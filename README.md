@@ -2,7 +2,7 @@
 This is a capstone project for the Computer Science Undergraduate program at Sonoma State University. It is a SLM Operating System design to utilize and support the use of Small Language Models
 # SLM-OS: Small Language Model Operating System
 ## Architecture and Design Document
-### Version 1.0 - December 2024
+### Version 1.0 - December 2025
 
 ---
 
