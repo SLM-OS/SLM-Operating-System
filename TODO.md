@@ -14,7 +14,7 @@ maybe, if I'm lucky and am able to get ahead, next month's.
 ### Development Environment
 - [ ] Update CLion student license
 - [ ] Install CLion and configure for ARM64 cross-compilation
-- [ ] Install `aarch64-linux-gnu-gcc` toolchain
+- [ ] Install `aarch64-none-elf-gcc` toolchain (ARM bare-metal)
 - [ ] Install Rust toolchain with `aarch64-unknown-none` target
 - [ ] Set up QEMU for ARM64 emulation (virt machine)
 - [ ] Create GitHub repository with initial structure (see Appendix A of design doc)

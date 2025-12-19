@@ -1,0 +1,67 @@
+# Build outputs
+build/
+target/
+
+# IDE - CLion/IntelliJ
+.idea/
+*.iml
+cmake-build-*/
+
+# Claude Code personal settings
+.claude/settings.local.json
+
+# Temporary output file
+CLAUDE_OUTPUT.md
+
+# OS generated files
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor backup/swap files
+*~
+*.swp
+*.swo
+.*.swp
+
+# Logs
+*.log
+
+# Compiled binaries (keep in build/ anyway)
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Dependency directories
+node_modules/
+
+# Rust
+**/*.rs.bk
+Cargo.lock
+
+# Python (if any scripts)
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+
+# Archives
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip

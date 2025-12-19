@@ -883,7 +883,7 @@ slm-os/
 
 **Software:**
 - Cross-compilation toolchain:
-  - aarch64-linux-gnu-gcc
+  - aarch64-none-elf-gcc (ARM bare-metal toolchain)
   - LLVM/Clang for ARM64
   - Rust with `aarch64-unknown-none` target
 - QEMU for early testing
