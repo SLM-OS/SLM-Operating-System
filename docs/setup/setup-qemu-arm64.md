@@ -121,7 +121,17 @@ qemu-system-aarch64 -machine virt -cpu help
 
 ## Running SLM-OS in QEMU
 
-### Basic Command
+### Using the Makefile (Recommended)
+
+The project Makefile provides convenient targets:
+
+```bash
+make run      # Build and run in QEMU
+make debug    # Build and start QEMU with GDB server
+make gdb      # Connect GDB to running QEMU (run in 2nd terminal)
+```
+
+### Manual Command
 
 ```powershell
 qemu-system-aarch64 `
@@ -129,7 +139,7 @@ qemu-system-aarch64 `
     -cpu cortex-a72 `
     -m 512M `
     -nographic `
-    -kernel kernel.elf
+    -kernel build/kernel/slm-os.elf
 ```
 
 ### Command Breakdown
@@ -140,7 +150,7 @@ qemu-system-aarch64 `
 | `-cpu cortex-a72` | Emulate Cortex-A72 CPU (similar to A76/A78) |
 | `-m 512M` | 512 MB of RAM |
 | `-nographic` | No GUI, serial output to terminal |
-| `-kernel kernel.elf` | Load kernel ELF directly (no bootloader) |
+| `-kernel build/kernel/slm-os.elf` | Load kernel ELF directly (no bootloader) |
 
 ### Multi-Core Configuration
 
@@ -151,7 +161,7 @@ qemu-system-aarch64 `
     -smp cores=4 `
     -m 1G `
     -nographic `
-    -kernel kernel.elf
+    -kernel build/kernel/slm-os.elf
 ```
 
 | Option | Description |
@@ -168,7 +178,7 @@ qemu-system-aarch64 `
     -m 512M `
     -nographic `
     -serial file:serial.log `
-    -kernel kernel.elf
+    -kernel build/kernel/slm-os.elf
 ```
 
 ---
@@ -211,7 +221,23 @@ void uart_puts(const char *s) {
 
 ## Debugging with GDB
 
-### Start QEMU with GDB Server
+### Using the Makefile (Recommended)
+
+**Terminal 1:**
+```bash
+make debug
+```
+
+**Terminal 2:**
+```bash
+make gdb
+```
+
+This automatically starts QEMU with GDB server and connects GDB with symbols loaded.
+
+### Manual Commands
+
+**Terminal 1 — Start QEMU with GDB Server:**
 
 ```powershell
 qemu-system-aarch64 `
@@ -219,7 +245,7 @@ qemu-system-aarch64 `
     -cpu cortex-a72 `
     -m 512M `
     -nographic `
-    -kernel kernel.elf `
+    -kernel build/kernel/slm-os.elf `
     -S `
     -gdb tcp::1234
 ```
@@ -229,12 +255,10 @@ qemu-system-aarch64 `
 | `-S` | Pause CPU at startup (wait for debugger) |
 | `-gdb tcp::1234` | Listen for GDB on port 1234 |
 
-### Connect with GDB
-
-In another terminal:
+**Terminal 2 — Connect with GDB:**
 
 ```powershell
-aarch64-none-elf-gdb kernel.elf
+aarch64-none-elf-gdb build/kernel/slm-os.elf
 ```
 
 Then in GDB:
@@ -284,7 +308,7 @@ Note: When using `-kernel`, QEMU loads your kernel at `0x40000000` and sets the 
    - **Name:** `Run in QEMU`
    - **Script text:**
      ```
-     qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel $PROJECT_DIR$/build/kernel.elf
+     qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel $PROJECT_DIR$/build/kernel/slm-os.elf
      ```
    - **Working directory:** `$ProjectFileDir$`
 
@@ -296,10 +320,20 @@ Note: When using `-kernel`, QEMU loads your kernel at `0x40000000` and sets the 
    - **Name:** `QEMU Debug Server`
    - **Script text:**
      ```
-     qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel $PROJECT_DIR$/build/kernel.elf -S -gdb tcp::1234
+     qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel $PROJECT_DIR$/build/kernel/slm-os.elf -S -gdb tcp::1234
      ```
 
 Then create a **Remote Debug** configuration to connect GDB to port 1234.
+
+### Alternative: Use Makefile Targets
+
+CLion's terminal can run Makefile targets directly:
+
+```bash
+make run      # Run in QEMU
+make debug    # Start with GDB server
+make gdb      # Connect GDB (in second terminal)
+```
 
 ---
 
@@ -335,13 +369,13 @@ Use `-nographic` flag to disable graphical output, or install SDL2.
 Add `-d int` to see interrupts/exceptions:
 
 ```powershell
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel kernel.elf -d int
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slm-os.elf -d int
 ```
 
 ### View QEMU debug output
 
 ```powershell
-qemu-system-aarch64 ... -d in_asm,cpu -D qemu.log
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slm-os.elf -d in_asm,cpu -D qemu.log
 ```
 
 This logs executed instructions and CPU state to `qemu.log`.
@@ -350,16 +384,22 @@ This logs executed instructions and CPU state to `qemu.log`.
 
 ## Quick Reference
 
-### Minimal Test Command
+### Using Makefile (Recommended)
 
-```powershell
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel kernel.elf
+```bash
+make run      # Build and run
+make debug    # Start with GDB server
+make gdb      # Connect GDB (2nd terminal)
 ```
 
-### Debug Command
+### Manual Commands
 
 ```powershell
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel kernel.elf -S -gdb tcp::1234
+# Run
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slm-os.elf
+
+# Debug
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slm-os.elf -S -gdb tcp::1234
 ```
 
 ### Exit QEMU

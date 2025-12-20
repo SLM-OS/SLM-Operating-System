@@ -12,135 +12,135 @@ maybe, if I'm lucky and am able to get ahead, next month's.
 ## Week 1: Environment Setup & Boot Foundation
 
 ### Development Environment
-- [ ] Update CLion student license
-- [ ] Install CLion and configure for ARM64 cross-compilation
-- [ ] Install `aarch64-none-elf-gcc` toolchain (ARM bare-metal)
-- [ ] Install Rust toolchain with `aarch64-unknown-none` target
-- [ ] Set up QEMU for ARM64 emulation (virt machine)
-- [ ] Create GitHub repository with initial structure (see Appendix A of design doc)
-- [ ] Set up top-level Makefile to orchestrate builds
-- [ ] Configure CMake for kernel build
-- [ ] Verify Claude Code integration with CLion
+- ✅ Update CLion student license
+- ✅ Install CLion and configure for ARM64 cross-compilation
+- ✅ Install `aarch64-none-elf-gcc` toolchain (ARM bare-metal)
+- ✅ Install Rust toolchain with `aarch64-unknown-none` target
+- ✅ Set up QEMU for ARM64 emulation (virt machine)
+- ✅ Create GitHub repository with initial structure (see Appendix A of design doc)
+- ✅ Set up top-level Makefile to orchestrate builds
+- ✅ Configure CMake for kernel build
+- ✅ Verify Claude Code integration with CLion
 
 ### Boot Process Research
-- [ ] Study Jetson Orin Nano boot sequence (UEFI → OS)
-- [ ] Review ARM64 exception levels (EL0-EL3)
-- [ ] Document which EL the OS will run at initially
-- [ ] Identify minimum device tree requirements
+- ✅ Study Jetson Orin Nano boot sequence (UEFI → OS)
+- ✅ Review ARM64 exception levels (EL0-EL3)
+- ✅ Document which EL the OS will run at initially — **EL1**
+- ✅ Identify minimum device tree requirements — **Hardcoded for QEMU** (DTB parsing in Month 2-3)
 
 ### Boot Implementation
-- [ ] Write `boot.S` — entry point, stack setup, BSS clear
-- [ ] Implement jump to C `kernel_main()`
-- [ ] Create linker script (`kernel.ld`) with memory layout
-- [ ] Build first bootable image (even if it does nothing)
-- [ ] Test boot in QEMU — verify execution reaches `kernel_main()`
+- ✅ Write `boot.S` — entry point, stack setup, BSS clear
+- ✅ Implement jump to C `kernel_main()`
+- ✅ Create linker script (`kernel.ld`) with memory layout
+- ✅ Build first bootable image (even if it does nothing)
+- ✅ Test boot in QEMU — verify execution reaches `kernel_main()`
 
 ---
 
 ## Week 2: UART Driver & Debug Output
 
 ### UART Research
-- [ ] Identify UART hardware on Jetson Orin Nano (likely PL011 compatible)
-- [ ] Identify UART hardware on QEMU virt machine (PL011)
-- [ ] Document register addresses and offsets
-- [ ] Decide on abstraction layer for hardware differences
+- ⬜ Identify UART hardware on Jetson Orin Nano (likely PL011 compatible)
+- ⬜ Identify UART hardware on QEMU virt machine (PL011)
+- ⬜ Document register addresses and offsets
+- ⬜ Decide on abstraction layer for hardware differences
 
 ### UART Implementation
-- [ ] Write `uart.c` — init, putc, puts functions
-- [ ] Implement `printf`-style formatted output (or minimal subset)
-- [ ] Add UART base address configuration (compile-time or runtime)
-- [ ] Test "Hello, SLM-OS!" output in QEMU
-- [ ] Create debug macros (`DEBUG_PRINT`, `ASSERT`, etc.)
+- ⬜ Write `uart.c` — init, putc, puts functions
+- ⬜ Implement `printf`-style formatted output (or minimal subset)
+- ⬜ Add UART base address configuration (compile-time or runtime)
+- ⬜ Test "Hello, SLM-OS!" output in QEMU
+- ⬜ Create debug macros (`DEBUG_PRINT`, `ASSERT`, etc.)
 
 ### Early Debug Infrastructure
-- [ ] Implement panic handler with UART output
-- [ ] Add register dump on panic (for debugging)
-- [ ] Create simple spin loop for fatal errors
+- ⬜ Implement panic handler with UART output
+- ⬜ Add register dump on panic (for debugging)
+- ⬜ Create simple spin loop for fatal errors
 
 ---
 
 ## Week 3: Physical Memory Management
 
 ### Memory Map Research
-- [ ] Document Jetson Orin Nano physical memory layout
-- [ ] Document QEMU virt machine memory layout
-- [ ] Identify reserved regions (firmware, MMIO, GPU carveout)
-- [ ] Decide how memory map will be discovered (hardcoded vs device tree)
+- ⬜ Document Jetson Orin Nano physical memory layout
+- ⬜ Document QEMU virt machine memory layout
+- ⬜ Identify reserved regions (firmware, MMIO, GPU carveout)
+- ⬜ Decide how memory map will be discovered (hardcoded vs device tree)
 
 ### Physical Memory Allocator
-- [ ] Define page size (4KB standard, 2MB huge pages for models)
-- [ ] Implement bitmap-based physical page allocator
-- [ ] Write `pmm_init()` — initialize from memory map
-- [ ] Write `pmm_alloc_page()` — allocate single 4KB page
-- [ ] Write `pmm_free_page()` — return page to free pool
-- [ ] Write `pmm_alloc_pages(count)` — allocate contiguous pages
-- [ ] Add statistics tracking (total pages, free pages, allocated)
+- ⬜ Define page size (4KB standard, 2MB huge pages for models)
+- ⬜ Implement bitmap-based physical page allocator
+- ⬜ Write `pmm_init()` — initialize from memory map
+- ⬜ Write `pmm_alloc_page()` — allocate single 4KB page
+- ⬜ Write `pmm_free_page()` — return page to free pool
+- ⬜ Write `pmm_alloc_pages(count)` — allocate contiguous pages
+- ⬜ Add statistics tracking (total pages, free pages, allocated)
 
 ### PMM Testing
-- [ ] Write unit tests for allocator (alloc/free cycles)
-- [ ] Test edge cases (out of memory, double free)
-- [ ] Verify no memory leaks after alloc/free sequences
-- [ ] Print memory statistics via UART
+- ⬜ Write unit tests for allocator (alloc/free cycles)
+- ⬜ Test edge cases (out of memory, double free)
+- ⬜ Verify no memory leaks after alloc/free sequences
+- ⬜ Print memory statistics via UART
 
 ---
 
 ## Week 4: Simple Scheduler
 
 ### Task Structure
-- [ ] Define `struct task` in C (simplified version of `slm_task`)
-- [ ] Implement task state enum (READY, RUNNING, BLOCKED, TERMINATED)
-- [ ] Allocate kernel stack per task
-- [ ] Create task ID assignment
+- ⬜ Define `struct task` in C (simplified version of `slm_task`)
+- ⬜ Implement task state enum (READY, RUNNING, BLOCKED, TERMINATED)
+- ⬜ Allocate kernel stack per task
+- ⬜ Create task ID assignment
 
 ### Context Switch
-- [ ] Write `context.S` — save/restore ARM64 registers
-- [ ] Implement `switch_to(old_task, new_task)`
-- [ ] Decide on callee-saved vs full register save
-- [ ] Handle stack pointer switch
+- ⬜ Write `context.S` — save/restore ARM64 registers
+- ⬜ Implement `switch_to(old_task, new_task)`
+- ⬜ Decide on callee-saved vs full register save
+- ⬜ Handle stack pointer switch
 
 ### Round-Robin Scheduler
-- [ ] Implement run queue (simple linked list)
-- [ ] Write `scheduler_init()`
-- [ ] Write `scheduler_add_task(task)`
-- [ ] Write `schedule()` — pick next task, context switch
-- [ ] Set up timer interrupt for preemption (ARM generic timer)
+- ⬜ Implement run queue (simple linked list)
+- ⬜ Write `scheduler_init()`
+- ⬜ Write `scheduler_add_task(task)`
+- ⬜ Write `schedule()` — pick next task, context switch
+- ⬜ Set up timer interrupt for preemption (ARM generic timer)
 
 ### Scheduler Testing
-- [ ] Create 2-3 test tasks that print to UART
-- [ ] Verify tasks run in round-robin order
-- [ ] Verify preemption works (tasks don't have to yield)
-- [ ] Test task termination and cleanup
+- ⬜ Create 2-3 test tasks that print to UART
+- ⬜ Verify tasks run in round-robin order
+- ⬜ Verify preemption works (tasks don't have to yield)
+- ⬜ Test task termination and cleanup
 
 ---
 
 ## End of Month 1 Milestone
 
 ### Deliverables
-- [ ] Bootable kernel image for QEMU
-- [ ] UART output working
-- [ ] Physical memory allocator functional
-- [ ] 2+ tasks running concurrently with preemptive scheduling
-- [ ] All code compiles cleanly with `-Wall -Werror`
-- [ ] Basic documentation in `docs/`
+- ⬜ Bootable kernel image for QEMU
+- ⬜ UART output working
+- ⬜ Physical memory allocator functional
+- ⬜ 2+ tasks running concurrently with preemptive scheduling
+- ⬜ All code compiles cleanly with `-Wall -Werror`
+- ⬜ Basic documentation in `docs/`
 
 ### Demo
-- [ ] Boot kernel in QEMU
-- [ ] Show multiple tasks printing interleaved output
-- [ ] Show memory allocation statistics
-- [ ] Show clean shutdown or intentional panic with register dump
+- ⬜ Boot kernel in QEMU
+- ⬜ Show multiple tasks printing interleaved output
+- ⬜ Show memory allocation statistics
+- ⬜ Show clean shutdown or intentional panic with register dump
 
 ---
 
 ## Outstanding Decisions
 
-### Must Decide Before Starting (Week 1)
+### Must Decide Before Starting (Week 1) — DECIDED
 
-| Decision | Options | Considerations | Recommendation |
-|----------|---------|----------------|----------------|
-| **Exception Level** | EL1 (kernel mode) vs EL2 (hypervisor) | EL1 is simpler; EL2 needed if you want to run Linux as guest later | Start with EL1 |
-| **Initial Target** | QEMU only vs QEMU + Jetson | Jetson adds hardware complexity; QEMU lets you iterate faster | QEMU first, Jetson in Month 2-3 |
-| **Boot Method** | UEFI stub vs U-Boot chainload vs raw binary | Design doc says U-Boot chainload; QEMU can load ELF directly | QEMU direct load now, U-Boot later |
-| **Repository Structure** | Monorepo vs separate kernel/runtime repos | Monorepo simplifies build coordination and FFI boundary | Monorepo |
+| Decision | Options | Choice |
+|----------|---------|--------|
+| **Exception Level** | EL1 (kernel mode) vs EL2 (hypervisor) | **EL1** |
+| **Initial Target** | QEMU only vs QEMU + Jetson | **QEMU** (Jetson in Month 2-3) |
+| **Boot Method** | UEFI stub vs U-Boot chainload vs raw binary | **QEMU direct load** (U-Boot later) |
+| **Repository Structure** | Monorepo vs separate kernel/runtime repos | **Monorepo** |
 
 ### Must Decide During Week 2
 

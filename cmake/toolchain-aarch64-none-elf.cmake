@@ -5,9 +5,11 @@ set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
 # Cross-compiler toolchain
-set(CMAKE_C_COMPILER aarch64-none-elf-gcc)
-set(CMAKE_CXX_COMPILER aarch64-none-elf-g++)
-set(CMAKE_ASM_COMPILER aarch64-none-elf-gcc)
+# Full path needed for Windows CMake to find the compiler
+set(ARM_TOOLCHAIN_PATH "C:/Program Files (x86)/Arm/GNU Toolchain mingw-w64-i686-aarch64-none-elf/bin")
+set(CMAKE_C_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-gcc.exe")
+set(CMAKE_CXX_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-g++.exe")
+set(CMAKE_ASM_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-gcc.exe")
 
 # Bare-metal flags
 set(CMAKE_C_FLAGS_INIT "-ffreestanding -nostdlib")
@@ -23,4 +25,4 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 
 # Objcopy for creating binary images
-set(CMAKE_OBJCOPY aarch64-none-elf-objcopy)
+set(CMAKE_OBJCOPY "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-objcopy.exe")

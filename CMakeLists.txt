@@ -30,34 +30,37 @@ set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 # Linker script
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel.ld)
 
-# Kernel source files (add as you implement them)
+# Kernel source files
 set(KERNEL_SOURCES
-    # Architecture-specific (ARM64)
-    # kernel/arch/arm64/boot.S
+    # Boot and core
+    kernel/src/boot.S
+    kernel/src/main.c
+
+    # Architecture-specific (ARM64) - add in later weeks
     # kernel/arch/arm64/context.S
     # kernel/arch/arm64/mmu.c
 
-    # Memory management
+    # Memory management - Week 3
     # kernel/mm/pmm.c
     # kernel/mm/vmm.c
     # kernel/mm/allocator.c
 
-    # Scheduler
+    # Scheduler - Week 4
     # kernel/sched/core.c
     # kernel/sched/task.c
     # kernel/sched/smp.c
 
-    # IPC
+    # IPC - Month 2
     # kernel/ipc/message.c
     # kernel/ipc/shared_buffer.c
     # kernel/ipc/queue.c
 
-    # Drivers
+    # Drivers - Week 2+
     # kernel/drivers/uart.c
     # kernel/drivers/gpio.c
     # kernel/drivers/i2c.c
 
-    # GPU integration
+    # GPU integration - Month 3+
     # kernel/gpu/jetson_gpu.c
     # kernel/gpu/memory_map.c
 )
@@ -65,24 +68,23 @@ set(KERNEL_SOURCES
 # Include directories
 set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/include
-    ${CMAKE_SOURCE_DIR}/kernel/arch/arm64/include
 )
 
-# Build kernel ELF (uncomment when you have source files)
-# add_executable(kernel.elf ${KERNEL_SOURCES})
-# target_include_directories(kernel.elf PRIVATE ${KERNEL_INCLUDES})
-# target_link_options(kernel.elf PRIVATE
-#     -T${LINKER_SCRIPT}
-#     -nostdlib
-#     -lgcc
-# )
+# Build kernel ELF
+add_executable(slm-os.elf ${KERNEL_SOURCES})
+target_include_directories(slm-os.elf PRIVATE ${KERNEL_INCLUDES})
+target_link_options(slm-os.elf PRIVATE
+    -T${LINKER_SCRIPT}
+    -nostdlib
+    -lgcc
+)
 
 # Create binary image from ELF (for booting)
-# add_custom_command(
-#     TARGET kernel.elf POST_BUILD
-#     COMMAND ${CMAKE_OBJCOPY} -O binary kernel.elf kernel.bin
-#     COMMENT "Creating kernel.bin"
-# )
+add_custom_command(
+    TARGET slm-os.elf POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary slm-os.elf slm-os.bin
+    COMMENT "Creating slm-os.bin"
+)
 
 # Print configuration summary
 message(STATUS "")

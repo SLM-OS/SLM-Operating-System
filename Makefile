@@ -13,6 +13,9 @@ BUILD_DIR := build
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
 RUNTIME_BUILD_DIR := runtime/target/aarch64-unknown-none
 
+# Tools (full paths for Windows compatibility)
+CMAKE := "C:/Program Files/CMake/bin/cmake.exe"
+
 # Toolchain
 TOOLCHAIN_FILE := cmake/toolchain-aarch64-none-elf.cmake
 
@@ -24,8 +27,8 @@ QEMU_MEMORY := 512M
 QEMU_CORES := 4
 
 # Output files
-KERNEL_ELF := $(KERNEL_BUILD_DIR)/kernel.elf
-KERNEL_BIN := $(KERNEL_BUILD_DIR)/kernel.bin
+KERNEL_ELF := $(KERNEL_BUILD_DIR)/slm-os.elf
+KERNEL_BIN := $(KERNEL_BUILD_DIR)/slm-os.bin
 
 # ============================================================================
 # Default target
@@ -41,13 +44,14 @@ all: kernel runtime
 .PHONY: kernel
 kernel: $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
-	cmake --build $(KERNEL_BUILD_DIR)
+	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
 $(KERNEL_BUILD_DIR)/Makefile:
 	@echo "Configuring kernel build..."
-	cmake -G "Unix Makefiles" -B $(KERNEL_BUILD_DIR) \
+	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_BUILD_DIR) \
 		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DCMAKE_MAKE_PROGRAM="C:/cygwin64/bin/make.exe"
 
 .PHONY: kernel-clean
 kernel-clean:
@@ -103,8 +107,7 @@ run: kernel
 .PHONY: debug
 debug: kernel
 	@echo "Starting QEMU with GDB server on port 1234..."
-	@echo "Connect with: aarch64-none-elf-gdb $(KERNEL_ELF)"
-	@echo "Then: target remote localhost:1234"
+	@echo "In another terminal, run: make gdb"
 	$(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
@@ -114,6 +117,17 @@ debug: kernel
 		-kernel $(KERNEL_ELF) \
 		-S \
 		-gdb tcp::1234
+
+# GDB connection settings
+GDB := aarch64-none-elf-gdb
+GDB_PORT := 1234
+
+.PHONY: gdb
+gdb:
+	@echo "Connecting GDB to QEMU on port $(GDB_PORT)..."
+	$(GDB) $(KERNEL_ELF) \
+		-ex "target remote localhost:$(GDB_PORT)" \
+		-ex "set confirm off"
 
 # ============================================================================
 # Utility targets
@@ -164,7 +178,8 @@ help:
 	@echo ""
 	@echo "Run targets:"
 	@echo "  run            Run kernel in QEMU"
-	@echo "  debug          Run kernel in QEMU with GDB server"
+	@echo "  debug          Run kernel in QEMU with GDB server (terminal 1)"
+	@echo "  gdb            Connect GDB to running QEMU (terminal 2)"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"
@@ -175,4 +190,5 @@ help:
 	@echo "  make                    Build everything (Debug)"
 	@echo "  make BUILD_TYPE=Release Build everything (Release)"
 	@echo "  make run                Build and run in QEMU"
-	@echo "  make debug              Build and debug with GDB"
+	@echo "  make debug              Start QEMU with GDB server"
+	@echo "  make gdb                Connect to QEMU (run in 2nd terminal)"
