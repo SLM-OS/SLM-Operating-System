@@ -35,32 +35,34 @@ set(KERNEL_SOURCES
     # Boot and core
     kernel/src/boot.S
     kernel/src/main.c
+    kernel/src/panic.c
 
-    # Architecture-specific (ARM64) - add in later weeks
+    # Drivers
+    kernel/drivers/uart_pl011.c
+    # kernel/drivers/uart_tegra.c    # Jetson Orin Nano
+    # kernel/drivers/gpio.c
+    # kernel/drivers/i2c.c
+
+    # Architecture-specific (ARM64)
     # kernel/arch/arm64/context.S
     # kernel/arch/arm64/mmu.c
 
-    # Memory management - Week 3
+    # Memory management
     # kernel/mm/pmm.c
     # kernel/mm/vmm.c
     # kernel/mm/allocator.c
 
-    # Scheduler - Week 4
+    # Scheduler
     # kernel/sched/core.c
     # kernel/sched/task.c
     # kernel/sched/smp.c
 
-    # IPC - Month 2
+    # IPC
     # kernel/ipc/message.c
     # kernel/ipc/shared_buffer.c
     # kernel/ipc/queue.c
 
-    # Drivers - Week 2+
-    # kernel/drivers/uart.c
-    # kernel/drivers/gpio.c
-    # kernel/drivers/i2c.c
-
-    # GPU integration - Month 3+
+    # GPU integration
     # kernel/gpu/jetson_gpu.c
     # kernel/gpu/memory_map.c
 )
@@ -71,9 +73,9 @@ set(KERNEL_INCLUDES
 )
 
 # Build kernel ELF
-add_executable(slm-os.elf ${KERNEL_SOURCES})
-target_include_directories(slm-os.elf PRIVATE ${KERNEL_INCLUDES})
-target_link_options(slm-os.elf PRIVATE
+add_executable(slmos.elf ${KERNEL_SOURCES})
+target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
+target_link_options(slmos.elf PRIVATE
     -T${LINKER_SCRIPT}
     -nostdlib
     -lgcc
@@ -81,9 +83,9 @@ target_link_options(slm-os.elf PRIVATE
 
 # Create binary image from ELF (for booting)
 add_custom_command(
-    TARGET slm-os.elf POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O binary slm-os.elf slm-os.bin
-    COMMENT "Creating slm-os.bin"
+    TARGET slmos.elf POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary slmos.elf slmos.bin
+    COMMENT "Creating slmos.bin"
 )
 
 # Print configuration summary

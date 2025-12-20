@@ -27,8 +27,8 @@ QEMU_MEMORY := 512M
 QEMU_CORES := 4
 
 # Output files
-KERNEL_ELF := $(KERNEL_BUILD_DIR)/slm-os.elf
-KERNEL_BIN := $(KERNEL_BUILD_DIR)/slm-os.bin
+KERNEL_ELF := $(KERNEL_BUILD_DIR)/slmos.elf
+KERNEL_BIN := $(KERNEL_BUILD_DIR)/slmos.bin
 
 # ============================================================================
 # Default target

@@ -17,8 +17,10 @@
 #define RAM_BASE        0x40000000
 #define RAM_SIZE        0x08000000      /* 128 MB default */
 
-/* UART (PL011) */
+/* UART - PL011 on QEMU virt */
+#define UART_TYPE_PL011
 #define UART_BASE       0x09000000
+#define UART_CLOCK      24000000        /* 24 MHz (QEMU default) */
 
 /* GIC (Generic Interrupt Controller) */
 #define GIC_DIST_BASE   0x08000000

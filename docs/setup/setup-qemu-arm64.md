@@ -139,7 +139,7 @@ qemu-system-aarch64 `
     -cpu cortex-a72 `
     -m 512M `
     -nographic `
-    -kernel build/kernel/slm-os.elf
+    -kernel build/kernel/slmos.elf
 ```
 
 ### Command Breakdown
@@ -150,7 +150,7 @@ qemu-system-aarch64 `
 | `-cpu cortex-a72` | Emulate Cortex-A72 CPU (similar to A76/A78) |
 | `-m 512M` | 512 MB of RAM |
 | `-nographic` | No GUI, serial output to terminal |
-| `-kernel build/kernel/slm-os.elf` | Load kernel ELF directly (no bootloader) |
+| `-kernel build/kernel/slmos.elf` | Load kernel ELF directly (no bootloader) |
 
 ### Multi-Core Configuration
 
@@ -161,7 +161,7 @@ qemu-system-aarch64 `
     -smp cores=4 `
     -m 1G `
     -nographic `
-    -kernel build/kernel/slm-os.elf
+    -kernel build/kernel/slmos.elf
 ```
 
 | Option | Description |
@@ -178,7 +178,7 @@ qemu-system-aarch64 `
     -m 512M `
     -nographic `
     -serial file:serial.log `
-    -kernel build/kernel/slm-os.elf
+    -kernel build/kernel/slmos.elf
 ```
 
 ---
@@ -245,7 +245,7 @@ qemu-system-aarch64 `
     -cpu cortex-a72 `
     -m 512M `
     -nographic `
-    -kernel build/kernel/slm-os.elf `
+    -kernel build/kernel/slmos.elf `
     -S `
     -gdb tcp::1234
 ```
@@ -258,7 +258,7 @@ qemu-system-aarch64 `
 **Terminal 2 — Connect with GDB:**
 
 ```powershell
-aarch64-none-elf-gdb build/kernel/slm-os.elf
+aarch64-none-elf-gdb build/kernel/slmos.elf
 ```
 
 Then in GDB:
@@ -308,7 +308,7 @@ Note: When using `-kernel`, QEMU loads your kernel at `0x40000000` and sets the 
    - **Name:** `Run in QEMU`
    - **Script text:**
      ```
-     qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel $PROJECT_DIR$/build/kernel/slm-os.elf
+     qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel $PROJECT_DIR$/build/kernel/slmos.elf
      ```
    - **Working directory:** `$ProjectFileDir$`
 
@@ -320,7 +320,7 @@ Note: When using `-kernel`, QEMU loads your kernel at `0x40000000` and sets the 
    - **Name:** `QEMU Debug Server`
    - **Script text:**
      ```
-     qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel $PROJECT_DIR$/build/kernel/slm-os.elf -S -gdb tcp::1234
+     qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel $PROJECT_DIR$/build/kernel/slmos.elf -S -gdb tcp::1234
      ```
 
 Then create a **Remote Debug** configuration to connect GDB to port 1234.
@@ -369,13 +369,13 @@ Use `-nographic` flag to disable graphical output, or install SDL2.
 Add `-d int` to see interrupts/exceptions:
 
 ```powershell
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slm-os.elf -d int
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slmos.elf -d int
 ```
 
 ### View QEMU debug output
 
 ```powershell
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slm-os.elf -d in_asm,cpu -D qemu.log
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slmos.elf -d in_asm,cpu -D qemu.log
 ```
 
 This logs executed instructions and CPU state to `qemu.log`.
@@ -396,10 +396,10 @@ make gdb      # Connect GDB (2nd terminal)
 
 ```powershell
 # Run
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slm-os.elf
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slmos.elf
 
 # Debug
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slm-os.elf -S -gdb tcp::1234
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 512M -nographic -kernel build/kernel/slmos.elf -S -gdb tcp::1234
 ```
 
 ### Exit QEMU

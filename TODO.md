@@ -40,22 +40,22 @@ maybe, if I'm lucky and am able to get ahead, next month's.
 ## Week 2: UART Driver & Debug Output
 
 ### UART Research
-- ⬜ Identify UART hardware on Jetson Orin Nano (likely PL011 compatible)
-- ⬜ Identify UART hardware on QEMU virt machine (PL011)
-- ⬜ Document register addresses and offsets
-- ⬜ Decide on abstraction layer for hardware differences
+- ✅ Identify UART hardware on Jetson Orin Nano — **Tegra186-UART (NS16550-compatible)**
+- ✅ Identify UART hardware on QEMU virt machine — **PL011** (also used by Pi 5)
+- ✅ Document register addresses and offsets — see `docs/uart-hardware.md`
+- ✅ Decide on abstraction layer for hardware differences — **compile-time `#ifdef`**
 
 ### UART Implementation
-- ⬜ Write `uart.c` — init, putc, puts functions
-- ⬜ Implement `printf`-style formatted output (or minimal subset)
-- ⬜ Add UART base address configuration (compile-time or runtime)
-- ⬜ Test "Hello, SLM-OS!" output in QEMU
-- ⬜ Create debug macros (`DEBUG_PRINT`, `ASSERT`, etc.)
+- ✅ Write `uart.c` — init, putc, getc, puts functions (uart_pl011.c)
+- ✅ Implement `printf`-style formatted output (%c, %s, %d, %u, %x, %X, %p, %l, %%)
+- ✅ Add UART base address configuration — **compile-time via platform.h**
+- ✅ Test "Hello, SLM-OS!" output in QEMU
+- ✅ Create debug macros (`DEBUG_PRINT`, `ASSERT`, `INFO`, `WARN`, `ERROR`)
 
 ### Early Debug Infrastructure
-- ⬜ Implement panic handler with UART output
-- ⬜ Add register dump on panic (for debugging)
-- ⬜ Create simple spin loop for fatal errors
+- ✅ Implement panic handler with UART output (panic.c)
+- ✅ Add register dump on panic — SP, ELR, SPSR, ESR (with exception class decode), FAR
+- ✅ Create simple spin loop for fatal errors (WFI loop in panic and boot.S)
 
 ---
 
