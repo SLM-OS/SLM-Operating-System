@@ -585,8 +585,10 @@ void vmm_init(void)
      * serves both identity (VA = PA) and kernel high addresses
      * (VA = PA | KERNEL_VA_BASE).
      *
-     * TODO: Once linker script separates .text from .data/.bss, map
-     * code sections as RX and data sections as RW. For now, use RWX.
+     * Note: Linker script now separates .text (RX) from .data/.bss (RW)
+     * in the ELF segments. However, the MMU uses 2MB blocks which are
+     * too coarse for per-section permissions. Fine-grained RX/RW mapping
+     * requires 4KB pages or 2MB-aligned sections (Phase 3 work).
      */
     uint32_t kernel_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
     for (int i = 0; i < 64; i++) {  /* 64 × 2MB = 128MB */

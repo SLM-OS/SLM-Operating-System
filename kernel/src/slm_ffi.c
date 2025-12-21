@@ -64,10 +64,31 @@ void slm_print(const char *s)
 
 uint64_t slm_get_time_ns(void)
 {
-    /* Timer runs at ~62.5 MHz on QEMU virt, each tick = 16ns */
-    /* For now, return a rough approximation */
-    /* TODO: Implement proper timer read */
-    return 0;
+    uint64_t ticks = timer_get_count();
+    uint64_t freq = timer_get_frequency();
+
+    /*
+     * Convert ticks to nanoseconds: ns = ticks * 1e9 / freq
+     * To avoid overflow with large tick counts, we compute:
+     * ns = ticks * (1e9 / freq) when freq divides 1e9 evenly,
+     * otherwise use: ns = (ticks / freq) * 1e9 + ((ticks % freq) * 1e9) / freq
+     *
+     * For QEMU virt (62.5 MHz), 1e9/freq = 16, so each tick = 16ns.
+     */
+    if (freq == 0) {
+        return 0;
+    }
+
+    uint64_t ns_per_tick = 1000000000ULL / freq;
+    uint64_t remainder = 1000000000ULL % freq;
+
+    /* Fast path for common frequencies that divide evenly */
+    if (remainder == 0) {
+        return ticks * ns_per_tick;
+    }
+
+    /* General case with remainder handling */
+    return ticks * ns_per_tick + (ticks * remainder) / freq;
 }
 
 /*

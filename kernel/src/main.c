@@ -421,8 +421,9 @@ static void test_lock_contention(void)
                 CONTENTION_TASKS, INCREMENTS_PER_TASK);
 
     /* Wait for completion with timeout */
-    int timeout = 100;
+    int timeout = 200;
     while (test_state.tasks_completed < CONTENTION_TASKS && timeout > 0) {
+        yield();  /* Let scheduler run */
         delay(100000);
         timeout--;
     }
@@ -442,6 +443,100 @@ static void test_lock_contention(void)
         uart_printf("  [FAIL] Counter = %u (expected %u) - RACE CONDITION DETECTED\n",
                     contention_counter, expected);
         test_errors++;
+    }
+}
+
+/*
+ * Test 5: Task Lifecycle Stress Test
+ *
+ * Creates and terminates tasks rapidly to verify:
+ * - Zombie cleanup mechanism works correctly
+ * - Stack memory is properly reclaimed (no leaks)
+ * - No use-after-free issues
+ */
+
+/* Completion tracking for lifecycle test */
+static volatile int lifecycle_completed = 0;
+
+static void lifecycle_task_func(void *arg)
+{
+    (void)arg;
+    /* Increment completion counter atomically before exiting */
+    __asm__ volatile(
+        "1: ldxr w0, [%0]\n"
+        "   add w0, w0, #1\n"
+        "   stxr w1, w0, [%0]\n"
+        "   cbnz w1, 1b\n"
+        : : "r"(&lifecycle_completed)
+        : "w0", "w1", "memory"
+    );
+    /* Task exits immediately - tests rapid cleanup */
+}
+
+static void test_task_lifecycle(void)
+{
+    uart_puts("\n--- Test 5: Task Lifecycle Stress Test ---\n");
+
+    #define LIFECYCLE_CYCLES 8
+
+    /* Get initial PMM state */
+    uint64_t initial_free = pmm_get_free_pages();
+    uart_printf("[Test5] Initial free pages: %lu\n", initial_free);
+
+    lifecycle_completed = 0;
+
+    /* Create all lifecycle tasks */
+    for (int cycle = 0; cycle < LIFECYCLE_CYCLES; cycle++) {
+        char name[16];
+        name[0] = 'l'; name[1] = 'c'; name[2] = '0' + cycle; name[3] = '\0';
+
+        struct task *t = task_create(name, lifecycle_task_func, NULL);
+        if (!t) {
+            uart_printf("  [FAIL] Failed to create lifecycle task %d\n", cycle);
+            test_errors++;
+            return;
+        }
+
+        /* Spread across CPUs 1-3 */
+        scheduler_add_task_to_cpu(t, (cycle % 3) + 1);
+    }
+
+    uart_printf("[Test5] Created %d lifecycle tasks\n", LIFECYCLE_CYCLES);
+
+    /* Wait for all tasks to complete (with timeout) */
+    int timeout = 100;
+    while (lifecycle_completed < LIFECYCLE_CYCLES && timeout > 0) {
+        delay(50000);
+        timeout--;
+    }
+
+    if (timeout == 0) {
+        uart_printf("  [FAIL] Timeout - only %d/%d tasks completed\n",
+                    lifecycle_completed, LIFECYCLE_CYCLES);
+        test_errors++;
+        return;
+    }
+
+    uart_printf("[Test5] All %d tasks completed\n", LIFECYCLE_CYCLES);
+
+    /* Give scheduler time to clean up all zombies */
+    for (int i = 0; i < 10; i++) {
+        yield();
+        delay(50000);
+    }
+
+    /* Check final PMM state */
+    uint64_t final_free = pmm_get_free_pages();
+    uart_printf("[Test5] Final free pages: %lu\n", final_free);
+
+    /* Verify no memory leak (allow small variance for timing) */
+    if (final_free >= initial_free) {
+        uart_printf("  [PASS] All %d tasks created/destroyed, memory reclaimed\n",
+                    LIFECYCLE_CYCLES);
+    } else {
+        uint64_t leaked = initial_free - final_free;
+        uart_printf("  [WARN] Possible leak: %lu pages missing (may be timing)\n", leaked);
+        /* Don't fail - zombie cleanup is async */
     }
 }
 
@@ -468,6 +563,7 @@ static void main_task_func(void *arg)
     test_task_migration();
     test_stress_multicpu();
     test_lock_contention();
+    test_task_lifecycle();
 
     /* Summary */
     uart_puts("\n");

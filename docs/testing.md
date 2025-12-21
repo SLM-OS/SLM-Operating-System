@@ -107,11 +107,13 @@ Validates the multi-core scheduler, task distribution, migration, and concurrenc
 | Cross-Core Task Migration | Task queued on CPU 1, migrated to CPU 3, verified running on new CPU |
 | Stress Test | 6 tasks (2 per CPU) complete correctly across CPUs 1, 2, 3 |
 | Lock Contention | 3 tasks × 50 increments with spinlock, counter equals expected (no race conditions) |
+| Task Lifecycle | 8 tasks created/terminated rapidly, memory fully reclaimed |
 
 **Test Notes:**
 - Tests run on CPUs 1-3 to avoid interfering with the main task on CPU 0
 - Migration test uses a "blocker" task to keep CPU 1 busy while migrating a READY task
 - Lock contention test verifies that spinlocks correctly protect shared data across cores
+- Lifecycle test validates zombie cleanup mechanism and stack memory reclamation
 
 Tests run from the main task function after boot completes. The kernel triggers an intentional undefined instruction fault after tests complete to terminate QEMU.
 

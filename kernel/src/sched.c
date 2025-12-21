@@ -15,14 +15,16 @@
 #include "spinlock.h"
 #include <stddef.h>
 
-/* External function to set current task (in task.c) */
+/* External functions from task.c */
 extern void task_set_current(struct task *task);
+extern void task_destroy(struct task *task);
 
 /* Per-CPU run queue */
 struct cpu_runqueue {
     struct task *head;          /* First task in run queue */
     struct task *tail;          /* Last task in run queue */
     struct task *idle_task;     /* This CPU's idle task */
+    struct task *zombie;        /* Terminated task pending cleanup */
     uint32_t ready_count;       /* Tasks in this CPU's run queue */
 };
 
@@ -341,6 +343,21 @@ void schedule(void)
 
     irq_flags_t flags = spin_lock_irqsave(&sched.lock);
 
+    /*
+     * Clean up zombie task from previous schedule cycle.
+     * This is safe because we've already switched away from it.
+     */
+    if (rq->zombie) {
+        struct task *zombie = rq->zombie;
+        rq->zombie = NULL;
+        spin_unlock_irqrestore(&sched.lock, flags);
+
+        /* Destroy outside lock - task_destroy may call pmm */
+        task_destroy(zombie);
+
+        flags = spin_lock_irqsave(&sched.lock);
+    }
+
     struct task *current = task_current();
     struct task *next = pick_next_task(this_cpu);
 
@@ -350,16 +367,9 @@ void schedule(void)
 
         /* Re-add to run queue if it's a normal task (not idle) */
         if (current != rq->idle_task) {
-            /* Remove from front (it was running) and add to back */
-            if (rq->head == current) {
-                rq->head = current->next;
-                if (!rq->head) {
-                    rq->tail = NULL;
-                }
-            }
             current->next = NULL;
 
-            /* Add to tail */
+            /* Add to tail of queue */
             if (rq->tail) {
                 rq->tail->next = current;
                 rq->tail = current;
@@ -367,6 +377,7 @@ void schedule(void)
                 rq->head = current;
                 rq->tail = current;
             }
+            rq->ready_count++;
         }
 
         /* Re-pick in case queue changed */
@@ -396,6 +407,15 @@ void schedule(void)
     next->state = TASK_RUNNING;
     next->switches++;
     sched.context_switches++;
+
+    /*
+     * If current task is terminated, mark it as zombie for cleanup.
+     * It will be destroyed on the next schedule() call after we've
+     * safely switched to a different stack.
+     */
+    if (current && current->state == TASK_TERMINATED) {
+        rq->zombie = current;
+    }
 
     task_set_current(next);
 

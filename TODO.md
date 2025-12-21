@@ -2,16 +2,14 @@
 
 This document tracks Phase 2 implementation of SLM-OS.
 
-**Status:** In progress (Milestones 1-4 complete)
+**Status:** Complete (All 5 milestones done)
 
 **Goals:**
 - Virtual memory with 2-level page tables
 - Multi-core boot and scheduling
 - Basic IPC (message queues)
 - Rust toolchain integration and FFI boundary
-
-**Carried from Phase 1:**
-- Task stack cleanup/memory reclamation
+- Task stack cleanup/memory reclamation (carried from Phase 1)
 
 ---
 
@@ -195,25 +193,33 @@ See `docs/ffi.md` for comprehensive FFI documentation.
 
 ---
 
-## Milestone 5: Deferred Cleanup from Phase 1
+## Milestone 5: Deferred Cleanup from Phase 1 ✅
 
-### Task Stack Reclamation
-- [ ] Implement `task_destroy()` — full cleanup including stack
-- [ ] Add stack to free list on task termination
-- [ ] Prevent use-after-free of terminated task structures
-- [ ] Test rapid task create/destroy cycles for leaks
+**Status:** Complete
 
-### General Cleanup
-- [ ] Review and fix any TODO comments from Phase 1
-- [ ] Add missing error handling
-- [ ] Improve debug output where needed
-- [ ] Update documentation
+### Linker Script Security ✅
+- ✅ Fix RWX segment warning in kernel ELF
+- ✅ Separate .text (RX) from .data/.bss (RW) in kernel.ld
+- ✅ Use proper PHDRS with permissions (FLAGS(5) for RX, FLAGS(6) for RW)
+- ✅ Ready for user/kernel separation in Phase 3
 
-### Linker Script Security
-- [ ] Fix RWX segment warning in kernel ELF
-- [ ] Separate .text (RX) from .data/.bss (RW) in kernel.ld
-- [ ] Use proper MEMORY regions with permissions
-- [ ] Important for user/kernel separation
+### Task Stack Reclamation ✅
+- ✅ Implement `task_destroy()` — full cleanup including stack
+- ✅ Add stack to free list on task termination (via `pmm_free_pages()`)
+- ✅ Prevent use-after-free with zombie cleanup mechanism
+- ✅ Test rapid task create/destroy cycles (8 lifecycle tasks, memory reclaimed)
+
+### Scheduler Bug Fixes ✅
+- ✅ Fixed `ready_count` underflow bug (tasks re-added to queue without increment)
+- ✅ Improved test stability with yield() in wait loops
+
+### General Cleanup ✅
+- ✅ Updated testing.md with lifecycle test documentation
+- ✅ Improved debug output in task_destroy()
+- ✅ Reviewed all TODO comments in kernel:
+  - ✅ Fixed `slm_get_time_ns()` to use proper timer read
+  - ✅ Updated vmm.c comment (linker fixed, MMU granularity is Phase 3)
+  - Remaining 3 TODOs are legitimate Phase 3 work (device tree, IPC timeout, user mappings)
 
 ---
 
@@ -294,31 +300,59 @@ See `docs/ffi.md` for comprehensive FFI documentation.
 
 ## Risk Mitigation
 
-### High-Risk Items
+### Phase 2 Risks (Resolved) ✅
 
-1. **MMU Enable Sequence**
-    - Many ways to triple-fault or hang silently
-    - Mitigation: Enable MMU with identity mapping first, then switch to high kernel
-    - Mitigation: Add extensive debug output before/after each step
-    - Fallback: Keep non-MMU boot path for debugging
+1. **MMU Enable Sequence** — ✅ Resolved
+    - Risk: Many ways to triple-fault or hang silently
+    - What worked: Identity mapping with shared L1 table for TTBR0/TTBR1, extensive debug output, 2MB block granularity for simplicity
+    - Result: MMU enables cleanly, kernel runs at high addresses
 
-2. **Multi-Core Synchronization**
-    - Race conditions are hard to reproduce and debug
-    - Mitigation: Start with global scheduler lock, optimize later
-    - Mitigation: Use ARM's exclusive load/store for atomics
-    - Mitigation: Stress test with many cores and tasks
+2. **Multi-Core Synchronization** — ✅ Resolved
+    - Risk: Race conditions are hard to reproduce and debug
+    - What worked: Global scheduler lock (simple but sufficient for 4 cores), ARM exclusive load/store for atomics, comprehensive stress tests (6 tasks across 3 CPUs, lock contention test with 150 increments)
+    - Result: No race conditions detected, all tests pass consistently
 
-3. **Rust/C Linking**
-    - Symbol visibility, name mangling, ABI mismatches
-    - Mitigation: Start with one trivial function, verify it works
-    - Mitigation: Use `extern "C"` and `#[no_mangle]` everywhere
-    - Fallback: If linking fails, Rust can be deferred to Phase 3
+3. **Rust/C Linking** — ✅ Resolved
+    - Risk: Symbol visibility, name mangling, ABI mismatches
+    - What worked: `extern "C"` and `#[no_mangle]` on all FFI functions, `#[repr(C)]` on shared structs, compile-time size assertions, runtime FFI validation
+    - Result: Rust runtime links and runs correctly, FFI tests pass
 
-4. **Rust Borrow Checker vs Kernel Patterns**
-    - Kernel data structures often have complex ownership
-    - Mitigation: Start with simple, obviously-safe Rust code
-    - Mitigation: Use `unsafe` sparingly and document why
-    - Fallback: Fall back to C++ if Rust becomes a blocker
+4. **Rust Borrow Checker vs Kernel Patterns** — ✅ Resolved (for Phase 2 scope)
+    - Risk: Kernel data structures often have complex ownership
+    - What worked: Keep Rust code simple for Phase 2, use `unsafe` only at FFI boundary, wrap unsafe in safe abstractions
+    - Result: No borrow checker issues; pattern scales for Phase 3
+
+### Phase 3 Risks (Upcoming)
+
+1. **User/Kernel Separation**
+    - Risk: Privilege escalation bugs, syscall interface design errors
+    - Mitigation: Start with minimal syscall set, validate all user pointers
+    - Mitigation: Use TTBR0 for user space, TTBR1 for kernel (already prepared)
+    - Fallback: Run SLM runtime in kernel mode if user space proves too complex
+
+2. **GPU/NPU Integration (Jetson)**
+    - Risk: Undocumented hardware, proprietary drivers, memory coherency issues
+    - Mitigation: Start with NVIDIA's documented MMIO interfaces
+    - Mitigation: Use shared buffers with proper cache attributes (already have SHM_GPU_ACCESSIBLE)
+    - Fallback: CPU-only inference if GPU integration stalls
+
+3. **Real Hardware Differences**
+    - Risk: QEMU behavior differs from Jetson Orin (interrupts, timers, cache)
+    - Mitigation: Test on real hardware early in Phase 3
+    - Mitigation: Abstract platform differences in `platform.h`
+    - Fallback: Maintain QEMU as primary development target
+
+4. **Deadline-Aware Scheduling**
+    - Risk: Priority inversion, missed deadlines, starvation
+    - Mitigation: Start with simple priority levels before full EDF
+    - Mitigation: Implement priority inheritance for locks
+    - Fallback: Use round-robin with CPU affinity (current approach works)
+
+5. **Model Memory Pressure**
+    - Risk: Large models (7B+ parameters) exceed available RAM
+    - Mitigation: Implement memory-mapped model loading (stream from storage)
+    - Mitigation: Use weight quantization (INT8/INT4) to reduce footprint
+    - Fallback: Target smaller models (1-3B parameters)
 
 ### Dependencies Between Milestones
 

@@ -4,9 +4,23 @@
  * Memory layout for QEMU virt machine:
  *   RAM starts at 0x40000000
  *   Kernel is loaded at RAM base
+ *
+ * Segment layout:
+ *   .text segment (RX) - code and read-only data
+ *   .data segment (RW) - initialized and uninitialized data
  */
 
 ENTRY(_start)
+
+/*
+ * Program headers define ELF segments with proper permissions.
+ * This eliminates the RWX warning by separating code from data.
+ */
+PHDRS
+{
+    text PT_LOAD FLAGS(5);   /* PF_R | PF_X = 0x5 (read + execute) */
+    data PT_LOAD FLAGS(6);   /* PF_R | PF_W = 0x6 (read + write) */
+}
 
 MEMORY
 {
@@ -15,27 +29,36 @@ MEMORY
 
 SECTIONS
 {
+    /* ================================================================
+     * TEXT SEGMENT (RX) - Code and read-only data
+     * ================================================================ */
+
     /* Code section - starts at RAM base */
     .text : {
         __text_start = .;
         KEEP(*(.text.boot))     /* Boot code first */
         *(.text .text.*)        /* All other code */
         __text_end = .;
-    } > RAM
+    } > RAM :text
 
-    /* Read-only data */
+    /* Read-only data - same segment as code */
     .rodata : {
         __rodata_start = .;
         *(.rodata .rodata.*)
         __rodata_end = .;
-    } > RAM
+    } > RAM :text
+
+    /* ================================================================
+     * DATA SEGMENT (RW) - Initialized and uninitialized data
+     * ================================================================ */
 
     /* Initialized data */
     .data : {
+        . = ALIGN(4096);        /* Page-align for MMU protection */
         __data_start = .;
         *(.data .data.*)
         __data_end = .;
-    } > RAM
+    } > RAM :data
 
     /* Uninitialized data (BSS) */
     .bss : {
@@ -45,7 +68,7 @@ SECTIONS
         *(COMMON)
         . = ALIGN(16);
         __bss_end = .;
-    } > RAM
+    } > RAM :data
 
     /* Stack - 16 KB, placed after BSS */
     . = ALIGN(16);
@@ -54,6 +77,7 @@ SECTIONS
     __stack_top = .;
 
     /* End of kernel image */
+    . = ALIGN(4096);            /* Page-align end for clean memory layout */
     __kernel_end = .;
 
     /* Discard unwanted sections */

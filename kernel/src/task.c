@@ -198,27 +198,49 @@ struct task *task_get(uint32_t id)
 
 /*
  * Free a terminated task's resources.
+ *
+ * This function reclaims the task's stack memory and frees the task slot
+ * for reuse. Must only be called after the task has been removed from
+ * all run queues and is no longer running.
  */
 void task_destroy(struct task *task)
 {
-    if (!task || task->state != TASK_TERMINATED) {
+    if (!task) {
         return;
     }
 
-    DEBUG_PRINT("Destroying task '%s' (id=%u)", task->name, task->id);
+    irq_flags_t flags = spin_lock_irqsave(&task_lock);
 
-    /* Free stack */
-    if (task->stack_base) {
-        size_t stack_pages = TASK_STACK_SIZE / 4096;
-        pmm_free_pages(task->stack_base, stack_pages);
+    /* Verify task is terminated */
+    if (task->state != TASK_TERMINATED) {
+        WARN("task_destroy: task '%s' not terminated (state=%d)",
+             task->name, task->state);
+        spin_unlock_irqrestore(&task_lock, flags);
+        return;
     }
 
-    /* Clear task slot */
+    /* Capture info before clearing */
+    void *stack = task->stack_base;
+    uint32_t task_id = task->id;
+    char task_name[TASK_NAME_LEN];
+    str_copy(task_name, task->name, TASK_NAME_LEN);
+
+    /* Clear task slot (marks as free: id == 0) */
     task->id = 0;
     task->name[0] = '\0';
-    task->state = TASK_TERMINATED;
     task->stack_base = NULL;
     task->stack_top = NULL;
+
+    spin_unlock_irqrestore(&task_lock, flags);
+
+    /* Free stack outside lock - pmm has its own locking */
+    if (stack) {
+        size_t stack_pages = TASK_STACK_SIZE / 4096;
+        pmm_free_pages(stack, stack_pages);
+    }
+
+    DEBUG_PRINT("Destroyed task '%s' (id=%u), freed %u KB stack",
+                task_name, task_id, TASK_STACK_SIZE / 1024);
 }
 
 /*
