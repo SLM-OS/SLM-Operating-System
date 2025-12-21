@@ -1,300 +1,274 @@
-# Phase 2: Core Features (C + Rust Scaffolding)
+# Phase 3: AI Infrastructure (C kernel + Rust runtime)
 
-This document tracks Phase 2 implementation of SLM-OS.
+This document tracks Phase 3 implementation of SLM-OS.
 
-**Status:** Complete (All 5 milestones done)
+**Status:** Not started
 
 **Goals:**
-- Virtual memory with 2-level page tables
-- Multi-core boot and scheduling
-- Basic IPC (message queues)
-- Rust toolchain integration and FFI boundary
-- Task stack cleanup/memory reclamation (carried from Phase 1)
+- Model memory management (Rust)
+- GPU initialization (Jetson)
+- Deadline-aware scheduler (policy in Rust)
+- Zero-copy buffer sharing
+- Real hardware testing (Jetson Orin Nano)
+
+**Carried from Phase 2:**
+- Per-queue scheduler locks
+- Load balancing
+- Page fault handling
+- Device tree parsing (stretch goal)
 
 ---
 
-## Milestone 1: Virtual Memory System ✅
+## Milestone 1: Model Memory Management
 
-**Status:** Complete
+### Model Memory Architecture
+- [ ] Design model memory region layout (see design doc section 2.1.2)
+- [ ] Define `ModelHandle` type in Rust (opaque handle to C-allocated memory)
+- [ ] Plan memory pools: weight pool (read-only) vs workspace pool (read-write)
+- [ ] Document memory lifecycle: load → map → use → unmap → unload
 
-### MMU Research ✅
-- ✅ Study ARM64 MMU architecture (TCR_EL1, TTBR0/TTBR1, MAIR)
-- ✅ Review translation table formats (4KB granule, 2-level for 2MB pages)
-- ✅ Document memory attribute options (Normal, Device, Non-cacheable)
-- ✅ Plan kernel vs user address space split (TTBR0 vs TTBR1)
+### Model Memory Allocator (Rust)
+- [ ] Implement `ModelAllocator` struct in `runtime/src/mm/model_mem.rs`
+- [ ] Write `alloc_model_region(size, flags)` — allocate contiguous 2MB-aligned region
+- [ ] Write `free_model_region(handle)` — return region to pool
+- [ ] Implement weight pool with read-only enforcement
+- [ ] Implement workspace pool for inference scratch space
+- [ ] Add statistics: total model memory, allocated, largest free block
 
-See `docs/mmu.md` for comprehensive documentation.
+### Zero-Copy Model Sharing
+- [ ] Implement model reference counting (multiple components can use same model)
+- [ ] Write `model_share(handle, target_component)` — share model with another component
+- [ ] Write `model_unshare(handle, component)` — release component's reference
+- [ ] Ensure model unload only happens when refcount reaches zero
+- [ ] Test concurrent access from multiple tasks
 
-### Page Table Implementation ✅
-- ✅ Define page table entry structures in `kernel/include/vmm.h`
-- ✅ Implement Level 1 table (512 entries × 1GB regions)
-- ✅ Implement Level 2 table (512 entries × 2MB blocks)
-- ✅ Write `vmm_init()` — create initial kernel mappings
-- ✅ Write `vmm_map_block(virt, phys, flags)` — map single 2MB block
-- ✅ Write `vmm_unmap_block(virt)` — remove mapping
-- ✅ Write `vmm_map_region(virt, phys, size, flags)` — map contiguous region
+### GPU Memory Integration
+- [ ] Implement `gpu_map_model(handle)` — make model accessible to GPU
+- [ ] Implement `gpu_unmap_model(handle)` — remove GPU mapping
+- [ ] Handle cache coherency (flush before GPU access, invalidate after)
+- [ ] Use `SHM_GPU_ACCESSIBLE` flag from Phase 2 shared buffers
+- [ ] Test with placeholder GPU driver (actual GPU in Milestone 3)
 
-### MMU Enable Sequence ✅
-- ✅ Set up MAIR_EL1 with memory attributes (Device, Normal NC, Normal WB)
-- ✅ Configure TCR_EL1 for 39-bit VA, 4KB granule
-- ✅ Populate initial page tables (identity map + kernel high map via shared L1)
-- ✅ Write `mmu_enable()` in `kernel/src/mmu.S`
-- ✅ Handle transition from physical to virtual addressing
-- Deferred: Update linker script for virtual addresses (RWX warning fix)
-
-### Model Memory Flags (SLM-Specific) ✅
-- ✅ Implement `gpu_mapped` flag handling (PTE_SW_GPU_MAPPED)
-- ✅ Implement `model_page` flag handling (PTE_SW_MODEL_PAGE)
-- ✅ Implement `inference_hot` flag handling (PTE_SW_INFERENCE_HOT)
-- ✅ Flags defined in vmm.h, preserved in block descriptors
-
-### VMM Testing ✅
-- ✅ Verify kernel code runs correctly after MMU enable
-- ✅ Test mapping/unmapping pages dynamically
-- ✅ Verify UART still works after MMU enable (device memory mapping)
-- ✅ Automated test suite with `make test`
-- Deferred: Test page fault handling (basic — panic with useful info)
+### Model Memory Testing
+- [ ] Test allocation/deallocation cycles
+- [ ] Test zero-copy sharing between tasks
+- [ ] Verify memory statistics accuracy
+- [ ] Stress test with many small allocations
+- [ ] Test large model allocation (approach RAM limits)
 
 ---
 
-## Milestone 2: Multi-Core Support ✅
+## Milestone 2: Deadline-Aware Scheduler
 
-### SMP Research ✅
-- ✅ Study ARM64 PSCI (Power State Coordination Interface)
-- ✅ Document QEMU virt machine SMP boot method
-- ✅ Review spin-table vs PSCI boot protocols
-- ✅ Plan per-CPU data structures
+### Scheduler Policy Design (Rust)
+- [ ] Define priority levels for inference tasks
+- [ ] Design deadline representation (`deadline_ns: u64`)
+- [ ] Plan scheduling algorithm (EDF vs fixed priority vs hybrid)
+- [ ] Document interaction with C scheduler primitives
 
-See `docs/smp.md` for comprehensive documentation.
+### Priority Infrastructure
+- [ ] Switch FFI task API from pointer to PID-based (use existing `task->id`)
+  - Change `slm_task_create()` to return `uint32_t` task ID instead of `void*`
+  - Update Rust wrappers to use `TaskId` newtype
+  - Enables safe validation via `task_get(id)` before use
+- [ ] Add `priority` field to task structure (C side)
+- [ ] Implement priority queue in scheduler (replace simple linked list)
+- [ ] Add FFI function `slm_task_set_priority(task_id, priority)`
+- [ ] Implement `slm_task_set_deadline(task_id, deadline_ns)`
 
-### Secondary Core Bring-Up ✅
-- ✅ Implement PSCI `CPU_ON` call
-- ✅ Write `smp_boot.S` — secondary core entry point
-- ✅ Set up per-core stacks
-- ✅ Initialize per-core GIC CPU interface
-- ✅ Implement `smp_init()` — bring up all secondary cores
-- ✅ Add core ID detection (`mpidr_el1` parsing)
+### Deadline-Aware Scheduling (Rust)
+- [ ] Implement `schedule_slm_task()` in `runtime/src/sched/deadline.rs`
+- [ ] Urgent task detection (deadline < threshold → performance core)
+- [ ] Working set size heuristics (small model → efficiency core OK)
+- [ ] Implement `assign_to_performance_core()` / `assign_to_efficiency_core()`
+- [ ] Load balancing across cores based on deadline pressure
 
-### Per-Core Scheduler ✅
-- ✅ Create per-core run queues (`struct cpu_runqueue` in `sched.c`)
-- ✅ Implement core affinity in task structure (`cpu_affinity`, `assigned_cpu`)
-- ✅ Update `schedule()` for multi-core awareness (per-CPU scheduling)
-- ✅ Add spinlocks for scheduler data structures (global `sched.lock`)
-- ✅ Implement `sched_migrate_task(task, target_cpu)`
-- ✅ Per-CPU current task tracking (`task_current()` uses `cpu_id()`)
+### Per-Queue Scheduler Locks (Deferred from Phase 2)
+- [ ] Replace global `sched.lock` with per-CPU run queue locks
+- [ ] Implement lock-free task stealing between queues (optional)
+- [ ] Reduce contention for cross-core operations
+- [ ] Benchmark improvement over global lock
 
-### Synchronization Primitives ✅
-- ✅ Implement spinlock (`spin_lock`, `spin_unlock`, `spin_trylock`)
-- ✅ Implement ticket lock (fairer than simple spinlock)
-- ✅ Add memory barriers where needed (`dmb`, `dsb`, `isb`)
-- ✅ Add IRQ-safe spinlock variants (`spin_lock_irqsave`, `spin_unlock_irqrestore`)
-- ✅ Test lock correctness (9 unit tests in `smp.c`)
-- ✅ Multi-core contention stress testing (3 tasks × 50 increments with spinlock)
+### Priority Inversion Prevention
+- [ ] Implement priority inheritance for spinlocks
+- [ ] Detect and log priority inversion events
+- [ ] Test with high-priority task waiting on low-priority lock holder
 
-### SMP Testing ✅
-- ✅ Verify all cores boot and reach idle loop (via `smp_run_tests()`)
-- ✅ Run tasks on different cores simultaneously (task_a/b/c on CPUs 1/2/3)
-- ✅ Test cross-core task migration (`sched_migrate_task`)
-- ✅ Stress test with many tasks across all cores (6 tasks, 2 per CPU)
-- ✅ Verify no deadlocks or race conditions (lock contention test passes)
-
----
-
-## Milestone 3: Basic IPC ✅
-
-**Status:** Complete
-
-### IPC Design ✅
-- ✅ Define message structure (`struct slm_message` — 64 bytes, cache-line aligned)
-- ✅ Define shared buffer structure (`struct shared_buffer` with refcounting)
-- ✅ Plan message queue implementation (ring buffer chosen)
-- ✅ Decide on blocking vs non-blocking semantics (sleep/wake for blocking)
-
-See `kernel/include/ipc.h` for full API definition.
-
-### Message Queue Implementation ✅
-- ✅ Implement `struct msg_queue` — fixed-size ring buffer
-- ✅ Write `msg_queue_create(capacity, msg_size)` — allocate queue with configurable message size
-- ✅ Write `msg_queue_destroy(queue)` — free queue
-- ✅ Write `msg_send(queue, msg, timeout)` — send message
-- ✅ Write `msg_recv(queue, msg, timeout)` — receive message
-- ✅ Implement blocking with task sleep/wake
-- ✅ Write `msg_queue_lookup(id)` — find queue by ID
-
-### Shared Buffer Implementation ✅
-- ✅ Write `shared_buffer_create(size, flags)` — allocate shared memory (2MB aligned)
-- ✅ Write `shared_buffer_map(buffer, task, perms)` — map into task's address space
-- ✅ Write `shared_buffer_unmap(buffer, task)` — remove mapping
-- ✅ Implement reference counting for safe cleanup
-- ✅ Add `SHM_GPU_ACCESSIBLE` flag support (for future GPU integration)
-- ✅ Write `shared_buffer_lookup(id)` — find buffer by ID
-- ✅ Write `shared_buffer_phys_addr(buffer)` — get physical address for DMA/GPU
-
-### IPC Testing ✅
-- ✅ Test message queue create/destroy
-- ✅ Test non-blocking send/recv (empty/full conditions)
-- ✅ Test queue lookup by ID
-- ✅ Test shared buffer create/destroy
-- ✅ Test shared buffer map/unmap with read/write verification
-- ✅ Test buffer lookup by ID
-- Deferred: Multi-task producer/consumer test (requires more complex test harness)
-- Deferred: Memory leak verification (no task cleanup yet)
+### Scheduler Testing
+- [ ] Test priority ordering (high priority runs first)
+- [ ] Test deadline-aware scheduling (urgent tasks preempt)
+- [ ] Verify no starvation of low-priority tasks
+- [ ] Stress test with mixed priorities and deadlines
+- [ ] Benchmark scheduling overhead
 
 ---
 
-## Milestone 4: Rust Integration ✅
+## Milestone 3: GPU Initialization (Jetson)
 
-**Status:** Complete
+### Jetson Hardware Research
+- [ ] Study Jetson Orin Nano GPU architecture (Ampere, 1024 cores)
+- [ ] Document MMIO register map for GPU control
+- [ ] Review NVIDIA open-source kernel driver for reference
+- [ ] Identify minimal initialization sequence
+- [ ] Plan DMA buffer allocation for GPU data transfer
 
-### Rust Toolchain Setup ✅
-- ✅ Verify Rust `aarch64-unknown-none` target is installed
-- ✅ Create `runtime/` crate with `Cargo.toml`
-- ✅ Configure `no_std` and `no_main` for freestanding environment
-- ✅ Set up `.cargo/config.toml` for cross-compilation
-- N/A: Create custom target JSON — standard target works
-- ✅ Add `panic = "abort"` to avoid unwinding
+### Platform Abstraction
+- [ ] Create `kernel/gpu/` directory structure
+- [ ] Define GPU driver interface (`struct gpu_driver`)
+- [ ] Implement QEMU stub driver (no-op, for testing without GPU)
+- [ ] Add platform detection to select correct driver
 
-### FFI Boundary Definition ✅
-- ✅ Create `kernel/include/slm_ffi.h` — C function declarations
-- ✅ Create `runtime/src/kernel_ffi.rs` — Rust extern declarations
-- ✅ Ensure struct layouts match exactly (`#[repr(C)]`, `#[repr(transparent)]`)
-- ✅ Define error codes for FFI functions (`SLM_OK`, `SLM_ERR_*`)
-- ✅ Document FFI calling conventions and ownership rules (`docs/ffi.md`)
+### Jetson GPU Driver (C)
+- [ ] Write `jetson_gpu_init()` — power on, clock enable, reset sequence
+- [ ] Write `jetson_gpu_alloc(size)` — allocate GPU-accessible memory
+- [ ] Write `jetson_gpu_free(addr)` — free GPU memory
+- [ ] Write `jetson_gpu_submit(cmd_buffer)` — submit work to GPU
+- [ ] Write `jetson_gpu_wait()` — wait for GPU completion
+- [ ] Implement basic fence/sync mechanism
 
-### FFI Functions (C Side) ✅
-- ✅ Implement `slm_map_region()` — wrapper around VMM
-- ✅ Implement `slm_unmap_region()` — wrapper around VMM
-- ✅ Implement `slm_alloc_pages()` — wrapper around PMM
-- ✅ Implement `slm_free_pages()` — wrapper around PMM
-- ✅ Implement `slm_get_time_ns()` — current time in nanoseconds
-- ✅ Implement `slm_task_create()` — create task from Rust
-- ✅ Implement `slm_msg_send()` / `slm_msg_recv()` — IPC wrappers
+### Memory Coherency
+- [ ] Implement cache flush before GPU access (`dc civac`)
+- [ ] Implement cache invalidate after GPU write (`dc ivac`)
+- [ ] Test with simple GPU memory copy operation
+- [ ] Document coherency requirements in `docs/gpu.md`
 
-### FFI Functions (Rust Side) ✅
-- ✅ Create safe wrappers in `runtime/src/kernel_ffi.rs`
-- ✅ Implement `Result` return types for error handling (`KernelResult<T>`)
-- ✅ Add `MemFlags` bitflags type for memory flags
-- ✅ Add `KernelError` enum for error codes
-- ✅ Write unit tests for FFI type sizes and alignments (compile-time + runtime)
-
-### Build Integration ✅
-- ✅ Update top-level Makefile to build Rust runtime
-- ✅ Link Rust static library (`.a`) with C kernel
-- N/A: Handle Rust symbols in linker script — no special handling needed
-- ✅ Verify combined binary boots in QEMU
-
-### First Rust Code ✅
-- ✅ Write simple Rust function callable from C (`rust_init()`, `rust_hello()`)
-- ✅ Call Rust function from `kernel_main()` as proof of concept
-- ✅ Print "Hello from Rust!" via FFI to UART
-- ✅ Verify Rust panic handler works (`rust_test_panic()` implemented)
-
-See `docs/ffi.md` for comprehensive FFI documentation.
+### GPU Testing
+- [ ] Test GPU initialization on real Jetson hardware
+- [ ] Test memory allocation and mapping
+- [ ] Test simple compute operation (if possible without CUDA)
+- [ ] Verify CPU can read GPU-written data correctly
+- [ ] Fallback: Defer actual GPU compute to Phase 5 (SLM Integration)
 
 ---
 
-## Milestone 5: Deferred Cleanup from Phase 1 ✅
+## Milestone 4: Real Hardware Bring-Up
 
-**Status:** Complete
+### Jetson Orin Nano Preparation
+- [ ] Set up SD card with bootable image
+- [ ] Configure U-Boot to chainload SLM-OS
+- [ ] Set up serial console for debug output
+- [ ] Document boot process in `docs/jetson-boot.md`
 
-### Linker Script Security ✅
-- ✅ Fix RWX segment warning in kernel ELF
-- ✅ Separate .text (RX) from .data/.bss (RW) in kernel.ld
-- ✅ Use proper PHDRS with permissions (FLAGS(5) for RX, FLAGS(6) for RW)
-- ✅ Ready for user/kernel separation in Phase 3
+### Platform-Specific Drivers
+- [ ] Implement Tegra UART driver (NS16550-compatible)
+- [ ] Verify GIC configuration for Jetson (may differ from QEMU)
+- [ ] Implement Jetson-specific timer if needed
+- [ ] Test GPIO driver on real pins (LED blink test)
 
-### Task Stack Reclamation ✅
-- ✅ Implement `task_destroy()` — full cleanup including stack
-- ✅ Add stack to free list on task termination (via `pmm_free_pages()`)
-- ✅ Prevent use-after-free with zombie cleanup mechanism
-- ✅ Test rapid task create/destroy cycles (8 lifecycle tasks, memory reclaimed)
+### Hardware Differences
+- [ ] Document all QEMU vs Jetson differences discovered
+- [ ] Update `platform.h` with Jetson-specific addresses
+- [ ] Test MMU with Jetson's actual memory map
+- [ ] Verify interrupt handling on real hardware
+- [ ] Test multi-core boot on Jetson (6 cores vs QEMU's 4)
 
-### Scheduler Bug Fixes ✅
-- ✅ Fixed `ready_count` underflow bug (tasks re-added to queue without increment)
-- ✅ Improved test stability with yield() in wait loops
+### Device Tree Support (Stretch Goal)
+- [ ] Implement minimal DTB parser
+- [ ] Extract memory regions from device tree
+- [ ] Extract interrupt configuration from device tree
+- [ ] Remove hardcoded addresses where possible
 
-### General Cleanup ✅
-- ✅ Updated testing.md with lifecycle test documentation
-- ✅ Improved debug output in task_destroy()
-- ✅ Reviewed all TODO comments in kernel:
-  - ✅ Fixed `slm_get_time_ns()` to use proper timer read
-  - ✅ Updated vmm.c comment (linker fixed, MMU granularity is Phase 3)
-  - Remaining 3 TODOs are legitimate Phase 3 work (device tree, IPC timeout, user mappings)
+### Hardware Testing
+- [ ] Full test suite passes on Jetson
+- [ ] Multi-core stress test on real hardware
+- [ ] IPC stress test on real hardware
+- [ ] Measure actual context switch time (< 10 µs target)
+- [ ] Measure actual interrupt latency
 
 ---
 
-## Phase 2 Completion Checklist
+## Milestone 5: Deferred Items and Polish
+
+### Page Fault Handling (Deferred from Phase 2)
+- [ ] Implement basic page fault handler (panic with useful info)
+- [ ] Log faulting address, access type, task ID
+- [ ] Add fault address to panic register dump
+- [ ] Future: demand paging for model memory (Phase 5+)
+
+### IPC Improvements (Deferred from Phase 2)
+- [ ] Implement proper timeout handling in `msg_recv()`
+- [ ] Multi-task producer/consumer stress test
+- [ ] Memory leak verification after IPC teardown
+- [ ] Add IPC statistics (messages sent, queue high-water mark)
+
+### Rust Runtime Expansion
+- [ ] Implement `ModelLoader` struct skeleton (full implementation Phase 5)
+- [ ] Implement `InferenceScheduler` struct skeleton
+- [ ] Add logging infrastructure in Rust (via FFI to UART)
+- [ ] Create `runtime/src/sched/heterogeneous.rs` for big.LITTLE awareness
+
+### Documentation
+- [ ] Update architecture doc with Phase 3 learnings
+- [ ] Document GPU driver interface
+- [ ] Document model memory API
+- [ ] Update build instructions for Jetson target
+- [ ] Create troubleshooting guide for hardware issues
+
+---
+
+## Phase 3 Completion Checklist
 
 ### Deliverables
-- ✅ Kernel runs with MMU enabled (virtual addresses)
-- ✅ All CPU cores boot and run tasks
-- ✅ Tasks can communicate via message queues
-- ✅ Rust code compiles and links with C kernel
-- ✅ At least one Rust function callable from C kernel
-- ✅ All code compiles cleanly with `-Wall -Werror` (C)
-- ✅ Documentation updated in `docs/`
+- [ ] Model memory allocator functional (Rust)
+- [ ] Deadline-aware scheduling working
+- [ ] GPU initialized on Jetson (basic functionality)
+- [ ] Kernel boots and runs on real Jetson hardware
+- [ ] All Phase 2 tests still pass
+- [ ] New tests for Phase 3 features
+- [ ] Documentation updated
 
 ### Demo
-- ✅ Boot kernel in QEMU with MMU enabled
-- ✅ Show tasks running on different cores
-- ✅ Show inter-task communication via IPC
-- ✅ Show Rust code executing (print from Rust)
-- ✅ Show memory statistics including virtual memory
+- [ ] Boot on Jetson Orin Nano via serial console
+- [ ] Show model memory allocation and sharing
+- [ ] Show deadline-aware task scheduling
+- [ ] Show GPU memory mapping (compute deferred to Phase 5)
+- [ ] Compare performance: QEMU vs real hardware
 
 ---
 
 ## Outstanding Decisions
 
-### Milestone 1 — Virtual Memory ✅ (Resolved)
+### Milestone 1 — Model Memory
 
-| Decision | Options | Choice |
-|----------|---------|--------|
-| **Page Granule** | 4KB vs 16KB vs 64KB | **4KB** — standard, well-documented, sufficient for Phase 2 |
-| **Address Space** | TTBR0 only vs TTBR0 + TTBR1 | **TTBR0 + TTBR1 shared L1** — simpler for boot; will split for user space later |
-| **Mapping Strategy** | Separate tables vs shared | **Identity + high kernel (shared table)** — single L1 table serves both |
-| **Block Size** | 4KB pages vs 2MB blocks | **2MB** — reduces table depth; sufficient granularity for kernel |
+| Decision | Options | Considerations | Deadline |
+|----------|---------|----------------|----------|
+| **Pool Strategy** | Single pool vs separate weight/workspace | Separate pools enable read-only weights, but more complexity | Before starting M1 |
+| **Alignment** | 2MB (huge page) vs 4KB | 2MB reduces TLB pressure for large models; 4KB more flexible | Before starting M1 |
+| **Rust vs C Implementation** | All Rust vs Rust policy + C mechanism | Rust for safety; C if performance critical | Before starting M1 |
 
-### Milestone 2 — Multi-Core ✅ (Resolved)
+### Milestone 2 — Scheduler
 
-| Decision | Options | Choice |
-|----------|---------|--------|
-| **Boot Protocol** | PSCI vs spin-table | **PSCI** — more portable, works on QEMU and Jetson |
-| **Scheduler Lock Granularity** | Global lock vs per-queue locks | **Global lock** for Phase 2; per-queue locks planned for Phase 3 |
-| **Load Balancing** | None vs periodic rebalancing | **Deferred to Phase 3** — SLM-based scheduler may supersede |
+| Decision | Options | Considerations | Deadline |
+|----------|---------|----------------|----------|
+| **Algorithm** | EDF vs fixed priority vs hybrid | EDF is optimal but complex; fixed priority is simpler | Before starting M2 |
+| **Priority Levels** | 4 vs 8 vs 16 vs 32 | More levels = finer control but more overhead | Before priority infrastructure |
+| **Lock-Free Stealing** | Implement vs defer | Performance benefit vs complexity; may not be needed for 4-6 cores | During per-queue locks |
 
-### Milestone 3 — IPC ✅ (Resolved)
+### Milestone 3 — GPU
 
-| Decision | Options | Choice |
-|----------|---------|--------|
-| **Message Queue Type** | Ring buffer vs linked list | **Ring buffer** — cache-friendly, no per-message allocation, predictable latency |
-| **Blocking Implementation** | Busy-wait vs sleep/wake | **Sleep/wake** — messages may take ms to arrive; spinning wastes CPU |
-| **Max Message Size** | Fixed vs variable | **64 bytes default, per-queue configurable** — cache-line aligned; large data via shared buffers |
+| Decision | Options | Considerations | Deadline |
+|----------|---------|----------------|----------|
+| **GPU Scope** | Init only vs basic compute vs CUDA | Init only is safest; CUDA requires proprietary libs | Before starting M3 |
+| **Driver Model** | Kernel driver vs user-space | Kernel is simpler for bare-metal; user-space more modular | Before starting M3 |
+| **Fallback** | CPU-only inference | Must work without GPU for QEMU testing | Before Phase 5 |
 
-### Milestone 4 — Rust Integration ✅ (Resolved)
+### Milestone 4 — Hardware
 
-| Decision | Options | Choice |
-|----------|---------|--------|
-| **Allocator** | None vs `linked_list_allocator` vs custom | **`linked_list_allocator`** — set up from the start; avoids refactoring later |
-| **Panic Strategy** | Abort vs custom handler calling C panic | **Custom handler** — calls C `panic()` for consistent diagnostics via UART |
-| **FFI Error Handling** | Integer codes vs tagged union | **Integer codes** — matches existing C patterns; Rust wraps in `Result` |
+| Decision | Options | Considerations | Deadline |
+|----------|---------|----------------|----------|
+| **Boot Method** | U-Boot vs UEFI direct | U-Boot is documented; UEFI may be cleaner | Before hardware bring-up |
+| **Device Tree** | Full parsing vs minimal vs hardcoded | Full is flexible; hardcoded is faster to implement | Stretch goal, can defer |
+| **Pi 5 Support** | Now vs later vs never | Different GPU, simpler platform; good fallback if Jetson stalls | Defer to Phase 4+ |
 
-### Deferred to Phase 3
+### Deferred to Phase 4
 
-| Decision | Notes |
-|----------|-------|
-| Model memory management | Phase 3: "Model memory management" |
-| GPU initialization | Phase 3: "GPU initialization (Jetson)" |
-| Deadline-aware scheduler | Phase 3: "Deadline-aware scheduler (policy in Rust)" |
-| Per-queue scheduler locks | Currently using global lock; will implement per-queue locks for scalability |
-| Load balancing | Periodic task rebalancing across cores (SLM scheduler may supersede) |
-| Component system | Phase 4 |
-| Jetson hardware testing | Can continue on QEMU for Phase 2 |
-
-### Future Considerations
-
-| Topic | Notes |
-|-------|-------|
-| **UART Synchronization** | Currently no locking on UART output, causing garbled interleaved output during concurrent access (especially at boot). Intentionally left unlocked to avoid deadlock risks with panics and nested prints. Future approaches to consider: (1) Per-CPU ring buffers that drain to UART from one CPU, (2) Message-level locking with trylock fallback for direct output, (3) Accept as debug build artifact since SLM workloads won't print much at runtime. |
+| Item | Notes |
+|------|-------|
+| Component hot-swap | Phase 4: "Hot-swap mechanism" |
+| Component isolation | Phase 4: "Component isolation" |
+| Message routing | Phase 4: "Message routing" |
+| Full model loader | Phase 5: "ONNX model loader" |
+| Inference engine | Phase 5: "TensorRT Lite integration" |
 
 ---
 
@@ -322,76 +296,107 @@ See `docs/ffi.md` for comprehensive FFI documentation.
     - What worked: Keep Rust code simple for Phase 2, use `unsafe` only at FFI boundary, wrap unsafe in safe abstractions
     - Result: No borrow checker issues; pattern scales for Phase 3
 
-### Phase 3 Risks (Upcoming)
+### Phase 3 Risks
 
-1. **User/Kernel Separation**
-    - Risk: Privilege escalation bugs, syscall interface design errors
-    - Mitigation: Start with minimal syscall set, validate all user pointers
-    - Mitigation: Use TTBR0 for user space, TTBR1 for kernel (already prepared)
-    - Fallback: Run SLM runtime in kernel mode if user space proves too complex
+1. **GPU Integration**
+    - Risk: NVIDIA's GPU is complex; documentation may be incomplete
+    - Mitigation: Start with just initialization and memory mapping
+    - Mitigation: Defer actual compute to Phase 5 with TensorRT
+    - Fallback: CPU-only inference is viable for small models
 
-2. **GPU/NPU Integration (Jetson)**
-    - Risk: Undocumented hardware, proprietary drivers, memory coherency issues
-    - Mitigation: Start with NVIDIA's documented MMIO interfaces
-    - Mitigation: Use shared buffers with proper cache attributes (already have SHM_GPU_ACCESSIBLE)
-    - Fallback: CPU-only inference if GPU integration stalls
+2. **Real Hardware Bring-Up**
+    - Risk: Silent failures, different behavior from QEMU
+    - Mitigation: Have working serial console before anything else
+    - Mitigation: Start with minimal boot, add features incrementally
+    - Mitigation: Keep QEMU as primary development target
 
-3. **Real Hardware Differences**
-    - Risk: QEMU behavior differs from Jetson Orin (interrupts, timers, cache)
-    - Mitigation: Test on real hardware early in Phase 3
-    - Mitigation: Abstract platform differences in `platform.h`
-    - Fallback: Maintain QEMU as primary development target
-
-4. **Deadline-Aware Scheduling**
+3. **Deadline Scheduler Correctness**
     - Risk: Priority inversion, missed deadlines, starvation
-    - Mitigation: Start with simple priority levels before full EDF
-    - Mitigation: Implement priority inheritance for locks
-    - Fallback: Use round-robin with CPU affinity (current approach works)
+    - Mitigation: Start with simple fixed priorities
+    - Mitigation: Add EDF only if fixed priority is insufficient
+    - Fallback: Round-robin with affinity works (Phase 2 baseline)
 
-5. **Model Memory Pressure**
-    - Risk: Large models (7B+ parameters) exceed available RAM
-    - Mitigation: Implement memory-mapped model loading (stream from storage)
-    - Mitigation: Use weight quantization (INT8/INT4) to reduce footprint
-    - Fallback: Target smaller models (1-3B parameters)
+4. **Model Memory Pressure**
+    - Risk: Large models exceed available RAM
+    - Mitigation: Start with small test models (< 100MB)
+    - Mitigation: Implement memory statistics early for visibility
+    - Fallback: Target 1-3B parameter models, not 7B+
+
+5. **Rust in Performance-Critical Paths**
+    - Risk: Abstraction overhead, borrow checker friction
+    - Mitigation: Profile early, optimize hot paths
+    - Mitigation: Keep FFI boundary thin
+    - Fallback: Move hot paths to C if needed
 
 ### Dependencies Between Milestones
 
 ```
-M1 (VMM) ─────┬──────> M4 (Rust) ──> requires VMM for slm_map_region
-              │
-              └──────> M3 (IPC) ──> shared buffers need VMM
-              
-M2 (SMP) ────────────> M3 (IPC) ──> IPC needs locks from SMP work
+M1 (Model Memory) ─────────> M3 (GPU) ──> GPU needs model memory for DMA buffers
+                    │
+                    └──────> M5 (Rust Runtime) ──> ModelLoader uses model memory
 
-M5 (Cleanup) ─────────> Can happen in parallel with M1-M4
+M2 (Scheduler) ────────────> Independent, can parallel with M1
+
+M3 (GPU) ──────────────────> M4 (Hardware) ──> GPU driver only testable on Jetson
+
+M4 (Hardware) ─────────────> Should start early for serial console setup
 ```
 
-Recommended order: M1 → M2 → M3 → M4 (with M5 throughout)
+Recommended order:
+1. M4 (Hardware) — Get serial working ASAP for debugging
+2. M1 (Model Memory) — Foundation for GPU and inference
+3. M2 (Scheduler) — Can parallel with M1
+4. M3 (GPU) — Requires M1 and M4
+5. M5 (Polish) — Throughout
 
 ---
 
 ## Resources
 
-### Virtual Memory
-- ARM Architecture Reference Manual — Chapter D5 (Address Translation)
-- [OS Dev Wiki — ARM Paging](https://wiki.osdev.org/ARM_Paging)
-- Linux kernel `arch/arm64/mm/` for reference (not to copy, but to understand)
+### GPU
+- NVIDIA Jetson Orin Nano Developer Guide
+- NVIDIA Open GPU Kernel Modules (reference for register interface)
+- Linux kernel `drivers/gpu/drm/nouveau/` (open-source NVIDIA driver)
 
-### Multi-Core
-- ARM Architecture Reference Manual — Chapter D1 (AArch64 System Registers)
-- PSCI Specification (ARM DEN0022)
-- [OS Dev Wiki — SMP](https://wiki.osdev.org/SMP)
+### Scheduling
+- "Deadline Scheduling in Linux" (LWN.net articles)
+- "Operating Systems: Three Easy Pieces" — Chapter on MLFQ and scheduling
+- RTEMS documentation (real-time scheduling in embedded OS)
 
-### Rust Embedded
-- [The Embedonomicon](https://docs.rust-embedded.org/embedonomicon/)
-- [rust-embedded/cortex-m](https://github.com/rust-embedded/cortex-m) — ARM Cortex-M, but patterns transfer
-- [Writing an OS in Rust](https://os.phil-opp.com/) — x86, but Rust OS patterns are useful
+### Model Memory
+- "Memory Management for Machine Learning Inference" (various papers)
+- TensorFlow Lite memory allocation strategy
+- ONNX Runtime memory arena design
 
-### FFI
-- [The Rustonomicon — FFI](https://doc.rust-lang.org/nomicon/ffi.html)
-- [Rust Reference — `extern` functions](https://doc.rust-lang.org/reference/items/external-blocks.html)
+### Jetson Hardware
+- Jetson Orin Nano Developer Kit User Guide
+- Tegra234 Technical Reference Manual (if available)
+- NVIDIA L4T (Linux for Tegra) source code for driver reference
+
+---
+
+## Lessons from Phase 1 & 2
+
+### What Worked Well
+- Starting with QEMU before real hardware
+- Global scheduler lock (simplicity over optimization)
+- Eager FPU save (predictable, no lazy-save bugs)
+- Rust FFI with safe wrappers around unsafe calls
+- Compile-time assertions for struct sizes
+
+### What To Do Differently
+- Set up serial console on real hardware earlier
+- Profile before optimizing (per-queue locks may not be needed)
+- Document all QEMU assumptions in one place
+- Add more stress tests earlier in development
+
+### Patterns to Preserve
+- Phase documents with checkboxes track progress visibly
+- "Deferred to Phase N" is explicit — nothing lost
+- Risk mitigation has concrete fallbacks
+- Decisions table forces explicit choices
 
 ---
 
 *Created: December 2025*
-*Target: Complete before Month 3 (AI Infrastructure)*
+*Target: Complete before Phase 4 (Component System)*
