@@ -30,6 +30,7 @@ PASSED - All tests passed
 [INFO] VMM tests passed
 [INFO] Spinlock tests passed
 [INFO] SMP tests passed
+[INFO] IPC tests passed
 [INFO] Scheduler tests passed
 ```
 
@@ -112,6 +113,28 @@ Validates the multi-core scheduler, task distribution, migration, and concurrenc
 - Lock contention test verifies that spinlocks correctly protect shared data across cores
 
 Tests run from the main task function after boot completes. The kernel triggers an intentional undefined instruction fault after tests complete to terminate QEMU.
+
+### IPC Tests (`kernel/src/ipc.c`)
+
+Validates message queues and shared buffers:
+
+| Test | Description |
+|------|-------------|
+| Message queue create | Create queue with 8 slots, 64-byte messages |
+| Message queue destroy | Free queue and verify cleanup |
+| Non-blocking send | Send message, verify count increases |
+| Non-blocking recv | Receive message, verify value matches |
+| Recv on empty | Returns `IPC_ERR_EMPTY` when queue empty |
+| Send on full | Returns `IPC_ERR_FULL` when queue full |
+| Queue lookup | Find queue by ID, returns NULL after destroy |
+| Shared buffer create | Create buffer, verify 2MB alignment and refcount |
+| Shared buffer destroy | Free buffer and verify cleanup |
+| Shared buffer map | Map buffer, verify refcount increases |
+| Shared buffer read/write | Write value, read back and verify |
+| Shared buffer unmap | Unmap buffer, verify refcount decreases |
+| Buffer lookup | Find buffer by ID, returns NULL after destroy |
+
+Tests run from `ipc_run_tests()` called at the start of the main task, before scheduler tests.
 
 ---
 

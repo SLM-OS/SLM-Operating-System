@@ -13,6 +13,7 @@
 #include "timer.h"
 #include "smp.h"        /* For cpu_id() and cpu_count */
 #include "spinlock.h"
+#include "ipc.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -455,7 +456,10 @@ static void main_task_func(void *arg)
     uart_puts("#    SLM-OS Scheduler Test Suite      #\n");
     uart_puts("########################################\n");
 
-    /* Run all tests */
+    /* Run IPC tests first (single-threaded tests) */
+    test_errors += ipc_run_tests();
+
+    /* Run all scheduler tests */
     test_multicore_basic();
     test_task_migration();
     test_stress_multicpu();
@@ -538,6 +542,9 @@ void kernel_main(void)
     /* Initialize scheduler */
     uart_puts("\n");
     scheduler_init();
+
+    /* Initialize IPC subsystem */
+    ipc_init();
 
     /* Create main task */
     struct task *main_task = task_create("main", main_task_func, NULL);

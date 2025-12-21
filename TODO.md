@@ -2,7 +2,7 @@
 
 This document tracks Phase 2 implementation of SLM-OS.
 
-**Status:** In progress (Milestones 1-2 complete)
+**Status:** In progress (Milestones 1-3 complete)
 
 **Goals:**
 - Virtual memory with 2-level page tables
@@ -57,15 +57,6 @@ See `docs/mmu.md` for comprehensive documentation.
 - ✅ Automated test suite with `make test`
 - Deferred: Test page fault handling (basic — panic with useful info)
 
-### Decisions Made
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Page Granule | 4KB | Standard, well-documented, sufficient for Phase 2 |
-| Address Space | TTBR0 + TTBR1 shared L1 | Simpler for boot; will split for user space later |
-| Mapping Strategy | Identity + high kernel (shared table) | Single L1 table serves both; identity for boot, high for kernel |
-| Block Size | 2MB | Reduces table depth; sufficient granularity for kernel |
-
 ---
 
 ## Milestone 2: Multi-Core Support ✅
@@ -111,35 +102,45 @@ See `docs/smp.md` for comprehensive documentation.
 
 ---
 
-## Milestone 3: Basic IPC
+## Milestone 3: Basic IPC ✅
 
-### IPC Design
-- [ ] Define message structure (`struct slm_message` from design doc)
-- [ ] Define shared buffer structure (`struct slm_shared_buffer`)
-- [ ] Plan message queue implementation (ring buffer vs linked list)
-- [ ] Decide on blocking vs non-blocking semantics
+**Status:** Complete
 
-### Message Queue Implementation
-- [ ] Implement `struct msg_queue` — fixed-size ring buffer
-- [ ] Write `msg_queue_create(capacity)` — allocate queue
-- [ ] Write `msg_queue_destroy(queue)` — free queue
-- [ ] Write `msg_send(queue, msg, timeout)` — send message
-- [ ] Write `msg_recv(queue, msg, timeout)` — receive message
-- [ ] Implement blocking with task sleep/wake
+### IPC Design ✅
+- ✅ Define message structure (`struct slm_message` — 64 bytes, cache-line aligned)
+- ✅ Define shared buffer structure (`struct shared_buffer` with refcounting)
+- ✅ Plan message queue implementation (ring buffer chosen)
+- ✅ Decide on blocking vs non-blocking semantics (sleep/wake for blocking)
 
-### Shared Buffer Implementation
-- [ ] Write `shared_buffer_create(size, flags)` — allocate shared memory
-- [ ] Write `shared_buffer_map(buffer, task)` — map into task's address space
-- [ ] Write `shared_buffer_unmap(buffer, task)` — remove mapping
-- [ ] Implement reference counting for safe cleanup
-- [ ] Add `GPU_ACCESSIBLE` flag support (for future GPU integration)
+See `kernel/include/ipc.h` for full API definition.
 
-### IPC Testing
-- [ ] Test single-producer single-consumer messaging
-- [ ] Test multiple producers, single consumer
-- [ ] Test blocking behavior (sender blocks when full, receiver blocks when empty)
-- [ ] Test shared buffer mapping into multiple tasks
-- [ ] Verify no memory leaks after IPC teardown
+### Message Queue Implementation ✅
+- ✅ Implement `struct msg_queue` — fixed-size ring buffer
+- ✅ Write `msg_queue_create(capacity, msg_size)` — allocate queue with configurable message size
+- ✅ Write `msg_queue_destroy(queue)` — free queue
+- ✅ Write `msg_send(queue, msg, timeout)` — send message
+- ✅ Write `msg_recv(queue, msg, timeout)` — receive message
+- ✅ Implement blocking with task sleep/wake
+- ✅ Write `msg_queue_lookup(id)` — find queue by ID
+
+### Shared Buffer Implementation ✅
+- ✅ Write `shared_buffer_create(size, flags)` — allocate shared memory (2MB aligned)
+- ✅ Write `shared_buffer_map(buffer, task, perms)` — map into task's address space
+- ✅ Write `shared_buffer_unmap(buffer, task)` — remove mapping
+- ✅ Implement reference counting for safe cleanup
+- ✅ Add `SHM_GPU_ACCESSIBLE` flag support (for future GPU integration)
+- ✅ Write `shared_buffer_lookup(id)` — find buffer by ID
+- ✅ Write `shared_buffer_phys_addr(buffer)` — get physical address for DMA/GPU
+
+### IPC Testing ✅
+- ✅ Test message queue create/destroy
+- ✅ Test non-blocking send/recv (empty/full conditions)
+- ✅ Test queue lookup by ID
+- ✅ Test shared buffer create/destroy
+- ✅ Test shared buffer map/unmap with read/write verification
+- ✅ Test buffer lookup by ID
+- Deferred: Multi-task producer/consumer test (requires more complex test harness)
+- Deferred: Memory leak verification (no task cleanup yet)
 
 ---
 
@@ -236,9 +237,14 @@ See `docs/smp.md` for comprehensive documentation.
 
 ### Milestone 1 — Virtual Memory ✅ (Resolved)
 
-All M1 decisions have been made. See "Decisions Made" section under Milestone 1 above.
+| Decision | Options | Choice |
+|----------|---------|--------|
+| **Page Granule** | 4KB vs 16KB vs 64KB | **4KB** — standard, well-documented, sufficient for Phase 2 |
+| **Address Space** | TTBR0 only vs TTBR0 + TTBR1 | **TTBR0 + TTBR1 shared L1** — simpler for boot; will split for user space later |
+| **Mapping Strategy** | Separate tables vs shared | **Identity + high kernel (shared table)** — single L1 table serves both |
+| **Block Size** | 4KB pages vs 2MB blocks | **2MB** — reduces table depth; sufficient granularity for kernel |
 
-### Milestone 2 — Multi-Core
+### Milestone 2 — Multi-Core ✅ (Resolved)
 
 | Decision | Options | Choice |
 |----------|---------|--------|
@@ -246,13 +252,13 @@ All M1 decisions have been made. See "Decisions Made" section under Milestone 1 
 | **Scheduler Lock Granularity** | Global lock vs per-queue locks | **Global lock** for Phase 2; per-queue locks planned for Phase 3 |
 | **Load Balancing** | None vs periodic rebalancing | **Deferred to Phase 3** — SLM-based scheduler may supersede |
 
-### Milestone 3 — IPC
+### Milestone 3 — IPC ✅ (Resolved)
 
-| Decision | Options | Considerations | Deadline |
-|----------|---------|----------------|----------|
-| **Message Queue Type** | Ring buffer vs linked list | Ring buffer is cache-friendly; linked list is flexible | Before starting M3 |
-| **Blocking Implementation** | Busy-wait vs sleep/wake | Sleep/wake is correct; busy-wait is simpler | Before starting M3 |
-| **Max Message Size** | Fixed vs variable | Fixed simplifies allocation; variable more flexible | Before starting M3 |
+| Decision | Options | Choice |
+|----------|---------|--------|
+| **Message Queue Type** | Ring buffer vs linked list | **Ring buffer** — cache-friendly, no per-message allocation, predictable latency |
+| **Blocking Implementation** | Busy-wait vs sleep/wake | **Sleep/wake** — messages may take ms to arrive; spinning wastes CPU |
+| **Max Message Size** | Fixed vs variable | **64 bytes default, per-queue configurable** — cache-line aligned; large data via shared buffers |
 
 ### Milestone 4 — Rust Integration
 

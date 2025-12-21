@@ -1,0 +1,306 @@
+# Inter-Process Communication (IPC)
+
+This document describes the IPC subsystem in SLM-OS, including message queues and shared buffers.
+
+---
+
+## Overview
+
+SLM-OS provides a two-tier IPC architecture:
+
+1. **Control Plane: Message Queues** — Small, fixed-size messages (default 64 bytes) for signaling, commands, and buffer handles
+2. **Data Plane: Shared Buffers** — Zero-copy shared memory for large data transfers (tensors, model weights)
+
+This design optimizes for SLM workloads where control messages are small but data transfers can be megabytes.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         IPC Architecture                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│    ┌──────────────┐         Message Queue          ┌──────────────┐ │
+│    │   Producer   │ ──── (64-byte messages) ────── │   Consumer   │ │
+│    │     Task     │                                │     Task     │ │
+│    └──────────────┘                                └──────────────┘ │
+│           │                                               │         │
+│           │  (buffer handle in message)                   │         │
+│           ▼                                               ▼         │
+│    ┌─────────────────────────────────────────────────────────────┐ │
+│    │                  Shared Buffer (2MB+)                       │ │
+│    │              (Zero-copy data transfer)                      │ │
+│    └─────────────────────────────────────────────────────────────┘ │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Message Queues
+
+### Design
+
+Message queues are implemented as fixed-size ring buffers with:
+
+- **Configurable message size** — Default 64 bytes (cache-line aligned), can be any size ≥ 4 bytes
+- **Fixed capacity** — Set at creation time
+- **Blocking semantics** — Sleep/wake for efficiency (no busy-waiting)
+- **Thread-safe** — Protected by spinlocks
+
+### API
+
+```c
+#include "ipc.h"
+
+/* Create a queue with 16 slots, 64-byte messages */
+struct msg_queue *q = msg_queue_create(16, 0);  /* 0 = MSG_SIZE_DEFAULT */
+
+/* Create a queue with custom message size */
+struct msg_queue *q = msg_queue_create(8, sizeof(struct my_message));
+
+/* Send a message (blocking) */
+struct slm_message msg = { .type = MSG_TYPE_REQUEST, ... };
+int ret = msg_send(q, &msg, MSG_WAIT_FOREVER);
+
+/* Send a message (non-blocking) */
+ret = msg_send(q, &msg, MSG_NO_WAIT);
+if (ret == IPC_ERR_FULL) {
+    /* Queue is full, handle appropriately */
+}
+
+/* Receive a message (blocking) */
+ret = msg_recv(q, &msg, MSG_WAIT_FOREVER);
+
+/* Receive a message (non-blocking) */
+ret = msg_recv(q, &msg, MSG_NO_WAIT);
+if (ret == IPC_ERR_EMPTY) {
+    /* Queue is empty */
+}
+
+/* Check queue depth */
+size_t pending = msg_queue_count(q);
+
+/* Find queue by ID (for sharing between tasks) */
+struct msg_queue *found = msg_queue_lookup(queue_id);
+
+/* Destroy queue */
+msg_queue_destroy(q);
+```
+
+### Default Message Structure
+
+The `struct slm_message` is the recommended format for SLM-OS messages:
+
+```c
+struct slm_message {
+    uint32_t type;              /*  4 bytes: Message type identifier */
+    uint32_t flags;             /*  4 bytes: Message-specific flags */
+    uint32_t sender_id;         /*  4 bytes: Sending task ID */
+    uint32_t reserved;          /*  4 bytes: Reserved */
+    union {                     /* 48 bytes: Payload */
+        uint8_t raw[48];
+        struct {
+            uint32_t buffer_handle;
+            uint32_t offset;
+            uint32_t length;
+            uint8_t  extra[36];
+        } buffer_ref;           /* For shared buffer references */
+        struct {
+            int32_t  status;
+            uint32_t value;
+            uint8_t  data[40];
+        } response;
+    } payload;
+};
+```
+
+Total size: 64 bytes (matches typical CPU cache line).
+
+### Error Codes
+
+| Code | Meaning |
+|------|---------|
+| `IPC_OK` (0) | Success |
+| `IPC_ERR_NOMEM` (-1) | Out of memory |
+| `IPC_ERR_FULL` (-2) | Queue full (non-blocking send) |
+| `IPC_ERR_EMPTY` (-3) | Queue empty (non-blocking recv) |
+| `IPC_ERR_TIMEOUT` (-4) | Operation timed out |
+| `IPC_ERR_INVALID` (-5) | Invalid parameter |
+| `IPC_ERR_BUSY` (-6) | Resource busy |
+
+---
+
+## Shared Buffers
+
+### Design
+
+Shared buffers provide zero-copy access to large memory regions:
+
+- **2MB alignment** — Matches VMM block size for efficient mapping
+- **Reference counting** — Safe multi-task access
+- **Permission control** — Read, write, or read-write per mapping
+- **GPU-ready flags** — Prepared for future GPU integration
+
+### API
+
+```c
+#include "ipc.h"
+
+/* Create a shared buffer (size rounded up to 2MB) */
+struct shared_buffer *buf = shared_buffer_create(1024 * 1024, SHM_RDWR);
+
+/* Map into current task's address space */
+void *addr = shared_buffer_map(buf, NULL, SHM_RDWR);  /* NULL = current task */
+
+/* Write data to buffer */
+memcpy(addr, source_data, data_size);
+
+/* Get buffer handle to send via message queue */
+uint32_t handle = buf->id;
+
+/* --- On receiving task --- */
+
+/* Look up buffer by handle */
+struct shared_buffer *buf = shared_buffer_lookup(handle);
+
+/* Map into this task */
+void *addr = shared_buffer_map(buf, NULL, SHM_READ);
+
+/* Read data directly (zero-copy) */
+process_data(addr, data_size);
+
+/* Unmap when done */
+shared_buffer_unmap(buf, NULL);
+
+/* --- On owner task --- */
+
+/* Destroy buffer (only when refcount == 1) */
+shared_buffer_destroy(buf);
+```
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `SHM_READ` | Buffer is readable |
+| `SHM_WRITE` | Buffer is writable |
+| `SHM_RDWR` | Both read and write |
+| `SHM_GPU_ACCESSIBLE` | Map with GPU-visible attributes (future) |
+| `SHM_MODEL_PAGE` | Mark as model weight storage (future) |
+| `SHM_INFERENCE_HOT` | Mark as hot inference data (future) |
+
+### Reference Counting Rules
+
+1. `refcount` starts at 1 (owner's implicit reference)
+2. Each `shared_buffer_map()` increments refcount
+3. Each `shared_buffer_unmap()` decrements refcount
+4. `shared_buffer_destroy()` only succeeds when refcount == 1
+
+This prevents use-after-free while allowing safe multi-task access.
+
+---
+
+## Usage Pattern: Large Data Transfer
+
+The typical pattern for transferring large data between tasks:
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│  Producer Task                          Consumer Task             │
+├───────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  1. Create shared buffer                                          │
+│     buf = shared_buffer_create(...)                               │
+│                                                                   │
+│  2. Map and write data                                            │
+│     addr = shared_buffer_map(buf, ...)                            │
+│     write_tensor_to(addr);                                        │
+│                                                                   │
+│  3. Send handle via message                                       │
+│     msg.payload.buffer_ref.buffer_handle = buf->id                │
+│     msg_send(queue, &msg, ...)                                    │
+│                                         ◄──────────────────────── │
+│                                         4. Receive message        │
+│                                            msg_recv(queue, ...)   │
+│                                                                   │
+│                                         5. Map buffer             │
+│                                            handle = msg.payload...│
+│                                            buf = shared_buffer_   │
+│                                                    lookup(handle) │
+│                                            addr = shared_buffer_  │
+│                                                    map(buf, ...)  │
+│                                                                   │
+│                                         6. Read data (zero-copy)  │
+│                                            process_tensor(addr)   │
+│                                                                   │
+│                                         7. Unmap when done        │
+│                                            shared_buffer_unmap()  │
+│                                                                   │
+│  8. Destroy when all done                                         │
+│     shared_buffer_destroy(buf)                                    │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Implementation Details
+
+### Memory Layout
+
+Message queues allocate:
+- 1 page (4KB) for the `struct msg_queue` descriptor
+- N pages for the ring buffer (`capacity × msg_size` bytes, rounded up)
+
+Shared buffers allocate:
+- 1 page (4KB) for the `struct shared_buffer` descriptor
+- M pages for the backing memory (size rounded up to 2MB)
+
+### Blocking Implementation
+
+When a task blocks on send (queue full) or recv (queue empty):
+
+1. Task is added to the queue's wait list (`send_waiters` or `recv_waiters`)
+2. Task state is set to `TASK_BLOCKED`
+3. Task yields, and scheduler skips it until woken
+
+When space/message becomes available:
+1. `wake_one()` removes first task from wait list
+2. Task state is set to `TASK_READY`
+3. Task is added back to scheduler run queue
+
+### Current Limitations
+
+1. **No timeout support** — `timeout_ms > 0` currently behaves like `MSG_WAIT_FOREVER`. Timer integration needed.
+2. **Kernel address space only** — All tasks share kernel mappings. Phase 3 will add per-task user space.
+3. **No priority inheritance** — Blocking can cause priority inversion.
+4. **2MB minimum for shared buffers** — Smaller allocations are rounded up.
+
+---
+
+## Configuration
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `MSG_SIZE_DEFAULT` | 64 | Default message size in bytes |
+| `MSG_QUEUE_MAX` | 32 | Maximum number of queues |
+| `SHM_BUFFER_MAX` | 64 | Maximum number of shared buffers |
+| `SHM_MAPPING_MAX` | 16 | Maximum mappings per buffer |
+
+---
+
+## Future Enhancements
+
+### Phase 3
+- Timeout support for blocking operations
+- Per-task user address space with separate mappings
+- Priority-based message queues
+
+### Phase 4+
+- GPU buffer sharing (`SHM_GPU_ACCESSIBLE` fully implemented)
+- DMA-friendly buffer allocation
+- Message queue statistics and monitoring
+
+---
+
+*Created: December 2025*
+*Last updated: December 2025*

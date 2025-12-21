@@ -68,9 +68,7 @@ set(KERNEL_SOURCES
     kernel/src/smp_boot.S
 
     # IPC
-    # kernel/ipc/message.c
-    # kernel/ipc/shared_buffer.c
-    # kernel/ipc/queue.c
+    kernel/src/ipc.c
 
     # GPU integration
     # kernel/gpu/jetson_gpu.c
