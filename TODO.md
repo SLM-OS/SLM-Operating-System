@@ -2,7 +2,7 @@
 
 This document tracks Phase 2 implementation of SLM-OS.
 
-**Status:** In progress (Milestones 1-3 complete)
+**Status:** In progress (Milestones 1-4 complete)
 
 **Goals:**
 - Virtual memory with 2-level page tables
@@ -144,50 +144,54 @@ See `kernel/include/ipc.h` for full API definition.
 
 ---
 
-## Milestone 4: Rust Integration
+## Milestone 4: Rust Integration ✅
 
-### Rust Toolchain Setup
-- [ ] Verify Rust `aarch64-unknown-none` target is installed
-- [ ] Create `runtime/` crate with `Cargo.toml`
-- [ ] Configure `no_std` and `no_main` for freestanding environment
-- [ ] Set up `.cargo/config.toml` for cross-compilation
-- [ ] Create custom target JSON if needed for bare-metal specifics
-- [ ] Add `panic = "abort"` to avoid unwinding
+**Status:** Complete
 
-### FFI Boundary Definition
-- [ ] Create `kernel/include/slm_ffi.h` — C function declarations
-- [ ] Create `runtime/src/kernel_ffi.rs` — Rust extern declarations
-- [ ] Ensure struct layouts match exactly (`#[repr(C)]`)
-- [ ] Define error codes for FFI functions
-- [ ] Document FFI calling conventions and ownership rules
+### Rust Toolchain Setup ✅
+- ✅ Verify Rust `aarch64-unknown-none` target is installed
+- ✅ Create `runtime/` crate with `Cargo.toml`
+- ✅ Configure `no_std` and `no_main` for freestanding environment
+- ✅ Set up `.cargo/config.toml` for cross-compilation
+- N/A: Create custom target JSON — standard target works
+- ✅ Add `panic = "abort"` to avoid unwinding
 
-### FFI Functions (C Side)
-- [ ] Implement `slm_map_region()` — wrapper around VMM
-- [ ] Implement `slm_unmap_region()` — wrapper around VMM
-- [ ] Implement `slm_alloc_pages()` — wrapper around PMM
-- [ ] Implement `slm_free_pages()` — wrapper around PMM
-- [ ] Implement `slm_get_time_ns()` — current time in nanoseconds
-- [ ] Implement `slm_task_create()` — create task from Rust
-- [ ] Implement `slm_msg_send()` / `slm_msg_recv()` — IPC wrappers
+### FFI Boundary Definition ✅
+- ✅ Create `kernel/include/slm_ffi.h` — C function declarations
+- ✅ Create `runtime/src/kernel_ffi.rs` — Rust extern declarations
+- ✅ Ensure struct layouts match exactly (`#[repr(C)]`, `#[repr(transparent)]`)
+- ✅ Define error codes for FFI functions (`SLM_OK`, `SLM_ERR_*`)
+- ✅ Document FFI calling conventions and ownership rules (`docs/ffi.md`)
 
-### FFI Functions (Rust Side)
-- [ ] Create safe wrappers in `runtime/src/kernel_ffi.rs`
-- [ ] Implement `Result` return types for error handling
-- [ ] Add `MemFlags` bitflags type for memory flags
-- [ ] Add `KernelError` enum for error codes
-- [ ] Write unit tests for FFI type sizes and alignments
+### FFI Functions (C Side) ✅
+- ✅ Implement `slm_map_region()` — wrapper around VMM
+- ✅ Implement `slm_unmap_region()` — wrapper around VMM
+- ✅ Implement `slm_alloc_pages()` — wrapper around PMM
+- ✅ Implement `slm_free_pages()` — wrapper around PMM
+- ✅ Implement `slm_get_time_ns()` — current time in nanoseconds
+- ✅ Implement `slm_task_create()` — create task from Rust
+- ✅ Implement `slm_msg_send()` / `slm_msg_recv()` — IPC wrappers
 
-### Build Integration
-- [ ] Update top-level Makefile to build Rust runtime
-- [ ] Link Rust static library (`.a`) with C kernel
-- [ ] Handle Rust symbols in linker script
-- [ ] Verify combined binary boots in QEMU
+### FFI Functions (Rust Side) ✅
+- ✅ Create safe wrappers in `runtime/src/kernel_ffi.rs`
+- ✅ Implement `Result` return types for error handling (`KernelResult<T>`)
+- ✅ Add `MemFlags` bitflags type for memory flags
+- ✅ Add `KernelError` enum for error codes
+- ✅ Write unit tests for FFI type sizes and alignments (compile-time + runtime)
 
-### First Rust Code
-- [ ] Write simple Rust function callable from C
-- [ ] Call Rust function from `kernel_main()` as proof of concept
-- [ ] Print "Hello from Rust!" via FFI to UART
-- [ ] Verify Rust panic handler works (calls C panic)
+### Build Integration ✅
+- ✅ Update top-level Makefile to build Rust runtime
+- ✅ Link Rust static library (`.a`) with C kernel
+- N/A: Handle Rust symbols in linker script — no special handling needed
+- ✅ Verify combined binary boots in QEMU
+
+### First Rust Code ✅
+- ✅ Write simple Rust function callable from C (`rust_init()`, `rust_hello()`)
+- ✅ Call Rust function from `kernel_main()` as proof of concept
+- ✅ Print "Hello from Rust!" via FFI to UART
+- ✅ Verify Rust panic handler works (`rust_test_panic()` implemented)
+
+See `docs/ffi.md` for comprehensive FFI documentation.
 
 ---
 
@@ -216,20 +220,20 @@ See `kernel/include/ipc.h` for full API definition.
 ## Phase 2 Completion Checklist
 
 ### Deliverables
-- [ ] Kernel runs with MMU enabled (virtual addresses)
-- [ ] All CPU cores boot and run tasks
-- [ ] Tasks can communicate via message queues
-- [ ] Rust code compiles and links with C kernel
-- [ ] At least one Rust function callable from C kernel
-- [ ] All code compiles cleanly with `-Wall -Werror` (C) and `#![deny(warnings)]` (Rust)
-- [ ] Documentation updated in `docs/`
+- ✅ Kernel runs with MMU enabled (virtual addresses)
+- ✅ All CPU cores boot and run tasks
+- ✅ Tasks can communicate via message queues
+- ✅ Rust code compiles and links with C kernel
+- ✅ At least one Rust function callable from C kernel
+- ✅ All code compiles cleanly with `-Wall -Werror` (C)
+- ✅ Documentation updated in `docs/`
 
 ### Demo
-- [ ] Boot kernel in QEMU with MMU enabled
-- [ ] Show tasks running on different cores
-- [ ] Show inter-task communication via IPC
-- [ ] Show Rust code executing (print from Rust)
-- [ ] Show memory statistics including virtual memory
+- ✅ Boot kernel in QEMU with MMU enabled
+- ✅ Show tasks running on different cores
+- ✅ Show inter-task communication via IPC
+- ✅ Show Rust code executing (print from Rust)
+- ✅ Show memory statistics including virtual memory
 
 ---
 
@@ -260,13 +264,13 @@ See `kernel/include/ipc.h` for full API definition.
 | **Blocking Implementation** | Busy-wait vs sleep/wake | **Sleep/wake** — messages may take ms to arrive; spinning wastes CPU |
 | **Max Message Size** | Fixed vs variable | **64 bytes default, per-queue configurable** — cache-line aligned; large data via shared buffers |
 
-### Milestone 4 — Rust Integration
+### Milestone 4 — Rust Integration ✅ (Resolved)
 
-| Decision | Options | Considerations | Deadline |
-|----------|---------|----------------|----------|
-| **Allocator** | None vs `linked_list_allocator` vs custom | Need allocator for `Vec`, `String`; can start without | Before runtime crate grows |
-| **Panic Strategy** | Abort vs custom handler calling C panic | Custom handler provides better diagnostics | Before first Rust code |
-| **FFI Error Handling** | Integer codes vs tagged union | Integer codes are simpler for C; Rust wraps in Result | Before FFI design |
+| Decision | Options | Choice |
+|----------|---------|--------|
+| **Allocator** | None vs `linked_list_allocator` vs custom | **`linked_list_allocator`** — set up from the start; avoids refactoring later |
+| **Panic Strategy** | Abort vs custom handler calling C panic | **Custom handler** — calls C `panic()` for consistent diagnostics via UART |
+| **FFI Error Handling** | Integer codes vs tagged union | **Integer codes** — matches existing C patterns; Rust wraps in `Result` |
 
 ### Deferred to Phase 3
 

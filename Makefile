@@ -35,7 +35,8 @@ KERNEL_BIN := $(KERNEL_BUILD_DIR)/slmos.bin
 # ============================================================================
 
 .PHONY: all
-all: kernel runtime
+all: kernel
+# Note: runtime is built as a dependency of kernel
 
 # ============================================================================
 # Kernel (C) targets
@@ -57,7 +58,7 @@ check-build-dir:
 	fi
 
 .PHONY: kernel
-kernel: check-build-dir $(KERNEL_BUILD_DIR)/Makefile
+kernel: check-build-dir runtime $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
@@ -179,12 +180,14 @@ test: kernel
 	elif grep -F "VMM tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
 	     grep -F "Spinlock tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
 	     grep -F "SMP tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
+	     grep -F "IPC tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
+	     grep -F "FFI tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
 	     grep -F "Scheduler tests passed" $(TEST_OUTPUT) > /dev/null 2>&1; then \
 		echo "PASSED - All tests passed"; \
 		grep -F "tests passed" $(TEST_OUTPUT) || true; \
 	else \
 		echo "UNKNOWN - Could not determine test status"; \
-		echo "Expected: VMM, Spinlock, SMP, and Scheduler tests passed"; \
+		echo "Expected: VMM, Spinlock, SMP, IPC, FFI, and Scheduler tests passed"; \
 		echo "Check $(TEST_OUTPUT) for details"; \
 		exit 1; \
 	fi

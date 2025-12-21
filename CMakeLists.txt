@@ -30,6 +30,15 @@ set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 # Linker script
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel.ld)
 
+# Rust runtime library
+# Built by `make runtime` before `make kernel`
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/runtime/target/aarch64-unknown-none/release)
+else()
+    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/runtime/target/aarch64-unknown-none/debug)
+endif()
+set(RUST_LIB ${RUST_LIB_DIR}/libslm_runtime.a)
+
 # Kernel source files
 set(KERNEL_SOURCES
     # Boot and core
@@ -70,6 +79,9 @@ set(KERNEL_SOURCES
     # IPC
     kernel/src/ipc.c
 
+    # FFI (C/Rust interface)
+    kernel/src/slm_ffi.c
+
     # GPU integration
     # kernel/gpu/jetson_gpu.c
     # kernel/gpu/memory_map.c
@@ -83,6 +95,15 @@ set(KERNEL_INCLUDES
 # Build kernel ELF
 add_executable(slmos.elf ${KERNEL_SOURCES})
 target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
+
+# Link with Rust runtime (if it exists)
+if(EXISTS ${RUST_LIB})
+    target_link_libraries(slmos.elf PRIVATE ${RUST_LIB})
+    message(STATUS "  Rust lib:   ${RUST_LIB}")
+else()
+    message(STATUS "  Rust lib:   (not built yet - run 'make runtime' first)")
+endif()
+
 target_link_options(slmos.elf PRIVATE
     -T${LINKER_SCRIPT}
     -nostdlib

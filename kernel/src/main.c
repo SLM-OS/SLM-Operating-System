@@ -14,6 +14,7 @@
 #include "smp.h"        /* For cpu_id() and cpu_count */
 #include "spinlock.h"
 #include "ipc.h"
+#include "slm_ffi.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -459,6 +460,9 @@ static void main_task_func(void *arg)
     /* Run IPC tests first (single-threaded tests) */
     test_errors += ipc_run_tests();
 
+    /* Run Rust FFI tests */
+    test_errors += rust_run_tests();
+
     /* Run all scheduler tests */
     test_multicore_basic();
     test_task_migration();
@@ -545,6 +549,27 @@ void kernel_main(void)
 
     /* Initialize IPC subsystem */
     ipc_init();
+
+    /* Initialize Rust runtime */
+    INFO("Initializing Rust runtime...");
+
+    /* Allocate heap for Rust (1MB = 256 pages) */
+    void *rust_heap = pmm_alloc_pages(256);
+    if (!rust_heap) {
+        panic("Failed to allocate Rust heap");
+    }
+    rust_heap_init(rust_heap, 256 * 4096);
+    INFO("  Rust heap: %p (%u KB)", rust_heap, (256 * 4096) / 1024);
+
+    /* Call Rust init and verify */
+    int magic = rust_init();
+    if (magic != 42) {
+        panic("Rust init failed (expected 42, got %d)", magic);
+    }
+    INFO("  Rust init: OK (magic=%d)", magic);
+
+    /* Say hello from Rust */
+    rust_hello();
 
     /* Create main task */
     struct task *main_task = task_create("main", main_task_func, NULL);

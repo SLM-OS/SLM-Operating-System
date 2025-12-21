@@ -2,16 +2,20 @@
 name = "slm-runtime"
 version = "0.1.0"
 edition = "2021"
-description = "SLM-OS Runtime Environment"
 authors = ["SLM-OS Team"]
+description = "Rust runtime for SLM-OS kernel"
 
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["staticlib"]  # Produces .a file for linking with C
+
+[dependencies]
+linked_list_allocator = "0.10"
+bitflags = { version = "2.4", default-features = false }
 
 [profile.dev]
 panic = "abort"
 
 [profile.release]
 panic = "abort"
-lto = true
-opt-level = "z"
+lto = true          # Link-time optimization for smaller binary
+opt-level = "z"     # Optimize for size

@@ -31,6 +31,7 @@ PASSED - All tests passed
 [INFO] Spinlock tests passed
 [INFO] SMP tests passed
 [INFO] IPC tests passed
+[INFO] FFI tests passed
 [INFO] Scheduler tests passed
 ```
 
@@ -136,6 +137,34 @@ Validates message queues and shared buffers:
 
 Tests run from `ipc_run_tests()` called at the start of the main task, before scheduler tests.
 
+### FFI Tests (`runtime/src/lib.rs`)
+
+Validates the Rust/C FFI boundary by exercising all FFI functions from the Rust side:
+
+| Test | Description |
+|------|-------------|
+| alloc_pages/free_pages | Allocate 1 page via FFI, free it |
+| alloc_pages (4 pages) | Allocate multiple pages, free them |
+| slm_print | Print via FFI (verified by output appearing) |
+| get_time_ns | Call time function without crash |
+| slm_task_create | Create task with Rust entry function |
+| msg_send | Send message to test queue |
+| msg_recv | Receive message, verify content matches |
+
+**Test Implementation Details:**
+
+- Tests run from `rust_run_tests()` called from C after IPC tests
+- Uses `slm_ffi_get_test_queue()` to get a message queue for IPC testing
+- Task creation test spawns a real task with a Rust `extern "C"` entry point
+- FFI type validation runs during `rust_init()` before these tests
+
+**Additional Validation:**
+
+The Rust runtime also validates FFI types at two levels:
+
+1. **Compile-time**: `const _: () = { assert!(...) }` blocks verify type sizes
+2. **Runtime**: `rust_ffi_validate()` verifies error codes and flag values match C
+
 ---
 
 ## Writing New Tests
@@ -158,13 +187,29 @@ Follow the pattern in `vmm_run_tests()`:
 }
 ```
 
-### Creating New Test Suites
+### Creating New Test Suites (C)
 
 1. Create a test function: `static int <subsystem>_run_tests(void)`
 2. Use `[PASS]`/`[FAIL]` markers for individual tests
 3. Print `[INFO] <name> tests passed` on success
 4. Call from the subsystem's init function or main
 5. Update this document
+
+### Adding FFI Tests (Rust)
+
+Add tests to `rust_run_tests()` in `runtime/src/lib.rs`:
+
+```rust
+// Test N: Description
+{
+    let result = /* call FFI function */;
+    let passed = /* verify result */;
+    print_test_result(b"test name\0", passed);
+    if !passed { failures += 1; }
+}
+```
+
+Use the `print_test_result()` helper to maintain consistent output format.
 
 ---
 

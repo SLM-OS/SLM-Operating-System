@@ -1,5 +1,14 @@
+# Cargo configuration for SLM-OS Rust runtime
+
 [build]
 target = "aarch64-unknown-none"
 
 [target.aarch64-unknown-none]
-rustflags = ["-C", "link-arg=-nostartfiles"]
+# Use the ARM cross-linker (same as C kernel)
+linker = "aarch64-none-elf-gcc"
+
+# Rust flags for bare-metal
+rustflags = [
+    "-C", "link-arg=-nostdlib",      # No standard library
+    "-C", "link-arg=-static",         # Static linking
+]

@@ -17,6 +17,27 @@ This document describes how to build, run, and debug SLM-OS.
 | `aarch64-none-elf-gdb` | Debugger | Included with ARM GNU Toolchain |
 | `cargo` | Rust build tool (Phase 2+) | [rustup.rs](https://rustup.rs/) |
 
+### Rust Setup
+
+Rust is required for the runtime component. Install via rustup:
+
+**Windows:**
+```
+Download and run: https://win.rustup.rs/x86_64
+```
+
+**After installation, add the bare-metal target:**
+```bash
+rustup target add aarch64-unknown-none
+```
+
+**For Cygwin/Git Bash users:** Add cargo to PATH in `~/.bash_profile`:
+```bash
+export PATH="/c/Users/<username>/.cargo/bin:$PATH"
+```
+
+Then `source ~/.bash_profile` to apply.
+
 ### Verify Installation
 
 ```bash
@@ -33,6 +54,12 @@ Checking required tools...
   [OK] aarch64-none-elf-gdb
 ```
 
+Verify Rust target:
+```bash
+rustup target list --installed | grep aarch64
+# Should show: aarch64-unknown-none
+```
+
 ---
 
 ## Build Targets
@@ -43,11 +70,16 @@ Checking required tools...
 |---------|-------------|
 | `make` | Build kernel and runtime (default) |
 | `make kernel` | Build C kernel only |
+| `make runtime` | Build Rust runtime only |
 | `make run` | Build and run in QEMU |
 | `make test` | Build and run automated tests |
 | `make debug` | Build and run with GDB server |
 | `make gdb` | Connect GDB to running QEMU |
 | `make clean` | Remove all build artifacts |
+| `make kernel-clean` | Remove kernel build artifacts |
+| `make runtime-clean` | Remove runtime build artifacts |
+| `make kernel-rebuild` | Clean and rebuild kernel |
+| `make runtime-rebuild` | Clean and rebuild runtime |
 | `make help` | Show all available targets |
 
 ### Build Targets
@@ -63,7 +95,13 @@ Output:
 - `build/kernel/slmos.bin` - Raw binary (for real hardware)
 
 #### `make runtime`
-Builds the Rust runtime component (Phase 2+). Currently a placeholder.
+Builds the Rust runtime component. This produces a static library that is linked with the C kernel.
+
+Output:
+- `runtime/target/aarch64-unknown-none/debug/libslm_runtime.a` - Debug build
+- `runtime/target/aarch64-unknown-none/release/libslm_runtime.a` - Release build
+
+Note: `make kernel` automatically builds the runtime first, so explicit `make runtime` is rarely needed.
 
 ### Clean Targets
 
@@ -147,6 +185,90 @@ aarch64-none-elf-gdb build/kernel/slmos.elf \
 | `info registers` | Show all registers |
 | `x/10i $pc` | Disassemble 10 instructions at PC |
 | `x/10x $sp` | Examine 10 words at stack pointer |
+
+---
+
+## Rust Runtime
+
+The Rust runtime provides higher-level components that link with the C kernel.
+
+### Building the Runtime
+
+```bash
+# Build runtime only (debug)
+make runtime
+
+# Build runtime only (release, with LTO)
+make BUILD_TYPE=Release runtime
+
+# Clean runtime build
+make runtime-clean
+
+# Clean and rebuild runtime
+make runtime-rebuild
+```
+
+Note: `make kernel` automatically builds the runtime first, so explicit `make runtime` is rarely needed.
+
+### Direct Cargo Build
+
+Build directly with Cargo (useful for IDE integration):
+
+```bash
+cd runtime
+cargo build                    # Debug build
+cargo build --release          # Release build
+```
+
+### Build Output
+
+| Build Type | Output Path |
+|------------|-------------|
+| Debug | `runtime/target/aarch64-unknown-none/debug/libslm_runtime.a` |
+| Release | `runtime/target/aarch64-unknown-none/release/libslm_runtime.a` |
+
+### Runtime Structure
+
+```
+runtime/
+├── Cargo.toml              # Crate configuration
+├── .cargo/
+│   └── config.toml         # Cross-compilation settings
+└── src/
+    ├── lib.rs              # Entry points (rust_init, rust_hello)
+    └── kernel_ffi.rs       # FFI declarations and safe wrappers
+```
+
+### Dependencies
+
+| Crate | Purpose |
+|-------|---------|
+| `linked_list_allocator` | Heap allocator for `no_std` |
+| `bitflags` | Type-safe flag enums |
+
+### Troubleshooting Rust Builds
+
+**Target not installed:**
+```bash
+rustup target add aarch64-unknown-none
+```
+
+**Cargo not found (Cygwin/Git Bash):**
+Add to `~/.bash_profile`:
+```bash
+export PATH="/c/Users/<username>/.cargo/bin:$PATH"
+```
+
+**Build fails with linker error:**
+Ensure ARM GNU Toolchain is in PATH (provides `aarch64-none-elf-gcc` linker).
+
+**Hard link warning on Google Drive:**
+```
+warning: hard linking files in the incremental compilation cache failed
+```
+This is harmless - Cargo falls back to copying. Can be ignored.
+
+---
 
 ### Utility Targets
 
@@ -292,14 +414,23 @@ CS-496-SLM-Operating-System/
 ├── kernel/
 │   ├── kernel.ld            # Linker script
 │   ├── include/             # Header files
+│   │   └── slm_ffi.h        # FFI declarations for Rust
 │   ├── src/                 # C and assembly sources
+│   │   └── slm_ffi.c        # FFI implementations
 │   └── drivers/             # Hardware drivers
-├── runtime/                 # Rust runtime (Phase 2+)
+├── runtime/                 # Rust runtime
+│   ├── Cargo.toml           # Rust crate configuration
+│   ├── .cargo/
+│   │   └── config.toml      # Cross-compilation settings
+│   └── src/
+│       ├── lib.rs           # Runtime entry points
+│       └── kernel_ffi.rs    # Rust FFI bindings
 ├── build/                   # Build output (generated)
 │   └── kernel/
 │       ├── slmos.elf        # Kernel ELF
 │       └── slmos.bin        # Raw binary
 └── docs/                    # Documentation
+    └── ffi.md               # FFI documentation
 ```
 
 ---
