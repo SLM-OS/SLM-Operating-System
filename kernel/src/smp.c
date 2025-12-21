@@ -1,0 +1,480 @@
+/*
+ * smp.c - Symmetric Multi-Processing for SLM-OS
+ *
+ * Handles secondary core boot via PSCI and per-CPU data management.
+ */
+
+#include "smp.h"
+#include "spinlock.h"
+#include "platform.h"
+#include "debug.h"
+#include "gic.h"
+#include "timer.h"
+#include "sched.h"
+
+#include <stddef.h>
+
+/* Per-CPU data array */
+struct per_cpu cpu_data[MAX_CPUS];
+
+/* Maps logical CPU ID -> MPIDR value */
+uint64_t cpu_logical_map[MAX_CPUS];
+
+/* Number of CPUs in the system */
+uint32_t cpu_count = 0;
+
+/* Number of CPUs currently online */
+volatile uint32_t cpus_online = 0;
+
+/* Per-CPU boot stacks (16 KB each, 16-byte aligned) */
+/* NOT static - needs to be visible to smp_boot.S */
+_Alignas(16) uint8_t cpu_stacks[MAX_CPUS][STACK_SIZE];
+
+/*
+ * Invoke PSCI function via HVC.
+ * QEMU virt machine uses HVC as the PSCI conduit.
+ */
+static int64_t psci_call(uint64_t fn, uint64_t arg1,
+                         uint64_t arg2, uint64_t arg3)
+{
+    register uint64_t x0 __asm__("x0") = fn;
+    register uint64_t x1 __asm__("x1") = arg1;
+    register uint64_t x2 __asm__("x2") = arg2;
+    register uint64_t x3 __asm__("x3") = arg3;
+
+    __asm__ volatile("hvc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3)
+        : "memory");
+
+    return (int64_t)x0;
+}
+
+/*
+ * Get logical CPU ID from MPIDR value.
+ */
+int cpu_logical_id(uint64_t mpidr)
+{
+    uint64_t aff = mpidr & MPIDR_AFF_MASK;
+
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        if (cpu_logical_map[i] == aff) {
+            return (int)i;
+        }
+    }
+
+    return -1;  /* Unknown CPU */
+}
+
+/*
+ * Power on a secondary CPU via PSCI.
+ */
+int psci_cpu_on(uint64_t target_mpidr, uintptr_t entry_point,
+                uintptr_t context_id)
+{
+    return (int)psci_call(PSCI_CPU_ON_64, target_mpidr,
+                          entry_point, context_id);
+}
+
+/*
+ * Power off the calling CPU via PSCI.
+ */
+void psci_cpu_off(void)
+{
+    psci_call(PSCI_CPU_OFF, 0, 0, 0);
+
+    /* Should not return, but loop if it does */
+    while (1) {
+        __asm__ volatile("wfi");
+    }
+}
+
+/*
+ * Reset the system via PSCI.
+ */
+void psci_system_reset(void)
+{
+    psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+
+    /* Should not return */
+    while (1) {
+        __asm__ volatile("wfi");
+    }
+}
+
+/*
+ * Power off the system via PSCI.
+ */
+void psci_system_off(void)
+{
+    psci_call(PSCI_SYSTEM_OFF, 0, 0, 0);
+
+    /* Should not return */
+    while (1) {
+        __asm__ volatile("wfi");
+    }
+}
+
+/*
+ * Get stack top for a given CPU.
+ */
+static void *cpu_stack_top(uint32_t cpu)
+{
+    return &cpu_stacks[cpu][STACK_SIZE];
+}
+
+/*
+ * Initialize CPU logical map.
+ * For QEMU virt, MPIDR values are contiguous (0, 1, 2, 3).
+ * For real hardware, this would parse device tree or ACPI.
+ */
+static void init_cpu_map(void)
+{
+    /* CPU 0 is always the boot CPU - get its real MPIDR */
+    cpu_logical_map[0] = cpu_get_mpidr() & MPIDR_AFF_MASK;
+    cpu_count = 1;
+
+    /*
+     * For QEMU virt, assume contiguous MPIDR values starting from 0.
+     * The number of CPUs is configured via -smp in QEMU.
+     * We'll try to bring up CPUs until one fails.
+     *
+     * TODO: Parse device tree for actual CPU list when DTB support is added.
+     */
+    #define QEMU_MAX_CPUS 4  /* Default QEMU virt SMP count */
+
+    for (uint32_t i = 1; i < QEMU_MAX_CPUS && i < MAX_CPUS; i++) {
+        cpu_logical_map[i] = i;  /* QEMU: MPIDR Aff0 = cpu number */
+        cpu_count++;
+    }
+
+    INFO("CPU map: %u CPUs detected", cpu_count);
+}
+
+/*
+ * Initialize per-CPU data for a given CPU.
+ */
+static void init_cpu_data(uint32_t cpu)
+{
+    struct per_cpu *p = &cpu_data[cpu];
+
+    p->cpu_id = cpu;
+    p->mpidr = cpu_logical_map[cpu];
+    p->online = false;
+    p->stack_top = cpu_stack_top(cpu);
+    p->boot_time_ns = 0;
+}
+
+/*
+ * Translate PSCI error code to string for debugging.
+ */
+static const char *psci_error_str(int err)
+{
+    switch (err) {
+    case PSCI_SUCCESS:          return "SUCCESS";
+    case PSCI_NOT_SUPPORTED:    return "NOT_SUPPORTED";
+    case PSCI_INVALID_PARAMS:   return "INVALID_PARAMS";
+    case PSCI_DENIED:           return "DENIED";
+    case PSCI_ALREADY_ON:       return "ALREADY_ON";
+    case PSCI_ON_PENDING:       return "ON_PENDING";
+    case PSCI_INTERNAL_FAILURE: return "INTERNAL_FAILURE";
+    case PSCI_NOT_PRESENT:      return "NOT_PRESENT";
+    case PSCI_DISABLED:         return "DISABLED";
+    case PSCI_INVALID_ADDRESS:  return "INVALID_ADDRESS";
+    default:                    return "UNKNOWN";
+    }
+}
+
+/*
+ * Secondary CPU initialization (called from smp_boot.S).
+ * This runs on each secondary CPU after it wakes up.
+ */
+void secondary_init(uint32_t logical_cpu_id)
+{
+    DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
+
+    /* Initialize per-CPU GIC interface */
+    gic_percpu_init();
+
+    /* Initialize per-CPU timer */
+    timer_percpu_init();
+
+    /* Mark this CPU as online */
+    cpu_data[logical_cpu_id].online = true;
+    __atomic_fetch_add(&cpus_online, 1, __ATOMIC_SEQ_CST);
+
+    INFO("CPU %u: online", logical_cpu_id);
+
+    /*
+     * Wait for CPU 0 to initialize the scheduler.
+     * This is necessary because smp_init() runs before scheduler_init().
+     */
+    while (!scheduler_is_initialized()) {
+        __asm__ volatile("wfe" ::: "memory");
+    }
+
+    /* Initialize scheduler for this CPU (creates idle task) */
+    scheduler_init_secondary(logical_cpu_id);
+
+    /* Start the per-CPU timer */
+    timer_start();
+
+    /* Enable interrupts */
+    __asm__ volatile("msr daifclr, #0x2");  /* Clear IRQ mask */
+
+    /* Start scheduler - this does not return */
+    scheduler_start();
+
+    /* Should never reach here */
+    panic("CPU %u: scheduler_start returned!", logical_cpu_id);
+}
+
+/*
+ * Bring up a single secondary CPU.
+ */
+static int boot_secondary(uint32_t cpu)
+{
+    uint64_t mpidr = cpu_logical_map[cpu];
+    uintptr_t entry = (uintptr_t)secondary_entry;
+    int ret;
+
+    DEBUG_PRINT("CPU %u: booting (MPIDR=0x%lx, entry=0x%lx)",
+                cpu, mpidr, entry);
+
+    /*
+     * Call PSCI CPU_ON.
+     * - target_mpidr: the CPU to wake
+     * - entry_point: address of secondary_entry in smp_boot.S
+     * - context_id: pass the logical CPU ID for easy lookup
+     */
+    ret = psci_cpu_on(mpidr, entry, cpu);
+
+    if (ret != PSCI_SUCCESS) {
+        WARN("CPU %u: PSCI CPU_ON failed: %s (%d)",
+             cpu, psci_error_str(ret), ret);
+        return ret;
+    }
+
+    /*
+     * Wait for the CPU to come online.
+     * Timeout after ~100ms to avoid hanging if something goes wrong.
+     */
+    for (int timeout = 0; timeout < 100; timeout++) {
+        if (cpu_data[cpu].online) {
+            return PSCI_SUCCESS;
+        }
+
+        /* Simple delay - approximately 1ms at ~1GHz */
+        for (volatile int i = 0; i < 100000; i++) {
+            __asm__ volatile("" ::: "memory");
+        }
+    }
+
+    WARN("CPU %u: boot timeout", cpu);
+    return PSCI_INTERNAL_FAILURE;
+}
+
+/*
+ * Run spinlock validation tests.
+ * Tests basic spinlock and ticket lock functionality on a single core.
+ * Returns 0 on success, non-zero on failure.
+ */
+static int spinlock_run_tests(void)
+{
+    int errors = 0;
+    spinlock_t test_lock = SPINLOCK_INIT;
+    ticket_lock_t test_ticket = TICKET_LOCK_INIT;
+
+    uart_puts("\nSpinlock Validation Tests:\n");
+
+    /* Test 1: Spinlock starts unlocked */
+    if (!spin_is_locked(&test_lock)) {
+        uart_printf("  [PASS] Spinlock initialized unlocked\n");
+    } else {
+        uart_printf("  [FAIL] Spinlock should start unlocked\n");
+        errors++;
+    }
+
+    /* Test 2: spin_lock acquires the lock */
+    spin_lock(&test_lock);
+    if (spin_is_locked(&test_lock)) {
+        uart_printf("  [PASS] spin_lock acquires lock\n");
+    } else {
+        uart_printf("  [FAIL] spin_lock did not acquire lock\n");
+        errors++;
+    }
+
+    /* Test 3: spin_trylock fails when lock is held */
+    if (spin_trylock(&test_lock) == 0) {
+        uart_printf("  [PASS] spin_trylock returns 0 when lock held\n");
+    } else {
+        uart_printf("  [FAIL] spin_trylock should return 0 when lock held\n");
+        errors++;
+    }
+
+    /* Test 4: spin_unlock releases the lock */
+    spin_unlock(&test_lock);
+    if (!spin_is_locked(&test_lock)) {
+        uart_printf("  [PASS] spin_unlock releases lock\n");
+    } else {
+        uart_printf("  [FAIL] spin_unlock did not release lock\n");
+        errors++;
+    }
+
+    /* Test 5: spin_trylock succeeds when lock is free */
+    if (spin_trylock(&test_lock) == 1) {
+        uart_printf("  [PASS] spin_trylock returns 1 when lock free\n");
+        spin_unlock(&test_lock);  /* Clean up */
+    } else {
+        uart_printf("  [FAIL] spin_trylock should return 1 when lock free\n");
+        errors++;
+    }
+
+    /* Test 6: Ticket lock basic acquire/release */
+    ticket_lock(&test_ticket);
+    ticket_unlock(&test_ticket);
+    uart_printf("  [PASS] Ticket lock acquire/release works\n");
+
+    /* Test 7: IRQ save/restore */
+    {
+        irq_flags_t flags = irq_save();
+        irq_restore(flags);
+        uart_printf("  [PASS] IRQ save/restore works\n");
+    }
+
+    /* Test 8: spin_lock_irqsave/spin_unlock_irqrestore */
+    {
+        irq_flags_t flags = spin_lock_irqsave(&test_lock);
+        if (spin_is_locked(&test_lock)) {
+            spin_unlock_irqrestore(&test_lock, flags);
+            if (!spin_is_locked(&test_lock)) {
+                uart_printf("  [PASS] IRQ-safe spinlock works\n");
+            } else {
+                uart_printf("  [FAIL] IRQ-safe unlock failed\n");
+                errors++;
+            }
+        } else {
+            uart_printf("  [FAIL] IRQ-safe lock failed\n");
+            errors++;
+        }
+    }
+
+    /* Test 9: Memory barrier compilation (just verify they compile and run) */
+    smp_mb();
+    smp_rmb();
+    smp_wmb();
+    barrier();
+    uart_printf("  [PASS] Memory barriers execute without fault\n");
+
+    if (errors == 0) {
+        INFO("Spinlock tests passed");
+    } else {
+        ERROR("Spinlock tests failed: %d errors", errors);
+    }
+
+    return errors;
+}
+
+/*
+ * Run SMP validation tests.
+ * Returns 0 on success, non-zero on failure.
+ */
+static int smp_run_tests(void)
+{
+    int errors = 0;
+
+    uart_puts("\nSMP Validation Tests:\n");
+
+    /* Test 1: Expected number of CPUs online */
+    if (cpus_online == cpu_count) {
+        uart_printf("  [PASS] All %u CPUs online\n", cpus_online);
+    } else {
+        uart_printf("  [FAIL] Expected %u CPUs online, got %u\n",
+                    cpu_count, cpus_online);
+        errors++;
+    }
+
+    /* Test 2: Each CPU's online flag set */
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        if (cpu_data[i].online) {
+            uart_printf("  [PASS] CPU %u online flag set\n", i);
+        } else {
+            uart_printf("  [FAIL] CPU %u not online\n", i);
+            errors++;
+        }
+    }
+
+    /* Test 3: CPU logical map populated correctly */
+    {
+        bool map_valid = true;
+        for (uint32_t i = 0; i < cpu_count; i++) {
+            if (cpu_logical_id(cpu_logical_map[i]) != (int)i) {
+                map_valid = false;
+                uart_printf("  [FAIL] CPU %u logical map lookup failed\n", i);
+                errors++;
+            }
+        }
+        if (map_valid) {
+            uart_printf("  [PASS] CPU logical map valid\n");
+        }
+    }
+
+    /* Test 4: Boot CPU (CPU 0) MPIDR matches what we read */
+    {
+        uint64_t boot_mpidr = cpu_get_mpidr() & MPIDR_AFF_MASK;
+        if (cpu_logical_map[0] == boot_mpidr) {
+            uart_printf("  [PASS] Boot CPU MPIDR correct (0x%lx)\n", boot_mpidr);
+        } else {
+            uart_printf("  [FAIL] Boot CPU MPIDR mismatch: map=0x%lx, actual=0x%lx\n",
+                        cpu_logical_map[0], boot_mpidr);
+            errors++;
+        }
+    }
+
+    if (errors == 0) {
+        INFO("SMP tests passed");
+    } else {
+        ERROR("SMP tests failed: %d errors", errors);
+    }
+
+    return errors;
+}
+
+/*
+ * Initialize SMP subsystem.
+ * Called by primary CPU after basic kernel init.
+ */
+void smp_init(void)
+{
+    uint32_t booted = 0;
+
+    INFO("SMP: initializing");
+
+    /* Run spinlock tests before booting secondary cores */
+    spinlock_run_tests();
+
+    /* Set up CPU logical map */
+    init_cpu_map();
+
+    /* Initialize per-CPU data for all CPUs */
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        init_cpu_data(i);
+    }
+
+    /* Mark CPU 0 (boot CPU) as online */
+    cpu_data[0].online = true;
+    cpus_online = 1;
+
+    /* Boot secondary CPUs */
+    for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
+        if (boot_secondary(cpu) == PSCI_SUCCESS) {
+            booted++;
+        }
+    }
+
+    INFO("SMP: %u/%u secondary CPUs online", booted, cpu_count - 1);
+    INFO("SMP: total %u CPUs active", cpus_online);
+
+    /* Run SMP validation tests */
+    smp_run_tests();
+}

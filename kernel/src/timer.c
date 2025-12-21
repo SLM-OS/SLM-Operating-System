@@ -154,3 +154,21 @@ uint64_t timer_get_frequency(void)
 {
     return read_cntfrq();
 }
+
+/*
+ * Per-CPU timer initialization.
+ * Called by each secondary CPU after boot.
+ * Enables the timer interrupt for this CPU but does not start the timer.
+ */
+void timer_percpu_init(void)
+{
+    /* Disable timer (will be started when scheduler runs on this core) */
+    write_cntp_ctl(0);
+
+    /*
+     * Enable timer interrupt in GIC for this CPU.
+     * PPI 30 (physical timer) is per-CPU, so each core must enable it.
+     */
+    gic_set_priority(TIMER_IRQ, GIC_PRIORITY_DEFAULT);
+    gic_enable_irq(TIMER_IRQ);
+}

@@ -323,6 +323,42 @@ Our `boot.S` implements:
 0x40000000 - ...        : RAM (kernel loaded here)
 ```
 
+### SMP Boot Sequence
+
+Secondary CPU cores are brought online via PSCI (Power State Coordination Interface):
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Primary Core (CPU 0)              Secondary Cores (CPU 1-3)        │
+├─────────────────────────────────────────────────────────────────────┤
+│  boot.S entry                      (powered off)                    │
+│  kernel_main()                                                      │
+│  ├─ pmm_init()                                                      │
+│  ├─ vmm_init() + MMU enable                                         │
+│  ├─ gic_init() (distributor)                                        │
+│  ├─ timer_init()                                                    │
+│  ├─ smp_init()                                                      │
+│  │   ├─ PSCI CPU_ON(1) ─────────► secondary_entry                   │
+│  │   │                              ├─ set SP (per-core stack)      │
+│  │   │                              ├─ gic_percpu_init()            │
+│  │   │                              ├─ timer_percpu_init()          │
+│  │   │                              └─ idle loop (WFI)              │
+│  │   ├─ PSCI CPU_ON(2) ─────────► (same)                            │
+│  │   └─ PSCI CPU_ON(3) ─────────► (same)                            │
+│  ├─ scheduler_init()                                                │
+│  └─ scheduler_start()              scheduler_start() (each core)    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+Each secondary core:
+1. Receives entry point address via PSCI `CPU_ON` call
+2. Starts executing `secondary_entry` in `smp_boot.S`
+3. Sets up its own 16KB stack from `cpu_stacks[]` array
+4. Initializes its GIC CPU interface and timer
+5. Enters the per-core scheduler, initially running its idle task
+
+See `docs/smp.md` for detailed SMP documentation.
+
 ---
 
 ## Device Tree Requirements
@@ -406,13 +442,5 @@ These addresses are used for Month 1 development:
 
 ---
 
-## Next Steps
-
-1. Write `boot.S` with entry point and stack setup
-2. Create `kernel.ld` linker script
-3. Implement minimal `kernel_main()` that prints to UART
-4. Test in QEMU
-
----
-
 *Last updated: December 2025*
+*Status: Primary boot implemented, SMP boot operational*

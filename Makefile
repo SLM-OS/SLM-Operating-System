@@ -20,7 +20,7 @@ CMAKE := "C:/Program Files/CMake/bin/cmake.exe"
 TOOLCHAIN_FILE := cmake/toolchain-aarch64-none-elf.cmake
 
 # QEMU settings
-QEMU := qemu-system-aarch64
+QEMU := "C:/Program Files/qemu/qemu-system-aarch64.exe"
 QEMU_MACHINE := virt
 QEMU_CPU := cortex-a76
 QEMU_MEMORY := 512M
@@ -41,8 +41,23 @@ all: kernel runtime
 # Kernel (C) targets
 # ============================================================================
 
+# Check for stale file locks in build directory (Windows issue with ungraceful QEMU/GDB termination)
+# If we can't create slmos.elf, nuke the directory to clear the stale lock
+.PHONY: check-build-dir
+check-build-dir:
+	@if [ -d "$(KERNEL_BUILD_DIR)" ]; then \
+		if ! touch "$(KERNEL_BUILD_DIR)/slmos.elf.test" 2>/dev/null; then \
+			echo "WARNING: Stale lock detected in $(KERNEL_BUILD_DIR)"; \
+			echo "         (Usually from ungraceful QEMU/GDB termination)"; \
+			echo "         Cleaning build directory..."; \
+			rm -rf "$(KERNEL_BUILD_DIR)"; \
+		else \
+			rm -f "$(KERNEL_BUILD_DIR)/slmos.elf.test"; \
+		fi \
+	fi
+
 .PHONY: kernel
-kernel: $(KERNEL_BUILD_DIR)/Makefile
+kernel: check-build-dir $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
@@ -130,6 +145,51 @@ gdb:
 		-ex "set confirm off"
 
 # ============================================================================
+# Test targets
+# ============================================================================
+
+# Test output file and timeout (seconds)
+TEST_OUTPUT := $(BUILD_DIR)/test-output.log
+TEST_TIMEOUT := 60
+
+.PHONY: test
+test: kernel
+	@echo "Running kernel tests (timeout: $(TEST_TIMEOUT)s)..."
+	@rm -f $(TEST_OUTPUT)
+	@$(QEMU) \
+		-machine $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
+		-smp cores=$(QEMU_CORES) \
+		-m $(QEMU_MEMORY) \
+		-nographic \
+		-kernel $(KERNEL_ELF) \
+		-no-reboot \
+		> $(TEST_OUTPUT) 2>&1 & \
+	QEMU_PID=$$!; \
+	sleep $(TEST_TIMEOUT); \
+	kill $$QEMU_PID 2>/dev/null || true; \
+	wait $$QEMU_PID 2>/dev/null || true
+	@echo ""
+	@echo "Test Results:"
+	@echo "============="
+	@if grep -F "[FAIL]" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "FAILED - Test failures detected:"; \
+		grep -F "[FAIL]" $(TEST_OUTPUT); \
+		exit 1; \
+	elif grep -F "VMM tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
+	     grep -F "Spinlock tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
+	     grep -F "SMP tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
+	     grep -F "Scheduler tests passed" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "PASSED - All tests passed"; \
+		grep -F "tests passed" $(TEST_OUTPUT) || true; \
+	else \
+		echo "UNKNOWN - Could not determine test status"; \
+		echo "Expected: VMM, Spinlock, SMP, and Scheduler tests passed"; \
+		echo "Check $(TEST_OUTPUT) for details"; \
+		exit 1; \
+	fi
+
+# ============================================================================
 # Utility targets
 # ============================================================================
 
@@ -180,6 +240,9 @@ help:
 	@echo "  run            Run kernel in QEMU"
 	@echo "  debug          Run kernel in QEMU with GDB server (terminal 1)"
 	@echo "  gdb            Connect GDB to running QEMU (terminal 2)"
+	@echo ""
+	@echo "Test targets:"
+	@echo "  test           Run kernel tests in QEMU (with timeout)"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"

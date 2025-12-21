@@ -4,6 +4,20 @@ Notes for working on the C kernel code.
 
 ---
 
+## Critical Struct Layout Rules
+
+### struct task Field Ordering
+
+**CRITICAL:** The `context` field in `struct task` MUST remain at offset 0x20. The assembly code in `context.S` has a hardcoded `TASK_CONTEXT_OFFSET = 0x20`.
+
+If you need to add new fields to `struct task`:
+- Add them AFTER the `context` field, not before
+- Or update `TASK_CONTEXT_OFFSET` in `context.S` to match
+
+If the offset is wrong, context switches will corrupt memory and cause crashes (typically instruction abort at address 0x0).
+
+---
+
 ## Assembly/C Interface
 
 ### Struct Offsets in Assembly
@@ -40,6 +54,39 @@ In bare-metal code, only these standard headers are safe (no libc required):
 | `<stdnoreturn.h>` | `noreturn` macro |
 
 **NOT safe:** `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<math.h>` — these require libc.
+
+---
+
+## C11 Strict Compliance
+
+The kernel is compiled with `-std=c11` (no GNU extensions). This means:
+
+**Use `__asm__` instead of `asm`:**
+```c
+/* Correct */
+__asm__ volatile("wfi");
+
+/* Incorrect - will not compile */
+asm volatile("wfi");
+```
+
+**Use `__asm__` for register constraints:**
+```c
+/* Correct */
+register uint64_t x0 __asm__("x0") = value;
+
+/* Incorrect */
+register uint64_t x0 asm("x0") = value;
+```
+
+**Use `_Alignas` instead of `alignas` (or include `<stdalign.h>`):**
+```c
+/* Works without stdalign.h */
+_Alignas(16) uint8_t buffer[64];
+
+/* Requires #include <stdalign.h> */
+alignas(16) uint8_t buffer[64];
+```
 
 ---
 

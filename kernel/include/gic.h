@@ -92,4 +92,11 @@ int gic_is_pending(uint32_t irq);
  */
 void gic_send_sgi(uint32_t irq, uint32_t target_cpu);
 
+/*
+ * Per-CPU GIC initialization.
+ * Called by each secondary CPU after boot.
+ * Initializes the CPU interface only (distributor is shared).
+ */
+void gic_percpu_init(void);
+
 #endif /* GIC_H */

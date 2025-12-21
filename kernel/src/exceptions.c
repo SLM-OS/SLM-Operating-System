@@ -84,8 +84,18 @@ void el1_irq_handler(void)
     /* Dispatch based on IRQ number */
     switch (irq) {
     case TIMER_IRQ:
+        /*
+         * For timer interrupt, we must signal EOI BEFORE calling the handler
+         * because timer_handler() -> scheduler_tick() -> schedule() may
+         * context switch to a different task and never return here.
+         *
+         * If we don't signal EOI before the switch, the GIC will think
+         * the interrupt is still being handled and won't deliver more
+         * timer interrupts to this CPU.
+         */
+        gic_end_interrupt(irq);
         timer_handler();
-        break;
+        return;  /* EOI already done, don't do it again */
 
     default:
         /* Unknown interrupt */

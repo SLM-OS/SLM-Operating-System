@@ -7,14 +7,19 @@
 #include "pmm.h"
 #include "uart.h"
 #include "debug.h"
+#include "smp.h"
+#include "spinlock.h"
 #include <stddef.h>
 
 /* Task table - static allocation for simplicity */
 static struct task task_table[MAX_TASKS];
 static uint32_t next_task_id = 1;       /* ID 0 reserved for idle task */
 
-/* Current running task (set by scheduler) */
-static struct task *current_task = NULL;
+/* Lock protecting task_table and next_task_id */
+static spinlock_t task_lock = SPINLOCK_INIT;
+
+/* Per-CPU current running task (set by scheduler) */
+static struct task *current_task[MAX_CPUS];
 
 /*
  * String copy helper (no libc)
@@ -48,14 +53,20 @@ static struct task *alloc_task_slot(void)
  * It calls the user's entry function and handles task exit.
  *
  * When we context-switch to a new task, x19 contains the entry point
- * and x20 contains the argument. We read these immediately before
- * the C compiler might use these callee-saved registers for other purposes.
+ * and x20 contains the argument. We use inline assembly to read these
+ * registers before the compiler can clobber them.
  */
 static void task_entry_wrapper(void)
 {
-    /* Read entry point and arg from registers (set by task_create) */
-    register uint64_t entry_reg __asm__("x19");
-    register uint64_t arg_reg __asm__("x20");
+    uint64_t entry_reg, arg_reg;
+
+    /*
+     * Read entry point and arg from callee-saved registers.
+     * These were set by task_create and restored by switch_to.
+     * We must use volatile asm to ensure the compiler actually reads the registers.
+     */
+    __asm__ volatile("mov %0, x19" : "=r"(entry_reg));
+    __asm__ volatile("mov %0, x20" : "=r"(arg_reg));
 
     task_entry_t entry = (task_entry_t)entry_reg;
     void *arg = (void *)arg_reg;
@@ -72,14 +83,11 @@ static void task_entry_wrapper(void)
  */
 struct task *task_create(const char *name, task_entry_t entry, void *arg)
 {
-    /* Find free task slot */
-    struct task *task = alloc_task_slot();
-    if (!task) {
-        ERROR("task_create: no free task slots");
-        return NULL;
-    }
+    irq_flags_t flags;
+    struct task *task;
+    uint32_t task_id;
 
-    /* Allocate stack (16KB = 4 pages) */
+    /* Allocate stack first (outside lock - pmm has its own locking) */
     size_t stack_pages = TASK_STACK_SIZE / 4096;
     void *stack = pmm_alloc_pages(stack_pages);
     if (!stack) {
@@ -87,11 +95,32 @@ struct task *task_create(const char *name, task_entry_t entry, void *arg)
         return NULL;
     }
 
-    /* Initialize task structure */
-    task->id = next_task_id++;
+    /* Acquire lock to access task_table and next_task_id */
+    flags = spin_lock_irqsave(&task_lock);
+
+    /* Find free task slot */
+    task = alloc_task_slot();
+    if (!task) {
+        spin_unlock_irqrestore(&task_lock, flags);
+        pmm_free_pages(stack, stack_pages);
+        ERROR("task_create: no free task slots");
+        return NULL;
+    }
+
+    /* Reserve task ID atomically */
+    task_id = next_task_id++;
+
+    /* Mark slot as used immediately (id != 0 means in use) */
+    task->id = task_id;
+
+    spin_unlock_irqrestore(&task_lock, flags);
+
+    /* Initialize rest of task structure (slot is ours now) */
     str_copy(task->name, name ? name : "unnamed", TASK_NAME_LEN);
     task->state = TASK_READY;
     task->next = NULL;
+    task->cpu_affinity = CPU_AFFINITY_ANY;  /* Can run on any CPU */
+    task->assigned_cpu = 0;                  /* Default to CPU 0 */
     task->switches = 0;
 
     /* Set up stack (grows downward on ARM64) */
@@ -139,11 +168,11 @@ void task_exit(void)
 }
 
 /*
- * Get current running task.
+ * Get current running task (for this CPU).
  */
 struct task *task_current(void)
 {
-    return current_task;
+    return current_task[cpu_id()];
 }
 
 /*
@@ -151,7 +180,7 @@ struct task *task_current(void)
  */
 void task_set_current(struct task *task)
 {
-    current_task = task;
+    current_task[cpu_id()] = task;
 }
 
 /*
@@ -190,4 +219,28 @@ void task_destroy(struct task *task)
     task->state = TASK_TERMINATED;
     task->stack_base = NULL;
     task->stack_top = NULL;
+}
+
+/*
+ * Set task CPU affinity.
+ */
+void task_set_affinity(struct task *task, uint32_t cpu)
+{
+    if (!task) return;
+
+    task->cpu_affinity = cpu;
+
+    /* If pinning to a specific CPU, update assigned_cpu */
+    if (cpu != CPU_AFFINITY_ANY && cpu < cpu_count) {
+        task->assigned_cpu = cpu;
+    }
+}
+
+/*
+ * Get task CPU affinity.
+ */
+uint32_t task_get_affinity(struct task *task)
+{
+    if (!task) return CPU_AFFINITY_ANY;
+    return task->cpu_affinity;
 }

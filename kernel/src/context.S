@@ -39,7 +39,7 @@
  *   0x04: name (16 bytes)
  *   0x14: state (4 bytes)
  *   0x18: next (8 bytes)
- *   0x20: context starts here
+ *   0x20: context starts here (cpu_affinity/assigned_cpu moved after context)
  */
 
 #define TASK_CONTEXT_OFFSET     0x20

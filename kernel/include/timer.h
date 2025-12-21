@@ -54,4 +54,11 @@ uint64_t timer_get_count(void);
  */
 uint64_t timer_get_frequency(void);
 
+/*
+ * Per-CPU timer initialization.
+ * Called by each secondary CPU after boot.
+ * Enables the timer interrupt for this CPU but does not start the timer.
+ */
+void timer_percpu_init(void);
+
 #endif /* TIMER_H */

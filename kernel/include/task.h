@@ -16,6 +16,9 @@
 #define MAX_TASKS           32              /* Maximum concurrent tasks */
 #define TASK_NAME_LEN       16              /* Max task name length */
 
+/* CPU affinity constants */
+#define CPU_AFFINITY_ANY    ((uint32_t)-1)  /* Task can run on any CPU */
+
 /* Task states */
 typedef enum {
     TASK_READY,         /* Ready to run, in run queue */
@@ -82,12 +85,16 @@ struct task {
     task_state_t state;                 /* Current task state */
     struct task *next;                  /* Next task in queue (run queue or wait queue) */
 
-    /* CPU context (saved/restored on switch) */
+    /* CPU context (saved/restored on switch) - MUST be at offset 0x20 for context.S */
     struct cpu_context context;
 
     /* Stack */
     void *stack_base;                   /* Bottom of stack (allocation address) */
     void *stack_top;                    /* Top of stack (initial SP) */
+
+    /* CPU affinity (placed after context to preserve context offset) */
+    uint32_t cpu_affinity;              /* CPU this task must run on, or CPU_AFFINITY_ANY */
+    uint32_t assigned_cpu;              /* CPU this task is currently assigned to */
 
     /* Statistics (optional, for debugging) */
     uint64_t switches;                  /* Number of times scheduled */
@@ -126,5 +133,25 @@ struct task *task_current(void);
  * Returns: Pointer to task, or NULL if not found.
  */
 struct task *task_get(uint32_t id);
+
+/*
+ * Set task CPU affinity.
+ *
+ * @task:     Task to modify
+ * @cpu:      CPU ID to pin to, or CPU_AFFINITY_ANY for any CPU
+ *
+ * Note: If task is currently running on a different CPU, it will
+ * be migrated on its next scheduling event.
+ */
+void task_set_affinity(struct task *task, uint32_t cpu);
+
+/*
+ * Get task CPU affinity.
+ *
+ * @task: Task to query
+ *
+ * Returns: CPU ID or CPU_AFFINITY_ANY
+ */
+uint32_t task_get_affinity(struct task *task);
 
 #endif /* TASK_H */

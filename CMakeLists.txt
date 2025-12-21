@@ -55,13 +55,17 @@ set(KERNEL_SOURCES
 
     # Memory management
     kernel/src/pmm.c
-    # kernel/mm/vmm.c
-    # kernel/mm/allocator.c
+    kernel/src/vmm.c
+    kernel/src/mmu.S
 
     # Scheduler
     kernel/src/task.c
     kernel/src/sched.c
     kernel/src/context.S
+
+    # SMP (multi-core support)
+    kernel/src/smp.c
+    kernel/src/smp_boot.S
 
     # IPC
     # kernel/ipc/message.c

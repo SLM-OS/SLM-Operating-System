@@ -189,3 +189,13 @@ void gic_send_sgi(uint32_t irq, uint32_t target_cpu)
 {
     GICD_SGIR = (target_cpu << 16) | (irq & 0xF);
 }
+
+/*
+ * Per-CPU GIC initialization.
+ * Called by each secondary CPU after boot.
+ * Only initializes the CPU interface (distributor is shared).
+ */
+void gic_percpu_init(void)
+{
+    gic_cpu_init();
+}

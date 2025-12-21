@@ -10,6 +10,7 @@
 #include "platform.h"
 #include "uart.h"
 #include "debug.h"
+#include "spinlock.h"
 
 /* External symbols from linker script */
 extern char __kernel_end;
@@ -19,6 +20,9 @@ extern char __kernel_end;
 #define BITMAP_SIZE     ((MAX_PAGES + 7) / 8)
 
 static uint8_t page_bitmap[BITMAP_SIZE];
+
+/* PMM lock - protects bitmap and state */
+static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 /* PMM state */
 static struct {
@@ -148,14 +152,19 @@ void *pmm_alloc_page(void)
         return (void *)0;
     }
 
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+
     size_t index = find_free_page();
     if (index >= pmm_state.total_pages) {
+        spin_unlock_irqrestore(&pmm_lock, flags);
         WARN("PMM: Out of memory");
         return (void *)0;
     }
 
     bitmap_set(index);
     pmm_state.free_pages--;
+
+    spin_unlock_irqrestore(&pmm_lock, flags);
 
     return (void *)index_to_addr(index);
 }
@@ -174,12 +183,17 @@ void *pmm_alloc_pages(size_t count)
         return (void *)0;
     }
 
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+
+    size_t start;
     if (count == 1) {
-        return pmm_alloc_page();
+        start = find_free_page();
+    } else {
+        start = find_free_pages(count);
     }
 
-    size_t start = find_free_pages(count);
     if (start >= pmm_state.total_pages) {
+        spin_unlock_irqrestore(&pmm_lock, flags);
         WARN("PMM: Cannot allocate %u contiguous pages", (unsigned)count);
         return (void *)0;
     }
@@ -189,6 +203,8 @@ void *pmm_alloc_pages(size_t count)
         bitmap_set(start + i);
     }
     pmm_state.free_pages -= count;
+
+    spin_unlock_irqrestore(&pmm_lock, flags);
 
     return (void *)index_to_addr(start);
 }
@@ -216,16 +232,21 @@ void pmm_free_page(void *page)
         return;
     }
 
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+
     size_t index = addr_to_index(addr);
 
     /* Check for double-free */
     if (!bitmap_test(index)) {
+        spin_unlock_irqrestore(&pmm_lock, flags);
         WARN("PMM: Double-free detected at 0x%lx", addr);
         return;
     }
 
     bitmap_clear(index);
     pmm_state.free_pages++;
+
+    spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
 /*
@@ -238,11 +259,40 @@ void pmm_free_pages(void *page, size_t count)
         return;
     }
 
+    if (count == 0) {
+        return;
+    }
+
     uintptr_t addr = (uintptr_t)page;
 
-    for (size_t i = 0; i < count; i++) {
-        pmm_free_page((void *)(addr + i * PAGE_SIZE));
+    /* Validate base address */
+    if (addr < pmm_state.heap_start || addr >= pmm_state.heap_end) {
+        ERROR("PMM: Invalid free address 0x%lx", addr);
+        return;
     }
+
+    if (addr & (PAGE_SIZE - 1)) {
+        ERROR("PMM: Unaligned free address 0x%lx", addr);
+        return;
+    }
+
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+
+    size_t base_index = addr_to_index(addr);
+
+    for (size_t i = 0; i < count; i++) {
+        size_t index = base_index + i;
+
+        if (!bitmap_test(index)) {
+            WARN("PMM: Double-free detected at index %u", (unsigned)index);
+            continue;
+        }
+
+        bitmap_clear(index);
+        pmm_state.free_pages++;
+    }
+
+    spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
 /*
@@ -254,12 +304,16 @@ void pmm_get_stats(struct pmm_stats *stats)
         return;
     }
 
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+
     stats->total_pages = pmm_state.total_pages;
     stats->free_pages = pmm_state.free_pages;
     stats->used_pages = pmm_state.total_pages - pmm_state.free_pages;
     stats->reserved_pages = pmm_state.reserved_pages;
     stats->heap_start = pmm_state.heap_start;
     stats->heap_end = pmm_state.heap_end;
+
+    spin_unlock_irqrestore(&pmm_lock, flags);
 }
 
 /*

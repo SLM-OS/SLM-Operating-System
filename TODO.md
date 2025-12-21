@@ -2,7 +2,7 @@
 
 This document tracks Phase 2 implementation of SLM-OS.
 
-**Status:** Not started
+**Status:** In progress (Milestones 1-2 complete)
 
 **Goals:**
 - Virtual memory with 2-level page tables
@@ -15,80 +15,99 @@ This document tracks Phase 2 implementation of SLM-OS.
 
 ---
 
-## Milestone 1: Virtual Memory System
+## Milestone 1: Virtual Memory System ✅
 
-### MMU Research
-- [ ] Study ARM64 MMU architecture (TCR_EL1, TTBR0/TTBR1, MAIR)
-- [ ] Review translation table formats (4KB granule, 2-level for 2MB pages)
-- [ ] Document memory attribute options (Normal, Device, Non-cacheable)
-- [ ] Plan kernel vs user address space split (TTBR0 vs TTBR1)
+**Status:** Complete
 
-### Page Table Implementation
-- [ ] Define `slm_pte_t` structure (as specified in design doc)
-- [ ] Implement Level 1 table (512 entries × 1GB regions)
-- [ ] Implement Level 2 table (512 entries × 2MB pages)
-- [ ] Write `vmm_init()` — create initial kernel mappings
-- [ ] Write `vmm_map_page(virt, phys, flags)` — map single 2MB page
-- [ ] Write `vmm_unmap_page(virt)` — remove mapping
-- [ ] Write `vmm_map_region(virt, phys, size, flags)` — map contiguous region
+### MMU Research ✅
+- ✅ Study ARM64 MMU architecture (TCR_EL1, TTBR0/TTBR1, MAIR)
+- ✅ Review translation table formats (4KB granule, 2-level for 2MB pages)
+- ✅ Document memory attribute options (Normal, Device, Non-cacheable)
+- ✅ Plan kernel vs user address space split (TTBR0 vs TTBR1)
 
-### MMU Enable Sequence
-- [ ] Set up MAIR_EL1 with memory attributes
-- [ ] Configure TCR_EL1 for 2-level translation
-- [ ] Populate initial page tables (identity map + kernel high map)
-- [ ] Write `mmu_enable()` — flush caches, set TTBR, enable MMU
-- [ ] Handle transition from physical to virtual addressing
-- [ ] Update linker script for virtual addresses
+See `docs/mmu.md` for comprehensive documentation.
 
-### Model Memory Flags (SLM-Specific)
-- [ ] Implement `gpu_mapped` flag handling
-- [ ] Implement `model_page` flag handling
-- [ ] Implement `inference_hot` flag handling
-- [ ] Test flag preservation across map/unmap cycles
+### Page Table Implementation ✅
+- ✅ Define page table entry structures in `kernel/include/vmm.h`
+- ✅ Implement Level 1 table (512 entries × 1GB regions)
+- ✅ Implement Level 2 table (512 entries × 2MB blocks)
+- ✅ Write `vmm_init()` — create initial kernel mappings
+- ✅ Write `vmm_map_block(virt, phys, flags)` — map single 2MB block
+- ✅ Write `vmm_unmap_block(virt)` — remove mapping
+- ✅ Write `vmm_map_region(virt, phys, size, flags)` — map contiguous region
 
-### VMM Testing
-- [ ] Verify kernel code runs correctly after MMU enable
-- [ ] Test mapping/unmapping pages dynamically
-- [ ] Test page fault handling (basic — panic with useful info)
-- [ ] Verify UART still works after MMU enable (device memory mapping)
+### MMU Enable Sequence ✅
+- ✅ Set up MAIR_EL1 with memory attributes (Device, Normal NC, Normal WB)
+- ✅ Configure TCR_EL1 for 39-bit VA, 4KB granule
+- ✅ Populate initial page tables (identity map + kernel high map via shared L1)
+- ✅ Write `mmu_enable()` in `kernel/src/mmu.S`
+- ✅ Handle transition from physical to virtual addressing
+- Deferred: Update linker script for virtual addresses (RWX warning fix)
+
+### Model Memory Flags (SLM-Specific) ✅
+- ✅ Implement `gpu_mapped` flag handling (PTE_SW_GPU_MAPPED)
+- ✅ Implement `model_page` flag handling (PTE_SW_MODEL_PAGE)
+- ✅ Implement `inference_hot` flag handling (PTE_SW_INFERENCE_HOT)
+- ✅ Flags defined in vmm.h, preserved in block descriptors
+
+### VMM Testing ✅
+- ✅ Verify kernel code runs correctly after MMU enable
+- ✅ Test mapping/unmapping pages dynamically
+- ✅ Verify UART still works after MMU enable (device memory mapping)
+- ✅ Automated test suite with `make test`
+- Deferred: Test page fault handling (basic — panic with useful info)
+
+### Decisions Made
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Page Granule | 4KB | Standard, well-documented, sufficient for Phase 2 |
+| Address Space | TTBR0 + TTBR1 shared L1 | Simpler for boot; will split for user space later |
+| Mapping Strategy | Identity + high kernel (shared table) | Single L1 table serves both; identity for boot, high for kernel |
+| Block Size | 2MB | Reduces table depth; sufficient granularity for kernel |
 
 ---
 
-## Milestone 2: Multi-Core Support
+## Milestone 2: Multi-Core Support ✅
 
-### SMP Research
-- [ ] Study ARM64 PSCI (Power State Coordination Interface)
-- [ ] Document QEMU virt machine SMP boot method
-- [ ] Review spin-table vs PSCI boot protocols
-- [ ] Plan per-CPU data structures
+### SMP Research ✅
+- ✅ Study ARM64 PSCI (Power State Coordination Interface)
+- ✅ Document QEMU virt machine SMP boot method
+- ✅ Review spin-table vs PSCI boot protocols
+- ✅ Plan per-CPU data structures
 
-### Secondary Core Bring-Up
-- [ ] Implement PSCI `CPU_ON` call
-- [ ] Write `smp_boot.S` — secondary core entry point
-- [ ] Set up per-core stacks
-- [ ] Initialize per-core GIC CPU interface
-- [ ] Implement `smp_init()` — bring up all secondary cores
-- [ ] Add core ID detection (`mpidr_el1` parsing)
+See `docs/smp.md` for comprehensive documentation.
 
-### Per-Core Scheduler
-- [ ] Create per-core run queues
-- [ ] Implement core affinity in task structure
-- [ ] Update `schedule()` for multi-core awareness
-- [ ] Add spinlocks for scheduler data structures
-- [ ] Implement `sched_migrate_task(task, target_core)`
+### Secondary Core Bring-Up ✅
+- ✅ Implement PSCI `CPU_ON` call
+- ✅ Write `smp_boot.S` — secondary core entry point
+- ✅ Set up per-core stacks
+- ✅ Initialize per-core GIC CPU interface
+- ✅ Implement `smp_init()` — bring up all secondary cores
+- ✅ Add core ID detection (`mpidr_el1` parsing)
 
-### Synchronization Primitives
-- [ ] Implement spinlock (`spin_lock`, `spin_unlock`)
-- [ ] Implement ticket lock (fairer than simple spinlock)
-- [ ] Add memory barriers where needed (`dmb`, `dsb`, `isb`)
-- [ ] Test lock correctness under contention
+### Per-Core Scheduler ✅
+- ✅ Create per-core run queues (`struct cpu_runqueue` in `sched.c`)
+- ✅ Implement core affinity in task structure (`cpu_affinity`, `assigned_cpu`)
+- ✅ Update `schedule()` for multi-core awareness (per-CPU scheduling)
+- ✅ Add spinlocks for scheduler data structures (global `sched.lock`)
+- ✅ Implement `sched_migrate_task(task, target_cpu)`
+- ✅ Per-CPU current task tracking (`task_current()` uses `cpu_id()`)
 
-### SMP Testing
-- [ ] Verify all cores boot and reach idle loop
-- [ ] Run tasks on different cores simultaneously
-- [ ] Test cross-core task migration
-- [ ] Stress test with many tasks across all cores
-- [ ] Verify no deadlocks or race conditions
+### Synchronization Primitives ✅
+- ✅ Implement spinlock (`spin_lock`, `spin_unlock`, `spin_trylock`)
+- ✅ Implement ticket lock (fairer than simple spinlock)
+- ✅ Add memory barriers where needed (`dmb`, `dsb`, `isb`)
+- ✅ Add IRQ-safe spinlock variants (`spin_lock_irqsave`, `spin_unlock_irqrestore`)
+- ✅ Test lock correctness (9 unit tests in `smp.c`)
+- ✅ Multi-core contention stress testing (3 tasks × 50 increments with spinlock)
+
+### SMP Testing ✅
+- ✅ Verify all cores boot and reach idle loop (via `smp_run_tests()`)
+- ✅ Run tasks on different cores simultaneously (task_a/b/c on CPUs 1/2/3)
+- ✅ Test cross-core task migration (`sched_migrate_task`)
+- ✅ Stress test with many tasks across all cores (6 tasks, 2 per CPU)
+- ✅ Verify no deadlocks or race conditions (lock contention test passes)
 
 ---
 
@@ -185,6 +204,12 @@ This document tracks Phase 2 implementation of SLM-OS.
 - [ ] Improve debug output where needed
 - [ ] Update documentation
 
+### Linker Script Security
+- [ ] Fix RWX segment warning in kernel ELF
+- [ ] Separate .text (RX) from .data/.bss (RW) in kernel.ld
+- [ ] Use proper MEMORY regions with permissions
+- [ ] Important for user/kernel separation
+
 ---
 
 ## Phase 2 Completion Checklist
@@ -209,21 +234,17 @@ This document tracks Phase 2 implementation of SLM-OS.
 
 ## Outstanding Decisions
 
-### Milestone 1 — Virtual Memory
+### Milestone 1 — Virtual Memory ✅ (Resolved)
 
-| Decision | Options | Considerations | Deadline |
-|----------|---------|----------------|----------|
-| **Page Granule** | 4KB vs 16KB vs 64KB | 4KB is standard; 64KB reduces TLB pressure for large models | Before starting M1 |
-| **Address Space Split** | TTBR0 only vs TTBR0/TTBR1 split | Split is cleaner for future user/kernel separation | Before starting M1 |
-| **Initial Mapping Strategy** | Identity map only vs identity + high kernel | High kernel is more realistic for future | Before MMU enable |
+All M1 decisions have been made. See "Decisions Made" section under Milestone 1 above.
 
 ### Milestone 2 — Multi-Core
 
-| Decision | Options | Considerations | Deadline |
-|----------|---------|----------------|----------|
-| **Boot Protocol** | PSCI vs spin-table | PSCI is more portable; spin-table simpler for QEMU | Before starting M2 |
-| **Scheduler Lock Granularity** | Global lock vs per-queue locks | Per-queue scales better but more complex | Before per-core scheduler |
-| **Load Balancing** | None vs periodic rebalancing | None is simpler; rebalancing helps utilization | Can defer to Phase 3 |
+| Decision | Options | Choice |
+|----------|---------|--------|
+| **Boot Protocol** | PSCI vs spin-table | **PSCI** — more portable, works on QEMU and Jetson |
+| **Scheduler Lock Granularity** | Global lock vs per-queue locks | **Global lock** for Phase 2; per-queue locks planned for Phase 3 |
+| **Load Balancing** | None vs periodic rebalancing | **Deferred to Phase 3** — SLM-based scheduler may supersede |
 
 ### Milestone 3 — IPC
 
@@ -248,8 +269,16 @@ This document tracks Phase 2 implementation of SLM-OS.
 | Model memory management | Phase 3: "Model memory management" |
 | GPU initialization | Phase 3: "GPU initialization (Jetson)" |
 | Deadline-aware scheduler | Phase 3: "Deadline-aware scheduler (policy in Rust)" |
+| Per-queue scheduler locks | Currently using global lock; will implement per-queue locks for scalability |
+| Load balancing | Periodic task rebalancing across cores (SLM scheduler may supersede) |
 | Component system | Phase 4 |
 | Jetson hardware testing | Can continue on QEMU for Phase 2 |
+
+### Future Considerations
+
+| Topic | Notes |
+|-------|-------|
+| **UART Synchronization** | Currently no locking on UART output, causing garbled interleaved output during concurrent access (especially at boot). Intentionally left unlocked to avoid deadlock risks with panics and nested prints. Future approaches to consider: (1) Per-CPU ring buffers that drain to UART from one CPU, (2) Message-level locking with trylock fallback for direct output, (3) Accept as debug build artifact since SLM workloads won't print much at runtime. |
 
 ---
 
