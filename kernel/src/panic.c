@@ -94,7 +94,7 @@ static void dump_registers(void)
     uart_printf("  ELR_EL1:  0x%lx  (return address)\n", elr);
     uart_printf("  SPSR_EL1: 0x%lx\n", spsr);
     uart_printf("  ESR_EL1:  0x%lx\n", esr);
-    uart_printf("    EC:     0x%x (%s)\n", ec, decode_exception_class(ec));
+    uart_printf("  EC:       0x%x (%s)\n", ec, decode_exception_class(ec));
     uart_printf("  FAR_EL1:  0x%lx  (fault address)\n", far);
 }
 

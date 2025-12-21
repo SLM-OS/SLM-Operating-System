@@ -40,6 +40,12 @@ set(KERNEL_SOURCES
     # Drivers
     kernel/drivers/uart_pl011.c
     # kernel/drivers/uart_tegra.c    # Jetson Orin Nano
+
+    # Interrupt handling
+    kernel/src/gic.c
+    kernel/src/timer.c
+    kernel/src/vectors.S
+    kernel/src/exceptions.c
     # kernel/drivers/gpio.c
     # kernel/drivers/i2c.c
 
@@ -48,14 +54,14 @@ set(KERNEL_SOURCES
     # kernel/arch/arm64/mmu.c
 
     # Memory management
-    # kernel/mm/pmm.c
+    kernel/src/pmm.c
     # kernel/mm/vmm.c
     # kernel/mm/allocator.c
 
     # Scheduler
-    # kernel/sched/core.c
-    # kernel/sched/task.c
-    # kernel/sched/smp.c
+    kernel/src/task.c
+    kernel/src/sched.c
+    kernel/src/context.S
 
     # IPC
     # kernel/ipc/message.c

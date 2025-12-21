@@ -22,7 +22,7 @@ TOOLCHAIN_FILE := cmake/toolchain-aarch64-none-elf.cmake
 # QEMU settings
 QEMU := qemu-system-aarch64
 QEMU_MACHINE := virt
-QEMU_CPU := cortex-a72
+QEMU_CPU := cortex-a76
 QEMU_MEMORY := 512M
 QEMU_CORES := 4
 

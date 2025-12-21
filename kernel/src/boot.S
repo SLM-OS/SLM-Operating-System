@@ -33,6 +33,19 @@ primary_cpu:
     mov     sp, x1
 
     /*
+     * Enable FPU and SIMD (NEON).
+     * CPACR_EL1 bits [21:20] control access to SIMD/FP:
+     *   00 = trap all access
+     *   01 = trap EL0 access only
+     *   10 = trap all access
+     *   11 = no trapping
+     * We set bits [21:20] = 11 to enable full access.
+     */
+    mov     x1, #(3 << 20)
+    msr     cpacr_el1, x1
+    isb
+
+    /*
      * Clear the BSS section.
      * BSS contains uninitialized global/static variables.
      */
@@ -51,6 +64,14 @@ bss_done:
      * Setting these bits masks (disables) the corresponding exceptions.
      */
     msr     daifset, #0xF
+
+    /*
+     * Set up exception vector table.
+     * VBAR_EL1 holds the base address of the vector table.
+     */
+    ldr     x1, =exception_vectors
+    msr     vbar_el1, x1
+    isb
 
     /*
      * Jump to C code.
@@ -72,54 +93,11 @@ halt:
 secondary_spin:
     /*
      * Secondary CPUs wait here.
-     * In Month 2, we'll implement proper multi-core bring-up.
+     * In Phase 2, we'll implement proper multi-core bring-up.
      */
     wfe                         /* Wait For Event */
     b       secondary_spin
 
 /*
- * Vector table placeholder.
- * Full exception handling will be implemented in Week 4.
- * For now, any exception will hang in an infinite loop.
+ * Note: Exception vector table is now in vectors.S
  */
-.balign 0x800
-.global vectors
-vectors:
-    /* Current EL with SP0 */
-    b       halt                /* Synchronous */
-    .balign 0x80
-    b       halt                /* IRQ */
-    .balign 0x80
-    b       halt                /* FIQ */
-    .balign 0x80
-    b       halt                /* SError */
-
-    /* Current EL with SPx */
-    .balign 0x80
-    b       halt                /* Synchronous */
-    .balign 0x80
-    b       halt                /* IRQ */
-    .balign 0x80
-    b       halt                /* FIQ */
-    .balign 0x80
-    b       halt                /* SError */
-
-    /* Lower EL using AArch64 */
-    .balign 0x80
-    b       halt                /* Synchronous */
-    .balign 0x80
-    b       halt                /* IRQ */
-    .balign 0x80
-    b       halt                /* FIQ */
-    .balign 0x80
-    b       halt                /* SError */
-
-    /* Lower EL using AArch32 */
-    .balign 0x80
-    b       halt                /* Synchronous */
-    .balign 0x80
-    b       halt                /* IRQ */
-    .balign 0x80
-    b       halt                /* FIQ */
-    .balign 0x80
-    b       halt                /* SError */

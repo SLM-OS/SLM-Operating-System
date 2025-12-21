@@ -5,6 +5,11 @@
 #include "platform.h"
 #include "uart.h"
 #include "debug.h"
+#include "pmm.h"
+#include "task.h"
+#include "sched.h"
+#include "gic.h"
+#include "timer.h"
 #include <stdint.h>
 
 /* External symbols from linker script */
@@ -27,6 +32,120 @@ static void print_memory_info(void)
                 (void *)RAM_BASE,
                 (void *)(RAM_BASE + RAM_SIZE),
                 RAM_SIZE / (1024 * 1024));
+}
+
+/*
+ * Simple delay loop (busy wait)
+ */
+static void delay(volatile uint32_t count)
+{
+    while (count--) {
+        __asm__ volatile("nop");
+    }
+}
+
+/*
+ * Test task A - loops with delay (preempted by timer)
+ */
+static void task_a_func(void *arg)
+{
+    int count = (int)(uintptr_t)arg;
+
+    for (int i = 0; i < count; i++) {
+        uart_printf("[Task A] iteration %d/%d\n", i + 1, count);
+        delay(500000);
+    }
+
+    uart_puts("[Task A] Done!\n");
+}
+
+/*
+ * Test task B - loops with delay (preempted by timer)
+ */
+static void task_b_func(void *arg)
+{
+    int count = (int)(uintptr_t)arg;
+
+    for (int i = 0; i < count; i++) {
+        uart_printf("[Task B] iteration %d/%d\n", i + 1, count);
+        delay(500000);
+    }
+
+    uart_puts("[Task B] Done!\n");
+}
+
+/*
+ * Test task C - loops with delay (preempted by timer)
+ */
+static void task_c_func(void *arg)
+{
+    int count = (int)(uintptr_t)arg;
+
+    for (int i = 0; i < count; i++) {
+        uart_printf("[Task C] iteration %d/%d\n", i + 1, count);
+        delay(500000);
+    }
+
+    uart_puts("[Task C] Done!\n");
+}
+
+/*
+ * Main task - runs after scheduler starts
+ */
+static void main_task_func(void *arg)
+{
+    (void)arg;
+
+    uart_puts("\n[Main] Creating test tasks...\n\n");
+
+    /* Create test tasks */
+    struct task *task_a = task_create("task_a", task_a_func, (void *)5);
+    struct task *task_b = task_create("task_b", task_b_func, (void *)5);
+    struct task *task_c = task_create("task_c", task_c_func, (void *)5);
+
+    if (!task_a || !task_b || !task_c) {
+        ERROR("Failed to create test tasks");
+        return;
+    }
+
+    /* Add to scheduler */
+    scheduler_add_task(task_a);
+    scheduler_add_task(task_b);
+    scheduler_add_task(task_c);
+
+    uart_puts("[Main] Tasks created and added to scheduler\n");
+    scheduler_dump();
+    uart_puts("\n[Main] Starting preemptive scheduling test...\n\n");
+
+    /*
+     * Wait for tasks to complete via timer preemption.
+     * The timer interrupt will call scheduler_tick() which
+     * will preempt tasks and switch between them.
+     */
+    while (task_a->state != TASK_TERMINATED ||
+           task_b->state != TASK_TERMINATED ||
+           task_c->state != TASK_TERMINATED) {
+        /* Busy wait - timer will preempt us */
+        delay(100000);
+    }
+
+    /* Show final stats */
+    uart_puts("\n[Main] All tasks completed\n");
+    scheduler_dump();
+    pmm_dump_stats();
+
+    uart_puts("\n");
+    INFO("Preemptive scheduler test complete");
+
+    /* Trigger an exception to demonstrate exception handling */
+    INFO("Triggering intentional fault (undefined instruction)...");
+    __asm__ volatile(".word 0x00000000");  /* Undefined instruction */
+
+    /* Should never reach here */
+    INFO("Halting");
+    while (1) {
+        __asm__ volatile("wfi");
+    }
 }
 
 /*
@@ -54,36 +173,43 @@ void kernel_main(void)
     uart_puts("\n");
     print_memory_info();
 
-    /* Test printf format specifiers */
-    uart_puts("\nPrintf test:\n");
-    uart_printf("  Decimal:     %d, %d\n", 42, -123);
-    uart_printf("  Unsigned:    %u\n", 4294967295U);
-    uart_printf("  Hex:         0x%x, 0x%X\n", 0xDEAD, 0xBEEF);
-    uart_printf("  Long hex:    0x%lx\n", 0x123456789ABCDEF0UL);
-    uart_printf("  Pointer:     %p\n", (void *)kernel_main);
-    uart_printf("  String:      %s\n", "Hello, SLM-OS!");
-    uart_printf("  Char:        %c\n", 'X');
-    uart_printf("  Percent:     100%%\n");
-
-    /* Debug macro test */
-    uart_puts("\nDebug macro test:\n");
-    DEBUG_PRINT("This is a debug message with value: %d", 42);
-    INFO("System initialized");
-    WARN("This is a warning");
-
-    /* Assert test (should pass) */
-    ASSERT(1 == 1);
-    DEBUG_PRINT("Assert passed");
-
-    /* Test panic with register dump (uncomment to test) */
-    /* panic("Test panic: value=%d, ptr=%p", 42, (void *)0xDEADBEEF); */
-
-    /* Done - halt */
+    /* Initialize physical memory manager */
     uart_puts("\n");
-    INFO("Kernel initialization complete");
-    INFO("Halting");
+    pmm_init();
+    pmm_dump_stats();
 
-    while (1) {
-        __asm__ volatile("wfi");
+    /* Initialize interrupt controller */
+    uart_puts("\n");
+    INFO("Initializing GIC...");
+    gic_init();
+
+    /* Initialize timer (but don't start yet) */
+    INFO("Initializing timer...");
+    timer_init();
+
+    /* Initialize scheduler */
+    uart_puts("\n");
+    scheduler_init();
+
+    /* Create main task */
+    struct task *main_task = task_create("main", main_task_func, NULL);
+    if (!main_task) {
+        panic("Failed to create main task");
     }
+    scheduler_add_task(main_task);
+
+    /* Start timer - will generate periodic interrupts */
+    INFO("Starting timer (100 Hz)...");
+    timer_start();
+
+    /* Enable interrupts */
+    INFO("Enabling interrupts...");
+    __asm__ volatile("msr daifclr, #0x2");  /* Clear IRQ mask */
+
+    /* Start scheduler - this does not return */
+    INFO("Starting scheduler...");
+    scheduler_start();
+
+    /* Should never reach here */
+    panic("scheduler_start returned!");
 }

@@ -1,6 +1,8 @@
 # Claude Code Notes for SLM-OS Project
 
-This file contains notes and reminders for Claude Code behavior on this project.
+Project-wide notes and reminders. See also:
+- `kernel/CLAUDE.md` — Kernel-specific (C, assembly)
+- `runtime/CLAUDE.md` — Runtime-specific (Rust)
 
 ---
 
@@ -38,12 +40,12 @@ Documentation will be submitted to an academic advisor. Avoid "you/your" languag
 
 ---
 
-## Project-Specific Notes
+## Project Environment
 
-- Output was temporarily written to `CLAUDE_OUTPUT.md` due to Windows rendering issues (now resolved)
 - Cygwin is used as the terminal environment in CLion
 - Windows CMake must be used instead of Cygwin CMake (path translation issues)
 - Project is on Google Drive (`H:\My Drive\`) which can cause file locking issues during builds
+- Google Drive blocks certain filenames (e.g., `kernel.elf`) — use `slmos.elf` instead
 
 ---
 
