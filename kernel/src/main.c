@@ -16,8 +16,12 @@
 #include "ipc.h"
 #include "slm_ffi.h"
 #include "test_harness.h"
+#include "gpu.h"
 #include <stdint.h>
 #include <stdbool.h>
+
+/* External GPU drivers */
+extern const struct gpu_driver gpu_stub_driver;
 
 /* External symbols from linker script */
 extern char __text_start, __text_end;
@@ -671,6 +675,14 @@ void kernel_main(void)
         WARN("Model memory init failed (code=%d)", model_init);
     } else {
         INFO("  Model memory: OK (16 MB weights, 8 MB workspace)");
+    }
+
+    /* Initialize GPU subsystem */
+    INFO("Initializing GPU...");
+    gpu_register_driver(&gpu_stub_driver);  /* QEMU uses stub driver */
+    int gpu_ret = gpu_init();
+    if (gpu_ret != GPU_OK) {
+        WARN("GPU init failed (code=%d)", gpu_ret);
     }
 
     /* Create main task */

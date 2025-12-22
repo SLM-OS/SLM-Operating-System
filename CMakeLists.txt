@@ -86,8 +86,10 @@ set(KERNEL_SOURCES
     kernel/src/slm_ffi.c
 
     # GPU integration
-    # kernel/gpu/jetson_gpu.c
-    # kernel/gpu/memory_map.c
+    kernel/gpu/gpu.c
+    kernel/gpu/cache.c
+    kernel/gpu/gpu_stub.c
+    # kernel/gpu/gpu_tegra.c    # Jetson Orin Nano (future)
 )
 
 # Test sources (Unity framework)
@@ -104,6 +106,7 @@ set(TEST_SOURCES
 set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/include
     ${CMAKE_SOURCE_DIR}/kernel/tests
+    ${CMAKE_SOURCE_DIR}/kernel/gpu
 )
 
 # Build kernel ELF
