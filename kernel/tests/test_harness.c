@@ -94,6 +94,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_model_mem();
     total_failures += test_suite_scheduler();
     total_failures += test_suite_pi_mutex();
+    total_failures += test_suite_gpu();
 
     /* Final summary */
     uart_puts("\n");

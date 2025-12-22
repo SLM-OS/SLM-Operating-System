@@ -37,4 +37,7 @@ int test_suite_model_mem(void);
 /* Priority inheritance mutex tests */
 int test_suite_pi_mutex(void);
 
+/* GPU subsystem tests */
+int test_suite_gpu(void);
+
 #endif /* TEST_HARNESS_H */

@@ -100,6 +100,7 @@ set(TEST_SOURCES
     kernel/tests/test_scheduler.c
     kernel/tests/test_model_mem.c
     kernel/tests/test_pi_mutex.c
+    kernel/tests/test_gpu.c
 )
 
 # Include directories
