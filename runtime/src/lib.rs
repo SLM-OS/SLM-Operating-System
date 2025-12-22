@@ -16,9 +16,13 @@ use linked_list_allocator::LockedHeap;
 // =============================================================================
 
 pub mod kernel_ffi;
+pub mod mm;
+pub mod sched;
 
 // Re-export commonly used types
-pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags};
+pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags, TaskId};
+pub use mm::{ModelHandle, AllocError, PoolStats};
+pub use sched::{Priority, CoreType, SchedulingHint, TaskDeadline, SlmTaskInfo};
 
 // =============================================================================
 // Global Allocator
@@ -166,18 +170,23 @@ pub extern "C" fn rust_run_tests() -> i32 {
         print_test_result(b"get_time_ns\0", passed);
     }
 
-    // Test 5: Task creation with Rust entry point
+    // Test 5: Task creation with Rust entry point (using safe wrapper)
     {
-        let handle = unsafe {
-            kernel_ffi::slm_task_create(
-                b"rust_test\0".as_ptr() as *const core::ffi::c_char,
-                rust_test_task,
-                core::ptr::null_mut(),
-            )
-        };
-        let passed = !handle.is_null();
-        print_test_result(b"slm_task_create (Rust entry)\0", passed);
-        if !passed { failures += 1; }
+        let result = kernel_ffi::task_create(
+            b"rust_test\0",
+            rust_test_task,
+            core::ptr::null_mut(),
+        );
+        let passed = result.is_ok();
+        if let Ok(task_id) = result {
+            // Task ID should be non-zero
+            let valid_id = task_id.is_valid();
+            print_test_result(b"slm_task_create (Rust entry)\0", passed && valid_id);
+            if !valid_id { failures += 1; }
+        } else {
+            print_test_result(b"slm_task_create (Rust entry)\0", false);
+            failures += 1;
+        }
     }
 
     // Test 6: Message queue send/receive (if test queue available)
@@ -207,6 +216,59 @@ pub extern "C" fn rust_run_tests() -> i32 {
         }
     }
 
+    // Test 7: Priority enum conversion
+    {
+        use sched::Priority;
+        // Test round-trip conversion
+        let p = Priority::High;
+        let raw = p.as_raw();
+        let back = Priority::from_raw(raw);
+        let passed = back == Priority::High && raw == 6;
+        print_test_result(b"Priority round-trip\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8: TaskDeadline::NONE
+    {
+        use sched::TaskDeadline;
+        let deadline = TaskDeadline::NONE;
+        // NONE deadline should never be expired
+        let passed = deadline.deadline_ns == 0 && !deadline.is_expired();
+        print_test_result(b"TaskDeadline::NONE\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 9: suggest_core_affinity heuristics
+    {
+        use sched::{TaskDeadline, CoreType, suggest_core_affinity};
+        // Small model (< 8MB) with no deadline -> Efficiency core
+        let core = suggest_core_affinity(4 * 1024 * 1024, &TaskDeadline::NONE);
+        let passed = core == CoreType::Efficiency;
+        print_test_result(b"suggest_core_affinity (small)\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 10: Large model core affinity
+    {
+        use sched::{TaskDeadline, CoreType, suggest_core_affinity};
+        // Large model (> 8MB) -> Performance core
+        let core = suggest_core_affinity(16 * 1024 * 1024, &TaskDeadline::NONE);
+        let passed = core == CoreType::Performance;
+        print_test_result(b"suggest_core_affinity (large)\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 11: SchedulingHint defaults
+    {
+        use sched::{SchedulingHint, Priority, CoreType};
+        let hint = SchedulingHint::default();
+        let passed = hint.priority == Priority::Normal
+            && hint.core_type == CoreType::Any
+            && !hint.pin_to_core;
+        print_test_result(b"SchedulingHint::default()\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
@@ -222,4 +284,256 @@ pub extern "C" fn rust_run_tests() -> i32 {
 // External C function to get test queue ID
 extern "C" {
     fn slm_ffi_get_test_queue() -> u32;
+}
+
+// =============================================================================
+// Model Memory API
+// =============================================================================
+
+/// Initialize model memory pools.
+///
+/// Called by C kernel to set up Rust model memory allocator.
+/// Uses 16 MB for weights and 8 MB for workspace by default.
+#[no_mangle]
+pub extern "C" fn rust_model_mem_init() -> i32 {
+    // Default sizes for QEMU testing (smaller to fit in 128MB RAM)
+    let weight_mb: usize = 16;
+    let workspace_mb: usize = 8;
+
+    match mm::model_mem_init(weight_mb, workspace_mb) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe {
+                kernel_ffi::uart_puts(b"[FAIL] Model memory init failed: \0".as_ptr());
+                match e {
+                    mm::AllocError::PmmFailed => {
+                        kernel_ffi::uart_puts(b"PMM allocation failed\n\0".as_ptr());
+                    }
+                    mm::AllocError::AlignmentError => {
+                        kernel_ffi::uart_puts(b"alignment error\n\0".as_ptr());
+                    }
+                    _ => {
+                        kernel_ffi::uart_puts(b"unknown error\n\0".as_ptr());
+                    }
+                }
+            }
+            -1
+        }
+    }
+}
+
+/// Run model memory tests.
+///
+/// Returns number of test failures (0 = all passed).
+#[no_mangle]
+pub extern "C" fn rust_model_mem_test() -> i32 {
+    let mut failures: i32 = 0;
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running model memory tests...\n\0".as_ptr());
+    }
+
+    // Test 1: Weight pool allocation
+    {
+        let result = mm::alloc_weights(mm::model_mem::BLOCK_SIZE);
+        let passed = result.is_ok();
+        if let Ok(handle) = result {
+            // Verify we can get pointer and size
+            let ptr = mm::get_ptr(handle);
+            let size = mm::get_size(handle);
+            let valid = ptr.is_some() && size == Some(mm::model_mem::BLOCK_SIZE);
+            if valid {
+                // Free the block
+                let _ = mm::free(handle);
+            }
+            print_test_result(b"weight alloc/free\0", passed && valid);
+            if !valid { failures += 1; }
+        } else {
+            print_test_result(b"weight alloc/free\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test 2: Workspace pool allocation
+    {
+        let result = mm::alloc_workspace(mm::model_mem::BLOCK_SIZE);
+        let passed = result.is_ok();
+        if let Ok(handle) = result {
+            let ptr = mm::get_ptr(handle);
+            let size = mm::get_size(handle);
+            let valid = ptr.is_some() && size == Some(mm::model_mem::BLOCK_SIZE);
+            if valid {
+                let _ = mm::free(handle);
+            }
+            print_test_result(b"workspace alloc/free\0", passed && valid);
+            if !valid { failures += 1; }
+        } else {
+            print_test_result(b"workspace alloc/free\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test 3: Reference counting / sharing
+    {
+        let result = mm::alloc_weights(mm::model_mem::BLOCK_SIZE);
+        if let Ok(handle1) = result {
+            // Share the block
+            let share_result = mm::share(handle1);
+            let share_ok = share_result.is_ok();
+
+            if share_ok {
+                // First free should just decrement refcount
+                let free1 = mm::free(handle1);
+                let free1_ok = free1.is_ok();
+
+                // Block should still be valid (refcount was 2, now 1)
+                let ptr = mm::get_ptr(handle1);
+                let still_valid = ptr.is_some();
+
+                // Second free should actually release
+                let free2 = mm::free(handle1);
+                let free2_ok = free2.is_ok();
+
+                let passed = share_ok && free1_ok && still_valid && free2_ok;
+                print_test_result(b"refcount/sharing\0", passed);
+                if !passed { failures += 1; }
+            } else {
+                print_test_result(b"refcount/sharing\0", false);
+                failures += 1;
+            }
+        } else {
+            print_test_result(b"refcount/sharing\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test 4: Pool exhaustion and recovery
+    {
+        // Allocate many blocks until we run out
+        let mut handles = [mm::ModelHandle::null(); 16];
+        let mut allocated = 0;
+
+        for i in 0..16 {
+            if let Ok(h) = mm::alloc_weights(mm::model_mem::BLOCK_SIZE) {
+                handles[i] = h;
+                allocated += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Should have allocated at least 1 block
+        let alloc_ok = allocated > 0;
+
+        // Free all and verify we can allocate again
+        for i in 0..allocated {
+            let _ = mm::free(handles[i]);
+        }
+
+        // Now should be able to allocate again
+        let realloc = mm::alloc_weights(mm::model_mem::BLOCK_SIZE);
+        let realloc_ok = realloc.is_ok();
+        if let Ok(h) = realloc {
+            let _ = mm::free(h);
+        }
+
+        let passed = alloc_ok && realloc_ok;
+        print_test_result(b"pool exhaust/recovery\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 5: Statistics
+    {
+        let stats = mm::weight_pool_stats();
+        let valid = stats.total_blocks > 0 && stats.free_blocks <= stats.total_blocks;
+        print_test_result(b"pool statistics\0", valid);
+        if !valid { failures += 1; }
+    }
+
+    // Test 6: GPU mapping stubs
+    {
+        let result = mm::alloc_weights(mm::model_mem::BLOCK_SIZE);
+        if let Ok(handle) = result {
+            let gpu_addr = mm::model_mem::gpu_map(handle);
+            let map_ok = gpu_addr.is_ok();
+
+            let unmap_result = mm::model_mem::gpu_unmap(handle);
+            let unmap_ok = unmap_result.is_ok();
+
+            let _ = mm::free(handle);
+
+            let passed = map_ok && unmap_ok;
+            print_test_result(b"GPU map/unmap stubs\0", passed);
+            if !passed { failures += 1; }
+        } else {
+            print_test_result(b"GPU map/unmap stubs\0", false);
+            failures += 1;
+        }
+    }
+
+    // Summary
+    unsafe {
+        if failures == 0 {
+            kernel_ffi::uart_puts(b"[INFO] Model memory tests passed\n\0".as_ptr());
+        } else {
+            kernel_ffi::uart_puts(b"[FAIL] Model memory tests had failures\n\0".as_ptr());
+        }
+    }
+
+    failures
+}
+
+// =============================================================================
+// Model Memory FFI (for C tests)
+// =============================================================================
+
+/// Allocate from weight pool. Returns ModelHandle (check is_null).
+#[no_mangle]
+pub extern "C" fn rust_model_alloc_weights(size: usize) -> mm::ModelHandle {
+    mm::alloc_weights(size).unwrap_or(mm::ModelHandle::null())
+}
+
+/// Allocate from workspace pool. Returns ModelHandle (check is_null).
+#[no_mangle]
+pub extern "C" fn rust_model_alloc_workspace(size: usize) -> mm::ModelHandle {
+    mm::alloc_workspace(size).unwrap_or(mm::ModelHandle::null())
+}
+
+/// Free a model memory handle. Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn rust_model_free(handle: mm::ModelHandle) -> i32 {
+    match mm::free(handle) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Share a model memory handle (increment refcount).
+#[no_mangle]
+pub extern "C" fn rust_model_share(handle: mm::ModelHandle) -> mm::ModelHandle {
+    mm::share(handle).unwrap_or(mm::ModelHandle::null())
+}
+
+/// Get raw pointer for a handle. Returns NULL if invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_get_ptr(handle: mm::ModelHandle) -> *mut u8 {
+    mm::get_ptr(handle).unwrap_or(core::ptr::null_mut())
+}
+
+/// Get allocation size. Returns 0 if invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_get_size(handle: mm::ModelHandle) -> usize {
+    mm::get_size(handle).unwrap_or(0)
+}
+
+/// Get weight pool statistics.
+#[no_mangle]
+pub extern "C" fn rust_weight_pool_stats() -> mm::PoolStats {
+    mm::weight_pool_stats()
+}
+
+/// Get workspace pool statistics.
+#[no_mangle]
+pub extern "C" fn rust_workspace_pool_stats() -> mm::PoolStats {
+    mm::workspace_pool_stats()
 }

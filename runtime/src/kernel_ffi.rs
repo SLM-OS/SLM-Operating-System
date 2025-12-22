@@ -154,22 +154,26 @@ bitflags! {
 // Opaque Handle Types
 // =============================================================================
 
-/// Opaque handle to a kernel task.
+/// Task identifier returned by slm_task_create.
 ///
-/// Tasks are managed by the C kernel. This is a pointer to `struct task`.
+/// Tasks are identified by their ID (uint32_t in C). ID 0 is reserved
+/// and indicates an invalid/failed task creation.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy)]
-pub struct TaskHandle(pub *mut core::ffi::c_void);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskId(pub u32);
 
-impl TaskHandle {
-    /// Null task handle.
-    pub const NULL: Self = TaskHandle(core::ptr::null_mut());
+impl TaskId {
+    /// Invalid task ID (indicates failure).
+    pub const INVALID: Self = TaskId(0);
 
-    /// Check if this handle is null.
-    pub fn is_null(self) -> bool {
-        self.0.is_null()
+    /// Check if this task ID is valid.
+    pub fn is_valid(self) -> bool {
+        self.0 != 0
     }
 }
+
+/// Legacy alias for TaskId (for compatibility during transition).
+pub type TaskHandle = TaskId;
 
 /// Opaque handle to a message queue.
 ///
@@ -278,12 +282,32 @@ extern "C" {
     /// * `arg` - Argument passed to entry function
     ///
     /// # Returns
-    /// Task handle on success, null on failure.
+    /// Task ID (non-zero) on success, 0 on failure.
     pub fn slm_task_create(
         name: *const c_char,
         entry: extern "C" fn(*mut core::ffi::c_void),
         arg: *mut core::ffi::c_void,
-    ) -> TaskHandle;
+    ) -> TaskId;
+
+    /// Set task priority.
+    ///
+    /// # Arguments
+    /// * `task_id` - Task ID (from slm_task_create)
+    /// * `priority` - Priority level (0-7, higher = more important)
+    ///
+    /// # Returns
+    /// SLM_OK on success, SLM_ERR_INVALID if task not found.
+    pub fn slm_task_set_priority(task_id: TaskId, priority: u8) -> i32;
+
+    /// Set task deadline.
+    ///
+    /// # Arguments
+    /// * `task_id` - Task ID (from slm_task_create)
+    /// * `deadline_ns` - Absolute deadline in nanoseconds (0 = no deadline)
+    ///
+    /// # Returns
+    /// SLM_OK on success, SLM_ERR_INVALID if task not found.
+    pub fn slm_task_set_deadline(task_id: TaskId, deadline_ns: u64) -> i32;
 
     // -------------------------------------------------------------------------
     // IPC - Message Queues
@@ -442,6 +466,66 @@ pub fn msg_recv(queue_id: u32, buf: &mut [u8], timeout_ms: i32) -> KernelResult<
     }
 }
 
+/// Create a new kernel task (safe wrapper).
+///
+/// # Arguments
+/// * `name` - Task name (must be null-terminated)
+/// * `entry` - Entry point function
+/// * `arg` - Argument passed to entry
+///
+/// # Returns
+/// Task ID on success, or error if creation failed.
+pub fn task_create(
+    name: &[u8],
+    entry: extern "C" fn(*mut core::ffi::c_void),
+    arg: *mut core::ffi::c_void,
+) -> KernelResult<TaskId> {
+    // Ensure null termination
+    if name.last() != Some(&0) {
+        return Err(KernelError::InvalidParam);
+    }
+    let task_id = unsafe { slm_task_create(name.as_ptr() as *const c_char, entry, arg) };
+    if task_id.is_valid() {
+        Ok(task_id)
+    } else {
+        Err(KernelError::OutOfMemory)
+    }
+}
+
+/// Set task priority.
+///
+/// # Arguments
+/// * `task_id` - Task ID (from task_create)
+/// * `priority` - Priority level (0-7, higher = more important)
+///
+/// # Errors
+/// Returns `KernelError::InvalidParam` if task not found.
+pub fn task_set_priority(task_id: TaskId, priority: u8) -> KernelResult<()> {
+    let ret = unsafe { slm_task_set_priority(task_id, priority) };
+    if ret == SLM_OK {
+        Ok(())
+    } else {
+        Err(KernelError::from_code(ret).unwrap_or(KernelError::Unknown(ret)))
+    }
+}
+
+/// Set task deadline.
+///
+/// # Arguments
+/// * `task_id` - Task ID (from task_create)
+/// * `deadline_ns` - Absolute deadline in nanoseconds (0 = no deadline)
+///
+/// # Errors
+/// Returns `KernelError::InvalidParam` if task not found.
+pub fn task_set_deadline(task_id: TaskId, deadline_ns: u64) -> KernelResult<()> {
+    let ret = unsafe { slm_task_set_deadline(task_id, deadline_ns) };
+    if ret == SLM_OK {
+        Ok(())
+    } else {
+        Err(KernelError::from_code(ret).unwrap_or(KernelError::Unknown(ret)))
+    }
+}
+
 // =============================================================================
 // FFI Type Size/Alignment Tests
 // =============================================================================
@@ -460,8 +544,10 @@ const _: () = {
     assert!(core::mem::size_of::<u64>() == 8);     // uint64_t
     assert!(core::mem::size_of::<i32>() == 4);     // int32_t / int
 
+    // TaskId is 32-bit (u32)
+    assert!(core::mem::size_of::<TaskId>() == 4);
+
     // Handle sizes (should be pointer-sized)
-    assert!(core::mem::size_of::<TaskHandle>() == 8);
     assert!(core::mem::size_of::<QueueHandle>() == 8);
     assert!(core::mem::size_of::<BufferHandle>() == 8);
 

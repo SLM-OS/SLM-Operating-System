@@ -15,6 +15,7 @@
 #include "spinlock.h"
 #include "ipc.h"
 #include "slm_ffi.h"
+#include "test_harness.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -547,15 +548,11 @@ static void main_task_func(void *arg)
 {
     (void)arg;
 
-    uart_puts("\n");
-    uart_puts("########################################\n");
-    uart_puts("#    SLM-OS Scheduler Test Suite      #\n");
-    uart_puts("########################################\n");
+    /* Run Unity test suites via harness */
+    test_harness_init();
+    test_errors += test_harness_run_all();
 
-    /* Run IPC tests first (single-threaded tests) */
-    test_errors += ipc_run_tests();
-
-    /* Run Rust FFI tests */
+    /* Run Rust FFI tests (not yet migrated to Unity) */
     test_errors += rust_run_tests();
 
     /* Run all scheduler tests */
@@ -666,6 +663,15 @@ void kernel_main(void)
 
     /* Say hello from Rust */
     rust_hello();
+
+    /* Initialize model memory pools */
+    INFO("Initializing model memory...");
+    int model_init = rust_model_mem_init();
+    if (model_init != 0) {
+        WARN("Model memory init failed (code=%d)", model_init);
+    } else {
+        INFO("  Model memory: OK (16 MB weights, 8 MB workspace)");
+    }
 
     /* Create main task */
     struct task *main_task = task_create("main", main_task_func, NULL);

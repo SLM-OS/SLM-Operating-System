@@ -105,9 +105,27 @@ typedef void (*slm_task_entry_t)(void *arg);
  * @name: Null-terminated task name
  * @entry: Entry point function
  * @arg: Argument passed to entry function
- * Returns: Opaque task handle, or NULL on failure
+ * Returns: Task ID (non-zero) on success, 0 on failure
  */
-void *slm_task_create(const char *name, slm_task_entry_t entry, void *arg);
+uint32_t slm_task_create(const char *name, slm_task_entry_t entry, void *arg);
+
+/*
+ * Set task priority.
+ *
+ * @task_id: Task ID (from slm_task_create)
+ * @priority: Priority level (0-7, higher = more important)
+ * Returns: SLM_OK on success, SLM_ERR_INVALID if task not found
+ */
+int slm_task_set_priority(uint32_t task_id, uint8_t priority);
+
+/*
+ * Set task deadline.
+ *
+ * @task_id: Task ID (from slm_task_create)
+ * @deadline_ns: Absolute deadline in nanoseconds (0 = no deadline)
+ * Returns: SLM_OK on success, SLM_ERR_INVALID if task not found
+ */
+int slm_task_set_deadline(uint32_t task_id, uint64_t deadline_ns);
 
 /*
  * ==========================================================================
@@ -185,6 +203,20 @@ extern int rust_ffi_validate(void);
  * Returns: Number of test failures (0 = all passed).
  */
 extern int rust_run_tests(void);
+
+/*
+ * Initialize model memory pools.
+ * Allocates memory from PMM for weight and workspace pools.
+ * Returns: 0 on success, -1 on failure.
+ */
+extern int rust_model_mem_init(void);
+
+/*
+ * Run model memory tests.
+ * Tests allocation, sharing, statistics, and GPU stubs.
+ * Returns: Number of test failures (0 = all passed).
+ */
+extern int rust_model_mem_test(void);
 
 /*
  * ==========================================================================

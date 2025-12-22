@@ -4,6 +4,92 @@ This document describes the testing approach for SLM-OS, including current imple
 
 ---
 
+## Unity Test Framework
+
+SLM-OS uses a bare-metal compatible subset of the [Unity Test Framework](https://github.com/ThrowTheSwitch/Unity) for C tests.
+
+### Test Directory Structure
+
+```
+kernel/tests/
+├── unity.h           # Unity API (macros, assertions)
+├── unity.c           # Unity implementation
+├── test_harness.h    # Test suite declarations
+├── test_harness.c    # UART output, suite runner
+├── test_ipc.c        # IPC test suite
+├── test_scheduler.c  # Scheduler tests (stub, runs from main.c)
+└── test_model_mem.c  # Model memory tests
+```
+
+### Available Assertions
+
+```c
+TEST_ASSERT(condition)                    /* condition is true */
+TEST_ASSERT_TRUE(condition)               /* same as above */
+TEST_ASSERT_FALSE(condition)              /* condition is false */
+TEST_ASSERT_NULL(ptr)                     /* ptr == NULL */
+TEST_ASSERT_NOT_NULL(ptr)                 /* ptr != NULL */
+TEST_ASSERT_EQUAL_INT(expected, actual)
+TEST_ASSERT_EQUAL_UINT64(expected, actual)
+TEST_ASSERT_EQUAL_PTR(expected, actual)
+TEST_ASSERT_EQUAL_HEX64(expected, actual) /* hex output on failure */
+TEST_ASSERT_GREATER_OR_EQUAL(threshold, value)
+```
+
+### Writing a New Test Suite
+
+1. Create `kernel/tests/test_<feature>.c`:
+
+```c
+#include "unity.h"
+#include "../include/<headers>.h"
+
+static void test_something_works(void)
+{
+    int result = function_under_test();
+    TEST_ASSERT_EQUAL_INT(42, result);
+}
+
+int test_suite_feature(void)
+{
+    UnityBegin("Feature Tests");
+    RUN_TEST(test_something_works);
+    return UnityEnd();
+}
+```
+
+2. Add declaration to `test_harness.h`:
+```c
+int test_suite_feature(void);
+```
+
+3. Add call to `test_harness_run_all()` in `test_harness.c`
+
+4. Add source to `CMakeLists.txt`:
+```cmake
+set(TEST_SOURCES
+    ...
+    kernel/tests/test_feature.c
+)
+```
+
+### Test Output Format
+
+```
+[TEST] Model Memory Tests
+  [PASS] test_weight_alloc_returns_valid_pointer
+  [PASS] test_allocated_memory_is_writable
+  [FAIL] test_something
+    FAILED at kernel/tests/test_model_mem.c:42
+      Expected: 100
+      Actual:   99
+
+----------------------------------------
+Tests: 3  Passed: 2  Failed: 1
+```
+
+---
+
 ## Current Testing Infrastructure
 
 ### `make test` Target
@@ -139,6 +225,24 @@ Validates message queues and shared buffers:
 
 Tests run from `ipc_run_tests()` called at the start of the main task, before scheduler tests.
 
+### Model Memory Tests (`kernel/tests/test_model_mem.c`)
+
+Validates the Rust model memory allocator via FFI. These tests verify actual behavior, not just that calls succeed.
+
+| Test | Description |
+|------|-------------|
+| weight_alloc_returns_valid_pointer | Allocate weight block, verify pointer is 2MB-aligned |
+| allocated_memory_is_writable | Write patterns to start and end of block, read back |
+| different_allocs_different_addresses | Two allocations return different, non-overlapping addresses |
+| size_returns_block_size | Get size returns 2MB block size |
+| pools_are_separate | Weight and workspace pools have different pool IDs and address ranges |
+| refcount_prevents_premature_free | share() increments refcount, free() only releases when count reaches 0 |
+| statistics_accuracy | Pool stats reflect actual allocations and frees |
+| pool_exhaustion | Allocating more than pool capacity returns null handle |
+| freed_memory_reused | After free, next alloc returns same block address |
+
+Tests run via Unity framework during boot, called from `test_harness_run_all()`.
+
 ### FFI Tests (`runtime/src/lib.rs`)
 
 Validates the Rust/C FFI boundary by exercising all FFI functions from the Rust side:
@@ -217,19 +321,20 @@ Use the `print_test_result()` helper to maintain consistent output format.
 
 ## Testing Progression Plan
 
-### Phase 1: Current State (Manual + `make test`)
+### Phase 1: Inline Tests (Manual + `make test`)
 
-- **Status**: Implemented
-- Tests run as part of kernel boot
+- **Status**: Complete
+- Tests ran inline during subsystem initialization
 - `make test` provides automated pass/fail detection
 - Manual verification via `make run` for debugging
 
-### Phase 2: Multiple Test Suites
+### Phase 2: Unity Test Framework
 
-- **Trigger**: When 2-3 distinct test suites exist (VMM, SMP, IPC, etc.)
-- Add test suite selection (run all vs. specific suite)
-- Consider separating test code from production code
-- Add test result summary (X passed, Y failed)
+- **Status**: Implemented (December 2025)
+- Unity test framework added to `kernel/tests/`
+- Test suites separated into individual files
+- Centralized test harness runs all suites
+- Test result summary (X passed, Y failed) per suite
 
 ### Phase 3: Test Runner Script
 

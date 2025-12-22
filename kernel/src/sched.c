@@ -1,9 +1,11 @@
 /*
- * sched.c - Per-core round-robin scheduler for SLM-OS
+ * sched.c - Per-core priority scheduler for SLM-OS
  *
- * Each CPU has its own run queue. A global spinlock protects all
- * scheduler data structures (simpler than per-queue locks, sufficient
- * for 4-6 cores).
+ * Each CPU has its own run queue ordered by effective priority (highest first).
+ * Within the same priority, tasks are scheduled FIFO.
+ *
+ * Each CPU has its own run queue lock, reducing contention for multi-core
+ * scheduling. Global statistics use atomic operations or accept benign races.
  */
 
 #include "sched.h"
@@ -13,7 +15,13 @@
 #include "platform.h"
 #include "smp.h"
 #include "spinlock.h"
+#include "slm_ffi.h"
 #include <stddef.h>
+
+/* Deadline boost thresholds (in nanoseconds) */
+#define DEADLINE_CRITICAL_NS    (10 * 1000000ULL)   /* 10ms - boost to CRITICAL */
+#define DEADLINE_HIGH_NS        (50 * 1000000ULL)   /* 50ms - boost to HIGH */
+#define DEADLINE_BOOST_NS       (100 * 1000000ULL)  /* 100ms - boost +1 */
 
 /* External functions from task.c */
 extern void task_set_current(struct task *task);
@@ -21,6 +29,7 @@ extern void task_destroy(struct task *task);
 
 /* Per-CPU run queue */
 struct cpu_runqueue {
+    spinlock_t lock;            /* Per-queue lock (reduces contention) */
     struct task *head;          /* First task in run queue */
     struct task *tail;          /* Last task in run queue */
     struct task *idle_task;     /* This CPU's idle task */
@@ -31,18 +40,16 @@ struct cpu_runqueue {
 /*
  * Global scheduler state.
  *
- * Lock strategy: Single global lock protects all scheduler data.
- * This is simpler than per-queue locks and sufficient for Phase 2.
- * Phase 3 will implement per-queue locks for scalability to larger
- * core counts. The SLM-based scheduler may also supersede this with
- * smarter task placement.
+ * Lock strategy: Each CPU run queue has its own lock for local operations.
+ * Cross-queue operations (migration) lock both queues in CPU ID order
+ * to prevent deadlock. Global statistics are racy but acceptable.
  */
 static struct {
-    struct cpu_runqueue cpu[MAX_CPUS];  /* Per-CPU run queues */
-    spinlock_t lock;                     /* Global scheduler lock */
-    uint32_t task_count;                 /* Total tasks in system */
-    uint64_t context_switches;           /* Total switches performed */
-    uint64_t timer_ticks;                /* Timer interrupts received */
+    struct cpu_runqueue cpu[MAX_CPUS];  /* Per-CPU run queues (each has own lock) */
+    uint32_t task_count;                 /* Total tasks (racy but OK for stats) */
+    uint64_t context_switches;           /* Total switches (racy but OK) */
+    uint64_t timer_ticks;                /* Timer interrupts (racy but OK) */
+    uint32_t isolated_cores;             /* Bitmask of isolated cores */
     int initialized;                     /* Scheduler initialized flag */
 } sched;
 
@@ -64,21 +71,65 @@ static void idle_task_func(void *arg)
 }
 
 /*
+ * Update a task's effective priority based on deadline proximity.
+ *
+ * Called when adding a task to the run queue and during scheduler tick.
+ * The effective_priority determines scheduling order.
+ */
+static void update_deadline_boost(struct task *task)
+{
+    if (!task || task->deadline_ns == 0) {
+        /* No deadline - effective priority equals base priority */
+        if (task) {
+            task->effective_priority = task->priority;
+        }
+        return;
+    }
+
+    uint64_t now = slm_get_time_ns();
+    uint8_t base = task->priority;
+    uint8_t boosted = base;
+
+    if (now >= task->deadline_ns) {
+        /* Deadline missed! Boost to critical to finish ASAP */
+        boosted = TASK_PRIORITY_CRITICAL;
+    } else {
+        uint64_t remaining = task->deadline_ns - now;
+
+        if (remaining < DEADLINE_CRITICAL_NS) {
+            /* < 10ms: boost to CRITICAL (7) */
+            boosted = TASK_PRIORITY_CRITICAL;
+        } else if (remaining < DEADLINE_HIGH_NS) {
+            /* < 50ms: boost to HIGH (6) */
+            boosted = TASK_PRIORITY_HIGH;
+        } else if (remaining < DEADLINE_BOOST_NS) {
+            /* < 100ms: boost +1 (capped at max) */
+            boosted = (base < TASK_PRIORITY_MAX) ? base + 1 : TASK_PRIORITY_MAX;
+        }
+        /* else: > 100ms remaining, no boost */
+    }
+
+    task->effective_priority = boosted;
+}
+
+/*
  * Initialize the scheduler (called on boot CPU).
  */
 void scheduler_init(void)
 {
     /* Initialize global state */
-    spin_init(&sched.lock);
     sched.task_count = 0;
     sched.context_switches = 0;
     sched.timer_ticks = 0;
+    sched.isolated_cores = 0;
 
-    /* Initialize per-CPU run queues */
+    /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        spin_init(&sched.cpu[i].lock);
         sched.cpu[i].head = NULL;
         sched.cpu[i].tail = NULL;
         sched.cpu[i].idle_task = NULL;
+        sched.cpu[i].zombie = NULL;
         sched.cpu[i].ready_count = 0;
     }
 
@@ -117,8 +168,6 @@ void scheduler_init_secondary(uint32_t cpu)
         return;  /* CPU 0 uses scheduler_init(), invalid CPUs ignored */
     }
 
-    irq_flags_t flags = spin_lock_irqsave(&sched.lock);
-
     /* Create idle task for this CPU */
     char idle_name[TASK_NAME_LEN];
     /* Simple integer to string for idle task name */
@@ -130,41 +179,70 @@ void scheduler_init_secondary(uint32_t cpu)
     idle_name[5] = '0' + cpu;
     idle_name[6] = '\0';
 
-    spin_unlock_irqrestore(&sched.lock, flags);
-
     /* Create task outside of lock (task_create may allocate memory) */
     struct task *idle = task_create(idle_name, idle_task_func, NULL);
     if (!idle) {
         panic("scheduler_init_secondary: failed to create idle task for CPU %u", cpu);
     }
 
-    flags = spin_lock_irqsave(&sched.lock);
+    /* Lock this CPU's queue to update idle task */
+    irq_flags_t flags = spin_lock_irqsave(&sched.cpu[cpu].lock);
 
     idle->state = TASK_READY;
     idle->cpu_affinity = cpu;  /* Pinned to this CPU */
     idle->assigned_cpu = cpu;
     sched.cpu[cpu].idle_task = idle;
 
-    spin_unlock_irqrestore(&sched.lock, flags);
+    spin_unlock_irqrestore(&sched.cpu[cpu].lock, flags);
 
     INFO("CPU %u: scheduler initialized", cpu);
 }
 
 /*
  * Add a task to a specific CPU's run queue (internal, requires lock held).
+ *
+ * Tasks are inserted in priority order (highest effective_priority first).
+ * Within the same priority, new tasks go after existing ones (FIFO).
  */
 static void add_to_cpu_queue_locked(struct task *task, uint32_t cpu)
 {
     struct cpu_runqueue *rq = &sched.cpu[cpu];
 
-    task->next = NULL;
     task->assigned_cpu = cpu;
 
-    if (rq->tail) {
-        rq->tail->next = task;
-        rq->tail = task;
-    } else {
+    /* Update effective priority based on deadline before insertion */
+    update_deadline_boost(task);
+
+    /* Empty queue - just add */
+    if (!rq->head) {
+        task->next = NULL;
         rq->head = task;
+        rq->tail = task;
+        rq->ready_count++;
+        return;
+    }
+
+    /* Find insertion point: insert before first task with LOWER priority */
+    struct task *prev = NULL;
+    struct task *curr = rq->head;
+
+    while (curr && curr->effective_priority >= task->effective_priority) {
+        prev = curr;
+        curr = curr->next;
+    }
+
+    /* Insert task between prev and curr */
+    task->next = curr;
+
+    if (prev) {
+        prev->next = task;
+    } else {
+        /* New head (highest priority) */
+        rq->head = task;
+    }
+
+    /* Update tail if inserting at end */
+    if (!curr) {
         rq->tail = task;
     }
 
@@ -212,15 +290,43 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
         return;
     }
 
-    irq_flags_t flags = spin_lock_irqsave(&sched.lock);
+    struct cpu_runqueue *rq = &sched.cpu[cpu];
+    irq_flags_t flags = spin_lock_irqsave(&rq->lock);
 
     add_to_cpu_queue_locked(task, cpu);
-    sched.task_count++;
+    sched.task_count++;  /* Racy but acceptable for stats */
 
     DEBUG_PRINT("Added task '%s' to CPU %u run queue (ready=%u)",
-                task->name, cpu, sched.cpu[cpu].ready_count);
+                task->name, cpu, rq->ready_count);
 
-    spin_unlock_irqrestore(&sched.lock, flags);
+    spin_unlock_irqrestore(&rq->lock, flags);
+}
+
+/*
+ * Find a non-isolated CPU for a task with CPU_AFFINITY_ANY.
+ *
+ * Currently uses a simple strategy: prefer the least loaded non-isolated CPU.
+ * Returns CPU 0 as fallback (CPU 0 cannot be isolated).
+ */
+static uint32_t find_target_cpu(void)
+{
+    uint32_t best_cpu = 0;
+    uint32_t best_count = sched.cpu[0].ready_count;
+
+    for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
+        /* Skip isolated cores */
+        if (sched.isolated_cores & (1U << cpu)) {
+            continue;
+        }
+
+        /* Pick CPU with fewer ready tasks */
+        if (sched.cpu[cpu].ready_count < best_count) {
+            best_cpu = cpu;
+            best_count = sched.cpu[cpu].ready_count;
+        }
+    }
+
+    return best_cpu;
 }
 
 /*
@@ -235,11 +341,11 @@ void scheduler_add_task(struct task *task)
     uint32_t target_cpu;
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
-        /* Task is pinned to a specific CPU */
+        /* Task is pinned to a specific CPU (even if isolated) */
         target_cpu = task->cpu_affinity;
     } else {
-        /* Default to CPU 0 for now (load balancing can improve this later) */
-        target_cpu = 0;
+        /* Find a non-isolated CPU with load balancing */
+        target_cpu = find_target_cpu();
     }
 
     scheduler_add_task_to_cpu(task, target_cpu);
@@ -254,25 +360,28 @@ void scheduler_remove_task(struct task *task)
         return;
     }
 
-    irq_flags_t flags = spin_lock_irqsave(&sched.lock);
+    uint32_t cpu = task->assigned_cpu;
+    struct cpu_runqueue *rq = &sched.cpu[cpu];
+    irq_flags_t flags = spin_lock_irqsave(&rq->lock);
 
     /*
      * Task might already have been removed from the queue when it
      * started running (schedule() removes from queue before switching).
      * Only decrement task_count if task was actually in the queue.
      */
-    if (remove_from_cpu_queue_locked(task, task->assigned_cpu)) {
-        sched.task_count--;
+    if (remove_from_cpu_queue_locked(task, cpu)) {
+        sched.task_count--;  /* Racy but acceptable for stats */
         DEBUG_PRINT("Removed task '%s' from CPU %u run queue (ready=%u)",
-                    task->name, task->assigned_cpu,
-                    sched.cpu[task->assigned_cpu].ready_count);
+                    task->name, cpu, rq->ready_count);
     }
 
-    spin_unlock_irqrestore(&sched.lock, flags);
+    spin_unlock_irqrestore(&rq->lock, flags);
 }
 
 /*
  * Migrate a task to a different CPU.
+ *
+ * Locks both source and target queues in CPU ID order to prevent deadlock.
  */
 int sched_migrate_task(struct task *task, uint32_t target_cpu)
 {
@@ -293,13 +402,26 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
         return -1;
     }
 
-    irq_flags_t flags = spin_lock_irqsave(&sched.lock);
-
     uint32_t old_cpu = task->assigned_cpu;
 
     if (old_cpu == target_cpu) {
-        spin_unlock_irqrestore(&sched.lock, flags);
         return 0;  /* Already on target CPU */
+    }
+
+    /*
+     * Lock both queues in CPU ID order to prevent deadlock.
+     * If old_cpu < target_cpu, lock old first; otherwise lock target first.
+     */
+    struct cpu_runqueue *rq_old = &sched.cpu[old_cpu];
+    struct cpu_runqueue *rq_new = &sched.cpu[target_cpu];
+    irq_flags_t flags;
+
+    if (old_cpu < target_cpu) {
+        flags = spin_lock_irqsave(&rq_old->lock);
+        spin_lock(&rq_new->lock);
+    } else {
+        flags = spin_lock_irqsave(&rq_new->lock);
+        spin_lock(&rq_old->lock);
     }
 
     /* Remove from old CPU queue if task is ready */
@@ -314,7 +436,15 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     DEBUG_PRINT("Migrated task '%s' from CPU %u to CPU %u",
                 task->name, old_cpu, target_cpu);
 
-    spin_unlock_irqrestore(&sched.lock, flags);
+    /* Unlock in reverse order */
+    if (old_cpu < target_cpu) {
+        spin_unlock(&rq_new->lock);
+        spin_unlock_irqrestore(&rq_old->lock, flags);
+    } else {
+        spin_unlock(&rq_old->lock);
+        spin_unlock_irqrestore(&rq_new->lock, flags);
+    }
+
     return 0;
 }
 
@@ -341,7 +471,7 @@ void schedule(void)
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = &sched.cpu[this_cpu];
 
-    irq_flags_t flags = spin_lock_irqsave(&sched.lock);
+    irq_flags_t flags = spin_lock_irqsave(&rq->lock);
 
     /*
      * Clean up zombie task from previous schedule cycle.
@@ -350,34 +480,30 @@ void schedule(void)
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
-        spin_unlock_irqrestore(&sched.lock, flags);
+        spin_unlock_irqrestore(&rq->lock, flags);
 
         /* Destroy outside lock - task_destroy may call pmm */
         task_destroy(zombie);
 
-        flags = spin_lock_irqsave(&sched.lock);
+        flags = spin_lock_irqsave(&rq->lock);
     }
 
     struct task *current = task_current();
     struct task *next = pick_next_task(this_cpu);
 
-    /* If current task is still running and ready, move to back of queue */
+    /* If current task is still running and ready, re-add to queue */
     if (current && current->state == TASK_RUNNING) {
         current->state = TASK_READY;
 
         /* Re-add to run queue if it's a normal task (not idle) */
         if (current != rq->idle_task) {
-            current->next = NULL;
+            /* Priority-ordered insertion (updates deadline boost) */
+            add_to_cpu_queue_locked(current, this_cpu);
+        }
 
-            /* Add to tail of queue */
-            if (rq->tail) {
-                rq->tail->next = current;
-                rq->tail = current;
-            } else {
-                rq->head = current;
-                rq->tail = current;
-            }
-            rq->ready_count++;
+        /* Update deadline boost for next candidate too */
+        if (rq->head) {
+            update_deadline_boost(rq->head);
         }
 
         /* Re-pick in case queue changed */
@@ -399,14 +525,14 @@ void schedule(void)
         if (current) {
             current->state = TASK_RUNNING;
         }
-        spin_unlock_irqrestore(&sched.lock, flags);
+        spin_unlock_irqrestore(&rq->lock, flags);
         return;
     }
 
     /* Perform context switch */
     next->state = TASK_RUNNING;
     next->switches++;
-    sched.context_switches++;
+    sched.context_switches++;  /* Racy but acceptable for stats */
 
     /*
      * If current task is terminated, mark it as zombie for cleanup.
@@ -419,7 +545,7 @@ void schedule(void)
 
     task_set_current(next);
 
-    spin_unlock_irqrestore(&sched.lock, flags);
+    spin_unlock_irqrestore(&rq->lock, flags);
 
     /* switch_to saves current context and restores next's context */
     switch_to(current, next);
@@ -439,6 +565,7 @@ void yield(void)
 void scheduler_start(void)
 {
     uint32_t this_cpu = cpu_id();
+    struct cpu_runqueue *rq = &sched.cpu[this_cpu];
 
     if (!sched.initialized) {
         panic("scheduler_start: scheduler not initialized");
@@ -446,17 +573,16 @@ void scheduler_start(void)
 
     INFO("CPU %u: Starting scheduler", this_cpu);
 
-    irq_flags_t flags = spin_lock_irqsave(&sched.lock);
+    irq_flags_t flags = spin_lock_irqsave(&rq->lock);
 
     /* Pick first task */
     struct task *first = pick_next_task(this_cpu);
     if (!first) {
-        spin_unlock_irqrestore(&sched.lock, flags);
+        spin_unlock_irqrestore(&rq->lock, flags);
         panic("scheduler_start: no tasks to run");
     }
 
     /* Remove from queue */
-    struct cpu_runqueue *rq = &sched.cpu[this_cpu];
     if (first != rq->idle_task && rq->head == first) {
         rq->head = first->next;
         if (!rq->head) {
@@ -467,13 +593,13 @@ void scheduler_start(void)
 
     first->state = TASK_RUNNING;
     first->switches++;
-    sched.context_switches++;
+    sched.context_switches++;  /* Racy but acceptable for stats */
 
     task_set_current(first);
 
     INFO("CPU %u: Switching to first task: '%s'", this_cpu, first->name);
 
-    spin_unlock_irqrestore(&sched.lock, flags);
+    spin_unlock_irqrestore(&rq->lock, flags);
 
     /* Switch to first task (NULL = no previous context to save) */
     switch_to(NULL, first);
@@ -496,31 +622,34 @@ void scheduler_tick(void)
 
 /*
  * Get scheduler statistics.
+ *
+ * Note: Stats are read without locking (racy but acceptable).
+ * This avoids lock contention for frequent stats queries.
  */
 void scheduler_get_stats(struct sched_stats *stats)
 {
     if (!stats) return;
 
-    irq_flags_t flags = spin_lock_irqsave(&sched.lock);
-
+    /* Read global stats (racy but acceptable for diagnostics) */
     stats->task_count = sched.task_count;
+    stats->context_switches = sched.context_switches;
+    stats->timer_ticks = sched.timer_ticks;
+
+    /* Sum ready counts from all CPUs */
     stats->ready_count = 0;
     for (uint32_t i = 0; i < cpu_count; i++) {
         stats->ready_count += sched.cpu[i].ready_count;
     }
-    stats->context_switches = sched.context_switches;
-    stats->timer_ticks = sched.timer_ticks;
-
-    spin_unlock_irqrestore(&sched.lock, flags);
 }
 
 /*
  * Dump scheduler state for debugging.
+ *
+ * Locks each CPU queue individually while dumping it.
  */
 void scheduler_dump(void)
 {
-    irq_flags_t flags = spin_lock_irqsave(&sched.lock);
-
+    /* Print global stats (racy but acceptable for debug output) */
     uart_puts("\nScheduler State:\n");
     uart_printf("  Initialized:      %s\n", sched.initialized ? "yes" : "no");
     uart_printf("  Task count:       %u\n", sched.task_count);
@@ -533,15 +662,17 @@ void scheduler_dump(void)
                     current->name, current->id, cpu_id());
     }
 
-    /* Dump per-CPU run queues */
+    /* Dump per-CPU run queues (lock each individually) */
     for (uint32_t i = 0; i < cpu_count; i++) {
         struct cpu_runqueue *rq = &sched.cpu[i];
+        irq_flags_t flags = spin_lock_irqsave(&rq->lock);
+
         uart_printf("  CPU %u queue (%u): ", i, rq->ready_count);
 
         if (rq->head) {
             struct task *t = rq->head;
             while (t) {
-                uart_printf("%s", t->name);
+                uart_printf("%s[p%u]", t->name, t->effective_priority);
                 if (t->next) uart_puts(" -> ");
                 t = t->next;
             }
@@ -549,7 +680,119 @@ void scheduler_dump(void)
         } else {
             uart_puts("(empty)\n");
         }
+
+        spin_unlock_irqrestore(&rq->lock, flags);
+    }
+}
+
+/*
+ * Isolate a core from general scheduling.
+ *
+ * Isolated cores only run tasks that are explicitly pinned to them
+ * via cpu_affinity. Tasks with CPU_AFFINITY_ANY will not be placed
+ * on isolated cores.
+ *
+ * Use for real-time or latency-sensitive workloads that need
+ * dedicated CPU time without interference from other tasks.
+ *
+ * @cpu: CPU ID to isolate
+ *
+ * Returns: 0 on success, -1 if invalid CPU
+ */
+int sched_isolate_core(uint32_t cpu)
+{
+    if (cpu >= cpu_count) {
+        return -1;
     }
 
-    spin_unlock_irqrestore(&sched.lock, flags);
+    /* Cannot isolate CPU 0 (boot CPU runs system tasks) */
+    if (cpu == 0) {
+        WARN("Cannot isolate CPU 0 (boot CPU)");
+        return -1;
+    }
+
+    sched.isolated_cores |= (1U << cpu);
+    INFO("CPU %u: isolated from general scheduling", cpu);
+    return 0;
+}
+
+/*
+ * Remove core isolation.
+ *
+ * @cpu: CPU ID to un-isolate
+ *
+ * Returns: 0 on success, -1 if invalid CPU
+ */
+int sched_unisolate_core(uint32_t cpu)
+{
+    if (cpu >= cpu_count) {
+        return -1;
+    }
+
+    sched.isolated_cores &= ~(1U << cpu);
+    INFO("CPU %u: returned to general scheduling", cpu);
+    return 0;
+}
+
+/*
+ * Check if a core is isolated.
+ *
+ * @cpu: CPU ID to check
+ *
+ * Returns: 1 if isolated, 0 if not (or invalid CPU)
+ */
+int sched_is_core_isolated(uint32_t cpu)
+{
+    if (cpu >= cpu_count) {
+        return 0;
+    }
+    return (sched.isolated_cores & (1U << cpu)) != 0;
+}
+
+/*
+ * Get the bitmask of isolated cores.
+ */
+uint32_t sched_get_isolated_cores(void)
+{
+    return sched.isolated_cores;
+}
+
+/*
+ * Set task CPU affinity.
+ *
+ * If the task is currently in a run queue, it will be migrated
+ * to the new target CPU.
+ */
+int sched_set_task_affinity(struct task *task, uint32_t cpu)
+{
+    if (!task) {
+        return -1;
+    }
+
+    /* Validate CPU (CPU_AFFINITY_ANY is a special value) */
+    if (cpu != CPU_AFFINITY_ANY && cpu >= cpu_count) {
+        return -1;
+    }
+
+    uint32_t old_affinity = task->cpu_affinity;
+    task->cpu_affinity = cpu;
+
+    /*
+     * If affinity changed and task is ready, migrate to appropriate CPU.
+     * Running tasks will be placed correctly on next schedule().
+     */
+    if (task->state == TASK_READY && old_affinity != cpu) {
+        uint32_t target;
+        if (cpu == CPU_AFFINITY_ANY) {
+            target = find_target_cpu();
+        } else {
+            target = cpu;
+        }
+
+        if (target != task->assigned_cpu) {
+            sched_migrate_task(task, target);
+        }
+    }
+
+    return 0;
 }

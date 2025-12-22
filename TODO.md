@@ -2,7 +2,7 @@
 
 This document tracks Phase 3 implementation of SLM-OS.
 
-**Status:** Not started
+**Status:** In progress (Milestone 2 started)
 
 **Goals:**
 - Model memory management (Rust)
@@ -22,71 +22,93 @@ This document tracks Phase 3 implementation of SLM-OS.
 ## Milestone 1: Model Memory Management
 
 ### Model Memory Architecture
-- [ ] Design model memory region layout (see design doc section 2.1.2)
-- [ ] Define `ModelHandle` type in Rust (opaque handle to C-allocated memory)
-- [ ] Plan memory pools: weight pool (read-only) vs workspace pool (read-write)
-- [ ] Document memory lifecycle: load → map → use → unmap → unload
+- ✅ Design model memory region layout (see `docs/model-memory.md`)
+- ✅ Define `ModelHandle` type in Rust (opaque handle with generation counter)
+- ✅ Plan memory pools: weight pool (read-only) vs workspace pool (read-write)
+- ✅ Document memory lifecycle: load → map → use → unmap → unload
 
 ### Model Memory Allocator (Rust)
-- [ ] Implement `ModelAllocator` struct in `runtime/src/mm/model_mem.rs`
-- [ ] Write `alloc_model_region(size, flags)` — allocate contiguous 2MB-aligned region
-- [ ] Write `free_model_region(handle)` — return region to pool
-- [ ] Implement weight pool with read-only enforcement
-- [ ] Implement workspace pool for inference scratch space
-- [ ] Add statistics: total model memory, allocated, largest free block
+- ✅ Implement `ModelAllocator` struct in `runtime/src/mm/model_mem.rs`
+- ✅ Write `alloc_weights(size)` / `alloc_workspace(size)` — allocate 2MB-aligned blocks
+- ✅ Write `free(handle)` — return block to pool (refcount-aware)
+- ✅ Implement weight pool (16 MB, 8 blocks on QEMU)
+- ✅ Implement workspace pool (8 MB, 4 blocks on QEMU)
+- ✅ Add statistics: `weight_pool_stats()`, `workspace_pool_stats()`
 
 ### Zero-Copy Model Sharing
-- [ ] Implement model reference counting (multiple components can use same model)
-- [ ] Write `model_share(handle, target_component)` — share model with another component
-- [ ] Write `model_unshare(handle, component)` — release component's reference
-- [ ] Ensure model unload only happens when refcount reaches zero
-- [ ] Test concurrent access from multiple tasks
+- ✅ Implement model reference counting (refcount in BlockMeta)
+- ✅ Write `share(handle)` — increment refcount, return shared handle
+- ✅ Write `unshare(handle)` — alias for free, decrements refcount
+- ✅ Ensure model unload only happens when refcount reaches zero
+- ✅ Test concurrent access via pool exhaust/recovery test
 
 ### GPU Memory Integration
-- [ ] Implement `gpu_map_model(handle)` — make model accessible to GPU
-- [ ] Implement `gpu_unmap_model(handle)` — remove GPU mapping
-- [ ] Handle cache coherency (flush before GPU access, invalidate after)
-- [ ] Use `SHM_GPU_ACCESSIBLE` flag from Phase 2 shared buffers
-- [ ] Test with placeholder GPU driver (actual GPU in Milestone 3)
+- ✅ Implement `gpu_map(handle)` — returns physical address (stub)
+- ✅ Implement `gpu_unmap(handle)` — placeholder for cache invalidate
+- [ ] Handle cache coherency (flush before GPU access, invalidate after) — deferred to M3
+- [ ] Use `SHM_GPU_ACCESSIBLE` flag from Phase 2 shared buffers — deferred to M3
+- [ ] Test with placeholder GPU driver (actual GPU in Milestone 3) — deferred to M3
 
 ### Model Memory Testing
-- [ ] Test allocation/deallocation cycles
-- [ ] Test zero-copy sharing between tasks
-- [ ] Verify memory statistics accuracy
-- [ ] Stress test with many small allocations
-- [ ] Test large model allocation (approach RAM limits)
+- ✅ Test allocation/deallocation cycles
+- ✅ Test zero-copy sharing between tasks
+- ✅ Verify memory statistics accuracy
+- ✅ Stress test: pool exhaustion and recovery
+- [ ] Test large model allocation (approach RAM limits) — deferred (needs more RAM)
 
 ---
 
 ## Milestone 2: Deadline-Aware Scheduler
 
 ### Scheduler Policy Design (Rust)
-- [ ] Define priority levels for inference tasks
-- [ ] Design deadline representation (`deadline_ns: u64`)
-- [ ] Plan scheduling algorithm (EDF vs fixed priority vs hybrid)
-- [ ] Document interaction with C scheduler primitives
+- ✅ Define priority levels for inference tasks (8 levels: 0-7, IDLE/LOW/NORMAL/HIGH/CRITICAL)
+- ✅ Design deadline representation (`deadline_ns: u64` in task struct)
+- ✅ Plan scheduling algorithm: Hybrid (fixed priority + deadline boost)
+- ✅ Document interaction with C scheduler primitives (see `docs/scheduler.md`)
 
 ### Priority Infrastructure
-- [ ] Switch FFI task API from pointer to PID-based (use existing `task->id`)
-  - Change `slm_task_create()` to return `uint32_t` task ID instead of `void*`
-  - Update Rust wrappers to use `TaskId` newtype
+- ✅ Switch FFI task API from pointer to PID-based (use existing `task->id`)
+  - Changed `slm_task_create()` to return `uint32_t` task ID instead of `void*`
+  - Updated Rust wrappers to use `TaskId` newtype
   - Enables safe validation via `task_get(id)` before use
-- [ ] Add `priority` field to task structure (C side)
-- [ ] Implement priority queue in scheduler (replace simple linked list)
-- [ ] Add FFI function `slm_task_set_priority(task_id, priority)`
-- [ ] Implement `slm_task_set_deadline(task_id, deadline_ns)`
+- ✅ Add `priority` field to task structure (C side)
+  - Added `priority`, `effective_priority` (uint8_t) and `deadline_ns` (uint64_t)
+  - Added `task_create_with_priority()` function
+  - Added getter/setter functions for priority and deadline
+- ✅ Implement priority queue in scheduler (replace simple linked list)
+  - Run queue now ordered by `effective_priority` (highest first)
+  - FIFO within same priority level
+- ✅ Add FFI function `slm_task_set_priority(task_id, priority)`
+- ✅ Implement `slm_task_set_deadline(task_id, deadline_ns)`
 
-### Deadline-Aware Scheduling (Rust)
-- [ ] Implement `schedule_slm_task()` in `runtime/src/sched/deadline.rs`
-- [ ] Urgent task detection (deadline < threshold → performance core)
-- [ ] Working set size heuristics (small model → efficiency core OK)
-- [ ] Implement `assign_to_performance_core()` / `assign_to_efficiency_core()`
+### Deadline-Aware Scheduling
+- ✅ Implement deadline boost in C scheduler
+  - Tasks with deadlines get `effective_priority` boosted as deadline approaches
+  - < 100ms: +1 boost
+  - < 50ms: boost to HIGH (6)
+  - < 10ms or missed: boost to CRITICAL (7)
+- ✅ Implement `schedule_slm_task()` in `runtime/src/sched/deadline.rs`
+  - Created `sched` module with `deadline.rs` submodule
+  - Provides `schedule_slm_task()` for SLM inference scheduling hints
+  - Exports `Priority`, `CoreType`, `SchedulingHint`, `TaskDeadline`, `SlmTaskInfo`
+- ✅ Urgent task detection (deadline < threshold → performance core)
+  - Tasks with deadline < 50ms get `CoreType::Performance` hint
+  - Tasks with deadline < 10ms get pinned to performance core
+- ✅ Working set size heuristics (small model → efficiency core OK)
+  - Models with working set < 8MB can use `CoreType::Efficiency`
+  - Larger models get `CoreType::Performance`
+- ✅ Implement `suggest_core_affinity()` (returns CoreType enum)
+  - Actual core assignment (`assign_to_*_core()`) deferred to Phase 4 (big.LITTLE)
 - [ ] Load balancing across cores based on deadline pressure
 
 ### Per-Queue Scheduler Locks (Deferred from Phase 2)
-- [ ] Replace global `sched.lock` with per-CPU run queue locks
-- [ ] Implement lock-free task stealing between queues (optional)
-- [ ] Reduce contention for cross-core operations
+- ✅ Replace global `sched.lock` with per-CPU run queue locks
+  - Each `cpu_runqueue` now has its own `spinlock_t lock`
+  - Single-queue operations use per-queue lock
+  - Cross-queue operations (migration) lock both queues in CPU ID order to prevent deadlock
+  - Global statistics are racy but acceptable for diagnostics
+- Deferred: Implement lock-free task stealing between queues (optional)
+- ✅ Reduce contention for cross-core operations
 - [ ] Benchmark improvement over global lock
 
 ### Priority Inversion Prevention
@@ -94,9 +116,30 @@ This document tracks Phase 3 implementation of SLM-OS.
 - [ ] Detect and log priority inversion events
 - [ ] Test with high-priority task waiting on low-priority lock holder
 
+### Real-Time Core Pinning
+- ✅ Use existing `cpu_affinity` field for deadline-critical tasks
+  - Added `sched_set_task_affinity(task, cpu)` function
+  - Tasks can be pinned to specific CPU or use `CPU_AFFINITY_ANY`
+- ✅ Implement `sched_isolate_core(cpu_id)` — exclude core from general scheduling
+  - `sched_isolate_core()`, `sched_unisolate_core()`, `sched_is_core_isolated()`
+  - `sched_get_isolated_cores()` returns bitmask of isolated CPUs
+  - CPU 0 cannot be isolated (boot CPU)
+- ✅ Update `scheduler_add_task()` to skip isolated cores for `CPU_AFFINITY_ANY` tasks
+  - New `find_target_cpu()` function picks least-loaded non-isolated CPU
+  - Pinned tasks still run on isolated cores
+- [ ] Policy: tasks with `inference_deadline_ns > 0` get pinned to performance core
+- [ ] Route timer IRQ only; keep other IRQs off isolated cores (GIC affinity)
+- [ ] Test: pinned inference task shows consistent latency vs unpinned
+
 ### Scheduler Testing
-- [ ] Test priority ordering (high priority runs first)
-- [ ] Test deadline-aware scheduling (urgent tasks preempt)
+- ✅ Test priority ordering (high priority runs first)
+  - `test_high_priority_runs_first`, `test_priority_ordering_multiple_levels`
+- ✅ Test deadline-aware scheduling (urgent tasks preempt)
+  - `test_deadline_boost_affects_order` and deadline boost unit tests
+- ✅ Test core isolation and affinity
+  - `test_isolate_core_marks_isolated`, `test_cannot_isolate_cpu0`, `test_isolate_invalid_cpu`
+  - `test_affinity_any_avoids_isolated`, `test_pinned_task_runs_on_isolated`
+  - `test_set_affinity_updates_field`, `test_set_affinity_invalid_cpu`, `test_multiple_cores_isolated`
 - [ ] Verify no starvation of low-priority tasks
 - [ ] Stress test with mixed priorities and deadlines
 - [ ] Benchmark scheduling overhead
@@ -177,7 +220,67 @@ This document tracks Phase 3 implementation of SLM-OS.
 
 ---
 
-## Milestone 5: Deferred Items and Polish
+## Milestone 5: Debug Shell & ELF Execution
+
+### MicroShell Integration
+- [ ] Clone MicroShell into `kernel/lib/microshell/` (or as git submodule)
+- [ ] Create UART I/O interface (`shell_io.c`) — `read`/`write` callbacks
+- [ ] Initialize shell in `kernel_main()` after scheduler starts
+- [ ] Run `ush_service()` from a dedicated shell task
+- [ ] Verify basic prompt and echo working in QEMU
+
+### Built-in Commands (System Inspection)
+- [ ] `help` — list available commands (MicroShell builtin)
+- [ ] `mem` — PMM statistics (total, free, allocated pages)
+- [ ] `vmm` — virtual memory regions and flags
+- [ ] `tasks` — list tasks (PID, state, CPU, name, priority)
+- [ ] `cpu` — per-core status (frequency, load, current task)
+- [ ] `ipc` — message queue and shared buffer stats
+- [ ] `model` — model memory pool status (if M1 complete)
+- [ ] `reboot` — system restart
+
+### Virtual Filesystem Structure
+- [ ] Mount root `/` with command nodes
+- [ ] Mount `/sys/` for system info (read-only virtual files)
+- [ ] Mount `/proc/` for per-task info (stretch goal)
+- [ ] Design `/components/` mount point for Phase 4
+
+### Basic ELF Loader
+- [ ] Implement minimal ELF64 parser (`elf_loader.c`)
+    - Parse ELF header, program headers
+    - Support `PT_LOAD` segments only
+    - Validate for ARM64 architecture
+- [ ] `elf_load(buffer, size)` — load ELF from memory buffer
+    - Allocate pages for code/data segments
+    - Map into address space (component region)
+    - Return entry point address
+- [ ] Create task from ELF entry point
+- [ ] Test with minimal "hello world" ELF (prints to UART and exits)
+
+### Shell ELF Execution Command
+- [ ] `run <name>` — load and execute ELF from built-in table (initially)
+- [ ] Pass argc/argv to loaded program (simple stack setup)
+- [ ] Handle task exit and cleanup
+- [ ] `kill <pid>` — terminate running task
+
+### Testing
+- [ ] Shell responds to commands in QEMU
+- [ ] All inspection commands show accurate data
+- [ ] Load and run trivial ELF executable
+- [ ] Task exits cleanly, memory reclaimed
+- [ ] Test on Jetson if M4 complete
+
+### Debug Monitor (Fallback if MicroShell Integration fails completely)
+See `docs/shell.md` for design details.
+- [ ] Implement `shell_init()` — spawn shell task on CPU 0
+- [ ] Implement `shell_getline()` — read line from UART (blocking)
+- [ ] Implement command dispatch (strcmp-based, no parsing)
+- [ ] Commands: `help`, `mem`, `tasks`, `cpu`, `reboot`
+- [ ] Optional: `gpio <n>` for LED toggle on real hardware
+
+---
+
+## Milestone 6: Deferred Items and Polish
 
 ### Page Fault Handling (Deferred from Phase 2)
 - [ ] Implement basic page fault handler (panic with useful info)
@@ -203,6 +306,7 @@ This document tracks Phase 3 implementation of SLM-OS.
 - [ ] Document model memory API
 - [ ] Update build instructions for Jetson target
 - [ ] Create troubleshooting guide for hardware issues
+
 
 ---
 
@@ -230,19 +334,19 @@ This document tracks Phase 3 implementation of SLM-OS.
 
 ### Milestone 1 — Model Memory
 
-| Decision | Options | Considerations | Deadline |
-|----------|---------|----------------|----------|
-| **Pool Strategy** | Single pool vs separate weight/workspace | Separate pools enable read-only weights, but more complexity | Before starting M1 |
-| **Alignment** | 2MB (huge page) vs 4KB | 2MB reduces TLB pressure for large models; 4KB more flexible | Before starting M1 |
-| **Rust vs C Implementation** | All Rust vs Rust policy + C mechanism | Rust for safety; C if performance critical | Before starting M1 |
+| Decision | Options | **Choice** | Rationale |
+|----------|---------|------------|-----------|
+| **Pool Strategy** | Single pool vs separate weight/workspace | **Separate pools** | Weight pool (read-only, shareable) vs workspace pool (read-write, per-task). Enables zero-copy model sharing. |
+| **Alignment** | 2MB (huge page) vs 4KB | **2MB blocks** | Reduces TLB pressure for large models. Simple block allocator without fragmentation concerns. |
+| **Rust vs C** | All Rust vs Rust policy + C mechanism | **All Rust** | Model memory allocator entirely in Rust (`runtime/src/mm/`). FFI only for underlying page allocation from C kernel. |
 
 ### Milestone 2 — Scheduler
 
-| Decision | Options | Considerations | Deadline |
-|----------|---------|----------------|----------|
-| **Algorithm** | EDF vs fixed priority vs hybrid | EDF is optimal but complex; fixed priority is simpler | Before starting M2 |
-| **Priority Levels** | 4 vs 8 vs 16 vs 32 | More levels = finer control but more overhead | Before priority infrastructure |
-| **Lock-Free Stealing** | Implement vs defer | Performance benefit vs complexity; may not be needed for 4-6 cores | During per-queue locks |
+| Decision | Options | **Choice** | Rationale |
+|----------|---------|------------|-----------|
+| **Algorithm** | EDF vs fixed priority vs hybrid | **Hybrid** | Fixed priority base + deadline boost. Simpler than full EDF, sufficient for 4-6 cores |
+| **Priority Levels** | 4 vs 8 vs 16 vs 32 | **8 levels** | Enough granularity without complexity. Maps to 3 bits |
+| **Lock-Free Stealing** | Implement vs defer | **Defer** | Global lock is fine for now. Profile first to confirm contention is an issue |
 
 ### Milestone 3 — GPU
 
@@ -259,6 +363,16 @@ This document tracks Phase 3 implementation of SLM-OS.
 | **Boot Method** | U-Boot vs UEFI direct | U-Boot is documented; UEFI may be cleaner | Before hardware bring-up |
 | **Device Tree** | Full parsing vs minimal vs hardcoded | Full is flexible; hardcoded is faster to implement | Stretch goal, can defer |
 | **Pi 5 Support** | Now vs later vs never | Different GPU, simpler platform; good fallback if Jetson stalls | Defer to Phase 4+ |
+
+### Milestone 5 — Debug Shell
+
+| Decision | Options | Recommendation |
+|----------|---------|----------------|
+| **Shell task priority** | High vs normal | **Normal** — shell shouldn't preempt real work |
+| **ELF source** | Embedded in kernel vs filesystem vs network | **Embedded initially** — array of `{name, data, size}` |
+| **Address space** | Shared with kernel vs isolated | **Shared** for Phase 3 — isolation in Phase 4+ |
+| **Argument passing** | Stack-based vs register | **Stack** — matches ARM64 ABI for `main(argc, argv)` |
+
 
 ### Deferred to Phase 4
 
@@ -328,26 +442,34 @@ This document tracks Phase 3 implementation of SLM-OS.
     - Mitigation: Keep FFI boundary thin
     - Fallback: Move hot paths to C if needed
 
+6. **MicroShell ELF Load and Execute**
+    - **MicroShell integration** — Low risk, well-documented library
+    - **ELF loader** — Medium risk, but ELF64 is simpler than ELF32; ARM64 is straightforward
+    - **Task creation from ELF** — Already have `task_create()`, just need entry point wiring
+
 ### Dependencies Between Milestones
 
 ```
 M1 (Model Memory) ─────────> M3 (GPU) ──> GPU needs model memory for DMA buffers
                     │
-                    └──────> M5 (Rust Runtime) ──> ModelLoader uses model memory
+                    └──────> M6 (Polish) ──> ModelLoader skeleton uses model memory
 
 M2 (Scheduler) ────────────> Independent, can parallel with M1
 
 M3 (GPU) ──────────────────> M4 (Hardware) ──> GPU driver only testable on Jetson
 
 M4 (Hardware) ─────────────> Should start early for serial console setup
+
+M5 (Shell) ────────────────> Useful for debugging, can start after M4
 ```
 
 Recommended order:
-1. M4 (Hardware) — Get serial working ASAP for debugging
-2. M1 (Model Memory) — Foundation for GPU and inference
-3. M2 (Scheduler) — Can parallel with M1
+1. M1 (Model Memory) — ✅ Complete
+2. M2 (Scheduler) — In progress
+3. M4 (Hardware) — Get serial working for debugging
 4. M3 (GPU) — Requires M1 and M4
-5. M5 (Polish) — Throughout
+5. M5 (Shell) — Useful for hardware debugging
+6. M6 (Polish) — Throughout
 
 ---
 

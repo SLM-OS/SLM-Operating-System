@@ -95,17 +95,39 @@ uint64_t slm_get_time_ns(void)
  * Task Management
  */
 
-void *slm_task_create(const char *name, slm_task_entry_t entry, void *arg)
+uint32_t slm_task_create(const char *name, slm_task_entry_t entry, void *arg)
 {
     struct task *task = task_create(name, (task_entry_t)entry, arg);
     if (!task) {
-        return (void *)0;
+        return 0;  /* ID 0 is reserved, indicates failure */
     }
 
     /* Add to scheduler */
     scheduler_add_task(task);
 
-    return (void *)task;
+    return task->id;
+}
+
+int slm_task_set_priority(uint32_t task_id, uint8_t priority)
+{
+    struct task *task = task_get(task_id);
+    if (!task) {
+        return SLM_ERR_INVALID;
+    }
+
+    task_set_priority(task, priority);
+    return SLM_OK;
+}
+
+int slm_task_set_deadline(uint32_t task_id, uint64_t deadline_ns)
+{
+    struct task *task = task_get(task_id);
+    if (!task) {
+        return SLM_ERR_INVALID;
+    }
+
+    task_set_deadline(task, deadline_ns);
+    return SLM_OK;
 }
 
 /*

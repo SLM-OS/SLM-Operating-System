@@ -436,14 +436,21 @@ static int vmm_run_tests(void)
     /*
      * Test 6: Dynamic mapping test
      * Map a new 2MB block, verify it's accessible, then unmap
+     *
+     * NOTE: This test requires physical memory beyond what's initially mapped.
+     * On QEMU with only 128MB RAM (0x40000000-0x48000000), all RAM is mapped
+     * at init, so we skip this test. On systems with more RAM, we test at
+     * 128MB offset which should be unmapped but valid physical memory.
      */
     {
-        /* Find an unmapped region - use 256MB offset (beyond our 128MB initial map) */
+        /* Find an unmapped region - use 128MB offset */
         uint64_t test_pa = RAM_BASE + (128 * 1024 * 1024);  /* 0x4800_0000 */
         uint64_t test_va = test_pa;  /* Identity map for simplicity */
 
-        /* Should not be mapped initially */
-        if (vmm_is_mapped(test_va)) {
+        /* Check if this address is beyond available RAM */
+        if (test_pa >= RAM_BASE + RAM_SIZE) {
+            uart_puts("  [SKIP] Dynamic map test: no unmapped RAM available\n");
+        } else if (vmm_is_mapped(test_va)) {
             uart_printf("  [FAIL] VA 0x%lx already mapped before test\n", test_va);
             errors++;
         } else {

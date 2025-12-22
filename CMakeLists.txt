@@ -87,13 +87,23 @@ set(KERNEL_SOURCES
     # kernel/gpu/memory_map.c
 )
 
+# Test sources (Unity framework)
+set(TEST_SOURCES
+    kernel/tests/unity.c
+    kernel/tests/test_harness.c
+    kernel/tests/test_ipc.c
+    kernel/tests/test_scheduler.c
+    kernel/tests/test_model_mem.c
+)
+
 # Include directories
 set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/include
+    ${CMAKE_SOURCE_DIR}/kernel/tests
 )
 
 # Build kernel ELF
-add_executable(slmos.elf ${KERNEL_SOURCES})
+add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
 target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
 
 # Link with Rust runtime (if it exists)

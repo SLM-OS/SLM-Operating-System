@@ -79,13 +79,19 @@ static void task_entry_wrapper(void)
 }
 
 /*
- * Create a new task.
+ * Create a new task with specified priority.
  */
-struct task *task_create(const char *name, task_entry_t entry, void *arg)
+struct task *task_create_with_priority(const char *name, task_entry_t entry,
+                                       void *arg, uint8_t priority)
 {
     irq_flags_t flags;
     struct task *task;
     uint32_t task_id;
+
+    /* Clamp priority to valid range */
+    if (priority > TASK_PRIORITY_MAX) {
+        priority = TASK_PRIORITY_MAX;
+    }
 
     /* Allocate stack first (outside lock - pmm has its own locking) */
     size_t stack_pages = TASK_STACK_SIZE / 4096;
@@ -121,6 +127,9 @@ struct task *task_create(const char *name, task_entry_t entry, void *arg)
     task->next = NULL;
     task->cpu_affinity = CPU_AFFINITY_ANY;  /* Can run on any CPU */
     task->assigned_cpu = 0;                  /* Default to CPU 0 */
+    task->priority = priority;
+    task->effective_priority = priority;
+    task->deadline_ns = 0;                   /* No deadline by default */
     task->switches = 0;
 
     /* Set up stack (grows downward on ARM64) */
@@ -142,10 +151,19 @@ struct task *task_create(const char *name, task_entry_t entry, void *arg)
     task->context.x19 = (uint64_t)entry;
     task->context.x20 = (uint64_t)arg;
 
-    DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p)",
-                task->name, task->id, task->stack_base, task->stack_top);
+    DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
+                task->name, task->id, task->stack_base, task->stack_top,
+                task->priority);
 
     return task;
+}
+
+/*
+ * Create a new task with default priority.
+ */
+struct task *task_create(const char *name, task_entry_t entry, void *arg)
+{
+    return task_create_with_priority(name, entry, arg, TASK_PRIORITY_DEFAULT);
 }
 
 /*
@@ -265,4 +283,60 @@ uint32_t task_get_affinity(struct task *task)
 {
     if (!task) return CPU_AFFINITY_ANY;
     return task->cpu_affinity;
+}
+
+/*
+ * Set task priority.
+ */
+void task_set_priority(struct task *task, uint8_t priority)
+{
+    if (!task) return;
+
+    /* Clamp to valid range */
+    if (priority > TASK_PRIORITY_MAX) {
+        priority = TASK_PRIORITY_MAX;
+    }
+
+    task->priority = priority;
+
+    /* Update effective priority (may be boosted by deadline) */
+    if (task->effective_priority < priority) {
+        task->effective_priority = priority;
+    }
+}
+
+/*
+ * Get task priority.
+ */
+uint8_t task_get_priority(struct task *task)
+{
+    if (!task) return TASK_PRIORITY_NORMAL;
+    return task->priority;
+}
+
+/*
+ * Get effective task priority (includes deadline boost).
+ */
+uint8_t task_get_effective_priority(struct task *task)
+{
+    if (!task) return TASK_PRIORITY_NORMAL;
+    return task->effective_priority;
+}
+
+/*
+ * Set task deadline.
+ */
+void task_set_deadline(struct task *task, uint64_t deadline_ns)
+{
+    if (!task) return;
+    task->deadline_ns = deadline_ns;
+}
+
+/*
+ * Get task deadline.
+ */
+uint64_t task_get_deadline(struct task *task)
+{
+    if (!task) return 0;
+    return task->deadline_ns;
 }

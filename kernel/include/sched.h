@@ -1,8 +1,9 @@
 /*
  * sched.h - Scheduler for SLM-OS
  *
- * Per-core round-robin scheduler with preemptive timer support.
- * Uses a global lock for simplicity (sufficient for 4-6 cores).
+ * Per-core priority scheduler with preemptive timer support.
+ * Each CPU has its own run queue with a per-queue lock to reduce contention.
+ * Cross-queue operations (migration) lock both queues in CPU ID order.
  */
 
 #ifndef SCHED_H
@@ -134,5 +135,56 @@ void scheduler_tick(void);
  * @new: Task to restore context to
  */
 extern void switch_to(struct task *old, struct task *new);
+
+/*
+ * Core isolation for real-time / latency-sensitive workloads.
+ *
+ * Isolated cores only run tasks that are explicitly pinned to them
+ * via cpu_affinity. Tasks with CPU_AFFINITY_ANY skip isolated cores.
+ */
+
+/*
+ * Isolate a core from general scheduling.
+ *
+ * @cpu: CPU ID to isolate (cannot be CPU 0)
+ *
+ * Returns: 0 on success, -1 if invalid or CPU 0
+ */
+int sched_isolate_core(uint32_t cpu);
+
+/*
+ * Remove core isolation, returning it to general scheduling.
+ *
+ * @cpu: CPU ID to un-isolate
+ *
+ * Returns: 0 on success, -1 if invalid CPU
+ */
+int sched_unisolate_core(uint32_t cpu);
+
+/*
+ * Check if a core is isolated.
+ *
+ * @cpu: CPU ID to check
+ *
+ * Returns: 1 if isolated, 0 if not (or invalid CPU)
+ */
+int sched_is_core_isolated(uint32_t cpu);
+
+/*
+ * Get the bitmask of isolated cores.
+ *
+ * Returns: Bitmask where bit N is set if CPU N is isolated
+ */
+uint32_t sched_get_isolated_cores(void);
+
+/*
+ * Set task CPU affinity.
+ *
+ * @task: Task to modify
+ * @cpu:  CPU ID to pin to, or CPU_AFFINITY_ANY for any non-isolated core
+ *
+ * Returns: 0 on success, -1 if invalid CPU
+ */
+int sched_set_task_affinity(struct task *task, uint32_t cpu);
 
 #endif /* SCHED_H */

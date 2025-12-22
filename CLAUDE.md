@@ -111,6 +111,19 @@ Documentation will be submitted to an academic advisor. Avoid "you/your" languag
 4. **Build directory on Google Drive**
    - See `docs/building.md` — file locking during sync can cause errors.
 
+5. **CLion file locking during build**
+   - Symptoms: "Permission denied" when linking `slmos.elf`, or CMake cache errors
+   - Affected files: `slmos.elf`, `CMakeConfigureLog.yaml`, `CompilerIdC.exe`
+   - **Root cause:** Microsoft's Incremental Linker (`link.exe`) holds file locks that persist even after CLion closes. Requires full system reboot to release.
+   - **Current workaround:** Build to local temp directory: `C:/temp/slmos-build`
+   - **CLion settings that may help** (Settings > Build > CMake):
+     - Disable "Reload CMake project on editing CMakeLists.txt"
+     - Disable "Auto-reload CMake on external changes" (Advanced Settings)
+     - Disable "Sync project after changes in the build scripts"
+     - Disable "Sync external changes when switching to the IDE window"
+     - Disable "Sync external changes periodically when the IDE is inactive"
+   - **Note:** Issue may be exacerbated by project being on Google Drive
+
 ---
 
 *Last updated: December 2025*
