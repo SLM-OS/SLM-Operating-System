@@ -2,7 +2,7 @@
 
 Design documentation for the SLM-OS model memory allocator (Phase 3, Milestone 1).
 
-**Status:** Implementation in progress
+**Status:** Complete (December 2025)
 
 ---
 
@@ -28,14 +28,14 @@ The model memory system provides specialized allocation for AI model weights and
 │  │  Weight Pool (Read-Only)                                    │    │
 │  │  - Model parameters, embeddings, static data                │    │
 │  │  - Long-lived (loaded once, used many times)                │    │
-│  │  - Default: 32 MB (16 × 2MB blocks)                         │    │
+│  │  - Default: 16 MB (8 × 2MB blocks)                          │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │  Workspace Pool (Read-Write)                                │    │
 │  │  - Activation tensors, KV cache, inference scratch          │    │
 │  │  - Per-inference (allocated, used, freed)                   │    │
-│  │  - Default: 16 MB (8 × 2MB blocks)                          │    │
+│  │  - Default: 8 MB (4 × 2MB blocks)                           │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -47,9 +47,9 @@ Default configuration targets QEMU with 128MB RAM:
 
 | Pool | Size | Blocks | Purpose |
 |------|------|--------|---------|
-| Weight | 32 MB | 16 | Model weights (read-only after load) |
-| Workspace | 16 MB | 8 | Inference scratch space |
-| **Total** | **48 MB** | **24** | Reserved for model memory |
+| Weight | 16 MB | 8 | Model weights (read-only after load) |
+| Workspace | 8 MB | 4 | Inference scratch space |
+| **Total** | **24 MB** | **12** | Reserved for model memory |
 
 On Jetson Orin Nano (4-8 GB RAM), these can be scaled significantly larger.
 
