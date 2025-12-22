@@ -19,7 +19,8 @@ kernel/tests/
 ├── test_ipc.c        # IPC test suite
 ├── test_scheduler.c  # Scheduler tests (29 tests: priority, deadline, isolation, benchmarks)
 ├── test_model_mem.c  # Model memory tests (Rust allocator via FFI)
-└── test_pi_mutex.c   # Priority inheritance mutex tests
+├── test_pi_mutex.c   # Priority inheritance mutex tests
+└── test_gpu.c        # GPU subsystem tests (22 tests)
 ```
 
 ### Available Assertions
@@ -312,6 +313,62 @@ Validates the Rust model memory allocator via FFI. These tests verify actual beh
 | freed_memory_reused | After free, next alloc returns same block address |
 
 Tests run via Unity framework during boot, called from `test_harness_run_all()`.
+
+### GPU Tests (`kernel/tests/test_gpu.c`)
+
+Validates the GPU platform abstraction layer. Since QEMU has no GPU hardware, these tests verify the stub driver implementation, cache coherency code paths, and API contracts. Tests run via Unity framework (22 tests total).
+
+#### Initialization Tests
+
+| Test | Description |
+|------|-------------|
+| test_gpu_available_after_init | GPU is available after kernel initialization |
+| test_gpu_get_info_valid | gpu_get_info() returns valid driver info (stub driver) |
+| test_gpu_get_info_null_returns_error | NULL parameter returns GPU_ERR_INVALID_PARAM |
+
+#### Buffer Allocation Tests
+
+| Test | Description |
+|------|-------------|
+| test_gpu_alloc_returns_valid_buffer | Allocation returns non-NULL cpu_addr and gpu_addr |
+| test_gpu_alloc_memory_is_accessible | Allocated memory can be read and written |
+| test_gpu_alloc_multiple_buffers_distinct | Multiple allocations return different, non-overlapping addresses |
+| test_gpu_alloc_2mb_alignment | GPU_MEM_ALIGN_2MB flag returns 2MB-aligned address |
+| test_gpu_alloc_zero_size_returns_error | Zero size returns GPU_ERR_INVALID_PARAM |
+| test_gpu_alloc_null_buffer_returns_error | NULL buffer returns GPU_ERR_INVALID_PARAM |
+
+#### Buffer Deallocation Tests
+
+| Test | Description |
+|------|-------------|
+| test_gpu_free_releases_memory | Free returns pages to PMM (verified via pmm_get_free_pages()) |
+| test_gpu_free_null_is_safe | Calling gpu_free(NULL) doesn't crash |
+| test_gpu_free_clears_buffer | After free, buffer fields are zeroed |
+
+#### Cache Coherency Tests
+
+| Test | Description |
+|------|-------------|
+| test_cache_clean_executes | DC CVAC cache clean executes without fault |
+| test_cache_invalidate_executes | DC IVAC cache invalidate executes without fault |
+| test_cache_flush_executes | DC CIVAC cache flush executes without fault |
+| test_gpu_sync_for_gpu_executes | gpu_sync_for_gpu() (clean) executes correctly |
+| test_gpu_sync_for_cpu_executes | gpu_sync_for_cpu() (invalidate) executes correctly |
+| test_cache_ops_null_safe | Cache ops with NULL address don't crash |
+| test_cache_ops_zero_size_safe | Cache ops with zero size don't crash |
+
+#### Integration Tests
+
+| Test | Description |
+|------|-------------|
+| test_gpu_buffer_workflow | Full workflow: alloc → write → sync_for_gpu → sync_for_cpu → read → free |
+| test_gpu_alloc_free_cycle | Allocate, free, reallocate — verifies memory reuse |
+| test_gpu_alloc_large_buffer | Allocate and use 1MB buffer |
+
+**Test Notes:**
+- Cache coherency tests verify code paths execute without exceptions, but cannot fully validate cache behavior without real DMA hardware
+- 2MB alignment test verifies the stub driver's over-allocation strategy for alignment
+- Integration tests simulate typical GPU buffer lifecycle patterns
 
 ### FFI Tests (`runtime/src/lib.rs`)
 
