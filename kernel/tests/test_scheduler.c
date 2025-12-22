@@ -13,6 +13,7 @@
 #include "uart.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <limits.h>
 
 /* Test state for tracking task execution order */
 static spinlock_t test_lock = SPINLOCK_INIT;
@@ -81,24 +82,23 @@ static void test_deadline_field_set(void)
  * Test: Distant deadline (> 100ms) does not boost priority
  *
  * This test requires adding task to queue to trigger boost calculation.
- * The task runs on CPU 0 (same as test) so we can check immediately.
+ * Use direct CPU 0 assignment to test boost logic in isolation.
  */
 static void test_distant_deadline_no_boost(void)
 {
-    /* Get current time and set deadline 200ms in future */
-    uint64_t now = slm_get_time_ns();
-    uint64_t deadline = now + (200 * 1000000ULL); /* 200ms */
-
     struct task *t = task_create_with_priority("dist_dl", nop_entry, NULL, TASK_PRIORITY_LOW);
     TEST_ASSERT_NOT_NULL(t);
 
+    /* Set deadline AFTER task creation to minimize elapsed time */
+    uint64_t now = slm_get_time_ns();
+    uint64_t deadline = now + (200 * 1000000ULL); /* 200ms */
     task_set_deadline(t, deadline);
 
     /* Disable interrupts to prevent scheduler from running the task */
     irq_flags_t flags = irq_save();
 
-    /* Add to scheduler - this triggers boost calculation */
-    scheduler_add_task(t);
+    /* Add to CPU 0 directly - this triggers boost calculation */
+    scheduler_add_task_to_cpu(t, 0);
 
     /* With 200ms remaining, no boost should be applied */
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW, t->effective_priority);
@@ -114,21 +114,24 @@ static void test_distant_deadline_no_boost(void)
 
 /*
  * Test: Deadline < 100ms gets +1 boost
+ *
+ * Use 90ms to stay safely in the 50-100ms range.
  */
 static void test_deadline_100ms_boost_plus_one(void)
 {
-    uint64_t now = slm_get_time_ns();
-    uint64_t deadline = now + (80 * 1000000ULL); /* 80ms - within 100ms threshold */
-
-    struct task *t = task_create_with_priority("80ms_dl", nop_entry, NULL, TASK_PRIORITY_LOW);
+    struct task *t = task_create_with_priority("90ms_dl", nop_entry, NULL, TASK_PRIORITY_LOW);
     TEST_ASSERT_NOT_NULL(t);
 
+    /* Set deadline AFTER task creation to minimize elapsed time */
+    uint64_t now = slm_get_time_ns();
+    uint64_t deadline = now + (90 * 1000000ULL); /* 90ms - safely within 50-100ms range */
     task_set_deadline(t, deadline);
 
     /* Disable interrupts to prevent scheduler from running the task */
     irq_flags_t flags = irq_save();
 
-    scheduler_add_task(t);
+    /* Add to CPU 0 directly to test boost logic in isolation */
+    scheduler_add_task_to_cpu(t, 0);
 
     /* Should be boosted by +1 (LOW=2 -> 3) */
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW + 1, t->effective_priority);
@@ -143,23 +146,26 @@ static void test_deadline_100ms_boost_plus_one(void)
 
 /*
  * Test: Deadline < 50ms boosts to HIGH
+ *
+ * Use 45ms to stay safely in the 10-50ms range even after setup time.
  */
 static void test_deadline_50ms_boost_to_high(void)
 {
-    uint64_t now = slm_get_time_ns();
-    uint64_t deadline = now + (30 * 1000000ULL); /* 30ms - within 50ms threshold */
-
-    struct task *t = task_create_with_priority("30ms_dl", nop_entry, NULL, TASK_PRIORITY_LOW);
+    struct task *t = task_create_with_priority("45ms_dl", nop_entry, NULL, TASK_PRIORITY_LOW);
     TEST_ASSERT_NOT_NULL(t);
 
+    /* Set deadline AFTER task creation to minimize elapsed time */
+    uint64_t now = slm_get_time_ns();
+    uint64_t deadline = now + (45 * 1000000ULL); /* 45ms - safely within 10-50ms range */
     task_set_deadline(t, deadline);
 
     /* Disable interrupts to prevent scheduler from running the task */
     irq_flags_t flags = irq_save();
 
-    scheduler_add_task(t);
+    /* Add to CPU 0 directly to test boost logic in isolation */
+    scheduler_add_task_to_cpu(t, 0);
 
-    /* Should be boosted to HIGH */
+    /* Should be boosted to HIGH (not CRITICAL) */
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->effective_priority);
 
     scheduler_remove_task(t);
@@ -172,21 +178,24 @@ static void test_deadline_50ms_boost_to_high(void)
 
 /*
  * Test: Deadline < 10ms boosts to CRITICAL
+ *
+ * Use 5ms offset and CPU 0 for deterministic testing.
  */
 static void test_deadline_10ms_boost_to_critical(void)
 {
-    uint64_t now = slm_get_time_ns();
-    uint64_t deadline = now + (5 * 1000000ULL); /* 5ms - within 10ms threshold */
-
     struct task *t = task_create_with_priority("5ms_dl", nop_entry, NULL, TASK_PRIORITY_LOW);
     TEST_ASSERT_NOT_NULL(t);
 
+    /* Set deadline AFTER task creation to minimize elapsed time */
+    uint64_t now = slm_get_time_ns();
+    uint64_t deadline = now + (5 * 1000000ULL); /* 5ms - within 10ms threshold */
     task_set_deadline(t, deadline);
 
     /* Disable interrupts to prevent scheduler from running the task */
     irq_flags_t flags = irq_save();
 
-    scheduler_add_task(t);
+    /* Add to CPU 0 directly to test boost logic in isolation */
+    scheduler_add_task_to_cpu(t, 0);
 
     /* Should be boosted to CRITICAL */
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, t->effective_priority);
@@ -201,22 +210,24 @@ static void test_deadline_10ms_boost_to_critical(void)
 
 /*
  * Test: Missed deadline (past) boosts to CRITICAL
+ *
+ * Use CPU 0 directly for deterministic testing.
  */
 static void test_missed_deadline_boost_to_critical(void)
 {
-    uint64_t now = slm_get_time_ns();
-    /* Set deadline in the past */
-    uint64_t deadline = now > 1000000ULL ? now - 1000000ULL : 1;
-
     struct task *t = task_create_with_priority("past_dl", nop_entry, NULL, TASK_PRIORITY_LOW);
     TEST_ASSERT_NOT_NULL(t);
 
+    /* Set deadline in the past */
+    uint64_t now = slm_get_time_ns();
+    uint64_t deadline = now > 1000000ULL ? now - 1000000ULL : 1;
     task_set_deadline(t, deadline);
 
     /* Disable interrupts to prevent scheduler from running the task */
     irq_flags_t flags = irq_save();
 
-    scheduler_add_task(t);
+    /* Add to CPU 0 directly to test boost logic in isolation */
+    scheduler_add_task_to_cpu(t, 0);
 
     /* Missed deadline should be CRITICAL */
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, t->effective_priority);
@@ -387,16 +398,30 @@ static void test_high_priority_runs_first(void)
     TEST_ASSERT_NOT_NULL(low);
     TEST_ASSERT_NOT_NULL(high);
 
-    /* Add LOW first, then HIGH - but HIGH should run first due to priority */
-    scheduler_add_task_to_cpu(low, 1);
-    scheduler_add_task_to_cpu(high, 1);
+    /* Add LOW first, then HIGH - but HIGH should run first due to priority.
+     * Use CPU 0 and disable IRQs to add atomically. */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(low, 0);
+    scheduler_add_task_to_cpu(high, 0);
+    irq_restore(flags);
 
-    /* Wait for both tasks to complete */
+    /* Lower our priority below all test tasks so they can run */
+    struct task *self = task_current();
+    uint8_t saved_pri = self->effective_priority;
+    self->priority = TASK_PRIORITY_IDLE;
+    self->effective_priority = TASK_PRIORITY_IDLE;
+
+    /* Wait for both tasks to complete, yielding to let them run */
     int timeout = 100;
     while ((low->state != TASK_TERMINATED || high->state != TASK_TERMINATED) && timeout > 0) {
-        test_delay(50000);
+        yield();
+        test_delay(10000);
         timeout--;
     }
+
+    /* Restore our priority */
+    self->priority = saved_pri;
+    self->effective_priority = saved_pri;
 
     /* Verify execution order: HIGH (2) should run before LOW (1) */
     TEST_ASSERT_EQUAL_INT(2, execution_order[0]); /* HIGH ran first */
@@ -436,23 +461,38 @@ static void test_priority_ordering_multiple_levels(void)
     TEST_ASSERT_NOT_NULL(high);
     TEST_ASSERT_NOT_NULL(critical);
 
-    /* Add in random order - should still execute by priority */
-    scheduler_add_task_to_cpu(normal, 1);
-    scheduler_add_task_to_cpu(idle, 1);
-    scheduler_add_task_to_cpu(critical, 1);
-    scheduler_add_task_to_cpu(low, 1);
-    scheduler_add_task_to_cpu(high, 1);
+    /* Add tasks to CPU 0 (same as test task).
+     * Disable IRQs to prevent preemption while adding all tasks.
+     * Tasks will run when we yield or timer tick occurs. */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(normal, 0);
+    scheduler_add_task_to_cpu(idle, 0);
+    scheduler_add_task_to_cpu(critical, 0);
+    scheduler_add_task_to_cpu(low, 0);
+    scheduler_add_task_to_cpu(high, 0);
+    irq_restore(flags);
 
-    /* Wait for all tasks to complete */
+    /* Lower our priority below all test tasks so they can run */
+    struct task *self = task_current();
+    uint8_t saved_pri = self->effective_priority;
+    self->priority = TASK_PRIORITY_IDLE;
+    self->effective_priority = TASK_PRIORITY_IDLE;
+
+    /* Wait for all tasks to complete, yielding to let them run */
     int timeout = 200;
     while ((idle->state != TASK_TERMINATED ||
             low->state != TASK_TERMINATED ||
             normal->state != TASK_TERMINATED ||
             high->state != TASK_TERMINATED ||
             critical->state != TASK_TERMINATED) && timeout > 0) {
-        test_delay(50000);
+        yield();
+        test_delay(10000);
         timeout--;
     }
+
+    /* Restore our priority */
+    self->priority = saved_pri;
+    self->effective_priority = saved_pri;
 
     /* Verify execution order: CRITICAL(7), HIGH(6), NORMAL(4), LOW(2), IDLE(0) */
     TEST_ASSERT_EQUAL_INT(7, execution_order[0]); /* CRITICAL first */
@@ -494,17 +534,31 @@ static void test_deadline_boost_affects_order(void)
     /* Set urgent deadline (5ms) - will boost to CRITICAL */
     task_set_deadline(urgent, now + (5 * 1000000ULL));
 
-    /* Add no_deadline first, then urgent */
-    scheduler_add_task_to_cpu(no_deadline, 1);
-    scheduler_add_task_to_cpu(urgent, 1);
+    /* Add no_deadline first, then urgent.
+     * Use CPU 0 and disable IRQs to add atomically. */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(no_deadline, 0);
+    scheduler_add_task_to_cpu(urgent, 0);
+    irq_restore(flags);
 
-    /* Wait for completion */
+    /* Lower our priority below all test tasks so they can run */
+    struct task *self = task_current();
+    uint8_t saved_pri = self->effective_priority;
+    self->priority = TASK_PRIORITY_IDLE;
+    self->effective_priority = TASK_PRIORITY_IDLE;
+
+    /* Wait for completion, yielding to let tasks run */
     int timeout = 100;
     while ((no_deadline->state != TASK_TERMINATED ||
             urgent->state != TASK_TERMINATED) && timeout > 0) {
-        test_delay(50000);
+        yield();
+        test_delay(10000);
         timeout--;
     }
+
+    /* Restore our priority */
+    self->priority = saved_pri;
+    self->effective_priority = saved_pri;
 
     /* Urgent (2) should run first despite being added second */
     TEST_ASSERT_EQUAL_INT(2, execution_order[0]); /* Urgent ran first */
@@ -707,6 +761,551 @@ static void test_multiple_cores_isolated(void)
 }
 
 /* ============================================================================
+ * Stress Tests: Scheduler Robustness
+ * ============================================================================ */
+
+/*
+ * Starvation test tracking.
+ * We track interleaved execution to verify:
+ * 1. HIGH priority runs first (priority ordering works)
+ * 2. LOW priority still completes (no starvation)
+ */
+#define STARV_ITERATIONS 5
+static volatile int starv_order[STARV_ITERATIONS * 2];
+static volatile int starv_index = 0;
+
+/* Task records its ID each iteration */
+static void starv_task_entry(void *arg)
+{
+    int id = (int)(uintptr_t)arg;  /* 1=LOW, 2=HIGH */
+
+    for (int i = 0; i < STARV_ITERATIONS; i++) {
+        irq_flags_t flags = spin_lock_irqsave(&test_lock);
+        if (starv_index < STARV_ITERATIONS * 2) {
+            starv_order[starv_index++] = id;
+        }
+        spin_unlock_irqrestore(&test_lock, flags);
+        test_delay(1000);  /* Small delay between iterations */
+    }
+
+    task_exit();
+}
+
+/*
+ * Test: Low-priority tasks are not starved
+ *
+ * Creates one LOW priority task and one HIGH priority task on same CPU.
+ * Verifies:
+ * 1. HIGH priority task runs first (correct priority ordering)
+ * 2. Both tasks complete all iterations (no starvation)
+ * 3. HIGH gets majority of early slots (priority is respected)
+ *
+ * Uses CPU 0 with IRQ protection and lowered test priority for determinism.
+ */
+static void test_no_starvation(void)
+{
+    /* Reset tracking */
+    starv_index = 0;
+    for (int i = 0; i < STARV_ITERATIONS * 2; i++) {
+        starv_order[i] = 0;
+    }
+
+    /* Create tasks: LOW=1, HIGH=2 */
+    struct task *low_task = task_create_with_priority("starv_low",
+        starv_task_entry, (void *)1, TASK_PRIORITY_LOW);
+    struct task *high_task = task_create_with_priority("starv_high",
+        starv_task_entry, (void *)2, TASK_PRIORITY_HIGH);
+
+    TEST_ASSERT_NOT_NULL(low_task);
+    TEST_ASSERT_NOT_NULL(high_task);
+
+    /* Add both tasks to CPU 0 atomically (HIGH should run first due to priority) */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(low_task, 0);
+    scheduler_add_task_to_cpu(high_task, 0);
+    irq_restore(flags);
+
+    /* Lower our priority below all test tasks so they can run */
+    struct task *self = task_current();
+    uint8_t saved_pri = self->effective_priority;
+    self->priority = TASK_PRIORITY_IDLE;
+    self->effective_priority = TASK_PRIORITY_IDLE;
+
+    /* Wait for both to complete */
+    int timeout = 300;
+    while ((low_task->state != TASK_TERMINATED ||
+            high_task->state != TASK_TERMINATED) && timeout > 0) {
+        yield();
+        test_delay(10000);
+        timeout--;
+    }
+
+    /* Restore our priority */
+    self->priority = saved_pri;
+    self->effective_priority = saved_pri;
+
+    /* Verify both completed all iterations (no starvation) */
+    int low_count = 0, high_count = 0;
+    for (int i = 0; i < starv_index; i++) {
+        if (starv_order[i] == 1) low_count++;
+        else if (starv_order[i] == 2) high_count++;
+    }
+    TEST_ASSERT_EQUAL_INT(STARV_ITERATIONS, low_count);
+    TEST_ASSERT_EQUAL_INT(STARV_ITERATIONS, high_count);
+
+    /* Verify HIGH ran first (priority ordering works) */
+    TEST_ASSERT_EQUAL_INT(2, starv_order[0]);
+
+    /* Cleanup */
+    task_destroy(high_task);
+    task_destroy(low_task);
+}
+
+/*
+ * Stress test with priority verification.
+ * We use fewer tasks and put them all on one CPU to get deterministic ordering.
+ */
+#define STRESS_TASK_COUNT 5
+static volatile int stress_order[STRESS_TASK_COUNT];
+static volatile int stress_index = 0;
+
+/* Task records its priority when it starts */
+static void stress_order_task(void *arg)
+{
+    int priority = (int)(uintptr_t)arg;
+
+    irq_flags_t flags = spin_lock_irqsave(&test_lock);
+    if (stress_index < STRESS_TASK_COUNT) {
+        stress_order[stress_index++] = priority;
+    }
+    spin_unlock_irqrestore(&test_lock, flags);
+
+    /* Small delay to ensure we don't exit before recording */
+    test_delay(1000);
+
+    task_exit();
+}
+
+/*
+ * Test: Stress test with mixed priorities and deadlines
+ *
+ * Creates 5 tasks with different priorities on the same CPU.
+ * Verifies they execute in strict priority order.
+ * One LOW priority task has an urgent deadline and should be boosted.
+ */
+static void test_stress_mixed_priorities(void)
+{
+    /* Reset tracking */
+    stress_index = 0;
+    for (int i = 0; i < STRESS_TASK_COUNT; i++) {
+        stress_order[i] = -1;
+    }
+
+    uint64_t now = slm_get_time_ns();
+
+    /*
+     * Create 5 tasks:
+     * - IDLE (0)
+     * - LOW (2) with urgent deadline -> should boost to CRITICAL (7)
+     * - NORMAL (4)
+     * - HIGH (6)
+     * - CRITICAL (7)
+     *
+     * Expected order after deadline boost: CRITICAL, boosted-LOW, HIGH, NORMAL, IDLE
+     * But since boosted-LOW becomes CRITICAL too, FIFO within same priority.
+     * We add CRITICAL first, then boosted-LOW, so: CRITICAL(7), boosted(7), HIGH(6), NORMAL(4), IDLE(0)
+     */
+    struct task *t_idle = task_create_with_priority("st_idle",
+        stress_order_task, (void *)0, TASK_PRIORITY_IDLE);
+    struct task *t_low_dl = task_create_with_priority("st_low_dl",
+        stress_order_task, (void *)2, TASK_PRIORITY_LOW);
+    struct task *t_normal = task_create_with_priority("st_norm",
+        stress_order_task, (void *)4, TASK_PRIORITY_NORMAL);
+    struct task *t_high = task_create_with_priority("st_high",
+        stress_order_task, (void *)6, TASK_PRIORITY_HIGH);
+    struct task *t_crit = task_create_with_priority("st_crit",
+        stress_order_task, (void *)7, TASK_PRIORITY_CRITICAL);
+
+    TEST_ASSERT_NOT_NULL(t_idle);
+    TEST_ASSERT_NOT_NULL(t_low_dl);
+    TEST_ASSERT_NOT_NULL(t_normal);
+    TEST_ASSERT_NOT_NULL(t_high);
+    TEST_ASSERT_NOT_NULL(t_crit);
+
+    /* Give t_low_dl an urgent deadline (5ms) - should boost to CRITICAL */
+    task_set_deadline(t_low_dl, now + (5 * 1000000ULL));
+
+    /* Add all tasks to CPU 0 atomically, in scrambled order.
+     * Use CPU 0 (same as test) with IRQ protection for deterministic ordering. */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(t_normal, 0);   /* NORMAL - should run 4th */
+    scheduler_add_task_to_cpu(t_idle, 0);     /* IDLE - should run 5th */
+    scheduler_add_task_to_cpu(t_crit, 0);     /* CRITICAL - should run 1st */
+    scheduler_add_task_to_cpu(t_low_dl, 0);   /* LOW+deadline -> boosted, 2nd */
+    scheduler_add_task_to_cpu(t_high, 0);     /* HIGH - should run 3rd */
+    irq_restore(flags);
+
+    /* Lower our priority below all test tasks so they can run */
+    struct task *self = task_current();
+    uint8_t saved_pri = self->effective_priority;
+    self->priority = TASK_PRIORITY_IDLE;
+    self->effective_priority = TASK_PRIORITY_IDLE;
+
+    /* Wait for all to complete, yielding to let them run */
+    int timeout = 300;
+    while ((t_idle->state != TASK_TERMINATED ||
+            t_low_dl->state != TASK_TERMINATED ||
+            t_normal->state != TASK_TERMINATED ||
+            t_high->state != TASK_TERMINATED ||
+            t_crit->state != TASK_TERMINATED) && timeout > 0) {
+        yield();
+        test_delay(10000);
+        timeout--;
+    }
+
+    /* Restore our priority */
+    self->priority = saved_pri;
+    self->effective_priority = saved_pri;
+
+    /* Verify all 5 tasks ran */
+    TEST_ASSERT_EQUAL_INT(5, stress_index);
+
+    /*
+     * Verify priority ordering:
+     * stress_order[0] should be CRITICAL (7)
+     * stress_order[1] should be boosted LOW (effective 7, recorded as 2)
+     * stress_order[2] should be HIGH (6)
+     * stress_order[3] should be NORMAL (4)
+     * stress_order[4] should be IDLE (0)
+     */
+    TEST_ASSERT_EQUAL_INT(7, stress_order[0]);  /* CRITICAL first */
+    TEST_ASSERT_EQUAL_INT(2, stress_order[1]);  /* Boosted LOW second (records base pri) */
+    TEST_ASSERT_EQUAL_INT(6, stress_order[2]);  /* HIGH third */
+    TEST_ASSERT_EQUAL_INT(4, stress_order[3]);  /* NORMAL fourth */
+    TEST_ASSERT_EQUAL_INT(0, stress_order[4]);  /* IDLE last */
+
+    /* Cleanup */
+    task_destroy(t_crit);
+    task_destroy(t_low_dl);
+    task_destroy(t_high);
+    task_destroy(t_normal);
+    task_destroy(t_idle);
+}
+
+/* ============================================================================
+ * Latency and Benchmark Tests
+ * ============================================================================ */
+
+/*
+ * Latency measurement tracking.
+ * We measure wake-to-run latency for tasks on isolated vs non-isolated cores.
+ */
+#define LATENCY_SAMPLES 10
+static volatile uint64_t latency_start_ns;
+static volatile uint64_t latency_samples[LATENCY_SAMPLES];
+static volatile int latency_sample_index = 0;
+
+/* Task that measures wake-to-run latency */
+static void latency_task_entry(void *arg)
+{
+    (void)arg;
+
+    /* Record latency immediately on entry */
+    uint64_t now = slm_get_time_ns();
+
+    irq_flags_t flags = spin_lock_irqsave(&test_lock);
+    if (latency_sample_index < LATENCY_SAMPLES) {
+        latency_samples[latency_sample_index++] = now - latency_start_ns;
+    }
+    spin_unlock_irqrestore(&test_lock, flags);
+
+    task_exit();
+}
+
+/*
+ * Test: Pinned inference task shows consistent latency on isolated core
+ *
+ * Compares latency variance between:
+ * 1. Task on isolated core (should have low variance)
+ * 2. Task on non-isolated core (may have more variance due to interference)
+ *
+ * This is a functional test, not a hard pass/fail - it logs the results
+ * for analysis.
+ */
+static void test_isolated_core_latency(void)
+{
+    if (cpu_count < 2) {
+        /* Skip on single-CPU systems */
+        TEST_ASSERT(1);
+        return;
+    }
+
+    uint64_t isolated_sum = 0;
+    uint64_t isolated_max = 0;
+    uint64_t isolated_min = UINT64_MAX;
+
+    uint64_t normal_sum = 0;
+    uint64_t normal_max = 0;
+    uint64_t normal_min = UINT64_MAX;
+
+    /*
+     * Phase 1: Measure latency on isolated core
+     */
+    sched_isolate_core(1);
+
+    for (int i = 0; i < LATENCY_SAMPLES; i++) {
+        latency_sample_index = 0;
+
+        struct task *t = task_create_with_priority("lat_iso",
+            latency_task_entry, NULL, TASK_PRIORITY_HIGH);
+        TEST_ASSERT_NOT_NULL(t);
+        t->cpu_affinity = 1;  /* Pin to isolated core */
+
+        /* Record start time and add task */
+        latency_start_ns = slm_get_time_ns();
+        scheduler_add_task(t);
+
+        /* Wait for completion */
+        int timeout = 100;
+        while (t->state != TASK_TERMINATED && timeout > 0) {
+            yield();
+            test_delay(1000);
+            timeout--;
+        }
+
+        /* Record sample */
+        if (latency_sample_index > 0) {
+            uint64_t sample = latency_samples[0];
+            isolated_sum += sample;
+            if (sample > isolated_max) isolated_max = sample;
+            if (sample < isolated_min) isolated_min = sample;
+        }
+
+        task_destroy(t);
+    }
+
+    sched_unisolate_core(1);
+
+    /*
+     * Phase 2: Measure latency on non-isolated core
+     */
+    for (int i = 0; i < LATENCY_SAMPLES; i++) {
+        latency_sample_index = 0;
+
+        struct task *t = task_create_with_priority("lat_norm",
+            latency_task_entry, NULL, TASK_PRIORITY_HIGH);
+        TEST_ASSERT_NOT_NULL(t);
+        t->cpu_affinity = 1;  /* Same core, but not isolated */
+
+        latency_start_ns = slm_get_time_ns();
+        scheduler_add_task(t);
+
+        int timeout = 100;
+        while (t->state != TASK_TERMINATED && timeout > 0) {
+            yield();
+            test_delay(1000);
+            timeout--;
+        }
+
+        if (latency_sample_index > 0) {
+            uint64_t sample = latency_samples[0];
+            normal_sum += sample;
+            if (sample > normal_max) normal_max = sample;
+            if (sample < normal_min) normal_min = sample;
+        }
+
+        task_destroy(t);
+    }
+
+    /*
+     * Calculate and log results
+     */
+    uint64_t isolated_avg = isolated_sum / LATENCY_SAMPLES;
+    uint64_t isolated_range = isolated_max - isolated_min;
+    uint64_t normal_avg = normal_sum / LATENCY_SAMPLES;
+    uint64_t normal_range = normal_max - normal_min;
+
+    uart_printf("  Latency (isolated): avg=%lu ns, range=%lu ns (min=%lu, max=%lu)\n",
+                (unsigned long)isolated_avg, (unsigned long)isolated_range,
+                (unsigned long)isolated_min, (unsigned long)isolated_max);
+    uart_printf("  Latency (normal):   avg=%lu ns, range=%lu ns (min=%lu, max=%lu)\n",
+                (unsigned long)normal_avg, (unsigned long)normal_range,
+                (unsigned long)normal_min, (unsigned long)normal_max);
+
+    /* Test passes if we got valid measurements */
+    TEST_ASSERT(isolated_avg > 0);
+    TEST_ASSERT(normal_avg > 0);
+
+    /* Log whether isolation improved consistency (smaller range = better) */
+    if (isolated_range < normal_range) {
+        uart_puts("  Result: Isolated core shows more consistent latency\n");
+    } else {
+        uart_puts("  Result: Similar latency variance (expected on QEMU)\n");
+    }
+}
+
+/*
+ * Benchmark: Measure context switch overhead
+ *
+ * Creates two tasks that yield back and forth, measuring the time
+ * for N context switches.
+ */
+#define BENCH_CONTEXT_SWITCHES 100
+static volatile int bench_switch_count = 0;
+static volatile uint64_t bench_start_time = 0;
+static volatile uint64_t bench_end_time = 0;
+
+/* Task A and B ping-pong yielding */
+static void bench_switch_task(void *arg)
+{
+    int task_id = (int)(uintptr_t)arg;  /* 0 or 1 */
+
+    while (bench_switch_count < BENCH_CONTEXT_SWITCHES) {
+        irq_flags_t flags = spin_lock_irqsave(&test_lock);
+        bench_switch_count++;
+        if (bench_switch_count >= BENCH_CONTEXT_SWITCHES) {
+            bench_end_time = slm_get_time_ns();
+        }
+        spin_unlock_irqrestore(&test_lock, flags);
+
+        /* Yield to other task */
+        if (bench_switch_count < BENCH_CONTEXT_SWITCHES) {
+            yield();
+        }
+    }
+
+    (void)task_id;
+    task_exit();
+}
+
+static void test_benchmark_context_switch(void)
+{
+    /* Reset benchmark state */
+    bench_switch_count = 0;
+    bench_start_time = 0;
+    bench_end_time = 0;
+
+    /* Create two tasks at same priority (will round-robin) */
+    struct task *a = task_create_with_priority("bench_a",
+        bench_switch_task, (void *)0, TASK_PRIORITY_HIGH);
+    struct task *b = task_create_with_priority("bench_b",
+        bench_switch_task, (void *)1, TASK_PRIORITY_HIGH);
+
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_NOT_NULL(b);
+
+    /* Record start time and begin */
+    bench_start_time = slm_get_time_ns();
+
+    /* Add tasks to CPU 1 */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(a, 1);
+    scheduler_add_task_to_cpu(b, 1);
+    irq_restore(flags);
+
+    /* Wait for benchmark to complete */
+    int timeout = 500;
+    while ((a->state != TASK_TERMINATED || b->state != TASK_TERMINATED) && timeout > 0) {
+        yield();
+        test_delay(10000);
+        timeout--;
+    }
+
+    /* Calculate results */
+    uint64_t total_time = bench_end_time - bench_start_time;
+    uint64_t per_switch = total_time / BENCH_CONTEXT_SWITCHES;
+
+    uart_printf("  Context switch benchmark: %d switches in %lu ns\n",
+                BENCH_CONTEXT_SWITCHES, (unsigned long)total_time);
+    uart_printf("  Average: %lu ns per switch (%lu µs)\n",
+                (unsigned long)per_switch, (unsigned long)(per_switch / 1000));
+
+    /* Test passes if benchmark completed */
+    TEST_ASSERT_EQUAL_INT(BENCH_CONTEXT_SWITCHES, bench_switch_count);
+    TEST_ASSERT(per_switch > 0);
+
+    /* Log assessment */
+    if (per_switch < 10000) {
+        uart_puts("  Assessment: Excellent (< 10 µs)\n");
+    } else if (per_switch < 50000) {
+        uart_puts("  Assessment: Good (< 50 µs)\n");
+    } else if (per_switch < 100000) {
+        uart_puts("  Assessment: Acceptable (< 100 µs)\n");
+    } else {
+        uart_puts("  Assessment: Needs optimization (> 100 µs)\n");
+    }
+
+    task_destroy(a);
+    task_destroy(b);
+}
+
+/*
+ * Benchmark: Measure scheduling overhead (pick_next_task + queue operations)
+ *
+ * Measures time to add/remove tasks from the run queue.
+ * Note: Keep small to avoid exhausting task slots (MAX_TASKS=32).
+ */
+#define BENCH_QUEUE_OPS 8
+
+static void test_benchmark_queue_operations(void)
+{
+    struct task *tasks[BENCH_QUEUE_OPS];
+    uint64_t add_total = 0;
+    uint64_t remove_total = 0;
+
+    /* Pre-create all tasks */
+    for (int i = 0; i < BENCH_QUEUE_OPS; i++) {
+        tasks[i] = task_create_with_priority("bench_q", nop_entry, NULL,
+            (i % 8));  /* Various priorities */
+        TEST_ASSERT_NOT_NULL(tasks[i]);
+    }
+
+    /* Benchmark: Add tasks to queue */
+    irq_flags_t flags = irq_save();
+    uint64_t start = slm_get_time_ns();
+
+    for (int i = 0; i < BENCH_QUEUE_OPS; i++) {
+        scheduler_add_task_to_cpu(tasks[i], 0);
+    }
+
+    uint64_t end = slm_get_time_ns();
+    irq_restore(flags);
+    add_total = end - start;
+
+    /* Benchmark: Remove tasks from queue */
+    flags = irq_save();
+    start = slm_get_time_ns();
+
+    for (int i = 0; i < BENCH_QUEUE_OPS; i++) {
+        scheduler_remove_task(tasks[i]);
+    }
+
+    end = slm_get_time_ns();
+    irq_restore(flags);
+    remove_total = end - start;
+
+    /* Clean up */
+    for (int i = 0; i < BENCH_QUEUE_OPS; i++) {
+        tasks[i]->state = TASK_TERMINATED;
+        task_destroy(tasks[i]);
+    }
+
+    /* Report results */
+    uint64_t add_per_op = add_total / BENCH_QUEUE_OPS;
+    uint64_t remove_per_op = remove_total / BENCH_QUEUE_OPS;
+
+    uart_printf("  Queue operation benchmark (%d ops):\n", BENCH_QUEUE_OPS);
+    uart_printf("    Add:    %lu ns total, %lu ns per op\n",
+                (unsigned long)add_total, (unsigned long)add_per_op);
+    uart_printf("    Remove: %lu ns total, %lu ns per op\n",
+                (unsigned long)remove_total, (unsigned long)remove_per_op);
+
+    /* Test passes if operations completed */
+    TEST_ASSERT(add_per_op > 0);
+    TEST_ASSERT(remove_per_op > 0);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -747,6 +1346,15 @@ int test_suite_scheduler(void)
     RUN_TEST(test_high_priority_runs_first);
     RUN_TEST(test_priority_ordering_multiple_levels);
     RUN_TEST(test_deadline_boost_affects_order);
+
+    /* Stress tests */
+    RUN_TEST(test_no_starvation);
+    RUN_TEST(test_stress_mixed_priorities);
+
+    /* Latency and benchmark tests */
+    RUN_TEST(test_isolated_core_latency);
+    RUN_TEST(test_benchmark_context_switch);
+    RUN_TEST(test_benchmark_queue_operations);
 
     return UnityEnd();
 }

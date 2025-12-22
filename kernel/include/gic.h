@@ -99,4 +99,43 @@ void gic_send_sgi(uint32_t irq, uint32_t target_cpu);
  */
 void gic_percpu_init(void);
 
+/*
+ * Set interrupt target CPU(s).
+ *
+ * Controls which CPU(s) can receive a given SPI.
+ * Only affects SPIs (32+). PPIs (16-31) and SGIs (0-15) are per-CPU.
+ *
+ * @irq: Interrupt number (must be >= 32 for SPIs)
+ * @cpu_mask: Bitmask of target CPUs (bit N = CPU N)
+ *
+ * Returns: 0 on success, -1 if irq is not an SPI
+ */
+int gic_set_affinity(uint32_t irq, uint32_t cpu_mask);
+
+/*
+ * Get current interrupt target CPU(s).
+ *
+ * @irq: Interrupt number (must be >= 32 for SPIs)
+ *
+ * Returns: CPU bitmask, or 0 if irq is not an SPI
+ */
+uint32_t gic_get_affinity(uint32_t irq);
+
+/*
+ * Route all SPIs away from a CPU.
+ *
+ * Used for core isolation to minimize interrupt interference.
+ * Timer IRQs (PPIs) are unaffected - needed for scheduler tick.
+ *
+ * @cpu: CPU to exclude from SPI routing
+ */
+void gic_exclude_cpu_from_spis(uint32_t cpu);
+
+/*
+ * Restore SPI routing to include a CPU.
+ *
+ * @cpu: CPU to include in SPI routing
+ */
+void gic_include_cpu_in_spis(uint32_t cpu);
+
 #endif /* GIC_H */

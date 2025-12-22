@@ -16,7 +16,9 @@
 #include "smp.h"
 #include "spinlock.h"
 #include "slm_ffi.h"
+#include "gic.h"
 #include <stddef.h>
+#include <stdint.h>
 
 /* Deadline boost thresholds (in nanoseconds) */
 #define DEADLINE_CRITICAL_NS    (10 * 1000000ULL)   /* 10ms - boost to CRITICAL */
@@ -303,15 +305,62 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
 }
 
 /*
+ * Calculate deadline pressure for a CPU's run queue.
+ *
+ * Returns a score based on the sum of urgency of deadline-constrained tasks.
+ * Higher score = more deadline pressure = avoid placing more work here.
+ *
+ * Urgency scoring:
+ *   - No deadline: 0 points
+ *   - Deadline > 100ms: 1 point
+ *   - Deadline 50-100ms: 2 points
+ *   - Deadline 10-50ms: 4 points
+ *   - Deadline < 10ms or missed: 8 points
+ */
+static uint32_t calculate_deadline_pressure(uint32_t cpu)
+{
+    struct cpu_runqueue *rq = &sched.cpu[cpu];
+    uint32_t pressure = 0;
+    uint64_t now = slm_get_time_ns();
+
+    struct task *t = rq->head;
+    while (t) {
+        if (t->deadline_ns > 0) {
+            if (now >= t->deadline_ns) {
+                /* Deadline missed - very high pressure */
+                pressure += 8;
+            } else {
+                uint64_t remaining = t->deadline_ns - now;
+                if (remaining < DEADLINE_CRITICAL_NS) {
+                    pressure += 8;  /* < 10ms */
+                } else if (remaining < DEADLINE_HIGH_NS) {
+                    pressure += 4;  /* < 50ms */
+                } else if (remaining < DEADLINE_BOOST_NS) {
+                    pressure += 2;  /* < 100ms */
+                } else {
+                    pressure += 1;  /* distant deadline */
+                }
+            }
+        }
+        t = t->next;
+    }
+
+    return pressure;
+}
+
+/*
  * Find a non-isolated CPU for a task with CPU_AFFINITY_ANY.
  *
- * Currently uses a simple strategy: prefer the least loaded non-isolated CPU.
+ * Uses a combined metric: ready_count + deadline_pressure.
+ * This spreads deadline-constrained tasks across cores to reduce
+ * the chance of missing deadlines due to queue contention.
+ *
  * Returns CPU 0 as fallback (CPU 0 cannot be isolated).
  */
 static uint32_t find_target_cpu(void)
 {
     uint32_t best_cpu = 0;
-    uint32_t best_count = sched.cpu[0].ready_count;
+    uint32_t best_score = sched.cpu[0].ready_count + calculate_deadline_pressure(0);
 
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
         /* Skip isolated cores */
@@ -319,10 +368,13 @@ static uint32_t find_target_cpu(void)
             continue;
         }
 
-        /* Pick CPU with fewer ready tasks */
-        if (sched.cpu[cpu].ready_count < best_count) {
+        /* Combined score: ready count + deadline pressure */
+        uint32_t score = sched.cpu[cpu].ready_count + calculate_deadline_pressure(cpu);
+
+        /* Pick CPU with lowest combined score */
+        if (score < best_score) {
             best_cpu = cpu;
-            best_count = sched.cpu[cpu].ready_count;
+            best_score = score;
         }
     }
 
@@ -330,7 +382,54 @@ static uint32_t find_target_cpu(void)
 }
 
 /*
+ * Find a "performance" core for deadline-critical tasks.
+ *
+ * In a big.LITTLE system, this would return a big core.
+ * In QEMU virt (homogeneous), we use CPU 1+ as "performance" cores
+ * to keep CPU 0 available for system tasks.
+ *
+ * Returns the least-loaded non-isolated CPU > 0, or falls back to find_target_cpu().
+ */
+static uint32_t find_performance_cpu(void)
+{
+    if (cpu_count <= 1) {
+        return 0;  /* Only one CPU available */
+    }
+
+    uint32_t best_cpu = 0;
+    uint32_t best_score = UINT32_MAX;
+    int found_perf_core = 0;
+
+    /* Prefer CPUs > 0 for performance tasks */
+    for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
+        /* Skip isolated cores - they're manually managed */
+        if (sched.isolated_cores & (1U << cpu)) {
+            continue;
+        }
+
+        uint32_t score = sched.cpu[cpu].ready_count + calculate_deadline_pressure(cpu);
+        if (score < best_score) {
+            best_cpu = cpu;
+            best_score = score;
+            found_perf_core = 1;
+        }
+    }
+
+    /* Fall back to any CPU if no performance core available */
+    if (!found_perf_core) {
+        return find_target_cpu();
+    }
+
+    return best_cpu;
+}
+
+/*
  * Add a task to the run queue (assigns to a CPU based on affinity).
+ *
+ * Policy for deadline-constrained tasks:
+ *   - Tasks with deadline_ns > 0 are placed on "performance" cores (CPU > 0)
+ *   - This keeps CPU 0 available for system tasks and reduces interference
+ *   - On big.LITTLE hardware, this would route to big cores
  */
 void scheduler_add_task(struct task *task)
 {
@@ -343,8 +442,13 @@ void scheduler_add_task(struct task *task)
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         /* Task is pinned to a specific CPU (even if isolated) */
         target_cpu = task->cpu_affinity;
+    } else if (task->deadline_ns > 0) {
+        /* Deadline-constrained tasks prefer performance cores */
+        target_cpu = find_performance_cpu();
+        DEBUG_PRINT("Deadline task '%s' -> CPU %u (performance core)",
+                    task->name, target_cpu);
     } else {
-        /* Find a non-isolated CPU with load balancing */
+        /* Regular tasks use standard load balancing */
         target_cpu = find_target_cpu();
     }
 
@@ -692,6 +796,11 @@ void scheduler_dump(void)
  * via cpu_affinity. Tasks with CPU_AFFINITY_ANY will not be placed
  * on isolated cores.
  *
+ * Additionally, SPIs (Shared Peripheral Interrupts) are routed away
+ * from isolated cores to minimize interrupt interference. Timer IRQs
+ * (PPIs) are unaffected - each CPU still gets its own timer interrupt
+ * for scheduler preemption.
+ *
  * Use for real-time or latency-sensitive workloads that need
  * dedicated CPU time without interference from other tasks.
  *
@@ -712,12 +821,20 @@ int sched_isolate_core(uint32_t cpu)
     }
 
     sched.isolated_cores |= (1U << cpu);
-    INFO("CPU %u: isolated from general scheduling", cpu);
+
+    /* Route SPIs away from this CPU to minimize interrupt interference.
+     * Timer IRQs (PPIs) are unaffected - still needed for preemption. */
+    gic_exclude_cpu_from_spis(cpu);
+
+    INFO("CPU %u: isolated from general scheduling (SPIs excluded)", cpu);
     return 0;
 }
 
 /*
  * Remove core isolation.
+ *
+ * Restores SPI routing to include this CPU and returns it to the
+ * general scheduling pool.
  *
  * @cpu: CPU ID to un-isolate
  *
@@ -730,7 +847,11 @@ int sched_unisolate_core(uint32_t cpu)
     }
 
     sched.isolated_cores &= ~(1U << cpu);
-    INFO("CPU %u: returned to general scheduling", cpu);
+
+    /* Restore SPI routing to this CPU */
+    gic_include_cpu_in_spis(cpu);
+
+    INFO("CPU %u: returned to general scheduling (SPIs restored)", cpu);
     return 0;
 }
 

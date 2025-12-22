@@ -173,6 +173,46 @@ uint32_t sched_get_isolated_cores(void);   /* Get bitmask */
 - Tasks with `CPU_AFFINITY_ANY` skip isolated cores
 - Pinned tasks (explicit `cpu_affinity`) still run on isolated cores
 - `find_target_cpu()` selects least-loaded non-isolated CPU
+- SPIs (Shared Peripheral Interrupts) are routed away from isolated cores
+- Timer IRQs (PPIs) are unaffected — each CPU keeps its timer for preemption
+
+### Deadline-Aware Load Balancing
+
+When placing tasks, the scheduler considers both queue depth and deadline pressure:
+
+```c
+/*
+ * Deadline pressure scoring:
+ *   - No deadline: 0 points
+ *   - Deadline > 100ms: 1 point
+ *   - Deadline 50-100ms: 2 points
+ *   - Deadline 10-50ms: 4 points
+ *   - Deadline < 10ms or missed: 8 points
+ */
+static uint32_t calculate_deadline_pressure(uint32_t cpu);
+```
+
+**Task placement policy:**
+- Tasks with `deadline_ns > 0` prefer "performance cores" (CPU 1+)
+- This keeps CPU 0 available for system tasks
+- On big.LITTLE hardware, this maps to big cores
+- `find_performance_cpu()` returns least-loaded non-isolated performance CPU
+
+### GIC Affinity for Isolated Cores
+
+The GIC driver provides functions to control interrupt routing:
+
+```c
+int gic_set_affinity(uint32_t irq, uint32_t cpu_mask);  /* Set SPI targets */
+uint32_t gic_get_affinity(uint32_t irq);                /* Get current targets */
+void gic_exclude_cpu_from_spis(uint32_t cpu);           /* Route SPIs away */
+void gic_include_cpu_in_spis(uint32_t cpu);             /* Restore SPI routing */
+```
+
+When a core is isolated via `sched_isolate_core()`:
+1. SPIs are automatically routed away from the core
+2. Timer IRQs (PPIs) remain active for scheduler preemption
+3. When un-isolated, SPI routing is restored
 
 ### Insertion Algorithm
 
@@ -196,6 +236,65 @@ if (prev) {
     rq->head = task;
 }
 ```
+
+## Priority Inversion Prevention
+
+Priority inversion occurs when a high-priority task waits on a lock held by a low-priority task, effectively running at the lower priority. SLM-OS provides a **priority-inheriting mutex** to prevent this.
+
+### PI Mutex API
+
+```c
+#include "pi_mutex.h"
+
+typedef struct {
+    spinlock_t guard;           /* Protects mutex state */
+    struct task *owner;         /* Current owner (NULL if unlocked) */
+    uint8_t owner_original_pri; /* Owner's priority before inheritance */
+    volatile uint8_t locked;    /* 1 if locked, 0 if unlocked */
+} pi_mutex_t;
+
+void pi_mutex_init(pi_mutex_t *mutex);
+void pi_mutex_lock(pi_mutex_t *mutex);      /* Blocking acquire */
+int pi_mutex_trylock(pi_mutex_t *mutex);    /* Non-blocking: 1=success, 0=fail */
+void pi_mutex_unlock(pi_mutex_t *mutex);
+
+/* Statistics */
+uint32_t pi_mutex_inversion_count(void);    /* Total inversions detected */
+```
+
+### Priority Inheritance Behavior
+
+When a high-priority task attempts to lock a mutex held by a lower-priority task:
+
+1. The lock holder's `effective_priority` is boosted to match the waiter
+2. The original priority is saved in `owner_original_pri`
+3. When the lock is released, the owner's priority is restored
+4. Each boost is logged: `"PI: Boosting task 'X' (pri N->M) for waiter 'Y'"`
+
+```
+Before PI:
+  Task A (LOW, pri=2) holds mutex
+  Task B (HIGH, pri=6) waiting on mutex
+  Task C (NORMAL, pri=4) ready
+
+  Schedule order: C, A, B  ← A blocks B despite lower priority!
+
+With PI:
+  Task A boosted to pri=6 while holding mutex
+  Schedule order: A (boosted), B, C  ← A runs to release lock quickly
+```
+
+### When to Use PI Mutex
+
+Use `pi_mutex_t` instead of `spinlock_t` when:
+- The critical section may be held for non-trivial time
+- High-priority tasks may contend with low-priority tasks
+- Predictable latency is important
+
+Continue using spinlocks for:
+- Very short critical sections
+- Interrupt handlers (IRQ context)
+- Single-CPU scenarios
 
 ## FFI Task API
 
@@ -371,15 +470,10 @@ Timer frequency is set in `timer.c`:
 
 ## Future Work
 
-### Milestone 2 Remaining
-- [ ] Load balancing across cores based on deadline pressure
-- [ ] Priority inversion prevention (priority inheritance)
-- [ ] Benchmark per-queue locks vs global lock
-
 ### Milestone 4+ (big.LITTLE)
-- [ ] Actual core assignment based on CoreType hints
+- [ ] Actual core assignment based on CoreType hints (detect big vs LITTLE cores)
 - [ ] CPU frequency scaling integration
-- [ ] GIC affinity routing for isolated cores
+- [ ] Dynamic core migration based on thermal/power state
 
 ---
 

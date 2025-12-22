@@ -34,4 +34,7 @@ int test_suite_scheduler(void);
 /* Model memory tests (new - calls into Rust) */
 int test_suite_model_mem(void);
 
+/* Priority inheritance mutex tests */
+int test_suite_pi_mutex(void);
+
 #endif /* TEST_HARNESS_H */

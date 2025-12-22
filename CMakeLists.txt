@@ -79,6 +79,9 @@ set(KERNEL_SOURCES
     # IPC
     kernel/src/ipc.c
 
+    # Synchronization
+    kernel/src/pi_mutex.c
+
     # FFI (C/Rust interface)
     kernel/src/slm_ffi.c
 
@@ -94,6 +97,7 @@ set(TEST_SOURCES
     kernel/tests/test_ipc.c
     kernel/tests/test_scheduler.c
     kernel/tests/test_model_mem.c
+    kernel/tests/test_pi_mutex.c
 )
 
 # Include directories

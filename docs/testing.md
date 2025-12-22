@@ -17,8 +17,9 @@ kernel/tests/
 ├── test_harness.h    # Test suite declarations
 ├── test_harness.c    # UART output, suite runner
 ├── test_ipc.c        # IPC test suite
-├── test_scheduler.c  # Scheduler tests (stub, runs from main.c)
-└── test_model_mem.c  # Model memory tests
+├── test_scheduler.c  # Scheduler tests (29 tests: priority, deadline, isolation, benchmarks)
+├── test_model_mem.c  # Model memory tests (Rust allocator via FFI)
+└── test_pi_mutex.c   # Priority inheritance mutex tests
 ```
 
 ### Available Assertions
@@ -183,25 +184,94 @@ Validates multi-core boot via PSCI:
 
 Tests run automatically at the end of `smp_init()` after all cores boot.
 
-### Scheduler Tests (`kernel/src/main.c`)
+### Scheduler Tests (`kernel/tests/test_scheduler.c`)
 
-Validates the multi-core scheduler, task distribution, migration, and concurrency:
+Validates the deadline-aware scheduler with priority ordering, deadline boost, core isolation, and scheduling performance. Tests run via Unity framework (29 tests total).
+
+#### Unit Tests: Deadline Boost Logic
 
 | Test | Description |
 |------|-------------|
-| Basic Multi-Core Execution | 3 tasks run concurrently on CPUs 1, 2, 3 |
-| Cross-Core Task Migration | Task queued on CPU 1, migrated to CPU 3, verified running on new CPU |
-| Stress Test | 6 tasks (2 per CPU) complete correctly across CPUs 1, 2, 3 |
-| Lock Contention | 3 tasks × 50 increments with spinlock, counter equals expected (no race conditions) |
-| Task Lifecycle | 8 tasks created/terminated rapidly, memory fully reclaimed |
+| test_no_deadline_no_boost | Task with no deadline has effective_priority = base priority |
+| test_deadline_field_set | task_set_deadline() correctly sets deadline_ns field |
+| test_distant_deadline_no_boost | Deadline > 100ms gets no boost |
+| test_deadline_100ms_boost_plus_one | Deadline 50-100ms gets +1 priority boost |
+| test_deadline_50ms_boost_to_high | Deadline 10-50ms boosts to HIGH (6) |
+| test_deadline_10ms_boost_to_critical | Deadline < 10ms boosts to CRITICAL (7) |
+| test_missed_deadline_boost_to_critical | Deadline in past boosts to CRITICAL (7) |
+
+#### Unit Tests: Priority and FFI
+
+| Test | Description |
+|------|-------------|
+| test_set_priority_updates_field | task_set_priority() updates both priority fields |
+| test_priority_clamped_to_max | Priority values > 7 clamped to CRITICAL (7) |
+| test_ffi_task_create_returns_id | slm_task_create() returns valid task ID |
+| test_ffi_set_priority | slm_task_set_priority() works via FFI |
+| test_ffi_set_deadline | slm_task_set_deadline() works via FFI |
+| test_ffi_invalid_task_id | FFI functions return -1 for invalid task IDs |
+
+#### Unit Tests: Core Isolation
+
+| Test | Description |
+|------|-------------|
+| test_isolate_core_marks_isolated | sched_isolate_core() sets isolation flag |
+| test_cannot_isolate_cpu0 | CPU 0 (boot CPU) cannot be isolated |
+| test_isolate_invalid_cpu | Invalid CPU ID returns error |
+| test_affinity_any_avoids_isolated | Tasks with CPU_AFFINITY_ANY skip isolated cores |
+| test_pinned_task_runs_on_isolated | Pinned tasks still run on isolated cores |
+| test_set_affinity_updates_field | sched_set_task_affinity() updates task field |
+| test_set_affinity_invalid_cpu | Invalid CPU returns error |
+| test_multiple_cores_isolated | Multiple cores can be isolated simultaneously |
+
+#### Integration Tests: Priority Ordering
+
+| Test | Description |
+|------|-------------|
+| test_high_priority_runs_first | HIGH priority task runs before LOW (tracks execution order) |
+| test_priority_ordering_multiple_levels | 5 tasks (CRITICAL/HIGH/NORMAL/LOW/IDLE) run in priority order |
+| test_deadline_boost_affects_order | LOW task with urgent deadline runs before unboosted LOW |
+
+#### Stress Tests
+
+| Test | Description |
+|------|-------------|
+| test_no_starvation | HIGH and LOW priority tasks both complete all iterations; HIGH runs first |
+| test_stress_mixed_priorities | 5 tasks with mixed priorities including deadline boost, verifies execution order |
+
+#### Latency and Benchmark Tests
+
+| Test | Description |
+|------|-------------|
+| test_isolated_core_latency | Compares wake-to-run latency on isolated vs non-isolated cores |
+| test_benchmark_context_switch | Measures 100 context switches between two ping-pong tasks |
+| test_benchmark_queue_operations | Measures add/remove latency for queue operations |
 
 **Test Notes:**
-- Tests run on CPUs 1-3 to avoid interfering with the main task on CPU 0
-- Migration test uses a "blocker" task to keep CPU 1 busy while migrating a READY task
-- Lock contention test verifies that spinlocks correctly protect shared data across cores
-- Lifecycle test validates zombie cleanup mechanism and stack memory reclamation
+- Priority ordering tests verify actual execution order, not just completion
+- Stress tests verify both priority ordering AND starvation prevention
+- Tests use CPU 0 with IRQ protection for deterministic ordering
+- Benchmark tests log results with assessment (Excellent < 10µs, Good < 50µs, etc.)
 
-Tests run from the main task function after boot completes. The kernel triggers an intentional undefined instruction fault after tests complete to terminate QEMU.
+### PI Mutex Tests (`kernel/tests/test_pi_mutex.c`)
+
+Validates the priority-inheriting mutex implementation. Tests run via Unity framework.
+
+| Test | Description |
+|------|-------------|
+| test_pi_mutex_init | Mutex initializes to unlocked state with NULL owner |
+| test_pi_mutex_lock_unlock | Basic lock/unlock cycle updates locked flag and owner |
+| test_pi_mutex_trylock_success | trylock succeeds when mutex is unlocked |
+| test_pi_mutex_trylock_fail | trylock behavior when mutex is held |
+| test_pi_mutex_priority_preserved | Owner's original priority saved and restored on unlock |
+| test_priority_inheritance_basic | LOW owner boosted to HIGH when HIGH-pri task waits |
+| test_inversion_count | pi_mutex_inversion_count() API is accessible |
+
+**Test Notes:**
+- `test_priority_inheritance_basic` manually simulates PI scenario by creating owner/waiter tasks
+- Verifies priority boost occurs (`effective_priority` changes from LOW to HIGH)
+- Verifies priority restoration on unlock
+- Logs PI events: `"PI: Boosting task 'X' (pri N->M) for waiter 'Y'"`
 
 ### IPC Tests (`kernel/src/ipc.c`)
 

@@ -199,3 +199,103 @@ void gic_percpu_init(void)
 {
     gic_cpu_init();
 }
+
+/*
+ * Set interrupt target CPU(s) for an SPI.
+ *
+ * The ITARGETSR registers control which CPUs can receive each interrupt.
+ * Each interrupt has an 8-bit field where each bit represents a CPU.
+ */
+int gic_set_affinity(uint32_t irq, uint32_t cpu_mask)
+{
+    /* Only SPIs (32+) can have their affinity changed */
+    if (irq < GIC_SPI_START) {
+        return -1;  /* SGIs and PPIs are per-CPU, cannot be routed */
+    }
+
+    uint32_t reg = irq / 4;
+    uint32_t offset = (irq % 4) * 8;
+
+    /* Read current value, update this IRQ's byte, write back */
+    uint32_t val = GICD_ITARGETSR(reg);
+    val &= ~(0xFF << offset);
+    val |= ((cpu_mask & 0xFF) << offset);
+    GICD_ITARGETSR(reg) = val;
+
+    return 0;
+}
+
+/*
+ * Get interrupt target CPU(s) for an SPI.
+ */
+uint32_t gic_get_affinity(uint32_t irq)
+{
+    /* Only SPIs (32+) have configurable affinity */
+    if (irq < GIC_SPI_START) {
+        return 0;
+    }
+
+    uint32_t reg = irq / 4;
+    uint32_t offset = (irq % 4) * 8;
+
+    return (GICD_ITARGETSR(reg) >> offset) & 0xFF;
+}
+
+/*
+ * Route all SPIs away from a CPU.
+ *
+ * Timer IRQs are PPIs and are unaffected - each CPU still gets its own
+ * timer interrupt for scheduler preemption.
+ */
+void gic_exclude_cpu_from_spis(uint32_t cpu)
+{
+    if (cpu >= 8) {
+        return;  /* GICv2 supports max 8 CPUs */
+    }
+
+    uint8_t cpu_bit = (1 << cpu);
+
+    /* Get number of interrupt lines from TYPER */
+    uint32_t typer = GICD_TYPER;
+    uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
+
+    /* Update all SPI target registers (starting at IRQ 32) */
+    for (uint32_t irq = GIC_SPI_START; irq < num_irqs; irq++) {
+        uint32_t reg = irq / 4;
+        uint32_t offset = (irq % 4) * 8;
+
+        uint32_t val = GICD_ITARGETSR(reg);
+        val &= ~(cpu_bit << offset);  /* Clear this CPU's bit */
+        GICD_ITARGETSR(reg) = val;
+    }
+
+    DEBUG_PRINT("GIC: Excluded CPU %u from SPI routing", cpu);
+}
+
+/*
+ * Restore SPI routing to include a CPU.
+ */
+void gic_include_cpu_in_spis(uint32_t cpu)
+{
+    if (cpu >= 8) {
+        return;
+    }
+
+    uint8_t cpu_bit = (1 << cpu);
+
+    /* Get number of interrupt lines from TYPER */
+    uint32_t typer = GICD_TYPER;
+    uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
+
+    /* Update all SPI target registers (starting at IRQ 32) */
+    for (uint32_t irq = GIC_SPI_START; irq < num_irqs; irq++) {
+        uint32_t reg = irq / 4;
+        uint32_t offset = (irq % 4) * 8;
+
+        uint32_t val = GICD_ITARGETSR(reg);
+        val |= (cpu_bit << offset);  /* Set this CPU's bit */
+        GICD_ITARGETSR(reg) = val;
+    }
+
+    DEBUG_PRINT("GIC: Included CPU %u in SPI routing", cpu);
+}
