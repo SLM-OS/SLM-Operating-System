@@ -102,6 +102,21 @@ struct msg_queue {
     spinlock_t      lock;           /* Protects queue state */
     struct task    *send_waiters;   /* Tasks blocked on send (queue full) */
     struct task    *recv_waiters;   /* Tasks blocked on recv (queue empty) */
+
+    /* Statistics */
+    uint64_t        msgs_sent;      /* Total messages successfully sent */
+    uint64_t        msgs_recv;      /* Total messages successfully received */
+    size_t          high_water;     /* Peak queue depth reached */
+};
+
+/*
+ * IPC statistics structure.
+ */
+struct ipc_stats {
+    uint32_t        queue_count;    /* Number of active message queues */
+    uint32_t        buffer_count;   /* Number of active shared buffers */
+    uint64_t        total_msgs_sent;/* Total messages sent across all queues */
+    uint64_t        total_msgs_recv;/* Total messages received across all queues */
 };
 
 /*
@@ -171,6 +186,24 @@ size_t msg_queue_count(struct msg_queue *queue);
  * Returns: Pointer to queue, or NULL if not found.
  */
 struct msg_queue *msg_queue_lookup(uint32_t id);
+
+/*
+ * Get message queue statistics.
+ *
+ * @queue: Queue to query
+ * @msgs_sent: Output - total messages sent (or NULL to skip)
+ * @msgs_recv: Output - total messages received (or NULL to skip)
+ * @high_water: Output - peak queue depth (or NULL to skip)
+ */
+void msg_queue_stats(struct msg_queue *queue, uint64_t *msgs_sent,
+                     uint64_t *msgs_recv, size_t *high_water);
+
+/*
+ * Get global IPC statistics.
+ *
+ * @stats: Pointer to stats structure to fill.
+ */
+void ipc_get_stats(struct ipc_stats *stats);
 
 /*
  * ============================================================================

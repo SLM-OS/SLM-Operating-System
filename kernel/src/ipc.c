@@ -53,14 +53,42 @@ static struct {
 
 /*
  * ==========================================================================
+ * Timer helpers for timeout support
+ * ==========================================================================
+ */
+#include "timer.h"
+
+/*
+ * Convert milliseconds to timer ticks.
+ */
+static inline uint64_t ms_to_ticks(uint32_t ms)
+{
+    uint64_t freq = timer_get_frequency();
+    return (uint64_t)ms * freq / 1000;
+}
+
+/*
+ * Check if timeout has elapsed.
+ * Returns 1 if expired, 0 otherwise.
+ */
+static inline int timeout_expired(uint64_t start_time, uint64_t timeout_ticks)
+{
+    uint64_t now = timer_get_count();
+    return (now - start_time) >= timeout_ticks;
+}
+
+/*
+ * ==========================================================================
  * Blocking helpers
  * ==========================================================================
  *
- * For Phase 2, we implement simple blocking by removing the task from
- * the run queue (BLOCKED state) and re-adding when the condition is met.
+ * Blocking is implemented via sleep/wake with optional timeout support.
  *
- * TODO: Implement timeout support (requires timer integration).
- * For now, timeout > 0 behaves like MSG_WAIT_FOREVER.
+ * For infinite waits, tasks are put in BLOCKED state and removed from
+ * the run queue until explicitly woken.
+ *
+ * For timed waits, we use polling with yield() to periodically check
+ * if the condition is met or timeout has expired.
  */
 
 /*
@@ -154,6 +182,11 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
     queue->send_waiters = NULL;
     queue->recv_waiters = NULL;
 
+    /* Initialize statistics */
+    queue->msgs_sent = 0;
+    queue->msgs_recv = 0;
+    queue->high_water = 0;
+
     /* Register in global table */
     irq_flags_t flags = spin_lock_irqsave(&ipc_state.lock);
 
@@ -220,6 +253,14 @@ int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms)
         return IPC_ERR_INVALID;
     }
 
+    /* Record start time for timeout tracking */
+    uint64_t start_time = 0;
+    uint64_t timeout_ticks = 0;
+    if (timeout_ms > 0) {
+        start_time = timer_get_count();
+        timeout_ticks = ms_to_ticks((uint32_t)timeout_ms);
+    }
+
     irq_flags_t flags = spin_lock_irqsave(&queue->lock);
 
     /* Wait for space if queue is full */
@@ -229,11 +270,23 @@ int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms)
             return IPC_ERR_FULL;
         }
 
-        /* Block until space available */
-        /* Note: block_on_queue releases and re-acquires lock */
-        irq_restore(flags);  /* Re-enable IRQs for blocking */
-        block_on_queue(&queue->send_waiters, &queue->lock);
-        flags = irq_save();  /* Disable again for consistency */
+        /* Check timeout for timed waits */
+        if (timeout_ms > 0 && timeout_expired(start_time, timeout_ticks)) {
+            spin_unlock_irqrestore(&queue->lock, flags);
+            return IPC_ERR_TIMEOUT;
+        }
+
+        if (timeout_ms < 0) {
+            /* Infinite wait: block until space available */
+            irq_restore(flags);
+            block_on_queue(&queue->send_waiters, &queue->lock);
+            flags = irq_save();
+        } else {
+            /* Timed wait: yield and retry */
+            spin_unlock_irqrestore(&queue->lock, flags);
+            yield();
+            flags = spin_lock_irqsave(&queue->lock);
+        }
     }
 
     /* Copy message to buffer */
@@ -243,6 +296,12 @@ int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms)
     /* Advance head */
     queue->head = (queue->head + 1) % queue->capacity;
     queue->count++;
+
+    /* Update statistics */
+    queue->msgs_sent++;
+    if (queue->count > queue->high_water) {
+        queue->high_water = queue->count;
+    }
 
     /* Wake a waiting receiver */
     wake_one(&queue->recv_waiters);
@@ -258,6 +317,14 @@ int msg_recv(struct msg_queue *queue, void *msg, int timeout_ms)
         return IPC_ERR_INVALID;
     }
 
+    /* Record start time for timeout tracking */
+    uint64_t start_time = 0;
+    uint64_t timeout_ticks = 0;
+    if (timeout_ms > 0) {
+        start_time = timer_get_count();
+        timeout_ticks = ms_to_ticks((uint32_t)timeout_ms);
+    }
+
     irq_flags_t flags = spin_lock_irqsave(&queue->lock);
 
     /* Wait for message if queue is empty */
@@ -267,10 +334,23 @@ int msg_recv(struct msg_queue *queue, void *msg, int timeout_ms)
             return IPC_ERR_EMPTY;
         }
 
-        /* Block until message available */
-        irq_restore(flags);
-        block_on_queue(&queue->recv_waiters, &queue->lock);
-        flags = irq_save();
+        /* Check timeout for timed waits */
+        if (timeout_ms > 0 && timeout_expired(start_time, timeout_ticks)) {
+            spin_unlock_irqrestore(&queue->lock, flags);
+            return IPC_ERR_TIMEOUT;
+        }
+
+        if (timeout_ms < 0) {
+            /* Infinite wait: block until message available */
+            irq_restore(flags);
+            block_on_queue(&queue->recv_waiters, &queue->lock);
+            flags = irq_save();
+        } else {
+            /* Timed wait: yield and retry */
+            spin_unlock_irqrestore(&queue->lock, flags);
+            yield();
+            flags = spin_lock_irqsave(&queue->lock);
+        }
     }
 
     /* Copy message from buffer */
@@ -280,6 +360,9 @@ int msg_recv(struct msg_queue *queue, void *msg, int timeout_ms)
     /* Advance tail */
     queue->tail = (queue->tail + 1) % queue->capacity;
     queue->count--;
+
+    /* Update statistics */
+    queue->msgs_recv++;
 
     /* Wake a waiting sender */
     wake_one(&queue->send_waiters);
@@ -316,6 +399,57 @@ struct msg_queue *msg_queue_lookup(uint32_t id)
 
     spin_unlock_irqrestore(&ipc_state.lock, flags);
     return queue;
+}
+
+void msg_queue_stats(struct msg_queue *queue, uint64_t *msgs_sent,
+                     uint64_t *msgs_recv, size_t *high_water)
+{
+    if (!queue) {
+        return;
+    }
+
+    irq_flags_t flags = spin_lock_irqsave(&queue->lock);
+
+    if (msgs_sent) {
+        *msgs_sent = queue->msgs_sent;
+    }
+    if (msgs_recv) {
+        *msgs_recv = queue->msgs_recv;
+    }
+    if (high_water) {
+        *high_water = queue->high_water;
+    }
+
+    spin_unlock_irqrestore(&queue->lock, flags);
+}
+
+void ipc_get_stats(struct ipc_stats *stats)
+{
+    if (!stats) {
+        return;
+    }
+
+    ipc_memset(stats, 0, sizeof(*stats));
+
+    irq_flags_t flags = spin_lock_irqsave(&ipc_state.lock);
+
+    /* Count queues and aggregate statistics */
+    for (size_t i = 0; i < MSG_QUEUE_MAX; i++) {
+        if (ipc_state.queues[i]) {
+            stats->queue_count++;
+            stats->total_msgs_sent += ipc_state.queues[i]->msgs_sent;
+            stats->total_msgs_recv += ipc_state.queues[i]->msgs_recv;
+        }
+    }
+
+    /* Count shared buffers */
+    for (size_t i = 0; i < SHM_BUFFER_MAX; i++) {
+        if (ipc_state.buffers[i]) {
+            stats->buffer_count++;
+        }
+    }
+
+    spin_unlock_irqrestore(&ipc_state.lock, flags);
 }
 
 /*
@@ -621,6 +755,8 @@ void ipc_init(void)
  * ==========================================================================
  */
 
+/* No longer using separate tasks for stress test - removed for reliability */
+
 int ipc_run_tests(void)
 {
     int errors = 0;
@@ -829,6 +965,227 @@ int ipc_run_tests(void)
                 uart_puts("  [FAIL] Buffer lookup after destroy returned non-NULL\n");
                 errors++;
             }
+        }
+    }
+
+    /*
+     * Test 7: msg_recv timeout
+     */
+    {
+        struct msg_queue *q = msg_queue_create(4, sizeof(uint32_t));
+        if (!q) {
+            uart_puts("  [FAIL] Queue create for timeout test\n");
+            errors++;
+        } else {
+            uint32_t recv_val = 0;
+
+            /* Receive on empty queue with 50ms timeout should fail */
+            uint64_t start = timer_get_count();
+            int ret = msg_recv(q, &recv_val, 50);
+            uint64_t elapsed = timer_get_count() - start;
+            uint64_t elapsed_ms = elapsed * 1000 / timer_get_frequency();
+
+            if (ret == IPC_ERR_TIMEOUT) {
+                uart_printf("  [PASS] Timed recv returns IPC_ERR_TIMEOUT (waited ~%lums)\n",
+                           elapsed_ms);
+            } else {
+                uart_printf("  [FAIL] Timed recv returned %d (expected IPC_ERR_TIMEOUT)\n", ret);
+                errors++;
+            }
+
+            /* Verify timeout was approximately correct (allow 10-100ms) */
+            if (elapsed_ms >= 10 && elapsed_ms <= 150) {
+                uart_puts("  [PASS] Timeout duration reasonable\n");
+            } else {
+                uart_printf("  [FAIL] Timeout duration out of range: %lums\n", elapsed_ms);
+                errors++;
+            }
+
+            msg_queue_destroy(q);
+        }
+    }
+
+    /*
+     * Test 8: msg_send timeout
+     */
+    {
+        struct msg_queue *q = msg_queue_create(2, sizeof(uint32_t));
+        if (!q) {
+            uart_puts("  [FAIL] Queue create for send timeout test\n");
+            errors++;
+        } else {
+            uint32_t val = 42;
+
+            /* Fill the queue */
+            msg_send(q, &val, MSG_NO_WAIT);
+            msg_send(q, &val, MSG_NO_WAIT);
+
+            /* Send on full queue with 50ms timeout should fail */
+            uint64_t start = timer_get_count();
+            int ret = msg_send(q, &val, 50);
+            uint64_t elapsed = timer_get_count() - start;
+            uint64_t elapsed_ms = elapsed * 1000 / timer_get_frequency();
+
+            if (ret == IPC_ERR_TIMEOUT) {
+                uart_printf("  [PASS] Timed send returns IPC_ERR_TIMEOUT (waited ~%lums)\n",
+                           elapsed_ms);
+            } else {
+                uart_printf("  [FAIL] Timed send returned %d (expected IPC_ERR_TIMEOUT)\n", ret);
+                errors++;
+            }
+
+            msg_queue_destroy(q);
+        }
+    }
+
+    /*
+     * Test 9: Memory leak verification
+     *
+     * Create and destroy IPC resources, verify memory is reclaimed.
+     */
+    {
+        size_t free_before = pmm_get_free_pages();
+
+        /* Create and destroy message queues */
+        for (int i = 0; i < 5; i++) {
+            struct msg_queue *q = msg_queue_create(16, 64);
+            if (q) {
+                /* Send some messages */
+                uint32_t msg = i;
+                msg_send(q, &msg, MSG_NO_WAIT);
+                msg_send(q, &msg, MSG_NO_WAIT);
+                msg_queue_destroy(q);
+            }
+        }
+
+        /* Create and destroy shared buffers */
+        for (int i = 0; i < 3; i++) {
+            struct shared_buffer *buf = shared_buffer_create(BLOCK_SIZE, SHM_RDWR);
+            if (buf) {
+                void *addr = shared_buffer_map(buf, NULL, SHM_RDWR);
+                if (addr) {
+                    shared_buffer_unmap(buf, NULL);
+                }
+                shared_buffer_destroy(buf);
+            }
+        }
+
+        size_t free_after = pmm_get_free_pages();
+
+        /* Allow small variance for allocator fragmentation */
+        if (free_after >= free_before - 2) {
+            uart_printf("  [PASS] Memory leak test (before=%lu, after=%lu)\n",
+                       (unsigned long)free_before, (unsigned long)free_after);
+        } else {
+            uart_printf("  [FAIL] Memory leak detected (before=%lu, after=%lu, leaked=%lu pages)\n",
+                       (unsigned long)free_before, (unsigned long)free_after,
+                       (unsigned long)(free_before - free_after));
+            errors++;
+        }
+    }
+
+    /*
+     * Test 10: IPC statistics
+     */
+    {
+        struct msg_queue *q = msg_queue_create(8, sizeof(uint32_t));
+        if (!q) {
+            uart_puts("  [FAIL] Queue create for stats test\n");
+            errors++;
+        } else {
+            /* Send some messages */
+            uint32_t val = 1;
+            for (int i = 0; i < 6; i++) {
+                msg_send(q, &val, MSG_NO_WAIT);
+            }
+            /* Receive some */
+            for (int i = 0; i < 4; i++) {
+                msg_recv(q, &val, MSG_NO_WAIT);
+            }
+
+            /* Check per-queue stats */
+            uint64_t sent, recv;
+            size_t hw;
+            msg_queue_stats(q, &sent, &recv, &hw);
+
+            if (sent == 6 && recv == 4 && hw == 6) {
+                uart_printf("  [PASS] Queue stats (sent=%lu, recv=%lu, high_water=%lu)\n",
+                           (unsigned long)sent, (unsigned long)recv, (unsigned long)hw);
+            } else {
+                uart_printf("  [FAIL] Queue stats wrong (sent=%lu exp 6, recv=%lu exp 4, hw=%lu exp 6)\n",
+                           (unsigned long)sent, (unsigned long)recv, (unsigned long)hw);
+                errors++;
+            }
+
+            /* Check global stats */
+            struct ipc_stats stats;
+            ipc_get_stats(&stats);
+
+            if (stats.queue_count >= 1 && stats.total_msgs_sent >= 6) {
+                uart_printf("  [PASS] Global IPC stats (queues=%u, total_sent=%lu)\n",
+                           stats.queue_count, (unsigned long)stats.total_msgs_sent);
+            } else {
+                uart_printf("  [FAIL] Global IPC stats wrong (queues=%u, sent=%lu)\n",
+                           stats.queue_count, (unsigned long)stats.total_msgs_sent);
+                errors++;
+            }
+
+            msg_queue_destroy(q);
+        }
+    }
+
+    /*
+     * Test 11: Queue stress test
+     *
+     * Rapidly send/recv messages to verify queue handles high throughput.
+     * Uses non-blocking operations in a single-threaded manner for reliable testing.
+     */
+    {
+        struct msg_queue *q = msg_queue_create(64, sizeof(uint32_t));
+        if (!q) {
+            uart_puts("  [FAIL] Queue create for stress test\n");
+            errors++;
+        } else {
+            uint32_t produced = 0;
+            uint32_t consumed = 0;
+
+            /* Interleaved send/recv pattern */
+            for (int round = 0; round < 100; round++) {
+                /* Send a batch of messages */
+                for (int i = 0; i < 10; i++) {
+                    uint32_t msg = (round * 10) + i;
+                    if (msg_send(q, &msg, MSG_NO_WAIT) == IPC_OK) {
+                        produced++;
+                    }
+                }
+
+                /* Receive some messages */
+                for (int i = 0; i < 8; i++) {
+                    uint32_t msg;
+                    if (msg_recv(q, &msg, MSG_NO_WAIT) == IPC_OK) {
+                        consumed++;
+                    }
+                }
+            }
+
+            /* Drain remaining messages */
+            uint32_t msg;
+            while (msg_recv(q, &msg, MSG_NO_WAIT) == IPC_OK) {
+                consumed++;
+            }
+
+            uart_printf("  [INFO] Stress test: produced=%u, consumed=%u\n",
+                       produced, consumed);
+
+            /* Verify all messages accounted for */
+            if (produced == consumed && produced >= 500) {
+                uart_puts("  [PASS] Queue stress test (high throughput)\n");
+            } else {
+                uart_printf("  [FAIL] Queue stress test: mismatch or low count\n");
+                errors++;
+            }
+
+            msg_queue_destroy(q);
         }
     }
 

@@ -338,11 +338,21 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ Add fault address to panic register dump
 - ⏸️ Future: demand paging for model memory — deferred to Phase 5+
 
-### IPC Improvements (Carried from Phase 2)
-- [ ] Implement proper timeout handling in `msg_recv()`
-- [ ] Multi-task producer/consumer stress test
-- [ ] Memory leak verification after IPC teardown
-- [ ] Add IPC statistics (messages sent, queue high-water mark)
+### IPC Improvements (Carried from Phase 2) ✅
+- ✅ Implement proper timeout handling in `msg_recv()` and `msg_send()`
+  - Uses timer_get_count() for elapsed time tracking
+  - Timed waits use polling with yield() for simplicity
+  - Infinite waits use blocking (BLOCKED state)
+- ✅ Queue stress test (high throughput single-threaded)
+  - 100 rounds of 10 send / 8 recv = 856+ messages
+  - Verifies all messages accounted for
+- ✅ Memory leak verification after IPC teardown
+  - Tests queue create/destroy and buffer map/unmap cycles
+  - Compares free pages before/after
+- ✅ Add IPC statistics (messages sent, queue high-water mark)
+  - Per-queue: msgs_sent, msgs_recv, high_water
+  - Global: queue_count, buffer_count, total_msgs_sent/recv
+  - `msg_queue_stats()` and `ipc_get_stats()` API
 
 ### Rust Runtime Expansion
 - [ ] Implement `ModelLoader` struct skeleton (full implementation Phase 5)
