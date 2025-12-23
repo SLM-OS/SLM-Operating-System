@@ -439,26 +439,76 @@ Using 39-bit VA with TTBR1 (kernel space starts at `0xFFFF_FF80_0000_0000`):
 
 When translation fails, the CPU generates a synchronous exception with:
 
-- **ESR_EL1**: Exception syndrome (includes fault type)
+- **ESR_EL1**: Exception syndrome (includes fault type, access type)
 - **FAR_EL1**: Faulting virtual address
+- **ELR_EL1**: Address of the faulting instruction
 
-### Fault Types (ESR_EL1.EC = 0x24/0x25)
+### Exception Classes (ESR_EL1.EC)
 
-| ISS[5:0] | Fault Type |
-|----------|------------|
-| 0b0001xx | Address size fault (level 0-3) |
-| 0b0001xx | Translation fault (level 0-3) |
-| 0b0010xx | Access flag fault (level 0-3) |
-| 0b0011xx | Permission fault (level 0-3) |
+| EC | Exception Type |
+|----|----------------|
+| 0x20 | Instruction Abort (lower EL) |
+| 0x21 | Instruction Abort (same EL) |
+| 0x24 | Data Abort (lower EL) |
+| 0x25 | Data Abort (same EL) |
 
-### SLM-OS Handling (Phase 2)
+### Fault Status Codes (ESR_EL1.ISS[5:0])
 
-For now, all page faults trigger panic with diagnostic info:
-- Faulting address (FAR_EL1)
-- Fault type (decoded from ESR_EL1)
-- Instruction address (ELR_EL1)
+| FSC | Fault Type |
+|-----|------------|
+| 0x04-0x07 | Translation fault (level 0-3) — page not mapped |
+| 0x08-0x0B | Access flag fault (level 0-3) |
+| 0x0C-0x0F | Permission fault (level 0-3) — access not allowed |
+| 0x10-0x14 | Synchronous external abort |
+| 0x21 | Alignment fault |
 
-Future phases may implement demand paging for model memory.
+### Data Abort Fields
+
+For data aborts (EC = 0x24/0x25), ESR_EL1 also contains:
+- **WnR (bit 6)**: 1 = write access, 0 = read access
+- **CM (bit 8)**: 1 = fault during cache maintenance operation
+
+### SLM-OS Page Fault Handler
+
+The handler in `kernel/src/exceptions.c` provides detailed diagnostics:
+
+```
+*********************************
+***       PAGE FAULT          ***
+*********************************
+
+Type:    Data Abort (WRITE)
+Address: 0xdeadbeef
+Reason:  Translation fault, level 3
+
+Task Context:
+  Task ID:   5
+  Task Name: worker
+  CPU:       1
+
+Fault Location:
+  ELR (PC):  0xffff000000080abc
+
+Raw Exception State:
+  ESR_EL1:   0x96000047
+  EC:        0x25 (Data Abort (same EL))
+  FSC:       0x7
+  WnR:       1 (write)
+  SPSR_EL1:  0x60000005
+
+System halted.
+```
+
+### Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `kernel/src/exceptions.c` | Page fault handler with `decode_fault_status()` |
+| `kernel/src/panic.c` | General panic with task context and register dump |
+
+### Future: Demand Paging
+
+Phase 5+ may implement demand paging for model memory, where translation faults trigger lazy allocation rather than panic.
 
 ---
 
