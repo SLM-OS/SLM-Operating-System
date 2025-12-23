@@ -431,7 +431,7 @@ When DTB parsing fails, SLM-OS uses values from `kernel/include/platform.h`:
 #if defined(PLATFORM_QEMU_VIRT)
     #define UART_BASE       0x09000000
     #define RAM_BASE        0x40000000
-    #define RAM_SIZE        0x08000000  // 128 MB default
+    #define RAM_SIZE        0x40000000  // 1 GB (scaled for model testing)
     #define GIC_DIST_BASE   0x08000000
     #define GIC_CPU_BASE    0x08010000
     #define TIMER_IRQ       30

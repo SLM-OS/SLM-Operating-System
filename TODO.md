@@ -2,7 +2,7 @@
 
 This document tracks Phase 3 implementation of SLM-OS.
 
-**Status:** In progress (M1-3 complete, M4 DTB parser done, M5 shell complete, M6 complete, M4 hardware testing pending)
+**Status:** In progress (M1-3 complete, M4 DTB parser done, M5 shell complete, M6 complete, M4 hardware testing pending, RAM scaled to 1GB for model testing)
 
 **Goals:**
 - Model memory management (Rust)
@@ -54,7 +54,7 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ Test zero-copy sharing between tasks
 - ✅ Verify memory statistics accuracy
 - ✅ Stress test: pool exhaustion and recovery
-- [ ] Test large model allocation (approach RAM limits) — needs more RAM
+- ✅ Test large model allocation (200MB/100 blocks, approach pool limits)
 
 ---
 
@@ -546,11 +546,11 @@ M5 (Shell) ────────────────> Useful for debuggin
 
 Recommended order:
 1. M1 (Model Memory) — ✅ Complete
-2. M2 (Scheduler) — In progress
+2. M2 (Scheduler) — ✅ Complete
 3. M4 (Hardware) — Get serial working for debugging
 4. M3 (GPU) — Requires M1 and M4
-5. M5 (Shell) — Useful for hardware debugging
-6. M6 (Polish) — Throughout
+5. M5 (Shell) — ✅ Complete (useful for hardware debugging)
+6. M6 (Polish) — ✅ Complete
 
 ---
 

@@ -23,7 +23,7 @@ void panic(const char *fmt, ...) __attribute__((noreturn));
  */
 #if defined(DEBUG) && !defined(NDEBUG)
     #define DEBUG_PRINT(fmt, ...) \
-        uart_printf("[DEBUG] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+        uart_printf("[DEBUG] %s:%d: " fmt "\n", __FILE__, __LINE__ __VA_OPT__(,) __VA_ARGS__)
 #else
     #define DEBUG_PRINT(fmt, ...) ((void)0)
 #endif
@@ -33,21 +33,21 @@ void panic(const char *fmt, ...) __attribute__((noreturn));
  * Always active, used for important status messages.
  */
 #define INFO(fmt, ...) \
-    uart_printf("[INFO] " fmt "\n", ##__VA_ARGS__)
+    uart_printf("[INFO] " fmt "\n" __VA_OPT__(,) __VA_ARGS__)
 
 /*
  * Warning print macro.
  * Always active, used for non-fatal warnings.
  */
 #define WARN(fmt, ...) \
-    uart_printf("[WARN] " fmt "\n", ##__VA_ARGS__)
+    uart_printf("[WARN] " fmt "\n" __VA_OPT__(,) __VA_ARGS__)
 
 /*
  * Error print macro.
  * Always active, used for error conditions.
  */
 #define ERROR(fmt, ...) \
-    uart_printf("[ERROR] %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+    uart_printf("[ERROR] %s:%d: " fmt "\n", __FILE__, __LINE__ __VA_OPT__(,) __VA_ARGS__)
 
 /*
  * Assert macro.

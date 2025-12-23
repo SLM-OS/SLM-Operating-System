@@ -316,15 +316,26 @@ make BUILD_TYPE=Release  # Optimized, no debug symbols
 
 ### Compiler Flags
 
-Defined in `CMakeLists.txt`:
+Defined in `CMakeLists.txt`. Uses **C23 standard** with strict warnings:
 
 ```cmake
-# Common flags
--Wall -Wextra -Werror    # Strict warnings
--ffreestanding -nostdlib  # No standard library
--mcpu=cortex-a78ae       # Target CPU
+# C23 standard (for __VA_OPT__, nullptr, etc.)
+-std=c23
+
+# Strict warnings (all treated as errors)
+-Wall -Wextra -Wpedantic -Werror
+-Wshadow -Wcast-align -Wstrict-prototypes
+-Wformat=2 -Wunused -Wunreachable-code
+
+# Freestanding environment
+-ffreestanding -nostdlib
+
+# Target CPU
+-mcpu=cortex-a78ae       # ARM Cortex-A78AE (Jetson Orin Nano)
 -mgeneral-regs-only      # No FPU in kernel code (except context switch)
 ```
+
+The codebase compiles with zero warnings at maximum strictness.
 
 ---
 
@@ -344,13 +355,17 @@ Emulates ARM Cortex-A76 (same as Raspberry Pi 5). Supports:
 - ARMv8.2-A architecture
 - All standard ARM64 features used by SLM-OS
 
-### Memory: `512M`
+### Memory: `1G`
 
-512MB RAM, sufficient for kernel development. Can be increased:
+1GB RAM (scaled for model testing). The VMM maps all RAM at boot, supporting:
+- 256MB weight pool + 128MB workspace pool = 384MB for model memory
+- Remaining RAM for kernel, tasks, and test allocations
+
+Can be adjusted in `Makefile`:
 
 ```bash
-# In Makefile, change:
-QEMU_MEMORY := 1G
+QEMU_MEMORY := 512M  # Smaller for faster tests
+QEMU_MEMORY := 2G    # Larger if needed
 ```
 
 ### Cores: `4`
@@ -569,7 +584,7 @@ screen /dev/ttyUSB0 115200
 | Timer | ARM Generic Timer | ARM Generic Timer |
 | GIC | GIC-400 | GIC-400 |
 | CPUs | 4 × Cortex-A76 | 6 × Cortex-A78AE |
-| RAM | 512MB-1GB | 4-8GB |
+| RAM | 1GB (default) | 8GB |
 | GPU | None (stub) | Ampere (1024 CUDA cores) |
 
 See `docs/jetson-boot.md` for detailed boot process documentation.

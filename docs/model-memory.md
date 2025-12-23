@@ -28,14 +28,14 @@ The model memory system provides specialized allocation for AI model weights and
 │  │  Weight Pool (Read-Only)                                    │    │
 │  │  - Model parameters, embeddings, static data                │    │
 │  │  - Long-lived (loaded once, used many times)                │    │
-│  │  - Default: 16 MB (8 × 2MB blocks)                          │    │
+│  │  - Default: 256 MB (128 × 2MB blocks) for 1GB RAM            │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │  Workspace Pool (Read-Write)                                │    │
 │  │  - Activation tensors, KV cache, inference scratch          │    │
 │  │  - Per-inference (allocated, used, freed)                   │    │
-│  │  - Default: 8 MB (4 × 2MB blocks)                           │    │
+│  │  - Default: 128 MB (64 × 2MB blocks) for 1GB RAM             │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -43,15 +43,15 @@ The model memory system provides specialized allocation for AI model weights and
 
 ### Pool Sizing
 
-Default configuration targets QEMU with 128MB RAM:
+Default configuration for QEMU with 1GB RAM (scaled for model testing):
 
 | Pool | Size | Blocks | Purpose |
 |------|------|--------|---------|
-| Weight | 16 MB | 8 | Model weights (read-only after load) |
-| Workspace | 8 MB | 4 | Inference scratch space |
-| **Total** | **24 MB** | **12** | Reserved for model memory |
+| Weight | 256 MB | 128 | Model weights (read-only after load) |
+| Workspace | 128 MB | 64 | Inference scratch space |
+| **Total** | **384 MB** | **192** | Reserved for model memory |
 
-On Jetson Orin Nano (4-8 GB RAM), these can be scaled significantly larger.
+On Jetson Orin Nano (8 GB RAM), these can be scaled even larger for production models.
 
 ---
 

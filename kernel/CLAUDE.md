@@ -37,7 +37,7 @@ If the offset is wrong, context switches will corrupt memory and cause crashes (
 
 ---
 
-## C11 Freestanding Headers
+## C23 Freestanding Headers
 
 In bare-metal code, only these standard headers are safe (no libc required):
 
@@ -46,20 +46,23 @@ In bare-metal code, only these standard headers are safe (no libc required):
 | `<float.h>` | Floating-point limits |
 | `<iso646.h>` | Alternative operator spellings |
 | `<limits.h>` | Integer limits |
-| `<stdalign.h>` | `alignas`, `alignof` |
 | `<stdarg.h>` | `va_list`, `va_start`, `va_arg`, `va_end` |
-| `<stdbool.h>` | `bool`, `true`, `false` |
-| `<stddef.h>` | `NULL`, `size_t`, `ptrdiff_t`, `offsetof` |
+| `<stddef.h>` | `NULL`, `nullptr`, `size_t`, `ptrdiff_t`, `offsetof` |
 | `<stdint.h>` | `uint32_t`, `int64_t`, `uintptr_t`, etc. |
-| `<stdnoreturn.h>` | `noreturn` macro |
+
+**C23 keywords (no header needed):**
+- `bool`, `true`, `false` — boolean type and constants
+- `alignas`, `alignof` — alignment specifiers
+- `nullptr` — type-safe null pointer
+- `static_assert` — compile-time assertions
 
 **NOT safe:** `<stdio.h>`, `<stdlib.h>`, `<string.h>`, `<math.h>` — these require libc.
 
 ---
 
-## C11 Strict Compliance
+## C23 Strict Compliance
 
-The kernel is compiled with `-std=c11` (no GNU extensions). This means:
+The kernel is compiled with `-std=c23 -Wpedantic` (no GNU extensions). This means:
 
 **Use `__asm__` instead of `asm`:**
 ```c
@@ -79,13 +82,22 @@ register uint64_t x0 __asm__("x0") = value;
 register uint64_t x0 asm("x0") = value;
 ```
 
-**Use `_Alignas` instead of `alignas` (or include `<stdalign.h>`):**
+**C23: `alignas` is now a keyword (no header needed):**
 ```c
-/* Works without stdalign.h */
-_Alignas(16) uint8_t buffer[64];
-
-/* Requires #include <stdalign.h> */
+/* C23 - alignas works directly */
 alignas(16) uint8_t buffer[64];
+
+/* _Alignas also still works */
+_Alignas(16) uint8_t buffer[64];
+```
+
+**C23: Use `__VA_OPT__` for variadic macros:**
+```c
+/* Correct - C23 standard */
+#define INFO(fmt, ...) uart_printf("[INFO] " fmt "\n" __VA_OPT__(,) __VA_ARGS__)
+
+/* Incorrect - GNU extension, triggers -Wpedantic warning */
+#define INFO(fmt, ...) uart_printf("[INFO] " fmt "\n", ##__VA_ARGS__)
 ```
 
 ---
