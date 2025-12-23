@@ -287,15 +287,33 @@ static void test_priority_clamped_to_max(void)
  * Test: slm_task_create returns valid task ID
  */
 /*
- * Dummy task for FFI tests.
- * Yields once then exits. The test must set priority/deadline before the
- * task gets scheduled, which works because slm_task_create returns before
- * the task runs on another CPU.
+ * Signal for blocking FFI test tasks.
+ * The task waits for this flag before exiting, giving tests time to
+ * inspect/modify the task on SMP systems where the task may start
+ * running immediately on another CPU.
+ */
+static volatile bool ffi_task_proceed = false;
+
+/*
+ * Blocking task for FFI tests.
+ * Waits for ffi_task_proceed flag before exiting.
+ */
+static void blocking_ffi_task(void *arg)
+{
+    (void)arg;
+    while (!ffi_task_proceed) {
+        yield();
+    }
+}
+
+/*
+ * Non-blocking dummy task for simple FFI tests.
+ * Yields once then exits.
  */
 static void dummy_task(void *arg)
 {
     (void)arg;
-    yield();  /* Give test code a chance to modify us */
+    yield();
 }
 
 static void test_ffi_task_create_returns_id(void)
@@ -319,10 +337,13 @@ static void test_ffi_task_create_returns_id(void)
  */
 static void test_ffi_set_priority(void)
 {
-    uint32_t id = slm_task_create("ffi_pri", dummy_task, NULL);
+    /* Reset signal so task blocks */
+    ffi_task_proceed = false;
+
+    uint32_t id = slm_task_create("ffi_pri", blocking_ffi_task, NULL);
     TEST_ASSERT(id != 0);
 
-    /* Get task pointer immediately before scheduler can reap it */
+    /* Task is blocked waiting for signal, safe to access */
     struct task *t = task_get(id);
     TEST_ASSERT_NOT_NULL(t);
 
@@ -330,6 +351,9 @@ static void test_ffi_set_priority(void)
     TEST_ASSERT_EQUAL_INT(SLM_OK, ret);
 
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->priority);
+
+    /* Signal task to exit */
+    ffi_task_proceed = true;
 
     /* Wait for task to complete */
     while (t->state != TASK_TERMINATED) {
@@ -343,10 +367,13 @@ static void test_ffi_set_priority(void)
  */
 static void test_ffi_set_deadline(void)
 {
-    uint32_t id = slm_task_create("ffi_dl", dummy_task, NULL);
+    /* Reset signal so task blocks */
+    ffi_task_proceed = false;
+
+    uint32_t id = slm_task_create("ffi_dl", blocking_ffi_task, NULL);
     TEST_ASSERT(id != 0);
 
-    /* Get task pointer immediately before scheduler can reap it */
+    /* Task is blocked waiting for signal, safe to access */
     struct task *t = task_get(id);
     TEST_ASSERT_NOT_NULL(t);
 
@@ -355,6 +382,9 @@ static void test_ffi_set_deadline(void)
     TEST_ASSERT_EQUAL_INT(SLM_OK, ret);
 
     TEST_ASSERT_EQUAL_UINT64(deadline, t->deadline_ns);
+
+    /* Signal task to exit */
+    ffi_task_proceed = true;
 
     /* Wait for task to complete */
     while (t->state != TASK_TERMINATED) {

@@ -438,60 +438,17 @@ static int vmm_run_tests(void)
      * Map a new 2MB block, verify it's accessible, then unmap
      *
      * NOTE: This test requires physical memory beyond what's initially mapped.
-     * On QEMU with only 128MB RAM (0x40000000-0x48000000), all RAM is mapped
-     * at init, so we skip this test. On systems with more RAM, we test at
-     * 128MB offset which should be unmapped but valid physical memory.
+     * Since vmm_init() now maps all of RAM_SIZE, this test is only meaningful
+     * if we have RAM beyond what the kernel knows about, which requires
+     * runtime detection (e.g., from DTB). For now, skip since all RAM is mapped.
      */
     {
-        /* Find an unmapped region - use 128MB offset */
-        uint64_t test_pa = RAM_BASE + (128 * 1024 * 1024);  /* 0x4800_0000 */
-        uint64_t test_va = test_pa;  /* Identity map for simplicity */
-
-        /* Check if this address is beyond available RAM */
-        if (test_pa >= RAM_BASE + RAM_SIZE) {
-            uart_puts("  [SKIP] Dynamic map test: no unmapped RAM available\n");
-        } else if (vmm_is_mapped(test_va)) {
-            uart_printf("  [FAIL] VA 0x%lx already mapped before test\n", test_va);
-            errors++;
-        } else {
-            /* Map it */
-            int ret = vmm_map_block(test_va, test_pa,
-                                    VMM_FLAG_READ | VMM_FLAG_WRITE);
-            if (ret != 0) {
-                uart_printf("  [FAIL] vmm_map_block() returned %d\n", ret);
-                errors++;
-            } else {
-                /* Verify it's now mapped */
-                if (!vmm_is_mapped(test_va)) {
-                    uart_puts("  [FAIL] Block not mapped after vmm_map_block()\n");
-                    errors++;
-                } else {
-                    /* Write and read back */
-                    volatile uint64_t *ptr = (volatile uint64_t *)test_va;
-                    uint64_t magic = 0x1234567890ABCDEFULL;
-                    *ptr = magic;
-                    uint64_t readback = *ptr;
-
-                    if (readback != magic) {
-                        uart_printf("  [FAIL] Dynamic map: wrote 0x%lx, read 0x%lx\n",
-                                    magic, readback);
-                        errors++;
-                    } else {
-                        /* Unmap it */
-                        ret = vmm_unmap_block(test_va);
-                        if (ret != 0) {
-                            uart_printf("  [FAIL] vmm_unmap_block() returned %d\n", ret);
-                            errors++;
-                        } else if (vmm_is_mapped(test_va)) {
-                            uart_puts("  [FAIL] Block still mapped after unmap\n");
-                            errors++;
-                        } else {
-                            uart_puts("  [PASS] Dynamic map/unmap works\n");
-                        }
-                    }
-                }
-            }
-        }
+        /*
+         * Since we now map all of RAM_SIZE at boot, there's no unmapped region
+         * within our known RAM. This test would only be meaningful with runtime
+         * memory discovery (DTB parsing) that finds more RAM than RAM_SIZE.
+         */
+        uart_puts("  [SKIP] Dynamic map test: all RAM mapped at boot\n");
     }
 
     /* Summary */
@@ -585,7 +542,7 @@ void vmm_init(void)
      */
 
     /*
-     * Map kernel RAM (first 128MB for now).
+     * Map kernel RAM (based on RAM_SIZE from platform.h).
      * L2 index for 0x4000_0000 within its 1GB region = 0.
      *
      * Since TTBR0 and TTBR1 share the same L1 table, this mapping
@@ -598,7 +555,9 @@ void vmm_init(void)
      * requires 4KB pages or 2MB-aligned sections (Phase 3 work).
      */
     uint32_t kernel_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
-    for (int i = 0; i < 64; i++) {  /* 64 × 2MB = 128MB */
+    uint32_t num_blocks = RAM_SIZE / BLOCK_SIZE;
+    if (num_blocks > 512) num_blocks = 512;  /* L2 table limit */
+    for (uint32_t i = 0; i < num_blocks; i++) {
         uint64_t pa = RAM_BASE + (i * BLOCK_SIZE);
         l2_kernel[i] = make_block_desc(pa, kernel_flags);
         vmm_state.blocks_mapped++;

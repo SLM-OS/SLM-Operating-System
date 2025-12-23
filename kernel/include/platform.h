@@ -38,7 +38,7 @@
 
 /* Memory layout */
 #define RAM_BASE            0x40000000UL
-#define RAM_SIZE            0x08000000UL    /* 128 MB default */
+#define RAM_SIZE            0x40000000UL    /* 1 GB for large model testing */
 
 /* UART - PL011 */
 #define UART_TYPE_PL011

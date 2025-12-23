@@ -14,8 +14,8 @@
  * ============================================================================ */
 
 #define MODEL_BLOCK_SIZE    (2 * 1024 * 1024)  /* 2 MB */
-#define WEIGHT_POOL_BLOCKS  8                   /* 16 MB / 2 MB */
-#define WORKSPACE_POOL_BLOCKS 4                 /* 8 MB / 2 MB */
+#define WEIGHT_POOL_BLOCKS  128                 /* 256 MB / 2 MB */
+#define WORKSPACE_POOL_BLOCKS 64                /* 128 MB / 2 MB */
 
 /* ============================================================================
  * FFI Declarations for Model Memory
@@ -282,6 +282,66 @@ static void test_freed_memory_reused(void)
 }
 
 /* ============================================================================
+ * Test: Large Model Allocation (approach pool limits)
+ *
+ * Allocates 200MB (100 blocks) to verify near-limit allocations work.
+ * This tests the scenario of loading a small LLM's weights.
+ * ============================================================================ */
+
+#define LARGE_MODEL_BLOCKS  100  /* 200 MB */
+
+static void test_large_model_allocation(void)
+{
+    ModelHandle handles[LARGE_MODEL_BLOCKS];
+    int allocated = 0;
+    size_t total_bytes = 0;
+
+    /* Get initial stats */
+    RustPoolStats before = rust_weight_pool_stats();
+
+    /* Allocate 100 blocks (200 MB) - simulates loading a small LLM */
+    for (int i = 0; i < LARGE_MODEL_BLOCKS; i++) {
+        handles[i] = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+        if (handle_is_null(handles[i])) {
+            break;
+        }
+        allocated++;
+        total_bytes += MODEL_BLOCK_SIZE;
+
+        /* Verify each block is accessible by writing to it */
+        volatile uint64_t *ptr = (volatile uint64_t *)rust_model_get_ptr(handles[i]);
+        if (ptr) {
+            ptr[0] = 0xDEADBEEF00000000ULL | (uint64_t)i;
+        }
+    }
+
+    /* Should have allocated all requested blocks */
+    TEST_ASSERT_EQUAL_INT(LARGE_MODEL_BLOCKS, allocated);
+
+    /* Verify stats updated correctly */
+    RustPoolStats during = rust_weight_pool_stats();
+    TEST_ASSERT_EQUAL_UINT64(LARGE_MODEL_BLOCKS, during.allocated_blocks);
+    TEST_ASSERT_EQUAL_UINT64(before.free_blocks - LARGE_MODEL_BLOCKS, during.free_blocks);
+
+    /* Verify all blocks still readable (not corrupted) */
+    for (int i = 0; i < allocated; i++) {
+        volatile uint64_t *ptr = (volatile uint64_t *)rust_model_get_ptr(handles[i]);
+        uint64_t expected = 0xDEADBEEF00000000ULL | (uint64_t)i;
+        TEST_ASSERT_EQUAL_HEX64(expected, ptr[0]);
+    }
+
+    /* Free all blocks */
+    for (int i = 0; i < allocated; i++) {
+        rust_model_free(handles[i]);
+    }
+
+    /* Verify stats restored */
+    RustPoolStats after = rust_weight_pool_stats();
+    TEST_ASSERT_EQUAL_UINT64(before.free_blocks, after.free_blocks);
+    TEST_ASSERT_EQUAL_UINT64(0, after.allocated_blocks);
+}
+
+/* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
 
@@ -298,6 +358,7 @@ int test_suite_model_mem(void)
     RUN_TEST(test_statistics_accuracy);
     RUN_TEST(test_pool_exhaustion);
     RUN_TEST(test_freed_memory_reused);
+    RUN_TEST(test_large_model_allocation);
 
     return UnityEnd();
 }

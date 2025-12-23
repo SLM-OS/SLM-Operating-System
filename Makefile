@@ -23,7 +23,7 @@ TOOLCHAIN_FILE := cmake/toolchain-aarch64-none-elf.cmake
 QEMU := "C:/Program Files/qemu/qemu-system-aarch64.exe"
 QEMU_MACHINE := virt
 QEMU_CPU := cortex-a76
-QEMU_MEMORY := 512M
+QEMU_MEMORY := 1G
 QEMU_CORES := 4
 
 # Output files

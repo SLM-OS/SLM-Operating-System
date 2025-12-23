@@ -295,12 +295,12 @@ extern "C" {
 /// Initialize model memory pools.
 ///
 /// Called by C kernel to set up Rust model memory allocator.
-/// Uses 16 MB for weights and 8 MB for workspace by default.
+/// Uses 256 MB for weights and 128 MB for workspace (with 1GB QEMU RAM).
 #[no_mangle]
 pub extern "C" fn rust_model_mem_init() -> i32 {
-    // Default sizes for QEMU testing (smaller to fit in 128MB RAM)
-    let weight_mb: usize = 16;
-    let workspace_mb: usize = 8;
+    // Sizes for 1GB RAM testing - large enough for meaningful model tests
+    let weight_mb: usize = 256;
+    let workspace_mb: usize = 128;
 
     match mm::model_mem_init(weight_mb, workspace_mb) {
         Ok(()) => 0,
