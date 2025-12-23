@@ -26,19 +26,26 @@ Project-wide notes and reminders. See also:
 
 ### TODO File Formatting
 
-Use green checkmark emoji (✅) for completed items, not markdown checkboxes:
+Use emoji markers for task status:
+
+| Status | Marker | Example |
+|--------|--------|---------|
+| Completed | ✅ | `- ✅ Task completed` |
+| Pending | `[ ]` | `- [ ] Task pending` |
+| Deferred | ⏸️ | `- ⏸️ Task deferred to Phase 4` |
 
 **Correct:**
 ```markdown
 - ✅ Task completed
 - [ ] Task pending
-- Deferred: Task postponed to later phase
+- ⏸️ Task deferred to Phase 4
 ```
 
 **Incorrect:**
 ```markdown
 - [x] Task completed  ← Don't use this
 - ✓ Task completed   ← Don't use plain check symbol either
+- Deferred: Task     ← Use ⏸️ emoji instead
 ```
 
 ---
