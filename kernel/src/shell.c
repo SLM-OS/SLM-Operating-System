@@ -10,9 +10,12 @@
 #include "task.h"
 #include "sched.h"
 #include "pmm.h"
+#include "vmm.h"
 #include "smp.h"
 #include "ipc.h"
+#include "slm_ffi.h"
 #include "platform.h"
+#include "dtb.h"
 #include <stddef.h>
 
 /* ============================================================================
@@ -26,6 +29,10 @@ static int cmd_cpu(int argc, char *argv[]);
 static int cmd_uptime(int argc, char *argv[]);
 static int cmd_clear(int argc, char *argv[]);
 static int cmd_reboot(int argc, char *argv[]);
+static int cmd_vmm(int argc, char *argv[]);
+static int cmd_ipc(int argc, char *argv[]);
+static int cmd_model(int argc, char *argv[]);
+static int cmd_dtb(int argc, char *argv[]);
 
 /* ============================================================================
  * Command table
@@ -37,6 +44,10 @@ static const shell_cmd_t builtin_commands[] = {
     {"tasks",  cmd_tasks,  "List all tasks"},
     {"cpu",    cmd_cpu,    "Show CPU status"},
     {"uptime", cmd_uptime, "Show system uptime"},
+    {"vmm",    cmd_vmm,    "Show virtual memory info"},
+    {"ipc",    cmd_ipc,    "Show IPC statistics"},
+    {"model",  cmd_model,  "Show model memory pools"},
+    {"dtb",    cmd_dtb,    "Show device tree info"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
 };
@@ -381,6 +392,157 @@ static int cmd_reboot(int argc, char *argv[])
     while (1) {
         __asm__ volatile("wfi");
     }
+
+    return 0;
+}
+
+/*
+ * vmm - Show virtual memory statistics
+ */
+static int cmd_vmm(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    struct vmm_stats stats;
+    vmm_get_stats(&stats);
+
+    uart_puts("Virtual Memory Statistics:\r\n");
+    uart_puts("\r\n");
+    uart_printf("  L1 tables:       %lu\r\n", (unsigned long)stats.l1_tables);
+    uart_printf("  L2 tables:       %lu\r\n", (unsigned long)stats.l2_tables);
+    uart_printf("  Blocks mapped:   %lu (2MB each)\r\n", (unsigned long)stats.blocks_mapped);
+    uart_printf("  Bytes mapped:    %lu MB\r\n", (unsigned long)(stats.bytes_mapped / (1024 * 1024)));
+    uart_puts("\r\n");
+
+    uart_puts("Memory Regions:\r\n");
+    uart_puts("  Region           Start            End              Flags\r\n");
+    uart_puts("  ---------------  ---------------  ---------------  -----\r\n");
+
+    /* Kernel code/data region */
+    uart_printf("  Kernel           0x%08lx       0x%08lx       RWX\r\n",
+                (unsigned long)0x40000000, (unsigned long)0x40200000);
+
+    /* Device MMIO region */
+    uart_printf("  MMIO (Devices)   0x%08lx       0x%08lx       RW-\r\n",
+                (unsigned long)0x08000000, (unsigned long)0x10000000);
+
+    uart_puts("\r\n");
+    return 0;
+}
+
+/*
+ * ipc - Show IPC statistics
+ */
+static int cmd_ipc(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    struct ipc_stats stats;
+    ipc_get_stats(&stats);
+
+    uart_puts("IPC Statistics:\r\n");
+    uart_puts("\r\n");
+
+    uart_puts("  Message Queues:\r\n");
+    uart_printf("    Active queues:     %lu\r\n", (unsigned long)stats.queue_count);
+    uart_printf("    Total msgs sent:   %lu\r\n", (unsigned long)stats.total_msgs_sent);
+    uart_printf("    Total msgs recv:   %lu\r\n", (unsigned long)stats.total_msgs_recv);
+    uart_puts("\r\n");
+
+    uart_puts("  Shared Buffers:\r\n");
+    uart_printf("    Active buffers:    %lu\r\n", (unsigned long)stats.buffer_count);
+    uart_puts("\r\n");
+
+    return 0;
+}
+
+/*
+ * model - Show model memory pool statistics
+ */
+static int cmd_model(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    const size_t block_size_kb = 2048;
+    RustPoolStats weight_stats = rust_weight_pool_stats();
+    RustPoolStats workspace_stats = rust_workspace_pool_stats();
+
+
+    uart_puts("Model Memory Pools:\r\n");
+    uart_puts("\r\n");
+
+    uart_puts("  Weight Pool (read-only model parameters):\r\n");
+    uart_printf("    Block size:      %lu KB\r\n", (unsigned long)block_size_kb);
+    uart_printf("    Total blocks:    %lu\r\n", (unsigned long)weight_stats.total_blocks);
+    uart_printf("    Free blocks:     %lu\r\n", (unsigned long)weight_stats.free_blocks);
+    uart_printf("    Allocated:       %lu\r\n", (unsigned long)weight_stats.allocated_blocks);
+    uart_printf("    Shared:          %lu\r\n", (unsigned long)weight_stats.shared_blocks);
+    uart_printf("    Peak usage:      %lu\r\n", (unsigned long)weight_stats.peak_usage);
+    uart_puts("\r\n");
+
+    uart_puts("  Workspace Pool (inference scratch space):\r\n");
+    uart_printf("    Block size:      %lu KB\r\n", (unsigned long)block_size_kb);
+    uart_printf("    Total blocks:    %lu\r\n", (unsigned long)workspace_stats.total_blocks);
+    uart_printf("    Free blocks:     %lu\r\n", (unsigned long)workspace_stats.free_blocks);
+    uart_printf("    Allocated:       %lu\r\n", (unsigned long)workspace_stats.allocated_blocks);
+    uart_printf("    Shared:          %lu\r\n", (unsigned long)workspace_stats.shared_blocks);
+    uart_printf("    Peak usage:      %lu\r\n", (unsigned long)workspace_stats.peak_usage);
+    uart_puts("\r\n");
+
+    /* Calculate totals */
+    size_t total_blocks = weight_stats.total_blocks + workspace_stats.total_blocks;
+    size_t total_mb = total_blocks * block_size_kb / 1024;
+    size_t free_blocks = weight_stats.free_blocks + workspace_stats.free_blocks;
+    size_t free_mb = free_blocks * block_size_kb / 1024;
+
+    uart_printf("  Total: %lu blocks (%lu MB), %lu free (%lu MB)\r\n",
+                (unsigned long)total_blocks, (unsigned long)total_mb,
+                (unsigned long)free_blocks, (unsigned long)free_mb);
+    uart_puts("\r\n");
+
+    return 0;
+}
+
+/*
+ * dtb - Show device tree information
+ */
+static int cmd_dtb(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    const fdt_info_t *info = dtb_get_info();
+
+    uart_puts("Device Tree Information:\r\n");
+    uart_puts("\r\n");
+    uart_printf("  Status:       %s\r\n", info->valid ? "parsed from DTB" : "using defaults");
+    uart_puts("\r\n");
+
+    uart_puts("  Memory:\r\n");
+    uart_printf("    Base:       0x%lx\r\n", (unsigned long)info->ram_base);
+    uart_printf("    Size:       %lu MB\r\n", (unsigned long)(info->ram_size / (1024 * 1024)));
+    uart_puts("\r\n");
+
+    uart_puts("  UART:\r\n");
+    uart_printf("    Base:       0x%lx\r\n", (unsigned long)info->uart_base);
+    uart_printf("    IRQ:        %lu\r\n", (unsigned long)info->uart_irq);
+    uart_puts("\r\n");
+
+    uart_puts("  GIC:\r\n");
+    uart_printf("    Dist base:  0x%lx\r\n", (unsigned long)info->gic_dist_base);
+    uart_printf("    CPU base:   0x%lx\r\n", (unsigned long)info->gic_cpu_base);
+    uart_puts("\r\n");
+
+    uart_puts("  CPUs:\r\n");
+    uart_printf("    Count:      %lu\r\n", (unsigned long)info->cpu_count);
+    uart_puts("\r\n");
+
+    uart_puts("  Timer:\r\n");
+    uart_printf("    IRQ:        %lu\r\n", (unsigned long)info->timer_irq);
+    uart_puts("\r\n");
 
     return 0;
 }

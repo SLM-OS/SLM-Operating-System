@@ -306,10 +306,11 @@ Based on TODO.md recommendations:
 Our `boot.S` implements:
 
 - [x] Be placed at correct address (0x40000000 for QEMU)
+- [x] Preserve DTB pointer (x0 → x19 callee-saved register)
 - [x] Set up stack pointer
 - [x] Clear BSS section
 - [x] Disable interrupts initially
-- [x] Call `kernel_main()`
+- [x] Pass DTB pointer to `kernel_main(void *dtb)`
 - [x] Handle case where `kernel_main()` returns (hang or reset)
 
 ### Memory Layout (QEMU virt)
@@ -381,55 +382,73 @@ When using QEMU with `-kernel`, QEMU can automatically generate and pass a DTB:
 - Contains description of the virtual hardware configuration
 - Can be overridden with `-dtb <file>` option
 
-### Month 1 Decision: Hardcoded Configuration
+**Note:** When booting ELF files with `-kernel`, QEMU may pass NULL in x0 instead of a DTB pointer. This is why SLM-OS implements fallback to `platform.h` defaults.
 
-> **NOTE:** This is an initial simplification. DTB parsing will be implemented when adding
-> Jetson Orin Nano support (Month 2-3).
+### DTB Parser Implementation ✅
 
-For Month 1 QEMU-only development, SLM-OS uses hardcoded hardware addresses instead of parsing the device tree. This decision:
+SLM-OS includes a minimal DTB parser (`kernel/src/dtb.c`) that:
 
-**Rationale:**
-- Reduces initial complexity
-- QEMU virt machine has well-documented, fixed addresses
-- Allows focus on core kernel functionality first
-- DTB parsing adds significant code for minimal Month 1 benefit
+1. **Validates** the FDT header (magic 0xd00dfeed, version ≥ 17)
+2. **Extracts** hardware configuration:
+   - RAM base/size from `/memory@*` node
+   - UART base/IRQ from `/pl011@*`, `/uart@*`, `/serial@*` nodes
+   - GIC addresses from `/intc@*`, `/gic@*` nodes
+   - CPU count from `/cpus/cpu@*` nodes
+   - Timer IRQ from `/timer` node
+3. **Falls back** to `platform.h` compile-time defaults if parsing fails
 
-**Implementation approach:**
-
-All hardware addresses are centralized in a single header file (`kernel/include/platform.h`):
+**Boot flow:**
 
 ```c
-// platform.h - Hardware configuration
-// NOTE: Replace hardcoded values with DTB parsing (Month 2-3)
+void kernel_main(void *dtb)
+{
+    uart_init();  /* Use platform.h defaults for UART first */
 
-#define PLATFORM_QEMU_VIRT  1
+    /* Parse DTB early */
+    fdt_info_t fdt_info = {0};
+    int ret = dtb_parse(dtb, &fdt_info);
 
-#if PLATFORM_QEMU_VIRT
+    if (ret == FDT_OK) {
+        INFO("DTB parsed successfully");
+    } else {
+        WARN("DTB parsing failed, using defaults");
+    }
+    /* ... rest of initialization ... */
+}
+```
+
+**Current status:**
+- Parser implemented and tested
+- QEMU ELF boot passes NULL → fallback to defaults
+- Real hardware bootloaders (U-Boot, UEFI) should pass valid DTB
+- Shell `dtb` command displays current configuration
+
+### Compile-Time Fallback (platform.h)
+
+When DTB parsing fails, SLM-OS uses values from `kernel/include/platform.h`:
+
+```c
+#if defined(PLATFORM_QEMU_VIRT)
     #define UART_BASE       0x09000000
     #define RAM_BASE        0x40000000
     #define RAM_SIZE        0x08000000  // 128 MB default
-    #define GIC_BASE        0x08000000
+    #define GIC_DIST_BASE   0x08000000
+    #define GIC_CPU_BASE    0x08010000
     #define TIMER_IRQ       30
+#elif defined(PLATFORM_JETSON_ORIN_NANO)
+    #define UART_BASE       0x03100000
+    /* ... Jetson-specific values ... */
 #endif
 ```
 
-**Why this approach works:**
-- No magic numbers scattered throughout the codebase
-- Single file to update when adding new platforms
-- Minimal refactoring required when DTB parsing is added (macros become variables)
-- Compile-time platform selection via `#if` / `#elif`
+This dual approach ensures:
+- Reliable boot on all platforms (compile-time fallback)
+- Runtime hardware discovery when DTB is available
+- Clean migration path to DTB-only configuration
 
-**Future transition to DTB:**
+### QEMU virt Hardware Addresses
 
-When DTB parsing is implemented:
-1. Parse DTB at early boot to extract hardware addresses
-2. Populate global variables with discovered values
-3. Change `platform.h` from compile-time macros to `extern` declarations
-4. Remove the NOTE comment from this section and `platform.h`
-
-### QEMU virt Hardcoded Values
-
-These addresses are used for Month 1 development:
+These addresses are used as fallback values:
 
 | Resource | Address | Size | Notes |
 |----------|---------|------|-------|
@@ -443,4 +462,4 @@ These addresses are used for Month 1 development:
 ---
 
 *Last updated: December 2025*
-*Status: Primary boot implemented, SMP boot operational*
+*Status: Primary boot implemented, SMP boot operational, DTB parser implemented*

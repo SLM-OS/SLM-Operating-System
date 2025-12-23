@@ -86,6 +86,7 @@ This hybrid approach leverages:
 
 ### 4. Platform Abstraction
 
+- **Device Tree parsing** for runtime hardware discovery (with fallback)
 - **Compile-time platform selection** via CMake
 - **Common driver interfaces** (UART, timer, interrupt controller)
 - **QEMU virt** as primary development platform
@@ -94,6 +95,18 @@ This hybrid approach leverages:
 ---
 
 ## Subsystem Overview
+
+### Platform Support
+
+| Component | File(s) | Purpose |
+|-----------|---------|---------|
+| DTB Parser | `kernel/src/dtb.c` | Device Tree parsing for hardware discovery |
+| Platform Info | `kernel/include/platform.h` | Compile-time fallback values |
+
+**Phase 3 Learnings:**
+- DTB passed in x0 by bootloader (U-Boot, UEFI)
+- QEMU ELF boot doesn't pass DTB (x0 is NULL)
+- Fallback to compile-time defaults ensures reliable boot
 
 ### Memory Management
 
@@ -168,18 +181,20 @@ This hybrid approach leverages:
 ## Boot Sequence
 
 ```
-Power On
+Power On / Bootloader
     │
+    │ (x0 = DTB address)
     ▼
 ┌─────────────────┐
 │   _start        │  kernel/src/boot.S
-│   (EL2 → EL1)   │
+│   (EL2 → EL1)   │  Saves x0→x19, passes to kernel_main
 └────────┬────────┘
          │
          ▼
 ┌─────────────────┐
-│   kernel_init   │  kernel/src/main.c
+│   kernel_main   │  kernel/src/main.c
 │   - UART init   │
+│   - DTB parse   │  (or fallback to platform.h)
 │   - PMM init    │
 │   - VMM/MMU     │
 │   - Scheduler   │
@@ -264,6 +279,7 @@ See `docs/ffi.md` for complete FFI documentation.
 ## Phase 3 Summary
 
 ### Completed Features
+- Device Tree parser with fallback to compile-time defaults
 - Model memory allocator with 2MB blocks (Rust)
 - Deadline-aware hybrid scheduler with priority boost
 - Priority-inheriting mutex

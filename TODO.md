@@ -2,7 +2,7 @@
 
 This document tracks Phase 3 implementation of SLM-OS.
 
-**Status:** In progress (Milestones 1-3 complete, M5 shell core complete)
+**Status:** In progress (M1-3 complete, M4 DTB parser done, M5 shell complete, M6 complete, M4 hardware testing pending)
 
 **Goals:**
 - Model memory management (Rust)
@@ -258,10 +258,16 @@ This document tracks Phase 3 implementation of SLM-OS.
 - [ ] Test multi-core boot on Jetson (6 cores vs QEMU's 4)
 
 ### Device Tree Support (Required)
-- [ ] Implement minimal DTB parser
-- [ ] Extract memory regions from device tree
+- ✅ Implement minimal DTB parser (`kernel/src/dtb.c`, `kernel/include/dtb.h`)
+  - Parses FDT header, validates magic and version
+  - Walks structure block extracting properties
+  - Extracts: RAM, UART, GIC, CPU count, timer IRQ
+  - Falls back to `platform.h` defaults if parsing fails
+- ✅ Add `dtb` shell command to display parsed/default values
+- ✅ Preserve DTB pointer in boot.S (x0 → x19 → kernel_main)
+- [ ] Extract memory regions from device tree (parser ready, QEMU ELF boot doesn't pass DTB)
 - [ ] Extract interrupt configuration from device tree
-- [ ] Remove hardcoded addresses from `platform.h`
+- [ ] Remove hardcoded addresses from `platform.h` (after hardware testing confirms DTB works)
 - [ ] Test on both Jetson and Pi 5 with platform-specific DTBs
 
 ### Hardware Testing
@@ -293,9 +299,9 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ `uptime` — system uptime (hours:minutes:seconds)
 - ✅ `clear` — clear screen (ANSI escape codes)
 - ✅ `reboot` — system restart (via PSCI)
-- [ ] `vmm` — virtual memory regions and flags (future enhancement)
-- [ ] `ipc` — message queue and shared buffer stats (future enhancement)
-- [ ] `model` — model memory pool status (future enhancement)
+- ✅ `vmm` — virtual memory regions and flags
+- ✅ `ipc` — message queue and shared buffer stats
+- ✅ `model` — model memory pool status
 
 ### Virtual Filesystem Structure ⏸️
 - ⏸️ Mount root `/` with command nodes — deferred to Phase 4

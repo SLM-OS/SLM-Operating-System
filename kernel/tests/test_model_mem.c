@@ -31,15 +31,6 @@ typedef struct {
     uint32_t _reserved;
 } ModelHandle;
 
-/* Pool statistics - matches Rust PoolStats */
-typedef struct {
-    size_t total_blocks;
-    size_t free_blocks;
-    size_t allocated_blocks;
-    size_t shared_blocks;
-    size_t peak_usage;
-} PoolStats;
-
 /* Rust FFI functions */
 extern int rust_model_mem_init(void);
 extern ModelHandle rust_model_alloc_weights(size_t size);
@@ -48,8 +39,6 @@ extern int rust_model_free(ModelHandle handle);
 extern ModelHandle rust_model_share(ModelHandle handle);
 extern void *rust_model_get_ptr(ModelHandle handle);
 extern size_t rust_model_get_size(ModelHandle handle);
-extern PoolStats rust_weight_pool_stats(void);
-extern PoolStats rust_workspace_pool_stats(void);
 
 /* Helper to check if handle is null */
 static int handle_is_null(ModelHandle h)
@@ -209,14 +198,14 @@ static void test_refcount_prevents_premature_free(void)
 
 static void test_statistics_accuracy(void)
 {
-    PoolStats before = rust_weight_pool_stats();
+    RustPoolStats before = rust_weight_pool_stats();
 
     /* Allocate 3 blocks */
     ModelHandle h1 = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
     ModelHandle h2 = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
     ModelHandle h3 = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
 
-    PoolStats during = rust_weight_pool_stats();
+    RustPoolStats during = rust_weight_pool_stats();
 
     /* Should have 3 fewer free blocks */
     TEST_ASSERT_EQUAL_UINT64(before.free_blocks - 3, during.free_blocks);
@@ -227,7 +216,7 @@ static void test_statistics_accuracy(void)
     rust_model_free(h2);
     rust_model_free(h3);
 
-    PoolStats after = rust_weight_pool_stats();
+    RustPoolStats after = rust_weight_pool_stats();
 
     /* Should be back to original */
     TEST_ASSERT_EQUAL_UINT64(before.free_blocks, after.free_blocks);

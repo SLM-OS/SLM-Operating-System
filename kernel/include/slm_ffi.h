@@ -219,6 +219,29 @@ extern int rust_model_mem_init(void);
 extern int rust_model_mem_test(void);
 
 /*
+ * Model memory pool statistics (for shell command).
+ */
+typedef struct {
+    size_t total_blocks;
+    size_t free_blocks;
+    size_t allocated_blocks;
+    size_t shared_blocks;
+    size_t peak_usage;
+} RustPoolStats;
+
+/*
+ * Get weight pool statistics.
+ * Returns statistics structure by value.
+ */
+extern RustPoolStats rust_weight_pool_stats(void);
+
+/*
+ * Get workspace pool statistics.
+ * Returns statistics structure by value.
+ */
+extern RustPoolStats rust_workspace_pool_stats(void);
+
+/*
  * ==========================================================================
  * Test Support Functions (called from Rust tests)
  * ==========================================================================

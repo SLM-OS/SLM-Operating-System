@@ -1,14 +1,14 @@
 # Debug Monitor (Shell)
 
-A minimal serial debug monitor for hardware bring-up and demos. This is **optional** — skip if behind schedule.
+A minimal serial debug monitor for hardware bring-up and demos.
 
-**Status:** Not implemented
+**Status:** Implemented
 
 ---
 
 ## Overview
 
-Not a real shell — just a command loop with `strcmp()` dispatch. Target: ~200-300 lines of C.
+A simple command loop with table-driven dispatch. The shell runs as a kernel task on CPU 0 and provides interactive access to system status and diagnostics.
 
 The industrial IoT deployment doesn't involve humans typing commands, so this is purely a development/demo tool.
 
@@ -18,17 +18,18 @@ The industrial IoT deployment doesn't involve humans typing commands, so this is
 
 ```
 SLM-OS> help
-  mem      - memory statistics
-  tasks    - list tasks
-  cpu      - per-core status
-  gpio <n> - toggle GPIO pin
-  reboot   - restart system
-
-SLM-OS> tasks
-PID  STATE    CPU  NAME
-  1  RUNNING    0  shell
-  2  READY      1  idle
-  3  BLOCKED    2  model_loader
+Available commands:
+  help    - List available commands
+  mem     - Show memory statistics
+  tasks   - List all tasks
+  cpu     - Show CPU status
+  uptime  - Show system uptime
+  vmm     - Show virtual memory info
+  ipc     - Show IPC statistics
+  model   - Show model memory pools
+  dtb     - Show device tree info
+  clear   - Clear screen
+  reboot  - Restart the system
 ```
 
 ### Command Descriptions
@@ -36,56 +37,60 @@ PID  STATE    CPU  NAME
 | Command | Description |
 |---------|-------------|
 | `help` | List available commands |
-| `mem` | Show PMM statistics (free pages, allocated, etc.) |
-| `tasks` | List all tasks with PID, state, CPU, and name |
-| `cpu` | Show per-core status (online, current task, idle time) |
-| `gpio <n>` | Toggle GPIO pin N (real hardware only) |
-| `reboot` | Restart system via PSCI |
+| `mem` | Show PMM statistics (total pages, free, allocated) |
+| `tasks` | List all tasks with ID, state, CPU affinity, priority, and name |
+| `cpu` | Show per-core status (online state, current task) |
+| `uptime` | Show system uptime in seconds and milliseconds |
+| `vmm` | Show virtual memory statistics (page tables, mapped regions) |
+| `ipc` | Show IPC statistics (message queues, shared buffers) |
+| `model` | Show model memory pool status (weight and workspace pools) |
+| `dtb` | Show Device Tree info (parsed or defaults) |
+| `clear` | Clear terminal screen (ANSI escape sequence) |
+| `reboot` | Restart system via PSCI (QEMU: triggers exit) |
 
 ---
 
 ## Implementation
 
+Located in `kernel/src/shell.c`.
+
 ### Key Functions
 
 | Function | Description |
 |----------|-------------|
-| `shell_init()` | Spawn shell task on CPU 0 |
-| `shell_getline()` | Read line from UART (blocking) |
-| `shell_dispatch()` | Match command string and execute handler |
+| `shell_init()` | Initialize shell and register built-in commands |
+| `shell_start()` | Spawn shell task on CPU 0 |
+| `shell_process_char()` | Handle incoming UART character (called from UART IRQ) |
+| `shell_register_command()` | Register external command at runtime |
 
 ### Architecture
 
+The shell uses interrupt-driven input via the UART driver:
+
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  shell_task()                                           │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │  while (1) {                                    │    │
-│  │      print_prompt();                            │    │
-│  │      shell_getline(buffer, sizeof(buffer));    │    │
-│  │      shell_dispatch(buffer);                   │    │
-│  │  }                                              │    │
-│  └─────────────────────────────────────────────────┘    │
+│  UART IRQ Handler                                       │
+│  └── shell_process_char(c)                              │
+│      ├── Echo character                                 │
+│      ├── Buffer until newline                           │
+│      └── On newline: parse and dispatch                 │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### Command Dispatch
 
-Simple `strcmp()` chain — no parsing library needed:
+Table-driven dispatch with support for external command registration:
 
 ```c
-if (strcmp(cmd, "help") == 0) {
-    cmd_help();
-} else if (strcmp(cmd, "mem") == 0) {
-    cmd_mem();
-} else if (strcmp(cmd, "tasks") == 0) {
-    cmd_tasks();
-} else if (strncmp(cmd, "gpio ", 5) == 0) {
-    int pin = atoi(cmd + 5);
-    cmd_gpio(pin);
-} else {
-    uart_printf("Unknown command: %s\n", cmd);
-}
+static const struct shell_command builtin_commands[] = {
+    {"help",   cmd_help,   "List available commands"},
+    {"mem",    cmd_mem,    "Show memory statistics"},
+    {"tasks",  cmd_tasks,  "List all tasks"},
+    // ...
+};
+
+// Runtime registration for test commands, etc.
+shell_register_command("test", cmd_test, "Run tests");
 ```
 
 ---
@@ -97,20 +102,11 @@ The following features are explicitly out of scope:
 - Scripting
 - Pipes
 - Job control
-- Command history
+- Command history (up arrow)
 - Tab completion
-- Line editing (backspace is OK)
+
+Backspace and basic line editing are supported.
 
 ---
 
-## Alternative if Skipped
-
-If the debug monitor is not implemented, use:
-
-- Compile-time test selection (`#ifdef TEST_xxx`)
-- `uart_printf()` debugging
-- Hard-coded demo sequences in `main()`
-
----
-
-*Created: December 2025*
+*Last updated: December 2025*

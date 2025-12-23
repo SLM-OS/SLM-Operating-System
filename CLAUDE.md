@@ -6,6 +6,29 @@ Project-wide notes and reminders. See also:
 
 ---
 
+## Git Commits
+
+Always ask for permission before committing code. Do not automatically commit changes after completing a task.
+
+---
+
+## File Editing
+
+**Always use relative paths** when reading or editing files. Absolute paths (e.g., `H:/My Drive/...`) can cause "file has been unexpectedly modified" errors due to CLion indexing or Google Drive sync interference. Relative paths work more reliably.
+
+**Correct:**
+```
+Read file_path="docs/shell.md"
+Edit file_path="kernel/src/shell.c"
+```
+
+**Avoid:**
+```
+Read file_path="H:/My Drive/Capstone/CS-496-SLM-Operating-System/docs/shell.md"
+```
+
+---
+
 ## Formatting Issues
 
 ### ASCII Box Diagrams

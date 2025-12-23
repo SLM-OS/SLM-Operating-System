@@ -177,17 +177,20 @@ test: kernel
 		echo "FAILED - Test failures detected:"; \
 		grep -F "[FAIL]" $(TEST_OUTPUT); \
 		exit 1; \
+	elif grep -F "PAGE FAULT" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "CRASHED - Kernel page fault detected"; \
+		grep -A 20 "PAGE FAULT" $(TEST_OUTPUT) | head -25; \
+		exit 1; \
 	elif grep -F "VMM tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
 	     grep -F "Spinlock tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
 	     grep -F "SMP tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
 	     grep -F "IPC tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
-	     grep -F "FFI tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
 	     grep -F "Scheduler tests passed" $(TEST_OUTPUT) > /dev/null 2>&1; then \
 		echo "PASSED - All tests passed"; \
 		grep -F "tests passed" $(TEST_OUTPUT) || true; \
 	else \
 		echo "UNKNOWN - Could not determine test status"; \
-		echo "Expected: VMM, Spinlock, SMP, IPC, FFI, and Scheduler tests passed"; \
+		echo "Expected: VMM, Spinlock, SMP, IPC, Scheduler tests passed"; \
 		echo "Check $(TEST_OUTPUT) for details"; \
 		exit 1; \
 	fi

@@ -322,10 +322,13 @@ static void test_ffi_set_priority(void)
     uint32_t id = slm_task_create("ffi_pri", dummy_task, NULL);
     TEST_ASSERT(id != 0);
 
+    /* Get task pointer immediately before scheduler can reap it */
+    struct task *t = task_get(id);
+    TEST_ASSERT_NOT_NULL(t);
+
     int ret = slm_task_set_priority(id, TASK_PRIORITY_HIGH);
     TEST_ASSERT_EQUAL_INT(SLM_OK, ret);
 
-    struct task *t = task_get(id);
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->priority);
 
     /* Wait for task to complete */
@@ -343,11 +346,14 @@ static void test_ffi_set_deadline(void)
     uint32_t id = slm_task_create("ffi_dl", dummy_task, NULL);
     TEST_ASSERT(id != 0);
 
+    /* Get task pointer immediately before scheduler can reap it */
+    struct task *t = task_get(id);
+    TEST_ASSERT_NOT_NULL(t);
+
     uint64_t deadline = 999999999ULL;
     int ret = slm_task_set_deadline(id, deadline);
     TEST_ASSERT_EQUAL_INT(SLM_OK, ret);
 
-    struct task *t = task_get(id);
     TEST_ASSERT_EQUAL_UINT64(deadline, t->deadline_ns);
 
     /* Wait for task to complete */

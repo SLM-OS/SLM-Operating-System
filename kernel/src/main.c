@@ -18,6 +18,7 @@
 #include "test_harness.h"
 #include "gpu.h"
 #include "shell.h"
+#include "dtb.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -597,12 +598,18 @@ static void main_task_func(void *arg)
  * kernel_main - Main kernel entry point
  *
  * Called from boot.S after basic hardware initialization.
+ * @param dtb  Pointer to Device Tree Blob from bootloader (may be NULL)
  * This function should not return.
  */
-void kernel_main(void)
+void kernel_main(void *dtb)
 {
     /* Initialize UART for debug output */
     uart_init();
+
+    /* Parse Device Tree (must be done early, before using platform values) */
+    fdt_info_t fdt_info = {0};
+    int dtb_ret = dtb_parse(dtb, &fdt_info);
+    /* Results stored globally, accessible via dtb_get_info() */
 
     /* Banner */
     uart_puts("\n");
@@ -612,7 +619,14 @@ void kernel_main(void)
     uart_puts("========================================\n\n");
 
     INFO("Boot successful");
-    INFO("Running at EL1 on %s", "QEMU virt");
+    INFO("Running at EL1 on %s", PLATFORM_NAME);
+
+    /* Show DTB parsing results */
+    if (dtb_ret == FDT_OK) {
+        INFO("DTB parsed successfully at %p", dtb);
+    } else {
+        WARN("DTB parsing failed (code=%d), using platform defaults", dtb_ret);
+    }
 
     /* Show memory layout */
     uart_puts("\n");

@@ -3,7 +3,7 @@
  *
  * This is the first code executed when the kernel is loaded.
  * QEMU loads us at 0x40000000 and jumps here with:
- *   - x0 = DTB address (ignored for now)
+ *   - x0 = DTB address (preserved and passed to kernel_main)
  *   - EL1 exception level
  *   - MMU disabled
  *   - Caches disabled
@@ -14,6 +14,12 @@
 .global _start
 
 _start:
+    /*
+     * Save DTB address (x0) to callee-saved register.
+     * QEMU passes DTB pointer in x0, which we preserve for kernel_main.
+     */
+    mov     x19, x0
+
     /*
      * Ensure we're running on the primary CPU (core 0).
      * Secondary cores will spin in a wait loop.
@@ -75,9 +81,11 @@ bss_done:
 
     /*
      * Jump to C code.
+     * Pass DTB address as first argument (x0).
      * kernel_main() should not return, but if it does,
      * we fall through to the halt loop.
      */
+    mov     x0, x19             /* DTB address from saved register */
     bl      kernel_main
 
     /* Fall through to halt if kernel_main returns */

@@ -244,6 +244,26 @@ uint8_t rust_select_inference_core(         // Recommend core for inference
 );  // Returns core ID or 0xFF if no recommendation
 ```
 
+### Model Memory (called from C)
+
+```c
+// Initialize model memory pools (weight + workspace)
+int rust_model_mem_init(void);  // Returns 0 on success
+
+// Pool statistics structure (returned by value)
+typedef struct {
+    size_t total_blocks;      // Total 2MB blocks in pool
+    size_t free_blocks;       // Currently free blocks
+    size_t allocated_blocks;  // Currently allocated (exclusive)
+    size_t shared_blocks;     // Currently shared (refcount > 1)
+    size_t peak_usage;        // High-water mark
+} RustPoolStats;
+
+// Get pool statistics
+RustPoolStats rust_weight_pool_stats(void);     // Weight pool (model parameters)
+RustPoolStats rust_workspace_pool_stats(void);  // Workspace pool (inference scratch)
+```
+
 ---
 
 ## Panic Handling
@@ -301,14 +321,14 @@ Validation failures cause `rust_init()` to return a negative error code instead 
 
 ## Future Extensions
 
-Planned FFI additions for Phase 3:
-- Model loading functions
-- GPU memory management
-- Inference scheduling
+Planned FFI additions:
+- Model loading functions (GGUF/ONNX parsing)
+- GPU memory management (CUDA/TensorRT integration)
+- Inference scheduling (request queuing, batching)
 - Tensor operations
 
 These will follow the same patterns established here.
 
 ---
 
-*Created: December 2025*
+*Last updated: December 2025*

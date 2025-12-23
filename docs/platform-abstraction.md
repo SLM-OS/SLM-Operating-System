@@ -9,9 +9,10 @@ This document defines how SLM-OS handles platform-specific differences to suppor
 1. [Supported Platforms](#supported-platforms)
 2. [Platform-Specific Components](#platform-specific-components)
 3. [Abstraction Strategies](#abstraction-strategies)
-4. [Implementation Approach](#implementation-approach)
-5. [Directory Structure](#directory-structure)
-6. [Adding a New Platform](#adding-a-new-platform)
+4. [Device Tree Support](#device-tree-support)
+5. [Implementation Approach](#implementation-approach)
+6. [Directory Structure](#directory-structure)
+7. [Adding a New Platform](#adding-a-new-platform)
 
 ---
 
@@ -160,6 +161,95 @@ extern const struct gpu_ops *gpu;
 - Harder to inline/optimize
 
 **Use for:** GPU interface (future), possibly storage drivers
+
+---
+
+## Device Tree Support
+
+SLM-OS includes a minimal Device Tree Blob (DTB) parser that enables runtime hardware discovery. This bridges the gap between compile-time platform selection and fully dynamic configuration.
+
+### Overview
+
+The DTB parser (`kernel/src/dtb.c`) extracts hardware configuration from a Flattened Device Tree passed by the bootloader:
+
+| Property | Source Node | Usage |
+|----------|-------------|-------|
+| RAM base/size | `/memory@*` | PMM initialization |
+| UART base | `/pl011@*`, `/uart@*`, `/serial@*` | Console output |
+| UART IRQ | `interrupts` property | Interrupt routing |
+| GIC distributor | `/intc@*`, `/gic@*` | Interrupt controller |
+| GIC CPU interface | `reg` property (second entry) | Per-CPU interrupt handling |
+| CPU count | `/cpus/cpu@*` node count | SMP initialization |
+| Timer IRQ | `/timer` `interrupts` property | Scheduler tick |
+
+### Boot Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Bootloader/QEMU                                                    │
+│  └── Passes DTB address in x0 register                              │
+├─────────────────────────────────────────────────────────────────────┤
+│  boot.S                                                             │
+│  └── Preserves x0 → x19, passes to kernel_main(dtb)                 │
+├─────────────────────────────────────────────────────────────────────┤
+│  kernel_main()                                                      │
+│  └── Calls dtb_parse(dtb, &fdt_info)                                │
+│      ├── Success: Uses parsed values                                │
+│      └── Failure: Falls back to platform.h defaults                 │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### API
+
+```c
+/* Parse DTB and extract platform info */
+int dtb_parse(const void *dtb, fdt_info_t *info);
+
+/* Get globally parsed info (after boot) */
+const fdt_info_t *dtb_get_info(void);
+
+/* Validate DTB header only */
+int dtb_validate(const void *dtb);
+
+/* Print parsed info (debug) */
+void dtb_print_info(const fdt_info_t *info);
+```
+
+### Fallback Behavior
+
+If DTB parsing fails (NULL pointer, invalid magic, unsupported version), the system falls back to compile-time defaults from `platform.h`. This ensures the kernel boots reliably even without a valid DTB.
+
+Current status:
+- **QEMU ELF boot**: DTB pointer is NULL (QEMU behavior with `-kernel` and ELF files)
+- **Real hardware**: Bootloaders (U-Boot, UEFI) pass valid DTB pointer
+- **Fallback**: `platform.h` values used when parsing fails
+
+### Shell Command
+
+The `dtb` shell command displays the current platform configuration:
+
+```
+slmos> dtb
+Device Tree Information:
+
+  Status:       using defaults
+
+  Memory:
+    Base:       0x40000000
+    Size:       128 MB
+
+  UART:
+    Base:       0x9000000
+    IRQ:        33
+  ...
+```
+
+### Future Work
+
+Once hardware testing confirms DTB parsing works on real hardware:
+1. Remove hardcoded values from `platform.h`
+2. Make `fdt_info_t` the single source of truth for platform configuration
+3. Add more property extraction (I2C, SPI, GPIO for Jetson peripherals)
 
 ---
 

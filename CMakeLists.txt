@@ -92,6 +92,9 @@ set(KERNEL_SOURCES
     # Shell
     kernel/src/shell.c
 
+    # Device Tree
+    kernel/src/dtb.c
+
     # FFI (C/Rust interface)
     kernel/src/slm_ffi.c
 
