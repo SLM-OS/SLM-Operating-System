@@ -10,12 +10,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-
-/* Maximum command line length */
-#define SHELL_MAX_LINE      128
-
-/* Maximum number of arguments */
-#define SHELL_MAX_ARGS      16
+#include "config.h"
 
 /* Shell prompt */
 #define SHELL_PROMPT        "slmos> "

@@ -11,10 +11,7 @@
 
 #include "task.h"
 #include "smp.h"
-
-/* Scheduler configuration */
-#define TIMER_HZ            100         /* 100 Hz = 10ms time slice */
-#define TIME_SLICE_MS       (1000 / TIMER_HZ)
+#include "config.h"
 
 /*
  * Initialize the scheduler (boot CPU).

@@ -10,11 +10,7 @@
 #include <stdalign.h>
 #include <stdint.h>
 #include <stddef.h>
-
-/* Task configuration */
-#define TASK_STACK_SIZE     (16 * 1024)     /* 16 KB per task */
-#define MAX_TASKS           32              /* Maximum concurrent tasks */
-#define TASK_NAME_LEN       16              /* Max task name length */
+#include "config.h"
 
 /* CPU affinity constants */
 #define CPU_AFFINITY_ANY    ((uint32_t)-1)  /* Task can run on any CPU */

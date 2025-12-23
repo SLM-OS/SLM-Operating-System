@@ -9,9 +9,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-
-/* Maximum number of CPUs supported */
-#define MAX_CPUS        8
+#include "config.h"
 
 /* PSCI function IDs (PSCI v0.2+) */
 #define PSCI_VERSION            0x84000000

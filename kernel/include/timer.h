@@ -8,11 +8,7 @@
 #define TIMER_H
 
 #include <stdint.h>
-
-/*
- * Timer configuration
- */
-#define TIMER_HZ    100     /* 100 Hz = 10ms tick */
+#include "config.h"
 
 /*
  * Initialize the timer.

@@ -56,9 +56,6 @@
 /* CPU configuration */
 #define CPU_MAX             4               /* QEMU default */
 
-/* Kernel stack */
-#define STACK_SIZE          0x4000UL        /* 16 KB per stack */
-
 #endif /* PLATFORM_QEMU_VIRT */
 
 /* ============================================================================
@@ -102,9 +99,6 @@
 
 /* CPU configuration */
 #define CPU_MAX             6               /* 6x Cortex-A78AE */
-
-/* Kernel stack */
-#define STACK_SIZE          0x4000UL        /* 16 KB per stack */
 
 /* GPU (for reference, actual init in kernel/gpu/) */
 #define GPU_BASE            0x17000000UL    /* Display controller base */

@@ -94,7 +94,7 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     }
 
     /* Allocate stack first (outside lock - pmm has its own locking) */
-    size_t stack_pages = TASK_STACK_SIZE / 4096;
+    size_t stack_pages = STACK_SIZE / 4096;
     void *stack = pmm_alloc_pages(stack_pages);
     if (!stack) {
         ERROR("task_create: failed to allocate stack");
@@ -134,7 +134,7 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
 
     /* Set up stack (grows downward on ARM64) */
     task->stack_base = stack;
-    task->stack_top = (void *)((uintptr_t)stack + TASK_STACK_SIZE);
+    task->stack_top = (void *)((uintptr_t)stack + STACK_SIZE);
 
     /* Initialize CPU context */
     /* Zero out the context first */
@@ -253,7 +253,7 @@ void task_destroy(struct task *task)
 
     /* Free stack outside lock - pmm has its own locking */
     if (stack) {
-        size_t stack_pages = TASK_STACK_SIZE / 4096;
+        size_t stack_pages = STACK_SIZE / 4096;
         pmm_free_pages(stack, stack_pages);
     }
 

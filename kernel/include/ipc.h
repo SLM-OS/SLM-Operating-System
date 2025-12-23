@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include "spinlock.h"
 #include "task.h"
+#include "config.h"
 
 /*
  * ============================================================================
@@ -47,12 +48,6 @@
  *   - timeout == 0: Non-blocking, return immediately if would block
  *   - timeout < 0:  Block indefinitely
  */
-
-/* Default message size (cache-line aligned) */
-#define MSG_SIZE_DEFAULT    64
-
-/* Maximum number of message queues */
-#define MSG_QUEUE_MAX       32
 
 /* Timeout values */
 #define MSG_NO_WAIT         0       /* Non-blocking */
@@ -224,12 +219,6 @@ void ipc_get_stats(struct ipc_stats *stats);
 #define SHM_GPU_ACCESSIBLE  (1 << 2)    /* Map with GPU-visible attributes */
 #define SHM_MODEL_PAGE      (1 << 3)    /* Mark as model weight storage */
 #define SHM_INFERENCE_HOT   (1 << 4)    /* Mark as hot inference data */
-
-/* Maximum number of shared buffers */
-#define SHM_BUFFER_MAX      64
-
-/* Maximum mappings per buffer */
-#define SHM_MAPPING_MAX     16
 
 /*
  * Per-task mapping of a shared buffer.

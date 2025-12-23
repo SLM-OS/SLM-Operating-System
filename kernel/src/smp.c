@@ -11,6 +11,7 @@
 #include "gic.h"
 #include "timer.h"
 #include "sched.h"
+#include "dtb.h"
 
 #include <stddef.h>
 
@@ -125,8 +126,8 @@ static void *cpu_stack_top(uint32_t cpu)
 
 /*
  * Initialize CPU logical map.
- * For QEMU virt, MPIDR values are contiguous (0, 1, 2, 3).
- * For real hardware, this would parse device tree or ACPI.
+ * Uses DTB if available, otherwise falls back to platform defaults.
+ * Assumes contiguous MPIDR values (valid for QEMU virt and most ARM64 systems).
  */
 static void init_cpu_map(void)
 {
@@ -135,20 +136,33 @@ static void init_cpu_map(void)
     cpu_count = 1;
 
     /*
-     * For QEMU virt, assume contiguous MPIDR values starting from 0.
-     * The number of CPUs is configured via -smp in QEMU.
-     * We'll try to bring up CPUs until one fails.
-     *
-     * TODO: Parse device tree for actual CPU list when DTB support is added.
+     * Determine number of CPUs:
+     * 1. Use DTB cpu_count if available and valid
+     * 2. Otherwise fall back to platform's CPU_MAX
      */
-    #define QEMU_MAX_CPUS 4  /* Default QEMU virt SMP count */
+    uint32_t expected_cpus = CPU_MAX;  /* Platform default */
 
-    for (uint32_t i = 1; i < QEMU_MAX_CPUS && i < MAX_CPUS; i++) {
-        cpu_logical_map[i] = i;  /* QEMU: MPIDR Aff0 = cpu number */
+    const fdt_info_t *fdt = dtb_get_info();
+    if (fdt && fdt->valid && fdt->cpu_count > 0) {
+        expected_cpus = fdt->cpu_count;
+        DEBUG_PRINT("CPU count from DTB: %u", expected_cpus);
+    } else {
+        DEBUG_PRINT("CPU count from platform.h: %u", expected_cpus);
+    }
+
+    /* Clamp to MAX_CPUS (kernel limit) */
+    if (expected_cpus > MAX_CPUS) {
+        WARN("DTB reports %u CPUs, limiting to MAX_CPUS=%u", expected_cpus, MAX_CPUS);
+        expected_cpus = MAX_CPUS;
+    }
+
+    /* Populate logical map (assume contiguous MPIDR Aff0 values) */
+    for (uint32_t i = 1; i < expected_cpus; i++) {
+        cpu_logical_map[i] = i;
         cpu_count++;
     }
 
-    INFO("CPU map: %u CPUs detected", cpu_count);
+    INFO("CPU map: %u CPUs configured", cpu_count);
 }
 
 /*
