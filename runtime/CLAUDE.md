@@ -13,8 +13,30 @@ runtime/
 │   └── config.toml      # Cross-compilation settings for aarch64
 └── src/
     ├── lib.rs           # Entry points (rust_init, rust_hello, etc.)
-    └── kernel_ffi.rs    # FFI declarations and safe wrappers
+    ├── kernel_ffi.rs    # FFI declarations and safe wrappers
+    ├── log.rs           # Logging infrastructure (via UART FFI)
+    ├── mm/
+    │   ├── mod.rs       # Memory management module
+    │   ├── model_mem.rs # Model memory allocator (weight/workspace pools)
+    │   └── model_loader.rs  # Model loader skeleton (Phase 5)
+    └── sched/
+        ├── mod.rs       # Scheduler policy module
+        ├── deadline.rs  # Deadline-aware scheduling
+        ├── inference.rs # Inference scheduler skeleton (Phase 5)
+        └── heterogeneous.rs  # big.LITTLE CPU topology awareness
 ```
+
+### Module Overview
+
+| Module | Purpose | Status |
+|--------|---------|--------|
+| `kernel_ffi` | FFI bindings to C kernel | Complete |
+| `log` | Logging via UART (log_info, log_error, etc.) | Complete |
+| `mm::model_mem` | 2MB-aligned model memory allocator | Complete |
+| `mm::model_loader` | GGUF/ONNX model loading | Skeleton (Phase 5) |
+| `sched::deadline` | Deadline-aware task scheduling hints | Complete |
+| `sched::inference` | Inference request queue management | Skeleton (Phase 5) |
+| `sched::heterogeneous` | CPU topology and core selection | Complete |
 
 ## `no_std` Conventions
 

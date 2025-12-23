@@ -217,6 +217,33 @@ void rust_test_panic(void);  // Triggers Rust panic (for testing)
 int rust_ffi_validate(void); // Validates FFI types (0 = success)
 ```
 
+### Rust Logging (called from C)
+
+The Rust logging module provides FFI-accessible logging functions:
+
+```c
+// Set log level: 0=Debug, 1=Info, 2=Warn, 3=Error, 4=Off
+void rust_log_set_level(uint8_t level);
+uint8_t rust_log_get_level(void);
+
+// Log messages (msg must be null-terminated)
+void rust_log_debug(const char *msg);
+void rust_log_info(const char *msg);
+void rust_log_warn(const char *msg);
+void rust_log_error(const char *msg);
+```
+
+### Heterogeneous Scheduling (called from C)
+
+```c
+uint8_t rust_cpu_num_cores(void);           // Get number of CPU cores
+bool rust_cpu_is_heterogeneous(void);       // Check if big.LITTLE
+uint8_t rust_select_inference_core(         // Recommend core for inference
+    size_t model_size,
+    uint8_t is_urgent
+);  // Returns core ID or 0xFF if no recommendation
+```
+
 ---
 
 ## Panic Handling

@@ -257,8 +257,11 @@ void task_destroy(struct task *task)
         pmm_free_pages(stack, stack_pages);
     }
 
-    DEBUG_PRINT("Destroyed task '%s' (id=%u), freed %u KB stack",
-                task_name, task_id, TASK_STACK_SIZE / 1024);
+    /* Note: DEBUG_PRINT removed here to avoid output interleaving issues
+     * during test runs with concurrent task destruction across multiple CPUs.
+     * Task lifecycle is well-tested; enable if debugging task issues. */
+    (void)task_name;
+    (void)task_id;
 }
 
 /*

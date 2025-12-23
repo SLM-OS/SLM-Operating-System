@@ -354,18 +354,33 @@ This document tracks Phase 3 implementation of SLM-OS.
   - Global: queue_count, buffer_count, total_msgs_sent/recv
   - `msg_queue_stats()` and `ipc_get_stats()` API
 
-### Rust Runtime Expansion
-- [ ] Implement `ModelLoader` struct skeleton (full implementation Phase 5)
-- [ ] Implement `InferenceScheduler` struct skeleton
-- [ ] Add logging infrastructure in Rust (via FFI to UART)
-- [ ] Create `runtime/src/sched/heterogeneous.rs` for big.LITTLE awareness
+### Rust Runtime Expansion ✅
+- ✅ Implement `ModelLoader` struct skeleton (full implementation Phase 5)
+  - `runtime/src/mm/model_loader.rs` with ModelFormat, ModelMetadata, LoadedModel
+  - ModelLoader with detect_format() and load_from_buffer() skeleton
+- ✅ Implement `InferenceScheduler` struct skeleton
+  - `runtime/src/sched/inference.rs` with RequestState, InferenceConfig
+  - InferenceScheduler with submit(), cancel(), get_result() skeleton
+- ✅ Add logging infrastructure in Rust (via FFI to UART)
+  - `runtime/src/log.rs` with LogLevel, log_debug/info/warn/error
+  - Numeric formatting (decimal and hex) without std
+  - FFI exports for C code to use Rust logging
+- ✅ Create `runtime/src/sched/heterogeneous.rs` for big.LITTLE awareness
+  - CpuTopology, CoreInfo, ClusterInfo for CPU topology
+  - TaskPlacement policy for core selection
+  - LoadBalancer with load-aware core selection
 
-### Documentation
-- [ ] Update architecture doc with Phase 3 learnings
-- [ ] Document GPU driver interface
-- [ ] Document model memory API
-- [ ] Update build instructions for Jetson target
-- [ ] Create troubleshooting guide for hardware issues
+### Documentation ✅
+- ✅ Update architecture doc with Phase 3 learnings
+  - Created `docs/architecture.md` with system overview and Phase 3 learnings
+- ✅ Document GPU driver interface
+  - `docs/gpu.md` already comprehensive (GPU HAL, driver interface, cache ops)
+- ✅ Document model memory API
+  - `docs/model-memory.md` updated with ModelLoader section
+- ✅ Update build instructions for Jetson target
+  - Added "Building for Jetson Orin Nano" section to `docs/building.md`
+- ✅ Create troubleshooting guide for hardware issues
+  - Created `docs/troubleshooting.md` covering build, QEMU, Jetson, and runtime issues
 
 
 ---

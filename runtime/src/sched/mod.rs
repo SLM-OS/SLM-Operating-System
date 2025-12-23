@@ -14,11 +14,25 @@
 //! - Core affinity hints for heterogeneous systems (big.LITTLE)
 
 pub mod deadline;
+pub mod heterogeneous;
+pub mod inference;
 
 // Re-export commonly used types from deadline module
 pub use deadline::{
     SchedulingHint, TaskDeadline, SlmTaskInfo,
     schedule_slm_task, suggest_core_affinity,
+};
+
+// Re-export inference scheduler types
+pub use inference::{
+    InferenceScheduler, InferenceRequest, InferenceResult,
+    InferenceConfig, RequestState, SchedulerError, SchedulerStats,
+};
+
+// Re-export heterogeneous scheduling types
+pub use heterogeneous::{
+    CpuTopology, CoreInfo, ClusterInfo, TaskPlacement,
+    LoadBalancer, CoreLoad,
 };
 
 // Priority and CoreType are defined in this module (above)

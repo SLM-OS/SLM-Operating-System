@@ -468,7 +468,101 @@ Timer frequency is set in `timer.c`:
 #define TIMER_HZ 100  // 100 Hz = 10ms tick
 ```
 
+## Heterogeneous Scheduling (big.LITTLE)
+
+The `runtime/src/sched/heterogeneous.rs` module provides CPU topology awareness for heterogeneous systems:
+
+### CPU Topology
+
+```rust
+/// CPU topology detection
+let topology = CpuTopology::detect();  // Auto-detect (defaults to 4 homogeneous cores)
+
+/// Or explicitly configure
+let topology = CpuTopology::big_little(2, 4);  // 2 big + 4 LITTLE cores
+
+/// Query topology
+println!("Cores: {}", topology.num_cores());
+println!("Heterogeneous: {}", topology.is_heterogeneous());
+```
+
+### Core Selection
+
+```rust
+/// Task placement preferences
+pub struct TaskPlacement {
+    pub core_type: CoreType,        // Performance, Efficiency, or Any
+    pub pinned_core: Option<u8>,    // Specific core (if any)
+    pub preferred_cluster: Option<u8>,
+    pub allow_migration: bool,
+}
+
+/// Built-in presets
+TaskPlacement::DEFAULT          // Any core, allow migration
+TaskPlacement::INFERENCE_HIGH   // Performance core, pinned
+TaskPlacement::BACKGROUND       // Efficiency core
+
+/// For inference tasks
+let placement = TaskPlacement::for_inference(model_size, is_urgent);
+```
+
+### Load Balancer
+
+```rust
+/// Load-aware core selection
+let balancer = LoadBalancer::detect();
+
+// Update load info (from kernel)
+balancer.update_load(cpu_id, load_percent, task_count);
+
+// Select best core for task
+let core = balancer.select_core(&placement);
+```
+
+## Inference Scheduler (Phase 5)
+
+The `runtime/src/sched/inference.rs` module provides a skeleton for AI inference task management:
+
+### API (Skeleton)
+
+```rust
+/// Create scheduler
+let mut scheduler = InferenceScheduler::new();
+scheduler.start()?;
+
+/// Submit inference request
+let config = InferenceConfig {
+    max_tokens: 128,
+    temperature: 0.7,
+    deadline: TaskDeadline::inference_latency_ms(100),
+    ..Default::default()
+};
+let request = InferenceRequest::new(model_handle, config)
+    .with_priority(Priority::High);
+let request_id = scheduler.submit(request)?;  // Returns NotImplemented for now
+
+/// Get results
+let result = scheduler.get_result(request_id, timeout_ms)?;
+```
+
+### Request States
+
+```
+QUEUED → RUNNING → COMPLETED
+           ↓         ↓
+        FAILED   CANCELLED
+```
+
+Full implementation will be added in Phase 5 with actual inference engine integration.
+
+---
+
 ## Future Work
+
+### Phase 5 (AI Integration)
+- [ ] Implement InferenceScheduler with actual request queue
+- [ ] Batch inference requests for throughput
+- [ ] GPU/NPU task coordination
 
 ### Milestone 4+ (big.LITTLE)
 - [ ] Actual core assignment based on CoreType hints (detect big vs LITTLE cores)

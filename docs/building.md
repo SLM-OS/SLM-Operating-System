@@ -493,4 +493,87 @@ QEMU := /path/to/qemu-system-aarch64
 
 ---
 
+## Building for Jetson Orin Nano
+
+For deployment to real Jetson hardware, additional steps are required.
+
+### Prerequisites
+
+- Jetson Orin Nano Developer Kit
+- SD card (32GB+ recommended) with JetPack flashed
+- USB-to-UART adapter (3.3V TTL, connected to J14 header)
+- Serial terminal (PuTTY, minicom, or screen)
+
+### Build for Jetson
+
+The same kernel binary works for both QEMU and Jetson:
+
+```bash
+make kernel
+```
+
+Output files:
+- `build/kernel/slmos.elf` - For debugging (with symbols)
+- `build/kernel/slmos.bin` - Raw binary (alternative format)
+
+### Deploy to Jetson
+
+1. **Mount the Jetson SD card** on a host machine
+
+2. **Copy kernel to boot partition:**
+   ```bash
+   sudo cp build/kernel/slmos.elf /media/user/boot/boot/slmos.elf
+   ```
+
+3. **Edit extlinux.conf:**
+   ```bash
+   sudo nano /media/user/boot/boot/extlinux/extlinux.conf
+   ```
+
+   Add an entry:
+   ```
+   LABEL slmos
+       MENU LABEL SLM-OS
+       LINUX /boot/slmos.elf
+       FDT /boot/tegra234-p3768-0000+p3767-0000.dtb
+       APPEND console=ttyTCU0,115200
+   ```
+
+4. **Boot the Jetson** and select SLM-OS from the boot menu
+
+### Serial Console Setup
+
+Connect to the Jetson debug UART:
+
+| Jetson J14 Pin | USB-UART Adapter |
+|----------------|------------------|
+| Pin 6 (GND)    | GND              |
+| Pin 8 (TX)     | RX               |
+| Pin 10 (RX)    | TX               |
+
+Serial settings: **115200 baud, 8N1**
+
+```bash
+# Linux/macOS
+screen /dev/ttyUSB0 115200
+
+# Windows (PuTTY)
+# Select COM port, 115200 baud
+```
+
+### Platform Differences
+
+| Feature | QEMU virt | Jetson Orin Nano |
+|---------|-----------|------------------|
+| UART | PL011 (0x09000000) | Tegra Combined UART |
+| Timer | ARM Generic Timer | ARM Generic Timer |
+| GIC | GIC-400 | GIC-400 |
+| CPUs | 4 × Cortex-A76 | 6 × Cortex-A78AE |
+| RAM | 512MB-1GB | 4-8GB |
+| GPU | None (stub) | Ampere (1024 CUDA cores) |
+
+See `docs/jetson-boot.md` for detailed boot process documentation.
+
+---
+
 *Last updated: December 2025*

@@ -290,15 +290,15 @@ When space/message becomes available:
 
 ## Future Enhancements
 
-### Phase 3
-- Timeout support for blocking operations
-- Per-task user address space with separate mappings
-- Priority-based message queues
+### Phase 3 (Completed)
+- ✅ Timeout support for blocking operations (M6)
+- ✅ Message queue statistics and monitoring (M6)
 
 ### Phase 4+
+- Per-task user address space with separate mappings
+- Priority-based message queues
 - GPU buffer sharing (`SHM_GPU_ACCESSIBLE` fully implemented)
 - DMA-friendly buffer allocation
-- Message queue statistics and monitoring
 
 ---
 

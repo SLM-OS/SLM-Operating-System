@@ -1,0 +1,404 @@
+## Future Work & Stretch Goals
+
+This section documents features discussed during development that are beyond the capstone scope but would enhance SLM-OS in future iterations or as time permits.
+
+---
+
+### USB Serial Console (TinyUSB + Tegra XUSB)
+Eliminate external UART adapter by implementing USB CDC-ACM device mode.
+
+- ☐ Study Tegra XUSB device controller (`xudc@3550000`) and Linux `tegra-xudc.c` driver
+- ☐ Initialize XUSB PHY, PLLs, and power rails from bare metal
+- ☐ Write Tegra XUSB Device Controller Driver (DCD) for TinyUSB
+- ☐ Integrate TinyUSB CDC-ACM class with MicroShell
+- ☐ Test enumeration on Linux/Windows/macOS hosts
+- ☐ Remove external UART adapter requirement from hardware setup
+
+**Effort:** 3-5 weeks  
+**Value:** Clean single-cable connection, professional demo setup
+
+---
+
+### Full POSIX Shell
+Replace MicroShell with a real shell supporting scripting, pipes, and job control.
+
+- ☐ Implement `fork()` system call (process duplication)
+- ☐ Implement `exec()` family (replace process image with ELF)
+- ☐ Implement `waitpid()` and process hierarchy
+- ☐ Add file descriptor table per process
+- ☐ Implement pipes (`pipe()`, `dup2()`)
+- ☐ Implement signal handling (`SIGINT`, `SIGTERM`, `SIGCHLD`)
+- ☐ Port BusyBox ash or dash shell
+- ☐ Add job control (foreground/background, `Ctrl+Z`)
+
+**Effort:** 2-3 months  
+**Value:** Full Unix-like environment, standard shell scripting  
+**Prerequisite:** User/kernel separation, filesystem
+
+---
+
+### Lua Scripting Runtime
+Embed Lua interpreter for runtime scripting and configuration.
+
+- ☐ Integrate Lua 5.4 core (or eLua for smaller footprint)
+- ☐ Create C bindings for kernel APIs (`slm.task_create()`, `slm.mem_stats()`)
+- ☐ Expose component/model management to Lua scripts
+- ☐ Implement Lua REPL as shell alternative
+- ☐ Support loading scripts from filesystem or embedded in components
+- ☐ Add `lua` command to MicroShell for interactive use
+
+**Effort:** 2-3 weeks  
+**Value:** Runtime configurability, rapid prototyping, user-defined automation
+
+---
+
+### User/Kernel Privilege Separation
+Implement proper privilege levels for security and stability.
+
+- ☐ Configure ARM64 EL0 (user) vs EL1 (kernel) transitions
+- ☐ Split address space: TTBR0 for user, TTBR1 for kernel
+- ☐ Implement system call interface (`svc` instruction dispatch)
+- ☐ Define minimal syscall set (memory, IPC, task control)
+- ☐ Validate all user pointers before kernel access
+- ☐ Handle user-mode exceptions gracefully (don't panic kernel)
+- ☐ Update components to run in user mode
+
+**Effort:** 3-4 weeks  
+**Value:** Security isolation, stability (bad component can't crash kernel)  
+**Prerequisite:** Required for component sandboxing
+
+---
+
+### Component Sandboxing
+Isolate components from each other and from kernel.
+
+- ☐ Per-component address spaces (separate page tables)
+- ☐ Memory protection between components
+- ☐ Capability-based access control for IPC
+- ☐ Resource limits (memory, CPU time) per component
+- ☐ Secure component loading with signature verification
+- ☐ Revocation of component privileges
+
+**Effort:** 4-6 weeks  
+**Value:** Run untrusted components safely  
+**Prerequisite:** User/kernel separation
+
+---
+
+### Secure Boot Chain
+Verify system integrity from power-on through component loading.
+
+- ☐ Study Jetson secure boot architecture (BRBCT, BCT)
+- ☐ Implement kernel image signature verification
+- ☐ Verify component signatures before loading
+- ☐ Integrate with Jetson fuse-based root of trust
+- ☐ Implement secure key storage for model encryption keys
+- ☐ Document threat model and security boundaries
+
+**Effort:** 4-6 weeks  
+**Value:** Production deployment security, tamper detection
+
+---
+
+### Encrypted Model Storage
+Protect model weights at rest and during loading.
+
+- ☐ Implement AES-256 decryption for model files
+- ☐ Integrate with Jetson security engine (SE) for hardware acceleration
+- ☐ Key management: secure storage, rotation, per-model keys
+- ☐ Decrypt-on-load to model memory region
+- ☐ Zero model memory on unload
+- ☐ Support encrypted model updates
+
+**Effort:** 2-3 weeks  
+**Value:** IP protection for proprietary models
+
+---
+
+### Distributed Operation
+Run SLM-OS across multiple boards for larger workloads.
+
+- ☐ Design distributed component communication protocol
+- ☐ Implement network-transparent IPC (message routing across nodes)
+- ☐ Distributed model loading (split large models across boards)
+- ☐ Node discovery and health monitoring
+- ☐ Failover: migrate components when node fails
+- ☐ Distributed inference coordination (pipeline parallelism)
+
+**Effort:** 2-3 months  
+**Value:** Scale beyond single-board memory/compute limits  
+**Prerequisite:** Networking (lwIP)
+
+---
+
+### Dynamic Model Compilation
+JIT-compile or optimize models for target hardware at load time.
+
+- ☐ Integrate TensorRT or similar optimization framework
+- ☐ Cache compiled models for fast reload
+- ☐ Profile-guided optimization based on actual inputs
+- ☐ Support multiple backends (CPU SIMD, GPU, NPU)
+- ☐ Automatic quantization (FP32 → INT8) with calibration
+
+**Effort:** 1-2 months  
+**Value:** Optimal inference performance without pre-compilation
+
+---
+
+### Advanced Power Management
+Optimize power consumption for battery/thermal-constrained deployments.
+
+- ☐ Implement CPU frequency scaling (DVFS)
+- ☐ Core power gating (turn off idle cores completely)
+- ☐ Inference-aware power modes (high-perf during inference, low-power idle)
+- ☐ GPU/NPU power management
+- ☐ Thermal throttling integration
+- ☐ Power consumption profiling and reporting
+
+**Effort:** 3-4 weeks  
+**Value:** Extended battery life, reduced thermal footprint
+
+---
+
+### Filesystem Integration (LittleFS)
+Add persistent storage for models, logs, and configuration.
+
+- ☐ Integrate LittleFS for flash-friendly filesystem
+- ☐ Mount eMMC/SD card partitions
+- ☐ Implement VFS layer for abstraction
+- ☐ Add filesystem commands to shell (`ls`, `cat`, `cp`, `rm`)
+- ☐ Support loading components/models from filesystem
+- ☐ Persistent configuration storage
+
+**Effort:** 2-3 weeks  
+**Value:** Persistent storage, standard file operations  
+**Enables:** Loading ELF from disk, logs, config files
+
+---
+
+### Networking (lwIP)
+Add TCP/IP networking for remote management and distributed operation.
+
+- ☐ Integrate lwIP TCP/IP stack
+- ☐ Write Jetson Ethernet driver (EQOS controller)
+- ☐ Implement DHCP client for automatic configuration
+- ☐ Add network commands to shell (`ping`, `ifconfig`)
+- ☐ REST API for remote component management
+- ☐ Network console (telnet/SSH alternative)
+
+**Effort:** 3-4 weeks  
+**Value:** Remote access, distributed systems, OTA updates
+
+---
+
+### Buddy Allocator
+Replace bitmap allocator with more efficient buddy system.
+
+- ☐ Implement buddy allocator for physical memory
+- ☐ Support O(log n) allocation of power-of-two pages
+- ☐ Efficient coalescing on free
+- ☐ Separate pools for different allocation sizes
+- ☐ Statistics and fragmentation monitoring
+- ☐ Benchmark vs bitmap allocator
+
+**Effort:** 1 week  
+**Value:** Faster allocation, less fragmentation for large model allocations
+
+---
+
+### Device Tree Parsing
+Replace hardcoded memory maps with runtime device tree discovery.
+
+- ☐ Implement FDT (Flattened Device Tree) parser
+- ☐ Discover memory regions from `/memory` node
+- ☐ Discover UART, GIC, timer from device tree
+- ☐ Support multiple board configurations without recompilation
+- ☐ Pass device tree from bootloader (U-Boot)
+
+**Effort:** 1-2 weeks  
+**Value:** Single kernel binary for multiple boards, cleaner configuration
+
+---
+
+### UART Output Synchronization
+Fix garbled output during concurrent multi-core prints.
+
+- ☐ Option A: Per-CPU ring buffers, single CPU drains to UART
+- ☐ Option B: Message-level spinlock with trylock fallback
+- ☐ Option C: Defer all output to dedicated UART task
+- ☐ Ensure panic output still works (bypass locks if needed)
+- ☐ Benchmark overhead vs current unlocked approach
+
+**Effort:** 2-3 days  
+**Value:** Clean debug output, especially at boot
+
+---
+
+### Real-Time Guarantees
+Formal real-time scheduling with provable bounds.
+
+- ☐ Implement Rate Monotonic Scheduling (RMS) policy option
+- ☐ Priority ceiling protocol for mutex
+- ☐ Worst-case execution time (WCET) analysis tooling
+- ☐ Interrupt latency measurement and optimization
+- ☐ Document schedulability analysis for demo workloads
+- ☐ Consider PREEMPT_RT-style improvements
+
+**Effort:** 3-4 weeks  
+**Value:** Certifiable real-time for safety-critical industrial use
+
+---
+
+### Development SDK & Tooling
+Make it easy for others to develop SLM-OS components.
+
+- ☐ Component project template (Cargo/CMake)
+- ☐ Component packaging tool (bundle code + manifest + models)
+- ☐ Emulator mode: run components on host for testing
+- ☐ Debug protocol: GDB stub for kernel debugging
+- ☐ Trace framework: record scheduler/IPC events for analysis
+- ☐ Performance profiler: CPU time, memory, inference latency
+
+**Effort:** 1-2 months  
+**Value:** Community adoption, easier development
+
+---
+
+### Component Marketplace Concept
+Infrastructure for sharing and deploying SLM components.
+
+- ☐ Component registry specification (metadata, versioning)
+- ☐ Dependency resolution for component installation
+- ☐ Signed component distribution
+- ☐ Web interface for browsing/searching components
+- ☐ CLI tool for `slm install <component>`
+- ☐ Update mechanism with rollback
+
+**Effort:** 2-3 months
+**Value:** Ecosystem growth, reusable components
+**Prerequisite:** Networking, filesystem, secure boot
+
+---
+
+### Demand Paging for Model Memory
+Lazy allocation and swap support for large models.
+
+- ☐ Implement lazy allocation (map on first access via page fault)
+- ☐ Swap cold model weights to storage
+- ☐ Prefetch next inference batch
+- ☐ Track working set for eviction decisions
+
+**Effort:** 2-3 weeks
+**Value:** Support models larger than physical RAM
+
+---
+
+### GPU Memory Integration
+Enable GPU access to model memory regions.
+
+- ☐ Implement `gpu_map()` / `gpu_unmap()` for model handles
+- ☐ Cache coherency: flush D-cache before GPU access
+- ☐ Invalidate D-cache after GPU writes
+- ☐ Fully implement `SHM_GPU_ACCESSIBLE` flag for IPC buffers
+- ☐ DMA-friendly buffer allocation with proper alignment
+
+**Effort:** 1-2 weeks
+**Value:** Zero-copy model data sharing with GPU
+**Prerequisite:** GPU driver initialization
+
+---
+
+### Multi-Model Management
+Support multiple loaded models with intelligent eviction.
+
+- ☐ Model registry: track loaded models by name/ID
+- ☐ LRU eviction: unload least-recently-used models when memory tight
+- ☐ Hot-swap: replace model without stopping inference
+- ☐ Model pinning: prevent eviction of critical models
+
+**Effort:** 1-2 weeks
+**Value:** Efficient memory use with multiple models
+
+---
+
+### TensorRT/CUDA Integration (Phase 5)
+Actual GPU inference acceleration.
+
+- ☐ Initialize NVIDIA GSP firmware on Jetson Orin
+- ☐ Set up CUDA runtime environment
+- ☐ Integrate TensorRT for optimized inference
+- ☐ Coordinate GPU/NPU task scheduling
+- ☐ Batch inference requests for throughput
+
+**Effort:** 2-3 months
+**Value:** Production-grade inference performance
+**Prerequisite:** GPU driver, model loader
+
+---
+
+### Raspberry Pi 5 Port
+Second platform target for broader hardware support.
+
+- ☐ BCM2712 UART driver
+- ☐ BCM2712 interrupt controller driver
+- ☐ BCM2712 timer driver
+- ☐ VideoCore VII GPU stub (or actual integration)
+- ☐ Platform detection and conditional initialization
+
+**Effort:** 2-3 weeks
+**Value:** Demonstrates platform abstraction, cheaper dev hardware
+
+---
+
+### EFI Stub Boot
+Boot directly from UEFI without U-Boot.
+
+- ☐ Implement PE/COFF header for EFI loading
+- ☐ EFI boot services for memory map
+- ☐ Exit boot services and take over hardware
+- ☐ Parse ACPI/DTB from EFI configuration table
+
+**Effort:** 1-2 weeks
+**Value:** Simpler boot chain, faster boot time
+
+---
+
+### CI/CD Pipeline
+Automated testing and deployment.
+
+- ☐ GitHub Actions workflow for QEMU tests
+- ☐ Automated build on PR
+- ☐ Test result reporting
+- ☐ Coverage tracking
+- ☐ Real hardware test farm (Jetson boards)
+- ☐ QEMU semihosting exit for clean test termination
+
+**Effort:** 1 week (basic), 2-3 weeks (with hardware)
+**Value:** Catch regressions early, professional development workflow
+
+---
+
+### TLB Shootdown
+Invalidate TLB entries across CPUs for shared page tables.
+
+- ☐ IPI-based TLB invalidation broadcast
+- ☐ Targeted invalidation (specific VA range)
+- ☐ Synchronization barrier after shootdown
+- ☐ Optimize for common cases (single page, full flush)
+
+**Effort:** 3-5 days
+**Value:** Required for shared page tables, user space support
+**Prerequisite:** IPI infrastructure (already have)
+
+---
+
+### Priority-Based Message Queues
+IPC message ordering by priority.
+
+- ☐ Priority field in message header
+- ☐ Priority-ordered insertion in queue
+- ☐ Prevent starvation of low-priority messages
+- ☐ Optional: separate queues per priority level
+
+**Effort:** 3-5 days
+**Value:** QoS for IPC, urgent messages bypass queue

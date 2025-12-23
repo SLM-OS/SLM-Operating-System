@@ -227,6 +227,48 @@ The allocator uses a spinlock for thread safety:
 
 ---
 
+## Model Loader (Phase 5)
+
+A skeleton `ModelLoader` is implemented in `runtime/src/mm/model_loader.rs`:
+
+```rust
+/// Supported model formats
+pub enum ModelFormat {
+    Gguf,       // GGUF format (llama.cpp)
+    Onnx,       // ONNX format
+    RawTensors, // Raw weight tensors
+    Unknown,
+}
+
+/// Load a model from memory buffer
+let loader = ModelLoader::new();
+let model = loader.load_from_buffer(&model_data)?;
+```
+
+### ModelLoader API (Skeleton)
+
+| Function | Purpose | Status |
+|----------|---------|--------|
+| `detect_format(data)` | Detect GGUF/ONNX from magic bytes | Implemented |
+| `load_from_buffer(data)` | Parse and load model into memory | Skeleton |
+| `estimate_memory(data)` | Estimate weight/workspace requirements | Skeleton |
+
+### LoadedModel
+
+A loaded model holds handles to allocated memory:
+
+```rust
+pub struct LoadedModel {
+    weights: ModelHandle,    // From weight pool
+    workspace: ModelHandle,  // From workspace pool
+    metadata: ModelMetadata, // Format, param count, sizes
+}
+```
+
+Memory is automatically freed when `LoadedModel` is dropped.
+
+---
+
 ## Future Extensions
 
 ### Demand Paging (Phase 4+)
