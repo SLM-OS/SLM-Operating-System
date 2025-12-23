@@ -27,6 +27,13 @@ set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mcpu=cortex-a78ae")
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 
+# Platform selection (QEMU_VIRT or JETSON_ORIN_NANO)
+set(PLATFORM "QEMU_VIRT" CACHE STRING "Target platform (QEMU_VIRT or JETSON_ORIN_NANO)")
+set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO")
+
+# Add platform define
+add_compile_definitions(PLATFORM_${PLATFORM}=1)
+
 # Linker script
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel.ld)
 
@@ -46,9 +53,9 @@ set(KERNEL_SOURCES
     kernel/src/main.c
     kernel/src/panic.c
 
-    # Drivers
-    kernel/drivers/uart_pl011.c
-    # kernel/drivers/uart_tegra.c    # Jetson Orin Nano
+    # Drivers - UART selected by platform
+    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
 
     # Interrupt handling
     kernel/src/gic.c
@@ -81,6 +88,9 @@ set(KERNEL_SOURCES
 
     # Synchronization
     kernel/src/pi_mutex.c
+
+    # Shell
+    kernel/src/shell.c
 
     # FFI (C/Rust interface)
     kernel/src/slm_ffi.c
@@ -139,6 +149,7 @@ add_custom_command(
 message(STATUS "")
 message(STATUS "SLM-OS Build Configuration")
 message(STATUS "  Version:    ${PROJECT_VERSION}")
+message(STATUS "  Platform:   ${PLATFORM}")
 message(STATUS "  C Compiler: ${CMAKE_C_COMPILER}")
 message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "")

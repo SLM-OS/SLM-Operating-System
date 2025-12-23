@@ -1,108 +1,140 @@
 /*
- * uart_pl011.c - PL011 UART driver for SLM-OS
+ * uart_tegra.c - Tegra UART driver for SLM-OS
  *
- * Supports: QEMU virt machine, Raspberry Pi 5
+ * Supports: NVIDIA Jetson Orin Nano (Tegra234)
  *
- * The PL011 is ARM's PrimeCell UART with 16-entry FIFOs.
- * On QEMU, baud rate configuration is ignored (virtual serial).
+ * The Tegra UART is NS16550-compatible with 32-bit register access.
+ * Registers are memory-mapped with 4-byte spacing (reg-shift=2).
+ *
+ * References:
+ * - Linux kernel: drivers/tty/serial/serial-tegra.c
+ * - Device tree: arch/arm64/boot/dts/nvidia/tegra234.dtsi
+ * - NS16550 datasheet
  */
 
 #include "platform.h"
 #include "uart.h"
 
-#ifndef UART_TYPE_PL011
-#error "uart_pl011.c included but UART_TYPE_PL011 not defined"
+#ifndef UART_TYPE_TEGRA
+#error "uart_tegra.c included but UART_TYPE_TEGRA not defined"
 #endif
 
-/* PL011 Register Offsets */
-#define PL011_DR        0x000   /* Data Register */
-#define PL011_FR        0x018   /* Flag Register */
-#define PL011_IBRD      0x024   /* Integer Baud Rate Divisor */
-#define PL011_FBRD      0x028   /* Fractional Baud Rate Divisor */
-#define PL011_LCR_H     0x02C   /* Line Control Register */
-#define PL011_CR        0x030   /* Control Register */
-#define PL011_IMSC      0x038   /* Interrupt Mask Set/Clear */
-#define PL011_ICR       0x044   /* Interrupt Clear Register */
+/* NS16550 Register Offsets (byte offsets, will be shifted) */
+#define NS16550_RBR     0   /* Receive Buffer Register (read) */
+#define NS16550_THR     0   /* Transmit Holding Register (write) */
+#define NS16550_IER     1   /* Interrupt Enable Register */
+#define NS16550_IIR     2   /* Interrupt Identification Register (read) */
+#define NS16550_FCR     2   /* FIFO Control Register (write) */
+#define NS16550_LCR     3   /* Line Control Register */
+#define NS16550_MCR     4   /* Modem Control Register */
+#define NS16550_LSR     5   /* Line Status Register */
+#define NS16550_MSR     6   /* Modem Status Register */
+#define NS16550_SCR     7   /* Scratch Register */
 
-/* Flag Register bits */
-#define PL011_FR_TXFF   (1 << 5)    /* Transmit FIFO full */
-#define PL011_FR_RXFE   (1 << 4)    /* Receive FIFO empty */
-#define PL011_FR_BUSY   (1 << 3)    /* UART busy */
+/* Divisor Latch registers (when LCR.DLAB=1) */
+#define NS16550_DLL     0   /* Divisor Latch Low */
+#define NS16550_DLM     1   /* Divisor Latch High */
 
 /* Line Control Register bits */
-#define PL011_LCR_WLEN8 (3 << 5)    /* 8-bit word length */
-#define PL011_LCR_FEN   (1 << 4)    /* FIFO enable */
+#define LCR_WLS_8       0x03    /* 8 data bits */
+#define LCR_STB_1       0x00    /* 1 stop bit */
+#define LCR_PEN_NONE    0x00    /* No parity */
+#define LCR_DLAB        0x80    /* Divisor Latch Access Bit */
 
-/* Control Register bits */
-#define PL011_CR_RXE    (1 << 9)    /* Receive enable */
-#define PL011_CR_TXE    (1 << 8)    /* Transmit enable */
-#define PL011_CR_UARTEN (1 << 0)    /* UART enable */
+/* FIFO Control Register bits */
+#define FCR_FIFO_EN     0x01    /* Enable FIFOs */
+#define FCR_RXSR        0x02    /* Reset RX FIFO */
+#define FCR_TXSR        0x04    /* Reset TX FIFO */
+#define FCR_TRIGGER_14  0xC0    /* RX trigger level = 14 bytes */
 
-/* Register access macros */
-#define UART_REG(offset) (*(volatile uint32_t *)(UART_BASE + (offset)))
+/* Line Status Register bits */
+#define LSR_DR          0x01    /* Data Ready */
+#define LSR_OE          0x02    /* Overrun Error */
+#define LSR_PE          0x04    /* Parity Error */
+#define LSR_FE          0x08    /* Framing Error */
+#define LSR_BI          0x10    /* Break Interrupt */
+#define LSR_THRE        0x20    /* Transmit Holding Register Empty */
+#define LSR_TEMT        0x40    /* Transmitter Empty */
+#define LSR_RXFE        0x80    /* RX FIFO Error */
+
+/* Modem Control Register bits */
+#define MCR_DTR         0x01    /* Data Terminal Ready */
+#define MCR_RTS         0x02    /* Request To Send */
+#define MCR_OUT2        0x08    /* Enable interrupts (directly connected) */
 
 /*
- * Initialize the PL011 UART.
- * Configures 8N1, enables FIFOs, enables TX/RX.
+ * Register access with Tegra-specific shift.
+ * Tegra UART has reg-shift=2, meaning each register is 4 bytes apart.
+ */
+#define REG_SHIFT       2
+#define UART_REG(reg)   (*(volatile uint32_t *)(UART_BASE + ((reg) << REG_SHIFT)))
+
+/*
+ * Calculate baud rate divisor.
+ * Divisor = UART_CLOCK / (16 * baud_rate)
+ */
+#define BAUD_DIVISOR(baud)  (UART_CLOCK / (16 * (baud)))
+
+/*
+ * Initialize the Tegra UART.
+ * Configures 8N1 at 115200 baud with FIFOs enabled.
  */
 void uart_init(void)
 {
-    /* Disable UART while configuring */
-    UART_REG(PL011_CR) = 0;
+    uint16_t divisor = BAUD_DIVISOR(115200);
 
-    /* Clear all pending interrupts */
-    UART_REG(PL011_ICR) = 0x7FF;
+    /* Disable interrupts */
+    UART_REG(NS16550_IER) = 0x00;
 
-    /*
-     * Set baud rate.
-     * Divisor = UART_CLOCK / (16 * baud)
-     * For 115200 baud with 24MHz clock:
-     *   Divisor = 24000000 / (16 * 115200) = 13.0208...
-     *   IBRD = 13, FBRD = 0.0208 * 64 = 1
-     *
-     * Note: QEMU ignores these values for virtual serial.
-     */
-    UART_REG(PL011_IBRD) = 13;
-    UART_REG(PL011_FBRD) = 1;
+    /* Enable DLAB to set baud rate */
+    UART_REG(NS16550_LCR) = LCR_DLAB;
 
-    /* Configure line: 8 bits, no parity, 1 stop bit, FIFOs enabled */
-    UART_REG(PL011_LCR_H) = PL011_LCR_WLEN8 | PL011_LCR_FEN;
+    /* Set divisor (115200 baud) */
+    UART_REG(NS16550_DLL) = divisor & 0xFF;
+    UART_REG(NS16550_DLM) = (divisor >> 8) & 0xFF;
 
-    /* Disable all interrupts (polling mode for now) */
-    UART_REG(PL011_IMSC) = 0;
+    /* Configure line: 8 bits, no parity, 1 stop bit, disable DLAB */
+    UART_REG(NS16550_LCR) = LCR_WLS_8 | LCR_STB_1 | LCR_PEN_NONE;
 
-    /* Enable UART, TX, and RX */
-    UART_REG(PL011_CR) = PL011_CR_UARTEN | PL011_CR_TXE | PL011_CR_RXE;
+    /* Enable and reset FIFOs, set RX trigger level */
+    UART_REG(NS16550_FCR) = FCR_FIFO_EN | FCR_RXSR | FCR_TXSR | FCR_TRIGGER_14;
+
+    /* Enable DTR, RTS, and OUT2 (interrupt enable) */
+    UART_REG(NS16550_MCR) = MCR_DTR | MCR_RTS | MCR_OUT2;
+
+    /* Clear any pending interrupts */
+    (void)UART_REG(NS16550_LSR);
+    (void)UART_REG(NS16550_RBR);
+    (void)UART_REG(NS16550_IIR);
+    (void)UART_REG(NS16550_MSR);
 }
 
 /*
  * Send a single character.
- * Blocks until transmit FIFO has space.
+ * Blocks until transmit holding register is empty.
  */
 void uart_putc(char c)
 {
-    /* Wait until transmit FIFO is not full */
-    while (UART_REG(PL011_FR) & PL011_FR_TXFF) {
+    /* Wait until THR is empty */
+    while ((UART_REG(NS16550_LSR) & LSR_THRE) == 0) {
         /* spin */
     }
 
-    UART_REG(PL011_DR) = c;
+    UART_REG(NS16550_THR) = c;
 }
 
 /*
  * Receive a single character.
- * Blocks until receive FIFO has data.
- * Yields to scheduler while waiting so other tasks can run.
+ * Blocks until data is available.
  */
 char uart_getc(void)
 {
-    /* Wait until receive FIFO is not empty, yielding to let other tasks run */
-    while (UART_REG(PL011_FR) & PL011_FR_RXFE) {
-        extern void yield(void);
-        yield();
+    /* Wait until data is ready */
+    while ((UART_REG(NS16550_LSR) & LSR_DR) == 0) {
+        /* spin */
     }
 
-    return (char)(UART_REG(PL011_DR) & 0xFF);
+    return (char)(UART_REG(NS16550_RBR) & 0xFF);
 }
 
 /*

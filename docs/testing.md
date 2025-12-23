@@ -263,10 +263,10 @@ Validates the priority-inheriting mutex implementation. Tests run via Unity fram
 | test_pi_mutex_init | Mutex initializes to unlocked state with NULL owner |
 | test_pi_mutex_lock_unlock | Basic lock/unlock cycle updates locked flag and owner |
 | test_pi_mutex_trylock_success | trylock succeeds when mutex is unlocked |
-| test_pi_mutex_trylock_fail | trylock behavior when mutex is held |
+| test_pi_mutex_trylock_fail | trylock returns 0 when mutex is already locked (simulates held lock) |
 | test_pi_mutex_priority_preserved | Owner's original priority saved and restored on unlock |
 | test_priority_inheritance_basic | LOW owner boosted to HIGH when HIGH-pri task waits |
-| test_inversion_count | pi_mutex_inversion_count() API is accessible |
+| test_inversion_count | Verify lock/unlock cycle without waiters doesn't increment inversion count |
 
 **Test Notes:**
 - `test_priority_inheritance_basic` manually simulates PI scenario by creating owner/waiter tasks
@@ -342,7 +342,7 @@ Validates the GPU platform abstraction layer. Since QEMU has no GPU hardware, th
 | Test | Description |
 |------|-------------|
 | test_gpu_free_releases_memory | Free returns pages to PMM (verified via pmm_get_free_pages()) |
-| test_gpu_free_null_is_safe | Calling gpu_free(NULL) doesn't crash |
+| test_gpu_free_null_is_safe | gpu_free(NULL) doesn't crash and PMM state unchanged |
 | test_gpu_free_clears_buffer | After free, buffer fields are zeroed |
 
 #### Cache Coherency Tests
@@ -353,9 +353,9 @@ Validates the GPU platform abstraction layer. Since QEMU has no GPU hardware, th
 | test_cache_invalidate_executes | DC IVAC cache invalidate executes without fault |
 | test_cache_flush_executes | DC CIVAC cache flush executes without fault |
 | test_gpu_sync_for_gpu_executes | gpu_sync_for_gpu() (clean) executes correctly |
-| test_gpu_sync_for_cpu_executes | gpu_sync_for_cpu() (invalidate) executes correctly |
-| test_cache_ops_null_safe | Cache ops with NULL address don't crash |
-| test_cache_ops_zero_size_safe | Cache ops with zero size don't crash |
+| test_gpu_sync_for_cpu_executes | gpu_sync_for_cpu() (invalidate) executes and data still readable |
+| test_cache_ops_null_safe | Cache ops with NULL address don't crash (verifies PMM unchanged) |
+| test_cache_ops_zero_size_safe | Cache ops with zero size don't corrupt memory (writes pattern, verifies unchanged) |
 
 #### Integration Tests
 

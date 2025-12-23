@@ -17,6 +17,7 @@
 #include "slm_ffi.h"
 #include "test_harness.h"
 #include "gpu.h"
+#include "shell.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -584,13 +585,12 @@ static void main_task_func(void *arg)
     }
 
     uart_puts("\n");
-    INFO("Triggering intentional fault to end test...");
-    __asm__ volatile(".word 0x00000000");  /* Undefined instruction */
+    INFO("Tests complete. Exiting main task...");
+    INFO("Shell is now active. Type 'help' for commands.");
+    uart_puts("\n");
 
-    /* Should never reach here */
-    while (1) {
-        __asm__ volatile("wfi");
-    }
+    /* Exit cleanly - shell task will continue running */
+    task_exit();
 }
 
 /*
@@ -685,12 +685,15 @@ void kernel_main(void)
         WARN("GPU init failed (code=%d)", gpu_ret);
     }
 
-    /* Create main task */
+    /* Create main task (runs tests) */
     struct task *main_task = task_create("main", main_task_func, NULL);
     if (!main_task) {
         panic("Failed to create main task");
     }
     scheduler_add_task(main_task);
+
+    /* Start shell task (interactive debug console) */
+    shell_start();
 
     /* Start timer - will generate periodic interrupts */
     INFO("Starting timer (100 Hz)...");

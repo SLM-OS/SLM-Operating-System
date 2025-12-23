@@ -72,22 +72,33 @@ static void test_pi_mutex_trylock_success(void)
 }
 
 /*
- * Test: trylock fails when locked
+ * Test: trylock fails when already locked
+ *
+ * We manually set the mutex to locked state (simulating another task holding it)
+ * and verify that trylock returns 0 (failure).
  */
 static void test_pi_mutex_trylock_fail(void)
 {
     pi_mutex_t mutex;
     pi_mutex_init(&mutex);
 
-    pi_mutex_lock(&mutex);
+    /* Manually set mutex to locked state (simulating another task owns it) */
+    struct task *fake_owner = task_current();  /* Use any valid task pointer */
+    mutex.locked = 1;
+    mutex.owner = fake_owner;
+    mutex.owner_original_pri = fake_owner->effective_priority;
 
-    /* Try to lock again (same task - would deadlock with blocking lock) */
-    /* For trylock, it should just fail */
-    /* Note: We're testing from the same task, which is a simplification */
-    /* In a real scenario, another task would call trylock */
+    /* trylock should fail (return 0) since mutex is already held */
+    int result = pi_mutex_trylock(&mutex);
+    TEST_ASSERT_EQUAL_INT(0, result);
 
-    pi_mutex_unlock(&mutex);
-    TEST_PASS();
+    /* Mutex should still be locked by original owner */
+    TEST_ASSERT_EQUAL_INT(1, mutex.locked);
+    TEST_ASSERT_EQUAL_PTR(fake_owner, mutex.owner);
+
+    /* Clean up - manually unlock since we manually locked */
+    mutex.locked = 0;
+    mutex.owner = NULL;
 }
 
 /*
@@ -185,15 +196,32 @@ static void test_priority_inheritance_basic(void)
 }
 
 /*
- * Test: Inversion count API is accessible
+ * Test: Inversion count API returns consistent values
+ *
+ * Verifies that the inversion counter:
+ * 1. Returns a valid (non-negative) value
+ * 2. Doesn't increment spuriously between calls
+ *
+ * Note: Full inversion counting verification requires multi-task
+ * coordination which is tested in test_priority_inheritance_basic.
  */
 static void test_inversion_count(void)
 {
-    /* Just verify the API works - count may or may not be > 0
-     * depending on whether real PI occurred */
-    uint32_t count = pi_mutex_inversion_count();
-    (void)count;  /* Avoid unused variable warning */
-    TEST_PASS();
+    /* Get baseline count */
+    uint32_t count1 = pi_mutex_inversion_count();
+
+    /* Perform operations that should NOT cause inversions */
+    pi_mutex_t mutex;
+    pi_mutex_init(&mutex);
+    pi_mutex_lock(&mutex);
+    pi_mutex_unlock(&mutex);
+
+    /* Count should not have changed (no inversion scenario) */
+    uint32_t count2 = pi_mutex_inversion_count();
+    TEST_ASSERT_EQUAL_UINT32(count1, count2);
+
+    /* Also verify pi_mutex_inversion_detected returns 0 (no recent inversion) */
+    TEST_ASSERT_EQUAL_INT(0, pi_mutex_inversion_detected());
 }
 
 /* ============================================================================

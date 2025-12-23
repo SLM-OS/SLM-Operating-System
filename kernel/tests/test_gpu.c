@@ -216,13 +216,19 @@ static void test_gpu_free_releases_memory(void)
 }
 
 /*
- * Test: gpu_free with NULL is safe (no crash)
+ * Test: gpu_free with NULL is safe (no crash, no side effects)
  */
 static void test_gpu_free_null_is_safe(void)
 {
-    /* Should not crash */
+    /* Record memory state before */
+    uint64_t free_before = pmm_get_free_pages();
+
+    /* Call gpu_free with NULL - should handle gracefully */
     gpu_free(NULL);
-    TEST_ASSERT(1);  /* If we get here, we passed */
+
+    /* Memory state should be unchanged (no spurious frees) */
+    uint64_t free_after = pmm_get_free_pages();
+    TEST_ASSERT_EQUAL_UINT64(free_before, free_after);
 }
 
 /*
@@ -349,7 +355,7 @@ static void test_gpu_sync_for_gpu_executes(void)
 }
 
 /*
- * Test: gpu_sync_for_cpu invalidates cache
+ * Test: gpu_sync_for_cpu invalidates cache and data remains readable
  */
 static void test_gpu_sync_for_cpu_executes(void)
 {
@@ -357,50 +363,67 @@ static void test_gpu_sync_for_cpu_executes(void)
     int ret = gpu_alloc(4096, GPU_MEM_READWRITE, &buf);
     TEST_ASSERT_EQUAL_INT(GPU_OK, ret);
 
-    /* Write data */
+    /* Write data to buffer */
     uint32_t *ptr = (uint32_t *)buf.cpu_addr;
     ptr[0] = TEST_PATTERN_A;
+    ptr[1] = TEST_PATTERN_B;
 
-    /* Sync for CPU (invalidate cache) - should not fault */
+    /* First sync for GPU (clean cache) to ensure data is in memory */
+    gpu_sync_for_gpu(&buf);
+
+    /* Now sync for CPU (invalidate cache) - simulating GPU write complete */
     gpu_sync_for_cpu(&buf);
 
-    /* Read should still work (cache refills from memory) */
-    uint32_t value = ptr[0];
-    (void)value;  /* Just verify we can read without fault */
+    /* Data should be readable and correct (cache refills from memory) */
+    TEST_ASSERT_EQUAL_HEX32(TEST_PATTERN_A, ptr[0]);
+    TEST_ASSERT_EQUAL_HEX32(TEST_PATTERN_B, ptr[1]);
 
     gpu_free(&buf);
 }
 
 /*
- * Test: Cache operations with NULL are safe
+ * Test: Cache operations with NULL are safe (no crash, no side effects)
  */
 static void test_cache_ops_null_safe(void)
 {
-    /* Should not crash */
+    /* Record memory state - should be unchanged by null ops */
+    uint64_t free_before = pmm_get_free_pages();
+
+    /* Cache ops with NULL addr should return early without crashing */
     cache_clean_range(NULL, 4096);
     cache_invalidate_range(NULL, 4096);
     cache_flush_range(NULL, 4096);
 
+    /* GPU sync with empty buffer should be no-op */
     gpu_buffer_t empty = {0};
     gpu_sync_for_gpu(&empty);
     gpu_sync_for_cpu(&empty);
 
-    TEST_ASSERT(1);  /* If we get here, we passed */
+    /* Memory should be unchanged */
+    uint64_t free_after = pmm_get_free_pages();
+    TEST_ASSERT_EQUAL_UINT64(free_before, free_after);
 }
 
 /*
- * Test: Cache operations with zero size are safe
+ * Test: Cache operations with zero size are no-ops
  */
 static void test_cache_ops_zero_size_safe(void)
 {
+    /* Create buffer with known pattern */
     uint8_t buf[64];
+    for (int i = 0; i < 64; i++) {
+        buf[i] = (uint8_t)i;
+    }
 
-    /* Should not crash or do anything harmful */
+    /* Zero-size cache ops should be no-ops (not touch memory) */
     cache_clean_range(buf, 0);
     cache_invalidate_range(buf, 0);
     cache_flush_range(buf, 0);
 
-    TEST_ASSERT(1);
+    /* Buffer should be unchanged */
+    for (int i = 0; i < 64; i++) {
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)i, buf[i]);
+    }
 }
 
 /* ============================================================================

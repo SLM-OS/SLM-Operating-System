@@ -2,7 +2,7 @@
 
 This document tracks Phase 3 implementation of SLM-OS.
 
-**Status:** In progress (Milestone 2 complete)
+**Status:** In progress (Milestones 1-3 complete, M5 shell core complete)
 
 **Goals:**
 - Model memory management (Rust)
@@ -258,11 +258,12 @@ This document tracks Phase 3 implementation of SLM-OS.
 - [ ] Verify interrupt handling on real hardware
 - [ ] Test multi-core boot on Jetson (6 cores vs QEMU's 4)
 
-### Device Tree Support (Stretch Goal)
+### Device Tree Support (Required — Deferred)
 - [ ] Implement minimal DTB parser
 - [ ] Extract memory regions from device tree
 - [ ] Extract interrupt configuration from device tree
-- [ ] Remove hardcoded addresses where possible
+- [ ] Remove hardcoded addresses from `platform.h`
+- [ ] Test on both Jetson and Pi 5 with platform-specific DTBs
 
 ### Hardware Testing
 - [ ] Full test suite passes on Jetson
@@ -275,30 +276,35 @@ This document tracks Phase 3 implementation of SLM-OS.
 
 ## Milestone 5: Debug Shell & ELF Execution
 
-### MicroShell Integration
-- [ ] Clone MicroShell into `kernel/lib/microshell/` (or as git submodule)
-- [ ] Create UART I/O interface (`shell_io.c`) — `read`/`write` callbacks
-- [ ] Initialize shell in `kernel_main()` after scheduler starts
-- [ ] Run `ush_service()` from a dedicated shell task
-- [ ] Verify basic prompt and echo working in QEMU
+### Custom Shell Implementation ✅
+- ✅ Create `shell.h` API header with command registration interface
+- ✅ Implement shell task running on CPU 0 at low priority
+- ✅ Implement `shell_init()` — initialize shell subsystem
+- ✅ Implement `shell_run()` — main loop with line editing (backspace, Ctrl+C)
+- ✅ Implement `shell_execute()` — execute command string directly
+- ✅ Implement `shell_register_command()` — register external commands
+- ✅ Integrate into `kernel_main()` with `shell_start()`
+- ✅ Verify prompt and echo working in QEMU
 
 ### Built-in Commands (System Inspection)
-- [ ] `help` — list available commands (MicroShell builtin)
-- [ ] `mem` — PMM statistics (total, free, allocated pages)
-- [ ] `vmm` — virtual memory regions and flags
-- [ ] `tasks` — list tasks (PID, state, CPU, name, priority)
-- [ ] `cpu` — per-core status (frequency, load, current task)
-- [ ] `ipc` — message queue and shared buffer stats
-- [ ] `model` — model memory pool status (if M1 complete)
-- [ ] `reboot` — system restart
+- ✅ `help` — list available commands
+- ✅ `mem` — PMM statistics (total, free, allocated pages)
+- ✅ `tasks` — list tasks (PID, state, CPU, name, priority, switches)
+- ✅ `cpu` — per-core status (online, isolated, current task)
+- ✅ `uptime` — system uptime (hours:minutes:seconds)
+- ✅ `clear` — clear screen (ANSI escape codes)
+- ✅ `reboot` — system restart (via PSCI)
+- [ ] `vmm` — virtual memory regions and flags (future)
+- [ ] `ipc` — message queue and shared buffer stats (future)
+- [ ] `model` — model memory pool status (future)
 
-### Virtual Filesystem Structure
+### Virtual Filesystem Structure (Deferred to Phase 4)
 - [ ] Mount root `/` with command nodes
 - [ ] Mount `/sys/` for system info (read-only virtual files)
 - [ ] Mount `/proc/` for per-task info (stretch goal)
 - [ ] Design `/components/` mount point for Phase 4
 
-### Basic ELF Loader
+### Basic ELF Loader (Deferred)
 - [ ] Implement minimal ELF64 parser (`elf_loader.c`)
     - Parse ELF header, program headers
     - Support `PT_LOAD` segments only
@@ -310,26 +316,18 @@ This document tracks Phase 3 implementation of SLM-OS.
 - [ ] Create task from ELF entry point
 - [ ] Test with minimal "hello world" ELF (prints to UART and exits)
 
-### Shell ELF Execution Command
+### Shell ELF Execution Command (Deferred)
 - [ ] `run <name>` — load and execute ELF from built-in table (initially)
 - [ ] Pass argc/argv to loaded program (simple stack setup)
 - [ ] Handle task exit and cleanup
 - [ ] `kill <pid>` — terminate running task
 
 ### Testing
-- [ ] Shell responds to commands in QEMU
-- [ ] All inspection commands show accurate data
-- [ ] Load and run trivial ELF executable
+- ✅ Shell responds to commands in QEMU
+- ✅ Built-in commands work correctly
+- [ ] Load and run trivial ELF executable (requires ELF loader)
 - [ ] Task exits cleanly, memory reclaimed
 - [ ] Test on Jetson if M4 complete
-
-### Debug Monitor (Fallback if MicroShell Integration fails completely)
-See `docs/shell.md` for design details.
-- [ ] Implement `shell_init()` — spawn shell task on CPU 0
-- [ ] Implement `shell_getline()` — read line from UART (blocking)
-- [ ] Implement command dispatch (strcmp-based, no parsing)
-- [ ] Commands: `help`, `mem`, `tasks`, `cpu`, `reboot`
-- [ ] Optional: `gpio <n>` for LED toggle on real hardware
 
 ---
 
@@ -411,20 +409,20 @@ See `docs/shell.md` for design details.
 
 ### Milestone 4 — Hardware
 
-| Decision | Options | Considerations | Deadline |
-|----------|---------|----------------|----------|
-| **Boot Method** | U-Boot vs UEFI direct | U-Boot is documented; UEFI may be cleaner | Before hardware bring-up |
-| **Device Tree** | Full parsing vs minimal vs hardcoded | Full is flexible; hardcoded is faster to implement | Stretch goal, can defer |
-| **Pi 5 Support** | Now vs later vs never | Different GPU, simpler platform; good fallback if Jetson stalls | Defer to Phase 4+ |
+| Decision | Options | **Choice** | Rationale |
+|----------|---------|------------|-----------|
+| **Boot Method** | U-Boot vs UEFI | **UEFI (extlinux.conf)** | Jetson Orin series uses UEFI, not U-Boot. UEFI reads /boot/extlinux/extlinux.conf from rootfs. Pi 5 may need different approach. |
+| **Device Tree** | Full parsing vs minimal vs hardcoded | **Hardcoded initially, DTB required later** | Get booting first with hardcoded addresses in `platform.h`. DTB parsing is NOT optional — will be implemented before Phase 4 completion. |
+| **Pi 5 Support** | Now vs later vs never | **Later** | Focus on Jetson first; Pi 5 as fallback if Jetson stalls. May need U-Boot or native bootloader (different from Jetson's UEFI). |
 
 ### Milestone 5 — Debug Shell
 
-| Decision | Options | Recommendation |
-|----------|---------|----------------|
-| **Shell task priority** | High vs normal | **Normal** — shell shouldn't preempt real work |
-| **ELF source** | Embedded in kernel vs filesystem vs network | **Embedded initially** — array of `{name, data, size}` |
+| Decision | Options | **Choice** | Rationale |
+|----------|---------|------------|-----------|
+| **Shell implementation** | MicroShell library vs Custom minimal | **Custom minimal** | No external dependencies, simpler, full control. ~500 lines C. |
+| **Shell task priority** | High vs normal vs low vs idle | **IDLE (0)** | Shell shouldn't preempt tests or real work. Runs only when system is otherwise idle. |
+| **ELF source** | Embedded in kernel vs filesystem vs network | **Deferred** | ELF loader deferred. Shell extensible via `shell_register_command()` for now. |
 | **Address space** | Shared with kernel vs isolated | **Shared** for Phase 3 — isolation in Phase 4+ |
-| **Argument passing** | Stack-based vs register | **Stack** — matches ARM64 ABI for `main(argc, argv)` |
 
 
 ### Deferred to Phase 4
