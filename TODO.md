@@ -45,16 +45,16 @@ This document tracks Phase 3 implementation of SLM-OS.
 ### GPU Memory Integration
 - ✅ Implement `gpu_map(handle)` — returns physical address (stub)
 - ✅ Implement `gpu_unmap(handle)` — placeholder for cache invalidate
-- ⏸️ Handle cache coherency (flush before GPU access, invalidate after) — deferred to M3
-- ⏸️ Use `SHM_GPU_ACCESSIBLE` flag from Phase 2 shared buffers — deferred to M3
-- ⏸️ Test with placeholder GPU driver (actual GPU in Milestone 3) — deferred to M3
+- 🔗 Handle cache coherency (flush before GPU access, invalidate after) — blocked by M3
+- 🔗 Use `SHM_GPU_ACCESSIBLE` flag from Phase 2 shared buffers — blocked by M3
+- 🔗 Test with placeholder GPU driver (actual GPU in Milestone 3) — blocked by M3
 
 ### Model Memory Testing
 - ✅ Test allocation/deallocation cycles
 - ✅ Test zero-copy sharing between tasks
 - ✅ Verify memory statistics accuracy
 - ✅ Stress test: pool exhaustion and recovery
-- ⏸️ Test large model allocation (approach RAM limits) — deferred (needs more RAM)
+- [ ] Test large model allocation (approach RAM limits) — needs more RAM
 
 ---
 
@@ -104,7 +104,7 @@ This document tracks Phase 3 implementation of SLM-OS.
   - `find_target_cpu()` uses combined metric: ready_count + deadline_pressure
   - Spreads deadline tasks across cores to reduce contention
 
-### Per-Queue Scheduler Locks (Deferred from Phase 2)
+### Per-Queue Scheduler Locks (Carried from Phase 2)
 - ✅ Replace global `sched.lock` with per-CPU run queue locks
   - Each `cpu_runqueue` now has its own `spinlock_t lock`
   - Single-queue operations use per-queue lock
@@ -208,13 +208,13 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ Add platform detection to select correct driver
   - `gpu_register_driver()` called from main.c with appropriate driver
 
-### Jetson GPU Driver (C) ⏸️
-- ⏸️ Write `jetson_gpu_init()` — power on, clock enable, reset sequence — deferred to M4
-- ⏸️ Write `jetson_gpu_alloc(size)` — allocate GPU-accessible memory — deferred to M4
-- ⏸️ Write `jetson_gpu_free(addr)` — free GPU memory — deferred to M4
-- ⏸️ Write `jetson_gpu_submit(cmd_buffer)` — submit work to GPU — deferred to M4
-- ⏸️ Write `jetson_gpu_wait()` — wait for GPU completion — deferred to M4
-- ⏸️ Implement basic fence/sync mechanism — deferred to M4
+### Jetson GPU Driver (C)
+- 🔗 Write `jetson_gpu_init()` — power on, clock enable, reset sequence — requires M4
+- 🔗 Write `jetson_gpu_alloc(size)` — allocate GPU-accessible memory — requires M4
+- 🔗 Write `jetson_gpu_free(addr)` — free GPU memory — requires M4
+- 🔗 Write `jetson_gpu_submit(cmd_buffer)` — submit work to GPU — requires M4
+- 🔗 Write `jetson_gpu_wait()` — wait for GPU completion — requires M4
+- 🔗 Implement basic fence/sync mechanism — requires M4
 
 ### Memory Coherency
 - ✅ Implement cache flush before GPU access (`dc cvac`, `dc civac`)
@@ -227,10 +227,10 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ Document coherency requirements in `docs/gpu.md`
 
 ### GPU Testing
-- ⏸️ Test GPU initialization on real Jetson hardware — deferred to M4
+- 🔗 Test GPU initialization on real Jetson hardware — requires M4
 - ✅ Test memory allocation and mapping — stub driver works
-- ⏸️ Test simple compute operation (if possible without CUDA) — deferred to M4
-- ⏸️ Verify CPU can read GPU-written data correctly — deferred to M4
+- 🔗 Test simple compute operation (if possible without CUDA) — requires M4
+- 🔗 Verify CPU can read GPU-written data correctly — requires M4
 - ✅ Fallback: Defer actual GPU compute to Phase 5 (SLM Integration)
   - Decision documented in Outstanding Decisions section
 
@@ -257,7 +257,7 @@ This document tracks Phase 3 implementation of SLM-OS.
 - [ ] Verify interrupt handling on real hardware
 - [ ] Test multi-core boot on Jetson (6 cores vs QEMU's 4)
 
-### Device Tree Support (Required — Deferred)
+### Device Tree Support (Required)
 - [ ] Implement minimal DTB parser
 - [ ] Extract memory regions from device tree
 - [ ] Extract interrupt configuration from device tree
@@ -293,9 +293,9 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ `uptime` — system uptime (hours:minutes:seconds)
 - ✅ `clear` — clear screen (ANSI escape codes)
 - ✅ `reboot` — system restart (via PSCI)
-- ⏸️ `vmm` — virtual memory regions and flags — deferred (future)
-- ⏸️ `ipc` — message queue and shared buffer stats — deferred (future)
-- ⏸️ `model` — model memory pool status — deferred (future)
+- [ ] `vmm` — virtual memory regions and flags (future enhancement)
+- [ ] `ipc` — message queue and shared buffer stats (future enhancement)
+- [ ] `model` — model memory pool status (future enhancement)
 
 ### Virtual Filesystem Structure ⏸️
 - ⏸️ Mount root `/` with command nodes — deferred to Phase 4
@@ -324,25 +324,25 @@ This document tracks Phase 3 implementation of SLM-OS.
 ### Testing
 - ✅ Shell responds to commands in QEMU
 - ✅ Built-in commands work correctly
-- ⏸️ Load and run trivial ELF executable — deferred (requires ELF loader)
-- ⏸️ Task exits cleanly, memory reclaimed — deferred (requires ELF loader)
-- ⏸️ Test on Jetson — deferred to M4
+- ⏸️ Load and run trivial ELF executable — deferred to Phase 4 (requires ELF loader)
+- ⏸️ Task exits cleanly, memory reclaimed — deferred to Phase 4 (requires ELF loader)
+- 🔗 Test on Jetson — requires M4
 
 ---
 
 ## Milestone 6: Deferred Items and Polish
 
-### Page Fault Handling ⏸️
-- ⏸️ Implement basic page fault handler (panic with useful info) — deferred from Phase 2
-- ⏸️ Log faulting address, access type, task ID — deferred from Phase 2
-- ⏸️ Add fault address to panic register dump — deferred from Phase 2
-- ⏸️ Future: demand paging for model memory (Phase 5+) — deferred
+### Page Fault Handling (Carried from Phase 2)
+- [ ] Implement basic page fault handler (panic with useful info)
+- [ ] Log faulting address, access type, task ID
+- [ ] Add fault address to panic register dump
+- ⏸️ Future: demand paging for model memory — deferred to Phase 5+
 
-### IPC Improvements ⏸️
-- ⏸️ Implement proper timeout handling in `msg_recv()` — deferred from Phase 2
-- ⏸️ Multi-task producer/consumer stress test — deferred from Phase 2
-- ⏸️ Memory leak verification after IPC teardown — deferred from Phase 2
-- ⏸️ Add IPC statistics (messages sent, queue high-water mark) — deferred from Phase 2
+### IPC Improvements (Carried from Phase 2)
+- [ ] Implement proper timeout handling in `msg_recv()`
+- [ ] Multi-task producer/consumer stress test
+- [ ] Memory leak verification after IPC teardown
+- [ ] Add IPC statistics (messages sent, queue high-water mark)
 
 ### Rust Runtime Expansion
 - [ ] Implement `ModelLoader` struct skeleton (full implementation Phase 5)

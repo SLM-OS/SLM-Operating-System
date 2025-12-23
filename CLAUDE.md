@@ -32,13 +32,20 @@ Use emoji markers for task status:
 |--------|--------|---------|
 | Completed | ✅ | `- ✅ Task completed` |
 | Pending | `[ ]` | `- [ ] Task pending` |
-| Deferred | ⏸️ | `- ⏸️ Task deferred to Phase 4` |
+| Blocked | 🔗 | `- 🔗 Task — requires M4` |
+| Deferred | ⏸️ | `- ⏸️ Task — deferred to Phase 4` |
+
+**Definitions:**
+- **Pending** `[ ]` — Ready to work on now
+- **Blocked** 🔗 — Waiting on dependency within this phase (e.g., "requires M4")
+- **Deferred** ⏸️ — Postponed to a future phase (e.g., "deferred to Phase 4")
 
 **Correct:**
 ```markdown
 - ✅ Task completed
 - [ ] Task pending
-- ⏸️ Task deferred to Phase 4
+- 🔗 Task — requires M4
+- ⏸️ Task — deferred to Phase 4
 ```
 
 **Incorrect:**
