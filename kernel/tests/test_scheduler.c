@@ -286,7 +286,17 @@ static void test_priority_clamped_to_max(void)
 /*
  * Test: slm_task_create returns valid task ID
  */
-static void dummy_task(void *arg) { (void)arg; }
+/*
+ * Dummy task for FFI tests.
+ * Yields once then exits. The test must set priority/deadline before the
+ * task gets scheduled, which works because slm_task_create returns before
+ * the task runs on another CPU.
+ */
+static void dummy_task(void *arg)
+{
+    (void)arg;
+    yield();  /* Give test code a chance to modify us */
+}
 
 static void test_ffi_task_create_returns_id(void)
 {
@@ -297,9 +307,10 @@ static void test_ffi_task_create_returns_id(void)
     struct task *t = task_get(id);
     TEST_ASSERT_NOT_NULL(t);
 
-    /* Clean up */
-    scheduler_remove_task(t);
-    t->state = TASK_TERMINATED;
+    /* Wait for task to complete (it yields once then exits) */
+    while (t->state != TASK_TERMINATED) {
+        yield();
+    }
     task_destroy(t);
 }
 
@@ -317,8 +328,10 @@ static void test_ffi_set_priority(void)
     struct task *t = task_get(id);
     TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t->priority);
 
-    scheduler_remove_task(t);
-    t->state = TASK_TERMINATED;
+    /* Wait for task to complete */
+    while (t->state != TASK_TERMINATED) {
+        yield();
+    }
     task_destroy(t);
 }
 
@@ -337,8 +350,10 @@ static void test_ffi_set_deadline(void)
     struct task *t = task_get(id);
     TEST_ASSERT_EQUAL_UINT64(deadline, t->deadline_ns);
 
-    scheduler_remove_task(t);
-    t->state = TASK_TERMINATED;
+    /* Wait for task to complete */
+    while (t->state != TASK_TERMINATED) {
+        yield();
+    }
     task_destroy(t);
 }
 

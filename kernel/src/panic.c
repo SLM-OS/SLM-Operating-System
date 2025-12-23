@@ -4,6 +4,8 @@
 
 #include "uart.h"
 #include "debug.h"
+#include "task.h"
+#include "smp.h"
 #include <stdint.h>
 #include <stdarg.h>
 
@@ -76,7 +78,7 @@ static const char *decode_exception_class(uint32_t ec)
 }
 
 /*
- * Dump system registers useful for debugging.
+ * Dump system registers and task context useful for debugging.
  */
 static void dump_registers(void)
 {
@@ -89,7 +91,18 @@ static void dump_registers(void)
     /* Extract exception class from ESR (bits 31:26) */
     uint32_t ec = (esr >> 26) & 0x3F;
 
-    uart_puts("Register Dump:\n");
+    /* Get current task info */
+    struct task *current = task_current();
+    uint32_t task_id = current ? current->id : 0xFFFFFFFF;
+    const char *task_name = current ? current->name : "<none>";
+    uint32_t current_cpu = cpu_id();
+
+    uart_puts("Task Context:\n");
+    uart_printf("  Task ID:   %lu\n", task_id);
+    uart_printf("  Task Name: %s\n", task_name);
+    uart_printf("  CPU:       %lu\n", current_cpu);
+
+    uart_puts("\nRegister Dump:\n");
     uart_printf("  SP:       0x%lx\n", sp);
     uart_printf("  ELR_EL1:  0x%lx  (return address)\n", elr);
     uart_printf("  SPSR_EL1: 0x%lx\n", spsr);

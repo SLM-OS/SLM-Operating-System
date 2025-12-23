@@ -8,6 +8,8 @@
 #include "timer.h"
 #include "uart.h"
 #include "debug.h"
+#include "task.h"
+#include "smp.h"
 #include <stdint.h>
 
 /* Timer IRQ number */
@@ -47,6 +49,135 @@ static const char *decode_ec(uint32_t ec)
 }
 
 /*
+ * Decode Data/Instruction Fault Status Code (DFSC/IFSC)
+ * Bits [5:0] of ESR_EL1 for data/instruction aborts
+ */
+static const char *decode_fault_status(uint32_t fsc)
+{
+    switch (fsc & 0x3F) {
+    /* Address size faults */
+    case 0x00: return "Address size fault, level 0";
+    case 0x01: return "Address size fault, level 1";
+    case 0x02: return "Address size fault, level 2";
+    case 0x03: return "Address size fault, level 3";
+
+    /* Translation faults (page not mapped) */
+    case 0x04: return "Translation fault, level 0";
+    case 0x05: return "Translation fault, level 1";
+    case 0x06: return "Translation fault, level 2";
+    case 0x07: return "Translation fault, level 3";
+
+    /* Access flag faults */
+    case 0x08: return "Access flag fault, level 0";
+    case 0x09: return "Access flag fault, level 1";
+    case 0x0A: return "Access flag fault, level 2";
+    case 0x0B: return "Access flag fault, level 3";
+
+    /* Permission faults */
+    case 0x0C: return "Permission fault, level 0";
+    case 0x0D: return "Permission fault, level 1";
+    case 0x0E: return "Permission fault, level 2";
+    case 0x0F: return "Permission fault, level 3";
+
+    /* Synchronous external aborts */
+    case 0x10: return "Synchronous external abort, level 0";
+    case 0x11: return "Synchronous external abort, level 1";
+    case 0x12: return "Synchronous external abort, level 2";
+    case 0x13: return "Synchronous external abort, level 3";
+    case 0x14: return "Synchronous external abort on translation table walk";
+
+    /* Other faults */
+    case 0x21: return "Alignment fault";
+    case 0x30: return "TLB conflict abort";
+    case 0x31: return "Unsupported atomic hardware update";
+
+    default:   return "Unknown fault status";
+    }
+}
+
+/*
+ * Check if exception class is a data abort
+ */
+static inline int is_data_abort(uint32_t ec)
+{
+    return (ec == 0x24 || ec == 0x25);
+}
+
+/*
+ * Check if exception class is an instruction abort
+ */
+static inline int is_instruction_abort(uint32_t ec)
+{
+    return (ec == 0x20 || ec == 0x21);
+}
+
+/*
+ * Handle page fault (data abort or instruction abort)
+ * Provides detailed fault information before panic
+ */
+static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
+                              uint32_t ec, int is_data)
+{
+    uint32_t fsc = esr & 0x3F;          /* Fault Status Code (bits 5:0) */
+    int is_write = (esr >> 6) & 1;      /* WnR bit (bit 6) - data aborts only */
+    int is_cm = (esr >> 8) & 1;         /* CM bit - cache maintenance */
+
+    /* Get current task info */
+    struct task *current = task_current();
+    uint32_t task_id = current ? current->id : 0xFFFFFFFF;
+    const char *task_name = current ? current->name : "<none>";
+    uint32_t current_cpu = cpu_id();
+
+    uart_puts("\n\n");
+    uart_puts("*********************************\n");
+    uart_puts("***       PAGE FAULT          ***\n");
+    uart_puts("*********************************\n\n");
+
+    /* Fault type */
+    if (is_data) {
+        uart_printf("Type:    Data Abort (%s)\n",
+                    is_write ? "WRITE" : "READ");
+    } else {
+        uart_puts("Type:    Instruction Abort (FETCH)\n");
+    }
+
+    /* Fault address and reason */
+    uart_printf("Address: 0x%lx\n", far);
+    uart_printf("Reason:  %s\n", decode_fault_status(fsc));
+
+    /* Task context */
+    uart_puts("\nTask Context:\n");
+    uart_printf("  Task ID:   %lu\n", task_id);
+    uart_printf("  Task Name: %s\n", task_name);
+    uart_printf("  CPU:       %lu\n", current_cpu);
+
+    /* Instruction that caused the fault */
+    uart_puts("\nFault Location:\n");
+    uart_printf("  ELR (PC):  0x%lx\n", tf->elr);
+
+    /* Raw register values for debugging */
+    uart_puts("\nRaw Exception State:\n");
+    uart_printf("  ESR_EL1:   0x%lx\n", esr);
+    uart_printf("  EC:        0x%x (%s)\n", ec, decode_ec(ec));
+    uart_printf("  FSC:       0x%x\n", fsc);
+    if (is_data) {
+        uart_printf("  WnR:       %d (%s)\n", is_write,
+                    is_write ? "write" : "read");
+        if (is_cm) {
+            uart_puts("  Note:      Fault during cache maintenance op\n");
+        }
+    }
+    uart_printf("  SPSR_EL1:  0x%lx\n", tf->spsr);
+
+    uart_puts("\nSystem halted.\n");
+
+    /* Halt */
+    while (1) {
+        __asm__ volatile("wfi");
+    }
+}
+
+/*
  * EL1 Synchronous exception handler
  */
 void el1_sync_handler(struct trap_frame *tf)
@@ -57,6 +188,22 @@ void el1_sync_handler(struct trap_frame *tf)
 
     uint32_t ec = (esr >> 26) & 0x3F;
 
+    /* Handle page faults specially for better diagnostics */
+    if (is_data_abort(ec)) {
+        /* Disable interrupts */
+        __asm__ volatile("msr daifset, #0xF");
+        handle_page_fault(tf, esr, far, ec, 1);
+        /* Never returns */
+    }
+
+    if (is_instruction_abort(ec)) {
+        /* Disable interrupts */
+        __asm__ volatile("msr daifset, #0xF");
+        handle_page_fault(tf, esr, far, ec, 0);
+        /* Never returns */
+    }
+
+    /* All other synchronous exceptions */
     panic("EL1 Synchronous Exception\n\n"
           "  EC:    0x%x (%s)\n"
           "  ESR:   0x%lx\n"
