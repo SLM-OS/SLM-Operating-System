@@ -175,7 +175,7 @@ impl MemoryPool {
                 self.blocks[i].state = BlockState::Allocated;
                 self.blocks[i].refcount = 1;
                 self.blocks[i].size_blocks = 1;
-                self.blocks[i].owner_task = 0; // TODO: get current task ID
+                self.blocks[i].owner_task = kernel_ffi::task_current().0;
 
                 self.free_count -= 1;
                 let used = self.block_count - self.free_count;

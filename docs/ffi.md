@@ -197,7 +197,17 @@ uint64_t slm_get_time_ns(void);  // Nanoseconds since boot
 ### Task Management
 
 ```c
-void *slm_task_create(const char *name, void (*entry)(void *), void *arg);
+// Create a new task (returns task ID, or 0 on failure)
+uint32_t slm_task_create(const char *name, void (*entry)(void *), void *arg);
+
+// Get the current task's ID (0 if no task running)
+uint32_t slm_task_current(void);
+
+// Set task priority (0-7, higher = more important)
+int slm_task_set_priority(uint32_t task_id, uint8_t priority);
+
+// Set task deadline in nanoseconds (0 = no deadline)
+int slm_task_set_deadline(uint32_t task_id, uint64_t deadline_ns);
 ```
 
 ### IPC (Message Queues)

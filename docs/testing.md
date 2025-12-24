@@ -274,27 +274,25 @@ Validates the priority-inheriting mutex implementation. Tests run via Unity fram
 - Verifies priority restoration on unlock
 - Logs PI events: `"PI: Boosting task 'X' (pri N->M) for waiter 'Y'"`
 
-### IPC Tests (`kernel/src/ipc.c`)
+### IPC Tests (`kernel/tests/test_ipc.c`)
 
-Validates message queues and shared buffers:
+Validates message queues and shared buffers. Tests run via Unity framework (13 tests total).
 
 | Test | Description |
 |------|-------------|
-| Message queue create | Create queue with 8 slots, 64-byte messages |
-| Message queue destroy | Free queue and verify cleanup |
-| Non-blocking send | Send message, verify count increases |
-| Non-blocking recv | Receive message, verify value matches |
-| Recv on empty | Returns `IPC_ERR_EMPTY` when queue empty |
-| Send on full | Returns `IPC_ERR_FULL` when queue full |
-| Queue lookup | Find queue by ID, returns NULL after destroy |
-| Shared buffer create | Create buffer, verify 2MB alignment and refcount |
-| Shared buffer destroy | Free buffer and verify cleanup |
-| Shared buffer map | Map buffer, verify refcount increases |
-| Shared buffer read/write | Write value, read back and verify |
-| Shared buffer unmap | Unmap buffer, verify refcount decreases |
-| Buffer lookup | Find buffer by ID, returns NULL after destroy |
-
-Tests run from `ipc_run_tests()` called at the start of the main task, before scheduler tests.
+| test_queue_create_destroy | Create queue, verify ID, destroy and verify lookup returns NULL |
+| test_queue_nonblocking_send_recv | Send message, receive and verify contents |
+| test_queue_lookup_by_id | Find queue by ID |
+| test_recv_empty_queue_nonblocking | Receive on empty queue fails |
+| test_buffer_create_destroy | Create shared buffer, destroy and verify lookup returns NULL |
+| test_buffer_map_unmap | Map buffer, write/read test pattern, unmap |
+| test_buffer_lookup_by_id | Find buffer by ID |
+| test_recv_timeout | Receive on empty queue times out correctly |
+| test_send_timeout_full_queue | Send on full queue times out correctly |
+| test_no_memory_leak | Create/destroy IPC objects, verify memory reclaimed |
+| test_queue_statistics | Verify per-queue stats (sent, recv, high_water) |
+| test_global_ipc_statistics | Verify global IPC stats tracking |
+| test_queue_stress | High-throughput send/recv stress test |
 
 ### Model Memory Tests (`kernel/tests/test_model_mem.c`)
 

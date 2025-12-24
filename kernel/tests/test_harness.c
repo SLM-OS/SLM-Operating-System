@@ -90,7 +90,12 @@ int test_harness_run_all(void)
     int total_failures = 0;
 
     /* Run each test suite */
-    total_failures += test_suite_ipc();
+    int ipc_failures = test_suite_ipc();
+    total_failures += ipc_failures;
+    if (ipc_failures == 0) {
+        uart_puts("[INFO] IPC tests passed\n");
+    }
+
     total_failures += test_suite_model_mem();
     total_failures += test_suite_scheduler();
     total_failures += test_suite_pi_mutex();

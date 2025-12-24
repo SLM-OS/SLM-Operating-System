@@ -130,6 +130,12 @@ int slm_task_set_deadline(uint32_t task_id, uint64_t deadline_ns)
     return SLM_OK;
 }
 
+uint32_t slm_task_current(void)
+{
+    struct task *task = task_current();
+    return task ? task->id : 0;
+}
+
 /*
  * IPC - Message Queues
  */

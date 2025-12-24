@@ -309,6 +309,12 @@ extern "C" {
     /// SLM_OK on success, SLM_ERR_INVALID if task not found.
     pub fn slm_task_set_deadline(task_id: TaskId, deadline_ns: u64) -> i32;
 
+    /// Get the current task's ID.
+    ///
+    /// # Returns
+    /// Task ID of the currently running task, or 0 if no task is running.
+    pub fn slm_task_current() -> TaskId;
+
     // -------------------------------------------------------------------------
     // IPC - Message Queues
     // -------------------------------------------------------------------------
@@ -524,6 +530,16 @@ pub fn task_set_deadline(task_id: TaskId, deadline_ns: u64) -> KernelResult<()> 
     } else {
         Err(KernelError::from_code(ret).unwrap_or(KernelError::Unknown(ret)))
     }
+}
+
+/// Get the current task's ID.
+///
+/// # Returns
+/// The task ID of the currently running task. Returns `TaskId(0)` if called
+/// before the scheduler is initialized or from interrupt context.
+pub fn task_current() -> TaskId {
+    // SAFETY: slm_task_current is a simple accessor with no side effects.
+    unsafe { slm_task_current() }
 }
 
 // =============================================================================

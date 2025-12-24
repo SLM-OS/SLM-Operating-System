@@ -455,13 +455,14 @@ This document tracks Phase 3 implementation of SLM-OS.
 | **Address space** | Shared with kernel vs isolated | **Shared** for Phase 3 — isolation in Phase 4+ |
 
 
-### Deferred to Phase 4
+### Deferred to Phase 4+
 
 | Item | Notes |
 |------|-------|
 | Component hot-swap | Phase 4: "Hot-swap mechanism" |
 | Component isolation | Phase 4: "Component isolation" |
 | Message routing | Phase 4: "Message routing" |
+| Rust panic formatting | Polish: Format `PanicInfo` into buffer for detailed messages (`runtime/src/lib.rs`) |
 | Full model loader | Phase 5: "ONNX model loader" |
 | Inference engine | Phase 5: "TensorRT Lite integration" |
 

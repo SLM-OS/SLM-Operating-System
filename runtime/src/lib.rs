@@ -50,8 +50,8 @@ pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
 
 #[panic_handler]
 fn rust_panic(_info: &PanicInfo) -> ! {
-    // Call C panic with a static message
-    // TODO: Format panic info into a buffer and pass to C
+    // Call C panic with a static message.
+    // (Formatting PanicInfo deferred — see TODO.md "Deferred to Phase 4+")
     static MSG: &[u8] = b"Rust panic!\0";
     unsafe {
         kernel_ffi::panic(MSG.as_ptr());

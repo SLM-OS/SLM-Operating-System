@@ -331,11 +331,4 @@ void *shared_buffer_phys_addr(struct shared_buffer *buffer);
  */
 void ipc_init(void);
 
-/*
- * Run IPC unit tests.
- *
- * Returns: Number of test failures (0 = all passed).
- */
-int ipc_run_tests(void);
-
 #endif /* IPC_H */

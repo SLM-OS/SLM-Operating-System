@@ -128,6 +128,13 @@ int slm_task_set_priority(uint32_t task_id, uint8_t priority);
 int slm_task_set_deadline(uint32_t task_id, uint64_t deadline_ns);
 
 /*
+ * Get the current task's ID.
+ *
+ * Returns: Task ID of the currently running task, or 0 if no task is running.
+ */
+uint32_t slm_task_current(void);
+
+/*
  * ==========================================================================
  * IPC - Message Queues
  * ==========================================================================
