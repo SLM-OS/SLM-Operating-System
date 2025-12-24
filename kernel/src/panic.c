@@ -97,18 +97,18 @@ static void dump_registers(void)
     const char *task_name = current ? current->name : "<none>";
     uint32_t current_cpu = cpu_id();
 
-    uart_puts("Task Context:\n");
-    uart_printf("  Task ID:   %lu\n", task_id);
-    uart_printf("  Task Name: %s\n", task_name);
-    uart_printf("  CPU:       %lu\n", current_cpu);
+    uart_puts_unlocked("Task Context:\n");
+    uart_printf_unlocked("  Task ID:   %lu\n", task_id);
+    uart_printf_unlocked("  Task Name: %s\n", task_name);
+    uart_printf_unlocked("  CPU:       %lu\n", current_cpu);
 
-    uart_puts("\nRegister Dump:\n");
-    uart_printf("  SP:       0x%lx\n", sp);
-    uart_printf("  ELR_EL1:  0x%lx  (return address)\n", elr);
-    uart_printf("  SPSR_EL1: 0x%lx\n", spsr);
-    uart_printf("  ESR_EL1:  0x%lx\n", esr);
-    uart_printf("  EC:       0x%x (%s)\n", ec, decode_exception_class(ec));
-    uart_printf("  FAR_EL1:  0x%lx  (fault address)\n", far);
+    uart_puts_unlocked("\nRegister Dump:\n");
+    uart_printf_unlocked("  SP:       0x%lx\n", sp);
+    uart_printf_unlocked("  ELR_EL1:  0x%lx  (return address)\n", elr);
+    uart_printf_unlocked("  SPSR_EL1: 0x%lx\n", spsr);
+    uart_printf_unlocked("  ESR_EL1:  0x%lx\n", esr);
+    uart_printf_unlocked("  EC:       0x%x (%s)\n", ec, decode_exception_class(ec));
+    uart_printf_unlocked("  FAR_EL1:  0x%lx  (fault address)\n", far);
 }
 
 /*
@@ -123,19 +123,19 @@ void panic(const char *fmt, ...)
     /* Disable interrupts to prevent further issues */
     __asm__ volatile("msr daifset, #0xF");
 
-    uart_puts("\n\n");
-    uart_puts("*********************************\n");
-    uart_puts("***      KERNEL PANIC         ***\n");
-    uart_puts("*********************************\n\n");
+    uart_puts_unlocked("\n\n");
+    uart_puts_unlocked("*********************************\n");
+    uart_puts_unlocked("***      KERNEL PANIC         ***\n");
+    uart_puts_unlocked("*********************************\n\n");
 
     va_start(args, fmt);
-    uart_vprintf(fmt, args);
+    uart_vprintf(fmt, args);  /* vprintf is already unlocked */
     va_end(args);
 
-    uart_puts("\n\n");
+    uart_puts_unlocked("\n\n");
     dump_registers();
 
-    uart_puts("\nSystem halted.\n");
+    uart_puts_unlocked("\nSystem halted.\n");
 
     /* Infinite loop - system is dead */
     while (1) {

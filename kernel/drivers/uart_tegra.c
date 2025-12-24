@@ -6,6 +6,11 @@
  * The Tegra UART is NS16550-compatible with 32-bit register access.
  * Registers are memory-mapped with 4-byte spacing (reg-shift=2).
  *
+ * Thread Safety:
+ *   uart_puts() and uart_printf() are synchronized with a spinlock to prevent
+ *   interleaved output from multiple CPUs. Use the _unlocked variants for
+ *   panic handlers or very early boot before the lock is safe.
+ *
  * References:
  * - Linux kernel: drivers/tty/serial/serial-tegra.c
  * - Device tree: arch/arm64/boot/dts/nvidia/tegra234.dtsi
@@ -14,6 +19,10 @@
 
 #include "platform.h"
 #include "uart.h"
+#include "spinlock.h"
+
+/* Global lock for synchronized UART output */
+static spinlock_t uart_lock = SPINLOCK_INIT;
 
 #ifndef UART_TYPE_TEGRA
 #error "uart_tegra.c included but UART_TYPE_TEGRA not defined"
@@ -138,10 +147,11 @@ char uart_getc(void)
 }
 
 /*
- * Send a null-terminated string.
+ * Send a null-terminated string (unlocked version).
+ * Use for panic handlers or very early boot.
  * Converts \n to \r\n for proper terminal display.
  */
-void uart_puts(const char *s)
+void uart_puts_unlocked(const char *s)
 {
     while (*s) {
         if (*s == '\n') {
@@ -149,6 +159,18 @@ void uart_puts(const char *s)
         }
         uart_putc(*s++);
     }
+}
+
+/*
+ * Send a null-terminated string (synchronized).
+ * Acquires lock to prevent interleaved output from multiple CPUs.
+ * Converts \n to \r\n for proper terminal display.
+ */
+void uart_puts(const char *s)
+{
+    irq_flags_t flags = spin_lock_irqsave(&uart_lock);
+    uart_puts_unlocked(s);
+    spin_unlock_irqrestore(&uart_lock, flags);
 }
 
 /* ========================================================================
@@ -318,9 +340,10 @@ int uart_vprintf(const char *fmt, va_list args)
 }
 
 /*
- * Formatted output (printf-style).
+ * Formatted output (unlocked version).
+ * Use for panic handlers or very early boot.
  */
-int uart_printf(const char *fmt, ...)
+int uart_printf_unlocked(const char *fmt, ...)
 {
     va_list args;
     int count;
@@ -328,6 +351,24 @@ int uart_printf(const char *fmt, ...)
     va_start(args, fmt);
     count = uart_vprintf(fmt, args);
     va_end(args);
+
+    return count;
+}
+
+/*
+ * Formatted output (synchronized).
+ * Acquires lock to prevent interleaved output from multiple CPUs.
+ */
+int uart_printf(const char *fmt, ...)
+{
+    va_list args;
+    int count;
+
+    irq_flags_t flags = spin_lock_irqsave(&uart_lock);
+    va_start(args, fmt);
+    count = uart_vprintf(fmt, args);
+    va_end(args);
+    spin_unlock_irqrestore(&uart_lock, flags);
 
     return count;
 }

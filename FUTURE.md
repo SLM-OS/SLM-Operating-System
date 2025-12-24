@@ -220,17 +220,19 @@ Replace hardcoded memory maps with runtime device tree discovery.
 
 ---
 
-### UART Output Synchronization
+### UART Output Synchronization ✅
 Fix garbled output during concurrent multi-core prints.
 
-- ☐ Option A: Per-CPU ring buffers, single CPU drains to UART
-- ☐ Option B: Message-level spinlock with trylock fallback
-- ☐ Option C: Defer all output to dedicated UART task
-- ☐ Ensure panic output still works (bypass locks if needed)
-- ☐ Benchmark overhead vs current unlocked approach
+- ✅ Option B: Message-level spinlock (implemented)
+  - `uart_puts()` and `uart_printf()` acquire spinlock with IRQ save
+  - `uart_puts_unlocked()` and `uart_printf_unlocked()` for panic/early boot
+  - `uart_putc()` remains unlocked for low-level use
+- ✅ Panic output works (uses unlocked variants)
+- ☐ Benchmark overhead vs current unlocked approach (optional)
 
-**Effort:** 2-3 days  
+**Effort:** 2-3 days
 **Value:** Clean debug output, especially at boot
+**Status:** Complete (December 2025)
 
 ---
 

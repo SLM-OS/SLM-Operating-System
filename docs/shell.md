@@ -28,6 +28,8 @@ Available commands:
   ipc     - Show IPC statistics
   model   - Show model memory pools
   dtb     - Show device tree info
+  elftest - Test ELF loader
+  run     - Run embedded test ELF
   clear   - Clear screen
   reboot  - Restart the system
 ```
@@ -45,6 +47,8 @@ Available commands:
 | `ipc` | Show IPC statistics (message queues, shared buffers) |
 | `model` | Show model memory pool status (weight and workspace pools) |
 | `dtb` | Show Device Tree info (parsed or defaults) |
+| `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |
+| `run` | Load and execute an embedded test ELF (demonstrates ELF loader) |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
 

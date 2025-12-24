@@ -309,29 +309,37 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ⏸️ Mount `/proc/` for per-task info (stretch goal) — deferred to Phase 4
 - ⏸️ Design `/components/` mount point for Phase 4 — deferred to Phase 4
 
-### Basic ELF Loader ⏸️
-- ⏸️ Implement minimal ELF64 parser (`elf_loader.c`) — deferred
+### Basic ELF Loader
+- ✅ Implement minimal ELF64 parser (`kernel/src/elf.c`, `kernel/include/elf.h`)
     - Parse ELF header, program headers
     - Support `PT_LOAD` segments only
     - Validate for ARM64 architecture
-- ⏸️ `elf_load(buffer, size)` — load ELF from memory buffer — deferred
+- ✅ `elf_load(buffer, size, info)` — load ELF from memory buffer
     - Allocate pages for code/data segments
-    - Map into address space (component region)
-    - Return entry point address
-- ⏸️ Create task from ELF entry point — deferred
-- ⏸️ Test with minimal "hello world" ELF (prints to UART and exits) — deferred
+    - Copy segment data, zero BSS
+    - Return entry point and segment info
+- ✅ `elftest` shell command for validation tests
+- ✅ Create task from ELF entry point
+    - `elf_create_task(info, name)` creates kernel task from loaded ELF
+    - Maps virtual addresses to physical addresses in loaded segments
+    - Uses union-based pointer conversion for ISO C compliance
+- ✅ `run` shell command for embedded test ELF
+    - Minimal ARM64 ELF binary (124 bytes) embedded in kernel
+    - Contains just a `ret` instruction
+    - Demonstrates full load → task_create → schedule flow
 
-### Shell ELF Execution Command ⏸️
-- ⏸️ `run <name>` — load and execute ELF from built-in table (initially) — deferred
-- ⏸️ Pass argc/argv to loaded program (simple stack setup) — deferred
-- ⏸️ Handle task exit and cleanup — deferred
-- ⏸️ `kill <pid>` — terminate running task — deferred
+### Shell ELF Execution Command
+- ✅ `run` — load and execute embedded test ELF (demonstrates ELF loading)
+- ⏸️ `run <name>` — load and execute ELF from built-in table — deferred to Phase 4
+- ⏸️ Pass argc/argv to loaded program (simple stack setup) — deferred to Phase 4
+- ⏸️ Handle task exit and ELF memory cleanup — deferred to Phase 4
+- ⏸️ `kill <pid>` — terminate running task — deferred to Phase 4
 
 ### Testing
 - ✅ Shell responds to commands in QEMU
 - ✅ Built-in commands work correctly
-- ⏸️ Load and run trivial ELF executable — deferred to Phase 4 (requires ELF loader)
-- ⏸️ Task exits cleanly, memory reclaimed — deferred to Phase 4 (requires ELF loader)
+- ✅ Load and run trivial ELF executable (`run` command with embedded test ELF)
+- ⏸️ Task exits cleanly, memory reclaimed — deferred to Phase 4 (ownership tracking)
 - 🔗 Test on Jetson — requires M4
 
 ---

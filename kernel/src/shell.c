@@ -16,6 +16,7 @@
 #include "slm_ffi.h"
 #include "platform.h"
 #include "dtb.h"
+#include "elf.h"
 #include <stddef.h>
 
 /* ============================================================================
@@ -33,6 +34,8 @@ static int cmd_vmm(int argc, char *argv[]);
 static int cmd_ipc(int argc, char *argv[]);
 static int cmd_model(int argc, char *argv[]);
 static int cmd_dtb(int argc, char *argv[]);
+static int cmd_elftest(int argc, char *argv[]);
+static int cmd_run(int argc, char *argv[]);
 
 /* ============================================================================
  * Command table
@@ -48,6 +51,8 @@ static const shell_cmd_t builtin_commands[] = {
     {"ipc",    cmd_ipc,    "Show IPC statistics"},
     {"model",  cmd_model,  "Show model memory pools"},
     {"dtb",    cmd_dtb,    "Show device tree info"},
+    {"elftest", cmd_elftest, "Test ELF loader"},
+    {"run",    cmd_run,    "Run embedded test ELF"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
 };
@@ -543,6 +548,171 @@ static int cmd_dtb(int argc, char *argv[])
     uart_puts("  Timer:\r\n");
     uart_printf("    IRQ:        %lu\r\n", (unsigned long)info->timer_irq);
     uart_puts("\r\n");
+
+    return 0;
+}
+
+/*
+ * elftest - Test ELF loader with a minimal handcrafted ELF
+ */
+static int cmd_elftest(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    uart_puts("ELF Loader Test:\r\n\r\n");
+
+    /* Test 1: Invalid data (not an ELF) */
+    uart_puts("  Test 1: Invalid data... ");
+    uint8_t not_elf[] = "This is not an ELF file";
+    int ret = elf_validate(not_elf, sizeof(not_elf));
+    if (ret == ELF_ERR_INVALID) {
+        uart_puts("PASS (correctly rejected)\r\n");
+    } else {
+        uart_printf("FAIL (expected ELF_ERR_INVALID, got %d)\r\n", ret);
+    }
+
+    /* Test 2: Truncated file */
+    uart_puts("  Test 2: Truncated file... ");
+    uint8_t truncated[] = {0x7f, 'E', 'L', 'F'};
+    ret = elf_validate(truncated, sizeof(truncated));
+    if (ret == ELF_ERR_TRUNCATED) {
+        uart_puts("PASS (correctly rejected)\r\n");
+    } else {
+        uart_printf("FAIL (expected ELF_ERR_TRUNCATED, got %d)\r\n", ret);
+    }
+
+    /* Test 3: Minimal valid ELF64 header (wrong arch) */
+    uart_puts("  Test 3: Wrong architecture... ");
+    uint8_t wrong_arch[64] = {0};
+    wrong_arch[0] = 0x7f; wrong_arch[1] = 'E'; wrong_arch[2] = 'L'; wrong_arch[3] = 'F';
+    wrong_arch[4] = 2;    /* ELFCLASS64 */
+    wrong_arch[5] = 1;    /* ELFDATA2LSB */
+    wrong_arch[6] = 1;    /* EV_CURRENT */
+    /* e_type at offset 16 */
+    wrong_arch[16] = 2;   /* ET_EXEC */
+    /* e_machine at offset 18 - x86_64 */
+    wrong_arch[18] = 0x3E;
+    ret = elf_validate(wrong_arch, sizeof(wrong_arch));
+    if (ret == ELF_ERR_ARCH) {
+        uart_puts("PASS (correctly rejected)\r\n");
+    } else {
+        uart_printf("FAIL (expected ELF_ERR_ARCH, got %d)\r\n", ret);
+    }
+
+    /* Test 4: Minimal valid ARM64 ELF header */
+    uart_puts("  Test 4: Valid ARM64 header... ");
+    uint8_t valid_header[64] = {0};
+    valid_header[0] = 0x7f; valid_header[1] = 'E'; valid_header[2] = 'L'; valid_header[3] = 'F';
+    valid_header[4] = 2;    /* ELFCLASS64 */
+    valid_header[5] = 1;    /* ELFDATA2LSB */
+    valid_header[6] = 1;    /* EV_CURRENT */
+    /* e_type at offset 16 */
+    valid_header[16] = 2;   /* ET_EXEC */
+    /* e_machine at offset 18 - AARCH64 */
+    valid_header[18] = 183; /* EM_AARCH64 */
+    /* e_phentsize at offset 54 */
+    valid_header[54] = 56;  /* sizeof(Elf64_Phdr) */
+    /* e_phnum at offset 56 = 0, so no segments to validate */
+    ret = elf_validate(valid_header, sizeof(valid_header));
+    if (ret == ELF_OK) {
+        uart_puts("PASS (accepted)\r\n");
+    } else {
+        uart_printf("FAIL (expected ELF_OK, got %d: %s)\r\n", ret, elf_strerror(ret));
+    }
+
+    uart_puts("\r\nELF loader validation tests complete.\r\n");
+    uart_puts("Note: Full load tests require an actual ELF binary.\r\n");
+
+    return 0;
+}
+
+/*
+ * Minimal ARM64 ELF binary that just returns.
+ *
+ * Layout:
+ *   0x00-0x3F: ELF64 header (64 bytes)
+ *   0x40-0x77: Program header (56 bytes)
+ *   0x78-0x7B: Code: ret instruction (4 bytes)
+ *
+ * Total: 124 bytes
+ */
+static const uint8_t test_elf_binary[] = {
+    /* ELF Header (64 bytes) */
+    0x7f, 'E', 'L', 'F',     /* e_ident[0-3]: ELF magic */
+    2,                       /* e_ident[4]: ELFCLASS64 */
+    1,                       /* e_ident[5]: ELFDATA2LSB (little-endian) */
+    1,                       /* e_ident[6]: EV_CURRENT */
+    0,                       /* e_ident[7]: ELFOSABI_NONE */
+    0, 0, 0, 0, 0, 0, 0, 0,  /* e_ident[8-15]: padding */
+    2, 0,                    /* e_type: ET_EXEC */
+    0xB7, 0,                 /* e_machine: EM_AARCH64 (183) */
+    1, 0, 0, 0,              /* e_version: 1 */
+    0x78, 0, 0, 0, 0, 0, 0, 0,  /* e_entry: 0x78 (code offset) */
+    0x40, 0, 0, 0, 0, 0, 0, 0,  /* e_phoff: 0x40 (program header offset) */
+    0, 0, 0, 0, 0, 0, 0, 0,  /* e_shoff: 0 (no section headers) */
+    0, 0, 0, 0,              /* e_flags: 0 */
+    0x40, 0,                 /* e_ehsize: 64 */
+    0x38, 0,                 /* e_phentsize: 56 */
+    1, 0,                    /* e_phnum: 1 */
+    0, 0,                    /* e_shentsize: 0 */
+    0, 0,                    /* e_shnum: 0 */
+    0, 0,                    /* e_shstrndx: 0 */
+
+    /* Program Header (56 bytes at offset 0x40) */
+    1, 0, 0, 0,              /* p_type: PT_LOAD */
+    5, 0, 0, 0,              /* p_flags: PF_R | PF_X */
+    0x78, 0, 0, 0, 0, 0, 0, 0,  /* p_offset: 0x78 */
+    0x78, 0, 0, 0, 0, 0, 0, 0,  /* p_vaddr: 0x78 */
+    0x78, 0, 0, 0, 0, 0, 0, 0,  /* p_paddr: 0x78 */
+    4, 0, 0, 0, 0, 0, 0, 0,  /* p_filesz: 4 */
+    4, 0, 0, 0, 0, 0, 0, 0,  /* p_memsz: 4 */
+    4, 0, 0, 0, 0, 0, 0, 0,  /* p_align: 4 */
+
+    /* Code (4 bytes at offset 0x78) */
+    0xC0, 0x03, 0x5F, 0xD6   /* ret (ARM64: 0xD65F03C0) */
+};
+
+static int cmd_run(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    uart_puts("Loading embedded test ELF...\r\n");
+
+    /* Load the test ELF */
+    struct elf_info info;
+    int ret = elf_load(test_elf_binary, sizeof(test_elf_binary), &info);
+    if (ret != ELF_OK) {
+        uart_printf("  Failed to load ELF: %s\r\n", elf_strerror(ret));
+        return -1;
+    }
+
+    uart_printf("  Loaded %zu segment(s), entry=0x%lx\r\n",
+                info.num_segments, info.entry);
+
+    /* Create task from ELF */
+    struct task *task = elf_create_task(&info, "test_elf");
+    if (!task) {
+        uart_puts("  Failed to create task\r\n");
+        elf_unload(&info);
+        return -1;
+    }
+
+    uart_printf("  Created task (id=%u)\r\n", task->id);
+
+    /* Add to scheduler */
+    scheduler_add_task(task);
+    uart_puts("  Task added to scheduler\r\n");
+
+    uart_puts("\r\nThe test ELF task will run and immediately return.\r\n");
+    uart_puts("Check 'tasks' output to verify it completed.\r\n");
+
+    /*
+     * Note: We don't unload the ELF here because the task hasn't run yet.
+     * In a real implementation, we'd track ELF ownership and clean up
+     * after task termination. For this demo, we leak the segment memory.
+     */
 
     return 0;
 }

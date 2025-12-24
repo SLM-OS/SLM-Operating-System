@@ -5,6 +5,11 @@
  * is selected at compile time based on the target platform:
  *   - PL011 for QEMU virt and Raspberry Pi 5
  *   - Tegra186-UART for Jetson Orin Nano
+ *
+ * Thread Safety:
+ *   uart_puts() and uart_printf() are synchronized with a spinlock to prevent
+ *   interleaved output when multiple CPUs print concurrently. Use the _unlocked
+ *   variants in panic handlers or very early boot (before spinlocks are safe).
  */
 
 #ifndef UART_H
@@ -22,6 +27,7 @@ void uart_init(void);
 /*
  * Send a single character.
  * Blocks until the transmit buffer has space.
+ * NOT synchronized - use uart_puts/uart_printf for multi-char output.
  */
 void uart_putc(char c);
 
@@ -32,13 +38,22 @@ void uart_putc(char c);
 char uart_getc(void);
 
 /*
- * Send a null-terminated string.
+ * Send a null-terminated string (synchronized).
+ * Acquires lock to prevent interleaved output from multiple CPUs.
  * Automatically converts \n to \r\n.
  */
 void uart_puts(const char *s);
 
 /*
- * Formatted output (printf-style).
+ * Send a null-terminated string (unlocked).
+ * Use for panic handlers or very early boot.
+ * Automatically converts \n to \r\n.
+ */
+void uart_puts_unlocked(const char *s);
+
+/*
+ * Formatted output (synchronized, printf-style).
+ * Acquires lock to prevent interleaved output from multiple CPUs.
  *
  * Supported format specifiers:
  *   %c  - character
@@ -56,7 +71,14 @@ void uart_puts(const char *s);
 int uart_printf(const char *fmt, ...);
 
 /*
- * Formatted output with va_list.
+ * Formatted output (unlocked, printf-style).
+ * Use for panic handlers or very early boot.
+ * Returns: number of characters written
+ */
+int uart_printf_unlocked(const char *fmt, ...);
+
+/*
+ * Formatted output with va_list (unlocked).
  * Used internally and by debug macros.
  */
 int uart_vprintf(const char *fmt, va_list args);

@@ -98,6 +98,9 @@ set(KERNEL_SOURCES
     # Device Tree
     kernel/src/dtb.c
 
+    # ELF Loader
+    kernel/src/elf.c
+
     # FFI (C/Rust interface)
     kernel/src/slm_ffi.c
 
