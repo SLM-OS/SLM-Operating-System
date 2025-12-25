@@ -2,9 +2,9 @@
 
 This document tracks Phase 3 implementation of SLM-OS.
 
-**Status:** In progress (M1-3 complete, M5-6 complete, M4 hardware bring-up blocked on serial adapter)
+**Status:** ✅ Complete (software). Hardware bring-up deferred to Phase 4.
 
-**Current Blocker:** USB-serial adapter needed for 40-pin header UART. TCU (USB-C debug) doesn't work after kexec - see `docs/jetson-tcu.md`. Adapter arriving in ~2 days.
+**Summary:** All QEMU-testable work complete. Hardware bring-up (M3 GPU driver, M4 Jetson testing) deferred to Phase 4 pending USB-serial adapter for 40-pin header UART.
 
 **Goals:**
 - Model memory management (Rust)
@@ -47,9 +47,9 @@ This document tracks Phase 3 implementation of SLM-OS.
 ### GPU Memory Integration
 - ✅ Implement `gpu_map(handle)` — returns physical address (stub)
 - ✅ Implement `gpu_unmap(handle)` — placeholder for cache invalidate
-- 🔗 Handle cache coherency (flush before GPU access, invalidate after) — blocked by M3
-- 🔗 Use `SHM_GPU_ACCESSIBLE` flag from Phase 2 shared buffers — blocked by M3
-- 🔗 Test with placeholder GPU driver (actual GPU in Milestone 3) — blocked by M3
+- ⏸️🔗 Handle cache coherency (flush before GPU access, invalidate after) — deferred to Phase 4 (requires M3)
+- ⏸️🔗 Use `SHM_GPU_ACCESSIBLE` flag from Phase 2 shared buffers — deferred to Phase 4 (requires M3)
+- ⏸️🔗 Test with placeholder GPU driver (actual GPU in Milestone 3) — deferred to Phase 4 (requires M3)
 
 ### Model Memory Testing
 - ✅ Test allocation/deallocation cycles
@@ -211,12 +211,12 @@ This document tracks Phase 3 implementation of SLM-OS.
   - `gpu_register_driver()` called from main.c with appropriate driver
 
 ### Jetson GPU Driver (C)
-- 🔗 Write `jetson_gpu_init()` — power on, clock enable, reset sequence — requires M4
-- 🔗 Write `jetson_gpu_alloc(size)` — allocate GPU-accessible memory — requires M4
-- 🔗 Write `jetson_gpu_free(addr)` — free GPU memory — requires M4
-- 🔗 Write `jetson_gpu_submit(cmd_buffer)` — submit work to GPU — requires M4
-- 🔗 Write `jetson_gpu_wait()` — wait for GPU completion — requires M4
-- 🔗 Implement basic fence/sync mechanism — requires M4
+- ⏸️🔗 Write `jetson_gpu_init()` — power on, clock enable, reset sequence — deferred to Phase 4 (requires M4)
+- ⏸️🔗 Write `jetson_gpu_alloc(size)` — allocate GPU-accessible memory — deferred to Phase 4 (requires M4)
+- ⏸️🔗 Write `jetson_gpu_free(addr)` — free GPU memory — deferred to Phase 4 (requires M4)
+- ⏸️🔗 Write `jetson_gpu_submit(cmd_buffer)` — submit work to GPU — deferred to Phase 4 (requires M4)
+- ⏸️🔗 Write `jetson_gpu_wait()` — wait for GPU completion — deferred to Phase 4 (requires M4)
+- ⏸️🔗 Implement basic fence/sync mechanism — deferred to Phase 4 (requires M4)
 
 ### Memory Coherency
 - ✅ Implement cache flush before GPU access (`dc cvac`, `dc civac`)
@@ -229,10 +229,10 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ Document coherency requirements in `docs/gpu.md`
 
 ### GPU Testing
-- 🔗 Test GPU initialization on real Jetson hardware — requires M4
+- ⏸️🔗 Test GPU initialization on real Jetson hardware — deferred to Phase 4 (requires M4)
 - ✅ Test memory allocation and mapping — stub driver works
-- 🔗 Test simple compute operation (if possible without CUDA) — requires M4
-- 🔗 Verify CPU can read GPU-written data correctly — requires M4
+- ⏸️🔗 Test simple compute operation (if possible without CUDA) — deferred to Phase 4 (requires M4)
+- ⏸️🔗 Verify CPU can read GPU-written data correctly — deferred to Phase 4 (requires M4)
 - ✅ Fallback: Defer actual GPU compute to Phase 5 (SLM Integration)
   - Decision documented in Outstanding Decisions section
 
@@ -244,7 +244,7 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ Set up Jetson with Linux (JetPack) for kexec testing
 - ✅ Configured remote lab access (SSH, serial, power control)
 - ✅ Document boot process in `docs/jetson-boot.md`
-- 🔗 Set up SD card boot for standalone SLM-OS — requires serial console working
+- ⏸️🔗 Set up SD card boot for standalone SLM-OS — deferred to Phase 4 (requires serial console)
 
 ### Boot Method
 - ✅ kexec from Linux works (kernel loads and executes)
@@ -253,23 +253,23 @@ This document tracks Phase 3 implementation of SLM-OS.
 
 ### Serial Console
 - ⏸️ USB-C debug port (TCU) — requires SPE firmware, doesn't work after kexec (see `docs/jetson-tcu.md`)
-- 🔗 40-pin header UART (UARTA @ 0x03100000) — requires USB-serial adapter (arriving in 2 days)
+- ⏸️🔗 40-pin header UART (UARTA @ 0x03100000) — deferred to Phase 4 (requires USB-serial adapter)
 - ✅ BPMP clock enable code written for UARTA
 - ✅ Linker scripts fixed for kexec compatibility (kernel.ld, kernel-jetson.ld)
 
 ### Platform-Specific Drivers
 - ✅ Tegra UART driver structure in place (NS16550-compatible, needs testing)
 - ✅ BPMP IPC driver for clock control (`kernel/drivers/bpmp.c`)
-- [ ] Verify GIC configuration for Jetson (may differ from QEMU)
-- [ ] Implement Jetson-specific timer if needed
-- [ ] Test GPIO driver on real pins (LED blink test)
+- ⏸️ Verify GIC configuration for Jetson (may differ from QEMU) — deferred to Phase 4
+- ⏸️ Implement Jetson-specific timer if needed — deferred to Phase 4
+- ⏸️ Test GPIO driver on real pins (LED blink test) — deferred to Phase 4
 
 ### Hardware Differences
-- [ ] Document all QEMU vs Jetson differences discovered
+- ✅ Document all QEMU vs Jetson differences discovered (see `docs/platform-abstraction.md`)
 - ✅ Update `platform.h` with Jetson-specific addresses
-- [ ] Test MMU with Jetson's actual memory map
-- [ ] Verify interrupt handling on real hardware
-- [ ] Test multi-core boot on Jetson (6 cores vs QEMU's 4)
+- ⏸️ Test MMU with Jetson's actual memory map — deferred to Phase 4
+- ⏸️ Verify interrupt handling on real hardware — deferred to Phase 4
+- ⏸️ Test multi-core boot on Jetson (6 cores vs QEMU's 4) — deferred to Phase 4
 
 ### Device Tree Support (Required)
 - ✅ Implement minimal DTB parser (`kernel/src/dtb.c`, `kernel/include/dtb.h`)
@@ -288,15 +288,15 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ Fixed boot header for ARM64 Image format
   - `ccmp` instruction at offset 0 encodes to "MZ" for PE/COFF compatibility
   - Enables binary format loading with proper DTB passing
-- [ ] Remove hardcoded addresses from `platform.h` (after hardware testing confirms DTB works)
-- [ ] Test on both Jetson and Pi 5 with platform-specific DTBs
+- ⏸️ Remove hardcoded addresses from `platform.h` (after hardware testing confirms DTB works) — deferred to Phase 4
+- ⏸️ Test on both Jetson and Pi 5 with platform-specific DTBs — deferred to Phase 4
 
 ### Hardware Testing
-- [ ] Full test suite passes on Jetson
-- [ ] Multi-core stress test on real hardware
-- [ ] IPC stress test on real hardware
-- [ ] Measure actual context switch time (< 10 µs target)
-- [ ] Measure actual interrupt latency
+- ⏸️ Full test suite passes on Jetson — deferred to Phase 4
+- ⏸️ Multi-core stress test on real hardware — deferred to Phase 4
+- ⏸️ IPC stress test on real hardware — deferred to Phase 4
+- ⏸️ Measure actual context switch time (< 10 µs target) — deferred to Phase 4
+- ⏸️ Measure actual interrupt latency — deferred to Phase 4
 
 ---
 
@@ -361,7 +361,7 @@ This document tracks Phase 3 implementation of SLM-OS.
 - ✅ Built-in commands work correctly
 - ✅ Load and run trivial ELF executable (`run` command with embedded test ELF)
 - ⏸️ Task exits cleanly, memory reclaimed — deferred to Phase 4 (ownership tracking)
-- 🔗 Test on Jetson — requires M4
+- ⏸️🔗 Test on Jetson — deferred to Phase 4 (requires M4)
 
 ---
 
@@ -427,8 +427,8 @@ This document tracks Phase 3 implementation of SLM-OS.
   - 10/10 tests pass: alloc, write, refcount, pool exhaustion, large model (200MB)
 - ✅ Deadline-aware scheduling working
   - All scheduler tests pass: priority, deadline boost, core isolation
-- [ ] GPU initialized on Jetson (basic functionality)
-- [ ] Kernel boots and runs on real Jetson hardware
+- ⏸️ GPU initialized on Jetson (basic functionality) — deferred to Phase 4
+- ⏸️ Kernel boots and runs on real Jetson hardware — deferred to Phase 4
 - ✅ All Phase 2 tests still pass
 - ✅ New tests for Phase 3 features
   - Model memory: 10 tests
@@ -439,11 +439,11 @@ This document tracks Phase 3 implementation of SLM-OS.
   - `docs/jetson-tcu.md`: TCU/HSP research notes
 
 ### Demo
-- [ ] Boot on Jetson Orin Nano via serial console
+- ⏸️ Boot on Jetson Orin Nano via serial console — deferred to Phase 4
 - ✅ Show model memory allocation and sharing (in QEMU via `model` shell cmd)
 - ✅ Show deadline-aware task scheduling (tests demonstrate boost behavior)
-- [ ] Show GPU memory mapping (compute deferred to Phase 5)
-- [ ] Compare performance: QEMU vs real hardware
+- ⏸️ Show GPU memory mapping (compute deferred to Phase 5) — deferred to Phase 4
+- ⏸️ Compare performance: QEMU vs real hardware — deferred to Phase 4
 
 ---
 
@@ -648,4 +648,5 @@ Recommended order:
 ---
 
 *Created: December 2025*
-*Target: Complete before Phase 4 (Component System)*
+*Completed: 25 December 2025*
+*Hardware bring-up deferred to Phase 4*
