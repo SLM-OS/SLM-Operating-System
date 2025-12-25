@@ -54,28 +54,30 @@ Use emoji markers for task status:
 | Status | Marker | Example |
 |--------|--------|---------|
 | Completed | ✅ | `- ✅ Task completed` |
-| Pending | `[ ]` | `- [ ] Task pending` |
-| Blocked | 🔗 | `- 🔗 Task — requires M4` |
+| Pending | ☐ | `- ☐ Task pending` |
+| Blocked | 🔗 | `- ☐🔗 Task — requires M4` |
 | Deferred | ⏸️ | `- ⏸️ Task — deferred to Phase 4` |
 
 **Definitions:**
-- **Pending** `[ ]` — Ready to work on now
-- **Blocked** 🔗 — Waiting on dependency within this phase (e.g., "requires M4")
-- **Deferred** ⏸️ — Postponed to a future phase (e.g., "deferred to Phase 4")
+- **Pending** ☐ — Ready to work on now
+- **Blocked** 🔗 — Waiting on dependency within this phase (combine with ☐ or ⏸️)
+- **Deferred** ⏸️ — Postponed to a future phase (e.g., "deferred to Phase 5")
 
 **Correct:**
 ```markdown
 - ✅ Task completed
-- [ ] Task pending
-- 🔗 Task — requires M4
-- ⏸️ Task — deferred to Phase 4
+- ☐ Task pending
+- ☐🔗 Task — requires M4 (pending, has dependency)
+- ⏸️ Task — deferred to Phase 5
+- ⏸️🔗 Task — deferred, had dependency when deferred
 ```
 
 **Incorrect:**
 ```markdown
 - [x] Task completed  ← Don't use this
-- ✓ Task completed   ← Don't use plain check symbol either
-- Deferred: Task     ← Use ⏸️ emoji instead
+- [ ] Task pending    ← Use ☐ instead
+- ✓ Task completed    ← Don't use plain check symbol
+- Deferred: Task      ← Use ⏸️ emoji instead
 ```
 
 ---
@@ -220,13 +222,17 @@ C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount
 
 ### Remote Lab Access
 
-See `lab-tools/` for scripts:
-- `jetson-power.py` — Kasa smart plug control (192.168.4.112)
-- `jetson-debug.sh` — Debug USB-C serial (/dev/ttyS4)
-- `jetson-uart.sh` — 40-pin header UART
+**Full lab operations guide:** See `docs/lab-operations.md` for detailed procedures including serial console access, deployment, and troubleshooting.
 
-SSH: `ssh -p 4243 root@gradient-nano.onthewifi.com`
+**Quick reference:**
+- SSH: `ssh -p 4243 root@gradient-nano.onthewifi.com`
+- Power control: `lab-tools/jetson-power.py`
+- Serial access requires Cygwin with `env -i` wrapper (see lab-operations.md)
+
+**Restarting the Jetson:**
+1. **Preferred:** Use `reboot` command via SSH (Linux) or SLM-OS shell
+2. **Last resort:** Power cycle via `jetson-power.py cycle` (only when software reboot unavailable)
 
 ---
 
-*Last updated: December 2025*
+*Last updated: 25 December 2025*
