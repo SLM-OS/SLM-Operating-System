@@ -20,6 +20,8 @@
 #include "platform.h"
 #include "uart.h"
 #include "spinlock.h"
+#include "bpmp.h"
+#include <stdbool.h>
 
 /* Global lock for synchronized UART output */
 static spinlock_t uart_lock = SPINLOCK_INIT;
@@ -84,12 +86,29 @@ static spinlock_t uart_lock = SPINLOCK_INIT;
  */
 #define BAUD_DIVISOR(baud)  (UART_CLOCK / (16 * (baud)))
 
+/* Flag to track if UART is available */
+static bool g_uart_available = false;
+
 /*
  * Initialize the Tegra UART.
  * Configures 8N1 at 115200 baud with FIFOs enabled.
+ *
+ * On Jetson platforms, the UART clock must be enabled via BPMP
+ * before we can access the UART registers. Since we can't access
+ * BPMP directly, we skip UART init if the clock isn't already enabled.
  */
 void uart_init(void)
 {
+    /*
+     * UART access is disabled on Jetson for now.
+     * Accessing UARTA without clock enabled causes RAS error and system reset.
+     * The kernel will run silently until we find a way to enable UART.
+     */
+#if 1  /* Set to 0 to enable UART (will crash if clock not enabled) */
+    g_uart_available = false;
+    return;
+#endif
+
     uint16_t divisor = BAUD_DIVISOR(115200);
 
     /* Disable interrupts */
@@ -124,6 +143,10 @@ void uart_init(void)
  */
 void uart_putc(char c)
 {
+    if (!g_uart_available) {
+        return;  /* UART not available, silently drop */
+    }
+
     /* Wait until THR is empty */
     while ((UART_REG(NS16550_LSR) & LSR_THRE) == 0) {
         /* spin */
@@ -138,6 +161,13 @@ void uart_putc(char c)
  */
 char uart_getc(void)
 {
+    if (!g_uart_available) {
+        /* UART not available, spin forever (kernel will halt) */
+        while (1) {
+            __asm__ volatile("wfe");
+        }
+    }
+
     /* Wait until data is ready */
     while ((UART_REG(NS16550_LSR) & LSR_DR) == 0) {
         /* spin */

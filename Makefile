@@ -8,6 +8,9 @@
 # Build type: Debug or Release
 BUILD_TYPE ?= Debug
 
+# Platform: QEMU_VIRT or JETSON_ORIN_NANO
+PLATFORM ?= QEMU_VIRT
+
 # Directories
 BUILD_DIR := build
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
@@ -67,6 +70,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_BUILD_DIR) \
 		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DPLATFORM=$(PLATFORM) \
 		-DCMAKE_MAKE_PROGRAM="C:/cygwin64/bin/make.exe"
 
 .PHONY: kernel-clean
@@ -203,6 +207,7 @@ test: kernel
 info:
 	@echo "SLM-OS Build Information"
 	@echo "========================"
+	@echo "Platform:       $(PLATFORM)"
 	@echo "Build type:     $(BUILD_TYPE)"
 	@echo "Kernel ELF:     $(KERNEL_ELF)"
 	@echo "Kernel binary:  $(KERNEL_BIN)"
@@ -225,7 +230,7 @@ help:
 	@echo "SLM-OS Build System"
 	@echo "==================="
 	@echo ""
-	@echo "Usage: make [target] [BUILD_TYPE=Debug|Release]"
+	@echo "Usage: make [target] [PLATFORM=QEMU_VIRT|JETSON_ORIN_NANO] [BUILD_TYPE=Debug|Release]"
 	@echo ""
 	@echo "Build targets:"
 	@echo "  all            Build kernel and runtime (default)"

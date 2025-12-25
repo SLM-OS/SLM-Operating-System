@@ -19,6 +19,7 @@
 #include "gpu.h"
 #include "shell.h"
 #include "dtb.h"
+#include "bpmp.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -603,6 +604,80 @@ static void main_task_func(void *arg)
  */
 void kernel_main(void *dtb)
 {
+    /*
+     * JETSON HARDWARE BRING-UP
+     *
+     * When JETSON_EARLY_UART_TEST is enabled (set to 1), this code runs a
+     * minimal UART test before full kernel initialization. This is useful
+     * for hardware bring-up when debugging boot issues.
+     *
+     * Requirements:
+     * - USB-serial adapter connected to 40-pin header pins 8/10 (UARTA)
+     * - BPMP clock enable for UARTA (handled below)
+     *
+     * See docs/jetson-tcu.md for notes on why TCU (USB-C debug) doesn't work
+     * after kexec - it requires SPE firmware cooperation.
+     */
+#define JETSON_EARLY_UART_TEST 0  /* Set to 1 to enable early UART test */
+
+#if defined(PLATFORM_JETSON_ORIN_NANO) && JETSON_EARLY_UART_TEST
+    (void)dtb;  /* Unused in early test mode */
+
+    /*
+     * UARTA at 0x03100000 - 40-pin header pins 8/10
+     * NS16550-compatible, requires BPMP clock enable before access.
+     */
+    #define UARTA_BASE 0x03100000UL
+    #define UARTA_THR  (*(volatile uint32_t *)(UARTA_BASE + 0x00))
+    #define UARTA_LSR  (*(volatile uint32_t *)(UARTA_BASE + 0x14))
+    #define LSR_THRE   (1 << 5)  /* Transmit Holding Register Empty */
+
+    /* Initialize BPMP for clock control */
+    int bpmp_ret = bpmp_init();
+
+    /* Enable UARTA clock via BPMP (TEGRA234_CLK_UARTA = 155) */
+    if (bpmp_ret == 0) {
+        bpmp_clk_enable(TEGRA234_CLK_UARTA);
+    }
+
+    /* Small delay for clock to stabilize */
+    for (volatile int i = 0; i < 1000000; i++) { }
+
+    /* Helper macros for UART output */
+    #define UART_PUTCHAR(c) do { \
+        while (!(UARTA_LSR & LSR_THRE)) { } \
+        UARTA_THR = (c); \
+    } while (0)
+
+    #define UART_PUTS(s) do { \
+        const char *_p = (s); \
+        while (*_p) { \
+            if (*_p == '\n') UART_PUTCHAR('\r'); \
+            UART_PUTCHAR(*_p++); \
+        } \
+    } while (0)
+
+    /* Output test message */
+    UART_PUTS("\n\n");
+    UART_PUTS("=====================================\n");
+    UART_PUTS("  SLM-OS on Jetson Orin Nano\n");
+    UART_PUTS("  UARTA via BPMP clock enable\n");
+    UART_PUTS("=====================================\n");
+    UART_PUTS("\n");
+
+    /* Heartbeat loop */
+    int count = 0;
+    while (1) {
+        UART_PUTCHAR('.');
+        count++;
+        if (count % 50 == 0) {
+            UART_PUTS(" [heartbeat]\n");
+        }
+        for (volatile int i = 0; i < 5000000; i++) { }
+    }
+    /* NOT REACHED */
+#endif
+
     /* Initialize UART for debug output */
     uart_init();
 
@@ -624,6 +699,7 @@ void kernel_main(void *dtb)
     /* Show DTB parsing results */
     if (dtb_ret == FDT_OK) {
         INFO("DTB parsed successfully at %p", dtb);
+        dtb_print_info(&fdt_info);
     } else {
         WARN("DTB parsing failed (code=%d), using platform defaults", dtb_ret);
     }

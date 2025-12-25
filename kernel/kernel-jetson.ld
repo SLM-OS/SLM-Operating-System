@@ -1,8 +1,8 @@
 /*
- * kernel.ld - Linker script for SLM-OS kernel
+ * kernel-jetson.ld - Linker script for SLM-OS on Jetson Orin Nano
  *
- * Memory layout for QEMU virt machine:
- *   RAM starts at 0x40000000
+ * Memory layout for Jetson Orin Nano (Tegra234):
+ *   RAM starts at 0x80000000 (standard ARM64 layout)
  *   Kernel is loaded at RAM base
  *
  * Segment layout:
@@ -10,13 +10,7 @@
  *   .data segment (RW) - initialized and uninitialized data
  */
 
-/*
- * Entry point for ELF loaders (QEMU, kexec).
- * Note: _start contains PE/COFF header for UEFI compatibility.
- * real_start is the actual executable code at offset 0x10000.
- * UEFI ignores ELF entry point and uses PE header's AddressOfEntryPoint.
- */
-ENTRY(real_start)
+ENTRY(_start)
 
 /*
  * Program headers define ELF segments with proper permissions.
@@ -30,7 +24,8 @@ PHDRS
 
 MEMORY
 {
-    RAM (rwx) : ORIGIN = 0x40000000, LENGTH = 1024M
+    /* Jetson Orin Nano: 8GB RAM starting at 0x80000000 */
+    RAM (rwx) : ORIGIN = 0x80000000, LENGTH = 1024M
 }
 
 SECTIONS
@@ -61,8 +56,8 @@ SECTIONS
     /* Page-align segment boundary for kexec compatibility */
     . = ALIGN(4096);
 
-    /* Initialized data */
-    .data : {
+    /* Initialized data - explicitly page-aligned for segment boundary */
+    .data ALIGN(4096) : {
         __data_start = .;
         *(.data .data.*)
         __data_end = .;
@@ -106,4 +101,4 @@ SECTIONS
 }
 
 /* Sanity check: ensure kernel fits in first 16 MB */
-ASSERT(__kernel_end < 0x41000000, "Kernel image too large!")
+ASSERT(__kernel_end < 0x81000000, "Kernel image too large!")

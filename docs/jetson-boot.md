@@ -133,10 +133,12 @@ The Jetson Orin Nano has UART available on the 40-pin GPIO header:
 | Device | Description |
 |--------|-------------|
 | `ttyTCU0` | Tegra Combined UART (debug console via USB-C when Linux runs) |
-| `ttyTHS0` | UART1 on GPIO header (Pin 8/10) — use this for bare-metal |
+| `ttyTHS0` | UART1 on GPIO header (Pin 8/10) — **use this for bare-metal** |
 | `ttyTHS1` | UART2 (if enabled) |
 
 For SLM-OS bare-metal, we use **UART1 (ttyTHS0)** at address `0x03100000`.
+
+**Important:** The USB-C debug port (TCU/ttyTCU0) does **not** work for bare-metal code. TCU requires SPE (Sensor Processing Engine) firmware cooperation, which is only active when Linux runs the SPE communication stack. After kexec or during bare-metal boot, TCU produces no output. See `docs/jetson-tcu.md` for details.
 
 ---
 
@@ -252,6 +254,14 @@ sudo kexec -e
 ---
 
 ## References
+
+### Project Documentation
+
+- `docs/platform-abstraction.md` — Comprehensive QEMU vs Jetson comparison, abstraction strategy
+- `docs/boot-sequence.md` — Boot sequence research, PE/COFF header encoding
+- `docs/jetson-tcu.md` — Why TCU doesn't work for bare-metal
+
+### External Resources
 
 - [Jetson Orin Series Boot Flow](https://docs.nvidia.com/jetson/archives/r35.4.1/DeveloperGuide/text/AR/BootArchitecture/JetsonOrinSeriesBootFlow.html)
 - [UEFI Adaptation Guide](https://docs.nvidia.com/jetson/archives/r36.2/DeveloperGuide/SD/Bootloader/UEFI.html)

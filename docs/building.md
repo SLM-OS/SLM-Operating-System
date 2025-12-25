@@ -580,14 +580,19 @@ screen /dev/ttyUSB0 115200
 
 | Feature | QEMU virt | Jetson Orin Nano |
 |---------|-----------|------------------|
-| UART | PL011 (0x09000000) | Tegra Combined UART |
+| UART | PL011 (0x09000000) | UARTA NS16550 (0x03100000)† |
 | Timer | ARM Generic Timer | ARM Generic Timer |
 | GIC | GIC-400 | GIC-400 |
 | CPUs | 4 × Cortex-A76 | 6 × Cortex-A78AE |
 | RAM | 1GB (default) | 8GB |
 | GPU | None (stub) | Ampere (1024 CUDA cores) |
 
-See `docs/jetson-boot.md` for detailed boot process documentation.
+**†Note:** The USB-C debug port (TCU/ttyTCU0) does not work after kexec or for bare-metal code. Use UARTA via the 40-pin GPIO header (pins 6/8/10) for SLM-OS serial output.
+
+See:
+- `docs/jetson-boot.md` — Detailed boot process documentation
+- `docs/platform-abstraction.md` — Platform differences and abstraction strategy
+- `docs/jetson-tcu.md` — Why TCU doesn't work for bare-metal
 
 ---
 

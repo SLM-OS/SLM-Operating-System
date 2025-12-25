@@ -406,4 +406,94 @@ These are called rarely and can use indirection:
 
 ---
 
+## QEMU vs Jetson: Practical Differences
+
+This section documents runtime differences discovered during development. These affect how the kernel boots and operates on each platform.
+
+### Boot Process
+
+| Aspect | QEMU | Jetson Orin Nano |
+|--------|------|------------------|
+| Boot method | Direct `-kernel` load | kexec from Linux or UEFI |
+| Kernel format | ELF (`.elf`) or Image (`.bin`) | Image format (PE/COFF header) |
+| DTB source | QEMU-generated | Bootloader-provided |
+| DTB in x0 | Only with `.bin` format | Yes (kexec/UEFI pass it) |
+| Load address | ELF: fixed at 0x40000000<br>BIN: 2MB-aligned (e.g., 0x40200000) | Runtime-determined by bootloader |
+
+**Key finding:** QEMU's ELF loader (`-kernel foo.elf`) does *not* pass DTB address in x0. Use binary format for DTB testing, or accept platform.h defaults for ELF testing.
+
+### Boot Header
+
+The kernel binary includes a PE/COFF header for UEFI compatibility:
+
+```
+Offset 0x00: "MZ" - PE/COFF magic (encoded as ARM64 ccmp instruction)
+Offset 0x04: Branch to real_start
+Offset 0x38: "ARM\x64" - ARM64 Image magic
+Offset 0x3C: PE header offset
+```
+
+The `ccmp x18, #0, #0xd, pl` instruction encodes to bytes `4D 5A 40 FA`, providing both:
+- Valid ARM64 instruction (harmless conditional compare)
+- "MZ" signature at offset 0 for PE/COFF recognition
+
+### Serial Console
+
+| Aspect | QEMU | Jetson Orin Nano |
+|--------|------|------------------|
+| Primary UART | PL011 at 0x09000000 | UARTA (NS16550) at 0x03100000 |
+| Debug port | `-serial stdio` | USB-C (TCU) or 40-pin header |
+| Clock init | Not needed | BPMP clock enable required |
+| IRQ | 33 (SPI 1) | Configured via BPMP |
+
+**Jetson-specific:** UARTA requires BPMP IPC to enable clock before use. The USB-C debug port uses TCU (Tegra Combined UART), which requires SPE firmware cooperation and doesn't work after kexec. See `docs/jetson-tcu.md`.
+
+### Memory Map
+
+| Region | QEMU virt | Jetson Orin Nano |
+|--------|-----------|------------------|
+| RAM base | 0x40000000 | 0x80000000 |
+| RAM size | Configurable (1GB default) | 4-8 GB (minus carveouts) |
+| GIC distributor | 0x08000000 | 0x03881000 |
+| GIC CPU interface | 0x08010000 | 0x03882000 |
+| UART | 0x09000000 (PL011) | 0x03100000 (UARTA) |
+
+### Interrupt Controller
+
+| Aspect | QEMU | Jetson |
+|--------|------|--------|
+| GIC version | GICv2 | GICv2 (legacy mode) |
+| Timer IRQ | 30 (virtual timer PPI) | 30 |
+| UART IRQ | 33 (SPI 1) | Platform-specific |
+
+Both platforms use GICv2-compatible mode, making the GIC driver portable.
+
+### Clock and Power Management
+
+| Aspect | QEMU | Jetson |
+|--------|------|--------|
+| Clocks | Always on | BPMP-managed |
+| Power domains | Not modeled | Must enable via BPMP |
+| BPMP IPC | Not needed | Required for UART, GPIO |
+
+Jetson peripherals are clock-gated by default. The BPMP (Boot and Power Management Processor) controls clocks via IPC messages. See `kernel/drivers/bpmp.c`.
+
+### Development Implications
+
+1. **Primary development:** Use QEMU with ELF format for fast iteration
+2. **DTB testing:** Use binary format (`slmos.bin`) to get DTB from QEMU
+3. **Hardware testing:** Always use binary format (required for kexec/UEFI)
+4. **Platform defaults:** `platform.h` values match QEMU virt machine
+5. **Jetson bring-up:** Requires serial console via 40-pin header UART
+
+### Makefile Targets
+
+```bash
+make run          # Run ELF in QEMU (fast, no DTB)
+make test         # Test ELF in QEMU (uses platform defaults)
+make PLATFORM=JETSON_ORIN_NANO kernel  # Build for Jetson
+```
+
+---
+
 *Last updated: December 2025*

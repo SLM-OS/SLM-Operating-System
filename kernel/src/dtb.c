@@ -22,7 +22,11 @@ static fdt_info_t g_fdt_info = {
     .uart_base = UART_BASE,
     .uart_irq = UART_IRQ,
     .gic_dist_base = GIC_DIST_BASE,
-    .gic_cpu_base = GIC_CPU_BASE,
+#if defined(GIC_VERSION) && GIC_VERSION == 3
+    .gic_cpu_base = GIC_REDIST_BASE,  /* GICv3: use redistributor base */
+#else
+    .gic_cpu_base = GIC_CPU_BASE,     /* GICv2: use CPU interface base */
+#endif
     .cpu_count = CPU_MAX,
     .timer_irq = TIMER_IRQ,
     .valid = false
@@ -396,7 +400,11 @@ int dtb_parse(const void *dtb, fdt_info_t *info)
     info->uart_base = UART_BASE;
     info->uart_irq = UART_IRQ;
     info->gic_dist_base = GIC_DIST_BASE;
-    info->gic_cpu_base = GIC_CPU_BASE;
+#if defined(GIC_VERSION) && GIC_VERSION == 3
+    info->gic_cpu_base = GIC_REDIST_BASE;  /* GICv3: use redistributor base */
+#else
+    info->gic_cpu_base = GIC_CPU_BASE;     /* GICv2: use CPU interface base */
+#endif
     info->cpu_count = 0;  /* Will be counted from /cpus */
     info->timer_irq = TIMER_IRQ;
     info->valid = false;

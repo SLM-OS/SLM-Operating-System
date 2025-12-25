@@ -313,6 +313,34 @@ Our `boot.S` implements:
 - [x] Pass DTB pointer to `kernel_main(void *dtb)`
 - [x] Handle case where `kernel_main()` returns (hang or reset)
 
+### PE/COFF Header for UEFI Compatibility
+
+SLM-OS includes a PE/COFF header at `_start` for UEFI boot compatibility. The header satisfies both:
+1. **PE/COFF requirement:** "MZ" signature at offset 0
+2. **ARM64 binary boot:** First instruction must be executable
+
+This is achieved using a clever encoding trick from the Linux kernel:
+
+```asm
+_start:
+    ccmp    x18, #0, #0xd, pl   /* Encodes to 0xfa405a4d = "MZ@." in little-endian */
+    b       real_start          /* Branch to actual entry point */
+```
+
+The `ccmp x18, #0, #0xd, pl` instruction:
+- Encodes to bytes `4D 5A 40 FA` (little-endian)
+- First two bytes are "MZ" (0x4D 0x5A) — the PE/COFF magic
+- Is a valid ARM64 instruction (conditional compare, harmless NOP)
+- Allows direct binary boot without requiring ELF format
+
+**Boot formats:**
+| Format | Use Case | DTB Passed | Entry Point |
+|--------|----------|------------|-------------|
+| ELF (`.elf`) | QEMU development | No (NULL in x0) | `real_start` via ELF entry |
+| Binary (`.bin`) | UEFI, kexec, DTB testing | Yes (valid x0) | `_start` (ccmp + branch) |
+
+See `docs/platform-abstraction.md` § "QEMU vs Jetson: Practical Differences" for detailed platform comparison.
+
 ### Memory Layout (QEMU virt)
 
 ```

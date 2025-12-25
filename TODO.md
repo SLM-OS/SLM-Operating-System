@@ -2,7 +2,9 @@
 
 This document tracks Phase 3 implementation of SLM-OS.
 
-**Status:** In progress (M1-3 complete, M4 DTB parser done, M5 shell complete, M6 complete, M4 hardware testing pending, RAM scaled to 1GB for model testing)
+**Status:** In progress (M1-3 complete, M5-6 complete, M4 hardware bring-up blocked on serial adapter)
+
+**Current Blocker:** USB-serial adapter needed for 40-pin header UART. TCU (USB-C debug) doesn't work after kexec - see `docs/jetson-tcu.md`. Adapter arriving in ~2 days.
 
 **Goals:**
 - Model memory management (Rust)
@@ -239,20 +241,32 @@ This document tracks Phase 3 implementation of SLM-OS.
 ## Milestone 4: Real Hardware Bring-Up
 
 ### Jetson Orin Nano Preparation
-- [ ] Set up SD card with bootable image
-- [ ] Configure U-Boot to chainload SLM-OS
-- [ ] Set up serial console for debug output
-- [ ] Document boot process in `docs/jetson-boot.md`
+- ✅ Set up Jetson with Linux (JetPack) for kexec testing
+- ✅ Configured remote lab access (SSH, serial, power control)
+- ✅ Document boot process in `docs/jetson-boot.md`
+- 🔗 Set up SD card boot for standalone SLM-OS — requires serial console working
+
+### Boot Method
+- ✅ kexec from Linux works (kernel loads and executes)
+- ✅ Fixed ELF segment alignment for kexec (page-aligned .data section)
+- ⏸️ U-Boot/UEFI direct boot — deferred until kexec debugging complete
+
+### Serial Console
+- ⏸️ USB-C debug port (TCU) — requires SPE firmware, doesn't work after kexec (see `docs/jetson-tcu.md`)
+- 🔗 40-pin header UART (UARTA @ 0x03100000) — requires USB-serial adapter (arriving in 2 days)
+- ✅ BPMP clock enable code written for UARTA
+- ✅ Linker scripts fixed for kexec compatibility (kernel.ld, kernel-jetson.ld)
 
 ### Platform-Specific Drivers
-- [ ] Implement Tegra UART driver (NS16550-compatible)
+- ✅ Tegra UART driver structure in place (NS16550-compatible, needs testing)
+- ✅ BPMP IPC driver for clock control (`kernel/drivers/bpmp.c`)
 - [ ] Verify GIC configuration for Jetson (may differ from QEMU)
 - [ ] Implement Jetson-specific timer if needed
 - [ ] Test GPIO driver on real pins (LED blink test)
 
 ### Hardware Differences
 - [ ] Document all QEMU vs Jetson differences discovered
-- [ ] Update `platform.h` with Jetson-specific addresses
+- ✅ Update `platform.h` with Jetson-specific addresses
 - [ ] Test MMU with Jetson's actual memory map
 - [ ] Verify interrupt handling on real hardware
 - [ ] Test multi-core boot on Jetson (6 cores vs QEMU's 4)
@@ -265,8 +279,15 @@ This document tracks Phase 3 implementation of SLM-OS.
   - Falls back to `platform.h` defaults if parsing fails
 - ✅ Add `dtb` shell command to display parsed/default values
 - ✅ Preserve DTB pointer in boot.S (x0 → x19 → kernel_main)
-- [ ] Extract memory regions from device tree (parser ready, QEMU ELF boot doesn't pass DTB)
-- [ ] Extract interrupt configuration from device tree
+- ✅ Extract memory regions from device tree
+  - Parser extracts `ram_base` and `ram_size` from `/memory@*` node
+  - Tested with QEMU binary format (ELF format doesn't pass DTB, uses defaults)
+- ✅ Extract interrupt configuration from device tree
+  - Parser extracts `uart_irq`, `timer_irq`, `gic_dist_base`, `gic_cpu_base`
+  - Verified with QEMU-generated DTB: all values match expected
+- ✅ Fixed boot header for ARM64 Image format
+  - `ccmp` instruction at offset 0 encodes to "MZ" for PE/COFF compatibility
+  - Enables binary format loading with proper DTB passing
 - [ ] Remove hardcoded addresses from `platform.h` (after hardware testing confirms DTB works)
 - [ ] Test on both Jetson and Pi 5 with platform-specific DTBs
 
@@ -402,18 +423,25 @@ This document tracks Phase 3 implementation of SLM-OS.
 ## Phase 3 Completion Checklist
 
 ### Deliverables
-- [ ] Model memory allocator functional (Rust)
-- [ ] Deadline-aware scheduling working
+- ✅ Model memory allocator functional (Rust)
+  - 10/10 tests pass: alloc, write, refcount, pool exhaustion, large model (200MB)
+- ✅ Deadline-aware scheduling working
+  - All scheduler tests pass: priority, deadline boost, core isolation
 - [ ] GPU initialized on Jetson (basic functionality)
 - [ ] Kernel boots and runs on real Jetson hardware
-- [ ] All Phase 2 tests still pass
-- [ ] New tests for Phase 3 features
-- [ ] Documentation updated
+- ✅ All Phase 2 tests still pass
+- ✅ New tests for Phase 3 features
+  - Model memory: 10 tests
+  - Scheduler: deadline boost, priority, isolation tests
+  - GPU: stub driver tests
+- ✅ Documentation updated
+  - `docs/platform-abstraction.md`: QEMU vs Jetson differences
+  - `docs/jetson-tcu.md`: TCU/HSP research notes
 
 ### Demo
 - [ ] Boot on Jetson Orin Nano via serial console
-- [ ] Show model memory allocation and sharing
-- [ ] Show deadline-aware task scheduling
+- ✅ Show model memory allocation and sharing (in QEMU via `model` shell cmd)
+- ✅ Show deadline-aware task scheduling (tests demonstrate boost behavior)
 - [ ] Show GPU memory mapping (compute deferred to Phase 5)
 - [ ] Compare performance: QEMU vs real hardware
 
@@ -582,8 +610,11 @@ Recommended order:
 
 ### Jetson Hardware
 - Jetson Orin Nano Developer Kit User Guide
-- Tegra234 Technical Reference Manual (if available)
+- [Orin Series SoC Technical Reference Manual (TRM)](https://developer.nvidia.com/orin-series-soc-technical-reference-manual) — requires NVIDIA developer login
+  - Local copy: `H:\My Drive\Capstone\Documentation\Orin-TRM_DP10508002_v1.2p.pdf`
+  - HSP section exported: `H:\My Drive\Capstone\Documentation\Hardware Synchronization Primitives.docx`
 - NVIDIA L4T (Linux for Tegra) source code for driver reference
+- See `docs/jetson-tcu.md` for TCU/HSP research notes
 
 ---
 
@@ -601,6 +632,12 @@ Recommended order:
 - Profile before optimizing (per-queue locks may not be needed)
 - Document all QEMU assumptions in one place
 - Add more stress tests earlier in development
+
+### Lessons from Phase 3 Hardware Bring-Up
+- **kexec is useful but has limitations** — Linux shutdown may stop firmware on co-processors (SPE)
+- **USB-C debug on Jetson uses TCU** — Requires SPE firmware cooperation, not simple MMIO UART
+- **TRM is invaluable** — HSP/mailbox documentation enabled informed debugging
+- **Have backup debug methods** — USB-serial adapter for 40-pin header avoids TCU complexity
 
 ### Patterns to Preserve
 - Phase documents with checkboxes track progress visibly

@@ -37,8 +37,12 @@ set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO")
 # Add platform define
 add_compile_definitions(PLATFORM_${PLATFORM}=1)
 
-# Linker script
-set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel.ld)
+# Linker script - platform-specific
+if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+    set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-jetson.ld)
+else()
+    set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel.ld)
+endif()
 
 # Rust runtime library
 # Built by `make runtime` before `make kernel`
@@ -59,6 +63,9 @@ set(KERNEL_SOURCES
     # Drivers - UART selected by platform
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
+
+    # Drivers - BPMP (Jetson only, required for clock control)
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp.c>
 
     # Interrupt handling
     kernel/src/gic.c

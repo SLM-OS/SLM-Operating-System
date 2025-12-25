@@ -103,6 +103,29 @@ Documentation will be submitted to an academic advisor. Avoid "you/your" languag
 - Windows CMake must be used instead of Cygwin CMake (path translation issues)
 - Project is on Google Drive (`H:\My Drive\`) which can cause file locking issues during builds
 
+### Running Cygwin from Claude Code
+
+**Problem:** When Claude Code runs `C:/cygwin64/bin/bash.exe`, it inherits Git Bash's mount table. This causes `/usr/bin` to point to Git Bash's binaries instead of Cygwin's, making Cygwin-installed programs (like `picocom`) unavailable.
+
+**Solution:** Use `env -i` to clear the inherited environment before running Cygwin bash:
+
+```bash
+# Correct: Clean environment with proper Cygwin mounts
+C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe --login -c "which picocom"
+# Output: /usr/bin/picocom
+
+# Incorrect: Inherits Git Bash mounts
+C:/cygwin64/bin/bash.exe --login -c "which picocom"
+# Output: picocom not found (because /usr/bin points to Git Bash)
+```
+
+**Verification:** Check which `/usr/bin` is mounted:
+```bash
+C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount | grep usr"
+# Should show: C:/cygwin64/bin on /usr/bin
+# Not: C:/Program Files/Git/usr/bin on /usr/bin
+```
+
 ---
 
 ## Build System
@@ -160,6 +183,49 @@ Documentation will be submitted to an academic advisor. Avoid "you/your" languag
      - Disable "Sync external changes when switching to the IDE window"
      - Disable "Sync external changes periodically when the IDE is inactive"
    - **Note:** Issue may be exacerbated by project being on Google Drive
+
+---
+
+## Jetson Hardware
+
+**Board:** Jetson Orin Nano Super Developer Kit
+
+### Reference Documentation
+
+- [Carrier Board Specification (PDF)](https://developer.nvidia.com/downloads/assets/embedded/secure/jetson/orin_nano/docs/jetson_orin_nano_devkit_carrier_board_specification_sp.pdf) — Definitive pinouts for J14, J12, etc.
+- [Developer Kit User Guide](https://developer.nvidia.com/embedded/learn/jetson-orin-nano-devkit-user-guide/howto.html)
+- [JetsonHacks GPIO Pinout](https://jetsonhacks.com/nvidia-jetson-orin-nano-gpio-header-pinout/)
+- [Orin TRM](https://developer.nvidia.com/orin-series-soc-technical-reference-manual) — Requires NVIDIA developer login
+  - Local copy: `H:\My Drive\Capstone\Documentation\Orin-TRM_DP10508002_v1.2p.pdf`
+
+### Serial Console Options
+
+| Port | Address | Type | Connection | Status |
+|------|---------|------|------------|--------|
+| UARTA | 0x03100000 | NS16550 | 40-pin header pins 8/10 | Works, needs USB-serial adapter |
+| TCU | HSP mailbox | Combined UART | USB-C debug port | Requires SPE firmware (see below) |
+
+**TCU (USB-C Debug):** The USB-C debug console uses the Tegra Combined UART (TCU), which routes through SPE firmware via HSP mailboxes. After kexec, SPE is no longer running, so TCU doesn't work for bare-metal. See `docs/jetson-tcu.md` for full research notes.
+
+**Recommended:** Use USB-serial adapter on 40-pin header (UARTA) for SLM-OS debugging.
+
+### Button Header (J14) Quick Reference
+
+| Pins | Function |
+|------|----------|
+| 5-6 | Jumper for power button mode (remove for auto power-on) |
+| 7-8 | Reset (momentary short) |
+| 9-10 | USB Force Recovery (hold during power-on) |
+| 11-12 | Power button (momentary short) |
+
+### Remote Lab Access
+
+See `lab-tools/` for scripts:
+- `jetson-power.py` — Kasa smart plug control (192.168.4.112)
+- `jetson-debug.sh` — Debug USB-C serial (/dev/ttyS4)
+- `jetson-uart.sh` — 40-pin header UART
+
+SSH: `ssh -p 4243 root@gradient-nano.onthewifi.com`
 
 ---
 
