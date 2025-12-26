@@ -29,7 +29,7 @@ jobs:
         sudo apt-get install -y qemu-system-arm
 
     - name: Install Rust
-      uses: dtolnay/rust-action@stable
+      uses: dtolnay/rust-toolchain@stable
       with:
         targets: aarch64-unknown-none
 
