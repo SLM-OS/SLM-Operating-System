@@ -96,32 +96,46 @@ Tests: 3  Passed: 2  Failed: 1
 
 ### `make test` Target
 
-The primary testing mechanism is `make test`, which:
+The primary testing mechanism is `make test`, designed for CI/CD automation:
 
-1. Builds the kernel
-2. Runs QEMU with a 60-second timeout
+1. Builds the kernel (if needed)
+2. Runs QEMU with configurable timeout (default 60 seconds)
 3. Captures output to `build/test-output.log`
-4. Parses output for test results
+4. Parses output for `[PASS]` or `[FAIL]` markers
 5. Returns exit code 0 on success, 1 on failure
 
 ```bash
-make test
+make test                    # Default 60s timeout
+make TEST_TIMEOUT=120 test   # Custom timeout for slow systems
 ```
 
 Example output:
 ```
-Running kernel tests (timeout: 60s)...
+Running kernel tests...
 
 Test Results:
 =============
 PASSED - All tests passed
-[INFO] VMM tests passed
-[INFO] Spinlock tests passed
-[INFO] SMP tests passed
-[INFO] IPC tests passed
-[INFO] FFI tests passed
-[INFO] Scheduler tests passed
 ```
+
+### `make shell` Target
+
+For interactive testing and exploration, use `make shell`:
+
+```bash
+make shell
+```
+
+After tests complete, the SLM-OS shell is available:
+```
+[INFO] Tests complete. Exiting main task...
+[INFO] Shell is now active. Type 'help' for commands.
+slm> help
+slm> mem
+slm> tasks
+```
+
+Exit QEMU with `Ctrl-A X`.
 
 ### Test Result Detection
 
@@ -424,6 +438,100 @@ Validates the GPU platform abstraction layer. Since QEMU has no GPU hardware, th
 - 2MB alignment test verifies the stub driver's over-allocation strategy for alignment
 - Integration tests simulate typical GPU buffer lifecycle patterns
 
+### PMM Tests (`kernel/tests/test_pmm.c`)
+
+Comprehensive validation of the buddy allocator physical memory manager. Tests run via Unity framework (24 tests total).
+
+These tests verify actual buddy allocator behavior, not just page counts. Key tests prove coalescing works by allocating larger blocks after freeing smaller ones.
+
+#### Basic Allocation
+
+| Test | Description |
+|------|-------------|
+| test_single_page_alloc | Allocate/free single page, verify page count |
+| test_power_of_two_alloc | Allocate exact power-of-2 pages (4 pages) |
+| test_non_power_of_two_rounds_up | Verify 3 pages rounds up to 4 |
+
+#### Alignment Verification
+
+| Test | Description |
+|------|-------------|
+| test_alignment_all_orders | Orders 0-8 return properly aligned addresses |
+
+#### Buddy Address Calculation
+
+| Test | Description |
+|------|-------------|
+| test_buddy_address_calculation | Verify XOR-based buddy address math |
+
+#### Coalescing Verification (Critical)
+
+| Test | Description |
+|------|-------------|
+| test_coalesce_enables_larger_allocation | **Proves coalescing works** by allocating 4-page block after freeing 4 singles |
+| test_recursive_coalescing | Free 8 pages → verify 4+ merges → allocate 8-page block |
+| test_coalesce_any_free_order | Coalescing works regardless of free order (forward, reverse, interleaved) |
+
+#### Split Verification
+
+| Test | Description |
+|------|-------------|
+| test_split_tracking | Verify split_count increases during allocation |
+| test_split_creates_buddies | Splitting order N requires exactly N splits |
+
+#### Merge Statistics
+
+| Test | Description |
+|------|-------------|
+| test_merge_counting | Verify merge_count tracks coalescing operations |
+
+#### Free List Integrity
+
+| Test | Description |
+|------|-------------|
+| test_free_list_integrity | After alloc/free cycles, free counts sum correctly |
+
+#### Fragmentation and Recovery
+
+| Test | Description |
+|------|-------------|
+| test_fragmentation_recovery_large | 100 single pages → free all → allocate 64-page block |
+| test_checkerboard_fragmentation | Checkerboard free pattern still coalesces fully |
+
+#### Exhaustion and Recovery
+
+| Test | Description |
+|------|-------------|
+| test_exhaustion_recovery | Allocate until OOM, free all, verify full recovery |
+
+#### Edge Cases
+
+| Test | Description |
+|------|-------------|
+| test_zero_alloc | Zero pages returns NULL |
+| test_double_free_detected | Double-free warns but doesn't crash |
+| test_memory_is_writable | Allocated memory can be written |
+| test_large_allocation_writable | 16-page block is fully writable |
+
+#### Statistics
+
+| Test | Description |
+|------|-------------|
+| test_statistics_sane | Basic PMM stats are consistent |
+| test_buddy_stats_operations | alloc_count and free_count track correctly |
+| test_free_counts_sum_correctly | Sum of free_counts[order] × 2^order = total free pages |
+
+#### Stress Tests
+
+| Test | Description |
+|------|-------------|
+| test_no_memory_leak | 500 alloc/free cycles don't leak memory |
+| test_mixed_workload_stress | Complex allocation pattern with proper size tracking |
+
+**Test API:**
+- `pmm_get_buddy_stats()` exposes internal buddy state for testing
+- Tests verify actual behavior (coalescing enables larger allocations), not just page counts
+
 ### FFI Tests (`runtime/src/lib.rs`)
 
 Validates the Rust/C FFI boundary by exercising all FFI functions from the Rust side:
@@ -559,24 +667,31 @@ Use the `print_test_result()` helper to maintain consistent output format.
 
 **Trade-off**: May miss hardware-specific bugs. Real hardware testing should be added in Phase 4.
 
-### Semihosting-Based Test Completion
+### Test Completion and Interactive Shell
 
-**Decision**: `make test` uses ARM semihosting for clean QEMU exit.
+**Behavior**:
+- On test **failure**: Kernel exits via ARM semihosting (`HLT #0xF000`)
+- On test **success**: Kernel continues to interactive shell
 
-**Implementation**:
-- After all tests complete, kernel calls `semihosting_exit()`
-- Uses ARM64 semihosting via `HLT #0xF000` instruction
-- QEMU intercepts the HLT and exits with the specified code
-- Exit code 0 on success, 1 on any test failure
+This design allows two usage modes:
 
-**Benefits**:
-- Clean exit instead of timeout-based termination
-- Exit code reflects actual test status
-- Faster CI runs (no waiting for timeout)
+| Target | Use Case | Behavior |
+|--------|----------|----------|
+| `make test` | CI/CD automation | Timeout-based, parses output for pass/fail |
+| `make shell` | Interactive use | Tests run, then shell is available |
 
-**Note**: Semihosting is only enabled for QEMU builds (`ENABLE_SEMIHOSTING=1`). On real hardware, the HLT instruction would cause a fault, so it's disabled at compile time.
+**`make test` Implementation**:
+1. Runs QEMU with configurable timeout (default 60s)
+2. Captures all output to `build/test-output.log`
+3. Parses output for `[PASS] All test suites passed` or `[FAIL]` markers
+4. Returns exit code 0 on success, 1 on failure
 
-See `docs/ci-cd.md` for full semihosting implementation details.
+**`make shell` Implementation**:
+1. Runs QEMU without timeout
+2. Tests complete and shell becomes active
+3. User interacts with shell, exits via `Ctrl-A X`
+
+**Note**: Semihosting is compiled in for QEMU builds (`ENABLE_SEMIHOSTING=1`). On real hardware, the HLT instruction would cause a fault, but tests only exit via semihosting on failure.
 
 ---
 

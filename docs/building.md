@@ -72,7 +72,8 @@ rustup target list --installed | grep aarch64
 | `make kernel` | Build C kernel only |
 | `make runtime` | Build Rust runtime only |
 | `make run` | Build and run in QEMU |
-| `make test` | Build and run automated tests |
+| `make shell` | Build and run with interactive shell |
+| `make test` | Build and run automated tests (CI mode) |
 | `make debug` | Build and run with GDB server |
 | `make gdb` | Connect GDB to running QEMU |
 | `make clean` | Remove all build artifacts |
@@ -117,14 +118,14 @@ Equivalent to `make kernel-clean && make kernel`.
 ### Run Targets
 
 #### `make run`
-Builds the kernel (if needed) and launches QEMU:
+Builds the kernel (if needed) and launches QEMU. Tests run automatically, then the shell becomes available.
 
 ```bash
 qemu-system-aarch64 \
     -machine virt \
     -cpu cortex-a76 \
     -smp cores=4 \
-    -m 512M \
+    -m 1G \
     -nographic \
     -kernel build/kernel/slmos.elf
 ```
@@ -133,6 +134,23 @@ qemu-system-aarch64 \
 - `Ctrl-A X` - Exit QEMU
 - `Ctrl-A C` - Switch to QEMU monitor
 - `Ctrl-A H` - Show help
+
+#### `make shell`
+Same as `make run`, but explicitly intended for interactive use. After tests complete, the SLM-OS shell is available:
+
+```
+[INFO] Tests complete. Exiting main task...
+[INFO] Shell is now active. Type 'help' for commands.
+slm> help
+Available commands:
+  help     - Show this help message
+  mem      - Show memory statistics
+  tasks    - List all tasks
+  ...
+slm>
+```
+
+Use `Ctrl-A X` to exit QEMU when done.
 
 #### `make debug`
 Starts QEMU with GDB server enabled, waiting for debugger connection:
@@ -147,19 +165,32 @@ qemu-system-aarch64 \
 Run this in one terminal, then `make gdb` in another.
 
 #### `make test`
-Builds the kernel and runs the automated test suite in QEMU:
+Builds the kernel and runs the automated test suite in QEMU with a timeout (default 60 seconds). Designed for CI/CD pipelines.
 
 ```bash
-make test
+make test                    # Default 60s timeout
+make TEST_TIMEOUT=120 test   # Custom timeout
 ```
+
+The test runner:
+1. Launches QEMU and captures output
+2. Parses output for `[PASS]` or `[FAIL]` markers
+3. Times out and kills QEMU after tests complete
+4. Returns exit code 0 on success, 1 on failure
 
 Output on success:
 ```
+Test Results:
+=============
 PASSED - All tests passed
-[INFO] VMM tests passed
-[INFO] Spinlock tests passed
-[INFO] SMP tests passed
-[INFO] Scheduler tests passed
+```
+
+Output on failure:
+```
+Test Results:
+=============
+FAILED - Test failures detected:
+  [FAIL] test_something
 ```
 
 The test runs with a 60-second timeout. Test output is saved to `build/test-output.log`.

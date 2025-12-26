@@ -124,6 +124,19 @@ run: kernel
 		-nographic \
 		-kernel $(KERNEL_ELF)
 
+.PHONY: shell
+shell: kernel
+	@echo "Running in QEMU (interactive shell after tests)..."
+	@echo "Press Ctrl+A then X to exit QEMU"
+	@echo ""
+	$(QEMU) \
+		-machine $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
+		-smp cores=$(QEMU_CORES) \
+		-m $(QEMU_MEMORY) \
+		-nographic \
+		-kernel $(KERNEL_ELF)
+
 .PHONY: debug
 debug: kernel
 	@echo "Starting QEMU with GDB server on port 1234..."
@@ -161,16 +174,14 @@ TEST_TIMEOUT := 60
 test: kernel
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
-	@$(QEMU) \
+	@timeout $(TEST_TIMEOUT) $(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
 		-smp cores=$(QEMU_CORES) \
 		-m $(QEMU_MEMORY) \
 		-nographic \
-		-semihosting \
 		-kernel $(KERNEL_ELF) \
-		> $(TEST_OUTPUT) 2>&1; \
-	QEMU_EXIT=$$?; \
+		> $(TEST_OUTPUT) 2>&1 || true; \
 	echo ""; \
 	echo "Test Results:"; \
 	echo "============="; \
@@ -190,7 +201,7 @@ test: kernel
 		grep -A 20 "KERNEL PANIC" $(TEST_OUTPUT) | head -25; \
 		exit 1; \
 	else \
-		echo "UNKNOWN - Could not determine test status"; \
+		echo "UNKNOWN - Could not determine test status (timeout?)"; \
 		echo "Check $(TEST_OUTPUT) for details"; \
 		exit 1; \
 	fi
@@ -245,6 +256,7 @@ help:
 	@echo ""
 	@echo "Run targets:"
 	@echo "  run            Run kernel in QEMU"
+	@echo "  shell          Run kernel in QEMU with interactive shell"
 	@echo "  debug          Run kernel in QEMU with GDB server (terminal 1)"
 	@echo "  gdb            Connect GDB to running QEMU (terminal 2)"
 	@echo ""

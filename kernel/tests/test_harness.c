@@ -105,6 +105,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();
     total_failures += test_suite_vmm();
+    total_failures += test_suite_pmm();
 
     /* Final summary */
     uart_puts("\n");
@@ -121,12 +122,13 @@ int test_harness_run_all(void)
     }
 
     /*
-     * When running under QEMU with semihosting, exit cleanly.
-     * This allows CI to detect test completion without timeout.
+     * When running under QEMU with semihosting, exit on failure.
+     * On success, return to caller so shell can run interactively.
+     * CI uses the exit code to detect test failures.
      */
-    if (semihosting_available()) {
-        uart_puts("[INFO] Exiting via semihosting...\n");
-        semihosting_exit(total_failures == 0 ? 0 : 1);
+    if (semihosting_available() && total_failures > 0) {
+        uart_puts("[INFO] Exiting via semihosting (test failure)...\n");
+        semihosting_exit(1);
     }
 
     return total_failures;

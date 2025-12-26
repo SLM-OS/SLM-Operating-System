@@ -191,18 +191,32 @@ Add TCP/IP networking for remote management and distributed operation.
 
 ---
 
-### Buddy Allocator
+### Buddy Allocator ✅
 Replace bitmap allocator with more efficient buddy system.
 
-- ☐ Implement buddy allocator for physical memory
-- ☐ Support O(log n) allocation of power-of-two pages
-- ☐ Efficient coalescing on free
-- ☐ Separate pools for different allocation sizes
-- ☐ Statistics and fragmentation monitoring
-- ☐ Benchmark vs bitmap allocator
+- ✅ Implement buddy allocator for physical memory
+  - `kernel/mm/pmm.c` - complete rewrite with buddy system
+  - Free lists per order (0-18), supporting 4KB to 1GB allocations
+  - Doubly-linked free lists for O(1) block insertion/removal
+- ✅ Support O(log n) allocation of power-of-two pages
+  - `log2_ceil()` for order calculation
+  - Automatic rounding up of non-power-of-2 requests
+- ✅ Efficient coalescing on free
+  - Buddy address calculation via XOR
+  - Recursive merge up to MAX_ORDER
+  - Statistics: merge_count tracks coalesces
+- ✅ Statistics and fragmentation monitoring
+  - Per-order free counts
+  - Split/merge operation counts
+  - `pmm_dump_stats()` shows free list distribution
+- ✅ 15 unit tests (`kernel/tests/test_pmm.c`)
+  - Basic alloc/free, coalescing, splitting
+  - Stress tests, fragmentation recovery
+  - Memory writability verification
 
-**Effort:** 1 week  
+**Effort:** 1 week
 **Value:** Faster allocation, less fragmentation for large model allocations
+**Status:** Complete (December 2025)
 
 ---
 

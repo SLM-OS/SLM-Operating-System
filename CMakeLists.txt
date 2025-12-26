@@ -145,6 +145,7 @@ set(TEST_SOURCES
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
     kernel/tests/test_vmm.c
+    kernel/tests/test_pmm.c
 )
 
 # Include directories

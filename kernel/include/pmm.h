@@ -1,7 +1,11 @@
 /*
  * pmm.h - Physical Memory Manager for SLM-OS
  *
- * Bitmap-based physical page allocator.
+ * Buddy allocator for efficient O(log n) allocation of power-of-two page counts.
+ * Automatically coalesces adjacent free blocks to reduce fragmentation.
+ *
+ * Note: Allocations are rounded up to the next power of 2.
+ * For example, requesting 3 pages returns 4 pages (order 2).
  */
 
 #ifndef PMM_H
@@ -37,6 +41,17 @@ struct pmm_stats {
     uintptr_t heap_end;         /* Last allocatable address + 1 */
 };
 
+/* Buddy allocator specific statistics (for testing/debugging) */
+#define PMM_MAX_ORDER   18      /* Maximum order: 2^18 = 262144 pages (1 GB) */
+
+struct pmm_buddy_stats {
+    size_t free_counts[PMM_MAX_ORDER + 1];  /* Free blocks at each order */
+    size_t alloc_count;         /* Total allocation operations */
+    size_t free_count;          /* Total free operations */
+    size_t split_count;         /* Number of block splits */
+    size_t merge_count;         /* Number of block merges (coalesces) */
+};
+
 /*
  * Initialize the physical memory manager.
  *
@@ -56,7 +71,10 @@ void *pmm_alloc_page(void);
  * Allocate contiguous physical pages.
  *
  * @count: Number of contiguous pages to allocate.
+ *         Rounded up to next power of 2 (e.g., 3 -> 4 pages).
  * Returns: Physical address of first page, or 0 on failure.
+ *
+ * Complexity: O(log n) where n is the number of pages.
  */
 void *pmm_alloc_pages(size_t count);
 
@@ -96,5 +114,13 @@ size_t pmm_get_free_pages(void);
  * Get total number of managed pages.
  */
 size_t pmm_get_total_pages(void);
+
+/*
+ * Get buddy allocator specific statistics.
+ * Useful for testing and debugging coalescing behavior.
+ *
+ * @stats: Pointer to buddy stats structure to fill.
+ */
+void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
 
 #endif /* PMM_H */

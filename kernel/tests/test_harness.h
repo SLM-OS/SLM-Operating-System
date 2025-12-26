@@ -52,4 +52,7 @@ int test_suite_shell(void);
 /* VMM/TLB tests */
 int test_suite_vmm(void);
 
+/* PMM buddy allocator tests */
+int test_suite_pmm(void);
+
 #endif /* TEST_HARNESS_H */

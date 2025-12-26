@@ -375,6 +375,7 @@ fn is_initialized() -> bool {
 /// Initialize model memory pools.
 ///
 /// Allocates memory from C PMM and sets up weight and workspace pools.
+/// Each pool is allocated separately to work efficiently with buddy allocator.
 ///
 /// # Arguments
 /// * `weight_mb` - Size of weight pool in megabytes (must be multiple of 2)
@@ -391,23 +392,23 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
     let weight_blocks = weight_mb / 2;
     let workspace_blocks = workspace_mb / 2;
 
-    // Allocate extra pages to ensure we can find a 2MB-aligned region
-    // We need: (weight + workspace) MB + up to 2MB extra for alignment
-    // 2MB = 512 pages, so allocate 511 extra pages for worst-case alignment
-    let total_mb = weight_mb + workspace_mb;
-    let total_pages = total_mb * 512 + 511;
-
-    // Allocate from C PMM
-    let base = kernel_ffi::alloc_pages(total_pages)
+    // Allocate weight pool (power-of-2 pages work well with buddy allocator)
+    // 256 MB = 65536 pages = order 16, exactly power of 2
+    let weight_pages = weight_mb * 256; // MB to pages (4KB each)
+    let weight_base_ptr = kernel_ffi::alloc_pages(weight_pages)
         .map_err(|_| AllocError::PmmFailed)?;
+    let weight_base = weight_base_ptr.as_ptr() as usize;
 
-    let raw_addr = base.as_ptr() as usize;
-
-    // Align up to 2MB boundary
-    let aligned_addr = (raw_addr + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1);
-
-    let weight_base = aligned_addr;
-    let workspace_base = aligned_addr + weight_blocks * BLOCK_SIZE;
+    // Allocate workspace pool separately
+    // 128 MB = 32768 pages = order 15, exactly power of 2
+    let workspace_pages = workspace_mb * 256; // MB to pages (4KB each)
+    let workspace_base_ptr = kernel_ffi::alloc_pages(workspace_pages)
+        .map_err(|_| {
+            // Free weight pool on failure
+            unsafe { kernel_ffi::free_pages(weight_base_ptr, weight_pages); }
+            AllocError::PmmFailed
+        })?;
+    let workspace_base = workspace_base_ptr.as_ptr() as usize;
 
     lock_acquire();
     // SAFETY: We hold the spinlock, so exclusive access is guaranteed.
