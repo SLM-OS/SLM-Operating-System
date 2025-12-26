@@ -54,6 +54,24 @@
 #define MSG_WAIT_FOREVER   -1       /* Block indefinitely */
 
 /*
+ * Priority levels for priority-based message queues.
+ * Higher numbers = higher priority.
+ * MSG_PRIO_NORMAL is the default for backward compatibility.
+ */
+#define MSG_PRIO_LOW        0       /* Background/batch processing */
+#define MSG_PRIO_NORMAL     1       /* Default priority */
+#define MSG_PRIO_HIGH       2       /* Time-sensitive operations */
+#define MSG_PRIO_URGENT     3       /* Critical/interrupt-level */
+#define MSG_PRIO_COUNT      4       /* Number of priority levels */
+
+/*
+ * Starvation prevention configuration.
+ * After every MSG_STARVATION_THRESHOLD receives from higher priority levels,
+ * the next receive will check lower priorities to prevent starvation.
+ */
+#define MSG_STARVATION_THRESHOLD  8
+
+/*
  * Default message structure (64 bytes).
  *
  * This is the recommended format for SLM-OS messages, but queues can
@@ -81,27 +99,49 @@ struct slm_message {
 };
 
 /*
+ * Per-priority buffer state within a message queue.
+ * Each priority level has its own ring buffer section.
+ */
+struct prio_buffer {
+    size_t          head;           /* Next write position (producer) */
+    size_t          tail;           /* Next read position (consumer) */
+    size_t          count;          /* Messages at this priority level */
+};
+
+/*
  * Message queue structure.
  *
- * The ring buffer uses head/tail indices with wrap-around.
- * Buffer layout: capacity slots of msg_size bytes each.
+ * Supports priority-based message ordering with separate per-priority
+ * ring buffers. Each priority level gets capacity/MSG_PRIO_COUNT slots.
+ *
+ * Messages sent via msg_send() use MSG_PRIO_NORMAL for backward compatibility.
+ * Messages sent via msg_send_priority() can specify any priority level.
+ *
+ * Receives always return the highest-priority available message, with
+ * starvation prevention for lower-priority messages.
  */
 struct msg_queue {
     uint32_t        id;             /* Unique queue identifier */
     size_t          msg_size;       /* Size of each message slot (bytes) */
-    size_t          capacity;       /* Number of message slots */
-    size_t          head;           /* Next write position (producer) */
-    size_t          tail;           /* Next read position (consumer) */
-    size_t          count;          /* Messages currently in queue */
-    uint8_t        *buffer;         /* Ring buffer: capacity * msg_size bytes */
+    size_t          capacity;       /* Number of slots per priority level */
+    size_t          total_capacity; /* Total capacity (capacity * MSG_PRIO_COUNT) */
+    size_t          total_count;    /* Total messages across all priorities */
+    uint8_t        *buffer;         /* Ring buffer: total_capacity * msg_size bytes */
     spinlock_t      lock;           /* Protects queue state */
     struct task    *send_waiters;   /* Tasks blocked on send (queue full) */
     struct task    *recv_waiters;   /* Tasks blocked on recv (queue empty) */
+
+    /* Per-priority state */
+    struct prio_buffer prio[MSG_PRIO_COUNT];
+
+    /* Starvation prevention */
+    uint32_t        high_prio_recv_count;   /* Consecutive high-prio receives */
 
     /* Statistics */
     uint64_t        msgs_sent;      /* Total messages successfully sent */
     uint64_t        msgs_recv;      /* Total messages successfully received */
     size_t          high_water;     /* Peak queue depth reached */
+    uint64_t        prio_msgs_sent[MSG_PRIO_COUNT];  /* Per-priority send counts */
 };
 
 /*
@@ -139,7 +179,23 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size);
 int msg_queue_destroy(struct msg_queue *queue);
 
 /*
- * Send a message to a queue.
+ * Send a message to a queue with specified priority.
+ *
+ * @queue:      Target queue
+ * @msg:        Message data (must be queue->msg_size bytes)
+ * @priority:   Message priority (MSG_PRIO_LOW to MSG_PRIO_URGENT)
+ * @timeout_ms: Timeout in milliseconds (MSG_NO_WAIT, MSG_WAIT_FOREVER, or >0)
+ *
+ * Returns: IPC_OK on success, IPC_ERR_FULL (non-blocking), IPC_ERR_TIMEOUT.
+ *
+ * Higher priority messages are received before lower priority messages.
+ * The message is copied into the queue buffer.
+ */
+int msg_send_priority(struct msg_queue *queue, const void *msg,
+                      int priority, int timeout_ms);
+
+/*
+ * Send a message to a queue with normal priority (backward compatible).
  *
  * @queue:      Target queue
  * @msg:        Message data (must be queue->msg_size bytes)
@@ -147,7 +203,7 @@ int msg_queue_destroy(struct msg_queue *queue);
  *
  * Returns: IPC_OK on success, IPC_ERR_FULL (non-blocking), IPC_ERR_TIMEOUT.
  *
- * The message is copied into the queue buffer.
+ * Equivalent to msg_send_priority(queue, msg, MSG_PRIO_NORMAL, timeout_ms).
  */
 int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms);
 

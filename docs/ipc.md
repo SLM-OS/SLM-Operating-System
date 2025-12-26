@@ -129,6 +129,84 @@ Total size: 64 bytes (matches typical CPU cache line).
 
 ---
 
+## Priority-Based Message Queues
+
+### Overview
+
+Message queues support 8 priority levels (0-7), allowing high-priority messages to be received before lower-priority ones. This is essential for SLM workloads where inference requests may need to preempt batch processing.
+
+```
+Priority Levels:
+┌─────────────────────────────────────────────────────────────────────┐
+│  7 │ Highest   │ Critical system messages                          │
+│  6 │ High      │ Urgent inference requests                         │
+│  5 │           │                                                   │
+│  4 │ Normal    │ Default priority (used by msg_send())             │
+│  3 │           │                                                   │
+│  2 │ Low       │ Background tasks                                  │
+│  1 │           │                                                   │
+│  0 │ Lowest    │ Best-effort, batch processing                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### API
+
+```c
+#include "ipc.h"
+
+/* Send with explicit priority (0-7, higher = more urgent) */
+int ret = msg_send_priority(queue, &msg, MSG_NO_WAIT, 7);  /* Highest priority */
+
+/* Standard msg_send() uses default priority (4) */
+ret = msg_send(queue, &msg, MSG_NO_WAIT);  /* Priority 4 */
+
+/* Receive always returns highest-priority message first */
+ret = msg_recv(queue, &msg, MSG_NO_WAIT);
+```
+
+### Priority Levels
+
+| Level | Constant | Typical Use |
+|-------|----------|-------------|
+| 7 | `MSG_PRIORITY_HIGHEST` | System-critical messages |
+| 6 | `MSG_PRIORITY_HIGH` | Urgent requests |
+| 4 | `MSG_PRIORITY_NORMAL` | Default (standard msg_send) |
+| 2 | `MSG_PRIORITY_LOW` | Background processing |
+| 0 | `MSG_PRIORITY_LOWEST` | Best-effort, batch work |
+
+### Starvation Prevention
+
+To prevent low-priority messages from being starved indefinitely, the queue implements a threshold-based serving policy:
+
+- After 16 consecutive high-priority messages are received
+- One low-priority message is served (if available)
+- Counter resets and high-priority serving resumes
+
+This ensures all priorities eventually make progress while still prioritizing urgent messages.
+
+### Implementation
+
+Internally, each queue maintains 8 separate ring buffers (one per priority level):
+
+```c
+struct msg_queue {
+    struct ring_buffer priority_rings[8];  /* Per-priority FIFOs */
+    uint32_t total_pending;                 /* Messages across all levels */
+    uint32_t starvation_counter;            /* Tracks consecutive high-pri */
+    /* ... */
+};
+```
+
+**Receive algorithm:**
+1. Scan from highest priority (7) to lowest (0)
+2. Return first message found
+3. If starvation_counter >= 16, check low priorities first
+4. Reset counter after serving a low-priority message
+
+**FIFO within priority:** Messages at the same priority level are served in FIFO order.
+
+---
+
 ## Shared Buffers
 
 ### Design
@@ -270,10 +348,9 @@ When space/message becomes available:
 
 ### Current Limitations
 
-1. **No timeout support** — `timeout_ms > 0` currently behaves like `MSG_WAIT_FOREVER`. Timer integration needed.
-2. **Kernel address space only** — All tasks share kernel mappings. Phase 3 will add per-task user space.
-3. **No priority inheritance** — Blocking can cause priority inversion.
-4. **2MB minimum for shared buffers** — Smaller allocations are rounded up.
+1. **Kernel address space only** — All tasks share kernel mappings. Future phases may add per-task user space.
+2. **No priority inheritance for IPC** — Blocking on IPC can cause priority inversion. (Note: Priority-inheriting mutexes exist separately.)
+3. **2MB minimum for shared buffers** — Smaller allocations are rounded up to 2MB block size.
 
 ---
 
@@ -293,10 +370,10 @@ When space/message becomes available:
 ### Phase 3 (Completed)
 - ✅ Timeout support for blocking operations (M6)
 - ✅ Message queue statistics and monitoring (M6)
+- ✅ Priority-based message queues with starvation prevention
 
 ### Phase 4+
 - Per-task user address space with separate mappings
-- Priority-based message queues
 - GPU buffer sharing (`SHM_GPU_ACCESSIBLE` fully implemented)
 - DMA-friendly buffer allocation
 

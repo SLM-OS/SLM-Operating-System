@@ -299,6 +299,96 @@ void vmm_invalidate_tlb_all(void)
 }
 
 /*
+ * Invalidate TLB for a virtual address range.
+ *
+ * Strategy: For small ranges, invalidate each page individually.
+ * For large ranges (> 32 pages), do a full TLB flush instead since
+ * the overhead of many individual invalidations outweighs a full flush.
+ */
+void vmm_invalidate_tlb_range(uint64_t start, uint64_t end)
+{
+    /* Align start down, end up to page boundaries */
+    start = start & ~(PAGE_SIZE - 1);
+    end = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    /* Calculate number of pages */
+    uint64_t num_pages = (end - start) / PAGE_SIZE;
+
+    /*
+     * Threshold for switching to full flush.
+     * 32 pages is a reasonable heuristic - individual TLBI instructions
+     * are fast, but 32+ iterations with barriers adds latency.
+     */
+    if (num_pages > 32 || end <= start) {
+        vmm_invalidate_tlb_all();
+        return;
+    }
+
+    /* Invalidate each page in the range */
+    __asm__ volatile("dsb ishst" ::: "memory");
+
+    for (uint64_t va = start; va < end; va += PAGE_SIZE) {
+        __asm__ volatile(
+            "tlbi vaae1is, %0\n"
+            :: "r"(va >> 12) : "memory"
+        );
+    }
+
+    __asm__ volatile(
+        "dsb ish\n"
+        "isb\n"
+        ::: "memory"
+    );
+}
+
+/*
+ * Invalidate TLB for a specific address and ASID.
+ *
+ * Uses TLBI VAE1IS which takes the VA and ASID combined:
+ * Xt[63:48] = ASID, Xt[43:0] = VA[55:12] (bits [47:44] are RES0)
+ */
+void vmm_invalidate_tlb_asid(uint64_t virt, uint16_t asid)
+{
+    /*
+     * Build the operand for TLBI VAE1IS:
+     * - Bits [63:48]: ASID (16 bits)
+     * - Bits [43:0]:  VA[55:12] shifted right by 12
+     */
+    uint64_t operand = ((uint64_t)asid << 48) | (virt >> 12);
+
+    __asm__ volatile(
+        "dsb ishst\n"
+        "tlbi vae1is, %0\n"
+        "dsb ish\n"
+        "isb\n"
+        :: "r"(operand) : "memory"
+    );
+}
+
+/*
+ * Invalidate all TLB entries for a specific ASID.
+ *
+ * Uses TLBI ASIDE1IS which takes ASID in bits [63:48].
+ */
+void vmm_invalidate_tlb_asid_all(uint16_t asid)
+{
+    /*
+     * Build the operand for TLBI ASIDE1IS:
+     * - Bits [63:48]: ASID (16 bits)
+     * - Other bits: ignored
+     */
+    uint64_t operand = (uint64_t)asid << 48;
+
+    __asm__ volatile(
+        "dsb ishst\n"
+        "tlbi aside1is, %0\n"
+        "dsb ish\n"
+        "isb\n"
+        :: "r"(operand) : "memory"
+    );
+}
+
+/*
  * Get current TTBR1_EL1 value.
  */
 uint64_t vmm_get_ttbr1(void)
@@ -613,4 +703,62 @@ void vmm_init(void)
 
     /* Run validation tests */
     vmm_run_tests();
+}
+
+/*
+ * ==========================================================================
+ * Test Helpers (for unit tests only)
+ * ==========================================================================
+ *
+ * These functions expose low-level page table manipulation for testing
+ * TLB invalidation behavior. They should NOT be used in production code.
+ */
+
+/*
+ * Get the L2 page table entry for a virtual address.
+ * Returns the raw PTE value, or 0 if no L2 table exists for this VA.
+ */
+uint64_t vmm_test_get_l2_entry(uint64_t virt)
+{
+    uint64_t *l2 = get_l2_table(virt);
+    if (!l2) {
+        return 0;
+    }
+    return l2[L2_INDEX(virt)];
+}
+
+/*
+ * Set the L2 page table entry WITHOUT invalidating TLB.
+ *
+ * This is intentionally dangerous - it creates an inconsistency between
+ * the page tables and TLB. Use only for testing that TLB invalidation
+ * is actually necessary and working.
+ *
+ * Returns 0 on success, -1 if no L2 table exists for this VA.
+ */
+int vmm_test_set_l2_entry_no_invalidate(uint64_t virt, uint64_t pte)
+{
+    uint64_t *l2 = get_l2_table(virt);
+    if (!l2) {
+        return -1;
+    }
+
+    /* Ensure prior stores are visible before PTE update */
+    __asm__ volatile("dsb ishst" ::: "memory");
+
+    l2[L2_INDEX(virt)] = pte;
+
+    /* Ensure PTE update is visible (but do NOT invalidate TLB) */
+    __asm__ volatile("dsb ish" ::: "memory");
+
+    return 0;
+}
+
+/*
+ * Build a block descriptor for testing.
+ * Wrapper around internal make_block_desc for test use.
+ */
+uint64_t vmm_test_make_block_desc(uint64_t phys, uint32_t flags)
+{
+    return make_block_desc(phys, flags);
 }

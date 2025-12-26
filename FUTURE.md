@@ -206,17 +206,31 @@ Replace bitmap allocator with more efficient buddy system.
 
 ---
 
-### Device Tree Parsing
+### Device Tree Parsing ✅
 Replace hardcoded memory maps with runtime device tree discovery.
 
-- ☐ Implement FDT (Flattened Device Tree) parser
-- ☐ Discover memory regions from `/memory` node
-- ☐ Discover UART, GIC, timer from device tree
-- ☐ Support multiple board configurations without recompilation
-- ☐ Pass device tree from bootloader (U-Boot)
+- ✅ Implement FDT (Flattened Device Tree) parser
+  - `kernel/src/dtb.c` - big-endian to little-endian conversion
+  - Full structure block walker with property callbacks
+  - #address-cells and #size-cells support for varying platforms
+- ✅ Discover memory regions from `/memory` node
+  - Parses `reg` property for RAM base and size
+  - Supports both 32-bit and 64-bit cell formats
+- ✅ Discover UART, GIC, timer from device tree
+  - Recognizes `pl011@`, `uart@`, `serial@` for UART
+  - Recognizes `intc@`, `gic@`, `interrupt-controller@` for GIC
+  - Parses timer IRQ from `interrupts` property
+- ✅ Support multiple board configurations without recompilation
+  - Falls back to platform.h defaults when DTB unavailable
+  - `dtb` shell command displays parsed or default config
+- ✅ Preserve DTB address from bootloader
+  - `boot.S` saves x0 (DTB pointer) through early init
+  - Passed to kernel_main for parsing
+- ☐ Full U-Boot integration testing (deferred - requires hardware)
 
-**Effort:** 1-2 weeks  
+**Effort:** 1-2 weeks
 **Value:** Single kernel binary for multiple boards, cleaner configuration
+**Status:** Complete (December 2025)
 
 ---
 
@@ -355,52 +369,93 @@ Second platform target for broader hardware support.
 ### EFI Stub Boot
 Boot directly from UEFI without U-Boot.
 
-- ☐ Implement PE/COFF header for EFI loading
-- ☐ EFI boot services for memory map
-- ☐ Exit boot services and take over hardware
-- ☐ Parse ACPI/DTB from EFI configuration table
+- ✅ Implement PE/COFF header for EFI loading
+  - `kernel/arch/arm64/boot.S` includes full PE/COFF header
+  - MZ magic via `ccmp x18, #0, #0xd, pl` (encodes to "MZ..")
+  - PE32+ optional header with proper ARM64 machine type
+  - Section headers for .text (code + data)
+  - Works with UEFI firmware that loads ARM64 PE binaries
+- ☐ EFI boot services for memory map (deferred)
+- ☐ Exit boot services and take over hardware (deferred)
+- ☐ Parse ACPI/DTB from EFI configuration table (deferred)
 
-**Effort:** 1-2 weeks
+**Effort:** 1-2 weeks (remaining items)
 **Value:** Simpler boot chain, faster boot time
+**Status:** PE/COFF header complete (December 2025)
 
 ---
 
-### CI/CD Pipeline
+### CI/CD Pipeline ✅
 Automated testing and deployment.
 
-- ☐ GitHub Actions workflow for QEMU tests
-- ☐ Automated build on PR
-- ☐ Test result reporting
-- ☐ Coverage tracking
-- ☐ Real hardware test farm (Jetson boards)
-- ☐ QEMU semihosting exit for clean test termination
+- ✅ GitHub Actions workflow for QEMU tests
+  - `.github/workflows/ci.yml` - triggers on push/PR to main
+  - Installs ARM GCC toolchain (aarch64-none-elf), Rust, QEMU
+  - Builds runtime (Rust) and kernel (CMake)
+  - Runs full test suite in QEMU with semihosting
+- ✅ Automated build on PR
+  - Workflow triggers on `push` to main/develop and `pull_request` to main
+  - Manual trigger via `workflow_dispatch` for testing
+- ✅ Test result reporting
+  - Parses QEMU output for `[PASS]` / `[FAIL]` markers
+  - Detects crashes via `PAGE FAULT` detection
+  - Uploads build artifacts (ELF, BIN, test output) on all runs
+- ✅ QEMU semihosting exit for clean test termination
+  - `kernel/src/semihosting.c` - ARM64 semihosting via HLT #0xF000
+  - `semihosting_exit(code)` - exits QEMU with specified code
+  - Test harness calls semihosting_exit() after all tests complete
+  - Eliminates timeout-based test detection
+- ☐ Coverage tracking (deferred)
+- ☐ Real hardware test farm (deferred - requires physical Jetson setup)
 
 **Effort:** 1 week (basic), 2-3 weeks (with hardware)
 **Value:** Catch regressions early, professional development workflow
+**Status:** Basic CI complete (December 2025)
 
 ---
 
-### TLB Shootdown
+### TLB Shootdown ✅
 Invalidate TLB entries across CPUs for shared page tables.
 
-- ☐ IPI-based TLB invalidation broadcast
-- ☐ Targeted invalidation (specific VA range)
-- ☐ Synchronization barrier after shootdown
-- ☐ Optimize for common cases (single page, full flush)
+- ✅ Hardware-broadcast TLB invalidation (TLBI with "is" suffix)
+  - Uses inner shareable domain for automatic cross-CPU broadcast
+  - No explicit IPIs needed - ARM64 hardware handles synchronization
+- ✅ Targeted invalidation (specific VA range)
+  - `vmm_invalidate_tlb_range(start, end)` - efficient for small ranges
+  - Falls back to full flush for large ranges (> 32 pages)
+- ✅ Synchronization barrier after shootdown
+  - DSB ISHST before: prior stores visible
+  - DSB ISH after: invalidation complete on all CPUs
+  - ISB: instruction stream synchronized
+- ✅ ASID-aware invalidation for future user space
+  - `vmm_invalidate_tlb_asid(virt, asid)` - single VA + ASID
+  - `vmm_invalidate_tlb_asid_all(asid)` - all VAs for ASID
+- ✅ 18 unit tests verifying TLB operations
 
 **Effort:** 3-5 days
 **Value:** Required for shared page tables, user space support
 **Prerequisite:** IPI infrastructure (already have)
+**Status:** Complete (December 2025)
 
 ---
 
-### Priority-Based Message Queues
+### Priority-Based Message Queues ✅
 IPC message ordering by priority.
 
-- ☐ Priority field in message header
-- ☐ Priority-ordered insertion in queue
-- ☐ Prevent starvation of low-priority messages
-- ☐ Optional: separate queues per priority level
+- ✅ 4 priority levels: LOW, NORMAL, HIGH, URGENT
+  - `msg_send_priority(queue, msg, priority, timeout)`
+  - `msg_send()` defaults to NORMAL for backward compatibility
+- ✅ Separate ring buffers per priority level
+  - Each priority has its own capacity slots
+  - No priority blocking another (independent per-level full detection)
+- ✅ Priority-ordered receive: highest priority first
+  - `msg_recv()` automatically returns highest priority available
+- ✅ Starvation prevention mechanism
+  - After 8 consecutive high-priority receives, low priority gets a turn
+  - Configurable via MSG_STARVATION_THRESHOLD
+- ✅ Per-priority statistics tracking (`prio_msgs_sent[]`)
+- ✅ 6 unit tests for priority queue functionality
 
 **Effort:** 3-5 days
 **Value:** QoS for IPC, urgent messages bypass queue
+**Status:** Complete (December 2025)

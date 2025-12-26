@@ -139,20 +139,43 @@ The Makefile checks for `[FAIL]` first (any failure = overall failure), then che
 
 ## Current Test Suites
 
-### VMM Tests (`kernel/src/vmm.c`)
+### VMM Tests (`kernel/tests/test_vmm.c`)
 
-Validates the Virtual Memory Manager after MMU is enabled:
+Validates the Virtual Memory Manager including TLB invalidation. Tests run via Unity framework (10 tests total).
+
+#### Page Table Verification
 
 | Test | Description |
 |------|-------------|
-| virt_to_phys (identity) | Translate identity-mapped RAM address |
-| virt_to_phys (TTBR1) | Translate kernel high address |
-| is_mapped (true) | Verify mapped address returns true |
-| is_mapped (false) | Verify unmapped address returns false |
-| TTBR1 read/write | Write via high VA, read via identity VA |
-| Dynamic map/unmap | Map new block, read/write, unmap |
+| test_virt_to_phys_accuracy | vmm_virt_to_phys() returns correct physical address |
+| test_va_pa_coherency | Write via VA is visible when read via PA |
 
-Tests run automatically during `vmm_init()` after MMU is enabled.
+#### TLB Invalidation Correctness (Functional Tests)
+
+These tests actually remap pages and verify the new mapping is used after TLB invalidation:
+
+| Test | Description |
+|------|-------------|
+| test_remap_requires_invalidation | Remap VA→PA2, invalidate TLB, verify PA2 data read |
+| test_remap_with_full_flush | Same as above using vmm_invalidate_tlb_all() |
+| test_remap_with_range_invalidation | Same as above using vmm_invalidate_tlb_range() |
+| test_sequential_remaps | Remap VA to PA1→PA2→PA3→PA1, verify each |
+| test_rapid_remap_stress | 50 rapid remap cycles with verification |
+
+#### ASID and Multi-CPU Tests
+
+| Test | Description |
+|------|-------------|
+| test_asid_invalidation_executes | ASID-specific TLB invalidation executes |
+| test_asid_all_invalidation_executes | Full ASID flush executes |
+| test_tlb_broadcast_all_cpus | TLB operations broadcast to all CPUs |
+
+**Test Notes:**
+- Uses test helper functions to manipulate page tables without auto-TLB invalidation
+- Proves TLB invalidation is actually necessary and working
+- Not just smoke tests — actual page remapping verified
+
+Early VMM validation tests also run during `vmm_init()` after MMU is enabled.
 
 ### Spinlock Tests (`kernel/src/smp.c`)
 
@@ -276,7 +299,9 @@ Validates the priority-inheriting mutex implementation. Tests run via Unity fram
 
 ### IPC Tests (`kernel/tests/test_ipc.c`)
 
-Validates message queues and shared buffers. Tests run via Unity framework (13 tests total).
+Validates message queues, shared buffers, and priority-based messaging. Tests run via Unity framework (17 tests total).
+
+#### Basic Queue Operations
 
 | Test | Description |
 |------|-------------|
@@ -284,15 +309,46 @@ Validates message queues and shared buffers. Tests run via Unity framework (13 t
 | test_queue_nonblocking_send_recv | Send message, receive and verify contents |
 | test_queue_lookup_by_id | Find queue by ID |
 | test_recv_empty_queue_nonblocking | Receive on empty queue fails |
+
+#### Shared Buffer Tests
+
+| Test | Description |
+|------|-------------|
 | test_buffer_create_destroy | Create shared buffer, destroy and verify lookup returns NULL |
 | test_buffer_map_unmap | Map buffer, write/read test pattern, unmap |
 | test_buffer_lookup_by_id | Find buffer by ID |
+
+#### Timeout and Blocking Tests
+
+| Test | Description |
+|------|-------------|
 | test_recv_timeout | Receive on empty queue times out correctly |
 | test_send_timeout_full_queue | Send on full queue times out correctly |
+
+#### Statistics and Stress Tests
+
+| Test | Description |
+|------|-------------|
 | test_no_memory_leak | Create/destroy IPC objects, verify memory reclaimed |
 | test_queue_statistics | Verify per-queue stats (sent, recv, high_water) |
 | test_global_ipc_statistics | Verify global IPC stats tracking |
 | test_queue_stress | High-throughput send/recv stress test |
+
+#### Priority-Based Message Queue Tests
+
+These tests validate the priority queue implementation with 8 priority levels (0=lowest, 7=highest) and starvation prevention.
+
+| Test | Description |
+|------|-------------|
+| test_priority_fifo_within_level | Messages at same priority level are received in FIFO order |
+| test_priority_interleaved_operations | High-priority messages inserted between lows are received in correct order |
+| test_priority_skip_empty_levels | Higher priority levels skip empty lower levels correctly |
+| test_starvation_threshold_boundary | After 16 high-priority messages, one low-priority is served to prevent starvation |
+
+**Test Notes:**
+- Priority tests use `msg_send_priority()` API with explicit priority levels
+- FIFO test verifies ordering by encoding sequence numbers in messages
+- Starvation test verifies the threshold (16) by counting dequeue order
 
 ### Model Memory Tests (`kernel/tests/test_model_mem.c`)
 
@@ -455,7 +511,7 @@ Use the `print_test_result()` helper to maintain consistent output format.
 
 ### Phase 2: Unity Test Framework
 
-- **Status**: Implemented (December 2025)
+- **Status**: Complete (December 2025)
 - Unity test framework added to `kernel/tests/`
 - Test suites separated into individual files
 - Centralized test harness runs all suites
@@ -470,11 +526,12 @@ Use the `print_test_result()` helper to maintain consistent output format.
 
 ### Phase 4: CI/CD Integration
 
-- **Trigger**: When project is shared or needs automated regression testing
-- GitHub Actions or similar CI platform
-- Run tests on every commit/PR
-- Block merges on test failure
-- Add hardware-specific test configurations (QEMU variants, real hardware)
+- **Status**: Complete (December 2025)
+- GitHub Actions workflow (`.github/workflows/ci.yml`)
+- Runs on every push to main/develop and all PRs
+- Uses ARM semihosting for clean QEMU exit
+- Uploads build artifacts (kernel ELF, test output)
+- See `docs/ci-cd.md` for full documentation
 
 ---
 
@@ -502,16 +559,24 @@ Use the `print_test_result()` helper to maintain consistent output format.
 
 **Trade-off**: May miss hardware-specific bugs. Real hardware testing should be added in Phase 4.
 
-### Timeout-Based Test Completion
+### Semihosting-Based Test Completion
 
-**Decision**: `make test` uses a fixed timeout to terminate QEMU.
+**Decision**: `make test` uses ARM semihosting for clean QEMU exit.
 
-**Rationale**:
-- Kernel doesn't have a "shutdown" mechanism yet
-- Simple and reliable
-- 60 seconds allows full scheduler test suite to complete
+**Implementation**:
+- After all tests complete, kernel calls `semihosting_exit()`
+- Uses ARM64 semihosting via `HLT #0xF000` instruction
+- QEMU intercepts the HLT and exits with the specified code
+- Exit code 0 on success, 1 on any test failure
 
-**Future**: Add QEMU semihosting exit or serial command to cleanly terminate tests.
+**Benefits**:
+- Clean exit instead of timeout-based termination
+- Exit code reflects actual test status
+- Faster CI runs (no waiting for timeout)
+
+**Note**: Semihosting is only enabled for QEMU builds (`ENABLE_SEMIHOSTING=1`). On real hardware, the HLT instruction would cause a fault, so it's disabled at compile time.
+
+See `docs/ci-cd.md` for full semihosting implementation details.
 
 ---
 

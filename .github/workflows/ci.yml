@@ -1,0 +1,99 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install ARM GCC Toolchain
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+        # Install the bare-metal toolchain
+        wget -q https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz
+        sudo tar -xf arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz -C /opt
+        echo "/opt/arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-elf/bin" >> $GITHUB_PATH
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get install -y qemu-system-arm
+
+    - name: Install Rust
+      uses: dtolnay/rust-action@stable
+      with:
+        targets: aarch64-unknown-none
+
+    - name: Verify toolchain installation
+      run: |
+        aarch64-none-elf-gcc --version
+        qemu-system-aarch64 --version
+        rustc --version
+        cargo --version
+        rustup target list --installed
+
+    - name: Build Runtime (Rust)
+      working-directory: runtime
+      run: cargo build
+
+    - name: Build Kernel
+      run: |
+        cmake -B build \
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DPLATFORM=QEMU_VIRT
+        cmake --build build
+
+    - name: Run Tests in QEMU
+      run: |
+        # Run QEMU with semihosting - kernel will exit cleanly when tests complete
+        qemu-system-aarch64 \
+          -M virt \
+          -cpu max \
+          -smp 4 \
+          -m 1G \
+          -nographic \
+          -semihosting \
+          -kernel build/slmos.elf \
+          2>&1 | tee test_output.txt
+        QEMU_EXIT=$?
+
+        echo "QEMU exit code: $QEMU_EXIT"
+
+        # Check output for test results
+        if grep -q "\[PASS\] All test suites passed" test_output.txt; then
+          echo "All tests passed!"
+          exit 0
+        elif grep -q "PAGE FAULT" test_output.txt; then
+          echo "ERROR: Kernel crashed with page fault"
+          cat test_output.txt
+          exit 1
+        elif grep -q "\[FAIL\]" test_output.txt; then
+          echo "ERROR: Some tests failed"
+          cat test_output.txt
+          exit 1
+        else
+          echo "WARNING: Could not determine test status from output"
+          cat test_output.txt
+          exit 1
+        fi
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: kernel-build
+        path: |
+          build/slmos.elf
+          build/slmos.bin
+          test_output.txt
+        retention-days: 7

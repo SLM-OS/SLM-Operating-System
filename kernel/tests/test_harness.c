@@ -6,6 +6,7 @@
 
 #include "test_harness.h"
 #include "../include/uart.h"
+#include "../include/semihosting.h"
 
 /* ============================================================================
  * Unity Output Functions
@@ -103,6 +104,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_component();
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();
+    total_failures += test_suite_vmm();
 
     /* Final summary */
     uart_puts("\n");
@@ -116,6 +118,15 @@ int test_harness_run_all(void)
         uart_puts("[FAIL] ");
         unity_output_number(total_failures);
         uart_puts(" total failure(s)\n");
+    }
+
+    /*
+     * When running under QEMU with semihosting, exit cleanly.
+     * This allows CI to detect test completion without timeout.
+     */
+    if (semihosting_available()) {
+        uart_puts("[INFO] Exiting via semihosting...\n");
+        semihosting_exit(total_failures == 0 ? 0 : 1);
     }
 
     return total_failures;

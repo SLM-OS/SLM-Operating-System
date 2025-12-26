@@ -37,6 +37,11 @@ set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO")
 # Add platform define
 add_compile_definitions(PLATFORM_${PLATFORM}=1)
 
+# Enable semihosting for QEMU (used for clean test exit)
+if(PLATFORM STREQUAL "QEMU_VIRT")
+    add_compile_definitions(ENABLE_SEMIHOSTING=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-jetson.ld)
@@ -115,6 +120,9 @@ set(KERNEL_SOURCES
     kernel/src/component.c
     kernel/src/slm_ffi.c
 
+    # Semihosting (for QEMU test exit)
+    kernel/src/semihosting.c
+
     # ==========================================================================
     # GPU Integration
     # ==========================================================================
@@ -136,6 +144,7 @@ set(TEST_SOURCES
     kernel/tests/test_component.c
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
+    kernel/tests/test_vmm.c
 )
 
 # Include directories

@@ -159,8 +159,12 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
     }
     ipc_memset(queue, 0, PAGE_SIZE);
 
-    /* Calculate buffer size and allocate */
-    size_t buffer_size = capacity * msg_size;
+    /*
+     * Calculate buffer size for all priority levels.
+     * Each priority level gets 'capacity' slots.
+     */
+    size_t total_capacity = capacity * MSG_PRIO_COUNT;
+    size_t buffer_size = total_capacity * msg_size;
     size_t pages_needed = (buffer_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
     queue->buffer = pmm_alloc_pages(pages_needed);
@@ -176,16 +180,28 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
     spin_init(&queue->lock);
     queue->msg_size = msg_size;
     queue->capacity = capacity;
-    queue->head = 0;
-    queue->tail = 0;
-    queue->count = 0;
+    queue->total_capacity = total_capacity;
+    queue->total_count = 0;
     queue->send_waiters = NULL;
     queue->recv_waiters = NULL;
+
+    /* Initialize per-priority state */
+    for (int p = 0; p < MSG_PRIO_COUNT; p++) {
+        queue->prio[p].head = 0;
+        queue->prio[p].tail = 0;
+        queue->prio[p].count = 0;
+    }
+
+    /* Initialize starvation prevention */
+    queue->high_prio_recv_count = 0;
 
     /* Initialize statistics */
     queue->msgs_sent = 0;
     queue->msgs_recv = 0;
     queue->high_water = 0;
+    for (int p = 0; p < MSG_PRIO_COUNT; p++) {
+        queue->prio_msgs_sent[p] = 0;
+    }
 
     /* Register in global table */
     irq_flags_t flags = spin_lock_irqsave(&ipc_state.lock);
@@ -203,7 +219,7 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
 
     spin_unlock_irqrestore(&ipc_state.lock, flags);
 
-    DEBUG_PRINT("Created message queue %u (capacity=%zu, msg_size=%zu)",
+    DEBUG_PRINT("Created message queue %u (capacity=%zu per-prio, msg_size=%zu)",
                 queue->id, capacity, msg_size);
 
     return queue;
@@ -237,7 +253,7 @@ int msg_queue_destroy(struct msg_queue *queue)
     spin_unlock_irqrestore(&ipc_state.lock, flags);
 
     /* Free buffer and queue structure */
-    size_t buffer_size = queue->capacity * queue->msg_size;
+    size_t buffer_size = queue->total_capacity * queue->msg_size;
     size_t pages = (buffer_size + PAGE_SIZE - 1) / PAGE_SIZE;
     pmm_free_pages(queue->buffer, pages);
     pmm_free_page(queue);
@@ -247,11 +263,28 @@ int msg_queue_destroy(struct msg_queue *queue)
     return IPC_OK;
 }
 
-int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms)
+/*
+ * Calculate buffer offset for a priority level's slot.
+ * Each priority level has its own section of the buffer.
+ */
+static inline uint8_t *prio_slot(struct msg_queue *queue, int prio, size_t idx)
+{
+    /* Buffer layout: [prio0 slots][prio1 slots][prio2 slots][prio3 slots] */
+    size_t base_offset = (size_t)prio * queue->capacity * queue->msg_size;
+    size_t slot_offset = idx * queue->msg_size;
+    return queue->buffer + base_offset + slot_offset;
+}
+
+int msg_send_priority(struct msg_queue *queue, const void *msg,
+                      int priority, int timeout_ms)
 {
     if (!queue || !msg) {
         return IPC_ERR_INVALID;
     }
+
+    /* Clamp priority to valid range */
+    if (priority < MSG_PRIO_LOW) priority = MSG_PRIO_LOW;
+    if (priority > MSG_PRIO_URGENT) priority = MSG_PRIO_URGENT;
 
     /* Record start time for timeout tracking */
     uint64_t start_time = 0;
@@ -263,8 +296,8 @@ int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms)
 
     irq_flags_t flags = spin_lock_irqsave(&queue->lock);
 
-    /* Wait for space if queue is full */
-    while (queue->count >= queue->capacity) {
+    /* Wait for space if this priority level is full */
+    while (queue->prio[priority].count >= queue->capacity) {
         if (timeout_ms == MSG_NO_WAIT) {
             spin_unlock_irqrestore(&queue->lock, flags);
             return IPC_ERR_FULL;
@@ -289,18 +322,21 @@ int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms)
         }
     }
 
-    /* Copy message to buffer */
-    uint8_t *slot = queue->buffer + (queue->head * queue->msg_size);
+    /* Copy message to this priority's buffer section */
+    struct prio_buffer *pb = &queue->prio[priority];
+    uint8_t *slot = prio_slot(queue, priority, pb->head);
     ipc_memcpy(slot, msg, queue->msg_size);
 
-    /* Advance head */
-    queue->head = (queue->head + 1) % queue->capacity;
-    queue->count++;
+    /* Advance head for this priority level */
+    pb->head = (pb->head + 1) % queue->capacity;
+    pb->count++;
+    queue->total_count++;
 
     /* Update statistics */
     queue->msgs_sent++;
-    if (queue->count > queue->high_water) {
-        queue->high_water = queue->count;
+    queue->prio_msgs_sent[priority]++;
+    if (queue->total_count > queue->high_water) {
+        queue->high_water = queue->total_count;
     }
 
     /* Wake a waiting receiver */
@@ -309,6 +345,57 @@ int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms)
     spin_unlock_irqrestore(&queue->lock, flags);
 
     return IPC_OK;
+}
+
+int msg_send(struct msg_queue *queue, const void *msg, int timeout_ms)
+{
+    /* Default to normal priority for backward compatibility */
+    return msg_send_priority(queue, msg, MSG_PRIO_NORMAL, timeout_ms);
+}
+
+/*
+ * Find the priority level to receive from.
+ * Normally receives from highest priority with messages.
+ * Starvation prevention: after N consecutive high-priority receives,
+ * check lower priorities to give them a chance.
+ *
+ * Caller must hold queue->lock.
+ * Returns priority level (0-3) or -1 if all empty.
+ */
+static int select_recv_priority(struct msg_queue *queue)
+{
+    /*
+     * Starvation prevention: after MSG_STARVATION_THRESHOLD consecutive
+     * receives from higher priorities, try to serve lower priorities once.
+     */
+    if (queue->high_prio_recv_count >= MSG_STARVATION_THRESHOLD) {
+        /* Check all priorities from lowest to highest for starvation relief */
+        for (int p = MSG_PRIO_LOW; p <= MSG_PRIO_URGENT; p++) {
+            if (queue->prio[p].count > 0) {
+                /* Reset counter when serving lower priority */
+                queue->high_prio_recv_count = 0;
+                return p;
+            }
+        }
+    }
+
+    /* Normal case: return highest priority with messages */
+    for (int p = MSG_PRIO_URGENT; p >= MSG_PRIO_LOW; p--) {
+        if (queue->prio[p].count > 0) {
+            /*
+             * Track consecutive high-priority receives.
+             * Only count if we're receiving above MSG_PRIO_LOW.
+             */
+            if (p > MSG_PRIO_LOW) {
+                queue->high_prio_recv_count++;
+            } else {
+                queue->high_prio_recv_count = 0;
+            }
+            return p;
+        }
+    }
+
+    return -1;  /* All priorities empty */
 }
 
 int msg_recv(struct msg_queue *queue, void *msg, int timeout_ms)
@@ -328,7 +415,7 @@ int msg_recv(struct msg_queue *queue, void *msg, int timeout_ms)
     irq_flags_t flags = spin_lock_irqsave(&queue->lock);
 
     /* Wait for message if queue is empty */
-    while (queue->count == 0) {
+    while (queue->total_count == 0) {
         if (timeout_ms == MSG_NO_WAIT) {
             spin_unlock_irqrestore(&queue->lock, flags);
             return IPC_ERR_EMPTY;
@@ -353,18 +440,28 @@ int msg_recv(struct msg_queue *queue, void *msg, int timeout_ms)
         }
     }
 
-    /* Copy message from buffer */
-    uint8_t *slot = queue->buffer + (queue->tail * queue->msg_size);
+    /* Select which priority level to receive from */
+    int prio = select_recv_priority(queue);
+    if (prio < 0) {
+        /* Should not happen since total_count > 0 */
+        spin_unlock_irqrestore(&queue->lock, flags);
+        return IPC_ERR_EMPTY;
+    }
+
+    /* Copy message from the selected priority's buffer section */
+    struct prio_buffer *pb = &queue->prio[prio];
+    uint8_t *slot = prio_slot(queue, prio, pb->tail);
     ipc_memcpy(msg, slot, queue->msg_size);
 
-    /* Advance tail */
-    queue->tail = (queue->tail + 1) % queue->capacity;
-    queue->count--;
+    /* Advance tail for this priority level */
+    pb->tail = (pb->tail + 1) % queue->capacity;
+    pb->count--;
+    queue->total_count--;
 
     /* Update statistics */
     queue->msgs_recv++;
 
-    /* Wake a waiting sender */
+    /* Wake a waiting sender (any priority - they'll check their level) */
     wake_one(&queue->send_waiters);
 
     spin_unlock_irqrestore(&queue->lock, flags);
@@ -379,7 +476,7 @@ size_t msg_queue_count(struct msg_queue *queue)
     }
 
     irq_flags_t flags = spin_lock_irqsave(&queue->lock);
-    size_t count = queue->count;
+    size_t count = queue->total_count;
     spin_unlock_irqrestore(&queue->lock, flags);
 
     return count;

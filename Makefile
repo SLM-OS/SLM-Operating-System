@@ -159,7 +159,7 @@ TEST_TIMEOUT := 60
 
 .PHONY: test
 test: kernel
-	@echo "Running kernel tests (timeout: $(TEST_TIMEOUT)s)..."
+	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 	@$(QEMU) \
 		-machine $(QEMU_MACHINE) \
@@ -167,17 +167,17 @@ test: kernel
 		-smp cores=$(QEMU_CORES) \
 		-m $(QEMU_MEMORY) \
 		-nographic \
+		-semihosting \
 		-kernel $(KERNEL_ELF) \
-		-no-reboot \
-		> $(TEST_OUTPUT) 2>&1 & \
-	QEMU_PID=$$!; \
-	sleep $(TEST_TIMEOUT); \
-	kill $$QEMU_PID 2>/dev/null || true; \
-	wait $$QEMU_PID 2>/dev/null || true
-	@echo ""
-	@echo "Test Results:"
-	@echo "============="
-	@if grep -F "[FAIL]" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		> $(TEST_OUTPUT) 2>&1; \
+	QEMU_EXIT=$$?; \
+	echo ""; \
+	echo "Test Results:"; \
+	echo "============="; \
+	if grep -F "[PASS] All test suites passed" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "PASSED - All tests passed"; \
+		exit 0; \
+	elif grep -F "[FAIL]" $(TEST_OUTPUT) > /dev/null 2>&1; then \
 		echo "FAILED - Test failures detected:"; \
 		grep -F "[FAIL]" $(TEST_OUTPUT); \
 		exit 1; \
@@ -185,16 +185,12 @@ test: kernel
 		echo "CRASHED - Kernel page fault detected"; \
 		grep -A 20 "PAGE FAULT" $(TEST_OUTPUT) | head -25; \
 		exit 1; \
-	elif grep -F "VMM tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
-	     grep -F "Spinlock tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
-	     grep -F "SMP tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
-	     grep -F "IPC tests passed" $(TEST_OUTPUT) > /dev/null 2>&1 && \
-	     grep -F "Scheduler tests passed" $(TEST_OUTPUT) > /dev/null 2>&1; then \
-		echo "PASSED - All tests passed"; \
-		grep -F "tests passed" $(TEST_OUTPUT) || true; \
+	elif grep -F "KERNEL PANIC" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "CRASHED - Kernel panic"; \
+		grep -A 20 "KERNEL PANIC" $(TEST_OUTPUT) | head -25; \
+		exit 1; \
 	else \
 		echo "UNKNOWN - Could not determine test status"; \
-		echo "Expected: VMM, Spinlock, SMP, IPC, Scheduler tests passed"; \
 		echo "Check $(TEST_OUTPUT) for details"; \
 		exit 1; \
 	fi

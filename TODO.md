@@ -493,5 +493,136 @@ M9 (Polish) ─────────> Can happen in parallel throughout
 
 ---
 
+## Extra Work Completed (December 2025)
+
+While waiting for USB-serial adapter delivery (1.5 days), the following enhancements were implemented. These items were selected from `FUTURE.md` based on feasibility without hardware access.
+
+### TLB Shootdown API
+
+**Files:** `kernel/mm/vmm.c`, `kernel/include/vmm.h`, `kernel/tests/test_vmm.c`
+
+Extended the VMM with comprehensive TLB invalidation support:
+
+| Function | Description |
+|----------|-------------|
+| `vmm_invalidate_tlb(virt)` | Invalidate single address (all CPUs) |
+| `vmm_invalidate_tlb_all()` | Full TLB flush (all CPUs) |
+| `vmm_invalidate_tlb_range(start, end)` | Range invalidation with threshold fallback |
+| `vmm_invalidate_tlb_asid(virt, asid)` | ASID-aware single address invalidation |
+| `vmm_invalidate_tlb_asid_all(asid)` | Invalidate all entries for an ASID |
+
+All functions use ARM64 "is" (inner shareable) suffix for automatic hardware broadcast to all CPUs. No software IPI required.
+
+**Test coverage (10 tests):**
+- Page table verification (`test_virt_to_phys_accuracy`, `test_va_pa_coherency`)
+- Remapping with TLB invalidation (`test_remap_requires_invalidation`, `test_remap_with_full_flush`, `test_remap_with_range_invalidation`)
+- Edge cases (`test_sequential_remaps`, `test_rapid_remap_stress`)
+- ASID operations (`test_asid_invalidation_executes`, `test_asid_all_invalidation_executes`)
+- Multi-CPU broadcast (`test_tlb_broadcast_all_cpus`)
+
+Tests use actual page table manipulation to verify TLB invalidation works correctly, not just smoke tests.
+
+---
+
+### Priority-Based Message Queues
+
+**Files:** `kernel/ipc/ipc.c`, `kernel/include/ipc.h`, `kernel/tests/test_ipc.c`
+
+Extended the IPC subsystem with priority-aware message queuing:
+
+| Priority Level | Constant | Description |
+|----------------|----------|-------------|
+| Urgent | `MSG_PRIO_URGENT` (3) | Highest priority, processed first |
+| High | `MSG_PRIO_HIGH` (2) | Above normal |
+| Normal | `MSG_PRIO_NORMAL` (1) | Default for `msg_send()` |
+| Low | `MSG_PRIO_LOW` (0) | Background messages |
+
+**Key features:**
+- Per-priority ring buffers (independent capacity)
+- `msg_send_priority(queue, msg, priority, timeout)` — send with explicit priority
+- `msg_send()` defaults to `MSG_PRIO_NORMAL`
+- Starvation prevention: low priority served after `MSG_STARVATION_THRESHOLD` (8) high-priority receives
+- Per-priority statistics tracking
+
+**Test coverage (10 tests):**
+- Priority ordering (`test_priority_high_before_low`, `test_priority_ordering_all_levels`)
+- Default behavior (`test_default_priority_is_normal`)
+- Starvation prevention (`test_starvation_prevention`, `test_starvation_threshold_boundary`)
+- Capacity (`test_priority_capacity`)
+- Statistics (`test_priority_statistics`)
+- FIFO within priority (`test_priority_fifo_within_level`)
+- Complex patterns (`test_priority_interleaved_operations`, `test_priority_skip_empty_levels`)
+
+---
+
+### CI/CD Pipeline
+
+**Files:** `.github/workflows/ci.yml`, `kernel/src/semihosting.c`, `kernel/include/semihosting.h`, `kernel/tests/test_harness.c`, `Makefile`
+
+Implemented GitHub Actions workflow for automated build and test:
+
+| Feature | Implementation |
+|---------|----------------|
+| **Triggers** | Push to main/develop, PRs to main, manual dispatch |
+| **Toolchain** | ARM GCC 13.2 (aarch64-none-elf), Rust stable, QEMU |
+| **Build** | CMake with cross-compilation toolchain file |
+| **Testing** | Full test suite in QEMU with 4 CPUs, 1GB RAM |
+| **Exit** | ARM64 semihosting (`HLT #0xF000`) for clean exit |
+| **Artifacts** | ELF, BIN, test output (7-day retention) |
+
+**Semihosting implementation:**
+- `semihosting_exit(code)` — exit QEMU with status code
+- `semihosting_available()` — compile-time check for QEMU platform
+- Uses `SYS_EXIT_EXTENDED` (0x20) for AArch64 compatibility
+- Conditional compilation: only enabled for `PLATFORM_QEMU_VIRT`
+
+**Test result parsing:**
+- `[PASS] All test suites passed` — success
+- `[FAIL]` — test failure
+- `PAGE FAULT` / `KERNEL PANIC` — crash detection
+
+See `docs/ci-cd.md` for comprehensive documentation.
+
+---
+
+### Documentation Updates
+
+| Document | Changes |
+|----------|---------|
+| `FUTURE.md` | Marked TLB Shootdown, Priority Queues, CI/CD, Device Tree Parsing, EFI Stub (PE/COFF header) as complete with implementation notes |
+| `docs/ci-cd.md` | New comprehensive CI/CD pipeline documentation |
+| `TODO.md` | Added this "Extra Work" section |
+
+---
+
+### Test Infrastructure Improvements
+
+Added test helper functions for functional VMM testing:
+
+```c
+// kernel/mm/vmm.c - Test helpers
+uint64_t vmm_test_get_l2_entry(uint64_t virt);
+int vmm_test_set_l2_entry_no_invalidate(uint64_t virt, uint64_t pte);
+uint64_t vmm_test_make_block_desc(uint64_t phys, uint32_t flags);
+```
+
+These allow tests to manipulate page tables directly and verify that TLB invalidation is actually required and working, rather than just testing that functions "don't crash."
+
+---
+
+### Summary
+
+| Item | Tests Added | Lines of Code |
+|------|-------------|---------------|
+| TLB Shootdown API | 10 | ~250 |
+| Priority Message Queues | 10 | ~300 |
+| CI/CD Pipeline | — | ~100 (workflow) + ~80 (semihosting) |
+| Documentation | — | ~300 |
+| **Total** | **20** | **~1030** |
+
+All 20 new tests pass. Total test count increased from ~60 to ~80.
+
+---
+
 *Created: December 2025*
 *Target: Complete hardware bring-up first, then component system*

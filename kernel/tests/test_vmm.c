@@ -1,0 +1,409 @@
+/*
+ * test_vmm.c - Virtual Memory Manager Tests for SLM-OS
+ *
+ * Tests VMM functionality including:
+ * - TLB invalidation correctness (not just "doesn't crash")
+ * - Proper remapping behavior after TLB invalidation
+ * - Page table and TLB consistency
+ */
+
+#include "unity.h"
+#include "../include/vmm.h"
+#include "../include/pmm.h"
+#include "../include/smp.h"
+#include "../include/platform.h"
+#include "../include/uart.h"
+#include <stdint.h>
+#include <stdbool.h>
+
+/*
+ * Magic values for distinguishing physical regions.
+ * Written to different physical addresses to verify which one is accessed.
+ */
+#define MARKER_PA1  0xDEADBEEF11111111UL
+#define MARKER_PA2  0xCAFEBABE22222222UL
+#define MARKER_PA3  0xFEEDFACE33333333UL
+
+/*
+ * Test region: We use a high RAM address for testing remapping.
+ * This should be within mapped RAM but not critical for kernel operation.
+ * Using 64MB offset from RAM_BASE (well into the heap area).
+ */
+#define TEST_VA     (RAM_BASE + 0x4000000)  /* 64MB into RAM */
+#define TEST_PA1    (RAM_BASE + 0x4000000)  /* Same as VA (identity mapped) */
+#define TEST_PA2    (RAM_BASE + 0x4200000)  /* 66MB into RAM (different 2MB block) */
+
+/* ============================================================================
+ * Functional Test: Verify page table matches actual memory access
+ * ============================================================================ */
+
+/*
+ * Test: vmm_virt_to_phys returns correct physical address
+ *
+ * Verifies the page table walker correctly translates addresses.
+ */
+static void test_virt_to_phys_accuracy(void)
+{
+    /* RAM_BASE should be identity mapped */
+    uint64_t pa = vmm_virt_to_phys(RAM_BASE);
+    TEST_ASSERT_EQUAL_HEX64(RAM_BASE, pa);
+
+    /* Check another known mapping */
+    uint64_t mid_ram = RAM_BASE + (RAM_SIZE / 2);
+    pa = vmm_virt_to_phys(mid_ram);
+    TEST_ASSERT_EQUAL_HEX64(mid_ram, pa);
+}
+
+/*
+ * Test: Writing via VA is visible when reading via PA
+ *
+ * Verifies that the mapping is correct and cache coherent.
+ */
+static void test_va_pa_coherency(void)
+{
+    volatile uint64_t *va_ptr = (volatile uint64_t *)TEST_VA;
+    uint64_t pa = vmm_virt_to_phys(TEST_VA);
+
+    /* Save original value */
+    uint64_t original = *va_ptr;
+
+    /* Write via VA */
+    *va_ptr = MARKER_PA1;
+
+    /* Ensure write is visible */
+    __asm__ volatile("dsb ish" ::: "memory");
+
+    /* Read via PA (identity mapped, so PA == VA for this region) */
+    volatile uint64_t *pa_ptr = (volatile uint64_t *)pa;
+    uint64_t readback = *pa_ptr;
+
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA1, readback);
+
+    /* Restore */
+    *va_ptr = original;
+}
+
+/* ============================================================================
+ * Functional Test: TLB invalidation is necessary and sufficient
+ * ============================================================================ */
+
+/*
+ * Test: After remapping + TLB invalidation, new mapping is used
+ *
+ * This is the KEY test for TLB correctness:
+ * 1. Write marker1 to PA1 (currently mapped to test VA)
+ * 2. Write marker2 to PA2 (different physical block)
+ * 3. Change PTE to point test VA to PA2 (without TLB invalidation)
+ * 4. Invalidate TLB
+ * 5. Read from test VA - MUST get marker2 (from PA2)
+ */
+static void test_remap_requires_invalidation(void)
+{
+    /* Get current PTE for test address */
+    uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
+    TEST_ASSERT_TRUE(original_pte != 0);
+
+    /* Write distinct markers to two different physical addresses */
+    volatile uint64_t *pa1_ptr = (volatile uint64_t *)TEST_PA1;
+    volatile uint64_t *pa2_ptr = (volatile uint64_t *)TEST_PA2;
+
+    uint64_t original_pa1 = *pa1_ptr;
+    uint64_t original_pa2 = *pa2_ptr;
+
+    *pa1_ptr = MARKER_PA1;
+    *pa2_ptr = MARKER_PA2;
+    __asm__ volatile("dsb ish" ::: "memory");
+
+    /* Verify we currently read from PA1 via TEST_VA */
+    volatile uint64_t *test_ptr = (volatile uint64_t *)TEST_VA;
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA1, *test_ptr);
+
+    /* Create new PTE pointing to PA2 */
+    uint64_t new_pte = vmm_test_make_block_desc(TEST_PA2, VMM_FLAGS_KERNEL_DATA);
+
+    /* Change PTE without TLB invalidation */
+    int ret = vmm_test_set_l2_entry_no_invalidate(TEST_VA, new_pte);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* NOW invalidate TLB for this address */
+    vmm_invalidate_tlb(TEST_VA);
+
+    /* Read from TEST_VA - should now get PA2's marker */
+    uint64_t after_remap = *test_ptr;
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA2, after_remap);
+
+    /* Restore original mapping */
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, original_pte);
+    vmm_invalidate_tlb(TEST_VA);
+
+    /* Verify we're back to reading from PA1 */
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA1, *test_ptr);
+
+    /* Restore original data */
+    *pa1_ptr = original_pa1;
+    *pa2_ptr = original_pa2;
+}
+
+/*
+ * Test: vmm_invalidate_tlb_all also works for remapped pages
+ *
+ * Same as above but uses full TLB flush instead of single address.
+ */
+static void test_remap_with_full_flush(void)
+{
+    uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
+    TEST_ASSERT_TRUE(original_pte != 0);
+
+    volatile uint64_t *pa1_ptr = (volatile uint64_t *)TEST_PA1;
+    volatile uint64_t *pa2_ptr = (volatile uint64_t *)TEST_PA2;
+
+    uint64_t original_pa1 = *pa1_ptr;
+    uint64_t original_pa2 = *pa2_ptr;
+
+    *pa1_ptr = MARKER_PA1;
+    *pa2_ptr = MARKER_PA2;
+    __asm__ volatile("dsb ish" ::: "memory");
+
+    /* Change PTE to PA2 without TLB invalidation */
+    uint64_t new_pte = vmm_test_make_block_desc(TEST_PA2, VMM_FLAGS_KERNEL_DATA);
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, new_pte);
+
+    /* Use full TLB flush instead of single address */
+    vmm_invalidate_tlb_all();
+
+    /* Should now read from PA2 */
+    volatile uint64_t *test_ptr = (volatile uint64_t *)TEST_VA;
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA2, *test_ptr);
+
+    /* Restore */
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, original_pte);
+    vmm_invalidate_tlb_all();
+    *pa1_ptr = original_pa1;
+    *pa2_ptr = original_pa2;
+}
+
+/*
+ * Test: vmm_invalidate_tlb_range handles remapped region
+ */
+static void test_remap_with_range_invalidation(void)
+{
+    uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
+    TEST_ASSERT_TRUE(original_pte != 0);
+
+    volatile uint64_t *pa1_ptr = (volatile uint64_t *)TEST_PA1;
+    volatile uint64_t *pa2_ptr = (volatile uint64_t *)TEST_PA2;
+
+    uint64_t original_pa1 = *pa1_ptr;
+    uint64_t original_pa2 = *pa2_ptr;
+
+    *pa1_ptr = MARKER_PA1;
+    *pa2_ptr = MARKER_PA2;
+    __asm__ volatile("dsb ish" ::: "memory");
+
+    /* Change PTE */
+    uint64_t new_pte = vmm_test_make_block_desc(TEST_PA2, VMM_FLAGS_KERNEL_DATA);
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, new_pte);
+
+    /* Use range invalidation covering the test address */
+    vmm_invalidate_tlb_range(TEST_VA, TEST_VA + BLOCK_SIZE);
+
+    /* Should read from PA2 */
+    volatile uint64_t *test_ptr = (volatile uint64_t *)TEST_VA;
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA2, *test_ptr);
+
+    /* Restore */
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, original_pte);
+    vmm_invalidate_tlb_range(TEST_VA, TEST_VA + BLOCK_SIZE);
+    *pa1_ptr = original_pa1;
+    *pa2_ptr = original_pa2;
+}
+
+/* ============================================================================
+ * Edge Case Tests
+ * ============================================================================ */
+
+/*
+ * Test: Multiple remaps in sequence
+ *
+ * Remap VA to PA1, PA2, PA3 in sequence, verifying each works.
+ */
+static void test_sequential_remaps(void)
+{
+    uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
+    TEST_ASSERT_TRUE(original_pte != 0);
+
+    /* Use three different physical addresses */
+    uint64_t pa1 = TEST_PA1;
+    uint64_t pa2 = TEST_PA2;
+    uint64_t pa3 = RAM_BASE + 0x4400000;  /* 68MB into RAM */
+
+    volatile uint64_t *ptr1 = (volatile uint64_t *)pa1;
+    volatile uint64_t *ptr2 = (volatile uint64_t *)pa2;
+    volatile uint64_t *ptr3 = (volatile uint64_t *)pa3;
+
+    uint64_t orig1 = *ptr1;
+    uint64_t orig2 = *ptr2;
+    uint64_t orig3 = *ptr3;
+
+    *ptr1 = MARKER_PA1;
+    *ptr2 = MARKER_PA2;
+    *ptr3 = MARKER_PA3;
+    __asm__ volatile("dsb ish" ::: "memory");
+
+    volatile uint64_t *test_ptr = (volatile uint64_t *)TEST_VA;
+
+    /* Currently points to PA1 */
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA1, *test_ptr);
+
+    /* Remap to PA2 */
+    uint64_t pte2 = vmm_test_make_block_desc(pa2, VMM_FLAGS_KERNEL_DATA);
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, pte2);
+    vmm_invalidate_tlb(TEST_VA);
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA2, *test_ptr);
+
+    /* Remap to PA3 */
+    uint64_t pte3 = vmm_test_make_block_desc(pa3, VMM_FLAGS_KERNEL_DATA);
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, pte3);
+    vmm_invalidate_tlb(TEST_VA);
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA3, *test_ptr);
+
+    /* Remap back to PA1 */
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, original_pte);
+    vmm_invalidate_tlb(TEST_VA);
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA1, *test_ptr);
+
+    /* Restore original data */
+    *ptr1 = orig1;
+    *ptr2 = orig2;
+    *ptr3 = orig3;
+}
+
+/*
+ * Test: Rapid remap stress test
+ *
+ * Rapidly remap between two physical addresses many times.
+ */
+static void test_rapid_remap_stress(void)
+{
+    uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
+
+    volatile uint64_t *ptr1 = (volatile uint64_t *)TEST_PA1;
+    volatile uint64_t *ptr2 = (volatile uint64_t *)TEST_PA2;
+
+    uint64_t orig1 = *ptr1;
+    uint64_t orig2 = *ptr2;
+
+    *ptr1 = MARKER_PA1;
+    *ptr2 = MARKER_PA2;
+    __asm__ volatile("dsb ish" ::: "memory");
+
+    uint64_t pte1 = vmm_test_make_block_desc(TEST_PA1, VMM_FLAGS_KERNEL_DATA);
+    uint64_t pte2 = vmm_test_make_block_desc(TEST_PA2, VMM_FLAGS_KERNEL_DATA);
+
+    volatile uint64_t *test_ptr = (volatile uint64_t *)TEST_VA;
+
+    /* Rapidly alternate between PA1 and PA2 */
+    for (int i = 0; i < 50; i++) {
+        /* Map to PA2 */
+        vmm_test_set_l2_entry_no_invalidate(TEST_VA, pte2);
+        vmm_invalidate_tlb(TEST_VA);
+        TEST_ASSERT_EQUAL_HEX64(MARKER_PA2, *test_ptr);
+
+        /* Map to PA1 */
+        vmm_test_set_l2_entry_no_invalidate(TEST_VA, pte1);
+        vmm_invalidate_tlb(TEST_VA);
+        TEST_ASSERT_EQUAL_HEX64(MARKER_PA1, *test_ptr);
+    }
+
+    /* Restore */
+    vmm_test_set_l2_entry_no_invalidate(TEST_VA, original_pte);
+    vmm_invalidate_tlb(TEST_VA);
+    *ptr1 = orig1;
+    *ptr2 = orig2;
+}
+
+/* ============================================================================
+ * ASID Tests (for future user space support)
+ * ============================================================================ */
+
+/*
+ * Test: ASID invalidation executes without fault
+ */
+static void test_asid_invalidation_executes(void)
+{
+    vmm_invalidate_tlb_asid(RAM_BASE, 0);
+    vmm_invalidate_tlb_asid(RAM_BASE, 1);
+    vmm_invalidate_tlb_asid(RAM_BASE, 255);
+    TEST_PASS();
+}
+
+/*
+ * Test: ASID-all invalidation executes without fault
+ */
+static void test_asid_all_invalidation_executes(void)
+{
+    vmm_invalidate_tlb_asid_all(0);
+    vmm_invalidate_tlb_asid_all(1);
+    vmm_invalidate_tlb_asid_all(255);
+    TEST_PASS();
+}
+
+/* ============================================================================
+ * Multi-CPU TLB Broadcast Tests
+ * ============================================================================ */
+
+/*
+ * Test: Verify TLB operations reach all CPUs
+ *
+ * This test verifies that the "is" (inner shareable) suffix works by
+ * checking that all online CPUs can access remapped memory correctly.
+ * Note: In QEMU, all CPUs share memory so this mainly verifies no faults.
+ */
+static void test_tlb_broadcast_all_cpus(void)
+{
+    uint32_t num_cpus = cpus_online;
+    uart_printf("  Testing TLB broadcast with %u CPUs online\n", num_cpus);
+
+    /* Perform TLB operations - should broadcast to all CPUs */
+    vmm_invalidate_tlb(TEST_VA);
+    vmm_invalidate_tlb_all();
+    vmm_invalidate_tlb_range(TEST_VA, TEST_VA + BLOCK_SIZE * 4);
+
+    /* Verify memory access still works from this CPU */
+    volatile uint64_t *ptr = (volatile uint64_t *)TEST_VA;
+    uint64_t val = *ptr;
+    (void)val;  /* Suppress unused warning */
+
+    TEST_PASS();
+}
+
+/* ============================================================================
+ * Test Suite Entry Point
+ * ============================================================================ */
+
+int test_suite_vmm(void)
+{
+    UnityBegin("VMM/TLB Functional Tests");
+
+    /* Page table verification */
+    RUN_TEST(test_virt_to_phys_accuracy);
+    RUN_TEST(test_va_pa_coherency);
+
+    /* TLB invalidation correctness - the KEY tests */
+    RUN_TEST(test_remap_requires_invalidation);
+    RUN_TEST(test_remap_with_full_flush);
+    RUN_TEST(test_remap_with_range_invalidation);
+
+    /* Edge cases */
+    RUN_TEST(test_sequential_remaps);
+    RUN_TEST(test_rapid_remap_stress);
+
+    /* ASID tests */
+    RUN_TEST(test_asid_invalidation_executes);
+    RUN_TEST(test_asid_all_invalidation_executes);
+
+    /* Multi-CPU */
+    RUN_TEST(test_tlb_broadcast_all_cpus);
+
+    return UnityEnd();
+}

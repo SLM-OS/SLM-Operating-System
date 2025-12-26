@@ -260,14 +260,72 @@ uint64_t vmm_virt_to_phys(uint64_t virt);
 bool vmm_is_mapped(uint64_t virt);
 
 /*
- * Invalidate TLB for a specific address.
+ * ==========================================================================
+ * TLB Shootdown API
+ * ==========================================================================
  *
- * @virt: Virtual address to invalidate
+ * ARM64 TLB invalidation with the "is" (inner shareable) suffix broadcasts
+ * to all CPUs in the inner shareable domain automatically. This provides
+ * hardware-assisted TLB shootdown without requiring explicit IPIs.
+ *
+ * All functions use DSB (Data Synchronization Barrier) to ensure:
+ * - DSB ISHST before: all prior stores are visible before invalidation
+ * - DSB ISH after: invalidation is complete on all CPUs before continuing
+ * - ISB: instruction stream is synchronized with TLB state
+ *
+ * Thread Safety: These functions are safe to call from any CPU. The hardware
+ * broadcast mechanism ensures coherency across all cores.
+ */
+
+/*
+ * Invalidate TLB for a specific address (all CPUs).
+ *
+ * Uses TLBI VAAE1IS (VA, All ASIDs, EL1, Inner Shareable).
+ * Broadcasts to all CPUs in the inner shareable domain.
+ *
+ * @virt: Virtual address to invalidate (any alignment)
  */
 void vmm_invalidate_tlb(uint64_t virt);
 
 /*
- * Invalidate entire TLB.
+ * Invalidate TLB for a virtual address range (all CPUs).
+ *
+ * Efficiently invalidates all TLB entries covering the given range.
+ * For large ranges (> 32 pages), falls back to full TLB flush.
+ *
+ * @start: Start virtual address (will be page-aligned)
+ * @end:   End virtual address (exclusive)
+ */
+void vmm_invalidate_tlb_range(uint64_t start, uint64_t end);
+
+/*
+ * Invalidate TLB for a specific address and ASID (all CPUs).
+ *
+ * Uses TLBI VAE1IS (VA, specified ASID, EL1, Inner Shareable).
+ * Only invalidates entries matching both the VA and ASID.
+ * Useful for per-process address space management.
+ *
+ * @virt: Virtual address to invalidate
+ * @asid: Address Space Identifier (0-65535)
+ */
+void vmm_invalidate_tlb_asid(uint64_t virt, uint16_t asid);
+
+/*
+ * Invalidate all TLB entries for a specific ASID (all CPUs).
+ *
+ * Uses TLBI ASIDE1IS (All addresses for ASID, Inner Shareable).
+ * Useful for process exit or address space destruction.
+ *
+ * @asid: Address Space Identifier (0-65535)
+ */
+void vmm_invalidate_tlb_asid_all(uint16_t asid);
+
+/*
+ * Invalidate entire TLB (all CPUs).
+ *
+ * Uses TLBI VMALLE1IS (VM All EL1, Inner Shareable).
+ * Broadcasts to all CPUs in the inner shareable domain.
+ * Use sparingly - invalidates all cached translations.
  */
 void vmm_invalidate_tlb_all(void);
 
@@ -287,6 +345,28 @@ struct vmm_stats {
 };
 
 void vmm_get_stats(struct vmm_stats *stats);
+
+/*
+ * ==========================================================================
+ * Test Helpers (for unit tests only - do NOT use in production)
+ * ==========================================================================
+ */
+
+/*
+ * Get the raw L2 PTE for a virtual address.
+ */
+uint64_t vmm_test_get_l2_entry(uint64_t virt);
+
+/*
+ * Set the L2 PTE WITHOUT invalidating TLB.
+ * Creates intentional TLB/page-table inconsistency for testing.
+ */
+int vmm_test_set_l2_entry_no_invalidate(uint64_t virt, uint64_t pte);
+
+/*
+ * Build a block descriptor for testing.
+ */
+uint64_t vmm_test_make_block_desc(uint64_t phys, uint32_t flags);
 
 /*
  * ==========================================================================

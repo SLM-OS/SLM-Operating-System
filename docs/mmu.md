@@ -512,6 +512,89 @@ Phase 5+ may implement demand paging for model memory, where translation faults 
 
 ---
 
+## TLB Shootdown API
+
+The Translation Lookaside Buffer (TLB) caches page table entries for fast address translation. When page tables are modified, the TLB must be invalidated to ensure the new mappings take effect.
+
+### API Functions
+
+```c
+#include "vmm.h"
+
+/* Invalidate a single virtual address */
+void vmm_invalidate_tlb(uint64_t virt);
+
+/* Invalidate all TLB entries */
+void vmm_invalidate_tlb_all(void);
+
+/* Invalidate a range of virtual addresses */
+void vmm_invalidate_tlb_range(uint64_t start, uint64_t end);
+
+/* Invalidate by ASID (Address Space ID) - for future user space */
+void vmm_invalidate_tlb_asid(uint64_t virt, uint8_t asid);
+void vmm_invalidate_tlb_asid_all(uint8_t asid);
+```
+
+### Inner Shareable Domain
+
+All TLB invalidation uses the "IS" (Inner Shareable) suffix, which means the invalidation is broadcast to all CPUs in the inner shareable domain:
+
+```c
+/* Single address invalidation */
+__asm__ volatile(
+    "dsb ishst\n"           /* Ensure PTE write complete */
+    "tlbi vaae1is, %0\n"    /* Invalidate by VA, all ASIDs, Inner Shareable */
+    "dsb ish\n"             /* Wait for TLB invalidate to complete */
+    "isb"                   /* Synchronize instruction stream */
+    : : "r"(virt >> 12) : "memory"
+);
+```
+
+**TLBI Instructions Used:**
+
+| Instruction | Description |
+|-------------|-------------|
+| `TLBI VAAE1IS, Xt` | Invalidate by VA, all ASIDs, EL1, Inner Shareable |
+| `TLBI VAE1IS, Xt` | Invalidate by VA and ASID, EL1, Inner Shareable |
+| `TLBI ASIDE1IS, Xt` | Invalidate by ASID, EL1, Inner Shareable |
+| `TLBI VMALLE1IS` | Invalidate all EL1 entries, Inner Shareable |
+
+The "IS" suffix ensures that on SMP systems, all CPUs see the TLB invalidation without requiring explicit inter-processor interrupts (IPIs).
+
+### When to Invalidate
+
+TLB invalidation is required after:
+1. Changing a page table entry's physical address
+2. Changing a page table entry's permissions
+3. Unmapping a virtual address
+4. Context switch to a different ASID (future)
+
+**Common pattern:**
+```c
+/* 1. Modify page table */
+l2_table[index] = new_pte;
+
+/* 2. Barrier to ensure write is visible */
+__asm__ volatile("dsb ishst" ::: "memory");
+
+/* 3. Invalidate TLB */
+vmm_invalidate_tlb(virt_addr);
+```
+
+### Test Coverage
+
+The VMM tests in `kernel/tests/test_vmm.c` include functional TLB tests that verify invalidation correctness:
+
+1. **test_remap_requires_invalidation** — Remaps a VA to a different PA, verifies the new PA is accessed
+2. **test_remap_with_full_flush** — Same test using `vmm_invalidate_tlb_all()`
+3. **test_remap_with_range_invalidation** — Same test using `vmm_invalidate_tlb_range()`
+4. **test_sequential_remaps** — Remaps VA through PA1→PA2→PA3→PA1
+5. **test_rapid_remap_stress** — 50 rapid remap cycles with verification
+
+These tests use helper functions to manipulate page tables without automatic TLB invalidation, proving that explicit invalidation is necessary and working.
+
+---
+
 ## References
 
 ### Official ARM Documentation

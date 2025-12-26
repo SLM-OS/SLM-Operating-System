@@ -49,4 +49,7 @@ int test_suite_vfs(void);
 /* Shell command tests */
 int test_suite_shell(void);
 
+/* VMM/TLB tests */
+int test_suite_vmm(void);
+
 #endif /* TEST_HARNESS_H */
