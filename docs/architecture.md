@@ -112,12 +112,15 @@ This hybrid approach leverages:
 
 | Component | File(s) | Purpose |
 |-----------|---------|---------|
-| PMM | `kernel/src/pmm.c` | Physical page allocation (bitmap) |
+| PMM | `kernel/mm/pmm.c` | Physical page allocation (buddy allocator) |
 | VMM | `kernel/src/vmm.c` | Virtual memory mapping |
 | MMU | `kernel/src/mmu.S` | Page table management (ARMv8) |
 | Model Memory | `runtime/src/mm/` | 2MB-aligned model weight/workspace pools |
 
-**Phase 3 Learnings:**
+**Phase 4 Updates:**
+- Buddy allocator replaces bitmap allocator for O(log n) allocation
+- Orders 0-18 (4KB to 1GB blocks) with automatic splitting/coalescing
+- Reduces fragmentation for large model allocations
 - 2MB block alignment dramatically reduces TLB misses for large models
 - Separate pools for weights vs workspace simplifies sharing semantics
 - Generation counters in handles detect use-after-free

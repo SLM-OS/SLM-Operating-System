@@ -297,14 +297,28 @@ extern struct platform_memory mem_info;
 
 ## Physical Memory Allocator Design
 
-### Considerations for Multi-Platform
+### Buddy Allocator (Current Implementation)
 
-1. **Variable DRAM base** — Can't assume 0x40000000
-2. **Non-contiguous usable regions** — Holes for reserved areas
-3. **Large address space** — 64-bit addresses, potential >4GB RAM
-4. **Alignment requirements** — GPU buffers may need specific alignment
+The PMM uses a buddy allocator for O(log n) allocation and freeing:
 
-### Proposed Interface
+**Key Features:**
+- **Orders 0-18**: Blocks from 4KB (2⁰ pages) to 1GB (2¹⁸ pages)
+- **Automatic splitting**: Large blocks split recursively to satisfy smaller requests
+- **Automatic coalescing**: Adjacent free buddies merge on free to prevent fragmentation
+- **Power-of-two rounding**: Requests rounded up to next power of 2 (bounded 2x overhead)
+
+**Algorithm:**
+1. `pmm_alloc_pages(n)`: Find smallest free block >= 2^⌈log₂(n)⌉, split if needed
+2. `pmm_free_pages(addr, n)`: Free block, recursively merge with buddy if both free
+
+**Buddy Address Calculation:**
+```c
+buddy_addr = block_addr XOR (block_size)
+```
+
+Two blocks are buddies if they are the same size and XOR to produce their parent address.
+
+### Interface
 
 ```c
 /* Initialize PMM from platform memory info */
@@ -312,7 +326,7 @@ void pmm_init(const struct platform_memory *mem);
 
 /* Allocate physical pages */
 void *pmm_alloc_page(void);                     /* Single 4KB page */
-void *pmm_alloc_pages(size_t count);            /* Contiguous pages */
+void *pmm_alloc_pages(size_t count);            /* Contiguous pages (rounded up) */
 void *pmm_alloc_aligned(size_t count, size_t align);  /* Aligned allocation */
 
 /* Free physical pages */
@@ -323,19 +337,18 @@ void pmm_free_pages(void *page, size_t count);
 size_t pmm_get_free_pages(void);
 size_t pmm_get_total_pages(void);
 void pmm_dump_stats(void);
+
+/* Buddy-specific statistics (for debugging/testing) */
+void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
 ```
 
-### Implementation Strategy
+### Design Considerations
 
-For Month 1 (QEMU):
-- Simple bitmap allocator
-- Single contiguous region
-- Hardcoded memory size
-
-For Month 2+ (Jetson/Pi):
-- Multiple region support
-- Parse device tree for memory map
-- Skip reserved regions in bitmap
+1. **Variable DRAM base** — Can't assume 0x40000000
+2. **Non-contiguous usable regions** — Holes for reserved areas
+3. **Large address space** — 64-bit addresses, potential >4GB RAM
+4. **Alignment requirements** — GPU buffers may need specific alignment
+5. **Fragmentation** — Buddy coalescing prevents unbounded fragmentation
 
 ---
 

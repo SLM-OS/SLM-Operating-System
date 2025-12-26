@@ -110,4 +110,64 @@ _Alignas(16) uint8_t buffer[64];
 
 ---
 
+## Buddy Allocator (PMM)
+
+The physical memory manager uses a buddy allocator (`kernel/mm/pmm.c`).
+
+### Key Implementation Details
+
+**Orders and Block Sizes:**
+- Order 0: 1 page (4KB)
+- Order 18: 262144 pages (1GB) - maximum
+- Total: 19 orders (0-18)
+
+**Data Structures:**
+```c
+struct free_block {
+    struct free_block *next;
+    struct free_block *prev;  // Doubly-linked for O(1) removal
+};
+
+struct buddy_state {
+    struct free_block *free_lists[MAX_ORDER + 1];  // One list per order
+    size_t free_counts[MAX_ORDER + 1];             // Blocks free at each order
+    // ... statistics
+};
+```
+
+**Buddy Address Calculation:**
+```c
+// Two blocks are buddies if XOR gives the parent block address
+uintptr_t buddy_addr = block_addr ^ (PAGE_SIZE << order);
+```
+
+**Allocation:**
+1. Round request up to power of 2 (order = log2_ceil(count))
+2. Search from target order up to MAX_ORDER for a free block
+3. Split larger blocks recursively, adding smaller halves to free lists
+
+**Freeing:**
+1. Round count up to power of 2 to find block order
+2. Check if buddy is free at same order (look it up in free list)
+3. If buddy is free, remove it and merge into parent (order + 1)
+4. Repeat until buddy is not free or MAX_ORDER reached
+
+**Statistics API:**
+```c
+void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
+// Returns free_counts[], alloc_count, free_count, split_count, merge_count
+```
+
+### Testing
+
+Tests in `kernel/tests/test_pmm.c` verify:
+- Basic alloc/free
+- Power-of-two rounding
+- Block splitting creates correct buddies
+- Coalescing enables larger allocations
+- Exhaustion and recovery
+- Mixed workload stress
+
+---
+
 *Last updated: December 2025*

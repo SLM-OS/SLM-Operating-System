@@ -20,7 +20,12 @@ kernel/tests/
 ├── test_scheduler.c  # Scheduler tests (29 tests: priority, deadline, isolation, benchmarks)
 ├── test_model_mem.c  # Model memory tests (Rust allocator via FFI)
 ├── test_pi_mutex.c   # Priority inheritance mutex tests
-└── test_gpu.c        # GPU subsystem tests (22 tests)
+├── test_gpu.c        # GPU subsystem tests (22 tests)
+├── test_pmm.c        # PMM buddy allocator tests (24 tests)
+├── test_vmm.c        # VMM and TLB invalidation tests (10 tests)
+├── test_component.c  # Component system tests
+├── test_vfs.c        # Virtual filesystem tests
+└── test_shell.c      # Shell command tests
 ```
 
 ### Available Assertions

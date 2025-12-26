@@ -209,9 +209,12 @@ Replace bitmap allocator with more efficient buddy system.
   - Per-order free counts
   - Split/merge operation counts
   - `pmm_dump_stats()` shows free list distribution
-- ✅ 15 unit tests (`kernel/tests/test_pmm.c`)
-  - Basic alloc/free, coalescing, splitting
-  - Stress tests, fragmentation recovery
+- ✅ 24 unit tests (`kernel/tests/test_pmm.c`)
+  - Basic alloc/free, power-of-two rounding
+  - Coalescing verification (proves merged blocks enable larger allocations)
+  - Block splitting creates correct buddies
+  - Statistics tracking (split_count, merge_count)
+  - Mixed workload stress tests
   - Memory writability verification
 
 **Effort:** 1 week
