@@ -55,6 +55,10 @@ void UnityBegin(const char *filename);
 /* Finalize Unity - returns number of failures */
 int UnityEnd(void);
 
+/* Convenience macros for test suite begin/end */
+#define UNITY_BEGIN() UnityBegin(__FILE__)
+#define UNITY_END() UnityEnd()
+
 /* ============================================================================
  * Running Tests
  * ============================================================================ */

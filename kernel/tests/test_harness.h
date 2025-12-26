@@ -46,4 +46,7 @@ int test_suite_component(void);
 /* Virtual filesystem tests */
 int test_suite_vfs(void);
 
+/* Shell command tests */
+int test_suite_shell(void);
+
 #endif /* TEST_HARNESS_H */

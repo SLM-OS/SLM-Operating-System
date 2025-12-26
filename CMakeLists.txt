@@ -135,6 +135,7 @@ set(TEST_SOURCES
     kernel/tests/test_gpu.c
     kernel/tests/test_component.c
     kernel/tests/test_vfs.c
+    kernel/tests/test_shell.c
 )
 
 # Include directories
