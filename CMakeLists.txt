@@ -64,6 +64,9 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
 
+    # Common UART formatting (used by all platforms)
+    kernel/src/kprintf.c
+
     # Drivers - BPMP (Jetson only, required for clock control)
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp.c>
 
