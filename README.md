@@ -723,97 +723,84 @@ struct driver {
 ```
 slm-os/
 ├── kernel/                      # C code
-│   ├── arch/                    # Architecture-specific (ARM64)
-│   │   ├── arm64/
-│   │   │   ├── boot.S
-│   │   │   ├── mmu.c
-│   │   │   └── context.S
-│   │   └── include/
+│   ├── arch/                    # Architecture-specific
+│   │   └── arm64/               # ARM64 (Cortex-A78AE)
+│   │       ├── boot.S           # Boot entry point
+│   │       ├── context.S        # Context switching
+│   │       ├── mmu.S            # MMU setup
+│   │       ├── vectors.S        # Exception vectors
+│   │       ├── smp_boot.S       # Secondary CPU boot
+│   │       └── exceptions.c     # Exception handlers
+│   │
 │   ├── mm/                      # Memory management
 │   │   ├── pmm.c                # Physical memory manager
-│   │   ├── vmm.c                # Virtual memory manager
-│   │   └── allocator.c
-│   ├── sched/                   # Core scheduler primitives
-│   │   ├── core.c               # Core scheduler
+│   │   └── vmm.c                # Virtual memory manager
+│   │
+│   ├── sched/                   # Scheduler
 │   │   ├── task.c               # Task management
+│   │   ├── sched.c              # Core scheduler
 │   │   └── smp.c                # Multi-core support
+│   │
 │   ├── ipc/                     # Inter-process communication
-│   │   ├── message.c
-│   │   ├── shared_buffer.c
-│   │   └── queue.c
+│   │   ├── ipc.c                # Message queues
+│   │   └── pi_mutex.c           # Priority inheritance mutex
+│   │
 │   ├── drivers/                 # Device drivers
-│   │   ├── uart.c
-│   │   ├── gpio.c
-│   │   └── i2c.c
+│   │   ├── uart_pl011.c         # PL011 UART (QEMU, RPi)
+│   │   ├── uart_tegra.c         # Tegra UART (Jetson)
+│   │   ├── gic.c                # GICv3 interrupt controller
+│   │   ├── timer.c              # ARM generic timer
+│   │   └── bpmp.c               # Jetson BPMP interface
+│   │
+│   ├── gpu/                     # GPU integration
+│   │   ├── gpu.c                # GPU memory interface
+│   │   ├── cache.c              # Cache coherency
+│   │   └── gpu_stub.c           # Stub for non-GPU platforms
+│   │
+│   ├── src/                     # Core kernel
+│   │   ├── main.c               # Kernel entry
+│   │   ├── panic.c              # Panic handler
+│   │   ├── kprintf.c            # Kernel printf
+│   │   ├── shell.c              # Debug shell
+│   │   ├── vfs.c                # Virtual filesystem
+│   │   ├── dtb.c                # Device tree parser
+│   │   ├── elf.c                # ELF loader
+│   │   ├── component.c          # Component system (C side)
+│   │   └── slm_ffi.c            # Rust FFI interface
+│   │
 │   ├── include/                 # Kernel headers
 │   │   ├── slm_ffi.h            # FFI boundary definitions
+│   │   ├── platform.h           # Platform configuration
 │   │   └── ...
-│   └── gpu/                     # GPU integration (C for NVIDIA APIs)
-│       ├── jetson_gpu.c
-│       ├── memory_map.c
-│       └── cuda_lite.c
+│   │
+│   └── tests/                   # Kernel tests (Unity framework)
+│       ├── unity.c/h            # Unity test framework
+│       ├── test_harness.c       # Test runner
+│       └── test_*.c             # Test suites
 │
 ├── runtime/                     # Rust code
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs
-│       ├── kernel_ffi.rs        # FFI bindings to C kernel
-│       ├── loader/              # Model/component loader
+│       ├── component/           # Component registry
 │       │   ├── mod.rs
-│       │   ├── elf_loader.rs
-│       │   ├── onnx_loader.rs
-│       │   └── component.rs
-│       ├── inference/           # Inference engine
-│       │   ├── mod.rs
-│       │   ├── engine.rs
-│       │   ├── batch.rs
-│       │   └── backends/
-│       │       ├── mod.rs
-│       │       └── tensorrt.rs
-│       ├── sched/               # SLM-aware scheduling policy
-│       │   ├── mod.rs
-│       │   ├── deadline.rs
-│       │   └── heterogeneous.rs
-│       └── mm/                  # Model memory management
+│       │   └── registry.rs
+│       └── model_mem/           # Model memory allocator
 │           ├── mod.rs
-│           └── model_mem.rs
-│
-├── components/                  # Example SLM components (Rust)
-│   ├── anomaly-detector/
-│   │   ├── Cargo.toml
-│   │   ├── manifest.yaml
-│   │   ├── src/
-│   │   │   └── lib.rs
-│   │   └── models/
-│   ├── resource-scheduler/
-│   │   ├── Cargo.toml
-│   │   ├── manifest.yaml
-│   │   └── src/
-│   │       └── lib.rs
-│   └── predictive-maintenance/
-│       ├── Cargo.toml
-│       ├── manifest.yaml
-│       └── src/
-│           └── lib.rs
-│
-├── tools/                       # Build and debug tools
-│   ├── mkimage/                 # OS image creator
-│   ├── component-pack/          # Component packager
-│   └── debugger/                # Kernel debugger
+│           └── allocator.rs
 │
 ├── docs/                        # Documentation
 │   ├── architecture.md
-│   ├── api/
-│   └── tutorials/
+│   ├── boot-sequence.md
+│   ├── mmu.md
+│   └── ...
 │
-├── tests/                       # Test suites
-│   ├── unit/
-│   ├── integration/
-│   └── benchmarks/
+├── lab-tools/                   # Hardware lab utilities
+│   └── jetson-power.py          # Jetson power control
 │
 ├── CMakeLists.txt               # C kernel build
-├── Cargo.toml                   # Workspace root for Rust
-└── Makefile                     # Top-level orchestrator
+├── Makefile                     # Top-level orchestrator
+└── CLAUDE.md                    # AI assistant notes
 ```
 
 ---

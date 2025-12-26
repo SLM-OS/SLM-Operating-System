@@ -55,72 +55,69 @@ set(RUST_LIB ${RUST_LIB_DIR}/libslm_runtime.a)
 
 # Kernel source files
 set(KERNEL_SOURCES
-    # Boot and core
-    kernel/src/boot.S
-    kernel/src/main.c
-    kernel/src/panic.c
+    # ==========================================================================
+    # Architecture-specific (ARM64)
+    # ==========================================================================
+    kernel/arch/arm64/boot.S
+    kernel/arch/arm64/context.S
+    kernel/arch/arm64/mmu.S
+    kernel/arch/arm64/vectors.S
+    kernel/arch/arm64/smp_boot.S
+    kernel/arch/arm64/exceptions.c
 
-    # Drivers - UART selected by platform
+    # ==========================================================================
+    # Memory Management
+    # ==========================================================================
+    kernel/mm/pmm.c
+    kernel/mm/vmm.c
+
+    # ==========================================================================
+    # Scheduler
+    # ==========================================================================
+    kernel/sched/task.c
+    kernel/sched/sched.c
+    kernel/sched/smp.c
+
+    # ==========================================================================
+    # Inter-Process Communication
+    # ==========================================================================
+    kernel/ipc/ipc.c
+    kernel/ipc/pi_mutex.c
+
+    # ==========================================================================
+    # Drivers
+    # ==========================================================================
+    # UART - platform-specific
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
 
-    # Common UART formatting (used by all platforms)
-    kernel/src/kprintf.c
-
-    # Drivers - BPMP (Jetson only, required for clock control)
+    # BPMP - Jetson only (required for clock control)
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp.c>
 
-    # Interrupt handling
-    kernel/src/gic.c
-    kernel/src/timer.c
-    kernel/src/vectors.S
-    kernel/src/exceptions.c
-    # kernel/drivers/gpio.c
-    # kernel/drivers/i2c.c
+    # Interrupt controller and timer
+    kernel/drivers/gic.c
+    kernel/drivers/timer.c
 
-    # Architecture-specific (ARM64)
-    # kernel/arch/arm64/context.S
-    # kernel/arch/arm64/mmu.c
+    # ==========================================================================
+    # Core Kernel
+    # ==========================================================================
+    kernel/src/main.c
+    kernel/src/panic.c
+    kernel/src/kprintf.c
 
-    # Memory management
-    kernel/src/pmm.c
-    kernel/src/vmm.c
-    kernel/src/mmu.S
-
-    # Scheduler
-    kernel/src/task.c
-    kernel/src/sched.c
-    kernel/src/context.S
-
-    # SMP (multi-core support)
-    kernel/src/smp.c
-    kernel/src/smp_boot.S
-
-    # IPC
-    kernel/src/ipc.c
-
-    # Synchronization
-    kernel/src/pi_mutex.c
-
-    # Shell
+    # Shell and utilities
     kernel/src/shell.c
-
-    # Device Tree
     kernel/src/dtb.c
-
-    # ELF Loader
     kernel/src/elf.c
-
-    # Virtual Filesystem
     kernel/src/vfs.c
 
-    # Component System (C helpers for Rust core)
+    # Component system and FFI
     kernel/src/component.c
-
-    # FFI (C/Rust interface)
     kernel/src/slm_ffi.c
 
-    # GPU integration
+    # ==========================================================================
+    # GPU Integration
+    # ==========================================================================
     kernel/gpu/gpu.c
     kernel/gpu/cache.c
     kernel/gpu/gpu_stub.c
