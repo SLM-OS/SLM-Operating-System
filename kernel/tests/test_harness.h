@@ -40,4 +40,10 @@ int test_suite_pi_mutex(void);
 /* GPU subsystem tests */
 int test_suite_gpu(void);
 
+/* Component system tests */
+int test_suite_component(void);
+
+/* Virtual filesystem tests */
+int test_suite_vfs(void);
+
 #endif /* TEST_HARNESS_H */

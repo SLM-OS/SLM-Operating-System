@@ -560,14 +560,14 @@ Full implementation will be added in Phase 5 with actual inference engine integr
 ## Future Work
 
 ### Phase 5 (AI Integration)
-- [ ] Implement InferenceScheduler with actual request queue
-- [ ] Batch inference requests for throughput
-- [ ] GPU/NPU task coordination
+- ☐ Implement InferenceScheduler with actual request queue
+- ☐ Batch inference requests for throughput
+- ☐ GPU/NPU task coordination
 
 ### Milestone 4+ (big.LITTLE)
-- [ ] Actual core assignment based on CoreType hints (detect big vs LITTLE cores)
-- [ ] CPU frequency scaling integration
-- [ ] Dynamic core migration based on thermal/power state
+- ☐ Actual core assignment based on CoreType hints (detect big vs LITTLE cores)
+- ☐ CPU frequency scaling integration
+- ☐ Dynamic core migration based on thermal/power state
 
 ---
 

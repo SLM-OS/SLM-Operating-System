@@ -9,9 +9,10 @@ This document describes how to interact with the Jetson Orin Nano lab hardware r
 | Operation | Command |
 |-----------|---------|
 | SSH to Jetson | `ssh -p 4243 root@gradient-nano.onthewifi.com` |
+| Reboot (preferred) | `reboot` via SSH or SLM-OS shell |
+| Power off | `lab-tools/jetson-power.py off` (smart plug) |
 | Power cycle | `lab-tools/jetson-power.py cycle` |
 | Serial (40-pin) | See "Serial Console Access" below |
-| Reboot (preferred) | `reboot` via SSH or SLM-OS shell |
 
 ---
 
@@ -47,6 +48,35 @@ Use power cycling only when:
 ```
 
 The Kasa smart plug is at `192.168.4.112`. The `cycle` command turns power off, waits 3 seconds, then turns it back on.
+
+---
+
+## Powering Off the Jetson
+
+### Use Smart Plug Only
+
+**⚠️ IMPORTANT:** Never use software power-off commands (`poweroff`, `shutdown -h`, `halt`) via SSH unless explicitly instructed. The Jetson requires **manual physical intervention** to restart after a software power-off — there is no remote way to turn it back on.
+
+**Correct method — Smart plug:**
+```bash
+/c/Windows/py.exe "H:/My Drive/Capstone/CS-496-SLM-Operating-System/lab-tools/jetson-power.py" off
+```
+
+This cuts power at the smart plug level. To turn it back on:
+```bash
+/c/Windows/py.exe "H:/My Drive/Capstone/CS-496-SLM-Operating-System/lab-tools/jetson-power.py" on
+```
+
+The Jetson is configured to auto-power-on when AC power is applied, so turning the smart plug on will boot the system.
+
+### Why Software Power-Off Doesn't Work Remotely
+
+When Linux executes `poweroff`, the Jetson enters a halted state but the smart plug remains on. In this state:
+- The Jetson will not respond to SSH
+- The Jetson will not auto-restart when power is cycled
+- Physical button press is required to restart
+
+The smart plug `status` command only shows whether the **plug** is providing power, not whether the Jetson itself is running.
 
 ---
 

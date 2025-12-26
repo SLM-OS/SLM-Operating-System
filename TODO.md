@@ -2,7 +2,7 @@
 
 This document tracks Phase 4 implementation of SLM-OS.
 
-**Status:** Not Started
+**Status:** In Progress
 
 **Summary:** Phase 4 combines hardware bring-up work deferred from Phase 3 (blocked on serial adapter) with the Component System milestone from the original roadmap.
 
@@ -167,20 +167,20 @@ This document tracks Phase 4 implementation of SLM-OS.
 **Depends on:** M1 (Serial Console) for Jetson testing
 
 ### Virtual Filesystem Structure
-- ☐ Mount root `/` with command nodes
-- ☐ Mount `/sys/` for system info (read-only virtual files)
-- ☐ Mount `/proc/` for per-task info
-- ☐ Design `/components/` mount point for component system
+- ✅ Mount root `/` with command nodes
+- ✅ Mount `/sys/` for system info (read-only virtual files)
+- ✅ Mount `/proc/` for per-task info
+- ✅ Design `/components/` mount point for component system
 
 ### ELF Execution Improvements
-- ☐ `run <name>` — load and execute ELF from built-in table
-- ☐ Pass argc/argv to loaded program (simple stack setup)
-- ☐ Handle task exit and ELF memory cleanup
-- ☐ Track ELF memory ownership for cleanup on exit
-- ☐ `kill <pid>` — terminate running task
+- ✅ `run <name>` — load and execute ELF from built-in table
+- ✅ Pass argc/argv to loaded program (simple stack setup)
+- ✅ Handle task exit and ELF memory cleanup
+- ✅ Track ELF memory ownership for cleanup on exit
+- ✅ `kill <pid>` — terminate running task
 
 ### Shell Testing
-- ☐ Task exits cleanly, memory reclaimed
+- ✅ Task exits cleanly, memory reclaimed
 - ☐🔗 Test shell on Jetson (requires M1)
 - ☐ Verify all shell commands work on real hardware
 
@@ -191,40 +191,41 @@ This document tracks Phase 4 implementation of SLM-OS.
 **Depends on:** M5 (Shell & ELF Improvements)
 
 ### Component Specification
-- ☐ Finalize component manifest format (YAML)
-- ☐ Define component binary format (simplified ELF or custom)
-- ☐ Document component API in `docs/components.md`
-- ☐ Create example component manifest
+- ✅ Finalize component manifest format (YAML)
+- ✅ Define component binary format (simplified ELF or custom)
+- ✅ Document component API in `docs/components.md`
+- ✅ Create example component manifest
 
 ### Component Loader
-- ☐ Implement component loader in Rust (`runtime/src/loader/`)
-- ☐ Parse component manifest
-- ☐ Load component code into memory
-- ☐ Resolve component dependencies
-- ☐ Create task(s) for component
+- ✅ Implement component loader in Rust (`runtime/src/component/`)
+- ✅ Parse component manifest (simple key-value format)
+- ✅ Component registry with spinlock protection
+- ⏸️ Load component code into memory — requires actual ELF loading
+- ⏸️ Resolve component dependencies — Phase 5+
+- ⏸️ Create task(s) for component — Phase 5+
 
 ### Component Lifecycle Manager
-- ☐ Implement `ComponentState` enum (Loaded, Initializing, Running, Suspended, Updating, Terminating)
-- ☐ Implement `Component` struct with lifecycle tracking
-- ☐ Write `component_load(name)` — load and start component
-- ☐ Write `component_unload(name)` — stop and unload component
-- ☐ Write `component_suspend(name)` / `component_resume(name)`
+- ✅ Implement `ComponentState` enum (Loaded, Initializing, Running, Suspended, Updating, Terminating)
+- ✅ Implement `ComponentInfo` struct with lifecycle tracking
+- ✅ FFI bindings for C kernel (component.h, component.c)
+- ✅ Component registration from shell
+- ⏸️ Automatic component discovery — Phase 5+
 
 ### Hot-Swap Mechanism
-- ☐ Design state transfer protocol between old and new component versions
-- ☐ Implement `component_hot_swap(old_name, new_component)`
-- ☐ Pause old component
-- ☐ Transfer state from old to new
-- ☐ Update message routing
-- ☐ Start new component
-- ☐ Cleanup old component
-- ☐ Test hot-swap with simple component
+- ⏸️ Design state transfer protocol between old and new component versions — Phase 5+
+- ⏸️ Implement `component_hot_swap(old_name, new_component)` — Phase 5+
+- ⏸️ Pause old component — Phase 5+
+- ⏸️ Transfer state from old to new — Phase 5+
+- ⏸️ Update message routing — Phase 5+
+- ⏸️ Start new component — Phase 5+
+- ⏸️ Cleanup old component — Phase 5+
+- ⏸️ Test hot-swap with simple component — Phase 5+
 
 ### Shell Commands
-- ☐ `component list` — list loaded components
-- ☐ `component load <name>` — load component
-- ☐ `component unload <name>` — unload component
-- ☐ `component status <name>` — show component details
+- ✅ `component list` — list loaded components
+- ✅ `component register` — register component from shell
+- ✅ `component unregister` — unregister component
+- ✅ `component status` — show component details
 
 ---
 
@@ -332,13 +333,13 @@ This document tracks Phase 4 implementation of SLM-OS.
 | **GPU compute scope** | Memory only vs basic compute | **Memory only** — compute requires GSP firmware (Phase 5) |
 | **Cache policy** | Write-back vs write-through | **Write-back with explicit flush** — better performance |
 
-### Milestone 6 — Components
+### Milestone 6 — Components ✅ DECIDED
 
-| Decision | Options | Recommendation |
-|----------|---------|----------------|
-| **Component format** | Simplified ELF vs custom | **Simplified ELF** — easier tooling |
-| **Manifest format** | YAML vs TOML vs JSON | **YAML** — human readable, already in design doc |
-| **State transfer** | Serialize all vs explicit API | **Explicit API** — component declares what state to transfer |
+| Decision | Options | **Choice** | Rationale |
+|----------|---------|------------|-----------|
+| **Component format** | Simplified ELF vs custom | **Simplified ELF** | Easier tooling, standard format |
+| **Manifest format** | YAML vs TOML vs JSON vs key-value | **Simple key-value** | No `no_std` YAML parser exists; key-value is trivial to parse and sufficient for current needs |
+| **State transfer** | Serialize all vs explicit API | **Explicit API** | Component declares what state to transfer (Phase 5+) |
 
 ### Milestone 8 — Isolation
 

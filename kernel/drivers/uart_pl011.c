@@ -340,3 +340,193 @@ int uart_printf(const char *fmt, ...)
 
     return count;
 }
+
+/* ========================================================================
+ * snprintf Implementation
+ * ======================================================================== */
+
+/*
+ * Context for buffer-based output.
+ */
+struct snprintf_ctx {
+    char *buf;          /* Current write position */
+    size_t remaining;   /* Space remaining (including null) */
+    int total;          /* Total chars that would be written */
+};
+
+/* Helper: write char to buffer context */
+static void buf_putc(struct snprintf_ctx *ctx, char c)
+{
+    ctx->total++;
+    if (ctx->remaining > 1) {
+        *ctx->buf++ = c;
+        ctx->remaining--;
+    }
+}
+
+/* Helper: write string to buffer context */
+static void buf_puts(struct snprintf_ctx *ctx, const char *s)
+{
+    while (*s) {
+        buf_putc(ctx, *s++);
+    }
+}
+
+/* Helper: write unsigned integer to buffer context */
+static void buf_unsigned(struct snprintf_ctx *ctx, uint64_t value, int base, int uppercase)
+{
+    char tmp[24];
+    char *p = tmp + sizeof(tmp) - 1;
+    const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+
+    *p = '\0';
+
+    if (value == 0) {
+        *--p = '0';
+    } else {
+        while (value > 0) {
+            *--p = digits[value % base];
+            value /= base;
+        }
+    }
+
+    buf_puts(ctx, p);
+}
+
+/* Helper: write signed integer to buffer context */
+static void buf_signed(struct snprintf_ctx *ctx, int64_t value, int base)
+{
+    if (value < 0) {
+        buf_putc(ctx, '-');
+        value = -value;
+    }
+    buf_unsigned(ctx, (uint64_t)value, base, 0);
+}
+
+/*
+ * Formatted output to buffer with va_list.
+ */
+int uart_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
+{
+    struct snprintf_ctx ctx;
+    int is_long;
+
+    if (!buf || size == 0) {
+        return -1;
+    }
+
+    ctx.buf = buf;
+    ctx.remaining = size;
+    ctx.total = 0;
+
+    while (*fmt) {
+        if (*fmt != '%') {
+            buf_putc(&ctx, *fmt++);
+            continue;
+        }
+
+        fmt++;  /* Skip '%' */
+
+        /* Check for long modifier */
+        is_long = 0;
+        if (*fmt == 'l') {
+            is_long = 1;
+            fmt++;
+        }
+
+        switch (*fmt) {
+        case 'c':
+            buf_putc(&ctx, (char)va_arg(args, int));
+            break;
+
+        case 's': {
+            const char *s = va_arg(args, const char *);
+            if (s) {
+                buf_puts(&ctx, s);
+            } else {
+                buf_puts(&ctx, "(null)");
+            }
+            break;
+        }
+
+        case 'd':
+        case 'i':
+            if (is_long) {
+                buf_signed(&ctx, va_arg(args, int64_t), 10);
+            } else {
+                buf_signed(&ctx, va_arg(args, int32_t), 10);
+            }
+            break;
+
+        case 'u':
+            if (is_long) {
+                buf_unsigned(&ctx, va_arg(args, uint64_t), 10, 0);
+            } else {
+                buf_unsigned(&ctx, va_arg(args, uint32_t), 10, 0);
+            }
+            break;
+
+        case 'x':
+            if (is_long) {
+                buf_unsigned(&ctx, va_arg(args, uint64_t), 16, 0);
+            } else {
+                buf_unsigned(&ctx, va_arg(args, uint32_t), 16, 0);
+            }
+            break;
+
+        case 'X':
+            if (is_long) {
+                buf_unsigned(&ctx, va_arg(args, uint64_t), 16, 1);
+            } else {
+                buf_unsigned(&ctx, va_arg(args, uint32_t), 16, 1);
+            }
+            break;
+
+        case 'p':
+            buf_puts(&ctx, "0x");
+            buf_unsigned(&ctx, (uint64_t)(uintptr_t)va_arg(args, void *), 16, 0);
+            break;
+
+        case '%':
+            buf_putc(&ctx, '%');
+            break;
+
+        case '\0':
+            /* Trailing % at end of format string */
+            goto done;
+
+        default:
+            /* Unknown format, print literally */
+            buf_putc(&ctx, '%');
+            buf_putc(&ctx, *fmt);
+            break;
+        }
+
+        fmt++;
+    }
+
+done:
+    /* Always null-terminate */
+    if (ctx.remaining > 0) {
+        *ctx.buf = '\0';
+    } else if (size > 0) {
+        buf[size - 1] = '\0';
+    }
+
+    return ctx.total;
+}
+
+/*
+ * Formatted output to buffer.
+ */
+int uart_snprintf(char *buf, size_t size, const char *fmt, ...)
+{
+    va_list args;
+    int count;
+
+    va_start(args, fmt);
+    count = uart_vsnprintf(buf, size, fmt, args);
+    va_end(args);
+
+    return count;
+}

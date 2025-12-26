@@ -40,7 +40,7 @@ See `docs/mmu.md` for comprehensive documentation.
 - ✅ Populate initial page tables (identity map + kernel high map via shared L1)
 - ✅ Write `mmu_enable()` in `kernel/src/mmu.S`
 - ✅ Handle transition from physical to virtual addressing
-- Deferred: Update linker script for virtual addresses (RWX warning fix)
+- ⏸️ Update linker script for virtual addresses (RWX warning fix) — deferred
 
 ### Model Memory Flags (SLM-Specific) ✅
 - ✅ Implement `gpu_mapped` flag handling (PTE_SW_GPU_MAPPED)
@@ -53,7 +53,7 @@ See `docs/mmu.md` for comprehensive documentation.
 - ✅ Test mapping/unmapping pages dynamically
 - ✅ Verify UART still works after MMU enable (device memory mapping)
 - ✅ Automated test suite with `make test`
-- Deferred: Test page fault handling (basic — panic with useful info)
+- ⏸️ Test page fault handling (basic — panic with useful info) — deferred
 
 ---
 
@@ -137,8 +137,8 @@ See `kernel/include/ipc.h` for full API definition.
 - ✅ Test shared buffer create/destroy
 - ✅ Test shared buffer map/unmap with read/write verification
 - ✅ Test buffer lookup by ID
-- Deferred: Multi-task producer/consumer test (requires more complex test harness)
-- Deferred: Memory leak verification (no task cleanup yet)
+- ⏸️ Multi-task producer/consumer test — deferred (requires more complex test harness)
+- ⏸️ Memory leak verification — deferred (no task cleanup yet)
 
 ---
 

@@ -274,6 +274,59 @@ RustPoolStats rust_weight_pool_stats(void);     // Weight pool (model parameters
 RustPoolStats rust_workspace_pool_stats(void);  // Workspace pool (inference scratch)
 ```
 
+### Component System (called from C)
+
+The component system is implemented in Rust (`runtime/src/component/`) with C FFI wrappers.
+
+```c
+// Initialize the component registry
+int component_system_init(void);  // Returns 0 on success
+
+// Get the number of registered components
+uint32_t component_count(void);
+
+// Register a new component
+// @param name: Component name (null-terminated, max 31 chars)
+// @param version: Version string (null-terminated, max 15 chars)
+// @param component_type: 0=service, 1=driver, 2=application
+// @param priority: 0=low, 1=normal, 2=high
+// Returns component index on success, -1 on error
+int component_register(const char *name, const char *version,
+                       uint8_t component_type, uint8_t priority);
+
+// Unregister a component by index
+// Returns 0 on success, -1 on error
+int component_unregister(uint32_t index);
+
+// Find a component by name
+// Returns component index, or -1 if not found
+int component_find(const char *name);
+
+// Get component info by index
+// Returns 0 on success, -1 on error
+int component_get_info(uint32_t index, ComponentInfo *info);
+
+// Set component state
+// States: 0=Loaded, 1=Initializing, 2=Running, 3=Suspended,
+//         4=Updating, 5=Terminating, 6=Unloaded
+// Returns 0 on success, -1 on error
+int component_set_state(uint32_t index, uint8_t state);
+```
+
+#### ComponentInfo Structure
+
+```c
+typedef struct {
+    char name[32];          // Component name (null-terminated)
+    char version[16];       // Version string (null-terminated)
+    uint8_t component_type; // 0=service, 1=driver, 2=application
+    uint8_t priority;       // 0=low, 1=normal, 2=high
+    uint8_t state;          // Lifecycle state (see above)
+    uint8_t _pad;           // Padding
+    uint32_t task_id;       // Associated task ID (0 if none)
+} ComponentInfo;
+```
+
 ---
 
 ## Panic Handling

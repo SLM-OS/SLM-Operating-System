@@ -100,6 +100,8 @@ int test_harness_run_all(void)
     total_failures += test_suite_scheduler();
     total_failures += test_suite_pi_mutex();
     total_failures += test_suite_gpu();
+    total_failures += test_suite_component();
+    total_failures += test_suite_vfs();
 
     /* Final summary */
     uart_puts("\n");

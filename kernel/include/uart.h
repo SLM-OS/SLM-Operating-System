@@ -16,6 +16,7 @@
 #define UART_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdarg.h>
 
 /*
@@ -82,5 +83,25 @@ int uart_printf_unlocked(const char *fmt, ...);
  * Used internally and by debug macros.
  */
 int uart_vprintf(const char *fmt, va_list args);
+
+/*
+ * Formatted output to buffer (snprintf-style).
+ *
+ * Writes at most (size - 1) characters to buf, always null-terminates.
+ * Same format specifiers as uart_printf.
+ *
+ * @buf:  Output buffer
+ * @size: Buffer size (including space for null terminator)
+ * @fmt:  Format string
+ *
+ * Returns: Number of characters that would have been written if buf
+ *          was large enough (excluding null terminator), or -1 on error.
+ */
+int uart_snprintf(char *buf, size_t size, const char *fmt, ...);
+
+/*
+ * Formatted output to buffer with va_list.
+ */
+int uart_vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
 
 #endif /* UART_H */

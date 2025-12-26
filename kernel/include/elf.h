@@ -168,9 +168,29 @@ struct task;
  *          Caller retains ownership of info and must call elf_unload()
  *          after the task terminates.
  *
- * Note: The ELF entry point is called with arg=NULL. When the entry
- *       function returns, task_exit() is called automatically.
+ * Note: Calls elf_create_task_with_args(info, name, 0, NULL).
  */
 struct task *elf_create_task(const struct elf_info *info, const char *name);
+
+/*
+ * Create a kernel task from a loaded ELF with argc/argv support.
+ *
+ * Similar to elf_create_task, but passes argc and argv to the entry point.
+ * The entry point signature should be: int main(int argc, char *argv[])
+ *
+ * @info: Load information from elf_load()
+ * @name: Task name (for debugging)
+ * @argc: Argument count
+ * @argv: Argument vector (will be copied to task's stack)
+ *
+ * Returns: Pointer to created task, or NULL on failure.
+ *          The returned task is ready to be added to the scheduler.
+ *
+ * Note: argv strings are copied to the task's stack, so the caller can
+ *       free them after this function returns.
+ */
+struct task *elf_create_task_with_args(const struct elf_info *info,
+                                        const char *name,
+                                        int argc, char *argv[]);
 
 #endif /* ELF_H */

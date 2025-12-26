@@ -17,6 +17,8 @@
 #include "platform.h"
 #include "dtb.h"
 #include "elf.h"
+#include "vfs.h"
+#include "component.h"
 #include <stddef.h>
 
 /* ============================================================================
@@ -36,6 +38,10 @@ static int cmd_model(int argc, char *argv[]);
 static int cmd_dtb(int argc, char *argv[]);
 static int cmd_elftest(int argc, char *argv[]);
 static int cmd_run(int argc, char *argv[]);
+static int cmd_kill(int argc, char *argv[]);
+static int cmd_ls(int argc, char *argv[]);
+static int cmd_cat(int argc, char *argv[]);
+static int cmd_component(int argc, char *argv[]);
 
 /* ============================================================================
  * Command table
@@ -52,7 +58,11 @@ static const shell_cmd_t builtin_commands[] = {
     {"model",  cmd_model,  "Show model memory pools"},
     {"dtb",    cmd_dtb,    "Show device tree info"},
     {"elftest", cmd_elftest, "Test ELF loader"},
-    {"run",    cmd_run,    "Run embedded test ELF"},
+    {"run",    cmd_run,    "Run a program (run <name>)"},
+    {"kill",   cmd_kill,   "Terminate a task by ID"},
+    {"ls",     cmd_ls,     "List directory (ls <path>)"},
+    {"cat",    cmd_cat,    "Show file contents (cat <path>)"},
+    {"component", cmd_component, "Component system (list/register/status)"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
 };
@@ -93,6 +103,27 @@ static int shell_strcmp(const char *a, const char *b)
 static void shell_strcpy(char *dst, const char *src)
 {
     while ((*dst++ = *src++));
+}
+
+/*
+ * Parse unsigned integer from string.
+ * Returns 0 on success, -1 on error.
+ */
+static int parse_uint(const char *str, uint32_t *out)
+{
+    if (!str || !*str) return -1;
+
+    uint32_t val = 0;
+    while (*str) {
+        if (*str < '0' || *str > '9') return -1;
+        uint32_t digit = *str - '0';
+        /* Check for overflow */
+        if (val > (UINT32_MAX - digit) / 10) return -1;
+        val = val * 10 + digit;
+        str++;
+    }
+    *out = val;
+    return 0;
 }
 
 /*
@@ -627,6 +658,20 @@ static int cmd_elftest(int argc, char *argv[])
     return 0;
 }
 
+/* ============================================================================
+ * Embedded ELF Registry
+ *
+ * Each entry contains a name and pointer to an embedded ELF binary.
+ * Use `run` to list available programs, `run <name>` to execute.
+ * ============================================================================ */
+
+typedef struct {
+    const char *name;           /* Program name */
+    const char *description;    /* Short description */
+    const uint8_t *data;        /* Pointer to ELF binary */
+    size_t size;                /* Size of ELF binary */
+} elf_program_t;
+
 /*
  * Minimal ARM64 ELF binary that just returns.
  *
@@ -673,16 +718,54 @@ static const uint8_t test_elf_binary[] = {
     0xC0, 0x03, 0x5F, 0xD6   /* ret (ARM64: 0xD65F03C0) */
 };
 
+/* Registry of embedded ELF programs */
+static const elf_program_t elf_programs[] = {
+    {"test",    "Minimal ELF that returns immediately", test_elf_binary, sizeof(test_elf_binary)},
+    /* Add more embedded ELF programs here */
+};
+
+#define NUM_ELF_PROGRAMS (sizeof(elf_programs) / sizeof(elf_programs[0]))
+
+/*
+ * Find an ELF program by name.
+ */
+static const elf_program_t *find_elf_program(const char *name)
+{
+    for (size_t i = 0; i < NUM_ELF_PROGRAMS; i++) {
+        if (shell_strcmp(name, elf_programs[i].name) == 0) {
+            return &elf_programs[i];
+        }
+    }
+    return NULL;
+}
+
 static int cmd_run(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
+    /* No arguments: list available programs */
+    if (argc < 2) {
+        uart_puts("Available programs:\r\n\r\n");
+        for (size_t i = 0; i < NUM_ELF_PROGRAMS; i++) {
+            uart_printf("  %-12s %s\r\n",
+                        elf_programs[i].name,
+                        elf_programs[i].description);
+        }
+        uart_puts("\r\nUsage: run <name>\r\n");
+        return 0;
+    }
 
-    uart_puts("Loading embedded test ELF...\r\n");
+    /* Find the program by name */
+    const elf_program_t *prog = find_elf_program(argv[1]);
+    if (!prog) {
+        uart_printf("Unknown program: %s\r\n", argv[1]);
+        uart_puts("Use 'run' to list available programs.\r\n");
+        return -1;
+    }
 
-    /* Load the test ELF */
+    uart_printf("Loading '%s'...\r\n", prog->name);
+
+    /* Load the ELF */
     struct elf_info info;
-    int ret = elf_load(test_elf_binary, sizeof(test_elf_binary), &info);
+    int ret = elf_load(prog->data, prog->size, &info);
     if (ret != ELF_OK) {
         uart_printf("  Failed to load ELF: %s\r\n", elf_strerror(ret));
         return -1;
@@ -691,30 +774,365 @@ static int cmd_run(int argc, char *argv[])
     uart_printf("  Loaded %zu segment(s), entry=0x%lx\r\n",
                 info.num_segments, info.entry);
 
-    /* Create task from ELF */
-    struct task *task = elf_create_task(&info, "test_elf");
+    /*
+     * Build argv for the ELF program.
+     * argv[0] = program name
+     * argv[1..n] = additional arguments from command line
+     */
+    int elf_argc = argc - 1;  /* Skip "run" */
+    char **elf_argv = &argv[1];  /* Points to program name */
+
+    /* Create task from ELF with arguments */
+    struct task *task = elf_create_task_with_args(&info, prog->name,
+                                                   elf_argc, elf_argv);
     if (!task) {
         uart_puts("  Failed to create task\r\n");
         elf_unload(&info);
         return -1;
     }
 
-    uart_printf("  Created task (id=%u)\r\n", task->id);
+    uart_printf("  Created task '%s' (id=%u) with %d arg(s)\r\n",
+                prog->name, task->id, elf_argc);
 
     /* Add to scheduler */
     scheduler_add_task(task);
     uart_puts("  Task added to scheduler\r\n");
 
-    uart_puts("\r\nThe test ELF task will run and immediately return.\r\n");
-    uart_puts("Check 'tasks' output to verify it completed.\r\n");
-
     /*
-     * Note: We don't unload the ELF here because the task hasn't run yet.
-     * In a real implementation, we'd track ELF ownership and clean up
-     * after task termination. For this demo, we leak the segment memory.
+     * Note: ELF segment memory is now automatically freed when the task
+     * terminates. The cleanup callback set by elf_create_task_with_args
+     * calls elf_unload() to free the segment memory.
      */
 
     return 0;
+}
+
+/*
+ * kill <pid> - Terminate a task by ID
+ */
+static int cmd_kill(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_puts("Usage: kill <pid>\r\n");
+        uart_puts("  Terminates a task by its process ID.\r\n");
+        uart_puts("  Use 'tasks' to see running task IDs.\r\n");
+        return -1;
+    }
+
+    uint32_t pid;
+    if (parse_uint(argv[1], &pid) != 0) {
+        uart_printf("Invalid PID: %s\r\n", argv[1]);
+        return -1;
+    }
+
+    /* Find the task */
+    struct task *target = task_get(pid);
+    if (!target) {
+        uart_printf("No task with PID %lu\r\n", (unsigned long)pid);
+        return -1;
+    }
+
+    /* Don't allow killing the current task (shell) */
+    struct task *current = task_current();
+    if (target == current) {
+        uart_puts("Cannot kill the current task (shell)\r\n");
+        return -1;
+    }
+
+    /* Don't allow killing idle tasks (they have special names like "idle" or "idle_0") */
+    if (shell_strcmp(target->name, "idle") == 0 ||
+        (target->name[0] == 'i' && target->name[1] == 'd' &&
+         target->name[2] == 'l' && target->name[3] == 'e' &&
+         target->name[4] == '_')) {
+        uart_puts("Cannot kill idle tasks\r\n");
+        return -1;
+    }
+
+    /* Check if already terminated */
+    if (target->state == TASK_TERMINATED) {
+        uart_printf("Task %lu is already terminated\r\n", (unsigned long)pid);
+        return 0;
+    }
+
+    uart_printf("Killing task '%s' (pid=%lu)...\r\n", target->name, (unsigned long)pid);
+
+    /* Mark as terminated and remove from scheduler */
+    target->state = TASK_TERMINATED;
+    scheduler_remove_task(target);
+
+    /* Destroy the task (frees stack) */
+    task_destroy(target);
+
+    uart_puts("Task terminated.\r\n");
+    return 0;
+}
+
+/* ============================================================================
+ * VFS Commands (ls, cat)
+ * ============================================================================ */
+
+/*
+ * Callback for listing directory entries.
+ */
+static void ls_print_entry(struct vfs_node *node, void *ctx)
+{
+    (void)ctx;
+    if (node->type == VFS_NODE_DIR) {
+        uart_printf("  %s/\r\n", node->name);
+    } else {
+        uart_printf("  %s\r\n", node->name);
+    }
+}
+
+/*
+ * ls <path> - List directory contents
+ */
+static int cmd_ls(int argc, char *argv[])
+{
+    const char *path = "/";  /* Default to root */
+
+    if (argc >= 2) {
+        path = argv[1];
+    }
+
+    struct vfs_node *node = vfs_lookup(path);
+    if (!node) {
+        uart_printf("ls: %s: No such file or directory\r\n", path);
+        return -1;
+    }
+
+    if (node->type != VFS_NODE_DIR) {
+        /* It's a file, just show its name */
+        uart_printf("%s\r\n", node->name);
+        return 0;
+    }
+
+    /* List directory contents */
+    uart_printf("%s:\r\n", path);
+    vfs_list(node, ls_print_entry, NULL);
+
+    return 0;
+}
+
+/*
+ * cat <path> - Show file contents
+ */
+static int cmd_cat(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_puts("Usage: cat <path>\r\n");
+        uart_puts("  Show contents of a virtual file.\r\n");
+        uart_puts("  Example: cat /sys/memory\r\n");
+        return -1;
+    }
+
+    const char *path = argv[1];
+
+    struct vfs_node *node = vfs_lookup(path);
+    if (!node) {
+        uart_printf("cat: %s: No such file or directory\r\n", path);
+        return -1;
+    }
+
+    if (node->type == VFS_NODE_DIR) {
+        uart_printf("cat: %s: Is a directory\r\n", path);
+        return -1;
+    }
+
+    /* Read file contents */
+    char buf[1024];
+    int len = vfs_read(node, buf, sizeof(buf) - 1);
+    if (len < 0) {
+        uart_printf("cat: %s: Read error\r\n", path);
+        return -1;
+    }
+
+    buf[len] = '\0';
+
+    /* Print contents, converting \n to \r\n */
+    for (int i = 0; i < len; i++) {
+        if (buf[i] == '\n') {
+            uart_putc('\r');
+        }
+        uart_putc(buf[i]);
+    }
+
+    /* Ensure newline at end */
+    if (len > 0 && buf[len - 1] != '\n') {
+        uart_puts("\r\n");
+    }
+
+    return 0;
+}
+
+/*
+ * cmd_component - Component system management.
+ */
+static int cmd_component(int argc, char *argv[])
+{
+    if (argc < 2) {
+        /* Show help */
+        uart_puts("Component System Commands:\r\n");
+        uart_puts("  component list      - List all registered components\r\n");
+        uart_puts("  component register <name> <version> <type> [priority]\r\n");
+        uart_puts("                      - Register a component\r\n");
+        uart_puts("                        type: service|driver|application\r\n");
+        uart_puts("                        priority: idle|low|normal|high|critical\r\n");
+        uart_puts("  component unregister <idx> - Unregister component by index\r\n");
+        uart_puts("  component status <name|idx> - Show component details\r\n");
+        return 0;
+    }
+
+    const char *subcmd = argv[1];
+
+    /* component list */
+    if (shell_strcmp(subcmd, "list") == 0) {
+        uint32_t count = component_count();
+        uart_printf("Registered Components: %u\r\n", count);
+
+        if (count == 0) {
+            uart_puts("  (none)\r\n");
+            return 0;
+        }
+
+        uart_puts("  Idx  Name                 Version   Type        State       Pri\r\n");
+        uart_puts("  ---  ----                 -------   ----        -----       ---\r\n");
+
+        for (uint32_t i = 0; i < COMPONENT_MAX_COUNT; i++) {
+            component_info_t info;
+            if (component_get_info(i, &info) == 0) {
+                uart_printf("  %3u  %-20s %-9s %-11s %-11s %s\r\n",
+                    i,
+                    (const char *)info.name,
+                    (const char *)info.version,
+                    component_type_name(info.component_type),
+                    component_state_name(info.state),
+                    info.priority == COMPONENT_PRIORITY_CRITICAL ? "crit" :
+                    info.priority == COMPONENT_PRIORITY_HIGH ? "high" :
+                    info.priority == COMPONENT_PRIORITY_LOW ? "low" :
+                    info.priority == COMPONENT_PRIORITY_IDLE ? "idle" : "norm");
+            }
+        }
+        return 0;
+    }
+
+    /* component register <name> <version> <type> [priority] */
+    if (shell_strcmp(subcmd, "register") == 0) {
+        if (argc < 5) {
+            uart_puts("Usage: component register <name> <version> <type> [priority]\r\n");
+            return -1;
+        }
+
+        const char *name = argv[2];
+        const char *version = argv[3];
+        const char *type_str = argv[4];
+        const char *prio_str = (argc > 5) ? argv[5] : "normal";
+
+        /* Parse type */
+        uint8_t type;
+        if (shell_strcmp(type_str, "service") == 0) {
+            type = COMPONENT_TYPE_SERVICE;
+        } else if (shell_strcmp(type_str, "driver") == 0) {
+            type = COMPONENT_TYPE_DRIVER;
+        } else if (shell_strcmp(type_str, "application") == 0) {
+            type = COMPONENT_TYPE_APPLICATION;
+        } else {
+            uart_printf("Unknown type: %s\r\n", type_str);
+            return -1;
+        }
+
+        /* Parse priority */
+        uint8_t priority;
+        if (shell_strcmp(prio_str, "idle") == 0) {
+            priority = COMPONENT_PRIORITY_IDLE;
+        } else if (shell_strcmp(prio_str, "low") == 0) {
+            priority = COMPONENT_PRIORITY_LOW;
+        } else if (shell_strcmp(prio_str, "high") == 0) {
+            priority = COMPONENT_PRIORITY_HIGH;
+        } else if (shell_strcmp(prio_str, "critical") == 0) {
+            priority = COMPONENT_PRIORITY_CRITICAL;
+        } else {
+            priority = COMPONENT_PRIORITY_NORMAL;
+        }
+
+        int idx = component_register(name, version, type, priority);
+        if (idx < 0) {
+            uart_puts("Failed to register component\r\n");
+            return -1;
+        }
+
+        uart_printf("Registered component '%s' at index %d\r\n", name, idx);
+        return 0;
+    }
+
+    /* component unregister <idx> */
+    if (shell_strcmp(subcmd, "unregister") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: component unregister <idx>\r\n");
+            return -1;
+        }
+
+        uint32_t idx;
+        if (parse_uint(argv[2], &idx) != 0) {
+            uart_puts("Invalid index\r\n");
+            return -1;
+        }
+        if (component_unregister(idx) != 0) {
+            uart_printf("Failed to unregister component %u\r\n", idx);
+            return -1;
+        }
+
+        uart_printf("Unregistered component %u\r\n", idx);
+        return 0;
+    }
+
+    /* component status <name|idx> */
+    if (shell_strcmp(subcmd, "status") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: component status <name|idx>\r\n");
+            return -1;
+        }
+
+        const char *arg = argv[2];
+        int idx;
+
+        /* Check if numeric */
+        if (arg[0] >= '0' && arg[0] <= '9') {
+            uint32_t parsed;
+            if (parse_uint(arg, &parsed) != 0) {
+                uart_puts("Invalid index\r\n");
+                return -1;
+            }
+            idx = (int)parsed;
+        } else {
+            idx = component_find(arg);
+            if (idx < 0) {
+                uart_printf("Component '%s' not found\r\n", arg);
+                return -1;
+            }
+        }
+
+        component_info_t info;
+        if (component_get_info((uint32_t)idx, &info) != 0) {
+            uart_printf("Failed to get info for component %d\r\n", idx);
+            return -1;
+        }
+
+        uart_printf("Component %d:\r\n", idx);
+        uart_printf("  Name:        %s\r\n", (const char *)info.name);
+        uart_printf("  Version:     %s\r\n", (const char *)info.version);
+        uart_printf("  Type:        %s\r\n", component_type_name(info.component_type));
+        uart_printf("  State:       %s\r\n", component_state_name(info.state));
+        uart_printf("  Priority:    %u\r\n", info.priority);
+        uart_printf("  Task ID:     %u\r\n", info.task_id);
+        uart_printf("  Memory:      %u KB\r\n", info.memory_kb);
+        uart_printf("  Switches:    %llu\r\n", (unsigned long long)info.switches);
+        return 0;
+    }
+
+    uart_printf("Unknown subcommand: %s\r\n", subcmd);
+    uart_puts("Use 'component' for help.\r\n");
+    return -1;
 }
 
 /* ============================================================================

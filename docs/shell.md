@@ -19,19 +19,23 @@ The industrial IoT deployment doesn't involve humans typing commands, so this is
 ```
 SLM-OS> help
 Available commands:
-  help    - List available commands
-  mem     - Show memory statistics
-  tasks   - List all tasks
-  cpu     - Show CPU status
-  uptime  - Show system uptime
-  vmm     - Show virtual memory info
-  ipc     - Show IPC statistics
-  model   - Show model memory pools
-  dtb     - Show device tree info
-  elftest - Test ELF loader
-  run     - Run embedded test ELF
-  clear   - Clear screen
-  reboot  - Restart the system
+  help      - List available commands
+  mem       - Show memory statistics
+  tasks     - List all tasks
+  cpu       - Show CPU status
+  uptime    - Show system uptime
+  vmm       - Show virtual memory info
+  ipc       - Show IPC statistics
+  model     - Show model memory pools
+  dtb       - Show device tree info
+  elftest   - Test ELF loader
+  run       - Run a program (run <name>)
+  kill      - Terminate a task by ID
+  ls        - List directory (ls <path>)
+  cat       - Show file contents (cat <path>)
+  component - Component system (list/register/status)
+  clear     - Clear screen
+  reboot    - Restart the system
 ```
 
 ### Command Descriptions
@@ -48,9 +52,50 @@ Available commands:
 | `model` | Show model memory pool status (weight and workspace pools) |
 | `dtb` | Show Device Tree info (parsed or defaults) |
 | `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |
-| `run` | Load and execute an embedded test ELF (demonstrates ELF loader) |
+| `run <name>` | Run a program by name from the ELF table |
+| `kill <pid>` | Terminate a task by process ID |
+| `ls <path>` | List virtual filesystem directory contents |
+| `cat <path>` | Display virtual file contents |
+| `component` | Component system management (see below) |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
+
+### Component Command
+
+The `component` command provides management of the component system:
+
+```
+component list                           - List all registered components
+component register <name> <ver> <type> [pri] - Register a new component
+component unregister <idx>               - Unregister by index
+component status <name|idx>              - Show component details
+```
+
+**Types:** `service`, `driver`, `application`
+**Priorities:** `idle`, `low`, `normal`, `high`, `critical`
+
+Example:
+```
+SLM-OS> component register my-service 1.0.0 service high
+Registered component 'my-service' at index 0
+
+SLM-OS> component list
+Registered Components: 1
+  Idx  Name                 Version   Type        State       Pri
+  ---  ----                 -------   ----        -----       ---
+    0  my-service           1.0.0     service     loaded      high
+
+SLM-OS> component status 0
+Component 0:
+  Name:        my-service
+  Version:     1.0.0
+  Type:        service
+  State:       loaded
+  Priority:    6
+  Task ID:     0
+  Memory:      0 KB
+  Switches:    0
+```
 
 ---
 

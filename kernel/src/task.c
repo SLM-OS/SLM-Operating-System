@@ -79,6 +79,72 @@ static void task_entry_wrapper(void)
 }
 
 /*
+ * Allocate a task slot without setting up a stack.
+ *
+ * This is used by elf.c to create tasks with custom stack setup.
+ * The caller must set up stack_base, stack_top, and context.
+ */
+struct task *task_alloc(const char *name, uint8_t priority)
+{
+    irq_flags_t flags;
+    struct task *task;
+    uint32_t task_id;
+
+    /* Clamp priority to valid range */
+    if (priority > TASK_PRIORITY_MAX) {
+        priority = TASK_PRIORITY_MAX;
+    }
+
+    /* Acquire lock to access task_table and next_task_id */
+    flags = spin_lock_irqsave(&task_lock);
+
+    /* Find free task slot */
+    task = alloc_task_slot();
+    if (!task) {
+        spin_unlock_irqrestore(&task_lock, flags);
+        ERROR("task_alloc: no free task slots");
+        return NULL;
+    }
+
+    /* Reserve task ID atomically */
+    task_id = next_task_id++;
+
+    /* Mark slot as used immediately (id != 0 means in use) */
+    task->id = task_id;
+
+    spin_unlock_irqrestore(&task_lock, flags);
+
+    /* Initialize task structure (slot is ours now) */
+    str_copy(task->name, name ? name : "unnamed", TASK_NAME_LEN);
+    task->state = TASK_READY;
+    task->next = NULL;
+    task->cpu_affinity = CPU_AFFINITY_ANY;
+    task->assigned_cpu = 0;
+    task->priority = priority;
+    task->effective_priority = priority;
+    task->deadline_ns = 0;
+    task->switches = 0;
+
+    /* Stack pointers left uninitialized - caller must set these */
+    task->stack_base = NULL;
+    task->stack_top = NULL;
+
+    /* Zero out the context */
+    for (size_t i = 0; i < sizeof(task->context); i++) {
+        ((uint8_t *)&task->context)[i] = 0;
+    }
+
+    /* No cleanup callback by default */
+    task->cleanup = NULL;
+    task->cleanup_arg = NULL;
+
+    DEBUG_PRINT("Allocated task '%s' (id=%u, priority=%u)",
+                task->name, task->id, task->priority);
+
+    return task;
+}
+
+/*
  * Create a new task with specified priority.
  */
 struct task *task_create_with_priority(const char *name, task_entry_t entry,
@@ -150,6 +216,10 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     /* Store entry point and arg in callee-saved registers for wrapper */
     task->context.x19 = (uint64_t)entry;
     task->context.x20 = (uint64_t)arg;
+
+    /* No cleanup callback by default */
+    task->cleanup = NULL;
+    task->cleanup_arg = NULL;
 
     DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
                 task->name, task->id, task->stack_base, task->stack_top,
@@ -242,14 +312,23 @@ void task_destroy(struct task *task)
     uint32_t task_id = task->id;
     char task_name[TASK_NAME_LEN];
     str_copy(task_name, task->name, TASK_NAME_LEN);
+    task_cleanup_t cleanup = task->cleanup;
+    void *cleanup_arg = task->cleanup_arg;
 
     /* Clear task slot (marks as free: id == 0) */
     task->id = 0;
     task->name[0] = '\0';
     task->stack_base = NULL;
     task->stack_top = NULL;
+    task->cleanup = NULL;
+    task->cleanup_arg = NULL;
 
     spin_unlock_irqrestore(&task_lock, flags);
+
+    /* Call cleanup callback first (e.g., to free ELF segment memory) */
+    if (cleanup) {
+        cleanup(cleanup_arg);
+    }
 
     /* Free stack outside lock - pmm has its own locking */
     if (stack) {
@@ -342,4 +421,14 @@ uint64_t task_get_deadline(struct task *task)
 {
     if (!task) return 0;
     return task->deadline_ns;
+}
+
+/*
+ * Set task cleanup callback.
+ */
+void task_set_cleanup(struct task *task, task_cleanup_t cleanup, void *cleanup_arg)
+{
+    if (!task) return;
+    task->cleanup = cleanup;
+    task->cleanup_arg = cleanup_arg;
 }

@@ -19,12 +19,14 @@ pub mod kernel_ffi;
 pub mod log;
 pub mod mm;
 pub mod sched;
+pub mod component;
 
 // Re-export commonly used types
 pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags, TaskId};
 pub use log::{LogLevel, log_debug, log_info, log_warn, log_error};
 pub use mm::{ModelHandle, AllocError, PoolStats};
 pub use sched::{Priority, CoreType, SchedulingHint, TaskDeadline, SlmTaskInfo};
+pub use component::{ComponentState, ComponentInfo, ComponentType, Priority as ComponentPriority};
 
 // =============================================================================
 // Global Allocator

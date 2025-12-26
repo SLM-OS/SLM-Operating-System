@@ -77,6 +77,9 @@ struct cpu_context {
     uint64_t fpsr;      /* Floating-point status register */
 };
 
+/* Task cleanup callback (called when task is destroyed) */
+typedef void (*task_cleanup_t)(void *cleanup_arg);
+
 /*
  * Task Control Block (TCB)
  *
@@ -112,6 +115,10 @@ struct task {
 
     /* Statistics (optional, for debugging) */
     uint64_t switches;                  /* Number of times scheduled */
+
+    /* Cleanup callback (called when task is destroyed) */
+    task_cleanup_t cleanup;             /* Optional cleanup function */
+    void *cleanup_arg;                  /* Argument passed to cleanup function */
 };
 
 /* Task function prototype */
@@ -232,7 +239,22 @@ uint64_t task_get_deadline(struct task *task);
  * @task: Task to destroy (must be in TERMINATED state)
  *
  * Note: The task must have been removed from the scheduler first.
+ *       If a cleanup callback is set, it will be called before
+ *       freeing the task's stack.
  */
 void task_destroy(struct task *task);
+
+/*
+ * Set task cleanup callback.
+ *
+ * The cleanup function will be called when the task is destroyed.
+ * This is useful for freeing resources associated with the task,
+ * such as ELF segment memory.
+ *
+ * @task:        Task to modify
+ * @cleanup:     Cleanup function (or NULL to clear)
+ * @cleanup_arg: Argument passed to cleanup function
+ */
+void task_set_cleanup(struct task *task, task_cleanup_t cleanup, void *cleanup_arg);
 
 #endif /* TASK_H */

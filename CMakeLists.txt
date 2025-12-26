@@ -108,6 +108,12 @@ set(KERNEL_SOURCES
     # ELF Loader
     kernel/src/elf.c
 
+    # Virtual Filesystem
+    kernel/src/vfs.c
+
+    # Component System (C helpers for Rust core)
+    kernel/src/component.c
+
     # FFI (C/Rust interface)
     kernel/src/slm_ffi.c
 
@@ -127,6 +133,8 @@ set(TEST_SOURCES
     kernel/tests/test_model_mem.c
     kernel/tests/test_pi_mutex.c
     kernel/tests/test_gpu.c
+    kernel/tests/test_component.c
+    kernel/tests/test_vfs.c
 )
 
 # Include directories

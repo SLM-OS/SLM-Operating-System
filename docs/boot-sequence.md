@@ -305,13 +305,13 @@ Based on TODO.md recommendations:
 
 Our `boot.S` implements:
 
-- [x] Be placed at correct address (0x40000000 for QEMU)
-- [x] Preserve DTB pointer (x0 → x19 callee-saved register)
-- [x] Set up stack pointer
-- [x] Clear BSS section
-- [x] Disable interrupts initially
-- [x] Pass DTB pointer to `kernel_main(void *dtb)`
-- [x] Handle case where `kernel_main()` returns (hang or reset)
+- ✅ Be placed at correct address (0x40000000 for QEMU)
+- ✅ Preserve DTB pointer (x0 → x19 callee-saved register)
+- ✅ Set up stack pointer
+- ✅ Clear BSS section
+- ✅ Disable interrupts initially
+- ✅ Pass DTB pointer to `kernel_main(void *dtb)`
+- ✅ Handle case where `kernel_main()` returns (hang or reset)
 
 ### PE/COFF Header for UEFI Compatibility
 

@@ -7,8 +7,63 @@
 #include "elf.h"
 #include "pmm.h"
 #include "task.h"
+#include "sched.h"
 #include "debug.h"
 #include <stddef.h>
+
+/*
+ * ELF task entry wrapper.
+ *
+ * Similar to task_entry_wrapper in task.c, but calls entry(argc, argv)
+ * instead of entry(arg).
+ *
+ * Register usage (set by elf_create_task_with_args):
+ *   x19 = entry point address
+ *   x20 = argc
+ *   x21 = argv pointer
+ */
+typedef int (*elf_main_t)(int argc, char *argv[]);
+
+static void elf_entry_wrapper(void)
+{
+    uint64_t entry_reg, argc_reg, argv_reg;
+
+    __asm__ volatile("mov %0, x19" : "=r"(entry_reg));
+    __asm__ volatile("mov %0, x20" : "=r"(argc_reg));
+    __asm__ volatile("mov %0, x21" : "=r"(argv_reg));
+
+    elf_main_t entry = (elf_main_t)(uintptr_t)entry_reg;
+    int argc = (int)argc_reg;
+    char **argv = (char **)(uintptr_t)argv_reg;
+
+    /* Call the ELF entry point */
+    int ret = entry(argc, argv);
+
+    /* Log return value */
+    if (ret != 0) {
+        INFO("ELF program exited with code %d", ret);
+    }
+
+    /* Exit the task */
+    extern void task_exit(void);
+    task_exit();
+}
+
+/*
+ * ELF cleanup callback.
+ *
+ * Called when the task is destroyed. Frees ELF segment memory.
+ * The cleanup_arg is a pointer to an elf_info structure stored
+ * on the task's stack.
+ */
+static void elf_cleanup(void *cleanup_arg)
+{
+    struct elf_info *info = (struct elf_info *)cleanup_arg;
+    if (info) {
+        DEBUG_PRINT("ELF cleanup: unloading %zu segments", info->num_segments);
+        elf_unload(info);
+    }
+}
 
 /* Helper to check if pointer is within buffer bounds */
 static inline int in_bounds(const void *buffer, size_t size,
@@ -248,6 +303,32 @@ static void *vaddr_to_phys(const struct elf_info *info, uint64_t vaddr)
 
 struct task *elf_create_task(const struct elf_info *info, const char *name)
 {
+    /* Delegate to elf_create_task_with_args with no arguments */
+    return elf_create_task_with_args(info, name, 0, NULL);
+}
+
+/*
+ * Simple strlen for argv setup.
+ */
+static size_t elf_strlen(const char *s)
+{
+    size_t len = 0;
+    while (s[len]) len++;
+    return len;
+}
+
+/*
+ * Simple strcpy for argv setup.
+ */
+static void elf_strcpy(char *dst, const char *src)
+{
+    while ((*dst++ = *src++));
+}
+
+struct task *elf_create_task_with_args(const struct elf_info *info,
+                                        const char *name,
+                                        int argc, char *argv[])
+{
     if (!info || info->num_segments == 0) {
         ERROR("elf_create_task: invalid ELF info");
         return NULL;
@@ -260,25 +341,137 @@ struct task *elf_create_task(const struct elf_info *info, const char *name)
         return NULL;
     }
 
-    INFO("ELF: Creating task '%s' with entry at %p (vaddr=0x%lx)",
-         name ? name : "elf_task", entry_phys, info->entry);
+    INFO("ELF: Creating task '%s' with entry at %p (vaddr=0x%lx), argc=%d",
+         name ? name : "elf_task", entry_phys, info->entry, argc);
 
     /*
-     * Convert object pointer to function pointer.
-     * ISO C forbids direct cast, so use a union to avoid -Wpedantic warning.
+     * Allocate stack for the task.
+     * We do this manually so we can set up argv on the stack.
      */
-    union {
-        void *ptr;
-        task_entry_t func;
-    } entry_conv;
-    entry_conv.ptr = entry_phys;
-
-    /* Create task with the ELF entry point */
-    struct task *task = task_create(name ? name : "elf_task", entry_conv.func, NULL);
-    if (!task) {
-        ERROR("elf_create_task: failed to create task");
+    size_t stack_pages = STACK_SIZE / PAGE_SIZE;
+    void *stack = pmm_alloc_pages(stack_pages);
+    if (!stack) {
+        ERROR("elf_create_task: failed to allocate stack");
         return NULL;
     }
+
+    /* Stack grows downward, so stack_top is at the high end */
+    uintptr_t stack_top = (uintptr_t)stack + STACK_SIZE;
+    uintptr_t sp = stack_top;
+
+    /*
+     * Reserve space at top of stack for elf_info copy.
+     * This allows cleanup to free segment memory when task is destroyed.
+     */
+    sp -= sizeof(struct elf_info);
+    sp &= ~15UL;  /* Align to 16 bytes */
+    struct elf_info *info_copy = (struct elf_info *)sp;
+
+    /* Copy elf_info to stack */
+    const uint8_t *src = (const uint8_t *)info;
+    uint8_t *dst = (uint8_t *)info_copy;
+    for (size_t i = 0; i < sizeof(struct elf_info); i++) {
+        dst[i] = src[i];
+    }
+
+    /*
+     * Set up argv on the stack.
+     *
+     * Layout (high to low addresses):
+     *   [arg strings]
+     *   [NULL terminator]
+     *   [argv[argc-1] pointer]
+     *   ...
+     *   [argv[0] pointer]
+     *   <- sp points here
+     *
+     * We build this by:
+     * 1. Copy all arg strings to the top of stack
+     * 2. Build argv[] array below the strings
+     */
+
+    char **argv_ptrs = NULL;
+
+    if (argc > 0 && argv != NULL) {
+        /* First, calculate total string space needed */
+        size_t strings_size = 0;
+        for (int i = 0; i < argc; i++) {
+            strings_size += elf_strlen(argv[i]) + 1;  /* +1 for null terminator */
+        }
+
+        /* Align strings_size to 8 bytes */
+        strings_size = (strings_size + 7) & ~7UL;
+
+        /* Reserve space for strings at top of stack */
+        sp -= strings_size;
+        char *strings_area = (char *)sp;
+
+        /* Copy strings and record their locations */
+        char *str_ptr = strings_area;
+        char *arg_locations[16];  /* Support up to 16 args */
+        if (argc > 16) argc = 16;
+
+        for (int i = 0; i < argc; i++) {
+            arg_locations[i] = str_ptr;
+            elf_strcpy(str_ptr, argv[i]);
+            str_ptr += elf_strlen(argv[i]) + 1;
+        }
+
+        /* Reserve space for argv array (argc + 1 pointers, including NULL) */
+        sp -= (argc + 1) * sizeof(char *);
+        sp &= ~15UL;  /* Align to 16 bytes (ARM64 ABI requirement) */
+        argv_ptrs = (char **)sp;
+
+        /* Fill in argv array */
+        for (int i = 0; i < argc; i++) {
+            argv_ptrs[i] = arg_locations[i];
+        }
+        argv_ptrs[argc] = NULL;  /* NULL terminator */
+    } else {
+        /* No arguments - just set up empty argv */
+        argc = 0;
+        sp -= sizeof(char *);
+        sp &= ~15UL;
+        argv_ptrs = (char **)sp;
+        argv_ptrs[0] = NULL;
+    }
+
+    /* Ensure stack pointer is 16-byte aligned (ARM64 ABI) */
+    sp &= ~15UL;
+
+    /*
+     * Now create the task structure manually.
+     * We can't use task_create() because we need to set up our own stack.
+     */
+    extern struct task *task_alloc(const char *name, uint8_t priority);
+    struct task *task = task_alloc(name ? name : "elf_task", TASK_PRIORITY_NORMAL);
+    if (!task) {
+        ERROR("elf_create_task: failed to allocate task");
+        pmm_free_pages(stack, stack_pages);
+        return NULL;
+    }
+
+    /* Set up stack pointers */
+    task->stack_base = stack;
+    task->stack_top = (void *)stack_top;
+
+    /* Set up initial context */
+    task->context.sp = sp;
+    task->context.x30 = (uint64_t)elf_entry_wrapper;  /* Return address -> wrapper */
+    task->context.x29 = 0;  /* Frame pointer */
+
+    /* Store entry point, argc, argv in callee-saved registers */
+    task->context.x19 = (uint64_t)entry_phys;
+    task->context.x20 = (uint64_t)argc;
+    task->context.x21 = (uint64_t)argv_ptrs;
+
+    /* Set cleanup callback to free ELF segment memory when task is destroyed */
+    extern void task_set_cleanup(struct task *task, void (*cleanup)(void *), void *arg);
+    task_set_cleanup(task, elf_cleanup, info_copy);
+
+    DEBUG_PRINT("ELF: Task '%s' stack=%p-%p, sp=0x%lx, argc=%d, argv=%p, cleanup=%p",
+                task->name, task->stack_base, task->stack_top,
+                (unsigned long)sp, argc, (void *)argv_ptrs, (void *)info_copy);
 
     return task;
 }

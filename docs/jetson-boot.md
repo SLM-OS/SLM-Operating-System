@@ -196,20 +196,20 @@ The SPI (Shared Peripheral Interrupt) numbers may also differ from QEMU.
 
 ### Prerequisites
 
-- [ ] USB-TTL serial adapter (3.3V)
-- [ ] SD card with JetPack image (for initial testing)
-- [ ] Serial terminal software (PuTTY, minicom, etc.)
+- ☐ USB-TTL serial adapter (3.3V)
+- ☐ SD card with JetPack image (for initial testing)
+- ☐ Serial terminal software (PuTTY, minicom, etc.)
 
 ### First Boot Steps
 
-1. [ ] Flash JetPack to SD card (establishes QSPI bootloader)
-2. [ ] Connect serial adapter to GPIO pins 6, 8, 10
-3. [ ] Boot Jetson with serial console open
-4. [ ] Verify Linux boots and serial output works
-5. [ ] Modify extlinux.conf to add SLM-OS entry
-6. [ ] Copy slmos.bin to /boot/
-7. [ ] Reboot and select SLM-OS from menu
-8. [ ] Debug via serial console
+1. ☐ Flash JetPack to SD card (establishes QSPI bootloader)
+2. ☐ Connect serial adapter to GPIO pins 6, 8, 10
+3. ☐ Boot Jetson with serial console open
+4. ☐ Verify Linux boots and serial output works
+5. ☐ Modify extlinux.conf to add SLM-OS entry
+6. ☐ Copy slmos.bin to /boot/
+7. ☐ Reboot and select SLM-OS from menu
+8. ☐ Debug via serial console
 
 ### Fallback: kexec Method
 

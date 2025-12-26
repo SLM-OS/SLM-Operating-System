@@ -20,6 +20,8 @@
 #include "shell.h"
 #include "dtb.h"
 #include "bpmp.h"
+#include "vfs.h"
+#include "component.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -737,6 +739,10 @@ void kernel_main(void *dtb)
     /* Initialize IPC subsystem */
     ipc_init();
 
+    /* Initialize Virtual Filesystem */
+    INFO("Initializing VFS...");
+    vfs_init();
+
     /* Initialize Rust runtime */
     INFO("Initializing Rust runtime...");
 
@@ -757,6 +763,12 @@ void kernel_main(void *dtb)
 
     /* Say hello from Rust */
     rust_hello();
+
+    /* Initialize component system */
+    INFO("Initializing component system...");
+    if (component_system_init() != 0) {
+        panic("Component system init failed");
+    }
 
     /* Initialize model memory pools */
     INFO("Initializing model memory...");

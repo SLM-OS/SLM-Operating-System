@@ -268,6 +268,21 @@ void unity_fail_expected_actual_hex(const char *file, int line,
     } while (0)
 
 /* ============================================================================
+ * Not-Equal Assertions
+ * ============================================================================ */
+
+#define TEST_ASSERT_NOT_EQUAL(expected, actual) \
+    do { \
+        if ((expected) == (actual)) { \
+            unity_fail(__FILE__, __LINE__, #expected " should not equal " #actual); \
+            return; \
+        } \
+    } while (0)
+
+#define TEST_ASSERT_NOT_EQUAL_INT(expected, actual) \
+    TEST_ASSERT_NOT_EQUAL(expected, actual)
+
+/* ============================================================================
  * Range Assertions
  * ============================================================================ */
 
@@ -302,6 +317,50 @@ void unity_fail_expected_actual_hex(const char *file, int line,
             return; \
         } \
     } while (0)
+
+/* Range assertions with custom message */
+#define TEST_ASSERT_GREATER_OR_EQUAL_MESSAGE(threshold, actual, msg) \
+    do { \
+        if (!((actual) >= (threshold))) { \
+            unity_fail(__FILE__, __LINE__, msg); \
+            return; \
+        } \
+    } while (0)
+
+/* ============================================================================
+ * String Assertions
+ * ============================================================================ */
+
+/* Helper for inline string comparison */
+static inline int unity_strcmp(const char *a, const char *b)
+{
+    if (a == NULL || b == NULL) return (a != b) ? 1 : 0;
+    while (*a && *b && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+#define TEST_ASSERT_EQUAL_STRING(expected, actual) \
+    do { \
+        if (unity_strcmp((expected), (actual)) != 0) { \
+            unity_fail(__FILE__, __LINE__, "strings not equal"); \
+            return; \
+        } \
+    } while (0)
+
+#define TEST_ASSERT_EQUAL_STRING_MESSAGE(expected, actual, msg) \
+    do { \
+        if (unity_strcmp((expected), (actual)) != 0) { \
+            unity_fail(__FILE__, __LINE__, msg); \
+            return; \
+        } \
+    } while (0)
+
+/* ============================================================================
+ * Pointer Assertions with Message
+ * ============================================================================ */
+
+#define TEST_ASSERT_NOT_NULL_MESSAGE(ptr, msg) \
+    do { if ((ptr) == NULL) { unity_fail(__FILE__, __LINE__, msg); return; } } while (0)
 
 /* ============================================================================
  * Memory Assertions
