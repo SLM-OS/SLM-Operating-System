@@ -2,6 +2,21 @@
 
 This section documents features discussed during development that are beyond the capstone scope but would enhance SLM-OS in future iterations or as time permits.
 
+### Status Summary
+
+| Category | Completed | Pending |
+|----------|-----------|---------|
+| **Core Infrastructure** | Buddy Allocator, TLB Shootdown, UART Sync | User/Kernel Separation |
+| **Filesystem** | LittleFS, VFS, File Commands, Help System | eMMC/SD, Persistent Config |
+| **IPC** | Priority Queues, Priority Inheritance Mutex | - |
+| **Scheduling** | Deadline Scheduler, Priority Inheritance, ELF Loader | Real-Time Guarantees (RMS) |
+| **Shell** | Working Directory, Path Resolution, 30+ Commands | POSIX Shell, Lua Scripting |
+| **Components** | Component System, Model Memory, GPU Stub | Sandboxing, Secure Boot |
+| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD | Jetson GPU, USB Serial, Networking |
+
+**Completed Features:** 18
+**Pending Features:** 15
+
 ---
 
 ### USB Serial Console (TinyUSB + Tegra XUSB)
@@ -186,19 +201,34 @@ Optimize power consumption for battery/thermal-constrained deployments.
 
 ---
 
-### Filesystem Integration (LittleFS)
+### Filesystem Integration (LittleFS) ✅
 Add persistent storage for models, logs, and configuration.
 
-- ☐ Integrate LittleFS for flash-friendly filesystem
-- ☐ Mount eMMC/SD card partitions
-- ☐ Implement VFS layer for abstraction
-- ☐ Add filesystem commands to shell (`ls`, `cat`, `cp`, `rm`)
-- ☐ Support loading components/models from filesystem
-- ☐ Persistent configuration storage
+- ✅ Integrate LittleFS for flash-friendly filesystem
+  - `kernel/lib/littlefs/` - LittleFS v2.8.1 library
+  - `kernel/fs/littlefs_slm.c` - SLM-OS wrapper with static buffers
+  - Configured for freestanding (no malloc, no libc)
+- ✅ RAM disk block device implementation
+  - `kernel/drivers/ramdisk.c` - 1MB RAM-backed block device
+  - `kernel/drivers/blkdev.c` - block device abstraction layer
+  - Flash semantics (erase-before-write, 0xFF erased state)
+- ✅ Implement VFS layer for abstraction
+  - `kernel/src/vfs.c` - unified virtual filesystem
+  - Virtual directories: `/sys/`, `/proc/`, `/components/`
+  - Mount points for real filesystems at `/mnt/files/`
+  - `vfs_read_path()`, `vfs_get_mount_ctx()` APIs
+- ✅ Add filesystem commands to shell
+  - Basic: `ls`, `cat`, `write`, `mkdir`, `rm`, `mv`, `df`
+  - Advanced: `cp`, `touch`, `stat`, `tree`, `wc`, `hexdump`, `grep`, `find`
+  - `truncate`, `append` for file manipulation
+- ✅ Support loading components/models from filesystem
+  - ELF loader reads from VFS paths
+  - Component manifests can reference filesystem paths
+- ✅ 26 LittleFS unit tests, 18 VFS tests
 
-**Effort:** 2-3 weeks  
-**Value:** Persistent storage, standard file operations  
-**Enables:** Loading ELF from disk, logs, config files
+**Effort:** 2-3 weeks
+**Value:** Persistent storage, standard file operations
+**Status:** Complete (December 2025)
 
 ---
 
@@ -501,4 +531,163 @@ IPC message ordering by priority.
 
 **Effort:** 3-5 days
 **Value:** QoS for IPC, urgent messages bypass queue
+**Status:** Complete (December 2025)
+
+---
+
+### Priority Inheritance Mutex ✅
+Prevent priority inversion in real-time task synchronization.
+
+- ✅ Full priority inheritance protocol implementation
+  - `kernel/ipc/pi_mutex.c` - priority inheritance mutex
+  - When high-priority task blocks on mutex held by low-priority task,
+    low-priority task temporarily inherits higher priority
+  - Priority restored when mutex released
+- ✅ Ownership tracking and validation
+  - Mutex records owner task
+  - Only owner can unlock
+  - Debug assertions for misuse
+- ✅ Nested locking support with priority chain tracking
+- ✅ Integration with scheduler priority system
+- ✅ 8 unit tests (`kernel/tests/test_pi_mutex.c`)
+
+**Effort:** 1 week
+**Value:** Bounded priority inversion, real-time correctness
+**Status:** Complete (December 2025)
+
+---
+
+### File-Driven Help System ✅
+Centralized, filesystem-based help for shell commands.
+
+- ✅ Help text stored in `/mnt/files/help/*.txt`
+  - Written at boot by `help_init()`
+  - Read on demand by `help <command>`
+  - 27 commands with detailed help text
+- ✅ `kernel/src/help.c` - centralized help definitions
+  - Each command has usage, description, examples
+  - Easy to update without recompiling shell
+- ✅ Modified `cmd_help` for two modes:
+  - `help` - list all commands with brief descriptions
+  - `help <cmd>` - show detailed help from file
+- ✅ 6 unit tests for help system
+
+**Effort:** 1 day
+**Value:** User-friendly documentation, reduced binary size
+**Status:** Complete (December 2025)
+
+---
+
+### Component System ✅
+Dynamic component lifecycle management.
+
+- ✅ Component registry in Rust (`runtime/src/component/`)
+  - `ComponentInfo` with state, priority, version, memory tracking
+  - Spinlock-protected registry with fixed capacity (32 components)
+  - FFI bindings for C kernel access
+- ✅ Component states: Loaded, Initializing, Running, Suspended, Updating, Terminating
+- ✅ Priority levels: Critical, High, Normal, Low, Idle
+- ✅ Shell commands for management:
+  - `component list` - show all registered components
+  - `component register <name> <version> <type> [priority]`
+  - `component unregister <index>`
+  - `component status <name|index>`
+- ✅ Virtual filesystem exposure at `/components/`
+- ✅ 12 component system tests
+
+**Effort:** 2 weeks
+**Value:** Runtime extensibility, modular system design
+**Status:** Complete (December 2025)
+
+---
+
+### Model Memory Allocator ✅
+Dedicated memory pools for ML model weights and workspace.
+
+- ✅ Rust-based allocator (`runtime/src/model_mem.rs`)
+  - Weight pool (256 MB) for model parameters
+  - Workspace pool (128 MB) for inference scratch space
+  - Block-based allocation with free list
+- ✅ C FFI interface (`kernel/include/slm_ffi.h`)
+  - `rust_model_mem_init()` - initialize pools
+  - `slm_weight_alloc()` / `slm_weight_free()`
+  - `slm_workspace_alloc()` / `slm_workspace_free()`
+  - `rust_model_mem_stats()` - pool statistics
+- ✅ `model` shell command shows pool status
+- ✅ 10 unit tests for allocator
+
+**Effort:** 1 week
+**Value:** Efficient memory management for ML inference
+**Status:** Complete (December 2025)
+
+---
+
+### GPU Stub Driver ✅
+Placeholder GPU driver for QEMU testing.
+
+- ✅ GPU abstraction layer (`kernel/gpu/gpu.c`)
+  - `gpu_init()`, `gpu_compute_submit()`, `gpu_sync()`
+  - Driver registration mechanism
+- ✅ Stub driver for QEMU (`kernel/gpu/gpu_stub.c`)
+  - Simulates GPU operations with delays
+  - Returns success for all operations
+- ✅ Cache coherency utilities (`kernel/gpu/cache.c`)
+  - D-cache clean/invalidate for GPU buffers
+  - Proper barriers for DMA operations
+- ✅ 22 GPU subsystem tests
+
+**Effort:** 1 week
+**Value:** GPU API ready for real driver, testable in QEMU
+**Status:** Complete (December 2025)
+
+---
+
+### ELF Loader ✅
+Load and execute ELF binaries as tasks.
+
+- ✅ ELF64 parser (`kernel/src/elf.c`)
+  - Header validation (magic, class, endianness, machine type)
+  - Program header parsing for LOAD segments
+  - Entry point extraction
+- ✅ Memory allocation for loaded programs
+  - Pages allocated from PMM for each segment
+  - Proper alignment handling
+  - Memory ownership tracked for cleanup
+- ✅ Task creation from ELF
+  - New task created with ELF entry as start function
+  - Stack setup with argc/argv passing
+  - Task exit triggers ELF memory cleanup
+- ✅ Shell integration
+  - `run <name>` - execute program from built-in table
+  - `kill <pid>` - terminate running task
+  - `elftest` - run ELF loader validation tests
+
+**Effort:** 1 week
+**Value:** Run user programs, extensible system
+**Status:** Complete (December 2025)
+
+---
+
+### Deadline-Aware Scheduler ✅
+Scheduler with deadline and priority support.
+
+- ✅ Priority-based scheduling (8 levels: 0-7)
+  - Higher priority tasks preempt lower
+  - Round-robin within same priority
+- ✅ Deadline scheduling support
+  - `task_set_deadline()` - set absolute deadline
+  - `slm_task_set_deadline()` FFI for Rust
+  - Earliest-deadline-first within priority class
+- ✅ CPU affinity and isolation
+  - Per-task CPU affinity mask
+  - `sched_set_affinity()` / `sched_get_affinity()`
+  - CPU isolation for dedicated workloads
+- ✅ Task migration between CPUs
+  - `sched_migrate_task()` - move task to different CPU
+  - Works for READY tasks in run queue
+- ✅ Per-CPU run queues with work stealing
+- ✅ 29 scheduler tests
+
+**Effort:** 2 weeks
+**Value:** Real-time task management, predictable latency
 **Status:** Complete (December 2025)
