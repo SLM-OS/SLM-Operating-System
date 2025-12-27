@@ -2,7 +2,7 @@
 
 High-level architecture documentation for the Small Language Model Operating System.
 
-**Status:** Phase 3 complete (December 2025)
+**Status:** Phase 4 in progress (December 2025)
 
 ---
 
@@ -33,8 +33,8 @@ SLM-OS is a bare-metal operating system designed for running AI inference worklo
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │                      C Kernel Layer                                  │   │
 │   │  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐  │   │
-│   │  │  PMM   │ │  VMM   │ │ Sched  │ │  IPC   │ │  SMP   │ │  GPU   │  │   │
-│   │  │        │ │  MMU   │ │        │ │        │ │        │ │  HAL   │  │   │
+│   │  │  PMM   │ │  VMM   │ │ Sched  │ │  IPC   │ │  VFS   │ │  GPU   │  │   │
+│   │  │        │ │  MMU   │ │        │ │        │ │   FS   │ │  HAL   │  │   │
 │   │  └────────┘ └────────┘ └────────┘ └────────┘ └────────┘ └────────┘  │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                         │
@@ -42,7 +42,7 @@ SLM-OS is a bare-metal operating system designed for running AI inference worklo
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │                     Hardware Abstraction                             │   │
 │   │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │   │
-│   │  │ UART PL011 │  │  GIC-400   │  │ ARM Timer  │  │  Cache Ops │     │   │
+│   │  │ UART PL011 │  │  GIC-400   │  │ ARM Timer  │  │  Block Dev │     │   │
 │   │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                         │
@@ -179,6 +179,24 @@ This hybrid approach leverages:
 - Focus on memory/cache coherency; defer compute to TensorRT (Phase 5)
 - Platform abstraction allows development on QEMU while targeting Jetson
 
+### Filesystem Subsystem
+
+| Component | File(s) | Purpose |
+|-----------|---------|---------|
+| VFS | `kernel/src/vfs.c` | Unified namespace, mount points |
+| Block Device | `kernel/drivers/blkdev.c` | Storage device abstraction |
+| RAM Disk | `kernel/drivers/ramdisk.c` | Memory-backed block device |
+| LittleFS Wrapper | `kernel/fs/littlefs_slm.c` | Flash filesystem integration |
+| LittleFS VFS | `kernel/fs/littlefs_vfs.c` | VFS adapter for LittleFS |
+| String Functions | `kernel/src/string.c` | Freestanding libc string ops |
+
+**Phase 4 Implementation:**
+- Block device abstraction for hardware-independent storage
+- RAM disk driver for development/testing (no hardware dependencies)
+- LittleFS for flash-friendly persistent storage
+- VFS mount point support unifies virtual and persistent files
+- Shell access via `ls` and `cat` commands
+
 ---
 
 ## Boot Sequence
@@ -229,8 +247,14 @@ CS-496-SLM-Operating-System/
 ├── kernel/
 │   ├── include/          # C headers
 │   ├── src/              # Core kernel (C + assembly)
-│   ├── drivers/          # Hardware drivers
+│   ├── arch/arm64/       # ARM64-specific code
+│   ├── mm/               # Memory management (PMM, VMM)
+│   ├── sched/            # Scheduler, tasks, SMP
+│   ├── ipc/              # Inter-process communication
+│   ├── drivers/          # Hardware drivers (UART, timer, blkdev)
+│   ├── fs/               # Filesystem (LittleFS wrapper, VFS adapter)
 │   ├── gpu/              # GPU subsystem
+│   ├── lib/              # Third-party libraries (LittleFS)
 │   └── tests/            # Kernel test suite
 ├── runtime/
 │   └── src/
@@ -279,9 +303,9 @@ See `docs/ffi.md` for complete FFI documentation.
 
 ---
 
-## Phase 3 Summary
+## Phase Summary
 
-### Completed Features
+### Phase 3 (Completed)
 - Device Tree parser with fallback to compile-time defaults
 - Model memory allocator with 2MB blocks (Rust)
 - Deadline-aware hybrid scheduler with priority boost
@@ -291,11 +315,20 @@ See `docs/ffi.md` for complete FFI documentation.
 - Heterogeneous CPU topology awareness (skeleton)
 - Inference scheduler skeleton (for Phase 5)
 
+### Phase 4 (In Progress)
+- **Filesystem integration**:
+  - Block device abstraction layer
+  - RAM disk driver for development
+  - LittleFS wrapper (flash-friendly filesystem)
+  - VFS mount point support
+  - Shell commands work with persistent storage
+- Hardware bring-up on Jetson Orin Nano (in progress)
+
 ### Deferred to Future Phases
 - Actual GPU compute (requires TensorRT, Phase 5)
 - Model loading and inference (Phase 5)
 - User/kernel separation (FUTURE.md)
-- Filesystem integration (FUTURE.md)
+- eMMC/SD card drivers (Phase 5)
 
 ---
 

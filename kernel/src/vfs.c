@@ -83,6 +83,8 @@ static struct vfs_node *alloc_node(void)
     node->read_ctx = NULL;
     node->num_children = 0;
     node->parent = NULL;
+    node->fs_ops = NULL;
+    node->fs_ctx = NULL;
 
     for (int i = 0; i < VFS_MAX_CHILDREN; i++) {
         node->children[i] = NULL;
@@ -588,4 +590,312 @@ char *vfs_get_path(struct vfs_node *node, char *buf, size_t size)
     }
 
     return buf;
+}
+
+/* ============================================================================
+ * Mount Point Support
+ * ============================================================================ */
+
+struct vfs_node *vfs_mount(const char *path,
+                            const struct vfs_fs_ops *ops,
+                            void *ctx)
+{
+    if (!path || path[0] != '/' || !ops) {
+        return NULL;
+    }
+
+    /* Parse the path to find parent directory and mount name */
+    char parent_path[VFS_MAX_PATH];
+    char mount_name[VFS_MAX_NAME];
+
+    /* Find last '/' in path */
+    const char *last_slash = path;
+    const char *p = path;
+    while (*p) {
+        if (*p == '/') {
+            last_slash = p;
+        }
+        p++;
+    }
+
+    /* Extract parent path and mount name */
+    if (last_slash == path) {
+        /* Mount directly under root (e.g., "/mnt") */
+        parent_path[0] = '/';
+        parent_path[1] = '\0';
+        vfs_strncpy(mount_name, path + 1, VFS_MAX_NAME);
+    } else {
+        /* Extract parent (e.g., "/mnt" from "/mnt/files") */
+        size_t parent_len = last_slash - path;
+        if (parent_len >= VFS_MAX_PATH) {
+            return NULL;
+        }
+        for (size_t i = 0; i < parent_len; i++) {
+            parent_path[i] = path[i];
+        }
+        parent_path[parent_len] = '\0';
+        vfs_strncpy(mount_name, last_slash + 1, VFS_MAX_NAME);
+    }
+
+    /* Look up parent directory */
+    struct vfs_node *parent = vfs_lookup(parent_path);
+    if (!parent) {
+        /* Parent doesn't exist - try to create intermediate directories */
+        /* For now, just create the immediate parent if it's under root */
+        if (parent_path[0] == '/' && parent_path[1] != '\0') {
+            /* Skip leading slash and find first component */
+            char first_component[VFS_MAX_NAME];
+            const char *q = parent_path + 1;
+            int idx = 0;
+            while (*q && *q != '/' && idx < VFS_MAX_NAME - 1) {
+                first_component[idx++] = *q++;
+            }
+            first_component[idx] = '\0';
+
+            /* Create directory under root if needed */
+            parent = find_child(root_node, first_component);
+            if (!parent) {
+                parent = vfs_create_dir(root_node, first_component);
+            }
+        }
+        if (!parent) {
+            return NULL;
+        }
+    }
+
+    if (parent->type != VFS_NODE_DIR) {
+        return NULL;  /* Parent is not a directory */
+    }
+
+    /* Check if node already exists */
+    struct vfs_node *existing = find_child(parent, mount_name);
+    if (existing) {
+        /* Existing node - convert to mount point if it's a directory */
+        if (existing->type == VFS_NODE_DIR && existing->num_children == 0) {
+            existing->type = VFS_NODE_MOUNT;
+            existing->fs_ops = ops;
+            existing->fs_ctx = ctx;
+            return existing;
+        }
+        return NULL;  /* Already exists and can't convert */
+    }
+
+    /* Create new mount point node */
+    struct vfs_node *node = alloc_node();
+    if (!node) {
+        return NULL;
+    }
+
+    vfs_strncpy(node->name, mount_name, VFS_MAX_NAME);
+    node->type = VFS_NODE_MOUNT;
+    node->fs_ops = ops;
+    node->fs_ctx = ctx;
+
+    if (add_child(parent, node) < 0) {
+        return NULL;
+    }
+
+    return node;
+}
+
+int vfs_unmount(struct vfs_node *mnt)
+{
+    if (!mnt || mnt->type != VFS_NODE_MOUNT) {
+        return -1;
+    }
+
+    /* For now, just clear the mount - node remains in pool */
+    mnt->type = VFS_NODE_DIR;
+    mnt->fs_ops = NULL;
+    mnt->fs_ctx = NULL;
+
+    return 0;
+}
+
+struct vfs_node *vfs_lookup_mount(const char *path, const char **subpath_out)
+{
+    if (!path || path[0] != '/') {
+        if (subpath_out) *subpath_out = NULL;
+        return NULL;
+    }
+
+    /* Handle root */
+    if (path[0] == '/' && (path[1] == '\0' || (path[1] == '/' && path[2] == '\0'))) {
+        if (subpath_out) *subpath_out = NULL;
+        return root_node;
+    }
+
+    struct vfs_node *node = root_node;
+    const char *p = path + 1;  /* Skip leading '/' */
+
+    char component[VFS_MAX_NAME];
+
+    while (*p) {
+        /* Skip leading slashes */
+        while (*p == '/') p++;
+
+        if (*p == '\0') break;
+
+        /* Remember where this component starts */
+        const char *comp_start = p - 1;  /* Include the leading '/' */
+
+        /* Extract path component */
+        int i = 0;
+        while (*p && *p != '/' && i < VFS_MAX_NAME - 1) {
+            component[i++] = *p++;
+        }
+        component[i] = '\0';
+
+        /* Look up in current directory */
+        struct vfs_node *child = find_child(node, component);
+        if (!child) {
+            /* Check if current node is a mount point */
+            if (node->type == VFS_NODE_MOUNT) {
+                /* Return mount with remaining path (including this component) */
+                if (subpath_out) *subpath_out = comp_start;
+                return node;
+            }
+            if (subpath_out) *subpath_out = NULL;
+            return NULL;  /* Not found */
+        }
+
+        /* If child is a mount point and there's more path, track subpath */
+        if (child->type == VFS_NODE_MOUNT && *p) {
+            if (subpath_out) *subpath_out = p;  /* Remaining path */
+            return child;
+        }
+
+        node = child;
+    }
+
+    /* Reached end of path */
+    if (subpath_out) {
+        *subpath_out = (node->type == VFS_NODE_MOUNT) ? "/" : NULL;
+    }
+    return node;
+}
+
+int vfs_read_path(const char *path, char *buf, size_t size, size_t offset)
+{
+    const char *subpath = NULL;
+    struct vfs_node *node = vfs_lookup_mount(path, &subpath);
+
+    if (!node) {
+        return -1;
+    }
+
+    /* If it's a mount point with a subpath, use fs_ops */
+    if (node->type == VFS_NODE_MOUNT && node->fs_ops && node->fs_ops->read) {
+        const char *fs_path = subpath ? subpath : "/";
+        return node->fs_ops->read(node->fs_ctx, fs_path, buf, size, offset);
+    }
+
+    /* Regular virtual file (offset not supported for virtual files) */
+    if (node->type == VFS_NODE_FILE && offset == 0) {
+        return vfs_read(node, buf, size);
+    }
+
+    return -1;
+}
+
+/*
+ * Helper for vfs_list_path - wraps vfs_node children as vfs_entry_info
+ */
+struct list_path_ctx {
+    void (*user_callback)(const struct vfs_entry_info *info, void *ctx);
+    void *user_ctx;
+};
+
+static void list_path_wrapper(struct vfs_node *child, void *ctx)
+{
+    struct list_path_ctx *lctx = ctx;
+    struct vfs_entry_info info;
+
+    vfs_strncpy(info.name, child->name, VFS_MAX_NAME);
+    info.type = (child->type == VFS_NODE_DIR || child->type == VFS_NODE_MOUNT) ? 1 : 0;
+    info.size = 0;  /* Virtual files don't have a fixed size */
+
+    lctx->user_callback(&info, lctx->user_ctx);
+}
+
+int vfs_list_path(const char *path,
+                  void (*callback)(const struct vfs_entry_info *info, void *ctx),
+                  void *ctx)
+{
+    if (!callback) {
+        return -1;
+    }
+
+    const char *subpath = NULL;
+    struct vfs_node *node = vfs_lookup_mount(path, &subpath);
+
+    if (!node) {
+        return -1;
+    }
+
+    /* If it's a mount point, use fs_ops */
+    if (node->type == VFS_NODE_MOUNT && node->fs_ops && node->fs_ops->readdir) {
+        const char *fs_path = subpath ? subpath : "/";
+        return node->fs_ops->readdir(node->fs_ctx, fs_path, callback, ctx);
+    }
+
+    /* Regular directory */
+    if (node->type == VFS_NODE_DIR) {
+        struct list_path_ctx lctx = {
+            .user_callback = callback,
+            .user_ctx = ctx
+        };
+        vfs_list(node, list_path_wrapper, &lctx);
+        return 0;
+    }
+
+    return -1;
+}
+
+int vfs_stat_path(const char *path, struct vfs_entry_info *info)
+{
+    if (!info) {
+        return -1;
+    }
+
+    const char *subpath = NULL;
+    struct vfs_node *node = vfs_lookup_mount(path, &subpath);
+
+    if (!node) {
+        return -1;
+    }
+
+    /* If it's a mount point with subpath, use fs_ops */
+    if (node->type == VFS_NODE_MOUNT && subpath && node->fs_ops && node->fs_ops->stat) {
+        return node->fs_ops->stat(node->fs_ctx, subpath, info);
+    }
+
+    /* Mount point itself (no subpath) */
+    if (node->type == VFS_NODE_MOUNT) {
+        vfs_strncpy(info->name, node->name, VFS_MAX_NAME);
+        info->type = 1;  /* Directory */
+        info->size = 0;
+        return 0;
+    }
+
+    /* Regular VFS node */
+    vfs_strncpy(info->name, node->name, VFS_MAX_NAME);
+    info->type = (node->type == VFS_NODE_DIR) ? 1 : 0;
+    info->size = 0;  /* Virtual files don't have fixed size */
+
+    return 0;
+}
+
+void *vfs_get_mount_ctx(const char *path, const char **subpath_out)
+{
+    const char *subpath = NULL;
+    struct vfs_node *node = vfs_lookup_mount(path, &subpath);
+
+    if (!node || node->type != VFS_NODE_MOUNT) {
+        if (subpath_out) *subpath_out = NULL;
+        return NULL;
+    }
+
+    if (subpath_out) *subpath_out = subpath ? subpath : "/";
+    return node->fs_ctx;
 }

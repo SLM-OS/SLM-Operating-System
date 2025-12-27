@@ -624,5 +624,70 @@ All 20 new tests pass. Total test count increased from ~60 to ~80.
 
 ---
 
+### Shell Path Resolution & Working Directory (December 2025)
+
+**Files:** `kernel/src/shell.c`, `kernel/tests/test_shell.c`, `docs/shell.md`, `docs/testing.md`
+
+Implemented comprehensive path resolution and working directory support:
+
+| Feature | Description |
+|---------|-------------|
+| **cwd state** | `shell_cwd` variable tracks current working directory (starts at `/`) |
+| **`pwd` command** | Prints current working directory |
+| **`cd` command** | Changes directory with full path resolution |
+| **Relative paths** | All filesystem commands support relative paths |
+| **`resolve_path()`** | Internal function handles `.`, `..`, `//`, trailing slashes |
+
+**Commands updated for relative paths:**
+- `ls` (now defaults to cwd instead of `/`)
+- `cat`, `write`, `mkdir`, `rm`, `truncate`, `append`
+- `mv` (both source and destination)
+- `df` (resolves path, falls back to `/mnt/files`)
+
+**Path resolution features:**
+- Prepends cwd for relative paths
+- Handles `.` (current directory - skip)
+- Handles `..` (parent directory - pop)
+- Normalizes `//` to `/`
+- Strips trailing slashes (except root)
+- Edge case: `cd ..` at root stays at root
+
+**Test coverage (21 new tests):**
+- Working directory tests (`test_shell_cmd_pwd`, `test_shell_cmd_cd_*`)
+- Relative path tests (`test_shell_cmd_ls_cwd`, `test_shell_cmd_ls_relative`, etc.)
+- Error cases (`test_shell_cmd_cd_nonexistent`, `test_shell_cmd_cd_file`)
+- Mount point tests (`test_shell_cmd_cd_mount_subdir`, `test_shell_mount_relative_path`)
+
+**Example usage:**
+```
+SLM-OS> pwd
+/
+SLM-OS> cd /mnt/files
+SLM-OS> ls
+hello.txt    [f]    20
+SLM-OS> cat hello.txt
+Hello from LittleFS!
+SLM-OS> cd ..
+SLM-OS> pwd
+/mnt
+```
+
+---
+
+### Summary (All Extra Work)
+
+| Item | Tests Added | Lines of Code |
+|------|-------------|---------------|
+| TLB Shootdown API | 10 | ~250 |
+| Priority Message Queues | 10 | ~300 |
+| CI/CD Pipeline | — | ~100 (workflow) + ~80 (semihosting) |
+| Shell Path Resolution | 21 | ~350 |
+| Documentation | — | ~500 |
+| **Total** | **41** | **~1580** |
+
+All tests pass. Total test count now ~100.
+
+---
+
 *Created: December 2025*
 *Target: Complete hardware bring-up first, then component system*

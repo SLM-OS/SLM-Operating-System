@@ -19,6 +19,32 @@ Eliminate external UART adapter by implementing USB CDC-ACM device mode.
 
 ---
 
+### Shell Working Directory & Relative Paths ✅
+Add current working directory support and relative path resolution.
+
+- ✅ Current working directory (cwd) state tracking
+  - `shell_cwd` variable in `kernel/src/shell.c`
+  - Starts at `/`, persists across commands
+- ✅ `pwd` command to print working directory
+- ✅ `cd` command with full path validation
+  - Validates target is a directory (not a file)
+  - Works with both virtual directories and mount points
+  - `cd` with no arg returns to `/`
+- ✅ `resolve_path()` internal function
+  - Handles `.` (current directory)
+  - Handles `..` (parent directory)
+  - Normalizes `//` to `/`
+  - Strips trailing slashes
+- ✅ All filesystem commands updated for relative paths
+  - `ls`, `cat`, `write`, `mkdir`, `rm`, `mv`, `df`, `truncate`, `append`
+- ✅ 21 unit tests for path resolution and working directory
+
+**Effort:** 1 day
+**Value:** Unix-like navigation, less typing for deep paths
+**Status:** Complete (December 2025)
+
+---
+
 ### Full POSIX Shell
 Replace MicroShell with a real shell supporting scripting, pipes, and job control.
 

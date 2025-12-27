@@ -27,7 +27,65 @@
 typedef enum {
     VFS_NODE_FILE,      /* Virtual file (read generates content) */
     VFS_NODE_DIR,       /* Directory containing other nodes */
+    VFS_NODE_MOUNT,     /* Mount point for a real filesystem */
 } vfs_node_type_t;
+
+/* Forward declaration for filesystem operations */
+struct vfs_fs_ops;
+
+/*
+ * Entry info for mounted filesystem traversal.
+ * Generic structure that filesystems populate.
+ */
+struct vfs_entry_info {
+    char name[VFS_MAX_NAME];    /* Entry name */
+    uint8_t type;               /* 0=file, 1=directory */
+    uint32_t size;              /* File size (for files) */
+};
+
+/*
+ * Filesystem operations structure.
+ * Mounted filesystems implement these callbacks.
+ */
+struct vfs_fs_ops {
+    /*
+     * Read file content.
+     *
+     * @ctx:    Filesystem context (e.g., lfs_mount)
+     * @path:   Path within filesystem (relative)
+     * @buf:    Buffer to write content to
+     * @size:   Maximum bytes to read
+     * @offset: Offset within file
+     *
+     * Returns: Number of bytes read, or -1 on error.
+     */
+    int (*read)(void *ctx, const char *path, char *buf, size_t size, size_t offset);
+
+    /*
+     * Read directory entries.
+     *
+     * @ctx:      Filesystem context
+     * @path:     Path within filesystem (relative)
+     * @callback: Called for each entry
+     * @cb_ctx:   User context passed to callback
+     *
+     * Returns: 0 on success, -1 on error.
+     */
+    int (*readdir)(void *ctx, const char *path,
+                   void (*callback)(const struct vfs_entry_info *info, void *cb_ctx),
+                   void *cb_ctx);
+
+    /*
+     * Get file/directory info.
+     *
+     * @ctx:  Filesystem context
+     * @path: Path within filesystem (relative)
+     * @info: Output entry info
+     *
+     * Returns: 0 on success, -1 on error.
+     */
+    int (*stat)(void *ctx, const char *path, struct vfs_entry_info *info);
+};
 
 /*
  * Read callback for virtual files.
@@ -47,7 +105,7 @@ typedef int (*vfs_read_fn)(char *buf, size_t size, void *ctx);
  */
 struct vfs_node {
     char name[VFS_MAX_NAME];        /* Node name (e.g., "memory") */
-    vfs_node_type_t type;           /* File or directory */
+    vfs_node_type_t type;           /* File, directory, or mount point */
 
     /* For files */
     vfs_read_fn read;               /* Read callback */
@@ -56,6 +114,10 @@ struct vfs_node {
     /* For directories */
     struct vfs_node *children[VFS_MAX_CHILDREN];
     int num_children;
+
+    /* For mount points (VFS_NODE_MOUNT) */
+    const struct vfs_fs_ops *fs_ops;  /* Filesystem operations */
+    void *fs_ctx;                     /* Filesystem context (e.g., lfs_mount*) */
 
     /* Tree structure */
     struct vfs_node *parent;
@@ -147,5 +209,101 @@ struct vfs_node *vfs_get_components(void); /* /components/ */
  * Returns: buf on success, NULL on error.
  */
 char *vfs_get_path(struct vfs_node *node, char *buf, size_t size);
+
+/*
+ * Mount a filesystem at a path.
+ *
+ * Creates a mount point node that redirects operations to the
+ * provided filesystem.
+ *
+ * @path:   Absolute path for mount point (e.g., "/mnt/files")
+ * @ops:    Filesystem operations
+ * @ctx:    Filesystem context (passed to ops callbacks)
+ *
+ * Returns: Mount point node, or NULL on error.
+ */
+struct vfs_node *vfs_mount(const char *path,
+                            const struct vfs_fs_ops *ops,
+                            void *ctx);
+
+/*
+ * Unmount a filesystem.
+ *
+ * @mnt: Mount point node from vfs_mount()
+ *
+ * Returns: 0 on success, -1 on error.
+ */
+int vfs_unmount(struct vfs_node *mnt);
+
+/*
+ * Check if a node is a mount point.
+ */
+static inline int vfs_is_mount(struct vfs_node *node)
+{
+    return node && node->type == VFS_NODE_MOUNT;
+}
+
+/*
+ * Lookup extended: returns both node and remaining subpath.
+ *
+ * When a mount point is encountered, returns the mount point node
+ * and the remaining path within that filesystem.
+ *
+ * @path:        Absolute path to look up
+ * @subpath_out: Output: remaining path within mount (NULL if not mount)
+ *
+ * Returns: Node pointer (may be mount point), or NULL if not found.
+ */
+struct vfs_node *vfs_lookup_mount(const char *path, const char **subpath_out);
+
+/*
+ * Read from a file, including mount point files.
+ *
+ * If path resolves to a mount point, uses the mounted filesystem.
+ *
+ * @path:   Absolute path
+ * @buf:    Buffer to write content to
+ * @size:   Maximum bytes to read
+ * @offset: Offset within file
+ *
+ * Returns: Number of bytes read, or -1 on error.
+ */
+int vfs_read_path(const char *path, char *buf, size_t size, size_t offset);
+
+/*
+ * List directory at path, including mount point directories.
+ *
+ * @path:     Absolute path
+ * @callback: Called for each entry
+ * @ctx:      User context passed to callback
+ *
+ * Returns: 0 on success, -1 on error.
+ */
+int vfs_list_path(const char *path,
+                  void (*callback)(const struct vfs_entry_info *info, void *ctx),
+                  void *ctx);
+
+/*
+ * Get info for a path, including mount point paths.
+ *
+ * @path: Absolute path
+ * @info: Output entry info
+ *
+ * Returns: 0 on success, -1 on error.
+ */
+int vfs_stat_path(const char *path, struct vfs_entry_info *info);
+
+/*
+ * Get the filesystem context for a mount point path.
+ *
+ * This is used by shell commands that need direct access to the
+ * underlying filesystem (e.g., for write operations).
+ *
+ * @path:        Absolute path to look up
+ * @subpath_out: Output: remaining path within mount
+ *
+ * Returns: Filesystem context (e.g., lfs_mount*), or NULL if not a mount.
+ */
+void *vfs_get_mount_ctx(const char *path, const char **subpath_out);
 
 #endif /* VFS_H */

@@ -106,6 +106,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_shell();
     total_failures += test_suite_vmm();
     total_failures += test_suite_pmm();
+    total_failures += test_suite_littlefs();
 
     /* Final summary */
     uart_puts("\n");

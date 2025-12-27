@@ -55,4 +55,7 @@ int test_suite_vmm(void);
 /* PMM buddy allocator tests */
 int test_suite_pmm(void);
 
+/* LittleFS integration tests */
+int test_suite_littlefs(void);
+
 #endif /* TEST_HARNESS_H */

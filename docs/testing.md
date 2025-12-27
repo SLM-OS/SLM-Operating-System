@@ -25,7 +25,8 @@ kernel/tests/
 ├── test_vmm.c        # VMM and TLB invalidation tests (10 tests)
 ├── test_component.c  # Component system tests
 ├── test_vfs.c        # Virtual filesystem tests
-└── test_shell.c      # Shell command tests
+├── test_shell.c      # Shell command and path resolution tests (58 tests)
+└── test_littlefs.c   # LittleFS and block device tests (26 tests)
 ```
 
 ### Available Assertions
@@ -536,6 +537,203 @@ These tests verify actual buddy allocator behavior, not just page counts. Key te
 **Test API:**
 - `pmm_get_buddy_stats()` exposes internal buddy state for testing
 - Tests verify actual behavior (coalescing enables larger allocations), not just page counts
+
+### LittleFS Tests (`kernel/tests/test_littlefs.c`)
+
+Validates the filesystem stack including block device abstraction, RAM disk driver, LittleFS wrapper, and VFS mount point integration. Tests run via Unity framework (26 tests total).
+
+#### RAM Disk Tests
+
+| Test | Description |
+|------|-------------|
+| test_ramdisk_create | Create RAM disk with specified geometry, verify block size/count |
+| test_ramdisk_read_write | Write pattern to block, read back and verify contents match |
+| test_ramdisk_erase | Erase block, verify memory reset to 0xFF (flash erased state) |
+
+#### LittleFS Mount Tests
+
+| Test | Description |
+|------|-------------|
+| test_lfs_format_mount | Format device, mount LittleFS, unmount |
+| test_lfs_remount | Format, mount, unmount, remount without format |
+| test_lfs_stat | Get filesystem statistics (total blocks, used blocks) |
+
+#### File Operation Tests
+
+| Test | Description |
+|------|-------------|
+| test_lfs_file_create_write | Create file with LFS_O_CREAT, write content, close |
+| test_lfs_file_read | Write file, reopen for read, verify contents |
+| test_lfs_file_seek_size | Test file size and seek (SET, CUR) operations |
+| test_lfs_file_truncate | Truncate file to smaller size, verify content preserved up to size |
+| test_lfs_rename | Rename file, verify old path gone and new path exists |
+| test_lfs_append_mode | Multiple opens with LFS_O_APPEND, verify content accumulates |
+| test_lfs_offset_read | Seek to offsets, read partial content, verify streaming reads |
+
+#### Directory Operation Tests
+
+| Test | Description |
+|------|-------------|
+| test_lfs_mkdir | Create directory, verify via stat |
+| test_lfs_dir_list | Create files/dirs, list directory, verify entries found |
+| test_lfs_remove | Create file, verify exists, remove, verify gone |
+
+#### VFS Mount Point Tests
+
+| Test | Description |
+|------|-------------|
+| test_vfs_mount_lookup | Verify /mnt and /mnt/files nodes exist with correct types |
+| test_vfs_mount_read_file | Read file via vfs_read_path() through mount point |
+| test_vfs_mount_list_dir | List directory via vfs_list_path() through mount point |
+
+#### VFS Mount Context Tests
+
+| Test | Description |
+|------|-------------|
+| test_vfs_get_mount_ctx | Retrieve mount context and subpath from VFS path |
+| test_vfs_read_with_offset | Read file at different offsets via vfs_read_path() |
+
+#### Write Through Mount Point Tests
+
+| Test | Description |
+|------|-------------|
+| test_write_through_mount | Create file via mount context, read back through VFS |
+| test_mkdir_through_mount | Create directory via mount context, verify via stat |
+| test_rename_through_mount | Rename file via mount context, verify old/new paths |
+| test_truncate_through_mount | Truncate file via mount context, verify size changed |
+| test_append_through_mount | Append to file via mount context, verify content accumulated |
+
+**Test Notes:**
+- Each test creates its own isolated RAM disk and LittleFS mount
+- Tests verify actual data round-trips, not just API success
+- VFS tests use the mount created during kernel boot in main.c
+- RAM disk tests verify flash semantics (erase-before-write, 0xFF erased state)
+- Write tests clean up created files after verification
+
+### Shell Tests (`kernel/tests/test_shell.c`)
+
+Validates shell command dispatch, argument parsing, working directory management, and path resolution. Tests run via Unity framework (58 tests total).
+
+#### Command Dispatch Tests
+
+| Test | Description |
+|------|-------------|
+| test_shell_empty_command | Empty command returns 0 |
+| test_shell_whitespace_only | Whitespace-only returns 0 |
+| test_shell_unknown_command | Unknown command returns -1 |
+
+#### Basic Commands
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_clear | `clear` executes successfully |
+| test_shell_cmd_uptime | `uptime` executes successfully |
+
+#### VFS Command Error Cases
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_ls_nonexistent | `ls /nonexistent` returns -1 |
+| test_shell_cmd_cat_no_args | `cat` with no args returns -1 |
+| test_shell_cmd_cat_nonexistent | `cat /nonexistent` returns -1 |
+| test_shell_cmd_cat_directory | `cat /sys` (directory) returns -1 |
+
+#### VFS Command Success Cases
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_ls_root | `ls /` lists root directory |
+| test_shell_cmd_ls_sys | `ls /sys` lists sys directory |
+| test_shell_cmd_cat_sys_memory | `cat /sys/memory` reads file |
+| test_shell_cmd_cat_sys_cpus | `cat /sys/cpus` reads file |
+
+#### Verbose Status Commands
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_help | `help` lists commands |
+| test_shell_cmd_mem | `mem` shows memory stats |
+| test_shell_cmd_tasks | `tasks` shows task list |
+| test_shell_cmd_cpu | `cpu` shows CPU info |
+| test_shell_cmd_vmm | `vmm` shows virtual memory |
+| test_shell_cmd_ipc | `ipc` shows IPC stats |
+| test_shell_cmd_model | `model` shows model memory |
+| test_shell_cmd_dtb | `dtb` shows device tree |
+
+#### Component Command Tests
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_component_help | `component` shows help |
+| test_shell_cmd_component_list_empty | `component list` shows empty list |
+| test_shell_cmd_component_register_missing_args | Missing args returns -1 |
+| test_shell_cmd_component_register_valid | Valid registration succeeds |
+| test_shell_cmd_component_register_invalid_type | Invalid type returns -1 |
+| test_shell_cmd_component_unregister_missing_args | Missing args returns -1 |
+| test_shell_cmd_component_unregister_invalid | Invalid index returns -1 |
+| test_shell_cmd_component_unregister_valid | Valid unregister succeeds |
+| test_shell_cmd_component_status_missing_args | Missing args returns -1 |
+| test_shell_cmd_component_status_by_index | Status by index works |
+| test_shell_cmd_component_status_not_found | Nonexistent name returns -1 |
+| test_shell_cmd_component_unknown_subcmd | Unknown subcommand returns -1 |
+
+#### Run and Kill Commands
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_run_unknown_program | Unknown program returns -1 |
+| test_shell_cmd_kill_no_args | No args returns -1 |
+| test_shell_cmd_kill_invalid_pid | Invalid PID returns -1 |
+| test_shell_cmd_kill_nonexistent_pid | Nonexistent PID returns -1 |
+
+#### Argument Parsing Tests
+
+| Test | Description |
+|------|-------------|
+| test_shell_extra_whitespace | Extra whitespace handled correctly |
+| test_shell_args_with_spaces | Args with spaces between handled |
+| test_shell_register_external_command | External command registration works |
+
+#### Working Directory Tests (pwd, cd)
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_pwd | `pwd` prints current directory |
+| test_shell_cmd_cd_root | `cd /` goes to root |
+| test_shell_cmd_cd_no_arg | `cd` (no arg) goes to root |
+| test_shell_cmd_cd_valid_dir | `cd /sys` changes to /sys |
+| test_shell_cmd_cd_nonexistent | `cd /nonexistent` returns -1 |
+| test_shell_cmd_cd_file | `cd /sys/memory` (file, not dir) returns -1 |
+| test_shell_cmd_cd_dotdot | `cd ..` goes to parent |
+| test_shell_cmd_cd_dotdot_at_root | `cd ..` at root stays at root |
+| test_shell_cmd_cd_dot | `cd .` stays in current dir |
+
+#### Relative Path Resolution Tests
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_ls_cwd | `ls` (no arg) lists cwd |
+| test_shell_cmd_ls_relative | `ls sys` from root lists /sys |
+| test_shell_cmd_ls_dot | `ls .` lists cwd |
+| test_shell_cmd_ls_dotdot | `ls ..` lists parent |
+| test_shell_cmd_cat_relative | `cat memory` from /sys reads /sys/memory |
+| test_shell_path_complex | Complex path `/sys/../proc/../sys` resolves correctly |
+| test_shell_path_trailing_slash | Trailing slashes handled |
+| test_shell_path_double_slash | Double slashes `//` handled |
+
+#### Mount Point Path Tests
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_cd_mount_subdir | `cd /mnt/files` works |
+| test_shell_mount_relative_path | `cat hello.txt` from /mnt/files works |
+| test_shell_cmd_df_cwd | `df` with cwd in mount shows filesystem stats |
+
+**Test Notes:**
+- Tests reset cwd to `/` after each test to avoid state leakage
+- Path resolution tests verify both virtual directories and mount points
+- Error cases verify proper error codes and messages
+- Each test uses `shell_execute()` for programmatic command execution
 
 ### FFI Tests (`runtime/src/lib.rs`)
 

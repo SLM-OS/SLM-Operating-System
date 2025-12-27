@@ -103,18 +103,34 @@ set(KERNEL_SOURCES
     kernel/drivers/gic.c
     kernel/drivers/timer.c
 
+    # Block device abstraction and RAM disk
+    kernel/drivers/blkdev.c
+    kernel/drivers/ramdisk.c
+
     # ==========================================================================
     # Core Kernel
     # ==========================================================================
     kernel/src/main.c
     kernel/src/panic.c
     kernel/src/kprintf.c
+    kernel/src/string.c
 
     # Shell and utilities
     kernel/src/shell.c
     kernel/src/dtb.c
     kernel/src/elf.c
     kernel/src/vfs.c
+
+    # ==========================================================================
+    # Filesystem
+    # ==========================================================================
+    # LittleFS library
+    kernel/lib/littlefs/lfs.c
+    kernel/lib/littlefs/lfs_util.c
+
+    # LittleFS wrapper and VFS adapter
+    kernel/fs/littlefs_slm.c
+    kernel/fs/littlefs_vfs.c
 
     # Component system and FFI
     kernel/src/component.c
@@ -146,6 +162,7 @@ set(TEST_SOURCES
     kernel/tests/test_shell.c
     kernel/tests/test_vmm.c
     kernel/tests/test_pmm.c
+    kernel/tests/test_littlefs.c
 )
 
 # Include directories
@@ -153,11 +170,22 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/include
     ${CMAKE_SOURCE_DIR}/kernel/tests
     ${CMAKE_SOURCE_DIR}/kernel/gpu
+    ${CMAKE_SOURCE_DIR}/kernel/lib/littlefs
 )
 
 # Build kernel ELF
 add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
 target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
+
+# Configure LittleFS for freestanding use (no libc)
+# - LFS_NO_MALLOC: We use static buffers
+# - LFS_NO_ASSERT: No __assert_func in freestanding
+# - LFS_NO_DEBUG/WARN/ERROR: No printf in freestanding
+set_source_files_properties(
+    kernel/lib/littlefs/lfs.c
+    kernel/lib/littlefs/lfs_util.c
+    PROPERTIES COMPILE_FLAGS "-Wno-unused-parameter -Wno-shadow -Wno-cast-align -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR"
+)
 
 # Link with Rust runtime (if it exists)
 if(EXISTS ${RUST_LIB})

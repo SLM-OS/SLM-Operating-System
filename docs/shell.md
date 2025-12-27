@@ -31,8 +31,17 @@ Available commands:
   elftest   - Test ELF loader
   run       - Run a program (run <name>)
   kill      - Terminate a task by ID
-  ls        - List directory (ls <path>)
-  cat       - Show file contents (cat <path>)
+  ls        - List directory (ls [path])
+  cd        - Change directory (cd [path])
+  pwd       - Print working directory
+  cat       - Show file contents (cat <path> [offset] [length])
+  write     - Write to file (write <path> <content>)
+  mkdir     - Create directory (mkdir <path>)
+  rm        - Remove file/dir (rm <path>)
+  mv        - Move/rename (mv <src> <dst>)
+  df        - Filesystem stats (df [path])
+  truncate  - Truncate file (truncate <path> <size>)
+  append    - Append to file (append <path> <content>)
   component - Component system (list/register/status)
   clear     - Clear screen
   reboot    - Restart the system
@@ -54,11 +63,181 @@ Available commands:
 | `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |
 | `run <name>` | Run a program by name from the ELF table |
 | `kill <pid>` | Terminate a task by process ID |
-| `ls <path>` | List virtual filesystem directory contents |
-| `cat <path>` | Display virtual file contents |
+| `ls [path]` | List directory contents (defaults to cwd) |
+| `cd [path]` | Change working directory (defaults to `/`) |
+| `pwd` | Print current working directory |
+| `cat <path> [off] [len]` | Display file contents with optional offset/length |
+| `write <path> <content>` | Write content to file (creates or overwrites) |
+| `mkdir <path>` | Create directory in mounted filesystem |
+| `rm <path>` | Remove file or empty directory |
+| `mv <src> <dst>` | Move/rename file or directory |
+| `df [path]` | Show filesystem usage statistics |
+| `truncate <path> <size>` | Truncate file to specified size |
+| `append <path> <content>` | Append content to file (for logging) |
 | `component` | Component system management (see below) |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
+
+### Working Directory
+
+The shell maintains a current working directory (cwd) that starts at `/`. Use `cd` and `pwd` to navigate:
+
+```
+SLM-OS> pwd
+/
+
+SLM-OS> cd /mnt/files
+SLM-OS> pwd
+/mnt/files
+
+SLM-OS> cd ..
+SLM-OS> pwd
+/mnt
+
+SLM-OS> cd
+SLM-OS> pwd
+/
+```
+
+All filesystem commands support relative paths:
+
+```
+SLM-OS> cd /mnt/files
+SLM-OS> ls
+hello.txt    [f]    20
+readme.txt   [f]    74
+
+SLM-OS> cat hello.txt
+Hello from LittleFS!
+
+SLM-OS> mkdir logs
+Created directory /mnt/files/logs
+
+SLM-OS> ls ./logs
+(empty directory)
+
+SLM-OS> cd logs
+SLM-OS> pwd
+/mnt/files/logs
+
+SLM-OS> write app.log Started
+Wrote 7 bytes to /mnt/files/logs/app.log
+
+SLM-OS> cat ../hello.txt
+Hello from LittleFS!
+```
+
+Path resolution handles:
+- Relative paths (prepends cwd)
+- `.` (current directory)
+- `..` (parent directory)
+- Multiple slashes (`//` → `/`)
+- Trailing slashes (stripped)
+
+### Filesystem Commands
+
+The `ls` and `cat` commands work with both virtual files and mounted filesystems:
+
+```
+SLM-OS> ls /
+sys/
+proc/
+components/
+mnt/
+
+SLM-OS> ls /sys
+memory
+cpus
+ipc
+model
+uptime
+version
+
+SLM-OS> cat /sys/memory
+total_kb: 1048576
+free_kb: 1047040
+allocated_pages: 384
+```
+
+Mount point access (LittleFS on RAM disk):
+
+```
+SLM-OS> ls /mnt/files
+hello.txt    [f]    20
+readme.txt   [f]    74
+
+SLM-OS> cat /mnt/files/hello.txt
+Hello from LittleFS!
+```
+
+The output format for mounted directories shows:
+- Filename
+- Type indicator: `[f]` for file, `[d]` for directory
+- Size in bytes (for files)
+
+See `docs/filesystem.md` for details on the LittleFS integration.
+
+### Write Commands
+
+The following commands modify files in mounted filesystems:
+
+```
+SLM-OS> write /mnt/files/test.txt Hello World
+Wrote 11 bytes to /mnt/files/test.txt
+
+SLM-OS> cat /mnt/files/test.txt
+Hello World
+
+SLM-OS> append /mnt/files/log.txt First entry
+Appended 12 bytes to /mnt/files/log.txt
+
+SLM-OS> append /mnt/files/log.txt Second entry
+Appended 13 bytes to /mnt/files/log.txt
+
+SLM-OS> cat /mnt/files/log.txt
+First entry
+Second entry
+
+SLM-OS> mkdir /mnt/files/subdir
+Created directory /mnt/files/subdir
+
+SLM-OS> mv /mnt/files/test.txt /mnt/files/renamed.txt
+Moved /mnt/files/test.txt -> /mnt/files/renamed.txt
+
+SLM-OS> rm /mnt/files/renamed.txt
+Removed /mnt/files/renamed.txt
+
+SLM-OS> df
+Filesystem      Blocks     Used     Free   Use%
+/mnt/files         256        4      252     1%
+                 1024K     16K    1008K
+```
+
+### Streaming Reads
+
+For large files, use offset and length parameters with `cat`:
+
+```
+SLM-OS> cat /mnt/files/large.bin 0 64
+[offset=0, read=64 bytes]
+(first 64 bytes of file)
+
+SLM-OS> cat /mnt/files/large.bin 64 64
+[offset=64, read=64 bytes]
+(next 64 bytes of file)
+```
+
+### File Truncation
+
+Clear or resize files with `truncate`:
+
+```
+SLM-OS> truncate /mnt/files/log.txt 0
+Truncated /mnt/files/log.txt to 0 bytes
+
+SLM-OS> cat /mnt/files/log.txt
+(empty)
+```
 
 ### Component Command
 

@@ -19,6 +19,7 @@
 #include "elf.h"
 #include "vfs.h"
 #include "component.h"
+#include "littlefs_slm.h"
 #include <stddef.h>
 
 /* ============================================================================
@@ -41,7 +42,16 @@ static int cmd_run(int argc, char *argv[]);
 static int cmd_kill(int argc, char *argv[]);
 static int cmd_ls(int argc, char *argv[]);
 static int cmd_cat(int argc, char *argv[]);
+static int cmd_write(int argc, char *argv[]);
+static int cmd_mkdir(int argc, char *argv[]);
+static int cmd_rm(int argc, char *argv[]);
+static int cmd_mv(int argc, char *argv[]);
+static int cmd_df(int argc, char *argv[]);
+static int cmd_truncate(int argc, char *argv[]);
+static int cmd_append(int argc, char *argv[]);
 static int cmd_component(int argc, char *argv[]);
+static int cmd_pwd(int argc, char *argv[]);
+static int cmd_cd(int argc, char *argv[]);
 
 /* ============================================================================
  * Command table
@@ -60,8 +70,17 @@ static const shell_cmd_t builtin_commands[] = {
     {"elftest", cmd_elftest, "Test ELF loader"},
     {"run",    cmd_run,    "Run a program (run <name>)"},
     {"kill",   cmd_kill,   "Terminate a task by ID"},
-    {"ls",     cmd_ls,     "List directory (ls <path>)"},
+    {"ls",     cmd_ls,     "List directory (ls [path])"},
+    {"cd",     cmd_cd,     "Change directory (cd [path])"},
+    {"pwd",    cmd_pwd,    "Print working directory"},
     {"cat",    cmd_cat,    "Show file contents (cat <path>)"},
+    {"write",  cmd_write,  "Write to file (write <path> <content>)"},
+    {"mkdir",  cmd_mkdir,  "Create directory (mkdir <path>)"},
+    {"rm",     cmd_rm,     "Remove file/dir (rm <path>)"},
+    {"mv",     cmd_mv,     "Move/rename (mv <src> <dst>)"},
+    {"df",     cmd_df,     "Filesystem stats (df [path])"},
+    {"truncate", cmd_truncate, "Truncate file (truncate <path> <size>)"},
+    {"append", cmd_append, "Append to file (append <path> <content>)"},
     {"component", cmd_component, "Component system (list/register/status)"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
@@ -80,6 +99,9 @@ static int num_external_commands = 0;
 
 static char line_buffer[SHELL_MAX_LINE];
 static int line_pos = 0;
+
+/* Current working directory */
+static char shell_cwd[VFS_MAX_PATH] = "/";
 
 /* ============================================================================
  * Helper functions
@@ -123,6 +145,125 @@ static int parse_uint(const char *str, uint32_t *out)
         str++;
     }
     *out = val;
+    return 0;
+}
+
+/*
+ * String length helper.
+ */
+static size_t shell_strlen(const char *s)
+{
+    size_t len = 0;
+    while (*s++) len++;
+    return len;
+}
+
+/*
+ * Resolve a path (relative or absolute) to a canonical absolute path.
+ * Handles: relative paths, ".", "..", trailing slashes, double slashes.
+ * Returns 0 on success, -1 on error (path too long).
+ */
+static int resolve_path(const char *path, char *out, size_t max_len)
+{
+    char work[VFS_MAX_PATH];
+    size_t work_len = 0;
+
+    if (!path || !out || max_len < 2) {
+        return -1;
+    }
+
+    /* Empty path means current directory */
+    if (*path == '\0') {
+        size_t cwd_len = shell_strlen(shell_cwd);
+        if (cwd_len >= max_len) return -1;
+        shell_strcpy(out, shell_cwd);
+        return 0;
+    }
+
+    /* Start with cwd for relative paths, empty for absolute */
+    if (path[0] != '/') {
+        /* Relative path - start with cwd */
+        size_t cwd_len = shell_strlen(shell_cwd);
+        if (cwd_len >= sizeof(work)) return -1;
+        shell_strcpy(work, shell_cwd);
+        work_len = cwd_len;
+
+        /* Ensure there's a separator if cwd isn't just "/" */
+        if (work_len > 1) {
+            if (work_len + 1 >= sizeof(work)) return -1;
+            work[work_len++] = '/';
+            work[work_len] = '\0';
+        }
+    } else {
+        /* Absolute path */
+        work[0] = '/';
+        work[1] = '\0';
+        work_len = 1;
+        path++;  /* Skip leading / */
+    }
+
+    /* Process each component of the path */
+    while (*path) {
+        /* Skip leading slashes */
+        while (*path == '/') path++;
+        if (*path == '\0') break;
+
+        /* Find end of component */
+        const char *comp_start = path;
+        size_t comp_len = 0;
+        while (*path && *path != '/') {
+            comp_len++;
+            path++;
+        }
+
+        /* Handle special components */
+        if (comp_len == 1 && comp_start[0] == '.') {
+            /* "." - current directory, skip */
+            continue;
+        } else if (comp_len == 2 && comp_start[0] == '.' && comp_start[1] == '.') {
+            /* ".." - parent directory */
+            if (work_len > 1) {
+                /* Remove trailing slash if present */
+                if (work[work_len - 1] == '/') {
+                    work_len--;
+                }
+                /* Find last slash */
+                while (work_len > 1 && work[work_len - 1] != '/') {
+                    work_len--;
+                }
+                /* Keep the slash for root, remove for others */
+                if (work_len > 1) {
+                    work_len--;
+                }
+                work[work_len] = '\0';
+            }
+            /* At root, ".." stays at root */
+        } else {
+            /* Regular component - append */
+            /* Ensure there's a separator */
+            if (work_len > 1 || (work_len == 1 && work[0] != '/')) {
+                if (work_len + 1 >= sizeof(work)) return -1;
+                work[work_len++] = '/';
+            }
+            /* Append component */
+            if (work_len + comp_len >= sizeof(work)) return -1;
+            for (size_t i = 0; i < comp_len; i++) {
+                work[work_len++] = comp_start[i];
+            }
+            work[work_len] = '\0';
+        }
+    }
+
+    /* Ensure we have at least "/" */
+    if (work_len == 0) {
+        work[0] = '/';
+        work[1] = '\0';
+        work_len = 1;
+    }
+
+    /* Copy to output */
+    if (work_len >= max_len) return -1;
+    shell_strcpy(out, work);
     return 0;
 }
 
@@ -868,16 +1009,79 @@ static int cmd_kill(int argc, char *argv[])
 }
 
 /* ============================================================================
- * VFS Commands (ls, cat)
+ * VFS Commands (pwd, cd, ls, cat)
  * ============================================================================ */
 
 /*
- * Callback for listing directory entries.
+ * pwd - Print working directory
+ */
+static int cmd_pwd(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    uart_printf("%s\r\n", shell_cwd);
+    return 0;
+}
+
+/*
+ * cd <path> - Change directory
+ */
+static int cmd_cd(int argc, char *argv[])
+{
+    char resolved[VFS_MAX_PATH];
+    const char *path = "/";  /* Default to root */
+
+    if (argc >= 2) {
+        path = argv[1];
+    }
+
+    /* Resolve the path */
+    if (resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        uart_puts("cd: path too long\r\n");
+        return -1;
+    }
+
+    /* Check if path exists and is a directory */
+    const char *subpath = NULL;
+    struct vfs_node *node = vfs_lookup_mount(resolved, &subpath);
+    if (!node) {
+        uart_printf("cd: %s: No such file or directory\r\n", resolved);
+        return -1;
+    }
+
+    /* Check if it's a directory or mount point */
+    if (node->type != VFS_NODE_DIR && node->type != VFS_NODE_MOUNT) {
+        uart_printf("cd: %s: Not a directory\r\n", resolved);
+        return -1;
+    }
+
+    /* For mount points, we also need to check if subpath is a directory */
+    if (node->type == VFS_NODE_MOUNT && subpath && subpath[0] != '\0' &&
+        !(subpath[0] == '/' && subpath[1] == '\0')) {
+        /* There's a subpath within the mount - verify it's a directory */
+        struct vfs_entry_info info;
+        if (vfs_stat_path(resolved, &info) < 0) {
+            uart_printf("cd: %s: No such file or directory\r\n", resolved);
+            return -1;
+        }
+        if (info.type != 1) {  /* 1 = directory */
+            uart_printf("cd: %s: Not a directory\r\n", resolved);
+            return -1;
+        }
+    }
+
+    /* Update cwd */
+    shell_strcpy(shell_cwd, resolved);
+    return 0;
+}
+
+/*
+ * Callback for listing directory entries (VFS nodes).
  */
 static void ls_print_entry(struct vfs_node *node, void *ctx)
 {
     (void)ctx;
-    if (node->type == VFS_NODE_DIR) {
+    if (node->type == VFS_NODE_DIR || node->type == VFS_NODE_MOUNT) {
         uart_printf("  %s/\r\n", node->name);
     } else {
         uart_printf("  %s\r\n", node->name);
@@ -885,65 +1089,167 @@ static void ls_print_entry(struct vfs_node *node, void *ctx)
 }
 
 /*
- * ls <path> - List directory contents
+ * Callback for listing directory entries (mount point entries).
+ */
+static void ls_print_mount_entry(const struct vfs_entry_info *info, void *ctx)
+{
+    (void)ctx;
+    if (info->type == 1) {  /* Directory */
+        uart_printf("  %s/\r\n", info->name);
+    } else {
+        uart_printf("  %s  (%lu bytes)\r\n", info->name, (unsigned long)info->size);
+    }
+}
+
+/*
+ * ls [path] - List directory contents
+ * Defaults to current working directory if no path given.
  */
 static int cmd_ls(int argc, char *argv[])
 {
-    const char *path = "/";  /* Default to root */
+    char resolved[VFS_MAX_PATH];
+    const char *input_path = ".";  /* Default to cwd */
 
     if (argc >= 2) {
-        path = argv[1];
+        input_path = argv[1];
     }
 
-    struct vfs_node *node = vfs_lookup(path);
-    if (!node) {
-        uart_printf("ls: %s: No such file or directory\r\n", path);
+    /* Resolve path (handles relative paths) */
+    if (resolve_path(input_path, resolved, sizeof(resolved)) < 0) {
+        uart_puts("ls: path too long\r\n");
         return -1;
     }
 
-    if (node->type != VFS_NODE_DIR) {
+    /* Try the path-based lookup which handles mount points */
+    const char *subpath = NULL;
+    struct vfs_node *node = vfs_lookup_mount(resolved, &subpath);
+    if (!node) {
+        uart_printf("ls: %s: No such file or directory\r\n", resolved);
+        return -1;
+    }
+
+    /* If it's a mount point, use the path-based listing */
+    if (node->type == VFS_NODE_MOUNT) {
+        uart_printf("%s:\r\n", resolved);
+        int err = vfs_list_path(resolved, ls_print_mount_entry, NULL);
+        if (err < 0) {
+            uart_printf("ls: %s: Failed to read directory\r\n", resolved);
+            return -1;
+        }
+        return 0;
+    }
+
+    if (node->type == VFS_NODE_FILE) {
         /* It's a file, just show its name */
         uart_printf("%s\r\n", node->name);
         return 0;
     }
 
-    /* List directory contents */
-    uart_printf("%s:\r\n", path);
+    /* Regular directory */
+    uart_printf("%s:\r\n", resolved);
     vfs_list(node, ls_print_entry, NULL);
 
     return 0;
 }
 
 /*
- * cat <path> - Show file contents
+ * cat <path> [offset] [length] - Show file contents
+ *
+ * With offset and length, reads a portion of the file (useful for large files).
+ * Supports relative paths.
  */
 static int cmd_cat(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: cat <path>\r\n");
-        uart_puts("  Show contents of a virtual file.\r\n");
+        uart_puts("Usage: cat <path> [offset] [length]\r\n");
+        uart_puts("  Show contents of a file (virtual or from mount).\r\n");
+        uart_puts("  Optional offset and length for large files.\r\n");
         uart_puts("  Example: cat /sys/memory\r\n");
+        uart_puts("  Example: cat hello.txt  (relative to cwd)\r\n");
+        uart_puts("  Example: cat /mnt/files/large.bin 0 1024\r\n");
         return -1;
     }
 
-    const char *path = argv[1];
-
-    struct vfs_node *node = vfs_lookup(path);
-    if (!node) {
-        uart_printf("cat: %s: No such file or directory\r\n", path);
+    char resolved[VFS_MAX_PATH];
+    if (resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
+        uart_puts("cat: path too long\r\n");
         return -1;
+    }
+
+    size_t offset = 0;
+    size_t max_len = 1024;  /* Default max read */
+
+    /* Parse optional offset */
+    if (argc >= 3) {
+        uint32_t off_val;
+        if (parse_uint(argv[2], &off_val) == 0) {
+            offset = off_val;
+        }
+    }
+
+    /* Parse optional length */
+    if (argc >= 4) {
+        uint32_t len_val;
+        if (parse_uint(argv[3], &len_val) == 0) {
+            max_len = len_val;
+            if (max_len > 4096) max_len = 4096;  /* Cap at 4KB for safety */
+        }
+    }
+
+    /* Try the path-based lookup which handles mount points */
+    const char *subpath = NULL;
+    struct vfs_node *node = vfs_lookup_mount(resolved, &subpath);
+    if (!node) {
+        uart_printf("cat: %s: No such file or directory\r\n", resolved);
+        return -1;
+    }
+
+    /* If it's a mount point with subpath, use the path-based read */
+    if (node->type == VFS_NODE_MOUNT) {
+        /* Allocate buffer based on requested length (up to 4KB) */
+        char buf[4096];
+        size_t read_size = max_len < sizeof(buf) - 1 ? max_len : sizeof(buf) - 1;
+
+        int len = vfs_read_path(resolved, buf, read_size, offset);
+        if (len < 0) {
+            uart_printf("cat: %s: Read error or is a directory\r\n", resolved);
+            return -1;
+        }
+
+        buf[len] = '\0';
+
+        /* Show offset info if using streaming */
+        if (offset > 0 || argc >= 4) {
+            uart_printf("[offset=%lu, read=%d bytes]\r\n",
+                        (unsigned long)offset, len);
+        }
+
+        /* Print contents, converting \n to \r\n */
+        for (int i = 0; i < len; i++) {
+            if (buf[i] == '\n') {
+                uart_putc('\r');
+            }
+            uart_putc(buf[i]);
+        }
+
+        /* Ensure newline at end */
+        if (len > 0 && buf[len - 1] != '\n') {
+            uart_puts("\r\n");
+        }
+
+        return 0;
     }
 
     if (node->type == VFS_NODE_DIR) {
-        uart_printf("cat: %s: Is a directory\r\n", path);
+        uart_printf("cat: %s: Is a directory\r\n", resolved);
         return -1;
     }
 
-    /* Read file contents */
+    /* Read virtual file contents */
     char buf[1024];
     int len = vfs_read(node, buf, sizeof(buf) - 1);
     if (len < 0) {
-        uart_printf("cat: %s: Read error\r\n", path);
+        uart_printf("cat: %s: Read error\r\n", resolved);
         return -1;
     }
 
@@ -962,6 +1268,409 @@ static int cmd_cat(int argc, char *argv[])
         uart_puts("\r\n");
     }
 
+    return 0;
+}
+
+/* ============================================================================
+ * Filesystem Write Commands (write, mkdir, rm, mv, df)
+ * ============================================================================ */
+
+/*
+ * write <path> <content> - Write content to a file
+ *
+ * Creates or overwrites a file in a mounted filesystem.
+ * Supports relative paths.
+ */
+static int cmd_write(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: write <path> <content>\r\n");
+        uart_puts("  Write content to a file (creates or overwrites).\r\n");
+        uart_puts("  Path must be in a mounted filesystem.\r\n");
+        uart_puts("  Example: write test.txt Hello  (relative to cwd)\r\n");
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
+        uart_puts("write: path too long\r\n");
+        return -1;
+    }
+
+    /* Get the mount context and subpath */
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        uart_printf("write: %s: Not a mounted filesystem\r\n", resolved);
+        uart_puts("  (Only mounted filesystems support writing)\r\n");
+        return -1;
+    }
+
+    /* Build content from remaining arguments */
+    char content[512];
+    int pos = 0;
+    for (int i = 2; i < argc && pos < (int)sizeof(content) - 1; i++) {
+        /* Add space between arguments */
+        if (i > 2 && pos < (int)sizeof(content) - 1) {
+            content[pos++] = ' ';
+        }
+        /* Copy argument */
+        const char *p = argv[i];
+        while (*p && pos < (int)sizeof(content) - 1) {
+            content[pos++] = *p++;
+        }
+    }
+    content[pos] = '\0';
+
+    /* Open file for writing (create + truncate) */
+    int fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fd < 0) {
+        uart_printf("write: %s: Failed to open file\r\n", resolved);
+        return -1;
+    }
+
+    /* Write content */
+    int written = littlefs_file_write(mnt, fd, content, pos);
+    littlefs_file_close(mnt, fd);
+
+    if (written < 0) {
+        uart_printf("write: %s: Write failed\r\n", resolved);
+        return -1;
+    }
+
+    uart_printf("Wrote %d bytes to %s\r\n", written, resolved);
+    return 0;
+}
+
+/*
+ * mkdir <path> - Create a directory
+ * Supports relative paths.
+ */
+static int cmd_mkdir(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_puts("Usage: mkdir <path>\r\n");
+        uart_puts("  Create a directory in a mounted filesystem.\r\n");
+        uart_puts("  Example: mkdir subdir  (relative to cwd)\r\n");
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
+        uart_puts("mkdir: path too long\r\n");
+        return -1;
+    }
+
+    /* Get the mount context and subpath */
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        uart_printf("mkdir: %s: Not a mounted filesystem\r\n", resolved);
+        return -1;
+    }
+
+    int err = littlefs_mkdir(mnt, subpath);
+    if (err < 0) {
+        if (err == LFS_ERR_EXIST) {
+            uart_printf("mkdir: %s: Already exists\r\n", resolved);
+        } else {
+            uart_printf("mkdir: %s: Failed (error %d)\r\n", resolved, err);
+        }
+        return -1;
+    }
+
+    uart_printf("Created directory %s\r\n", resolved);
+    return 0;
+}
+
+/*
+ * rm <path> - Remove a file or empty directory
+ * Supports relative paths.
+ */
+static int cmd_rm(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_puts("Usage: rm <path>\r\n");
+        uart_puts("  Remove a file or empty directory.\r\n");
+        uart_puts("  Example: rm test.txt  (relative to cwd)\r\n");
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
+        uart_puts("rm: path too long\r\n");
+        return -1;
+    }
+
+    /* Get the mount context and subpath */
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        uart_printf("rm: %s: Not a mounted filesystem\r\n", resolved);
+        return -1;
+    }
+
+    int err = littlefs_remove(mnt, subpath);
+    if (err < 0) {
+        if (err == LFS_ERR_NOENT) {
+            uart_printf("rm: %s: No such file or directory\r\n", resolved);
+        } else if (err == LFS_ERR_NOTEMPTY) {
+            uart_printf("rm: %s: Directory not empty\r\n", resolved);
+        } else {
+            uart_printf("rm: %s: Failed (error %d)\r\n", resolved, err);
+        }
+        return -1;
+    }
+
+    uart_printf("Removed %s\r\n", resolved);
+    return 0;
+}
+
+/*
+ * mv <src> <dst> - Move/rename a file or directory
+ * Supports relative paths.
+ */
+static int cmd_mv(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: mv <source> <dest>\r\n");
+        uart_puts("  Move or rename a file/directory.\r\n");
+        uart_puts("  Both paths must be in the same filesystem.\r\n");
+        uart_puts("  Example: mv old.txt new.txt  (relative to cwd)\r\n");
+        return -1;
+    }
+
+    char src_resolved[VFS_MAX_PATH];
+    char dst_resolved[VFS_MAX_PATH];
+
+    if (resolve_path(argv[1], src_resolved, sizeof(src_resolved)) < 0) {
+        uart_puts("mv: source path too long\r\n");
+        return -1;
+    }
+    if (resolve_path(argv[2], dst_resolved, sizeof(dst_resolved)) < 0) {
+        uart_puts("mv: destination path too long\r\n");
+        return -1;
+    }
+
+    /* Get mount contexts for both paths */
+    const char *src_subpath = NULL;
+    const char *dst_subpath = NULL;
+    struct lfs_mount *src_mnt = vfs_get_mount_ctx(src_resolved, &src_subpath);
+    struct lfs_mount *dst_mnt = vfs_get_mount_ctx(dst_resolved, &dst_subpath);
+
+    if (!src_mnt) {
+        uart_printf("mv: %s: Not a mounted filesystem\r\n", src_resolved);
+        return -1;
+    }
+
+    if (!dst_mnt) {
+        uart_printf("mv: %s: Not a mounted filesystem\r\n", dst_resolved);
+        return -1;
+    }
+
+    if (src_mnt != dst_mnt) {
+        uart_puts("mv: Source and destination must be in the same filesystem\r\n");
+        return -1;
+    }
+
+    int err = littlefs_rename(src_mnt, src_subpath, dst_subpath);
+    if (err < 0) {
+        if (err == LFS_ERR_NOENT) {
+            uart_printf("mv: %s: No such file or directory\r\n", src_resolved);
+        } else {
+            uart_printf("mv: Failed (error %d)\r\n", err);
+        }
+        return -1;
+    }
+
+    uart_printf("Moved %s -> %s\r\n", src_resolved, dst_resolved);
+    return 0;
+}
+
+/*
+ * df [path] - Show filesystem statistics
+ * Defaults to cwd or /mnt/files if cwd not in a mount.
+ * Supports relative paths.
+ */
+static int cmd_df(int argc, char *argv[])
+{
+    char resolved[VFS_MAX_PATH];
+    const char *input_path = ".";  /* Default to cwd */
+
+    if (argc >= 2) {
+        input_path = argv[1];
+    }
+
+    /* Resolve path */
+    if (resolve_path(input_path, resolved, sizeof(resolved)) < 0) {
+        uart_puts("df: path too long\r\n");
+        return -1;
+    }
+
+    /* Get the mount context */
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        /* If cwd isn't in a mount, try /mnt/files as fallback */
+        if (argc < 2) {
+            mnt = vfs_get_mount_ctx("/mnt/files", &subpath);
+            if (mnt) {
+                shell_strcpy(resolved, "/mnt/files");
+            }
+        }
+        if (!mnt) {
+            uart_printf("df: %s: Not a mounted filesystem\r\n", resolved);
+            return -1;
+        }
+    }
+
+    uint32_t total_blocks, used_blocks;
+    int err = littlefs_stat(mnt, &total_blocks, &used_blocks);
+    if (err < 0) {
+        uart_printf("df: Failed to get stats (error %d)\r\n", err);
+        return -1;
+    }
+
+    /* Get block device info */
+    struct blkdev *dev = littlefs_get_blkdev(mnt);
+    uint32_t block_size = dev ? dev->block_size : 4096;
+    uint32_t free_blocks = total_blocks - used_blocks;
+
+    uint32_t total_kb = (total_blocks * block_size) / 1024;
+    uint32_t used_kb = (used_blocks * block_size) / 1024;
+    uint32_t free_kb = (free_blocks * block_size) / 1024;
+    uint32_t pct_used = total_blocks > 0 ? (used_blocks * 100) / total_blocks : 0;
+
+    uart_puts("Filesystem      Blocks     Used     Free   Use%\r\n");
+    uart_printf("%-14s  %6lu   %6lu   %6lu   %3lu%%\r\n",
+                resolved, (unsigned long)total_blocks,
+                (unsigned long)used_blocks, (unsigned long)free_blocks,
+                (unsigned long)pct_used);
+    uart_printf("                %5luK   %5luK   %5luK\r\n",
+                (unsigned long)total_kb, (unsigned long)used_kb,
+                (unsigned long)free_kb);
+
+    return 0;
+}
+
+/*
+ * truncate <path> <size> - Truncate file to specified size
+ * Supports relative paths.
+ */
+static int cmd_truncate(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: truncate <path> <size>\r\n");
+        uart_puts("  Truncate or extend file to specified size (in bytes).\r\n");
+        uart_puts("  Example: truncate log.txt 0  (relative to cwd)\r\n");
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
+        uart_puts("truncate: path too long\r\n");
+        return -1;
+    }
+
+    /* Parse size */
+    uint32_t size;
+    if (parse_uint(argv[2], &size) != 0) {
+        uart_printf("truncate: Invalid size: %s\r\n", argv[2]);
+        return -1;
+    }
+
+    /* Get the mount context and subpath */
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        uart_printf("truncate: %s: Not a mounted filesystem\r\n", resolved);
+        return -1;
+    }
+
+    /* Open file for writing */
+    int fd = littlefs_file_open(mnt, subpath, LFS_O_RDWR);
+    if (fd < 0) {
+        uart_printf("truncate: %s: Failed to open file\r\n", resolved);
+        return -1;
+    }
+
+    /* Truncate to specified size */
+    int err = littlefs_file_truncate(mnt, fd, size);
+    littlefs_file_close(mnt, fd);
+
+    if (err < 0) {
+        uart_printf("truncate: %s: Failed (error %d)\r\n", resolved, err);
+        return -1;
+    }
+
+    uart_printf("Truncated %s to %lu bytes\r\n", resolved, (unsigned long)size);
+    return 0;
+}
+
+/*
+ * append <path> <content> - Append content to a file
+ *
+ * Creates the file if it doesn't exist.
+ * Useful for logging. Supports relative paths.
+ */
+static int cmd_append(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: append <path> <content>\r\n");
+        uart_puts("  Append content to file (creates if needed).\r\n");
+        uart_puts("  Example: append log.txt Entry 1  (relative to cwd)\r\n");
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
+        uart_puts("append: path too long\r\n");
+        return -1;
+    }
+
+    /* Get the mount context and subpath */
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        uart_printf("append: %s: Not a mounted filesystem\r\n", resolved);
+        return -1;
+    }
+
+    /* Build content from remaining arguments */
+    char content[512];
+    int pos = 0;
+    for (int i = 2; i < argc && pos < (int)sizeof(content) - 2; i++) {
+        /* Add space between arguments */
+        if (i > 2 && pos < (int)sizeof(content) - 2) {
+            content[pos++] = ' ';
+        }
+        /* Copy argument */
+        const char *p = argv[i];
+        while (*p && pos < (int)sizeof(content) - 2) {
+            content[pos++] = *p++;
+        }
+    }
+    /* Add newline for log entries */
+    content[pos++] = '\n';
+    content[pos] = '\0';
+
+    /* Open file for appending (create if needed) */
+    int fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_APPEND);
+    if (fd < 0) {
+        uart_printf("append: %s: Failed to open file\r\n", resolved);
+        return -1;
+    }
+
+    /* Write content */
+    int written = littlefs_file_write(mnt, fd, content, pos);
+    littlefs_file_close(mnt, fd);
+
+    if (written < 0) {
+        uart_printf("append: %s: Write failed\r\n", resolved);
+        return -1;
+    }
+
+    uart_printf("Appended %d bytes to %s\r\n", written, resolved);
     return 0;
 }
 

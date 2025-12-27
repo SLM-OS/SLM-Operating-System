@@ -488,6 +488,305 @@ static void test_shell_register_external_command(void)
 }
 
 /* ============================================================================
+ * Working Directory and Path Resolution Tests
+ * ============================================================================ */
+
+/*
+ * Test: pwd command returns current directory.
+ */
+static void test_shell_cmd_pwd(void)
+{
+    /* First cd to root to ensure known state */
+    int ret = shell_execute("cd /");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("pwd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: cd to root directory.
+ */
+static void test_shell_cmd_cd_root(void)
+{
+    int ret = shell_execute("cd /");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: cd with no argument goes to root.
+ */
+static void test_shell_cmd_cd_no_arg(void)
+{
+    /* First cd somewhere else */
+    shell_execute("cd /sys");
+
+    /* cd with no arg should go to root */
+    int ret = shell_execute("cd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Verify we're at root by listing */
+    ret = shell_execute("ls");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: cd to valid directory works.
+ */
+static void test_shell_cmd_cd_valid_dir(void)
+{
+    int ret = shell_execute("cd /sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* pwd should now be /sys */
+    ret = shell_execute("pwd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset to root */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: cd to nonexistent directory fails.
+ */
+static void test_shell_cmd_cd_nonexistent(void)
+{
+    int ret = shell_execute("cd /nonexistent");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: cd to file fails (not a directory).
+ */
+static void test_shell_cmd_cd_file(void)
+{
+    int ret = shell_execute("cd /sys/memory");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: cd with .. goes to parent directory.
+ */
+static void test_shell_cmd_cd_dotdot(void)
+{
+    /* Go to /sys first */
+    int ret = shell_execute("cd /sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* cd .. should go back to / */
+    ret = shell_execute("cd ..");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Verify at root */
+    ret = shell_execute("ls /");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: cd .. at root stays at root.
+ */
+static void test_shell_cmd_cd_dotdot_at_root(void)
+{
+    int ret = shell_execute("cd /");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* cd .. at root should stay at root */
+    ret = shell_execute("cd ..");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("pwd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: cd with . stays in current directory.
+ */
+static void test_shell_cmd_cd_dot(void)
+{
+    int ret = shell_execute("cd /sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* cd . should stay in /sys */
+    ret = shell_execute("cd .");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("pwd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: ls with no argument uses cwd.
+ */
+static void test_shell_cmd_ls_cwd(void)
+{
+    int ret = shell_execute("cd /sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* ls with no arg should list /sys */
+    ret = shell_execute("ls");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: ls with relative path.
+ */
+static void test_shell_cmd_ls_relative(void)
+{
+    int ret = shell_execute("cd /");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* ls sys should work as relative path */
+    ret = shell_execute("ls sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: ls with . path.
+ */
+static void test_shell_cmd_ls_dot(void)
+{
+    int ret = shell_execute("cd /sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* ls . should list current directory */
+    ret = shell_execute("ls .");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: ls with .. path.
+ */
+static void test_shell_cmd_ls_dotdot(void)
+{
+    int ret = shell_execute("cd /sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* ls .. should list parent (root) */
+    ret = shell_execute("ls ..");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: cat with relative path.
+ */
+static void test_shell_cmd_cat_relative(void)
+{
+    int ret = shell_execute("cd /sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* cat memory should work as relative path */
+    ret = shell_execute("cat memory");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: Path resolution with complex path (multiple ..).
+ */
+static void test_shell_path_complex(void)
+{
+    /* cd to a path with multiple .. */
+    int ret = shell_execute("cd /sys/../proc/../sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Should be in /sys */
+    ret = shell_execute("pwd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: Path resolution with trailing slashes.
+ */
+static void test_shell_path_trailing_slash(void)
+{
+    int ret = shell_execute("cd /sys/");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("pwd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: Path resolution with double slashes.
+ */
+static void test_shell_path_double_slash(void)
+{
+    int ret = shell_execute("ls //sys//");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: cd to mount point subdirectory.
+ */
+static void test_shell_cmd_cd_mount_subdir(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("pwd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* List should work */
+    ret = shell_execute("ls");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: Relative path in mounted filesystem.
+ */
+static void test_shell_mount_relative_path(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* cat hello.txt should work */
+    ret = shell_execute("cat hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/*
+ * Test: df with relative path (cwd in mount).
+ */
+static void test_shell_cmd_df_cwd(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* df with no arg should show current filesystem */
+    ret = shell_execute("df");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Reset */
+    shell_execute("cd /");
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -554,6 +853,28 @@ int test_suite_shell(void)
 
     /* External command registration */
     RUN_TEST(test_shell_register_external_command);
+
+    /* Working directory and path resolution tests */
+    RUN_TEST(test_shell_cmd_pwd);
+    RUN_TEST(test_shell_cmd_cd_root);
+    RUN_TEST(test_shell_cmd_cd_no_arg);
+    RUN_TEST(test_shell_cmd_cd_valid_dir);
+    RUN_TEST(test_shell_cmd_cd_nonexistent);
+    RUN_TEST(test_shell_cmd_cd_file);
+    RUN_TEST(test_shell_cmd_cd_dotdot);
+    RUN_TEST(test_shell_cmd_cd_dotdot_at_root);
+    RUN_TEST(test_shell_cmd_cd_dot);
+    RUN_TEST(test_shell_cmd_ls_cwd);
+    RUN_TEST(test_shell_cmd_ls_relative);
+    RUN_TEST(test_shell_cmd_ls_dot);
+    RUN_TEST(test_shell_cmd_ls_dotdot);
+    RUN_TEST(test_shell_cmd_cat_relative);
+    RUN_TEST(test_shell_path_complex);
+    RUN_TEST(test_shell_path_trailing_slash);
+    RUN_TEST(test_shell_path_double_slash);
+    RUN_TEST(test_shell_cmd_cd_mount_subdir);
+    RUN_TEST(test_shell_mount_relative_path);
+    RUN_TEST(test_shell_cmd_df_cwd);
 
     return UNITY_END();
 }

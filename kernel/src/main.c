@@ -22,6 +22,10 @@
 #include "bpmp.h"
 #include "vfs.h"
 #include "component.h"
+#include "blkdev.h"
+#include "ramdisk.h"
+#include "littlefs_slm.h"
+#include "littlefs_vfs.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -742,6 +746,51 @@ void kernel_main(void *dtb)
     /* Initialize Virtual Filesystem */
     INFO("Initializing VFS...");
     vfs_init();
+
+    /* Initialize Block Device Subsystem and LittleFS */
+    INFO("Initializing filesystem subsystems...");
+    blkdev_init();
+    littlefs_init();
+
+    /* Create RAM disk for file storage (1 MB) */
+    struct blkdev *ramdisk = ramdisk_create_default("ramdisk0");
+    if (ramdisk) {
+        if (blkdev_register(ramdisk) == BLKDEV_OK) {
+            /* Mount LittleFS at /mnt/files */
+            struct lfs_mount *lfs_mnt = littlefs_mount_at("/mnt/files", ramdisk, true);
+            if (lfs_mnt) {
+                INFO("  LittleFS mounted at /mnt/files (1 MB)");
+
+                /* Create a welcome file for testing */
+                int f = littlefs_file_open(lfs_mnt, "/hello.txt",
+                                           LFS_O_WRONLY | LFS_O_CREAT);
+                if (f >= 0) {
+                    const char *msg = "Hello from SLM-OS LittleFS!\n";
+                    littlefs_file_write(lfs_mnt, f, msg, 28);
+                    littlefs_file_close(lfs_mnt, f);
+                }
+
+                /* Create a readme file */
+                f = littlefs_file_open(lfs_mnt, "/readme.txt",
+                                       LFS_O_WRONLY | LFS_O_CREAT);
+                if (f >= 0) {
+                    const char *readme =
+                        "SLM-OS LittleFS File System\n"
+                        "===========================\n"
+                        "This is a RAM-backed filesystem for testing.\n"
+                        "Files will not persist across reboots.\n";
+                    littlefs_file_write(lfs_mnt, f, readme, 127);
+                    littlefs_file_close(lfs_mnt, f);
+                }
+            } else {
+                WARN("Failed to mount LittleFS");
+            }
+        } else {
+            WARN("Failed to register RAM disk");
+        }
+    } else {
+        WARN("Failed to create RAM disk");
+    }
 
     /* Initialize Rust runtime */
     INFO("Initializing Rust runtime...");

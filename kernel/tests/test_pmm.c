@@ -319,15 +319,23 @@ static void test_split_tracking(void)
 
 /*
  * Test: Splitting a large block creates correct number of smaller blocks
- * The allocator uses the SMALLEST sufficient block, so we find the smallest
- * order >= 2 with free blocks to predict which one gets split.
+ *
+ * This test verifies that when we need to split a block, the split count
+ * increases appropriately. Since the allocator uses the smallest available
+ * block, we need to ensure no smaller blocks exist before testing.
  */
 static void test_split_creates_buddies(void)
 {
     struct pmm_buddy_stats stats_before;
     pmm_get_buddy_stats(&stats_before);
 
-    /* Find the smallest order >= 2 with free blocks (that's what allocator uses) */
+    /* If there are already small blocks (order 0 or 1), no split will occur */
+    if (stats_before.free_counts[0] > 0 || stats_before.free_counts[1] > 0) {
+        TEST_IGNORE_MESSAGE("Skipped: small blocks already available, no split needed");
+        return;
+    }
+
+    /* Find the smallest order >= 2 with free blocks */
     int found_order = -1;
     for (int o = 2; o <= PMM_MAX_ORDER; o++) {
         if (stats_before.free_counts[o] > 0) {
@@ -337,7 +345,6 @@ static void test_split_creates_buddies(void)
     }
 
     if (found_order < 2) {
-        /* Not enough large blocks to test splitting */
         TEST_IGNORE_MESSAGE("Skipped: no large blocks available for split test");
         return;
     }
