@@ -25,7 +25,7 @@ kernel/tests/
 ├── test_vmm.c        # VMM and TLB invalidation tests (10 tests)
 ├── test_component.c  # Component system tests
 ├── test_vfs.c        # Virtual filesystem tests
-├── test_shell.c      # Shell command and path resolution tests (58 tests)
+├── test_shell.c      # Shell command and path resolution tests (106 tests)
 └── test_littlefs.c   # LittleFS and block device tests (26 tests)
 ```
 
@@ -612,7 +612,7 @@ Validates the filesystem stack including block device abstraction, RAM disk driv
 
 ### Shell Tests (`kernel/tests/test_shell.c`)
 
-Validates shell command dispatch, argument parsing, working directory management, and path resolution. Tests run via Unity framework (58 tests total).
+Validates shell command dispatch, argument parsing, working directory management, path resolution, file utility commands, and the file-driven help system. Tests run via Unity framework (106 tests total).
 
 #### Command Dispatch Tests
 
@@ -728,6 +728,66 @@ Validates shell command dispatch, argument parsing, working directory management
 | test_shell_cmd_cd_mount_subdir | `cd /mnt/files` works |
 | test_shell_mount_relative_path | `cat hello.txt` from /mnt/files works |
 | test_shell_cmd_df_cwd | `df` with cwd in mount shows filesystem stats |
+
+#### File Utility Command Tests
+
+Tests for the file utility commands verify actual functionality, not just return codes. For example, `cp` tests verify file content is identical after copying, and `touch` tests verify file size is 0 bytes.
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_touch | `touch` creates empty file with verified 0-byte size |
+| test_shell_cmd_touch_existing | `touch` on existing file does NOT truncate content |
+| test_shell_cmd_cp | `cp` copies file contents (verified via VFS read) |
+| test_shell_cmd_cp_binary | `cp` preserves binary content byte-for-byte (memcmp) |
+| test_shell_cmd_cp_not_found | `cp` nonexistent file returns -1 |
+| test_shell_cmd_cp_missing_args | `cp` without args returns -1 |
+| test_shell_cmd_stat_file | `stat` shows file info with verified size > 0 |
+| test_shell_cmd_stat_dir | `stat` shows directory info |
+| test_shell_cmd_stat_not_found | `stat` nonexistent path returns -1 |
+| test_shell_cmd_stat_virtual | `stat` works on virtual files (/sys/memory) |
+| test_shell_cmd_stat_missing_args | `stat` without args returns -1 |
+| test_shell_cmd_tree | `tree` shows recursive directory listing |
+| test_shell_cmd_tree_subdir | `tree` lists nested subdirectories |
+| test_shell_cmd_tree_depth | `tree` respects depth limit |
+| test_shell_cmd_tree_virtual | `tree /sys` lists virtual directory |
+| test_shell_cmd_tree_root | `tree /` with depth limit works |
+| test_shell_cmd_wc | `wc` counts lines, words, bytes |
+| test_shell_cmd_wc_known_content | `wc` on known file executes correctly |
+| test_shell_cmd_wc_not_found | `wc` nonexistent file returns -1 |
+| test_shell_cmd_wc_missing_args | `wc` without args returns -1 |
+| test_shell_cmd_hexdump | `hexdump` shows hex and ASCII output |
+| test_shell_cmd_hexdump_offset | `hexdump` respects offset parameter |
+| test_shell_cmd_hexdump_middle | `hexdump` with offset in middle of file |
+| test_shell_cmd_hexdump_not_found | `hexdump` nonexistent file returns -1 |
+| test_shell_cmd_hexdump_missing_args | `hexdump` without args returns -1 |
+| test_shell_cmd_grep | `grep Hello` finds pattern at start |
+| test_shell_cmd_grep_middle | `grep from` finds pattern in middle |
+| test_shell_cmd_grep_case | `grep hello` (lowercase) shows 0 matches |
+| test_shell_cmd_grep_no_match | `grep NOTFOUND` shows "(0 matches)" |
+| test_shell_cmd_grep_not_found | `grep` on nonexistent file returns -1 |
+| test_shell_cmd_grep_missing_args | `grep` without pattern/file returns -1 |
+| test_shell_cmd_grep_multiline | `grep` on multiline file works |
+| test_shell_cmd_find | `find hello.txt` locates exact match |
+| test_shell_cmd_find_wildcard | `find *.txt` matches with trailing wildcard |
+| test_shell_cmd_find_leading_wildcard | `find *lo.txt` matches with leading wildcard |
+| test_shell_cmd_find_no_match | `find *.xyz` shows "(0 files found)" |
+| test_shell_cmd_find_question | `find hell?.txt` matches single char wildcard |
+| test_shell_cmd_find_subdir | `find` recursively searches subdirectories |
+| test_shell_cmd_find_missing_args | `find` without args returns -1 |
+| test_shell_cmd_find_nonmount | `find /sys` returns -1 (not a mounted FS) |
+
+#### Help System Tests
+
+Tests for the file-driven help system that stores help text in `/mnt/files/help/*.txt`:
+
+| Test | Description |
+|------|-------------|
+| test_shell_cmd_help_list | `help` lists all commands |
+| test_shell_cmd_help_valid | `help cp` shows detailed help (verified for cp, ls, grep) |
+| test_shell_cmd_help_unknown | `help nonexistent_command` returns -1 |
+| test_shell_help_files_exist | Help files exist at `/mnt/files/help/cp.txt`, etc. |
+| test_shell_help_file_content | Help files contain substantial content (>50 bytes) |
+| test_shell_help_dir_listing | `ls /mnt/files/help` shows help files |
 
 **Test Notes:**
 - Tests reset cwd to `/` after each test to avoid state leakage

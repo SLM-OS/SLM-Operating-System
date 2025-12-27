@@ -42,6 +42,14 @@ Available commands:
   df        - Filesystem stats (df [path])
   truncate  - Truncate file (truncate <path> <size>)
   append    - Append to file (append <path> <content>)
+  cp        - Copy file (cp <src> <dst>)
+  touch     - Create empty file (touch <path>)
+  stat      - Show file info (stat <path>)
+  tree      - Recursive directory listing (tree [path])
+  wc        - Count lines/words/bytes (wc <path>)
+  hexdump   - Hex dump file (hexdump <path> [offset] [len])
+  grep      - Search in file (grep <pattern> <path>)
+  find      - Find files (find <path> <pattern>)
   component - Component system (list/register/status)
   clear     - Clear screen
   reboot    - Restart the system
@@ -51,7 +59,7 @@ Available commands:
 
 | Command | Description |
 |---------|-------------|
-| `help` | List available commands |
+| `help [cmd]` | List commands, or show detailed help for a specific command |
 | `mem` | Show PMM statistics (total pages, free, allocated) |
 | `tasks` | List all tasks with ID, state, CPU affinity, priority, and name |
 | `cpu` | Show per-core status (online state, current task) |
@@ -74,9 +82,52 @@ Available commands:
 | `df [path]` | Show filesystem usage statistics |
 | `truncate <path> <size>` | Truncate file to specified size |
 | `append <path> <content>` | Append content to file (for logging) |
+| `cp <src> <dst>` | Copy file (cross-mount supported) |
+| `touch <path>` | Create empty file if it doesn't exist |
+| `stat <path>` | Show file/directory information (type, size) |
+| `tree [path] [depth]` | Recursive directory listing (default depth: 5) |
+| `wc <path>` | Count lines, words, and bytes in file |
+| `hexdump <path> [off] [len]` | Hex dump of file contents (default: 256 bytes) |
+| `grep <pattern> <path>` | Search for substring in file (shows line numbers) |
+| `find <path> <pattern>` | Find files by name pattern (wildcards: `*`, `?`) |
 | `component` | Component system management (see below) |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
+
+### Getting Help
+
+The `help` command has two modes:
+
+**List all commands:**
+```
+SLM-OS> help
+Available commands:
+
+  help       List available commands
+  mem        Show memory statistics
+  tasks      List all tasks
+  ...
+
+Use 'help <cmd>' for detailed help on a command.
+```
+
+**Detailed help for a command:**
+```
+SLM-OS> help cp
+cp - Copy files
+
+Usage:
+  cp <source> <destination>
+
+Copies file contents from source to destination. Works across
+mount points. Destination is overwritten if it exists.
+
+Examples:
+  cp hello.txt backup.txt           Copy in current dir
+  cp /mnt/files/a.txt ./b.txt       Copy with paths
+```
+
+Help text is stored in `/mnt/files/help/*.txt` files, written at boot. This file-driven approach keeps help text out of the compiled kernel binary and makes it easy to modify.
 
 ### Working Directory
 
@@ -238,6 +289,78 @@ Truncated /mnt/files/log.txt to 0 bytes
 SLM-OS> cat /mnt/files/log.txt
 (empty)
 ```
+
+### File Utility Commands
+
+Additional commands for file operations:
+
+**Copy files:**
+```
+SLM-OS> cp /mnt/files/hello.txt /mnt/files/backup.txt
+Copied 20 bytes: /mnt/files/hello.txt -> /mnt/files/backup.txt
+```
+
+**Create empty file:**
+```
+SLM-OS> touch /mnt/files/newfile.txt
+Touched /mnt/files/newfile.txt
+```
+
+**Show file information:**
+```
+SLM-OS> stat /mnt/files/hello.txt
+  File: /mnt/files/hello.txt
+  Type: regular file
+  Size: 20 bytes
+```
+
+**Recursive directory tree:**
+```
+SLM-OS> tree /mnt/files
+/mnt/files
+  hello.txt  (20 bytes)
+  readme.txt  (74 bytes)
+  logs/
+    app.log  (25 bytes)
+```
+
+**Count lines, words, bytes:**
+```
+SLM-OS> wc /mnt/files/readme.txt
+        2       12       74  /mnt/files/readme.txt
+```
+
+**Hex dump file contents:**
+```
+SLM-OS> hexdump /mnt/files/hello.txt 0 32
+00000000  48 65 6c 6c 6f 20 66 72  6f 6d 20 4c 69 74 74 6c  |Hello from Littl|
+00000010  65 46 53 21                                       |eFS!|
+00000014
+```
+
+**Search for pattern in file:**
+```
+SLM-OS> grep Hello /mnt/files/hello.txt
+1: Hello from LittleFS!
+(1 matches)
+```
+
+**Find files by pattern:**
+```
+SLM-OS> find /mnt/files *.txt
+/mnt/files/hello.txt
+/mnt/files/readme.txt
+(2 files found)
+
+SLM-OS> find /mnt/files log*
+/mnt/files/logs/
+/mnt/files/logs/app.log
+(2 files found)
+```
+
+Pattern wildcards:
+- `*` matches any sequence of characters
+- `?` matches any single character
 
 ### Component Command
 

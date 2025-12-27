@@ -459,17 +459,28 @@ littlefs_mount_at("/mnt/storage", emmc, false);  /* Don't format! */
 
 ### Additional Commands
 
-The following shell commands are now implemented:
+The following shell commands are implemented for filesystem operations:
+
+**Write commands:**
 - `write <path> <content>` - Write/overwrite file
 - `mkdir <path>` - Create directory
 - `rm <path>` - Remove file or empty directory
 - `mv <src> <dst>` - Move/rename
-- `df [path]` - Filesystem statistics
+- `cp <src> <dst>` - Copy file (cross-mount supported)
+- `touch <path>` - Create empty file
 - `truncate <path> <size>` - Resize file
 - `append <path> <content>` - Append to file (for logging)
 
-Future enhancements could include:
-- `cp <src> <dst>` - Copy file
+**Read/info commands:**
+- `df [path]` - Filesystem statistics
+- `stat <path>` - Show file/directory info (type, size)
+- `tree [path] [depth]` - Recursive directory listing
+- `wc <path>` - Count lines, words, bytes
+- `hexdump <path> [off] [len]` - Hex dump file contents
+
+**Search commands:**
+- `grep <pattern> <path>` - Search for pattern in file
+- `find <path> <pattern>` - Find files by name (wildcards: `*`, `?`)
 
 ### Multiple Partitions
 

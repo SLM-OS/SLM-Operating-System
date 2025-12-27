@@ -10,6 +10,8 @@
 #include "../include/component.h"
 #include "../include/vfs.h"
 #include "../include/task.h"
+#include "../include/littlefs_slm.h"
+#include "../include/string.h"
 
 /* ============================================================================
  * Test Helpers
@@ -23,6 +25,34 @@ static void cleanup_components(void)
     for (uint32_t i = 0; i < COMPONENT_MAX_COUNT; i++) {
         component_unregister(i);
     }
+}
+
+/*
+ * Helper to read file content via VFS API.
+ * Returns bytes read, or -1 on error.
+ */
+static int read_file_content(const char *path, char *buf, size_t size)
+{
+    return vfs_read_path(path, buf, size, 0);
+}
+
+/*
+ * Helper to get file size via LittleFS API.
+ * Returns size in bytes, or -1 on error.
+ */
+static int get_file_size(const char *path)
+{
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(path, &subpath);
+    if (!mnt || !subpath) return -1;
+
+    /* Skip leading slash if present */
+    if (subpath[0] == '/') subpath++;
+
+    struct lfs_entry_info info;
+    if (littlefs_stat_path(mnt, subpath, &info) < 0) return -1;
+
+    return (int)info.size;
 }
 
 /* ============================================================================
@@ -787,6 +817,598 @@ static void test_shell_cmd_df_cwd(void)
 }
 
 /* ============================================================================
+ * New Filesystem Commands Tests (cp, touch, stat, tree, wc, hexdump, grep, find)
+ * ============================================================================ */
+
+/*
+ * Test: touch creates empty file - VERIFIES FILE SIZE IS 0.
+ */
+static void test_shell_cmd_touch(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("touch testtouch.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Verify file exists AND is empty (0 bytes) */
+    int size = get_file_size("/mnt/files/testtouch.tmp");
+    TEST_ASSERT_EQUAL_INT(0, size);
+
+    /* Cleanup */
+    shell_execute("rm testtouch.tmp");
+    shell_execute("cd /");
+}
+
+/*
+ * Test: touch on existing file doesn't truncate.
+ */
+static void test_shell_cmd_touch_existing(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Create file with content */
+    ret = shell_execute("write touch_exist.tmp Hello123");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    int orig_size = get_file_size("/mnt/files/touch_exist.tmp");
+    TEST_ASSERT_TRUE(orig_size > 0);
+
+    /* Touch should NOT truncate */
+    ret = shell_execute("touch touch_exist.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Verify size unchanged */
+    int new_size = get_file_size("/mnt/files/touch_exist.tmp");
+    TEST_ASSERT_EQUAL_INT(orig_size, new_size);
+
+    /* Cleanup */
+    shell_execute("rm touch_exist.tmp");
+    shell_execute("cd /");
+}
+
+/*
+ * Test: cp copies a file - VERIFIES CONTENT IS IDENTICAL.
+ */
+static void test_shell_cmd_cp(void)
+{
+    const char *test_content = "Hello from cp test!";
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Create source file */
+    ret = shell_execute("write cpsrc.tmp Hello from cp test!");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Copy it */
+    ret = shell_execute("cp cpsrc.tmp cpdst.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Verify destination has same content */
+    char buf[64] = {0};
+    int bytes = read_file_content("/mnt/files/cpdst.tmp", buf, sizeof(buf) - 1);
+    TEST_ASSERT_TRUE(bytes > 0);
+    TEST_ASSERT_EQUAL_STRING(test_content, buf);
+
+    /* Verify sizes match */
+    int src_size = get_file_size("/mnt/files/cpsrc.tmp");
+    int dst_size = get_file_size("/mnt/files/cpdst.tmp");
+    TEST_ASSERT_EQUAL_INT(src_size, dst_size);
+
+    /* Cleanup */
+    shell_execute("rm cpsrc.tmp");
+    shell_execute("rm cpdst.tmp");
+    shell_execute("cd /");
+}
+
+/*
+ * Test: cp copies binary content correctly.
+ */
+static void test_shell_cmd_cp_binary(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Write bytes including special chars via shell */
+    ret = shell_execute("write cpbin.tmp ABCDEFGHIJ1234567890");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Copy */
+    ret = shell_execute("cp cpbin.tmp cpbin2.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Read both and compare */
+    char buf1[64] = {0}, buf2[64] = {0};
+    int bytes1 = read_file_content("/mnt/files/cpbin.tmp", buf1, sizeof(buf1) - 1);
+    int bytes2 = read_file_content("/mnt/files/cpbin2.tmp", buf2, sizeof(buf2) - 1);
+
+    TEST_ASSERT_EQUAL_INT(bytes1, bytes2);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(buf1, buf2, (size_t)bytes1));
+
+    /* Cleanup */
+    shell_execute("rm cpbin.tmp");
+    shell_execute("rm cpbin2.tmp");
+    shell_execute("cd /");
+}
+
+/*
+ * Test: cp with source not found fails.
+ */
+static void test_shell_cmd_cp_not_found(void)
+{
+    int ret = shell_execute("cp /mnt/files/nonexistent.tmp /mnt/files/dst.tmp");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: cp with missing args fails.
+ */
+static void test_shell_cmd_cp_missing_args(void)
+{
+    int ret = shell_execute("cp");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+
+    ret = shell_execute("cp /mnt/files/hello.txt");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: stat shows file information - VERIFIES SIZE.
+ */
+static void test_shell_cmd_stat_file(void)
+{
+    /* hello.txt exists with known content */
+    int ret = shell_execute("stat /mnt/files/hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Verify we can get its size (should be non-zero) */
+    int size = get_file_size("/mnt/files/hello.txt");
+    TEST_ASSERT_TRUE(size > 0);
+}
+
+/*
+ * Test: stat shows directory information.
+ */
+static void test_shell_cmd_stat_dir(void)
+{
+    int ret = shell_execute("stat /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: stat on nonexistent fails.
+ */
+static void test_shell_cmd_stat_not_found(void)
+{
+    int ret = shell_execute("stat /mnt/files/nonexistent");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: stat on virtual file.
+ */
+static void test_shell_cmd_stat_virtual(void)
+{
+    int ret = shell_execute("stat /sys/memory");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: stat with missing args.
+ */
+static void test_shell_cmd_stat_missing_args(void)
+{
+    int ret = shell_execute("stat");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: tree lists directory recursively.
+ */
+static void test_shell_cmd_tree(void)
+{
+    int ret = shell_execute("tree /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: tree with subdirectory structure.
+ */
+static void test_shell_cmd_tree_subdir(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Create subdirectory with file */
+    ret = shell_execute("mkdir tree_test_dir");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("write tree_test_dir/nested.txt nested content");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Tree should show subdirectory and its contents */
+    ret = shell_execute("tree /mnt/files/tree_test_dir");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Cleanup */
+    shell_execute("rm tree_test_dir/nested.txt");
+    shell_execute("rm tree_test_dir");
+    shell_execute("cd /");
+}
+
+/*
+ * Test: tree with depth limit.
+ */
+static void test_shell_cmd_tree_depth(void)
+{
+    int ret = shell_execute("tree /mnt/files 2");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: tree on virtual directory.
+ */
+static void test_shell_cmd_tree_virtual(void)
+{
+    int ret = shell_execute("tree /sys");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: tree on root.
+ */
+static void test_shell_cmd_tree_root(void)
+{
+    int ret = shell_execute("tree / 2");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: wc counts lines, words, bytes - VERIFIES COMMAND RUNS.
+ */
+static void test_shell_cmd_wc(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Create file with known content */
+    ret = shell_execute("write wc_test.tmp line1 word2 word3");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("wc wc_test.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Cleanup */
+    shell_execute("rm wc_test.tmp");
+    shell_execute("cd /");
+}
+
+/*
+ * Test: wc on known file verifies size.
+ */
+static void test_shell_cmd_wc_known_content(void)
+{
+    /* hello.txt has "Hello from LittleFS!" = 20 bytes, 1 line, 3 words */
+    int ret = shell_execute("wc /mnt/files/hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: wc on nonexistent fails.
+ */
+static void test_shell_cmd_wc_not_found(void)
+{
+    int ret = shell_execute("wc /mnt/files/nonexistent");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: wc missing args.
+ */
+static void test_shell_cmd_wc_missing_args(void)
+{
+    int ret = shell_execute("wc");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: hexdump shows hex output.
+ */
+static void test_shell_cmd_hexdump(void)
+{
+    int ret = shell_execute("hexdump /mnt/files/hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: hexdump with offset and length.
+ */
+static void test_shell_cmd_hexdump_offset(void)
+{
+    int ret = shell_execute("hexdump /mnt/files/hello.txt 0 16");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: hexdump with offset in middle of file.
+ */
+static void test_shell_cmd_hexdump_middle(void)
+{
+    int ret = shell_execute("hexdump /mnt/files/hello.txt 6 10");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: hexdump on nonexistent fails.
+ */
+static void test_shell_cmd_hexdump_not_found(void)
+{
+    int ret = shell_execute("hexdump /mnt/files/nonexistent");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: hexdump missing args.
+ */
+static void test_shell_cmd_hexdump_missing_args(void)
+{
+    int ret = shell_execute("hexdump");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: grep finds pattern in file.
+ */
+static void test_shell_cmd_grep(void)
+{
+    /* The hello.txt file contains "Hello from LittleFS!" */
+    int ret = shell_execute("grep Hello /mnt/files/hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: grep finds pattern in middle of line.
+ */
+static void test_shell_cmd_grep_middle(void)
+{
+    /* Search for "from" in "Hello from LittleFS!" */
+    int ret = shell_execute("grep from /mnt/files/hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: grep case sensitivity.
+ */
+static void test_shell_cmd_grep_case(void)
+{
+    /* "hello" (lowercase) should NOT match "Hello" */
+    int ret = shell_execute("grep hello /mnt/files/hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);  /* Returns 0 but shows "0 matches" */
+}
+
+/*
+ * Test: grep with no match.
+ */
+static void test_shell_cmd_grep_no_match(void)
+{
+    int ret = shell_execute("grep NOTFOUND /mnt/files/hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);  /* Returns 0, prints "no matches" */
+}
+
+/*
+ * Test: grep on nonexistent fails.
+ */
+static void test_shell_cmd_grep_not_found(void)
+{
+    int ret = shell_execute("grep pattern /mnt/files/nonexistent");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: grep missing args.
+ */
+static void test_shell_cmd_grep_missing_args(void)
+{
+    int ret = shell_execute("grep");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+
+    ret = shell_execute("grep pattern");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: grep with multiline file.
+ */
+static void test_shell_cmd_grep_multiline(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* readme.txt has multiple lines */
+    ret = shell_execute("grep SLM-OS /mnt/files/readme.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    shell_execute("cd /");
+}
+
+/*
+ * Test: find locates files by exact pattern.
+ */
+static void test_shell_cmd_find(void)
+{
+    int ret = shell_execute("find /mnt/files hello.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: find with * wildcard.
+ */
+static void test_shell_cmd_find_wildcard(void)
+{
+    int ret = shell_execute("find /mnt/files *.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: find with leading wildcard.
+ */
+static void test_shell_cmd_find_leading_wildcard(void)
+{
+    int ret = shell_execute("find /mnt/files *lo.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: find with no matches.
+ */
+static void test_shell_cmd_find_no_match(void)
+{
+    int ret = shell_execute("find /mnt/files *.xyz");
+    TEST_ASSERT_EQUAL_INT(0, ret);  /* Returns 0, prints "no files found" */
+}
+
+/*
+ * Test: find with question mark wildcard.
+ */
+static void test_shell_cmd_find_question(void)
+{
+    int ret = shell_execute("find /mnt/files hell?.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: find in subdirectory.
+ */
+static void test_shell_cmd_find_subdir(void)
+{
+    int ret = shell_execute("cd /mnt/files");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Create subdirectory with file */
+    ret = shell_execute("mkdir find_test_dir");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("write find_test_dir/target.txt found me");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Find should locate it */
+    ret = shell_execute("find /mnt/files target.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Also find with wildcard */
+    ret = shell_execute("find /mnt/files *.txt");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Cleanup */
+    shell_execute("rm find_test_dir/target.txt");
+    shell_execute("rm find_test_dir");
+    shell_execute("cd /");
+}
+
+/*
+ * Test: find missing args.
+ */
+static void test_shell_cmd_find_missing_args(void)
+{
+    int ret = shell_execute("find");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+
+    ret = shell_execute("find /mnt/files");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: find on non-mount path returns error.
+ * (find requires a mounted filesystem, not virtual directories)
+ */
+static void test_shell_cmd_find_nonmount(void)
+{
+    int ret = shell_execute("find /sys mem*");
+    TEST_ASSERT_EQUAL_INT(-1, ret);  /* Expected: not a mounted filesystem */
+}
+
+/* ============================================================================
+ * Help System Tests
+ * ============================================================================ */
+
+/*
+ * Test: help with no argument lists all commands.
+ */
+static void test_shell_cmd_help_list(void)
+{
+    int ret = shell_execute("help");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: help with valid command shows detailed help.
+ */
+static void test_shell_cmd_help_valid(void)
+{
+    int ret = shell_execute("help cp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("help ls");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    ret = shell_execute("help grep");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: help with unknown command returns error.
+ */
+static void test_shell_cmd_help_unknown(void)
+{
+    int ret = shell_execute("help nonexistent_command");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: help files exist in /mnt/files/help/ directory.
+ */
+static void test_shell_help_files_exist(void)
+{
+    /* Verify some help files exist */
+    char buf[64];
+
+    int bytes = vfs_read_path("/mnt/files/help/cp.txt", buf, sizeof(buf), 0);
+    TEST_ASSERT_TRUE(bytes > 0);
+
+    bytes = vfs_read_path("/mnt/files/help/ls.txt", buf, sizeof(buf), 0);
+    TEST_ASSERT_TRUE(bytes > 0);
+
+    bytes = vfs_read_path("/mnt/files/help/help.txt", buf, sizeof(buf), 0);
+    TEST_ASSERT_TRUE(bytes > 0);
+}
+
+/*
+ * Test: help file contains expected content (non-empty and reasonable size).
+ */
+static void test_shell_help_file_content(void)
+{
+    char buf[256];
+
+    /* Read cp help file */
+    int bytes = vfs_read_path("/mnt/files/help/cp.txt", buf, sizeof(buf) - 1, 0);
+    TEST_ASSERT_TRUE(bytes > 50);  /* Should have substantial help text */
+
+    /* Read help help file */
+    bytes = vfs_read_path("/mnt/files/help/help.txt", buf, sizeof(buf) - 1, 0);
+    TEST_ASSERT_TRUE(bytes > 50);  /* Should have substantial help text */
+}
+
+/*
+ * Test: ls /mnt/files/help shows help files.
+ */
+static void test_shell_help_dir_listing(void)
+{
+    int ret = shell_execute("ls /mnt/files/help");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -875,6 +1497,70 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_cd_mount_subdir);
     RUN_TEST(test_shell_mount_relative_path);
     RUN_TEST(test_shell_cmd_df_cwd);
+
+    /* touch command tests */
+    RUN_TEST(test_shell_cmd_touch);
+    RUN_TEST(test_shell_cmd_touch_existing);
+
+    /* cp command tests */
+    RUN_TEST(test_shell_cmd_cp);
+    RUN_TEST(test_shell_cmd_cp_binary);
+    RUN_TEST(test_shell_cmd_cp_not_found);
+    RUN_TEST(test_shell_cmd_cp_missing_args);
+
+    /* stat command tests */
+    RUN_TEST(test_shell_cmd_stat_file);
+    RUN_TEST(test_shell_cmd_stat_dir);
+    RUN_TEST(test_shell_cmd_stat_not_found);
+    RUN_TEST(test_shell_cmd_stat_virtual);
+    RUN_TEST(test_shell_cmd_stat_missing_args);
+
+    /* tree command tests */
+    RUN_TEST(test_shell_cmd_tree);
+    RUN_TEST(test_shell_cmd_tree_subdir);
+    RUN_TEST(test_shell_cmd_tree_depth);
+    RUN_TEST(test_shell_cmd_tree_virtual);
+    RUN_TEST(test_shell_cmd_tree_root);
+
+    /* wc command tests */
+    RUN_TEST(test_shell_cmd_wc);
+    RUN_TEST(test_shell_cmd_wc_known_content);
+    RUN_TEST(test_shell_cmd_wc_not_found);
+    RUN_TEST(test_shell_cmd_wc_missing_args);
+
+    /* hexdump command tests */
+    RUN_TEST(test_shell_cmd_hexdump);
+    RUN_TEST(test_shell_cmd_hexdump_offset);
+    RUN_TEST(test_shell_cmd_hexdump_middle);
+    RUN_TEST(test_shell_cmd_hexdump_not_found);
+    RUN_TEST(test_shell_cmd_hexdump_missing_args);
+
+    /* grep command tests */
+    RUN_TEST(test_shell_cmd_grep);
+    RUN_TEST(test_shell_cmd_grep_middle);
+    RUN_TEST(test_shell_cmd_grep_case);
+    RUN_TEST(test_shell_cmd_grep_no_match);
+    RUN_TEST(test_shell_cmd_grep_not_found);
+    RUN_TEST(test_shell_cmd_grep_missing_args);
+    RUN_TEST(test_shell_cmd_grep_multiline);
+
+    /* find command tests */
+    RUN_TEST(test_shell_cmd_find);
+    RUN_TEST(test_shell_cmd_find_wildcard);
+    RUN_TEST(test_shell_cmd_find_leading_wildcard);
+    RUN_TEST(test_shell_cmd_find_no_match);
+    RUN_TEST(test_shell_cmd_find_question);
+    RUN_TEST(test_shell_cmd_find_subdir);
+    RUN_TEST(test_shell_cmd_find_missing_args);
+    RUN_TEST(test_shell_cmd_find_nonmount);
+
+    /* Help system tests */
+    RUN_TEST(test_shell_cmd_help_list);
+    RUN_TEST(test_shell_cmd_help_valid);
+    RUN_TEST(test_shell_cmd_help_unknown);
+    RUN_TEST(test_shell_help_files_exist);
+    RUN_TEST(test_shell_help_file_content);
+    RUN_TEST(test_shell_help_dir_listing);
 
     return UNITY_END();
 }

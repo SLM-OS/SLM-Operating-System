@@ -26,6 +26,7 @@
 #include "ramdisk.h"
 #include "littlefs_slm.h"
 #include "littlefs_vfs.h"
+#include "help.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -781,6 +782,11 @@ void kernel_main(void *dtb)
                         "Files will not persist across reboots.\n";
                     littlefs_file_write(lfs_mnt, f, readme, 127);
                     littlefs_file_close(lfs_mnt, f);
+                }
+
+                /* Initialize file-driven help system */
+                if (help_init() == 0) {
+                    INFO("  Help system initialized (/mnt/files/help/)");
                 }
             } else {
                 WARN("Failed to mount LittleFS");

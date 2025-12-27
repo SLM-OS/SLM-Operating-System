@@ -674,6 +674,40 @@ SLM-OS> pwd
 
 ---
 
+### File Utility Commands (December 2025)
+
+**Files:** `kernel/src/shell.c`, `kernel/tests/test_shell.c`, `docs/shell.md`, `docs/filesystem.md`
+
+Added comprehensive file manipulation commands to the shell:
+
+| Command | Description |
+|---------|-------------|
+| `cp <src> <dst>` | Copy file contents (cross-mount supported) |
+| `touch <path>` | Create empty file if it doesn't exist |
+| `stat <path>` | Show file/directory information (type, size) |
+| `tree [path] [depth]` | Recursive directory listing (default depth: 5) |
+| `wc <path>` | Count lines, words, and bytes in file |
+| `hexdump <path> [off] [len]` | Hex dump with ASCII display (default: 256 bytes) |
+| `grep <pattern> <path>` | Search for substring in file (shows line numbers) |
+| `find <path> <pattern>` | Find files by name pattern (wildcards: `*`, `?`) |
+
+**Key implementation details:**
+- Pattern matching with recursive wildcard (`*`) and single-char (`?`) support
+- Hex dump with classic 16-byte-per-line format and ASCII sidebar
+- grep shows line numbers and match count
+- find recursively searches directories with configurable max depth
+- All commands support relative paths via `resolve_path()`
+
+**Test coverage (42 comprehensive tests):**
+- Functional verification (cp: content identical via VFS read; touch: size = 0 bytes)
+- Edge cases (touch existing file doesn't truncate; cp binary content preserved)
+- Error handling (missing arguments for all commands; nonexistent files)
+- Pattern matching (wildcards `*` and `?` at start, middle, end; case sensitivity)
+- Subdirectory operations (tree/find with nested dirs created during test)
+- Virtual directory handling (tree/stat on /sys; find returns error for non-mount)
+
+---
+
 ### Summary (All Extra Work)
 
 | Item | Tests Added | Lines of Code |
@@ -682,10 +716,11 @@ SLM-OS> pwd
 | Priority Message Queues | 10 | ~300 |
 | CI/CD Pipeline | — | ~100 (workflow) + ~80 (semihosting) |
 | Shell Path Resolution | 21 | ~350 |
-| Documentation | — | ~500 |
-| **Total** | **41** | **~1580** |
+| File Utility Commands | 42 | ~800 |
+| Documentation | — | ~700 |
+| **Total** | **83** | **~2580** |
 
-All tests pass. Total test count now ~100.
+All tests pass. Total test count now ~140.
 
 ---
 

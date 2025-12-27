@@ -117,6 +117,7 @@ set(KERNEL_SOURCES
 
     # Shell and utilities
     kernel/src/shell.c
+    kernel/src/help.c
     kernel/src/dtb.c
     kernel/src/elf.c
     kernel/src/vfs.c
