@@ -58,4 +58,7 @@ int test_suite_pmm(void);
 /* LittleFS integration tests */
 int test_suite_littlefs(void);
 
+/* Networking tests (QEMU only) */
+int test_suite_net(void);
+
 #endif /* TEST_HARNESS_H */

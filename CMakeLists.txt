@@ -147,6 +147,14 @@ set(KERNEL_SOURCES
     kernel/gpu/cache.c
     kernel/gpu/gpu_stub.c
     # kernel/gpu/gpu_tegra.c    # Jetson Orin Nano (future)
+
+    # ==========================================================================
+    # Networking (QEMU only for now)
+    # ==========================================================================
+    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/virtio_net.c>
+    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/net/sys_arch.c>
+    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/net/lwip_slm.c>
+    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/src/net_shell.c>
 )
 
 # Test sources (Unity framework)
@@ -164,6 +172,36 @@ set(TEST_SOURCES
     kernel/tests/test_vmm.c
     kernel/tests/test_pmm.c
     kernel/tests/test_littlefs.c
+    kernel/tests/test_net.c
+)
+
+# lwIP library sources (QEMU networking only)
+set(LWIP_SOURCES
+    kernel/lib/lwip/src/core/init.c
+    kernel/lib/lwip/src/core/def.c
+    kernel/lib/lwip/src/core/inet_chksum.c
+    kernel/lib/lwip/src/core/ip.c
+    kernel/lib/lwip/src/core/mem.c
+    kernel/lib/lwip/src/core/memp.c
+    kernel/lib/lwip/src/core/netif.c
+    kernel/lib/lwip/src/core/pbuf.c
+    kernel/lib/lwip/src/core/raw.c
+    kernel/lib/lwip/src/core/stats.c
+    kernel/lib/lwip/src/core/sys.c
+    kernel/lib/lwip/src/core/tcp.c
+    kernel/lib/lwip/src/core/tcp_in.c
+    kernel/lib/lwip/src/core/tcp_out.c
+    kernel/lib/lwip/src/core/timeouts.c
+    kernel/lib/lwip/src/core/udp.c
+    kernel/lib/lwip/src/core/ipv4/autoip.c
+    kernel/lib/lwip/src/core/ipv4/dhcp.c
+    kernel/lib/lwip/src/core/ipv4/etharp.c
+    kernel/lib/lwip/src/core/ipv4/icmp.c
+    kernel/lib/lwip/src/core/ipv4/igmp.c
+    kernel/lib/lwip/src/core/ipv4/ip4.c
+    kernel/lib/lwip/src/core/ipv4/ip4_addr.c
+    kernel/lib/lwip/src/core/ipv4/ip4_frag.c
+    kernel/lib/lwip/src/netif/ethernet.c
 )
 
 # Include directories
@@ -172,10 +210,16 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/tests
     ${CMAKE_SOURCE_DIR}/kernel/gpu
     ${CMAKE_SOURCE_DIR}/kernel/lib/littlefs
+    ${CMAKE_SOURCE_DIR}/kernel/lib/lwip/src/include
 )
 
 # Build kernel ELF
-add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
+# Conditionally add lwIP sources for QEMU platform
+if(PLATFORM STREQUAL "QEMU_VIRT")
+    add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES} ${LWIP_SOURCES})
+else()
+    add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
+endif()
 target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
 
 # Configure LittleFS for freestanding use (no libc)
@@ -187,6 +231,14 @@ set_source_files_properties(
     kernel/lib/littlefs/lfs_util.c
     PROPERTIES COMPILE_FLAGS "-Wno-unused-parameter -Wno-shadow -Wno-cast-align -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR"
 )
+
+# Configure lwIP for freestanding use (QEMU only)
+if(PLATFORM STREQUAL "QEMU_VIRT")
+    set_source_files_properties(
+        ${LWIP_SOURCES}
+        PROPERTIES COMPILE_FLAGS "-Wno-unused-parameter -Wno-unused-variable -Wno-type-limits -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes -Wno-redundant-decls"
+    )
+endif()
 
 # Link with Rust runtime (if it exists)
 if(EXISTS ${RUST_LIB})

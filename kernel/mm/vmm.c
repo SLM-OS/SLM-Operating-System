@@ -655,13 +655,17 @@ void vmm_init(void)
 
     /*
      * Map MMIO devices.
-     * GIC is at 0x0800_0000, UART at 0x0900_0000
+     * GIC is at 0x0800_0000, UART at 0x0900_0000, VirtIO at 0x0a00_0000
      * L2 index = PA / 2MB = PA >> 21
      * 0x0800_0000 >> 21 = 64
      * 0x0900_0000 >> 21 = 72
+     * 0x0a00_0000 >> 21 = 80
      */
     uint64_t gic_l2_idx = (GIC_DIST_BASE >> BLOCK_SHIFT) & 0x1FF;
     uint64_t uart_l2_idx = (UART_BASE >> BLOCK_SHIFT) & 0x1FF;
+#if defined(PLATFORM_QEMU_VIRT)
+    uint64_t virtio_l2_idx = (0x0a000000 >> BLOCK_SHIFT) & 0x1FF;
+#endif
 
     /*
      * MMIO mappings - same table serves both identity and kernel mappings.
@@ -670,7 +674,14 @@ void vmm_init(void)
                                            VMM_FLAGS_DEVICE);
     l2_mmio[uart_l2_idx] = make_block_desc(UART_BASE & ~(BLOCK_SIZE - 1),
                                             VMM_FLAGS_DEVICE);
+#if defined(PLATFORM_QEMU_VIRT)
+    /* VirtIO MMIO region for virtio-net */
+    l2_mmio[virtio_l2_idx] = make_block_desc(0x0a000000,
+                                              VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped += 3;
+#else
     vmm_state.blocks_mapped += 2;
+#endif
 
     DEBUG_PRINT("  L1 table at PA: 0x%lx", (uint64_t)l1_table);
     DEBUG_PRINT("  L2 kernel at PA: 0x%lx", (uint64_t)l2_kernel);

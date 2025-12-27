@@ -197,6 +197,21 @@ This hybrid approach leverages:
 - VFS mount point support unifies virtual and persistent files
 - Shell access via `ls` and `cat` commands
 
+### Networking Subsystem
+
+| Component | File(s) | Purpose |
+|-----------|---------|---------|
+| VirtIO-Net | `kernel/drivers/virtio_net.c` | Network driver (QEMU) |
+| lwIP Wrapper | `kernel/net/lwip_slm.c` | TCP/IP stack integration |
+| OS Abstraction | `kernel/net/sys_arch.c` | lwIP platform layer |
+| Shell Commands | `kernel/src/net_shell.c` | ping, ifconfig, netstat |
+
+**Phase 4 Implementation:**
+- lwIP TCP/IP stack for ICMP, TCP, UDP, DHCP
+- VirtIO-Net driver for QEMU virtual networking
+- Shell commands: `net`, `ping`, `ifconfig`, `netstat`
+- Static IP and DHCP configuration support
+
 ---
 
 ## Boot Sequence

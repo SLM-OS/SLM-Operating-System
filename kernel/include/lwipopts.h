@@ -1,0 +1,197 @@
+/**
+ * lwIP Options for SLM-OS
+ *
+ * This file configures which lwIP features are enabled and sets
+ * buffer sizes and pool counts appropriate for our embedded use case.
+ *
+ * Key decisions:
+ * - NO_SYS=1: Single-threaded mode (polled, no OS threading)
+ * - Static memory pools (no malloc)
+ * - ICMP enabled for ping
+ * - DHCP enabled for automatic configuration
+ * - TCP/UDP enabled for future use
+ * - DNS disabled (can enable later)
+ */
+
+#ifndef LWIPOPTS_H
+#define LWIPOPTS_H
+
+/* -------------------------------------------------------------------------- */
+/* Platform / Architecture                                                     */
+/* -------------------------------------------------------------------------- */
+
+/* Single-threaded mode - no OS threading abstraction needed */
+#define NO_SYS                      1
+
+/* We handle timeouts ourselves in the main loop */
+#define NO_SYS_NO_TIMERS            0
+
+/* Disable threading when NO_SYS=1 */
+#define LWIP_NETCONN                0
+#define LWIP_SOCKET                 0
+
+/* -------------------------------------------------------------------------- */
+/* Memory Configuration                                                        */
+/* -------------------------------------------------------------------------- */
+
+/* Use lwIP's internal memory pools, not libc malloc */
+#define MEM_LIBC_MALLOC             0
+#define MEMP_MEM_MALLOC             0
+#define MEMP_MEM_INIT               1  /* Zero-initialize pools at startup */
+
+/* Heap size for variable-length allocations */
+#define MEM_SIZE                    (32 * 1024)  /* 32 KB */
+
+/* Memory alignment (8-byte for AArch64) */
+#define MEM_ALIGNMENT               8
+
+/* Allow sending without copying (zero-copy TX) */
+#define LWIP_NETIF_TX_SINGLE_PBUF   1
+
+/* -------------------------------------------------------------------------- */
+/* Buffer Pools (pbuf)                                                         */
+/* -------------------------------------------------------------------------- */
+
+/* Number of pbufs in the pool */
+#define PBUF_POOL_SIZE              16
+
+/* Size of each pbuf in pool (standard Ethernet MTU + headers) */
+#define PBUF_POOL_BUFSIZE           1536
+
+/* -------------------------------------------------------------------------- */
+/* Protocol Support                                                            */
+/* -------------------------------------------------------------------------- */
+
+/* IPv4 support (required) */
+#define LWIP_IPV4                   1
+
+/* IPv6 support (disabled for simplicity) */
+#define LWIP_IPV6                   0
+
+/* ICMP (ping) support */
+#define LWIP_ICMP                   1
+#define LWIP_RAW                    1  /* Required for ping implementation */
+
+/* ARP (Address Resolution Protocol) for Ethernet */
+#define LWIP_ARP                    1
+#define ARP_TABLE_SIZE              10
+#define ARP_QUEUEING                1
+
+/* Address Conflict Detection - disabled (requires extra code) */
+#define LWIP_ACD                    0
+
+/* DHCP client for automatic IP configuration */
+#define LWIP_DHCP                   1
+#define DHCP_DOES_ARP_CHECK         0  /* Disable - requires ACD */
+#define LWIP_DHCP_DOES_ACD_CHECK    0  /* Disable ACD check in DHCP */
+
+/* TCP support (for future telnet/HTTP) */
+#define LWIP_TCP                    1
+#define TCP_MSS                     1460
+#define TCP_WND                     (4 * TCP_MSS)
+#define TCP_SND_BUF                 (4 * TCP_MSS)
+#define TCP_SND_QUEUELEN            16
+#define MEMP_NUM_TCP_PCB            5
+#define MEMP_NUM_TCP_PCB_LISTEN     4
+#define MEMP_NUM_TCP_SEG            16
+
+/* UDP support (for DNS, DHCP) */
+#define LWIP_UDP                    1
+#define MEMP_NUM_UDP_PCB            4
+
+/* DNS client (disabled for now) */
+#define LWIP_DNS                    0
+
+/* Autoip (link-local addressing) - disabled */
+#define LWIP_AUTOIP                 0
+
+/* IGMP (multicast) - disabled */
+#define LWIP_IGMP                   0
+
+/* -------------------------------------------------------------------------- */
+/* Network Interfaces                                                          */
+/* -------------------------------------------------------------------------- */
+
+/* Single network interface */
+#define LWIP_SINGLE_NETIF           1
+
+/* Enable netif status/link callbacks */
+#define LWIP_NETIF_STATUS_CALLBACK  1
+#define LWIP_NETIF_LINK_CALLBACK    1
+
+/* Hostname for DHCP */
+#define LWIP_NETIF_HOSTNAME         1
+
+/* Hardware address length (Ethernet = 6) */
+#define NETIF_MAX_HWADDR_LEN        6
+
+/* Loopback interface */
+#define LWIP_HAVE_LOOPIF            0
+#define LWIP_NETIF_LOOPBACK         0
+
+/* -------------------------------------------------------------------------- */
+/* Checksum Configuration                                                      */
+/* -------------------------------------------------------------------------- */
+
+/* Let CPU calculate all checksums (no hardware offload) */
+#define CHECKSUM_GEN_IP             1
+#define CHECKSUM_GEN_UDP            1
+#define CHECKSUM_GEN_TCP            1
+#define CHECKSUM_GEN_ICMP           1
+#define CHECKSUM_CHECK_IP           1
+#define CHECKSUM_CHECK_UDP          1
+#define CHECKSUM_CHECK_TCP          1
+#define CHECKSUM_CHECK_ICMP         1
+
+/* -------------------------------------------------------------------------- */
+/* Statistics and Debugging                                                    */
+/* -------------------------------------------------------------------------- */
+
+/* Enable statistics collection */
+#define LWIP_STATS                  1
+#define LWIP_STATS_DISPLAY          1
+
+/* Debug output (can be enabled per-module) */
+#define LWIP_DEBUG                  0
+#define LWIP_DBG_MIN_LEVEL          LWIP_DBG_LEVEL_ALL
+#define LWIP_DBG_TYPES_ON           LWIP_DBG_ON
+
+/* Per-module debug (uncomment to enable) */
+#if LWIP_DEBUG
+#define ETHARP_DEBUG                LWIP_DBG_ON
+#define NETIF_DEBUG                 LWIP_DBG_ON
+#define PBUF_DEBUG                  LWIP_DBG_OFF
+#define ICMP_DEBUG                  LWIP_DBG_ON
+#define IP_DEBUG                    LWIP_DBG_ON
+#define TCP_DEBUG                   LWIP_DBG_OFF
+#define UDP_DEBUG                   LWIP_DBG_OFF
+#define DHCP_DEBUG                  LWIP_DBG_ON
+#endif
+
+/* -------------------------------------------------------------------------- */
+/* Timeouts                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/* Number of active timeout handlers */
+#define MEMP_NUM_SYS_TIMEOUT        8
+
+/* TCP timer intervals */
+#define TCP_TMR_INTERVAL            250
+#define TCP_FAST_INTERVAL           250
+#define TCP_SLOW_INTERVAL           500
+
+/* -------------------------------------------------------------------------- */
+/* Application Hooks                                                           */
+/* -------------------------------------------------------------------------- */
+
+/* No application hooks by default */
+#define LWIP_HOOK_UNKNOWN_ETH_PROTOCOL(p, netif) 0
+
+/* -------------------------------------------------------------------------- */
+/* Sanity Checks                                                               */
+/* -------------------------------------------------------------------------- */
+
+/* Enable internal consistency checks */
+#define LWIP_ASSERT_CORE_LOCKED()   /* NO_SYS mode, nothing to check */
+
+#endif /* LWIPOPTS_H */

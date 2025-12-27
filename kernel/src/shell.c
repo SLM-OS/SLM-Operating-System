@@ -21,6 +21,9 @@
 #include "component.h"
 #include "littlefs_slm.h"
 #include "help.h"
+#if defined(PLATFORM_QEMU_VIRT)
+#include "net.h"
+#endif
 #include <stddef.h>
 
 /* ============================================================================
@@ -2600,6 +2603,11 @@ void shell_init(void)
 {
     line_pos = 0;
     num_external_commands = 0;
+
+#if defined(PLATFORM_QEMU_VIRT)
+    /* Register network commands (ping, ifconfig, netstat) */
+    net_shell_init();
+#endif
 
     uart_puts("\r\n");
     uart_puts("SLM-OS Debug Shell\r\n");

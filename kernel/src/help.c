@@ -494,6 +494,77 @@ static const struct help_entry help_entries[] = {
         "Runs ELF loader validation tests including header parsing\n"
         "and architecture verification.\n"
     ),
+
+    HELP_TEXT("net",
+        "net - Network control\n"
+        "\n"
+        "Usage:\n"
+        "  net init      Initialize network subsystem\n"
+        "  net status    Show network status\n"
+        "\n"
+        "The network must be initialized before using ping, ifconfig,\n"
+        "or netstat commands.\n"
+        "\n"
+        "Example:\n"
+        "  net init\n"
+        "  Initializing network...\n"
+        "  Network initialized successfully\n"
+    ),
+
+    HELP_TEXT("ping",
+        "ping - Send ICMP echo request\n"
+        "\n"
+        "Usage:\n"
+        "  ping <ip_address> [count]\n"
+        "\n"
+        "Sends ICMP echo requests to the specified IP address.\n"
+        "Default count is 4 packets.\n"
+        "\n"
+        "Examples:\n"
+        "  ping 10.0.2.2           Ping QEMU gateway (4 packets)\n"
+        "  ping 10.0.2.2 10        Send 10 ping packets\n"
+        "\n"
+        "Note: Requires 'net init' first.\n"
+    ),
+
+    HELP_TEXT("ifconfig",
+        "ifconfig - Network interface configuration\n"
+        "\n"
+        "Usage:\n"
+        "  ifconfig                          Show current config\n"
+        "  ifconfig dhcp                     Enable DHCP\n"
+        "  ifconfig <ip> <netmask> <gateway> Set static IP\n"
+        "\n"
+        "Examples:\n"
+        "  ifconfig\n"
+        "  sl0: flags=UP,STATIC\n"
+        "       ether 52:54:00:12:34:56\n"
+        "       inet 10.0.2.15  netmask 255.255.255.0\n"
+        "       gateway 10.0.2.2\n"
+        "\n"
+        "  ifconfig 192.168.1.100 255.255.255.0 192.168.1.1\n"
+        "  IP set to 192.168.1.100\n"
+    ),
+
+    HELP_TEXT("netstat",
+        "netstat - Show network statistics\n"
+        "\n"
+        "Usage:\n"
+        "  netstat\n"
+        "\n"
+        "Displays network interface statistics:\n"
+        "  - RX/TX packet counts\n"
+        "  - RX/TX byte counts\n"
+        "  - Error and dropped packet counts\n"
+        "\n"
+        "Example:\n"
+        "  netstat\n"
+        "  Network Statistics:\n"
+        "    RX packets: 42  bytes: 6048\n"
+        "    TX packets: 38  bytes: 3192\n"
+        "    RX errors:  0  dropped: 0\n"
+        "    TX errors:  0\n"
+    ),
 };
 
 #define NUM_HELP_ENTRIES (sizeof(help_entries) / sizeof(help_entries[0]))

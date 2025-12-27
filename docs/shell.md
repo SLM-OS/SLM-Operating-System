@@ -51,6 +51,10 @@ Available commands:
   grep      - Search in file (grep <pattern> <path>)
   find      - Find files (find <path> <pattern>)
   component - Component system (list/register/status)
+  net       - Network control (init/status)
+  ping      - Send ICMP echo request
+  ifconfig  - Network interface config
+  netstat   - Network statistics
   clear     - Clear screen
   reboot    - Restart the system
 ```
@@ -91,6 +95,12 @@ Available commands:
 | `grep <pattern> <path>` | Search for substring in file (shows line numbers) |
 | `find <path> <pattern>` | Find files by name pattern (wildcards: `*`, `?`) |
 | `component` | Component system management (see below) |
+| `net init\|status` | Initialize network or show status |
+| `ping <ip> [count]` | Send ICMP echo requests (default: 4) |
+| `ifconfig` | Show network configuration |
+| `ifconfig dhcp` | Enable DHCP |
+| `ifconfig <ip> <mask> <gw>` | Set static IP configuration |
+| `netstat` | Show network TX/RX statistics |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
 
@@ -397,6 +407,56 @@ Component 0:
   Task ID:     0
   Memory:      0 KB
   Switches:    0
+```
+
+### Network Commands
+
+Network commands are available on QEMU (VirtIO-Net). See `docs/networking.md` for full details.
+
+**Initialize networking:**
+```
+SLM-OS> net init
+Initializing network...
+Network initialized successfully
+
+SLM-OS> net status
+Network: UP
+  Interface: sl0
+  IP Address: 10.0.2.15
+  Link: connected
+```
+
+**Ping a host:**
+```
+SLM-OS> ping 10.0.2.2
+PING 10.0.2.2: 4 packets
+Reply from 10.0.2.2: seq=1 time=1 ms
+Reply from 10.0.2.2: seq=2 time=0 ms
+Reply from 10.0.2.2: seq=3 time=0 ms
+Reply from 10.0.2.2: seq=4 time=0 ms
+
+--- 10.0.2.2 ping statistics ---
+4 packets transmitted, 4 received, 0% packet loss
+rtt min/avg/max = 0/0/1 ms
+```
+
+**Show interface configuration:**
+```
+SLM-OS> ifconfig
+sl0: flags=UP,STATIC
+     ether 52:54:00:12:34:56
+     inet 10.0.2.15  netmask 255.255.255.0
+     gateway 10.0.2.2
+```
+
+**Show network statistics:**
+```
+SLM-OS> netstat
+Network Statistics:
+  RX packets: 42  bytes: 6048
+  TX packets: 38  bytes: 3192
+  RX errors:  0  dropped: 0
+  TX errors:  0
 ```
 
 ---

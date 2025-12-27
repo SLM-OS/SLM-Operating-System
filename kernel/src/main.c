@@ -27,6 +27,9 @@
 #include "littlefs_slm.h"
 #include "littlefs_vfs.h"
 #include "help.h"
+#if defined(PLATFORM_QEMU_VIRT)
+#include "net.h"
+#endif
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -851,6 +854,9 @@ void kernel_main(void *dtb)
 
     /* Start shell task (interactive debug console) */
     shell_start();
+
+    /* Note: Network initialization is done via 'net init' shell command
+     * because VirtIO MMIO needs to be mapped first. See cmd_net in shell.c */
 
     /* Start timer - will generate periodic interrupts */
     INFO("Starting timer (100 Hz)...");

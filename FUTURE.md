@@ -12,10 +12,10 @@ This section documents features discussed during development that are beyond the
 | **Scheduling** | Deadline Scheduler, Priority Inheritance, ELF Loader | Real-Time Guarantees (RMS) |
 | **Shell** | Working Directory, Path Resolution, 30+ Commands | POSIX Shell, Lua Scripting |
 | **Components** | Component System, Model Memory, GPU Stub | Sandboxing, Secure Boot |
-| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD | Jetson GPU, USB Serial, Networking |
+| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU) | Jetson GPU, USB Serial, Networking (Jetson) |
 
-**Completed Features:** 18
-**Pending Features:** 15
+**Completed Features:** 19
+**Pending Features:** 14
 
 ---
 
@@ -232,18 +232,38 @@ Add persistent storage for models, logs, and configuration.
 
 ---
 
-### Networking (lwIP)
-Add TCP/IP networking for remote management and distributed operation.
+### Networking (lwIP + VirtIO-Net) ✅
+TCP/IP networking for QEMU with lwIP stack and VirtIO-Net driver.
 
-- ☐ Integrate lwIP TCP/IP stack
+- ✅ Integrate lwIP TCP/IP stack
+  - `kernel/lib/lwip/` - lwIP 2.1.3 with custom lwipopts.h
+  - NO_SYS=1 mode (single-threaded, polled)
+  - TCP, UDP, ICMP, DHCP support
+- ✅ VirtIO-Net driver for QEMU
+  - `kernel/drivers/virtio_net.c` - MMIO transport at 0x0A000000
+  - TX/RX queue management, interrupt handling
+  - `kernel/net/lwip_slm.c` - netif adapter
+  - `kernel/net/sys_arch.c` - OS abstraction layer
+- ✅ Add network shell commands
+  - `net init|status` - Initialize network, show status
+  - `ping <ip> [count]` - ICMP echo requests
+  - `ifconfig` - Display/configure interface
+  - `ifconfig dhcp` - Enable DHCP client
+  - `ifconfig <ip> <mask> <gw>` - Static IP configuration
+  - `netstat` - TX/RX statistics
+- ✅ Documentation and tests
+  - `docs/networking.md` - comprehensive documentation
+  - `kernel/tests/test_net.c` - 13 unit tests
+  - Help files for all network commands
+
+**Remaining (not implemented):**
 - ☐ Write Jetson Ethernet driver (EQOS controller)
-- ☐ Implement DHCP client for automatic configuration
-- ☐ Add network commands to shell (`ping`, `ifconfig`)
 - ☐ REST API for remote component management
 - ☐ Network console (telnet/SSH alternative)
 
-**Effort:** 3-4 weeks  
+**Effort:** 1 week (QEMU), 2-3 weeks (Jetson)
 **Value:** Remote access, distributed systems, OTA updates
+**Status:** Partial (December 2025) - QEMU complete, Jetson pending
 
 ---
 

@@ -708,6 +708,42 @@ Added comprehensive file manipulation commands to the shell:
 
 ---
 
+### Networking (lwIP + VirtIO-Net) (December 2025)
+
+**Files:** `kernel/drivers/virtio_net.c`, `kernel/net/lwip_slm.c`, `kernel/net/sys_arch.c`, `kernel/src/net_shell.c`, `kernel/tests/test_net.c`, `docs/networking.md`
+
+Implemented TCP/IP networking for QEMU using lwIP and VirtIO-Net:
+
+| Component | Description |
+|-----------|-------------|
+| **VirtIO-Net Driver** | MMIO transport at 0x0A000000, TX/RX queue management |
+| **lwIP Integration** | TCP, UDP, ICMP, DHCP support in NO_SYS mode |
+| **OS Abstraction** | `sys_arch.c` with critical sections via spinlocks |
+| **Shell Commands** | `net`, `ping`, `ifconfig`, `netstat` |
+
+**Shell commands:**
+- `net init` — Initialize VirtIO and lwIP stack
+- `net status` — Show network status
+- `ping <ip> [count]` — Send ICMP echo requests
+- `ifconfig` — Display/configure network interface
+- `ifconfig dhcp` — Enable DHCP
+- `ifconfig <ip> <mask> <gw>` — Set static IP
+- `netstat` — Display TX/RX statistics
+
+**Platform support:**
+- QEMU: VirtIO-Net with user-mode networking (10.0.2.x)
+- Jetson: Not yet implemented (requires Realtek/Intel NIC driver)
+
+**Test coverage (13 tests):**
+- IP address utilities (creation, parsing, formatting, roundtrip)
+- Network state queries (up/down, configuration)
+- Statistics functions
+- Error handling (NULL pointers, invalid input)
+
+**Configuration:** QEMU runs with `-device virtio-net-device,netdev=net0 -netdev user,id=net0`
+
+---
+
 ### Summary (All Extra Work)
 
 | Item | Tests Added | Lines of Code |
@@ -717,10 +753,11 @@ Added comprehensive file manipulation commands to the shell:
 | CI/CD Pipeline | — | ~100 (workflow) + ~80 (semihosting) |
 | Shell Path Resolution | 21 | ~350 |
 | File Utility Commands | 42 | ~800 |
-| Documentation | — | ~700 |
-| **Total** | **83** | **~2580** |
+| Networking (lwIP) | 13 | ~1500 |
+| Documentation | — | ~900 |
+| **Total** | **96** | **~4100** |
 
-All tests pass. Total test count now ~140.
+All tests pass. Total test count now ~150.
 
 ---
 
