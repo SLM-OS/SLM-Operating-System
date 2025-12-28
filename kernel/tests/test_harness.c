@@ -7,6 +7,7 @@
 #include "test_harness.h"
 #include "../include/uart.h"
 #include "../include/semihosting.h"
+#include "../include/slm_ffi.h"
 
 /* ============================================================================
  * Unity Output Functions
@@ -108,6 +109,25 @@ int test_harness_run_all(void)
     total_failures += test_suite_pmm();
     total_failures += test_suite_littlefs();
     total_failures += test_suite_net();
+    total_failures += test_suite_lua();
+
+    /* Rust FFI tests */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Rust FFI Tests\n");
+    uart_puts("========================================\n");
+    total_failures += rust_run_tests();
+
+    /*
+     * Integration tests run actual tasks across CPUs.
+     * These must run after all unit tests because they exercise
+     * the full scheduler infrastructure.
+     */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Integration Tests (Multi-Core)\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_integration();
 
     /* Final summary */
     uart_puts("\n");
@@ -124,13 +144,13 @@ int test_harness_run_all(void)
     }
 
     /*
-     * When running under QEMU with semihosting, exit on failure.
-     * On success, return to caller so shell can run interactively.
-     * CI uses the exit code to detect test failures.
+     * When running under QEMU with semihosting, always exit after tests.
+     * This ensures proper exit codes for CI regardless of pass/fail.
      */
-    if (semihosting_available() && total_failures > 0) {
-        uart_puts("[INFO] Exiting via semihosting (test failure)...\n");
-        semihosting_exit(1);
+    if (semihosting_available()) {
+        int exit_code = (total_failures > 0) ? 1 : 0;
+        uart_puts("[INFO] Exiting via semihosting...\n");
+        semihosting_exit(exit_code);
     }
 
     return total_failures;

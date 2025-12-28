@@ -565,6 +565,41 @@ static const struct help_entry help_entries[] = {
         "    RX errors:  0  dropped: 0\n"
         "    TX errors:  0\n"
     ),
+
+    HELP_TEXT("lua",
+        "lua - Lua scripting environment\n"
+        "\n"
+        "Usage:\n"
+        "  lua              Enter interactive REPL\n"
+        "  lua -e \"code\"    Execute Lua code directly\n"
+        "  lua <file>       Run script from file (not yet implemented)\n"
+        "\n"
+        "REPL Commands:\n"
+        "  exit             Exit the REPL\n"
+        "  Ctrl+D           Exit the REPL\n"
+        "  Ctrl+C           Cancel current line\n"
+        "\n"
+        "SLM-OS Bindings (slm module):\n"
+        "  slm.print(...)   Print to console\n"
+        "  slm.uptime()     Get system uptime in milliseconds\n"
+        "  slm.mem_stats()  Get memory stats {total_kb, free_kb, used_kb}\n"
+        "  slm.tasks()      Get list of tasks [{id, name, state, cpu}, ...]\n"
+        "  slm.sleep(ms)    Sleep for milliseconds\n"
+        "  slm.yield()      Yield CPU to scheduler\n"
+        "  slm.version()    Get SLM-OS version string\n"
+        "  slm.cpu_count()  Get number of CPUs\n"
+        "  slm.cpu_id()     Get current CPU ID\n"
+        "\n"
+        "Examples:\n"
+        "  lua\n"
+        "  >>> print(\"Hello from Lua!\")\n"
+        "  >>> slm.print(slm.uptime())\n"
+        "  >>> for k,v in pairs(slm.mem_stats()) do print(k,v) end\n"
+        "  >>> exit\n"
+        "\n"
+        "  lua -e \"print(1+2)\"\n"
+        "  3\n"
+    ),
 };
 
 #define NUM_HELP_ENTRIES (sizeof(help_entries) / sizeof(help_entries[0]))

@@ -14,6 +14,7 @@ PLATFORM ?= QEMU_VIRT
 # Directories
 BUILD_DIR := build
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
+KERNEL_TEST_BUILD_DIR := $(BUILD_DIR)/kernel-test
 RUNTIME_BUILD_DIR := runtime/target/aarch64-unknown-none
 
 # Tools (full paths for Windows compatibility)
@@ -32,6 +33,7 @@ QEMU_CORES := 4
 # Output files
 KERNEL_ELF := $(KERNEL_BUILD_DIR)/slmos.elf
 KERNEL_BIN := $(KERNEL_BUILD_DIR)/slmos.bin
+KERNEL_TEST_ELF := $(KERNEL_TEST_BUILD_DIR)/slmos.elf
 
 # ============================================================================
 # Default target
@@ -103,7 +105,7 @@ runtime-rebuild: runtime-clean runtime
 # ============================================================================
 
 .PHONY: clean
-clean: kernel-clean runtime-clean
+clean: kernel-clean kernel-test-clean runtime-clean
 	@echo "Clean complete."
 
 .PHONY: rebuild
@@ -126,7 +128,7 @@ run: kernel
 
 .PHONY: shell
 shell: kernel
-	@echo "Running in QEMU (interactive shell after tests)..."
+	@echo "Running in QEMU (interactive shell)..."
 	@echo "Press Ctrl+A then X to exit QEMU"
 	@echo ""
 	$(QEMU) \
@@ -170,28 +172,46 @@ gdb:
 TEST_OUTPUT := $(BUILD_DIR)/test-output.log
 TEST_TIMEOUT := 60
 
+# Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
+.PHONY: kernel-test
+kernel-test: check-build-dir runtime $(KERNEL_TEST_BUILD_DIR)/Makefile
+	@echo "Building test kernel..."
+	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)
+
+$(KERNEL_TEST_BUILD_DIR)/Makefile:
+	@echo "Configuring test kernel build..."
+	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_TEST_BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DPLATFORM=$(PLATFORM) \
+		-DENABLE_BOOT_TESTS=ON \
+		-DCMAKE_MAKE_PROGRAM="C:/cygwin64/bin/make.exe"
+
+.PHONY: kernel-test-clean
+kernel-test-clean:
+	@echo "Cleaning test kernel build..."
+	rm -rf $(KERNEL_TEST_BUILD_DIR)
+
 .PHONY: test
-test: kernel
+test: kernel-test
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
-	@timeout $(TEST_TIMEOUT) $(QEMU) \
+	@$(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
 		-smp cores=$(QEMU_CORES) \
 		-m $(QEMU_MEMORY) \
 		-nographic \
-		-kernel $(KERNEL_ELF) \
-		> $(TEST_OUTPUT) 2>&1 || true; \
+		-semihosting \
+		-kernel $(KERNEL_TEST_ELF) \
+		> $(TEST_OUTPUT) 2>&1; \
+	QEMU_EXIT=$$?; \
 	echo ""; \
 	echo "Test Results:"; \
 	echo "============="; \
-	if grep -F "[PASS] All test suites passed" $(TEST_OUTPUT) > /dev/null 2>&1; then \
-		echo "PASSED - All tests passed"; \
+	if [ $$QEMU_EXIT -eq 0 ]; then \
+		echo "PASSED - All tests passed (exit code 0)"; \
 		exit 0; \
-	elif grep -F "[FAIL]" $(TEST_OUTPUT) > /dev/null 2>&1; then \
-		echo "FAILED - Test failures detected:"; \
-		grep -F "[FAIL]" $(TEST_OUTPUT); \
-		exit 1; \
 	elif grep -F "PAGE FAULT" $(TEST_OUTPUT) > /dev/null 2>&1; then \
 		echo "CRASHED - Kernel page fault detected"; \
 		grep -A 20 "PAGE FAULT" $(TEST_OUTPUT) | head -25; \
@@ -200,9 +220,14 @@ test: kernel
 		echo "CRASHED - Kernel panic"; \
 		grep -A 20 "KERNEL PANIC" $(TEST_OUTPUT) | head -25; \
 		exit 1; \
+	elif grep -F "[FAIL]" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "FAILED - Test failures detected:"; \
+		grep -F "[FAIL]" $(TEST_OUTPUT); \
+		exit 1; \
 	else \
-		echo "UNKNOWN - Could not determine test status (timeout?)"; \
+		echo "FAILED - Tests failed (exit code $$QEMU_EXIT)"; \
 		echo "Check $(TEST_OUTPUT) for details"; \
+		tail -30 $(TEST_OUTPUT); \
 		exit 1; \
 	fi
 
@@ -242,11 +267,13 @@ help:
 	@echo "Build targets:"
 	@echo "  all            Build kernel and runtime (default)"
 	@echo "  kernel         Build C kernel only"
+	@echo "  kernel-test    Build test kernel (with ENABLE_BOOT_TESTS)"
 	@echo "  runtime        Build Rust runtime only"
 	@echo ""
 	@echo "Clean targets:"
 	@echo "  clean          Clean all build artifacts"
 	@echo "  kernel-clean   Clean kernel build only"
+	@echo "  kernel-test-clean Clean test kernel build only"
 	@echo "  runtime-clean  Clean runtime build only"
 	@echo ""
 	@echo "Rebuild targets:"
@@ -255,13 +282,13 @@ help:
 	@echo "  runtime-rebuild Clean and rebuild runtime"
 	@echo ""
 	@echo "Run targets:"
-	@echo "  run            Run kernel in QEMU"
-	@echo "  shell          Run kernel in QEMU with interactive shell"
+	@echo "  run            Run kernel in QEMU (same as shell)"
+	@echo "  shell          Run kernel in QEMU (interactive shell)"
 	@echo "  debug          Run kernel in QEMU with GDB server (terminal 1)"
 	@echo "  gdb            Connect GDB to running QEMU (terminal 2)"
 	@echo ""
 	@echo "Test targets:"
-	@echo "  test           Run kernel tests in QEMU (with timeout)"
+	@echo "  test           Run all tests in QEMU (exits on completion)"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  info           Show build configuration"
@@ -271,6 +298,7 @@ help:
 	@echo "Examples:"
 	@echo "  make                    Build everything (Debug)"
 	@echo "  make BUILD_TYPE=Release Build everything (Release)"
-	@echo "  make run                Build and run in QEMU"
+	@echo "  make shell              Build and run interactive shell"
+	@echo "  make test               Run all tests"
 	@echo "  make debug              Start QEMU with GDB server"
 	@echo "  make gdb                Connect to QEMU (run in 2nd terminal)"

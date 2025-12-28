@@ -22,7 +22,8 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wshadow -Wcast-align -Wstrict-prototypes")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wformat=2 -Wno-format-nonliteral")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wunused -Wunreachable-code")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding -nostdlib")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=cortex-a78ae -mgeneral-regs-only")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=cortex-a78ae")
+# Note: -mgeneral-regs-only is added to kernel target only (not lua library)
 
 set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mcpu=cortex-a78ae")
 
@@ -40,6 +41,13 @@ add_compile_definitions(PLATFORM_${PLATFORM}=1)
 # Enable semihosting for QEMU (used for clean test exit)
 if(PLATFORM STREQUAL "QEMU_VIRT")
     add_compile_definitions(ENABLE_SEMIHOSTING=1)
+endif()
+
+# Boot tests - run all tests at kernel startup (for CI/testing)
+# Default OFF for interactive use; `make test` enables this
+option(ENABLE_BOOT_TESTS "Run tests at boot instead of interactive shell" OFF)
+if(ENABLE_BOOT_TESTS)
+    add_compile_definitions(ENABLE_BOOT_TESTS=1)
 endif()
 
 # Linker script - platform-specific
@@ -68,6 +76,7 @@ set(KERNEL_SOURCES
     kernel/arch/arm64/mmu.S
     kernel/arch/arm64/vectors.S
     kernel/arch/arm64/smp_boot.S
+    # Note: setjmp.S moved to lua library (uses FP registers)
     kernel/arch/arm64/exceptions.c
 
     # ==========================================================================
@@ -155,6 +164,11 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/net/sys_arch.c>
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/net/lwip_slm.c>
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/src/net_shell.c>
+
+    # ==========================================================================
+    # Lua Scripting - Lua library includes all FP-using code
+    # lua_slm.c and lua_shell.c are compiled as part of lua library
+    # ==========================================================================
 )
 
 # Test sources (Unity framework)
@@ -173,6 +187,8 @@ set(TEST_SOURCES
     kernel/tests/test_pmm.c
     kernel/tests/test_littlefs.c
     kernel/tests/test_net.c
+    kernel/tests/test_lua.c
+    kernel/tests/test_integration.c
 )
 
 # lwIP library sources (QEMU networking only)
@@ -204,6 +220,38 @@ set(LWIP_SOURCES
     kernel/lib/lwip/src/netif/ethernet.c
 )
 
+# Lua 5.4 library sources
+set(LUA_SOURCES
+    kernel/lib/lua/src/lapi.c
+    kernel/lib/lua/src/lauxlib.c
+    kernel/lib/lua/src/lbaselib.c
+    kernel/lib/lua/src/lcode.c
+    kernel/lib/lua/src/lcorolib.c
+    kernel/lib/lua/src/lctype.c
+    kernel/lib/lua/src/ldblib.c
+    kernel/lib/lua/src/ldebug.c
+    kernel/lib/lua/src/ldo.c
+    kernel/lib/lua/src/ldump.c
+    kernel/lib/lua/src/lfunc.c
+    kernel/lib/lua/src/lgc.c
+    kernel/lib/lua/src/linit.c
+    kernel/lib/lua/src/llex.c
+    kernel/lib/lua/src/lmathlib.c
+    kernel/lib/lua/src/lmem.c
+    kernel/lib/lua/src/lobject.c
+    kernel/lib/lua/src/lopcodes.c
+    kernel/lib/lua/src/lparser.c
+    kernel/lib/lua/src/lstate.c
+    kernel/lib/lua/src/lstring.c
+    kernel/lib/lua/src/lstrlib.c
+    kernel/lib/lua/src/ltable.c
+    kernel/lib/lua/src/ltablib.c
+    kernel/lib/lua/src/ltm.c
+    kernel/lib/lua/src/lundump.c
+    kernel/lib/lua/src/lvm.c
+    kernel/lib/lua/src/lzio.c
+)
+
 # Include directories
 set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/include
@@ -211,16 +259,22 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/gpu
     ${CMAKE_SOURCE_DIR}/kernel/lib/littlefs
     ${CMAKE_SOURCE_DIR}/kernel/lib/lwip/src/include
+    ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src
 )
 
 # Build kernel ELF
 # Conditionally add lwIP sources for QEMU platform
+# Note: Lua is linked as a separate library (see lua target below)
 if(PLATFORM STREQUAL "QEMU_VIRT")
     add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES} ${LWIP_SOURCES})
 else()
     add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
 endif()
 target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
+
+# Kernel uses -mgeneral-regs-only to avoid FP register pollution in kernel code
+# (Lua library is built separately without this flag to allow floating-point)
+target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only)
 
 # Configure LittleFS for freestanding use (no libc)
 # - LFS_NO_MALLOC: We use static buffers
@@ -239,6 +293,38 @@ if(PLATFORM STREQUAL "QEMU_VIRT")
         PROPERTIES COMPILE_FLAGS "-Wno-unused-parameter -Wno-unused-variable -Wno-type-limits -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes -Wno-redundant-decls"
     )
 endif()
+
+# Lua library - uses floating-point so it doesn't get -mgeneral-regs-only
+# Includes lua_slm.c, lua_shell.c (use Lua FP API) and setjmp.S (saves FP registers)
+add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.c kernel/src/lua_shell.c kernel/arch/arm64/setjmp.S)
+target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src)
+
+# Lua-specific compile flags (relaxed warnings for C99 Lua code)
+target_compile_options(lua PRIVATE
+    -std=c23
+    -ffreestanding
+    -nostdlib
+    -mcpu=cortex-a78ae
+    # Relaxed warnings for Lua's C99 style code
+    -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
+    -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes
+    -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
+    -Wno-unused-but-set-variable -Wno-missing-field-initializers
+    -Wno-float-conversion -Wno-conversion -Wno-error
+)
+
+# Lua configuration defines (set before Lua headers via -D)
+# Note: We don't use LUA_USER_H since the ARM toolchain provides newlib headers
+target_compile_definitions(lua PRIVATE
+    LUA_USE_C89=1
+    LUA_32BITS=1
+    LUA_USE_LOCALE=0
+    LUAI_MAXSTACK=15000
+    LUA_MINBUFFER=32
+)
+
+# Link with Lua library (built above)
+target_link_libraries(slmos.elf PRIVATE lua)
 
 # Link with Rust runtime (if it exists)
 if(EXISTS ${RUST_LIB})

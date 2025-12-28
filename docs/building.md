@@ -70,14 +70,16 @@ rustup target list --installed | grep aarch64
 |---------|-------------|
 | `make` | Build kernel and runtime (default) |
 | `make kernel` | Build C kernel only |
+| `make kernel-test` | Build test kernel (with ENABLE_BOOT_TESTS) |
 | `make runtime` | Build Rust runtime only |
 | `make run` | Build and run in QEMU |
 | `make shell` | Build and run with interactive shell |
-| `make test` | Build and run automated tests (CI mode) |
+| `make test` | Build test kernel and run in QEMU (CI mode) |
 | `make debug` | Build and run with GDB server |
 | `make gdb` | Connect GDB to running QEMU |
 | `make clean` | Remove all build artifacts |
 | `make kernel-clean` | Remove kernel build artifacts |
+| `make kernel-test-clean` | Remove test kernel build artifacts |
 | `make runtime-clean` | Remove runtime build artifacts |
 | `make kernel-rebuild` | Clean and rebuild kernel |
 | `make runtime-rebuild` | Clean and rebuild runtime |
@@ -107,10 +109,13 @@ Note: `make kernel` automatically builds the runtime first, so explicit `make ru
 ### Clean Targets
 
 #### `make clean`
-Removes all build artifacts (kernel and runtime).
+Removes all build artifacts (kernel, test kernel, and runtime).
 
 #### `make kernel-clean`
 Removes only kernel build artifacts. Use when CMake cache needs refreshing.
+
+#### `make kernel-test-clean`
+Removes only test kernel build artifacts (`build/kernel-test/`).
 
 #### `make kernel-rebuild`
 Equivalent to `make kernel-clean && make kernel`.
@@ -118,7 +123,7 @@ Equivalent to `make kernel-clean && make kernel`.
 ### Run Targets
 
 #### `make run`
-Builds the kernel (if needed) and launches QEMU. Tests run automatically, then the shell becomes available.
+Builds the kernel (if needed) and launches QEMU. Boots directly to the interactive shell.
 
 ```bash
 qemu-system-aarch64 \
@@ -136,11 +141,10 @@ qemu-system-aarch64 \
 - `Ctrl-A H` - Show help
 
 #### `make shell`
-Same as `make run`, but explicitly intended for interactive use. After tests complete, the SLM-OS shell is available:
+Same as `make run`. Builds the kernel and launches QEMU with the interactive shell:
 
 ```
-[INFO] Tests complete. Exiting main task...
-[INFO] Shell is now active. Type 'help' for commands.
+SLM-OS Shell - Type 'help' for commands
 slm> help
 Available commands:
   help     - Show this help message
@@ -165,24 +169,25 @@ qemu-system-aarch64 \
 Run this in one terminal, then `make gdb` in another.
 
 #### `make test`
-Builds the kernel and runs the automated test suite in QEMU with a timeout (default 60 seconds). Designed for CI/CD pipelines.
+Builds a special test kernel (with `ENABLE_BOOT_TESTS` flag) and runs it in QEMU. The test kernel runs all test suites at boot and exits via semihosting with an appropriate exit code. Designed for CI/CD pipelines.
 
 ```bash
-make test                    # Default 60s timeout
-make TEST_TIMEOUT=120 test   # Custom timeout
+make test                    # Run tests (uses kernel-test build)
+make kernel-test             # Build test kernel only
+make kernel-test-clean       # Clean test kernel build
 ```
 
 The test runner:
-1. Launches QEMU and captures output
-2. Parses output for `[PASS]` or `[FAIL]` markers
-3. Times out and kills QEMU after tests complete
+1. Builds `build/kernel-test/slmos.elf` with `ENABLE_BOOT_TESTS=ON`
+2. Launches QEMU with `-semihosting` flag
+3. QEMU exits automatically when tests complete (via semihosting exit)
 4. Returns exit code 0 on success, 1 on failure
 
 Output on success:
 ```
 Test Results:
 =============
-PASSED - All tests passed
+PASSED - All tests passed (exit code 0)
 ```
 
 Output on failure:
@@ -193,7 +198,7 @@ FAILED - Test failures detected:
   [FAIL] test_something
 ```
 
-The test runs with a 60-second timeout. Test output is saved to `build/test-output.log`.
+Test output is saved to `build/test-output.log`.
 See `docs/testing.md` for details on the test framework.
 
 #### `make gdb`
@@ -472,9 +477,12 @@ CS-496-SLM-Operating-System/
 │       ├── lib.rs           # Runtime entry points
 │       └── kernel_ffi.rs    # Rust FFI bindings
 ├── build/                   # Build output (generated)
-│   └── kernel/
-│       ├── slmos.elf        # Kernel ELF
-│       └── slmos.bin        # Raw binary
+│   ├── kernel/              # Normal kernel build
+│   │   ├── slmos.elf        # Kernel ELF (boots to shell)
+│   │   └── slmos.bin        # Raw binary
+│   ├── kernel-test/         # Test kernel build (ENABLE_BOOT_TESTS)
+│   │   └── slmos.elf        # Test kernel ELF (runs tests, exits)
+│   └── test-output.log      # Test output from last `make test`
 └── docs/                    # Documentation
     └── ffi.md               # FFI documentation
 ```

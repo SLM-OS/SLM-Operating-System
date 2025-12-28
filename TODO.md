@@ -744,6 +744,50 @@ Implemented TCP/IP networking for QEMU using lwIP and VirtIO-Net:
 
 ---
 
+### Lua 5.4 Scripting Integration (December 2025)
+
+**Files:** `kernel/lib/lua/`, `kernel/src/lua_slm.c`, `kernel/src/lua_shell.c`, `kernel/src/lua_stubs.c`, `kernel/arch/arm64/setjmp.S`, `kernel/tests/test_lua.c`, `docs/lua.md`
+
+Embedded Lua 5.4 interpreter for runtime scripting and automation:
+
+| Component | Description |
+|-----------|-------------|
+| **Lua Core** | Full Lua 5.4.7 in `kernel/lib/lua/src/`, built as separate library (allows FP) |
+| **SLM Bindings** | `slm` module with kernel API access (uptime, mem_stats, tasks, etc.) |
+| **REPL** | Interactive read-eval-print loop with line editing |
+| **Shell Command** | `lua` (REPL), `lua -e "code"` (direct execution) |
+| **Libc Stubs** | 1MB heap allocator, math functions, string ops for freestanding |
+| **Error Handling** | Custom `setjmp.S` for ARM64 (22-slot jmp_buf) |
+
+**SLM module functions:**
+- `slm.print(...)` — Console output (replaces Lua's print)
+- `slm.uptime()` — System uptime in milliseconds
+- `slm.mem_stats()` — Memory statistics table (total_kb, free_kb, used_kb)
+- `slm.tasks()` — Array of task tables (id, name, state, cpu, priority)
+- `slm.sleep(ms)` — Sleep with scheduler yield
+- `slm.yield()` — Yield CPU to scheduler
+- `slm.version()` — SLM-OS version string
+- `slm.cpu_count()`, `slm.cpu_id()` — CPU information
+
+**Build configuration:**
+- Lua built without `-mgeneral-regs-only` (needs FP for math)
+- Custom `slm_luaconf.h` with `LUA_32BITS=1`, `LUA_USE_C89=1`
+- Reduced stack/buffer sizes for embedded use
+
+**Bugs fixed during integration:**
+1. **Heap allocator unsigned underflow** (`lua_stubs.c`): Block split logic could underflow when calculating remaining size
+2. **jmp_buf buffer overflow** (`setjmp.S`): Original layout stored 23 values but ARM toolchain jmp_buf is only 22 slots (176 bytes)
+
+**Test coverage (22 tests):**
+- State management (newstate, multiple states, close NULL)
+- Basic execution (arithmetic, strings, tables, functions, loops)
+- Error handling (syntax errors, runtime errors, pcall)
+- SLM bindings (module exists, uptime, mem_stats, tasks, version, cpu_count, cpu_id)
+- Standard libraries (string, table, math)
+- Complex integration (metatables, class-like patterns)
+
+---
+
 ### Summary (All Extra Work)
 
 | Item | Tests Added | Lines of Code |
@@ -754,10 +798,11 @@ Implemented TCP/IP networking for QEMU using lwIP and VirtIO-Net:
 | Shell Path Resolution | 21 | ~350 |
 | File Utility Commands | 42 | ~800 |
 | Networking (lwIP) | 13 | ~1500 |
-| Documentation | — | ~900 |
-| **Total** | **96** | **~4100** |
+| Lua Scripting | 22 | ~2500 (includes Lua source integration) |
+| Documentation | — | ~1100 |
+| **Total** | **118** | **~6700** |
 
-All tests pass. Total test count now ~150.
+All tests pass. Total test count now ~170.
 
 ---
 

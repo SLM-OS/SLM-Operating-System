@@ -13,7 +13,7 @@ SLM-OS uses GitHub Actions for automated building and testing. The pipeline runs
 │                         GitHub Actions Workflow                         │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│   Push/PR ──> Install Toolchains ──> Build Runtime ──> Build Kernel    │
+│   Push/PR ──> Install Toolchains ──> Build Runtime ──> Build Test Kernel│
 │                                                                         │
 │                    │                                                    │
 │                    ▼                                                    │
@@ -21,6 +21,8 @@ SLM-OS uses GitHub Actions for automated building and testing. The pipeline runs
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+The CI pipeline builds a **test kernel** with `ENABLE_BOOT_TESTS=ON`, which runs all test suites at boot and exits via semihosting. This is separate from the normal kernel build which boots to an interactive shell.
 
 ---
 
@@ -85,13 +87,15 @@ Prints versions to confirm all tools are available:
   run: cargo build
 ```
 
-#### 7. Build Kernel (CMake)
+#### 7. Build Test Kernel (CMake)
+Builds the kernel with `ENABLE_BOOT_TESTS=ON` so tests run at boot:
 ```yaml
 - run: |
     cmake -B build \
       -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \
       -DCMAKE_BUILD_TYPE=Debug \
-      -DPLATFORM=QEMU_VIRT
+      -DPLATFORM=QEMU_VIRT \
+      -DENABLE_BOOT_TESTS=ON
     cmake --build build
 ```
 
@@ -181,7 +185,21 @@ int test_harness_run_all(void)
 
 ### Conditional Compilation
 
-Semihosting is only enabled for QEMU builds:
+Two flags control test behavior:
+
+**ENABLE_BOOT_TESTS** — Controls whether tests run at boot:
+```cmake
+# CMakeLists.txt
+option(ENABLE_BOOT_TESTS "Run tests at boot and exit" OFF)
+if(ENABLE_BOOT_TESTS)
+    add_compile_definitions(ENABLE_BOOT_TESTS=1)
+endif()
+```
+
+- `ON`: Kernel runs test harness at boot, exits via semihosting (CI mode)
+- `OFF`: Kernel boots to interactive shell (development mode)
+
+**ENABLE_SEMIHOSTING** — Controls semihosting availability (auto-set for QEMU):
 ```cmake
 # CMakeLists.txt
 if(PLATFORM STREQUAL "QEMU_VIRT")
@@ -229,14 +247,20 @@ fi
 The Makefile mirrors the CI behavior for local testing:
 
 ```bash
-# Run tests locally (uses semihosting)
+# Run tests locally (builds test kernel, uses semihosting)
 make test
 
-# Or with explicit build directory
-make BUILD_DIR=/c/temp/slmos-build kernel test
+# Build test kernel separately
+make kernel-test
+
+# Clean test kernel build
+make kernel-test-clean
+
+# With explicit build directory
+make BUILD_DIR=/c/temp/slmos-build kernel-test test
 ```
 
-The local Makefile also uses `-semihosting` and parses output for `[PASS]`/`[FAIL]`.
+The Makefile builds a separate test kernel in `build/kernel-test/` with `ENABLE_BOOT_TESTS=ON`. The test target launches QEMU with `-semihosting` and captures the exit code for pass/fail determination.
 
 ---
 
@@ -270,14 +294,18 @@ Each CI run produces the following artifacts (retained 7 days):
 
 ```bash
 # Reproduce CI environment locally
-make kernel-clean kernel test
+make kernel-test-clean kernel-test test
 
 # View full test output
-cat /c/temp/slmos-build/test-output.log
+cat build/test-output.log
 
-# Run QEMU manually with more verbose output
+# Run test kernel manually with more verbose output
 qemu-system-aarch64 -M virt -cpu max -smp 4 -m 1G -nographic \
-    -semihosting -kernel build/slmos.elf
+    -semihosting -kernel build/kernel-test/slmos.elf
+
+# Run normal kernel (boots to shell, no tests)
+qemu-system-aarch64 -M virt -cpu max -smp 4 -m 1G -nographic \
+    -kernel build/kernel/slmos.elf
 ```
 
 ---
@@ -302,8 +330,9 @@ The following CI features are planned but not yet implemented:
 | `kernel/src/semihosting.c` | Semihosting implementation |
 | `kernel/include/semihosting.h` | Semihosting API declarations |
 | `kernel/tests/test_harness.c` | Test harness with semihosting exit |
-| `CMakeLists.txt` | Build configuration (ENABLE_SEMIHOSTING) |
-| `Makefile` | Local build/test with semihosting |
+| `kernel/tests/test_integration.c` | Multi-core integration tests |
+| `CMakeLists.txt` | Build configuration (ENABLE_BOOT_TESTS, ENABLE_SEMIHOSTING) |
+| `Makefile` | Local build/test with kernel-test target |
 
 ---
 

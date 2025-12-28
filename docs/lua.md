@@ -1,0 +1,142 @@
+# Lua Scripting
+
+SLM-OS includes an embedded Lua 5.4 interpreter for scripting and automation.
+
+## Overview
+
+Lua integration provides:
+- Interactive REPL (Read-Eval-Print Loop) for experimentation
+- Direct code execution via command line
+- Kernel API access through the `slm` module
+- Standard Lua libraries: base, table, string, math
+
+## Shell Command
+
+```
+lua              # Enter interactive REPL
+lua -e "code"    # Execute Lua code directly
+lua <file>       # Run script from file (not yet implemented)
+```
+
+### Interactive REPL
+
+```
+slmos> lua
+Lua 5.4 REPL - type 'exit' to quit
+>>> print("Hello from Lua!")
+Hello from Lua!
+>>> 1 + 2
+>>> print(1 + 2)
+3
+>>> exit
+Exiting Lua REPL
+```
+
+REPL controls:
+- `exit` - Exit the REPL
+- `Ctrl+D` - Exit the REPL
+- `Ctrl+C` - Cancel current line
+
+### Direct Execution
+
+```
+slmos> lua -e "print(1+2)"
+3
+slmos> lua -e "for i=1,5 do print(i) end"
+1
+2
+3
+4
+5
+```
+
+## SLM-OS Kernel Bindings
+
+The `slm` module provides access to kernel functionality:
+
+| Function | Description |
+|----------|-------------|
+| `slm.print(...)` | Print to console (replaces Lua's print) |
+| `slm.uptime()` | Get system uptime in milliseconds |
+| `slm.mem_stats()` | Get memory statistics table |
+| `slm.tasks()` | Get list of running tasks |
+| `slm.sleep(ms)` | Sleep for milliseconds |
+| `slm.yield()` | Yield CPU to scheduler |
+| `slm.version()` | Get SLM-OS version string |
+| `slm.cpu_count()` | Get number of CPUs |
+| `slm.cpu_id()` | Get current CPU ID |
+
+### Memory Statistics
+
+```lua
+>>> stats = slm.mem_stats()
+>>> for k,v in pairs(stats) do print(k, v) end
+total_kb    1048576
+free_kb     1020432
+used_kb     28144
+```
+
+### Task Information
+
+```lua
+>>> for _,t in ipairs(slm.tasks()) do
+...   print(t.id, t.name, t.state, t.cpu)
+... end
+0       idle    ready   0
+1       idle    ready   1
+2       idle    ready   2
+3       idle    ready   3
+4       init    blocked 0
+5       test    running 1
+6       shell   running 2
+```
+
+## Implementation Details
+
+### Build Configuration
+
+Lua is built as a separate static library to allow floating-point operations
+while the kernel itself uses `-mgeneral-regs-only`. The Lua library includes:
+
+- Lua 5.4 core (`kernel/lib/lua/src/`)
+- Libc stubs for freestanding environment (`kernel/src/lua_stubs.c`)
+- SLM-OS bindings (`kernel/src/lua_slm.c`)
+- Shell command (`kernel/src/lua_shell.c`)
+- setjmp/longjmp for error handling (`kernel/arch/arm64/setjmp.S`)
+
+### Lua Configuration
+
+Lua is configured for embedded use with:
+- `LUA_32BITS=1` - 32-bit integers and floats
+- `LUA_USE_C89=1` - C89 compatibility mode
+- `LUAI_MAXSTACK=15000` - Reduced stack size
+- `LUA_MINBUFFER=32` - Smaller buffers
+
+### Memory
+
+Lua uses a 1MB heap allocated in `.bss` for all allocations. The heap
+uses a first-fit allocator with coalescing on free.
+
+### Libc Stubs
+
+The freestanding environment provides minimal implementations of:
+- Memory: `malloc`, `free`, `realloc`, `calloc`
+- Strings: `strrchr`, `strcat`, `strstr`, `strdup`, etc.
+- Math: `sin`, `cos`, `exp`, `log`, `sqrt`, `pow`, etc.
+- I/O: `printf`, `fprintf` (output to UART)
+- Time: `time`, `clock` (based on timer counter)
+
+## Limitations
+
+- **No file I/O**: Scripts cannot be loaded from files yet
+- **No coroutines**: The coroutine library is not enabled
+- **No debug library**: The debug library is not enabled
+- **No os library**: System calls are not available
+- **Limited math precision**: Math functions use Taylor series approximations
+
+## Future Enhancements
+
+- Load scripts from LittleFS filesystem
+- Expose more kernel APIs (IPC, networking, GPU)
+- Script-driven test automation
+- Configuration files in Lua

@@ -55,6 +55,7 @@ Available commands:
   ping      - Send ICMP echo request
   ifconfig  - Network interface config
   netstat   - Network statistics
+  lua       - Lua scripting (REPL or -e "code")
   clear     - Clear screen
   reboot    - Restart the system
 ```
@@ -101,6 +102,8 @@ Available commands:
 | `ifconfig dhcp` | Enable DHCP |
 | `ifconfig <ip> <mask> <gw>` | Set static IP configuration |
 | `netstat` | Show network TX/RX statistics |
+| `lua` | Enter Lua REPL |
+| `lua -e "code"` | Execute Lua code directly |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
 

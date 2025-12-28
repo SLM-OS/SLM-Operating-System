@@ -61,4 +61,10 @@ int test_suite_littlefs(void);
 /* Networking tests (QEMU only) */
 int test_suite_net(void);
 
+/* Lua scripting tests */
+int test_suite_lua(void);
+
+/* Multi-core integration tests (actual tasks across CPUs) */
+int test_suite_integration(void);
+
 #endif /* TEST_HARNESS_H */

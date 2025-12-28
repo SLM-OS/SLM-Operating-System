@@ -12,21 +12,24 @@ SLM-OS uses a bare-metal compatible subset of the [Unity Test Framework](https:/
 
 ```
 kernel/tests/
-├── unity.h           # Unity API (macros, assertions)
-├── unity.c           # Unity implementation
-├── test_harness.h    # Test suite declarations
-├── test_harness.c    # UART output, suite runner
-├── test_ipc.c        # IPC test suite
-├── test_scheduler.c  # Scheduler tests (29 tests: priority, deadline, isolation, benchmarks)
-├── test_model_mem.c  # Model memory tests (Rust allocator via FFI)
-├── test_pi_mutex.c   # Priority inheritance mutex tests
-├── test_gpu.c        # GPU subsystem tests (22 tests)
-├── test_pmm.c        # PMM buddy allocator tests (24 tests)
-├── test_vmm.c        # VMM and TLB invalidation tests (10 tests)
-├── test_component.c  # Component system tests
-├── test_vfs.c        # Virtual filesystem tests
-├── test_shell.c      # Shell command and path resolution tests (106 tests)
-└── test_littlefs.c   # LittleFS and block device tests (26 tests)
+├── unity.h            # Unity API (macros, assertions)
+├── unity.c            # Unity implementation
+├── test_harness.h     # Test suite declarations
+├── test_harness.c     # UART output, suite runner, semihosting exit
+├── test_ipc.c         # IPC test suite
+├── test_scheduler.c   # Scheduler tests (29 tests: priority, deadline, isolation, benchmarks)
+├── test_model_mem.c   # Model memory tests (Rust allocator via FFI)
+├── test_pi_mutex.c    # Priority inheritance mutex tests
+├── test_gpu.c         # GPU subsystem tests (22 tests)
+├── test_pmm.c         # PMM buddy allocator tests (24 tests)
+├── test_vmm.c         # VMM and TLB invalidation tests (10 tests)
+├── test_component.c   # Component system tests
+├── test_vfs.c         # Virtual filesystem tests
+├── test_shell.c       # Shell command and path resolution tests (106 tests)
+├── test_littlefs.c    # LittleFS and block device tests (26 tests)
+├── test_net.c         # Networking tests (QEMU only)
+├── test_lua.c         # Lua scripting tests
+└── test_integration.c # Multi-core integration tests (5 tests)
 ```
 
 ### Available Assertions
@@ -100,19 +103,25 @@ Tests: 3  Passed: 2  Failed: 1
 
 ## Current Testing Infrastructure
 
+SLM-OS uses a compile-time flag `ENABLE_BOOT_TESTS` to separate test and interactive modes:
+
+| Build | Flag | Behavior |
+|-------|------|----------|
+| `make kernel-test` | `ENABLE_BOOT_TESTS=ON` | Runs all tests at boot, exits via semihosting |
+| `make kernel` | `ENABLE_BOOT_TESTS=OFF` | Boots directly to interactive shell |
+
 ### `make test` Target
 
 The primary testing mechanism is `make test`, designed for CI/CD automation:
 
-1. Builds the kernel (if needed)
-2. Runs QEMU with configurable timeout (default 60 seconds)
+1. Builds a separate test kernel with `ENABLE_BOOT_TESTS=ON`
+2. Runs QEMU with semihosting enabled (clean exit codes)
 3. Captures output to `build/test-output.log`
-4. Parses output for `[PASS]` or `[FAIL]` markers
-5. Returns exit code 0 on success, 1 on failure
+4. Returns QEMU exit code: 0 = all tests passed, 1 = failure
 
 ```bash
-make test                    # Default 60s timeout
-make TEST_TIMEOUT=120 test   # Custom timeout for slow systems
+make test                    # Build and run all tests
+make kernel-test-clean test  # Clean rebuild and test
 ```
 
 Example output:
@@ -121,27 +130,39 @@ Running kernel tests...
 
 Test Results:
 =============
-PASSED - All tests passed
+PASSED - All tests passed (exit code 0)
 ```
+
+The test kernel executes all Unity test suites, Rust FFI tests, and multi-core integration tests, then exits via ARM semihosting.
 
 ### `make shell` Target
 
-For interactive testing and exploration, use `make shell`:
+For interactive use, `make shell` boots directly to the shell without running tests:
 
 ```bash
 make shell
 ```
 
-After tests complete, the SLM-OS shell is available:
+The shell is immediately available:
 ```
-[INFO] Tests complete. Exiting main task...
-[INFO] Shell is now active. Type 'help' for commands.
+SLM-OS Debug Shell
+Type 'help' for available commands.
+
 slm> help
 slm> mem
 slm> tasks
 ```
 
 Exit QEMU with `Ctrl-A X`.
+
+### Build Directories
+
+Tests use a separate build directory to avoid conflicts:
+
+| Target | Build Directory | Notes |
+|--------|-----------------|-------|
+| `make kernel` | `build/kernel` | Interactive shell kernel |
+| `make kernel-test` | `build/kernel-test` | Test kernel with ENABLE_BOOT_TESTS |
 
 ### Test Result Detection
 
@@ -151,9 +172,11 @@ Tests use consistent markers for pass/fail detection:
 |--------|---------|
 | `[PASS]` | Individual test passed |
 | `[FAIL]` | Individual test failed |
-| `[INFO] <name> tests passed` | Test suite completed successfully |
+| `[PASS] All test suites passed!` | All tests completed successfully |
+| Exit code 0 | Semihosting exit success |
+| Exit code 1 | Semihosting exit failure |
 
-The Makefile checks for `[FAIL]` first (any failure = overall failure), then checks for `tests passed` to confirm success.
+The Makefile primarily uses the semihosting exit code to determine pass/fail, with fallback to output parsing for crash detection.
 
 ---
 
@@ -795,6 +818,25 @@ Tests for the file-driven help system that stores help text in `/mnt/files/help/
 - Error cases verify proper error codes and messages
 - Each test uses `shell_execute()` for programmatic command execution
 
+### Integration Tests (`kernel/tests/test_integration.c`)
+
+Multi-core integration tests that exercise the scheduler with actual tasks running across CPUs. Unlike unit tests, these require the full scheduler infrastructure to be running. Tests run via Unity framework (5 tests total).
+
+| Test | Description |
+|------|-------------|
+| test_multicore_basic | Distribute 3 tasks to CPUs 1, 2, 3 and verify all complete |
+| test_task_migration | Create task on CPU 1, migrate to CPU 3 while blocker runs, verify runs on CPU 3 |
+| test_stress_multicpu | Create 6 tasks across CPUs 1, 2, 3 (2 per CPU), verify all complete |
+| test_lock_contention | 3 tasks contending on same spinlock, verify no race conditions |
+| test_task_lifecycle | Rapid create/destroy of 8 tasks, verify memory reclaimed |
+
+**Test Notes:**
+- Tests create real tasks on secondary CPUs (not CPU 0 where main runs)
+- Uses spinlock-protected test state for cross-core coordination
+- Task migration test verifies `sched_migrate_task()` moves READY tasks between run queues
+- Lock contention test counts atomic increments to detect race conditions
+- Lifecycle test checks PMM free pages before/after to detect memory leaks
+
 ### FFI Tests (`runtime/src/lib.rs`)
 
 Validates the Rust/C FFI boundary by exercising all FFI functions from the Rust side:
@@ -908,16 +950,21 @@ Use the `print_test_result()` helper to maintain consistent output format.
 
 ## Design Decisions
 
-### Tests Run During Boot
+### Separate Test and Shell Builds
 
-**Decision**: Tests run as part of kernel initialization, not as separate binaries.
+**Decision**: Tests are enabled via compile-time flag `ENABLE_BOOT_TESTS`, creating two distinct kernel builds.
 
 **Rationale**:
-- Kernel is in early development; no loader infrastructure yet
-- Tests need full kernel context (MMU, interrupts, scheduler)
-- Simpler than building separate test harnesses
+- Interactive shell should not be delayed by test execution
+- Test failures should be caught by CI, not observed during manual testing
+- Semihosting exit requires knowing in advance whether tests will run
+- Separate builds allow optimization of each use case
 
-**Trade-off**: Tests add to boot time (~30 seconds for full suite); will need to be conditional or removable for production builds.
+**Implementation**:
+- `CMakeLists.txt` defines `option(ENABLE_BOOT_TESTS ...)` (default OFF)
+- `make test` builds with `-DENABLE_BOOT_TESTS=ON`
+- `make shell` builds without the flag (default OFF)
+- Separate build directories prevent conflicts: `build/kernel` vs `build/kernel-test`
 
 ### QEMU-Based Testing
 
@@ -930,31 +977,34 @@ Use the `print_test_result()` helper to maintain consistent output format.
 
 **Trade-off**: May miss hardware-specific bugs. Real hardware testing should be added in Phase 4.
 
-### Test Completion and Interactive Shell
+### Semihosting for Test Exit
 
 **Behavior**:
-- On test **failure**: Kernel exits via ARM semihosting (`HLT #0xF000`)
-- On test **success**: Kernel continues to interactive shell
+- Test kernel always exits via ARM semihosting after tests complete
+- Exit code 0 = all tests passed
+- Exit code 1 = one or more tests failed
 
-This design allows two usage modes:
+This enables two distinct usage modes:
 
 | Target | Use Case | Behavior |
 |--------|----------|----------|
-| `make test` | CI/CD automation | Timeout-based, parses output for pass/fail |
-| `make shell` | Interactive use | Tests run, then shell is available |
+| `make test` | CI/CD automation | QEMU exits with pass/fail exit code |
+| `make shell` | Interactive use | Boots directly to shell (no tests) |
 
 **`make test` Implementation**:
-1. Runs QEMU with configurable timeout (default 60s)
-2. Captures all output to `build/test-output.log`
-3. Parses output for `[PASS] All test suites passed` or `[FAIL]` markers
-4. Returns exit code 0 on success, 1 on failure
+1. Builds test kernel with `ENABLE_BOOT_TESTS=ON`
+2. Runs QEMU with `-semihosting` flag
+3. Captures output to `build/test-output.log`
+4. Uses QEMU exit code to determine pass/fail
+5. Falls back to output parsing for crash detection
 
 **`make shell` Implementation**:
-1. Runs QEMU without timeout
-2. Tests complete and shell becomes active
-3. User interacts with shell, exits via `Ctrl-A X`
+1. Builds normal kernel (no `ENABLE_BOOT_TESTS`)
+2. Runs QEMU without timeout
+3. Shell is immediately available
+4. User interacts, exits via `Ctrl-A X`
 
-**Note**: Semihosting is compiled in for QEMU builds (`ENABLE_SEMIHOSTING=1`). On real hardware, the HLT instruction would cause a fault, but tests only exit via semihosting on failure.
+**Note**: Semihosting is only compiled for QEMU builds (`ENABLE_SEMIHOSTING=1` when `PLATFORM=QEMU_VIRT`). On real hardware (Jetson), the HLT instruction would cause a fault, so semihosting calls are compile-time disabled.
 
 ---
 

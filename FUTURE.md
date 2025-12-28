@@ -10,12 +10,12 @@ This section documents features discussed during development that are beyond the
 | **Filesystem** | LittleFS, VFS, File Commands, Help System | eMMC/SD, Persistent Config |
 | **IPC** | Priority Queues, Priority Inheritance Mutex | - |
 | **Scheduling** | Deadline Scheduler, Priority Inheritance, ELF Loader | Real-Time Guarantees (RMS) |
-| **Shell** | Working Directory, Path Resolution, 30+ Commands | POSIX Shell, Lua Scripting |
+| **Shell** | Working Directory, Path Resolution, 30+ Commands, Lua Scripting | POSIX Shell |
 | **Components** | Component System, Model Memory, GPU Stub | Sandboxing, Secure Boot |
 | **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU) | Jetson GPU, USB Serial, Networking (Jetson) |
 
-**Completed Features:** 19
-**Pending Features:** 14
+**Completed Features:** 20
+**Pending Features:** 13
 
 ---
 
@@ -78,18 +78,40 @@ Replace MicroShell with a real shell supporting scripting, pipes, and job contro
 
 ---
 
-### Lua Scripting Runtime
+### Lua Scripting Runtime ✅
 Embed Lua interpreter for runtime scripting and configuration.
 
-- ☐ Integrate Lua 5.4 core (or eLua for smaller footprint)
-- ☐ Create C bindings for kernel APIs (`slm.task_create()`, `slm.mem_stats()`)
-- ☐ Expose component/model management to Lua scripts
-- ☐ Implement Lua REPL as shell alternative
-- ☐ Support loading scripts from filesystem or embedded in components
-- ☐ Add `lua` command to MicroShell for interactive use
+- ✅ Integrate Lua 5.4 core
+  - `kernel/lib/lua/src/` - Full Lua 5.4.7 source (configured for embedded use)
+  - Built as separate static library (allows FP operations)
+  - Custom `slm_luaconf.h` for freestanding configuration
+- ✅ Create C bindings for kernel APIs
+  - `slm.print(...)` - Console output
+  - `slm.uptime()` - System uptime in milliseconds
+  - `slm.mem_stats()` - Memory statistics (total_kb, free_kb, used_kb)
+  - `slm.tasks()` - List of running tasks with id, name, state, cpu, priority
+  - `slm.sleep(ms)` - Sleep with scheduler yield
+  - `slm.yield()` - Yield CPU to scheduler
+  - `slm.version()` - SLM-OS version string
+  - `slm.cpu_count()`, `slm.cpu_id()` - CPU information
+- ✅ Implement Lua REPL as shell alternative
+  - Interactive mode with prompt, history navigation
+  - `exit` or Ctrl+D to exit, Ctrl+C to cancel line
+- ✅ Add `lua` command to MicroShell for interactive use
+  - `lua` - Enter interactive REPL
+  - `lua -e "code"` - Execute Lua code directly
+- ✅ Libc stubs for freestanding environment
+  - `kernel/src/lua_stubs.c` - 1MB heap, malloc/free/realloc
+  - Math functions via Taylor series approximations
+  - `kernel/arch/arm64/setjmp.S` - setjmp/longjmp for error handling
+- ✅ Standard Lua libraries enabled: base, table, string, math
+- ✅ 22 unit tests covering state management, execution, error handling, bindings
+- ☐ Expose component/model management to Lua scripts (future)
+- ☐ Support loading scripts from filesystem (future)
 
-**Effort:** 2-3 weeks  
+**Effort:** 1 week
 **Value:** Runtime configurability, rapid prototyping, user-defined automation
+**Status:** Complete (December 2025)
 
 ---
 

@@ -27,6 +27,12 @@ Edit file_path="kernel/src/shell.c"
 Read file_path="H:/My Drive/Capstone/CS-496-SLM-Operating-System/docs/shell.md"
 ```
 
+**When experiencing repeated "file has been unexpectedly modified" errors:**
+- Work with the user to diagnose the root cause first
+- Do NOT resort to workarounds like `sed` or Bash heredocs
+- Possible causes: CLion indexing, file watchers, IDE auto-save
+- Try restarting CLion or pausing file sync services
+
 ---
 
 ## Formatting Issues

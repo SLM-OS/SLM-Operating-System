@@ -24,6 +24,7 @@
 #if defined(PLATFORM_QEMU_VIRT)
 #include "net.h"
 #endif
+#include "lua_slm.h"
 #include <stddef.h>
 
 /* ============================================================================
@@ -2608,6 +2609,9 @@ void shell_init(void)
     /* Register network commands (ping, ifconfig, netstat) */
     net_shell_init();
 #endif
+
+    /* Register Lua scripting command */
+    lua_shell_init();
 
     uart_puts("\r\n");
     uart_puts("SLM-OS Debug Shell\r\n");
