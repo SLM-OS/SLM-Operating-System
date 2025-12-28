@@ -45,12 +45,13 @@ jobs:
       working-directory: runtime
       run: cargo build
 
-    - name: Build Kernel
+    - name: Build Test Kernel
       run: |
         cmake -B build \
           -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \
           -DCMAKE_BUILD_TYPE=Debug \
-          -DPLATFORM=QEMU_VIRT
+          -DPLATFORM=QEMU_VIRT \
+          -DENABLE_BOOT_TESTS=ON
         cmake --build build
 
     - name: Run Tests in QEMU
