@@ -69,20 +69,26 @@ For users who want to install everything quickly, here are all the commands:
 ```bash
 # 1. Build essentials and CMake
 sudo apt update
-sudo apt install -y build-essential cmake git
+sudo apt install -y build-essential cmake git ninja-build gdb-multiarch curl wget
 
-# 2. ARM toolchain (download from ARM website - see setup-arm64-toolchain.md)
-# Download: https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
-# Extract and add to PATH
+# 2. QEMU
+sudo apt install -y qemu-system-arm
 
-# 3. Rust
+# 3. ARM toolchain (download from ARM website)
+cd ~/Downloads
+wget https://developer.arm.com/-/media/Files/downloads/gnu/13.3.rel1/binrel/arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-elf.tar.xz
+sudo mkdir -p /opt/arm-gnu-toolchain
+sudo tar -xf arm-gnu-toolchain-13.3.rel1-x86_64-aarch64-none-elf.tar.xz -C /opt/arm-gnu-toolchain --strip-components=1
+
+# 4. Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 rustup target add aarch64-unknown-none
 rustup component add rust-src
 
-# 4. QEMU
-sudo apt install -y qemu-system-arm
+# 5. Add both toolchains to PATH permanently
+echo 'export PATH="/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 ---

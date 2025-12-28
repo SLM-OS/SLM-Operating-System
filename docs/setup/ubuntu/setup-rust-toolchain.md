@@ -30,12 +30,14 @@ After installation, add Cargo to PATH:
 source ~/.cargo/env
 ```
 
-Or add to `~/.bashrc` for permanent configuration:
+For permanent configuration, add both Rust and the ARM toolchain to `~/.bashrc`:
 
 ```bash
-echo 'source ~/.cargo/env' >> ~/.bashrc
+echo 'export PATH="/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
+
+This single line adds both toolchains and is simpler than sourcing `~/.cargo/env`.
 
 ---
 

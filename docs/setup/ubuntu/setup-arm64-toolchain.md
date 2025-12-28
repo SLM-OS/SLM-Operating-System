@@ -88,19 +88,21 @@ Then reload:
 source /etc/profile.d/arm-toolchain.sh
 ```
 
-### Option B: Current user only
+### Option B: Current user only (Recommended)
 
-Add to `~/.bashrc`:
+Add to `~/.bashrc` along with Rust/Cargo:
 
 ```bash
-echo 'export PATH="/opt/arm-gnu-toolchain/bin:$PATH"' >> ~/.bashrc
+echo 'export PATH="/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
+
+This single line adds both the ARM toolchain and Rust toolchain to the PATH.
 
 Or add to `~/.profile` for login shells:
 
 ```bash
-echo 'export PATH="/opt/arm-gnu-toolchain/bin:$PATH"' >> ~/.profile
+echo 'export PATH="/opt/arm-gnu-toolchain/bin:$HOME/.cargo/bin:$PATH"' >> ~/.profile
 source ~/.profile
 ```
 

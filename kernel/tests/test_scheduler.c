@@ -413,10 +413,23 @@ static void test_ffi_invalid_task_id(void)
  * They create tasks on a secondary CPU and track execution order.
  */
 
+/*
+ * Barrier for SMP-safe priority ordering tests.
+ * Tasks wait on this barrier before recording their execution order.
+ * This ensures all tasks are queued before any starts recording.
+ */
+static volatile bool order_barrier_released = false;
+
 /* Task that records its ID in the execution order array */
 static void order_tracking_task(void *arg)
 {
     int task_id = (int)(uintptr_t)arg;
+
+    /* Wait at barrier until all tasks are queued */
+    while (!order_barrier_released) {
+        /* Spin-wait - don't yield to avoid scheduler interference */
+        __asm__ volatile("yield" ::: "memory");
+    }
 
     irq_flags_t flags = spin_lock_irqsave(&test_lock);
     if (execution_index < 8) {
@@ -436,9 +449,10 @@ static void order_tracking_task(void *arg)
  */
 static void test_high_priority_runs_first(void)
 {
-    /* Reset execution tracking */
+    /* Reset execution tracking and barrier */
     execution_index = 0;
     for (int i = 0; i < 8; i++) execution_order[i] = -1;
+    order_barrier_released = false;
 
     /* Create tasks with different priorities */
     struct task *low = task_create_with_priority("low", order_tracking_task,
@@ -449,6 +463,13 @@ static void test_high_priority_runs_first(void)
     TEST_ASSERT_NOT_NULL(low);
     TEST_ASSERT_NOT_NULL(high);
 
+    /* Lower our priority below all test tasks BEFORE adding them.
+     * This ensures when barrier is released, scheduler picks by priority. */
+    struct task *self = task_current();
+    uint8_t saved_pri = self->effective_priority;
+    self->priority = TASK_PRIORITY_IDLE;
+    self->effective_priority = TASK_PRIORITY_IDLE;
+
     /* Add LOW first, then HIGH - but HIGH should run first due to priority.
      * Use CPU 0 and disable IRQs to add atomically. */
     irq_flags_t flags = irq_save();
@@ -456,11 +477,9 @@ static void test_high_priority_runs_first(void)
     scheduler_add_task_to_cpu(high, 0);
     irq_restore(flags);
 
-    /* Lower our priority below all test tasks so they can run */
-    struct task *self = task_current();
-    uint8_t saved_pri = self->effective_priority;
-    self->priority = TASK_PRIORITY_IDLE;
-    self->effective_priority = TASK_PRIORITY_IDLE;
+    /* Memory barrier then release - tasks will start recording in priority order */
+    __asm__ volatile("dmb sy" ::: "memory");
+    order_barrier_released = true;
 
     /* Wait for both tasks to complete, yielding to let them run */
     int timeout = 100;
@@ -490,9 +509,10 @@ static void test_high_priority_runs_first(void)
  */
 static void test_priority_ordering_multiple_levels(void)
 {
-    /* Reset execution tracking */
+    /* Reset execution tracking and barrier */
     execution_index = 0;
     for (int i = 0; i < 8; i++) execution_order[i] = -1;
+    order_barrier_released = false;
 
     /* Create tasks at different priority levels */
     struct task *idle = task_create_with_priority("p_idle", order_tracking_task,
@@ -512,9 +532,14 @@ static void test_priority_ordering_multiple_levels(void)
     TEST_ASSERT_NOT_NULL(high);
     TEST_ASSERT_NOT_NULL(critical);
 
+    /* Lower our priority below all test tasks BEFORE adding them */
+    struct task *self = task_current();
+    uint8_t saved_pri = self->effective_priority;
+    self->priority = TASK_PRIORITY_IDLE;
+    self->effective_priority = TASK_PRIORITY_IDLE;
+
     /* Add tasks to CPU 0 (same as test task).
-     * Disable IRQs to prevent preemption while adding all tasks.
-     * Tasks will run when we yield or timer tick occurs. */
+     * Disable IRQs to prevent preemption while adding all tasks. */
     irq_flags_t flags = irq_save();
     scheduler_add_task_to_cpu(normal, 0);
     scheduler_add_task_to_cpu(idle, 0);
@@ -523,11 +548,9 @@ static void test_priority_ordering_multiple_levels(void)
     scheduler_add_task_to_cpu(high, 0);
     irq_restore(flags);
 
-    /* Lower our priority below all test tasks so they can run */
-    struct task *self = task_current();
-    uint8_t saved_pri = self->effective_priority;
-    self->priority = TASK_PRIORITY_IDLE;
-    self->effective_priority = TASK_PRIORITY_IDLE;
+    /* Memory barrier then release - tasks will start recording in priority order */
+    __asm__ volatile("dmb sy" ::: "memory");
+    order_barrier_released = true;
 
     /* Wait for all tasks to complete, yielding to let them run */
     int timeout = 200;
@@ -567,9 +590,10 @@ static void test_priority_ordering_multiple_levels(void)
  */
 static void test_deadline_boost_affects_order(void)
 {
-    /* Reset execution tracking */
+    /* Reset execution tracking and barrier */
     execution_index = 0;
     for (int i = 0; i < 8; i++) execution_order[i] = -1;
+    order_barrier_released = false;
 
     uint64_t now = slm_get_time_ns();
 
@@ -585,6 +609,12 @@ static void test_deadline_boost_affects_order(void)
     /* Set urgent deadline (5ms) - will boost to CRITICAL */
     task_set_deadline(urgent, now + (5 * 1000000ULL));
 
+    /* Lower our priority below all test tasks BEFORE adding them */
+    struct task *self = task_current();
+    uint8_t saved_pri = self->effective_priority;
+    self->priority = TASK_PRIORITY_IDLE;
+    self->effective_priority = TASK_PRIORITY_IDLE;
+
     /* Add no_deadline first, then urgent.
      * Use CPU 0 and disable IRQs to add atomically. */
     irq_flags_t flags = irq_save();
@@ -592,11 +622,9 @@ static void test_deadline_boost_affects_order(void)
     scheduler_add_task_to_cpu(urgent, 0);
     irq_restore(flags);
 
-    /* Lower our priority below all test tasks so they can run */
-    struct task *self = task_current();
-    uint8_t saved_pri = self->effective_priority;
-    self->priority = TASK_PRIORITY_IDLE;
-    self->effective_priority = TASK_PRIORITY_IDLE;
+    /* Memory barrier then release - tasks will start recording in priority order */
+    __asm__ volatile("dmb sy" ::: "memory");
+    order_barrier_released = true;
 
     /* Wait for completion, yielding to let tasks run */
     int timeout = 100;
