@@ -4,12 +4,21 @@
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
-# Cross-compiler toolchain
-# Full path needed for Windows CMake to find the compiler
-set(ARM_TOOLCHAIN_PATH "C:/Program Files (x86)/Arm/GNU Toolchain mingw-w64-i686-aarch64-none-elf/bin")
-set(CMAKE_C_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-gcc.exe")
-set(CMAKE_CXX_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-g++.exe")
-set(CMAKE_ASM_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-gcc.exe")
+# Cross-compiler toolchain - detect OS and use appropriate paths
+if(WIN32)
+    # Windows: use full paths
+    set(ARM_TOOLCHAIN_PATH "C:/Program Files (x86)/Arm/GNU Toolchain mingw-w64-i686-aarch64-none-elf/bin")
+    set(CMAKE_C_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-gcc.exe")
+    set(CMAKE_CXX_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-g++.exe")
+    set(CMAKE_ASM_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-gcc.exe")
+    set(CMAKE_OBJCOPY "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-objcopy.exe")
+else()
+    # Linux/macOS: tools are in PATH
+    set(CMAKE_C_COMPILER aarch64-none-elf-gcc)
+    set(CMAKE_CXX_COMPILER aarch64-none-elf-g++)
+    set(CMAKE_ASM_COMPILER aarch64-none-elf-gcc)
+    set(CMAKE_OBJCOPY aarch64-none-elf-objcopy)
+endif()
 
 # Bare-metal flags
 set(CMAKE_C_FLAGS_INIT "-ffreestanding -nostdlib")
@@ -23,6 +32,3 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-
-# Objcopy for creating binary images
-set(CMAKE_OBJCOPY "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-objcopy.exe")

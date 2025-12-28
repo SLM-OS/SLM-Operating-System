@@ -17,14 +17,21 @@ KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
 KERNEL_TEST_BUILD_DIR := $(BUILD_DIR)/kernel-test
 RUNTIME_BUILD_DIR := runtime/target/aarch64-unknown-none
 
-# Tools (full paths for Windows compatibility)
-CMAKE := "C:/Program Files/CMake/bin/cmake.exe"
+# Tools - detect OS and use appropriate paths
+ifeq ($(OS),Windows_NT)
+    CMAKE := "C:/Program Files/CMake/bin/cmake.exe"
+    QEMU := "C:/Program Files/qemu/qemu-system-aarch64.exe"
+    MAKE_PROGRAM_ARG := -DCMAKE_MAKE_PROGRAM="C:/cygwin64/bin/make.exe"
+else
+    CMAKE := cmake
+    QEMU := qemu-system-aarch64
+    MAKE_PROGRAM_ARG :=
+endif
 
 # Toolchain
 TOOLCHAIN_FILE := cmake/toolchain-aarch64-none-elf.cmake
 
 # QEMU settings
-QEMU := "C:/Program Files/qemu/qemu-system-aarch64.exe"
 QEMU_MACHINE := virt
 QEMU_CPU := cortex-a76
 QEMU_MEMORY := 1G
@@ -73,7 +80,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DPLATFORM=$(PLATFORM) \
-		-DCMAKE_MAKE_PROGRAM="C:/cygwin64/bin/make.exe"
+		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-clean
 kernel-clean:
@@ -185,7 +192,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DPLATFORM=$(PLATFORM) \
 		-DENABLE_BOOT_TESTS=ON \
-		-DCMAKE_MAKE_PROGRAM="C:/cygwin64/bin/make.exe"
+		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-test-clean
 kernel-test-clean:
