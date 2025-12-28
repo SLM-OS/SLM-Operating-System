@@ -5,15 +5,16 @@ set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
 # Cross-compiler toolchain - detect OS and use appropriate paths
+# Platform-specific configuration
 if(WIN32)
-    # Windows: use full paths
+    # Windows: Full path needed to find the compiler
     set(ARM_TOOLCHAIN_PATH "C:/Program Files (x86)/Arm/GNU Toolchain mingw-w64-i686-aarch64-none-elf/bin")
     set(CMAKE_C_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-gcc.exe")
     set(CMAKE_CXX_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-g++.exe")
     set(CMAKE_ASM_COMPILER "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-gcc.exe")
     set(CMAKE_OBJCOPY "${ARM_TOOLCHAIN_PATH}/aarch64-none-elf-objcopy.exe")
 else()
-    # Linux/macOS: tools are in PATH
+    # Linux/macOS: Compiler should be in PATH (e.g., from GitHub Actions setup)
     set(CMAKE_C_COMPILER aarch64-none-elf-gcc)
     set(CMAKE_CXX_COMPILER aarch64-none-elf-g++)
     set(CMAKE_ASM_COMPILER aarch64-none-elf-gcc)

@@ -301,7 +301,7 @@ target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src)
 
 # Lua-specific compile flags (relaxed warnings for C99 Lua code)
 target_compile_options(lua PRIVATE
-    -std=c23
+    -std=gnu11
     -ffreestanding
     -nostdlib
     -mcpu=cortex-a78ae
