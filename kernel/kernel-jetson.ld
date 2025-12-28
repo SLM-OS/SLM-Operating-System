@@ -73,11 +73,19 @@ SECTIONS
         __bss_end = .;
     } > RAM :data
 
-    /* Stack - 16 KB, placed after BSS */
-    . = ALIGN(16);
-    __stack_bottom = .;
-    . = . + 0x4000;             /* 16 KB stack */
-    __stack_top = .;
+    /*
+     * Stack - 16 KB, placed after BSS
+     *
+     * IMPORTANT: The stack must be part of the data segment so that kexec
+     * allocates memory for it. Previously the stack was just symbols outside
+     * any section, which meant kexec's segment allocation didn't include it.
+     */
+    .stack (NOLOAD) : {
+        . = ALIGN(16);
+        __stack_bottom = .;
+        . = . + 0x4000;         /* 16 KB stack */
+        __stack_top = .;
+    } > RAM :data
 
     /* End of kernel image */
     . = ALIGN(4096);            /* Page-align end for clean memory layout */

@@ -137,20 +137,40 @@ section_table:
 
 real_start:
     /*
+     * Early debug: Write characters to UART to confirm we reached real_start.
+     *
+     * NOTE: On Jetson after kexec, early UART access causes RAS errors because
+     * peripheral clocks/power are not configured. Skip early debug for Jetson
+     * and rely on C code UART initialization instead.
+     *
+     * QEMU PL011: 0x09000000 - works immediately, no clock setup needed.
+     */
+#ifndef PLATFORM_JETSON_ORIN_NANO
+    ldr     x10, =0x09000000        /* QEMU PL011 base */
+    mov     w11, #'S'               /* 'S' for Start */
+    str     w11, [x10]              /* Write to THR */
+    mov     w11, #'\n'
+    str     w11, [x10]
+#endif
+
+    /*
      * Save DTB address (x0) to callee-saved register.
      * QEMU passes DTB pointer in x0, which we preserve for kernel_main.
      */
     mov     x19, x0
 
     /*
-     * Ensure we're running on the primary CPU (core 0).
-     * Secondary cores will spin in a wait loop.
-     * MPIDR_EL1 bits [7:0] contain the CPU ID (Aff0).
+     * NOTE: After kexec, we may not be on CPU 0. For testing, skip the
+     * MPIDR check and continue on whatever CPU we landed on.
+     * TODO: Properly handle SMP bring-up after kexec.
      */
+#ifndef PLATFORM_JETSON_ORIN_NANO
+    /* Only do MPIDR check on QEMU where we know we start on CPU 0 */
     mrs     x1, mpidr_el1
     and     x1, x1, #0xFF
     cbz     x1, primary_cpu
     b       secondary_spin
+#endif
 
 primary_cpu:
     /*

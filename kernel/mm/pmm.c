@@ -71,7 +71,10 @@ static struct {
     bool initialized;
 } buddy_state;
 
-/* PMM lock - protects all buddy state */
+/* PMM lock - protects all buddy state
+ * NOTE: On Jetson after kexec, spinlock operations are no-ops (defined in
+ * spinlock.h) since LDAXR/STXR hangs due to corrupted exclusive monitor state.
+ */
 static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 /*
@@ -461,9 +464,7 @@ void *pmm_alloc_pages(size_t count)
     }
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
-
     uintptr_t addr = buddy_alloc(order);
-
     spin_unlock_irqrestore(&pmm_lock, flags);
 
     if (addr == 0) {

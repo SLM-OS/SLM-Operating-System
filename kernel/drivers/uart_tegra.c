@@ -21,6 +21,7 @@
 
 #include "platform.h"
 #include "uart.h"
+#include "bpmp.h"
 #include <stdbool.h>
 
 #ifndef UART_TYPE_TEGRA
@@ -91,22 +92,60 @@ static bool g_uart_available = false;
  * Configures 8N1 at 115200 baud with FIFOs enabled.
  *
  * On Jetson platforms, the UART clock must be enabled via BPMP
- * before we can access the UART registers. Since we can't access
- * BPMP directly, we skip UART init if the clock isn't already enabled.
+ * before we can access the UART registers.
  */
 void uart_init(void)
 {
+    uint16_t divisor = BAUD_DIVISOR(115200);
+
     /*
-     * UART access is disabled on Jetson for now.
-     * Accessing UARTA without clock enabled causes RAS error and system reset.
-     * The kernel will run silently until we find a way to enable UART.
+     * UART initialization modes:
+     * 0 = Skip UART entirely (silent mode)
+     * 1 = Try BPMP to enable clock (full initialization)
+     * 2 = Direct mode - assume clock is already enabled (after kexec)
+     *
+     * After kexec from Linux, the UART clock should still be enabled
+     * from Linux's initialization, so we can skip BPMP communication
+     * which may not work correctly after kexec.
      */
-#if 1  /* Set to 0 to enable UART (will crash if clock not enabled) */
+#define UART_INIT_MODE 2
+
+#if UART_INIT_MODE == 0
+    /* Silent mode - no UART output */
     g_uart_available = false;
     return;
-#endif
 
-    uint16_t divisor = BAUD_DIVISOR(115200);
+#elif UART_INIT_MODE == 1
+    /*
+     * Full BPMP mode - enable clock via BPMP.
+     * Only works when BPMP is fully operational.
+     */
+    if (bpmp_init() != 0) {
+        g_uart_available = false;
+        return;
+    }
+
+    if (bpmp_reset_deassert(TEGRA234_RESET_UARTA) != 0) {
+        g_uart_available = false;
+        return;
+    }
+
+    if (bpmp_clk_enable(TEGRA234_CLK_UARTA) != 0) {
+        g_uart_available = false;
+        return;
+    }
+
+    g_uart_available = true;
+
+#elif UART_INIT_MODE == 2
+    /*
+     * Direct mode - assume UART clock is already enabled.
+     * After kexec from Linux, the UART hardware should still be
+     * configured and clocked. Just reinitialize the UART settings.
+     */
+    g_uart_available = true;
+
+#endif
 
     /* Disable interrupts */
     UART_REG(NS16550_IER) = 0x00;

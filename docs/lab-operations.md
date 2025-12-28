@@ -12,7 +12,7 @@ This document describes how to interact with the Jetson Orin Nano lab hardware r
 | Reboot (preferred) | `reboot` via SSH or SLM-OS shell |
 | Power off | `lab-tools/jetson-power.py off` (smart plug) |
 | Power cycle | `lab-tools/jetson-power.py cycle` |
-| Serial (40-pin) | See "Serial Console Access" below |
+| Serial console | `picocom -b 115200 /dev/ttyS8` (COM9 ↔ ttyTHS1) |
 
 ---
 
@@ -105,19 +105,28 @@ C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount
 
 ### Serial Port Mapping
 
-| Cygwin Device | Windows Port | Connection |
-|---------------|--------------|------------|
-| `/dev/ttyS4` | COM5 | USB-C debug (TCU) — **does not work for bare-metal** |
-| TBD | TBD | USB-serial adapter on 40-pin header (pending) |
+| Cygwin Device | Windows Port | Jetson Device | Connection |
+|---------------|--------------|---------------|------------|
+| `/dev/ttyS4` | COM5 | TCU | USB-C debug — **does not work for bare-metal** |
+| `/dev/ttyS8` | COM9 | `/dev/ttyTHS1` | USB-serial adapter on 40-pin header ✓ |
 
 ### Connecting to Serial Console
 
 **40-pin Header UART (for SLM-OS bare-metal):**
 ```bash
-C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS<N> --noreset"
+# From Cygwin (recommended):
+picocom -b 115200 /dev/ttyS8 --noreset
+
+# From Claude Code (with env wrapper):
+C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS8 --noreset"
 ```
 
-Replace `<N>` with the correct serial port number once the USB-serial adapter is connected.
+**Sending data from Jetson side (for testing):**
+```bash
+ssh -p 4243 root@gradient-nano.onthewifi.com
+stty -F /dev/ttyTHS1 115200 raw -echo
+echo "test message" > /dev/ttyTHS1
+```
 
 **Picocom options:**
 - `-b 115200` — Baud rate

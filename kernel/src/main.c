@@ -87,6 +87,41 @@ static void main_task_func(void *arg)
  */
 void kernel_main(void *dtb)
 {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /*
+     * After kexec, the ARM64 exclusive monitor and event flags may be in
+     * undefined states. Clear them before using any spinlocks.
+     * - CLREX clears the exclusive monitor (prevents stale exclusive access)
+     * - SEVL sets event locally (ensures first WFE in spinlock doesn't hang)
+     */
+    __asm__ volatile(
+        "clrex\n"       /* Clear exclusive monitor */
+        "sevl\n"        /* Set event locally */
+        "wfe\n"         /* Consume the event we just set */
+        ::: "memory"
+    );
+
+    /*
+     * Disable hardware watchdog timer.
+     *
+     * Linux starts a watchdog with a 120 second timeout. After kexec, the
+     * watchdog continues running and will reset the system unless disabled.
+     * We must do this BEFORE any time-consuming initialization.
+     */
+    {
+        volatile uint32_t *wdt_unlock = (volatile uint32_t *)(WDT_BASE + WDT_UNLOCK);
+        volatile uint32_t *wdt_cmd = (volatile uint32_t *)(WDT_BASE + WDT_CMD);
+
+        /* Unlock the watchdog registers */
+        *wdt_unlock = WDT_UNLOCK_PATTERN;
+        __asm__ volatile("dsb sy" ::: "memory");
+
+        /* Disable the watchdog counter */
+        *wdt_cmd = WDT_CMD_DISABLE;
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+#endif
+
     /*
      * JETSON HARDWARE BRING-UP
      *
@@ -101,65 +136,7 @@ void kernel_main(void *dtb)
      * See docs/jetson-tcu.md for notes on why TCU (USB-C debug) doesn't work
      * after kexec - it requires SPE firmware cooperation.
      */
-#define JETSON_EARLY_UART_TEST 0  /* Set to 1 to enable early UART test */
-
-#if defined(PLATFORM_JETSON_ORIN_NANO) && JETSON_EARLY_UART_TEST
-    (void)dtb;  /* Unused in early test mode */
-
-    /*
-     * UARTA at 0x03100000 - 40-pin header pins 8/10
-     * NS16550-compatible, requires BPMP clock enable before access.
-     */
-    #define UARTA_BASE 0x03100000UL
-    #define UARTA_THR  (*(volatile uint32_t *)(UARTA_BASE + 0x00))
-    #define UARTA_LSR  (*(volatile uint32_t *)(UARTA_BASE + 0x14))
-    #define LSR_THRE   (1 << 5)  /* Transmit Holding Register Empty */
-
-    /* Initialize BPMP for clock control */
-    int bpmp_ret = bpmp_init();
-
-    /* Enable UARTA clock via BPMP (TEGRA234_CLK_UARTA = 155) */
-    if (bpmp_ret == 0) {
-        bpmp_clk_enable(TEGRA234_CLK_UARTA);
-    }
-
-    /* Small delay for clock to stabilize */
-    for (volatile int i = 0; i < 1000000; i++) { }
-
-    /* Helper macros for UART output */
-    #define UART_PUTCHAR(c) do { \
-        while (!(UARTA_LSR & LSR_THRE)) { } \
-        UARTA_THR = (c); \
-    } while (0)
-
-    #define UART_PUTS(s) do { \
-        const char *_p = (s); \
-        while (*_p) { \
-            if (*_p == '\n') UART_PUTCHAR('\r'); \
-            UART_PUTCHAR(*_p++); \
-        } \
-    } while (0)
-
-    /* Output test message */
-    UART_PUTS("\n\n");
-    UART_PUTS("=====================================\n");
-    UART_PUTS("  SLM-OS on Jetson Orin Nano\n");
-    UART_PUTS("  UARTA via BPMP clock enable\n");
-    UART_PUTS("=====================================\n");
-    UART_PUTS("\n");
-
-    /* Heartbeat loop */
-    int count = 0;
-    while (1) {
-        UART_PUTCHAR('.');
-        count++;
-        if (count % 50 == 0) {
-            UART_PUTS(" [heartbeat]\n");
-        }
-        for (volatile int i = 0; i < 5000000; i++) { }
-    }
-    /* NOT REACHED */
-#endif
+#define JETSON_EARLY_UART_TEST 0  /* Disabled - testing uart_init */
 
     /* Initialize UART for debug output */
     uart_init();
@@ -167,6 +144,7 @@ void kernel_main(void *dtb)
     /* Parse Device Tree (must be done early, before using platform values) */
     fdt_info_t fdt_info = {0};
     int dtb_ret = dtb_parse(dtb, &fdt_info);
+
     /* Results stored globally, accessible via dtb_get_info() */
 
     /* Banner */

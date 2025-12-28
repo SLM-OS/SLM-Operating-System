@@ -15,7 +15,10 @@
 #include "spinlock.h"
 #include <stdint.h>
 
-/* Global lock for synchronized UART output */
+/* Global lock for synchronized UART output
+ * NOTE: On Jetson after kexec, spinlock operations are no-ops (defined in
+ * spinlock.h) since LDAXR/STXR hangs due to corrupted exclusive monitor state.
+ */
 static spinlock_t uart_lock = SPINLOCK_INIT;
 
 /* ========================================================================

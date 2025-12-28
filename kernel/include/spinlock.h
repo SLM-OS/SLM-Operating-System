@@ -9,6 +9,7 @@
 #define SPINLOCK_H
 
 #include <stdint.h>
+#include "platform.h"   /* For PLATFORM_JETSON_ORIN_NANO */
 
 /*
  * Memory barrier macros for ARM64.
@@ -60,11 +61,22 @@ static inline void spin_init(spinlock_t *lock)
 /*
  * Acquire a spinlock.
  * Spins until the lock is acquired.
+ *
+ * NOTE: On Jetson after kexec, the ARM exclusive monitor state is corrupted
+ * in a way that LDAXR/STXR operations hang (even without WFE). Since we're
+ * running single-core after kexec, we skip locking entirely and just use
+ * a memory barrier.
  */
 static inline void spin_lock(spinlock_t *lock)
 {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Jetson: skip locking, just barrier for memory ordering */
+    (void)lock;
+    dmb(ish);
+#else
     uint32_t tmp;
 
+    /* Other platforms: use WFE for low-power spinning */
     __asm__ volatile(
         "   sevl\n"                     /* Set event locally (avoid initial WFE block) */
         "1: wfe\n"                      /* Wait for event (low power spin) */
@@ -76,6 +88,7 @@ static inline void spin_lock(spinlock_t *lock)
         : "r"(&lock->lock), "r"(1)
         : "memory"
     );
+#endif
 }
 
 /*
@@ -84,6 +97,12 @@ static inline void spin_lock(spinlock_t *lock)
  */
 static inline int spin_trylock(spinlock_t *lock)
 {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Jetson: always succeed, we're single-core after kexec */
+    (void)lock;
+    dmb(ish);
+    return 1;
+#else
     uint32_t tmp, result;
 
     __asm__ volatile(
@@ -101,6 +120,7 @@ static inline int spin_trylock(spinlock_t *lock)
     );
 
     return result;
+#endif
 }
 
 /*
@@ -108,6 +128,11 @@ static inline int spin_trylock(spinlock_t *lock)
  */
 static inline void spin_unlock(spinlock_t *lock)
 {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Jetson: skip unlocking, just barrier for memory ordering */
+    (void)lock;
+    dmb(ish);
+#else
     __asm__ volatile(
         "   stlr    wzr, [%0]\n"        /* Store-release 0 (unlocked) */
         "   sev\n"                      /* Send event to wake waiters */
@@ -115,6 +140,7 @@ static inline void spin_unlock(spinlock_t *lock)
         : "r"(&lock->lock)
         : "memory"
     );
+#endif
 }
 
 /*
@@ -238,11 +264,20 @@ static inline void irq_restore(irq_flags_t flags)
 
 /*
  * Acquire spinlock with IRQs disabled.
+ *
+ * NOTE: On Jetson after kexec, the ARM exclusive monitor state is corrupted
+ * in a way that LDAXR/STXR operations hang. We skip actual locking since we're
+ * running single-core after kexec anyway. IRQ disabling still provides
+ * protection against interrupt handlers.
  */
 static inline irq_flags_t spin_lock_irqsave(spinlock_t *lock)
 {
     irq_flags_t flags = irq_save();
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
     spin_lock(lock);
+#else
+    (void)lock;  /* Suppress unused parameter warning */
+#endif
     return flags;
 }
 
@@ -251,7 +286,11 @@ static inline irq_flags_t spin_lock_irqsave(spinlock_t *lock)
  */
 static inline void spin_unlock_irqrestore(spinlock_t *lock, irq_flags_t flags)
 {
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
     spin_unlock(lock);
+#else
+    (void)lock;  /* Suppress unused parameter warning */
+#endif
     irq_restore(flags);
 }
 

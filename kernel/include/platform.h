@@ -144,6 +144,32 @@
 /* BPMP clock IDs (from tegra234-clock.h) */
 #define TEGRA234_CLK_UARTA  155
 
+/* BPMP reset IDs (from tegra234-reset.h) */
+#define TEGRA234_RESET_UARTA  100
+
+/*
+ * Watchdog Timer (WDT)
+ *
+ * Linux starts a hardware watchdog with a 120 second timeout.
+ * After kexec, the watchdog continues running and will reset the
+ * system unless disabled early in boot.
+ *
+ * Register offsets (from tegra_wdt.c driver):
+ *   WDT_CFG:    0x0
+ *   WDT_STS:    0x4
+ *   WDT_CMD:    0x8
+ *   WDT_UNLOCK: 0xC
+ *
+ * To disable: write 0xC45A to UNLOCK, then write 0x2 to CMD
+ */
+#define WDT_BASE            0x02190000UL
+#define WDT_CFG             0x0
+#define WDT_STS             0x4
+#define WDT_CMD             0x8
+#define WDT_UNLOCK          0xC
+#define WDT_UNLOCK_PATTERN  0xC45A
+#define WDT_CMD_DISABLE     0x2
+
 /*
  * Additional Jetson-specific peripherals (from device tree):
  *
