@@ -624,8 +624,21 @@ void schedule(void)
         rq->ready_count--;
     }
 
-    /* No switch needed if same task */
+    /*
+     * No switch needed if same task AND task is not terminated.
+     * If the current task is terminated, we MUST switch to a different task.
+     */
     if (next == current) {
+        if (current && current->state == TASK_TERMINATED) {
+            /*
+             * This should never happen: terminated task picked as next.
+             * The terminated task should not be in the run queue, and
+             * pick_next_task should return idle_task if queue is empty.
+             */
+            spin_unlock_irqrestore(&rq->lock, flags);
+            panic("schedule: terminated task selected as next (CPU %u, task '%s')",
+                  this_cpu, current->name);
+        }
         if (current) {
             current->state = TASK_RUNNING;
         }
