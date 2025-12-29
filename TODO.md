@@ -37,16 +37,16 @@ This document tracks Phase 4 implementation of SLM-OS.
 
 **Priority:** CRITICAL — Unblocks all other Jetson work
 
-**Reference:** See `docs/lab-operations.md` for serial console procedures and Cygwin setup.
+**Reference:** See `docs/lab-operations.md` for serial console procedures (Ubuntu and Windows).
 
 ### Serial Console (40-pin Header UART)
-- ☐ Connect USB-serial adapter to 40-pin header (Pin 8 TXD, Pin 10 RXD, Pin 6 GND)
-- ☐ Test Tegra UART driver (NS16550-compatible @ 0x03100000)
-- ☐ Verify BPMP clock enable for UARTA works
-- ☐ Confirm baud rate settings (115200 8N1)
-- ☐ Test bidirectional communication (shell input/output)
+- ✅ Connect USB-serial adapter to 40-pin header (Pin 8 TXD, Pin 10 RXD, Pin 6 GND)
+- ☐ Test Tegra UART driver (NS16550-compatible @ 0x03100000) — works with Linux, untested with SLM-OS
+- ☐ Verify BPMP clock enable for UARTA works — UART_INIT_MODE=2 bypasses this after kexec
+- ✅ Confirm baud rate settings (115200 8N1)
+- ✅ Test bidirectional communication (shell input/output) — verified via `test-lab-setup.sh`
 
-**Note:** UARTA may require clock enable via BPMP before it can output anything. If no serial output on first boot, this is the likely cause. Debug by verifying Linux can use the same UART first.
+**Note:** Serial hardware verified working (December 2025). Lab moved to Ubuntu machine. See `docs/lab-operations.md` and `lab-tools/test-lab-setup.sh`.
 
 ### Boot Method Validation
 - ☐ Test kexec boot with serial console output
@@ -434,11 +434,12 @@ M9 (Polish) ─────────> Can happen in parallel throughout
 ### Jetson Hardware
 - Jetson Orin Nano Developer Kit User Guide
 - [Orin Series SoC Technical Reference Manual (TRM)](https://developer.nvidia.com/orin-series-soc-technical-reference-manual)
-    - Local copy: `H:\My Drive\Capstone\Documentation\Orin-TRM_DP10508002_v1.2p.pdf`
 - NVIDIA L4T (Linux for Tegra) source code for driver reference
 - `docs/lab-operations.md` for serial console procedures and remote lab access
+- `docs/jetson-kexec-debugging.md` for kexec boot debugging notes
 - `docs/jetson-tcu.md` for TCU/HSP research notes
 - `docs/platform-abstraction.md` for QEMU vs Jetson differences
+- `lab-tools/` for lab automation scripts (power control, serial, tests)
 
 ### GPU
 - NVIDIA Open GPU Kernel Modules (reference for register interface)
@@ -802,7 +803,7 @@ Embedded Lua 5.4 interpreter for runtime scripting and automation:
 | Documentation | — | ~1100 |
 | **Total** | **118** | **~6700** |
 
-All tests pass. Total test count now ~170.
+All tests pass. Total test count now 327+.
 
 ---
 
