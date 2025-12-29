@@ -1,22 +1,47 @@
 #!/bin/bash
 #
-# Connect to Jetson debug serial port (USB-C debug console)
+# Connect to Jetson USB-C debug console (TCU)
+# Note: This works with Linux but NOT with SLM-OS bare-metal (TCU requires SPE firmware)
 #
 # Usage:
 #     jetson-debug.sh [port]
 #
 # Examples:
-#     jetson-debug.sh              # Use default /dev/ttyS4
-#     jetson-debug.sh /dev/ttyS5   # Use specific port
+#     jetson-debug.sh              # Use port from lab-settings.cfg
+#     jetson-debug.sh /dev/ttyACM1 # Use specific port
 #
 
-DEFAULT_PORT="/dev/ttyS4"
-BAUD=115200
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/lab-settings.cfg"
+
+# Load config
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# Defaults (if not in config)
+DEFAULT_PORT="${JETSON_DEBUG_PORT:-/dev/ttyACM0}"
+BAUD="${SERIAL_BAUD:-115200}"
 
 PORT="${1:-$DEFAULT_PORT}"
 
-echo "Connecting to Jetson debug port: $PORT @ ${BAUD}bps"
+# Check if port exists
+if [ ! -e "$PORT" ]; then
+    echo "Error: Serial port $PORT not found"
+    echo ""
+    echo "Available serial ports:"
+    ls -la /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || echo "  (none found)"
+    echo ""
+    echo "Note: The USB-C debug port only appears when the Jetson is powered on"
+    echo "      and running Linux (not SLM-OS bare-metal)."
+    echo ""
+    echo "Check lab-settings.cfg or specify port as argument"
+    exit 1
+fi
+
+echo "Connecting to Jetson USB-C debug port: $PORT @ ${BAUD}bps"
+echo "Note: This only works when Jetson is running Linux (not SLM-OS)"
 echo "Exit: Ctrl-A Ctrl-X"
 echo ""
 
-/usr/bin/picocom -b "$BAUD" "$PORT"
+sudo picocom -b "$BAUD" "$PORT"

@@ -6,13 +6,14 @@ This document describes how to interact with the Jetson Orin Nano lab hardware r
 
 ## Quick Reference
 
-| Operation | Command |
-|-----------|---------|
-| SSH to Jetson | `ssh -p 4243 root@gradient-nano.onthewifi.com` |
-| Reboot (preferred) | `reboot` via SSH or SLM-OS shell |
-| Power off | `lab-tools/jetson-power.py off` (smart plug) |
-| Power cycle | `lab-tools/jetson-power.py cycle` |
-| Serial console | `picocom -b 115200 /dev/ttyS8` (COM9 ↔ ttyTHS1) |
+| Operation | Ubuntu | Windows (Cygwin) |
+|-----------|--------|------------------|
+| SSH to Jetson | `ssh -p 4243 root@gradient-nano.onthewifi.com` | Same |
+| Reboot (preferred) | `reboot` via SSH or SLM-OS shell | Same |
+| Power control | `./lab-tools/jetson-power.py <cmd>` | `py lab-tools/jetson-power.py <cmd>` |
+| Serial console | `./lab-tools/jetson-uart.sh` | See Cygwin section below |
+
+**Lab configuration:** `lab-tools/lab-settings.cfg` contains environment-specific settings.
 
 ---
 
@@ -42,12 +43,17 @@ Use power cycling only when:
 - System is hung or crashed
 - No serial output and no network connectivity
 
+**Ubuntu:**
 ```bash
-# From Claude Code (using Windows Python):
-/c/Windows/py.exe "H:/My Drive/Capstone/CS-496-SLM-Operating-System/lab-tools/jetson-power.py" cycle
+./lab-tools/jetson-power.py cycle
 ```
 
-The Kasa smart plug is at `192.168.4.112`. The `cycle` command turns power off, waits 3 seconds, then turns it back on.
+**Windows:**
+```bash
+py lab-tools/jetson-power.py cycle
+```
+
+The Kasa smart plug IP is configured in `lab-tools/lab-settings.cfg`. The `cycle` command turns power off, waits 3 seconds, then turns it back on.
 
 ---
 
@@ -58,13 +64,17 @@ The Kasa smart plug is at `192.168.4.112`. The `cycle` command turns power off, 
 **⚠️ IMPORTANT:** Never use software power-off commands (`poweroff`, `shutdown -h`, `halt`) via SSH unless explicitly instructed. The Jetson requires **manual physical intervention** to restart after a software power-off — there is no remote way to turn it back on.
 
 **Correct method — Smart plug:**
+
+**Ubuntu:**
 ```bash
-/c/Windows/py.exe "H:/My Drive/Capstone/CS-496-SLM-Operating-System/lab-tools/jetson-power.py" off
+./lab-tools/jetson-power.py off   # Power off
+./lab-tools/jetson-power.py on    # Power on
 ```
 
-This cuts power at the smart plug level. To turn it back on:
+**Windows:**
 ```bash
-/c/Windows/py.exe "H:/My Drive/Capstone/CS-496-SLM-Operating-System/lab-tools/jetson-power.py" on
+py lab-tools/jetson-power.py off  # Power off
+py lab-tools/jetson-power.py on   # Power on
 ```
 
 The Jetson is configured to auto-power-on when AC power is applied, so turning the smart plug on will boot the system.
@@ -82,53 +92,51 @@ The smart plug `status` command only shows whether the **plug** is providing pow
 
 ## Serial Console Access
 
-### Important: Cygwin Environment Setup
+### Ubuntu
 
-**Claude Code runs in Git Bash**, which has different mount points than Cygwin. When running Cygwin bash from Claude Code, the inherited Git Bash environment causes `/usr/bin` to point to Git Bash's binaries instead of Cygwin's. This makes Cygwin-installed programs like `picocom` invisible.
+**Using the lab-tools script (recommended):**
+```bash
+./lab-tools/jetson-uart.sh
+```
 
-**Solution:** Always use `env -i` to clear the inherited environment before running Cygwin:
+**Or directly with picocom:**
+```bash
+sudo picocom -b 115200 /dev/ttyUSB0
+```
+
+The serial port is configured in `lab-tools/lab-settings.cfg` (default: `/dev/ttyUSB0`).
+
+**Testing serial from Jetson side:**
+```bash
+ssh -p 4243 root@gradient-nano.onthewifi.com
+echo "test message" > /dev/ttyTHS1
+```
+
+### Windows (Cygwin)
+
+**Important: Cygwin Environment Setup**
+
+Claude Code runs in Git Bash, which has different mount points than Cygwin. When running Cygwin bash from Claude Code, the inherited Git Bash environment causes `/usr/bin` to point to Git Bash's binaries instead of Cygwin's.
+
+**Solution:** Always use `env -i` to clear the inherited environment:
 
 ```bash
 # CORRECT: Clean environment - picocom will be found
-C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS4"
+C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS8"
 
 # WRONG: Inherits Git Bash mounts - picocom not found
-C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS4"
-```
-
-**Verification:** Check which `/usr/bin` is active:
-```bash
-C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount | grep usr"
-# Should show: C:/cygwin64/bin on /usr/bin
-# NOT: C:/Program Files/Git/usr/bin on /usr/bin
+C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS8"
 ```
 
 ### Serial Port Mapping
 
-| Cygwin Device | Windows Port | Jetson Device | Connection |
-|---------------|--------------|---------------|------------|
-| `/dev/ttyS4` | COM5 | TCU | USB-C debug — **does not work for bare-metal** |
-| `/dev/ttyS8` | COM9 | `/dev/ttyTHS1` | USB-serial adapter on 40-pin header ✓ |
+| Ubuntu | Windows/Cygwin | Jetson Device | Connection |
+|--------|----------------|---------------|------------|
+| `/dev/ttyUSB0` | `/dev/ttyS8` (COM9) | `/dev/ttyTHS1` | 40-pin header UART ✓ |
+| `/dev/ttyACM*` | `/dev/ttyS4` (COM5) | TCU | USB-C debug — **bare-metal: no** |
 
-### Connecting to Serial Console
+### Picocom Options
 
-**40-pin Header UART (for SLM-OS bare-metal):**
-```bash
-# From Cygwin (recommended):
-picocom -b 115200 /dev/ttyS8 --noreset
-
-# From Claude Code (with env wrapper):
-C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS8 --noreset"
-```
-
-**Sending data from Jetson side (for testing):**
-```bash
-ssh -p 4243 root@gradient-nano.onthewifi.com
-stty -F /dev/ttyTHS1 115200 raw -echo
-echo "test message" > /dev/ttyTHS1
-```
-
-**Picocom options:**
 - `-b 115200` — Baud rate
 - `--noreset` — Don't reset DTR/RTS on connect (avoids resetting some devices)
 - `--exit-after <ms>` — Exit after timeout (useful for scripted captures)
@@ -152,19 +160,22 @@ See `docs/jetson-tcu.md` for technical details on why TCU doesn't work.
 
 ### Via SSH (when Linux is running)
 
+**Ubuntu:**
 ```bash
 # Copy kernel to Jetson
-scp -P 4243 /c/temp/slmos-build/kernel/slmos.elf root@gradient-nano.onthewifi.com:/boot/
+scp -P 4243 build/kernel/slmos.elf root@gradient-nano.onthewifi.com:/root/
+```
 
-# Or copy binary format
-scp -P 4243 /c/temp/slmos-build/kernel/slmos.bin root@gradient-nano.onthewifi.com:/boot/
+**Windows:**
+```bash
+scp -P 4243 C:/temp/slmos-build/kernel/slmos.elf root@gradient-nano.onthewifi.com:/root/
 ```
 
 ### Booting SLM-OS via kexec
 
 ```bash
 ssh -p 4243 root@gradient-nano.onthewifi.com
-kexec -l /boot/slmos.elf --reuse-cmdline
+kexec -l /root/slmos.elf --reuse-cmdline
 kexec -e
 ```
 
@@ -174,26 +185,47 @@ Note: After `kexec -e`, SSH connection will drop. Monitor via serial console.
 
 ## Lab Tools Reference
 
-All scripts are in `lab-tools/`:
+All scripts are in `lab-tools/`. Configuration is in `lab-tools/lab-settings.cfg`.
+
+### lab-settings.cfg
+
+Environment-specific settings:
+```bash
+KASA_PLUG_IP="192.168.4.112"      # Smart plug IP address
+JETSON_UART_PORT="/dev/ttyUSB0"   # 40-pin header serial port
+JETSON_DEBUG_PORT="/dev/ttyACM1"  # USB-C debug port (Linux only)
+SERIAL_BAUD=115200                # Baud rate
+POWER_CYCLE_DELAY=3               # Seconds between off/on
+```
 
 ### jetson-power.py
 
-Controls Kasa smart plug (192.168.4.112):
+Controls Kasa smart plug for Jetson power:
 
-```bash
-/c/Windows/py.exe "H:/My Drive/Capstone/CS-496-SLM-Operating-System/lab-tools/jetson-power.py" <command>
-```
+**Ubuntu:** `./lab-tools/jetson-power.py <command>`
+**Windows:** `py lab-tools/jetson-power.py <command>`
 
 | Command | Description |
 |---------|-------------|
-| `status` | Show current power state |
+| `status` | Show current power state and plug info |
 | `on` | Turn power on |
 | `off` | Turn power off |
-| `cycle` | Power off, wait 3s, power on |
+| `cycle` | Power off, wait, power on |
 
-### jetson-debug.sh / jetson-uart.sh
+### jetson-uart.sh
 
-Shell scripts for serial access. These may need updating once USB-serial adapter is configured.
+Connect to 40-pin header UART (UARTA) for SLM-OS debugging:
+```bash
+./lab-tools/jetson-uart.sh              # Use port from config
+./lab-tools/jetson-uart.sh /dev/ttyUSB1 # Use specific port
+```
+
+### jetson-debug.sh
+
+Connect to USB-C debug port (TCU). Only works when Linux is running:
+```bash
+./lab-tools/jetson-debug.sh
+```
 
 ---
 
@@ -253,4 +285,5 @@ Fix: Power cycle via `jetson-power.py cycle`, wait for Linux to boot.
 ---
 
 *Created: 25 December 2025*
+*Updated: 28 December 2025 - Added Ubuntu support, verified serial working*
 *For: Claude Code reference during lab operations*

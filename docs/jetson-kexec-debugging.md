@@ -139,16 +139,18 @@ The kernel command line includes `console=ttyTHS1,115200`.
 - All kernel initialization appears to complete (verified via checkpoint testing)
 
 ### What's Untested
-- Serial output (hardware connection issue - see below)
+- SLM-OS serial output after kexec boot
 - Scheduler actually running tasks (no visibility without UART)
 - Shell interactivity
 
-### Blocking Issue: Serial Hardware
+### Serial Hardware Status
 
-The USB-serial adapter connected to the 40-pin header has **intermittent power issues**. Testing showed:
-- Sent test message from Linux via `echo "TEST" > /dev/ttyTHS1`
-- Neither COM5 (/dev/ttyS4) nor COM9 (/dev/ttyS8) received the data
-- User confirmed adapters are only intermittently powered when using USB port power
+**Resolved (December 28, 2025):** Serial hardware is working. Lab setup moved from Windows PC to Ubuntu machine.
+
+**Verified working:**
+- Bidirectional serial at 115200 baud between Ubuntu host and Jetson
+- Local `/dev/ttyUSB0` ↔ Jetson `/dev/ttyTHS1`
+- Test: `echo "TEST" > /dev/ttyTHS1` from Jetson is received on Ubuntu
 
 **40-pin Header UART Pinout (UARTA):**
 | Pin | Function | Connect to |
@@ -206,8 +208,8 @@ python3 lab-tools/jetson-power.py status # Check power state
 
 ## Next Steps
 
-1. **Fix serial hardware** - Use powered USB hub, verify wiring to 40-pin header
-2. **Test UART output** - Once serial is working, should see SLM-OS banner and boot messages
+1. ~~**Fix serial hardware**~~ - ✅ Resolved - serial working on Ubuntu lab machine
+2. **Test UART output** - Boot SLM-OS via kexec, should see banner and boot messages
 3. **Verify scheduler** - With serial working, can confirm tasks are running
 4. **Test shell** - Interactive shell via UART should work once serial is connected
 
@@ -247,7 +249,18 @@ To verify kernel reaches a certain point, add a PSCI reboot:
 ```
 If the Jetson reboots back to Linux after kexec, the kernel reached that point.
 
-### Serial Monitoring (Cygwin)
+### Serial Monitoring
+
+**Ubuntu:**
+```bash
+# Use the lab-tools script
+./lab-tools/jetson-uart.sh
+
+# Or directly with picocom
+sudo picocom -b 115200 /dev/ttyUSB0
+```
+
+**Windows (Cygwin):**
 ```bash
 # Use env -i to get proper Cygwin mounts (not Git Bash)
 C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin:/usr/local/bin \
@@ -264,4 +277,4 @@ echo "TEST MESSAGE" > /dev/ttyTHS1
 ---
 
 *Document created: December 28, 2025*
-*Last session: Watchdog fix confirmed, UART enabled but untested due to hardware issue*
+*Last update: December 28, 2025 - Serial hardware verified working on Ubuntu lab machine*

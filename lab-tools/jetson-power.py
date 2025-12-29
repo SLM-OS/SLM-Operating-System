@@ -16,10 +16,37 @@ Examples:
 import asyncio
 import argparse
 import sys
+import os
+from pathlib import Path
 from kasa import Device
 
-DEFAULT_HOST = "192.168.4.112"
-CYCLE_DELAY = 3  # seconds between off and on
+# Load defaults from config file
+def load_config():
+    """Load settings from lab-settings.cfg"""
+    config = {
+        'KASA_PLUG_IP': '192.168.4.96',
+        'POWER_CYCLE_DELAY': '3',
+    }
+
+    # Find config file relative to script location
+    script_dir = Path(__file__).parent
+    config_file = script_dir / 'lab-settings.cfg'
+
+    if config_file.exists():
+        with open(config_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    config[key] = value
+
+    return config
+
+CONFIG = load_config()
+DEFAULT_HOST = CONFIG.get('KASA_PLUG_IP', '192.168.4.96')
+CYCLE_DELAY = int(CONFIG.get('POWER_CYCLE_DELAY', '3'))
 
 
 async def get_device(host: str) -> Device:
