@@ -22,18 +22,28 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wshadow -Wcast-align -Wstrict-prototypes")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wformat=2 -Wno-format-nonliteral")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wunused -Wunreachable-code")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding -nostdlib")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=cortex-a78ae")
 # Note: -mgeneral-regs-only is added to kernel target only (not lua library)
 
-set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mcpu=cortex-a78ae")
+# CPU selection - platform-specific
+if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+    set(TARGET_CPU "cortex-a78ae")
+elseif(PLATFORM STREQUAL "RASPI5")
+    set(TARGET_CPU "cortex-a76")
+else()
+    # QEMU_VIRT - use cortex-a76 (common modern ARM core)
+    set(TARGET_CPU "cortex-a76")
+endif()
+
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=${TARGET_CPU}")
+set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mcpu=${TARGET_CPU}")
 
 # Debug/Release configurations
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 
-# Platform selection (QEMU_VIRT or JETSON_ORIN_NANO)
-set(PLATFORM "QEMU_VIRT" CACHE STRING "Target platform (QEMU_VIRT or JETSON_ORIN_NANO)")
-set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO")
+# Platform selection (QEMU_VIRT, JETSON_ORIN_NANO, or RASPI5)
+set(PLATFORM "QEMU_VIRT" CACHE STRING "Target platform (QEMU_VIRT, JETSON_ORIN_NANO, or RASPI5)")
+set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO" "RASPI5")
 
 # Add platform define
 add_compile_definitions(PLATFORM_${PLATFORM}=1)
@@ -53,6 +63,8 @@ endif()
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-jetson.ld)
+elseif(PLATFORM STREQUAL "RASPI5")
+    set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-raspi5.ld)
 else()
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel.ld)
 endif()
@@ -102,7 +114,9 @@ set(KERNEL_SOURCES
     # Drivers
     # ==========================================================================
     # UART - platform-specific
+    # PL011 UART for QEMU and Raspberry Pi 5
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
+    $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/uart_pl011.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
 
     # BPMP - Jetson only (required for clock control)
@@ -274,7 +288,8 @@ target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
 
 # Kernel uses -mgeneral-regs-only to avoid FP register pollution in kernel code
 # (Lua library is built separately without this flag to allow floating-point)
-target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only)
+# -fPIE generates position-independent code for UEFI boot (loads at arbitrary address)
+target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fPIE)
 
 # Configure LittleFS for freestanding use (no libc)
 # - LFS_NO_MALLOC: We use static buffers
@@ -304,7 +319,7 @@ target_compile_options(lua PRIVATE
     -std=gnu11
     -ffreestanding
     -nostdlib
-    -mcpu=cortex-a78ae
+    -mcpu=${TARGET_CPU}
     # Relaxed warnings for Lua's C99 style code
     -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
     -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes

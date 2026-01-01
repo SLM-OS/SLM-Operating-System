@@ -87,12 +87,27 @@ static void main_task_func(void *arg)
  */
 void kernel_main(void *dtb)
 {
+#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(JETSON_REBOOT_CHECKPOINT)
+    /*
+     * CHECKPOINT TEST: Trigger immediate reboot via PSCI.
+     * If the Jetson reboots back to Linux, the kernel reached kernel_main().
+     * Enable by adding -DJETSON_REBOOT_CHECKPOINT to CFLAGS.
+     */
+    {
+        register uint64_t x0 __asm__("x0") = 0x84000009;  /* PSCI SYSTEM_RESET */
+        __asm__ volatile("smc #0" : "+r"(x0) :: "memory");
+        while(1) __asm__ volatile("wfi");
+    }
+#endif
+
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /*
      * After kexec, the ARM64 exclusive monitor and event flags may be in
      * undefined states. Clear them before using any spinlocks.
      * - CLREX clears the exclusive monitor (prevents stale exclusive access)
      * - SEVL sets event locally (ensures first WFE in spinlock doesn't hang)
+     *
+     * This is safe to do even in UEFI context.
      */
     __asm__ volatile(
         "clrex\n"       /* Clear exclusive monitor */
@@ -101,6 +116,14 @@ void kernel_main(void *dtb)
         ::: "memory"
     );
 
+    /*
+     * Early device access (watchdog, UART) is skipped for direct UEFI boot.
+     * UEFI doesn't have these device registers mapped. After vmm_init()
+     * sets up our own page tables, these devices will be accessible.
+     *
+     * For kexec boot, define JETSON_KEXEC_BOOT to enable early device access.
+     */
+#if defined(JETSON_KEXEC_BOOT)
     /*
      * Disable hardware watchdog timer.
      *
@@ -120,7 +143,33 @@ void kernel_main(void *dtb)
         *wdt_cmd = WDT_CMD_DISABLE;
         __asm__ volatile("dsb sy" ::: "memory");
     }
-#endif
+
+    /*
+     * EARLY DEBUG: Write directly to UART before uart_init()
+     * This tests if UART hardware is accessible after kexec.
+     * UARTA is at 0x03100000, THR is at offset 0 (reg-shift=2).
+     *
+     * Don't wait for THRE - if UART clock is off, we'd hang forever.
+     * Just blast characters and add delays.
+     */
+    {
+        volatile uint32_t *uart_thr = (volatile uint32_t *)0x03100000;
+
+        /* Send "SLM" without waiting (in case UART clock is off) */
+        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
+        *uart_thr = 'S';
+        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
+        *uart_thr = 'L';
+        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
+        *uart_thr = 'M';
+        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
+        *uart_thr = '\r';
+        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
+        *uart_thr = '\n';
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+#endif /* JETSON_KEXEC_BOOT */
+#endif /* PLATFORM_JETSON_ORIN_NANO */
 
     /*
      * JETSON HARDWARE BRING-UP
@@ -137,6 +186,74 @@ void kernel_main(void *dtb)
      * after kexec - it requires SPE firmware cooperation.
      */
 #define JETSON_EARLY_UART_TEST 0  /* Disabled - testing uart_init */
+
+#if defined(PLATFORM_RASPI5)
+    /*
+     * Pi 5 RP1 UART0 initialization with LED validation.
+     * GPIO14 = TXD (alt function 4), GPIO15 = RXD (alt function 4)
+     */
+    {
+        volatile uint32_t *gpio2_data = (volatile uint32_t *)0x107D517C04ULL;
+
+        /* RP1 GPIO registers for pin muxing */
+        volatile uint32_t *gpio14_ctrl = (volatile uint32_t *)0x1F000D0074ULL;
+        volatile uint32_t *gpio15_ctrl = (volatile uint32_t *)0x1F000D007CULL;
+        volatile uint32_t *gpio14_pads = (volatile uint32_t *)0x1F000F003CULL;
+        volatile uint32_t *gpio15_pads = (volatile uint32_t *)0x1F000F0040ULL;
+
+        /* RP1 PL011 UART0 registers */
+        volatile uint32_t *uart_dr   = (volatile uint32_t *)0x1F00030000ULL;
+        volatile uint32_t *uart_ibrd = (volatile uint32_t *)0x1F00030024ULL;
+        volatile uint32_t *uart_fbrd = (volatile uint32_t *)0x1F00030028ULL;
+        volatile uint32_t *uart_lcrh = (volatile uint32_t *)0x1F0003002CULL;
+        volatile uint32_t *uart_cr   = (volatile uint32_t *)0x1F00030030ULL;
+
+        /* Brute-force test: cycle through alt functions 0-8 */
+        for (int alt = 0; alt <= 8; alt++) {
+            /* Blink (alt+1) times to identify iteration */
+            for (int b = 0; b <= alt; b++) {
+                *gpio2_data |= (1 << 9);
+                for (volatile int d = 0; d < 300000; d++);
+                *gpio2_data &= ~(1 << 9);
+                for (volatile int d = 0; d < 300000; d++);
+            }
+
+            /* Configure GPIO14 with current alt function */
+            *gpio14_pads = (1 << 6) | (2 << 4);  /* IE=1, drive=8mA */
+            *gpio14_ctrl = alt;  /* Try this FUNCSEL */
+
+            /* Configure GPIO15 same way */
+            *gpio15_pads = (1 << 6) | (1 << 3);  /* IE=1, pull-up */
+            *gpio15_ctrl = alt;
+
+            /* Initialize PL011 UART */
+            *uart_cr = 0;
+            *uart_ibrd = 23;
+            *uart_fbrd = 56;
+            *uart_lcrh = (3 << 5);
+            *uart_cr = (1 << 0) | (1 << 8);
+
+            /* Send "SLM" multiple times */
+            for (int r = 0; r < 10; r++) {
+                *uart_dr = 'S';
+                *uart_dr = 'L';
+                *uart_dr = 'M';
+                for (volatile int d = 0; d < 100000; d++);
+            }
+
+            /* 1 second pause before next iteration */
+            for (volatile int d = 0; d < 50000000; d++);
+        }
+
+        /* Done - long blink */
+        *gpio2_data |= (1 << 9);
+        for (volatile int d = 0; d < 50000000; d++);
+        *gpio2_data &= ~(1 << 9);
+
+        /* Hang */
+        while(1);
+    }
+#endif
 
     /* Initialize UART for debug output */
     uart_init();

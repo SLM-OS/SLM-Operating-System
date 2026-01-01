@@ -5,6 +5,7 @@
  *
  * For QEMU: Loads at 0x40000000 with x0 = DTB address
  * For Jetson: Loaded by UEFI at runtime-determined address with x0 = DTB address
+ * For Pi 5: Loaded at 0x80000 by firmware with x0 = DTB address
  *
  * Entry conditions:
  *   - x0 = DTB address (preserved and passed to kernel_main)
@@ -18,10 +19,11 @@
 .global _start
 .global real_start
 
+#if !defined(PLATFORM_RASPI5)
 /*
  * ARM64 Linux Image Header with PE/COFF stub
  *
- * This header is required for UEFI boot on ARM64.
+ * This header is required for UEFI boot on ARM64 (Jetson, etc.).
  * UEFI requires PE/COFF format, so we include a minimal PE header.
  * Format follows Linux kernel's arch/arm64/kernel/efi-header.S
  *
@@ -31,6 +33,8 @@
  * For direct boot (QEMU -kernel binary), the first instruction must be
  * executable. The ccmp instruction encodes to bytes "MZ.." satisfying both
  * PE/COFF magic requirement and ARM64 executable requirement.
+ *
+ * NOTE: Pi 5 does not use this header - see PLATFORM_RASPI5 section below.
  */
 _start:
     /*
@@ -73,7 +77,7 @@ optional_header:
     .long   0x10000             /* AddressOfEntryPoint (64KB, where real_start will be) */
     .long   0x10000             /* BaseOfCode (64KB) */
 
-    .quad   0                   /* ImageBase */
+    .quad   0x80000000          /* ImageBase - preferred load address */
     .long   0x10000             /* SectionAlignment (64KB, like Linux) */
     .long   0x200               /* FileAlignment (512 bytes) */
     .short  0                   /* MajorOperatingSystemVersion */
@@ -114,7 +118,7 @@ section_table:
     .long   0                   /* PointerToLineNumbers */
     .short  0                   /* NumberOfRelocations */
     .short  0                   /* NumberOfLineNumbers */
-    .long   0x60000020          /* Characteristics: CNT_CODE | MEM_READ | MEM_EXECUTE */
+    .long   0xe0000020          /* Characteristics: CNT_CODE | MEM_READ | MEM_WRITE | MEM_EXECUTE */
 
     /* .data section (dummy, required) */
     .ascii  ".data\0\0\0"       /* Name (8 bytes) */
@@ -136,6 +140,26 @@ section_table:
     .space  0x10000 - (. - _start)
 
 real_start:
+
+#else /* PLATFORM_RASPI5 */
+
+/*
+ * Pi 5 Raw Binary Entry Point
+ *
+ * Pi 5 uses a raw binary format loaded at 0x80000 by the firmware.
+ * No PE/COFF header is needed - the firmware jumps directly to the
+ * first byte of the kernel image.
+ *
+ * By making _start = real_start (same address), all symbol offset
+ * calculations work correctly. The literal pool uses offsets relative
+ * to _start, which now points to the actual start of the executable code.
+ *
+ * This approach follows Circle's proven raw binary format for Pi 5.
+ */
+_start:
+real_start:
+
+#endif /* PLATFORM_RASPI5 */
     /*
      * Early debug: Write characters to UART to confirm we reached real_start.
      *
@@ -144,14 +168,58 @@ real_start:
      * and rely on C code UART initialization instead.
      *
      * QEMU PL011: 0x09000000 - works immediately, no clock setup needed.
+     * Pi 5 PL011: 0x1F00030000 - via RP1, should work after firmware init.
      */
-#ifndef PLATFORM_JETSON_ORIN_NANO
+#if defined(PLATFORM_QEMU_VIRT)
     ldr     x10, =0x09000000        /* QEMU PL011 base */
     mov     w11, #'S'               /* 'S' for Start */
     str     w11, [x10]              /* Write to THR */
     mov     w11, #'\n'
     str     w11, [x10]
+#elif defined(PLATFORM_RASPI5)
+    /*
+     * Pi 5 enters from firmware in EL2. We must transition to EL1 before
+     * peripheral access will work. This follows Circle's startup64.S approach.
+     */
+
+    /* Check current exception level */
+    mrs     x10, CurrentEL
+    cmp     x10, #8                 /* EL2 = 0b1000 (CurrentEL bits [3:2] = 2) */
+    b.ne    .Lpi5_in_el1            /* Already in EL1, skip transition */
+
+    /* We're in EL2 - configure and transition to EL1 */
+
+    /* Disable coprocessor traps to EL2 */
+    mov     x10, #0x33ff
+    msr     cptr_el2, x10
+    msr     hstr_el2, xzr
+
+    /* Enable FP/SIMD at EL1 */
+    mov     x10, #(3 << 20)
+    msr     cpacr_el1, x10
+
+    /* Initialize HCR_EL2 for 64-bit EL1 */
+    mov     x10, #(1 << 31)         /* RW bit = 1 for AArch64 */
+    msr     hcr_el2, x10
+
+    /* SCTLR_EL1 - safe initial value (from Circle) */
+    mov     x10, #0x0800
+    movk    x10, #0x30d0, lsl #16
+    msr     sctlr_el1, x10
+
+    /* Set up return to EL1h with interrupts masked */
+    mov     x10, #0x3c4             /* EL1h, DAIF masked */
+    msr     spsr_el2, x10
+    adr     x10, .Lpi5_in_el1
+    msr     elr_el2, x10
+    eret
+
+.Lpi5_in_el1:
+    /* Now in EL1 - synchronize before continuing */
+    dsb     sy
+    isb
 #endif
+    /* On Jetson, skip early UART - clocks not configured */
 
     /*
      * Save DTB address (x0) to callee-saved register.
@@ -164,20 +232,27 @@ real_start:
      * MPIDR check and continue on whatever CPU we landed on.
      * TODO: Properly handle SMP bring-up after kexec.
      */
-#ifndef PLATFORM_JETSON_ORIN_NANO
-    /* Only do MPIDR check on QEMU where we know we start on CPU 0 */
+#if defined(PLATFORM_QEMU_VIRT) || defined(PLATFORM_RASPI5)
+    /* Do MPIDR check on platforms where we know we start on CPU 0 */
     mrs     x1, mpidr_el1
     and     x1, x1, #0xFF
     cbz     x1, primary_cpu
     b       secondary_spin
 #endif
+    /* On Jetson, skip MPIDR check - may not be on CPU 0 after kexec */
 
 primary_cpu:
     /*
      * Set up the stack pointer.
      * Stack grows downward, so point to top of stack area.
+     *
+     * UEFI loads us at an arbitrary address. We must calculate addresses
+     * relative to our actual load address, not the linker's assumed base.
+     * Use adr to get the actual address of _start, then add known offsets.
      */
-    ldr     x1, =__stack_top
+    adr     x0, _start                      /* x0 = actual runtime address of _start */
+    ldr     x1, .Lstack_offset              /* x1 = offset from _start to __stack_top */
+    add     x1, x0, x1                      /* x1 = actual __stack_top address */
     mov     sp, x1
 
     /*
@@ -196,9 +271,13 @@ primary_cpu:
     /*
      * Clear the BSS section.
      * BSS contains uninitialized global/static variables.
+     * Calculate addresses relative to actual _start location.
      */
-    ldr     x1, =__bss_start
-    ldr     x2, =__bss_end
+    adr     x0, _start                      /* x0 = actual runtime address of _start */
+    ldr     x1, .Lbss_start_offset          /* x1 = offset to __bss_start */
+    ldr     x2, .Lbss_end_offset            /* x2 = offset to __bss_end */
+    add     x1, x0, x1                      /* x1 = actual __bss_start */
+    add     x2, x0, x2                      /* x2 = actual __bss_end */
 bss_clear:
     cmp     x1, x2
     b.ge    bss_done
@@ -216,8 +295,11 @@ bss_done:
     /*
      * Set up exception vector table.
      * VBAR_EL1 holds the base address of the vector table.
+     * Calculate address relative to actual _start location.
      */
-    ldr     x1, =exception_vectors
+    adr     x0, _start                          /* x0 = actual runtime address of _start */
+    ldr     x1, .Lvectors_offset                /* x1 = offset to exception_vectors */
+    add     x1, x0, x1                          /* x1 = actual exception_vectors address */
     msr     vbar_el1, x1
     isb
 
@@ -247,6 +329,21 @@ secondary_spin:
      */
     wfe                         /* Wait For Event */
     b       secondary_spin
+
+/*
+ * Literal pool for position-independent addressing.
+ * These offsets are calculated by the linker and used to compute
+ * actual runtime addresses when UEFI loads us at an arbitrary location.
+ */
+    .align  3
+.Lstack_offset:
+    .quad   __stack_top - _start
+.Lbss_start_offset:
+    .quad   __bss_start - _start
+.Lbss_end_offset:
+    .quad   __bss_end - _start
+.Lvectors_offset:
+    .quad   exception_vectors - _start
 
 /*
  * Note: Exception vector table is now in vectors.S

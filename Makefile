@@ -8,7 +8,7 @@
 # Build type: Debug or Release
 BUILD_TYPE ?= Debug
 
-# Platform: QEMU_VIRT or JETSON_ORIN_NANO
+# Platform: QEMU_VIRT, JETSON_ORIN_NANO, or RASPI5
 PLATFORM ?= QEMU_VIRT
 
 # Directories
@@ -269,7 +269,7 @@ help:
 	@echo "SLM-OS Build System"
 	@echo "==================="
 	@echo ""
-	@echo "Usage: make [target] [PLATFORM=QEMU_VIRT|JETSON_ORIN_NANO] [BUILD_TYPE=Debug|Release]"
+	@echo "Usage: make [target] [PLATFORM=QEMU_VIRT|JETSON_ORIN_NANO|RASPI5] [BUILD_TYPE=Debug|Release]"
 	@echo ""
 	@echo "Build targets:"
 	@echo "  all            Build kernel and runtime (default)"

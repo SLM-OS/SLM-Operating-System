@@ -21,7 +21,7 @@
  * If neither is defined, default to QEMU.
  * ============================================================================ */
 
-#if !defined(PLATFORM_QEMU_VIRT) && !defined(PLATFORM_JETSON_ORIN_NANO)
+#if !defined(PLATFORM_QEMU_VIRT) && !defined(PLATFORM_JETSON_ORIN_NANO) && !defined(PLATFORM_RASPI5)
 #define PLATFORM_QEMU_VIRT  1
 #endif
 
@@ -189,11 +189,99 @@
 #endif /* PLATFORM_JETSON_ORIN_NANO */
 
 /* ============================================================================
+ * Raspberry Pi 5 (BCM2712)
+ *
+ * Quad-core Cortex-A76 @ 2.4 GHz with RP1 I/O controller.
+ * Uses PL011 UART and GIC-400 (GICv2).
+ *
+ * Hardware info from Circle library and Raspberry Pi forums:
+ * - RP1 peripherals mapped via PCIe at 0x1F00000000
+ * - UART0 (PL011): 0x1F00030000 (GPIO14/15 on 40-pin header)
+ * - GIC-400: 0x107FFF8000
+ * - Physical memory starts at 0x0
+ * - Kernel loaded at 0x80000 by firmware
+ *
+ * References:
+ * - Circle library: https://github.com/rsta2/circle
+ * - RP1 Peripherals document
+ * - Raspberry Pi 5 forums
+ * ============================================================================ */
+#if defined(PLATFORM_RASPI5)
+
+/* Platform identification */
+#define PLATFORM_NAME       "Raspberry Pi 5"
+
+/* Memory layout */
+#define RAM_BASE            0x00000000UL
+#define RAM_SIZE            0x100000000UL   /* 4 GB (adjust for 8GB model) */
+#define KERNEL_LOAD_ADDR    0x80000UL       /* Firmware loads kernel here */
+
+/*
+ * UART - PL011 via RP1
+ *
+ * UART0 is exposed on 40-pin GPIO header:
+ *   Pin 6:  GND
+ *   Pin 8:  GPIO14 (TXD) - Pi transmits
+ *   Pin 10: GPIO15 (RXD) - Pi receives
+ *
+ * The RP1 I/O controller is connected via PCIe and peripherals
+ * are mapped starting at 0x1F00000000.
+ */
+#define UART_TYPE_PL011
+#define UART_BASE           0x1F00030000UL  /* UART0 via RP1 */
+#define UART_SIZE           0x00001000UL    /* 4 KB */
+#define UART_CLOCK          48000000UL      /* 48 MHz */
+#define UART_IRQ            (32 + 121)      /* RP1 UART0 IRQ - TBD, may need adjustment */
+
+/*
+ * Alternative UARTs (via RP1):
+ *   UART1: 0x1F00034000
+ *   UART2: 0x1F00038000
+ *   UART3: 0x1F0003C000
+ *   UART4: 0x1F00040000
+ *   UART5: 0x1F00044000
+ */
+
+/*
+ * GIC (Generic Interrupt Controller) - GIC-400 (v2)
+ *
+ * IMPORTANT: Device tree shows 0x107FFF9000 but that's GICD offset.
+ * The actual GIC base is 0x107FFF8000.
+ *
+ * Register offsets from GIC base:
+ *   GICD: +0x1000
+ *   GICC: +0x2000
+ */
+#define GIC_VERSION         2
+#define GIC_BASE            0x107FFF8000UL
+#define GIC_DIST_BASE       0x107FFF9000UL  /* GIC_BASE + 0x1000 */
+#define GIC_CPU_BASE        0x107FFFA000UL  /* GIC_BASE + 0x2000 */
+
+/* Timer - ARM Generic Timer */
+#define TIMER_IRQ           30              /* PPI 14 (CNTV_EL0) */
+
+/* CPU configuration */
+#define CPU_MAX             4               /* 4x Cortex-A76 */
+
+/*
+ * Additional BCM2712/RP1 peripherals (for reference):
+ *
+ * RP1 Base:        0x1F00000000
+ * GPIO:            0x1F000D0000
+ * I2C0:            0x1F00070000
+ * I2C1:            0x1F00074000
+ * SPI0:            0x1F00050000
+ * PWM:             0x1F00098000
+ */
+
+#endif /* PLATFORM_RASPI5 */
+
+/* ============================================================================
  * Sanity Checks
  * ============================================================================ */
 
 #ifndef PLATFORM_NAME
-#error "No platform selected. Define PLATFORM_QEMU_VIRT or PLATFORM_JETSON_ORIN_NANO"
+#error "No platform selected. Define PLATFORM_QEMU_VIRT, PLATFORM_JETSON_ORIN_NANO, or PLATFORM_RASPI5"
 #endif
 
 #ifndef RAM_BASE

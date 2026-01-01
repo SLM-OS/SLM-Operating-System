@@ -108,7 +108,7 @@ void uart_init(void)
      * from Linux's initialization, so we can skip BPMP communication
      * which may not work correctly after kexec.
      */
-#define UART_INIT_MODE 2
+#define UART_INIT_MODE 2  /* Direct mode - assume clock enabled (for UEFI boot) */
 
 #if UART_INIT_MODE == 0
     /* Silent mode - no UART output */

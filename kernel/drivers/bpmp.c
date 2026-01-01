@@ -300,6 +300,23 @@ int bpmp_init(void)
         return -1;
     }
 
+    /*
+     * After kexec, the IVC channels may be in a corrupted state.
+     * Reset the channel counters to force a clean state.
+     * BPMP should handle out-of-sync counters gracefully.
+     */
+    volatile struct ivc_channel_header *tx_h = tx_header();
+    volatile struct ivc_channel_header *rx_h = rx_header();
+
+    /* Sync TX channel: set r_count = w_count (mark all messages as read) */
+    mmio_write32(&tx_h->r_count, mmio_read32(&tx_h->w_count));
+
+    /* Sync RX channel: set r_count = w_count (mark all messages as read) */
+    mmio_write32(&rx_h->r_count, mmio_read32(&rx_h->w_count));
+
+    /* Clear any pending doorbells */
+    hsp_ccplex_clear();
+
     g_bpmp_initialized = true;
     return 0;
 }
