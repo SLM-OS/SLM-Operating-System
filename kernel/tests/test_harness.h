@@ -67,4 +67,7 @@ int test_suite_lua(void);
 /* Multi-core integration tests (actual tasks across CPUs) */
 int test_suite_integration(void);
 
+/* x86-64 boot and platform tests (x86 only) */
+int test_suite_x86_boot(void);
+
 #endif /* TEST_HARNESS_H */

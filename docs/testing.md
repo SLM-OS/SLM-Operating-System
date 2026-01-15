@@ -29,7 +29,8 @@ kernel/tests/
 ├── test_littlefs.c    # LittleFS and block device tests (26 tests)
 ├── test_net.c         # Networking tests (QEMU only)
 ├── test_lua.c         # Lua scripting tests
-└── test_integration.c # Multi-core integration tests (5 tests)
+├── test_integration.c # Multi-core integration tests (5 tests)
+└── test_x86_boot.c    # x86-64 boot and platform tests (20 tests, x86 only)
 ```
 
 ### Available Assertions

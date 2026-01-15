@@ -1,0 +1,159 @@
+# Makefile.test - Minimal x86-64 kernel build for boot testing
+#
+# This builds a standalone test kernel to verify x86-64 boot works.
+# Once verified, the code will be integrated into the main build system.
+#
+# Usage:
+#   make -f kernel/arch/x86_64/Makefile.test       # Build
+#   make -f kernel/arch/x86_64/Makefile.test run   # Build and run in QEMU
+#   make -f kernel/arch/x86_64/Makefile.test clean # Clean
+
+# Tools
+CC := gcc
+AS := gcc
+LD := ld
+OBJCOPY := objcopy
+
+# Directories
+ROOT := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))/../../..
+BUILD := $(ROOT)/build/x86_64-test
+SRC_ARCH := $(ROOT)/kernel/arch/x86_64
+SRC_DRV := $(ROOT)/kernel/drivers
+
+# Output files
+KERNEL_ELF := $(BUILD)/kernel-x86.elf
+KERNEL_ISO := $(BUILD)/slmos-x86.iso
+GRUB_CFG := $(BUILD)/boot/grub/grub.cfg
+
+# GCC freestanding include directory (for stdint.h, stddef.h, etc.)
+GCC_INCLUDE := $(shell gcc -print-file-name=include)
+
+# Compiler flags
+CFLAGS := -m64 -ffreestanding -nostdlib -nostdinc
+CFLAGS += -isystem $(GCC_INCLUDE)
+CFLAGS += -mno-red-zone -mno-sse -mno-sse2 -mno-mmx
+CFLAGS += -fno-stack-protector -fno-pic
+CFLAGS += -Wall -Wextra -std=c11
+CFLAGS += -I$(ROOT)/kernel/include
+CFLAGS += -DPLATFORM_X86_64=1
+
+# Assembler flags
+ASFLAGS := -m64
+
+# Linker flags
+LDFLAGS := -n -T $(ROOT)/kernel/kernel-x86_64.ld
+
+# Source files - split into 32-bit trampoline and 64-bit entry
+SRCS_C := $(SRC_ARCH)/main_x86.c $(SRC_DRV)/fb_console.c
+
+# Object files
+OBJS := $(BUILD)/trampoline32.o $(BUILD)/entry64.o $(BUILD)/main_x86.o $(BUILD)/fb_console.o
+
+# QEMU
+QEMU := qemu-system-x86_64
+QEMU_FLAGS := -m 256M -no-reboot -no-shutdown
+
+.PHONY: all run clean iso
+
+all: $(KERNEL_ELF)
+
+# Build kernel ELF
+$(KERNEL_ELF): $(OBJS) $(ROOT)/kernel/kernel-x86_64.ld | $(BUILD)
+	@echo "Linking $@..."
+	$(LD) $(LDFLAGS) -o $@ $(OBJS)
+
+# Compile 32-bit trampoline - must use -m32 to generate true 32-bit code
+$(BUILD)/trampoline32.o: $(SRC_ARCH)/trampoline32.S | $(BUILD)
+	@echo "Assembling $< (32-bit trampoline)..."
+	$(CC) -c -m32 -I$(ROOT)/kernel/include -o $(BUILD)/trampoline32_temp.o $<
+	$(OBJCOPY) -O elf64-x86-64 $(BUILD)/trampoline32_temp.o $@
+	rm $(BUILD)/trampoline32_temp.o
+
+# Compile 64-bit entry point
+$(BUILD)/entry64.o: $(SRC_ARCH)/entry64.S | $(BUILD)
+	@echo "Assembling $< (64-bit entry)..."
+	$(CC) -c -m64 -I$(ROOT)/kernel/include -o $@ $<
+
+# Compile C files
+$(BUILD)/main_x86.o: $(SRC_ARCH)/main_x86.c | $(BUILD)
+	@echo "Compiling $<..."
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/fb_console.o: $(SRC_DRV)/fb_console.c | $(BUILD)
+	@echo "Compiling $<..."
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Create build directory
+$(BUILD):
+	mkdir -p $(BUILD)
+
+# Create bootable ISO using GRUB
+iso: $(KERNEL_ISO)
+
+$(KERNEL_ISO): $(KERNEL_ELF) | $(BUILD)
+	@echo "Creating bootable ISO..."
+	mkdir -p $(BUILD)/boot/grub
+	cp $(KERNEL_ELF) $(BUILD)/boot/kernel.elf
+	@echo 'set timeout=0' > $(GRUB_CFG)
+	@echo 'set default=0' >> $(GRUB_CFG)
+	@echo '' >> $(GRUB_CFG)
+	@echo 'menuentry "SLM-OS x86-64" {' >> $(GRUB_CFG)
+	@echo '    multiboot2 /boot/kernel.elf' >> $(GRUB_CFG)
+	@echo '    boot' >> $(GRUB_CFG)
+	@echo '}' >> $(GRUB_CFG)
+	grub-mkrescue -o $(KERNEL_ISO) $(BUILD) 2>/dev/null || \
+		grub2-mkrescue -o $(KERNEL_ISO) $(BUILD) 2>/dev/null
+
+# Run in QEMU with multiboot2 directly (no ISO needed)
+run: $(KERNEL_ELF)
+	@echo "Running x86-64 kernel in QEMU..."
+	@echo "Press Ctrl+A then X to exit"
+	$(QEMU) $(QEMU_FLAGS) \
+		-kernel $(KERNEL_ELF)
+
+# Run in QEMU with graphical display (to see framebuffer)
+run-gui: $(KERNEL_ELF)
+	@echo "Running x86-64 kernel in QEMU (GUI mode)..."
+	$(QEMU) $(QEMU_FLAGS) \
+		-kernel $(KERNEL_ELF) \
+		-display gtk
+
+# Run from ISO (for testing GRUB boot)
+run-iso: $(KERNEL_ISO)
+	@echo "Running x86-64 kernel from ISO..."
+	$(QEMU) $(QEMU_FLAGS) \
+		-cdrom $(KERNEL_ISO) \
+		-display gtk
+
+# Debug in QEMU with GDB
+debug: $(KERNEL_ELF)
+	@echo "Starting QEMU with GDB server on port 1234..."
+	$(QEMU) $(QEMU_FLAGS) \
+		-kernel $(KERNEL_ELF) \
+		-s -S
+
+# Connect GDB
+gdb: $(KERNEL_ELF)
+	gdb $(KERNEL_ELF) \
+		-ex "target remote localhost:1234" \
+		-ex "set disassembly-flavor intel"
+
+# Clean
+clean:
+	rm -rf $(BUILD)
+
+# Show help
+help:
+	@echo "x86-64 Boot Test Makefile"
+	@echo "========================="
+	@echo ""
+	@echo "Targets:"
+	@echo "  all      - Build kernel ELF (default)"
+	@echo "  run      - Build and run in QEMU (text mode)"
+	@echo "  run-gui  - Build and run in QEMU (GUI mode, shows framebuffer)"
+	@echo "  iso      - Create bootable ISO with GRUB"
+	@echo "  run-iso  - Run from ISO in QEMU"
+	@echo "  debug    - Run QEMU with GDB server"
+	@echo "  gdb      - Connect GDB to running QEMU"
+	@echo "  clean    - Remove build artifacts"
+	@echo "  help     - Show this help"
