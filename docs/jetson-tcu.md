@@ -249,5 +249,12 @@ Would require access to SPE firmware source (not publicly available) or deep rev
 
 ---
 
+## See Also
+
+**`docs/jetson-nvidia-support.md`** — Comprehensive documentation of all Jetson blockers. Even with USB-serial adapter, bare-metal UART access is blocked by CBB firewall.
+
+---
+
 *Created: December 2025*
-*Status: Research complete, implementation deferred pending USB-serial adapter*
+*Updated: January 2026*
+*Status: TCU not viable for bare-metal. USB-serial adapter also blocked by CBB firewall.*

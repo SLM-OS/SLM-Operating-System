@@ -198,6 +198,19 @@ C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount
 
 **Board:** Jetson Orin Nano Super Developer Kit
 
+**Status:** ⛔ BLOCKED — CBB firewall prevents bare-metal peripheral access
+
+### Critical Blocker
+
+SLM-OS bare-metal execution on Jetson is blocked by the Tegra234 Control Backbone (CBB) firewall, which prevents unsigned/unauthenticated code from accessing peripherals. This is a hardware-enforced security feature.
+
+**Key findings:**
+- kexec is NOT supported (NVIDIA confirmed)
+- Direct UEFI boot has same CBB restrictions
+- All boot methods blocked by CBB firewall
+
+**Comprehensive documentation:** `docs/jetson-nvidia-support.md`
+
 ### Reference Documentation
 
 - [Carrier Board Specification (PDF)](https://developer.nvidia.com/downloads/assets/embedded/secure/jetson/orin_nano/docs/jetson_orin_nano_devkit_carrier_board_specification_sp.pdf) — Definitive pinouts for J14, J12, etc.
@@ -210,12 +223,12 @@ C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount
 
 | Port | Address | Type | Connection | Status |
 |------|---------|------|------------|--------|
-| UARTA | 0x03100000 | NS16550 | 40-pin header pins 8/10 | Works, needs USB-serial adapter |
-| TCU | HSP mailbox | Combined UART | USB-C debug port | Requires SPE firmware (see below) |
+| UARTA | 0x03100000 | NS16550 | 40-pin header pins 8/10 | Works with Linux; BLOCKED for SLM-OS (CBB firewall) |
+| TCU | HSP mailbox | Combined UART | USB-C debug port | Requires SPE firmware (Linux only) |
 
 **TCU (USB-C Debug):** The USB-C debug console uses the Tegra Combined UART (TCU), which routes through SPE firmware via HSP mailboxes. After kexec, SPE is no longer running, so TCU doesn't work for bare-metal. See `docs/jetson-tcu.md` for full research notes.
 
-**Recommended:** Use USB-serial adapter on 40-pin header (UARTA) for SLM-OS debugging.
+**UARTA (40-pin Header):** Serial hardware works for Linux. For SLM-OS, the CBB firewall blocks access to 0x03100000. See `docs/jetson-nvidia-support.md` for full analysis.
 
 ### Button Header (J14) Quick Reference
 
@@ -241,4 +254,4 @@ C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount
 
 ---
 
-*Last updated: 25 December 2025*
+*Last updated: 15 January 2026*

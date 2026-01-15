@@ -490,5 +490,15 @@ Given the hardware security restrictions on Jetson Orin, **Raspberry Pi 5 may be
 
 ---
 
+---
+
+## See Also
+
+For comprehensive documentation including NVIDIA forum research and potential solutions, see:
+
+**`docs/jetson-nvidia-support.md`** — Consolidated blockers, forum findings, and questions for NVIDIA support
+
+---
+
 *Log started: 2025-12-31*
-*Last updated: 2025-12-31 19:30 UTC*
+*Last updated: 2026-01-15 (added cross-reference to jetson-nvidia-support.md)*

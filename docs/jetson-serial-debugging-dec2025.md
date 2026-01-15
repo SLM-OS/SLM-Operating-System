@@ -589,4 +589,10 @@ User is obtaining a new Jetson device. This unit may have intermittent issues fr
 
 ---
 
-*Document updated: December 29, 2025*
+## See Also
+
+**`docs/jetson-nvidia-support.md`** — Comprehensive documentation of all Jetson blockers, NVIDIA forum research, and potential solutions. Consolidates findings from all debugging sessions including this one.
+
+---
+
+*Document updated: January 15, 2026 - Added cross-reference to jetson-nvidia-support.md*

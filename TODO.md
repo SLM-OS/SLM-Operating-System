@@ -37,35 +37,56 @@ This document tracks Phase 4 implementation of SLM-OS.
 
 **Priority:** CRITICAL — Unblocks all other Jetson work
 
+**Status:** ⛔ BLOCKED by CBB Firewall — See `docs/jetson-nvidia-support.md`
+
 **Reference:** See `docs/lab-operations.md` for serial console procedures (Ubuntu and Windows).
+
+### ⛔ Critical Blocker: CBB Firewall
+
+All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) firewall, which prevents unsigned/unauthenticated code from accessing any peripherals. This is a hardware-enforced security feature.
+
+**Key findings:**
+- kexec is explicitly NOT supported by NVIDIA
+- Direct UEFI boot has the same CBB restrictions
+- L4T bootloader uses kexec internally (extlinux.conf boot also blocked)
+- BPMP communication is corrupted after kexec (cannot enable UART clocks)
+
+**Potential solutions (require NVIDIA support):**
+1. EL2 hypervisor approach (forum evidence suggests this works)
+2. Secure boot integration (sign SLM-OS with PKC/SBK keys)
+3. CBB firewall configuration via `tegra234-mb2-bct-scr-*-override.dts`
+
+**Full documentation:** `docs/jetson-nvidia-support.md`
 
 ### Serial Console (40-pin Header UART)
 - ✅ Connect USB-serial adapter to 40-pin header (Pin 8 TXD, Pin 10 RXD, Pin 6 GND)
-- ☐ Test Tegra UART driver (NS16550-compatible @ 0x03100000) — works with Linux, untested with SLM-OS
-- ☐ Verify BPMP clock enable for UARTA works — UART_INIT_MODE=2 bypasses this after kexec
+- ⛔ Test Tegra UART driver (NS16550-compatible @ 0x03100000) — BLOCKED by CBB firewall
+- ⛔ Verify BPMP clock enable for UARTA works — BLOCKED (BPMP IVC corrupted after kexec)
 - ✅ Confirm baud rate settings (115200 8N1)
-- ✅ Test bidirectional communication (shell input/output) — verified via `test-lab-setup.sh`
+- ✅ Test bidirectional communication (shell input/output) — verified via `test-lab-setup.sh` (Linux only)
 
-**Note:** Serial hardware verified working (December 2025). Lab moved to Ubuntu machine. See `docs/lab-operations.md` and `lab-tools/test-lab-setup.sh`.
+**Note:** Serial hardware verified working with Linux (December 2025). SLM-OS serial blocked by CBB firewall.
 
 ### Boot Method Validation
-- ☐ Test kexec boot with serial console output
-- ☐ Debug any silent failures with serial visibility
-- ☐ Set up SD card boot for standalone SLM-OS
-- ☐ Document working boot sequence in `docs/jetson-boot.md`
-- ⏸️ U-Boot/UEFI direct boot — after kexec is stable
+- ⛔ Test kexec boot with serial console output — BLOCKED (kexec not supported per NVIDIA)
+- ✅ Debug any silent failures with serial visibility — Root cause identified: CBB firewall
+- ⛔ Set up SD card boot for standalone SLM-OS — BLOCKED (L4T uses kexec internally)
+- ✅ Document working boot sequence in `docs/jetson-boot.md` — Documented blockers instead
+- ⛔ U-Boot/UEFI direct boot — BLOCKED (same CBB firewall restrictions)
 
 ### Platform Validation
-- ☐ Verify DTB parsing on real Jetson hardware
-- ☐ Confirm memory map matches DTB values
-- ☐ Remove hardcoded addresses from `platform.h` (use DTB values)
-- ⏸️ Test on Pi 5 with platform-specific DTB — later (Jetson first)
+- ⛔ Verify DTB parsing on real Jetson hardware — BLOCKED by boot issues
+- ⛔ Confirm memory map matches DTB values — BLOCKED
+- ⛔ Remove hardcoded addresses from `platform.h` (use DTB values) — BLOCKED
+- ✅ Test on Pi 5 with platform-specific DTB — Pi 5 works, shifted focus here
 
 ---
 
 ## Milestone 2: Jetson Hardware Validation
 
 **Depends on:** M1 (Serial Console)
+
+**Status:** ⛔ BLOCKED — Depends on M1 which is blocked by CBB firewall
 
 ### GIC and Interrupts
 - ☐ Verify GIC configuration for Jetson (may differ from QEMU)
@@ -101,11 +122,15 @@ This document tracks Phase 4 implementation of SLM-OS.
 
 **Depends on:** M1 (Serial Console), M2 (Hardware Validation)
 
+**Status:** ⛔ BLOCKED — Depends on M1/M2 which are blocked by CBB firewall
+
+**Additional blocker:** GPU initialization requires GSP (GPU System Processor) firmware, which runs on an on-die RISC-V core. Without GSP firmware documentation or source code, GPU compute is not possible. See `docs/gpu.md` for details.
+
 ### GPU Initialization
-- ☐ Write `jetson_gpu_init()` — power on, clock enable, reset sequence
-- ☐ Enable GPU clocks via BPMP IPC
-- ☐ Verify GPU is responsive (read ID registers)
-- ☐ Document initialization sequence in `docs/gpu.md`
+- ⛔ Write `jetson_gpu_init()` — BLOCKED by CBB firewall + GSP requirement
+- ⛔ Enable GPU clocks via BPMP IPC — BLOCKED (BPMP IVC corrupted)
+- ⛔ Verify GPU is responsive (read ID registers) — BLOCKED
+- ✅ Document initialization sequence in `docs/gpu.md` — Documented blockers
 
 ### GPU Memory Management
 - ☐ Write `jetson_gpu_alloc(size)` — allocate GPU-accessible memory

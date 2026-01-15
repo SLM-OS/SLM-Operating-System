@@ -276,5 +276,13 @@ echo "TEST MESSAGE" > /dev/ttyTHS1
 
 ---
 
+## See Also
+
+**`docs/jetson-nvidia-support.md`** — Comprehensive documentation of all Jetson blockers, NVIDIA forum research, and potential solutions. This document consolidates findings from all debugging sessions.
+
+**Key finding:** kexec is NOT supported by NVIDIA, and the CBB firewall blocks all bare-metal peripheral access. See the consolidated document for potential paths forward.
+
+---
+
 *Document created: December 28, 2025*
-*Last update: December 28, 2025 - Serial hardware verified working on Ubuntu lab machine*
+*Last update: January 15, 2026 - Added cross-reference to jetson-nvidia-support.md*

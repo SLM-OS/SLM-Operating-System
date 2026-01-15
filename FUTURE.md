@@ -12,7 +12,7 @@ This section documents features discussed during development that are beyond the
 | **Scheduling** | Deadline Scheduler, Priority Inheritance, ELF Loader | Real-Time Guarantees (RMS) |
 | **Shell** | Working Directory, Path Resolution, 30+ Commands, Lua Scripting | POSIX Shell |
 | **Components** | Component System, Model Memory, GPU Stub | Sandboxing, Secure Boot |
-| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU) | Jetson GPU, USB Serial, Networking (Jetson) |
+| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU), Pi 5 UART | Jetson GPU, USB Serial, Networking (Jetson) — ⛔ BLOCKED by CBB firewall |
 
 **Completed Features:** 20
 **Pending Features:** 13
@@ -20,16 +20,19 @@ This section documents features discussed during development that are beyond the
 ---
 
 ### USB Serial Console (TinyUSB + Tegra XUSB)
+
+**Status:** ⛔ BLOCKED on Jetson — CBB firewall prevents bare-metal peripheral access. See `docs/jetson-nvidia-support.md`.
+
 Eliminate external UART adapter by implementing USB CDC-ACM device mode.
 
-- ☐ Study Tegra XUSB device controller (`xudc@3550000`) and Linux `tegra-xudc.c` driver
-- ☐ Initialize XUSB PHY, PLLs, and power rails from bare metal
-- ☐ Write Tegra XUSB Device Controller Driver (DCD) for TinyUSB
-- ☐ Integrate TinyUSB CDC-ACM class with MicroShell
-- ☐ Test enumeration on Linux/Windows/macOS hosts
-- ☐ Remove external UART adapter requirement from hardware setup
+- ⛔ Study Tegra XUSB device controller (`xudc@3550000`) and Linux `tegra-xudc.c` driver — BLOCKED
+- ⛔ Initialize XUSB PHY, PLLs, and power rails from bare metal — BLOCKED by CBB firewall
+- ⛔ Write Tegra XUSB Device Controller Driver (DCD) for TinyUSB — BLOCKED
+- ☐ Integrate TinyUSB CDC-ACM class with MicroShell — platform-independent, can proceed
+- ⛔ Test enumeration on Linux/Windows/macOS hosts — BLOCKED on Jetson
+- ⛔ Remove external UART adapter requirement from hardware setup — BLOCKED
 
-**Effort:** 3-5 weeks  
+**Effort:** 3-5 weeks (if CBB firewall resolved)
 **Value:** Clean single-cable connection, professional demo setup
 
 ---
@@ -149,17 +152,25 @@ Isolate components from each other and from kernel.
 ---
 
 ### Secure Boot Chain
+
+**Note:** Secure boot integration is a potential solution to the CBB firewall blocker. If SLM-OS were signed and integrated into the Jetson secure boot chain, it might receive proper CBB permissions. See `docs/jetson-nvidia-support.md`.
+
 Verify system integrity from power-on through component loading.
 
-- ☐ Study Jetson secure boot architecture (BRBCT, BCT)
+- ☐ Study Jetson secure boot architecture (BRBCT, BCT) — partially researched, see forum findings
 - ☐ Implement kernel image signature verification
 - ☐ Verify component signatures before loading
 - ☐ Integrate with Jetson fuse-based root of trust
 - ☐ Implement secure key storage for model encryption keys
 - ☐ Document threat model and security boundaries
 
-**Effort:** 4-6 weeks  
-**Value:** Production deployment security, tamper detection
+**Forum findings:**
+- Signing requires `l4t_sign_image.sh` tool
+- Cannot sign payloads after Secure Boot is activated (requires full reflash)
+- Uses PKC/SBK keys for signing
+
+**Effort:** 4-6 weeks
+**Value:** Production deployment security, tamper detection, **potential CBB firewall bypass**
 
 ---
 
@@ -279,13 +290,13 @@ TCP/IP networking for QEMU with lwIP stack and VirtIO-Net driver.
   - Help files for all network commands
 
 **Remaining (not implemented):**
-- ☐ Write Jetson Ethernet driver (EQOS controller)
+- ⛔ Write Jetson Ethernet driver (EQOS controller) — BLOCKED by CBB firewall
 - ☐ REST API for remote component management
 - ☐ Network console (telnet/SSH alternative)
 
-**Effort:** 1 week (QEMU), 2-3 weeks (Jetson)
+**Effort:** 1 week (QEMU), 2-3 weeks (Jetson if CBB resolved)
 **Value:** Remote access, distributed systems, OTA updates
-**Status:** Partial (December 2025) - QEMU complete, Jetson pending
+**Status:** Partial (December 2025) - QEMU complete, Jetson BLOCKED by CBB firewall
 
 ---
 
@@ -425,17 +436,20 @@ Lazy allocation and swap support for large models.
 ---
 
 ### GPU Memory Integration
+
+**Status:** ⛔ BLOCKED on Jetson — CBB firewall prevents GPU register access. See `docs/jetson-nvidia-support.md`.
+
 Enable GPU access to model memory regions.
 
-- ☐ Implement `gpu_map()` / `gpu_unmap()` for model handles
-- ☐ Cache coherency: flush D-cache before GPU access
-- ☐ Invalidate D-cache after GPU writes
+- ⛔ Implement `gpu_map()` / `gpu_unmap()` for model handles — BLOCKED on Jetson
+- ✅ Cache coherency: flush D-cache before GPU access — implemented in `cache.c`
+- ✅ Invalidate D-cache after GPU writes — implemented in `cache.c`
 - ☐ Fully implement `SHM_GPU_ACCESSIBLE` flag for IPC buffers
 - ☐ DMA-friendly buffer allocation with proper alignment
 
-**Effort:** 1-2 weeks
+**Effort:** 1-2 weeks (if CBB firewall resolved)
 **Value:** Zero-copy model data sharing with GPU
-**Prerequisite:** GPU driver initialization
+**Prerequisite:** GPU driver initialization, CBB firewall resolution
 
 ---
 
@@ -453,17 +467,25 @@ Support multiple loaded models with intelligent eviction.
 ---
 
 ### TensorRT/CUDA Integration (Phase 5)
+
+**Status:** ⛔ BLOCKED on Jetson — Multiple blockers. See `docs/jetson-nvidia-support.md`.
+
 Actual GPU inference acceleration.
 
-- ☐ Initialize NVIDIA GSP firmware on Jetson Orin
-- ☐ Set up CUDA runtime environment
-- ☐ Integrate TensorRT for optimized inference
-- ☐ Coordinate GPU/NPU task scheduling
-- ☐ Batch inference requests for throughput
+- ⛔ Initialize NVIDIA GSP firmware on Jetson Orin — GSP firmware not publicly documented
+- ⛔ Set up CUDA runtime environment — Requires GSP initialization
+- ⛔ Integrate TensorRT for optimized inference — Requires CUDA
+- ⛔ Coordinate GPU/NPU task scheduling — BLOCKED
+- ☐ Batch inference requests for throughput — Can be designed platform-independently
 
-**Effort:** 2-3 months
+**Blockers:**
+1. CBB firewall prevents bare-metal GPU register access
+2. GSP (GPU System Processor) firmware required but not documented
+3. BPMP communication needed for GPU clocks but corrupted after kexec
+
+**Effort:** 2-3 months (if all blockers resolved)
 **Value:** Production-grade inference performance
-**Prerequisite:** GPU driver, model loader
+**Prerequisite:** GPU driver, model loader, NVIDIA support for bare-metal
 
 ---
 
