@@ -287,3 +287,11 @@ Fix: Power cycle via `jetson-power.py cycle`, wait for Linux to boot.
 *Created: 25 December 2025*
 *Updated: 28 December 2025 - Added Ubuntu support, verified serial working*
 *For: Claude Code reference during lab operations*
+
+
+## (Re-)Programming MicroSD Card
+
+In order to access and (re-)flash the microSD card in a device, follow the procedure here: docs/sd-wire-usage.md
+
+D
+## Flashing

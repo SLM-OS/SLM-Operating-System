@@ -189,69 +189,17 @@ void kernel_main(void *dtb)
 
 #if defined(PLATFORM_RASPI5)
     /*
-     * Pi 5 RP1 UART0 initialization with LED validation.
-     * GPIO14 = TXD (alt function 4), GPIO15 = RXD (alt function 4)
+     * Raspberry Pi 5: Blink LED to confirm kernel reached C code.
+     * BCM2712 GPIO2 controls ACT LED (bit 9).
      */
     {
         volatile uint32_t *gpio2_data = (volatile uint32_t *)0x107D517C04ULL;
-
-        /* RP1 GPIO registers for pin muxing */
-        volatile uint32_t *gpio14_ctrl = (volatile uint32_t *)0x1F000D0074ULL;
-        volatile uint32_t *gpio15_ctrl = (volatile uint32_t *)0x1F000D007CULL;
-        volatile uint32_t *gpio14_pads = (volatile uint32_t *)0x1F000F003CULL;
-        volatile uint32_t *gpio15_pads = (volatile uint32_t *)0x1F000F0040ULL;
-
-        /* RP1 PL011 UART0 registers */
-        volatile uint32_t *uart_dr   = (volatile uint32_t *)0x1F00030000ULL;
-        volatile uint32_t *uart_ibrd = (volatile uint32_t *)0x1F00030024ULL;
-        volatile uint32_t *uart_fbrd = (volatile uint32_t *)0x1F00030028ULL;
-        volatile uint32_t *uart_lcrh = (volatile uint32_t *)0x1F0003002CULL;
-        volatile uint32_t *uart_cr   = (volatile uint32_t *)0x1F00030030ULL;
-
-        /* Brute-force test: cycle through alt functions 0-8 */
-        for (int alt = 0; alt <= 8; alt++) {
-            /* Blink (alt+1) times to identify iteration */
-            for (int b = 0; b <= alt; b++) {
-                *gpio2_data |= (1 << 9);
-                for (volatile int d = 0; d < 300000; d++);
-                *gpio2_data &= ~(1 << 9);
-                for (volatile int d = 0; d < 300000; d++);
-            }
-
-            /* Configure GPIO14 with current alt function */
-            *gpio14_pads = (1 << 6) | (2 << 4);  /* IE=1, drive=8mA */
-            *gpio14_ctrl = alt;  /* Try this FUNCSEL */
-
-            /* Configure GPIO15 same way */
-            *gpio15_pads = (1 << 6) | (1 << 3);  /* IE=1, pull-up */
-            *gpio15_ctrl = alt;
-
-            /* Initialize PL011 UART */
-            *uart_cr = 0;
-            *uart_ibrd = 23;
-            *uart_fbrd = 56;
-            *uart_lcrh = (3 << 5);
-            *uart_cr = (1 << 0) | (1 << 8);
-
-            /* Send "SLM" multiple times */
-            for (int r = 0; r < 10; r++) {
-                *uart_dr = 'S';
-                *uart_dr = 'L';
-                *uart_dr = 'M';
-                for (volatile int d = 0; d < 100000; d++);
-            }
-
-            /* 1 second pause before next iteration */
-            for (volatile int d = 0; d < 50000000; d++);
+        for (int i = 0; i < 3; i++) {
+            *gpio2_data |= (1 << 9);   /* LED ON */
+            for (volatile int d = 0; d < 500000; d++);
+            *gpio2_data &= ~(1 << 9);  /* LED OFF */
+            for (volatile int d = 0; d < 500000; d++);
         }
-
-        /* Done - long blink */
-        *gpio2_data |= (1 << 9);
-        for (volatile int d = 0; d < 50000000; d++);
-        *gpio2_data &= ~(1 << 9);
-
-        /* Hang */
-        while(1);
     }
 #endif
 

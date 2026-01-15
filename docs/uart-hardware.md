@@ -7,34 +7,34 @@ This document describes the UART hardware for each supported SLM-OS platform.
 ## Table of Contents
 
 1. [Platform Summary](#platform-summary)
-2. [PL011 UART (QEMU virt, Raspberry Pi 5)](#pl011-uart-qemu-virt-raspberry-pi-5)
+2. [PL011 UART (QEMU virt)](#pl011-uart-qemu-virt)
 3. [Tegra186-UART (Jetson Orin Nano)](#tegra186-uart-jetson-orin-nano)
-4. [Abstraction Strategy](#abstraction-strategy)
+4. [RP1 UART (Raspberry Pi 5)](#rp1-uart-raspberry-pi-5)
+5. [Abstraction Strategy](#abstraction-strategy)
 
 ---
 
 ## Platform Summary
 
-| Platform | UART Type | Base Address | Notes |
-|----------|-----------|--------------|-------|
-| QEMU virt | PL011 | 0x09000000 | Primary development target |
-| Raspberry Pi 5 | PL011 | 0x107D001000 | BCM2712 UART0 |
-| Jetson Orin Nano | Tegra186-UART | 0x03100000 | UARTA (debug console) |
+| Platform | UART Type | Base Address | Driver | Notes |
+|----------|-----------|--------------|--------|-------|
+| QEMU virt | PL011 | 0x09000000 | uart_pl011.c | Primary development target |
+| Raspberry Pi 5 | RP1 PL011 | 0x1F00030000 | uart_rp1_bitbang.c | Via RP1 southbridge |
+| Jetson Orin Nano | Tegra186-UART | 0x03100000 | uart_tegra.c | UARTA (debug console) |
 
-The PL011 is an ARM standard UART used by QEMU and Raspberry Pi. Jetson uses an NS16550-compatible Tegra UART with different register layout.
+The PL011 is an ARM standard UART used by QEMU. Raspberry Pi 5 uses a PL011-like UART on the RP1 southbridge chip (accessed via PCIe). Jetson uses an NS16550-compatible Tegra UART with different register layout.
 
 ---
 
-## PL011 UART (QEMU virt, Raspberry Pi 5)
+## PL011 UART (QEMU virt)
 
 The PL011 is ARM's PrimeCell UART. It provides a full-featured serial interface with FIFOs, DMA support, and configurable baud rates.
 
-### Base Addresses
+### Base Address
 
 | Platform | Base Address |
 |----------|--------------|
 | QEMU virt | 0x09000000 |
-| Raspberry Pi 5 | 0x107D001000 |
 
 ### Register Map
 
@@ -238,6 +238,102 @@ void ns16550_init(uintptr_t base) {
 
 ---
 
+## RP1 UART (Raspberry Pi 5)
+
+The Raspberry Pi 5's GPIO and UART peripherals are on the RP1 southbridge chip, connected to the BCM2712 SoC via PCIe. The UART is PL011-compatible but has quirks that require a custom driver.
+
+### Architecture
+
+```
+BCM2712 SoC ──PCIe──> RP1 Southbridge
+                         ├── GPIO controller
+                         ├── UART0 (PL011)
+                         ├── UART1-5
+                         └── Other peripherals
+```
+
+### Memory Map
+
+The RP1 is mapped via PCIe BAR at 0x1F00000000, which maps to the RP1's internal address space at 0x40000000:
+
+| Peripheral | Host Address | RP1 Internal | Description |
+|------------|--------------|--------------|-------------|
+| GPIO IO | 0x1F000D0000 | 0x400D0000 | Pin control registers |
+| GPIO RIO | 0x1F000E0000 | 0x400E0000 | Direct GPIO access |
+| GPIO PADS | 0x1F000F0000 | 0x400F0000 | Pad configuration |
+| UART0 | 0x1F00030000 | 0x40030000 | PL011 UART |
+
+### GPIO Configuration
+
+GPIO14 (TXD) and GPIO15 (RXD) must be configured for UART function:
+
+| Register | Address | Value | Description |
+|----------|---------|-------|-------------|
+| GPIO14_PADS | 0x1F000F003C | 0x56 | Output enable, 4mA drive |
+| GPIO14_CTRL | 0x1F000D0074 | 4 | FUNCSEL = UART TXD |
+| GPIO15_PADS | 0x1F000F0040 | 0x56 | Input enable, 4mA drive |
+| GPIO15_CTRL | 0x1F000D007C | 4 | FUNCSEL = UART RXD |
+
+FUNCSEL values:
+- 4 = UART function (TXD on GPIO14, RXD on GPIO15)
+- 5 = SYS_RIO (direct GPIO control via RIO registers)
+
+### Known Limitations
+
+1. **Flag register reads crash:** Reading from UART_FR (0x1F00030018) causes a data abort. The driver uses blind writes with a fixed delay instead of polling TX ready.
+
+2. **FIFOs unreliable:** With FIFOs enabled, character corruption occurs. The driver disables FIFOs (LCR_H bit 4 = 0).
+
+3. **Requires firmware initialization:** The `config.txt` settings `pciex4_reset=0` and `uart_2ndstage=1` must be set so the firmware leaves PCIe/RP1 initialized.
+
+### Initialization Sequence
+
+```c
+// 1. Configure GPIO pads and pin mux
+*gpio14_pads = 0x56;
+*gpio14_ctrl = 4;  // UART function
+*gpio15_pads = 0x56;
+*gpio15_ctrl = 4;
+
+// 2. Disable UART
+*uart_cr = 0;
+
+// 3. Clear interrupts
+*uart_icr = 0x7FF;
+
+// 4. Set baud rate (50MHz clock, 115200 baud)
+*uart_ibrd = 27;
+*uart_fbrd = 8;
+
+// 5. Configure 8N1, FIFOs DISABLED
+*uart_lcr = (3 << 5);  // 8-bit, no FEN
+
+// 6. Enable UART with TX and RX
+*uart_cr = (1 << 0) | (1 << 8) | (1 << 9);
+```
+
+### Transmit (No Flag Polling)
+
+```c
+void uart_putc(char c) {
+    *uart_dr = c;
+    // Fixed delay - flag polling crashes
+    for (volatile int d = 0; d < 15000; d++);
+}
+```
+
+### Driver File
+
+The driver is in `kernel/drivers/uart_rp1_bitbang.c`. Despite the filename (historical), it uses hardware UART for TX. RX is bit-banged via GPIO RIO for reliability.
+
+### References
+
+- [Raspberry Pi 5 config.txt documentation](https://www.raspberrypi.com/documentation/computers/config_txt.html)
+- Circle framework for Pi 5 bare-metal reference
+- See `docs/pi5-uart-testing-status.md` for full investigation notes
+
+---
+
 ## Abstraction Strategy
 
 Since PL011 and NS16550 have different register layouts, SLM-OS uses compile-time platform selection.
@@ -278,10 +374,10 @@ In `platform.h`:
 #if defined(PLATFORM_QEMU_VIRT)
     #define UART_TYPE_PL011
     #define UART_BASE  0x09000000
-#elif defined(PLATFORM_RPI5)
-    #define UART_TYPE_PL011
-    #define UART_BASE  0x107D001000
-#elif defined(PLATFORM_JETSON)
+#elif defined(PLATFORM_RASPI5)
+    #define UART_TYPE_RP1_BITBANG
+    #define UART_BASE  0x1F00030000
+#elif defined(PLATFORM_JETSON_ORIN_NANO)
     #define UART_TYPE_NS16550
     #define UART_BASE  0x03100000
 #endif
@@ -292,11 +388,10 @@ In `platform.h`:
 CMake selects the appropriate driver based on platform:
 
 ```cmake
-if(PLATFORM STREQUAL "QEMU_VIRT" OR PLATFORM STREQUAL "RPI5")
-    set(UART_DRIVER kernel/drivers/uart_pl011.c)
-else()
-    set(UART_DRIVER kernel/drivers/uart_tegra.c)
-endif()
+# UART driver selection in CMakeLists.txt
+$<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
+$<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/uart_rp1_bitbang.c>
+$<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
 ```
 
 ---
@@ -312,4 +407,4 @@ endif()
 
 ---
 
-*Last updated: December 2025*
+*Last updated: January 2026*

@@ -227,11 +227,16 @@
  * The RP1 I/O controller is connected via PCIe and peripherals
  * are mapped starting at 0x1F00000000.
  */
-#define UART_TYPE_PL011
+/*
+ * Use bit-banged UART for now - hardware PL011 needs clock configuration.
+ * The bit-bang driver uses GPIO14/15 directly via RIO registers.
+ */
+#define UART_TYPE_RP1_BITBANG
+/* Hardware UART base (for future use when PL011 is working) */
 #define UART_BASE           0x1F00030000UL  /* UART0 via RP1 */
 #define UART_SIZE           0x00001000UL    /* 4 KB */
 #define UART_CLOCK          48000000UL      /* 48 MHz */
-#define UART_IRQ            (32 + 121)      /* RP1 UART0 IRQ - TBD, may need adjustment */
+#define UART_IRQ            (32 + 121)      /* RP1 UART0 IRQ - TBD */
 
 /*
  * Alternative UARTs (via RP1):

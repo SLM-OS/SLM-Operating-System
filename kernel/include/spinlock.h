@@ -9,7 +9,17 @@
 #define SPINLOCK_H
 
 #include <stdint.h>
-#include "platform.h"   /* For PLATFORM_JETSON_ORIN_NANO */
+#include "platform.h"   /* For PLATFORM_JETSON_ORIN_NANO, PLATFORM_RASPI5 */
+
+/*
+ * On Jetson after kexec and on Raspberry Pi 5 bare-metal, the ARM exclusive
+ * monitor state is not properly initialized, causing LDAXR/STXR operations
+ * to hang (even without WFE). Since we're running single-core in these cases,
+ * we skip actual spinlock operations and just use memory barriers.
+ */
+#if defined(SPINLOCK_SKIP_LOCKING) || defined(PLATFORM_RASPI5)
+#define SPINLOCK_SKIP_LOCKING 1
+#endif
 
 /*
  * Memory barrier macros for ARM64.
@@ -69,7 +79,7 @@ static inline void spin_init(spinlock_t *lock)
  */
 static inline void spin_lock(spinlock_t *lock)
 {
-#if defined(PLATFORM_JETSON_ORIN_NANO)
+#if defined(SPINLOCK_SKIP_LOCKING)
     /* Jetson: skip locking, just barrier for memory ordering */
     (void)lock;
     dmb(ish);
@@ -97,7 +107,7 @@ static inline void spin_lock(spinlock_t *lock)
  */
 static inline int spin_trylock(spinlock_t *lock)
 {
-#if defined(PLATFORM_JETSON_ORIN_NANO)
+#if defined(SPINLOCK_SKIP_LOCKING)
     /* Jetson: always succeed, we're single-core after kexec */
     (void)lock;
     dmb(ish);
@@ -128,7 +138,7 @@ static inline int spin_trylock(spinlock_t *lock)
  */
 static inline void spin_unlock(spinlock_t *lock)
 {
-#if defined(PLATFORM_JETSON_ORIN_NANO)
+#if defined(SPINLOCK_SKIP_LOCKING)
     /* Jetson: skip unlocking, just barrier for memory ordering */
     (void)lock;
     dmb(ish);
@@ -273,7 +283,7 @@ static inline void irq_restore(irq_flags_t flags)
 static inline irq_flags_t spin_lock_irqsave(spinlock_t *lock)
 {
     irq_flags_t flags = irq_save();
-#if !defined(PLATFORM_JETSON_ORIN_NANO)
+#if !defined(SPINLOCK_SKIP_LOCKING)
     spin_lock(lock);
 #else
     (void)lock;  /* Suppress unused parameter warning */
@@ -286,7 +296,7 @@ static inline irq_flags_t spin_lock_irqsave(spinlock_t *lock)
  */
 static inline void spin_unlock_irqrestore(spinlock_t *lock, irq_flags_t flags)
 {
-#if !defined(PLATFORM_JETSON_ORIN_NANO)
+#if !defined(SPINLOCK_SKIP_LOCKING)
     spin_unlock(lock);
 #else
     (void)lock;  /* Suppress unused parameter warning */

@@ -22,7 +22,7 @@ This document defines how SLM-OS handles platform-specific differences to suppor
 |----------|--------|-----|-----|-----|-----|
 | QEMU virt | Primary dev | Virtual | Cortex-A76 (emulated) | Configurable | None |
 | Jetson Orin Nano | Target | Tegra234 | Cortex-A78AE | 4-8 GB | Ampere |
-| Raspberry Pi 5 | Stretch goal | BCM2712 | Cortex-A76 | 4-8 GB | VideoCore VII |
+| Raspberry Pi 5 | Working | BCM2712 | Cortex-A76 | 4-8 GB | VideoCore VII |
 
 ---
 
@@ -55,10 +55,11 @@ This document defines how SLM-OS handles platform-specific differences to suppor
 
 | Aspect | QEMU virt | Jetson Orin Nano | Raspberry Pi 5 |
 |--------|-----------|------------------|----------------|
-| Type | PL011 | Tegra186 (NS16550) | PL011 |
-| Base address | 0x09000000 | 0x03100000 | 0x107D001000 |
-| Register layout | ARM standard | 8250-compatible | ARM standard |
-| Driver | uart_pl011.c | uart_tegra.c | uart_pl011.c |
+| Type | PL011 | Tegra186 (NS16550) | RP1 PL011 |
+| Base address | 0x09000000 | 0x03100000 | 0x1F00030000 (via RP1) |
+| Register layout | ARM standard | 8250-compatible | ARM standard (no flag reads) |
+| Driver | uart_pl011.c | uart_tegra.c | uart_rp1_bitbang.c |
+| Notes | - | BPMP clock enable | Requires firmware PCIe init |
 
 #### Interrupt Controller
 
@@ -496,4 +497,61 @@ make PLATFORM=JETSON_ORIN_NANO kernel  # Build for Jetson
 
 ---
 
-*Last updated: December 2025*
+## Raspberry Pi 5: Platform Notes
+
+This section documents Pi 5-specific requirements discovered during bring-up.
+
+### Boot Configuration
+
+Pi 5 requires specific `config.txt` settings for bare-metal UART to work:
+
+```
+arm_64bit=1
+kernel_address=0x80000
+kernel=kernel_2712.img
+
+# Critical: Firmware pre-initializes PCIe/RP1 for bare-metal
+pciex4_reset=0
+uart_2ndstage=1
+os_check=0
+```
+
+Without `pciex4_reset=0` and `uart_2ndstage=1`, the firmware resets PCIe after loading the kernel, making RP1 peripherals inaccessible.
+
+### RP1 Southbridge
+
+The Pi 5's GPIO and UART are on the RP1 chip, connected via PCIe:
+
+| Address Range | Contents |
+|---------------|----------|
+| 0x1F00000000+ | RP1 peripherals (maps to RP1's internal 0x40000000) |
+| 0x1F000D0000 | GPIO IO (pin control) |
+| 0x1F000E0000 | GPIO RIO (direct GPIO) |
+| 0x1F000F0000 | GPIO PADS |
+| 0x1F00030000 | UART0 (PL011) |
+
+### Known Limitations
+
+1. **UART flag register:** Reading UART_FR causes data abort. The driver uses blind writes with delay.
+
+2. **Spinlocks:** ARM exclusive monitor operations (LDAXR/STXR) hang. `SPINLOCK_SKIP_LOCKING` is defined for Pi 5.
+
+3. **Single-core only:** Due to spinlock limitation, multi-core support is not available.
+
+### Serial Console
+
+- **Pins:** GPIO14 (TXD, pin 8), GPIO15 (RXD, pin 10), GND (pin 6)
+- **Baud:** 115200, 8N1
+- **GPIO FUNCSEL:** 4 (UART function)
+
+### Driver
+
+The driver `uart_rp1_bitbang.c` (despite the name) uses hardware PL011:
+- TX: Hardware UART with fixed delay (no flag polling)
+- RX: Bit-banged via RIO for reliability
+
+See `docs/pi5-uart-testing-status.md` for full details.
+
+---
+
+*Last updated: January 2026*
