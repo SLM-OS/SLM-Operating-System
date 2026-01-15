@@ -2,7 +2,7 @@
 
 This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 3050.
 
-**Status:** In Progress (M1 - Boot Foundation)
+**Status:** In Progress (M1 - Boot Foundation ~80% Complete)
 
 **Summary:** Primary development track to port SLM-OS to x86-64 architecture with discrete NVIDIA GPU. This enables GPU driver development on accessible hardware with superior debugging tools.
 
@@ -28,6 +28,48 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 
 ---
 
+## Completed Work Summary (January 2026)
+
+### M1 Boot Foundation — ~80% Complete
+
+**What's Working:**
+- x86-64 kernel boots in QEMU from GRUB ISO
+- Full 32-bit to 64-bit long mode transition
+- 4-level page tables with 2MB pages (1GB identity mapped)
+- 64-bit GDT with code/data segments
+- Framebuffer console with 8x16 bitmap font
+- C kernel entry and basic output
+
+**Key Files Created:**
+| File | Purpose |
+|------|---------|
+| `kernel/arch/x86_64/trampoline32.S` | 32-bit Multiboot2 entry, mode transition |
+| `kernel/arch/x86_64/entry64.S` | 64-bit entry, BSS clear, kernel call |
+| `kernel/arch/x86_64/main_x86.c` | Test kernel entry point |
+| `kernel/arch/x86_64/Makefile.test` | Build system with ISO creation |
+| `kernel/kernel-x86_64.ld` | Linker script for x86-64 |
+| `kernel/drivers/fb_console.c` | Framebuffer console driver |
+| `kernel/tests/test_x86_boot.c` | 20 functional tests |
+| `docs/x86-64-port.md` | Comprehensive documentation |
+
+**Technical Challenges Solved:**
+1. **32/64-bit assembly split** — GAS generates 64-bit instructions even with `.code32` when targeting elf64; solved by compiling trampoline with `-m32` and converting via `objcopy`
+2. **GDT pointer relocation** — Made `gdt64_ptr` global for correct symbol relocation instead of section-relative
+3. **Page table preservation** — Moved page tables to separate `.page_tables` section to prevent BSS zeroing from corrupting active paging structures
+
+**Test Command:**
+```bash
+make -f kernel/arch/x86_64/Makefile.test iso
+qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio
+```
+
+**Remaining for M1:**
+- External SSD setup for real hardware boot
+- Integration with main CMake build system
+- Rust target configuration
+
+---
+
 ## Icon Key
 
 | Icon | Meaning |
@@ -42,36 +84,51 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 ## Milestone 1: x86-64 Boot Foundation
 
 ### Development Environment
-- ☐ Set up cross-compilation for x86-64 bare-metal (`x86_64-elf-gcc` or clang)
-- ☐ Install Rust target `x86_64-unknown-none`
-- ☐ Create `kernel/arch/x86_64/` directory structure
-- ☐ Update CMakeLists.txt for x86-64 target
+- ✅ Set up cross-compilation for x86-64 bare-metal (native GCC with -m32/-m64)
+- ✅ Install Rust target `x86_64-unknown-none`
+- ✅ Create `kernel/arch/x86_64/` directory structure
+- ☐ Update CMakeLists.txt for x86-64 target (using Makefile.test for now)
 - ☐ Update Cargo.toml for x86-64 target
-- ☐ Set up QEMU x86-64 for initial testing (before real hardware)
+- ✅ Set up QEMU x86-64 for initial testing (before real hardware)
 
-### UEFI Boot
-- ☐ Research UEFI boot on x86-64 (different from ARM64 UEFI)
-- ☐ Create UEFI application stub or use BOOTX64.EFI approach
-- ☐ Implement minimal UEFI boot services usage:
-  - ☐ Get memory map from UEFI
-  - ☐ Get framebuffer info (optional, for debug)
-  - ☐ Exit boot services
-- ☐ Write `boot_x86.S` — entry from UEFI, set up 64-bit long mode (if not already)
-- ☐ Create x86-64 linker script (`kernel-x86_64.ld`)
-- ☐ Alternative: Multiboot2 header for GRUB boot (simpler than raw UEFI)
+### Multiboot2/GRUB Boot (chosen over raw UEFI)
+- ✅ Research boot options — chose Multiboot2/GRUB (simpler than raw UEFI)
+- ✅ Implement Multiboot2 header with framebuffer tag
+- ✅ Write `trampoline32.S` — 32-bit entry, validates magic, checks CPUID/long mode
+- ✅ Implement 32-bit to 64-bit mode transition:
+  - ✅ Set up 4-level page tables (PML4 → PDPT → PD with 2MB pages)
+  - ✅ Enable PAE in CR4
+  - ✅ Load PML4 into CR3
+  - ✅ Enable long mode in EFER MSR
+  - ✅ Enable paging in CR0
+  - ✅ Load 64-bit GDT
+  - ✅ Far jump to 64-bit code segment
+- ✅ Write `entry64.S` — 64-bit entry, segment setup, BSS clear, kernel call
+- ✅ Create x86-64 linker script (`kernel-x86_64.ld`)
+- ✅ Create GRUB bootable ISO with `grub-mkrescue`
 
 ### Early Console
-- ☐ Implement UEFI GOP framebuffer console (primary — no physical serial port)
-- ☐ Implement basic font rendering (8x16 bitmap font)
-- ☐ Port `printf` infrastructure to x86-64
-- ☐ Test "Hello from SLM-OS x86-64!" in QEMU
+- ✅ Implement UEFI GOP framebuffer console (`fb_console.c`)
+- ✅ Implement basic font rendering (8x16 bitmap font)
+- ✅ Port `printf` infrastructure to x86-64 (`fb_console_puts`, `uart_putc` compat)
+- ✅ Test "Hello from SLM-OS x86-64!" in QEMU — **WORKING**
 
 ### External SSD Setup
 - ☐ Format external SSD with GPT partition table
 - ☐ Create EFI System Partition (ESP) — FAT32, ~512MB
 - ☐ Create SLM-OS partition (can be raw or minimal filesystem)
-- ☐ Install UEFI bootloader or configure direct kernel boot
-- ☐ Document boot configuration in `docs/x86-boot.md`
+- ☐ Install GRUB bootloader for real hardware
+- ✅ Document boot configuration in `docs/x86-64-port.md`
+
+### Testing & Documentation
+- ✅ Create functional tests (`test_x86_boot.c` — 20 tests)
+  - ✅ Control register tests (CR0, CR4, EFER, CR3)
+  - ✅ Page table structure tests (PML4, PDPT, PD entries)
+  - ✅ GDT tests (limit, CS/DS selectors)
+  - ✅ Memory layout tests (kernel address, section ordering)
+  - ✅ 64-bit mode verification tests
+- ✅ Create comprehensive documentation (`docs/x86-64-port.md`)
+- ✅ Update test harness header for x86 boot tests
 
 ---
 
@@ -370,13 +427,14 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 
 ## Outstanding Decisions
 
-### Milestone 1 — Boot Method
+### Milestone 1 — Boot Method ✅ DECIDED
 
-| Decision | Options | Recommendation |
-|----------|---------|----------------|
-| **Boot method** | Raw UEFI vs Multiboot2/GRUB | **Multiboot2/GRUB** initially — simpler, well-documented; can add raw UEFI later |
-| **Console** | Serial (COM1) vs Framebuffer | **UEFI GOP framebuffer** — no physical serial port on target PC |
-| **SSD filesystem** | Raw partitions vs FAT32/ext4 | **FAT32 ESP + raw partition** — UEFI needs FAT32, kernel can be raw |
+| Decision | Options | **Chosen** |
+|----------|---------|------------|
+| **Boot method** | Raw UEFI vs Multiboot2/GRUB | ✅ **Multiboot2/GRUB** — simpler, well-documented, WORKING |
+| **Console** | Serial (COM1) vs Framebuffer | ✅ **UEFI GOP framebuffer** — no physical serial port on target PC |
+| **SSD filesystem** | Raw partitions vs FAT32/ext4 | **FAT32 ESP + raw partition** — pending real hardware setup |
+| **32→64 transition** | Single file vs split files | ✅ **Split files** — trampoline32.S (-m32) + entry64.S (-m64) |
 
 ### Milestone 5 — PCIe
 
@@ -513,5 +571,6 @@ M9 (Docs) ──────> Ongoing throughout
 ---
 
 *Created: January 2026*
+*Last Updated: January 2026 — M1 boot foundation ~80% complete*
 *Purpose: Parallel development track for x86-64 + RTX 3050 GPU learning*
 *Relationship: Supports Phase 4 (Jetson) and Phase 5 (SLM Integration)*
