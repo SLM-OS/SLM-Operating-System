@@ -29,15 +29,25 @@
 static uint64_t l1_table[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 
 /*
- * L2 tables: allocated dynamically from PMM as needed.
+ * L2 tables: statically allocated for initial boot.
  * Each L2 table covers 1GB and contains 512 × 2MB block descriptors.
  *
- * For initial boot, we statically allocate a few L2 tables:
- * - One for kernel code/data (covers first 1GB of physical RAM)
- * - One for MMIO (covers GIC, UART region)
+ * Different platforms need different numbers of L2 tables depending
+ * on how many distinct 1GB L1 regions contain devices or RAM that
+ * need fine-grained (2MB) mappings.
+ *
+ * QEMU:   l2_kernel (RAM), l2_mmio (GIC+UART+VirtIO, all in 0x00-0x3F)
+ * Jetson: l2_kernel (RAM), l2_mmio (GIC+UART, all in 0x00-0x3F)
+ * Pi 5:   l2_mmio_gic (GIC/GPIO at L1[65]), l2_mmio_rp1 (RP1 UART at L1[124])
+ *         (RAM uses 1GB L1 block descriptors, no L2 needed)
  */
+#if defined(PLATFORM_QEMU_VIRT) || defined(PLATFORM_JETSON_ORIN_NANO)
 static uint64_t l2_kernel[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+#elif defined(PLATFORM_RASPI5)
+static uint64_t l2_mmio_gic[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+static uint64_t l2_mmio_rp1[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+#endif
 
 /* VMM state */
 static struct {
@@ -103,6 +113,52 @@ static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
 
     return desc;
 }
+
+#if defined(PLATFORM_RASPI5)
+/*
+ * Build an L1 block descriptor (1GB block, used for large RAM regions).
+ *
+ * At L1 with 4KB granule, block descriptors map 1GB regions.
+ * Output address bits are [47:30] (1GB-aligned).
+ */
+static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
+{
+    uint64_t desc = PTE_TYPE_BLOCK;
+
+    /* Physical address (1GB aligned) */
+    desc |= (pa & 0x0000FFFFC0000000UL);
+
+    /* Access flag */
+    desc |= PTE_AF;
+
+    /* Memory attributes — same logic as L2 block descriptors */
+    if (flags & VMM_FLAG_DEVICE) {
+        desc |= PTE_ATTR_INDEX(MAIR_IDX_DEVICE_nGnRnE);
+        desc |= PTE_SH_NON;
+    } else if (flags & VMM_FLAG_NOCACHE) {
+        desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC);
+        desc |= PTE_SH_INNER;
+    } else {
+        desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB);
+        desc |= PTE_SH_INNER;
+    }
+
+    /* Access permissions */
+    if (!(flags & VMM_FLAG_WRITE)) {
+        desc |= PTE_AP_RO_EL1;
+    } else {
+        desc |= PTE_AP_RW_EL1;
+    }
+
+    /* Execute permissions */
+    if (!(flags & VMM_FLAG_EXEC)) {
+        desc |= PTE_PXN;
+    }
+    desc |= PTE_UXN;
+
+    return desc;
+}
+#endif /* PLATFORM_RASPI5 */
 
 /*
  * Build a table descriptor (L1 entry pointing to L2 table).
@@ -237,6 +293,17 @@ int vmm_map_region(uint64_t virt, uint64_t phys, uint64_t size, uint32_t flags)
  */
 uint64_t vmm_virt_to_phys(uint64_t virt)
 {
+    uint64_t l1_idx = L1_INDEX(virt);
+    uint64_t l1_entry = l1_table[l1_idx];
+
+    /* Check for L1 block descriptor (1GB mapping) */
+    if ((l1_entry & PTE_TYPE_MASK) == PTE_TYPE_BLOCK) {
+        uint64_t block_pa = l1_entry & 0x0000FFFFC0000000UL;
+        uint64_t offset = virt & (L1_BLOCK_SIZE - 1);
+        return block_pa | offset;
+    }
+
+    /* Otherwise look up L2 table */
     uint64_t *l2 = get_l2_table(virt);
     if (!l2) {
         return 0;
@@ -261,6 +328,15 @@ uint64_t vmm_virt_to_phys(uint64_t virt)
  */
 bool vmm_is_mapped(uint64_t virt)
 {
+    uint64_t l1_idx = L1_INDEX(virt);
+    uint64_t l1_entry = l1_table[l1_idx];
+
+    /* L1 block descriptor = 1GB region is mapped */
+    if ((l1_entry & PTE_TYPE_MASK) == PTE_TYPE_BLOCK) {
+        return true;
+    }
+
+    /* Check L2 table */
     uint64_t *l2 = get_l2_table(virt);
     if (!l2) {
         return false;
@@ -480,10 +556,11 @@ static int vmm_run_tests(void)
 
     /*
      * Test 4: vmm_is_mapped() for unmapped address
-     * Address 0x8000_0000 (2GB) should not be mapped
+     * Pick an address beyond mapped RAM that should not be mapped.
      */
     {
-        uint64_t va = 0x80000000UL;
+        /* Use an address well beyond RAM_BASE + RAM_SIZE */
+        uint64_t va = RAM_BASE + RAM_SIZE + 0x40000000UL;
         bool mapped = vmm_is_mapped(va);
 
         if (!mapped) {
@@ -582,112 +659,178 @@ void vmm_dump(void)
  */
 
 /*
- * Set up initial page tables and enable MMU.
+ * ==========================================================================
+ * Platform-Specific Page Table Setup
  *
- * With 39-bit VA and shared L1 table (TTBR0 = TTBR1), each mapping
- * serves both identity (TTBR0) and kernel high (TTBR1) addresses:
+ * Each platform has a different physical memory layout and device address
+ * space. The L1 table maps 512 × 1GB regions (39-bit VA). Each platform
+ * populates the L1 entries differently:
  *
- * Physical:          TTBR0 (identity):     TTBR1 (kernel):
- * 0x0800_0000 (GIC)  0x0800_0000       ->  0xFFFF_FF80_0800_0000
- * 0x0900_0000 (UART) 0x0900_0000       ->  0xFFFF_FF80_0900_0000
- * 0x4000_0000 (RAM)  0x4000_0000       ->  0xFFFF_FF80_4000_0000
+ * QEMU virt:
+ *   L1[0]  → L2 table for MMIO (GIC 0x08M, UART 0x09M, VirtIO 0x0AM)
+ *   L1[1]  → L2 table for RAM  (0x40000000, 1GB)
  *
- * During MMU enable, code executes via TTBR0 (identity mapping).
- * After enable, kernel code runs via TTBR1 (high addresses).
+ * Jetson Orin Nano:
+ *   L1[0]  → L2 table for MMIO (GIC 0x0F4M, UART 0x031M)
+ *   L1[2]  → L2 table for RAM  (0x80000000, 1GB of 8GB mapped)
+ *
+ * Raspberry Pi 5:
+ *   L1[0-3] → 1GB block descs for RAM (0x00000000, 4GB)
+ *   L1[65]  → L2 table for GIC/GPIO   (0x107FFF9000, 0x107D517C04)
+ *   L1[124] → L2 table for RP1/UART   (0x1F00030000, 0x1F000D0000)
+ *
+ * x86-64 has its own VMM (4-level page tables, not shared with this code).
+ * ==========================================================================
  */
-void vmm_init(void)
+
+#if defined(PLATFORM_QEMU_VIRT) || defined(PLATFORM_JETSON_ORIN_NANO)
+/*
+ * QEMU and Jetson: RAM and MMIO are in separate 1GB L1 regions.
+ * RAM gets an L2 table for 2MB block mappings.
+ * MMIO gets an L2 table with sparse device mappings.
+ */
+static void vmm_setup_platform(void)
 {
-    INFO("Initializing VMM...");
+    uint32_t kernel_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
 
-    /* Clear tables */
-    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
-        l1_table[i] = 0;
-        l2_kernel[i] = 0;
-        l2_mmio[i] = 0;
-    }
-
-    /*
-     * Set up L1 table entries.
-     *
-     * With 39-bit VA, both TTBR0 (identity) and TTBR1 (kernel) use the
-     * same L1 table. The index is determined by VA[38:30]:
-     * - L1[0] covers 0x0000_0000 - 0x3FFF_FFFF (MMIO region)
-     * - L1[1] covers 0x4000_0000 - 0x7FFF_FFFF (RAM region)
-     *
-     * For TTBR0 access (identity): VA 0x4000_0000 → L1[1]
-     * For TTBR1 access (kernel):   VA 0xFFFF_FF80_4000_0000 → L1[1]
-     * Same index, different TTBR selection based on high bits.
-     */
-
-    /* L1[0] for MMIO region (0x0000_0000 - 0x3FFF_FFFF) */
+    /* L1 entry for MMIO region (GIC, UART, etc. all below 0x40000000) */
     l1_table[0] = make_table_desc((uint64_t)l2_mmio);
     vmm_state.l2_tables_used++;
 
-    /* L1[1] for RAM region (0x4000_0000 - 0x7FFF_FFFF) */
+    /* L1 entry for RAM */
     l1_table[RAM_BASE >> 30] = make_table_desc((uint64_t)l2_kernel);
     vmm_state.l2_tables_used++;
 
-    /*
-     * Populate L2 tables with block mappings.
-     */
-
-    /*
-     * Map kernel RAM (based on RAM_SIZE from platform.h).
-     * L2 index for 0x4000_0000 within its 1GB region = 0.
-     *
-     * Since TTBR0 and TTBR1 share the same L1 table, this mapping
-     * serves both identity (VA = PA) and kernel high addresses
-     * (VA = PA | KERNEL_VA_BASE).
-     *
-     * Note: Linker script now separates .text (RX) from .data/.bss (RW)
-     * in the ELF segments. However, the MMU uses 2MB blocks which are
-     * too coarse for per-section permissions. Fine-grained RX/RW mapping
-     * requires 4KB pages or 2MB-aligned sections (Phase 3 work).
-     */
-    uint32_t kernel_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
+    /* Populate RAM L2 table with 2MB blocks */
     uint32_t num_blocks = RAM_SIZE / BLOCK_SIZE;
-    if (num_blocks > 512) num_blocks = 512;  /* L2 table limit */
+    if (num_blocks > 512) num_blocks = 512;
     for (uint32_t i = 0; i < num_blocks; i++) {
         uint64_t pa = RAM_BASE + (i * BLOCK_SIZE);
         l2_kernel[i] = make_block_desc(pa, kernel_flags);
         vmm_state.blocks_mapped++;
     }
 
-    /*
-     * Map MMIO devices.
-     * GIC is at 0x0800_0000, UART at 0x0900_0000, VirtIO at 0x0a00_0000
-     * L2 index = PA / 2MB = PA >> 21
-     * 0x0800_0000 >> 21 = 64
-     * 0x0900_0000 >> 21 = 72
-     * 0x0a00_0000 >> 21 = 80
-     */
+    /* Map MMIO devices into l2_mmio */
     uint64_t gic_l2_idx = (GIC_DIST_BASE >> BLOCK_SHIFT) & 0x1FF;
     uint64_t uart_l2_idx = (UART_BASE >> BLOCK_SHIFT) & 0x1FF;
-#if defined(PLATFORM_QEMU_VIRT)
-    uint64_t virtio_l2_idx = (0x0a000000 >> BLOCK_SHIFT) & 0x1FF;
-#endif
 
-    /*
-     * MMIO mappings - same table serves both identity and kernel mappings.
-     */
     l2_mmio[gic_l2_idx] = make_block_desc(GIC_DIST_BASE & ~(BLOCK_SIZE - 1),
                                            VMM_FLAGS_DEVICE);
     l2_mmio[uart_l2_idx] = make_block_desc(UART_BASE & ~(BLOCK_SIZE - 1),
                                             VMM_FLAGS_DEVICE);
-#if defined(PLATFORM_QEMU_VIRT)
-    /* VirtIO MMIO region for virtio-net */
-    l2_mmio[virtio_l2_idx] = make_block_desc(0x0a000000,
-                                              VMM_FLAGS_DEVICE);
-    vmm_state.blocks_mapped += 3;
-#else
     vmm_state.blocks_mapped += 2;
+
+#if defined(PLATFORM_QEMU_VIRT)
+    /* VirtIO MMIO region for virtio-net at 0x0A000000 */
+    uint64_t virtio_l2_idx = (0x0a000000 >> BLOCK_SHIFT) & 0x1FF;
+    l2_mmio[virtio_l2_idx] = make_block_desc(0x0a000000, VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
 #endif
+}
+#endif /* QEMU || JETSON */
+
+#if defined(PLATFORM_RASPI5)
+/*
+ * Raspberry Pi 5: RAM starts at 0x0 and devices are at high addresses.
+ *
+ * Physical memory layout:
+ *   0x0000_0000 - 0x0FFF_FFFF : RAM (4GB)          → L1[0]-L1[3]
+ *   0x1040_0000_0000 region   : GIC-400, GPIO2      → L1[65]
+ *   0x1F00_0000_0000 region   : RP1 (UART, GPIO)    → L1[124]
+ *
+ * RAM uses 1GB L1 block descriptors (no L2 tables needed).
+ * MMIO uses L2 tables for fine-grained 2MB device mappings.
+ */
+static void vmm_setup_platform(void)
+{
+    uint32_t ram_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
+
+    /*
+     * Map RAM using 1GB L1 block descriptors.
+     * Pi 5 has 4GB (or 8GB) starting at PA 0x0.
+     */
+    uint32_t ram_gb = RAM_SIZE / L1_BLOCK_SIZE;
+    if (ram_gb > 512) ram_gb = 512;
+    for (uint32_t i = 0; i < ram_gb; i++) {
+        l1_table[i] = make_l1_block_desc(i * L1_BLOCK_SIZE, ram_flags);
+        vmm_state.blocks_mapped += 512;  /* each 1GB = 512 × 2MB equivalent */
+    }
+
+    /*
+     * Map GIC and GPIO2 region: L1[65] covers 0x1040000000-0x107FFFFFFF
+     *
+     * GIC distributor: 0x107FFF9000  → L2 index = (0x107FFF9000 >> 21) & 0x1FF
+     * GIC CPU iface:   0x107FFFA000  → same 2MB block as distributor
+     * GPIO2 (ACT LED): 0x107D517C04  → L2 index = (0x107D517C04 >> 21) & 0x1FF
+     */
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+        l2_mmio_gic[i] = 0;
+
+    uint64_t gic_l1_idx = GIC_DIST_BASE >> 30;
+    l1_table[gic_l1_idx] = make_table_desc((uint64_t)l2_mmio_gic);
+    vmm_state.l2_tables_used++;
+
+    /* GIC distributor + CPU interface (same 2MB block) */
+    uint64_t gic_l2_idx = (GIC_DIST_BASE >> BLOCK_SHIFT) & 0x1FF;
+    l2_mmio_gic[gic_l2_idx] = make_block_desc(GIC_DIST_BASE & ~(BLOCK_SIZE - 1),
+                                                VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
+
+    /* GPIO2 for ACT LED at 0x107D517C04 */
+    uint64_t gpio2_addr = 0x107D517C04ULL;
+    uint64_t gpio2_l2_idx = (gpio2_addr >> BLOCK_SHIFT) & 0x1FF;
+    if (gpio2_l2_idx != gic_l2_idx) {
+        l2_mmio_gic[gpio2_l2_idx] = make_block_desc(gpio2_addr & ~(BLOCK_SIZE - 1),
+                                                      VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+    }
+
+    /*
+     * Map RP1 peripherals: L1[124] covers 0x1F00000000-0x1F3FFFFFFF
+     *
+     * UART0:  0x1F00030000  → L2 index = (0x1F00030000 >> 21) & 0x1FF
+     * GPIO:   0x1F000D0000  → same 2MB block as UART0 (both in first 2MB)
+     * RIO:    0x1F000E0000  → same 2MB block
+     * PADS:   0x1F000F0000  → same 2MB block
+     */
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+        l2_mmio_rp1[i] = 0;
+
+    uint64_t rp1_l1_idx = UART_BASE >> 30;
+    l1_table[rp1_l1_idx] = make_table_desc((uint64_t)l2_mmio_rp1);
+    vmm_state.l2_tables_used++;
+
+    /* RP1 first 2MB block covers UART0, GPIO, RIO, PADS */
+    uint64_t rp1_l2_idx = (UART_BASE >> BLOCK_SHIFT) & 0x1FF;
+    l2_mmio_rp1[rp1_l2_idx] = make_block_desc(UART_BASE & ~(BLOCK_SIZE - 1),
+                                                VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
+}
+#endif /* PLATFORM_RASPI5 */
+
+/*
+ * Set up initial page tables and enable MMU.
+ *
+ * With 39-bit VA and shared L1 table (TTBR0 = TTBR1), each mapping
+ * serves both identity (TTBR0) and kernel high (TTBR1) addresses.
+ * During MMU enable, code executes via TTBR0 (identity mapping).
+ */
+void vmm_init(void)
+{
+    INFO("Initializing VMM...");
+
+    /* Clear L1 table */
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
+        l1_table[i] = 0;
+    }
+
+    /* Platform-specific page table setup */
+    vmm_setup_platform();
 
     DEBUG_PRINT("  L1 table at PA: 0x%lx", (uint64_t)l1_table);
-    DEBUG_PRINT("  L2 kernel at PA: 0x%lx", (uint64_t)l2_kernel);
-    DEBUG_PRINT("  L2 MMIO at PA: 0x%lx", (uint64_t)l2_mmio);
     DEBUG_PRINT("  TTBR0 = TTBR1 = 0x%lx (shared L1 table)", (uint64_t)l1_table);
-    DEBUG_PRINT("  Mapped %u blocks (%lu MB)",
+    DEBUG_PRINT("  L2 tables used: %u", vmm_state.l2_tables_used);
+    DEBUG_PRINT("  Blocks mapped: %u (%lu MB)",
                 vmm_state.blocks_mapped,
                 (vmm_state.blocks_mapped * BLOCK_SIZE) / (1024 * 1024));
 

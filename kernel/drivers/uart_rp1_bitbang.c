@@ -120,17 +120,24 @@ void uart_init(void)
 
 /*
  * Send a single character via PL011 UART.
- * Uses blind writes with delay - flag register reads may crash on RP1.
+ *
+ * After MMU is enabled with proper device memory mapping for RP1,
+ * the flag register should be safely readable. Use it to wait for
+ * TX FIFO space rather than a blind delay which breaks when caches
+ * change loop timing.
  */
 void uart_putc(char c)
 {
     volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
+    volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
+
+    /* Wait until TX FIFO is not full */
+    while (*uart_fr & FR_TXFF) {
+        __asm__ volatile("yield" ::: "memory");
+    }
 
     /* Write character to data register */
     *uart_dr = (uint32_t)c;
-
-    /* Delay to allow transmission (no flag polling - it crashes) */
-    for (volatile int d = 0; d < 15000; d++);
 }
 
 /*

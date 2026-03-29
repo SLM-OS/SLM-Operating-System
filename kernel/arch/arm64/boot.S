@@ -218,6 +218,7 @@ real_start:
     /* Now in EL1 - synchronize before continuing */
     dsb     sy
     isb
+
 #endif
     /* On Jetson, skip early UART - clocks not configured */
 
