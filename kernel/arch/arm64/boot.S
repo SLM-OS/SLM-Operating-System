@@ -194,6 +194,15 @@ real_start:
     msr     cptr_el2, x10
     msr     hstr_el2, xzr
 
+    /* Enable EL1 access to physical timer and counter registers.
+     * CNTHCTL_EL2: bit 0 (EL1PCTEN) = allow CNTPCT_EL0 reads
+     *              bit 1 (EL1PCEN)   = allow CNTP_* timer access
+     * Without this, any physical timer access from EL1 traps to EL2
+     * and hangs (no EL2 exception handler installed). */
+    mov     x10, #3
+    msr     cnthctl_el2, x10
+    msr     cntvoff_el2, xzr        /* No virtual offset */
+
     /* Enable FP/SIMD at EL1 */
     mov     x10, #(3 << 20)
     msr     cpacr_el1, x10

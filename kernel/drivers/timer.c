@@ -96,8 +96,11 @@ void timer_init(void)
     write_cntp_ctl(0);
 
     /* Configure GIC for timer interrupt */
+    DEBUG_PRINT("  Configuring GIC for timer IRQ %d...", TIMER_IRQ);
     gic_set_priority(TIMER_IRQ, GIC_PRIORITY_DEFAULT);
+    DEBUG_PRINT("  GIC priority set");
     gic_enable_irq(TIMER_IRQ);
+    DEBUG_PRINT("  GIC IRQ enabled");
 
     INFO("Timer initialized (not started)");
 }

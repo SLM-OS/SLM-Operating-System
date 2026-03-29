@@ -179,6 +179,7 @@ static void init_cpu_data(uint32_t cpu)
     p->boot_time_ns = 0;
 }
 
+#if !defined(PLATFORM_RASPI5)
 /*
  * Translate PSCI error code to string for debugging.
  */
@@ -198,6 +199,7 @@ static const char *psci_error_str(int err)
     default:                    return "UNKNOWN";
     }
 }
+#endif /* !PLATFORM_RASPI5 */
 
 /*
  * Secondary CPU initialization (called from smp_boot.S).
@@ -243,6 +245,7 @@ void secondary_init(uint32_t logical_cpu_id)
     panic("CPU %u: scheduler_start returned!", logical_cpu_id);
 }
 
+#if !defined(PLATFORM_RASPI5)
 /*
  * Bring up a single secondary CPU.
  */
@@ -287,6 +290,7 @@ static int boot_secondary(uint32_t cpu)
     WARN("CPU %u: boot timeout", cpu);
     return PSCI_INTERNAL_FAILURE;
 }
+#endif /* !PLATFORM_RASPI5 */
 
 /*
  * Run spinlock validation tests.
@@ -463,6 +467,7 @@ void smp_init(void)
     uint32_t booted = 0;
 
     INFO("SMP: initializing");
+    DEBUG_PRINT("  About to run spinlock tests...");
 
     /* Run spinlock tests before booting secondary cores */
     spinlock_run_tests();
@@ -480,11 +485,21 @@ void smp_init(void)
     cpus_online = 1;
 
     /* Boot secondary CPUs */
+#if defined(PLATFORM_RASPI5)
+    /*
+     * Pi 5: Skip secondary CPU boot. The Pi 5 firmware's EL2 stub does not
+     * implement PSCI, so HVC #0 calls hang. Additionally, ARM exclusive
+     * monitor operations hang on Pi 5, making spinlocks unusable for SMP.
+     */
+    INFO("SMP: skipping secondary boot on Pi 5 (no PSCI, no spinlocks)");
+    (void)booted;
+#else
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
         if (boot_secondary(cpu) == PSCI_SUCCESS) {
             booted++;
         }
     }
+#endif
 
     INFO("SMP: %u/%u secondary CPUs online", booted, cpu_count - 1);
     INFO("SMP: total %u CPUs active", cpus_online);
