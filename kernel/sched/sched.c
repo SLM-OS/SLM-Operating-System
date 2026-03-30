@@ -17,6 +17,7 @@
 #include "spinlock.h"
 #include "slm_ffi.h"
 #include "gic.h"
+#include "timer.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -717,6 +718,14 @@ void scheduler_start(void)
     INFO("CPU %u: Switching to first task: '%s'", this_cpu, first->name);
 
     spin_unlock_irqrestore(&rq->lock, flags);
+
+    /* Start timer and enable interrupts now that a task is active.
+     * Must be done AFTER task_set_current() so that timer IRQ handler
+     * can safely call task_current() in schedule(). */
+    INFO("Starting timer (100 Hz)...");
+    timer_start();
+    INFO("Enabling interrupts...");
+    __asm__ volatile("msr daifclr, #0x2" ::: "memory");  /* Clear IRQ mask */
 
     /* Switch to first task (NULL = no previous context to save) */
     switch_to(NULL, first);

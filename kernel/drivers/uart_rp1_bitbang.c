@@ -106,8 +106,8 @@ void uart_init(void)
     *uart_fbrd = 8;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* 8N1, FIFOs disabled (single character mode) */
-    *uart_lcr = LCR_WLEN_8;
+    /* 8N1, FIFOs enabled */
+    *uart_lcr = LCR_WLEN_8 | (1 << 4);
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* Enable UART, TX, and RX */
@@ -141,56 +141,26 @@ void uart_putc(char c)
 }
 
 /*
- * Receive a single character.
- * Uses bit-banging via RIO for more reliable reception.
- * Yields to scheduler while waiting for start bit.
+ * Receive a single character via PL011 UART.
+ *
+ * Originally used GPIO bit-banging because flag register reads caused data
+ * aborts. With proper device memory mapping (VMM maps RP1 as nGnRnE), the
+ * PL011 hardware RX works correctly.
  */
 char uart_getc(void)
 {
     extern void yield(void);
 
-    /* Set up GPIO15 for RIO input */
-    volatile uint32_t *gpio15_ctrl = (volatile uint32_t *)(RP1_GPIO_IO_BASE + GPIO_RXD * 8 + 4);
-    volatile uint32_t *rio_in = (volatile uint32_t *)(RP1_GPIO_RIO_BASE + 0x08);
-    volatile uint32_t *rio_oe = (volatile uint32_t *)(RP1_GPIO_RIO_BASE + 0x04);
+    volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
+    volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
 
-    /* Switch RXD to RIO mode for bit-banging */
-    *gpio15_ctrl = FUNCSEL_SYS_RIO;
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    /* Ensure GPIO15 is input */
-    *rio_oe &= ~(1u << GPIO_RXD);
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    uint8_t byte = 0;
-
-    /* Wait for start bit (falling edge) */
-    while ((*rio_in >> GPIO_RXD) & 1) {
+    /* Wait until RX FIFO has data */
+    while (*uart_fr & FR_RXFE) {
         yield();
     }
 
-    /* Wait half a bit to sample in the middle of each bit */
-    for (volatile int d = 0; d < BIT_DELAY / 2; d++);
-
-    /* Skip past start bit */
-    for (volatile int d = 0; d < BIT_DELAY; d++);
-
-    /* Read 8 data bits, LSB first */
-    for (int i = 0; i < 8; i++) {
-        if ((*rio_in >> GPIO_RXD) & 1) {
-            byte |= (1u << i);
-        }
-        for (volatile int d = 0; d < BIT_DELAY; d++);
-    }
-
-    /* Wait for stop bit */
-    for (volatile int d = 0; d < BIT_DELAY; d++);
-
-    /* Switch RXD back to UART mode */
-    *gpio15_ctrl = FUNCSEL_UART;
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    return (char)byte;
+    /* Read character (lower 8 bits of DR) */
+    return (char)(*uart_dr & 0xFF);
 }
 
 #endif /* UART_TYPE_RP1_BITBANG */

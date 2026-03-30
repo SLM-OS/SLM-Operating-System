@@ -374,15 +374,14 @@ void kernel_main(void *dtb)
     /* Note: Network initialization is done via 'net init' shell command
      * because VirtIO MMIO needs to be mapped first. See cmd_net in shell.c */
 
-    /* Start timer - will generate periodic interrupts */
-    INFO("Starting timer (100 Hz)...");
-    timer_start();
-
-    /* Enable interrupts */
-    INFO("Enabling interrupts...");
-    __asm__ volatile("msr daifclr, #0x2");  /* Clear IRQ mask */
-
-    /* Start scheduler - this does not return */
+    /*
+     * Start scheduler - this selects the first task, starts the timer,
+     * enables interrupts, and does not return.
+     *
+     * Timer and interrupts must be enabled AFTER the first task is selected,
+     * otherwise a timer IRQ could fire before task_current() is set,
+     * causing schedule() to dereference NULL.
+     */
     INFO("Starting scheduler...");
     scheduler_start();
 
