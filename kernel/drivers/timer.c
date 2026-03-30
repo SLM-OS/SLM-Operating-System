@@ -9,16 +9,24 @@
 #include "sched.h"
 #include "uart.h"
 #include "debug.h"
+#include "platform.h"
 
-/* Timer IRQ number (from platform.h / GIC) */
-#define TIMER_IRQ   GIC_INT_PHYS_TIMER  /* IRQ 30 - physical timer */
+/*
+ * Timer selection: Pi 5 uses virtual timer (CNTV) because the physical
+ * timer IRQ is not being delivered despite correct GIC configuration.
+ * Other platforms use physical timer (CNTP).
+ */
+#if defined(PLATFORM_RASPI5)
+#define USE_VIRTUAL_TIMER   1
+#define ACTUAL_TIMER_IRQ    27  /* Virtual timer PPI 11 = IRQ 27 */
+#else
+#define USE_VIRTUAL_TIMER   0
+#define ACTUAL_TIMER_IRQ    TIMER_IRQ  /* Physical timer IRQ 30 */
+#endif
 
 /* Timer interval (computed at init) */
 static uint64_t timer_interval;
 
-/*
- * Read timer frequency from CNTFRQ_EL0
- */
 static inline uint64_t read_cntfrq(void)
 {
     uint64_t val;
@@ -26,9 +34,6 @@ static inline uint64_t read_cntfrq(void)
     return val;
 }
 
-/*
- * Read current counter value from CNTPCT_EL0
- */
 static inline uint64_t read_cntpct(void)
 {
     uint64_t val;
@@ -36,9 +41,24 @@ static inline uint64_t read_cntpct(void)
     return val;
 }
 
-/*
- * Read timer control register CNTP_CTL_EL0
- */
+#if USE_VIRTUAL_TIMER
+static inline uint64_t read_cntp_ctl(void)
+{
+    uint64_t val;
+    __asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(val));
+    return val;
+}
+
+static inline void write_cntp_ctl(uint64_t val)
+{
+    __asm__ volatile("msr cntv_ctl_el0, %0" :: "r"(val));
+}
+
+static inline void write_cntp_tval(int64_t val)
+{
+    __asm__ volatile("msr cntv_tval_el0, %0" :: "r"(val));
+}
+#else
 static inline uint64_t read_cntp_ctl(void)
 {
     uint64_t val;
@@ -46,36 +66,26 @@ static inline uint64_t read_cntp_ctl(void)
     return val;
 }
 
-/*
- * Write timer control register CNTP_CTL_EL0
- */
 static inline void write_cntp_ctl(uint64_t val)
 {
     __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(val));
 }
 
-/*
- * Write timer compare value CNTP_CVAL_EL0
- */
 static inline void write_cntp_cval(uint64_t val)
 {
     __asm__ volatile("msr cntp_cval_el0, %0" :: "r"(val));
 }
 
-/*
- * Write timer value CNTP_TVAL_EL0
- */
 static inline void write_cntp_tval(int64_t val)
 {
     __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(val));
 }
+#endif
 
-/*
- * CNTP_CTL_EL0 bits
- */
-#define CNTP_CTL_ENABLE     (1 << 0)    /* Timer enable */
-#define CNTP_CTL_IMASK      (1 << 1)    /* Interrupt mask (1 = masked) */
-#define CNTP_CTL_ISTATUS    (1 << 2)    /* Interrupt status */
+/* Timer control bits (same for CNTP and CNTV) */
+#define CNTP_CTL_ENABLE     (1 << 0)
+#define CNTP_CTL_IMASK      (1 << 1)
+#define CNTP_CTL_ISTATUS    (1 << 2)
 
 /*
  * Initialize the timer.
@@ -96,12 +106,24 @@ void timer_init(void)
     write_cntp_ctl(0);
 
     /* Configure GIC for timer interrupt */
-    DEBUG_PRINT("  Configuring GIC for timer IRQ %d...", TIMER_IRQ);
-    gic_set_priority(TIMER_IRQ, GIC_PRIORITY_DEFAULT);
+    DEBUG_PRINT("  Configuring GIC for timer IRQ %d (%s)...",
+                ACTUAL_TIMER_IRQ, USE_VIRTUAL_TIMER ? "virtual" : "physical");
+    gic_set_priority(ACTUAL_TIMER_IRQ, GIC_PRIORITY_DEFAULT);
     DEBUG_PRINT("  GIC priority set");
-    gic_enable_irq(TIMER_IRQ);
+    gic_enable_irq(ACTUAL_TIMER_IRQ);
     DEBUG_PRINT("  GIC IRQ enabled");
 
+    /* Verify GIC state for timer IRQ */
+    {
+        volatile uint32_t *isenabler0 = (volatile uint32_t *)(GIC_DIST_BASE + 0x100);
+        volatile uint32_t *ispendr0 = (volatile uint32_t *)(GIC_DIST_BASE + 0x200);
+        volatile uint32_t *gicc_ctlr = (volatile uint32_t *)(GIC_CPU_BASE + 0x000);
+        volatile uint32_t *gicc_pmr = (volatile uint32_t *)(GIC_CPU_BASE + 0x004);
+        DEBUG_PRINT("  GIC ISENABLER0=0x%x (IRQ30 %s)",
+                    *isenabler0, (*isenabler0 & (1 << 30)) ? "enabled" : "DISABLED");
+        DEBUG_PRINT("  GIC ISPENDR0=0x%x", *ispendr0);
+        DEBUG_PRINT("  GICC_CTLR=0x%x GICC_PMR=0x%x", *gicc_ctlr, *gicc_pmr);
+    }
     INFO("Timer initialized (not started)");
 }
 
@@ -117,6 +139,17 @@ void timer_start(void)
     write_cntp_ctl(CNTP_CTL_ENABLE);
 
     INFO("Timer started (%d Hz)", TIMER_HZ);
+
+    /* Verify timer is running */
+    {
+        uint64_t ctl = read_cntp_ctl();
+        uint64_t cval = read_cntpct();
+        volatile uint32_t *ispendr0 = (volatile uint32_t *)(GIC_DIST_BASE + 0x200);
+        DEBUG_PRINT("  CNTP_CTL=0x%lx (EN=%lu, IMASK=%lu, ISTATUS=%lu)",
+                    ctl, ctl & 1, (ctl >> 1) & 1, (ctl >> 2) & 1);
+        DEBUG_PRINT("  CNTPCT=0x%lx", cval);
+        DEBUG_PRINT("  GIC ISPENDR0=0x%x after start", *ispendr0);
+    }
 }
 
 /*

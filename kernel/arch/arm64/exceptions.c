@@ -12,8 +12,9 @@
 #include "smp.h"
 #include <stdint.h>
 
-/* Timer IRQ number */
-#define TIMER_IRQ   30  /* Physical timer PPI */
+/* Timer IRQ numbers */
+#define PHYS_TIMER_IRQ  30  /* Physical timer PPI 14 */
+#define VIRT_TIMER_IRQ  27  /* Virtual timer PPI 11 */
 
 /*
  * Trap frame structure (matches save_regs in vectors.S)
@@ -226,10 +227,10 @@ void el1_irq_handler(void)
     uint32_t irq = gic_acknowledge();
 
     if (irq_debug_count < 3) {
-        /* Use uart_puts_unlocked if available, otherwise direct write */
         volatile uint32_t *dr = (volatile uint32_t *)(0x1F00030000ULL);
-        const char *msg = irq == 1023 ? "S" : (irq == TIMER_IRQ ? "T" : "?");
-        *dr = (uint32_t)msg[0];  /* Single char, no polling */
+        const char *msg = irq == 1023 ? "S" :
+                          (irq == PHYS_TIMER_IRQ || irq == VIRT_TIMER_IRQ) ? "T" : "?";
+        *dr = (uint32_t)msg[0];
         irq_debug_count++;
     }
 
@@ -240,7 +241,8 @@ void el1_irq_handler(void)
 
     /* Dispatch based on IRQ number */
     switch (irq) {
-    case TIMER_IRQ:
+    case PHYS_TIMER_IRQ:
+    case VIRT_TIMER_IRQ:
         /*
          * For timer interrupt, we must signal EOI BEFORE calling the handler
          * because timer_handler() -> scheduler_tick() -> schedule() may

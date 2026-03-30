@@ -203,6 +203,52 @@ real_start:
     msr     cnthctl_el2, x10
     msr     cntvoff_el2, xzr        /* No virtual offset */
 
+    /*
+     * Configure GIC-400 interrupt groups from EL2.
+     *
+     * The Pi 5 firmware loads the kernel without running Circle's armstub8.S,
+     * so the GIC group registers (GICD_IGROUPR) may default to 0 (Group 0).
+     * Group 0 interrupts signal as FIQ, not IRQ. EL1 code unmasks IRQ (DAIF-I)
+     * but not FIQ, so interrupts are never delivered.
+     *
+     * Fix: set all interrupts to Group 1 (signaled as IRQ to non-secure EL1).
+     * Also enable both groups in the distributor and configure the CPU interface
+     * to deliver Group 1 as IRQ. This mirrors what armstub8.S does from EL3.
+     *
+     * GIC-400 base addresses (from device tree):
+     *   GICD: 0x107FFF9000
+     *   GICC: 0x107FFFA000
+     */
+    ldr     x10, =0x107FFF9000      /* GICD base */
+
+    /* Read GICD_TYPER to get number of interrupt lines */
+    ldr     w11, [x10, #0x004]      /* GICD_TYPER */
+    and     w11, w11, #0x1F         /* ITLinesNumber field */
+    add     w11, w11, #1            /* Number of 32-IRQ groups */
+
+    /* Set all GICD_IGROUPR registers to 0xFFFFFFFF (all Group 1) */
+    mov     x12, x10
+    add     x12, x12, #0x080       /* GICD_IGROUPR0 offset */
+    mov     w13, #0
+.Lgroup_loop:
+    mov     w14, #0xFFFFFFFF
+    str     w14, [x12, x13, lsl #2]
+    add     w13, w13, #1
+    cmp     w13, w11
+    b.lt    .Lgroup_loop
+
+    /* Enable Group 0 and Group 1 in distributor */
+    mov     w11, #3                 /* EnableGrp0 | EnableGrp1 */
+    str     w11, [x10, #0x000]      /* GICD_CTLR */
+
+    /* Configure CPU interface */
+    ldr     x10, =0x107FFFA000      /* GICC base */
+    mov     w11, #0xFF
+    str     w11, [x10, #0x004]      /* GICC_PMR = 0xFF (allow all) */
+    /* Enable Group 0+1, AckCtl, bypass disable bits */
+    ldr     w11, =0x1E7
+    str     w11, [x10, #0x000]      /* GICC_CTLR */
+
     /* Enable FP/SIMD at EL1 */
     mov     x10, #(3 << 20)
     msr     cpacr_el1, x10

@@ -724,8 +724,46 @@ void scheduler_start(void)
      * can safely call task_current() in schedule(). */
     INFO("Starting timer (100 Hz)...");
     timer_start();
+    /* Verify VBAR and DAIF before enabling interrupts */
+    {
+        uint64_t vbar, daif;
+        __asm__ volatile("mrs %0, vbar_el1" : "=r"(vbar));
+        __asm__ volatile("mrs %0, daif" : "=r"(daif));
+        DEBUG_PRINT("  VBAR_EL1=0x%lx DAIF=0x%lx", vbar, daif);
+    }
+
+    /* Check GIC state before unmasking */
+    {
+        volatile uint32_t *gicc_hppir = (volatile uint32_t *)(GIC_CPU_BASE + 0x018);
+        volatile uint32_t *gicc_ctlr = (volatile uint32_t *)(GIC_CPU_BASE + 0x000);
+        volatile uint32_t *gicd_ctlr = (volatile uint32_t *)(GIC_DIST_BASE + 0x000);
+        volatile uint32_t *gicd_igroupr0 = (volatile uint32_t *)(GIC_DIST_BASE + 0x080);
+        uint32_t hppir = *gicc_hppir;
+        DEBUG_PRINT("  GICC_HPPIR=0x%x (IRQ %u)", hppir, hppir & 0x3FF);
+        DEBUG_PRINT("  GICC_CTLR=0x%x GICD_CTLR=0x%x", *gicc_ctlr, *gicd_ctlr);
+        DEBUG_PRINT("  GICD_IGROUPR0=0x%x (Group1=%s)", *gicd_igroupr0,
+                    *gicd_igroupr0 == 0xFFFFFFFF ? "ALL" : "NOT ALL");
+    }
+
     INFO("Enabling interrupts...");
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");  /* Clear IRQ mask */
+    __asm__ volatile("isb" ::: "memory");  /* Ensure unmask takes effect */
+
+    /* Test: wait for IRQ to be taken, or timeout */
+    {
+        volatile uint32_t *ispendr0 = (volatile uint32_t *)(GIC_DIST_BASE + 0x200);
+        uint64_t daif;
+        __asm__ volatile("mrs %0, daif" : "=r"(daif));
+        DEBUG_PRINT("  DAIF=0x%lx ISPENDR0=0x%x after unmask", daif, *ispendr0);
+
+        /* If IRQ is still pending after unmask+ISB, the CPU isn't taking it */
+        if (*ispendr0 & (1 << 30)) {
+            WARN("Timer IRQ still pending after unmask! Trying WFI...");
+            __asm__ volatile("wfi" ::: "memory");
+            __asm__ volatile("mrs %0, daif" : "=r"(daif));
+            DEBUG_PRINT("  After WFI: DAIF=0x%lx ISPENDR0=0x%x", daif, *ispendr0);
+        }
+    }
 
     /* Switch to first task (NULL = no previous context to save) */
     switch_to(NULL, first);

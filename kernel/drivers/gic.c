@@ -235,8 +235,23 @@ static void gic_dist_init(void)
         GICD_ICFGR(i) = 0;
     }
 
-    /* Enable distributor */
-    GICD_CTLR = GICD_CTLR_ENABLE;
+    /*
+     * Set all interrupts to Group 1 (non-secure).
+     * On Pi 5 (and other platforms with security extensions), Group 0
+     * interrupts signal as FIQ and Group 1 as IRQ. Since we only
+     * handle IRQ in our exception vectors, all interrupts must be Group 1.
+     */
+    for (uint32_t i = 0; i < num_irqs / 32; i++) {
+        *(volatile uint32_t *)(GICD_BASE + 0x080 + 4 * i) = 0xFFFFFFFF;
+    }
+
+    /* Clear any active interrupts */
+    for (uint32_t i = 0; i < num_irqs / 32; i++) {
+        *(volatile uint32_t *)(GICD_BASE + 0x380 + 4 * i) = 0xFFFFFFFF;
+    }
+
+    /* Enable distributor: both Group 0 and Group 1 */
+    GICD_CTLR = 3;
 }
 
 #else /* GIC_VERSION == 3 */
@@ -345,12 +360,12 @@ static void gic_redist_init(uint32_t cpu)
 static void gic_cpu_init(void)
 {
     /* Set priority mask to allow all priorities */
-    GICC_PMR = 0xFF;
+    GICC_PMR = 0xF0;
 
     /* No priority grouping (all bits for priority) */
     GICC_BPR = 0;
 
-    /* Enable CPU interface */
+    /* Enable CPU interface for Group 1 (non-secure IRQ) */
     GICC_CTLR = GICC_CTLR_ENABLE;
 }
 
