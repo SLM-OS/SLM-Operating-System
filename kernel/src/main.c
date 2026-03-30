@@ -212,6 +212,28 @@ void kernel_main(void *dtb)
 
     /* Results stored globally, accessible via dtb_get_info() */
 
+#if defined(PLATFORM_RASPI5)
+    /*
+     * Pi 5 DTB recovery: the firmware places the DTB near the top of RAM
+     * (typically around 0x2efec000). When using an armstub, the DTB
+     * pointer in x0 may not be preserved through the EL3→EL2 transition.
+     * Scan backwards from the top of low RAM to find it.
+     */
+    if (!dtb) {
+        /* FDT magic is 0xD00DFEED (big-endian) */
+        for (uint64_t addr = 0x2FFF0000; addr >= 0x2E000000; addr -= 0x1000) {
+            uint32_t *p = (uint32_t *)addr;
+            if (*p == 0xEDFE0DD0) {  /* 0xD00DFEED in little-endian */
+                dtb = (void *)addr;
+                break;
+            }
+        }
+        if (dtb) {
+            uart_printf("[BOOT] DTB found by scan at %p\n", dtb);
+        }
+    }
+#endif
+
     /* Banner */
     uart_puts("\n");
     uart_puts("========================================\n");

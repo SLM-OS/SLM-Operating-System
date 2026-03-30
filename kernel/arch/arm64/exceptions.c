@@ -219,20 +219,10 @@ void el1_sync_handler(struct trap_frame *tf)
  *
  * Called for all IRQs. Identifies the source and dispatches.
  */
-static volatile int irq_debug_count = 0;
-
 void el1_irq_handler(void)
 {
     /* Acknowledge interrupt */
     uint32_t irq = gic_acknowledge();
-
-    if (irq_debug_count < 3) {
-        volatile uint32_t *dr = (volatile uint32_t *)(0x1F00030000ULL);
-        const char *msg = irq == 1023 ? "S" :
-                          (irq == PHYS_TIMER_IRQ || irq == VIRT_TIMER_IRQ) ? "T" : "?";
-        *dr = (uint32_t)msg[0];
-        irq_debug_count++;
-    }
 
     /* Spurious interrupt? */
     if (irq == 1023) {

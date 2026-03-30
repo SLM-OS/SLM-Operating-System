@@ -106,25 +106,11 @@ void timer_init(void)
     write_cntp_ctl(0);
 
     /* Configure GIC for timer interrupt */
-    DEBUG_PRINT("  Configuring GIC for timer IRQ %d (%s)...",
-                ACTUAL_TIMER_IRQ, USE_VIRTUAL_TIMER ? "virtual" : "physical");
     gic_set_priority(ACTUAL_TIMER_IRQ, GIC_PRIORITY_DEFAULT);
-    DEBUG_PRINT("  GIC priority set");
     gic_enable_irq(ACTUAL_TIMER_IRQ);
-    DEBUG_PRINT("  GIC IRQ enabled");
 
-    /* Verify GIC state for timer IRQ */
-    {
-        volatile uint32_t *isenabler0 = (volatile uint32_t *)(GIC_DIST_BASE + 0x100);
-        volatile uint32_t *ispendr0 = (volatile uint32_t *)(GIC_DIST_BASE + 0x200);
-        volatile uint32_t *gicc_ctlr = (volatile uint32_t *)(GIC_CPU_BASE + 0x000);
-        volatile uint32_t *gicc_pmr = (volatile uint32_t *)(GIC_CPU_BASE + 0x004);
-        DEBUG_PRINT("  GIC ISENABLER0=0x%x (IRQ30 %s)",
-                    *isenabler0, (*isenabler0 & (1 << 30)) ? "enabled" : "DISABLED");
-        DEBUG_PRINT("  GIC ISPENDR0=0x%x", *ispendr0);
-        DEBUG_PRINT("  GICC_CTLR=0x%x GICC_PMR=0x%x", *gicc_ctlr, *gicc_pmr);
-    }
-    INFO("Timer initialized (not started)");
+    INFO("Timer initialized (IRQ %d, %s, not started)",
+         ACTUAL_TIMER_IRQ, USE_VIRTUAL_TIMER ? "virtual" : "physical");
 }
 
 /*
@@ -139,17 +125,6 @@ void timer_start(void)
     write_cntp_ctl(CNTP_CTL_ENABLE);
 
     INFO("Timer started (%d Hz)", TIMER_HZ);
-
-    /* Verify timer is running */
-    {
-        uint64_t ctl = read_cntp_ctl();
-        uint64_t cval = read_cntpct();
-        volatile uint32_t *ispendr0 = (volatile uint32_t *)(GIC_DIST_BASE + 0x200);
-        DEBUG_PRINT("  CNTP_CTL=0x%lx (EN=%lu, IMASK=%lu, ISTATUS=%lu)",
-                    ctl, ctl & 1, (ctl >> 1) & 1, (ctl >> 2) & 1);
-        DEBUG_PRINT("  CNTPCT=0x%lx", cval);
-        DEBUG_PRINT("  GIC ISPENDR0=0x%x after start", *ispendr0);
-    }
 }
 
 /*
