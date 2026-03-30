@@ -2669,19 +2669,6 @@ void shell_run(void)
     char *argv[SHELL_MAX_ARGS];
     int argc;
 
-#if defined(PLATFORM_RASPI5)
-    /* Diagnostic: dump UART register state before first prompt */
-    {
-        volatile uint32_t *cr = (volatile uint32_t *)(0x1F00030000ULL + 0x30);
-        volatile uint32_t *fr = (volatile uint32_t *)(0x1F00030000ULL + 0x18);
-        volatile uint32_t *ibrd = (volatile uint32_t *)(0x1F00030000ULL + 0x24);
-        volatile uint32_t *fbrd = (volatile uint32_t *)(0x1F00030000ULL + 0x28);
-        volatile uint32_t *lcr = (volatile uint32_t *)(0x1F00030000ULL + 0x2C);
-        uart_printf("[UART] CR=0x%x FR=0x%x IBRD=%u FBRD=%u LCR=0x%x\r\n",
-                    *cr, *fr, *ibrd, *fbrd, *lcr);
-    }
-#endif
-
     while (1) {
         /* Print prompt */
         uart_puts(SHELL_PROMPT);

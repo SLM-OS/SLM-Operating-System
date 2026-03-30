@@ -131,13 +131,20 @@ void uart_putc(char c)
     volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
     volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
 
-    /* Wait until TX FIFO is not full */
-    while (*uart_fr & FR_TXFF) {
-        __asm__ volatile("yield" ::: "memory");
+    /* Wait until TX FIFO is not full.
+     * Use a timeout to detect if FR is stuck — fall back to delay. */
+    int timeout = 100000;
+    while ((*uart_fr & FR_TXFF) && --timeout > 0) {
+        __asm__ volatile("" ::: "memory");
     }
 
     /* Write character to data register */
     *uart_dr = (uint32_t)c;
+
+    /* If FR polling timed out, use a delay to pace output */
+    if (timeout <= 0) {
+        for (volatile int d = 0; d < 2000; d++);
+    }
 }
 
 /*
