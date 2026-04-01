@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "labctl": {
+      "command": "/opt/labctl/venv/bin/labctl",
+      "args": ["mcp"]
+    }
+  }
+}

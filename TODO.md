@@ -63,7 +63,7 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 - ⛔ Test Tegra UART driver (NS16550-compatible @ 0x03100000) — BLOCKED by CBB firewall
 - ⛔ Verify BPMP clock enable for UARTA works — BLOCKED (BPMP IVC corrupted after kexec)
 - ✅ Confirm baud rate settings (115200 8N1)
-- ✅ Test bidirectional communication (shell input/output) — verified via `test-lab-setup.sh` (Linux only)
+- ✅ Test bidirectional communication (shell input/output) — verified via labctl (Linux only)
 
 **Note:** Serial hardware verified working with Linux (December 2025). SLM-OS serial blocked by CBB firewall.
 
@@ -464,7 +464,7 @@ M9 (Polish) ─────────> Can happen in parallel throughout
 - `docs/jetson-kexec-debugging.md` for kexec boot debugging notes
 - `docs/jetson-tcu.md` for TCU/HSP research notes
 - `docs/platform-abstraction.md` for QEMU vs Jetson differences
-- `lab-tools/` for lab automation scripts (power control, serial, tests)
+- `labctl` for lab operations (power, serial, deploy) — see [Embedded-Lab-Control](https://github.com/johnjezl/Embedded-Lab-Control)
 
 ### GPU
 - NVIDIA Open GPU Kernel Modules (reference for register interface)

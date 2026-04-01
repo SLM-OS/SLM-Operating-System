@@ -241,17 +241,22 @@ SLM-OS bare-metal execution on Jetson is blocked by the Tegra234 Control Backbon
 
 ### Remote Lab Access
 
-**Full lab operations guide:** See `docs/lab-operations.md` for detailed procedures including serial console access, deployment, and troubleshooting.
+Lab hardware is managed by **labctl** (Embedded Lab Control).
+
+**Documentation:** [github.com/johnjezl/Embedded-Lab-Control](https://github.com/johnjezl/Embedded-Lab-Control)
 
 **Quick reference:**
-- SSH: `ssh -p 4243 root@gradient-nano.onthewifi.com`
-- Power control: `lab-tools/jetson-power.py`
-- Serial access requires Cygwin with `env -i` wrapper (see lab-operations.md)
+- Power control: `labctl power on/off/cycle pi-5-1`
+- Serial console: `labctl connect pi-5-1-console`
+- SD card deploy: Use `sdwire` CLI (see `docs/pi5-baremetal-status.md` for full workflow)
+- Lab status: `labctl status`
 
-**Restarting the Jetson:**
-1. **Preferred:** Use `reboot` command via SSH (Linux) or SLM-OS shell
-2. **Last resort:** Power cycle via `jetson-power.py cycle` (only when software reboot unavailable)
+**Restarting the Pi 5:**
+1. **Preferred:** `labctl power cycle pi-5-1`
+2. **From shell:** `reboot` command via SLM-OS shell (when RX input is working)
+
+**Note:** The old `lab-tools/` scripts (jetson-power.py, jetson-uart.sh, etc.) have been replaced by labctl. Use labctl for all lab operations.
 
 ---
 
-*Last updated: 15 January 2026*
+*Last updated: 31 March 2026*

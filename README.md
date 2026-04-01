@@ -795,9 +795,6 @@ slm-os/
 │   ├── mmu.md
 │   └── ...
 │
-├── lab-tools/                   # Hardware lab utilities
-│   └── jetson-power.py          # Jetson power control
-│
 ├── CMakeLists.txt               # C kernel build
 ├── Makefile                     # Top-level orchestrator
 └── CLAUDE.md                    # AI assistant notes

@@ -1,269 +1,201 @@
 # Lab Operations Guide
 
-This document describes how to interact with the Jetson Orin Nano lab hardware remotely. It is primarily intended for Claude Code to reference when performing lab operations.
+This document describes how to interact with the embedded development lab hardware. All lab operations use **labctl** (Embedded Lab Control).
+
+**labctl documentation:** [github.com/johnjezl/Embedded-Lab-Control](https://github.com/johnjezl/Embedded-Lab-Control)
 
 ---
 
 ## Quick Reference
 
-| Operation | Ubuntu | Windows (Cygwin) |
-|-----------|--------|------------------|
-| SSH to Jetson | `ssh -p 4243 root@gradient-nano.onthewifi.com` | Same |
-| Reboot (preferred) | `reboot` via SSH or SLM-OS shell | Same |
-| Power control | `./lab-tools/jetson-power.py <cmd>` | `py lab-tools/jetson-power.py <cmd>` |
-| Serial console | `./lab-tools/jetson-uart.sh` | See Cygwin section below |
-
-**Lab configuration:** `lab-tools/lab-settings.cfg` contains environment-specific settings.
-
----
-
-## Restarting the Jetson
-
-### Preferred: Software Reboot
-
-Always prefer software reboot over power cycling when possible:
-
-1. **From Linux (via SSH):**
-   ```bash
-   ssh -p 4243 root@gradient-nano.onthewifi.com
-   reboot
-   ```
-
-2. **From SLM-OS shell:**
-   ```
-   slmos> reboot
-   ```
-   (Uses PSCI system reset)
-
-### Last Resort: Power Cycle
-
-Use power cycling only when:
-- SSH is not responding
-- SLM-OS shell is not responding
-- System is hung or crashed
-- No serial output and no network connectivity
-
-**Ubuntu:**
-```bash
-./lab-tools/jetson-power.py cycle
-```
-
-**Windows:**
-```bash
-py lab-tools/jetson-power.py cycle
-```
-
-The Kasa smart plug IP is configured in `lab-tools/lab-settings.cfg`. The `cycle` command turns power off, waits 3 seconds, then turns it back on.
+| Operation | Command |
+|-----------|---------|
+| Power on | `labctl power on pi-5-1` |
+| Power off | `labctl power off pi-5-1` |
+| Power cycle | `labctl power cycle pi-5-1 --delay 2` |
+| Serial console | `labctl connect pi-5-1-console` |
+| Lab status | `labctl status` |
+| Health check | `labctl health` |
 
 ---
 
-## Powering Off the Jetson
+## Lab Hardware
 
-### Use Smart Plug Only
+### Raspberry Pi 5 (`pi-5-1`)
 
-**⚠️ IMPORTANT:** Never use software power-off commands (`poweroff`, `shutdown -h`, `halt`) via SSH unless explicitly instructed. The Jetson requires **manual physical intervention** to restart after a software power-off — there is no remote way to turn it back on.
+| Component | Details |
+|-----------|---------|
+| Board | Raspberry Pi 5 (BCM2712), 4GB RAM |
+| Serial console | `/dev/lab/port-2-2` → TCP localhost:4005 (via ser2net) |
+| Power control | Kasa smart plug (via labctl) |
+| SD card deploy | SDWireC (Badgerd USB-C model) |
+| EEPROM | Sep 2024 firmware (do NOT update — see `docs/pi5-baremetal-status.md`) |
 
-**Correct method — Smart plug:**
+### Jetson Orin Nano
 
-**Ubuntu:**
-```bash
-./lab-tools/jetson-power.py off   # Power off
-./lab-tools/jetson-power.py on    # Power on
-```
-
-**Windows:**
-```bash
-py lab-tools/jetson-power.py off  # Power off
-py lab-tools/jetson-power.py on   # Power on
-```
-
-The Jetson is configured to auto-power-on when AC power is applied, so turning the smart plug on will boot the system.
-
-### Why Software Power-Off Doesn't Work Remotely
-
-When Linux executes `poweroff`, the Jetson enters a halted state but the smart plug remains on. In this state:
-- The Jetson will not respond to SSH
-- The Jetson will not auto-restart when power is cycled
-- Physical button press is required to restart
-
-The smart plug `status` command only shows whether the **plug** is providing power, not whether the Jetson itself is running.
+| Component | Details |
+|-----------|---------|
+| Board | Jetson Orin Nano Super Developer Kit |
+| Status | ⛔ BLOCKED by CBB firewall (see `docs/jetson-nvidia-support.md`) |
+| Serial console | `/dev/lab/port-2-1` → TCP localhost:4004 (via ser2net) |
 
 ---
 
-## Serial Console Access
+## Power Control
 
-### Ubuntu
-
-**Using the lab-tools script (recommended):**
-```bash
-./lab-tools/jetson-uart.sh
-```
-
-**Or directly with picocom:**
-```bash
-sudo picocom -b 115200 /dev/ttyUSB0
-```
-
-The serial port is configured in `lab-tools/lab-settings.cfg` (default: `/dev/ttyUSB0`).
-
-**Testing serial from Jetson side:**
-```bash
-ssh -p 4243 root@gradient-nano.onthewifi.com
-echo "test message" > /dev/ttyTHS1
-```
-
-### Windows (Cygwin)
-
-**Important: Cygwin Environment Setup**
-
-Claude Code runs in Git Bash, which has different mount points than Cygwin. When running Cygwin bash from Claude Code, the inherited Git Bash environment causes `/usr/bin` to point to Git Bash's binaries instead of Cygwin's.
-
-**Solution:** Always use `env -i` to clear the inherited environment:
+Power is managed via Kasa smart plugs controlled by labctl:
 
 ```bash
-# CORRECT: Clean environment - picocom will be found
-C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS8"
-
-# WRONG: Inherits Git Bash mounts - picocom not found
-C:/cygwin64/bin/bash.exe --login -c "picocom -b 115200 /dev/ttyS8"
+labctl power on pi-5-1       # Turn on
+labctl power off pi-5-1      # Turn off
+labctl power cycle pi-5-1    # Off, wait 2s, on
+labctl power cycle pi-5-1 --delay 5  # Custom delay
 ```
 
-### Serial Port Mapping
-
-| Ubuntu | Windows/Cygwin | Jetson Device | Connection |
-|--------|----------------|---------------|------------|
-| `/dev/ttyUSB0` | `/dev/ttyS8` (COM9) | `/dev/ttyTHS1` | 40-pin header UART ✓ |
-| `/dev/ttyACM*` | `/dev/ttyS4` (COM5) | TCU | USB-C debug — **bare-metal: no** |
-
-### Picocom Options
-
-- `-b 115200` — Baud rate
-- `--noreset` — Don't reset DTR/RTS on connect (avoids resetting some devices)
-- `--exit-after <ms>` — Exit after timeout (useful for scripted captures)
-
-**To exit picocom:** Press `Ctrl-A` then `Ctrl-X`
-
-### USB-C Debug Port (TCU) Limitations
-
-The USB-C debug port (`/dev/ttyS4`) uses Tegra Combined UART (TCU), which:
-- Works when Linux is running (SPE firmware handles routing)
-- Does NOT work after kexec or for bare-metal code
-- Produces no output when SLM-OS is running
-
-For SLM-OS debugging, use the 40-pin header UART (UARTA at 0x03100000).
-
-See `docs/jetson-tcu.md` for technical details on why TCU doesn't work.
+**Important:** Devices are configured to auto-power-on when AC power is applied.
 
 ---
 
-## Deploying Code to Jetson
+## Serial Console
 
-### Via SSH (when Linux is running)
+### Via labctl (recommended)
 
-**Ubuntu:**
 ```bash
-# Copy kernel to Jetson
+labctl connect pi-5-1-console
+```
+
+This connects to the ser2net TCP port using `nc`. Press `Ctrl+]` then `q` to disconnect.
+
+### Direct access
+
+```bash
+sudo picocom -b 115200 /dev/ttyUSB1   # Pi 5 console
+```
+
+**Note:** ser2net must be stopped first for direct access (`sudo systemctl stop ser2net`).
+
+### ser2net Configuration
+
+ser2net provides TCP access to serial ports. Configuration is in `/etc/ser2net.yaml`:
+
+| Port | TCP Port | Device | Baud |
+|------|----------|--------|------|
+| pi-5-1-console | 4005 | `/dev/lab/port-2-2` | 115200 |
+| jetson-console | 4004 | `/dev/lab/port-2-1` | 115200 |
+
+---
+
+## Deploying to Raspberry Pi 5
+
+The Pi 5 SD card is connected through a Badgerd SDWireC which allows the SD card to be switched between the host machine (for flashing) and the Pi 5 (for booting) without physical intervention.
+
+### SDWireC Commands
+
+```bash
+# Switch SD to host (for flashing)
+sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" host
+
+# Switch SD to Pi 5 (for booting)
+sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" dut
+
+# Check current state
+sudo /tmp/sdwire-venv/bin/sdwire state -s "20120501030900000.10.3"
+
+# List all SDWire devices
+sudo /tmp/sdwire-venv/bin/sdwire list
+```
+
+**Note:** The SDWireC block device can change (e.g., `/dev/sdc` → `/dev/sdd`) when USB devices are plugged/unplugged. Always check `sdwire list` for the current device.
+
+### Full Deploy Workflow
+
+```bash
+# 1. Build for Pi 5
+make kernel-clean && make kernel PLATFORM=RASPI5
+
+# 2. Flash SD card
+labctl power off pi-5-1
+sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" host
+sleep 2
+sudo mount /dev/sddN /mnt           # Check sdwire list for correct device!
+sudo cp build/kernel/slmos.bin /mnt/kernel_2712.img
+sudo umount /mnt
+sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" dut
+
+# 3. Boot and monitor
+labctl power cycle pi-5-1 --delay 2
+sleep 15
+labctl connect pi-5-1-console
+```
+
+### SD Card Contents
+
+The boot partition (FAT32, labeled SLMOS) contains:
+- `kernel_2712.img` — SLM-OS binary (`build/kernel/slmos.bin`)
+- `armstub8-2712.bin` — EL3 stub for GIC group configuration
+- `config.txt` — bare-metal boot config
+- Standard Pi firmware: `bootcode.bin`, `start*.elf`, `fixup*.dat`, DTBs, `overlays/`
+
+---
+
+## Deploying to Jetson (kexec)
+
+⛔ **Currently blocked by CBB firewall.** See `docs/jetson-nvidia-support.md`.
+
+When available:
+```bash
+# Copy kernel to Jetson via SSH
 scp -P 4243 build/kernel/slmos.elf root@gradient-nano.onthewifi.com:/root/
-```
 
-**Windows:**
-```bash
-scp -P 4243 C:/temp/slmos-build/kernel/slmos.elf root@gradient-nano.onthewifi.com:/root/
-```
-
-### Booting SLM-OS via kexec
-
-```bash
+# Boot via kexec
 ssh -p 4243 root@gradient-nano.onthewifi.com
 kexec -l /root/slmos.elf --reuse-cmdline
 kexec -e
-```
-
-Note: After `kexec -e`, SSH connection will drop. Monitor via serial console.
-
----
-
-## Lab Tools Reference
-
-All scripts are in `lab-tools/`. Configuration is in `lab-tools/lab-settings.cfg`.
-
-### lab-settings.cfg
-
-Environment-specific settings:
-```bash
-KASA_PLUG_IP="192.168.4.112"      # Smart plug IP address
-JETSON_UART_PORT="/dev/ttyUSB0"   # 40-pin header serial port
-JETSON_DEBUG_PORT="/dev/ttyACM1"  # USB-C debug port (Linux only)
-SERIAL_BAUD=115200                # Baud rate
-POWER_CYCLE_DELAY=3               # Seconds between off/on
-```
-
-### jetson-power.py
-
-Controls Kasa smart plug for Jetson power:
-
-**Ubuntu:** `./lab-tools/jetson-power.py <command>`
-**Windows:** `py lab-tools/jetson-power.py <command>`
-
-| Command | Description |
-|---------|-------------|
-| `status` | Show current power state and plug info |
-| `on` | Turn power on |
-| `off` | Turn power off |
-| `cycle` | Power off, wait, power on |
-
-### jetson-uart.sh
-
-Connect to 40-pin header UART (UARTA) for SLM-OS debugging:
-```bash
-./lab-tools/jetson-uart.sh              # Use port from config
-./lab-tools/jetson-uart.sh /dev/ttyUSB1 # Use specific port
-```
-
-### jetson-debug.sh
-
-Connect to USB-C debug port (TCU). Only works when Linux is running:
-```bash
-./lab-tools/jetson-debug.sh
 ```
 
 ---
 
 ## Troubleshooting
 
-### "picocom not found" in Cygwin
+### No serial output
 
-Cause: Git Bash environment inherited, `/usr/bin` points to wrong location.
+1. Check power: `labctl power cycle pi-5-1`
+2. Check serial connection: `labctl connect pi-5-1-console`
+3. Check SD card: `sudo /tmp/sdwire-venv/bin/sdwire state -s "20120501030900000.10.3"` (should be "Target" for booting)
+4. Check USB: `lsusb | grep -i "CH340\|cp210"` for serial adapters
 
-Fix: Use `env -i` wrapper as shown above.
+### Kasa authentication error
 
-### No serial output after kexec
+The Kasa smart plug occasionally returns authentication errors (cloud token expired). Retry the command — it usually succeeds on the second attempt.
 
-Cause: TCU requires SPE firmware which stops after kexec.
+### SDWireC not detected
 
-Fix: Use 40-pin header UART instead of USB-C debug port.
+1. Check USB: `sudo /tmp/sdwire-venv/bin/sdwire list`
+2. Check cable connections
+3. The SDWireC uses `0bda:0316` (Realtek) — different from the old SDWire which used `04e8:6001` (Samsung)
 
-### SSH connection refused
+### Build fails for wrong platform
 
-Possible causes:
-1. Jetson is running SLM-OS (no network stack)
-2. Jetson is hung/crashed
-3. Network issue
-
-Fix: Power cycle via `jetson-power.py cycle`, wait for Linux to boot.
-
-### Power cycle doesn't bring system back
-
-1. Wait longer (Jetson boot takes ~30 seconds)
-2. Check physical connections
-3. Try multiple power cycles
-4. May need physical access to check hardware
+The CMake cache remembers the last platform. Always clean first:
+```bash
+make kernel-clean && make kernel PLATFORM=RASPI5
+```
 
 ---
 
 ## Hardware Reference
 
-### 40-Pin Header Serial (J14)
+### Pi 5 40-Pin Header Serial
+
+| Pin | Function | Connect to USB-Serial |
+|-----|----------|----------------------|
+| 6 | GND | GND |
+| 8 | GPIO14 (TX) | RX |
+| 10 | GPIO15 (RX) | TX |
+
+**Important:** Use 3.3V USB-serial adapter. 5V may damage the Pi.
+
+### Jetson 40-Pin Header Serial
 
 | Pin | Function | Connect to USB-Serial |
 |-----|----------|----------------------|
@@ -273,25 +205,7 @@ Fix: Power cycle via `jetson-power.py cycle`, wait for Linux to boot.
 
 **Important:** Use 3.3V USB-serial adapter. 5V will damage the Jetson.
 
-### Button Header (J14)
-
-| Pins | Function |
-|------|----------|
-| 5-6 | Jumper for power button mode |
-| 7-8 | Reset (momentary short) |
-| 9-10 | Force Recovery |
-| 11-12 | Power button |
-
 ---
 
 *Created: 25 December 2025*
-*Updated: 28 December 2025 - Added Ubuntu support, verified serial working*
-*For: Claude Code reference during lab operations*
-
-
-## (Re-)Programming MicroSD Card
-
-In order to access and (re-)flash the microSD card in a device, follow the procedure here: docs/sd-wire-usage.md
-
-D
-## Flashing
+*Updated: 31 March 2026 — Replaced lab-tools with labctl, added SDWireC/Pi 5 workflow*

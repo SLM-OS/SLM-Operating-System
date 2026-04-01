@@ -51,7 +51,7 @@
       "Bash(aarch64-none-elf-objdump:*)",
       "Bash(aarch64-none-elf-gcc:*)",
       "Bash(aarch64-none-elf-nm:*)",
-      "Bash(./lab-tools/jetson-power.py:*)",
+      "Bash(labctl:*)",
       "Bash(git staus:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",

@@ -200,8 +200,8 @@ kexec -e
 # (connection will drop - this is expected)
 
 # Power control (if needed)
-python3 lab-tools/jetson-power.py cycle  # Power cycle
-python3 lab-tools/jetson-power.py status # Check power state
+labctl power cycle jetson-1          # Power cycle
+labctl power status jetson-1         # Check power state
 ```
 
 ---
@@ -251,10 +251,9 @@ If the Jetson reboots back to Linux after kexec, the kernel reached that point.
 
 ### Serial Monitoring
 
-**Ubuntu:**
 ```bash
-# Use the lab-tools script
-./lab-tools/jetson-uart.sh
+# Via labctl
+labctl connect jetson-console
 
 # Or directly with picocom
 sudo picocom -b 115200 /dev/ttyUSB0

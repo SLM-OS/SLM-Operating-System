@@ -29,7 +29,7 @@ This document records a comprehensive debugging session attempting to get SLM-OS
 - Jetson Orin Nano connected to Ubuntu lab machine via:
   - SSH tunnel (port 4243) through router
   - USB-serial adapter on 40-pin header (pins 8/10 = UARTA)
-  - Smart plug for remote power control (`lab-tools/jetson-power.py`)
+  - Smart plug for remote power control (via `labctl power`)
 - Serial device: `/dev/ttyUSB0` on Ubuntu host
 - Jetson boots from SD card (238GB), not eMMC
 

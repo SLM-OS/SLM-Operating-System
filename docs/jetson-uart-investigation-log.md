@@ -182,7 +182,7 @@ This could be:
 - Early boot code accessing restricted addresses
 
 ### Action 3.16: Power cycle Jetson to restore Linux
-**Command**: `./lab-tools/jetson-power.py cycle`
+**Command**: `labctl power cycle jetson-1`
 **Result**: Jetson rebooted to Linux.
 
 ### Action 3.17: Check kexec debug output for load addresses
