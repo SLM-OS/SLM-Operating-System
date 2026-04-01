@@ -65,7 +65,6 @@
  */
 void uart_init(void)
 {
-    /* Use local pointers - matches the working inline code structure */
     volatile uint32_t *gpio14_ctrl = (volatile uint32_t *)(RP1_GPIO_IO_BASE + GPIO_TXD * 8 + 4);
     volatile uint32_t *gpio15_ctrl = (volatile uint32_t *)(RP1_GPIO_IO_BASE + GPIO_RXD * 8 + 4);
     volatile uint32_t *gpio14_pads = (volatile uint32_t *)(RP1_GPIO_PADS_BASE + 4 + GPIO_TXD * 4);
@@ -83,8 +82,8 @@ void uart_init(void)
     *gpio14_ctrl = FUNCSEL_UART;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Configure GPIO15 (RXD) pad and pin mux */
-    *gpio15_pads = PAD_CONFIG;
+    /* Configure GPIO15 (RXD) pad: IE=1, pull-up for idle-high */
+    *gpio15_pads = 0x5A;  /* IE=1, OD=0, 4mA, PUE=1, PDE=0, SCHMITT=1 */
     __asm__ volatile("dsb sy" ::: "memory");
     *gpio15_ctrl = FUNCSEL_UART;
     __asm__ volatile("dsb sy" ::: "memory");
@@ -101,13 +100,17 @@ void uart_init(void)
      * Set baud rate for 115200 @ 50MHz clock
      * Divisor = 50000000 / (16 * 115200) = 27.127
      * IBRD = 27, FBRD = 0.127 * 64 = 8
+     *
+     * NOTE: This assumes a 50 MHz UART clock. The actual RP1 UART clock
+     * may differ. TX works at this rate but RX does not receive data —
+     * likely a baud rate mismatch on RX. See docs/pi5-baremetal-status.md.
      */
     *uart_ibrd = 27;
     *uart_fbrd = 8;
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* 8N1, FIFOs enabled */
-    *uart_lcr = LCR_WLEN_8 | (1 << 4);
+    *uart_lcr = LCR_WLEN_8 | LCR_FEN;
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* Enable UART, TX, and RX */

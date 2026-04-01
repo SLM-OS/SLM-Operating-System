@@ -1,19 +1,23 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
-**Date:** March 29, 2026
-**Status:** IN PROGRESS - Kernel boots through VMM/GIC/timer, hangs at scheduler init
+**Date:** March 31, 2026
+**Status:** BOOTS TO SHELL - Full boot with timer interrupts, shell prompt appears. RX input not working.
 
 ## Summary
 
-Pi 5 bare-metal support boots through PMM, VMM, GIC, and timer initialization with clean serial output. The kernel hangs after timer init (likely IRQ routing issue). Automated deployment via SDWireC is working.
+SLM-OS boots to an interactive shell prompt (`slmos>`) on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, timer (with preemptive scheduling), SMP (single-core), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The armstub8-2712.bin configures GIC interrupt groups from EL3.
+
+**Remaining issue:** UART RX (serial input) does not work — the PL011 RX FIFO never receives characters. TX output is fully functional. See "Current Blocker" section below.
 
 **Key achievements:**
 1. EL2→EL1 transition for peripheral access
-2. RP1 UART via firmware-initialized PCIe (no manual PCIe init required)
+2. RP1 UART TX via PL011 flag register polling (works after MMU enable)
 3. Serial console output at 115200 baud on GPIO14/15
 4. Platform-specific VMM mappings (1GB L1 block descriptors for RAM, L2 tables for MMIO)
-5. UART TX using PL011 flag register polling (works after MMU enable with device memory mapping)
-6. Automated deploy via SDWireC + labctl
+5. armstub8-2712.bin for GIC Group 1 configuration from EL3
+6. Timer interrupts working (virtual timer, IRQ 27) with preemptive scheduling
+7. All subsystems boot: PMM, VMM, GIC, scheduler, IPC, VFS, LittleFS, Rust, Lua
+8. Automated deploy via SDWireC + labctl
 
 ## Hardware Setup
 
@@ -35,7 +39,9 @@ Pi 5 bare-metal support boots through PMM, VMM, GIC, and timer initialization wi
 | GIC init | ✅ Working | GICv2 at 0x107FFF9000 |
 | Timer init | ✅ Working | 54 MHz, 100 Hz tick |
 | SDWireC deploy | ✅ Working | Automated flash/boot via sdwire CLI + labctl |
-| Scheduler/shell | ☐ Pending | Hangs after timer init (IRQ routing issue) |
+| Preemptive scheduler | ✅ Working | Timer interrupts, task switching |
+| Shell prompt | ✅ Working | `slmos>` appears after full boot |
+| UART RX (input) | ☐ Broken | PL011 FR_RXFE never clears — see blocker below |
 
 ## Configuration
 
@@ -62,9 +68,15 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 3. **Single-core:** Due to spinlock limitation, multi-core support not available.
 
-4. **Timer IRQ hang:** Kernel hangs after timer initialization, likely due to GIC IRQ routing differences on Pi 5 vs QEMU. Needs investigation.
+4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 
-5. **SDWireC compatibility:** Works with slower SD cards (29 GB tested). Faster UHS-I cards (SDR104) may fail through the SDWireC's analog MUX. The original SDWire (micro-USB) is incompatible with Pi 5.
+5. **UART RX not working:** PL011 RX FIFO never receives characters (FR_RXFE always 1). The PL011 CR shows RXE=1, GPIO15 is configured for UART function with IE=1 and pull-up. TX works perfectly. Suspected baud rate mismatch: `uart_init()` sets IBRD=27/FBRD=8 (50 MHz clock assumption), but the actual RP1 UART clock may differ. TX is tolerant of small baud errors; RX is not. See "Current Blocker" section.
+
+6. **Doubled early boot output:** Characters are doubled in the first few lines of boot output (before `uart_init()` re-configures the UART). Caused by the armstub's EL3→EL2 transition affecting the firmware's UART state. Cosmetic only.
+
+7. **DTB not preserved:** The armstub's `eret` to EL2 does not preserve the DTB pointer in x0. A scan for FDT magic in upper RAM was added but the garbled early output prevents confirmation. Kernel falls back to platform defaults.
+
+8. **SDWireC compatibility:** Works with slower SD cards (29 GB tested). Faster UHS-I cards (SDR104) may fail through the SDWireC's analog MUX. The original SDWire (micro-USB) is incompatible with Pi 5.
 
 ## Pi 5 UART Architecture
 
@@ -74,6 +86,31 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 | BCM2712 UART | 0x107D001000 | 3-pin JST connector | Not used (needs cable) |
 
 The GPIO header UART uses the RP1 southbridge chip connected via PCIe. With proper config.txt settings, the firmware leaves this accessible for bare-metal code.
+
+## Current Blocker: UART RX Not Working
+
+**Symptom:** The shell prompt (`slmos>`) appears but typing on the serial console produces no response. The PL011 flag register `FR_RXFE` (bit 4) never clears, indicating the RX FIFO is always empty.
+
+**What works:** TX output is perfect — clean text at 115200 baud.
+
+**Verified correct:**
+- `CR=0x301` — UARTEN=1, TXE=1, RXE=1 (RX is enabled)
+- GPIO15 pad: `0x5A` — IE=1 (input enabled), pull-up, schmitt trigger
+- GPIO15 funcsel: 4 (UART function)
+- PL011 registers accessible (no data abort on FR read)
+
+**Suspected root cause:** Baud rate mismatch on RX. `uart_init()` configures IBRD=27/FBRD=8, assuming a 50 MHz UART clock. This produces 115108 baud (0.08% error). TX works because the receiver (PC) tolerates small errors. RX fails because the PL011 receiver is less tolerant of timing mismatches — even 2-3% error can cause framing errors that prevent data from entering the FIFO.
+
+**Investigation needed:**
+1. Determine the actual RP1 UART clock frequency. The firmware's original IBRD/FBRD values (before `uart_init()` overwrites them) would reveal this. Read IBRD/FBRD BEFORE `uart_init()` runs and log them.
+2. Alternatively, try different IBRD/FBRD values:
+   - 48 MHz clock: IBRD=26, FBRD=3
+   - 44.2 MHz clock: IBRD=24, FBRD=0
+3. Another approach: don't overwrite firmware's baud rate. But an empty `uart_init()` breaks TX (tested — no output). The firmware's UART state is lost during the armstub's EL3→EL2 transition.
+4. The firmware might use a different clock for the PL011. Circle uses a 48 MHz reference. Try IBRD=26/FBRD=3 (48 MHz).
+5. Check if the issue is electrical: try a different USB-serial adapter. The CH340 adapter might have RX wiring issues with the RP1 GPIO voltage levels.
+
+**Workaround considered:** Revert to GPIO bit-banged RX, but this broke with caches enabled (timing loops run at wrong speed after MMU enable). Would need a timer-based bit-bang implementation.
 
 ## Driver Details
 
