@@ -1,13 +1,13 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
-**Date:** March 31, 2026
-**Status:** BOOTS TO SHELL - Full boot with timer interrupts, shell prompt appears. RX input not working.
+**Date:** April 2, 2026
+**Status:** INTERACTIVE SHELL — Full boot, shell accepts input. Timer/preemption disabled (workaround).
 
 ## Summary
 
-SLM-OS boots to an interactive shell prompt (`slmos>`) on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, timer (with preemptive scheduling), SMP (single-core), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The armstub8-2712.bin configures GIC interrupt groups from EL3.
+SLM-OS boots to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (single-core), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The armstub8-2712.bin configures GIC interrupt groups from EL3.
 
-**Remaining issue:** UART RX (serial input) does not work — the PL011 RX FIFO never receives characters. TX output is fully functional. See "Current Blocker" section below.
+**UART RX is working** — the shell accepts input and responds to commands. Two RP1-specific GPIO pad configurations were required (OD=1, FUNCSEL sequencing). Timer interrupts are currently disabled as a workaround; preemptive scheduling is not active. See "Current Blocker" section below.
 
 **Key achievements:**
 1. EL2→EL1 transition for peripheral access
@@ -33,15 +33,15 @@ SLM-OS boots to an interactive shell prompt (`slmos>`) on Pi 5 hardware. All ker
 | Boot to C code | ✅ Working | EL2→EL1 transition in boot.S |
 | ACT LED control | ✅ Working | GPIO2 bit 9 at 0x107D517C04 |
 | Serial TX | ✅ Working | PL011 flag register polling (after MMU) |
-| Serial RX | ✅ Working | Bit-banged via RIO |
+| Serial RX | ✅ Working | PL011 hardware RX (OD=1, FUNCSEL 5→4 sequence) |
 | PMM (buddy) | ✅ Working | 4GB RAM detected and managed |
 | VMM (MMU) | ✅ Working | Platform-specific mappings, all tests pass |
 | GIC init | ✅ Working | GICv2 at 0x107FFF9000 |
 | Timer init | ✅ Working | 54 MHz, 100 Hz tick |
 | SDWireC deploy | ✅ Working | Automated flash/boot via sdwire CLI + labctl |
-| Preemptive scheduler | ✅ Working | Timer interrupts, task switching |
+| Preemptive scheduler | ⚠️ Disabled | Timer IRQs break RP1 UART RX — see blocker |
 | Shell prompt | ✅ Working | `slmos>` appears after full boot |
-| UART RX (input) | ☐ Broken | PL011 FR_RXFE never clears — see blocker below |
+| UART RX (input) | ✅ Working | PL011 RX works when timer IRQs are disabled |
 
 ## Configuration
 
@@ -70,7 +70,7 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 
-5. **UART RX not working:** PL011 RX FIFO never receives characters (FR_RXFE always 1). The PL011 CR shows RXE=1, GPIO15 is configured for UART function with IE=1 and pull-up. TX works perfectly. Suspected baud rate mismatch: `uart_init()` sets IBRD=27/FBRD=8 (50 MHz clock assumption), but the actual RP1 UART clock may differ. TX is tolerant of small baud errors; RX is not. See "Current Blocker" section.
+5. **Timer interrupts break UART RX:** PL011 RX works correctly without timer interrupts but fails when the timer fires. Timer/preemption disabled as workaround. See "Current Blocker" section.
 
 6. **Doubled early boot output:** Characters are doubled in the first few lines of boot output (before `uart_init()` re-configures the UART). Caused by the armstub's EL3→EL2 transition affecting the firmware's UART state. Cosmetic only.
 
@@ -87,41 +87,55 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 The GPIO header UART uses the RP1 southbridge chip connected via PCIe. With proper config.txt settings, the firmware leaves this accessible for bare-metal code.
 
-## Current Blocker: UART RX Not Working
+## Current Blocker: Timer Interrupts Break PL011 RX
 
-**Symptom:** The shell prompt (`slmos>`) appears but typing on the serial console produces no response. The PL011 flag register `FR_RXFE` (bit 4) never clears, indicating the RX FIFO is always empty.
+**Symptom:** PL011 UART RX works correctly when timer interrupts are disabled, but stops receiving external data as soon as the timer starts firing (100 Hz). TX is unaffected.
 
-**What works:** TX output is perfect — clean text at 115200 baud.
+**Current workaround:** Timer and IRQs are disabled on Pi 5 (`scheduler_start()` skips `timer_start()` and IRQ unmasking). The shell runs cooperatively with busy-wait polling. Preemptive scheduling is not active.
 
-**Verified correct:**
-- `CR=0x301` — UARTEN=1, TXE=1, RXE=1 (RX is enabled)
-- GPIO15 pad: `0x5A` — IE=1 (input enabled), pull-up, schmitt trigger
-- GPIO15 funcsel: 4 (UART function)
-- PL011 registers accessible (no data abort on FR read)
+**What was ruled out:**
+- Baud rate: confirmed 50 MHz clock is correct (48 MHz produces garbled output)
+- GPIO15 configuration: FUNCSEL=4, IE=1, OD=1, PUE=1 — all correct
+- RP1 signal path: STATUS register confirms INFROMPAD→INFILTERED→INTOPERI all connected
+- PL011 hardware: loopback test passes (TX→RX internally, receives 0x55 correctly)
+- MMU: RX works after MMU enable (before timer start)
+- GIC init: RX works after GIC initialization
+- IRQ unmasking: RX works with IRQs unmasked (no timer running)
+- Context switching: RX fails even with `schedule()` removed from `scheduler_tick()`
+- `yield()`: RX fails even with busy-wait (no yield/schedule calls)
 
-**Suspected root cause:** Baud rate mismatch on RX. `uart_init()` configures IBRD=27/FBRD=8, assuming a 50 MHz UART clock. This produces 115108 baud (0.08% error). TX works because the receiver (PC) tolerates small errors. RX fails because the PL011 receiver is less tolerant of timing mismatches — even 2-3% error can cause framing errors that prevent data from entering the FIFO.
+**Root cause (narrowed):** The timer interrupt handler itself — the act of taking an IRQ exception, acknowledging the GIC, and returning — disrupts PL011 RX on the RP1. This appears to be an interaction between the GIC interrupt handling path (BCM2712 internal bus at 0x107FFF9000) and the RP1 PL011 (PCIe bus at 0x1F00030000). The exact mechanism is unknown.
 
-**Investigation needed:**
-1. Determine the actual RP1 UART clock frequency. The firmware's original IBRD/FBRD values (before `uart_init()` overwrites them) would reveal this. Read IBRD/FBRD BEFORE `uart_init()` runs and log them.
-2. Alternatively, try different IBRD/FBRD values:
-   - 48 MHz clock: IBRD=26, FBRD=3
-   - 44.2 MHz clock: IBRD=24, FBRD=0
-3. Another approach: don't overwrite firmware's baud rate. But an empty `uart_init()` breaks TX (tested — no output). The firmware's UART state is lost during the armstub's EL3→EL2 transition.
-4. The firmware might use a different clock for the PL011. Circle uses a 48 MHz reference. Try IBRD=26/FBRD=3 (48 MHz).
-5. Check if the issue is electrical: try a different USB-serial adapter. The CH340 adapter might have RX wiring issues with the RP1 GPIO voltage levels.
+**Investigation ideas for next session:**
+1. Check if the timer IRQ acknowledge (GIC IAR read) or completion (GIC EOIR write) has a side effect on PCIe transactions
+2. Try using a different timer source (e.g., RP1's own timer instead of ARM generic timer)
+3. Try PL011 interrupt-driven RX instead of polling — the PL011 RX interrupt might work even if polling doesn't
+4. Check if the RP1 PL011's IMSC (interrupt mask) register needs RX interrupts enabled for the FIFO to operate correctly when other interrupts are active
 
-**Workaround considered:** Revert to GPIO bit-banged RX, but this broke with caches enabled (timing loops run at wrong speed after MMU enable). Would need a timer-based bit-bang implementation.
+## UART RX Fix Details (April 2026)
+
+Two RP1-specific GPIO pad configurations were required to make RX work:
+
+**1. OD=1 (Output Disable) on GPIO15 pad:**
+The firmware/armstub resets GPIO15 to defaults (FUNCSEL=31, IE=0, OD=1, pull-down). When reconfiguring for UART RX, setting OD=0 (as standard PL011 drivers do) causes the output driver to interfere with external input — even though the GPIO STATUS register shows OE=0. Setting OD=1 forces the output driver off at the pad level, allowing the external serial adapter signal through.
+
+**2. FUNCSEL sequencing (5→4):**
+Switching GPIO15 directly from FUNCSEL=31 (NULL, reset default) to FUNCSEL=4 (UART) does not reliably enable the PL011 RX input path. An intermediate switch to FUNCSEL=5 (SYS_RIO) followed by FUNCSEL=4 (UART) is required. This appears to reset internal RP1 mux state.
+
+**Pad configuration:** `PAD=0xDA` (IE=1, OD=1, 4mA, PUE=1, SCHMITT=1)
+**CTRL configuration:** `CTRL=0x84` (F_M=4, FUNCSEL=4)
 
 ## Driver Details
 
 **File:** `kernel/drivers/uart_rp1_bitbang.c`
 
-Despite the filename (historical), uses hardware PL011 for TX:
+Despite the filename (historical), uses hardware PL011 for both TX and RX:
 - TX: PL011 flag register polling (TXFF bit) — works after MMU maps RP1 as device memory
-- RX: Bit-banged via GPIO RIO for reliability
-- Init: Firmware initializes UART via `uart_2ndstage=1`; driver re-initializes with explicit baud rate config
+- RX: PL011 flag register polling (RXFE bit) — requires OD=1 pad config and FUNCSEL 5→4 sequencing
+- Init: Firmware initializes UART via `uart_2ndstage=1`; driver re-initializes with explicit baud rate and GPIO config
 
 **Baud rate:** 50MHz clock / (16 × 115200) = 27.127 → IBRD=27, FBRD=8
+**RX pad:** `0xDA` (IE=1, OD=1, 4mA, PUE=1, SCHMITT=1) — OD=1 is critical
 
 ## VMM Platform Mappings
 

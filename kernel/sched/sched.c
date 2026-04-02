@@ -722,12 +722,23 @@ void scheduler_start(void)
     /* Start timer and enable interrupts now that a task is active.
      * Must be done AFTER task_set_current() so that timer IRQ handler
      * can safely call task_current() in schedule(). */
+    /*
+     * Pi 5: Timer interrupts break PL011 RX on the RP1 southbridge.
+     * The interaction between GIC interrupt handling and RP1 PCIe bus
+     * causes the PL011 to stop receiving external data. Skip timer
+     * start and run cooperatively until the root cause is resolved.
+     * See docs/pi5-baremetal-status.md for investigation details.
+     */
+#if defined(PLATFORM_RASPI5)
+    INFO("Timer/IRQ disabled (Pi 5 UART RX workaround)");
+#else
     INFO("Starting timer (100 Hz)...");
     timer_start();
 
     INFO("Enabling interrupts...");
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");  /* Clear IRQ mask */
     __asm__ volatile("isb" ::: "memory");  /* Ensure unmask takes effect */
+#endif
 
     /* Switch to first task (NULL = no previous context to save) */
     switch_to(NULL, first);

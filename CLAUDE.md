@@ -248,7 +248,7 @@ Lab hardware is managed by **labctl** (Embedded Lab Control).
 **Quick reference:**
 - Power control: `labctl power on/off/cycle pi-5-1`
 - Serial console: `labctl connect pi-5-1-console`
-- SD card deploy: Use `sdwire` CLI (see `docs/pi5-baremetal-status.md` for full workflow)
+- SD card deploy: See "SD Card Deploy Workflow" below
 - Lab status: `labctl status`
 
 **Restarting the Pi 5:**
@@ -257,6 +257,44 @@ Lab hardware is managed by **labctl** (Embedded Lab Control).
 
 **Note:** The old `lab-tools/` scripts (jetson-power.py, jetson-uart.sh, etc.) have been replaced by labctl. Use labctl for all lab operations.
 
+### SD Card Deploy Workflow
+
+**IMPORTANT:** Always use `labctl` for ALL SD card operations. Never manually access `/dev/sdX` devices — multiple SDWire devices exist in the lab and manual access risks writing to the wrong device.
+
+**For SLM-OS kernel updates** (copy kernel binary to existing boot partition):
+
+The lab has two SDWire devices. `labctl` manages which device belongs to which SBC. Use the MCP tools (`sdwire_to_host`, `sdwire_to_dut`) or CLI equivalents, and use the block device path returned by labctl to ensure the correct SD card is accessed.
+
+```bash
+# 1. Power off the Pi
+labctl power off pi-5-1
+
+# 2. Switch SD card to host — note the block device path returned
+labctl sdwire host pi-5-1
+# Returns e.g.: "block device: /dev/sdd"
+
+# 3. Mount the boot partition (use the device labctl returned + "1")
+sudo mount /dev/sdd1 /mnt
+
+# 4. Copy kernel binary
+sudo cp build/kernel/slmos.bin /mnt/kernel_2712.img
+sync
+
+# 5. Unmount
+sudo umount /mnt
+
+# 6. Switch back to DUT and power on
+labctl sdwire dut pi-5-1
+labctl power on pi-5-1
+```
+
+**For full SD card images** (raw `dd` write):
+```bash
+labctl sdwire flash pi-5-1 path/to/image.img
+```
+
+**Known issue:** The block device reported by labctl may become stale after USB re-enumeration. If the reported device shows 0B size, check `dmesg` or `lsblk` for the actual device that was assigned.
+
 ---
 
-*Last updated: 31 March 2026*
+*Last updated: 1 April 2026*

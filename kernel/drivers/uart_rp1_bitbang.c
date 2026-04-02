@@ -2,12 +2,23 @@
  * uart_rp1_bitbang.c - UART driver for Raspberry Pi 5 via RP1
  *
  * Uses the PL011 UART0 on RP1 (GPIO14=TXD, GPIO15=RXD).
- * Falls back to bit-banging for RX since PL011 RX timing is sensitive.
- *
  * The RP1 peripherals are accessed via PCIe at 0x1F00000000.
  * GPIO pins must be configured for UART function (funcsel=4).
  *
- * Baud rate: 115200 @ 50MHz clock (firmware default)
+ * Baud rate: 115200 @ 50MHz clock (confirmed by testing; 48 MHz
+ * assumption from RP1 datasheet produces garbled output).
+ *
+ * RX requires two non-obvious RP1 pad/mux configurations:
+ *   1. OD=1 (output disable) on the RX pad — without this, the output
+ *      driver interferes with external input even though OE reads as 0.
+ *   2. FUNCSEL sequencing: set SYS_RIO (5) before UART (4). Direct
+ *      switch from reset default (31/NULL) to UART doesn't reliably
+ *      enable the PL011 RX input path.
+ *
+ * Known limitation: Timer interrupts break PL011 RX on the RP1.
+ * The shell currently runs without preemptive scheduling (no timer).
+ * The root cause appears to be an interaction between the GIC interrupt
+ * handling path and the RP1 PCIe bus. Investigation ongoing.
  */
 
 #include "platform.h"
@@ -30,6 +41,7 @@
 
 /* PL011 register offsets */
 #define UART_DR     0x00    /* Data register */
+#define UART_RSRECR 0x04    /* Receive status / error clear */
 #define UART_FR     0x18    /* Flag register */
 #define UART_IBRD   0x24    /* Integer baud rate divisor */
 #define UART_FBRD   0x28    /* Fractional baud rate divisor */
@@ -54,11 +66,14 @@
 #define FUNCSEL_UART    4   /* UART TXD/RXD function */
 #define FUNCSEL_SYS_RIO 5   /* Direct GPIO control */
 
-/* Pad configuration: IE=1, OD=0, 4mA drive */
-#define PAD_CONFIG  0x56
+/* Pad configuration for TX: IE=1, OD=0, 4mA drive */
+#define PAD_TX  0x56
 
-/* Bit delay for 115200 baud (for RX bit-banging) */
-#define BIT_DELAY  150
+/*
+ * Pad configuration for RX: IE=1, OD=1, 4mA, PUE=1, SCHMITT=1
+ * OD=1 (output disable) is critical — see file header comment.
+ */
+#define PAD_RX  0xDA
 
 /*
  * Initialize UART0 on RP1 for 115200 baud.
@@ -77,15 +92,25 @@ void uart_init(void)
     volatile uint32_t *uart_lcr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_LCR);
 
     /* Configure GPIO14 (TXD) pad and pin mux */
-    *gpio14_pads = PAD_CONFIG;
+    *gpio14_pads = PAD_TX;
     __asm__ volatile("dsb sy" ::: "memory");
     *gpio14_ctrl = FUNCSEL_UART;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Configure GPIO15 (RXD) pad: IE=1, pull-up for idle-high */
-    *gpio15_pads = 0x5A;  /* IE=1, OD=0, 4mA, PUE=1, PDE=0, SCHMITT=1 */
+    /*
+     * Configure GPIO15 (RXD).
+     * The firmware/armstub resets GPIO15 to defaults (FUNCSEL=31/NULL,
+     * IE=0, OD=1, pull-down). Must reconfigure for UART RX.
+     *
+     * FUNCSEL sequencing: SYS_RIO (5) first, then UART (4).
+     * See file header for explanation.
+     */
+    *gpio15_pads = PAD_RX;
     __asm__ volatile("dsb sy" ::: "memory");
-    *gpio15_ctrl = FUNCSEL_UART;
+    *gpio15_ctrl = (4 << 5) | FUNCSEL_SYS_RIO;  /* F_M=4, FUNCSEL=5 first */
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (volatile int d = 0; d < 1000; d++);
+    *gpio15_ctrl = (4 << 5) | FUNCSEL_UART;      /* F_M=4, FUNCSEL=4 */
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* Disable UART before configuration */
@@ -97,13 +122,9 @@ void uart_init(void)
     __asm__ volatile("dsb sy" ::: "memory");
 
     /*
-     * Set baud rate for 115200 @ 50MHz clock
+     * Set baud rate for 115200 @ 50MHz clock.
      * Divisor = 50000000 / (16 * 115200) = 27.127
      * IBRD = 27, FBRD = 0.127 * 64 = 8
-     *
-     * NOTE: This assumes a 50 MHz UART clock. The actual RP1 UART clock
-     * may differ. TX works at this rate but RX does not receive data —
-     * likely a baud rate mismatch on RX. See docs/pi5-baremetal-status.md.
      */
     *uart_ibrd = 27;
     *uart_fbrd = 8;
@@ -153,20 +174,19 @@ void uart_putc(char c)
 /*
  * Receive a single character via PL011 UART.
  *
- * Originally used GPIO bit-banging because flag register reads caused data
- * aborts. With proper device memory mapping (VMM maps RP1 as nGnRnE), the
- * PL011 hardware RX works correctly.
+ * Polls FR_RXFE until data is available. Currently uses busy-wait
+ * because timer interrupts break PL011 RX on the RP1 (preemptive
+ * scheduling is disabled). When the timer interrupt issue is resolved,
+ * this can switch to yield()-based cooperative waiting.
  */
 char uart_getc(void)
 {
-    extern void yield(void);
-
     volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
     volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
 
     /* Wait until RX FIFO has data */
     while (*uart_fr & FR_RXFE) {
-        yield();
+        __asm__ volatile("" ::: "memory");
     }
 
     /* Read character (lower 8 bits of DR) */
