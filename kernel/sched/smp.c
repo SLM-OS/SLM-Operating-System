@@ -487,11 +487,11 @@ void smp_init(void)
     /* Boot secondary CPUs */
 #if defined(PLATFORM_RASPI5)
     /*
-     * Pi 5: Skip secondary CPU boot. The Pi 5 firmware's EL2 stub does not
-     * implement PSCI, so HVC #0 calls hang. Additionally, ARM exclusive
-     * monitor operations hang on Pi 5, making spinlocks unusable for SMP.
+     * Pi 5: Skip secondary CPU boot. The Pi 5 firmware does not implement
+     * PSCI CPU_ON, so secondary cores cannot be started via HVC calls.
+     * Spinlocks work correctly after MMU enable (spinlock_hw_enabled flag).
      */
-    INFO("SMP: skipping secondary boot on Pi 5 (no PSCI, no spinlocks)");
+    INFO("SMP: skipping secondary boot on Pi 5 (no PSCI CPU_ON)");
     (void)booted;
 #else
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {

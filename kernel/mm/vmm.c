@@ -13,6 +13,15 @@
 #include <stddef.h>
 
 /*
+ * Runtime flag for spinlock hardware support.
+ * Before MMU enable, memory is non-cacheable and ldaxr/stxr hang.
+ * Set to 1 after MMU is enabled with proper cacheable mappings.
+ */
+#if !defined(SPINLOCK_SKIP_LOCKING)
+volatile int spinlock_hw_enabled = 0;
+#endif
+
+/*
  * ==========================================================================
  * Page Table Storage
  * ==========================================================================
@@ -853,6 +862,17 @@ void vmm_init(void)
     vmm_state.initialized = true;
 
     INFO("MMU enabled successfully");
+
+    /* Enable hardware spinlocks now that memory is cacheable.
+     * The exclusive monitor (ldaxr/stxr) requires cacheable, shareable
+     * memory to function. Before MMU enable, all memory is non-cacheable
+     * and exclusive operations hang on Cortex-A76. */
+#if !defined(SPINLOCK_SKIP_LOCKING)
+    spinlock_hw_enabled = 1;
+    __asm__ volatile("dmb ish" ::: "memory");  /* Ensure flag is visible */
+    INFO("Spinlock hardware enabled (exclusive monitor active)");
+#endif
+
     vmm_dump();
 
     /* Run validation tests */

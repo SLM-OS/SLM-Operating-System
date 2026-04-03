@@ -64,9 +64,9 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 1. **~~UART flag register:~~** ~~Reading from UART_FR causes data abort.~~ **RESOLVED** — Flag register reads work correctly after MMU enable with proper device memory mapping (nGnRnE) for the RP1 region. The earlier crash was caused by the VMM not mapping the RP1 address space at all.
 
-2. **Spinlocks:** ARM exclusive monitor operations hang. `SPINLOCK_SKIP_LOCKING` defined for Pi 5.
+2. **~~Spinlocks:~~** **RESOLVED** — Hardware spinlocks work after MMU enable. Before MMU, a runtime flag (`spinlock_hw_enabled`) gates barrier-only fallback. The exclusive monitor requires cacheable memory, which is available only after VMM initialization.
 
-3. **Single-core:** Due to spinlock limitation, multi-core support not available.
+3. **Single-core:** Pi 5 firmware does not implement PSCI CPU_ON, so secondary cores cannot be booted. Spinlocks now work (resolved), but multi-core is blocked by the PSCI limitation.
 
 4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 

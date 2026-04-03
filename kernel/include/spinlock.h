@@ -9,16 +9,27 @@
 #define SPINLOCK_H
 
 #include <stdint.h>
-#include "platform.h"   /* For PLATFORM_JETSON_ORIN_NANO, PLATFORM_RASPI5 */
+#include "platform.h"   /* For PLATFORM_JETSON_ORIN_NANO (SPINLOCK_SKIP_LOCKING) */
 
 /*
- * On Jetson after kexec and on Raspberry Pi 5 bare-metal, the ARM exclusive
- * monitor state is not properly initialized, causing LDAXR/STXR operations
- * to hang (even without WFE). Since we're running single-core in these cases,
- * we skip actual spinlock operations and just use memory barriers.
+ * On Jetson after kexec, the exclusive monitor is broken — skip locking.
+ *
+ * On Pi 5, the exclusive monitor works but ONLY after the MMU is enabled.
+ * Pre-MMU, memory is non-cacheable and ldaxr/stxr hang on Cortex-A76.
+ * A runtime flag (spinlock_hw_enabled) gates real locking: set to true
+ * by vmm_init() after MMU enable. Before that, spinlocks use barriers only.
  */
-#if defined(SPINLOCK_SKIP_LOCKING) || defined(PLATFORM_RASPI5)
+#if defined(SPINLOCK_SKIP_LOCKING)
 #define SPINLOCK_SKIP_LOCKING 1
+#endif
+
+/*
+ * Runtime flag: when false, spin_lock/spin_unlock use barriers only.
+ * Set to true after MMU is enabled and exclusive monitor is functional.
+ * Declared in spinlock.h, defined in vmm.c (set after MMU enable).
+ */
+#if !defined(SPINLOCK_SKIP_LOCKING)
+extern volatile int spinlock_hw_enabled;
 #endif
 
 /*
@@ -76,6 +87,11 @@ static inline void spin_init(spinlock_t *lock)
  * in a way that LDAXR/STXR operations hang (even without WFE). Since we're
  * running single-core after kexec, we skip locking entirely and just use
  * a memory barrier.
+ *
+ * On Pi 5, the exclusive monitor requires cacheable memory (MMU enabled).
+ * Before MMU init, spinlock_hw_enabled is 0 and spin_lock uses barrier-only
+ * fallback. After vmm_init() enables the MMU, spinlock_hw_enabled is set to 1
+ * and real ldaxr/stxr operations are used.
  */
 static inline void spin_lock(spinlock_t *lock)
 {
@@ -84,9 +100,17 @@ static inline void spin_lock(spinlock_t *lock)
     (void)lock;
     dmb(ish);
 #else
+    /* Before MMU enable, exclusive monitor doesn't work (non-cacheable memory).
+     * Use barrier-only fallback until vmm_init sets spinlock_hw_enabled. */
+    if (!spinlock_hw_enabled) {
+        (void)lock;
+        dmb(ish);
+        return;
+    }
+
     uint32_t tmp;
 
-    /* Other platforms: use WFE for low-power spinning */
+    /* Use WFE for low-power spinning */
     __asm__ volatile(
         "   sevl\n"                     /* Set event locally (avoid initial WFE block) */
         "1: wfe\n"                      /* Wait for event (low power spin) */
@@ -108,21 +132,26 @@ static inline void spin_lock(spinlock_t *lock)
 static inline int spin_trylock(spinlock_t *lock)
 {
 #if defined(SPINLOCK_SKIP_LOCKING)
-    /* Jetson: always succeed, we're single-core after kexec */
     (void)lock;
     dmb(ish);
     return 1;
 #else
+    if (!spinlock_hw_enabled) {
+        (void)lock;
+        dmb(ish);
+        return 1;
+    }
+
     uint32_t tmp, result;
 
     __asm__ volatile(
-        "   ldaxr   %w0, [%2]\n"        /* Load-acquire exclusive */
-        "   cbnz    %w0, 1f\n"          /* If locked, fail */
-        "   stxr    %w0, %w3, [%2]\n"   /* Try to store 1 (locked) */
-        "   cbnz    %w0, 1f\n"          /* If store failed, fail */
-        "   mov     %w1, #1\n"          /* Success */
+        "   ldaxr   %w0, [%2]\n"
+        "   cbnz    %w0, 1f\n"
+        "   stxr    %w0, %w3, [%2]\n"
+        "   cbnz    %w0, 1f\n"
+        "   mov     %w1, #1\n"
         "   b       2f\n"
-        "1: mov     %w1, #0\n"          /* Failure */
+        "1: mov     %w1, #0\n"
         "2:\n"
         : "=&r"(tmp), "=&r"(result)
         : "r"(&lock->lock), "r"(1)
@@ -139,13 +168,18 @@ static inline int spin_trylock(spinlock_t *lock)
 static inline void spin_unlock(spinlock_t *lock)
 {
 #if defined(SPINLOCK_SKIP_LOCKING)
-    /* Jetson: skip unlocking, just barrier for memory ordering */
     (void)lock;
     dmb(ish);
 #else
+    if (!spinlock_hw_enabled) {
+        (void)lock;
+        dmb(ish);
+        return;
+    }
+
     __asm__ volatile(
-        "   stlr    wzr, [%0]\n"        /* Store-release 0 (unlocked) */
-        "   sev\n"                      /* Send event to wake waiters */
+        "   stlr    wzr, [%0]\n"
+        "   sev\n"
         :
         : "r"(&lock->lock)
         : "memory"

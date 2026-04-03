@@ -1577,6 +1577,90 @@ static void test_timer_irq_is_physical(void)
 }
 
 /* ============================================================================
+ * Spinlock Hardware Mode Tests (post-MMU)
+ *
+ * These tests run after vmm_init() has enabled the MMU and set
+ * spinlock_hw_enabled=1. They verify hardware spinlocks (ldaxr/stxr)
+ * work correctly, unlike the smp.c tests which run pre-MMU in
+ * barrier-only mode.
+ * ============================================================================ */
+
+#if !defined(SPINLOCK_SKIP_LOCKING)
+extern volatile int spinlock_hw_enabled;
+#endif
+
+/*
+ * Test: spinlock_hw_enabled is 1 after boot (VMM has initialized).
+ */
+static void test_spinlock_hw_enabled_after_boot(void)
+{
+#if !defined(SPINLOCK_SKIP_LOCKING)
+    TEST_ASSERT_EQUAL_INT(1, spinlock_hw_enabled);
+#else
+    TEST_IGNORE_MESSAGE("SPINLOCK_SKIP_LOCKING active, no runtime flag");
+#endif
+}
+
+/*
+ * Test: Hardware spin_lock actually sets lock value to 1.
+ * This test runs post-MMU so it exercises real ldaxr/stxr.
+ */
+static void test_spinlock_hw_acquire_release(void)
+{
+    spinlock_t lock = SPINLOCK_INIT;
+
+    TEST_ASSERT_EQUAL_INT(0, lock.lock);
+
+    spin_lock(&lock);
+#if !defined(SPINLOCK_SKIP_LOCKING)
+    /* With hardware spinlocks, lock.lock should be 1 */
+    TEST_ASSERT_EQUAL_INT(1, lock.lock);
+#endif
+
+    spin_unlock(&lock);
+    TEST_ASSERT_EQUAL_INT(0, lock.lock);
+}
+
+/*
+ * Test: Hardware spin_trylock returns 0 when lock is held.
+ */
+static void test_spinlock_hw_trylock_contention(void)
+{
+    spinlock_t lock = SPINLOCK_INIT;
+
+    spin_lock(&lock);
+
+    /* trylock should fail since lock is held */
+    int result = spin_trylock(&lock);
+#if !defined(SPINLOCK_SKIP_LOCKING)
+    TEST_ASSERT_EQUAL_INT(0, result);
+#else
+    (void)result;
+    TEST_IGNORE_MESSAGE("SPINLOCK_SKIP_LOCKING: trylock always succeeds");
+#endif
+
+    spin_unlock(&lock);
+}
+
+/*
+ * Test: IRQ-safe spinlock works in hardware mode.
+ */
+static void test_spinlock_hw_irqsafe(void)
+{
+    spinlock_t lock = SPINLOCK_INIT;
+
+    irq_flags_t flags = spin_lock_irqsave(&lock);
+
+#if !defined(SPINLOCK_SKIP_LOCKING)
+    /* Lock should be held */
+    TEST_ASSERT_EQUAL_INT(1, lock.lock);
+#endif
+
+    spin_unlock_irqrestore(&lock, flags);
+    TEST_ASSERT_EQUAL_INT(0, lock.lock);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1639,6 +1723,12 @@ int test_suite_scheduler(void)
     RUN_TEST(test_timer_counter_advances);
     RUN_TEST(test_timer_frequency_reasonable);
     RUN_TEST(test_timer_irq_is_physical);
+
+    /* Spinlock hardware mode tests (post-MMU) */
+    RUN_TEST(test_spinlock_hw_enabled_after_boot);
+    RUN_TEST(test_spinlock_hw_acquire_release);
+    RUN_TEST(test_spinlock_hw_trylock_contention);
+    RUN_TEST(test_spinlock_hw_irqsafe);
 
     return UnityEnd();
 }
