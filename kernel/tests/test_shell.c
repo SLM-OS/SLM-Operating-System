@@ -12,6 +12,7 @@
 #include "../include/task.h"
 #include "../include/littlefs_slm.h"
 #include "../include/string.h"
+#include "../include/uart.h"
 
 /* ============================================================================
  * Test Helpers
@@ -1440,6 +1441,125 @@ static void test_shell_help_dir_listing(void)
 }
 
 /* ============================================================================
+ * Shared String Function Regression Tests (CORE-L1)
+ *
+ * Previously, 6 files had their own static copies of strcmp/strlen/strcpy.
+ * Now they all use the shared functions from string.c via string.h.
+ * ============================================================================ */
+
+/* Regression: shared string functions from string.h work correctly */
+static void test_string_strcmp_basic(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, strcmp("hello", "hello"));
+    TEST_ASSERT_TRUE(strcmp("abc", "abd") < 0);
+    TEST_ASSERT_TRUE(strcmp("abd", "abc") > 0);
+    TEST_ASSERT_TRUE(strcmp("", "a") < 0);
+    TEST_ASSERT_EQUAL_INT(0, strcmp("", ""));
+}
+
+static void test_string_strlen_basic(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, strlen(""));
+    TEST_ASSERT_EQUAL_INT(5, strlen("hello"));
+    TEST_ASSERT_EQUAL_INT(1, strlen("x"));
+}
+
+static void test_string_strcpy_basic(void)
+{
+    char buf[32];
+    strcpy(buf, "test");
+    TEST_ASSERT_EQUAL_STRING("test", buf);
+    strcpy(buf, "");
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+static void test_string_strncpy_basic(void)
+{
+    char buf[8];
+    extern void *memset(void *s, int c, size_t n);
+    memset(buf, 'X', sizeof(buf));
+    strncpy(buf, "hi", sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("hi", buf);
+    /* strncpy should zero-pad remaining bytes */
+    TEST_ASSERT_EQUAL_INT(0, buf[3]);
+}
+
+/* ============================================================================
+ * kprintf Format Regression Tests (CORE-L3)
+ *
+ * The kprintf was refactored to use a common format parser.
+ * These tests verify format specifiers produce correct output via
+ * uart_snprintf (which writes to a buffer, testable).
+ * ============================================================================ */
+
+/* Regression: kprintf format specifiers work after refactor */
+static void test_kprintf_decimal(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "%d", 42);
+    TEST_ASSERT_EQUAL_STRING("42", buf);
+    uart_snprintf(buf, sizeof(buf), "%d", -1);
+    TEST_ASSERT_EQUAL_STRING("-1", buf);
+    uart_snprintf(buf, sizeof(buf), "%d", 0);
+    TEST_ASSERT_EQUAL_STRING("0", buf);
+}
+
+static void test_kprintf_hex(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "%x", 0xDEAD);
+    TEST_ASSERT_EQUAL_STRING("dead", buf);
+    uart_snprintf(buf, sizeof(buf), "%X", 0xBEEF);
+    TEST_ASSERT_EQUAL_STRING("BEEF", buf);
+}
+
+static void test_kprintf_string(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "hello %s", "world");
+    TEST_ASSERT_EQUAL_STRING("hello world", buf);
+    uart_snprintf(buf, sizeof(buf), "%s", "");
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+static void test_kprintf_pointer(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "%p", (void *)0x1234);
+    TEST_ASSERT_EQUAL_STRING("0x1234", buf);
+}
+
+static void test_kprintf_width_pad(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "%8d", 42);
+    TEST_ASSERT_EQUAL_STRING("      42", buf);
+    uart_snprintf(buf, sizeof(buf), "%08x", 0xFF);
+    TEST_ASSERT_EQUAL_STRING("000000ff", buf);
+}
+
+static void test_kprintf_long(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "%lu", (unsigned long)4294967296UL);
+    TEST_ASSERT_EQUAL_STRING("4294967296", buf);
+}
+
+static void test_kprintf_percent(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "100%%");
+    TEST_ASSERT_EQUAL_STRING("100%", buf);
+}
+
+static void test_kprintf_mixed(void)
+{
+    char buf[128];
+    uart_snprintf(buf, sizeof(buf), "[%s] val=%d hex=0x%X", "INFO", 42, 0xABC);
+    TEST_ASSERT_EQUAL_STRING("[INFO] val=42 hex=0xABC", buf);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1594,6 +1714,22 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_help_files_exist);
     RUN_TEST(test_shell_help_file_content);
     RUN_TEST(test_shell_help_dir_listing);
+
+    /* String function regression tests */
+    RUN_TEST(test_string_strcmp_basic);
+    RUN_TEST(test_string_strlen_basic);
+    RUN_TEST(test_string_strcpy_basic);
+    RUN_TEST(test_string_strncpy_basic);
+
+    /* kprintf format regression tests */
+    RUN_TEST(test_kprintf_decimal);
+    RUN_TEST(test_kprintf_hex);
+    RUN_TEST(test_kprintf_string);
+    RUN_TEST(test_kprintf_pointer);
+    RUN_TEST(test_kprintf_width_pad);
+    RUN_TEST(test_kprintf_long);
+    RUN_TEST(test_kprintf_percent);
+    RUN_TEST(test_kprintf_mixed);
 
     return UNITY_END();
 }

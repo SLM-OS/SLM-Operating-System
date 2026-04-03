@@ -13,6 +13,7 @@
 #include "uart.h"
 #include "vfs.h"
 #include "littlefs_slm.h"
+#include "string.h"
 #include <stddef.h>
 
 /* ============================================================================
@@ -608,21 +609,6 @@ static const struct help_entry help_entries[] = {
  * Implementation
  * ============================================================================ */
 
-/* Helper: string length */
-static size_t help_strlen(const char *s)
-{
-    size_t len = 0;
-    while (*s++) len++;
-    return len;
-}
-
-/* Helper: string compare */
-static int help_strcmp(const char *a, const char *b)
-{
-    while (*a && *b && *a == *b) { a++; b++; }
-    return *a - *b;
-}
-
 /*
  * Initialize the help system.
  * Creates /help/ directory and writes all help files.
@@ -662,7 +648,7 @@ int help_init(void)
         /* Write help text */
         int f = littlefs_file_open(mnt, path, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
         if (f >= 0) {
-            littlefs_file_write(mnt, f, e->text, help_strlen(e->text));
+            littlefs_file_write(mnt, f, e->text, strlen(e->text));
             littlefs_file_close(mnt, f);
         }
     }
@@ -728,7 +714,7 @@ int help_exists(const char *command)
 
     /* Check if command is in our help entries */
     for (size_t i = 0; i < NUM_HELP_ENTRIES; i++) {
-        if (help_strcmp(help_entries[i].name, command) == 0) {
+        if (strcmp(help_entries[i].name, command) == 0) {
             return 1;
         }
     }

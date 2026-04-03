@@ -423,13 +423,13 @@
 
 ### Phase 3: Code Quality (address when convenient)
 
-- ☐ **CORE-L1** — Deduplicate 13 string helpers into shared functions
-- ☐ **CORE-L3** — Merge kprintf vprintf/vsnprintf duplicate parsing
-- ☐ **CORE-L9** — Split shell.c into ~5 focused files
-- ☐ **FS-C1** — Add heap_reset() for Lua session cleanup
-- ☐ **MM-M2** — pmm_dump_stats copy-then-print
-- ☐ **DRV-C2, DRV-C3** — Add timeouts to GIC wait loops
-- ☐ **DOC-C1, DOC-C2** — Fix all wrong file paths and GIC version refs
+- ✅ **CORE-L1** — Deduplicate 13 string helpers into shared functions
+- ✅ **CORE-L3** — Merge kprintf vprintf/vsnprintf duplicate parsing
+- ⏸️ **CORE-L9** — Split shell.c into ~5 focused files — deferred (large refactor, separate commit)
+- ✅ **FS-C1** — Add heap_reset() for Lua session cleanup
+- ✅ **MM-M2** — pmm_dump_stats copy-then-print
+- ✅ **DRV-C2, DRV-C3** — Add timeouts to GIC wait loops
+- ✅ **DOC-C1, DOC-C2** — Fix all wrong file paths and GIC version refs
 
 ### Phase 4: Test Improvements
 

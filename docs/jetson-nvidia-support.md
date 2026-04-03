@@ -442,8 +442,8 @@ Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a
 |------------|---------|------|--------|
 | UARTA | 0x03100000 | NS16550 | Blocked by CBB |
 | UARTC | 0x0C280000 | NS16550 | Forum reports EL2 access works |
-| GIC Distributor | 0x0F400000 | GICv2 | Unknown |
-| GIC CPU Interface | 0x0F440000 | GICv2 | Unknown |
+| GIC Distributor (GICD) | 0x0F400000 | GICv3 | Unknown |
+| GIC Redistributor (GICR) | 0x0F440000 | GICv3 | Unknown |
 | Watchdog | 0x02190000 | Timer | Works (disabled successfully) |
 | BPMP IVC TX | 0x0C168000 | HSP Mailbox | IVC corrupted after kexec |
 

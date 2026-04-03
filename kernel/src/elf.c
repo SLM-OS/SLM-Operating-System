@@ -9,6 +9,7 @@
 #include "task.h"
 #include "sched.h"
 #include "debug.h"
+#include "string.h"
 #include <stddef.h>
 
 /*
@@ -307,24 +308,6 @@ struct task *elf_create_task(const struct elf_info *info, const char *name)
     return elf_create_task_with_args(info, name, 0, NULL);
 }
 
-/*
- * Simple strlen for argv setup.
- */
-static size_t elf_strlen(const char *s)
-{
-    size_t len = 0;
-    while (s[len]) len++;
-    return len;
-}
-
-/*
- * Simple strcpy for argv setup.
- */
-static void elf_strcpy(char *dst, const char *src)
-{
-    while ((*dst++ = *src++));
-}
-
 struct task *elf_create_task_with_args(const struct elf_info *info,
                                         const char *name,
                                         int argc, char *argv[])
@@ -396,7 +379,7 @@ struct task *elf_create_task_with_args(const struct elf_info *info,
         /* First, calculate total string space needed */
         size_t strings_size = 0;
         for (int i = 0; i < argc; i++) {
-            strings_size += elf_strlen(argv[i]) + 1;  /* +1 for null terminator */
+            strings_size += strlen(argv[i]) + 1;  /* +1 for null terminator */
         }
 
         /* Align strings_size to 8 bytes */
@@ -413,8 +396,8 @@ struct task *elf_create_task_with_args(const struct elf_info *info,
 
         for (int i = 0; i < argc; i++) {
             arg_locations[i] = str_ptr;
-            elf_strcpy(str_ptr, argv[i]);
-            str_ptr += elf_strlen(argv[i]) + 1;
+            strcpy(str_ptr, argv[i]);
+            str_ptr += strlen(argv[i]) + 1;
         }
 
         /* Reserve space for argv array (argc + 1 pointers, including NULL) */

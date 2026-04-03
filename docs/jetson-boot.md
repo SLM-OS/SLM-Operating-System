@@ -158,8 +158,8 @@ For SLM-OS bare-metal, we use **UART1 (ttyTHS0)** at address `0x03100000`.
 |------------|--------------|------|-------|
 | UARTA | 0x03100000 | 64 KB | GPIO header UART |
 | UARTE | 0x03140000 | 64 KB | Additional UART |
-| GICv2 Distributor | 0x0F400000 | 64 KB | Interrupt controller |
-| GICv2 CPU Interface | 0x0F440000 | 64 KB | Per-CPU interrupt interface |
+| GICv3 Distributor (GICD) | 0x0F400000 | 64 KB | Interrupt controller |
+| GICv3 Redistributor (GICR) | 0x0F440000 | 2 MB | Per-CPU redistributors |
 | ARM Timer | System register | N/A | Generic Timer (CNTPCT_EL0) |
 
 **Note:** These addresses are from device tree and may need verification on hardware.
@@ -168,7 +168,7 @@ For SLM-OS bare-metal, we use **UART1 (ttyTHS0)** at address `0x03100000`.
 
 ## GIC Configuration
 
-Jetson Orin Nano uses ARM GICv2 (or GICv3 in v2 compat mode):
+Jetson Orin Nano uses ARM GICv3:
 
 - **Distributor:** 0x0F400000 (vs 0x08000000 on QEMU)
 - **CPU Interface:** 0x0F440000 (vs 0x08010000 on QEMU)

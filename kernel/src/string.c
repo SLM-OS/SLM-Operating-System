@@ -5,6 +5,7 @@
  * These are bare-minimum implementations for kernel use.
  */
 
+#include "string.h"
 #include <stddef.h>
 
 /* Copy string from src to dest */

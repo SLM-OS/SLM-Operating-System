@@ -38,7 +38,7 @@ See `docs/mmu.md` for comprehensive documentation.
 - ✅ Set up MAIR_EL1 with memory attributes (Device, Normal NC, Normal WB)
 - ✅ Configure TCR_EL1 for 39-bit VA, 4KB granule
 - ✅ Populate initial page tables (identity map + kernel high map via shared L1)
-- ✅ Write `mmu_enable()` in `kernel/src/mmu.S`
+- ✅ Write `mmu_enable()` in `kernel/arch/arm64/mmu.S`
 - ✅ Handle transition from physical to virtual addressing
 - ⏸️ Update linker script for virtual addresses (RWX warning fix) — deferred
 

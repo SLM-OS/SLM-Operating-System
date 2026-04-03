@@ -4,6 +4,11 @@
  * Centralized formatting functions for kernel output. Uses the platform-specific
  * UART driver (uart_putc) for actual character output.
  *
+ * Architecture: A common format parser (fmt_vprintf) uses an output abstraction
+ * (struct fmt_output) with a putc callback. Two backends exist:
+ *   - UART backend: writes characters to the hardware UART
+ *   - Buffer backend: writes characters to a memory buffer with bounds checking
+ *
  * Thread Safety:
  *   uart_puts() and uart_printf() are synchronized with a spinlock to prevent
  *   interleaved output from multiple CPUs. Use the _unlocked variants for
@@ -13,6 +18,7 @@
 #include "kprintf.h"
 #include "uart.h"
 #include "spinlock.h"
+#include "string.h"
 #include <stdint.h>
 
 /* Global lock for synchronized UART output
@@ -20,6 +26,72 @@
  * spinlock.h) since LDAXR/STXR hangs due to corrupted exclusive monitor state.
  */
 static spinlock_t uart_lock = SPINLOCK_INIT;
+
+/* ========================================================================
+ * Output Abstraction
+ * ======================================================================== */
+
+/*
+ * Output abstraction for format functions.
+ *
+ * The putc callback writes a single character to the output target.
+ * For UART output, it calls uart_putc directly.
+ * For buffer output, it writes to the buffer with bounds checking.
+ *
+ * The crlf flag controls \n -> \r\n conversion for bare text and %s output.
+ * This is enabled for UART (terminal needs \r\n) but not for buffer output.
+ */
+struct fmt_output {
+    void (*putc)(struct fmt_output *out, char c);
+    char *buf;      /* For buffer output: current write position */
+    size_t pos;     /* For buffer output: space remaining (including null) */
+    size_t size;    /* For buffer output: original buffer size */
+    int count;      /* Total characters written (or that would be written) */
+    int crlf;       /* Convert \n to \r\n in bare text and %s output */
+};
+
+/* UART backend: write character to hardware UART */
+static void uart_out_putc(struct fmt_output *out, char c)
+{
+    uart_putc(c);
+    out->count++;
+}
+
+/* Buffer backend: write character to buffer with bounds checking */
+static void buf_out_putc(struct fmt_output *out, char c)
+{
+    out->count++;
+    if (out->pos > 1) {
+        *out->buf++ = c;
+        out->pos--;
+    }
+}
+
+/* Initialize output for UART */
+static struct fmt_output fmt_output_uart(void)
+{
+    struct fmt_output out;
+    out.putc = uart_out_putc;
+    out.buf = NULL;
+    out.pos = 0;
+    out.size = 0;
+    out.count = 0;
+    out.crlf = 1;
+    return out;
+}
+
+/* Initialize output for buffer */
+static struct fmt_output fmt_output_buf(char *buf, size_t size)
+{
+    struct fmt_output out;
+    out.putc = buf_out_putc;
+    out.buf = buf;
+    out.pos = size;
+    out.size = size;
+    out.count = 0;
+    out.crlf = 0;
+    return out;
+}
 
 /* ========================================================================
  * String Output Functions
@@ -53,70 +125,56 @@ void uart_puts(const char *s)
 }
 
 /* ========================================================================
- * Printf Implementation - Helpers
+ * Common Format Helpers
  * ======================================================================== */
 
-/* Helper: print padding characters */
-static int print_padding(char pad_char, int count)
+/* Helper: output padding characters */
+static void fmt_padding(struct fmt_output *out, char pad_char, int count)
 {
-    int printed = 0;
     while (count-- > 0) {
-        uart_putc(pad_char);
-        printed++;
+        out->putc(out, pad_char);
     }
-    return printed;
 }
 
-/* Helper: get string length */
-static int str_len(const char *s)
+/* Helper: output a single character with width (no \r\n conversion for %c) */
+static void fmt_char_width(struct fmt_output *out, char c, int width,
+                           int left_justify)
 {
-    int len = 0;
-    while (*s++) len++;
-    return len;
-}
-
-/* Helper: print a single character with width */
-static int print_char_width(char c, int width, int left_justify)
-{
-    int count = 0;
     int pad = width > 1 ? width - 1 : 0;
 
     if (!left_justify && pad > 0) {
-        count += print_padding(' ', pad);
+        fmt_padding(out, ' ', pad);
     }
-    uart_putc(c);
-    count++;
+    out->putc(out, c);
     if (left_justify && pad > 0) {
-        count += print_padding(' ', pad);
+        fmt_padding(out, ' ', pad);
     }
-    return count;
 }
 
-/* Helper: print a string with width */
-static int print_string_width(const char *s, int width, int left_justify)
+/* Helper: output a string with width (\r\n conversion if crlf flag is set) */
+static void fmt_string_width(struct fmt_output *out, const char *s, int width,
+                             int left_justify)
 {
-    int count = 0;
-    int len = str_len(s);
+    int len = (int)strlen(s);
     int pad = width > len ? width - len : 0;
 
     if (!left_justify && pad > 0) {
-        count += print_padding(' ', pad);
+        fmt_padding(out, ' ', pad);
     }
     while (*s) {
-        if (*s == '\n') {
-            uart_putc('\r');
+        if (out->crlf && *s == '\n') {
+            out->putc(out, '\r');
         }
-        uart_putc(*s++);
-        count++;
+        out->putc(out, *s++);
     }
     if (left_justify && pad > 0) {
-        count += print_padding(' ', pad);
+        fmt_padding(out, ' ', pad);
     }
-    return count;
 }
 
-/* Helper: format unsigned integer to buffer, return length */
-static int format_unsigned(char *buf, uint64_t value, int base, int uppercase)
+/* Helper: format unsigned integer to temp buffer, return digit count */
+static int fmt_format_unsigned(char *buf, uint64_t value, int base,
+                               int uppercase)
 {
     char *p = buf + 23;  /* Work backwards from end */
     const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
@@ -143,99 +201,97 @@ static int format_unsigned(char *buf, uint64_t value, int base, int uppercase)
     return len;
 }
 
-/* Helper: print unsigned integer with width and flags */
-static int print_unsigned_width(uint64_t value, int base, int uppercase,
-                                 int width, int left_justify, int zero_pad)
+/* Helper: output a string from a temp buffer (no \r\n conversion needed) */
+static void fmt_puts_raw(struct fmt_output *out, const char *s)
+{
+    while (*s) {
+        out->putc(out, *s++);
+    }
+}
+
+/* Helper: output unsigned integer with width and flags */
+static void fmt_unsigned_width(struct fmt_output *out, uint64_t value,
+                               int base, int uppercase, int width,
+                               int left_justify, int zero_pad)
 {
     char buf[24];
-    int len = format_unsigned(buf, value, base, uppercase);
-    int count = 0;
+    int len = fmt_format_unsigned(buf, value, base, uppercase);
     int pad = width > len ? width - len : 0;
     char pad_char = zero_pad ? '0' : ' ';
 
     if (!left_justify && pad > 0) {
-        count += print_padding(pad_char, pad);
+        fmt_padding(out, pad_char, pad);
     }
-    for (int i = 0; i < len; i++) {
-        uart_putc(buf[i]);
-        count++;
-    }
+    fmt_puts_raw(out, buf);
     if (left_justify && pad > 0) {
-        count += print_padding(' ', pad);  /* Always space-pad on right */
+        fmt_padding(out, ' ', pad);  /* Always space-pad on right */
     }
-    return count;
 }
 
-/* Helper: print signed integer with width and flags */
-static int print_signed_width(int64_t value, int base, int width,
-                               int left_justify, int zero_pad)
+/* Helper: output signed integer with width and flags */
+static void fmt_signed_width(struct fmt_output *out, int64_t value,
+                             int base, int width, int left_justify,
+                             int zero_pad)
 {
     char buf[24];
     int negative = value < 0;
     uint64_t abs_val = negative ? (uint64_t)(-value) : (uint64_t)value;
-    int len = format_unsigned(buf, abs_val, base, 0);
+    int len = fmt_format_unsigned(buf, abs_val, base, 0);
     int total_len = len + (negative ? 1 : 0);
-    int count = 0;
     int pad = width > total_len ? width - total_len : 0;
 
     if (!left_justify) {
         if (zero_pad) {
             /* Sign before zeros */
             if (negative) {
-                uart_putc('-');
-                count++;
+                out->putc(out, '-');
             }
-            count += print_padding('0', pad);
+            fmt_padding(out, '0', pad);
         } else {
             /* Spaces before sign */
-            count += print_padding(' ', pad);
+            fmt_padding(out, ' ', pad);
             if (negative) {
-                uart_putc('-');
-                count++;
+                out->putc(out, '-');
             }
         }
     } else {
         if (negative) {
-            uart_putc('-');
-            count++;
+            out->putc(out, '-');
         }
     }
 
-    for (int i = 0; i < len; i++) {
-        uart_putc(buf[i]);
-        count++;
-    }
+    fmt_puts_raw(out, buf);
 
     if (left_justify && pad > 0) {
-        count += print_padding(' ', pad);
+        fmt_padding(out, ' ', pad);
     }
-    return count;
 }
 
 /* ========================================================================
- * Printf Implementation - Main Functions
+ * Common Format Parser
  * ======================================================================== */
 
 /*
- * Formatted output with va_list.
+ * Common formatted output with va_list and output abstraction.
  *
  * Supported format: %[flags][width][length]specifier
  *   Flags:  - (left-justify), 0 (zero-pad)
  *   Width:  minimum field width (decimal number)
  *   Length: l (long)
  *   Specifiers: c, s, d, i, u, x, X, p, %
+ *
+ * Bare text characters (outside format specifiers) get \r\n conversion
+ * when out->crlf is set (UART output). %s strings also get conversion.
+ * %c does NOT get \r\n conversion (preserving existing behavior).
  */
-int uart_vprintf(const char *fmt, va_list args)
+static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
 {
-    int count = 0;
-
     while (*fmt) {
         if (*fmt != '%') {
-            if (*fmt == '\n') {
-                uart_putc('\r');
+            if (out->crlf && *fmt == '\n') {
+                out->putc(out, '\r');
             }
-            uart_putc(*fmt++);
-            count++;
+            out->putc(out, *fmt++);
             continue;
         }
 
@@ -269,88 +325,103 @@ int uart_vprintf(const char *fmt, va_list args)
         /* Handle specifier */
         switch (*fmt) {
         case 'c':
-            count += print_char_width((char)va_arg(args, int), width, left_justify);
+            fmt_char_width(out, (char)va_arg(args, int), width, left_justify);
             break;
 
         case 's': {
             const char *s = va_arg(args, const char *);
             if (s == NULL) s = "(null)";
-            count += print_string_width(s, width, left_justify);
+            fmt_string_width(out, s, width, left_justify);
             break;
         }
 
         case 'd':
         case 'i':
             if (is_long) {
-                count += print_signed_width(va_arg(args, int64_t), 10, width,
-                                            left_justify, zero_pad);
+                fmt_signed_width(out, va_arg(args, int64_t), 10, width,
+                                 left_justify, zero_pad);
             } else {
-                count += print_signed_width(va_arg(args, int32_t), 10, width,
-                                            left_justify, zero_pad);
+                fmt_signed_width(out, va_arg(args, int32_t), 10, width,
+                                 left_justify, zero_pad);
             }
             break;
 
         case 'u':
             if (is_long) {
-                count += print_unsigned_width(va_arg(args, uint64_t), 10, 0,
-                                              width, left_justify, zero_pad);
+                fmt_unsigned_width(out, va_arg(args, uint64_t), 10, 0,
+                                   width, left_justify, zero_pad);
             } else {
-                count += print_unsigned_width(va_arg(args, uint32_t), 10, 0,
-                                              width, left_justify, zero_pad);
+                fmt_unsigned_width(out, va_arg(args, uint32_t), 10, 0,
+                                   width, left_justify, zero_pad);
             }
             break;
 
         case 'x':
             if (is_long) {
-                count += print_unsigned_width(va_arg(args, uint64_t), 16, 0,
-                                              width, left_justify, zero_pad);
+                fmt_unsigned_width(out, va_arg(args, uint64_t), 16, 0,
+                                   width, left_justify, zero_pad);
             } else {
-                count += print_unsigned_width(va_arg(args, uint32_t), 16, 0,
-                                              width, left_justify, zero_pad);
+                fmt_unsigned_width(out, va_arg(args, uint32_t), 16, 0,
+                                   width, left_justify, zero_pad);
             }
             break;
 
         case 'X':
             if (is_long) {
-                count += print_unsigned_width(va_arg(args, uint64_t), 16, 1,
-                                              width, left_justify, zero_pad);
+                fmt_unsigned_width(out, va_arg(args, uint64_t), 16, 1,
+                                   width, left_justify, zero_pad);
             } else {
-                count += print_unsigned_width(va_arg(args, uint32_t), 16, 1,
-                                              width, left_justify, zero_pad);
+                fmt_unsigned_width(out, va_arg(args, uint32_t), 16, 1,
+                                   width, left_justify, zero_pad);
             }
             break;
 
         case 'p':
-            uart_putc('0');
-            uart_putc('x');
-            count += 2;
+            out->putc(out, '0');
+            out->putc(out, 'x');
             /* Pointers: use width-2 to account for "0x" prefix */
-            count += print_unsigned_width((uint64_t)(uintptr_t)va_arg(args, void *),
-                                          16, 0, width > 2 ? width - 2 : 0,
-                                          left_justify, zero_pad);
+            fmt_unsigned_width(out, (uint64_t)(uintptr_t)va_arg(args, void *),
+                               16, 0, width > 2 ? width - 2 : 0,
+                               left_justify, zero_pad);
             break;
 
         case '%':
-            uart_putc('%');
-            count++;
+            out->putc(out, '%');
             break;
 
         case '\0':
             /* Trailing % at end of format string */
-            return count;
+            return;
 
         default:
             /* Unknown format, print literally */
-            uart_putc('%');
-            uart_putc(*fmt);
-            count += 2;
+            out->putc(out, '%');
+            out->putc(out, *fmt);
             break;
         }
 
         fmt++;
     }
+}
 
-    return count;
+/* ========================================================================
+ * Public API - Printf Functions
+ * ======================================================================== */
+
+/*
+ * Formatted output with va_list.
+ *
+ * Supported format: %[flags][width][length]specifier
+ *   Flags:  - (left-justify), 0 (zero-pad)
+ *   Width:  minimum field width (decimal number)
+ *   Length: l (long)
+ *   Specifiers: c, s, d, i, u, x, X, p, %
+ */
+int uart_vprintf(const char *fmt, va_list args)
+{
+    struct fmt_output out = fmt_output_uart();
+    fmt_vprintf(&out, fmt, args);
+    return out.count;
 }
 
 /*
@@ -388,139 +459,7 @@ int uart_printf(const char *fmt, ...)
 }
 
 /* ========================================================================
- * snprintf Implementation - Helpers
- * ======================================================================== */
-
-/*
- * Context for buffer-based output.
- */
-struct snprintf_ctx {
-    char *buf;          /* Current write position */
-    size_t remaining;   /* Space remaining (including null) */
-    int total;          /* Total chars that would be written */
-};
-
-/* Helper: write char to buffer context */
-static void buf_putc(struct snprintf_ctx *ctx, char c)
-{
-    ctx->total++;
-    if (ctx->remaining > 1) {
-        *ctx->buf++ = c;
-        ctx->remaining--;
-    }
-}
-
-/* Helper: write padding to buffer context */
-static void buf_padding(struct snprintf_ctx *ctx, char pad_char, int count)
-{
-    while (count-- > 0) {
-        buf_putc(ctx, pad_char);
-    }
-}
-
-/* Helper: write string to buffer context */
-static void buf_puts(struct snprintf_ctx *ctx, const char *s)
-{
-    while (*s) {
-        buf_putc(ctx, *s++);
-    }
-}
-
-/* Helper: write string with width to buffer context */
-static void buf_puts_width(struct snprintf_ctx *ctx, const char *s,
-                           int width, int left_justify)
-{
-    int len = str_len(s);
-    int pad = width > len ? width - len : 0;
-
-    if (!left_justify && pad > 0) {
-        buf_padding(ctx, ' ', pad);
-    }
-    buf_puts(ctx, s);
-    if (left_justify && pad > 0) {
-        buf_padding(ctx, ' ', pad);
-    }
-}
-
-/* Helper: format unsigned integer to temp buffer, return length */
-static int buf_format_unsigned(char *tmp, uint64_t value, int base, int uppercase)
-{
-    char *p = tmp + 23;
-    const char *digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
-    int len = 0;
-
-    *p = '\0';
-
-    if (value == 0) {
-        *--p = '0';
-        len = 1;
-    } else {
-        while (value > 0) {
-            *--p = digits[value % base];
-            value /= base;
-            len++;
-        }
-    }
-
-    /* Move to start of buffer */
-    for (int i = 0; i < len; i++) {
-        tmp[i] = p[i];
-    }
-    tmp[len] = '\0';
-    return len;
-}
-
-/* Helper: write unsigned integer with width to buffer context */
-static void buf_unsigned_width(struct snprintf_ctx *ctx, uint64_t value,
-                               int base, int uppercase, int width,
-                               int left_justify, int zero_pad)
-{
-    char tmp[24];
-    int len = buf_format_unsigned(tmp, value, base, uppercase);
-    int pad = width > len ? width - len : 0;
-    char pad_char = zero_pad ? '0' : ' ';
-
-    if (!left_justify && pad > 0) {
-        buf_padding(ctx, pad_char, pad);
-    }
-    buf_puts(ctx, tmp);
-    if (left_justify && pad > 0) {
-        buf_padding(ctx, ' ', pad);
-    }
-}
-
-/* Helper: write signed integer with width to buffer context */
-static void buf_signed_width(struct snprintf_ctx *ctx, int64_t value,
-                             int base, int width, int left_justify, int zero_pad)
-{
-    char tmp[24];
-    int negative = value < 0;
-    uint64_t abs_val = negative ? (uint64_t)(-value) : (uint64_t)value;
-    int len = buf_format_unsigned(tmp, abs_val, base, 0);
-    int total_len = len + (negative ? 1 : 0);
-    int pad = width > total_len ? width - total_len : 0;
-
-    if (!left_justify) {
-        if (zero_pad) {
-            if (negative) buf_putc(ctx, '-');
-            buf_padding(ctx, '0', pad);
-        } else {
-            buf_padding(ctx, ' ', pad);
-            if (negative) buf_putc(ctx, '-');
-        }
-    } else {
-        if (negative) buf_putc(ctx, '-');
-    }
-
-    buf_puts(ctx, tmp);
-
-    if (left_justify && pad > 0) {
-        buf_padding(ctx, ' ', pad);
-    }
-}
-
-/* ========================================================================
- * snprintf Implementation - Main Functions
+ * Public API - snprintf Functions
  * ======================================================================== */
 
 /*
@@ -534,141 +473,21 @@ static void buf_signed_width(struct snprintf_ctx *ctx, int64_t value,
  */
 int uart_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 {
-    struct snprintf_ctx ctx;
-
     if (!buf || size == 0) {
         return -1;
     }
 
-    ctx.buf = buf;
-    ctx.remaining = size;
-    ctx.total = 0;
+    struct fmt_output out = fmt_output_buf(buf, size);
+    fmt_vprintf(&out, fmt, args);
 
-    while (*fmt) {
-        if (*fmt != '%') {
-            buf_putc(&ctx, *fmt++);
-            continue;
-        }
-
-        fmt++;  /* Skip '%' */
-
-        /* Parse flags */
-        int left_justify = 0;
-        int zero_pad = 0;
-        while (*fmt == '-' || *fmt == '0') {
-            if (*fmt == '-') left_justify = 1;
-            if (*fmt == '0') zero_pad = 1;
-            fmt++;
-        }
-        if (left_justify) zero_pad = 0;
-
-        /* Parse width */
-        int width = 0;
-        while (*fmt >= '0' && *fmt <= '9') {
-            width = width * 10 + (*fmt - '0');
-            fmt++;
-        }
-
-        /* Parse length modifier */
-        int is_long = 0;
-        if (*fmt == 'l') {
-            is_long = 1;
-            fmt++;
-        }
-
-        /* Handle specifier */
-        switch (*fmt) {
-        case 'c': {
-            char c = (char)va_arg(args, int);
-            int pad = width > 1 ? width - 1 : 0;
-            if (!left_justify && pad > 0) buf_padding(&ctx, ' ', pad);
-            buf_putc(&ctx, c);
-            if (left_justify && pad > 0) buf_padding(&ctx, ' ', pad);
-            break;
-        }
-
-        case 's': {
-            const char *s = va_arg(args, const char *);
-            if (s == NULL) s = "(null)";
-            buf_puts_width(&ctx, s, width, left_justify);
-            break;
-        }
-
-        case 'd':
-        case 'i':
-            if (is_long) {
-                buf_signed_width(&ctx, va_arg(args, int64_t), 10, width,
-                                 left_justify, zero_pad);
-            } else {
-                buf_signed_width(&ctx, va_arg(args, int32_t), 10, width,
-                                 left_justify, zero_pad);
-            }
-            break;
-
-        case 'u':
-            if (is_long) {
-                buf_unsigned_width(&ctx, va_arg(args, uint64_t), 10, 0,
-                                   width, left_justify, zero_pad);
-            } else {
-                buf_unsigned_width(&ctx, va_arg(args, uint32_t), 10, 0,
-                                   width, left_justify, zero_pad);
-            }
-            break;
-
-        case 'x':
-            if (is_long) {
-                buf_unsigned_width(&ctx, va_arg(args, uint64_t), 16, 0,
-                                   width, left_justify, zero_pad);
-            } else {
-                buf_unsigned_width(&ctx, va_arg(args, uint32_t), 16, 0,
-                                   width, left_justify, zero_pad);
-            }
-            break;
-
-        case 'X':
-            if (is_long) {
-                buf_unsigned_width(&ctx, va_arg(args, uint64_t), 16, 1,
-                                   width, left_justify, zero_pad);
-            } else {
-                buf_unsigned_width(&ctx, va_arg(args, uint32_t), 16, 1,
-                                   width, left_justify, zero_pad);
-            }
-            break;
-
-        case 'p':
-            buf_puts(&ctx, "0x");
-            buf_unsigned_width(&ctx, (uint64_t)(uintptr_t)va_arg(args, void *),
-                               16, 0, width > 2 ? width - 2 : 0,
-                               left_justify, zero_pad);
-            break;
-
-        case '%':
-            buf_putc(&ctx, '%');
-            break;
-
-        case '\0':
-            /* Trailing % at end of format string */
-            goto done;
-
-        default:
-            /* Unknown format, print literally */
-            buf_putc(&ctx, '%');
-            buf_putc(&ctx, *fmt);
-            break;
-        }
-
-        fmt++;
-    }
-
-done:
     /* Always null-terminate */
-    if (ctx.remaining > 0) {
-        *ctx.buf = '\0';
+    if (out.pos > 0) {
+        *out.buf = '\0';
     } else if (size > 0) {
         buf[size - 1] = '\0';
     }
 
-    return ctx.total;
+    return out.count;
 }
 
 /*

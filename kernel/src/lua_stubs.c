@@ -170,6 +170,22 @@ static void heap_init(void) {
     heap_initialized = 1;
 }
 
+/**
+ * Reset the heap to a single free block.
+ *
+ * Called after lua_close() to reclaim all Lua heap memory and eliminate
+ * fragmentation. Safe because only one Lua state exists at a time.
+ */
+void heap_reset(void) {
+    heap_head = (struct heap_block *)lua_heap;
+    heap_head->magic = BLOCK_MAGIC;
+    heap_head->size = LUA_HEAP_SIZE - sizeof(struct heap_block);
+    heap_head->is_free = 1;
+    heap_head->next = NULL;
+    heap_head->prev = NULL;
+    heap_initialized = 1;
+}
+
 void *malloc(size_t size) {
     if (!heap_initialized) heap_init();
     if (size == 0) return NULL;

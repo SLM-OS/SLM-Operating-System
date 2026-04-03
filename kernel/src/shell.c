@@ -25,6 +25,7 @@
 #include "net.h"
 #endif
 #include "lua_slm.h"
+#include "string.h"
 #include <stddef.h>
 
 /* ============================================================================
@@ -129,26 +130,6 @@ static char shell_cwd[VFS_MAX_PATH] = "/";
  * ============================================================================ */
 
 /*
- * Simple string comparison.
- */
-static int shell_strcmp(const char *a, const char *b)
-{
-    while (*a && *b && *a == *b) {
-        a++;
-        b++;
-    }
-    return *a - *b;
-}
-
-/*
- * Copy string.
- */
-static void shell_strcpy(char *dst, const char *src)
-{
-    while ((*dst++ = *src++));
-}
-
-/*
  * Parse unsigned integer from string.
  * Returns 0 on success, -1 on error.
  */
@@ -170,16 +151,6 @@ static int parse_uint(const char *str, uint32_t *out)
 }
 
 /*
- * String length helper.
- */
-static size_t shell_strlen(const char *s)
-{
-    size_t len = 0;
-    while (*s++) len++;
-    return len;
-}
-
-/*
  * Resolve a path (relative or absolute) to a canonical absolute path.
  * Handles: relative paths, ".", "..", trailing slashes, double slashes.
  * Returns 0 on success, -1 on error (path too long).
@@ -195,18 +166,18 @@ static int resolve_path(const char *path, char *out, size_t max_len)
 
     /* Empty path means current directory */
     if (*path == '\0') {
-        size_t cwd_len = shell_strlen(shell_cwd);
+        size_t cwd_len = strlen(shell_cwd);
         if (cwd_len >= max_len) return -1;
-        shell_strcpy(out, shell_cwd);
+        strcpy(out, shell_cwd);
         return 0;
     }
 
     /* Start with cwd for relative paths, empty for absolute */
     if (path[0] != '/') {
         /* Relative path - start with cwd */
-        size_t cwd_len = shell_strlen(shell_cwd);
+        size_t cwd_len = strlen(shell_cwd);
         if (cwd_len >= sizeof(work)) return -1;
-        shell_strcpy(work, shell_cwd);
+        strcpy(work, shell_cwd);
         work_len = cwd_len;
 
         /* Ensure there's a separator if cwd isn't just "/" */
@@ -284,7 +255,7 @@ static int resolve_path(const char *path, char *out, size_t max_len)
 
     /* Copy to output */
     if (work_len >= max_len) return -1;
-    shell_strcpy(out, work);
+    strcpy(out, work);
     return 0;
 }
 
@@ -295,14 +266,14 @@ static const shell_cmd_t *find_command(const char *name)
 {
     /* Check built-in commands */
     for (size_t i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
-        if (shell_strcmp(name, builtin_commands[i].name) == 0) {
+        if (strcmp(name, builtin_commands[i].name) == 0) {
             return &builtin_commands[i];
         }
     }
 
     /* Check external commands */
     for (int i = 0; i < num_external_commands; i++) {
-        if (shell_strcmp(name, external_commands[i].name) == 0) {
+        if (strcmp(name, external_commands[i].name) == 0) {
             return &external_commands[i];
         }
     }
@@ -902,7 +873,7 @@ static const elf_program_t elf_programs[] = {
 static const elf_program_t *find_elf_program(const char *name)
 {
     for (size_t i = 0; i < NUM_ELF_PROGRAMS; i++) {
-        if (shell_strcmp(name, elf_programs[i].name) == 0) {
+        if (strcmp(name, elf_programs[i].name) == 0) {
             return &elf_programs[i];
         }
     }
@@ -1010,7 +981,7 @@ static int cmd_kill(int argc, char *argv[])
     }
 
     /* Don't allow killing idle tasks (they have special names like "idle" or "idle_0") */
-    if (shell_strcmp(target->name, "idle") == 0 ||
+    if (strcmp(target->name, "idle") == 0 ||
         (target->name[0] == 'i' && target->name[1] == 'd' &&
          target->name[2] == 'l' && target->name[3] == 'e' &&
          target->name[4] == '_')) {
@@ -1100,7 +1071,7 @@ static int cmd_cd(int argc, char *argv[])
     }
 
     /* Update cwd */
-    shell_strcpy(shell_cwd, resolved);
+    strcpy(shell_cwd, resolved);
     return 0;
 }
 
@@ -1544,7 +1515,7 @@ static int cmd_df(int argc, char *argv[])
         if (argc < 2) {
             mnt = vfs_get_mount_ctx("/mnt/files", &subpath);
             if (mnt) {
-                shell_strcpy(resolved, "/mnt/files");
+                strcpy(resolved, "/mnt/files");
             }
         }
         if (!mnt) {
@@ -1929,16 +1900,16 @@ static void tree_recurse(struct lfs_mount *mnt, const char *path, int depth, int
 
             /* Recurse into subdirectory */
             char subpath[VFS_MAX_PATH];
-            size_t path_len = shell_strlen(path);
-            size_t name_len = shell_strlen(entry.name);
+            size_t path_len = strlen(path);
+            size_t name_len = strlen(entry.name);
 
             if (path_len + name_len + 2 < sizeof(subpath)) {
-                shell_strcpy(subpath, path);
+                strcpy(subpath, path);
                 if (path_len > 1) {
                     subpath[path_len] = '/';
-                    shell_strcpy(subpath + path_len + 1, entry.name);
+                    strcpy(subpath + path_len + 1, entry.name);
                 } else {
-                    shell_strcpy(subpath + 1, entry.name);
+                    strcpy(subpath + 1, entry.name);
                 }
                 tree_recurse(mnt, subpath, depth + 1, max_depth);
             }
@@ -2212,7 +2183,7 @@ static int cmd_grep(int argc, char *argv[])
     }
 
     const char *pattern = argv[1];
-    size_t pattern_len = shell_strlen(pattern);
+    size_t pattern_len = strlen(pattern);
 
     char resolved[VFS_MAX_PATH];
     if (resolve_path(argv[2], resolved, sizeof(resolved)) < 0) {
@@ -2332,18 +2303,18 @@ static void find_recurse(struct lfs_mount *mnt, const char *base_path,
 
         /* Build full path for display */
         char full_path[VFS_MAX_PATH];
-        size_t path_len = shell_strlen(path);
-        size_t name_len = shell_strlen(entry.name);
+        size_t path_len = strlen(path);
+        size_t name_len = strlen(entry.name);
 
         if (path_len + name_len + 2 < sizeof(full_path)) {
-            shell_strcpy(full_path, path);
+            strcpy(full_path, path);
             if (path_len > 1 || (path_len == 1 && path[0] != '/')) {
                 full_path[path_len] = '/';
-                shell_strcpy(full_path + path_len + 1, entry.name);
+                strcpy(full_path + path_len + 1, entry.name);
             } else if (path_len == 1 && path[0] == '/') {
-                shell_strcpy(full_path + 1, entry.name);
+                strcpy(full_path + 1, entry.name);
             } else {
-                shell_strcpy(full_path, entry.name);
+                strcpy(full_path, entry.name);
             }
 
             /* Check if name matches pattern */
@@ -2398,8 +2369,8 @@ static int cmd_find(int argc, char *argv[])
     int count = 0;
 
     /* Calculate the base path prefix (mount point) */
-    size_t resolved_len = shell_strlen(resolved);
-    size_t subpath_len = subpath ? shell_strlen(subpath) : 0;
+    size_t resolved_len = strlen(resolved);
+    size_t subpath_len = subpath ? strlen(subpath) : 0;
     char base_path[VFS_MAX_PATH];
 
     if (subpath_len > 0 && resolved_len >= subpath_len) {
@@ -2409,7 +2380,7 @@ static int cmd_find(int argc, char *argv[])
         }
         base_path[base_len] = '\0';
     } else {
-        shell_strcpy(base_path, resolved);
+        strcpy(base_path, resolved);
     }
 
     find_recurse(mnt, base_path, subpath, pattern, &count);
@@ -2444,7 +2415,7 @@ static int cmd_component(int argc, char *argv[])
     const char *subcmd = argv[1];
 
     /* component list */
-    if (shell_strcmp(subcmd, "list") == 0) {
+    if (strcmp(subcmd, "list") == 0) {
         uint32_t count = component_count();
         uart_printf("Registered Components: %u\r\n", count);
 
@@ -2475,7 +2446,7 @@ static int cmd_component(int argc, char *argv[])
     }
 
     /* component register <name> <version> <type> [priority] */
-    if (shell_strcmp(subcmd, "register") == 0) {
+    if (strcmp(subcmd, "register") == 0) {
         if (argc < 5) {
             uart_puts("Usage: component register <name> <version> <type> [priority]\r\n");
             return -1;
@@ -2488,11 +2459,11 @@ static int cmd_component(int argc, char *argv[])
 
         /* Parse type */
         uint8_t type;
-        if (shell_strcmp(type_str, "service") == 0) {
+        if (strcmp(type_str, "service") == 0) {
             type = COMPONENT_TYPE_SERVICE;
-        } else if (shell_strcmp(type_str, "driver") == 0) {
+        } else if (strcmp(type_str, "driver") == 0) {
             type = COMPONENT_TYPE_DRIVER;
-        } else if (shell_strcmp(type_str, "application") == 0) {
+        } else if (strcmp(type_str, "application") == 0) {
             type = COMPONENT_TYPE_APPLICATION;
         } else {
             uart_printf("Unknown type: %s\r\n", type_str);
@@ -2501,13 +2472,13 @@ static int cmd_component(int argc, char *argv[])
 
         /* Parse priority */
         uint8_t priority;
-        if (shell_strcmp(prio_str, "idle") == 0) {
+        if (strcmp(prio_str, "idle") == 0) {
             priority = COMPONENT_PRIORITY_IDLE;
-        } else if (shell_strcmp(prio_str, "low") == 0) {
+        } else if (strcmp(prio_str, "low") == 0) {
             priority = COMPONENT_PRIORITY_LOW;
-        } else if (shell_strcmp(prio_str, "high") == 0) {
+        } else if (strcmp(prio_str, "high") == 0) {
             priority = COMPONENT_PRIORITY_HIGH;
-        } else if (shell_strcmp(prio_str, "critical") == 0) {
+        } else if (strcmp(prio_str, "critical") == 0) {
             priority = COMPONENT_PRIORITY_CRITICAL;
         } else {
             priority = COMPONENT_PRIORITY_NORMAL;
@@ -2524,7 +2495,7 @@ static int cmd_component(int argc, char *argv[])
     }
 
     /* component unregister <idx> */
-    if (shell_strcmp(subcmd, "unregister") == 0) {
+    if (strcmp(subcmd, "unregister") == 0) {
         if (argc < 3) {
             uart_puts("Usage: component unregister <idx>\r\n");
             return -1;
@@ -2545,7 +2516,7 @@ static int cmd_component(int argc, char *argv[])
     }
 
     /* component status <name|idx> */
-    if (shell_strcmp(subcmd, "status") == 0) {
+    if (strcmp(subcmd, "status") == 0) {
         if (argc < 3) {
             uart_puts("Usage: component status <name|idx>\r\n");
             return -1;
@@ -2642,13 +2613,13 @@ int shell_execute(const char *cmdline)
     int argc;
 
     /* Copy to modifiable buffer (bounded to prevent stack overflow) */
-    size_t len = shell_strlen(cmdline);
+    size_t len = strlen(cmdline);
     if (len >= SHELL_MAX_LINE) {
         uart_printf("Command too long (%u chars, max %d)\r\n",
                     (unsigned)len, SHELL_MAX_LINE - 1);
         return -1;
     }
-    shell_strcpy(buf, cmdline);
+    strcpy(buf, cmdline);
 
     /* Parse into argc/argv */
     argc = parse_line(buf, argv, SHELL_MAX_ARGS);

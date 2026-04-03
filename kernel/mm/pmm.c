@@ -580,26 +580,27 @@ void pmm_dump_stats(void)
                 (unsigned)(stats.used_pages * PAGE_SIZE / 1024));
     uart_printf("  Reserved:        %u pages (kernel)\n", (unsigned)stats.reserved_pages);
 
-    /* Buddy-specific stats */
-    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    /* Snapshot buddy-specific stats under lock, then print without lock held.
+     * UART output at 115200 baud is slow; holding the PMM spinlock (with IRQs
+     * disabled) during printing would block all allocations and timer interrupts. */
+    struct pmm_buddy_stats buddy_stats;
+    pmm_get_buddy_stats(&buddy_stats);
 
     uart_puts("\n  Free list distribution:\n");
     for (unsigned int o = 0; o <= MAX_ORDER; o++) {
-        if (buddy_state.free_counts[o] > 0) {
+        if (buddy_stats.free_counts[o] > 0) {
             uart_printf("    Order %2u (%5u KB): %u blocks\n",
                         o,
                         (unsigned)(order_to_size(o) / 1024),
-                        (unsigned)buddy_state.free_counts[o]);
+                        (unsigned)buddy_stats.free_counts[o]);
         }
     }
 
     uart_printf("\n  Operations:\n");
-    uart_printf("    Allocations: %u\n", (unsigned)buddy_state.alloc_count);
-    uart_printf("    Frees:       %u\n", (unsigned)buddy_state.free_count);
-    uart_printf("    Splits:      %u\n", (unsigned)buddy_state.split_count);
-    uart_printf("    Merges:      %u\n", (unsigned)buddy_state.merge_count);
-
-    spin_unlock_irqrestore(&pmm_lock, flags);
+    uart_printf("    Allocations: %u\n", (unsigned)buddy_stats.alloc_count);
+    uart_printf("    Frees:       %u\n", (unsigned)buddy_stats.free_count);
+    uart_printf("    Splits:      %u\n", (unsigned)buddy_stats.split_count);
+    uart_printf("    Merges:      %u\n", (unsigned)buddy_stats.merge_count);
 }
 
 /*

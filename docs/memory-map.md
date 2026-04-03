@@ -105,10 +105,10 @@ None. All RAM from 0x40000000 to end is usable after kernel image.
 0x03000000 ├─────────────────────────────────────┤
            │  Additional peripherals             │
            │  - UART at 0x03100000               │
-0x03881000 ├─────────────────────────────────────┤
-           │  GIC Distributor                    │
-0x03882000 ├─────────────────────────────────────┤
-           │  GIC CPU Interface                  │
+0x0F400000 ├─────────────────────────────────────┤
+           │  GIC Distributor (GICD)             │
+0x0F440000 ├─────────────────────────────────────┤
+           │  GIC Redistributor (GICR)           │
 0x04000000 ├─────────────────────────────────────┤
            │  More peripherals / reserved        │
            │                                     │
@@ -143,8 +143,8 @@ None. All RAM from 0x40000000 to end is usable after kernel image.
 |----------|--------------|------|-------------|
 | UARTA | 0x03100000 | 4 KB | Debug console |
 | UARTB | 0x03110000 | 4 KB | Secondary UART |
-| GIC Distributor | 0x03881000 | 4 KB | Interrupt controller |
-| GIC CPU | 0x03882000 | 4 KB | Per-CPU interface |
+| GIC Distributor (GICD) | 0x0F400000 | 64 KB | Interrupt controller |
+| GIC Redistributor (GICR) | 0x0F440000 | 2 MB | Per-CPU redistributors |
 | DRAM | 0x80000000 | 4-8 GB | Main memory |
 
 ### Reserved Regions

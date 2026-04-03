@@ -621,7 +621,7 @@ screen /dev/ttyUSB0 115200
 |---------|-----------|------------------|
 | UART | PL011 (0x09000000) | UARTA NS16550 (0x03100000)† |
 | Timer | ARM Generic Timer | ARM Generic Timer |
-| GIC | GIC-400 | GIC-400 |
+| GIC | GIC-400 (v2) | GICv3 |
 | CPUs | 4 × Cortex-A76 | 6 × Cortex-A78AE |
 | RAM | 1GB (default) | 8GB |
 | GPU | None (stub) | Ampere (1024 CUDA cores) |

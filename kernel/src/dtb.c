@@ -8,6 +8,7 @@
 #include "dtb.h"
 #include "platform.h"
 #include "uart.h"
+#include "string.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -54,16 +55,6 @@ static inline uint64_t be64_to_cpu(uint64_t be)
  * String Helpers
  * ============================================================================ */
 
-/* Simple strcmp - returns 0 if equal */
-static int fdt_strcmp(const char *s1, const char *s2)
-{
-    while (*s1 && *s1 == *s2) {
-        s1++;
-        s2++;
-    }
-    return (unsigned char)*s1 - (unsigned char)*s2;
-}
-
 /* Check if s starts with prefix */
 static bool fdt_strstart(const char *s, const char *prefix)
 {
@@ -73,16 +64,6 @@ static bool fdt_strstart(const char *s, const char *prefix)
         }
     }
     return true;
-}
-
-/* String length */
-static size_t fdt_strlen(const char *s)
-{
-    size_t len = 0;
-    while (*s++) {
-        len++;
-    }
-    return len;
 }
 
 /* ============================================================================
@@ -181,7 +162,7 @@ static void fdt_skip_name(struct fdt_parser *p)
 {
     p->pos += 4; /* Skip token */
     const char *name = (const char *)(p->struct_base + p->pos);
-    p->pos += fdt_strlen(name) + 1;
+    p->pos += strlen(name) + 1;
     p->pos = fdt_align(p->pos);
 }
 #endif
@@ -208,7 +189,7 @@ static void fdt_walk_tree(struct fdt_parser *p, fdt_info_t *info,
             /* Track node path at depth 1 (direct children of root) */
             if (p->depth == 0 && name[0] != '\0') {
                 /* This is a root child - store its name */
-                size_t len = fdt_strlen(name);
+                size_t len = strlen(name);
                 if (len >= sizeof(current_node)) {
                     len = sizeof(current_node) - 1;
                 }
@@ -217,14 +198,14 @@ static void fdt_walk_tree(struct fdt_parser *p, fdt_info_t *info,
                 }
                 current_node[len] = '\0';
                 target_depth = 1;
-            } else if (p->depth == 1 && fdt_strcmp(current_node, "cpus") == 0) {
+            } else if (p->depth == 1 && strcmp(current_node, "cpus") == 0) {
                 /* Inside /cpus - track cpu@ nodes */
                 if (fdt_strstart(name, "cpu@")) {
                     info->cpu_count++;
                 }
             }
 
-            p->pos += fdt_strlen(name) + 1;
+            p->pos += strlen(name) + 1;
             p->pos = fdt_align(p->pos);
             p->depth++;
             break;
@@ -250,9 +231,9 @@ static void fdt_walk_tree(struct fdt_parser *p, fdt_info_t *info,
             const char *prop_name = fdt_get_string(p->dtb, nameoff);
 
             /* Update address/size cells if found */
-            if (fdt_strcmp(prop_name, "#address-cells") == 0 && len == 4) {
+            if (strcmp(prop_name, "#address-cells") == 0 && len == 4) {
                 p->address_cells = fdt_read_cell32(data, 0);
-            } else if (fdt_strcmp(prop_name, "#size-cells") == 0 && len == 4) {
+            } else if (strcmp(prop_name, "#size-cells") == 0 && len == 4) {
                 p->size_cells = fdt_read_cell32(data, 0);
             }
 
@@ -290,7 +271,7 @@ static void extract_property(const char *node_name, const char *prop_name,
 {
     /* Memory node: memory@... */
     if (fdt_strstart(node_name, "memory")) {
-        if (fdt_strcmp(prop_name, "reg") == 0) {
+        if (strcmp(prop_name, "reg") == 0) {
             /* reg = <base size> using address-cells and size-cells */
             if (p->address_cells == 2 && len >= 8) {
                 info->ram_base = fdt_read_cell64(data, 0);
@@ -311,14 +292,14 @@ static void extract_property(const char *node_name, const char *prop_name,
     if (fdt_strstart(node_name, "pl011") ||
         fdt_strstart(node_name, "uart") ||
         fdt_strstart(node_name, "serial")) {
-        if (fdt_strcmp(prop_name, "reg") == 0 && len >= 8) {
+        if (strcmp(prop_name, "reg") == 0 && len >= 8) {
             /* First reg entry is base address */
             if (p->address_cells == 2) {
                 info->uart_base = fdt_read_cell64(data, 0);
             } else {
                 info->uart_base = fdt_read_cell32(data, 0);
             }
-        } else if (fdt_strcmp(prop_name, "interrupts") == 0 && len >= 12) {
+        } else if (strcmp(prop_name, "interrupts") == 0 && len >= 12) {
             /* interrupts = <type irq flags> - IRQ is second cell */
             info->uart_irq = fdt_read_cell32(data, 1) + 32; /* SPI offset */
         }
@@ -328,7 +309,7 @@ static void extract_property(const char *node_name, const char *prop_name,
     if (fdt_strstart(node_name, "intc") ||
         fdt_strstart(node_name, "gic") ||
         fdt_strstart(node_name, "interrupt-controller")) {
-        if (fdt_strcmp(prop_name, "reg") == 0 && len >= 16) {
+        if (strcmp(prop_name, "reg") == 0 && len >= 16) {
             /* reg = <dist_base dist_size cpu_base cpu_size ...> */
             if (p->address_cells == 2) {
                 info->gic_dist_base = fdt_read_cell64(data, 0);
@@ -348,7 +329,7 @@ static void extract_property(const char *node_name, const char *prop_name,
 
     /* Timer: timer@... */
     if (fdt_strstart(node_name, "timer")) {
-        if (fdt_strcmp(prop_name, "interrupts") == 0 && len >= 12) {
+        if (strcmp(prop_name, "interrupts") == 0 && len >= 12) {
             /* Look for virtual timer (usually third entry) */
             /* interrupts = <type irq flags> repeated for each timer */
             /* Secure, Non-secure, Virtual, Hypervisor */

@@ -12,6 +12,7 @@
 #include "ipc.h"
 #include "uart.h"
 #include "slm_ffi.h"
+#include "string.h"
 #include <stddef.h>
 
 /* Maximum number of VFS nodes */
@@ -26,44 +27,6 @@ static struct vfs_node *root_node = NULL;
 static struct vfs_node *sys_node = NULL;
 static struct vfs_node *proc_node = NULL;
 static struct vfs_node *components_node = NULL;
-
-/* ============================================================================
- * Helper functions
- * ============================================================================ */
-
-/*
- * String comparison.
- */
-static int vfs_strcmp(const char *a, const char *b)
-{
-    while (*a && *b && *a == *b) {
-        a++;
-        b++;
-    }
-    return *a - *b;
-}
-
-/*
- * String copy with length limit.
- */
-static void vfs_strncpy(char *dst, const char *src, size_t max)
-{
-    size_t i;
-    for (i = 0; i < max - 1 && src[i] != '\0'; i++) {
-        dst[i] = src[i];
-    }
-    dst[i] = '\0';
-}
-
-/*
- * String length.
- */
-static size_t vfs_strlen(const char *s)
-{
-    size_t len = 0;
-    while (s[len]) len++;
-    return len;
-}
 
 /*
  * Allocate a new node from the pool.
@@ -122,7 +85,7 @@ static struct vfs_node *find_child(struct vfs_node *parent, const char *name)
     }
 
     for (int i = 0; i < parent->num_children; i++) {
-        if (vfs_strcmp(parent->children[i]->name, name) == 0) {
+        if (strcmp(parent->children[i]->name, name) == 0) {
             return parent->children[i];
         }
     }
@@ -392,7 +355,7 @@ void vfs_init(void)
 {
     /* Create root directory */
     root_node = alloc_node();
-    vfs_strncpy(root_node->name, "/", VFS_MAX_NAME);
+    strncpy(root_node->name, "/", VFS_MAX_NAME);
     root_node->type = VFS_NODE_DIR;
 
     /* Create /sys/ directory */
@@ -468,7 +431,7 @@ struct vfs_node *vfs_create_file(struct vfs_node *parent, const char *name,
         return NULL;
     }
 
-    vfs_strncpy(node->name, name, VFS_MAX_NAME);
+    strncpy(node->name, name, VFS_MAX_NAME);
     node->type = VFS_NODE_FILE;
     node->read = read;
     node->read_ctx = ctx;
@@ -492,7 +455,7 @@ struct vfs_node *vfs_create_dir(struct vfs_node *parent, const char *name)
         return NULL;
     }
 
-    vfs_strncpy(node->name, name, VFS_MAX_NAME);
+    strncpy(node->name, name, VFS_MAX_NAME);
     node->type = VFS_NODE_DIR;
 
     if (add_child(parent, node) < 0) {
@@ -559,7 +522,7 @@ char *vfs_get_path(struct vfs_node *node, char *buf, size_t size)
 
     struct vfs_node *n = node;
     while (n && n->parent) {
-        size_t len = vfs_strlen(n->name);
+        size_t len = strlen(n->name);
         pos -= len;
         if (pos < 1) {
             return NULL;  /* Path too long */
@@ -623,7 +586,7 @@ struct vfs_node *vfs_mount(const char *path,
         /* Mount directly under root (e.g., "/mnt") */
         parent_path[0] = '/';
         parent_path[1] = '\0';
-        vfs_strncpy(mount_name, path + 1, VFS_MAX_NAME);
+        strncpy(mount_name, path + 1, VFS_MAX_NAME);
     } else {
         /* Extract parent (e.g., "/mnt" from "/mnt/files") */
         size_t parent_len = last_slash - path;
@@ -634,7 +597,7 @@ struct vfs_node *vfs_mount(const char *path,
             parent_path[i] = path[i];
         }
         parent_path[parent_len] = '\0';
-        vfs_strncpy(mount_name, last_slash + 1, VFS_MAX_NAME);
+        strncpy(mount_name, last_slash + 1, VFS_MAX_NAME);
     }
 
     /* Look up parent directory */
@@ -686,7 +649,7 @@ struct vfs_node *vfs_mount(const char *path,
         return NULL;
     }
 
-    vfs_strncpy(node->name, mount_name, VFS_MAX_NAME);
+    strncpy(node->name, mount_name, VFS_MAX_NAME);
     node->type = VFS_NODE_MOUNT;
     node->fs_ops = ops;
     node->fs_ctx = ctx;
@@ -811,7 +774,7 @@ static void list_path_wrapper(struct vfs_node *child, void *ctx)
     struct list_path_ctx *lctx = ctx;
     struct vfs_entry_info info;
 
-    vfs_strncpy(info.name, child->name, VFS_MAX_NAME);
+    strncpy(info.name, child->name, VFS_MAX_NAME);
     info.type = (child->type == VFS_NODE_DIR || child->type == VFS_NODE_MOUNT) ? 1 : 0;
     info.size = 0;  /* Virtual files don't have a fixed size */
 
@@ -872,14 +835,14 @@ int vfs_stat_path(const char *path, struct vfs_entry_info *info)
 
     /* Mount point itself (no subpath) */
     if (node->type == VFS_NODE_MOUNT) {
-        vfs_strncpy(info->name, node->name, VFS_MAX_NAME);
+        strncpy(info->name, node->name, VFS_MAX_NAME);
         info->type = 1;  /* Directory */
         info->size = 0;
         return 0;
     }
 
     /* Regular VFS node */
-    vfs_strncpy(info->name, node->name, VFS_MAX_NAME);
+    strncpy(info->name, node->name, VFS_MAX_NAME);
     info->type = (node->type == VFS_NODE_DIR) ? 1 : 0;
     info->size = 0;  /* Virtual files don't have fixed size */
 

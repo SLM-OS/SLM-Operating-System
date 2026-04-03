@@ -40,6 +40,9 @@ void *realloc(void *ptr, size_t size);
 void free(void *ptr);
 void *calloc(size_t nmemb, size_t size);
 
+/* Reset Lua heap to a single free block (eliminates fragmentation) */
+void heap_reset(void);
+
 /* ============================================================================
  * Additional String Functions
  * ============================================================================

@@ -65,9 +65,9 @@ This document defines how SLM-OS handles platform-specific differences to suppor
 
 | Aspect | QEMU virt | Jetson Orin Nano | Raspberry Pi 5 |
 |--------|-----------|------------------|----------------|
-| Type | GICv2 | GICv2 | GIC-400 (v2) |
-| Distributor | 0x08000000 | 0x03881000 | 0x107FFF9000 |
-| CPU interface | 0x08010000 | 0x03882000 | 0x107FFFA000 |
+| Type | GICv2 | GICv3 | GIC-400 (v2) |
+| Distributor | 0x08000000 | 0x0F400000 (GICD) | 0x107FFF9000 |
+| CPU interface | 0x08010000 | 0x0F440000 (GICR) | 0x107FFFA000 |
 
 ---
 
@@ -308,7 +308,7 @@ kernel/
 │   │   ├── uart_pl011.c    # PL011 (QEMU, RPi5)
 │   │   └── uart_tegra.c    # Tegra186 (Jetson)
 │   ├── gic/
-│   │   └── gic_v2.c        # GICv2 (all platforms)
+│   │   └── gic.c            # GIC driver (GICv2 + GICv3)
 │   └── timer/
 │       └── arm_timer.c     # ARM generic timer
 │
@@ -455,19 +455,19 @@ The `ccmp x18, #0, #0xd, pl` instruction encodes to bytes `4D 5A 40 FA`, providi
 |--------|-----------|------------------|
 | RAM base | 0x40000000 | 0x80000000 |
 | RAM size | Configurable (1GB default) | 4-8 GB (minus carveouts) |
-| GIC distributor | 0x08000000 | 0x03881000 |
-| GIC CPU interface | 0x08010000 | 0x03882000 |
+| GIC distributor | 0x08000000 | 0x0F400000 (GICD) |
+| GIC redistributor | 0x08010000 | 0x0F440000 (GICR) |
 | UART | 0x09000000 (PL011) | 0x03100000 (UARTA) |
 
 ### Interrupt Controller
 
 | Aspect | QEMU | Jetson |
 |--------|------|--------|
-| GIC version | GICv2 | GICv2 (legacy mode) |
+| GIC version | GICv2 | GICv3 |
 | Timer IRQ | 30 (virtual timer PPI) | 30 |
 | UART IRQ | 33 (SPI 1) | Platform-specific |
 
-Both platforms use GICv2-compatible mode, making the GIC driver portable.
+QEMU uses GICv2 while Jetson uses GICv3. The GIC driver handles both versions via platform-specific initialization.
 
 ### Clock and Power Management
 

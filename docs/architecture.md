@@ -113,8 +113,8 @@ This hybrid approach leverages:
 | Component | File(s) | Purpose |
 |-----------|---------|---------|
 | PMM | `kernel/mm/pmm.c` | Physical page allocation (buddy allocator) |
-| VMM | `kernel/src/vmm.c` | Virtual memory mapping |
-| MMU | `kernel/src/mmu.S` | Page table management (ARMv8) |
+| VMM | `kernel/mm/vmm.c` | Virtual memory mapping |
+| MMU | `kernel/arch/arm64/mmu.S` | Page table management (ARMv8) |
 | Model Memory | `runtime/src/mm/` | 2MB-aligned model weight/workspace pools |
 
 **Phase 4 Updates:**
@@ -129,10 +129,10 @@ This hybrid approach leverages:
 
 | Component | File(s) | Purpose |
 |-----------|---------|---------|
-| Scheduler | `kernel/src/sched.c` | Per-CPU run queues, priority ordering |
-| Task Management | `kernel/src/task.c` | Task lifecycle, context switch |
-| Context Switch | `kernel/src/context.S` | Register save/restore |
-| PI Mutex | `kernel/src/pi_mutex.c` | Priority-inheriting mutex |
+| Scheduler | `kernel/sched/sched.c` | Per-CPU run queues, priority ordering |
+| Task Management | `kernel/sched/task.c` | Task lifecycle, context switch |
+| Context Switch | `kernel/arch/arm64/context.S` | Register save/restore |
+| PI Mutex | `kernel/ipc/pi_mutex.c` | Priority-inheriting mutex |
 | Deadline Policy | `runtime/src/sched/deadline.rs` | Deadline analysis, core hints |
 | Heterogeneous | `runtime/src/sched/heterogeneous.rs` | big.LITTLE topology awareness |
 
@@ -145,8 +145,8 @@ This hybrid approach leverages:
 
 | Component | File(s) | Purpose |
 |-----------|---------|---------|
-| Message Queues | `kernel/src/ipc.c` | Synchronous message passing |
-| Shared Memory | `kernel/src/ipc.c` | Zero-copy buffer sharing |
+| Message Queues | `kernel/ipc/ipc.c` | Synchronous message passing |
+| Shared Memory | `kernel/ipc/ipc.c` | Zero-copy buffer sharing |
 
 **Phase 3 Learnings:**
 - Timeout support essential for robust applications
@@ -157,7 +157,7 @@ This hybrid approach leverages:
 
 | Component | File(s) | Purpose |
 |-----------|---------|---------|
-| SMP Boot | `kernel/src/smp.c`, `smp_boot.S` | Secondary CPU initialization |
+| SMP Boot | `kernel/sched/smp.c`, `smp_boot.S` | Secondary CPU initialization |
 | Spinlocks | `kernel/include/spinlock.h` | Multi-core synchronization |
 | IPI | `kernel/src/gic.c` | Inter-processor interrupts |
 

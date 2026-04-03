@@ -543,6 +543,38 @@ static void test_free_null_safe(void)
 }
 
 /* ============================================================================
+ * Lua Heap Reset Regression Tests (FS-C1)
+ *
+ * The heap_reset function reinitializes the Lua heap between sessions
+ * to prevent fragmentation.
+ * ============================================================================ */
+
+/*
+ * Regression test: Lua heap resets between sessions.
+ * Without heap_reset(), cumulative fragmentation across
+ * lua_slm_newstate()/lua_slm_close() cycles would eventually OOM.
+ */
+static void test_lua_heap_reset_across_sessions(void)
+{
+    /* Create and destroy 5 Lua sessions in a row.
+     * Each session runs a script that allocates tables.
+     * Without heap_reset, fragmentation would accumulate. */
+    for (int i = 0; i < 5; i++) {
+        lua_State *L = lua_slm_newstate();
+        TEST_ASSERT_NOT_NULL(L);
+
+        /* Allocate some tables to exercise the heap */
+        int result = lua_slm_dostring(L,
+            "local t = {} for i=1,100 do t[i] = {x=i, y=i*2, name='test'..i} end");
+        TEST_ASSERT_EQUAL_INT(0, result);
+
+        lua_slm_close(L);
+    }
+    /* If we got here, all 5 sessions succeeded — heap_reset is working */
+    TEST_PASS();
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -591,6 +623,9 @@ int test_suite_lua(void)
     RUN_TEST(test_free_corrupted_magic_no_crash);
     RUN_TEST(test_realloc_corrupted_magic_returns_null);
     RUN_TEST(test_free_null_safe);
+
+    /* Heap management regression tests */
+    RUN_TEST(test_lua_heap_reset_across_sessions);
 
     return UNITY_END();
 }

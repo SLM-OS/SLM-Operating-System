@@ -251,6 +251,10 @@ lua_State *lua_slm_newstate(void) {
 void lua_slm_close(lua_State *L) {
     if (L) {
         lua_close(L);
+        /* Reset the Lua heap to eliminate fragmentation between sessions.
+         * Safe because only one Lua state exists at a time. */
+        extern void heap_reset(void);
+        heap_reset();
     }
 }
 

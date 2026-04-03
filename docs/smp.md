@@ -560,16 +560,16 @@ The following tests pass in the automated test suite (`make test`):
 
 | File | Changes |
 |------|---------|
-| `kernel/src/smp.c` | PSCI wrappers, `smp_init()`, secondary core bring-up, CPU detection |
+| `kernel/sched/smp.c` | PSCI wrappers, `smp_init()`, secondary core bring-up, CPU detection |
 | `kernel/src/smp_boot.S` | Secondary core entry point, per-core stack setup |
-| `kernel/src/sched.c` | Per-core run queues, task affinity, migration, multi-core `schedule()` |
+| `kernel/sched/sched.c` | Per-core run queues, task affinity, migration, multi-core `schedule()` |
 | `kernel/src/spinlock.c` | Spinlock and ticket lock implementation |
 | `kernel/include/spinlock.h` | Lock type definitions, IRQ-safe variants |
 | `kernel/include/smp.h` | CPU ID, per-CPU data structures, PSCI constants |
 | `kernel/src/gic.c` | Added `gic_percpu_init()` for secondary cores |
 | `kernel/src/timer.c` | Added `timer_percpu_init()` for secondary cores |
-| `kernel/src/task.c` | Added locking for concurrent task creation |
-| `kernel/src/pmm.c` | Added spinlock protection for multi-core allocation |
+| `kernel/sched/task.c` | Added locking for concurrent task creation |
+| `kernel/mm/pmm.c` | Added spinlock protection for multi-core allocation |
 
 ---
 

@@ -23,7 +23,7 @@ The scheduler uses a **hybrid priority/deadline** approach:
 │   └─────────────────────────────────────────────────────────────┘   │
 │                              │                                       │
 │                              ▼ FFI                                   │
-│   C Kernel Layer (kernel/src/sched.c)                               │
+│   C Kernel Layer (kernel/sched/sched.c)                              │
 │   ┌─────────────────────────────────────────────────────────────┐   │
 │   │  Per-CPU Run Queues (priority-ordered)                      │   │
 │   │  - Priority boost based on deadline proximity               │   │
@@ -455,7 +455,7 @@ The context switch saves/restores:
 #define MAX_TASKS           32            // Maximum concurrent tasks
 #define TASK_NAME_LEN       16            // Max task name length
 
-// kernel/src/sched.c
+// kernel/sched/sched.c
 #define DEADLINE_CRITICAL_NS  (10 * 1000000ULL)   // 10ms
 #define DEADLINE_HIGH_NS      (50 * 1000000ULL)   // 50ms
 #define DEADLINE_BOOST_NS     (100 * 1000000ULL)  // 100ms

@@ -221,7 +221,7 @@ These tests actually remap pages and verify the new mapping is used after TLB in
 
 Early VMM validation tests also run during `vmm_init()` after MMU is enabled.
 
-### Spinlock Tests (`kernel/src/smp.c`)
+### Spinlock Tests (`kernel/sched/smp.c`)
 
 Validates synchronization primitives on a single core:
 
@@ -239,7 +239,7 @@ Validates synchronization primitives on a single core:
 
 Tests run automatically at start of `smp_init()` before secondary cores boot.
 
-### SMP Tests (`kernel/src/smp.c`)
+### SMP Tests (`kernel/sched/smp.c`)
 
 Validates multi-core boot via PSCI:
 

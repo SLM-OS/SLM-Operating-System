@@ -261,10 +261,18 @@ static void gic_dist_init(void)
 
 /*
  * Wait for register write to complete (GICv3).
+ * Times out after ~1M iterations to avoid hanging on hardware faults.
  */
 static void gic_wait_rwp(void)
 {
+    extern int uart_printf(const char *fmt, ...);
+    uint32_t timeout = 1000000;
     while (GICD_CTLR & GICD_CTLR_RWP) {
+        if (--timeout == 0) {
+            uart_printf("[GIC] WARNING: gic_wait_rwp timed out (GICD_CTLR=0x%x)\n",
+                        GICD_CTLR);
+            return;
+        }
         __asm__ volatile("yield");
     }
 }
@@ -331,9 +339,19 @@ static void gic_redist_init(uint32_t cpu)
     waker &= ~GICR_WAKER_ProcessorSleep;
     GICR_WAKER(cpu) = waker;
 
-    /* Wait for children to wake */
-    while (GICR_WAKER(cpu) & GICR_WAKER_ChildrenAsleep) {
-        __asm__ volatile("yield");
+    /* Wait for children to wake (with timeout) */
+    {
+        extern int uart_printf(const char *fmt, ...);
+        uint32_t timeout = 1000000;
+        while (GICR_WAKER(cpu) & GICR_WAKER_ChildrenAsleep) {
+            if (--timeout == 0) {
+                uart_printf("[GIC] WARNING: gic_redist_init timed out waiting for "
+                            "redistributor %u wake (GICR_WAKER=0x%x)\n",
+                            cpu, GICR_WAKER(cpu));
+                break;
+            }
+            __asm__ volatile("yield");
+        }
     }
 
     DEBUG_PRINT("GICv3: Redistributor %u awake", cpu);

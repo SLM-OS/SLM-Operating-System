@@ -470,7 +470,7 @@ For data aborts (EC = 0x24/0x25), ESR_EL1 also contains:
 
 ### SLM-OS Page Fault Handler
 
-The handler in `kernel/src/exceptions.c` provides detailed diagnostics:
+The handler in `kernel/arch/arm64/exceptions.c` provides detailed diagnostics:
 
 ```
 *********************************
@@ -503,7 +503,7 @@ System halted.
 
 | File | Purpose |
 |------|---------|
-| `kernel/src/exceptions.c` | Page fault handler with `decode_fault_status()` |
+| `kernel/arch/arm64/exceptions.c` | Page fault handler with `decode_fault_status()` |
 | `kernel/src/panic.c` | General panic with task context and register dump |
 
 ### Future: Demand Paging
