@@ -723,13 +723,14 @@ void scheduler_start(void)
      * Must be done AFTER task_set_current() so that timer IRQ handler
      * can safely call task_current() in schedule(). */
     /*
-     * Pi 5: Timer interrupts break PL011 RX AND TX on the RP1 southbridge.
-     * Tested with and without armstub, with GIC ISB fixes, with DAIF
-     * context save/restore — the timer ISR itself disrupts RP1 PCIe UART.
-     * Run cooperatively until root cause is resolved.
+     * Pi 5: Timer interrupts break RP1 UART. Even a single interrupt per
+     * second breaks RX (though TX survives at 1 Hz). At 100 Hz, both
+     * TX and RX break. Physical timer (IRQ 30) and virtual timer (IRQ 27)
+     * both exhibit the same behavior. Root cause is in the ISR/GIC
+     * interaction with the RP1 PCIe bus. Run cooperatively until resolved.
      */
 #if defined(PLATFORM_RASPI5)
-    INFO("Timer/IRQ disabled (Pi 5 UART RX workaround)");
+    INFO("Timer/IRQ disabled (Pi 5 UART workaround)");
 #else
     INFO("Starting timer (100 Hz)...");
     timer_start();

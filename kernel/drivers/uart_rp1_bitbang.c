@@ -47,6 +47,7 @@
 #define UART_FBRD   0x28    /* Fractional baud rate divisor */
 #define UART_LCR    0x2C    /* Line control register */
 #define UART_CR     0x30    /* Control register */
+#define UART_IMSC   0x38    /* Interrupt mask set/clear register */
 #define UART_ICR    0x44    /* Interrupt clear register */
 
 /* Flag register bits */
@@ -118,8 +119,13 @@ void uart_init(void)
     *uart_lcr = 0;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Step 4a: Clear all interrupt flags */
-    *uart_icr = 0x7FF;
+    /* Step 4a: Disable all PL011 interrupts and clear pending flags.
+     * The firmware may have left IMSC with RX/TX interrupts enabled.
+     * With GIC active, an unhandled PL011 interrupt could jam the FIFO. */
+    volatile uint32_t *uart_imsc = (volatile uint32_t *)(RP1_UART0_BASE + UART_IMSC);
+    *uart_imsc = 0;         /* Disable all interrupt masks */
+    __asm__ volatile("dsb sy" ::: "memory");
+    *uart_icr = 0x7FF;      /* Clear all pending interrupt flags */
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* Step 4b: Configure GPIO14 (TXD) pad and pin mux */

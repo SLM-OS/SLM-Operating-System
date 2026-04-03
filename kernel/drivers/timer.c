@@ -12,17 +12,13 @@
 #include "platform.h"
 
 /*
- * Timer selection: Pi 5 uses virtual timer (CNTV) because the physical
- * timer IRQ is not being delivered despite correct GIC configuration.
- * Other platforms use physical timer (CNTP).
+ * Timer selection: All platforms use the non-secure physical timer (CNTP).
+ * Pi 5 previously used virtual timer (CNTV, IRQ 27) but Linux and Circle
+ * both use the physical timer (IRQ 30) at EL1. CNTHCTL_EL2 must have
+ * EL1PCEN set (done in boot.S) for EL1 access to CNTP registers.
  */
-#if defined(PLATFORM_RASPI5)
-#define USE_VIRTUAL_TIMER   1
-#define ACTUAL_TIMER_IRQ    27  /* Virtual timer PPI 11 = IRQ 27 */
-#else
 #define USE_VIRTUAL_TIMER   0
 #define ACTUAL_TIMER_IRQ    TIMER_IRQ  /* Physical timer IRQ 30 */
-#endif
 
 /* Timer interval (computed at init) */
 static uint64_t timer_interval;
