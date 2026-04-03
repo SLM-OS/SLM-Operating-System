@@ -585,7 +585,15 @@ The following tests pass in the automated test suite (`make test`):
 
 **Secondary CPU Boot:** TF-A drops secondary cores at EL2 via PSCI CPU_ON. `smp_boot.S` performs the EL2→EL1 transition and enables the MMU using page tables saved by the primary CPU in `secondary_mmu_ttbr/mair/tcr`.
 
-**Known Issue:** Cache coherency for regular cached writes between cores does not work — secondary CPU writes are not visible to the primary. Exclusive monitor operations (spinlocks via ldaxr/stxr) work correctly between all 4 cores.
+**4-Core SMP Status:** All 4 Cortex-A76 cores boot successfully and reach C code. The shell reports "4 online / 4 total". Exclusive monitor operations (spinlocks via ldaxr/stxr) work correctly between all cores without any workaround.
+
+**Cache Coherency Workaround (DC CVAC/CIVAC):** Hardware cache coherency for regular cached writes between cores is broken because TF-A does not set SMPEN (bit 6 of CPUECTLR_EL1) before dropping secondary cores to EL2. SMPEN controls whether the core participates in the inner-shareable coherency domain; without it, normal cached stores on one core are not visible to other cores. Since CPUECTLR_EL1 is only writable at EL3, the OS cannot fix this from EL1.
+
+The workaround uses explicit ARM64 cache maintenance instructions:
+- **DC CVAC** (Data Cache Clean by VA to PoC) — flushes dirty cache lines to the point of coherency, making writes visible to other cores
+- **DC CIVAC** (Data Cache Clean and Invalidate by VA to PoC) — flushes and invalidates, ensuring the reading core fetches fresh data from memory
+
+These operations are applied to shared data structures (e.g., `cpus_online`, `cpu_data[]`) after writes and before reads on the cross-core boundary. This adds overhead compared to hardware coherency but is correct and sufficient for the current SMP workload.
 
 ---
 

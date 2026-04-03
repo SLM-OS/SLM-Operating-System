@@ -1716,6 +1716,43 @@ static void test_secondary_mmu_ttbr_set(void)
 }
 
 /* ============================================================================
+ * SMP: Multi-Core Online Verification
+ * ============================================================================ */
+
+/*
+ * Test: All configured CPUs are online after boot.
+ * After smp_init() completes, cpus_online should equal cpu_count.
+ */
+static void test_all_cpus_online(void)
+{
+    extern volatile uint32_t cpus_online;
+    extern uint32_t cpu_count;
+    TEST_ASSERT_EQUAL_INT(cpu_count, cpus_online);
+}
+
+/*
+ * Test: Each CPU's per_cpu online flag is set.
+ * Verifies that every entry in cpu_data[] up to cpu_count has online==true.
+ */
+static void test_cpu_data_online_flags(void)
+{
+    extern struct per_cpu cpu_data[];
+    extern uint32_t cpu_count;
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        TEST_ASSERT_TRUE(cpu_data[i].online);
+    }
+}
+
+/*
+ * Test: CPU 0 is the boot CPU.
+ * The test suite runs on the primary core, which should be logical CPU 0.
+ */
+static void test_boot_cpu_is_cpu0(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, cpu_id());
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1788,6 +1825,11 @@ int test_suite_scheduler(void)
     /* SMP: MPIDR encoding and secondary MMU */
     RUN_TEST(test_cpu_logical_map_encoding);
     RUN_TEST(test_secondary_mmu_ttbr_set);
+
+    /* SMP: multi-core online verification */
+    RUN_TEST(test_all_cpus_online);
+    RUN_TEST(test_cpu_data_online_flags);
+    RUN_TEST(test_boot_cpu_is_cpu0);
 
     return UnityEnd();
 }
