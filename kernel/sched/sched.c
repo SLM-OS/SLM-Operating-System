@@ -18,6 +18,7 @@
 #include "slm_ffi.h"
 #include "gic.h"
 #include "timer.h"
+#include "cache.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -64,6 +65,12 @@ static void idle_task_func(void *arg)
 {
     (void)arg;
 
+    /* Unmask IRQ so timer interrupts can fire.
+     * New tasks start with DAIF=0x080 (IRQ masked) to survive their first
+     * context switch. The idle task must explicitly unmask here because it
+     * never calls spin_unlock_irqrestore (which would normally unmask). */
+    __asm__ volatile("msr daifclr, #2" ::: "memory");
+
     while (1) {
         /* Wait for interrupt (timer will wake us) */
         __asm__ volatile("wfi");
@@ -81,11 +88,17 @@ static void idle_task_func(void *arg)
  */
 static void update_deadline_boost(struct task *task)
 {
-    if (!task || task->deadline_ns == 0) {
+    if (!task) {
+        return;
+    }
+
+    /* Deadline may have been set by another CPU */
+    cache_invalidate(&task->deadline_ns);
+
+    if (task->deadline_ns == 0) {
         /* No deadline - effective priority equals base priority */
-        if (task) {
-            task->effective_priority = task->priority;
-        }
+        task->effective_priority = task->priority;
+        cache_clean(&task->effective_priority);
         return;
     }
 
@@ -113,6 +126,7 @@ static void update_deadline_boost(struct task *task)
     }
 
     task->effective_priority = boosted;
+    cache_clean(&task->effective_priority);
 }
 
 /*
@@ -146,6 +160,7 @@ void scheduler_init(void)
     sched.cpu[0].idle_task->assigned_cpu = 0;
 
     sched.initialized = 1;
+    cache_clean(&sched.initialized);
 
     /* Wake any secondary CPUs waiting for scheduler init */
     __asm__ volatile("sev" ::: "memory");
@@ -158,6 +173,7 @@ void scheduler_init(void)
  */
 int scheduler_is_initialized(void)
 {
+    cache_invalidate(&sched.initialized);
     return sched.initialized;
 }
 
@@ -303,6 +319,11 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
                 task->name, cpu, rq->ready_count);
 
     spin_unlock_irqrestore(&rq->lock, flags);
+
+    /* Push run queue and task data to PoC so the target CPU can see them.
+     * Without SMPEN, data written inside the lock stays in our L1. */
+    cache_clean_range(rq, sizeof(*rq));
+    cache_clean_range(task, sizeof(*task));
 }
 
 /*
@@ -440,6 +461,9 @@ void scheduler_add_task(struct task *task)
 
     uint32_t target_cpu;
 
+    /* Affinity may have been set by another CPU */
+    cache_invalidate(&task->cpu_affinity);
+
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         /* Task is pinned to a specific CPU (even if isolated) */
         target_cpu = task->cpu_affinity;
@@ -576,6 +600,11 @@ void schedule(void)
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = &sched.cpu[this_cpu];
 
+    /* Invalidate our cached copy of the run queue before reading.
+     * Another CPU may have added tasks to our queue (scheduler_add_task).
+     * Without SMPEN, those writes stay in the other CPU's L1 cache. */
+    cache_invalidate_range(rq, sizeof(*rq));
+
     irq_flags_t flags = spin_lock_irqsave(&rq->lock);
 
     /*
@@ -597,8 +626,12 @@ void schedule(void)
     struct task *next = pick_next_task(this_cpu);
 
     /* If current task is still running and ready, re-add to queue */
+    if (current) {
+        cache_invalidate(&current->state);
+    }
     if (current && current->state == TASK_RUNNING) {
         current->state = TASK_READY;
+        cache_clean(&current->state);
 
         /* Re-add to run queue if it's a normal task (not idle) */
         if (current != rq->idle_task) {
@@ -649,7 +682,9 @@ void schedule(void)
 
     /* Perform context switch */
     next->state = TASK_RUNNING;
+    cache_clean(&next->state);
     next->switches++;
+    cache_clean(&next->switches);
     sched.context_switches++;  /* Racy but acceptable for stats */
 
     /*
@@ -657,6 +692,9 @@ void schedule(void)
      * It will be destroyed on the next schedule() call after we've
      * safely switched to a different stack.
      */
+    if (current) {
+        cache_invalidate(&current->state);
+    }
     if (current && current->state == TASK_TERMINATED) {
         rq->zombie = current;
     }

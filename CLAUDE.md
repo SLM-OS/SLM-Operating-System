@@ -6,6 +6,18 @@ Project-wide notes and reminders. See also:
 
 ---
 
+## Build, Deploy, and Test
+
+Use the `/deploy-and-test` skill when building, deploying to Pi 5 hardware, and capturing boot/test output. This skill orchestrates the labctl MCP tools (sdwire_update, power_cycle, serial_capture, boot_test) for the full deploy cycle.
+
+For iterative hardware debugging, use the labctl MCP tools directly:
+- `sdwire_update` — flash kernel + rename/delete files on SD card
+- `boot_test` — automated multi-boot reliability testing
+- `serial_capture` — capture boot output with pattern matching
+- `serial_send` — send commands to the shell and capture responses
+
+---
+
 ## Git Commits
 
 Always ask for permission before committing code. Do not automatically commit changes after completing a task.

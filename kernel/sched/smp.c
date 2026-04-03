@@ -12,6 +12,7 @@
 #include "timer.h"
 #include "sched.h"
 #include "dtb.h"
+#include "cache.h"
 
 #include <stddef.h>
 
@@ -243,9 +244,8 @@ void secondary_init(uint32_t logical_cpu_id)
     cpu_data[logical_cpu_id].online = true;
     cpu_boot_flag[logical_cpu_id] = 1;
     /* Clean cachelines to PoC so primary CPU can see them */
-    __asm__ volatile("dc cvac, %0" :: "r"(&cpu_boot_flag[logical_cpu_id]) : "memory");
-    __asm__ volatile("dc cvac, %0" :: "r"(&cpu_data[logical_cpu_id].online) : "memory");
-    __asm__ volatile("dsb sy" ::: "memory");
+    cache_clean(&cpu_boot_flag[logical_cpu_id]);
+    cache_clean(&cpu_data[logical_cpu_id].online);
     cpus_online++;
 
     INFO("CPU %u: online", logical_cpu_id);
@@ -313,12 +313,8 @@ static int boot_secondary(uint32_t cpu)
      * The flag is a separate volatile uint32_t for reliable cross-core visibility.
      */
     for (volatile int timeout = 0; timeout < 5000; timeout++) {
-        /* Invalidate our cached copy to force re-read from PoC.
-         * DC CIVAC writes back dirty data then invalidates the line.
-         * Only do this periodically — not every iteration — to avoid
-         * excessive cache thrashing. */
-        __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[cpu]) : "memory");
-        __asm__ volatile("dsb sy" ::: "memory");
+        /* Invalidate our cached copy to force re-read from PoC */
+        cache_invalidate(&cpu_boot_flag[cpu]);
         if (cpu_boot_flag[cpu]) {
             return PSCI_SUCCESS;
         }
@@ -453,6 +449,7 @@ static int smp_run_tests(void)
 
     /* Test 2: Each CPU's online flag set */
     for (uint32_t i = 0; i < cpu_count; i++) {
+        cache_invalidate(&cpu_data[i].online);
         if (cpu_data[i].online) {
             uart_printf("  [PASS] CPU %u online flag set\n", i);
         } else {

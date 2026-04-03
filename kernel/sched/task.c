@@ -9,6 +9,7 @@
 #include "debug.h"
 #include "smp.h"
 #include "spinlock.h"
+#include "cache.h"
 #include <stddef.h>
 
 /* Task table - static allocation for simplicity */
@@ -258,6 +259,7 @@ void task_exit(void)
     INFO("Task '%s' (id=%u) exiting", task->name, task->id);
 
     task->state = TASK_TERMINATED;
+    cache_clean(&task->state);
 
     /* Remove from run queue and schedule next task */
     scheduler_remove_task(task);
@@ -272,7 +274,9 @@ void task_exit(void)
  */
 struct task *task_current(void)
 {
-    return current_task[cpu_id()];
+    uint32_t cpu = cpu_id();
+    cache_invalidate(&current_task[cpu]);
+    return current_task[cpu];
 }
 
 /*
@@ -280,7 +284,9 @@ struct task *task_current(void)
  */
 void task_set_current(struct task *task)
 {
-    current_task[cpu_id()] = task;
+    uint32_t cpu = cpu_id();
+    current_task[cpu] = task;
+    cache_clean(&current_task[cpu]);
 }
 
 /*
@@ -363,10 +369,12 @@ void task_set_affinity(struct task *task, uint32_t cpu)
     if (!task) return;
 
     task->cpu_affinity = cpu;
+    cache_clean(&task->cpu_affinity);
 
     /* If pinning to a specific CPU, update assigned_cpu */
     if (cpu != CPU_AFFINITY_ANY && cpu < cpu_count) {
         task->assigned_cpu = cpu;
+        cache_clean(&task->assigned_cpu);
     }
 }
 
@@ -392,11 +400,13 @@ void task_set_priority(struct task *task, uint8_t priority)
     }
 
     task->priority = priority;
+    cache_clean(&task->priority);
 
     /* Update effective priority (may be boosted by deadline) */
     if (task->effective_priority < priority) {
         task->effective_priority = priority;
     }
+    cache_clean(&task->effective_priority);
 }
 
 /*
@@ -424,6 +434,7 @@ void task_set_deadline(struct task *task, uint64_t deadline_ns)
 {
     if (!task) return;
     task->deadline_ns = deadline_ns;
+    cache_clean(&task->deadline_ns);
 }
 
 /*
