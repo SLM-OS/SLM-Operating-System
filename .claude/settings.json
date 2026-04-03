@@ -63,5 +63,6 @@
       "Bash(git reset --hard)",
       "Bash(git clean -fd)"
     ]
-  }
+  },
+  "skills": ["/opt/labctl/skills/deploy-and-test.md"]
 }

@@ -192,20 +192,17 @@ static void test_net_ip_roundtrip(void)
  * ============================================================================ */
 
 /*
- * Test: net_is_up returns false before initialization
+ * Test: net_is_up is callable without crash
  *
- * Note: This test assumes network is not initialized at test start.
- * In a real scenario, network might be initialized by shell command.
+ * Smoke test: net_is_up() should return a valid boolean without faulting.
+ * The actual value depends on whether a prior test already initialized
+ * networking, so the return value is not asserted.
  */
 static void test_net_is_up_before_init(void)
 {
-    /* If network was previously initialized, this test may not be meaningful */
-    /* We test the initial state or accept that it's already up */
     bool is_up = net_is_up();
-
-    /* Either state is valid - we're just testing the function doesn't crash */
     (void)is_up;
-    TEST_PASS();
+    TEST_IGNORE_MESSAGE("smoke test: network state depends on test order");
 }
 
 /*
@@ -267,7 +264,7 @@ static void test_net_commands_without_init(void)
  * ============================================================================ */
 
 /*
- * Test: net_get_stats doesn't crash with valid or NULL pointer
+ * Test: net_get_stats returns sane values and handles NULL safely
  */
 static void test_net_get_stats_safety(void)
 {
@@ -276,10 +273,15 @@ static void test_net_get_stats_safety(void)
     /* Should not crash with valid pointer */
     net_get_stats(&stats);
 
+    /* Sanity: error counts should never exceed packet counts */
+    TEST_ASSERT_TRUE(stats.rx_errors <= stats.rx_packets);
+    TEST_ASSERT_TRUE(stats.tx_errors <= stats.tx_packets);
+
+    /* Sanity: dropped packets should never exceed received packets */
+    TEST_ASSERT_TRUE(stats.rx_dropped <= stats.rx_packets);
+
     /* Should not crash with NULL (just doesn't write) */
     net_get_stats(NULL);
-
-    TEST_PASS();
 }
 
 /*

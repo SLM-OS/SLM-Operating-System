@@ -2,13 +2,13 @@
 
 High-level architecture documentation for the Small Language Model Operating System.
 
-**Status:** Phase 4 in progress (December 2025)
+**Status:** Phase 4+ (April 2026)
 
 ---
 
 ## Overview
 
-SLM-OS is a bare-metal operating system designed for running AI inference workloads on edge devices, specifically targeting the NVIDIA Jetson Orin Nano. The system is built as a hybrid C/Rust kernel with specialized support for AI model memory management and deadline-aware scheduling.
+SLM-OS is a bare-metal operating system designed for running AI inference workloads on edge devices. The system is built as a hybrid C/Rust kernel with specialized support for AI model memory management and deadline-aware scheduling. Development targets multiple ARM64 platforms (QEMU virt, Raspberry Pi 5, NVIDIA Jetson Orin Nano) with an experimental x86-64 port.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -41,15 +41,15 @@ SLM-OS is a bare-metal operating system designed for running AI inference worklo
 │                                    ▼                                         │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │                     Hardware Abstraction                             │   │
-│   │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │   │
-│   │  │ UART PL011 │  │  GIC-400   │  │ ARM Timer  │  │  Block Dev │     │   │
-│   │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │   │
+│   │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐   │   │
+│   │  │UART PL011│ │ RP1 UART │ │ GIC-400  │ │ARM Timer │ │ Block Dev│   │   │
+│   │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘   │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                         │
 │                                    ▼                                         │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                    Hardware (ARM64 / Cortex-A78AE)                   │   │
-│   │            QEMU virt (development) │ Jetson Orin Nano (target)       │   │
+│   │                    Hardware (ARM64 / Cortex-A78AE / Cortex-A76)      │   │
+│   │       QEMU virt │ Raspberry Pi 5 │ Jetson Orin Nano │ x86-64 (exp.) │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -90,7 +90,9 @@ This hybrid approach leverages:
 - **Compile-time platform selection** via CMake
 - **Common driver interfaces** (UART, timer, interrupt controller)
 - **QEMU virt** as primary development platform
-- **Jetson Orin Nano** as production target
+- **Raspberry Pi 5** (BCM2712) as secondary hardware target — boots to interactive shell
+- **Jetson Orin Nano** as original hardware target (blocked by CBB firewall)
+- **x86-64** experimental port (multiboot2 boot, serial output)
 
 ---
 
@@ -102,6 +104,18 @@ This hybrid approach leverages:
 |-----------|---------|---------|
 | DTB Parser | `kernel/src/dtb.c` | Device Tree parsing for hardware discovery |
 | Platform Info | `kernel/include/platform.h` | Compile-time fallback values |
+| RP1 UART Driver | `kernel/drivers/uart_rp1_bitbang.c` | Pi 5 UART via RP1 southbridge |
+| x86-64 Boot | `kernel/arch/x86_64/boot.S`, `entry64.S` | Multiboot2 boot, long mode entry |
+| x86-64 Main | `kernel/arch/x86_64/main_x86.c` | x86-64 kernel entry point |
+
+**Supported Platforms:**
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| QEMU virt | Primary development | Full feature set, VirtIO-Net networking |
+| Raspberry Pi 5 | Hardware target | Boots to interactive shell, UART TX/RX working, cooperative scheduling (timer IRQs disabled as workaround). See `docs/pi5-baremetal-status.md` |
+| Jetson Orin Nano | Blocked | CBB firewall prevents bare-metal peripheral access. See `docs/jetson-nvidia-support.md` |
+| x86-64 | Experimental | Multiboot2 boot, serial output, basic subsystem init |
 
 **Phase 3 Learnings:**
 - DTB passed in x0 by bootloader (U-Boot, UEFI)
@@ -212,6 +226,48 @@ This hybrid approach leverages:
 - Shell commands: `net`, `ping`, `ifconfig`, `netstat`
 - Static IP and DHCP configuration support
 
+### Lua Scripting Engine
+
+| Component | File(s) | Purpose |
+|-----------|---------|---------|
+| Lua Integration | `kernel/src/lua_slm.c` | Lua 5.4 state management and kernel bindings |
+| Libc Stubs | `kernel/src/lua_stubs.c` | Freestanding libc shims for Lua runtime |
+| Shell Commands | `kernel/src/lua_shell.c` | `lua` command: REPL, inline exec, script files |
+
+**Phase 4 Implementation:**
+- Lua 5.4 engine running in freestanding kernel environment
+- Interactive REPL via `lua` shell command
+- Inline execution via `lua -e "code"`
+- Script file execution from VFS via `lua <filename>`
+- SLM-OS kernel bindings exposed as the `slm` table (`slm.uptime`, `slm.tasks`, `slm.mem`, `slm.print`, etc.)
+- Custom libc stub layer routes Lua's C library dependencies through kernel primitives
+
+See `docs/lua.md` for full documentation.
+
+### ELF Loader
+
+| Component | File(s) | Purpose |
+|-----------|---------|---------|
+| ELF64 Loader | `kernel/src/elf.c` | Parse and load ARM64 ELF binaries |
+
+**Phase 4 Implementation:**
+- Minimal ELF64 parser for ARM64 executables
+- Loads program segments into allocated memory
+- Creates a new task with standard `main(argc, argv)` entry convention
+- Accessible from the shell via the `run` command
+
+### Component System
+
+| Component | File(s) | Purpose |
+|-----------|---------|---------|
+| Component (C) | `kernel/src/component.c` | C helper functions and state names |
+| Component (Rust) | `runtime/src/component/` | Core component lifecycle management |
+
+**Phase 4 Implementation:**
+- Lifecycle management for SLM workloads (loaded, initializing, running, suspended, updating, terminating, unloaded)
+- Shell interface via `component` command (list, register, status)
+- Designed as the runtime unit for model inference tasks
+
 ---
 
 ## Boot Sequence
@@ -263,13 +319,15 @@ CS-496-SLM-Operating-System/
 │   ├── include/          # C headers
 │   ├── src/              # Core kernel (C + assembly)
 │   ├── arch/arm64/       # ARM64-specific code
+│   ├── arch/x86_64/      # x86-64 experimental port
 │   ├── mm/               # Memory management (PMM, VMM)
 │   ├── sched/            # Scheduler, tasks, SMP
 │   ├── ipc/              # Inter-process communication
-│   ├── drivers/          # Hardware drivers (UART, timer, blkdev)
+│   ├── drivers/          # Hardware drivers (UART, timer, blkdev, VirtIO)
 │   ├── fs/               # Filesystem (LittleFS wrapper, VFS adapter)
+│   ├── net/              # Networking (lwIP integration)
 │   ├── gpu/              # GPU subsystem
-│   ├── lib/              # Third-party libraries (LittleFS)
+│   ├── lib/              # Third-party libraries (LittleFS, Lua 5.4, lwIP)
 │   └── tests/            # Kernel test suite
 ├── runtime/
 │   └── src/
@@ -277,7 +335,8 @@ CS-496-SLM-Operating-System/
 │       ├── kernel_ffi.rs # FFI to C kernel
 │       ├── log.rs        # Logging infrastructure
 │       ├── mm/           # Model memory management
-│       └── sched/        # Scheduling policies
+│       ├── sched/        # Scheduling policies
+│       └── component/    # Component system for SLM workloads
 ├── docs/                 # Documentation
 └── build/                # Build output (gitignored)
 ```
@@ -330,21 +389,46 @@ See `docs/ffi.md` for complete FFI documentation.
 - Heterogeneous CPU topology awareness (skeleton)
 - Inference scheduler skeleton (for Phase 5)
 
-### Phase 4 (In Progress)
+### Phase 4 (Completed)
 - **Filesystem integration**:
   - Block device abstraction layer
   - RAM disk driver for development
   - LittleFS wrapper (flash-friendly filesystem)
   - VFS mount point support
-  - Shell commands work with persistent storage
-- Hardware bring-up on Jetson Orin Nano (in progress)
+- **Networking**:
+  - VirtIO-Net driver for QEMU virtual networking
+  - lwIP TCP/IP stack (ICMP, TCP, UDP, DHCP)
+  - Shell commands: `net`, `ping`, `ifconfig`, `netstat`
+- **Lua scripting engine**:
+  - Lua 5.4 with freestanding libc stubs
+  - REPL, inline execution (`lua -e`), script files
+  - SLM-OS kernel bindings (`slm.uptime`, `slm.tasks`, `slm.mem`, etc.)
+- **ELF loader** for loading and running ARM64 binaries from the shell
+- **Component system** for SLM workload lifecycle management (Rust + C)
+- **Interactive shell** with 38+ commands (filesystem ops, process management, networking, scripting)
+
+### Phase 4+ (In Progress)
+- **Raspberry Pi 5 hardware bring-up**:
+  - Boots to fully interactive shell on real hardware
+  - RP1 UART TX/RX working (PL011 via RP1 southbridge)
+  - GICv2, buddy allocator, VMM, all subsystems operational
+  - Timer interrupts and preemptive scheduling disabled as workaround (timer IRQs interfere with UART RX)
+  - Automated deploy pipeline via SDWireC and labctl
+  - See `docs/pi5-baremetal-status.md` for detailed status
+- **Experimental x86-64 port**:
+  - Multiboot2 boot sequence (32-bit trampoline to 64-bit long mode)
+  - Serial console output
+  - Basic subsystem initialization
+- **Jetson Orin Nano** hardware bring-up blocked by CBB firewall (see `docs/jetson-nvidia-support.md`)
+- **Automated lab infrastructure** via labctl (power control, serial capture, SDWireC management)
 
 ### Deferred to Future Phases
 - Actual GPU compute (requires TensorRT, Phase 5)
 - Model loading and inference (Phase 5)
 - User/kernel separation (FUTURE.md)
 - eMMC/SD card drivers (Phase 5)
+- Pi 5 preemptive scheduling (requires resolving timer/UART conflict)
 
 ---
 
-*Last updated: December 2025*
+*Last updated: April 2026*

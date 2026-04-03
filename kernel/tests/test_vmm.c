@@ -328,24 +328,30 @@ static void test_rapid_remap_stress(void)
 
 /*
  * Test: ASID invalidation executes without fault
+ *
+ * Smoke test only: calls the function with several ASID values to verify
+ * no exception is raised.  TLB state cannot be validated from software.
  */
 static void test_asid_invalidation_executes(void)
 {
     vmm_invalidate_tlb_asid(RAM_BASE, 0);
     vmm_invalidate_tlb_asid(RAM_BASE, 1);
     vmm_invalidate_tlb_asid(RAM_BASE, 255);
-    TEST_PASS();
+    TEST_IGNORE_MESSAGE("smoke test: verifies no crash, cannot validate TLB state");
 }
 
 /*
  * Test: ASID-all invalidation executes without fault
+ *
+ * Smoke test only: calls the function with several ASID values to verify
+ * no exception is raised.  TLB state cannot be validated from software.
  */
 static void test_asid_all_invalidation_executes(void)
 {
     vmm_invalidate_tlb_asid_all(0);
     vmm_invalidate_tlb_asid_all(1);
     vmm_invalidate_tlb_asid_all(255);
-    TEST_PASS();
+    TEST_IGNORE_MESSAGE("smoke test: verifies no crash, cannot validate TLB state");
 }
 
 /* ============================================================================
@@ -374,7 +380,7 @@ static void test_tlb_broadcast_all_cpus(void)
     uint64_t val = *ptr;
     (void)val;  /* Suppress unused warning */
 
-    TEST_PASS();
+    TEST_IGNORE_MESSAGE("smoke test: verifies no crash on single-core");
 }
 
 /* ============================================================================

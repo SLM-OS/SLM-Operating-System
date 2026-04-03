@@ -572,7 +572,12 @@ static void test_zero_alloc(void)
 }
 
 /*
- * Test: Double free is detected (doesn't crash)
+ * Test: Double free is detected and rejected
+ *
+ * After the first free, the page returns to the free pool.  A second free
+ * of the same address should be silently rejected (the PMM prints a WARN
+ * but does not add the block again).  Verify by checking that the free
+ * page count does not increase on the second call.
  */
 static void test_double_free_detected(void)
 {
@@ -580,10 +585,19 @@ static void test_double_free_detected(void)
     TEST_ASSERT_NOT_NULL(page);
 
     pmm_free_page(page);
-    /* Second free should warn but not crash */
+
+    /* Snapshot free page count after the legitimate free */
+    struct pmm_stats stats_after_first;
+    pmm_get_stats(&stats_after_first);
+
+    /* Second free should be rejected (warn but not crash) */
     pmm_free_page(page);
 
-    TEST_PASS();
+    /* Free page count must not increase — the double free was rejected */
+    struct pmm_stats stats_after_second;
+    pmm_get_stats(&stats_after_second);
+    TEST_ASSERT_EQUAL_INT(stats_after_first.free_pages,
+                          stats_after_second.free_pages);
 }
 
 /*

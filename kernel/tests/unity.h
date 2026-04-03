@@ -30,11 +30,13 @@ extern void unity_output_hex(uint64_t n);
 typedef struct {
     const char *current_test;
     const char *current_file;
+    const char *ignore_message;
     int current_line;
     int test_count;
     int test_failures;
     int test_ignores;
     int current_test_failed;
+    int current_test_ignored;
 } UnityState;
 
 extern UnityState Unity;
@@ -67,16 +69,24 @@ int UnityEnd(void);
     do { \
         Unity.current_test = #func; \
         Unity.current_test_failed = 0; \
+        Unity.current_test_ignored = 0; \
+        Unity.ignore_message = NULL; \
         Unity.test_count++; \
         setUp(); \
         func(); \
         tearDown(); \
         if (Unity.current_test_failed) { \
             unity_output_string("  [FAIL] "); \
+        } else if (Unity.current_test_ignored) { \
+            unity_output_string("  [IGNORE] "); \
         } else { \
             unity_output_string("  [PASS] "); \
         } \
         unity_output_string(#func); \
+        if (Unity.ignore_message) { \
+            unity_output_string(" - "); \
+            unity_output_string(Unity.ignore_message); \
+        } \
         unity_output_char('\n'); \
     } while (0)
 
@@ -106,10 +116,13 @@ void unity_fail_expected_actual_hex(const char *file, int line,
     do { return; } while (0)
 
 #define TEST_IGNORE() \
-    do { Unity.test_ignores++; Unity.current_test_failed = 0; return; } while (0)
+    do { Unity.test_ignores++; Unity.current_test_failed = 0; \
+         Unity.current_test_ignored = 1; return; } while (0)
 
 #define TEST_IGNORE_MESSAGE(msg) \
-    do { Unity.test_ignores++; Unity.current_test_failed = 0; return; } while (0)
+    do { Unity.test_ignores++; Unity.current_test_failed = 0; \
+         Unity.current_test_ignored = 1; Unity.ignore_message = (msg); \
+         return; } while (0)
 
 /* ============================================================================
  * Boolean Assertions

@@ -8,6 +8,7 @@
 #include "unity.h"
 #include "vfs.h"
 #include "uart.h"
+#include "dtb.h"
 #include <stdint.h>
 
 /* ============================================================================
@@ -392,6 +393,45 @@ static void test_vfs_read_consistency(void)
 /* String comparison uses unity_strcmp from unity.h */
 
 /* ============================================================================
+ * DTB Parser Basic Tests (TEST-L6)
+ * ============================================================================ */
+
+/**
+ * Test dtb_get_info() returns a valid struct.
+ */
+static void test_dtb_info_available(void)
+{
+    const fdt_info_t *info = dtb_get_info();
+    TEST_ASSERT_NOT_NULL(info);
+}
+
+/**
+ * Test DTB reports a reasonable CPU count.
+ */
+static void test_dtb_cpu_count_reasonable(void)
+{
+    const fdt_info_t *info = dtb_get_info();
+    TEST_ASSERT_NOT_NULL(info);
+    /* If parsing succeeded, should detect at least 1 CPU, no more than 64 */
+    if (info->valid) {
+        TEST_ASSERT_TRUE(info->cpu_count >= 1);
+        TEST_ASSERT_TRUE(info->cpu_count <= 64);
+    }
+}
+
+/**
+ * Test DTB reports non-zero memory size.
+ */
+static void test_dtb_memory_info(void)
+{
+    const fdt_info_t *info = dtb_get_info();
+    TEST_ASSERT_NOT_NULL(info);
+    if (info->valid) {
+        TEST_ASSERT_TRUE(info->ram_size > 0);
+    }
+}
+
+/* ============================================================================
  * Test Runner
  * ============================================================================ */
 
@@ -435,6 +475,11 @@ int test_suite_vfs(void)
 
     /* Consistency tests */
     RUN_TEST(test_vfs_read_consistency);
+
+    /* DTB parser basic tests (TEST-L6) */
+    RUN_TEST(test_dtb_info_available);
+    RUN_TEST(test_dtb_cpu_count_reasonable);
+    RUN_TEST(test_dtb_memory_info);
 
     int failures = UnityEnd();
 

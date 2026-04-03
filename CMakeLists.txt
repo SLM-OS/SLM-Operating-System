@@ -202,6 +202,7 @@ set(TEST_SOURCES
     kernel/tests/test_littlefs.c
     kernel/tests/test_net.c
     kernel/tests/test_lua.c
+    kernel/tests/test_x86_boot.c
     kernel/tests/test_integration.c
 )
 

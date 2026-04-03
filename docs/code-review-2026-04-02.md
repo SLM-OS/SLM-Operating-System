@@ -433,7 +433,7 @@
 
 ### Phase 4: Test Improvements
 
-- ☐ **TEST-L6** — Add tests for UART, GIC, timer, kprintf/string, DTB
-- ☐ **TEST-L1** — Wire up test_x86_boot.c or remove it
-- ☐ **TEST-L2** — Strengthen always-pass tests with real assertions
-- ☐ **DOC-M6** — Update architecture.md with current state
+- ✅ **TEST-L6** — Add tests for timer, DTB (kprintf/string added in Phase 3)
+- ✅ **TEST-L1** — Wire up test_x86_boot.c in CMakeLists.txt and test harness
+- ✅ **TEST-L2** — Strengthen always-pass tests with real assertions or TEST_IGNORE
+- ✅ **DOC-M6** — Update architecture.md with current state

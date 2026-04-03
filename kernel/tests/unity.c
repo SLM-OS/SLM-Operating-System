@@ -14,11 +14,13 @@
 UnityState Unity = {
     .current_test = NULL,
     .current_file = NULL,
+    .ignore_message = NULL,
     .current_line = 0,
     .test_count = 0,
     .test_failures = 0,
     .test_ignores = 0,
     .current_test_failed = 0,
+    .current_test_ignored = 0,
 };
 
 /* ============================================================================
@@ -32,6 +34,8 @@ void UnityBegin(const char *filename)
     Unity.test_failures = 0;
     Unity.test_ignores = 0;
     Unity.current_test_failed = 0;
+    Unity.current_test_ignored = 0;
+    Unity.ignore_message = NULL;
 
     unity_output_string("[TEST] ");
     unity_output_string(filename);

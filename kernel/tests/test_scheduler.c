@@ -10,6 +10,7 @@
 #include "slm_ffi.h"
 #include "spinlock.h"
 #include "smp.h"
+#include "timer.h"
 #include "uart.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -1431,6 +1432,46 @@ static void test_benchmark_queue_operations(void)
 }
 
 /* ============================================================================
+ * Timer Basic Tests (TEST-L6)
+ * ============================================================================ */
+
+/*
+ * Test: timer_get_count() returns a non-zero value after boot.
+ */
+static void test_timer_counter_readable(void)
+{
+    uint64_t count = timer_get_count();
+    /* Counter should be non-zero after boot */
+    TEST_ASSERT_TRUE(count > 0);
+}
+
+/*
+ * Test: Two consecutive reads show the counter advancing (or not going backwards).
+ */
+static void test_timer_counter_advances(void)
+{
+    uint64_t a = timer_get_count();
+    /* Small delay */
+    for (volatile int i = 0; i < 10000; i++) {
+        /* spin */
+    }
+    uint64_t b = timer_get_count();
+    /* Counter should advance (or at minimum not go backwards) */
+    TEST_ASSERT_TRUE(b >= a);
+}
+
+/*
+ * Test: timer_get_frequency() returns a reasonable value.
+ */
+static void test_timer_frequency_reasonable(void)
+{
+    uint64_t freq = timer_get_frequency();
+    /* Timer frequency should be between 1 MHz and 100 GHz */
+    TEST_ASSERT_TRUE(freq >= 1000000);
+    TEST_ASSERT_TRUE(freq <= 100000000000ULL);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1484,6 +1525,11 @@ int test_suite_scheduler(void)
     RUN_TEST(test_isolated_core_latency);
     RUN_TEST(test_benchmark_context_switch);
     RUN_TEST(test_benchmark_queue_operations);
+
+    /* Timer basic tests (TEST-L6) */
+    RUN_TEST(test_timer_counter_readable);
+    RUN_TEST(test_timer_counter_advances);
+    RUN_TEST(test_timer_frequency_reasonable);
 
     return UnityEnd();
 }
