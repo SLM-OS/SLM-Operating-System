@@ -113,7 +113,7 @@ This hybrid approach leverages:
 | Platform | Status | Notes |
 |----------|--------|-------|
 | QEMU virt | Primary development | Full feature set, VirtIO-Net networking |
-| Raspberry Pi 5 | Hardware target | Boots to interactive shell, UART TX/RX working, cooperative scheduling (timer IRQs disabled as workaround). See `docs/pi5-baremetal-status.md` |
+| Raspberry Pi 5 | Hardware target | Boots to interactive shell, UART TX/RX working, preemptive scheduling at 100 Hz. See `docs/pi5-baremetal-status.md` |
 | Jetson Orin Nano | Blocked | CBB firewall prevents bare-metal peripheral access. See `docs/jetson-nvidia-support.md` |
 | x86-64 | Experimental | Multiboot2 boot, serial output, basic subsystem init |
 
@@ -412,7 +412,7 @@ See `docs/ffi.md` for complete FFI documentation.
   - Boots to fully interactive shell on real hardware
   - RP1 UART TX/RX working (PL011 via RP1 southbridge)
   - GICv2, buddy allocator, VMM, all subsystems operational
-  - Timer interrupts and preemptive scheduling disabled as workaround (timer IRQs interfere with UART RX)
+  - Preemptive scheduling active at 100 Hz (physical timer, IRQ 30)
   - Automated deploy pipeline via SDWireC and labctl
   - See `docs/pi5-baremetal-status.md` for detailed status
 - **Experimental x86-64 port**:
@@ -427,7 +427,8 @@ See `docs/ffi.md` for complete FFI documentation.
 - Model loading and inference (Phase 5)
 - User/kernel separation (FUTURE.md)
 - eMMC/SD card drivers (Phase 5)
-- Pi 5 preemptive scheduling (requires resolving timer/UART conflict)
+- Pi 5 multi-core support (requires fixing spinlock exclusive monitor)
+- Pi 5 armstub reliability (EL3→EL2 ERET intermittent failure, currently disabled)
 
 ---
 

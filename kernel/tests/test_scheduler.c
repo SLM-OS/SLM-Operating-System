@@ -11,6 +11,7 @@
 #include "spinlock.h"
 #include "smp.h"
 #include "timer.h"
+#include "platform.h"
 #include "uart.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -1564,6 +1565,17 @@ static void test_timer_frequency_reasonable(void)
     TEST_ASSERT_TRUE(freq <= 100000000000ULL);
 }
 
+/*
+ * Regression test: Timer uses physical timer IRQ 30 (PPI 14).
+ * Previously used virtual timer IRQ 27 (PPI 11). Linux kernel and
+ * Circle both use the physical timer at EL1.
+ */
+static void test_timer_irq_is_physical(void)
+{
+    /* TIMER_IRQ is defined in platform.h as 30 for all platforms */
+    TEST_ASSERT_EQUAL_INT(30, TIMER_IRQ);
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -1626,6 +1638,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_timer_counter_readable);
     RUN_TEST(test_timer_counter_advances);
     RUN_TEST(test_timer_frequency_reasonable);
+    RUN_TEST(test_timer_irq_is_physical);
 
     return UnityEnd();
 }
