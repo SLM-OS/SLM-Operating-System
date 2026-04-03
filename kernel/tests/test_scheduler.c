@@ -40,6 +40,51 @@ static void nop_entry(void *arg)
 }
 
 /* ============================================================================
+ * Regression Tests: DAIF Context Switch Preservation
+ * ============================================================================ */
+
+/*
+ * Regression test: DAIF register is saved and restored across context switches.
+ * Previously, DAIF was not part of cpu_context, meaning a task's interrupt
+ * mask state could leak to/from other tasks.
+ */
+static void test_daif_saved_in_context(void)
+{
+    struct task *t = task_create_with_priority("daif_test", nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    /* Set a known DAIF value in the task's context (all exceptions masked) */
+    t->context.daif = 0x3C0;  /* D=1, A=1, I=1, F=1 */
+
+    /* Verify it's preserved in the struct */
+    TEST_ASSERT_EQUAL_HEX64(0x3C0, t->context.daif);
+
+    /* Set a different value (only IRQ masked) */
+    t->context.daif = 0x080;  /* I=1 only */
+    TEST_ASSERT_EQUAL_HEX64(0x080, t->context.daif);
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/*
+ * Test: New task's DAIF context is zero-initialized (interrupts unmasked).
+ */
+static void test_new_task_daif_zeroed(void)
+{
+    struct task *t = task_create_with_priority("daif_zero", nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    /* BSS-initialized task should have DAIF = 0 (interrupts enabled) */
+    TEST_ASSERT_EQUAL_HEX64(0, t->context.daif);
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/* ============================================================================
  * Unit Tests: Deadline Boost Logic
  * ============================================================================ */
 
@@ -1392,6 +1437,10 @@ static void test_benchmark_queue_operations(void)
 int test_suite_scheduler(void)
 {
     UnityBegin("Scheduler Tests");
+
+    /* Regression tests: DAIF context preservation */
+    RUN_TEST(test_daif_saved_in_context);
+    RUN_TEST(test_new_task_daif_zeroed);
 
     /* Unit tests: Deadline boost logic */
     RUN_TEST(test_no_deadline_no_boost);

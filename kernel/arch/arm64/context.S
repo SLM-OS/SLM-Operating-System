@@ -61,6 +61,7 @@
 #define CTX_V0      0x70
 #define CTX_FPCR    0x270
 #define CTX_FPSR    0x278
+#define CTX_DAIF    0x280
 
 .global switch_to
 .type switch_to, @function
@@ -112,13 +113,21 @@ switch_to:
     mrs     x3, fpsr
     str     x3, [x2, #CTX_FPSR]
 
+    /* Save DAIF (interrupt mask state) */
+    mrs     x3, daif
+    str     x3, [x2, #CTX_DAIF]
+
 .Lrestore:
     /*
      * Restore new task's context
      */
     add     x2, x1, #TASK_CONTEXT_OFFSET    /* x2 = &new->context */
 
-    /* Restore FPCR and FPSR first */
+    /* Restore DAIF (interrupt mask state) */
+    ldr     x3, [x2, #CTX_DAIF]
+    msr     daif, x3
+
+    /* Restore FPCR and FPSR */
     ldr     x3, [x2, #CTX_FPCR]
     msr     fpcr, x3
     ldr     x3, [x2, #CTX_FPSR]

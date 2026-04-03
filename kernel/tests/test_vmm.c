@@ -378,6 +378,31 @@ static void test_tlb_broadcast_all_cpus(void)
 }
 
 /* ============================================================================
+ * Regression Tests: Integer Overflow in Statistics
+ * ============================================================================ */
+
+/*
+ * Regression test: vmm_get_stats bytes_mapped doesn't overflow.
+ * Previously, vmm_dump used (blocks_mapped * BLOCK_SIZE) in 32-bit
+ * arithmetic, which overflowed on Pi 5 where blocks_mapped > 2047.
+ * vmm_get_stats uses uint64_t and should be correct.
+ */
+static void test_vmm_stats_bytes_mapped_no_overflow(void)
+{
+    struct vmm_stats stats;
+    vmm_get_stats(&stats);
+
+    /* bytes_mapped should equal blocks_mapped * 2MB */
+    uint64_t expected = (uint64_t)stats.blocks_mapped * (2 * 1024 * 1024);
+    TEST_ASSERT_EQUAL_HEX64(expected, stats.bytes_mapped);
+
+    /* On Pi 5, blocks_mapped is ~2050+, bytes should be ~4GB+ */
+    /* On QEMU, blocks_mapped is smaller but still should be consistent */
+    TEST_ASSERT_TRUE(stats.bytes_mapped > 0);
+    TEST_ASSERT_TRUE(stats.bytes_mapped >= (uint64_t)stats.blocks_mapped * 1024 * 1024);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -404,6 +429,9 @@ int test_suite_vmm(void)
 
     /* Multi-CPU */
     RUN_TEST(test_tlb_broadcast_all_cpus);
+
+    /* Regression: integer overflow in stats */
+    RUN_TEST(test_vmm_stats_bytes_mapped_no_overflow);
 
     return UnityEnd();
 }

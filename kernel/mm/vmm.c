@@ -638,7 +638,7 @@ void vmm_dump(void)
     uart_printf("  L1 table at: %p\n", l1_table);
     uart_printf("  Blocks mapped: %u\n", vmm_state.blocks_mapped);
     uart_printf("  Bytes mapped: %lu MB\n",
-                (vmm_state.blocks_mapped * BLOCK_SIZE) / (1024 * 1024));
+                ((uint64_t)vmm_state.blocks_mapped * BLOCK_SIZE) / (1024 * 1024));
 
     /* Dump non-empty L1 entries */
     for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
@@ -832,7 +832,7 @@ void vmm_init(void)
     DEBUG_PRINT("  L2 tables used: %u", vmm_state.l2_tables_used);
     DEBUG_PRINT("  Blocks mapped: %u (%lu MB)",
                 vmm_state.blocks_mapped,
-                (vmm_state.blocks_mapped * BLOCK_SIZE) / (1024 * 1024));
+                ((uint64_t)vmm_state.blocks_mapped * BLOCK_SIZE) / (1024 * 1024));
 
     /*
      * Enable MMU.

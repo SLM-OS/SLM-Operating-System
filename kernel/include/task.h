@@ -75,6 +75,9 @@ struct cpu_context {
     alignas(16) __uint128_t v[32];  /* V0-V31 SIMD registers */
     uint64_t fpcr;      /* Floating-point control register */
     uint64_t fpsr;      /* Floating-point status register */
+
+    /* Interrupt state — preserved across context switches */
+    uint64_t daif;      /* DAIF register (interrupt mask state) */
 };
 
 /* Task cleanup callback (called when task is destroyed) */

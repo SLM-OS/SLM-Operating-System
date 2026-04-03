@@ -180,6 +180,6 @@ void timer_percpu_init(void)
      * Enable timer interrupt in GIC for this CPU.
      * PPI 30 (physical timer) is per-CPU, so each core must enable it.
      */
-    gic_set_priority(TIMER_IRQ, GIC_PRIORITY_DEFAULT);
-    gic_enable_irq(TIMER_IRQ);
+    gic_set_priority(ACTUAL_TIMER_IRQ, GIC_PRIORITY_DEFAULT);
+    gic_enable_irq(ACTUAL_TIMER_IRQ);
 }

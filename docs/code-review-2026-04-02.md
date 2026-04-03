@@ -414,12 +414,12 @@
 
 ### Phase 2: Correctness (address soon)
 
-- ☐ **SCHED-C1** — DAIF not saved across context switch
-- ☐ **DRV-C4** — Timer percpu wrong IRQ on Pi 5
-- ☐ **DRV-C5** — VirtIO RX buffer mapping bug
-- ☐ **DRV-M1** — GICv2 SGI target bitmask
-- ☐ **MM-M6** — vmm_dump integer overflow
-- ☐ **DOC-C3** — Fix platform.h UART_CLOCK to 50 MHz
+- ✅ **SCHED-C1** — DAIF not saved across context switch
+- ✅ **DRV-C4** — Timer percpu wrong IRQ on Pi 5
+- ✅ **DRV-C5** — VirtIO RX buffer mapping bug
+- ✅ **DRV-M1** — GICv2 SGI target bitmask
+- ✅ **MM-M6** — vmm_dump integer overflow
+- ✅ **DOC-C3** — Fix platform.h UART_CLOCK to 50 MHz
 
 ### Phase 3: Code Quality (address when convenient)
 

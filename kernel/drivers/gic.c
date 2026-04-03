@@ -574,7 +574,7 @@ void gic_send_sgi(uint32_t irq, uint32_t target_cpu)
     icc_write_sgi1r(sgi_val);
     __asm__ volatile("isb");
 #else
-    GICD_SGIR = (target_cpu << 16) | (irq & 0xF);
+    GICD_SGIR = ((1U << target_cpu) << 16) | (irq & 0xF);
 #endif
 }
 

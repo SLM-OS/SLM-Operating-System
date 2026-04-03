@@ -235,7 +235,7 @@
 /* Hardware UART base (for future use when PL011 is working) */
 #define UART_BASE           0x1F00030000UL  /* UART0 via RP1 */
 #define UART_SIZE           0x00001000UL    /* 4 KB */
-#define UART_CLOCK          48000000UL      /* 48 MHz */
+#define UART_CLOCK          50000000UL      /* 50 MHz (confirmed by testing; 48 MHz garbles output) */
 #define UART_IRQ            (32 + 121)      /* RP1 UART0 IRQ - TBD */
 
 /*

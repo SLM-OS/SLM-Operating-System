@@ -435,9 +435,11 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
         return 0;  /* No packet available */
     }
 
-    /* Get the buffer address from the descriptor */
-    /* For our simple case, we know which buffer was used */
-    uint8_t *rx_buf = rx_buffer_pool[desc_idx % RX_BUFFER_COUNT];
+    /* Get the buffer address from the descriptor's stored addr.
+     * Cannot use desc_idx as buffer pool index — after the first round
+     * of receives, descriptors are reused from a free list and indices
+     * no longer correspond to the original buffer pool slots. */
+    uint8_t *rx_buf = (uint8_t *)(uintptr_t)netdev.rx_vq.desc[desc_idx].addr;
 
     /* Skip virtio-net header */
     struct virtio_net_hdr *hdr = (struct virtio_net_hdr *)rx_buf;
