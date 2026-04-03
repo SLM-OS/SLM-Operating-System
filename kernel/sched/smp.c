@@ -27,9 +27,9 @@ uint32_t cpu_count = 0;
 /* Number of CPUs currently online */
 volatile uint32_t cpus_online = 0;
 
-/* Per-CPU boot handshake flags — separate from per_cpu struct to avoid
- * any potential struct-access optimization issues with volatile members */
-static volatile uint32_t cpu_boot_flag[MAX_CPUS];
+/* Per-CPU boot handshake flags — cacheline-aligned to avoid corrupting
+ * adjacent data during DC CIVAC cache maintenance operations. */
+static volatile uint32_t cpu_boot_flag[MAX_CPUS] __attribute__((aligned(64)));
 
 /* Per-CPU boot stacks (16 KB each, 16-byte aligned) */
 /* NOT static - needs to be visible to smp_boot.S */
@@ -236,10 +236,16 @@ void secondary_init(uint32_t logical_cpu_id)
     DEBUG_PRINT("CPU %u: timer percpu done", logical_cpu_id);
 
     /* Signal the primary CPU that we're online.
-     * Use atomic store-release for cross-core cache coherency.
-     * Regular volatile writes may stay in L1 without propagating. */
+     * Explicit cache clean (DC CVAC) pushes the write from L1 to the
+     * Point of Coherency (PoC / main memory). This is needed because
+     * CPUECTLR_EL1.SMPEN may not be set by TF-A for secondary cores,
+     * meaning regular cache coherency doesn't propagate L1 writes. */
     cpu_data[logical_cpu_id].online = true;
-    __atomic_store_n(&cpu_boot_flag[logical_cpu_id], 1, __ATOMIC_RELEASE);
+    cpu_boot_flag[logical_cpu_id] = 1;
+    /* Clean cachelines to PoC so primary CPU can see them */
+    __asm__ volatile("dc cvac, %0" :: "r"(&cpu_boot_flag[logical_cpu_id]) : "memory");
+    __asm__ volatile("dc cvac, %0" :: "r"(&cpu_data[logical_cpu_id].online) : "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
     cpus_online++;
 
     INFO("CPU %u: online", logical_cpu_id);
@@ -306,11 +312,18 @@ static int boot_secondary(uint32_t cpu)
      * Wait for secondary CPU to signal via boot flag.
      * The flag is a separate volatile uint32_t for reliable cross-core visibility.
      */
-    for (volatile int timeout = 0; timeout < 50000000; timeout++) {
-        /* Use atomic load-acquire to force cache coherent read */
-        if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
+    for (volatile int timeout = 0; timeout < 5000; timeout++) {
+        /* Invalidate our cached copy to force re-read from PoC.
+         * DC CIVAC writes back dirty data then invalidates the line.
+         * Only do this periodically — not every iteration — to avoid
+         * excessive cache thrashing. */
+        __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[cpu]) : "memory");
+        __asm__ volatile("dsb sy" ::: "memory");
+        if (cpu_boot_flag[cpu]) {
             return PSCI_SUCCESS;
         }
+        /* Brief delay between checks (~1ms) */
+        for (volatile int d = 0; d < 100000; d++);
     }
 
     WARN("CPU %u: boot timeout (flag=%u, online=%d)", cpu,
@@ -518,6 +531,7 @@ void smp_init(void)
     }
 
     INFO("SMP: %u/%u secondary CPUs online", booted, cpu_count - 1);
+    cpus_online = 1 + booted;  /* Set from primary's count, not secondary writes */
     INFO("SMP: total %u CPUs active", cpus_online);
 
     /* Run SMP validation tests */
