@@ -723,10 +723,10 @@ void scheduler_start(void)
      * Must be done AFTER task_set_current() so that timer IRQ handler
      * can safely call task_current() in schedule(). */
     /*
-     * Pi 5: Timer interrupts break PL011 RX on the RP1 southbridge.
-     * ISB on GIC EOI (DRV-C1 fix) did not resolve it. Skip timer
-     * start and run cooperatively until the root cause is resolved.
-     * See docs/pi5-baremetal-status.md for investigation details.
+     * Pi 5: Timer interrupts break PL011 RX AND TX on the RP1 southbridge.
+     * Tested with and without armstub, with GIC ISB fixes, with DAIF
+     * context save/restore — the timer ISR itself disrupts RP1 PCIe UART.
+     * Run cooperatively until root cause is resolved.
      */
 #if defined(PLATFORM_RASPI5)
     INFO("Timer/IRQ disabled (Pi 5 UART RX workaround)");

@@ -1,9 +1,22 @@
 /*
- * armstub8-2712.S - Minimal EL3 stub for Raspberry Pi 5
+ * armstub8-2712.S - EL3 stub for Raspberry Pi 5
  *
  * The Pi 5 firmware loads this as "armstub8-2712.bin" and executes it
- * before jumping to the kernel at 0x80000. Its purpose is to configure
- * the GIC-400 interrupt groups from secure state (EL3).
+ * at EL3 before jumping to the kernel at 0x80000.
+ *
+ * Purpose:
+ *   1. Configure GIC-400 interrupt groups (GICD_IGROUPR) from secure state,
+ *      since these registers are RAZ/WI from non-secure EL2/EL1.
+ *   2. Set up system registers for a clean EL3→EL2 transition.
+ *
+ * The stub does NOT enable GIC forwarding (GICD_CTLR, GICC_CTLR) —
+ * that is handled by the kernel's gic_init() after exception vectors
+ * are set up.
+ *
+ * System registers configured here match the standard Raspberry Pi
+ * armstub8.S from the firmware. Missing any of these causes intermittent
+ * boot failures (~30-60%) due to traps to EL3 with no handler, or
+ * stale system register state from the firmware.
  *
  * Build:
  *   aarch64-none-elf-gcc -nostdlib -nostartfiles -Wl,--section-start=.text=0 \
@@ -12,50 +25,34 @@
  */
 
 #define GIC_DISTB       0x107FFF9000
-#define GIC_CPUB        0x107FFFA000
 #define GICD_CTRLR      0x000
 #define GICD_TYPER      0x004
 #define GICD_IGROUPR    0x080
-#define GICC_CTRLR      0x000
-#define GICC_PMR        0x004
 #define KERNEL_ENTRY    0x80000
-
-/*
- * Marker location: write the current EL and a magic value to 0x7FF00
- * (just below the kernel at 0x80000). The kernel can read this to
- * confirm the armstub ran and at what EL.
- */
-#define MARKER_ADDR     0x7FF00
-#define MARKER_MAGIC    0x53544233  /* "STB3" */
 
 .globl _start
 _start:
-    /* Save DTB pointer */
+    /* Save DTB pointer (firmware passes it in x0) */
     mov     x19, x0
 
-    /* Write marker: current EL + magic + DTB address */
-    mrs     x0, CurrentEL
-    lsr     x0, x0, #2             /* Extract EL number (bits [3:2]) */
-    ldr     x1, =MARKER_ADDR
-    str     w0, [x1]               /* marker[0] = current EL */
-    ldr     w2, =MARKER_MAGIC
-    str     w2, [x1, #4]           /* marker[1] = magic */
-    str     x19, [x1, #8]          /* marker[2..3] = DTB address (64-bit) */
-
     /* Check if we're at EL3 */
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
     cmp     x0, #3
     b.ne    .Lnot_el3
 
     /*
-     * EL3: Configure GIC and drop to EL2.
+     * EL3: Configure GIC groups and system registers, then drop to EL2.
      */
 
-    /* Only primary core does distributor setup */
+    /* --- GIC Group Configuration (requires EL3 secure access) --- */
+
+    /* Only primary core sets GICD_IGROUPR (distributor is shared) */
     mrs     x0, mpidr_el1
     tst     x0, #0x3
-    b.ne    .Lel3_per_cpu
+    b.ne    .Lel3_sysregs
 
-    /* Set all GICD_IGROUPR to Group 1 */
+    /* Set all GICD_IGROUPR to 0xFFFFFFFF (all interrupts Group 1) */
     ldr     x0, =GIC_DISTB
     ldr     w1, [x0, #GICD_TYPER]
     and     w1, w1, #0x1F
@@ -68,28 +65,71 @@ _start:
     cmp     w3, w1
     b.lt    1b
 
-    /* Enable distributor: Group 0 + Group 1 */
-    mov     w1, #3
-    str     w1, [x0, #GICD_CTRLR]
+    /* Ensure GIC writes complete */
+    dsb     sy
 
-.Lel3_per_cpu:
-    /* Configure GIC CPU interface from secure state */
-    ldr     x0, =GIC_CPUB
-    mov     w1, #0xFF
-    str     w1, [x0, #GICC_PMR]
-    ldr     w1, =0x1E7
-    str     w1, [x0, #GICC_CTRLR]
+.Lel3_sysregs:
+    /* --- System Register Setup for EL3→EL2 Transition --- */
 
-    /* SCR_EL3: NS=1, RW=1 (AArch64 EL2), HCE=1, SMD=1 */
+    /*
+     * CPTR_EL3 = 0: Do not trap FP/SIMD/SVE access to EL3.
+     * Without this, any FP/SIMD instruction at EL2/EL1 traps to EL3
+     * which no longer has a handler after ERET → system hang.
+     */
+    msr     cptr_el3, xzr
+
+    /*
+     * SCR_EL3: Configure security state for EL2.
+     *   NS  [0]  = 1  Non-secure (EL2/EL1 run in non-secure world)
+     *   IRQ [1]  = 0  Don't route IRQ to EL3
+     *   FIQ [2]  = 0  Don't route FIQ to EL3
+     *   EA  [3]  = 0  Don't route external aborts to EL3
+     *   RES1[4]  = 1  Reserved, must be 1
+     *   RES1[5]  = 1  Reserved, must be 1
+     *   SMD [7]  = 1  Disable SMC instruction
+     *   HCE [8]  = 1  Enable HVC instruction
+     *   RW  [10] = 1  EL2 is AArch64
+     *   = 0x5b1
+     */
     ldr     x0, =0x5b1
     msr     scr_el3, x0
 
-    /* Drop to EL2h with exceptions masked */
+    /*
+     * SCTLR_EL2: Safe initial value for EL2.
+     * Matches the standard RPi firmware armstub value.
+     *   - MMU disabled
+     *   - Caches disabled
+     *   - Alignment check enabled
+     *   - Various RES1 bits set per ARM ARM
+     */
+    ldr     x0, =0x30c50838
+    msr     sctlr_el2, x0
+
+    /*
+     * ACTLR_EL3: Allow EL2 access to implementation-defined features.
+     * Set to all-1s to avoid trapping implementation-defined registers.
+     */
+    mov     x0, #0xFFFFFFFF
+    msr     actlr_el3, x0
+
+    /*
+     * MDCR_EL3 = 0: Don't trap debug/PMU access to EL3.
+     */
+    msr     mdcr_el3, xzr
+
+    /* SPSR_EL3: Return to EL2h with all exceptions masked */
     mov     x0, #0x3c9
     msr     spsr_el3, x0
+
+    /* ELR_EL3: Return address is the kernel entry point */
     ldr     x0, =KERNEL_ENTRY
     msr     elr_el3, x0
-    mov     x0, x19             /* DTB address */
+
+    /* Restore DTB pointer for kernel */
+    mov     x0, x19
+
+    /* Synchronize all register writes and pending MMIO */
+    dsb     sy
     isb
     eret
 
@@ -98,6 +138,6 @@ _start:
      * Not at EL3 — can't configure GIC groups (IGROUPR is RAZ/WI).
      * Just jump to the kernel at the current EL, preserving DTB.
      */
-    mov     x0, x19             /* DTB address */
+    mov     x0, x19
     ldr     x1, =KERNEL_ENTRY
     br      x1
