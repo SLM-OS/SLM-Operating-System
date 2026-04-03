@@ -1661,6 +1661,61 @@ static void test_spinlock_hw_irqsafe(void)
 }
 
 /* ============================================================================
+ * SMP: MPIDR Encoding and Secondary MMU Tests
+ * ============================================================================ */
+
+/*
+ * Test: cpu_logical_map has correct MPIDR encoding for this platform.
+ */
+static void test_cpu_logical_map_encoding(void)
+{
+    extern uint64_t cpu_logical_map[];
+    extern uint32_t cpu_count;
+
+    /* CPU 0 should match the boot CPU's actual MPIDR */
+    uint64_t boot_mpidr = cpu_get_mpidr() & MPIDR_AFF_MASK;
+    TEST_ASSERT_EQUAL_HEX64(boot_mpidr, cpu_logical_map[0]);
+
+    /* Verify map has at least 1 entry */
+    TEST_ASSERT_TRUE(cpu_count >= 1);
+
+#if defined(PLATFORM_RASPI5)
+    /* Pi 5: Aff1 encoding — each CPU ID shifted left by 8 */
+    if (cpu_count >= 2)
+        TEST_ASSERT_EQUAL_HEX64(0x100, cpu_logical_map[1]);
+    if (cpu_count >= 3)
+        TEST_ASSERT_EQUAL_HEX64(0x200, cpu_logical_map[2]);
+    if (cpu_count >= 4)
+        TEST_ASSERT_EQUAL_HEX64(0x300, cpu_logical_map[3]);
+#elif defined(PLATFORM_QEMU_VIRT)
+    /* QEMU: Aff0 encoding — sequential */
+    if (cpu_count >= 2)
+        TEST_ASSERT_EQUAL_HEX64(1, cpu_logical_map[1]);
+    if (cpu_count >= 3)
+        TEST_ASSERT_EQUAL_HEX64(2, cpu_logical_map[2]);
+#endif
+}
+
+/*
+ * Test: secondary_mmu_ttbr is set after VMM init (used by secondary CPUs).
+ */
+static void test_secondary_mmu_ttbr_set(void)
+{
+#if !defined(SPINLOCK_SKIP_LOCKING)
+    extern volatile uint64_t secondary_mmu_ttbr;
+    extern volatile uint64_t secondary_mmu_mair;
+    extern volatile uint64_t secondary_mmu_tcr;
+
+    /* These should be non-zero after vmm_init */
+    TEST_ASSERT_TRUE(secondary_mmu_ttbr != 0);
+    TEST_ASSERT_TRUE(secondary_mmu_mair != 0);
+    TEST_ASSERT_TRUE(secondary_mmu_tcr != 0);
+#else
+    TEST_IGNORE_MESSAGE("SPINLOCK_SKIP_LOCKING: secondary MMU vars not defined");
+#endif
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1729,6 +1784,10 @@ int test_suite_scheduler(void)
     RUN_TEST(test_spinlock_hw_acquire_release);
     RUN_TEST(test_spinlock_hw_trylock_contention);
     RUN_TEST(test_spinlock_hw_irqsafe);
+
+    /* SMP: MPIDR encoding and secondary MMU */
+    RUN_TEST(test_cpu_logical_map_encoding);
+    RUN_TEST(test_secondary_mmu_ttbr_set);
 
     return UnityEnd();
 }

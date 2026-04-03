@@ -5,7 +5,7 @@
 
 ## Summary
 
-SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (single-core), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting.
+SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (multi-core boot via PSCI — 4 cores reach C code, cache coherency pending), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting.
 
 **Preemptive scheduling is active** — timer interrupts drive context switching at 100 Hz. The shell accepts input and responds to commands with preemption enabled. Two RP1-specific GPIO pad configurations were required for UART RX (OD=1, FUNCSEL sequencing). The armstub is currently disabled (separate issue; see Known Limitations).
 
@@ -66,7 +66,7 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 2. **~~Spinlocks:~~** **RESOLVED** — Hardware spinlocks work after MMU enable. Before MMU, a runtime flag (`spinlock_hw_enabled`) gates barrier-only fallback. The exclusive monitor requires cacheable memory, which is available only after VMM initialization.
 
-3. **Single-core:** Pi 5 firmware does not implement PSCI CPU_ON, so secondary cores cannot be booted. Spinlocks now work (resolved), but multi-core is blocked by the PSCI limitation.
+3. **~~Single-core:~~** PSCI CPU_ON via SMC confirmed working — all 4 cores boot, transition EL2→EL1, enable MMU, and run C code. Cache coherency for regular memory writes between cores is still not working (exclusive monitor operations like spinlocks work correctly). Full SMP pending resolution of cache coherency.
 
 4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 

@@ -571,6 +571,22 @@ The following tests pass in the automated test suite (`make test`):
 | `kernel/sched/task.c` | Added locking for concurrent task creation |
 | `kernel/mm/pmm.c` | Added spinlock protection for multi-core allocation |
 
+### Pi 5 Platform Notes
+
+**MPIDR Encoding:** The BCM2712 Cortex-A76 cores use Affinity Level 1 (Aff1) for the CPU ID, not Aff0 like QEMU virt. The MPIDR values are:
+- CPU 0: `0x000` (Aff1=0)
+- CPU 1: `0x100` (Aff1=1)
+- CPU 2: `0x200` (Aff1=2)
+- CPU 3: `0x300` (Aff1=3)
+
+`boot.S` extracts Aff1 with `lsr x1, x1, #8` for Pi 5 vs masking Aff0 for QEMU.
+
+**PSCI Conduit:** Pi 5 uses SMC (Secure Monitor Call) via ARM Trusted Firmware-A (TF-A) at EL3. QEMU virt uses HVC. The `psci_call()` function selects the conduit at compile time.
+
+**Secondary CPU Boot:** TF-A drops secondary cores at EL2 via PSCI CPU_ON. `smp_boot.S` performs the EL2→EL1 transition and enables the MMU using page tables saved by the primary CPU in `secondary_mmu_ttbr/mair/tcr`.
+
+**Known Issue:** Cache coherency for regular cached writes between cores does not work — secondary CPU writes are not visible to the primary. Exclusive monitor operations (spinlocks via ldaxr/stxr) work correctly between all 4 cores.
+
 ---
 
 ## Resources
@@ -584,5 +600,5 @@ The following tests pass in the automated test suite (`make test`):
 ---
 
 *Created: December 2025*
-*Updated: December 2025*
+*Updated: April 2026*
 *Status: Implementation complete, all tests passing*

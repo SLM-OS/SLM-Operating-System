@@ -427,7 +427,7 @@ See `docs/ffi.md` for complete FFI documentation.
 - Model loading and inference (Phase 5)
 - User/kernel separation (FUTURE.md)
 - eMMC/SD card drivers (Phase 5)
-- Pi 5 multi-core support (blocked: firmware lacks PSCI CPU_ON for secondary core boot)
+- Pi 5 multi-core (secondary CPUs boot via PSCI SMC, cache coherency for regular writes pending)
 - Pi 5 armstub reliability (EL3→EL2 ERET intermittent failure, currently disabled)
 
 ---
