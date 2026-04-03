@@ -2,11 +2,12 @@
 
 This document tracks Phase 4 implementation of SLM-OS.
 
-**Status:** In Progress
+**Status:** In Progress (Pi 5 bring-up complete, Jetson blocked)
 
-**Summary:** Phase 4 combines hardware bring-up work deferred from Phase 3 (blocked on serial adapter) with the Component System milestone from the original roadmap.
+**Summary:** Phase 4 combines hardware bring-up work with the Component System milestone. Pi 5 is now the primary hardware platform with 4-core SMP, preemptive scheduling, and an interactive shell. Jetson remains blocked by the CBB firewall.
 
 **Goals:**
+- ✅ Raspberry Pi 5 hardware bring-up (complete — 4-core SMP)
 - Complete Jetson Orin Nano hardware bring-up
 - Jetson GPU driver implementation
 - Component hot-swap mechanism
@@ -30,6 +31,47 @@ This document tracks Phase 4 implementation of SLM-OS.
 | ✅ | Complete |
 | ⏸️ | Deferred to later phase |
 | 🔗 | Has dependency on another milestone (shown as ⏸️🔗 or ☐🔗) |
+
+---
+
+## Raspberry Pi 5 Bring-Up (Complete)
+
+**Status:** ✅ Complete — 4-core SMP, preemptive scheduling, interactive shell
+
+See `docs/pi5-baremetal-status.md` for full details.
+
+### Hardware & Boot
+- ✅ EL2→EL1 transition for peripheral access
+- ✅ RP1 UART TX/RX (PL011 via PCIe, 115200 baud)
+- ✅ GPIO pad config: OD=1 + FUNCSEL 5→4 sequencing for RX
+- ✅ ACT LED control (GPIO2 bit 9)
+- ✅ DTB parsing (found via RAM scan at 0x2efec700)
+- ✅ 100% boot reliability (armstub disabled)
+- ✅ Automated deploy via SDWireC + labctl
+
+### Memory & MMU
+- ✅ PMM buddy allocator (4 GB RAM)
+- ✅ VMM with platform-specific 1GB L1 block descriptors
+- ✅ MMU enable with cacheable + Inner Shareable mappings
+
+### Interrupts & Timer
+- ✅ GIC-400 (GICv2) initialized from EL2
+- ✅ Physical timer (CNTP, IRQ 30, 54 MHz) at 100 Hz
+- ✅ Preemptive scheduling (DAIF=0x080 fix for task context switch)
+
+### Multi-Core SMP
+- ✅ PSCI CPU_ON via SMC (TF-A at EL3)
+- ✅ MPIDR Aff1 encoding (0x000, 0x100, 0x200, 0x300)
+- ✅ Secondary CPU EL2→EL1 transition + MMU enable
+- ✅ 4 cores online (DC CVAC/CIVAC cache coherency workaround)
+- ✅ Hardware spinlocks (runtime-enabled after MMU, `spinlock_hw_enabled`)
+
+### Remaining Pi 5 Work
+- ☐ Run QEMU test suite on Pi 5 hardware
+- ☐ Timer-driven sleep/delay functions
+- ☐ Interrupt-driven UART (PL011 via RP1 MSI→GIC SPI)
+- ☐ Fix task_exit/schedule race on secondary CPUs
+- ☐ Investigate SMPEN for proper cache coherency (vs DC CVAC/CIVAC workaround)
 
 ---
 
