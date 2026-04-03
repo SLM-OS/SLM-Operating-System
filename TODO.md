@@ -72,6 +72,7 @@ See `docs/pi5-baremetal-status.md` for full details.
 - ☐ Interrupt-driven UART (PL011 via RP1 MSI→GIC SPI)
 - ☐ Fix task_exit/schedule race on secondary CPUs
 - ☐ Investigate SMPEN for proper cache coherency (vs DC CVAC/CIVAC workaround)
+- ☐ Re-enable cross-CPU task dispatch (currently pinned to CPU 0 due to SMPEN/cache coherency)
 
 ---
 

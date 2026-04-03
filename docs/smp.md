@@ -595,6 +595,10 @@ The workaround uses explicit ARM64 cache maintenance instructions:
 
 These operations are applied to shared data structures (e.g., `cpus_online`, `cpu_data[]`) after writes and before reads on the cross-core boundary. This adds overhead compared to hardware coherency but is correct and sufficient for the current SMP workload.
 
+The raw DC CVAC/CIVAC instructions have been refactored into portable helpers in `kernel/include/cache.h`: `cache_clean()`, `cache_invalidate()`, `cache_clean_range()`, and `cache_invalidate_range()`. These are active cache maintenance operations on Pi 5 (`PLATFORM_RASPI5`) and no-ops (memory barriers only) on QEMU and other platforms with working hardware coherency.
+
+**CPU 0 Task Pinning:** Due to the cache coherency limitation, tasks without explicit CPU affinity are currently pinned to CPU 0. Secondary CPUs run idle and timer tasks but do not receive dispatched work. Cross-CPU task dispatch remains disabled until the SMPEN issue is resolved or an alternative coherency strategy is validated.
+
 ---
 
 ## Resources
