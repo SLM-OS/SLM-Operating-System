@@ -722,23 +722,12 @@ void scheduler_start(void)
     /* Start timer and enable interrupts now that a task is active.
      * Must be done AFTER task_set_current() so that timer IRQ handler
      * can safely call task_current() in schedule(). */
-    /*
-     * Pi 5: Timer interrupts break RP1 UART. Even a single interrupt per
-     * second breaks RX (though TX survives at 1 Hz). At 100 Hz, both
-     * TX and RX break. Physical timer (IRQ 30) and virtual timer (IRQ 27)
-     * both exhibit the same behavior. Root cause is in the ISR/GIC
-     * interaction with the RP1 PCIe bus. Run cooperatively until resolved.
-     */
-#if defined(PLATFORM_RASPI5)
-    INFO("Timer/IRQ disabled (Pi 5 UART workaround)");
-#else
     INFO("Starting timer (100 Hz)...");
     timer_start();
 
     INFO("Enabling interrupts...");
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");  /* Clear IRQ mask */
     __asm__ volatile("isb" ::: "memory");  /* Ensure unmask takes effect */
-#endif
 
     /* Switch to first task (NULL = no previous context to save) */
     switch_to(NULL, first);

@@ -70,19 +70,112 @@ static void test_daif_saved_in_context(void)
 }
 
 /*
- * Test: New task's DAIF context is zero-initialized (interrupts unmasked).
+ * Test: New task's DAIF starts with IRQ masked (0x080).
+ * This prevents timer interrupts from firing during the fragile first
+ * context switch into the task. IRQs are unmasked when the task calls
+ * spin_unlock_irqrestore or explicitly clears the I bit.
  */
-static void test_new_task_daif_zeroed(void)
+static void test_new_task_daif_irq_masked(void)
 {
-    struct task *t = task_create_with_priority("daif_zero", nop_entry, NULL,
+    struct task *t = task_create_with_priority("daif_init", nop_entry, NULL,
                                                TASK_PRIORITY_NORMAL);
     TEST_ASSERT_NOT_NULL(t);
 
-    /* BSS-initialized task should have DAIF = 0 (interrupts enabled) */
-    TEST_ASSERT_EQUAL_HEX64(0, t->context.daif);
+    /* New tasks should have IRQ masked to survive first context switch */
+    TEST_ASSERT_EQUAL_HEX64(0x080, t->context.daif);
 
     t->state = TASK_TERMINATED;
     task_destroy(t);
+}
+
+/*
+ * Regression test: No task is ever created with DAIF=0.
+ * DAIF=0 means all exceptions unmasked, which caused the original bug where
+ * timer interrupts fired during the first context switch into a new task,
+ * corrupting the context switch. Tasks at all priority levels must have
+ * DAIF=0x080 (IRQ masked) on creation.
+ */
+static void test_daif_not_zero_on_create(void)
+{
+    struct task *low = task_create_with_priority("daif_low", nop_entry, NULL,
+                                                  TASK_PRIORITY_LOW);
+    struct task *normal = task_create_with_priority("daif_norm", nop_entry, NULL,
+                                                     TASK_PRIORITY_NORMAL);
+    struct task *high = task_create_with_priority("daif_high", nop_entry, NULL,
+                                                   TASK_PRIORITY_HIGH);
+    struct task *critical = task_create_with_priority("daif_crit", nop_entry, NULL,
+                                                       TASK_PRIORITY_CRITICAL);
+
+    TEST_ASSERT_NOT_NULL(low);
+    TEST_ASSERT_NOT_NULL(normal);
+    TEST_ASSERT_NOT_NULL(high);
+    TEST_ASSERT_NOT_NULL(critical);
+
+    /* No task should ever have DAIF=0 (all exceptions unmasked) */
+    TEST_ASSERT_TRUE(low->context.daif != 0);
+    TEST_ASSERT_TRUE(normal->context.daif != 0);
+    TEST_ASSERT_TRUE(high->context.daif != 0);
+    TEST_ASSERT_TRUE(critical->context.daif != 0);
+
+    /* All should specifically be 0x080 (IRQ masked) */
+    TEST_ASSERT_EQUAL_HEX64(0x080, low->context.daif);
+    TEST_ASSERT_EQUAL_HEX64(0x080, normal->context.daif);
+    TEST_ASSERT_EQUAL_HEX64(0x080, high->context.daif);
+    TEST_ASSERT_EQUAL_HEX64(0x080, critical->context.daif);
+
+    low->state = TASK_TERMINATED;
+    task_destroy(low);
+    normal->state = TASK_TERMINATED;
+    task_destroy(normal);
+    high->state = TASK_TERMINATED;
+    task_destroy(high);
+    critical->state = TASK_TERMINATED;
+    task_destroy(critical);
+}
+
+/*
+ * Regression test: Multiple tasks all have IRQ masked in initial context.
+ * This catches regressions where someone might memset the context to zero
+ * without re-applying the DAIF=0x080 initialization afterward.
+ */
+static void test_task_create_multiple_all_irq_masked(void)
+{
+    #define MULTI_DAIF_COUNT 6
+    struct task *tasks[MULTI_DAIF_COUNT];
+
+    /* Create tasks in a batch */
+    for (int i = 0; i < MULTI_DAIF_COUNT; i++) {
+        tasks[i] = task_create_with_priority("daif_multi", nop_entry, NULL,
+                                              TASK_PRIORITY_NORMAL);
+        TEST_ASSERT_NOT_NULL(tasks[i]);
+    }
+
+    /* Verify every single task has IRQ masked */
+    for (int i = 0; i < MULTI_DAIF_COUNT; i++) {
+        TEST_ASSERT_EQUAL_HEX64(0x080, tasks[i]->context.daif);
+    }
+
+    /* Clean up */
+    for (int i = 0; i < MULTI_DAIF_COUNT; i++) {
+        tasks[i]->state = TASK_TERMINATED;
+        task_destroy(tasks[i]);
+    }
+    #undef MULTI_DAIF_COUNT
+}
+
+/*
+ * Regression test: Idle task (ID 1) also has DAIF=0x080.
+ * The idle task is created by scheduler_init(), not task_create_with_priority(),
+ * so it follows a different code path. This verifies that path also sets
+ * DAIF correctly to prevent timer ISR corruption during context switch.
+ */
+static void test_idle_task_daif(void)
+{
+    struct task *idle = task_get(1);
+    TEST_ASSERT_NOT_NULL(idle);
+
+    /* Idle task should also have IRQ masked in its saved context */
+    TEST_ASSERT_EQUAL_HEX64(0x080, idle->context.daif);
 }
 
 /* ============================================================================
@@ -1481,7 +1574,10 @@ int test_suite_scheduler(void)
 
     /* Regression tests: DAIF context preservation */
     RUN_TEST(test_daif_saved_in_context);
-    RUN_TEST(test_new_task_daif_zeroed);
+    RUN_TEST(test_new_task_daif_irq_masked);
+    RUN_TEST(test_daif_not_zero_on_create);
+    RUN_TEST(test_task_create_multiple_all_irq_masked);
+    RUN_TEST(test_idle_task_daif);
 
     /* Unit tests: Deadline boost logic */
     RUN_TEST(test_no_deadline_no_boost);

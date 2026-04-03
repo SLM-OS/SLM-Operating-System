@@ -214,6 +214,16 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->context.sp = (uint64_t)task->stack_top;
     task->context.x30 = (uint64_t)task_entry_wrapper;  /* Return address */
     task->context.x29 = 0;                              /* Frame pointer */
+    task->context.daif = 0x080;  /* IRQ masked (DAIF I-bit set). Critical for
+                                  * correctness: context.S restores DAIF early
+                                  * in the switch sequence, before GP registers
+                                  * and SP are fully loaded. With DAIF=0, the
+                                  * timer ISR fires mid-restore and corrupts the
+                                  * partially restored context. Setting 0x080
+                                  * keeps IRQs masked until the task is fully
+                                  * running; task code unmasks naturally via
+                                  * spin_unlock_irqrestore or explicit DAIF
+                                  * clear. */
 
     /* Store entry point and arg in callee-saved registers for wrapper */
     task->context.x19 = (uint64_t)entry;

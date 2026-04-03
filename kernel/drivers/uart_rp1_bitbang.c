@@ -15,10 +15,12 @@
  *      switch from reset default (31/NULL) to UART doesn't reliably
  *      enable the PL011 RX input path.
  *
- * Known limitation: Timer interrupts break PL011 RX on the RP1.
- * The shell currently runs without preemptive scheduling (no timer).
- * The root cause appears to be an interaction between the GIC interrupt
- * handling path and the RP1 PCIe bus. Investigation ongoing.
+ * Timer interrupts work correctly with preemptive scheduling active.
+ * An earlier issue where timer IRQs appeared to break PL011 RX was
+ * traced to a DAIF initialization bug in task creation — new tasks
+ * started with DAIF=0 (IRQs unmasked), allowing the timer ISR to
+ * fire during context restore in context.S. Fix: DAIF=0x080 (IRQ
+ * masked) on new tasks. See docs/pi5-baremetal-status.md for details.
  */
 
 #include "platform.h"
@@ -210,7 +212,7 @@ char uart_getc(void)
 
     /* Wait until RX FIFO has data */
     while (*uart_fr & FR_RXFE) {
-        __asm__ volatile("" ::: "memory");
+        yield();
     }
 
     /* Read character (lower 8 bits of DR) */

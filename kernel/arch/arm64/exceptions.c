@@ -221,6 +221,7 @@ void el1_sync_handler(struct trap_frame *tf)
  */
 void el1_irq_handler(void)
 {
+
     /* Acknowledge interrupt */
     uint32_t irq = gic_acknowledge();
 

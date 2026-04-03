@@ -1,13 +1,13 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
 **Date:** April 2, 2026
-**Status:** INTERACTIVE SHELL — Full boot, shell accepts input. Timer/preemption disabled (workaround).
+**Status:** PREEMPTIVE SCHEDULING — Full boot, interactive shell, timer-driven preemption active.
 
 ## Summary
 
 SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (single-core), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting.
 
-**UART RX is working** — the shell accepts input and responds to commands. Two RP1-specific GPIO pad configurations were required (OD=1, FUNCSEL sequencing). Timer interrupts and the armstub are currently disabled; preemptive scheduling is not active. See "Current Blocker" section below.
+**Preemptive scheduling is active** — timer interrupts drive context switching at 100 Hz. The shell accepts input and responds to commands with preemption enabled. Two RP1-specific GPIO pad configurations were required for UART RX (OD=1, FUNCSEL sequencing). The armstub is currently disabled (separate issue; see Known Limitations).
 
 **Key achievements:**
 1. EL2→EL1 transition for peripheral access
@@ -39,9 +39,9 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | GIC init | ✅ Working | GICv2 at 0x107FFF9000 |
 | Timer init | ✅ Working | 54 MHz, 100 Hz tick |
 | SDWireC deploy | ✅ Working | Automated flash/boot via sdwire CLI + labctl |
-| Preemptive scheduler | ⚠️ Disabled | Timer IRQs break RP1 UART RX — see blocker |
+| Preemptive scheduler | ✅ Working | 100 Hz timer, DAIF-based context switch |
 | Shell prompt | ✅ Working | `slmos>` appears after full boot |
-| UART RX (input) | ✅ Working | PL011 RX works when timer IRQs are disabled |
+| UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
 
 ## Configuration
 
@@ -70,9 +70,9 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 
-5. **Timer interrupts break UART RX:** PL011 RX works correctly without timer interrupts but fails when the timer fires. Timer/preemption disabled as workaround. See "Current Blocker" section.
+5. **~~Timer interrupts break UART RX~~** **RESOLVED** — Root cause was DAIF initialization in new tasks. See "Resolved Blocker" section for full details.
 
-6. **~~Doubled early boot output / boot garbling:~~** **RESOLVED** — The armstub8-2712.bin caused ~60% of boots to produce garbled output or hang. Removing the armstub (renaming to `.disabled`) gives 100% reliable boot. The armstub's EL3→EL2 ERET intermittently left the system in a bad state affecting RP1 PCIe UART access. Since the armstub is only needed for GIC Group 1 configuration (which requires timer interrupts, currently disabled), it is not needed.
+6. **~~Doubled early boot output / boot garbling:~~** **RESOLVED** — The armstub8-2712.bin caused ~60% of boots to produce garbled output or hang. Removing the armstub (renaming to `.disabled`) gives 100% reliable boot. The armstub's EL3→EL2 ERET intermittently left the system in a bad state affecting RP1 PCIe UART access. The armstub remains disabled as a separate issue from the timer/preemption fix — GIC Group 1 configuration is handled by boot.S from EL2 instead.
 
 7. **DTB not preserved:** The armstub's `eret` to EL2 does not preserve the DTB pointer in x0. A scan for FDT magic in upper RAM was added but the garbled early output prevents confirmation. Kernel falls back to platform defaults.
 
@@ -87,13 +87,30 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 The GPIO header UART uses the RP1 southbridge chip connected via PCIe. With proper config.txt settings, the firmware leaves this accessible for bare-metal code.
 
-## Current Blocker: Timer Interrupts Break PL011 RX
+## Resolved Blocker: Timer Interrupts Breaking PL011 RX
 
-**Symptom:** PL011 UART RX works correctly when timer interrupts are disabled, but stops receiving external data as soon as the timer starts firing (100 Hz). TX is unaffected.
+**Status: RESOLVED** (April 2, 2026)
 
-**Current workaround:** Timer and IRQs are disabled on Pi 5 (`scheduler_start()` skips `timer_start()` and IRQ unmasking). The shell runs cooperatively with busy-wait polling. Preemptive scheduling is not active.
+### Root Cause
 
-**What was ruled out:**
+New tasks were initialized with `DAIF=0` (all exceptions unmasked). During the first context switch into a task, the DAIF restore in `context.S` runs early in the restore sequence — before general-purpose registers, stack pointer, and FPU state are fully loaded. With `DAIF=0`, this immediately unmasked IRQs, allowing the timer ISR to fire mid-register-restore. The timer ISR corrupted the partially restored context, which manifested as UART RX failure (the symptom that led to weeks of investigation).
+
+### Fix
+
+Initialize the `daif` field in new task contexts to `0x080` (IRQ masked) in `task_create_with_priority()`. This ensures the first context switch completes all register restores before any interrupt can fire. Task code naturally unmasks IRQs via `spin_unlock_irqrestore()` or explicit DAIF clear once fully running.
+
+### Why the Symptom Was Misleading
+
+The corruption appeared as "timer interrupts break UART RX" because:
+- RX polling in `uart_getc()` reads from RP1 via PCIe — a path sensitive to register/stack corruption
+- TX was unaffected because `uart_putc()` is simpler and less sensitive to context state
+- The bug only triggered on the *first* switch into a new task (subsequent switches saved/restored DAIF correctly from the running task's actual state)
+- Disabling the timer masked the symptom by preventing the ISR from firing during the vulnerable window
+
+### Investigation History (Preserved for Reference)
+
+The following were ruled out during investigation before the true root cause was found:
+
 - Baud rate: confirmed 50 MHz clock is correct (48 MHz produces garbled output)
 - GPIO15 configuration: FUNCSEL=4, IE=1, OD=1, PUE=1 — all correct
 - RP1 signal path: STATUS register confirms INFROMPAD→INFILTERED→INTOPERI all connected
@@ -104,13 +121,7 @@ The GPIO header UART uses the RP1 southbridge chip connected via PCIe. With prop
 - Context switching: RX fails even with `schedule()` removed from `scheduler_tick()`
 - `yield()`: RX fails even with busy-wait (no yield/schedule calls)
 
-**Root cause (narrowed):** The timer interrupt handler itself — the act of taking an IRQ exception, acknowledging the GIC, and returning — disrupts PL011 RX on the RP1. This appears to be an interaction between the GIC interrupt handling path (BCM2712 internal bus at 0x107FFF9000) and the RP1 PL011 (PCIe bus at 0x1F00030000). The exact mechanism is unknown.
-
-**Investigation ideas for next session:**
-1. Check if the timer IRQ acknowledge (GIC IAR read) or completion (GIC EOIR write) has a side effect on PCIe transactions
-2. Try using a different timer source (e.g., RP1's own timer instead of ARM generic timer)
-3. Try PL011 interrupt-driven RX instead of polling — the PL011 RX interrupt might work even if polling doesn't
-4. Check if the RP1 PL011's IMSC (interrupt mask) register needs RX interrupts enabled for the FIFO to operate correctly when other interrupts are active
+These tests were not wasted — they systematically eliminated hardware, bus, and driver-level causes and narrowed the search to the context switch path itself.
 
 ## UART RX Fix Details (April 2026)
 
