@@ -1,0 +1,395 @@
+/*
+ * shell_sys.c - System and debug commands for SLM-OS shell
+ *
+ * Commands: help, mem, tasks, cpu, uptime, clear, reboot, vmm, ipc, model, dtb
+ */
+
+#include "shell.h"
+#include "shell_internal.h"
+#include "uart.h"
+#include "task.h"
+#include "sched.h"
+#include "pmm.h"
+#include "vmm.h"
+#include "smp.h"
+#include "ipc.h"
+#include "slm_ffi.h"
+#include "platform.h"
+#include "dtb.h"
+#include "help.h"
+#include "string.h"
+#include <stdint.h>
+
+/* Command table access (defined in shell.c) */
+extern const shell_cmd_t builtin_commands[];
+extern const int NUM_BUILTIN_COMMANDS;
+extern shell_cmd_t external_commands[];
+extern int num_external_commands;
+
+/*
+ * help - List available commands or show detailed help
+ *
+ * Usage:
+ *   help          - List all commands with brief descriptions
+ *   help <cmd>    - Show detailed help for a specific command
+ */
+int cmd_help(int argc, char *argv[])
+{
+    /* If a command name is given, show detailed help from file */
+    if (argc >= 2) {
+        return help_show(argv[1]);
+    }
+
+    /* Otherwise, list all commands with brief descriptions */
+    uart_puts("Available commands:\r\n");
+    uart_puts("\r\n");
+
+    /* Built-in commands */
+    for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
+        uart_printf("  %-10s %s\r\n",
+                    builtin_commands[i].name,
+                    builtin_commands[i].help);
+    }
+
+    /* External commands */
+    for (int i = 0; i < num_external_commands; i++) {
+        uart_printf("  %-10s %s\r\n",
+                    external_commands[i].name,
+                    external_commands[i].help);
+    }
+
+    uart_puts("\r\n");
+    uart_puts("Use 'help <cmd>' for detailed help on a command.\r\n");
+    return 0;
+}
+
+/*
+ * mem - Show memory statistics
+ */
+int cmd_mem(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    size_t total_pages = pmm_get_total_pages();
+    size_t free_pages = pmm_get_free_pages();
+    size_t used_pages = total_pages - free_pages;
+
+    size_t page_size = 4096;
+    size_t total_kb = (total_pages * page_size) / 1024;
+    size_t free_kb = (free_pages * page_size) / 1024;
+    size_t used_kb = (used_pages * page_size) / 1024;
+
+    uart_puts("Memory Statistics:\r\n");
+    uart_puts("\r\n");
+    uart_printf("  Total:     %lu KB (%lu pages)\r\n", total_kb, total_pages);
+    uart_printf("  Used:      %lu KB (%lu pages)\r\n", used_kb, used_pages);
+    uart_printf("  Free:      %lu KB (%lu pages)\r\n", free_kb, free_pages);
+    uart_puts("\r\n");
+
+    return 0;
+}
+
+/*
+ * State name lookup
+ */
+static const char *state_name(task_state_t state)
+{
+    switch (state) {
+        case TASK_READY:      return "READY";
+        case TASK_RUNNING:    return "RUNNING";
+        case TASK_BLOCKED:    return "BLOCKED";
+        case TASK_TERMINATED: return "TERMINATED";
+        default:              return "UNKNOWN";
+    }
+}
+
+/*
+ * tasks - List all tasks
+ */
+int cmd_tasks(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    uart_puts("Task List:\r\n");
+    uart_puts("\r\n");
+    uart_puts("  ID  Name             State       Pri  CPU  Switches\r\n");
+    uart_puts("  --  ---------------  ----------  ---  ---  --------\r\n");
+
+    /* Iterate through possible task IDs */
+    for (uint32_t id = 0; id < MAX_TASKS; id++) {
+        struct task *t = task_get(id);
+        if (t != NULL) {
+            uart_printf("  %2lu  %-15s  %-10s  %3u  %3lu  %lu\r\n",
+                        t->id,
+                        t->name,
+                        state_name(t->state),
+                        t->effective_priority,
+                        t->assigned_cpu,
+                        t->switches);
+        }
+    }
+
+    uart_puts("\r\n");
+    return 0;
+}
+
+/*
+ * cpu - Show CPU status
+ */
+int cmd_cpu(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    uart_puts("CPU Status:\r\n");
+    uart_puts("\r\n");
+    uart_printf("  Platform:    %s\r\n", PLATFORM_NAME);
+    uart_printf("  CPUs:        %lu online / %lu total\r\n", cpus_online, cpu_count);
+    uart_puts("\r\n");
+
+    uart_puts("  CPU  Status   Isolated  Current Task\r\n");
+    uart_puts("  ---  ------   --------  ------------\r\n");
+
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        bool online = (i < cpus_online);
+        bool isolated = sched_is_core_isolated(i);
+        struct task *current = NULL;
+
+        /* Get current task for this CPU (if we can) */
+        /* Note: This is a snapshot and may be racy */
+        if (online && i == cpu_id()) {
+            current = task_current();
+        }
+
+        uart_printf("  %3lu  %-6s   %-8s  %s\r\n",
+                    i,
+                    online ? "online" : "offline",
+                    isolated ? "yes" : "no",
+                    current ? current->name : "-");
+    }
+
+    uart_puts("\r\n");
+    return 0;
+}
+
+/*
+ * uptime - Show system uptime
+ */
+int cmd_uptime(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    /* Get time from ARM generic timer */
+    extern uint64_t timer_get_count(void);
+    extern uint64_t timer_get_frequency(void);
+
+    uint64_t count = timer_get_count();
+    uint64_t freq = timer_get_frequency();
+
+    if (freq == 0) freq = 1;  /* Avoid divide by zero */
+
+    uint64_t total_seconds = count / freq;
+    uint64_t hours = total_seconds / 3600;
+    uint64_t minutes = (total_seconds % 3600) / 60;
+    uint64_t seconds = total_seconds % 60;
+
+    uart_printf("Uptime: %lu:%02lu:%02lu\r\n", hours, minutes, seconds);
+
+    return 0;
+}
+
+/*
+ * clear - Clear screen using ANSI escape codes
+ */
+int cmd_clear(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    /* ANSI escape: clear screen and move cursor to home */
+    uart_puts("\033[2J\033[H");
+
+    return 0;
+}
+
+/*
+ * reboot - Restart the system
+ */
+int cmd_reboot(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    uart_puts("Rebooting...\r\n");
+
+    /* Use PSCI SYSTEM_RESET */
+    register uint64_t x0 __asm__("x0") = 0x84000009;  /* SYSTEM_RESET */
+    __asm__ volatile(
+        "hvc #0"
+        : "+r"(x0)
+        :
+        : "x1", "x2", "x3", "memory"
+    );
+
+    /* If PSCI fails, spin */
+    uart_puts("Reboot failed!\r\n");
+    while (1) {
+        __asm__ volatile("wfi");
+    }
+
+    return 0;
+}
+
+/*
+ * vmm - Show virtual memory statistics
+ */
+int cmd_vmm(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    struct vmm_stats stats;
+    vmm_get_stats(&stats);
+
+    uart_puts("Virtual Memory Statistics:\r\n");
+    uart_puts("\r\n");
+    uart_printf("  L1 tables:       %lu\r\n", (unsigned long)stats.l1_tables);
+    uart_printf("  L2 tables:       %lu\r\n", (unsigned long)stats.l2_tables);
+    uart_printf("  Blocks mapped:   %lu (2MB each)\r\n", (unsigned long)stats.blocks_mapped);
+    uart_printf("  Bytes mapped:    %lu MB\r\n", (unsigned long)(stats.bytes_mapped / (1024 * 1024)));
+    uart_puts("\r\n");
+
+    uart_puts("Memory Regions:\r\n");
+    uart_puts("  Region           Start            End              Flags\r\n");
+    uart_puts("  ---------------  ---------------  ---------------  -----\r\n");
+
+    /* Kernel code/data region */
+    uart_printf("  Kernel           0x%08lx       0x%08lx       RWX\r\n",
+                (unsigned long)0x40000000, (unsigned long)0x40200000);
+
+    /* Device MMIO region */
+    uart_printf("  MMIO (Devices)   0x%08lx       0x%08lx       RW-\r\n",
+                (unsigned long)0x08000000, (unsigned long)0x10000000);
+
+    uart_puts("\r\n");
+    return 0;
+}
+
+/*
+ * ipc - Show IPC statistics
+ */
+int cmd_ipc(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    struct ipc_stats stats;
+    ipc_get_stats(&stats);
+
+    uart_puts("IPC Statistics:\r\n");
+    uart_puts("\r\n");
+
+    uart_puts("  Message Queues:\r\n");
+    uart_printf("    Active queues:     %lu\r\n", (unsigned long)stats.queue_count);
+    uart_printf("    Total msgs sent:   %lu\r\n", (unsigned long)stats.total_msgs_sent);
+    uart_printf("    Total msgs recv:   %lu\r\n", (unsigned long)stats.total_msgs_recv);
+    uart_puts("\r\n");
+
+    uart_puts("  Shared Buffers:\r\n");
+    uart_printf("    Active buffers:    %lu\r\n", (unsigned long)stats.buffer_count);
+    uart_puts("\r\n");
+
+    return 0;
+}
+
+/*
+ * model - Show model memory pool statistics
+ */
+int cmd_model(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    const size_t block_size_kb = 2048;
+    RustPoolStats weight_stats = rust_weight_pool_stats();
+    RustPoolStats workspace_stats = rust_workspace_pool_stats();
+
+
+    uart_puts("Model Memory Pools:\r\n");
+    uart_puts("\r\n");
+
+    uart_puts("  Weight Pool (read-only model parameters):\r\n");
+    uart_printf("    Block size:      %lu KB\r\n", (unsigned long)block_size_kb);
+    uart_printf("    Total blocks:    %lu\r\n", (unsigned long)weight_stats.total_blocks);
+    uart_printf("    Free blocks:     %lu\r\n", (unsigned long)weight_stats.free_blocks);
+    uart_printf("    Allocated:       %lu\r\n", (unsigned long)weight_stats.allocated_blocks);
+    uart_printf("    Shared:          %lu\r\n", (unsigned long)weight_stats.shared_blocks);
+    uart_printf("    Peak usage:      %lu\r\n", (unsigned long)weight_stats.peak_usage);
+    uart_puts("\r\n");
+
+    uart_puts("  Workspace Pool (inference scratch space):\r\n");
+    uart_printf("    Block size:      %lu KB\r\n", (unsigned long)block_size_kb);
+    uart_printf("    Total blocks:    %lu\r\n", (unsigned long)workspace_stats.total_blocks);
+    uart_printf("    Free blocks:     %lu\r\n", (unsigned long)workspace_stats.free_blocks);
+    uart_printf("    Allocated:       %lu\r\n", (unsigned long)workspace_stats.allocated_blocks);
+    uart_printf("    Shared:          %lu\r\n", (unsigned long)workspace_stats.shared_blocks);
+    uart_printf("    Peak usage:      %lu\r\n", (unsigned long)workspace_stats.peak_usage);
+    uart_puts("\r\n");
+
+    /* Calculate totals */
+    size_t total_blocks = weight_stats.total_blocks + workspace_stats.total_blocks;
+    size_t total_mb = total_blocks * block_size_kb / 1024;
+    size_t free_blocks = weight_stats.free_blocks + workspace_stats.free_blocks;
+    size_t free_mb = free_blocks * block_size_kb / 1024;
+
+    uart_printf("  Total: %lu blocks (%lu MB), %lu free (%lu MB)\r\n",
+                (unsigned long)total_blocks, (unsigned long)total_mb,
+                (unsigned long)free_blocks, (unsigned long)free_mb);
+    uart_puts("\r\n");
+
+    return 0;
+}
+
+/*
+ * dtb - Show device tree information
+ */
+int cmd_dtb(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    const fdt_info_t *info = dtb_get_info();
+
+    uart_puts("Device Tree Information:\r\n");
+    uart_puts("\r\n");
+    uart_printf("  Status:       %s\r\n", info->valid ? "parsed from DTB" : "using defaults");
+    uart_puts("\r\n");
+
+    uart_puts("  Memory:\r\n");
+    uart_printf("    Base:       0x%lx\r\n", (unsigned long)info->ram_base);
+    uart_printf("    Size:       %lu MB\r\n", (unsigned long)(info->ram_size / (1024 * 1024)));
+    uart_puts("\r\n");
+
+    uart_puts("  UART:\r\n");
+    uart_printf("    Base:       0x%lx\r\n", (unsigned long)info->uart_base);
+    uart_printf("    IRQ:        %lu\r\n", (unsigned long)info->uart_irq);
+    uart_puts("\r\n");
+
+    uart_puts("  GIC:\r\n");
+    uart_printf("    Dist base:  0x%lx\r\n", (unsigned long)info->gic_dist_base);
+    uart_printf("    CPU base:   0x%lx\r\n", (unsigned long)info->gic_cpu_base);
+    uart_puts("\r\n");
+
+    uart_puts("  CPUs:\r\n");
+    uart_printf("    Count:      %lu\r\n", (unsigned long)info->cpu_count);
+    uart_puts("\r\n");
+
+    uart_puts("  Timer:\r\n");
+    uart_printf("    IRQ:        %lu\r\n", (unsigned long)info->timer_irq);
+    uart_puts("\r\n");
+
+    return 0;
+}

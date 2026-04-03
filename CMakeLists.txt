@@ -138,8 +138,12 @@ set(KERNEL_SOURCES
     kernel/src/kprintf.c
     kernel/src/string.c
 
-    # Shell and utilities
+    # Shell (core + command modules)
     kernel/src/shell.c
+    kernel/src/shell_sys.c
+    kernel/src/shell_fs.c
+    kernel/src/shell_exec.c
+    kernel/src/shell_component.c
     kernel/src/help.c
     kernel/src/dtb.c
     kernel/src/elf.c

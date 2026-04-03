@@ -425,7 +425,7 @@
 
 - ✅ **CORE-L1** — Deduplicate 13 string helpers into shared functions
 - ✅ **CORE-L3** — Merge kprintf vprintf/vsnprintf duplicate parsing
-- ⏸️ **CORE-L9** — Split shell.c into ~5 focused files — deferred (large refactor, separate commit)
+- ✅ **CORE-L9** — Split shell.c into 5 focused files (core + sys + fs + exec + component)
 - ✅ **FS-C1** — Add heap_reset() for Lua session cleanup
 - ✅ **MM-M2** — pmm_dump_stats copy-then-print
 - ✅ **DRV-C2, DRV-C3** — Add timeouts to GIC wait loops
