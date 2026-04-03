@@ -1441,6 +1441,145 @@ static void test_shell_help_dir_listing(void)
 }
 
 /* ============================================================================
+ * Write/Modify Command Tests
+ *
+ * Tests for shell commands that create, modify, or remove files:
+ * write, mkdir, rm, mv, append, truncate.
+ * ============================================================================ */
+
+/*
+ * Test: write command creates a file with content.
+ */
+static void test_shell_cmd_write(void)
+{
+    int ret = shell_execute("write /mnt/files/write_test.tmp hello world");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    /* Verify file was created by catting it */
+    ret = shell_execute("cat /mnt/files/write_test.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    shell_execute("rm /mnt/files/write_test.tmp");
+}
+
+/*
+ * Test: write with no arguments returns error.
+ */
+static void test_shell_cmd_write_no_args(void)
+{
+    int ret = shell_execute("write");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: mkdir creates a directory.
+ */
+static void test_shell_cmd_mkdir(void)
+{
+    int ret = shell_execute("mkdir /mnt/files/test_mkdir_dir");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    /* Verify dir exists by listing it */
+    ret = shell_execute("ls /mnt/files/test_mkdir_dir");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    shell_execute("rm /mnt/files/test_mkdir_dir");
+}
+
+/*
+ * Test: mkdir with no arguments returns error.
+ */
+static void test_shell_cmd_mkdir_no_args(void)
+{
+    int ret = shell_execute("mkdir");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: rm removes a file.
+ */
+static void test_shell_cmd_rm(void)
+{
+    shell_execute("write /mnt/files/rm_test.tmp data");
+    int ret = shell_execute("rm /mnt/files/rm_test.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    /* Verify file is gone */
+    ret = shell_execute("cat /mnt/files/rm_test.tmp");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: rm on nonexistent file returns error.
+ */
+static void test_shell_cmd_rm_nonexistent(void)
+{
+    int ret = shell_execute("rm /mnt/files/does_not_exist_12345");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: mv renames a file.
+ */
+static void test_shell_cmd_mv(void)
+{
+    shell_execute("write /mnt/files/mv_src.tmp move me");
+    int ret = shell_execute("mv /mnt/files/mv_src.tmp /mnt/files/mv_dst.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    /* Source should be gone */
+    ret = shell_execute("cat /mnt/files/mv_src.tmp");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    /* Dest should exist */
+    ret = shell_execute("cat /mnt/files/mv_dst.tmp");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    shell_execute("rm /mnt/files/mv_dst.tmp");
+}
+
+/*
+ * Test: mv with missing arguments returns error.
+ */
+static void test_shell_cmd_mv_missing_args(void)
+{
+    int ret = shell_execute("mv");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: append adds content to an existing file.
+ */
+static void test_shell_cmd_append(void)
+{
+    shell_execute("write /mnt/files/append_test.tmp first");
+    int ret = shell_execute("append /mnt/files/append_test.tmp second");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    shell_execute("rm /mnt/files/append_test.tmp");
+}
+
+/*
+ * Test: append with no arguments returns error.
+ */
+static void test_shell_cmd_append_no_args(void)
+{
+    int ret = shell_execute("append");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: truncate shortens a file to a given size.
+ */
+static void test_shell_cmd_truncate(void)
+{
+    shell_execute("write /mnt/files/trunc_test.tmp some long content here");
+    int ret = shell_execute("truncate /mnt/files/trunc_test.tmp 4");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    shell_execute("rm /mnt/files/trunc_test.tmp");
+}
+
+/*
+ * Test: truncate with no arguments returns error.
+ */
+static void test_shell_cmd_truncate_no_args(void)
+{
+    int ret = shell_execute("truncate");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/* ============================================================================
  * Shared String Function Regression Tests (CORE-L1)
  *
  * Previously, 6 files had their own static copies of strcmp/strlen/strcpy.
@@ -1714,6 +1853,20 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_help_files_exist);
     RUN_TEST(test_shell_help_file_content);
     RUN_TEST(test_shell_help_dir_listing);
+
+    /* Write/modify command tests */
+    RUN_TEST(test_shell_cmd_write);
+    RUN_TEST(test_shell_cmd_write_no_args);
+    RUN_TEST(test_shell_cmd_mkdir);
+    RUN_TEST(test_shell_cmd_mkdir_no_args);
+    RUN_TEST(test_shell_cmd_rm);
+    RUN_TEST(test_shell_cmd_rm_nonexistent);
+    RUN_TEST(test_shell_cmd_mv);
+    RUN_TEST(test_shell_cmd_mv_missing_args);
+    RUN_TEST(test_shell_cmd_append);
+    RUN_TEST(test_shell_cmd_append_no_args);
+    RUN_TEST(test_shell_cmd_truncate);
+    RUN_TEST(test_shell_cmd_truncate_no_args);
 
     /* String function regression tests */
     RUN_TEST(test_string_strcmp_basic);
