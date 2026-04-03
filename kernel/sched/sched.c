@@ -318,12 +318,20 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
     DEBUG_PRINT("Added task '%s' to CPU %u run queue (ready=%u)",
                 task->name, cpu, rq->ready_count);
 
-    spin_unlock_irqrestore(&rq->lock, flags);
+    /* Clean specific fields written inside the lock to PoC.
+     * Without SMPEN, these stay in our L1 cache. The target CPU's
+     * schedule() invalidates before reading. Only clean the fields
+     * that were modified — NOT the entire task struct (which includes
+     * the task's context/stack that may be in active use). */
+    cache_clean(&rq->head);
+    cache_clean(&rq->tail);
+    cache_clean(&rq->ready_count);
+    cache_clean(&task->next);
+    cache_clean(&task->assigned_cpu);
+    cache_clean(&task->state);
+    cache_clean(&task->effective_priority);
 
-    /* Push run queue and task data to PoC so the target CPU can see them.
-     * Without SMPEN, data written inside the lock stays in our L1. */
-    cache_clean_range(rq, sizeof(*rq));
-    cache_clean_range(task, sizeof(*task));
+    spin_unlock_irqrestore(&rq->lock, flags);
 }
 
 /*
@@ -412,6 +420,7 @@ static uint32_t find_target_cpu(void)
  *
  * Returns the least-loaded non-isolated CPU > 0, or falls back to find_target_cpu().
  */
+__attribute__((unused))
 static uint32_t find_performance_cpu(void)
 {
     if (cpu_count <= 1) {
@@ -467,6 +476,14 @@ void scheduler_add_task(struct task *task)
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         /* Task is pinned to a specific CPU (even if isolated) */
         target_cpu = task->cpu_affinity;
+#if defined(PLATFORM_RASPI5)
+    } else {
+        /* Pi 5: cross-CPU task dispatch requires cache coherency (SMPEN)
+         * which TF-A doesn't set for secondary cores. Until resolved,
+         * all tasks without explicit affinity run on CPU 0. Secondary
+         * CPUs are online and handle their own idle/timer tasks. */
+        target_cpu = 0;
+#else
     } else if (task->deadline_ns > 0) {
         /* Deadline-constrained tasks prefer performance cores */
         target_cpu = find_performance_cpu();
@@ -475,6 +492,7 @@ void scheduler_add_task(struct task *task)
     } else {
         /* Regular tasks use standard load balancing */
         target_cpu = find_target_cpu();
+#endif
     }
 
     scheduler_add_task_to_cpu(task, target_cpu);
@@ -614,6 +632,7 @@ void schedule(void)
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
+        cache_clean(&rq->zombie);
         spin_unlock_irqrestore(&rq->lock, flags);
 
         /* Destroy outside lock - task_destroy may call pmm */
@@ -700,6 +719,15 @@ void schedule(void)
     }
 
     task_set_current(next);
+
+    /* Clean run queue fields modified in this schedule() cycle.
+     * Without this, the next dc civac at the start of schedule() would
+     * write back our stale dirty cacheline, overwriting another CPU's
+     * fresh data (e.g., a newly added task from scheduler_add_task). */
+    cache_clean(&rq->head);
+    cache_clean(&rq->tail);
+    cache_clean(&rq->ready_count);
+    cache_clean(&rq->zombie);
 
     spin_unlock_irqrestore(&rq->lock, flags);
 
