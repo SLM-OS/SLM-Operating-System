@@ -27,13 +27,18 @@ uint32_t cpu_count = 0;
 /* Number of CPUs currently online */
 volatile uint32_t cpus_online = 0;
 
+/* Per-CPU boot handshake flags — separate from per_cpu struct to avoid
+ * any potential struct-access optimization issues with volatile members */
+static volatile uint32_t cpu_boot_flag[MAX_CPUS];
+
 /* Per-CPU boot stacks (16 KB each, 16-byte aligned) */
 /* NOT static - needs to be visible to smp_boot.S */
 _Alignas(16) uint8_t cpu_stacks[MAX_CPUS][STACK_SIZE];
 
 /*
- * Invoke PSCI function via HVC.
- * QEMU virt machine uses HVC as the PSCI conduit.
+ * Invoke PSCI function.
+ * Pi 5 uses SMC (Secure Monitor Call) — TF-A handles PSCI at EL3.
+ * QEMU virt uses HVC (Hypervisor Call) — QEMU's PSCI handler at EL2.
  */
 static int64_t psci_call(uint64_t fn, uint64_t arg1,
                          uint64_t arg2, uint64_t arg3)
@@ -43,10 +48,17 @@ static int64_t psci_call(uint64_t fn, uint64_t arg1,
     register uint64_t x2 __asm__("x2") = arg2;
     register uint64_t x3 __asm__("x3") = arg3;
 
+#if defined(PLATFORM_RASPI5)
+    __asm__ volatile("smc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3)
+        : "memory");
+#else
     __asm__ volatile("hvc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3)
         : "memory");
+#endif
 
     return (int64_t)x0;
 }
@@ -156,9 +168,15 @@ static void init_cpu_map(void)
         expected_cpus = MAX_CPUS;
     }
 
-    /* Populate logical map (assume contiguous MPIDR Aff0 values) */
+    /* Populate logical map with MPIDR affinity values.
+     * Pi 5 BCM2712: CPU ID in Aff1 (0x000, 0x100, 0x200, 0x300)
+     * QEMU virt:    CPU ID in Aff0 (0, 1, 2, 3) */
     for (uint32_t i = 1; i < expected_cpus; i++) {
-        cpu_logical_map[i] = i;
+#if defined(PLATFORM_RASPI5)
+        cpu_logical_map[i] = (uint64_t)i << 8;   /* Aff1 encoding */
+#else
+        cpu_logical_map[i] = i;                    /* Aff0 encoding */
+#endif
         cpu_count++;
     }
 
@@ -179,7 +197,6 @@ static void init_cpu_data(uint32_t cpu)
     p->boot_time_ns = 0;
 }
 
-#if !defined(PLATFORM_RASPI5)
 /*
  * Translate PSCI error code to string for debugging.
  */
@@ -199,7 +216,6 @@ static const char *psci_error_str(int err)
     default:                    return "UNKNOWN";
     }
 }
-#endif /* !PLATFORM_RASPI5 */
 
 /*
  * Secondary CPU initialization (called from smp_boot.S).
@@ -210,14 +226,21 @@ void secondary_init(uint32_t logical_cpu_id)
     DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
 
     /* Initialize per-CPU GIC interface */
+    DEBUG_PRINT("CPU %u: GIC percpu init...", logical_cpu_id);
     gic_percpu_init();
+    DEBUG_PRINT("CPU %u: GIC percpu done", logical_cpu_id);
 
     /* Initialize per-CPU timer */
+    DEBUG_PRINT("CPU %u: timer percpu init...", logical_cpu_id);
     timer_percpu_init();
+    DEBUG_PRINT("CPU %u: timer percpu done", logical_cpu_id);
 
-    /* Mark this CPU as online */
+    /* Signal the primary CPU that we're online.
+     * Use atomic store-release for cross-core cache coherency.
+     * Regular volatile writes may stay in L1 without propagating. */
     cpu_data[logical_cpu_id].online = true;
-    __atomic_fetch_add(&cpus_online, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&cpu_boot_flag[logical_cpu_id], 1, __ATOMIC_RELEASE);
+    cpus_online++;
 
     INFO("CPU %u: online", logical_cpu_id);
 
@@ -245,7 +268,6 @@ void secondary_init(uint32_t logical_cpu_id)
     panic("CPU %u: scheduler_start returned!", logical_cpu_id);
 }
 
-#if !defined(PLATFORM_RASPI5)
 /*
  * Bring up a single secondary CPU.
  */
@@ -254,6 +276,10 @@ static int boot_secondary(uint32_t cpu)
     uint64_t mpidr = cpu_logical_map[cpu];
     uintptr_t entry = (uintptr_t)secondary_entry;
     int ret;
+
+    /* Clear boot flag before starting the CPU */
+    cpu_boot_flag[cpu] = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
 
     DEBUG_PRINT("CPU %u: booting (MPIDR=0x%lx, entry=0x%lx)",
                 cpu, mpidr, entry);
@@ -276,21 +302,21 @@ static int boot_secondary(uint32_t cpu)
      * Wait for the CPU to come online.
      * Timeout after ~100ms to avoid hanging if something goes wrong.
      */
-    for (int timeout = 0; timeout < 100; timeout++) {
-        if (cpu_data[cpu].online) {
+    /*
+     * Wait for secondary CPU to signal via boot flag.
+     * The flag is a separate volatile uint32_t for reliable cross-core visibility.
+     */
+    for (volatile int timeout = 0; timeout < 50000000; timeout++) {
+        /* Use atomic load-acquire to force cache coherent read */
+        if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
             return PSCI_SUCCESS;
-        }
-
-        /* Simple delay - approximately 1ms at ~1GHz */
-        for (volatile int i = 0; i < 100000; i++) {
-            __asm__ volatile("" ::: "memory");
         }
     }
 
-    WARN("CPU %u: boot timeout", cpu);
+    WARN("CPU %u: boot timeout (flag=%u, online=%d)", cpu,
+         cpu_boot_flag[cpu], (int)cpu_data[cpu].online);
     return PSCI_INTERNAL_FAILURE;
 }
-#endif /* !PLATFORM_RASPI5 */
 
 /*
  * Run spinlock validation tests.
@@ -484,22 +510,12 @@ void smp_init(void)
     cpu_data[0].online = true;
     cpus_online = 1;
 
-    /* Boot secondary CPUs */
-#if defined(PLATFORM_RASPI5)
-    /*
-     * Pi 5: Skip secondary CPU boot. The Pi 5 firmware does not implement
-     * PSCI CPU_ON, so secondary cores cannot be started via HVC calls.
-     * Spinlocks work correctly after MMU enable (spinlock_hw_enabled flag).
-     */
-    INFO("SMP: skipping secondary boot on Pi 5 (no PSCI CPU_ON)");
-    (void)booted;
-#else
+    /* Boot secondary CPUs via PSCI CPU_ON */
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
         if (boot_secondary(cpu) == PSCI_SUCCESS) {
             booted++;
         }
     }
-#endif
 
     INFO("SMP: %u/%u secondary CPUs online", booted, cpu_count - 1);
     INFO("SMP: total %u CPUs active", cpus_online);

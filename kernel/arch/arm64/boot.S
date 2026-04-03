@@ -288,8 +288,16 @@ real_start:
      * MPIDR check and continue on whatever CPU we landed on.
      * TODO: Properly handle SMP bring-up after kexec.
      */
-#if defined(PLATFORM_QEMU_VIRT) || defined(PLATFORM_RASPI5)
-    /* Do MPIDR check on platforms where we know we start on CPU 0 */
+#if defined(PLATFORM_RASPI5)
+    /* Pi 5 BCM2712: CPU ID is in MPIDR Aff1 (bits 15:8), not Aff0.
+     * MPIDR values: CPU0=0x000, CPU1=0x100, CPU2=0x200, CPU3=0x300 */
+    mrs     x1, mpidr_el1
+    lsr     x1, x1, #8
+    and     x1, x1, #0xFF
+    cbz     x1, primary_cpu
+    b       secondary_spin
+#elif defined(PLATFORM_QEMU_VIRT)
+    /* QEMU virt: CPU ID is in MPIDR Aff0 (bits 7:0) */
     mrs     x1, mpidr_el1
     and     x1, x1, #0xFF
     cbz     x1, primary_cpu

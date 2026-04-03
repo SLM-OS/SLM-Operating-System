@@ -22,6 +22,15 @@ volatile int spinlock_hw_enabled = 0;
 #endif
 
 /*
+ * MMU configuration shared with secondary CPUs.
+ * Set by vmm_init() after MMU enable. Secondary CPUs read these
+ * in smp_boot.S to enable their MMU with the same page tables.
+ */
+volatile uint64_t secondary_mmu_ttbr = 0;
+volatile uint64_t secondary_mmu_mair = 0;
+volatile uint64_t secondary_mmu_tcr = 0;
+
+/*
  * ==========================================================================
  * Page Table Storage
  * ==========================================================================
@@ -862,6 +871,12 @@ void vmm_init(void)
     vmm_state.initialized = true;
 
     INFO("MMU enabled successfully");
+
+    /* Save MMU configuration for secondary CPUs (smp_boot.S reads these) */
+    secondary_mmu_ttbr = (uint64_t)l1_table;
+    secondary_mmu_mair = MAIR_EL1_VALUE;
+    secondary_mmu_tcr = TCR_EL1_VALUE;
+    __asm__ volatile("dmb ish" ::: "memory");
 
     /* Enable hardware spinlocks now that memory is cacheable.
      * The exclusive monitor (ldaxr/stxr) requires cacheable, shareable
