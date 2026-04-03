@@ -724,8 +724,7 @@ void scheduler_start(void)
      * can safely call task_current() in schedule(). */
     /*
      * Pi 5: Timer interrupts break PL011 RX on the RP1 southbridge.
-     * The interaction between GIC interrupt handling and RP1 PCIe bus
-     * causes the PL011 to stop receiving external data. Skip timer
+     * ISB on GIC EOI (DRV-C1 fix) did not resolve it. Skip timer
      * start and run cooperatively until the root cause is resolved.
      * See docs/pi5-baremetal-status.md for investigation details.
      */

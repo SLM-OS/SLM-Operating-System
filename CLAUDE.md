@@ -261,6 +261,8 @@ Lab hardware is managed by **labctl** (Embedded Lab Control).
 
 **IMPORTANT:** Always use `labctl` for ALL SD card operations. Never manually access `/dev/sdX` devices — multiple SDWire devices exist in the lab and manual access risks writing to the wrong device.
 
+**If the MCP server fails:** Do NOT revert to using the labctl CLI directly or try to mount/modify the SD card manually. Instead, inform the user of the MCP failure so they can investigate and fix the labctl issue. Working around labctl defeats its purpose of managing multiple SDWire devices safely.
+
 **For SLM-OS kernel updates** (copy kernel binary to existing boot partition):
 
 The lab has two SDWire devices. `labctl` manages which device belongs to which SBC. Use the MCP tools (`sdwire_to_host`, `sdwire_to_dut`) or CLI equivalents, and use the block device path returned by labctl to ensure the correct SD card is accessed.

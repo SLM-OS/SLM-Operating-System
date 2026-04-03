@@ -87,6 +87,37 @@ static void test_shell_unknown_command(void)
 }
 
 /*
+ * Regression test: shell_execute with string longer than SHELL_MAX_LINE
+ * must return -1 without crashing (was a stack buffer overflow).
+ */
+static void test_shell_cmd_too_long(void)
+{
+    /* Build a string longer than SHELL_MAX_LINE (128) */
+    char long_cmd[256];
+    extern void *memset(void *s, int c, size_t n);
+    memset(long_cmd, 'a', 200);
+    long_cmd[200] = '\0';
+
+    int ret = shell_execute(long_cmd);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Regression test: shell_execute at exactly SHELL_MAX_LINE-1 still works.
+ */
+static void test_shell_cmd_at_max_length(void)
+{
+    char cmd[SHELL_MAX_LINE];
+    extern void *memset(void *s, int c, size_t n);
+    memset(cmd, ' ', SHELL_MAX_LINE - 1);
+    cmd[SHELL_MAX_LINE - 1] = '\0';
+
+    /* All spaces — should parse as empty command, return 0 */
+    int ret = shell_execute(cmd);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
  * Test: 'uptime' command executes successfully (minimal output).
  */
 static void test_shell_cmd_uptime(void)
@@ -1420,6 +1451,8 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_empty_command);
     RUN_TEST(test_shell_whitespace_only);
     RUN_TEST(test_shell_unknown_command);
+    RUN_TEST(test_shell_cmd_too_long);
+    RUN_TEST(test_shell_cmd_at_max_length);
 
     /* Basic commands - just verify they execute (minimal output) */
     RUN_TEST(test_shell_cmd_clear);

@@ -2641,7 +2641,13 @@ int shell_execute(const char *cmdline)
     char *argv[SHELL_MAX_ARGS];
     int argc;
 
-    /* Copy to modifiable buffer */
+    /* Copy to modifiable buffer (bounded to prevent stack overflow) */
+    size_t len = shell_strlen(cmdline);
+    if (len >= SHELL_MAX_LINE) {
+        uart_printf("Command too long (%u chars, max %d)\r\n",
+                    (unsigned)len, SHELL_MAX_LINE - 1);
+        return -1;
+    }
     shell_strcpy(buf, cmdline);
 
     /* Parse into argc/argv */

@@ -436,6 +436,113 @@ static void test_lua_complex_script(void)
 }
 
 /* ============================================================================
+ * Lua Heap Allocator Regression Tests
+ *
+ * Tests for the heap allocator in lua_stubs.c that is used by Lua.
+ * These are regression tests for specific defects found in code review.
+ * ============================================================================ */
+
+/* Imports from lua_stubs.c allocator */
+extern void *malloc(size_t size);
+extern void free(void *ptr);
+extern void *realloc(void *ptr, size_t size);
+extern void *calloc(size_t nmemb, size_t size);
+extern void *memset(void *s, int c, size_t n);
+
+/*
+ * Regression test: calloc with overflow-producing arguments returns NULL.
+ * Previously, calloc(SIZE_MAX, 2) would wrap to a small allocation,
+ * causing heap corruption when the caller wrote beyond the buffer.
+ */
+static void test_calloc_overflow_returns_null(void)
+{
+    void *ptr = calloc((size_t)-1, 2);
+    TEST_ASSERT_NULL(ptr);
+}
+
+/*
+ * Regression test: calloc with large-but-valid arguments near overflow boundary.
+ */
+static void test_calloc_near_overflow_returns_null(void)
+{
+    void *ptr = calloc((size_t)-1 / 2 + 1, 3);
+    TEST_ASSERT_NULL(ptr);
+}
+
+/*
+ * Test: calloc normal case works and zeroes memory.
+ */
+static void test_calloc_normal_zeroes(void)
+{
+    uint8_t *ptr = (uint8_t *)calloc(16, 1);
+    TEST_ASSERT_NOT_NULL(ptr);
+    for (int i = 0; i < 16; i++) {
+        TEST_ASSERT_EQUAL_INT(0, ptr[i]);
+    }
+    free(ptr);
+}
+
+/*
+ * Regression test: free() with corrupted block header does not crash.
+ * Previously, corruption was detected but silently ignored with no
+ * diagnostic output, making heap bugs nearly impossible to diagnose.
+ * Now it prints a diagnostic message and returns gracefully.
+ */
+static void test_free_corrupted_magic_no_crash(void)
+{
+    void *ptr = malloc(64);
+    TEST_ASSERT_NOT_NULL(ptr);
+
+    /*
+     * Corrupt the magic field in the block header.
+     * Header is sizeof(struct heap_block) = 32 bytes before user data.
+     * Magic is at offset 0 of the header (first uint32_t).
+     */
+    uint32_t *magic = (uint32_t *)((uint8_t *)ptr - 32);
+    uint32_t saved_magic = *magic;
+    *magic = 0xDEADBEEF;
+
+    /* free() should detect corruption and return without crashing */
+    free(ptr);
+
+    /* Restore magic so the allocator isn't left in a corrupted state */
+    *magic = saved_magic;
+    /* Now free for real */
+    free(ptr);
+
+    TEST_PASS();
+}
+
+/*
+ * Regression test: realloc() with corrupted block header returns NULL.
+ */
+static void test_realloc_corrupted_magic_returns_null(void)
+{
+    void *ptr = malloc(64);
+    TEST_ASSERT_NOT_NULL(ptr);
+
+    uint32_t *magic = (uint32_t *)((uint8_t *)ptr - 32);
+    uint32_t saved_magic = *magic;
+    *magic = 0xBADDCAFE;
+
+    void *result = realloc(ptr, 128);
+    TEST_ASSERT_NULL(result);
+
+    /* Restore and free */
+    *magic = saved_magic;
+    free(ptr);
+}
+
+/*
+ * Test: free(NULL) is a safe no-op.
+ */
+static void test_free_null_safe(void)
+{
+    free(NULL);
+    TEST_PASS();
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -476,6 +583,14 @@ int test_suite_lua(void)
 
     /* Complex integration */
     RUN_TEST(test_lua_complex_script);
+
+    /* Heap allocator regression tests */
+    RUN_TEST(test_calloc_overflow_returns_null);
+    RUN_TEST(test_calloc_near_overflow_returns_null);
+    RUN_TEST(test_calloc_normal_zeroes);
+    RUN_TEST(test_free_corrupted_magic_no_crash);
+    RUN_TEST(test_realloc_corrupted_magic_returns_null);
+    RUN_TEST(test_free_null_safe);
 
     return UNITY_END();
 }

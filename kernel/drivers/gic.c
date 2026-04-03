@@ -127,10 +127,11 @@ static inline uint64_t icc_read_sre(void)
     return val;
 }
 
-/* Write ICC_SRE_EL1 */
+/* Write ICC_SRE_EL1 — ISB required, affects subsequent system register access */
 static inline void icc_write_sre(uint64_t val)
 {
     __asm__ volatile("msr ICC_SRE_EL1, %0" :: "r"(val));
+    __asm__ volatile("isb");
 }
 
 /* Write ICC_PMR_EL1 (Priority Mask) */
@@ -151,10 +152,11 @@ static inline void icc_write_ctlr(uint64_t val)
     __asm__ volatile("msr ICC_CTLR_EL1, %0" :: "r"(val));
 }
 
-/* Write ICC_IGRPEN1_EL1 (Group 1 Enable) */
+/* Write ICC_IGRPEN1_EL1 (Group 1 Enable) — ISB required, enables interrupt delivery */
 static inline void icc_write_igrpen1(uint64_t val)
 {
     __asm__ volatile("msr ICC_IGRPEN1_EL1, %0" :: "r"(val));
+    __asm__ volatile("isb");
 }
 
 /* Read ICC_IAR1_EL1 (Interrupt Acknowledge) */
@@ -169,6 +171,7 @@ static inline uint64_t icc_read_iar1(void)
 static inline void icc_write_eoir1(uint64_t val)
 {
     __asm__ volatile("msr ICC_EOIR1_EL1, %0" :: "r"(val));
+    __asm__ volatile("isb");  /* Ensure EOI takes effect before next instruction */
 }
 
 /* Write ICC_SGI1R_EL1 (SGI generation) */

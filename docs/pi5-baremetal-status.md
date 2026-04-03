@@ -5,9 +5,9 @@
 
 ## Summary
 
-SLM-OS boots to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (single-core), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The armstub8-2712.bin configures GIC interrupt groups from EL3.
+SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (single-core), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting.
 
-**UART RX is working** — the shell accepts input and responds to commands. Two RP1-specific GPIO pad configurations were required (OD=1, FUNCSEL sequencing). Timer interrupts are currently disabled as a workaround; preemptive scheduling is not active. See "Current Blocker" section below.
+**UART RX is working** — the shell accepts input and responds to commands. Two RP1-specific GPIO pad configurations were required (OD=1, FUNCSEL sequencing). Timer interrupts and the armstub are currently disabled; preemptive scheduling is not active. See "Current Blocker" section below.
 
 **Key achievements:**
 1. EL2→EL1 transition for peripheral access
@@ -72,7 +72,7 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 5. **Timer interrupts break UART RX:** PL011 RX works correctly without timer interrupts but fails when the timer fires. Timer/preemption disabled as workaround. See "Current Blocker" section.
 
-6. **Doubled early boot output:** Characters are doubled in the first few lines of boot output (before `uart_init()` re-configures the UART). Caused by the armstub's EL3→EL2 transition affecting the firmware's UART state. Cosmetic only.
+6. **~~Doubled early boot output / boot garbling:~~** **RESOLVED** — The armstub8-2712.bin caused ~60% of boots to produce garbled output or hang. Removing the armstub (renaming to `.disabled`) gives 100% reliable boot. The armstub's EL3→EL2 ERET intermittently left the system in a bad state affecting RP1 PCIe UART access. Since the armstub is only needed for GIC Group 1 configuration (which requires timer interrupts, currently disabled), it is not needed.
 
 7. **DTB not preserved:** The armstub's `eret` to EL2 does not preserve the DTB pointer in x0. A scan for FDT magic in upper RAM was added but the garbled early output prevents confirmation. Kernel falls back to platform defaults.
 

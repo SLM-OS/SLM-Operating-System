@@ -44,21 +44,24 @@ pub enum LogLevel {
 }
 
 /// Global log level filter. Messages below this level are suppressed.
-static mut LOG_LEVEL: LogLevel = LogLevel::Info;
+/// Uses atomic storage for thread-safe access from any core.
+static LOG_LEVEL: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(LogLevel::Info as u8);
 
 /// Set the global log level.
-///
-/// # Safety
-/// This modifies global mutable state but is safe for single-threaded
-/// boot-time configuration. Not thread-safe during concurrent logging.
 pub fn set_log_level(level: LogLevel) {
-    // SAFETY: Single-threaded configuration at boot time
-    unsafe { LOG_LEVEL = level };
+    LOG_LEVEL.store(level as u8, core::sync::atomic::Ordering::Release);
 }
 
 /// Get the current log level.
 pub fn get_log_level() -> LogLevel {
-    unsafe { LOG_LEVEL }
+    match LOG_LEVEL.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => LogLevel::Debug,
+        1 => LogLevel::Info,
+        2 => LogLevel::Warn,
+        3 => LogLevel::Error,
+        _ => LogLevel::Off,
+    }
 }
 
 // =============================================================================

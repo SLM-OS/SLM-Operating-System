@@ -216,7 +216,8 @@ void free(void *ptr) {
         ((uint8_t *)ptr - sizeof(struct heap_block));
 
     if (block->magic != BLOCK_MAGIC) {
-        /* Corruption detected */
+        extern int uart_printf(const char *fmt, ...);
+        uart_printf("[HEAP] Corruption detected in free() at %p\n", ptr);
         return;
     }
 
@@ -248,6 +249,8 @@ void *realloc(void *ptr, size_t size) {
         ((uint8_t *)ptr - sizeof(struct heap_block));
 
     if (block->magic != BLOCK_MAGIC) {
+        extern int uart_printf(const char *fmt, ...);
+        uart_printf("[HEAP] Corruption detected in realloc() at %p\n", ptr);
         return NULL;
     }
 
@@ -265,6 +268,10 @@ void *realloc(void *ptr, size_t size) {
 }
 
 void *calloc(size_t nmemb, size_t size) {
+    /* Check for multiplication overflow */
+    if (nmemb != 0 && size > (size_t)-1 / nmemb) {
+        return NULL;
+    }
     size_t total = nmemb * size;
     void *ptr = malloc(total);
     if (ptr) memset(ptr, 0, total);

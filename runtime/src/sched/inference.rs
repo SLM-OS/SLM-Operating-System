@@ -82,12 +82,9 @@ pub struct InferenceRequest {
 impl InferenceRequest {
     /// Create a new inference request.
     pub fn new(model_handle: ModelHandle, config: InferenceConfig) -> Self {
-        static mut NEXT_ID: u64 = 1;
-        let id = unsafe {
-            let id = NEXT_ID;
-            NEXT_ID += 1;
-            id
-        };
+        use core::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
         Self {
             id,

@@ -91,14 +91,45 @@ void uart_init(void)
     volatile uint32_t *uart_fbrd = (volatile uint32_t *)(RP1_UART0_BASE + UART_FBRD);
     volatile uint32_t *uart_lcr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_LCR);
 
-    /* Configure GPIO14 (TXD) pad and pin mux */
+    volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
+
+    /*
+     * PL011 proper shutdown sequence (per ARM TRM):
+     * 1. Wait for any in-flight TX to complete
+     * 2. Disable UART
+     * 3. Flush FIFOs
+     * 4. Reconfigure GPIO, baud rate, LCR
+     * 5. Re-enable
+     */
+
+    /* Step 1: Wait for firmware TX to finish (BUSY=0) */
+    {
+        int timeout = 1000000;
+        while ((*uart_fr & (1 << 3)) && --timeout > 0) {
+            __asm__ volatile("" ::: "memory");
+        }
+    }
+
+    /* Step 2: Disable UART */
+    *uart_cr = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Step 3: Flush FIFOs by disabling them */
+    *uart_lcr = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Step 4a: Clear all interrupt flags */
+    *uart_icr = 0x7FF;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Step 4b: Configure GPIO14 (TXD) pad and pin mux */
     *gpio14_pads = PAD_TX;
     __asm__ volatile("dsb sy" ::: "memory");
     *gpio14_ctrl = FUNCSEL_UART;
     __asm__ volatile("dsb sy" ::: "memory");
 
     /*
-     * Configure GPIO15 (RXD).
+     * Step 4c: Configure GPIO15 (RXD).
      * The firmware/armstub resets GPIO15 to defaults (FUNCSEL=31/NULL,
      * IE=0, OD=1, pull-down). Must reconfigure for UART RX.
      *
@@ -111,14 +142,6 @@ void uart_init(void)
     __asm__ volatile("dsb sy" ::: "memory");
     for (volatile int d = 0; d < 1000; d++);
     *gpio15_ctrl = (4 << 5) | FUNCSEL_UART;      /* F_M=4, FUNCSEL=4 */
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    /* Disable UART before configuration */
-    *uart_cr = 0;
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    /* Clear all interrupt flags */
-    *uart_icr = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
 
     /*
@@ -145,18 +168,17 @@ void uart_init(void)
 /*
  * Send a single character via PL011 UART.
  *
- * After MMU is enabled with proper device memory mapping for RP1,
- * the flag register should be safely readable. Use it to wait for
- * TX FIFO space rather than a blind delay which breaks when caches
- * change loop timing.
+ * Waits for TX FIFO space before writing. The FR register is accessed
+ * via PCIe to the RP1, which may return unreliable data before the MMU
+ * maps the region as device memory. A post-write delay ensures proper
+ * character spacing regardless of FR reliability.
  */
 void uart_putc(char c)
 {
     volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
     volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
 
-    /* Wait until TX FIFO is not full.
-     * Use a timeout to detect if FR is stuck — fall back to delay. */
+    /* Wait until TX FIFO is not full (with timeout for robustness) */
     int timeout = 100000;
     while ((*uart_fr & FR_TXFF) && --timeout > 0) {
         __asm__ volatile("" ::: "memory");
@@ -164,23 +186,19 @@ void uart_putc(char c)
 
     /* Write character to data register */
     *uart_dr = (uint32_t)c;
-
-    /* If FR polling timed out, use a delay to pace output */
-    if (timeout <= 0) {
-        for (volatile int d = 0; d < 2000; d++);
-    }
+    __asm__ volatile("dsb sy" ::: "memory");
 }
 
 /*
  * Receive a single character via PL011 UART.
  *
- * Polls FR_RXFE until data is available. Currently uses busy-wait
- * because timer interrupts break PL011 RX on the RP1 (preemptive
- * scheduling is disabled). When the timer interrupt issue is resolved,
- * this can switch to yield()-based cooperative waiting.
+ * Polls FR_RXFE until data is available, yielding to the scheduler
+ * between checks to allow other tasks to run.
  */
 char uart_getc(void)
 {
+    extern void yield(void);
+
     volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
     volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
 

@@ -46,37 +46,39 @@ static struct task *alloc_task_slot(void)
     return NULL;
 }
 
+/* Forward declaration — defined in assembly below */
+extern void task_entry_wrapper(void);
+
 /*
- * Task wrapper function.
- *
- * This is the actual entry point set in the task's context.
- * It calls the user's entry function and handles task exit.
- *
- * When we context-switch to a new task, x19 contains the entry point
- * and x20 contains the argument. We use inline assembly to read these
- * registers before the compiler can clobber them.
+ * C trampoline called from assembly task_entry_wrapper.
+ * x19 (entry) and x20 (arg) are passed as function arguments
+ * by the assembly stub, avoiding any risk of compiler clobbering.
  */
-static void task_entry_wrapper(void)
+void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
 {
-    uint64_t entry_reg, arg_reg;
+    task_entry_t entry = (task_entry_t)entry_addr;
+    void *arg = (void *)arg_addr;
 
-    /*
-     * Read entry point and arg from callee-saved registers.
-     * These were set by task_create and restored by switch_to.
-     * We must use volatile asm to ensure the compiler actually reads the registers.
-     */
-    __asm__ volatile("mov %0, x19" : "=r"(entry_reg));
-    __asm__ volatile("mov %0, x20" : "=r"(arg_reg));
-
-    task_entry_t entry = (task_entry_t)entry_reg;
-    void *arg = (void *)arg_reg;
-
-    /* Call the actual task function */
     entry(arg);
-
-    /* Task returned - exit cleanly */
     task_exit();
 }
+
+/*
+ * Task entry wrapper (assembly).
+ *
+ * When switch_to restores a new task for the first time, x19 holds
+ * the entry point and x20 holds the argument (set by task_create).
+ * This must be in assembly to guarantee x19/x20 are read before
+ * the compiler can use them for its own purposes in a C prologue.
+ */
+__asm__(
+    ".global task_entry_wrapper\n"
+    ".type task_entry_wrapper, %function\n"
+    "task_entry_wrapper:\n"
+    "    mov x0, x19\n"
+    "    mov x1, x20\n"
+    "    b task_entry_trampoline\n"
+);
 
 /*
  * Allocate a task slot without setting up a stack.
