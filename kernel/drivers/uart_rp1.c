@@ -342,7 +342,8 @@ static uint32_t rp1_bus = 1;  /* Will be updated by uart_irq_init */
 static uint32_t rp1_cfg_read32(uint32_t reg)
 {
     volatile uint32_t *idx = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_INDEX);
-    *idx = (rp1_bus << 20) | (0U << 12) | (reg & 0xFFF);
+    /* INDEX gets bus/devfn only — register offset goes in the DATA read address */
+    *idx = (rp1_bus << 20) | (0U << 12);
     __asm__ volatile("dsb sy" ::: "memory");
     return *(volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_DATA + (reg & 0xFFC));
 }
@@ -350,7 +351,7 @@ static uint32_t rp1_cfg_read32(uint32_t reg)
 static void rp1_cfg_write32(uint32_t reg, uint32_t val)
 {
     volatile uint32_t *idx = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_INDEX);
-    *idx = (rp1_bus << 20) | (0U << 12) | (reg & 0xFFF);
+    *idx = (rp1_bus << 20) | (0U << 12);
     __asm__ volatile("dsb sy" ::: "memory");
     *(volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_DATA + (reg & 0xFFC)) = val;
     __asm__ volatile("dsb sy" ::: "memory");
@@ -485,32 +486,21 @@ void uart_irq_init(void)
                     bar0_hi, bar0_lo, table_offset);
     }
 
-    /* TODO: Program MSI-X table entries once BAR addresses are confirmed */
-    /* TODO: Clear Function Mask */
-    DEBUG_PRINT("RP1 MSI-X: config space access works! Table programming TBD");
-
-    /* Skip table programming for now — just confirm config space works */
+    /* Read outbound window config to determine CPU→PCIe address mapping.
+     * The outbound window translates CPU physical addresses to PCIe addresses
+     * that the RP1 sees. BAR0 PCIe addr = 0x00410000 → CPU addr = ? */
     {
-        uint32_t ctrl_addr = (msix_cap + 2) & ~3U;
-        uint32_t ctrl_word = rp1_cfg_read32(ctrl_addr);
-        uint32_t ctrl_shift = ((msix_cap + 2) & 3) * 8;
-        uint16_t flags = (uint16_t)(ctrl_word >> ctrl_shift);
-        /* Disable MSI-X for now (revert the enable we did above) */
-        uint16_t new_flags = flags & ~0xC000;
-        ctrl_word &= ~(0xFFFF << ctrl_shift);
-        ctrl_word |= ((uint32_t)new_flags << ctrl_shift);
-        rp1_cfg_write32(ctrl_addr, ctrl_word);
-        DEBUG_PRINT("RP1 MSI-X: function mask cleared (flags=0x%x)", new_flags);
-    }
-
-    /* Ensure Bus Master is enabled (Command register bit 2) */
-    {
-        uint32_t cmd_status = rp1_cfg_read32(0x04);
-        uint16_t cmd = cmd_status & 0xFFFF;
-        if (!(cmd & (1 << 2))) {
-            rp1_cfg_write32(0x04, cmd_status | (1 << 2));
-            DEBUG_PRINT("RP1: enabled Bus Master");
-        }
+        /* PCIE_MISC_CPU_2_PCIE_MEM_WIN0 registers */
+        volatile uint32_t *win0_lo  = (volatile uint32_t *)(PCIE_RC_BASE + 0x400C);
+        volatile uint32_t *win0_hi  = (volatile uint32_t *)(PCIE_RC_BASE + 0x4010);
+        volatile uint32_t *win0_base_lo = (volatile uint32_t *)(PCIE_RC_BASE + 0x4070);
+        volatile uint32_t *win0_base_hi = (volatile uint32_t *)(PCIE_RC_BASE + 0x4080);
+        volatile uint32_t *win0_limit_lo = (volatile uint32_t *)(PCIE_RC_BASE + 0x4074);
+        volatile uint32_t *win0_limit_hi = (volatile uint32_t *)(PCIE_RC_BASE + 0x4084);
+        DEBUG_PRINT("Outbound win0: offset=0x%x_%08x base=0x%x_%08x limit=0x%x_%08x",
+                    *win0_hi, *win0_lo,
+                    *win0_base_hi, *win0_base_lo,
+                    *win0_limit_hi, *win0_limit_lo);
     }
 
 skip_msix:
@@ -526,18 +516,15 @@ skip_msix:
      * The firmware may have already configured this (it uses RP1 for
      * HDMI/USB), but we set it explicitly to be safe.
      */
-    volatile uint32_t *rc_bar1_lo   = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR1_CONFIG_LO);
-    volatile uint32_t *rc_bar1_hi   = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR1_CONFIG_HI);
-    volatile uint32_t *rc_remap_lo  = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR1_REMAP);
-    volatile uint32_t *rc_remap_hi  = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR1_REMAP_HI);
-
-    *rc_bar1_lo  = 0xFFFFF01C;  /* PCIe addr low + 4KB size encoding */
-    *rc_bar1_hi  = 0x000000FF;  /* PCIe addr high */
-    *rc_remap_lo = 0x00130001;  /* MIP0 phys addr low + access enable */
-    *rc_remap_hi = 0x00000010;  /* MIP0 phys addr high */
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    DEBUG_PRINT("PCIe RC BAR1→MIP0 routing configured");
+    /* Read RC BAR1 config to check if firmware already set up MIP routing */
+    {
+        volatile uint32_t *rc_bar1_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR1_CONFIG_LO);
+        volatile uint32_t *rc_bar1_hi = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR1_CONFIG_HI);
+        volatile uint32_t *rc_remap_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR1_REMAP);
+        volatile uint32_t *rc_remap_hi = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR1_REMAP_HI);
+        DEBUG_PRINT("RC BAR1: lo=0x%x hi=0x%x remap=0x%x_%x",
+                    *rc_bar1_lo, *rc_bar1_hi, *rc_remap_hi, *rc_remap_lo);
+    }
 
     /*
      * Step 2: Initialize MIP0 (MSI-X Interrupt Peripheral).

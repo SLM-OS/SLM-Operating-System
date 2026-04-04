@@ -99,18 +99,19 @@ PL011 UART0 (0x1F00030000)
 - Ring buffer: 256-byte SPSC buffer for ISR→uart_getc handoff
 - Polling fallback: Transparent — if IRQ never fires, original polling path runs
 
-**What is NOT yet working:**
-- **PCIe config space access hangs.** The BCM2712 PCIe RC at `0x1000120000` is VMM-mapped, but reading registers (PCIE_STATUS, EXT_CFG_INDEX/DATA) causes the system to hang. This blocks three remaining steps:
-  1. MSI-X Enable bit in RP1's PCIe config space (via EXT_CFG)
-  2. MSI-X table programming (msg_addr/msg_data at RP1 BAR0 `0x1F00410000`)
-  3. Bus Master Enable verification
-- **Root cause unknown.** Possible causes: wrong memory attribute for RC registers, firmware doesn't leave RC accessible from EL1, or the RC register offsets differ from the pcie-brcmstb.c driver.
-- The GIC ICFGRn register may need edge-triggered configuration for SPI 153.
+**What is NOT yet working — PCIe RC register writes hang from EL1:**
+- **Reads succeed:** PCIE_STATUS, EXT_CFG config reads (vendor/device, capabilities, BARs), RC BAR1 readback — all work
+- **Writes hang:** Any write to the RC register space (EXT_CFG DATA, RC BAR1 config) causes the system to freeze
+- This blocks MSI-X enable, MSI-X table programming, and RC BAR1→MIP routing setup
 
-**Investigation notes:**
-- RP1 vendor ID is 0x1de4. Bus 0 = RC (Broadcom 0x14e4), bus 1 = RP1 (expected).
-- The EXT_CFG mechanism (write bus/devfn to +0x9000, read data at +0x9004) is from the brcmstb driver but the actual data register may be at a different offset on BCM2712.
-- Circle's `bcmpciehostbridge.cpp` may have the correct register layout — compare against brcmstb.c offsets.
+**Key findings from investigation:**
+- EXT_CFG data register is at RC+0x8000 (not 0x9004). INDEX register is at RC+0x9000.
+- INDEX must contain only bus/devfn (NOT register offset). Register offset goes in the DATA address.
+- RP1 appears at bus 0 (dedicated pcie2 link, no hierarchy). Vendor 0x1de4, device 0x0001.
+- MSI-X capability at config offset 0xB0: 61 vectors, table in BAR0 offset 0, PBA at BAR0+0x2000.
+- BAR0 PCIe address = 0x00410000. Outbound window base = 0x1F03F00000, offset = 0. So MSI-X table CPU address = 0x1F04310000 (NOT 0x1F00410000).
+- RC BAR1 is unconfigured (all zeros) — firmware did not set up MIP routing.
+- **Root cause hypothesis:** PCIe RC register space is read-only from EL1. The firmware or TF-A may lock down write access. Linux may handle this differently (brcmstb driver init at EL2, or firmware service).
 
 ## Configuration
 
