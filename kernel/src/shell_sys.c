@@ -176,6 +176,28 @@ int cmd_cpu(int argc, char *argv[])
         extern int uart_is_irq_mode(void);
         uart_printf("\r\n  UART RX:     %s\r\n",
                     uart_is_irq_mode() ? "interrupt-driven" : "polling");
+
+        /* GIC pending check for UART IRQ */
+        uint32_t pend_reg = UART_IRQ / 32;
+        uint32_t pend_bit = UART_IRQ % 32;
+        volatile uint32_t *ispendr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + 4 * pend_reg);
+        int pending = (*ispendr >> pend_bit) & 1;
+
+        /* MIP status */
+        volatile uint32_t *mip_status = (volatile uint32_t *)(MIP0_BASE + 0x80);  /* STATUSL_HOST */
+        uint32_t mip_st = *mip_status;
+
+        /* RP1 INTSTAT */
+        volatile uint32_t *intstatl = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_INTSTATL);
+        uint32_t rp1_st = *intstatl;
+
+        /* PL011 RIS/MIS */
+        volatile uint32_t *ris = (volatile uint32_t *)(UART_BASE + 0x3C);
+        volatile uint32_t *mis = (volatile uint32_t *)(UART_BASE + 0x40);
+
+        uart_printf("  GIC pend:    %d  MIP status: 0x%x  RP1 INTSTAT: 0x%x\r\n",
+                    pending, mip_st, rp1_st);
+        uart_printf("  PL011 RIS:   0x%x  MIS: 0x%x\r\n", *ris, *mis);
     }
 #endif
 

@@ -396,27 +396,10 @@ void uart_irq_init(void)
             goto skip_msix;
         }
 
-        /* Read just the vendor/device at 0x8000 (single dword) */
-        {
-            volatile uint32_t *cfg0 = (volatile uint32_t *)(PCIE_RC_BASE + 0x8000);
-            uint32_t id_8000 = *cfg0;
-            DEBUG_PRINT("RC+0x8000[0x00] = 0x%x", id_8000);
-        }
-
-        /* Read vendor/device via EXT_CFG INDEX=0x9000 DATA=0x9004 bus=1 */
-        {
-            volatile uint32_t *idx = (volatile uint32_t *)(PCIE_RC_BASE + 0x9000);
-            *idx = (1U << 20);  /* bus=1, devfn=0 */
-            __asm__ volatile("dsb sy" ::: "memory");
-            volatile uint32_t *data = (volatile uint32_t *)(PCIE_RC_BASE + 0x9004);
-            uint32_t id_9004 = *data;
-            DEBUG_PRINT("RC+0x9004 bus1: id=0x%x", id_9004);
-        }
-
+        /* Use 0x8000 for reads (works from EL1, writes done from EL2) */
         rp1_bus = 0;
         uint32_t rp1_id = rp1_cfg_read32(0x00);
-        DEBUG_PRINT("rp1_cfg_read32(0x00) bus0 @+0x%x: id=0x%x",
-                    PCIE_RC_EXT_CFG_DATA, rp1_id);
+        DEBUG_PRINT("RP1 config: id=0x%x (vendor=0x%x)", rp1_id, rp1_id & 0xFFFF);
 
         if ((rp1_id & 0xFFFF) != 0x1de4) {
             INFO("UART IRQ: RP1 not found (id=0x%x), polling fallback", rp1_id);
@@ -603,20 +586,18 @@ skip_msix:
      *   3. PL011 IMSC (interrupt source — last, arms the trigger)
      */
 
-    /* Step 1: Enable GIC SPI for UART0 (edge-triggered for MIP) */
-    DEBUG_PRINT("Enabling GIC SPI %d (edge-triggered)...", UART_IRQ);
+    /* Step 1: Enable GIC SPI for UART0 (level-triggered) */
+    DEBUG_PRINT("Enabling GIC SPI %d...", UART_IRQ);
     gic_set_priority(UART_IRQ, GIC_PRIORITY_DEFAULT);
-    /* Set edge-triggered: ICFGR bit = 0b10 for this IRQ */
+    gic_enable_irq(UART_IRQ);
+    /* Clear any pending state before enabling */
     {
-        uint32_t icfgr_reg = UART_IRQ / 16;
-        uint32_t icfgr_bit = (UART_IRQ % 16) * 2;
-        volatile uint32_t *icfgr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0xC00 + 4 * icfgr_reg);
-        uint32_t val = *icfgr;
-        val |= (2U << icfgr_bit);   /* Set edge-triggered (bit 1 of 2-bit field) */
-        *icfgr = val;
+        uint32_t pend_reg = UART_IRQ / 32;
+        uint32_t pend_bit = UART_IRQ % 32;
+        volatile uint32_t *icpendr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x280 + 4 * pend_reg);
+        *icpendr = (1U << pend_bit);  /* Clear pending */
         __asm__ volatile("dsb sy" ::: "memory");
     }
-    gic_enable_irq(UART_IRQ);
 
     /* Step 2: Enable RP1 MSI-X vector 25 with IACK_EN */
     DEBUG_PRINT("Enabling RP1 MSIX_CFG vector %d...", RP1_INT_UART0);
