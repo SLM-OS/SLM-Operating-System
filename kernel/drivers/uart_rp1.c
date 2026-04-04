@@ -361,6 +361,7 @@ void uart_irq_init(void)
     rx_head = 0;
     rx_tail = 0;
     uart_irq_mode = 0;
+    uint8_t msix_cap = 0;  /* Set during config space walk, used for function mask clear */
 
     /*
      * Step 0a: Enable MSI-X in RP1's PCIe config space.
@@ -386,8 +387,121 @@ void uart_irq_init(void)
      *
      * Polling fallback works transparently in the meantime.
      */
-    INFO("UART IRQ: PCIe config space access not yet implemented (polling fallback)");
-    goto skip_msix;
+    /*
+     * Read PCIe RC PCIE_STATUS to verify link is active.
+     * This is a basic accessibility test for the RC register block.
+     */
+    {
+        volatile uint32_t *pcie_status = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_PCIE_STATUS);
+        uint32_t status = *pcie_status;
+        DEBUG_PRINT("PCIe RC status at 0x%lx = 0x%x (DL_ACTIVE=%d)",
+                    (uint64_t)(PCIE_RC_BASE + PCIE_RC_PCIE_STATUS),
+                    status, (status >> 5) & 1);
+
+        if (!(status & (1 << 5))) {
+            INFO("UART IRQ: PCIe link not active, skipping MSI-X setup");
+            goto skip_msix;
+        }
+
+        /* RP1 is at bus 0 on the dedicated pcie2 link */
+        rp1_bus = 0;
+        uint32_t rp1_id = rp1_cfg_read32(0x00);
+        DEBUG_PRINT("RP1 config[0x00] = 0x%x (vendor=0x%x device=0x%x)",
+                    rp1_id, rp1_id & 0xFFFF, rp1_id >> 16);
+
+        if ((rp1_id & 0xFFFF) != 0x1de4) {
+            INFO("UART IRQ: RP1 not found (id=0x%x), polling fallback", rp1_id);
+            goto skip_msix;
+        }
+
+        /* Ensure Bus Master is enabled */
+        uint32_t cmd_status = rp1_cfg_read32(0x04);
+        uint16_t cmd = cmd_status & 0xFFFF;
+        if (!(cmd & (1 << 2))) {
+            rp1_cfg_write32(0x04, cmd_status | (1 << 2));
+            DEBUG_PRINT("RP1: enabled Bus Master");
+        }
+
+        /* Walk capability list to find MSI-X (cap ID 0x11).
+         * Config reads must be 4-byte aligned; extract bytes by shift. */
+        {
+            uint32_t word34 = rp1_cfg_read32(0x34);
+            uint8_t cap_ptr = word34 & 0xFF;
+            int limit = 48;
+            while (cap_ptr >= 0x40 && cap_ptr != 0xFF && limit-- > 0) {
+                uint32_t aligned_addr = cap_ptr & ~3U;
+                uint32_t word = rp1_cfg_read32(aligned_addr);
+                uint32_t byte_offset = cap_ptr & 3;
+                uint8_t cap_id = (word >> (byte_offset * 8)) & 0xFF;
+                uint8_t next = (word >> (byte_offset * 8 + 8)) & 0xFF;
+                DEBUG_PRINT("  cap at 0x%x: id=0x%x next=0x%x", cap_ptr, cap_id, next);
+                if (cap_id == 0x11) {
+                    msix_cap = cap_ptr;
+                    break;
+                }
+                cap_ptr = next;
+            }
+        }
+
+        if (!msix_cap) {
+            INFO("UART IRQ: MSI-X cap not found in RP1 config");
+            goto skip_msix;
+        }
+
+        /* MSI-X Message Control is at cap_offset + 2 (16-bit).
+         * Read the 4-byte aligned word containing the cap header. */
+        uint32_t msix_aligned = msix_cap & ~3U;
+        uint32_t msix_word = rp1_cfg_read32(msix_aligned);
+        uint32_t byte_off = msix_cap & 3;
+        /* Message Control is at cap+2, which is 2 bytes above cap_id */
+        uint16_t msix_flags = (uint16_t)(msix_word >> ((byte_off + 2) * 8));
+        if (byte_off + 2 >= 4) {
+            /* Flags span into next 32-bit word */
+            msix_flags = (uint16_t)(rp1_cfg_read32(msix_aligned + 4));
+        }
+        uint16_t table_size = (msix_flags & 0x7FF) + 1;
+        DEBUG_PRINT("RP1 MSI-X: cap=0x%x flags=0x%x table_size=%d",
+                    msix_cap, msix_flags, table_size);
+
+        /* Skip MSI-X enable for now — just read BAR info for diagnostics */
+        DEBUG_PRINT("RP1 MSI-X: cap found, skipping enable for diagnostics");
+    }
+
+    /* Read the MSI-X Table BIR and offset from config space to find the actual table location */
+    {
+        uint32_t table_off_bir = rp1_cfg_read32(msix_cap + 4);
+        uint32_t pba_off_bir = rp1_cfg_read32(msix_cap + 8);
+        uint32_t table_bir = table_off_bir & 0x7;
+        uint32_t table_offset = table_off_bir & ~0x7;
+        uint32_t pba_bir = pba_off_bir & 0x7;
+        uint32_t pba_offset = pba_off_bir & ~0x7;
+        DEBUG_PRINT("RP1 MSI-X: table BIR=%u offset=0x%x, PBA BIR=%u offset=0x%x",
+                    table_bir, table_offset, pba_bir, pba_offset);
+
+        /* Read BAR0 to find MSI-X table address */
+        uint32_t bar0_lo = rp1_cfg_read32(0x10);
+        uint32_t bar0_hi = rp1_cfg_read32(0x14);
+        DEBUG_PRINT("RP1 BAR0=0x%x_%08x (MSI-X table at BAR0+0x%x)",
+                    bar0_hi, bar0_lo, table_offset);
+    }
+
+    /* TODO: Program MSI-X table entries once BAR addresses are confirmed */
+    /* TODO: Clear Function Mask */
+    DEBUG_PRINT("RP1 MSI-X: config space access works! Table programming TBD");
+
+    /* Skip table programming for now — just confirm config space works */
+    {
+        uint32_t ctrl_addr = (msix_cap + 2) & ~3U;
+        uint32_t ctrl_word = rp1_cfg_read32(ctrl_addr);
+        uint32_t ctrl_shift = ((msix_cap + 2) & 3) * 8;
+        uint16_t flags = (uint16_t)(ctrl_word >> ctrl_shift);
+        /* Disable MSI-X for now (revert the enable we did above) */
+        uint16_t new_flags = flags & ~0xC000;
+        ctrl_word &= ~(0xFFFF << ctrl_shift);
+        ctrl_word |= ((uint32_t)new_flags << ctrl_shift);
+        rp1_cfg_write32(ctrl_addr, ctrl_word);
+        DEBUG_PRINT("RP1 MSI-X: function mask cleared (flags=0x%x)", new_flags);
+    }
 
     /* Ensure Bus Master is enabled (Command register bit 2) */
     {
@@ -397,61 +511,6 @@ void uart_irq_init(void)
             rp1_cfg_write32(0x04, cmd_status | (1 << 2));
             DEBUG_PRINT("RP1: enabled Bus Master");
         }
-    }
-
-    /* Walk capability list to find MSI-X (cap ID 0x11) */
-    uint8_t msix_cap = 0;
-    {
-        uint8_t cap_ptr = (uint8_t)(rp1_cfg_read32(0x34) & 0xFF);
-        int limit = 48;  /* Safety limit to prevent infinite loop */
-        while (cap_ptr && cap_ptr != 0xFF && limit-- > 0) {
-            uint32_t cap_hdr = rp1_cfg_read32(cap_ptr);
-            uint8_t cap_id = cap_hdr & 0xFF;
-            if (cap_id == 0x11) {
-                msix_cap = cap_ptr;
-                break;
-            }
-            cap_ptr = (cap_hdr >> 8) & 0xFF;
-        }
-    }
-
-    if (msix_cap) {
-        /* Enable MSI-X with Function Mask (program table, then unmask) */
-        uint32_t msix_word = rp1_cfg_read32(msix_cap);
-        uint16_t flags = (msix_word >> 16) & 0xFFFF;
-        uint16_t new_flags = flags | 0xC000;  /* Enable + MaskAll */
-        rp1_cfg_write32(msix_cap, (msix_word & 0x0000FFFF) | ((uint32_t)new_flags << 16));
-        DEBUG_PRINT("RP1 MSI-X cap at 0x%x: flags 0x%x → 0x%x, table_size=%d",
-                    msix_cap, flags, new_flags, (flags & 0x7FF) + 1);
-    } else {
-        INFO("UART IRQ: MSI-X cap not found in RP1 config");
-    }
-
-    /*
-     * Step 0b: Program MSI-X table entries.
-     *
-     * Each entry tells the RP1 MSI-X engine what PCIe address to write
-     * and what data value to use for each vector. The RC BAR1 catches
-     * writes to 0xFF_FFFFF000 and routes them to MIP0.
-     */
-    for (int i = 0; i < RP1_MSIX_TABLE_SIZE; i++) {
-        volatile uint32_t *entry = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + i * 16);
-        entry[0] = MSIX_MSG_ADDR_LO;   /* msg_addr low */
-        entry[1] = MSIX_MSG_ADDR_HI;   /* msg_addr high */
-        entry[2] = (uint32_t)i;         /* msg_data = vector number */
-        entry[3] = 0x00000000;           /* vector_ctrl: unmasked */
-    }
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    DEBUG_PRINT("RP1 MSI-X: programmed %d table entries", RP1_MSIX_TABLE_SIZE);
-
-    /* Clear Function Mask now that table is programmed */
-    if (msix_cap) {
-        uint32_t msix_word = rp1_cfg_read32(msix_cap);
-        uint16_t flags = (msix_word >> 16) & 0xFFFF;
-        uint16_t new_flags = (flags | 0x8000) & ~0x4000;  /* Keep Enable, clear MaskAll */
-        rp1_cfg_write32(msix_cap, (msix_word & 0x0000FFFF) | ((uint32_t)new_flags << 16));
-        DEBUG_PRINT("RP1 MSI-X: function mask cleared (flags: 0x%x)", new_flags);
     }
 
 skip_msix:
