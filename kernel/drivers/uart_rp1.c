@@ -286,39 +286,31 @@ char uart_getc(void)
  */
 void uart_irq_handler(void)
 {
-    volatile uint32_t *intstatl = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_INTSTATL);
+    volatile uint32_t *uart_dr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
+    volatile uint32_t *uart_fr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
+    volatile uint32_t *uart_icr = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
 
-    uint32_t pending = *intstatl;
+    uart_irq_mode = 1;
 
-    /* Check if UART0 (vector 25) is pending */
-    if (pending & (1U << RP1_INT_UART0)) {
-        volatile uint32_t *uart_dr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
-        volatile uint32_t *uart_fr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
-        volatile uint32_t *uart_icr = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
-
-        uart_irq_mode = 1;
-
-        /* Drain RX FIFO into ring buffer */
-        while (!(*uart_fr & FR_RXFE)) {
-            uint8_t ch = (uint8_t)(*uart_dr & 0xFF);
-            uint32_t next = (rx_head + 1) & (UART_RX_BUF_SIZE - 1);
-            if (next != rx_tail) {
-                rx_buf[rx_head] = ch;
-                rx_head = next;
-            }
+    /* Drain RX FIFO into ring buffer */
+    while (!(*uart_fr & FR_RXFE)) {
+        uint8_t ch = (uint8_t)(*uart_dr & 0xFF);
+        uint32_t next = (rx_head + 1) & (UART_RX_BUF_SIZE - 1);
+        if (next != rx_tail) {
+            rx_buf[rx_head] = ch;
+            rx_head = next;
         }
-
-        /* Clear PL011 interrupt flags */
-        *uart_icr = IMSC_RXIM | IMSC_RTIM;
-        __asm__ volatile("dsb sy" ::: "memory");
-
-        /* IACK: acknowledge the RP1 MSI-X vector (unmasks for next interrupt).
-         * Use the atomic SET alias so we don't disturb other bits. */
-        volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
-                                                             + RP1_MSIX_CFG(RP1_INT_UART0));
-        *msix_set = MSIX_CFG_IACK;
-        __asm__ volatile("dsb sy" ::: "memory");
     }
+
+    /* Clear PL011 interrupt flags */
+    *uart_icr = IMSC_RXIM | IMSC_RTIM;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* IACK the RP1 MSI-X vector (unmasks for next interrupt) */
+    volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
+                                                         + RP1_MSIX_CFG(RP1_INT_UART0));
+    *msix_set = MSIX_CFG_IACK;
+    __asm__ volatile("dsb sy" ::: "memory");
 }
 
 /*
@@ -489,18 +481,63 @@ void uart_irq_init(void)
     /* Read outbound window config to determine CPU→PCIe address mapping.
      * The outbound window translates CPU physical addresses to PCIe addresses
      * that the RP1 sees. BAR0 PCIe addr = 0x00410000 → CPU addr = ? */
+    /* Dump firmware's PCIe RC window configuration */
     {
-        /* PCIE_MISC_CPU_2_PCIE_MEM_WIN0 registers */
-        volatile uint32_t *win0_lo  = (volatile uint32_t *)(PCIE_RC_BASE + 0x400C);
-        volatile uint32_t *win0_hi  = (volatile uint32_t *)(PCIE_RC_BASE + 0x4010);
-        volatile uint32_t *win0_base_lo = (volatile uint32_t *)(PCIE_RC_BASE + 0x4070);
-        volatile uint32_t *win0_base_hi = (volatile uint32_t *)(PCIE_RC_BASE + 0x4080);
-        volatile uint32_t *win0_limit_lo = (volatile uint32_t *)(PCIE_RC_BASE + 0x4074);
-        volatile uint32_t *win0_limit_hi = (volatile uint32_t *)(PCIE_RC_BASE + 0x4084);
-        DEBUG_PRINT("Outbound win0: offset=0x%x_%08x base=0x%x_%08x limit=0x%x_%08x",
-                    *win0_hi, *win0_lo,
-                    *win0_base_hi, *win0_base_lo,
-                    *win0_limit_hi, *win0_limit_lo);
+        /* Outbound window 0 (CPU to PCIe) */
+        uint32_t w0_lo  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x400C);
+        uint32_t w0_hi  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4010);
+        uint32_t w0_bl  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4070);
+        uint32_t w0_bhi = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4080);
+        uint32_t w0_lhi = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4084);
+        DEBUG_PRINT("Out win0: pci=0x%x_%08x baselim=0x%08x bhi=0x%x lhi=0x%x",
+                    w0_hi, w0_lo, w0_bl, w0_bhi, w0_lhi);
+
+        /* Inbound BARs */
+        uint32_t b1_lo  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x402C);
+        uint32_t b1_hi  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4030);
+        uint32_t b1_rl  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x40AC);
+        uint32_t b1_rh  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x40B0);
+        DEBUG_PRINT("BAR1: cfg=0x%x_%08x remap=0x%x_%08x", b1_hi, b1_lo, b1_rh, b1_rl);
+
+        uint32_t b2_lo  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4034);
+        uint32_t b2_hi  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4038);
+        uint32_t b2_rl  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x40B4);
+        uint32_t b2_rh  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x40B8);
+        DEBUG_PRINT("BAR2: cfg=0x%x_%08x remap=0x%x_%08x", b2_hi, b2_lo, b2_rh, b2_rl);
+
+        uint32_t misc = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4008);
+        DEBUG_PRINT("MISC_CTRL=0x%08x", misc);
+
+        /* Read first few MSI-X table entries at BAR0 (0x1F00410000) */
+        for (int i = 0; i < 3; i++) {
+            volatile uint32_t *e = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + i * 16);
+            DEBUG_PRINT("MSIX[%d]: addr=0x%x_%08x data=0x%x ctrl=0x%x",
+                        i, e[1], e[0], e[2], e[3]);
+        }
+        /* Also check vector 25 (UART0) */
+        {
+            volatile uint32_t *e = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + 25 * 16);
+            DEBUG_PRINT("MSIX[25/UART0]: addr=0x%x_%08x data=0x%x ctrl=0x%x",
+                        e[1], e[0], e[2], e[3]);
+        }
+
+        /* Program MSI-X table entries from EL1 (BAR0 space, not RC) */
+        DEBUG_PRINT("Programming MSI-X table (%d entries)...", RP1_MSIX_TABLE_SIZE);
+        for (int i = 0; i < RP1_MSIX_TABLE_SIZE; i++) {
+            volatile uint32_t *e = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + i * 16);
+            e[0] = MSIX_MSG_ADDR_LO;    /* 0xFFFFF000 */
+            e[1] = MSIX_MSG_ADDR_HI;    /* 0x000000FF */
+            e[2] = (uint32_t)i;          /* data = vector number */
+            e[3] = 0x00000000;           /* ctrl: unmasked */
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+
+        /* Verify one entry */
+        {
+            volatile uint32_t *e = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + 25 * 16);
+            DEBUG_PRINT("MSIX[25] after write: addr=0x%x_%08x data=0x%x ctrl=0x%x",
+                        e[1], e[0], e[2], e[3]);
+        }
     }
 
 skip_msix:
@@ -543,20 +580,46 @@ skip_msix:
     }
 
     /*
-     * Step 3: Configure PL011 UART for interrupt-driven RX.
+     * Enable the interrupt path in reverse order (sink→source) so the
+     * handler is ready before the interrupt can fire:
+     *   1. GIC (handler ready)
+     *   2. RP1 MSIX_CFG (MSI-X vector forwarding)
+     *   3. PL011 IMSC (interrupt source — last, arms the trigger)
      */
 
-    DEBUG_PRINT("Step 3: PL011 interrupt config...");
-    /* Set RX FIFO trigger level to 1/8 full (2 bytes) for low latency */
+    /* Step 1: Enable GIC SPI for UART0 (edge-triggered for MIP) */
+    DEBUG_PRINT("Enabling GIC SPI %d (edge-triggered)...", UART_IRQ);
+    gic_set_priority(UART_IRQ, GIC_PRIORITY_DEFAULT);
+    /* Set edge-triggered: ICFGR bit = 0b10 for this IRQ */
+    {
+        uint32_t icfgr_reg = UART_IRQ / 16;
+        uint32_t icfgr_bit = (UART_IRQ % 16) * 2;
+        volatile uint32_t *icfgr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0xC00 + 4 * icfgr_reg);
+        uint32_t val = *icfgr;
+        val |= (2U << icfgr_bit);   /* Set edge-triggered (bit 1 of 2-bit field) */
+        *icfgr = val;
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+    gic_enable_irq(UART_IRQ);
+
+    /* Step 2: Enable RP1 MSI-X vector 25 with IACK_EN */
+    DEBUG_PRINT("Enabling RP1 MSIX_CFG vector %d...", RP1_INT_UART0);
+    volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
+                                                         + RP1_MSIX_CFG(RP1_INT_UART0));
+    *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
+    __asm__ volatile("dsb sy" ::: "memory");
+    *msix_set = MSIX_CFG_IACK;  /* Clear any pending state */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Step 3: Configure and enable PL011 RX interrupts (arms the trigger) */
+    DEBUG_PRINT("Enabling PL011 RX interrupts...");
     volatile uint32_t *uart_ifls = (volatile uint32_t *)(RP1_UART0_BASE + UART_IFLS);
     *uart_ifls = (*uart_ifls & ~(0x7 << 3)) | (0x0 << 3);
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Clear pending PL011 interrupt flags and drain stale FIFO data */
     volatile uint32_t *uart_icr = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
     volatile uint32_t *uart_fr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
     volatile uint32_t *uart_dr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
-
     *uart_icr = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
     while (!(*uart_fr & FR_RXFE)) {
@@ -565,36 +628,9 @@ skip_msix:
     *uart_icr = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Enable PL011 RX and receive timeout interrupts */
     volatile uint32_t *uart_imsc = (volatile uint32_t *)(RP1_UART0_BASE + UART_IMSC);
     *uart_imsc = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
-
-    /*
-     * Step 4: Enable RP1 MSI-X vector 25 (UART0).
-     *
-     * IACK_EN: auto-mask on assert (required for level-triggered PL011).
-     * After servicing, the handler must write IACK to re-enable.
-     */
-    DEBUG_PRINT("Step 4: RP1 MSIX_CFG enable...");
-    volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
-                                                         + RP1_MSIX_CFG(RP1_INT_UART0));
-    *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    /* IACK any pending state */
-    *msix_set = MSIX_CFG_IACK;
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    /*
-     * Step 5: Enable GIC SPI for UART0.
-     *
-     * MIP0 vector 25 → GIC SPI 153 → GIC IRQ 185 (UART_IRQ).
-     * Set edge-triggered since MIP converts MSI-X writes to edge pulses.
-     */
-    DEBUG_PRINT("Step 5: GIC SPI enable...");
-    gic_set_priority(UART_IRQ, GIC_PRIORITY_DEFAULT);
-    gic_enable_irq(UART_IRQ);
 
     INFO("UART IRQ enabled (GIC IRQ %d = SPI %d, RP1 vec %d)",
          UART_IRQ, UART_IRQ - 32, RP1_INT_UART0);

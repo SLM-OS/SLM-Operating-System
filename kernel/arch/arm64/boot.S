@@ -274,14 +274,60 @@ real_start:
      * RC base: 0x10_00120000 (pcie2 for RP1)
      */
     /*
-     * PCIe RC BAR1 and MIP0 configuration for interrupt routing.
-     * These writes succeed from EL2 but break RP1 peripheral access
-     * (outbound window conflict). Disabled pending investigation of
-     * the correct outbound window / BAR1 interaction.
-     *
-     * TODO: Configure BAR1->MIP0 without disrupting the outbound window
-     * that the firmware set up for RP1 peripheral MMIO.
+     * Enable MSI-X in RP1 PCIe config space (requires EL2 for writes).
+     * EXT_CFG: write bus/devfn to RC+0x9000, data at RC+0x8000+offset.
+     * MSI-X cap is at offset 0xB0. Message Control is at 0xB0+2 (in
+     * the upper 16 bits of the 32-bit word at 0xB0).
+     * Set Enable (bit 15) but NOT Function Mask (bit 14).
      */
+    ldr     x10, =0x1000129000     /* EXT_CFG_INDEX */
+    str     wzr, [x10]             /* bus=0, devfn=0 */
+    dsb     sy
+    ldr     x10, =0x10001280B0     /* EXT_CFG_DATA + 0xB0 (MSI-X cap) */
+    ldr     w11, [x10]             /* Read current value */
+    orr     w11, w11, #(1 << 31)   /* Set Enable (bit 15 of upper 16 = bit 31) */
+    bic     w11, w11, #(1 << 30)   /* Clear Function Mask (bit 14 = bit 30) */
+    str     w11, [x10]             /* Write back */
+    dsb     sy
+
+    /*
+     * Configure RC BAR1 for MSI-X -> MIP0 routing.
+     * Routes RP1 MSI-X writes (PCIe addr 0xFF_FFFFF000) to MIP0.
+     */
+    ldr     x10, =0x100012402C     /* RC_BAR1_CONFIG_LO */
+    ldr     w11, =0xFFFFF01C       /* PCIe addr low + 4KB size */
+    str     w11, [x10]
+    ldr     x10, =0x1000124030     /* RC_BAR1_CONFIG_HI */
+    ldr     w11, =0x000000FF       /* PCIe addr high */
+    str     w11, [x10]
+    ldr     x10, =0x10001240AC     /* UBUS_BAR1_CONFIG_REMAP */
+    ldr     w11, =0x00130001       /* MIP0 phys low + enable */
+    str     w11, [x10]
+    ldr     x10, =0x10001240B0     /* UBUS_BAR1_CONFIG_REMAP_HI */
+    mov     w11, #0x10             /* MIP0 phys high */
+    str     w11, [x10]
+    dsb     sy
+
+    /*
+     * Initialize MIP0 (MSI-X Interrupt Peripheral).
+     * Unmask UART0 (vector 25) for host, mask all for VPU.
+     */
+    mvn     w11, wzr               /* 0xFFFFFFFF */
+    ldr     x10, =0x1000130040     /* MIP_INT_MASKL_HOST */
+    mov     w12, w11
+    bic     w12, w12, #(1 << 25)   /* Unmask UART0 only */
+    str     w12, [x10]
+    ldr     x10, =0x1000130050     /* MIP_INT_MASKH_HOST */
+    str     w11, [x10]             /* All high masked */
+    ldr     x10, =0x1000130060     /* MIP_INT_MASKL_VPU */
+    str     w11, [x10]
+    ldr     x10, =0x1000130070     /* MIP_INT_MASKH_VPU */
+    str     w11, [x10]
+    ldr     x10, =0x1000130020     /* MIP_INT_CFGL_HOST */
+    str     w11, [x10]             /* Edge-triggered */
+    ldr     x10, =0x1000130030     /* MIP_INT_CFGH_HOST */
+    str     w11, [x10]
+    dsb     sy
 
     adr     x10, .Lpi5_in_el1
     msr     elr_el2, x10
