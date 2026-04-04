@@ -102,6 +102,34 @@ _Alignas(16) uint8_t buffer[64];
 
 ---
 
+## Cache Maintenance (Pi 5 / No SMPEN)
+
+On Pi 5, TF-A does not set SMPEN for secondary cores. Use `cache.h` helpers for cross-CPU data:
+
+**Critical rule: DC CIVAC writes back dirty data before invalidating.**
+
+If CPU 0 has a dirty cacheline and you call `cache_invalidate()` (DC CIVAC), it first writes CPU 0's stale data to PoC, overwriting any newer value written by another CPU. Always `cache_clean()` or `cache_clean_range()` shared data on the writer side before another CPU uses `cache_invalidate()` to read it.
+
+**Pattern for cross-CPU data init:**
+```c
+/* CPU 0: initialize shared data, then clean before secondary boot */
+for (uint32_t i = 0; i < cpu_count; i++)
+    init_data(i);
+cache_clean_range(shared_data, sizeof(shared_data));
+
+/* Secondary CPU: write, then clean */
+shared_data[cpu].field = value;
+cache_clean(&shared_data[cpu].field);
+
+/* CPU 0 (reader): invalidate, then read */
+cache_invalidate(&shared_data[cpu].field);
+val = shared_data[cpu].field;
+```
+
+**False sharing:** `struct per_cpu` is 40 bytes. Adjacent entries share 64-byte cachelines. A dirty write to `cpu_data[0]` can be written back by CIVAC when invalidating `cpu_data[1]`.
+
+---
+
 ## Platform Abstraction
 
 - Use compile-time `#ifdef` for driver selection (UART, timer)

@@ -67,7 +67,7 @@ See `docs/pi5-baremetal-status.md` for full details.
 - ✅ Hardware spinlocks (runtime-enabled after MMU, `spinlock_hw_enabled`)
 
 ### Remaining Pi 5 Work
-- ☐ Run QEMU test suite on Pi 5 hardware
+- ✅ Run QEMU test suite on Pi 5 hardware (384 tests: 369 pass, 15 ignored, 0 failures)
 - ☐ Timer-driven sleep/delay functions
 - ☐ Interrupt-driven UART (PL011 via RP1 MSI→GIC SPI)
 - ☐ Fix task_exit/schedule race on secondary CPUs

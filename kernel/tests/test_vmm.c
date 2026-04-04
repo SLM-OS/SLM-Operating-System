@@ -101,7 +101,10 @@ static void test_remap_requires_invalidation(void)
 {
     /* Get current PTE for test address */
     uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
-    TEST_ASSERT_TRUE(original_pte != 0);
+    if (original_pte == 0) {
+        TEST_IGNORE_MESSAGE("L1 block mapping: no L2 entry to remap");
+        return;
+    }
 
     /* Write distinct markers to two different physical addresses */
     volatile uint64_t *pa1_ptr = (volatile uint64_t *)TEST_PA1;
@@ -152,7 +155,10 @@ static void test_remap_requires_invalidation(void)
 static void test_remap_with_full_flush(void)
 {
     uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
-    TEST_ASSERT_TRUE(original_pte != 0);
+    if (original_pte == 0) {
+        TEST_IGNORE_MESSAGE("L1 block mapping: no L2 entry to remap");
+        return;
+    }
 
     volatile uint64_t *pa1_ptr = (volatile uint64_t *)TEST_PA1;
     volatile uint64_t *pa2_ptr = (volatile uint64_t *)TEST_PA2;
@@ -188,7 +194,10 @@ static void test_remap_with_full_flush(void)
 static void test_remap_with_range_invalidation(void)
 {
     uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
-    TEST_ASSERT_TRUE(original_pte != 0);
+    if (original_pte == 0) {
+        TEST_IGNORE_MESSAGE("L1 block mapping: no L2 entry to remap");
+        return;
+    }
 
     volatile uint64_t *pa1_ptr = (volatile uint64_t *)TEST_PA1;
     volatile uint64_t *pa2_ptr = (volatile uint64_t *)TEST_PA2;
@@ -230,7 +239,10 @@ static void test_remap_with_range_invalidation(void)
 static void test_sequential_remaps(void)
 {
     uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
-    TEST_ASSERT_TRUE(original_pte != 0);
+    if (original_pte == 0) {
+        TEST_IGNORE_MESSAGE("L1 block mapping: no L2 entry to remap");
+        return;
+    }
 
     /* Use three different physical addresses */
     uint64_t pa1 = TEST_PA1;
@@ -286,6 +298,10 @@ static void test_sequential_remaps(void)
 static void test_rapid_remap_stress(void)
 {
     uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
+    if (original_pte == 0) {
+        TEST_IGNORE_MESSAGE("L1 block mapping: no L2 entry to remap");
+        return;
+    }
 
     volatile uint64_t *ptr1 = (volatile uint64_t *)TEST_PA1;
     volatile uint64_t *ptr2 = (volatile uint64_t *)TEST_PA2;
@@ -408,6 +424,38 @@ static void test_vmm_stats_bytes_mapped_no_overflow(void)
     TEST_ASSERT_TRUE(stats.bytes_mapped >= (uint64_t)stats.blocks_mapped * 1024 * 1024);
 }
 
+/*
+ * Test: L1 block mapping detection
+ *
+ * Pi 5 maps RAM with 1GB L1 block descriptors (no L2 tables for RAM).
+ * QEMU virt uses L2 tables with 2MB entries. This test verifies that
+ * vmm_test_get_l2_entry correctly returns 0 for L1 block mappings
+ * and non-zero for L2 table mappings.
+ */
+static void test_l1_block_mapping_detection(void)
+{
+    uint64_t pte = vmm_test_get_l2_entry(TEST_VA);
+
+#if defined(PLATFORM_RASPI5)
+    /*
+     * Pi 5 uses 1GB L1 block descriptors for the entire 4GB RAM region.
+     * vmm_test_get_l2_entry should return 0 because there is no L2 table
+     * for this address — the L1 entry is a block descriptor, not a table.
+     */
+    TEST_ASSERT_EQUAL_HEX64(0, pte);
+#else
+    /*
+     * QEMU virt uses L2 tables with 2MB block entries for RAM.
+     * vmm_test_get_l2_entry should return a valid non-zero PTE.
+     */
+    TEST_ASSERT_TRUE(pte != 0);
+#endif
+
+    /* virt_to_phys should work regardless of mapping granularity */
+    uint64_t pa = vmm_virt_to_phys(TEST_VA);
+    TEST_ASSERT_EQUAL_HEX64(TEST_PA1, pa);
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -419,6 +467,9 @@ int test_suite_vmm(void)
     /* Page table verification */
     RUN_TEST(test_virt_to_phys_accuracy);
     RUN_TEST(test_va_pa_coherency);
+
+    /* Platform-specific mapping granularity */
+    RUN_TEST(test_l1_block_mapping_detection);
 
     /* TLB invalidation correctness - the KEY tests */
     RUN_TEST(test_remap_requires_invalidation);

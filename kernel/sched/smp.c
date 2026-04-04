@@ -520,6 +520,15 @@ void smp_init(void)
     cpu_data[0].online = true;
     cpus_online = 1;
 
+    /*
+     * Clean all cpu_data cachelines to PoC before booting secondaries.
+     * Without SMPEN, DC CIVAC (used later to read secondary updates)
+     * first writes back any dirty data from this CPU's L1. If cpu_data
+     * is still dirty here (from init_cpu_data writing online=false),
+     * CIVAC would overwrite the secondary's online=true at PoC.
+     */
+    cache_clean_range(cpu_data, sizeof(cpu_data));
+
     /* Boot secondary CPUs via PSCI CPU_ON */
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
         if (boot_secondary(cpu) == PSCI_SUCCESS) {

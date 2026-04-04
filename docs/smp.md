@@ -597,6 +597,10 @@ These operations are applied to shared data structures (e.g., `cpus_online`, `cp
 
 The raw DC CVAC/CIVAC instructions have been refactored into portable helpers in `kernel/include/cache.h`: `cache_clean()`, `cache_invalidate()`, `cache_clean_range()`, and `cache_invalidate_range()`. These are active cache maintenance operations on Pi 5 (`PLATFORM_RASPI5`) and no-ops (memory barriers only) on QEMU and other platforms with working hardware coherency.
 
+**DC CIVAC Writeback Bug (Fixed April 2026):** A subtle interaction with DC CIVAC caused secondary CPUs' `online` flags to appear false from CPU 0. The root cause: CPU 0 called `init_cpu_data()` which wrote `online = false` to `cpu_data[]`, making those cachelines dirty in CPU 0's L1. Later, secondary CPUs set `online = true` and called `cache_clean()` (DC CVAC) to push their writes to PoC. However, when CPU 0 called `cache_invalidate()` (DC CIVAC) to read the updated value, the CIVAC instruction first **wrote back** CPU 0's stale dirty data to PoC (the "clean" phase of clean-and-invalidate), overwriting the secondary CPU's newer `true` with CPU 0's old `false`. Only then did it invalidate and re-read — fetching the now-corrupted value.
+
+The fix: `cache_clean_range(cpu_data, sizeof(cpu_data))` is called after `init_cpu_data()` but before booting any secondary CPUs. This ensures CPU 0's cachelines are clean (not dirty) in L1, so subsequent DC CIVAC operations have nothing stale to write back. The `struct per_cpu` is 40 bytes, meaning adjacent CPU entries share cachelines (64-byte lines), which exacerbated the false-sharing aspect of this bug.
+
 **CPU 0 Task Pinning:** Due to the cache coherency limitation, tasks without explicit CPU affinity are currently pinned to CPU 0. Secondary CPUs run idle and timer tasks but do not receive dispatched work. Cross-CPU task dispatch remains disabled until the SMPEN issue is resolved or an alternative coherency strategy is validated.
 
 ---

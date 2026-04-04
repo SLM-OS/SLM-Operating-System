@@ -13,6 +13,7 @@
 #include "timer.h"
 #include "platform.h"
 #include "uart.h"
+#include "cache.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <limits.h>
@@ -1731,6 +1732,8 @@ static void test_all_cpus_online(void)
 {
     extern volatile uint32_t cpus_online;
     extern uint32_t cpu_count;
+    cache_invalidate(&cpus_online);
+    cache_invalidate(&cpu_count);
     TEST_ASSERT_EQUAL_INT(cpu_count, cpus_online);
 }
 
@@ -1743,6 +1746,7 @@ static void test_cpu_data_online_flags(void)
     extern struct per_cpu cpu_data[];
     extern uint32_t cpu_count;
     for (uint32_t i = 0; i < cpu_count; i++) {
+        cache_invalidate(&cpu_data[i].online);
         TEST_ASSERT_TRUE(cpu_data[i].online);
     }
 }
@@ -1754,6 +1758,55 @@ static void test_cpu_data_online_flags(void)
 static void test_boot_cpu_is_cpu0(void)
 {
     TEST_ASSERT_EQUAL_INT(0, cpu_id());
+}
+
+/*
+ * Test: cpus_online counter matches per-CPU online flags.
+ * Verifies consistency between the global counter and per-CPU structs.
+ * This catches the DC CIVAC writeback bug where CPU 0's stale dirty cacheline
+ * for cpu_data[] would overwrite secondary CPUs' online=true at PoC.
+ */
+static void test_cpus_online_matches_flags(void)
+{
+    extern struct per_cpu cpu_data[];
+    extern volatile uint32_t cpus_online;
+    extern uint32_t cpu_count;
+
+    cache_invalidate(&cpus_online);
+    uint32_t counter = cpus_online;
+    uint32_t flags_count = 0;
+
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        cache_invalidate(&cpu_data[i].online);
+        if (cpu_data[i].online) {
+            flags_count++;
+        }
+    }
+
+    TEST_ASSERT_EQUAL_UINT32(counter, flags_count);
+}
+
+/*
+ * Test: Per-CPU struct fields are consistent after boot.
+ * Verifies that cpu_data[i] has correct cpu_id and valid mpidr after
+ * cache maintenance. This tests that cache_clean_range on cpu_data before
+ * secondary boot doesn't corrupt neighboring struct fields (false sharing).
+ */
+static void test_cpu_data_fields_consistent(void)
+{
+    extern struct per_cpu cpu_data[];
+    extern uint32_t cpu_count;
+    extern uint64_t cpu_logical_map[];
+
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        /* Invalidate the entire per-CPU struct to get fresh data */
+        cache_invalidate_range(&cpu_data[i], sizeof(struct per_cpu));
+
+        TEST_ASSERT_EQUAL_UINT32(i, cpu_data[i].cpu_id);
+        TEST_ASSERT_EQUAL_HEX64(cpu_logical_map[i], cpu_data[i].mpidr);
+        TEST_ASSERT_TRUE(cpu_data[i].online);
+        TEST_ASSERT_TRUE(cpu_data[i].stack_top != NULL);
+    }
 }
 
 /* ============================================================================
@@ -1834,6 +1887,10 @@ int test_suite_scheduler(void)
     RUN_TEST(test_all_cpus_online);
     RUN_TEST(test_cpu_data_online_flags);
     RUN_TEST(test_boot_cpu_is_cpu0);
+
+    /* SMP: cache coherency regression tests */
+    RUN_TEST(test_cpus_online_matches_flags);
+    RUN_TEST(test_cpu_data_fields_consistent);
 
     return UnityEnd();
 }
