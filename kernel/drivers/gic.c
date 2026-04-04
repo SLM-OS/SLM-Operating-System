@@ -208,14 +208,19 @@ static void gic_dist_init(void)
     uint32_t ctlr_before = GICD_CTLR;
     DEBUG_PRINT("GICD_CTLR before init: 0x%x", ctlr_before);
 
-    /* Disable distributor while configuring */
-    GICD_CTLR = 0;
+    /* NOTE: Do NOT disable the distributor (GICD_CTLR=0).
+     * TF-A configures the GIC from EL3 and disabling/re-enabling from
+     * non-secure EL1 may reset secure-side state needed for SPI delivery.
+     * Instead, configure interrupts incrementally. */
 
     /* Get number of interrupt lines */
     uint32_t typer = GICD_TYPER;
     uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
 
-    DEBUG_PRINT("GICv2: %u interrupt lines", num_irqs);
+    /* Check GIC architecture revision */
+    uint32_t pidr2 = *(volatile uint32_t *)(GICD_BASE + 0xFE8);
+    uint32_t arch_rev = (pidr2 >> 4) & 0xF;
+    DEBUG_PRINT("GICv2: %u IRQs, PIDR2=0x%x arch=%u", num_irqs, pidr2, arch_rev);
 
     /* Disable all interrupts */
     for (uint32_t i = 0; i < num_irqs / 32; i++) {
@@ -257,8 +262,8 @@ static void gic_dist_init(void)
         *(volatile uint32_t *)(GICD_BASE + 0x380 + 4 * i) = 0xFFFFFFFF;
     }
 
-    /* Enable distributor: both Group 0 and Group 1 */
-    GICD_CTLR = 3;
+    /* Ensure EnableGrp1 is set (don't touch other bits TF-A configured) */
+    GICD_CTLR = ctlr_before | 1;
 
     DEBUG_PRINT("GICD_CTLR after init: 0x%x", GICD_CTLR);
 }
