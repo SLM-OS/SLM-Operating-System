@@ -300,7 +300,7 @@
 
 /* PCIe RC config space access (EXT_CFG mechanism) */
 #define PCIE_RC_EXT_CFG_INDEX  0x9000       /* Write bus/devfn selector */
-#define PCIE_RC_EXT_CFG_DATA   0x8000       /* Config data (4KB window, per Circle) */
+#define PCIE_RC_EXT_CFG_DATA   0x8000       /* Config data (firmware uses default offset) */
 
 /* MSI-X target address (PCIe address that RC BAR1 routes to MIP0) */
 #define MSIX_MSG_ADDR_LO   0xFFFFF000UL
