@@ -198,6 +198,49 @@ int cmd_cpu(int argc, char *argv[])
         uart_printf("  GIC pend:    %d  MIP status: 0x%x  RP1 INTSTAT: 0x%x\r\n",
                     pending, mip_st, rp1_st);
         uart_printf("  PL011 RIS:   0x%x  MIS: 0x%x\r\n", *ris, *mis);
+
+        /* MSIX_CFG register for UART0 vector */
+        volatile uint32_t *msix_cfg = (volatile uint32_t *)(RP1_INTC_BASE + RP1_MSIX_CFG(RP1_INT_UART0));
+        uart_printf("  MSIX_CFG[25]:0x%x\r\n", *msix_cfg);
+
+        /* Read MSI-X capability from config space (at 0x8000+0xB0) */
+        volatile uint32_t *msix_cap = (volatile uint32_t *)(PCIE_RC_BASE + 0x8000 + 0xB0);
+        uart_printf("  MSI-X cap:   0x%x (Enable=%d FuncMask=%d)\r\n",
+                    *msix_cap, (*msix_cap >> 31) & 1, (*msix_cap >> 30) & 1);
+
+        /* Read MSI-X table entry 25 */
+        volatile uint32_t *e25 = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + 25 * 16);
+        uart_printf("  MSIX tbl[25]:addr=0x%x_%08x data=0x%x ctrl=0x%x\r\n",
+                    e25[1], e25[0], e25[2], e25[3]);
+
+        /* GIC target and priority for UART IRQ */
+        uint32_t tgt_reg = UART_IRQ / 4;
+        uint32_t tgt_off = (UART_IRQ % 4) * 8;
+        volatile uint32_t *itargets = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x800 + 4 * tgt_reg);
+        uint8_t target = (*itargets >> tgt_off) & 0xFF;
+        uint32_t pri_reg = UART_IRQ / 4;
+        uint32_t pri_off = (UART_IRQ % 4) * 8;
+        volatile uint32_t *ipriority = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x400 + 4 * pri_reg);
+        uint8_t priority = (*ipriority >> pri_off) & 0xFF;
+        /* Active state */
+        uint32_t act_reg = UART_IRQ / 32;
+        uint32_t act_bit = UART_IRQ % 32;
+        volatile uint32_t *isactiver = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x300 + 4 * act_reg);
+        int active = (*isactiver >> act_bit) & 1;
+        /* Enable state */
+        volatile uint32_t *isenabler = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x100 + 4 * act_reg);
+        int enabled = (*isenabler >> act_bit) & 1;
+
+        uart_printf("  GIC IRQ %d: target=0x%x pri=0x%x active=%d enabled=%d\r\n",
+                    UART_IRQ, target, priority, active, enabled);
+
+        /* Try software-triggering the interrupt to test handler */
+        if (!uart_is_irq_mode()) {
+            volatile uint32_t *ispendr_w = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + 4 * pend_reg);
+            *ispendr_w = (1U << pend_bit);  /* Set pending */
+            __asm__ volatile("dsb sy; isb" ::: "memory");
+            uart_printf("  [Triggered IRQ %d — check UART RX mode on next `cpu`]\r\n", UART_IRQ);
+        }
     }
 #endif
 

@@ -249,7 +249,7 @@
  * 2. MIP0: unmasks vectors, converts MSI-X to GIC SPIs
  * 3. RP1 MSIX_CFG: enables per-vector MSI-X forwarding
  */
-#define UART_IRQ            (32 + 128 + RP1_INT_UART0) /* = 185: SPI 153 */
+#define UART_IRQ            (32 + 229)      /* PCIe INTA: GIC SPI 229 (Circle approach) */
 
 /* RP1 PCIE_CFG register block (MSI-X configuration) */
 #define RP1_INTC_BASE       0x1F00108000UL

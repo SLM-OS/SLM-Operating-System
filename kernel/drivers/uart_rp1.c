@@ -267,25 +267,23 @@ char uart_getc(void)
  * ============================================================================ */
 
 /*
- * UART RX interrupt handler.
+ * PCIe INTA chained handler for RP1 UART0 interrupt.
  *
- * Called from el1_irq_handler when GIC reports UART_IRQ (153).
- * Drains the PL011 RX FIFO into the ring buffer.
- *
- * MUST NOT call uart_printf/uart_puts — the UART TX spinlock may be
- * held by the interrupted code, causing deadlock.
- */
-/*
- * PCIe INTA chained handler — dispatches RP1 peripheral interrupts.
- *
- * Called from el1_irq_handler when GIC reports UART_IRQ (PCIe INTA, SPI 229).
- * Reads RP1 INTSTAT to determine which peripheral(s) fired, handles them,
- * and writes IACK to unmask level-triggered vectors.
+ * Called from el1_irq_handler when GIC reports UART_IRQ (SPI 229).
+ * Checks RP1 INTSTAT for UART0 (vector 25), drains PL011 FIFO,
+ * clears PL011 ICR, then IACKs the RP1 MSIX_CFG vector.
  *
  * MUST NOT call uart_printf/uart_puts — deadlock risk.
  */
 void uart_irq_handler(void)
 {
+    volatile uint32_t *intstatl = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_INTSTATL);
+    uint32_t pending = *intstatl;
+
+    if (!(pending & (1U << RP1_INT_UART0))) {
+        return;  /* Not UART0 — some other RP1 peripheral on PCIe INTA */
+    }
+
     volatile uint32_t *uart_dr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
     volatile uint32_t *uart_fr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
     volatile uint32_t *uart_icr = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
@@ -306,7 +304,7 @@ void uart_irq_handler(void)
     *uart_icr = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* IACK the RP1 MSI-X vector (unmasks for next interrupt) */
+    /* IACK the RP1 MSIX_CFG vector (unmasks for next interrupt) */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_IACK;
@@ -329,8 +327,9 @@ void uart_irq_handler(void)
  * Try multiple bus numbers to find RP1. Firmware may enumerate it
  * on bus 0 (integrated) or bus 1 (standard PCIe enumeration).
  */
-static uint32_t rp1_bus = 1;  /* Will be updated by uart_irq_init */
-
+/* PCIe config space access (used by old MSI-X approach, kept for reference) */
+#if 0
+static uint32_t rp1_bus = 1;
 static uint32_t rp1_cfg_read32(uint32_t reg)
 {
     volatile uint32_t *idx = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_INDEX);
@@ -348,14 +347,71 @@ static void rp1_cfg_write32(uint32_t reg, uint32_t val)
     *(volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_DATA + (reg & 0xFFC)) = val;
     __asm__ volatile("dsb sy" ::: "memory");
 }
+#endif /* config space access functions */
 
 void uart_irq_init(void)
 {
     rx_head = 0;
     rx_tail = 0;
     uart_irq_mode = 0;
-    uint8_t msix_cap = 0;  /* Set during config space walk, used for function mask clear */
 
+    /*
+     * PCIe INTA approach (like Circle):
+     * RP1 interrupts arrive at GIC as PCIe INTA (SPI 229).
+     * Enable the RP1 MSIX_CFG for UART0 vector, configure PL011,
+     * and set up the GIC handler. No MSI-X table or BAR1/MIP needed.
+     *
+     * Ordering: GIC first (handler ready), then MSIX_CFG, then PL011 last.
+     */
+
+    /* 1. Enable GIC SPI 229 (PCIe INTA) */
+    gic_set_priority(UART_IRQ, GIC_PRIORITY_DEFAULT);
+    gic_enable_irq(UART_IRQ);
+
+    /* 2. Enable RP1 MSIX_CFG vector 25 with IACK_EN */
+    volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
+                                                         + RP1_MSIX_CFG(RP1_INT_UART0));
+    *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* 3. PL011: drain FIFO, clear interrupts, enable IMSC */
+    volatile uint32_t *uart_ifls = (volatile uint32_t *)(RP1_UART0_BASE + UART_IFLS);
+    *uart_ifls = (*uart_ifls & ~(0x7 << 3)) | (0x0 << 3);
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    volatile uint32_t *uart_icr = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
+    volatile uint32_t *uart_fr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
+    volatile uint32_t *uart_dr  = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
+    *uart_icr = 0x7FF;
+    __asm__ volatile("dsb sy" ::: "memory");
+    while (!(*uart_fr & FR_RXFE)) {
+        (void)*uart_dr;
+    }
+    *uart_icr = 0x7FF;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    volatile uint32_t *uart_imsc = (volatile uint32_t *)(RP1_UART0_BASE + UART_IMSC);
+    *uart_imsc = IMSC_RXIM | IMSC_RTIM;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* 4. Final cleanup: clear stale PL011 state, IACK last */
+    *uart_icr = 0x7FF;
+    __asm__ volatile("dsb sy" ::: "memory");
+    while (!(*uart_fr & FR_RXFE)) {
+        (void)*uart_dr;
+    }
+    *uart_icr = 0x7FF;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    *msix_set = MSIX_CFG_IACK;  /* Unmask for first interrupt */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    INFO("UART IRQ enabled (GIC IRQ %d, RP1 vec %d)",
+         UART_IRQ, RP1_INT_UART0);
+}
+
+/* DEAD CODE BELOW — old MSI-X approach preserved for reference */
+#if 0
     /*
      * Step 0a: Enable MSI-X in RP1's PCIe config space.
      *
@@ -586,30 +642,31 @@ skip_msix:
      *   3. PL011 IMSC (interrupt source — last, arms the trigger)
      */
 
-    /* Step 1: Enable GIC SPI for UART0 (level-triggered) */
-    DEBUG_PRINT("Enabling GIC SPI %d...", UART_IRQ);
+    /*
+     * Enable the interrupt chain. Critical ordering:
+     * 1. GIC handler ready first
+     * 2. MSIX_CFG enabled (will auto-mask on first assertion)
+     * 3. PL011 configured: drain FIFO, clear ICR, enable IMSC
+     * 4. Clear all stale state (GIC pending, PL011 ICR)
+     * 5. IACK MSIX_CFG LAST — this unmasks for the first real interrupt
+     *
+     * The IACK must be the absolute last step because with IACK_EN,
+     * any PL011 assertion while MSIX_CFG is unmasked will immediately
+     * fire an MSI-X and auto-mask. So we must ensure the PL011 is
+     * quiescent (FIFO empty, ICR cleared) before the final IACK.
+     */
+
+    /* 1. GIC: enable SPI, set priority */
     gic_set_priority(UART_IRQ, GIC_PRIORITY_DEFAULT);
     gic_enable_irq(UART_IRQ);
-    /* Clear any pending state before enabling */
-    {
-        uint32_t pend_reg = UART_IRQ / 32;
-        uint32_t pend_bit = UART_IRQ % 32;
-        volatile uint32_t *icpendr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x280 + 4 * pend_reg);
-        *icpendr = (1U << pend_bit);  /* Clear pending */
-        __asm__ volatile("dsb sy" ::: "memory");
-    }
 
-    /* Step 2: Enable RP1 MSI-X vector 25 with IACK_EN */
-    DEBUG_PRINT("Enabling RP1 MSIX_CFG vector %d...", RP1_INT_UART0);
+    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (auto-mask on assert) */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
     __asm__ volatile("dsb sy" ::: "memory");
-    *msix_set = MSIX_CFG_IACK;  /* Clear any pending state */
-    __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Step 3: Configure and enable PL011 RX interrupts (arms the trigger) */
-    DEBUG_PRINT("Enabling PL011 RX interrupts...");
+    /* 3. PL011: configure FIFO level, drain stale data, enable IMSC */
     volatile uint32_t *uart_ifls = (volatile uint32_t *)(RP1_UART0_BASE + UART_IFLS);
     *uart_ifls = (*uart_ifls & ~(0x7 << 3)) | (0x0 << 3);
     __asm__ volatile("dsb sy" ::: "memory");
@@ -629,9 +686,33 @@ skip_msix:
     *uart_imsc = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    INFO("UART IRQ enabled (GIC IRQ %d = SPI %d, RP1 vec %d)",
-         UART_IRQ, UART_IRQ - 32, RP1_INT_UART0);
-}
+    /* 4. Clear all stale interrupt state */
+    /* Clear PL011 ICR one more time (IMSC enable may have triggered) */
+    *uart_icr = 0x7FF;
+    __asm__ volatile("dsb sy" ::: "memory");
+    /* Drain any last-moment FIFO data */
+    while (!(*uart_fr & FR_RXFE)) {
+        (void)*uart_dr;
+    }
+    *uart_icr = 0x7FF;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Clear GIC pending (from any MSI-X that fired during init) */
+    {
+        uint32_t pend_reg = UART_IRQ / 32;
+        uint32_t pend_bit = UART_IRQ % 32;
+        volatile uint32_t *icpendr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x280 + 4 * pend_reg);
+        *icpendr = (1U << pend_bit);
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+
+    /* 5. IACK — unmask MSIX_CFG for the first real interrupt.
+     * PL011 should be quiescent now (FIFO empty, ICR cleared).
+     * The next character that arrives will trigger the full path. */
+    *msix_set = MSIX_CFG_IACK;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+#endif /* old MSI-X approach */
 
 /*
  * Check if UART is in interrupt-driven mode.
