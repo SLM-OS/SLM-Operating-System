@@ -265,6 +265,24 @@ real_start:
     /* Set up return to EL1h with interrupts masked */
     mov     x10, #0x3c4             /* EL1h, DAIF masked */
     msr     spsr_el2, x10
+    /*
+     * Configure PCIe RC BAR1 → MIP0 routing (must be done from EL2).
+     * PCIe RC register writes hang from EL1 — the hardware restricts
+     * write access to EL2+. This routes RP1 MSI-X writes (PCIe addr
+     * 0xFF_FFFFF000) to MIP0 (phys 0x10_00130000) for interrupt delivery.
+     *
+     * RC base: 0x10_00120000 (pcie2 for RP1)
+     */
+    /*
+     * PCIe RC BAR1 and MIP0 configuration for interrupt routing.
+     * These writes succeed from EL2 but break RP1 peripheral access
+     * (outbound window conflict). Disabled pending investigation of
+     * the correct outbound window / BAR1 interaction.
+     *
+     * TODO: Configure BAR1->MIP0 without disrupting the outbound window
+     * that the firmware set up for RP1 peripheral MMIO.
+     */
+
     adr     x10, .Lpi5_in_el1
     msr     elr_el2, x10
     eret

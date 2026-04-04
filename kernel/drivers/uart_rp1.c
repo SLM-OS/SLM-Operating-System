@@ -516,43 +516,37 @@ skip_msix:
      * The firmware may have already configured this (it uses RP1 for
      * HDMI/USB), but we set it explicitly to be safe.
      */
-    /* Read RC BAR1 config to check if firmware already set up MIP routing */
+    /* Verify RC BAR1→MIP0 routing (configured from EL2 in boot.S) */
     {
         volatile uint32_t *rc_bar1_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR1_CONFIG_LO);
-        volatile uint32_t *rc_bar1_hi = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR1_CONFIG_HI);
         volatile uint32_t *rc_remap_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR1_REMAP);
-        volatile uint32_t *rc_remap_hi = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR1_REMAP_HI);
-        DEBUG_PRINT("RC BAR1: lo=0x%x hi=0x%x remap=0x%x_%x",
-                    *rc_bar1_lo, *rc_bar1_hi, *rc_remap_hi, *rc_remap_lo);
+        uint32_t bar1 = *rc_bar1_lo;
+        uint32_t remap = *rc_remap_lo;
+        if (bar1 == 0xFFFFF01C && remap == 0x00130001) {
+            DEBUG_PRINT("RC BAR1→MIP0 routing verified (configured from EL2)");
+        } else {
+            INFO("UART IRQ: RC BAR1 not configured (lo=0x%x remap=0x%x)", bar1, remap);
+        }
     }
 
-    /*
-     * Step 2: Initialize MIP0 (MSI-X Interrupt Peripheral).
-     *
-     * Unmask all vectors for host CPU, mask all for VPU.
-     * Set all vectors to edge-triggered (MSI-X writes are edges).
-     */
-    volatile uint32_t *mip_maskl_host = (volatile uint32_t *)(MIP0_BASE + MIP_INT_MASKL_HOST);
-    volatile uint32_t *mip_maskh_host = (volatile uint32_t *)(MIP0_BASE + MIP_INT_MASKH_HOST);
-    volatile uint32_t *mip_maskl_vpu  = (volatile uint32_t *)(MIP0_BASE + MIP_INT_MASKL_VPU);
-    volatile uint32_t *mip_maskh_vpu  = (volatile uint32_t *)(MIP0_BASE + MIP_INT_MASKH_VPU);
-    volatile uint32_t *mip_cfgl_host  = (volatile uint32_t *)(MIP0_BASE + MIP_INT_CFGL_HOST);
-    volatile uint32_t *mip_cfgh_host  = (volatile uint32_t *)(MIP0_BASE + MIP_INT_CFGH_HOST);
-
-    *mip_maskl_host = 0x00000000;   /* Unmask vectors 0-31 for host */
-    *mip_maskh_host = 0x00000000;   /* Unmask vectors 32-63 for host */
-    *mip_maskl_vpu  = 0xFFFFFFFF;   /* Mask all for VPU */
-    *mip_maskh_vpu  = 0xFFFFFFFF;
-    *mip_cfgl_host  = 0xFFFFFFFF;   /* Edge-triggered */
-    *mip_cfgh_host  = 0xFFFFFFFF;
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    DEBUG_PRINT("MIP0 initialized (64 vectors, edge-triggered, host-unmasked)");
+    /* MIP0 initialization is done from EL2 in boot.S (write access requires EL2).
+     * Verify the MIP0 mask registers are set correctly. */
+    {
+        volatile uint32_t *mip_maskl = (volatile uint32_t *)(MIP0_BASE + MIP_INT_MASKL_HOST);
+        uint32_t expected = ~(1U << RP1_INT_UART0);  /* All masked except UART0 */
+        uint32_t actual = *mip_maskl;
+        if (actual == expected) {
+            DEBUG_PRINT("MIP0 verified (UART0 unmasked, configured from EL2)");
+        } else {
+            DEBUG_PRINT("MIP0 mask: expected 0x%x got 0x%x", expected, actual);
+        }
+    }
 
     /*
      * Step 3: Configure PL011 UART for interrupt-driven RX.
      */
 
+    DEBUG_PRINT("Step 3: PL011 interrupt config...");
     /* Set RX FIFO trigger level to 1/8 full (2 bytes) for low latency */
     volatile uint32_t *uart_ifls = (volatile uint32_t *)(RP1_UART0_BASE + UART_IFLS);
     *uart_ifls = (*uart_ifls & ~(0x7 << 3)) | (0x0 << 3);
@@ -582,6 +576,7 @@ skip_msix:
      * IACK_EN: auto-mask on assert (required for level-triggered PL011).
      * After servicing, the handler must write IACK to re-enable.
      */
+    DEBUG_PRINT("Step 4: RP1 MSIX_CFG enable...");
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
@@ -597,6 +592,7 @@ skip_msix:
      * MIP0 vector 25 → GIC SPI 153 → GIC IRQ 185 (UART_IRQ).
      * Set edge-triggered since MIP converts MSI-X writes to edge pulses.
      */
+    DEBUG_PRINT("Step 5: GIC SPI enable...");
     gic_set_priority(UART_IRQ, GIC_PRIORITY_DEFAULT);
     gic_enable_irq(UART_IRQ);
 

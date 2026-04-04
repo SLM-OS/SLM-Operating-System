@@ -111,7 +111,7 @@ PL011 UART0 (0x1F00030000)
 - MSI-X capability at config offset 0xB0: 61 vectors, table in BAR0 offset 0, PBA at BAR0+0x2000.
 - BAR0 PCIe address = 0x00410000. Outbound window base = 0x1F03F00000, offset = 0. So MSI-X table CPU address = 0x1F04310000 (NOT 0x1F00410000).
 - RC BAR1 is unconfigured (all zeros) — firmware did not set up MIP routing.
-- **Root cause hypothesis:** PCIe RC register space is read-only from EL1. The firmware or TF-A may lock down write access. Linux may handle this differently (brcmstb driver init at EL2, or firmware service).
+- **Root cause confirmed:** PCIe RC register writes require EL2. Writes from EL1 hang; writes from EL2 (in boot.S before ERET) succeed and values persist. However, writing RC BAR1 from EL2 **breaks RP1 peripheral MMIO access** — the BAR1 inbound window configuration conflicts with the firmware's outbound window that maps CPU addresses to RP1 peripherals. The next step is understanding the outbound/inbound window interaction on the brcmstb PCIe controller to configure BAR1 without disrupting RP1 MMIO.
 
 ## Configuration
 
