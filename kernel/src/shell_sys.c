@@ -243,12 +243,27 @@ int cmd_cpu(int argc, char *argv[])
         uart_printf("  GICC: CTLR=0x%x PMR=0x%x BPR=0x%x RPR=0x%x HPPIR=%u\r\n",
                     *gicc_ctlr, *gicc_pmr, *gicc_bpr, *gicc_rpr, *gicc_hppir);
 
-        /* Try software-triggering the interrupt to test handler */
+        /* Test: trigger a low-numbered SPI (64 = SPI 32) to test GIC SPI delivery */
         if (!uart_is_irq_mode()) {
-            volatile uint32_t *ispendr_w = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + 4 * pend_reg);
-            *ispendr_w = (1U << pend_bit);  /* Set pending */
+            uint32_t test_irq = 64;
+            uint32_t tr = test_irq / 32;
+            uint32_t tb = test_irq % 32;
+            volatile uint32_t *ispendr_t = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + 4 * tr);
+            volatile uint32_t *isenabler_t = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x100 + 4 * tr);
+            /* Enable and trigger test SPI */
+            *isenabler_t = (1U << tb);
+            __asm__ volatile("dsb sy" ::: "memory");
+            *ispendr_t = (1U << tb);
             __asm__ volatile("dsb sy; isb" ::: "memory");
-            uart_printf("  [Triggered IRQ %d — check UART RX mode on next `cpu`]\r\n", UART_IRQ);
+            /* Check HPPIR now */
+            uint32_t hppir = *gicc_hppir;
+            uart_printf("  [Test SPI %d triggered, HPPIR=%u]\r\n", test_irq, hppir);
+            /* Disable test SPI */
+            volatile uint32_t *icenabler_t = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x180 + 4 * tr);
+            volatile uint32_t *icpendr_t = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x280 + 4 * tr);
+            *icenabler_t = (1U << tb);
+            *icpendr_t = (1U << tb);
+            __asm__ volatile("dsb sy" ::: "memory");
         }
     }
 #endif
