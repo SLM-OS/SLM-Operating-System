@@ -197,45 +197,44 @@ static inline uint32_t cpu_id(void) {
 
 ### Design
 
-Each CPU core needs private data:
-- Current running task
-- Run queue (tasks ready on this core)
-- Idle task
-- Core state (online, offline)
-- Statistics
+Per-CPU state is split between two structures:
+
+**`struct per_cpu` (in `smp.h`)** — SMP-level data, used during boot and for CPU identification:
 
 ```c
-#define MAX_CPUS 8  /* Support up to 8 cores */
-
 struct per_cpu {
-    uint32_t cpu_id;              /* Logical CPU ID */
-    struct task *current;          /* Currently running task */
-    struct task *idle_task;        /* Idle task for this core */
-    struct run_queue rq;           /* Per-core run queue */
-    volatile int online;           /* 1 if core is up */
-
-    /* Statistics */
-    uint64_t context_switches;
-    uint64_t timer_ticks;
-    uint64_t idle_time_ns;
+    uint32_t cpu_id;            /* Logical CPU ID */
+    uint64_t mpidr;             /* Physical MPIDR value */
+    volatile bool online;       /* True when core is up and running */
+    void *stack_top;            /* Top of this CPU's boot stack */
+    uint64_t boot_time_ns;      /* Time when this CPU came online */
 };
 
-/* Per-CPU data array (indexed by cpu_id) */
 extern struct per_cpu cpu_data[MAX_CPUS];
+```
 
-/* Get current CPU's data */
-static inline struct per_cpu *this_cpu(void) {
-    return &cpu_data[cpu_id()];
-}
+**`struct cpu_runqueue` (in `sched.c`)** — Scheduler-level data, one per CPU:
+
+```c
+struct cpu_runqueue {
+    spinlock_t lock;            /* Per-queue lock (reduces contention) */
+    struct task *head;          /* First task in run queue */
+    struct task *tail;          /* Last task in run queue */
+    struct task *idle_task;     /* This CPU's idle task */
+    struct task *zombie;        /* Terminated task pending cleanup */
+    uint32_t ready_count;       /* Tasks in this CPU's run queue */
+};
 ```
 
 ### Accessing Per-CPU Data
 
 Since there's no thread-local storage in bare metal, per-CPU data is accessed via:
 1. Read MPIDR to get CPU ID
-2. Index into global `cpu_data[]` array
+2. Index into global `cpu_data[]` or scheduler arrays
 
 This requires a memory access for every per-CPU operation but is simple and reliable.
+
+**Cache coherency note:** `struct per_cpu` is 40 bytes, so adjacent entries share 64-byte cachelines. On Pi 5 (no SMPEN), CPU 0 must `cache_clean_range(cpu_data, ...)` before booting secondary CPUs to avoid DC CIVAC writeback corruption. See `kernel/CLAUDE.md` for details.
 
 ---
 
@@ -411,16 +410,7 @@ void ticket_unlock(ticket_lock_t *lock) {
 
 ### Per-Core Run Queues
 
-Each core has its own run queue:
-
-```c
-struct run_queue {
-    spinlock_t lock;
-    struct task *head;
-    struct task *tail;
-    uint32_t count;
-};
-```
+Each core has its own run queue with a per-queue lock (reduces contention vs. a global lock). Tasks are inserted in priority order (highest `effective_priority` first, FIFO within same priority).
 
 ### Task Affinity
 
@@ -428,40 +418,33 @@ Tasks can be pinned to specific cores or allowed to migrate:
 
 ```c
 /* In struct task */
-uint32_t cpu_affinity;      /* Bitmask of allowed CPUs, 0 = any */
-uint32_t current_cpu;       /* CPU currently running on */
+uint32_t cpu_affinity;      /* CPU_AFFINITY_ANY or specific CPU ID */
+uint32_t assigned_cpu;      /* CPU this task is currently assigned to */
 ```
+
+### Deadline Boost
+
+Tasks with `deadline_ns > 0` get their `effective_priority` boosted as the deadline approaches:
+- More than 100ms remaining: no boost
+- 50–100ms remaining: +1 priority
+- 10–50ms remaining: boost to HIGH (6)
+- Under 10ms or missed: boost to CRITICAL (7)
 
 ### Schedule Function
 
-```c
-void schedule(void) {
-    struct per_cpu *cpu = this_cpu();
-    struct task *prev = cpu->current;
-    struct task *next;
+The `schedule()` function runs on each CPU independently:
+1. Clean up zombie (terminated) task from previous cycle
+2. If current task is RUNNING, set to READY and re-insert in priority order
+3. Pick highest-priority task from queue (or idle task if empty)
+4. Context switch via `switch_to()` (saves/restores callee-saved regs, FPU, DAIF)
 
-    spin_lock(&cpu->rq.lock);
+### Sleep/Delay
 
-    /* Put previous task back if still runnable */
-    if (prev && prev->state == TASK_READY) {
-        enqueue_task(&cpu->rq, prev);
-    }
+`sleep_ms()` and `sleep_us()` provide timer-driven delays using the ARM generic timer counter. The sleeping task calls `yield()` in a loop until the target tick count is reached. Other tasks (including idle) run during the wait. Minimum precision is one scheduler tick (~10ms).
 
-    /* Pick next task (or idle) */
-    next = dequeue_task(&cpu->rq);
-    if (!next) {
-        next = cpu->idle_task;
-    }
+### Idle Task DAIF
 
-    spin_unlock(&cpu->rq.lock);
-
-    if (next != prev) {
-        cpu->current = next;
-        cpu->context_switches++;
-        switch_to(prev, next);
-    }
-}
-```
+The idle task's IRQ unmask (`msr daifclr, #2`) must be inside the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry, and `context.S` saves this masked DAIF. On resume, the restored DAIF would keep IRQ masked, causing `wfi` to hang. Re-clearing DAIF each iteration prevents this.
 
 ### Inter-Processor Interrupts (IPI)
 
@@ -523,25 +506,33 @@ All SMP and multi-core scheduler functionality has been implemented and tested.
 | Spinlocks | `spinlock.h`, `spinlock.c` | ✅ Complete |
 | Ticket locks | `spinlock.h`, `spinlock.c` | ✅ Complete |
 | IRQ-safe spinlocks | `spinlock.h` | ✅ Complete |
-| Per-core run queues | `sched.c` | ✅ Complete |
+| Per-core run queues | `sched.c` | ✅ Complete (per-queue locks) |
 | Task CPU affinity | `task.h`, `sched.c` | ✅ Complete |
 | Task migration | `sched.c` | ✅ Complete |
+| Priority scheduling | `sched.c` | ✅ Complete (8 levels + deadline boost) |
+| Core isolation | `sched.c`, `gic.c` | ✅ Complete (SPI rerouting) |
+| Timer sleep/delay | `timer.c` | ✅ Complete (sleep_ms, sleep_us) |
 | GIC per-CPU init | `gic.c` | ✅ Complete |
 | Timer per-CPU init | `timer.c` | ✅ Complete |
 
 ### Test Results
 
-The following tests pass in the automated test suite (`make test`):
+The full test suite passes on both QEMU and Pi 5 hardware (393 tests, 0 failures).
 
+**QEMU multi-core integration tests** (5 tests):
 1. **Basic Multi-Core Execution** — 3 tasks run concurrently on CPUs 1, 2, 3
-2. **Cross-Core Task Migration** — Task migrated from CPU 1 to CPU 3 queue, verified running on new CPU
+2. **Cross-Core Task Migration** — Task migrated from CPU 1 to CPU 3 queue
 3. **Stress Test** — 6 tasks (2 per CPU) complete correctly
-4. **Lock Contention** — 3 tasks across 3 CPUs increment shared counter 50× each with no race conditions
+4. **Lock Contention** — 3 tasks across 3 CPUs increment shared counter with no races
+5. **Task Lifecycle** — Rapid create/destroy cycles
+
+**Pi 5:** These 5 tests are IGNORED because cross-CPU task dispatch requires SMPEN (not set by TF-A). All other tests (scheduler, sleep, SMP online verification, etc.) pass on Pi 5.
 
 ### Key Implementation Details
 
 **Locking Strategy:**
-- Global scheduler lock (`sched.lock`) protects all run queues
+- Per-CPU run queue locks (`sched.cpu[i].lock`) for local operations
+- Cross-queue operations (migration) lock both queues in CPU ID order to prevent deadlock
 - PMM has its own spinlock for memory allocation
 - Task creation protected by task table lock
 - IRQ-safe spinlock variants used throughout (save/restore DAIF)
@@ -553,8 +544,8 @@ The following tests pass in the automated test suite (`make test`):
 
 **Known Limitations:**
 - UART output is intentionally unsynchronized to avoid deadlock risks with panics
-- Load balancing deferred to Phase 3 (SLM scheduler may supersede)
-- Per-queue locks planned for Phase 3 (currently using global lock)
+- Pi 5: tasks without explicit CPU affinity pinned to CPU 0 (SMPEN not set by TF-A)
+- Blocked-task sleep queue attempted but wake mechanism failed on Pi 5 (deferred)
 
 ### Files Modified/Added
 
@@ -617,4 +608,4 @@ The fix: `cache_clean_range(cpu_data, sizeof(cpu_data))` is called after `init_c
 
 *Created: December 2025*
 *Updated: April 2026*
-*Status: Implementation complete, all tests passing*
+*Status: Implementation complete, all tests passing (393 tests on Pi 5, 0 failures)*
