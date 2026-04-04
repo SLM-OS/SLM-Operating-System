@@ -10,6 +10,7 @@
 #include "debug.h"
 #include "task.h"
 #include "smp.h"
+#include "platform.h"
 #include <stdint.h>
 
 /* Timer IRQ numbers */
@@ -246,6 +247,13 @@ void el1_irq_handler(void)
         gic_end_interrupt(irq);
         timer_handler();
         return;  /* EOI already done, don't do it again */
+
+#if defined(PLATFORM_RASPI5)
+    case UART_IRQ:
+        gic_end_interrupt(irq);
+        uart_irq_handler();
+        return;
+#endif
 
     default:
         /* Unknown interrupt */

@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include "platform.h"
 
 /*
  * Initialize the UART hardware.
@@ -37,6 +38,22 @@ void uart_putc(char c);
  * Blocks until a character is available.
  */
 char uart_getc(void);
+
+#if defined(PLATFORM_RASPI5)
+/*
+ * Initialize UART RX interrupt handling.
+ * Enables PL011 RX/timeout interrupts and GIC routing for UART_IRQ.
+ * Must be called after gic_init(). Falls back to polling if IRQ never fires.
+ */
+void uart_irq_init(void);
+
+/*
+ * UART RX interrupt handler.
+ * Called from el1_irq_handler when UART_IRQ fires.
+ * Must NOT call uart output functions (deadlock risk).
+ */
+void uart_irq_handler(void);
+#endif
 
 /*
  * Send a null-terminated string (synchronized).

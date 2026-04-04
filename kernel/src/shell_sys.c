@@ -171,6 +171,14 @@ int cmd_cpu(int argc, char *argv[])
                     current ? current->name : "-");
     }
 
+#if defined(PLATFORM_RASPI5)
+    {
+        extern int uart_is_irq_mode(void);
+        uart_printf("\r\n  UART RX:     %s\r\n",
+                    uart_is_irq_mode() ? "interrupt-driven" : "polling");
+    }
+#endif
+
     uart_puts("\r\n");
     return 0;
 }

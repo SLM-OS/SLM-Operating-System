@@ -116,7 +116,7 @@ set(KERNEL_SOURCES
     # UART - platform-specific
     # PL011 UART for QEMU, bit-banged for Pi 5, Tegra for Jetson
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
-    $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/uart_rp1_bitbang.c>
+    $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/uart_rp1.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
 
     # BPMP - Jetson only (required for clock control)

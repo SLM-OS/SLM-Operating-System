@@ -43,6 +43,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | Shell prompt | ✅ Working | `slmos>` appears after full boot |
 | UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
 | Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
+| UART RX IRQ | 🔧 In progress | PCIe RC→MIP→GIC path configured, MSI-X table TBD |
 
 ## Test Results (April 3, 2026)
 
@@ -75,6 +76,32 @@ Full test suite runs on Pi 5 hardware with zero failures:
 **Key bugs fixed to achieve zero failures:**
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM
 2. DC CIVAC writeback bug: CPU 0's stale dirty cacheline for `cpu_data[]` overwrote secondary CPUs' `online=true` at PoC (fixed by `cache_clean_range` before booting secondaries)
+
+## Interrupt-Driven UART (In Progress)
+
+The RP1 UART interrupt path requires configuring three hardware blocks between the PL011 and the GIC:
+
+```
+PL011 UART0 (0x1F00030000)
+  → RP1 PCIE_CFG MSI-X engine (0x1F00108000) — vector 25
+    → PCIe MSI-X write to 0xFF_FFFFF000
+      → BCM2712 PCIe RC BAR1 (0x1000120000) remaps to MIP0
+        → MIP0 (0x1000130000) → GIC SPI 153 (IRQ 185)
+```
+
+**What is configured:**
+- PL011 IMSC: RX + receive timeout interrupts enabled
+- RP1 MSIX_CFG: Vector 25 enabled with IACK_EN
+- PCIe RC BAR1: Configured to route MSI-X PCI addr to MIP0 physical addr
+- MIP0: All vectors unmasked for host, edge-triggered
+- GIC: SPI 153 enabled, priority set, routed to CPU 0
+- IRQ handler: Reads RP1 INTSTAT, drains PL011 FIFO, writes IACK
+- Ring buffer: 256-byte SPSC buffer for ISR→uart_getc handoff
+- Polling fallback: Transparent — if IRQ never fires, original polling path runs
+
+**What is NOT yet working:**
+- The RP1 PCIe MSI-X capability table entries (per-vector msg_addr/msg_data) may not be programmed with the correct target address and data values. The firmware programs these for the vectors it uses, but UART0 (vector 25) may not be among them. Programming the MSI-X table requires accessing PCIe configuration space.
+- The GIC ICFGRn register may need to be set to edge-triggered for SPI 153 (currently defaults to level-triggered from gic_init).
 
 ## Configuration
 

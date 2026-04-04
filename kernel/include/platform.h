@@ -228,15 +228,71 @@
  * are mapped starting at 0x1F00000000.
  */
 /*
- * Use bit-banged UART for now - hardware PL011 needs clock configuration.
- * The bit-bang driver uses GPIO14/15 directly via RIO registers.
+ * RP1 PL011 UART driver (hardware TX/RX, interrupt-capable).
+ * Uses UART0 on RP1 via PCIe at 0x1F00030000, GPIO14=TXD, GPIO15=RXD.
  */
-#define UART_TYPE_RP1_BITBANG
-/* Hardware UART base (for future use when PL011 is working) */
+#define UART_TYPE_RP1
 #define UART_BASE           0x1F00030000UL  /* UART0 via RP1 */
 #define UART_SIZE           0x00001000UL    /* 4 KB */
 #define UART_CLOCK          50000000UL      /* 50 MHz (confirmed by testing; 48 MHz garbles output) */
-#define UART_IRQ            (32 + 121)      /* RP1 UART0 IRQ - TBD */
+/*
+ * RP1 Interrupt Architecture
+ *
+ * RP1 peripheral IRQ → RP1 MSI-X engine → PCIe MSI-X write →
+ * BCM2712 PCIe RC BAR1 → MIP0 (MSI-X Interrupt Peripheral) → GIC SPI
+ *
+ * MIP0 maps 64 MSI-X vectors to GIC SPIs starting at SPI 128:
+ *   RP1 vector N → MIP0 vector N → GIC SPI (128 + N) → GIC IRQ (160 + N)
+ *
+ * Three hardware blocks must be configured:
+ * 1. PCIe RC BAR1: routes MSI-X writes (PCI addr 0xFF_FFFFF000) to MIP0
+ * 2. MIP0: unmasks vectors, converts MSI-X to GIC SPIs
+ * 3. RP1 MSIX_CFG: enables per-vector MSI-X forwarding
+ */
+#define UART_IRQ            (32 + 128 + RP1_INT_UART0) /* = 185: SPI 153 */
+
+/* RP1 PCIE_CFG register block (MSI-X configuration) */
+#define RP1_INTC_BASE       0x1F00108000UL
+#define RP1_INTC_INTSTATL   0x108           /* Raw interrupt status [31:0] */
+#define RP1_INTC_INTSTATH   0x10C           /* Raw interrupt status [63:32] */
+#define RP1_INTC_SET        0x800           /* Atomic set alias offset */
+
+/* MSIX_CFG register for a given RP1 vector (0-63) */
+#define RP1_MSIX_CFG(n)     (0x008 + (n) * 4)
+
+/* MSIX_CFG bit fields */
+#define MSIX_CFG_ENABLE     (1 << 0)
+#define MSIX_CFG_IACK       (1 << 2)
+#define MSIX_CFG_IACK_EN    (1 << 3)
+
+/* RP1 peripheral interrupt vector numbers (from rp1-peripherals.pdf) */
+#define RP1_INT_UART0       25
+
+/* BCM2712 PCIe RC (Root Complex) for pcie2 (RP1's link) */
+#define PCIE_RC_BASE        0x1000120000UL
+#define PCIE_RC_SIZE        0x10000UL
+
+/* PCIe RC register offsets for BAR1→MIP routing */
+#define PCIE_RC_BAR1_CONFIG_LO      0x402C
+#define PCIE_RC_BAR1_CONFIG_HI      0x4030
+#define PCIE_RC_UBUS_BAR1_REMAP     0x40AC
+#define PCIE_RC_UBUS_BAR1_REMAP_HI  0x40B0
+#define PCIE_RC_PCIE_STATUS         0x4068  /* Bit 5 = DL_ACTIVE */
+
+/* MIP0 (MSI-X Interrupt Peripheral) */
+#define MIP0_BASE           0x1000130000UL
+#define MIP0_SIZE           0xC0UL
+#define MIP0_BASE_SPI       128             /* MIP vector 0 → GIC SPI 128 */
+
+/* MIP register offsets */
+#define MIP_INT_RAISED      0x00
+#define MIP_INT_CLEARED     0x10
+#define MIP_INT_CFGL_HOST   0x20
+#define MIP_INT_CFGH_HOST   0x30
+#define MIP_INT_MASKL_HOST  0x40
+#define MIP_INT_MASKH_HOST  0x50
+#define MIP_INT_MASKL_VPU   0x60
+#define MIP_INT_MASKH_VPU   0x70
 
 /*
  * Alternative UARTs (via RP1):

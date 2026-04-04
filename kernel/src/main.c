@@ -278,6 +278,11 @@ void kernel_main(void *dtb)
     uart_puts("\n");
     smp_init();
 
+#if defined(PLATFORM_RASPI5)
+    /* Enable UART RX interrupts (after GIC + SMP init) */
+    uart_irq_init();
+#endif
+
     /* Initialize scheduler */
     uart_puts("\n");
     scheduler_init();

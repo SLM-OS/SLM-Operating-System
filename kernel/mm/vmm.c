@@ -56,13 +56,15 @@ static uint64_t l1_table[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
  *
  * QEMU:   l2_kernel (RAM), l2_mmio (GIC+UART+VirtIO, all in 0x00-0x3F)
  * Jetson: l2_kernel (RAM), l2_mmio (GIC+UART, all in 0x00-0x3F)
- * Pi 5:   l2_mmio_gic (GIC/GPIO at L1[65]), l2_mmio_rp1 (RP1 UART at L1[124])
+ * Pi 5:   l2_mmio_pcie (PCIe RC/MIP at L1[64]), l2_mmio_gic (GIC/GPIO at L1[65]),
+ *          l2_mmio_rp1 (RP1 UART/INTC at L1[124])
  *         (RAM uses 1GB L1 block descriptors, no L2 needed)
  */
 #if defined(PLATFORM_QEMU_VIRT) || defined(PLATFORM_JETSON_ORIN_NANO)
 static uint64_t l2_kernel[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #elif defined(PLATFORM_RASPI5)
+static uint64_t l2_mmio_pcie[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio_gic[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio_rp1[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #endif
@@ -775,6 +777,25 @@ static void vmm_setup_platform(void)
     }
 
     /*
+     * Map PCIe RC + MIP0: L1[64] covers 0x1000000000-0x103FFFFFFF
+     *
+     * PCIe RC (pcie2): 0x1000120000  → L2 index = (0x1000120000 >> 21) & 0x1FF
+     * MIP0:            0x1000130000  → same 2MB block as PCIe RC
+     */
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+        l2_mmio_pcie[i] = 0;
+
+    uint64_t pcie_l1_idx = PCIE_RC_BASE >> 30;
+    l1_table[pcie_l1_idx] = make_table_desc((uint64_t)l2_mmio_pcie);
+    vmm_state.l2_tables_used++;
+
+    /* PCIe RC and MIP0 are in the same 2MB block (0x1000100000-0x10002FFFFF) */
+    uint64_t pcie_l2_idx = (PCIE_RC_BASE >> BLOCK_SHIFT) & 0x1FF;
+    l2_mmio_pcie[pcie_l2_idx] = make_block_desc(PCIE_RC_BASE & ~(BLOCK_SIZE - 1),
+                                                  VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
+
+    /*
      * Map GIC and GPIO2 region: L1[65] covers 0x1040000000-0x107FFFFFFF
      *
      * GIC distributor: 0x107FFF9000  → L2 index = (0x107FFF9000 >> 21) & 0x1FF
@@ -822,6 +843,12 @@ static void vmm_setup_platform(void)
     uint64_t rp1_l2_idx = (UART_BASE >> BLOCK_SHIFT) & 0x1FF;
     l2_mmio_rp1[rp1_l2_idx] = make_block_desc(UART_BASE & ~(BLOCK_SIZE - 1),
                                                 VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
+
+    /* RP1 INTC (PCIE_CFG) at 0x1F00108000 — different 2MB block */
+    uint64_t rp1_intc_l2_idx = (RP1_INTC_BASE >> BLOCK_SHIFT) & 0x1FF;
+    l2_mmio_rp1[rp1_intc_l2_idx] = make_block_desc(RP1_INTC_BASE & ~(BLOCK_SIZE - 1),
+                                                     VMM_FLAGS_DEVICE);
     vmm_state.blocks_mapped++;
 }
 #endif /* PLATFORM_RASPI5 */
