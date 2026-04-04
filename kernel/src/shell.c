@@ -67,6 +67,7 @@ const shell_cmd_t builtin_commands[] = {
     {"grep",   cmd_grep,   "Search in file (grep <pattern> <path>)"},
     {"find",   cmd_find,   "Find files (find <path> <pattern>)"},
     {"component", cmd_component, "Component system (list/register/status)"},
+    {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
 };

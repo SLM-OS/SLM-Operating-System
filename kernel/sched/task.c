@@ -126,6 +126,8 @@ struct task *task_alloc(const char *name, uint8_t priority)
     task->priority = priority;
     task->effective_priority = priority;
     task->deadline_ns = 0;
+    task->wake_time_ns = 0;
+    task->sleep_next = NULL;
     task->switches = 0;
 
     /* Stack pointers left uninitialized - caller must set these */
@@ -199,6 +201,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->priority = priority;
     task->effective_priority = priority;
     task->deadline_ns = 0;                   /* No deadline by default */
+    task->wake_time_ns = 0;                  /* Not sleeping */
+    task->sleep_next = NULL;
     task->switches = 0;
 
     /* Set up stack (grows downward on ARM64) */

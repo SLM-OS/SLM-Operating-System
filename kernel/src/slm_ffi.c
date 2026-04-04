@@ -92,6 +92,14 @@ uint64_t slm_get_time_ns(void)
 }
 
 /*
+ * Sleep the current task for the given number of milliseconds.
+ */
+void slm_sleep_ms(uint32_t ms)
+{
+    sleep_ms(ms);
+}
+
+/*
  * Task Management
  */
 

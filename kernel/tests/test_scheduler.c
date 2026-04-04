@@ -1810,6 +1810,112 @@ static void test_cpu_data_fields_consistent(void)
 }
 
 /* ============================================================================
+ * Sleep: Timer-driven sleep tests
+ * ============================================================================ */
+
+/*
+ * Test: sleep_ms(0) returns immediately without blocking.
+ */
+static void test_sleep_zero_returns_immediately(void)
+{
+    uint64_t before = slm_get_time_ns();
+    sleep_ms(0);
+    uint64_t after = slm_get_time_ns();
+
+    /* Should complete in well under 1ms */
+    uint64_t elapsed_us = (after - before) / 1000;
+    TEST_ASSERT_MESSAGE(elapsed_us < 1000, "sleep_ms(0) took > 1ms");
+}
+
+/*
+ * Test: sleep_ms blocks for approximately the requested duration.
+ * Timer tick is 10ms, so sleep_ms(50) should sleep ~50ms (5 ticks).
+ */
+static void test_sleep_ms_duration(void)
+{
+    uint64_t before = slm_get_time_ns();
+    sleep_ms(50);
+    uint64_t after = slm_get_time_ns();
+
+    uint64_t elapsed_ms = (after - before) / 1000000;
+
+    /* Should be at least 40ms (allowing for tick alignment) */
+    TEST_ASSERT_MESSAGE(elapsed_ms >= 40, "sleep_ms(50) woke too early");
+    /* Should be no more than 80ms (50ms + 2 extra ticks tolerance) */
+    TEST_ASSERT_MESSAGE(elapsed_ms <= 80, "sleep_ms(50) woke too late");
+}
+
+/*
+ * Test: sleep_ms with a short duration (1 tick or less).
+ * sleep_ms(5) should wake on the next tick (~10ms).
+ */
+static void test_sleep_ms_short(void)
+{
+    uint64_t before = slm_get_time_ns();
+    sleep_ms(5);
+    uint64_t after = slm_get_time_ns();
+
+    uint64_t elapsed_ms = (after - before) / 1000000;
+
+    /* Should wake within ~20ms (at most 2 ticks) */
+    TEST_ASSERT_MESSAGE(elapsed_ms <= 30, "sleep_ms(5) took > 30ms");
+}
+
+/*
+ * Test: sleep_us works for microsecond-level durations.
+ * Since timer tick is 10ms, sub-tick sleeps wake on next tick.
+ */
+static void test_sleep_us_wakes_on_tick(void)
+{
+    uint64_t before = slm_get_time_ns();
+    sleep_us(1000);  /* 1ms = sub-tick */
+    uint64_t after = slm_get_time_ns();
+
+    uint64_t elapsed_ms = (after - before) / 1000000;
+
+    /* Should wake within ~20ms (next tick or two) */
+    TEST_ASSERT_MESSAGE(elapsed_ms <= 30, "sleep_us(1000) took > 30ms");
+}
+
+/*
+ * Test: Multiple sequential sleeps accumulate correctly.
+ */
+static void test_sleep_sequential(void)
+{
+    uint64_t before = slm_get_time_ns();
+    sleep_ms(30);
+    sleep_ms(30);
+    uint64_t after = slm_get_time_ns();
+
+    uint64_t elapsed_ms = (after - before) / 1000000;
+
+    /* Two 30ms sleeps should total ~60ms, allow 40-100ms range */
+    TEST_ASSERT_MESSAGE(elapsed_ms >= 40, "Sequential sleeps too short");
+    TEST_ASSERT_MESSAGE(elapsed_ms <= 100, "Sequential sleeps too long");
+}
+
+/*
+ * Test: Task state is TASK_RUNNING after waking from sleep.
+ * Verifies that the sleep/wake cycle restores the task properly.
+ */
+static void test_sleep_task_state_restored(void)
+{
+    struct task *current = task_current();
+    TEST_ASSERT_NOT_NULL(current);
+
+    /* Before sleep, should be RUNNING */
+    TEST_ASSERT_EQUAL(TASK_RUNNING, current->state);
+
+    sleep_ms(10);
+
+    /* After wake, should be RUNNING again */
+    TEST_ASSERT_EQUAL(TASK_RUNNING, current->state);
+
+    /* wake_time should be cleared */
+    TEST_ASSERT_EQUAL_UINT64(0, current->wake_time_ns);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1891,6 +1997,14 @@ int test_suite_scheduler(void)
     /* SMP: cache coherency regression tests */
     RUN_TEST(test_cpus_online_matches_flags);
     RUN_TEST(test_cpu_data_fields_consistent);
+
+    /* Sleep: timer-driven sleep */
+    RUN_TEST(test_sleep_zero_returns_immediately);
+    RUN_TEST(test_sleep_ms_duration);
+    RUN_TEST(test_sleep_ms_short);
+    RUN_TEST(test_sleep_us_wakes_on_tick);
+    RUN_TEST(test_sleep_sequential);
+    RUN_TEST(test_sleep_task_state_restored);
 
     return UnityEnd();
 }

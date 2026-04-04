@@ -13,6 +13,7 @@
 #include "vmm.h"
 #include "smp.h"
 #include "ipc.h"
+#include "timer.h"
 #include "slm_ffi.h"
 #include "platform.h"
 #include "dtb.h"
@@ -218,6 +219,31 @@ int cmd_clear(int argc, char *argv[])
 /*
  * reboot - Restart the system
  */
+/*
+ * sleep - Sleep for N milliseconds
+ */
+int cmd_sleep(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_puts("Usage: sleep <ms>\r\n");
+        return 1;
+    }
+
+    uint32_t ms = (uint32_t)atoi(argv[1]);
+    if (ms == 0) {
+        uart_puts("sleep: duration must be > 0\r\n");
+        return 1;
+    }
+
+    uint64_t before = slm_get_time_ns();
+    sleep_ms(ms);
+    uint64_t after = slm_get_time_ns();
+    uint64_t elapsed_ms = (after - before) / 1000000;
+
+    uart_printf("Slept %lu ms (requested %u ms)\r\n", elapsed_ms, ms);
+    return 0;
+}
+
 int cmd_reboot(int argc, char *argv[])
 {
     (void)argc;

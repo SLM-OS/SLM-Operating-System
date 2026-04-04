@@ -134,6 +134,7 @@ void timer_stop(void)
     INFO("Timer stopped");
 }
 
+
 /*
  * Timer interrupt handler.
  */
@@ -178,4 +179,52 @@ void timer_percpu_init(void)
      */
     gic_set_priority(ACTUAL_TIMER_IRQ, GIC_PRIORITY_DEFAULT);
     gic_enable_irq(ACTUAL_TIMER_IRQ);
+}
+
+/*
+ * Sleep the current task for the given number of milliseconds.
+ */
+void sleep_ms(uint32_t ms)
+{
+    if (ms == 0) {
+        return;
+    }
+
+    /* Simple busy-wait implementation for initial bring-up.
+     * Uses the hardware timer counter directly — no task blocking. */
+    uint64_t freq = read_cntfrq();
+    uint64_t target = read_cntpct() + (freq / 1000) * ms;
+
+    while (read_cntpct() < target) {
+        /* Yield to let other tasks run while we wait */
+        yield();
+    }
+}
+
+/*
+ * Sleep the current task for the given number of microseconds.
+ */
+void sleep_us(uint64_t us)
+{
+    if (us == 0) {
+        return;
+    }
+
+    uint64_t freq = read_cntfrq();
+    uint64_t target = read_cntpct() + (freq / 1000000) * us;
+
+    while (read_cntpct() < target) {
+        yield();
+    }
+}
+
+/*
+ * Wake sleeping tasks (no-op in busy-wait implementation).
+ *
+ * The busy-wait sleep uses yield() in a loop, so tasks never enter
+ * TASK_BLOCKED state. This stub is kept for API compatibility.
+ */
+void timer_wake_sleepers(void)
+{
+    /* No-op: busy-wait sleep doesn't use a sleep queue */
 }

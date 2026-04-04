@@ -130,6 +130,12 @@ val = shared_data[cpu].field;
 
 ---
 
+## Idle Task DAIF
+
+The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry. `context.S` saves this masked DAIF into idle's context. On resume, the restored DAIF keeps IRQ masked. If the unmask is only at function entry, idle would loop forever in `wfi` with IRQ disabled.
+
+---
+
 ## Platform Abstraction
 
 - Use compile-time `#ifdef` for driver selection (UART, timer)

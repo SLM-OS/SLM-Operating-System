@@ -91,6 +91,13 @@ void slm_print(const char *s);
 uint64_t slm_get_time_ns(void);
 
 /*
+ * Sleep the current task for the given number of milliseconds.
+ *
+ * @ms: Sleep duration in milliseconds (0 returns immediately)
+ */
+void slm_sleep_ms(uint32_t ms);
+
+/*
  * ==========================================================================
  * Task Management
  * ==========================================================================

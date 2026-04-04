@@ -65,13 +65,14 @@ static void idle_task_func(void *arg)
 {
     (void)arg;
 
-    /* Unmask IRQ so timer interrupts can fire.
-     * New tasks start with DAIF=0x080 (IRQ masked) to survive their first
-     * context switch. The idle task must explicitly unmask here because it
-     * never calls spin_unlock_irqrestore (which would normally unmask). */
-    __asm__ volatile("msr daifclr, #2" ::: "memory");
-
     while (1) {
+        /* Unmask IRQ so timer interrupts can fire.
+         * This must be inside the loop because context switch saves/restores
+         * DAIF. When idle is preempted by the timer ISR, the saved DAIF has
+         * IRQ masked (hardware masks IRQ on exception entry). On resume,
+         * the restored DAIF keeps IRQ masked — so we must re-clear it here. */
+        __asm__ volatile("msr daifclr, #2" ::: "memory");
+
         /* Wait for interrupt (timer will wake us) */
         __asm__ volatile("wfi");
 

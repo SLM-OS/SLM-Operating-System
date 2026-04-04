@@ -57,4 +57,38 @@ uint64_t timer_get_frequency(void);
  */
 void timer_percpu_init(void);
 
+/*
+ * Sleep the current task for a given number of milliseconds.
+ *
+ * Blocks the calling task and yields to the scheduler. The task is
+ * automatically woken by the timer tick handler when the sleep time
+ * has elapsed. Minimum effective sleep is one timer tick (~10ms).
+ *
+ * Must not be called from interrupt context.
+ *
+ * @ms: Sleep duration in milliseconds (0 returns immediately)
+ */
+void sleep_ms(uint32_t ms);
+
+/*
+ * Sleep the current task for a given number of microseconds.
+ *
+ * For durations under ~10ms, precision is limited by the timer tick
+ * rate (TIMER_HZ). For very short sleeps (< 1 tick), the task will
+ * wake on the next timer tick.
+ *
+ * Must not be called from interrupt context.
+ *
+ * @us: Sleep duration in microseconds (0 returns immediately)
+ */
+void sleep_us(uint64_t us);
+
+/*
+ * Check sleeping tasks and wake any whose deadline has passed.
+ *
+ * Called from scheduler_tick() on every timer interrupt.
+ * Moves expired tasks from the sleep queue back to the run queue.
+ */
+void timer_wake_sleepers(void);
+
 #endif /* TIMER_H */

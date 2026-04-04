@@ -116,6 +116,10 @@ struct task {
     /* Deadline scheduling */
     uint64_t deadline_ns;               /* Absolute deadline (0 = no deadline) */
 
+    /* Sleep support */
+    uint64_t wake_time_ns;              /* Absolute wake time (0 = not sleeping) */
+    struct task *sleep_next;            /* Next task in sleep queue */
+
     /* Statistics (optional, for debugging) */
     uint64_t switches;                  /* Number of times scheduled */
 

@@ -1,11 +1,11 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
 **Date:** April 3, 2026
-**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (384 tests: 369 pass, 15 ignored, 0 failures).
+**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (393 tests: 378 pass, 15 ignored, 0 failures).
 
 ## Summary
 
-SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (384 tests across 13 suites) passes with zero failures on Pi 5 hardware.
+SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (393 tests across 13 suites) passes with zero failures on Pi 5 hardware.
 
 **Preemptive scheduling is active** — timer interrupts drive context switching at 100 Hz. The shell accepts input and responds to commands with preemption enabled. Two RP1-specific GPIO pad configurations were required for UART RX (OD=1, FUNCSEL sequencing). The armstub is currently disabled (separate issue; see Known Limitations).
 
@@ -42,6 +42,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | Preemptive scheduler | ✅ Working | 100 Hz timer, DAIF-based context switch |
 | Shell prompt | ✅ Working | `slmos>` appears after full boot |
 | UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
+| Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
 
 ## Test Results (April 3, 2026)
 
@@ -51,7 +52,7 @@ Full test suite runs on Pi 5 hardware with zero failures:
 |---|---|---|---|---|
 | IPC | 23 | 0 | 0 | 23 |
 | Model Memory | 10 | 0 | 0 | 10 |
-| Scheduler | 48 | 0 | 1 | 49 |
+| Scheduler | 54 | 0 | 1 | 55 |
 | Priority Inheritance Mutex | 7 | 0 | 0 | 7 |
 | GPU | 22 | 0 | 0 | 22 |
 | Component | 22 | 0 | 0 | 22 |
@@ -62,7 +63,7 @@ Full test suite runs on Pi 5 hardware with zero failures:
 | LittleFS | 26 | 0 | 0 | 26 |
 | Lua | 29 | 0 | 0 | 29 |
 | Integration (Multi-Core) | 0 | 0 | 5 | 5 |
-| **Total** | **372** | **0** | **15** | **387** |
+| **Total** | **378** | **0** | **15** | **393** |
 
 **Ignored tests (expected):**
 - Scheduler: `test_isolated_core_latency` — task_exit race on secondary CPUs (pre-existing)
