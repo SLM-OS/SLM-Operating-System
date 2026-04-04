@@ -456,6 +456,34 @@ static void test_l1_block_mapping_detection(void)
     TEST_ASSERT_EQUAL_HEX64(TEST_PA1, pa);
 }
 
+/*
+ * Test: MMIO regions are mapped correctly.
+ *
+ * Verifies that platform-specific device memory regions (UART, GIC, etc.)
+ * are accessible via vmm_is_mapped(). These regions are mapped as device
+ * memory (nGnRnE) in the VMM init code.
+ */
+static void test_mmio_regions_mapped(void)
+{
+    /* UART must be mapped on all platforms */
+    TEST_ASSERT_TRUE(vmm_is_mapped(UART_BASE));
+
+    /* GIC must be mapped on all platforms */
+    TEST_ASSERT_TRUE(vmm_is_mapped(GIC_DIST_BASE));
+
+#if defined(PLATFORM_RASPI5)
+    /* RP1 INTC (PCIE_CFG) at 0x1F00108000 */
+    TEST_ASSERT_TRUE(vmm_is_mapped(RP1_INTC_BASE));
+
+    /* PCIe RC + MIP0 region */
+    TEST_ASSERT_TRUE(vmm_is_mapped(PCIE_RC_BASE));
+    TEST_ASSERT_TRUE(vmm_is_mapped(MIP0_BASE));
+
+    /* RP1 BAR0 (MSI-X table) */
+    TEST_ASSERT_TRUE(vmm_is_mapped(RP1_MSIX_TABLE_BASE));
+#endif
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -470,6 +498,9 @@ int test_suite_vmm(void)
 
     /* Platform-specific mapping granularity */
     RUN_TEST(test_l1_block_mapping_detection);
+
+    /* MMIO region mapping verification */
+    RUN_TEST(test_mmio_regions_mapped);
 
     /* TLB invalidation correctness - the KEY tests */
     RUN_TEST(test_remap_requires_invalidation);

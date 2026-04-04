@@ -1810,6 +1810,122 @@ static void test_cpu_data_fields_consistent(void)
 }
 
 /* ============================================================================
+ * SPSC Ring Buffer: Tests the algorithm used by UART IRQ RX path
+ * ============================================================================ */
+
+/* Local ring buffer matching uart_rp1.c implementation */
+#define TEST_RB_SIZE 16  /* Small power-of-2 for testing wraps */
+
+static volatile uint8_t  test_rb_buf[TEST_RB_SIZE];
+static volatile uint32_t test_rb_head;
+static volatile uint32_t test_rb_tail;
+
+static void test_rb_reset(void) {
+    test_rb_head = 0;
+    test_rb_tail = 0;
+}
+
+/* Producer (mimics ISR): returns 1 if inserted, 0 if full */
+static int test_rb_put(uint8_t ch) {
+    uint32_t next = (test_rb_head + 1) & (TEST_RB_SIZE - 1);
+    if (next == test_rb_tail) return 0;  /* Full */
+    test_rb_buf[test_rb_head] = ch;
+    test_rb_head = next;
+    return 1;
+}
+
+/* Consumer (mimics uart_getc): returns char or -1 if empty */
+static int test_rb_get(void) {
+    if (test_rb_head == test_rb_tail) return -1;  /* Empty */
+    uint8_t ch = test_rb_buf[test_rb_tail];
+    test_rb_tail = (test_rb_tail + 1) & (TEST_RB_SIZE - 1);
+    return ch;
+}
+
+/*
+ * Test: Empty ring buffer returns no data.
+ */
+static void test_ringbuf_empty(void)
+{
+    test_rb_reset();
+    TEST_ASSERT_EQUAL_INT(-1, test_rb_get());
+    TEST_ASSERT_EQUAL_UINT32(0, test_rb_head);
+    TEST_ASSERT_EQUAL_UINT32(0, test_rb_tail);
+}
+
+/*
+ * Test: Basic put/get maintains FIFO order.
+ */
+static void test_ringbuf_fifo_order(void)
+{
+    test_rb_reset();
+    TEST_ASSERT_EQUAL_INT(1, test_rb_put('A'));
+    TEST_ASSERT_EQUAL_INT(1, test_rb_put('B'));
+    TEST_ASSERT_EQUAL_INT(1, test_rb_put('C'));
+
+    TEST_ASSERT_EQUAL_INT('A', test_rb_get());
+    TEST_ASSERT_EQUAL_INT('B', test_rb_get());
+    TEST_ASSERT_EQUAL_INT('C', test_rb_get());
+    TEST_ASSERT_EQUAL_INT(-1, test_rb_get());  /* Empty */
+}
+
+/*
+ * Test: Buffer full rejects new data (capacity = size - 1).
+ */
+static void test_ringbuf_full(void)
+{
+    test_rb_reset();
+
+    /* Fill to capacity (size - 1 entries usable) */
+    for (int i = 0; i < TEST_RB_SIZE - 1; i++) {
+        TEST_ASSERT_EQUAL_INT(1, test_rb_put((uint8_t)i));
+    }
+
+    /* One more should fail */
+    TEST_ASSERT_EQUAL_INT(0, test_rb_put(0xFF));
+
+    /* Drain and verify order */
+    for (int i = 0; i < TEST_RB_SIZE - 1; i++) {
+        TEST_ASSERT_EQUAL_INT(i, test_rb_get());
+    }
+    TEST_ASSERT_EQUAL_INT(-1, test_rb_get());
+}
+
+/*
+ * Test: Wrap-around works correctly when head/tail cross buffer boundary.
+ */
+static void test_ringbuf_wrap(void)
+{
+    test_rb_reset();
+
+    /* Fill and drain several times to force wrap-around */
+    for (int round = 0; round < 5; round++) {
+        for (int i = 0; i < TEST_RB_SIZE - 1; i++) {
+            TEST_ASSERT_EQUAL_INT(1, test_rb_put((uint8_t)(round * 10 + i)));
+        }
+        for (int i = 0; i < TEST_RB_SIZE - 1; i++) {
+            TEST_ASSERT_EQUAL_INT(round * 10 + i, test_rb_get());
+        }
+        TEST_ASSERT_EQUAL_INT(-1, test_rb_get());
+    }
+}
+
+/*
+ * Test: Interleaved put/get (streaming pattern).
+ */
+static void test_ringbuf_interleaved(void)
+{
+    test_rb_reset();
+
+    for (int i = 0; i < 100; i++) {
+        TEST_ASSERT_EQUAL_INT(1, test_rb_put((uint8_t)(i & 0xFF)));
+        int ch = test_rb_get();
+        TEST_ASSERT_EQUAL_INT(i & 0xFF, ch);
+    }
+    TEST_ASSERT_EQUAL_INT(-1, test_rb_get());
+}
+
+/* ============================================================================
  * Sleep: Timer-driven sleep tests
  * ============================================================================ */
 
@@ -1997,6 +2113,13 @@ int test_suite_scheduler(void)
     /* SMP: cache coherency regression tests */
     RUN_TEST(test_cpus_online_matches_flags);
     RUN_TEST(test_cpu_data_fields_consistent);
+
+    /* SPSC ring buffer (UART IRQ RX algorithm) */
+    RUN_TEST(test_ringbuf_empty);
+    RUN_TEST(test_ringbuf_fifo_order);
+    RUN_TEST(test_ringbuf_full);
+    RUN_TEST(test_ringbuf_wrap);
+    RUN_TEST(test_ringbuf_interleaved);
 
     /* Sleep: timer-driven sleep */
     RUN_TEST(test_sleep_zero_returns_immediately);
