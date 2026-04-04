@@ -850,6 +850,12 @@ static void vmm_setup_platform(void)
     l2_mmio_rp1[rp1_intc_l2_idx] = make_block_desc(RP1_INTC_BASE & ~(BLOCK_SIZE - 1),
                                                      VMM_FLAGS_DEVICE);
     vmm_state.blocks_mapped++;
+
+    /* RP1 BAR0 (MSI-X table) at 0x1F00410000 — another 2MB block */
+    uint64_t rp1_bar0_l2_idx = (RP1_MSIX_TABLE_BASE >> BLOCK_SHIFT) & 0x1FF;
+    l2_mmio_rp1[rp1_bar0_l2_idx] = make_block_desc(RP1_MSIX_TABLE_BASE & ~(BLOCK_SIZE - 1),
+                                                     VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
 }
 #endif /* PLATFORM_RASPI5 */
 

@@ -294,6 +294,18 @@
 #define MIP_INT_MASKL_VPU   0x60
 #define MIP_INT_MASKH_VPU   0x70
 
+/* RP1 BAR0: MSI-X table (61 entries × 16 bytes each) */
+#define RP1_MSIX_TABLE_BASE 0x1F00410000UL
+#define RP1_MSIX_TABLE_SIZE 61              /* RP1_INT_END = 61 vectors */
+
+/* PCIe RC config space access (EXT_CFG mechanism) */
+#define PCIE_RC_EXT_CFG_INDEX  0x9000       /* Write bus/devfn selector */
+#define PCIE_RC_EXT_CFG_DATA   0x9004       /* Config data (index+4 on BCM2712) */
+
+/* MSI-X target address (PCIe address that RC BAR1 routes to MIP0) */
+#define MSIX_MSG_ADDR_LO   0xFFFFF000UL
+#define MSIX_MSG_ADDR_HI   0x000000FFUL
+
 /*
  * Alternative UARTs (via RP1):
  *   UART1: 0x1F00034000

@@ -100,8 +100,17 @@ PL011 UART0 (0x1F00030000)
 - Polling fallback: Transparent — if IRQ never fires, original polling path runs
 
 **What is NOT yet working:**
-- The RP1 PCIe MSI-X capability table entries (per-vector msg_addr/msg_data) may not be programmed with the correct target address and data values. The firmware programs these for the vectors it uses, but UART0 (vector 25) may not be among them. Programming the MSI-X table requires accessing PCIe configuration space.
-- The GIC ICFGRn register may need to be set to edge-triggered for SPI 153 (currently defaults to level-triggered from gic_init).
+- **PCIe config space access hangs.** The BCM2712 PCIe RC at `0x1000120000` is VMM-mapped, but reading registers (PCIE_STATUS, EXT_CFG_INDEX/DATA) causes the system to hang. This blocks three remaining steps:
+  1. MSI-X Enable bit in RP1's PCIe config space (via EXT_CFG)
+  2. MSI-X table programming (msg_addr/msg_data at RP1 BAR0 `0x1F00410000`)
+  3. Bus Master Enable verification
+- **Root cause unknown.** Possible causes: wrong memory attribute for RC registers, firmware doesn't leave RC accessible from EL1, or the RC register offsets differ from the pcie-brcmstb.c driver.
+- The GIC ICFGRn register may need edge-triggered configuration for SPI 153.
+
+**Investigation notes:**
+- RP1 vendor ID is 0x1de4. Bus 0 = RC (Broadcom 0x14e4), bus 1 = RP1 (expected).
+- The EXT_CFG mechanism (write bus/devfn to +0x9000, read data at +0x9004) is from the brcmstb driver but the actual data register may be at a different offset on BCM2712.
+- Circle's `bcmpciehostbridge.cpp` may have the correct register layout — compare against brcmstb.c offsets.
 
 ## Configuration
 
