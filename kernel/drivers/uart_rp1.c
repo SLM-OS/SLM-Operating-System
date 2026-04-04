@@ -656,8 +656,8 @@ skip_msix:
      * quiescent (FIFO empty, ICR cleared) before the final IACK.
      */
 
-    /* 1. GIC: enable SPI, set priority */
-    gic_set_priority(UART_IRQ, GIC_PRIORITY_DEFAULT);
+    /* 1. GIC: enable SPI with higher priority than timer (lower value = higher priority) */
+    gic_set_priority(UART_IRQ, 0x40);  /* Higher priority than timer (0x80) */
     gic_enable_irq(UART_IRQ);
 
     /* 2. MSIX_CFG: enable vector 25 with IACK_EN (auto-mask on assert) */

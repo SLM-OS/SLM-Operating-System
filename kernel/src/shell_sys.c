@@ -234,6 +234,15 @@ int cmd_cpu(int argc, char *argv[])
         uart_printf("  GIC IRQ %d: target=0x%x pri=0x%x active=%d enabled=%d\r\n",
                     UART_IRQ, target, priority, active, enabled);
 
+        /* GICC state from EL1 */
+        volatile uint32_t *gicc_ctlr = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE);
+        volatile uint32_t *gicc_pmr = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x4);
+        volatile uint32_t *gicc_bpr = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x8);
+        volatile uint32_t *gicc_rpr = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x14);
+        volatile uint32_t *gicc_hppir = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x18);
+        uart_printf("  GICC: CTLR=0x%x PMR=0x%x BPR=0x%x RPR=0x%x HPPIR=%u\r\n",
+                    *gicc_ctlr, *gicc_pmr, *gicc_bpr, *gicc_rpr, *gicc_hppir);
+
         /* Try software-triggering the interrupt to test handler */
         if (!uart_is_irq_mode()) {
             volatile uint32_t *ispendr_w = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + 4 * pend_reg);
