@@ -237,6 +237,9 @@ real_start:
     cmp     w13, w11
     b.lt    .Lgroup_loop
 
+    /* Read GICD_CTLR before we modify it (to see what TF-A left) */
+    ldr     w14, [x10, #0x000]      /* Save original GICD_CTLR in w14 */
+
     /* Enable Group 0 and Group 1 in distributor */
     mov     w11, #3                 /* EnableGrp0 | EnableGrp1 */
     str     w11, [x10, #0x000]      /* GICD_CTLR */

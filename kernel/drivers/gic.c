@@ -204,6 +204,10 @@ static uint32_t get_cpu_id(void)
  */
 static void gic_dist_init(void)
 {
+    /* Read GICD_CTLR before modifying (check firmware/TF-A state) */
+    uint32_t ctlr_before = GICD_CTLR;
+    DEBUG_PRINT("GICD_CTLR before init: 0x%x", ctlr_before);
+
     /* Disable distributor while configuring */
     GICD_CTLR = 0;
 
@@ -255,6 +259,8 @@ static void gic_dist_init(void)
 
     /* Enable distributor: both Group 0 and Group 1 */
     GICD_CTLR = 3;
+
+    DEBUG_PRINT("GICD_CTLR after init: 0x%x", GICD_CTLR);
 }
 
 #else /* GIC_VERSION == 3 */

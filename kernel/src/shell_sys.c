@@ -240,8 +240,24 @@ int cmd_cpu(int argc, char *argv[])
         volatile uint32_t *gicc_bpr = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x8);
         volatile uint32_t *gicc_rpr = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x14);
         volatile uint32_t *gicc_hppir = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x18);
-        uart_printf("  GICC: CTLR=0x%x PMR=0x%x BPR=0x%x RPR=0x%x HPPIR=%u\r\n",
-                    *gicc_ctlr, *gicc_pmr, *gicc_bpr, *gicc_rpr, *gicc_hppir);
+        volatile uint32_t *gicc_ahppir = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x28);
+        uart_printf("  GICC: CTLR=0x%x PMR=0x%x BPR=0x%x RPR=0x%x HPPIR=%u AHPPIR=%u\r\n",
+                    *gicc_ctlr, *gicc_pmr, *gicc_bpr, *gicc_rpr, *gicc_hppir, *gicc_ahppir);
+
+        /* IGROUPR for our SPI */
+        uint32_t grp_reg = UART_IRQ / 32;
+        uint32_t grp_bit = UART_IRQ % 32;
+        volatile uint32_t *igroupr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x080 + 4 * grp_reg);
+        int grp1 = (*igroupr >> grp_bit) & 1;
+        /* Also check GICD_CTLR */
+        volatile uint32_t *gicd_ctlr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE);
+        uart_printf("  GICD: CTLR=0x%x IGROUPR[%d] bit %d=%d\r\n",
+                    *gicd_ctlr, grp_reg, grp_bit, grp1);
+        /* Dump all IGROUPR registers to see which are Group 0 vs Group 1 */
+        for (uint32_t g = 0; g < 10; g++) {
+            volatile uint32_t *igr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x080 + 4 * g);
+            uart_printf("  IGROUPR[%u]=0x%08x\r\n", g, *igr);
+        }
 
         /* Test: trigger a low-numbered SPI (64 = SPI 32) to test GIC SPI delivery */
         if (!uart_is_irq_mode()) {
