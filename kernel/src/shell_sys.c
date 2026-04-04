@@ -259,6 +259,15 @@ int cmd_cpu(int argc, char *argv[])
             uart_printf("  IGROUPR[%u]=0x%08x\r\n", g, *igr);
         }
 
+        /* Test: trigger SGI 1 to test CPU interface delivery */
+        {
+            volatile uint32_t *sgir = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0xF00);
+            *sgir = (1U << 25) | 1;  /* Target self (bit 25 = TargetListFilter=01), SGI ID=1 */
+            __asm__ volatile("dsb sy; isb" ::: "memory");
+            uint32_t hppir_after = *gicc_hppir;
+            uart_printf("  [SGI 1 triggered, HPPIR=%u]\r\n", hppir_after);
+        }
+
         /* Test: trigger a low-numbered SPI (64 = SPI 32) to test GIC SPI delivery */
         if (!uart_is_irq_mode()) {
             uint32_t test_irq = 64;

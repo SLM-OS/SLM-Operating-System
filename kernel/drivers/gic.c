@@ -392,8 +392,9 @@ static void gic_cpu_init(void)
     /* No priority grouping (all bits for priority) */
     GICC_BPR = 0;
 
-    /* Enable CPU interface for Group 1 (non-secure IRQ) */
-    GICC_CTLR = GICC_CTLR_ENABLE;
+    /* Enable CPU interface for Group 1 (non-secure IRQ).
+     * Preserve bits set from EL2 in boot.S (AckCtl, bypass bits). */
+    GICC_CTLR = GICC_CTLR_ENABLE | 0x1E6;  /* 0x1E7 = enable + AckCtl + bypass */
 }
 
 #else /* GIC_VERSION == 3 */
