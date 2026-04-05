@@ -259,7 +259,19 @@ char uart_getc(void)
         }
     }
 
-    return (char)(*uart_dr & 0xFF);
+    char ch = (char)(*uart_dr & 0xFF);
+
+    /* Clear PL011 interrupt flags and IACK the MSIX_CFG so the
+     * interrupt path can take over for the next character. */
+    volatile uint32_t *uart_icr_p = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
+    *uart_icr_p = 0x7FF;
+    __asm__ volatile("dsb sy" ::: "memory");
+    volatile uint32_t *msix_iack = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
+                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
+    *msix_iack = MSIX_CFG_IACK;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    return ch;
 }
 
 /* ============================================================================
@@ -304,7 +316,12 @@ void uart_irq_handler(void)
     *uart_icr = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* No IACK needed — MSIX_CFG without IACK_EN doesn't auto-mask */
+    /* IACK: acknowledge level-triggered vector (unmasks for next interrupt).
+     * Must be done AFTER PL011 ICR clear so the source isn't still asserting. */
+    volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
+                                                         + RP1_MSIX_CFG(RP1_INT_UART0));
+    *msix_set = MSIX_CFG_IACK;
+    __asm__ volatile("dsb sy" ::: "memory");
 }
 
 /*
@@ -372,13 +389,12 @@ void uart_irq_init(void)
     gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 without IACK_EN.
-     * IACK_EN auto-masks on every PL011 assertion, creating a race
-     * where the level-triggered PL011 immediately re-triggers and
-     * re-masks. Without IACK_EN, MSI-X fires on each assertion edge. */
+    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (level-triggered).
+     * The vector auto-masks on first PL011 assertion during init.
+     * The handler will IACK after clearing the PL011 source. */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
-    *msix_set = MSIX_CFG_ENABLE;
+    *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* 3. PL011: configure, drain FIFO, clear ICR, enable IMSC */
@@ -418,7 +434,10 @@ void uart_irq_init(void)
         __asm__ volatile("dsb sy" ::: "memory");
     }
 
-    /* No IACK needed without IACK_EN */
+    /* IACK: unmask the vector. PL011 MIS should be 0 now (FIFO drained,
+     * ICR cleared above). The next character will trigger the full path. */
+    *msix_set = MSIX_CFG_IACK;
+    __asm__ volatile("dsb sy" ::: "memory");
 
     INFO("UART IRQ enabled (GIC IRQ %d = SPI %d, RP1 vec %d)",
          UART_IRQ, UART_IRQ - 32, RP1_INT_UART0);
