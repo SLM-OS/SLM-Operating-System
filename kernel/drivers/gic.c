@@ -470,7 +470,7 @@ void gic_init(void)
             GICD_ITARGETSR(i) = 0x01010101;
         }
         for (uint32_t i = 8; i < num_irqs / 4; i++) {
-            GICD_IPRIORITYR(i) = 0xa0a0a0a0;  /* Linux default: 0xa0 */
+            GICD_IPRIORITYR(i) = 0x40404040;  /* Higher priority than timer (0x80) */
         }
 
         /* Ensure EnableGrp1 is set */

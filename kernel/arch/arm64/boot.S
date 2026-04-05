@@ -253,6 +253,18 @@ real_start:
     ldr     w11, =0x1E3             /* EnableGrp0+1, bypass disables, no AckCtl */
     str     w11, [x10, #0x000]      /* GICC_CTLR */
 
+    /* Test: write SPI registers from EL2 for IRQ 64 (SPI 32).
+     * If BCM2712 blocks EL1 SPI writes but allows EL2, this should work. */
+    ldr     x10, =0x107FFF9000      /* GICD base */
+    /* IPRIORITYR for IRQ 64: reg 16 (64/4), byte 0 (64%4=0) */
+    ldr     x12, =0x107FFF9000
+    add     x12, x12, #0x440        /* IPRIORITYR base + 16*4 = +0x40, base=0x400 → 0x440 */
+    ldr     w13, [x12]
+    and     w13, w13, #0xFFFFFF00   /* Clear byte 0 */
+    orr     w13, w13, #0x60         /* Set priority 0x60 */
+    str     w13, [x12]
+    dsb     sy
+
     /* Enable FP/SIMD at EL1 */
     mov     x10, #(3 << 20)
     msr     cpacr_el1, x10

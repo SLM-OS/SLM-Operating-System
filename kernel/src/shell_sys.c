@@ -259,6 +259,29 @@ int cmd_cpu(int argc, char *argv[])
             uart_printf("  IGROUPR[%u]=0x%08x\r\n", g, *igr);
         }
 
+        /* Check SPI priority at various IRQ numbers to find the boundary */
+        {
+            uint32_t test_irqs[] = {64, 128, 185, 192, 224, 256, 261, 30};
+            for (int t = 0; t < 8; t++) {
+                uint32_t irq = test_irqs[t];
+                volatile uint32_t *preg = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x400 + (irq & ~3));
+                uint8_t pri = (*preg >> ((irq & 3) * 8)) & 0xFF;
+                uart_printf("  IRQ%u pri=0x%x%s", irq, pri, (t < 7) ? "  " : "\r\n");
+            }
+        }
+
+        /* Test: trigger UART_IRQ (185) SPI to test delivery */
+        if (!uart_is_irq_mode()) {
+            volatile uint32_t *ispendr_u = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + 4 * (UART_IRQ / 32));
+            *ispendr_u = (1U << (UART_IRQ % 32));
+            __asm__ volatile("dsb sy; isb" ::: "memory");
+            uint32_t h = *gicc_hppir;
+            uart_printf("  [UART IRQ %d triggered, HPPIR=%u]\r\n", UART_IRQ, h);
+            /* Clear it */
+            volatile uint32_t *icpendr_u = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x280 + 4 * (UART_IRQ / 32));
+            *icpendr_u = (1U << (UART_IRQ % 32));
+        }
+
         /* Test: trigger SGI 1 to test CPU interface delivery */
         {
             volatile uint32_t *sgir = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0xF00);

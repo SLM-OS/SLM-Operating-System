@@ -356,25 +356,22 @@ void uart_irq_init(void)
     uart_irq_mode = 0;
 
     /*
-     * PCIe INTA approach (like Circle):
-     * RP1 interrupts arrive at GIC as PCIe INTA (SPI 229).
-     * Enable the RP1 MSIX_CFG for UART0 vector, configure PL011,
-     * and set up the GIC handler. No MSI-X table or BAR1/MIP needed.
-     *
-     * Ordering: GIC first (handler ready), then MSIX_CFG, then PL011 last.
+     * MIP-based interrupt path (IRQ 185 = MIP0 vec 25 → SPI 153).
+     * SPIs in range 128-191 are non-secure writable on BCM2712.
+     * SPIs >= 224 (including INTA at SPI 229) are secure-only.
      */
 
-    /* 1. Enable GIC SPI 229 (PCIe INTA) */
-    gic_set_priority(UART_IRQ, GIC_PRIORITY_DEFAULT);
+    /* 1. GIC: enable SPI with higher priority than timer */
+    gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. Enable RP1 MSIX_CFG vector 25 with IACK_EN */
+    /* 2. MSIX_CFG: enable vector 25 with IACK_EN */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* 3. PL011: drain FIFO, clear interrupts, enable IMSC */
+    /* 3. PL011: configure, drain FIFO, clear ICR, enable IMSC */
     volatile uint32_t *uart_ifls = (volatile uint32_t *)(RP1_UART0_BASE + UART_IFLS);
     *uart_ifls = (*uart_ifls & ~(0x7 << 3)) | (0x0 << 3);
     __asm__ volatile("dsb sy" ::: "memory");
@@ -394,7 +391,7 @@ void uart_irq_init(void)
     *uart_imsc = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* 4. Final cleanup: clear stale PL011 state, IACK last */
+    /* 4. Clear stale state, IACK last */
     *uart_icr = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
     while (!(*uart_fr & FR_RXFE)) {
@@ -403,15 +400,22 @@ void uart_irq_init(void)
     *uart_icr = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    *msix_set = MSIX_CFG_IACK;  /* Unmask for first interrupt */
+    {
+        uint32_t pend_reg = UART_IRQ / 32;
+        uint32_t pend_bit = UART_IRQ % 32;
+        volatile uint32_t *icpendr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x280 + 4 * pend_reg);
+        *icpendr = (1U << pend_bit);
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+
+    *msix_set = MSIX_CFG_IACK;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    INFO("UART IRQ enabled (GIC IRQ %d, RP1 vec %d)",
-         UART_IRQ, RP1_INT_UART0);
+    INFO("UART IRQ enabled (GIC IRQ %d = SPI %d, RP1 vec %d)",
+         UART_IRQ, UART_IRQ - 32, RP1_INT_UART0);
 }
 
-/* DEAD CODE BELOW — old MSI-X approach preserved for reference */
-#if 0
+#if 0 /* Old code preserved for reference */
     /*
      * Step 0a: Enable MSI-X in RP1's PCIe config space.
      *
