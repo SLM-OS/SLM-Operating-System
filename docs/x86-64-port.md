@@ -421,7 +421,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 47 tests across 11 categories:
+The `test_x86_boot.c` test suite contains 49 tests across 12 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -435,6 +435,7 @@ The `test_x86_boot.c` test suite contains 47 tests across 11 categories:
 | PIT timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock irqsave roundtrip, gic enable/disable, timer frequency, timer count |
 | Scheduler integration | 5 | gic_init loads IDT, task stack within mapping, gic_end_interrupt safe, uart_putc, scheduler_tick callable |
+| setjmp/longjmp | 2 | setjmp/longjmp round-trip, longjmp(0) returns 1 |
 | Long mode | 2 | 64-bit operations, RIP-relative addressing |
 
 ### Running Tests
@@ -490,6 +491,7 @@ Total: 72 bytes. Offsets hardcoded in `context.S` as `CTX_RBX`, `CTX_RSP`, etc.
 | `kernel/arch/x86_64/entry64.S` | 64-bit entry, BSS clear, calls `kernel_main_x86` |
 | `kernel/arch/x86_64/idt.S` | ISR stubs for exceptions (0-31) and IRQs (32-47) |
 | `kernel/arch/x86_64/context.S` | `switch_to()` context switch + `task_entry_wrapper` |
+| `kernel/arch/x86_64/setjmp.S` | `setjmp`/`longjmp` for Lua error handling |
 
 ### C Code — x86-64 Platform Layer
 
@@ -513,7 +515,7 @@ Total: 72 bytes. Offsets hardcoded in `context.S` as `CTX_RBX`, `CTX_RSP`, etc.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 47 tests: boot, IDT, PIC, PIT, Multiboot2, platform, scheduler, page tables |
+| `kernel/tests/test_x86_boot.c` | 49 tests: boot, IDT, PIC, PIT, Multiboot2, platform, scheduler, setjmp |
 
 ---
 

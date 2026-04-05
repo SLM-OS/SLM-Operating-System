@@ -850,6 +850,46 @@ static void test_scheduler_tick_callable(void)
 }
 
 /* ============================================================================
+ * setjmp/longjmp Tests (required for Lua)
+ * ============================================================================ */
+
+extern int setjmp(void *env);
+extern void longjmp(void *env, int val) __attribute__((noreturn));
+
+/*
+ * Test: setjmp returns 0 on initial call, non-zero after longjmp.
+ */
+static void test_setjmp_longjmp(void)
+{
+    uint64_t buf[8];  /* jmp_buf for x86-64 */
+    int val = setjmp(buf);
+    if (val == 0) {
+        /* Initial call — do longjmp with value 42 */
+        longjmp(buf, 42);
+        /* Should not reach here */
+        TEST_ASSERT_TRUE(false);
+    } else {
+        /* Returned from longjmp — val should be 42 */
+        TEST_ASSERT_EQUAL_INT64(42, val);
+    }
+}
+
+/*
+ * Test: longjmp with val=0 returns 1 (per POSIX spec).
+ */
+static void test_longjmp_zero_returns_one(void)
+{
+    uint64_t buf[8];
+    int val = setjmp(buf);
+    if (val == 0) {
+        longjmp(buf, 0);
+        TEST_ASSERT_TRUE(false);
+    } else {
+        TEST_ASSERT_EQUAL_INT64(1, val);
+    }
+}
+
+/* ============================================================================
  * Long Mode Verification Tests
  * ============================================================================ */
 
@@ -944,6 +984,10 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_gic_end_interrupt_safe);
     RUN_TEST(test_uart_putc_works);
     RUN_TEST(test_scheduler_tick_callable);
+
+    /* setjmp/longjmp (required for Lua) */
+    RUN_TEST(test_setjmp_longjmp);
+    RUN_TEST(test_longjmp_zero_returns_one);
 
     /* Long mode verification */
     RUN_TEST(test_64bit_operations);

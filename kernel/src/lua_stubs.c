@@ -35,12 +35,76 @@ FILE *__slm_stdin = &stdin_file;
 FILE *__slm_stdout = &stdout_file;
 FILE *__slm_stderr = &stderr_file;
 
+#if defined(PLATFORM_X86_64)
+/* x86-64 ABI: Lua references stdin/stderr/stdout as direct symbols */
+FILE *stdin = &stdin_file;
+FILE *stdout = &stdout_file;
+FILE *stderr = &stderr_file;
+#endif
+
 /* Errno storage */
 static int __slm_errno = 0;
+
+#if defined(PLATFORM_X86_64)
+/* x86-64 glibc ABI: errno accessed via __errno_location() */
+int *__errno_location(void) {
+    return &__slm_errno;
+}
+#endif
 
 int *__errno(void) {
     return &__slm_errno;
 }
+
+#if defined(PLATFORM_X86_64)
+/*
+ * x86-64 glibc ABI: ctype macros (isspace, isdigit, etc.) use __ctype_b_loc().
+ * Provide a static ctype table compatible with the glibc classification bits.
+ */
+static const unsigned short __ctype_table[384] = {
+    /* -128 to -1: all zero (non-ASCII) */
+    [128 + 0] = 0x0200,   /* \0: cntrl */
+    [128 + 9] = 0x2001,   /* \t: space|blank */
+    [128 + 10] = 0x2000,  /* \n: space */
+    [128 + 11] = 0x2000,  /* \v: space */
+    [128 + 12] = 0x2000,  /* \f: space */
+    [128 + 13] = 0x2000,  /* \r: space */
+    [128 + 32] = 0x2001,  /* ' ': space|blank */
+    /* '0'-'9': digit|xdigit */
+    [128 + '0'] = 0x0808, [128 + '1'] = 0x0808, [128 + '2'] = 0x0808,
+    [128 + '3'] = 0x0808, [128 + '4'] = 0x0808, [128 + '5'] = 0x0808,
+    [128 + '6'] = 0x0808, [128 + '7'] = 0x0808, [128 + '8'] = 0x0808,
+    [128 + '9'] = 0x0808,
+    /* 'A'-'F': upper|xdigit|alpha */
+    [128 + 'A'] = 0x0508, [128 + 'B'] = 0x0508, [128 + 'C'] = 0x0508,
+    [128 + 'D'] = 0x0508, [128 + 'E'] = 0x0508, [128 + 'F'] = 0x0508,
+    /* 'G'-'Z': upper|alpha */
+    [128 + 'G'] = 0x0500, [128 + 'H'] = 0x0500, [128 + 'I'] = 0x0500,
+    [128 + 'J'] = 0x0500, [128 + 'K'] = 0x0500, [128 + 'L'] = 0x0500,
+    [128 + 'M'] = 0x0500, [128 + 'N'] = 0x0500, [128 + 'O'] = 0x0500,
+    [128 + 'P'] = 0x0500, [128 + 'Q'] = 0x0500, [128 + 'R'] = 0x0500,
+    [128 + 'S'] = 0x0500, [128 + 'T'] = 0x0500, [128 + 'U'] = 0x0500,
+    [128 + 'V'] = 0x0500, [128 + 'W'] = 0x0500, [128 + 'X'] = 0x0500,
+    [128 + 'Y'] = 0x0500, [128 + 'Z'] = 0x0500,
+    /* 'a'-'f': lower|xdigit|alpha */
+    [128 + 'a'] = 0x0608, [128 + 'b'] = 0x0608, [128 + 'c'] = 0x0608,
+    [128 + 'd'] = 0x0608, [128 + 'e'] = 0x0608, [128 + 'f'] = 0x0608,
+    /* 'g'-'z': lower|alpha */
+    [128 + 'g'] = 0x0600, [128 + 'h'] = 0x0600, [128 + 'i'] = 0x0600,
+    [128 + 'j'] = 0x0600, [128 + 'k'] = 0x0600, [128 + 'l'] = 0x0600,
+    [128 + 'm'] = 0x0600, [128 + 'n'] = 0x0600, [128 + 'o'] = 0x0600,
+    [128 + 'p'] = 0x0600, [128 + 'q'] = 0x0600, [128 + 'r'] = 0x0600,
+    [128 + 's'] = 0x0600, [128 + 't'] = 0x0600, [128 + 'u'] = 0x0600,
+    [128 + 'v'] = 0x0600, [128 + 'w'] = 0x0600, [128 + 'x'] = 0x0600,
+    [128 + 'y'] = 0x0600, [128 + 'z'] = 0x0600,
+};
+
+static const unsigned short *__ctype_ptr = &__ctype_table[128];
+
+const unsigned short **__ctype_b_loc(void) {
+    return &__ctype_ptr;
+}
+#endif
 
 /* Define these so Lua's headers can find them */
 #define stdin   __slm_stdin
@@ -932,7 +996,11 @@ void exit(int status) {
     (void)status;
     uart_printf("Lua exit called\n");
     task_exit();
+#if defined(PLATFORM_X86_64)
+    for (;;) __asm__ volatile("hlt");
+#else
     for (;;) __asm__ volatile("wfi");
+#endif
 }
 
 void _Exit(int status) {
@@ -947,7 +1015,11 @@ int atexit(void (*function)(void)) {
 void abort(void) {
     uart_printf("Lua abort called\n");
     task_exit();
+#if defined(PLATFORM_X86_64)
+    for (;;) __asm__ volatile("hlt");
+#else
     for (;;) __asm__ volatile("wfi");
+#endif
 }
 
 /* ============================================================================
@@ -1088,8 +1160,9 @@ void *memchr(const void *s, int c, size_t n) {
 }
 
 /* newlib reentrancy - provide the global pointer that stdio macros need.
- * struct _reent is already defined via sys/reent.h (included by string.h).
- * We provide minimal storage - only _errno is typically used by Lua. */
+ * Only needed on ARM64 (newlib toolchain). x86-64 uses GCC freestanding. */
+#if !defined(PLATFORM_X86_64)
 #include <sys/reent.h>
 static struct _reent impure_data;
 struct _reent *_impure_ptr = &impure_data;
+#endif

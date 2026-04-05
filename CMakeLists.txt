@@ -358,40 +358,59 @@ if(PLATFORM STREQUAL "QEMU_VIRT")
 endif()
 
 # Lua library - uses floating-point so it doesn't get -mgeneral-regs-only
-# Includes lua_slm.c, lua_shell.c (use Lua FP API) and setjmp.S (saves FP registers)
-# Skipped for x86-64 (needs x86-64 setjmp.S — future work)
-if(NOT PLATFORM STREQUAL "X86_64")
-add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.c kernel/src/lua_shell.c kernel/arch/arm64/setjmp.S)
+# setjmp.S is architecture-specific (saves callee-saved FP regs on ARM64)
+if(PLATFORM STREQUAL "X86_64")
+    set(LUA_SETJMP kernel/arch/x86_64/setjmp.S)
+else()
+    set(LUA_SETJMP kernel/arch/arm64/setjmp.S)
+endif()
+
+add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.c kernel/src/lua_shell.c ${LUA_SETJMP})
 target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src)
 
 # Lua-specific compile flags (relaxed warnings for C99 Lua code)
-target_compile_options(lua PRIVATE
-    -std=gnu11
-    -ffreestanding
-    -nostdlib
-    -mcpu=${TARGET_CPU}
-    # Relaxed warnings for Lua's C99 style code
-    -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
-    -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes
-    -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
-    -Wno-unused-but-set-variable -Wno-missing-field-initializers
-    -Wno-float-conversion -Wno-conversion -Wno-error
-)
+if(PLATFORM STREQUAL "X86_64")
+    # Lua needs SSE for double (x86-64 ABI returns doubles in xmm0).
+    # Override the global -mno-sse flags; only -mno-red-zone for kernel safety.
+    target_compile_options(lua PRIVATE
+        -std=gnu11
+        -ffreestanding
+        -nostdlib
+        -mno-red-zone -fno-stack-protector -fno-pic
+        -msse -msse2
+        -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
+        -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes
+        -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
+        -Wno-unused-but-set-variable -Wno-missing-field-initializers
+        -Wno-float-conversion -Wno-conversion -Wno-error
+    )
+    target_include_directories(lua PRIVATE ${CMAKE_SOURCE_DIR}/kernel/include/compat)
+else()
+    target_compile_options(lua PRIVATE
+        -std=gnu11
+        -ffreestanding
+        -nostdlib
+        -mcpu=${TARGET_CPU}
+        -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
+        -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes
+        -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
+        -Wno-unused-but-set-variable -Wno-missing-field-initializers
+        -Wno-float-conversion -Wno-conversion -Wno-error
+    )
+endif()
 
-# Lua configuration defines (set before Lua headers via -D)
-# Note: We don't use LUA_USER_H since the ARM toolchain provides newlib headers
+# Lua configuration defines
 target_compile_definitions(lua PRIVATE
     LUA_USE_C89=1
     LUA_32BITS=1
     LUA_USE_LOCALE=0
     LUAI_MAXSTACK=15000
     LUA_MINBUFFER=32
+    $<$<STREQUAL:${PLATFORM},X86_64>:PLATFORM_X86_64=1>
 )
 
-# Link with Lua library (built above) — ARM64 only
+# Link with Lua library
 target_link_libraries(slmos.elf PRIVATE lua)
-
-endif() # NOT X86_64 (end of Lua section)
 
 # Link with Rust runtime (ARM64 only — x86-64 provides stubs)
 if(NOT PLATFORM STREQUAL "X86_64")

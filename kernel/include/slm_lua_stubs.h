@@ -17,9 +17,13 @@
  * Lua uses these for pcall/error recovery. We provide minimal implementations.
  */
 
-/* Jump buffer - must save callee-saved registers for AArch64 */
+/* Jump buffer - sized for target architecture's callee-saved registers */
 typedef struct {
+#if defined(PLATFORM_X86_64)
+    uint64_t regs[8];   /* rbx, rbp, r12-r15, rsp, rip */
+#else
     uint64_t regs[22];  /* x19-x29, x30 (LR), SP, FPSR, FPCR, d8-d15 */
+#endif
 } jmp_buf[1];
 
 /* Save context - returns 0 on initial call */
@@ -118,11 +122,16 @@ char *setlocale(int category, const char *locale);
 /* ============================================================================
  * Time Stubs
  * ============================================================================
- * Note: time_t and clock_t are provided by the ARM toolchain's sys/types.h
- * which is included via Lua's signal.h inclusion. We don't redefine them.
+ * time_t and clock_t: ARM toolchain provides via sys/types.h.
+ * x86-64 freestanding doesn't have sys/types.h, so define them.
  */
 
-#include <sys/types.h>  /* For time_t, clock_t */
+#if defined(PLATFORM_X86_64)
+typedef long time_t;
+typedef long clock_t;
+#else
+#include <sys/types.h>  /* For time_t, clock_t (ARM newlib) */
+#endif
 
 struct tm {
     int tm_sec;

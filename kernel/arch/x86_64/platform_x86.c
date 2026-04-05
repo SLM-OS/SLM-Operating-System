@@ -285,13 +285,6 @@ void cache_flush_range(void *addr, size_t size)
     (void)addr; (void)size;
 }
 
-/* ---- Lua shell stub ---- */
-
-void lua_shell_init(void)
-{
-    /* No Lua runtime on x86-64 yet */
-}
-
 /* ---- VMM stats stub ---- */
 
 struct vmm_stats {

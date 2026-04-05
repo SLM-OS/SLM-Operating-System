@@ -172,9 +172,13 @@ static int l_cpu_count(lua_State *L) {
  * slm.cpu_id() - Get current CPU ID
  */
 static int l_cpu_id(lua_State *L) {
+#if defined(PLATFORM_X86_64)
+    lua_pushinteger(L, 0);
+#else
     uint64_t mpidr;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     lua_pushinteger(L, (lua_Integer)(mpidr & 0xFF));
+#endif
     return 1;
 }
 
