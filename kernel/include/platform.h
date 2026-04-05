@@ -107,6 +107,29 @@
  */
 
 /*
+ * TCU (Tegra Combined UART) RX Mailbox
+ *
+ * The TCU multiplexes serial I/O through the SPE firmware. TX can go
+ * directly through UARTC hardware, but RX arrives via HSP shared mailbox.
+ * SPE reads bytes from the USB-C physical UART and writes packed messages
+ * to TOP0_HSP Shared Mailbox 0 at 0x03C10000.
+ *
+ * Mailbox format (32-bit):
+ *   Bit 31:     Data present (TAG bit, set by SPE)
+ *   Bits 25:24: Byte count (1-3)
+ *   Bits 23:16: Byte 2 (if count >= 3)
+ *   Bits 15:8:  Byte 1 (if count >= 2)
+ *   Bits 7:0:   Byte 0
+ *
+ * After reading, write 0 to clear the mailbox so SPE can send more.
+ * Escape protocol: 0xFF followed by tag byte switches RX channel.
+ *
+ * Source: NVIDIA tegra-combined-uart.c, rt-aux-cpu-demo SPE firmware.
+ */
+#define TCU_RX_MBOX         0x03C10000UL    /* TOP0_HSP SM0 (SPE → CCPLEX) */
+#define TCU_MBOX_TAG_BIT    (1UL << 31)     /* Data present flag */
+
+/*
  * GIC (Generic Interrupt Controller) v3
  *
  * Unlike GICv2, GICv3 has:

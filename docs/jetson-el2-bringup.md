@@ -3,7 +3,7 @@
 This document records the successful bypass of the Tegra234 CBB firewall by running SLM-OS at EL2 with VHE (Virtual Host Extensions). This unblocked serial output, GIC, timer, and scheduler — enough to boot to an interactive shell.
 
 **Date:** April 2026
-**Status:** 🟡 Partially working — shell boots, UART RX and SMP still need work
+**Status:** 🟡 Partially working — interactive shell with serial I/O, SMP still needs work
 
 ---
 
@@ -104,7 +104,8 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 | Peripheral | Address | EL2 Access | Notes |
 |------------|---------|------------|-------|
 | UARTA | 0x03100000 | ❌ Blocked | 40-pin header UART |
-| UARTC | 0x0C280000 | ✅ Works | Via TCU to USB-C debug |
+| UARTC (TX) | 0x0C280000 | ✅ Works | Via TCU to USB-C debug |
+| TCU RX Mailbox | 0x03C10000 | ✅ Works | HSP SM0, SPE routes USB-C input here |
 | GIC Distributor | 0x0F400000 | ✅ Works | GICv3, 992 interrupt lines |
 | GIC Redistributor | 0x0F440000 | ✅ Works | Per-CPU, CPU 0 awake |
 | ARM Generic Timer | System regs | ✅ Works | 100 Hz tick confirmed |
@@ -165,7 +166,7 @@ The PMM caps the heap at 0xC0000000, providing ~1 GB of usable memory for the bu
 
 ## Remaining Work
 
-1. **UART RX** — TCU drops characters on input. TX works perfectly. May need TCU RX register configuration or a different input path.
+1. ~~**UART RX**~~ — **FIXED.** RX data arrives via TCU HSP mailbox (0x03C10000), not UARTC's RBR register. SPE firmware routes USB-C input to TOP0_HSP SM0. Reading the mailbox and unpacking 1-3 bytes per message gives clean bidirectional serial.
 2. **SMP** — Secondary CPUs via PSCI CPU_ON after kexec. May need to investigate CPU state after kexec.
 3. **Memory above 0xC0000000** — Could potentially use DRAM above the OP-TEE carveout (0xC2000000+) by parsing actual carveout boundaries.
 4. **GPU access** — GPU at 0x17000000 not yet tested from EL2. Would unlock AI inference on Jetson's 1024-core Ampere GPU.

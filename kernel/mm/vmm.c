@@ -740,6 +740,14 @@ static void vmm_setup_platform(void)
                                             VMM_FLAGS_DEVICE);
     vmm_state.blocks_mapped += 2;
 
+#if defined(TCU_RX_MBOX)
+    /* TCU RX mailbox (HSP shared mailbox for serial input on Jetson) */
+    uint64_t tcu_l2_idx = (TCU_RX_MBOX >> BLOCK_SHIFT) & 0x1FF;
+    l2_mmio[tcu_l2_idx] = make_block_desc(TCU_RX_MBOX & ~(BLOCK_SIZE - 1),
+                                           VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
+#endif
+
 #if defined(PLATFORM_QEMU_VIRT)
     /* VirtIO MMIO region for virtio-net at 0x0A000000 */
     uint64_t virtio_l2_idx = (0x0a000000 >> BLOCK_SHIFT) & 0x1FF;

@@ -150,10 +150,10 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 | Port | Address | Type | Connection | Status |
 |------|---------|------|------------|--------|
 | UARTA | 0x03100000 | NS16550 | 40-pin header pins 8/10 | BLOCKED by CBB (even at EL2) |
-| UARTC | 0x0C280000 | NS16550 | Via TCU → USB-C debug | ✅ Working at EL2 (TX verified, RX garbled) |
+| UARTC | 0x0C280000 | NS16550 | Via TCU → USB-C debug | ✅ TX+RX working at EL2 |
 | TCU | HSP mailbox | Combined UART | USB-C debug port | Routes UARTC output after kexec |
 
-**UARTC (Working):** UARTC at 0x0C280000 is accessible from EL2. Output is routed through the TCU to the USB-C debug serial console. TX works perfectly; RX drops characters (TCU framing issue, under investigation).
+**UARTC (Working):** UARTC at 0x0C280000 is accessible from EL2. TX writes directly to UARTC THR. RX arrives via TCU HSP mailbox at 0x03C10000 (SPE firmware routes USB-C input there). Both directions fully functional.
 
 **UARTA (Blocked):** The 40-pin header UART at 0x03100000 remains blocked by the CBB firewall even at EL2.
 

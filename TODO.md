@@ -103,9 +103,9 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 ### Serial Console
 - ✅ Connect USB-serial adapter to 40-pin header (Pin 8 TXD, Pin 10 RXD, Pin 6 GND)
 - ✅ UARTC serial TX working at EL2 via TCU (USB-C debug console)
-- ☐ Fix UART RX character dropping (TCU framing issue)
+- ✅ UART RX working via TCU HSP mailbox (0x03C10000) — SPE routes USB-C input here
 - ✅ Confirm baud rate settings (115200 8N1)
-- ✅ Test bidirectional communication — TX verified, RX garbled (TCU issue)
+- ✅ Test bidirectional communication — help, mem, cpu, lua all verified
 
 ### Boot Method Validation
 - ✅ kexec boot with serial console output — working at EL2 with VHE
