@@ -111,7 +111,7 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 | ARM Generic Timer | System regs | ✅ Works | 100 Hz tick confirmed |
 | OP-TEE carveout | 0xC0000000+ | ❌ Blocked | Secure memory, kills core |
 | Watchdog | 0x02190000 | Not tested | Disabled via timer clear |
-| GPU | 0x17000000 | Not tested | Future work |
+| GPU (PMC regs) | 0x17000000 | ✅ Works | GA10B identified: BOOT_0=0xB7B000A1 |
 
 ---
 

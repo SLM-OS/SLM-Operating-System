@@ -172,8 +172,8 @@ set(KERNEL_SOURCES
     # ==========================================================================
     kernel/gpu/gpu.c
     kernel/gpu/cache.c
-    kernel/gpu/gpu_stub.c
-    # kernel/gpu/gpu_tegra.c    # Jetson Orin Nano (future)
+    $<$<NOT:$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/gpu/gpu_stub.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/gpu_nvidia.c>
 
     # ==========================================================================
     # Networking (QEMU only for now)

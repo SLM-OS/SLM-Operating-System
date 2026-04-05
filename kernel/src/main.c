@@ -34,6 +34,10 @@
 
 /* External GPU drivers */
 extern const struct gpu_driver gpu_stub_driver;
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+extern const struct gpu_driver gpu_nvidia_driver;
+extern void nvidia_gpu_set_mmio_base(uintptr_t base);
+#endif
 
 /* External symbols from linker script */
 extern char __text_start, __text_end;
@@ -386,7 +390,12 @@ void kernel_main(void *dtb)
 
     /* Initialize GPU subsystem */
     INFO("Initializing GPU...");
-    gpu_register_driver(&gpu_stub_driver);  /* QEMU uses stub driver */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    nvidia_gpu_set_mmio_base(GPU_BASE);
+    gpu_register_driver(&gpu_nvidia_driver);
+#else
+    gpu_register_driver(&gpu_stub_driver);
+#endif
     int gpu_ret = gpu_init();
     if (gpu_ret != GPU_OK) {
         WARN("GPU init failed (code=%d)", gpu_ret);
