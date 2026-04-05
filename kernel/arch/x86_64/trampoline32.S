@@ -24,6 +24,9 @@
 
 /*
  * Multiboot2 Header
+ *
+ * No framebuffer tag — GRUB EFI cannot always set a video mode.
+ * The kernel uses COM1 serial for console output.
  */
 .section .multiboot, "a"
 .align 8
@@ -32,15 +35,6 @@ multiboot_header:
     .long MULTIBOOT2_ARCH
     .long MULTIBOOT2_HEADER_LENGTH
     .long MULTIBOOT2_CHECKSUM
-
-    /* Framebuffer tag */
-    .align 8
-    .short 5            /* Type: framebuffer */
-    .short 0            /* Flags */
-    .long 20            /* Size */
-    .long 1024          /* Width */
-    .long 768           /* Height */
-    .long 32            /* Depth */
 
     /* End tag */
     .align 8
@@ -51,6 +45,10 @@ multiboot_header_end:
 
 /*
  * 32-bit entry point
+ *
+ * GRUB enters here in 32-bit protected mode with:
+ *   EAX = Multiboot2 magic (0x36D76289) — BIOS GRUB only; UEFI GRUB may not set this
+ *   EBX = pointer to Multiboot2 information structure
  */
 .section .text.boot32
 .code32
@@ -64,9 +62,11 @@ _start:
     /* Set up 32-bit stack */
     mov $stack_top, %esp
 
-    /* Verify Multiboot2 magic */
-    cmp $MULTIBOOT2_BOOTLOADER_MAGIC, %eax
-    jne halt32
+    /*
+     * Skip Multiboot2 magic validation.
+     * GRUB EFI does not reliably pass 0x36D76289 in EAX.
+     * The multiboot info pointer in EBX is still valid.
+     */
 
     /* Check CPUID support */
     pushfl
@@ -148,9 +148,6 @@ _start:
     ljmp $0x08, $entry64
 
 halt32:
-    mov $0x3F8, %dx
-    mov $'!', %al
-    out %al, %dx
     hlt
     jmp halt32
 
