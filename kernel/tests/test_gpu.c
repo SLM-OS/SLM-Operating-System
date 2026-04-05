@@ -542,6 +542,104 @@ static void test_gpu_alloc_large_buffer(void)
 }
 
 /* ============================================================================
+ * Unit Tests: NVIDIA GPU Register Decode (Platform-Agnostic)
+ *
+ * Tests the register decode functions in gpu_nvidia.h using known hardware
+ * values from actual Jetson Orin Nano (GA10B) and RTX 3050 (GA106) GPUs.
+ * These functions are pure computation — no hardware access required.
+ * ============================================================================ */
+
+#include "gpu_nvidia.h"
+
+/* Actual hardware values captured from Jetson Orin Nano GA10B */
+#define GA10B_BOOT0     0xB7B000A1
+#define GA10B_BOOT42    0x17BA1000
+
+/*
+ * Test: BOOT_0 architecture decode for GA10B
+ */
+static void test_nv_boot0_arch_ga10b(void)
+{
+    uint32_t arch = nv_boot0_arch(GA10B_BOOT0);
+    TEST_ASSERT_EQUAL_UINT32(NV_GPU_ARCHITECTURE_AMPERE, arch);
+}
+
+/*
+ * Test: BOOT_0 implementation decode for GA10B
+ */
+static void test_nv_boot0_impl_ga10b(void)
+{
+    uint32_t impl = nv_boot0_impl(GA10B_BOOT0);
+    TEST_ASSERT_EQUAL_UINT32(NV_GPU_IMPL_GA10B, impl);
+}
+
+/*
+ * Test: BOOT_42 chip ID decode for GA10B
+ */
+static void test_nv_boot42_chip_id_ga10b(void)
+{
+    uint32_t chip_id = nv_boot42_chip_id(GA10B_BOOT42);
+    TEST_ASSERT_EQUAL_UINT32(NV_CHIP_ID_GA10B, chip_id);
+}
+
+/*
+ * Test: BOOT_42 architecture decode for GA10B
+ */
+static void test_nv_boot42_arch_ga10b(void)
+{
+    uint32_t arch = nv_boot42_arch(GA10B_BOOT42);
+    TEST_ASSERT_EQUAL_UINT32(NV_GPU_ARCHITECTURE_AMPERE, arch);
+}
+
+/*
+ * Test: Chip name lookup for known Ampere variants
+ */
+static void test_nv_chip_name_lookup(void)
+{
+    TEST_ASSERT_EQUAL_STRING("GA10B (Jetson Orin)", nv_chip_name(NV_CHIP_ID_GA10B));
+    TEST_ASSERT_EQUAL_STRING("GA106 (RTX 3050/3060)", nv_chip_name(NV_CHIP_ID_GA106));
+    TEST_ASSERT_EQUAL_STRING("GA100 (A100)", nv_chip_name(NV_CHIP_ID_GA100));
+    TEST_ASSERT_EQUAL_STRING("Unknown", nv_chip_name(0x999));
+}
+
+/*
+ * Test: NV_GPU_NOT_PRESENT sentinel detection
+ */
+static void test_nv_gpu_not_present(void)
+{
+    /* 0xFFFFFFFF indicates GPU not present or in reset */
+    uint32_t boot0 = NV_GPU_NOT_PRESENT;
+    TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFF, boot0);
+    /* Architecture decode of 0xFFFFFFFF should NOT match Ampere */
+    uint32_t arch = nv_boot0_arch(boot0);
+    TEST_ASSERT_NOT_EQUAL(NV_GPU_ARCHITECTURE_AMPERE, arch);
+}
+
+/*
+ * Test: Synthetic GA106 (RTX 3050) register decode
+ *
+ * Construct a plausible BOOT_42 value for GA106 and verify decode.
+ * BOOT_42 format: arch(29:24)=0x17, impl(23:20)=0x6 → chip_id=0x176
+ */
+static void test_nv_boot42_chip_id_ga106(void)
+{
+    uint32_t synthetic_boot42 = (NV_GPU_ARCHITECTURE_AMPERE << 24) |
+                                (NV_GPU_IMPL_GA106 << 20);
+    uint32_t chip_id = nv_boot42_chip_id(synthetic_boot42);
+    TEST_ASSERT_EQUAL_UINT32(NV_CHIP_ID_GA106, chip_id);
+}
+
+/*
+ * Test: Architecture constants are distinct
+ */
+static void test_nv_architecture_constants(void)
+{
+    TEST_ASSERT_NOT_EQUAL(NV_GPU_ARCHITECTURE_TURING, NV_GPU_ARCHITECTURE_AMPERE);
+    TEST_ASSERT_NOT_EQUAL(NV_GPU_ARCHITECTURE_AMPERE, NV_GPU_ARCHITECTURE_HOPPER);
+    TEST_ASSERT_NOT_EQUAL(NV_GPU_ARCHITECTURE_HOPPER, NV_GPU_ARCHITECTURE_ADA);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -580,6 +678,16 @@ int test_suite_gpu(void)
     RUN_TEST(test_gpu_buffer_workflow);
     RUN_TEST(test_gpu_alloc_free_cycle);
     RUN_TEST(test_gpu_alloc_large_buffer);
+
+    /* NVIDIA register decode tests (platform-agnostic) */
+    RUN_TEST(test_nv_boot0_arch_ga10b);
+    RUN_TEST(test_nv_boot0_impl_ga10b);
+    RUN_TEST(test_nv_boot42_chip_id_ga10b);
+    RUN_TEST(test_nv_boot42_arch_ga10b);
+    RUN_TEST(test_nv_chip_name_lookup);
+    RUN_TEST(test_nv_gpu_not_present);
+    RUN_TEST(test_nv_boot42_chip_id_ga106);
+    RUN_TEST(test_nv_architecture_constants);
 
     return UnityEnd();
 }

@@ -174,15 +174,18 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 
 **Depends on:** M1 (Serial Console), M2 (Hardware Validation)
 
-**Status:** ⛔ BLOCKED — Depends on M1/M2 which are blocked by CBB firewall
+**Status:** 🟡 Partially Unblocked — GPU MMIO accessible from EL2, probe working
 
-**Additional blocker:** GPU initialization requires GSP (GPU System Processor) firmware, which runs on an on-die RISC-V core. Without GSP firmware documentation or source code, GPU compute is not possible. See `docs/gpu.md` for details.
+GPU registers at `0x17000000` are accessible from EL2. The GA10B chip has been identified (BOOT_0=0xB7B000A1, chip ID=0x17B, Ampere). GPU compute still requires GSP firmware loading.
+
+Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10B) and x86-64 RTX 3050 (GA106).
 
 ### GPU Initialization
-- ⛔ Write `jetson_gpu_init()` — BLOCKED by CBB firewall + GSP requirement
-- ⛔ Enable GPU clocks via BPMP IPC — BLOCKED (BPMP IVC corrupted)
-- ⛔ Verify GPU is responsive (read ID registers) — BLOCKED
-- ✅ Document initialization sequence in `docs/gpu.md` — Documented blockers
+- ✅ NVIDIA GPU probe (`gpu_nvidia.c`) — GA10B identified at EL2
+- ✅ Read GPU ID registers (NV_PMC_BOOT_0, BOOT_42) — working
+- ☐ Enable GPU clocks via BPMP IPC (may not be needed at EL2)
+- ☐ GSP firmware loading (RISC-V processor on GPU die)
+- ✅ Document initialization sequence in `docs/gpu.md`
 
 ### GPU Memory Management
 - ☐ Write `jetson_gpu_alloc(size)` — allocate GPU-accessible memory

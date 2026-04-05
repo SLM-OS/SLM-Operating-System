@@ -2,7 +2,7 @@
 
 Design and implementation documentation for GPU support in SLM-OS (Phase 3, Milestone 3).
 
-**Status:** Platform abstraction complete; Jetson driver pending hardware bring-up
+**Status:** Platform abstraction complete; NVIDIA GPU probe working on Jetson (GA10B accessible from EL2)
 
 ---
 
@@ -11,7 +11,7 @@ Design and implementation documentation for GPU support in SLM-OS (Phase 3, Mile
 SLM-OS provides a platform-agnostic GPU abstraction layer that enables:
 - GPU-accessible memory allocation
 - Cache coherency for CPU/GPU data sharing
-- Uniform API across platforms (QEMU stub, Jetson Tegra)
+- Uniform API across platforms (QEMU stub, NVIDIA Ampere)
 
 ### Key Design Decision
 
@@ -50,7 +50,7 @@ This means true bare-metal GPU compute is impractical without a Linux-like envir
 │              ┌───────────────┴───────────────┐                       │
 │              ▼                               ▼                       │
 │   ┌─────────────────────┐       ┌─────────────────────┐             │
-│   │  gpu_stub_driver    │       │  gpu_tegra_driver   │             │
+│   │  gpu_stub_driver    │       │  gpu_nvidia_driver  │             │
 │   │  (QEMU - no GPU)    │       │  (Jetson - future)  │             │
 │   └─────────────────────┘       └─────────────────────┘             │
 │              │                               │                       │
@@ -336,9 +336,22 @@ kernel/gpu/
 ├── gpu.h           # Public API and driver interface
 ├── gpu.c           # Driver registration and dispatch
 ├── cache.c         # ARM64 cache maintenance operations
-├── gpu_stub.c      # QEMU stub driver (no GPU)
-└── gpu_tegra.c     # Jetson driver (future)
+├── gpu_stub.c      # QEMU stub driver (no GPU hardware)
+├── gpu_nvidia.h    # NVIDIA Ampere register definitions (shared)
+└── gpu_nvidia.c    # NVIDIA Ampere driver (Jetson GA10B + x86-64 GA106)
 ```
+
+### NVIDIA GPU Probe Results (Jetson Orin Nano, April 2026)
+
+The GPU at `0x17000000` is accessible from EL2. Identification registers:
+
+| Register | Value | Meaning |
+|----------|-------|---------|
+| NV_PMC_BOOT_0 | `0xB7B000A1` | GA10B, rev A1, Ampere |
+| NV_PMC_BOOT_42 | `0x17BA1000` | Chip ID 0x17B |
+| NV_PMC_ENABLE | `0x50000000` | Some engines active |
+
+This confirms the GPU's MMIO space is not blocked by the CBB firewall at EL2. Next steps: GSP firmware loading, Host1x DMA, compute shader dispatch.
 
 ---
 
@@ -353,4 +366,4 @@ kernel/gpu/
 ---
 
 *Created: December 2025*
-*Last updated: December 2025*
+*Last updated: April 2026 — NVIDIA GPU probe working on Jetson at EL2*
