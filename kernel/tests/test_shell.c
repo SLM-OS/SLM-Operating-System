@@ -160,6 +160,12 @@ static void test_shell_cmd_bench_stats(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
 }
 
+static void test_shell_cmd_bench_all(void)
+{
+    int ret = shell_execute("bench all");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
 static void test_shell_cmd_bench_invalid(void)
 {
     int ret = shell_execute("bench foobar");
@@ -1762,6 +1768,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_bench_irq);
     RUN_TEST(test_shell_cmd_bench_ipc);
     RUN_TEST(test_shell_cmd_bench_stats);
+    RUN_TEST(test_shell_cmd_bench_all);
     RUN_TEST(test_shell_cmd_bench_invalid);
 
     /* VFS commands - error cases */

@@ -67,7 +67,7 @@ See `docs/pi5-baremetal-status.md` for full details.
 - ✅ Hardware spinlocks (runtime-enabled after MMU, `spinlock_hw_enabled`)
 
 ### Remaining Pi 5 Work
-- ✅ Run QEMU test suite on Pi 5 hardware (419 tests: 403 pass, 16 ignored, 0 failures)
+- ✅ Run QEMU test suite on Pi 5 hardware (420 tests: 404 pass, 16 ignored, 0 failures)
 - ✅ Timer-driven sleep/delay functions (sleep_ms, sleep_us, shell `sleep` command)
 - ☐🔗 Interrupt-driven UART — blocked on PCIe BAR1 inbound window match (see `docs/pi5-uart-irq-investigation.md`)
 - ✅ Fix task_exit/schedule race on secondary CPUs — IRQ mask in task_exit prevents timer/schedule race
