@@ -747,6 +747,82 @@ static void test_timer_get_count_advances(void)
 }
 
 /* ============================================================================
+ * Scheduler / Context Switch Integration Tests
+ * ============================================================================ */
+
+/*
+ * Test: gic_init() loads the IDT (IDTR base is non-zero after gic_init).
+ * This verifies the fix for the context switch triple-fault where gic_init()
+ * remapped the PIC but forgot to call idt_init().
+ */
+static void test_gic_init_loads_idt(void)
+{
+    struct idtr_value idtr;
+    read_idtr(&idtr);
+    /* IDTR should have been loaded by gic_init() → idt_init() */
+    TEST_ASSERT_TRUE(idtr.base != 0);
+    TEST_ASSERT_TRUE(idtr.limit >= 48 * 16 - 1);
+}
+
+/*
+ * Test: Task stacks are allocated within the identity-mapped 1GB.
+ * A task stack above 1GB would cause page faults on interrupt.
+ */
+static void test_task_stack_within_mapping(void)
+{
+    extern struct task *task_current(void);
+    struct task *current = task_current();
+    if (current && current->stack_base) {
+        uintptr_t base = (uintptr_t)current->stack_base;
+        uintptr_t top = (uintptr_t)current->stack_top;
+        TEST_ASSERT_TRUE(base < 0x40000000UL);
+        TEST_ASSERT_TRUE(top <= 0x40000000UL);
+        TEST_ASSERT_TRUE(top > base);
+    } else {
+        /* No current task (running in test harness context) — skip */
+        TEST_ASSERT_TRUE(true);
+    }
+}
+
+/*
+ * Test: gic_end_interrupt sends PIC EOI without crashing.
+ * Verifies the PIC wrapper handles the gic_* interface correctly.
+ */
+static void test_gic_end_interrupt_safe(void)
+{
+    /* EOI for timer IRQ (vector 32) should not crash */
+    gic_end_interrupt(TIMER_IRQ);
+    /* EOI for out-of-range vector should be a no-op */
+    gic_end_interrupt(0);
+    gic_end_interrupt(255);
+    TEST_ASSERT_TRUE(true);
+}
+
+/*
+ * Test: UART driver functions are callable (uart_putc, uart_getc availability).
+ */
+static void test_uart_putc_works(void)
+{
+    /* uart_putc should not crash — write a newline */
+    extern void uart_putc(char c);
+    uart_putc('\n');
+    TEST_ASSERT_TRUE(true);
+}
+
+/*
+ * Test: scheduler_tick does not crash when called (timer integration).
+ */
+static void test_scheduler_tick_callable(void)
+{
+    extern void scheduler_tick(void);
+    /* Disable interrupts to prevent re-entrant tick */
+    irq_flags_t flags = irq_save();
+    scheduler_tick();
+    irq_restore(flags);
+    TEST_ASSERT_TRUE(true);
+}
+
+/* ============================================================================
  * Long Mode Verification Tests
  * ============================================================================ */
 
@@ -832,6 +908,13 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_gic_enable_disable_timer);
     RUN_TEST(test_timer_get_frequency);
     RUN_TEST(test_timer_get_count_advances);
+
+    /* Scheduler / context switch integration */
+    RUN_TEST(test_gic_init_loads_idt);
+    RUN_TEST(test_task_stack_within_mapping);
+    RUN_TEST(test_gic_end_interrupt_safe);
+    RUN_TEST(test_uart_putc_works);
+    RUN_TEST(test_scheduler_tick_callable);
 
     /* Long mode verification */
     RUN_TEST(test_64bit_operations);

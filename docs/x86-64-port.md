@@ -372,12 +372,16 @@ build/x86_64-integrated/        # Integrated kernel
 ### Deploy Workflow
 
 ```bash
-# Build and flash in one step
+# Standalone test kernel
 make -f kernel/arch/x86_64/Makefile.test clean disk && \
 labctl sdwire flash test-pc build/x86_64-test/slmos-x86.img
 
-# Capture boot output
-labctl serial_capture test-pc --timeout 30 --until "System halted"
+# Integrated kernel (full SLM-OS with shell)
+make -f kernel/arch/x86_64/Makefile.test disk-int && \
+labctl sdwire flash test-pc build/x86_64-integrated/slmos-x86.img
+
+# Capture boot output (standalone: wait for halt; integrated: wait for shell)
+labctl serial_capture test-pc --timeout 30 --until "slm-os>"
 ```
 
 ### UEFI Disk Image Structure
@@ -399,7 +403,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 40 tests across 10 categories:
+The `test_x86_boot.c` test suite contains 45 tests across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -412,6 +416,7 @@ The `test_x86_boot.c` test suite contains 40 tests across 10 categories:
 | PIC | 3 | OCW3 response, timer unmasked, slave accessible |
 | PIT timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock irqsave roundtrip, gic enable/disable, timer frequency, timer count |
+| Scheduler integration | 5 | gic_init loads IDT, task stack within mapping, gic_end_interrupt safe, uart_putc, scheduler_tick callable |
 | Long mode | 2 | 64-bit operations, RIP-relative addressing |
 
 ### Running Tests
@@ -490,7 +495,7 @@ Total: 72 bytes. Offsets hardcoded in `context.S` as `CTX_RBX`, `CTX_RSP`, etc.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 40 tests: boot, IDT, PIC, PIT, Multiboot2, platform abstraction |
+| `kernel/tests/test_x86_boot.c` | 45 tests: boot, IDT, PIC, PIT, Multiboot2, platform, scheduler |
 
 ---
 
@@ -546,12 +551,14 @@ The 32-bit trampoline halts when CPUID or long mode checks fail. Since the seria
 ### Triple Fault / Reboot Loop
 
 Common causes:
-1. Invalid page table entries
-2. GDT not loaded correctly
-3. Far jump target wrong
-4. BSS clear zeroing page tables
+1. **IDT not loaded** — `idt_init()` must be called before any interrupts can fire. In the integrated build, `gic_init()` in `pic.c` calls `idt_init()`. If the IDT is missing, the first timer interrupt causes a triple fault.
+2. Invalid page table entries
+3. GDT not loaded correctly
+4. Far jump target wrong
+5. BSS clear zeroing page tables
+6. **Premature STI** — enabling interrupts before the context switch to the first task corrupts the boot stack context. Interrupts should be enabled by `task_entry_wrapper` after the task's stack and registers are fully set up.
 
-**Debug**: Add serial output markers between each step to isolate failure point.
+**Debug**: Add serial output markers between each step to isolate failure point. Output to COM1 (0x3F8) directly from assembly with `outb`.
 
 ### GRUB Shows "no suitable video mode found"
 
