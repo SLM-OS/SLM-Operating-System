@@ -270,7 +270,14 @@ int cmd_cpu(int argc, char *argv[])
             }
         }
 
-        /* (Software trigger tests removed — they leave stale interrupts) */
+        /* BAR1 and MIP verification */
+        {
+            volatile uint32_t *b1lo = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + 0x402C);
+            volatile uint32_t *b1hi = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + 0x4030);
+            volatile uint32_t *rlo  = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + 0x40AC);
+            volatile uint32_t *rhi  = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + 0x40B0);
+            uart_printf("  BAR1: %x_%08x remap=%x_%08x\r\n", *b1hi, *b1lo, *rhi, *rlo);
+        }
     }
 #endif
 

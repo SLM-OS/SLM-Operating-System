@@ -69,7 +69,7 @@ See `docs/pi5-baremetal-status.md` for full details.
 ### Remaining Pi 5 Work
 - ✅ Run QEMU test suite on Pi 5 hardware (393 tests: 378 pass, 15 ignored, 0 failures)
 - ✅ Timer-driven sleep/delay functions (sleep_ms, sleep_us, shell `sleep` command)
-- ☐🔗 Interrupt-driven UART — infrastructure complete, blocked on PCIe RC config space access from EL1
+- ☐🔗 Interrupt-driven UART — blocked on PCIe BAR1 inbound window match (see `docs/pi5-uart-irq-investigation.md`)
 - ☐ Fix task_exit/schedule race on secondary CPUs
 - ☐ Investigate SMPEN for proper cache coherency (vs DC CVAC/CIVAC workaround)
 - ☐ Re-enable cross-CPU task dispatch (currently pinned to CPU 0 due to SMPEN/cache coherency)
