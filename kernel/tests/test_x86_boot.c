@@ -10,6 +10,8 @@
  * - PIC remapping verification
  * - PIT timer interrupt delivery
  * - Multiboot2 info parsing
+ * - Platform abstraction (cpu_context layout, platform defines,
+ *   spinlock irq_save/restore, gic/timer interfaces)
  *
  * These tests only run on x86-64 platform (PLATFORM_X86_64=1).
  */
@@ -17,8 +19,15 @@
 #include "unity.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifdef PLATFORM_X86_64
+
+#include "platform.h"
+#include "task.h"
+#include "spinlock.h"
+#include "gic.h"
+#include "timer.h"
 
 /* ============================================================================
  * External Symbols from Boot Code
@@ -599,6 +608,145 @@ static void test_pit_rate_approximately_100hz(void)
 }
 
 /* ============================================================================
+ * Platform Abstraction Tests
+ * ============================================================================ */
+
+/*
+ * Test: cpu_context struct is at offset 0x20 in struct task.
+ * context.S hardcodes TASK_CONTEXT_OFFSET = 0x20.
+ */
+static void test_cpu_context_offset(void)
+{
+    TEST_ASSERT_EQUAL_INT64(0x20, offsetof(struct task, context));
+}
+
+/*
+ * Test: cpu_context fields are at expected offsets (must match context.S).
+ */
+static void test_cpu_context_field_offsets(void)
+{
+    TEST_ASSERT_EQUAL_INT64(0x00, offsetof(struct cpu_context, rbx));
+    TEST_ASSERT_EQUAL_INT64(0x08, offsetof(struct cpu_context, rbp));
+    TEST_ASSERT_EQUAL_INT64(0x10, offsetof(struct cpu_context, r12));
+    TEST_ASSERT_EQUAL_INT64(0x18, offsetof(struct cpu_context, r13));
+    TEST_ASSERT_EQUAL_INT64(0x20, offsetof(struct cpu_context, r14));
+    TEST_ASSERT_EQUAL_INT64(0x28, offsetof(struct cpu_context, r15));
+    TEST_ASSERT_EQUAL_INT64(0x30, offsetof(struct cpu_context, rsp));
+    TEST_ASSERT_EQUAL_INT64(0x38, offsetof(struct cpu_context, rip));
+    TEST_ASSERT_EQUAL_INT64(0x40, offsetof(struct cpu_context, rflags));
+}
+
+/*
+ * Test: cpu_context struct total size is 72 bytes (9 uint64_t fields).
+ */
+static void test_cpu_context_size(void)
+{
+    TEST_ASSERT_EQUAL_INT64(72, sizeof(struct cpu_context));
+}
+
+/*
+ * Test: Platform defines are correct for x86-64.
+ */
+static void test_platform_defines(void)
+{
+    TEST_ASSERT_EQUAL_HEX64(0x200000UL, RAM_BASE);
+    TEST_ASSERT_TRUE(RAM_SIZE > 0);
+    TEST_ASSERT_EQUAL_HEX64(0x3F8UL, UART_BASE);
+    TEST_ASSERT_EQUAL_INT64(32, TIMER_IRQ);
+    TEST_ASSERT_EQUAL_INT64(1, CPU_MAX);
+}
+
+/*
+ * Test: irq_save disables interrupts and irq_restore re-enables them.
+ */
+static void test_irq_save_restore(void)
+{
+    /* Save current flags (IF should be set since we're in a running kernel) */
+    uint64_t rflags_before;
+    __asm__ volatile("pushfq; pop %0" : "=r"(rflags_before));
+
+    /* irq_save should disable interrupts and return old flags */
+    irq_flags_t saved = irq_save();
+
+    /* IF should now be clear */
+    uint64_t rflags_after;
+    __asm__ volatile("pushfq; pop %0" : "=r"(rflags_after));
+    TEST_ASSERT_TRUE((rflags_after & (1UL << 9)) == 0);
+
+    /* irq_restore should put things back */
+    irq_restore(saved);
+
+    /* IF should be restored to its original state */
+    uint64_t rflags_restored;
+    __asm__ volatile("pushfq; pop %0" : "=r"(rflags_restored));
+    TEST_ASSERT_EQUAL_HEX64(rflags_before & (1UL << 9), rflags_restored & (1UL << 9));
+}
+
+/*
+ * Test: spin_lock_irqsave/spin_unlock_irqrestore round-trips correctly.
+ */
+static void test_spinlock_irqsave_roundtrip(void)
+{
+    spinlock_t lock = SPINLOCK_INIT;
+
+    uint64_t rflags_before;
+    __asm__ volatile("pushfq; pop %0" : "=r"(rflags_before));
+
+    irq_flags_t flags = spin_lock_irqsave(&lock);
+    /* Interrupts should be disabled */
+    uint64_t rflags_locked;
+    __asm__ volatile("pushfq; pop %0" : "=r"(rflags_locked));
+    TEST_ASSERT_TRUE((rflags_locked & (1UL << 9)) == 0);
+
+    spin_unlock_irqrestore(&lock, flags);
+    /* Interrupts should be restored */
+    uint64_t rflags_unlocked;
+    __asm__ volatile("pushfq; pop %0" : "=r"(rflags_unlocked));
+    TEST_ASSERT_EQUAL_HEX64(rflags_before & (1UL << 9), rflags_unlocked & (1UL << 9));
+}
+
+/*
+ * Test: gic_enable_irq/gic_disable_irq work for the timer IRQ.
+ */
+static void test_gic_enable_disable_timer(void)
+{
+    /* Disable timer IRQ */
+    gic_disable_irq(TIMER_IRQ);
+
+    /* Read PIC1 mask — IRQ 0 (timer) should be masked (bit 0 = 1) */
+    uint8_t mask = inb(0x21);
+    TEST_ASSERT_TRUE((mask & 0x01) != 0);
+
+    /* Re-enable timer IRQ */
+    gic_enable_irq(TIMER_IRQ);
+
+    /* IRQ 0 should be unmasked (bit 0 = 0) */
+    mask = inb(0x21);
+    TEST_ASSERT_TRUE((mask & 0x01) == 0);
+}
+
+/*
+ * Test: timer_get_frequency returns TIMER_HZ (100).
+ */
+static void test_timer_get_frequency(void)
+{
+    TEST_ASSERT_EQUAL_INT64(100, timer_get_frequency());
+}
+
+/*
+ * Test: timer_get_count returns advancing tick count.
+ */
+static void test_timer_get_count_advances(void)
+{
+    uint64_t t1 = timer_get_count();
+    /* Wait a few ticks */
+    for (int i = 0; i < 5; i++)
+        __asm__ volatile("hlt");
+    uint64_t t2 = timer_get_count();
+    TEST_ASSERT_TRUE(t2 > t1);
+}
+
+/* ============================================================================
  * Long Mode Verification Tests
  * ============================================================================ */
 
@@ -673,6 +821,17 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_interrupts_enabled);
     RUN_TEST(test_pit_ticks_incrementing);
     RUN_TEST(test_pit_rate_approximately_100hz);
+
+    /* Platform abstraction tests */
+    RUN_TEST(test_cpu_context_offset);
+    RUN_TEST(test_cpu_context_field_offsets);
+    RUN_TEST(test_cpu_context_size);
+    RUN_TEST(test_platform_defines);
+    RUN_TEST(test_irq_save_restore);
+    RUN_TEST(test_spinlock_irqsave_roundtrip);
+    RUN_TEST(test_gic_enable_disable_timer);
+    RUN_TEST(test_timer_get_frequency);
+    RUN_TEST(test_timer_get_count_advances);
 
     /* Long mode verification */
     RUN_TEST(test_64bit_operations);

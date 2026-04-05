@@ -9,6 +9,31 @@
 #include <stdint.h>
 #include <stdarg.h>
 
+#if defined(PLATFORM_X86_64)
+/*
+ * x86-64 register dump for panic diagnostics.
+ */
+static void dump_registers(void)
+{
+    uint64_t rsp, cr2;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+
+    struct task *current = task_current();
+    uint32_t task_id = current ? current->id : 0xFFFFFFFF;
+    const char *task_name = current ? current->name : "<none>";
+
+    uart_puts_unlocked("Task Context:\n");
+    uart_printf_unlocked("  Task ID:   %lu\n", task_id);
+    uart_printf_unlocked("  Task Name: %s\n", task_name);
+    uart_printf_unlocked("  CPU:       0\n");
+
+    uart_puts_unlocked("\nRegister Dump:\n");
+    uart_printf_unlocked("  RSP:  0x%lx\n", rsp);
+    uart_printf_unlocked("  CR2:  0x%lx  (page fault address)\n", cr2);
+}
+
+#else /* ARM64 */
 /*
  * Read ARM64 system registers for exception debugging.
  */
@@ -110,6 +135,7 @@ static void dump_registers(void)
     uart_printf_unlocked("  EC:       0x%x (%s)\n", ec, decode_exception_class(ec));
     uart_printf_unlocked("  FAR_EL1:  0x%lx  (fault address)\n", far);
 }
+#endif /* PLATFORM_X86_64 */
 
 /*
  * Panic - halt the system with an error message.
@@ -121,7 +147,11 @@ void panic(const char *fmt, ...)
     va_list args;
 
     /* Disable interrupts to prevent further issues */
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("cli");
+#else
     __asm__ volatile("msr daifset, #0xF");
+#endif
 
     uart_puts_unlocked("\n\n");
     uart_puts_unlocked("*********************************\n");
@@ -139,6 +169,10 @@ void panic(const char *fmt, ...)
 
     /* Infinite loop - system is dead */
     while (1) {
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("hlt");
+#else
         __asm__ volatile("wfi");
+#endif
     }
 }

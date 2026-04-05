@@ -21,7 +21,7 @@
  * If neither is defined, default to QEMU.
  * ============================================================================ */
 
-#if !defined(PLATFORM_QEMU_VIRT) && !defined(PLATFORM_JETSON_ORIN_NANO) && !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_QEMU_VIRT) && !defined(PLATFORM_JETSON_ORIN_NANO) && !defined(PLATFORM_RASPI5) && !defined(PLATFORM_X86_64)
 #define PLATFORM_QEMU_VIRT  1
 #endif
 
@@ -187,6 +187,38 @@
  */
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */
+
+/* ============================================================================
+ * x86-64 PC
+ *
+ * Standard x86-64 hardware with UEFI boot via GRUB Multiboot2.
+ * Uses 16550 UART (COM1) for serial console and 8259 PIC for interrupts.
+ * ============================================================================ */
+#if defined(PLATFORM_X86_64)
+
+/* Platform identification */
+#define PLATFORM_NAME       "x86-64"
+
+/* Memory layout (identity mapped first 1GB, usable above kernel) */
+#define RAM_BASE            0x00200000UL    /* Above kernel image */
+#define RAM_SIZE            0x3DE00000UL    /* ~990 MB (1GB minus first 2MB minus BIOS) */
+
+/* UART - 16550 COM1 (I/O port, not MMIO) */
+#define UART_TYPE_16550
+#define UART_BASE           0x3F8UL
+#define UART_IRQ            36              /* IRQ 4 → vector 36 */
+
+/* Interrupt controller - 8259 PIC (not GIC) */
+#define GIC_DIST_BASE       0UL             /* Dummy — PIC uses I/O ports */
+#define GIC_CPU_BASE        0UL
+
+/* Timer - 8254 PIT */
+#define TIMER_IRQ           32              /* IRQ 0 → vector 32 */
+
+/* CPU configuration */
+#define CPU_MAX             1               /* Single core (no SMP yet) */
+
+#endif /* PLATFORM_X86_64 */
 
 /* ============================================================================
  * Raspberry Pi 5 (BCM2712)
@@ -355,7 +387,7 @@
  * ============================================================================ */
 
 #ifndef PLATFORM_NAME
-#error "No platform selected. Define PLATFORM_QEMU_VIRT, PLATFORM_JETSON_ORIN_NANO, or PLATFORM_RASPI5"
+#error "No platform selected. Define PLATFORM_QEMU_VIRT, PLATFORM_JETSON_ORIN_NANO, PLATFORM_RASPI5, or PLATFORM_X86_64"
 #endif
 
 #ifndef RAM_BASE

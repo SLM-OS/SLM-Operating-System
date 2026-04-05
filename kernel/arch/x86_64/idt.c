@@ -7,9 +7,19 @@
 
 #include <stdint.h>
 
-/* From main_x86.c */
+/*
+ * Serial output functions.
+ * In standalone mode, these are provided by main_x86.c.
+ * In integrated mode, they come from uart.h (kprintf.c).
+ */
+#ifdef SLM_INTEGRATED_BUILD
+#include "uart.h"
+static void serial_puts(const char *s) { uart_puts(s); }
+static void serial_print_hex(uint64_t v) { uart_printf("0x%lx", v); }
+#else
 extern void serial_puts(const char *s);
 extern void serial_print_hex(uint64_t value);
+#endif
 
 /* ISR stubs from idt.S */
 extern void isr_0(void);
@@ -252,11 +262,12 @@ void exception_handler(struct interrupt_frame *frame)
         while (1)
             __asm__ volatile("hlt");
     } else if (vec >= 32 && vec < 48) {
-        /* PIC IRQ */
+        /* PIC IRQ — send EOI before handler because timer_handler may
+         * context switch via schedule() and never return here. */
         uint8_t irq = vec - 32;
+        pic_send_eoi(irq);
         if (irq_handlers[irq])
             irq_handlers[irq](irq);
-        pic_send_eoi(irq);
     }
 }
 

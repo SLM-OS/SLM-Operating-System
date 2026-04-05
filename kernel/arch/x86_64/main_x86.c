@@ -256,6 +256,10 @@ extern void irq_register(uint8_t irq, void (*handler)(uint8_t));
 
 /* ---- Kernel entry ---- */
 
+/* entry64.S calls kernel_main_x86; in standalone mode, forward to kernel_main */
+void kernel_main(uint32_t multiboot_info_addr);
+void kernel_main_x86(uint32_t mb_addr) { kernel_main(mb_addr); }
+
 void kernel_main(uint32_t multiboot_info_addr)
 {
     serial_init();

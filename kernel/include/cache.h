@@ -65,7 +65,34 @@ static inline void cache_invalidate_range(const volatile void *addr, size_t size
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
-#else /* !PLATFORM_RASPI5 — coherency works */
+#elif defined(PLATFORM_X86_64)
+
+/* x86-64: fully hardware cache coherent, no explicit maintenance needed */
+static inline void cache_clean(const volatile void *addr)
+{
+    (void)addr;
+    __asm__ volatile("" ::: "memory");
+}
+
+static inline void cache_invalidate(const volatile void *addr)
+{
+    (void)addr;
+    __asm__ volatile("" ::: "memory");
+}
+
+static inline void cache_clean_range(const volatile void *addr, size_t size)
+{
+    (void)addr; (void)size;
+    __asm__ volatile("" ::: "memory");
+}
+
+static inline void cache_invalidate_range(const volatile void *addr, size_t size)
+{
+    (void)addr; (void)size;
+    __asm__ volatile("" ::: "memory");
+}
+
+#else /* ARM64 — coherency works (QEMU, Jetson) */
 
 static inline void cache_clean(const volatile void *addr)
 {
@@ -93,6 +120,6 @@ static inline void cache_invalidate_range(const volatile void *addr, size_t size
     __asm__ volatile("dmb ish" ::: "memory");
 }
 
-#endif /* PLATFORM_RASPI5 */
+#endif /* cache platform selection */
 
 #endif /* CACHE_H */

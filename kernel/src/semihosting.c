@@ -7,6 +7,23 @@
 
 #include "semihosting.h"
 
+#if defined(PLATFORM_X86_64)
+
+/* x86-64: no semihosting support */
+void semihosting_exit(int exit_code)
+{
+    (void)exit_code;
+    for (;;)
+        __asm__ volatile("hlt");
+}
+
+int semihosting_available(void)
+{
+    return 0;
+}
+
+#else /* ARM64 */
+
 /*
  * Structure for SYS_EXIT_EXTENDED operation.
  */
@@ -42,10 +59,6 @@ void semihosting_exit(int exit_code)
 {
     struct exit_block block;
 
-    /*
-     * Use SYS_EXIT_EXTENDED for AArch64.
-     * This allows specifying both a reason code and an exit subcode.
-     */
     block.reason = (exit_code == 0) ?
         ADP_Stopped_ApplicationExit :
         ADP_Stopped_RunTimeErrorUnknown;
@@ -53,13 +66,8 @@ void semihosting_exit(int exit_code)
 
     semihosting_call(SYS_EXIT_EXTENDED, &block);
 
-    /*
-     * If semihosting call returns (shouldn't happen with SYS_EXIT),
-     * try the simple SYS_EXIT as fallback.
-     */
     semihosting_call(SYS_EXIT, (void *)ADP_Stopped_ApplicationExit);
 
-    /* If we're still here, loop forever */
     for (;;) {
         __asm__ volatile("wfi");
     }
@@ -67,16 +75,11 @@ void semihosting_exit(int exit_code)
 
 int semihosting_available(void)
 {
-    /*
-     * There's no reliable way to detect semihosting availability
-     * without potentially causing a fault. For now, assume it's
-     * available when ENABLE_SEMIHOSTING is defined at compile time.
-     *
-     * On real hardware, the HLT instruction will cause an exception.
-     */
 #ifdef ENABLE_SEMIHOSTING
     return 1;
 #else
     return 0;
 #endif
 }
+
+#endif /* PLATFORM_X86_64 */

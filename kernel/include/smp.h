@@ -60,6 +60,19 @@ extern uint64_t cpu_logical_map[MAX_CPUS];
 extern uint32_t cpu_count;
 extern volatile uint32_t cpus_online;
 
+#if defined(PLATFORM_X86_64)
+
+/* x86-64 single-core: CPU ID is always 0 */
+static inline uint32_t cpu_id(void) {
+    return 0;
+}
+
+static inline struct per_cpu *this_cpu(void) {
+    return &cpu_data[0];
+}
+
+#else /* ARM64 */
+
 /*
  * Get current CPU's MPIDR value.
  */
@@ -89,6 +102,8 @@ static inline uint32_t cpu_id(void) {
 static inline struct per_cpu *this_cpu(void) {
     return &cpu_data[cpu_id()];
 }
+
+#endif /* PLATFORM_X86_64 */
 
 /*
  * Initialize SMP subsystem.

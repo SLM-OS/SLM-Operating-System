@@ -71,10 +71,13 @@ static void idle_task_func(void *arg)
          * DAIF. When idle is preempted by the timer ISR, the saved DAIF has
          * IRQ masked (hardware masks IRQ on exception entry). On resume,
          * the restored DAIF keeps IRQ masked — so we must re-clear it here. */
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("sti" ::: "memory");
+        __asm__ volatile("hlt");
+#else
         __asm__ volatile("msr daifclr, #2" ::: "memory");
-
-        /* Wait for interrupt (timer will wake us) */
         __asm__ volatile("wfi");
+#endif
 
         /* Yield to check if other tasks are ready */
         yield();
@@ -164,7 +167,9 @@ void scheduler_init(void)
     cache_clean(&sched.initialized);
 
     /* Wake any secondary CPUs waiting for scheduler init */
+#if !defined(PLATFORM_X86_64)
     __asm__ volatile("sev" ::: "memory");
+#endif
 
     INFO("Scheduler initialized");
 }
@@ -793,8 +798,12 @@ void scheduler_start(void)
     timer_start();
 
     INFO("Enabling interrupts...");
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("sti" ::: "memory");
+#else
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");  /* Clear IRQ mask */
     __asm__ volatile("isb" ::: "memory");  /* Ensure unmask takes effect */
+#endif
 
     /* Switch to first task (NULL = no previous context to save) */
     switch_to(NULL, first);

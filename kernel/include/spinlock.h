@@ -32,29 +32,40 @@
 extern volatile int spinlock_hw_enabled;
 #endif
 
+#if defined(PLATFORM_X86_64)
+/*
+ * Memory barrier macros for x86-64.
+ *
+ * x86-64 has a strong memory model: stores are not reordered with other
+ * stores, loads are not reordered with other loads. Only store-load
+ * reordering occurs. MFENCE provides a full barrier.
+ */
+#define dmb(opt)    __asm__ volatile("" ::: "memory")   /* compiler barrier suffices for most */
+#define dsb(opt)    __asm__ volatile("mfence" ::: "memory")
+#define isb()       __asm__ volatile("" ::: "memory")
+
+#define smp_mb()    __asm__ volatile("mfence" ::: "memory")
+#define smp_rmb()   __asm__ volatile("lfence" ::: "memory")
+#define smp_wmb()   __asm__ volatile("sfence" ::: "memory")
+#define barrier()   __asm__ volatile("" ::: "memory")
+
+#else /* ARM64 */
 /*
  * Memory barrier macros for ARM64.
  *
  * DMB (Data Memory Barrier) - ensures memory accesses complete
  * DSB (Data Synchronization Barrier) - ensures memory + cache ops complete
  * ISB (Instruction Synchronization Barrier) - flushes pipeline
- *
- * Barrier options:
- *   ish   - Inner Shareable (all cores in the system)
- *   ishld - Inner Shareable, load operations
- *   ishst - Inner Shareable, store operations
  */
 #define dmb(opt)    __asm__ volatile("dmb " #opt ::: "memory")
 #define dsb(opt)    __asm__ volatile("dsb " #opt ::: "memory")
 #define isb()       __asm__ volatile("isb" ::: "memory")
 
-/* Full memory barriers */
-#define smp_mb()    dmb(ish)      /* Full barrier */
-#define smp_rmb()   dmb(ishld)    /* Read barrier */
-#define smp_wmb()   dmb(ishst)    /* Write barrier */
-
-/* Compiler barrier (prevents reordering, no CPU barrier) */
+#define smp_mb()    dmb(ish)
+#define smp_rmb()   dmb(ishld)
+#define smp_wmb()   dmb(ishst)
 #define barrier()   __asm__ volatile("" ::: "memory")
+#endif /* PLATFORM_X86_64 */
 
 /*
  * ============================================================================
@@ -95,7 +106,11 @@ static inline void spin_init(spinlock_t *lock)
  */
 static inline void spin_lock(spinlock_t *lock)
 {
-#if defined(SPINLOCK_SKIP_LOCKING)
+#if defined(PLATFORM_X86_64)
+    /* x86-64 single-core: compiler barrier only */
+    (void)lock;
+    barrier();
+#elif defined(SPINLOCK_SKIP_LOCKING)
     /* Jetson: skip locking, just barrier for memory ordering */
     (void)lock;
     dmb(ish);
@@ -131,7 +146,11 @@ static inline void spin_lock(spinlock_t *lock)
  */
 static inline int spin_trylock(spinlock_t *lock)
 {
-#if defined(SPINLOCK_SKIP_LOCKING)
+#if defined(PLATFORM_X86_64)
+    (void)lock;
+    barrier();
+    return 1;
+#elif defined(SPINLOCK_SKIP_LOCKING)
     (void)lock;
     dmb(ish);
     return 1;
@@ -167,7 +186,10 @@ static inline int spin_trylock(spinlock_t *lock)
  */
 static inline void spin_unlock(spinlock_t *lock)
 {
-#if defined(SPINLOCK_SKIP_LOCKING)
+#if defined(PLATFORM_X86_64)
+    (void)lock;
+    barrier();
+#elif defined(SPINLOCK_SKIP_LOCKING)
     (void)lock;
     dmb(ish);
 #else
@@ -227,6 +249,19 @@ static inline void ticket_init(ticket_lock_t *lock)
  */
 static inline void ticket_lock(ticket_lock_t *lock)
 {
+#if defined(PLATFORM_X86_64)
+    /* x86-64: atomic fetch-and-add using LOCK XADD */
+    uint16_t ticket;
+    __asm__ volatile(
+        "lock xaddw %0, %1"
+        : "=r"(ticket), "+m"(lock->next)
+        : "0"((uint16_t)1)
+        : "memory"
+    );
+    while (lock->owner != ticket) {
+        __asm__ volatile("pause" ::: "memory");
+    }
+#else
     uint32_t status;
     uint16_t ticket;
     uint16_t next_ticket;
@@ -249,6 +284,7 @@ static inline void ticket_lock(ticket_lock_t *lock)
 
     /* Acquire barrier */
     dmb(ish);
+#endif
 }
 
 /*
@@ -258,12 +294,17 @@ static inline void ticket_unlock(ticket_lock_t *lock)
 {
     uint16_t next_owner = lock->owner + 1;
 
+#if defined(PLATFORM_X86_64)
+    barrier();
+    lock->owner = next_owner;
+#else
     /* Release barrier then update owner */
     dmb(ish);
     lock->owner = next_owner;
 
     /* Wake waiters */
     __asm__ volatile("sev" ::: "memory");
+#endif
 }
 
 /*
@@ -283,6 +324,9 @@ typedef uint64_t irq_flags_t;
 static inline irq_flags_t irq_save(void)
 {
     irq_flags_t flags;
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+#else
     __asm__ volatile(
         "mrs    %0, daif\n"
         "msr    daifset, #2\n"      /* Set IRQ mask bit */
@@ -290,6 +334,7 @@ static inline irq_flags_t irq_save(void)
         :
         : "memory"
     );
+#endif
     return flags;
 }
 
@@ -298,12 +343,16 @@ static inline irq_flags_t irq_save(void)
  */
 static inline void irq_restore(irq_flags_t flags)
 {
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("push %0; popfq" :: "r"(flags) : "memory", "cc");
+#else
     __asm__ volatile(
         "msr    daif, %0\n"
         :
         : "r"(flags)
         : "memory"
     );
+#endif
 }
 
 /*

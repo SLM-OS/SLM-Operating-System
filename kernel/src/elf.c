@@ -29,9 +29,15 @@ static void elf_entry_wrapper(void)
 {
     uint64_t entry_reg, argc_reg, argv_reg;
 
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("mov %%rbx, %0" : "=r"(entry_reg));
+    __asm__ volatile("mov %%r12, %0" : "=r"(argc_reg));
+    __asm__ volatile("mov %%r13, %0" : "=r"(argv_reg));
+#else
     __asm__ volatile("mov %0, x19" : "=r"(entry_reg));
     __asm__ volatile("mov %0, x20" : "=r"(argc_reg));
     __asm__ volatile("mov %0, x21" : "=r"(argv_reg));
+#endif
 
     elf_main_t entry = (elf_main_t)(uintptr_t)entry_reg;
     int argc = (int)argc_reg;
@@ -439,14 +445,22 @@ struct task *elf_create_task_with_args(const struct elf_info *info,
     task->stack_top = (void *)stack_top;
 
     /* Set up initial context */
+#if defined(PLATFORM_X86_64)
+    task->context.rsp = sp;
+    task->context.rip = (uint64_t)elf_entry_wrapper;
+    task->context.rbp = 0;
+    task->context.rflags = 0;
+    task->context.rbx = (uint64_t)entry_phys;
+    task->context.r12 = (uint64_t)argc;
+    task->context.r13 = (uint64_t)argv_ptrs;
+#else
     task->context.sp = sp;
     task->context.x30 = (uint64_t)elf_entry_wrapper;  /* Return address -> wrapper */
     task->context.x29 = 0;  /* Frame pointer */
-
-    /* Store entry point, argc, argv in callee-saved registers */
     task->context.x19 = (uint64_t)entry_phys;
     task->context.x20 = (uint64_t)argc;
     task->context.x21 = (uint64_t)argv_ptrs;
+#endif
 
     /* Set cleanup callback to free ELF segment memory when task is destroyed */
     extern void task_set_cleanup(struct task *task, void (*cleanup)(void *), void *arg);

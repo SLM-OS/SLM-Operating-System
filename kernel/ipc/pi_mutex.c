@@ -90,7 +90,11 @@ void pi_mutex_lock(pi_mutex_t *mutex)
          */
         while (mutex->locked) {
             /* Yield to let the owner run */
+#if defined(PLATFORM_X86_64)
+            __asm__ volatile("pause" ::: "memory");
+#else
             __asm__ volatile("yield" ::: "memory");
+#endif
         }
     }
 }
@@ -149,7 +153,9 @@ void pi_mutex_unlock(pi_mutex_t *mutex)
     spin_unlock_irqrestore(&mutex->guard, flags);
 
     /* Wake any waiters */
+#if !defined(PLATFORM_X86_64)
     __asm__ volatile("sev" ::: "memory");
+#endif
 }
 
 /*

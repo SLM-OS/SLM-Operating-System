@@ -47,13 +47,12 @@ static struct task *alloc_task_slot(void)
     return NULL;
 }
 
-/* Forward declaration — defined in assembly below */
+/* Forward declaration — defined in assembly (context.S for x86-64, inline below for ARM64) */
 extern void task_entry_wrapper(void);
 
 /*
  * C trampoline called from assembly task_entry_wrapper.
- * x19 (entry) and x20 (arg) are passed as function arguments
- * by the assembly stub, avoiding any risk of compiler clobbering.
+ * Callee-saved registers hold the entry point and argument.
  */
 void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
 {
@@ -64,13 +63,12 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     task_exit();
 }
 
+#if !defined(PLATFORM_X86_64)
 /*
- * Task entry wrapper (assembly).
+ * ARM64 task entry wrapper (inline assembly).
  *
- * When switch_to restores a new task for the first time, x19 holds
- * the entry point and x20 holds the argument (set by task_create).
- * This must be in assembly to guarantee x19/x20 are read before
- * the compiler can use them for its own purposes in a C prologue.
+ * When switch_to restores a new task, x19 = entry, x20 = arg.
+ * Passes them to task_entry_trampoline as function arguments.
  */
 __asm__(
     ".global task_entry_wrapper\n"
@@ -80,6 +78,7 @@ __asm__(
     "    mov x1, x20\n"
     "    b task_entry_trampoline\n"
 );
+#endif /* !PLATFORM_X86_64 — x86-64 wrapper is in context.S */
 
 /*
  * Allocate a task slot without setting up a stack.
@@ -216,6 +215,14 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     }
 
     /* Set up initial context for first switch */
+#if defined(PLATFORM_X86_64)
+    task->context.rsp = (uint64_t)task->stack_top;
+    task->context.rip = (uint64_t)task_entry_wrapper;
+    task->context.rbp = 0;                              /* Frame pointer */
+    task->context.rflags = 0;                           /* IF=0: interrupts disabled */
+    task->context.rbx = (uint64_t)entry;                /* Entry function */
+    task->context.r12 = (uint64_t)arg;                  /* Argument */
+#else
     task->context.sp = (uint64_t)task->stack_top;
     task->context.x30 = (uint64_t)task_entry_wrapper;  /* Return address */
     task->context.x29 = 0;                              /* Frame pointer */
@@ -233,6 +240,7 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     /* Store entry point and arg in callee-saved registers for wrapper */
     task->context.x19 = (uint64_t)entry;
     task->context.x20 = (uint64_t)arg;
+#endif /* PLATFORM_X86_64 */
 
     /* No cleanup callback by default */
     task->cleanup = NULL;

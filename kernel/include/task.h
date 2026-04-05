@@ -33,27 +33,36 @@ typedef enum {
     TASK_TERMINATED     /* Finished execution, awaiting cleanup */
 } task_state_t;
 
+#if defined(PLATFORM_X86_64)
 /*
- * CPU context saved during context switch.
+ * x86-64 CPU context saved during context switch.
  *
- * ARM64 calling convention:
- *   - x0-x7:   Arguments/results (caller-saved)
- *   - x8:      Indirect result (caller-saved)
- *   - x9-x15:  Temporary (caller-saved)
- *   - x16-x17: Intra-procedure-call (caller-saved)
- *   - x18:     Platform register (reserved)
- *   - x19-x28: Callee-saved (we must preserve these)
- *   - x29:     Frame pointer (callee-saved)
- *   - x30:     Link register (return address)
- *   - sp:      Stack pointer
+ * System V AMD64 ABI callee-saved registers:
+ *   rbx, rbp, r12, r13, r14, r15
+ * Plus rsp (stack pointer) and rip (saved return address).
  *
- * For voluntary context switch (yield), we only need callee-saved registers.
- * For preemptive switch (interrupt), we save everything in the exception handler.
+ * New tasks have rip = task_entry_wrapper, rbx = entry, r12 = arg.
+ * rflags is saved to preserve the interrupt flag (IF) state.
+ */
+struct cpu_context {
+    uint64_t rbx;       /* 0x00 */
+    uint64_t rbp;       /* 0x08 */
+    uint64_t r12;       /* 0x10 */
+    uint64_t r13;       /* 0x18 */
+    uint64_t r14;       /* 0x20 */
+    uint64_t r15;       /* 0x28 */
+    uint64_t rsp;       /* 0x30 */
+    uint64_t rip;       /* 0x38 */
+    uint64_t rflags;    /* 0x40 */
+};
+
+#else /* ARM64 */
+/*
+ * ARM64 CPU context saved during context switch.
  *
- * FPU/SIMD registers (eager save for SLM workloads):
- *   - v0-v31:  128-bit SIMD registers (512 bytes total)
- *   - fpcr:    Floating-point control register
- *   - fpsr:    Floating-point status register
+ * Callee-saved: x19-x28, x29 (fp), x30 (lr), sp.
+ * FPU/SIMD: v0-v31, fpcr, fpsr (eager save for SLM workloads).
+ * Interrupt state: DAIF register.
  */
 struct cpu_context {
     /* Callee-saved general purpose registers */
@@ -79,6 +88,7 @@ struct cpu_context {
     /* Interrupt state — preserved across context switches */
     uint64_t daif;      /* DAIF register (interrupt mask state) */
 };
+#endif /* PLATFORM_X86_64 */
 
 /* Task cleanup callback (called when task is destroyed) */
 typedef void (*task_cleanup_t)(void *cleanup_arg);

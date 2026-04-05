@@ -334,39 +334,35 @@ sudo apt install gcc make grub-efi-amd64-bin sgdisk dosfstools qemu-system-x86
 ### Build Commands
 
 ```bash
-# Build kernel ELF
-make -f kernel/arch/x86_64/Makefile.test
+# --- Standalone test kernel (boot + IDT + PIC + PIT only) ---
+make -f kernel/arch/x86_64/Makefile.test           # Build standalone ELF
+make -f kernel/arch/x86_64/Makefile.test disk       # UEFI disk image
+make -f kernel/arch/x86_64/Makefile.test run        # QEMU (serial)
 
-# Create bootable ISO (QEMU -cdrom testing)
-make -f kernel/arch/x86_64/Makefile.test iso
+# --- Integrated kernel (full SLM-OS: scheduler, shell, PMM, VFS) ---
+make -f kernel/arch/x86_64/Makefile.test integrated # Build integrated ELF
+make -f kernel/arch/x86_64/Makefile.test disk-int   # UEFI disk image
+make -f kernel/arch/x86_64/Makefile.test run-int    # QEMU (serial)
 
-# Create UEFI-bootable disk image (real hardware)
-make -f kernel/arch/x86_64/Makefile.test disk
-
-# Run in QEMU (serial output)
-make -f kernel/arch/x86_64/Makefile.test run
-
-# Run in QEMU (GUI mode)
-make -f kernel/arch/x86_64/Makefile.test run-gui
-
-# Debug with GDB
-make -f kernel/arch/x86_64/Makefile.test debug
-make -f kernel/arch/x86_64/Makefile.test gdb
+# --- Other targets ---
+make -f kernel/arch/x86_64/Makefile.test iso        # GRUB ISO (QEMU -cdrom)
+make -f kernel/arch/x86_64/Makefile.test debug      # QEMU + GDB server
+make -f kernel/arch/x86_64/Makefile.test gdb        # Connect GDB
+make -f kernel/arch/x86_64/Makefile.test clean      # Remove all build artifacts
 ```
 
 ### Build Output
 
 ```
-build/x86_64-test/
-├── kernel-x86.elf        # Kernel ELF binary
-├── slmos-x86.iso         # Bootable ISO (QEMU)
-├── slmos-x86.img         # UEFI disk image (hardware)
-├── bootx64.efi           # GRUB EFI binary
-├── grub-embed.cfg        # Embedded GRUB config
-├── esp/                   # EFI System Partition contents
-│   ├── EFI/BOOT/BOOTX64.EFI
-│   └── slmos/kernel.elf
-└── *.o                   # Object files
+build/x86_64-test/              # Standalone kernel
+├── kernel-x86.elf
+├── slmos-x86.iso / .img
+└── *.o
+
+build/x86_64-integrated/        # Integrated kernel
+├── kernel-x86.elf
+├── slmos-x86.img
+└── kernel/**/*.o               # Mirrored source tree
 ```
 
 ---
@@ -403,7 +399,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 31 tests across 9 categories:
+The `test_x86_boot.c` test suite contains 40 tests across 10 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -415,11 +411,49 @@ The `test_x86_boot.c` test suite contains 31 tests across 9 categories:
 | IDT | 4 | IDTR loaded, exception entries present, IRQ interrupt gates, exception trap gates |
 | PIC | 3 | OCW3 response, timer unmasked, slave accessible |
 | PIT timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
+| Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock irqsave roundtrip, gic enable/disable, timer frequency, timer count |
 | Long mode | 2 | 64-bit operations, RIP-relative addressing |
 
 ### Running Tests
 
 Tests are integrated into the kernel and run during boot when compiled with the test harness. They use the Unity bare-metal test framework.
+
+---
+
+## Platform Abstraction
+
+The x86-64 port uses `#if defined(PLATFORM_X86_64)` guards in shared kernel headers to replace ARM64-specific inline assembly. Shared kernel code (scheduler, PMM, shell, VFS, IPC) runs unmodified.
+
+### Modified Shared Headers
+
+| Header | x86-64 Changes |
+|--------|----------------|
+| `platform.h` | RAM_BASE, UART_BASE, TIMER_IRQ, CPU_MAX for x86-64 |
+| `task.h` | x86-64 `struct cpu_context` (rbx, rbp, r12-r15, rsp, rip, rflags) |
+| `spinlock.h` | x86-64 barriers (mfence/lfence/sfence), irq_save (pushfq+cli), spin_lock (no-op single core) |
+| `cache.h` | No-ops (x86-64 fully hardware cache coherent) |
+| `smp.h` | `cpu_id()` returns 0 (single core) |
+
+### x86-64 cpu_context Layout
+
+```
+struct task offset 0x20 + struct cpu_context:
+  +0x00: rbx    +0x08: rbp    +0x10: r12    +0x18: r13
+  +0x20: r14    +0x28: r15    +0x30: rsp    +0x38: rip
+  +0x40: rflags
+```
+
+Total: 72 bytes. Offsets hardcoded in `context.S` as `CTX_RBX`, `CTX_RSP`, etc.
+
+### Platform Driver Mapping
+
+| Main Kernel Interface | x86-64 Implementation |
+|-----------------------|----------------------|
+| `uart.h` (uart_init, uart_putc, uart_getc) | `kernel/drivers/uart_x86.c` — 16550 COM1 |
+| `gic.h` (gic_init, gic_enable_irq, gic_end_interrupt) | `kernel/arch/x86_64/pic.c` — 8259 PIC |
+| `timer.h` (timer_init, timer_start, timer_handler) | `kernel/arch/x86_64/timer_x86.c` — 8254 PIT |
+| `switch_to()` (context.S) | `kernel/arch/x86_64/context.S` — x86-64 registers |
+| `smp_init`, `vmm_init`, DTB/Rust stubs | `kernel/arch/x86_64/platform_x86.c` |
 
 ---
 
@@ -430,28 +464,33 @@ Tests are integrated into the kernel and run during boot when compiled with the 
 | File | Purpose |
 |------|---------|
 | `kernel/arch/x86_64/trampoline32.S` | 32-bit Multiboot2 entry, mode transition |
-| `kernel/arch/x86_64/entry64.S` | 64-bit entry, BSS clear, kernel call |
+| `kernel/arch/x86_64/entry64.S` | 64-bit entry, BSS clear, calls `kernel_main_x86` |
 | `kernel/arch/x86_64/idt.S` | ISR stubs for exceptions (0-31) and IRQs (32-47) |
+| `kernel/arch/x86_64/context.S` | `switch_to()` context switch + `task_entry_wrapper` |
 
-### C Code
+### C Code — x86-64 Platform Layer
 
 | File | Purpose |
 |------|---------|
-| `kernel/arch/x86_64/main_x86.c` | Kernel entry, serial console, PIC, PIT, Multiboot2 parsing |
+| `kernel/arch/x86_64/main_x86.c` | Standalone test kernel entry (not used in integrated build) |
 | `kernel/arch/x86_64/idt.c` | IDT setup, exception handler, IRQ dispatch |
+| `kernel/arch/x86_64/pic.c` | 8259 PIC driver (gic.h interface) |
+| `kernel/arch/x86_64/timer_x86.c` | 8254 PIT timer (timer.h interface) |
+| `kernel/arch/x86_64/platform_x86.c` | Boot glue, SMP/VMM/DTB/Rust/component stubs |
+| `kernel/drivers/uart_x86.c` | 16550 UART driver (uart.h interface) |
 
 ### Build System
 
 | File | Purpose |
 |------|---------|
-| `kernel/arch/x86_64/Makefile.test` | x86-64 build rules (ELF, ISO, disk image) |
+| `kernel/arch/x86_64/Makefile.test` | Standalone + integrated build rules |
 | `kernel/kernel-x86_64.ld` | Linker script |
 
 ### Tests
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 31 tests covering boot, IDT, PIC, PIT, Multiboot2 |
+| `kernel/tests/test_x86_boot.c` | 40 tests: boot, IDT, PIC, PIT, Multiboot2, platform abstraction |
 
 ---
 
@@ -525,6 +564,20 @@ The embedded GRUB prefix config uses commands that require specific modules. Ens
 ### Garbled Serial Output from BIOS
 
 The UEFI firmware outputs POST messages on the serial port at a different baud rate (typically 9600). This garbled data appears before SLM-OS initializes the serial port at 115200. It is harmless.
+
+---
+
+## Known Issues
+
+### Context Switch Triple Fault
+
+The integrated kernel boots through full initialization (PMM, scheduler, VFS, LittleFS, shell task creation) but triple-faults when `scheduler_start()` enables interrupts and the first timer tick triggers a context switch via `switch_to()`. The system reboots instead of switching to the first task.
+
+**Status**: Under investigation. The `context.S` implementation is suspected — the register save/restore sequence or stack pointer handling may be incorrect. The standalone test kernel (without scheduler) works correctly with timer interrupts.
+
+### Only 1GB Identity Mapped
+
+The boot code identity-maps only the first 1GB. On the i7-6700 with 16 GB RAM, addresses above 0x3FFFFFFF are not accessible. The PMM is configured with `RAM_SIZE = ~990 MB`, leaving 15 GB unused. Extending the page tables to map all RAM is planned for a future phase.
 
 ---
 

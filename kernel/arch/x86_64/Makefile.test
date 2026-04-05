@@ -194,6 +194,139 @@ gdb: $(KERNEL_ELF)
 clean:
 	rm -rf $(BUILD)
 
+# ============================================================================
+# Integrated kernel build (full SLM-OS with x86-64 platform layer)
+# ============================================================================
+
+BUILD_INT := $(ROOT)/build/x86_64-integrated
+KERNEL_INT := $(BUILD_INT)/kernel-x86.elf
+
+# Additional include paths for shared kernel
+CFLAGS_INT := $(CFLAGS) -DSLM_INTEGRATED_BUILD \
+              -I$(ROOT)/kernel/lib/littlefs -I$(ROOT)/kernel/tests -I$(ROOT)/kernel/gpu \
+              -I$(ROOT)/kernel/include/compat \
+              -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
+
+# Assembly objects (same as standalone)
+OBJS_INT_ASM := $(BUILD_INT)/trampoline32.o $(BUILD_INT)/entry64.o \
+                $(BUILD_INT)/idt_asm.o $(BUILD_INT)/context_x86.o
+
+# x86-64 platform C sources
+SRCS_INT_ARCH := $(SRC_ARCH)/idt.c $(SRC_ARCH)/pic.c \
+                 $(SRC_ARCH)/timer_x86.c $(SRC_ARCH)/platform_x86.c
+
+# Shared kernel C sources
+SRCS_INT_KERNEL := $(ROOT)/kernel/src/main.c \
+                   $(ROOT)/kernel/src/panic.c \
+                   $(ROOT)/kernel/src/kprintf.c \
+                   $(ROOT)/kernel/src/string.c \
+                   $(ROOT)/kernel/src/shell.c \
+                   $(ROOT)/kernel/src/shell_sys.c \
+                   $(ROOT)/kernel/src/shell_fs.c \
+                   $(ROOT)/kernel/src/shell_exec.c \
+                   $(ROOT)/kernel/src/shell_component.c \
+                   $(ROOT)/kernel/src/vfs.c \
+                   $(ROOT)/kernel/src/elf.c \
+                   $(ROOT)/kernel/src/help.c \
+                   $(ROOT)/kernel/src/semihosting.c \
+                   $(ROOT)/kernel/src/slm_ffi.c \
+                   $(ROOT)/kernel/sched/sched.c \
+                   $(ROOT)/kernel/sched/task.c \
+                   $(ROOT)/kernel/mm/pmm.c \
+                   $(ROOT)/kernel/ipc/ipc.c \
+                   $(ROOT)/kernel/ipc/pi_mutex.c \
+                   $(ROOT)/kernel/drivers/uart_x86.c \
+                   $(ROOT)/kernel/drivers/blkdev.c \
+                   $(ROOT)/kernel/drivers/ramdisk.c \
+                   $(ROOT)/kernel/gpu/gpu.c \
+                   $(ROOT)/kernel/gpu/gpu_stub.c \
+                   $(ROOT)/kernel/fs/littlefs_slm.c \
+                   $(ROOT)/kernel/fs/littlefs_vfs.c \
+                   $(ROOT)/kernel/lib/littlefs/lfs.c \
+                   $(ROOT)/kernel/lib/littlefs/lfs_util.c
+
+OBJS_INT_C := $(patsubst $(ROOT)/%.c,$(BUILD_INT)/%.o,$(SRCS_INT_ARCH) $(SRCS_INT_KERNEL))
+
+OBJS_INT := $(OBJS_INT_ASM) $(OBJS_INT_C)
+
+.PHONY: integrated run-int disk-int
+
+integrated: $(KERNEL_INT)
+
+LIBGCC := $(shell gcc -m64 -print-libgcc-file-name)
+
+$(KERNEL_INT): $(OBJS_INT) $(ROOT)/kernel/kernel-x86_64.ld | $(BUILD_INT)
+	@echo "Linking integrated kernel $@..."
+	$(LD) -n -T $(ROOT)/kernel/kernel-x86_64.ld -o $@ $(OBJS_INT) $(LIBGCC)
+
+# Assembly rules for integrated build
+$(BUILD_INT)/trampoline32.o: $(SRC_ARCH)/trampoline32.S | $(BUILD_INT)
+	@mkdir -p $(dir $@)
+	$(CC) -c -m32 -I$(ROOT)/kernel/include -o $(BUILD_INT)/trampoline32_temp.o $<
+	$(OBJCOPY) -O elf64-x86-64 $(BUILD_INT)/trampoline32_temp.o $@
+	rm $(BUILD_INT)/trampoline32_temp.o
+
+$(BUILD_INT)/entry64.o: $(SRC_ARCH)/entry64.S | $(BUILD_INT)
+	@mkdir -p $(dir $@)
+	$(CC) -c -m64 -I$(ROOT)/kernel/include -o $@ $<
+
+$(BUILD_INT)/idt_asm.o: $(SRC_ARCH)/idt.S | $(BUILD_INT)
+	@mkdir -p $(dir $@)
+	$(CC) -c -m64 -o $@ $<
+
+$(BUILD_INT)/context_x86.o: $(SRC_ARCH)/context.S | $(BUILD_INT)
+	@mkdir -p $(dir $@)
+	$(CC) -c -m64 -o $@ $<
+
+# Pattern rule for C files in the integrated build
+$(BUILD_INT)/%.o: $(ROOT)/%.c | $(BUILD_INT)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS_INT) -c $< -o $@
+
+$(BUILD_INT):
+	mkdir -p $(BUILD_INT)
+
+# Run integrated kernel in QEMU
+run-int: $(KERNEL_INT)
+	@echo "Running integrated x86-64 kernel in QEMU..."
+	@echo "Press Ctrl+A then X to exit"
+	$(QEMU) $(QEMU_FLAGS) \
+		-kernel $(KERNEL_INT) \
+		-serial stdio \
+		-display none
+
+# Create UEFI disk image for integrated kernel
+DISK_IMG_INT := $(BUILD_INT)/slmos-x86.img
+
+disk-int: $(KERNEL_INT)
+	@echo "Creating UEFI-bootable disk image (integrated)..."
+	@echo 'set timeout=0' > $(BUILD_INT)/grub-embed.cfg
+	@echo 'set default=0' >> $(BUILD_INT)/grub-embed.cfg
+	@echo 'insmod part_gpt' >> $(BUILD_INT)/grub-embed.cfg
+	@echo 'insmod fat' >> $(BUILD_INT)/grub-embed.cfg
+	@echo 'insmod multiboot2' >> $(BUILD_INT)/grub-embed.cfg
+	@echo 'insmod all_video' >> $(BUILD_INT)/grub-embed.cfg
+	@echo 'set gfxpayload=text' >> $(BUILD_INT)/grub-embed.cfg
+	@echo 'search --file --set=root /slmos/kernel.elf' >> $(BUILD_INT)/grub-embed.cfg
+	@echo 'multiboot2 /slmos/kernel.elf' >> $(BUILD_INT)/grub-embed.cfg
+	@echo 'boot' >> $(BUILD_INT)/grub-embed.cfg
+	grub-mkimage -O x86_64-efi -o $(BUILD_INT)/bootx64.efi \
+		-p /boot/grub -c $(BUILD_INT)/grub-embed.cfg \
+		part_gpt fat multiboot2 search serial all_video
+	mkdir -p $(BUILD_INT)/esp/EFI/BOOT $(BUILD_INT)/esp/slmos
+	cp $(BUILD_INT)/bootx64.efi $(BUILD_INT)/esp/EFI/BOOT/BOOTX64.EFI
+	cp $(KERNEL_INT) $(BUILD_INT)/esp/slmos/kernel.elf
+	dd if=/dev/zero of=$(DISK_IMG_INT) bs=1M count=64 status=none
+	sgdisk --clear --new=1:2048:131038 --typecode=1:EF00 --change-name=1:"EFI" \
+		$(DISK_IMG_INT) > /dev/null
+	LOOP=$$(sudo losetup --find --show --offset 1048576 --sizelimit $$((64*1024*1024 - 1048576)) $(DISK_IMG_INT)) && \
+	sudo mkfs.vfat -F 32 -n "SLMOS" $$LOOP > /dev/null && \
+	sudo mount $$LOOP /mnt && \
+	sudo cp -r $(BUILD_INT)/esp/* /mnt/ && \
+	sudo umount /mnt && \
+	sudo losetup -d $$LOOP
+	@echo "Created: $(DISK_IMG_INT)"
+
 # Show help
 help:
 	@echo "x86-64 Boot Test Makefile"
@@ -206,6 +339,9 @@ help:
 	@echo "  iso      - Create bootable ISO with GRUB (QEMU only)"
 	@echo "  run-iso  - Run from ISO in QEMU"
 	@echo "  disk     - Create UEFI-bootable disk image (for real hardware)"
+	@echo "  integrated - Build integrated SLM-OS kernel for x86-64"
+	@echo "  run-int  - Run integrated kernel in QEMU"
+	@echo "  disk-int - Create UEFI disk image (integrated)"
 	@echo "  debug    - Run QEMU with GDB server"
 	@echo "  gdb      - Connect GDB to running QEMU"
 	@echo "  clean    - Remove build artifacts"

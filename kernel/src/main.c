@@ -242,7 +242,11 @@ void kernel_main(void *dtb)
     uart_puts("========================================\n\n");
 
     INFO("Boot successful");
+#if defined(PLATFORM_X86_64)
+    INFO("Running in Ring 0 on %s", PLATFORM_NAME);
+#else
     INFO("Running at EL1 on %s", PLATFORM_NAME);
+#endif
 
     /* Show DTB parsing results */
     if (dtb_ret == FDT_OK) {

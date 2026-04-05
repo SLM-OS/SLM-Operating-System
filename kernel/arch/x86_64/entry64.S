@@ -12,8 +12,8 @@
 /* Imports from trampoline32.S */
 .extern multiboot_ptr
 
-/* Kernel entry point */
-.extern kernel_main
+/* Kernel entry point (platform_x86.c bridges to main kernel) */
+.extern kernel_main_x86
 
 /* BSS boundaries from linker */
 .extern __bss_start
@@ -41,7 +41,7 @@ entry64:
 
     /* Load multiboot info pointer and call kernel */
     mov multiboot_ptr(%rip), %edi
-    call kernel_main
+    call kernel_main_x86
 
     /* Halt if kernel returns */
 halt64:

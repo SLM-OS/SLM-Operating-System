@@ -361,19 +361,16 @@ int cmd_reboot(int argc, char *argv[])
 
     uart_puts("Rebooting...\r\n");
 
-    /* Use PSCI SYSTEM_RESET */
-    register uint64_t x0 __asm__("x0") = 0x84000009;  /* SYSTEM_RESET */
-    __asm__ volatile(
-        "hvc #0"
-        : "+r"(x0)
-        :
-        : "x1", "x2", "x3", "memory"
-    );
+    psci_system_reset();
 
-    /* If PSCI fails, spin */
+    /* If reset fails, spin */
     uart_puts("Reboot failed!\r\n");
     while (1) {
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("hlt");
+#else
         __asm__ volatile("wfi");
+#endif
     }
 
     return 0;
