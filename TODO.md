@@ -67,7 +67,7 @@ See `docs/pi5-baremetal-status.md` for full details.
 - ✅ Hardware spinlocks (runtime-enabled after MMU, `spinlock_hw_enabled`)
 
 ### Remaining Pi 5 Work
-- ✅ Run QEMU test suite on Pi 5 hardware (413 tests: 397 pass, 16 ignored, 0 failures)
+- ✅ Run QEMU test suite on Pi 5 hardware (419 tests: 403 pass, 16 ignored, 0 failures)
 - ✅ Timer-driven sleep/delay functions (sleep_ms, sleep_us, shell `sleep` command)
 - ☐🔗 Interrupt-driven UART — blocked on PCIe BAR1 inbound window match (see `docs/pi5-uart-irq-investigation.md`)
 - ✅ Fix task_exit/schedule race on secondary CPUs — IRQ mask in task_exit prevents timer/schedule race
@@ -215,13 +215,13 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 **Depends on:** M2 (Hardware Validation)
 
 ### Context Switch Performance
-- ☐ Measure actual context switch time on Jetson
-- ☐ Target: < 10 µs
-- ☐ Compare with QEMU measurements
+- ✅ Measure context switch time — Pi 5: 1.6 µs avg, QEMU: ~20 µs (shell `bench context`)
+- ✅ Target: < 10 µs — Pi 5 meets target
+- ☐ Compare with Jetson measurements (blocked on M1)
 - ☐ Profile and optimize if needed
 
 ### Interrupt Latency
-- ☐ Measure actual interrupt latency on Jetson
+- ✅ Measure timer tick jitter — Pi 5: < 1 µs jitter (shell `bench irq`)
 - ☐ Measure worst-case latency under load
 - ☐ Document results in `docs/performance.md`
 
@@ -231,8 +231,8 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ☐ Test core isolation effectiveness
 
 ### IPC Performance
+- ✅ Measure message passing latency — Pi 5: 322 ns send+recv round-trip (shell `bench ipc`)
 - ☐ IPC stress test on real hardware
-- ☐ Measure message passing latency
 - ☐ Measure shared buffer throughput
 
 ### Full Test Suite

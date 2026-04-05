@@ -1,7 +1,7 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
 **Date:** April 5, 2026
-**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (413 tests: 397 pass, 16 ignored, 0 failures).
+**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (419 tests: 403 pass, 16 ignored, 0 failures).
 
 ## Summary
 
@@ -41,6 +41,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | SDWireC deploy | ✅ Working | Automated flash/boot via sdwire CLI + labctl |
 | Preemptive scheduler | ✅ Working | 100 Hz timer, DAIF-based context switch |
 | Shell prompt | ✅ Working | `slmos>` appears after full boot |
+| Performance benchmarks | ✅ Working | `bench all` — context switch, IRQ, IPC, stats |
 | UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
 | Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
 | UART RX IRQ | 🔧 In progress | PCIe RC→MIP→GIC path configured, MSI-X table TBD |
@@ -58,14 +59,14 @@ Full test suite runs on Pi 5 hardware with zero failures:
 | GPU | 22 | 0 | 0 | 22 |
 | Component | 22 | 0 | 0 | 22 |
 | VFS | 26 | 0 | 0 | 26 |
-| Shell | 132 | 0 | 0 | 132 |
+| Shell | 138 | 0 | 0 | 138 |
 | VMM/TLB | 5 | 0 | 8 | 13 |
 | PMM Buddy | 23 | 0 | 1 | 24 |
 | LittleFS | 26 | 0 | 0 | 26 |
 | Net | 12 | 0 | 1 | 13 |
 | Lua | 29 | 0 | 0 | 29 |
 | Integration (Multi-Core) | 0 | 0 | 5 | 5 |
-| **Total** | **397** | **0** | **16** | **413** |
+| **Total** | **403** | **0** | **16** | **419** |
 
 **Ignored tests (16 total, expected):**
 - Scheduler (1): `test_isolated_core_latency` — requires cross-CPU dispatch (SMPEN)

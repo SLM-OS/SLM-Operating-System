@@ -354,6 +354,226 @@ int cmd_sleep(int argc, char *argv[])
     return 0;
 }
 
+/* ============================================================================
+ * bench - Performance benchmarking
+ *
+ * Subcommands:
+ *   bench context  — Context switch latency (create/switch/destroy)
+ *   bench irq      — Interrupt latency (timer tick interval accuracy)
+ *   bench ipc      — IPC message round-trip latency
+ *   bench all      — Run all benchmarks
+ * ============================================================================ */
+
+#define BENCH_ITERATIONS 100
+
+/* --- Context switch benchmark --- */
+
+static volatile int bench_ctx_done;
+static volatile uint64_t bench_ctx_start;
+static volatile uint64_t bench_ctx_total;
+static volatile int bench_ctx_count;
+
+static void bench_ctx_task(void *arg)
+{
+    (void)arg;
+    while (bench_ctx_count < BENCH_ITERATIONS) {
+        uint64_t now = slm_get_time_ns();
+        if (bench_ctx_start > 0) {
+            bench_ctx_total += now - bench_ctx_start;
+        }
+        bench_ctx_count++;
+        bench_ctx_start = slm_get_time_ns();
+        yield();
+    }
+    bench_ctx_done = 1;
+}
+
+static void bench_context_switch(void)
+{
+    bench_ctx_done = 0;
+    bench_ctx_start = 0;
+    bench_ctx_total = 0;
+    bench_ctx_count = 0;
+
+    struct task *t = task_create_with_priority("bench_ctx",
+        bench_ctx_task, NULL, TASK_PRIORITY_HIGH);
+    if (!t) {
+        uart_puts("  Failed to create benchmark task\r\n");
+        return;
+    }
+    scheduler_add_task_to_cpu(t, 0);
+
+    /* Wait for completion */
+    int timeout = 500;
+    while (!bench_ctx_done && timeout > 0) {
+        yield();
+        timeout--;
+    }
+
+    if (bench_ctx_count > 1) {
+        uint64_t avg_ns = bench_ctx_total / (uint64_t)(bench_ctx_count - 1);
+        uart_printf("  Context switch: %d round-trips\r\n", bench_ctx_count - 1);
+        uart_printf("    Average: %lu ns (%lu us)\r\n",
+                    (unsigned long)avg_ns, (unsigned long)(avg_ns / 1000));
+        if (avg_ns < 10000)
+            uart_puts("    Rating:  Excellent (< 10 us)\r\n");
+        else if (avg_ns < 50000)
+            uart_puts("    Rating:  Good (< 50 us)\r\n");
+        else if (avg_ns < 100000)
+            uart_puts("    Rating:  Acceptable (< 100 us)\r\n");
+        else
+            uart_puts("    Rating:  Needs optimization (> 100 us)\r\n");
+    } else {
+        uart_puts("  Context switch: insufficient data\r\n");
+    }
+}
+
+/* --- Interrupt latency benchmark --- */
+
+static void bench_irq_latency(void)
+{
+    uint64_t freq = timer_get_frequency();
+    uint64_t expected_interval_ns = 10000000ULL; /* 100 Hz = 10ms */
+    uint64_t samples[20];
+    int count = 0;
+
+    uart_printf("  Timer frequency: %lu Hz (expected 10 ms ticks)\r\n",
+                (unsigned long)freq);
+
+    /* Measure actual tick intervals by reading counter across yields */
+    uint64_t prev = slm_get_time_ns();
+    for (int i = 0; i < 20; i++) {
+        /* yield() allows timer tick to preempt, then we resume */
+        yield();
+        uint64_t now = slm_get_time_ns();
+        samples[count++] = now - prev;
+        prev = now;
+    }
+
+    /* Calculate stats */
+    uint64_t min_ns = UINT64_MAX, max_ns = 0, sum_ns = 0;
+    for (int i = 0; i < count; i++) {
+        if (samples[i] < min_ns) min_ns = samples[i];
+        if (samples[i] > max_ns) max_ns = samples[i];
+        sum_ns += samples[i];
+    }
+    uint64_t avg_ns = sum_ns / (uint64_t)count;
+
+    uart_printf("  Timer tick jitter (%d samples):\r\n", count);
+    uart_printf("    Min: %lu ns (%lu us)\r\n",
+                (unsigned long)min_ns, (unsigned long)(min_ns / 1000));
+    uart_printf("    Avg: %lu ns (%lu us)\r\n",
+                (unsigned long)avg_ns, (unsigned long)(avg_ns / 1000));
+    uart_printf("    Max: %lu ns (%lu us)\r\n",
+                (unsigned long)max_ns, (unsigned long)(max_ns / 1000));
+
+    /* Jitter = max deviation from expected interval */
+    int64_t jitter = (int64_t)max_ns - (int64_t)min_ns;
+    uart_printf("    Jitter (max-min): %lu us\r\n",
+                (unsigned long)(jitter > 0 ? (uint64_t)jitter / 1000 : 0));
+    (void)expected_interval_ns;
+}
+
+/* --- IPC benchmark --- */
+
+static void bench_ipc_latency(void)
+{
+    struct msg_queue *q = msg_queue_create(16, 8);
+    if (!q) {
+        uart_puts("  Failed to create message queue\r\n");
+        return;
+    }
+
+    uint8_t msg[8] = {0};
+    uint8_t buf[8];
+    uint64_t total_ns = 0;
+    int ipc_iters = BENCH_ITERATIONS;
+
+    /* Measure send+recv round-trip on same CPU (no cross-CPU overhead) */
+    irq_flags_t flags = irq_save();
+    for (int i = 0; i < ipc_iters; i++) {
+        uint64_t start = slm_get_time_ns();
+        msg_send(q, msg, 0);
+        msg_recv(q, buf, 0);
+        uint64_t end = slm_get_time_ns();
+        total_ns += end - start;
+    }
+    irq_restore(flags);
+
+    uint64_t avg_ns = total_ns / (uint64_t)ipc_iters;
+    uart_printf("  IPC send+recv round-trip (%d iterations):\r\n", ipc_iters);
+    uart_printf("    Total: %lu ns\r\n", (unsigned long)total_ns);
+    uart_printf("    Average: %lu ns (%lu us)\r\n",
+                (unsigned long)avg_ns, (unsigned long)(avg_ns / 1000));
+
+    msg_queue_destroy(q);
+}
+
+/* --- Scheduler stats snapshot --- */
+
+static void bench_sched_stats(void)
+{
+    struct sched_stats stats;
+    scheduler_get_stats(&stats);
+
+    uint64_t uptime_ns = slm_get_time_ns();
+    uint64_t uptime_s = uptime_ns / 1000000000ULL;
+
+    uart_printf("  Scheduler stats (uptime %lu s):\r\n", (unsigned long)uptime_s);
+    uart_printf("    Tasks:            %lu\r\n", (unsigned long)stats.task_count);
+    uart_printf("    Context switches: %lu\r\n", (unsigned long)stats.context_switches);
+    uart_printf("    Timer ticks:      %lu\r\n", (unsigned long)stats.timer_ticks);
+    if (uptime_s > 0) {
+        uart_printf("    Switches/sec:     %lu\r\n",
+                    (unsigned long)(stats.context_switches / uptime_s));
+    }
+}
+
+int cmd_bench(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_puts("Usage: bench <context|irq|ipc|stats|all>\r\n");
+        return 1;
+    }
+
+    uart_puts("\r\n");
+
+    if (strcmp(argv[1], "context") == 0) {
+        uart_puts("Context Switch Benchmark\r\n");
+        uart_puts("========================\r\n");
+        bench_context_switch();
+    } else if (strcmp(argv[1], "irq") == 0) {
+        uart_puts("Interrupt Latency Benchmark\r\n");
+        uart_puts("===========================\r\n");
+        bench_irq_latency();
+    } else if (strcmp(argv[1], "ipc") == 0) {
+        uart_puts("IPC Latency Benchmark\r\n");
+        uart_puts("=====================\r\n");
+        bench_ipc_latency();
+    } else if (strcmp(argv[1], "stats") == 0) {
+        uart_puts("Scheduler Statistics\r\n");
+        uart_puts("====================\r\n");
+        bench_sched_stats();
+    } else if (strcmp(argv[1], "all") == 0) {
+        uart_puts("SLM-OS Performance Benchmarks\r\n");
+        uart_puts("=============================\r\n\r\n");
+        bench_context_switch();
+        uart_puts("\r\n");
+        bench_irq_latency();
+        uart_puts("\r\n");
+        bench_ipc_latency();
+        uart_puts("\r\n");
+        bench_sched_stats();
+    } else {
+        uart_printf("Unknown benchmark: %s\r\n", argv[1]);
+        uart_puts("Available: context, irq, ipc, stats, all\r\n");
+        return 1;
+    }
+
+    uart_puts("\r\n");
+    return 0;
+}
+
 int cmd_reboot(int argc, char *argv[])
 {
     (void)argc;

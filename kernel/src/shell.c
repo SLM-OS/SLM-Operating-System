@@ -68,6 +68,7 @@ const shell_cmd_t builtin_commands[] = {
     {"find",   cmd_find,   "Find files (find <path> <pattern>)"},
     {"component", cmd_component, "Component system (list/register/status)"},
     {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)"},
+    {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
 };
