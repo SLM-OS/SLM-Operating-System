@@ -270,49 +270,7 @@ int cmd_cpu(int argc, char *argv[])
             }
         }
 
-        /* Test: trigger UART_IRQ (185) SPI to test delivery */
-        if (!uart_is_irq_mode()) {
-            volatile uint32_t *ispendr_u = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + 4 * (UART_IRQ / 32));
-            *ispendr_u = (1U << (UART_IRQ % 32));
-            __asm__ volatile("dsb sy; isb" ::: "memory");
-            uint32_t h = *gicc_hppir;
-            uart_printf("  [UART IRQ %d triggered, HPPIR=%u]\r\n", UART_IRQ, h);
-            /* Clear it */
-            volatile uint32_t *icpendr_u = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x280 + 4 * (UART_IRQ / 32));
-            *icpendr_u = (1U << (UART_IRQ % 32));
-        }
-
-        /* Test: trigger SGI 1 to test CPU interface delivery */
-        {
-            volatile uint32_t *sgir = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0xF00);
-            *sgir = (1U << 25) | 1;  /* Target self (bit 25 = TargetListFilter=01), SGI ID=1 */
-            __asm__ volatile("dsb sy; isb" ::: "memory");
-            uint32_t hppir_after = *gicc_hppir;
-            uart_printf("  [SGI 1 triggered, HPPIR=%u]\r\n", hppir_after);
-        }
-
-        /* Test: trigger a low-numbered SPI (64 = SPI 32) to test GIC SPI delivery */
-        if (!uart_is_irq_mode()) {
-            uint32_t test_irq = 64;
-            uint32_t tr = test_irq / 32;
-            uint32_t tb = test_irq % 32;
-            volatile uint32_t *ispendr_t = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + 4 * tr);
-            volatile uint32_t *isenabler_t = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x100 + 4 * tr);
-            /* Enable and trigger test SPI */
-            *isenabler_t = (1U << tb);
-            __asm__ volatile("dsb sy" ::: "memory");
-            *ispendr_t = (1U << tb);
-            __asm__ volatile("dsb sy; isb" ::: "memory");
-            /* Check HPPIR now */
-            uint32_t hppir = *gicc_hppir;
-            uart_printf("  [Test SPI %d triggered, HPPIR=%u]\r\n", test_irq, hppir);
-            /* Disable test SPI */
-            volatile uint32_t *icenabler_t = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x180 + 4 * tr);
-            volatile uint32_t *icpendr_t = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x280 + 4 * tr);
-            *icenabler_t = (1U << tb);
-            *icpendr_t = (1U << tb);
-            __asm__ volatile("dsb sy" ::: "memory");
-        }
+        /* (Software trigger tests removed — they leave stale interrupts) */
     }
 #endif
 

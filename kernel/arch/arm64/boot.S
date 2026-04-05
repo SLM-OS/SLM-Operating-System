@@ -253,16 +253,53 @@ real_start:
     ldr     w11, =0x1E3             /* EnableGrp0+1, bypass disables, no AckCtl */
     str     w11, [x10, #0x000]      /* GICC_CTLR */
 
-    /* Test: write SPI registers from EL2 for IRQ 64 (SPI 32).
-     * If BCM2712 blocks EL1 SPI writes but allows EL2, this should work. */
-    ldr     x10, =0x107FFF9000      /* GICD base */
-    /* IPRIORITYR for IRQ 64: reg 16 (64/4), byte 0 (64%4=0) */
-    ldr     x12, =0x107FFF9000
-    add     x12, x12, #0x440        /* IPRIORITYR base + 16*4 = +0x40, base=0x400 → 0x440 */
-    ldr     w13, [x12]
-    and     w13, w13, #0xFFFFFF00   /* Clear byte 0 */
-    orr     w13, w13, #0x60         /* Set priority 0x60 */
-    str     w13, [x12]
+    /*
+     * Configure PCIe→MIP→GIC interrupt path from EL2 (writes to RC
+     * and MIP registers require EL2 on BCM2712).
+     */
+
+    /* MSI-X enable in RP1 PCIe config (via RC EXT_CFG at +0x8000) */
+    ldr     x10, =0x1000129000     /* EXT_CFG_INDEX */
+    str     wzr, [x10]             /* bus=0, devfn=0 */
+    dsb     sy
+    ldr     x10, =0x10001280B0     /* EXT_CFG_DATA + 0xB0 (MSI-X cap) */
+    ldr     w11, [x10]
+    orr     w11, w11, #(1 << 31)   /* Enable (bit 15 of upper 16) */
+    bic     w11, w11, #(1 << 30)   /* Clear Function Mask */
+    str     w11, [x10]
+    dsb     sy
+
+    /* RC BAR1 → MIP0 routing */
+    ldr     x10, =0x100012402C
+    ldr     w11, =0xFFFFF01C
+    str     w11, [x10]
+    ldr     x10, =0x1000124030
+    ldr     w11, =0x000000FF
+    str     w11, [x10]
+    ldr     x10, =0x10001240AC
+    ldr     w11, =0x00130001
+    str     w11, [x10]
+    ldr     x10, =0x10001240B0
+    mov     w11, #0x10
+    str     w11, [x10]
+    dsb     sy
+
+    /* MIP0: unmask UART0 (vec 25), mask VPU, edge-triggered */
+    mvn     w11, wzr
+    ldr     x10, =0x1000130040     /* MASKL_HOST */
+    mov     w12, w11
+    bic     w12, w12, #(1 << 25)
+    str     w12, [x10]
+    ldr     x10, =0x1000130050     /* MASKH_HOST */
+    str     w11, [x10]
+    ldr     x10, =0x1000130060     /* MASKL_VPU */
+    str     w11, [x10]
+    ldr     x10, =0x1000130070     /* MASKH_VPU */
+    str     w11, [x10]
+    ldr     x10, =0x1000130020     /* CFGL_HOST */
+    str     w11, [x10]
+    ldr     x10, =0x1000130030     /* CFGH_HOST */
+    str     w11, [x10]
     dsb     sy
 
     /* Enable FP/SIMD at EL1 */

@@ -304,11 +304,7 @@ void uart_irq_handler(void)
     *uart_icr = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* IACK the RP1 MSIX_CFG vector (unmasks for next interrupt) */
-    volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
-                                                         + RP1_MSIX_CFG(RP1_INT_UART0));
-    *msix_set = MSIX_CFG_IACK;
-    __asm__ volatile("dsb sy" ::: "memory");
+    /* No IACK needed — MSIX_CFG without IACK_EN doesn't auto-mask */
 }
 
 /*
@@ -361,14 +357,28 @@ void uart_irq_init(void)
      * SPIs >= 224 (including INTA at SPI 229) are secure-only.
      */
 
+    /* 0. Program MSI-X table (BAR0 at 0x1F00410000, set from EL1) */
+    for (int i = 0; i < RP1_MSIX_TABLE_SIZE; i++) {
+        volatile uint32_t *entry = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + i * 16);
+        entry[0] = MSIX_MSG_ADDR_LO;
+        entry[1] = MSIX_MSG_ADDR_HI;
+        entry[2] = (uint32_t)i;
+        entry[3] = 0x00000000;  /* Unmasked */
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    DEBUG_PRINT("MSI-X table: %d entries programmed", RP1_MSIX_TABLE_SIZE);
+
     /* 1. GIC: enable SPI with higher priority than timer */
     gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 with IACK_EN */
+    /* 2. MSIX_CFG: enable vector 25 without IACK_EN.
+     * IACK_EN auto-masks on every PL011 assertion, creating a race
+     * where the level-triggered PL011 immediately re-triggers and
+     * re-masks. Without IACK_EN, MSI-X fires on each assertion edge. */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
-    *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
+    *msix_set = MSIX_CFG_ENABLE;
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* 3. PL011: configure, drain FIFO, clear ICR, enable IMSC */
@@ -408,8 +418,7 @@ void uart_irq_init(void)
         __asm__ volatile("dsb sy" ::: "memory");
     }
 
-    *msix_set = MSIX_CFG_IACK;
-    __asm__ volatile("dsb sy" ::: "memory");
+    /* No IACK needed without IACK_EN */
 
     INFO("UART IRQ enabled (GIC IRQ %d = SPI %d, RP1 vec %d)",
          UART_IRQ, UART_IRQ - 32, RP1_INT_UART0);
