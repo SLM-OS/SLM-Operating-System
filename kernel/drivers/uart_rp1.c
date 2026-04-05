@@ -434,8 +434,7 @@ void uart_irq_init(void)
         __asm__ volatile("dsb sy" ::: "memory");
     }
 
-    /* IACK: unmask the vector. PL011 MIS should be 0 now (FIFO drained,
-     * ICR cleared above). The next character will trigger the full path. */
+    /* IACK: unmask the vector */
     *msix_set = MSIX_CFG_IACK;
     __asm__ volatile("dsb sy" ::: "memory");
 
