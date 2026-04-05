@@ -274,7 +274,7 @@ real_start:
     ldr     w11, =0xFFFFF01C
     str     w11, [x10]
     ldr     x10, =0x1000124030
-    ldr     w11, =0x000000FF
+    mov     w11, #0x0F             /* BAR1 PCIe addr hi (Circle: 0x0F, not 0xFF) */
     str     w11, [x10]
     ldr     x10, =0x10001240AC
     ldr     w11, =0x00130001

@@ -303,8 +303,9 @@
 #define PCIE_RC_EXT_CFG_DATA   0x8000       /* Config data (firmware uses default offset) */
 
 /* MSI-X target address (PCIe address that RC BAR1 routes to MIP0) */
+/* MSI-X target address (must match Circle's 0xFFFFFFF000: {0x0F, 0xFFFFF000}) */
 #define MSIX_MSG_ADDR_LO   0xFFFFF000UL
-#define MSIX_MSG_ADDR_HI   0x000000FFUL
+#define MSIX_MSG_ADDR_HI   0x0000000FUL
 
 /*
  * Alternative UARTs (via RP1):
