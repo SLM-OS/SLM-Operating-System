@@ -236,6 +236,18 @@ static void test_pdpt_4gb_boot_entries(void)
     }
 }
 
+/*
+ * Test: vmm_init detected RAM and set x86_detected_ram_end.
+ * Must be > 0 and > 1GB (any real or QEMU system has at least 256MB).
+ */
+extern uintptr_t x86_detected_ram_end;
+
+static void test_vmm_detected_ram(void)
+{
+    TEST_ASSERT_TRUE(x86_detected_ram_end > 0);
+    TEST_ASSERT_TRUE(x86_detected_ram_end > 0x10000000UL);  /* > 256 MB */
+}
+
 /* ============================================================================
  * GDT Tests
  * ============================================================================ */
@@ -880,6 +892,7 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_pd_2mb_pages);
     RUN_TEST(test_pd_full_1gb_mapping);
     RUN_TEST(test_pdpt_4gb_boot_entries);
+    RUN_TEST(test_vmm_detected_ram);
 
     /* GDT tests */
     RUN_TEST(test_gdt_limit);

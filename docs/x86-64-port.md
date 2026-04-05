@@ -337,6 +337,20 @@ sudo apt install gcc make grub-efi-amd64-bin sgdisk dosfstools qemu-system-x86
 
 ### Build Commands
 
+#### CMake (recommended)
+
+```bash
+# Configure
+cmake -B build -DPLATFORM=X86_64 -DCMAKE_BUILD_TYPE=Debug
+
+# Build
+cmake --build build -j$(nproc)
+
+# Output: build/slmos.elf, build/slmos.bin
+```
+
+#### Standalone Makefile (quick iterations)
+
 ```bash
 # --- Standalone test kernel (boot + IDT + PIC + PIT only) ---
 make -f kernel/arch/x86_64/Makefile.test           # Build standalone ELF
@@ -407,12 +421,12 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 46 tests across 11 categories:
+The `test_x86_boot.c` test suite contains 47 tests across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
 | Control registers | 4 | CR0 paging, CR4 PAE, EFER long mode, CR3→PML4 |
-| Page tables | 5 | PML4, PDPT, PD structure, 4GB boot mapping, PDPT[0..3] populated |
+| Page tables | 6 | PML4, PDPT, PD structure, 4GB boot mapping, PDPT[0..3] populated, vmm_init RAM detection |
 | GDT | 3 | Limit, CS selector (0x08), DS selector (0x10) |
 | Memory layout | 3 | Kernel at 1MB, section ordering, within mapping |
 | Multiboot2 | 5 | Pointer valid, structure size, memory map, usable RAM, bootloader name |
@@ -499,7 +513,7 @@ Total: 72 bytes. Offsets hardcoded in `context.S` as `CTX_RBX`, `CTX_RSP`, etc.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 45 tests: boot, IDT, PIC, PIT, Multiboot2, platform, scheduler |
+| `kernel/tests/test_x86_boot.c` | 47 tests: boot, IDT, PIC, PIT, Multiboot2, platform, scheduler, page tables |
 
 ---
 
