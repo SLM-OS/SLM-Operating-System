@@ -99,16 +99,114 @@ void psci_system_off(void)
         __asm__ volatile("hlt");
 }
 
-/* ---- VMM stub ---- */
+/* ---- VMM: extend page tables to map all RAM ---- */
 
 /* spinlock_hw_enabled is referenced by spinlock.h */
 volatile int spinlock_hw_enabled = 1;  /* x86-64 coherency always works */
 
+/* Page table symbols from entry64.S */
+extern uint64_t pml4[];
+extern uint64_t pdpt[];
+extern uint64_t pd[];      /* 20 PD pages (80KB) */
+
+/* Detected RAM end address — used by PMM instead of hardcoded RAM_SIZE */
+uintptr_t x86_detected_ram_end = 0;
+
+/*
+ * Find the highest usable address from the Multiboot2 memory map.
+ */
+static uintptr_t detect_ram_end(void)
+{
+    if (multiboot_info_addr == 0)
+        return RAM_BASE + 0x3DE00000UL;  /* Fallback: ~1GB */
+
+    uint8_t *ptr = (uint8_t *)(uintptr_t)multiboot_info_addr;
+    uint32_t total_size = *(uint32_t *)ptr;
+    uint8_t *end = ptr + total_size;
+    uintptr_t highest = 0;
+
+    ptr += 8;  /* Skip size + reserved */
+    while (ptr < end) {
+        uint32_t tag_type = *(uint32_t *)ptr;
+        uint32_t tag_size = *(uint32_t *)(ptr + 4);
+        if (tag_type == 0) break;
+
+        if (tag_type == 6) {  /* Memory map */
+            uint32_t entry_size = *(uint32_t *)(ptr + 8);
+            uint8_t *entry = ptr + 16;
+            while (entry < ptr + tag_size) {
+                uint64_t base = *(uint64_t *)entry;
+                uint64_t len  = *(uint64_t *)(entry + 8);
+                uint32_t type = *(uint32_t *)(entry + 16);
+                if (type == 1) {  /* Available */
+                    uint64_t region_end = base + len;
+                    if (region_end > highest)
+                        highest = region_end;
+                }
+                entry += entry_size;
+            }
+            break;
+        }
+        ptr += (tag_size + 7) & ~7;
+    }
+
+    return (uintptr_t)highest;
+}
+
 void vmm_init(void)
 {
-    /* Identity mapping is already set up by trampoline32.S (1GB, 2MB pages).
-     * No additional page table setup needed for Phase 1. */
-    uart_printf("[VMM] Using boot identity mapping (1 GB)\n");
+    /* Detect total RAM from Multiboot2 memory map */
+    uintptr_t ram_end = detect_ram_end();
+    x86_detected_ram_end = ram_end;
+
+    /* Calculate how many 1GB PD pages are needed.
+     * Map 2 extra GB beyond actual RAM so the buddy allocator's
+     * free_block headers and power-of-2 block merging can't
+     * touch unmapped memory. */
+    uint64_t gb_for_ram = (ram_end + 0x3FFFFFFFUL) >> 30;  /* Round up */
+    uint64_t gb_needed = gb_for_ram + 2;  /* Extra margin for buddy allocator */
+    if (gb_needed > 20)
+        gb_needed = 20;  /* Limited by reserved PD pages */
+
+    uart_printf("[VMM] Detected RAM end: 0x%lx (%lu GB)\n", ram_end, gb_needed);
+
+    /* trampoline32.S already mapped 0-4GB (PDPT[0..3] → PD[0..3]).
+     * Extend PDPT[4..N] → PD[4..N] for RAM above 4GB. */
+    if (gb_needed > 4) {
+        for (uint64_t i = 4; i < gb_needed; i++) {
+            /* Point PDPT[i] at PD[i] (each PD is 4096 bytes apart) */
+            uint64_t pd_phys = (uint64_t)&pd[512 * i];  /* PD[i] base (identity mapped) */
+            pdpt[i] = pd_phys | 0x3;  /* Present + Writable */
+
+            /* Fill PD[i] with 512 × 2MB pages */
+            uint64_t *pd_page = &pd[512 * i];
+            for (uint64_t j = 0; j < 512; j++) {
+                uint64_t phys = (i << 30) | (j << 21);  /* i*1GB + j*2MB */
+                pd_page[j] = phys | 0x83;  /* Present + Writable + 2MB */
+            }
+        }
+
+        uart_printf("[VMM] Flushing TLB...\n");
+
+        /* Flush TLB by reloading CR3 */
+        uint64_t cr3;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+        __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+
+        uart_printf("[VMM] Extended identity mapping: %lu GB (%lu PD pages)\n",
+                    gb_needed, gb_needed);
+    } else {
+        uart_printf("[VMM] Boot mapping sufficient (4 GB)\n");
+    }
+
+    /* Clamp detected RAM end to what's actually mapped.
+     * Subtract one page to ensure the last free block's header
+     * doesn't land on the first unmapped byte. */
+    uintptr_t mapped_end = gb_needed << 30;  /* gb_needed * 1GB */
+    if (x86_detected_ram_end > mapped_end)
+        x86_detected_ram_end = mapped_end;
+    /* Align down to page boundary */
+    x86_detected_ram_end &= ~(uintptr_t)0xFFF;
 }
 
 /* ---- DTB stubs ---- */

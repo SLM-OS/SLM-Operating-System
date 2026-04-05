@@ -260,14 +260,22 @@ void kernel_main(void *dtb)
     uart_puts("\n");
     print_memory_info();
 
+#if defined(PLATFORM_X86_64)
+    /* x86-64: extend page tables BEFORE PMM so all RAM is accessible */
+    uart_puts("\n");
+    vmm_init();
+#endif
+
     /* Initialize physical memory manager */
     uart_puts("\n");
     pmm_init();
     pmm_dump_stats();
 
-    /* Initialize virtual memory manager and enable MMU */
+#if !defined(PLATFORM_X86_64)
+    /* ARM64: enable MMU after PMM (PMM needs to know page boundaries first) */
     uart_puts("\n");
     vmm_init();
+#endif
 
     /* Initialize interrupt controller */
     uart_puts("\n");

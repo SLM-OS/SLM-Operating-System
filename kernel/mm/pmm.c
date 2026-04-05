@@ -364,6 +364,16 @@ void pmm_init(void)
     buddy_state.heap_start = PAGE_ALIGN_UP(kernel_end);
     buddy_state.heap_end = RAM_BASE + RAM_SIZE;
 
+#if defined(PLATFORM_X86_64)
+    /* On x86-64, RAM_SIZE in platform.h is the MAX array size, not actual RAM.
+     * Use the detected RAM end from vmm_init() (Multiboot2 memory map). */
+    {
+        extern uintptr_t x86_detected_ram_end;
+        if (x86_detected_ram_end > 0)
+            buddy_state.heap_end = x86_detected_ram_end;
+    }
+#endif
+
     /* Calculate page counts */
     buddy_state.total_pages = (buddy_state.heap_end - buddy_state.heap_start) / PAGE_SIZE;
     buddy_state.reserved_pages = (buddy_state.heap_start - RAM_BASE) / PAGE_SIZE;

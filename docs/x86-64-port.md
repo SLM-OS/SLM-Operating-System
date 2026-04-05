@@ -196,13 +196,17 @@ CR3 ──► PML4 ──► PDPT ──► PD ──► (2MB pages)
 
 ### Identity Mapping
 
-The boot code creates an identity mapping of the first 1GB using 2MB pages:
+The boot code creates an identity mapping in two stages:
 
-- **PML4[0]** → PDPT (single entry)
-- **PDPT[0]** → PD (single entry)
-- **PD[0-511]** → 2MB pages (512 entries = 1GB)
+**Stage 1 (trampoline32.S, 32-bit):** Maps the first 4 GB using 4 PD pages.
 
-Virtual address == physical address for 0x00000000 - 0x3FFFFFFF.
+**Stage 2 (vmm_init, 64-bit C):** Extends the mapping to cover all RAM detected from the Multiboot2 memory map. On the i7-6700 with 16 GB, this maps 20 GB (20 PD pages total).
+
+- **PML4[0]** → PDPT (single entry, covers 512 GB)
+- **PDPT[0..N]** → PD[0..N] (one per GB of mapped RAM)
+- **PD[i][0-511]** → 2MB pages (512 entries = 1 GB per PD)
+
+Virtual address == physical address for all mapped memory.
 
 ### Page Table Entry Format (2MB Page)
 
@@ -403,12 +407,12 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 45 tests across 11 categories:
+The `test_x86_boot.c` test suite contains 46 tests across 11 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
 | Control registers | 4 | CR0 paging, CR4 PAE, EFER long mode, CR3→PML4 |
-| Page tables | 4 | PML4, PDPT, PD structure, full 1GB mapping |
+| Page tables | 5 | PML4, PDPT, PD structure, 4GB boot mapping, PDPT[0..3] populated |
 | GDT | 3 | Limit, CS selector (0x08), DS selector (0x10) |
 | Memory layout | 3 | Kernel at 1MB, section ordering, within mapping |
 | Multiboot2 | 5 | Pointer valid, structure size, memory map, usable RAM, bootloader name |
@@ -576,9 +580,7 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 ## Known Issues
 
-### Only 1GB Identity Mapped
-
-The boot code identity-maps only the first 1GB. On the i7-6700 with 16 GB RAM, addresses above 0x3FFFFFFF are not accessible. The PMM is configured with `RAM_SIZE = ~990 MB`, leaving 15 GB unused. Extending the page tables to map all RAM is planned for a future phase.
+No critical known issues. All 16 GB RAM is mapped and usable.
 
 ---
 

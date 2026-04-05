@@ -199,9 +199,9 @@
 /* Platform identification */
 #define PLATFORM_NAME       "x86-64"
 
-/* Memory layout (identity mapped first 1GB, usable above kernel) */
+/* Memory layout */
 #define RAM_BASE            0x00200000UL    /* Above kernel image */
-#define RAM_SIZE            0x3DE00000UL    /* ~990 MB (1GB minus first 2MB minus BIOS) */
+#define RAM_SIZE            0x500000000UL   /* 20 GB max — sizes the block_state array in PMM */
 
 /* UART - 16550 COM1 (I/O port, not MMIO) */
 #define UART_TYPE_16550

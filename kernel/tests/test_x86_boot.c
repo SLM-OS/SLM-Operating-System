@@ -210,14 +210,29 @@ static void test_pd_2mb_pages(void)
     TEST_ASSERT_EQUAL_HEX64(255UL * PAGE_SIZE_2MB, entry255 & 0xFFFFFFE00000UL);
 }
 
+/*
+ * Test: First 4 PD pages (4 GB boot mapping) are fully populated.
+ */
 static void test_pd_full_1gb_mapping(void)
 {
-    for (int i = 0; i < 512; i++) {
+    /* Boot trampoline now maps 4 GB = 2048 PD entries across PD[0]-PD[3] */
+    for (int i = 0; i < 2048; i++) {
         uint64_t entry = pd[i];
         TEST_ASSERT_TRUE((entry & PAGE_PRESENT) != 0);
         TEST_ASSERT_TRUE((entry & PAGE_2MB) != 0);
         uint64_t expected_phys = (uint64_t)i * PAGE_SIZE_2MB;
         TEST_ASSERT_EQUAL_HEX64(expected_phys, entry & 0xFFFFFFE00000UL);
+    }
+}
+
+/*
+ * Test: PDPT[0..3] are populated (4 GB boot mapping).
+ */
+static void test_pdpt_4gb_boot_entries(void)
+{
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_TRUE((pdpt[i] & PAGE_PRESENT) != 0);
+        TEST_ASSERT_TRUE((pdpt[i] & PAGE_WRITABLE) != 0);
     }
 }
 
@@ -864,6 +879,7 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_pdpt_entry_valid);
     RUN_TEST(test_pd_2mb_pages);
     RUN_TEST(test_pd_full_1gb_mapping);
+    RUN_TEST(test_pdpt_4gb_boot_entries);
 
     /* GDT tests */
     RUN_TEST(test_gdt_limit);

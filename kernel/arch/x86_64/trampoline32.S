@@ -92,11 +92,16 @@ _start:
     test $0x20000000, %edx
     jz halt32
 
-    /* Set up page tables for identity mapping first 1GB */
-    /* Zero all page table memory */
+    /*
+     * Set up page tables for identity mapping first 4GB.
+     * Uses 2MB pages: 4 PD pages × 512 entries = 2048 × 2MB = 4GB.
+     * vmm_init() extends mapping above 4GB from 64-bit C code.
+     */
+
+    /* Zero all page table memory (PML4 + PDPT + 20 PD pages = 22 pages) */
     mov $pml4, %edi
     xor %eax, %eax
-    mov $(4096 * 3 / 4), %ecx
+    mov $(4096 * 22 / 4), %ecx
     rep stosl
 
     /* PML4[0] -> PDPT */
@@ -105,16 +110,21 @@ _start:
     or $0x3, %eax
     mov %eax, (%edi)
 
-    /* PDPT[0] -> PD */
+    /* PDPT[0..3] -> PD[0..3] (4 entries, each covering 1GB) */
     mov $pdpt, %edi
     mov $pd, %eax
     or $0x3, %eax
-    mov %eax, (%edi)
+    mov $4, %ecx
+2:  mov %eax, (%edi)
+    add $4096, %eax         /* Next PD page (4KB apart) */
+    add $8, %edi            /* Next PDPT entry (8 bytes) */
+    dec %ecx
+    jnz 2b
 
-    /* Fill PD with 512 x 2MB pages */
+    /* Fill PD[0..3] with 2048 x 2MB pages (4GB identity mapping) */
     mov $pd, %edi
     mov $0x83, %eax         /* Present + Writable + 2MB */
-    mov $512, %ecx
+    mov $2048, %ecx         /* 4 × 512 entries */
 1:  mov %eax, (%edi)
     add $0x200000, %eax
     add $8, %edi

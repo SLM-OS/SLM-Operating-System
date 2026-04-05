@@ -50,8 +50,11 @@ halt64:
     jmp halt64
 
 /*
- * Page tables - in separate section, not zeroed by BSS clear
- * These are set up by trampoline32.S and must remain intact.
+ * Page tables - in separate section, not zeroed by BSS clear.
+ * trampoline32.S fills PD[0..3] (4GB). vmm_init() fills PD[4..19] (above 4GB).
+ *
+ * Layout: 1 PML4 + 1 PDPT + 20 PD pages = 22 pages (88 KB)
+ * Each PD covers 1GB (512 × 2MB pages), so 20 PDs cover up to 20GB.
  */
 .section .page_tables, "aw", @nobits
 .align 4096
@@ -66,7 +69,11 @@ pdpt:
 
 .global pd
 pd:
-    .space 4096
+    .space 4096 * 20    /* PD[0]-PD[19]: 20GB coverage */
+
+/* Number of PD pages available for vmm_init */
+.global pd_count
+.set pd_count, 20
 
 /*
  * Stack (in BSS)
