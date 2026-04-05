@@ -1,11 +1,11 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
-**Date:** April 3, 2026
-**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (393 tests: 378 pass, 15 ignored, 0 failures).
+**Date:** April 5, 2026
+**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (413 tests: 397 pass, 16 ignored, 0 failures).
 
 ## Summary
 
-SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (393 tests across 13 suites) passes with zero failures on Pi 5 hardware.
+SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (413 tests across 14 suites) passes with zero failures on Pi 5 hardware.
 
 **Preemptive scheduling is active** — timer interrupts drive context switching at 100 Hz. The shell accepts input and responds to commands with preemption enabled. Two RP1-specific GPIO pad configurations were required for UART RX (OD=1, FUNCSEL sequencing). The armstub is currently disabled (separate issue; see Known Limitations).
 
@@ -45,7 +45,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
 | UART RX IRQ | 🔧 In progress | PCIe RC→MIP→GIC path configured, MSI-X table TBD |
 
-## Test Results (April 3, 2026)
+## Test Results (April 5, 2026)
 
 Full test suite runs on Pi 5 hardware with zero failures:
 
@@ -53,29 +53,32 @@ Full test suite runs on Pi 5 hardware with zero failures:
 |---|---|---|---|---|
 | IPC | 23 | 0 | 0 | 23 |
 | Model Memory | 10 | 0 | 0 | 10 |
-| Scheduler | 54 | 0 | 1 | 55 |
+| Scheduler | 60 | 0 | 1 | 61 |
 | Priority Inheritance Mutex | 7 | 0 | 0 | 7 |
 | GPU | 22 | 0 | 0 | 22 |
 | Component | 22 | 0 | 0 | 22 |
 | VFS | 26 | 0 | 0 | 26 |
 | Shell | 132 | 0 | 0 | 132 |
-| VMM/TLB | 4 | 0 | 8 | 12 |
+| VMM/TLB | 5 | 0 | 8 | 13 |
 | PMM Buddy | 23 | 0 | 1 | 24 |
 | LittleFS | 26 | 0 | 0 | 26 |
+| Net | 12 | 0 | 1 | 13 |
 | Lua | 29 | 0 | 0 | 29 |
 | Integration (Multi-Core) | 0 | 0 | 5 | 5 |
-| **Total** | **378** | **0** | **15** | **393** |
+| **Total** | **397** | **0** | **16** | **413** |
 
-**Ignored tests (expected):**
-- Scheduler: `test_isolated_core_latency` — task_exit race on secondary CPUs (pre-existing)
-- VMM (5 tests): TLB remap tests — Pi 5 uses 1GB L1 block descriptors, no L2 entries to remap
-- VMM (3 tests): ASID/TLB broadcast smoke tests — cannot validate TLB state from test
-- PMM: `test_split_creates_buddies` — small blocks already available, no split triggered
-- Integration (5 tests): Cross-CPU task dispatch requires SMPEN (not set by TF-A on Pi 5)
+**Ignored tests (16 total, expected):**
+- Scheduler (1): `test_isolated_core_latency` — requires cross-CPU dispatch (SMPEN)
+- VMM (5): TLB remap tests — Pi 5 uses 1GB L1 block descriptors, no L2 entries to remap
+- VMM (3): ASID/TLB broadcast smoke tests — cannot validate TLB state from test
+- PMM (1): `test_split_creates_buddies` — small blocks already available, no split triggered
+- Net (1): platform-specific test not applicable to Pi 5
+- Integration (5): Cross-CPU task dispatch requires SMPEN (L2 not coherent without it)
 
 **Key bugs fixed to achieve zero failures:**
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM
 2. DC CIVAC writeback bug: CPU 0's stale dirty cacheline for `cpu_data[]` overwrote secondary CPUs' `online=true` at PoC (fixed by `cache_clean_range` before booting secondaries)
+3. task_exit/schedule race: timer could fire between state=TERMINATED and scheduler_remove_task(), causing panic (fixed by masking IRQs in task_exit)
 
 ## Interrupt-Driven UART (In Progress)
 
@@ -136,9 +139,16 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 2. **~~Spinlocks:~~** **RESOLVED** — Hardware spinlocks work after MMU enable. Before MMU, a runtime flag (`spinlock_hw_enabled`) gates barrier-only fallback. The exclusive monitor requires cacheable memory, which is available only after VMM initialization.
 
-3. **~~Single-core:~~** **RESOLVED** — All 4 Cortex-A76 cores boot via PSCI CPU_ON (SMC), transition EL2→EL1, enable MMU, and run C code. The shell reports "4 online / 4 total". Cache coherency for regular writes is broken because TF-A does not set SMPEN (CPUECTLR_EL1 bit 6) before dropping to EL2, and SMPEN is only writable from EL3. Worked around with explicit DC CVAC (clean) and DC CIVAC (clean+invalidate) cache maintenance on shared data. Exclusive monitor operations (spinlocks via ldaxr/stxr) work without the workaround.
+3. **~~Single-core:~~** **RESOLVED (4 cores online) — cache coherency limitation remains.** All 4 Cortex-A76 cores boot via PSCI CPU_ON (SMC), transition EL2→EL1, enable MMU, and run C code. The shell reports "4 online / 4 total". However, full cache coherency is broken because TF-A does not set SMPEN (CPUECTLR_EL1 bit 6), and the bit is only writable from EL3.
 
-   **Note:** While all 4 cores are online, tasks without explicit CPU affinity are currently pinned to CPU 0 due to the cache coherency limitation. Secondary CPUs run idle and timer tasks but do not receive dispatched work. Cross-CPU task dispatch remains disabled until the SMPEN/cache coherency issue is resolved.
+   **SMPEN investigation findings (April 2026):**
+   - SMPEN (CPUECTLR_EL1 bit 6) cannot be set from EL2 — write traps to EL3 (TF-A), system hangs
+   - Reading CPUECTLR_EL1 from EL1 works — confirmed SMPEN=0 on all 4 CPUs
+   - DC CIVAC does not propagate through per-core L2 caches without SMPEN on Cortex-A76
+   - Cross-CPU task dispatch was attempted but tasks on secondary CPUs see stale rq data (L2 retains old values for 100+ seconds)
+   - Workaround: all user tasks pinned to CPU 0; explicit DC CVAC/CIVAC for same-CPU operations
+   - Potential fixes: non-cacheable shared memory region, TF-A patch for SMPEN, L2 flush by set/way (DC CISW)
+   - Exclusive monitor operations (spinlocks via ldaxr/stxr) work without SMPEN
 
 4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 

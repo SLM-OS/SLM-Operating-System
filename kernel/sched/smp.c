@@ -227,6 +227,13 @@ void secondary_init(uint32_t logical_cpu_id)
 {
     DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
 
+    /* Verify SMPEN was set from EL2 on this secondary core */
+    if (cpu_has_smpen()) {
+        DEBUG_PRINT("CPU %u: SMPEN set", logical_cpu_id);
+    } else {
+        WARN("CPU %u: SMPEN NOT set", logical_cpu_id);
+    }
+
     /* Initialize per-CPU GIC interface */
     DEBUG_PRINT("CPU %u: GIC percpu init...", logical_cpu_id);
     gic_percpu_init();
@@ -505,6 +512,14 @@ void smp_init(void)
     uint32_t booted = 0;
 
     INFO("SMP: initializing");
+
+    /* Check if SMPEN was successfully set from EL2 during boot */
+    if (cpu_has_smpen()) {
+        INFO("SMP: SMPEN set on CPU 0 — hardware cache coherency active");
+    } else {
+        WARN("SMP: SMPEN NOT set — using DC CVAC/CIVAC workaround");
+    }
+
     DEBUG_PRINT("  About to run spinlock tests...");
 
     /* Run spinlock tests before booting secondary cores */

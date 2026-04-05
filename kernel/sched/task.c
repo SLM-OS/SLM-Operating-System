@@ -238,6 +238,14 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
 
+    /* Clean the context struct to PoC so a secondary CPU can read it
+     * during switch_to(). Without SMPEN, task_create's writes to
+     * context.sp, context.x30, etc. stay in this CPU's L1 cache.
+     * scheduler_add_task_to_cpu() intentionally skips cleaning the
+     * context (to avoid overwriting a running task's live state),
+     * so we must clean it here at creation time. */
+    cache_clean_range(&task->context, sizeof(task->context));
+
     DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
                 task->name, task->id, task->stack_base, task->stack_top,
                 task->priority);
@@ -262,10 +270,20 @@ void task_exit(void)
 
     INFO("Task '%s' (id=%u) exiting", task->name, task->id);
 
+    /* Mask IRQs to prevent a timer-driven schedule() from racing with
+     * the state change below. Without this, the timer can fire between
+     * setting TASK_TERMINATED and scheduler_remove_task(), causing
+     * schedule() to find a terminated task still in the run queue
+     * (pick_next_task returns it, next == current → panic). */
+    __asm__ volatile("msr daifset, #2" ::: "memory");
+
     task->state = TASK_TERMINATED;
     cache_clean(&task->state);
 
-    /* Remove from run queue and schedule next task */
+    /* Remove from run queue and schedule next task.
+     * schedule() -> spin_lock_irqsave saves our masked DAIF state.
+     * The context switch to the next task restores that task's DAIF,
+     * which will have IRQs unmasked. */
     scheduler_remove_task(task);
     schedule();
 

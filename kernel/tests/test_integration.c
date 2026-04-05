@@ -21,6 +21,7 @@
 #include "../include/spinlock.h"
 #include "../include/pmm.h"
 #include "../include/platform.h"
+#include "../include/cache.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -77,17 +78,22 @@ static void migration_test_task(void *arg)
     (void)arg;
 
     migration_cpu_before = cpu_id();
+    cache_clean(&migration_cpu_before);
 
     /* Signal ready for migration */
     migration_ready = true;
+    cache_clean(&migration_ready);
 
     /* Wait for migration to complete */
-    while (!migration_done) {
+    while (1) {
+        cache_invalidate(&migration_done);
+        if (migration_done) break;
         delay(10000);
         yield();
     }
 
     migration_cpu_after = cpu_id();
+    cache_clean(&migration_cpu_after);
 
     /* Do some work to prove we're running */
     for (int i = 0; i < 3; i++) {
@@ -96,6 +102,7 @@ static void migration_test_task(void *arg)
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
+    cache_clean(&test_state.tasks_completed);
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -135,6 +142,7 @@ static void stress_task_func(void *arg)
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
+    cache_clean(&test_state.tasks_completed);
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -149,12 +157,14 @@ static void contention_task(void *arg)
     for (int i = 0; i < increments; i++) {
         irq_flags_t flags = spin_lock_irqsave(&contention_lock);
         contention_counter++;
+        cache_clean(&contention_counter);
         spin_unlock_irqrestore(&contention_lock, flags);
         delay(1000);
     }
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
+    cache_clean(&test_state.tasks_completed);
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -168,6 +178,7 @@ static void lifecycle_task_func(void *arg)
     /* Atomic increment using spinlock for reliability */
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     lifecycle_completed++;
+    cache_clean(&lifecycle_completed);
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -182,7 +193,7 @@ static void lifecycle_task_func(void *arg)
 static void test_multicore_basic(void)
 {
 #if defined(PLATFORM_RASPI5)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN (not set by TF-A on Pi 5)");
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN — L2 not coherent (TF-A limitation on Pi 5)");
 #endif
     struct task *task_a = task_create("task_a", task_a_func, (void *)3);
     struct task *task_b = task_create("task_b", task_b_func, (void *)3);
@@ -198,14 +209,21 @@ static void test_multicore_basic(void)
 
     /* Wait for completion with timeout */
     int timeout = 500;
-    while ((task_a->state != TASK_TERMINATED ||
-            task_b->state != TASK_TERMINATED ||
-            task_c->state != TASK_TERMINATED) && timeout > 0) {
+    while (timeout > 0) {
+        cache_invalidate(&task_a->state);
+        cache_invalidate(&task_b->state);
+        cache_invalidate(&task_c->state);
+        if (task_a->state == TASK_TERMINATED &&
+            task_b->state == TASK_TERMINATED &&
+            task_c->state == TASK_TERMINATED) break;
         delay(100000);
         timeout--;
     }
 
     TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for tasks to complete");
+    cache_invalidate(&task_a->state);
+    cache_invalidate(&task_b->state);
+    cache_invalidate(&task_c->state);
     TEST_ASSERT_EQUAL(TASK_TERMINATED, task_a->state);
     TEST_ASSERT_EQUAL(TASK_TERMINATED, task_b->state);
     TEST_ASSERT_EQUAL(TASK_TERMINATED, task_c->state);
@@ -218,7 +236,7 @@ static void test_multicore_basic(void)
 static void test_task_migration(void)
 {
 #if defined(PLATFORM_RASPI5)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN (not set by TF-A on Pi 5)");
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN — L2 not coherent (TF-A limitation on Pi 5)");
 #endif
     migration_ready = false;
     migration_done = false;
@@ -244,7 +262,9 @@ static void test_task_migration(void)
 
     /* Wait for task to start and signal ready */
     int timeout = 200;
-    while (!migration_ready && timeout > 0) {
+    while (timeout > 0) {
+        cache_invalidate(&migration_ready);
+        if (migration_ready) break;
         delay(50000);
         timeout--;
     }
@@ -252,16 +272,21 @@ static void test_task_migration(void)
 
     /* Let task finish */
     migration_done = true;
+    cache_clean(&migration_done);
 
     /* Wait for completion */
     timeout = 200;
-    while ((mig_task->state != TASK_TERMINATED ||
-            blocker->state != TASK_TERMINATED) && timeout > 0) {
+    while (timeout > 0) {
+        cache_invalidate(&mig_task->state);
+        cache_invalidate(&blocker->state);
+        if (mig_task->state == TASK_TERMINATED &&
+            blocker->state == TASK_TERMINATED) break;
         delay(100000);
         timeout--;
     }
 
     TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for task completion");
+    cache_invalidate(&migration_cpu_before);
     TEST_ASSERT_MESSAGE(migration_cpu_before == 3, "Task should run on CPU 3 after migration");
 }
 
@@ -272,7 +297,7 @@ static void test_task_migration(void)
 static void test_stress_multicpu(void)
 {
 #if defined(PLATFORM_RASPI5)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN (not set by TF-A on Pi 5)");
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN — L2 not coherent (TF-A limitation on Pi 5)");
 #endif
     reset_test_state();
 
@@ -294,17 +319,20 @@ static void test_stress_multicpu(void)
 
     /* Wait for completion */
     int timeout = 500;
-    while ((tasks[0]->state != TASK_TERMINATED ||
-            tasks[1]->state != TASK_TERMINATED ||
-            tasks[2]->state != TASK_TERMINATED ||
-            tasks[3]->state != TASK_TERMINATED ||
-            tasks[4]->state != TASK_TERMINATED ||
-            tasks[5]->state != TASK_TERMINATED) && timeout > 0) {
+    while (timeout > 0) {
+        for (int j = 0; j < 6; j++)
+            cache_invalidate(&tasks[j]->state);
+        bool all_done = true;
+        for (int j = 0; j < 6; j++) {
+            if (tasks[j]->state != TASK_TERMINATED) { all_done = false; break; }
+        }
+        if (all_done) break;
         delay(100000);
         timeout--;
     }
 
     TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for stress tasks");
+    cache_invalidate(&test_state.tasks_completed);
     TEST_ASSERT_EQUAL(6, test_state.tasks_completed);
 }
 
@@ -315,7 +343,7 @@ static void test_stress_multicpu(void)
 static void test_lock_contention(void)
 {
 #if defined(PLATFORM_RASPI5)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN (not set by TF-A on Pi 5)");
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN — L2 not coherent (TF-A limitation on Pi 5)");
 #endif
     reset_test_state();
     contention_counter = 0;
@@ -336,7 +364,9 @@ static void test_lock_contention(void)
 
     /* Wait for completion */
     int timeout = 300;
-    while (test_state.tasks_completed < CONTENTION_TASKS && timeout > 0) {
+    while (timeout > 0) {
+        cache_invalidate(&test_state.tasks_completed);
+        if (test_state.tasks_completed >= CONTENTION_TASKS) break;
         yield();
         delay(100000);
         timeout--;
@@ -344,6 +374,7 @@ static void test_lock_contention(void)
 
     TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for contention tasks");
 
+    cache_invalidate(&contention_counter);
     uint32_t expected = CONTENTION_TASKS * INCREMENTS_PER_TASK;
     TEST_ASSERT_MESSAGE(contention_counter == expected, "Race condition detected");
 }
@@ -355,7 +386,7 @@ static void test_lock_contention(void)
 static void test_task_lifecycle(void)
 {
 #if defined(PLATFORM_RASPI5)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN (not set by TF-A on Pi 5)");
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN — L2 not coherent (TF-A limitation on Pi 5)");
 #endif
     #define LIFECYCLE_CYCLES 8
 
@@ -373,13 +404,16 @@ static void test_task_lifecycle(void)
 
     /* Wait for completion */
     int timeout = 300;  /* Increased timeout for lifecycle tasks */
-    while (lifecycle_completed < LIFECYCLE_CYCLES && timeout > 0) {
+    while (timeout > 0) {
+        cache_invalidate(&lifecycle_completed);
+        if (lifecycle_completed >= LIFECYCLE_CYCLES) break;
         yield();
         delay(50000);
         timeout--;
     }
 
     TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for lifecycle tasks");
+    cache_invalidate(&lifecycle_completed);
     TEST_ASSERT_MESSAGE(lifecycle_completed == LIFECYCLE_CYCLES, "Not all lifecycle tasks completed");
 
     /* Give scheduler time to clean up zombies */

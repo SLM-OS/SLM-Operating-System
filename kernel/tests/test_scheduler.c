@@ -1216,6 +1216,67 @@ static void test_stress_mixed_priorities(void)
  * Latency and Benchmark Tests
  * ============================================================================ */
 
+/* ============================================================================
+ * task_exit race regression test (TEST-RACE-EXIT)
+ *
+ * Regression test for the race between task_exit() and timer-driven schedule().
+ * Before the fix, the timer could fire between state=TERMINATED and
+ * scheduler_remove_task(), finding a terminated task still in the run queue
+ * and triggering a panic. The fix masks IRQs at the top of task_exit().
+ *
+ * This test runs on CPU 0 so it works on both QEMU and Pi 5.
+ * ============================================================================ */
+
+static volatile uint32_t rapid_exit_count;
+static spinlock_t rapid_exit_lock = SPINLOCK_INIT;
+
+static void rapid_exit_task(void *arg)
+{
+    (void)arg;
+    /* Minimal work — exit immediately to maximize timer race window */
+    irq_flags_t flags = spin_lock_irqsave(&rapid_exit_lock);
+    rapid_exit_count++;
+    spin_unlock_irqrestore(&rapid_exit_lock, flags);
+    /* task_exit() is called automatically by task_entry_trampoline */
+}
+
+/*
+ * Test: Rapidly create and destroy tasks on CPU 0 with timer running.
+ * Exercises the task_exit/schedule race window. Before the IRQ mask fix,
+ * this would panic under load (~1 in 50 iterations).
+ */
+static void test_rapid_task_exit_no_panic(void)
+{
+    rapid_exit_count = 0;
+    #define RAPID_EXIT_ITERATIONS 50
+
+    for (int i = 0; i < RAPID_EXIT_ITERATIONS; i++) {
+        struct task *t = task_create("rapid", rapid_exit_task, NULL);
+        TEST_ASSERT_NOT_NULL(t);
+        /* Pin to CPU 0 — this tests the local task_exit race, not cross-CPU */
+        scheduler_add_task_to_cpu(t, 0);
+
+        /* Wait for task to complete — polling with yield to let scheduler run */
+        int timeout = 200;
+        while (timeout > 0) {
+            cache_invalidate(&t->state);
+            if (t->state == TASK_TERMINATED) break;
+            yield();
+            timeout--;
+        }
+        TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for rapid exit task");
+
+        /* Give scheduler time to clean up zombie */
+        yield();
+    }
+
+    TEST_ASSERT_EQUAL_UINT32(RAPID_EXIT_ITERATIONS, rapid_exit_count);
+}
+
+/* ============================================================================
+ * Latency and benchmark tests
+ * ============================================================================ */
+
 /*
  * Latency measurement tracking.
  * We measure wake-to-run latency for tasks on isolated vs non-isolated cores.
@@ -1254,12 +1315,16 @@ static void latency_task_entry(void *arg)
  */
 static void test_isolated_core_latency(void)
 {
-    /* This benchmark creates many short-lived tasks on isolated cores.
-     * Under some QEMU configurations (-cpu max), a race in task_exit/schedule
-     * can cause a kernel panic on the secondary CPU, which cascades to fail
-     * ALL subsequent integration tests. Skip until the underlying race is fixed. */
-    TEST_IGNORE_MESSAGE("Skipped: task_exit race on secondary CPUs (pre-existing)");
-    if (0 && cpu_count < 2) {
+    /* This test dispatches short-lived tasks to secondary CPUs.
+     * Previously disabled due to a task_exit/schedule race (now fixed:
+     * IRQ mask in task_exit prevents timer from interrupting between
+     * state=TERMINATED and scheduler_remove_task).
+     * On Pi 5, cross-CPU dispatch doesn't work (L2 not coherent without
+     * SMPEN). Skip on Pi 5 but run on QEMU. */
+#if defined(PLATFORM_RASPI5)
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN (Pi 5)");
+#endif
+    if (cpu_count < 2) {
         TEST_ASSERT(1);
         return;
     }
@@ -2083,6 +2148,9 @@ int test_suite_scheduler(void)
     /* Stress tests */
     RUN_TEST(test_no_starvation);
     RUN_TEST(test_stress_mixed_priorities);
+
+    /* Regression: task_exit race (runs on all platforms) */
+    RUN_TEST(test_rapid_task_exit_no_panic);
 
     /* Latency and benchmark tests */
     RUN_TEST(test_isolated_core_latency);

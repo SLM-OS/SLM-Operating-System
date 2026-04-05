@@ -19,7 +19,6 @@
 #include "gic.h"
 #include "timer.h"
 #include "cache.h"
-#include <stddef.h>
 #include <stdint.h>
 
 /* Deadline boost thresholds (in nanoseconds) */
@@ -33,13 +32,13 @@ extern void task_destroy(struct task *task);
 
 /* Per-CPU run queue */
 struct cpu_runqueue {
-    spinlock_t lock;            /* Per-queue lock (reduces contention) */
-    struct task *head;          /* First task in run queue */
-    struct task *tail;          /* Last task in run queue */
-    struct task *idle_task;     /* This CPU's idle task */
-    struct task *zombie;        /* Terminated task pending cleanup */
-    uint32_t ready_count;       /* Tasks in this CPU's run queue */
-};
+    spinlock_t lock;
+    struct task *head;
+    struct task *tail;
+    struct task *idle_task;
+    struct task *zombie;
+    uint32_t ready_count;
+} __attribute__((aligned(CACHE_LINE_SIZE)));
 
 /*
  * Global scheduler state.
@@ -475,23 +474,20 @@ void scheduler_add_task(struct task *task)
     cache_invalidate(&task->cpu_affinity);
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
-        /* Task is pinned to a specific CPU (even if isolated) */
         target_cpu = task->cpu_affinity;
 #if defined(PLATFORM_RASPI5)
     } else {
-        /* Pi 5: cross-CPU task dispatch requires cache coherency (SMPEN)
-         * which TF-A doesn't set for secondary cores. Until resolved,
-         * all tasks without explicit affinity run on CPU 0. Secondary
-         * CPUs are online and handle their own idle/timer tasks. */
+        /* Pi 5: cross-CPU task dispatch requires SMPEN for L2 cache
+         * coherency, which TF-A doesn't set. DC CIVAC does not
+         * propagate through per-core L2 caches without SMPEN.
+         * All tasks without explicit affinity run on CPU 0. */
         target_cpu = 0;
 #else
     } else if (task->deadline_ns > 0) {
-        /* Deadline-constrained tasks prefer performance cores */
         target_cpu = find_performance_cpu();
         DEBUG_PRINT("Deadline task '%s' -> CPU %u (performance core)",
                     task->name, target_cpu);
     } else {
-        /* Regular tasks use standard load balancing */
         target_cpu = find_target_cpu();
 #endif
     }
@@ -580,6 +576,20 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
         /* Task is blocked - just update assigned_cpu */
         task->assigned_cpu = target_cpu;
     }
+
+    /* Clean modified fields to PoC for cross-CPU visibility.
+     * Without SMPEN, writes stay in this CPU's L1 cache. The target
+     * CPU's schedule() invalidates before reading. */
+    cache_clean(&rq_old->head);
+    cache_clean(&rq_old->tail);
+    cache_clean(&rq_old->ready_count);
+    cache_clean(&rq_new->head);
+    cache_clean(&rq_new->tail);
+    cache_clean(&rq_new->ready_count);
+    cache_clean(&task->next);
+    cache_clean(&task->assigned_cpu);
+    cache_clean(&task->state);
+    cache_clean(&task->effective_priority);
 
     DEBUG_PRINT("Migrated task '%s' from CPU %u to CPU %u",
                 task->name, old_cpu, target_cpu);
