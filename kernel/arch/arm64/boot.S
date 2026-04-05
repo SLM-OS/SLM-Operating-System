@@ -241,15 +241,16 @@ real_start:
     ldr     w14, [x10, #0x000]      /* Save original GICD_CTLR in w14 */
 
     /* Enable Group 0 and Group 1 in distributor */
-    mov     w11, #3                 /* EnableGrp0 | EnableGrp1 */
+    mov     w11, #3                 /* EnableGrp0 | EnableGrp1 (non-secure: only bit 0 effective) */
     str     w11, [x10, #0x000]      /* GICD_CTLR */
 
     /* Configure CPU interface */
     ldr     x10, =0x107FFFA000      /* GICC base */
     mov     w11, #0xFF
     str     w11, [x10, #0x004]      /* GICC_PMR = 0xFF (allow all) */
-    /* Enable Group 0+1, AckCtl, bypass disable bits */
-    ldr     w11, =0x1E7
+    /* Enable Group 0+1 with bypass disable bits.
+     * AckCtl (bit 2) removed — it interferes with TF-A's Group 0 handling. */
+    ldr     w11, =0x1E3             /* EnableGrp0+1, bypass disables, no AckCtl */
     str     w11, [x10, #0x000]      /* GICC_CTLR */
 
     /* Enable FP/SIMD at EL1 */

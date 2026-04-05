@@ -202,7 +202,7 @@ static uint32_t get_cpu_id(void)
 /*
  * Initialize the GIC distributor (GICv2).
  */
-static void gic_dist_init(void)
+static void __attribute__((unused)) gic_dist_init(void)
 {
     /* Read GICD_CTLR before modifying (check firmware/TF-A state) */
     uint32_t ctlr_before = GICD_CTLR;
@@ -398,8 +398,8 @@ static void gic_cpu_init(void)
     GICC_BPR = 0;
 
     /* Enable CPU interface for Group 1 (non-secure IRQ).
-     * Preserve bits set from EL2 in boot.S (AckCtl, bypass bits). */
-    GICC_CTLR = GICC_CTLR_ENABLE | 0x1E6;  /* 0x1E7 = enable + AckCtl + bypass */
+     * Use value 0x1 (just EnableGrp1), matching Linux gic driver. */
+    GICC_CTLR = GICC_CTLR_ENABLE;
 }
 
 #else /* GIC_VERSION == 3 */
@@ -455,8 +455,34 @@ void gic_init(void)
     DEBUG_PRINT("  Redistributor: 0x%lx", (unsigned long)GICR_BASE);
 #endif
 
+#if defined(PLATFORM_RASPI5)
+    /* On Pi 5, skip full distributor reinit to preserve TF-A's configuration.
+     * TF-A sets SPIs to Group 1, enables Group 0. Our dist_init was
+     * overwriting this. Only init the CPU interface. */
+    {
+        uint32_t typer = GICD_TYPER;
+        uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
+        uint32_t pidr2 = *(volatile uint32_t *)(GICD_BASE + 0xFE8);
+        DEBUG_PRINT("GICv2: %u IRQs, PIDR2=0x%x arch=%u", num_irqs, pidr2, (pidr2 >> 4) & 0xF);
+
+        /* Just set SPIs to target CPU 0 and default priority */
+        for (uint32_t i = 8; i < num_irqs / 4; i++) {
+            GICD_ITARGETSR(i) = 0x01010101;
+        }
+        for (uint32_t i = 8; i < num_irqs / 4; i++) {
+            GICD_IPRIORITYR(i) = 0xa0a0a0a0;  /* Linux default: 0xa0 */
+        }
+
+        /* Ensure EnableGrp1 is set */
+        uint32_t ctlr = GICD_CTLR;
+        GICD_CTLR = ctlr | 1;
+        DEBUG_PRINT("GICD_CTLR: 0x%x -> 0x%x", ctlr, GICD_CTLR);
+    }
+    gic_cpu_init();
+#else
     gic_dist_init();
     gic_cpu_init();
+#endif
 
     INFO("GIC initialized");
 }

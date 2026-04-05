@@ -24,29 +24,6 @@ Always ask for permission before committing code. Do not automatically commit ch
 
 ---
 
-## File Editing
-
-**Always use relative paths** when reading or editing files. Absolute paths (e.g., `H:/My Drive/...`) can cause "file has been unexpectedly modified" errors due to CLion indexing or Google Drive sync interference. Relative paths work more reliably.
-
-**Correct:**
-```
-Read file_path="docs/shell.md"
-Edit file_path="kernel/src/shell.c"
-```
-
-**Avoid:**
-```
-Read file_path="H:/My Drive/Capstone/CS-496-SLM-Operating-System/docs/shell.md"
-```
-
-**When experiencing repeated "file has been unexpectedly modified" errors:**
-- Work with the user to diagnose the root cause first
-- Do NOT resort to workarounds like `sed` or Bash heredocs
-- Possible causes: CLion indexing, file watchers, IDE auto-save
-- Try restarting CLion or pausing file sync services
-
----
-
 ## Formatting Issues
 
 ### ASCII Box Diagrams
@@ -114,61 +91,22 @@ Documentation will be submitted to an academic advisor. Avoid "you/your" languag
 
 ---
 
-## Project Environment
-
-- **User's terminal**: Cygwin (paths like `/cygdrive/c/...`)
-- **Claude Code's shell**: Git Bash/MINGW64 (paths like `/c/...`)
-- This mismatch means Cygwin-style paths in the user's PATH don't work for Claude Code
-- **Always use Windows-style paths** (`C:/Program Files/...`) in Makefiles and commands — they work in both environments
-- Windows CMake must be used instead of Cygwin CMake (path translation issues)
-- Project is on Google Drive (`H:\My Drive\`) which can cause file locking issues during builds
-
-### Running Cygwin from Claude Code
-
-**Problem:** When Claude Code runs `C:/cygwin64/bin/bash.exe`, it inherits Git Bash's mount table. This causes `/usr/bin` to point to Git Bash's binaries instead of Cygwin's, making Cygwin-installed programs (like `picocom`) unavailable.
-
-**Solution:** Use `env -i` to clear the inherited environment before running Cygwin bash:
-
-```bash
-# Correct: Clean environment with proper Cygwin mounts
-C:/cygwin64/bin/env.exe -i HOME=/tmp PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe --login -c "which picocom"
-# Output: /usr/bin/picocom
-
-# Incorrect: Inherits Git Bash mounts
-C:/cygwin64/bin/bash.exe --login -c "which picocom"
-# Output: picocom not found (because /usr/bin points to Git Bash)
-```
-
-**Verification:** Check which `/usr/bin` is mounted:
-```bash
-C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount | grep usr"
-# Should show: C:/cygwin64/bin on /usr/bin
-# Not: C:/Program Files/Git/usr/bin on /usr/bin
-```
-
----
-
 ## Build System
 
 ### Prerequisites
 
 - ARM GNU Toolchain for Windows (aarch64-none-elf-gcc)
-- Windows CMake (not Cygwin CMake)
-- Cygwin make (C:/cygwin64/bin/make.exe)
+- GNU make
 - QEMU for Windows (qemu-system-aarch64)
 
 ### Build Commands
 
 ```bash
 # Standard build targets (from project root):
-"C:/cygwin64/bin/make.exe" kernel          # Build kernel
-"C:/cygwin64/bin/make.exe" kernel-clean    # Clean kernel build
-"C:/cygwin64/bin/make.exe" run             # Build and run in QEMU
-"C:/cygwin64/bin/make.exe" debug           # Build and run with GDB server
-
-# Alternative using -C flag:
-"C:/cygwin64/bin/make.exe" -C "H:/My Drive/Capstone/CS-496-SLM-Operating-System" kernel
-```
+make kernel          # Build kernel
+make kernel-clean    # Clean kernel build
+make run             # Build and run in QEMU
+make debug           # Build and run with GDB server
 
 ### Common Build Issues
 
@@ -178,31 +116,6 @@ C:/cygwin64/bin/env.exe -i PATH=/usr/bin:/bin C:/cygwin64/bin/bash.exe -c "mount
    - Note: `ps -eaf | grep qemu` may fail — grep complains about "binary input" and misses processes. Use `tasklist.exe | grep -i qemu` or Windows Task Manager instead.
    - The Makefile's `check-build-dir` target tries to detect this, but may not catch all cases
    - Manual fix: Kill QEMU processes, then `rm -rf build/kernel` and rebuild
-   - Can also happen with Google Drive sync - pause sync or wait.
-
-2. **"make: command not found"**
-   - Use full path: `"C:/cygwin64/bin/make.exe"`
-
-3. **Path translation issues**
-   - Windows tools need Windows paths (H:/My Drive/...)
-   - Cygwin tools need Cygwin paths (/cygdrive/h/My Drive/...)
-   - The Makefile handles this, but direct cmake calls may fail.
-
-4. **Build directory on Google Drive**
-   - See `docs/building.md` — file locking during sync can cause errors.
-
-5. **CLion file locking during build**
-   - Symptoms: "Permission denied" when linking `slmos.elf`, or CMake cache errors
-   - Affected files: `slmos.elf`, `CMakeConfigureLog.yaml`, `CompilerIdC.exe`
-   - **Root cause:** Microsoft's Incremental Linker (`link.exe`) holds file locks that persist even after CLion closes. Requires full system reboot to release.
-   - **Current workaround:** Build to local temp directory: `C:/temp/slmos-build`
-   - **CLion settings that may help** (Settings > Build > CMake):
-     - Disable "Reload CMake project on editing CMakeLists.txt"
-     - Disable "Auto-reload CMake on external changes" (Advanced Settings)
-     - Disable "Sync project after changes in the build scripts"
-     - Disable "Sync external changes when switching to the IDE window"
-     - Disable "Sync external changes periodically when the IDE is inactive"
-   - **Note:** Issue may be exacerbated by project being on Google Drive
 
 ---
 
@@ -257,15 +170,8 @@ Lab hardware is managed by **labctl** (Embedded Lab Control).
 
 **Documentation:** [github.com/johnjezl/Embedded-Lab-Control](https://github.com/johnjezl/Embedded-Lab-Control)
 
-**Quick reference:**
-- Power control: `labctl power on/off/cycle pi-5-1`
-- Serial console: `labctl connect pi-5-1-console`
-- SD card deploy: See "SD Card Deploy Workflow" below
-- Lab status: `labctl status`
-
-**Restarting the Pi 5:**
-1. **Preferred:** `labctl power cycle pi-5-1`
-2. **From shell:** `reboot` command via SLM-OS shell (when RX input is working)
+Check documentation for features and capabilities.
+labctl is implemented as an MCP server, but also has a CLI.
 
 **Note:** The old `lab-tools/` scripts (jetson-power.py, jetson-uart.sh, etc.) have been replaced by labctl. Use labctl for all lab operations.
 
@@ -273,41 +179,75 @@ Lab hardware is managed by **labctl** (Embedded Lab Control).
 
 **IMPORTANT:** Always use `labctl` for ALL SD card operations. Never manually access `/dev/sdX` devices — multiple SDWire devices exist in the lab and manual access risks writing to the wrong device.
 
-**If the MCP server fails:** Do NOT revert to using the labctl CLI directly or try to mount/modify the SD card manually. Instead, inform the user of the MCP failure so they can investigate and fix the labctl issue. Working around labctl defeats its purpose of managing multiple SDWire devices safely.
-
 **For SLM-OS kernel updates** (copy kernel binary to existing boot partition):
 
 The lab has two SDWire devices. `labctl` manages which device belongs to which SBC. Use the MCP tools (`sdwire_to_host`, `sdwire_to_dut`) or CLI equivalents, and use the block device path returned by labctl to ensure the correct SD card is accessed.
 
-```bash
-# 1. Power off the Pi
-labctl power off pi-5-1
-
-# 2. Switch SD card to host — note the block device path returned
-labctl sdwire host pi-5-1
-# Returns e.g.: "block device: /dev/sdd"
-
-# 3. Mount the boot partition (use the device labctl returned + "1")
-sudo mount /dev/sdd1 /mnt
-
-# 4. Copy kernel binary
-sudo cp build/kernel/slmos.bin /mnt/kernel_2712.img
-sync
-
-# 5. Unmount
-sudo umount /mnt
-
-# 6. Switch back to DUT and power on
-labctl sdwire dut pi-5-1
-labctl power on pi-5-1
-```
-
-**For full SD card images** (raw `dd` write):
-```bash
-labctl sdwire flash pi-5-1 path/to/image.img
-```
-
 **Known issue:** The block device reported by labctl may become stale after USB re-enumeration. If the reported device shows 0B size, check `dmesg` or `lsblk` for the actual device that was assigned.
+
+---
+
+## Post-Change Checklist (Mandatory)
+
+After EVERY code change — no exceptions — complete all applicable steps before reporting completion:
+
+1. Write or update regression tests that would catch the defect/behavior if it regressed
+2. Update any documentation affected by the change (docs/, status files, TODO lists, inline comments)
+3. Run `make test` (QEMU) and confirm all tests pass
+4. If the change affects Pi 5: build with `PLATFORM=RASPI5`, deploy via `labctl sdwire_update`, and verify on hardware using `serial_capture`/`serial_send`
+5. Commit with a descriptive message
+
+Do NOT wait for the user to ask for tests or documentation. Do NOT report a change as complete until steps 1-4 are done. If a step is not applicable (e.g., change is QEMU-only), note why it was skipped.
+
+---
+
+## Build-Deploy-Test Workflow
+
+Use the build-and-run skill for Pi 5 hardware iterations. Do NOT manually sequence individual `make`, `sdwire_update`, `serial_capture` calls when the skill can orchestrate them. If the skill is not working or missing, inform the user immediately — do not fall back to manual steps silently.
+
+For quick single-command hardware verification:
+```
+make kernel PLATFORM=RASPI5 && labctl sdwire_update + serial_capture + serial_send
+```
+This should be ONE logical operation, not four separate user-visible steps.
+
+---
+
+## Hardware Debugging Methodology
+
+When debugging hardware issues, follow this order:
+
+1. **Identify the boundary.** What is the last known-working state and the first known-broken state? (e.g., "RX works before MMU enable, fails after" — test this FIRST before exploring baud rates, pad configs, or adapter hardware)
+2. **Change one variable at a time.** Do not combine multiple hypotheses in one deploy.
+3. **Use binary search.** If boot works at step A and fails at step Z, test at step M — don't test A+1, A+2, A+3 sequentially.
+4. **Exhaust software causes before suspecting hardware.** Adapter swaps, multimeter tests, and oscilloscope checks come AFTER software hypotheses are eliminated.
+5. **Document each hypothesis, test, and result** in the relevant status doc so work isn't repeated across sessions.
+
+---
+
+## Reference File Cache
+
+Before launching a subagent to fetch source files from GitHub (Circle, Linux kernel, NVIDIA open-gpu-kernel-modules, RP1 datasheet), check `docs/reference/` first. If the file has been fetched before, use the local copy. If fetching new files, save them to `docs/reference/` for future sessions.
+
+Do NOT re-fetch the same GitHub raw URLs across multiple subagents in the same session. Fetch once, read from disk afterward.
+
+---
+
+## Reliability Testing
+
+When testing boot reliability or hardware behavior changes, use `labctl boot_test` with an appropriate count (minimum 10) rather than asking the user to manually reboot and count. Report pass/fail ratio and any failure patterns (e.g., "failed 3/10, all failures showed garbled output after line 4").
+
+---
+
+## labctl Is the Only Hardware Interface
+
+NEVER bypass labctl to interact with hardware. This includes:
+- NEVER manually mounting SD cards or running `mount`/`cp`/`umount`
+- NEVER directly accessing `/dev/sd*` block devices
+- NEVER running `nc` or `picocom` directly for serial console access
+- NEVER stopping/restarting `ser2net`
+
+If labctl lacks a needed capability, inform the user and request the feature. Do not work around it — workarounds cause device conflicts with other projects sharing the lab infrastructure.
 
 ---
 
