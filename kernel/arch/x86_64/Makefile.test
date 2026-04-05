@@ -44,7 +44,8 @@ ASFLAGS := -m64
 LDFLAGS := -n -T $(ROOT)/kernel/kernel-x86_64.ld
 
 # Object files
-OBJS := $(BUILD)/trampoline32.o $(BUILD)/entry64.o $(BUILD)/main_x86.o
+OBJS := $(BUILD)/trampoline32.o $(BUILD)/entry64.o $(BUILD)/idt_asm.o \
+        $(BUILD)/main_x86.o $(BUILD)/idt.o
 
 # QEMU
 QEMU := qemu-system-x86_64
@@ -71,8 +72,17 @@ $(BUILD)/entry64.o: $(SRC_ARCH)/entry64.S | $(BUILD)
 	@echo "Assembling $< (64-bit entry)..."
 	$(CC) -c -m64 -I$(ROOT)/kernel/include -o $@ $<
 
+# Compile 64-bit ISR stubs
+$(BUILD)/idt_asm.o: $(SRC_ARCH)/idt.S | $(BUILD)
+	@echo "Assembling $< (ISR stubs)..."
+	$(CC) -c -m64 -o $@ $<
+
 # Compile C files
 $(BUILD)/main_x86.o: $(SRC_ARCH)/main_x86.c | $(BUILD)
+	@echo "Compiling $<..."
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/idt.o: $(SRC_ARCH)/idt.c | $(BUILD)
 	@echo "Compiling $<..."
 	$(CC) $(CFLAGS) -c $< -o $@
 

@@ -12,12 +12,15 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 4. [Memory Layout](#memory-layout)
 5. [Page Tables](#page-tables)
 6. [GDT and Segments](#gdt-and-segments)
-7. [Console Output](#console-output)
-8. [Building](#building)
-9. [Testing](#testing)
-10. [Key Files](#key-files)
-11. [Design Decisions](#design-decisions)
-12. [Troubleshooting](#troubleshooting)
+7. [IDT and Exceptions](#idt-and-exceptions)
+8. [PIC and Timer](#pic-and-timer)
+9. [Console Output](#console-output)
+10. [Building](#building)
+11. [Hardware Deployment](#hardware-deployment)
+12. [Testing](#testing)
+13. [Key Files](#key-files)
+14. [Design Decisions](#design-decisions)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -25,20 +28,23 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 
 The x86-64 port enables SLM-OS to run on standard PC hardware with x86-64 processors. This port uses:
 
-- **Boot method**: Multiboot2 via GRUB
-- **Console**: UEFI GOP framebuffer (no serial port required)
+- **Boot method**: Multiboot2 via GRUB (UEFI)
+- **Console**: COM1 serial (115200 baud, 8N1)
 - **Paging**: 4-level page tables with 2MB pages
 - **Mode**: 64-bit long mode
+- **Interrupts**: 8259 PIC, PIT timer at 100 Hz
 
 ### Platform Differences from ARM64
 
-| Feature | ARM64 (Jetson/Pi) | x86-64 |
-|---------|-------------------|--------|
-| Boot method | kexec / UEFI | GRUB Multiboot2 |
-| Console | UART serial | Framebuffer |
+| Feature | ARM64 (Pi 5) | x86-64 |
+|---------|--------------|--------|
+| Boot method | SD card / UEFI | GRUB Multiboot2 (UEFI) |
+| Console | UART serial (PL011) | COM1 serial (16550) |
 | Page size | 4KB/64KB | 4KB/2MB |
-| Exception levels | EL0-EL3 | Ring 0-3 |
-| Privilege modes | EL1 (kernel) | Ring 0 |
+| Exception model | EL0-EL3 | Ring 0-3, IDT |
+| Kernel privilege | EL1 | Ring 0 |
+| Interrupt controller | GIC-400 (GICv2) | 8259 PIC |
+| Timer | ARM Generic Timer (CNTP) | 8254 PIT |
 
 ---
 
@@ -46,38 +52,62 @@ The x86-64 port enables SLM-OS to run on standard PC hardware with x86-64 proces
 
 ### Primary Target
 
-- **CPU**: Intel Core i7-6700 (Skylake)
+- **Board**: Gigabyte H610M S2H V2
+- **CPU**: Intel Core i7-6700 (Skylake, 4 cores / 8 threads)
 - **GPU**: NVIDIA GeForce RTX 3050 (for future CUDA support)
-- **Boot device**: 120GB USB SSD
-- **Memory**: 16GB+ DDR4
+- **Memory**: 16 GB DDR4
+- **Boot media**: SD card via SDWire (USB mass storage to UEFI)
+- **Serial**: Native RS-232 COM port → USB-serial adapter (Prolific) to lab server
+
+### Lab Integration
+
+The x86-64 target is managed by labctl as `test-pc`:
+
+| Resource | Assignment |
+|----------|------------|
+| Power | Kasa smart plug outlet 4 |
+| Serial | `/dev/lab/port-2-9` → TCP:4006 (115200 baud) |
+| SDWire | `pc-sdwire` (SDWire original, serial `sd-wire_1`) |
+| Network | 192.168.4.136 (ethernet) |
 
 ### QEMU Testing
 
-The x86-64 port is tested in QEMU before deployment to real hardware:
-
 ```bash
-qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio
+# ISO boot (BIOS GRUB)
+qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio -display none
+
+# Direct kernel boot (Multiboot2 — QEMU only)
+qemu-system-x86_64 -m 256M -kernel build/x86_64-test/kernel-x86.elf -serial stdio -display none
 ```
 
 ---
 
 ## Boot Sequence
 
-The x86-64 boot process transitions from 32-bit protected mode (GRUB) to 64-bit long mode:
+The x86-64 boot process transitions from UEFI firmware through GRUB to 64-bit long mode:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  GRUB Bootloader                                                    │
-│  - Loads kernel ELF at 1MB (0x100000)                               │
-│  - Verifies Multiboot2 header                                       │
-│  - Jumps to _start in 32-bit protected mode                         │
-│  - Passes magic (0x36D76289) in EAX, info pointer in EBX            │
+│  UEFI Firmware                                                      │
+│  - Discovers SD card as USB mass storage (via SDWire)               │
+│  - Finds GPT partition with EFI System Partition                    │
+│  - Loads EFI/BOOT/BOOTX64.EFI (GRUB)                               │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  GRUB Bootloader (EFI)                                              │
+│  - Runs embedded prefix config (grub-mkimage -c)                    │
+│  - Finds /slmos/kernel.elf on EFI partition                         │
+│  - Loads kernel ELF via multiboot2 command                          │
+│  - Jumps to _start in 32-bit protected mode                        │
+│  - Passes multiboot info pointer in EBX                             │
+│  - NOTE: UEFI GRUB does not reliably pass magic in EAX             │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  32-bit Trampoline (trampoline32.S)                                 │
-│  - Validates Multiboot2 magic                                       │
 │  - Checks CPUID and long mode support                               │
 │  - Sets up 4-level page tables (identity mapping first 1GB)         │
 │  - Enables PAE in CR4                                               │
@@ -100,10 +130,12 @@ The x86-64 boot process transitions from 32-bit protected mode (GRUB) to 64-bit 
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  C Kernel (main_x86.c)                                              │
-│  - Initializes framebuffer console                                  │
-│  - Parses Multiboot2 info for framebuffer                           │
-│  - Displays boot messages                                           │
-│  - Halts (test kernel)                                              │
+│  - Initializes COM1 serial console (115200 baud)                    │
+│  - Loads IDT (48 vectors: exceptions 0-31, IRQs 32-47)             │
+│  - Remaps 8259 PIC (IRQ 0-15 → vectors 32-47)                      │
+│  - Initializes PIT timer at 100 Hz                                  │
+│  - Enables interrupts (STI)                                         │
+│  - Parses Multiboot2 info (memory map, bootloader name)             │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -118,7 +150,7 @@ The transition from 32-bit to 64-bit mode requires:
 5. **Load 64-bit GDT**
 6. **Far jump** to 64-bit code segment
 
-The far jump is critical - it must use segment selector 0x08 (64-bit code segment) to actually switch the CPU into 64-bit mode.
+The far jump must use segment selector 0x08 (64-bit code segment) to actually switch the CPU into 64-bit mode.
 
 ---
 
@@ -133,7 +165,7 @@ The far jump is critical - it must use segment selector 0x08 (64-bit code segmen
   0x00101000               .text (code)
   0x00102000               .rodata (constants, GDT)
   0x00103000               .data (initialized data)
-  0x00104000               .bss (stack)
+  0x00104000               .bss (stack, IDT)
   0x00109000               .page_tables (PML4, PDPT, PD)
 0x00200000 - 0x3FFFFFFF    Available (identity mapped)
 ```
@@ -143,10 +175,10 @@ The far jump is critical - it must use segment selector 0x08 (64-bit code segmen
 | Section | Purpose | Attributes |
 |---------|---------|------------|
 | `.multiboot` | Multiboot2 header | Read-only |
-| `.text` | Executable code | Read/Execute |
+| `.text` | Executable code (boot, ISR stubs, kernel) | Read/Execute |
 | `.rodata` | Constants, GDT | Read-only |
 | `.data` | Initialized data | Read/Write |
-| `.bss` | Uninitialized data, stack | Read/Write |
+| `.bss` | Uninitialized data, stack, IDT | Read/Write |
 | `.page_tables` | Page tables (not zeroed) | Read/Write |
 
 ---
@@ -170,7 +202,7 @@ The boot code creates an identity mapping of the first 1GB using 2MB pages:
 - **PDPT[0]** → PD (single entry)
 - **PD[0-511]** → 2MB pages (512 entries = 1GB)
 
-This means virtual address == physical address for 0x00000000 - 0x3FFFFFFF.
+Virtual address == physical address for 0x00000000 - 0x3FFFFFFF.
 
 ### Page Table Entry Format (2MB Page)
 
@@ -179,26 +211,10 @@ Bit     Description
 ────────────────────────────────────────
 0       Present (P)
 1       Read/Write (R/W)
-2       User/Supervisor (U/S)
-3       Page Write-Through (PWT)
-4       Page Cache Disable (PCD)
-5       Accessed (A)
-6       Dirty (D)
 7       Page Size (PS) - must be 1 for 2MB
-8       Global (G)
-12-20   Reserved (must be 0)
 21-51   Physical Address bits 21-51
-52-62   Reserved
 63      No Execute (NX)
 ```
-
-### Page Tables in Separate Section
-
-The page tables are placed in a `.page_tables` section separate from `.bss` to prevent them from being zeroed during BSS clearing. This is critical because:
-
-1. BSS clear happens after paging is enabled
-2. Zeroing active page tables causes immediate page faults
-3. The separate section ensures page tables remain intact
 
 ---
 
@@ -219,49 +235,90 @@ Offset  Segment         Description
 ```c
 /* Code64: 0x00AF9A000000FFFF */
 /* Data64: 0x00CF92000000FFFF */
-
-Bits 0-15:   Limit low (0xFFFF)
-Bits 16-31:  Base low (0x0000)
-Bits 32-39:  Base middle (0x00)
-Bits 40-47:  Access byte
-             Code64: 0x9A (Present, Ring 0, Code, Execute/Read)
-             Data64: 0x92 (Present, Ring 0, Data, Read/Write)
-Bits 48-51:  Limit high (0xF)
-Bits 52-55:  Flags
-             Code64: 0xA (64-bit, limit in 4K units)
-             Data64: 0xC (32-bit compat, limit in 4K units)
-Bits 56-63:  Base high (0x00)
 ```
+
+---
+
+## IDT and Exceptions
+
+### IDT Structure
+
+The Interrupt Descriptor Table has 48 entries (16 bytes each):
+
+| Vectors | Type | Purpose |
+|---------|------|---------|
+| 0-31 | Trap gates | CPU exceptions (#DE, #UD, #GP, #PF, etc.) |
+| 2 | Interrupt gate | NMI (clears IF) |
+| 32-47 | Interrupt gates | PIC IRQs (clears IF) |
+
+### Exception Handler
+
+When a CPU exception fires, the handler prints a full register dump to serial:
+
+- Exception name and vector number
+- Error code (if applicable)
+- RIP, CS, RSP, SS, RFLAGS
+- All general-purpose registers (RAX-R15)
+- CR2 (faulting address) for page faults
+
+### ISR Stack Frame
+
+```
+[SS, RSP, RFLAGS, CS, RIP]   ← pushed by CPU
+[error_code]                   ← pushed by CPU or dummy 0
+[vector]                       ← pushed by ISR stub
+[R15..RAX]                     ← pushed by common handler
+```
+
+Exceptions 8, 10-14, 17, 21, 29, 30 push a hardware error code; all others get a dummy 0 to keep the stack layout uniform.
+
+### IRQ Dispatch
+
+IRQ handlers are registered via `irq_register(irq, handler)`. The common handler dispatches to the registered callback and sends EOI to the PIC.
+
+---
+
+## PIC and Timer
+
+### 8259 PIC Remapping
+
+The PIC is remapped to avoid conflict with CPU exception vectors:
+
+| PIC | IRQ Range | Vector Range |
+|-----|-----------|-------------|
+| Master (PIC1) | IRQ 0-7 | Vectors 32-39 |
+| Slave (PIC2) | IRQ 8-15 | Vectors 40-47 |
+
+### PIT Timer (8254)
+
+- **Channel**: 0
+- **Mode**: Rate generator (mode 2)
+- **Frequency**: ~100 Hz (divisor = 1193182 / 100 = 11931)
+- **IRQ**: 0 → vector 32
+
+The timer interrupt handler increments a global `pit_ticks` counter used for timing.
 
 ---
 
 ## Console Output
 
-### Framebuffer Console
+### Serial Console (COM1)
 
-The x86-64 port uses a UEFI GOP framebuffer for console output instead of serial UART:
+The x86-64 port uses the 16550 UART on COM1 for all console output:
 
-1. GRUB requests framebuffer via Multiboot2 tag
-2. Kernel parses Multiboot2 info for framebuffer address
-3. `fb_console.c` renders 8x16 bitmap font to framebuffer
+| Parameter | Value |
+|-----------|-------|
+| I/O Base | 0x3F8 |
+| Baud rate | 115200 |
+| Data bits | 8 |
+| Parity | None |
+| Stop bits | 1 |
 
-### Framebuffer Info (from Multiboot2)
+Serial is initialized early in `kernel_main`, before any other subsystem.
 
-| Field | Description |
-|-------|-------------|
-| `addr` | Physical address of framebuffer |
-| `pitch` | Bytes per scanline |
-| `width` | Width in pixels |
-| `height` | Height in pixels |
-| `bpp` | Bits per pixel (typically 32) |
-| `type` | 1 = RGB direct color |
+### GRUB EFI and Framebuffer
 
-### Serial Debug (COM1)
-
-For debugging, the boot code outputs progress markers to COM1 (0x3F8):
-
-- Boot errors output `!` before halting
-- Serial is available even without framebuffer
+GRUB EFI cannot reliably set a video mode on all hardware. The Multiboot2 header does not request a framebuffer tag, and the kernel does not depend on framebuffer output. All output goes through serial.
 
 ---
 
@@ -271,7 +328,7 @@ For debugging, the boot code outputs progress markers to COM1 (0x3F8):
 
 ```bash
 # Ubuntu/Debian
-sudo apt install gcc make grub-pc-bin xorriso qemu-system-x86
+sudo apt install gcc make grub-efi-amd64-bin sgdisk dosfstools qemu-system-x86
 ```
 
 ### Build Commands
@@ -280,18 +337,20 @@ sudo apt install gcc make grub-pc-bin xorriso qemu-system-x86
 # Build kernel ELF
 make -f kernel/arch/x86_64/Makefile.test
 
-# Create bootable ISO
+# Create bootable ISO (QEMU -cdrom testing)
 make -f kernel/arch/x86_64/Makefile.test iso
 
-# Run in QEMU (text mode with serial)
+# Create UEFI-bootable disk image (real hardware)
+make -f kernel/arch/x86_64/Makefile.test disk
+
+# Run in QEMU (serial output)
 make -f kernel/arch/x86_64/Makefile.test run
 
-# Run in QEMU (GUI mode with framebuffer)
+# Run in QEMU (GUI mode)
 make -f kernel/arch/x86_64/Makefile.test run-gui
 
 # Debug with GDB
 make -f kernel/arch/x86_64/Makefile.test debug
-# In another terminal:
 make -f kernel/arch/x86_64/Makefile.test gdb
 ```
 
@@ -300,13 +359,43 @@ make -f kernel/arch/x86_64/Makefile.test gdb
 ```
 build/x86_64-test/
 ├── kernel-x86.elf        # Kernel ELF binary
-├── slmos-x86.iso         # Bootable ISO
-├── boot/
-│   ├── kernel.elf        # Copy for ISO
-│   └── grub/
-│       └── grub.cfg      # GRUB configuration
+├── slmos-x86.iso         # Bootable ISO (QEMU)
+├── slmos-x86.img         # UEFI disk image (hardware)
+├── bootx64.efi           # GRUB EFI binary
+├── grub-embed.cfg        # Embedded GRUB config
+├── esp/                   # EFI System Partition contents
+│   ├── EFI/BOOT/BOOTX64.EFI
+│   └── slmos/kernel.elf
 └── *.o                   # Object files
 ```
+
+---
+
+## Hardware Deployment
+
+### Deploy Workflow
+
+```bash
+# Build and flash in one step
+make -f kernel/arch/x86_64/Makefile.test clean disk && \
+labctl sdwire flash test-pc build/x86_64-test/slmos-x86.img
+
+# Capture boot output
+labctl serial_capture test-pc --timeout 30 --until "System halted"
+```
+
+### UEFI Disk Image Structure
+
+The `disk` target creates a 64 MB GPT image with one EFI System Partition (FAT32):
+
+```
+GPT Partition Table
+└── Partition 1: EFI System (type EF00), FAT32
+    ├── EFI/BOOT/BOOTX64.EFI    # GRUB EFI binary (grub-mkimage)
+    └── slmos/kernel.elf          # SLM-OS kernel
+```
+
+GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal` module, which fails to initialize video on some UEFI implementations. The prefix config is embedded directly into the EFI binary.
 
 ---
 
@@ -314,34 +403,23 @@ build/x86_64-test/
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite verifies:
+The `test_x86_boot.c` test suite contains 31 tests across 9 categories:
 
-- **Control registers**: CR0 paging, CR4 PAE, EFER long mode
-- **Page tables**: PML4, PDPT, PD structure and entries
-- **GDT**: Limit, CS selector (0x08), DS selector (0x10)
-- **Memory layout**: Kernel at 1MB, section ordering
-- **64-bit mode**: 64-bit operations, RIP-relative addressing
-- **Framebuffer**: Console output functionality
+| Category | Tests | Description |
+|----------|-------|-------------|
+| Control registers | 4 | CR0 paging, CR4 PAE, EFER long mode, CR3→PML4 |
+| Page tables | 4 | PML4, PDPT, PD structure, full 1GB mapping |
+| GDT | 3 | Limit, CS selector (0x08), DS selector (0x10) |
+| Memory layout | 3 | Kernel at 1MB, section ordering, within mapping |
+| Multiboot2 | 5 | Pointer valid, structure size, memory map, usable RAM, bootloader name |
+| IDT | 4 | IDTR loaded, exception entries present, IRQ interrupt gates, exception trap gates |
+| PIC | 3 | OCW3 response, timer unmasked, slave accessible |
+| PIT timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
+| Long mode | 2 | 64-bit operations, RIP-relative addressing |
 
 ### Running Tests
 
-Tests are integrated into the kernel and run during boot when test mode is enabled.
-
-### QEMU Test Command
-
-```bash
-# Quick boot test with serial output
-timeout 5 qemu-system-x86_64 -m 256M \
-    -cdrom build/x86_64-test/slmos-x86.iso \
-    -serial stdio \
-    -display none
-```
-
-Expected output:
-```
-[SLM-OS x86-64] Boot started
-[SLM-OS x86-64] Initializing framebuffer...
-```
+Tests are integrated into the kernel and run during boot when compiled with the test harness. They use the Unity bare-metal test framework.
 
 ---
 
@@ -353,26 +431,27 @@ Expected output:
 |------|---------|
 | `kernel/arch/x86_64/trampoline32.S` | 32-bit Multiboot2 entry, mode transition |
 | `kernel/arch/x86_64/entry64.S` | 64-bit entry, BSS clear, kernel call |
+| `kernel/arch/x86_64/idt.S` | ISR stubs for exceptions (0-31) and IRQs (32-47) |
 
 ### C Code
 
 | File | Purpose |
 |------|---------|
-| `kernel/arch/x86_64/main_x86.c` | Test kernel entry point |
-| `kernel/drivers/fb_console.c` | Framebuffer console driver |
+| `kernel/arch/x86_64/main_x86.c` | Kernel entry, serial console, PIC, PIT, Multiboot2 parsing |
+| `kernel/arch/x86_64/idt.c` | IDT setup, exception handler, IRQ dispatch |
 
 ### Build System
 
 | File | Purpose |
 |------|---------|
-| `kernel/arch/x86_64/Makefile.test` | x86-64 build rules |
+| `kernel/arch/x86_64/Makefile.test` | x86-64 build rules (ELF, ISO, disk image) |
 | `kernel/kernel-x86_64.ld` | Linker script |
 
 ### Tests
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | Boot and platform tests |
+| `kernel/tests/test_x86_boot.c` | 31 tests covering boot, IDT, PIC, PIT, Multiboot2 |
 
 ---
 
@@ -381,42 +460,49 @@ Expected output:
 ### Why Multiboot2 Instead of Raw UEFI?
 
 1. **Simpler**: GRUB handles UEFI complexity
-2. **Portable**: Same kernel works with BIOS and UEFI
-3. **Framebuffer**: GRUB requests GOP framebuffer via Multiboot2 tag
-4. **Proven**: Well-documented, widely used
+2. **Portable**: Same kernel works with BIOS and UEFI GRUB
+3. **Proven**: Well-documented, widely used
+
+### Why grub-mkimage Instead of grub-mkstandalone?
+
+`grub-mkstandalone` includes the `normal` module which tries to initialize `gfxterm` before processing the config. On some UEFI implementations this fails with "no suitable video mode found." `grub-mkimage` with `-c` embeds the config as prefix commands that execute immediately without `normal`, avoiding the video initialization entirely.
+
+### Why Skip Multiboot2 Magic Check?
+
+GRUB BIOS passes 0x36D76289 in EAX per the Multiboot2 spec, but GRUB EFI does not reliably set this value. The multiboot info pointer in EBX is valid in both cases, so the magic check is skipped. The kernel validates the multiboot2 info structure itself.
 
 ### Why Split Assembly Files?
 
-GAS generates 64-bit instructions (RIP-relative addressing) even with `.code32` directive when the output format is elf64. Solution:
+GAS generates 64-bit instructions (RIP-relative addressing) even with `.code32` when the output format is elf64. Solution:
 
 1. `trampoline32.S` compiled with `-m32` (true 32-bit code)
 2. `objcopy` converts to elf64-x86-64 format
-3. `entry64.S` compiled with `-m64` (native 64-bit)
-4. Link both together
+3. `entry64.S` and `idt.S` compiled with `-m64` (native 64-bit)
+4. Link all together
 
 ### Why 2MB Pages?
 
 1. **Simplicity**: No need for PT level (only PML4→PDPT→PD)
 2. **Performance**: Fewer TLB entries needed
 3. **Boot speed**: Identity mapping 1GB requires only 512 PD entries
-4. **Sufficient**: Full kernel fits in first 2MB
+
+### Why 8259 PIC Instead of APIC?
+
+The 8259 PIC is simpler and sufficient for single-core bring-up. APIC/IOAPIC will be needed later for SMP, but the PIC provides a working interrupt path with minimal code.
 
 ### Why Separate .page_tables Section?
 
-The BSS clear loop (`rep stosq`) runs after paging is enabled. If page tables were in BSS, clearing BSS would zero the active page tables, causing immediate page faults. The separate section ensures page tables remain intact.
+The BSS clear loop (`rep stosq`) runs after paging is enabled. If page tables were in BSS, clearing BSS would zero the active page tables, causing immediate page faults.
 
 ---
 
 ## Troubleshooting
 
-### Boot Halts with '!' on Serial
+### Boot Halts Silently (No Serial Output After BIOS)
 
-The 32-bit trampoline outputs '!' and halts when:
-- Multiboot2 magic (0x36D76289) not in EAX
-- CPUID not supported
-- Long mode not supported
+The 32-bit trampoline halts when CPUID or long mode checks fail. Since the serial port is not yet initialized at this stage, the halt is silent.
 
-**Solution**: Verify GRUB configuration uses `multiboot2` command.
+**Debug**: Add early serial output before the failing check (see commit history for diagnostic approach).
 
 ### Triple Fault / Reboot Loop
 
@@ -428,15 +514,17 @@ Common causes:
 
 **Debug**: Add serial output markers between each step to isolate failure point.
 
-### No Framebuffer Output
+### GRUB Shows "no suitable video mode found"
 
-1. Verify Multiboot2 framebuffer tag in header
-2. Check GRUB provides framebuffer info
-3. Verify framebuffer address is within mapped memory
+This occurs when GRUB's `normal` module fails to initialize `gfxterm` via UEFI GOP. Use `grub-mkimage` instead of `grub-mkstandalone` to avoid loading `normal`.
 
-### GDT Pointer Relocation Issue
+### GRUB Shows "Unknown command"
 
-If `lgdt` loads from wrong address, ensure `gdt64_ptr` is declared `.global` in assembly. Without this, the assembler generates a section-relative relocation instead of a symbol relocation.
+The embedded GRUB prefix config uses commands that require specific modules. Ensure all needed modules are listed in the `grub-mkimage` command line (e.g., `part_gpt fat multiboot2 search all_video`).
+
+### Garbled Serial Output from BIOS
+
+The UEFI firmware outputs POST messages on the serial port at a different baud rate (typically 9600). This garbled data appears before SLM-OS initializes the serial port at 115200. It is harmless.
 
 ---
 
@@ -446,7 +534,9 @@ If `lgdt` loads from wrong address, ensure `gdt64_ptr` is declared `.global` in 
 - [AMD64 Architecture Programmer's Manual](https://developer.amd.com/resources/developer-guides-manuals/)
 - [Intel 64 and IA-32 Architectures Software Developer's Manual](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
 - [OSDev Wiki - Setting Up Long Mode](https://wiki.osdev.org/Setting_Up_Long_Mode)
+- [OSDev Wiki - 8259 PIC](https://wiki.osdev.org/8259_PIC)
+- [OSDev Wiki - Programmable Interval Timer](https://wiki.osdev.org/Programmable_Interval_Timer)
 
 ---
 
-*Last updated: January 2026*
+*Last updated: April 2026*
