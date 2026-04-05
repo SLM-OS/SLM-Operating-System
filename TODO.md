@@ -128,9 +128,9 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ Timer (100 Hz)
 - ✅ Scheduler (single-core)
 - ✅ Lua scripting
-- ✅ Shell (boots, RX issue)
+- ✅ Shell (fully interactive)
 - ☐ SMP (skipped — kexec limitation)
-- ☐ Full memory (capped at OP-TEE carveout)
+- ✅ Memory expansion (~6.7 GB free across 3 regions around OP-TEE carveout)
 
 ---
 

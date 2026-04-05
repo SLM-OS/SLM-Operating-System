@@ -122,19 +122,26 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 ```
 0x80000000 ─────────── RAM base (kernel loaded here by kexec)
     │  .text, .data, .bss, stack
-0x80437000 ─────────── Heap start (__kernel_end, page-aligned)
-    │  Buddy allocator free memory (~1 GB)
-0xC0000000 ─────────── OP-TEE secure carveout (heap capped here)
+0x80437000 ─────────── Heap region 1 start
+    │  Buddy allocator (~990 MB)
+0xBE000000 ─────────── OP-TEE secure carveout (64 MB)
     │  OP-TEE binary at 0xC1D35000
-    │  ...firmware carveouts...
+0xC2000000 ─────────── Heap region 2 start
+    │  Buddy allocator (~958 MB)
+0xFFFE0000 ─────────── Small reserved gap
+0x100000000 ────────── Heap region 3 start
+    │  Buddy allocator (~5 GB)
+0x240000000 ────────── Conservative end (reserved sub-regions above)
 0x280000000 ────────── RAM end (8 GB total)
 ```
 
+Total usable: ~6.9 GB across three regions. Verified: `mem` command shows 6.7 GB free.
+
 ### OP-TEE Carveout
 
-The OP-TEE (Trusted OS) binary is loaded at 0xC1D35000 during boot. The memory controller protects a region starting at approximately 0xC0000000. Writing to this region triggers a RAS error and kills the CPU core.
+The OP-TEE (Trusted OS) binary is loaded at 0xC1D35000 during boot. The memory controller protects the region 0xBE000000-0xC1FFFFFF (64 MB). Writing to this region triggers a RAS error and kills the CPU core.
 
-The PMM caps the heap at 0xC0000000, providing ~1 GB of usable memory for the buddy allocator.
+The PMM uses three non-contiguous regions around the carveout via the `pmm_add_region()` helper.
 
 ---
 

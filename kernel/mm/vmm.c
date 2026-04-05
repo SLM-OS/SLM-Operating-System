@@ -55,7 +55,8 @@ static uint64_t l1_table[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
  * need fine-grained (2MB) mappings.
  *
  * QEMU:   l2_kernel (RAM), l2_mmio (GIC+UART+VirtIO, all in 0x00-0x3F)
- * Jetson: l2_kernel (RAM), l2_mmio (GIC+UART, all in 0x00-0x3F)
+ * Jetson: l2_kernel (RAM 0x80-0xBF), l2_ram_c0 (RAM 0xC2-0xFF around OP-TEE),
+ *         l2_mmio (GIC+UART+GPU+TCU, all in 0x00-0x3F), plus L1 1GB blocks for >4GB
  * Pi 5:   l2_mmio_pcie (PCIe RC/MIP at L1[64]), l2_mmio_gic (GIC/GPIO at L1[65]),
  *          l2_mmio_rp1 (RP1 UART/INTC at L1[124])
  *         (RAM uses 1GB L1 block descriptors, no L2 needed)
@@ -63,7 +64,12 @@ static uint64_t l1_table[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #if defined(PLATFORM_QEMU_VIRT) || defined(PLATFORM_JETSON_ORIN_NANO)
 static uint64_t l2_kernel[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
-#elif defined(PLATFORM_RASPI5)
+#endif
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+/* L2 table for 0xC0000000-0xFFFFFFFF: maps RAM around OP-TEE carveout */
+static uint64_t l2_ram_c0[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+#endif
+#if defined(PLATFORM_RASPI5)
 static uint64_t l2_mmio_pcie[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio_gic[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio_rp1[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
@@ -717,18 +723,60 @@ static void vmm_setup_platform(void)
     l1_table[0] = make_table_desc((uint64_t)l2_mmio);
     vmm_state.l2_tables_used++;
 
-    /* L1 entry for RAM */
+    /* L1[2]: RAM 0x80000000-0xBFFFFFFF via L2 table */
     l1_table[RAM_BASE >> 30] = make_table_desc((uint64_t)l2_kernel);
     vmm_state.l2_tables_used++;
 
-    /* Populate RAM L2 table with 2MB blocks */
+    /* Populate RAM L2 table with 2MB blocks.
+     * On Jetson, stop before OP-TEE carveout at 0xBE000000 (L2 entry 496).
+     * On QEMU, map up to 1GB. */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    #define KERNEL_L2_LIMIT 496  /* 496 * 2MB = 992 MB → 0x80000000-0xBDFFFFFF */
+#else
+    #define KERNEL_L2_LIMIT 512
+#endif
     uint32_t num_blocks = RAM_SIZE / BLOCK_SIZE;
-    if (num_blocks > 512) num_blocks = 512;
+    if (num_blocks > KERNEL_L2_LIMIT) num_blocks = KERNEL_L2_LIMIT;
     for (uint32_t i = 0; i < num_blocks; i++) {
         uint64_t pa = RAM_BASE + (i * BLOCK_SIZE);
         l2_kernel[i] = make_block_desc(pa, kernel_flags);
         vmm_state.blocks_mapped++;
     }
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /*
+     * Jetson memory expansion: map RAM above OP-TEE carveout.
+     *
+     * Memory map (from /proc/iomem):
+     *   80000000-BDFFFFFF : System RAM (~990 MB) — mapped above in l2_kernel
+     *   BE000000-C1FFFFFF : OP-TEE carveout (64 MB) — DO NOT MAP
+     *   C2000000-FFFDFFFF : System RAM (~958 MB)
+     *   100000000-25E244FFF : System RAM (~5.5 GB)
+     *
+     * L1[3] (0xC0000000-0xFFFFFFFF): L2 table skipping OP-TEE at entries 0-15
+     * L1[4]-L1[8] (0x100000000-0x23FFFFFFF): 1GB block descriptors
+     */
+
+    /* L1[3]: 0xC0000000-0xFFFFFFFF via L2 table (skip carveout) */
+    l1_table[3] = make_table_desc((uint64_t)l2_ram_c0);
+    vmm_state.l2_tables_used++;
+
+    /* Map 0xC2000000-0xFFFFFFFF as 2MB blocks (skip entries 0-15 = OP-TEE) */
+    for (uint32_t i = 16; i < 512; i++) {  /* Entry 16 = 0xC2000000 */
+        uint64_t pa = 0xC0000000UL + (i * BLOCK_SIZE);
+        l2_ram_c0[i] = make_block_desc(pa, kernel_flags);
+        vmm_state.blocks_mapped++;
+    }
+
+    /* L1[4]-L1[8]: 1GB block descriptors for 0x100000000-0x23FFFFFFF (5 GB)
+     * Using L1-level 1GB blocks — same descriptor format as L2 2MB blocks
+     * but placed directly in L1 with 1GB-aligned addresses. */
+    for (uint32_t idx = 4; idx <= 8; idx++) {
+        uint64_t pa = (uint64_t)idx << 30;  /* idx * 1GB */
+        l1_table[idx] = make_block_desc(pa, kernel_flags);
+        vmm_state.blocks_mapped++;
+    }
+#endif
 
     /* Map MMIO devices into l2_mmio */
     uint64_t gic_l2_idx = (GIC_DIST_BASE >> BLOCK_SHIFT) & 0x1FF;

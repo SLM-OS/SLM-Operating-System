@@ -357,28 +357,41 @@ static void buddy_free(uintptr_t addr, unsigned int order, unsigned int original
 /*
  * Initialize the physical memory manager.
  */
+/*
+ * Add a contiguous memory region to the buddy allocator.
+ * Breaks it into the largest power-of-two aligned blocks possible.
+ */
+static void pmm_add_region(uintptr_t start, uintptr_t end)
+{
+    uintptr_t current = PAGE_ALIGN_UP(start);
+    while (current < end) {
+        unsigned int order = MAX_ORDER;
+
+        while (order > 0) {
+            size_t block_size = order_to_size(order);
+            if ((current + block_size <= end) &&
+                is_aligned_to_order(current, order)) {
+                break;
+            }
+            order--;
+        }
+
+        size_t block_size = order_to_size(order);
+        set_block_state(current, order, BLOCK_FREE);
+        free_list_add(current, order);
+        buddy_state.free_pages += order_to_pages(order);
+
+        current += block_size;
+    }
+}
+
 void pmm_init(void)
 {
-    /* Calculate heap boundaries */
     uintptr_t kernel_end = (uintptr_t)&__kernel_end;
     buddy_state.heap_start = PAGE_ALIGN_UP(kernel_end);
     buddy_state.heap_end = RAM_BASE + RAM_SIZE;
 
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-    /* Cap heap below OP-TEE secure carveout.
-     * The TOS (OP-TEE) binary is at 0xC1D35000 with a secure carveout
-     * starting at ~0xC0000000. Writing to this region triggers a memory
-     * controller security violation (RAS error).
-     * Cap at 0xC0000000 to give ~1GB of usable heap.
-     * TODO: Parse actual carveout boundaries from DTB/bootloader params. */
-    {
-        uintptr_t optee_carveout = 0xC0000000UL;
-        if (buddy_state.heap_end > optee_carveout)
-            buddy_state.heap_end = optee_carveout;
-    }
-#endif
-
-    /* Calculate page counts */
+    /* Calculate page counts (full range including gaps) */
     buddy_state.total_pages = (buddy_state.heap_end - buddy_state.heap_start) / PAGE_SIZE;
     buddy_state.reserved_pages = (buddy_state.heap_start - RAM_BASE) / PAGE_SIZE;
 
@@ -390,7 +403,7 @@ void pmm_init(void)
 
     /* Clear block state array */
     for (size_t i = 0; i < MAX_BLOCKS; i++) {
-        block_state[i] = BLOCK_ALLOCATED; /* Start as allocated, we'll free valid regions */
+        block_state[i] = BLOCK_ALLOCATED;
     }
 
     /* Initialize statistics */
@@ -401,38 +414,26 @@ void pmm_init(void)
     buddy_state.merge_count = 0;
 
     /*
-     * Add the heap to the buddy system.
-     * We process the heap in chunks, adding the largest power-of-two
-     * aligned blocks we can at each step.
+     * Add memory regions to the buddy allocator.
+     * On Jetson, the OP-TEE carveout splits RAM into multiple regions.
      */
-    uintptr_t current = buddy_state.heap_start;
-    uintptr_t end = buddy_state.heap_end;
-    while (current < end) {
-        /* Find the largest order that:
-         * 1. Fits in remaining space
-         * 2. Is properly aligned at this address
-         */
-        unsigned int order = MAX_ORDER;
-
-        while (order > 0) {
-            size_t block_size = order_to_size(order);
-
-            /* Check if block fits and address is aligned */
-            if ((current + block_size <= end) &&
-                is_aligned_to_order(current, order)) {
-                break;
-            }
-            order--;
-        }
-
-        /* Add this block to the free list */
-        size_t block_size = order_to_size(order);
-        set_block_state(current, order, BLOCK_FREE);
-        free_list_add(current, order);
-        buddy_state.free_pages += order_to_pages(order);
-
-        current += block_size;
-    }
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /*
+     * Jetson memory regions (from /proc/iomem):
+     *   80000000-BDFFFFFF : System RAM (~990 MB, region 1)
+     *   BE000000-C1FFFFFF : OP-TEE carveout — SKIP
+     *   C2000000-FFFDFFFF : System RAM (~958 MB, region 2)
+     *   100000000-23FFFFFFF : System RAM (~5 GB, region 3, conservative end)
+     *
+     * Region 3 has internal reserved sub-regions above 0x240000000.
+     * Use 0x240000000 as a conservative upper bound.
+     */
+    pmm_add_region(buddy_state.heap_start, 0xBE000000UL);
+    pmm_add_region(0xC2000000UL, 0xFFFE0000UL);
+    pmm_add_region(0x100000000UL, 0x240000000UL);
+#else
+    pmm_add_region(buddy_state.heap_start, buddy_state.heap_end);
+#endif
 
     buddy_state.initialized = true;
 
@@ -440,8 +441,9 @@ void pmm_init(void)
     DEBUG_PRINT("  Kernel ends at:  0x%lx", kernel_end);
     DEBUG_PRINT("  Heap start:      0x%lx", buddy_state.heap_start);
     DEBUG_PRINT("  Heap end:        0x%lx", buddy_state.heap_end);
-    DEBUG_PRINT("  Total pages:     %u", (unsigned)buddy_state.total_pages);
-    DEBUG_PRINT("  Free pages:      %u", (unsigned)buddy_state.free_pages);
+    DEBUG_PRINT("  Free pages:      %u (%u MB)",
+                (unsigned)buddy_state.free_pages,
+                (unsigned)(buddy_state.free_pages * PAGE_SIZE / (1024 * 1024)));
     DEBUG_PRINT("  Reserved pages:  %u (kernel)", (unsigned)buddy_state.reserved_pages);
 }
 
