@@ -364,6 +364,20 @@ void pmm_init(void)
     buddy_state.heap_start = PAGE_ALIGN_UP(kernel_end);
     buddy_state.heap_end = RAM_BASE + RAM_SIZE;
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Cap heap below OP-TEE secure carveout.
+     * The TOS (OP-TEE) binary is at 0xC1D35000 with a secure carveout
+     * starting at ~0xC0000000. Writing to this region triggers a memory
+     * controller security violation (RAS error).
+     * Cap at 0xC0000000 to give ~1GB of usable heap.
+     * TODO: Parse actual carveout boundaries from DTB/bootloader params. */
+    {
+        uintptr_t optee_carveout = 0xC0000000UL;
+        if (buddy_state.heap_end > optee_carveout)
+            buddy_state.heap_end = optee_carveout;
+    }
+#endif
+
     /* Calculate page counts */
     buddy_state.total_pages = (buddy_state.heap_end - buddy_state.heap_start) / PAGE_SIZE;
     buddy_state.reserved_pages = (buddy_state.heap_start - RAM_BASE) / PAGE_SIZE;
@@ -393,7 +407,6 @@ void pmm_init(void)
      */
     uintptr_t current = buddy_state.heap_start;
     uintptr_t end = buddy_state.heap_end;
-
     while (current < end) {
         /* Find the largest order that:
          * 1. Fits in remaining space

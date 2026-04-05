@@ -242,7 +242,11 @@ void kernel_main(void *dtb)
     uart_puts("========================================\n\n");
 
     INFO("Boot successful");
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    INFO("Running at EL2 (VHE) on %s", PLATFORM_NAME);
+#else
     INFO("Running at EL1 on %s", PLATFORM_NAME);
+#endif
 
     /* Show DTB parsing results */
     if (dtb_ret == FDT_OK) {

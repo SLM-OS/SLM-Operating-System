@@ -103,12 +103,15 @@ void uart_init(void)
      * 0 = Skip UART entirely (silent mode)
      * 1 = Try BPMP to enable clock (full initialization)
      * 2 = Direct mode - assume clock is already enabled (after kexec)
+     * 3 = Raw mode - just enable flag, don't touch any registers.
+     *     Uses whatever baud rate/config the firmware left in place.
+     *     Needed when clock frequency is unknown (e.g., UARTC after kexec).
      *
      * After kexec from Linux, the UART clock should still be enabled
      * from Linux's initialization, so we can skip BPMP communication
      * which may not work correctly after kexec.
      */
-#define UART_INIT_MODE 2  /* Direct mode - assume clock enabled (for UEFI boot) */
+#define UART_INIT_MODE 3  /* Raw mode - don't reconfigure (EL2/UARTC boot) */
 
 #if UART_INIT_MODE == 0
     /* Silent mode - no UART output */
@@ -144,6 +147,16 @@ void uart_init(void)
      * configured and clocked. Just reinitialize the UART settings.
      */
     g_uart_available = true;
+
+#elif UART_INIT_MODE == 3
+    /*
+     * Raw mode - don't touch any UART registers.
+     * Use whatever configuration the firmware/Linux left in place.
+     * Useful when the UART clock frequency is unknown and reconfiguring
+     * the baud rate would garble output.
+     */
+    g_uart_available = true;
+    return;
 
 #endif
 

@@ -2,9 +2,9 @@
 
 This document tracks Phase 4 implementation of SLM-OS.
 
-**Status:** In Progress (Pi 5 bring-up complete, Jetson blocked)
+**Status:** In Progress (Pi 5 bring-up complete, Jetson partially unblocked)
 
-**Summary:** Phase 4 combines hardware bring-up work with the Component System milestone. Pi 5 is now the primary hardware platform with 4-core SMP, preemptive scheduling, and an interactive shell. Jetson remains blocked by the CBB firewall.
+**Summary:** Phase 4 combines hardware bring-up work with the Component System milestone. Pi 5 is now the primary hardware platform with 4-core SMP, preemptive scheduling, and an interactive shell. Jetson CBB firewall has been partially bypassed — SLM-OS boots to shell at EL2 using UARTC via VHE (April 2026).
 
 **Goals:**
 - ✅ Raspberry Pi 5 hardware bring-up (complete — 4-core SMP)
@@ -80,48 +80,57 @@ See `docs/pi5-baremetal-status.md` for full details.
 
 **Priority:** CRITICAL — Unblocks all other Jetson work
 
-**Status:** ⛔ BLOCKED by CBB Firewall — See `docs/jetson-nvidia-support.md`
+**Status:** 🟡 Partially Complete — EL2 + VHE + UARTC bypasses CBB for serial and core subsystems
 
-**Reference:** See `docs/lab-operations.md` for serial console procedures (Ubuntu and Windows).
+**Reference:** See `docs/jetson-nvidia-support.md` for full CBB analysis, `docs/jetson-el2-bringup.md` for EL2 breakthrough details.
 
-### ⛔ Critical Blocker: CBB Firewall
+### CBB Firewall — Partially Bypassed (April 2026)
 
-All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) firewall, which prevents unsigned/unauthenticated code from accessing any peripherals. This is a hardware-enforced security feature.
+The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C280000) from EL2**. By enabling VHE (HCR_EL2.E2H=1, TGE=1) and using UARTC, SLM-OS now boots to an interactive shell.
 
-**Key findings:**
-- kexec is explicitly NOT supported by NVIDIA
-- Direct UEFI boot has the same CBB restrictions
-- L4T bootloader uses kexec internally (extlinux.conf boot also blocked)
-- BPMP communication is corrupted after kexec (cannot enable UART clocks)
+**EL2 breakthrough findings:**
+- SLM-OS enters at EL2 after kexec (confirmed via PSCI SYSTEM_OFF probe)
+- VHE transparently redirects EL1 register accesses to EL2 — kernel code works unmodified
+- UARTC accessible from EL2; UARTA blocked; GICv3 accessible; timer works
+- OP-TEE secure carveout at 0xC0000000 limits usable heap to ~1GB
+- UART RX via TCU drops characters (TX works perfectly)
 
-**Potential solutions (require NVIDIA support):**
-1. EL2 hypervisor approach (forum evidence suggests this works)
-2. Secure boot integration (sign SLM-OS with PKC/SBK keys)
-3. CBB firewall configuration via `tegra234-mb2-bct-scr-*-override.dts`
+**Remaining CBB restrictions:**
+- UARTA (40-pin header) — blocked
+- SMP secondary CPU boot — PSCI CPU_ON after kexec needs investigation
+- Full 8GB RAM — OP-TEE carveout blocks access above 0xC0000000
 
-**Full documentation:** `docs/jetson-nvidia-support.md`
-
-### Serial Console (40-pin Header UART)
+### Serial Console
 - ✅ Connect USB-serial adapter to 40-pin header (Pin 8 TXD, Pin 10 RXD, Pin 6 GND)
-- ⛔ Test Tegra UART driver (NS16550-compatible @ 0x03100000) — BLOCKED by CBB firewall
-- ⛔ Verify BPMP clock enable for UARTA works — BLOCKED (BPMP IVC corrupted after kexec)
+- ✅ UARTC serial TX working at EL2 via TCU (USB-C debug console)
+- ☐ Fix UART RX character dropping (TCU framing issue)
 - ✅ Confirm baud rate settings (115200 8N1)
-- ✅ Test bidirectional communication (shell input/output) — verified via labctl (Linux only)
-
-**Note:** Serial hardware verified working with Linux (December 2025). SLM-OS serial blocked by CBB firewall.
+- ✅ Test bidirectional communication — TX verified, RX garbled (TCU issue)
 
 ### Boot Method Validation
-- ⛔ Test kexec boot with serial console output — BLOCKED (kexec not supported per NVIDIA)
-- ✅ Debug any silent failures with serial visibility — Root cause identified: CBB firewall
-- ⛔ Set up SD card boot for standalone SLM-OS — BLOCKED (L4T uses kexec internally)
-- ✅ Document working boot sequence in `docs/jetson-boot.md` — Documented blockers instead
-- ⛔ U-Boot/UEFI direct boot — BLOCKED (same CBB firewall restrictions)
+- ✅ kexec boot with serial console output — working at EL2 with VHE
+- ✅ Debug silent failures with serial visibility — Root cause: CBB firewall, bypassed with EL2
+- ✅ Document working boot sequence — SSH → kexec → EL2/VHE → UARTC
+- ☐ Investigate direct UEFI boot at EL2 (would avoid kexec limitations)
 
 ### Platform Validation
-- ⛔ Verify DTB parsing on real Jetson hardware — BLOCKED by boot issues
-- ⛔ Confirm memory map matches DTB values — BLOCKED
-- ⛔ Remove hardcoded addresses from `platform.h` (use DTB values) — BLOCKED
-- ✅ Test on Pi 5 with platform-specific DTB — Pi 5 works, shifted focus here
+- ✅ Verify DTB parsing on real Jetson hardware — DTB at 0x80437000 parsed successfully
+- ✅ Confirm memory map matches DTB values — RAM 0x80000000-0x280000000 (8GB)
+- ☐ Remove hardcoded addresses from `platform.h` (use DTB values)
+- ✅ Test on Pi 5 with platform-specific DTB — Pi 5 works
+
+### Kernel Subsystem Status on Jetson
+- ✅ UART (UARTC, TX only)
+- ✅ DTB parsing
+- ✅ PMM (buddy allocator, ~1GB heap)
+- ✅ VMM + MMU (identity + high map)
+- ✅ GICv3 (distributor + redistributor)
+- ✅ Timer (100 Hz)
+- ✅ Scheduler (single-core)
+- ✅ Lua scripting
+- ✅ Shell (boots, RX issue)
+- ☐ SMP (skipped — kexec limitation)
+- ☐ Full memory (capped at OP-TEE carveout)
 
 ---
 

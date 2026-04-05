@@ -346,7 +346,77 @@ real_start:
     isb
 
 #endif
-    /* On Jetson, skip early UART - clocks not configured */
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /*
+     * EL2 UART PROBE: Test peripheral access from EL2.
+     *
+     * Previous tests confirmed:
+     *   - SLM-OS enters at EL2 after kexec (via PSCI SYSTEM_OFF probe)
+     *   - UARTA (0x03100000) write from EL2 triggers CBB error
+     *
+     * This test tries UARTC (0x0C280000) — the peripheral a forum user
+     * successfully accessed from EL2 on Jetson Orin. Different UARTs
+     * may be in different CBB firewall domains.
+     *
+     * Also tests UARTD (0x031D0000) as a third option.
+     *
+     * NS16550 THR at offset 0, reg-shift=2 (4-byte spacing).
+     * UART clocks: UARTA needs /dev/ttyTHS1 open before kexec.
+     *              UARTC clock status unknown (may need BPMP enablement).
+     *
+     * If any write succeeds, characters appear on whatever serial adapter
+     * is monitoring that UART. If CBB blocks, EL3 logs the RAS error.
+     */
+
+    /*
+     * Enable VHE (Virtual Host Extensions) at EL2.
+     *
+     * With VHE, the CPU transparently redirects EL1 register names to EL2:
+     *   SCTLR_EL1 → SCTLR_EL2,  VBAR_EL1 → VBAR_EL2
+     *   TTBR0_EL1 → TTBR0_EL2,  TTBR1_EL1 → TTBR1_EL2
+     *   TCR_EL1 → TCR_EL2,      MAIR_EL1 → MAIR_EL2
+     *   CPACR_EL1 → CPTR_EL2    (with CPACR-compatible format)
+     *
+     * This means the entire existing kernel code works unmodified at EL2.
+     * Exceptions are taken to EL2 (TGE=1), not EL1.
+     *
+     * HCR_EL2 bits:
+     *   E2H (bit 34): Enable EL1→EL2 register redirection
+     *   TGE (bit 27): Trap General Exceptions to EL2
+     *   RW  (bit 31): EL1 is AArch64
+     */
+    ldr     x10, =((1 << 34) | (1 << 31) | (1 << 27))
+    msr     hcr_el2, x10
+    isb
+
+    /*
+     * Disable ARM generic timer to prevent stale Linux timer IRQs.
+     * After kexec, the timer compare value from Linux may fire soon,
+     * causing a pending interrupt that cascades through the GIC and
+     * triggers CBB/RAS errors. Disable all timer controls early.
+     *
+     * With VHE (E2H=1), CNTP_CTL_EL0 and CNTV_CTL_EL0 control the
+     * host physical and virtual timers respectively.
+     */
+    msr     cntp_ctl_el0, xzr      /* Disable physical timer */
+    msr     cntv_ctl_el0, xzr      /* Disable virtual timer */
+    msr     cnthp_ctl_el2, xzr     /* Disable hypervisor physical timer */
+    isb
+
+    /* Quick UARTC confirmation — write "EL2\r\n" to verify serial works */
+    ldr     x11, =0x0C280000       /* UARTC base (accessible from EL2) */
+    mov     w12, #'E'
+    str     w12, [x11]
+    mov     w12, #'L'
+    str     w12, [x11]
+    mov     w12, #'2'
+    str     w12, [x11]
+    mov     w12, #'\r'
+    str     w12, [x11]
+    mov     w12, #'\n'
+    str     w12, [x11]
+#endif
 
     /*
      * Save DTB address (x0) to callee-saved register.

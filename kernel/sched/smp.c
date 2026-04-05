@@ -201,6 +201,7 @@ static void init_cpu_data(uint32_t cpu)
 /*
  * Translate PSCI error code to string for debugging.
  */
+__attribute__((unused))
 static const char *psci_error_str(int err)
 {
     switch (err) {
@@ -277,6 +278,7 @@ void secondary_init(uint32_t logical_cpu_id)
 /*
  * Bring up a single secondary CPU.
  */
+__attribute__((unused))
 static int boot_secondary(uint32_t cpu)
 {
     uint64_t mpidr = cpu_logical_map[cpu];
@@ -530,11 +532,18 @@ void smp_init(void)
     cache_clean_range(cpu_data, sizeof(cpu_data));
 
     /* Boot secondary CPUs via PSCI CPU_ON */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* TEMPORARY: Skip secondary CPU boot on Jetson EL2 bringup.
+     * After kexec, PSCI CPU_ON may not work correctly and secondary CPUs
+     * may not be in a valid state. Single-core for now. */
+    WARN("SMP: Skipping secondary boot (Jetson EL2 bringup)");
+#else
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
         if (boot_secondary(cpu) == PSCI_SUCCESS) {
             booted++;
         }
     }
+#endif
 
     INFO("SMP: %u/%u secondary CPUs online", booted, cpu_count - 1);
     cpus_online = 1 + booted;  /* Set from primary's count, not secondary writes */

@@ -83,25 +83,26 @@
 #define RAM_SIZE            0x200000000UL   /* 8 GB */
 
 /*
- * UART - Tegra High-Speed UART (HSUART)
+ * UART - Tegra NS16550-compatible UART
  *
- * UARTA is exposed on 40-pin GPIO header:
- *   Pin 6:  GND
- *   Pin 8:  UART1_TX (Jetson transmits)
- *   Pin 10: UART1_RX (Jetson receives)
+ * Uses UARTC (0x0C280000) instead of UARTA (0x03100000) because:
+ *   - SLM-OS runs at EL2 after kexec (confirmed via PSCI probe)
+ *   - CBB firewall blocks UARTA access but allows UARTC from EL2
+ *   - UARTC output is visible via TCU (Tegra Combined UART) on
+ *     the USB-C debug serial console
  *
- * The debug header (J14) uses TCU (Tegra Combined UART) which requires
- * BPMP firmware - not suitable for bare-metal initially.
+ * UARTA (40-pin header, 0x03100000): BLOCKED by CBB firewall
+ * UARTC (0x0C280000): Accessible from EL2, confirmed working
  */
 #define UART_TYPE_TEGRA
-#define UART_BASE           0x03100000UL    /* UARTA */
+#define UART_BASE           0x0C280000UL    /* UARTC (EL2 accessible) */
 #define UART_SIZE           0x00010000UL    /* 64 KB */
 #define UART_CLOCK          408000000UL     /* 408 MHz (Tegra default) */
-#define UART_IRQ            (32 + 112)      /* GIC_SPI 112 -> IRQ 144 */
+#define UART_IRQ            (32 + 114)      /* GIC_SPI 114 (UARTC) */
 
 /*
  * Alternative UARTs:
- *   UARTC: 0x03140000 (serial2 alias)
+ *   UARTA: 0x03100000 (40-pin header) — BLOCKED by CBB at EL2
  *   UARTD: 0x031D0000
  */
 
