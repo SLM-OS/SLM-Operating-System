@@ -18,9 +18,11 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 10. [Building](#building)
 11. [Hardware Deployment](#hardware-deployment)
 12. [Testing](#testing)
-13. [Key Files](#key-files)
-14. [Design Decisions](#design-decisions)
-15. [Troubleshooting](#troubleshooting)
+13. [Platform Abstraction](#platform-abstraction)
+14. [Lua Scripting](#lua-scripting)
+15. [Key Files](#key-files)
+16. [Design Decisions](#design-decisions)
+17. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -478,6 +480,19 @@ Total: 72 bytes. Offsets hardcoded in `context.S` as `CTX_RBX`, `CTX_RSP`, etc.
 | `timer.h` (timer_init, timer_start, timer_handler) | `kernel/arch/x86_64/timer_x86.c` — 8254 PIT |
 | `switch_to()` (context.S) | `kernel/arch/x86_64/context.S` — x86-64 registers |
 | `smp_init`, `vmm_init`, DTB/Rust stubs | `kernel/arch/x86_64/platform_x86.c` |
+
+---
+
+## Lua Scripting
+
+The Lua 5.4 runtime is compiled for x86-64 with the following adaptations:
+
+- **setjmp/longjmp**: `kernel/arch/x86_64/setjmp.S` saves x86-64 callee-saved registers (rbx, rbp, r12-r15, rsp, rip). Also provides `_setjmp` alias (POSIX variant used by Lua).
+- **SSE enabled**: Lua uses `double` which requires SSE registers on x86-64. The Lua library is compiled with `-msse -msse2` while the kernel remains `-mno-sse`.
+- **glibc ABI stubs**: `__errno_location()`, `__ctype_b_loc()` (static classification table), `stdin`/`stdout`/`stderr` as direct symbols.
+- **jmp_buf**: Sized to 8 × uint64_t (64 bytes) for x86-64, vs 22 × uint64_t (176 bytes) for ARM64.
+
+Lua commands are available in the shell via `lua <expression>`.
 
 ---
 
