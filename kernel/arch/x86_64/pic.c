@@ -39,8 +39,13 @@ static inline void io_wait(void)
 /* PIC vector offset (IRQ 0 maps to this vector) */
 #define PIC_VECTOR_OFFSET   32
 
+/* IDT must be loaded before any interrupts can fire */
+extern void idt_init(void);
+
 void gic_init(void)
 {
+    /* Load IDT first (x86-64 equivalent of GIC vector table) */
+    idt_init();
     /* Save masks */
     uint8_t mask1 = inb(PIC1_DATA);
     uint8_t mask2 = inb(PIC2_DATA);

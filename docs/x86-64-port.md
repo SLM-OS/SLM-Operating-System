@@ -569,12 +569,6 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 ## Known Issues
 
-### Context Switch Triple Fault
-
-The integrated kernel boots through full initialization (PMM, scheduler, VFS, LittleFS, shell task creation) but triple-faults when `scheduler_start()` enables interrupts and the first timer tick triggers a context switch via `switch_to()`. The system reboots instead of switching to the first task.
-
-**Status**: Under investigation. The `context.S` implementation is suspected — the register save/restore sequence or stack pointer handling may be incorrect. The standalone test kernel (without scheduler) works correctly with timer interrupts.
-
 ### Only 1GB Identity Mapped
 
 The boot code identity-maps only the first 1GB. On the i7-6700 with 16 GB RAM, addresses above 0x3FFFFFFF are not accessible. The PMM is configured with `RAM_SIZE = ~990 MB`, leaving 15 GB unused. Extending the page tables to map all RAM is planned for a future phase.

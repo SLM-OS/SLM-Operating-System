@@ -799,7 +799,10 @@ void scheduler_start(void)
 
     INFO("Enabling interrupts...");
 #if defined(PLATFORM_X86_64)
-    __asm__ volatile("sti" ::: "memory");
+    /* Don't STI here — switch_to will load the task's rflags (IF=0),
+     * and task_entry_wrapper does STI after the context is fully set up.
+     * Enabling interrupts before switch_to would allow a timer IRQ to
+     * fire while still on the boot stack, corrupting the task context. */
 #else
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");  /* Clear IRQ mask */
     __asm__ volatile("isb" ::: "memory");  /* Ensure unmask takes effect */
