@@ -46,6 +46,7 @@ static void nop_entry(void *arg)
  * Regression Tests: DAIF Context Switch Preservation
  * ============================================================================ */
 
+#if !defined(PLATFORM_X86_64)
 /*
  * Regression test: DAIF register is saved and restored across context switches.
  * Previously, DAIF was not part of cpu_context, meaning a task's interrupt
@@ -179,6 +180,7 @@ static void test_idle_task_daif(void)
     /* Idle task should also have IRQ masked in its saved context */
     TEST_ASSERT_EQUAL_HEX64(0x080, idle->context.daif);
 }
+#endif /* !PLATFORM_X86_64 */
 
 /* ============================================================================
  * Unit Tests: Deadline Boost Logic
@@ -2039,12 +2041,14 @@ int test_suite_scheduler(void)
 {
     UnityBegin("Scheduler Tests");
 
-    /* Regression tests: DAIF context preservation */
+    /* Regression tests: DAIF context preservation (ARM64 only) */
+#if !defined(PLATFORM_X86_64)
     RUN_TEST(test_daif_saved_in_context);
     RUN_TEST(test_new_task_daif_irq_masked);
     RUN_TEST(test_daif_not_zero_on_create);
     RUN_TEST(test_task_create_multiple_all_irq_masked);
     RUN_TEST(test_idle_task_daif);
+#endif
 
     /* Unit tests: Deadline boost logic */
     RUN_TEST(test_no_deadline_no_boost);

@@ -98,19 +98,21 @@ int test_harness_run_all(void)
         uart_puts("[INFO] IPC tests passed\n");
     }
 
-    total_failures += test_suite_model_mem();
-    total_failures += test_suite_scheduler();
     total_failures += test_suite_pi_mutex();
     total_failures += test_suite_gpu();
-    total_failures += test_suite_component();
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();
-    total_failures += test_suite_vmm();
     total_failures += test_suite_pmm();
     total_failures += test_suite_littlefs();
+    total_failures += test_suite_x86_boot();
+#if !defined(PLATFORM_X86_64)
+    total_failures += test_suite_model_mem();
+    total_failures += test_suite_scheduler();
+    total_failures += test_suite_component();
+    total_failures += test_suite_vmm();
     total_failures += test_suite_net();
     total_failures += test_suite_lua();
-    total_failures += test_suite_x86_boot();
+#endif
 
     /* Rust FFI tests */
     uart_puts("\n");
@@ -128,7 +130,9 @@ int test_harness_run_all(void)
     uart_puts("========================================\n");
     uart_puts("Integration Tests (Multi-Core)\n");
     uart_puts("========================================\n");
+#if !defined(PLATFORM_X86_64)
     total_failures += test_suite_integration();
+#endif
 
     /* Final summary */
     uart_puts("\n");

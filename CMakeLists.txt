@@ -25,25 +25,32 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding -nostdlib")
 # Note: -mgeneral-regs-only is added to kernel target only (not lua library)
 
 # CPU selection - platform-specific
-if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+if(PLATFORM STREQUAL "X86_64")
+    # x86-64: no -mcpu, use x86-specific flags
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fno-stack-protector -fno-pic")
+    set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mno-red-zone")
+elseif(PLATFORM STREQUAL "JETSON_ORIN_NANO")
     set(TARGET_CPU "cortex-a78ae")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=${TARGET_CPU}")
+    set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mcpu=${TARGET_CPU}")
 elseif(PLATFORM STREQUAL "RASPI5")
     set(TARGET_CPU "cortex-a76")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=${TARGET_CPU}")
+    set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mcpu=${TARGET_CPU}")
 else()
     # QEMU_VIRT - use cortex-a76 (common modern ARM core)
     set(TARGET_CPU "cortex-a76")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=${TARGET_CPU}")
+    set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mcpu=${TARGET_CPU}")
 endif()
-
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=${TARGET_CPU}")
-set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -mcpu=${TARGET_CPU}")
 
 # Debug/Release configurations
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 
-# Platform selection (QEMU_VIRT, JETSON_ORIN_NANO, or RASPI5)
-set(PLATFORM "QEMU_VIRT" CACHE STRING "Target platform (QEMU_VIRT, JETSON_ORIN_NANO, or RASPI5)")
-set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO" "RASPI5")
+# Platform selection
+set(PLATFORM "QEMU_VIRT" CACHE STRING "Target platform (QEMU_VIRT, JETSON_ORIN_NANO, RASPI5, or X86_64)")
+set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO" "RASPI5" "X86_64")
 
 # Add platform define
 add_compile_definitions(PLATFORM_${PLATFORM}=1)
@@ -61,7 +68,9 @@ if(ENABLE_BOOT_TESTS)
 endif()
 
 # Linker script - platform-specific
-if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+if(PLATFORM STREQUAL "X86_64")
+    set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64.ld)
+elseif(PLATFORM STREQUAL "JETSON_ORIN_NANO")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-jetson.ld)
 elseif(PLATFORM STREQUAL "RASPI5")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-raspi5.ld)
@@ -81,28 +90,35 @@ set(RUST_LIB ${RUST_LIB_DIR}/libslm_runtime.a)
 # Kernel source files
 set(KERNEL_SOURCES
     # ==========================================================================
-    # Architecture-specific (ARM64)
+    # Architecture-specific
     # ==========================================================================
-    kernel/arch/arm64/boot.S
-    kernel/arch/arm64/context.S
-    kernel/arch/arm64/mmu.S
-    kernel/arch/arm64/vectors.S
-    kernel/arch/arm64/smp_boot.S
-    # Note: setjmp.S moved to lua library (uses FP registers)
-    kernel/arch/arm64/exceptions.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/boot.S>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/context.S>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/mmu.S>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/vectors.S>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/smp_boot.S>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/exceptions.c>
+    # trampoline32.S handled by custom command below (needs -m32 + objcopy)
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/entry64.S>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/idt.S>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/context.S>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/idt.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/pic.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/timer_x86.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/platform_x86.c>
 
     # ==========================================================================
     # Memory Management
     # ==========================================================================
     kernel/mm/pmm.c
-    kernel/mm/vmm.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/mm/vmm.c>
 
     # ==========================================================================
     # Scheduler
     # ==========================================================================
     kernel/sched/task.c
     kernel/sched/sched.c
-    kernel/sched/smp.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
 
     # ==========================================================================
     # Inter-Process Communication
@@ -114,17 +130,17 @@ set(KERNEL_SOURCES
     # Drivers
     # ==========================================================================
     # UART - platform-specific
-    # PL011 UART for QEMU, bit-banged for Pi 5, Tegra for Jetson
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/uart_pl011.c>
     $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/uart_rp1.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/drivers/uart_x86.c>
 
     # BPMP - Jetson only (required for clock control)
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp.c>
 
-    # Interrupt controller and timer
-    kernel/drivers/gic.c
-    kernel/drivers/timer.c
+    # Interrupt controller and timer (ARM64 only — x86-64 uses pic.c + timer_x86.c)
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/gic.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/timer.c>
 
     # Block device abstraction and RAM disk
     kernel/drivers/blkdev.c
@@ -145,7 +161,7 @@ set(KERNEL_SOURCES
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
     kernel/src/help.c
-    kernel/src/dtb.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     kernel/src/elf.c
     kernel/src/vfs.c
 
@@ -160,8 +176,8 @@ set(KERNEL_SOURCES
     kernel/fs/littlefs_slm.c
     kernel/fs/littlefs_vfs.c
 
-    # Component system and FFI
-    kernel/src/component.c
+    # Component system and FFI (x86-64 provides stubs in platform_x86.c)
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/component.c>
     kernel/src/slm_ffi.c
 
     # Semihosting (for QEMU test exit)
@@ -171,7 +187,7 @@ set(KERNEL_SOURCES
     # GPU Integration
     # ==========================================================================
     kernel/gpu/gpu.c
-    kernel/gpu/cache.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/gpu/cache.c>
     kernel/gpu/gpu_stub.c
     # kernel/gpu/gpu_tegra.c    # Jetson Orin Nano (future)
 
@@ -194,20 +210,21 @@ set(TEST_SOURCES
     kernel/tests/unity.c
     kernel/tests/test_harness.c
     kernel/tests/test_ipc.c
-    kernel/tests/test_scheduler.c
-    kernel/tests/test_model_mem.c
     kernel/tests/test_pi_mutex.c
     kernel/tests/test_gpu.c
-    kernel/tests/test_component.c
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
-    kernel/tests/test_vmm.c
     kernel/tests/test_pmm.c
     kernel/tests/test_littlefs.c
-    kernel/tests/test_net.c
-    kernel/tests/test_lua.c
     kernel/tests/test_x86_boot.c
-    kernel/tests/test_integration.c
+    # ARM64-specific test files (use inline asm not available on x86-64)
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_scheduler.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_mem.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_component.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_vmm.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_net.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_lua.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
 )
 
 # lwIP library sources (QEMU networking only)
@@ -282,19 +299,45 @@ set(KERNEL_INCLUDES
 )
 
 # Build kernel ELF
-# Conditionally add lwIP sources for QEMU platform
-# Note: Lua is linked as a separate library (see lua target below)
 if(PLATFORM STREQUAL "QEMU_VIRT")
     add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES} ${LWIP_SOURCES})
+elseif(PLATFORM STREQUAL "X86_64")
+    add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
 else()
     add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
 endif()
 target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
 
-# Kernel uses -mgeneral-regs-only to avoid FP register pollution in kernel code
-# (Lua library is built separately without this flag to allow floating-point)
-# -fPIE generates position-independent code for UEFI boot (loads at arbitrary address)
-target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fPIE)
+if(PLATFORM STREQUAL "X86_64")
+    # x86-64: no -mgeneral-regs-only (ARM64-only flag)
+    target_include_directories(slmos.elf PRIVATE ${CMAKE_SOURCE_DIR}/kernel/include/compat)
+    target_compile_definitions(slmos.elf PRIVATE SLM_INTEGRATED_BUILD=1)
+
+    # Build trampoline32.S with -m32, then objcopy to elf64-x86-64
+    set(TRAMPOLINE_OBJ ${CMAKE_BINARY_DIR}/trampoline32.o)
+    add_custom_command(
+        OUTPUT ${TRAMPOLINE_OBJ}
+        COMMAND gcc -c -m32 -I${CMAKE_SOURCE_DIR}/kernel/include -DPLATFORM_X86_64=1
+                -o ${CMAKE_BINARY_DIR}/trampoline32_temp.o
+                ${CMAKE_SOURCE_DIR}/kernel/arch/x86_64/trampoline32.S
+        COMMAND objcopy -O elf64-x86-64
+                ${CMAKE_BINARY_DIR}/trampoline32_temp.o
+                ${TRAMPOLINE_OBJ}
+        COMMAND ${CMAKE_COMMAND} -E rm -f ${CMAKE_BINARY_DIR}/trampoline32_temp.o
+        DEPENDS ${CMAKE_SOURCE_DIR}/kernel/arch/x86_64/trampoline32.S
+        COMMENT "Assembling trampoline32.S (32-bit → 64-bit)"
+    )
+    add_custom_target(trampoline32 DEPENDS ${TRAMPOLINE_OBJ})
+    add_dependencies(slmos.elf trampoline32)
+    target_link_options(slmos.elf PRIVATE ${TRAMPOLINE_OBJ})
+
+    # Disable PIE (bare-metal kernel loaded at fixed address)
+    target_link_options(slmos.elf PRIVATE -no-pie)
+else()
+    # ARM64: -mgeneral-regs-only avoids FP register pollution
+    # -fPIE for position-independent code
+    target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fPIE)
+endif()
 
 # Configure LittleFS for freestanding use (no libc)
 # - LFS_NO_MALLOC: We use static buffers
@@ -316,6 +359,8 @@ endif()
 
 # Lua library - uses floating-point so it doesn't get -mgeneral-regs-only
 # Includes lua_slm.c, lua_shell.c (use Lua FP API) and setjmp.S (saves FP registers)
+# Skipped for x86-64 (needs x86-64 setjmp.S — future work)
+if(NOT PLATFORM STREQUAL "X86_64")
 add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.c kernel/src/lua_shell.c kernel/arch/arm64/setjmp.S)
 target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src)
 
@@ -343,22 +388,27 @@ target_compile_definitions(lua PRIVATE
     LUA_MINBUFFER=32
 )
 
-# Link with Lua library (built above)
+# Link with Lua library (built above) — ARM64 only
 target_link_libraries(slmos.elf PRIVATE lua)
 
-# Link with Rust runtime (if it exists)
-if(EXISTS ${RUST_LIB})
-    target_link_libraries(slmos.elf PRIVATE ${RUST_LIB})
-    message(STATUS "  Rust lib:   ${RUST_LIB}")
-else()
-    message(STATUS "  Rust lib:   (not built yet - run 'make runtime' first)")
+endif() # NOT X86_64 (end of Lua section)
+
+# Link with Rust runtime (ARM64 only — x86-64 provides stubs)
+if(NOT PLATFORM STREQUAL "X86_64")
+    if(EXISTS ${RUST_LIB})
+        target_link_libraries(slmos.elf PRIVATE ${RUST_LIB})
+        message(STATUS "  Rust lib:   ${RUST_LIB}")
+    else()
+        message(STATUS "  Rust lib:   (not built yet - run 'make runtime' first)")
+    endif()
 endif()
 
 target_link_options(slmos.elf PRIVATE
     -T${LINKER_SCRIPT}
     -nostdlib
-    -lgcc
 )
+# -lgcc must come after object files (provides __popcountdi2 etc.)
+target_link_libraries(slmos.elf PRIVATE gcc)
 
 # Create binary image from ELF (for booting)
 add_custom_command(
