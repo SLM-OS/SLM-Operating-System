@@ -99,6 +99,72 @@ secondary_entry:
     msr     sctlr_el1, x1
     isb
 
+#if defined(PLATFORM_RASPI5)
+    /*
+     * Invalidate all data cache lines (L1 + L2) by set/way.
+     * Pi 5 only — QEMU's coherency works without this.
+     *
+     * Pre-MMU reads (secondary_mmu_ttbr, _mair, _tcr above) entered
+     * L1/L2 as Non-Shareable lines because the MMU was off. With MMU
+     * now on, page table attributes mark memory as Inner Shareable,
+     * but the existing L2 lines are NOT retroactively made coherent.
+     * The DSU won't snoop these stale lines, so subsequent reads of
+     * ANY address that was cached pre-MMU return stale data forever.
+     *
+     * Fix: invalidate all L1/L2 by set/way. This forces all subsequent
+     * reads to miss and refetch through the DSU's coherency protocol.
+     * Cost: ~100µs, done once per secondary CPU at boot.
+     */
+
+    /* Invalidate L1 data cache (level 0 in CSSELR) */
+    mov     x0, #0                  /* Level 0 (L1), data cache */
+    msr     csselr_el1, x0
+    isb
+    mrs     x4, ccsidr_el1          /* Read cache geometry */
+    and     x1, x4, #7              /* Line size field */
+    add     x1, x1, #4              /* log2(line size in bytes) */
+    ubfx    x2, x4, #3, #10        /* Associativity - 1 */
+    clz     w3, w2                  /* Way shift = 32 - log2(ways) */
+    ubfx    x4, x4, #13, #15       /* NumSets - 1 */
+.Lsec_inv_l1_set:
+    mov     x5, x2                  /* x5 = way counter */
+.Lsec_inv_l1_way:
+    lsl     x6, x5, x3             /* Way field */
+    lsl     x7, x4, x1             /* Set field */
+    orr     x6, x6, x7             /* Combine way + set + level */
+    dc      isw, x6                /* Invalidate by set/way */
+    subs    x5, x5, #1
+    b.ge    .Lsec_inv_l1_way
+    subs    x4, x4, #1
+    b.ge    .Lsec_inv_l1_set
+
+    /* Invalidate L2 data cache (level 1 in CSSELR) */
+    mov     x0, #2                  /* Level 1 (L2), data cache */
+    msr     csselr_el1, x0
+    isb
+    mrs     x4, ccsidr_el1
+    and     x1, x4, #7
+    add     x1, x1, #4
+    ubfx    x2, x4, #3, #10
+    clz     w3, w2
+    ubfx    x4, x4, #13, #15
+.Lsec_inv_l2_set:
+    mov     x5, x2
+.Lsec_inv_l2_way:
+    lsl     x6, x5, x3
+    lsl     x7, x4, x1
+    orr     x6, x6, x7
+    orr     x6, x6, #2             /* Level 1 (L2) */
+    dc      isw, x6
+    subs    x5, x5, #1
+    b.ge    .Lsec_inv_l2_way
+    subs    x4, x4, #1
+    b.ge    .Lsec_inv_l2_set
+
+    dsb     sy
+    isb
+#endif /* PLATFORM_RASPI5 */
+
 .Lsec_skip_mmu:
     /*
      * Set up stack for this CPU.
