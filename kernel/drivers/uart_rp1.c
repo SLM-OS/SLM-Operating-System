@@ -261,8 +261,7 @@ char uart_getc(void)
 
     char ch = (char)(*uart_dr & 0xFF);
 
-    /* Clear PL011 interrupt flags and IACK the MSIX_CFG so the
-     * interrupt path can take over for the next character. */
+    /* Clear PL011 interrupt flags and IACK to unmask for next interrupt */
     volatile uint32_t *uart_icr_p = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
     *uart_icr_p = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
@@ -316,8 +315,7 @@ void uart_irq_handler(void)
     *uart_icr = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* IACK: acknowledge level-triggered vector (unmasks for next interrupt).
-     * Must be done AFTER PL011 ICR clear so the source isn't still asserting. */
+    /* IACK: acknowledge level-triggered vector */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_IACK;
@@ -389,9 +387,9 @@ void uart_irq_init(void)
     gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (level-triggered).
-     * The vector auto-masks on first PL011 assertion during init.
-     * The handler will IACK after clearing the PL011 source. */
+    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (required — without it,
+     * level-triggered PL011 floods PCIe with MSI-X TLPs that don't match
+     * BAR1, causing RP1 PCIe stall). IACK_EN auto-masks after first fire. */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
@@ -434,7 +432,7 @@ void uart_irq_init(void)
         __asm__ volatile("dsb sy" ::: "memory");
     }
 
-    /* IACK: unmask the vector */
+    /* IACK to unmask after init cleanup */
     *msix_set = MSIX_CFG_IACK;
     __asm__ volatile("dsb sy" ::: "memory");
 
