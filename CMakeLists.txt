@@ -174,7 +174,7 @@ set(KERNEL_SOURCES
     kernel/src/shell_fs.c
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
-    kernel/src/component_runtime.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/component_runtime.c>
     kernel/src/help.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     kernel/src/elf.c

@@ -918,8 +918,12 @@ void scheduler_start(void)
      * and don't unmask (timer never fires). When the task_entry_trampoline
      * DAIF fix is applied, this MUST be removed. See task.c TODO. */
     INFO("Enabling interrupts...");
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("sti" ::: "memory");
+#else
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");
     __asm__ volatile("isb" ::: "memory");
+#endif
 
     /* Switch to first task (NULL = no previous context to save) */
     switch_to(NULL, first);
