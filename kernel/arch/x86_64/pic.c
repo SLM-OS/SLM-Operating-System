@@ -1,8 +1,8 @@
 /*
- * pic.c - 8259 PIC driver implementing gic.h interface for x86-64
+ * pic.c - Interrupt controller implementing gic.h for x86-64
  *
- * Maps the gic_* function names to 8259 PIC operations.
- * IRQ numbering: vectors 32-47 map to PIC IRQ 0-15.
+ * Uses LAPIC + IOAPIC for interrupt routing. Disables the legacy 8259 PIC.
+ * Maps the gic_* function names to LAPIC/IOAPIC operations.
  */
 
 #include "platform.h"
@@ -18,110 +18,86 @@ static inline void outb(uint16_t port, uint8_t val)
     __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-static inline uint8_t inb(uint16_t port)
-{
-    uint8_t ret;
-    __asm__ volatile("inb %1, %0" : "=a"(ret) : "Nd"(port));
-    return ret;
-}
-
 static inline void io_wait(void)
 {
     outb(0x80, 0);
 }
 
-/* PIC I/O ports */
-#define PIC1_CMD    0x20
-#define PIC1_DATA   0x21
-#define PIC2_CMD    0xA0
-#define PIC2_DATA   0xA1
+/* LAPIC / IOAPIC drivers */
+extern void lapic_init(void);
+extern void lapic_percpu_init(void);
+extern void lapic_eoi(void);
+extern void lapic_send_ipi(uint32_t apic_id, uint32_t vector, uint32_t flags);
+extern void ioapic_init(void);
+extern void ioapic_enable_irq(uint32_t irq);
+extern void ioapic_disable_irq(uint32_t irq);
 
-/* PIC vector offset (IRQ 0 maps to this vector) */
-#define PIC_VECTOR_OFFSET   32
-
-/* IDT must be loaded before any interrupts can fire */
+/* IDT must be loaded before any interrupts */
 extern void idt_init(void);
+
+/*
+ * Disable the 8259 PIC by masking all IRQs.
+ * Some chipsets may still route spurious interrupts through the PIC
+ * even after IOAPIC is enabled, so we remap to high vectors to avoid
+ * conflicts with CPU exceptions.
+ */
+static void pic_disable(void)
+{
+    /* Remap PIC to vectors 0xF0-0xFF (out of the way) */
+    outb(0x20, 0x11); io_wait();
+    outb(0xA0, 0x11); io_wait();
+    outb(0x21, 0xF0); io_wait();  /* Master → vectors 0xF0-0xF7 */
+    outb(0xA1, 0xF8); io_wait();  /* Slave → vectors 0xF8-0xFF */
+    outb(0x21, 0x04); io_wait();
+    outb(0xA1, 0x02); io_wait();
+    outb(0x21, 0x01); io_wait();
+    outb(0xA1, 0x01); io_wait();
+
+    /* Mask all PIC interrupts */
+    outb(0x21, 0xFF);
+    outb(0xA1, 0xFF);
+}
+
+/* ---- gic.h Interface ---- */
 
 void gic_init(void)
 {
-    /* Load IDT first (x86-64 equivalent of GIC vector table) */
+    /* Load IDT (x86-64 interrupt vector table) */
     idt_init();
-    /* Save masks */
-    uint8_t mask1 = inb(PIC1_DATA);
-    uint8_t mask2 = inb(PIC2_DATA);
 
-    /* ICW1: begin init (cascade mode, ICW4 needed) */
-    outb(PIC1_CMD, 0x11); io_wait();
-    outb(PIC2_CMD, 0x11); io_wait();
+    /* Disable legacy 8259 PIC */
+    pic_disable();
 
-    /* ICW2: vector offsets */
-    outb(PIC1_DATA, PIC_VECTOR_OFFSET);      io_wait();  /* IRQ 0-7 → 32-39 */
-    outb(PIC2_DATA, PIC_VECTOR_OFFSET + 8);  io_wait();  /* IRQ 8-15 → 40-47 */
-
-    /* ICW3: cascade wiring */
-    outb(PIC1_DATA, 0x04); io_wait();  /* slave on IRQ2 */
-    outb(PIC2_DATA, 0x02); io_wait();  /* slave identity */
-
-    /* ICW4: 8086 mode */
-    outb(PIC1_DATA, 0x01); io_wait();
-    outb(PIC2_DATA, 0x01); io_wait();
-
-    /* Restore masks (mask all initially) */
-    outb(PIC1_DATA, mask1);
-    outb(PIC2_DATA, mask2);
+    /* Initialize LAPIC and IOAPIC */
+    lapic_init();
+    ioapic_init();
 }
 
 void gic_enable_irq(uint32_t irq)
 {
-    if (irq < PIC_VECTOR_OFFSET || irq >= PIC_VECTOR_OFFSET + 16)
-        return;
-    uint8_t pic_irq = irq - PIC_VECTOR_OFFSET;
-
-    if (pic_irq < 8) {
-        outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << pic_irq));
-    } else {
-        outb(PIC2_DATA, inb(PIC2_DATA) & ~(1 << (pic_irq - 8)));
-        /* Also unmask cascade (IRQ 2 on master) */
-        outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << 2));
-    }
+    ioapic_enable_irq(irq);
 }
 
 void gic_disable_irq(uint32_t irq)
 {
-    if (irq < PIC_VECTOR_OFFSET || irq >= PIC_VECTOR_OFFSET + 16)
-        return;
-    uint8_t pic_irq = irq - PIC_VECTOR_OFFSET;
-
-    if (pic_irq < 8) {
-        outb(PIC1_DATA, inb(PIC1_DATA) | (1 << pic_irq));
-    } else {
-        outb(PIC2_DATA, inb(PIC2_DATA) | (1 << (pic_irq - 8)));
-    }
+    ioapic_disable_irq(irq);
 }
 
 void gic_set_priority(uint32_t irq, uint8_t priority)
 {
     (void)irq;
     (void)priority;
-    /* 8259 PIC has no priority control */
 }
 
 uint32_t gic_acknowledge(void)
 {
-    /* On x86-64, the vector is identified by the IDT dispatch.
-     * This function is not used in the x86-64 interrupt path. */
     return 0;
 }
 
 void gic_end_interrupt(uint32_t irq)
 {
-    if (irq < PIC_VECTOR_OFFSET)
-        return;
-    uint8_t pic_irq = irq - PIC_VECTOR_OFFSET;
-
-    if (pic_irq >= 8)
-        outb(PIC2_CMD, 0x20);  /* EOI to slave */
-    outb(PIC1_CMD, 0x20);      /* EOI to master */
+    (void)irq;
+    lapic_eoi();
 }
 
 int gic_is_pending(uint32_t irq)
@@ -132,13 +108,14 @@ int gic_is_pending(uint32_t irq)
 
 void gic_send_sgi(uint32_t irq, uint32_t target_cpu)
 {
-    (void)irq;
-    (void)target_cpu;
+    extern uint8_t acpi_get_cpu_apic_id(uint32_t logical_id);
+    uint32_t apic_id = acpi_get_cpu_apic_id(target_cpu);
+    lapic_send_ipi(apic_id, irq, 0);  /* Fixed delivery */
 }
 
 void gic_percpu_init(void)
 {
-    /* No per-CPU init for 8259 PIC */
+    lapic_percpu_init();
 }
 
 int gic_set_affinity(uint32_t irq, uint32_t cpu_mask)
@@ -151,7 +128,7 @@ int gic_set_affinity(uint32_t irq, uint32_t cpu_mask)
 uint32_t gic_get_affinity(uint32_t irq)
 {
     (void)irq;
-    return 1;  /* CPU 0 */
+    return 1;
 }
 
 void gic_exclude_cpu_from_spis(uint32_t cpu)

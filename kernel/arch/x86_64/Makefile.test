@@ -213,6 +213,7 @@ OBJS_INT_ASM := $(BUILD_INT)/trampoline32.o $(BUILD_INT)/entry64.o \
 
 # x86-64 platform C sources
 SRCS_INT_ARCH := $(SRC_ARCH)/idt.c $(SRC_ARCH)/pic.c $(SRC_ARCH)/acpi.c \
+                 $(SRC_ARCH)/lapic.c $(SRC_ARCH)/ioapic.c \
                  $(SRC_ARCH)/timer_x86.c $(SRC_ARCH)/platform_x86.c
 
 # Shared kernel C sources
