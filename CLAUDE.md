@@ -133,7 +133,7 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - kexec from Linux → SLM-OS enters at EL2
 - Enable VHE (HCR_EL2.E2H=1, TGE=1) → transparent EL1 register redirection
 - Use UARTC (0x0C280000) for serial console (visible via TCU on USB-C debug)
-- OP-TEE carveout at 0xC0000000 caps usable heap at ~1GB
+- OP-TEE carveout at 0xBE-0xC2 skipped; ~6.7 GB usable across 3 regions
 
 **Documentation:** `docs/jetson-nvidia-support.md`, `docs/jetson-el2-bringup.md`
 

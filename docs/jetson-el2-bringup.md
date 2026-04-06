@@ -161,7 +161,13 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 - Added `UART_INIT_MODE 3` (raw mode) — preserves firmware baud rate config
 
 ### pmm.c
-- OP-TEE carveout cap: `heap_end = min(heap_end, 0xC0000000)`
+- Refactored into `pmm_add_region()` helper for non-contiguous memory
+- Three regions on Jetson: 0x80-0xBE (990 MB), 0xC2-0xFF (958 MB), 0x100-0x240 (5 GB)
+
+### vmm.c
+- Added `l2_ram_c0` table for 0xC0-0xFF range (skips OP-TEE carveout entries 0-15)
+- Added L1 1GB block descriptors for indices 4-8 (0x100000000-0x23FFFFFFF)
+- Capped `l2_kernel` at entry 496 (before OP-TEE carveout at 0xBE000000)
 
 ### smp.c
 - Skip secondary CPU boot on Jetson (PSCI CPU_ON after kexec unreliable)
@@ -175,7 +181,7 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 
 1. ~~**UART RX**~~ — **FIXED.** RX data arrives via TCU HSP mailbox (0x03C10000), not UARTC's RBR register. SPE firmware routes USB-C input to TOP0_HSP SM0. Reading the mailbox and unpacking 1-3 bytes per message gives clean bidirectional serial.
 2. **SMP** — Secondary CPUs via PSCI CPU_ON after kexec. May need to investigate CPU state after kexec.
-3. **Memory above 0xC0000000** — Could potentially use DRAM above the OP-TEE carveout (0xC2000000+) by parsing actual carveout boundaries.
+3. ~~**Memory above 0xC0000000**~~ — **DONE.** Three regions mapped: 0x80-0xBE, 0xC2-0xFF, 0x100-0x240. Total ~6.7 GB free.
 4. **GPU access** — GPU at 0x17000000 not yet tested from EL2. Would unlock AI inference on Jetson's 1024-core Ampere GPU.
 5. **Direct UEFI boot** — Avoiding kexec would give cleaner state (no stale Linux config, no watchdog).
 

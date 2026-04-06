@@ -122,7 +122,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 ### Kernel Subsystem Status on Jetson
 - ✅ UART (UARTC, TX only)
 - ✅ DTB parsing
-- ✅ PMM (buddy allocator, ~1GB heap)
+- ✅ PMM (buddy allocator, ~6.7 GB across 3 regions)
 - ✅ VMM + MMU (identity + high map)
 - ✅ GICv3 (distributor + redistributor)
 - ✅ Timer (100 Hz)
