@@ -15,7 +15,7 @@
 #include "component.h"
 #include "task.h"
 #include "sched.h"
-#include "ipc.h"
+/* IPC used by message router (M7); echo service uses simple mailbox */
 #include "uart.h"
 #include "debug.h"
 #include "arch.h"
@@ -78,51 +78,50 @@ static void counter_service_entry(void *arg)
  * Demonstrates inter-component communication.
  * ============================================================================ */
 
-/* Global echo queue — accessible to message senders (use atomic ops for cross-CPU visibility) */
-struct msg_queue *echo_service_queue;
+/* Simple shared mailbox for echo service (avoids IPC queue complexity) */
+static volatile struct {
+    volatile uint32_t ready;       /* 1 = message available */
+    volatile uint32_t ack;         /* 1 = message consumed */
+    char data[64];
+} echo_mailbox;
+
+/* Echo service running flag */
+static volatile int echo_running;
 
 static void echo_service_entry(void *arg)
 {
     int comp_idx = (int)(uintptr_t)arg;
-
-    /* Create IPC queue for receiving messages */
-    struct msg_queue *q = msg_queue_create(8, 64);
-    __atomic_store_n(&echo_service_queue, q, __ATOMIC_RELEASE);
-    if (!q) {
-        uart_printf("[echo] Failed to create message queue\n");
-        component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
-        return;
-    }
-
-    component_set_state((uint32_t)comp_idx, COMPONENT_RUNNING);
-    uart_printf("[echo] Started (component %d), listening for messages...\n", comp_idx);
-
-    char buf[64];
-    int msgs_received = 0;
-    int idle_polls = 0;
     extern void sleep_ms(uint32_t ms);
 
-    /* Poll for messages — non-blocking recv with sleep between polls */
+    component_set_state((uint32_t)comp_idx, COMPONENT_RUNNING);
+    echo_running = 1;
+    uart_printf("[echo] Started (component %d), listening for messages...\n", comp_idx);
+
+    int msgs_received = 0;
+    int idle_polls = 0;
+
+    /* Poll shared mailbox for messages */
     while (idle_polls < 40) {  /* ~20 seconds max idle */
-        int ret = msg_recv(q, buf, 0);  /* Non-blocking */
-        if (ret == IPC_OK) {
-            buf[63] = '\0';
+        if (echo_mailbox.ready) {
+            echo_mailbox.data[63] = '\0';
             msgs_received++;
-            idle_polls = 0;  /* Reset idle counter on message */
-            uart_printf("[echo] Received: \"%s\" (msg #%d)\n", buf, msgs_received);
+            idle_polls = 0;
+            uart_printf("[echo] Received: \"%s\" (msg #%d)\n",
+                        (const char *)echo_mailbox.data, msgs_received);
+            echo_mailbox.ready = 0;
+            echo_mailbox.ack = 1;
         } else {
             idle_polls++;
-            sleep_ms(500);  /* Poll every 500ms */
+            sleep_ms(500);
         }
     }
 
-    if (msgs_received > 0) {
+    if (msgs_received > 0)
         uart_printf("[echo] Idle timeout after %d messages\n", msgs_received);
-    }
 
     uart_printf("[echo] Done (%d messages)\n", msgs_received);
     component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
-    echo_service_queue = NULL;
+    echo_running = 0;
 }
 
 /* ============================================================================
@@ -229,26 +228,20 @@ int component_run(const char *name)
         return -1;
     }
 
+    /* Reset echo mailbox for echo service */
+    if (bc->entry == echo_service_entry) {
+        echo_mailbox.ready = 0;
+        echo_mailbox.ack = 0;
+        echo_running = 0;
+    }
+
     /* Link task to component */
-    /* Store cleanup context on the task */
     static struct component_task_ctx cleanup_ctxs[COMPONENT_MAX_COUNT];
     cleanup_ctxs[comp_idx].component_idx = comp_idx;
     task_set_cleanup(task, component_task_cleanup, &cleanup_ctxs[comp_idx]);
 
-    /* Add to scheduler and yield to let it start */
+    /* Add to scheduler */
     scheduler_add_task(task);
-
-    /* Wait for echo service to initialize its queue */
-    if (bc->entry == echo_service_entry) {
-        extern void sleep_ms(uint32_t ms);
-        for (int i = 0; i < 20; i++) {
-            if (__atomic_load_n(&echo_service_queue, __ATOMIC_ACQUIRE) != NULL)
-                break;
-            sleep_ms(50);  /* 50ms × 20 = 1 second max */
-        }
-        if (__atomic_load_n(&echo_service_queue, __ATOMIC_ACQUIRE) == NULL)
-            uart_printf("[WARN] Echo queue not ready after 1s\n");
-    }
 
     uart_printf("Component '%s' v%s started (idx=%d, task=%u)\n",
                 bc->name, bc->version, comp_idx, task->id);
@@ -261,27 +254,33 @@ int component_run(const char *name)
  */
 int component_send_echo(const char *message)
 {
-    struct msg_queue *q = __atomic_load_n(&echo_service_queue, __ATOMIC_ACQUIRE);
-    if (!q) {
+    if (!echo_running) {
         uart_printf("Echo service not running\n");
         return -1;
     }
 
-    char buf[64];
+    /* Copy message to shared mailbox */
     size_t len = 0;
     while (message[len] && len < 63) {
-        buf[len] = message[len];
+        ((volatile char *)echo_mailbox.data)[len] = message[len];
         len++;
     }
-    buf[len] = '\0';
+    ((volatile char *)echo_mailbox.data)[len] = '\0';
 
-    int ret = msg_send(q, buf, 0);
-    if (ret != IPC_OK) {
-        uart_printf("Failed to send message (err=%d)\n", ret);
-        return -1;
+    /* Signal echo service */
+    echo_mailbox.ack = 0;
+    echo_mailbox.ready = 1;
+
+    /* Wait for acknowledgment (up to 2 seconds) */
+    extern void sleep_ms(uint32_t ms);
+    for (int i = 0; i < 40; i++) {
+        if (echo_mailbox.ack)
+            return 0;
+        sleep_ms(50);
     }
 
-    return 0;
+    uart_printf("Echo service did not acknowledge\n");
+    return -1;
 }
 
 /*
