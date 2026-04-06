@@ -1,7 +1,7 @@
 # Pi 5 UART Interrupt Investigation Status
 
 **Date:** April 6, 2026
-**Status:** BAR3 FIX IMPLEMENTED — MSI-X TLPs reach MIP0 (IRQ storm test confirms). Handler debugging needed.
+**Status:** BAR3 routing working, MSIX_CFG re-arm blocker identified. IRQ handler never called (irq_count=0).
 
 ## Summary
 
@@ -142,6 +142,30 @@ Linux MISC_CTRL = 0x00263480 has additional bits set compared to firmware defaul
 - RCB_MPS (bit 17) = 1 — max payload size
 
 These may also be needed for BAR3 inbound matching to work.
+
+## Implementation Status (April 6, 2026)
+
+BAR3 fix implemented in `boot.S` and verified on hardware. All register values confirmed via `cpu` shell command readback.
+
+### What's Proven Working
+- **BAR3→MIP0 delivery:** Without IACK_EN, system hangs from IRQ storm (continuous MSI-X fires reaching MIP0→GIC). This confirms the full TLP path works.
+- **Init sequence fix:** IMSC disabled before IACK prevents level-triggered livelock. Post-init diagnostic shows `MIS=0 INTSTAT=0 MIP_status=0 GIC_ISPENDR=0` — clean state.
+- **Hybrid uart_getc:** Checks ring buffer first, falls back to PL011 polling. System remains usable via polling while IRQ path is debugged.
+
+### Current Blocker: MSIX_CFG Engine Re-Arm
+
+After init IACK, `irq_count` stays 0 — the handler is NEVER called for new characters. The MSIX_CFG engine appears to not re-fire after IACK re-arm, despite the PL011 asserting new interrupts (MIS goes non-zero when characters arrive).
+
+**Diagnostics in place:**
+- `uart_irq_count` (visible via `cpu` command as `irq_count=N`) — handler call counter
+- Post-init register dump: MIS, INTSTAT, MIP_status, MIP_raised, GIC_ISPENDR
+
+**Next investigation steps:**
+1. Write MSIX_CFG = ENABLE + IACK_EN AFTER IACK (full register re-init, not just IACK bit)
+2. Clear RP1 INTSTAT bit 25 explicitly before IACK
+3. Read MSIX_CFG register back after IACK to verify actual engine state
+4. Try without IACK_EN + fast ICR clear in handler (avoid IRQ storm by clearing PL011 source quickly)
+5. Compare MSIX_CFG register state with Linux (add to register dump)
 
 ## Previous Hypotheses (Superseded)
 

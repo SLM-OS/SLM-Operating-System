@@ -158,7 +158,7 @@ MSIX_CFG[25]: 0x9 (ENABLE + IACK_EN)
 
 **MSI-X→MIP0 path is functional** (April 6, 2026): Removing IACK_EN causes an IRQ storm (system hangs from continuous MIP0→GIC interrupts), proving TLPs reach MIP0 and generate GIC SPIs. With IACK_EN, system is stable (single fire, auto-masked).
 
-**Remaining work:** The IRQ handler needs debugging — `cpu` command still shows "UART RX: polling" after boot. The handler should service the PL011 interrupt, drain the FIFO into the ring buffer, write IACK to re-arm, and switch to IRQ-driven mode. See `docs/pi5-uart-irq-investigation.md` for the Linux register comparison that identified the BAR3 fix.
+**Remaining blocker: MSIX_CFG re-arm.** After init IACK, the engine doesn't fire for new characters (`cpu` shows `irq_count=0`). Init sequence was fixed to disable IMSC before IACK (prevents level-triggered livelock), post-init diagnostic confirms clean state. The engine re-arm behavior with IACK_EN needs further investigation — see `docs/pi5-uart-irq-investigation.md` "Implementation Status" section for next steps. Polling fallback works via hybrid `uart_getc` (ring buffer check + PL011 polling).
 
 **Root cause of original failure (resolved):** We originally configured BAR1, which firmware uses for RP1 peripheral MMIO. Linux uses BAR3 for MSI-X routing. Also, MSI-X PCI address high byte should be 0xFF (device tree), not 0x0F (Circle framework).
 
