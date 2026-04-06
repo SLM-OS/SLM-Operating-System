@@ -96,7 +96,9 @@
 static volatile uint8_t  rx_buf[UART_RX_BUF_SIZE];
 static volatile uint32_t rx_head;       /* ISR writes here */
 static volatile uint32_t rx_tail;       /* uart_getc reads here */
-static volatile int      uart_irq_mode; /* 1 once IRQ 153 fires */
+static volatile int      uart_irq_mode;  /* 1 once IRQ 153 fires */
+static volatile int      uart_irq_ready; /* 1 after uart_irq_init() configures path */
+volatile uint32_t uart_irq_count; /* diagnostic: handler call count */
 
 /* ============================================================================
  * Initialization
@@ -232,45 +234,28 @@ char uart_getc(void)
 {
     extern void yield(void);
 
-    if (uart_irq_mode) {
-        /* Interrupt-driven path: read from ring buffer */
-        while (rx_head == rx_tail) {
-            yield();
-        }
+    /* Check ring buffer first (filled by IRQ handler) */
+    if (rx_head != rx_tail) {
         uint8_t ch = rx_buf[rx_tail];
         rx_tail = (rx_tail + 1) & (UART_RX_BUF_SIZE - 1);
         return (char)ch;
     }
 
-    /* Polling fallback (used when IRQ 153 never fires) */
+    /* Polling fallback — data may arrive before IRQ fires */
     volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
     volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
 
     while (*uart_fr & FR_RXFE) {
         yield();
-        /* Check if interrupts became active while polling */
-        if (uart_irq_mode) {
-            while (rx_head == rx_tail) {
-                yield();
-            }
+        /* Check ring buffer in case IRQ delivered while polling */
+        if (rx_head != rx_tail) {
             uint8_t ch = rx_buf[rx_tail];
             rx_tail = (rx_tail + 1) & (UART_RX_BUF_SIZE - 1);
             return (char)ch;
         }
     }
 
-    char ch = (char)(*uart_dr & 0xFF);
-
-    /* Clear PL011 interrupt flags and IACK to unmask for next interrupt */
-    volatile uint32_t *uart_icr_p = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
-    *uart_icr_p = 0x7FF;
-    __asm__ volatile("dsb sy" ::: "memory");
-    volatile uint32_t *msix_iack = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
-                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
-    *msix_iack = MSIX_CFG_IACK;
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    return ch;
+    return (char)(*uart_dr & 0xFF);
 }
 
 /* ============================================================================
@@ -300,6 +285,7 @@ void uart_irq_handler(void)
     volatile uint32_t *uart_icr = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
 
     uart_irq_mode = 1;
+    uart_irq_count++;
 
     /* Drain RX FIFO into ring buffer */
     while (!(*uart_fr & FR_RXFE)) {
@@ -412,10 +398,14 @@ void uart_irq_init(void)
     __asm__ volatile("dsb sy" ::: "memory");
 
     volatile uint32_t *uart_imsc = (volatile uint32_t *)(RP1_UART0_BASE + UART_IMSC);
-    *uart_imsc = IMSC_RXIM | IMSC_RTIM;
-    __asm__ volatile("dsb sy" ::: "memory");
 
-    /* 4. Clear stale state, IACK last */
+    /* 4. Clear ALL stale interrupt state with IMSC disabled.
+     * Critical ordering: IMSC must be 0 when we IACK, so the PL011
+     * interrupt line is LOW. Otherwise the re-armed MSIX_CFG engine
+     * sees the line HIGH and immediately re-fires + auto-masks,
+     * creating a livelock where the engine is never armed when data arrives. */
+    *uart_imsc = 0;  /* Disable all PL011 interrupts */
+    __asm__ volatile("dsb sy" ::: "memory");
     *uart_icr = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
     while (!(*uart_fr & FR_RXFE)) {
@@ -432,9 +422,31 @@ void uart_irq_init(void)
         __asm__ volatile("dsb sy" ::: "memory");
     }
 
-    /* IACK to unmask after init cleanup */
+    /* IACK with PL011 interrupt line LOW (IMSC=0 → MIS=0 → no assertion).
+     * This re-arms MSIX_CFG without immediately re-firing. */
     *msix_set = MSIX_CFG_IACK;
     __asm__ volatile("dsb sy" ::: "memory");
+
+    /* NOW enable PL011 IMSC. Next RX data will assert the interrupt
+     * line, MSIX_CFG will fire, BAR3→MIP0→GIC→handler. */
+    *uart_imsc = IMSC_RXIM | IMSC_RTIM;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Diagnostic: check if re-enabling IMSC caused MSI-X→MIP0 delivery */
+    {
+        volatile uint32_t *mip_stat = (volatile uint32_t *)(MIP0_BASE + 0x80);
+        volatile uint32_t *mip_raised = (volatile uint32_t *)(MIP0_BASE + MIP_INT_RAISED);
+        volatile uint32_t *gic_ispendr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + (UART_IRQ/32)*4);
+        uint32_t mip_s = *mip_stat;
+        uint32_t mip_r = *mip_raised;
+        uint32_t gic_p = *gic_ispendr;
+        uint32_t mis = *(volatile uint32_t *)(RP1_UART0_BASE + UART_MIS);
+        uint32_t intstat = *(volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_INTSTATL);
+        INFO("UART IRQ: post-init diag: MIS=0x%x INTSTAT=0x%x MIP_status=0x%x MIP_raised=0x%x GIC_ISPENDR=0x%x",
+             mis, intstat, mip_s, mip_r, gic_p);
+    }
+    /* Mark IRQ path ready — uart_getc will now use ring buffer exclusively */
+    uart_irq_ready = 1;
 
     INFO("UART IRQ enabled (GIC IRQ %d = SPI %d, RP1 vec %d)",
          UART_IRQ, UART_IRQ - 32, RP1_INT_UART0);

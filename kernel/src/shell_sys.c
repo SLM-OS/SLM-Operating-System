@@ -174,8 +174,10 @@ int cmd_cpu(int argc, char *argv[])
 #if defined(PLATFORM_RASPI5)
     {
         extern int uart_is_irq_mode(void);
-        uart_printf("\r\n  UART RX:     %s\r\n",
-                    uart_is_irq_mode() ? "interrupt-driven" : "polling");
+        extern volatile uint32_t uart_irq_count;
+        uart_printf("\r\n  UART RX:     %s (irq_count=%u)\r\n",
+                    uart_is_irq_mode() ? "interrupt-driven" : "polling",
+                    uart_irq_count);
 
         /* GIC pending check for UART IRQ */
         uint32_t pend_reg = UART_IRQ / 32;
