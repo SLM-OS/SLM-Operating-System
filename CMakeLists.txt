@@ -109,6 +109,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/pic.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/timer_x86.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/platform_x86.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/ap_trampoline.S>
 
     # ==========================================================================
     # Memory Management
@@ -335,7 +336,9 @@ if(PLATFORM STREQUAL "X86_64")
     target_link_options(slmos.elf PRIVATE ${TRAMPOLINE_OBJ})
 
     # Disable PIE (bare-metal kernel loaded at fixed address)
-    target_link_options(slmos.elf PRIVATE -no-pie)
+    # -Wl,-n (--nmagic): don't page-align sections — keeps all sections in a
+    # single LOAD segment, which is required for QEMU's Multiboot2 loader
+    target_link_options(slmos.elf PRIVATE -no-pie -Wl,-n)
 else()
     # ARM64: -mgeneral-regs-only avoids FP register pollution
     # -fPIE for position-independent code

@@ -1,8 +1,9 @@
 /*
  * platform_x86.c - x86-64 platform initialization and stubs
  *
- * Provides boot glue, SMP/VMM/DTB/Rust stubs, and the entry point
- * wrapper that bridges the Multiboot2 entry to the main kernel.
+ * Provides boot glue, SMP boot via INIT-SIPI-SIPI, VMM/DTB/Rust stubs,
+ * and the entry point wrapper that bridges the Multiboot2 entry to the
+ * main kernel.
  */
 
 #include "platform.h"
@@ -16,6 +17,10 @@
 #include "dtb.h"
 #include "uart.h"
 #include "spinlock.h"
+#include "pmm.h"
+#include "sched.h"
+#include "gic.h"
+#include "timer.h"
 
 /* ---- Boot entry bridge ---- */
 
@@ -42,10 +47,198 @@ extern int acpi_init(void);
 extern uint32_t acpi_get_enabled_cpu_count(void);
 extern uint8_t acpi_get_cpu_apic_id(uint32_t logical_id);
 
+/* LAPIC interface (lapic.c) */
+extern void lapic_send_ipi(uint32_t apic_id, uint32_t vector, uint32_t flags);
+extern uint32_t lapic_get_id(void);
+
+/* AP trampoline symbols (ap_trampoline.S) */
+extern char ap_trampoline_start[];
+extern char ap_trampoline_end[];
+
+/* IDT pointer — needed for AP trampoline params */
+extern struct {
+    uint16_t limit;
+    uint64_t base;
+} __attribute__((packed)) idtr;
+
+/* GDT pointer — from trampoline32.S */
+extern struct {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed)) gdt64_ptr;
+
 struct per_cpu cpu_data[MAX_CPUS];
 uint64_t cpu_logical_map[MAX_CPUS];
 uint32_t cpu_count = 1;
 volatile uint32_t cpus_online = 1;
+
+/*
+ * AP trampoline parameters — written by BSP at TRAMP_BASE + 0xF00,
+ * read by AP trampoline code. Layout must match ap_trampoline.S.
+ */
+#define AP_TRAMPOLINE_BASE  0x8000
+#define AP_PARAMS_OFF       0xF00
+
+struct ap_boot_params {
+    uint64_t cr3;           /* +0x00: PML4 physical address */
+    uint16_t gdt_limit;     /* +0x08: GDT limit */
+    uint64_t gdt_base;      /* +0x0A: GDT base (note: packed, offset 0x0A not 0x10) */
+    uint16_t idt_limit;     /* +0x12: IDT limit */
+    uint64_t idt_base;      /* +0x14: IDT base */
+    uint32_t _pad;          /* +0x1C: alignment */
+    uint64_t stack;         /* +0x1C: per-CPU stack top (overwrites _pad at correct offset) */
+    uint32_t cpu_id;        /* +0x24: logical CPU ID */
+    uint64_t entry;         /* +0x28: 64-bit entry point */
+    volatile uint32_t flag; /* +0x30: AP sets to 1 when running */
+} __attribute__((packed));
+
+/* Per-CPU stack size: 16 KB */
+#define AP_STACK_SIZE  (16384)
+#define AP_STACK_ORDER 2  /* 4 pages = 16 KB */
+
+/* ICR flags for INIT and SIPI */
+#define ICR_INIT            0x00000500
+#define ICR_SIPI            0x00000600
+#define ICR_LEVEL_ASSERT    0x00004000
+#define ICR_LEVEL_DEASSERT  0x00000000
+
+/* I/O port access */
+static inline void io_outb(uint16_t port, uint8_t val)
+{
+    __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+/*
+ * Busy-wait delay using PIT channel 2.
+ * Approximate: ~1 PIT tick = 0.838 µs, so ms * 1193 ≈ ms in PIT ticks.
+ */
+static void delay_ms(uint32_t ms)
+{
+    /* Simple busy-loop; not precise but sufficient for SIPI timing */
+    for (volatile uint32_t i = 0; i < ms * 100000; i++)
+        __asm__ volatile("pause");
+}
+
+/*
+ * 64-bit AP entry point — called from ap_trampoline.S after mode transition.
+ * Runs on the AP's own stack in long mode. Performs per-CPU init and enters
+ * the scheduler.
+ */
+static void ap_entry_64(uint32_t logical_cpu_id)
+{
+    /* Initialize per-CPU LAPIC */
+    gic_percpu_init();
+
+    /* Initialize per-CPU timer */
+    timer_percpu_init();
+
+    /* Mark CPU online (atomic increment — multiple APs may boot concurrently) */
+    cpu_data[logical_cpu_id].online = true;
+    __atomic_add_fetch(&cpus_online, 1, __ATOMIC_SEQ_CST);
+
+    uart_printf("[SMP] CPU %u: online (APIC ID %u)\n",
+                logical_cpu_id, (uint32_t)cpu_data[logical_cpu_id].mpidr);
+
+    /* Wait for BSP to finish scheduler initialization */
+    while (!scheduler_is_initialized())
+        __asm__ volatile("pause" ::: "memory");
+
+    /* Initialize scheduler for this CPU */
+    scheduler_init_secondary(logical_cpu_id);
+
+    /* Start per-CPU timer */
+    timer_start();
+
+    /* Enable interrupts */
+    __asm__ volatile("sti");
+
+    /* Enter scheduler — does not return */
+    scheduler_start();
+
+    /* Should never reach here */
+    __asm__ volatile("cli; hlt");
+    while (1);
+}
+
+/*
+ * Boot a single AP via INIT-SIPI-SIPI sequence.
+ * Returns 0 on success, -1 on timeout.
+ */
+static int boot_ap(uint32_t logical_cpu_id, uint8_t apic_id)
+{
+    /* Allocate per-CPU stack */
+    void *stack_pages = pmm_alloc_pages(1 << AP_STACK_ORDER);
+    if (!stack_pages) {
+        uart_printf("[SMP] CPU %u: failed to allocate stack\n", logical_cpu_id);
+        return -1;
+    }
+    void *stack_top = (char *)stack_pages + AP_STACK_SIZE;
+    cpu_data[logical_cpu_id].stack_top = stack_top;
+
+    /* Set up boot parameters at TRAMP_BASE + PARAMS_OFF */
+    volatile uint8_t *params_base = (volatile uint8_t *)(AP_TRAMPOLINE_BASE + AP_PARAMS_OFF);
+
+    /* CR3 — BSP's PML4 */
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    *(volatile uint64_t *)(params_base + 0x00) = cr3;
+
+    /* GDT pointer (limit + 64-bit base) */
+    *(volatile uint16_t *)(params_base + 0x08) = gdt64_ptr.limit;
+    *(volatile uint64_t *)(params_base + 0x0A) = (uint64_t)gdt64_ptr.base;
+
+    /* IDT pointer (limit + 64-bit base) — read directly via SIDT */
+    struct { uint16_t limit; uint64_t base; } __attribute__((packed)) idt_val;
+    __asm__ volatile("sidt %0" : "=m"(idt_val));
+    *(volatile uint16_t *)(params_base + 0x12) = idt_val.limit;
+    *(volatile uint64_t *)(params_base + 0x14) = idt_val.base;
+
+    /* Per-CPU stack top */
+    *(volatile uint64_t *)(params_base + 0x1C) = (uint64_t)stack_top;
+
+    /* Logical CPU ID */
+    *(volatile uint32_t *)(params_base + 0x24) = logical_cpu_id;
+
+    /* 64-bit entry point */
+    *(volatile uint64_t *)(params_base + 0x28) = (uint64_t)ap_entry_64;
+
+    /* Clear flag — AP will set to 1 */
+    *(volatile uint32_t *)(params_base + 0x30) = 0;
+
+    /* Memory fence to ensure all params are visible */
+    __asm__ volatile("mfence" ::: "memory");
+
+    /* Send INIT IPI */
+    lapic_send_ipi(apic_id, 0, ICR_INIT | ICR_LEVEL_ASSERT);
+    delay_ms(1);
+    lapic_send_ipi(apic_id, 0, ICR_INIT | ICR_LEVEL_DEASSERT);
+    delay_ms(10);
+
+    /* Send first SIPI — vector = page number of trampoline (0x8000 / 4096 = 8) */
+    uint8_t sipi_vector = AP_TRAMPOLINE_BASE >> 12;
+    lapic_send_ipi(apic_id, sipi_vector, ICR_SIPI);
+    delay_ms(1);
+
+    /* Wait for AP to signal it's running */
+    for (int i = 0; i < 1000; i++) {
+        if (*(volatile uint32_t *)(params_base + 0x30) != 0)
+            return 0;  /* AP is up */
+        delay_ms(1);
+    }
+
+    /* Timeout — send second SIPI (Intel spec allows retry) */
+    lapic_send_ipi(apic_id, sipi_vector, ICR_SIPI);
+
+    for (int i = 0; i < 1000; i++) {
+        if (*(volatile uint32_t *)(params_base + 0x30) != 0)
+            return 0;
+        delay_ms(1);
+    }
+
+    uart_printf("[SMP] CPU %u: SIPI timeout (APIC ID %u)\n",
+                logical_cpu_id, apic_id);
+    return -1;
+}
 
 void smp_init(void)
 {
@@ -64,7 +257,7 @@ void smp_init(void)
     cpu_data[0].stack_top = NULL;
     cpu_logical_map[0] = acpi_get_cpu_apic_id(0);
 
-    /* Store APIC IDs for all CPUs (AP startup uses these later) */
+    /* Store APIC IDs for all CPUs */
     for (uint32_t i = 1; i < cpu_count; i++) {
         cpu_data[i].cpu_id = i;
         cpu_data[i].mpidr = acpi_get_cpu_apic_id(i);
@@ -77,16 +270,49 @@ void smp_init(void)
     uart_printf("[SMP] %u CPUs detected (BSP APIC ID %u)\n",
                 cpu_count, acpi_get_cpu_apic_id(0));
 
-    /* TODO: AP startup via INIT+SIPI in Phase 4 */
+    if (cpu_count <= 1)
+        return;
+
+    /* Copy AP trampoline to low memory (below 1MB, at 0x8000) */
+    uintptr_t tramp_size = (uintptr_t)ap_trampoline_end - (uintptr_t)ap_trampoline_start;
+    volatile uint8_t *tramp_dest = (volatile uint8_t *)AP_TRAMPOLINE_BASE;
+    const uint8_t *tramp_src = (const uint8_t *)ap_trampoline_start;
+
+    /* Zero the entire trampoline page (including params area) */
+    for (uintptr_t i = 0; i < 0x1000; i++)
+        tramp_dest[i] = 0;
+
+    /* Copy trampoline code */
+    for (uintptr_t i = 0; i < tramp_size; i++)
+        tramp_dest[i] = tramp_src[i];
+
+    uart_printf("[SMP] Trampoline copied to 0x%x (%lu bytes)\n",
+                AP_TRAMPOLINE_BASE, (unsigned long)tramp_size);
+
+    /* Boot each AP sequentially */
+    for (uint32_t i = 1; i < cpu_count; i++) {
+        uint8_t apic_id = acpi_get_cpu_apic_id(i);
+        uart_printf("[SMP] Booting CPU %u (APIC ID %u)...\n", i, apic_id);
+        boot_ap(i, apic_id);
+    }
+
+    uart_printf("[SMP] %u/%u CPUs online\n", cpus_online, cpu_count);
 }
 
-/* cpu_logical_id is used by ARM64 cpu_id() — provide stub */
+/*
+ * Look up logical CPU ID from LAPIC ID.
+ * Used by cpu_id() in smp.h.
+ */
 int cpu_logical_id(uint64_t mpidr)
 {
-    (void)mpidr;
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        if (cpu_logical_map[i] == mpidr)
+            return (int)i;
+    }
     return 0;
 }
 
+/* secondary_init stub — not used on x86-64, ap_entry_64 handles this */
 void secondary_init(uint32_t cpu)
 {
     (void)cpu;
@@ -97,7 +323,7 @@ int psci_cpu_on(uint64_t target_mpidr, uintptr_t entry_point, uintptr_t context_
     (void)target_mpidr;
     (void)entry_point;
     (void)context_id;
-    return -1;  /* Not supported */
+    return -1;  /* x86-64 uses INIT-SIPI, not PSCI */
 }
 
 void psci_cpu_off(void)

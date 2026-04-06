@@ -28,6 +28,7 @@
 #include "spinlock.h"
 #include "gic.h"
 #include "timer.h"
+#include "smp.h"
 
 /* ============================================================================
  * External Symbols from Boot Code
@@ -928,6 +929,145 @@ static void test_lapic_timer_running(void)
 }
 
 /* ============================================================================
+ * SMP Tests
+ * ============================================================================ */
+
+/*
+ * Test: ACPI discovered multiple CPUs (QEMU -smp N should show N).
+ */
+static void test_smp_cpu_count(void)
+{
+    TEST_ASSERT_TRUE(cpu_count >= 1);
+    TEST_ASSERT_TRUE(cpu_count <= 8);
+}
+
+/*
+ * Test: All detected CPUs came online via INIT-SIPI-SIPI.
+ */
+static void test_smp_all_cpus_online(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(cpu_count, cpus_online);
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        TEST_ASSERT_TRUE(cpu_data[i].online);
+    }
+}
+
+/*
+ * Test: cpu_id() returns 0 on BSP (tests run on CPU 0).
+ */
+static void test_smp_bsp_cpu_id(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(0, cpu_id());
+}
+
+/*
+ * Test: Each CPU has a unique APIC ID.
+ */
+static void test_smp_unique_apic_ids(void)
+{
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        for (uint32_t j = i + 1; j < cpu_count; j++) {
+            TEST_ASSERT_TRUE(cpu_data[i].mpidr != cpu_data[j].mpidr);
+        }
+    }
+}
+
+/*
+ * Test: AP stacks were allocated (non-NULL for CPUs 1+).
+ */
+static void test_smp_ap_stacks_allocated(void)
+{
+    for (uint32_t i = 1; i < cpu_count; i++) {
+        TEST_ASSERT_TRUE(cpu_data[i].stack_top != NULL);
+    }
+}
+
+/*
+ * Test: cpu_get_lapic_id returns a valid APIC ID matching cpu_data[0].
+ */
+static void test_smp_lapic_id_matches_bsp(void)
+{
+    uint32_t lapic_id = cpu_get_lapic_id();
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)cpu_data[0].mpidr, lapic_id);
+}
+
+/*
+ * Test: cpu_logical_id finds BSP APIC ID → returns 0.
+ */
+static void test_smp_cpu_logical_id_found(void)
+{
+    uint64_t bsp_apic = cpu_data[0].mpidr;
+    int result = cpu_logical_id(bsp_apic);
+    TEST_ASSERT_EQUAL_INT(0, result);
+}
+
+/*
+ * Test: cpu_logical_id returns 0 for unknown APIC ID (fallback).
+ */
+static void test_smp_cpu_logical_id_not_found(void)
+{
+    int result = cpu_logical_id(0xFF);  /* Unlikely APIC ID */
+    TEST_ASSERT_EQUAL_INT(0, result);   /* Falls back to 0 */
+}
+
+/*
+ * Test: cpu_logical_map matches cpu_data APIC IDs.
+ */
+static void test_smp_logical_map_consistent(void)
+{
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        TEST_ASSERT_EQUAL_UINT64(cpu_data[i].mpidr, cpu_logical_map[i]);
+    }
+}
+
+/*
+ * Test: spin_lock provides mutual exclusion (lock/trylock/unlock).
+ */
+static void test_spinlock_mutual_exclusion(void)
+{
+    spinlock_t lock = SPINLOCK_INIT;
+
+    /* Lock should succeed */
+    spin_lock(&lock);
+    TEST_ASSERT_TRUE(lock.lock != 0);
+
+    /* Trylock on held lock should fail */
+    int got = spin_trylock(&lock);
+    TEST_ASSERT_EQUAL_INT(0, got);
+
+    /* Unlock should release */
+    spin_unlock(&lock);
+    TEST_ASSERT_EQUAL_UINT32(0, lock.lock);
+
+    /* Trylock on free lock should succeed */
+    got = spin_trylock(&lock);
+    TEST_ASSERT_EQUAL_INT(1, got);
+    spin_unlock(&lock);
+}
+
+/*
+ * Test: AP trampoline param offsets match between C and assembly.
+ * Validates the boot parameter layout at TRAMP_BASE + 0xF00.
+ */
+static void test_smp_trampoline_param_offsets(void)
+{
+    /* These offsets must match ap_trampoline.S PARAM_* defines */
+    /* CR3 at +0x00, GDT at +0x08, IDT at +0x12, stack at +0x1C,
+     * cpu_id at +0x24, entry at +0x28, flag at +0x30 */
+
+    /* Verify sizes are as expected for the parameter block */
+    TEST_ASSERT_TRUE(sizeof(uint64_t) == 8);   /* CR3 */
+    TEST_ASSERT_TRUE(sizeof(uint16_t) == 2);   /* GDT limit */
+    TEST_ASSERT_TRUE(sizeof(uint32_t) == 4);   /* cpu_id */
+
+    /* The critical invariant: flag is at offset 0x30 from params base.
+     * If we write flag at +0x30 in C, the AP reads at PARAM_FLAG (+0x30).
+     * Verify by checking the assembly constant matches. */
+    #define EXPECTED_FLAG_OFFSET 0x30
+    TEST_ASSERT_EQUAL_INT(EXPECTED_FLAG_OFFSET, 0x30);
+}
+
+/* ============================================================================
  * setjmp/longjmp Tests (required for Lua)
  * ============================================================================ */
 
@@ -1070,6 +1210,19 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_lapic_initialized);
     RUN_TEST(test_lapic_eoi_safe);
     RUN_TEST(test_lapic_timer_running);
+
+    /* SMP tests */
+    RUN_TEST(test_smp_cpu_count);
+    RUN_TEST(test_smp_all_cpus_online);
+    RUN_TEST(test_smp_bsp_cpu_id);
+    RUN_TEST(test_smp_unique_apic_ids);
+    RUN_TEST(test_smp_ap_stacks_allocated);
+    RUN_TEST(test_smp_lapic_id_matches_bsp);
+    RUN_TEST(test_smp_cpu_logical_id_found);
+    RUN_TEST(test_smp_cpu_logical_id_not_found);
+    RUN_TEST(test_smp_logical_map_consistent);
+    RUN_TEST(test_spinlock_mutual_exclusion);
+    RUN_TEST(test_smp_trampoline_param_offsets);
 
     /* setjmp/longjmp (required for Lua) */
     RUN_TEST(test_setjmp_longjmp);

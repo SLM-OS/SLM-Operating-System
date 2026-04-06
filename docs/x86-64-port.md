@@ -13,16 +13,18 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 5. [Page Tables](#page-tables)
 6. [GDT and Segments](#gdt-and-segments)
 7. [IDT and Exceptions](#idt-and-exceptions)
-8. [PIC and Timer](#pic-and-timer)
-9. [Console Output](#console-output)
-10. [Building](#building)
-11. [Hardware Deployment](#hardware-deployment)
-12. [Testing](#testing)
-13. [Platform Abstraction](#platform-abstraction)
-14. [Lua Scripting](#lua-scripting)
-15. [Key Files](#key-files)
-16. [Design Decisions](#design-decisions)
-17. [Troubleshooting](#troubleshooting)
+8. [Interrupt Controller (APIC)](#interrupt-controller-apic)
+9. [Timer (LAPIC)](#timer-lapic)
+10. [SMP (Symmetric Multi-Processing)](#smp-symmetric-multi-processing)
+11. [Console Output](#console-output)
+12. [Building](#building)
+13. [Hardware Deployment](#hardware-deployment)
+14. [Testing](#testing)
+15. [Platform Abstraction](#platform-abstraction)
+16. [Lua Scripting](#lua-scripting)
+17. [Key Files](#key-files)
+18. [Design Decisions](#design-decisions)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -329,6 +331,66 @@ On the i7-6700, the LAPIC timer clock runs at ~1 GHz. Each CPU has its own LAPIC
 
 ---
 
+## SMP (Symmetric Multi-Processing)
+
+SLM-OS boots all detected CPUs on x86-64 via the standard INIT-SIPI-SIPI sequence.
+
+### CPU Discovery
+
+CPUs are discovered via ACPI MADT parsing (`acpi.c`). The MADT provides:
+- Local APIC entries with APIC ID and enabled flag
+- I/O APIC address and GSI base
+- Interrupt Source Overrides
+
+On the i7-6700: 16 MADT entries, 8 enabled (4 cores × 2 hyperthreads).
+On QEMU with `-smp 4`: 4 MADT entries, 4 enabled.
+
+### AP Boot Sequence
+
+1. BSP copies `ap_trampoline.S` blob to physical address 0x8000 (below 1MB)
+2. BSP fills boot parameters at 0x8F00: CR3, GDT, IDT, stack, CPU ID, entry point
+3. For each AP:
+   - Send INIT IPI via LAPIC ICR → resets AP
+   - Wait 10ms
+   - Send SIPI with vector 0x08 (0x8000 / 4096) → AP wakes at 0x8000
+   - AP executes trampoline: real mode → protected mode → long mode
+   - AP loads BSP's page tables, GDT, IDT from params
+   - AP jumps to `ap_entry_64()` on its own 16KB stack
+4. AP initializes: LAPIC, timer, scheduler, then enters `scheduler_start()`
+
+### AP Trampoline (`ap_trampoline.S`)
+
+```
+SIPI → real mode (0x8000)
+  ├─ Load temporary 32-bit GDT
+  ├─ Enable PE (CR0 bit 0)
+  └─ Far jump to 32-bit code
+       ├─ Enable PAE (CR4 bit 5)
+       ├─ Load BSP's PML4 into CR3
+       ├─ Enable LME in EFER
+       ├─ Enable PG (CR0 bit 31)
+       ├─ Load BSP's 64-bit GDT
+       └─ Far jump to 64-bit code
+            ├─ Set segments, load IDT
+            ├─ Load per-CPU stack
+            ├─ Signal BSP (flag = 1)
+            └─ Jump to ap_entry_64()
+```
+
+### Per-CPU Identification
+
+`cpu_id()` reads the current CPU's LAPIC ID (memory-mapped at 0xFEE00020) and looks it up in `cpu_logical_map[]` to get the logical CPU ID (0, 1, 2, ...).
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `kernel/arch/x86_64/ap_trampoline.S` | Real-mode AP startup, mode transitions |
+| `kernel/arch/x86_64/platform_x86.c` | `smp_init()`, `boot_ap()`, `ap_entry_64()` |
+| `kernel/arch/x86_64/acpi.c` | ACPI MADT parsing for CPU topology |
+
+---
+
 ## Console Output
 
 ### Serial Console (COM1)
@@ -446,7 +508,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 55 tests across 13 categories:
+The `test_x86_boot.c` test suite contains 66 tests across 14 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -530,6 +592,7 @@ Lua commands are available in the shell via `lua <expression>`.
 | `kernel/arch/x86_64/entry64.S` | 64-bit entry, BSS clear, calls `kernel_main_x86` |
 | `kernel/arch/x86_64/idt.S` | ISR stubs for exceptions (0-31) and IRQs (32-47) |
 | `kernel/arch/x86_64/context.S` | `switch_to()` context switch + `task_entry_wrapper` |
+| `kernel/arch/x86_64/ap_trampoline.S` | AP startup: real mode → protected → long mode |
 | `kernel/arch/x86_64/setjmp.S` | `setjmp`/`longjmp` for Lua error handling |
 
 ### C Code — x86-64 Platform Layer
@@ -557,7 +620,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 55 tests: boot, IDT, APIC, Multiboot2, platform, scheduler, setjmp |
+| `kernel/tests/test_x86_boot.c` | 66 tests: boot, IDT, APIC, SMP, spinlock, Multiboot2, platform, scheduler, setjmp |
 
 ---
 

@@ -62,13 +62,32 @@ extern volatile uint32_t cpus_online;
 
 #if defined(PLATFORM_X86_64)
 
-/* x86-64 single-core: CPU ID is always 0 */
+/*
+ * Get current CPU's LAPIC ID.
+ * The LAPIC ID register is memory-mapped at LAPIC_BASE + 0x020.
+ * Reading it from the default address 0xFEE00000 works for all CPUs.
+ */
+static inline uint32_t cpu_get_lapic_id(void) {
+    volatile uint32_t *lapic = (volatile uint32_t *)0xFEE00000UL;
+    return (lapic[0x020 / 4] >> 24) & 0xFF;
+}
+
+/*
+ * Get logical CPU ID from LAPIC ID.
+ * Returns -1 if LAPIC ID not found in mapping table.
+ */
+int cpu_logical_id(uint64_t mpidr);
+
+/*
+ * Get current CPU's logical ID.
+ */
 static inline uint32_t cpu_id(void) {
-    return 0;
+    int id = cpu_logical_id(cpu_get_lapic_id());
+    return (id >= 0) ? (uint32_t)id : 0;
 }
 
 static inline struct per_cpu *this_cpu(void) {
-    return &cpu_data[0];
+    return &cpu_data[cpu_id()];
 }
 
 #else /* ARM64 */

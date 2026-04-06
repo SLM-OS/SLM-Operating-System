@@ -107,9 +107,13 @@ static inline void spin_init(spinlock_t *lock)
 static inline void spin_lock(spinlock_t *lock)
 {
 #if defined(PLATFORM_X86_64)
-    /* x86-64 single-core: compiler barrier only */
-    (void)lock;
-    barrier();
+    /* x86-64: test-and-set spinlock using LOCK XCHG */
+    uint32_t val = 1;
+    while (__atomic_exchange_n(&lock->lock, val, __ATOMIC_ACQUIRE) != 0) {
+        /* Spin on read (avoids bus lock contention) until lock looks free */
+        while (__atomic_load_n(&lock->lock, __ATOMIC_RELAXED) != 0)
+            __asm__ volatile("pause" ::: "memory");
+    }
 #elif defined(SPINLOCK_SKIP_LOCKING)
     /* Jetson: skip locking, just barrier for memory ordering */
     (void)lock;
@@ -147,9 +151,7 @@ static inline void spin_lock(spinlock_t *lock)
 static inline int spin_trylock(spinlock_t *lock)
 {
 #if defined(PLATFORM_X86_64)
-    (void)lock;
-    barrier();
-    return 1;
+    return __atomic_exchange_n(&lock->lock, 1, __ATOMIC_ACQUIRE) == 0;
 #elif defined(SPINLOCK_SKIP_LOCKING)
     (void)lock;
     dmb(ish);
@@ -187,8 +189,7 @@ static inline int spin_trylock(spinlock_t *lock)
 static inline void spin_unlock(spinlock_t *lock)
 {
 #if defined(PLATFORM_X86_64)
-    (void)lock;
-    barrier();
+    __atomic_store_n(&lock->lock, 0, __ATOMIC_RELEASE);
 #elif defined(SPINLOCK_SKIP_LOCKING)
     (void)lock;
     dmb(ish);

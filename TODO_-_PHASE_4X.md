@@ -2,7 +2,7 @@
 
 This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 3050.
 
-**Status:** In Progress (M1 - Boot Foundation ~80% Complete)
+**Status:** In Progress (M1-M4 Complete, M5 PCIe Next)
 
 **Summary:** Primary development track to port SLM-OS to x86-64 architecture with discrete NVIDIA GPU. This enables GPU driver development on accessible hardware with superior debugging tools.
 
@@ -28,45 +28,93 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 
 ---
 
-## Completed Work Summary (January 2026)
+## Completed Work Summary
 
-### M1 Boot Foundation — ~80% Complete
+### M1 Boot Foundation — ✅ Complete (April 2026)
 
 **What's Working:**
-- x86-64 kernel boots in QEMU from GRUB ISO
+- x86-64 kernel boots in QEMU and on real i7-6700 hardware
 - Full 32-bit to 64-bit long mode transition
-- 4-level page tables with 2MB pages (1GB identity mapped)
+- 4-level page tables with 2MB pages (up to 20GB identity mapped)
 - 64-bit GDT with code/data segments
-- Framebuffer console with 8x16 bitmap font
-- C kernel entry and basic output
+- Serial console via COM1 at 115200 baud
+- Full SLM-OS kernel boots via shared `kernel_main()` path
+- CMake build system integrated (`cmake -DPLATFORM=X86_64`)
+- UEFI-bootable disk images via `make -f Makefile.test disk`
 
-**Key Files Created:**
+**Key Files:**
 | File | Purpose |
 |------|---------|
 | `kernel/arch/x86_64/trampoline32.S` | 32-bit Multiboot2 entry, mode transition |
 | `kernel/arch/x86_64/entry64.S` | 64-bit entry, BSS clear, kernel call |
-| `kernel/arch/x86_64/main_x86.c` | Test kernel entry point |
-| `kernel/arch/x86_64/Makefile.test` | Build system with ISO creation |
+| `kernel/arch/x86_64/platform_x86.c` | Platform stubs, VMM init, SMP init, boot bridge |
+| `kernel/arch/x86_64/main_x86.c` | Standalone test kernel (Makefile.test only) |
+| `kernel/arch/x86_64/Makefile.test` | Standalone build + UEFI disk image |
 | `kernel/kernel-x86_64.ld` | Linker script for x86-64 |
-| `kernel/drivers/fb_console.c` | Framebuffer console driver |
-| `kernel/tests/test_x86_boot.c` | 20 functional tests |
+| `kernel/drivers/uart_x86.c` | COM1 16550 UART driver |
+| `kernel/tests/test_x86_boot.c` | 66 functional tests |
 | `docs/x86-64-port.md` | Comprehensive documentation |
 
 **Technical Challenges Solved:**
 1. **32/64-bit assembly split** — GAS generates 64-bit instructions even with `.code32` when targeting elf64; solved by compiling trampoline with `-m32` and converting via `objcopy`
 2. **GDT pointer relocation** — Made `gdt64_ptr` global for correct symbol relocation instead of section-relative
 3. **Page table preservation** — Moved page tables to separate `.page_tables` section to prevent BSS zeroing from corrupting active paging structures
+4. **UEFI boot** — GRUB EFI doesn't pass Multiboot2 magic or set video mode; skip magic check, use serial-only output
+5. **Extended paging** — `vmm_init()` detects RAM from Multiboot2 memory map, extends PDPT/PD beyond 4GB
 
-**Test Command:**
+**Build Commands:**
 ```bash
-make -f kernel/arch/x86_64/Makefile.test iso
-qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio
+# CMake integrated build (full SLM-OS kernel)
+cmake -B build -DPLATFORM=X86_64 && cmake --build build
+
+# Standalone test build
+make -f kernel/arch/x86_64/Makefile.test
+
+# UEFI disk image for real hardware
+make -f kernel/arch/x86_64/Makefile.test disk
 ```
 
-**Remaining for M1:**
-- External SSD setup for real hardware boot
-- Integration with main CMake build system
-- Rust target configuration
+### M2 Memory Management — ✅ Complete (April 2026)
+
+- Multiboot2 memory map parsed to detect RAM end
+- PMM buddy allocator running (uses `x86_detected_ram_end` instead of hardcoded `RAM_SIZE`)
+- Page tables extended to map up to 20GB (trampoline maps 0-4GB, `vmm_init()` extends)
+- Verified: QEMU 4GB → 5113 MB, i7-6700 16GB → 19914 MB
+- Identity mapping (virtual == physical), no higher-half yet
+
+**Remaining M2 items (deferred):**
+- Higher-half kernel mapping
+- Full `vmm_map_page()` / `vmm_unmap_page()` API for x86-64 PTEs
+- Model memory flags in PTE available bits
+
+### M3 Interrupts & Timer — ✅ Complete (April 2026)
+
+- **IDT**: 64 entries (exceptions 0-31, IOAPIC IRQs 32-47, LAPIC vectors 48-63)
+- **LAPIC**: Initialized from ACPI MADT address, SVR enabled, TPR=0, flat destination mode
+- **IOAPIC**: All redirection entries configured, Interrupt Source Overrides applied
+- **8259 PIC**: Disabled (remapped to 0xF0-0xFF, all masked)
+- **LAPIC timer**: Periodic mode, calibrated against PIT channel 2, 100Hz tick
+- **Context switch**: `context.S` saves/restores RBX, RBP, R12-R15, RSP, RIP, RFLAGS
+- **Exception handling**: Full register dump on fault, CR2 for page faults
+- Preemptive scheduling verified working on QEMU and i7-6700 hardware
+
+**Key files:**
+| File | Purpose |
+|------|---------|
+| `kernel/arch/x86_64/idt.c` + `idt.S` | IDT setup, ISR stubs, exception/IRQ dispatch |
+| `kernel/arch/x86_64/lapic.c` | Local APIC driver, timer calibration |
+| `kernel/arch/x86_64/ioapic.c` | I/O APIC driver, IRQ routing |
+| `kernel/arch/x86_64/pic.c` | gic.h → LAPIC/IOAPIC bridge, 8259 disable |
+| `kernel/arch/x86_64/timer_x86.c` | LAPIC timer implementing timer.h |
+| `kernel/arch/x86_64/context.S` | x86-64 context switch |
+
+### Additional Completed Work
+
+- **Lua runtime** (`setjmp.S`, ctype/errno stubs, SSE for Lua math)
+- **ACPI MADT parsing** (`acpi.c`) — discovers CPUs, LAPIC base, IOAPIC, ISOs
+- **Platform abstraction** (`pic.c` bridges gic.h, `platform_x86.c` provides all stubs)
+- **Real x86-64 spinlocks** — TTAS with `__atomic_exchange_n`, atomic `cpus_online` increment
+- **66 functional tests** across 14 categories
 
 ---
 
@@ -81,14 +129,14 @@ qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio
 
 ---
 
-## Milestone 1: x86-64 Boot Foundation
+## Milestone 1: x86-64 Boot Foundation — ✅ Complete
 
 ### Development Environment
 - ✅ Set up cross-compilation for x86-64 bare-metal (native GCC with -m32/-m64)
 - ✅ Install Rust target `x86_64-unknown-none`
 - ✅ Create `kernel/arch/x86_64/` directory structure
-- ☐ Update CMakeLists.txt for x86-64 target (using Makefile.test for now)
-- ☐ Update Cargo.toml for x86-64 target
+- ✅ Update CMakeLists.txt for x86-64 target (`cmake -DPLATFORM=X86_64`)
+- ☐ Update Cargo.toml for x86-64 target (Rust runtime not yet ported)
 - ✅ Set up QEMU x86-64 for initial testing (before real hardware)
 
 ### Multiboot2/GRUB Boot (chosen over raw UEFI)
@@ -114,125 +162,127 @@ qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio
 - ✅ Test "Hello from SLM-OS x86-64!" in QEMU — **WORKING**
 
 ### External SSD Setup
-- ☐ Format external SSD with GPT partition table
-- ☐ Create EFI System Partition (ESP) — FAT32, ~512MB
-- ☐ Create SLM-OS partition (can be raw or minimal filesystem)
-- ☐ Install GRUB bootloader for real hardware
+- ✅ UEFI-bootable disk image via `make disk` (grub-mkimage + GPT + ESP)
+- ✅ Verified boot on Gigabyte H610M S2H V2 / i7-6700 via SDWire + labctl
 - ✅ Document boot configuration in `docs/x86-64-port.md`
 
 ### Testing & Documentation
-- ✅ Create functional tests (`test_x86_boot.c` — 20 tests)
+- ✅ Create functional tests (`test_x86_boot.c` — 55 tests across 13 categories)
   - ✅ Control register tests (CR0, CR4, EFER, CR3)
   - ✅ Page table structure tests (PML4, PDPT, PD entries)
   - ✅ GDT tests (limit, CS/DS selectors)
   - ✅ Memory layout tests (kernel address, section ordering)
   - ✅ 64-bit mode verification tests
-- ✅ Create comprehensive documentation (`docs/x86-64-port.md`)
+  - ✅ IDT structure and exception handler tests
+  - ✅ Multiboot2 parsing tests
+  - ✅ Platform abstraction tests (cpu_context, spinlock, gic, timer)
+  - ✅ Scheduler integration tests
+  - ✅ ACPI + LAPIC + IOAPIC tests
+  - ✅ setjmp/longjmp tests (Lua support)
+  - ✅ VMM RAM detection test
+- ✅ Create comprehensive documentation (`docs/x86-64-port.md` — 657 lines)
 - ✅ Update test harness header for x86 boot tests
 
 ---
 
-## Milestone 2: x86-64 Memory Management
+## Milestone 2: x86-64 Memory Management — ✅ Core Complete
 
 ### Physical Memory
-- ☐ Parse UEFI memory map (different format from ARM64 DTB)
-- ☐ Adapt PMM bitmap allocator for x86-64 memory layout
-- ☐ Handle memory holes and reserved regions
-- ☐ Support > 4GB RAM (x86-64 can address much more than ARM64 embedded)
+- ✅ Parse Multiboot2 memory map (type 6 tag) to detect RAM end
+- ✅ PMM buddy allocator works for x86-64 (uses `x86_detected_ram_end`)
+- ✅ Support > 4GB RAM — i7-6700 reports 19914 MB usable
+- ✅ `vmm_init()` extends page tables from boot's 4GB to detected RAM (up to 20GB)
 
 ### Virtual Memory (x86-64 Paging)
-- ☐ Study x86-64 4-level page tables (PML4 → PDPT → PD → PT)
-- ☐ Implement `vmm_x86.c` with x86-64 page table structures
-- ☐ Define page table entry format (different from ARM64):
-  ```c
-  // x86-64 PTE format (simplified)
-  typedef struct {
-      uint64_t present    : 1;
-      uint64_t writable   : 1;
-      uint64_t user       : 1;
-      uint64_t pwt        : 1;   // Page write-through
-      uint64_t pcd        : 1;   // Page cache disable
-      uint64_t accessed   : 1;
-      uint64_t dirty      : 1;
-      uint64_t pat        : 1;   // Page attribute table
-      uint64_t global     : 1;
-      uint64_t available  : 3;   // OS use — SLM flags here
-      uint64_t pfn        : 40;  // Physical frame number
-      uint64_t available2 : 7;   // OS use
-      uint64_t nx         : 1;   // No execute
-  } x86_pte_t;
-  ```
-- ☐ Implement `vmm_map_page()`, `vmm_unmap_page()` for x86-64
-- ☐ Set up identity mapping + higher-half kernel mapping
-- ☐ Enable paging (likely already enabled by UEFI, just switch tables)
+- ✅ 4-level page tables: PML4 → PDPT → PD with 2MB pages
+- ✅ Boot maps 0-4GB (trampoline32.S), `vmm_init()` extends PDPT[4..N]
+- ✅ Identity mapping (virtual == physical) for all RAM
+- ✅ TLB flush via CR3 reload after extending
+- ⏸️ `vmm_map_page()` / `vmm_unmap_page()` API — deferred (identity mapping sufficient)
+- ⏸️ Higher-half kernel mapping — deferred to post-SMP
+- ⏸️ x86-64 PTE bitfield definitions — deferred to when needed
 
 ### Model Memory Regions
-- ☐ Port model memory flags to x86-64 PTE available bits
-- ☐ Implement `gpu_mapped`, `model_page`, `inference_hot` flags
-- ☐ Allocate GPU-accessible memory (requires PCIe BAR understanding)
+- ⏸️ Port model memory flags to x86-64 PTE available bits — deferred to M6
+- ⏸️ Implement `gpu_mapped`, `model_page`, `inference_hot` flags — deferred to M6
+- ⏸️ Allocate GPU-accessible memory — deferred to M5/M6
 
 ---
 
-## Milestone 3: x86-64 Interrupts & Timer
+## Milestone 3: x86-64 Interrupts & Timer — ✅ Complete
 
 ### Interrupt Controller (APIC)
-- ☐ Study Local APIC and I/O APIC architecture (replaces ARM GIC)
-- ☐ Implement Local APIC initialization
-- ☐ Implement I/O APIC initialization
-- ☐ Set up Interrupt Descriptor Table (IDT) — 256 entries
-- ☐ Write interrupt stubs in `vectors_x86.S`
-- ☐ Implement interrupt dispatch in C
+- ✅ Local APIC: SVR enable, TPR=0, flat destination mode, LVT masking (`lapic.c`)
+- ✅ I/O APIC: redirection table, Interrupt Source Override handling (`ioapic.c`)
+- ✅ IDT: 64 entries — exceptions 0-31, IOAPIC 32-47, LAPIC 48-63 (`idt.c` + `idt.S`)
+- ✅ ISR stubs with register save/restore, error code handling
+- ✅ C interrupt dispatch via `exception_handler()` + `irq_handlers[]` callback table
+- ✅ 8259 PIC disabled (remapped to 0xF0-0xFF, all masked)
+- ✅ gic.h interface bridges to LAPIC+IOAPIC via `pic.c`
 
 ### Exception Handling
-- ☐ Handle x86-64 exceptions (different numbers from ARM64):
-  - ☐ #DE (0) — Divide error
-  - ☐ #DB (1) — Debug
-  - ☐ #NMI (2) — Non-maskable interrupt
-  - ☐ #BP (3) — Breakpoint
-  - ☐ #OF (4) — Overflow
-  - ☐ #UD (6) — Invalid opcode
-  - ☐ #NM (7) — Device not available (FPU)
-  - ☐ #DF (8) — Double fault
-  - ☐ #GP (13) — General protection fault
-  - ☐ #PF (14) — Page fault
-- ☐ Implement panic handler with x86-64 register dump
+- ✅ All exceptions 0-31 handled with named descriptions
+- ✅ Full register dump on fault (RAX-R15, RIP, RSP, RFLAGS, CS, SS)
+- ✅ CR2 decode for page faults
+- ✅ Halt after fatal exception
 
 ### Timer
-- ☐ Study x86 timer options: APIC timer, HPET, PIT
-- ☐ Implement APIC timer for preemptive scheduling (preferred)
-- ☐ Calibrate timer against known reference (PIT or TSC)
-- ☐ Set up 100 Hz tick (matching ARM64 configuration)
+- ✅ LAPIC timer in periodic mode (vector 48), calibrated against PIT channel 2
+- ✅ 100 Hz tick matching ARM64 configuration
+- ✅ `timer_percpu_init()` ready for SMP (starts LAPIC timer on secondary CPUs)
+- ✅ `sleep_ms()` / `sleep_us()` via busy-wait on tick counter
 
 ### Context Switch
-- ☐ Write `context_x86.S` — save/restore x86-64 registers
-- ☐ Callee-saved: RBX, RBP, R12-R15, RSP
-- ☐ Save/restore SSE/AVX state (FXSAVE/FXRSTOR or XSAVE/XRSTOR)
-- ☐ Handle stack switch
+- ✅ `context.S`: saves/restores RBX, RBP, R12-R15, RSP, RIP, RFLAGS
+- ✅ `task_entry_wrapper`: enables interrupts (STI), calls entry, calls `task_exit()`
+- ✅ TASK_CONTEXT_OFFSET = 0x20 matches task.h
+- ⏸️ SSE/AVX state save (FXSAVE/XSAVE) — deferred (kernel is -mno-sse)
 
 ---
 
-## Milestone 4: x86-64 Multi-Core (SMP)
+## Milestone 4: x86-64 Multi-Core (SMP) — ✅ Complete
+
+### SMP Discovery
+- ✅ ACPI MADT parsing discovers CPUs, LAPIC base, IOAPIC (`acpi.c`)
+- ✅ `smp_init()` populates `cpu_data[]` and `cpu_logical_map[]` from ACPI
+- ✅ i7-6700: MADT reports 16 CPUs (8 enabled), APIC IDs stored
+- ✅ QEMU: 4 CPUs detected, all brought online
+- ✅ `cpu_count` set from ACPI, `CPU_MAX` = 8
 
 ### SMP Boot
-- ☐ Study x86-64 SMP boot (INIT-SIPI-SIPI sequence)
-- ☐ Parse ACPI MADT table for CPU topology
-- ☐ Implement AP (Application Processor) boot:
-  - ☐ Allocate trampoline code below 1MB
-  - ☐ Send INIT IPI to target CPU
-  - ☐ Send SIPI IPI with trampoline address
-  - ☐ AP wakes in real mode, transitions to long mode
-- ☐ Set up per-CPU stacks
-- ☐ Initialize per-CPU Local APIC
+- ✅ AP trampoline (`ap_trampoline.S`): 16-bit → 32-bit → 64-bit transition
+- ✅ Trampoline copied to 0x8000 (below 1MB), SIPI vector = 0x08
+- ✅ INIT IPI + SIPI IPI sequence via LAPIC ICR
+- ✅ AP loads BSP's page tables (CR3), GDT, IDT from boot params
+- ✅ Per-CPU stacks allocated from PMM (16 KB each)
+- ✅ `lapic_percpu_init()` + `timer_percpu_init()` called on each AP
+- ✅ `scheduler_init_secondary()` + `scheduler_start()` on each AP
+- ✅ Verified: 4/4 CPUs online in QEMU, shell responsive
+
+**Key files:**
+| File | Purpose |
+|------|---------|
+| `kernel/arch/x86_64/ap_trampoline.S` | Real-mode AP startup, mode transitions |
+| `kernel/arch/x86_64/platform_x86.c` | INIT-SIPI-SIPI sequence, `boot_ap()`, `ap_entry_64()` |
 
 ### Per-CPU Data
-- ☐ Implement GS-base for per-CPU data access (x86-64 idiom)
-- ☐ Port per-CPU run queues to x86-64
-- ☐ Implement CPU ID detection (`cpuid` instruction)
+- ✅ `cpu_id()` reads LAPIC ID, looks up in `cpu_logical_map[]`
+- ✅ Per-CPU run queues working via shared scheduler code
+- ⏸️ GS-base for per-CPU data access — deferred (LAPIC ID lookup sufficient)
 
 ### Synchronization
-- ☐ Port spinlocks to x86-64 (`lock` prefix, `pause` instruction)
-- ☐ Port ticket locks
-- ☐ Verify memory ordering (x86 has stronger ordering than ARM)
+- ✅ Spinlocks work on x86-64 (coherency always enabled, `spinlock_hw_enabled = 1`)
+- ✅ x86 TSO memory model is stronger than ARM — fewer barriers needed
+- ✅ Multi-core scheduler verified with 4 CPUs in QEMU
+
+### Tests
+- ✅ 11 new SMP + spinlock tests (55 → 66 total):
+  - SMP boot: `test_smp_cpu_count`, `test_smp_all_cpus_online`, `test_smp_bsp_cpu_id`
+  - APIC IDs: `test_smp_unique_apic_ids`, `test_smp_lapic_id_matches_bsp`
+  - CPU lookup: `test_smp_cpu_logical_id_found`, `test_smp_cpu_logical_id_not_found`
+  - Data integrity: `test_smp_logical_map_consistent`, `test_smp_ap_stacks_allocated`
+  - Spinlock: `test_spinlock_mutual_exclusion`
+  - Layout: `test_smp_trampoline_param_offsets`
 
 ---
 
@@ -307,47 +357,34 @@ qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio
 
 ---
 
-## Milestone 7: Platform Abstraction Layer
+## Milestone 7: Platform Abstraction Layer — ~70% Complete
 
 ### Architecture Abstraction
-- ☐ Create `kernel/arch/` with clean separation:
-  ```
-  kernel/arch/
-  ├── arm64/          # Existing ARM64 code
-  │   ├── boot.S
-  │   ├── mmu.c
-  │   ├── context.S
-  │   ├── gic.c
-  │   └── timer.c
-  └── x86_64/         # New x86-64 code
-      ├── boot.S
-      ├── mmu.c
-      ├── context.S
-      ├── apic.c
-      └── timer.c
-  ```
-- ☐ Create architecture-independent headers in `kernel/include/arch.h`
-- ☐ Implement arch-specific functions with common API:
-  - ☐ `arch_init()` — platform initialization
-  - ☐ `arch_irq_enable()` / `arch_irq_disable()`
-  - ☐ `arch_get_cpu_id()`
-  - ☐ `arch_context_switch()`
-  - ☐ `arch_timer_init()` / `arch_timer_get_ns()`
+- ✅ `kernel/arch/arm64/` and `kernel/arch/x86_64/` clean separation
+- ✅ `pic.c` bridges `gic.h` interface to LAPIC+IOAPIC
+- ✅ `timer_x86.c` implements `timer.h` via LAPIC timer
+- ✅ `platform_x86.c` provides all platform stubs (SMP, VMM, DTB, Rust, GPU, components)
+- ✅ `uart_x86.c` implements `uart.h` via COM1 16550
+- ✅ `context.S` implements `switch_to()` for x86-64 ABI
+- ☐ Create `kernel/include/arch.h` with formal arch-agnostic API
+- ☐ `arch_irq_enable()` / `arch_irq_disable()` (currently inline in platform.h)
 
 ### Build System
-- ☐ Update CMakeLists.txt to select architecture
-- ☐ Create `ARCH=arm64` and `ARCH=x86_64` build options
-- ☐ Ensure both architectures build from same source tree
-- ☐ Update Makefile for architecture selection
+- ✅ CMakeLists.txt: `cmake -DPLATFORM=X86_64` selects x86-64 sources/flags/linker script
+- ✅ Conditional compilation: ARM64-only files excluded, x86-64 files included
+- ✅ Standalone build: `Makefile.test` for standalone test kernel + UEFI disk image
+- ✅ Both architectures build from same source tree
 
 ### Shared Code
-- ☐ Verify all shared code compiles for both architectures:
-  - ☐ Scheduler (policy)
-  - ☐ IPC (message queues, shared buffers)
-  - ☐ Shell
-  - ☐ ELF loader
-  - ☐ Model memory allocator (Rust)
-- ☐ Fix any architecture assumptions in "portable" code
+- ✅ Scheduler compiles and runs (preemptive scheduling verified)
+- ✅ IPC (message queues, shared buffers) compiles
+- ✅ Shell (30+ commands) compiles and runs
+- ✅ ELF loader compiles
+- ✅ PMM buddy allocator compiles and runs
+- ✅ VFS + LittleFS compiles and runs
+- ✅ Lua 5.4 interpreter compiles and runs (with x86-64 setjmp.S)
+- ☐ Rust runtime (model memory allocator) — needs x86-64 Cargo target
+- ☐ Networking (lwIP + VirtIO) — not yet ported
 
 ---
 
@@ -493,22 +530,21 @@ qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio
 ### Dependencies
 
 ```
-M1 (Boot) ──────> M2 (Memory) ──────> M3 (Interrupts) ──────> M4 (SMP)
+M1 (Boot) ✅ ──> M2 (Memory) ✅ ──> M3 (Interrupts) ✅ ──> M4 (SMP) ✅
                        │
-                       └──────> M5 (PCIe) ──────> M6 (GPU)
+                       └──────> M5 (PCIe) ← NEXT ──────> M6 (GPU)
                        
-M7 (Abstraction) ──────> Depends on M1-M4 being functional
+M7 (Abstraction) ~70% ──> Incrementally built with M1-M4
 
-M8 (Testing) ──────> Depends on M1-M6
+M8 (Testing) ──────> Depends on M5-M6
 
 M9 (Docs) ──────> Ongoing throughout
 ```
 
-**Critical Path:** M1 → M2 → M3 → M5 → M6 (GPU access)
+**Critical Path:** ~~M1 → M2 → M3 → M4~~ → **M5 (PCIe)** → M6 (GPU)
 
 **Parallel Work:**
-- M4 (SMP) can parallel with M5-M6
-- M7 (Abstraction) can start after M1-M4 basics work
+- M7 (Abstraction) ~70% done — remaining items are formal API headers
 - M9 (Docs) ongoing
 
 ---
@@ -571,6 +607,6 @@ M9 (Docs) ──────> Ongoing throughout
 ---
 
 *Created: January 2026*
-*Last Updated: January 2026 — M1 boot foundation ~80% complete*
+*Last Updated: April 2026 — M1-M4 complete (4-CPU SMP working), M7 ~70%, M5 PCIe next*
 *Purpose: Parallel development track for x86-64 + RTX 3050 GPU learning*
 *Relationship: Supports Phase 4 (Jetson) and Phase 5 (SLM Integration)*
