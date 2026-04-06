@@ -829,33 +829,26 @@ void schedule(void)
 #endif
 
     /*
-     * If called from the timer ISR, mask the LAPIC timer before
-     * releasing the lock. This prevents the timer ISR from calling
-     * scheduler_tick() → schedule() reentranly between lock release
-     * and switch_to (which would deadlock on the same-CPU spinlock).
+     * Mask the LAPIC timer before releasing the lock. This prevents the
+     * timer ISR from calling scheduler_tick() → schedule() between lock
+     * release and switch_to, which corrupts task_current() state.
      *
-     * Yield-initiated switches DON'T need masking because yield()
-     * is not called from the timer ISR — there's no reentrance risk.
-     * Masking on every switch would prevent the timer from firing
-     * while tasks are voluntarily yielding to each other.
+     * The timer is unmasked after switch_to returns (on the resumed
+     * task's stack). New tasks unmask it in task_entry_wrapper.
      */
 #if defined(PLATFORM_X86_64)
     extern void lapic_timer_mask(void);
     extern void lapic_timer_unmask(void);
-    int need_timer_mask = from_timer_isr[this_cpu];
-    if (need_timer_mask)
-        lapic_timer_mask();
+    lapic_timer_mask();
 #endif
 
     rq_unlock_irqrestore(this_cpu, flags);
 
-    /* switch_to saves current context and restores next's context */
     switch_to(current, next);
 
-    /* If the timer was masked by this schedule() instance, unmask it. */
+    /* Resumed: unmask timer so preemption continues */
 #if defined(PLATFORM_X86_64)
-    if (need_timer_mask)
-        lapic_timer_unmask();
+    lapic_timer_unmask();
 #endif
 }
 
