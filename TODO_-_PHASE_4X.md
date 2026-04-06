@@ -52,7 +52,7 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 | `kernel/arch/x86_64/Makefile.test` | Standalone build + UEFI disk image |
 | `kernel/kernel-x86_64.ld` | Linker script for x86-64 |
 | `kernel/drivers/uart_x86.c` | COM1 16550 UART driver |
-| `kernel/tests/test_x86_boot.c` | 80 functional tests |
+| `kernel/tests/test_x86_boot.c` | 82 functional tests |
 | `docs/x86-64-port.md` | Comprehensive documentation |
 
 **Technical Challenges Solved:**
@@ -114,7 +114,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - **ACPI MADT parsing** (`acpi.c`) — discovers CPUs, LAPIC base, IOAPIC, ISOs
 - **Platform abstraction** (`pic.c` bridges gic.h, `platform_x86.c` provides all stubs)
 - **Real x86-64 spinlocks** — TTAS with `__atomic_exchange_n`, atomic `cpus_online` increment
-- **80 functional tests** across 15 categories
+- **82 functional tests** across 16 categories
 
 ---
 
@@ -167,7 +167,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - ✅ Document boot configuration in `docs/x86-64-port.md`
 
 ### Testing & Documentation
-- ✅ Create functional tests (`test_x86_boot.c` — 77 tests across 15 categories)
+- ✅ Create functional tests (`test_x86_boot.c` — 82 tests across 16 categories)
   - ✅ Control register tests (CR0, CR4, EFER, CR3)
   - ✅ Page table structure tests (PML4, PDPT, PD entries)
   - ✅ GDT tests (limit, CS/DS selectors)

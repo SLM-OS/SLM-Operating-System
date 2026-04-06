@@ -26,21 +26,7 @@
 #include "uart.h"
 #include "shell.h"
 
-/* PCI interface (pci.c) */
-extern uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
-extern uint16_t pci_config_read16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
-extern void pci_config_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg, uint32_t val);
-
-struct pci_device_info {
-    uint8_t  bus, dev, func;
-    uint16_t vendor_id, device_id;
-    uint8_t  class_code, subclass, prog_if, header_type;
-    uint8_t  irq_line, irq_pin;
-    uint32_t bar[6];
-};
-extern const struct pci_device_info *pci_find_device(uint16_t vendor_id, uint16_t device_id);
-extern const struct pci_device_info *pci_find_class(uint8_t class_code, uint8_t subclass);
-extern uint32_t pci_get_device_count(void);
+#include "pci.h"
 
 /* ---- NVIDIA Register Offsets (BAR0) ---- */
 
@@ -177,12 +163,11 @@ void nvidia_gpu_init(void)
     nvidia_gpu.found = false;
 
     /* Find NVIDIA display device (class 03:00 = VGA, 03:02 = 3D) */
-    const struct pci_device_info *pci_dev = NULL;
+    const struct pci_device *pci_dev = NULL;
 
     /* Scan all PCI devices for NVIDIA vendor */
     for (uint32_t i = 0; i < pci_get_device_count(); i++) {
-        extern const struct pci_device_info *pci_get_device(uint32_t index);
-        const struct pci_device_info *d = pci_get_device(i);
+        const struct pci_device *d = pci_get_device(i);
         if (d && d->vendor_id == NVIDIA_VENDOR_ID && d->class_code == 0x03) {
             pci_dev = d;
             break;

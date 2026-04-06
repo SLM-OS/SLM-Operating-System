@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include "uart.h"
 #include "shell.h"
+#include "pci.h"
 
 /* ---- I/O Port Access ---- */
 
@@ -180,22 +181,8 @@ static void pci_init_ecam(void)
 
 /* ---- PCI Device List ---- */
 
+/* struct pci_device defined in pci.h */
 #define PCI_MAX_DEVICES 64
-
-struct pci_device {
-    uint8_t  bus;
-    uint8_t  dev;
-    uint8_t  func;
-    uint16_t vendor_id;
-    uint16_t device_id;
-    uint8_t  class_code;
-    uint8_t  subclass;
-    uint8_t  prog_if;
-    uint8_t  header_type;
-    uint8_t  irq_line;
-    uint8_t  irq_pin;
-    uint32_t bar[6];
-};
 
 static struct pci_device pci_devices[PCI_MAX_DEVICES];
 static uint32_t pci_device_count;

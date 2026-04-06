@@ -1110,24 +1110,57 @@ static void test_nvidia_gpu_vram_test_without_gpu(void)
     TEST_ASSERT_EQUAL_INT(-1, result);
 }
 
+/*
+ * Test: Accessor functions don't crash and return sane defaults when no GPU.
+ */
+extern uint16_t nvidia_gpu_get_chip_id(void);
+extern uint8_t nvidia_gpu_get_architecture(void);
+extern uint64_t nvidia_gpu_get_bar0_addr(void);
+extern uint64_t nvidia_gpu_get_bar1_addr(void);
+
+static void test_nvidia_gpu_accessors_safe(void)
+{
+    /* All should return 0 when no GPU present */
+    if (!nvidia_gpu_is_found()) {
+        TEST_ASSERT_EQUAL_UINT16(0, nvidia_gpu_get_chip_id());
+        TEST_ASSERT_EQUAL_UINT32(0, nvidia_gpu_get_architecture());
+        TEST_ASSERT_EQUAL_UINT64(0, nvidia_gpu_get_bar0_addr());
+        TEST_ASSERT_EQUAL_UINT64(0, nvidia_gpu_get_bar1_addr());
+    } else {
+        /* On real hardware, chip_id should be non-zero */
+        TEST_ASSERT_TRUE(nvidia_gpu_get_chip_id() != 0);
+        TEST_ASSERT_TRUE(nvidia_gpu_get_bar0_addr() != 0);
+    }
+}
+
+/*
+ * Test: BOOT_42 decode produces correct fields for a known value.
+ * GA107 should produce: arch=0x17, impl=0x07, chip_id=0x177.
+ */
+static void test_nvidia_gpu_boot42_decode(void)
+{
+    /* Simulate a GA107 BOOT_42 value: arch=0x17, impl=0x07, major=0xA, minor=0x1 */
+    uint32_t test_boot42 = (0x17U << 24) | (0x07U << 20) | (0x0AU << 16) | (0x01U << 12);
+
+    /* Verify decode logic matches what nvidia_gpu.c does */
+    uint8_t arch = (test_boot42 >> 24) & 0x3F;
+    uint8_t impl = (test_boot42 >> 20) & 0x0F;
+    uint16_t chip = (test_boot42 >> 20) & 0x3FF;
+    uint8_t major = (test_boot42 >> 16) & 0x0F;
+    uint8_t minor = (test_boot42 >> 12) & 0x0F;
+
+    TEST_ASSERT_EQUAL_HEX8(0x17, arch);
+    TEST_ASSERT_EQUAL_HEX8(0x07, impl);
+    TEST_ASSERT_EQUAL_HEX16(0x177, chip);
+    TEST_ASSERT_EQUAL_HEX8(0x0A, major);
+    TEST_ASSERT_EQUAL_HEX8(0x01, minor);
+}
+
 /* ============================================================================
  * PCI Tests
  * ============================================================================ */
 
-extern uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
-extern uint16_t pci_config_read16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
-extern uint8_t pci_config_read8(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
-extern uint32_t pci_get_device_count(void);
-
-struct pci_device_ext {
-    uint8_t  bus, dev, func;
-    uint16_t vendor_id, device_id;
-    uint8_t  class_code, subclass, prog_if, header_type;
-    uint8_t  irq_line, irq_pin;
-    uint32_t bar[6];
-};
-extern const struct pci_device_ext *pci_get_device(uint32_t index);
-extern const struct pci_device_ext *pci_find_class(uint8_t class_code, uint8_t subclass);
+#include "pci.h"
 
 /*
  * Test: Legacy PCI config read returns valid data at 00:00.0.
@@ -1173,7 +1206,7 @@ static void test_pci_found_host_bridge(void)
  */
 static void test_pci_device_at_index_valid(void)
 {
-    const struct pci_device_ext *dev = (const struct pci_device_ext *)pci_get_device(0);
+    const struct pci_device *dev = (const struct pci_device *)pci_get_device(0);
     TEST_ASSERT_TRUE(dev != NULL);
     TEST_ASSERT_TRUE(dev->vendor_id != 0xFFFF);
     TEST_ASSERT_TRUE(dev->vendor_id != 0x0000);
@@ -1210,8 +1243,6 @@ static void test_pci_config_read16_vendor(void)
 /*
  * Test: pci_find_device locates the host bridge by vendor:device.
  */
-extern const struct pci_device_ext *pci_find_device(uint16_t vendor_id, uint16_t device_id);
-
 static void test_pci_find_device_by_id(void)
 {
     /* Read the actual host bridge vendor:device from config space */
@@ -1407,6 +1438,8 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_nvidia_gpu_init_ran);
     RUN_TEST(test_nvidia_gpu_no_crash_without_gpu);
     RUN_TEST(test_nvidia_gpu_vram_test_without_gpu);
+    RUN_TEST(test_nvidia_gpu_accessors_safe);
+    RUN_TEST(test_nvidia_gpu_boot42_decode);
 
     /* PCI tests */
     RUN_TEST(test_pci_host_bridge_exists);

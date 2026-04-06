@@ -604,7 +604,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 80 tests across 16 categories:
+The `test_x86_boot.c` test suite contains 82 tests across 16 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -618,7 +618,7 @@ The `test_x86_boot.c` test suite contains 80 tests across 16 categories:
 | Timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
 | ACPI + APIC | 6 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, timer running |
 | SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
-| NVIDIA GPU | 3 | Init ran, no-crash without GPU, VRAM test returns -1 without GPU |
+| NVIDIA GPU | 5 | Init ran, no-crash without GPU, VRAM test -1 without GPU, accessors safe, BOOT_42 decode |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
 | Scheduler integration | 5 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick |
@@ -723,7 +723,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 80 tests: boot, IDT, APIC, SMP, spinlock, GPU, PCI, Multiboot2, platform, scheduler, setjmp |
+| `kernel/tests/test_x86_boot.c` | 82 tests: boot, IDT, APIC, SMP, spinlock, GPU, PCI, Multiboot2, platform, scheduler, setjmp |
 
 ---
 
