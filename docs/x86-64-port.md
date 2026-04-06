@@ -922,7 +922,7 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 - QEMU's `-kernel` flag does not support Multiboot2 on Ubuntu 24.04 (QEMU 8.2.2). Use GRUB ISO boot (`-cdrom`) instead.
 - NVIDIA GPU engine registers return 0xBADF5040 — this is expected (GSP firmware not loaded). See `docs/nvidia-gsp.md`.
-- Echo service IPC: `component send` reports "not running" because the echo task hasn't initialized its IPC queue before the shell sends. The echo task is on CPU 0 (same as shell) and only runs when the shell yields. A wait loop with `sleep_ms` is in place but the x86-64 SMP scheduler doesn't reliably preempt between same-CPU tasks during `component_run`. Counter component (no IPC) works reliably.
+- **x86-64 scheduler reentrance bug:** `yield()`-based sleep with 2+ user tasks on the same CPU deadlocks. Root cause: timer IRQ fires between `rq_unlock_irqrestore` and `switch_to` in `schedule()`, causing reentrant `schedule()` that corrupts saved context. Single task + shell works (counter component ✅). Multi-task IPC (echo service) requires fix. See commit `19a0259` for investigation details.
 - **Fixed (April 2026):** SMP timer tick rate was 8× too fast (all 8 CPUs incrementing `pit_ticks`). Now only BSP increments. `sleep_ms` accuracy verified: `sleep 3000` → 3020ms.
 - No higher-half kernel mapping — identity mapping only.
 - No networking on x86-64 — requires VirtIO-PCI transport (not MMIO).
