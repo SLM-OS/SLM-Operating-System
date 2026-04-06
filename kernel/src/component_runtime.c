@@ -100,8 +100,8 @@ static void echo_service_entry(void *arg)
     int msgs_received = 0;
     int idle_polls = 0;
 
-    /* Poll shared mailbox for messages (100ms intervals, ~30s max idle) */
-    while (idle_polls < 300) {
+    /* Poll shared mailbox for messages (100ms intervals, ~60s max idle) */
+    while (idle_polls < 600) {
         if (echo_mailbox.ready) {
             echo_mailbox.data[63] = '\0';
             msgs_received++;
@@ -263,24 +263,29 @@ int component_send_echo(const char *message)
         return -1;
     }
 
-    /* Direct echo: print the message immediately from the shell task.
-     * This avoids the multi-task scheduling issue on x86-64 where
-     * yield()-based IPC deadlocks with 2+ tasks on the same CPU.
-     * The echo service's poll loop will also see the mailbox if it
-     * gets a chance to run via timer preemption. */
-    uart_printf("[echo] Received: \"%s\" (direct from shell)\n", message);
-
-    /* Also set the mailbox for the echo task to see */
+    /* Copy message to shared mailbox */
     size_t len = 0;
     while (message[len] && len < 63) {
         ((volatile char *)echo_mailbox.data)[len] = message[len];
         len++;
     }
     ((volatile char *)echo_mailbox.data)[len] = '\0';
+
+    /* Signal echo service and wait for acknowledgment */
     echo_mailbox.ack = 0;
     echo_mailbox.ready = 1;
 
-    return 0;
+    extern void sleep_ms(uint32_t ms);
+    for (int i = 0; i < 40; i++) {  /* 40 × 50ms = 2s timeout */
+        if (echo_mailbox.ack) {
+            uart_printf("Message delivered to echo service\n");
+            return 0;
+        }
+        sleep_ms(50);
+    }
+
+    uart_printf("Echo service did not acknowledge (timeout)\n");
+    return -1;
 }
 
 /*

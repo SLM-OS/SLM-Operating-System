@@ -824,10 +824,30 @@ void schedule(void)
     cache_clean(&rq->zombie);
 #endif
 
+    /*
+     * Mask the LAPIC timer before releasing the lock. This prevents the
+     * timer ISR from calling scheduler_tick() → schedule() between lock
+     * release and switch_to, which would deadlock on the spinlock
+     * (same CPU, non-reentrant lock).
+     *
+     * The timer is unmasked after switch_to returns (on the resumed
+     * task's stack). New tasks unmask it in task_entry_wrapper.
+     */
+#if defined(PLATFORM_X86_64)
+    extern void lapic_timer_mask(void);
+    extern void lapic_timer_unmask(void);
+    lapic_timer_mask();
+#endif
+
     rq_unlock_irqrestore(this_cpu, flags);
 
     /* switch_to saves current context and restores next's context */
     switch_to(current, next);
+
+    /* Resumed here after being switched back. Re-enable the timer. */
+#if defined(PLATFORM_X86_64)
+    lapic_timer_unmask();
+#endif
 }
 
 /*
