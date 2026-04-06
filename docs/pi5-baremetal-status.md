@@ -225,19 +225,30 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
    - NC task struct fields: `task->state/next/context` all in NC memory
    - Spinlock on NC memory: hangs (`ldaxr`/`stxr` needs cacheable). Fixed by `rq_lock[]` separation.
 
-   **Investigation areas for next agent:**
-   1. **Secondary CPU timer interrupt delivery:** Do CPUs 1-3 receive timer IRQs after `timer_start()`? The timer is per-CPU (physical timer, IRQ 30). Each secondary calls `timer_percpu_init()` during boot. Add a debug counter incremented in `timer_handler()` per-CPU and dump via shell command.
-   2. **Secondary CPU `schedule()` execution:** Does `schedule()` actually run on CPU 1 after timer IRQ? The idle task calls `wfi`, timer fires, exception vector calls `timer_irq_handler()` → `scheduler_tick()` → `schedule()`. Add a per-CPU debug counter in `schedule()` entry.
-   3. **`rq_lock[]` cross-CPU contention:** CPU 0 holds `rq_lock[1]` briefly to add a task. If CPU 1's `schedule()` tries to acquire `rq_lock[1]` simultaneously, does the cacheable spinlock work across CPUs? Spinlocks were validated during boot, but under concurrent load the behavior may differ. Test with a simple NC flag instead of the spinlock.
-   4. **`pick_next_task()` return value:** After `schedule()` acquires the lock, does `cpu_rq(1)->head` return the dispatched task? Since the run queue is NC, the pointer should be visible. Add a debug print: `if (rq->head) DEBUG_PRINT("CPU %u: found task '%s'", ...)`.
-   5. **Context switch to dispatched task:** If `pick_next_task()` finds the task, does `switch_to()` complete? The task context is NC. The task stack is cacheable (allocated by CPU 0 via PMM). The stack contents are never read by CPU 1 until the task starts executing — the stack grows from `stack_top` and was never cached by CPU 1.
+   **ROOT CAUSE FOUND (April 6, 2026): Timer interrupts never fire.**
+
+   Per-CPU diagnostic counters (`cpu` shell command) prove `timer_handler()` is never called on ANY CPU:
+   ```
+   CPU  Ticks  Schedule   Picked
+     0      0  2871229   2871230   ← all schedule() calls from yield(), 0 from timer
+     1      0        0         0   ← stuck in WFI forever
+     2      0        0         0
+     3      0        0         0
+   ```
+
+   **Why:** All tasks start with `DAIF=0x080` (IRQ masked) to prevent context corruption during the first `context.S` restore. The tasks never unmask IRQs. Only the idle task unmasks (in its `while` loop), but on CPU 0 the shell's `yield()`-polling runs continuously, so the idle task never executes. On CPUs 1-3, the idle task unmasks and calls `wfi`, but since the timer IS running (started by `timer_start()` in `secondary_init`), they SHOULD get timer IRQs. The issue may be that the idle task on secondary CPUs also has the DAIF bug — investigate further.
+
+   **Fix identified (not yet applied — causes hang when both changes applied together):**
+   1. Unmask IRQs in `task_entry_trampoline()` after context restore completes
+   2. Remove the `msr daifclr, #0x2` in `scheduler_start()` (unsafe on boot stack — timer could fire before `switch_to()`, corrupting context)
+   3. Both changes needed atomically — either alone causes a different hang
 
    **Key code locations:**
-   - CPU 0 pinning: `kernel/sched/sched.c`, `scheduler_add_task()` — the `#if defined(PLATFORM_RASPI5)` block
-   - Run queue lock: `rq_lock[]` array and `rq_lock_irqsave()`/`rq_unlock_irqrestore()` in `sched.c`
-   - Timer per-CPU init: `kernel/drivers/timer.c`, `timer_percpu_init()`
-   - Scheduler entry: `kernel/sched/sched.c`, `schedule()` function
-   - Context switch: `kernel/arch/arm64/context.S`, `switch_to()`
+   - Task DAIF init: `kernel/sched/task.c`, `task_create_with_priority()` line ~251 (`context.daif = 0x080`)
+   - Task entry unmask: `kernel/sched/task.c`, `task_entry_trampoline()` (TODO comment)
+   - Boot-stack unmask: `kernel/sched/sched.c`, `scheduler_start()` (NOTE comment)
+   - Idle task unmask: `kernel/sched/sched.c`, `idle_task_func()` line ~125 (`daifclr`)
+   - Diagnostics: `sched_diag_tick[]`, `sched_diag_schedule[]`, `sched_diag_picked[]`, `timer_handler_count` — all visible via `cpu` command
 
    **Root cause note:** The Cortex-A76 does NOT have an SMPEN bit (unlike A53/A72). The `cpu_has_smpen()` function reads bit 6 of `S3_0_C15_C1_4` which is a different field on A76. The DSU is supposed to provide coherency automatically per ARM TRM, but BCM2712's implementation does not appear to do so for regular loads/stores.
 
