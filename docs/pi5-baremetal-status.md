@@ -1,11 +1,11 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
 **Date:** April 5, 2026
-**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (420 tests: 404 pass, 16 ignored, 0 failures).
+**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (420 tests: 404 pass, 16 ignored, 0 failures). 100% boot reliability (92/92 power cycles). Context switch: 1.7 µs.
 
 ## Summary
 
-SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (413 tests across 14 suites) passes with zero failures on Pi 5 hardware.
+SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (420 tests across 14 suites) passes with zero failures on Pi 5 hardware.
 
 **Preemptive scheduling is active** — timer interrupts drive context switching at 100 Hz. The shell accepts input and responds to commands with preemption enabled. Two RP1-specific GPIO pad configurations were required for UART RX (OD=1, FUNCSEL sequencing). The armstub is currently disabled (separate issue; see Known Limitations).
 
@@ -44,7 +44,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | Performance benchmarks | ✅ Working | `bench all` — context switch, IRQ, IPC, stats |
 | UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
 | Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
-| UART RX IRQ | 🔧 In progress | PCIe RC→MIP→GIC path configured, MSI-X table TBD |
+| UART RX IRQ | ⏸️ On hold | PCIe RC→MIP→GIC path configured, BAR1 routing TBD |
 
 ## Test Results (April 5, 2026)
 
@@ -80,6 +80,48 @@ Full test suite runs on Pi 5 hardware with zero failures:
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM
 2. DC CIVAC writeback bug: CPU 0's stale dirty cacheline for `cpu_data[]` overwrote secondary CPUs' `online=true` at PoC (fixed by `cache_clean_range` before booting secondaries)
 3. task_exit/schedule race: timer could fire between state=TERMINATED and scheduler_remove_task(), causing panic (fixed by masking IRQs in task_exit)
+
+## Boot Reliability (April 5, 2026)
+
+100-cycle automated boot test via `labctl boot_test`:
+
+| Metric | Value |
+|--------|-------|
+| Total runs | 100 |
+| Kernel boots successful | 92/92 (100%) |
+| Infrastructure failures | 8 (Kasa smart plug auth timeouts) |
+| Average boot time | 10.1s (power-on to shell prompt) |
+| Boot time range | 9.6s – 10.2s |
+
+All 8 failures were Kasa smart plug authentication errors (transient cloud API issue), not kernel failures. Every boot that successfully power-cycled reached the `slmos>` shell prompt — **zero kernel boot failures in 92 consecutive boots**.
+
+## Performance Benchmarks (April 5, 2026)
+
+Measured on Pi 5 hardware (Cortex-A76 @ default clock, 4 GB RAM) using the `bench all` shell command:
+
+| Benchmark | Result | Rating |
+|-----------|--------|--------|
+| Context switch (round-trip) | 1,737 ns (1.7 µs) | Excellent (< 10 µs) |
+| Timer tick jitter (min) | 1,685 ns | |
+| Timer tick jitter (avg) | 1,776 ns | |
+| Timer tick jitter (max) | 2,370 ns | |
+| Timer tick jitter (range) | 685 ns | |
+| IPC send+recv round-trip | 322 ns | |
+
+**QEMU comparison** (same kernel, `qemu-system-aarch64 -M virt`):
+
+| Benchmark | Pi 5 | QEMU | Notes |
+|-----------|------|------|-------|
+| Context switch | 1,737 ns | 2,513 ns | Pi 5 ~1.4x faster |
+| Timer jitter (max) | 2,370 ns | 11,616 ns | Pi 5 much tighter |
+| IPC round-trip | 322 ns | 1,773 ns | Pi 5 ~5.5x faster |
+
+**Notes:**
+- Context switch benchmark creates a high-priority task and measures 99 round-trips between yield pairs
+- Timer jitter measured over 20 consecutive samples from the 54 MHz ARM Generic Timer (Pi 5) / 62.5 MHz (QEMU)
+- IPC benchmark measures 100 synchronous message queue send+receive iterations
+- All Pi 5 measurements taken at shell prompt with 4 CPUs online and preemptive scheduling active
+- QEMU numbers are from the `bench all` shell test (test_shell_cmd_bench_all), not the unit test benchmark
 
 ## Interrupt-Driven UART (On Hold)
 
