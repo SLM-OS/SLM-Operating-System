@@ -270,13 +270,13 @@ int cmd_cpu(int argc, char *argv[])
             }
         }
 
-        /* BAR1 and MIP verification */
+        /* BAR3 → MIP0 verification (BAR1 is firmware's RP1 MMIO mapping) */
         {
-            volatile uint32_t *b1lo = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + 0x402C);
-            volatile uint32_t *b1hi = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + 0x4030);
-            volatile uint32_t *rlo  = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + 0x40AC);
-            volatile uint32_t *rhi  = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + 0x40B0);
-            uart_printf("  BAR1: %x_%08x remap=%x_%08x\r\n", *b1hi, *b1lo, *rhi, *rlo);
+            volatile uint32_t *b3lo = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + PCIE_RC_BAR3_CONFIG_LO);
+            volatile uint32_t *b3hi = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + PCIE_RC_BAR3_CONFIG_HI);
+            volatile uint32_t *rlo  = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + PCIE_RC_UBUS_BAR3_REMAP);
+            volatile uint32_t *rhi  = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + PCIE_RC_UBUS_BAR3_REMAP_HI);
+            uart_printf("  BAR3: %x_%08x remap=%x_%08x\r\n", *b3hi, *b3lo, *rhi, *rlo);
         }
     }
 #endif

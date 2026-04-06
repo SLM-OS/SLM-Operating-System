@@ -87,7 +87,7 @@ static void echo_service_entry(void *arg)
     /* Create IPC queue for receiving messages */
     struct msg_queue *q = msg_queue_create(8, 64);
     echo_service_queue = q;
-    __asm__ volatile("mfence" ::: "memory");  /* Ensure visible to other CPUs */
+    __asm__ volatile("dmb sy" ::: "memory");  /* Ensure visible to other CPUs */
     if (!q) {
         uart_printf("[echo] Failed to create message queue\n");
         component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);

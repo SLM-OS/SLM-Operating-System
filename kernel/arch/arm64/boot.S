@@ -372,18 +372,29 @@ real_start:
     str     w11, [x10]
     dsb     sy
 
-    /* RC BAR1 → MIP0 routing */
-    ldr     x10, =0x100012402C
-    ldr     w11, =0xFFFFF01C
+    /* RC BAR3 → MIP0 routing (BAR1 is used by firmware for RP1 MMIO).
+     * Linux uses BAR3 for MSI-X inbound capture — confirmed by register dump.
+     * PCI address 0xFF_FFFFF000 (device tree value, NOT Circle's 0x0F). */
+    ldr     x10, =0x100012403C     /* BAR3_CONFIG_LO */
+    ldr     w11, =0xFFFFF01C       /* addr=0xFFFFF000, size=4KB */
     str     w11, [x10]
-    ldr     x10, =0x1000124030
-    mov     w11, #0x0F             /* BAR1 PCIe addr hi (Circle: 0x0F, not 0xFF) */
+    ldr     x10, =0x1000124040     /* BAR3_CONFIG_HI */
+    mov     w11, #0xFF             /* PCI addr hi = 0xFF (from DT, confirmed by Linux) */
     str     w11, [x10]
-    ldr     x10, =0x10001240AC
-    ldr     w11, =0x00130001
+    ldr     x10, =0x10001240BC     /* UBUS_BAR3_REMAP */
+    ldr     w11, =0x00130001       /* → MIP0 at 0x00130000, access_en=1 */
     str     w11, [x10]
-    ldr     x10, =0x10001240B0
-    mov     w11, #0x10
+    ldr     x10, =0x10001240C0     /* UBUS_BAR3_REMAP_HI */
+    mov     w11, #0x10             /* → 0x10_00130000 */
+    str     w11, [x10]
+    dsb     sy
+
+    /* Set MISC_CTRL bits that Linux sets (may be needed for BAR3 matching) */
+    ldr     x10, =0x1000124008     /* MISC_CTRL */
+    ldr     w11, [x10]             /* Read current value */
+    orr     w11, w11, #(1 << 12)   /* SCB_ACCESS_EN */
+    orr     w11, w11, #(1 << 13)   /* CFG_READ_UR_MODE */
+    orr     w11, w11, #(1 << 17)   /* RCB_MPS */
     str     w11, [x10]
     dsb     sy
 
@@ -422,12 +433,10 @@ real_start:
     mov     x10, #0x3c4             /* EL1h, DAIF masked */
     msr     spsr_el2, x10
     /*
-     * Configure PCIe RC BAR1 → MIP0 routing (must be done from EL2).
+     * PCIe RC BAR3 → MIP0 routing was configured above (must be done from EL2).
      * PCIe RC register writes hang from EL1 — the hardware restricts
-     * write access to EL2+. This routes RP1 MSI-X writes (PCIe addr
+     * write access to EL2+. BAR3 routes RP1 MSI-X writes (PCIe addr
      * 0xFF_FFFFF000) to MIP0 (phys 0x10_00130000) for interrupt delivery.
-     *
-     * RC base: 0x10_00120000 (pcie2 for RP1)
      */
     /*
      * Enable MSI-X in RP1 PCIe config space (requires EL2 for writes).
