@@ -353,8 +353,9 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - ✅ Verified on real i7-6700 + RTX 3050: GA107 (0x177), Ampere, Rev 10.1, BAR0=0x53000000, BAR1=0x40000000
 
 ### VRAM Access
-- ✅ `nvidia_gpu_vram_test()` — write/read pattern to BAR1 VRAM (implemented)
-- ☐ Verify VRAM test on real hardware (BAR1 at 0x40000000, 256 MB)
+- ✅ `nvidia_gpu_vram_test()` — write/read pattern to BAR1 VRAM
+- ✅ `nvidia_gpu_vram_test_extended()` — tests 5 offsets across 128 MB aperture
+- ✅ Verified on real hardware: all 5 offsets PASS (0, 1MB, 16MB, 64MB, 128MB)
 - ☐ VRAM size detection via resizable BAR or bar size probing
 
 ### GSP Firmware Study

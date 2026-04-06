@@ -463,7 +463,9 @@ After PCI enumeration finds an NVIDIA device (vendor 0x10DE, display class 0x03)
 
 ### Shell Commands
 
-- `gpu` — shows GPU model, chip ID, architecture, BARs, PMC_ENABLE register
+- `gpu` — shows GPU model, chip ID, architecture, BARs, PMC_ENABLE
+- `gpu vram` — runs extended VRAM write/read test across 5 offsets
+- `gpu regs` — reads additional BAR0 registers (PTIMER, PBUS, PSTRAPS)
 - `pci` — highlights NVIDIA devices with BAR details
 
 ### Key Registers Read (BAR0)
@@ -494,7 +496,24 @@ System context: 8/8 CPUs online, 20 GB RAM, ECAM at 0xC0000000, 21 PCI devices.
 
 ### VRAM Test
 
-`nvidia_gpu_vram_test()` writes a 64-word pattern to BAR1 and reads it back. Verifies CPU ↔ VRAM data path via PCIe.
+`gpu vram` shell command runs an extended VRAM test across 5 offsets (0, 1MB, 16MB, 64MB, 128MB). Each offset writes a 64-word XOR pattern and reads it back.
+
+Verified on real hardware (April 2026): all 5 offsets PASS.
+
+```
+slmos> gpu vram
+VRAM Test (BAR1 at 0x40000000, 256 MB):
+  Offset 0x00000000: PASS (64 words)
+  Offset 0x00100000: PASS (64 words)
+  Offset 0x01000000: PASS (64 words)
+  Offset 0x04000000: PASS (64 words)
+  Offset 0x08000000: PASS (64 words)
+Result: PASSED
+```
+
+### GPU Register Observations
+
+Registers belonging to uninitialized engines (PBUS, PMC_INTR) return 0xBADF5040 — the GPU's default "engine not initialized" response. This indicates GSP firmware has not been loaded. PTIMER and PSTRAPS are readable because they don't require GSP.
 
 ### Key Files
 

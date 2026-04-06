@@ -303,16 +303,98 @@ int nvidia_gpu_vram_test(void)
 
 /* ---- Shell Command ---- */
 
+/*
+ * Extended VRAM test — tests multiple offsets across the aperture.
+ * Returns 0 on success, -1 on failure.
+ */
+int nvidia_gpu_vram_test_extended(void)
+{
+    if (!nvidia_gpu.found || !nvidia_gpu.bar1 || nvidia_gpu.bar1_size == 0) {
+        uart_printf("[GPU] VRAM test: no GPU or BAR1 not mapped\n");
+        return -1;
+    }
+
+    volatile uint32_t *vram = (volatile uint32_t *)nvidia_gpu.bar1;
+    uint64_t aperture_words = nvidia_gpu.bar1_size / 4;
+    int total_errors = 0;
+
+    /* Test at multiple offsets: 0, 1MB, 16MB, 64MB, 128MB */
+    uint64_t offsets[] = {0, 256*1024, 4*1024*1024, 16*1024*1024, 32*1024*1024};
+    int num_offsets = 5;
+
+    for (int t = 0; t < num_offsets; t++) {
+        uint64_t word_offset = offsets[t];
+        if (word_offset + 64 > aperture_words) {
+            uart_printf("[GPU]   Offset 0x%lx: beyond aperture, skipped\n",
+                        word_offset * 4);
+            continue;
+        }
+
+        uint32_t pattern = 0xA5A5A5A5 ^ (uint32_t)t;
+        int errors = 0;
+
+        /* Write pattern */
+        for (int i = 0; i < 64; i++)
+            vram[word_offset + i] = pattern ^ (uint32_t)i;
+
+        __asm__ volatile("mfence" ::: "memory");
+
+        /* Read back */
+        for (int i = 0; i < 64; i++) {
+            uint32_t expected = pattern ^ (uint32_t)i;
+            uint32_t actual = vram[word_offset + i];
+            if (actual != expected) {
+                if (errors == 0)
+                    uart_printf("[GPU]   Offset 0x%lx+%d: expected 0x%08x, got 0x%08x\n",
+                                word_offset * 4, i * 4, expected, actual);
+                errors++;
+            }
+        }
+
+        if (errors == 0) {
+            uart_printf("[GPU]   Offset 0x%08lx: PASS (64 words)\n", word_offset * 4);
+        } else {
+            uart_printf("[GPU]   Offset 0x%08lx: FAIL (%d errors)\n", word_offset * 4, errors);
+            total_errors += errors;
+        }
+    }
+
+    return total_errors == 0 ? 0 : -1;
+}
+
 static int cmd_gpu(int argc, char *argv[])
 {
-    (void)argc; (void)argv;
-
     if (!nvidia_gpu.found) {
         uart_printf("No NVIDIA GPU detected.\n");
-        uart_printf("(GPU identification requires real hardware with RTX 3050)\n");
         return 0;
     }
 
+    /* Subcommand: "gpu vram" runs VRAM test */
+    if (argc >= 2 && argv[1][0] == 'v') {
+        uart_printf("VRAM Test (BAR1 at 0x%lx, %lu MB):\n",
+                    nvidia_gpu.bar1_addr,
+                    (unsigned long)(nvidia_gpu.bar1_size / (1024 * 1024)));
+        int result = nvidia_gpu_vram_test_extended();
+        uart_printf("Result: %s\n", result == 0 ? "PASSED" : "FAILED");
+        return result;
+    }
+
+    /* Subcommand: "gpu regs" reads additional registers */
+    if (argc >= 2 && argv[1][0] == 'r') {
+        uart_printf("GPU Registers (BAR0 at 0x%lx):\n", nvidia_gpu.bar0_addr);
+        uart_printf("  PMC_BOOT_0:    0x%08x\n", nvidia_gpu.bar0[0x000 / 4]);
+        uart_printf("  PMC_BOOT_42:   0x%08x\n", nvidia_gpu.bar0[0xA00 / 4]);
+        uart_printf("  PMC_ENABLE:    0x%08x\n", nvidia_gpu.bar0[0x200 / 4]);
+        uart_printf("  PMC_INTR_HOST: 0x%08x\n", nvidia_gpu.bar0[0x100 / 4]);
+        uart_printf("  PMC_INTR_EN:   0x%08x\n", nvidia_gpu.bar0[0x140 / 4]);
+        uart_printf("  PTIMER_TIME_0: 0x%08x\n", nvidia_gpu.bar0[0x9400 / 4]);
+        uart_printf("  PTIMER_TIME_1: 0x%08x\n", nvidia_gpu.bar0[0x9410 / 4]);
+        uart_printf("  PBUS[0x1000]:  0x%08x\n", nvidia_gpu.bar0[0x1000 / 4]);
+        uart_printf("  PSTRAPS:       0x%08x\n", nvidia_gpu.bar0[0x101000 / 4]);
+        return 0;
+    }
+
+    /* Default: show GPU info */
     uart_printf("NVIDIA GPU: %s (%s)\n",
                 impl_name(nvidia_gpu.architecture, nvidia_gpu.implementation),
                 arch_name(nvidia_gpu.architecture));
@@ -329,11 +411,12 @@ static int cmd_gpu(int argc, char *argv[])
                 nvidia_gpu.bar1_addr,
                 (unsigned long)(nvidia_gpu.bar1_size / (1024 * 1024)));
 
-    /* Read current PMC state */
     uint32_t pmc_enable = nvidia_gpu.bar0[NV_PMC_ENABLE / 4];
     uint32_t pmc_intr = nvidia_gpu.bar0[NV_PMC_INTR_HOST / 4];
     uart_printf("  PMC_ENABLE:    0x%08x\n", pmc_enable);
     uart_printf("  PMC_INTR_HOST: 0x%08x\n", pmc_intr);
+
+    uart_printf("\nSubcommands: gpu vram, gpu regs\n");
 
     return 0;
 }
@@ -341,7 +424,7 @@ static int cmd_gpu(int argc, char *argv[])
 static const shell_cmd_t gpu_nvidia_cmd = {
     .name = "gpu",
     .handler = cmd_gpu,
-    .help = "Show NVIDIA GPU info (registers, BARs, architecture)"
+    .help = "NVIDIA GPU info (gpu vram | gpu regs)"
 };
 
 void nvidia_gpu_register_shell_commands(void)
