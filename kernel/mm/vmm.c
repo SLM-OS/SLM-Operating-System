@@ -733,7 +733,7 @@ static void vmm_setup_platform(void)
      * On Jetson, stop before OP-TEE carveout at 0xBE000000 (L2 entry 496).
      * On QEMU, map up to 1GB. */
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    #define KERNEL_L2_LIMIT 496  /* 496 * 2MB = 992 MB → 0x80000000-0xBDFFFFFF */
+    #define KERNEL_L2_LIMIT 495  /* 495 * 2MB = 990 MB → 0x80000000-0xBDDFFFFF (WB) */
 #else
     #define KERNEL_L2_LIMIT 512
 #endif
@@ -744,6 +744,18 @@ static void vmm_setup_platform(void)
         l2_kernel[i] = make_block_desc(pa, kernel_flags);
         vmm_state.blocks_mapped++;
     }
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Entry 495: NC 2MB block at 0xBDE00000 for cross-CPU shared data.
+     * This is the last 2MB of region 1 (before OP-TEE carveout at 0xBE000000).
+     * Mapped as Normal Non-Cacheable, Inner Shareable (MAIR index 2). */
+    {
+        uint32_t nc_flags = VMM_FLAG_NOCACHE | VMM_FLAG_READ | VMM_FLAG_WRITE;
+        l2_kernel[495] = make_block_desc(0xBDE00000UL, nc_flags);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  L2[495]: NC block at 0xBDE00000 (cross-CPU shared memory)");
+    }
+#endif
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /*

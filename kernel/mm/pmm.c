@@ -443,7 +443,7 @@ void pmm_init(void)
      * Region 3 has internal reserved sub-regions above 0x240000000.
      * Use 0x240000000 as a conservative upper bound.
      */
-    pmm_add_region(buddy_state.heap_start, 0xBE000000UL);
+    pmm_add_region(buddy_state.heap_start, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
     pmm_add_region(0xC2000000UL, 0xFFFE0000UL);
     pmm_add_region(0x100000000UL, 0x240000000UL);
 #else
