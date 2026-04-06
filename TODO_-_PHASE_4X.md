@@ -52,7 +52,7 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 | `kernel/arch/x86_64/Makefile.test` | Standalone build + UEFI disk image |
 | `kernel/kernel-x86_64.ld` | Linker script for x86-64 |
 | `kernel/drivers/uart_x86.c` | COM1 16550 UART driver |
-| `kernel/tests/test_x86_boot.c` | 82 functional tests |
+| `kernel/tests/test_x86_boot.c` | 84 functional tests |
 | `docs/x86-64-port.md` | Comprehensive documentation |
 
 **Technical Challenges Solved:**
@@ -114,7 +114,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - **ACPI MADT parsing** (`acpi.c`) — discovers CPUs, LAPIC base, IOAPIC, ISOs
 - **Platform abstraction** (`pic.c` bridges gic.h, `platform_x86.c` provides all stubs)
 - **Real x86-64 spinlocks** — TTAS with `__atomic_exchange_n`, atomic `cpus_online` increment
-- **82 functional tests** across 16 categories
+- **84 functional tests** across 16 categories
 
 ---
 
@@ -167,7 +167,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - ✅ Document boot configuration in `docs/x86-64-port.md`
 
 ### Testing & Documentation
-- ✅ Create functional tests (`test_x86_boot.c` — 82 tests across 16 categories)
+- ✅ Create functional tests (`test_x86_boot.c` — 84 tests across 16 categories)
   - ✅ Control register tests (CR0, CR4, EFER, CR3)
   - ✅ Page table structure tests (PML4, PDPT, PD entries)
   - ✅ GDT tests (limit, CS/DS selectors)
@@ -350,11 +350,11 @@ make -f kernel/arch/x86_64/Makefile.test disk
   - ✅ Read NV_PMC_ENABLE for engine status
 - ✅ `gpu` shell command — shows GPU info, BARs, registers
 - ✅ Graceful no-GPU path (QEMU: "No NVIDIA GPU found")
-- ☐ Verify on real i7-6700 + RTX 3050 hardware
+- ✅ Verified on real i7-6700 + RTX 3050: GA107 (0x177), Ampere, Rev 10.1, BAR0=0x53000000, BAR1=0x40000000
 
 ### VRAM Access
-- ✅ `nvidia_gpu_vram_test()` — write/read pattern to BAR1 VRAM
-- ☐ Verify VRAM test on real hardware
+- ✅ `nvidia_gpu_vram_test()` — write/read pattern to BAR1 VRAM (implemented)
+- ☐ Verify VRAM test on real hardware (BAR1 at 0x40000000, 256 MB)
 - ☐ VRAM size detection via resizable BAR or bar size probing
 
 ### GSP Firmware Study

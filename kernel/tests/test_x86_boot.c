@@ -1134,6 +1134,24 @@ static void test_nvidia_gpu_accessors_safe(void)
 }
 
 /*
+ * Test: Shell commands 'pci' and 'gpu' are registered and callable.
+ */
+extern int shell_execute(const char *cmdline);
+
+static void test_nvidia_gpu_shell_command_registered(void)
+{
+    /* shell_execute returns 0 on success, -1 if command not found */
+    int result = shell_execute("gpu");
+    TEST_ASSERT_TRUE(result >= 0);  /* Command found (0 = success) */
+}
+
+static void test_pci_shell_command_registered(void)
+{
+    int result = shell_execute("pci");
+    TEST_ASSERT_TRUE(result >= 0);
+}
+
+/*
  * Test: BOOT_42 decode produces correct fields for a known value.
  * GA107 should produce: arch=0x17, impl=0x07, chip_id=0x177.
  */
@@ -1440,6 +1458,8 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_nvidia_gpu_vram_test_without_gpu);
     RUN_TEST(test_nvidia_gpu_accessors_safe);
     RUN_TEST(test_nvidia_gpu_boot42_decode);
+    RUN_TEST(test_nvidia_gpu_shell_command_registered);
+    RUN_TEST(test_pci_shell_command_registered);
 
     /* PCI tests */
     RUN_TEST(test_pci_host_bridge_exists);

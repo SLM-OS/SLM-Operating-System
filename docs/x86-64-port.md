@@ -474,6 +474,24 @@ After PCI enumeration finds an NVIDIA device (vendor 0x10DE, display class 0x03)
 | 0xA00 | NV_PMC_BOOT_42 | Preferred GPU identification |
 | 0x200 | NV_PMC_ENABLE | Engine master enable bitmap |
 
+### Hardware Verification (i7-6700 + RTX 3050)
+
+Verified on Gigabyte H610M S2H V2 via labctl (April 2026):
+
+```
+NVIDIA GPU: GA107 (Ampere)
+  PCI:      01:00.0 (device 0x2584)
+  Chip ID:  0x177 (rev 10.1)
+  BOOT_0:   0xB77000A1
+  BOOT_42:  0x177A1000
+  BAR0:     0x53000000 (16 MB MMIO)
+  BAR1:     0x40000000 (256 MB VRAM)
+  PMC_ENABLE:    0x40000000
+  PMC_INTR_HOST: 0xBADF5040
+```
+
+System context: 8/8 CPUs online, 20 GB RAM, ECAM at 0xC0000000, 21 PCI devices.
+
 ### VRAM Test
 
 `nvidia_gpu_vram_test()` writes a 64-word pattern to BAR1 and reads it back. Verifies CPU ↔ VRAM data path via PCIe.
@@ -604,7 +622,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 82 tests across 16 categories:
+The `test_x86_boot.c` test suite contains 84 tests across 16 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -618,7 +636,7 @@ The `test_x86_boot.c` test suite contains 82 tests across 16 categories:
 | Timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
 | ACPI + APIC | 6 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, timer running |
 | SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
-| NVIDIA GPU | 5 | Init ran, no-crash without GPU, VRAM test -1 without GPU, accessors safe, BOOT_42 decode |
+| NVIDIA GPU | 7 | Init ran, no-crash, VRAM test -1 without GPU, accessors safe, BOOT_42 decode, gpu/pci shell commands registered |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
 | Scheduler integration | 5 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick |
@@ -723,7 +741,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 82 tests: boot, IDT, APIC, SMP, spinlock, GPU, PCI, Multiboot2, platform, scheduler, setjmp |
+| `kernel/tests/test_x86_boot.c` | 84 tests: boot, IDT, APIC, SMP, spinlock, GPU, PCI, Multiboot2, platform, scheduler, setjmp |
 
 ---
 
