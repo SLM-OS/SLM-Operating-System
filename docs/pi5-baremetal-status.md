@@ -454,5 +454,4 @@ Initially planned to port Circle's PCIe/RP1 initialization (~1500 lines of C). D
 
 - [Circle bare-metal framework](https://github.com/rsta2/circle)
 - [Raspberry Pi config.txt documentation](https://www.raspberrypi.com/documentation/computers/config_txt.html)
-- `docs/pi5-uart-testing-status.md` - Detailed UART investigation notes
-- `docs/pi5-pe-header-analysis.md` - PE header issue analysis
+- `docs/pi5-uart-irq-investigation.md` - PCIe BAR1/MSI-X investigation for interrupt-driven UART

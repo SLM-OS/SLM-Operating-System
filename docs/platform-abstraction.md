@@ -546,11 +546,11 @@ The Pi 5's GPIO and UART are on the RP1 chip, connected via PCIe:
 
 ### Driver
 
-The driver `uart_rp1_bitbang.c` (despite the name) uses hardware PL011:
-- TX: Hardware UART with fixed delay (no flag polling)
-- RX: Bit-banged via RIO for reliability
+The driver `uart_rp1.c` uses hardware PL011:
+- TX: PL011 flag register polling (TXFF bit)
+- RX: PL011 flag register polling (RXFE bit) with GPIO pad config (OD=1, FUNCSEL 5→4)
 
-See `docs/pi5-uart-testing-status.md` for full details.
+See `docs/pi5-baremetal-status.md` for full details.
 
 ---
 
