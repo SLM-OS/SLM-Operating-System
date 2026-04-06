@@ -826,8 +826,11 @@ void schedule(void)
 
     rq_unlock_irqrestore(this_cpu, flags);
 
-    /* switch_to saves current context and restores next's context */
+    /* switch_to saves current context and restores next's context.
+     * Reentrant schedule() from timer ISR is blocked by the per-CPU
+     * schedule_in_progress guard until we clear it after resuming. */
     switch_to(current, next);
+
 }
 
 /*

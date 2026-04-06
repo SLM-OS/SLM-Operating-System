@@ -100,8 +100,8 @@ static void echo_service_entry(void *arg)
     int msgs_received = 0;
     int idle_polls = 0;
 
-    /* Poll shared mailbox for messages */
-    while (idle_polls < 40) {  /* ~20 seconds max idle */
+    /* Poll shared mailbox for messages (100ms intervals, ~30s max idle) */
+    while (idle_polls < 300) {
         if (echo_mailbox.ready) {
             echo_mailbox.data[63] = '\0';
             msgs_received++;
@@ -112,7 +112,7 @@ static void echo_service_entry(void *arg)
             echo_mailbox.ack = 1;
         } else {
             idle_polls++;
-            sleep_ms(500);
+            sleep_ms(100);
         }
     }
 
@@ -228,20 +228,25 @@ int component_run(const char *name)
         return -1;
     }
 
-    /* Reset echo mailbox for echo service */
+    /* Pre-initialize echo service state (before task starts) */
     if (bc->entry == echo_service_entry) {
         echo_mailbox.ready = 0;
         echo_mailbox.ack = 0;
-        echo_running = 0;
+        echo_running = 1;  /* Set BEFORE task starts so send sees it immediately */
     }
+
+    /* Pin component tasks to CPU 0 so they share the scheduler with shell
+     * and IPC via shared memory is immediately visible (same CPU). */
+    task->cpu_affinity = 0;
 
     /* Link task to component */
     static struct component_task_ctx cleanup_ctxs[COMPONENT_MAX_COUNT];
     cleanup_ctxs[comp_idx].component_idx = comp_idx;
     task_set_cleanup(task, component_task_cleanup, &cleanup_ctxs[comp_idx]);
 
-    /* Add to scheduler */
+    /* Add to scheduler and yield to let the new task initialize */
     scheduler_add_task(task);
+    yield();
 
     uart_printf("Component '%s' v%s started (idx=%d, task=%u)\n",
                 bc->name, bc->version, comp_idx, task->id);

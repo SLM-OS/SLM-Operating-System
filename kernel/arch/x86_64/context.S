@@ -68,7 +68,8 @@ switch_to:
     mov     CTX_R15(%rdx), %r15
     mov     CTX_RSP(%rdx), %rsp
 
-    /* Restore rflags */
+    /* Restore rflags (may re-enable IRQs via IF bit).
+     * Reentrant schedule() is prevented by per-CPU guard flag. */
     mov     CTX_RFLAGS(%rdx), %rax
     push    %rax
     popfq
