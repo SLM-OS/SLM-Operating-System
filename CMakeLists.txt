@@ -103,6 +103,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/idt.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/context.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/idt.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/acpi.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/pic.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/timer_x86.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/platform_x86.c>

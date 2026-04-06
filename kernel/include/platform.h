@@ -216,7 +216,7 @@
 #define TIMER_IRQ           32              /* IRQ 0 → vector 32 */
 
 /* CPU configuration */
-#define CPU_MAX             1               /* Single core (no SMP yet) */
+#define CPU_MAX             8               /* i7-6700: 4 cores / 8 threads */
 
 #endif /* PLATFORM_X86_64 */
 

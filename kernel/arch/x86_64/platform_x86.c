@@ -35,7 +35,12 @@ void kernel_main_x86(uint32_t mb_addr)
     kernel_main(NULL);  /* No DTB on x86-64 */
 }
 
-/* ---- SMP stubs (single core) ---- */
+/* ---- SMP ---- */
+
+/* ACPI interface (acpi.c) */
+extern int acpi_init(void);
+extern uint32_t acpi_get_enabled_cpu_count(void);
+extern uint8_t acpi_get_cpu_apic_id(uint32_t logical_id);
 
 struct per_cpu cpu_data[MAX_CPUS];
 uint64_t cpu_logical_map[MAX_CPUS];
@@ -44,15 +49,35 @@ volatile uint32_t cpus_online = 1;
 
 void smp_init(void)
 {
+    /* Discover CPUs via ACPI MADT */
+    if (acpi_init() == 0) {
+        cpu_count = acpi_get_enabled_cpu_count();
+        if (cpu_count > MAX_CPUS) cpu_count = MAX_CPUS;
+    } else {
+        cpu_count = 1;
+    }
+
+    /* Initialize BSP (CPU 0) */
     cpu_data[0].cpu_id = 0;
-    cpu_data[0].mpidr = 0;
+    cpu_data[0].mpidr = acpi_get_cpu_apic_id(0);
     cpu_data[0].online = true;
     cpu_data[0].stack_top = NULL;
-    cpu_logical_map[0] = 0;
-    cpu_count = 1;
+    cpu_logical_map[0] = acpi_get_cpu_apic_id(0);
+
+    /* Store APIC IDs for all CPUs (AP startup uses these later) */
+    for (uint32_t i = 1; i < cpu_count; i++) {
+        cpu_data[i].cpu_id = i;
+        cpu_data[i].mpidr = acpi_get_cpu_apic_id(i);
+        cpu_data[i].online = false;
+        cpu_logical_map[i] = acpi_get_cpu_apic_id(i);
+    }
+
     cpus_online = 1;
 
-    uart_printf("[SMP] Single core (x86-64, no APIC SMP yet)\n");
+    uart_printf("[SMP] %u CPUs detected (BSP APIC ID %u)\n",
+                cpu_count, acpi_get_cpu_apic_id(0));
+
+    /* TODO: AP startup via INIT+SIPI in Phase 4 */
 }
 
 /* cpu_logical_id is used by ARM64 cpu_id() — provide stub */
@@ -284,6 +309,11 @@ void cache_flush_range(void *addr, size_t size)
 {
     (void)addr; (void)size;
 }
+
+/* ---- Lua shell stub (for Makefile.test builds without Lua library) ---- */
+#if !defined(SLM_INTEGRATED_BUILD) || !defined(__LUA_LINKED__)
+void __attribute__((weak)) lua_shell_init(void) {}
+#endif
 
 /* ---- VMM stats stub ---- */
 

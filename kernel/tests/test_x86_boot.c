@@ -850,6 +850,45 @@ static void test_scheduler_tick_callable(void)
 }
 
 /* ============================================================================
+ * ACPI Tests
+ * ============================================================================ */
+
+extern uint32_t acpi_get_enabled_cpu_count(void);
+extern uint32_t acpi_get_lapic_address(void);
+extern uint32_t acpi_get_ioapic_address(void);
+
+/*
+ * Test: ACPI detected at least 1 CPU.
+ */
+static void test_acpi_discovered_cpus(void)
+{
+    uint32_t count = acpi_get_enabled_cpu_count();
+    TEST_ASSERT_TRUE(count >= 1);
+    TEST_ASSERT_TRUE(count <= 64);  /* Sanity: no more than 64 logical CPUs */
+}
+
+/*
+ * Test: LAPIC address is in the expected range (0xFEE00000 default).
+ */
+static void test_acpi_lapic_address(void)
+{
+    uint32_t addr = acpi_get_lapic_address();
+    TEST_ASSERT_TRUE(addr != 0);
+    /* LAPIC is typically at 0xFEE00000, but BIOS can move it */
+    TEST_ASSERT_TRUE(addr >= 0xFEC00000UL);
+}
+
+/*
+ * Test: IOAPIC address is valid (non-zero, in MMIO range).
+ */
+static void test_acpi_ioapic_address(void)
+{
+    uint32_t addr = acpi_get_ioapic_address();
+    TEST_ASSERT_TRUE(addr != 0);
+    TEST_ASSERT_TRUE(addr >= 0xFEC00000UL);
+}
+
+/* ============================================================================
  * setjmp/longjmp Tests (required for Lua)
  * ============================================================================ */
 
@@ -984,6 +1023,11 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_gic_end_interrupt_safe);
     RUN_TEST(test_uart_putc_works);
     RUN_TEST(test_scheduler_tick_callable);
+
+    /* ACPI tests */
+    RUN_TEST(test_acpi_discovered_cpus);
+    RUN_TEST(test_acpi_lapic_address);
+    RUN_TEST(test_acpi_ioapic_address);
 
     /* setjmp/longjmp (required for Lua) */
     RUN_TEST(test_setjmp_longjmp);
