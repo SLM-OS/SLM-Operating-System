@@ -136,12 +136,16 @@ static void update_deadline_boost(struct task *task)
     }
 
     /* Deadline may have been set by another CPU */
+#if !defined(PLATFORM_RASPI5)
     cache_invalidate(&task->deadline_ns);
+#endif
 
     if (task->deadline_ns == 0) {
         /* No deadline - effective priority equals base priority */
         task->effective_priority = task->priority;
+#if !defined(PLATFORM_RASPI5)
         cache_clean(&task->effective_priority);
+#endif
         return;
     }
 
@@ -169,7 +173,9 @@ static void update_deadline_boost(struct task *task)
     }
 
     task->effective_priority = boosted;
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&task->effective_priority);
+#endif
 }
 
 /*
@@ -189,6 +195,10 @@ void scheduler_init(void)
     ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue), CACHE_LINE_SIZE);
     INFO("SMP: run queues in NC memory at 0x%lx", (unsigned long)NC_MEM_BASE);
 #endif
+
+    /* Initialize task table (NC on Pi 5, BSS fallback otherwise) */
+    extern void task_table_init(void);
+    task_table_init();
 
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
@@ -373,6 +383,7 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
      * schedule() invalidates before reading. Only clean the fields
      * that were modified — NOT the entire task struct (which includes
      * the task's context/stack that may be in active use). */
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&rq->head);
     cache_clean(&rq->tail);
     cache_clean(&rq->ready_count);
@@ -380,6 +391,7 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
     cache_clean(&task->assigned_cpu);
     cache_clean(&task->state);
     cache_clean(&task->effective_priority);
+#endif
 
     rq_unlock_irqrestore(cpu, flags);
 }
@@ -520,19 +532,18 @@ void scheduler_add_task(struct task *task)
     uint32_t target_cpu;
 
     /* Affinity may have been set by another CPU */
+#if !defined(PLATFORM_RASPI5)
     cache_invalidate(&task->cpu_affinity);
+#endif
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         target_cpu = task->cpu_affinity;
 #if defined(PLATFORM_RASPI5)
     } else {
-        /* Pi 5: NC run queues make queue metadata visible cross-CPU, but
-         * task struct data (context, stack, function pointer) lives in
-         * cacheable memory. Without SMPEN, secondary CPUs may see stale
-         * task struct data in L2. Tasks pinned to CPU 0 until task structs
-         * are also allocated from NC memory. */
+        /* TEMPORARY: CPU 0 pinning while debugging cross-CPU dispatch.
+         * NC task table + NC run queues are in place, but secondary CPUs
+         * may not be picking up dispatched tasks. */
         target_cpu = 0;
-    }
 #else
     } else if (task->deadline_ns > 0) {
         target_cpu = find_performance_cpu();
@@ -540,8 +551,8 @@ void scheduler_add_task(struct task *task)
                     task->name, target_cpu);
     } else {
         target_cpu = find_target_cpu();
-    }
 #endif
+    }
 
     scheduler_add_task_to_cpu(task, target_cpu);
 }
@@ -607,8 +618,8 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
      * Lock both queues in CPU ID order to prevent deadlock.
      * If old_cpu < target_cpu, lock old first; otherwise lock target first.
      */
-    struct cpu_runqueue *rq_old = cpu_rq(old_cpu);
-    struct cpu_runqueue *rq_new = cpu_rq(target_cpu);
+    struct cpu_runqueue *rq_old __attribute__((unused)) = cpu_rq(old_cpu);
+    struct cpu_runqueue *rq_new __attribute__((unused)) = cpu_rq(target_cpu);
     irq_flags_t flags;
 
     if (old_cpu < target_cpu) {
@@ -631,6 +642,7 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     /* Clean modified fields to PoC for cross-CPU visibility.
      * Without SMPEN, writes stay in this CPU's L1 cache. The target
      * CPU's schedule() invalidates before reading. */
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&rq_old->head);
     cache_clean(&rq_old->tail);
     cache_clean(&rq_old->ready_count);
@@ -641,6 +653,7 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     cache_clean(&task->assigned_cpu);
     cache_clean(&task->state);
     cache_clean(&task->effective_priority);
+#endif
 
     DEBUG_PRINT("Migrated task '%s' from CPU %u to CPU %u",
                 task->name, old_cpu, target_cpu);
@@ -695,7 +708,9 @@ void schedule(void)
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
+#if !defined(PLATFORM_RASPI5)
         cache_clean(&rq->zombie);
+#endif
         rq_unlock_irqrestore(this_cpu, flags);
 
         /* Destroy outside lock - task_destroy may call pmm */
@@ -709,11 +724,15 @@ void schedule(void)
 
     /* If current task is still running and ready, re-add to queue */
     if (current) {
+#if !defined(PLATFORM_RASPI5)
         cache_invalidate(&current->state);
+#endif
     }
     if (current && current->state == TASK_RUNNING) {
         current->state = TASK_READY;
+#if !defined(PLATFORM_RASPI5)
         cache_clean(&current->state);
+#endif
 
         /* Re-add to run queue if it's a normal task (not idle) */
         if (current != rq->idle_task) {
@@ -764,9 +783,13 @@ void schedule(void)
 
     /* Perform context switch */
     next->state = TASK_RUNNING;
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&next->state);
+#endif
     next->switches++;
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&next->switches);
+#endif
     sched.context_switches++;  /* Racy but acceptable for stats */
 
     /*
@@ -775,7 +798,9 @@ void schedule(void)
      * safely switched to a different stack.
      */
     if (current) {
+#if !defined(PLATFORM_RASPI5)
         cache_invalidate(&current->state);
+#endif
     }
     if (current && current->state == TASK_TERMINATED) {
         rq->zombie = current;
@@ -787,10 +812,12 @@ void schedule(void)
      * Without this, the next dc civac at the start of schedule() would
      * write back our stale dirty cacheline, overwriting another CPU's
      * fresh data (e.g., a newly added task from scheduler_add_task). */
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&rq->head);
     cache_clean(&rq->tail);
     cache_clean(&rq->ready_count);
     cache_clean(&rq->zombie);
+#endif
 
     rq_unlock_irqrestore(this_cpu, flags);
 

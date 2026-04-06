@@ -1316,7 +1316,7 @@ static void latency_task_entry(void *arg)
 static void test_isolated_core_latency(void)
 {
 #if defined(PLATFORM_RASPI5)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch blocked: task structs in cacheable memory");
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch under investigation — NC task table + run queues in place");
 #endif
     /* This test dispatches short-lived tasks to secondary CPUs.
      * Previously disabled due to a task_exit/schedule race (now fixed:

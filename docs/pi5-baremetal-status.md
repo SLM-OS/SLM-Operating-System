@@ -206,9 +206,9 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
    **Validated:** `test_nc_memory_accessible` confirms NC memory read/write works on Pi 5. Run queue NC allocation logs `SMP: run queues in NC memory at 0xffe00000` during boot.
 
-   **Remaining blocker for full cross-CPU dispatch:** Task struct data (context, stack, function pointer, `next` pointer) lives in cacheable heap memory. Even with NC run queues, the secondary CPU's L2 may have stale task struct data. NC run queues alone caused secondary CPUs to pick up dispatch work but crash accessing stale task data.
+   **NC task table (IMPLEMENTED, April 2026):** The entire `task_table[MAX_TASKS]` (32 * 768B = 24KB) is now allocated from NC memory at boot. All task struct fields (state, next, context, etc.) are instantly visible cross-CPU. Validated on Pi 5 with CPU 0 pinning — all tests pass.
 
-   **Next step:** Allocate task dispatch descriptors (`next`, `state`, `assigned_cpu`, `priority`) from NC memory, separate from the task struct. This would make the complete dispatch path NC-visible.
+   **Remaining blocker for full cross-CPU dispatch:** With both NC run queues and NC task table in place, removing CPU 0 pinning causes the system to hang when tasks are dispatched to secondary CPUs. The NC data visibility is confirmed working (test_nc_memory_accessible passes), but secondary CPUs may not be processing their run queues correctly during timer interrupts. Further investigation needed: timer interrupt delivery to secondary CPUs, idle task wake path, and rq_lock cross-CPU contention.
 
    **Root cause note:** The Cortex-A76 does NOT have an SMPEN bit (unlike A53/A72). The `cpu_has_smpen()` function reads bit 6 of `S3_0_C15_C1_4` which is a different field on A76. The DSU is supposed to provide coherency automatically per ARM TRM, but BCM2712's implementation does not appear to do so for regular loads/stores.
 
