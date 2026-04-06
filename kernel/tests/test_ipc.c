@@ -9,6 +9,7 @@
 #include "../include/pmm.h"
 #include "../include/timer.h"
 #include "../include/config.h"
+#include "../gpu/gpu.h"
 
 /* ========================================================================= */
 /* Message Queue Tests                                                       */
@@ -116,6 +117,33 @@ static void test_buffer_lookup_by_id(void)
     struct shared_buffer *found = shared_buffer_lookup(id);
     TEST_ASSERT_EQUAL_PTR(buf, found);
 
+    shared_buffer_destroy(buf);
+}
+
+static void test_buffer_gpu_accessible(void)
+{
+    /* Create a GPU-accessible shared buffer */
+    struct shared_buffer *buf = shared_buffer_create(4096,
+        SHM_RDWR | SHM_GPU_ACCESSIBLE);
+    TEST_ASSERT_NOT_NULL(buf);
+    TEST_ASSERT_NOT_NULL(buf->phys_base);
+    TEST_ASSERT_GREATER_THAN(0, buf->size);
+
+    /* On platforms with GPU, gpu_backed should be true.
+     * On QEMU stub, gpu_alloc succeeds so gpu_backed is also true. */
+    TEST_ASSERT_TRUE(buf->gpu_backed || !gpu_available());
+
+    /* Map and write data (triggers cache sync on GPU platforms) */
+    void *mapped = shared_buffer_map(buf, NULL,
+        SHM_RDWR | SHM_GPU_ACCESSIBLE);
+    TEST_ASSERT_NOT_NULL(mapped);
+
+    /* Write pattern and verify readback */
+    volatile uint32_t *p = (volatile uint32_t *)mapped;
+    *p = 0xDEADBEEF;
+    TEST_ASSERT_EQUAL_HEX32(0xDEADBEEF, *p);
+
+    shared_buffer_unmap(buf, NULL);
     shared_buffer_destroy(buf);
 }
 
@@ -674,6 +702,7 @@ int test_suite_ipc(void)
     RUN_TEST(test_buffer_create_destroy);
     RUN_TEST(test_buffer_map_unmap);
     RUN_TEST(test_buffer_lookup_by_id);
+    RUN_TEST(test_buffer_gpu_accessible);
 
     /* Timeout tests */
     RUN_TEST(test_recv_timeout);

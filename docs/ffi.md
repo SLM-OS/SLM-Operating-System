@@ -382,11 +382,22 @@ Validation failures cause `rust_init()` to return a negative error code instead 
 
 ---
 
+## GPU Cache Coherency FFI (April 2026)
+
+| C Function | Rust FFI | Purpose |
+|------------|----------|---------|
+| `slm_gpu_sync_for_device(addr, size)` | `slm_gpu_sync_for_device(addr, size)` | Clean CPU caches (DC CVAC) so GPU sees latest data |
+| `slm_gpu_sync_for_cpu(addr, size)` | `slm_gpu_sync_for_cpu(addr, size)` | Invalidate CPU caches (DC IVAC) so CPU sees GPU-written data |
+
+Used by the Rust model memory allocator (`gpu_map`/`gpu_unmap`) to ensure cache coherency when sharing memory between CPU and GPU on Jetson Orin (unified memory architecture).
+
+---
+
 ## Future Extensions
 
 Planned FFI additions:
 - Model loading functions (GGUF/ONNX parsing)
-- GPU memory management (CUDA/TensorRT integration)
+- GPU command submission (requires GSP firmware)
 - Inference scheduling (request queuing, batching)
 - Tensor operations
 
@@ -394,4 +405,4 @@ These will follow the same patterns established here.
 
 ---
 
-*Last updated: December 2025*
+*Last updated: April 2026*
