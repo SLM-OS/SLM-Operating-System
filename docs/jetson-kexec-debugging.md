@@ -1,6 +1,11 @@
 # Jetson Orin Nano Kexec Debugging - Session Summary
 
-This document captures the debugging work done to get SLM-OS booting on the Jetson Orin Nano via kexec. Use this to continue development on another machine.
+> **Historical Record (December 2025 - January 2026).** This investigation led to the
+> discovery of the EL2 hypervisor approach implemented in April 2026. kexec is still used
+> as the deploy mechanism, but the CBB bypass uses EL2+VHE instead of the workarounds
+> documented here. See `docs/jetson-el2-bringup.md` for the current implementation.
+
+This document captures the debugging work done to get SLM-OS booting on the Jetson Orin Nano via kexec.
 
 ---
 

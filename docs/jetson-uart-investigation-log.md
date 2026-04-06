@@ -1,5 +1,9 @@
 # Jetson UART Investigation Log
 
+> **Historical Record (December 2025 - January 2026).** UART is now fully working via
+> UARTC at EL2 (TX) and TCU HSP mailbox (RX). This log documents the investigation that
+> led to the successful EL2 approach. See `docs/jetson-el2-bringup.md`.
+
 Investigation into getting UART output from SLM-OS on Jetson Orin Nano after kexec boot.
 
 ---

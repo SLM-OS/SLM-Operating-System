@@ -114,7 +114,7 @@ This hybrid approach leverages:
 |----------|--------|-------|
 | QEMU virt | Primary development | Full feature set, VirtIO-Net networking |
 | Raspberry Pi 5 | Hardware target | 4-core SMP, boots to interactive shell, UART TX/RX working, preemptive scheduling at 100 Hz. See `docs/pi5-baremetal-status.md` |
-| Jetson Orin Nano | Blocked | CBB firewall prevents bare-metal peripheral access. See `docs/jetson-nvidia-support.md` |
+| Jetson Orin Nano | Working | EL2+VHE boot, UARTC serial, GICv3, 6.7GB RAM, GPU probe. Single-core (SMP needs UEFI boot). See `docs/jetson-el2-bringup.md` |
 | x86-64 | Experimental | Multiboot2 boot, serial output, basic subsystem init |
 
 **Phase 3 Learnings:**

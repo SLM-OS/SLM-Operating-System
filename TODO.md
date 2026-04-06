@@ -129,7 +129,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ Scheduler (single-core)
 - ✅ Lua scripting
 - ✅ Shell (fully interactive)
-- ☐ SMP (skipped — kexec limitation)
+- ☐ SMP — PSCI CPU_ON fails after kexec (TF-A state). VHE secondary code ready. Needs UEFI boot.
 - ✅ Memory expansion (~6.7 GB free across 3 regions around OP-TEE carveout)
 
 ---

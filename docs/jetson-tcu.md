@@ -2,7 +2,13 @@
 
 This document captures research into using the TCU (Tegra Combined UART) for debug output on Jetson Orin Nano. This approach was explored as an alternative to using a second USB-serial adapter for the 40-pin header UART.
 
-**Status:** Deferred - TCU requires SPE firmware cooperation which is not available after kexec
+**Status:** RESOLVED (April 2026) — TCU RX works via HSP mailbox at EL2
+
+> **April 2026 Update:** The TCU is now fully functional for bare-metal serial I/O.
+> TX: write directly to UARTC (0x0C280000), output routed through SPE/TCU to USB-C.
+> RX: read from TOP0_HSP shared mailbox 0 (0x03C10000), where SPE deposits incoming bytes.
+> The SPE firmware continues running after kexec and handles the USB-C ↔ UART multiplexing.
+> See `docs/jetson-el2-bringup.md` and `kernel/drivers/uart_tegra.c` for implementation.
 
 ---
 

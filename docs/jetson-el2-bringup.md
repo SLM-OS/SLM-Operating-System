@@ -110,7 +110,7 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 | GIC Redistributor | 0x0F440000 | ✅ Works | Per-CPU, CPU 0 awake |
 | ARM Generic Timer | System regs | ✅ Works | 100 Hz tick confirmed |
 | OP-TEE carveout | 0xC0000000+ | ❌ Blocked | Secure memory, kills core |
-| Watchdog | 0x02190000 | Not tested | Disabled via timer clear |
+| Watchdog | 0x02190000 | ✅ Works | Disabled in kernel_main() |
 | GPU (PMC regs) | 0x17000000 | ✅ Works | GA10B identified: BOOT_0=0xB7B000A1 |
 
 ---
@@ -180,10 +180,11 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 ## Remaining Work
 
 1. ~~**UART RX**~~ — **FIXED.** RX data arrives via TCU HSP mailbox (0x03C10000), not UARTC's RBR register. SPE firmware routes USB-C input to TOP0_HSP SM0. Reading the mailbox and unpacking 1-3 bytes per message gives clean bidirectional serial.
-2. **SMP** — Secondary CPUs via PSCI CPU_ON after kexec. May need to investigate CPU state after kexec.
+2. **SMP** — PSCI CPU_ON (SMC) returns but secondary CPUs don't come online after kexec. TF-A's CPU management state is inconsistent. VHE code for secondaries is ready in `smp_boot.S`. **Blocked on direct UEFI boot** (which gives clean PSCI state).
 3. ~~**Memory above 0xC0000000**~~ — **DONE.** Three regions mapped: 0x80-0xBE, 0xC2-0xFF, 0x100-0x240. Total ~6.7 GB free.
-4. **GPU access** — GPU at 0x17000000 not yet tested from EL2. Would unlock AI inference on Jetson's 1024-core Ampere GPU.
-5. **Direct UEFI boot** — Avoiding kexec would give cleaner state (no stale Linux config, no watchdog).
+4. ~~**GPU access**~~ — **DONE.** GPU at 0x17000000 accessible from EL2. GA10B identified (BOOT_0=0xB7B000A1). GSP firmware loading needed for compute.
+5. **Direct UEFI boot** — WIP EFI stub exists (`efi.h`, `efi_stub.c`) with runtime detection. **Blocked by PE/COFF relocation issue:** UEFI loads at 0x25DE00000, not preferred ImageBase 0x80000000, and no relocation table exists. Fix requires either `-fPIE` compilation, PE/COFF relocations, or assembly-only stub.
+6. ~~**Watchdog**~~ — **DONE.** Tegra WDT at 0x02190000 accessible from EL2 and disabled early in `kernel_main()`.
 
 ---
 

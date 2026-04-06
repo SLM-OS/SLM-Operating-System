@@ -2,7 +2,7 @@
 
 Boot documentation for SLM-OS on NVIDIA Jetson Orin Nano.
 
-**Status:** Research complete; hardware bring-up pending
+**Status:** Working (April 2026) — SLM-OS boots via kexec at EL2 with VHE. See `docs/jetson-el2-bringup.md`.
 
 ---
 

@@ -1,5 +1,8 @@
 # Jetson Serial Debugging Session - December 2025
 
+> **Historical Record.** Serial output is now fully working via UARTC at EL2.
+> See `docs/jetson-el2-bringup.md` for the current implementation.
+
 This document records a comprehensive debugging session attempting to get SLM-OS serial output working on the Jetson Orin Nano via kexec boot.
 
 **Date:** December 28-29, 2025
