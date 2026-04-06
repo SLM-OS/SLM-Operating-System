@@ -2,9 +2,13 @@
 
 This document describes the x86-64 port of SLM-OS, including architecture details, boot sequence, build instructions, and design decisions.
 
+**Status:** Milestones M1–M6 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, and NVIDIA RTX 3050 GPU identification + VRAM access. GSP firmware loading (required for GPU compute) documented as future work.
+
 ---
 
 ## Table of Contents
+
+0. [Current Status](#current-status)
 
 1. [Overview](#overview)
 2. [Target Hardware](#target-hardware)
@@ -27,6 +31,63 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 19. [Key Files](#key-files)
 20. [Design Decisions](#design-decisions)
 21. [Troubleshooting](#troubleshooting)
+22. [Recommended Next Steps](#recommended-next-steps)
+
+---
+
+## Current Status
+
+*Last verified: April 2026 on Gigabyte H610M S2H V2 (i7-6700 + RTX 3050)*
+
+### What Works
+
+| Feature | QEMU | Real Hardware | Notes |
+|---------|------|--------------|-------|
+| Boot (Multiboot2 → long mode) | ✅ | ✅ | UEFI GRUB via SD card |
+| 4-level paging (up to 20 GB) | ✅ 4 GB | ✅ 20 GB | Identity mapped, 2MB pages |
+| SMP (INIT-SIPI-SIPI) | ✅ 4 CPUs | ✅ 8 CPUs | All cores + hyperthreads |
+| Preemptive scheduler | ✅ | ✅ | LAPIC timer, 100 Hz, per-CPU |
+| IDT + LAPIC + IOAPIC | ✅ | ✅ | 64 vectors, exception handling |
+| Spinlocks (TTAS atomic) | ✅ | ✅ | Correct under SMP load |
+| PCI enumeration | ✅ 6 devices | ✅ 21 devices | ECAM on hardware, legacy I/O in QEMU |
+| NVIDIA GPU identification | N/A | ✅ GA107 | BOOT_42 → chip 0x177, Ampere, Rev 10.1 |
+| VRAM read/write (BAR1) | N/A | ✅ 5 offsets | 256 MB aperture, pattern verified |
+| Shell (30+ commands) | ✅ | ✅ | Including `gpu`, `pci`, `lua` |
+| Lua 5.4 scripting | ✅ | ✅ | setjmp/longjmp, SSE for math |
+| VFS + LittleFS | ✅ | ✅ | RAM disk, file commands |
+| PMM buddy allocator | ✅ | ✅ | 19,916 MB usable on hardware |
+| GPU compute / 3D | ❌ | ❌ | Requires GSP firmware (documented) |
+
+### Milestone Completion
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| M1 | Boot Foundation | ✅ Complete |
+| M2 | Memory Management | ✅ Complete |
+| M3 | Interrupts & Timer | ✅ Complete |
+| M4 | SMP (Multi-Core) | ✅ Complete |
+| M5 | PCIe Enumeration | ✅ Complete |
+| M6 | NVIDIA GPU Driver | ✅ Complete (GSP deferred) |
+| M7 | Platform Abstraction | ~70% |
+| M8 | Testing & Validation | 84 tests passing |
+| M9 | Documentation | nvidia-gsp.md complete |
+
+### Hardware Test Results (i7-6700 + RTX 3050)
+
+```
+8/8 CPUs online (4 cores × 2 hyperthreads)
+20 GB RAM mapped (19,916 MB usable)
+ECAM at 0xC0000000 (ACPI MCFG, 256 buses)
+21 PCI devices (Intel H610 chipset + NVIDIA RTX 3050 + Realtek 8168)
+
+NVIDIA RTX 3050 (GA107):
+  PCI 01:00.0, device 0x2584
+  BOOT_42: 0x177A1000 → Ampere architecture, chip 0x177, rev 10.1
+  BAR0: 0x53000000 (16 MB MMIO) — registers readable
+  BAR1: 0x40000000 (256 MB VRAM) — read/write verified
+  PMC_ENABLE: 0x40000000 (PDISPLAY active from Linux)
+  Engine registers: 0xBADF5040 (GSP not loaded)
+```
 
 ---
 
@@ -80,12 +141,14 @@ The x86-64 target is managed by labctl as `test-pc`:
 ### QEMU Testing
 
 ```bash
-# ISO boot (BIOS GRUB)
-qemu-system-x86_64 -m 256M -cdrom build/x86_64-test/slmos-x86.iso -serial stdio -display none
+# ISO boot (recommended — works on all QEMU versions)
+qemu-system-x86_64 -m 4G -smp 4 -cdrom build/slmos.iso -serial stdio -display none
 
-# Direct kernel boot (Multiboot2 — QEMU only)
-qemu-system-x86_64 -m 256M -kernel build/x86_64-test/kernel-x86.elf -serial stdio -display none
+# SMP testing with more CPUs
+qemu-system-x86_64 -m 4G -smp 8 -cdrom build/slmos.iso -serial stdio -display none
 ```
+
+**Note:** QEMU 8.2.2 on Ubuntu 24.04 does not support Multiboot2 via `-kernel`. Use GRUB ISO (`-cdrom`) instead. Create the ISO with `grub-mkrescue`.
 
 ---
 
@@ -256,13 +319,14 @@ Offset  Segment         Description
 
 ### IDT Structure
 
-The Interrupt Descriptor Table has 48 entries (16 bytes each):
+The Interrupt Descriptor Table has 64 entries (16 bytes each):
 
 | Vectors | Type | Purpose |
 |---------|------|---------|
 | 0-31 | Trap gates | CPU exceptions (#DE, #UD, #GP, #PF, etc.) |
 | 2 | Interrupt gate | NMI (clears IF) |
-| 32-47 | Interrupt gates | PIC IRQs (clears IF) |
+| 32-47 | Interrupt gates | IOAPIC device IRQs (clears IF) |
+| 48-63 | Interrupt gates | LAPIC timer (48), IPIs, reserved |
 
 ### Exception Handler
 
@@ -287,7 +351,7 @@ Exceptions 8, 10-14, 17, 21, 29, 30 push a hardware error code; all others get a
 
 ### IRQ Dispatch
 
-IRQ handlers are registered via `irq_register(irq, handler)`. The common handler dispatches to the registered callback and sends EOI to the PIC.
+IRQ handlers are registered via `irq_register(irq, handler)`. The common handler dispatches to the registered callback and sends EOI via LAPIC.
 
 ---
 
@@ -855,18 +919,55 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 ## Known Issues
 
 - QEMU's `-kernel` flag does not support Multiboot2 on Ubuntu 24.04 (QEMU 8.2.2). Use GRUB ISO boot (`-cdrom`) instead.
-- No critical functional issues. All 16 GB RAM mapped, 4-CPU SMP working, PCI enumeration operational.
+- NVIDIA GPU engine registers return 0xBADF5040 — this is expected (GSP firmware not loaded). See `docs/nvidia-gsp.md`.
+- Rust runtime is stubbed (model memory, component system return dummy values). Needs `x86_64-unknown-none` Cargo target.
+- No higher-half kernel mapping — identity mapping only. Sufficient for current use but limits virtual address space layout.
+- No networking on x86-64 — lwIP + VirtIO not yet ported.
+
+---
+
+## Recommended Next Steps
+
+### High Value (Demo Polish)
+
+1. **Rust runtime port** — Add `x86_64-unknown-none` Cargo target to enable real model memory allocation and component system (currently stubbed)
+2. **`bench` shell commands** — Port context switch and IPC benchmarks from ARM64 for performance comparison
+3. **`cpu` command enhancement** — Show per-CPU scheduler stats, task counts, idle time
+
+### Medium Value (Completeness)
+
+4. **Higher-half kernel mapping** — Move kernel to 0xFFFFFFFF80000000 for proper virtual address space separation
+5. **Networking** — Port lwIP + VirtIO-Net (QEMU only, requires VirtIO MMIO mapping)
+6. **Test automation** — Run `test` command in QEMU CI and verify all 84 tests pass automatically
+
+### Research (Post-Capstone)
+
+7. **GSP firmware loading** — Load the 38 MB RISC-V firmware to enable GPU compute. See `docs/nvidia-gsp.md` for the complete roadmap. This is a project-scale effort requiring VBIOS parsing, SEC2 Falcon programming, and a full RPC stack.
+8. **IOMMU / VT-d** — Enable DMA protection for PCI devices
 
 ---
 
 ## References
 
-- [Multiboot2 Specification](https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html)
+### Architecture
+
 - [AMD64 Architecture Programmer's Manual](https://developer.amd.com/resources/developer-guides-manuals/)
 - [Intel 64 and IA-32 Architectures Software Developer's Manual](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
+- [Multiboot2 Specification](https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html)
+
+### OSDev
+
 - [OSDev Wiki - Setting Up Long Mode](https://wiki.osdev.org/Setting_Up_Long_Mode)
-- [OSDev Wiki - 8259 PIC](https://wiki.osdev.org/8259_PIC)
-- [OSDev Wiki - Programmable Interval Timer](https://wiki.osdev.org/Programmable_Interval_Timer)
+- [OSDev Wiki - APIC](https://wiki.osdev.org/APIC)
+- [OSDev Wiki - IOAPIC](https://wiki.osdev.org/IOAPIC)
+- [OSDev Wiki - PCI Express](https://wiki.osdev.org/PCI_Express)
+- [OSDev Wiki - SMP](https://wiki.osdev.org/SMP)
+
+### NVIDIA GPU
+
+- [NVIDIA open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules) — Register definitions, GSP boot reference
+- [envytools](https://github.com/envytools/envytools) — Community GPU documentation (PMC, BARs, MMIO map)
+- [Linux nouveau driver](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/gpu/drm/nouveau) — GSP boot implementation
 
 ---
 
