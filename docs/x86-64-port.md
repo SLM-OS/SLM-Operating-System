@@ -68,9 +68,9 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 | M4 | SMP (Multi-Core) | ✅ Complete |
 | M5 | PCIe Enumeration | ✅ Complete |
 | M6 | NVIDIA GPU Driver | ✅ Complete (GSP deferred) |
-| M7 | Platform Abstraction | ~70% |
-| M8 | Testing & Validation | 84 tests passing |
-| M9 | Documentation | nvidia-gsp.md complete |
+| M7 | Platform Abstraction | ✅ Complete (arch.h, Rust linked) |
+| M8 | Testing & Validation | ✅ Complete (84 tests, CI, benchmarks) |
+| M9 | Documentation | ✅ Complete (GSP, arch comparison, Jetson checklist) |
 
 ### Hardware Test Results (i7-6700 + RTX 3050)
 
