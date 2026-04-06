@@ -116,7 +116,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 ### Platform Validation
 - ✅ Verify DTB parsing on real Jetson hardware — DTB at 0x80437000 parsed successfully
 - ✅ Confirm memory map matches DTB values — RAM 0x80000000-0x280000000 (8GB)
-- ☐ Remove hardcoded addresses from `platform.h` (use DTB values)
+- ⏸️ Remove hardcoded addresses from `platform.h` (use DTB values) — deferred, addresses already match DTB. Requires driver init restructuring for runtime address lookup.
 - ✅ Test on Pi 5 with platform-specific DTB — Pi 5 works
 
 ### Kernel Subsystem Status on Jetson
