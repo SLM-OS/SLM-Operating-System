@@ -160,12 +160,19 @@ After init IACK, `irq_count` stays 0 — the handler is NEVER called for new cha
 - `uart_irq_count` (visible via `cpu` command as `irq_count=N`) — handler call counter
 - Post-init register dump: MIS, INTSTAT, MIP_status, MIP_raised, GIC_ISPENDR
 
+**Tested and ruled out (April 6, 2026):**
+1. ~~Write MSIX_CFG after IACK~~ — Tried writing full ENABLE+IACK_EN to direct register (not SET alias) after IACK. MSIX_CFG reads back 0x9 but engine still doesn't fire. irq_count=0.
+2. ~~No IACK_EN + fast ICR clear~~ — Without IACK_EN, engine doesn't fire for NEW characters either (irq_count=0). Only fires for PERSISTENT RTIM from boot (proven by IRQ storm test). The engine appears to only respond to the interrupt state at ENABLE time, not to subsequent assertions.
+3. ~~Blocking uart_getc on ring buffer~~ — Confirmed: with polling disabled, shell hangs (IRQ never fires). Not a polling race condition.
+
+**Key insight:** MSIX_CFG engine fires TLPs for interrupts that are ALREADY ACTIVE when ENABLE is written, but NOT for interrupts that assert AFTER ENABLE. This is consistent with the engine requiring a LOW→HIGH edge transition that it doesn't detect after init.
+
 **Next investigation steps:**
-1. Write MSIX_CFG = ENABLE + IACK_EN AFTER IACK (full register re-init, not just IACK bit)
-2. Clear RP1 INTSTAT bit 25 explicitly before IACK
-3. Read MSIX_CFG register back after IACK to verify actual engine state
-4. Try without IACK_EN + fast ICR clear in handler (avoid IRQ storm by clearing PL011 source quickly)
-5. Compare MSIX_CFG register state with Linux (add to register dump)
+1. Read RP1 MSIX_CFG register from Linux to compare engine state during active interrupt delivery
+2. Check if RP1 has a separate MSI-X controller enable (distinct from per-vector MSIX_CFG)
+3. Investigate the RP1 INTC CLR alias (offset 0xC00) — may need to clear before re-enable
+4. Check if the PCIe endpoint MSI-X enable (config space 0xB0) needs re-assertion after BAR3 setup
+5. Study Linux `rp1_irqchip` driver source for the exact MSIX_CFG write sequence
 
 ## Previous Hypotheses (Superseded)
 

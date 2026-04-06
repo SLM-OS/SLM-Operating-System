@@ -234,20 +234,21 @@ char uart_getc(void)
 {
     extern void yield(void);
 
-    /* Check ring buffer first (filled by IRQ handler) */
+    /* Check ring buffer first (filled by IRQ handler if it ever fires) */
     if (rx_head != rx_tail) {
         uint8_t ch = rx_buf[rx_tail];
         rx_tail = (rx_tail + 1) & (UART_RX_BUF_SIZE - 1);
         return (char)ch;
     }
 
-    /* Polling fallback — data may arrive before IRQ fires */
+    /* Polling fallback — MSIX_CFG engine doesn't generate TLPs for new
+     * characters despite correct BAR3 routing. The IRQ storm test proves
+     * TLP delivery works, but the engine doesn't fire on PL011 assertion. */
     volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
     volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
 
     while (*uart_fr & FR_RXFE) {
         yield();
-        /* Check ring buffer in case IRQ delivered while polling */
         if (rx_head != rx_tail) {
             uint8_t ch = rx_buf[rx_tail];
             rx_tail = (rx_tail + 1) & (UART_RX_BUF_SIZE - 1);
@@ -301,7 +302,7 @@ void uart_irq_handler(void)
     *uart_icr = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* IACK: acknowledge level-triggered vector */
+    /* IACK: re-arm MSIX_CFG for next interrupt */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_IACK;
@@ -373,9 +374,12 @@ void uart_irq_init(void)
     gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 WITHOUT IACK_EN for testing.
-     * Without IACK_EN, MSI-X fires repeatedly while interrupt is active.
-     * With correct BAR3 routing, this should deliver to MIP0→GIC. */
+    /* 2. MSIX_CFG: enable vector 25 with IACK_EN.
+     * The MSIX_CFG engine doesn't fire TLPs for new PL011 assertions
+     * (irq_count stays 0). The IRQ storm test (no IACK_EN + persistent
+     * RTIM from boot) proves BAR3→MIP0→GIC delivery works, but the
+     * engine doesn't trigger on runtime PL011 interrupts.
+     * Keep IACK_EN for stability while investigation continues. */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
@@ -399,12 +403,10 @@ void uart_irq_init(void)
 
     volatile uint32_t *uart_imsc = (volatile uint32_t *)(RP1_UART0_BASE + UART_IMSC);
 
-    /* 4. Clear ALL stale interrupt state with IMSC disabled.
-     * Critical ordering: IMSC must be 0 when we IACK, so the PL011
-     * interrupt line is LOW. Otherwise the re-armed MSIX_CFG engine
-     * sees the line HIGH and immediately re-fires + auto-masks,
-     * creating a livelock where the engine is never armed when data arrives. */
-    *uart_imsc = 0;  /* Disable all PL011 interrupts */
+    /* 4. Clear ALL stale state with IMSC disabled, then IACK, then enable IMSC.
+     * IMSC must be 0 when we IACK so PL011 line is LOW and MSIX_CFG doesn't
+     * immediately re-fire + auto-mask (level-triggered livelock). */
+    *uart_imsc = 0;
     __asm__ volatile("dsb sy" ::: "memory");
     *uart_icr = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
@@ -422,17 +424,15 @@ void uart_irq_init(void)
         __asm__ volatile("dsb sy" ::: "memory");
     }
 
-    /* IACK with PL011 interrupt line LOW (IMSC=0 → MIS=0 → no assertion).
-     * This re-arms MSIX_CFG without immediately re-firing. */
+    /* IACK with PL011 line LOW (IMSC=0) — re-arms MSIX_CFG */
     *msix_set = MSIX_CFG_IACK;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* NOW enable PL011 IMSC. Next RX data will assert the interrupt
-     * line, MSIX_CFG will fire, BAR3→MIP0→GIC→handler. */
+    /* NOW enable PL011 IMSC */
     *uart_imsc = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Diagnostic: check if re-enabling IMSC caused MSI-X→MIP0 delivery */
+    /* Diagnostic: check if IMSC enable triggered MSI-X→MIP0 delivery */
     {
         volatile uint32_t *mip_stat = (volatile uint32_t *)(MIP0_BASE + 0x80);
         volatile uint32_t *mip_raised = (volatile uint32_t *)(MIP0_BASE + MIP_INT_RAISED);
