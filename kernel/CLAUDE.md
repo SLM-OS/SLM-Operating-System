@@ -142,7 +142,18 @@ On Pi 5, DC CIVAC does not propagate through per-core L2 caches without SMPEN. N
 
 **Spinlock separation:** `rq_lock[MAX_CPUS]` is a separate cacheable array. ARM exclusive load/store (`ldaxr`/`stxr`) used by spinlocks requires cacheable memory on BCM2712. The lock is NOT in the `cpu_runqueue` struct — it's accessed via `rq_lock_irqsave(cpu)` / `rq_unlock_irqrestore(cpu, flags)`.
 
+**Task table:** `task_table` is allocated from NC memory at boot via `task_table_init()` in `task.c`. All task struct fields are NC-visible. The `task_table_fallback[MAX_TASKS]` BSS array is used on non-Pi5 platforms. Task STACKS remain in cacheable PMM (only accessed by owning CPU).
+
 **When to use NC memory:** Only for data that MUST be visible across CPUs without cache maintenance. NC memory is slower than cached memory (every access goes to DRAM). Do not use for hot-path per-CPU data.
+
+**NC memory layout:**
+| Offset from NC_MEM_BASE | Size | Contents |
+|---|---|---|
+| 0x000 | 256B | `cpu_runqueue[MAX_CPUS]` (run queue metadata) |
+| 0x100 | 24KB | `task_table[MAX_TASKS]` (all task structs) |
+| ~0x6100 | ... | Available for future NC allocations |
+
+**Cross-CPU dispatch status (April 2026):** NC run queues + NC task table are validated. CPU 0 pinning is still active because removing it causes hangs — see `docs/pi5-baremetal-status.md` Known Limitations item 3 for investigation notes.
 
 ---
 

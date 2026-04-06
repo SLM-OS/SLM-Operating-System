@@ -72,7 +72,8 @@ See `docs/pi5-baremetal-status.md` for full details.
 - ☐🔗 Interrupt-driven UART — blocked on PCIe BAR1 inbound window match (see `docs/pi5-uart-irq-investigation.md`)
 - ✅ Fix task_exit/schedule race on secondary CPUs — IRQ mask in task_exit prevents timer/schedule race
 - ✅ Investigate SMPEN for proper cache coherency — SMPEN trapped to EL3, L2 not coherent without it
-- ⏸️ Re-enable cross-CPU task dispatch — NC run queues implemented (queue metadata visible cross-CPU), task structs in cacheable memory block full dispatch. Next: NC task dispatch descriptors.
+- ✅ NC shared memory infrastructure — 2MB NC region at 0xFFE00000, run queues + task table in NC, validated on Pi 5
+- ⏸️ Re-enable cross-CPU task dispatch — NC data visibility solved (run queues + task table in NC memory, tests pass). Blocker is now in secondary CPU scheduler execution: tasks dispatched to CPUs 1-3 never run. See `docs/pi5-baremetal-status.md` Known Limitations item 3 for investigation areas.
 
 ---
 

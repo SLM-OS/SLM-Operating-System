@@ -208,7 +208,34 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
    **NC task table (IMPLEMENTED, April 2026):** The entire `task_table[MAX_TASKS]` (32 * 768B = 24KB) is now allocated from NC memory at boot. All task struct fields (state, next, context, etc.) are instantly visible cross-CPU. Validated on Pi 5 with CPU 0 pinning — all tests pass.
 
-   **Remaining blocker for full cross-CPU dispatch:** With both NC run queues and NC task table in place, removing CPU 0 pinning causes the system to hang when tasks are dispatched to secondary CPUs. The NC data visibility is confirmed working (test_nc_memory_accessible passes), but secondary CPUs may not be processing their run queues correctly during timer interrupts. Further investigation needed: timer interrupt delivery to secondary CPUs, idle task wake path, and rq_lock cross-CPU contention.
+   **Remaining blocker for full cross-CPU dispatch:** With both NC run queues and NC task table in place, removing CPU 0 pinning (`scheduler_add_task()` uses `find_target_cpu()` instead of `target_cpu = 0`) causes the system to hang when tasks are dispatched to secondary CPUs. NC data visibility is confirmed working (`test_nc_memory_accessible` passes on hardware).
+
+   **Observed behavior when pinning removed:**
+   - Boot completes normally (all subsystems init, shell starts, timer starts)
+   - Tasks dispatched to CPU 1-3 via `scheduler_add_task_to_cpu()` never complete
+   - CPU 0 hangs polling `task->state` (NC read) waiting for TASK_TERMINATED
+   - System becomes unresponsive (no shell, no serial output)
+   - The `ffi_test` task dispatched to CPU 1 in `test_ffi_task_create_returns_id` (scheduler test suite) is the first task to hang — it has an infinite polling loop without timeout
+
+   **What has been ruled out:**
+   - NC data visibility: confirmed working (3 NC tests pass on Pi 5)
+   - NC run queue metadata: `cpu_rq(cpu)->head/tail/ready_count` in NC, accessible
+   - NC task struct fields: `task->state/next/context` all in NC memory
+   - Spinlock on NC memory: hangs (`ldaxr`/`stxr` needs cacheable). Fixed by `rq_lock[]` separation.
+
+   **Investigation areas for next agent:**
+   1. **Secondary CPU timer interrupt delivery:** Do CPUs 1-3 receive timer IRQs after `timer_start()`? The timer is per-CPU (physical timer, IRQ 30). Each secondary calls `timer_percpu_init()` during boot. Add a debug counter incremented in `timer_handler()` per-CPU and dump via shell command.
+   2. **Secondary CPU `schedule()` execution:** Does `schedule()` actually run on CPU 1 after timer IRQ? The idle task calls `wfi`, timer fires, exception vector calls `timer_irq_handler()` → `scheduler_tick()` → `schedule()`. Add a per-CPU debug counter in `schedule()` entry.
+   3. **`rq_lock[]` cross-CPU contention:** CPU 0 holds `rq_lock[1]` briefly to add a task. If CPU 1's `schedule()` tries to acquire `rq_lock[1]` simultaneously, does the cacheable spinlock work across CPUs? Spinlocks were validated during boot, but under concurrent load the behavior may differ. Test with a simple NC flag instead of the spinlock.
+   4. **`pick_next_task()` return value:** After `schedule()` acquires the lock, does `cpu_rq(1)->head` return the dispatched task? Since the run queue is NC, the pointer should be visible. Add a debug print: `if (rq->head) DEBUG_PRINT("CPU %u: found task '%s'", ...)`.
+   5. **Context switch to dispatched task:** If `pick_next_task()` finds the task, does `switch_to()` complete? The task context is NC. The task stack is cacheable (allocated by CPU 0 via PMM). The stack contents are never read by CPU 1 until the task starts executing — the stack grows from `stack_top` and was never cached by CPU 1.
+
+   **Key code locations:**
+   - CPU 0 pinning: `kernel/sched/sched.c`, `scheduler_add_task()` — the `#if defined(PLATFORM_RASPI5)` block
+   - Run queue lock: `rq_lock[]` array and `rq_lock_irqsave()`/`rq_unlock_irqrestore()` in `sched.c`
+   - Timer per-CPU init: `kernel/drivers/timer.c`, `timer_percpu_init()`
+   - Scheduler entry: `kernel/sched/sched.c`, `schedule()` function
+   - Context switch: `kernel/arch/arm64/context.S`, `switch_to()`
 
    **Root cause note:** The Cortex-A76 does NOT have an SMPEN bit (unlike A53/A72). The `cpu_has_smpen()` function reads bit 6 of `S3_0_C15_C1_4` which is a different field on A76. The DSU is supposed to provide coherency automatically per ARM TRM, but BCM2712's implementation does not appear to do so for regular loads/stores.
 
