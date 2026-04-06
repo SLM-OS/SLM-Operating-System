@@ -111,7 +111,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ kexec boot with serial console output — working at EL2 with VHE
 - ✅ Debug silent failures with serial visibility — Root cause: CBB firewall, bypassed with EL2
 - ✅ Document working boot sequence — SSH → kexec → EL2/VHE → UARTC
-- ☐ Investigate direct UEFI boot at EL2 (would avoid kexec limitations)
+- ☐ Direct UEFI boot — EFI stub + self-relocating trampoline implemented. PE/COFF loads when UEFI uses preferred address (0x80000000). Blocked when UEFI relocates (no .reloc section). Alternative SMP paths: SGI wake, UEFI Shell `load`, or `AllocatePages(AllocateAddress)`
 
 ### Platform Validation
 - ✅ Verify DTB parsing on real Jetson hardware — DTB at 0x80437000 parsed successfully
@@ -129,7 +129,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ Scheduler (single-core)
 - ✅ Lua scripting
 - ✅ Shell (fully interactive)
-- ☐ SMP — PSCI CPU_ON fails after kexec (TF-A state). VHE secondary code ready. Needs UEFI boot.
+- ☐ SMP — PSCI CPU_ON fails after kexec (TF-A state inconsistent). VHE secondary code ready. Paths: UEFI boot (PE/COFF relocation blocker), SGI/spin-table wake (bypass PSCI), or UEFI Shell load
 - ✅ Memory expansion (~6.7 GB free across 3 regions around OP-TEE carveout)
 
 ---

@@ -162,22 +162,28 @@ static void efi_disable_mmu(void)
         ::: "memory"
     );
 
-    /* Disable MMU (read SCTLR, clear M/C/I bits, write back)
-     * At EL2: use sctlr_el2 directly (not VHE-aliased sctlr_el1,
-     * since VHE isn't enabled yet at this point). */
+    /* Disable MMU (read SCTLR, clear M/C/I bits, write back).
+     *
+     * Use sctlr_el1 (not sctlr_el2): when UEFI's VHE is active
+     * (E2H=1, TGE=1), sctlr_el1 is aliased to SCTLR_EL2. Using the
+     * _el1 form works correctly both with and without VHE.
+     * Direct sctlr_el2 access faults when VHE is active because
+     * UEFI's exception vectors trap it. */
     __asm__ volatile(
-        "mrs    x0, sctlr_el2\n"
+        "mrs    x0, sctlr_el1\n"
         "bic    x0, x0, #(1 << 0)\n"   /* M: MMU enable */
         "bic    x0, x0, #(1 << 2)\n"   /* C: Data cache enable */
         "bic    x0, x0, #(1 << 12)\n"  /* I: Instruction cache enable */
-        "msr    sctlr_el2, x0\n"
+        "msr    sctlr_el1, x0\n"
         "isb\n"
         ::: "x0", "memory"
     );
 
-    /* Invalidate TLBs */
+    /* Invalidate TLBs.
+     * tlbi vmalle1 is the VHE-compatible form: with VHE it invalidates
+     * all EL2 TLB entries; without VHE it invalidates EL1 entries. */
     __asm__ volatile(
-        "tlbi   alle2\n"
+        "tlbi   vmalle1\n"
         "dsb    nsh\n"
         "isb\n"
         ::: "memory"

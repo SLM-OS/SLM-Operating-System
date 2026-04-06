@@ -151,6 +151,18 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 - Enable VHE: `msr hcr_el2, x10` with E2H=1, TGE=1, RW=1
 - Disable stale Linux timers: clear CNTP_CTL, CNTV_CTL, CNTHP_CTL
 - UARTC probe: write "EL2\r\n" as boot confirmation
+- EFI boot detection: check x1 for EFI_SYSTEM_TABLE signature, call `efi_stub_entry()`
+- Self-relocating trampoline: after ExitBootServices, copies image from UEFI load address to 0x80000000 (link address), flushes I-cache, jumps to copy. Skipped when already at link address.
+
+### efi_stub.c
+- `efi_stub_entry()`: finds DTB in EFI config table, calls ExitBootServices with retry
+- `efi_disable_mmu()`: VHE-compatible — uses `sctlr_el1` (aliased to SCTLR_EL2 under VHE) and `tlbi vmalle1` instead of direct `sctlr_el2`/`tlbi alle2`
+
+### kernel-jetson.ld
+- `.data` section aligned to PE SectionAlignment (64KB) for UEFI compliance
+- `__kernel_end` aligned to 64KB for PE SizeOfImage
+- `.data` padded to PE FileAlignment (512 bytes)
+- Build-time PE alignment assertions
 
 ### platform.h
 - `UART_BASE` changed to `0x0C280000` (UARTC)
@@ -183,7 +195,7 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 2. **SMP** — PSCI CPU_ON (SMC) returns but secondary CPUs don't come online after kexec. TF-A's CPU management state is inconsistent. VHE code for secondaries is ready in `smp_boot.S`. **Blocked on direct UEFI boot** (which gives clean PSCI state).
 3. ~~**Memory above 0xC0000000**~~ — **DONE.** Three regions mapped: 0x80-0xBE, 0xC2-0xFF, 0x100-0x240. Total ~6.7 GB free.
 4. ~~**GPU access**~~ — **DONE.** GPU at 0x17000000 accessible from EL2. GA10B identified (BOOT_0=0xB7B000A1). GSP firmware loading needed for compute.
-5. **Direct UEFI boot** — WIP EFI stub exists (`efi.h`, `efi_stub.c`) with runtime detection. **Blocked by PE/COFF relocation issue:** UEFI loads at 0x25DE00000, not preferred ImageBase 0x80000000, and no relocation table exists. Fix requires either `-fPIE` compilation, PE/COFF relocations, or assembly-only stub.
+5. **Direct UEFI boot** — WIP. EFI stub (`efi_stub.c`) handles ExitBootServices with VHE-compatible MMU disable. Self-relocating trampoline in boot.S copies image to link address (0x80000000) when UEFI loads elsewhere. PE/COFF header with ImageBase=0x80000000 accepted when preferred address available. **Blocked when UEFI can't use preferred address** — no `.reloc` section for relocation. Alternative SMP paths to investigate: SGI/spin-table wake (bypass PSCI entirely), UEFI Shell `load` command (more permissive PE parsing), or `AllocatePages(AllocateAddress)` to force preferred address.
 6. ~~**Watchdog**~~ — **DONE.** Tegra WDT at 0x02190000 accessible from EL2 and disabled early in `kernel_main()`.
 
 ---

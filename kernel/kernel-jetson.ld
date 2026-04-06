@@ -53,13 +53,13 @@ SECTIONS
      * DATA SEGMENT (RW) - Initialized and uninitialized data
      * ================================================================ */
 
-    /* Page-align segment boundary for kexec compatibility */
-    . = ALIGN(4096);
-
-    /* Initialized data - explicitly page-aligned for segment boundary */
-    .data ALIGN(4096) : {
+    /* Initialized data — aligned to PE SectionAlignment (64KB) for proper
+     * PE/COFF .data section layout. Also satisfies kexec page-alignment. */
+    .data ALIGN(0x10000) : {
         __data_start = .;
         *(.data .data.*)
+        /* Pad to PE FileAlignment (512 bytes) for SizeOfRawData compliance */
+        . = ALIGN(0x200);
         __data_end = .;
     } > RAM :data
 
@@ -87,8 +87,8 @@ SECTIONS
         __stack_top = .;
     } > RAM :data
 
-    /* End of kernel image */
-    . = ALIGN(4096);            /* Page-align end for clean memory layout */
+    /* End of kernel image — align to SectionAlignment for PE SizeOfImage */
+    . = ALIGN(0x10000);
     __kernel_end = .;
 
     /* Kernel virtual size (includes BSS) for PE SizeOfImage */
@@ -97,8 +97,16 @@ SECTIONS
     /* Kernel file size (excludes BSS) for ARM64 image_size */
     _kernel_file_size = __data_end - _start;
 
-    /* Code section size in file (file size minus 64KB PE header) */
-    _kernel_code_size = __data_end - _start - 0x10000;
+    /* PE .text section: code + rodata (everything before .data).
+     * With .data at 64KB alignment, this is automatically section-aligned. */
+    _kernel_code_size = __data_start - _start - 0x10000;
+
+    /* PE .data section: initialized data.
+     * VA = file offset of .data (relative to image base).
+     * Size = .data content rounded up to FileAlignment (512 bytes). */
+    _kernel_data_va = __data_start - _start;
+    _kernel_data_size = __data_end - __data_start;
+    _kernel_data_file = __data_start - _start;
 
     /* Discard unwanted sections */
     /DISCARD/ : {
@@ -108,5 +116,14 @@ SECTIONS
     }
 }
 
-/* Sanity check: ensure kernel fits in first 16 MB */
+/* Sanity checks */
 ASSERT(__kernel_end < 0x81000000, "Kernel image too large!")
+
+/* PE/COFF alignment constraints (SectionAlignment=0x10000, FileAlignment=0x200).
+ * These must hold for UEFI to accept the PE/COFF image on Jetson. */
+ASSERT((__data_start - _start) % 0x10000 == 0,
+    "PE error: .data VA not aligned to SectionAlignment (64KB)")
+ASSERT((__data_end - __data_start) % 0x200 == 0,
+    "PE error: .data SizeOfRawData not aligned to FileAlignment (512)")
+ASSERT((_kernel_size + 0x10000) % 0x10000 == 0,
+    "PE error: SizeOfImage not aligned to SectionAlignment (64KB)")

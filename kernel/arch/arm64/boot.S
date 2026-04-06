@@ -77,7 +77,7 @@ optional_header:
     .long   0x10000             /* AddressOfEntryPoint (64KB, where real_start will be) */
     .long   0x10000             /* BaseOfCode (64KB) */
 
-    .quad   0x80000000          /* ImageBase - preferred load address */
+    .quad   0x80000000          /* ImageBase - preferred load address (Jetson RAM base) */
     .long   0x10000             /* SectionAlignment (64KB, like Linux) */
     .long   0x200               /* FileAlignment (512 bytes) */
     .short  0                   /* MajorOperatingSystemVersion */
@@ -87,7 +87,7 @@ optional_header:
     .short  0                   /* MajorSubsystemVersion */
     .short  0                   /* MinorSubsystemVersion */
     .long   0                   /* Win32VersionValue */
-    .long   _kernel_size + 0x10000  /* SizeOfImage (code + 64KB header) */
+    .long   _kernel_size + 0x10000  /* SizeOfImage (64KB header + full virtual size) */
     .long   0x10000             /* SizeOfHeaders (64KB, like Linux) */
     .long   0                   /* CheckSum */
     .short  0xa                 /* Subsystem: EFI_APPLICATION */
@@ -108,11 +108,11 @@ optional_header:
     .quad   0                   /* Base Relocation Table */
 
 section_table:
-    /* .text section */
+    /* .text section — all code and data */
     .ascii  ".text\0\0\0"       /* Name (8 bytes) */
     .long   _kernel_size        /* VirtualSize */
     .long   0x10000             /* VirtualAddress (64KB) */
-    .long   _kernel_code_size   /* SizeOfRawData (code size, excludes 64KB header) */
+    .long   _kernel_code_size   /* SizeOfRawData (file size, excludes 64KB header) */
     .long   0x10000             /* PointerToRawData (64KB) */
     .long   0                   /* PointerToRelocations */
     .long   0                   /* PointerToLineNumbers */
@@ -120,7 +120,7 @@ section_table:
     .short  0                   /* NumberOfLineNumbers */
     .long   0xe0000020          /* Characteristics: CNT_CODE | MEM_READ | MEM_WRITE | MEM_EXECUTE */
 
-    /* .data section (dummy, required) */
+    /* .data section (dummy, required by PE/COFF but not actually used) */
     .ascii  ".data\0\0\0"       /* Name (8 bytes) */
     .long   0                   /* VirtualSize */
     .long   0                   /* VirtualAddress */
@@ -161,6 +161,7 @@ real_start:
 
 #endif /* PLATFORM_RASPI5 */
 
+
 #if !defined(PLATFORM_RASPI5)
     /*
      * EFI Boot Detection
@@ -196,6 +197,68 @@ real_start:
      */
     bl      efi_stub_entry
     /* x0 now contains DTB pointer (or NULL). Continue with normal boot. */
+
+    /*
+     * Self-Relocating Trampoline
+     *
+     * UEFI loads the PE/COFF image at an arbitrary address, but the
+     * kernel is linked at 0x80000000. GOT entries and all absolute
+     * addresses in C code assume the link address. Copy the entire
+     * image to 0x80000000 and jump there so everything works.
+     *
+     * Preconditions (established by efi_stub_entry):
+     *   - ExitBootServices completed, we own all memory
+     *   - MMU disabled, caches cleaned and disabled
+     *   - x0 = DTB pointer (or NULL)
+     *
+     * The kexec path never reaches here (cbz x1 skips to .Lnot_efi).
+     */
+    mov     x20, x0                /* Save DTB pointer */
+
+    adr     x5, _start             /* x5 = actual load address of _start */
+    ldr     x4, .Llink_address     /* x4 = 0x80000000 (link address) */
+    cmp     x5, x4
+    b.eq    .Lreloc_done           /* Already at link address, skip copy */
+
+    /* Copy image from UEFI load address to link address */
+    ldr     x8, .Limage_size       /* x8 = _kernel_file_size (text+rodata+data) */
+    mov     x2, x5                 /* x2 = source pointer */
+    mov     x1, x4                 /* x1 = destination pointer */
+    add     x3, x8, #15
+    and     x3, x3, #~15          /* x3 = size rounded up to 16-byte alignment */
+
+.Lreloc_copy:
+    cbz     x3, .Lreloc_copy_done
+    ldp     x6, x7, [x2], #16
+    stp     x6, x7, [x1], #16
+    sub     x3, x3, #16
+    b       .Lreloc_copy
+
+.Lreloc_copy_done:
+    /*
+     * Invalidate instruction cache. With MMU and D-cache off
+     * (SCTLR_EL2.C=0, I=0 from efi_disable_mmu), the stp writes went
+     * directly to memory. But stale I-cache lines from UEFI's previous
+     * execution at 0x80000000 must be flushed before we jump there.
+     */
+    ic      ialluis
+    dsb     nsh
+    isb
+
+    /*
+     * Jump to the copy at 0x80000000.
+     * Compute: target = link_address + (.Lpost_reloc - _start)
+     */
+    adr     x9, .Lpost_reloc
+    sub     x9, x9, x5            /* offset of .Lpost_reloc from _start */
+    add     x10, x4, x9           /* address in the copy */
+    br      x10                    /* absolute branch to relocated code */
+
+.Lpost_reloc:
+    /* Now running at link address. All GOT/absolute addresses are correct. */
+
+.Lreloc_done:
+    mov     x0, x20                /* Restore DTB pointer */
 
 .Lnot_efi:
 #endif /* !PLATFORM_RASPI5 */
@@ -589,7 +652,12 @@ secondary_spin:
     .quad   __bss_end - _start
 .Lvectors_offset:
     .quad   exception_vectors - _start
+.Llink_address:
+    .quad   0x80000000
+.Limage_size:
+    .quad   _kernel_file_size
 
 /*
  * Note: Exception vector table is now in vectors.S
  */
+
