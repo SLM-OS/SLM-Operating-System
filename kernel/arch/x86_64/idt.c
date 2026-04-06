@@ -70,6 +70,22 @@ extern void isr_44(void);
 extern void isr_45(void);
 extern void isr_46(void);
 extern void isr_47(void);
+extern void isr_48(void);
+extern void isr_49(void);
+extern void isr_50(void);
+extern void isr_51(void);
+extern void isr_52(void);
+extern void isr_53(void);
+extern void isr_54(void);
+extern void isr_55(void);
+extern void isr_56(void);
+extern void isr_57(void);
+extern void isr_58(void);
+extern void isr_59(void);
+extern void isr_60(void);
+extern void isr_61(void);
+extern void isr_62(void);
+extern void isr_63(void);
 
 /*
  * IDT gate descriptor (16 bytes on x86-64)
@@ -89,7 +105,7 @@ struct idt_ptr {
     uint64_t base;
 } __attribute__((packed));
 
-#define IDT_ENTRIES 48
+#define IDT_ENTRIES 64
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr idtr;
 
@@ -154,39 +170,25 @@ static const char *exception_names[] = {
     "#CP Control Protection",
 };
 
-/* IRQ handler callback table */
+/* IRQ handler callback table (vectors 32-63 → index 0-31) */
 typedef void (*irq_handler_t)(uint8_t irq);
-static irq_handler_t irq_handlers[16];
+static irq_handler_t irq_handlers[32];
 
 void irq_register(uint8_t irq, irq_handler_t handler)
 {
-    if (irq < 16)
+    if (irq < 32)
         irq_handlers[irq] = handler;
 }
 
-/* PIC I/O ports */
-#define PIC1_CMD  0x20
-#define PIC1_DATA 0x21
-#define PIC2_CMD  0xA0
-#define PIC2_DATA 0xA1
+/* gic_end_interrupt is used for LAPIC EOI (from pic.c) */
+extern void gic_end_interrupt(uint32_t irq);
 
-static inline void outb(uint16_t port, uint8_t val)
-{
-    __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
+/* I/O port access for PIC test in test suite */
 static inline uint8_t inb(uint16_t port)
 {
     uint8_t ret;
     __asm__ volatile("inb %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
-}
-
-static void pic_send_eoi(uint8_t irq)
-{
-    if (irq >= 8)
-        outb(PIC2_CMD, 0x20);
-    outb(PIC1_CMD, 0x20);
 }
 
 /*
@@ -261,12 +263,13 @@ void exception_handler(struct interrupt_frame *frame)
         serial_puts("*** HALT ***\n");
         while (1)
             __asm__ volatile("hlt");
-    } else if (vec >= 32 && vec < 48) {
-        /* PIC IRQ — send EOI before handler because timer_handler may
-         * context switch via schedule() and never return here. */
+    } else if (vec >= 32 && vec < 64) {
+        /* Hardware IRQ (IOAPIC vectors 32-47, LAPIC vectors 48-63).
+         * Send EOI before handler — timer_handler may context switch
+         * via schedule() and never return here. */
         uint8_t irq = vec - 32;
-        pic_send_eoi(irq);
-        if (irq_handlers[irq])
+        gic_end_interrupt(vec);  /* LAPIC EOI for all APIC-delivered interrupts */
+        if (irq < 32 && irq_handlers[irq])
             irq_handlers[irq](irq);
     }
 }
@@ -327,6 +330,24 @@ void idt_init(void)
     idt_set_gate(45, isr_45, IDT_INTERRUPT_GATE);
     idt_set_gate(46, isr_46, IDT_INTERRUPT_GATE);
     idt_set_gate(47, isr_47, IDT_INTERRUPT_GATE);
+
+    /* Extended vectors (48-63) for LAPIC timer, IPIs, etc. */
+    idt_set_gate(48, isr_48, IDT_INTERRUPT_GATE);
+    idt_set_gate(49, isr_49, IDT_INTERRUPT_GATE);
+    idt_set_gate(50, isr_50, IDT_INTERRUPT_GATE);
+    idt_set_gate(51, isr_51, IDT_INTERRUPT_GATE);
+    idt_set_gate(52, isr_52, IDT_INTERRUPT_GATE);
+    idt_set_gate(53, isr_53, IDT_INTERRUPT_GATE);
+    idt_set_gate(54, isr_54, IDT_INTERRUPT_GATE);
+    idt_set_gate(55, isr_55, IDT_INTERRUPT_GATE);
+    idt_set_gate(56, isr_56, IDT_INTERRUPT_GATE);
+    idt_set_gate(57, isr_57, IDT_INTERRUPT_GATE);
+    idt_set_gate(58, isr_58, IDT_INTERRUPT_GATE);
+    idt_set_gate(59, isr_59, IDT_INTERRUPT_GATE);
+    idt_set_gate(60, isr_60, IDT_INTERRUPT_GATE);
+    idt_set_gate(61, isr_61, IDT_INTERRUPT_GATE);
+    idt_set_gate(62, isr_62, IDT_INTERRUPT_GATE);
+    idt_set_gate(63, isr_63, IDT_INTERRUPT_GATE);
 
     /* Load IDT */
     idtr.limit = sizeof(idt) - 1;

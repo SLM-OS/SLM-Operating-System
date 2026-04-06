@@ -148,4 +148,22 @@ ISR_IRQ 45
 ISR_IRQ 46
 ISR_IRQ 47
 
+/* Extended vectors (48-63) for LAPIC timer, IPIs, etc. */
+ISR_IRQ 48     /* LAPIC Timer */
+ISR_IRQ 49     /* IPI (future SMP) */
+ISR_IRQ 50
+ISR_IRQ 51
+ISR_IRQ 52
+ISR_IRQ 53
+ISR_IRQ 54
+ISR_IRQ 55
+ISR_IRQ 56
+ISR_IRQ 57
+ISR_IRQ 58
+ISR_IRQ 59
+ISR_IRQ 60
+ISR_IRQ 61
+ISR_IRQ 62
+ISR_IRQ 63
+
 .section .note.GNU-stack, "", @progbits
