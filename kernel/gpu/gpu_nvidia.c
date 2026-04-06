@@ -18,6 +18,12 @@
 #include "gpu.h"
 #include "../include/uart.h"
 #include "../include/debug.h"
+#include "../include/pmm.h"
+
+/* Forward-declare cache functions from gpu/cache.c to avoid
+ * header conflict between gpu/cache.h and kernel/include/cache.h */
+void cache_clean_range(void *addr, size_t size);
+void cache_invalidate_range(void *addr, size_t size);
 #include <stdbool.h>
 
 /* MMIO register access */
@@ -159,15 +165,103 @@ static int nvidia_get_info(struct gpu_info *info)
     return GPU_OK;
 }
 
+/*
+ * GPU memory allocation for unified memory (Jetson Orin).
+ *
+ * On Jetson, CPU and GPU share the same physical DRAM. Allocating
+ * GPU-accessible memory is the same as allocating regular pages from
+ * the PMM — the GPU can access any physical address. The key
+ * difference from the stub driver is that cache coherency matters:
+ * the CPU must clean caches before GPU reads, and invalidate before
+ * reading GPU-written data.
+ */
+static int nvidia_alloc(size_t size, uint32_t flags, gpu_buffer_t *buf)
+{
+    if (!buf || size == 0) {
+        return GPU_ERR_INVALID_PARAM;
+    }
+
+    size_t page_size = 4096;
+    size_t pages = (size + page_size - 1) / page_size;
+
+    if (flags & GPU_MEM_ALIGN_2MB) {
+        size_t align_2mb = 2 * 1024 * 1024;
+        size_t align_pages = align_2mb / page_size;
+        size_t aligned_size = ((size + align_2mb - 1) / align_2mb) * align_2mb;
+        size_t aligned_pages = aligned_size / page_size;
+        size_t actual_pages = aligned_pages + align_pages;
+
+        void *addr = pmm_alloc_pages(actual_pages);
+        if (!addr) {
+            return GPU_ERR_NO_MEMORY;
+        }
+
+        uintptr_t aligned_addr = ((uintptr_t)addr + align_2mb - 1) & ~(align_2mb - 1);
+        buf->cpu_addr = (void *)aligned_addr;
+        buf->gpu_addr = aligned_addr;
+        buf->size = aligned_size;
+    } else {
+        void *addr = pmm_alloc_pages(pages);
+        if (!addr) {
+            return GPU_ERR_NO_MEMORY;
+        }
+
+        buf->cpu_addr = addr;
+        buf->gpu_addr = (uint64_t)(uintptr_t)addr;
+        buf->size = pages * page_size;
+    }
+
+    buf->flags = flags;
+    return GPU_OK;
+}
+
+static void nvidia_free(gpu_buffer_t *buf)
+{
+    if (!buf || !buf->cpu_addr) {
+        return;
+    }
+
+    size_t pages = buf->size / 4096;
+    pmm_free_pages(buf->cpu_addr, pages);
+
+    buf->cpu_addr = NULL;
+    buf->gpu_addr = 0;
+    buf->size = 0;
+}
+
+/*
+ * Clean CPU caches so GPU sees latest data.
+ * DC CVAC (Clean by VA to PoC) writes dirty lines back to DRAM.
+ */
+static void nvidia_sync_for_gpu(gpu_buffer_t *buf)
+{
+    if (!buf || !buf->cpu_addr) {
+        return;
+    }
+    cache_clean_range(buf->cpu_addr, buf->size);
+}
+
+/*
+ * Invalidate CPU caches so CPU sees GPU-written data.
+ * DC IVAC (Invalidate by VA to PoC) discards stale cached copies.
+ */
+static void nvidia_sync_for_cpu(gpu_buffer_t *buf)
+{
+    if (!buf || !buf->cpu_addr) {
+        return;
+    }
+    cache_invalidate_range(buf->cpu_addr, buf->size);
+}
+
 const struct gpu_driver gpu_nvidia_driver = {
     .name          = "nvidia",
     .init          = nvidia_init,
     .shutdown      = nvidia_shutdown,
     .get_info      = nvidia_get_info,
-    .alloc         = NULL,  /* Future: GPU memory allocation */
-    .free          = NULL,
-    .sync_for_gpu  = NULL,
-    .sync_for_cpu  = NULL,
+    .alloc         = nvidia_alloc,
+    .free          = nvidia_free,
+    .sync_for_gpu  = nvidia_sync_for_gpu,
+    .sync_for_cpu  = nvidia_sync_for_cpu,
     .submit        = NULL,
     .wait          = NULL,
 };

@@ -14,8 +14,8 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 2. RP1 UART TX via PL011 flag register polling (works after MMU enable)
 3. Serial console output at 115200 baud on GPIO14/15
 4. Platform-specific VMM mappings (1GB L1 block descriptors for RAM, L2 tables for MMIO)
-5. armstub8-2712.bin for GIC Group 1 configuration from EL3
-6. Timer interrupts working (virtual timer, IRQ 27) with preemptive scheduling
+5. GIC Group 1 configuration from EL2 in boot.S (armstub disabled)
+6. Timer interrupts working (physical timer, IRQ 30) with preemptive scheduling
 7. All subsystems boot: PMM, VMM, GIC, scheduler, IPC, VFS, LittleFS, Rust, Lua
 8. Automated deploy via SDWireC + labctl
 
@@ -70,12 +70,12 @@ Full test suite runs on Pi 5 hardware with zero failures:
 | **Total** | **415** | **0** | **16** | **431** |
 
 **Ignored tests (16 total, expected):**
-- Scheduler (1): `test_isolated_core_latency` — requires cross-CPU dispatch (SMPEN)
+- Scheduler (1): `test_isolated_core_latency` — requires cross-CPU dispatch (secondary CPUs don't run dispatched tasks)
 - VMM (5): TLB remap tests — Pi 5 uses 1GB L1 block descriptors, no L2 entries to remap
 - VMM (3): ASID/TLB broadcast smoke tests — cannot validate TLB state from test
 - PMM (1): `test_split_creates_buddies` — small blocks already available, no split triggered
 - Net (1): platform-specific test not applicable to Pi 5
-- Integration (5): Cross-CPU task dispatch requires SMPEN (L2 not coherent without it)
+- Integration (5): Cross-CPU task dispatch — NC data visible but secondary CPUs don't process dispatched tasks
 
 **Key bugs fixed to achieve zero failures:**
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM
@@ -324,7 +324,9 @@ Despite the filename (historical), uses hardware PL011 for both TX and RX:
 The Pi 5 has a unique memory layout compared to QEMU/Jetson. RAM starts at PA 0x0 and devices are at high addresses (above 4 GB). The VMM uses platform-specific setup:
 
 ```
-L1[0-3]  → 1GB block descriptors for RAM (0x00000000-0xFFFFFFFF, 4 GB)
+L1[0-2]  → 1GB block descriptors for RAM (0x00000000-0xBFFFFFFF, 3 GB)
+L1[3]    → L2 table: 511 WB 2MB blocks + 1 NC block at 0xFFE00000 (cross-CPU shared memory)
+L1[64]   → L2 table for PCIe RC/MIP0 (0x1000120000)
 L1[65]   → L2 table for GIC/GPIO2 (0x107FFF9000, 0x107D517C04)
 L1[124]  → L2 table for RP1 UART/GPIO (0x1F00030000, 0x1F000D0000)
 ```
