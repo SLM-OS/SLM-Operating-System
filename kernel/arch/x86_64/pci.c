@@ -137,9 +137,10 @@ uint8_t pci_config_read8(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg)
 
 /* ---- ACPI MCFG Parsing ---- */
 
+/* ---- ACPI MCFG Parsing ---- */
+
 /*
- * MCFG table structure (PCI Express memory-mapped config space).
- * Found via ACPI RSDT/XSDT with signature "MCFG".
+ * MCFG entry structure (PCI Express memory-mapped config space).
  */
 struct mcfg_entry {
     uint64_t base_address;
@@ -149,107 +150,22 @@ struct mcfg_entry {
     uint32_t reserved;
 } __attribute__((packed));
 
-/* ACPI table lookup (from acpi.c) */
-extern uint32_t multiboot_info_addr;
-
-struct acpi_sdt_header {
-    char     signature[4];
-    uint32_t length;
-    uint8_t  revision;
-    uint8_t  checksum;
-    char     oem_id[6];
-    char     oem_table_id[8];
-    uint32_t oem_revision;
-    uint32_t creator_id;
-    uint32_t creator_revision;
-} __attribute__((packed));
-
-struct acpi_rsdp {
-    char     signature[8];
-    uint8_t  checksum;
-    char     oem_id[6];
-    uint8_t  revision;
-    uint32_t rsdt_address;
-    uint32_t length;
-    uint64_t xsdt_address;
-    uint8_t  extended_checksum;
-    uint8_t  reserved[3];
-} __attribute__((packed));
-
-static bool sig_match(const char *a, const char *b, int len)
-{
-    for (int i = 0; i < len; i++)
-        if (a[i] != b[i]) return false;
-    return true;
-}
-
-/*
- * Find a specific ACPI table by signature.
- * Reuses the RSDP discovery from acpi.c via Multiboot2 tag.
- */
-static const struct acpi_sdt_header *acpi_find_table(const char *sig)
-{
-    if (multiboot_info_addr == 0) return NULL;
-
-    /* Find RSDP from Multiboot2 */
-    uint8_t *ptr = (uint8_t *)(uintptr_t)multiboot_info_addr;
-    uint32_t total_size = *(uint32_t *)ptr;
-    uint8_t *end = ptr + total_size;
-    const struct acpi_rsdp *rsdp = NULL;
-
-    ptr += 8;
-    while (ptr < end) {
-        uint32_t tag_type = *(uint32_t *)ptr;
-        uint32_t tag_size = *(uint32_t *)(ptr + 4);
-        if (tag_type == 0) break;
-        if (tag_type == 14 || tag_type == 15) {
-            rsdp = (const struct acpi_rsdp *)(ptr + 8);
-            break;
-        }
-        ptr += (tag_size + 7) & ~7;
-    }
-    if (!rsdp) return NULL;
-
-    /* Search XSDT or RSDT for the requested table */
-    if (rsdp->revision >= 2 && rsdp->xsdt_address != 0) {
-        const struct acpi_sdt_header *xsdt =
-            (const struct acpi_sdt_header *)(uintptr_t)rsdp->xsdt_address;
-        uint32_t entries = (xsdt->length - sizeof(*xsdt)) / 8;
-        const uint64_t *ptrs = (const uint64_t *)((uintptr_t)xsdt + sizeof(*xsdt));
-        for (uint32_t i = 0; i < entries; i++) {
-            const struct acpi_sdt_header *hdr =
-                (const struct acpi_sdt_header *)(uintptr_t)ptrs[i];
-            if (sig_match(hdr->signature, sig, 4))
-                return hdr;
-        }
-    } else {
-        const struct acpi_sdt_header *rsdt =
-            (const struct acpi_sdt_header *)(uintptr_t)rsdp->rsdt_address;
-        uint32_t entries = (rsdt->length - sizeof(*rsdt)) / 4;
-        const uint32_t *ptrs = (const uint32_t *)((uintptr_t)rsdt + sizeof(*rsdt));
-        for (uint32_t i = 0; i < entries; i++) {
-            const struct acpi_sdt_header *hdr =
-                (const struct acpi_sdt_header *)(uintptr_t)ptrs[i];
-            if (sig_match(hdr->signature, sig, 4))
-                return hdr;
-        }
-    }
-
-    return NULL;
-}
+/* acpi_find_table() provided by acpi.c — must call acpi_init() first */
+extern const void *acpi_find_table(const char *sig);
 
 static void pci_init_ecam(void)
 {
-    const struct acpi_sdt_header *mcfg = acpi_find_table("MCFG");
+    const uint8_t *mcfg = (const uint8_t *)acpi_find_table("MCFG");
     if (!mcfg) {
         uart_printf("[PCI] No ACPI MCFG table — using legacy I/O\n");
         return;
     }
 
-    /* MCFG entries start at offset 44 (after header + 8 bytes reserved) */
+    /* MCFG: standard 36-byte SDT header + 8 bytes reserved = 44 bytes before entries */
+    uint32_t mcfg_length = *(const uint32_t *)(mcfg + 4);  /* SDT length field */
     const struct mcfg_entry *entries =
-        (const struct mcfg_entry *)((uintptr_t)mcfg + 44);
-    uint32_t count = (mcfg->length - 44) / sizeof(struct mcfg_entry);
+        (const struct mcfg_entry *)(mcfg + 44);
+    uint32_t count = (mcfg_length - 44) / sizeof(struct mcfg_entry);
 
     if (count == 0) return;
 

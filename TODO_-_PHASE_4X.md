@@ -52,7 +52,7 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 | `kernel/arch/x86_64/Makefile.test` | Standalone build + UEFI disk image |
 | `kernel/kernel-x86_64.ld` | Linker script for x86-64 |
 | `kernel/drivers/uart_x86.c` | COM1 16550 UART driver |
-| `kernel/tests/test_x86_boot.c` | 66 functional tests |
+| `kernel/tests/test_x86_boot.c` | 77 functional tests |
 | `docs/x86-64-port.md` | Comprehensive documentation |
 
 **Technical Challenges Solved:**
@@ -114,7 +114,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - **ACPI MADT parsing** (`acpi.c`) — discovers CPUs, LAPIC base, IOAPIC, ISOs
 - **Platform abstraction** (`pic.c` bridges gic.h, `platform_x86.c` provides all stubs)
 - **Real x86-64 spinlocks** — TTAS with `__atomic_exchange_n`, atomic `cpus_online` increment
-- **66 functional tests** across 14 categories
+- **77 functional tests** across 15 categories
 
 ---
 
@@ -167,7 +167,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - ✅ Document boot configuration in `docs/x86-64-port.md`
 
 ### Testing & Documentation
-- ✅ Create functional tests (`test_x86_boot.c` — 55 tests across 13 categories)
+- ✅ Create functional tests (`test_x86_boot.c` — 77 tests across 15 categories)
   - ✅ Control register tests (CR0, CR4, EFER, CR3)
   - ✅ Page table structure tests (PML4, PDPT, PD entries)
   - ✅ GDT tests (limit, CS/DS selectors)
@@ -320,10 +320,11 @@ make -f kernel/arch/x86_64/Makefile.test disk
 | `kernel/arch/x86_64/pci.c` | Config access, enumeration, shell command |
 
 ### Tests
-- ✅ 6 new PCI tests (66 → 72 total):
-  - `test_pci_host_bridge_exists`, `test_pci_nonexistent_device`
-  - `test_pci_enumeration_found_devices`, `test_pci_found_host_bridge`
-  - `test_pci_device_at_index_valid`, `test_pci_found_isa_bridge`
+- ✅ 11 PCI tests (66 → 77 total):
+  - Config access: `test_pci_host_bridge_exists`, `test_pci_nonexistent_device`, `test_pci_config_read8_class`, `test_pci_config_read16_vendor`
+  - Enumeration: `test_pci_enumeration_found_devices`, `test_pci_found_host_bridge`, `test_pci_device_at_index_valid`, `test_pci_found_isa_bridge`
+  - Lookup: `test_pci_find_device_by_id`, `test_pci_find_device_not_found`
+  - Multi-function: `test_pci_multifunction_device`
 
 ---
 

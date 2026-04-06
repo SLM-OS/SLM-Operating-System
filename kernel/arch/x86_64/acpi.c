@@ -101,6 +101,9 @@ struct acpi_iso_info {
     uint16_t flags;
 };
 
+/* Saved RSDP pointer for acpi_find_table() */
+static const struct acpi_rsdp *saved_rsdp;
+
 static struct {
     bool     valid;
     uint32_t lapic_address;
@@ -245,6 +248,8 @@ int acpi_init(void)
         return -1;
     }
 
+    saved_rsdp = rsdp;
+
     uart_printf("[ACPI] RSDP found at 0x%lx (revision %u)\n",
                 (uintptr_t)rsdp, rsdp->revision);
 
@@ -360,6 +365,42 @@ bool acpi_get_iso(uint32_t index, uint8_t *source_irq, uint32_t *global_irq, uin
     if (global_irq) *global_irq = acpi_info.isos[index].global_irq;
     if (flags) *flags = acpi_info.isos[index].flags;
     return true;
+}
+
+/*
+ * Find an ACPI table by its 4-byte signature (e.g., "MCFG", "HPET").
+ * Must be called after acpi_init().
+ * Returns pointer to the SDT header, or NULL if not found.
+ */
+const void *acpi_find_table(const char *sig)
+{
+    if (!saved_rsdp) return NULL;
+
+    if (saved_rsdp->revision >= 2 && saved_rsdp->xsdt_address != 0) {
+        const struct acpi_sdt_header *xsdt =
+            (const struct acpi_sdt_header *)(uintptr_t)saved_rsdp->xsdt_address;
+        uint32_t entries = (xsdt->length - sizeof(*xsdt)) / 8;
+        const uint64_t *ptrs = (const uint64_t *)((uintptr_t)xsdt + sizeof(*xsdt));
+        for (uint32_t i = 0; i < entries; i++) {
+            const struct acpi_sdt_header *hdr =
+                (const struct acpi_sdt_header *)(uintptr_t)ptrs[i];
+            if (sig_match(hdr->signature, sig, 4))
+                return hdr;
+        }
+    } else {
+        const struct acpi_sdt_header *rsdt =
+            (const struct acpi_sdt_header *)(uintptr_t)saved_rsdp->rsdt_address;
+        uint32_t entries = (rsdt->length - sizeof(*rsdt)) / 4;
+        const uint32_t *ptrs = (const uint32_t *)((uintptr_t)rsdt + sizeof(*rsdt));
+        for (uint32_t i = 0; i < entries; i++) {
+            const struct acpi_sdt_header *hdr =
+                (const struct acpi_sdt_header *)(uintptr_t)ptrs[i];
+            if (sig_match(hdr->signature, sig, 4))
+                return hdr;
+        }
+    }
+
+    return NULL;
 }
 
 #endif /* PLATFORM_X86_64 */

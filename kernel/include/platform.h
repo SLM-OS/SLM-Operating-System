@@ -192,7 +192,7 @@
  * x86-64 PC
  *
  * Standard x86-64 hardware with UEFI boot via GRUB Multiboot2.
- * Uses 16550 UART (COM1) for serial console and 8259 PIC for interrupts.
+ * Uses 16550 UART (COM1) for serial console, LAPIC + IOAPIC for interrupts.
  * ============================================================================ */
 #if defined(PLATFORM_X86_64)
 
@@ -208,8 +208,8 @@
 #define UART_BASE           0x3F8UL
 #define UART_IRQ            36              /* IRQ 4 → vector 36 */
 
-/* Interrupt controller - 8259 PIC (not GIC) */
-#define GIC_DIST_BASE       0UL             /* Dummy — PIC uses I/O ports */
+/* Interrupt controller — LAPIC + IOAPIC (gic.h mapped via pic.c) */
+#define GIC_DIST_BASE       0UL             /* Dummy — LAPIC/IOAPIC are memory-mapped */
 #define GIC_CPU_BASE        0UL
 
 /* Timer - 8254 PIT */

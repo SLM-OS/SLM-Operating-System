@@ -1073,6 +1073,7 @@ static void test_smp_trampoline_param_offsets(void)
 
 extern uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
 extern uint16_t pci_config_read16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
+extern uint8_t pci_config_read8(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
 extern uint32_t pci_get_device_count(void);
 
 struct pci_device_ext {
@@ -1142,6 +1143,64 @@ static void test_pci_found_isa_bridge(void)
 {
     const void *dev = pci_find_class(0x06, 0x01);
     TEST_ASSERT_TRUE(dev != NULL);
+}
+
+/*
+ * Test: pci_config_read8 returns valid class code for host bridge.
+ */
+static void test_pci_config_read8_class(void)
+{
+    uint8_t class_code = pci_config_read8(0, 0, 0, 0x0B);
+    TEST_ASSERT_EQUAL_HEX8(0x06, class_code);  /* Bridge device */
+}
+
+/*
+ * Test: pci_config_read16 returns valid vendor ID.
+ */
+static void test_pci_config_read16_vendor(void)
+{
+    uint16_t vendor = pci_config_read16(0, 0, 0, 0x00);
+    TEST_ASSERT_TRUE(vendor != 0xFFFF);
+    TEST_ASSERT_TRUE(vendor != 0x0000);
+}
+
+/*
+ * Test: pci_find_device locates the host bridge by vendor:device.
+ */
+extern const struct pci_device_ext *pci_find_device(uint16_t vendor_id, uint16_t device_id);
+
+static void test_pci_find_device_by_id(void)
+{
+    /* Read the actual host bridge vendor:device from config space */
+    uint16_t vendor = pci_config_read16(0, 0, 0, 0x00);
+    uint16_t device = pci_config_read16(0, 0, 0, 0x02);
+
+    const void *dev = pci_find_device(vendor, device);
+    TEST_ASSERT_TRUE(dev != NULL);
+}
+
+/*
+ * Test: pci_find_device returns NULL for non-existent vendor:device.
+ */
+static void test_pci_find_device_not_found(void)
+{
+    const void *dev = pci_find_device(0xDEAD, 0xBEEF);
+    TEST_ASSERT_TRUE(dev == NULL);
+}
+
+/*
+ * Test: QEMU PIIX3 (00:01.x) is a multi-function device with functions 1 and 3.
+ */
+static void test_pci_multifunction_device(void)
+{
+    /* QEMU i440FX has PIIX3 at 00:01.0 (ISA bridge), 00:01.1 (IDE), 00:01.3 (PM) */
+    uint8_t hdr = pci_config_read8(0, 1, 0, 0x0E);
+    /* Bit 7 of header type = multi-function */
+    TEST_ASSERT_TRUE((hdr & 0x80) != 0);
+
+    /* Function 1 should be valid (IDE controller) */
+    uint16_t vendor_f1 = pci_config_read16(0, 1, 1, 0x00);
+    TEST_ASSERT_TRUE(vendor_f1 != 0xFFFF);
 }
 
 /* ============================================================================
@@ -1308,6 +1367,11 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_pci_found_host_bridge);
     RUN_TEST(test_pci_device_at_index_valid);
     RUN_TEST(test_pci_found_isa_bridge);
+    RUN_TEST(test_pci_config_read8_class);
+    RUN_TEST(test_pci_config_read16_vendor);
+    RUN_TEST(test_pci_find_device_by_id);
+    RUN_TEST(test_pci_find_device_not_found);
+    RUN_TEST(test_pci_multifunction_device);
 
     /* setjmp/longjmp (required for Lua) */
     RUN_TEST(test_setjmp_longjmp);

@@ -18,14 +18,14 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 10. [SMP (Symmetric Multi-Processing)](#smp-symmetric-multi-processing)
 11. [PCI/PCIe Enumeration](#pcipcie-enumeration)
 12. [Console Output](#console-output)
-12. [Building](#building)
-13. [Hardware Deployment](#hardware-deployment)
-14. [Testing](#testing)
-15. [Platform Abstraction](#platform-abstraction)
-16. [Lua Scripting](#lua-scripting)
-17. [Key Files](#key-files)
-18. [Design Decisions](#design-decisions)
-19. [Troubleshooting](#troubleshooting)
+13. [Building](#building)
+14. [Hardware Deployment](#hardware-deployment)
+15. [Testing](#testing)
+16. [Platform Abstraction](#platform-abstraction)
+17. [Lua Scripting](#lua-scripting)
+18. [Key Files](#key-files)
+19. [Design Decisions](#design-decisions)
+20. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -551,7 +551,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 72 tests across 15 categories:
+The `test_x86_boot.c` test suite contains 77 tests across 15 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -664,7 +664,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 72 tests: boot, IDT, APIC, SMP, spinlock, PCI, Multiboot2, platform, scheduler, setjmp |
+| `kernel/tests/test_x86_boot.c` | 77 tests: boot, IDT, APIC, SMP, spinlock, PCI, Multiboot2, platform, scheduler, setjmp |
 
 ---
 
