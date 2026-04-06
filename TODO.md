@@ -4,7 +4,7 @@ This document tracks Phase 4 implementation of SLM-OS.
 
 **Status:** In Progress (Pi 5 bring-up complete, Jetson partially unblocked)
 
-**Summary:** Phase 4 combines hardware bring-up work with the Component System milestone. Pi 5 is now the primary hardware platform with 4-core SMP, preemptive scheduling, and an interactive shell. Jetson CBB firewall has been partially bypassed — SLM-OS boots to shell at EL2 using UARTC via VHE (April 2026).
+**Summary:** Phase 4 combines hardware bring-up work with the Component System milestone. Pi 5 has 4-core SMP, Jetson has 6-core SMP — both with preemptive scheduling and interactive shell. Jetson runs at EL2 with VHE, using UARTC via TCU for serial (April 2026).
 
 **Goals:**
 - ✅ Raspberry Pi 5 hardware bring-up (complete — 4-core SMP)
@@ -98,7 +98,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 
 **Remaining CBB restrictions:**
 - UARTA (40-pin header) — blocked even from EL2
-- SMP — PSCI CPU_ON fails after kexec (TF-A state inconsistent). See M1 UEFI boot item.
+- ✅ SMP — 6-core boot working. Root cause was wrong MPIDR encoding, not TF-A state.
 
 ### Serial Console
 - ✅ Connect USB-serial adapter to 40-pin header (Pin 8 TXD, Pin 10 RXD, Pin 6 GND)
@@ -129,7 +129,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ Scheduler (single-core)
 - ✅ Lua scripting
 - ✅ Shell (fully interactive)
-- ☐ SMP — PSCI CPU_ON fails after kexec (TF-A state inconsistent). VHE secondary code ready. Paths: UEFI boot (PE/COFF relocation blocker), SGI/spin-table wake (bypass PSCI), or UEFI Shell load
+- ✅ SMP — 6 cores online via PSCI CPU_ON (MPIDR dual-cluster encoding fixed)
 - ✅ Memory expansion (~6.7 GB free across 3 regions around OP-TEE carveout)
 
 ---
@@ -138,7 +138,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 
 **Depends on:** M1 (Serial Console)
 
-**Status:** 🟡 Mostly Complete — GIC, timer, MMU verified working at EL2. SMP blocked.
+**Status:** ✅ Complete — GIC, timer, MMU, SMP all working at EL2.
 
 ### GIC and Interrupts
 - ✅ GICv3 initialized (distributor 0x0F400000, redistributor 0x0F440000, 992 interrupt lines)
@@ -151,9 +151,9 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ 100 Hz tick confirmed, scheduler preemption working
 
 ### Multi-Core
-- ☐ Update `MAX_CPUS` in `config.h` from 4 to 6 (or 8 for headroom)
-- ☐ SMP boot — blocked on PSCI CPU_ON after kexec (see M1 UEFI boot / alternative SMP paths)
-- ☐ Test per-core scheduling on 6 cores
+- ✅ MAX_CPUS=8 in config.h, CPU_MAX=6 in platform.h — 6 cores boot
+- ✅ SMP boot — PSCI CPU_ON via SMC with correct dual-cluster MPIDR encoding
+- ☐ Test per-core scheduling on 6 cores (tasks dispatched to secondaries)
 - ☐ Multi-core stress test on real hardware
 
 ### MMU

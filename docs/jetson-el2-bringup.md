@@ -3,7 +3,7 @@
 This document records the successful bypass of the Tegra234 CBB firewall by running SLM-OS at EL2 with VHE (Virtual Host Extensions). This unblocked serial output, GIC, timer, and scheduler — enough to boot to an interactive shell.
 
 **Date:** April 2026
-**Status:** 🟡 Partially working — interactive shell with serial I/O, SMP still needs work
+**Status:** ✅ Fully working — 6-core SMP, interactive shell with serial I/O
 
 ---
 
@@ -192,7 +192,7 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 ## Remaining Work
 
 1. ~~**UART RX**~~ — **FIXED.** RX data arrives via TCU HSP mailbox (0x03C10000), not UARTC's RBR register. SPE firmware routes USB-C input to TOP0_HSP SM0. Reading the mailbox and unpacking 1-3 bytes per message gives clean bidirectional serial.
-2. **SMP** — PSCI CPU_ON (SMC) returns but secondary CPUs don't come online after kexec. TF-A's CPU management state is inconsistent. VHE code for secondaries is ready in `smp_boot.S`. **Blocked on direct UEFI boot** (which gives clean PSCI state).
+2. ~~**SMP**~~ — **FIXED.** 6 cores online via PSCI CPU_ON. Root cause was wrong MPIDR encoding — Jetson uses dual-cluster Aff2.Aff1 (0x000, 0x100, 0x200, 0x300, 0x10200, 0x10300), not contiguous Aff0. TF-A state is fine after kexec; the original diagnosis was incorrect. Boot flag visibility uses PSCI success fallback (same cache incoherency as Pi 5).
 3. ~~**Memory above 0xC0000000**~~ — **DONE.** Three regions mapped: 0x80-0xBE, 0xC2-0xFF, 0x100-0x240. Total ~6.7 GB free.
 4. ~~**GPU access**~~ — **DONE.** GPU at 0x17000000 accessible from EL2. GA10B identified (BOOT_0=0xB7B000A1). GSP firmware loading needed for compute.
 5. **Direct UEFI boot** — WIP. EFI stub (`efi_stub.c`) handles ExitBootServices with VHE-compatible MMU disable. Self-relocating trampoline in boot.S copies image to link address (0x80000000) when UEFI loads elsewhere. PE/COFF header with ImageBase=0x80000000 accepted when preferred address available. **Blocked when UEFI can't use preferred address** — no `.reloc` section for relocation. Alternative SMP paths to investigate: SGI/spin-table wake (bypass PSCI entirely), UEFI Shell `load` command (more permissive PE parsing), or `AllocatePages(AllocateAddress)` to force preferred address.

@@ -10,13 +10,14 @@ Benchmark results across all hardware platforms. All measurements taken with `be
 
 Measures round-trip time for a full task context switch (save registers, switch page tables, restore registers).
 
-| Platform | CPU | Avg Latency | Rating |
-|----------|-----|-------------|--------|
-| **Jetson Orin Nano** | Cortex-A78AE @ EL2 | **471 ns** | Excellent |
-| **Raspberry Pi 5** | Cortex-A76 | **1,600 ns** | Excellent |
-| **QEMU virt** | Emulated | ~20,000 ns | N/A (emulated) |
+| Platform | CPU | Cores | Avg Latency | Rating |
+|----------|-----|-------|-------------|--------|
+| **Jetson Orin Nano** | Cortex-A78AE @ EL2 | 6 | **262 ns** | Excellent |
+| **Jetson Orin Nano** | Cortex-A78AE @ EL2 | 1 | 471 ns | Excellent |
+| **Raspberry Pi 5** | Cortex-A76 | 4 | **1,600 ns** | Excellent |
+| **QEMU virt** | Emulated | 4 | ~20,000 ns | N/A (emulated) |
 
-The Jetson A78AE is 3.4x faster than the Pi 5 A76 on context switches, likely due to the newer microarchitecture and higher clock speed.
+The Jetson A78AE is 6.1x faster than the Pi 5 A76 on context switches with all cores active.
 
 ---
 
@@ -24,10 +25,11 @@ The Jetson A78AE is 3.4x faster than the Pi 5 A76 on context switches, likely du
 
 Measures the variation in timer IRQ delivery across 20 consecutive ticks at 100 Hz.
 
-| Platform | Min | Avg | Max | Jitter (max-min) |
-|----------|-----|-----|-----|-------------------|
-| **Jetson Orin Nano** | 416 ns | **595 ns** | 2,432 ns | 2 us |
-| **Raspberry Pi 5** | — | < 1,000 ns | — | — |
+| Platform | Cores | Min | Avg | Max | Jitter |
+|----------|-------|-----|-----|-----|--------|
+| **Jetson Orin Nano** | 6 | 224 ns | **390 ns** | 2,624 ns | 2 us |
+| **Jetson Orin Nano** | 1 | 416 ns | 595 ns | 2,432 ns | 2 us |
+| **Raspberry Pi 5** | 4 | — | < 1,000 ns | — | — |
 
 Sub-microsecond average IRQ latency on both platforms. The Jetson's 2 us worst-case jitter is well within real-time requirements.
 
@@ -37,12 +39,13 @@ Sub-microsecond average IRQ latency on both platforms. The Jetson's 2 us worst-c
 
 Measures full send+receive round-trip latency for a single message through the kernel IPC subsystem (100 iterations).
 
-| Platform | Avg Round-Trip | Per Operation |
-|----------|---------------|---------------|
-| **Jetson Orin Nano** | **622 ns** | ~311 ns |
-| **Raspberry Pi 5** | **322 ns** (send+recv) | ~161 ns |
+| Platform | Cores | Avg Round-Trip | Per Operation |
+|----------|-------|---------------|---------------|
+| **Jetson Orin Nano** | 6 | **330 ns** | ~165 ns |
+| **Jetson Orin Nano** | 1 | 622 ns | ~311 ns |
+| **Raspberry Pi 5** | 4 | **322 ns** (send+recv) | ~161 ns |
 
-Both platforms demonstrate sub-microsecond IPC. The Pi 5 measurement was send+recv only (not full round-trip), so the platforms are comparable.
+Both platforms demonstrate sub-microsecond IPC.
 
 ---
 
@@ -63,7 +66,7 @@ Jetson's 6.7 GB usable memory spans three non-contiguous regions around the OP-T
 | Feature | Jetson Orin Nano | Raspberry Pi 5 | QEMU virt |
 |---------|-----------------|----------------|-----------|
 | CPU | 6x Cortex-A78AE | 4x Cortex-A76 | 4x (emulated) |
-| Cores Online | 1 (SMP blocked) | 4 | 4 |
+| Cores Online | 6 | 4 | 4 |
 | Exception Level | EL2 (VHE) | EL1 | EL1 |
 | GIC | GICv3 | GICv2 | GICv2 |
 | GPU | GA10B (Ampere) | None | None |
