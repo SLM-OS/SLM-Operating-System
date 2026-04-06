@@ -90,6 +90,7 @@ set(KERNEL_SOURCES
     kernel/arch/arm64/smp_boot.S
     # Note: setjmp.S moved to lua library (uses FP registers)
     kernel/arch/arm64/exceptions.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>:kernel/arch/arm64/efi_stub.c>
 
     # ==========================================================================
     # Memory Management

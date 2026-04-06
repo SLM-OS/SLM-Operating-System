@@ -160,6 +160,46 @@ _start:
 real_start:
 
 #endif /* PLATFORM_RASPI5 */
+
+#if !defined(PLATFORM_RASPI5)
+    /*
+     * EFI Boot Detection
+     *
+     * When launched as a UEFI application, UEFI calls this entry with:
+     *   x0 = EFI_HANDLE (image handle)
+     *   x1 = EFI_SYSTEM_TABLE* (system table pointer)
+     *
+     * When launched via kexec:
+     *   x0 = DTB pointer
+     *   x1 = 0 or undefined
+     *
+     * Detect EFI by checking if x1 points to a valid EFI_SYSTEM_TABLE
+     * (signature "IBI SYST" = 0x5453595320494249 at the start).
+     * If EFI: call efi_stub_entry() which handles ExitBootServices,
+     *         disables MMU, and returns the DTB pointer in x0.
+     * If kexec: x0 already contains the DTB pointer, continue normally.
+     */
+    cbz     x1, .Lnot_efi              /* x1 == NULL → definitely not EFI */
+    ldr     x10, =0x5453595320494249    /* EFI_SYSTEM_TABLE_SIGNATURE */
+    ldr     x11, [x1]                   /* Read first 8 bytes at x1 */
+    cmp     x10, x11
+    b.ne    .Lnot_efi                   /* Signature mismatch → kexec boot */
+
+    /*
+     * EFI boot detected. x0=handle, x1=system_table.
+     * UEFI provides a valid stack, so we can call C code directly.
+     * efi_stub_entry() will:
+     *   1. Find DTB in the EFI configuration table
+     *   2. Call ExitBootServices to take over the machine
+     *   3. Disable MMU and clean caches
+     *   4. Return the DTB pointer (or NULL) in x0
+     */
+    bl      efi_stub_entry
+    /* x0 now contains DTB pointer (or NULL). Continue with normal boot. */
+
+.Lnot_efi:
+#endif /* !PLATFORM_RASPI5 */
+
     /*
      * Early debug: Write characters to UART to confirm we reached real_start.
      *
