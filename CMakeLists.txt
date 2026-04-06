@@ -92,13 +92,15 @@ set(KERNEL_SOURCES
     # ==========================================================================
     # Architecture-specific
     # ==========================================================================
+    # ARM64 architecture files (excluded for x86-64)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/boot.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/context.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/mmu.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/vectors.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/smp_boot.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/exceptions.c>
-    # trampoline32.S handled by custom command below (needs -m32 + objcopy)
+    $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_stub.c>
+    # x86-64 architecture files (trampoline32.S handled by custom command below)
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/entry64.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/idt.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/context.S>
@@ -118,6 +120,7 @@ set(KERNEL_SOURCES
     # ==========================================================================
     kernel/mm/pmm.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/mm/vmm.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/mm/ncmem.c>
 
     # ==========================================================================
     # Scheduler
@@ -194,8 +197,8 @@ set(KERNEL_SOURCES
     # ==========================================================================
     kernel/gpu/gpu.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/gpu/cache.c>
-    kernel/gpu/gpu_stub.c
-    # kernel/gpu/gpu_tegra.c    # Jetson Orin Nano (future)
+    $<$<NOT:$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/gpu/gpu_stub.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/gpu_nvidia.c>
 
     # ==========================================================================
     # Networking (QEMU only for now)

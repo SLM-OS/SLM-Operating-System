@@ -1,11 +1,11 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
-**Date:** April 3, 2026
-**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (393 tests: 378 pass, 15 ignored, 0 failures).
+**Date:** April 5, 2026
+**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (431 tests: 415 pass, 16 ignored, 0 failures). 100% boot reliability (92/92 power cycles). Context switch: 1.7 µs.
 
 ## Summary
 
-SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (393 tests across 13 suites) passes with zero failures on Pi 5 hardware.
+SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (431 tests across 14 suites) passes with zero failures on Pi 5 hardware.
 
 **Preemptive scheduling is active** — timer interrupts drive context switching at 100 Hz. The shell accepts input and responds to commands with preemption enabled. Two RP1-specific GPIO pad configurations were required for UART RX (OD=1, FUNCSEL sequencing). The armstub is currently disabled (separate issue; see Known Limitations).
 
@@ -41,11 +41,13 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | SDWireC deploy | ✅ Working | Automated flash/boot via sdwire CLI + labctl |
 | Preemptive scheduler | ✅ Working | 100 Hz timer, DAIF-based context switch |
 | Shell prompt | ✅ Working | `slmos>` appears after full boot |
+| Performance benchmarks | ✅ Working | `bench all` — context switch, IRQ, IPC, stats |
 | UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
 | Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
-| UART RX IRQ | 🔧 In progress | PCIe RC→MIP→GIC path configured, MSI-X table TBD |
+| NC shared memory | ✅ Working | 2MB NC region at 0xFFE00000, scheduler run queues in NC |
+| UART RX IRQ | ⏸️ On hold | PCIe RC→MIP→GIC path configured, BAR1 routing TBD |
 
-## Test Results (April 3, 2026)
+## Test Results (April 5, 2026)
 
 Full test suite runs on Pi 5 hardware with zero failures:
 
@@ -53,31 +55,76 @@ Full test suite runs on Pi 5 hardware with zero failures:
 |---|---|---|---|---|
 | IPC | 23 | 0 | 0 | 23 |
 | Model Memory | 10 | 0 | 0 | 10 |
-| Scheduler | 54 | 0 | 1 | 55 |
+| Scheduler | 60 | 0 | 1 | 61 |
 | Priority Inheritance Mutex | 7 | 0 | 0 | 7 |
 | GPU | 22 | 0 | 0 | 22 |
 | Component | 22 | 0 | 0 | 22 |
 | VFS | 26 | 0 | 0 | 26 |
-| Shell | 132 | 0 | 0 | 132 |
-| VMM/TLB | 4 | 0 | 8 | 12 |
+| Shell | 139 | 0 | 0 | 139 |
+| VMM/TLB | 5 | 0 | 8 | 13 |
 | PMM Buddy | 23 | 0 | 1 | 24 |
 | LittleFS | 26 | 0 | 0 | 26 |
+| Net | 12 | 0 | 1 | 13 |
 | Lua | 29 | 0 | 0 | 29 |
-| Integration (Multi-Core) | 0 | 0 | 5 | 5 |
-| **Total** | **378** | **0** | **15** | **393** |
+| Integration (Multi-Core + NC) | 3 | 0 | 5 | 8 |
+| **Total** | **415** | **0** | **16** | **431** |
 
-**Ignored tests (expected):**
-- Scheduler: `test_isolated_core_latency` — task_exit race on secondary CPUs (pre-existing)
-- VMM (5 tests): TLB remap tests — Pi 5 uses 1GB L1 block descriptors, no L2 entries to remap
-- VMM (3 tests): ASID/TLB broadcast smoke tests — cannot validate TLB state from test
-- PMM: `test_split_creates_buddies` — small blocks already available, no split triggered
-- Integration (5 tests): Cross-CPU task dispatch requires SMPEN (not set by TF-A on Pi 5)
+**Ignored tests (16 total, expected):**
+- Scheduler (1): `test_isolated_core_latency` — requires cross-CPU dispatch (SMPEN)
+- VMM (5): TLB remap tests — Pi 5 uses 1GB L1 block descriptors, no L2 entries to remap
+- VMM (3): ASID/TLB broadcast smoke tests — cannot validate TLB state from test
+- PMM (1): `test_split_creates_buddies` — small blocks already available, no split triggered
+- Net (1): platform-specific test not applicable to Pi 5
+- Integration (5): Cross-CPU task dispatch requires SMPEN (L2 not coherent without it)
 
 **Key bugs fixed to achieve zero failures:**
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM
 2. DC CIVAC writeback bug: CPU 0's stale dirty cacheline for `cpu_data[]` overwrote secondary CPUs' `online=true` at PoC (fixed by `cache_clean_range` before booting secondaries)
+3. task_exit/schedule race: timer could fire between state=TERMINATED and scheduler_remove_task(), causing panic (fixed by masking IRQs in task_exit)
 
-## Interrupt-Driven UART (In Progress)
+## Boot Reliability (April 5, 2026)
+
+100-cycle automated boot test via `labctl boot_test`:
+
+| Metric | Value |
+|--------|-------|
+| Total runs | 100 |
+| Kernel boots successful | 92/92 (100%) |
+| Infrastructure failures | 8 (Kasa smart plug auth timeouts) |
+| Average boot time | 10.1s (power-on to shell prompt) |
+| Boot time range | 9.6s – 10.2s |
+
+All 8 failures were Kasa smart plug authentication errors (transient cloud API issue), not kernel failures. Every boot that successfully power-cycled reached the `slmos>` shell prompt — **zero kernel boot failures in 92 consecutive boots**.
+
+## Performance Benchmarks (April 5, 2026)
+
+Measured on Pi 5 hardware (Cortex-A76 @ default clock, 4 GB RAM) using the `bench all` shell command:
+
+| Benchmark | Result | Rating |
+|-----------|--------|--------|
+| Context switch (round-trip) | 1,737 ns (1.7 µs) | Excellent (< 10 µs) |
+| Timer tick jitter (min) | 1,685 ns | |
+| Timer tick jitter (avg) | 1,776 ns | |
+| Timer tick jitter (max) | 2,370 ns | |
+| Timer tick jitter (range) | 685 ns | |
+| IPC send+recv round-trip | 322 ns | |
+
+**QEMU comparison** (same kernel, `qemu-system-aarch64 -M virt`):
+
+| Benchmark | Pi 5 | QEMU | Notes |
+|-----------|------|------|-------|
+| Context switch | 1,737 ns | 2,513 ns | Pi 5 ~1.4x faster |
+| Timer jitter (max) | 2,370 ns | 11,616 ns | Pi 5 much tighter |
+| IPC round-trip | 322 ns | 1,773 ns | Pi 5 ~5.5x faster |
+
+**Notes:**
+- Context switch benchmark creates a high-priority task and measures 99 round-trips between yield pairs
+- Timer jitter measured over 20 consecutive samples from the 54 MHz ARM Generic Timer (Pi 5) / 62.5 MHz (QEMU)
+- IPC benchmark measures 100 synchronous message queue send+receive iterations
+- All Pi 5 measurements taken at shell prompt with 4 CPUs online and preemptive scheduling active
+- QEMU numbers are from the `bench all` shell test (test_shell_cmd_bench_all), not the unit test benchmark
+
+## Interrupt-Driven UART (On Hold)
 
 The RP1 UART interrupt path requires configuring three hardware blocks between the PL011 and the GIC:
 
@@ -136,9 +183,61 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 2. **~~Spinlocks:~~** **RESOLVED** — Hardware spinlocks work after MMU enable. Before MMU, a runtime flag (`spinlock_hw_enabled`) gates barrier-only fallback. The exclusive monitor requires cacheable memory, which is available only after VMM initialization.
 
-3. **~~Single-core:~~** **RESOLVED** — All 4 Cortex-A76 cores boot via PSCI CPU_ON (SMC), transition EL2→EL1, enable MMU, and run C code. The shell reports "4 online / 4 total". Cache coherency for regular writes is broken because TF-A does not set SMPEN (CPUECTLR_EL1 bit 6) before dropping to EL2, and SMPEN is only writable from EL3. Worked around with explicit DC CVAC (clean) and DC CIVAC (clean+invalidate) cache maintenance on shared data. Exclusive monitor operations (spinlocks via ldaxr/stxr) work without the workaround.
+3. **Cache coherency / cross-CPU dispatch:** Cross-CPU task dispatch is blocked by two issues:
 
-   **Note:** While all 4 cores are online, tasks without explicit CPU affinity are currently pinned to CPU 0 due to the cache coherency limitation. Secondary CPUs run idle and timer tasks but do not receive dispatched work. Cross-CPU task dispatch remains disabled until the SMPEN/cache coherency issue is resolved.
+   **a) Pre-MMU L2 pollution (FIXED):** Secondary CPUs read kernel data (MMU config variables) before enabling the MMU. These pre-MMU reads enter L1/L2 as Non-Shareable lines. After MMU enable, the page table attributes mark memory as Inner Shareable, but existing L2 lines are NOT retroactively made coherent — the DSU never snoops them. Fixed by invalidating L1/L2 by set/way (DC ISW) after MMU enable in `smp_boot.S`. This unblocks secondary CPU initialization (scheduler init, idle task creation, timer start).
+
+   **b) Runtime cross-CPU data sharing (OPEN):** Even with the L2 invalidate fix, tasks dispatched to secondary CPUs are never consumed. Neither barriers-only (relying on DSU) nor explicit DC CVAC/CIVAC make runtime cross-CPU data visible. The DSU does not appear to provide automatic coherency for regular loads/stores despite correct Inner Shareable page table attributes (SH=0b11 confirmed from hardware dump). Spinlocks work (exclusive monitor has separate coherency). All combinations tested and failed:
+
+   | TF-A | Cache Ops | L2 Invalidate | Result |
+   |------|-----------|---------------|--------|
+   | Built-in EEPROM | DC CVAC/CIVAC | No | Fail |
+   | Built-in EEPROM | Barriers only | No | Fail |
+   | RPi Foundation (bcm2712) | Barriers only | No | Fail |
+   | RPi Foundation (bcm2712) | DC CVAC/CIVAC | No | Fail |
+   | Built-in EEPROM | Barriers only | Yes | Fail |
+   | Built-in EEPROM | DC CVAC/CIVAC | Yes | Fail |
+
+   **Untested:** RPi Foundation TF-A + L2 invalidate (combination of all fixes).
+
+   **Workaround:** All user tasks pinned to CPU 0. Secondary CPUs run idle tasks and handle timer interrupts but do not receive dispatched work.
+
+   **NC memory infrastructure (IMPLEMENTED, April 2026):** A 2MB non-cacheable region is mapped at the top of RAM (`0xFFE00000`) by splitting L1[3] into an L2 table (511 WB + 1 NC entries). The scheduler run queue metadata (`struct cpu_runqueue`) is allocated from this NC region via a bump allocator (`ncmem.h`). NC memory bypasses L1/L2 entirely, making writes instantly visible to all CPUs. Spinlocks remain in cacheable memory (`rq_lock[]`) because `ldaxr`/`stxr` requires cacheable memory on BCM2712.
+
+   **Validated:** `test_nc_memory_accessible` confirms NC memory read/write works on Pi 5. Run queue NC allocation logs `SMP: run queues in NC memory at 0xffe00000` during boot.
+
+   **NC task table (IMPLEMENTED, April 2026):** The entire `task_table[MAX_TASKS]` (32 * 768B = 24KB) is now allocated from NC memory at boot. All task struct fields (state, next, context, etc.) are instantly visible cross-CPU. Validated on Pi 5 with CPU 0 pinning — all tests pass.
+
+   **Remaining blocker for full cross-CPU dispatch:** With both NC run queues and NC task table in place, removing CPU 0 pinning (`scheduler_add_task()` uses `find_target_cpu()` instead of `target_cpu = 0`) causes the system to hang when tasks are dispatched to secondary CPUs. NC data visibility is confirmed working (`test_nc_memory_accessible` passes on hardware).
+
+   **Observed behavior when pinning removed:**
+   - Boot completes normally (all subsystems init, shell starts, timer starts)
+   - Tasks dispatched to CPU 1-3 via `scheduler_add_task_to_cpu()` never complete
+   - CPU 0 hangs polling `task->state` (NC read) waiting for TASK_TERMINATED
+   - System becomes unresponsive (no shell, no serial output)
+   - The `ffi_test` task dispatched to CPU 1 in `test_ffi_task_create_returns_id` (scheduler test suite) is the first task to hang — it has an infinite polling loop without timeout
+
+   **What has been ruled out:**
+   - NC data visibility: confirmed working (3 NC tests pass on Pi 5)
+   - NC run queue metadata: `cpu_rq(cpu)->head/tail/ready_count` in NC, accessible
+   - NC task struct fields: `task->state/next/context` all in NC memory
+   - Spinlock on NC memory: hangs (`ldaxr`/`stxr` needs cacheable). Fixed by `rq_lock[]` separation.
+
+   **Investigation areas for next agent:**
+   1. **Secondary CPU timer interrupt delivery:** Do CPUs 1-3 receive timer IRQs after `timer_start()`? The timer is per-CPU (physical timer, IRQ 30). Each secondary calls `timer_percpu_init()` during boot. Add a debug counter incremented in `timer_handler()` per-CPU and dump via shell command.
+   2. **Secondary CPU `schedule()` execution:** Does `schedule()` actually run on CPU 1 after timer IRQ? The idle task calls `wfi`, timer fires, exception vector calls `timer_irq_handler()` → `scheduler_tick()` → `schedule()`. Add a per-CPU debug counter in `schedule()` entry.
+   3. **`rq_lock[]` cross-CPU contention:** CPU 0 holds `rq_lock[1]` briefly to add a task. If CPU 1's `schedule()` tries to acquire `rq_lock[1]` simultaneously, does the cacheable spinlock work across CPUs? Spinlocks were validated during boot, but under concurrent load the behavior may differ. Test with a simple NC flag instead of the spinlock.
+   4. **`pick_next_task()` return value:** After `schedule()` acquires the lock, does `cpu_rq(1)->head` return the dispatched task? Since the run queue is NC, the pointer should be visible. Add a debug print: `if (rq->head) DEBUG_PRINT("CPU %u: found task '%s'", ...)`.
+   5. **Context switch to dispatched task:** If `pick_next_task()` finds the task, does `switch_to()` complete? The task context is NC. The task stack is cacheable (allocated by CPU 0 via PMM). The stack contents are never read by CPU 1 until the task starts executing — the stack grows from `stack_top` and was never cached by CPU 1.
+
+   **Key code locations:**
+   - CPU 0 pinning: `kernel/sched/sched.c`, `scheduler_add_task()` — the `#if defined(PLATFORM_RASPI5)` block
+   - Run queue lock: `rq_lock[]` array and `rq_lock_irqsave()`/`rq_unlock_irqrestore()` in `sched.c`
+   - Timer per-CPU init: `kernel/drivers/timer.c`, `timer_percpu_init()`
+   - Scheduler entry: `kernel/sched/sched.c`, `schedule()` function
+   - Context switch: `kernel/arch/arm64/context.S`, `switch_to()`
+
+   **Root cause note:** The Cortex-A76 does NOT have an SMPEN bit (unlike A53/A72). The `cpu_has_smpen()` function reads bit 6 of `S3_0_C15_C1_4` which is a different field on A76. The DSU is supposed to provide coherency automatically per ARM TRM, but BCM2712's implementation does not appear to do so for regular loads/stores.
 
 4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 
@@ -355,5 +454,4 @@ Initially planned to port Circle's PCIe/RP1 initialization (~1500 lines of C). D
 
 - [Circle bare-metal framework](https://github.com/rsta2/circle)
 - [Raspberry Pi config.txt documentation](https://www.raspberrypi.com/documentation/computers/config_txt.html)
-- `docs/pi5-uart-testing-status.md` - Detailed UART investigation notes
-- `docs/pi5-pe-header-analysis.md` - PE header issue analysis
+- `docs/pi5-uart-irq-investigation.md` - PCIe BAR1/MSI-X investigation for interrupt-driven UART

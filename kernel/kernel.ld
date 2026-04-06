@@ -105,6 +105,11 @@ SECTIONS
     /* Code section size in file (file size minus 64KB PE header) */
     _kernel_code_size = __data_end - _start - 0x10000;
 
+    /* PE .data section symbols (used by PE/COFF header in boot.S) */
+    _kernel_data_va = __data_start - _start;
+    _kernel_data_size = __data_end - __data_start;
+    _kernel_data_file = __data_start - _start;
+
     /* Discard unwanted sections */
     /DISCARD/ : {
         *(.comment)

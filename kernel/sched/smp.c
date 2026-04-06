@@ -49,13 +49,15 @@ static int64_t psci_call(uint64_t fn, uint64_t arg1,
     register uint64_t x2 __asm__("x2") = arg2;
     register uint64_t x3 __asm__("x3") = arg3;
 
-#if defined(PLATFORM_RASPI5)
-    __asm__ volatile("smc #0"
+#if defined(PLATFORM_QEMU_VIRT)
+    /* QEMU: PSCI handler at EL2, use HVC */
+    __asm__ volatile("hvc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3)
         : "memory");
 #else
-    __asm__ volatile("hvc #0"
+    /* Pi 5 and Jetson: PSCI handler at EL3 (TF-A), use SMC */
+    __asm__ volatile("smc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3)
         : "memory");
@@ -225,6 +227,13 @@ static const char *psci_error_str(int err)
 void secondary_init(uint32_t logical_cpu_id)
 {
     DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
+
+    /* Verify SMPEN was set from EL2 on this secondary core */
+    if (cpu_has_smpen()) {
+        DEBUG_PRINT("CPU %u: SMPEN set", logical_cpu_id);
+    } else {
+        WARN("CPU %u: SMPEN NOT set", logical_cpu_id);
+    }
 
     /* Initialize per-CPU GIC interface */
     DEBUG_PRINT("CPU %u: GIC percpu init...", logical_cpu_id);
@@ -503,6 +512,14 @@ void smp_init(void)
     uint32_t booted = 0;
 
     INFO("SMP: initializing");
+
+    /* Check if SMPEN was successfully set from EL2 during boot */
+    if (cpu_has_smpen()) {
+        INFO("SMP: SMPEN set on CPU 0 — hardware cache coherency active");
+    } else {
+        WARN("SMP: SMPEN NOT set — using DC CVAC/CIVAC workaround");
+    }
+
     DEBUG_PRINT("  About to run spinlock tests...");
 
     /* Run spinlock tests before booting secondary cores */

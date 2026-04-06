@@ -103,12 +103,15 @@ void uart_init(void)
      * 0 = Skip UART entirely (silent mode)
      * 1 = Try BPMP to enable clock (full initialization)
      * 2 = Direct mode - assume clock is already enabled (after kexec)
+     * 3 = Raw mode - just enable flag, don't touch any registers.
+     *     Uses whatever baud rate/config the firmware left in place.
+     *     Needed when clock frequency is unknown (e.g., UARTC after kexec).
      *
      * After kexec from Linux, the UART clock should still be enabled
      * from Linux's initialization, so we can skip BPMP communication
      * which may not work correctly after kexec.
      */
-#define UART_INIT_MODE 2  /* Direct mode - assume clock enabled (for UEFI boot) */
+#define UART_INIT_MODE 3  /* Raw mode - don't reconfigure (EL2/UARTC boot) */
 
 #if UART_INIT_MODE == 0
     /* Silent mode - no UART output */
@@ -144,6 +147,16 @@ void uart_init(void)
      * configured and clocked. Just reinitialize the UART settings.
      */
     g_uart_available = true;
+
+#elif UART_INIT_MODE == 3
+    /*
+     * Raw mode - don't touch any UART registers.
+     * Use whatever configuration the firmware/Linux left in place.
+     * Useful when the UART clock frequency is unknown and reconfiguring
+     * the baud rate would garble output.
+     */
+    g_uart_available = true;
+    return;
 
 #endif
 
@@ -192,8 +205,25 @@ void uart_putc(char c)
 }
 
 /*
+ * TCU RX buffer.
+ *
+ * The TCU HSP mailbox delivers 1-3 bytes per read. We buffer extra bytes
+ * here so uart_getc() can return one character at a time.
+ */
+#ifdef TCU_RX_MBOX
+static char tcu_rx_buf[3];
+static int tcu_rx_count = 0;
+static int tcu_rx_pos = 0;
+#endif
+
+/*
  * Receive a single character.
  * Blocks until data is available.
+ *
+ * On Jetson, RX comes through the TCU HSP mailbox (TOP0_HSP SM0 at
+ * 0x03C10000), NOT through UARTC's RBR register. The SPE firmware
+ * reads bytes from the USB-C physical UART and packs 1-3 bytes into
+ * a 32-bit mailbox message.
  */
 char uart_getc(void)
 {
@@ -204,10 +234,45 @@ char uart_getc(void)
         }
     }
 
-    /* Wait until data is ready */
+#ifdef TCU_RX_MBOX
+    /* Return buffered bytes from previous mailbox read */
+    if (tcu_rx_pos < tcu_rx_count) {
+        return tcu_rx_buf[tcu_rx_pos++];
+    }
+
+    /* Poll the TCU RX mailbox until data arrives */
+    volatile uint32_t *mbox = (volatile uint32_t *)TCU_RX_MBOX;
+    uint32_t val;
+
+    for (;;) {
+        val = *mbox;
+        if (val & TCU_MBOX_TAG_BIT)
+            break;
+        /* Yield CPU briefly while waiting */
+        __asm__ volatile("yield");
+    }
+
+    /* Clear the mailbox so SPE can send more */
+    *mbox = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Extract bytes from mailbox message */
+    int count = (int)((val >> 24) & 0x3);  /* bits 25:24 = byte count */
+    if (count == 0) count = 1;             /* shouldn't happen, but be safe */
+
+    tcu_rx_buf[0] = (char)(val & 0xFF);
+    tcu_rx_buf[1] = (char)((val >> 8) & 0xFF);
+    tcu_rx_buf[2] = (char)((val >> 16) & 0xFF);
+    tcu_rx_count = count;
+    tcu_rx_pos = 1;  /* Return byte 0 now, buffer the rest */
+
+    return tcu_rx_buf[0];
+#else
+    /* Non-TCU path: read directly from UART RBR */
     while ((UART_REG(NS16550_LSR) & LSR_DR) == 0) {
         /* spin */
     }
 
     return (char)(UART_REG(NS16550_RBR) & 0xFF);
+#endif
 }

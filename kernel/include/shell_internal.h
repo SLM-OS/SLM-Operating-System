@@ -59,6 +59,7 @@ int cmd_vmm(int argc, char **argv);
 int cmd_ipc(int argc, char **argv);
 int cmd_model(int argc, char **argv);
 int cmd_dtb(int argc, char **argv);
+int cmd_bench(int argc, char **argv);
 
 /* Filesystem commands (shell_fs.c) */
 int cmd_ls(int argc, char **argv);

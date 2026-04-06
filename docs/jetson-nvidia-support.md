@@ -2,8 +2,14 @@
 
 This document consolidates all findings related to running SLM-OS on the Jetson Orin Nano, including hardware security blockers, attempted solutions, NVIDIA forum research, and potential paths forward.
 
-**Status:** Blocked pending NVIDIA support or alternative approach
-**Last Updated:** January 2026
+**Status:** RESOLVED — EL2 + VHE approach implemented April 2026. See `docs/jetson-el2-bringup.md`.
+**Last Updated:** April 2026
+
+> **April 2026 Update:** The CBB firewall has been partially bypassed by running SLM-OS
+> at EL2 with VHE (Virtual Host Extensions). UARTC, GICv3, timer, GPU, and ~6.7 GB of
+> memory are all accessible from EL2. SLM-OS boots to an interactive shell.
+> This document is preserved as a historical record of the investigation that led to
+> the EL2 solution. For current implementation details, see `docs/jetson-el2-bringup.md`.
 
 ---
 
@@ -297,9 +303,9 @@ This allowed accessing peripherals like UARTC (0xC280000) from bare-metal code.
 
 ## Potential Solutions
 
-### Solution 1: EL2 Hypervisor Approach (Most Promising)
+### Solution 1: EL2 Hypervisor Approach — ✅ IMPLEMENTED (April 2026)
 
-Based on the forum success story, running SLM-OS at EL2 with properly configured page tables may bypass CBB restrictions.
+This approach was successfully implemented. See `docs/jetson-el2-bringup.md` for full details.
 
 **Requirements:**
 - Enable EL2 in UEFI/bootloader configuration
@@ -472,11 +478,9 @@ Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a
 
 ### Project Documentation
 
+- `docs/jetson-el2-bringup.md` — Current EL2 implementation (April 2026)
 - `docs/jetson-boot.md` — Boot process overview
-- `docs/jetson-tcu.md` — TCU/HSP research (why USB-C debug doesn't work)
-- `docs/jetson-kexec-debugging.md` — Kexec debugging session notes
-- `docs/jetson-serial-debugging-dec2025.md` — Serial debugging session
-- `docs/jetson-uart-investigation-log.md` — Detailed UART investigation log
+- `docs/jetson-tcu.md` — TCU/HSP architecture research
 - `docs/platform-abstraction.md` — QEMU vs Jetson comparison
 - `docs/gpu.md` — GPU integration (blocked by GSP firmware requirement)
 

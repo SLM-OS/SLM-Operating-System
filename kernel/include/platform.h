@@ -83,27 +83,51 @@
 #define RAM_SIZE            0x200000000UL   /* 8 GB */
 
 /*
- * UART - Tegra High-Speed UART (HSUART)
+ * UART - Tegra NS16550-compatible UART
  *
- * UARTA is exposed on 40-pin GPIO header:
- *   Pin 6:  GND
- *   Pin 8:  UART1_TX (Jetson transmits)
- *   Pin 10: UART1_RX (Jetson receives)
+ * Uses UARTC (0x0C280000) instead of UARTA (0x03100000) because:
+ *   - SLM-OS runs at EL2 after kexec (confirmed via PSCI probe)
+ *   - CBB firewall blocks UARTA access but allows UARTC from EL2
+ *   - UARTC output is visible via TCU (Tegra Combined UART) on
+ *     the USB-C debug serial console
  *
- * The debug header (J14) uses TCU (Tegra Combined UART) which requires
- * BPMP firmware - not suitable for bare-metal initially.
+ * UARTA (40-pin header, 0x03100000): BLOCKED by CBB firewall
+ * UARTC (0x0C280000): Accessible from EL2, confirmed working
  */
 #define UART_TYPE_TEGRA
-#define UART_BASE           0x03100000UL    /* UARTA */
+#define UART_BASE           0x0C280000UL    /* UARTC (EL2 accessible) */
 #define UART_SIZE           0x00010000UL    /* 64 KB */
 #define UART_CLOCK          408000000UL     /* 408 MHz (Tegra default) */
-#define UART_IRQ            (32 + 112)      /* GIC_SPI 112 -> IRQ 144 */
+#define UART_IRQ            (32 + 114)      /* GIC_SPI 114 (UARTC) */
 
 /*
  * Alternative UARTs:
- *   UARTC: 0x03140000 (serial2 alias)
+ *   UARTA: 0x03100000 (40-pin header) — BLOCKED by CBB at EL2
  *   UARTD: 0x031D0000
  */
+
+/*
+ * TCU (Tegra Combined UART) RX Mailbox
+ *
+ * The TCU multiplexes serial I/O through the SPE firmware. TX can go
+ * directly through UARTC hardware, but RX arrives via HSP shared mailbox.
+ * SPE reads bytes from the USB-C physical UART and writes packed messages
+ * to TOP0_HSP Shared Mailbox 0 at 0x03C10000.
+ *
+ * Mailbox format (32-bit):
+ *   Bit 31:     Data present (TAG bit, set by SPE)
+ *   Bits 25:24: Byte count (1-3)
+ *   Bits 23:16: Byte 2 (if count >= 3)
+ *   Bits 15:8:  Byte 1 (if count >= 2)
+ *   Bits 7:0:   Byte 0
+ *
+ * After reading, write 0 to clear the mailbox so SPE can send more.
+ * Escape protocol: 0xFF followed by tag byte switches RX channel.
+ *
+ * Source: NVIDIA tegra-combined-uart.c, rt-aux-cpu-demo SPE firmware.
+ */
+#define TCU_RX_MBOX         0x03C10000UL    /* TOP0_HSP SM0 (SPE → CCPLEX) */
+#define TCU_MBOX_TAG_BIT    (1UL << 31)     /* Data present flag */
 
 /*
  * GIC (Generic Interrupt Controller) v3

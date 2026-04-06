@@ -31,13 +31,20 @@ This document describes how to interact with the embedded development lab hardwa
 | SD card deploy | SDWireC (Badgerd USB-C model) |
 | EEPROM | Sep 2024 firmware (do NOT update — see `docs/pi5-baremetal-status.md`) |
 
-### Jetson Orin Nano
+### Jetson Orin Nano (`jetson-nano-2`)
 
 | Component | Details |
 |-----------|---------|
 | Board | Jetson Orin Nano Super Developer Kit |
-| Status | ⛔ BLOCKED by CBB firewall (see `docs/jetson-nvidia-support.md`) |
+| Status | 🟡 Partial — boots to shell at EL2 via UARTC (see `docs/jetson-el2-bringup.md`) |
+| Linux | Ubuntu 22.04.5, kernel 5.15.148-tegra, JetPack R36.4.7 |
 | Serial console | `/dev/lab/port-2-1` → TCP localhost:4004 (via ser2net) |
+| Power control | Kasa smart plug (via labctl) |
+| Ethernet | `192.168.4.93` (enP8p1s0) |
+| WiFi | `192.168.4.39` (wlP1p1s0) |
+| SSH | `ssh root@192.168.4.93` (port 22, password: slmos) |
+| SD card deploy | No SDWire — use SSH + kexec workflow (see below) |
+| Boot media | microSD card (no NVMe installed) |
 
 ---
 
@@ -138,20 +145,42 @@ The boot partition (FAT32, labeled SLMOS) contains:
 
 ---
 
-## Deploying to Jetson (kexec)
+## Deploying to Jetson (SSH + kexec)
 
-⛔ **Currently blocked by CBB firewall.** See `docs/jetson-nvidia-support.md`.
+🟡 **Partially working** — boots to shell at EL2 via UARTC. See `docs/jetson-el2-bringup.md`.
 
-When available:
+The Jetson has no SDWire device. All deployment is via SSH + kexec, with serial console
+and power control via labctl. No physical handling is required after initial setup.
+
+### Deploy Workflow
+
 ```bash
-# Copy kernel to Jetson via SSH
-scp -P 4243 build/kernel/slmos.elf root@gradient-nano.onthewifi.com:/root/
+# 1. Build for Jetson
+make kernel-clean && make kernel PLATFORM=JETSON
 
-# Boot via kexec
-ssh -p 4243 root@gradient-nano.onthewifi.com
-kexec -l /root/slmos.elf --reuse-cmdline
-kexec -e
+# 2. Copy kernel to Jetson via SSH
+scp build/kernel/slmos.elf root@192.168.4.93:/root/
+
+# 3. Boot via kexec (from SSH session)
+ssh root@192.168.4.93 'kexec -l /root/slmos.elf --reuse-cmdline && kexec -e'
+
+# 4. Observe output via serial console
+labctl serial-capture jetson-nano-2 --timeout 30
+
+# 5. Recover back to Linux (power cycle)
+labctl power cycle jetson-nano-2
 ```
+
+### Recovery
+
+After kexec into SLM-OS, the Jetson cannot be reached via SSH. To recover:
+
+1. `labctl power cycle jetson-nano-2` — power cycles back to Linux
+2. Wait ~40s for Linux to boot
+3. SSH is available again
+
+**Note:** The UEFI boot order has network boot first, which adds ~5 minutes if
+the SD card is not present. With SD card inserted, Linux boots in ~40 seconds.
 
 ---
 

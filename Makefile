@@ -175,7 +175,7 @@ gdb:
 # Test targets
 # ============================================================================
 
-# Test output file and timeout (seconds)
+# Test output file and timeout (kills QEMU if tests hang to prevent OOM)
 TEST_OUTPUT := $(BUILD_DIR)/test-output.log
 TEST_TIMEOUT := 60
 
@@ -203,7 +203,7 @@ kernel-test-clean:
 test: kernel-test
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
-	@$(QEMU) \
+	@timeout $(TEST_TIMEOUT) $(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
 		-smp cores=$(QEMU_CORES) \
@@ -216,7 +216,12 @@ test: kernel-test
 	echo ""; \
 	echo "Test Results:"; \
 	echo "============="; \
-	if [ $$QEMU_EXIT -eq 0 ]; then \
+	if [ $$QEMU_EXIT -eq 124 ]; then \
+		echo "TIMEOUT - Tests did not complete within $(TEST_TIMEOUT)s"; \
+		echo "Last output:"; \
+		tail -20 $(TEST_OUTPUT); \
+		exit 1; \
+	elif [ $$QEMU_EXIT -eq 0 ]; then \
 		echo "PASSED - All tests passed (exit code 0)"; \
 		exit 0; \
 	elif grep -F "PAGE FAULT" $(TEST_OUTPUT) > /dev/null 2>&1; then \

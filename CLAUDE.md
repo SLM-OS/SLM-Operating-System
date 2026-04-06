@@ -123,18 +123,26 @@ make debug           # Build and run with GDB server
 
 **Board:** Jetson Orin Nano Super Developer Kit
 
-**Status:** ⛔ BLOCKED — CBB firewall prevents bare-metal peripheral access
+**Status:** 🟡 Partially Working — EL2 + VHE + UARTC bypasses CBB for serial and core subsystems
 
-### Critical Blocker
+### CBB Firewall — Partially Bypassed
 
-SLM-OS bare-metal execution on Jetson is blocked by the Tegra234 Control Backbone (CBB) firewall, which prevents unsigned/unauthenticated code from accessing peripherals. This is a hardware-enforced security feature.
+The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** enabled, SLM-OS can access UARTC, GICv3, and timer — enough to boot to the shell. UARTA (40-pin header) remains blocked.
 
-**Key findings:**
-- kexec is NOT supported (NVIDIA confirmed)
-- Direct UEFI boot has same CBB restrictions
-- All boot methods blocked by CBB firewall
+**Working approach (April 2026):**
+- kexec from Linux → SLM-OS enters at EL2
+- Enable VHE (HCR_EL2.E2H=1, TGE=1) → transparent EL1 register redirection
+- Use UARTC (0x0C280000) for serial console (visible via TCU on USB-C debug)
+- OP-TEE carveout at 0xBE-0xC2 skipped; ~6.7 GB usable across 3 regions
 
-**Comprehensive documentation:** `docs/jetson-nvidia-support.md`
+**UEFI direct boot (WIP):**
+- EFI stub (`efi_stub.c`) with VHE-compatible MMU disable + self-relocating trampoline in `boot.S`
+- PE/COFF loads when UEFI uses preferred address (ImageBase=0x80000000)
+- Blocked when UEFI can't use preferred address (no `.reloc` section for PE relocation)
+- Alternative SMP paths: SGI/spin-table wake (bypass PSCI), UEFI Shell `load` command
+- SMP is blocked on either UEFI boot or an alternative secondary CPU wake mechanism
+
+**Documentation:** `docs/jetson-nvidia-support.md`, `docs/jetson-el2-bringup.md`
 
 ### Reference Documentation
 
@@ -148,12 +156,15 @@ SLM-OS bare-metal execution on Jetson is blocked by the Tegra234 Control Backbon
 
 | Port | Address | Type | Connection | Status |
 |------|---------|------|------------|--------|
-| UARTA | 0x03100000 | NS16550 | 40-pin header pins 8/10 | Works with Linux; BLOCKED for SLM-OS (CBB firewall) |
-| TCU | HSP mailbox | Combined UART | USB-C debug port | Requires SPE firmware (Linux only) |
+| UARTA | 0x03100000 | NS16550 | 40-pin header pins 8/10 | BLOCKED by CBB (even at EL2) |
+| UARTC | 0x0C280000 | NS16550 | Via TCU → USB-C debug | ✅ TX+RX working at EL2 |
+| TCU | HSP mailbox | Combined UART | USB-C debug port | Routes UARTC output after kexec |
 
-**TCU (USB-C Debug):** The USB-C debug console uses the Tegra Combined UART (TCU), which routes through SPE firmware via HSP mailboxes. After kexec, SPE is no longer running, so TCU doesn't work for bare-metal. See `docs/jetson-tcu.md` for full research notes.
+**UARTC (Working):** UARTC at 0x0C280000 is accessible from EL2. TX writes directly to UARTC THR. RX arrives via TCU HSP mailbox at 0x03C10000 (SPE firmware routes USB-C input there). Both directions fully functional.
 
-**UARTA (40-pin Header):** Serial hardware works for Linux. For SLM-OS, the CBB firewall blocks access to 0x03100000. See `docs/jetson-nvidia-support.md` for full analysis.
+**UARTA (Blocked):** The 40-pin header UART at 0x03100000 remains blocked by the CBB firewall even at EL2.
+
+**TCU:** SPE firmware continues running after kexec and routes UARTC output through the USB-C debug port.
 
 ### Button Header (J14) Quick Reference
 

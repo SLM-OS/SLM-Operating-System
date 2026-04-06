@@ -7,6 +7,7 @@
 #include "debug.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "ncmem.h"
 #include "task.h"
 #include "sched.h"
 #include "gic.h"
@@ -34,6 +35,10 @@
 
 /* External GPU drivers */
 extern const struct gpu_driver gpu_stub_driver;
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+extern const struct gpu_driver gpu_nvidia_driver;
+extern void nvidia_gpu_set_mmio_base(uintptr_t base);
+#endif
 
 /* External symbols from linker script */
 extern char __text_start, __text_end;
@@ -117,15 +122,12 @@ void kernel_main(void *dtb)
     );
 
     /*
-     * Early device access (watchdog, UART) is skipped for direct UEFI boot.
-     * UEFI doesn't have these device registers mapped. After vmm_init()
-     * sets up our own page tables, these devices will be accessible.
-     *
-     * For kexec boot, define JETSON_KEXEC_BOOT to enable early device access.
-     */
-#if defined(JETSON_KEXEC_BOOT)
-    /*
      * Disable hardware watchdog timer.
+     *
+     * Linux starts a hardware watchdog (Tegra WDT) with a 120-second
+     * timeout. After kexec, the watchdog continues running and will
+     * reset the system unless disabled. Do this early — before any
+     * time-consuming initialization like SMP boot.
      *
      * Linux starts a watchdog with a 120 second timeout. After kexec, the
      * watchdog continues running and will reset the system unless disabled.
@@ -143,32 +145,6 @@ void kernel_main(void *dtb)
         *wdt_cmd = WDT_CMD_DISABLE;
         __asm__ volatile("dsb sy" ::: "memory");
     }
-
-    /*
-     * EARLY DEBUG: Write directly to UART before uart_init()
-     * This tests if UART hardware is accessible after kexec.
-     * UARTA is at 0x03100000, THR is at offset 0 (reg-shift=2).
-     *
-     * Don't wait for THRE - if UART clock is off, we'd hang forever.
-     * Just blast characters and add delays.
-     */
-    {
-        volatile uint32_t *uart_thr = (volatile uint32_t *)0x03100000;
-
-        /* Send "SLM" without waiting (in case UART clock is off) */
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = 'S';
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = 'L';
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = 'M';
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = '\r';
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = '\n';
-        __asm__ volatile("dsb sy" ::: "memory");
-    }
-#endif /* JETSON_KEXEC_BOOT */
 #endif /* PLATFORM_JETSON_ORIN_NANO */
 
     /*
@@ -242,7 +218,9 @@ void kernel_main(void *dtb)
     uart_puts("========================================\n\n");
 
     INFO("Boot successful");
-#if defined(PLATFORM_X86_64)
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    INFO("Running at EL2 (VHE) on %s", PLATFORM_NAME);
+#elif defined(PLATFORM_X86_64)
     INFO("Running in Ring 0 on %s", PLATFORM_NAME);
 #else
     INFO("Running at EL1 on %s", PLATFORM_NAME);
@@ -276,6 +254,9 @@ void kernel_main(void *dtb)
     uart_puts("\n");
     vmm_init();
 #endif
+
+    /* Initialize non-cacheable shared memory region (Pi 5 only) */
+    ncmem_init();
 
     /* Initialize interrupt controller */
     uart_puts("\n");
@@ -394,7 +375,12 @@ void kernel_main(void *dtb)
 
     /* Initialize GPU subsystem */
     INFO("Initializing GPU...");
-    gpu_register_driver(&gpu_stub_driver);  /* QEMU uses stub driver */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    nvidia_gpu_set_mmio_base(GPU_BASE);
+    gpu_register_driver(&gpu_nvidia_driver);
+#else
+    gpu_register_driver(&gpu_stub_driver);
+#endif
     int gpu_ret = gpu_init();
     if (gpu_ret != GPU_OK) {
         WARN("GPU init failed (code=%d)", gpu_ret);

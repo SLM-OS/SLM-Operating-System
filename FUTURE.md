@@ -12,7 +12,7 @@ This section documents features discussed during development that are beyond the
 | **Scheduling** | Deadline Scheduler, Priority Inheritance, ELF Loader | Real-Time Guarantees (RMS) |
 | **Shell** | Working Directory, Path Resolution, 30+ Commands, Lua Scripting | POSIX Shell |
 | **Components** | Component System, Model Memory, GPU Stub | Sandboxing, Secure Boot |
-| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU), Pi 5 UART | Jetson GPU, USB Serial, Networking (Jetson) — ⛔ BLOCKED by CBB firewall |
+| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU), Pi 5 UART, Jetson EL2 Boot, GPU Probe | Jetson GPU Compute (GSP), USB Serial, Networking (Jetson), SMP (needs UEFI boot) |
 
 **Completed Features:** 20
 **Pending Features:** 13
@@ -21,18 +21,18 @@ This section documents features discussed during development that are beyond the
 
 ### USB Serial Console (TinyUSB + Tegra XUSB)
 
-**Status:** ⛔ BLOCKED on Jetson — CBB firewall prevents bare-metal peripheral access. See `docs/jetson-nvidia-support.md`.
+**Status:** ☐ Unblocked (April 2026) — CBB firewall bypassed via EL2+VHE. See `docs/jetson-el2-bringup.md`.
 
 Eliminate external UART adapter by implementing USB CDC-ACM device mode.
 
 - ⛔ Study Tegra XUSB device controller (`xudc@3550000`) and Linux `tegra-xudc.c` driver — BLOCKED
-- ⛔ Initialize XUSB PHY, PLLs, and power rails from bare metal — BLOCKED by CBB firewall
+- ⛔ Initialize XUSB PHY, PLLs, and power rails from bare metal — Unblocked (CBB bypassed via EL2, April 2026)
 - ⛔ Write Tegra XUSB Device Controller Driver (DCD) for TinyUSB — BLOCKED
 - ☐ Integrate TinyUSB CDC-ACM class with MicroShell — platform-independent, can proceed
 - ⛔ Test enumeration on Linux/Windows/macOS hosts — BLOCKED on Jetson
 - ⛔ Remove external UART adapter requirement from hardware setup — BLOCKED
 
-**Effort:** 3-5 weeks (if CBB firewall resolved)
+**Effort:** 3-5 weeks (CBB resolved via EL2)
 **Value:** Clean single-cable connection, professional demo setup
 
 ---
@@ -290,13 +290,13 @@ TCP/IP networking for QEMU with lwIP stack and VirtIO-Net driver.
   - Help files for all network commands
 
 **Remaining (not implemented):**
-- ⛔ Write Jetson Ethernet driver (EQOS controller) — BLOCKED by CBB firewall
+- ⛔ Write Jetson Ethernet driver (EQOS controller) — Unblocked (CBB bypassed via EL2, April 2026)
 - ☐ REST API for remote component management
 - ☐ Network console (telnet/SSH alternative)
 
 **Effort:** 1 week (QEMU), 2-3 weeks (Jetson if CBB resolved)
 **Value:** Remote access, distributed systems, OTA updates
-**Status:** Partial (December 2025) - QEMU complete, Jetson BLOCKED by CBB firewall
+**Status:** Partial (December 2025) - QEMU complete, Jetson Unblocked (CBB bypassed via EL2, April 2026)
 
 ---
 
@@ -437,7 +437,7 @@ Lazy allocation and swap support for large models.
 
 ### GPU Memory Integration
 
-**Status:** ⛔ BLOCKED on Jetson — CBB firewall prevents GPU register access. See `docs/jetson-nvidia-support.md`.
+**Status:** ☐ Partially unblocked — GPU registers accessible from EL2 (probe working). GSP firmware loading pending. See `docs/jetson-el2-bringup.md`.
 
 Enable GPU access to model memory regions.
 
@@ -447,9 +447,9 @@ Enable GPU access to model memory regions.
 - ☐ Fully implement `SHM_GPU_ACCESSIBLE` flag for IPC buffers
 - ☐ DMA-friendly buffer allocation with proper alignment
 
-**Effort:** 1-2 weeks (if CBB firewall resolved)
+**Effort:** 1-2 weeks (CBB resolved via EL2)
 **Value:** Zero-copy model data sharing with GPU
-**Prerequisite:** GPU driver initialization, CBB firewall resolution
+**Prerequisite:** GPU driver initialization, GSP firmware loading
 
 ---
 

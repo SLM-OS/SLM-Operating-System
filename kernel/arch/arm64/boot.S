@@ -77,7 +77,7 @@ optional_header:
     .long   0x10000             /* AddressOfEntryPoint (64KB, where real_start will be) */
     .long   0x10000             /* BaseOfCode (64KB) */
 
-    .quad   0x80000000          /* ImageBase - preferred load address */
+    .quad   0x80000000          /* ImageBase - preferred load address (Jetson RAM base) */
     .long   0x10000             /* SectionAlignment (64KB, like Linux) */
     .long   0x200               /* FileAlignment (512 bytes) */
     .short  0                   /* MajorOperatingSystemVersion */
@@ -87,7 +87,7 @@ optional_header:
     .short  0                   /* MajorSubsystemVersion */
     .short  0                   /* MinorSubsystemVersion */
     .long   0                   /* Win32VersionValue */
-    .long   _kernel_size + 0x10000  /* SizeOfImage (code + 64KB header) */
+    .long   _kernel_size + 0x10000  /* SizeOfImage (64KB header + full virtual size) */
     .long   0x10000             /* SizeOfHeaders (64KB, like Linux) */
     .long   0                   /* CheckSum */
     .short  0xa                 /* Subsystem: EFI_APPLICATION */
@@ -108,11 +108,11 @@ optional_header:
     .quad   0                   /* Base Relocation Table */
 
 section_table:
-    /* .text section */
+    /* .text section — all code and data */
     .ascii  ".text\0\0\0"       /* Name (8 bytes) */
     .long   _kernel_size        /* VirtualSize */
     .long   0x10000             /* VirtualAddress (64KB) */
-    .long   _kernel_code_size   /* SizeOfRawData (code size, excludes 64KB header) */
+    .long   _kernel_code_size   /* SizeOfRawData (file size, excludes 64KB header) */
     .long   0x10000             /* PointerToRawData (64KB) */
     .long   0                   /* PointerToRelocations */
     .long   0                   /* PointerToLineNumbers */
@@ -120,7 +120,7 @@ section_table:
     .short  0                   /* NumberOfLineNumbers */
     .long   0xe0000020          /* Characteristics: CNT_CODE | MEM_READ | MEM_WRITE | MEM_EXECUTE */
 
-    /* .data section (dummy, required) */
+    /* .data section (dummy, required by PE/COFF but not actually used) */
     .ascii  ".data\0\0\0"       /* Name (8 bytes) */
     .long   0                   /* VirtualSize */
     .long   0                   /* VirtualAddress */
@@ -160,6 +160,109 @@ _start:
 real_start:
 
 #endif /* PLATFORM_RASPI5 */
+
+
+#if !defined(PLATFORM_RASPI5)
+    /*
+     * EFI Boot Detection
+     *
+     * When launched as a UEFI application, UEFI calls this entry with:
+     *   x0 = EFI_HANDLE (image handle)
+     *   x1 = EFI_SYSTEM_TABLE* (system table pointer)
+     *
+     * When launched via kexec:
+     *   x0 = DTB pointer
+     *   x1 = 0 or undefined
+     *
+     * Detect EFI by checking if x1 points to a valid EFI_SYSTEM_TABLE
+     * (signature "IBI SYST" = 0x5453595320494249 at the start).
+     * If EFI: call efi_stub_entry() which handles ExitBootServices,
+     *         disables MMU, and returns the DTB pointer in x0.
+     * If kexec: x0 already contains the DTB pointer, continue normally.
+     */
+    cbz     x1, .Lnot_efi              /* x1 == NULL → definitely not EFI */
+    ldr     x10, =0x5453595320494249    /* EFI_SYSTEM_TABLE_SIGNATURE */
+    ldr     x11, [x1]                   /* Read first 8 bytes at x1 */
+    cmp     x10, x11
+    b.ne    .Lnot_efi                   /* Signature mismatch → kexec boot */
+
+    /*
+     * EFI boot detected. x0=handle, x1=system_table.
+     * UEFI provides a valid stack, so we can call C code directly.
+     * efi_stub_entry() will:
+     *   1. Find DTB in the EFI configuration table
+     *   2. Call ExitBootServices to take over the machine
+     *   3. Disable MMU and clean caches
+     *   4. Return the DTB pointer (or NULL) in x0
+     */
+    bl      efi_stub_entry
+    /* x0 now contains DTB pointer (or NULL). Continue with normal boot. */
+
+    /*
+     * Self-Relocating Trampoline
+     *
+     * UEFI loads the PE/COFF image at an arbitrary address, but the
+     * kernel is linked at 0x80000000. GOT entries and all absolute
+     * addresses in C code assume the link address. Copy the entire
+     * image to 0x80000000 and jump there so everything works.
+     *
+     * Preconditions (established by efi_stub_entry):
+     *   - ExitBootServices completed, we own all memory
+     *   - MMU disabled, caches cleaned and disabled
+     *   - x0 = DTB pointer (or NULL)
+     *
+     * The kexec path never reaches here (cbz x1 skips to .Lnot_efi).
+     */
+    mov     x20, x0                /* Save DTB pointer */
+
+    adr     x5, _start             /* x5 = actual load address of _start */
+    ldr     x4, .Llink_address     /* x4 = 0x80000000 (link address) */
+    cmp     x5, x4
+    b.eq    .Lreloc_done           /* Already at link address, skip copy */
+
+    /* Copy image from UEFI load address to link address */
+    ldr     x8, .Limage_size       /* x8 = _kernel_file_size (text+rodata+data) */
+    mov     x2, x5                 /* x2 = source pointer */
+    mov     x1, x4                 /* x1 = destination pointer */
+    add     x3, x8, #15
+    and     x3, x3, #~15          /* x3 = size rounded up to 16-byte alignment */
+
+.Lreloc_copy:
+    cbz     x3, .Lreloc_copy_done
+    ldp     x6, x7, [x2], #16
+    stp     x6, x7, [x1], #16
+    sub     x3, x3, #16
+    b       .Lreloc_copy
+
+.Lreloc_copy_done:
+    /*
+     * Invalidate instruction cache. With MMU and D-cache off
+     * (SCTLR_EL2.C=0, I=0 from efi_disable_mmu), the stp writes went
+     * directly to memory. But stale I-cache lines from UEFI's previous
+     * execution at 0x80000000 must be flushed before we jump there.
+     */
+    ic      ialluis
+    dsb     nsh
+    isb
+
+    /*
+     * Jump to the copy at 0x80000000.
+     * Compute: target = link_address + (.Lpost_reloc - _start)
+     */
+    adr     x9, .Lpost_reloc
+    sub     x9, x9, x5            /* offset of .Lpost_reloc from _start */
+    add     x10, x4, x9           /* address in the copy */
+    br      x10                    /* absolute branch to relocated code */
+
+.Lpost_reloc:
+    /* Now running at link address. All GOT/absolute addresses are correct. */
+
+.Lreloc_done:
+    mov     x0, x20                /* Restore DTB pointer */
+
+.Lnot_efi:
+#endif /* !PLATFORM_RASPI5 */
+
     /*
      * Early debug: Write characters to UART to confirm we reached real_start.
      *
@@ -346,7 +449,77 @@ real_start:
     isb
 
 #endif
-    /* On Jetson, skip early UART - clocks not configured */
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /*
+     * EL2 UART PROBE: Test peripheral access from EL2.
+     *
+     * Previous tests confirmed:
+     *   - SLM-OS enters at EL2 after kexec (via PSCI SYSTEM_OFF probe)
+     *   - UARTA (0x03100000) write from EL2 triggers CBB error
+     *
+     * This test tries UARTC (0x0C280000) — the peripheral a forum user
+     * successfully accessed from EL2 on Jetson Orin. Different UARTs
+     * may be in different CBB firewall domains.
+     *
+     * Also tests UARTD (0x031D0000) as a third option.
+     *
+     * NS16550 THR at offset 0, reg-shift=2 (4-byte spacing).
+     * UART clocks: UARTA needs /dev/ttyTHS1 open before kexec.
+     *              UARTC clock status unknown (may need BPMP enablement).
+     *
+     * If any write succeeds, characters appear on whatever serial adapter
+     * is monitoring that UART. If CBB blocks, EL3 logs the RAS error.
+     */
+
+    /*
+     * Enable VHE (Virtual Host Extensions) at EL2.
+     *
+     * With VHE, the CPU transparently redirects EL1 register names to EL2:
+     *   SCTLR_EL1 → SCTLR_EL2,  VBAR_EL1 → VBAR_EL2
+     *   TTBR0_EL1 → TTBR0_EL2,  TTBR1_EL1 → TTBR1_EL2
+     *   TCR_EL1 → TCR_EL2,      MAIR_EL1 → MAIR_EL2
+     *   CPACR_EL1 → CPTR_EL2    (with CPACR-compatible format)
+     *
+     * This means the entire existing kernel code works unmodified at EL2.
+     * Exceptions are taken to EL2 (TGE=1), not EL1.
+     *
+     * HCR_EL2 bits:
+     *   E2H (bit 34): Enable EL1→EL2 register redirection
+     *   TGE (bit 27): Trap General Exceptions to EL2
+     *   RW  (bit 31): EL1 is AArch64
+     */
+    ldr     x10, =((1 << 34) | (1 << 31) | (1 << 27))
+    msr     hcr_el2, x10
+    isb
+
+    /*
+     * Disable ARM generic timer to prevent stale Linux timer IRQs.
+     * After kexec, the timer compare value from Linux may fire soon,
+     * causing a pending interrupt that cascades through the GIC and
+     * triggers CBB/RAS errors. Disable all timer controls early.
+     *
+     * With VHE (E2H=1), CNTP_CTL_EL0 and CNTV_CTL_EL0 control the
+     * host physical and virtual timers respectively.
+     */
+    msr     cntp_ctl_el0, xzr      /* Disable physical timer */
+    msr     cntv_ctl_el0, xzr      /* Disable virtual timer */
+    msr     cnthp_ctl_el2, xzr     /* Disable hypervisor physical timer */
+    isb
+
+    /* Quick UARTC confirmation — write "EL2\r\n" to verify serial works */
+    ldr     x11, =0x0C280000       /* UARTC base (accessible from EL2) */
+    mov     w12, #'E'
+    str     w12, [x11]
+    mov     w12, #'L'
+    str     w12, [x11]
+    mov     w12, #'2'
+    str     w12, [x11]
+    mov     w12, #'\r'
+    str     w12, [x11]
+    mov     w12, #'\n'
+    str     w12, [x11]
+#endif
 
     /*
      * Save DTB address (x0) to callee-saved register.
@@ -479,7 +652,12 @@ secondary_spin:
     .quad   __bss_end - _start
 .Lvectors_offset:
     .quad   exception_vectors - _start
+.Llink_address:
+    .quad   0x80000000
+.Limage_size:
+    .quad   _kernel_file_size
 
 /*
  * Note: Exception vector table is now in vectors.S
  */
+

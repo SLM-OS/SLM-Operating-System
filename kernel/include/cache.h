@@ -24,6 +24,23 @@
 #define CACHE_LINE_SIZE 64
 
 /*
+ * Check if SMPEN (bit 6) is set in CPUECTLR_EL1.
+ * On Cortex-A76, this register is encoded as S3_0_C15_C1_4.
+ * Returns true if the current core has cache coherency enabled.
+ */
+#if defined(PLATFORM_RASPI5)
+#include <stdbool.h>
+static inline bool cpu_has_smpen(void)
+{
+    uint64_t val;
+    __asm__ volatile("mrs %0, S3_0_C15_C1_4" : "=r"(val));
+    return (val & (1UL << 6)) != 0;
+}
+#else
+static inline bool cpu_has_smpen(void) { return true; }
+#endif
+
+/*
  * Pi 5: explicit cache maintenance needed (SMPEN not set by TF-A).
  * Other platforms: coherency works, these are just barriers.
  */
@@ -61,6 +78,20 @@ static inline void cache_invalidate_range(const volatile void *addr, size_t size
     const char *end = p + size;
     for (; p < end; p += CACHE_LINE_SIZE) {
         __asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/*
+ * Discard cacheline without writeback (DC IVAC).
+ * DANGEROUS: any uncleaned dirty data in the cacheline is lost.
+ */
+static inline void cache_discard_range(const volatile void *addr, size_t size)
+{
+    const char *p = (const char *)addr;
+    const char *end = p + size;
+    for (; p < end; p += CACHE_LINE_SIZE) {
+        __asm__ volatile("dc ivac, %0" :: "r"(p) : "memory");
     }
     __asm__ volatile("dsb sy" ::: "memory");
 }
@@ -114,6 +145,13 @@ static inline void cache_clean_range(const volatile void *addr, size_t size)
 }
 
 static inline void cache_invalidate_range(const volatile void *addr, size_t size)
+{
+    (void)addr;
+    (void)size;
+    __asm__ volatile("dmb ish" ::: "memory");
+}
+
+static inline void cache_discard_range(const volatile void *addr, size_t size)
 {
     (void)addr;
     (void)size;

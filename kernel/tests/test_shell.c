@@ -128,6 +128,51 @@ static void test_shell_cmd_uptime(void)
 }
 
 /*
+ * Test: 'bench' command with each subcommand.
+ */
+static void test_shell_cmd_bench_no_args(void)
+{
+    int ret = shell_execute("bench");
+    TEST_ASSERT_EQUAL_INT(1, ret);  /* Missing subcommand → error */
+}
+
+static void test_shell_cmd_bench_context(void)
+{
+    int ret = shell_execute("bench context");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_bench_irq(void)
+{
+    int ret = shell_execute("bench irq");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_bench_ipc(void)
+{
+    int ret = shell_execute("bench ipc");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_bench_stats(void)
+{
+    int ret = shell_execute("bench stats");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_bench_all(void)
+{
+    int ret = shell_execute("bench all");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_bench_invalid(void)
+{
+    int ret = shell_execute("bench foobar");
+    TEST_ASSERT_EQUAL_INT(1, ret);  /* Unknown subcommand → error */
+}
+
+/*
  * Test: 'clear' command executes successfully (minimal output).
  */
 static void test_shell_cmd_clear(void)
@@ -1716,6 +1761,15 @@ int test_suite_shell(void)
     /* Basic commands - just verify they execute (minimal output) */
     RUN_TEST(test_shell_cmd_clear);
     RUN_TEST(test_shell_cmd_uptime);
+
+    /* Benchmark command */
+    RUN_TEST(test_shell_cmd_bench_no_args);
+    RUN_TEST(test_shell_cmd_bench_context);
+    RUN_TEST(test_shell_cmd_bench_irq);
+    RUN_TEST(test_shell_cmd_bench_ipc);
+    RUN_TEST(test_shell_cmd_bench_stats);
+    RUN_TEST(test_shell_cmd_bench_all);
+    RUN_TEST(test_shell_cmd_bench_invalid);
 
     /* VFS commands - error cases */
     RUN_TEST(test_shell_cmd_ls_nonexistent);

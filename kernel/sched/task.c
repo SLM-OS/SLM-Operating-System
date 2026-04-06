@@ -10,10 +10,12 @@
 #include "smp.h"
 #include "spinlock.h"
 #include "cache.h"
+#include "ncmem.h"
 #include <stddef.h>
 
-/* Task table - static allocation for simplicity */
-static struct task task_table[MAX_TASKS];
+/* Task table - NC on Pi 5, BSS fallback otherwise */
+static struct task *task_table;
+static struct task task_table_fallback[MAX_TASKS];
 static uint32_t next_task_id = 1;       /* ID 0 reserved for idle task */
 
 /* Lock protecting task_table and next_task_id */
@@ -21,6 +23,25 @@ static spinlock_t task_lock = SPINLOCK_INIT;
 
 /* Per-CPU current running task (set by scheduler) */
 static struct task *current_task[MAX_CPUS];
+
+void task_table_init(void)
+{
+#if defined(PLATFORM_RASPI5)
+    task_table = ncmem_alloc(MAX_TASKS * sizeof(struct task), CACHE_LINE_SIZE);
+    if (!task_table) {
+        /* Fall back to cacheable array if NC alloc fails */
+        task_table = task_table_fallback;
+        return;
+    }
+    /* Zero NC task table — slots must start with id==0 (free).
+     * Use volatile to ensure NC writes are not optimized out. */
+    volatile uint8_t *p = (volatile uint8_t *)task_table;
+    for (size_t i = 0; i < MAX_TASKS * sizeof(struct task); i++)
+        p[i] = 0;
+#else
+    task_table = task_table_fallback;
+#endif
+}
 
 /*
  * String copy helper (no libc)
@@ -246,6 +267,16 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
 
+    /* Clean the context struct to PoC so a secondary CPU can read it
+     * during switch_to(). Without SMPEN, task_create's writes to
+     * context.sp, context.x30, etc. stay in this CPU's L1 cache.
+     * scheduler_add_task_to_cpu() intentionally skips cleaning the
+     * context (to avoid overwriting a running task's live state),
+     * so we must clean it here at creation time. */
+#if !defined(PLATFORM_RASPI5)
+    cache_clean_range(&task->context, sizeof(task->context));
+#endif
+
     DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
                 task->name, task->id, task->stack_base, task->stack_top,
                 task->priority);
@@ -270,10 +301,26 @@ void task_exit(void)
 
     INFO("Task '%s' (id=%u) exiting", task->name, task->id);
 
-    task->state = TASK_TERMINATED;
-    cache_clean(&task->state);
+    /* Mask IRQs to prevent a timer-driven schedule() from racing with
+     * the state change below. Without this, the timer can fire between
+     * setting TASK_TERMINATED and scheduler_remove_task(), causing
+     * schedule() to find a terminated task still in the run queue
+     * (pick_next_task returns it, next == current → panic). */
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("cli" ::: "memory");
+#else
+    __asm__ volatile("msr daifset, #2" ::: "memory");
+#endif
 
-    /* Remove from run queue and schedule next task */
+    task->state = TASK_TERMINATED;
+#if !defined(PLATFORM_RASPI5) && !defined(PLATFORM_X86_64)
+    cache_clean(&task->state);
+#endif
+
+    /* Remove from run queue and schedule next task.
+     * schedule() -> spin_lock_irqsave saves our masked DAIF state.
+     * The context switch to the next task restores that task's DAIF,
+     * which will have IRQs unmasked. */
     scheduler_remove_task(task);
     schedule();
 
@@ -381,12 +428,16 @@ void task_set_affinity(struct task *task, uint32_t cpu)
     if (!task) return;
 
     task->cpu_affinity = cpu;
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&task->cpu_affinity);
+#endif
 
     /* If pinning to a specific CPU, update assigned_cpu */
     if (cpu != CPU_AFFINITY_ANY && cpu < cpu_count) {
         task->assigned_cpu = cpu;
+#if !defined(PLATFORM_RASPI5)
         cache_clean(&task->assigned_cpu);
+#endif
     }
 }
 
@@ -412,13 +463,17 @@ void task_set_priority(struct task *task, uint8_t priority)
     }
 
     task->priority = priority;
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&task->priority);
+#endif
 
     /* Update effective priority (may be boosted by deadline) */
     if (task->effective_priority < priority) {
         task->effective_priority = priority;
     }
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&task->effective_priority);
+#endif
 }
 
 /*
@@ -446,7 +501,9 @@ void task_set_deadline(struct task *task, uint64_t deadline_ns)
 {
     if (!task) return;
     task->deadline_ns = deadline_ns;
+#if !defined(PLATFORM_RASPI5)
     cache_clean(&task->deadline_ns);
+#endif
 }
 
 /*

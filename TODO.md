@@ -2,9 +2,9 @@
 
 This document tracks Phase 4 implementation of SLM-OS.
 
-**Status:** In Progress (Pi 5 bring-up complete, Jetson blocked)
+**Status:** In Progress (Pi 5 bring-up complete, Jetson partially unblocked)
 
-**Summary:** Phase 4 combines hardware bring-up work with the Component System milestone. Pi 5 is now the primary hardware platform with 4-core SMP, preemptive scheduling, and an interactive shell. Jetson remains blocked by the CBB firewall.
+**Summary:** Phase 4 combines hardware bring-up work with the Component System milestone. Pi 5 is now the primary hardware platform with 4-core SMP, preemptive scheduling, and an interactive shell. Jetson CBB firewall has been partially bypassed — SLM-OS boots to shell at EL2 using UARTC via VHE (April 2026).
 
 **Goals:**
 - ✅ Raspberry Pi 5 hardware bring-up (complete — 4-core SMP)
@@ -67,12 +67,13 @@ See `docs/pi5-baremetal-status.md` for full details.
 - ✅ Hardware spinlocks (runtime-enabled after MMU, `spinlock_hw_enabled`)
 
 ### Remaining Pi 5 Work
-- ✅ Run QEMU test suite on Pi 5 hardware (393 tests: 378 pass, 15 ignored, 0 failures)
+- ✅ Run QEMU test suite on Pi 5 hardware (431 tests: 415 pass, 16 ignored, 0 failures)
 - ✅ Timer-driven sleep/delay functions (sleep_ms, sleep_us, shell `sleep` command)
 - ☐🔗 Interrupt-driven UART — blocked on PCIe BAR1 inbound window match (see `docs/pi5-uart-irq-investigation.md`)
-- ☐ Fix task_exit/schedule race on secondary CPUs
-- ☐ Investigate SMPEN for proper cache coherency (vs DC CVAC/CIVAC workaround)
-- ☐ Re-enable cross-CPU task dispatch (currently pinned to CPU 0 due to SMPEN/cache coherency)
+- ✅ Fix task_exit/schedule race on secondary CPUs — IRQ mask in task_exit prevents timer/schedule race
+- ✅ Investigate SMPEN for proper cache coherency — SMPEN trapped to EL3, L2 not coherent without it
+- ✅ NC shared memory infrastructure — 2MB NC region at 0xFFE00000, run queues + task table in NC, validated on Pi 5
+- ⏸️ Re-enable cross-CPU task dispatch — NC data visibility solved (run queues + task table in NC memory, tests pass). Blocker is now in secondary CPU scheduler execution: tasks dispatched to CPUs 1-3 never run. See `docs/pi5-baremetal-status.md` Known Limitations item 3 for investigation areas.
 
 ---
 
@@ -80,48 +81,56 @@ See `docs/pi5-baremetal-status.md` for full details.
 
 **Priority:** CRITICAL — Unblocks all other Jetson work
 
-**Status:** ⛔ BLOCKED by CBB Firewall — See `docs/jetson-nvidia-support.md`
+**Status:** 🟡 Partially Complete — EL2 + VHE + UARTC bypasses CBB for serial and core subsystems
 
-**Reference:** See `docs/lab-operations.md` for serial console procedures (Ubuntu and Windows).
+**Reference:** See `docs/jetson-nvidia-support.md` for full CBB analysis, `docs/jetson-el2-bringup.md` for EL2 breakthrough details.
 
-### ⛔ Critical Blocker: CBB Firewall
+### CBB Firewall — Partially Bypassed (April 2026)
 
-All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) firewall, which prevents unsigned/unauthenticated code from accessing any peripherals. This is a hardware-enforced security feature.
+The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C280000) from EL2**. By enabling VHE (HCR_EL2.E2H=1, TGE=1) and using UARTC, SLM-OS now boots to an interactive shell.
 
-**Key findings:**
-- kexec is explicitly NOT supported by NVIDIA
-- Direct UEFI boot has the same CBB restrictions
-- L4T bootloader uses kexec internally (extlinux.conf boot also blocked)
-- BPMP communication is corrupted after kexec (cannot enable UART clocks)
+**EL2 breakthrough findings:**
+- SLM-OS enters at EL2 after kexec (confirmed via PSCI SYSTEM_OFF probe)
+- VHE transparently redirects EL1 register accesses to EL2 — kernel code works unmodified
+- UARTC accessible from EL2; UARTA blocked; GICv3 accessible; timer works
+- OP-TEE secure carveout at 0xBE-0xC2 skipped; ~6.7 GB usable across 3 regions
+- UART RX working via TCU HSP mailbox (0x03C10000)
 
-**Potential solutions (require NVIDIA support):**
-1. EL2 hypervisor approach (forum evidence suggests this works)
-2. Secure boot integration (sign SLM-OS with PKC/SBK keys)
-3. CBB firewall configuration via `tegra234-mb2-bct-scr-*-override.dts`
+**Remaining CBB restrictions:**
+- UARTA (40-pin header) — blocked even from EL2
+- SMP — PSCI CPU_ON fails after kexec (TF-A state inconsistent). See M1 UEFI boot item.
 
-**Full documentation:** `docs/jetson-nvidia-support.md`
-
-### Serial Console (40-pin Header UART)
+### Serial Console
 - ✅ Connect USB-serial adapter to 40-pin header (Pin 8 TXD, Pin 10 RXD, Pin 6 GND)
-- ⛔ Test Tegra UART driver (NS16550-compatible @ 0x03100000) — BLOCKED by CBB firewall
-- ⛔ Verify BPMP clock enable for UARTA works — BLOCKED (BPMP IVC corrupted after kexec)
+- ✅ UARTC serial TX working at EL2 via TCU (USB-C debug console)
+- ✅ UART RX working via TCU HSP mailbox (0x03C10000) — SPE routes USB-C input here
 - ✅ Confirm baud rate settings (115200 8N1)
-- ✅ Test bidirectional communication (shell input/output) — verified via labctl (Linux only)
-
-**Note:** Serial hardware verified working with Linux (December 2025). SLM-OS serial blocked by CBB firewall.
+- ✅ Test bidirectional communication — help, mem, cpu, lua all verified
 
 ### Boot Method Validation
-- ⛔ Test kexec boot with serial console output — BLOCKED (kexec not supported per NVIDIA)
-- ✅ Debug any silent failures with serial visibility — Root cause identified: CBB firewall
-- ⛔ Set up SD card boot for standalone SLM-OS — BLOCKED (L4T uses kexec internally)
-- ✅ Document working boot sequence in `docs/jetson-boot.md` — Documented blockers instead
-- ⛔ U-Boot/UEFI direct boot — BLOCKED (same CBB firewall restrictions)
+- ✅ kexec boot with serial console output — working at EL2 with VHE
+- ✅ Debug silent failures with serial visibility — Root cause: CBB firewall, bypassed with EL2
+- ✅ Document working boot sequence — SSH → kexec → EL2/VHE → UARTC
+- ☐ Direct UEFI boot — EFI stub + self-relocating trampoline implemented. PE/COFF loads when UEFI uses preferred address (0x80000000). Blocked when UEFI relocates (no .reloc section). Alternative SMP paths: SGI wake, UEFI Shell `load`, or `AllocatePages(AllocateAddress)`
 
 ### Platform Validation
-- ⛔ Verify DTB parsing on real Jetson hardware — BLOCKED by boot issues
-- ⛔ Confirm memory map matches DTB values — BLOCKED
-- ⛔ Remove hardcoded addresses from `platform.h` (use DTB values) — BLOCKED
-- ✅ Test on Pi 5 with platform-specific DTB — Pi 5 works, shifted focus here
+- ✅ Verify DTB parsing on real Jetson hardware — DTB at 0x80437000 parsed successfully
+- ✅ Confirm memory map matches DTB values — RAM 0x80000000-0x280000000 (8GB)
+- ☐ Remove hardcoded addresses from `platform.h` (use DTB values)
+- ✅ Test on Pi 5 with platform-specific DTB — Pi 5 works
+
+### Kernel Subsystem Status on Jetson
+- ✅ UART (UARTC, TX only)
+- ✅ DTB parsing
+- ✅ PMM (buddy allocator, ~6.7 GB across 3 regions)
+- ✅ VMM + MMU (identity + high map)
+- ✅ GICv3 (distributor + redistributor)
+- ✅ Timer (100 Hz)
+- ✅ Scheduler (single-core)
+- ✅ Lua scripting
+- ✅ Shell (fully interactive)
+- ☐ SMP — PSCI CPU_ON fails after kexec (TF-A state inconsistent). VHE secondary code ready. Paths: UEFI boot (PE/COFF relocation blocker), SGI/spin-table wake (bypass PSCI), or UEFI Shell load
+- ✅ Memory expansion (~6.7 GB free across 3 regions around OP-TEE carveout)
 
 ---
 
@@ -129,35 +138,31 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 
 **Depends on:** M1 (Serial Console)
 
-**Status:** ⛔ BLOCKED — Depends on M1 which is blocked by CBB firewall
+**Status:** 🟡 Mostly Complete — GIC, timer, MMU verified working at EL2. SMP blocked.
 
 ### GIC and Interrupts
-- ☐ Verify GIC configuration for Jetson (may differ from QEMU)
-- ☐ Test interrupt delivery on real hardware
-- ☐ Verify timer IRQ fires at expected rate (100 Hz)
-- ☐ Test GIC affinity settings for core isolation
+- ✅ GICv3 initialized (distributor 0x0F400000, redistributor 0x0F440000, 992 interrupt lines)
+- ✅ Interrupt delivery working (timer IRQ drives scheduler)
+- ✅ Timer IRQ fires at 100 Hz (confirmed via shell uptime)
+- ☐ Test GIC affinity settings for core isolation (requires SMP)
 
 ### Timer
-- ☐ Verify ARM generic timer works on Jetson
-- ☐ Implement Jetson-specific timer if needed
-- ☐ Calibrate timer frequency against real hardware
+- ✅ ARM generic timer works on Jetson at EL2
+- ✅ 100 Hz tick confirmed, scheduler preemption working
 
 ### Multi-Core
 - ☐ Update `MAX_CPUS` in `config.h` from 4 to 6 (or 8 for headroom)
-- ☐ Test multi-core boot on Jetson (6 cores vs QEMU's 4)
-- ☐ Verify PSCI CPU_ON works for all secondary cores
+- ☐ SMP boot — blocked on PSCI CPU_ON after kexec (see M1 UEFI boot / alternative SMP paths)
 - ☐ Test per-core scheduling on 6 cores
 - ☐ Multi-core stress test on real hardware
 
 ### MMU
-- ☐ Test MMU with Jetson's actual memory map
-- ☐ Verify device memory mappings (UART, GIC, GPU registers)
+- ✅ MMU working with Jetson memory map (3 regions around OP-TEE carveout)
+- ✅ Device memory mappings verified (UARTC, GIC, TCU mailbox, GPU, WDT)
 - ☐ Test model memory regions on real hardware
 
 ### GPIO
-- ☐ Test GPIO driver on real pins
-- ☐ LED blink test for visual confirmation
-- ☐ Document available GPIO pins on 40-pin header
+- ⏸️ GPIO testing deferred — UARTA (40-pin header) blocked by CBB, no GPIO pins accessible from EL2
 
 ---
 
@@ -165,15 +170,18 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 
 **Depends on:** M1 (Serial Console), M2 (Hardware Validation)
 
-**Status:** ⛔ BLOCKED — Depends on M1/M2 which are blocked by CBB firewall
+**Status:** 🟡 Partially Unblocked — GPU MMIO accessible from EL2, probe working
 
-**Additional blocker:** GPU initialization requires GSP (GPU System Processor) firmware, which runs on an on-die RISC-V core. Without GSP firmware documentation or source code, GPU compute is not possible. See `docs/gpu.md` for details.
+GPU registers at `0x17000000` are accessible from EL2. The GA10B chip has been identified (BOOT_0=0xB7B000A1, chip ID=0x17B, Ampere). GPU compute still requires GSP firmware loading.
+
+Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10B) and x86-64 RTX 3050 (GA106).
 
 ### GPU Initialization
-- ⛔ Write `jetson_gpu_init()` — BLOCKED by CBB firewall + GSP requirement
-- ⛔ Enable GPU clocks via BPMP IPC — BLOCKED (BPMP IVC corrupted)
-- ⛔ Verify GPU is responsive (read ID registers) — BLOCKED
-- ✅ Document initialization sequence in `docs/gpu.md` — Documented blockers
+- ✅ NVIDIA GPU probe (`gpu_nvidia.c`) — GA10B identified at EL2
+- ✅ Read GPU ID registers (NV_PMC_BOOT_0, BOOT_42) — working
+- ☐ Enable GPU clocks via BPMP IPC (may not be needed at EL2)
+- ☐ GSP firmware loading (RISC-V processor on GPU die)
+- ✅ Document initialization sequence in `docs/gpu.md`
 
 ### GPU Memory Management
 - ☐ Write `jetson_gpu_alloc(size)` — allocate GPU-accessible memory
@@ -203,13 +211,13 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 **Depends on:** M2 (Hardware Validation)
 
 ### Context Switch Performance
-- ☐ Measure actual context switch time on Jetson
-- ☐ Target: < 10 µs
-- ☐ Compare with QEMU measurements
+- ✅ Measure context switch time — Pi 5: 1.6 µs avg, QEMU: ~20 µs (shell `bench context`)
+- ✅ Target: < 10 µs — Pi 5 meets target
+- ☐ Compare with Jetson measurements (blocked on M1)
 - ☐ Profile and optimize if needed
 
 ### Interrupt Latency
-- ☐ Measure actual interrupt latency on Jetson
+- ✅ Measure timer tick jitter — Pi 5: < 1 µs jitter (shell `bench irq`)
 - ☐ Measure worst-case latency under load
 - ☐ Document results in `docs/performance.md`
 
@@ -219,8 +227,8 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 - ☐ Test core isolation effectiveness
 
 ### IPC Performance
+- ✅ Measure message passing latency — Pi 5: 322 ns send+recv round-trip (shell `bench ipc`)
 - ☐ IPC stress test on real hardware
-- ☐ Measure message passing latency
 - ☐ Measure shared buffer throughput
 
 ### Full Test Suite
@@ -249,8 +257,7 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 
 ### Shell Testing
 - ✅ Task exits cleanly, memory reclaimed
-- ☐🔗 Test shell on Jetson (requires M1)
-- ☐ Verify all shell commands work on real hardware
+- ✅ Shell working on Jetson — help, mem, cpu, lua, all file commands verified via serial
 
 ---
 
@@ -366,9 +373,9 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 ## Phase 4 Completion Checklist
 
 ### Deliverables
-- ☐ Kernel boots and runs on real Jetson Orin Nano hardware
-- ☐ Serial console working via 40-pin header UART
-- ☐ All Phase 1-3 tests pass on Jetson
+- ✅ Kernel boots and runs on real Jetson Orin Nano hardware (single-core EL2)
+- ✅ Serial console working via UARTC/TCU (USB-C debug port)
+- ☐ All Phase 1-3 tests pass on Jetson (need formal test run)
 - ☐ GPU initialized, memory allocation working
 - ☐ Performance benchmarks documented
 - ☐ At least one example component loading and running
@@ -376,8 +383,8 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 - ☐ Message routing between components working
 
 ### Demo
-- ☐ Boot on Jetson Orin Nano via serial console
-- ☐ Show shell commands working on real hardware
+- ✅ Boot on Jetson Orin Nano via serial console (kexec → EL2/VHE → UARTC)
+- ✅ Show shell commands working on real hardware (help, mem, cpu, lua verified)
 - ☐ Show component load/unload via shell
 - ☐ Show hot-swap of a component
 - ☐ Show message passing between components
@@ -387,12 +394,12 @@ All Jetson hardware bring-up is blocked by the Tegra234 Control Backbone (CBB) f
 
 ## Outstanding Decisions
 
-### Milestone 1 — Serial Console
+### Milestone 1 — Serial Console ✅ DECIDED
 
-| Decision | Options | Recommendation |
-|----------|---------|----------------|
-| **Primary debug method** | 40-pin UART vs USB-C TCU | **40-pin UART** — TCU requires SPE firmware cooperation |
-| **Baud rate** | 115200 vs higher | **115200** — standard, reliable |
+| Decision | Options | **Choice** | Rationale |
+|----------|---------|------------|-----------|
+| **Primary debug method** | 40-pin UART vs USB-C TCU | **UARTC via USB-C** | UARTA blocked by CBB at EL2; UARTC (0x0C280000) works. TCU RX via HSP mailbox (0x03C10000). |
+| **Baud rate** | 115200 vs higher | **115200** | Standard, reliable, firmware-configured |
 
 ### Milestone 3 — GPU
 
@@ -504,7 +511,7 @@ M9 (Polish) ─────────> Can happen in parallel throughout
 - [Orin Series SoC Technical Reference Manual (TRM)](https://developer.nvidia.com/orin-series-soc-technical-reference-manual)
 - NVIDIA L4T (Linux for Tegra) source code for driver reference
 - `docs/lab-operations.md` for serial console procedures and remote lab access
-- `docs/jetson-kexec-debugging.md` for kexec boot debugging notes
+- `docs/jetson-el2-bringup.md` for EL2 breakthrough and current implementation
 - `docs/jetson-tcu.md` for TCU/HSP research notes
 - `docs/platform-abstraction.md` for QEMU vs Jetson differences
 - `labctl` for lab operations (power, serial, deploy) — see [Embedded-Lab-Control](https://github.com/johnjezl/Embedded-Lab-Control)

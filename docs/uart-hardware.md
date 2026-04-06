@@ -330,7 +330,7 @@ The driver is in `kernel/drivers/uart_rp1_bitbang.c`. Despite the filename (hist
 
 - [Raspberry Pi 5 config.txt documentation](https://www.raspberrypi.com/documentation/computers/config_txt.html)
 - Circle framework for Pi 5 bare-metal reference
-- See `docs/pi5-uart-testing-status.md` for full investigation notes
+- See `docs/pi5-baremetal-status.md` for current UART status and driver details
 
 ---
 
