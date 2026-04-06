@@ -318,6 +318,7 @@
 
 /* MSIX_CFG bit fields */
 #define MSIX_CFG_ENABLE     (1 << 0)
+#define MSIX_CFG_TEST       (1 << 1)    /* Force one MSI-X fire (self-clearing) */
 #define MSIX_CFG_IACK       (1 << 2)
 #define MSIX_CFG_IACK_EN    (1 << 3)
 

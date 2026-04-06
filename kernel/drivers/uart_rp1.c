@@ -387,9 +387,9 @@ void uart_irq_init(void)
     gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (required — without it,
-     * level-triggered PL011 floods PCIe with MSI-X TLPs that don't match
-     * BAR3, causing RP1 PCIe stall). IACK_EN auto-masks after first fire. */
+    /* 2. MSIX_CFG: enable vector 25 WITHOUT IACK_EN for testing.
+     * Without IACK_EN, MSI-X fires repeatedly while interrupt is active.
+     * With correct BAR3 routing, this should deliver to MIP0→GIC. */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
@@ -692,7 +692,7 @@ skip_msix:
     gic_set_priority(UART_IRQ, 0x40);  /* Higher priority than timer (0x80) */
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (auto-mask on assert) */
+    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (auto-mask after first fire) */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
