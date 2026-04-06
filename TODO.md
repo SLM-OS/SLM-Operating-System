@@ -72,7 +72,7 @@ See `docs/pi5-baremetal-status.md` for full details.
 - ☐🔗 Interrupt-driven UART — blocked on PCIe BAR1 inbound window match (see `docs/pi5-uart-irq-investigation.md`)
 - ✅ Fix task_exit/schedule race on secondary CPUs — IRQ mask in task_exit prevents timer/schedule race
 - ✅ Investigate SMPEN for proper cache coherency — SMPEN trapped to EL3, L2 not coherent without it
-- ⏸️ Re-enable cross-CPU task dispatch — deferred, requires SMPEN or non-cacheable shared memory
+- ⏸️ Re-enable cross-CPU task dispatch — L2 invalidate fixes boot, runtime coherency still blocked (6 TF-A/cache combinations tested, all fail)
 
 ---
 

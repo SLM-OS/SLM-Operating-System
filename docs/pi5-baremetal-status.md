@@ -81,7 +81,7 @@ Full test suite runs on Pi 5 hardware with zero failures:
 2. DC CIVAC writeback bug: CPU 0's stale dirty cacheline for `cpu_data[]` overwrote secondary CPUs' `online=true` at PoC (fixed by `cache_clean_range` before booting secondaries)
 3. task_exit/schedule race: timer could fire between state=TERMINATED and scheduler_remove_task(), causing panic (fixed by masking IRQs in task_exit)
 
-## Interrupt-Driven UART (In Progress)
+## Interrupt-Driven UART (On Hold)
 
 The RP1 UART interrupt path requires configuring three hardware blocks between the PL011 and the GIC:
 
@@ -140,16 +140,31 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
 2. **~~Spinlocks:~~** **RESOLVED** — Hardware spinlocks work after MMU enable. Before MMU, a runtime flag (`spinlock_hw_enabled`) gates barrier-only fallback. The exclusive monitor requires cacheable memory, which is available only after VMM initialization.
 
-3. **~~Single-core:~~** **RESOLVED (4 cores online) — cache coherency limitation remains.** All 4 Cortex-A76 cores boot via PSCI CPU_ON (SMC), transition EL2→EL1, enable MMU, and run C code. The shell reports "4 online / 4 total". However, full cache coherency is broken because TF-A does not set SMPEN (CPUECTLR_EL1 bit 6), and the bit is only writable from EL3.
+3. **Cache coherency / cross-CPU dispatch:** Cross-CPU task dispatch is blocked by two issues:
 
-   **SMPEN investigation findings (April 2026):**
-   - SMPEN (CPUECTLR_EL1 bit 6) cannot be set from EL2 — write traps to EL3 (TF-A), system hangs
-   - Reading CPUECTLR_EL1 from EL1 works — confirmed SMPEN=0 on all 4 CPUs
-   - DC CIVAC does not propagate through per-core L2 caches without SMPEN on Cortex-A76
-   - Cross-CPU task dispatch was attempted but tasks on secondary CPUs see stale rq data (L2 retains old values for 100+ seconds)
-   - Workaround: all user tasks pinned to CPU 0; explicit DC CVAC/CIVAC for same-CPU operations
-   - Potential fixes: non-cacheable shared memory region, TF-A patch for SMPEN, L2 flush by set/way (DC CISW)
-   - Exclusive monitor operations (spinlocks via ldaxr/stxr) work without SMPEN
+   **a) Pre-MMU L2 pollution (FIXED):** Secondary CPUs read kernel data (MMU config variables) before enabling the MMU. These pre-MMU reads enter L1/L2 as Non-Shareable lines. After MMU enable, the page table attributes mark memory as Inner Shareable, but existing L2 lines are NOT retroactively made coherent — the DSU never snoops them. Fixed by invalidating L1/L2 by set/way (DC ISW) after MMU enable in `smp_boot.S`. This unblocks secondary CPU initialization (scheduler init, idle task creation, timer start).
+
+   **b) Runtime cross-CPU data sharing (OPEN):** Even with the L2 invalidate fix, tasks dispatched to secondary CPUs are never consumed. Neither barriers-only (relying on DSU) nor explicit DC CVAC/CIVAC make runtime cross-CPU data visible. The DSU does not appear to provide automatic coherency for regular loads/stores despite correct Inner Shareable page table attributes (SH=0b11 confirmed from hardware dump). Spinlocks work (exclusive monitor has separate coherency). All combinations tested and failed:
+
+   | TF-A | Cache Ops | L2 Invalidate | Result |
+   |------|-----------|---------------|--------|
+   | Built-in EEPROM | DC CVAC/CIVAC | No | Fail |
+   | Built-in EEPROM | Barriers only | No | Fail |
+   | RPi Foundation (bcm2712) | Barriers only | No | Fail |
+   | RPi Foundation (bcm2712) | DC CVAC/CIVAC | No | Fail |
+   | Built-in EEPROM | Barriers only | Yes | Fail |
+   | Built-in EEPROM | DC CVAC/CIVAC | Yes | Fail |
+
+   **Untested:** RPi Foundation TF-A + L2 invalidate (combination of all fixes).
+
+   **Workaround:** All user tasks pinned to CPU 0. Secondary CPUs run idle tasks and handle timer interrupts but do not receive dispatched work.
+
+   **Root cause note:** The Cortex-A76 does NOT have an SMPEN bit (unlike A53/A72). The `cpu_has_smpen()` function reads bit 6 of `S3_0_C15_C1_4` which is a different field on A76. The DSU is supposed to provide coherency automatically per ARM TRM, but BCM2712's implementation does not appear to do so for regular loads/stores.
+
+   **Potential fixes:**
+   - RPi Foundation TF-A (CPUECTLR_EL1 + CLUSTERECTLR_EL1 init) combined with L2 invalidate
+   - Non-cacheable shared memory for scheduler run queue data
+   - Further investigation of DSU configuration registers
 
 4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 
