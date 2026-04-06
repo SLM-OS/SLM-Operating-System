@@ -13,14 +13,20 @@
 #include "sched.h"
 #include "dtb.h"
 #include "cache.h"
+#include "ncmem.h"
 
 #include <stddef.h>
 
 /* Per-CPU data array */
 struct per_cpu cpu_data[MAX_CPUS];
 
-/* Maps logical CPU ID -> MPIDR value */
+/* Maps logical CPU ID -> MPIDR value.
+ * On platforms with NC memory, this points to NC-allocated storage.
+ * On others, it's the static array declared here. */
 uint64_t cpu_logical_map[MAX_CPUS];
+#if defined(PLATFORM_HAS_NC_MEMORY)
+static uint64_t *nc_cpu_logical_map;  /* NC copy for cross-CPU reads */
+#endif
 
 /* Number of CPUs in the system */
 uint32_t cpu_count = 0;
@@ -28,8 +34,9 @@ uint32_t cpu_count = 0;
 /* Number of CPUs currently online */
 volatile uint32_t cpus_online = 0;
 
-/* Per-CPU boot handshake flags — cacheline-aligned to avoid corrupting
- * adjacent data during DC CIVAC cache maintenance operations. */
+/* Per-CPU boot handshake flags.
+ * On NC platforms, allocated from NC region for instant cross-CPU visibility.
+ * Otherwise cacheline-aligned to avoid DC CIVAC corruption of adjacent data. */
 static volatile uint32_t cpu_boot_flag[MAX_CPUS] __attribute__((aligned(64)));
 
 /* Per-CPU boot stacks (16 KB each, 16-byte aligned) */
@@ -73,13 +80,25 @@ int cpu_logical_id(uint64_t mpidr)
 {
     uint64_t aff = mpidr & MPIDR_AFF_MASK;
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Hardcoded MPIDR table — avoids all cache visibility issues.
+     * Secondary CPUs call this during GIC init before any NC pointers
+     * or cacheable data from the primary is visible. */
+    static const uint64_t jetson_map[] = {
+        0x000, 0x100, 0x200, 0x300, 0x10200, 0x10300
+    };
+    for (int i = 0; i < 6; i++) {
+        if (jetson_map[i] == aff) return i;
+    }
+    return -1;
+#else
     for (uint32_t i = 0; i < cpu_count; i++) {
         if (cpu_logical_map[i] == aff) {
             return (int)i;
         }
     }
-
     return -1;  /* Unknown CPU */
+#endif
 }
 
 /*
@@ -146,6 +165,15 @@ static void *cpu_stack_top(uint32_t cpu)
  */
 static void init_cpu_map(void)
 {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Allocate NC copies of cross-CPU data structures.
+     * Secondary CPUs read these via NC addresses for instant visibility. */
+    nc_cpu_logical_map = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
+    for (int i = 0; i < MAX_CPUS; i++) {
+        if (nc_cpu_logical_map) nc_cpu_logical_map[i] = 0xFFFFFFFFUL;  /* sentinel */
+    }
+#endif
+
     /* CPU 0 is always the boot CPU - get its real MPIDR */
     cpu_logical_map[0] = cpu_get_mpidr() & MPIDR_AFF_MASK;
     cpu_count = 1;
@@ -199,6 +227,16 @@ static void init_cpu_map(void)
     for (uint32_t i = 1; i < expected_cpus; i++) {
         cpu_logical_map[i] = i;                    /* Aff0 encoding */
         cpu_count++;
+    }
+#endif
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Copy the logical map to NC memory so secondary CPUs can read it.
+     * cpu_logical_id() on secondaries uses this NC copy. */
+    if (nc_cpu_logical_map) {
+        for (uint32_t i = 0; i < cpu_count; i++) {
+            nc_cpu_logical_map[i] = cpu_logical_map[i];
+        }
     }
 #endif
 

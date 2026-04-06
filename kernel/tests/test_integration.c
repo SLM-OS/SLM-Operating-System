@@ -193,7 +193,7 @@ static void lifecycle_task_func(void *arg)
  */
 static void test_multicore_basic(void)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     TEST_IGNORE_MESSAGE("Cross-CPU dispatch under investigation — NC task table + run queues in place");
 #endif
     struct task *task_a = task_create("task_a", task_a_func, (void *)3);
@@ -236,7 +236,7 @@ static void test_multicore_basic(void)
  */
 static void test_task_migration(void)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     TEST_IGNORE_MESSAGE("Cross-CPU dispatch under investigation — NC task table + run queues in place");
 #endif
     migration_ready = false;
@@ -297,7 +297,7 @@ static void test_task_migration(void)
  */
 static void test_stress_multicpu(void)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     TEST_IGNORE_MESSAGE("Cross-CPU dispatch under investigation — NC task table + run queues in place");
 #endif
     reset_test_state();
@@ -343,7 +343,7 @@ static void test_stress_multicpu(void)
  */
 static void test_lock_contention(void)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     TEST_IGNORE_MESSAGE("Cross-CPU dispatch under investigation — NC task table + run queues in place");
 #endif
     reset_test_state();
@@ -386,7 +386,7 @@ static void test_lock_contention(void)
  */
 static void test_task_lifecycle(void)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     TEST_IGNORE_MESSAGE("Cross-CPU dispatch under investigation — NC task table + run queues in place");
 #endif
     #define LIFECYCLE_CYCLES 8
@@ -435,7 +435,7 @@ static void test_task_lifecycle(void)
  * visible across CPUs — the foundation for cross-CPU task dispatch on Pi 5.
  * ============================================================================ */
 
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
 
 /*
  * Test: NC memory region is correctly mapped and accessible.
@@ -518,7 +518,7 @@ static void test_nc_region_used_by_scheduler(void)
     *nc_base = saved;  /* Restore (this is the spinlock field) */
 }
 
-#endif /* PLATFORM_RASPI5 */
+#endif /* PLATFORM_HAS_NC_MEMORY */
 
 /* ============================================================================
  * Test Suite Entry Point
@@ -534,7 +534,7 @@ int test_suite_integration(void)
     RUN_TEST(test_lock_contention);
     RUN_TEST(test_task_lifecycle);
 
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     /* NC memory validation */
     RUN_TEST(test_nc_memory_accessible);
     RUN_TEST(test_nc_alloc_alignment);

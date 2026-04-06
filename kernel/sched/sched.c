@@ -90,7 +90,7 @@ static struct {
 /* cpu_rq() implementation — must be after sched struct definition */
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     /* NC memory at compile-time-known address — no cacheable pointer.
      * Run queues are the first ncmem_alloc() in scheduler_init(). */
     return &((struct cpu_runqueue *)NC_MEM_BASE)[cpu];
@@ -139,14 +139,14 @@ static void update_deadline_boost(struct task *task)
     }
 
     /* Deadline may have been set by another CPU */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->deadline_ns);
 #endif
 
     if (task->deadline_ns == 0) {
         /* No deadline - effective priority equals base priority */
         task->effective_priority = task->priority;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&task->effective_priority);
 #endif
         return;
@@ -176,7 +176,7 @@ static void update_deadline_boost(struct task *task)
     }
 
     task->effective_priority = boosted;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->effective_priority);
 #endif
 }
@@ -192,7 +192,7 @@ void scheduler_init(void)
     sched.timer_ticks = 0;
     sched.isolated_cores = 0;
 
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     /* Initialize NC run queue region. cpu_rq() uses NC_MEM_BASE directly
      * (compile-time constant) so no cacheable pointer is needed. */
     ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue), CACHE_LINE_SIZE);
@@ -388,7 +388,7 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
      * schedule() invalidates before reading. Only clean the fields
      * that were modified — NOT the entire task struct (which includes
      * the task's context/stack that may be in active use). */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&rq->head);
     cache_clean(&rq->tail);
     cache_clean(&rq->ready_count);
@@ -537,13 +537,13 @@ void scheduler_add_task(struct task *task)
     uint32_t target_cpu;
 
     /* Affinity may have been set by another CPU */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->cpu_affinity);
 #endif
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         target_cpu = task->cpu_affinity;
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     } else {
         /* TEMPORARY: CPU 0 pinning while debugging cross-CPU dispatch.
          * NC task table + NC run queues are in place, but secondary CPUs
@@ -647,7 +647,7 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     /* Clean modified fields to PoC for cross-CPU visibility.
      * Without SMPEN, writes stay in this CPU's L1 cache. The target
      * CPU's schedule() invalidates before reading. */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&rq_old->head);
     cache_clean(&rq_old->tail);
     cache_clean(&rq_old->ready_count);
@@ -700,7 +700,7 @@ void schedule(void)
 
     /* On non-NC platforms, invalidate cached copy of run queue before reading.
      * On Pi 5 with NC run queues, this is a no-op (NC data not cached). */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate_range(rq, sizeof(*rq));
 #endif
 
@@ -713,7 +713,7 @@ void schedule(void)
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&rq->zombie);
 #endif
         rq_unlock_irqrestore(this_cpu, flags);
@@ -729,13 +729,13 @@ void schedule(void)
 
     /* If current task is still running and ready, re-add to queue */
     if (current) {
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_invalidate(&current->state);
 #endif
     }
     if (current && current->state == TASK_RUNNING) {
         current->state = TASK_READY;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&current->state);
 #endif
 
@@ -788,11 +788,11 @@ void schedule(void)
 
     /* Perform context switch */
     next->state = TASK_RUNNING;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&next->state);
 #endif
     next->switches++;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&next->switches);
 #endif
     sched.context_switches++;  /* Racy but acceptable for stats */
@@ -803,7 +803,7 @@ void schedule(void)
      * safely switched to a different stack.
      */
     if (current) {
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_invalidate(&current->state);
 #endif
     }
@@ -817,7 +817,7 @@ void schedule(void)
      * Without this, the next dc civac at the start of schedule() would
      * write back our stale dirty cacheline, overwriting another CPU's
      * fresh data (e.g., a newly added task from scheduler_add_task). */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&rq->head);
     cache_clean(&rq->tail);
     cache_clean(&rq->ready_count);

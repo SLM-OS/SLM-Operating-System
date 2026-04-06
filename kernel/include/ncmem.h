@@ -22,6 +22,10 @@
 
 #if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
 
+/* Platforms with NC memory — use this macro in scheduler/SMP code
+ * instead of platform-specific guards. */
+#define PLATFORM_HAS_NC_MEMORY 1
+
 #if defined(PLATFORM_RASPI5)
 #define NC_MEM_BASE     0xFFE00000UL    /* Last 2MB of 4GB RAM */
 #elif defined(PLATFORM_JETSON_ORIN_NANO)
