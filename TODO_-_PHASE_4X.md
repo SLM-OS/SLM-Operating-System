@@ -2,7 +2,7 @@
 
 This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 3050.
 
-**Status:** In Progress (M1-M4 Complete, M5 PCIe Next)
+**Status:** In Progress (M1-M5 Complete, M6 GPU Driver Next)
 
 **Summary:** Primary development track to port SLM-OS to x86-64 architecture with discrete NVIDIA GPU. This enables GPU driver development on accessible hardware with superior debugging tools.
 
@@ -286,27 +286,44 @@ make -f kernel/arch/x86_64/Makefile.test disk
 
 ---
 
-## Milestone 5: PCIe Enumeration
+## Milestone 5: PCIe Enumeration — ✅ Complete
 
-### PCIe Basics
-- ☐ Study PCIe configuration space access (Type 0/1 headers)
-- ☐ Implement PCIe config read/write via ECAM (memory-mapped) or legacy I/O
-- ☐ Find ECAM base address from ACPI MCFG table
-- ☐ Enumerate PCIe bus, find all devices
+### PCIe Config Space Access
+- ✅ Legacy I/O access via ports 0xCF8/0xCFC (works everywhere)
+- ✅ ECAM (memory-mapped) via ACPI MCFG table (used if available)
+- ✅ pci_config_read8/16/32 and pci_config_write32 API
+
+### Bus Enumeration
+- ✅ Scan all buses/devices/functions, follow PCI-PCI bridges
+- ✅ Store vendor/device ID, class, subclass, BARs, IRQ per device
+- ✅ Multi-function device support (header type bit 7)
+- ✅ Verified: 6 devices on QEMU i440FX
 
 ### Device Discovery
-- ☐ Scan for NVIDIA GPU (Vendor ID 0x10DE)
-- ☐ Identify RTX 3050 (Device ID varies by SKU, likely 0x2507 for GA107)
-- ☐ Read BAR (Base Address Registers) for GPU MMIO and VRAM
-- ☐ Map GPU BARs into virtual address space
+- ✅ `pci_find_device(vendor, device)` — find by vendor:device ID
+- ✅ `pci_find_class(class, subclass)` — find by class code
+- ✅ NVIDIA GPU detection (vendor 0x10DE, class 0x03) with BAR dump
+- ☐ Map GPU BARs into virtual address space — deferred to M6
 
 ### Resource Allocation
-- ☐ Parse existing BAR assignments (UEFI likely configured them)
-- ☐ Alternatively: Implement simple BAR allocation if needed
-- ☐ Document GPU memory layout
+- ✅ Read existing BAR assignments (UEFI-configured)
+- ✅ 64-bit BAR support (BAR type detection: MMIO/IO, 32/64-bit)
+- ☐ BAR size probing (write all-ones, read back) — deferred to M6
 
 ### Shell Command
-- ☐ `pci` — list PCIe devices (vendor, device, class, BARs)
+- ✅ `pci` — lists all devices with BDF, vendor:device, class, description
+- ✅ BAR details shown for display devices (class 0x03)
+
+**Key files:**
+| File | Purpose |
+|------|---------|
+| `kernel/arch/x86_64/pci.c` | Config access, enumeration, shell command |
+
+### Tests
+- ✅ 6 new PCI tests (66 → 72 total):
+  - `test_pci_host_bridge_exists`, `test_pci_nonexistent_device`
+  - `test_pci_enumeration_found_devices`, `test_pci_found_host_bridge`
+  - `test_pci_device_at_index_valid`, `test_pci_found_isa_bridge`
 
 ---
 
@@ -532,16 +549,16 @@ make -f kernel/arch/x86_64/Makefile.test disk
 ```
 M1 (Boot) ✅ ──> M2 (Memory) ✅ ──> M3 (Interrupts) ✅ ──> M4 (SMP) ✅
                        │
-                       └──────> M5 (PCIe) ← NEXT ──────> M6 (GPU)
+                       └──────> M5 (PCIe) ✅ ──────> M6 (GPU) ← NEXT
                        
-M7 (Abstraction) ~70% ──> Incrementally built with M1-M4
+M7 (Abstraction) ~70% ──> Incrementally built with M1-M5
 
-M8 (Testing) ──────> Depends on M5-M6
+M8 (Testing) ──────> Depends on M6
 
 M9 (Docs) ──────> Ongoing throughout
 ```
 
-**Critical Path:** ~~M1 → M2 → M3 → M4~~ → **M5 (PCIe)** → M6 (GPU)
+**Critical Path:** ~~M1 → M2 → M3 → M4 → M5~~ → **M6 (GPU Driver)**
 
 **Parallel Work:**
 - M7 (Abstraction) ~70% done — remaining items are formal API headers
@@ -607,6 +624,6 @@ M9 (Docs) ──────> Ongoing throughout
 ---
 
 *Created: January 2026*
-*Last Updated: April 2026 — M1-M4 complete (4-CPU SMP working), M7 ~70%, M5 PCIe next*
+*Last Updated: April 2026 — M1-M5 complete (SMP + PCIe), M7 ~70%, M6 GPU next*
 *Purpose: Parallel development track for x86-64 + RTX 3050 GPU learning*
 *Relationship: Supports Phase 4 (Jetson) and Phase 5 (SLM Integration)*

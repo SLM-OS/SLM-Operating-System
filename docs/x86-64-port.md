@@ -16,7 +16,8 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 8. [Interrupt Controller (APIC)](#interrupt-controller-apic)
 9. [Timer (LAPIC)](#timer-lapic)
 10. [SMP (Symmetric Multi-Processing)](#smp-symmetric-multi-processing)
-11. [Console Output](#console-output)
+11. [PCI/PCIe Enumeration](#pcipcie-enumeration)
+12. [Console Output](#console-output)
 12. [Building](#building)
 13. [Hardware Deployment](#hardware-deployment)
 14. [Testing](#testing)
@@ -391,6 +392,48 @@ SIPI → real mode (0x8000)
 
 ---
 
+## PCI/PCIe Enumeration
+
+SLM-OS discovers PCI devices during boot using legacy I/O config space access, with optional ECAM (memory-mapped) via ACPI MCFG.
+
+### Config Space Access
+
+Two methods are supported, selected automatically:
+
+| Method | Mechanism | When Used |
+|--------|-----------|-----------|
+| Legacy I/O | Ports 0xCF8 (address) / 0xCFC (data) | Always available (fallback) |
+| ECAM | Memory-mapped, from ACPI MCFG table | If MCFG table present |
+
+### Bus Enumeration
+
+1. Check host bridge at 00:00.0
+2. Scan all 32 devices on bus 0 (check multi-function via header type bit 7)
+3. For each PCI-PCI bridge (class 06:04), scan the secondary bus
+4. Store vendor/device ID, class, subclass, BARs, IRQ for each device
+
+### Shell Command
+
+```
+slmos> pci
+PCI Devices (6 found):
+  BDF       Vendor:Device  Class     Description
+  --------  -------------  --------  -----------
+  00:00.0   8086:1237      06:00     Host Bridge
+  00:01.0   8086:7000      06:01     ISA Bridge
+  ...
+```
+
+NVIDIA GPUs (vendor 0x10DE) are highlighted with BAR details during boot.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `kernel/arch/x86_64/pci.c` | Config access, enumeration, shell command |
+
+---
+
 ## Console Output
 
 ### Serial Console (COM1)
@@ -508,7 +551,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 66 tests across 14 categories:
+The `test_x86_boot.c` test suite contains 72 tests across 15 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -606,7 +649,8 @@ Lua commands are available in the shell via `lua <expression>`.
 | `kernel/arch/x86_64/ioapic.c` | I/O APIC driver (redirection table) |
 | `kernel/arch/x86_64/pic.c` | gic.h interface routing to LAPIC/IOAPIC |
 | `kernel/arch/x86_64/timer_x86.c` | LAPIC timer (timer.h interface, calibrated vs PIT) |
-| `kernel/arch/x86_64/platform_x86.c` | Boot glue, SMP/VMM/DTB/Rust/component stubs |
+| `kernel/arch/x86_64/platform_x86.c` | Boot glue, SMP boot (INIT-SIPI), VMM/DTB/Rust stubs |
+| `kernel/arch/x86_64/pci.c` | PCI config access, bus enumeration, `pci` shell command |
 | `kernel/drivers/uart_x86.c` | 16550 UART driver (uart.h interface) |
 
 ### Build System
@@ -620,7 +664,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 66 tests: boot, IDT, APIC, SMP, spinlock, Multiboot2, platform, scheduler, setjmp |
+| `kernel/tests/test_x86_boot.c` | 72 tests: boot, IDT, APIC, SMP, spinlock, PCI, Multiboot2, platform, scheduler, setjmp |
 
 ---
 

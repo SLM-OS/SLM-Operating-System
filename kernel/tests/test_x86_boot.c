@@ -1068,6 +1068,83 @@ static void test_smp_trampoline_param_offsets(void)
 }
 
 /* ============================================================================
+ * PCI Tests
+ * ============================================================================ */
+
+extern uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
+extern uint16_t pci_config_read16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
+extern uint32_t pci_get_device_count(void);
+
+struct pci_device_ext {
+    uint8_t  bus, dev, func;
+    uint16_t vendor_id, device_id;
+    uint8_t  class_code, subclass, prog_if, header_type;
+    uint8_t  irq_line, irq_pin;
+    uint32_t bar[6];
+};
+extern const struct pci_device_ext *pci_get_device(uint32_t index);
+extern const struct pci_device_ext *pci_find_class(uint8_t class_code, uint8_t subclass);
+
+/*
+ * Test: Legacy PCI config read returns valid data at 00:00.0.
+ */
+static void test_pci_host_bridge_exists(void)
+{
+    uint32_t val = pci_config_read32(0, 0, 0, 0x00);
+    uint16_t vendor = val & 0xFFFF;
+    /* Host bridge must exist and have a valid vendor ID */
+    TEST_ASSERT_TRUE(vendor != 0xFFFF);
+    TEST_ASSERT_TRUE(vendor != 0x0000);
+}
+
+/*
+ * Test: Non-existent device returns 0xFFFF vendor ID.
+ */
+static void test_pci_nonexistent_device(void)
+{
+    /* Bus 255, device 31, function 7 — very unlikely to exist */
+    uint16_t vendor = pci_config_read16(255, 31, 7, 0x00);
+    TEST_ASSERT_EQUAL_HEX16(0xFFFF, vendor);
+}
+
+/*
+ * Test: PCI enumeration found at least one device.
+ */
+static void test_pci_enumeration_found_devices(void)
+{
+    TEST_ASSERT_TRUE(pci_get_device_count() > 0);
+}
+
+/*
+ * Test: Host bridge (class 06:00) was discovered.
+ */
+static void test_pci_found_host_bridge(void)
+{
+    const void *dev = pci_find_class(0x06, 0x00);
+    TEST_ASSERT_TRUE(dev != NULL);
+}
+
+/*
+ * Test: First device at index 0 is valid.
+ */
+static void test_pci_device_at_index_valid(void)
+{
+    const struct pci_device_ext *dev = (const struct pci_device_ext *)pci_get_device(0);
+    TEST_ASSERT_TRUE(dev != NULL);
+    TEST_ASSERT_TRUE(dev->vendor_id != 0xFFFF);
+    TEST_ASSERT_TRUE(dev->vendor_id != 0x0000);
+}
+
+/*
+ * Test: ISA bridge exists (QEMU always has one).
+ */
+static void test_pci_found_isa_bridge(void)
+{
+    const void *dev = pci_find_class(0x06, 0x01);
+    TEST_ASSERT_TRUE(dev != NULL);
+}
+
+/* ============================================================================
  * setjmp/longjmp Tests (required for Lua)
  * ============================================================================ */
 
@@ -1223,6 +1300,14 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_smp_logical_map_consistent);
     RUN_TEST(test_spinlock_mutual_exclusion);
     RUN_TEST(test_smp_trampoline_param_offsets);
+
+    /* PCI tests */
+    RUN_TEST(test_pci_host_bridge_exists);
+    RUN_TEST(test_pci_nonexistent_device);
+    RUN_TEST(test_pci_enumeration_found_devices);
+    RUN_TEST(test_pci_found_host_bridge);
+    RUN_TEST(test_pci_device_at_index_valid);
+    RUN_TEST(test_pci_found_isa_bridge);
 
     /* setjmp/longjmp (required for Lua) */
     RUN_TEST(test_setjmp_longjmp);

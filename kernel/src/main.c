@@ -400,6 +400,16 @@ void kernel_main(void *dtb)
         WARN("GPU init failed (code=%d)", gpu_ret);
     }
 
+    /* Initialize PCI subsystem (x86-64 only) */
+#if defined(PLATFORM_X86_64)
+    {
+        extern void pci_init(void);
+        extern void pci_register_shell_commands(void);
+        pci_init();
+        pci_register_shell_commands();
+    }
+#endif
+
     /* Create main task (runs tests) */
     struct task *main_task = task_create("main", main_task_func, NULL);
     if (!main_task) {
