@@ -34,6 +34,19 @@ extern void irq_register(uint8_t irq, void (*handler)(uint8_t));
 /* Tick counter (global, incremented on BSP only for uptime tracking) */
 volatile uint64_t pit_ticks;
 
+/*
+ * Read the Time Stamp Counter (RDTSC) — cycle-accurate, ~GHz resolution.
+ */
+static inline uint64_t rdtsc(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* TSC frequency (cycles per second), measured during timer_init */
+static uint64_t tsc_freq;
+
 /* Calibrated LAPIC timer values */
 static uint32_t lapic_ticks_per_sec;
 static uint32_t lapic_initial_count;
@@ -50,6 +63,27 @@ void timer_init(void)
 {
     /* Calibrate LAPIC timer against PIT */
     lapic_ticks_per_sec = lapic_timer_calibrate();
+
+    /* Calibrate TSC: measure cycles during the same ~10ms window */
+    {
+        extern void outb(uint16_t port, uint8_t val);
+        extern uint8_t inb(uint16_t port);
+        uint16_t pit_count = 11932;  /* ~10ms */
+        outb(0x61, (inb(0x61) & 0xFD) | 0x01);
+        outb(0x43, 0xB0);
+        outb(0x42, pit_count & 0xFF);
+        outb(0x42, (pit_count >> 8) & 0xFF);
+        uint8_t tmp = inb(0x61) & 0xFE;
+        outb(0x61, tmp);
+        outb(0x61, tmp | 0x01);
+        uint64_t tsc_start = rdtsc();
+        while (!(inb(0x61) & 0x20))
+            ;
+        uint64_t tsc_elapsed = rdtsc() - tsc_start;
+        tsc_freq = tsc_elapsed * 100;  /* 10ms × 100 = 1 second */
+        uart_printf("[TIMER] TSC calibration: %lu cycles/10ms, %lu MHz\n",
+                    (unsigned long)tsc_elapsed, (unsigned long)(tsc_freq / 1000000));
+    }
 
     if (lapic_ticks_per_sec == 0) {
         uart_printf("[TIMER] LAPIC calibration failed, using fallback\n");
@@ -87,11 +121,15 @@ void timer_handler(void)
 
 uint64_t timer_get_count(void)
 {
+    if (tsc_freq > 0)
+        return rdtsc();
     return pit_ticks;
 }
 
 uint64_t timer_get_frequency(void)
 {
+    if (tsc_freq > 0)
+        return tsc_freq;
     return TIMER_HZ;
 }
 
