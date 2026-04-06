@@ -42,6 +42,10 @@ struct cpu_runqueue {
     uint32_t ready_count;
 } __attribute__((aligned(CACHE_LINE_SIZE)));
 
+/* Per-CPU flag: set when schedule() is called from timer ISR (scheduler_tick).
+ * Used on x86-64 to conditionally mask the LAPIC timer during context switch. */
+static volatile int from_timer_isr[MAX_CPUS];
+
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
  * used by spinlocks may not work on Non-Cacheable memory (BCM2712). */
@@ -825,18 +829,22 @@ void schedule(void)
 #endif
 
     /*
-     * Mask the LAPIC timer before releasing the lock. This prevents the
-     * timer ISR from calling scheduler_tick() → schedule() between lock
-     * release and switch_to, which would deadlock on the spinlock
-     * (same CPU, non-reentrant lock).
+     * If called from the timer ISR, mask the LAPIC timer before
+     * releasing the lock. This prevents the timer ISR from calling
+     * scheduler_tick() → schedule() reentranly between lock release
+     * and switch_to (which would deadlock on the same-CPU spinlock).
      *
-     * The timer is unmasked after switch_to returns (on the resumed
-     * task's stack). New tasks unmask it in task_entry_wrapper.
+     * Yield-initiated switches DON'T need masking because yield()
+     * is not called from the timer ISR — there's no reentrance risk.
+     * Masking on every switch would prevent the timer from firing
+     * while tasks are voluntarily yielding to each other.
      */
 #if defined(PLATFORM_X86_64)
     extern void lapic_timer_mask(void);
     extern void lapic_timer_unmask(void);
-    lapic_timer_mask();
+    int need_timer_mask = from_timer_isr[this_cpu];
+    if (need_timer_mask)
+        lapic_timer_mask();
 #endif
 
     rq_unlock_irqrestore(this_cpu, flags);
@@ -844,9 +852,10 @@ void schedule(void)
     /* switch_to saves current context and restores next's context */
     switch_to(current, next);
 
-    /* Resumed here after being switched back. Re-enable the timer. */
+    /* If the timer was masked by this schedule() instance, unmask it. */
 #if defined(PLATFORM_X86_64)
-    lapic_timer_unmask();
+    if (need_timer_mask)
+        lapic_timer_unmask();
 #endif
 }
 
@@ -932,8 +941,20 @@ void scheduler_tick(void)
     /* Note: timer_ticks is racy but acceptable for stats */
     sched.timer_ticks++;
 
+    /* Mark that this schedule() call comes from the timer ISR.
+     * schedule() uses this to decide whether to mask the LAPIC timer
+     * during the context switch (only needed for timer-initiated
+     * preemption to prevent reentrant schedule() deadlock). */
+#if defined(PLATFORM_X86_64)
+    from_timer_isr[cpu_id()] = 1;
+#endif
+
     /* Preempt current task */
     schedule();
+
+#if defined(PLATFORM_X86_64)
+    from_timer_isr[cpu_id()] = 0;
+#endif
 }
 
 /*
