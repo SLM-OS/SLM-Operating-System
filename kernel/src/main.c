@@ -404,13 +404,10 @@ void kernel_main(void *dtb)
 #if defined(PLATFORM_X86_64)
     {
         extern void pci_init(void);
-        extern void pci_register_shell_commands(void);
         extern void nvidia_gpu_init(void);
-        extern void nvidia_gpu_register_shell_commands(void);
         pci_init();
-        pci_register_shell_commands();
         nvidia_gpu_init();
-        nvidia_gpu_register_shell_commands();
+        /* Shell commands registered in shell_init() after shell starts */
     }
 #endif
 

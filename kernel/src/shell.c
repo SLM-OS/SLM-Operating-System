@@ -336,6 +336,16 @@ void shell_init(void)
     /* Register Lua scripting command */
     lua_shell_init();
 
+    /* Register platform-specific commands */
+#if defined(PLATFORM_X86_64)
+    {
+        extern void pci_register_shell_commands(void);
+        extern void nvidia_gpu_register_shell_commands(void);
+        pci_register_shell_commands();
+        nvidia_gpu_register_shell_commands();
+    }
+#endif
+
     uart_puts("\r\n");
     uart_puts("SLM-OS Debug Shell\r\n");
     uart_puts("Type 'help' for available commands.\r\n");
