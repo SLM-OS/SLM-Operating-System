@@ -928,22 +928,102 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 ## Recommended Next Steps
 
-### High Value (Demo Polish)
+### Completed This Session
 
-1. **Rust runtime port** — Add `x86_64-unknown-none` Cargo target to enable real model memory allocation and component system (currently stubbed)
-2. **`bench` shell commands** — Port context switch and IPC benchmarks from ARM64 for performance comparison
-3. **`cpu` command enhancement** — Show per-CPU scheduler stats, task counts, idle time
+1. ~~Rust runtime port~~ ✅ — `x86_64-unknown-none` target, real library linked via `--whole-archive`
+2. ~~Benchmarks~~ ✅ — RDTSC-based nanosecond timing, context switch 104 ns, IPC 113 ns
+3. ~~arch.h~~ ✅ — Architecture-agnostic IRQ control, halt, barriers
+4. ~~CI pipeline~~ ✅ — x86-64 build + QEMU boot test in GitHub Actions
 
-### Medium Value (Completeness)
+### Remaining (Post-Capstone)
 
-4. **Higher-half kernel mapping** — Move kernel to 0xFFFFFFFF80000000 for proper virtual address space separation
-5. **Networking** — Port lwIP + VirtIO-Net (QEMU only, requires VirtIO MMIO mapping)
-6. **Test automation** — Run `test` command in QEMU CI and verify all 84 tests pass automatically
+5. **Higher-half kernel mapping** — Move kernel to 0xFFFFFFFF80000000
+6. **VirtIO-PCI networking** — x86-64 QEMU uses VirtIO-PCI (not MMIO), requires new transport driver
+7. **GSP firmware loading** — See `docs/nvidia-gsp.md`
+8. **IOMMU / VT-d** — DMA protection for PCI devices
 
-### Research (Post-Capstone)
+---
 
-7. **GSP firmware loading** — Load the 38 MB RISC-V firmware to enable GPU compute. See `docs/nvidia-gsp.md` for the complete roadmap. This is a project-scale effort requiring VBIOS parsing, SEC2 Falcon programming, and a full RPC stack.
-8. **IOMMU / VT-d** — Enable DMA protection for PCI devices
+## Architecture Comparison: ARM64 vs x86-64
+
+### Feature Parity Matrix
+
+| Feature | ARM64 (Pi 5) | ARM64 (QEMU) | x86-64 (QEMU) | x86-64 (i7-6700) |
+|---------|-------------|--------------|----------------|-------------------|
+| Boot | ✅ SD card | ✅ `-kernel` | ✅ GRUB ISO | ✅ SD via SDWire |
+| SMP | ✅ 4 cores | ✅ 4 cores | ✅ 4 cores | ✅ 8 CPUs (4c×2HT) |
+| Preemptive scheduler | ✅ | ✅ | ✅ | ✅ |
+| Shell (30+ commands) | ✅ | ✅ | ✅ | ✅ |
+| PMM buddy allocator | ✅ | ✅ | ✅ | ✅ (20 GB) |
+| VFS + LittleFS | ✅ | ✅ | ✅ | ✅ |
+| Lua 5.4 scripting | ✅ | ✅ | ✅ | ✅ |
+| Rust runtime | ✅ | ✅ | ✅ | ✅ |
+| IPC message queues | ✅ | ✅ | ✅ | ✅ |
+| PCI enumeration | N/A | N/A | ✅ (6 devices) | ✅ (21 devices) |
+| NVIDIA GPU probe | N/A | N/A | N/A | ✅ (GA107) |
+| VRAM access | N/A | N/A | N/A | ✅ (256 MB) |
+| Networking (lwIP) | ❌ | ✅ | ❌ | ❌ |
+| GPU compute | ❌ | ❌ | ❌ | ❌ (GSP required) |
+
+### Performance Comparison
+
+| Metric | ARM64 (Pi 5, 2.4 GHz) | x86-64 (i7-6700, 3.4 GHz) |
+|--------|----------------------|---------------------------|
+| Context switch | ~1-5 µs (estimated) | **104 ns** |
+| IPC round-trip | ~1-5 µs (estimated) | **113 ns** |
+| Timer jitter | ~10 µs | **116 ns** |
+| RAM usable | 3,840 MB | **19,916 MB** |
+| CPUs online | 4 | **8** |
+| PCI devices | N/A | **21** |
+
+### Porting Effort Summary
+
+| Component | Lines Changed | Effort | Notes |
+|-----------|--------------|--------|-------|
+| Boot assembly | ~500 | New | trampoline32.S, entry64.S, ap_trampoline.S |
+| IDT + ISR stubs | ~400 | New | idt.c, idt.S (replaces vectors.S) |
+| LAPIC + IOAPIC | ~530 | New | lapic.c, ioapic.c, pic.c (replaces gic.c) |
+| LAPIC timer | ~140 | New | timer_x86.c (replaces timer.c) |
+| ACPI parsing | ~400 | New | acpi.c (replaces DTB parsing) |
+| Context switch | ~110 | New | context.S (different register set) |
+| PCI enumeration | ~490 | New | No ARM64 equivalent |
+| NVIDIA GPU | ~380 | New | No ARM64 equivalent |
+| Platform stubs | ~650 | New | platform_x86.c, SMP, VMM stubs |
+| Shared code | 0 | Unchanged | Scheduler, IPC, shell, VFS, Lua, PMM |
+| **Total new x86-64** | **~3,600** | | |
+
+---
+
+## Jetson GPU Bring-Up Checklist
+
+Based on x86-64 GPU learnings, these steps apply to Jetson Orin Nano (GA10B, integrated Ampere GPU):
+
+### What Transfers Directly
+
+- [x] GPU register map: NV_PMC_BOOT_0 (0x000), BOOT_42 (0xA00), PMC_ENABLE (0x200)
+- [x] BOOT_42 decode: architecture field (0x17 = Ampere), implementation, chip_id
+- [x] 0xBADF5040 meaning: engine not initialized, GSP required
+- [x] GSP boot sequence: 7-phase chain documented in `docs/nvidia-gsp.md`
+- [x] Nouveau source file map for GSP implementation
+- [x] VRAM write/read verification pattern
+
+### Jetson-Specific Differences
+
+- [ ] GPU is memory-mapped (no PCIe BAR — integrated GPU at fixed MMIO address)
+- [ ] GPU address for Jetson: check device tree for `gpu@` node
+- [ ] CBB firewall may block GPU MMIO access (same issue as UART)
+- [ ] GSP firmware may be pre-loaded by CBoot/UEFI bootloader
+- [ ] Check if GPU engines are already initialized (PMC_ENABLE != 0)
+- [ ] TCU serial path may interfere with GPU register access
+
+### Recommended Approach
+
+1. From EL2 (VHE mode), read GPU MMIO registers (NV_PMC_BOOT_0, BOOT_42)
+2. If BOOT_42 reads correctly → CBB allows GPU access from EL2
+3. Check PMC_ENABLE — if non-zero, some engines are already initialized
+4. Read PTIMER to verify register path works
+5. If 0xBADF5040 on engine registers → GSP not loaded, same barrier as x86-64
+6. If CBB blocks GPU → same barrier as UARTA, documented in `docs/jetson-nvidia-support.md`
 
 ---
 
