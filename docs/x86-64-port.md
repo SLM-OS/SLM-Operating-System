@@ -115,7 +115,7 @@ The x86-64 boot process transitions from UEFI firmware through GRUB to 64-bit lo
 ┌─────────────────────────────────────────────────────────────────────┐
 │  32-bit Trampoline (trampoline32.S)                                 │
 │  - Checks CPUID and long mode support                               │
-│  - Sets up 4-level page tables (identity mapping first 1GB)         │
+│  - Sets up 4-level page tables (identity mapping first 4GB)         │
 │  - Enables PAE in CR4                                               │
 │  - Loads PML4 address into CR3                                      │
 │  - Enables long mode in EFER MSR                                    │
@@ -135,13 +135,14 @@ The x86-64 boot process transitions from UEFI firmware through GRUB to 64-bit lo
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  C Kernel (main_x86.c)                                              │
-│  - Initializes COM1 serial console (115200 baud)                    │
-│  - Loads IDT (48 vectors: exceptions 0-31, IRQs 32-47)             │
-│  - Remaps 8259 PIC (IRQ 0-15 → vectors 32-47)                      │
-│  - Initializes PIT timer at 100 Hz                                  │
-│  - Enables interrupts (STI)                                         │
-│  - Parses Multiboot2 info (memory map, bootloader name)             │
+│  C Kernel (platform_x86.c → main.c)                                 │
+│  - Initializes COM1 serial (115200 baud)                            │
+│  - PMM buddy allocator, VMM extends paging to all RAM               │
+│  - SMP: ACPI MADT discovery, INIT-SIPI-SIPI boots all CPUs          │
+│  - IDT (64 vectors), disables 8259 PIC, inits LAPIC + IOAPIC        │
+│  - LAPIC timer at 100 Hz (calibrated against PIT)                    │
+│  - PCI enumeration (legacy I/O or ECAM)                              │
+│  - Scheduler, IPC, VFS, LittleFS, Lua, shell                        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -165,15 +166,16 @@ The far jump must use segment selector 0x08 (64-bit code segment) to actually sw
 ### Physical Memory Map
 
 ```
-0x00000000 - 0x000FFFFF    Reserved (real mode, legacy)
-0x00100000 - 0x001FFFFF    Kernel image
-  0x00100000               Multiboot2 header
-  0x00101000               .text (code)
-  0x00102000               .rodata (constants, GDT)
-  0x00103000               .data (initialized data)
-  0x00104000               .bss (stack, IDT)
-  0x00109000               .page_tables (PML4, PDPT, PD)
-0x00200000 - 0x3FFFFFFF    Available (identity mapped)
+0x00000000 - 0x00007FFF    Reserved (real mode IVT, BIOS data)
+0x00008000 - 0x00008FFF    AP trampoline (copied at runtime for SMP boot)
+0x00100000 - 0x0066FFFF    Kernel image (~5.5 MB with all subsystems)
+  0x00100000               .multiboot header
+  0x00101000               .text (code, ~250 KB)
+  0x0013E000               .rodata (constants, GDT, ~52 KB)
+  0x0014C000               .data (initialized data)
+  0x0014D000               .bss (stack, IDT, PMM state, ~5 MB)
+  0x00658000               .page_tables (PML4, PDPT, 20×PD = 88 KB)
+0x00200000 - RAM end       Available (identity mapped, up to 20 GB)
 ```
 
 ### Linker Script Sections
@@ -556,16 +558,18 @@ The `test_x86_boot.c` test suite contains 77 tests across 15 categories:
 | Category | Tests | Description |
 |----------|-------|-------------|
 | Control registers | 4 | CR0 paging, CR4 PAE, EFER long mode, CR3→PML4 |
-| Page tables | 6 | PML4, PDPT, PD structure, 4GB boot mapping, PDPT[0..3] populated, vmm_init RAM detection |
+| Page tables | 6 | PML4, PDPT, PD structure, 4GB boot mapping, PDPT[0..3], VMM RAM detection |
 | GDT | 3 | Limit, CS selector (0x08), DS selector (0x10) |
 | Memory layout | 3 | Kernel at 1MB, section ordering, within mapping |
 | Multiboot2 | 5 | Pointer valid, structure size, memory map, usable RAM, bootloader name |
 | IDT | 4 | IDTR loaded, exception entries present, IRQ interrupt gates, exception trap gates |
-| PIC | 3 | OCW3 response, timer unmasked, slave accessible |
-| PIT timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
+| Legacy PIC | 3 | OCW3 response, timer unmasked, slave accessible |
+| Timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
 | ACPI + APIC | 6 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, timer running |
-| Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock irqsave roundtrip, gic enable/disable, timer frequency, timer count |
-| Scheduler integration | 5 | gic_init loads IDT, task stack within mapping, gic_end_interrupt safe, uart_putc, scheduler_tick callable |
+| SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
+| PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
+| Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
+| Scheduler integration | 5 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick |
 | setjmp/longjmp | 2 | setjmp/longjmp round-trip, longjmp(0) returns 1 |
 | Long mode | 2 | 64-bit operations, RIP-relative addressing |
 
@@ -585,9 +589,9 @@ The x86-64 port uses `#if defined(PLATFORM_X86_64)` guards in shared kernel head
 |--------|----------------|
 | `platform.h` | RAM_BASE, UART_BASE, TIMER_IRQ, CPU_MAX for x86-64 |
 | `task.h` | x86-64 `struct cpu_context` (rbx, rbp, r12-r15, rsp, rip, rflags) |
-| `spinlock.h` | x86-64 barriers (mfence/lfence/sfence), irq_save (pushfq+cli), spin_lock (no-op single core) |
+| `spinlock.h` | x86-64 barriers (mfence/lfence/sfence), irq_save (pushfq+cli), spin_lock (TTAS atomic), ticket_lock (lock xaddw) |
 | `cache.h` | No-ops (x86-64 fully hardware cache coherent) |
-| `smp.h` | `cpu_id()` returns 0 (single core) |
+| `smp.h` | `cpu_id()` reads LAPIC ID, looks up in cpu_logical_map[] |
 
 ### x86-64 cpu_context Layout
 
@@ -605,10 +609,12 @@ Total: 72 bytes. Offsets hardcoded in `context.S` as `CTX_RBX`, `CTX_RSP`, etc.
 | Main Kernel Interface | x86-64 Implementation |
 |-----------------------|----------------------|
 | `uart.h` (uart_init, uart_putc, uart_getc) | `kernel/drivers/uart_x86.c` — 16550 COM1 |
-| `gic.h` (gic_init, gic_enable_irq, gic_end_interrupt) | `kernel/arch/x86_64/pic.c` — 8259 PIC |
-| `timer.h` (timer_init, timer_start, timer_handler) | `kernel/arch/x86_64/timer_x86.c` — 8254 PIT |
+| `gic.h` (gic_init, gic_enable_irq, gic_end_interrupt) | `kernel/arch/x86_64/pic.c` — LAPIC + IOAPIC |
+| `timer.h` (timer_init, timer_start, timer_handler) | `kernel/arch/x86_64/timer_x86.c` — LAPIC timer |
 | `switch_to()` (context.S) | `kernel/arch/x86_64/context.S` — x86-64 registers |
 | `smp_init`, `vmm_init`, DTB/Rust stubs | `kernel/arch/x86_64/platform_x86.c` |
+| PCI config access, enumeration, shell | `kernel/arch/x86_64/pci.c` |
+| ACPI table discovery | `kernel/arch/x86_64/acpi.c` |
 
 ---
 
@@ -697,7 +703,7 @@ GAS generates 64-bit instructions (RIP-relative addressing) even with `.code32` 
 
 1. **Simplicity**: No need for PT level (only PML4→PDPT→PD)
 2. **Performance**: Fewer TLB entries needed
-3. **Boot speed**: Identity mapping 1GB requires only 512 PD entries
+3. **Boot speed**: Identity mapping 4GB requires only 2048 PD entries (4 pages)
 
 ### Why LAPIC Timer Instead of PIT?
 
@@ -745,7 +751,8 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 ## Known Issues
 
-No critical known issues. All 16 GB RAM is mapped and usable.
+- QEMU's `-kernel` flag does not support Multiboot2 on Ubuntu 24.04 (QEMU 8.2.2). Use GRUB ISO boot (`-cdrom`) instead.
+- No critical functional issues. All 16 GB RAM mapped, 4-CPU SMP working, PCI enumeration operational.
 
 ---
 
