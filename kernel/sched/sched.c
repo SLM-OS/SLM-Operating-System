@@ -893,11 +893,9 @@ void scheduler_start(void)
     INFO("Starting timer (100 Hz)...");
     timer_start();
 
-    /* NOTE: This daifclr is on the boot stack BEFORE switch_to(). It's
-     * safe ONLY because all tasks start with DAIF=0x080 (IRQ masked),
-     * so the timer never actually fires during the switch. If tasks
-     * are changed to unmask IRQs (for preemptive scheduling), this
-     * daifclr must be removed — see task_entry_trampoline TODO. */
+    /* NOTE: This daifclr is safe ONLY because tasks start with DAIF=0x080
+     * and don't unmask (timer never fires). When the task_entry_trampoline
+     * DAIF fix is applied, this MUST be removed. See task.c TODO. */
     INFO("Enabling interrupts...");
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");
     __asm__ volatile("isb" ::: "memory");

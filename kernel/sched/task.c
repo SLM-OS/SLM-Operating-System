@@ -81,12 +81,18 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     task_entry_t entry = (task_entry_t)entry_addr;
     void *arg = (void *)arg_addr;
 
-    /* TODO: unmask IRQs here for preemptive scheduling.
-     * Tasks start with DAIF=0x080 (IRQ masked). Without unmasking,
-     * timer interrupts never fire and preemptive scheduling doesn't work.
-     * Current workaround: cooperative scheduling via yield().
-     * Fix requires also removing the boot-stack daifclr in scheduler_start()
-     * to avoid context corruption during switch_to(). */
+    /* TODO: Unmask IRQs here for preemptive scheduling on Pi 5.
+     *
+     * Root cause identified: tasks run with DAIF=0x080 permanently, so
+     * timer IRQs never fire. Fix: unmask here + remove boot-stack daifclr.
+     *
+     * BLOCKER: When both fixes applied, the system deadlocks after printing
+     * "SLM-OS Debug Shell" (shell task gets stuck during uart_puts).
+     * Timer preemption during UART output may cause a context switch
+     * deadlock. Need to investigate:
+     * 1. Is schedule() re-entrant-safe when called from timer during yield()?
+     * 2. Does the context switch corrupt UART polling state?
+     * 3. Is there a lock ordering issue between uart_lock and rq_lock? */
 
     entry(arg);
     task_exit();
