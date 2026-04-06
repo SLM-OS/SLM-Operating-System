@@ -295,13 +295,13 @@
  * RP1 Interrupt Architecture
  *
  * RP1 peripheral IRQ → RP1 MSI-X engine → PCIe MSI-X write →
- * BCM2712 PCIe RC BAR1 → MIP0 (MSI-X Interrupt Peripheral) → GIC SPI
+ * BCM2712 PCIe RC BAR3 → MIP0 (MSI-X Interrupt Peripheral) → GIC SPI
  *
  * MIP0 maps 64 MSI-X vectors to GIC SPIs starting at SPI 128:
  *   RP1 vector N → MIP0 vector N → GIC SPI (128 + N) → GIC IRQ (160 + N)
  *
  * Three hardware blocks must be configured:
- * 1. PCIe RC BAR1: routes MSI-X writes (PCI addr 0xFF_FFFFF000) to MIP0
+ * 1. PCIe RC BAR3: routes MSI-X writes (PCI addr 0xFF_FFFFF000) to MIP0
  * 2. MIP0: unmasks vectors, converts MSI-X to GIC SPIs
  * 3. RP1 MSIX_CFG: enables per-vector MSI-X forwarding
  */
@@ -318,6 +318,7 @@
 
 /* MSIX_CFG bit fields */
 #define MSIX_CFG_ENABLE     (1 << 0)
+#define MSIX_CFG_TEST       (1 << 1)    /* Force one MSI-X fire (self-clearing) */
 #define MSIX_CFG_IACK       (1 << 2)
 #define MSIX_CFG_IACK_EN    (1 << 3)
 
@@ -328,11 +329,13 @@
 #define PCIE_RC_BASE        0x1000120000UL
 #define PCIE_RC_SIZE        0x10000UL
 
-/* PCIe RC register offsets for BAR1→MIP routing */
-#define PCIE_RC_BAR1_CONFIG_LO      0x402C
-#define PCIE_RC_BAR1_CONFIG_HI      0x4030
-#define PCIE_RC_UBUS_BAR1_REMAP     0x40AC
-#define PCIE_RC_UBUS_BAR1_REMAP_HI  0x40B0
+/* PCIe RC register offsets for BAR3→MIP routing (Linux uses BAR3, not BAR1).
+ * BAR1 is used by firmware for RP1 peripheral MMIO — do not modify BAR1. */
+#define PCIE_RC_BAR3_CONFIG_LO      0x403C
+#define PCIE_RC_BAR3_CONFIG_HI      0x4040
+#define PCIE_RC_UBUS_BAR3_REMAP     0x40BC
+#define PCIE_RC_UBUS_BAR3_REMAP_HI  0x40C0
+#define PCIE_RC_MISC_CTRL           0x4008
 #define PCIE_RC_PCIE_STATUS         0x4068  /* Bit 5 = DL_ACTIVE */
 
 /* MIP0 (MSI-X Interrupt Peripheral) */
@@ -358,10 +361,10 @@
 #define PCIE_RC_EXT_CFG_INDEX  0x9000       /* Write bus/devfn selector */
 #define PCIE_RC_EXT_CFG_DATA   0x8000       /* Config data (firmware uses default offset) */
 
-/* MSI-X target address (PCIe address that RC BAR1 routes to MIP0) */
-/* MSI-X target address (must match Circle's 0xFFFFFFF000: {0x0F, 0xFFFFF000}) */
+/* MSI-X target address (PCIe address that RC BAR3 routes to MIP0).
+ * Device tree value: <0xff 0xfffff000>. Confirmed by Linux register dump. */
 #define MSIX_MSG_ADDR_LO   0xFFFFF000UL
-#define MSIX_MSG_ADDR_HI   0x0000000FUL
+#define MSIX_MSG_ADDR_HI   0x000000FFUL
 
 /*
  * Alternative UARTs (via RP1):

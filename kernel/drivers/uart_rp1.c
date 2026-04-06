@@ -387,9 +387,9 @@ void uart_irq_init(void)
     gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (required — without it,
-     * level-triggered PL011 floods PCIe with MSI-X TLPs that don't match
-     * BAR1, causing RP1 PCIe stall). IACK_EN auto-masks after first fire. */
+    /* 2. MSIX_CFG: enable vector 25 WITHOUT IACK_EN for testing.
+     * Without IACK_EN, MSI-X fires repeatedly while interrupt is active.
+     * With correct BAR3 routing, this should deliver to MIP0→GIC. */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
@@ -460,7 +460,7 @@ void uart_irq_init(void)
      * For now, skip the PCIe config space / MSI-X table programming.
      * The MSI-X table, Bus Master Enable, and MSI-X Enable bits are
      * the remaining pieces needed for interrupt-driven UART. The PL011
-     * IMSC, RP1 MSIX_CFG, RC BAR1→MIP routing, and MIP registers are
+     * IMSC, RP1 MSIX_CFG, RC BAR3→MIP routing, and MIP registers are
      * all configured below and ready for when PCIe config access works.
      *
      * Polling fallback works transparently in the meantime.
@@ -589,6 +589,12 @@ void uart_irq_init(void)
         uint32_t b2_rh  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x40B8);
         DEBUG_PRINT("BAR2: cfg=0x%x_%08x remap=0x%x_%08x", b2_hi, b2_lo, b2_rh, b2_rl);
 
+        uint32_t b3_lo  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x403C);
+        uint32_t b3_hi  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4040);
+        uint32_t b3_rl  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x40BC);
+        uint32_t b3_rh  = *(volatile uint32_t *)(PCIE_RC_BASE + 0x40C0);
+        DEBUG_PRINT("BAR3: cfg=0x%x_%08x remap=0x%x_%08x", b3_hi, b3_lo, b3_rh, b3_rl);
+
         uint32_t misc = *(volatile uint32_t *)(PCIE_RC_BASE + 0x4008);
         DEBUG_PRINT("MISC_CTRL=0x%08x", misc);
 
@@ -628,25 +634,22 @@ skip_msix:
     (void)0;
 
     /*
-     * Step 1: Configure PCIe RC BAR1 → MIP0 routing.
+     * Step 1: Verify PCIe RC BAR3 → MIP0 routing (configured from EL2 in boot.S).
      *
      * When RP1 fires an MSI-X, it writes to PCIe address 0xFF_FFFFF000.
-     * RC BAR1 catches that write and remaps it to physical 0x10_00130000
+     * RC BAR3 catches that write and remaps it to physical 0x10_00130000
      * (MIP0), which converts the MSI-X vector into a GIC SPI.
-     *
-     * The firmware may have already configured this (it uses RP1 for
-     * HDMI/USB), but we set it explicitly to be safe.
+     * BAR1 is used by firmware for RP1 peripheral MMIO — do not touch.
      */
-    /* Verify RC BAR1→MIP0 routing (configured from EL2 in boot.S) */
     {
-        volatile uint32_t *rc_bar1_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR1_CONFIG_LO);
-        volatile uint32_t *rc_remap_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR1_REMAP);
-        uint32_t bar1 = *rc_bar1_lo;
+        volatile uint32_t *rc_bar3_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR3_CONFIG_LO);
+        volatile uint32_t *rc_remap_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR3_REMAP);
+        uint32_t bar3 = *rc_bar3_lo;
         uint32_t remap = *rc_remap_lo;
-        if (bar1 == 0xFFFFF01C && remap == 0x00130001) {
-            DEBUG_PRINT("RC BAR1→MIP0 routing verified (configured from EL2)");
+        if (bar3 == 0xFFFFF01C && remap == 0x00130001) {
+            DEBUG_PRINT("RC BAR3→MIP0 routing verified (configured from EL2)");
         } else {
-            INFO("UART IRQ: RC BAR1 not configured (lo=0x%x remap=0x%x)", bar1, remap);
+            INFO("UART IRQ: RC BAR3 not configured (lo=0x%x remap=0x%x)", bar3, remap);
         }
     }
 
@@ -689,7 +692,7 @@ skip_msix:
     gic_set_priority(UART_IRQ, 0x40);  /* Higher priority than timer (0x80) */
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (auto-mask on assert) */
+    /* 2. MSIX_CFG: enable vector 25 with IACK_EN (auto-mask after first fire) */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
