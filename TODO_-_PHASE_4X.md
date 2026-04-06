@@ -2,7 +2,7 @@
 
 This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 3050.
 
-**Status:** In Progress (M1-M5 Complete, M6 GPU Driver In Progress)
+**Status:** M1-M6 Complete (M6 GPU: registers + VRAM verified, GSP documented as future work)
 
 **Summary:** Primary development track to port SLM-OS to x86-64 architecture with discrete NVIDIA GPU. This enables GPU driver development on accessible hardware with superior debugging tools.
 
@@ -328,7 +328,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 
 ---
 
-## Milestone 6: NVIDIA GPU Driver (RTX 3050) — In Progress
+## Milestone 6: NVIDIA GPU Driver (RTX 3050) — ✅ Complete (GSP Deferred)
 
 ### GPU Research
 - ✅ Study NVIDIA open-gpu-kernel-modules for GA107 register map
@@ -359,16 +359,22 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - ☐ VRAM size detection via resizable BAR or bar size probing
 
 ### GSP Firmware Study
-- ☐ Study GSP (GPU System Processor) architecture
-- ☐ Document GSP boot sequence from open-gpu-kernel-modules
-- ☐ Identify GSP firmware files needed (from NVIDIA driver package)
-- ☐ Understand GSP mailbox/command interface
-- ☐ Document findings in `docs/nvidia-gsp.md`
+- ✅ Study GSP (GPU System Processor) architecture — RISC-V core, mandatory on Ampere
+- ✅ Document GSP boot sequence from open-gpu-kernel-modules (7 phases)
+- ✅ Identify GSP firmware files (gsp-535.113.01.bin.zst, 38 MB RISC-V ELF + 3 support blobs)
+- ✅ Document GSP mailbox/command interface (Falcon MAILBOX0/1, RPC queues)
+- ✅ Document findings in `docs/nvidia-gsp.md`
+- ✅ Map nouveau source files for future GSP implementation
 
-### GPU Memory Management
-- ☐ Implement VRAM allocation (simple bump allocator initially)
-- ☐ Implement `gpu_alloc(size)` / `gpu_free(addr)`
-- ☐ Handle PCIe DMA for system memory ↔ VRAM transfers
+**Finding:** GSP is mandatory on Ampere — no legacy mode. Engine registers return
+0xBADF5040 without GSP-RM. Full GSP boot requires VBIOS parsing, SEC2 Falcon
+programming, cryptographic verification, 38 MB firmware loading, and RPC stack.
+This is a project-scale effort deferred to post-capstone.
+
+### GPU Memory Management — Deferred (Requires GSP)
+- ⏸️ VRAM allocation through GPU page tables — requires GSP-RM
+- ⏸️ `gpu_alloc(size)` / `gpu_free(addr)` — requires GSP-RM
+- ⏸️ PCIe DMA for system memory ↔ VRAM — raw BAR1 access works; proper DMA requires GSP
 
 ### GSP Communication (Advanced)
 - ☐ Load GSP firmware into GPU memory
@@ -560,20 +566,14 @@ make -f kernel/arch/x86_64/Makefile.test disk
 ```
 M1 (Boot) ✅ ──> M2 (Memory) ✅ ──> M3 (Interrupts) ✅ ──> M4 (SMP) ✅
                        │
-                       └──────> M5 (PCIe) ✅ ──────> M6 (GPU) ← IN PROGRESS
+                       └──────> M5 (PCIe) ✅ ──────> M6 (GPU) ✅ (GSP deferred)
                        
-M7 (Abstraction) ~70% ──> Incrementally built with M1-M5
-
-M8 (Testing) ──────> Depends on M6
-
-M9 (Docs) ──────> Ongoing throughout
+M7 (Abstraction) ~70% ──> Incrementally built with M1-M6
+M8 (Testing) ──────> 84 tests passing
+M9 (Docs) ──────> nvidia-gsp.md complete
 ```
 
-**Critical Path:** ~~M1 → M2 → M3 → M4 → M5~~ → **M6 (GPU Driver)**
-
-**Parallel Work:**
-- M7 (Abstraction) ~70% done — remaining items are formal API headers
-- M9 (Docs) ongoing
+**All critical path milestones complete.** Remaining work: M7 formal headers, M8 hardware test automation, M9 architecture comparison doc.
 
 ---
 
@@ -635,6 +635,6 @@ M9 (Docs) ──────> Ongoing throughout
 ---
 
 *Created: January 2026*
-*Last Updated: April 2026 — M1-M5 complete, M6 GPU driver in progress (BAR0/BAR1 mapped, BOOT_42 decode), M7 ~70%*
+*Last Updated: April 2026 — M1-M6 complete (GPU registers + VRAM verified on RTX 3050, GSP research documented), M7 ~70%*
 *Purpose: Parallel development track for x86-64 + RTX 3050 GPU learning*
 *Relationship: Supports Phase 4 (Jetson) and Phase 5 (SLM Integration)*

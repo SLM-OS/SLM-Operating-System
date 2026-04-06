@@ -515,6 +515,12 @@ Result: PASSED
 
 Registers belonging to uninitialized engines (PBUS, PMC_INTR) return 0xBADF5040 — the GPU's default "engine not initialized" response. This indicates GSP firmware has not been loaded. PTIMER and PSTRAPS are readable because they don't require GSP.
 
+### GSP Firmware (Future Work)
+
+Full GPU compute requires loading the GSP (GPU System Processor) firmware — a 38 MB RISC-V binary that runs the GPU Resource Manager. This involves VBIOS parsing, SEC2 Falcon programming, cryptographic verification, and an RPC stack. GSP is mandatory on Ampere; there is no legacy register-programming mode.
+
+See **`docs/nvidia-gsp.md`** for the complete 7-phase boot sequence, register map, firmware file locations, and nouveau source file roadmap.
+
 ### Key Files
 
 | File | Purpose |
@@ -755,6 +761,13 @@ Lua commands are available in the shell via `lua <expression>`.
 |------|---------|
 | `kernel/arch/x86_64/Makefile.test` | Standalone + integrated build rules |
 | `kernel/kernel-x86_64.ld` | Linker script |
+
+### Documentation
+
+| File | Purpose |
+|------|---------|
+| `docs/x86-64-port.md` | This document — architecture, build, deploy, test |
+| `docs/nvidia-gsp.md` | GSP firmware research: boot sequence, registers, nouveau source map |
 
 ### Tests
 
