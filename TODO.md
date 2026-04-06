@@ -153,8 +153,8 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 ### Multi-Core
 - ✅ MAX_CPUS=8 in config.h, CPU_MAX=6 in platform.h — 6 cores boot
 - ✅ SMP boot — PSCI CPU_ON via SMC with correct dual-cluster MPIDR encoding
-- ☐ Test per-core scheduling on 6 cores (tasks dispatched to secondaries)
-- ☐ Multi-core stress test on real hardware
+- ☐ Cross-CPU task dispatch — blocked on NC memory infrastructure (same as Pi 5). All tasks run on CPU 0.
+- ☐ Multi-core stress test — requires cross-CPU dispatch
 
 ### MMU
 - ✅ MMU working with Jetson memory map (3 regions around OP-TEE carveout)
