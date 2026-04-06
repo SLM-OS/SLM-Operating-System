@@ -123,7 +123,9 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 0x80000000 ─────────── RAM base (kernel loaded here by kexec)
     │  .text, .data, .bss, stack
 0x80437000 ─────────── Heap region 1 start
-    │  Buddy allocator (~990 MB)
+    │  Buddy allocator (~988 MB)
+0xBDE00000 ─────────── NC shared memory (2 MB, Non-Cacheable)
+    │  Cross-CPU boot flags, scheduler run queues
 0xBE000000 ─────────── OP-TEE secure carveout (64 MB)
     │  OP-TEE binary at 0xC1D35000
 0xC2000000 ─────────── Heap region 2 start
@@ -135,7 +137,7 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 0x280000000 ────────── RAM end (8 GB total)
 ```
 
-Total usable: ~6.9 GB across three regions. Verified: `mem` command shows 6.7 GB free.
+Total usable: ~6.9 GB across three regions plus 2 MB NC. Verified: `mem` command shows 6.7 GB free.
 
 ### OP-TEE Carveout
 

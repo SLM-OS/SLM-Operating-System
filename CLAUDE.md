@@ -140,6 +140,7 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - Root cause of prior failure: wrong MPIDR encoding. Jetson uses dual-cluster Aff2.Aff1: 0x000, 0x100, 0x200, 0x300, 0x10200, 0x10300
 - Boot flag visibility uses PSCI success fallback (same cache incoherency as Pi 5)
 - VHE set up on all secondary CPUs in `smp_boot.S`
+- NC memory at 0xBDE00000 (2 MB, last block of region 1 before OP-TEE) for cross-CPU shared data
 
 **UEFI direct boot (WIP, not required for SMP):**
 - EFI stub (`efi_stub.c`) with VHE-compatible MMU disable + self-relocating trampoline in `boot.S`
