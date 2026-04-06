@@ -87,6 +87,11 @@ static struct {
     int initialized;                     /* Scheduler initialized flag */
 } sched;
 
+/* Per-CPU diagnostic counters for cross-CPU dispatch debugging */
+volatile uint32_t sched_diag_tick[MAX_CPUS];     /* timer tick count per CPU */
+volatile uint32_t sched_diag_schedule[MAX_CPUS]; /* schedule() entry count per CPU */
+volatile uint32_t sched_diag_picked[MAX_CPUS];   /* pick_next_task found work */
+
 /* cpu_rq() implementation — must be after sched struct definition */
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
 {
@@ -683,6 +688,7 @@ static struct task *pick_next_task(uint32_t cpu)
     struct cpu_runqueue *rq = cpu_rq(cpu);
 
     if (rq->head) {
+        sched_diag_picked[cpu]++;
         return rq->head;
     }
 
@@ -697,6 +703,7 @@ void schedule(void)
 {
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
+    sched_diag_schedule[this_cpu]++;
 
     /* On non-NC platforms, invalidate cached copy of run queue before reading.
      * On Pi 5 with NC run queues, this is a no-op (NC data not cached). */
@@ -886,16 +893,14 @@ void scheduler_start(void)
     INFO("Starting timer (100 Hz)...");
     timer_start();
 
+    /* NOTE: This daifclr is on the boot stack BEFORE switch_to(). It's
+     * safe ONLY because all tasks start with DAIF=0x080 (IRQ masked),
+     * so the timer never actually fires during the switch. If tasks
+     * are changed to unmask IRQs (for preemptive scheduling), this
+     * daifclr must be removed — see task_entry_trampoline TODO. */
     INFO("Enabling interrupts...");
-#if defined(PLATFORM_X86_64)
-    /* Don't STI here — switch_to will load the task's rflags (IF=0),
-     * and task_entry_wrapper does STI after the context is fully set up.
-     * Enabling interrupts before switch_to would allow a timer IRQ to
-     * fire while still on the boot stack, corrupting the task context. */
-#else
-    __asm__ volatile("msr daifclr, #0x2" ::: "memory");  /* Clear IRQ mask */
-    __asm__ volatile("isb" ::: "memory");  /* Ensure unmask takes effect */
-#endif
+    __asm__ volatile("msr daifclr, #0x2" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
 
     /* Switch to first task (NULL = no previous context to save) */
     switch_to(NULL, first);
@@ -911,6 +916,7 @@ void scheduler_tick(void)
 {
     /* Note: timer_ticks is racy but acceptable for stats */
     sched.timer_ticks++;
+    sched_diag_tick[cpu_id()]++;
 
     /* Preempt current task */
     schedule();

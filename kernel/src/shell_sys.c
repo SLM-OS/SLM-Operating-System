@@ -171,6 +171,23 @@ int cmd_cpu(int argc, char *argv[])
                     current ? current->name : "-");
     }
 
+    /* Per-CPU scheduler diagnostics */
+    {
+        extern volatile uint32_t sched_diag_tick[];
+        extern volatile uint32_t sched_diag_schedule[];
+        extern volatile uint32_t sched_diag_picked[];
+        extern volatile uint32_t timer_handler_count;
+        uart_printf("\r\n  Per-CPU scheduler diagnostics:\r\n");
+        uart_printf("  CPU  Ticks     Schedule  Picked\r\n");
+        uart_printf("  ---  --------  --------  ------\r\n");
+        for (uint32_t i = 0; i < cpu_count; i++) {
+            uart_printf("  %3lu  %8u  %8u  %6u\r\n",
+                        i, sched_diag_tick[i], sched_diag_schedule[i],
+                        sched_diag_picked[i]);
+        }
+        uart_printf("  timer_handler_count: %u\r\n", timer_handler_count);
+    }
+
 #if defined(PLATFORM_RASPI5)
     {
         extern int uart_is_irq_mode(void);

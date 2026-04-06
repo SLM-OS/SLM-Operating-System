@@ -81,6 +81,13 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     task_entry_t entry = (task_entry_t)entry_addr;
     void *arg = (void *)arg_addr;
 
+    /* TODO: unmask IRQs here for preemptive scheduling.
+     * Tasks start with DAIF=0x080 (IRQ masked). Without unmasking,
+     * timer interrupts never fire and preemptive scheduling doesn't work.
+     * Current workaround: cooperative scheduling via yield().
+     * Fix requires also removing the boot-stack daifclr in scheduler_start()
+     * to avoid context corruption during switch_to(). */
+
     entry(arg);
     task_exit();
 }

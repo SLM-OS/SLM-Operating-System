@@ -138,8 +138,12 @@ void timer_stop(void)
 /*
  * Timer interrupt handler.
  */
+volatile uint32_t timer_handler_count;  /* Diagnostic: total handler calls */
+
 void timer_handler(void)
 {
+    timer_handler_count++;
+
     /* Reload timer for next tick */
     write_cntp_tval(timer_interval);
 
