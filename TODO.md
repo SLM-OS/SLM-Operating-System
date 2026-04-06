@@ -15,7 +15,7 @@ This document tracks Phase 4 implementation of SLM-OS.
 - Shell/ELF execution improvements
 
 **Carried from Phase 3:**
-- GPU Memory Integration (cache coherency, SHM_GPU_ACCESSIBLE)
+- ✅ GPU Memory Integration (cache coherency, SHM_GPU_ACCESSIBLE) — completed April 2026
 - Jetson GPU Driver (init, alloc, submit, fence)
 - Hardware bring-up (serial console, GIC, timer, GPIO, MMU testing)
 - Shell improvements (virtual filesystem, ELF argc/argv, kill command)
@@ -186,8 +186,8 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 ### GPU Memory Management
 - ✅ `nvidia_alloc()` / `nvidia_free()` — allocate/free GPU-accessible memory from PMM (unified memory)
 - ✅ Cache coherency: `nvidia_sync_for_gpu()` (DC CVAC) and `nvidia_sync_for_cpu()` (DC IVAC)
-- ☐ Use `SHM_GPU_ACCESSIBLE` flag from Phase 2 shared buffers
-- ☐ Integrate with model memory allocator
+- ✅ `SHM_GPU_ACCESSIBLE` flag wired — shared buffers use `gpu_alloc` when flag set, `gpu_free` on destroy, cache sync on map
+- ✅ Model memory ↔ GPU: Rust `gpu_map()`/`gpu_unmap()` call C FFI for cache sync (`slm_gpu_sync_for_device`/`slm_gpu_sync_for_cpu`)
 
 ### GPU Command Submission (Stretch)
 - ⏸️ Write `jetson_gpu_submit(cmd_buffer)` — submit work to GPU

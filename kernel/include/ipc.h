@@ -298,6 +298,7 @@ struct shared_buffer {
     spinlock_t          lock;           /* Protects refcount and mappings */
     struct task        *owner;          /* Task that created the buffer */
     struct shm_mapping *mappings;       /* List of per-task mappings */
+    bool                gpu_backed;     /* True if allocated via GPU subsystem */
 };
 
 /*

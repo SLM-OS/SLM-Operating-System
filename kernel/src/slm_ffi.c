@@ -12,6 +12,7 @@
 #include "task.h"
 #include "sched.h"
 #include "ipc.h"
+#include "../gpu/gpu.h"
 
 /*
  * Memory Management
@@ -97,6 +98,34 @@ uint64_t slm_get_time_ns(void)
 void slm_sleep_ms(uint32_t ms)
 {
     sleep_ms(ms);
+}
+
+/*
+ * GPU Cache Coherency
+ */
+
+void slm_gpu_sync_for_device(void *addr, size_t size)
+{
+    if (!gpu_available()) return;
+    gpu_buffer_t buf = {
+        .cpu_addr = addr,
+        .gpu_addr = (uint64_t)(uintptr_t)addr,
+        .size = size,
+        .flags = 0,
+    };
+    gpu_sync_for_gpu(&buf);
+}
+
+void slm_gpu_sync_for_cpu(void *addr, size_t size)
+{
+    if (!gpu_available()) return;
+    gpu_buffer_t buf = {
+        .cpu_addr = addr,
+        .gpu_addr = (uint64_t)(uintptr_t)addr,
+        .size = size,
+        .flags = 0,
+    };
+    gpu_sync_for_cpu(&buf);
 }
 
 /*
