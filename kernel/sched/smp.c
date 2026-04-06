@@ -325,13 +325,8 @@ void secondary_init(uint32_t logical_cpu_id)
     /* Initialize scheduler for this CPU (creates idle task) */
     scheduler_init_secondary(logical_cpu_id);
 
-    /* Start the per-CPU timer */
-    timer_start();
-
-    /* Enable interrupts */
-    __asm__ volatile("msr daifclr, #0x2");  /* Clear IRQ mask */
-
-    /* Start scheduler - this does not return */
+    /* Start scheduler — this starts the timer, enables interrupts,
+     * and switches to the idle task. Does not return. */
     scheduler_start();
 
     /* Should never reach here */

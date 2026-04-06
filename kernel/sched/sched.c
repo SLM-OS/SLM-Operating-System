@@ -87,10 +87,19 @@ static struct {
     int initialized;                     /* Scheduler initialized flag */
 } sched;
 
-/* Per-CPU diagnostic counters for cross-CPU dispatch debugging */
-volatile uint32_t sched_diag_tick[MAX_CPUS];     /* timer tick count per CPU */
-volatile uint32_t sched_diag_schedule[MAX_CPUS]; /* schedule() entry count per CPU */
-volatile uint32_t sched_diag_picked[MAX_CPUS];   /* pick_next_task found work */
+/* Per-CPU diagnostic counters for cross-CPU dispatch debugging.
+ * On Pi 5 these must be in NC memory for cross-CPU visibility —
+ * secondary CPU writes to cacheable BSS are invisible to CPU 0. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+/* Allocated from NC region in scheduler_init for cross-CPU visibility */
+volatile uint32_t *sched_diag_tick;
+volatile uint32_t *sched_diag_schedule;
+volatile uint32_t *sched_diag_picked;
+#else
+volatile uint32_t sched_diag_tick[MAX_CPUS];
+volatile uint32_t sched_diag_schedule[MAX_CPUS];
+volatile uint32_t sched_diag_picked[MAX_CPUS];
+#endif
 
 /* cpu_rq() implementation — must be after sched struct definition */
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
@@ -207,6 +216,18 @@ void scheduler_init(void)
     /* Initialize task table (NC on Pi 5, BSS fallback otherwise) */
     extern void task_table_init(void);
     task_table_init();
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Allocate diagnostic counters from NC memory for cross-CPU visibility */
+    sched_diag_tick = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    sched_diag_schedule = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    sched_diag_picked = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        sched_diag_tick[i] = 0;
+        sched_diag_schedule[i] = 0;
+        sched_diag_picked[i] = 0;
+    }
+#endif
 
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {

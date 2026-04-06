@@ -173,9 +173,15 @@ int cmd_cpu(int argc, char *argv[])
 
     /* Per-CPU scheduler diagnostics */
     {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        extern volatile uint32_t *sched_diag_tick;
+        extern volatile uint32_t *sched_diag_schedule;
+        extern volatile uint32_t *sched_diag_picked;
+#else
         extern volatile uint32_t sched_diag_tick[];
         extern volatile uint32_t sched_diag_schedule[];
         extern volatile uint32_t sched_diag_picked[];
+#endif
         extern volatile uint32_t timer_handler_count;
         uart_printf("\r\n  Per-CPU scheduler diagnostics:\r\n");
         uart_printf("  CPU  Ticks     Schedule  Picked\r\n");
