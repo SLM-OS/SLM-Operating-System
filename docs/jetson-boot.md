@@ -155,7 +155,7 @@ The SPE firmware continues running after kexec and handles the TCU multiplexing.
 | TCU RX Mailbox | 0x03C10000 | ✅ Works | HSP SM0, serial input from USB-C |
 | UARTA | 0x03100000 | ❌ Blocked | 40-pin header UART, CBB denies |
 | GICv3 Distributor | 0x0F400000 | ✅ Works | 992 interrupt lines |
-| GICv3 Redistributor | 0x0F440000 | ✅ Works | Per-CPU, CPU 0 awake |
+| GICv3 Redistributor | 0x0F440000+ | ✅ Works | 6 CPUs, dual-cluster (gap at 0x0F500000) |
 | GPU (PMC) | 0x17000000 | ✅ Works | GA10B identified |
 | Watchdog | 0x02190000 | ✅ Works | Disabled early in boot |
 | ARM Timer | System register | ✅ Works | Generic Timer (CNTPCT_EL0), 100 Hz |
@@ -169,7 +169,7 @@ See `docs/jetson-el2-bringup.md` for the full CBB firewall peripheral map.
 Jetson Orin Nano uses ARM GICv3 (verified working at EL2):
 
 - **Distributor (GICD):** 0x0F400000 — 992 interrupt lines
-- **Redistributor (GICR):** 0x0F440000 — per-CPU, CPU 0 awake
+- **Redistributor (GICR):** 0x0F440000+ — 6 CPUs, dual-cluster with gap (0xF440000-0xF4A0000, 0xF500000-0xF520000)
 
 QEMU uses GICv2 at 0x08000000/0x08010000. The platform.h `#ifdef` handles the difference.
 

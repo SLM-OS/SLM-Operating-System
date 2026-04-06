@@ -1,9 +1,11 @@
 /*
- * ncmem.c - Non-cacheable shared memory bump allocator (Pi 5 only)
+ * ncmem.c - Non-cacheable shared memory bump allocator
  *
- * Provides permanent, boot-time allocations from the 2MB NC region at the
- * top of physical RAM. Memory is never freed — these are kernel-lifetime
- * structures like scheduler run queues.
+ * Provides permanent, boot-time allocations from the 2MB NC region.
+ * Memory is never freed — these are kernel-lifetime structures like
+ * scheduler run queues and cross-CPU boot flags.
+ *
+ * Works on any platform that defines NC_MEM_BASE (Pi 5, Jetson).
  */
 
 #include "ncmem.h"
@@ -11,7 +13,7 @@
 #include "debug.h"
 #include <stdint.h>
 
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
 
 static uintptr_t nc_next_free;
 static size_t nc_total_allocated;
@@ -56,4 +58,4 @@ size_t ncmem_used(void)
     return nc_total_allocated;
 }
 
-#endif /* PLATFORM_RASPI5 */
+#endif /* PLATFORM_RASPI5 || PLATFORM_JETSON_ORIN_NANO */

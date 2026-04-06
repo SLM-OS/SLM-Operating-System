@@ -27,7 +27,7 @@ static struct task *current_task[MAX_CPUS];
 
 void task_table_init(void)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     task_table = ncmem_alloc(MAX_TASKS * sizeof(struct task), CACHE_LINE_SIZE);
     if (!task_table) {
         /* Fall back to cacheable array if NC alloc fails */
@@ -80,6 +80,19 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
 {
     task_entry_t entry = (task_entry_t)entry_addr;
     void *arg = (void *)arg_addr;
+
+    /* TODO: Unmask IRQs here for preemptive scheduling on Pi 5.
+     *
+     * Root cause identified: tasks run with DAIF=0x080 permanently, so
+     * timer IRQs never fire. Fix: unmask here + remove boot-stack daifclr.
+     *
+     * BLOCKER: When both fixes applied, the system deadlocks after printing
+     * "SLM-OS Debug Shell" (shell task gets stuck during uart_puts).
+     * Timer preemption during UART output may cause a context switch
+     * deadlock. Need to investigate:
+     * 1. Is schedule() re-entrant-safe when called from timer during yield()?
+     * 2. Does the context switch corrupt UART polling state?
+     * 3. Is there a lock ordering issue between uart_lock and rq_lock? */
 
     entry(arg);
     task_exit();
@@ -274,7 +287,7 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
      * scheduler_add_task_to_cpu() intentionally skips cleaning the
      * context (to avoid overwriting a running task's live state),
      * so we must clean it here at creation time. */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean_range(&task->context, sizeof(task->context));
 #endif
 
@@ -310,7 +323,7 @@ void task_exit(void)
     arch_irq_disable();
 
     task->state = TASK_TERMINATED;
-#if !defined(PLATFORM_RASPI5) && !defined(PLATFORM_X86_64)
+#if !defined(PLATFORM_HAS_NC_MEMORY) && !defined(PLATFORM_X86_64)
     cache_clean(&task->state);
 #endif
 
@@ -425,14 +438,14 @@ void task_set_affinity(struct task *task, uint32_t cpu)
     if (!task) return;
 
     task->cpu_affinity = cpu;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->cpu_affinity);
 #endif
 
     /* If pinning to a specific CPU, update assigned_cpu */
     if (cpu != CPU_AFFINITY_ANY && cpu < cpu_count) {
         task->assigned_cpu = cpu;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&task->assigned_cpu);
 #endif
     }
@@ -460,7 +473,7 @@ void task_set_priority(struct task *task, uint8_t priority)
     }
 
     task->priority = priority;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->priority);
 #endif
 
@@ -468,7 +481,7 @@ void task_set_priority(struct task *task, uint8_t priority)
     if (task->effective_priority < priority) {
         task->effective_priority = priority;
     }
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->effective_priority);
 #endif
 }
@@ -498,7 +511,7 @@ void task_set_deadline(struct task *task, uint64_t deadline_ns)
 {
     if (!task) return;
     task->deadline_ns = deadline_ns;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->deadline_ns);
 #endif
 }

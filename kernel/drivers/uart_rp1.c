@@ -96,7 +96,9 @@
 static volatile uint8_t  rx_buf[UART_RX_BUF_SIZE];
 static volatile uint32_t rx_head;       /* ISR writes here */
 static volatile uint32_t rx_tail;       /* uart_getc reads here */
-static volatile int      uart_irq_mode; /* 1 once IRQ 153 fires */
+static volatile int      uart_irq_mode;  /* 1 once IRQ 153 fires */
+static volatile int      uart_irq_ready; /* 1 after uart_irq_init() configures path */
+volatile uint32_t uart_irq_count; /* diagnostic: handler call count */
 
 /* ============================================================================
  * Initialization
@@ -232,45 +234,29 @@ char uart_getc(void)
 {
     extern void yield(void);
 
-    if (uart_irq_mode) {
-        /* Interrupt-driven path: read from ring buffer */
-        while (rx_head == rx_tail) {
-            yield();
-        }
+    /* Check ring buffer first (filled by IRQ handler if it ever fires) */
+    if (rx_head != rx_tail) {
         uint8_t ch = rx_buf[rx_tail];
         rx_tail = (rx_tail + 1) & (UART_RX_BUF_SIZE - 1);
         return (char)ch;
     }
 
-    /* Polling fallback (used when IRQ 153 never fires) */
+    /* Polling fallback — MSIX_CFG engine doesn't generate TLPs for new
+     * characters despite correct BAR3 routing. The IRQ storm test proves
+     * TLP delivery works, but the engine doesn't fire on PL011 assertion. */
     volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
     volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
 
     while (*uart_fr & FR_RXFE) {
         yield();
-        /* Check if interrupts became active while polling */
-        if (uart_irq_mode) {
-            while (rx_head == rx_tail) {
-                yield();
-            }
+        if (rx_head != rx_tail) {
             uint8_t ch = rx_buf[rx_tail];
             rx_tail = (rx_tail + 1) & (UART_RX_BUF_SIZE - 1);
             return (char)ch;
         }
     }
 
-    char ch = (char)(*uart_dr & 0xFF);
-
-    /* Clear PL011 interrupt flags and IACK to unmask for next interrupt */
-    volatile uint32_t *uart_icr_p = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
-    *uart_icr_p = 0x7FF;
-    __asm__ volatile("dsb sy" ::: "memory");
-    volatile uint32_t *msix_iack = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
-                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
-    *msix_iack = MSIX_CFG_IACK;
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    return ch;
+    return (char)(*uart_dr & 0xFF);
 }
 
 /* ============================================================================
@@ -300,6 +286,7 @@ void uart_irq_handler(void)
     volatile uint32_t *uart_icr = (volatile uint32_t *)(RP1_UART0_BASE + UART_ICR);
 
     uart_irq_mode = 1;
+    uart_irq_count++;
 
     /* Drain RX FIFO into ring buffer */
     while (!(*uart_fr & FR_RXFE)) {
@@ -315,7 +302,7 @@ void uart_irq_handler(void)
     *uart_icr = IMSC_RXIM | IMSC_RTIM;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* IACK: acknowledge level-triggered vector */
+    /* IACK: re-arm MSIX_CFG for next interrupt */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
     *msix_set = MSIX_CFG_IACK;
@@ -372,7 +359,29 @@ void uart_irq_init(void)
      * SPIs >= 224 (including INTA at SPI 229) are secure-only.
      */
 
-    /* 0. Program MSI-X table (BAR0 at 0x1F00410000, set from EL1) */
+    /* 0. Disable MSI-X, program table, then re-enable.
+     * boot.S enables MSI-X from EL2 before the table is programmed.
+     * The RP1 may latch table addresses at Enable time. Toggling
+     * Enable around table programming ensures the RP1 picks up our
+     * addresses (0xFF_FFFFF000 for BAR3→MIP0 routing).
+     *
+     * MSI-X capability at RP1 config offset 0xB0 (via EXT_CFG).
+     * Bit 31 = Enable, Bit 30 = Function Mask. */
+    volatile uint32_t *ext_cfg_idx = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_INDEX);
+    volatile uint32_t *msix_cap = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_DATA + 0xB0);
+    *ext_cfg_idx = 0;  /* bus=0, devfn=0 */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    uint32_t cap_val = *msix_cap;
+    /* Disable MSI-X (clear Enable, set Function Mask) */
+    cap_val &= ~(1U << 31);  /* Clear Enable */
+    cap_val |= (1U << 30);   /* Set Function Mask */
+    /* Note: config space writes may hang from EL1 on BCM2712.
+     * If this hangs, the table re-latch theory is wrong. */
+    *msix_cap = cap_val;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Program MSI-X table with BAR3→MIP0 target address */
     for (int i = 0; i < RP1_MSIX_TABLE_SIZE; i++) {
         volatile uint32_t *entry = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + i * 16);
         entry[0] = MSIX_MSG_ADDR_LO;
@@ -383,16 +392,27 @@ void uart_irq_init(void)
     __asm__ volatile("dsb sy" ::: "memory");
     DEBUG_PRINT("MSI-X table: %d entries programmed", RP1_MSIX_TABLE_SIZE);
 
+    /* Re-enable MSI-X (RP1 should latch new table addresses) */
+    cap_val |= (1U << 31);   /* Set Enable */
+    cap_val &= ~(1U << 30);  /* Clear Function Mask */
+    *msix_cap = cap_val;
+    __asm__ volatile("dsb sy" ::: "memory");
+
     /* 1. GIC: enable SPI with higher priority than timer */
     gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 WITHOUT IACK_EN for testing.
-     * Without IACK_EN, MSI-X fires repeatedly while interrupt is active.
-     * With correct BAR3 routing, this should deliver to MIP0→GIC. */
+    /* 2. MSIX_CFG: enable vector 25, then set IACK_EN.
+     * Linux rp1_irqchip does these as SEPARATE writes to the SET alias:
+     *   irq_activate: writel(ENABLE, SET + MSIX_CFG(n))
+     *   irq_set_type: writel(IACK_EN, SET + MSIX_CFG(n))  [for level-triggered]
+     * Our previous single write (ENABLE|IACK_EN) may not properly initialize
+     * the engine — the RP1 may need ENABLE to take effect before IACK_EN. */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
-    *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
+    *msix_set = MSIX_CFG_ENABLE;
+    __asm__ volatile("dsb sy" ::: "memory");
+    *msix_set = MSIX_CFG_IACK_EN;
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* 3. PL011: configure, drain FIFO, clear ICR, enable IMSC */
@@ -412,10 +432,12 @@ void uart_irq_init(void)
     __asm__ volatile("dsb sy" ::: "memory");
 
     volatile uint32_t *uart_imsc = (volatile uint32_t *)(RP1_UART0_BASE + UART_IMSC);
-    *uart_imsc = IMSC_RXIM | IMSC_RTIM;
-    __asm__ volatile("dsb sy" ::: "memory");
 
-    /* 4. Clear stale state, IACK last */
+    /* 4. Clear ALL stale state with IMSC disabled, then IACK, then enable IMSC.
+     * IMSC must be 0 when we IACK so PL011 line is LOW and MSIX_CFG doesn't
+     * immediately re-fire + auto-mask (level-triggered livelock). */
+    *uart_imsc = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
     *uart_icr = 0x7FF;
     __asm__ volatile("dsb sy" ::: "memory");
     while (!(*uart_fr & FR_RXFE)) {
@@ -432,9 +454,29 @@ void uart_irq_init(void)
         __asm__ volatile("dsb sy" ::: "memory");
     }
 
-    /* IACK to unmask after init cleanup */
+    /* IACK with PL011 line LOW (IMSC=0) — re-arms MSIX_CFG */
     *msix_set = MSIX_CFG_IACK;
     __asm__ volatile("dsb sy" ::: "memory");
+
+    /* NOW enable PL011 IMSC */
+    *uart_imsc = IMSC_RXIM | IMSC_RTIM;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Diagnostic: check if IMSC enable triggered MSI-X→MIP0 delivery */
+    {
+        volatile uint32_t *mip_stat = (volatile uint32_t *)(MIP0_BASE + 0x80);
+        volatile uint32_t *mip_raised = (volatile uint32_t *)(MIP0_BASE + MIP_INT_RAISED);
+        volatile uint32_t *gic_ispendr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x200 + (UART_IRQ/32)*4);
+        uint32_t mip_s = *mip_stat;
+        uint32_t mip_r = *mip_raised;
+        uint32_t gic_p = *gic_ispendr;
+        uint32_t mis = *(volatile uint32_t *)(RP1_UART0_BASE + UART_MIS);
+        uint32_t intstat = *(volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_INTSTATL);
+        INFO("UART IRQ: post-init diag: MIS=0x%x INTSTAT=0x%x MIP_status=0x%x MIP_raised=0x%x GIC_ISPENDR=0x%x",
+             mis, intstat, mip_s, mip_r, gic_p);
+    }
+    /* Mark IRQ path ready — uart_getc will now use ring buffer exclusively */
+    uart_irq_ready = 1;
 
     INFO("UART IRQ enabled (GIC IRQ %d = SPI %d, RP1 vec %d)",
          UART_IRQ, UART_IRQ - 32, RP1_INT_UART0);

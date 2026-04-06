@@ -109,7 +109,7 @@ jobs:
     - name: Install x86-64 tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y qemu-system-x86 grub-efi-amd64-bin xorriso mtools sgdisk dosfstools
+        sudo apt-get install -y qemu-system-x86 grub-efi-amd64-bin xorriso mtools gdisk dosfstools
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable

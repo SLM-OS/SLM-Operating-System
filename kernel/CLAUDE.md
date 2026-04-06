@@ -130,11 +130,13 @@ val = shared_data[cpu].field;
 
 ---
 
-## Non-Cacheable Shared Memory (Pi 5)
+## Non-Cacheable Shared Memory (Pi 5 + Jetson)
 
-On Pi 5, DC CIVAC does not propagate through per-core L2 caches without SMPEN. Non-cacheable (NC) memory bypasses L1/L2 entirely, making writes instantly visible to all CPUs.
+On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite SMPEN. DC CIVAC doesn't propagate through per-core L2. Non-cacheable (NC) memory bypasses L1/L2 entirely, making writes instantly visible to all CPUs. Enabled when `PLATFORM_HAS_NC_MEMORY` is defined (set in `ncmem.h`).
 
-**NC region:** Last 2MB of RAM (`0xFFE00000`), mapped as MAIR index 2 (Normal Non-Cacheable, Inner Shareable) via L2 table entry in `vmm.c`. Reserved from PMM in `pmm.c`.
+**NC region:** Platform-specific 2MB block mapped as MAIR index 2 (Normal Non-Cacheable, Inner Shareable) via L2 table entry in `vmm.c`. Reserved from PMM in `pmm.c`.
+- Pi 5: `0xFFE00000` (last 2MB of 4GB RAM)
+- Jetson: `0xBDE00000` (last 2MB of region 1, before OP-TEE carveout)
 
 **Allocator:** `ncmem_alloc(size, align)` in `kernel/include/ncmem.h` / `kernel/mm/ncmem.c`. Simple bump allocator, no free. Used for permanent kernel-lifetime structures.
 
@@ -142,7 +144,7 @@ On Pi 5, DC CIVAC does not propagate through per-core L2 caches without SMPEN. N
 
 **Spinlock separation:** `rq_lock[MAX_CPUS]` is a separate cacheable array. ARM exclusive load/store (`ldaxr`/`stxr`) used by spinlocks requires cacheable memory on BCM2712. The lock is NOT in the `cpu_runqueue` struct — it's accessed via `rq_lock_irqsave(cpu)` / `rq_unlock_irqrestore(cpu, flags)`.
 
-**Task table:** `task_table` is allocated from NC memory at boot via `task_table_init()` in `task.c`. All task struct fields are NC-visible. The `task_table_fallback[MAX_TASKS]` BSS array is used on non-Pi5 platforms. Task STACKS remain in cacheable PMM (only accessed by owning CPU).
+**Task table:** `task_table` is allocated from NC memory at boot via `task_table_init()` in `task.c`. All task struct fields are NC-visible. The `task_table_fallback[MAX_TASKS]` BSS array is used on platforms without NC memory. Task STACKS remain in cacheable PMM (only accessed by owning CPU).
 
 **When to use NC memory:** Only for data that MUST be visible across CPUs without cache maintenance. NC memory is slower than cached memory (every access goes to DRAM). Do not use for hot-path per-CPU data.
 

@@ -91,10 +91,24 @@ static struct {
     int initialized;                     /* Scheduler initialized flag */
 } sched;
 
+/* Per-CPU diagnostic counters for cross-CPU dispatch debugging.
+ * On Pi 5 these must be in NC memory for cross-CPU visibility —
+ * secondary CPU writes to cacheable BSS are invisible to CPU 0. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+/* Allocated from NC region in scheduler_init for cross-CPU visibility */
+volatile uint32_t *sched_diag_tick;
+volatile uint32_t *sched_diag_schedule;
+volatile uint32_t *sched_diag_picked;
+#else
+volatile uint32_t sched_diag_tick[MAX_CPUS];
+volatile uint32_t sched_diag_schedule[MAX_CPUS];
+volatile uint32_t sched_diag_picked[MAX_CPUS];
+#endif
+
 /* cpu_rq() implementation — must be after sched struct definition */
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     /* NC memory at compile-time-known address — no cacheable pointer.
      * Run queues are the first ncmem_alloc() in scheduler_init(). */
     return &((struct cpu_runqueue *)NC_MEM_BASE)[cpu];
@@ -143,14 +157,14 @@ static void update_deadline_boost(struct task *task)
     }
 
     /* Deadline may have been set by another CPU */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->deadline_ns);
 #endif
 
     if (task->deadline_ns == 0) {
         /* No deadline - effective priority equals base priority */
         task->effective_priority = task->priority;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&task->effective_priority);
 #endif
         return;
@@ -180,7 +194,7 @@ static void update_deadline_boost(struct task *task)
     }
 
     task->effective_priority = boosted;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&task->effective_priority);
 #endif
 }
@@ -196,7 +210,7 @@ void scheduler_init(void)
     sched.timer_ticks = 0;
     sched.isolated_cores = 0;
 
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     /* Initialize NC run queue region. cpu_rq() uses NC_MEM_BASE directly
      * (compile-time constant) so no cacheable pointer is needed. */
     ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue), CACHE_LINE_SIZE);
@@ -206,6 +220,18 @@ void scheduler_init(void)
     /* Initialize task table (NC on Pi 5, BSS fallback otherwise) */
     extern void task_table_init(void);
     task_table_init();
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Allocate diagnostic counters from NC memory for cross-CPU visibility */
+    sched_diag_tick = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    sched_diag_schedule = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    sched_diag_picked = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        sched_diag_tick[i] = 0;
+        sched_diag_schedule[i] = 0;
+        sched_diag_picked[i] = 0;
+    }
+#endif
 
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
@@ -392,7 +418,7 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
      * schedule() invalidates before reading. Only clean the fields
      * that were modified — NOT the entire task struct (which includes
      * the task's context/stack that may be in active use). */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&rq->head);
     cache_clean(&rq->tail);
     cache_clean(&rq->ready_count);
@@ -541,13 +567,13 @@ void scheduler_add_task(struct task *task)
     uint32_t target_cpu;
 
     /* Affinity may have been set by another CPU */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&task->cpu_affinity);
 #endif
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         target_cpu = task->cpu_affinity;
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_HAS_NC_MEMORY)
     } else {
         /* TEMPORARY: CPU 0 pinning while debugging cross-CPU dispatch.
          * NC task table + NC run queues are in place, but secondary CPUs
@@ -651,7 +677,7 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     /* Clean modified fields to PoC for cross-CPU visibility.
      * Without SMPEN, writes stay in this CPU's L1 cache. The target
      * CPU's schedule() invalidates before reading. */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&rq_old->head);
     cache_clean(&rq_old->tail);
     cache_clean(&rq_old->ready_count);
@@ -687,6 +713,7 @@ static struct task *pick_next_task(uint32_t cpu)
     struct cpu_runqueue *rq = cpu_rq(cpu);
 
     if (rq->head) {
+        sched_diag_picked[cpu]++;
         return rq->head;
     }
 
@@ -701,10 +728,11 @@ void schedule(void)
 {
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
+    sched_diag_schedule[this_cpu]++;
 
     /* On non-NC platforms, invalidate cached copy of run queue before reading.
      * On Pi 5 with NC run queues, this is a no-op (NC data not cached). */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate_range(rq, sizeof(*rq));
 #endif
 
@@ -717,7 +745,7 @@ void schedule(void)
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&rq->zombie);
 #endif
         rq_unlock_irqrestore(this_cpu, flags);
@@ -733,13 +761,13 @@ void schedule(void)
 
     /* If current task is still running and ready, re-add to queue */
     if (current) {
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_invalidate(&current->state);
 #endif
     }
     if (current && current->state == TASK_RUNNING) {
         current->state = TASK_READY;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_clean(&current->state);
 #endif
 
@@ -792,11 +820,11 @@ void schedule(void)
 
     /* Perform context switch */
     next->state = TASK_RUNNING;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&next->state);
 #endif
     next->switches++;
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&next->switches);
 #endif
     sched.context_switches++;  /* Racy but acceptable for stats */
@@ -807,7 +835,7 @@ void schedule(void)
      * safely switched to a different stack.
      */
     if (current) {
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
         cache_invalidate(&current->state);
 #endif
     }
@@ -821,7 +849,7 @@ void schedule(void)
      * Without this, the next dc civac at the start of schedule() would
      * write back our stale dirty cacheline, overwriting another CPU's
      * fresh data (e.g., a newly added task from scheduler_add_task). */
-#if !defined(PLATFORM_RASPI5)
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&rq->head);
     cache_clean(&rq->tail);
     cache_clean(&rq->ready_count);
@@ -908,15 +936,15 @@ void scheduler_start(void)
     INFO("Starting timer (100 Hz)...");
     timer_start();
 
+    /* NOTE: This daifclr is safe ONLY because tasks start with DAIF=0x080
+     * and don't unmask (timer never fires). When the task_entry_trampoline
+     * DAIF fix is applied, this MUST be removed. See task.c TODO. */
     INFO("Enabling interrupts...");
 #if defined(PLATFORM_X86_64)
-    /* Don't STI here — switch_to will load the task's rflags (IF=0),
-     * and task_entry_wrapper does STI after the context is fully set up.
-     * Enabling interrupts before switch_to would allow a timer IRQ to
-     * fire while still on the boot stack, corrupting the task context. */
+    __asm__ volatile("sti" ::: "memory");
 #else
-    __asm__ volatile("msr daifclr, #0x2" ::: "memory");  /* Clear IRQ mask */
-    __asm__ volatile("isb" ::: "memory");  /* Ensure unmask takes effect */
+    __asm__ volatile("msr daifclr, #0x2" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
 #endif
 
     /* Switch to first task (NULL = no previous context to save) */
@@ -933,6 +961,7 @@ void scheduler_tick(void)
 {
     /* Note: timer_ticks is racy but acceptable for stats */
     sched.timer_ticks++;
+    sched_diag_tick[cpu_id()]++;
 
     /* Mark that this schedule() call comes from the timer ISR.
      * schedule() uses this to decide whether to mask the LAPIC timer

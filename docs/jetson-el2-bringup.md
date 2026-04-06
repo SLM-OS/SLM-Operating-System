@@ -107,7 +107,7 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 | UARTC (TX) | 0x0C280000 | ✅ Works | Via TCU to USB-C debug |
 | TCU RX Mailbox | 0x03C10000 | ✅ Works | HSP SM0, SPE routes USB-C input here |
 | GIC Distributor | 0x0F400000 | ✅ Works | GICv3, 992 interrupt lines |
-| GIC Redistributor | 0x0F440000 | ✅ Works | Per-CPU, CPU 0 awake |
+| GIC Redistributor | 0x0F440000+ | ✅ Works | 6 CPUs, dual-cluster layout (gap at 0x0F500000) |
 | ARM Generic Timer | System regs | ✅ Works | 100 Hz tick confirmed |
 | OP-TEE carveout | 0xC0000000+ | ❌ Blocked | Secure memory, kills core |
 | Watchdog | 0x02190000 | ✅ Works | Disabled in kernel_main() |
@@ -123,7 +123,9 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 0x80000000 ─────────── RAM base (kernel loaded here by kexec)
     │  .text, .data, .bss, stack
 0x80437000 ─────────── Heap region 1 start
-    │  Buddy allocator (~990 MB)
+    │  Buddy allocator (~988 MB)
+0xBDE00000 ─────────── NC shared memory (2 MB, Non-Cacheable)
+    │  Cross-CPU boot flags, scheduler run queues
 0xBE000000 ─────────── OP-TEE secure carveout (64 MB)
     │  OP-TEE binary at 0xC1D35000
 0xC2000000 ─────────── Heap region 2 start
@@ -135,7 +137,7 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 0x280000000 ────────── RAM end (8 GB total)
 ```
 
-Total usable: ~6.9 GB across three regions. Verified: `mem` command shows 6.7 GB free.
+Total usable: ~6.9 GB across three regions plus 2 MB NC. Verified: `mem` command shows 6.7 GB free.
 
 ### OP-TEE Carveout
 

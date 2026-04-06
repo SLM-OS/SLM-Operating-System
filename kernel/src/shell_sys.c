@@ -171,11 +171,36 @@ int cmd_cpu(int argc, char *argv[])
                     current ? current->name : "-");
     }
 
+    /* Per-CPU scheduler diagnostics */
+    {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        extern volatile uint32_t *sched_diag_tick;
+        extern volatile uint32_t *sched_diag_schedule;
+        extern volatile uint32_t *sched_diag_picked;
+#else
+        extern volatile uint32_t sched_diag_tick[];
+        extern volatile uint32_t sched_diag_schedule[];
+        extern volatile uint32_t sched_diag_picked[];
+#endif
+        extern volatile uint32_t timer_handler_count;
+        uart_printf("\r\n  Per-CPU scheduler diagnostics:\r\n");
+        uart_printf("  CPU  Ticks     Schedule  Picked\r\n");
+        uart_printf("  ---  --------  --------  ------\r\n");
+        for (uint32_t i = 0; i < cpu_count; i++) {
+            uart_printf("  %3lu  %8u  %8u  %6u\r\n",
+                        i, sched_diag_tick[i], sched_diag_schedule[i],
+                        sched_diag_picked[i]);
+        }
+        uart_printf("  timer_handler_count: %u\r\n", timer_handler_count);
+    }
+
 #if defined(PLATFORM_RASPI5)
     {
         extern int uart_is_irq_mode(void);
-        uart_printf("\r\n  UART RX:     %s\r\n",
-                    uart_is_irq_mode() ? "interrupt-driven" : "polling");
+        extern volatile uint32_t uart_irq_count;
+        uart_printf("\r\n  UART RX:     %s (irq_count=%u)\r\n",
+                    uart_is_irq_mode() ? "interrupt-driven" : "polling",
+                    uart_irq_count);
 
         /* GIC pending check for UART IRQ */
         uint32_t pend_reg = UART_IRQ / 32;

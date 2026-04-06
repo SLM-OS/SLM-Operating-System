@@ -45,7 +45,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
 | Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
 | NC shared memory | ✅ Working | 2MB NC region at 0xFFE00000, scheduler run queues in NC |
-| UART RX IRQ | ⏸️ On hold | PCIe RC→MIP→GIC path configured, BAR1 routing TBD |
+| UART RX IRQ | 🔧 In progress | BAR3→MIP0 routing working (IRQ storm test confirms TLP delivery), handler debugging |
 
 ## Test Results (April 5, 2026)
 
@@ -124,41 +124,43 @@ Measured on Pi 5 hardware (Cortex-A76 @ default clock, 4 GB RAM) using the `benc
 - All Pi 5 measurements taken at shell prompt with 4 CPUs online and preemptive scheduling active
 - QEMU numbers are from the `bench all` shell test (test_shell_cmd_bench_all), not the unit test benchmark
 
-## Interrupt-Driven UART (On Hold)
+## Interrupt-Driven UART (BAR3 Configured, Handler Testing)
 
-The RP1 UART interrupt path requires configuring three hardware blocks between the PL011 and the GIC:
+The RP1 UART interrupt path traverses three hardware blocks between the PL011 and the GIC:
 
 ```
 PL011 UART0 (0x1F00030000)
   → RP1 PCIE_CFG MSI-X engine (0x1F00108000) — vector 25
     → PCIe MSI-X write to 0xFF_FFFFF000
-      → BCM2712 PCIe RC BAR1 (0x1000120000) remaps to MIP0
+      → BCM2712 PCIe RC BAR3 (0x1000120000) remaps to MIP0
         → MIP0 (0x1000130000) → GIC SPI 153 (IRQ 185)
 ```
 
-**What is configured:**
+**What is configured (all from EL2 in boot.S):**
+- PCIe RC BAR3: Routes MSI-X PCI address `0xFF_FFFFF000` to MIP0 at `0x10_00130000`
+- MISC_CTRL: SCB_ACCESS_EN, CFG_READ_UR_MODE, RCB_MPS bits set
+- MIP0: Vector 25 unmasked for host, edge-triggered
+- MSI-X Enable in RP1 config space (EXT_CFG from EL2)
 - PL011 IMSC: RX + receive timeout interrupts enabled
 - RP1 MSIX_CFG: Vector 25 enabled with IACK_EN
-- PCIe RC BAR1: Configured to route MSI-X PCI addr to MIP0 physical addr
-- MIP0: All vectors unmasked for host, edge-triggered
-- GIC: SPI 153 enabled, priority set, routed to CPU 0
+- GIC: SPI 153 enabled, priority 0x40, routed to CPU 0
 - IRQ handler: Reads RP1 INTSTAT, drains PL011 FIFO, writes IACK
 - Ring buffer: 256-byte SPSC buffer for ISR→uart_getc handoff
 - Polling fallback: Transparent — if IRQ never fires, original polling path runs
 
-**What is NOT yet working — PCIe RC register writes hang from EL1:**
-- **Reads succeed:** PCIE_STATUS, EXT_CFG config reads (vendor/device, capabilities, BARs), RC BAR1 readback — all work
-- **Writes hang:** Any write to the RC register space (EXT_CFG DATA, RC BAR1 config) causes the system to freeze
-- This blocks MSI-X enable, MSI-X table programming, and RC BAR1→MIP routing setup
+**Hardware-verified (Pi 5 `cpu` command readback):**
+```
+BAR3: ff_fffff01c remap=10_00130001
+MSIX tbl[25]: addr=0xff_fffff000 data=0x19 ctrl=0x0
+MSI-X cap: 0x803c0011 (Enable=1 FuncMask=0)
+MSIX_CFG[25]: 0x9 (ENABLE + IACK_EN)
+```
 
-**Key findings from investigation:**
-- EXT_CFG data register is at RC+0x8000 (not 0x9004). INDEX register is at RC+0x9000.
-- INDEX must contain only bus/devfn (NOT register offset). Register offset goes in the DATA address.
-- RP1 appears at bus 0 (dedicated pcie2 link, no hierarchy). Vendor 0x1de4, device 0x0001.
-- MSI-X capability at config offset 0xB0: 61 vectors, table in BAR0 offset 0, PBA at BAR0+0x2000.
-- BAR0 PCIe address = 0x00410000. Outbound window base = 0x1F03F00000, offset = 0. So MSI-X table CPU address = 0x1F04310000 (NOT 0x1F00410000).
-- RC BAR1 is unconfigured (all zeros) — firmware did not set up MIP routing.
-- **Root cause confirmed:** PCIe RC register writes require EL2. Writes from EL1 hang; writes from EL2 (in boot.S before ERET) succeed and values persist. However, writing RC BAR1 from EL2 **breaks RP1 peripheral MMIO access** — the BAR1 inbound window configuration conflicts with the firmware's outbound window that maps CPU addresses to RP1 peripherals. The next step is understanding the outbound/inbound window interaction on the brcmstb PCIe controller to configure BAR1 without disrupting RP1 MMIO.
+**MSI-X→MIP0 path is functional** (April 6, 2026): Removing IACK_EN causes an IRQ storm (system hangs from continuous MIP0→GIC interrupts), proving TLPs reach MIP0 and generate GIC SPIs. With IACK_EN, system is stable (single fire, auto-masked).
+
+**Remaining blocker: MSIX_CFG re-arm.** After init IACK, the engine doesn't fire for new characters (`cpu` shows `irq_count=0`). Init sequence was fixed to disable IMSC before IACK (prevents level-triggered livelock), post-init diagnostic confirms clean state. The engine re-arm behavior with IACK_EN needs further investigation — see `docs/pi5-uart-irq-investigation.md` "Implementation Status" section for next steps. Polling fallback works via hybrid `uart_getc` (ring buffer check + PL011 polling).
+
+**Root cause of original failure (resolved):** We originally configured BAR1, which firmware uses for RP1 peripheral MMIO. Linux uses BAR3 for MSI-X routing. Also, MSI-X PCI address high byte should be 0xFF (device tree), not 0x0F (Circle framework).
 
 ## Configuration
 
@@ -223,19 +225,30 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
    - NC task struct fields: `task->state/next/context` all in NC memory
    - Spinlock on NC memory: hangs (`ldaxr`/`stxr` needs cacheable). Fixed by `rq_lock[]` separation.
 
-   **Investigation areas for next agent:**
-   1. **Secondary CPU timer interrupt delivery:** Do CPUs 1-3 receive timer IRQs after `timer_start()`? The timer is per-CPU (physical timer, IRQ 30). Each secondary calls `timer_percpu_init()` during boot. Add a debug counter incremented in `timer_handler()` per-CPU and dump via shell command.
-   2. **Secondary CPU `schedule()` execution:** Does `schedule()` actually run on CPU 1 after timer IRQ? The idle task calls `wfi`, timer fires, exception vector calls `timer_irq_handler()` → `scheduler_tick()` → `schedule()`. Add a per-CPU debug counter in `schedule()` entry.
-   3. **`rq_lock[]` cross-CPU contention:** CPU 0 holds `rq_lock[1]` briefly to add a task. If CPU 1's `schedule()` tries to acquire `rq_lock[1]` simultaneously, does the cacheable spinlock work across CPUs? Spinlocks were validated during boot, but under concurrent load the behavior may differ. Test with a simple NC flag instead of the spinlock.
-   4. **`pick_next_task()` return value:** After `schedule()` acquires the lock, does `cpu_rq(1)->head` return the dispatched task? Since the run queue is NC, the pointer should be visible. Add a debug print: `if (rq->head) DEBUG_PRINT("CPU %u: found task '%s'", ...)`.
-   5. **Context switch to dispatched task:** If `pick_next_task()` finds the task, does `switch_to()` complete? The task context is NC. The task stack is cacheable (allocated by CPU 0 via PMM). The stack contents are never read by CPU 1 until the task starts executing — the stack grows from `stack_top` and was never cached by CPU 1.
+   **ROOT CAUSE FOUND (April 6, 2026): Timer interrupts never fire.**
+
+   Per-CPU diagnostic counters (`cpu` shell command) prove `timer_handler()` is never called on ANY CPU:
+   ```
+   CPU  Ticks  Schedule   Picked
+     0      0  2871229   2871230   ← all schedule() calls from yield(), 0 from timer
+     1      0        0         0   ← stuck in WFI forever
+     2      0        0         0
+     3      0        0         0
+   ```
+
+   **Why:** All tasks start with `DAIF=0x080` (IRQ masked) to prevent context corruption during the first `context.S` restore. The tasks never unmask IRQs. Only the idle task unmasks (in its `while` loop), but on CPU 0 the shell's `yield()`-polling runs continuously, so the idle task never executes. On CPUs 1-3, the idle task unmasks and calls `wfi`, but since the timer IS running (started by `timer_start()` in `secondary_init`), they SHOULD get timer IRQs. The issue may be that the idle task on secondary CPUs also has the DAIF bug — investigate further.
+
+   **Fix identified (not yet applied — causes hang when both changes applied together):**
+   1. Unmask IRQs in `task_entry_trampoline()` after context restore completes
+   2. Remove the `msr daifclr, #0x2` in `scheduler_start()` (unsafe on boot stack — timer could fire before `switch_to()`, corrupting context)
+   3. Both changes needed atomically — either alone causes a different hang
 
    **Key code locations:**
-   - CPU 0 pinning: `kernel/sched/sched.c`, `scheduler_add_task()` — the `#if defined(PLATFORM_RASPI5)` block
-   - Run queue lock: `rq_lock[]` array and `rq_lock_irqsave()`/`rq_unlock_irqrestore()` in `sched.c`
-   - Timer per-CPU init: `kernel/drivers/timer.c`, `timer_percpu_init()`
-   - Scheduler entry: `kernel/sched/sched.c`, `schedule()` function
-   - Context switch: `kernel/arch/arm64/context.S`, `switch_to()`
+   - Task DAIF init: `kernel/sched/task.c`, `task_create_with_priority()` line ~251 (`context.daif = 0x080`)
+   - Task entry unmask: `kernel/sched/task.c`, `task_entry_trampoline()` (TODO comment)
+   - Boot-stack unmask: `kernel/sched/sched.c`, `scheduler_start()` (NOTE comment)
+   - Idle task unmask: `kernel/sched/sched.c`, `idle_task_func()` line ~125 (`daifclr`)
+   - Diagnostics: `sched_diag_tick[]`, `sched_diag_schedule[]`, `sched_diag_picked[]`, `timer_handler_count` — all visible via `cpu` command
 
    **Root cause note:** The Cortex-A76 does NOT have an SMPEN bit (unlike A53/A72). The `cpu_has_smpen()` function reads bit 6 of `S3_0_C15_C1_4` which is a different field on A76. The DSU is supposed to provide coherency automatically per ARM TRM, but BCM2712's implementation does not appear to do so for regular loads/stores.
 

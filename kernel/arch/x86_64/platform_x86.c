@@ -570,6 +570,12 @@ __attribute__((weak)) void rust_workspace_pool_stats(struct pool_stats *stats)
 /* ---- Component system stubs (weak — overridden by Rust library) ---- */
 
 __attribute__((weak)) uint32_t component_count(void) { return 0; }
+__attribute__((weak)) int component_run(const char *name) { (void)name; return -1; }
+__attribute__((weak)) int component_send_echo(const char *msg) { (void)msg; return -1; }
+__attribute__((weak)) void component_list_builtins(void) {}
+
+/* Timer diagnostic counter (defined in ARM64 timer.c, referenced by shell_sys.c) */
+__attribute__((weak)) volatile uint32_t timer_handler_count = 0;
 
 struct component_info {
     uint32_t id;

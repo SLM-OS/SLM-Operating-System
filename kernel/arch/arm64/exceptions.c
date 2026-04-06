@@ -234,7 +234,7 @@ void el1_irq_handler(void)
     /* Dispatch based on IRQ number */
     switch (irq) {
     case PHYS_TIMER_IRQ:
-    case VIRT_TIMER_IRQ:
+    case VIRT_TIMER_IRQ: {
         /*
          * For timer interrupt, we must signal EOI BEFORE calling the handler
          * because timer_handler() -> scheduler_tick() -> schedule() may
@@ -244,9 +244,12 @@ void el1_irq_handler(void)
          * the interrupt is still being handled and won't deliver more
          * timer interrupts to this CPU.
          */
+        static volatile uint32_t timer_irq_entered;
+        timer_irq_entered++;
         gic_end_interrupt(irq);
         timer_handler();
         return;  /* EOI already done, don't do it again */
+    }
 
 #if defined(PLATFORM_RASPI5)
     case UART_IRQ:
