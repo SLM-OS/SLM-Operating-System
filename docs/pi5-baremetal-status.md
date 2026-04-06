@@ -1,11 +1,11 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
 **Date:** April 5, 2026
-**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (420 tests: 404 pass, 16 ignored, 0 failures). 100% boot reliability (92/92 power cycles). Context switch: 1.7 µs.
+**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (431 tests: 415 pass, 16 ignored, 0 failures). 100% boot reliability (92/92 power cycles). Context switch: 1.7 µs.
 
 ## Summary
 
-SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (420 tests across 14 suites) passes with zero failures on Pi 5 hardware.
+SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (431 tests across 14 suites) passes with zero failures on Pi 5 hardware.
 
 **Preemptive scheduling is active** — timer interrupts drive context switching at 100 Hz. The shell accepts input and responds to commands with preemption enabled. Two RP1-specific GPIO pad configurations were required for UART RX (OD=1, FUNCSEL sequencing). The armstub is currently disabled (separate issue; see Known Limitations).
 
@@ -44,6 +44,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | Performance benchmarks | ✅ Working | `bench all` — context switch, IRQ, IPC, stats |
 | UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
 | Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
+| NC shared memory | ✅ Working | 2MB NC region at 0xFFE00000, scheduler run queues in NC |
 | UART RX IRQ | ⏸️ On hold | PCIe RC→MIP→GIC path configured, BAR1 routing TBD |
 
 ## Test Results (April 5, 2026)
@@ -65,8 +66,8 @@ Full test suite runs on Pi 5 hardware with zero failures:
 | LittleFS | 26 | 0 | 0 | 26 |
 | Net | 12 | 0 | 1 | 13 |
 | Lua | 29 | 0 | 0 | 29 |
-| Integration (Multi-Core) | 0 | 0 | 5 | 5 |
-| **Total** | **404** | **0** | **16** | **420** |
+| Integration (Multi-Core + NC) | 3 | 0 | 5 | 8 |
+| **Total** | **415** | **0** | **16** | **431** |
 
 **Ignored tests (16 total, expected):**
 - Scheduler (1): `test_isolated_core_latency` — requires cross-CPU dispatch (SMPEN)

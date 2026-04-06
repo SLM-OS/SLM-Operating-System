@@ -474,6 +474,50 @@ static void test_nc_memory_accessible(void)
         TEST_ASSERT_EQUAL_HEX32((uint32_t)(i * 0x11111111), nc_arr[i]);
 }
 
+/*
+ * Test: NC allocator alignment and edge cases.
+ */
+static void test_nc_alloc_alignment(void)
+{
+    /* Allocate with different alignments and verify */
+    void *a64 = ncmem_alloc(8, 64);
+    TEST_ASSERT_NOT_NULL(a64);
+    TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)a64 % 64);
+
+    void *a128 = ncmem_alloc(8, 128);
+    TEST_ASSERT_NOT_NULL(a128);
+    TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)a128 % 128);
+
+    /* Different allocations return different addresses */
+    TEST_ASSERT_MESSAGE(a64 != a128, "Two NC allocs returned same address");
+
+    /* Zero size returns NULL */
+    TEST_ASSERT_NULL(ncmem_alloc(0, 64));
+
+    /* ncmem_used() returns non-zero after allocations */
+    TEST_ASSERT_MESSAGE(ncmem_used() > 0, "ncmem_used should be non-zero");
+}
+
+/*
+ * Test: NC region is used for scheduler data (run queues start at NC_MEM_BASE).
+ * Verifies the first ncmem allocation (run queues in scheduler_init) landed
+ * at the expected NC base address.
+ */
+static void test_nc_region_used_by_scheduler(void)
+{
+    /* ncmem_used() should be non-zero (scheduler allocated run queues) */
+    TEST_ASSERT_MESSAGE(ncmem_used() > 0,
+                        "NC region unused — scheduler should have allocated run queues");
+
+    /* The NC region should be writable at the base (run queue data lives there) */
+    volatile uint32_t *nc_base = (volatile uint32_t *)NC_MEM_BASE;
+    uint32_t saved = *nc_base;
+    *nc_base = 0xA5A5A5A5;
+    __asm__ volatile("dmb sy" ::: "memory");
+    TEST_ASSERT_EQUAL_HEX32(0xA5A5A5A5, *nc_base);
+    *nc_base = saved;  /* Restore (this is the spinlock field) */
+}
+
 #endif /* PLATFORM_RASPI5 */
 
 /* ============================================================================
@@ -491,8 +535,10 @@ int test_suite_integration(void)
     RUN_TEST(test_task_lifecycle);
 
 #if defined(PLATFORM_RASPI5)
-    /* NC memory validation — must pass before cross-CPU dispatch can work */
+    /* NC memory validation */
     RUN_TEST(test_nc_memory_accessible);
+    RUN_TEST(test_nc_alloc_alignment);
+    RUN_TEST(test_nc_region_used_by_scheduler);
 #endif
 
     return UNITY_END();

@@ -481,6 +481,12 @@ static void test_mmio_regions_mapped(void)
 
     /* RP1 BAR0 (MSI-X table) */
     TEST_ASSERT_TRUE(vmm_is_mapped(RP1_MSIX_TABLE_BASE));
+
+    /* NC shared memory region (last 2MB of RAM, mapped via L2 table) */
+    TEST_ASSERT_TRUE(vmm_is_mapped(0xFFE00000));
+
+    /* Verify virt_to_phys works for NC region (identity-mapped) */
+    TEST_ASSERT_EQUAL_HEX64(0xFFE00000, vmm_virt_to_phys(0xFFE00000));
 #endif
 }
 

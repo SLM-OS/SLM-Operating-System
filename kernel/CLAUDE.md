@@ -130,6 +130,22 @@ val = shared_data[cpu].field;
 
 ---
 
+## Non-Cacheable Shared Memory (Pi 5)
+
+On Pi 5, DC CIVAC does not propagate through per-core L2 caches without SMPEN. Non-cacheable (NC) memory bypasses L1/L2 entirely, making writes instantly visible to all CPUs.
+
+**NC region:** Last 2MB of RAM (`0xFFE00000`), mapped as MAIR index 2 (Normal Non-Cacheable, Inner Shareable) via L2 table entry in `vmm.c`. Reserved from PMM in `pmm.c`.
+
+**Allocator:** `ncmem_alloc(size, align)` in `kernel/include/ncmem.h` / `kernel/mm/ncmem.c`. Simple bump allocator, no free. Used for permanent kernel-lifetime structures.
+
+**Scheduler run queues:** `cpu_rq(cpu)` returns an NC address computed from `NC_MEM_BASE` (compile-time constant). No cacheable pointer indirection — secondary CPUs can compute the address without reading any cacheable data.
+
+**Spinlock separation:** `rq_lock[MAX_CPUS]` is a separate cacheable array. ARM exclusive load/store (`ldaxr`/`stxr`) used by spinlocks requires cacheable memory on BCM2712. The lock is NOT in the `cpu_runqueue` struct — it's accessed via `rq_lock_irqsave(cpu)` / `rq_unlock_irqrestore(cpu, flags)`.
+
+**When to use NC memory:** Only for data that MUST be visible across CPUs without cache maintenance. NC memory is slower than cached memory (every access goes to DRAM). Do not use for hot-path per-CPU data.
+
+---
+
 ## Idle Task DAIF
 
 The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry. `context.S` saves this masked DAIF into idle's context. On resume, the restored DAIF keeps IRQ masked. If the unmask is only at function entry, idle would loop forever in `wfi` with IRQ disabled.
