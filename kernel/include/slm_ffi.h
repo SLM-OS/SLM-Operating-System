@@ -99,6 +99,30 @@ void slm_sleep_ms(uint32_t ms);
 
 /*
  * ==========================================================================
+ * GPU Cache Coherency
+ * ==========================================================================
+ */
+
+/*
+ * Flush CPU caches for a memory region so GPU sees latest data.
+ * Called before GPU reads CPU-written data (DC CVAC).
+ *
+ * @addr: Virtual address of region
+ * @size: Size in bytes
+ */
+void slm_gpu_sync_for_device(void *addr, size_t size);
+
+/*
+ * Invalidate CPU caches for a memory region so CPU sees GPU-written data.
+ * Called after GPU writes, before CPU reads (DC IVAC).
+ *
+ * @addr: Virtual address of region
+ * @size: Size in bytes
+ */
+void slm_gpu_sync_for_cpu(void *addr, size_t size);
+
+/*
+ * ==========================================================================
  * Task Management
  * ==========================================================================
  */

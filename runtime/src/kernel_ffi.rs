@@ -271,6 +271,16 @@ extern "C" {
     pub fn slm_get_time_ns() -> u64;
 
     // -------------------------------------------------------------------------
+    // GPU Cache Coherency
+    // -------------------------------------------------------------------------
+
+    /// Flush CPU caches so GPU sees latest data (DC CVAC).
+    pub fn slm_gpu_sync_for_device(addr: *mut u8, size: usize);
+
+    /// Invalidate CPU caches so CPU sees GPU-written data (DC IVAC).
+    pub fn slm_gpu_sync_for_cpu(addr: *mut u8, size: usize);
+
+    // -------------------------------------------------------------------------
     // Task Management
     // -------------------------------------------------------------------------
 

@@ -10,6 +10,7 @@
 #include "sched.h"
 #include "uart.h"
 #include "debug.h"
+#include "../gpu/gpu.h"
 #include <stddef.h>
 
 /*
@@ -595,8 +596,30 @@ struct shared_buffer *shared_buffer_create(size_t size, uint32_t flags)
     }
     ipc_memset(buf, 0, PAGE_SIZE);
 
-    /* Allocate backing physical memory */
-    void *phys = pmm_alloc_pages(pages);
+    /* Allocate backing physical memory.
+     * If GPU_ACCESSIBLE is requested and GPU is available, use the GPU
+     * allocator which ensures proper cache coherency attributes. */
+    void *phys = NULL;
+    bool gpu_backed = false;
+
+    if ((flags & SHM_GPU_ACCESSIBLE) && gpu_available()) {
+        gpu_buffer_t gpu_buf;
+        uint32_t gpu_flags = GPU_MEM_READWRITE;
+        if (size >= 2 * 1024 * 1024) {
+            gpu_flags |= GPU_MEM_ALIGN_2MB;
+        }
+        int ret = gpu_alloc(size, gpu_flags, &gpu_buf);
+        if (ret == GPU_OK) {
+            phys = gpu_buf.cpu_addr;
+            gpu_backed = true;
+        }
+        /* Fall through to PMM if GPU alloc fails */
+    }
+
+    if (!phys) {
+        phys = pmm_alloc_pages(pages);
+    }
+
     if (!phys) {
         WARN("shared_buffer_create: failed to allocate %zu pages", pages);
         pmm_free_page(buf);
@@ -612,6 +635,7 @@ struct shared_buffer *shared_buffer_create(size_t size, uint32_t flags)
     buf->refcount = 1;  /* Owner's implicit reference */
     buf->owner = task_current();
     buf->mappings = NULL;
+    buf->gpu_backed = gpu_backed;
 
     /* Register in global table */
     irq_flags_t irqflags = spin_lock_irqsave(&ipc_state.lock);
@@ -687,10 +711,15 @@ void *shared_buffer_map(struct shared_buffer *buffer, struct task *task,
      */
     void *virt_addr = buffer->phys_base;  /* Identity mapped in kernel */
 
-    /* If GPU_ACCESSIBLE is requested, set the appropriate page flags */
-    if (perms & SHM_GPU_ACCESSIBLE) {
-        /* Page table flags already set by vmm if needed */
-        /* For now, physical memory is accessible to GPU via identity map */
+    /* If GPU_ACCESSIBLE, clean caches so GPU sees the latest data */
+    if ((perms & SHM_GPU_ACCESSIBLE) && buffer->gpu_backed) {
+        gpu_buffer_t gpu_buf = {
+            .cpu_addr = buffer->phys_base,
+            .gpu_addr = (uint64_t)(uintptr_t)buffer->phys_base,
+            .size = buffer->size,
+            .flags = 0,
+        };
+        gpu_sync_for_gpu(&gpu_buf);
     }
 
     m->task = task;
@@ -788,9 +817,21 @@ int shared_buffer_destroy(struct shared_buffer *buffer)
     }
     spin_unlock_irqrestore(&ipc_state.lock, flags);
 
-    /* Free physical memory and descriptor */
-    size_t pages = buffer->size / PAGE_SIZE;
-    pmm_free_pages(buffer->phys_base, pages);
+    /* Free physical memory */
+    if (buffer->gpu_backed) {
+        gpu_buffer_t gpu_buf = {
+            .cpu_addr = buffer->phys_base,
+            .gpu_addr = (uint64_t)(uintptr_t)buffer->phys_base,
+            .size = buffer->size,
+            .flags = 0,
+        };
+        gpu_free(&gpu_buf);
+    } else {
+        size_t pages = buffer->size / PAGE_SIZE;
+        pmm_free_pages(buffer->phys_base, pages);
+    }
+
+    /* Free descriptor */
     pmm_free_page(buffer);
 
     DEBUG_PRINT("Destroyed shared buffer %u", buffer->id);

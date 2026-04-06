@@ -612,28 +612,33 @@ pub enum GpuError {
 
 /// Map model memory for GPU DMA access.
 ///
-/// Currently a stub - returns the physical address without actual GPU mapping.
-/// Cache flush would be performed here on real hardware.
+/// Flushes CPU caches so the GPU sees the latest data, then returns the
+/// physical address (identity-mapped in the kernel). On platforms with
+/// unified memory (Jetson Orin), this is sufficient for GPU access.
 pub fn gpu_map(handle: ModelHandle) -> Result<u64, GpuError> {
     let ptr = get_ptr(handle).ok_or(GpuError::InvalidHandle)?;
+    let size = get_size(handle).ok_or(GpuError::InvalidHandle)?;
 
-    // TODO: Flush D-cache for the region
-    // TODO: Set up IOMMU mapping if needed
+    // Flush CPU caches so GPU sees latest data
+    unsafe {
+        crate::kernel_ffi::slm_gpu_sync_for_device(ptr as *mut u8, size);
+    }
 
-    // For now, return physical address (identity mapped in our kernel)
+    // Return physical address (identity mapped in our kernel)
     Ok(ptr as u64)
 }
 
 /// Unmap model memory from GPU.
 ///
-/// Currently a stub - no actual unmapping.
-/// Cache invalidate would be performed here on real hardware.
+/// Invalidates CPU caches so the CPU sees any GPU-written data.
 pub fn gpu_unmap(handle: ModelHandle) -> Result<(), GpuError> {
-    // Validate handle
-    let _ = get_ptr(handle).ok_or(GpuError::InvalidHandle)?;
+    let ptr = get_ptr(handle).ok_or(GpuError::InvalidHandle)?;
+    let size = get_size(handle).ok_or(GpuError::InvalidHandle)?;
 
-    // TODO: Invalidate D-cache for the region
-    // TODO: Remove IOMMU mapping if needed
+    // Invalidate CPU caches so CPU sees GPU-written data
+    unsafe {
+        crate::kernel_ffi::slm_gpu_sync_for_cpu(ptr as *mut u8, size);
+    }
 
     Ok(())
 }
