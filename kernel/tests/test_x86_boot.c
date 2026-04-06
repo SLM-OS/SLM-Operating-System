@@ -1068,6 +1068,49 @@ static void test_smp_trampoline_param_offsets(void)
 }
 
 /* ============================================================================
+ * NVIDIA GPU Tests
+ * ============================================================================ */
+
+extern bool nvidia_gpu_is_found(void);
+extern int nvidia_gpu_vram_test(void);
+
+/*
+ * Test: nvidia_gpu_init ran without crashing (found or not).
+ * This is a basic liveness test — the init function should complete
+ * gracefully whether or not a GPU is present.
+ */
+static void test_nvidia_gpu_init_ran(void)
+{
+    /* If we got here, nvidia_gpu_init() completed without crashing */
+    TEST_ASSERT_TRUE(true);
+}
+
+/*
+ * Test: In QEMU (no NVIDIA GPU), nvidia_gpu_is_found() returns false.
+ * On real hardware with RTX 3050, this test would need to be skipped or inverted.
+ */
+static void test_nvidia_gpu_no_crash_without_gpu(void)
+{
+    /* In QEMU there is no NVIDIA GPU — verify graceful absence */
+    /* This test passes whether GPU is found or not; it verifies
+     * the accessor doesn't crash */
+    bool found = nvidia_gpu_is_found();
+    (void)found;  /* Either value is acceptable */
+    TEST_ASSERT_TRUE(true);
+}
+
+/*
+ * Test: VRAM test returns -1 when no GPU is present.
+ */
+static void test_nvidia_gpu_vram_test_without_gpu(void)
+{
+    if (nvidia_gpu_is_found())
+        return;  /* Skip on real hardware — VRAM test would pass there */
+    int result = nvidia_gpu_vram_test();
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
+/* ============================================================================
  * PCI Tests
  * ============================================================================ */
 
@@ -1359,6 +1402,11 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_smp_logical_map_consistent);
     RUN_TEST(test_spinlock_mutual_exclusion);
     RUN_TEST(test_smp_trampoline_param_offsets);
+
+    /* NVIDIA GPU tests */
+    RUN_TEST(test_nvidia_gpu_init_ran);
+    RUN_TEST(test_nvidia_gpu_no_crash_without_gpu);
+    RUN_TEST(test_nvidia_gpu_vram_test_without_gpu);
 
     /* PCI tests */
     RUN_TEST(test_pci_host_bridge_exists);

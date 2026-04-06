@@ -17,15 +17,16 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 9. [Timer (LAPIC)](#timer-lapic)
 10. [SMP (Symmetric Multi-Processing)](#smp-symmetric-multi-processing)
 11. [PCI/PCIe Enumeration](#pcipcie-enumeration)
-12. [Console Output](#console-output)
-13. [Building](#building)
-14. [Hardware Deployment](#hardware-deployment)
-15. [Testing](#testing)
-16. [Platform Abstraction](#platform-abstraction)
-17. [Lua Scripting](#lua-scripting)
-18. [Key Files](#key-files)
-19. [Design Decisions](#design-decisions)
-20. [Troubleshooting](#troubleshooting)
+12. [NVIDIA GPU (RTX 3050)](#nvidia-gpu-rtx-3050)
+13. [Console Output](#console-output)
+14. [Building](#building)
+15. [Hardware Deployment](#hardware-deployment)
+16. [Testing](#testing)
+17. [Platform Abstraction](#platform-abstraction)
+18. [Lua Scripting](#lua-scripting)
+19. [Key Files](#key-files)
+20. [Design Decisions](#design-decisions)
+21. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -436,6 +437,56 @@ NVIDIA GPUs (vendor 0x10DE) are highlighted with BAR details during boot.
 
 ---
 
+## NVIDIA GPU (RTX 3050)
+
+SLM-OS includes an NVIDIA GPU probe that reads GPU identification registers via PCI BAR0 and maps VRAM via BAR1.
+
+### GPU Identification
+
+After PCI enumeration finds an NVIDIA device (vendor 0x10DE, display class 0x03), the driver:
+
+1. Enables memory space + bus mastering in PCI command register
+2. Maps BAR0 (16 MB MMIO) and BAR1 (VRAM aperture) with size probing
+3. Reads `NV_PMC_BOOT_42` at BAR0 offset 0xA00 for chip identification:
+   - Bits 29:24 = architecture (0x17 = Ampere)
+   - Bits 23:20 = implementation (0x07 = GA107)
+   - Bits 29:20 = chip ID (0x177)
+   - Bits 19:16 = major revision, 15:12 = minor revision
+
+### BAR Layout
+
+| BAR | Type | Typical Size | Content |
+|-----|------|-------------|---------|
+| BAR0 | 32-bit MMIO | 16 MB | GPU control registers |
+| BAR1 | 64-bit prefetchable | 256 MB - 8 GB | VRAM aperture |
+| BAR2 | 64-bit | 32 MB | RAMIN / control structures |
+
+### Shell Commands
+
+- `gpu` — shows GPU model, chip ID, architecture, BARs, PMC_ENABLE register
+- `pci` — highlights NVIDIA devices with BAR details
+
+### Key Registers Read (BAR0)
+
+| Offset | Register | Purpose |
+|--------|----------|---------|
+| 0x000 | NV_PMC_BOOT_0 | Legacy GPU identification |
+| 0xA00 | NV_PMC_BOOT_42 | Preferred GPU identification |
+| 0x200 | NV_PMC_ENABLE | Engine master enable bitmap |
+
+### VRAM Test
+
+`nvidia_gpu_vram_test()` writes a 64-word pattern to BAR1 and reads it back. Verifies CPU ↔ VRAM data path via PCIe.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `kernel/arch/x86_64/nvidia_gpu.c` | GPU probe, BAR mapping, register decode, VRAM test, shell command |
+| `docs/reference/nvidia-nv_ref.h` | Register definitions from open-gpu-kernel-modules |
+
+---
+
 ## Console Output
 
 ### Serial Console (COM1)
@@ -553,7 +604,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 77 tests across 15 categories:
+The `test_x86_boot.c` test suite contains 80 tests across 16 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -567,6 +618,7 @@ The `test_x86_boot.c` test suite contains 77 tests across 15 categories:
 | Timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
 | ACPI + APIC | 6 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, timer running |
 | SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
+| NVIDIA GPU | 3 | Init ran, no-crash without GPU, VRAM test returns -1 without GPU |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
 | Scheduler integration | 5 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick |
@@ -657,6 +709,7 @@ Lua commands are available in the shell via `lua <expression>`.
 | `kernel/arch/x86_64/timer_x86.c` | LAPIC timer (timer.h interface, calibrated vs PIT) |
 | `kernel/arch/x86_64/platform_x86.c` | Boot glue, SMP boot (INIT-SIPI), VMM/DTB/Rust stubs |
 | `kernel/arch/x86_64/pci.c` | PCI config access, bus enumeration, `pci` shell command |
+| `kernel/arch/x86_64/nvidia_gpu.c` | GPU probe, BAR mapping, register decode, VRAM test, `gpu` command |
 | `kernel/drivers/uart_x86.c` | 16550 UART driver (uart.h interface) |
 
 ### Build System
@@ -670,7 +723,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 77 tests: boot, IDT, APIC, SMP, spinlock, PCI, Multiboot2, platform, scheduler, setjmp |
+| `kernel/tests/test_x86_boot.c` | 80 tests: boot, IDT, APIC, SMP, spinlock, GPU, PCI, Multiboot2, platform, scheduler, setjmp |
 
 ---
 

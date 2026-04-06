@@ -110,6 +110,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/timer_x86.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/platform_x86.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/pci.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/nvidia_gpu.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/ap_trampoline.S>
 
     # ==========================================================================

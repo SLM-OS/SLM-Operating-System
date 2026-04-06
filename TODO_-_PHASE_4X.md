@@ -2,7 +2,7 @@
 
 This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 3050.
 
-**Status:** In Progress (M1-M5 Complete, M6 GPU Driver Next)
+**Status:** In Progress (M1-M5 Complete, M6 GPU Driver In Progress)
 
 **Summary:** Primary development track to port SLM-OS to x86-64 architecture with discrete NVIDIA GPU. This enables GPU driver development on accessible hardware with superior debugging tools.
 
@@ -52,7 +52,7 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 | `kernel/arch/x86_64/Makefile.test` | Standalone build + UEFI disk image |
 | `kernel/kernel-x86_64.ld` | Linker script for x86-64 |
 | `kernel/drivers/uart_x86.c` | COM1 16550 UART driver |
-| `kernel/tests/test_x86_boot.c` | 77 functional tests |
+| `kernel/tests/test_x86_boot.c` | 80 functional tests |
 | `docs/x86-64-port.md` | Comprehensive documentation |
 
 **Technical Challenges Solved:**
@@ -114,7 +114,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - **ACPI MADT parsing** (`acpi.c`) — discovers CPUs, LAPIC base, IOAPIC, ISOs
 - **Platform abstraction** (`pic.c` bridges gic.h, `platform_x86.c` provides all stubs)
 - **Real x86-64 spinlocks** — TTAS with `__atomic_exchange_n`, atomic `cpus_online` increment
-- **77 functional tests** across 15 categories
+- **80 functional tests** across 15 categories
 
 ---
 
@@ -328,15 +328,34 @@ make -f kernel/arch/x86_64/Makefile.test disk
 
 ---
 
-## Milestone 6: NVIDIA GPU Driver (RTX 3050)
+## Milestone 6: NVIDIA GPU Driver (RTX 3050) — In Progress
 
 ### GPU Research
-- ☐ Study NVIDIA open-gpu-kernel-modules for GA107
-- ☐ Document register map differences from Jetson (if any)
-- ☐ Understand PCIe BAR layout:
-  - ☐ BAR0: GPU registers (MMIO)
-  - ☐ BAR1: GPU memory aperture (VRAM access)
-  - ☐ BAR2/3: Other resources
+- ✅ Study NVIDIA open-gpu-kernel-modules for GA107 register map
+- ✅ Document BAR0 register offsets (NV_PMC_BOOT_0, BOOT_42, ENABLE)
+- ✅ Understand PCIe BAR layout:
+  - ✅ BAR0: GPU registers (16 MB MMIO, non-prefetchable)
+  - ✅ BAR1: VRAM aperture (64-bit, prefetchable, up to 8 GB)
+  - ✅ BAR2: RAMIN / control structures (64-bit)
+- ✅ Architecture decode: Ampere = 0x17, GA107 = implementation 0x07, chip_id = 0x177
+
+### Basic GPU Initialization
+- ✅ `nvidia_gpu_init()`:
+  - ✅ Scan PCI bus for NVIDIA vendor (0x10DE) + display class (0x03)
+  - ✅ Enable memory space + bus mastering via PCI command register
+  - ✅ Map BAR0 (MMIO registers) with size probing
+  - ✅ Map BAR1 (VRAM aperture) with 64-bit BAR + size probing
+  - ✅ Read NV_PMC_BOOT_0 and NV_PMC_BOOT_42 for chip identification
+  - ✅ Decode architecture, implementation, chip ID, revision
+  - ✅ Read NV_PMC_ENABLE for engine status
+- ✅ `gpu` shell command — shows GPU info, BARs, registers
+- ✅ Graceful no-GPU path (QEMU: "No NVIDIA GPU found")
+- ☐ Verify on real i7-6700 + RTX 3050 hardware
+
+### VRAM Access
+- ✅ `nvidia_gpu_vram_test()` — write/read pattern to BAR1 VRAM
+- ☐ Verify VRAM test on real hardware
+- ☐ VRAM size detection via resizable BAR or bar size probing
 
 ### GSP Firmware Study
 - ☐ Study GSP (GPU System Processor) architecture
@@ -345,19 +364,9 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - ☐ Understand GSP mailbox/command interface
 - ☐ Document findings in `docs/nvidia-gsp.md`
 
-### Basic GPU Initialization
-- ☐ Implement `rtx3050_gpu_init()`:
-  - ☐ Enable GPU via PCIe command register
-  - ☐ Map BAR0 (registers) and BAR1 (VRAM)
-  - ☐ Read GPU identification registers
-  - ☐ Check GPU state (powered on, not in reset)
-- ☐ Implement `rtx3050_gpu_info()` — print GPU details
-
 ### GPU Memory Management
 - ☐ Implement VRAM allocation (simple bump allocator initially)
-- ☐ Implement `gpu_alloc(size)` — allocate VRAM
-- ☐ Implement `gpu_free(addr)` — free VRAM
-- ☐ Map VRAM into CPU address space for data transfer
+- ☐ Implement `gpu_alloc(size)` / `gpu_free(addr)`
 - ☐ Handle PCIe DMA for system memory ↔ VRAM transfers
 
 ### GSP Communication (Advanced)
@@ -550,7 +559,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 ```
 M1 (Boot) ✅ ──> M2 (Memory) ✅ ──> M3 (Interrupts) ✅ ──> M4 (SMP) ✅
                        │
-                       └──────> M5 (PCIe) ✅ ──────> M6 (GPU) ← NEXT
+                       └──────> M5 (PCIe) ✅ ──────> M6 (GPU) ← IN PROGRESS
                        
 M7 (Abstraction) ~70% ──> Incrementally built with M1-M5
 
@@ -625,6 +634,6 @@ M9 (Docs) ──────> Ongoing throughout
 ---
 
 *Created: January 2026*
-*Last Updated: April 2026 — M1-M5 complete (SMP + PCIe), M7 ~70%, M6 GPU next*
+*Last Updated: April 2026 — M1-M5 complete, M6 GPU driver in progress (BAR0/BAR1 mapped, BOOT_42 decode), M7 ~70%*
 *Purpose: Parallel development track for x86-64 + RTX 3050 GPU learning*
 *Relationship: Supports Phase 4 (Jetson) and Phase 5 (SLM Integration)*

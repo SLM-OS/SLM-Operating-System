@@ -400,13 +400,17 @@ void kernel_main(void *dtb)
         WARN("GPU init failed (code=%d)", gpu_ret);
     }
 
-    /* Initialize PCI subsystem (x86-64 only) */
+    /* Initialize PCI and GPU subsystems (x86-64 only) */
 #if defined(PLATFORM_X86_64)
     {
         extern void pci_init(void);
         extern void pci_register_shell_commands(void);
+        extern void nvidia_gpu_init(void);
+        extern void nvidia_gpu_register_shell_commands(void);
         pci_init();
         pci_register_shell_commands();
+        nvidia_gpu_init();
+        nvidia_gpu_register_shell_commands();
     }
 #endif
 
