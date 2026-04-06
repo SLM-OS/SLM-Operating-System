@@ -42,9 +42,21 @@ struct cpu_runqueue {
     uint32_t ready_count;
 } __attribute__((aligned(CACHE_LINE_SIZE)));
 
-/* Per-CPU flag: set when schedule() is called from timer ISR (scheduler_tick).
- * Used on x86-64 to conditionally mask the LAPIC timer during context switch. */
-static volatile int from_timer_isr[MAX_CPUS];
+/*
+ * Per-CPU preemption disable flag.
+ *
+ * Set during the critical window in schedule() between releasing the
+ * run queue lock and completing the context switch. scheduler_tick()
+ * checks this flag and skips calling schedule() if set.
+ *
+ * Without this, a timer IRQ firing in the window between rq_unlock
+ * and switch_to causes a reentrant schedule() that corrupts state:
+ * - x86-64: task_current() returns the wrong task (set before switch)
+ * - ARM64 (Pi 5): deadlock during UART output after DAIF unmask fix
+ *
+ * This is the cross-platform equivalent of Linux's preempt_count.
+ */
+static volatile int preempt_disabled[MAX_CPUS];
 
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
@@ -857,27 +869,29 @@ void schedule(void)
 #endif
 
     /*
-     * Mask the LAPIC timer before releasing the lock. This prevents the
-     * timer ISR from calling scheduler_tick() → schedule() between lock
-     * release and switch_to, which corrupts task_current() state.
+     * Disable preemption during the context switch window.
      *
-     * The timer is unmasked after switch_to returns (on the resumed
-     * task's stack). New tasks unmask it in task_entry_wrapper.
+     * Between rq_unlock (which re-enables IRQs) and switch_to completion,
+     * a timer IRQ could fire and call scheduler_tick() → schedule().
+     * That reentrant schedule() would see stale task_current() (already
+     * set to `next` at line 846, but we're still on `current`'s stack).
+     *
+     * The preempt_disabled flag tells scheduler_tick() to skip the
+     * schedule() call during this window. The timer still fires and
+     * increments tick counters — it just doesn't try to context-switch.
+     *
+     * After switch_to returns (on the resumed task's stack), we clear
+     * the flag so preemption resumes normally.
      */
-#if defined(PLATFORM_X86_64)
-    extern void lapic_timer_mask(void);
-    extern void lapic_timer_unmask(void);
-    lapic_timer_mask();
-#endif
+    preempt_disabled[this_cpu] = 1;
 
     rq_unlock_irqrestore(this_cpu, flags);
 
     switch_to(current, next);
 
-    /* Resumed: unmask timer so preemption continues */
-#if defined(PLATFORM_X86_64)
-    lapic_timer_unmask();
-#endif
+    /* Resumed on our stack after being switched back.
+     * Re-enable preemption so timer ticks can trigger scheduling. */
+    preempt_disabled[this_cpu] = 0;
 }
 
 /*
@@ -959,24 +973,22 @@ void scheduler_start(void)
  */
 void scheduler_tick(void)
 {
-    /* Note: timer_ticks is racy but acceptable for stats */
-    sched.timer_ticks++;
-    sched_diag_tick[cpu_id()]++;
+    uint32_t cpu = cpu_id();
 
-    /* Mark that this schedule() call comes from the timer ISR.
-     * schedule() uses this to decide whether to mask the LAPIC timer
-     * during the context switch (only needed for timer-initiated
-     * preemption to prevent reentrant schedule() deadlock). */
-#if defined(PLATFORM_X86_64)
-    from_timer_isr[cpu_id()] = 1;
-#endif
+    /* Always count ticks (used by sleep_ms, uptime, benchmarks) */
+    sched.timer_ticks++;
+    sched_diag_tick[cpu]++;
+
+    /* Skip preemption if a context switch is in progress on this CPU.
+     * schedule() sets preempt_disabled between rq_unlock and switch_to
+     * completion. Calling schedule() here would corrupt state because
+     * task_set_current(next) has already been called but the actual
+     * stack switch hasn't happened yet. */
+    if (preempt_disabled[cpu])
+        return;
 
     /* Preempt current task */
     schedule();
-
-#if defined(PLATFORM_X86_64)
-    from_timer_isr[cpu_id()] = 0;
-#endif
 }
 
 /*

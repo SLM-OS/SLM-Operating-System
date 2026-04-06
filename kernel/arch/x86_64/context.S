@@ -96,9 +96,6 @@ switch_to:
 .global task_entry_wrapper
 .type task_entry_wrapper, @function
 task_entry_wrapper:
-    /* Unmask LAPIC timer (schedule() masked it before switch_to) */
-    call    lapic_timer_unmask
-
     /* Enable interrupts (new tasks start with IF=0) */
     sti
 
