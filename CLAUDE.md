@@ -135,12 +135,16 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - Use UARTC (0x0C280000) for serial console (visible via TCU on USB-C debug)
 - OP-TEE carveout at 0xBE-0xC2 skipped; ~6.7 GB usable across 3 regions
 
-**UEFI direct boot (WIP):**
+**SMP (April 2026):**
+- 6-core boot working via PSCI CPU_ON after kexec
+- Root cause of prior failure: wrong MPIDR encoding. Jetson uses dual-cluster Aff2.Aff1: 0x000, 0x100, 0x200, 0x300, 0x10200, 0x10300
+- Boot flag visibility uses PSCI success fallback (same cache incoherency as Pi 5)
+- VHE set up on all secondary CPUs in `smp_boot.S`
+
+**UEFI direct boot (WIP, not required for SMP):**
 - EFI stub (`efi_stub.c`) with VHE-compatible MMU disable + self-relocating trampoline in `boot.S`
 - PE/COFF loads when UEFI uses preferred address (ImageBase=0x80000000)
 - Blocked when UEFI can't use preferred address (no `.reloc` section for PE relocation)
-- Alternative SMP paths: SGI/spin-table wake (bypass PSCI), UEFI Shell `load` command
-- SMP is blocked on either UEFI boot or an alternative secondary CPU wake mechanism
 
 **Documentation:** `docs/jetson-nvidia-support.md`, `docs/jetson-el2-bringup.md`
 
