@@ -88,7 +88,11 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     {
         extern volatile int preempt_disabled[];
         preempt_disabled[cpu_id()] = 0;
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("mfence" ::: "memory");
+#else
         __asm__ volatile("dsb sy" ::: "memory");
+#endif
     }
 
     /* User tasks keep IRQs masked (cooperative scheduling via yield).
