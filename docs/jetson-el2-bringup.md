@@ -107,7 +107,7 @@ All changes are `#ifdef PLATFORM_JETSON_ORIN_NANO` guarded.
 | UARTC (TX) | 0x0C280000 | ✅ Works | Via TCU to USB-C debug |
 | TCU RX Mailbox | 0x03C10000 | ✅ Works | HSP SM0, SPE routes USB-C input here |
 | GIC Distributor | 0x0F400000 | ✅ Works | GICv3, 992 interrupt lines |
-| GIC Redistributor | 0x0F440000 | ✅ Works | Per-CPU, CPU 0 awake |
+| GIC Redistributor | 0x0F440000+ | ✅ Works | 6 CPUs, dual-cluster layout (gap at 0x0F500000) |
 | ARM Generic Timer | System regs | ✅ Works | 100 Hz tick confirmed |
 | OP-TEE carveout | 0xC0000000+ | ❌ Blocked | Secure memory, kills core |
 | Watchdog | 0x02190000 | ✅ Works | Disabled in kernel_main() |
