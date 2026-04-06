@@ -92,13 +92,12 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - SLM-OS enters at EL2 after kexec (confirmed via PSCI SYSTEM_OFF probe)
 - VHE transparently redirects EL1 register accesses to EL2 — kernel code works unmodified
 - UARTC accessible from EL2; UARTA blocked; GICv3 accessible; timer works
-- OP-TEE secure carveout at 0xC0000000 limits usable heap to ~1GB
-- UART RX via TCU drops characters (TX works perfectly)
+- OP-TEE secure carveout at 0xBE-0xC2 skipped; ~6.7 GB usable across 3 regions
+- UART RX working via TCU HSP mailbox (0x03C10000)
 
 **Remaining CBB restrictions:**
-- UARTA (40-pin header) — blocked
-- SMP secondary CPU boot — PSCI CPU_ON after kexec needs investigation
-- Full 8GB RAM — OP-TEE carveout blocks access above 0xC0000000
+- UARTA (40-pin header) — blocked even from EL2
+- SMP — PSCI CPU_ON fails after kexec (TF-A state inconsistent). See M1 UEFI boot item.
 
 ### Serial Console
 - ✅ Connect USB-serial adapter to 40-pin header (Pin 8 TXD, Pin 10 RXD, Pin 6 GND)
@@ -138,35 +137,31 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 
 **Depends on:** M1 (Serial Console)
 
-**Status:** ⛔ BLOCKED — Depends on M1 which is blocked by CBB firewall
+**Status:** 🟡 Mostly Complete — GIC, timer, MMU verified working at EL2. SMP blocked.
 
 ### GIC and Interrupts
-- ☐ Verify GIC configuration for Jetson (may differ from QEMU)
-- ☐ Test interrupt delivery on real hardware
-- ☐ Verify timer IRQ fires at expected rate (100 Hz)
-- ☐ Test GIC affinity settings for core isolation
+- ✅ GICv3 initialized (distributor 0x0F400000, redistributor 0x0F440000, 992 interrupt lines)
+- ✅ Interrupt delivery working (timer IRQ drives scheduler)
+- ✅ Timer IRQ fires at 100 Hz (confirmed via shell uptime)
+- ☐ Test GIC affinity settings for core isolation (requires SMP)
 
 ### Timer
-- ☐ Verify ARM generic timer works on Jetson
-- ☐ Implement Jetson-specific timer if needed
-- ☐ Calibrate timer frequency against real hardware
+- ✅ ARM generic timer works on Jetson at EL2
+- ✅ 100 Hz tick confirmed, scheduler preemption working
 
 ### Multi-Core
 - ☐ Update `MAX_CPUS` in `config.h` from 4 to 6 (or 8 for headroom)
-- ☐ Test multi-core boot on Jetson (6 cores vs QEMU's 4)
-- ☐ Verify PSCI CPU_ON works for all secondary cores
+- ☐ SMP boot — blocked on PSCI CPU_ON after kexec (see M1 UEFI boot / alternative SMP paths)
 - ☐ Test per-core scheduling on 6 cores
 - ☐ Multi-core stress test on real hardware
 
 ### MMU
-- ☐ Test MMU with Jetson's actual memory map
-- ☐ Verify device memory mappings (UART, GIC, GPU registers)
+- ✅ MMU working with Jetson memory map (3 regions around OP-TEE carveout)
+- ✅ Device memory mappings verified (UARTC, GIC, TCU mailbox, GPU, WDT)
 - ☐ Test model memory regions on real hardware
 
 ### GPIO
-- ☐ Test GPIO driver on real pins
-- ☐ LED blink test for visual confirmation
-- ☐ Document available GPIO pins on 40-pin header
+- ⏸️ GPIO testing deferred — UARTA (40-pin header) blocked by CBB, no GPIO pins accessible from EL2
 
 ---
 
@@ -261,8 +256,7 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 
 ### Shell Testing
 - ✅ Task exits cleanly, memory reclaimed
-- ☐🔗 Test shell on Jetson (requires M1)
-- ☐ Verify all shell commands work on real hardware
+- ✅ Shell working on Jetson — help, mem, cpu, lua, all file commands verified via serial
 
 ---
 
@@ -378,9 +372,9 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 ## Phase 4 Completion Checklist
 
 ### Deliverables
-- ☐ Kernel boots and runs on real Jetson Orin Nano hardware
-- ☐ Serial console working via 40-pin header UART
-- ☐ All Phase 1-3 tests pass on Jetson
+- ✅ Kernel boots and runs on real Jetson Orin Nano hardware (single-core EL2)
+- ✅ Serial console working via UARTC/TCU (USB-C debug port)
+- ☐ All Phase 1-3 tests pass on Jetson (need formal test run)
 - ☐ GPU initialized, memory allocation working
 - ☐ Performance benchmarks documented
 - ☐ At least one example component loading and running
@@ -388,8 +382,8 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ☐ Message routing between components working
 
 ### Demo
-- ☐ Boot on Jetson Orin Nano via serial console
-- ☐ Show shell commands working on real hardware
+- ✅ Boot on Jetson Orin Nano via serial console (kexec → EL2/VHE → UARTC)
+- ✅ Show shell commands working on real hardware (help, mem, cpu, lua verified)
 - ☐ Show component load/unload via shell
 - ☐ Show hot-swap of a component
 - ☐ Show message passing between components
@@ -399,12 +393,12 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 
 ## Outstanding Decisions
 
-### Milestone 1 — Serial Console
+### Milestone 1 — Serial Console ✅ DECIDED
 
-| Decision | Options | Recommendation |
-|----------|---------|----------------|
-| **Primary debug method** | 40-pin UART vs USB-C TCU | **40-pin UART** — TCU requires SPE firmware cooperation |
-| **Baud rate** | 115200 vs higher | **115200** — standard, reliable |
+| Decision | Options | **Choice** | Rationale |
+|----------|---------|------------|-----------|
+| **Primary debug method** | 40-pin UART vs USB-C TCU | **UARTC via USB-C** | UARTA blocked by CBB at EL2; UARTC (0x0C280000) works. TCU RX via HSP mailbox (0x03C10000). |
+| **Baud rate** | 115200 vs higher | **115200** | Standard, reliable, firmware-configured |
 
 ### Milestone 3 — GPU
 
