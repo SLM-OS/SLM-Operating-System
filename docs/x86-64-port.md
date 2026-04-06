@@ -395,7 +395,7 @@ The per-CPU LAPIC timer replaces the legacy 8254 PIT:
 - **Divide**: 16 (LAPIC timer divide register = 0x03)
 - **Vector**: 48
 
-On the i7-6700, the LAPIC timer clock runs at ~1 GHz. Each CPU has its own LAPIC timer, enabling per-CPU tick interrupts for SMP.
+On the i7-6700, the LAPIC timer clock runs at ~1 GHz. Each CPU has its own LAPIC timer for preemptive scheduling. Only the BSP (CPU 0) increments the global `pit_ticks` counter — secondary CPUs call `scheduler_tick()` but don't update the tick counter (prevents N× tick rate on N-CPU systems).
 
 ---
 
@@ -922,9 +922,10 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 - QEMU's `-kernel` flag does not support Multiboot2 on Ubuntu 24.04 (QEMU 8.2.2). Use GRUB ISO boot (`-cdrom`) instead.
 - NVIDIA GPU engine registers return 0xBADF5040 — this is expected (GSP firmware not loaded). See `docs/nvidia-gsp.md`.
-- Echo service IPC: `component send` may report "not running" if the echo task hasn't been scheduled yet. The IPC queue pointer may not be visible across CPUs immediately. Counter component works reliably.
-- No higher-half kernel mapping — identity mapping only. Sufficient for current use but limits virtual address space layout.
-- No networking on x86-64 — lwIP + VirtIO not yet ported.
+- Echo service IPC: `component send` reports "not running" because the echo task hasn't initialized its IPC queue before the shell sends. The echo task is on CPU 0 (same as shell) and only runs when the shell yields. A wait loop with `sleep_ms` is in place but the x86-64 SMP scheduler doesn't reliably preempt between same-CPU tasks during `component_run`. Counter component (no IPC) works reliably.
+- **Fixed (April 2026):** SMP timer tick rate was 8× too fast (all 8 CPUs incrementing `pit_ticks`). Now only BSP increments. `sleep_ms` accuracy verified: `sleep 3000` → 3020ms.
+- No higher-half kernel mapping — identity mapping only.
+- No networking on x86-64 — requires VirtIO-PCI transport (not MMIO).
 
 ---
 
