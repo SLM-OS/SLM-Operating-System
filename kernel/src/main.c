@@ -258,6 +258,12 @@ void kernel_main(void *dtb)
     /* Initialize non-cacheable shared memory region (Pi 5 only) */
     ncmem_init();
 
+    /* Move UART lock to NC memory for cross-CPU safety */
+    {
+        extern void kprintf_init_nc_lock(void);
+        kprintf_init_nc_lock();
+    }
+
     /* Initialize interrupt controller */
     uart_puts("\n");
     INFO("Initializing GIC...");

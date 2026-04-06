@@ -25,7 +25,34 @@
  * NOTE: On Jetson after kexec, spinlock operations are no-ops (defined in
  * spinlock.h) since LDAXR/STXR hangs due to corrupted exclusive monitor state.
  */
+/* On Pi 5/Jetson, cross-CPU spinlocks must be in NC memory because
+ * per-core L2 caches are incoherent (SMPEN not set). Cacheable spinlocks
+ * cause deadlock under concurrent contention — both CPUs see stale
+ * "unlocked" state and both acquire the lock simultaneously.
+ *
+ * uart_lock is shared across ALL CPUs (printf from any CPU), so it
+ * MUST be in NC memory on platforms with incoherent caches. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+#include "ncmem.h"
+/* Early boot uses the BSS lock (single-CPU, no contention).
+ * After ncmem_init, the pointer switches to an NC-allocated lock
+ * that works safely across CPUs with incoherent L2 caches. */
+static spinlock_t uart_lock_early = SPINLOCK_INIT;
+static spinlock_t *uart_lock_ptr = &uart_lock_early;
+#define uart_lock (*uart_lock_ptr)
+
+void kprintf_init_nc_lock(void)
+{
+    spinlock_t *nc_lock = ncmem_alloc(sizeof(spinlock_t), 64);
+    if (nc_lock) {
+        spin_init(nc_lock);
+        uart_lock_ptr = nc_lock;
+    }
+}
+#else
 static spinlock_t uart_lock = SPINLOCK_INIT;
+void kprintf_init_nc_lock(void) {}
+#endif
 
 /* ========================================================================
  * Output Abstraction

@@ -469,9 +469,12 @@ static void test_ffi_task_create_returns_id(void)
     TEST_ASSERT_NOT_NULL(t);
 
     /* Wait for task to complete (it yields once then exits) */
-    while (t->state != TASK_TERMINATED) {
+    int timeout = 10000;
+    while (t->state != TASK_TERMINATED && timeout > 0) {
         yield();
+        timeout--;
     }
+    TEST_ASSERT_MESSAGE(timeout > 0, "ffi_test task did not complete (cross-CPU dispatch may have failed)");
     task_destroy(t);
 }
 
@@ -1317,8 +1320,8 @@ static void latency_task_entry(void *arg)
  */
 static void test_isolated_core_latency(void)
 {
-#if defined(PLATFORM_RASPI5)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch under investigation — NC task table + run queues in place");
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch: idle task not waking on secondary CPUs");
 #endif
     /* This test dispatches short-lived tasks to secondary CPUs.
      * Previously disabled due to a task_exit/schedule race (now fixed:

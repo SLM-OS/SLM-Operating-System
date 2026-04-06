@@ -56,7 +56,7 @@ struct cpu_runqueue {
  *
  * This is the cross-platform equivalent of Linux's preempt_count.
  */
-static volatile int preempt_disabled[MAX_CPUS];
+volatile int preempt_disabled[MAX_CPUS];
 
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
@@ -587,9 +587,10 @@ void scheduler_add_task(struct task *task)
         target_cpu = task->cpu_affinity;
 #if defined(PLATFORM_HAS_NC_MEMORY)
     } else {
-        /* TEMPORARY: CPU 0 pinning while debugging cross-CPU dispatch.
-         * NC task table + NC run queues are in place, but secondary CPUs
-         * may not be picking up dispatched tasks. */
+        /* CPU 0 pinning: secondary CPUs' idle tasks don't process dispatched
+         * tasks despite correct NC infrastructure and timer/preempt_disabled
+         * fixes. Idle task's daifclr+wfi+timer+schedule path needs debugging.
+         * See docs/pi5-cross-cpu-dispatch-investigation.md. */
         target_cpu = 0;
 #else
     } else if (task->deadline_ns > 0) {
@@ -950,9 +951,12 @@ void scheduler_start(void)
     INFO("Starting timer (100 Hz)...");
     timer_start();
 
-    /* NOTE: This daifclr is safe ONLY because tasks start with DAIF=0x080
-     * and don't unmask (timer never fires). When the task_entry_trampoline
-     * DAIF fix is applied, this MUST be removed. See task.c TODO. */
+    /* Guard against timer re-entrancy during switch_to.
+     * The trampoline clears this after context restore. */
+    preempt_disabled[this_cpu] = 1;
+
+    /* Unmask IRQs. If timer fires, scheduler_tick() sees preempt_disabled=1
+     * and skips schedule(). Ticks still count for sleep/uptime. */
     INFO("Enabling interrupts...");
 #if defined(PLATFORM_X86_64)
     __asm__ volatile("sti" ::: "memory");
@@ -961,7 +965,9 @@ void scheduler_start(void)
     __asm__ volatile("isb" ::: "memory");
 #endif
 
-    /* Switch to first task (NULL = no previous context to save) */
+    /* Switch to first task (NULL = no previous context to save).
+     * switch_to never returns — it jumps to task_entry_wrapper.
+     * The trampoline clears preempt_disabled[this_cpu]. */
     switch_to(NULL, first);
 
     /* Should never reach here */
