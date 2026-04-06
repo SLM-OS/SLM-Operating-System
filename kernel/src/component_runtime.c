@@ -18,6 +18,7 @@
 #include "ipc.h"
 #include "uart.h"
 #include "debug.h"
+#include "arch.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -77,8 +78,8 @@ static void counter_service_entry(void *arg)
  * Demonstrates inter-component communication.
  * ============================================================================ */
 
-/* Global echo queue — accessible to message senders (volatile for cross-CPU visibility) */
-volatile struct msg_queue *echo_service_queue;
+/* Global echo queue — accessible to message senders (use atomic ops for cross-CPU visibility) */
+struct msg_queue *echo_service_queue;
 
 static void echo_service_entry(void *arg)
 {
@@ -86,8 +87,7 @@ static void echo_service_entry(void *arg)
 
     /* Create IPC queue for receiving messages */
     struct msg_queue *q = msg_queue_create(8, 64);
-    echo_service_queue = q;
-    __asm__ volatile("dmb sy" ::: "memory");  /* Ensure visible to other CPUs */
+    __atomic_store_n(&echo_service_queue, q, __ATOMIC_RELEASE);
     if (!q) {
         uart_printf("[echo] Failed to create message queue\n");
         component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
@@ -235,8 +235,20 @@ int component_run(const char *name)
     cleanup_ctxs[comp_idx].component_idx = comp_idx;
     task_set_cleanup(task, component_task_cleanup, &cleanup_ctxs[comp_idx]);
 
-    /* Add to scheduler */
+    /* Add to scheduler and yield to let it start */
     scheduler_add_task(task);
+
+    /* Wait for echo service to initialize its queue */
+    if (bc->entry == echo_service_entry) {
+        extern void sleep_ms(uint32_t ms);
+        for (int i = 0; i < 20; i++) {
+            if (__atomic_load_n(&echo_service_queue, __ATOMIC_ACQUIRE) != NULL)
+                break;
+            sleep_ms(50);  /* 50ms × 20 = 1 second max */
+        }
+        if (__atomic_load_n(&echo_service_queue, __ATOMIC_ACQUIRE) == NULL)
+            uart_printf("[WARN] Echo queue not ready after 1s\n");
+    }
 
     uart_printf("Component '%s' v%s started (idx=%d, task=%u)\n",
                 bc->name, bc->version, comp_idx, task->id);
@@ -249,7 +261,7 @@ int component_run(const char *name)
  */
 int component_send_echo(const char *message)
 {
-    struct msg_queue *q = (struct msg_queue *)echo_service_queue;
+    struct msg_queue *q = __atomic_load_n(&echo_service_queue, __ATOMIC_ACQUIRE);
     if (!q) {
         uart_printf("Echo service not running\n");
         return -1;

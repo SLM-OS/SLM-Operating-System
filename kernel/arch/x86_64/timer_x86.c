@@ -17,6 +17,7 @@
 #include "config.h"
 #include "gic.h"
 #include "sched.h"
+#include "smp.h"
 #include "uart.h"
 
 /* LAPIC timer interface (lapic.c) */
@@ -55,7 +56,9 @@ static uint32_t lapic_initial_count;
 static void lapic_timer_irq(uint8_t irq)
 {
     (void)irq;
-    pit_ticks++;
+    /* Only BSP increments the global tick counter (avoid 8× rate with SMP) */
+    if (cpu_id() == 0)
+        pit_ticks++;
     scheduler_tick();
 }
 
