@@ -89,25 +89,61 @@ PIDR2=0x2B (GIC-400, ArchRev=2)
 - All RC register WRITES require EL2 (done in boot.S before EL2→EL1 drop)
 
 ### MSI-X Address
-- Circle uses `0xFFFFFFF000` = `{0x0F, 0xFFFFF000}` (36-bit address)
-- DT says `<0xff 0xfffff000>` = `{0xFF, 0xFFFFF000}` (40-bit address)
-- We use Circle's value (0x0F) — the DT value was wrong for our use
+- Circle uses `0x0F_FFFFF000` = `{0x0F, 0xFFFFF000}` (36-bit address) — **WRONG for Pi 5**
+- DT says `<0xff 0xfffff000>` = `{0xFF, 0xFFFFF000}` (40-bit address) — **CORRECT (confirmed by Linux register dump)**
+- Linux BAR3_CONFIG_HI = 0xFF, matching the device tree value
 
 ### PCI SMC Service
 - `SMC_PCI_VERSION` (0x84000130) returns -1 (SMC_UNK) — service not compiled into TF-A
 - Pi 5 platform.mk has "PCI support via SMC calls disabled by default"
 
-## Remaining Hypotheses
+## Linux Register Dump (April 6, 2026)
 
-### Hypothesis 1: Firmware Re-configuration
-The VPU firmware (`start4.elf`) runs alongside ARM cores and manages HDMI/USB via RP1. It may re-configure PCIe RC registers (including BAR1) after our boot.S writes, or it may use BAR1 for its own purposes and our writes conflict. However, our readback shows our values persisting.
+Booted Raspberry Pi OS (2025-05-13, kernel 6.12.25) on the same Pi 5 and dumped PCIe RC registers via `/dev/mem` over SSH. **Root cause found: wrong BAR and wrong PCI address.**
 
-### Hypothesis 2: Bridge State Dependency
-The brcmstb RC may require a specific initialization sequence for BAR1 inbound matching to work:
-1. Linux's `brcm_pcie_setup` explicitly disables BAR1 (`SIZE=0`) as part of bridge reset
-2. After link-up and endpoint enumeration, `brcm_pcie_probe` re-enables BAR1 for MSI
-3. Our boot.S writes BAR1 on a live link without the full reset cycle
-4. The RC may need a bridge-level re-training or specific MISC register configuration for BAR1 to actually capture inbound TLPs
+### Linux PCIe RC Configuration
+
+| Register | Linux | SLM-OS | Notes |
+|----------|-------|--------|-------|
+| BAR1_CONFIG_LO (+0x402C) | 0x00000007 | 0xFFFFF01C | Linux: 512KB window for RP1 BAR space |
+| BAR1_CONFIG_HI (+0x4030) | 0x00000000 | 0x0000000F | Linux: BAR1 NOT used for MSI-X |
+| UBUS_BAR1_REMAP (+0x40AC) | 0x00000001 | 0x00130001 | Linux: remaps to 0x1F_00000000 (RP1) |
+| UBUS_BAR1_REMAP_HI (+0x40B0) | 0x0000001F | 0x00000010 | |
+| **BAR3_CONFIG_LO (+0x403C)** | **0xFFFFF01C** | (not configured) | **Linux uses BAR3 for MSI-X!** |
+| **BAR3_CONFIG_HI (+0x4040)** | **0x000000FF** | (not configured) | **PCI addr = 0xFF_FFFFF000** |
+| **UBUS_BAR3_REMAP (+0x40BC)** | **0x00130001** | (not configured) | **→ MIP0 at 0x10_00130000** |
+| **UBUS_BAR3_REMAP_HI (+0x40C0)** | **0x00000010** | (not configured) | |
+| MISC_CTRL (+0x4008) | 0x00263480 | (not read) | SCB_ACCESS_EN=1, RCB_MPS=1 |
+| PCIE_STATUS (+0x4068) | 0x0005E0B0 | 0x0003E0B0 | Different flags |
+
+### Root Cause: Two Bugs
+
+**Bug 1: Wrong BAR.** Linux routes MSI-X through **BAR3** (registers at +0x403C/4040/40BC/40C0), NOT BAR1. BAR1 is used for RP1 peripheral BAR space mapping. SLM-OS configured BAR1, which conflicted with the firmware's RP1 MMIO mapping and broke peripheral access.
+
+**Bug 2: Wrong PCI address.** The MSI-X target address high byte should be `0xFF` (from device tree: `<0xff 0xfffff000>`), NOT `0x0F` (from Circle). Full MSI-X address: `0xFF_FFFFF000`. SLM-OS used Circle's `0x0F` value.
+
+### Fix Required
+
+In `boot.S` (EL2 PCIe RC setup):
+1. Leave BAR1 alone (firmware uses it for RP1 MMIO)
+2. Configure **BAR3** registers instead:
+   - `RC_BAR3_CONFIG_LO` (+0x403C) = 0xFFFFF01C
+   - `RC_BAR3_CONFIG_HI` (+0x4040) = 0x000000FF
+   - `UBUS_BAR3_REMAP`   (+0x40BC) = 0x00130001
+   - `UBUS_BAR3_REMAP_HI`(+0x40C0) = 0x00000010
+3. Update MSI-X table entry 25 address to `{0xFF, 0xFFFFF000}`
+4. Set MISC_CTRL to include SCB_ACCESS_EN and RCB_MPS (0x00263480)
+
+### Also Note: MISC_CTRL
+
+Linux MISC_CTRL = 0x00263480 has additional bits set compared to firmware default. Key bits:
+- SCB_ACCESS_EN (bit 12) = 1 — enables SCB (system coherent bus) access
+- CFG_READ_UR_MODE (bit 13) = 1 — unsupported request handling
+- RCB_MPS (bit 17) = 1 — max payload size
+
+These may also be needed for BAR3 inbound matching to work.
+
+## Previous Hypotheses (Superseded)
 
 ## Next Step: Linux Register Dump (Option A)
 
