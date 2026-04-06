@@ -13,18 +13,23 @@
 /*
  * cmd_component - Component system management.
  */
+/* Component runtime (component_runtime.c) */
+extern int component_run(const char *name);
+extern int component_send_echo(const char *message);
+extern void component_list_builtins(void);
+
 int cmd_component(int argc, char *argv[])
 {
     if (argc < 2) {
         /* Show help */
         uart_puts("Component System Commands:\r\n");
-        uart_puts("  component list      - List all registered components\r\n");
+        uart_puts("  component list       - List registered components\r\n");
+        uart_puts("  component builtins   - List available built-in components\r\n");
+        uart_puts("  component run <name> - Run a built-in component\r\n");
+        uart_puts("  component send <msg> - Send message to echo service\r\n");
         uart_puts("  component register <name> <version> <type> [priority]\r\n");
-        uart_puts("                      - Register a component\r\n");
-        uart_puts("                        type: service|driver|application\r\n");
-        uart_puts("                        priority: idle|low|normal|high|critical\r\n");
-        uart_puts("  component unregister <idx> - Unregister component by index\r\n");
-        uart_puts("  component status <name|idx> - Show component details\r\n");
+        uart_puts("  component unregister <idx>\r\n");
+        uart_puts("  component status <name|idx>\r\n");
         return 0;
     }
 
@@ -59,6 +64,41 @@ int cmd_component(int argc, char *argv[])
             }
         }
         return 0;
+    }
+
+    /* component builtins */
+    if (strcmp(subcmd, "builtins") == 0) {
+        component_list_builtins();
+        return 0;
+    }
+
+    /* component run <name> */
+    if (strcmp(subcmd, "run") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: component run <name>\r\n");
+            component_list_builtins();
+            return -1;
+        }
+        int idx = component_run(argv[2]);
+        return (idx >= 0) ? 0 : -1;
+    }
+
+    /* component send <message> */
+    if (strcmp(subcmd, "send") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: component send <message>\r\n");
+            return -1;
+        }
+        /* Join remaining args into a single message */
+        char msg[64];
+        int pos = 0;
+        for (int i = 2; i < argc && pos < 62; i++) {
+            if (i > 2 && pos < 62) msg[pos++] = ' ';
+            for (int j = 0; argv[i][j] && pos < 62; j++)
+                msg[pos++] = argv[i][j];
+        }
+        msg[pos] = '\0';
+        return component_send_echo(msg);
     }
 
     /* component register <name> <version> <type> [priority] */

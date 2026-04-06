@@ -372,27 +372,36 @@ bool acpi_get_iso(uint32_t index, uint8_t *source_irq, uint32_t *global_irq, uin
  * Must be called after acpi_init().
  * Returns pointer to the SDT header, or NULL if not found.
  */
+/* Maximum valid physical address for ACPI table pointers (20 GB identity map) */
+#define ACPI_MAX_ADDR 0x500000000ULL
+
 const void *acpi_find_table(const char *sig)
 {
     if (!saved_rsdp) return NULL;
 
     if (saved_rsdp->revision >= 2 && saved_rsdp->xsdt_address != 0) {
-        const struct acpi_sdt_header *xsdt =
-            (const struct acpi_sdt_header *)(uintptr_t)saved_rsdp->xsdt_address;
+        uintptr_t xsdt_addr = (uintptr_t)saved_rsdp->xsdt_address;
+        if (xsdt_addr >= ACPI_MAX_ADDR) return NULL;
+        const struct acpi_sdt_header *xsdt = (const struct acpi_sdt_header *)xsdt_addr;
         uint32_t entries = (xsdt->length - sizeof(*xsdt)) / 8;
+        if (entries > 256) return NULL;  /* Sanity check */
         const uint64_t *ptrs = (const uint64_t *)((uintptr_t)xsdt + sizeof(*xsdt));
         for (uint32_t i = 0; i < entries; i++) {
+            if (ptrs[i] == 0 || ptrs[i] >= ACPI_MAX_ADDR) continue;
             const struct acpi_sdt_header *hdr =
                 (const struct acpi_sdt_header *)(uintptr_t)ptrs[i];
             if (sig_match(hdr->signature, sig, 4))
                 return hdr;
         }
     } else {
-        const struct acpi_sdt_header *rsdt =
-            (const struct acpi_sdt_header *)(uintptr_t)saved_rsdp->rsdt_address;
+        uintptr_t rsdt_addr = (uintptr_t)saved_rsdp->rsdt_address;
+        if (rsdt_addr >= ACPI_MAX_ADDR) return NULL;
+        const struct acpi_sdt_header *rsdt = (const struct acpi_sdt_header *)rsdt_addr;
         uint32_t entries = (rsdt->length - sizeof(*rsdt)) / 4;
+        if (entries > 256) return NULL;
         const uint32_t *ptrs = (const uint32_t *)((uintptr_t)rsdt + sizeof(*rsdt));
         for (uint32_t i = 0; i < entries; i++) {
+            if (ptrs[i] == 0) continue;
             const struct acpi_sdt_header *hdr =
                 (const struct acpi_sdt_header *)(uintptr_t)ptrs[i];
             if (sig_match(hdr->signature, sig, 4))

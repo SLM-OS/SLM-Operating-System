@@ -106,10 +106,16 @@ static int validate_header(const Elf64_Ehdr *ehdr, size_t size)
         return ELF_ERR_INVALID;
     }
 
-    /* Check ARM64 architecture */
+    /* Check architecture matches current platform */
+#if defined(PLATFORM_X86_64)
+    if (ehdr->e_machine != 0x3E) {  /* EM_X86_64 = 62 */
+        return ELF_ERR_ARCH;
+    }
+#else
     if (ehdr->e_machine != EM_AARCH64) {
         return ELF_ERR_ARCH;
     }
+#endif
 
     /* Check executable type */
     if (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) {
