@@ -34,7 +34,8 @@ The x86-64 port enables SLM-OS to run on standard PC hardware with x86-64 proces
 - **Console**: COM1 serial (115200 baud, 8N1)
 - **Paging**: 4-level page tables with 2MB pages
 - **Mode**: 64-bit long mode
-- **Interrupts**: 8259 PIC, PIT timer at 100 Hz
+- **Interrupts**: LAPIC + IOAPIC (8259 PIC disabled)
+- **Timer**: LAPIC timer at 100 Hz (calibrated against PIT)
 
 ### Platform Differences from ARM64
 
@@ -45,8 +46,8 @@ The x86-64 port enables SLM-OS to run on standard PC hardware with x86-64 proces
 | Page size | 4KB/64KB | 4KB/2MB |
 | Exception model | EL0-EL3 | Ring 0-3, IDT |
 | Kernel privilege | EL1 | Ring 0 |
-| Interrupt controller | GIC-400 (GICv2) | 8259 PIC |
-| Timer | ARM Generic Timer (CNTP) | 8254 PIT |
+| Interrupt controller | GIC-400 (GICv2) | LAPIC + IOAPIC |
+| Timer | ARM Generic Timer (CNTP) | LAPIC timer (~1 GHz) |
 
 ---
 
@@ -284,25 +285,47 @@ IRQ handlers are registered via `irq_register(irq, handler)`. The common handler
 
 ---
 
-## PIC and Timer
+## Interrupt Controller (APIC)
 
-### 8259 PIC Remapping
+### Architecture
 
-The PIC is remapped to avoid conflict with CPU exception vectors:
+The x86-64 port uses the Advanced Programmable Interrupt Controller (APIC):
 
-| PIC | IRQ Range | Vector Range |
-|-----|-----------|-------------|
-| Master (PIC1) | IRQ 0-7 | Vectors 32-39 |
-| Slave (PIC2) | IRQ 8-15 | Vectors 40-47 |
+| Component | Address | Purpose |
+|-----------|---------|---------|
+| Local APIC (LAPIC) | 0xFEE00000 | Per-CPU interrupt handling, timer, IPI |
+| I/O APIC (IOAPIC) | 0xFEC00000 | External device interrupt routing |
 
-### PIT Timer (8254)
+The legacy 8259 PIC is disabled at boot (remapped to vectors 0xF0-0xFF, all masked).
 
-- **Channel**: 0
-- **Mode**: Rate generator (mode 2)
-- **Frequency**: ~100 Hz (divisor = 1193182 / 100 = 11931)
-- **IRQ**: 0 → vector 32
+### ACPI Discovery
 
-The timer interrupt handler increments a global `pit_ticks` counter used for timing.
+CPU topology and APIC addresses are discovered from the ACPI MADT table:
+- RSDP found via Multiboot2 tag (type 14/15) or BIOS memory scan
+- MADT provides: LAPIC base, IOAPIC base, CPU APIC IDs, Interrupt Source Overrides
+- ISA IRQ 0 (PIT) is typically redirected to IOAPIC pin 2 via an ISO entry
+
+### Interrupt Vector Layout
+
+| Vector Range | Purpose |
+|-------------|---------|
+| 0-31 | CPU exceptions (trap gates) |
+| 32-47 | IOAPIC device IRQs (keyboard, serial, etc.) |
+| 48 | LAPIC timer (per-CPU, periodic) |
+| 49-63 | Reserved for IPIs and future use |
+| 0xFF | Spurious interrupt vector |
+
+## Timer (LAPIC)
+
+The per-CPU LAPIC timer replaces the legacy 8254 PIT:
+
+- **Mode**: Periodic (auto-reload)
+- **Frequency**: 100 Hz (TIMER_HZ)
+- **Calibration**: Measured against PIT channel 2 (~10ms one-shot)
+- **Divide**: 16 (LAPIC timer divide register = 0x03)
+- **Vector**: 48
+
+On the i7-6700, the LAPIC timer clock runs at ~1 GHz. Each CPU has its own LAPIC timer, enabling per-CPU tick interrupts for SMP.
 
 ---
 
@@ -423,7 +446,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 49 tests across 12 categories:
+The `test_x86_boot.c` test suite contains 55 tests across 13 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -435,6 +458,7 @@ The `test_x86_boot.c` test suite contains 49 tests across 12 categories:
 | IDT | 4 | IDTR loaded, exception entries present, IRQ interrupt gates, exception trap gates |
 | PIC | 3 | OCW3 response, timer unmasked, slave accessible |
 | PIT timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
+| ACPI + APIC | 6 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, timer running |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock irqsave roundtrip, gic enable/disable, timer frequency, timer count |
 | Scheduler integration | 5 | gic_init loads IDT, task stack within mapping, gic_end_interrupt safe, uart_putc, scheduler_tick callable |
 | setjmp/longjmp | 2 | setjmp/longjmp round-trip, longjmp(0) returns 1 |
@@ -514,8 +538,11 @@ Lua commands are available in the shell via `lua <expression>`.
 |------|---------|
 | `kernel/arch/x86_64/main_x86.c` | Standalone test kernel entry (not used in integrated build) |
 | `kernel/arch/x86_64/idt.c` | IDT setup, exception handler, IRQ dispatch |
-| `kernel/arch/x86_64/pic.c` | 8259 PIC driver (gic.h interface) |
-| `kernel/arch/x86_64/timer_x86.c` | 8254 PIT timer (timer.h interface) |
+| `kernel/arch/x86_64/acpi.c` | ACPI RSDP/MADT parsing (CPU discovery) |
+| `kernel/arch/x86_64/lapic.c` | Local APIC driver (init, EOI, IPI, timer) |
+| `kernel/arch/x86_64/ioapic.c` | I/O APIC driver (redirection table) |
+| `kernel/arch/x86_64/pic.c` | gic.h interface routing to LAPIC/IOAPIC |
+| `kernel/arch/x86_64/timer_x86.c` | LAPIC timer (timer.h interface, calibrated vs PIT) |
 | `kernel/arch/x86_64/platform_x86.c` | Boot glue, SMP/VMM/DTB/Rust/component stubs |
 | `kernel/drivers/uart_x86.c` | 16550 UART driver (uart.h interface) |
 
@@ -530,7 +557,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 49 tests: boot, IDT, PIC, PIT, Multiboot2, platform, scheduler, setjmp |
+| `kernel/tests/test_x86_boot.c` | 55 tests: boot, IDT, APIC, Multiboot2, platform, scheduler, setjmp |
 
 ---
 
@@ -565,9 +592,9 @@ GAS generates 64-bit instructions (RIP-relative addressing) even with `.code32` 
 2. **Performance**: Fewer TLB entries needed
 3. **Boot speed**: Identity mapping 1GB requires only 512 PD entries
 
-### Why 8259 PIC Instead of APIC?
+### Why LAPIC Timer Instead of PIT?
 
-The 8259 PIC is simpler and sufficient for single-core bring-up. APIC/IOAPIC will be needed later for SMP, but the PIC provides a working interrupt path with minimal code.
+The LAPIC timer is per-CPU (essential for SMP) and higher frequency (~1 GHz vs PIT's 1.19 MHz). The PIT is still used once at boot to calibrate the LAPIC timer frequency, then disabled.
 
 ### Why Separate .page_tables Section?
 

@@ -889,6 +889,45 @@ static void test_acpi_ioapic_address(void)
 }
 
 /* ============================================================================
+ * LAPIC / IOAPIC Tests
+ * ============================================================================ */
+
+extern uint32_t lapic_read(uint32_t offset);
+extern uint32_t lapic_get_id(void);
+extern void lapic_eoi(void);
+
+/*
+ * Test: LAPIC is initialized (SVR has APIC enable bit set).
+ */
+static void test_lapic_initialized(void)
+{
+    uint32_t svr = lapic_read(0xF0);  /* Spurious Vector Register */
+    /* Bit 8 = APIC Software Enable */
+    TEST_ASSERT_TRUE((svr & (1 << 8)) != 0);
+}
+
+/*
+ * Test: LAPIC EOI doesn't crash (write to EOI register).
+ */
+static void test_lapic_eoi_safe(void)
+{
+    lapic_eoi();
+    TEST_ASSERT_TRUE(true);
+}
+
+/*
+ * Test: LAPIC timer is delivering ticks (pit_ticks advances).
+ */
+static void test_lapic_timer_running(void)
+{
+    extern volatile uint64_t pit_ticks;
+    uint64_t start = pit_ticks;
+    for (int i = 0; i < 10; i++)
+        __asm__ volatile("hlt");
+    TEST_ASSERT_TRUE(pit_ticks > start);
+}
+
+/* ============================================================================
  * setjmp/longjmp Tests (required for Lua)
  * ============================================================================ */
 
@@ -1024,10 +1063,13 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_uart_putc_works);
     RUN_TEST(test_scheduler_tick_callable);
 
-    /* ACPI tests */
+    /* ACPI + APIC tests */
     RUN_TEST(test_acpi_discovered_cpus);
     RUN_TEST(test_acpi_lapic_address);
     RUN_TEST(test_acpi_ioapic_address);
+    RUN_TEST(test_lapic_initialized);
+    RUN_TEST(test_lapic_eoi_safe);
+    RUN_TEST(test_lapic_timer_running);
 
     /* setjmp/longjmp (required for Lua) */
     RUN_TEST(test_setjmp_longjmp);

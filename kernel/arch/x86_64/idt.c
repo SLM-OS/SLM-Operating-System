@@ -180,8 +180,9 @@ void irq_register(uint8_t irq, irq_handler_t handler)
         irq_handlers[irq] = handler;
 }
 
-/* gic_end_interrupt is used for LAPIC EOI (from pic.c) */
-extern void gic_end_interrupt(uint32_t irq);
+/* gic_end_interrupt for LAPIC EOI — provided by pic.c in integrated build.
+ * Weak default for standalone test kernel (no LAPIC). */
+__attribute__((weak)) void gic_end_interrupt(uint32_t irq) { (void)irq; }
 
 /* I/O port access for PIC test in test suite */
 static inline uint8_t inb(uint16_t port)
