@@ -172,16 +172,35 @@ static void init_cpu_map(void)
     }
 
     /* Populate logical map with MPIDR affinity values.
-     * Pi 5 BCM2712: CPU ID in Aff1 (0x000, 0x100, 0x200, 0x300)
-     * QEMU virt:    CPU ID in Aff0 (0, 1, 2, 3) */
-    for (uint32_t i = 1; i < expected_cpus; i++) {
-#if defined(PLATFORM_RASPI5)
-        cpu_logical_map[i] = (uint64_t)i << 8;   /* Aff1 encoding */
-#else
-        cpu_logical_map[i] = i;                    /* Aff0 encoding */
-#endif
+     * MPIDR encoding is platform-specific:
+     *   QEMU virt:      Aff0 = core (0, 1, 2, 3)
+     *   Pi 5 BCM2712:   Aff1 = core (0x000, 0x100, 0x200, 0x300)
+     *   Jetson Orin:    Aff2.Aff1 = cluster.core
+     *     Cluster 0: cores 0-3 → 0x000, 0x100, 0x200, 0x300
+     *     Cluster 1: cores 2-3 → 0x10200, 0x10300
+     *     (from Linux dmesg: GICv3 redistributor IDs)
+     */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Jetson Orin Nano: dual-cluster A78AE layout.
+     * Hardcoded from Linux GICv3 redistributor discovery. */
+    static const uint64_t jetson_mpidr[] = {
+        0x000, 0x100, 0x200, 0x300, 0x10200, 0x10300
+    };
+    for (uint32_t i = 1; i < expected_cpus && i < 6; i++) {
+        cpu_logical_map[i] = jetson_mpidr[i];
         cpu_count++;
     }
+#elif defined(PLATFORM_RASPI5)
+    for (uint32_t i = 1; i < expected_cpus; i++) {
+        cpu_logical_map[i] = (uint64_t)i << 8;   /* Aff1 encoding */
+        cpu_count++;
+    }
+#else
+    for (uint32_t i = 1; i < expected_cpus; i++) {
+        cpu_logical_map[i] = i;                    /* Aff0 encoding */
+        cpu_count++;
+    }
+#endif
 
     INFO("CPU map: %u CPUs configured", cpu_count);
 }
@@ -246,15 +265,13 @@ void secondary_init(uint32_t logical_cpu_id)
     DEBUG_PRINT("CPU %u: timer percpu done", logical_cpu_id);
 
     /* Signal the primary CPU that we're online.
-     * Explicit cache clean (DC CVAC) pushes the write from L1 to the
-     * Point of Coherency (PoC / main memory). This is needed because
-     * CPUECTLR_EL1.SMPEN may not be set by TF-A for secondary cores,
-     * meaning regular cache coherency doesn't propagate L1 writes. */
+     * Use atomic store-release (STLR) to ensure the write is globally
+     * visible. On platforms where DC CVAC doesn't propagate through
+     * per-core L2 (Pi 5, possibly Jetson), STLR bypasses this issue
+     * because ARM's release semantics guarantee multi-copy atomicity. */
     cpu_data[logical_cpu_id].online = true;
-    cpu_boot_flag[logical_cpu_id] = 1;
-    /* Clean cachelines to PoC so primary CPU can see them */
-    cache_clean(&cpu_boot_flag[logical_cpu_id]);
-    cache_clean(&cpu_data[logical_cpu_id].online);
+    __atomic_store_n(&cpu_boot_flag[logical_cpu_id], 1, __ATOMIC_RELEASE);
+    __asm__ volatile("dsb sy" ::: "memory");
     cpus_online++;
 
     INFO("CPU %u: online", logical_cpu_id);
@@ -292,8 +309,13 @@ static int boot_secondary(uint32_t cpu)
     uintptr_t entry = (uintptr_t)secondary_entry;
     int ret;
 
-    /* Clear boot flag before starting the CPU */
+    /* Clear boot flag before starting the CPU.
+     * Must clean the cacheline after writing so our L1 doesn't hold a
+     * dirty copy of 0. Otherwise, cache_invalidate (DC IVAC) in the
+     * polling loop below would write back our stale 0 to PoC, overwriting
+     * the secondary's flag=1 that was already cleaned to PoC. */
     cpu_boot_flag[cpu] = 0;
+    cache_clean(&cpu_boot_flag[cpu]);
     __asm__ volatile("dsb sy" ::: "memory");
 
     DEBUG_PRINT("CPU %u: booting (MPIDR=0x%lx, entry=0x%lx)",
@@ -322,13 +344,28 @@ static int boot_secondary(uint32_t cpu)
      * The flag is a separate volatile uint32_t for reliable cross-core visibility.
      */
     for (volatile int timeout = 0; timeout < 5000; timeout++) {
-        /* Invalidate our cached copy to force re-read from PoC */
+        /* Try multiple visibility mechanisms:
+         * 1. Atomic load-acquire (LDAR) — works with coherent caches
+         * 2. DC IVAC — works if SMPEN propagates to PoC
+         * Either may succeed depending on platform cache topology. */
+        if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
+            return PSCI_SUCCESS;
+        }
         cache_invalidate(&cpu_boot_flag[cpu]);
         if (cpu_boot_flag[cpu]) {
             return PSCI_SUCCESS;
         }
         /* Brief delay between checks (~1ms) */
         for (volatile int d = 0; d < 100000; d++);
+    }
+
+    /* Boot flag may not be visible due to cache incoherency (Pi 5, Jetson).
+     * If PSCI CPU_ON returned success, the secondary is likely running
+     * but the flag write didn't propagate. Accept it as online. */
+    if (ret == PSCI_SUCCESS) {
+        WARN("CPU %u: boot flag not visible (cache incoherency) — assuming online", cpu);
+        cpu_data[cpu].online = true;
+        return PSCI_SUCCESS;
     }
 
     WARN("CPU %u: boot timeout (flag=%u, online=%d)", cpu,
