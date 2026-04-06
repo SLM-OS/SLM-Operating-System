@@ -73,6 +73,8 @@ static uint64_t l2_ram_c0[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)))
 static uint64_t l2_mmio_pcie[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio_gic[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static uint64_t l2_mmio_rp1[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+/* L2 table for 4th GB: splits L1[3] so last 2MB can be non-cacheable */
+static uint64_t l2_ram_gb3[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #endif
 
 /* VMM state */
@@ -832,12 +834,46 @@ static void vmm_setup_platform(void)
     /*
      * Map RAM using 1GB L1 block descriptors.
      * Pi 5 has 4GB (or 8GB) starting at PA 0x0.
+     *
+     * L1[0-2]: 1GB block descriptors (write-back cacheable).
+     * L1[3]:   L2 table — 511 WB 2MB blocks + 1 NC 2MB block at the top.
+     *          The NC block (PA 0xFFE00000) is used for cross-CPU shared data
+     *          that must bypass L1/L2 caches (see ncmem.h).
      */
     uint32_t ram_gb = RAM_SIZE / L1_BLOCK_SIZE;
     if (ram_gb > 512) ram_gb = 512;
-    for (uint32_t i = 0; i < ram_gb; i++) {
+
+    /* Map first N-1 GBs as L1 block descriptors */
+    uint32_t l1_blocks = (ram_gb > 1) ? ram_gb - 1 : ram_gb;
+    for (uint32_t i = 0; i < l1_blocks; i++) {
         l1_table[i] = make_l1_block_desc(i * L1_BLOCK_SIZE, ram_flags);
-        vmm_state.blocks_mapped += 512;  /* each 1GB = 512 × 2MB equivalent */
+        vmm_state.blocks_mapped += 512;
+    }
+
+    /* Split the last GB into L2 2MB entries for NC region at top */
+    if (ram_gb > 1) {
+        uint64_t gb3_base = (uint64_t)(ram_gb - 1) * L1_BLOCK_SIZE;
+        uint32_t nc_flags = VMM_FLAG_NOCACHE | VMM_FLAG_READ | VMM_FLAG_WRITE;
+
+        for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+            l2_ram_gb3[i] = 0;
+
+        /* L2[0-510]: WB cacheable 2MB blocks (same as original L1 block) */
+        for (int i = 0; i < ENTRIES_PER_TABLE - 1; i++) {
+            l2_ram_gb3[i] = make_block_desc(gb3_base + (uint64_t)i * BLOCK_SIZE,
+                                            ram_flags);
+        }
+        /* L2[511]: Non-cacheable 2MB block for cross-CPU shared memory */
+        l2_ram_gb3[ENTRIES_PER_TABLE - 1] = make_block_desc(
+            gb3_base + (uint64_t)(ENTRIES_PER_TABLE - 1) * BLOCK_SIZE, nc_flags);
+
+        l1_table[ram_gb - 1] = make_table_desc((uint64_t)l2_ram_gb3);
+        vmm_state.l2_tables_used++;
+        vmm_state.blocks_mapped += ENTRIES_PER_TABLE;
+
+        DEBUG_PRINT("  L1[%u]: L2 table (511 WB + 1 NC at 0x%lx)",
+                    ram_gb - 1,
+                    (unsigned long)(gb3_base + (uint64_t)(ENTRIES_PER_TABLE - 1) * BLOCK_SIZE));
     }
 
     /*

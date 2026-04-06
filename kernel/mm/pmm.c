@@ -389,7 +389,12 @@ void pmm_init(void)
 {
     uintptr_t kernel_end = (uintptr_t)&__kernel_end;
     buddy_state.heap_start = PAGE_ALIGN_UP(kernel_end);
+#if defined(PLATFORM_RASPI5)
+    /* Reserve last 2MB for non-cacheable shared memory (see ncmem.h) */
+    buddy_state.heap_end = (RAM_BASE + RAM_SIZE) - 0x200000UL;
+#else
     buddy_state.heap_end = RAM_BASE + RAM_SIZE;
+#endif
 
     /* Calculate page counts (full range including gaps) */
     buddy_state.total_pages = (buddy_state.heap_end - buddy_state.heap_start) / PAGE_SIZE;

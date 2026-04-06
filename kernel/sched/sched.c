@@ -19,6 +19,7 @@
 #include "gic.h"
 #include "timer.h"
 #include "cache.h"
+#include "ncmem.h"
 #include <stdint.h>
 
 /* Deadline boost thresholds (in nanoseconds) */
@@ -30,15 +31,45 @@
 extern void task_set_current(struct task *task);
 extern void task_destroy(struct task *task);
 
-/* Per-CPU run queue */
+/* Per-CPU run queue.
+ * On Pi 5, the data fields live in NC memory for cross-CPU visibility,
+ * but the lock stays in cacheable memory (ldaxr/stxr require cacheable). */
 struct cpu_runqueue {
-    spinlock_t lock;
     struct task *head;
     struct task *tail;
     struct task *idle_task;
     struct task *zombie;
     uint32_t ready_count;
 } __attribute__((aligned(CACHE_LINE_SIZE)));
+
+/* Per-CPU run queue locks — always in cacheable memory.
+ * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
+ * used by spinlocks may not work on Non-Cacheable memory (BCM2712). */
+static spinlock_t rq_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
+
+/* Lock helpers that use the correct lock for a given CPU */
+static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
+{
+    return spin_lock_irqsave(&rq_lock[cpu]);
+}
+static inline void rq_unlock_irqrestore(uint32_t cpu, irq_flags_t flags)
+{
+    spin_unlock_irqrestore(&rq_lock[cpu], flags);
+}
+
+/*
+ * Per-CPU run queue access.
+ *
+ * On Pi 5, run queues are in non-cacheable memory at NC_MEM_BASE to bypass
+ * the L1/L2 incoherency (SMPEN not set by TF-A). The address is computed
+ * from compile-time constants — no cacheable pointer indirection that would
+ * itself be invisible to other CPUs.
+ *
+ * On other platforms (QEMU, Jetson), caches are coherent and run queues
+ * live in the normal BSS-resident fallback array.
+ */
+/* Forward declaration — defined below after sched struct */
+static inline struct cpu_runqueue *cpu_rq(uint32_t cpu);
 
 /*
  * Global scheduler state.
@@ -48,13 +79,25 @@ struct cpu_runqueue {
  * to prevent deadlock. Global statistics are racy but acceptable.
  */
 static struct {
-    struct cpu_runqueue cpu[MAX_CPUS];  /* Per-CPU run queues (each has own lock) */
+    struct cpu_runqueue cpu_fallback[MAX_CPUS];
     uint32_t task_count;                 /* Total tasks (racy but OK for stats) */
     uint64_t context_switches;           /* Total switches (racy but OK) */
     uint64_t timer_ticks;                /* Timer interrupts (racy but OK) */
     uint32_t isolated_cores;             /* Bitmask of isolated cores */
     int initialized;                     /* Scheduler initialized flag */
 } sched;
+
+/* cpu_rq() implementation — must be after sched struct definition */
+static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
+{
+#if defined(PLATFORM_RASPI5)
+    /* NC memory at compile-time-known address — no cacheable pointer.
+     * Run queues are the first ncmem_alloc() in scheduler_init(). */
+    return &((struct cpu_runqueue *)NC_MEM_BASE)[cpu];
+#else
+    return &sched.cpu_fallback[cpu];
+#endif
+}
 
 /*
  * Idle task - runs when no other tasks are ready.
@@ -140,24 +183,31 @@ void scheduler_init(void)
     sched.timer_ticks = 0;
     sched.isolated_cores = 0;
 
+#if defined(PLATFORM_RASPI5)
+    /* Initialize NC run queue region. cpu_rq() uses NC_MEM_BASE directly
+     * (compile-time constant) so no cacheable pointer is needed. */
+    ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue), CACHE_LINE_SIZE);
+    INFO("SMP: run queues in NC memory at 0x%lx", (unsigned long)NC_MEM_BASE);
+#endif
+
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
-        spin_init(&sched.cpu[i].lock);
-        sched.cpu[i].head = NULL;
-        sched.cpu[i].tail = NULL;
-        sched.cpu[i].idle_task = NULL;
-        sched.cpu[i].zombie = NULL;
-        sched.cpu[i].ready_count = 0;
+        spin_init(&rq_lock[i]);
+        cpu_rq(i)->head = NULL;
+        cpu_rq(i)->tail = NULL;
+        cpu_rq(i)->idle_task = NULL;
+        cpu_rq(i)->zombie = NULL;
+        cpu_rq(i)->ready_count = 0;
     }
 
     /* Create idle task for boot CPU (CPU 0) */
-    sched.cpu[0].idle_task = task_create("idle", idle_task_func, NULL);
-    if (!sched.cpu[0].idle_task) {
+    cpu_rq(0)->idle_task = task_create("idle", idle_task_func, NULL);
+    if (!cpu_rq(0)->idle_task) {
         panic("scheduler_init: failed to create idle task");
     }
-    sched.cpu[0].idle_task->state = TASK_READY;
-    sched.cpu[0].idle_task->cpu_affinity = 0;  /* Pinned to CPU 0 */
-    sched.cpu[0].idle_task->assigned_cpu = 0;
+    cpu_rq(0)->idle_task->state = TASK_READY;
+    cpu_rq(0)->idle_task->cpu_affinity = 0;  /* Pinned to CPU 0 */
+    cpu_rq(0)->idle_task->assigned_cpu = 0;
 
     sched.initialized = 1;
     cache_clean(&sched.initialized);
@@ -205,14 +255,14 @@ void scheduler_init_secondary(uint32_t cpu)
     }
 
     /* Lock this CPU's queue to update idle task */
-    irq_flags_t flags = spin_lock_irqsave(&sched.cpu[cpu].lock);
+    irq_flags_t flags = rq_lock_irqsave(cpu);
 
     idle->state = TASK_READY;
     idle->cpu_affinity = cpu;  /* Pinned to this CPU */
     idle->assigned_cpu = cpu;
-    sched.cpu[cpu].idle_task = idle;
+    cpu_rq(cpu)->idle_task = idle;
 
-    spin_unlock_irqrestore(&sched.cpu[cpu].lock, flags);
+    rq_unlock_irqrestore(cpu, flags);
 
     INFO("CPU %u: scheduler initialized", cpu);
 }
@@ -225,7 +275,7 @@ void scheduler_init_secondary(uint32_t cpu)
  */
 static void add_to_cpu_queue_locked(struct task *task, uint32_t cpu)
 {
-    struct cpu_runqueue *rq = &sched.cpu[cpu];
+    struct cpu_runqueue *rq = cpu_rq(cpu);
 
     task->assigned_cpu = cpu;
 
@@ -274,7 +324,7 @@ static void add_to_cpu_queue_locked(struct task *task, uint32_t cpu)
  */
 static int remove_from_cpu_queue_locked(struct task *task, uint32_t cpu)
 {
-    struct cpu_runqueue *rq = &sched.cpu[cpu];
+    struct cpu_runqueue *rq = cpu_rq(cpu);
     struct task *prev = NULL;
     struct task *curr = rq->head;
 
@@ -309,8 +359,8 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
         return;
     }
 
-    struct cpu_runqueue *rq = &sched.cpu[cpu];
-    irq_flags_t flags = spin_lock_irqsave(&rq->lock);
+    struct cpu_runqueue *rq = cpu_rq(cpu);
+    irq_flags_t flags = rq_lock_irqsave(cpu);
 
     add_to_cpu_queue_locked(task, cpu);
     sched.task_count++;  /* Racy but acceptable for stats */
@@ -331,7 +381,7 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
     cache_clean(&task->state);
     cache_clean(&task->effective_priority);
 
-    spin_unlock_irqrestore(&rq->lock, flags);
+    rq_unlock_irqrestore(cpu, flags);
 }
 
 /*
@@ -349,7 +399,7 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
  */
 static uint32_t calculate_deadline_pressure(uint32_t cpu)
 {
-    struct cpu_runqueue *rq = &sched.cpu[cpu];
+    struct cpu_runqueue *rq = cpu_rq(cpu);
     uint32_t pressure = 0;
     uint64_t now = slm_get_time_ns();
 
@@ -390,7 +440,7 @@ static uint32_t calculate_deadline_pressure(uint32_t cpu)
 static uint32_t find_target_cpu(void)
 {
     uint32_t best_cpu = 0;
-    uint32_t best_score = sched.cpu[0].ready_count + calculate_deadline_pressure(0);
+    uint32_t best_score = cpu_rq(0)->ready_count + calculate_deadline_pressure(0);
 
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
         /* Skip isolated cores */
@@ -399,7 +449,7 @@ static uint32_t find_target_cpu(void)
         }
 
         /* Combined score: ready count + deadline pressure */
-        uint32_t score = sched.cpu[cpu].ready_count + calculate_deadline_pressure(cpu);
+        uint32_t score = cpu_rq(cpu)->ready_count + calculate_deadline_pressure(cpu);
 
         /* Pick CPU with lowest combined score */
         if (score < best_score) {
@@ -420,8 +470,7 @@ static uint32_t find_target_cpu(void)
  *
  * Returns the least-loaded non-isolated CPU > 0, or falls back to find_target_cpu().
  */
-__attribute__((unused))
-static uint32_t find_performance_cpu(void)
+static uint32_t __attribute__((unused)) find_performance_cpu(void)
 {
     if (cpu_count <= 1) {
         return 0;  /* Only one CPU available */
@@ -438,7 +487,7 @@ static uint32_t find_performance_cpu(void)
             continue;
         }
 
-        uint32_t score = sched.cpu[cpu].ready_count + calculate_deadline_pressure(cpu);
+        uint32_t score = cpu_rq(cpu)->ready_count + calculate_deadline_pressure(cpu);
         if (score < best_score) {
             best_cpu = cpu;
             best_score = score;
@@ -477,11 +526,13 @@ void scheduler_add_task(struct task *task)
         target_cpu = task->cpu_affinity;
 #if defined(PLATFORM_RASPI5)
     } else {
-        /* Pi 5: cross-CPU task dispatch requires SMPEN for L2 cache
-         * coherency, which TF-A doesn't set. DC CIVAC does not
-         * propagate through per-core L2 caches without SMPEN.
-         * All tasks without explicit affinity run on CPU 0. */
+        /* Pi 5: NC run queues make queue metadata visible cross-CPU, but
+         * task struct data (context, stack, function pointer) lives in
+         * cacheable memory. Without SMPEN, secondary CPUs may see stale
+         * task struct data in L2. Tasks pinned to CPU 0 until task structs
+         * are also allocated from NC memory. */
         target_cpu = 0;
+    }
 #else
     } else if (task->deadline_ns > 0) {
         target_cpu = find_performance_cpu();
@@ -489,8 +540,8 @@ void scheduler_add_task(struct task *task)
                     task->name, target_cpu);
     } else {
         target_cpu = find_target_cpu();
-#endif
     }
+#endif
 
     scheduler_add_task_to_cpu(task, target_cpu);
 }
@@ -505,8 +556,8 @@ void scheduler_remove_task(struct task *task)
     }
 
     uint32_t cpu = task->assigned_cpu;
-    struct cpu_runqueue *rq = &sched.cpu[cpu];
-    irq_flags_t flags = spin_lock_irqsave(&rq->lock);
+    struct cpu_runqueue *rq = cpu_rq(cpu);
+    irq_flags_t flags = rq_lock_irqsave(cpu);
 
     /*
      * Task might already have been removed from the queue when it
@@ -519,7 +570,7 @@ void scheduler_remove_task(struct task *task)
                     task->name, cpu, rq->ready_count);
     }
 
-    spin_unlock_irqrestore(&rq->lock, flags);
+    rq_unlock_irqrestore(cpu, flags);
 }
 
 /*
@@ -556,16 +607,16 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
      * Lock both queues in CPU ID order to prevent deadlock.
      * If old_cpu < target_cpu, lock old first; otherwise lock target first.
      */
-    struct cpu_runqueue *rq_old = &sched.cpu[old_cpu];
-    struct cpu_runqueue *rq_new = &sched.cpu[target_cpu];
+    struct cpu_runqueue *rq_old = cpu_rq(old_cpu);
+    struct cpu_runqueue *rq_new = cpu_rq(target_cpu);
     irq_flags_t flags;
 
     if (old_cpu < target_cpu) {
-        flags = spin_lock_irqsave(&rq_old->lock);
-        spin_lock(&rq_new->lock);
+        flags = rq_lock_irqsave(old_cpu);
+        spin_lock(&rq_lock[target_cpu]);
     } else {
-        flags = spin_lock_irqsave(&rq_new->lock);
-        spin_lock(&rq_old->lock);
+        flags = rq_lock_irqsave(target_cpu);
+        spin_lock(&rq_lock[old_cpu]);
     }
 
     /* Remove from old CPU queue if task is ready */
@@ -596,11 +647,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
 
     /* Unlock in reverse order */
     if (old_cpu < target_cpu) {
-        spin_unlock(&rq_new->lock);
-        spin_unlock_irqrestore(&rq_old->lock, flags);
+        spin_unlock(&rq_lock[target_cpu]);
+        rq_unlock_irqrestore(old_cpu, flags);
     } else {
-        spin_unlock(&rq_old->lock);
-        spin_unlock_irqrestore(&rq_new->lock, flags);
+        spin_unlock(&rq_lock[old_cpu]);
+        rq_unlock_irqrestore(target_cpu, flags);
     }
 
     return 0;
@@ -611,7 +662,7 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
  */
 static struct task *pick_next_task(uint32_t cpu)
 {
-    struct cpu_runqueue *rq = &sched.cpu[cpu];
+    struct cpu_runqueue *rq = cpu_rq(cpu);
 
     if (rq->head) {
         return rq->head;
@@ -627,14 +678,15 @@ static struct task *pick_next_task(uint32_t cpu)
 void schedule(void)
 {
     uint32_t this_cpu = cpu_id();
-    struct cpu_runqueue *rq = &sched.cpu[this_cpu];
+    struct cpu_runqueue *rq = cpu_rq(this_cpu);
 
-    /* Invalidate our cached copy of the run queue before reading.
-     * Another CPU may have added tasks to our queue (scheduler_add_task).
-     * Without SMPEN, those writes stay in the other CPU's L1 cache. */
+    /* On non-NC platforms, invalidate cached copy of run queue before reading.
+     * On Pi 5 with NC run queues, this is a no-op (NC data not cached). */
+#if !defined(PLATFORM_RASPI5)
     cache_invalidate_range(rq, sizeof(*rq));
+#endif
 
-    irq_flags_t flags = spin_lock_irqsave(&rq->lock);
+    irq_flags_t flags = rq_lock_irqsave(this_cpu);
 
     /*
      * Clean up zombie task from previous schedule cycle.
@@ -644,12 +696,12 @@ void schedule(void)
         struct task *zombie = rq->zombie;
         rq->zombie = NULL;
         cache_clean(&rq->zombie);
-        spin_unlock_irqrestore(&rq->lock, flags);
+        rq_unlock_irqrestore(this_cpu, flags);
 
         /* Destroy outside lock - task_destroy may call pmm */
         task_destroy(zombie);
 
-        flags = spin_lock_irqsave(&rq->lock);
+        flags = rq_lock_irqsave(this_cpu);
     }
 
     struct task *current = task_current();
@@ -699,14 +751,14 @@ void schedule(void)
              * The terminated task should not be in the run queue, and
              * pick_next_task should return idle_task if queue is empty.
              */
-            spin_unlock_irqrestore(&rq->lock, flags);
+            rq_unlock_irqrestore(this_cpu, flags);
             panic("schedule: terminated task selected as next (CPU %u, task '%s')",
                   this_cpu, current->name);
         }
         if (current) {
             current->state = TASK_RUNNING;
         }
-        spin_unlock_irqrestore(&rq->lock, flags);
+        rq_unlock_irqrestore(this_cpu, flags);
         return;
     }
 
@@ -740,7 +792,7 @@ void schedule(void)
     cache_clean(&rq->ready_count);
     cache_clean(&rq->zombie);
 
-    spin_unlock_irqrestore(&rq->lock, flags);
+    rq_unlock_irqrestore(this_cpu, flags);
 
     /* switch_to saves current context and restores next's context */
     switch_to(current, next);
@@ -760,7 +812,7 @@ void yield(void)
 void scheduler_start(void)
 {
     uint32_t this_cpu = cpu_id();
-    struct cpu_runqueue *rq = &sched.cpu[this_cpu];
+    struct cpu_runqueue *rq = cpu_rq(this_cpu);
 
     if (!sched.initialized) {
         panic("scheduler_start: scheduler not initialized");
@@ -768,12 +820,12 @@ void scheduler_start(void)
 
     INFO("CPU %u: Starting scheduler", this_cpu);
 
-    irq_flags_t flags = spin_lock_irqsave(&rq->lock);
+    irq_flags_t flags = rq_lock_irqsave(this_cpu);
 
     /* Pick first task */
     struct task *first = pick_next_task(this_cpu);
     if (!first) {
-        spin_unlock_irqrestore(&rq->lock, flags);
+        rq_unlock_irqrestore(this_cpu, flags);
         panic("scheduler_start: no tasks to run");
     }
 
@@ -794,7 +846,7 @@ void scheduler_start(void)
 
     INFO("CPU %u: Switching to first task: '%s'", this_cpu, first->name);
 
-    spin_unlock_irqrestore(&rq->lock, flags);
+    rq_unlock_irqrestore(this_cpu, flags);
 
     /* Start timer and enable interrupts now that a task is active.
      * Must be done AFTER task_set_current() so that timer IRQ handler
@@ -843,7 +895,7 @@ void scheduler_get_stats(struct sched_stats *stats)
     /* Sum ready counts from all CPUs */
     stats->ready_count = 0;
     for (uint32_t i = 0; i < cpu_count; i++) {
-        stats->ready_count += sched.cpu[i].ready_count;
+        stats->ready_count += cpu_rq(i)->ready_count;
     }
 }
 
@@ -869,8 +921,8 @@ void scheduler_dump(void)
 
     /* Dump per-CPU run queues (lock each individually) */
     for (uint32_t i = 0; i < cpu_count; i++) {
-        struct cpu_runqueue *rq = &sched.cpu[i];
-        irq_flags_t flags = spin_lock_irqsave(&rq->lock);
+        struct cpu_runqueue *rq = cpu_rq(i);
+        irq_flags_t flags = rq_lock_irqsave(i);
 
         uart_printf("  CPU %u queue (%u): ", i, rq->ready_count);
 
@@ -886,7 +938,7 @@ void scheduler_dump(void)
             uart_puts("(empty)\n");
         }
 
-        spin_unlock_irqrestore(&rq->lock, flags);
+        rq_unlock_irqrestore(i, flags);
     }
 }
 

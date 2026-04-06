@@ -201,12 +201,15 @@ The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave P
 
    **Workaround:** All user tasks pinned to CPU 0. Secondary CPUs run idle tasks and handle timer interrupts but do not receive dispatched work.
 
-   **Root cause note:** The Cortex-A76 does NOT have an SMPEN bit (unlike A53/A72). The `cpu_has_smpen()` function reads bit 6 of `S3_0_C15_C1_4` which is a different field on A76. The DSU is supposed to provide coherency automatically per ARM TRM, but BCM2712's implementation does not appear to do so for regular loads/stores.
+   **NC memory infrastructure (IMPLEMENTED, April 2026):** A 2MB non-cacheable region is mapped at the top of RAM (`0xFFE00000`) by splitting L1[3] into an L2 table (511 WB + 1 NC entries). The scheduler run queue metadata (`struct cpu_runqueue`) is allocated from this NC region via a bump allocator (`ncmem.h`). NC memory bypasses L1/L2 entirely, making writes instantly visible to all CPUs. Spinlocks remain in cacheable memory (`rq_lock[]`) because `ldaxr`/`stxr` requires cacheable memory on BCM2712.
 
-   **Potential fixes:**
-   - RPi Foundation TF-A (CPUECTLR_EL1 + CLUSTERECTLR_EL1 init) combined with L2 invalidate
-   - Non-cacheable shared memory for scheduler run queue data
-   - Further investigation of DSU configuration registers
+   **Validated:** `test_nc_memory_accessible` confirms NC memory read/write works on Pi 5. Run queue NC allocation logs `SMP: run queues in NC memory at 0xffe00000` during boot.
+
+   **Remaining blocker for full cross-CPU dispatch:** Task struct data (context, stack, function pointer, `next` pointer) lives in cacheable heap memory. Even with NC run queues, the secondary CPU's L2 may have stale task struct data. NC run queues alone caused secondary CPUs to pick up dispatch work but crash accessing stale task data.
+
+   **Next step:** Allocate task dispatch descriptors (`next`, `state`, `assigned_cpu`, `priority`) from NC memory, separate from the task struct. This would make the complete dispatch path NC-visible.
+
+   **Root cause note:** The Cortex-A76 does NOT have an SMPEN bit (unlike A53/A72). The `cpu_has_smpen()` function reads bit 6 of `S3_0_C15_C1_4` which is a different field on A76. The DSU is supposed to provide coherency automatically per ARM TRM, but BCM2712's implementation does not appear to do so for regular loads/stores.
 
 4. **~~Timer IRQ hang~~** **RESOLVED** — Timer interrupts now work using the virtual timer (CNTV, IRQ 27) with armstub8-2712.bin configuring GIC groups from EL3.
 

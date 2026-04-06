@@ -7,6 +7,7 @@
 #include "debug.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "ncmem.h"
 #include "task.h"
 #include "sched.h"
 #include "gic.h"
@@ -243,6 +244,9 @@ void kernel_main(void *dtb)
     /* Initialize virtual memory manager and enable MMU */
     uart_puts("\n");
     vmm_init();
+
+    /* Initialize non-cacheable shared memory region (Pi 5 only) */
+    ncmem_init();
 
     /* Initialize interrupt controller */
     uart_puts("\n");

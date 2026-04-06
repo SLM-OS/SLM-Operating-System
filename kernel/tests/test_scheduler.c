@@ -1315,15 +1315,13 @@ static void latency_task_entry(void *arg)
  */
 static void test_isolated_core_latency(void)
 {
+#if defined(PLATFORM_RASPI5)
+    TEST_IGNORE_MESSAGE("Cross-CPU dispatch blocked: task structs in cacheable memory");
+#endif
     /* This test dispatches short-lived tasks to secondary CPUs.
      * Previously disabled due to a task_exit/schedule race (now fixed:
      * IRQ mask in task_exit prevents timer from interrupting between
-     * state=TERMINATED and scheduler_remove_task).
-     * On Pi 5, cross-CPU dispatch doesn't work (L2 not coherent without
-     * SMPEN). Skip on Pi 5 but run on QEMU. */
-#if defined(PLATFORM_RASPI5)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch requires SMPEN (Pi 5)");
-#endif
+     * state=TERMINATED and scheduler_remove_task). */
     if (cpu_count < 2) {
         TEST_ASSERT(1);
         return;
