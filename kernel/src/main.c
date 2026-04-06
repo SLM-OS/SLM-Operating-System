@@ -121,15 +121,12 @@ void kernel_main(void *dtb)
     );
 
     /*
-     * Early device access (watchdog, UART) is skipped for direct UEFI boot.
-     * UEFI doesn't have these device registers mapped. After vmm_init()
-     * sets up our own page tables, these devices will be accessible.
-     *
-     * For kexec boot, define JETSON_KEXEC_BOOT to enable early device access.
-     */
-#if defined(JETSON_KEXEC_BOOT)
-    /*
      * Disable hardware watchdog timer.
+     *
+     * Linux starts a hardware watchdog (Tegra WDT) with a 120-second
+     * timeout. After kexec, the watchdog continues running and will
+     * reset the system unless disabled. Do this early — before any
+     * time-consuming initialization like SMP boot.
      *
      * Linux starts a watchdog with a 120 second timeout. After kexec, the
      * watchdog continues running and will reset the system unless disabled.
@@ -147,32 +144,6 @@ void kernel_main(void *dtb)
         *wdt_cmd = WDT_CMD_DISABLE;
         __asm__ volatile("dsb sy" ::: "memory");
     }
-
-    /*
-     * EARLY DEBUG: Write directly to UART before uart_init()
-     * This tests if UART hardware is accessible after kexec.
-     * UARTA is at 0x03100000, THR is at offset 0 (reg-shift=2).
-     *
-     * Don't wait for THRE - if UART clock is off, we'd hang forever.
-     * Just blast characters and add delays.
-     */
-    {
-        volatile uint32_t *uart_thr = (volatile uint32_t *)0x03100000;
-
-        /* Send "SLM" without waiting (in case UART clock is off) */
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = 'S';
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = 'L';
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = 'M';
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = '\r';
-        for (int i = 0; i < 100000; i++) __asm__ volatile("nop");
-        *uart_thr = '\n';
-        __asm__ volatile("dsb sy" ::: "memory");
-    }
-#endif /* JETSON_KEXEC_BOOT */
 #endif /* PLATFORM_JETSON_ORIN_NANO */
 
     /*

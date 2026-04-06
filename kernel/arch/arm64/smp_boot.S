@@ -22,14 +22,34 @@ secondary_entry:
     msr     daifset, #0xF
 
     /*
-     * Check if we're at EL2 (Pi 5 via TF-A) or EL1 (QEMU).
-     * If EL2, do the EL2→EL1 transition first.
+     * Check if we're at EL2 or EL1.
+     * - Jetson (after kexec): EL2 → enable VHE, stay at EL2
+     * - Pi 5 (via TF-A): EL2 → transition to EL1
+     * - QEMU: EL1 → skip EL2 handling
      */
     mrs     x0, CurrentEL
     cmp     x0, #8                  /* EL2 = 0b1000 */
     b.ne    .Lsec_in_el1
 
-    /* --- EL2→EL1 transition (same as boot.S primary path) --- */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /*
+     * Jetson: Stay at EL2 with VHE (same as primary CPU in boot.S).
+     * Enable VHE so EL1 register names redirect to EL2 transparently.
+     * Disable stale Linux timers to prevent pending IRQs.
+     */
+    ldr     x0, =((1 << 34) | (1 << 31) | (1 << 27))
+    msr     hcr_el2, x0
+    isb
+
+    /* Disable stale timers from Linux */
+    msr     cntp_ctl_el0, xzr
+    msr     cntv_ctl_el0, xzr
+    msr     cnthp_ctl_el2, xzr
+    isb
+
+    b       .Lsec_in_el1           /* Continue with MMU setup (VHE active) */
+#else
+    /* --- EL2→EL1 transition (Pi 5 path) --- */
 
     /* Disable coprocessor traps to EL2 */
     mov     x0, #0x33ff
@@ -60,9 +80,10 @@ secondary_entry:
     adr     x0, .Lsec_in_el1
     msr     elr_el2, x0
     eret
+#endif /* PLATFORM_JETSON_ORIN_NANO */
 
 .Lsec_in_el1:
-    /* --- Now at EL1 with MMU off --- */
+    /* --- Now at EL1 (or EL2 with VHE on Jetson) with MMU off --- */
 
     /*
      * Enable the MMU using the primary CPU's page tables.
