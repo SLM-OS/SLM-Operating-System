@@ -45,7 +45,7 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | UART RX (input) | ✅ Working | PL011 RX works with preemptive scheduling active |
 | Timer sleep | ✅ Working | sleep_ms/sleep_us using ARM timer counter + yield |
 | NC shared memory | ✅ Working | 2MB NC region at 0xFFE00000, scheduler run queues in NC |
-| UART RX IRQ | ⏸️ On hold | PCIe RC→MIP→GIC path configured, BAR1 routing TBD |
+| UART RX IRQ | 🔧 In progress | BAR3→MIP0 routing working (IRQ storm test confirms TLP delivery), handler debugging |
 
 ## Test Results (April 5, 2026)
 
@@ -124,41 +124,43 @@ Measured on Pi 5 hardware (Cortex-A76 @ default clock, 4 GB RAM) using the `benc
 - All Pi 5 measurements taken at shell prompt with 4 CPUs online and preemptive scheduling active
 - QEMU numbers are from the `bench all` shell test (test_shell_cmd_bench_all), not the unit test benchmark
 
-## Interrupt-Driven UART (On Hold)
+## Interrupt-Driven UART (BAR3 Configured, Handler Testing)
 
-The RP1 UART interrupt path requires configuring three hardware blocks between the PL011 and the GIC:
+The RP1 UART interrupt path traverses three hardware blocks between the PL011 and the GIC:
 
 ```
 PL011 UART0 (0x1F00030000)
   → RP1 PCIE_CFG MSI-X engine (0x1F00108000) — vector 25
     → PCIe MSI-X write to 0xFF_FFFFF000
-      → BCM2712 PCIe RC BAR1 (0x1000120000) remaps to MIP0
+      → BCM2712 PCIe RC BAR3 (0x1000120000) remaps to MIP0
         → MIP0 (0x1000130000) → GIC SPI 153 (IRQ 185)
 ```
 
-**What is configured:**
+**What is configured (all from EL2 in boot.S):**
+- PCIe RC BAR3: Routes MSI-X PCI address `0xFF_FFFFF000` to MIP0 at `0x10_00130000`
+- MISC_CTRL: SCB_ACCESS_EN, CFG_READ_UR_MODE, RCB_MPS bits set
+- MIP0: Vector 25 unmasked for host, edge-triggered
+- MSI-X Enable in RP1 config space (EXT_CFG from EL2)
 - PL011 IMSC: RX + receive timeout interrupts enabled
 - RP1 MSIX_CFG: Vector 25 enabled with IACK_EN
-- PCIe RC BAR1: Configured to route MSI-X PCI addr to MIP0 physical addr
-- MIP0: All vectors unmasked for host, edge-triggered
-- GIC: SPI 153 enabled, priority set, routed to CPU 0
+- GIC: SPI 153 enabled, priority 0x40, routed to CPU 0
 - IRQ handler: Reads RP1 INTSTAT, drains PL011 FIFO, writes IACK
 - Ring buffer: 256-byte SPSC buffer for ISR→uart_getc handoff
 - Polling fallback: Transparent — if IRQ never fires, original polling path runs
 
-**What is NOT yet working — PCIe RC register writes hang from EL1:**
-- **Reads succeed:** PCIE_STATUS, EXT_CFG config reads (vendor/device, capabilities, BARs), RC BAR1 readback — all work
-- **Writes hang:** Any write to the RC register space (EXT_CFG DATA, RC BAR1 config) causes the system to freeze
-- This blocks MSI-X enable, MSI-X table programming, and RC BAR1→MIP routing setup
+**Hardware-verified (Pi 5 `cpu` command readback):**
+```
+BAR3: ff_fffff01c remap=10_00130001
+MSIX tbl[25]: addr=0xff_fffff000 data=0x19 ctrl=0x0
+MSI-X cap: 0x803c0011 (Enable=1 FuncMask=0)
+MSIX_CFG[25]: 0x9 (ENABLE + IACK_EN)
+```
 
-**Key findings from investigation:**
-- EXT_CFG data register is at RC+0x8000 (not 0x9004). INDEX register is at RC+0x9000.
-- INDEX must contain only bus/devfn (NOT register offset). Register offset goes in the DATA address.
-- RP1 appears at bus 0 (dedicated pcie2 link, no hierarchy). Vendor 0x1de4, device 0x0001.
-- MSI-X capability at config offset 0xB0: 61 vectors, table in BAR0 offset 0, PBA at BAR0+0x2000.
-- BAR0 PCIe address = 0x00410000. Outbound window base = 0x1F03F00000, offset = 0. So MSI-X table CPU address = 0x1F04310000 (NOT 0x1F00410000).
-- RC BAR1 is unconfigured (all zeros) — firmware did not set up MIP routing.
-- **Root cause confirmed:** PCIe RC register writes require EL2. Writes from EL1 hang; writes from EL2 (in boot.S before ERET) succeed and values persist. However, writing RC BAR1 from EL2 **breaks RP1 peripheral MMIO access** — the BAR1 inbound window configuration conflicts with the firmware's outbound window that maps CPU addresses to RP1 peripherals. The next step is understanding the outbound/inbound window interaction on the brcmstb PCIe controller to configure BAR1 without disrupting RP1 MMIO.
+**MSI-X→MIP0 path is functional** (April 6, 2026): Removing IACK_EN causes an IRQ storm (system hangs from continuous MIP0→GIC interrupts), proving TLPs reach MIP0 and generate GIC SPIs. With IACK_EN, system is stable (single fire, auto-masked).
+
+**Remaining work:** The IRQ handler needs debugging — `cpu` command still shows "UART RX: polling" after boot. The handler should service the PL011 interrupt, drain the FIFO into the ring buffer, write IACK to re-arm, and switch to IRQ-driven mode. See `docs/pi5-uart-irq-investigation.md` for the Linux register comparison that identified the BAR3 fix.
+
+**Root cause of original failure (resolved):** We originally configured BAR1, which firmware uses for RP1 peripheral MMIO. Linux uses BAR3 for MSI-X routing. Also, MSI-X PCI address high byte should be 0xFF (device tree), not 0x0F (Circle framework).
 
 ## Configuration
 

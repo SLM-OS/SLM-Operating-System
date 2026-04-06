@@ -1,7 +1,7 @@
 # Pi 5 UART Interrupt Investigation Status
 
-**Date:** April 4, 2026
-**Status:** BLOCKED — PCIe BAR1 inbound window doesn't match RP1 MSI-X TLPs
+**Date:** April 6, 2026
+**Status:** BAR3 FIX IMPLEMENTED — MSI-X TLPs reach MIP0 (IRQ storm test confirms). Handler debugging needed.
 
 ## Summary
 

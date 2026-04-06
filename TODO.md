@@ -69,7 +69,7 @@ See `docs/pi5-baremetal-status.md` for full details.
 ### Remaining Pi 5 Work
 - ✅ Run QEMU test suite on Pi 5 hardware (431 tests: 415 pass, 16 ignored, 0 failures)
 - ✅ Timer-driven sleep/delay functions (sleep_ms, sleep_us, shell `sleep` command)
-- ☐🔗 Interrupt-driven UART — blocked on PCIe BAR1 inbound window match (see `docs/pi5-uart-irq-investigation.md`)
+- ☐ Interrupt-driven UART — BAR3→MIP0 routing working (MSI-X TLPs reach GIC), IRQ handler debugging needed (see `docs/pi5-uart-irq-investigation.md`)
 - ✅ Fix task_exit/schedule race on secondary CPUs — IRQ mask in task_exit prevents timer/schedule race
 - ✅ Investigate SMPEN for proper cache coherency — SMPEN trapped to EL3, L2 not coherent without it
 - ✅ NC shared memory infrastructure — 2MB NC region at 0xFFE00000, run queues + task table in NC, validated on Pi 5

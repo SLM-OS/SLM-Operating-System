@@ -490,6 +490,34 @@ static void test_mmio_regions_mapped(void)
 #endif
 }
 
+/*
+ * Test: PCIe RC BAR3→MIP0 routing configured correctly by boot.S (Pi 5 only).
+ * Verifies the register values that enable MSI-X interrupt delivery.
+ */
+static void test_bar3_mip0_routing(void)
+{
+#if defined(PLATFORM_RASPI5)
+    volatile uint32_t *bar3_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR3_CONFIG_LO);
+    volatile uint32_t *bar3_hi = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_BAR3_CONFIG_HI);
+    volatile uint32_t *remap_lo = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR3_REMAP);
+    volatile uint32_t *remap_hi = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_UBUS_BAR3_REMAP_HI);
+
+    /* BAR3 captures PCI address 0xFF_FFFFF000 (MSI-X target) */
+    TEST_ASSERT_EQUAL_HEX32(0xFFFFF01C, *bar3_lo);
+    TEST_ASSERT_EQUAL_HEX32(0x000000FF, *bar3_hi);
+
+    /* BAR3 remaps to MIP0 at physical 0x10_00130000 */
+    TEST_ASSERT_EQUAL_HEX32(0x00130001, *remap_lo);   /* access_en=1 */
+    TEST_ASSERT_EQUAL_HEX32(0x00000010, *remap_hi);
+
+    /* MISC_CTRL has SCB_ACCESS_EN set */
+    volatile uint32_t *misc = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_MISC_CTRL);
+    TEST_ASSERT_MESSAGE((*misc & (1 << 12)) != 0, "MISC_CTRL SCB_ACCESS_EN not set");
+#else
+    TEST_ASSERT(1);  /* BAR3 not configured on non-Pi5 platforms */
+#endif
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -526,6 +554,9 @@ int test_suite_vmm(void)
 
     /* Regression: integer overflow in stats */
     RUN_TEST(test_vmm_stats_bytes_mapped_no_overflow);
+
+    /* PCIe BAR3→MIP0 routing (Pi 5 UART IRQ path) */
+    RUN_TEST(test_bar3_mip0_routing);
 
     return UnityEnd();
 }
