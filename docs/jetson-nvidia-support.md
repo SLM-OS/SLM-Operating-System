@@ -478,11 +478,9 @@ Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a
 
 ### Project Documentation
 
+- `docs/jetson-el2-bringup.md` — Current EL2 implementation (April 2026)
 - `docs/jetson-boot.md` — Boot process overview
-- `docs/jetson-tcu.md` — TCU/HSP research (why USB-C debug doesn't work)
-- `docs/jetson-kexec-debugging.md` — Kexec debugging session notes
-- `docs/jetson-serial-debugging-dec2025.md` — Serial debugging session
-- `docs/jetson-uart-investigation-log.md` — Detailed UART investigation log
+- `docs/jetson-tcu.md` — TCU/HSP architecture research
 - `docs/platform-abstraction.md` — QEMU vs Jetson comparison
 - `docs/gpu.md` — GPU integration (blocked by GSP firmware requirement)
 

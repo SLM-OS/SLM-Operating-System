@@ -511,7 +511,7 @@ M9 (Polish) ─────────> Can happen in parallel throughout
 - [Orin Series SoC Technical Reference Manual (TRM)](https://developer.nvidia.com/orin-series-soc-technical-reference-manual)
 - NVIDIA L4T (Linux for Tegra) source code for driver reference
 - `docs/lab-operations.md` for serial console procedures and remote lab access
-- `docs/jetson-kexec-debugging.md` for kexec boot debugging notes
+- `docs/jetson-el2-bringup.md` for EL2 breakthrough and current implementation
 - `docs/jetson-tcu.md` for TCU/HSP research notes
 - `docs/platform-abstraction.md` for QEMU vs Jetson differences
 - `labctl` for lab operations (power, serial, deploy) — see [Embedded-Lab-Control](https://github.com/johnjezl/Embedded-Lab-Control)

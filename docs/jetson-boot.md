@@ -110,19 +110,13 @@ Boot Linux normally, then use kexec to jump to SLM-OS. This is useful for early 
 
 ### Hardware Connection
 
-The Jetson Orin Nano has UART available on the 40-pin GPIO header:
+SLM-OS uses **UARTC** (0x0C280000) for serial output, routed through the TCU to the **USB-C debug port**. No external adapter needed — connect a USB-C cable to the Jetson's debug port and use `labctl serial-capture jetson-nano-2`.
 
-| Pin | Function | Connect to |
-|-----|----------|------------|
-| 6 | GND | Adapter GND |
-| 8 | UART1_TX | Adapter RX |
-| 10 | UART1_RX | Adapter TX |
-
-**Important:** Use a 3.3V USB-TTL adapter. 5V will damage the Jetson.
+The 40-pin GPIO header UART (UARTA at 0x03100000) is **blocked by the CBB firewall** even at EL2.
 
 ### Serial Settings
 
-- Baud rate: 115200
+- Baud rate: 115200 (firmware-configured, preserved by raw mode)
 - Data bits: 8
 - Parity: None
 - Stop bits: 1
@@ -130,15 +124,16 @@ The Jetson Orin Nano has UART available on the 40-pin GPIO header:
 
 ### Console Device Names
 
-| Device | Description |
-|--------|-------------|
-| `ttyTCU0` | Tegra Combined UART (debug console via USB-C when Linux runs) |
-| `ttyTHS0` | UART1 on GPIO header (Pin 8/10) — **use this for bare-metal** |
-| `ttyTHS1` | UART2 (if enabled) |
+| Device | Address | Description |
+|--------|---------|-------------|
+| `ttyTCU0` | Via HSP | Tegra Combined UART (USB-C debug) — **used by SLM-OS** |
+| `ttyTHS0` | 0x03100000 | UARTA on GPIO header (Pin 8/10) — blocked by CBB at EL2 |
 
-For SLM-OS bare-metal, we use **UART1 (ttyTHS0)** at address `0x03100000`.
+**SLM-OS serial path (April 2026):**
+- **TX:** Direct write to UARTC THR at 0x0C280000 → SPE routes through TCU → USB-C debug port
+- **RX:** SPE reads USB-C input → writes to TCU HSP mailbox at 0x03C10000 → SLM-OS polls mailbox
 
-**Important:** The USB-C debug port (TCU/ttyTCU0) does **not** work for bare-metal code. TCU requires SPE (Sensor Processing Engine) firmware cooperation, which is only active when Linux runs the SPE communication stack. After kexec or during bare-metal boot, TCU produces no output. See `docs/jetson-tcu.md` for details.
+The SPE firmware continues running after kexec and handles the TCU multiplexing. See `docs/jetson-tcu.md` for TCU architecture details and `docs/jetson-el2-bringup.md` for the implementation.
 
 ---
 
@@ -152,28 +147,31 @@ For SLM-OS bare-metal, we use **UART1 (ttyTHS0)** at address `0x03100000`.
 | Peripherals | 0x02000000 | 0x0FFFFFFF | ~224 MB | MMIO devices |
 | DRAM | 0x80000000 | varies | 4-8 GB | Main memory |
 
-### Key Peripheral Addresses
+### Key Peripheral Addresses (verified on hardware at EL2)
 
-| Peripheral | Base Address | Size | Notes |
-|------------|--------------|------|-------|
-| UARTA | 0x03100000 | 64 KB | GPIO header UART |
-| UARTE | 0x03140000 | 64 KB | Additional UART |
-| GICv3 Distributor (GICD) | 0x0F400000 | 64 KB | Interrupt controller |
-| GICv3 Redistributor (GICR) | 0x0F440000 | 2 MB | Per-CPU redistributors |
-| ARM Timer | System register | N/A | Generic Timer (CNTPCT_EL0) |
+| Peripheral | Base Address | EL2 Access | Notes |
+|------------|--------------|------------|-------|
+| UARTC (TX) | 0x0C280000 | ✅ Works | Serial output via TCU to USB-C |
+| TCU RX Mailbox | 0x03C10000 | ✅ Works | HSP SM0, serial input from USB-C |
+| UARTA | 0x03100000 | ❌ Blocked | 40-pin header UART, CBB denies |
+| GICv3 Distributor | 0x0F400000 | ✅ Works | 992 interrupt lines |
+| GICv3 Redistributor | 0x0F440000 | ✅ Works | Per-CPU, CPU 0 awake |
+| GPU (PMC) | 0x17000000 | ✅ Works | GA10B identified |
+| Watchdog | 0x02190000 | ✅ Works | Disabled early in boot |
+| ARM Timer | System register | ✅ Works | Generic Timer (CNTPCT_EL0), 100 Hz |
 
-**Note:** These addresses are from device tree and may need verification on hardware.
+See `docs/jetson-el2-bringup.md` for the full CBB firewall peripheral map.
 
 ---
 
 ## GIC Configuration
 
-Jetson Orin Nano uses ARM GICv3:
+Jetson Orin Nano uses ARM GICv3 (verified working at EL2):
 
-- **Distributor:** 0x0F400000 (vs 0x08000000 on QEMU)
-- **CPU Interface:** 0x0F440000 (vs 0x08010000 on QEMU)
+- **Distributor (GICD):** 0x0F400000 — 992 interrupt lines
+- **Redistributor (GICR):** 0x0F440000 — per-CPU, CPU 0 awake
 
-The SPI (Shared Peripheral Interrupt) numbers may also differ from QEMU.
+QEMU uses GICv2 at 0x08000000/0x08010000. The platform.h `#ifdef` handles the difference.
 
 ---
 
@@ -181,13 +179,14 @@ The SPI (Shared Peripheral Interrupt) numbers may also differ from QEMU.
 
 | Feature | QEMU virt | Jetson Orin Nano |
 |---------|-----------|------------------|
-| UART | PL011 @ 0x09000000 | NS16550 @ 0x03100000 |
-| GIC Dist | 0x08000000 | 0x0F400000 |
-| GIC CPU | 0x08010000 | 0x0F440000 |
+| UART | PL011 @ 0x09000000 | NS16550 UARTC @ 0x0C280000 (via TCU) |
+| UART RX | PL011 RBR | TCU HSP mailbox @ 0x03C10000 |
+| GIC | GICv2 @ 0x08000000 | GICv3 @ 0x0F400000 |
 | RAM Base | 0x40000000 | 0x80000000 |
-| RAM Size | 128 MB (configurable) | 4-8 GB |
-| CPU Count | 4 (configurable) | 6 (Cortex-A78AE) |
-| Bootloader | Direct load | UEFI → extlinux.conf |
+| RAM Size | 128 MB (configurable) | ~6.7 GB (8 GB minus OP-TEE carveout) |
+| CPU Count | 4 (configurable) | 6 (Cortex-A78AE), 1 online (SMP blocked) |
+| Exception Level | EL1 (drops from EL3) | EL2 with VHE (stays at EL2) |
+| Bootloader | Direct load | UEFI → kexec from Linux |
 | Timer | Virtual | Physical (system register) |
 
 ---
@@ -196,53 +195,51 @@ The SPI (Shared Peripheral Interrupt) numbers may also differ from QEMU.
 
 ### Prerequisites
 
-- ☐ USB-TTL serial adapter (3.3V)
-- ☐ SD card with JetPack image (for initial testing)
-- ☐ Serial terminal software (PuTTY, minicom, etc.)
+- ✅ Jetson with JetPack R36.4.7 and Linux on SD card
+- ✅ USB-C cable for serial console (via TCU debug port)
+- ✅ Network access for SSH (192.168.4.93)
+- ✅ labctl configured for power control and serial capture
 
-### First Boot Steps
-
-1. ☐ Flash JetPack to SD card (establishes QSPI bootloader)
-2. ☐ Connect serial adapter to GPIO pins 6, 8, 10
-3. ☐ Boot Jetson with serial console open
-4. ☐ Verify Linux boots and serial output works
-5. ☐ Modify extlinux.conf to add SLM-OS entry
-6. ☐ Copy slmos.bin to /boot/
-7. ☐ Reboot and select SLM-OS from menu
-8. ☐ Debug via serial console
-
-### Fallback: kexec Method
-
-If direct UEFI boot fails:
+### Deploy and Boot (kexec method)
 
 ```bash
-# On running Linux:
-sudo kexec -l slmos.bin --append="console=ttyTHS0,115200"
-sudo kexec -e
+# 1. Build for Jetson
+make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
+
+# 2. Deploy via SSH
+scp build/kernel/slmos.elf root@192.168.4.93:/root/
+
+# 3. Boot via kexec
+ssh root@192.168.4.93 'kexec -l /root/slmos.elf --reuse-cmdline && kexec -e'
+
+# 4. Observe via serial
+labctl serial-capture jetson-nano-2 --timeout 60
+
+# 5. Recover (power cycle back to Linux)
+labctl power cycle jetson-nano-2 --delay 10
 ```
 
 ---
 
 ## Troubleshooting
 
-### No Serial Output
+### No Serial Output After kexec
 
-1. Check TX/RX connections (they should be crossed)
-2. Verify 3.3V adapter (not 5V)
-3. Check baud rate (115200)
-4. Try different UART (UARTA vs UARTE)
+1. Verify USB-C cable is connected to debug port (not power port)
+2. Check labctl serial: `labctl serial-capture jetson-nano-2 --timeout 5`
+3. Power cycle: `labctl power cycle jetson-nano-2 --delay 10`
+4. If Jetson stuck after PSCI SYSTEM_OFF: power off for 30s, then power on
 
 ### UEFI Drops to Shell
 
-- extlinux.conf not found or malformed
-- Check path: `/boot/extlinux/extlinux.conf`
-- Verify SD card is first in boot order
+- SD card not detected or boot order wrong
+- Network boot timeouts add ~5 minutes — wait or press Enter
 
-### Kernel Crashes Immediately
+### CBB Firewall Errors (RAS)
 
-- Wrong kernel format (needs Image header, not raw ELF)
-- Wrong load address
-- DTB mismatch
+- Accessing a blocked peripheral from EL2
+- Check `docs/jetson-el2-bringup.md` for the peripheral access map
+- UARTA (0x03100000) is always blocked; use UARTC (0x0C280000)
 - UART driver issue (no output visible)
 
 ### Memory Access Faults
