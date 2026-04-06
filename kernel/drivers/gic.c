@@ -8,6 +8,8 @@
 
 #include "gic.h"
 #include "platform.h"
+#include "config.h"
+#include "smp.h"
 #include "uart.h"
 #include "debug.h"
 #include <stddef.h>
@@ -78,15 +80,26 @@
 #define GICR_BASE           GIC_REDIST_BASE
 #define GICR_STRIDE         0x20000     /* 128KB per CPU (2 x 64KB frames) */
 
-/* Calculate redistributor base for a CPU */
+/*
+ * Per-CPU redistributor base addresses.
+ * On some platforms (Jetson Orin), redistributors aren't at sequential
+ * stride offsets — there are gaps between clusters. We discover the
+ * correct base by walking the GICR chain using GICR_TYPER affinity.
+ */
+static uintptr_t gicr_cpu_base[MAX_CPUS];
+
+/* Calculate redistributor base for a CPU (must be initialized first) */
 static inline uintptr_t gicr_rd_base(uint32_t cpu)
 {
+    if (gicr_cpu_base[cpu])
+        return gicr_cpu_base[cpu];
+    /* Fallback to stride calculation (for boot CPU before discovery) */
     return GICR_BASE + (cpu * GICR_STRIDE);
 }
 
 static inline uintptr_t gicr_sgi_base(uint32_t cpu)
 {
-    return GICR_BASE + (cpu * GICR_STRIDE) + 0x10000;
+    return gicr_rd_base(cpu) + 0x10000;
 }
 
 /* GICR_RD registers */
@@ -194,7 +207,15 @@ static uint32_t get_cpu_id(void)
 {
     uint64_t mpidr;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-    return mpidr & 0xFF;  /* Aff0 = CPU ID within cluster */
+
+    /* Use the SMP logical map for proper MPIDR→CPU ID translation.
+     * On Jetson Orin, Aff0=0 for all cores — the core ID is in Aff1/Aff2.
+     * cpu_logical_id() handles all platform MPIDR encodings. */
+    int id = cpu_logical_id(mpidr);
+    if (id >= 0) return (uint32_t)id;
+
+    /* Fallback for boot CPU before SMP init populates the map */
+    return 0;
 }
 #endif
 
@@ -341,10 +362,51 @@ static void gic_dist_init(void)
 }
 
 /*
+ * Discover the redistributor for the current CPU.
+ *
+ * On platforms with non-contiguous redistributor layouts (e.g., Jetson Orin
+ * with dual clusters where there's a gap between cluster 0 and cluster 1),
+ * the simple cpu*stride calculation gives wrong addresses.
+ *
+ * Jetson Orin redistributor addresses (from Linux dmesg):
+ *   CPU 0: 0x0F440000  (offset 0x000000)
+ *   CPU 1: 0x0F460000  (offset 0x020000)
+ *   CPU 2: 0x0F480000  (offset 0x040000)
+ *   CPU 3: 0x0F4A0000  (offset 0x060000)
+ *   CPU 4: 0x0F500000  (offset 0x0C0000)  ← gap after cluster 0
+ *   CPU 5: 0x0F520000  (offset 0x0E0000)
+ */
+static void gic_discover_redist(uint32_t cpu)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Hardcoded from Linux GICv3 redistributor discovery.
+     * Offsets from GIC_REDIST_BASE (0x0F440000). */
+    static const uint32_t jetson_redist_offset[] = {
+        0x000000, 0x020000, 0x040000, 0x060000,  /* cluster 0 */
+        0x0C0000, 0x0E0000                         /* cluster 1 */
+    };
+    if (cpu < 6) {
+        gicr_cpu_base[cpu] = GICR_BASE + jetson_redist_offset[cpu];
+        DEBUG_PRINT("GICv3: CPU %u → redistributor at 0x%lx",
+                    cpu, (unsigned long)gicr_cpu_base[cpu]);
+        return;
+    }
+#endif
+
+    /* Default: sequential stride (works for QEMU, Pi 5) */
+    gicr_cpu_base[cpu] = GICR_BASE + (cpu * GICR_STRIDE);
+    DEBUG_PRINT("GICv3: CPU %u → redistributor at 0x%lx (stride)",
+                cpu, (unsigned long)gicr_cpu_base[cpu]);
+}
+
+/*
  * Initialize the GIC redistributor for a CPU (GICv3).
  */
 static void gic_redist_init(uint32_t cpu)
 {
+    /* Discover the correct redistributor for this CPU */
+    gic_discover_redist(cpu);
+
     /* Wake up the redistributor */
     uint32_t waker = GICR_WAKER(cpu);
     waker &= ~GICR_WAKER_ProcessorSleep;
