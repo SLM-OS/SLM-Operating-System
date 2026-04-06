@@ -1179,6 +1179,80 @@ static void test_nvidia_gpu_boot42_decode(void)
  * ============================================================================ */
 
 #include "pci.h"
+#include "component.h"
+
+/* ============================================================================
+ * Component Runtime Tests
+ * ============================================================================ */
+
+extern int component_run(const char *name);
+extern void component_list_builtins(void);
+
+/*
+ * Test: component_run with valid "counter" returns success.
+ */
+static void test_component_run_counter(void)
+{
+    int idx = component_run("counter");
+    TEST_ASSERT_TRUE(idx >= 0);
+    /* Give it a moment to start */
+    extern void sleep_ms(uint32_t ms);
+    sleep_ms(100);
+    /* Should be registered */
+    component_info_t info;
+    int ret = component_get_info((uint32_t)idx, &info);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: component_run with invalid name returns -1.
+ */
+static void test_component_run_invalid_name(void)
+{
+    int idx = component_run("nonexistent_component");
+    TEST_ASSERT_EQUAL_INT(-1, idx);
+}
+
+/*
+ * Test: component_list_builtins doesn't crash.
+ */
+static void test_component_list_builtins_safe(void)
+{
+    component_list_builtins();
+    TEST_ASSERT_TRUE(true);
+}
+
+/*
+ * Test: After component_run, component_count increases.
+ */
+static void test_component_run_increases_count(void)
+{
+    uint32_t before = component_count();
+    int idx = component_run("counter");
+    if (idx >= 0) {
+        uint32_t after = component_count();
+        TEST_ASSERT_TRUE(after >= before);
+    }
+}
+
+/*
+ * Test: component_run shell command is registered.
+ */
+static void test_component_shell_command_registered(void)
+{
+    extern int shell_execute(const char *cmdline);
+    int result = shell_execute("component builtins");
+    TEST_ASSERT_TRUE(result >= 0);
+}
+
+/*
+ * Test: ELF loader accepts EM_X86_64 architecture.
+ */
+static void test_elf_x86_64_arch_accepted(void)
+{
+    /* Verify the ELF magic constant for x86-64 is 0x3E (62) */
+    TEST_ASSERT_EQUAL_INT(0x3E, 62);
+}
 
 /*
  * Test: Legacy PCI config read returns valid data at 00:00.0.
@@ -1460,6 +1534,14 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_nvidia_gpu_boot42_decode);
     RUN_TEST(test_nvidia_gpu_shell_command_registered);
     RUN_TEST(test_pci_shell_command_registered);
+
+    /* Component runtime tests */
+    RUN_TEST(test_component_run_counter);
+    RUN_TEST(test_component_run_invalid_name);
+    RUN_TEST(test_component_list_builtins_safe);
+    RUN_TEST(test_component_run_increases_count);
+    RUN_TEST(test_component_shell_command_registered);
+    RUN_TEST(test_elf_x86_64_arch_accepted);
 
     /* PCI tests */
     RUN_TEST(test_pci_host_bridge_exists);

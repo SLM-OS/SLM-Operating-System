@@ -53,7 +53,7 @@ This document tracks the x86-64 port of SLM-OS for desktop PC with NVIDIA RTX 30
 | `kernel/arch/x86_64/Makefile.test` | Standalone build + UEFI disk image |
 | `kernel/kernel-x86_64.ld` | Linker script for x86-64 |
 | `kernel/drivers/uart_x86.c` | COM1 16550 UART driver |
-| `kernel/tests/test_x86_boot.c` | 84 functional tests |
+| `kernel/tests/test_x86_boot.c` | 90 functional tests |
 | `docs/x86-64-port.md` | Comprehensive documentation |
 
 **Technical Challenges Solved:**
@@ -115,7 +115,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - **ACPI MADT parsing** (`acpi.c`) — discovers CPUs, LAPIC base, IOAPIC, ISOs
 - **Platform abstraction** (`pic.c` bridges gic.h, `platform_x86.c` provides all stubs)
 - **Real x86-64 spinlocks** — TTAS with `__atomic_exchange_n`, atomic `cpus_online` increment
-- **84 functional tests** across 16 categories
+- **90 functional tests** across 17 categories
 
 ---
 
@@ -168,7 +168,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - ✅ Document boot configuration in `docs/x86-64-port.md`
 
 ### Testing & Documentation
-- ✅ Create functional tests (`test_x86_boot.c` — 84 tests across 16 categories)
+- ✅ Create functional tests (`test_x86_boot.c` — 90 tests across 17 categories)
   - ✅ Control register tests (CR0, CR4, EFER, CR3)
   - ✅ Page table structure tests (PML4, PDPT, PD entries)
   - ✅ GDT tests (limit, CS/DS selectors)
@@ -422,7 +422,7 @@ This is a project-scale effort deferred to post-capstone.
 
 ### QEMU x86-64 Testing
 - ✅ Boot SLM-OS in QEMU x86-64 (`qemu-system-x86_64` via GRUB ISO)
-- ✅ 84 functional tests compiled and integrated
+- ✅ 90 functional tests compiled and integrated
 - ✅ Test multi-core on QEMU x86-64 (4 CPUs, all online)
 - ✅ Test interrupt handling (LAPIC timer, IDT, context switch)
 - ✅ Test context switching (preemptive scheduler verified)
@@ -475,7 +475,7 @@ This is a project-scale effort deferred to post-capstone.
 ### Deliverables
 - ✅ SLM-OS boots on x86-64 PC (i7-6700, 8 CPUs, 20 GB RAM)
 - ✅ Multi-core scheduling working (INIT-SIPI-SIPI, 8/8 CPUs online)
-- ✅ 84 functional tests pass on x86-64
+- ✅ 90 functional tests pass on x86-64
 - ✅ RTX 3050 detected: chip identified (GA107), VRAM read/write verified
 - ✅ GSP firmware interface documented (`docs/nvidia-gsp.md`)
 - ⏸️ Portable GPU HAL — deferred (requires GSP for real GPU operations)
@@ -593,6 +593,6 @@ M7 (Abstraction) ✅    M8 (Testing) ✅    M9 (Docs) ✅
 
 *Created: January 2026*
 *Last Updated: 6 April 2026*
-*Status: ALL MILESTONES COMPLETE (M1-M9). 84 tests, 8-CPU SMP, Rust runtime, RDTSC benchmarks, GPU + VRAM verified, GSP documented, CI pipeline.*
+*Status: ALL MILESTONES COMPLETE (M1-M9). 90 tests, 8-CPU SMP, Rust runtime, RDTSC benchmarks, GPU + VRAM verified, GSP documented, CI pipeline, component execution.*
 *Purpose: Parallel development track for x86-64 + RTX 3050 GPU learning*
 *Relationship: Supports Phase 4 (Jetson) and Phase 5 (SLM Integration)*

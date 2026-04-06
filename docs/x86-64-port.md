@@ -69,7 +69,7 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 | M5 | PCIe Enumeration | ✅ Complete |
 | M6 | NVIDIA GPU Driver | ✅ Complete (GSP deferred) |
 | M7 | Platform Abstraction | ✅ Complete (arch.h, Rust linked) |
-| M8 | Testing & Validation | ✅ Complete (84 tests, CI, benchmarks) |
+| M8 | Testing & Validation | ✅ Complete (90 tests, CI, benchmarks) |
 | M9 | Documentation | ✅ Complete (GSP, arch comparison, Jetson checklist) |
 
 ### Hardware Test Results (i7-6700 + RTX 3050)
@@ -711,7 +711,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 84 tests across 16 categories:
+The `test_x86_boot.c` test suite contains 90 tests across 17 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -726,6 +726,7 @@ The `test_x86_boot.c` test suite contains 84 tests across 16 categories:
 | ACPI + APIC | 6 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, timer running |
 | SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
 | NVIDIA GPU | 7 | Init ran, no-crash, VRAM test -1 without GPU, accessors safe, BOOT_42 decode, gpu/pci shell commands registered |
+| Component runtime | 6 | Run counter, invalid name rejected, list builtins safe, run increases count, shell command registered, ELF x86-64 arch |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
 | Scheduler integration | 5 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick |
@@ -817,6 +818,7 @@ Lua commands are available in the shell via `lua <expression>`.
 | `kernel/arch/x86_64/platform_x86.c` | Boot glue, SMP boot (INIT-SIPI), VMM/DTB/Rust stubs |
 | `kernel/arch/x86_64/pci.c` | PCI config access, bus enumeration, `pci` shell command |
 | `kernel/arch/x86_64/nvidia_gpu.c` | GPU probe, BAR mapping, register decode, VRAM test, `gpu` command |
+| `kernel/src/component_runtime.c` | Built-in component execution, `component run/send/builtins` |
 | `kernel/drivers/uart_x86.c` | 16550 UART driver (uart.h interface) |
 
 ### Build System
@@ -837,7 +839,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/tests/test_x86_boot.c` | 84 tests: boot, IDT, APIC, SMP, spinlock, GPU, PCI, Multiboot2, platform, scheduler, setjmp |
+| `kernel/tests/test_x86_boot.c` | 90 tests: boot, IDT, APIC, SMP, spinlock, GPU, PCI, component, ELF, Multiboot2, platform, scheduler, setjmp |
 
 ---
 
@@ -920,7 +922,7 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 - QEMU's `-kernel` flag does not support Multiboot2 on Ubuntu 24.04 (QEMU 8.2.2). Use GRUB ISO boot (`-cdrom`) instead.
 - NVIDIA GPU engine registers return 0xBADF5040 — this is expected (GSP firmware not loaded). See `docs/nvidia-gsp.md`.
-- Rust runtime is stubbed (model memory, component system return dummy values). Needs `x86_64-unknown-none` Cargo target.
+- Echo service IPC: `component send` may report "not running" if the echo task hasn't been scheduled yet. The IPC queue pointer may not be visible across CPUs immediately. Counter component works reliably.
 - No higher-half kernel mapping — identity mapping only. Sufficient for current use but limits virtual address space layout.
 - No networking on x86-64 — lwIP + VirtIO not yet ported.
 

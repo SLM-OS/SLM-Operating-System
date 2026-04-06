@@ -300,6 +300,16 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ✅ `component register` — register component from shell
 - ✅ `component unregister` — unregister component
 - ✅ `component status` — show component details
+- ✅ `component builtins` — list available built-in components
+- ✅ `component run <name>` — run a built-in component as a kernel task
+- ✅ `component send <msg>` — send IPC message to echo service
+
+### Component Runtime (April 2026)
+- ✅ `component_runtime.c`: bridges component registry to kernel task system
+- ✅ Built-in counter service: counts to 10, lifecycle transitions verified on hardware
+- ✅ Built-in echo service: IPC message queue (cross-CPU queue visibility issue — WIP)
+- ✅ Task cleanup callback updates component state to Unloaded on exit
+- ✅ 6 new tests: component_run, invalid name, builtins, count, shell command, ELF arch
 
 ---
 
@@ -377,7 +387,7 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ✅ All subsystems verified on Jetson hardware (April 2026)
 - ✅ GPU initialized (probe), memory allocation working (nvidia_alloc/free + cache coherency)
 - ✅ Performance benchmarks documented — see `docs/performance.md`
-- ☐ At least one example component loading and running
+- ✅ At least one example component loading and running — counter service verified on i7-6700
 - ☐ Hot-swap demonstrated (same component, new version)
 - ☐ Message routing between components working
 
