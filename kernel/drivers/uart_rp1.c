@@ -359,7 +359,29 @@ void uart_irq_init(void)
      * SPIs >= 224 (including INTA at SPI 229) are secure-only.
      */
 
-    /* 0. Program MSI-X table (BAR0 at 0x1F00410000, set from EL1) */
+    /* 0. Disable MSI-X, program table, then re-enable.
+     * boot.S enables MSI-X from EL2 before the table is programmed.
+     * The RP1 may latch table addresses at Enable time. Toggling
+     * Enable around table programming ensures the RP1 picks up our
+     * addresses (0xFF_FFFFF000 for BAR3→MIP0 routing).
+     *
+     * MSI-X capability at RP1 config offset 0xB0 (via EXT_CFG).
+     * Bit 31 = Enable, Bit 30 = Function Mask. */
+    volatile uint32_t *ext_cfg_idx = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_INDEX);
+    volatile uint32_t *msix_cap = (volatile uint32_t *)(PCIE_RC_BASE + PCIE_RC_EXT_CFG_DATA + 0xB0);
+    *ext_cfg_idx = 0;  /* bus=0, devfn=0 */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    uint32_t cap_val = *msix_cap;
+    /* Disable MSI-X (clear Enable, set Function Mask) */
+    cap_val &= ~(1U << 31);  /* Clear Enable */
+    cap_val |= (1U << 30);   /* Set Function Mask */
+    /* Note: config space writes may hang from EL1 on BCM2712.
+     * If this hangs, the table re-latch theory is wrong. */
+    *msix_cap = cap_val;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Program MSI-X table with BAR3→MIP0 target address */
     for (int i = 0; i < RP1_MSIX_TABLE_SIZE; i++) {
         volatile uint32_t *entry = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + i * 16);
         entry[0] = MSIX_MSG_ADDR_LO;
@@ -370,19 +392,27 @@ void uart_irq_init(void)
     __asm__ volatile("dsb sy" ::: "memory");
     DEBUG_PRINT("MSI-X table: %d entries programmed", RP1_MSIX_TABLE_SIZE);
 
+    /* Re-enable MSI-X (RP1 should latch new table addresses) */
+    cap_val |= (1U << 31);   /* Set Enable */
+    cap_val &= ~(1U << 30);  /* Clear Function Mask */
+    *msix_cap = cap_val;
+    __asm__ volatile("dsb sy" ::: "memory");
+
     /* 1. GIC: enable SPI with higher priority than timer */
     gic_set_priority(UART_IRQ, 0x40);
     gic_enable_irq(UART_IRQ);
 
-    /* 2. MSIX_CFG: enable vector 25 with IACK_EN.
-     * The MSIX_CFG engine doesn't fire TLPs for new PL011 assertions
-     * (irq_count stays 0). The IRQ storm test (no IACK_EN + persistent
-     * RTIM from boot) proves BAR3→MIP0→GIC delivery works, but the
-     * engine doesn't trigger on runtime PL011 interrupts.
-     * Keep IACK_EN for stability while investigation continues. */
+    /* 2. MSIX_CFG: enable vector 25, then set IACK_EN.
+     * Linux rp1_irqchip does these as SEPARATE writes to the SET alias:
+     *   irq_activate: writel(ENABLE, SET + MSIX_CFG(n))
+     *   irq_set_type: writel(IACK_EN, SET + MSIX_CFG(n))  [for level-triggered]
+     * Our previous single write (ENABLE|IACK_EN) may not properly initialize
+     * the engine — the RP1 may need ENABLE to take effect before IACK_EN. */
     volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_SET
                                                          + RP1_MSIX_CFG(RP1_INT_UART0));
-    *msix_set = MSIX_CFG_ENABLE | MSIX_CFG_IACK_EN;
+    *msix_set = MSIX_CFG_ENABLE;
+    __asm__ volatile("dsb sy" ::: "memory");
+    *msix_set = MSIX_CFG_IACK_EN;
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* 3. PL011: configure, drain FIFO, clear ICR, enable IMSC */
