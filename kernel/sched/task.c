@@ -11,6 +11,7 @@
 #include "spinlock.h"
 #include "cache.h"
 #include "ncmem.h"
+#include "arch.h"
 #include <stddef.h>
 
 /* Task table - NC on Pi 5, BSS fallback otherwise */
@@ -306,11 +307,7 @@ void task_exit(void)
      * setting TASK_TERMINATED and scheduler_remove_task(), causing
      * schedule() to find a terminated task still in the run queue
      * (pick_next_task returns it, next == current → panic). */
-#if defined(PLATFORM_X86_64)
-    __asm__ volatile("cli" ::: "memory");
-#else
-    __asm__ volatile("msr daifset, #2" ::: "memory");
-#endif
+    arch_irq_disable();
 
     task->state = TASK_TERMINATED;
 #if !defined(PLATFORM_RASPI5) && !defined(PLATFORM_X86_64)

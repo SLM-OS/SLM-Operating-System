@@ -1,14 +1,22 @@
 # Cargo configuration for SLM-OS Rust runtime
+#
+# Default target is aarch64. For x86-64 builds, override with:
+#   cargo build --target x86_64-unknown-none
 
 [build]
 target = "aarch64-unknown-none"
 
 [target.aarch64-unknown-none]
-# Use the ARM cross-linker (same as C kernel)
 linker = "aarch64-none-elf-gcc"
-
-# Rust flags for bare-metal
 rustflags = [
-    "-C", "link-arg=-nostdlib",      # No standard library
-    "-C", "link-arg=-static",         # Static linking
+    "-C", "link-arg=-nostdlib",
+    "-C", "link-arg=-static",
+]
+
+[target.x86_64-unknown-none]
+linker = "gcc"
+rustflags = [
+    "-C", "link-arg=-nostdlib",
+    "-C", "link-arg=-static",
+    "-C", "relocation-model=static",
 ]

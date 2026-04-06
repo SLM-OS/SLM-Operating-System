@@ -485,36 +485,26 @@ const fdt_info_t *dtb_get_info(void)
     return &dummy_fdt_info;
 }
 
-/* ---- Rust FFI stubs ---- */
+/* ---- Rust FFI stubs (weak — overridden by real Rust library when linked) ---- */
 
-void rust_heap_init(void *heap_start, size_t heap_size)
+__attribute__((weak)) void rust_heap_init(void *heap_start, size_t heap_size)
 {
-    (void)heap_start;
-    (void)heap_size;
+    (void)heap_start; (void)heap_size;
 }
 
-int rust_init(void)
+__attribute__((weak)) int rust_init(void)
 {
-    return 42;  /* Magic value expected by main.c */
+    return 42;
 }
 
-void rust_hello(void)
-{
-    /* No Rust runtime on x86-64 yet */
-}
+__attribute__((weak)) void rust_hello(void) {}
 
-int rust_model_mem_init(void)
+__attribute__((weak)) int rust_model_mem_init(void)
 {
     return 0;
 }
 
-int rust_run_tests(void)
-{
-    return 0;
-}
-
-/* Component system init (normally in Rust runtime) */
-int component_system_init(void)
+__attribute__((weak)) int rust_run_tests(void)
 {
     return 0;
 }
@@ -558,7 +548,7 @@ void vmm_get_stats(struct vmm_stats *stats)
     }
 }
 
-/* ---- Rust model memory stubs ---- */
+/* ---- Rust model memory stubs (weak — overridden by Rust library) ---- */
 
 struct pool_stats {
     uint64_t total_bytes;
@@ -567,29 +557,19 @@ struct pool_stats {
     uint32_t num_allocs;
 };
 
-void rust_weight_pool_stats(struct pool_stats *stats)
+__attribute__((weak)) void rust_weight_pool_stats(struct pool_stats *stats)
 {
-    if (stats) {
-        stats->total_bytes = 0;
-        stats->used_bytes = 0;
-        stats->free_bytes = 0;
-        stats->num_allocs = 0;
-    }
+    if (stats) { stats->total_bytes = 0; stats->used_bytes = 0; stats->free_bytes = 0; stats->num_allocs = 0; }
 }
 
-void rust_workspace_pool_stats(struct pool_stats *stats)
+__attribute__((weak)) void rust_workspace_pool_stats(struct pool_stats *stats)
 {
-    if (stats) {
-        stats->total_bytes = 0;
-        stats->used_bytes = 0;
-        stats->free_bytes = 0;
-        stats->num_allocs = 0;
-    }
+    if (stats) { stats->total_bytes = 0; stats->used_bytes = 0; stats->free_bytes = 0; stats->num_allocs = 0; }
 }
 
-/* ---- Component system stubs ---- */
+/* ---- Component system stubs (weak — overridden by Rust library) ---- */
 
-uint32_t component_count(void) { return 0; }
+__attribute__((weak)) uint32_t component_count(void) { return 0; }
 
 struct component_info {
     uint32_t id;
@@ -598,41 +578,26 @@ struct component_info {
     uint32_t type;
 };
 
-int component_get_info(uint32_t index, struct component_info *info)
-{
-    (void)index; (void)info;
-    return -1;
-}
+__attribute__((weak)) int component_get_info(uint32_t index, struct component_info *info)
+{ (void)index; (void)info; return -1; }
 
-const char *component_state_name(uint32_t state)
-{
-    (void)state;
-    return "unknown";
-}
+__attribute__((weak)) const char *component_state_name(uint32_t state)
+{ (void)state; return "unknown"; }
 
-const char *component_type_name(uint32_t type)
-{
-    (void)type;
-    return "unknown";
-}
+__attribute__((weak)) const char *component_type_name(uint32_t type)
+{ (void)type; return "unknown"; }
 
-int component_register(const char *name, uint32_t type, void *config)
-{
-    (void)name; (void)type; (void)config;
-    return -1;
-}
+__attribute__((weak)) int component_register(const char *name, uint32_t type, void *config)
+{ (void)name; (void)type; (void)config; return -1; }
 
-int component_unregister(uint32_t id)
-{
-    (void)id;
-    return -1;
-}
+__attribute__((weak)) int component_unregister(uint32_t id)
+{ (void)id; return -1; }
 
-int component_find(const char *name)
-{
-    (void)name;
-    return -1;
-}
+__attribute__((weak)) int component_find(const char *name)
+{ (void)name; return -1; }
+
+/* Component system init — also provided by Rust */
+__attribute__((weak)) int component_system_init(void) { return 0; }
 
 /* ---- VMM mapping stubs ---- */
 

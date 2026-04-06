@@ -80,10 +80,15 @@ endif()
 
 # Rust runtime library
 # Built by `make runtime` before `make kernel`
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/runtime/target/aarch64-unknown-none/release)
+if(PLATFORM STREQUAL "X86_64")
+    set(RUST_TARGET "x86_64-unknown-none")
 else()
-    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/runtime/target/aarch64-unknown-none/debug)
+    set(RUST_TARGET "aarch64-unknown-none")
+endif()
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/runtime/target/${RUST_TARGET}/release)
+else()
+    set(RUST_LIB_DIR ${CMAKE_SOURCE_DIR}/runtime/target/${RUST_TARGET}/debug)
 endif()
 set(RUST_LIB ${RUST_LIB_DIR}/libslm_runtime.a)
 
@@ -423,14 +428,13 @@ target_compile_definitions(lua PRIVATE
 # Link with Lua library
 target_link_libraries(slmos.elf PRIVATE lua)
 
-# Link with Rust runtime (ARM64 only — x86-64 provides stubs)
-if(NOT PLATFORM STREQUAL "X86_64")
-    if(EXISTS ${RUST_LIB})
-        target_link_libraries(slmos.elf PRIVATE ${RUST_LIB})
-        message(STATUS "  Rust lib:   ${RUST_LIB}")
-    else()
-        message(STATUS "  Rust lib:   (not built yet - run 'make runtime' first)")
-    endif()
+# Link with Rust runtime (weak C stubs provide fallback if not built)
+# --whole-archive forces all Rust symbols to be included, overriding weak C stubs
+if(EXISTS ${RUST_LIB})
+    target_link_libraries(slmos.elf PRIVATE -Wl,--whole-archive ${RUST_LIB} -Wl,--no-whole-archive)
+    message(STATUS "  Rust lib:   ${RUST_LIB}")
+else()
+    message(STATUS "  Rust lib:   (not built yet - run 'make runtime' first, using C stubs)")
 endif()
 
 target_link_options(slmos.elf PRIVATE
