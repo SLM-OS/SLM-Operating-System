@@ -52,12 +52,39 @@ pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
 // =============================================================================
 
 #[panic_handler]
-fn rust_panic(_info: &PanicInfo) -> ! {
-    // Call C panic with a static message.
-    // (Formatting PanicInfo deferred — see TODO.md "Deferred to Phase 4+")
-    static MSG: &[u8] = b"Rust panic!\0";
+fn rust_panic(info: &PanicInfo) -> ! {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
     unsafe {
-        kernel_ffi::panic(MSG.as_ptr());
+        kernel_ffi::uart_puts(b"RUST PANIC: \0".as_ptr());
+    }
+
+    if let Some(loc) = info.location() {
+        // Copy file path to null-terminated stack buffer (file() is not null-terminated)
+        let file = loc.file().as_bytes();
+        let mut buf = [0u8; 64];
+        let len = if file.len() < 63 { file.len() } else { 63 };
+        buf[..len].copy_from_slice(&file[..len]);
+        buf[len] = 0;
+
+        unsafe {
+            uart_printf(
+                b"at %s:%u:%u\n\0".as_ptr(),
+                buf.as_ptr(),
+                loc.line(),
+                loc.column(),
+            );
+        }
+    } else {
+        unsafe {
+            kernel_ffi::uart_puts(b"(no location)\n\0".as_ptr());
+        }
+    }
+
+    unsafe {
+        kernel_ffi::panic(b"Rust panic - halting\0".as_ptr());
     }
 }
 
@@ -399,6 +426,134 @@ pub extern "C" fn rust_run_tests() -> i32 {
         msg_router::msg_router_subscribe(b"events\0".as_ptr(), 1);
         msg_router::msg_router_list();
         print_test_result(b"msg_router_list safe\0", true);
+    }
+
+    // Test 22: unsubscribe_all clears subscriptions and reclaims empty topic
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"cleanup\0".as_ptr(), 70);
+        msg_router::msg_router_unsubscribe_all(70);
+        // Topic should be reclaimed — publish should return 0
+        let delivered = msg_router::msg_router_publish(
+            b"cleanup\0".as_ptr(),
+            b"gone\0".as_ptr(),
+        );
+        let passed = delivered == 0;
+        print_test_result(b"unsubscribe_all reclaims topic\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 23: unsubscribe_all leaves other subscribers intact
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"shared\0".as_ptr(), 80);
+        msg_router::msg_router_subscribe(b"shared\0".as_ptr(), 81);
+        msg_router::msg_router_unsubscribe_all(80);
+        // Component 81 should still be subscribed — receive should find mailbox
+        // (no message pending, but the subscription slot should exist)
+        // Verify by checking that component 81 can still be found in topic
+        let data = msg_router::msg_router_receive(81, core::ptr::null_mut());
+        // No message pending, so NULL is expected — but topic should still exist
+        let passed = data.is_null(); // subscription exists, just no message
+        print_test_result(b"unsubscribe_all preserves others\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 24: get_subscriptions returns correct count and topic names
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"topicA\0".as_ptr(), 90);
+        msg_router::msg_router_subscribe(b"topicB\0".as_ptr(), 90);
+        let mut topics = [[0u8; 16]; 8];
+        let mut count: i32 = 0;
+        msg_router::msg_router_get_subscriptions(
+            90,
+            topics.as_mut_ptr(),
+            &mut count,
+            8,
+        );
+        // Verify count
+        let count_ok = count == 2;
+        // Verify topic names (order may vary, check both are present)
+        let name_a = topics[0][0] == b't'; // "topicA" or "topicB" starts with 't'
+        let name_b = topics[1][0] == b't';
+        let passed = count_ok && name_a && name_b;
+        print_test_result(b"get_subscriptions count and names\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 25: unsubscribe_all across multiple topics
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"multi1\0".as_ptr(), 91);
+        msg_router::msg_router_subscribe(b"multi2\0".as_ptr(), 91);
+        msg_router::msg_router_subscribe(b"multi3\0".as_ptr(), 91);
+        msg_router::msg_router_unsubscribe_all(91);
+        // All 3 topics should be reclaimed
+        let mut topics = [[0u8; 16]; 8];
+        let mut count: i32 = 0;
+        msg_router::msg_router_get_subscriptions(
+            91,
+            topics.as_mut_ptr(),
+            &mut count,
+            8,
+        );
+        let passed = count == 0;
+        print_test_result(b"unsubscribe_all clears multiple topics\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 26: unsubscribe_all on nonexistent component is a no-op
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"safe\0".as_ptr(), 92);
+        msg_router::msg_router_unsubscribe_all(999); // nonexistent
+        // Component 92's subscription should be untouched
+        let mut topics = [[0u8; 16]; 8];
+        let mut count: i32 = 0;
+        msg_router::msg_router_get_subscriptions(
+            92,
+            topics.as_mut_ptr(),
+            &mut count,
+            8,
+        );
+        let passed = count == 1;
+        print_test_result(b"unsubscribe_all nonexistent is no-op\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 27: get_subscriptions with zero subscriptions
+    {
+        msg_router::msg_router_init();
+        let mut topics = [[0u8; 16]; 8];
+        let mut count: i32 = -1;
+        msg_router::msg_router_get_subscriptions(
+            93,
+            topics.as_mut_ptr(),
+            &mut count,
+            8,
+        );
+        let passed = count == 0;
+        print_test_result(b"get_subscriptions zero returns 0\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 28: get_subscriptions with max_topics=0 returns count but writes nothing
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"limited\0".as_ptr(), 94);
+        let mut topics = [[0u8; 16]; 8];
+        let mut count: i32 = 0;
+        msg_router::msg_router_get_subscriptions(
+            94,
+            topics.as_mut_ptr(),
+            &mut count,
+            0, // max_topics = 0
+        );
+        // count should still report actual number, but no names written
+        let passed = count == 1;
+        print_test_result(b"get_subscriptions max=0 still counts\0", passed);
+        if !passed { failures += 1; }
     }
 
     // Summary

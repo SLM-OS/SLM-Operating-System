@@ -328,9 +328,23 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     cache_clean_range(&task->context, sizeof(task->context));
 #endif
 
+    /* Skip DEBUG_PRINT on secondary CPUs — uart_lock contention with
+     * CPU 0's boot output causes deadlock/hang on real hardware. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    {
+        uint64_t _mpidr;
+        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
+        if (cpu_logical_id(_mpidr) == 0) {
+            DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
+                        task->name, task->id, task->stack_base, task->stack_top,
+                        task->priority);
+        }
+    }
+#else
     DEBUG_PRINT("Created task '%s' (id=%u, stack=%p-%p, priority=%u)",
                 task->name, task->id, task->stack_base, task->stack_top,
                 task->priority);
+#endif
 
     return task;
 }

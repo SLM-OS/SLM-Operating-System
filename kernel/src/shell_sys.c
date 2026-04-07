@@ -21,6 +21,7 @@
 #include "dtb.h"
 #include "help.h"
 #include "string.h"
+#include "../gpu/gpu.h"
 #include <stdint.h>
 
 /* Command table access (defined in shell.c) */
@@ -780,7 +781,7 @@ void smp_test_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|stats|all>\r\n");
+        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -856,6 +857,58 @@ int cmd_bench(int argc, char *argv[])
         uart_puts("Shared Buffer Throughput Benchmark\r\n");
         uart_puts("==================================\r\n");
         bench_shared_buffer();
+    } else if (strcmp(argv[1], "gpu") == 0) {
+        uart_puts("GPU Cache Sync Benchmark\r\n");
+        uart_puts("========================\r\n");
+        if (!gpu_available()) {
+            uart_puts("  GPU not available\r\n");
+        } else {
+            gpu_buffer_t buf;
+            uint64_t t0, t1;
+
+            /* Measure alloc */
+            t0 = timer_get_count();
+            int ret = gpu_alloc(4096, GPU_MEM_READWRITE, &buf);
+            t1 = timer_get_count();
+            if (ret != GPU_OK) {
+                uart_puts("  gpu_alloc failed\r\n");
+            } else {
+                uint64_t freq = timer_get_frequency();
+                uint64_t alloc_ns = (t1 - t0) * 1000000000ULL / freq;
+
+                /* Write pattern */
+                volatile uint32_t *p = (volatile uint32_t *)buf.cpu_addr;
+                for (int i = 0; i < 1024; i++) p[i] = 0xDEADBEEF;
+
+                /* Measure sync_for_gpu (cache clean) */
+                t0 = timer_get_count();
+                gpu_sync_for_gpu(&buf);
+                t1 = timer_get_count();
+                uint64_t clean_ns = (t1 - t0) * 1000000000ULL / freq;
+
+                /* Measure sync_for_cpu (cache invalidate) */
+                t0 = timer_get_count();
+                gpu_sync_for_cpu(&buf);
+                t1 = timer_get_count();
+                uint64_t inv_ns = (t1 - t0) * 1000000000ULL / freq;
+
+                /* Verify data survived round-trip */
+                int ok = (p[0] == 0xDEADBEEF && p[1023] == 0xDEADBEEF);
+
+                /* Measure free */
+                t0 = timer_get_count();
+                gpu_free(&buf);
+                t1 = timer_get_count();
+                uint64_t free_ns = (t1 - t0) * 1000000000ULL / freq;
+
+                uart_printf("  4KB buffer (1024 uint32):\r\n");
+                uart_printf("    Alloc:         %lu ns\r\n", (unsigned long)alloc_ns);
+                uart_printf("    sync_for_gpu:  %lu ns (DC CVAC clean)\r\n", (unsigned long)clean_ns);
+                uart_printf("    sync_for_cpu:  %lu ns (DC IVAC invalidate)\r\n", (unsigned long)inv_ns);
+                uart_printf("    Free:          %lu ns\r\n", (unsigned long)free_ns);
+                uart_printf("    Data integrity: %s\r\n", ok ? "PASS" : "FAIL");
+            }
+        }
     } else if (strcmp(argv[1], "all") == 0) {
         uart_puts("SLM-OS Performance Benchmarks\r\n");
         uart_puts("=============================\r\n\r\n");
@@ -874,7 +927,7 @@ int cmd_bench(int argc, char *argv[])
         bench_sched_stats();
     } else {
         uart_printf("Unknown benchmark: %s\r\n", argv[1]);
-        uart_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, stats, all\r\n");
+        uart_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, stats, all\r\n");
         return 1;
     }
 
