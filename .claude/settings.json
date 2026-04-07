@@ -55,7 +55,10 @@
       "Bash(git staus:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
-      "Bash(git mv:*)"
+      "Bash(git mv:*)",
+      "Bash(gh api *search/*)",
+      "Bash(gh api *repos/*)",
+      "Bash(gh api rate_limit)"
     ],
     "deny": [
       "Bash(git push --force)",
@@ -64,5 +67,8 @@
       "Bash(git clean -fd)"
     ]
   },
-  "skills": ["/opt/labctl/skills/deploy-and-test.md"]
+  "skills": ["/opt/labctl/skills/deploy-and-test.md"],
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
 }
