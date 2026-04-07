@@ -39,9 +39,44 @@
 
 **Next test:** Try allocating the idle task's context in cacheable memory, or skip the FPU restore for the first switch_to.
 
-## Current State
+## Iteration 6: NC context is NOT the issue
 
-- NC init flag works (secondary CPUs pass scheduler polling loop)
-- Shell boots and is responsive (CPU 0 cooperative scheduling)
-- Secondary CPUs run scheduler_start() but idle tasks never enter their function body
-- Blocker: `switch_to(NULL, idle)` on secondary CPUs fails silently — context.S restore from NC task struct doesn't reach the trampoline
+**Test:** Forced task_table to cacheable BSS (disabled NC alloc). Secondary CPUs still show 0 idle loops.
+**Conclusion:** NC memory for task structs is NOT the problem. switch_to fails regardless of memory type.
+
+## Iteration 7: Secondary CPUs never reach scheduler_start
+
+**Test:** Added 0xBBBB marker in smp.c right before scheduler_start(). CPU 0 shows 0xAAAA (scheduler_start marker), CPUs 1-3 show 0 (not even 0xBBBB).
+**Conclusion:** `scheduler_init_secondary()` hangs — secondary CPUs never return from it.
+
+## Iteration 8: task_lock cross-CPU deadlock
+
+**Hypothesis:** `task_lock` in task.c uses ldaxr/stxr which fails under cross-CPU contention.
+**Fix:** Replaced with `__atomic_test_and_set` (SWPALB).
+**Result:** No change — secondary CPUs still stuck.
+
+## Iteration 9: NC init flag timing
+
+**Problem:** NC init flag at `NC_MEM_BASE + NC_MEM_SIZE - 64` contained garbage from uninitialized DRAM. When properly zeroed, secondary CPUs correctly wait.
+**Issue:** Zeroing in `ncmem_init` happens before VMM → write goes to cacheable identity map, not NC. Fixed by zeroing in `main.c` after `vmm_init` and before `smp_init`.
+**Result:** Shell id=3 (secondary CPUs don't create idle tasks). Secondary CPUs stuck in init polling loop despite NC flag being set to 1.
+
+## Iteration 10: TLB invalidation
+
+**Hypothesis:** Secondary CPUs' TLB has stale entries from boot.S (L1[3] = 1GB cacheable block). NC reads go through cacheable path.
+**Fix:** Added `tlbi vmalle1; dsb sy; isb` before MMU enable in smp_boot.S.
+**Result:** No change. Shell id=3.
+
+## Current State (as of latest iteration)
+
+- NC init flag: zeroed correctly, set to 1 by scheduler_init
+- DEBUG_PRINT confirms flag is set (readback shows value=1)
+- Secondary CPUs boot successfully (SMP tests pass, "CPU N: online" printed)
+- Secondary CPUs DO enter the scheduler_is_initialized() polling loop
+- But they NEVER see the NC flag = 1 and NEVER exit the loop
+- The write (from CPU 0) to NC_MEM_BASE + NC_MEM_SIZE - 64 does NOT reach DRAM
+- TLB invalidation didn't help — the issue is likely in how CPU 0 writes to NC memory
+
+**Root cause hypothesis:** CPU 0's write to the NC flag address goes through the cacheable L1/L2 cache (since CPU 0's TLB might also have a stale entry for this address range). CPU 0's boot.S initial page table had L1[3] as a 1GB cacheable block. vmm_init() installs new tables with L2 split, but CPU 0's TLB may retain the old cacheable mapping.
+
+**Next step:** Add TLB invalidation on CPU 0 in vmm_init() after installing new page tables. Or verify that vmm_init already does TLBI.
