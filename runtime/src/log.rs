@@ -71,6 +71,13 @@ pub fn get_log_level() -> LogLevel {
 extern "C" {
     fn slm_print(s: *const c_char);
     fn uart_puts(s: *const u8);
+    static pit_ticks: u64;
+}
+
+/// Read `pit_ticks` using volatile access (modified by ISR at 100 Hz).
+#[inline]
+fn get_ticks() -> u64 {
+    unsafe { core::ptr::read_volatile(&pit_ticks) }
 }
 
 /// Print a null-terminated string to UART.
@@ -85,6 +92,26 @@ fn uart_print(s: &[u8]) {
     }
 }
 
+/// Print a timestamp prefix in `[secs.cs]` format (pit_ticks at 100 Hz).
+fn print_timestamp() {
+    let ticks = get_ticks();
+    let secs = ticks / 100;
+    let cs = ticks % 100;
+    let mut buf = [0u8; NUM_BUF_SIZE];
+
+    uart_print(b"[\0");
+    let start = format_u64(secs, &mut buf);
+    unsafe { uart_puts(buf[start..].as_ptr()) };
+    uart_print(b".\0");
+    // Zero-pad centiseconds to 2 digits
+    if cs < 10 {
+        uart_print(b"0\0");
+    }
+    let start = format_u64(cs, &mut buf);
+    unsafe { uart_puts(buf[start..].as_ptr()) };
+    uart_print(b"] \0");
+}
+
 // =============================================================================
 // Logging Functions
 // =============================================================================
@@ -95,6 +122,7 @@ fn uart_print(s: &[u8]) {
 #[inline]
 pub fn log_debug(msg: &[u8]) {
     if get_log_level() <= LogLevel::Debug {
+        print_timestamp();
         uart_print(b"[DEBUG] \0");
         uart_print(msg);
     }
@@ -106,6 +134,7 @@ pub fn log_debug(msg: &[u8]) {
 #[inline]
 pub fn log_info(msg: &[u8]) {
     if get_log_level() <= LogLevel::Info {
+        print_timestamp();
         uart_print(b"[INFO] \0");
         uart_print(msg);
     }
@@ -117,6 +146,7 @@ pub fn log_info(msg: &[u8]) {
 #[inline]
 pub fn log_warn(msg: &[u8]) {
     if get_log_level() <= LogLevel::Warn {
+        print_timestamp();
         uart_print(b"[WARN] \0");
         uart_print(msg);
     }
@@ -128,6 +158,7 @@ pub fn log_warn(msg: &[u8]) {
 #[inline]
 pub fn log_error(msg: &[u8]) {
     if get_log_level() <= LogLevel::Error {
+        print_timestamp();
         uart_print(b"[ERROR] \0");
         uart_print(msg);
     }
@@ -205,6 +236,7 @@ fn format_hex(value: u64, buf: &mut [u8; NUM_BUF_SIZE]) -> usize {
 /// The prefix must be null-terminated.
 pub fn log_info_val(prefix: &[u8], value: u64) {
     if get_log_level() <= LogLevel::Info {
+        print_timestamp();
         uart_print(b"[INFO] \0");
         // Print prefix without null terminator
         if !prefix.is_empty() && prefix[prefix.len() - 1] == 0 {
@@ -223,6 +255,7 @@ pub fn log_info_val(prefix: &[u8], value: u64) {
 /// The prefix must be null-terminated.
 pub fn log_hex(prefix: &[u8], value: u64) {
     if get_log_level() <= LogLevel::Info {
+        print_timestamp();
         uart_print(b"[INFO] \0");
         if !prefix.is_empty() && prefix[prefix.len() - 1] == 0 {
             unsafe { uart_puts(prefix.as_ptr()) };
@@ -237,6 +270,7 @@ pub fn log_hex(prefix: &[u8], value: u64) {
 /// Log a debug message with an unsigned integer value.
 pub fn log_debug_val(prefix: &[u8], value: u64) {
     if get_log_level() <= LogLevel::Debug {
+        print_timestamp();
         uart_print(b"[DEBUG] \0");
         if !prefix.is_empty() && prefix[prefix.len() - 1] == 0 {
             unsafe { uart_puts(prefix.as_ptr()) };
@@ -251,6 +285,7 @@ pub fn log_debug_val(prefix: &[u8], value: u64) {
 /// Log an error message with an unsigned integer value.
 pub fn log_error_val(prefix: &[u8], value: u64) {
     if get_log_level() <= LogLevel::Error {
+        print_timestamp();
         uart_print(b"[ERROR] \0");
         if !prefix.is_empty() && prefix[prefix.len() - 1] == 0 {
             unsafe { uart_puts(prefix.as_ptr()) };
@@ -265,6 +300,7 @@ pub fn log_error_val(prefix: &[u8], value: u64) {
 /// Log a warning message with an unsigned integer value.
 pub fn log_warn_val(prefix: &[u8], value: u64) {
     if get_log_level() <= LogLevel::Warn {
+        print_timestamp();
         uart_print(b"[WARN] \0");
         if !prefix.is_empty() && prefix[prefix.len() - 1] == 0 {
             unsafe { uart_puts(prefix.as_ptr()) };
@@ -308,6 +344,7 @@ pub extern "C" fn rust_log_get_level() -> u8 {
 #[no_mangle]
 pub unsafe extern "C" fn rust_log_info(msg: *const c_char) {
     if get_log_level() <= LogLevel::Info {
+        print_timestamp();
         uart_print(b"[INFO] \0");
         slm_print(msg);
     }
@@ -320,6 +357,7 @@ pub unsafe extern "C" fn rust_log_info(msg: *const c_char) {
 #[no_mangle]
 pub unsafe extern "C" fn rust_log_error(msg: *const c_char) {
     if get_log_level() <= LogLevel::Error {
+        print_timestamp();
         uart_print(b"[ERROR] \0");
         slm_print(msg);
     }
@@ -332,6 +370,7 @@ pub unsafe extern "C" fn rust_log_error(msg: *const c_char) {
 #[no_mangle]
 pub unsafe extern "C" fn rust_log_warn(msg: *const c_char) {
     if get_log_level() <= LogLevel::Warn {
+        print_timestamp();
         uart_print(b"[WARN] \0");
         slm_print(msg);
     }
@@ -344,6 +383,7 @@ pub unsafe extern "C" fn rust_log_warn(msg: *const c_char) {
 #[no_mangle]
 pub unsafe extern "C" fn rust_log_debug(msg: *const c_char) {
     if get_log_level() <= LogLevel::Debug {
+        print_timestamp();
         uart_print(b"[DEBUG] \0");
         slm_print(msg);
     }

@@ -36,6 +36,8 @@ Shell                     MessageRouter                Components
 | `msg_router_publish(topic, data)` | Publish to all subscribers, wait for ack |
 | `msg_router_receive(idx, topic_out)` | Check for pending message |
 | `msg_router_ack(idx)` | Acknowledge received message |
+| `msg_router_unsubscribe_all(idx)` | Remove all subscriptions for a component (reclaims empty topics) |
+| `msg_router_get_subscriptions(idx, names, count, max)` | Query which topics a component is subscribed to |
 | `msg_router_list()` | Print topics and subscribers |
 
 ### Shell Commands
@@ -45,6 +47,15 @@ Shell                     MessageRouter                Components
 | `msg send <topic> <data>` | Publish a message to a topic |
 | `msg list` | List all topics and subscribers |
 | `msg subscribe <topic> <idx>` | Subscribe a component to a topic |
+
+---
+
+## Subscription Lifecycle
+
+1. **Subscribe:** Component calls `msg_router_subscribe(topic, idx)` during initialization. Topic is auto-created if it does not exist.
+2. **Publish/Receive:** Messages published to a topic are copied into each subscriber's mailbox. Subscribers poll via `msg_router_receive()` and acknowledge via `msg_router_ack()`.
+3. **Unsubscribe on unload:** When a component's task exits, `component_task_cleanup()` calls `msg_router_unsubscribe_all(idx)` to remove all subscriptions. Topics with no remaining subscribers are reclaimed.
+4. **Hot-swap preservation:** During `component_hot_swap()`, subscriptions are saved via `msg_router_get_subscriptions()`, the old component is unregistered, the new component is started, and saved subscriptions are re-applied to the new component index.
 
 ---
 

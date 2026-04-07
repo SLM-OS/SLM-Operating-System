@@ -50,7 +50,8 @@ Available commands:
   hexdump   - Hex dump file (hexdump <path> [offset] [len])
   grep      - Search in file (grep <pattern> <path>)
   find      - Find files (find <path> <pattern>)
-  component - Component system (list/register/status)
+  component - Component system (list/run/swap/register/status)
+  msg       - Message router (send/list/subscribe)
   net       - Network control (init/status)
   ping      - Send ICMP echo request
   ifconfig  - Network interface config
@@ -96,6 +97,7 @@ Available commands:
 | `grep <pattern> <path>` | Search for substring in file (shows line numbers) |
 | `find <path> <pattern>` | Find files by name pattern (wildcards: `*`, `?`) |
 | `component` | Component system management (see below) |
+| `msg` | Message router commands (see below) |
 | `net init\|status` | Initialize network or show status |
 | `ping <ip> [count]` | Send ICMP echo requests (default: 4) |
 | `ifconfig` | Show network configuration |
@@ -380,10 +382,14 @@ Pattern wildcards:
 The `component` command provides management of the component system:
 
 ```
-component list                           - List all registered components
+component list                              - List all registered components
+component builtins                          - List available built-in components
+component run <name>                        - Run a built-in component as a task
+component swap <old> <new>                  - Hot-swap: replace old with new (preserves subscriptions)
+component send <msg>                        - Send message to echo service
 component register <name> <ver> <type> [pri] - Register a new component
-component unregister <idx>               - Unregister by index
-component status <name|idx>              - Show component details
+component unregister <idx>                  - Unregister by index
+component status <name|idx>                 - Show component details
 ```
 
 **Types:** `service`, `driver`, `application`
@@ -391,25 +397,47 @@ component status <name|idx>              - Show component details
 
 Example:
 ```
-SLM-OS> component register my-service 1.0.0 service high
-Registered component 'my-service' at index 0
+SLM-OS> component builtins
+Built-in Components (3 available):
+  counter      1.0      service     Counts to 10 with 500ms intervals
+  echo         1.0      service     Echoes IPC messages back to sender
+  listener     1.0      service     Listens on 'events' topic via message router
+
+SLM-OS> component run listener
+Component 'listener' v1.0 started (idx=0, task=7)
+
+SLM-OS> component swap listener listener
+Hot-swap: 'listener' (idx 0) -> 'listener' (idx 1), 1 subscription(s) transferred
 
 SLM-OS> component list
 Registered Components: 1
   Idx  Name                 Version   Type        State       Pri
-  ---  ----                 -------   ----        -----       ---
-    0  my-service           1.0.0     service     loaded      high
+    1  listener             1.0       service     running     idle
+```
 
-SLM-OS> component status 0
-Component 0:
-  Name:        my-service
-  Version:     1.0.0
-  Type:        service
-  State:       loaded
-  Priority:    6
-  Task ID:     0
-  Memory:      0 KB
-  Switches:    0
+### Message Router Command
+
+The `msg` command provides access to the topic-based publish/subscribe message router:
+
+```
+msg send <topic> <data>     - Publish a message to a topic
+msg list                    - List all topics and their subscribers
+msg subscribe <topic> <idx> - Subscribe a component to a topic
+```
+
+Example:
+```
+SLM-OS> component run listener
+[listener] Started (component 0), subscribed to 'events'
+
+SLM-OS> msg send events Hello from shell!
+[listener] [events] "Hello from shell!" (msg #1)
+Message delivered to 1 subscriber(s)
+
+SLM-OS> msg list
+Message Router (1 topics):
+  Topic 'events' (1 subscribers):
+    -> component 'listener' (idx 0)
 ```
 
 ### Network Commands

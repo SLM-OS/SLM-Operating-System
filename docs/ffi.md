@@ -311,6 +311,27 @@ int component_get_info(uint32_t index, ComponentInfo *info);
 //         4=Updating, 5=Terminating, 6=Unloaded
 // Returns 0 on success, -1 on error
 int component_set_state(uint32_t index, uint8_t state);
+
+// Hot-swap a running component with a new version.
+// Preserves topic subscriptions across the swap.
+// Returns new component index on success, -1 on error
+int component_hot_swap(const char *old_name, const char *new_name);
+```
+
+### Message Router (Rust → C FFI)
+
+The message router is implemented in Rust (`runtime/src/msg_router.rs`) and exports `extern "C"` functions:
+
+```c
+void msg_router_init(void);
+int msg_router_subscribe(const char *topic_name, int component_idx);
+int msg_router_publish(const char *topic_name, const char *data);
+const char *msg_router_receive(int component_idx, char *topic_out);
+void msg_router_ack(int component_idx);
+void msg_router_unsubscribe_all(int component_idx);
+void msg_router_get_subscriptions(int component_idx,
+    char topic_names[][16], int *count_out, int max_topics);
+void msg_router_list(void);
 ```
 
 #### ComponentInfo Structure
@@ -331,20 +352,17 @@ typedef struct {
 
 ## Panic Handling
 
-Rust panics are routed to the C `panic()` function:
+Rust panics are routed to the C `panic()` function with source location:
 
 ```rust
 #[panic_handler]
-fn rust_panic(_info: &PanicInfo) -> ! {
-    static MSG: &[u8] = b"Rust panic!\0";
-    unsafe { kernel_ffi::panic(MSG.as_ptr()); }
+fn rust_panic(info: &PanicInfo) -> ! {
+    // Prints: "RUST PANIC: at file.rs:line:column"
+    // Then calls C panic() to halt the kernel
 }
 ```
 
-This ensures:
-- Consistent panic output through UART
-- Proper kernel halt behavior
-- Future: Panic info can be formatted and passed to C
+The panic handler extracts `PanicInfo::location()` to print the source file, line, and column before halting. The file path is copied to a stack buffer with null termination (since Rust `&str` is not null-terminated).
 
 To test the panic handler:
 ```c
