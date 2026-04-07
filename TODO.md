@@ -182,8 +182,8 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 ### GPU Initialization
 - ✅ NVIDIA GPU probe (`gpu_nvidia.c`) — GA10B identified at EL2
 - ✅ Read GPU ID registers (NV_PMC_BOOT_0, BOOT_42) — working
-- ☐ Enable GPU clocks via BPMP IPC (may not be needed at EL2)
-- ☐ GSP firmware loading (RISC-V processor on GPU die)
+- ⏸️ Enable GPU clocks via BPMP IPC — not needed, GPU registers accessible without it (clocks left enabled by Linux before kexec)
+- ⏸️ GSP firmware loading — Phase 5+, RISC-V processor on GPU die, required for compute but not documented by NVIDIA
 - ✅ Document initialization sequence in `docs/gpu.md`
 
 ### GPU Memory Management
