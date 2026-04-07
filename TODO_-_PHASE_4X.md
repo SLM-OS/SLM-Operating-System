@@ -406,7 +406,7 @@ This is a project-scale effort deferred to post-capstone.
 - ✅ Both architectures build from same source tree
 
 ### Shared Code
-- ✅ Scheduler compiles and runs (preemptive scheduling verified)
+- ✅ Scheduler compiles and runs (preemptive scheduling verified, reentrance fix cross-platform)
 - ✅ IPC (message queues, shared buffers) compiles
 - ✅ Shell (30+ commands) compiles and runs
 - ✅ ELF loader compiles
@@ -415,6 +415,14 @@ This is a project-scale effort deferred to post-capstone.
 - ✅ Lua 5.4 interpreter compiles and runs (with x86-64 setjmp.S)
 - ✅ Rust runtime linked via `--whole-archive` (model memory, component system)
 - ⏸️ Networking — requires VirtIO-PCI transport driver (x86-64 QEMU uses PCI, not MMIO)
+
+### Inter-Component IPC
+- ✅ Message router: topic-based pub/sub (`msg_router.c`)
+- ✅ Echo service: shared mailbox with atomic ready/ack flags
+- ✅ Listener service: subscribes to `events` topic via message router
+- ✅ Shell commands: `msg send/list/subscribe`, `component send`
+- ✅ UART yield fix: `uart_getc()` yields to scheduler, enabling background task scheduling
+- ✅ 20 unit tests (message router + component services)
 
 ---
 

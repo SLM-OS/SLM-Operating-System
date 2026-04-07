@@ -128,6 +128,57 @@ static void echo_service_entry(void *arg)
 }
 
 /* ============================================================================
+ * Built-in Component: Listener Service
+ *
+ * Subscribes to a topic via the message router and prints received messages.
+ * Demonstrates the pub/sub IPC pattern (M7 MessageRouter).
+ * ============================================================================ */
+
+/* Message router API (msg_router.c) */
+extern void msg_router_init(void);
+extern int msg_router_subscribe(const char *topic_name, int component_idx);
+extern const char *msg_router_receive(int component_idx, char *topic_out);
+extern void msg_router_ack(int component_idx);
+
+static void listener_service_entry(void *arg)
+{
+    int comp_idx = (int)(uintptr_t)arg;
+
+    component_set_state((uint32_t)comp_idx, COMPONENT_RUNNING);
+
+    /* Subscribe to the "events" topic */
+    if (msg_router_subscribe("events", comp_idx) != 0) {
+        uart_printf("[listener] Failed to subscribe to 'events'\n");
+        component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
+        return;
+    }
+
+    uart_printf("[listener] Started (component %d), subscribed to 'events'\n", comp_idx);
+
+    int msgs_received = 0;
+    extern volatile uint64_t pit_ticks;
+    uint64_t timeout_tick = pit_ticks + 6000;  /* 60s at 100 Hz */
+
+    while (pit_ticks < timeout_tick) {
+        char topic_buf[16];
+        const char *data = msg_router_receive(comp_idx, topic_buf);
+        if (data) {
+            msgs_received++;
+            uart_printf("[listener] [%s] \"%s\" (msg #%d)\n",
+                        topic_buf, data, msgs_received);
+            msg_router_ack(comp_idx);
+            /* Reset timeout on activity */
+            timeout_tick = pit_ticks + 6000;
+        } else {
+            yield();
+        }
+    }
+
+    uart_printf("[listener] Done (%d messages)\n", msgs_received);
+    component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
+}
+
+/* ============================================================================
  * Built-in Component Table
  * ============================================================================ */
 
@@ -158,6 +209,14 @@ static const struct builtin_component builtin_components[] = {
         .type = COMPONENT_TYPE_SERVICE,
         .priority = COMPONENT_PRIORITY_IDLE,  /* Same as shell to enable round-robin */
         .entry = echo_service_entry,
+    },
+    {
+        .name = "listener",
+        .version = "1.0",
+        .description = "Listens on 'events' topic via message router",
+        .type = COMPONENT_TYPE_SERVICE,
+        .priority = COMPONENT_PRIORITY_IDLE,  /* Same as shell for round-robin */
+        .entry = listener_service_entry,
     },
 };
 

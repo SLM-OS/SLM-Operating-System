@@ -30,6 +30,23 @@ Phase 4 implements the component registry and lifecycle management foundation:
 | Component lookup (by name) | ✅ | O(n) scan |
 | Thread-safe registry | ✅ | Spinlock protected |
 | Shell commands | ✅ | list, register, unregister, status |
+| Built-in services | ✅ | counter, echo, listener |
+| Message router (pub/sub) | ✅ | Topic-based, yield-based delivery |
+| Echo IPC (shared mailbox) | ✅ | Atomic ready/ack, round-robin scheduling |
+
+### Built-in Component Services
+
+| Service | Description | IPC Method |
+|---------|-------------|------------|
+| `counter` | Counts to 10 with 500ms intervals | None (standalone) |
+| `echo` | Echoes messages sent via `component send` | Shared mailbox (atomic flags) |
+| `listener` | Prints messages from `events` topic | Message router (pub/sub) |
+
+### Message Router
+
+The message router (`kernel/src/msg_router.c`) provides topic-based publish/subscribe messaging between components. Components subscribe to named topics and receive messages via per-subscriber mailboxes. See `docs/m7-message-router.md` for implementation details.
+
+Shell commands: `msg send <topic> <data>`, `msg list`, `msg subscribe <topic> <idx>`
 
 ### Deferred to Phase 5+
 
@@ -38,7 +55,6 @@ Phase 4 implements the component registry and lifecycle management foundation:
 | ELF loading from manifest | Requires component binary format |
 | Dependency resolution | Requires manifest dependencies |
 | Hot-swap with state transfer | Complex, needs explicit API |
-| Message routing | Requires topic-based pub/sub |
 | Component isolation | Requires user space separation |
 
 ## Component Manifest Format

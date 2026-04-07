@@ -9,17 +9,30 @@
 
 #if defined(PLATFORM_X86_64)
 
-/* x86-64: no semihosting support */
+/*
+ * x86-64: Use QEMU isa-debug-exit device for test exit.
+ * Port 0x501, writing (code << 1) | 1. QEMU exits with that value.
+ * QEMU sees exit_code=0 → writes 0x01 → QEMU exits with code 1.
+ * QEMU sees exit_code=1 → writes 0x03 → QEMU exits with code 3.
+ * The test harness accounts for this mapping.
+ */
+static inline void outb_x86(uint16_t port, uint8_t val)
+{
+    __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
 void semihosting_exit(int exit_code)
 {
-    (void)exit_code;
+    /* isa-debug-exit at port 0x501: value = (exit_code << 1) | 1 */
+    outb_x86(0x501, (uint8_t)((exit_code << 1) | 1));
+    /* Fallback: halt if isa-debug-exit not present */
     for (;;)
         __asm__ volatile("hlt");
 }
 
 int semihosting_available(void)
 {
-    return 0;
+    return 1;  /* Available when QEMU has -device isa-debug-exit */
 }
 
 #else /* ARM64 */

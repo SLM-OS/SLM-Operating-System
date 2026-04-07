@@ -370,6 +370,13 @@ void kernel_main(void *dtb)
         panic("Component system init failed");
     }
 
+    /* Initialize message router (topic-based pub/sub for component IPC) */
+    {
+        extern void msg_router_init(void);
+        msg_router_init();
+        INFO("  Message router: OK");
+    }
+
     /* Initialize model memory pools */
     INFO("Initializing model memory...");
     int model_init = rust_model_mem_init();

@@ -15,7 +15,11 @@ PLATFORM ?= QEMU_VIRT
 BUILD_DIR := build
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
 KERNEL_TEST_BUILD_DIR := $(BUILD_DIR)/kernel-test
-RUNTIME_BUILD_DIR := runtime/target/aarch64-unknown-none
+ifeq ($(PLATFORM),X86_64)
+    RUNTIME_BUILD_DIR := runtime/target/x86_64-unknown-none
+else
+    RUNTIME_BUILD_DIR := runtime/target/aarch64-unknown-none
+endif
 
 # Tools - detect OS and use appropriate paths
 ifeq ($(OS),Windows_NT)
@@ -24,18 +28,33 @@ ifeq ($(OS),Windows_NT)
     MAKE_PROGRAM_ARG := -DCMAKE_MAKE_PROGRAM="C:/cygwin64/bin/make.exe"
 else
     CMAKE := cmake
-    QEMU := qemu-system-aarch64
+    ifeq ($(PLATFORM),X86_64)
+        QEMU := qemu-system-x86_64
+    else
+        QEMU := qemu-system-aarch64
+    endif
     MAKE_PROGRAM_ARG :=
 endif
 
-# Toolchain
-TOOLCHAIN_FILE := cmake/toolchain-aarch64-none-elf.cmake
+# Toolchain (select based on platform)
+ifeq ($(PLATFORM),X86_64)
+    TOOLCHAIN_FILE := cmake/toolchain-x86_64-none-elf.cmake
+else
+    TOOLCHAIN_FILE := cmake/toolchain-aarch64-none-elf.cmake
+endif
 
 # QEMU settings
-QEMU_MACHINE := virt
-QEMU_CPU := cortex-a76
-QEMU_MEMORY := 1G
-QEMU_CORES := 4
+ifeq ($(PLATFORM),X86_64)
+    QEMU_MACHINE := q35
+    QEMU_CPU := max
+    QEMU_MEMORY := 256M
+    QEMU_CORES := 4
+else
+    QEMU_MACHINE := virt
+    QEMU_CPU := cortex-a76
+    QEMU_MEMORY := 1G
+    QEMU_CORES := 4
+endif
 
 # Output files
 KERNEL_ELF := $(KERNEL_BUILD_DIR)/slmos.elf
@@ -199,10 +218,61 @@ kernel-test-clean:
 	@echo "Cleaning test kernel build..."
 	rm -rf $(KERNEL_TEST_BUILD_DIR)
 
+# x86-64 test ISO path
+KERNEL_TEST_ISO := $(KERNEL_TEST_BUILD_DIR)/slmos-test.iso
+
 .PHONY: test
 test: kernel-test
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
+ifeq ($(PLATFORM),X86_64)
+	@# x86-64: create GRUB ISO and use isa-debug-exit for test termination
+	@mkdir -p $(KERNEL_TEST_BUILD_DIR)/iso/boot/grub
+	@cp $(KERNEL_TEST_ELF) $(KERNEL_TEST_BUILD_DIR)/iso/boot/kernel.elf
+	@echo 'set timeout=0' > $(KERNEL_TEST_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'set default=0' >> $(KERNEL_TEST_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'menuentry "SLM-OS Tests" { multiboot2 /boot/kernel.elf; boot; }' >> $(KERNEL_TEST_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@grub-mkrescue -o $(KERNEL_TEST_ISO) $(KERNEL_TEST_BUILD_DIR)/iso 2>/dev/null
+	@timeout $(TEST_TIMEOUT) $(QEMU) \
+		-machine $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
+		-smp cores=$(QEMU_CORES) \
+		-m $(QEMU_MEMORY) \
+		-nographic \
+		-device isa-debug-exit,iobase=0x501,iosize=2 \
+		-cdrom $(KERNEL_TEST_ISO) \
+		> $(TEST_OUTPUT) 2>&1; \
+	QEMU_EXIT=$$?; \
+	echo ""; \
+	echo "Test Results:"; \
+	echo "============="; \
+	if [ $$QEMU_EXIT -eq 124 ]; then \
+		echo "TIMEOUT - Tests did not complete within $(TEST_TIMEOUT)s"; \
+		echo "Last output:"; \
+		tail -20 $(TEST_OUTPUT); \
+		exit 1; \
+	elif [ $$QEMU_EXIT -eq 1 ]; then \
+		echo "PASSED - All tests passed (isa-debug-exit code 1 = success)"; \
+		exit 0; \
+	elif grep -F "PAGE FAULT" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "CRASHED - Kernel page fault detected"; \
+		grep -A 20 "PAGE FAULT" $(TEST_OUTPUT) | head -25; \
+		exit 1; \
+	elif grep -F "KERNEL PANIC" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "CRASHED - Kernel panic"; \
+		grep -A 20 "KERNEL PANIC" $(TEST_OUTPUT) | head -25; \
+		exit 1; \
+	elif grep -F "[FAIL]" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "FAILED - Test failures detected:"; \
+		grep -F "[FAIL]" $(TEST_OUTPUT); \
+		exit 1; \
+	else \
+		echo "FAILED - Tests failed (exit code $$QEMU_EXIT)"; \
+		echo "Check $(TEST_OUTPUT) for details"; \
+		tail -30 $(TEST_OUTPUT); \
+		exit 1; \
+	fi
+else
 	@timeout $(TEST_TIMEOUT) $(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
@@ -242,6 +312,7 @@ test: kernel-test
 		tail -30 $(TEST_OUTPUT); \
 		exit 1; \
 	fi
+endif
 
 # ============================================================================
 # Utility targets

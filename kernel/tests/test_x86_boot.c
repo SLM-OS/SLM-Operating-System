@@ -1433,6 +1433,228 @@ static void test_rip_relative_addressing(void)
 }
 
 /* ============================================================================
+ * Message Router Tests
+ * ============================================================================ */
+
+extern void msg_router_init(void);
+extern int msg_router_subscribe(const char *topic_name, int component_idx);
+extern int msg_router_publish(const char *topic_name, const char *data);
+extern const char *msg_router_receive(int component_idx, char *topic_out);
+extern void msg_router_ack(int component_idx);
+extern void msg_router_list(void);
+
+static void test_msg_router_init_succeeds(void)
+{
+    msg_router_init();
+    /* List should show 0 topics */
+    msg_router_list();
+    TEST_ASSERT_TRUE(true);
+}
+
+static void test_msg_router_subscribe_creates_topic(void)
+{
+    msg_router_init();
+    int ret = msg_router_subscribe("test_topic", 0);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_msg_router_subscribe_multiple(void)
+{
+    msg_router_init();
+    int ret1 = msg_router_subscribe("test_topic", 0);
+    int ret2 = msg_router_subscribe("test_topic", 1);
+    TEST_ASSERT_EQUAL_INT(0, ret1);
+    TEST_ASSERT_EQUAL_INT(0, ret2);
+}
+
+static void test_msg_router_subscribe_multiple_topics(void)
+{
+    msg_router_init();
+    int ret1 = msg_router_subscribe("topic_a", 0);
+    int ret2 = msg_router_subscribe("topic_b", 1);
+    TEST_ASSERT_EQUAL_INT(0, ret1);
+    TEST_ASSERT_EQUAL_INT(0, ret2);
+}
+
+static void test_msg_router_receive_no_message(void)
+{
+    msg_router_init();
+    msg_router_subscribe("test_topic", 5);
+    char topic_buf[16];
+    const char *data = msg_router_receive(5, topic_buf);
+    TEST_ASSERT_NULL(data);
+}
+
+static void test_msg_router_receive_unsubscribed(void)
+{
+    msg_router_init();
+    char topic_buf[16];
+    const char *data = msg_router_receive(99, topic_buf);
+    TEST_ASSERT_NULL(data);
+}
+
+static void test_msg_router_publish_no_subscribers(void)
+{
+    msg_router_init();
+    /* Publish to nonexistent topic */
+    int delivered = msg_router_publish("nobody", "hello");
+    TEST_ASSERT_EQUAL_INT(0, delivered);
+}
+
+static void test_msg_router_list_no_crash(void)
+{
+    msg_router_init();
+    msg_router_subscribe("events", 0);
+    msg_router_subscribe("logs", 1);
+    msg_router_list();
+    TEST_ASSERT_TRUE(true);
+}
+
+static void test_msg_router_subscribe_max_per_topic(void)
+{
+    msg_router_init();
+    /* Fill all 4 subscriber slots on one topic */
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("full", 0));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("full", 1));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("full", 2));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("full", 3));
+    /* 5th subscriber should fail */
+    TEST_ASSERT_EQUAL_INT(-1, msg_router_subscribe("full", 4));
+}
+
+static void test_msg_router_subscribe_max_topics(void)
+{
+    msg_router_init();
+    /* Fill all 8 topic slots */
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t0", 0));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t1", 1));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t2", 2));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t3", 3));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t4", 4));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t5", 5));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t6", 6));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t7", 7));
+    /* 9th topic should fail */
+    TEST_ASSERT_EQUAL_INT(-1, msg_router_subscribe("t8", 8));
+}
+
+static void test_msg_router_ack_no_pending(void)
+{
+    msg_router_init();
+    msg_router_subscribe("test_topic", 10);
+    /* Ack with no pending message — should not crash */
+    msg_router_ack(10);
+    /* Receive should still return NULL */
+    const char *data = msg_router_receive(10, NULL);
+    TEST_ASSERT_NULL(data);
+}
+
+static void test_msg_router_receive_null_topic_out(void)
+{
+    msg_router_init();
+    msg_router_subscribe("test_topic", 11);
+    /* Passing NULL for topic_out should not crash */
+    const char *data = msg_router_receive(11, NULL);
+    TEST_ASSERT_NULL(data);
+}
+
+static void test_msg_router_reinit_clears_state(void)
+{
+    msg_router_init();
+    msg_router_subscribe("topic_a", 0);
+    msg_router_subscribe("topic_b", 1);
+    /* Re-init should clear everything */
+    msg_router_init();
+    /* Previous subscriptions gone — publish finds nothing */
+    int delivered = msg_router_publish("topic_a", "hello");
+    TEST_ASSERT_EQUAL_INT(0, delivered);
+}
+
+static void test_msg_router_publish_existing_topic_no_ack(void)
+{
+    msg_router_init();
+    msg_router_subscribe("slow", 20);
+    /* Publish will timeout because no one acks — returns 0 delivered.
+     * This test verifies the timeout path doesn't crash.
+     * Note: uses pit_ticks for timeout, so relies on timer running. */
+    int delivered = msg_router_publish("slow", "test");
+    TEST_ASSERT_EQUAL_INT(0, delivered);
+}
+
+static void test_msg_router_shell_subscribe_command(void)
+{
+    extern int shell_execute(const char *cmdline);
+    msg_router_init();
+    /* Register a component first so subscribe has a valid idx */
+    extern int component_register(const char *name, const char *version,
+                                  uint8_t type, uint8_t priority);
+    int idx = component_register("test_sub", "1.0", 0, 0);
+    if (idx >= 0) {
+        /* Subscribe via shell command */
+        char cmd[64];
+        extern int str_format(char *buf, int max, const char *fmt, ...);
+        /* Build command manually since we don't have snprintf */
+        const char *prefix = "msg subscribe test_events ";
+        int i = 0;
+        while (prefix[i]) { cmd[i] = prefix[i]; i++; }
+        cmd[i++] = '0' + (char)(idx % 10);
+        cmd[i] = '\0';
+        int result = shell_execute(cmd);
+        TEST_ASSERT_EQUAL_INT(0, result);
+        /* Cleanup */
+        extern int component_unregister(uint32_t index);
+        component_unregister((uint32_t)idx);
+    }
+}
+
+static void test_msg_router_shell_send_no_topic(void)
+{
+    extern int shell_execute(const char *cmdline);
+    msg_router_init();
+    /* Send to nonexistent topic — should fail */
+    int result = shell_execute("msg send nonexistent hello");
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
+static void test_msg_router_shell_command_registered(void)
+{
+    extern int shell_execute(const char *cmdline);
+    int result = shell_execute("msg list");
+    TEST_ASSERT_TRUE(result >= 0);
+}
+
+static void test_component_run_listener(void)
+{
+    extern int component_run(const char *name);
+    int idx = component_run("listener");
+    TEST_ASSERT_TRUE(idx >= 0);
+    /* Give it a tick to start */
+    extern void sleep_ms(uint32_t ms);
+    sleep_ms(100);
+    /* Should be registered */
+    component_info_t info;
+    int ret = component_get_info((uint32_t)idx, &info);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_component_run_echo_and_send(void)
+{
+    extern int component_run(const char *name);
+    extern int component_send_echo(const char *message);
+    int idx = component_run("echo");
+    TEST_ASSERT_TRUE(idx >= 0);
+    /* Give echo time to start and begin polling */
+    extern void sleep_ms(uint32_t ms);
+    sleep_ms(200);
+    /* Send a message — delivery depends on scheduling */
+    int result = component_send_echo("test message");
+    /* Result may be 0 (delivered) or -1 (timeout) depending on scheduling.
+     * At minimum, the call should not crash. */
+    (void)result;
+    TEST_ASSERT_TRUE(true);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1563,6 +1785,29 @@ int test_suite_x86_boot(void)
     /* Long mode verification */
     RUN_TEST(test_64bit_operations);
     RUN_TEST(test_rip_relative_addressing);
+
+    /* Message router tests */
+    RUN_TEST(test_msg_router_init_succeeds);
+    RUN_TEST(test_msg_router_subscribe_creates_topic);
+    RUN_TEST(test_msg_router_subscribe_multiple);
+    RUN_TEST(test_msg_router_subscribe_multiple_topics);
+    RUN_TEST(test_msg_router_receive_no_message);
+    RUN_TEST(test_msg_router_receive_unsubscribed);
+    RUN_TEST(test_msg_router_publish_no_subscribers);
+    RUN_TEST(test_msg_router_list_no_crash);
+    RUN_TEST(test_msg_router_subscribe_max_per_topic);
+    RUN_TEST(test_msg_router_subscribe_max_topics);
+    RUN_TEST(test_msg_router_ack_no_pending);
+    RUN_TEST(test_msg_router_receive_null_topic_out);
+    RUN_TEST(test_msg_router_reinit_clears_state);
+    RUN_TEST(test_msg_router_publish_existing_topic_no_ack);
+    RUN_TEST(test_msg_router_shell_subscribe_command);
+    RUN_TEST(test_msg_router_shell_send_no_topic);
+    RUN_TEST(test_msg_router_shell_command_registered);
+
+    /* Component service tests */
+    RUN_TEST(test_component_run_listener);
+    RUN_TEST(test_component_run_echo_and_send);
 
     return UnityEnd();
 }

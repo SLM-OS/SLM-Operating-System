@@ -2,7 +2,7 @@
 
 This document describes the x86-64 port of SLM-OS, including architecture details, boot sequence, build instructions, and design decisions.
 
-**Status:** Milestones M1–M6 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, and NVIDIA RTX 3050 GPU identification + VRAM access. GSP firmware loading (required for GPU compute) documented as future work.
+**Status:** Milestones M1–M7 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, NVIDIA RTX 3050 GPU identification + VRAM access, and topic-based message routing (pub/sub IPC). GSP firmware loading (required for GPU compute) documented as future work.
 
 ---
 
@@ -56,6 +56,9 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 | Lua 5.4 scripting | ✅ | ✅ | setjmp/longjmp, SSE for math |
 | VFS + LittleFS | ✅ | ✅ | RAM disk, file commands |
 | PMM buddy allocator | ✅ | ✅ | 19,916 MB usable on hardware |
+| Component system | ✅ | ✅ | Counter, echo, listener services |
+| Message router (pub/sub) | ✅ | N/A | Topic-based IPC, yield-based delivery |
+| Echo IPC (shared mailbox) | ✅ | ✅ | Atomic mailbox, round-robin scheduling |
 | GPU compute / 3D | ❌ | ❌ | Requires GSP firmware (documented) |
 
 ### Milestone Completion
@@ -594,6 +597,63 @@ See **`docs/nvidia-gsp.md`** for the complete 7-phase boot sequence, register ma
 
 ---
 
+## Message Router (M7)
+
+The message router provides topic-based publish/subscribe IPC for inter-component communication.
+
+### Architecture
+
+Components subscribe to named topics. When a publisher sends a message to a topic, all subscribers receive it via per-subscriber mailboxes with atomic `ready`/`ack` flags. The publisher waits (yield-based) for each subscriber to acknowledge.
+
+```
+Publisher (shell)           MessageRouter             Subscriber (listener)
+  |                              |                          |
+  | msg_router_publish("events") |                          |
+  |----------------------------->|                          |
+  |                              | mailbox.ready = 1        |
+  |                              |------------------------->|
+  |                              |        mailbox.ack = 1   |
+  |                              |<-------------------------|
+  |  returns delivered=1         |                          |
+  |<-----------------------------|                          |
+```
+
+### Limits
+
+| Parameter | Value |
+|-----------|-------|
+| Max topics | 8 |
+| Max subscribers per topic | 4 |
+| Max message length | 60 bytes |
+| Topic name length | 16 bytes |
+| Publish ack timeout | 5 seconds |
+
+### Shell Commands
+
+| Command | Description |
+|---------|-------------|
+| `msg send <topic> <data>` | Publish a message to all subscribers |
+| `msg list` | Show all topics and their subscribers |
+| `msg subscribe <topic> <idx>` | Subscribe a component to a topic |
+
+### Built-in Listener Service
+
+The `listener` component subscribes to the `events` topic on startup and prints all received messages. Start it with `component run listener`, then publish with `msg send events <message>`.
+
+### UART Yield Fix
+
+On x86-64, `uart_getc()` previously busy-looped polling the LSR register. This starved all background tasks (echo, listener, counter) of CPU time. The fix adds `yield()` in the polling loop, allowing the scheduler to round-robin between the shell and component tasks.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `kernel/src/msg_router.c` | Router implementation (subscribe, publish, receive, ack, list) |
+| `kernel/src/component_runtime.c` | Listener service entry point |
+| `kernel/src/shell_component.c` | `cmd_msg` shell handler |
+
+---
+
 ## Console Output
 
 ### Serial Console (COM1)
@@ -727,6 +787,8 @@ The `test_x86_boot.c` test suite contains 90 tests across 17 categories:
 | SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
 | NVIDIA GPU | 7 | Init ran, no-crash, VRAM test -1 without GPU, accessors safe, BOOT_42 decode, gpu/pci shell commands registered |
 | Component runtime | 6 | Run counter, invalid name rejected, list builtins safe, run increases count, shell command registered, ELF x86-64 arch |
+| Message router | 18 | Init, subscribe (single/multiple/multi-topic/overflow), receive (empty/unsubscribed/null), publish (none/timeout), ack no-pending, reinit, shell commands (list/subscribe/send) |
+| Component services | 2 | Listener starts + registers, echo start + send safe |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
 | Scheduler integration | 5 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick |
@@ -819,7 +881,8 @@ Lua commands are available in the shell via `lua <expression>`.
 | `kernel/arch/x86_64/pci.c` | PCI config access, bus enumeration, `pci` shell command |
 | `kernel/arch/x86_64/nvidia_gpu.c` | GPU probe, BAR mapping, register decode, VRAM test, `gpu` command |
 | `kernel/src/component_runtime.c` | Built-in component execution, `component run/send/builtins` |
-| `kernel/drivers/uart_x86.c` | 16550 UART driver (uart.h interface) |
+| `kernel/src/msg_router.c` | Topic-based pub/sub message router for component IPC |
+| `kernel/drivers/uart_x86.c` | 16550 UART driver (uart.h interface, yield-based getc) |
 
 ### Build System
 
@@ -922,7 +985,7 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 - QEMU's `-kernel` flag does not support Multiboot2 on Ubuntu 24.04 (QEMU 8.2.2). Use GRUB ISO boot (`-cdrom`) instead.
 - NVIDIA GPU engine registers return 0xBADF5040 — this is expected (GSP firmware not loaded). See `docs/nvidia-gsp.md`.
-- **x86-64 scheduler reentrance bug:** `yield()`-based sleep with 2+ user tasks on the same CPU deadlocks. Root cause: timer IRQ fires between `rq_unlock_irqrestore` and `switch_to` in `schedule()`, causing reentrant `schedule()` that corrupts saved context. Single task + shell works (counter component ✅). Multi-task IPC (echo service) requires fix. See commit `19a0259` for investigation details.
+- **x86-64 scheduler reentrance bug (FIXED):** Timer IRQ between `rq_unlock_irqrestore` and `switch_to` caused reentrant `schedule()` deadlock. Fixed with per-CPU `preempt_disabled` flag in `sched.c` — cross-platform solution that works for both ARM64 and x86-64. Multi-task IPC (echo + listener + shell) verified working. See `docs/x86-64-scheduler-investigation.md` for full investigation log.
 - **Fixed (April 2026):** SMP timer tick rate was 8× too fast (all 8 CPUs incrementing `pit_ticks`). Now only BSP increments. `sleep_ms` accuracy verified: `sleep 3000` → 3020ms.
 - No higher-half kernel mapping — identity mapping only.
 - No networking on x86-64 — requires VirtIO-PCI transport (not MMIO).
@@ -931,12 +994,15 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 
 ## Recommended Next Steps
 
-### Completed This Session
+### Completed
 
 1. ~~Rust runtime port~~ ✅ — `x86_64-unknown-none` target, real library linked via `--whole-archive`
 2. ~~Benchmarks~~ ✅ — RDTSC-based nanosecond timing, context switch 104 ns, IPC 113 ns
 3. ~~arch.h~~ ✅ — Architecture-agnostic IRQ control, halt, barriers
 4. ~~CI pipeline~~ ✅ — x86-64 build + QEMU boot test in GitHub Actions
+5. ~~Scheduler reentrance fix~~ ✅ — per-CPU `preempt_disabled` flag, cross-platform
+6. ~~Echo IPC~~ ✅ — Shared mailbox with atomic ops, round-robin scheduling
+7. ~~M7 MessageRouter~~ ✅ — Topic-based pub/sub, listener service, shell commands, 9 tests
 
 ### Remaining (Post-Capstone)
 
@@ -962,6 +1028,9 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 | Lua 5.4 scripting | ✅ | ✅ | ✅ | ✅ |
 | Rust runtime | ✅ | ✅ | ✅ | ✅ |
 | IPC message queues | ✅ | ✅ | ✅ | ✅ |
+| Component system | ✅ | ✅ | ✅ | ✅ |
+| Message router (pub/sub) | ✅ | ✅ | ✅ | N/A |
+| Echo IPC (mailbox) | ✅ | ✅ | ✅ | ✅ |
 | PCI enumeration | N/A | N/A | ✅ (6 devices) | ✅ (21 devices) |
 | NVIDIA GPU probe | N/A | N/A | N/A | ✅ (GA107) |
 | VRAM access | N/A | N/A | N/A | ✅ (256 MB) |

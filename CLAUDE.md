@@ -95,18 +95,35 @@ Documentation will be submitted to an academic advisor. Avoid "you/your" languag
 
 ### Prerequisites
 
-- ARM GNU Toolchain for Windows (aarch64-none-elf-gcc)
+- ARM GNU Toolchain (aarch64-none-elf-gcc) — for ARM64 platforms
+- GCC (x86_64-linux-gnu) — for x86-64 platform
 - GNU make
-- QEMU for Windows (qemu-system-aarch64)
+- CMake 3.20+
+- QEMU (qemu-system-aarch64 for ARM, qemu-system-x86_64 for x86)
+- grub-mkrescue — for x86-64 ISO creation (test and boot)
+- Rust toolchain with `aarch64-unknown-none` and `x86_64-unknown-none` targets
 
 ### Build Commands
 
 ```bash
 # Standard build targets (from project root):
-make kernel          # Build kernel
+make kernel          # Build kernel (default: QEMU_VIRT ARM64)
 make kernel-clean    # Clean kernel build
 make run             # Build and run in QEMU
 make debug           # Build and run with GDB server
+make test            # Build test kernel and run in QEMU
+
+# x86-64 platform:
+make kernel PLATFORM=X86_64    # Build for x86-64
+make test PLATFORM=X86_64      # Run x86-64 tests (creates GRUB ISO, uses isa-debug-exit)
+make run PLATFORM=X86_64       # Run in QEMU (uses q35 machine, multiboot2 via ISO)
+
+# Other platforms:
+make kernel PLATFORM=RASPI5            # Raspberry Pi 5
+make kernel PLATFORM=JETSON_ORIN_NANO  # Jetson Orin Nano
+```
+
+The Makefile automatically selects the correct toolchain, QEMU binary, and QEMU machine settings based on `PLATFORM`. For x86-64, the test target creates a bootable GRUB ISO and uses `isa-debug-exit` for clean test termination.
 
 ### Common Build Issues
 

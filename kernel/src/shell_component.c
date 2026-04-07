@@ -1,7 +1,8 @@
 /*
- * shell_component.c - Component system commands for SLM-OS shell
+ * shell_component.c - Component system and message router commands
  *
  * Commands: component (list, register, unregister, status)
+ *           msg (send, list, subscribe)
  */
 
 #include "shell_internal.h"
@@ -10,13 +11,18 @@
 #include "string.h"
 #include <stdint.h>
 
-/*
- * cmd_component - Component system management.
- */
 /* Component runtime (component_runtime.c) */
 extern int component_run(const char *name);
 extern int component_send_echo(const char *message);
 extern void component_list_builtins(void);
+
+/* Message router (msg_router.c) */
+extern void msg_router_init(void);
+extern int msg_router_subscribe(const char *topic_name, int component_idx);
+extern int msg_router_publish(const char *topic_name, const char *data);
+extern const char *msg_router_receive(int component_idx, char *topic_out);
+extern void msg_router_ack(int component_idx);
+extern void msg_router_list(void);
 
 int cmd_component(int argc, char *argv[])
 {
@@ -217,5 +223,77 @@ int cmd_component(int argc, char *argv[])
 
     uart_printf("Unknown subcommand: %s\r\n", subcmd);
     uart_puts("Use 'component' for help.\r\n");
+    return -1;
+}
+
+/*
+ * cmd_msg - Message router commands.
+ *
+ * Subcommands:
+ *   msg send <topic> <data>     - Publish a message to a topic
+ *   msg list                    - List topics and subscribers
+ *   msg subscribe <topic> <idx> - Subscribe a component to a topic
+ */
+int cmd_msg(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_puts("Message Router Commands:\r\n");
+        uart_puts("  msg send <topic> <data>     - Publish message to topic\r\n");
+        uart_puts("  msg list                    - List topics and subscribers\r\n");
+        uart_puts("  msg subscribe <topic> <idx> - Subscribe component to topic\r\n");
+        return 0;
+    }
+
+    const char *subcmd = argv[1];
+
+    /* msg list */
+    if (strcmp(subcmd, "list") == 0) {
+        msg_router_list();
+        return 0;
+    }
+
+    /* msg subscribe <topic> <component_idx> */
+    if (strcmp(subcmd, "subscribe") == 0) {
+        if (argc < 4) {
+            uart_puts("Usage: msg subscribe <topic> <component_idx>\r\n");
+            return -1;
+        }
+        uint32_t idx;
+        if (shell_parse_uint(argv[3], &idx) != 0) {
+            uart_puts("Invalid component index\r\n");
+            return -1;
+        }
+        int ret = msg_router_subscribe(argv[2], (int)idx);
+        if (ret == 0) {
+            uart_printf("Subscribed component %u to topic '%s'\r\n", idx, argv[2]);
+        }
+        return ret;
+    }
+
+    /* msg send <topic> <data...> */
+    if (strcmp(subcmd, "send") == 0) {
+        if (argc < 4) {
+            uart_puts("Usage: msg send <topic> <data...>\r\n");
+            return -1;
+        }
+        const char *topic = argv[2];
+
+        /* Join remaining args into message */
+        char msg[64];
+        int pos = 0;
+        for (int i = 3; i < argc && pos < 62; i++) {
+            if (i > 3 && pos < 62) msg[pos++] = ' ';
+            for (int j = 0; argv[i][j] && pos < 62; j++)
+                msg[pos++] = argv[i][j];
+        }
+        msg[pos] = '\0';
+
+        int delivered = msg_router_publish(topic, msg);
+        uart_printf("Message delivered to %d subscriber(s)\r\n", delivered);
+        return (delivered > 0) ? 0 : -1;
+    }
+
+    uart_printf("Unknown subcommand: %s\r\n", subcmd);
+    uart_puts("Use 'msg' for help.\r\n");
     return -1;
 }

@@ -139,10 +139,12 @@ void timer_stop(void)
  * Timer interrupt handler.
  */
 volatile uint32_t timer_handler_count;  /* Diagnostic: total handler calls */
+volatile uint64_t pit_ticks;            /* 100 Hz tick counter (cross-platform) */
 
 void timer_handler(void)
 {
     timer_handler_count++;
+    pit_ticks++;
 
     /* Reload timer for next tick */
     write_cntp_tval(timer_interval);

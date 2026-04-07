@@ -90,4 +90,7 @@ int cmd_kill(int argc, char **argv);
 /* Component commands (shell_component.c) */
 int cmd_component(int argc, char **argv);
 
+/* Message router commands (shell_component.c) */
+int cmd_msg(int argc, char **argv);
+
 #endif /* SHELL_INTERNAL_H */
