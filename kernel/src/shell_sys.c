@@ -204,6 +204,7 @@ int cmd_cpu(int argc, char *argv[])
         }
         uart_printf("  timer_handler_count: %u\r\n", timer_handler_count);
 
+#if !defined(PLATFORM_X86_64)
         /* Show secondary CPU TTBR0 values (stored in boot_flag slots) */
         {
             extern volatile uint32_t cpu_boot_flag[];
@@ -215,6 +216,7 @@ int cmd_cpu(int argc, char *argv[])
                 uart_printf("  CPU %u TTBR0 (low32): 0x%x\r\n", i, val);
             }
         }
+#endif
     }
 
 #if defined(PLATFORM_RASPI5)
