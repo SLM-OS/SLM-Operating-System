@@ -76,7 +76,7 @@ See `docs/pi5-baremetal-status.md` for full details.
 - ✅ Performance benchmarks — context switch 1.7µs, IPC 322ns, timer jitter 685ns range
 - ✅ UART IRQ investigation — BAR3 fix (not BAR1), 0xFF address (not 0x0F). Root cause identified: MSIX_CFG controls RP1-internal routing, not TLP generation. Needs brcmstb MSI controller for full interrupt-driven RX. Polling has no measurable performance impact.
 - ⏸️ Interrupt-driven UART — requires implementing brcmstb MSI controller (BAR2→DRAM doorbell). Deferred: polling works, no performance impact.
-- ☐ Cross-CPU task dispatch — ROOT CAUSE FOUND: timer IRQs never fire (DAIF permanently masked in all tasks). Fix: unmask IRQs in task_entry_trampoline + remove boot-stack daifclr. See `docs/pi5-baremetal-status.md` Known Limitations item 3.
+- ✅ Cross-CPU task dispatch — WORKING via cooperative scheduling (WFE/SEV). All 4 CPUs execute tasks. Timer-based preemption on secondary CPUs still under investigation. See `docs/pi5-cross-cpu-dispatch-investigation.md`.
 
 ---
 

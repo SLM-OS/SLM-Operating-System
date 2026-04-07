@@ -72,12 +72,13 @@ void schedule(void);
 void yield(void);
 
 /*
- * Start the scheduler.
+ * Start the scheduler on the specified CPU.
  *
- * Enables timer interrupts and begins executing tasks.
- * Does not return.
+ * Caller passes the logical CPU ID to avoid stale cpu_id() reads on
+ * secondary CPUs (L2 cache incoherency on Pi 5). Enables timer,
+ * unmasks interrupts, and switches to the first task. Does not return.
  */
-void scheduler_start(void);
+void scheduler_start(uint32_t cpu);
 
 /*
  * Get scheduler statistics.

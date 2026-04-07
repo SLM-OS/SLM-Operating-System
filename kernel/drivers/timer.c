@@ -120,7 +120,9 @@ void timer_start(void)
     /* Enable timer, unmask interrupt */
     write_cntp_ctl(CNTP_CTL_ENABLE);
 
-    INFO("Timer started (%d Hz)", TIMER_HZ);
+    /* INFO print removed — called from per-CPU scheduler_start where
+     * secondary CPUs cannot safely use uart_lock (L2 incoherency).
+     * CPU 0 prints "Timer started" from scheduler_start directly. */
 }
 
 /*
@@ -146,8 +148,11 @@ void timer_handler(void)
     timer_handler_count++;
     pit_ticks++;
 
-    /* Reload timer for next tick */
-    write_cntp_tval(timer_interval);
+    /* Reload timer for next tick.
+     * Read frequency from system register instead of cacheable timer_interval
+     * because secondary CPUs' L2 may have stale data (0) for the variable,
+     * causing an infinite IRQ storm (tval=0 → immediate re-fire). */
+    write_cntp_tval(read_cntfrq() / TIMER_HZ);
 
     /* Call scheduler tick handler */
     scheduler_tick();

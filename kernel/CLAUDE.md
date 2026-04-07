@@ -155,7 +155,7 @@ On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite
 | 0x100 | 24KB | `task_table[MAX_TASKS]` (all task structs) |
 | ~0x6100 | ... | Available for future NC allocations |
 
-**Cross-CPU dispatch status (April 2026):** NC run queues + NC task table are validated. CPU 0 pinning is still active because removing it causes hangs — see `docs/pi5-baremetal-status.md` Known Limitations item 3 for investigation notes.
+**Cross-CPU dispatch status (April 7, 2026):** Working via cooperative scheduling (WFE/SEV). NC run queues and task table in use. CPU 0 pinning removed, round-robin load balancing enabled across all 4 CPUs. Tasks dispatched to secondary CPUs complete successfully (`bench smp` validates). Timer-based preemption on secondary CPUs still under investigation (IRQ handler hang). See `docs/pi5-cross-cpu-dispatch-investigation.md` for full history.
 
 ---
 

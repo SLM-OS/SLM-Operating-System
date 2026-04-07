@@ -1321,9 +1321,7 @@ static void latency_task_entry(void *arg)
  */
 static void test_isolated_core_latency(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch: idle task not waking on secondary CPUs");
-#endif
+    /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     /* This test dispatches short-lived tasks to secondary CPUs.
      * Previously disabled due to a task_exit/schedule race (now fixed:
      * IRQ mask in task_exit prevents timer from interrupting between
@@ -2101,6 +2099,86 @@ static void test_sleep_task_state_restored(void)
 }
 
 /* ============================================================================
+ * Cross-CPU Dispatch Infrastructure Tests
+ * ============================================================================ */
+
+/*
+ * Test: cpu_id() returns the correct logical ID for the boot CPU.
+ * On Pi 5, this validates the hardcoded MPIDR table (Aff1 encoding).
+ * On QEMU, this validates the dynamic cpu_logical_map lookup.
+ */
+static void test_cpu_id_returns_correct_value(void)
+{
+    /* Boot CPU should always be 0 */
+    TEST_ASSERT_EQUAL_UINT32(0, cpu_id());
+
+    /* cpu_logical_id with boot CPU's MPIDR should return 0 */
+    uint64_t mpidr = cpu_get_mpidr();
+    int logical = cpu_logical_id(mpidr);
+    TEST_ASSERT_EQUAL_INT(0, logical);
+
+#if defined(PLATFORM_RASPI5)
+    /* Pi 5 hardcoded table: verify all 4 entries */
+    TEST_ASSERT_EQUAL_INT(0, cpu_logical_id(0x000));
+    TEST_ASSERT_EQUAL_INT(1, cpu_logical_id(0x100));
+    TEST_ASSERT_EQUAL_INT(2, cpu_logical_id(0x200));
+    TEST_ASSERT_EQUAL_INT(3, cpu_logical_id(0x300));
+    /* Invalid MPIDR should return -1 */
+    TEST_ASSERT_EQUAL_INT(-1, cpu_logical_id(0x400));
+    TEST_ASSERT_EQUAL_INT(-1, cpu_logical_id(0x001));
+#endif
+}
+
+/*
+ * Test: find_target_cpu() distributes tasks across CPUs.
+ * The round-robin should NOT always return 0 when all queues are empty.
+ */
+static void test_round_robin_distributes_tasks(void)
+{
+    extern uint32_t cpu_count;
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Single CPU — round-robin not applicable");
+    }
+
+    /* Create and dispatch 4 tasks via scheduler_add_task (uses find_target_cpu) */
+    uint32_t cpu_hits[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 4; i++) {
+        struct task *t = task_create("rr_test", NULL, NULL);
+        TEST_ASSERT_NOT_NULL(t);
+        /* Check assigned_cpu after add (find_target_cpu sets it) */
+        scheduler_add_task(t);
+        uint32_t assigned = t->assigned_cpu;
+        if (assigned < 4) cpu_hits[assigned]++;
+        /* Clean up — remove from queue */
+        scheduler_remove_task(t);
+        t->id = 0;  /* Free the slot */
+    }
+
+    /* At least 2 different CPUs should have been selected */
+    int cpus_used = 0;
+    for (int i = 0; i < 4; i++) {
+        if (cpu_hits[i] > 0) cpus_used++;
+    }
+    TEST_ASSERT_MESSAGE(cpus_used >= 2,
+        "Round-robin should distribute across multiple CPUs");
+}
+
+/*
+ * Test: scheduler_start() takes a cpu parameter (API change validation).
+ * This is a compile-time test — if the signature is wrong, this won't compile.
+ * At runtime, verify the function declaration matches expectations.
+ */
+static void test_scheduler_start_accepts_cpu_param(void)
+{
+    /* Verify the function pointer matches the expected signature.
+     * This is effectively a compile-time check — if scheduler_start
+     * still took void, this would fail to compile. */
+    void (*fn)(uint32_t) = scheduler_start;
+    TEST_ASSERT_NOT_NULL(fn);
+    (void)fn;  /* Suppress unused warning */
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -2202,6 +2280,11 @@ int test_suite_scheduler(void)
     RUN_TEST(test_sleep_us_wakes_on_tick);
     RUN_TEST(test_sleep_sequential);
     RUN_TEST(test_sleep_task_state_restored);
+
+    /* Cross-CPU dispatch infrastructure */
+    RUN_TEST(test_cpu_id_returns_correct_value);
+    RUN_TEST(test_round_robin_distributes_tasks);
+    RUN_TEST(test_scheduler_start_accepts_cpu_param);
 
     return UnityEnd();
 }

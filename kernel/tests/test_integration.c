@@ -193,9 +193,6 @@ static void lifecycle_task_func(void *arg)
  */
 static void test_multicore_basic(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch: idle task not waking on secondary CPUs");
-#endif
     struct task *task_a = task_create("task_a", task_a_func, (void *)3);
     struct task *task_b = task_create("task_b", task_b_func, (void *)3);
     struct task *task_c = task_create("task_c", task_c_func, (void *)3);
@@ -236,9 +233,7 @@ static void test_multicore_basic(void)
  */
 static void test_task_migration(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch: idle task not waking on secondary CPUs");
-#endif
+    /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     migration_ready = false;
     migration_done = false;
     migration_cpu_before = 0;
@@ -297,9 +292,7 @@ static void test_task_migration(void)
  */
 static void test_stress_multicpu(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch: idle task not waking on secondary CPUs");
-#endif
+    /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     reset_test_state();
 
     struct task *tasks[6];
@@ -343,9 +336,7 @@ static void test_stress_multicpu(void)
  */
 static void test_lock_contention(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch: idle task not waking on secondary CPUs");
-#endif
+    /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     reset_test_state();
     contention_counter = 0;
 
@@ -386,9 +377,7 @@ static void test_lock_contention(void)
  */
 static void test_task_lifecycle(void)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    TEST_IGNORE_MESSAGE("Cross-CPU dispatch: idle task not waking on secondary CPUs");
-#endif
+    /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     #define LIFECYCLE_CYCLES 8
 
     uint64_t initial_free = pmm_get_free_pages();

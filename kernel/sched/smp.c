@@ -91,6 +91,14 @@ int cpu_logical_id(uint64_t mpidr)
         if (jetson_map[i] == aff) return i;
     }
     return -1;
+#elif defined(PLATFORM_RASPI5)
+    /* Hardcoded MPIDR table — avoids all cache visibility issues.
+     * BCM2712 Cortex-A76: 4 cores, Aff1 encoding (0x000-0x300). */
+    static const uint64_t pi5_map[] = { 0x000, 0x100, 0x200, 0x300 };
+    for (int i = 0; i < 4; i++) {
+        if (pi5_map[i] == aff) return i;
+    }
+    return -1;
 #else
     for (uint32_t i = 0; i < cpu_count; i++) {
         if (cpu_logical_map[i] == aff) {
@@ -283,6 +291,11 @@ static const char *psci_error_str(int err)
  */
 void secondary_init(uint32_t logical_cpu_id)
 {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Immediate NC write at function entry — confirms C code is reached.
+     * 0xEE = distinctive value to distinguish from stale previous-boot data. */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4) = 0xEE;
+#endif
     DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
 
     /* Verify SMPEN was set from EL2 on this secondary core */
@@ -320,37 +333,45 @@ void secondary_init(uint32_t logical_cpu_id)
      * Wait for CPU 0 to initialize the scheduler.
      * This is necessary because smp_init() runs before scheduler_init().
      */
-    /* Diagnostic: write TTBR0 value to boot flag slot so CPU 0 can verify.
-     * CPU 0 reads via the working boot handshake pattern (cold L2). */
+    /* Debug: write to FIXED NC addresses to trace secondary CPU progress.
+     * NC writes are instantly visible to CPU 0 — no L2 eviction needed.
+     * Use NC_MEM_BASE + NC_MEM_SIZE - 256 + cpu*4 to avoid collisions. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Write what we READ from the NC init flag — diagnostic to see if
+     * secondary CPUs can read CPU 0's NC writes. */
     {
-        uint64_t ttbr0;
-        __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-        /* Store low 32 bits of TTBR0 in boot_flag (reusing the slot) */
-        __atomic_store_n(&cpu_boot_flag[logical_cpu_id], (uint32_t)(ttbr0 & 0xFFFFFFFF), __ATOMIC_RELEASE);
+        volatile uint32_t *nc_flag = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
+        volatile uint32_t *nc_dbg = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4);
+        *nc_dbg = 0xAA;  /* Marker: reached this point */
+        /* Read the NC init flag value and write to NC debug */
+        uint32_t flag_val = *nc_flag;
+        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 192 + logical_cpu_id * 4) = flag_val;
     }
-    /* Poll with delay — same pattern as cpu_boot_flag polling in boot_secondary.
-     * The delay allows L2 natural eviction so cache_invalidate + read sees
-     * the updated value from DRAM. Without delay, L2 retains stale data. */
-    /* Poll via cpu_boot_flag — same mechanism that works for boot handshake.
-     * CPU 0 writes value=2 to our boot_flag slot from scheduler_init().
-     * cache_invalidate + delay allows L2 eviction (proven pattern). */
+#endif
+
     while (!scheduler_is_initialized()) {
         for (volatile int d = 0; d < 100000; d++) {}
     }
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4) = 0xBD;
+#endif
+
     /* Initialize scheduler for this CPU (creates idle task) */
     scheduler_init_secondary(logical_cpu_id);
 
-    /* Debug: mark that we reached pre-scheduler_start */
-    {
-        extern volatile uint32_t *sched_diag_idle_loops;
-        if (sched_diag_idle_loops)
-            sched_diag_idle_loops[logical_cpu_id] = 0xBBBB;
-    }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xBC = returned from scheduler_init_secondary */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4) = 0xBC;
+#endif
 
     /* Start scheduler — this starts the timer, enables interrupts,
      * and switches to the idle task. Does not return. */
-    scheduler_start();
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xBE = about to call scheduler_start */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4) = 0xBE;
+#endif
+    scheduler_start(logical_cpu_id);
 
     /* Should never reach here */
     panic("CPU %u: scheduler_start returned!", logical_cpu_id);

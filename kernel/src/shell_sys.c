@@ -213,8 +213,30 @@ int cmd_cpu(int argc, char *argv[])
             uart_printf("  CPU 0 TTBR0: 0x%lx\r\n", (unsigned long)my_ttbr0);
             for (uint32_t i = 1; i < cpu_count; i++) {
                 uint32_t val = __atomic_load_n(&cpu_boot_flag[i], __ATOMIC_ACQUIRE);
-                uart_printf("  CPU %u TTBR0 (low32): 0x%x\r\n", i, val);
+#if defined(PLATFORM_HAS_NC_MEMORY)
+                volatile uint32_t *nc_dbg_addr = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + i * 4);
+                uint32_t nc_dbg = *nc_dbg_addr;
+                uint32_t nc_flag_read = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 192 + i * 4);
+                uart_printf("  CPU %u boot: 0x%x  NC_DBG@%lx: 0x%x  NC_FLAG_READ: 0x%x\r\n",
+                            i, val, (unsigned long)nc_dbg_addr, nc_dbg, nc_flag_read);
+#else
+                uart_printf("  CPU %u boot: 0x%x\r\n", i, val);
+#endif
             }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+            /* Write-readback test: CPU 0 writes to NC_DBG[0], reads back */
+            {
+                volatile uint32_t *test_addr = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256);
+                uint32_t before = *test_addr;
+                *test_addr = 0xDEAD;
+                uint32_t after = *test_addr;
+                *test_addr = before;  /* restore */
+                /* Also read nc_flag directly */
+                uint32_t nc_flag_val = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
+                uart_printf("  NC test@%lx: before=0x%x wrote=0xDEAD read=0x%x nc_flag=%u\r\n",
+                            (unsigned long)test_addr, before, after, nc_flag_val);
+            }
+#endif
         }
 #endif
     }
@@ -579,6 +601,18 @@ static void bench_sched_stats(void)
     }
 }
 
+/* SMP cross-CPU dispatch test: task runs on target CPU, writes NC done flag */
+void smp_test_task(void *arg)
+{
+    (void)arg;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    uint32_t target_cpu = (uint32_t)(uintptr_t)arg;
+    /* Write to NC memory — instantly visible to CPU 0 without CIVAC.
+     * Offset -320 from end of NC region: per-CPU done flags. */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + target_cpu * 4) = cpu_id() + 1;
+#endif
+}
+
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -604,6 +638,48 @@ int cmd_bench(int argc, char *argv[])
         uart_puts("Scheduler Statistics\r\n");
         uart_puts("====================\r\n");
         bench_sched_stats();
+    } else if (strcmp(argv[1], "smp") == 0) {
+        uart_puts("SMP Cross-CPU Dispatch Test\r\n");
+        uart_puts("===========================\r\n");
+        /* Dispatch a task to each secondary CPU and verify it completes.
+         * Uses NC memory for done flags — instantly visible cross-CPU. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        /* Zero done flags in NC memory */
+        for (uint32_t i = 0; i < 4; i++)
+            *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + i * 4) = 0;
+#endif
+        for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
+            extern void smp_test_task(void *arg);
+            char name[16];
+            name[0] = 's'; name[1] = 'm'; name[2] = 'p';
+            name[3] = '0' + cpu; name[4] = '\0';
+            struct task *t = task_create(name, smp_test_task, (void *)(uintptr_t)cpu);
+            if (t) {
+                scheduler_add_task_to_cpu(t, cpu);
+                uart_printf("  Dispatched '%s' to CPU %u\r\n", name, cpu);
+            }
+        }
+        /* Wait for all to complete (NC read — no CIVAC needed) */
+        for (int wait = 0; wait < 500000; wait++) {
+            int all_done = 1;
+            for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+                if (!*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + cpu * 4))
+                    { all_done = 0; break; }
+#endif
+            }
+            if (all_done) break;
+            for (volatile int d = 0; d < 1000; d++) {}
+        }
+        for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+            uint32_t result = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + cpu * 4);
+            uart_printf("  CPU %u: %s (ran on CPU %u)\r\n", cpu,
+                        result ? "COMPLETED" : "TIMEOUT", result ? result - 1 : 0);
+#else
+            uart_printf("  CPU %u: (NC memory required)\r\n", cpu);
+#endif
+        }
     } else if (strcmp(argv[1], "all") == 0) {
         uart_puts("SLM-OS Performance Benchmarks\r\n");
         uart_puts("=============================\r\n\r\n");

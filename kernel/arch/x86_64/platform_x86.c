@@ -153,7 +153,7 @@ static void ap_entry_64(uint32_t logical_cpu_id)
     __asm__ volatile("sti");
 
     /* Enter scheduler — does not return */
-    scheduler_start();
+    scheduler_start(0);
 
     /* Should never reach here */
     __asm__ volatile("cli; hlt");

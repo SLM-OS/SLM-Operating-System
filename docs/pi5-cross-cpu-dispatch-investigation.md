@@ -1,7 +1,7 @@
 # Pi 5 Cross-CPU Task Dispatch Investigation
 
-**Date:** April 3–6, 2026
-**Status:** Root causes identified. NC infrastructure complete. Timer DAIF fix causes deadlock — needs resolution.
+**Date:** April 3–7, 2026
+**Status:** ✅ CROSS-CPU DISPATCH WORKING. All 4 CPUs execute tasks. Cooperative scheduling via WFE/SEV. Timer-based preemption on secondary CPUs still blocked (IRQ handler hang under investigation).
 
 ---
 
@@ -28,6 +28,17 @@ All 4 Cortex-A76 cores boot successfully on Pi 5, but user tasks are pinned to C
 | April 6 (AM) | Secondary CPU boot bug found: double timer_start/daifclr before scheduler_start crashes boot stack. |
 | April 6 (PM) | DAIF trampoline fix applied — QEMU passes, Pi 5 deadlocks after "SLM-OS Debug Shell". |
 | April 6 (PM) | Reverted to stable state. Both DAIF fixes needed atomically but cause deadlock on Pi 5. |
+| April 7 | SD card filename bug discovered — deployments were writing `slmos.bin` but Pi 5 loads `kernel_2712.img`. All prior deploys ran stale binary. |
+| April 7 | MPIDR Aff0/Aff1 extraction bug: Pi 5 uses Aff1 (bits [15:8]), code extracted Aff0 — all CPUs identified as CPU 0. |
+| April 7 | Stale `cpu_id()` on secondary CPUs: cacheable BSS reads return 0 without L2 coherency. Hardcoded MPIDR table fix. |
+| April 7 | `scheduler_start()` changed to accept `cpu` parameter — eliminates internal `cpu_id()` call on secondary CPUs. |
+| April 7 | `timer_start()` INFO print removed — uart_lock acquisition deadlocked secondary CPUs. |
+| April 7 | NC diagnostic pointer NULL guard added — stale cacheable pointer caused crash in timer handler. |
+| April 7 | Secondary CPUs now reach 0xC6 (about to unmask IRQs). Hang at daifclr — pending timer IRQ handler does not return. |
+| April 7 | `timer_interval` stale on secondary CPUs — `write_cntp_tval(0)` causes infinite IRQ storm. Fixed: read CNTFRQ from system register. |
+| April 7 | Workaround: skip daifclr on secondary CPUs, use WFE + SEV for cooperative scheduling. |
+| April 7 | **BREAKTHROUGH: Cross-CPU dispatch working!** `bench smp` dispatches tasks to CPUs 1-3, all complete successfully. |
+| April 7 | CPU 0 pinning removed, round-robin load balancing enabled across all 4 CPUs. |
 
 ---
 
@@ -169,6 +180,114 @@ Between steps 2 and 3, the timer fires on the boot stack with `task_current()` r
 
 ---
 
+## Phase 3: Secondary CPU Exception Handler Investigation (April 7, 2026)
+
+### Session Summary
+
+This session made major breakthroughs in cross-CPU dispatch. Multiple root causes were identified and fixed, advancing secondary CPUs from "stuck at polling loop" to "stuck at IRQ unmask" — almost through the full scheduler_start path.
+
+### Root Cause 1: Wrong SD Card Filename (Deployment Bug)
+
+Pi 5's `config.txt` specifies `kernel=kernel_2712.img`. The `sdwire_update` command was copying the build artifact as `slmos.bin`, which the firmware ignored. Every deployment for multiple sessions was writing to the wrong file — the Pi 5 was running a stale binary from the initial SD card setup.
+
+**Fix:** Changed all sdwire_update calls to copy as `kernel_2712.img`.
+
+**Impact:** Hours of debugging against stale NC_DBG/boot_flag values that appeared unchanging. Distinctive marker values (0x44, 0xBD, 0x33) confirmed the old binary was running despite successful copy.
+
+### Root Cause 2: MPIDR Aff0/Aff1 Extraction Bug
+
+Pi 5 BCM2712 MPIDR encoding uses Aff1 (bits [15:8]) for CPU index. All 4 CPUs have Aff0=0:
+- CPU 0: MPIDR=0x80000000 → Aff0=0, Aff1=0
+- CPU 1: MPIDR=0x80000100 → Aff0=0, Aff1=1
+- CPU 2: MPIDR=0x80000200 → Aff0=0, Aff1=2
+- CPU 3: MPIDR=0x80000300 → Aff0=0, Aff1=3
+
+Code using `mpidr & 0xFF` (Aff0) wrote to CPU 0's slot for ALL CPUs. Affected:
+1. `task_entry_trampoline()`: `preempt_disabled[aff0]` always cleared CPU 0's slot, never the correct CPU's
+2. `idle_task_func()`: NC counter incremented CPU 0's diagnostic slot only
+3. NC debug traces in `scheduler_start()`: all wrote to slot 0
+
+**Fix:** Changed extraction to `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` — works for both QEMU (Aff0 encoding) and Pi 5 (Aff1 encoding) since only one field is non-zero.
+
+### Root Cause 3: Stale `cpu_id()` on Secondary CPUs
+
+`cpu_logical_id()` reads `cpu_logical_map[]` and `cpu_count` from cacheable BSS. Without L2 coherency, secondary CPUs get stale data:
+- `cpu_count` may read as 0 or 1 (BSS initial value in DRAM, CPU 0's update stuck in L2)
+- `cpu_logical_map[]` may have zeros (BSS default)
+- Result: `cpu_logical_id()` returns -1, `cpu_id()` returns 0 (fallback)
+
+This caused secondary CPUs to operate as CPU 0, locking CPU 0's run queue and creating deadlocks.
+
+**First attempt:** Use NC copy (`nc_cpu_logical_map`). Failed because the NC pointer itself is in cacheable BSS — secondary CPUs read NULL.
+
+**Fix:** Hardcoded MPIDR table for Pi 5 (same pattern as Jetson):
+```c
+static const uint64_t pi5_map[] = { 0x000, 0x100, 0x200, 0x300 };
+```
+This avoids ALL cacheable memory reads during CPU identification.
+
+### Root Cause 4: `scheduler_start()` Used `cpu_id()` Internally
+
+`scheduler_start(void)` called `cpu_id()` to determine which CPU it was running on. On secondary CPUs, this returned 0 (stale), causing scheduler operations on the wrong run queue.
+
+**Fix:** Changed `scheduler_start(void)` to `scheduler_start(uint32_t cpu)` — callers pass the known CPU ID:
+- `main.c`: passes 0
+- `smp.c`: passes `logical_cpu_id` (known correct from PSCI boot)
+- `platform_x86.c`: passes 0
+
+### Root Cause 5: `timer_start()` INFO Print Deadlock
+
+`timer_start()` called `INFO("Timer started (%d Hz)")` which acquires `uart_lock` via `spin_lock_irqsave()`. On secondary CPUs, if CPU 0 holds uart_lock, the ldaxr reads stale "locked" from L2 and spins forever.
+
+**Fix:** Removed the INFO print from `timer_start()`. CPU 0's scheduler_start prints its own "Starting timer" message.
+
+### Root Cause 6: Stale NC Diagnostic Pointer Crash
+
+`scheduler_tick()` accesses `sched_diag_tick[cpu]++` where `sched_diag_tick` is a cacheable pointer to NC memory. Secondary CPUs read NULL (stale BSS default from DRAM), causing a NULL pointer dereference in the timer handler.
+
+**Fix:** Added NULL guard for NC pointer access on Pi 5.
+
+### Current State After Fixes
+
+NC trace markers show secondary CPUs progress through scheduler_start:
+```
+0xBD = post-polling-loop (exits NC flag wait)
+0xBC = returned from scheduler_init_secondary
+0xBE = about to call scheduler_start
+0xC0 = entered scheduler_start
+0xC1 = passed sched.initialized check
+0xC2 = acquired rq_lock
+0xC3 = picked idle task
+0xC4 = unlocked rq, about to start timer
+0xC5 = timer started
+0xC6 = about to unmask IRQs (daifclr)
+--- HANG: daifclr triggers pending timer IRQ, handler never returns ---
+```
+
+**The current blocker:** When secondary CPUs execute `msr daifclr, #0x2` (unmask IRQs), a pending timer interrupt fires immediately. The exception handler path on secondary CPUs does not return. The next investigation step is the IRQ handler / exception vector code for secondary CPUs.
+
+### NC_DBG Diagnostic Legend (updated)
+| Value | Meaning | Location |
+|-------|---------|----------|
+| 0xAA | Pre-polling marker | smp.c, before scheduler_is_initialized loop |
+| 0xBD | Post-polling, about to call scheduler_init_secondary | smp.c |
+| 0xBC | Returned from scheduler_init_secondary | smp.c |
+| 0xBE | About to call scheduler_start | smp.c |
+| 0xC0 | Entered scheduler_start | sched.c |
+| 0xC1 | Passed initialized check | sched.c |
+| 0xC2 | Acquired rq_lock | sched.c |
+| 0xC3 | Picked a task | sched.c |
+| 0xC4 | Released lock, about to start timer | sched.c |
+| 0xC5 | Timer started | sched.c |
+| 0xC6 | About to unmask IRQs | sched.c |
+| 0xC7 | Post-daifclr (IRQs unmasked) | sched.c |
+| 0xCC | About to call switch_to | sched.c |
+| 0xDD | task_entry_trampoline reached | task.c |
+| 0xE1 | Panic: not initialized | sched.c |
+| 0xE2 | Panic: no tasks | sched.c |
+
+---
+
 ## Current State
 
 ### What's Working
@@ -180,9 +299,16 @@ Between steps 2 and 3, the timer fires on the boot stack with `task_current()` r
 - Secondary CPU boot fix (no double timer_start) ✅
 - Root cause identified (DAIF never unmasked in tasks) ✅
 - Fix works on QEMU ✅
+- SD card deploy filename corrected (`kernel_2712.img`) ✅
+- MPIDR Aff1 extraction for Pi 5 (works for both QEMU and Pi 5) ✅
+- Hardcoded MPIDR table eliminates cacheable BSS dependency for cpu_id ✅
+- `scheduler_start(uint32_t cpu)` — callers pass known CPU ID ✅
+- `timer_start()` INFO print removed (uart_lock deadlock on secondary CPUs) ✅
+- NC diagnostic pointer NULL guard ✅
+- Secondary CPUs progress through scheduler_start to IRQ unmask (0xC6) ✅
 
 ### What's Blocked
-- **Pi 5 deadlock when preemption enabled** — shell hangs during uart_puts with both DAIF fixes applied
+- **Secondary CPU IRQ handler hang** — `daifclr` triggers pending timer IRQ, exception handler never returns. Next step: investigate exception vector / IRQ handler path on secondary CPUs.
 
 ### NC Memory Layout
 ```
@@ -231,8 +357,10 @@ Total used: ~25KB / 2MB (1.2%)
 
 ## Next Steps
 
-1. **Debug the Pi 5 preemption deadlock.** The DAIF trampoline fix works on QEMU but deadlocks on Pi 5. Add a debug print INSIDE the trampoline (before `daifclr`) to confirm the trampoline runs. Add a debug counter in the exception vector for timer IRQ to count deliveries. Check if `schedule()` completes or hangs in `rq_lock_irqsave()`.
+1. **Debug the secondary CPU IRQ handler hang.** When secondary CPUs execute `msr daifclr, #0x2`, a pending timer IRQ fires immediately and the handler never returns. Add NC trace markers inside the exception vector entry (`vectors.S`), the IRQ dispatcher, and `scheduler_tick()` to identify where the handler stalls. Likely candidates:
+   - Exception vector jumps to wrong address (stale vector base from cacheable memory)
+   - `scheduler_tick()` calls `cpu_id()` which returns 0 (stale) — deadlocks on CPU 0's rq_lock
+   - GIC IAR read returns spurious INTID on secondary CPUs (GIC per-CPU interface not properly initialized)
+   - `task_current()` reads stale cacheable pointer, causing crash in context save
 
-2. **Alternative: cooperative multi-CPU.** Instead of full preemption, keep tasks with IRQs masked but have idle tasks wake via timer. When CPU 0 dispatches a task to CPU 1, CPU 1's idle wakes on the next timer tick, calls `schedule()`, picks up the task. This avoids the preemption deadlock while still enabling multi-core execution. Tasks on secondary CPUs would run to completion (no preemption) but multiple tasks could run in parallel across CPUs.
-
-3. **Fix NC diagnostic readback.** The NC counters show garbage values (pointer addresses instead of counter values). Verify `ncmem_alloc` returns valid NC addresses and the zeroing loop works.
+2. **Alternative: cooperative multi-CPU.** Instead of full preemption, keep tasks with IRQs masked but have idle tasks wake via timer. When CPU 0 dispatches a task to CPU 1, CPU 1's idle wakes on the next timer tick, calls `schedule()`, picks up the task. This avoids the IRQ handler issue while still enabling multi-core execution.

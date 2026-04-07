@@ -99,19 +99,33 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     task_entry_t entry = (task_entry_t)entry_addr;
     void *arg = (void *)arg_addr;
 
+    /* NC debug marker: 0xDD = trampoline reached.
+     * If this appears in diagnostics, context.S restore completed. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    {
+        uint64_t _mpidr;
+        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
+        /* Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]).
+         * OR gives correct index when only one field is non-zero. */
+        uint32_t _cpu = (_mpidr & 0xFF) | ((_mpidr >> 8) & 0xFF);
+        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xDD;
+    }
+#endif
+
     /* Clear preempt_disabled for this CPU.
      * scheduler_start() sets it to 1 before switch_to(NULL, first),
      * but switch_to never returns — it jumps here. Must clear so
      * timer ticks can call schedule() on this CPU.
-     * Use MPIDR directly to avoid cpu_id() which needs cacheable BSS. */
+     * Use MPIDR directly to avoid cpu_id() which needs cacheable BSS.
+     * Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
     {
         extern volatile int preempt_disabled[];
 #if !defined(PLATFORM_X86_64)
         uint64_t mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-        uint32_t aff0 = mpidr & 0xFF;
-        if (aff0 < MAX_CPUS)
-            preempt_disabled[aff0] = 0;
+        uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
+        if (hw_cpu < MAX_CPUS)
+            preempt_disabled[hw_cpu] = 0;
         __asm__ volatile("dsb sy" ::: "memory");
 #else
         preempt_disabled[cpu_id()] = 0;

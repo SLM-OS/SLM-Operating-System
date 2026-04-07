@@ -145,7 +145,19 @@ static void idle_task_func(void *arg)
     (void)arg;
 
     while (1) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        /* Use fixed NC address — sched_diag_idle_loops pointer is in
+         * cacheable BSS and may not be visible to secondary CPUs.
+         * Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
+        {
+            uint64_t mpidr;
+            __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+            uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
+            (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
+        }
+#else
         sched_diag_idle_loops[cpu_id()]++;
+#endif
 
         /* Unmask IRQ so timer interrupts can fire.
          * This must be inside the loop because context switch saves/restores
@@ -155,6 +167,13 @@ static void idle_task_func(void *arg)
 #if defined(PLATFORM_X86_64)
         __asm__ volatile("sti" ::: "memory");
         __asm__ volatile("hlt");
+#elif defined(PLATFORM_HAS_NC_MEMORY)
+        /* Pi 5: WFE for cooperative scheduling.
+         * Timer IRQs on secondary CPUs cause an exception handler hang
+         * (under investigation) so we skip daifclr here.
+         * WFE wakes on SEV from other CPUs (sent by scheduler_add_task_to_cpu
+         * and spin_unlock). CPU sleeps until work is dispatched. */
+        __asm__ volatile("wfe" ::: "memory");
 #else
         __asm__ volatile("msr daifclr, #2" ::: "memory");
         __asm__ volatile("wfi");
@@ -227,8 +246,17 @@ static void update_deadline_boost(struct task *task)
 /* Called from main.c after vmm_init, before smp_init */
 void nc_zero_sched_init_flag(void)
 {
-    nc_sched_initialized = 0;
+    volatile uint32_t *nc_flag = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
+    *nc_flag = 0;
+    __asm__ volatile("dc civac, %0" :: "r"(nc_flag) : "memory");
     __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Zero NC_DBG and NC_FLAG_READ regions so stale previous-boot data
+     * is cleared. Any non-zero value after boot = written by current boot. */
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + i * 4) = 0;
+        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 192 + i * 4) = 0;
+    }
 }
 #endif
 
@@ -296,7 +324,16 @@ void scheduler_init(void)
     /* Signal via cpu_boot_flag — the ONLY proven cross-CPU channel.
      * Write value 2 to each secondary CPU's boot flag slot.
      * Same pattern as boot handshake (atomic store + cache_clean). */
-    nc_sched_initialized = 1;  /* Local flag for quick checks */
+    nc_sched_initialized = 1;
+    /* Write to NC flag AND CIVAC to push through any cacheable TLB stale entry.
+     * Even if CPU 0's TLB maps this address as cacheable (stale from boot.S),
+     * CIVAC pushes L1→L2→DRAM. Secondary CPUs read from NC (DRAM). */
+    {
+        volatile uint32_t *nc_flag = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
+        *nc_flag = 1;
+        __asm__ volatile("dc civac, %0" :: "r"(nc_flag) : "memory");
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
     {
         extern volatile uint32_t cpu_boot_flag[];
         for (uint32_t i = 1; i < cpu_count; i++) {
@@ -324,18 +361,10 @@ void scheduler_init(void)
 int scheduler_is_initialized(void)
 {
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Check cpu_boot_flag for THIS CPU — value 2 means scheduler ready.
-     * Uses the SAME pattern that works in boot handshake. */
-    {
-        extern volatile uint32_t cpu_boot_flag[];
-        uint32_t this_cpu = cpu_id();
-        if (__atomic_load_n(&cpu_boot_flag[this_cpu], __ATOMIC_ACQUIRE) == 2)
-            return 1;
-        cache_invalidate(&cpu_boot_flag[this_cpu]);
-        if (cpu_boot_flag[this_cpu] == 2)
-            return 1;
-        return 0;
-    }
+    /* Read the NC flag at a fixed NC address.
+     * CPU 0 writes 1 to this address in scheduler_init().
+     * NC reads bypass L2, going directly to DRAM. */
+    return *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64) == 1;
 #else
     cache_invalidate(&sched.initialized);
     return sched.initialized;
@@ -350,6 +379,14 @@ void scheduler_init_secondary(uint32_t cpu)
 {
     if (cpu == 0 || cpu >= MAX_CPUS) {
         return;  /* CPU 0 uses scheduler_init(), invalid CPUs ignored */
+    }
+
+    /* Debug: mark entry into scheduler_init_secondary via boot_flag */
+    {
+        extern volatile uint32_t cpu_boot_flag[];
+        cpu_boot_flag[cpu] = 0x33;  /* Distinctive: entered scheduler_init_secondary */
+        __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[cpu]) : "memory");
+        __asm__ volatile("dsb sy" ::: "memory");
     }
 
     /* Create idle task for this CPU */
@@ -369,8 +406,26 @@ void scheduler_init_secondary(uint32_t cpu)
         panic("scheduler_init_secondary: failed to create idle task for CPU %u", cpu);
     }
 
+    /* Debug: mark post-task_create via boot_flag */
+    {
+        extern volatile uint32_t cpu_boot_flag[];
+        cpu_boot_flag[cpu] = 0x44;  /* Distinctive value to verify current binary */
+        __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[cpu]) : "memory");
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xB0 = about to acquire rq_lock */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + cpu * 4) = 0xB0;
+#endif
+
     /* Lock this CPU's queue to update idle task */
     irq_flags_t flags = rq_lock_irqsave(cpu);
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xB1 = acquired rq_lock */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + cpu * 4) = 0xB1;
+#endif
 
     idle->state = TASK_READY;
     idle->cpu_affinity = cpu;  /* Pinned to this CPU */
@@ -378,6 +433,11 @@ void scheduler_init_secondary(uint32_t cpu)
     cpu_rq(cpu)->idle_task = idle;
 
     rq_unlock_irqrestore(cpu, flags);
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xB2 = released rq_lock, function about to return */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + cpu * 4) = 0xB2;
+#endif
 
     /* Skip INFO print on secondary CPUs — uart_lock contention may hang */
     if (cpu == 0)
@@ -501,6 +561,12 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
 #endif
 
     rq_unlock_irqrestore(cpu, flags);
+
+#if !defined(PLATFORM_X86_64)
+    /* Wake idle CPUs so they can pick up the new task.
+     * SEV wakes any CPU in WFE (used by idle loop on NC platforms). */
+    __asm__ volatile("sev" ::: "memory");
+#endif
 }
 
 /*
@@ -558,25 +624,30 @@ static uint32_t calculate_deadline_pressure(uint32_t cpu)
  */
 static uint32_t find_target_cpu(void)
 {
-    uint32_t best_cpu = 0;
-    uint32_t best_score = cpu_rq(0)->ready_count + calculate_deadline_pressure(0);
+    /* Round-robin starting point to spread tasks across CPUs.
+     * Without this, ties (all CPUs at score 0) always go to CPU 0. */
+    static uint32_t rr_next;
+    uint32_t start = rr_next % cpu_count;
 
-    for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
+    uint32_t best_cpu = start;
+    uint32_t best_score = cpu_rq(start)->ready_count + calculate_deadline_pressure(start);
+
+    for (uint32_t i = 1; i < cpu_count; i++) {
+        uint32_t cpu = (start + i) % cpu_count;
+
         /* Skip isolated cores */
-        if (sched.isolated_cores & (1U << cpu)) {
+        if (sched.isolated_cores & (1U << cpu))
             continue;
-        }
 
-        /* Combined score: ready count + deadline pressure */
         uint32_t score = cpu_rq(cpu)->ready_count + calculate_deadline_pressure(cpu);
 
-        /* Pick CPU with lowest combined score */
         if (score < best_score) {
             best_cpu = cpu;
             best_score = score;
         }
     }
 
+    rr_next = best_cpu + 1;
     return best_cpu;
 }
 
@@ -589,7 +660,7 @@ static uint32_t find_target_cpu(void)
  *
  * Returns the least-loaded non-isolated CPU > 0, or falls back to find_target_cpu().
  */
-static uint32_t __attribute__((unused)) find_performance_cpu(void)
+static uint32_t find_performance_cpu(void)
 {
     if (cpu_count <= 1) {
         return 0;  /* Only one CPU available */
@@ -645,21 +716,12 @@ void scheduler_add_task(struct task *task)
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         target_cpu = task->cpu_affinity;
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    } else {
-        /* CPU 0 pinning: secondary CPUs' idle tasks don't process dispatched
-         * tasks despite correct NC infrastructure and timer/preempt_disabled
-         * fixes. Idle task's daifclr+wfi+timer+schedule path needs debugging.
-         * See docs/pi5-cross-cpu-dispatch-investigation.md. */
-        target_cpu = 0;
-#else
     } else if (task->deadline_ns > 0) {
         target_cpu = find_performance_cpu();
         DEBUG_PRINT("Deadline task '%s' -> CPU %u (performance core)",
                     task->name, target_cpu);
     } else {
         target_cpu = find_target_cpu();
-#endif
     }
 
     scheduler_add_task_to_cpu(task, target_cpu);
@@ -966,26 +1028,52 @@ void yield(void)
 /*
  * Start the scheduler on this CPU.
  */
-void scheduler_start(void)
+void scheduler_start(uint32_t this_cpu)
 {
-    uint32_t this_cpu = cpu_id();
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xC0 = entered scheduler_start */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC0;
+#endif
+
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
 
     if (!sched.initialized) {
+        /* Write panic marker to NC before panic (uart may deadlock) */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xE1;
+#endif
         panic("scheduler_start: scheduler not initialized");
     }
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xC1 = passed initialized check */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC1;
+#endif
 
     if (this_cpu == 0)
         INFO("CPU %u: Starting scheduler", this_cpu);
 
     irq_flags_t flags = rq_lock_irqsave(this_cpu);
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xC2 = acquired rq lock */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC2;
+#endif
+
     /* Pick first task */
     struct task *first = pick_next_task(this_cpu);
     if (!first) {
         rq_unlock_irqrestore(this_cpu, flags);
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xE2;
+#endif
         panic("scheduler_start: no tasks to run");
     }
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xC3 = picked a task */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC3;
+#endif
 
     /* Remove from queue */
     if (first != rq->idle_task && rq->head == first) {
@@ -1007,12 +1095,22 @@ void scheduler_start(void)
 
     rq_unlock_irqrestore(this_cpu, flags);
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xC4 = unlocked, about to start timer */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC4;
+#endif
+
     /* Start timer and enable interrupts now that a task is active.
      * Must be done AFTER task_set_current() so that timer IRQ handler
      * can safely call task_current() in schedule(). */
     if (this_cpu == 0)
         INFO("Starting timer (100 Hz)...");
     timer_start();
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xC5 = timer started */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC5;
+#endif
 
     /* Guard against timer re-entrancy during switch_to.
      * The trampoline clears this after context restore. */
@@ -1022,15 +1120,42 @@ void scheduler_start(void)
      * and skips schedule(). Ticks still count for sleep/uptime. */
     if (this_cpu == 0)
         INFO("Enabling interrupts...");
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xC6 = pre-daifclr */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC6;
+#endif
+
+    /* Unmask IRQs.
+     * On Pi 5 secondary CPUs, skip daifclr for now — the idle task's
+     * while loop does its own daifclr + wfi. Enabling interrupts here
+     * on the boot stack triggers an exception path that hangs (under
+     * investigation). CPU 0 enables interrupts normally. */
 #if defined(PLATFORM_X86_64)
     __asm__ volatile("sti" ::: "memory");
+#elif defined(PLATFORM_HAS_NC_MEMORY)
+    if (this_cpu == 0) {
+        __asm__ volatile("msr daifclr, #0x2" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+    }
+    /* Secondary CPUs: idle_task_func does daifclr in its loop */
 #else
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");
     __asm__ volatile("isb" ::: "memory");
 #endif
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xC7 = past daifclr */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC7;
+#endif
+
     /* Debug: mark that we reached pre-switch point */
     sched_diag_idle_loops[this_cpu] = 0xAAAA;
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC trace: 0xCC = about to call switch_to */
+    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xCC;
+#endif
 
     /* Switch to first task (NULL = no previous context to save).
      * switch_to never returns — it jumps to task_entry_wrapper.
@@ -1050,7 +1175,14 @@ void scheduler_tick(void)
 
     /* Always count ticks (used by sleep_ms, uptime, benchmarks) */
     sched.timer_ticks++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* sched_diag_tick pointer is in cacheable BSS — secondary CPUs
+     * may have stale L2 data for it. Use direct NC address if available. */
+    if (sched_diag_tick)
+        sched_diag_tick[cpu]++;
+#else
     sched_diag_tick[cpu]++;
+#endif
 
     /* Skip preemption if a context switch is in progress on this CPU.
      * schedule() sets preempt_disabled between rq_unlock and switch_to

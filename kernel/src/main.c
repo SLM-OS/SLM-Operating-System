@@ -444,7 +444,7 @@ void kernel_main(void *dtb)
      * causing schedule() to dereference NULL.
      */
     INFO("Starting scheduler...");
-    scheduler_start();
+    scheduler_start(0);
 
     /* Should never reach here */
     panic("scheduler_start returned!");
