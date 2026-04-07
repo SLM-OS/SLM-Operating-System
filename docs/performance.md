@@ -61,6 +61,32 @@ Jetson's 6.7 GB usable memory spans three non-contiguous regions around the OP-T
 
 ---
 
+## GPU Cache Sync (Jetson Only)
+
+Measures GPU buffer allocation, cache maintenance (DC CVAC/IVAC), and deallocation on a 4KB buffer (1024 uint32 values). Uses unified memory (CPU and GPU share DRAM).
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| gpu_alloc (4KB) | 1,952 ns | PMM page allocation |
+| sync_for_gpu (DC CVAC) | 1,184 ns | Clean 64 cache lines to PoC |
+| sync_for_cpu (DC IVAC) | 896 ns | Invalidate 64 cache lines |
+| gpu_free | 2,272 ns | PMM page deallocation |
+| Data integrity | PASS | 0xDEADBEEF survives clean+invalidate round-trip |
+
+---
+
+## Core Isolation (Jetson)
+
+`bench isolate`: CPU 2 isolated from GIC SPI routing, 8 tasks dispatched across remaining 5 CPUs. 0 tasks reached isolated CPU. **PASS.**
+
+---
+
+## Cross-CPU Task Dispatch (Jetson)
+
+`bench smp`: dispatches tasks to CPUs 1-5, verifies each completes on the correct CPU. 3 consecutive runs, all 5/5 CPUs COMPLETED. Uses cooperative scheduling via WFE/SEV.
+
+---
+
 ## Hardware Summary
 
 | Feature | Jetson Orin Nano | Raspberry Pi 5 | QEMU virt |
