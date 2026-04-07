@@ -1,6 +1,9 @@
 # Cross-CPU Dispatch Debug Progress Log
 
+> **Note:** This file is a historical debug log from April 6, 2026. Cross-CPU dispatch was resolved on April 7, 2026. See `pi5-cross-cpu-dispatch-investigation.md` for the full investigation and resolution.
+
 **Started:** April 6, 2026
+**Resolved:** April 7, 2026
 **Goal:** Enable multi-core task dispatch on Pi 5
 
 ---
