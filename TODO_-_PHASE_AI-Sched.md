@@ -26,11 +26,12 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 | ✅ | Complete |
 | ⏸️ | Deferred to later phase |
 | 🔗 | Has dependency on another milestone |
-| ⚠️ | Risk item requiring attention |
 
 ---
 
 ## Milestone 1: Pluggable Scheduler Interface
+
+**Note:** This milestone is pure kernel C refactoring — no FP, no new build flags needed. Can be completed with existing build system.
 
 ### Scheduler Policy Vtable
 - ☐ Create `kernel/include/sched_policy.h` with vtable definition:
@@ -83,7 +84,73 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 
 ---
 
-## Milestone 2: AI Inference Engine
+## Milestone 2: Build System Integration
+
+**Note:** Required before M3 (Inference) since AI code needs different compiler flags.
+
+### CMake Configuration
+- ☐ Add to `CMakeLists.txt`:
+  ```cmake
+  option(ENABLE_AI_SCHEDULER "Include AI scheduling models" OFF)
+  
+  if(ENABLE_AI_SCHEDULER)
+      add_compile_definitions(CONFIG_AI_SCHEDULER=1)
+      
+      # AI inference library — needs FP/NEON
+      # On AArch64, NEON/FP is always available.
+      # The key is to NOT include -mgeneral-regs-only (which the main kernel uses).
+      # Same pattern as Lua library.
+      add_library(ai_sched STATIC
+          kernel/sched/ai/ai_inference.c
+          kernel/sched/ai/ai_state.c
+          kernel/sched/ai/sched_ai.c
+          kernel/sched/ai/fp_context.S
+          kernel/sched/ai/ai_weights_mlp.c
+      )
+      
+      target_compile_options(ai_sched PRIVATE
+          -ffreestanding
+          -nostdlib
+          -mcpu=${TARGET_CPU}    # cortex-a78ae, cortex-a76, or generic
+          -fPIE
+          -O2
+          # NOTE: No -mgeneral-regs-only here — that's the whole point
+      )
+      
+      target_include_directories(ai_sched PRIVATE
+          ${KERNEL_INCLUDES}
+          kernel/sched/ai
+      )
+      
+      target_link_libraries(slmos.elf PRIVATE ai_sched)
+  endif()
+  ```
+
+### Stub Weights for Development
+- ☐ Create `kernel/sched/ai/ai_weights_stub.c`:
+  - All-zero weight arrays matching extern declarations
+  - Allows compilation without Plan A deliverables
+- ☐ Create `kernel/sched/ai/ai_weights.h`:
+  - Extern declarations for weight arrays
+  - Dimension constants (from `ai_config.h` when available)
+
+### Weight File Integration
+- ☐ Create `scripts/import_ai_weights.sh`:
+  - Copies generated weights from Plan A output directory
+  - Copies `ai_config.h` with platform-specific dimensions
+  - Validates dimensions match
+- ☐ Add Makefile target: `make import-ai-weights`
+
+### Build Verification
+- ☐ Verify build with `ENABLE_AI_SCHEDULER=OFF` (existing behavior)
+- ☐ Verify build with `ENABLE_AI_SCHEDULER=ON` + stub weights
+- ☐ Verify build with `ENABLE_AI_SCHEDULER=ON` + real weights (after Plan A)
+
+---
+
+## Milestone 3: AI Inference Engine
+
+**Depends on:** M2 (Build System)
 
 ### Directory Structure
 - ☐ Create `kernel/sched/ai/` directory
@@ -111,16 +178,16 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
   ```
   - ☐ Linear scan for max logit index
 
-### ⚠️ NEON Optimization
-- ☐ Verify `-mcpu=cortex-a78ae` enables NEON auto-vectorization
-- ☐ If not, add explicit NEON intrinsics to `ai_matvec()`:
+### NEON Optimization
+- ☐ Verify `-mcpu=${TARGET_CPU}` enables NEON auto-vectorization (check assembly output)
+- ☐ If auto-vectorization insufficient, add explicit NEON intrinsics to `ai_matvec()`:
   ```c
   #include <arm_neon.h>
   float32x4_t acc = vdupq_n_f32(0.0f);
   // vld1q_f32, vfmaq_f32 for 4-wide accumulation
   ```
 - ☐ Benchmark scalar vs NEON: target < 50µs for full inference
-- ☐ Add compile-time check for NEON availability
+- ☐ Add compile-time check for NEON availability (`#ifdef __ARM_NEON`)
 
 ### Action Decoding
 - ☐ Define `struct ai_sched_action`:
@@ -139,7 +206,7 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
       out->core_assignment = idx;
   }
   ```
-- ☐ Implement `ai_validate_action()` — bounds checking
+- ☐ Implement `ai_validate_action()` — bounds checking against runtime core count
 
 ### MLP Inference
 - ☐ Implement `ai_schedule_mlp()`:
@@ -147,7 +214,7 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
   int ai_schedule_mlp(const float state[AI_STATE_DIM],
                       struct ai_sched_action *action);
   ```
-  - ☐ 4-layer forward pass: (108→256→256→128→42)
+  - ☐ 4-layer forward pass: (108→256→256→128→N_ACTIONS)
   - ☐ Stack-allocated scratch buffers (256 floats = 1KB)
   - ☐ Thread-safe (no static globals)
   - ☐ Returns 0 on success, -1 on error
@@ -158,7 +225,7 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
   int ai_schedule_ppo(const float state[AI_STATE_DIM],
                       struct ai_sched_action *action);
   ```
-  - ☐ Same architecture as MLP (108→256→256→128→42)
+  - ☐ Same architecture as MLP (108→256→256→128→N_ACTIONS)
   - ☐ Uses different weight arrays
 
 ### XGBoost Inference (Stretch)
@@ -169,18 +236,37 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 
 ---
 
-## Milestone 3: State Vector Extraction
+## Milestone 4: State Vector Extraction
+
+**Depends on:** M2 (Build System)
 
 ### State Dimensions
-- ☐ Define constants in `ai_types.h`:
+- ☐ Create `kernel/sched/ai/ai_types.h` with dimension constants:
   ```c
-  #define AI_STATE_DIM        108
-  #define AI_NUM_CORES        6
-  #define AI_FEATURES_PER_CORE 6
-  #define AI_NUM_TASKS        8
-  #define AI_FEATURES_PER_TASK 8
-  #define AI_GLOBAL_FEATURES  8
+  // State vector is fixed at 108 dimensions (trained model input shape).
+  // Platforms with fewer cores zero-fill unused core slots.
+  // These values come from ai_config.h (generated by Plan A) or defaults.
+  #ifndef AI_STATE_DIM
+  #define AI_STATE_DIM          108
+  #endif
+  #ifndef AI_STATE_NUM_CORES
+  #define AI_STATE_NUM_CORES    6   // Max cores in state vector (zero-fill if fewer)
+  #endif
+  #define AI_FEATURES_PER_CORE  6
+  #ifndef AI_STATE_NUM_TASKS
+  #define AI_STATE_NUM_TASKS    8   // Top-N tasks by priority
+  #endif
+  #define AI_FEATURES_PER_TASK  8
+  #define AI_GLOBAL_FEATURES    8
+  
+  // Verify: 6×6 + 8×8 + 8 = 36 + 64 + 8 = 108
+  _Static_assert(AI_STATE_NUM_CORES * AI_FEATURES_PER_CORE +
+                 AI_STATE_NUM_TASKS * AI_FEATURES_PER_TASK +
+                 AI_GLOBAL_FEATURES == AI_STATE_DIM,
+                 "State dimension mismatch");
   ```
+
+**Note:** The state vector shape is fixed at 108 dimensions because the model was trained with this input size. On platforms with fewer physical cores (e.g., Pi 5 with 4 cores), the extra core slots (4-5) are zero-filled. This matches how the simulator handles variable core counts. Coordinate with Plan A to confirm model training configuration.
 
 ### Core State File
 - ☐ Create `kernel/sched/ai/ai_state.h` — public API
@@ -191,11 +277,11 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
   ```
 
 ### Per-Core Features (36 floats)
-For each core c (0 to 5), features at offset `c*6`:
+For each core c (0 to AI_STATE_NUM_CORES-1), features at offset `c*6`:
 
 | Offset | Feature | Source | Notes |
 |--------|---------|--------|-------|
-| c×6+0 | utilization | `running_ticks / total_ticks` | New counter (see M4) |
+| c×6+0 | utilization | `running_ticks / total_ticks` | New counter (see M5) |
 | c×6+1 | queue_depth | `cpu_rq(c)->ready_count / 32.0f` | Existing |
 | c×6+2 | cache_pressure | `0.0f` | Future: PMU integration |
 | c×6+3 | core_type | `1.0f` | Homogeneous on Jetson/Pi5 |
@@ -203,6 +289,7 @@ For each core c (0 to 5), features at offset `c*6`:
 | c×6+5 | current_task_prio | `current->effective_priority / 7.0f` | Existing |
 
 - ☐ Implement per-core feature extraction
+- ☐ Zero-fill cores beyond `cpu_count()` (for Pi 5: cores 4-5 = zeros)
 - ☐ Handle core offline/invalid states gracefully
 
 ### Per-Task Features (64 floats)
@@ -216,10 +303,10 @@ Top 8 tasks by effective_priority, features at offset `36 + t*8`:
 | t×8+3 | model_size | `0.0f` | Future: slm_task_info |
 | t×8+4 | inference_dur | `0.0f` | Future: slm_task_info |
 | t×8+5 | can_use_gpu | `0.0f` | Future: slm_task_info |
-| t×8+6 | wait_time | `(now - arrival_time_ns) / 1e9` | New field (see M4) |
+| t×8+6 | wait_time | `(now - arrival_time_ns) / 1e9` | New field (see M5) |
 | t×8+7 | component_type | `0.0f` | Future: slm_task_info |
 
-- ☐ Implement top-8 task collection (see M4 for caching)
+- ☐ Implement top-8 task collection (see M5 for caching)
 - ☐ Handle < 8 tasks gracefully (zero-fill remaining slots)
 - ☐ Implement per-task feature extraction
 
@@ -229,8 +316,8 @@ Features at offset 100:
 | Offset | Feature | Source | Notes |
 |--------|---------|--------|-------|
 | 100 | ready_count | `sum(ready_count) / 64.0f` | Existing |
-| 101 | deadline_miss_rate | Rolling window counter | New (see M4) |
-| 102 | avg_latency | `cumulative_latency / completion_count / 1e7` | New (see M4) |
+| 101 | deadline_miss_rate | Rolling window counter | New (see M5) |
+| 102 | avg_latency | `cumulative_latency / completion_count / 1e7` | New (see M5) |
 | 103 | weight_pool_pressure | `0.0f` or FFI query | Future: Rust runtime |
 | 104 | workspace_pool_pressure | `0.0f` or FFI query | Future: Rust runtime |
 | 105 | gpu_queue_depth | `gpu_pending_count() / 8.0f` | If GPU driver available |
@@ -242,7 +329,7 @@ Features at offset 100:
 
 ---
 
-## Milestone 4: Scheduler Counters & Task Fields
+## Milestone 5: Scheduler Counters & Task Fields
 
 ### New Task Fields
 - ☐ Add to `struct task` (guarded by `CONFIG_AI_SCHEDULER`):
@@ -277,7 +364,7 @@ Features at offset 100:
   static struct {
       uint32_t miss_count;
       uint32_t total_count;
-      uint32_t window_misses[100];  // Rolling window
+      uint8_t  window_misses[100];  // Rolling window (0=hit, 1=miss)
       uint32_t window_idx;
   } deadline_stats;
   #endif
@@ -303,98 +390,15 @@ Features at offset 100:
   ```c
   #ifdef CONFIG_AI_SCHEDULER
   static struct {
-      struct task *tasks[8];
+      struct task *tasks[AI_STATE_NUM_TASKS];
       uint32_t count;
       uint64_t last_update_tick;
   } top_tasks_cache;
   #endif
   ```
-- ☐ Update cache in `scheduler_tick()` (every N ticks, not every tick)
+- ☐ Update cache in `scheduler_tick()` every N ticks (not every tick)
 - ☐ Implement `ai_get_top_tasks()` that returns cached list
 - ☐ Tune update frequency (every 10 ticks = 100ms seems reasonable)
-
----
-
-## Milestone 5: AI Policy Implementation
-
-### Policy File
-- ☐ Create `kernel/sched/ai/sched_ai.c`
-- ☐ Create `kernel/sched/ai/sched_ai.h`
-
-### MLP Policy Ops
-- ☐ Implement `ai_mlp_init()`:
-  - ☐ Verify weights are loaded (not all zeros)
-  - ☐ Run self-test inference
-  - ☐ Return 0 on success
-- ☐ Implement `ai_mlp_shutdown()`:
-  - ☐ Log statistics (decisions made, fallbacks, avg latency)
-- ☐ Implement `ai_mlp_assign_cpu()`:
-  ```c
-  uint32_t ai_mlp_assign_cpu(struct task *task) {
-      float state[AI_STATE_DIM];
-      struct ai_sched_action action;
-      
-      // FP state save (see M6)
-      fp_save();
-      
-      ai_extract_state(state);
-      
-      if (ai_schedule_mlp(state, &action) < 0) {
-          fp_restore();
-          return heuristic_assign_cpu(task);  // Fallback
-      }
-      
-      // Validate action
-      if (action.core_assignment >= cpu_count() ||
-          (sched_is_core_isolated(action.core_assignment) &&
-           task->cpu_affinity == CPU_AFFINITY_ANY)) {
-          fp_restore();
-          return heuristic_assign_cpu(task);  // Fallback
-      }
-      
-      // Apply priority adjustment
-      if (action.priority_adj == 1) {
-          task->effective_priority = min(task->effective_priority + 1, PRIORITY_CRITICAL);
-      } else if (action.priority_adj == 2) {
-          task->effective_priority = max(task->effective_priority - 1, PRIORITY_IDLE);
-      }
-      
-      // Preempt flag affects pick_next_task() via priority
-      if (action.preempt && task->effective_priority < PRIORITY_CRITICAL) {
-          task->effective_priority++;
-      }
-      
-      fp_restore();
-      return action.core_assignment;
-  }
-  ```
-- ☐ Implement `ai_mlp_tick()` (optional, for periodic rebalancing)
-
-### PPO Policy Ops
-- ☐ Implement `sched_policy_ai_ppo` struct (same pattern as MLP)
-- ☐ Uses `ai_schedule_ppo()` instead of `ai_schedule_mlp()`
-
-### XGBoost Policy Ops (Stretch)
-- ⏸️ Implement `sched_policy_ai_xgboost` struct
-- ⏸️ Uses cascaded tree inference
-
-### Policy Registration
-- ☐ Register policies in `sched_ai_init()`:
-  ```c
-  void sched_ai_init(void) {
-      sched_register_policy(&sched_policy_ai_mlp);
-      sched_register_policy(&sched_policy_ai_ppo);
-  }
-  ```
-- ☐ Call from `kernel_main()` if `CONFIG_AI_SCHEDULER` defined
-
-### Statistics
-- ☐ Track per-policy stats:
-  - ☐ Total decisions made
-  - ☐ Fallback count
-  - ☐ Average inference latency
-  - ☐ Action distribution histogram
-- ☐ Add `sched stats` shell command to display
 
 ---
 
@@ -447,64 +451,88 @@ Features at offset 100:
 
 ---
 
-## Milestone 7: Build System Integration
+## Milestone 7: AI Policy Implementation
 
-### CMake Configuration
-- ☐ Add to `CMakeLists.txt`:
-  ```cmake
-  option(ENABLE_AI_SCHEDULER "Include AI scheduling models" OFF)
-  
-  if(ENABLE_AI_SCHEDULER)
-      add_compile_definitions(CONFIG_AI_SCHEDULER=1)
+**Depends on:** M1 (Vtable), M3 (Inference), M4 (State), M5 (Counters), M6 (FP State)
+
+### Policy File
+- ☐ Create `kernel/sched/ai/sched_ai.c`
+- ☐ Create `kernel/sched/ai/sched_ai.h`
+
+### MLP Policy Ops
+- ☐ Implement `ai_mlp_init()`:
+  - ☐ Verify weights are loaded (not all zeros)
+  - ☐ Run self-test inference
+  - ☐ Return 0 on success
+- ☐ Implement `ai_mlp_shutdown()`:
+  - ☐ Log statistics (decisions made, fallbacks, avg latency)
+- ☐ Implement `ai_mlp_assign_cpu()`:
+  ```c
+  uint32_t ai_mlp_assign_cpu(struct task *task) {
+      float state[AI_STATE_DIM];
+      struct ai_sched_action action;
       
-      # AI inference library - needs FP/NEON
-      add_library(ai_sched STATIC
-          kernel/sched/ai/ai_inference.c
-          kernel/sched/ai/ai_state.c
-          kernel/sched/ai/sched_ai.c
-          kernel/sched/ai/fp_context.S
-          kernel/sched/ai/ai_weights_mlp.c
-      )
+      // FP state save (see M6)
+      FP_CONTEXT_SAVE();
       
-      # Explicit FP/NEON flags - NOT -mgeneral-regs-only
-      target_compile_options(ai_sched PRIVATE
-          -ffreestanding
-          -nostdlib
-          -mcpu=cortex-a78ae
-          -mfpu=neon-fp-armv8
-          -mfloat-abi=hard
-          -fPIE
-          -O2
-      )
+      ai_extract_state(state);
       
-      target_include_directories(ai_sched PRIVATE
-          ${KERNEL_INCLUDES}
-          kernel/sched/ai
-      )
+      if (ai_schedule_mlp(state, &action) < 0) {
+          FP_CONTEXT_RESTORE();
+          return heuristic_assign_cpu(task);  // Fallback
+      }
       
-      target_link_libraries(slmos.elf PRIVATE ai_sched)
-  endif()
+      // Validate action
+      if (action.core_assignment >= cpu_count() ||
+          (sched_is_core_isolated(action.core_assignment) &&
+           task->cpu_affinity == CPU_AFFINITY_ANY)) {
+          FP_CONTEXT_RESTORE();
+          return heuristic_assign_cpu(task);  // Fallback
+      }
+      
+      // Apply priority adjustment
+      if (action.priority_adj == 1) {
+          task->effective_priority = min(task->effective_priority + 1, PRIORITY_CRITICAL);
+      } else if (action.priority_adj == 2) {
+          task->effective_priority = max(task->effective_priority - 1, PRIORITY_IDLE);
+      }
+      
+      // Preempt flag affects pick_next_task() via priority
+      if (action.preempt && task->effective_priority < PRIORITY_CRITICAL) {
+          task->effective_priority++;
+      }
+      
+      FP_CONTEXT_RESTORE();
+      return action.core_assignment;
+  }
   ```
+- ☐ Implement `ai_mlp_tick()` (optional, for periodic rebalancing)
 
-### Stub Weights for Development
-- ☐ Create `kernel/sched/ai/ai_weights_stub.c`:
-  - All-zero weight arrays matching extern declarations
-  - Allows compilation without Plan A deliverables
-- ☐ Create `kernel/sched/ai/ai_weights_stub.h`:
-  - Extern declarations for weight arrays
-  - Dimension constants
+### PPO Policy Ops
+- ☐ Implement `sched_policy_ai_ppo` struct (same pattern as MLP)
+- ☐ Uses `ai_schedule_ppo()` instead of `ai_schedule_mlp()`
 
-### Weight File Integration
-- ☐ Create `scripts/import_ai_weights.sh`:
-  - Copies generated weights from Plan A output directory
-  - Updates include paths
-  - Validates dimensions match
-- ☐ Add Makefile target: `make import-ai-weights`
+### XGBoost Policy Ops (Stretch)
+- ⏸️ Implement `sched_policy_ai_xgboost` struct
+- ⏸️ Uses cascaded tree inference
 
-### Build Verification
-- ☐ Verify build with `ENABLE_AI_SCHEDULER=OFF` (existing behavior)
-- ☐ Verify build with `ENABLE_AI_SCHEDULER=ON` + stub weights
-- ☐ Verify build with `ENABLE_AI_SCHEDULER=ON` + real weights (after Plan A)
+### Policy Registration
+- ☐ Register policies in `sched_ai_init()`:
+  ```c
+  void sched_ai_init(void) {
+      sched_register_policy(&sched_policy_ai_mlp);
+      sched_register_policy(&sched_policy_ai_ppo);
+  }
+  ```
+- ☐ Call from `kernel_main()` if `CONFIG_AI_SCHEDULER` defined
+
+### Statistics
+- ☐ Track per-policy stats:
+  - ☐ Total decisions made
+  - ☐ Fallback count
+  - ☐ Average inference latency
+  - ☐ Action distribution histogram
+- ☐ Add `sched stats` shell command to display
 
 ---
 
@@ -526,6 +554,7 @@ Features at offset 100:
 - ☐ `test_ai_extract_state_dimensions` — output is 108 floats
 - ☐ `test_ai_extract_state_normalized` — values in expected ranges [0,1] or similar
 - ☐ `test_ai_extract_state_cores` — per-core features match kernel state
+- ☐ `test_ai_extract_state_zero_fill` — unused cores (beyond cpu_count) are zero
 - ☐ `test_ai_extract_state_tasks` — per-task features match known task values
 
 #### Policy Tests
@@ -566,19 +595,30 @@ Features at offset 100:
 
 ## Milestone 9: x86-64 Support (Phase 4X Integration)
 
+**Depends on:** Phase 4X M3 (Interrupts) complete
+
 ### SSE/AVX Implementation
 - ☐ Create `kernel/sched/ai/ai_inference_x86.c`:
   - SSE intrinsics version of `ai_matvec()`
   - `_mm_load_ps`, `_mm_fmadd_ps` for 4-wide
-- ☐ Add `#ifdef __x86_64__` / `#ifdef __aarch64__` guards
+- ☐ Add architecture guards:
+  ```c
+  #if defined(__aarch64__)
+  #include "ai_inference_arm64.c"
+  #elif defined(__x86_64__)
+  #include "ai_inference_x86.c"
+  #else
+  #error "Unsupported architecture for AI scheduler"
+  #endif
+  ```
 - ☐ Verify performance target on x86-64 (< 50µs)
 
 ### Build System
 - ☐ Update CMake for x86-64 AI scheduler build
-- ☐ Add appropriate SSE/AVX flags
+- ☐ Add appropriate SSE/AVX flags (`-msse4.2` or `-mavx2`)
 
 ### x86-64 FP Context
-- ☐ Implement `fp_save()` / `fp_restore()` for x86-64 (FXSAVE/FXRSTOR)
+- ☐ Implement `fp_save()` / `fp_restore()` for x86-64 (FXSAVE/FXRSTOR or XSAVE/XRSTOR)
 
 ---
 
@@ -613,14 +653,20 @@ Features at offset 100:
 
 ## Outstanding Decisions
 
-### Milestone 2 — Inference
+### Milestone 3 — Inference
 
 | Decision | Options | Recommendation |
 |----------|---------|----------------|
-| **NEON strategy** | Auto-vectorize vs explicit intrinsics | **Try auto-vectorize first** — add intrinsics only if needed |
+| **NEON strategy** | Auto-vectorize vs explicit intrinsics | **Try auto-vectorize first** — add intrinsics only if < 50µs not met |
 | **Scratch buffers** | Stack vs static | **Stack** — thread safety, no locking needed |
 
-### Milestone 4 — Counters
+### Milestone 4 — State Vector
+
+| Decision | Options | Recommendation |
+|----------|---------|----------------|
+| **Core zero-fill** | Error on mismatch vs zero-fill | **Zero-fill** — matches simulator behavior, model trained this way |
+
+### Milestone 5 — Counters
 
 | Decision | Options | Recommendation |
 |----------|---------|----------------|
@@ -638,7 +684,7 @@ Features at offset 100:
 
 | Decision | Options | Recommendation |
 |----------|---------|----------------|
-| **x86 SIMD** | SSE vs AVX vs AVX-512 | **SSE** — widest compatibility, sufficient for 256×256 |
+| **x86 SIMD** | SSE vs AVX vs AVX-512 | **SSE4.2** — widest compatibility, sufficient for 256×256 |
 
 ---
 
@@ -648,13 +694,13 @@ Features at offset 100:
 
 1. **⚠️ FP Register Corruption in IRQ Context**
    - Risk: AI inference clobbers FP registers used by interrupted code
-   - Mitigation: Explicit FP save/restore around inference
+   - Mitigation: Explicit FP save/restore around inference (M6)
    - Verification: Stress test with FP-heavy workload + frequent scheduling
    - Fallback: Defer inference to non-IRQ context
 
 2. **⚠️ Inference Latency > 50µs**
-   - Risk: Scalar FP code is too slow (~87µs estimated)
-   - Mitigation: Verify NEON auto-vectorization; add intrinsics if needed
+   - Risk: Auto-vectorized code doesn't meet performance target
+   - Mitigation: Verify NEON usage in disassembly; add intrinsics if needed
    - Verification: Latency test on QEMU and real hardware
    - Fallback: Reduce model size (fewer neurons), or accept higher latency
 
@@ -666,7 +712,7 @@ Features at offset 100:
 
 4. **Top-8 Task Scan Contention**
    - Risk: Locking all run queues for scan creates contention
-   - Mitigation: Cache top-8 list, update on timer tick (not every decision)
+   - Mitigation: Cache top-8 list, update on timer tick (M5)
    - Verification: Measure contention under high task creation rate
    - Fallback: Simpler "first 8 ready tasks" without global scan
 
@@ -676,45 +722,52 @@ Features at offset 100:
    - Mitigation: Verification script validates dimensions
    - Fallback: Manual weight array creation from Python export
 
+6. **Platform Core Count Mismatch**
+   - Risk: Model expects 6 cores, Pi 5 has 4
+   - Mitigation: Zero-fill unused core slots (documented in M4)
+   - Verification: Test on both 4-core and 6-core QEMU configurations
+   - Coordination: Confirm with Plan A that model handles zero-filled cores
+
 ---
 
 ## Dependencies
 
 ### External Dependencies
-- **Plan A (Export Pipeline):** Generates `ai_weights_*.c` files
+- **Plan A (Export Pipeline):** Generates `ai_weights_*.c` and `ai_config.h` files
   - Can proceed with stub weights until Plan A delivers
   - Interface contract defined in both plans
+  - Coordinate on: state vector dimensions, action space per platform
 - **Phase 4X (x86-64 port):** For SSE/AVX inference path
   - M9 depends on Phase 4X M3 (interrupts) being complete
 
 ### Internal Dependencies
 
 ```
-M1 (Vtable) ──────> M5 (AI Policy) ──────> M8 (Testing)
-                          │
-M2 (Inference) ───────────┤
-                          │
-M3 (State) ───────────────┤
-                          │
-M4 (Counters) ────────────┘
-      │
-M6 (FP State) ──────> M5 (AI Policy)
+M1 (Vtable) ──────────────────────────────────> M7 (AI Policy)
+                                                     │
+M2 (Build) ──────> M3 (Inference) ───────────────────┤
+                          │                          │
+                   M4 (State) ───────────────────────┤
+                          │                          │
+                   M5 (Counters) ────────────────────┤
+                                                     │
+                   M6 (FP State) ────────────────────┘
+                   
+M8 (Testing) ──────> After M7
 
-M7 (Build) ──────> Independent, start early
-
-M9 (x86-64) ──────> After M1-M6 complete on ARM64
+M9 (x86-64) ──────> After M1-M8 complete on ARM64
 ```
 
 **Recommended Order:**
-1. M7 (Build) — set up infrastructure
-2. M1 (Vtable) — foundation
-3. M2 (Inference) — core math
-4. M3 (State) — feature extraction
-5. M4 (Counters) — kernel instrumentation
-6. M6 (FP State) — interrupt safety
-7. M5 (AI Policy) — integration
-8. M8 (Testing) — validation
-9. M9 (x86-64) — port
+1. **M1 (Vtable)** — pure refactor, validates interface, no new dependencies
+2. **M2 (Build)** — set up FP library infrastructure
+3. **M3 (Inference)** — core math, needs M2
+4. **M4 (State)** — feature extraction, needs M2
+5. **M5 (Counters)** — kernel instrumentation
+6. **M6 (FP State)** — interrupt safety
+7. **M7 (AI Policy)** — integration, needs M1, M3-M6
+8. **M8 (Testing)** — validation
+9. **M9 (x86-64)** — port
 
 ---
 
@@ -724,6 +777,7 @@ M9 (x86-64) ──────> After M1-M6 complete on ARM64
 - Export script: `slm-os-scheduler-ai/scripts/export_models.py`
 - Generated output: `slm-os-scheduler-ai/deploy/generated/`
 - Verification: `slm-os-scheduler-ai/scripts/verify_inference.c`
+- Platform config: `slm-os-scheduler-ai/slm_sim/platforms.py`
 
 ### Simulator Reference
 - State vector: `slm_sim/observation.py`
@@ -733,6 +787,7 @@ M9 (x86-64) ──────> After M1-M6 complete on ARM64
 ### NEON/SIMD
 - [ARM NEON Intrinsics Reference](https://developer.arm.com/architectures/instruction-sets/intrinsics/)
 - [Auto-vectorization with GCC](https://gcc.gnu.org/projects/tree-ssa/vectorization.html)
+- Verify with: `aarch64-none-elf-objdump -d ai_inference.o | grep -E 'fmla|fadd'`
 
 ### Kernel Scheduling
 - `kernel/sched/sched.c` — current scheduler
@@ -754,8 +809,13 @@ M9 (x86-64) ──────> After M1-M6 complete on ARM64
 - Safe wrappers around unsafe calls
 - Model memory allocator available for future integration
 
+### From Build System
+- Separate library with different compiler flags (Lua pattern) works well
+- `-mgeneral-regs-only` for main kernel, omit for FP libraries
+
 ---
 
 *Created: January 2026*
+*Revised: January 2026 — Fixed AArch64 compiler flags, reordered milestones, documented core count handling*
 *Purpose: Integrate trained AI models into SLM-OS kernel scheduler*
 *Depends on: Plan A (Export Pipeline) for production weights*
