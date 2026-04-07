@@ -381,6 +381,7 @@ void scheduler_init_secondary(uint32_t cpu)
         return;  /* CPU 0 uses scheduler_init(), invalid CPUs ignored */
     }
 
+#if !defined(PLATFORM_X86_64)
     /* Debug: mark entry into scheduler_init_secondary via boot_flag */
     {
         extern volatile uint32_t cpu_boot_flag[];
@@ -388,6 +389,7 @@ void scheduler_init_secondary(uint32_t cpu)
         __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[cpu]) : "memory");
         __asm__ volatile("dsb sy" ::: "memory");
     }
+#endif
 
     /* Create idle task for this CPU */
     char idle_name[TASK_NAME_LEN];
@@ -406,6 +408,7 @@ void scheduler_init_secondary(uint32_t cpu)
         panic("scheduler_init_secondary: failed to create idle task for CPU %u", cpu);
     }
 
+#if !defined(PLATFORM_X86_64)
     /* Debug: mark post-task_create via boot_flag */
     {
         extern volatile uint32_t cpu_boot_flag[];
@@ -413,6 +416,7 @@ void scheduler_init_secondary(uint32_t cpu)
         __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[cpu]) : "memory");
         __asm__ volatile("dsb sy" ::: "memory");
     }
+#endif
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* NC trace: 0xB0 = about to acquire rq_lock */
