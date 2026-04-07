@@ -175,7 +175,8 @@ set(KERNEL_SOURCES
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
     kernel/src/component_runtime.c
-    kernel/src/msg_router.c
+    # msg_router: Rust implementation in runtime/src/msg_router.rs
+    # (linked via --whole-archive from Rust staticlib)
     kernel/src/help.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     kernel/src/elf.c

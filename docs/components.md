@@ -44,7 +44,7 @@ Phase 4 implements the component registry and lifecycle management foundation:
 
 ### Message Router
 
-The message router (`kernel/src/msg_router.c`) provides topic-based publish/subscribe messaging between components. Components subscribe to named topics and receive messages via per-subscriber mailboxes. See `docs/m7-message-router.md` for implementation details.
+The message router (`runtime/src/msg_router.rs`) provides topic-based publish/subscribe messaging between components. Implemented in Rust with `#[no_mangle] extern "C"` FFI, components subscribe to named topics and receive messages via per-subscriber mailboxes with atomic ready/ack flags. See `docs/m7-message-router.md` for implementation details.
 
 Shell commands: `msg send <topic> <data>`, `msg list`, `msg subscribe <topic> <idx>`
 

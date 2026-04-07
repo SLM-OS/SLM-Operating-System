@@ -648,7 +648,7 @@ On x86-64, `uart_getc()` previously busy-looped polling the LSR register. This s
 
 | File | Purpose |
 |------|---------|
-| `kernel/src/msg_router.c` | Router implementation (subscribe, publish, receive, ack, list) |
+| `runtime/src/msg_router.rs` | Router implementation in Rust (subscribe, publish, receive, ack, list) |
 | `kernel/src/component_runtime.c` | Listener service entry point |
 | `kernel/src/shell_component.c` | `cmd_msg` shell handler |
 
@@ -787,7 +787,8 @@ The `test_x86_boot.c` test suite contains 90 tests across 17 categories:
 | SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
 | NVIDIA GPU | 7 | Init ran, no-crash, VRAM test -1 without GPU, accessors safe, BOOT_42 decode, gpu/pci shell commands registered |
 | Component runtime | 6 | Run counter, invalid name rejected, list builtins safe, run increases count, shell command registered, ELF x86-64 arch |
-| Message router | 18 | Init, subscribe (single/multiple/multi-topic/overflow), receive (empty/unsubscribed/null), publish (none/timeout), ack no-pending, reinit, shell commands (list/subscribe/send) |
+| Message router (C tests) | 18 | Init, subscribe (single/multiple/multi-topic/overflow), receive (empty/unsubscribed/null), publish (none/timeout), ack no-pending, reinit, shell commands (list/subscribe/send) |
+| Message router (Rust tests) | 10 | Init+subscribe, multi-subscribe, subscriber overflow, topic overflow, receive empty/unsubscribed, publish nonexistent, reinit clears, ack no-pending, list safe |
 | Component services | 2 | Listener starts + registers, echo start + send safe |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
@@ -881,7 +882,7 @@ Lua commands are available in the shell via `lua <expression>`.
 | `kernel/arch/x86_64/pci.c` | PCI config access, bus enumeration, `pci` shell command |
 | `kernel/arch/x86_64/nvidia_gpu.c` | GPU probe, BAR mapping, register decode, VRAM test, `gpu` command |
 | `kernel/src/component_runtime.c` | Built-in component execution, `component run/send/builtins` |
-| `kernel/src/msg_router.c` | Topic-based pub/sub message router for component IPC |
+| `runtime/src/msg_router.rs` | Topic-based pub/sub message router (Rust, replaces C version) |
 | `kernel/drivers/uart_x86.c` | 16550 UART driver (uart.h interface, yield-based getc) |
 
 ### Build System
@@ -1002,7 +1003,7 @@ The UEFI firmware outputs POST messages on the serial port at a different baud r
 4. ~~CI pipeline~~ ✅ — x86-64 build + QEMU boot test in GitHub Actions
 5. ~~Scheduler reentrance fix~~ ✅ — per-CPU `preempt_disabled` flag, cross-platform
 6. ~~Echo IPC~~ ✅ — Shared mailbox with atomic ops, round-robin scheduling
-7. ~~M7 MessageRouter~~ ✅ — Topic-based pub/sub, listener service, shell commands, 9 tests
+7. ~~M7 MessageRouter~~ ✅ — Topic-based pub/sub in Rust, listener service, shell commands, 30 tests
 
 ### Remaining (Post-Capstone)
 

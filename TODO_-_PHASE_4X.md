@@ -137,7 +137,7 @@ make -f kernel/arch/x86_64/Makefile.test disk
 - ✅ Install Rust target `x86_64-unknown-none`
 - ✅ Create `kernel/arch/x86_64/` directory structure
 - ✅ Update CMakeLists.txt for x86-64 target (`cmake -DPLATFORM=X86_64`)
-- ☐ Update Cargo.toml for x86-64 target (Rust runtime not yet ported)
+- ✅ Update Cargo.toml for x86-64 target (`x86_64-unknown-none` builds via `--whole-archive`)
 - ✅ Set up QEMU x86-64 for initial testing (before real hardware)
 
 ### Multiboot2/GRUB Boot (chosen over raw UEFI)
@@ -417,7 +417,7 @@ This is a project-scale effort deferred to post-capstone.
 - ⏸️ Networking — requires VirtIO-PCI transport driver (x86-64 QEMU uses PCI, not MMIO)
 
 ### Inter-Component IPC
-- ✅ Message router: topic-based pub/sub (`msg_router.c`)
+- ✅ Message router: topic-based pub/sub (Rust `msg_router.rs`, 30 tests)
 - ✅ Echo service: shared mailbox with atomic ready/ack flags
 - ✅ Listener service: subscribes to `events` topic via message router
 - ✅ Shell commands: `msg send/list/subscribe`, `component send`

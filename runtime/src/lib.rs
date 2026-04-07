@@ -20,6 +20,7 @@ pub mod log;
 pub mod mm;
 pub mod sched;
 pub mod component;
+pub mod msg_router;
 
 // Re-export commonly used types
 pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags, TaskId};
@@ -271,6 +272,133 @@ pub extern "C" fn rust_run_tests() -> i32 {
             && !hint.pin_to_core;
         print_test_result(b"SchedulingHint::default()\0", passed);
         if !passed { failures += 1; }
+    }
+
+    // =========================================================================
+    // Message Router (Rust implementation) tests
+    // =========================================================================
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running Rust msg_router tests...\n\0".as_ptr());
+    }
+
+    // Test 12: msg_router_init + subscribe
+    {
+        msg_router::msg_router_init();
+        let ret = msg_router::msg_router_subscribe(b"rust_topic\0".as_ptr(), 0);
+        let passed = ret == 0;
+        print_test_result(b"msg_router_init + subscribe\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 13: subscribe multiple to same topic
+    {
+        msg_router::msg_router_init();
+        let r1 = msg_router::msg_router_subscribe(b"multi\0".as_ptr(), 0);
+        let r2 = msg_router::msg_router_subscribe(b"multi\0".as_ptr(), 1);
+        let r3 = msg_router::msg_router_subscribe(b"multi\0".as_ptr(), 2);
+        let passed = r1 == 0 && r2 == 0 && r3 == 0;
+        print_test_result(b"subscribe 3 to same topic\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 14: subscribe overflow (max 4 per topic)
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"full\0".as_ptr(), 0);
+        msg_router::msg_router_subscribe(b"full\0".as_ptr(), 1);
+        msg_router::msg_router_subscribe(b"full\0".as_ptr(), 2);
+        msg_router::msg_router_subscribe(b"full\0".as_ptr(), 3);
+        let overflow = msg_router::msg_router_subscribe(b"full\0".as_ptr(), 4);
+        let passed = overflow == -1;
+        print_test_result(b"subscribe overflow returns -1\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 15: max topics overflow (8 topics)
+    {
+        msg_router::msg_router_init();
+        for i in 0..8u8 {
+            let mut name = [0u8; 4];
+            name[0] = b't';
+            name[1] = b'0' + i;
+            name[2] = 0;
+            msg_router::msg_router_subscribe(name.as_ptr(), i as i32);
+        }
+        let mut name9 = [0u8; 4];
+        name9[0] = b't';
+        name9[1] = b'9';
+        name9[2] = 0;
+        let overflow = msg_router::msg_router_subscribe(name9.as_ptr(), 8);
+        let passed = overflow == -1;
+        print_test_result(b"topic overflow returns -1\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 16: receive with no message returns NULL
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"empty\0".as_ptr(), 50);
+        let mut topic_buf = [0u8; 16];
+        let data = msg_router::msg_router_receive(50, topic_buf.as_mut_ptr());
+        let passed = data.is_null();
+        print_test_result(b"receive empty returns NULL\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 17: receive for unsubscribed component returns NULL
+    {
+        msg_router::msg_router_init();
+        let data = msg_router::msg_router_receive(99, core::ptr::null_mut());
+        let passed = data.is_null();
+        print_test_result(b"receive unsubscribed returns NULL\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 18: publish to nonexistent topic returns 0
+    {
+        msg_router::msg_router_init();
+        let delivered = msg_router::msg_router_publish(
+            b"nonexistent\0".as_ptr(),
+            b"hello\0".as_ptr(),
+        );
+        let passed = delivered == 0;
+        print_test_result(b"publish nonexistent topic returns 0\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 19: reinit clears subscriptions
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"temp\0".as_ptr(), 0);
+        msg_router::msg_router_init(); // reinit
+        let delivered = msg_router::msg_router_publish(
+            b"temp\0".as_ptr(),
+            b"gone\0".as_ptr(),
+        );
+        let passed = delivered == 0;
+        print_test_result(b"reinit clears subscriptions\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 20: ack with no pending message doesn't crash
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"ack_test\0".as_ptr(), 60);
+        msg_router::msg_router_ack(60); // no message pending
+        let data = msg_router::msg_router_receive(60, core::ptr::null_mut());
+        let passed = data.is_null();
+        print_test_result(b"ack no-pending safe\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 21: list doesn't crash with topics
+    {
+        msg_router::msg_router_init();
+        msg_router::msg_router_subscribe(b"logs\0".as_ptr(), 0);
+        msg_router::msg_router_subscribe(b"events\0".as_ptr(), 1);
+        msg_router::msg_router_list();
+        print_test_result(b"msg_router_list safe\0", true);
     }
 
     // Summary

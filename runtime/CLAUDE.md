@@ -15,6 +15,7 @@ runtime/
     ├── lib.rs           # Entry points (rust_init, rust_hello, etc.)
     ├── kernel_ffi.rs    # FFI declarations and safe wrappers
     ├── log.rs           # Logging infrastructure (via UART FFI)
+    ├── msg_router.rs    # Topic-based pub/sub message router (FFI)
     ├── mm/
     │   ├── mod.rs       # Memory management module
     │   ├── model_mem.rs # Model memory allocator (weight/workspace pools)
@@ -32,6 +33,7 @@ runtime/
 |--------|---------|--------|
 | `kernel_ffi` | FFI bindings to C kernel | Complete |
 | `log` | Logging via UART (log_info, log_error, etc.) | Complete |
+| `msg_router` | Topic-based pub/sub message router | Complete |
 | `mm::model_mem` | 2MB-aligned model memory allocator | Complete |
 | `mm::model_loader` | GGUF/ONNX model loading | Skeleton (Phase 5) |
 | `sched::deadline` | Deadline-aware task scheduling hints | Complete |

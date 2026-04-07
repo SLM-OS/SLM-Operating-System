@@ -113,10 +113,17 @@ kernel-rebuild: kernel-clean kernel
 # Runtime (Rust) targets
 # ============================================================================
 
+# Rust target selection based on platform
+ifeq ($(PLATFORM),X86_64)
+    RUST_TARGET_FLAG := --target x86_64-unknown-none
+else
+    RUST_TARGET_FLAG :=
+endif
+
 .PHONY: runtime
 runtime:
 	@echo "Building runtime..."
-	cd runtime && cargo build $(if $(filter Release,$(BUILD_TYPE)),--release,)
+	cd runtime && cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,)
 
 .PHONY: runtime-clean
 runtime-clean:

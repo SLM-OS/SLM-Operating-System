@@ -112,7 +112,7 @@ Added 20 tests to `test_x86_boot.c`:
 19. `test_component_run_listener` — listener starts and registers successfully
 20. `test_component_run_echo_and_send` — echo service starts, send doesn't crash
 
-All 20 tests pass.
+All 20 C-side tests pass. Plus 10 Rust-native tests in `rust_run_tests()` (30 total).
 
 ### Step 7: Makefile Platform Fixes (Complete)
 
@@ -185,10 +185,28 @@ Three tasks (shell, listener, echo) round-robin on CPU 0 with IDLE priority.
 | `kernel/drivers/uart_x86.c` | Added `yield()` in `uart_getc()` |
 | `kernel/drivers/timer.c` | Added `pit_ticks` for ARM64 cross-platform compat |
 | `kernel/src/semihosting.c` | x86-64: use `isa-debug-exit` |
-| `kernel/tests/test_x86_boot.c` | Added 20 message router + component tests |
+| `kernel/tests/test_x86_boot.c` | 20 C-side message router + component tests |
+| `runtime/src/lib.rs` | 10 Rust-native message router tests in rust_run_tests() |
 | `CMakeLists.txt` | Added `msg_router.c` to build |
 | `Makefile` | Platform-aware toolchain, QEMU, and test execution |
+| `runtime/src/msg_router.rs` | Rust implementation (replaces C version) |
+| `runtime/src/lib.rs` | Added `msg_router` module |
 | `docs/x86-64-port.md` | M7 subsection, feature matrix, test counts |
 | `docs/components.md` | Message router integration, built-in services |
 | `TODO_-_PHASE_4X.md` | Inter-component IPC section |
 | `CLAUDE.md` | x86-64 build commands and platform selection |
+
+## Rust Implementation Notes
+
+The message router was initially implemented in C (`msg_router.c`) and later
+ported to Rust (`runtime/src/msg_router.rs`). The Rust version:
+
+- Exports the same `#[no_mangle] extern "C"` symbols as the C version
+- Uses `core::sync::atomic::AtomicU32` for mailbox ready/ack flags
+- Accesses `pit_ticks` via `core::ptr::read_volatile` (ISR-modified)
+- Calls `yield()` (renamed to `sched_yield` via `#[link_name]` since `yield` is a Rust keyword)
+- Calls `uart_printf` for formatted output and `uart_puts` for simple strings
+- Uses `component_get_info` from the Rust component module for subscriber name lookup
+
+The C `msg_router.c` is kept in the repo but excluded from the build via CMakeLists.txt.
+The Rust staticlib is linked with `--whole-archive`, making all symbols available to C.
