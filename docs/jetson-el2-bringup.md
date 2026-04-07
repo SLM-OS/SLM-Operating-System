@@ -184,7 +184,19 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 - Capped `l2_kernel` at entry 496 (before OP-TEE carveout at 0xBE000000)
 
 ### smp.c
-- Skip secondary CPU boot on Jetson (PSCI CPU_ON after kexec unreliable)
+- 6-core SMP via PSCI CPU_ON with dual-cluster MPIDR table (0x000, 0x100, 0x200, 0x300, 0x10200, 0x10300)
+- Boot flag PSCI success fallback (cache incoherency workaround)
+- NC logical map for cross-CPU `cpu_logical_id()` lookup
+- Hardcoded MPIDR table in `cpu_logical_id()` for Jetson (avoids all cache visibility issues)
+
+### smp_boot.S
+- VHE enable for secondary CPUs (same as primary: E2H=1, TGE=1, RW=1)
+- L1/L2 cache invalidation by set/way after MMU enable (same as Pi 5)
+- TLB invalidation before MMU enable
+
+### gic.c
+- Per-CPU GIC redistributor discovery with Jetson dual-cluster offset table
+- `get_cpu_id()` uses `cpu_logical_id()` for proper MPIDR translation
 
 ### main.c
 - Updated EL info message: "Running at EL2 (VHE)"
@@ -199,6 +211,7 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 4. ~~**GPU access**~~ — **DONE.** GPU at 0x17000000 accessible from EL2. GA10B identified (BOOT_0=0xB7B000A1). GSP firmware loading needed for compute.
 5. **Direct UEFI boot** — WIP. EFI stub (`efi_stub.c`) handles ExitBootServices with VHE-compatible MMU disable. Self-relocating trampoline in boot.S copies image to link address (0x80000000) when UEFI loads elsewhere. PE/COFF header with ImageBase=0x80000000 accepted when preferred address available. **Blocked when UEFI can't use preferred address** — no `.reloc` section for relocation. Alternative SMP paths to investigate: SGI/spin-table wake (bypass PSCI entirely), UEFI Shell `load` command (more permissive PE parsing), or `AllocatePages(AllocateAddress)` to force preferred address.
 6. ~~**Watchdog**~~ — **DONE.** Tegra WDT at 0x02190000 accessible from EL2 and disabled early in `kernel_main()`.
+7. **Cross-CPU task dispatch** — Secondary CPUs boot and reach `scheduler_init_secondary()` but don't see the NC init flag (`NC_FLAG_READ: 0x0`). Same root cause as Pi 5 iterations 1-10. CIVAC + TLB invalidation + L1/L2 set/way invalidation applied but NC writes from CPU 0 still don't reach Jetson secondaries. Pi 5 solved this with its CIVAC breakthrough — Jetson may need different cache topology handling. `bench smp` dispatches tasks but they timeout on CPUs 1-3.
 
 ---
 
