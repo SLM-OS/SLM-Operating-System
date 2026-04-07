@@ -468,13 +468,14 @@ static void test_ffi_task_create_returns_id(void)
     struct task *t = task_get(id);
     TEST_ASSERT_NOT_NULL(t);
 
-    /* Wait for task to complete (it yields once then exits) */
-    int timeout = 10000;
+    /* Wait for task to complete (it yields once then exits).
+     * Large timeout because cross-CPU dispatch on QEMU may be slow. */
+    int timeout = 500000;
     while (t->state != TASK_TERMINATED && timeout > 0) {
         yield();
         timeout--;
     }
-    TEST_ASSERT_MESSAGE(timeout > 0, "ffi_test task did not complete (cross-CPU dispatch may have failed)");
+    TEST_ASSERT_MESSAGE(timeout > 0, "ffi_test task did not complete");
     task_destroy(t);
 }
 

@@ -32,10 +32,38 @@
  *
  * uart_lock is shared across ALL CPUs (printf from any CPU), so it
  * MUST be in NC memory on platforms with incoherent caches. */
-/* UART lock for thread-safe printf. Cacheable BSS — spinlocks require
- * cacheable memory for ldaxr/stxr on BCM2712. Cross-CPU contention
- * works because the exclusive monitor is independent of L2 coherency. */
+/* UART lock for thread-safe printf.
+ *
+ * On real ARM64 hardware (Pi 5), standard ldaxr/stxr spinlocks DON'T
+ * work for cross-CPU contention because ldaxr reads from incoherent L2.
+ * Use __atomic_test_and_set (SWPALB on ARM64) which operates atomically
+ * at the point of coherency. On QEMU and x86, use standard spinlocks. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+static volatile uint8_t uart_atomic_lock;
+
+#define UART_LOCK_IRQSAVE() \
+    irq_flags_t _uart_flags; \
+    do { \
+        __asm__ volatile("mrs %0, daif" : "=r"(_uart_flags)); \
+        __asm__ volatile("msr daifset, #2" ::: "memory"); \
+        while (__atomic_test_and_set(&uart_atomic_lock, __ATOMIC_ACQUIRE)) {} \
+    } while(0)
+
+#define UART_UNLOCK_IRQRESTORE() \
+    do { \
+        __atomic_clear(&uart_atomic_lock, __ATOMIC_RELEASE); \
+        __asm__ volatile("msr daif, %0" :: "r"(_uart_flags) : "memory"); \
+    } while(0)
+#else
 static spinlock_t uart_lock = SPINLOCK_INIT;
+
+#define UART_LOCK_IRQSAVE() \
+    irq_flags_t _uart_flags = spin_lock_irqsave(&uart_lock)
+
+#define UART_UNLOCK_IRQRESTORE() \
+    spin_unlock_irqrestore(&uart_lock, _uart_flags)
+#endif
+
 void kprintf_init_nc_lock(void) {}
 
 /* ========================================================================
@@ -130,9 +158,9 @@ void uart_puts_unlocked(const char *s)
  */
 void uart_puts(const char *s)
 {
-    irq_flags_t flags = spin_lock_irqsave(&uart_lock);
+    UART_LOCK_IRQSAVE();
     uart_puts_unlocked(s);
-    spin_unlock_irqrestore(&uart_lock, flags);
+    UART_UNLOCK_IRQRESTORE();
 }
 
 /* ========================================================================
@@ -460,11 +488,11 @@ int uart_printf(const char *fmt, ...)
     va_list args;
     int count;
 
-    irq_flags_t flags = spin_lock_irqsave(&uart_lock);
+    UART_LOCK_IRQSAVE();
     va_start(args, fmt);
     count = uart_vprintf(fmt, args);
     va_end(args);
-    spin_unlock_irqrestore(&uart_lock, flags);
+    UART_UNLOCK_IRQRESTORE();
 
     return count;
 }
