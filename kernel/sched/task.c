@@ -30,12 +30,9 @@ void task_table_init(void)
 #if defined(PLATFORM_HAS_NC_MEMORY)
     task_table = ncmem_alloc(MAX_TASKS * sizeof(struct task), CACHE_LINE_SIZE);
     if (!task_table) {
-        /* Fall back to cacheable array if NC alloc fails */
         task_table = task_table_fallback;
         return;
     }
-    /* Zero NC task table — slots must start with id==0 (free).
-     * Use volatile to ensure NC writes are not optimized out. */
     volatile uint8_t *p = (volatile uint8_t *)task_table;
     for (size_t i = 0; i < MAX_TASKS * sizeof(struct task); i++)
         p[i] = 0;
