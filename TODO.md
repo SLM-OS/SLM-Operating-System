@@ -147,7 +147,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ GICv3 initialized (distributor 0x0F400000, redistributor 0x0F440000, 992 interrupt lines)
 - ✅ Interrupt delivery working (timer IRQ drives scheduler)
 - ✅ Timer IRQ fires at 100 Hz (confirmed via shell uptime)
-- ☐ Test GIC affinity settings for core isolation (SMP working, needs cross-CPU dispatch)
+- ☐ Test GIC affinity settings for core isolation (cross-CPU dispatch working)
 
 ### Timer
 - ✅ ARM generic timer works on Jetson at EL2
@@ -156,8 +156,8 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 ### Multi-Core
 - ✅ MAX_CPUS=8 in config.h, CPU_MAX=6 in platform.h — 6 cores boot
 - ✅ SMP boot — PSCI CPU_ON via SMC with correct dual-cluster MPIDR encoding
-- ☐ Cross-CPU task dispatch — blocked on NC memory infrastructure (same as Pi 5). All tasks run on CPU 0.
-- ☐ Multi-core stress test — requires cross-CPU dispatch
+- ✅ Cross-CPU task dispatch — all 6 CPUs execute tasks via cooperative scheduling (WFE/SEV). Root cause was UART lock deadlock in task_create DEBUG_PRINT.
+- ☐ Multi-core stress test on real hardware
 
 ### MMU
 - ✅ MMU working with Jetson memory map (3 regions around OP-TEE carveout)

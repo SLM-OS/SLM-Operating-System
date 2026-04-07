@@ -158,6 +158,8 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - Boot flag visibility uses PSCI success fallback (same cache incoherency as Pi 5)
 - VHE set up on all secondary CPUs in `smp_boot.S`
 - NC memory at 0xBDE00000 (2 MB, last block of region 1 before OP-TEE) for cross-CPU shared data
+- Cross-CPU task dispatch working — `bench smp` dispatches to all 6 CPUs via cooperative WFE/SEV
+- DC CVAC/CIVAC cache maintenance active (cache.h), page tables flushed to DRAM before secondary boot
 
 **UEFI direct boot (WIP, not required for SMP):**
 - EFI stub (`efi_stub.c`) with VHE-compatible MMU disable + self-relocating trampoline in `boot.S`

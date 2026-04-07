@@ -3,7 +3,7 @@
 This document records the successful bypass of the Tegra234 CBB firewall by running SLM-OS at EL2 with VHE (Virtual Host Extensions). This unblocked serial output, GIC, timer, and scheduler — enough to boot to an interactive shell.
 
 **Date:** April 2026
-**Status:** ✅ Fully working — 6-core SMP, interactive shell with serial I/O
+**Status:** ✅ Fully working — 6-core SMP with cross-CPU task dispatch, interactive shell with serial I/O
 
 ---
 
@@ -211,7 +211,7 @@ The PMM uses three non-contiguous regions around the carveout via the `pmm_add_r
 4. ~~**GPU access**~~ — **DONE.** GPU at 0x17000000 accessible from EL2. GA10B identified (BOOT_0=0xB7B000A1). GSP firmware loading needed for compute.
 5. **Direct UEFI boot** — WIP. EFI stub (`efi_stub.c`) handles ExitBootServices with VHE-compatible MMU disable. Self-relocating trampoline in boot.S copies image to link address (0x80000000) when UEFI loads elsewhere. PE/COFF header with ImageBase=0x80000000 accepted when preferred address available. **Blocked when UEFI can't use preferred address** — no `.reloc` section for relocation. Alternative SMP paths to investigate: SGI/spin-table wake (bypass PSCI entirely), UEFI Shell `load` command (more permissive PE parsing), or `AllocatePages(AllocateAddress)` to force preferred address.
 6. ~~**Watchdog**~~ — **DONE.** Tegra WDT at 0x02190000 accessible from EL2 and disabled early in `kernel_main()`.
-7. **Cross-CPU task dispatch** — NC visibility confirmed working (secondaries see NC flag, exit polling loop, reach `scheduler_init_secondary()` with boot_flag=0x33). Actual blocker: `task_create()` hangs on secondary CPUs (boot_flag never reaches 0x44). Likely cause: spinlock contention in the task subsystem (`task_lock`) or PMM allocator during concurrent `task_create` calls. `bench smp` dispatches tasks to CPUs 1-5 but they timeout. Cache maintenance (DC CVAC/CIVAC) now active on Jetson (cache.h fix).
+7. ~~**Cross-CPU task dispatch**~~ — **FIXED.** Root cause was UART lock deadlock: `DEBUG_PRINT` in `task_create()` acquired `uart_lock` while 5 secondary CPUs + CPU 0 all contended for it during boot. Fix: skip `DEBUG_PRINT` on secondary CPUs. `bench smp` dispatches tasks to all 6 CPUs (5/5 COMPLETED on second run, first run may timeout CPU 1 due to idle task creation race). Cache maintenance (DC CVAC/CIVAC) now active on Jetson. Page tables flushed to DRAM before secondary boot.
 
 ---
 
