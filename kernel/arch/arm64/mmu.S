@@ -78,9 +78,12 @@ mmu_enable:
     isb
 
     /*
-     * Barrier before enabling MMU.
-     * Ensures all table writes and register updates are visible.
+     * Invalidate TLB after loading new page tables.
+     * If the MMU was already enabled (boot.S → vmm_init transition),
+     * old TLB entries for L1[3] = 1GB cacheable block persist.
+     * Without this, the NC region at 0xFFE00000 is accessed as cacheable.
      */
+    tlbi    vmalle1
     dsb     ish
     isb
 

@@ -296,9 +296,11 @@ void scheduler_init(void)
      * Secondary CPUs poll the NC flag instead. */
     nc_sched_initialized = 1;
     __asm__ volatile("dsb sy" ::: "memory");
-    DEBUG_PRINT("NC sched init flag set at 0x%lx, value=%u",
-                (unsigned long)(NC_MEM_BASE + NC_MEM_SIZE - 64),
-                (unsigned int)nc_sched_initialized);
+    {
+        uint32_t rb = nc_sched_initialized;
+        INFO("NC sched flag: wrote 1, readback=%u (addr=0x%lx)",
+             rb, (unsigned long)(NC_MEM_BASE + NC_MEM_SIZE - 64));
+    }
 #endif
 
     /* Wake any secondary CPUs waiting for scheduler init */
