@@ -990,6 +990,35 @@ void vmm_init(void)
     /* Platform-specific page table setup */
     vmm_setup_platform();
 
+    /*
+     * Flush page tables to DRAM before MMU enable.
+     * On real hardware (Pi 5, Jetson), secondary CPUs' page table walkers
+     * read from DRAM, not from CPU 0's L1/L2 cache. Without this flush,
+     * secondary CPUs read stale L2 entries (0 = unmapped), making the NC
+     * region invisible. Uses raw DC CVAC since cache.h wrappers may not
+     * be initialized yet (MMU is still off). */
+    {
+        const char *p = (const char *)l1_table;
+        const char *end = p + sizeof(l1_table);
+        for (; p < end; p += 64)
+            __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
+    }
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    {
+        const char *p = (const char *)l2_kernel;
+        const char *end = p + ENTRIES_PER_TABLE * sizeof(uint64_t);
+        for (; p < end; p += 64)
+            __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
+    }
+    {
+        const char *p = (const char *)l2_ram_c0;
+        const char *end = p + ENTRIES_PER_TABLE * sizeof(uint64_t);
+        for (; p < end; p += 64)
+            __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
+    }
+#endif
+    __asm__ volatile("dsb sy" ::: "memory");
+
     DEBUG_PRINT("  L1 table at PA: 0x%lx", (uint64_t)l1_table);
     DEBUG_PRINT("  TTBR0 = TTBR1 = 0x%lx (shared L1 table)", (uint64_t)l1_table);
     DEBUG_PRINT("  L2 tables used: %u", vmm_state.l2_tables_used);

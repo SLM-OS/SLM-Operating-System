@@ -28,7 +28,7 @@
  * On Cortex-A76, this register is encoded as S3_0_C15_C1_4.
  * Returns true if the current core has cache coherency enabled.
  */
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
 #include <stdbool.h>
 static inline bool cpu_has_smpen(void)
 {
@@ -44,7 +44,7 @@ static inline bool cpu_has_smpen(void) { return true; }
  * Pi 5: explicit cache maintenance needed (SMPEN not set by TF-A).
  * Other platforms: coherency works, these are just barriers.
  */
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
 
 /* Clean cacheline containing addr to Point of Coherency */
 static inline void cache_clean(const volatile void *addr)
@@ -123,7 +123,7 @@ static inline void cache_invalidate_range(const volatile void *addr, size_t size
     __asm__ volatile("" ::: "memory");
 }
 
-#else /* ARM64 — coherency works (QEMU, Jetson) */
+#else /* ARM64 — coherency works (QEMU) */
 
 static inline void cache_clean(const volatile void *addr)
 {
