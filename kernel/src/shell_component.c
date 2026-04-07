@@ -14,6 +14,7 @@
 /* Component runtime (component_runtime.c) */
 extern int component_run(const char *name);
 extern int component_send_echo(const char *message);
+extern int component_hot_swap(const char *old_name, const char *new_name);
 extern void component_list_builtins(void);
 
 /* Message router (msg_router.c) */
@@ -29,10 +30,11 @@ int cmd_component(int argc, char *argv[])
     if (argc < 2) {
         /* Show help */
         uart_puts("Component System Commands:\r\n");
-        uart_puts("  component list       - List registered components\r\n");
-        uart_puts("  component builtins   - List available built-in components\r\n");
-        uart_puts("  component run <name> - Run a built-in component\r\n");
-        uart_puts("  component send <msg> - Send message to echo service\r\n");
+        uart_puts("  component list            - List registered components\r\n");
+        uart_puts("  component builtins        - List available built-in components\r\n");
+        uart_puts("  component run <name>      - Run a built-in component\r\n");
+        uart_puts("  component swap <old> <new> - Hot-swap: replace old with new\r\n");
+        uart_puts("  component send <msg>      - Send message to echo service\r\n");
         uart_puts("  component register <name> <version> <type> [priority]\r\n");
         uart_puts("  component unregister <idx>\r\n");
         uart_puts("  component status <name|idx>\r\n");
@@ -86,6 +88,16 @@ int cmd_component(int argc, char *argv[])
             return -1;
         }
         int idx = component_run(argv[2]);
+        return (idx >= 0) ? 0 : -1;
+    }
+
+    /* component swap <old_name> <new_name> */
+    if (strcmp(subcmd, "swap") == 0) {
+        if (argc < 4) {
+            uart_puts("Usage: component swap <old_name> <new_name>\r\n");
+            return -1;
+        }
+        int idx = component_hot_swap(argv[2], argv[3]);
         return (idx >= 0) ? 0 : -1;
     }
 

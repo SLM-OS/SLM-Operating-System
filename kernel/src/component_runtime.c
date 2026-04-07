@@ -33,12 +33,20 @@ struct component_task_ctx {
     int component_idx;
 };
 
+extern void msg_router_unsubscribe_all(int component_idx);
+
 static void component_task_cleanup(void *arg)
 {
     struct component_task_ctx *ctx = (struct component_task_ctx *)arg;
     if (ctx) {
-        component_set_state((uint32_t)ctx->component_idx, COMPONENT_UNLOADED);
-        DEBUG_PRINT("Component %d task exited → Unloaded", ctx->component_idx);
+        /* Only clean up if this component still owns the slot (not hot-swapped) */
+        component_info_t info;
+        if (component_get_info((uint32_t)ctx->component_idx, &info) == 0 &&
+            (info.state == COMPONENT_TERMINATING || info.state == COMPONENT_RUNNING)) {
+            msg_router_unsubscribe_all(ctx->component_idx);
+            component_set_state((uint32_t)ctx->component_idx, COMPONENT_UNLOADED);
+        }
+        DEBUG_PRINT("Component %d task exited", ctx->component_idx);
     }
 }
 
@@ -351,6 +359,58 @@ int component_send_echo(const char *message)
 
     uart_printf("Echo service did not acknowledge (5s timeout)\n");
     return -1;
+}
+
+/*
+ * Hot-swap a running component: unload old, load new, preserve subscriptions.
+ * Returns the new component index on success, -1 on failure.
+ */
+extern void msg_router_get_subscriptions(
+    int component_idx, char topic_names[][16], int *count_out, int max_topics);
+extern int msg_router_subscribe(const char *topic_name, int component_idx);
+
+int component_hot_swap(const char *old_name, const char *new_name)
+{
+    /* Find old component */
+    int old_idx = component_find(old_name);
+    if (old_idx < 0) {
+        uart_printf("Hot-swap: component '%s' not found\n", old_name);
+        return -1;
+    }
+
+    component_info_t info;
+    if (component_get_info((uint32_t)old_idx, &info) != 0) {
+        uart_printf("Hot-swap: cannot get info for component %d\n", old_idx);
+        return -1;
+    }
+
+    /* Save subscriptions before cleanup */
+    char saved_topics[8][16];
+    int saved_count = 0;
+    msg_router_get_subscriptions(old_idx, saved_topics, &saved_count, 8);
+
+    /* Mark as updating — prevents cleanup callback from acting */
+    component_set_state((uint32_t)old_idx, COMPONENT_UPDATING);
+
+    /* Remove old subscriptions and unregister */
+    msg_router_unsubscribe_all(old_idx);
+    component_unregister((uint32_t)old_idx);
+
+    /* Run new component */
+    int new_idx = component_run(new_name);
+    if (new_idx < 0) {
+        uart_printf("Hot-swap: failed to start '%s'\n", new_name);
+        return -1;
+    }
+
+    /* Re-subscribe new component to saved topics */
+    for (int i = 0; i < saved_count; i++) {
+        msg_router_subscribe(saved_topics[i], new_idx);
+    }
+
+    uart_printf("Hot-swap: '%s' (idx %d) -> '%s' (idx %d), %d subscription(s) transferred\n",
+                old_name, old_idx, new_name, new_idx, saved_count);
+    return new_idx;
 }
 
 /*

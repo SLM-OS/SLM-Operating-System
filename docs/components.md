@@ -6,9 +6,9 @@ This document describes the SLM-OS component system for modular, hot-swappable f
 
 Components are self-contained units of functionality that can be:
 - Registered and unregistered at runtime
-- Hot-swapped without system restart (Phase 5+)
+- Hot-swapped without system restart (stateless swap with subscription preservation)
 - Isolated from each other (within kernel-space limits)
-- Interconnected via message passing (Phase 5+)
+- Interconnected via topic-based message passing (pub/sub)
 
 ## Current Implementation (Phase 4)
 
@@ -29,7 +29,7 @@ Phase 4 implements the component registry and lifecycle management foundation:
 | State transitions | ✅ | Any valid transition |
 | Component lookup (by name) | ✅ | O(n) scan |
 | Thread-safe registry | ✅ | Spinlock protected |
-| Shell commands | ✅ | list, register, unregister, status |
+| Shell commands | ✅ | list, builtins, run, swap, send, register, unregister, status |
 | Built-in services | ✅ | counter, echo, listener |
 | Message router (pub/sub) | ✅ | Topic-based, yield-based delivery |
 | Echo IPC (shared mailbox) | ✅ | Atomic ready/ack, round-robin scheduling |
@@ -48,13 +48,31 @@ The message router (`runtime/src/msg_router.rs`) provides topic-based publish/su
 
 Shell commands: `msg send <topic> <data>`, `msg list`, `msg subscribe <topic> <idx>`
 
+### Hot-Swap
+
+The `component_hot_swap(old_name, new_name)` function replaces a running component with a new instance while preserving all topic subscriptions. The process:
+
+1. Saves the old component's topic subscriptions via `msg_router_get_subscriptions()`
+2. Sets the old component state to `COMPONENT_UPDATING`
+3. Removes old subscriptions and unregisters the old component
+4. Runs the new component via `component_run()`
+5. Re-subscribes the new component to all saved topics
+
+Shell command: `component swap <old_name> <new_name>`
+
+**Limitations:** This is a stateless swap — no internal state is transferred between old and new versions. State transfer is deferred to Phase 5+.
+
+### Subscription Cleanup
+
+When a component's task exits, `component_task_cleanup()` automatically calls `msg_router_unsubscribe_all()` to remove all of the component's topic subscriptions. Empty topics (no remaining subscribers) are reclaimed. This prevents orphaned subscriptions from accumulating after component unloads.
+
 ### Deferred to Phase 5+
 
 | Feature | Reason |
 |---------|--------|
 | ELF loading from manifest | Requires component binary format |
 | Dependency resolution | Requires manifest dependencies |
-| Hot-swap with state transfer | Complex, needs explicit API |
+| Hot-swap with state transfer | Stateless swap works; stateful transfer needs explicit API |
 | Component isolation | Requires user space separation |
 
 ## Component Manifest Format
@@ -175,6 +193,11 @@ uint32_t component_count(void);
 /* State management */
 int component_set_state(uint32_t index, uint8_t state);
 
+/* Runtime operations */
+int component_run(const char *name);
+int component_hot_swap(const char *old_name, const char *new_name);
+int component_send_echo(const char *message);
+
 /* Helper functions */
 const char *component_state_name(uint8_t state);
 const char *component_type_name(uint8_t type);
@@ -226,32 +249,43 @@ The component system is implemented in Rust (`runtime/src/component/`):
 
 ```
 component list                              # List all registered components
+component builtins                          # List available built-in components
+component run <name>                        # Run a built-in component as a task
+component swap <old> <new>                  # Hot-swap: replace old with new
+component send <msg>                        # Send message to echo service
 component register <name> <version> <type>  # Register a new component
 component unregister <index>                # Unregister by slot index
-component status <index>                    # Show component details
+component status <name|index>               # Show component details
+
+msg send <topic> <data>                     # Publish message to a topic
+msg list                                    # List topics and subscribers
+msg subscribe <topic> <idx>                 # Subscribe component to topic
 ```
 
 ### Examples
 
 ```
-slmos> component register my-service 1.0.0 service
-Registered component at slot 0
+slmos> component builtins
+Built-in Components (3 available):
+  counter      1.0      service     Counts to 10 with 500ms intervals
+  echo         1.0      service     Echoes IPC messages back to sender
+  listener     1.0      service     Listens on 'events' topic via message router
+
+slmos> component run listener
+Component 'listener' v1.0 started (idx=0, task=7)
+[listener] Started (component 0), subscribed to 'events'
+
+slmos> msg send events Hello from shell!
+[listener] [events] "Hello from shell!" (msg #1)
+Message delivered to 1 subscriber(s)
+
+slmos> component swap listener listener
+Hot-swap: 'listener' (idx 0) -> 'listener' (idx 1), 1 subscription(s) transferred
 
 slmos> component list
-Components (1):
-  [0] my-service v1.0.0 (service) - loaded
-
-slmos> component status 0
-Component [0]:
-  Name:     my-service
-  Version:  1.0.0
-  Type:     service
-  Priority: normal
-  State:    loaded
-  Task ID:  0
-
-slmos> component unregister 0
-Unregistered component 0
+Registered Components: 1
+  Idx  Name                 Version   Type        State       Pri
+    1  listener             1.0       service     running     idle
 ```
 
 ## Example Component
@@ -336,4 +370,4 @@ The `/components/` directory is mounted in the VFS:
 ---
 
 *Created: December 2025*
-*Updated: December 2025 — Phase 4 implementation complete*
+*Updated: April 2026 — Hot-swap, subscription cleanup, message routing complete*

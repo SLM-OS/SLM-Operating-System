@@ -1655,6 +1655,223 @@ static void test_component_run_echo_and_send(void)
 }
 
 /* ============================================================================
+ * Message Router: Unsubscribe + Get Subscriptions Tests
+ * ============================================================================ */
+
+static void test_msg_router_unsubscribe_all_clears(void)
+{
+    extern void msg_router_init(void);
+    extern int msg_router_subscribe(const char *topic_name, int component_idx);
+    extern void msg_router_unsubscribe_all(int component_idx);
+    extern int msg_router_publish(const char *topic_name, const char *data);
+
+    msg_router_init();
+    msg_router_subscribe("unsub_test", 70);
+    msg_router_unsubscribe_all(70);
+    /* Topic should be reclaimed — publish should return 0 */
+    int delivered = msg_router_publish("unsub_test", "hello");
+    TEST_ASSERT_EQUAL_INT(0, delivered);
+}
+
+static void test_msg_router_unsubscribe_partial(void)
+{
+    extern void msg_router_init(void);
+    extern int msg_router_subscribe(const char *topic_name, int component_idx);
+    extern void msg_router_unsubscribe_all(int component_idx);
+    extern const char *msg_router_receive(int component_idx, char *topic_out);
+
+    msg_router_init();
+    msg_router_subscribe("partial", 80);
+    msg_router_subscribe("partial", 81);
+    msg_router_unsubscribe_all(80);
+    /* Component 81 should still be subscribed — receive returns NULL (no message) */
+    const char *data = msg_router_receive(81, NULL);
+    TEST_ASSERT_NULL(data);
+    /* But component 80 should also return NULL (unsubscribed) */
+    data = msg_router_receive(80, NULL);
+    TEST_ASSERT_NULL(data);
+}
+
+static void test_msg_router_get_subscriptions(void)
+{
+    extern void msg_router_init(void);
+    extern int msg_router_subscribe(const char *topic_name, int component_idx);
+    extern void msg_router_get_subscriptions(
+        int component_idx, char topic_names[][16], int *count_out, int max_topics);
+
+    msg_router_init();
+    msg_router_subscribe("sub_a", 90);
+    msg_router_subscribe("sub_b", 90);
+    char topics[8][16];
+    int count = 0;
+    msg_router_get_subscriptions(90, topics, &count, 8);
+    TEST_ASSERT_EQUAL_INT(2, count);
+}
+
+/* ============================================================================
+ * Hot-Swap Tests
+ * ============================================================================ */
+
+static void test_component_hot_swap_basic(void)
+{
+    extern int component_run(const char *name);
+    extern int component_hot_swap(const char *old_name, const char *new_name);
+    extern void sleep_ms(uint32_t ms);
+
+    /* Run listener, then hot-swap it with a new listener */
+    int idx1 = component_run("listener");
+    TEST_ASSERT_TRUE(idx1 >= 0);
+    sleep_ms(100);
+
+    int idx2 = component_hot_swap("listener", "listener");
+    TEST_ASSERT_TRUE(idx2 >= 0);
+
+    /* New component should be registered */
+    component_info_t info;
+    int ret = component_get_info((uint32_t)idx2, &info);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_component_hot_swap_preserves_subscriptions(void)
+{
+    extern int component_run(const char *name);
+    extern int component_hot_swap(const char *old_name, const char *new_name);
+    extern void msg_router_init(void);
+    extern int msg_router_subscribe(const char *topic_name, int component_idx);
+    extern void msg_router_get_subscriptions(
+        int component_idx, char topic_names[][16], int *count_out, int max_topics);
+    extern void sleep_ms(uint32_t ms);
+
+    msg_router_init();
+
+    /* Run counter (doesn't self-subscribe) so we control subscriptions */
+    int idx1 = component_run("counter");
+    TEST_ASSERT_TRUE(idx1 >= 0);
+    sleep_ms(100);
+
+    /* Manually subscribe to two topics */
+    msg_router_subscribe("topicX", idx1);
+    msg_router_subscribe("topicY", idx1);
+
+    /* Verify subscriptions */
+    char topics[8][16];
+    int count = 0;
+    msg_router_get_subscriptions(idx1, topics, &count, 8);
+    TEST_ASSERT_EQUAL_INT(2, count);
+
+    /* Hot-swap counter with counter */
+    int idx2 = component_hot_swap("counter", "counter");
+    TEST_ASSERT_TRUE(idx2 >= 0);
+
+    /* New component should have the 2 subscriptions */
+    count = 0;
+    msg_router_get_subscriptions(idx2, topics, &count, 8);
+    TEST_ASSERT_EQUAL_INT(2, count);
+}
+
+static void test_component_hot_swap_not_found(void)
+{
+    extern int component_hot_swap(const char *old_name, const char *new_name);
+    int idx = component_hot_swap("nonexistent", "counter");
+    TEST_ASSERT_EQUAL_INT(-1, idx);
+}
+
+static void test_component_hot_swap_invalid_new_name(void)
+{
+    extern int component_run(const char *name);
+    extern int component_hot_swap(const char *old_name, const char *new_name);
+    extern void sleep_ms(uint32_t ms);
+
+    /* Run counter, then try to swap with a nonexistent component */
+    int idx1 = component_run("counter");
+    TEST_ASSERT_TRUE(idx1 >= 0);
+    sleep_ms(100);
+
+    int idx2 = component_hot_swap("counter", "bogus_component");
+    TEST_ASSERT_EQUAL_INT(-1, idx2);
+}
+
+/* ============================================================================
+ * Unsubscribe / Get Subscriptions Edge Cases
+ * ============================================================================ */
+
+static void test_msg_router_unsubscribe_all_multi_topic(void)
+{
+    extern void msg_router_init(void);
+    extern int msg_router_subscribe(const char *topic_name, int component_idx);
+    extern void msg_router_unsubscribe_all(int component_idx);
+    extern void msg_router_get_subscriptions(
+        int component_idx, char topic_names[][16], int *count_out, int max_topics);
+
+    msg_router_init();
+    msg_router_subscribe("t1", 95);
+    msg_router_subscribe("t2", 95);
+    msg_router_subscribe("t3", 95);
+    msg_router_unsubscribe_all(95);
+
+    char topics[8][16];
+    int count = -1;
+    msg_router_get_subscriptions(95, topics, &count, 8);
+    TEST_ASSERT_EQUAL_INT(0, count);
+}
+
+static void test_msg_router_unsubscribe_all_noop(void)
+{
+    extern void msg_router_init(void);
+    extern int msg_router_subscribe(const char *topic_name, int component_idx);
+    extern void msg_router_unsubscribe_all(int component_idx);
+    extern void msg_router_get_subscriptions(
+        int component_idx, char topic_names[][16], int *count_out, int max_topics);
+
+    msg_router_init();
+    msg_router_subscribe("keep", 96);
+    /* Unsubscribe a component that has no subscriptions */
+    msg_router_unsubscribe_all(999);
+    /* Component 96 should be unaffected */
+    char topics[8][16];
+    int count = 0;
+    msg_router_get_subscriptions(96, topics, &count, 8);
+    TEST_ASSERT_EQUAL_INT(1, count);
+}
+
+static void test_msg_router_get_subscriptions_zero(void)
+{
+    extern void msg_router_init(void);
+    extern void msg_router_get_subscriptions(
+        int component_idx, char topic_names[][16], int *count_out, int max_topics);
+
+    msg_router_init();
+    char topics[8][16];
+    int count = -1;
+    msg_router_get_subscriptions(97, topics, &count, 8);
+    TEST_ASSERT_EQUAL_INT(0, count);
+}
+
+static void test_msg_router_get_subscriptions_max_zero(void)
+{
+    extern void msg_router_init(void);
+    extern int msg_router_subscribe(const char *topic_name, int component_idx);
+    extern void msg_router_get_subscriptions(
+        int component_idx, char topic_names[][16], int *count_out, int max_topics);
+
+    msg_router_init();
+    msg_router_subscribe("capped", 98);
+    char topics[8][16];
+    int count = 0;
+    /* max_topics=0: should still report count but not write topic names */
+    msg_router_get_subscriptions(98, topics, &count, 0);
+    TEST_ASSERT_EQUAL_INT(1, count);
+}
+
+static void test_component_swap_shell_command_registered(void)
+{
+    extern int shell_execute(const char *cmdline);
+    /* "component swap" with missing args should return error but not crash */
+    int result = shell_execute("component swap");
+    TEST_ASSERT_TRUE(result < 0);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1804,10 +2021,28 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_msg_router_shell_subscribe_command);
     RUN_TEST(test_msg_router_shell_send_no_topic);
     RUN_TEST(test_msg_router_shell_command_registered);
+    RUN_TEST(test_msg_router_unsubscribe_all_clears);
+    RUN_TEST(test_msg_router_unsubscribe_partial);
+    RUN_TEST(test_msg_router_get_subscriptions);
 
     /* Component service tests */
     RUN_TEST(test_component_run_listener);
     RUN_TEST(test_component_run_echo_and_send);
+
+    /* Hot-swap tests */
+    RUN_TEST(test_component_hot_swap_not_found);
+    RUN_TEST(test_component_hot_swap_invalid_new_name);
+    RUN_TEST(test_component_hot_swap_basic);
+    RUN_TEST(test_component_hot_swap_preserves_subscriptions);
+
+    /* Unsubscribe / get_subscriptions edge cases */
+    RUN_TEST(test_msg_router_unsubscribe_all_multi_topic);
+    RUN_TEST(test_msg_router_unsubscribe_all_noop);
+    RUN_TEST(test_msg_router_get_subscriptions_zero);
+    RUN_TEST(test_msg_router_get_subscriptions_max_zero);
+
+    /* Shell command registration */
+    RUN_TEST(test_component_swap_shell_command_registered);
 
     return UnityEnd();
 }

@@ -368,6 +368,64 @@ pub extern "C" fn msg_router_ack(component_idx: i32) {
     }
 }
 
+/// Remove all subscriptions for a component. Reclaims topics with no remaining
+/// subscribers. Called during component unload to prevent orphaned subscriptions.
+#[no_mangle]
+pub extern "C" fn msg_router_unsubscribe_all(component_idx: i32) {
+    unsafe {
+        for i in 0..MAX_TOPICS {
+            if !TOPICS[i].is_active() {
+                continue;
+            }
+            for j in 0..MAX_SUBSCRIBERS {
+                if TOPICS[i].subs[j].component_idx == component_idx {
+                    TOPICS[i].subs[j].clear();
+                    TOPICS[i].sub_count -= 1;
+                }
+            }
+            // Reclaim topic if no subscribers remain
+            if TOPICS[i].sub_count <= 0 {
+                TOPICS[i].clear();
+                TOPIC_COUNT -= 1;
+            }
+        }
+    }
+}
+
+/// Get the list of topics a component is subscribed to.
+/// Writes topic names into `topic_names` (array of TOPIC_NAME_LEN buffers)
+/// and sets `count_out` to the number found. At most `max_topics` entries.
+#[no_mangle]
+pub extern "C" fn msg_router_get_subscriptions(
+    component_idx: i32,
+    topic_names: *mut [u8; TOPIC_NAME_LEN],
+    count_out: *mut i32,
+    max_topics: i32,
+) {
+    if topic_names.is_null() || count_out.is_null() {
+        return;
+    }
+    unsafe {
+        let mut count = 0i32;
+        for i in 0..MAX_TOPICS {
+            if !TOPICS[i].is_active() {
+                continue;
+            }
+            for j in 0..MAX_SUBSCRIBERS {
+                if TOPICS[i].subs[j].component_idx == component_idx {
+                    if count < max_topics {
+                        let dst = &mut *topic_names.add(count as usize);
+                        *dst = TOPICS[i].name;
+                    }
+                    count += 1;
+                    break; // Only count each topic once per component
+                }
+            }
+        }
+        *count_out = count;
+    }
+}
+
 /// List all topics and their subscribers.
 #[no_mangle]
 pub extern "C" fn msg_router_list() {

@@ -154,6 +154,32 @@ int component_get_info(uint32_t index, component_info_t *info);
 int component_find(const char *name);
 
 // =============================================================================
+// Runtime Operations
+// =============================================================================
+
+/**
+ * Run a built-in component by name.
+ *
+ * Registers it in the component system, creates a task, and links them.
+ *
+ * @param name Built-in component name (e.g., "counter", "echo", "listener")
+ * @return Component index on success, -1 on error
+ */
+int component_run(const char *name);
+
+/**
+ * Hot-swap a running component with a new version.
+ *
+ * Saves the old component's topic subscriptions, unregisters the old
+ * component, runs the new one, and re-subscribes to the saved topics.
+ *
+ * @param old_name Name of the component to replace
+ * @param new_name Name of the replacement component (built-in)
+ * @return New component index on success, -1 on error
+ */
+int component_hot_swap(const char *old_name, const char *new_name);
+
+// =============================================================================
 // State Management
 // =============================================================================
 

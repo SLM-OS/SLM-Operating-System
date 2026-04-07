@@ -288,15 +288,12 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ✅ Component registration from shell
 - ⏸️ Automatic component discovery — Phase 5+
 
-### Hot-Swap Mechanism
-- ⏸️ Design state transfer protocol between old and new component versions — Phase 5+
-- ⏸️ Implement `component_hot_swap(old_name, new_component)` — Phase 5+
-- ⏸️ Pause old component — Phase 5+
-- ⏸️ Transfer state from old to new — Phase 5+
-- ⏸️ Update message routing — Phase 5+
-- ⏸️ Start new component — Phase 5+
-- ⏸️ Cleanup old component — Phase 5+
-- ⏸️ Test hot-swap with simple component — Phase 5+
+### Hot-Swap Mechanism (April 2026)
+- ✅ Implement `component_hot_swap(old_name, new_name)` — stateless swap with subscription preservation
+- ✅ Save topic subscriptions → unregister old → run new → re-subscribe
+- ✅ Shell command: `component swap <old> <new>`
+- ✅ Tests: hot-swap basic, subscription preservation, not-found, invalid new name
+- ⏸️ Design state transfer protocol between old and new versions — Phase 5+
 
 ### Shell Commands
 - ✅ `component list` — list loaded components
@@ -305,6 +302,7 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ✅ `component status` — show component details
 - ✅ `component builtins` — list available built-in components
 - ✅ `component run <name>` — run a built-in component as a kernel task
+- ✅ `component swap <old> <new>` — hot-swap: replace old with new, preserve subscriptions
 - ✅ `component send <msg>` — send IPC message to echo service
 
 ### Component Runtime (April 2026)
@@ -320,68 +318,71 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 
 **Depends on:** M6 (Component System)
 
-**Status:** ✅ Complete — MessageRouter implemented in both C and Rust with topic-based pub/sub. See `docs/m7-message-router.md`.
-
-### Message Router
-- ✅ `MessageRouter` in Rust (`runtime/src/msg_router.rs`) with 10 native tests
-- ✅ C implementation (`kernel/src/msg_router.c`) with shell integration
-- ✅ Topic-based publish/subscribe
-- ✅ Direct component-to-component messaging
-- ✅ Message queue per component
-
-### Routing Table
-- ✅ Build routing table from subscriptions
-- ✅ Update routing table on subscribe/unsubscribe
-- ✅ Wildcard topic matching
+### Message Router (April 2026)
+- ✅ Implement `MessageRouter` in Rust (`runtime/src/msg_router.rs`, 470+ lines)
+- ✅ Topic-based publish/subscribe (8 topics, 4 subscribers each, atomic mailboxes)
+- ✅ Subscription cleanup on component unload (`msg_router_unsubscribe_all`)
+- ✅ Subscription query for hot-swap (`msg_router_get_subscriptions`)
+- ⏸️ Direct component-to-component messaging — Phase 5 (topic broadcast sufficient)
+- ⏸️ Build routing table from component manifests — Phase 5
+- ⏸️ Wildcard subscriptions — Phase 5
 
 ### Integration with IPC
-- ✅ Routes messages through kernel IPC primitives
-- ☐ Zero-copy for large messages (use shared buffers) — Phase 5+
-- ✅ Message priority support
+- ⏸️ Route messages through kernel IPC priority queues — Phase 5
+- ⏸️ Zero-copy for large messages (use shared buffers) — Phase 5
+- ⏸️ Message priority support in router — Phase 5
 
-### Testing
-- ✅ Shell commands: `component msg`, `component sub`, `component pub`
-- ✅ Rust-native tests (10 tests in msg_router.rs)
-- ☐ Test routing table update on hot-swap — Phase 5+
+### Testing (April 2026)
+- ✅ Test message routing between components (listener + msg send)
+- ✅ Test pub/sub with multiple subscribers
+- ✅ Test subscription cleanup on component unload (Rust + C tests)
+- ✅ Test subscription query (`get_subscriptions` returns correct topics)
+- ✅ Test routing table update on hot-swap (subscriptions preserved)
 
 ---
 
 ## Milestone 8: Component Isolation (Stretch)
 
-**Note:** Full isolation requires user/kernel separation. This milestone implements what's possible in kernel space.
+**Assessment (April 2026):** Full isolation requires user/kernel mode separation (EL0/EL1 on ARM64, Ring 3/0 on x86-64), which is a Phase 5 feature. All components currently run in kernel space. Below is what Phase 4 provides vs what is deferred.
 
-### Memory Isolation
-- ☐ Separate heap regions per component
-- ☐ Prevent components from accessing each other's memory
-- ☐ Shared memory only via explicit shared buffers
+### What Phase 4 Provides
+- ✅ Component lifecycle states prevent invalid operations on unloaded components
+- ✅ Subscription cleanup prevents resource leaks when components exit
+- ✅ Task cleanup callbacks free component resources on task exit
+- ✅ Error reporting via panic handler (file:line:column) and component state tracking
 
-### Resource Limits
-- ☐ Memory limit per component
-- ☐ CPU time accounting per component
+### Memory Isolation — Deferred to Phase 5
+- ⏸️ Separate heap regions per component — requires per-component page tables
+- ⏸️ Prevent components from accessing each other's memory — requires MMU enforcement
+- ⏸️ Shared memory only via explicit shared buffers — requires capability system
+
+### Resource Limits — Deferred to Phase 5
+- ⏸️ Memory limit per component — `memory_kb` field exists in `component_info_t` but unenforced
+- ⏸️ CPU time accounting per component — requires per-task timer instrumentation
 - ⏸️ CPU time limit enforcement — requires preemption improvements
 
-### Fault Isolation
-- ☐ Component crash doesn't crash kernel
-- ☐ Automatic component restart on failure
-- ☐ Error reporting to system log
+### Fault Isolation — Deferred to Phase 5
+- ⏸️ Component crash doesn't crash kernel — requires exception-based containment
+- ⏸️ Automatic component restart on failure — requires supervisor task
+- ⏸️ Error reporting to structured system log — Phase 5 (basic UART logging available)
 
 ---
 
 ## Milestone 9: Deferred Polish Items
 
-### Rust Runtime
-- ☐ Format `PanicInfo` into buffer for detailed panic messages
-- ☐ Improve Rust logging with timestamps
+### Rust Runtime (April 2026)
+- ✅ Format `PanicInfo` into buffer — panic handler now prints file:line:column
+- ✅ Improve Rust logging with timestamps — `[secs.cs]` prefix on all log messages
 
 ### Scheduler
 - ⏸️ Lock-free task stealing between queues — profile first to confirm need
-- ☐ Big.LITTLE core assignment (`assign_to_performance_core()`, `assign_to_efficiency_core()`)
+- ✅ Big.LITTLE core assignment — `runtime/src/sched/heterogeneous.rs` (546 lines)
 
 ### Documentation
-- ☐ Update architecture doc with Phase 4 learnings
-- ☐ Document component system API
-- ☐ Document Jetson-specific setup and configuration
-- ☐ Create component development tutorial
+- ✅ Update architecture doc with Phase 4 learnings (`docs/architecture.md`)
+- ✅ Document component system API (`docs/components.md`)
+- ✅ Document Jetson-specific setup (`docs/jetson-boot.md`, `docs/jetson-el2-bringup.md`)
+- ⏸️ Create component development tutorial — Phase 5
 
 ---
 
@@ -394,16 +395,16 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ✅ GPU initialized (probe), memory allocation working (nvidia_alloc/free + cache coherency)
 - ✅ Performance benchmarks documented — see `docs/performance.md`
 - ✅ At least one example component loading and running — counter service verified on i7-6700
-- ⏸️ Hot-swap demonstrated (same component, new version) — Phase 5+
-- ✅ Message routing between components — M7 MessageRouter complete (C + Rust)
+- ✅ Hot-swap demonstrated — `component swap` preserves subscriptions (April 2026)
+- ✅ Message routing between components working — topic pub/sub via msg_router (April 2026)
 
 ### Demo
 - ✅ Boot on Jetson Orin Nano via serial console (kexec → EL2/VHE → UARTC → 6-core SMP)
 - ✅ Show shell commands working on real hardware (help, mem, cpu, lua, bench smp verified)
-- ✅ Show component load/unload via shell — counter service + echo service
-- ⏸️ Show hot-swap of a component — Phase 5+
-- ✅ Show message passing between components — `component pub/sub/msg` commands
-- ✅ Compare QEMU vs Jetson performance — see `docs/performance.md`
+- ✅ Show component load/unload via shell (`component run/list/unregister`)
+- ✅ Show hot-swap of a component (`component swap <old> <new>`)
+- ✅ Show message passing between components (`msg send <topic> <data>`)
+- ✅ Compare QEMU vs Jetson performance (`bench context/irq/ipc`, `docs/performance.md`)
 
 ---
 
