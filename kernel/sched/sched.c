@@ -112,10 +112,9 @@ volatile uint32_t *sched_diag_tick;
 volatile uint32_t *sched_diag_schedule;
 volatile uint32_t *sched_diag_picked;
 volatile uint32_t *sched_diag_idle_loops;  /* idle task iteration count per CPU */
-/* NC flag for scheduler_is_initialized() cross-CPU polling.
- * Uses a fixed address at the END of the NC region (NC_MEM_BASE + NC_MEM_SIZE - 64)
- * to avoid conflicts with the bump allocator. Secondary CPUs read this
- * instead of the cacheable sched.initialized. */
+/* Scheduler init flag for cross-CPU polling via NC memory.
+ * Uses a fixed address at the END of the NC region.
+ * CPU 0 writes 1, secondary CPUs poll until they see 1. */
 #define NC_SCHED_INIT_FLAG (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64))
 #define nc_sched_initialized NC_SCHED_INIT_FLAG
 #else
@@ -296,11 +295,6 @@ void scheduler_init(void)
      * Secondary CPUs poll the NC flag instead. */
     nc_sched_initialized = 1;
     __asm__ volatile("dsb sy" ::: "memory");
-    {
-        uint32_t rb = nc_sched_initialized;
-        INFO("NC sched flag: wrote 1, readback=%u (addr=0x%lx)",
-             rb, (unsigned long)(NC_MEM_BASE + NC_MEM_SIZE - 64));
-    }
 #endif
 
     /* Wake any secondary CPUs waiting for scheduler init */
@@ -317,8 +311,7 @@ void scheduler_init(void)
 int scheduler_is_initialized(void)
 {
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Read from NC memory — bypasses incoherent L2 */
-    return nc_sched_initialized;
+    return nc_sched_initialized;  /* NC read — bypasses L2 */
 #else
     cache_invalidate(&sched.initialized);
     return sched.initialized;

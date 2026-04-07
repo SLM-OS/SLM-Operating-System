@@ -318,8 +318,16 @@ void secondary_init(uint32_t logical_cpu_id)
      * Wait for CPU 0 to initialize the scheduler.
      * This is necessary because smp_init() runs before scheduler_init().
      */
+    /* Test: secondary CPU NC write at a fixed address */
+    {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        /* Write to a known NC address (different from the init flag) */
+        volatile uint32_t *nc_test = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 128 + logical_cpu_id * 4);
+        *nc_test = 0xDDDD + logical_cpu_id;
+#endif
+    }
     while (!scheduler_is_initialized()) {
-        __asm__ volatile("wfe" ::: "memory");
+        for (volatile int d = 0; d < 100000; d++) {}
     }
 
     /* Initialize scheduler for this CPU (creates idle task) */
