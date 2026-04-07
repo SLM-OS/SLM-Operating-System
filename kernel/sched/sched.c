@@ -294,6 +294,10 @@ void scheduler_init(void)
      * work because DC CIVAC doesn't propagate through L2 on Pi 5.
      * Secondary CPUs poll the NC flag instead. */
     nc_sched_initialized = 1;
+    /* If CPU 0's TLB still has a cacheable mapping for this address
+     * (despite TLBI), the write went to L1 cache. Clean it to PoC
+     * so secondary CPUs reading from NC (DRAM) see the value. */
+    cache_clean(&nc_sched_initialized);
     __asm__ volatile("dsb sy" ::: "memory");
 #endif
 
