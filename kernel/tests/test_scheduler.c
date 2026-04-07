@@ -7,6 +7,7 @@
 #include "unity.h"
 #include "task.h"
 #include "sched.h"
+#include "sched_policy.h"
 #include "slm_ffi.h"
 #include "spinlock.h"
 #include "smp.h"
@@ -14,6 +15,7 @@
 #include "platform.h"
 #include "uart.h"
 #include "cache.h"
+#include "string.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <limits.h>
@@ -2243,6 +2245,386 @@ static void test_isolation_excludes_from_dispatch(void)
 }
 
 /* ============================================================================
+ * Pluggable Scheduler Policy Tests
+ * ============================================================================ */
+
+/*
+ * Test: Default policy is "heuristic" after scheduler_init().
+ */
+static void test_policy_default_is_heuristic(void)
+{
+    const char *name = sched_get_policy();
+    TEST_ASSERT_NOT_NULL(name);
+    TEST_ASSERT_EQUAL_STRING("heuristic", name);
+}
+
+/*
+ * Test: Heuristic policy is registered and findable.
+ */
+static void test_policy_find_heuristic(void)
+{
+    const struct sched_policy_ops *p = sched_find_policy("heuristic");
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_STRING("heuristic", p->name);
+    TEST_ASSERT_NOT_NULL(p->assign_cpu);
+}
+
+/*
+ * Test: sched_find_policy returns NULL for unknown names.
+ */
+static void test_policy_find_unknown_returns_null(void)
+{
+    const struct sched_policy_ops *p = sched_find_policy("nonexistent");
+    TEST_ASSERT_NULL(p);
+
+    p = sched_find_policy(NULL);
+    TEST_ASSERT_NULL(p);
+}
+
+/*
+ * Test: sched_policy_count returns at least 1 (the heuristic policy).
+ */
+static void test_policy_count_at_least_one(void)
+{
+    int count = sched_policy_count();
+    TEST_ASSERT_TRUE(count >= 1);
+}
+
+/*
+ * Test: sched_policy_get returns policies within range, NULL outside.
+ */
+static void test_policy_get_bounds(void)
+{
+    int count = sched_policy_count();
+
+    /* Valid indices should return non-NULL */
+    for (int i = 0; i < count; i++) {
+        const struct sched_policy_ops *p = sched_policy_get(i);
+        TEST_ASSERT_NOT_NULL(p);
+        TEST_ASSERT_NOT_NULL(p->name);
+    }
+
+    /* Out-of-bounds should return NULL */
+    TEST_ASSERT_NULL(sched_policy_get(-1));
+    TEST_ASSERT_NULL(sched_policy_get(count));
+    TEST_ASSERT_NULL(sched_policy_get(SCHED_POLICY_MAX + 1));
+}
+
+/*
+ * Test: sched_set_policy rejects NULL.
+ */
+static void test_policy_set_null_rejected(void)
+{
+    int ret = sched_set_policy(NULL);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    /* Active policy should still be heuristic */
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+}
+
+/* Stub policy for testing: always assigns to CPU 0 */
+static uint32_t stub_assign_cpu(struct task *task)
+{
+    (void)task;
+    return 0;
+}
+
+static int stub_init_called;
+static int stub_shutdown_called;
+
+static int stub_init(void)
+{
+    stub_init_called++;
+    return 0;
+}
+
+static void stub_shutdown(void)
+{
+    stub_shutdown_called++;
+}
+
+static const struct sched_policy_ops stub_policy = {
+    .name       = "test_stub",
+    .init       = stub_init,
+    .shutdown   = stub_shutdown,
+    .assign_cpu = stub_assign_cpu,
+    .tick       = NULL,
+};
+
+/*
+ * Test: Register a custom policy and find it by name.
+ */
+static void test_policy_register_and_find(void)
+{
+    int count_before = sched_policy_count();
+    int ret = sched_register_policy(&stub_policy);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_INT(count_before + 1, sched_policy_count());
+
+    const struct sched_policy_ops *p = sched_find_policy("test_stub");
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_PTR(&stub_policy, p);
+}
+
+/*
+ * Test: Switch to custom policy, verify init/shutdown callbacks called,
+ * then switch back to heuristic.
+ */
+static void test_policy_switch_calls_init_shutdown(void)
+{
+    /* Ensure stub is registered (may already be from prior test) */
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+
+    stub_init_called = 0;
+    stub_shutdown_called = 0;
+
+    /* Switch to stub */
+    int ret = sched_set_policy(&stub_policy);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_STRING("test_stub", sched_get_policy());
+    TEST_ASSERT_EQUAL_INT(1, stub_init_called);
+
+    /* Switch back to heuristic */
+    const struct sched_policy_ops *heuristic = sched_find_policy("heuristic");
+    TEST_ASSERT_NOT_NULL(heuristic);
+    ret = sched_set_policy(heuristic);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+    TEST_ASSERT_EQUAL_INT(1, stub_shutdown_called);
+}
+
+/*
+ * Test: Custom policy's assign_cpu callback is actually used.
+ */
+static void test_policy_custom_assign_cpu_called(void)
+{
+    /* Ensure stub is registered */
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+
+    /* Switch to stub policy (always returns CPU 0) */
+    stub_init_called = 0;
+    sched_set_policy(&stub_policy);
+
+    irq_flags_t flags = irq_save();
+    for (int i = 0; i < 4; i++) {
+        struct task *t = task_create("pol_test", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(t);
+        scheduler_add_task(t);
+        /* stub_assign_cpu always returns 0 */
+        TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+        scheduler_remove_task(t);
+        t->id = 0;
+    }
+    irq_restore(flags);
+
+    /* Switch back to heuristic */
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/* Tracking policy: records which CPU was assigned per call */
+static uint32_t tracking_assignments[16];
+static int tracking_count;
+
+static uint32_t tracking_assign_cpu(struct task *task)
+{
+    (void)task;
+    /* Simple round-robin across all CPUs */
+    extern uint32_t cpu_count;
+    uint32_t cpu = tracking_count % cpu_count;
+    if (tracking_count < 16)
+        tracking_assignments[tracking_count] = cpu;
+    tracking_count++;
+    return cpu;
+}
+
+static const struct sched_policy_ops tracking_policy = {
+    .name       = "test_track",
+    .init       = NULL,
+    .shutdown   = NULL,
+    .assign_cpu = tracking_assign_cpu,
+    .tick       = NULL,
+};
+
+/*
+ * Test: Tasks with explicit affinity bypass the policy callback entirely.
+ */
+static void test_policy_bypassed_for_explicit_affinity(void)
+{
+    if (!sched_find_policy("test_track")) {
+        sched_register_policy(&tracking_policy);
+    }
+
+    tracking_count = 0;
+    sched_set_policy(&tracking_policy);
+
+    irq_flags_t flags = irq_save();
+
+    /* Task with explicit affinity — should NOT call policy */
+    struct task *t = task_create("aff_pin", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    task_set_affinity(t, 0);
+    int count_before = tracking_count;
+    scheduler_add_task(t);
+    TEST_ASSERT_EQUAL_INT(count_before, tracking_count);
+    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    scheduler_remove_task(t);
+    t->id = 0;
+
+    /* Task with CPU_AFFINITY_ANY — SHOULD call policy */
+    t = task_create("aff_any", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    count_before = tracking_count;
+    scheduler_add_task(t);
+    TEST_ASSERT_EQUAL_INT(count_before + 1, tracking_count);
+    scheduler_remove_task(t);
+    t->id = 0;
+
+    irq_restore(flags);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/* Failing init policy: init() returns -1 */
+static int fail_init(void)
+{
+    return -1;
+}
+
+static const struct sched_policy_ops fail_policy = {
+    .name       = "test_fail",
+    .init       = fail_init,
+    .shutdown   = NULL,
+    .assign_cpu = stub_assign_cpu,
+    .tick       = NULL,
+};
+
+/*
+ * Test: sched_set_policy rejects a policy whose init() fails,
+ * and the previous policy remains active.
+ */
+static void test_policy_init_failure_keeps_old(void)
+{
+    if (!sched_find_policy("test_fail")) {
+        sched_register_policy(&fail_policy);
+    }
+
+    /* Start with heuristic */
+    sched_set_policy(sched_find_policy("heuristic"));
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+
+    /* Try switching to fail_policy — should fail */
+    int ret = sched_set_policy(&fail_policy);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+
+    /* Heuristic should still be active */
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+}
+
+/* Tick-counting policy: tracks tick() calls */
+static volatile uint32_t tick_calls[8];
+
+static void tick_counter(uint32_t cpu)
+{
+    if (cpu < 8) tick_calls[cpu]++;
+}
+
+static const struct sched_policy_ops tick_policy = {
+    .name       = "test_tick",
+    .init       = NULL,
+    .shutdown   = NULL,
+    .assign_cpu = stub_assign_cpu,
+    .tick       = tick_counter,
+};
+
+/*
+ * Test: Policy tick() callback is invoked by scheduler_tick().
+ */
+static void test_policy_tick_callback_invoked(void)
+{
+    if (!sched_find_policy("test_tick")) {
+        sched_register_policy(&tick_policy);
+    }
+
+    for (int i = 0; i < 8; i++) tick_calls[i] = 0;
+
+    sched_set_policy(&tick_policy);
+
+    /* scheduler_tick() is called by the timer ISR. Call it directly
+     * a few times to test the tick callback. We need preempt_disabled
+     * to be set so schedule() is skipped (we just want the tick call). */
+    extern volatile int preempt_disabled[];
+    uint32_t cpu = cpu_id();
+    preempt_disabled[cpu] = 1;
+
+    scheduler_tick();
+    scheduler_tick();
+    scheduler_tick();
+
+    preempt_disabled[cpu] = 0;
+
+    TEST_ASSERT_TRUE(tick_calls[cpu] >= 3);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/*
+ * Test: sched_register_policy rejects NULL and policies without assign_cpu.
+ */
+static void test_policy_register_rejects_invalid(void)
+{
+    int ret = sched_register_policy(NULL);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+
+    static const struct sched_policy_ops no_assign = {
+        .name       = "bad",
+        .init       = NULL,
+        .shutdown   = NULL,
+        .assign_cpu = NULL,
+        .tick       = NULL,
+    };
+    ret = sched_register_policy(&no_assign);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: Heuristic policy still distributes tasks across CPUs
+ * (behavioral equivalence with the old inline code).
+ */
+static void test_policy_heuristic_distributes_tasks(void)
+{
+    extern uint32_t cpu_count;
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Single CPU — distribution not applicable");
+    }
+
+    /* Ensure heuristic is active */
+    sched_set_policy(sched_find_policy("heuristic"));
+
+    uint32_t cpu_hits[8] = {0};
+    irq_flags_t flags = irq_save();
+    for (int i = 0; i < 8; i++) {
+        struct task *t = task_create("dist", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(t);
+        scheduler_add_task(t);
+        uint32_t assigned = t->assigned_cpu;
+        if (assigned < 8) cpu_hits[assigned]++;
+        scheduler_remove_task(t);
+        t->id = 0;
+    }
+    irq_restore(flags);
+
+    int cpus_used = 0;
+    for (uint32_t i = 0; i < cpu_count && i < 8; i++) {
+        if (cpu_hits[i] > 0) cpus_used++;
+    }
+    TEST_ASSERT_MESSAGE(cpus_used >= 2,
+        "Heuristic policy should distribute across multiple CPUs");
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -2351,6 +2733,22 @@ int test_suite_scheduler(void)
     RUN_TEST(test_scheduler_start_accepts_cpu_param);
     RUN_TEST(test_deadline_boost_raises_priority);
     RUN_TEST(test_isolation_excludes_from_dispatch);
+
+    /* Pluggable scheduler policy interface */
+    RUN_TEST(test_policy_default_is_heuristic);
+    RUN_TEST(test_policy_find_heuristic);
+    RUN_TEST(test_policy_find_unknown_returns_null);
+    RUN_TEST(test_policy_count_at_least_one);
+    RUN_TEST(test_policy_get_bounds);
+    RUN_TEST(test_policy_set_null_rejected);
+    RUN_TEST(test_policy_register_rejects_invalid);
+    RUN_TEST(test_policy_register_and_find);
+    RUN_TEST(test_policy_switch_calls_init_shutdown);
+    RUN_TEST(test_policy_custom_assign_cpu_called);
+    RUN_TEST(test_policy_bypassed_for_explicit_affinity);
+    RUN_TEST(test_policy_init_failure_keeps_old);
+    RUN_TEST(test_policy_tick_callback_invoked);
+    RUN_TEST(test_policy_heuristic_distributes_tasks);
 
     return UnityEnd();
 }

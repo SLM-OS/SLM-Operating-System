@@ -9,6 +9,7 @@
 #include "uart.h"
 #include "task.h"
 #include "sched.h"
+#include "sched_policy.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "smp.h"
@@ -1052,4 +1053,56 @@ int cmd_dtb(int argc, char *argv[])
     uart_puts("\r\n");
 
     return 0;
+}
+
+/*
+ * sched - Show or change scheduler policy.
+ *
+ *   sched              Show current policy name
+ *   sched policy       List all registered policies
+ *   sched policy <name> Switch to named policy
+ */
+int cmd_sched(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_printf("Scheduler policy: %s\r\n", sched_get_policy());
+        return 0;
+    }
+
+    if (strcmp(argv[1], "policy") == 0) {
+        if (argc < 3) {
+            /* List available policies */
+            int count = sched_policy_count();
+            const char *current = sched_get_policy();
+            uart_printf("Available policies (%d):\r\n", count);
+            for (int i = 0; i < count; i++) {
+                const struct sched_policy_ops *p = sched_policy_get(i);
+                if (p) {
+                    uart_printf("  %s%s\r\n", p->name,
+                                strcmp(p->name, current) == 0 ? " (active)" : "");
+                }
+            }
+            return 0;
+        }
+
+        /* Switch to named policy */
+        const struct sched_policy_ops *policy = sched_find_policy(argv[2]);
+        if (!policy) {
+            uart_printf("Unknown policy: '%s'\r\n", argv[2]);
+            uart_puts("Use 'sched policy' to list available policies.\r\n");
+            return 1;
+        }
+
+        int ret = sched_set_policy(policy);
+        if (ret < 0) {
+            uart_printf("Failed to switch to policy '%s'\r\n", argv[2]);
+            return 1;
+        }
+
+        uart_printf("Switched to policy: %s\r\n", policy->name);
+        return 0;
+    }
+
+    uart_puts("Usage: sched [policy [<name>]]\r\n");
+    return 1;
 }

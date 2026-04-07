@@ -135,6 +135,7 @@ set(KERNEL_SOURCES
     # ==========================================================================
     kernel/sched/task.c
     kernel/sched/sched.c
+    kernel/sched/sched_heuristic.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
 
     # ==========================================================================

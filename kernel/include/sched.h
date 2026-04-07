@@ -14,6 +14,30 @@
 #include "config.h"
 
 /*
+ * Per-CPU run queue.
+ *
+ * On Pi 5, the data fields live in NC memory for cross-CPU visibility,
+ * but the lock stays in cacheable memory (ldaxr/stxr require cacheable).
+ *
+ * Exposed in the header so scheduling policies can inspect queue state
+ * (e.g., ready_count, head) for CPU assignment decisions. Policies must
+ * NOT modify run queue fields — use scheduler_add_task_to_cpu() etc.
+ */
+struct cpu_runqueue {
+    struct task *head;
+    struct task *tail;
+    struct task *idle_task;
+    struct task *zombie;
+    uint32_t ready_count;
+} __attribute__((aligned(64)));  /* CACHE_LINE_SIZE */
+
+/*
+ * Get the run queue for a CPU. Used by scheduling policies to inspect
+ * queue state. Policies must not modify the returned struct.
+ */
+struct cpu_runqueue *sched_cpu_rq(uint32_t cpu);
+
+/*
  * Initialize the scheduler (boot CPU).
  *
  * Sets up the idle task and prepares the run queue.

@@ -2,7 +2,7 @@
 
 This document tracks the integration of trained AI models (MLP, PPO, XGBoost) into the SLM-OS kernel scheduler.
 
-**Status:** Not Started
+**Status:** In Progress — M1 (Pluggable Scheduler Interface) complete
 
 **Summary:** This phase implements a pluggable scheduler interface and AI-based inference engine, allowing the kernel to use trained ML models for CPU assignment, priority adjustment, and preemption decisions.
 
@@ -34,53 +34,45 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 **Note:** This milestone is pure kernel C refactoring — no FP, no new build flags needed. Can be completed with existing build system.
 
 ### Scheduler Policy Vtable
-- ☐ Create `kernel/include/sched_policy.h` with vtable definition:
-  ```c
-  struct sched_policy_ops {
-      const char *name;
-      int      (*init)(void);
-      void     (*shutdown)(void);
-      uint32_t (*assign_cpu)(struct task *task);
-      void     (*tick)(uint32_t cpu);  // may be NULL
-  };
-  ```
-- ☐ Document interface contract in header comments
-- ☐ Define `SCHED_POLICY_MAX_NAME` (16 chars)
+- ✅ Create `kernel/include/sched_policy.h` with vtable definition
+- ✅ Document interface contract in header comments
+- ✅ Define `SCHED_POLICY_MAX_NAME` (16 chars), `SCHED_POLICY_MAX` (8)
 
 ### Extract Heuristic Policy
-- ☐ Create `kernel/sched/sched_heuristic.c`
-- ☐ Move `find_target_cpu()` logic from `sched.c` (~lines 487-551) to new file
-- ☐ Move `find_performance_cpu()` logic
-- ☐ Implement `heuristic_assign_cpu()` wrapping existing logic
-- ☐ Create `sched_policy_heuristic` ops struct
-- ☐ Verify extracted code compiles standalone
+- ✅ Create `kernel/sched/sched_heuristic.c`
+- ✅ Move `find_target_cpu()` logic from `sched.c` to new file
+- ✅ Move `find_performance_cpu()` logic
+- ✅ Implement `heuristic_assign_cpu()` wrapping existing logic
+- ✅ Create `sched_policy_heuristic` ops struct
+- ✅ Verify extracted code compiles standalone
 
 ### Wire Vtable into sched.c
-- ☐ Add `static const struct sched_policy_ops *active_policy`
-- ☐ Initialize to `&sched_policy_heuristic`
-- ☐ Replace inline CPU selection in `scheduler_add_task()` with `active_policy->assign_cpu(task)`
-- ☐ Add `active_policy->tick(cpu_id)` call in `scheduler_tick()` (if non-NULL)
-- ☐ Implement `sched_set_policy(const struct sched_policy_ops *policy)`:
-  - ☐ Disable interrupts
-  - ☐ Swap pointer
-  - ☐ Re-enable interrupts
-  - ☐ Log policy change
-- ☐ Implement `sched_get_policy()` — returns current policy name
-- ☐ Guard AI-specific code with `#ifdef CONFIG_AI_SCHEDULER`
+- ✅ Add `static const struct sched_policy_ops *active_policy`
+- ✅ Initialize to `&sched_policy_heuristic`
+- ✅ Replace inline CPU selection in `scheduler_add_task()` with `active_policy->assign_cpu(task)`
+- ✅ Add `active_policy->tick(cpu_id)` call in `scheduler_tick()` (if non-NULL)
+- ✅ Implement `sched_set_policy(const struct sched_policy_ops *policy)`:
+  - ✅ Disable interrupts
+  - ✅ Swap pointer
+  - ✅ Re-enable interrupts
+  - ✅ Log policy change
+- ✅ Implement `sched_get_policy()` — returns current policy name
+- ✅ Guard AI-specific code with `#ifdef CONFIG_AI_SCHEDULER`
 
 ### Shell Command
-- ☐ Add `sched` command to shell:
+- ✅ Add `sched` command to shell:
   - `sched` — show current policy name
   - `sched policy` — list available policies
   - `sched policy <name>` — switch to named policy
-- ☐ Implement policy registry (simple array of `sched_policy_ops*`)
-- ☐ `sched_register_policy()` for dynamic registration
+- ✅ Implement policy registry (simple array of `sched_policy_ops*`)
+- ✅ `sched_register_policy()` for dynamic registration
 
 ### Verification
-- ☐ All existing scheduler tests pass unchanged
-- ☐ Heuristic policy produces identical CPU assignments to old inline code
-- ☐ `sched_set_policy()` swaps cleanly under load
-- ☐ Shell command works correctly
+- ✅ All existing scheduler tests pass unchanged
+- ✅ Heuristic policy produces identical CPU assignments to old inline code
+- ✅ `sched_set_policy()` swaps cleanly under load
+- ✅ Shell command works correctly
+- ✅ 14 new policy vtable tests added (test_scheduler.c)
 
 ---
 

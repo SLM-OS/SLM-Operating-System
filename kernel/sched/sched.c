@@ -9,6 +9,7 @@
  */
 
 #include "sched.h"
+#include "sched_policy.h"
 #include "task.h"
 #include "uart.h"
 #include "debug.h"
@@ -20,6 +21,7 @@
 #include "timer.h"
 #include "cache.h"
 #include "ncmem.h"
+#include "string.h"
 #include <stdint.h>
 
 /* Deadline boost thresholds (in nanoseconds) */
@@ -30,17 +32,6 @@
 /* External functions from task.c */
 extern void task_set_current(struct task *task);
 extern void task_destroy(struct task *task);
-
-/* Per-CPU run queue.
- * On Pi 5, the data fields live in NC memory for cross-CPU visibility,
- * but the lock stays in cacheable memory (ldaxr/stxr require cacheable). */
-struct cpu_runqueue {
-    struct task *head;
-    struct task *tail;
-    struct task *idle_task;
-    struct task *zombie;
-    uint32_t ready_count;
-} __attribute__((aligned(CACHE_LINE_SIZE)));
 
 /*
  * Per-CPU preemption disable flag.
@@ -134,6 +125,107 @@ static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
 #else
     return &sched.cpu_fallback[cpu];
 #endif
+}
+
+/*
+ * Public accessor for cpu_rq — used by external policies (sched_heuristic.c,
+ * sched_ai.c) that need to inspect run queue state for CPU assignment.
+ */
+struct cpu_runqueue *sched_cpu_rq(uint32_t cpu)
+{
+    return cpu_rq(cpu);
+}
+
+/* ============================================================================
+ * Policy registry and active policy
+ * ============================================================================ */
+
+static const struct sched_policy_ops *policy_registry[SCHED_POLICY_MAX];
+static int policy_registry_count;
+
+static const struct sched_policy_ops *active_policy = &sched_policy_heuristic;
+
+int sched_register_policy(const struct sched_policy_ops *policy)
+{
+    if (!policy || !policy->name || !policy->assign_cpu) {
+        return -1;
+    }
+    if (policy_registry_count >= SCHED_POLICY_MAX) {
+        WARN("Policy registry full, cannot register '%s'", policy->name);
+        return -1;
+    }
+    policy_registry[policy_registry_count++] = policy;
+    return 0;
+}
+
+int sched_set_policy(const struct sched_policy_ops *policy)
+{
+    if (!policy || !policy->assign_cpu) {
+        return -1;
+    }
+
+    /* Init the new policy before swapping (may fail) */
+    if (policy->init) {
+        int ret = policy->init();
+        if (ret < 0) {
+            WARN("Policy '%s' init failed (%d)", policy->name, ret);
+            return -1;
+        }
+    }
+
+    /* IRQ-safe swap */
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("cli" ::: "memory");
+#else
+    __asm__ volatile("msr daifset, #2" ::: "memory");
+#endif
+
+    const struct sched_policy_ops *old = active_policy;
+    active_policy = policy;
+
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("sti" ::: "memory");
+#else
+    __asm__ volatile("msr daifclr, #2" ::: "memory");
+#endif
+
+    /* Shut down old policy after swap */
+    if (old && old->shutdown) {
+        old->shutdown();
+    }
+
+    INFO("Scheduler policy: %s -> %s",
+         old ? old->name : "(none)", policy->name);
+    return 0;
+}
+
+const char *sched_get_policy(void)
+{
+    return active_policy ? active_policy->name : "none";
+}
+
+const struct sched_policy_ops *sched_find_policy(const char *name)
+{
+    if (!name) return NULL;
+    for (int i = 0; i < policy_registry_count; i++) {
+        if (strcmp(policy_registry[i]->name, name) == 0) {
+            return policy_registry[i];
+        }
+    }
+    return NULL;
+}
+
+int sched_policy_count(void)
+{
+    return policy_registry_count;
+}
+
+const struct sched_policy_ops *sched_policy_get(int index)
+{
+    if (index < 0 || index >= policy_registry_count) {
+        return NULL;
+    }
+    return policy_registry[index];
 }
 
 /*
@@ -313,6 +405,9 @@ void scheduler_init(void)
     cpu_rq(0)->idle_task->state = TASK_READY;
     cpu_rq(0)->idle_task->cpu_affinity = 0;  /* Pinned to CPU 0 */
     cpu_rq(0)->idle_task->assigned_cpu = 0;
+
+    /* Register built-in policy */
+    sched_register_policy(&sched_policy_heuristic);
 
     sched.initialized = 1;
     cache_clean(&sched.initialized);
@@ -574,136 +669,10 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
 }
 
 /*
- * Calculate deadline pressure for a CPU's run queue.
+ * Add a task to the run queue (assigns to a CPU based on affinity/policy).
  *
- * Returns a score based on the sum of urgency of deadline-constrained tasks.
- * Higher score = more deadline pressure = avoid placing more work here.
- *
- * Urgency scoring:
- *   - No deadline: 0 points
- *   - Deadline > 100ms: 1 point
- *   - Deadline 50-100ms: 2 points
- *   - Deadline 10-50ms: 4 points
- *   - Deadline < 10ms or missed: 8 points
- */
-static uint32_t calculate_deadline_pressure(uint32_t cpu)
-{
-    struct cpu_runqueue *rq = cpu_rq(cpu);
-    uint32_t pressure = 0;
-    uint64_t now = slm_get_time_ns();
-
-    struct task *t = rq->head;
-    while (t) {
-        if (t->deadline_ns > 0) {
-            if (now >= t->deadline_ns) {
-                /* Deadline missed - very high pressure */
-                pressure += 8;
-            } else {
-                uint64_t remaining = t->deadline_ns - now;
-                if (remaining < DEADLINE_CRITICAL_NS) {
-                    pressure += 8;  /* < 10ms */
-                } else if (remaining < DEADLINE_HIGH_NS) {
-                    pressure += 4;  /* < 50ms */
-                } else if (remaining < DEADLINE_BOOST_NS) {
-                    pressure += 2;  /* < 100ms */
-                } else {
-                    pressure += 1;  /* distant deadline */
-                }
-            }
-        }
-        t = t->next;
-    }
-
-    return pressure;
-}
-
-/*
- * Find a non-isolated CPU for a task with CPU_AFFINITY_ANY.
- *
- * Uses a combined metric: ready_count + deadline_pressure.
- * This spreads deadline-constrained tasks across cores to reduce
- * the chance of missing deadlines due to queue contention.
- *
- * Returns CPU 0 as fallback (CPU 0 cannot be isolated).
- */
-static uint32_t find_target_cpu(void)
-{
-    /* Round-robin starting point to spread tasks across CPUs.
-     * Without this, ties (all CPUs at score 0) always go to CPU 0. */
-    static uint32_t rr_next;
-
-    /* Find a valid (non-isolated) starting CPU */
-    uint32_t best_cpu = 0;  /* fallback */
-    uint32_t best_score = UINT32_MAX;
-
-    for (uint32_t i = 0; i < cpu_count; i++) {
-        uint32_t cpu = (rr_next + i) % cpu_count;
-
-        /* Skip isolated cores */
-        if (sched.isolated_cores & (1U << cpu))
-            continue;
-
-        uint32_t score = cpu_rq(cpu)->ready_count + calculate_deadline_pressure(cpu);
-
-        if (score < best_score) {
-            best_cpu = cpu;
-            best_score = score;
-        }
-    }
-
-    rr_next = best_cpu + 1;
-    return best_cpu;
-}
-
-/*
- * Find a "performance" core for deadline-critical tasks.
- *
- * In a big.LITTLE system, this would return a big core.
- * In QEMU virt (homogeneous), we use CPU 1+ as "performance" cores
- * to keep CPU 0 available for system tasks.
- *
- * Returns the least-loaded non-isolated CPU > 0, or falls back to find_target_cpu().
- */
-static uint32_t find_performance_cpu(void)
-{
-    if (cpu_count <= 1) {
-        return 0;  /* Only one CPU available */
-    }
-
-    uint32_t best_cpu = 0;
-    uint32_t best_score = UINT32_MAX;
-    int found_perf_core = 0;
-
-    /* Prefer CPUs > 0 for performance tasks */
-    for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
-        /* Skip isolated cores - they're manually managed */
-        if (sched.isolated_cores & (1U << cpu)) {
-            continue;
-        }
-
-        uint32_t score = cpu_rq(cpu)->ready_count + calculate_deadline_pressure(cpu);
-        if (score < best_score) {
-            best_cpu = cpu;
-            best_score = score;
-            found_perf_core = 1;
-        }
-    }
-
-    /* Fall back to any CPU if no performance core available */
-    if (!found_perf_core) {
-        return find_target_cpu();
-    }
-
-    return best_cpu;
-}
-
-/*
- * Add a task to the run queue (assigns to a CPU based on affinity).
- *
- * Policy for deadline-constrained tasks:
- *   - Tasks with deadline_ns > 0 are placed on "performance" cores (CPU > 0)
- *   - This keeps CPU 0 available for system tasks and reduces interference
- *   - On big.LITTLE hardware, this would route to big cores
+ * Tasks with explicit CPU affinity are placed on that CPU directly.
+ * Tasks with CPU_AFFINITY_ANY are assigned by the active scheduling policy.
  */
 void scheduler_add_task(struct task *task)
 {
@@ -720,12 +689,8 @@ void scheduler_add_task(struct task *task)
 
     if (task->cpu_affinity != CPU_AFFINITY_ANY) {
         target_cpu = task->cpu_affinity;
-    } else if (task->deadline_ns > 0) {
-        target_cpu = find_performance_cpu();
-        DEBUG_PRINT("Deadline task '%s' -> CPU %u (performance core)",
-                    task->name, target_cpu);
     } else {
-        target_cpu = find_target_cpu();
+        target_cpu = active_policy->assign_cpu(task);
     }
 
     scheduler_add_task_to_cpu(task, target_cpu);
@@ -1188,6 +1153,10 @@ void scheduler_tick(void)
     sched_diag_tick[cpu]++;
 #endif
 
+    /* Policy tick callback (stats collection, rebalancing) */
+    if (active_policy && active_policy->tick)
+        active_policy->tick(cpu);
+
     /* Skip preemption if a context switch is in progress on this CPU.
      * schedule() sets preempt_disabled between rq_unlock and switch_to
      * completion. Calling schedule() here would corrupt state because
@@ -1381,7 +1350,7 @@ int sched_set_task_affinity(struct task *task, uint32_t cpu)
     if (task->state == TASK_READY && old_affinity != cpu) {
         uint32_t target;
         if (cpu == CPU_AFFINITY_ANY) {
-            target = find_target_cpu();
+            target = active_policy->assign_cpu(task);
         } else {
             target = cpu;
         }
