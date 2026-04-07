@@ -147,7 +147,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ GICv3 initialized (distributor 0x0F400000, redistributor 0x0F440000, 992 interrupt lines)
 - ✅ Interrupt delivery working (timer IRQ drives scheduler)
 - ✅ Timer IRQ fires at 100 Hz (confirmed via shell uptime)
-- ☐ Test GIC affinity settings for core isolation (cross-CPU dispatch working)
+- ✅ GIC affinity / core isolation — `bench isolate`: CPU 2 isolated, 8 tasks dispatched, 0 reached isolated core. PASS.
 
 ### Timer
 - ✅ ARM generic timer works on Jetson at EL2
@@ -157,7 +157,7 @@ The Tegra234 CBB firewall blocks UARTA (0x03100000) but **allows UARTC (0x0C2800
 - ✅ MAX_CPUS=8 in config.h, CPU_MAX=6 in platform.h — 6 cores boot
 - ✅ SMP boot — PSCI CPU_ON via SMC with correct dual-cluster MPIDR encoding
 - ✅ Cross-CPU task dispatch — all 6 CPUs execute tasks via cooperative scheduling (WFE/SEV). Root cause was UART lock deadlock in task_create DEBUG_PRINT.
-- ☐ Multi-core stress test on real hardware
+- ✅ Multi-core stress test — `bench smp` 3 consecutive runs, all 5/5 CPUs COMPLETED
 
 ### MMU
 - ✅ MMU working with Jetson memory map (3 regions around OP-TEE carveout)
@@ -204,7 +204,7 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ✅ GPU probe on real Jetson hardware — GA10B identified (BOOT_0=0xB7B000A1)
 - ✅ GPU alloc/free tested via HAL (30+ QEMU tests exercise same interface)
 - ✅ GPU↔IPC shared buffer test (test_buffer_gpu_accessible)
-- ☐ Benchmark CPU↔GPU cache sync overhead (needs dedicated test task with timing)
+- ✅ GPU cache sync benchmark — `bench gpu`: alloc 1952ns, sync_for_gpu 1184ns, sync_for_cpu 896ns, free 2272ns, data integrity PASS
 
 ---
 
