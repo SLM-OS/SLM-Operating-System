@@ -2,24 +2,24 @@
 
 This document tracks Phase 4 implementation of SLM-OS.
 
-**Status:** In Progress (Pi 5 bring-up complete, Jetson partially unblocked)
+**Status:** ✅ Complete (All milestones done. M8 isolation deferred to Phase 5.)
 
-**Summary:** Phase 4 combines hardware bring-up work with the Component System milestone. Pi 5 has 4-core SMP, Jetson has 6-core SMP — both with preemptive scheduling and interactive shell. Jetson runs at EL2 with VHE, using UARTC via TCU for serial (April 2026).
+**Summary:** Phase 4 combines hardware bring-up with the Component System. Pi 5 has 4-core SMP with cross-CPU dispatch. Jetson has 6-core SMP at EL2 with VHE, using UARTC via TCU for serial. Component system includes hot-swap with subscription preservation, topic-based pub/sub message routing, and built-in services. Rust runtime has PanicInfo formatting and timestamped logging.
 
 **Goals:**
-- ✅ Raspberry Pi 5 hardware bring-up (complete — 4-core SMP)
-- Complete Jetson Orin Nano hardware bring-up
-- Jetson GPU driver implementation
-- Component hot-swap mechanism
-- Component isolation and message routing
-- Shell/ELF execution improvements
+- ✅ Raspberry Pi 5 hardware bring-up (4-core SMP, cross-CPU dispatch)
+- ✅ Jetson Orin Nano hardware bring-up (6-core SMP, EL2/VHE, UARTC)
+- ✅ GPU memory integration (cache coherency, nvidia_alloc/free)
+- ✅ Component system with hot-swap and message routing
+- ✅ Performance benchmarks on all platforms
+- ⏸️ Component isolation — deferred to Phase 5 (requires user/kernel separation)
 
 **Carried from Phase 3:**
 - ✅ GPU Memory Integration (cache coherency, SHM_GPU_ACCESSIBLE) — completed April 2026
-- Jetson GPU Driver (init, alloc, submit, fence)
-- Hardware bring-up (serial console, GIC, timer, GPIO, MMU testing)
-- Shell improvements (virtual filesystem, ELF argc/argv, kill command)
-- Lock-free task stealing (optional)
+- ⏸️ Jetson GPU compute (init, submit, fence) — requires GSP firmware (Phase 5+)
+- ✅ Hardware bring-up (serial console, GIC, timer, MMU — all platforms)
+- ✅ Shell improvements (VFS, file commands, Lua, networking)
+- ⏸️ Lock-free task stealing — deferred (profile first to confirm need)
 
 ---
 
@@ -898,5 +898,50 @@ All tests pass. Total test count now 327+.
 
 ---
 
+## Lessons from Phase 4
+
+### What Worked Well
+- **kexec from Linux** — Bypassed Jetson UEFI/CBB complexity; gave immediate EL2 access
+- **EL2 with VHE** — Transparent EL1 register redirection avoided rewriting the kernel for EL2
+- **Non-cacheable memory** — Solved cross-CPU coherency on Pi 5 and Jetson where hardware coherency is absent
+- **UARTC via TCU** — Provided serial console on Jetson when UARTA was CBB-blocked
+- **PSCI success fallback** — Reliable SMP boot on both Pi 5 and Jetson despite cache incoherency
+- **labctl** — Automated deploy/test cycle (SDWire + serial + power) prevented manual error accumulation
+- **Rust msg_router** — Topic-based pub/sub with atomic mailboxes; clean FFI boundary
+- **Stateless hot-swap** — Subscription preservation made hot-swap practical without state transfer protocol
+- **Timestamps in Rust logging** — Immediate value for correlating events across subsystems
+
+### What To Do Differently
+- **Investigate CBB firewalls earlier** — Would have reached EL2/VHE approach sooner on Jetson
+- **Test cross-CPU dispatch earlier** — NC memory requirement only discovered when SMP was already working on single core
+- **Keep TODO files in sync** — M7 items were marked ☐ despite being implemented; caused confusion
+- **Add delivery verification tests from the start** — Initial message router tests only checked that functions didn't crash, not that messages were delivered
+
+### Patterns to Preserve
+- Phase documents with checkboxes track progress visibly
+- "Deferred to Phase N" with ⏸️ is explicit — nothing lost
+- Risk mitigation has concrete fallbacks
+- Decisions table forces explicit choices
+- Icon system (✅ ⏸️ 🔗) for quick status visibility
+- Boot reliability testing (`labctl boot_test`) for hardware changes
+- Binary search debugging methodology for hardware issues
+
+### Deferred to Phase 5
+
+| Item | Notes |
+|------|-------|
+| Component isolation (M8) | Requires user/kernel mode separation (EL0/EL1) |
+| Stateful hot-swap | State transfer protocol between component versions |
+| Direct component-to-component messaging | Topic broadcast sufficient for Phase 4 |
+| Wildcard subscriptions | Not needed until component count grows |
+| Zero-copy large messages | Shared buffers exist in IPC; router integration deferred |
+| Message priority in router | IPC priority queues work; router integration deferred |
+| Jetson GPU compute | GSP firmware loading required (RISC-V on GPU) |
+| Component development tutorial | Needs working examples for Phase 5 user-space components |
+| Lock-free task stealing | Profile first to confirm contention |
+
+---
+
 *Created: December 2025*
-*Target: Complete hardware bring-up first, then component system*
+*Completed: April 2026*
+*All milestones done. M8 isolation deferred to Phase 5.*
