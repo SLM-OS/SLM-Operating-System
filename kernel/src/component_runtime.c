@@ -100,19 +100,22 @@ static void echo_service_entry(void *arg)
     int msgs_received = 0;
     int idle_polls = 0;
 
-    /* Poll shared mailbox for messages (100ms intervals, ~60s max idle) */
-    while (idle_polls < 600) {
-        if (echo_mailbox.ready) {
+    /* Poll shared mailbox for messages using yield() instead of sleep_ms().
+     * Use pit_ticks for time-based timeout (60 seconds). */
+    extern volatile uint64_t pit_ticks;
+    uint64_t timeout_tick = pit_ticks + 6000;  /* 60s at 100 Hz */
+    while (pit_ticks < timeout_tick) {
+        if (__atomic_load_n(&echo_mailbox.ready, __ATOMIC_ACQUIRE)) {
             echo_mailbox.data[63] = '\0';
             msgs_received++;
             idle_polls = 0;
             uart_printf("[echo] Received: \"%s\" (msg #%d)\n",
                         (const char *)echo_mailbox.data, msgs_received);
-            echo_mailbox.ready = 0;
-            echo_mailbox.ack = 1;
+            __atomic_store_n(&echo_mailbox.ready, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&echo_mailbox.ack, 1, __ATOMIC_RELEASE);
         } else {
             idle_polls++;
-            sleep_ms(100);
+            yield();
         }
     }
 
@@ -153,7 +156,7 @@ static const struct builtin_component builtin_components[] = {
         .version = "1.0",
         .description = "Echoes IPC messages back to sender",
         .type = COMPONENT_TYPE_SERVICE,
-        .priority = COMPONENT_PRIORITY_NORMAL,
+        .priority = COMPONENT_PRIORITY_IDLE,  /* Same as shell to enable round-robin */
         .entry = echo_service_entry,
     },
 };
@@ -271,20 +274,23 @@ int component_send_echo(const char *message)
     }
     ((volatile char *)echo_mailbox.data)[len] = '\0';
 
-    /* Signal echo service and wait for acknowledgment */
-    echo_mailbox.ack = 0;
-    echo_mailbox.ready = 1;
+    /* Signal echo service and wait for acknowledgment.
+     * Use yield() + pit_ticks timeout (5 seconds). */
+    __atomic_store_n(&echo_mailbox.ack, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&echo_mailbox.ready, 1, __ATOMIC_RELEASE);
 
-    extern void sleep_ms(uint32_t ms);
-    for (int i = 0; i < 40; i++) {  /* 40 × 50ms = 2s timeout */
-        if (echo_mailbox.ack) {
+    /* Both shell and echo are IDLE priority — yield() round-robins between them */
+    extern volatile uint64_t pit_ticks;
+    uint64_t send_timeout = pit_ticks + 500;  /* 5s at 100 Hz */
+    while (pit_ticks < send_timeout) {
+        if (__atomic_load_n(&echo_mailbox.ack, __ATOMIC_ACQUIRE)) {
             uart_printf("Message delivered to echo service\n");
             return 0;
         }
-        sleep_ms(50);
+        yield();
     }
 
-    uart_printf("Echo service did not acknowledge (timeout)\n");
+    uart_printf("Echo service did not acknowledge (5s timeout)\n");
     return -1;
 }
 
