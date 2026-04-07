@@ -631,13 +631,13 @@ static uint32_t find_target_cpu(void)
     /* Round-robin starting point to spread tasks across CPUs.
      * Without this, ties (all CPUs at score 0) always go to CPU 0. */
     static uint32_t rr_next;
-    uint32_t start = rr_next % cpu_count;
 
-    uint32_t best_cpu = start;
-    uint32_t best_score = cpu_rq(start)->ready_count + calculate_deadline_pressure(start);
+    /* Find a valid (non-isolated) starting CPU */
+    uint32_t best_cpu = 0;  /* fallback */
+    uint32_t best_score = UINT32_MAX;
 
-    for (uint32_t i = 1; i < cpu_count; i++) {
-        uint32_t cpu = (start + i) % cpu_count;
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        uint32_t cpu = (rr_next + i) % cpu_count;
 
         /* Skip isolated cores */
         if (sched.isolated_cores & (1U << cpu))

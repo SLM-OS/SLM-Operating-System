@@ -216,7 +216,7 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 - ✅ Measure context switch time — Pi 5: 1.6 µs avg, QEMU: ~20 µs (shell `bench context`)
 - ✅ Target: < 10 µs — Pi 5 meets target
 - ✅ Compare with Jetson measurements — Jetson 6-core: 262 ns, 1-core: 471 ns (6.1x faster than Pi 5)
-- ☐ Profile and optimize if needed
+- ✅ Profile and optimize — Pi 5 with NC memory: 2.5 µs avg (vs 1.6 µs cacheable). NC overhead acceptable for cross-CPU correctness.
 
 ### Interrupt Latency
 - ✅ Measure timer tick jitter — Pi 5: < 1 µs, Jetson 6-core: 390 ns avg, 2 µs max
@@ -225,13 +225,13 @@ Code is structured as shared `gpu_nvidia.h`/`gpu_nvidia.c` for both Jetson (GA10
 
 ### Scheduler Performance
 - ✅ Scheduler verified stable on Jetson — 17+ min uptime, 6 cores, multiple bench runs
-- ☐ Deadline accuracy under load (needs cross-CPU task dispatch for meaningful load)
-- ☐ Core isolation effectiveness (needs cross-CPU dispatch)
+- ✅ Deadline accuracy under load — `bench deadline`: 100ms MET (31ms latency), 50ms MET, 20ms MISSED (cooperative scheduling ~31ms cycle). Timer preemption would improve.
+- ✅ Core isolation effectiveness — `bench isolate`: CPU 2 isolated, 8 tasks dispatched, 0 reached isolated core. PASS.
 
 ### IPC Performance
 - ✅ Measure message passing latency — Pi 5: 322 ns, Jetson 6-core: 530 ns round-trip
 - ✅ IPC tested on Jetson hardware — 100-iteration bench runs stable, queues create/destroy correctly
-- ☐ Shared buffer throughput benchmark (needs dedicated test task)
+- ✅ Shared buffer throughput — `bench shared`: Write 7.5 GB/s, Read 14.6 GB/s (4KB buffer, 64B stride, Pi 5 Cortex-A76)
 
 ### Full Test Suite
 - ✅ All subsystems verified on Jetson via shell commands (April 2026) — see `docs/performance.md`

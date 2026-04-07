@@ -2140,19 +2140,21 @@ static void test_round_robin_distributes_tasks(void)
         TEST_IGNORE_MESSAGE("Single CPU — round-robin not applicable");
     }
 
-    /* Create and dispatch 4 tasks via scheduler_add_task (uses find_target_cpu) */
+    /* Create and dispatch 4 tasks via scheduler_add_task (uses find_target_cpu).
+     * Use NULL entry + IRQ protection to prevent tasks from running
+     * on secondary CPUs before we can check assigned_cpu. */
     uint32_t cpu_hits[4] = {0, 0, 0, 0};
+    irq_flags_t rr_flags = irq_save();
     for (int i = 0; i < 4; i++) {
-        struct task *t = task_create("rr_test", NULL, NULL);
+        struct task *t = task_create("rr_test", nop_entry, NULL);
         TEST_ASSERT_NOT_NULL(t);
-        /* Check assigned_cpu after add (find_target_cpu sets it) */
         scheduler_add_task(t);
         uint32_t assigned = t->assigned_cpu;
         if (assigned < 4) cpu_hits[assigned]++;
-        /* Clean up — remove from queue */
         scheduler_remove_task(t);
-        t->id = 0;  /* Free the slot */
+        t->id = 0;
     }
+    irq_restore(rr_flags);
 
     /* At least 2 different CPUs should have been selected */
     int cpus_used = 0;
@@ -2176,6 +2178,68 @@ static void test_scheduler_start_accepts_cpu_param(void)
     void (*fn)(uint32_t) = scheduler_start;
     TEST_ASSERT_NOT_NULL(fn);
     (void)fn;  /* Suppress unused warning */
+}
+
+/*
+ * Test: Deadline boost raises effective priority.
+ * Creates a task with a tight deadline, verifies priority is boosted.
+ */
+static void test_deadline_boost_raises_priority(void)
+{
+    struct task *t = task_create("dl_test", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    /* Default priority, no deadline — effective should match base */
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_DEFAULT, t->effective_priority);
+
+    /* Set a tight absolute deadline (now + 10ms) */
+    task_set_deadline(t, slm_get_time_ns() + 10 * 1000000ULL);
+
+    /* Pin to CPU 0 to avoid cross-CPU dispatch race (test may remove
+     * task while secondary CPU is trying to run it) */
+    task_set_affinity(t, 0);
+
+    /* Add to scheduler to trigger deadline boost */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task(t);
+
+    /* Effective priority should be boosted above base (higher number = higher priority) */
+    TEST_ASSERT_TRUE(t->effective_priority > t->priority);
+
+    scheduler_remove_task(t);
+    irq_restore(flags);
+    t->id = 0;
+}
+
+/*
+ * Test: Isolated cores excluded from round-robin dispatch.
+ * Isolates a core, dispatches multiple tasks, verifies none land on it.
+ */
+static void test_isolation_excludes_from_dispatch(void)
+{
+    extern uint32_t cpu_count;
+    if (cpu_count < 3) {
+        TEST_IGNORE_MESSAGE("Need 3+ CPUs for isolation dispatch test");
+    }
+
+    sched_isolate_core(2);
+
+    int landed_on_2 = 0;
+    irq_flags_t iso_flags = irq_save();
+    for (int i = 0; i < 8; i++) {
+        struct task *t = task_create("iso_d", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(t);
+        scheduler_add_task(t);
+        if (t->assigned_cpu == 2) landed_on_2++;
+        scheduler_remove_task(t);
+        t->id = 0;
+    }
+    irq_restore(iso_flags);
+
+    sched_unisolate_core(2);
+
+    TEST_ASSERT_MESSAGE(landed_on_2 == 0,
+        "No tasks should land on isolated CPU 2");
 }
 
 /* ============================================================================
@@ -2285,6 +2349,8 @@ int test_suite_scheduler(void)
     RUN_TEST(test_cpu_id_returns_correct_value);
     RUN_TEST(test_round_robin_distributes_tasks);
     RUN_TEST(test_scheduler_start_accepts_cpu_param);
+    RUN_TEST(test_deadline_boost_raises_priority);
+    RUN_TEST(test_isolation_excludes_from_dispatch);
 
     return UnityEnd();
 }

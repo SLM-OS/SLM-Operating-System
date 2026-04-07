@@ -601,6 +601,169 @@ static void bench_sched_stats(void)
     }
 }
 
+/* --- Deadline accuracy benchmark --- */
+
+/* NC offsets for deadline bench: -384 from end of NC region */
+#define DL_NC_DONE   (NC_MEM_BASE + NC_MEM_SIZE - 384)
+#define DL_NC_TIME   (NC_MEM_BASE + NC_MEM_SIZE - 376)  /* 8 bytes for uint64_t */
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+static void deadline_bench_task(void *arg)
+{
+    (void)arg;
+    *(volatile uint64_t *)DL_NC_TIME = slm_get_time_ns();
+    *(volatile uint32_t *)DL_NC_DONE = 1;
+}
+#endif
+
+static void bench_deadline_accuracy(void)
+{
+    uint64_t deadlines_ms[] = {100, 50, 20, 10};
+    int num_deadlines = 4;
+
+    uart_puts("  Testing deadline-boosted task dispatch latency:\r\n");
+
+    for (int d = 0; d < num_deadlines; d++) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        *(volatile uint32_t *)DL_NC_DONE = 0;
+        uint64_t start_ns = slm_get_time_ns();
+
+        struct task *t = task_create("dl_bench", deadline_bench_task, NULL);
+        if (!t) { uart_puts("    Failed to create task\r\n"); continue; }
+
+        task_set_deadline(t, slm_get_time_ns() + deadlines_ms[d] * 1000000ULL);
+        scheduler_add_task(t);
+
+        for (int wait = 0; wait < 1000000; wait++) {
+            if (*(volatile uint32_t *)DL_NC_DONE) break;
+            for (volatile int x = 0; x < 100; x++) {}
+        }
+
+        if (*(volatile uint32_t *)DL_NC_DONE) {
+            uint64_t end_ns = *(volatile uint64_t *)DL_NC_TIME;
+            uint64_t latency_us = (end_ns - start_ns) / 1000;
+            uint64_t deadline_us = deadlines_ms[d] * 1000;
+            const char *met = (latency_us < deadline_us) ? "MET" : "MISSED";
+            uart_printf("    Deadline %3lu ms: dispatched in %lu us — %s\r\n",
+                        (unsigned long)deadlines_ms[d], (unsigned long)latency_us, met);
+        } else {
+            uart_printf("    Deadline %3lu ms: TIMEOUT\r\n",
+                        (unsigned long)deadlines_ms[d]);
+        }
+#else
+        uart_printf("    Deadline %3lu ms: (NC memory required for cross-CPU)\r\n",
+                    (unsigned long)deadlines_ms[d]);
+#endif
+    }
+}
+
+/* --- Core isolation benchmark --- */
+
+/* NC offsets for isolation bench: -400 from end of NC region */
+#define ISO_NC_DONE  (NC_MEM_BASE + NC_MEM_SIZE - 400)
+#define ISO_NC_CPU   (NC_MEM_BASE + NC_MEM_SIZE - 404)
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+static void isolation_bench_task(void *arg)
+{
+    (void)arg;
+    *(volatile uint32_t *)ISO_NC_CPU = cpu_id();
+    *(volatile uint32_t *)ISO_NC_DONE = 1;
+}
+#endif
+
+static void bench_core_isolation(void)
+{
+    extern uint32_t cpu_count;
+    if (cpu_count < 3) {
+        uart_puts("  Need 3+ CPUs for isolation test\r\n");
+        return;
+    }
+
+    uart_puts("  Isolating CPU 2, dispatching 8 tasks:\r\n");
+    sched_isolate_core(2);
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    int cpu_hits[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 8; i++) {
+        *(volatile uint32_t *)ISO_NC_DONE = 0;
+        struct task *t = task_create("iso_test", isolation_bench_task, NULL);
+        if (!t) continue;
+        scheduler_add_task(t);
+
+        for (int wait = 0; wait < 500000; wait++) {
+            if (*(volatile uint32_t *)ISO_NC_DONE) break;
+            for (volatile int x = 0; x < 100; x++) {}
+        }
+        if (*(volatile uint32_t *)ISO_NC_DONE) {
+            uint32_t ran_on = *(volatile uint32_t *)ISO_NC_CPU;
+            if (ran_on < 4) cpu_hits[ran_on]++;
+        }
+    }
+
+    uart_printf("    CPU 0: %d tasks  CPU 1: %d tasks  CPU 2: %d tasks  CPU 3: %d tasks\r\n",
+                cpu_hits[0], cpu_hits[1], cpu_hits[2], cpu_hits[3]);
+    uart_printf("    CPU 2 (isolated): %s\r\n",
+                cpu_hits[2] == 0 ? "PASS — no tasks dispatched" : "FAIL — tasks reached isolated core");
+#else
+    uart_puts("    (NC memory required for cross-CPU isolation test)\r\n");
+#endif
+
+    sched_unisolate_core(2);
+    uart_puts("  CPU 2 un-isolated.\r\n");
+}
+
+/* --- Shared buffer throughput benchmark --- */
+
+static void bench_shared_buffer(void)
+{
+    /* Create a shared buffer and measure write+read throughput */
+    struct shared_buffer *buf = shared_buffer_create(4096, 0);
+    if (!buf) {
+        uart_puts("  Failed to create shared buffer\r\n");
+        return;
+    }
+
+    void *ptr = shared_buffer_map(buf, task_current(), 0x3); /* RW */
+    if (!ptr) {
+        uart_puts("  Failed to map shared buffer\r\n");
+        shared_buffer_destroy(buf);
+        return;
+    }
+
+    /* Write 4KB, 1000 iterations */
+    uint64_t start = slm_get_time_ns();
+    for (int i = 0; i < 1000; i++) {
+        volatile uint8_t *p = (volatile uint8_t *)ptr;
+        for (int j = 0; j < 4096; j += 64)
+            p[j] = (uint8_t)i;
+    }
+    uint64_t write_ns = slm_get_time_ns() - start;
+
+    /* Read 4KB, 1000 iterations */
+    start = slm_get_time_ns();
+    volatile uint8_t sink = 0;
+    for (int i = 0; i < 1000; i++) {
+        volatile uint8_t *p = (volatile uint8_t *)ptr;
+        for (int j = 0; j < 4096; j += 64)
+            sink = p[j];
+    }
+    (void)sink;
+    uint64_t read_ns = slm_get_time_ns() - start;
+
+    uint64_t write_mbps = (4096ULL * 1000 * 1000000000ULL) / (write_ns * 1024 * 1024);
+    uint64_t read_mbps = (4096ULL * 1000 * 1000000000ULL) / (read_ns * 1024 * 1024);
+
+    uart_printf("  Shared buffer (4 KB, 1000 iterations, 64B stride):\r\n");
+    uart_printf("    Write: %lu MB/s (%lu ns total)\r\n",
+                (unsigned long)write_mbps, (unsigned long)write_ns);
+    uart_printf("    Read:  %lu MB/s (%lu ns total)\r\n",
+                (unsigned long)read_mbps, (unsigned long)read_ns);
+
+    shared_buffer_unmap(buf, task_current());
+    shared_buffer_destroy(buf);
+}
+
 /* SMP cross-CPU dispatch test: task runs on target CPU, writes NC done flag */
 void smp_test_task(void *arg)
 {
@@ -616,7 +779,7 @@ void smp_test_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|stats|all>\r\n");
+        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|stats|all>\r\n");
         return 1;
     }
 
@@ -680,6 +843,18 @@ int cmd_bench(int argc, char *argv[])
             uart_printf("  CPU %u: (NC memory required)\r\n", cpu);
 #endif
         }
+    } else if (strcmp(argv[1], "deadline") == 0) {
+        uart_puts("Deadline Accuracy Benchmark\r\n");
+        uart_puts("===========================\r\n");
+        bench_deadline_accuracy();
+    } else if (strcmp(argv[1], "isolate") == 0) {
+        uart_puts("Core Isolation Benchmark\r\n");
+        uart_puts("========================\r\n");
+        bench_core_isolation();
+    } else if (strcmp(argv[1], "shared") == 0) {
+        uart_puts("Shared Buffer Throughput Benchmark\r\n");
+        uart_puts("==================================\r\n");
+        bench_shared_buffer();
     } else if (strcmp(argv[1], "all") == 0) {
         uart_puts("SLM-OS Performance Benchmarks\r\n");
         uart_puts("=============================\r\n\r\n");
@@ -689,10 +864,16 @@ int cmd_bench(int argc, char *argv[])
         uart_puts("\r\n");
         bench_ipc_latency();
         uart_puts("\r\n");
+        bench_deadline_accuracy();
+        uart_puts("\r\n");
+        bench_core_isolation();
+        uart_puts("\r\n");
+        bench_shared_buffer();
+        uart_puts("\r\n");
         bench_sched_stats();
     } else {
         uart_printf("Unknown benchmark: %s\r\n", argv[1]);
-        uart_puts("Available: context, irq, ipc, stats, all\r\n");
+        uart_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, stats, all\r\n");
         return 1;
     }
 
