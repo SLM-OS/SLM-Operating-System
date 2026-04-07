@@ -23,18 +23,17 @@ static uint32_t next_task_id = 1;       /* ID 0 reserved for idle task */
  * On Pi 5, standard ldaxr/stxr spinlocks fail under cross-CPU contention
  * (L2 retains stale lock values). Use atomic test-and-set instead. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
-static volatile uint8_t task_atomic_lock;
+/* Use standard spinlock but add DC CIVAC after release to push
+ * "unlocked" state through L2 to DRAM. Secondary CPUs' first lock
+ * attempt reads from DRAM (cold L2) and sees "unlocked". */
+static spinlock_t task_lock __attribute__((aligned(64))) = SPINLOCK_INIT;
 #define TASK_LOCK_IRQSAVE() \
-    irq_flags_t _task_flags; \
-    do { \
-        __asm__ volatile("mrs %0, daif" : "=r"(_task_flags)); \
-        __asm__ volatile("msr daifset, #2" ::: "memory"); \
-        while (__atomic_test_and_set(&task_atomic_lock, __ATOMIC_ACQUIRE)) {} \
-    } while(0)
+    irq_flags_t _task_flags = spin_lock_irqsave(&task_lock)
 #define TASK_UNLOCK_IRQRESTORE() \
     do { \
-        __atomic_clear(&task_atomic_lock, __ATOMIC_RELEASE); \
-        __asm__ volatile("msr daif, %0" :: "r"(_task_flags) : "memory"); \
+        spin_unlock_irqrestore(&task_lock, _task_flags); \
+        __asm__ volatile("dc civac, %0" :: "r"(&task_lock) : "memory"); \
+        __asm__ volatile("dsb sy" ::: "memory"); \
     } while(0)
 #else
 static spinlock_t task_lock = SPINLOCK_INIT;

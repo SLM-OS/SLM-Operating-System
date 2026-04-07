@@ -203,6 +203,18 @@ int cmd_cpu(int argc, char *argv[])
             uart_printf("  %3lu  %8u  %8u  %6u    %9u\r\n", i, t, s, p, il);
         }
         uart_printf("  timer_handler_count: %u\r\n", timer_handler_count);
+
+        /* Show secondary CPU TTBR0 values (stored in boot_flag slots) */
+        {
+            extern volatile uint32_t cpu_boot_flag[];
+            uint64_t my_ttbr0;
+            __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(my_ttbr0));
+            uart_printf("  CPU 0 TTBR0: 0x%lx\r\n", (unsigned long)my_ttbr0);
+            for (uint32_t i = 1; i < cpu_count; i++) {
+                uint32_t val = __atomic_load_n(&cpu_boot_flag[i], __ATOMIC_ACQUIRE);
+                uart_printf("  CPU %u TTBR0 (low32): 0x%x\r\n", i, val);
+            }
+        }
     }
 
 #if defined(PLATFORM_RASPI5)

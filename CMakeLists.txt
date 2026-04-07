@@ -74,6 +74,9 @@ elseif(PLATFORM STREQUAL "JETSON_ORIN_NANO")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-jetson.ld)
 elseif(PLATFORM STREQUAL "RASPI5")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-raspi5.ld)
+    # Note: -march=armv8.2-a causes compiler to emit SWPAB/CASALB etc.
+    # which may trap on BCM2712 if TF-A doesn't enable LSE pass-through.
+    # Use inline assembly for explicit LSE atomics where needed instead.
 else()
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel.ld)
 endif()

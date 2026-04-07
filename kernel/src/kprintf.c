@@ -18,6 +18,10 @@
 #include "kprintf.h"
 #include "uart.h"
 #include "spinlock.h"
+/* ncmem.h not included — PLATFORM_HAS_NC_MEMORY is intentionally NOT
+ * defined here. The uart_lock uses standard spinlocks on all platforms.
+ * Cross-CPU contention on uart_lock is handled by keeping secondary CPU
+ * prints minimal and relying on natural L2 eviction timing. */
 #include "string.h"
 #include <stdint.h>
 

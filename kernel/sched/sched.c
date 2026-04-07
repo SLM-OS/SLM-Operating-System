@@ -112,11 +112,11 @@ volatile uint32_t *sched_diag_tick;
 volatile uint32_t *sched_diag_schedule;
 volatile uint32_t *sched_diag_picked;
 volatile uint32_t *sched_diag_idle_loops;  /* idle task iteration count per CPU */
-/* Scheduler init flag for cross-CPU polling via NC memory.
- * Uses a fixed address at the END of the NC region.
- * CPU 0 writes 1, secondary CPUs poll until they see 1. */
-#define NC_SCHED_INIT_FLAG (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64))
-#define nc_sched_initialized NC_SCHED_INIT_FLAG
+/* Scheduler init flag — uses the SAME pattern as the working cpu_boot_flag
+ * handshake: cacheline-aligned, atomic store + cache_invalidate polling
+ * with delay for natural L2 eviction. */
+static volatile uint32_t sched_init_flag __attribute__((aligned(64)));
+#define nc_sched_initialized sched_init_flag
 #else
 volatile uint32_t sched_diag_tick[MAX_CPUS];
 volatile uint32_t sched_diag_schedule[MAX_CPUS];
@@ -293,12 +293,21 @@ void scheduler_init(void)
      * The cacheable sched.initialized + cache_clean/invalidate doesn't
      * work because DC CIVAC doesn't propagate through L2 on Pi 5.
      * Secondary CPUs poll the NC flag instead. */
-    nc_sched_initialized = 1;
-    /* If CPU 0's TLB still has a cacheable mapping for this address
-     * (despite TLBI), the write went to L1 cache. Clean it to PoC
-     * so secondary CPUs reading from NC (DRAM) see the value. */
-    cache_clean(&nc_sched_initialized);
-    __asm__ volatile("dsb sy" ::: "memory");
+    /* Signal via cpu_boot_flag — the ONLY proven cross-CPU channel.
+     * Write value 2 to each secondary CPU's boot flag slot.
+     * Same pattern as boot handshake (atomic store + cache_clean). */
+    nc_sched_initialized = 1;  /* Local flag for quick checks */
+    {
+        extern volatile uint32_t cpu_boot_flag[];
+        for (uint32_t i = 1; i < cpu_count; i++) {
+            cpu_boot_flag[i] = 2;
+            /* DC CIVAC: clean L1→L2→PoC (main memory on BCM2712).
+             * DC CVAC only goes to L2. DC CIVAC cleans then invalidates,
+             * which forces the line all the way to DRAM. */
+            __asm__ volatile("dc civac, %0" :: "r"(&cpu_boot_flag[i]) : "memory");
+            __asm__ volatile("dsb sy" ::: "memory");
+        }
+    }
 #endif
 
     /* Wake any secondary CPUs waiting for scheduler init */
@@ -315,7 +324,18 @@ void scheduler_init(void)
 int scheduler_is_initialized(void)
 {
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    return nc_sched_initialized;  /* NC read — bypasses L2 */
+    /* Check cpu_boot_flag for THIS CPU — value 2 means scheduler ready.
+     * Uses the SAME pattern that works in boot handshake. */
+    {
+        extern volatile uint32_t cpu_boot_flag[];
+        uint32_t this_cpu = cpu_id();
+        if (__atomic_load_n(&cpu_boot_flag[this_cpu], __ATOMIC_ACQUIRE) == 2)
+            return 1;
+        cache_invalidate(&cpu_boot_flag[this_cpu]);
+        if (cpu_boot_flag[this_cpu] == 2)
+            return 1;
+        return 0;
+    }
 #else
     cache_invalidate(&sched.initialized);
     return sched.initialized;

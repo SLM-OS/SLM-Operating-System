@@ -37,7 +37,7 @@ volatile uint32_t cpus_online = 0;
 /* Per-CPU boot handshake flags.
  * On NC platforms, allocated from NC region for instant cross-CPU visibility.
  * Otherwise cacheline-aligned to avoid DC CIVAC corruption of adjacent data. */
-static volatile uint32_t cpu_boot_flag[MAX_CPUS] __attribute__((aligned(64)));
+volatile uint32_t cpu_boot_flag[MAX_CPUS] __attribute__((aligned(64)));
 
 /* Per-CPU boot stacks (16 KB each, 16-byte aligned) */
 /* NOT static - needs to be visible to smp_boot.S */
@@ -312,20 +312,28 @@ void secondary_init(uint32_t logical_cpu_id)
     __asm__ volatile("dsb sy" ::: "memory");
     cpus_online++;
 
-    INFO("CPU %u: online", logical_cpu_id);
+    /* Skip INFO print — uart_lock (ldaxr/stxr) deadlocks cross-CPU
+     * when CPU 0 holds it during boot output. The boot handshake above
+     * already confirms the CPU is online. */
 
     /*
      * Wait for CPU 0 to initialize the scheduler.
      * This is necessary because smp_init() runs before scheduler_init().
      */
-    /* Test: secondary CPU NC write at a fixed address */
+    /* Diagnostic: write TTBR0 value to boot flag slot so CPU 0 can verify.
+     * CPU 0 reads via the working boot handshake pattern (cold L2). */
     {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-        /* Write to a known NC address (different from the init flag) */
-        volatile uint32_t *nc_test = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 128 + logical_cpu_id * 4);
-        *nc_test = 0xDDDD + logical_cpu_id;
-#endif
+        uint64_t ttbr0;
+        __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
+        /* Store low 32 bits of TTBR0 in boot_flag (reusing the slot) */
+        __atomic_store_n(&cpu_boot_flag[logical_cpu_id], (uint32_t)(ttbr0 & 0xFFFFFFFF), __ATOMIC_RELEASE);
     }
+    /* Poll with delay — same pattern as cpu_boot_flag polling in boot_secondary.
+     * The delay allows L2 natural eviction so cache_invalidate + read sees
+     * the updated value from DRAM. Without delay, L2 retains stale data. */
+    /* Poll via cpu_boot_flag — same mechanism that works for boot handshake.
+     * CPU 0 writes value=2 to our boot_flag slot from scheduler_init().
+     * cache_invalidate + delay allows L2 eviction (proven pattern). */
     while (!scheduler_is_initialized()) {
         for (volatile int d = 0; d < 100000; d++) {}
     }
