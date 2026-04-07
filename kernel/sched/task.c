@@ -81,25 +81,25 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     task_entry_t entry = (task_entry_t)entry_addr;
     void *arg = (void *)arg_addr;
 
-    /* Clear preempt_disabled — scheduler_start() sets it to 1 before
-     * switch_to(NULL, first), but switch_to never returns for the first
-     * task (it jumps here via task_entry_wrapper). Without this clear,
-     * preempt_disabled stays 1 and timer ticks never call schedule(). */
+    /* Clear preempt_disabled for this CPU.
+     * scheduler_start() sets it to 1 before switch_to(NULL, first),
+     * but switch_to never returns — it jumps here. Must clear so
+     * timer ticks can call schedule() on this CPU.
+     * Use MPIDR directly to avoid cpu_id() which needs cacheable BSS. */
     {
         extern volatile int preempt_disabled[];
-        preempt_disabled[cpu_id()] = 0;
-#if defined(PLATFORM_X86_64)
-        __asm__ volatile("mfence" ::: "memory");
-#else
+#if !defined(PLATFORM_X86_64)
+        uint64_t mpidr;
+        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+        uint32_t aff0 = mpidr & 0xFF;
+        if (aff0 < MAX_CPUS)
+            preempt_disabled[aff0] = 0;
         __asm__ volatile("dsb sy" ::: "memory");
+#else
+        preempt_disabled[cpu_id()] = 0;
+        __asm__ volatile("mfence" ::: "memory");
 #endif
     }
-
-    /* User tasks keep IRQs masked (cooperative scheduling via yield).
-     * Idle tasks unmask in their while loop for timer-driven WFI wake.
-     * This avoids preemption deadlocks while enabling cross-CPU dispatch:
-     * secondary CPUs' idle tasks wake on timer, call schedule(), and
-     * pick up tasks dispatched from CPU 0. */
 
     entry(arg);
     task_exit();

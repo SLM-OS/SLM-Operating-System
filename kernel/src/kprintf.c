@@ -32,27 +32,11 @@
  *
  * uart_lock is shared across ALL CPUs (printf from any CPU), so it
  * MUST be in NC memory on platforms with incoherent caches. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-#include "ncmem.h"
-/* Early boot uses the BSS lock (single-CPU, no contention).
- * After ncmem_init, the pointer switches to an NC-allocated lock
- * that works safely across CPUs with incoherent L2 caches. */
-static spinlock_t uart_lock_early = SPINLOCK_INIT;
-static spinlock_t *uart_lock_ptr = &uart_lock_early;
-#define uart_lock (*uart_lock_ptr)
-
-void kprintf_init_nc_lock(void)
-{
-    spinlock_t *nc_lock = ncmem_alloc(sizeof(spinlock_t), 64);
-    if (nc_lock) {
-        spin_init(nc_lock);
-        uart_lock_ptr = nc_lock;
-    }
-}
-#else
+/* UART lock for thread-safe printf. Cacheable BSS — spinlocks require
+ * cacheable memory for ldaxr/stxr on BCM2712. Cross-CPU contention
+ * works because the exclusive monitor is independent of L2 coherency. */
 static spinlock_t uart_lock = SPINLOCK_INIT;
 void kprintf_init_nc_lock(void) {}
-#endif
 
 /* ========================================================================
  * Output Abstraction

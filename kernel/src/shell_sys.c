@@ -16,6 +16,7 @@
 #include "timer.h"
 #include "slm_ffi.h"
 #include "platform.h"
+#include "ncmem.h"
 #include "dtb.h"
 #include "help.h"
 #include "string.h"
@@ -184,12 +185,22 @@ int cmd_cpu(int argc, char *argv[])
 #endif
         extern volatile uint32_t timer_handler_count;
         uart_printf("\r\n  Per-CPU scheduler diagnostics:\r\n");
-        uart_printf("  CPU  Ticks     Schedule  Picked\r\n");
-        uart_printf("  ---  --------  --------  ------\r\n");
+        uart_printf("  CPU  Ticks     Schedule  Picked    IdleLoops\r\n");
+        uart_printf("  ---  --------  --------  ------    ---------\r\n");
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        extern volatile uint32_t *sched_diag_idle_loops;
+#else
+        extern volatile uint32_t sched_diag_idle_loops[];
+#endif
+        uart_printf("  diag_tick ptr=0x%lx val[0]=0x%x\r\n",
+                    (unsigned long)(uintptr_t)sched_diag_tick,
+                    *(volatile uint32_t *)sched_diag_tick);
         for (uint32_t i = 0; i < cpu_count; i++) {
-            uart_printf("  %3lu  %8u  %8u  %6u\r\n",
-                        i, sched_diag_tick[i], sched_diag_schedule[i],
-                        sched_diag_picked[i]);
+            uint32_t t = sched_diag_tick[i];
+            uint32_t s = sched_diag_schedule[i];
+            uint32_t p = sched_diag_picked[i];
+            uint32_t il = sched_diag_idle_loops[i];
+            uart_printf("  %3lu  %8u  %8u  %6u    %9u\r\n", i, t, s, p, il);
         }
         uart_printf("  timer_handler_count: %u\r\n", timer_handler_count);
     }

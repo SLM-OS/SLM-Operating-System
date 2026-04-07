@@ -111,10 +111,18 @@ static struct {
 volatile uint32_t *sched_diag_tick;
 volatile uint32_t *sched_diag_schedule;
 volatile uint32_t *sched_diag_picked;
+volatile uint32_t *sched_diag_idle_loops;  /* idle task iteration count per CPU */
+/* NC flag for scheduler_is_initialized() cross-CPU polling.
+ * Uses a fixed address at the END of the NC region (NC_MEM_BASE + NC_MEM_SIZE - 64)
+ * to avoid conflicts with the bump allocator. Secondary CPUs read this
+ * instead of the cacheable sched.initialized. */
+#define NC_SCHED_INIT_FLAG (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64))
+#define nc_sched_initialized NC_SCHED_INIT_FLAG
 #else
 volatile uint32_t sched_diag_tick[MAX_CPUS];
 volatile uint32_t sched_diag_schedule[MAX_CPUS];
 volatile uint32_t sched_diag_picked[MAX_CPUS];
+volatile uint32_t sched_diag_idle_loops[MAX_CPUS];
 #endif
 
 /* cpu_rq() implementation — must be after sched struct definition */
@@ -138,6 +146,8 @@ static void idle_task_func(void *arg)
     (void)arg;
 
     while (1) {
+        sched_diag_idle_loops[cpu_id()]++;
+
         /* Unmask IRQ so timer interrupts can fire.
          * This must be inside the loop because context switch saves/restores
          * DAIF. When idle is preempted by the timer ISR, the saved DAIF has
@@ -243,6 +253,9 @@ void scheduler_init(void)
         sched_diag_schedule[i] = 0;
         sched_diag_picked[i] = 0;
     }
+    sched_diag_idle_loops = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    for (uint32_t i = 0; i < MAX_CPUS; i++)
+        sched_diag_idle_loops[i] = 0;
 #endif
 
     /* Initialize per-CPU run queues with per-queue locks */
@@ -266,6 +279,13 @@ void scheduler_init(void)
 
     sched.initialized = 1;
     cache_clean(&sched.initialized);
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Also set an NC flag for secondary CPUs.
+     * The cacheable sched.initialized + cache_clean/invalidate doesn't
+     * work because DC CIVAC doesn't propagate through L2 on Pi 5.
+     * Secondary CPUs poll the NC flag instead. */
+    nc_sched_initialized = 1;
+#endif
 
     /* Wake any secondary CPUs waiting for scheduler init */
 #if !defined(PLATFORM_X86_64)
@@ -280,8 +300,13 @@ void scheduler_init(void)
  */
 int scheduler_is_initialized(void)
 {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Read from NC memory — bypasses incoherent L2 */
+    return nc_sched_initialized;
+#else
     cache_invalidate(&sched.initialized);
     return sched.initialized;
+#endif
 }
 
 /*
@@ -915,7 +940,8 @@ void scheduler_start(void)
         panic("scheduler_start: scheduler not initialized");
     }
 
-    INFO("CPU %u: Starting scheduler", this_cpu);
+    if (this_cpu == 0)
+        INFO("CPU %u: Starting scheduler", this_cpu);
 
     irq_flags_t flags = rq_lock_irqsave(this_cpu);
 
@@ -941,14 +967,16 @@ void scheduler_start(void)
 
     task_set_current(first);
 
-    INFO("CPU %u: Switching to first task: '%s'", this_cpu, first->name);
+    if (this_cpu == 0)
+        INFO("CPU %u: Switching to first task: '%s'", this_cpu, first->name);
 
     rq_unlock_irqrestore(this_cpu, flags);
 
     /* Start timer and enable interrupts now that a task is active.
      * Must be done AFTER task_set_current() so that timer IRQ handler
      * can safely call task_current() in schedule(). */
-    INFO("Starting timer (100 Hz)...");
+    if (this_cpu == 0)
+        INFO("Starting timer (100 Hz)...");
     timer_start();
 
     /* Guard against timer re-entrancy during switch_to.
@@ -957,7 +985,8 @@ void scheduler_start(void)
 
     /* Unmask IRQs. If timer fires, scheduler_tick() sees preempt_disabled=1
      * and skips schedule(). Ticks still count for sleep/uptime. */
-    INFO("Enabling interrupts...");
+    if (this_cpu == 0)
+        INFO("Enabling interrupts...");
 #if defined(PLATFORM_X86_64)
     __asm__ volatile("sti" ::: "memory");
 #else
