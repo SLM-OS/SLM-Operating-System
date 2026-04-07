@@ -128,10 +128,10 @@ secondary_entry:
     msr     sctlr_el1, x1
     isb
 
-#if defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
     /*
      * Invalidate all data cache lines (L1 + L2) by set/way.
-     * Pi 5 only — QEMU's coherency works without this.
+     * Required on real hardware (Pi 5, Jetson) — QEMU's coherency works without this.
      *
      * Pre-MMU reads (secondary_mmu_ttbr, _mair, _tcr above) entered
      * L1/L2 as Non-Shareable lines because the MMU was off. With MMU
@@ -192,7 +192,7 @@ secondary_entry:
 
     dsb     sy
     isb
-#endif /* PLATFORM_RASPI5 */
+#endif /* PLATFORM_RASPI5 || PLATFORM_JETSON_ORIN_NANO */
 
 .Lsec_skip_mmu:
     /*
