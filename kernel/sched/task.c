@@ -19,8 +19,30 @@ static struct task *task_table;
 static struct task task_table_fallback[MAX_TASKS];
 static uint32_t next_task_id = 1;       /* ID 0 reserved for idle task */
 
-/* Lock protecting task_table and next_task_id */
+/* Lock protecting task_table and next_task_id.
+ * On Pi 5, standard ldaxr/stxr spinlocks fail under cross-CPU contention
+ * (L2 retains stale lock values). Use atomic test-and-set instead. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+static volatile uint8_t task_atomic_lock;
+#define TASK_LOCK_IRQSAVE() \
+    irq_flags_t _task_flags; \
+    do { \
+        __asm__ volatile("mrs %0, daif" : "=r"(_task_flags)); \
+        __asm__ volatile("msr daifset, #2" ::: "memory"); \
+        while (__atomic_test_and_set(&task_atomic_lock, __ATOMIC_ACQUIRE)) {} \
+    } while(0)
+#define TASK_UNLOCK_IRQRESTORE() \
+    do { \
+        __atomic_clear(&task_atomic_lock, __ATOMIC_RELEASE); \
+        __asm__ volatile("msr daif, %0" :: "r"(_task_flags) : "memory"); \
+    } while(0)
+#else
 static spinlock_t task_lock = SPINLOCK_INIT;
+#define TASK_LOCK_IRQSAVE() \
+    irq_flags_t _task_flags = spin_lock_irqsave(&task_lock)
+#define TASK_UNLOCK_IRQRESTORE() \
+    spin_unlock_irqrestore(&task_lock, _task_flags)
+#endif
 
 /* Per-CPU current running task (set by scheduler) */
 static struct task *current_task[MAX_CPUS];
@@ -127,7 +149,6 @@ __asm__(
  */
 struct task *task_alloc(const char *name, uint8_t priority)
 {
-    irq_flags_t flags;
     struct task *task;
     uint32_t task_id;
 
@@ -137,12 +158,12 @@ struct task *task_alloc(const char *name, uint8_t priority)
     }
 
     /* Acquire lock to access task_table and next_task_id */
-    flags = spin_lock_irqsave(&task_lock);
+    TASK_LOCK_IRQSAVE();
 
     /* Find free task slot */
     task = alloc_task_slot();
     if (!task) {
-        spin_unlock_irqrestore(&task_lock, flags);
+        TASK_UNLOCK_IRQRESTORE();
         ERROR("task_alloc: no free task slots");
         return NULL;
     }
@@ -153,7 +174,7 @@ struct task *task_alloc(const char *name, uint8_t priority)
     /* Mark slot as used immediately (id != 0 means in use) */
     task->id = task_id;
 
-    spin_unlock_irqrestore(&task_lock, flags);
+    TASK_UNLOCK_IRQRESTORE();
 
     /* Initialize task structure (slot is ours now) */
     str_copy(task->name, name ? name : "unnamed", TASK_NAME_LEN);
@@ -193,7 +214,6 @@ struct task *task_alloc(const char *name, uint8_t priority)
 struct task *task_create_with_priority(const char *name, task_entry_t entry,
                                        void *arg, uint8_t priority)
 {
-    irq_flags_t flags;
     struct task *task;
     uint32_t task_id;
 
@@ -211,12 +231,12 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     }
 
     /* Acquire lock to access task_table and next_task_id */
-    flags = spin_lock_irqsave(&task_lock);
+    TASK_LOCK_IRQSAVE();
 
     /* Find free task slot */
     task = alloc_task_slot();
     if (!task) {
-        spin_unlock_irqrestore(&task_lock, flags);
+        TASK_UNLOCK_IRQRESTORE();
         pmm_free_pages(stack, stack_pages);
         ERROR("task_create: no free task slots");
         return NULL;
@@ -228,7 +248,7 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     /* Mark slot as used immediately (id != 0 means in use) */
     task->id = task_id;
 
-    spin_unlock_irqrestore(&task_lock, flags);
+    TASK_UNLOCK_IRQRESTORE();
 
     /* Initialize rest of task structure (slot is ours now) */
     str_copy(task->name, name ? name : "unnamed", TASK_NAME_LEN);
@@ -388,13 +408,13 @@ void task_destroy(struct task *task)
         return;
     }
 
-    irq_flags_t flags = spin_lock_irqsave(&task_lock);
+    TASK_LOCK_IRQSAVE();
 
     /* Verify task is terminated */
     if (task->state != TASK_TERMINATED) {
         WARN("task_destroy: task '%s' not terminated (state=%d)",
              task->name, task->state);
-        spin_unlock_irqrestore(&task_lock, flags);
+        TASK_UNLOCK_IRQRESTORE();
         return;
     }
 
@@ -414,7 +434,7 @@ void task_destroy(struct task *task)
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
 
-    spin_unlock_irqrestore(&task_lock, flags);
+    TASK_UNLOCK_IRQRESTORE();
 
     /* Call cleanup callback first (e.g., to free ELF segment memory) */
     if (cleanup) {

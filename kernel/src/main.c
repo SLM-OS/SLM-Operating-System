@@ -273,6 +273,18 @@ void kernel_main(void *dtb)
     INFO("Initializing timer...");
     timer_init();
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Zero the NC scheduler init flag BEFORE booting secondary CPUs.
+     * Must be after vmm_init() so the write targets NC memory (DRAM),
+     * not the cacheable identity map from boot.S. Secondary CPUs will
+     * poll this flag after booting — it must be 0 until scheduler_init
+     * sets it to 1. */
+    {
+        extern void nc_zero_sched_init_flag(void);
+        nc_zero_sched_init_flag();
+    }
+#endif
+
     /* Initialize SMP and boot secondary CPUs */
     uart_puts("\n");
     smp_init();

@@ -224,8 +224,18 @@ static void update_deadline_boost(struct task *task)
 /*
  * Initialize the scheduler (called on boot CPU).
  */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+/* Called from main.c after vmm_init, before smp_init */
+void nc_zero_sched_init_flag(void)
+{
+    nc_sched_initialized = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+#endif
+
 void scheduler_init(void)
 {
+
     /* Initialize global state */
     sched.task_count = 0;
     sched.context_switches = 0;
@@ -285,6 +295,10 @@ void scheduler_init(void)
      * work because DC CIVAC doesn't propagate through L2 on Pi 5.
      * Secondary CPUs poll the NC flag instead. */
     nc_sched_initialized = 1;
+    __asm__ volatile("dsb sy" ::: "memory");
+    DEBUG_PRINT("NC sched init flag set at 0x%lx, value=%u",
+                (unsigned long)(NC_MEM_BASE + NC_MEM_SIZE - 64),
+                (unsigned int)nc_sched_initialized);
 #endif
 
     /* Wake any secondary CPUs waiting for scheduler init */
@@ -346,7 +360,9 @@ void scheduler_init_secondary(uint32_t cpu)
 
     rq_unlock_irqrestore(cpu, flags);
 
-    INFO("CPU %u: scheduler initialized", cpu);
+    /* Skip INFO print on secondary CPUs — uart_lock contention may hang */
+    if (cpu == 0)
+        INFO("CPU %u: scheduler initialized", cpu);
 }
 
 /*
@@ -993,6 +1009,9 @@ void scheduler_start(void)
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");
     __asm__ volatile("isb" ::: "memory");
 #endif
+
+    /* Debug: mark that we reached pre-switch point */
+    sched_diag_idle_loops[this_cpu] = 0xAAAA;
 
     /* Switch to first task (NULL = no previous context to save).
      * switch_to never returns — it jumps to task_entry_wrapper.

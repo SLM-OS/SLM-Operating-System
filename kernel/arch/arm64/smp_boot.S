@@ -112,6 +112,14 @@ secondary_entry:
     msr     ttbr1_el1, x0
     isb
 
+    /* Invalidate TLB before enabling MMU with new page tables.
+     * Without this, stale TLB entries from boot.S may cache L1[3]
+     * as a 1GB cacheable block instead of an L2 table (needed for
+     * the NC region at 0xFFE00000). */
+    tlbi    vmalle1
+    dsb     sy
+    isb
+
     /* Enable MMU + caches in SCTLR_EL1 */
     mrs     x1, sctlr_el1
     orr     x1, x1, #(1 << 0)      /* M: MMU enable */
