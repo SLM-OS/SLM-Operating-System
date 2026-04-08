@@ -42,7 +42,7 @@ const shell_cmd_t builtin_commands[] = {
     {"uptime", cmd_uptime, "Show system uptime"},
     {"vmm",    cmd_vmm,    "Show virtual memory info"},
     {"ipc",    cmd_ipc,    "Show IPC statistics"},
-    {"model",  cmd_model,  "Show model memory pools"},
+    {"model",  cmd_model,  "Model management (load/list/info/unload/pools)"},
     {"dtb",    cmd_dtb,    "Show device tree info"},
     {"elftest", cmd_elftest, "Test ELF loader"},
     {"run",    cmd_run,    "Run a program (run <name>)"},

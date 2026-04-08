@@ -398,6 +398,9 @@ void kernel_main(void *dtb)
         INFO("  Model memory: OK (16 MB weights, 8 MB workspace)");
     }
 
+    /* Initialize model loader registry */
+    rust_model_loader_init();
+
     /* Initialize GPU subsystem */
     INFO("Initializing GPU...");
 #if defined(PLATFORM_JETSON_ORIN_NANO)

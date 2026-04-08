@@ -114,6 +114,13 @@ int test_harness_run_all(void)
     total_failures += test_suite_lua();
 #endif
 
+    /* Model loader tests (Rust ONNX parser + registry) */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Model Loader Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_model_loader();
+
     /* Rust FFI tests */
     uart_puts("\n");
     uart_puts("========================================\n");

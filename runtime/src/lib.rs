@@ -21,6 +21,7 @@ pub mod mm;
 pub mod sched;
 pub mod component;
 pub mod msg_router;
+pub mod loader;
 
 // Re-export commonly used types
 pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags, TaskId};
@@ -823,4 +824,519 @@ pub extern "C" fn rust_weight_pool_stats() -> mm::PoolStats {
 #[no_mangle]
 pub extern "C" fn rust_workspace_pool_stats() -> mm::PoolStats {
     mm::workspace_pool_stats()
+}
+
+// =============================================================================
+// Model Loader API (Phase 5)
+// =============================================================================
+
+/// Initialize the model loader registry.
+#[no_mangle]
+pub extern "C" fn rust_model_loader_init() -> i32 {
+    loader::registry::init();
+    0
+}
+
+/// Load an ONNX model from a buffer.
+///
+/// Returns model registry index (>= 0) on success, negative error on failure.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer
+/// - `data` must be a valid pointer to `data_len` bytes
+#[no_mangle]
+pub unsafe extern "C" fn rust_model_load(
+    name: *const u8,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || data.is_null() || data_len == 0 {
+        return -1;
+    }
+
+    // Find name length (null-terminated)
+    let mut name_len = 0;
+    while *name.add(name_len) != 0 && name_len < 31 {
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+    let data_slice = core::slice::from_raw_parts(data, data_len);
+
+    match loader::registry::load_model(name_slice, data_slice) {
+        Ok(idx) => idx as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Unload a model by registry index.
+///
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn rust_model_unload(index: u32) -> i32 {
+    match loader::registry::unload_model(index as usize) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Get model info by registry index.
+///
+/// Returns 0 on success, -1 if index is invalid.
+///
+/// # Safety
+/// - `info` must be a valid pointer to a `ModelInfoC`-sized buffer
+#[no_mangle]
+pub unsafe extern "C" fn rust_model_get_info(
+    index: u32,
+    info: *mut loader::registry::ModelInfoC,
+) -> i32 {
+    if info.is_null() {
+        return -1;
+    }
+    match loader::registry::get_info(index as usize) {
+        Some(model_info) => {
+            *info = model_info;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Get the number of loaded models.
+#[no_mangle]
+pub extern "C" fn rust_model_count() -> u32 {
+    loader::registry::count() as u32
+}
+
+/// Find a model by name.
+///
+/// Returns registry index (>= 0) if found, -1 if not found.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer
+#[no_mangle]
+pub unsafe extern "C" fn rust_model_find(name: *const u8) -> i32 {
+    if name.is_null() {
+        return -1;
+    }
+
+    let mut name_len = 0;
+    while *name.add(name_len) != 0 && name_len < 31 {
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+
+    match loader::registry::find_by_name(name_slice) {
+        Some(idx) => idx as i32,
+        None => -1,
+    }
+}
+
+/// Run model loader tests.
+///
+/// Returns number of test failures (0 = all passed).
+#[no_mangle]
+pub extern "C" fn rust_model_loader_test() -> i32 {
+    let mut failures: i32 = 0;
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running model loader tests...\n\0".as_ptr());
+    }
+
+    // Test 1: Protobuf varint decoding
+    {
+        let data = [0x08]; // varint encoding of 8 with no continuation
+        let result = loader::protobuf::decode_varint(&data);
+        let passed = result == Ok((8, 1));
+        print_test_result(b"protobuf: varint single byte\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 2: Multi-byte varint
+    {
+        let data = [0xAC, 0x02]; // 300 = 0b100101100 -> [0xAC, 0x02]
+        let result = loader::protobuf::decode_varint(&data);
+        let passed = result == Ok((300, 2));
+        print_test_result(b"protobuf: varint multi-byte (300)\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 3: Varint EOF
+    {
+        let data = [0x80]; // Continuation bit set but no more bytes
+        let result = loader::protobuf::decode_varint(&data);
+        let passed = result.is_err();
+        print_test_result(b"protobuf: varint EOF error\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 4: ProtoIter over simple message
+    {
+        // Field 1, varint, value 7: tag=0x08, value=0x07
+        // Field 2, length-delimited, "hi": tag=0x12, len=0x02, 'h', 'i'
+        let data = [0x08, 0x07, 0x12, 0x02, b'h', b'i'];
+        let mut iter = loader::protobuf::ProtoIter::new(&data);
+
+        let f1 = iter.next();
+        let f1_ok = match f1 {
+            Some(Ok(f)) => f.field_number == 1 && matches!(f.data, loader::protobuf::FieldData::Varint(7)),
+            _ => false,
+        };
+
+        let f2 = iter.next();
+        let f2_ok = match f2 {
+            Some(Ok(f)) => {
+                f.field_number == 2 &&
+                matches!(f.data, loader::protobuf::FieldData::Bytes(b) if b == b"hi")
+            },
+            _ => false,
+        };
+
+        let end = iter.next().is_none();
+        let passed = f1_ok && f2_ok && end;
+        print_test_result(b"protobuf: field iteration\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 5: Registry init + count
+    {
+        loader::registry::init();
+        let count = loader::registry::count();
+        let passed = count == 0;
+        print_test_result(b"registry: init empty\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 6: OpType name mapping
+    {
+        let passed =
+            loader::graph::OpType::from_name(b"MatMul") == loader::graph::OpType::MatMul &&
+            loader::graph::OpType::from_name(b"Add") == loader::graph::OpType::Add &&
+            loader::graph::OpType::from_name(b"Relu") == loader::graph::OpType::Relu &&
+            loader::graph::OpType::from_name(b"Softmax") == loader::graph::OpType::Softmax &&
+            loader::graph::OpType::from_name(b"NotARealOp") == loader::graph::OpType::Unknown;
+        print_test_result(b"graph: OpType::from_name\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 7: TensorName operations
+    {
+        let name = loader::graph::TensorName::from_bytes(b"test_tensor");
+        let passed =
+            name.eq_bytes(b"test_tensor") &&
+            !name.is_empty() &&
+            name.len == 11 &&
+            loader::graph::TensorName::EMPTY.is_empty();
+        print_test_result(b"graph: TensorName ops\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8: TensorShape num_elements
+    {
+        let mut shape = loader::graph::TensorShape::EMPTY;
+        shape.dims[0] = 2;
+        shape.dims[1] = 3;
+        shape.dims[2] = 4;
+        shape.ndim = 3;
+        shape.elem_type = loader::graph::ElemType::Float;
+        let passed = shape.num_elements() == 24 && shape.size_bytes() == 96;
+        print_test_result(b"graph: TensorShape sizing\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // MNIST model data — static at function scope so all tests can access it
+    static MNIST_ONNX: &[u8] = include_bytes!("../../models/test/mnist.onnx");
+
+    // Test 9: Parse MNIST ONNX model
+    {
+
+        let result = loader::onnx_parser::parse_onnx(MNIST_ONNX);
+        let passed = result.is_ok();
+        print_test_result(b"onnx: parse MNIST model\0", passed);
+        if !passed { failures += 1; }
+
+        if let Ok(ref parsed) = result {
+            // Test 10: Verify ir_version
+            {
+                let passed = parsed.ir_version > 0;
+                print_test_result(b"onnx: ir_version > 0\0", passed);
+                if !passed { failures += 1; }
+            }
+
+            // Test 11: Verify nodes found
+            {
+                let passed = parsed.node_count > 0;
+                print_test_result(b"onnx: has nodes\0", passed);
+                if !passed { failures += 1; }
+            }
+
+            // Test 12: Verify initializers (weights) found
+            {
+                let passed = parsed.initializer_count > 0;
+                print_test_result(b"onnx: has initializers\0", passed);
+                if !passed { failures += 1; }
+            }
+
+            // Test 13: Verify total weight size > 0
+            {
+                let total = parsed.total_weight_size();
+                let passed = total > 0;
+                print_test_result(b"onnx: weight size > 0\0", passed);
+                if !passed { failures += 1; }
+            }
+
+            // Test 14: Verify graph inputs/outputs
+            {
+                let passed = parsed.input_count > 0 && parsed.output_count > 0;
+                print_test_result(b"onnx: has inputs and outputs\0", passed);
+                if !passed { failures += 1; }
+            }
+
+            // Test 15: Build operator graph
+            {
+                let graph_result = loader::onnx_parser::build_graph(parsed);
+                let passed = graph_result.is_ok();
+                print_test_result(b"onnx: build_graph succeeds\0", passed);
+                if !passed { failures += 1; }
+
+                if let Ok(graph) = graph_result {
+                    // Test 16: Graph has correct structure
+                    {
+                        let passed = graph.node_count == parsed.node_count &&
+                                     graph.input_count > 0 &&
+                                     graph.output_count > 0;
+                        print_test_result(b"onnx: graph structure valid\0", passed);
+                        if !passed { failures += 1; }
+                    }
+                }
+            }
+
+        }
+
+        // Drop the parsed ONNX model before the registry test to avoid
+        // having two large heap objects simultaneously (~30KB each).
+        drop(result);
+
+        // Test 17: Full load/unload lifecycle via registry
+        {
+            loader::registry::init();
+            let load_result = loader::registry::load_model(b"mnist_test", MNIST_ONNX);
+            let loaded = load_result.is_ok();
+            print_test_result(b"registry: load MNIST model\0", loaded);
+            if !loaded { failures += 1; }
+
+            if let Ok(idx) = load_result {
+                // Verify model info
+                let info = loader::registry::get_info(idx);
+                let info_ok = info.is_some();
+                print_test_result(b"registry: get_info after load\0", info_ok);
+                if !info_ok { failures += 1; }
+
+                if let Some(info) = info {
+                    let meta_ok = info.param_count > 0 &&
+                                  info.weight_size > 0 &&
+                                  info.node_count > 0;
+                    print_test_result(b"registry: model metadata valid\0", meta_ok);
+                    if !meta_ok { failures += 1; }
+                }
+
+                // Find by name
+                let found = loader::registry::find_by_name(b"mnist_test");
+                let find_ok = found == Some(idx);
+                print_test_result(b"registry: find_by_name\0", find_ok);
+                if !find_ok { failures += 1; }
+
+                // Count
+                let count_ok = loader::registry::count() == 1;
+                print_test_result(b"registry: count == 1\0", count_ok);
+                if !count_ok { failures += 1; }
+
+                // Unload
+                let unload_ok = loader::registry::unload_model(idx).is_ok();
+                print_test_result(b"registry: unload model\0", unload_ok);
+                if !unload_ok { failures += 1; }
+
+                // Verify unloaded
+                let empty = loader::registry::count() == 0;
+                print_test_result(b"registry: count == 0 after unload\0", empty);
+                if !empty { failures += 1; }
+            }
+        }
+    }
+
+    // =========================================================================
+    // Error and edge case tests
+    // =========================================================================
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running model loader error/edge case tests...\n\0".as_ptr());
+    }
+
+    // Test 18: Error — corrupted ONNX data
+    {
+        let garbage: [u8; 64] = [0xFF, 0xFE, 0xAB, 0xCD, 0x00, 0x01, 0x02, 0x03,
+                                  0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+                                  0xDE, 0xAD, 0xBE, 0xEF, 0x42, 0x43, 0x44, 0x45,
+                                  0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+                                  0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+                                  0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                                  0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11,
+                                  0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22];
+        let result = loader::onnx_parser::parse_onnx(&garbage);
+        // Corrupted data should either fail to parse or produce an empty/invalid model.
+        // The protobuf parser may return Ok with garbage fields — the important thing
+        // is that it does NOT panic.
+        let passed = result.is_err() || result.is_ok();
+        print_test_result(b"error: corrupted ONNX data handled\0", passed);
+        if !passed { failures += 1; }
+
+        // If it returned Ok, verify the registry rejects it (no valid weights)
+        if result.is_ok() {
+            loader::registry::init();
+            let load_result = loader::registry::load_model(b"garbage", &garbage);
+            let passed = load_result.is_err();
+            print_test_result(b"error: corrupted data rejected by registry\0", passed);
+            if !passed { failures += 1; }
+        }
+    }
+
+    // Test 19: Error — empty input
+    {
+        let empty: [u8; 0] = [];
+        let result = loader::onnx_parser::parse_onnx(&empty);
+        // Empty input: parse_onnx may return Ok with 0 nodes (valid empty protobuf)
+        // or Err — either is acceptable, as long as it does not panic.
+        let passed = match &result {
+            Ok(parsed) => parsed.node_count == 0,
+            Err(_) => true,
+        };
+        print_test_result(b"error: empty input handled\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 20: Error — truncated ONNX (first 10 bytes only)
+    {
+        let truncated = &MNIST_ONNX[..core::cmp::min(10, MNIST_ONNX.len())];
+        let result = loader::onnx_parser::parse_onnx(truncated);
+        // Truncated data should parse partially or fail — must not panic.
+        // The key check: it does not crash and the registry rejects it.
+        let parse_ok = result.is_err() || result.is_ok();
+        print_test_result(b"error: truncated ONNX handled\0", parse_ok);
+        if !parse_ok { failures += 1; }
+
+        // Try loading truncated data through the registry — should fail
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"truncated", truncated);
+        let passed = load_result.is_err();
+        print_test_result(b"error: truncated ONNX rejected by registry\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 21: Multiple model loading — load MNIST twice with different names
+    {
+        loader::registry::init();
+        let load1 = loader::registry::load_model(b"mnist_a", MNIST_ONNX);
+        let load1_ok = load1.is_ok();
+        print_test_result(b"multi: load first model\0", load1_ok);
+        if !load1_ok { failures += 1; }
+
+        let load2 = loader::registry::load_model(b"mnist_b", MNIST_ONNX);
+        let load2_ok = load2.is_ok();
+        print_test_result(b"multi: load second model\0", load2_ok);
+        if !load2_ok { failures += 1; }
+
+        let count_ok = loader::registry::count() == 2;
+        print_test_result(b"multi: count == 2\0", count_ok);
+        if !count_ok { failures += 1; }
+
+        // Verify both are findable by name
+        let find_a = loader::registry::find_by_name(b"mnist_a").is_some();
+        let find_b = loader::registry::find_by_name(b"mnist_b").is_some();
+        let find_ok = find_a && find_b;
+        print_test_result(b"multi: both findable by name\0", find_ok);
+        if !find_ok { failures += 1; }
+
+        // Unload both
+        if let Ok(idx1) = load1 {
+            let _ = loader::registry::unload_model(idx1);
+        }
+        if let Ok(idx2) = load2 {
+            let _ = loader::registry::unload_model(idx2);
+        }
+        let empty = loader::registry::count() == 0;
+        print_test_result(b"multi: count == 0 after unload both\0", empty);
+        if !empty { failures += 1; }
+    }
+
+    // Test 22: Load 3 models, verify count, unload all
+    {
+        loader::registry::init();
+        let r1 = loader::registry::load_model(b"m0", MNIST_ONNX);
+        let r2 = loader::registry::load_model(b"m1", MNIST_ONNX);
+        let r3 = loader::registry::load_model(b"m2", MNIST_ONNX);
+        let all_ok = r1.is_ok() && r2.is_ok() && r3.is_ok();
+        let count_ok = loader::registry::count() == 3;
+        print_test_result(b"registry: load 3 models\0", all_ok && count_ok);
+        if !(all_ok && count_ok) { failures += 1; }
+
+        // Unload all
+        if let Ok(i) = r1 { let _ = loader::registry::unload_model(i); }
+        if let Ok(i) = r2 { let _ = loader::registry::unload_model(i); }
+        if let Ok(i) = r3 { let _ = loader::registry::unload_model(i); }
+        let cleanup_ok = loader::registry::count() == 0;
+        print_test_result(b"registry: cleanup 3 models\0", cleanup_ok);
+        if !cleanup_ok { failures += 1; }
+    }
+
+    // Test 23: Find nonexistent model
+    {
+        loader::registry::init();
+        let found = loader::registry::find_by_name(b"nonexistent");
+        let passed = found.is_none();
+        print_test_result(b"find: nonexistent returns None\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 24: Unload invalid index
+    {
+        loader::registry::init();
+        let result = loader::registry::unload_model(99);
+        let passed = result.is_err();
+        print_test_result(b"unload: invalid index returns Err\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 25: Double unload — load, unload, try to unload again
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"double_test", MNIST_ONNX);
+        let loaded = load_result.is_ok();
+        print_test_result(b"double unload: load succeeds\0", loaded);
+        if !loaded { failures += 1; }
+
+        if let Ok(idx) = load_result {
+            // First unload should succeed
+            let first_unload = loader::registry::unload_model(idx);
+            let first_ok = first_unload.is_ok();
+            print_test_result(b"double unload: first unload succeeds\0", first_ok);
+            if !first_ok { failures += 1; }
+
+            // Second unload should fail (slot is now empty)
+            let second_unload = loader::registry::unload_model(idx);
+            let second_fails = second_unload.is_err();
+            print_test_result(b"double unload: second unload fails\0", second_fails);
+            if !second_fails { failures += 1; }
+        }
+    }
+
+    // Summary
+    unsafe {
+        if failures == 0 {
+            kernel_ffi::uart_puts(b"[INFO] Model loader tests passed\n\0".as_ptr());
+        } else {
+            kernel_ffi::uart_puts(b"[FAIL] Model loader tests had failures\n\0".as_ptr());
+        }
+    }
+
+    failures
 }

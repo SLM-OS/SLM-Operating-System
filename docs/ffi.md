@@ -274,6 +274,62 @@ RustPoolStats rust_weight_pool_stats(void);     // Weight pool (model parameters
 RustPoolStats rust_workspace_pool_stats(void);  // Workspace pool (inference scratch)
 ```
 
+### Model Loader (called from C)
+
+The model loader parses ONNX models and manages a registry of loaded models. Implemented in Rust (`runtime/src/loader/`) with C FFI wrappers.
+
+```c
+// Initialize the model loader registry
+// Returns: 0 on success
+int rust_model_loader_init(void);
+
+// Load an ONNX model from a buffer
+// @param name: Model name (null-terminated)
+// @param data: Pointer to ONNX protobuf data
+// @param data_len: Size of data in bytes
+// Returns: Registry index (>= 0) on success, -1 on error
+int rust_model_load(const char *name, const uint8_t *data, size_t data_len);
+
+// Unload a model by registry index
+// Returns: 0 on success, -1 on error
+int rust_model_unload(uint32_t index);
+
+// Get model info by registry index
+// Fills the RustModelInfo struct on success
+// Returns: 0 on success, -1 on error
+int rust_model_get_info(uint32_t index, RustModelInfo *info);
+
+// Get number of currently loaded models
+uint32_t rust_model_count(void);
+
+// Find a model by name (null-terminated)
+// Returns: Registry index (>= 0) if found, -1 if not found
+int rust_model_find(const char *name);
+
+// Run model loader self-tests
+// Returns: Number of failures (0 = all passed)
+int rust_model_loader_test(void);
+```
+
+#### RustModelInfo Structure
+
+```c
+typedef struct {
+    uint8_t  name[32];        // Model name (null-terminated)
+    uint8_t  format;          // 0=GGUF, 1=ONNX, 2=Raw
+    uint8_t  _pad[3];         // Alignment padding
+    uint64_t param_count;     // Total parameters across all weight tensors
+    uint64_t weight_size;     // Weight data size in bytes
+    uint64_t workspace_size;  // Workspace allocation in bytes
+    uint32_t node_count;      // Operator nodes in the graph
+    uint32_t input_count;     // Graph-level inputs (excluding initializers)
+    uint32_t output_count;    // Graph-level outputs
+    uint32_t _reserved;       // Future use
+} RustModelInfo;
+```
+
+The registry supports up to 8 simultaneously loaded models. Memory is allocated from the weight and workspace pools (see Model Memory above) and freed automatically on unload.
+
 ### Component System (called from C)
 
 The component system is implemented in Rust (`runtime/src/component/`) with C FFI wrappers.
@@ -414,10 +470,9 @@ Used by the Rust model memory allocator (`gpu_map`/`gpu_unmap`) to ensure cache 
 ## Future Extensions
 
 Planned FFI additions:
-- Model loading functions (GGUF/ONNX parsing)
+- Inference execution (tensor operations, operator dispatch)
 - GPU command submission (requires GSP firmware)
 - Inference scheduling (request queuing, batching)
-- Tensor operations
 
 These will follow the same patterns established here.
 

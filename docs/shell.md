@@ -26,7 +26,7 @@ Available commands:
   uptime    - Show system uptime
   vmm       - Show virtual memory info
   ipc       - Show IPC statistics
-  model     - Show model memory pools
+  model     - Model management (load/unload/info/list/pools)
   dtb       - Show device tree info
   elftest   - Test ELF loader
   run       - Run a program (run <name>)
@@ -72,7 +72,12 @@ Available commands:
 | `uptime` | Show system uptime in seconds and milliseconds |
 | `vmm` | Show virtual memory statistics (page tables, mapped regions) |
 | `ipc` | Show IPC statistics (message queues, shared buffers) |
-| `model` | Show model memory pool status (weight and workspace pools) |
+| `model` | Show model pool stats and loaded model list |
+| `model load <path>` | Load an ONNX model from VFS (e.g., `/mnt/files/mnist.onnx`) |
+| `model list` | List loaded models with parameter count, weight size, and node count |
+| `model info <name\|idx>` | Show detailed information for a loaded model |
+| `model unload <name\|idx>` | Unload a model by name or registry index and free its memory |
+| `model pools` | Show weight and workspace memory pool statistics |
 | `dtb` | Show Device Tree info (parsed or defaults) |
 | `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |
 | `run <name>` | Run a program by name from the ELF table |
@@ -551,4 +556,4 @@ Backspace and basic line editing are supported.
 
 ---
 
-*Last updated: December 2025*
+*Last updated: April 2026*

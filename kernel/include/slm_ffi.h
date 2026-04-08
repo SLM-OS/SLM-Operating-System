@@ -281,6 +281,69 @@ extern RustPoolStats rust_workspace_pool_stats(void);
 
 /*
  * ==========================================================================
+ * Model Loader FFI (Phase 5)
+ * ==========================================================================
+ */
+
+/*
+ * Model info structure returned by Rust model loader.
+ */
+typedef struct {
+    uint8_t  name[32];
+    uint8_t  format;        /* 0=GGUF, 1=ONNX, 2=Raw */
+    uint8_t  _pad[3];
+    uint64_t param_count;
+    uint64_t weight_size;
+    uint64_t workspace_size;
+    uint32_t node_count;
+    uint32_t input_count;
+    uint32_t output_count;
+    uint32_t _reserved;
+} RustModelInfo;
+
+/*
+ * Initialize the model loader registry.
+ * Returns: 0 on success.
+ */
+extern int rust_model_loader_init(void);
+
+/*
+ * Load an ONNX model from a buffer.
+ * Returns: Registry index (>= 0) on success, -1 on error.
+ */
+extern int rust_model_load(const char *name, const uint8_t *data, size_t data_len);
+
+/*
+ * Unload a model by registry index.
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_model_unload(uint32_t index);
+
+/*
+ * Get model info by registry index.
+ * Returns: 0 on success, -1 on error. Fills info struct.
+ */
+extern int rust_model_get_info(uint32_t index, RustModelInfo *info);
+
+/*
+ * Get number of loaded models.
+ */
+extern uint32_t rust_model_count(void);
+
+/*
+ * Find a model by name (null-terminated).
+ * Returns: Registry index (>= 0) if found, -1 if not found.
+ */
+extern int rust_model_find(const char *name);
+
+/*
+ * Run model loader tests.
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_model_loader_test(void);
+
+/*
+ * ==========================================================================
  * Test Support Functions (called from Rust tests)
  * ==========================================================================
  */

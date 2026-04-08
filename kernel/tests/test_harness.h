@@ -70,4 +70,7 @@ int test_suite_integration(void);
 /* x86-64 boot and platform tests (x86 only) */
 int test_suite_x86_boot(void);
 
+/* Model loader tests (ONNX parsing, registry - calls into Rust) */
+int test_suite_model_loader(void);
+
 #endif /* TEST_HARNESS_H */
