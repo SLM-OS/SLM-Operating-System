@@ -241,6 +241,7 @@ static void __attribute__((unused)) gic_dist_init(void)
     /* Check GIC architecture revision */
     uint32_t pidr2 = *(volatile uint32_t *)(GICD_BASE + 0xFE8);
     uint32_t arch_rev = (pidr2 >> 4) & 0xF;
+    (void)arch_rev; /* Used by DEBUG_PRINT in debug builds */
     DEBUG_PRINT("GICv2: %u IRQs, PIDR2=0x%x arch=%u", num_irqs, pidr2, arch_rev);
 
     /* Disable all interrupts */

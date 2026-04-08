@@ -76,4 +76,7 @@ int test_suite_model_loader(void);
 /* Inference engine tests (tensor ops, end-to-end MNIST - calls into Rust) */
 int test_suite_inference(void);
 
+/* GPU compute integration tests (capability detection, fallback - calls into Rust) */
+int test_suite_gpu_compute(void);
+
 #endif /* TEST_HARNESS_H */

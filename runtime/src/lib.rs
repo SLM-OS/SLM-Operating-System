@@ -1783,3 +1783,182 @@ pub extern "C" fn rust_inference_test() -> i32 {
 
     failures
 }
+
+// =============================================================================
+// GPU Compute API (Phase 5, M3)
+// =============================================================================
+
+/// Print GPU status to UART (called from shell `model gpu` command).
+#[no_mangle]
+pub extern "C" fn rust_gpu_print_status() {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    let caps = inference::gpu::GpuCapabilities::detect();
+
+    unsafe {
+        uart_printf(b"GPU Status:\r\n\0".as_ptr());
+
+        // Driver name
+        uart_printf(b"  Driver:         %s\r\n\0".as_ptr(), caps.name.as_ptr());
+        uart_printf(b"  Device:         %s\r\n\0".as_ptr(), caps.device.as_ptr());
+
+        let status_str = match caps.status {
+            inference::gpu::GpuStatus::NotAvailable => b"Not available\0".as_ptr(),
+            inference::gpu::GpuStatus::DetectedNoCompute => b"Detected (compute not ready - GSP required)\0".as_ptr(),
+            inference::gpu::GpuStatus::ComputeReady => b"Compute ready\0".as_ptr(),
+        };
+        uart_printf(b"  Compute:        %s\r\n\0".as_ptr(), status_str);
+
+        if caps.cuda_cores > 0 {
+            uart_printf(b"  CUDA cores:     %lu\r\n\0".as_ptr(), caps.cuda_cores as u64);
+            uart_printf(b"  Tensor cores:   %lu\r\n\0".as_ptr(), caps.tensor_cores as u64);
+        }
+        uart_printf(b"  Unified memory: %s\r\n\0".as_ptr(),
+            if caps.unified_memory { b"yes\0".as_ptr() } else { b"no\0".as_ptr() });
+
+        let backend_str = if caps.has_compute() {
+            b"GPU (with CPU fallback)\0".as_ptr()
+        } else {
+            b"CPU only\0".as_ptr()
+        };
+        uart_printf(b"  Inference:      %s\r\n\0".as_ptr(), backend_str);
+    }
+}
+
+/// Run GPU compute integration tests.
+#[no_mangle]
+pub extern "C" fn rust_gpu_compute_test() -> i32 {
+    let mut failures: i32 = 0;
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running GPU compute tests...\n\0".as_ptr());
+    }
+
+    // Test 1: GPU capabilities detect returns valid struct
+    {
+        let caps = inference::gpu::GpuCapabilities::detect();
+        // On QEMU: NotAvailable. On Jetson: DetectedNoCompute.
+        // Both are valid states.
+        let passed = caps.status == inference::gpu::GpuStatus::NotAvailable ||
+                     caps.status == inference::gpu::GpuStatus::DetectedNoCompute;
+        print_test_result(b"gpu: capabilities detect valid\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 2: select_backend returns Cpu when no GPU
+    {
+        let caps = inference::gpu::GpuCapabilities::NONE;
+        let backend = inference::gpu::select_backend(
+            loader::graph::OpType::MatMul, 10000, &caps,
+        );
+        let passed = backend == inference::gpu::Backend::Cpu;
+        print_test_result(b"gpu: no-gpu forces CPU backend\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 3: select_backend returns Gpu for large MatMul with compute ready
+    {
+        let caps = inference::gpu::GpuCapabilities {
+            status: inference::gpu::GpuStatus::ComputeReady,
+            capabilities: inference::gpu::GPU_CAP_COMPUTE,
+            cuda_cores: 1024,
+            tensor_cores: 32,
+            unified_memory: true,
+            name: [0; 32],
+            device: [0; 64],
+        };
+        let backend = inference::gpu::select_backend(
+            loader::graph::OpType::MatMul, 10000, &caps,
+        );
+        let passed = backend == inference::gpu::Backend::Gpu;
+        print_test_result(b"gpu: large MatMul routes to GPU\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 4: select_backend keeps small ops on CPU even with GPU
+    {
+        let caps = inference::gpu::GpuCapabilities {
+            status: inference::gpu::GpuStatus::ComputeReady,
+            capabilities: inference::gpu::GPU_CAP_COMPUTE,
+            cuda_cores: 1024,
+            tensor_cores: 0,
+            unified_memory: true,
+            name: [0; 32],
+            device: [0; 64],
+        };
+        let backend = inference::gpu::select_backend(
+            loader::graph::OpType::Relu, 100, &caps,
+        );
+        let passed = backend == inference::gpu::Backend::Cpu;
+        print_test_result(b"gpu: small Relu stays on CPU\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 5: gpu_execute_matmul stub returns NotReady
+    {
+        let result = inference::gpu::gpu_execute_matmul(
+            core::ptr::null(), core::ptr::null(), core::ptr::null_mut(),
+            0, 0, 0,
+        );
+        let passed = result == Err(inference::gpu::GpuError::NotReady);
+        print_test_result(b"gpu: matmul stub returns NotReady\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 6: select_backend routes large Conv to GPU
+    {
+        let caps = inference::gpu::GpuCapabilities {
+            status: inference::gpu::GpuStatus::ComputeReady,
+            capabilities: inference::gpu::GPU_CAP_COMPUTE,
+            cuda_cores: 1024,
+            tensor_cores: 0,
+            unified_memory: true,
+            name: [0; 32],
+            device: [0; 64],
+        };
+        let backend = inference::gpu::select_backend(
+            loader::graph::OpType::Conv, 10000, &caps,
+        );
+        let passed = backend == inference::gpu::Backend::Gpu;
+        print_test_result(b"gpu: large Conv routes to GPU\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 7: select_backend keeps small MatMul on CPU even with GPU
+    {
+        let caps = inference::gpu::GpuCapabilities {
+            status: inference::gpu::GpuStatus::ComputeReady,
+            capabilities: inference::gpu::GPU_CAP_COMPUTE,
+            cuda_cores: 1024,
+            tensor_cores: 0,
+            unified_memory: true,
+            name: [0; 32],
+            device: [0; 64],
+        };
+        let backend = inference::gpu::select_backend(
+            loader::graph::OpType::MatMul, 100, &caps,
+        );
+        let passed = backend == inference::gpu::Backend::Cpu;
+        print_test_result(b"gpu: small MatMul stays on CPU\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8: rust_gpu_print_status doesn't crash (smoke test)
+    {
+        rust_gpu_print_status();
+        print_test_result(b"gpu: print_status no crash\0", true);
+    }
+
+    // Summary
+    unsafe {
+        if failures == 0 {
+            kernel_ffi::uart_puts(b"[INFO] GPU compute tests passed\n\0".as_ptr());
+        } else {
+            kernel_ffi::uart_puts(b"[FAIL] GPU compute tests had failures\n\0".as_ptr());
+        }
+    }
+
+    failures
+}

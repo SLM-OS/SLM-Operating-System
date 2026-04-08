@@ -156,3 +156,45 @@ int test_suite_inference(void)
 
     return failures;
 }
+
+/* ============================================================================
+ * GPU compute integration tests
+ * ============================================================================ */
+
+static void test_slm_gpu_available_returns(void)
+{
+    int result = slm_gpu_available();
+    TEST_ASSERT_TRUE(result == 0 || result == 1);
+}
+
+static void test_slm_gpu_get_info_fills_struct(void)
+{
+    RustGpuInfo info;
+    memset(&info, 0xFF, sizeof(info));
+    int result = slm_gpu_get_info(&info);
+    TEST_ASSERT_EQUAL_INT(0, result);
+    TEST_ASSERT_TRUE(info.name[0] != 0xFF);
+}
+
+static void test_slm_gpu_get_info_null_returns_error(void)
+{
+    int result = slm_gpu_get_info(NULL);
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
+int test_suite_gpu_compute(void)
+{
+    /* Part 1: Rust-side GPU compute tests */
+    int failures = rust_gpu_compute_test();
+
+    /* Part 2: C-side FFI tests */
+    UnityBegin("GPU Compute FFI Tests");
+
+    RUN_TEST(test_slm_gpu_available_returns);
+    RUN_TEST(test_slm_gpu_get_info_fills_struct);
+    RUN_TEST(test_slm_gpu_get_info_null_returns_error);
+
+    failures += UnityEnd();
+
+    return failures;
+}

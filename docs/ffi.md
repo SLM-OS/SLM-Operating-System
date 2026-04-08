@@ -357,6 +357,48 @@ int rust_infer_and_print(uint32_t model_index);
 int rust_inference_test(void);
 ```
 
+### GPU Compute (called from C)
+
+The GPU compute layer provides capability detection and status reporting for GPU-accelerated inference. Implemented in Rust (`runtime/src/inference/gpu.rs`) with C FFI wrappers in `kernel/src/slm_ffi.c`.
+
+```c
+// Check if GPU subsystem is available
+// Returns: 1 if available, 0 if not
+int slm_gpu_available(void);
+
+// Get GPU info for Rust
+// @param info: Pointer to RustGpuInfo struct to fill
+// Returns: 0 on success, -1 on error
+int slm_gpu_get_info(RustGpuInfo *info);
+
+// Print GPU status to UART (called from shell `model gpu` command)
+// Displays driver, device, compute status, cores, and inference backend
+void rust_gpu_print_status(void);
+
+// Run GPU compute integration tests
+// Tests capability detection, backend selection, and cache coherency stubs
+// Returns: Number of failures (0 = all passed)
+int rust_gpu_compute_test(void);
+```
+
+#### RustGpuInfo Structure
+
+```c
+typedef struct {
+    uint8_t  name[32];         // Driver name (e.g., "nvidia", "stub", "none")
+    uint8_t  device[64];       // Device description
+    uint32_t capabilities;     // GPU_CAP_* flags (COMPUTE, TENSOR_CORES, UNIFIED_MEMORY)
+    uint32_t cuda_cores;       // Number of CUDA cores (0 if N/A)
+    uint32_t tensor_cores;     // Number of tensor cores (0 if N/A)
+    uint64_t memory_size;      // GPU memory in bytes (0 for unified memory)
+    uint8_t  unified_memory;   // 1 if CPU/GPU share memory
+    uint8_t  compute_ready;    // 1 if gpu_submit/gpu_wait are implemented
+    uint8_t  _pad[6];          // Alignment padding
+} RustGpuInfo;
+```
+
+The `slm_gpu_available()` function delegates to the kernel's `gpu_available()`, which checks whether a GPU driver has been registered and initialized. The `slm_gpu_get_info()` function queries the active GPU driver via `gpu_get_info()` and copies the result into the `RustGpuInfo` layout expected by Rust.
+
 ### Component System (called from C)
 
 The component system is implemented in Rust (`runtime/src/component/`) with C FFI wrappers.

@@ -154,6 +154,35 @@ bitflags! {
 // Opaque Handle Types
 // =============================================================================
 
+/// GPU info structure from the kernel (matches C RustGpuInfo).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GpuInfoFfi {
+    pub name: [u8; 32],
+    pub device: [u8; 64],
+    pub capabilities: u32,
+    pub cuda_cores: u32,
+    pub tensor_cores: u32,
+    pub memory_size: u64,
+    pub unified_memory: u8,
+    pub compute_ready: u8,
+    pub _pad: [u8; 6],
+}
+
+impl GpuInfoFfi {
+    pub const EMPTY: Self = Self {
+        name: [0; 32],
+        device: [0; 64],
+        capabilities: 0,
+        cuda_cores: 0,
+        tensor_cores: 0,
+        memory_size: 0,
+        unified_memory: 0,
+        compute_ready: 0,
+        _pad: [0; 6],
+    };
+}
+
 /// Task identifier returned by slm_task_create.
 ///
 /// Tasks are identified by their ID (uint32_t in C). ID 0 is reserved
@@ -279,6 +308,12 @@ extern "C" {
 
     /// Invalidate CPU caches so CPU sees GPU-written data (DC IVAC).
     pub fn slm_gpu_sync_for_cpu(addr: *mut u8, size: usize);
+
+    /// Check if GPU subsystem is available. Returns 1 if available, 0 if not.
+    pub fn slm_gpu_available() -> i32;
+
+    /// Get GPU info. Returns 0 on success, -1 on error.
+    pub fn slm_gpu_get_info(info: *mut GpuInfoFfi) -> i32;
 
     // -------------------------------------------------------------------------
     // Task Management
@@ -444,6 +479,18 @@ pub fn print(s: &[u8]) {
 /// Get current time in nanoseconds since boot.
 pub fn get_time_ns() -> u64 {
     unsafe { slm_get_time_ns() }
+}
+
+/// Check if GPU is available.
+pub fn gpu_available() -> bool {
+    unsafe { slm_gpu_available() != 0 }
+}
+
+/// Get GPU info from the kernel.
+pub fn gpu_get_info() -> GpuInfoFfi {
+    let mut info = GpuInfoFfi::EMPTY;
+    unsafe { slm_gpu_get_info(&mut info); }
+    info
 }
 
 /// Send a message to a queue.

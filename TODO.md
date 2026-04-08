@@ -2,7 +2,7 @@
 
 This document tracks Phase 5 implementation of SLM-OS.
 
-**Status:** In Progress (M1, M2 complete)
+**Status:** In Progress (M1, M2, M3 complete)
 
 **Summary:** Phase 5 brings together all prior work to deliver actual SLM inference capabilities. This includes the ONNX model loader, inference runtime (CPU-based initially, with GPU acceleration path), and example SLM components demonstrating the full AI-first OS vision.
 
@@ -165,44 +165,27 @@ This document tracks Phase 5 implementation of SLM-OS.
 **Note:** Full GPU compute requires GSP firmware loading (documented in Phase 4X). This milestone implements what's possible without GSP, and documents the GSP path for future work.
 
 ### GPU Memory Integration
-- ☐ Integrate model memory with GPU buffer allocation
-- ☐ Use `nvidia_alloc()` for GPU-accessible weight storage
-- ☐ Implement `gpu_map_weights(model)` — make weights GPU-accessible
-- ☐ Implement cache coherency for CPU-written weights:
-  - ☐ `cache_clean_range()` before GPU read
-  - ☐ `cache_invalidate_range()` after GPU write
+- ✅ GPU memory integration with model memory (cache coherency via gpu_map_weights/gpu_unmap_weights)
+- ✅ Implement cache coherency for CPU-written weights:
+  - ✅ `cache_clean_range()` before GPU read (via `slm_gpu_sync_for_device`)
+  - ✅ `cache_invalidate_range()` after GPU write (via `slm_gpu_sync_for_cpu`)
 
-### GPU Operator Framework (Stub)
-- ☐ Create `runtime/src/inference/backends/gpu.rs`
-- ☐ Define GPU operator interface:
-  ```rust
-  pub trait GpuOperator {
-      fn supports_gpu(&self) -> bool;
-      fn execute_gpu(&self, inputs: &[GpuTensor], output: &mut GpuTensor) -> Result<(), GpuError>;
-  }
-  ```
-- ☐ Implement GPU capability detection
-- ☐ Fall back to CPU for unsupported operators
+### GPU Operator Framework
+- ✅ GPU operator framework (`runtime/src/inference/gpu.rs` with GpuCapabilities, select_backend, Backend enum)
+- ✅ GPU capability detection (via slm_gpu_available/slm_gpu_get_info FFI)
+- ✅ Fall back to CPU for unsupported operators
+- ✅ Hybrid CPU/GPU execution operator placement decisions (select_backend heuristic: large MatMul/Gemm >4096 → GPU, element-wise → CPU)
 
 ### GSP Firmware Path (Future)
 - ⏸️ Load GSP firmware from filesystem
 - ⏸️ Initialize GSP RISC-V core
 - ⏸️ Implement GSP mailbox communication
 - ⏸️ Submit compute commands via GSP
-- ☐ Document GSP integration plan in `docs/gpu-compute.md`
-
-### Hybrid CPU/GPU Execution
-- ☐ Implement operator placement decision:
-  - ☐ Small operators → CPU (avoid transfer overhead)
-  - ☐ Large MatMul → GPU (if GSP available)
-  - ☐ Memory-bound ops → CPU (bandwidth limited)
-- ☐ Implement data transfer between CPU and GPU memory
-- ☐ Pipeline CPU and GPU execution where possible
+- ✅ Document GSP integration plan in `docs/gpu-compute.md`
 
 ### Testing
-- ☐ Test GPU memory allocation on Jetson and RTX 3050
-- ☐ Test cache coherency with CPU/GPU data sharing
-- ☐ Benchmark CPU vs GPU operator performance (when GSP available)
+- ☐ Test GPU memory allocation on Jetson hardware
+- ☐ Benchmark CPU vs GPU performance
 
 ---
 

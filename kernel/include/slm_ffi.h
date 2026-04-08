@@ -369,6 +369,50 @@ extern int rust_inference_test(void);
 
 /*
  * ==========================================================================
+ * GPU Compute FFI (Phase 5, M3)
+ * ==========================================================================
+ */
+
+/*
+ * GPU info structure for Rust FFI.
+ */
+typedef struct {
+    uint8_t  name[32];         /* Driver name (e.g., "nvidia" or "stub") */
+    uint8_t  device[64];       /* Device description */
+    uint32_t capabilities;     /* GPU_CAP_* flags */
+    uint32_t cuda_cores;
+    uint32_t tensor_cores;
+    uint64_t memory_size;
+    uint8_t  unified_memory;   /* 1 if CPU/GPU share memory */
+    uint8_t  compute_ready;    /* 1 if submit/wait are implemented */
+    uint8_t  _pad[6];
+} RustGpuInfo;
+
+/*
+ * Check if GPU subsystem is available.
+ * Returns: 1 if available, 0 if not.
+ */
+int slm_gpu_available(void);
+
+/*
+ * Get GPU info for Rust.
+ * Returns: 0 on success, -1 on error. Fills info struct.
+ */
+int slm_gpu_get_info(RustGpuInfo *info);
+
+/*
+ * Print GPU status to UART (called from Rust shell command).
+ */
+extern void rust_gpu_print_status(void);
+
+/*
+ * Run GPU compute integration tests.
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_gpu_compute_test(void);
+
+/*
+ * ==========================================================================
  * Test Support Functions (called from Rust tests)
  * ==========================================================================
  */

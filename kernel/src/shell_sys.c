@@ -1304,8 +1304,12 @@ int cmd_model(int argc, char *argv[])
     if (strcmp(subcmd, "infer") == 0) {
         return model_infer(argc, argv);
     }
+    if (strcmp(subcmd, "gpu") == 0) {
+        rust_gpu_print_status();
+        return 0;
+    }
 
-    uart_puts("Usage: model [load|list|info|unload|infer|pools]\r\n");
+    uart_puts("Usage: model [load|list|info|unload|infer|pools|gpu]\r\n");
     return -1;
 }
 

@@ -55,6 +55,7 @@ pub struct InferenceEngine {
     workspace: BumpAllocator,
     bindings: [TensorBinding; MAX_BINDINGS],
     binding_count: usize,
+    gpu_caps: super::gpu::GpuCapabilities,
     initialized: bool,
 }
 
@@ -94,6 +95,7 @@ impl InferenceEngine {
             workspace: BumpAllocator::empty(),
             bindings: [TensorBinding::EMPTY; MAX_BINDINGS],
             binding_count: 0,
+            gpu_caps: super::gpu::GpuCapabilities::NONE,
             initialized: false,
         }
     }
@@ -125,6 +127,7 @@ impl InferenceEngine {
         self.weight_base = weight_base as *const u8;
         self.workspace = BumpAllocator::new(ws_ptr, ws_size);
         self.binding_count = 0;
+        self.gpu_caps = super::gpu::GpuCapabilities::detect();
         self.initialized = true;
         Ok(())
     }
@@ -227,7 +230,20 @@ impl InferenceEngine {
 
         match node.op_type {
             OpType::Reshape => self.exec_reshape(&node),
-            OpType::MatMul => self.exec_matmul(&node),
+            OpType::MatMul => {
+                // Hybrid dispatch: try GPU for large MatMul, fall back to CPU
+                let backend = super::gpu::select_backend(
+                    OpType::MatMul,
+                    self.estimate_input_elements(&node),
+                    &self.gpu_caps,
+                );
+                if backend == super::gpu::Backend::Gpu {
+                    if self.exec_matmul_gpu(&node).is_ok() {
+                        return Ok(());
+                    }
+                }
+                self.exec_matmul(&node)
+            }
             OpType::Add => self.exec_add(&node),
             OpType::Relu => self.exec_relu(&node),
             OpType::Softmax => self.exec_softmax(&node),
@@ -482,6 +498,36 @@ impl InferenceEngine {
         ).ok_or(EngineError::WorkspaceExhausted)?;
 
         ops::maxpool2d(&input, &mut out, kh, kw, sh, sw)?;
+        self.bind_output(node, 0, out);
+        Ok(())
+    }
+
+    /// Estimate total input elements for a node (for GPU placement decisions).
+    fn estimate_input_elements(&self, node: &GraphNode) -> usize {
+        let mut total = 0;
+        for i in 0..node.input_count as usize {
+            if let Ok(t) = self.resolve(&node.inputs[i]) {
+                total += t.num_elements();
+            }
+        }
+        total
+    }
+
+    /// Attempt to execute MatMul on GPU. Falls back on any error.
+    fn exec_matmul_gpu(&mut self, node: &GraphNode) -> Result<(), EngineError> {
+        let a = self.resolve(&node.inputs[0])?;
+        let b = self.resolve(&node.inputs[1])?;
+
+        let m = a.rows() as usize;
+        let k = a.cols() as usize;
+        let n = b.cols() as usize;
+
+        let mut out = self.workspace.alloc_tensor(&[m as u32, n as u32])
+            .ok_or(EngineError::WorkspaceExhausted)?;
+
+        super::gpu::gpu_execute_matmul(a.data, b.data, out.data_mut(), m, k, n)
+            .map_err(|_| EngineError::UnsupportedOp)?;
+
         self.bind_output(node, 0, out);
         Ok(())
     }

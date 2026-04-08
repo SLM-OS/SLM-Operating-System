@@ -26,7 +26,7 @@ Available commands:
   uptime    - Show system uptime
   vmm       - Show virtual memory info
   ipc       - Show IPC statistics
-  model     - Model management (load/unload/info/list/pools)
+  model     - Model management (load/unload/info/list/gpu/pools)
   dtb       - Show device tree info
   elftest   - Test ELF loader
   run       - Run a program (run <name>)
@@ -78,6 +78,7 @@ Available commands:
 | `model info <name\|idx>` | Show detailed information for a loaded model |
 | `model unload <name\|idx>` | Unload a model by name or registry index and free its memory |
 | `model infer <name\|idx>` | Run inference on model with zero input, print output probabilities and predicted class |
+| `model gpu` | Show GPU status, capabilities, and inference backend |
 | `model pools` | Show weight and workspace memory pool statistics |
 | `dtb` | Show Device Tree info (parsed or defaults) |
 | `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |

@@ -18,6 +18,7 @@ pub mod tensor;
 pub mod workspace;
 pub mod ops;
 pub mod engine;
+pub mod gpu;
 
 pub use tensor::Tensor;
 pub use workspace::BumpAllocator;

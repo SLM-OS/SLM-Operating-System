@@ -128,6 +128,13 @@ int test_harness_run_all(void)
     uart_puts("========================================\n");
     total_failures += test_suite_inference();
 
+    /* GPU compute integration tests */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("GPU Compute Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_gpu_compute();
+
     /* Rust FFI tests */
     uart_puts("\n");
     uart_puts("========================================\n");
