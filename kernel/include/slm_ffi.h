@@ -358,6 +358,13 @@ extern int rust_model_loader_test(void);
  * @output_len: Capacity of output buffer (in floats)
  * Returns: Number of output floats on success, negative on error.
  */
+/*
+ * Run inference with zero input and return the argmax class.
+ * Returns: class index (>= 0) on success, -1 on error.
+ * Used by kernel-mode components that cannot handle FP types.
+ */
+extern int rust_infer_classify(uint32_t model_index);
+
 extern int rust_infer(uint32_t model_index, const float *input_data,
                       size_t input_len, float *output_buf, size_t output_len);
 
@@ -410,6 +417,12 @@ extern void rust_gpu_print_status(void);
  * Returns: Number of failures (0 = all passed).
  */
 extern int rust_gpu_compute_test(void);
+
+/*
+ * Run component integration tests.
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_component_test(void);
 
 /*
  * ==========================================================================

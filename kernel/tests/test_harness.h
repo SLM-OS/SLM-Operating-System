@@ -82,4 +82,7 @@ int test_suite_gpu_compute(void);
 /* Syscall infrastructure tests (dispatch, trap frame, user task creation) */
 int test_suite_syscall(void);
 
+/* Component integration tests (infer_classify, example components) */
+int test_suite_components_m5(void);
+
 #endif /* TEST_HARNESS_H */

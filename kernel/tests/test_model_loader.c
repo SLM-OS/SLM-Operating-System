@@ -198,3 +198,28 @@ int test_suite_gpu_compute(void)
 
     return failures;
 }
+
+/* ============================================================================
+ * Component integration tests (M5)
+ * ============================================================================ */
+
+static void test_infer_classify_invalid_model(void)
+{
+    int result = rust_infer_classify(99);
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
+int test_suite_components_m5(void)
+{
+    /* Part 1: Rust-side component tests */
+    int failures = rust_component_test();
+
+    /* Part 2: C-side FFI tests */
+    UnityBegin("Component FFI Tests");
+
+    RUN_TEST(test_infer_classify_invalid_model);
+
+    failures += UnityEnd();
+
+    return failures;
+}

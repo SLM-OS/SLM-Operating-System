@@ -135,6 +135,13 @@ int test_harness_run_all(void)
     uart_puts("========================================\n");
     total_failures += test_suite_gpu_compute();
 
+    /* Component integration tests (M5) */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Component Integration Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_components_m5();
+
     /* Syscall infrastructure tests */
     uart_puts("\n");
     uart_puts("========================================\n");

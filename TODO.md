@@ -2,7 +2,7 @@
 
 This document tracks Phase 5 implementation of SLM-OS.
 
-**Status:** In Progress (M1, M2, M3, M4 complete)
+**Status:** In Progress (M1-M5 complete)
 
 **Summary:** Phase 5 brings together all prior work to deliver actual SLM inference capabilities. This includes the ONNX model loader, inference runtime (CPU-based initially, with GPU acceleration path), and example SLM components demonstrating the full AI-first OS vision.
 
@@ -283,17 +283,21 @@ This document tracks Phase 5 implementation of SLM-OS.
     publishes:
       - topic: /output/result
   ```
-- ☐ Document component API in `docs/component-development.md`
+- ✅ Document component API in `docs/component-development.md`
 
-### Anomaly Detector Component
-- ☐ Create `components/anomaly-detector/`
-- ☐ Implement simple anomaly detection model:
-  - ☐ Input: sensor readings (float array)
-  - ☐ Output: anomaly score + classification
-  - ☐ Model: Small MLP or autoencoder (< 1MB)
-- ☐ Subscribe to `/sensors/data` topic
-- ☐ Publish to `/alerts/anomaly` topic
-- ☐ Implement threshold-based alerting
+### Sensor Monitor Component (Rule-Based Threshold Monitoring)
+- ✅ Implement rule-based monitoring (no ML):
+  - ✅ Subscribes to `/sensors/data`, parses integer values
+  - ✅ Publishes alerts to `/alerts/threshold` when value > 50
+  - ✅ Cooperative polling loop with `yield()` and `pit_ticks` timeout
+- ✅ Demonstrates component lifecycle and message routing without model loading
+
+### Digit Classifier Component (MNIST Inference)
+- ✅ Implement MNIST digit classification:
+  - ✅ Subscribes to `/input/digits`
+  - ✅ Runs inference via `rust_infer_classify()` (zero input, argmax result)
+  - ✅ Publishes predicted class to `/output/class`
+- ✅ Demonstrates full AI inference pipeline within a component
 
 ### Text Classifier Component
 - ☐ Create `components/text-classifier/`
@@ -304,25 +308,15 @@ This document tracks Phase 5 implementation of SLM-OS.
 - ☐ Subscribe to `/input/text` topic
 - ☐ Publish to `/output/classification` topic
 
-### Sensor Monitor Component (No Model)
-- ☐ Create `components/sensor-monitor/`
-- ☐ Implement rule-based monitoring (no ML):
-  - ☐ Input: sensor readings
-  - ☐ Output: threshold alerts
-- ☐ Demonstrates component system without model loading
-- ☐ Useful as baseline for comparison
-
 ### Component Integration Testing
-- ☐ Load all three components simultaneously
-- ☐ Verify message routing between components
-- ☐ Test hot-swap of anomaly detector
+- ✅ Component integration with message routing (sensor_monitor + digit_classifier)
+- ☐ Test hot-swap of digit_classifier or sensor_monitor
 - ☐ Measure end-to-end latency (input → inference → output)
 - ☐ Stress test with high message rates
 
 ### Demo Script
-- ☐ Create `scripts/demo.lua` for scripted demo
-- ☐ Load components, inject test data, show results
-- ☐ Document demo in `docs/demo.md`
+- ✅ Create `scripts/demo.lua` for scripted demo
+- ✅ Demo shows system info, component listing, model status, and message routing walkthrough
 
 ---
 

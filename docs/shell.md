@@ -405,10 +405,14 @@ component status <name|idx>                 - Show component details
 Example:
 ```
 SLM-OS> component builtins
-Built-in Components (3 available):
+Built-in Components (5 available):
+  Name         Version  Type        Description
+  ----         -------  ----        -----------
   counter      1.0      service     Counts to 10 with 500ms intervals
   echo         1.0      service     Echoes IPC messages back to sender
   listener     1.0      service     Listens on 'events' topic via message router
+  sensor_monitor 1.0    service     Rule-based sensor threshold monitoring
+  digit_classifier 1.0  application MNIST digit classification via inference engine
 
 SLM-OS> component run listener
 Component 'listener' v1.0 started (idx=0, task=7)

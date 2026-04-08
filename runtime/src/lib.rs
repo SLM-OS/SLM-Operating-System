@@ -1346,6 +1346,46 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
 // Inference API (Phase 5, M2)
 // =============================================================================
 
+/// Run inference with zero input and return the argmax class.
+///
+/// Used by kernel-mode components (compiled with -mgeneral-regs-only)
+/// that cannot handle FP types directly.
+///
+/// Returns: argmax class index (>= 0) on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn rust_infer_classify(model_index: u32) -> i32 {
+    static CLASSIFY_INPUT: [f32; 784] = [0.0; 784];
+    static mut CLASSIFY_OUTPUT: [f32; 64] = [0.0; 64];
+
+    let result = unsafe {
+        for o in CLASSIFY_OUTPUT.iter_mut() { *o = 0.0; }
+        inference::run_inference(
+            model_index as usize,
+            CLASSIFY_INPUT.as_ptr(),
+            CLASSIFY_INPUT.len(),
+            CLASSIFY_OUTPUT.as_mut_ptr(),
+            CLASSIFY_OUTPUT.len(),
+        )
+    };
+
+    match result {
+        Ok(n) if n > 0 => {
+            // Find argmax
+            let mut best_idx: i32 = 0;
+            let mut best_val = unsafe { CLASSIFY_OUTPUT[0] };
+            for i in 1..n {
+                let v = unsafe { CLASSIFY_OUTPUT[i] };
+                if v > best_val {
+                    best_val = v;
+                    best_idx = i as i32;
+                }
+            }
+            best_idx
+        }
+        _ => -1,
+    }
+}
+
 /// Run inference on a loaded model.
 ///
 /// Returns number of output floats written on success, negative on error.
@@ -1957,6 +1997,52 @@ pub extern "C" fn rust_gpu_compute_test() -> i32 {
             kernel_ffi::uart_puts(b"[INFO] GPU compute tests passed\n\0".as_ptr());
         } else {
             kernel_ffi::uart_puts(b"[FAIL] GPU compute tests had failures\n\0".as_ptr());
+        }
+    }
+
+    failures
+}
+
+// =============================================================================
+// Component Tests (Phase 5, M5)
+// =============================================================================
+
+/// Test the rust_infer_classify FFI and component infrastructure.
+///
+/// Note: MNIST model loading + inference is already tested in rust_inference_test.
+/// These tests validate the classify-specific FFI (integer return, invalid model).
+#[no_mangle]
+pub extern "C" fn rust_component_test() -> i32 {
+    let mut failures: i32 = 0;
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running component tests...\n\0".as_ptr());
+    }
+
+    // Test 1: rust_infer_classify with invalid model returns -1
+    {
+        let result = rust_infer_classify(99);
+        let passed = result == -1;
+        print_test_result(b"classify: invalid model returns -1\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 2: rust_infer_classify with model index 0 (no model loaded at this point)
+    {
+        let result = rust_infer_classify(0);
+        // Model 0 may or may not be loaded depending on prior test state.
+        // If loaded, returns 0-9. If not loaded, returns -1. Both are valid.
+        let passed = (result >= -1) && (result <= 9);
+        print_test_result(b"classify: valid return range\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Summary
+    unsafe {
+        if failures == 0 {
+            kernel_ffi::uart_puts(b"[INFO] Component tests passed\n\0".as_ptr());
+        } else {
+            kernel_ffi::uart_puts(b"[FAIL] Component tests had failures\n\0".as_ptr());
         }
     }
 

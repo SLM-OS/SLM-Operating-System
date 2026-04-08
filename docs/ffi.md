@@ -346,6 +346,15 @@ The inference engine executes ONNX operator graphs on loaded models. Implemented
 int rust_infer(uint32_t model_index, const float *input_data,
                size_t input_len, float *output_buf, size_t output_len);
 
+// Run inference with zero input and return argmax class index
+// @param model_index: Registry index of loaded model
+// Returns: class index (>= 0) on success, -1 on error
+// Used by kernel-mode components that cannot handle FP types.
+// Internally allocates a static 784-float input buffer (zeros) and
+// a 64-float output buffer, runs the full inference pipeline, and
+// returns the index of the highest output value.
+int rust_infer_classify(uint32_t model_index);
+
 // Run inference with zero input, print results to UART
 // Prints output probabilities and predicted class
 // @param model_index: Registry index of loaded model

@@ -617,8 +617,10 @@ pub fn run_inference(
     // SAFETY: We hold the engine lock, exclusive access guaranteed.
     let result = unsafe {
         let engine = &mut *ENGINE.get();
-        engine.init(model_index)?;
-        engine.run(input, input_len, output, output_len)
+        match engine.init(model_index) {
+            Ok(()) => engine.run(input, input_len, output, output_len),
+            Err(e) => Err(e),
+        }
     };
 
     engine_unlock();
