@@ -571,7 +571,10 @@ Output: logits[42] → argmax → decode(core, priority_adj, preempt)
 
 **Total:** ~131K parameters, ~262K FLOPs per inference.
 
-**Performance:** On AArch64, the inner loop uses NEON SIMD intrinsics (`vfmaq_f32` for 4-wide fused multiply-add, `vmaxq_f32` for vectorized ReLU). Estimated ~22µs on Cortex-A78 at 1.5 GHz (~12 GFLOPS with NEON).
+**Performance:** SIMD-optimized on both architectures:
+- **AArch64**: NEON intrinsics (`vfmaq_f32` fused multiply-add, `vmaxq_f32` ReLU). Estimated ~22µs on Cortex-A78 @ 1.5 GHz.
+- **x86-64**: SSE intrinsics (`_mm_mul_ps`/`_mm_add_ps` dot product, `_mm_max_ps` ReLU, shuffle-based horizontal sum).
+- **Fallback**: Scalar C code on unsupported architectures.
 
 **Thread safety:** All scratch memory is stack-allocated (two alternating 256-float buffers = 2 KB). No static globals, no locks needed. Multiple CPUs can run inference concurrently.
 

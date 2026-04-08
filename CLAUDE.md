@@ -126,6 +126,10 @@ make kernel PLATFORM=JETSON_ORIN_NANO  # Jetson Orin Nano
 # Must configure manually since Makefile doesn't forward cmake options
 cmake -B build/kernel -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \
   -DPLATFORM=QEMU_VIRT -DENABLE_AI_SCHEDULER=ON && cmake --build build/kernel
+
+# AI scheduler on x86-64 (uses SSE instead of NEON):
+cmake -B build/kernel -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-x86_64-none-elf.cmake \
+  -DPLATFORM=X86_64 -DENABLE_AI_SCHEDULER=ON && cmake --build build/kernel
 ```
 
 The Makefile automatically selects the correct toolchain, QEMU binary, and QEMU machine settings based on `PLATFORM`. For x86-64, the test target creates a bootable GRUB ISO and uses `isa-debug-exit` for clean test termination.

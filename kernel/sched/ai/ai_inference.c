@@ -20,8 +20,15 @@
 #if defined(__aarch64__) && defined(__ARM_NEON)
 #include <arm_neon.h>
 #define USE_NEON 1
+#define USE_SSE  0
+#elif defined(__x86_64__) && defined(__SSE2__)
+#include <xmmintrin.h>  /* SSE */
+#include <emmintrin.h>  /* SSE2 */
+#define USE_NEON 0
+#define USE_SSE  1
 #else
 #define USE_NEON 0
+#define USE_SSE  0
 #endif
 
 /* ============================================================================
@@ -45,17 +52,36 @@ static void ai_matvec(const float *W, const float *bias,
         float32x4_t acc = vdupq_n_f32(0.0f);
         int j = 0;
 
-        /* Process 4 elements at a time */
         for (; j <= N - 4; j += 4) {
             float32x4_t w = vld1q_f32(&row[j]);
             float32x4_t x = vld1q_f32(&in[j]);
             acc = vfmaq_f32(acc, w, x);
         }
 
-        /* Horizontal sum of accumulator */
         float sum = vaddvq_f32(acc);
 
-        /* Handle remaining elements */
+        for (; j < N; j++) {
+            sum += row[j] * in[j];
+        }
+#elif USE_SSE
+        /* SSE 4-wide accumulation */
+        __m128 acc = _mm_setzero_ps();
+        int j = 0;
+
+        for (; j <= N - 4; j += 4) {
+            __m128 w = _mm_loadu_ps(&row[j]);
+            __m128 x = _mm_loadu_ps(&in[j]);
+            acc = _mm_add_ps(acc, _mm_mul_ps(w, x));
+        }
+
+        /* Horizontal sum: [a,b,c,d] → a+b+c+d */
+        __m128 shuf = _mm_shuffle_ps(acc, acc, _MM_SHUFFLE(2,3,0,1));
+        acc = _mm_add_ps(acc, shuf);
+        shuf = _mm_shuffle_ps(acc, acc, _MM_SHUFFLE(0,1,2,3));
+        acc = _mm_add_ps(acc, shuf);
+        float sum;
+        _mm_store_ss(&sum, acc);
+
         for (; j < N; j++) {
             sum += row[j] * in[j];
         }
@@ -84,6 +110,19 @@ static void ai_relu(float *x, int n)
         float32x4_t v = vld1q_f32(&x[i]);
         v = vmaxq_f32(v, zero);
         vst1q_f32(&x[i], v);
+    }
+
+    for (; i < n; i++) {
+        if (x[i] < 0.0f) x[i] = 0.0f;
+    }
+#elif USE_SSE
+    __m128 zero = _mm_setzero_ps();
+    int i = 0;
+
+    for (; i <= n - 4; i += 4) {
+        __m128 v = _mm_loadu_ps(&x[i]);
+        v = _mm_max_ps(v, zero);
+        _mm_storeu_ps(&x[i], v);
     }
 
     for (; i < n; i++) {
