@@ -5,16 +5,83 @@
 //! workspace bump allocator.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::loader::graph::*;
 use crate::loader::registry;
 use crate::mm;
+use crate::kernel_ffi;
 use super::tensor::Tensor;
 use super::workspace::BumpAllocator;
 use super::ops;
 
 /// Maximum named tensors tracked during inference.
 const MAX_BINDINGS: usize = 32;
+
+// =============================================================================
+// Inference Statistics
+// =============================================================================
+
+/// Inference performance statistics (thread-safe via atomics).
+#[repr(C)]
+#[derive(Debug)]
+pub struct InferenceStats {
+    pub total_inferences: u64,
+    pub total_time_ns: u64,
+    pub min_time_ns: u64,
+    pub max_time_ns: u64,
+    pub last_time_ns: u64,
+    pub errors: u64,
+}
+
+/// Atomic counters for inference stats.
+static STATS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static STATS_TIME: AtomicU64 = AtomicU64::new(0);
+static STATS_MIN: AtomicU64 = AtomicU64::new(u64::MAX);
+static STATS_MAX: AtomicU64 = AtomicU64::new(0);
+static STATS_LAST: AtomicU64 = AtomicU64::new(0);
+static STATS_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+/// Get a snapshot of inference statistics.
+pub fn get_stats() -> InferenceStats {
+    let min = STATS_MIN.load(Ordering::Relaxed);
+    InferenceStats {
+        total_inferences: STATS_TOTAL.load(Ordering::Relaxed),
+        total_time_ns: STATS_TIME.load(Ordering::Relaxed),
+        min_time_ns: if min == u64::MAX { 0 } else { min },
+        max_time_ns: STATS_MAX.load(Ordering::Relaxed),
+        last_time_ns: STATS_LAST.load(Ordering::Relaxed),
+        errors: STATS_ERRORS.load(Ordering::Relaxed),
+    }
+}
+
+/// Record a successful inference.
+fn record_inference(elapsed_ns: u64) {
+    STATS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    STATS_TIME.fetch_add(elapsed_ns, Ordering::Relaxed);
+    STATS_LAST.store(elapsed_ns, Ordering::Relaxed);
+
+    // Update min (CAS loop)
+    let mut cur = STATS_MIN.load(Ordering::Relaxed);
+    while elapsed_ns < cur {
+        match STATS_MIN.compare_exchange_weak(cur, elapsed_ns, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(actual) => cur = actual,
+        }
+    }
+
+    // Update max (CAS loop)
+    cur = STATS_MAX.load(Ordering::Relaxed);
+    while elapsed_ns > cur {
+        match STATS_MAX.compare_exchange_weak(cur, elapsed_ns, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+fn record_error() {
+    STATS_ERRORS.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Errors from the inference engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,6 +681,8 @@ pub fn run_inference(
 ) -> Result<usize, EngineError> {
     engine_lock();
 
+    let start = kernel_ffi::get_time_ns();
+
     // SAFETY: We hold the engine lock, exclusive access guaranteed.
     let result = unsafe {
         let engine = &mut *ENGINE.get();
@@ -622,6 +691,13 @@ pub fn run_inference(
             Err(e) => Err(e),
         }
     };
+
+    let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+
+    match &result {
+        Ok(_) => record_inference(elapsed),
+        Err(_) => record_error(),
+    }
 
     engine_unlock();
     result

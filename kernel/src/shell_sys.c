@@ -1308,8 +1308,51 @@ int cmd_model(int argc, char *argv[])
         rust_gpu_print_status();
         return 0;
     }
+    if (strcmp(subcmd, "stats") == 0) {
+        RustInferStats stats;
+        if (rust_infer_stats(&stats) == 0) {
+            uart_puts("Inference Statistics:\r\n");
+            uart_printf("  Total inferences: %lu\r\n", (unsigned long)stats.total_inferences);
+            if (stats.total_inferences > 0) {
+                unsigned long avg_us = (unsigned long)(stats.total_time_ns / stats.total_inferences / 1000);
+                uart_printf("  Avg latency:      %lu us\r\n", avg_us);
+                uart_printf("  Min latency:      %lu us\r\n", (unsigned long)(stats.min_time_ns / 1000));
+                uart_printf("  Max latency:      %lu us\r\n", (unsigned long)(stats.max_time_ns / 1000));
+                uart_printf("  Last latency:     %lu us\r\n", (unsigned long)(stats.last_time_ns / 1000));
+            }
+            uart_printf("  Errors:           %lu\r\n", (unsigned long)stats.errors);
+        }
+        return 0;
+    }
+    if (strcmp(subcmd, "bench") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: model bench <name|idx> [iterations]\r\n");
+            return -1;
+        }
+        int idx = -1;
+        uint32_t parsed_idx;
+        if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+            idx = (int)parsed_idx;
+        } else {
+            idx = rust_model_find(argv[2]);
+        }
+        if (idx < 0) {
+            uart_printf("model bench: '%s' not found\r\n", argv[2]);
+            return -1;
+        }
+        uint32_t iters = 10;  /* Default 10 iterations */
+        if (argc >= 4) {
+            uint32_t parsed_iters;
+            if (shell_parse_uint(argv[3], &parsed_iters) == 0 && parsed_iters > 0) {
+                iters = parsed_iters;
+            }
+        }
+        uart_printf("Benchmarking model '%s' (%lu iterations)...\r\n",
+                    argv[2], (unsigned long)iters);
+        return rust_infer_bench((uint32_t)idx, iters);
+    }
 
-    uart_puts("Usage: model [load|list|info|unload|infer|pools|gpu]\r\n");
+    uart_puts("Usage: model [load|list|info|unload|infer|bench|stats|pools|gpu]\r\n");
     return -1;
 }
 

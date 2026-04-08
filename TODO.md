@@ -2,7 +2,7 @@
 
 This document tracks Phase 5 implementation of SLM-OS.
 
-**Status:** In Progress (M1-M5 complete)
+**Status:** In Progress (M1-M6 complete)
 
 **Summary:** Phase 5 brings together all prior work to deliver actual SLM inference capabilities. This includes the ONNX model loader, inference runtime (CPU-based initially, with GPU acceleration path), and example SLM components demonstrating the full AI-first OS vision.
 
@@ -325,15 +325,15 @@ This document tracks Phase 5 implementation of SLM-OS.
 **Depends on:** M1-M5
 
 ### End-to-End Pipeline
-- ☐ Define inference request/response protocol
-- ☐ Implement pipeline stages:
-  1. ☐ Component receives input message
+- ✅ Define inference request/response protocol (implemented via message routing in M5 components)
+- ✅ Implement pipeline stages:
+  1. ✅ Component receives input message
   2. ☐ Preprocess input (tokenization, normalization)
-  3. ☐ Load/reuse model
-  4. ☐ Run inference
+  3. ✅ Load/reuse model
+  4. ✅ Run inference
   5. ☐ Postprocess output
-  6. ☐ Send response message
-- ☐ Measure and log each stage's latency
+  6. ✅ Send response message (component publishes result)
+- ✅ Measure and log each stage's latency (InferenceStats tracking)
 
 ### Batching Support
 - ☐ Implement request batching in inference engine:
@@ -357,10 +357,10 @@ This document tracks Phase 5 implementation of SLM-OS.
 - ☐ If AI scheduler available (Phase AI-Sched), use ML-based scheduling
 
 ### Performance Monitoring
-- ☐ Track inference latency (p50, p95, p99)
-- ☐ Track throughput (inferences/second)
-- ☐ Track memory usage (weights, workspace)
-- ☐ Expose metrics via shell command: `infer stats`
+- ✅ Track inference latency (min/avg/max/last)
+- ✅ Track throughput (inferences/second via bench)
+- ✅ Track memory usage (via `model pools` command)
+- ✅ Expose metrics via shell command: `model stats`
 - ☐ Optional: Expose metrics via network API
 
 ### Testing

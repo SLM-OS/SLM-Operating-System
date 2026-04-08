@@ -26,7 +26,7 @@ Available commands:
   uptime    - Show system uptime
   vmm       - Show virtual memory info
   ipc       - Show IPC statistics
-  model     - Model management (load/unload/info/list/gpu/pools)
+  model     - Model management (load/unload/info/list/gpu/pools/stats/bench)
   dtb       - Show device tree info
   elftest   - Test ELF loader
   run       - Run a program (run <name>)
@@ -80,6 +80,8 @@ Available commands:
 | `model infer <name\|idx>` | Run inference on model with zero input, print output probabilities and predicted class |
 | `model gpu` | Show GPU status, capabilities, and inference backend |
 | `model pools` | Show weight and workspace memory pool statistics |
+| `model stats` | Show inference performance statistics (latency, throughput, errors) |
+| `model bench <name> [N]` | Benchmark model inference latency (default 10 iterations) |
 | `dtb` | Show Device Tree info (parsed or defaults) |
 | `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |
 | `run <name>` | Run a program by name from the ELF table |

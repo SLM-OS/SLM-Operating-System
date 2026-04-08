@@ -1346,6 +1346,93 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
 // Inference API (Phase 5, M2)
 // =============================================================================
 
+/// Get inference performance statistics.
+#[no_mangle]
+pub extern "C" fn rust_infer_stats(stats: *mut inference::InferenceStats) -> i32 {
+    if stats.is_null() {
+        return -1;
+    }
+    unsafe {
+        *stats = inference::get_stats();
+    }
+    0
+}
+
+/// Run inference benchmark: N iterations, print min/avg/max latency.
+#[no_mangle]
+pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if iterations == 0 {
+        return -1;
+    }
+
+    static BENCH_INPUT: [f32; 784] = [0.0; 784];
+    static mut BENCH_OUTPUT: [f32; 64] = [0.0; 64];
+
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    let mut total_ns: u64 = 0;
+    let mut success: u32 = 0;
+
+    for i in 0..iterations {
+        let start = kernel_ffi::get_time_ns();
+        let result = unsafe {
+            for o in BENCH_OUTPUT.iter_mut() { *o = 0.0; }
+            inference::run_inference(
+                model_index as usize,
+                BENCH_INPUT.as_ptr(),
+                BENCH_INPUT.len(),
+                BENCH_OUTPUT.as_mut_ptr(),
+                BENCH_OUTPUT.len(),
+            )
+        };
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+
+        if result.is_ok() {
+            if elapsed < min_ns { min_ns = elapsed; }
+            if elapsed > max_ns { max_ns = elapsed; }
+            total_ns += elapsed;
+            success += 1;
+        }
+
+        // Print progress every 10 iterations
+        if (i + 1) % 10 == 0 || i + 1 == iterations {
+            unsafe {
+                uart_printf(b"  [%lu/%lu] last=%lu us\r\n\0".as_ptr(),
+                    (i + 1) as u64, iterations as u64, elapsed / 1000);
+            }
+        }
+    }
+
+    if success == 0 {
+        unsafe {
+            uart_printf(b"Benchmark failed: 0/%lu inferences succeeded\r\n\0".as_ptr(),
+                iterations as u64);
+        }
+        return -1;
+    }
+
+    let avg_ns = total_ns / success as u64;
+    let avg_us = avg_ns / 1000;
+    let min_us = min_ns / 1000;
+    let max_us = max_ns / 1000;
+
+    unsafe {
+        uart_printf(b"\r\nBenchmark Results (%lu iterations):\r\n\0".as_ptr(),
+            success as u64);
+        uart_printf(b"  Min latency:  %lu us\r\n\0".as_ptr(), min_us);
+        uart_printf(b"  Avg latency:  %lu us\r\n\0".as_ptr(), avg_us);
+        uart_printf(b"  Max latency:  %lu us\r\n\0".as_ptr(), max_us);
+        uart_printf(b"  Throughput:   %lu infer/sec\r\n\0".as_ptr(),
+            if avg_us > 0 { 1_000_000 / avg_us } else { 0 });
+    }
+
+    0
+}
+
 /// Run inference with zero input and return the argmax class.
 ///
 /// Used by kernel-mode components (compiled with -mgeneral-regs-only)
@@ -2034,6 +2121,24 @@ pub extern "C" fn rust_component_test() -> i32 {
         // If loaded, returns 0-9. If not loaded, returns -1. Both are valid.
         let passed = (result >= -1) && (result <= 9);
         print_test_result(b"classify: valid return range\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 3: Inference stats are populated (from prior inference tests)
+    {
+        let stats = inference::get_stats();
+        // After all prior inference tests, total should be > 0
+        let passed = stats.total_inferences > 0 && stats.errors > 0;  // errors from invalid model tests
+        print_test_result(b"stats: counters populated\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 4: Stats struct has valid ranges
+    {
+        let stats = inference::get_stats();
+        let passed = stats.min_time_ns <= stats.max_time_ns &&
+                     stats.total_time_ns >= stats.total_inferences; // at least 1 ns each
+        print_test_result(b"stats: valid ranges\0", passed);
         if !passed { failures += 1; }
     }
 

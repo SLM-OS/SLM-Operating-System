@@ -364,7 +364,34 @@ int rust_infer_and_print(uint32_t model_index);
 // Run inference engine self-tests
 // Returns: number of test failures (0 = all passed)
 int rust_inference_test(void);
+
+// Get inference performance statistics
+// @param stats: Pointer to RustInferStats struct to fill
+// Returns: 0 on success, -1 on error
+int rust_infer_stats(RustInferStats *stats);
+
+// Benchmark model inference latency
+// @param model_index: Registry index of loaded model
+// @param iterations: Number of inference iterations to run
+// Returns: 0 on success, negative on error
+// Runs N iterations of inference, prints min/avg/max latency results to UART
+int rust_infer_bench(uint32_t model_index, uint32_t iterations);
 ```
+
+#### RustInferStats Structure
+
+```c
+typedef struct {
+    uint64_t total_inferences;  // Total inference calls completed
+    uint64_t total_errors;      // Total inference errors
+    uint64_t min_latency_us;    // Minimum inference latency (microseconds)
+    uint64_t max_latency_us;    // Maximum inference latency (microseconds)
+    uint64_t avg_latency_us;    // Average inference latency (microseconds)
+    uint64_t last_latency_us;   // Most recent inference latency (microseconds)
+} RustInferStats;
+```
+
+The `rust_infer_stats()` function fills the caller-provided struct with cumulative statistics from the inference engine. Latency values are tracked per-inference and reported in microseconds. The `rust_infer_bench()` function runs the specified number of iterations on the given model and prints a summary (min/avg/max latency) to the UART console.
 
 ### GPU Compute (called from C)
 

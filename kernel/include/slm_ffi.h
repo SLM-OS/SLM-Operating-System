@@ -375,6 +375,30 @@ extern int rust_infer(uint32_t model_index, const float *input_data,
 extern int rust_inference_test(void);
 
 /*
+ * Inference statistics structure.
+ */
+typedef struct {
+    uint64_t total_inferences;
+    uint64_t total_time_ns;
+    uint64_t min_time_ns;
+    uint64_t max_time_ns;
+    uint64_t last_time_ns;
+    uint64_t errors;
+} RustInferStats;
+
+/*
+ * Get inference performance statistics.
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_infer_stats(RustInferStats *stats);
+
+/*
+ * Run inference benchmark (N iterations, prints results to UART).
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
+
+/*
  * ==========================================================================
  * GPU Compute FFI (Phase 5, M3)
  * ==========================================================================
