@@ -527,6 +527,61 @@ The context switch saves/restores:
 #define DEADLINE_BOOST_NS     (100 * 1000000ULL)  // 100ms
 ```
 
+### AI Scheduler (Optional)
+
+The AI scheduler is an optional feature that adds MLP/PPO model-based CPU assignment policies. It is disabled by default and has no effect on the standard build.
+
+```bash
+# Build with AI scheduler (adds ai_mlp and ai_ppo policies)
+cmake -B build/kernel \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \
+  -DPLATFORM=QEMU_VIRT \
+  -DENABLE_AI_SCHEDULER=ON
+
+# Or for tests
+cmake -B build/kernel-test \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \
+  -DPLATFORM=QEMU_VIRT \
+  -DENABLE_BOOT_TESTS=ON \
+  -DENABLE_AI_SCHEDULER=ON
+```
+
+When enabled:
+- Defines `CONFIG_AI_SCHEDULER=1` globally
+- Builds `libai_sched.a` — a separate static library compiled **without** `-mgeneral-regs-only` (same pattern as Lua), enabling FP/NEON for inference math
+- Registers `ai_mlp` and `ai_ppo` policies at boot via `sched_ai_init()`
+- Adds ~1 MB to binary size (mostly weight arrays; stub weights are all zeros)
+
+**Files:** `kernel/sched/ai/` — `ai_types.h`, `ai_weights.h`, `ai_weights_stub.c`, `ai_inference.{c,h}`, `ai_state.{c,h}`, `sched_ai.c`, `fp_context.S`
+
+#### Inference Engine Architecture
+
+The inference engine implements a 4-layer feedforward neural network:
+
+```
+Input: state[108] (per-core, per-task, and global features)
+  ↓
+Layer 0: Linear(108→256) + ReLU     ~27K params
+Layer 1: Linear(256→256) + ReLU     ~66K params
+Layer 2: Linear(256→128) + ReLU     ~33K params
+Layer 3: Linear(128→42)             ~5K params
+  ↓
+Output: logits[42] → argmax → decode(core, priority_adj, preempt)
+```
+
+**Total:** ~131K parameters, ~262K FLOPs per inference.
+
+**Performance:** On AArch64, the inner loop uses NEON SIMD intrinsics (`vfmaq_f32` for 4-wide fused multiply-add, `vmaxq_f32` for vectorized ReLU). Estimated ~22µs on Cortex-A78 at 1.5 GHz (~12 GFLOPS with NEON).
+
+**Thread safety:** All scratch memory is stack-allocated (two alternating 256-float buffers = 2 KB). No static globals, no locks needed. Multiple CPUs can run inference concurrently.
+
+**Action decoding:** The argmax index encodes three decisions:
+- `preempt = idx % 2` (0=no, 1=yes)
+- `priority_adj = (idx / 2) % 3` (0=none, 1=boost, 2=reduce)
+- `core_assignment = idx / 6` (0 to num_cores-1)
+
+Invalid actions (core out of range, isolated core) fall back to the heuristic policy.
+
 ### Runtime Configuration
 
 Timer frequency is set in `timer.c`:

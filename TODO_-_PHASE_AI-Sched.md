@@ -2,7 +2,7 @@
 
 This document tracks the integration of trained AI models (MLP, PPO, XGBoost) into the SLM-OS kernel scheduler.
 
-**Status:** In Progress — M1 (Pluggable Scheduler Interface) complete
+**Status:** In Progress — M1 (Vtable), M2 (Build System), M3 (Inference Engine) complete
 
 **Summary:** This phase implements a pluggable scheduler interface and AI-based inference engine, allowing the kernel to use trained ML models for CPU assignment, priority adjustment, and preemption decisions.
 
@@ -81,7 +81,7 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 **Note:** Required before M3 (Inference) since AI code needs different compiler flags.
 
 ### CMake Configuration
-- ☐ Add to `CMakeLists.txt`:
+- ✅ Add to `CMakeLists.txt`:
   ```cmake
   option(ENABLE_AI_SCHEDULER "Include AI scheduling models" OFF)
   
@@ -119,12 +119,15 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
   ```
 
 ### Stub Weights for Development
-- ☐ Create `kernel/sched/ai/ai_weights_stub.c`:
+- ✅ Create `kernel/sched/ai/ai_weights_stub.c`:
   - All-zero weight arrays matching extern declarations
-  - Allows compilation without Plan A deliverables
-- ☐ Create `kernel/sched/ai/ai_weights.h`:
+  - MLP and PPO stubs (8 arrays each, cache-line aligned)
+- ✅ Create `kernel/sched/ai/ai_weights.h`:
   - Extern declarations for weight arrays
-  - Dimension constants (from `ai_config.h` when available)
+  - References ai_types.h for dimension constants
+- ✅ Create `kernel/sched/ai/ai_types.h`:
+  - State vector dimensions with _Static_assert
+  - Action decoding, MLP layer dimensions
 
 ### Weight File Integration
 - ☐ Create `scripts/import_ai_weights.sh`:
@@ -134,8 +137,8 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 - ☐ Add Makefile target: `make import-ai-weights`
 
 ### Build Verification
-- ☐ Verify build with `ENABLE_AI_SCHEDULER=OFF` (existing behavior)
-- ☐ Verify build with `ENABLE_AI_SCHEDULER=ON` + stub weights
+- ✅ Verify build with `ENABLE_AI_SCHEDULER=OFF` (existing behavior)
+- ✅ Verify build with `ENABLE_AI_SCHEDULER=ON` + stub weights
 - ☐ Verify build with `ENABLE_AI_SCHEDULER=ON` + real weights (after Plan A)
 
 ---
@@ -145,80 +148,51 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 **Depends on:** M2 (Build System)
 
 ### Directory Structure
-- ☐ Create `kernel/sched/ai/` directory
-- ☐ Create `kernel/sched/ai/ai_inference.h` — public API
-- ☐ Create `kernel/sched/ai/ai_inference.c` — implementation
-- ☐ Create `kernel/sched/ai/ai_types.h` — shared types
+- ✅ Create `kernel/sched/ai/` directory
+- ✅ Create `kernel/sched/ai/ai_inference.h` — public API
+- ✅ Create `kernel/sched/ai/ai_inference.c` — stub implementation (M3 fills in)
+- ✅ Create `kernel/sched/ai/ai_types.h` — shared types
 
 ### Core Math Functions
-- ☐ Implement `ai_matvec()`:
-  ```c
-  static void ai_matvec(const float *W, const float *bias,
-                        const float *in, float *out, int M, int N);
-  ```
-  - ☐ Row-major W[M×N] × in[N] + bias[M] → out[M]
-  - ☐ Cache-friendly inner loop (stride-1 access on W)
-  - ☐ No dynamic allocation
-- ☐ Implement `ai_relu()`:
-  ```c
-  static void ai_relu(float *x, int n);
-  ```
-  - ☐ In-place: `if (x[i] < 0) x[i] = 0`
-- ☐ Implement `ai_argmax()`:
-  ```c
-  static int ai_argmax(const float *x, int n);
-  ```
-  - ☐ Linear scan for max logit index
+- ✅ Implement `ai_matvec()`:
+  - ✅ Row-major W[M×N] × in[N] + bias[M] → out[M]
+  - ✅ Cache-friendly inner loop (stride-1 access on W)
+  - ✅ No dynamic allocation
+  - ✅ NEON 4-wide path + scalar fallback
+- ✅ Implement `ai_relu()`:
+  - ✅ In-place with NEON vmaxq path
+- ✅ Implement `ai_argmax()`:
+  - ✅ Linear scan for max logit index
 
 ### NEON Optimization
-- ☐ Verify `-mcpu=${TARGET_CPU}` enables NEON auto-vectorization (check assembly output)
-- ☐ If auto-vectorization insufficient, add explicit NEON intrinsics to `ai_matvec()`:
-  ```c
-  #include <arm_neon.h>
-  float32x4_t acc = vdupq_n_f32(0.0f);
-  // vld1q_f32, vfmaq_f32 for 4-wide accumulation
-  ```
-- ☐ Benchmark scalar vs NEON: target < 50µs for full inference
-- ☐ Add compile-time check for NEON availability (`#ifdef __ARM_NEON`)
+- ✅ Explicit NEON intrinsics in `ai_matvec()` (vfmaq_f32, vaddvq_f32)
+- ✅ NEON intrinsics in `ai_relu()` (vmaxq_f32)
+- ✅ Compile-time check: `#if defined(__aarch64__) && defined(__ARM_NEON)`
+- ✅ Verified NEON codegen: fmla, faddp, fmax instructions present in object
+- ☐ Benchmark on real hardware: target < 50µs (requires real weights)
 
 ### Action Decoding
-- ☐ Define `struct ai_sched_action`:
-  ```c
-  struct ai_sched_action {
-      uint8_t core_assignment;  // 0 to num_cores-1, or GPU
-      uint8_t priority_adj;     // 0=none, 1=boost, 2=reduce
-      uint8_t preempt;          // 0=no, 1=yes
-  };
-  ```
-- ☐ Implement `ai_decode_action()`:
-  ```c
-  static inline void ai_decode_action(int idx, struct ai_sched_action *out) {
-      out->preempt = idx % 2; idx /= 2;
-      out->priority_adj = idx % 3; idx /= 3;
-      out->core_assignment = idx;
-  }
-  ```
-- ☐ Implement `ai_validate_action()` — bounds checking against runtime core count
+- ✅ `struct ai_sched_action` defined in `ai_types.h` (M2)
+- ✅ `ai_decode_action()` — static inline in `ai_types.h` (M2)
+- ✅ `ai_validate_action()` — bounds checking in `ai_inference.c`
 
 ### MLP Inference
-- ☐ Implement `ai_schedule_mlp()`:
-  ```c
-  int ai_schedule_mlp(const float state[AI_STATE_DIM],
-                      struct ai_sched_action *action);
-  ```
-  - ☐ 4-layer forward pass: (108→256→256→128→N_ACTIONS)
-  - ☐ Stack-allocated scratch buffers (256 floats = 1KB)
-  - ☐ Thread-safe (no static globals)
-  - ☐ Returns 0 on success, -1 on error
+- ✅ Implement `ai_schedule_mlp()`:
+  - ✅ 4-layer forward pass via shared `forward_pass()`: (108→256→256→128→N_ACTIONS)
+  - ✅ Stack-allocated scratch buffers (2 × 256 floats = 2 KB)
+  - ✅ Thread-safe (no static globals)
+  - ✅ Returns 0 on success, -1 on error
 
 ### PPO Inference
-- ☐ Implement `ai_schedule_ppo()`:
-  ```c
-  int ai_schedule_ppo(const float state[AI_STATE_DIM],
-                      struct ai_sched_action *action);
-  ```
-  - ☐ Same architecture as MLP (108→256→256→128→N_ACTIONS)
-  - ☐ Uses different weight arrays
+- ✅ Implement `ai_schedule_ppo()`:
+  - ✅ Same architecture, uses `ai_ppo_w*`/`ai_ppo_b*` weight arrays
+
+### Testing (14 new tests)
+- ✅ matvec: basic 2×3, identity 4×4, zero weights at model dimensions
+- ✅ relu: mixed values, all positive, all negative
+- ✅ argmax: basic, first/last/tie, negative values
+- ✅ Full MLP and PPO forward pass with stub weights
+- ✅ ai_validate_action: valid, out-of-range core/priority/preempt, NULL
 
 ### XGBoost Inference (Stretch)
 - ⏸️ Implement tree traversal function
@@ -533,14 +507,29 @@ Features at offset 100:
 ### Unit Tests
 
 #### Inference Tests
-- ☐ `test_ai_matvec_basic` — small known matrix, verify output
-- ☐ `test_ai_matvec_large` — 256×256 matrix, verify dimensions
-- ☐ `test_ai_relu_positive` — positive values unchanged
-- ☐ `test_ai_relu_negative` — negative values zeroed
-- ☐ `test_ai_argmax` — verify max index found correctly
-- ☐ `test_ai_decode_action` — verify encoding/decoding roundtrip
-- ☐ `test_ai_schedule_mlp_valid` — returns valid action struct
-- ☐ `test_ai_schedule_mlp_bounds` — action values in valid ranges
+- ✅ `test_ai_matvec_basic` — 2×3 known matrix
+- ✅ `test_ai_matvec_identity` — 4×4 identity matrix
+- ✅ `test_ai_matvec_zero_weights` — model-dimension zero weights
+- ✅ `test_ai_matvec_single_row` — M=1 edge case
+- ✅ `test_ai_matvec_8x8` — exercises NEON 4-wide path with remainder
+- ✅ `test_ai_relu_mixed` — positive/negative/zero values
+- ✅ `test_ai_relu_all_positive` — positive values unchanged
+- ✅ `test_ai_relu_all_negative` — negative values zeroed
+- ✅ `test_ai_relu_single_neg` — n=1 edge case
+- ✅ `test_ai_relu_empty` — n=0 no-crash edge case
+- ✅ `test_ai_argmax_basic` — clear maximum in middle
+- ✅ `test_ai_argmax_first` / `last` — boundary positions
+- ✅ `test_ai_argmax_tie` — first occurrence wins
+- ✅ `test_ai_argmax_negative` — all-negative array
+- ✅ `test_ai_argmax_empty` — n=0 returns -1
+- ✅ `test_ai_argmax_single` — n=1 returns 0
+- ✅ `test_ai_decode_roundtrip` — all 42 indices roundtrip correctly
+- ✅ `test_ai_mlp_forward_pass` — full 4-layer forward pass with stub weights
+- ✅ `test_ai_ppo_forward_pass` — PPO forward pass with stub weights
+- ✅ `test_ai_mlp_action_bounds` — output action fields in valid ranges
+- ✅ `test_ai_mlp_null_state` — NULL state returns -1
+- ✅ `test_ai_ppo_null_state` — NULL state returns -1
+- ✅ `test_ai_validate_action_bounds` — valid/invalid core, priority, preempt, NULL
 
 #### State Extraction Tests
 - ☐ `test_ai_extract_state_dimensions` — output is 108 floats
@@ -617,9 +606,9 @@ Features at offset 100:
 ## Phase AI-Sched Completion Checklist
 
 ### Deliverables
-- ☐ Pluggable scheduler interface working
-- ☐ Heuristic policy extracted and functionally identical
-- ☐ AI inference engine compiles and runs (with stub weights)
+- ✅ Pluggable scheduler interface working
+- ✅ Heuristic policy extracted and functionally identical
+- ✅ AI inference engine compiles and runs (with stub weights)
 - ☐ State vector extraction matches simulator specification
 - ☐ MLP policy makes scheduling decisions
 - ☐ FP state properly saved/restored in interrupt context

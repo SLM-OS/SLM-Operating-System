@@ -18,6 +18,14 @@
 #include "string.h"
 #include <stdint.h>
 #include <stdbool.h>
+
+/* AI scheduler types (always available — header-only) */
+#include "ai_types.h"
+
+#ifdef CONFIG_AI_SCHEDULER
+#include "ai_inference.h"
+#include "ai_state.h"
+#endif
 #include <limits.h>
 
 /* Test state for tracking task execution order */
@@ -2625,6 +2633,316 @@ static void test_policy_heuristic_distributes_tasks(void)
 }
 
 /* ============================================================================
+ * AI Scheduler Types Tests (unconditional — ai_types.h is header-only)
+ * ============================================================================ */
+
+/*
+ * Test: ai_decode_action with index 0 → all fields zero.
+ */
+static void test_ai_decode_action_zero(void)
+{
+    struct ai_sched_action a;
+    ai_decode_action(0, &a);
+    TEST_ASSERT_EQUAL_UINT8(0, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(0, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(0, a.preempt);
+}
+
+/*
+ * Test: ai_decode_action correctly separates preempt, priority_adj, core.
+ * Encoding: idx = core * 6 + priority_adj * 2 + preempt
+ */
+static void test_ai_decode_action_components(void)
+{
+    struct ai_sched_action a;
+
+    /* preempt=1, priority_adj=0, core=0 → idx=1 */
+    ai_decode_action(1, &a);
+    TEST_ASSERT_EQUAL_UINT8(0, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(0, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(1, a.preempt);
+
+    /* preempt=0, priority_adj=1, core=0 → idx=2 */
+    ai_decode_action(2, &a);
+    TEST_ASSERT_EQUAL_UINT8(0, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(1, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(0, a.preempt);
+
+    /* preempt=0, priority_adj=0, core=1 → idx=6 */
+    ai_decode_action(6, &a);
+    TEST_ASSERT_EQUAL_UINT8(1, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(0, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(0, a.preempt);
+
+    /* preempt=1, priority_adj=2, core=2 → idx = 2*6 + 2*2 + 1 = 17 */
+    ai_decode_action(17, &a);
+    TEST_ASSERT_EQUAL_UINT8(2, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(2, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(1, a.preempt);
+}
+
+/*
+ * Test: ai_decode_action with max valid index (N_ACTIONS - 1).
+ */
+static void test_ai_decode_action_max(void)
+{
+    struct ai_sched_action a;
+    /* idx = 41 (last of 42): core=6, pri_adj=2, preempt=1
+     * 41 / 2 = 20 r 1 (preempt=1)
+     * 20 / 3 = 6  r 2 (priority_adj=2)
+     * core = 6 */
+    ai_decode_action(AI_SCHED_N_ACTIONS - 1, &a);
+    TEST_ASSERT_EQUAL_UINT8(1, a.preempt);
+    TEST_ASSERT_EQUAL_UINT8(2, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8((AI_SCHED_N_ACTIONS - 1) / 6, a.core_assignment);
+}
+
+/*
+ * Test: All valid action indices produce in-range component values.
+ */
+static void test_ai_decode_action_all_valid(void)
+{
+    struct ai_sched_action a;
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++) {
+        ai_decode_action(i, &a);
+        TEST_ASSERT_TRUE(a.preempt <= 1);
+        TEST_ASSERT_TRUE(a.priority_adj <= 2);
+        /* core_assignment upper bound depends on N_ACTIONS */
+        TEST_ASSERT_TRUE(a.core_assignment < (AI_SCHED_N_ACTIONS + 5) / 6);
+    }
+}
+
+/*
+ * Test: State vector dimension constants are self-consistent.
+ * (The _Static_assert in ai_types.h catches compile-time errors,
+ * but this verifies the runtime values match expectations.)
+ */
+static void test_ai_state_dim_constants(void)
+{
+    TEST_ASSERT_EQUAL_INT(108, AI_STATE_DIM);
+    TEST_ASSERT_EQUAL_INT(6, AI_STATE_NUM_CORES);
+    TEST_ASSERT_EQUAL_INT(6, AI_FEATURES_PER_CORE);
+    TEST_ASSERT_EQUAL_INT(8, AI_STATE_NUM_TASKS);
+    TEST_ASSERT_EQUAL_INT(8, AI_FEATURES_PER_TASK);
+    TEST_ASSERT_EQUAL_INT(8, AI_GLOBAL_FEATURES);
+    TEST_ASSERT_EQUAL_INT(AI_STATE_NUM_CORES * AI_FEATURES_PER_CORE +
+                          AI_STATE_NUM_TASKS * AI_FEATURES_PER_TASK +
+                          AI_GLOBAL_FEATURES, AI_STATE_DIM);
+}
+
+/*
+ * Test: MLP layer dimensions form a valid chain.
+ */
+static void test_ai_mlp_layer_dims(void)
+{
+    /* Each layer's output must match the next layer's input */
+    TEST_ASSERT_EQUAL_INT(AI_STATE_DIM, AI_MLP_LAYER0_IN);
+    TEST_ASSERT_EQUAL_INT(AI_MLP_LAYER0_OUT, AI_MLP_LAYER1_IN);
+    TEST_ASSERT_EQUAL_INT(AI_MLP_LAYER1_OUT, AI_MLP_LAYER2_IN);
+    TEST_ASSERT_EQUAL_INT(AI_MLP_LAYER2_OUT, AI_MLP_LAYER3_IN);
+    TEST_ASSERT_EQUAL_INT(AI_SCHED_N_ACTIONS, AI_MLP_LAYER3_OUT);
+}
+
+/* ============================================================================
+ * AI Scheduler Library Tests (only when CONFIG_AI_SCHEDULER is enabled)
+ * ============================================================================ */
+
+#ifdef CONFIG_AI_SCHEDULER
+
+/*
+ * Test: ai_extract_state stub zero-fills the state vector.
+ * Note: uses memset instead of float literals because this test
+ * file is compiled with -mgeneral-regs-only (no FP instructions).
+ */
+static void test_ai_extract_state_stub_zeros(void)
+{
+    float state[AI_STATE_DIM];
+    /* Fill with non-zero bytes to verify the stub actually writes */
+    memset(state, 0xFF, sizeof(state));
+
+    ai_extract_state(state);
+
+    /* All bytes should now be zero (IEEE 754 zero = all bits 0) */
+    uint8_t *bytes = (uint8_t *)state;
+    for (int i = 0; i < (int)sizeof(state); i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, bytes[i]);
+    }
+}
+
+/*
+ * AI inference math tests.
+ * These call helper functions in ai_test_helpers.c (compiled with FP
+ * enabled in the ai_sched library). Each helper returns 0 on pass.
+ */
+extern int ai_test_matvec_basic(void);
+extern int ai_test_matvec_identity(void);
+extern int ai_test_matvec_zero_weights(void);
+extern int ai_test_relu_mixed(void);
+extern int ai_test_relu_all_positive(void);
+extern int ai_test_relu_all_negative(void);
+extern int ai_test_argmax_basic(void);
+extern int ai_test_argmax_last(void);
+extern int ai_test_argmax_first(void);
+extern int ai_test_argmax_tie(void);
+extern int ai_test_argmax_negative(void);
+extern int ai_test_mlp_stub_inference(void);
+extern int ai_test_ppo_stub_inference(void);
+extern int ai_test_validate_action(void);
+extern int ai_test_argmax_empty(void);
+extern int ai_test_argmax_single(void);
+extern int ai_test_relu_single_neg(void);
+extern int ai_test_relu_empty(void);
+extern int ai_test_matvec_single_row(void);
+extern int ai_test_matvec_8x8(void);
+extern int ai_test_mlp_null_state(void);
+extern int ai_test_ppo_null_state(void);
+extern int ai_test_mlp_action_bounds(void);
+extern int ai_test_decode_roundtrip(void);
+
+static void test_ai_matvec_basic(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_basic()); }
+
+static void test_ai_matvec_identity(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_identity()); }
+
+static void test_ai_matvec_zero_weights(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_zero_weights()); }
+
+static void test_ai_relu_mixed(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_mixed()); }
+
+static void test_ai_relu_all_positive(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_all_positive()); }
+
+static void test_ai_relu_all_negative(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_all_negative()); }
+
+static void test_ai_argmax_basic(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_basic()); }
+
+static void test_ai_argmax_last(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_last()); }
+
+static void test_ai_argmax_first(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_first()); }
+
+static void test_ai_argmax_tie(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_tie()); }
+
+static void test_ai_argmax_negative(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_negative()); }
+
+static void test_ai_mlp_forward_pass(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_mlp_stub_inference()); }
+
+static void test_ai_ppo_forward_pass(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_ppo_stub_inference()); }
+
+static void test_ai_validate_action_bounds(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_validate_action()); }
+
+static void test_ai_argmax_empty(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_empty()); }
+
+static void test_ai_argmax_single(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_single()); }
+
+static void test_ai_relu_single_neg(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_single_neg()); }
+
+static void test_ai_relu_empty(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_empty()); }
+
+static void test_ai_matvec_single_row(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_single_row()); }
+
+static void test_ai_matvec_8x8(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_8x8()); }
+
+static void test_ai_mlp_null_state(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_mlp_null_state()); }
+
+static void test_ai_ppo_null_state(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_ppo_null_state()); }
+
+static void test_ai_mlp_action_bounds_check(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_mlp_action_bounds()); }
+
+static void test_ai_decode_roundtrip(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_decode_roundtrip()); }
+
+/*
+ * Test: AI policies (ai_mlp, ai_ppo) are registered and findable.
+ */
+static void test_ai_policies_registered(void)
+{
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    TEST_ASSERT_NOT_NULL(mlp);
+    TEST_ASSERT_EQUAL_STRING("ai_mlp", mlp->name);
+    TEST_ASSERT_NOT_NULL(mlp->assign_cpu);
+
+    const struct sched_policy_ops *ppo = sched_find_policy("ai_ppo");
+    TEST_ASSERT_NOT_NULL(ppo);
+    TEST_ASSERT_EQUAL_STRING("ai_ppo", ppo->name);
+    TEST_ASSERT_NOT_NULL(ppo->assign_cpu);
+}
+
+/*
+ * Test: Can switch to ai_mlp policy and back to heuristic.
+ */
+static void test_ai_policy_switch_to_mlp_and_back(void)
+{
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    TEST_ASSERT_NOT_NULL(mlp);
+
+    int ret = sched_set_policy(mlp);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_STRING("ai_mlp", sched_get_policy());
+
+    /* Tasks should still be assignable (stub returns CPU 0) */
+    irq_flags_t flags = irq_save();
+    struct task *t = task_create("ai_test", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    scheduler_remove_task(t);
+    t->id = 0;
+    irq_restore(flags);
+
+    /* Switch back */
+    ret = sched_set_policy(sched_find_policy("heuristic"));
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+}
+
+/*
+ * Test: fp_save and fp_restore are callable and don't crash.
+ * (Full FP register verification requires M6; this just tests linkage
+ * and basic operation.)
+ */
+extern void fp_save(void *state);
+extern void fp_restore(const void *state);
+
+static void test_fp_save_restore_callable(void)
+{
+    /* 528 bytes = 32 x 16 (V regs) + 4 (fpcr) + 4 (fpsr), 16-byte aligned */
+    alignas(16) uint8_t fp_state[528];
+
+    /* Zero the state buffer */
+    for (int i = 0; i < 528; i++)
+        fp_state[i] = 0;
+
+    /* These should not crash */
+    fp_save(fp_state);
+    fp_restore(fp_state);
+
+    /* If we got here, save/restore linkage and basic operation work */
+    TEST_PASS();
+}
+
+#endif /* CONFIG_AI_SCHEDULER */
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -2749,6 +3067,50 @@ int test_suite_scheduler(void)
     RUN_TEST(test_policy_init_failure_keeps_old);
     RUN_TEST(test_policy_tick_callback_invoked);
     RUN_TEST(test_policy_heuristic_distributes_tasks);
+
+    /* AI scheduler types (unconditional — header-only) */
+    RUN_TEST(test_ai_decode_action_zero);
+    RUN_TEST(test_ai_decode_action_components);
+    RUN_TEST(test_ai_decode_action_max);
+    RUN_TEST(test_ai_decode_action_all_valid);
+    RUN_TEST(test_ai_state_dim_constants);
+    RUN_TEST(test_ai_mlp_layer_dims);
+
+#ifdef CONFIG_AI_SCHEDULER
+    /* AI scheduler library tests (only with -DENABLE_AI_SCHEDULER=ON) */
+    RUN_TEST(test_ai_extract_state_stub_zeros);
+    RUN_TEST(test_ai_policies_registered);
+    RUN_TEST(test_ai_policy_switch_to_mlp_and_back);
+    RUN_TEST(test_fp_save_restore_callable);
+
+    /* AI inference engine math tests (M3) */
+    RUN_TEST(test_ai_matvec_basic);
+    RUN_TEST(test_ai_matvec_identity);
+    RUN_TEST(test_ai_matvec_zero_weights);
+    RUN_TEST(test_ai_relu_mixed);
+    RUN_TEST(test_ai_relu_all_positive);
+    RUN_TEST(test_ai_relu_all_negative);
+    RUN_TEST(test_ai_argmax_basic);
+    RUN_TEST(test_ai_argmax_last);
+    RUN_TEST(test_ai_argmax_first);
+    RUN_TEST(test_ai_argmax_tie);
+    RUN_TEST(test_ai_argmax_negative);
+    RUN_TEST(test_ai_mlp_forward_pass);
+    RUN_TEST(test_ai_ppo_forward_pass);
+    RUN_TEST(test_ai_validate_action_bounds);
+
+    /* Edge cases and NULL handling */
+    RUN_TEST(test_ai_argmax_empty);
+    RUN_TEST(test_ai_argmax_single);
+    RUN_TEST(test_ai_relu_single_neg);
+    RUN_TEST(test_ai_relu_empty);
+    RUN_TEST(test_ai_matvec_single_row);
+    RUN_TEST(test_ai_matvec_8x8);
+    RUN_TEST(test_ai_mlp_null_state);
+    RUN_TEST(test_ai_ppo_null_state);
+    RUN_TEST(test_ai_mlp_action_bounds_check);
+    RUN_TEST(test_ai_decode_roundtrip);
+#endif
 
     return UnityEnd();
 }
