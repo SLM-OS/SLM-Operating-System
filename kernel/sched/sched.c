@@ -541,6 +541,7 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
     }
 
     struct cpu_runqueue *rq = cpu_rq(cpu);
+    (void)rq; /* Used by DEBUG_PRINT in debug builds */
     irq_flags_t flags = rq_lock_irqsave(cpu);
 
     add_to_cpu_queue_locked(task, cpu);

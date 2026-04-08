@@ -457,10 +457,10 @@ static void test_nc_memory_accessible(void)
     volatile uint32_t *nc_arr = (volatile uint32_t *)ncmem_alloc(256, 64);
     TEST_ASSERT_NOT_NULL(nc_arr);
     for (int i = 0; i < 64; i++)
-        nc_arr[i] = (uint32_t)(i * 0x11111111);
+        nc_arr[i] = (uint32_t)((uint32_t)i * 0x11111111U);
     __asm__ volatile("dmb sy" ::: "memory");
     for (int i = 0; i < 64; i++)
-        TEST_ASSERT_EQUAL_HEX32((uint32_t)(i * 0x11111111), nc_arr[i]);
+        TEST_ASSERT_EQUAL_HEX32((uint32_t)((uint32_t)i * 0x11111111U), nc_arr[i]);
 }
 
 /*
