@@ -106,6 +106,7 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/mmu.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/vectors.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/smp_boot.S>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/user_entry.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/arch/arm64/exceptions.c>
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/arch/arm64/efi_stub.c>
     # x86-64 architecture files (trampoline32.S handled by custom command below)
@@ -199,6 +200,7 @@ set(KERNEL_SOURCES
     # Component system and FFI (x86-64 provides stubs in platform_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/component.c>
     kernel/src/slm_ffi.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/syscall.c>
 
     # Semihosting (for QEMU test exit)
     kernel/src/semihosting.c
@@ -241,6 +243,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_scheduler.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_mem.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_loader.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_syscall.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_component.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_vmm.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_net.c>

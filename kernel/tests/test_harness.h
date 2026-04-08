@@ -79,4 +79,7 @@ int test_suite_inference(void);
 /* GPU compute integration tests (capability detection, fallback - calls into Rust) */
 int test_suite_gpu_compute(void);
 
+/* Syscall infrastructure tests (dispatch, trap frame, user task creation) */
+int test_suite_syscall(void);
+
 #endif /* TEST_HARNESS_H */

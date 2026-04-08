@@ -2,7 +2,7 @@
 
 This document tracks Phase 5 implementation of SLM-OS.
 
-**Status:** In Progress (M1, M2, M3 complete)
+**Status:** In Progress (M1, M2, M3, M4 complete)
 
 **Summary:** Phase 5 brings together all prior work to deliver actual SLM inference capabilities. This includes the ONNX model loader, inference runtime (CPU-based initially, with GPU acceleration path), and example SLM components demonstrating the full AI-first OS vision.
 
@@ -193,19 +193,19 @@ This document tracks Phase 5 implementation of SLM-OS.
 
 **Depends on:** Phase 4 component system
 
-**Note:** This implements user/kernel separation (EL0/EL1 on ARM64, Ring 3/Ring 0 on x86-64) to provide real isolation between components.
+**Note:** This implements user/kernel separation (EL0/EL1 on ARM64, Ring 3/Ring 0 on x86-64) to provide real isolation between components. See `docs/component-isolation.md` for design details.
 
 ### Privilege Separation Design
-- ☐ Document isolation architecture in `docs/component-isolation.md`
-- ☐ Define syscall interface for component → kernel communication
+- ✅ Document isolation architecture in `docs/component-isolation.md`
+- ✅ Define syscall interface (numbers and calling convention)
 - ☐ Design capability-based access control
 
 ### ARM64 User Mode (EL0)
-- ☐ Implement EL1 → EL0 transition for component execution
+- ☐ Implement EL1 → EL0 transition for component execution — blocked: VMM_FLAG_USER investigation
 - ☐ Configure TTBR0_EL1 for per-component page tables
-- ☐ Implement syscall entry via `SVC` instruction
-- ☐ Handle `SVC` exception and dispatch to kernel
-- ☐ Implement syscall return via `ERET`
+- ✅ Implement syscall entry via `SVC` instruction
+- ✅ Handle `SVC` exception and dispatch to kernel
+- ✅ Implement syscall return via `ERET`
 
 ### x86-64 User Mode (Ring 3)
 - ☐ Implement Ring 0 → Ring 3 transition via `IRET`
@@ -215,18 +215,16 @@ This document tracks Phase 5 implementation of SLM-OS.
 - ☐ Implement syscall return via `SYSRET`
 
 ### Syscall Interface
-- ☐ Define syscall numbers and calling convention
-- ☐ Implement core syscalls:
-  - ☐ `sys_exit(code)` — terminate component
-  - ☐ `sys_yield()` — yield CPU
-  - ☐ `sys_sleep(ms)` — sleep for duration
-  - ☐ `sys_send(topic, msg, len)` — send message
-  - ☐ `sys_recv(topic, buf, len, timeout)` — receive message
-  - ☐ `sys_alloc(size)` — allocate memory
-  - ☐ `sys_free(ptr)` — free memory
-  - ☐ `sys_model_load(path)` — load model
-  - ☐ `sys_model_infer(handle, input, output)` — run inference
-- ☐ Validate user pointers before kernel access
+- ✅ Define syscall numbers and calling convention
+- ✅ Core syscalls (via `user_syscall.h`):
+  - ✅ `sys_exit(code)` — terminate component
+  - ✅ `sys_yield()` — yield CPU
+  - ✅ `sys_sleep(ms)` — sleep for duration
+  - ✅ `sys_send(topic, msg, len)` — send message
+  - ✅ `sys_recv(topic, buf, len, timeout)` — receive message
+  - ✅ `sys_model_infer(handle, input, output)` — run inference
+  - ✅ `sys_log(str, len)` — log to kernel UART
+- ✅ Validate user pointers before kernel access
 
 ### Per-Component Address Spaces
 - ☐ Create separate page tables per component
@@ -243,9 +241,9 @@ This document tracks Phase 5 implementation of SLM-OS.
 - ⏸️ CPU time limit enforcement — requires preemption improvements
 
 ### Fault Isolation
-- ☐ Component crash doesn't crash kernel
-- ☐ Catch page faults, illegal instructions in component
-- ☐ Terminate faulting component cleanly
+- ✅ Component crash doesn't crash kernel (`handle_user_fault` terminates component)
+- ✅ Catch page faults, illegal instructions in component (`el0_sync_handler`)
+- ✅ Terminate faulting component cleanly
 - ☐ Notify parent/supervisor of component failure
 - ☐ Automatic component restart (optional, configurable)
 

@@ -175,6 +175,9 @@
 #define VMM_FLAG_WRITE          (1U << 3)   /* Writable */
 #define VMM_FLAG_EXEC           (1U << 4)   /* Executable */
 
+/* User mode flag (Phase 5 M4) */
+#define VMM_FLAG_USER           (1U << 5)   /* EL0 accessible */
+
 /* SLM-specific flags */
 #define VMM_FLAG_GPU_MAPPED     (1U << 8)   /* Mapped to GPU */
 #define VMM_FLAG_MODEL_PAGE     (1U << 9)   /* Contains model data */
@@ -186,6 +189,8 @@
 #define VMM_FLAGS_KERNEL_RO     (VMM_FLAG_READ)
 #define VMM_FLAGS_DEVICE        (VMM_FLAG_DEVICE | VMM_FLAG_READ | VMM_FLAG_WRITE)
 #define VMM_FLAGS_DMA           (VMM_FLAG_NOCACHE | VMM_FLAG_READ | VMM_FLAG_WRITE)
+#define VMM_FLAGS_USER_CODE     (VMM_FLAG_READ | VMM_FLAG_EXEC | VMM_FLAG_USER)
+#define VMM_FLAGS_USER_DATA     (VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_USER)
 
 /*
  * ==========================================================================

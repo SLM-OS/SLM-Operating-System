@@ -357,6 +357,59 @@ struct task *task_create(const char *name, task_entry_t entry, void *arg)
     return task_create_with_priority(name, entry, arg, TASK_PRIORITY_DEFAULT);
 }
 
+#if !defined(PLATFORM_X86_64)
+/*
+ * Assembly trampoline that transitions from EL1 to EL0 via ERET.
+ * Defined in user_entry.S.
+ */
+extern void user_task_enter(void *entry, void *stack_top, void *arg);
+
+/*
+ * Kernel-mode wrapper for user tasks.
+ *
+ * When switch_to() restores this task for the first time, x19=entry, x20=arg.
+ * task_entry_trampoline calls this function, which then ERETsm into EL0.
+ *
+ * Note: At this point we are at EL1 with interrupts masked. user_task_enter
+ * sets SPSR to EL0t with interrupts enabled, so ERET unmasks them.
+ */
+static void user_task_wrapper(void *arg)
+{
+    struct task *t = task_current();
+    if (!t || !t->user_entry) {
+        task_exit();
+        return;
+    }
+
+    /* ERET to EL0 — does not return */
+    user_task_enter((void *)(uintptr_t)t->user_entry, t->stack_top, arg);
+
+    /* Should never reach here */
+    task_exit();
+}
+
+/*
+ * Create a new user-mode (EL0) task.
+ *
+ * The task starts in kernel mode (via task_entry_wrapper) then
+ * transitions to EL0 via ERET. Syscalls (SVC #0) return to EL1.
+ */
+struct task *task_create_user(const char *name, task_entry_t user_entry,
+                              void *arg, uint8_t priority)
+{
+    /* Create a kernel task that runs the user_task_wrapper */
+    struct task *task = task_create_with_priority(name, user_task_wrapper,
+                                                   arg, priority);
+    if (!task) return NULL;
+
+    /* Mark as user-mode and store the real EL0 entry point */
+    task->is_user = 1;
+    task->user_entry = user_entry;
+
+    return task;
+}
+#endif /* !PLATFORM_X86_64 */
+
 /*
  * Terminate the current task.
  */

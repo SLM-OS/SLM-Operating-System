@@ -135,6 +135,13 @@ int test_harness_run_all(void)
     uart_puts("========================================\n");
     total_failures += test_suite_gpu_compute();
 
+    /* Syscall infrastructure tests */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Syscall Infrastructure Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_syscall();
+
     /* Rust FFI tests */
     uart_puts("\n");
     uart_puts("========================================\n");
