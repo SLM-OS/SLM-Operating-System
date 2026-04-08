@@ -264,12 +264,13 @@ pub fn add(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineError> 
 }
 
 // =============================================================================
-// MatMul — matrix multiplication
+// MatMul — matrix multiplication with NEON SIMD
 // =============================================================================
 
 /// MatMul: C[M,N] = A[M,K] × B[K,N]
 ///
-/// Row-major layout. Inner loop structured for auto-vectorization.
+/// Uses NEON float32x4_t intrinsics on AArch64 to process 4 output columns
+/// at a time. Falls back to scalar for the remaining columns (N % 4).
 pub fn matmul(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
     // Get dimensions — handle both 2D and batched cases
     let (m, k_a) = if a.ndim >= 2 {
@@ -307,20 +308,72 @@ pub fn matmul(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineErro
             *cp.add(i) = 0.0;
         }
 
-        // C[i,j] += A[i,k] * B[k,j]
-        // Loop order: i, k, j — row-major friendly for A access,
-        // and the inner j loop enables auto-vectorization
-        for i in 0..m {
-            for kk in 0..k {
-                let a_ik = *ap.add(i * k + kk);
-                for j in 0..n {
-                    *cp.add(i * n + j) += a_ik * *bp.add(kk * n + j);
-                }
-            }
+        #[cfg(target_arch = "aarch64")]
+        {
+            matmul_neon(ap, bp, cp, m, k, n);
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            matmul_scalar(ap, bp, cp, m, k, n);
         }
     }
 
     Ok(())
+}
+
+/// NEON-optimized matmul inner loop.
+///
+/// Processes 4 output columns at a time using float32x4_t.
+/// Loop order: i, k, j(×4) — the inner j loop uses vld1q_f32 to load
+/// 4 consecutive B elements and vfmaq_n_f32 for fused multiply-add.
+#[cfg(target_arch = "aarch64")]
+unsafe fn matmul_neon(ap: *const f32, bp: *const f32, cp: *mut f32,
+                      m: usize, k: usize, n: usize) {
+    use core::arch::aarch64::*;
+
+    let n4 = n & !3; // Round down to multiple of 4
+
+    for i in 0..m {
+        for kk in 0..k {
+            let a_ik = *ap.add(i * k + kk);
+            let a_vec = vdupq_n_f32(a_ik); // Broadcast A[i,k] to all 4 lanes
+
+            // NEON path: process 4 columns at a time
+            let mut j = 0;
+            while j < n4 {
+                let b_ptr = bp.add(kk * n + j);
+                let c_ptr = cp.add(i * n + j);
+
+                let b_val = vld1q_f32(b_ptr);       // Load B[k, j..j+3]
+                let c_val = vld1q_f32(c_ptr);       // Load C[i, j..j+3]
+                let c_new = vfmaq_f32(c_val, a_vec, b_val); // C += A * B
+                vst1q_f32(c_ptr, c_new);             // Store C[i, j..j+3]
+
+                j += 4;
+            }
+
+            // Scalar tail: remaining columns (N % 4)
+            while j < n {
+                *cp.add(i * n + j) += a_ik * *bp.add(kk * n + j);
+                j += 1;
+            }
+        }
+    }
+}
+
+/// Scalar matmul fallback for non-AArch64 platforms.
+#[cfg(not(target_arch = "aarch64"))]
+unsafe fn matmul_scalar(ap: *const f32, bp: *const f32, cp: *mut f32,
+                        m: usize, k: usize, n: usize) {
+    for i in 0..m {
+        for kk in 0..k {
+            let a_ik = *ap.add(i * k + kk);
+            for j in 0..n {
+                *cp.add(i * n + j) += a_ik * *bp.add(kk * n + j);
+            }
+        }
+    }
 }
 
 // =============================================================================

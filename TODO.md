@@ -115,21 +115,14 @@ This document tracks Phase 5 implementation of SLM-OS.
 - ✅ Implement operator dispatch table
 
 ### SIMD Optimization
-- ⏸️ Use NEON intrinsics for ARM64 — deferred, auto-vectorization sufficient for demo
-  ```rust
-  #[cfg(target_arch = "aarch64")]
-  use core::arch::aarch64::*;
-  ```
-- ⏸️ Use SSE/AVX intrinsics for x86-64 — deferred, auto-vectorization sufficient for demo
-  ```rust
-  #[cfg(target_arch = "x86_64")]
-  use core::arch::x86_64::*;
-  ```
-- ⏸️ Implement SIMD-optimized `matmul_f32()` — deferred, auto-vectorization sufficient for demo:
-  - ⏸️ 4-wide accumulation (NEON: `vfmaq_f32`, SSE: `_mm_fmadd_ps`)
-  - ⏸️ Cache-friendly tiling (64×64 or 128×128 blocks)
-  - ⏸️ Prefetching for large matrices
-- ⏸️ Benchmark: target < 1ms for 256×256 × 256×256 MatMul — deferred, auto-vectorization sufficient for demo
+- ✅ Use NEON intrinsics for ARM64 (`core::arch::aarch64::*` in ops.rs matmul)
+  - ✅ 4-wide accumulation via `vld1q_f32`, `vfmaq_f32`, `vst1q_f32`
+  - ✅ Scalar tail for non-4-aligned columns
+  - ✅ Verified: accuracy matches PyTorch reference (argmax=5)
+- ⏸️ Use SSE/AVX intrinsics for x86-64
+- ⏸️ Cache-friendly tiling (64×64 or 128×128 blocks)
+- ⏸️ Prefetching for large matrices
+- ⏸️ Benchmark: target < 1ms for 256×256 × 256×256 MatMul
 
 ### Inference Runtime
 - ✅ Create `runtime/src/inference/engine.rs`
