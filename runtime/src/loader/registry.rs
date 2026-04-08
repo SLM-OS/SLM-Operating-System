@@ -399,6 +399,25 @@ pub fn get_weights(index: usize) -> Option<ModelHandle> {
     result
 }
 
+/// Share a model's weight memory with another consumer.
+///
+/// Increments the refcount on the weight block so it stays alive
+/// even if the original model is unloaded. The caller must call
+/// `mm::free()` on the returned handle when done.
+pub fn share_weights(index: usize) -> Option<ModelHandle> {
+    lock();
+    let result = unsafe {
+        let reg = &*REGISTRY.get();
+        if index >= MAX_MODELS || !reg.entries[index].active {
+            None
+        } else {
+            mm::share(reg.entries[index].weights).ok()
+        }
+    };
+    unlock();
+    result
+}
+
 /// Get the workspace memory handle for a loaded model.
 pub fn get_workspace(index: usize) -> Option<ModelHandle> {
     lock();

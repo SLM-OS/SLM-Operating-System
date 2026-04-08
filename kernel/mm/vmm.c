@@ -741,9 +741,10 @@ void vmm_dump(void)
  */
 static void vmm_setup_platform(void)
 {
-    /* Note: VMM_FLAG_USER not set here yet — EL0 memory access requires
-     * further investigation on QEMU virt platform. Components currently
-     * run at EL1 with syscall infrastructure ready for EL0 transition. */
+    /* Note: VMM_FLAG_USER (AP[1]=1) causes QEMU MMU hang on virt platform
+     * with cortex-a53, cortex-a76, and -cpu max. Root cause: unknown
+     * (PTE format is valid per ARM ARM, PAN/SPAN investigated and ruled out).
+     * EL0 data access requires AP[1]=1 — deferred to hardware testing. */
     uint32_t kernel_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
 
     /* L1 entry for MMIO region (GIC, UART, etc. all below 0x40000000) */

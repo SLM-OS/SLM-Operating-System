@@ -209,6 +209,35 @@ static void test_infer_classify_invalid_model(void)
     TEST_ASSERT_EQUAL_INT(-1, result);
 }
 
+/*
+ * Test hot-swap of components with subscription preservation.
+ *
+ * Starts sensor_monitor, swaps it with a new sensor_monitor instance,
+ * verifies the swap returns a valid component index (subscriptions
+ * are preserved internally by component_hot_swap).
+ */
+extern int component_run(const char *name);
+extern int component_hot_swap(const char *old_name, const char *new_name);
+extern void yield(void);
+
+static void test_component_hot_swap(void)
+{
+    /* Start sensor_monitor */
+    int idx = component_run("sensor_monitor");
+    TEST_ASSERT_TRUE(idx >= 0);
+
+    /* Give it a tick to start and subscribe */
+    yield();
+
+    /* Hot-swap sensor_monitor with itself (new instance) */
+    int new_idx = component_hot_swap("sensor_monitor", "sensor_monitor");
+    TEST_ASSERT_TRUE(new_idx >= 0);
+    /* New index may differ from old — both are valid */
+
+    /* Give new instance a tick to run */
+    yield();
+}
+
 int test_suite_components_m5(void)
 {
     /* Part 1: Rust-side component tests */
@@ -218,6 +247,7 @@ int test_suite_components_m5(void)
     UnityBegin("Component FFI Tests");
 
     RUN_TEST(test_infer_classify_invalid_model);
+    RUN_TEST(test_component_hot_swap);
 
     failures += UnityEnd();
 

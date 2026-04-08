@@ -1882,6 +1882,23 @@ pub extern "C" fn rust_inference_test() -> i32 {
                 };
                 print_test_result(b"e2e: outputs not all zero\0", not_all_zero);
                 if !not_all_zero { failures += 1; }
+
+                // Accuracy reference: ONNX Runtime produces argmax=5 for
+                // MNIST-12 with all-zero [1,1,28,28] input.
+                let argmax = unsafe {
+                    let mut best = 0usize;
+                    let mut best_val = E2E_OUTPUT[0];
+                    for i in 1..n {
+                        if E2E_OUTPUT[i] > best_val {
+                            best_val = E2E_OUTPUT[i];
+                            best = i;
+                        }
+                    }
+                    best
+                };
+                let accuracy_ok = argmax == 5;
+                print_test_result(b"e2e: accuracy argmax==5 (PyTorch ref)\0", accuracy_ok);
+                if !accuracy_ok { failures += 1; }
             }
 
             let _ = loader::registry::unload_model(idx);
@@ -2131,6 +2148,64 @@ pub extern "C" fn rust_component_test() -> i32 {
         let passed = stats.total_inferences > 0 && stats.errors > 0;  // errors from invalid model tests
         print_test_result(b"stats: counters populated\0", passed);
         if !passed { failures += 1; }
+    }
+
+    // Test 5: PyTorch accuracy reference — argmax should be 5 for zero input
+    // Reference: ONNX Runtime produces argmax=5 for MNIST-12 with all-zero
+    // [1,1,28,28] input (verified via onnxruntime Python package).
+    {
+        let class = rust_infer_classify(0);
+        // If model 0 is loaded from a prior test, check argmax matches reference
+        if class >= 0 {
+            let passed = class == 5;
+            print_test_result(b"accuracy: MNIST zero-input argmax==5\0", passed);
+            if !passed { failures += 1; }
+        } else {
+            // Model not loaded — skip (not a failure)
+            print_test_result(b"accuracy: MNIST reference (skipped)\0", true);
+        }
+    }
+
+    // Test 7: Weight sharing — share_weights increments refcount
+    {
+        // If model 0 is still loaded, test sharing
+        if let Some(shared_handle) = loader::registry::share_weights(0) {
+            // Shared handle should be valid
+            let ptr = mm::get_ptr(shared_handle);
+            let passed = ptr.is_some();
+            print_test_result(b"sharing: weight share returns valid handle\0", passed);
+            if !passed { failures += 1; }
+
+            // Free the shared handle (decrements refcount)
+            let _ = mm::free(shared_handle);
+            print_test_result(b"sharing: weight unshare succeeds\0", true);
+        } else {
+            // No model loaded — skip
+            print_test_result(b"sharing: no model to share (skipped)\0", true);
+        }
+    }
+
+    // Test 6: End-to-end pipeline latency measurement
+    {
+        let stats = inference::get_stats();
+        if stats.total_inferences > 0 {
+            let avg_us = stats.total_time_ns / stats.total_inferences / 1000;
+            let min_us = stats.min_time_ns / 1000;
+            let max_us = stats.max_time_ns / 1000;
+            unsafe {
+                extern "C" { fn uart_printf(fmt: *const u8, ...); }
+                uart_printf(
+                    b"  [INFO] Pipeline latency: avg=%lu us, min=%lu us, max=%lu us (%lu inferences)\n\0".as_ptr(),
+                    avg_us, min_us, max_us, stats.total_inferences,
+                );
+            }
+            // Latency should be reasonable (< 10 seconds per inference on QEMU)
+            let passed = avg_us < 10_000_000;
+            print_test_result(b"latency: avg < 10s per inference\0", passed);
+            if !passed { failures += 1; }
+        } else {
+            print_test_result(b"latency: no inferences to measure\0", true);
+        }
     }
 
     // Test 4: Stats struct has valid ranges

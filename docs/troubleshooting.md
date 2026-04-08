@@ -381,4 +381,54 @@ uart_printf("Weight pool: %zu/%zu blocks free\n",
 
 ---
 
-*Last updated: December 2025*
+## Phase 5: Model Loading and Inference Issues
+
+### Stack Overflow During Model Loading or Inference
+
+**Symptom:** Kernel panic (data abort, instruction abort) during `model load` or `model infer`.
+
+**Cause:** The `ParsedOnnx` struct (~6KB) and `OperatorGraph` (~4KB) are stack-allocated. In debug builds, Rust creates larger stack frames. Combined with the inference engine call chain, total stack usage can exceed the limit.
+
+**Fix:**
+- Use Release builds (`BUILD_TYPE=Release` in Makefile) for smaller stack frames
+- Stack size is configured in `kernel/include/config.h` as `STACK_SIZE` (currently 64KB)
+- Reduce parser constants in `runtime/src/loader/onnx_parser.rs` (`MAX_NODES`, `MAX_INITIALIZERS`, `NAME_LEN`) if models exceed limits
+
+### Model Memory Pool Exhaustion
+
+**Symptom:** `model load` fails after loading/unloading several models, or tests hang during model loading.
+
+**Cause:** The model memory pools (weight pool: 256MB, workspace pool: 128MB) allocate in 2MB blocks. Each model load consumes at least 1 weight block + 1 workspace block (4MB minimum). Repeated load/unload in test suites can exhaust available blocks.
+
+**Fix:**
+- Check pool status with `model pools`
+- Ensure models are unloaded after use (`model unload <name>`)
+- The registry `init()` function only initializes once — it does NOT free existing allocations
+
+### Inference Engine Deadlock
+
+**Symptom:** `model infer` or `rust_infer_classify` hangs indefinitely.
+
+**Cause (fixed):** The `run_inference()` function acquired a spinlock but early-return on init failure (via `?` operator) skipped the unlock. All subsequent inference calls would spin forever.
+
+**Fix:** This was fixed by replacing the `?` early return with an explicit `match` that ensures `engine_unlock()` is always called. If the issue recurs, check that all paths through `run_inference()` in `runtime/src/inference/engine.rs` release the `ENGINE_LOCK`.
+
+### QEMU MMU Hang with User-Accessible Pages
+
+**Symptom:** System hangs at "Enabling MMU..." when `VMM_FLAG_USER` is set on RAM page table entries.
+
+**Cause:** Setting `PTE_AP_RW_ALL` (AP[1]=1) in L2 block descriptors causes QEMU to hang during MMU enable. Tested with `-cpu cortex-a53`, `-cpu cortex-a76`, and `-cpu max` — all hang. PAN (Privileged Access Never) and SPAN were investigated and ruled out. The PTE format is valid per the ARM Architecture Reference Manual. Root cause is believed to be a QEMU-specific emulation limitation.
+
+**Status:** EL0 data access is deferred to hardware testing (Pi 5, Jetson). The syscall infrastructure works at EL1. See `docs/component-isolation.md` for details.
+
+### ONNX Model Name Truncation
+
+**Symptom:** Tensor names not found during inference (WeightNotFound error).
+
+**Cause:** The ONNX parser uses fixed-size name buffers (`NAME_LEN=40` in parser, `TENSOR_NAME_LEN=40` in graph). ONNX models with tensor names longer than 39 characters will have their names truncated, causing name-mismatch errors during graph construction or inference.
+
+**Fix:** Increase `NAME_LEN` and `TENSOR_NAME_LEN` if the target model has longer names. Be aware this increases struct sizes and stack usage.
+
+---
+
+*Last updated: April 2026*
