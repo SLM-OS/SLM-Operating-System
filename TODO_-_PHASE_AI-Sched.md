@@ -130,11 +130,11 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
   - Action decoding, MLP layer dimensions
 
 ### Weight File Integration
-- ☐ Create `scripts/import_ai_weights.sh`:
+- ✅ Create `scripts/import_ai_weights.sh`:
   - Copies generated weights from Plan A output directory
   - Copies `ai_config.h` with platform-specific dimensions
-  - Validates dimensions match
-- ☐ Add Makefile target: `make import-ai-weights`
+  - Validates expected array names present
+- ☐ Add Makefile target: `make import-ai-weights` — deferred (script works standalone)
 
 ### Build Verification
 - ✅ Verify build with `ENABLE_AI_SCHEDULER=OFF` (existing behavior)
@@ -428,7 +428,7 @@ Features at offset 100:
   - ✅ Fallback count
   - ✅ Average inference latency (total_latency_ns / decisions)
   - ☐ Action distribution histogram — deferred (low priority)
-- ☐ Add `sched stats` shell command to display
+- ✅ `sched stats` shell command (M8)
 
 ---
 
