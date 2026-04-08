@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::mm::{self, ModelHandle};
 use crate::mm::model_loader::LoadError;
 use super::onnx_parser;
-use super::graph::OperatorGraph;
+use super::graph::{OperatorGraph, WeightTable, WeightEntry, TensorName, TensorShape, ElemType};
 
 /// Maximum simultaneously loaded models.
 pub const MAX_MODELS: usize = 8;
@@ -62,6 +62,7 @@ struct LoadedModelEntry {
     weights: ModelHandle,
     workspace: ModelHandle,
     graph: OperatorGraph,
+    weight_table: WeightTable,
     info: ModelInfoC,
     active: bool,
 }
@@ -73,6 +74,7 @@ impl LoadedModelEntry {
             weights: ModelHandle::null(),
             workspace: ModelHandle::null(),
             graph: OperatorGraph::EMPTY,
+            weight_table: WeightTable::EMPTY,
             info: ModelInfoC::EMPTY,
             active: false,
         }
@@ -184,7 +186,8 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         }
     };
 
-    // Copy each initializer's data into the weight block
+    // Copy each initializer's data into the weight block and build weight table
+    let mut weight_table = WeightTable::EMPTY;
     let mut offset: usize = 0;
     for i in 0..parsed.initializer_count {
         let tensor = &parsed.initializers[i];
@@ -193,13 +196,58 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             continue;
         }
 
+        // Determine data source and handle varint-encoded int64_data specially.
+        // int64_data is varint-encoded in protobuf, but we need raw little-endian
+        // bytes for the inference engine to read directly as *const i64.
+        // Static buffer to avoid stack allocation (load_model already heavy on stack)
+        static mut I64_DECODE_BUF: [u8; 128] = [0u8; 128];
         let src = if let Some(raw) = tensor.raw_data {
             raw
         } else if let Some(floats) = tensor.float_data {
             floats
+        } else if let Some(i64_packed) = tensor.int64_data {
+            // Decode varint-encoded int64 values to raw little-endian bytes.
+            // SAFETY: load_model is serialized by the registry lock.
+            unsafe {
+                let mut decode_offset = 0usize;
+                for val in super::protobuf::packed_varint_i64(i64_packed) {
+                    if let Ok(v) = val {
+                        if decode_offset + 8 <= I64_DECODE_BUF.len() {
+                            let bytes = (v as i64).to_le_bytes();
+                            I64_DECODE_BUF[decode_offset..decode_offset + 8]
+                                .copy_from_slice(&bytes);
+                            decode_offset += 8;
+                        }
+                    }
+                }
+                &I64_DECODE_BUF[..decode_offset]
+            }
         } else {
             continue;
         };
+
+        // Record weight entry in table
+        if weight_table.count < super::graph::MAX_WEIGHT_ENTRIES {
+            let mut shape = TensorShape::EMPTY;
+            let ndim = core::cmp::min(tensor.shape.ndim as usize, 8);
+            for d in 0..ndim {
+                shape.dims[d] = if tensor.shape.dims[d] > 0 {
+                    tensor.shape.dims[d] as u32
+                } else {
+                    1
+                };
+            }
+            shape.ndim = ndim as u8;
+            shape.elem_type = ElemType::from_onnx(tensor.data_type as u32);
+
+            weight_table.entries[weight_table.count] = WeightEntry {
+                name: TensorName::from_bytes(tensor.name.as_bytes()),
+                offset: offset as u32,
+                size: src.len() as u32,
+                shape,
+            };
+            weight_table.count += 1;
+        }
 
         // SAFETY: weight_ptr is valid for BLOCK_SIZE bytes from alloc_weights,
         // and we're writing within that range (total_weight_size <= BLOCK_SIZE
@@ -264,6 +312,7 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
                     weights,
                     workspace,
                     graph,
+                    weight_table,
                     info,
                     active: true,
                 };
@@ -350,6 +399,36 @@ pub fn get_weights(index: usize) -> Option<ModelHandle> {
     result
 }
 
+/// Get the workspace memory handle for a loaded model.
+pub fn get_workspace(index: usize) -> Option<ModelHandle> {
+    lock();
+    let result = unsafe {
+        let reg = &*REGISTRY.get();
+        if index >= MAX_MODELS || !reg.entries[index].active {
+            None
+        } else {
+            Some(reg.entries[index].workspace)
+        }
+    };
+    unlock();
+    result
+}
+
+/// Get the weight table for a loaded model.
+pub fn get_weight_table(index: usize) -> Option<WeightTable> {
+    lock();
+    let result = unsafe {
+        let reg = &*REGISTRY.get();
+        if index >= MAX_MODELS || !reg.entries[index].active {
+            None
+        } else {
+            Some(reg.entries[index].weight_table.clone())
+        }
+    };
+    unlock();
+    result
+}
+
 /// Find a model by name (null-terminated or exact-length byte slice).
 pub fn find_by_name(name: &[u8]) -> Option<usize> {
     // Trim trailing null
@@ -379,6 +458,49 @@ pub fn find_by_name(name: &[u8]) -> Option<usize> {
     };
     unlock();
     result
+}
+
+/// Copy a model's operator graph directly into a caller-provided buffer.
+///
+/// Avoids returning the 6KB OperatorGraph by value (stack overflow in debug).
+pub fn copy_graph_into(index: usize, dest: &mut OperatorGraph) -> bool {
+    lock();
+    let ok = unsafe {
+        let reg = &*REGISTRY.get();
+        if index >= MAX_MODELS || !reg.entries[index].active {
+            false
+        } else {
+            // Direct field copy into destination (no intermediate stack variable)
+            core::ptr::copy_nonoverlapping(
+                &reg.entries[index].graph as *const OperatorGraph,
+                dest as *mut OperatorGraph,
+                1,
+            );
+            true
+        }
+    };
+    unlock();
+    ok
+}
+
+/// Copy a model's weight table directly into a caller-provided buffer.
+pub fn copy_weight_table_into(index: usize, dest: &mut WeightTable) -> bool {
+    lock();
+    let ok = unsafe {
+        let reg = &*REGISTRY.get();
+        if index >= MAX_MODELS || !reg.entries[index].active {
+            false
+        } else {
+            core::ptr::copy_nonoverlapping(
+                &reg.entries[index].weight_table as *const WeightTable,
+                dest as *mut WeightTable,
+                1,
+            );
+            true
+        }
+    };
+    unlock();
+    ok
 }
 
 /// Get the number of loaded models.

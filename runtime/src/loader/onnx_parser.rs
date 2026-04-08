@@ -41,6 +41,7 @@ const NODE_OP_TYPE: u32 = 4;
 const TENSOR_DIMS: u32 = 1;
 const TENSOR_DATA_TYPE: u32 = 2;
 const TENSOR_FLOAT_DATA: u32 = 4;
+const TENSOR_INT64_DATA: u32 = 7;
 const TENSOR_NAME: u32 = 8;
 const TENSOR_RAW_DATA: u32 = 13;
 
@@ -80,8 +81,9 @@ pub const MAX_NODE_INPUTS_PARSE: usize = 3;
 /// Maximum outputs per node.
 pub const MAX_NODE_OUTPUTS_PARSE: usize = 2;
 
-/// Name buffer length.
-pub const NAME_LEN: usize = 24;
+/// Name buffer length — must accommodate ONNX tensor names.
+/// MNIST-12 has names up to 38 chars (e.g., "Pooling160_Output_0_reshape0_shape").
+pub const NAME_LEN: usize = 40;
 
 // =============================================================================
 // Parser types
@@ -187,6 +189,8 @@ pub struct TensorInfo<'a> {
     pub raw_data: Option<&'a [u8]>,
     /// Packed float data (field 4: float_data). Points into the ONNX buffer.
     pub float_data: Option<&'a [u8]>,
+    /// Packed int64 data (field 7: int64_data). Points into the ONNX buffer.
+    pub int64_data: Option<&'a [u8]>,
 }
 
 impl<'a> TensorInfo<'a> {
@@ -196,6 +200,7 @@ impl<'a> TensorInfo<'a> {
         data_type: OnnxDataType::Unknown,
         raw_data: None,
         float_data: None,
+        int64_data: None,
     };
 
     /// Total number of elements.
@@ -221,6 +226,9 @@ impl<'a> TensorInfo<'a> {
         }
         if let Some(floats) = self.float_data {
             return floats.len();
+        }
+        if let Some(i64s) = self.int64_data {
+            return i64s.len();
         }
         self.num_elements() * self.data_type.element_size()
     }
@@ -468,6 +476,11 @@ fn parse_tensor_proto<'a>(data: &'a [u8]) -> Result<TensorInfo<'a>, ParseError> 
             TENSOR_FLOAT_DATA => {
                 if let FieldData::Bytes(packed) = field.data {
                     tensor.float_data = Some(packed);
+                }
+            }
+            TENSOR_INT64_DATA => {
+                if let FieldData::Bytes(packed) = field.data {
+                    tensor.int64_data = Some(packed);
                 }
             }
             TENSOR_NAME => {

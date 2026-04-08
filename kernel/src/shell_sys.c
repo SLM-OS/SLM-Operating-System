@@ -1237,6 +1237,42 @@ static int model_unload(int argc, char *argv[])
     }
 }
 
+/*
+ * Run inference and print results — implemented in Rust to avoid FP
+ * operations in -mgeneral-regs-only kernel C code.
+ */
+extern int rust_infer_and_print(uint32_t model_index);
+
+static int model_infer(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: model infer <name|idx>\r\n");
+        return -1;
+    }
+
+    /* Find model */
+    int idx = -1;
+    uint32_t parsed_idx;
+    if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+        idx = (int)parsed_idx;
+    } else {
+        idx = rust_model_find(argv[2]);
+    }
+
+    if (idx < 0) {
+        uart_printf("model infer: '%s' not found\r\n", argv[2]);
+        return -1;
+    }
+
+    int result = rust_infer_and_print((uint32_t)idx);
+    if (result < 0) {
+        uart_printf("model infer: failed (error %d)\r\n", result);
+        return -1;
+    }
+
+    return 0;
+}
+
 int cmd_model(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -1265,8 +1301,11 @@ int cmd_model(int argc, char *argv[])
         model_show_pools();
         return 0;
     }
+    if (strcmp(subcmd, "infer") == 0) {
+        return model_infer(argc, argv);
+    }
 
-    uart_puts("Usage: model [load <path>|list|info <name>|unload <name>|pools]\r\n");
+    uart_puts("Usage: model [load|list|info|unload|infer|pools]\r\n");
     return -1;
 }
 

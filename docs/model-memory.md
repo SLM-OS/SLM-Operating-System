@@ -297,6 +297,14 @@ The `ParsedOnnx` struct is ~6KB, designed to fit within the 32KB kernel task sta
 
 See `docs/onnx-support.md` for supported operators and ONNX format details.
 
+### Inference Engine
+
+The inference engine (`runtime/src/inference/engine.rs`) executes operator graphs on loaded models using the following memory strategy:
+
+- **Static 10KB workspace buffer** -- The engine uses a fixed-size 10KB buffer for intermediate tensors, avoiding heap allocation entirely. This keeps inference within the kernel task stack budget.
+- **Bump allocator with per-call reset** -- Intermediate tensors are allocated sequentially from the workspace buffer during a forward pass. The bump pointer resets to zero at the start of each inference call, so no explicit free operations are needed.
+- **WeightTable** -- Maps initializer names to byte offsets within the weight memory block allocated from the weight pool. During inference, operator inputs that correspond to model weights are resolved through this table rather than copied.
+
 ---
 
 ## Future Extensions

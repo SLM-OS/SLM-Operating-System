@@ -9,6 +9,7 @@
 #include "unity.h"
 #include "slm_ffi.h"
 #include "uart.h"
+#include "string.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -98,6 +99,58 @@ int test_suite_model_loader(void)
     RUN_TEST(test_model_find_null);
     RUN_TEST(test_model_unload_invalid_index);
     RUN_TEST(test_model_count_after_init);
+
+    failures += UnityEnd();
+
+    return failures;
+}
+
+/* ============================================================================
+ * Inference engine tests
+ * ============================================================================ */
+
+/*
+ * Note: These tests use uint32_t arrays cast to float* to avoid
+ * floating-point operations in -mgeneral-regs-only kernel code.
+ * The Rust FFI functions only check for NULL pointers at this level.
+ */
+
+static void test_infer_null_input(void)
+{
+    uint32_t output[10];
+    int result = rust_infer(0, NULL, 784, (void *)output, 10);
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
+static void test_infer_null_output(void)
+{
+    uint32_t input[4];
+    memset(input, 0, sizeof(input));
+    int result = rust_infer(0, (const void *)input, 4, NULL, 10);
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
+static void test_infer_invalid_model(void)
+{
+    uint32_t input[4];
+    uint32_t output[4];
+    memset(input, 0, sizeof(input));
+    memset(output, 0, sizeof(output));
+    int result = rust_infer(99, (const void *)input, 4, (void *)output, 4);
+    TEST_ASSERT_TRUE(result < 0);
+}
+
+int test_suite_inference(void)
+{
+    /* Part 1: Rust-side inference tests */
+    int failures = rust_inference_test();
+
+    /* Part 2: C-side FFI boundary tests */
+    UnityBegin("Inference FFI Tests");
+
+    RUN_TEST(test_infer_null_input);
+    RUN_TEST(test_infer_null_output);
+    RUN_TEST(test_infer_invalid_model);
 
     failures += UnityEnd();
 

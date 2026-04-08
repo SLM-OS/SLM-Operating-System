@@ -77,6 +77,7 @@ Available commands:
 | `model list` | List loaded models with parameter count, weight size, and node count |
 | `model info <name\|idx>` | Show detailed information for a loaded model |
 | `model unload <name\|idx>` | Unload a model by name or registry index and free its memory |
+| `model infer <name\|idx>` | Run inference on model with zero input, print output probabilities and predicted class |
 | `model pools` | Show weight and workspace memory pool statistics |
 | `dtb` | Show Device Tree info (parsed or defaults) |
 | `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |

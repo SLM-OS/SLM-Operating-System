@@ -10,7 +10,7 @@ Documentation for ONNX model parsing and loading in SLM-OS (Phase 5, Milestone 1
 
 SLM-OS includes a minimal ONNX model loader that parses ONNX protobuf files, constructs an operator graph, and stores model weights in the model memory pools. The implementation is designed for a `no_std` bare-metal environment with strict stack size constraints (32KB kernel task stack).
 
-The loader does not perform inference -- it prepares models for a future inference engine (Phase 5, Milestone 2).
+The loader prepares models for the inference engine, which executes operator graphs on the CPU (see "Inference Engine" section below).
 
 ---
 
@@ -32,6 +32,8 @@ The following ONNX operators are recognized during graph construction:
 | Unsqueeze | `Unsqueeze` | Insert dimensions |
 | Gemm | `Gemm` | General matrix multiplication |
 | Flatten | `Flatten` | Flatten tensor to 2D |
+| Conv | `Conv` | 2D convolution (NCHW layout, default stride=1, pad=0) |
+| MaxPool | `MaxPool` | 2D max pooling (default kernel=2x2, stride=2) |
 | Shape | `Shape` | Return tensor shape |
 | Constant | `Constant` | Constant tensor value |
 | Cast | `Cast` | Data type conversion |
@@ -139,13 +141,23 @@ SLM-OS> model load /mnt/files/mnist.onnx
 
 ---
 
+## Inference Engine
+
+SLM-OS can now execute ONNX models end-to-end on the CPU. The inference engine walks the operator graph in topological order, dispatching each node to the corresponding operator implementation. Intermediate tensors are allocated from a static workspace buffer that resets between inference calls.
+
+The **MNIST-12** model from the ONNX Model Zoo serves as the verified test case. This model uses Conv, MaxPool, Reshape, MatMul, Add, Relu, and Softmax operators to classify 28x28 grayscale digit images into 10 classes. Running `model infer` on a loaded MNIST model executes the full forward pass and prints output probabilities with the predicted class.
+
+See `docs/ffi.md` for the inference FFI functions (`rust_infer`, `rust_infer_and_print`, `rust_inference_test`).
+
+---
+
 ## Future Work
 
 - **FP16/INT8 quantization** -- Load and store quantized weights for reduced memory usage
 - **Larger models** -- Increase node/initializer limits for production models (requires heap allocation or larger stack)
 - **Dynamic shapes** -- Support batch dimension and variable-length sequences
 - **GGUF format** -- Parse llama.cpp GGUF models (format detection is implemented but loading is not)
-- **Inference engine** -- Execute the operator graph on loaded weights (Phase 5, Milestone 2)
+- **SIMD optimization** -- Use NEON/SSE intrinsics for operator acceleration
 
 ---
 

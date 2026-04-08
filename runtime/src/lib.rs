@@ -22,6 +22,7 @@ pub mod sched;
 pub mod component;
 pub mod msg_router;
 pub mod loader;
+pub mod inference;
 
 // Re-export commonly used types
 pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags, TaskId};
@@ -1335,6 +1336,448 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
             kernel_ffi::uart_puts(b"[INFO] Model loader tests passed\n\0".as_ptr());
         } else {
             kernel_ffi::uart_puts(b"[FAIL] Model loader tests had failures\n\0".as_ptr());
+        }
+    }
+
+    failures
+}
+
+// =============================================================================
+// Inference API (Phase 5, M2)
+// =============================================================================
+
+/// Run inference on a loaded model.
+///
+/// Returns number of output floats written on success, negative on error.
+///
+/// # Safety
+/// - `input_data` must point to at least `input_len` floats
+/// - `output_buf` must point to at least `output_len` floats
+#[no_mangle]
+pub unsafe extern "C" fn rust_infer(
+    model_index: u32,
+    input_data: *const f32,
+    input_len: usize,
+    output_buf: *mut f32,
+    output_len: usize,
+) -> i32 {
+    if input_data.is_null() || output_buf.is_null() {
+        return -1;
+    }
+    match inference::run_inference(
+        model_index as usize,
+        input_data,
+        input_len,
+        output_buf,
+        output_len,
+    ) {
+        Ok(n) => n as i32,
+        Err(_) => -2,
+    }
+}
+
+/// Run inference on a loaded model with zero input and print results.
+///
+/// Used by the shell `model infer` command to avoid FP operations in
+/// kernel C code (compiled with -mgeneral-regs-only).
+#[no_mangle]
+pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    let idx = model_index as usize;
+    let info = match loader::registry::get_info(idx) {
+        Some(i) => i,
+        None => return -1,
+    };
+
+    // Use static buffers to avoid blowing the 32KB stack
+    static INPUT: [f32; 784] = [0.0f32; 784];
+    static mut OUTPUT: [f32; 64] = [0.0f32; 64];
+
+    let start = kernel_ffi::get_time_ns();
+
+    // SAFETY: This function is only called from the single-threaded shell.
+    let result = unsafe {
+        for o in OUTPUT.iter_mut() { *o = 0.0; }
+
+        match inference::run_inference(
+            idx,
+            INPUT.as_ptr(),
+            INPUT.len(),
+            OUTPUT.as_mut_ptr(),
+            OUTPUT.len(),
+        ) {
+            Ok(n) => n,
+            Err(_) => return -3,
+        }
+    };
+
+    let end = kernel_ffi::get_time_ns();
+    let elapsed_us = (end - start) / 1000;
+
+    unsafe {
+        uart_printf(
+            b"Inference on '%s' completed in %lu us\r\n\0".as_ptr(),
+            info.name.as_ptr(),
+            elapsed_us as u64,
+        );
+        uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
+    }
+
+    // Find argmax and print outputs
+    let mut argmax: usize = 0;
+    let mut max_val = unsafe { OUTPUT[0] };
+    for i in 0..result {
+        let val = unsafe { OUTPUT[i] };
+        let pct = (val * 1000.0) as i32;
+        let pct = if pct < 0 { 0 } else { pct };
+        unsafe {
+            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
+        }
+        if val > max_val {
+            max_val = val;
+            argmax = i;
+        }
+    }
+
+    unsafe {
+        uart_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
+    }
+
+    0
+}
+
+/// Run inference engine tests.
+///
+/// Returns number of test failures (0 = all passed).
+#[no_mangle]
+pub extern "C" fn rust_inference_test() -> i32 {
+    let mut failures: i32 = 0;
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running inference tests...\n\0".as_ptr());
+    }
+
+    // Test 1: BumpAllocator basic alloc/reset
+    {
+        let mut buf = [0u8; 1024];
+        let mut alloc = inference::BumpAllocator::new(buf.as_mut_ptr(), buf.len());
+        let p1 = alloc.alloc(64, 16);
+        let p1_ok = !p1.is_null();
+        let used_ok = alloc.used() >= 64;
+        alloc.reset();
+        let reset_ok = alloc.used() == 0;
+        let passed = p1_ok && used_ok && reset_ok;
+        print_test_result(b"workspace: bump alloc/reset\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 2: BumpAllocator tensor alloc
+    {
+        let mut buf = [0u8; 4096];
+        let mut alloc = inference::BumpAllocator::new(buf.as_mut_ptr(), buf.len());
+        let t = alloc.alloc_tensor(&[2, 3]);
+        let passed = t.is_some() && t.unwrap().num_elements() == 6;
+        print_test_result(b"workspace: tensor alloc\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 3: MatMul correctness
+    // A = [[1,2,3],[4,5,6]] (2x3), B = [[7,8],[9,10],[11,12]] (3x2)
+    // C = [[58,64],[139,154]] (2x2)
+    {
+        let a_data: [f32; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b_data: [f32; 6] = [7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+        let mut c_data: [f32; 4] = [0.0; 4];
+
+        let a = inference::Tensor::new(a_data.as_ptr(), &[2, 3]);
+        let b = inference::Tensor::new(b_data.as_ptr(), &[3, 2]);
+        let mut c = inference::Tensor::new(c_data.as_mut_ptr() as *const f32, &[2, 2]);
+
+        let result = inference::ops::matmul(&a, &b, &mut c);
+        let passed = result.is_ok() &&
+            unsafe {
+                let p = c.data;
+                (*p.add(0) - 58.0).abs() < 0.01 &&
+                (*p.add(1) - 64.0).abs() < 0.01 &&
+                (*p.add(2) - 139.0).abs() < 0.01 &&
+                (*p.add(3) - 154.0).abs() < 0.01
+            };
+        print_test_result(b"ops: matmul 2x3 * 3x2\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 4: Add with broadcast
+    {
+        let a_data: [f32; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b_data: [f32; 3] = [10.0, 20.0, 30.0];
+        let mut c_data: [f32; 6] = [0.0; 6];
+
+        let a = inference::Tensor::new(a_data.as_ptr(), &[2, 3]);
+        let b = inference::Tensor::new(b_data.as_ptr(), &[3]);
+        let mut c = inference::Tensor::new(c_data.as_mut_ptr() as *const f32, &[2, 3]);
+
+        let result = inference::ops::add(&a, &b, &mut c);
+        let passed = result.is_ok() &&
+            unsafe {
+                let p = c.data;
+                (*p.add(0) - 11.0).abs() < 0.01 &&
+                (*p.add(1) - 22.0).abs() < 0.01 &&
+                (*p.add(2) - 33.0).abs() < 0.01 &&
+                (*p.add(3) - 14.0).abs() < 0.01 &&
+                (*p.add(4) - 25.0).abs() < 0.01 &&
+                (*p.add(5) - 36.0).abs() < 0.01
+            };
+        print_test_result(b"ops: add broadcast [2,3]+[3]\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 5: Relu
+    {
+        let input_data: [f32; 4] = [-2.0, -0.5, 0.0, 3.0];
+        let mut out_data: [f32; 4] = [0.0; 4];
+
+        let input = inference::Tensor::new(input_data.as_ptr(), &[4]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[4]);
+
+        let result = inference::ops::relu(&input, &mut out);
+        let passed = result.is_ok() &&
+            unsafe {
+                let p = out.data;
+                *p.add(0) == 0.0 && *p.add(1) == 0.0 &&
+                *p.add(2) == 0.0 && *p.add(3) == 3.0
+            };
+        print_test_result(b"ops: relu\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 6: Softmax
+    {
+        let input_data: [f32; 3] = [1.0, 2.0, 3.0];
+        let mut out_data: [f32; 3] = [0.0; 3];
+
+        let input = inference::Tensor::new(input_data.as_ptr(), &[3]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[3]);
+
+        let result = inference::ops::softmax(&input, &mut out);
+        let sum = unsafe { *out.data.add(0) + *out.data.add(1) + *out.data.add(2) };
+        let monotonic = unsafe { *out.data.add(0) < *out.data.add(1) && *out.data.add(1) < *out.data.add(2) };
+        let passed = result.is_ok() && (sum - 1.0).abs() < 0.01 && monotonic;
+        print_test_result(b"ops: softmax sums to 1.0\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 7: Reshape
+    {
+        let data: [f32; 6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let input = inference::Tensor::new(data.as_ptr(), &[2, 3]);
+        let result = inference::ops::reshape(&input, &[3, 2]);
+        let passed = result.is_ok() && result.unwrap().num_elements() == 6;
+        print_test_result(b"ops: reshape preserves elements\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8: Conv2D unit test
+    // 1x1x4x4 input (all ones), 1x1x2x2 kernel (all ones), no bias
+    // stride=1, pad=0 => output 1x1x3x3, each element = 4.0
+    {
+        let input_data: [f32; 16] = [1.0; 16];
+        let weight_data: [f32; 4] = [1.0; 4];
+        let mut out_data: [f32; 9] = [0.0; 9];
+
+        let input = inference::Tensor::new(input_data.as_ptr(), &[1, 1, 4, 4]);
+        let weight = inference::Tensor::new(weight_data.as_ptr(), &[1, 1, 2, 2]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[1, 1, 3, 3]);
+
+        let result = inference::ops::conv2d(&input, &weight, None, &mut out, 2, 2, 1, 1, 0, 0);
+        let passed = result.is_ok() && unsafe {
+            let p = out.data;
+            let mut ok = true;
+            let mut i = 0;
+            while i < 9 {
+                if (*p.add(i) - 4.0).abs() > 0.01 { ok = false; }
+                i += 1;
+            }
+            ok
+        };
+        print_test_result(b"ops: conv2d 1x1x4x4 k=2x2\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 9: MaxPool2D unit test
+    // 1x1x4x4 input with values 1..16, 2x2 pool stride 2
+    // output 1x1x2x2 = [6, 8, 14, 16]
+    {
+        let input_data: [f32; 16] = [
+            1.0,  2.0,  3.0,  4.0,
+            5.0,  6.0,  7.0,  8.0,
+            9.0,  10.0, 11.0, 12.0,
+            13.0, 14.0, 15.0, 16.0,
+        ];
+        let mut out_data: [f32; 4] = [0.0; 4];
+
+        let input = inference::Tensor::new(input_data.as_ptr(), &[1, 1, 4, 4]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[1, 1, 2, 2]);
+
+        let result = inference::ops::maxpool2d(&input, &mut out, 2, 2, 2, 2);
+        let passed = result.is_ok() && unsafe {
+            let p = out.data;
+            (*p.add(0) - 6.0).abs() < 0.01 &&
+            (*p.add(1) - 8.0).abs() < 0.01 &&
+            (*p.add(2) - 14.0).abs() < 0.01 &&
+            (*p.add(3) - 16.0).abs() < 0.01
+        };
+        print_test_result(b"ops: maxpool2d 2x2 stride 2\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 10: Gemm unit test
+    // A=[1,2; 3,4] B=[5,6; 7,8] C=[1,1] => A*B+C = [[20,23],[44,51]]
+    {
+        let a_data: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+        let b_data: [f32; 4] = [5.0, 6.0, 7.0, 8.0];
+        let c_data: [f32; 2] = [1.0, 1.0];
+        let mut out_data: [f32; 4] = [0.0; 4];
+
+        let a = inference::Tensor::new(a_data.as_ptr(), &[2, 2]);
+        let b = inference::Tensor::new(b_data.as_ptr(), &[2, 2]);
+        let c = inference::Tensor::new(c_data.as_ptr(), &[2]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[2, 2]);
+
+        let result = inference::ops::gemm(&a, &b, Some(&c), &mut out);
+        let passed = result.is_ok() && unsafe {
+            let p = out.data;
+            (*p.add(0) - 20.0).abs() < 0.01 &&
+            (*p.add(1) - 23.0).abs() < 0.01 &&
+            (*p.add(2) - 44.0).abs() < 0.01 &&
+            (*p.add(3) - 51.0).abs() < 0.01
+        };
+        print_test_result(b"ops: gemm A*B+C\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 11: MatMul shape mismatch (2x3 * 2x3 is invalid)
+    {
+        let a_data: [f32; 6] = [1.0; 6];
+        let b_data: [f32; 6] = [1.0; 6];
+        let mut out_data: [f32; 9] = [0.0; 9];
+
+        let a = inference::Tensor::new(a_data.as_ptr(), &[2, 3]);
+        let b = inference::Tensor::new(b_data.as_ptr(), &[2, 3]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[3, 3]);
+
+        let result = inference::ops::matmul(&a, &b, &mut out);
+        let passed = match result {
+            Err(inference::EngineError::ShapeMismatch) => true,
+            _ => false,
+        };
+        print_test_result(b"ops: matmul shape mismatch\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 12: Workspace exhaustion (tiny workspace, large tensor request)
+    {
+        let mut buf = [0u8; 64];
+        let mut alloc = inference::BumpAllocator::new(buf.as_mut_ptr(), buf.len());
+        let result = alloc.alloc_tensor(&[1000]);
+        let passed = result.is_none();
+        print_test_result(b"workspace: exhaustion returns None\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 13: End-to-end MNIST inference
+    {
+        static MNIST_ONNX: &[u8] = include_bytes!("../../models/test/mnist.onnx");
+
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"mnist_e2e", MNIST_ONNX);
+
+        if let Ok(idx) = load_result {
+            // Use statics to avoid stack overflow (32KB stack)
+            static E2E_INPUT: [f32; 784] = [0.0; 784];
+            static mut E2E_OUTPUT: [f32; 10] = [0.0; 10];
+
+            // Check engine can be created for this model
+            let engine_ok = inference::InferenceEngine::new(idx).is_ok();
+            print_test_result(b"e2e: engine creation\0", engine_ok);
+            if !engine_ok {
+                failures += 1;
+                let _ = loader::registry::unload_model(idx);
+                unsafe {
+                    kernel_ffi::uart_puts(b"[FAIL] Inference tests had failures\n\0".as_ptr());
+                }
+                return failures;
+            }
+
+            // SAFETY: single-threaded test context, static buffers
+            let result = unsafe {
+                for o in E2E_OUTPUT.iter_mut() { *o = 0.0; }
+                inference::run_inference(
+                    idx,
+                    E2E_INPUT.as_ptr(),
+                    E2E_INPUT.len(),
+                    E2E_OUTPUT.as_mut_ptr(),
+                    E2E_OUTPUT.len(),
+                )
+            };
+
+            let run_ok = result.is_ok();
+            if !run_ok {
+                // Print the error code for debugging
+                if let Err(e) = result {
+                    unsafe {
+                        extern "C" { fn uart_printf(fmt: *const u8, ...); }
+                        uart_printf(b"  [DBG] e2e failed: err=%d\n\0".as_ptr(), e as i32);
+                    }
+                }
+            }
+            print_test_result(b"e2e: MNIST inference completes\0", run_ok);
+            if !run_ok { failures += 1; }
+
+            if run_ok {
+                let n = result.unwrap();
+                let count_ok = n == 10;
+                print_test_result(b"e2e: 10 outputs produced\0", count_ok);
+                if !count_ok { failures += 1; }
+
+                // Verify outputs are finite (not NaN or Inf)
+                let all_finite = unsafe {
+                    E2E_OUTPUT[..n].iter().all(|&v| v.is_finite())
+                };
+                print_test_result(b"e2e: all outputs finite\0", all_finite);
+                if !all_finite { failures += 1; }
+
+                // Verify outputs are not all zeros (model produces meaningful values)
+                let not_all_zero = unsafe {
+                    E2E_OUTPUT[..n].iter().any(|&v| v != 0.0)
+                };
+                print_test_result(b"e2e: outputs not all zero\0", not_all_zero);
+                if !not_all_zero { failures += 1; }
+            }
+
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"e2e: model load for inference\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test 14: Engine creation for nonexistent model
+    {
+        let result = inference::InferenceEngine::new(99);
+        let passed = result.is_err();
+        print_test_result(b"engine: nonexistent model error\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Summary
+    unsafe {
+        if failures == 0 {
+            kernel_ffi::uart_puts(b"[INFO] Inference tests passed\n\0".as_ptr());
+        } else {
+            kernel_ffi::uart_puts(b"[FAIL] Inference tests had failures\n\0".as_ptr());
         }
     }
 

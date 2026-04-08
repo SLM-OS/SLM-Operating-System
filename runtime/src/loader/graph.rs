@@ -5,7 +5,7 @@
 //! buffer has been freed.
 
 /// Maximum nodes in the operator graph.
-pub const MAX_GRAPH_NODES: usize = 24;
+pub const MAX_GRAPH_NODES: usize = 12;
 
 /// Maximum inputs per graph node.
 pub const MAX_NODE_INPUTS: usize = 4;
@@ -16,8 +16,8 @@ pub const MAX_NODE_OUTPUTS: usize = 2;
 /// Maximum graph-level inputs/outputs.
 pub const MAX_GRAPH_IO: usize = 4;
 
-/// Maximum tensor name length.
-pub const TENSOR_NAME_LEN: usize = 32;
+/// Maximum tensor name length — must accommodate ONNX tensor names.
+pub const TENSOR_NAME_LEN: usize = 40;
 
 /// Maximum tensor dimensions.
 pub const MAX_DIMS: usize = 8;
@@ -41,6 +41,8 @@ pub enum OpType {
     Shape = 12,
     Constant = 13,
     Cast = 14,
+    Conv = 15,
+    MaxPool = 16,
     /// Operator not in the supported set.
     Unknown = 255,
 }
@@ -64,6 +66,8 @@ impl OpType {
             b"Shape" => OpType::Shape,
             b"Constant" => OpType::Constant,
             b"Cast" => OpType::Cast,
+            b"Conv" => OpType::Conv,
+            b"MaxPool" => OpType::MaxPool,
             _ => OpType::Unknown,
         }
     }
@@ -86,6 +90,8 @@ impl OpType {
             OpType::Shape => "Shape",
             OpType::Constant => "Constant",
             OpType::Cast => "Cast",
+            OpType::Conv => "Conv",
+            OpType::MaxPool => "MaxPool",
             OpType::Unknown => "Unknown",
         }
     }
@@ -278,5 +284,54 @@ impl core::fmt::Debug for OperatorGraph {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "OperatorGraph(nodes={} inputs={} outputs={})",
             self.node_count, self.input_count, self.output_count)
+    }
+}
+
+// =============================================================================
+// Weight table (maps initializer names to offsets in weight memory block)
+// =============================================================================
+
+/// Maximum weight entries (matches parser MAX_INITIALIZERS).
+pub const MAX_WEIGHT_ENTRIES: usize = 16;
+
+/// An entry mapping an initializer name to its offset within the weight block.
+#[derive(Clone, Copy)]
+pub struct WeightEntry {
+    pub name: TensorName,
+    pub offset: u32,
+    pub size: u32,
+    pub shape: TensorShape,
+}
+
+impl WeightEntry {
+    pub const EMPTY: Self = Self {
+        name: TensorName::EMPTY,
+        offset: 0,
+        size: 0,
+        shape: TensorShape::EMPTY,
+    };
+}
+
+/// Table of weight name → offset mappings for a loaded model.
+#[derive(Clone)]
+pub struct WeightTable {
+    pub entries: [WeightEntry; MAX_WEIGHT_ENTRIES],
+    pub count: usize,
+}
+
+impl WeightTable {
+    pub const EMPTY: Self = Self {
+        entries: [WeightEntry::EMPTY; MAX_WEIGHT_ENTRIES],
+        count: 0,
+    };
+
+    /// Find a weight entry by name.
+    pub fn find(&self, name: &[u8]) -> Option<&WeightEntry> {
+        for i in 0..self.count {
+            if self.entries[i].name.eq_bytes(name) {
+                return Some(&self.entries[i]);
+            }
+        }
+        None
     }
 }

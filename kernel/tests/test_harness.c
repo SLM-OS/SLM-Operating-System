@@ -121,6 +121,13 @@ int test_harness_run_all(void)
     uart_puts("========================================\n");
     total_failures += test_suite_model_loader();
 
+    /* Inference engine tests (tensor ops + end-to-end MNIST) */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Inference Engine Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_inference();
+
     /* Rust FFI tests */
     uart_puts("\n");
     uart_puts("========================================\n");

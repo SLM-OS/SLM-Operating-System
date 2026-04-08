@@ -20,6 +20,7 @@ pub mod onnx_parser;
 pub mod graph;
 pub mod registry;
 
-pub use graph::{OpType, OperatorGraph, GraphNode, TensorName, TensorShape, ElemType};
+pub use graph::{OpType, OperatorGraph, GraphNode, TensorName, TensorShape, ElemType,
+                WeightTable, WeightEntry, MAX_WEIGHT_ENTRIES};
 pub use registry::{ModelInfoC, MAX_MODELS};
 pub use onnx_parser::ParsedOnnx;

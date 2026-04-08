@@ -19,7 +19,7 @@
  * Memory Configuration
  * ============================================================================ */
 
-#define STACK_SIZE          0x8000UL        /* 32 KB per stack — needed for ONNX model parsing */
+#define STACK_SIZE          0x20000UL       /* 128 KB per stack — needed for ONNX parsing + inference */
 
 /* ============================================================================
  * Scheduler Configuration

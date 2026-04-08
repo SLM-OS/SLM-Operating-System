@@ -344,6 +344,31 @@ extern int rust_model_loader_test(void);
 
 /*
  * ==========================================================================
+ * Inference Engine FFI (Phase 5, M2)
+ * ==========================================================================
+ */
+
+/*
+ * Run inference on a loaded model.
+ *
+ * @model_index: Registry index (from rust_model_load)
+ * @input_data: Pointer to FP32 input array
+ * @input_len: Number of floats in input
+ * @output_buf: Buffer for FP32 output
+ * @output_len: Capacity of output buffer (in floats)
+ * Returns: Number of output floats on success, negative on error.
+ */
+extern int rust_infer(uint32_t model_index, const float *input_data,
+                      size_t input_len, float *output_buf, size_t output_len);
+
+/*
+ * Run inference engine tests.
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_inference_test(void);
+
+/*
+ * ==========================================================================
  * Test Support Functions (called from Rust tests)
  * ==========================================================================
  */

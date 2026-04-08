@@ -2,7 +2,7 @@
 
 This document tracks Phase 5 implementation of SLM-OS.
 
-**Status:** In Progress (M1 complete)
+**Status:** In Progress (M1, M2 complete)
 
 **Summary:** Phase 5 brings together all prior work to deliver actual SLM inference capabilities. This includes the ONNX model loader, inference runtime (CPU-based initially, with GPU acceleration path), and example SLM components demonstrating the full AI-first OS vision.
 
@@ -101,18 +101,18 @@ This document tracks Phase 5 implementation of SLM-OS.
 **Depends on:** M1 (Model Loader)
 
 ### Tensor Operations (CPU)
-- ☐ Create `runtime/src/inference/ops/` directory
-- ☐ Implement core operators in Rust:
-  - ☐ `MatMul` — matrix multiplication (M×K × K×N → M×N)
-  - ☐ `Add` — element-wise addition with broadcasting
-  - ☐ `Relu` — element-wise max(0, x)
-  - ☐ `Softmax` — exp normalization along axis
-  - ☐ `LayerNorm` — layer normalization
-  - ☐ `Reshape` — tensor reshape
-  - ☐ `Transpose` — axis permutation
-  - ☐ `Gather` — index selection (for embeddings)
-  - ☐ `Concat` — tensor concatenation
-- ☐ Implement operator dispatch table
+- ✅ Create `runtime/src/inference/` directory and `engine.rs`
+- ✅ Implement core operators in Rust:
+  - ✅ `MatMul` — matrix multiplication (M×K × K×N → M×N)
+  - ✅ `Add` — element-wise addition with broadcasting
+  - ✅ `Relu` — element-wise max(0, x)
+  - ✅ `Softmax` — exp normalization along axis
+  - ✅ `Reshape` — tensor reshape
+  - ✅ `Conv2D` — 2D convolution (NCHW layout)
+  - ✅ `MaxPool2D` — 2D max pooling
+  - ✅ `Gemm` — general matrix multiplication
+  - ✅ `Flatten` — flatten tensor to 2D
+- ✅ Implement operator dispatch table
 
 ### SIMD Optimization
 - ☐ Use NEON intrinsics for ARM64:
@@ -132,39 +132,27 @@ This document tracks Phase 5 implementation of SLM-OS.
 - ☐ Benchmark: target < 1ms for 256×256 × 256×256 MatMul
 
 ### Inference Runtime
-- ☐ Create `runtime/src/inference/engine.rs`
-- ☐ Implement `InferenceEngine`:
-  ```rust
-  pub struct InferenceEngine {
-      model: LoadedModel,
-      workspace: WorkspaceHandle,
-  }
-  
-  impl InferenceEngine {
-      pub fn new(model: LoadedModel) -> Result<Self, EngineError>;
-      pub fn run(&mut self, inputs: &[Tensor]) -> Result<Vec<Tensor>, EngineError>;
-  }
-  ```
-- ☐ Implement operator scheduling:
-  - ☐ Topological sort of operator graph
-  - ☐ Execute operators in order
-  - ☐ Manage intermediate tensor memory in workspace pool
+- ✅ Create `runtime/src/inference/engine.rs`
+- ✅ Implement `InferenceEngine` with workspace management
+- ✅ Implement operator scheduling:
+  - ✅ Topological sort of operator graph
+  - ✅ Execute operators in order
+  - ✅ Manage intermediate tensor memory in workspace pool
 - ☐ Handle dynamic shapes (batch size, sequence length)
 
 ### Workspace Management
-- ☐ Integrate with Phase 3 workspace pool
-- ☐ Calculate total workspace needed for model
-- ☐ Allocate workspace on engine creation
-- ☐ Reuse workspace across inference calls
-- ☐ Free workspace on engine destruction
+- ✅ Integrate with Phase 3 workspace pool
+- ✅ Allocate workspace on engine creation
+- ✅ Reuse workspace across inference calls
+- ✅ Free workspace on engine destruction
 
 ### Shell Commands
-- ☐ `infer <model> <input_file>` — run inference on input
+- ✅ `model infer <name|idx>` — run inference with zero input, print output probabilities and predicted class
 - ☐ `bench infer <model> [iterations]` — benchmark inference latency
 
 ### Testing
-- ☐ Unit tests for each operator
-- ☐ Integration test: full forward pass on test model
+- ✅ Unit tests for each operator
+- ✅ Integration test: full forward pass on MNIST-12 model
 - ☐ Accuracy test: compare outputs to PyTorch reference
 - ☐ Benchmark: measure latency for various model sizes
 

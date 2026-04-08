@@ -330,6 +330,33 @@ typedef struct {
 
 The registry supports up to 8 simultaneously loaded models. Memory is allocated from the weight and workspace pools (see Model Memory above) and freed automatically on unload.
 
+### Inference Engine (called from C)
+
+The inference engine executes ONNX operator graphs on loaded models. Implemented in Rust (`runtime/src/inference/`) with C FFI wrappers.
+
+```c
+// Run inference on a loaded model
+// @param model_index: Registry index of loaded model
+// @param input_data: Pointer to input float array (NULL for zero input)
+// @param input_len: Number of input floats
+// @param output_buf: Buffer to receive output floats
+// @param output_len: Capacity of output buffer in floats
+// Returns: output float count on success, negative on error
+// -1 = NULL pointer, -2 = inference error, -3 = engine creation failed
+int rust_infer(uint32_t model_index, const float *input_data,
+               size_t input_len, float *output_buf, size_t output_len);
+
+// Run inference with zero input, print results to UART
+// Prints output probabilities and predicted class
+// @param model_index: Registry index of loaded model
+// Returns: 0 on success, negative on error
+int rust_infer_and_print(uint32_t model_index);
+
+// Run inference engine self-tests
+// Returns: number of test failures (0 = all passed)
+int rust_inference_test(void);
+```
+
 ### Component System (called from C)
 
 The component system is implemented in Rust (`runtime/src/component/`) with C FFI wrappers.
