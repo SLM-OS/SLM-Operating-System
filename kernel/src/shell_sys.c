@@ -1156,6 +1156,35 @@ int cmd_sched(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: sched [policy [<name>]]\r\n");
+    if (strcmp(argv[1], "stats") == 0) {
+        struct sched_stats stats;
+        scheduler_get_stats(&stats);
+
+        uart_puts("Scheduler Statistics:\r\n");
+        uart_printf("  Policy:           %s\r\n", sched_get_policy());
+        uart_printf("  Tasks:            %u\r\n", stats.task_count);
+        uart_printf("  Ready:            %u\r\n", stats.ready_count);
+        uart_printf("  Context switches: %lu\r\n", (unsigned long)stats.context_switches);
+        uart_printf("  Timer ticks:      %lu\r\n", (unsigned long)stats.timer_ticks);
+
+#ifdef CONFIG_AI_SCHEDULER
+        uart_puts("\r\nPer-CPU Utilization:\r\n");
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            struct cpu_runqueue *rq = sched_cpu_rq(c);
+            uint32_t pct = 0;
+            if (rq->total_ticks > 0) {
+                pct = (uint32_t)(rq->running_ticks * 100 / rq->total_ticks);
+            }
+            uart_printf("  CPU %u: %u%% (%lu / %lu ticks)\r\n",
+                        c, pct,
+                        (unsigned long)rq->running_ticks,
+                        (unsigned long)rq->total_ticks);
+        }
+#endif
+
+        return 0;
+    }
+
+    uart_puts("Usage: sched [policy [<name>] | stats]\r\n");
     return 1;
 }

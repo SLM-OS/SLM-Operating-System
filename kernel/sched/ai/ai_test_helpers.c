@@ -739,6 +739,151 @@ int ai_test_policy_dispatches_any_affinity(void)
     return 0;
 }
 
+/*
+ * Test: Inference latency measurement.
+ * Runs 100 iterations and reports min/max/avg via return value.
+ * On QEMU, timing is unreliable — this just verifies it completes.
+ * Returns: avg latency in nanoseconds (0 on error)
+ */
+int ai_test_inference_latency(void)
+{
+    float state[AI_STATE_DIM];
+    struct ai_sched_action action;
+    uint64_t min_ns = UINT64_MAX, max_ns = 0, total_ns = 0;
+
+    for (int i = 0; i < AI_STATE_DIM; i++)
+        state[i] = 0.0f;
+
+    for (int i = 0; i < 100; i++) {
+        uint64_t t0 = slm_get_time_ns();
+        ai_schedule_mlp(state, &action);
+        uint64_t t1 = slm_get_time_ns();
+
+        uint64_t elapsed = t1 - t0;
+        total_ns += elapsed;
+        if (elapsed < min_ns) min_ns = elapsed;
+        if (elapsed > max_ns) max_ns = elapsed;
+    }
+
+    /* Just verify it completed — QEMU timing is unreliable for assertions */
+    return (int)(total_ns / 100);  /* avg_ns, truncated to int */
+}
+
+/*
+ * Test: State extraction latency measurement.
+ */
+int ai_test_state_extraction_latency(void)
+{
+    float state[AI_STATE_DIM];
+    uint64_t total_ns = 0;
+
+    for (int i = 0; i < 100; i++) {
+        uint64_t t0 = slm_get_time_ns();
+        ai_extract_state(state);
+        uint64_t t1 = slm_get_time_ns();
+        total_ns += (t1 - t0);
+    }
+
+    return (int)(total_ns / 100);
+}
+
+/*
+ * Test: FP save/restore latency measurement.
+ */
+int ai_test_fp_latency(void)
+{
+    struct fp_state fps;
+    uint64_t total_ns = 0;
+
+    for (int i = 0; i < 100; i++) {
+        uint64_t t0 = slm_get_time_ns();
+        fp_save(&fps);
+        fp_restore(&fps);
+        uint64_t t1 = slm_get_time_ns();
+        total_ns += (t1 - t0);
+    }
+
+    return (int)(total_ns / 100);
+}
+
+/*
+ * Test: Stress test — create 20 tasks with varying priorities under AI policy.
+ */
+int ai_test_scheduler_stress(void)
+{
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    if (!mlp) return -1;
+
+    sched_set_policy(mlp);
+
+    struct task *tasks[20];
+    int created = 0;
+
+    /* Create tasks with varying priorities */
+    for (int i = 0; i < 20; i++) {
+        uint8_t pri = (uint8_t)(TASK_PRIORITY_LOW + (i % 4) * 2);
+        if (pri > TASK_PRIORITY_CRITICAL) pri = TASK_PRIORITY_CRITICAL;
+
+        tasks[i] = task_create_with_priority("stress", nop_entry, NULL, pri);
+        if (!tasks[i]) break;
+        created++;
+
+        /* Set deadline on every other task */
+        if (i % 2 == 0) {
+            task_set_deadline(tasks[i], slm_get_time_ns() + 500 * 1000000ULL);
+        }
+
+        task_set_affinity(tasks[i], 0);
+        scheduler_add_task(tasks[i]);
+    }
+
+    /* Remove all tasks */
+    for (int i = 0; i < created; i++) {
+        scheduler_remove_task(tasks[i]);
+        tasks[i]->id = 0;
+    }
+
+    sched_set_policy(sched_find_policy("heuristic"));
+
+    if (created < 15) return -2;  /* Should be able to create at least 15 */
+    return 0;
+}
+
+/*
+ * Test: Switch between heuristic and AI policies under load.
+ */
+int ai_test_mixed_policy_switch(void)
+{
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    const struct sched_policy_ops *heur = sched_find_policy("heuristic");
+    if (!mlp || !heur) return -1;
+
+    for (int round = 0; round < 5; round++) {
+        /* Switch to AI */
+        if (sched_set_policy(mlp) < 0) return -2;
+
+        /* Dispatch a task */
+        struct task *t = task_create("mixed", nop_entry, NULL);
+        if (!t) return -3;
+        task_set_affinity(t, 0);
+        scheduler_add_task(t);
+        scheduler_remove_task(t);
+        t->id = 0;
+
+        /* Switch back to heuristic */
+        if (sched_set_policy(heur) < 0) return -4;
+
+        /* Dispatch another task */
+        t = task_create("mixed2", nop_entry, NULL);
+        if (!t) return -5;
+        scheduler_add_task(t);
+        scheduler_remove_task(t);
+        t->id = 0;
+    }
+
+    return 0;
+}
+
 #endif /* ENABLE_BOOT_TESTS */
 
 /* Avoid "empty translation unit" warning when tests are not enabled */

@@ -2928,6 +2928,38 @@ static void test_ai_fp_state_size(void)
 static void test_ai_policy_dispatches_any_affinity(void)
 { TEST_ASSERT_EQUAL_INT(0, ai_test_policy_dispatches_any_affinity()); }
 
+/* M8: Performance, stress, and integration tests */
+extern int ai_test_inference_latency(void);
+extern int ai_test_state_extraction_latency(void);
+extern int ai_test_fp_latency(void);
+extern int ai_test_scheduler_stress(void);
+extern int ai_test_mixed_policy_switch(void);
+
+static void test_ai_inference_latency(void)
+{
+    int avg_ns = ai_test_inference_latency();
+    /* Just verify it completed (QEMU timing unreliable for latency bounds) */
+    TEST_ASSERT_TRUE(avg_ns >= 0);
+}
+
+static void test_ai_state_extraction_latency(void)
+{
+    int avg_ns = ai_test_state_extraction_latency();
+    TEST_ASSERT_TRUE(avg_ns >= 0);
+}
+
+static void test_ai_fp_save_restore_latency(void)
+{
+    int avg_ns = ai_test_fp_latency();
+    TEST_ASSERT_TRUE(avg_ns >= 0);
+}
+
+static void test_ai_scheduler_stress(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_scheduler_stress()); }
+
+static void test_ai_mixed_policy_switch(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_mixed_policy_switch()); }
+
 #endif /* ENABLE_BOOT_TESTS — math test helpers */
 
 /*
@@ -2957,6 +2989,44 @@ static void test_ai_arrival_time_set(void)
 #else
     TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
 #endif
+}
+
+/*
+ * Shell command tests for sched (M8).
+ * cmd_sched is always compiled but AI subcommands only work with CONFIG_AI_SCHEDULER.
+ */
+extern int cmd_sched(int argc, char **argv);
+
+static void test_sched_cmd_no_args(void)
+{
+    /* sched with no args should show current policy and return 0 */
+    char *argv[] = {"sched"};
+    int ret = cmd_sched(1, argv);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_sched_cmd_policy_list(void)
+{
+    /* sched policy should list policies and return 0 */
+    char *argv[] = {"sched", "policy"};
+    int ret = cmd_sched(2, argv);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_sched_cmd_stats(void)
+{
+    /* sched stats should show statistics and return 0 */
+    char *argv[] = {"sched", "stats"};
+    int ret = cmd_sched(2, argv);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_sched_cmd_invalid(void)
+{
+    /* sched with invalid subcommand should return 1 */
+    char *argv[] = {"sched", "bogus"};
+    int ret = cmd_sched(2, argv);
+    TEST_ASSERT_EQUAL_INT(1, ret);
 }
 
 /*
@@ -3230,11 +3300,26 @@ int test_suite_scheduler(void)
     RUN_TEST(test_ai_fp_repeated_save_restore);
     RUN_TEST(test_ai_policy_mlp_end_to_end);
     RUN_TEST(test_ai_policy_dispatches_any_affinity);
+
+    /* M8: Performance tests (report-only on QEMU) */
+    RUN_TEST(test_ai_inference_latency);
+    RUN_TEST(test_ai_state_extraction_latency);
+    RUN_TEST(test_ai_fp_save_restore_latency);
+
+    /* M8: Integration/stress tests */
+    RUN_TEST(test_ai_scheduler_stress);
+    RUN_TEST(test_ai_mixed_policy_switch);
 #endif /* ENABLE_BOOT_TESTS */
 
     /* M5 counter tests (integer-only, no ENABLE_BOOT_TESTS needed) */
     RUN_TEST(test_ai_arrival_time_set);
     RUN_TEST(test_ai_utilization_counters_exist);
+
+    /* Shell command tests */
+    RUN_TEST(test_sched_cmd_no_args);
+    RUN_TEST(test_sched_cmd_policy_list);
+    RUN_TEST(test_sched_cmd_stats);
+    RUN_TEST(test_sched_cmd_invalid);
 #endif
 
     return UnityEnd();

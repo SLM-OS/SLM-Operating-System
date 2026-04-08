@@ -70,7 +70,7 @@ const shell_cmd_t builtin_commands[] = {
     {"msg",       cmd_msg,       "Message router (send/list/subscribe)"},
     {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)"},
     {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)"},
-    {"sched",  cmd_sched,  "Scheduler policy (sched [policy [<name>]])"},
+    {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | stats])"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
 };
