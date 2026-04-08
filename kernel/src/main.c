@@ -294,14 +294,11 @@ void kernel_main(void *dtb)
     uart_irq_init();
 #endif
 
-    /* Initialize scheduler */
-    uart_puts("\n");
-    scheduler_init();
-
-    /* Initialize IPC subsystem */
-    ipc_init();
-
-    /* Initialize Virtual Filesystem */
+    /* Initialize Virtual Filesystem and perform all initial PMM allocations
+     * BEFORE scheduler_init(). On Pi 5 without SMPEN, PMM spinlock doesn't
+     * provide cross-CPU mutual exclusion. Secondary CPUs will allocate
+     * idle task stacks after scheduler_init(), so CPU 0 must finish its
+     * allocations first to avoid concurrent PMM access. */
     INFO("Initializing VFS...");
     vfs_init();
 
@@ -424,6 +421,15 @@ void kernel_main(void *dtb)
         /* Shell commands registered in shell_init() after shell starts */
     }
 #endif
+
+    /* Initialize scheduler and IPC AFTER all initial PMM allocations.
+     * On Pi 5 without SMPEN, PMM spinlock doesn't provide cross-CPU
+     * mutual exclusion. scheduler_init() signals secondary CPUs to proceed
+     * with their own allocations (idle task stacks). Doing it here ensures
+     * CPU 0's allocations (ramdisk, Rust heap, model memory) are complete. */
+    uart_puts("\n");
+    scheduler_init();
+    ipc_init();
 
     /* Create main task (runs tests) */
     struct task *main_task = task_create("main", main_task_func, NULL);
