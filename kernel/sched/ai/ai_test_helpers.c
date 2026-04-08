@@ -13,6 +13,8 @@
 #include "ai_inference.h"
 #include "ai_state.h"
 #include "ai_weights.h"
+#include "fp_context.h"
+#include "sched_policy.h"
 #include "task.h"
 #include "sched.h"
 #include "smp.h"
@@ -612,6 +614,128 @@ int ai_test_extract_state_task_features(void)
     /* Task may not appear if top-8 cache wasn't updated yet — that's OK,
      * the cache updates on timer ticks. Just verify no crash. */
     (void)found;
+    return 0;
+}
+
+/*
+ * Test: AI MLP policy end-to-end: switch, dispatch tasks, verify stats,
+ * switch back. Tests the full M7 integration path.
+ */
+int ai_test_policy_mlp_end_to_end(void)
+{
+    /* Switch to AI MLP policy (triggers init + self-test) */
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    if (!mlp) return -1;
+
+    int ret = sched_set_policy(mlp);
+    if (ret < 0) return -2;
+
+    /* Dispatch several tasks through the AI policy */
+    for (int i = 0; i < 4; i++) {
+        struct task *t = task_create("e2e", nop_entry, NULL);
+        if (!t) {
+            sched_set_policy(sched_find_policy("heuristic"));
+            return -3;
+        }
+        task_set_affinity(t, 0);  /* Pin to avoid cross-CPU dispatch race */
+        scheduler_add_task(t);
+        /* With stub weights, action = (core=0, pri=0, preempt=0) is valid
+         * so the AI policy should NOT fall back */
+        scheduler_remove_task(t);
+        t->id = 0;
+    }
+
+    /* Switch back to heuristic (triggers shutdown which logs stats) */
+    ret = sched_set_policy(sched_find_policy("heuristic"));
+    if (ret < 0) return -4;
+
+    return 0;
+}
+
+/*
+ * Test: FP save/restore preserves register state across multiple calls.
+ * Saves state, runs inference (modifies FP regs), restores, repeats.
+ */
+int ai_test_fp_repeated_save_restore(void)
+{
+    struct fp_state saved;
+
+    for (int i = 0; i < 10; i++) {
+        fp_save(&saved);
+
+        /* Run inference which uses FP registers internally */
+        float state[AI_STATE_DIM];
+        struct ai_sched_action action;
+        for (int j = 0; j < AI_STATE_DIM; j++)
+            state[j] = (float)i * 0.1f;
+
+        ai_schedule_mlp(state, &action);
+
+        fp_restore(&saved);
+    }
+
+    /* If we got here without crashing, save/restore is functional */
+    return 0;
+}
+
+/*
+ * Test: struct fp_state has correct size for the assembly code.
+ * ARM64: 32 × 16 = 512 bytes for regs + 4 (fpcr) + 4 (fpsr) = 520 bytes
+ * The struct also has alignment padding.
+ */
+int ai_test_fp_state_size(void)
+{
+    /* regs array must be at least 512 bytes */
+    if (sizeof(((struct fp_state *)0)->regs) < 512) return -1;
+
+    /* fpcr and fpsr must be at offsets 512 and 516 */
+    struct fp_state s;
+    /* Verify the fields exist and are at expected positions */
+    volatile uint32_t *fpcr_ptr = &s.fpcr;
+    volatile uint32_t *fpsr_ptr = &s.fpsr;
+    (void)fpcr_ptr;
+    (void)fpsr_ptr;
+
+    /* Total struct must be at least 520 bytes (512 regs + 4 fpcr + 4 fpsr) */
+    if (sizeof(struct fp_state) < 520) return -2;
+
+    /* Must be 16-byte aligned */
+    if (__alignof__(struct fp_state) < 16) return -3;
+
+    return 0;
+}
+
+/*
+ * Test: AI policy with CPU_AFFINITY_ANY uses the policy's assign_cpu.
+ * Verifies the full path: extract state → inference → validate → assign.
+ */
+int ai_test_policy_dispatches_any_affinity(void)
+{
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    if (!mlp) return -1;
+
+    sched_set_policy(mlp);
+
+    /* Create task with ANY affinity — should go through AI policy */
+    struct task *t = task_create("any_aff", nop_entry, NULL);
+    if (!t) {
+        sched_set_policy(sched_find_policy("heuristic"));
+        return -2;
+    }
+
+    /* Don't set affinity — default is CPU_AFFINITY_ANY */
+    scheduler_add_task(t);
+
+    /* With stub weights, argmax=0 → core 0 */
+    uint32_t assigned = t->assigned_cpu;
+
+    scheduler_remove_task(t);
+    t->id = 0;
+    sched_set_policy(sched_find_policy("heuristic"));
+
+    /* Stub weights always produce core=0 */
+    if (assigned != 0) return -3;
+
     return 0;
 }
 

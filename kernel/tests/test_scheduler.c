@@ -2763,15 +2763,17 @@ static void test_ai_extract_state_writes_all(void)
 
     ai_extract_state(state);
 
-    /* Verify at least some bytes changed (core_type=1.0 is non-zero,
-     * and many features should be 0.0 — different from 0xDE). */
-    uint8_t *bytes = (uint8_t *)state;
-    int changed = 0;
-    for (int i = 0; i < (int)sizeof(state); i++) {
-        if (bytes[i] != 0xDE) changed++;
+    /* Verify that every 4-byte float slot was written.
+     * Check that no float still has the exact sentinel pattern (0xDEDEDEDE).
+     * A float with all bytes 0xDE = ~-1.845e+29 — extremely unlikely to be
+     * a valid feature value (features are in [0, ~1] range). */
+    uint32_t sentinel = 0xDEDEDEDE;
+    uint32_t *words = (uint32_t *)state;
+    int unwritten = 0;
+    for (int i = 0; i < AI_STATE_DIM; i++) {
+        if (words[i] == sentinel) unwritten++;
     }
-    /* All 108 floats × 4 bytes = 432 bytes should have been written */
-    TEST_ASSERT_EQUAL_INT((int)sizeof(state), changed);
+    TEST_ASSERT_EQUAL_INT(0, unwritten);
 }
 
 /*
@@ -2907,6 +2909,24 @@ static void test_ai_state_isolated_core(void)
 
 static void test_ai_state_task_features(void)
 { TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_task_features()); }
+
+/* M6+M7: FP context and AI policy integration tests */
+extern int ai_test_policy_mlp_end_to_end(void);
+extern int ai_test_fp_repeated_save_restore(void);
+extern int ai_test_fp_state_size(void);
+extern int ai_test_policy_dispatches_any_affinity(void);
+
+static void test_ai_policy_mlp_end_to_end(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_policy_mlp_end_to_end()); }
+
+static void test_ai_fp_repeated_save_restore(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_fp_repeated_save_restore()); }
+
+static void test_ai_fp_state_size(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_fp_state_size()); }
+
+static void test_ai_policy_dispatches_any_affinity(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_policy_dispatches_any_affinity()); }
 
 #endif /* ENABLE_BOOT_TESTS — math test helpers */
 
@@ -3204,6 +3224,12 @@ int test_suite_scheduler(void)
     RUN_TEST(test_ai_state_core_zero_fill);
     RUN_TEST(test_ai_state_isolated_core);
     RUN_TEST(test_ai_state_task_features);
+
+    /* M6+M7: FP context and AI policy integration */
+    RUN_TEST(test_ai_fp_state_size);
+    RUN_TEST(test_ai_fp_repeated_save_restore);
+    RUN_TEST(test_ai_policy_mlp_end_to_end);
+    RUN_TEST(test_ai_policy_dispatches_any_affinity);
 #endif /* ENABLE_BOOT_TESTS */
 
     /* M5 counter tests (integer-only, no ENABLE_BOOT_TESTS needed) */

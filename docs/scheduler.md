@@ -620,6 +620,30 @@ Top 8 tasks by effective priority, cached and updated every 100ms.
 | load_imbalance | std_dev(utils) / mean(utils), clamped [0,1] |
 | weight/workspace_pool_pressure, gpu_queue_depth, episode_time | 0.0 (future) |
 
+#### FP Register Safety
+
+AI inference uses FP/NEON registers, but `scheduler_add_task()` can be called from timer IRQ context (e.g., waking a sleeping task). The AI policy wraps all inference calls with `FP_CONTEXT_SAVE()` / `FP_CONTEXT_RESTORE()` (`fp_context.h`) to save and restore all 32 SIMD registers (V0-V31) + FPCR/FPSR. This adds ~520 bytes of stack usage per inference call.
+
+The save/restore is implemented in assembly (`fp_context.S`): `stp`/`ldp` pairs for ARM64, `FXSAVE`/`FXRSTOR` for x86-64.
+
+#### Heuristic Fallback
+
+The AI policy falls back to the heuristic policy when:
+- Inference returns an error (e.g., NULL state)
+- The decoded action targets an out-of-range CPU
+- The target CPU is isolated and the task has `CPU_AFFINITY_ANY`
+
+Fallback calls `sched_policy_heuristic.assign_cpu()` directly. Each fallback is counted in per-policy statistics.
+
+#### Policy Statistics
+
+Each AI policy tracks:
+- **decisions**: total `assign_cpu` calls
+- **fallbacks**: times heuristic was used instead
+- **total_latency_ns**: cumulative inference time (state extraction + forward pass)
+
+Statistics are logged when the policy is deactivated via `shutdown()`.
+
 #### Scheduler Counters (CONFIG_AI_SCHEDULER)
 
 When `CONFIG_AI_SCHEDULER` is defined, the scheduler tracks additional metrics:
