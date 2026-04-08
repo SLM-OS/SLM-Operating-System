@@ -2,7 +2,7 @@
 
 This document tracks Phase 5 implementation of SLM-OS.
 
-**Status:** In Progress (M1-M6 complete)
+**Status:** Complete (M1-M7)
 
 **Summary:** Phase 5 brings together all prior work to deliver actual SLM inference capabilities. This includes the ONNX model loader, inference runtime (CPU-based initially, with GPU acceleration path), and example SLM components demonstrating the full AI-first OS vision.
 
@@ -380,15 +380,15 @@ This document tracks Phase 5 implementation of SLM-OS.
 - ☐ Generate rustdoc for runtime crate
 
 ### User Guides
-- ☐ Component development tutorial (`docs/tutorials/component.md`)
-- ☐ Model preparation guide (`docs/tutorials/models.md`)
-- ☐ Performance tuning guide (`docs/tutorials/performance.md`)
+- ✅ Component development tutorial (`docs/tutorials/component.md`)
+- ✅ Model preparation guide (`docs/tutorials/models.md`)
+- ✅ Performance tuning guide (`docs/tutorials/performance.md`)
 - ☐ Troubleshooting guide updates
 
 ### Architecture Documentation
-- ☐ Update architecture doc with Phase 5 additions
-- ☐ Document inference pipeline architecture
-- ☐ Document isolation architecture
+- ✅ Update architecture doc with Phase 5 additions
+- ✅ Document inference pipeline architecture
+- ✅ Document isolation architecture
 - ☐ Add sequence diagrams for key flows
 
 ### Performance Documentation
