@@ -389,12 +389,12 @@ This document tracks Phase 5 implementation of SLM-OS.
 - ✅ Update architecture doc with Phase 5 additions
 - ✅ Document inference pipeline architecture
 - ✅ Document isolation architecture
-- ⏸️ Add sequence diagrams for key flows
+- ✅ Add sequence diagrams for key flows
 
 ### Performance Documentation
 - ⏸️ Benchmark results for all target platforms
 - ⏸️ Comparison with baseline (Linux + Python)
-- ⏸️ Memory usage analysis
+- ✅ Memory usage analysis
 - ⏸️ Power consumption analysis (if measurable)
 
 ---

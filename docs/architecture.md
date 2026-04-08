@@ -414,6 +414,91 @@ Statistics accumulate across all callers (shell, components) and are accessible 
 | `kernel/arch/arm64/user_entry.S` | EL1-to-EL0 transition |
 | `kernel/include/user_syscall.h` | User-mode syscall stubs |
 
+### Sequence Diagrams
+
+The following diagrams illustrate key data flows through the Phase 5 inference stack and syscall interface.
+
+**Model Load and Inference Flow**
+
+This diagram traces the path from a shell command through the C FFI boundary into the Rust runtime, showing how ONNX models are parsed, stored, and executed.
+
+```
+Shell                 C FFI              Rust Runtime           Model Memory
+  |                     |                     |                     |
+  | model load path     |                     |                     |
+  |-------------------->|                     |                     |
+  |                     | rust_model_load()   |                     |
+  |                     |-------------------->|                     |
+  |                     |                     | parse_onnx()        |
+  |                     |                     |----.                |
+  |                     |                     |    | protobuf parse  |
+  |                     |                     |<---'                |
+  |                     |                     | build_graph()       |
+  |                     |                     |----.                |
+  |                     |                     |<---'                |
+  |                     |                     | alloc_weights()     |
+  |                     |                     |------------------->|
+  |                     |                     |     ModelHandle    |
+  |                     |                     |<-------------------|
+  |                     |                     | copy weights       |
+  |                     |                     | store in registry  |
+  |                     |   model index       |                     |
+  |                     |<--------------------|                     |
+  | "Loaded model"      |                     |                     |
+  |<--------------------|                     |                     |
+  |                     |                     |                     |
+  | model infer name    |                     |                     |
+  |-------------------->|                     |                     |
+  |                     | rust_infer_and_print|                     |
+  |                     |-------------------->|                     |
+  |                     |                     | run_inference()     |
+  |                     |                     | init engine         |
+  |                     |                     | bind weights        |
+  |                     |                     | for each node:      |
+  |                     |                     |   dispatch op       |
+  |                     |                     |   alloc workspace   |
+  |                     |                     | copy output         |
+  |                     |   print results     |                     |
+  |                     |<--------------------|                     |
+  | "Predicted class"   |                     |                     |
+  |<--------------------|                     |                     |
+```
+
+The load path parses the ONNX protobuf on the stack (~6 KB for `ParsedOnnx`), builds an operator graph, and allocates weight storage from the 2 MB-aligned weight pool. The inference path creates a static `InferenceEngine`, binds weight pointers into the tensor binding table, and executes operators in topological order using workspace memory from the bump allocator.
+
+**Syscall Flow (EL0 Component)**
+
+This diagram shows how an EL0 component issues a syscall, how the ARM64 hardware transitions to EL1, and how the kernel dispatches and returns the result.
+
+```
+EL0 Component         ARM64 Hardware        EL1 Kernel
+  |                     |                     |
+  | sys_log(msg, len)   |                     |
+  | x8=SYS_LOG, x0=msg |                     |
+  | SVC #0              |                     |
+  |-------------------->|                     |
+  |                     | Exception to EL1    |
+  |                     | save ELR/SPSR       |
+  |                     |-------------------->|
+  |                     |                     | save_regs (vectors.S)
+  |                     |                     | el0_sync_handler()
+  |                     |                     | read ESR: EC=0x15 (SVC)
+  |                     |                     | syscall_dispatch(frame)
+  |                     |                     | frame->x8 = SYS_LOG
+  |                     |                     | sys_log_handler()
+  |                     |                     |   uart write
+  |                     |                     | frame->x0 = 0 (success)
+  |                     |                     | restore_regs
+  |                     |                     | ERET
+  |                     |<--------------------|
+  |                     | Return to EL0       |
+  |                     | restore ELR/SPSR    |
+  |<--------------------|                     |
+  | x0 = 0 (success)   |                     |
+```
+
+The `SVC #0` instruction causes an immediate exception to EL1. Hardware saves the return address in `ELR_EL1` and processor state in `SPSR_EL1`. The kernel's exception vector saves all general-purpose registers, reads `ESR_EL1` to identify the exception class (EC=0x15 for SVC from AArch64), and dispatches based on the syscall number in `x8`. The return value is placed in `x0` of the saved register frame before `ERET` restores execution at EL0.
+
 ---
 
 ## Boot Sequence

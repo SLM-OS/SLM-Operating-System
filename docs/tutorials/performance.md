@@ -227,6 +227,47 @@ This shows the buddy allocator's free block counts at each order (4 KB to 1 GB),
 
 ---
 
+## Memory Usage Analysis
+
+SLM-OS uses fixed-size memory pools and stack-allocated structures to avoid heap fragmentation in the bare-metal environment. The table below summarizes memory consumption for each subsystem involved in inference.
+
+| Resource | Total Capacity | Typical Usage (MNIST-12) | Notes |
+|----------|---------------|--------------------------|-------|
+| Weight pool | 256 MB (128 x 2 MB blocks) | 1 block (26 KB data in 2 MB = 1.3% utilization) | Larger models use multiple blocks |
+| Workspace pool | 128 MB (64 x 2 MB blocks) | < 64 KB per inference call | Bump allocator resets per call |
+| Task stack | 64 KB per task | ~15 KB peak (Release build) | Debug builds use more due to no inlining |
+| Rust heap | 1 MB | Minimal (Box removed) | Used during model parsing; ParsedOnnx moved to stack |
+| Model registry | 8 slots | ~8 KB in BSS per slot | Graph + weight table + handles |
+| Static inference engine | ~10 KB in BSS | ~10 KB (fixed) | Avoids heap allocation entirely |
+
+### Weight Pool
+
+The weight pool reserves 256 MB as 128 blocks of 2 MB each. The 2 MB alignment matches ARM64 block-descriptor page table entries, reducing TLB pressure for large models. MNIST-12 occupies a single block despite containing only 26 KB of weight data, yielding 1.3% block utilization. This trade-off is intentional: TLB efficiency and allocation simplicity outweigh the internal fragmentation for small models. Larger models (e.g., MobileNetV2 at ~14 MB) span multiple contiguous blocks with better utilization.
+
+### Workspace Pool
+
+The workspace pool reserves 128 MB as 64 blocks of 2 MB each. During inference, intermediate tensors are allocated from a bump allocator that advances a pointer through the workspace. Each inference call resets the bump pointer to the base, making allocation O(1) and eliminating fragmentation. MNIST-12 inference uses less than 64 KB of workspace for its intermediate feature maps and matrix products.
+
+### Stack Usage
+
+Each kernel task receives a 64 KB stack. The inference call chain places several large structures on the stack:
+
+- `ParsedOnnx`: ~6 KB (protobuf parse result, formerly heap-allocated)
+- `OperatorGraph`: ~4 KB (node array, tensor shapes)
+- `InferenceEngine`: ~10 KB (static, but references stack data during execution)
+
+In Release builds with LTO enabled, aggressive inlining collapses multiple call frames, and the full parse-and-infer path consumes approximately 15 KB of stack. Debug builds may use 30-40 KB due to disabled inlining and unoptimized register spills. The 64 KB stack provides comfortable headroom in both configurations.
+
+### Rust Heap
+
+The Rust runtime receives a 1 MB heap initialized by `rust_heap_init()`. Early development used `Box<ParsedOnnx>` for the parsed model, but this was refactored to stack allocation to reduce heap pressure. The heap remains available for future features (e.g., dynamic collections) but current inference workloads make minimal use of it.
+
+### Model Registry and Static Engine
+
+The model registry occupies approximately 8 KB per slot in BSS (8 slots total = ~64 KB). Each slot stores the operator graph, weight binding table, and memory handles. The `InferenceEngine` is a static global (~10 KB in BSS) protected by a spinlock, avoiding per-inference heap allocation. Together, these static structures ensure that the inference hot path performs no dynamic memory allocation beyond the bump-allocated workspace.
+
+---
+
 ## Performance Optimization Checklist
 
 1. **Use Release builds** for all benchmarking (`BUILD_TYPE=Release`)
