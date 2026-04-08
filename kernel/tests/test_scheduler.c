@@ -2747,33 +2747,39 @@ static void test_ai_mlp_layer_dims(void)
  * AI Scheduler Library Tests (only when CONFIG_AI_SCHEDULER is enabled)
  * ============================================================================ */
 
-#ifdef CONFIG_AI_SCHEDULER
+#if defined(CONFIG_AI_SCHEDULER)
 
 /*
- * Test: ai_extract_state stub zero-fills the state vector.
- * Note: uses memset instead of float literals because this test
- * file is compiled with -mgeneral-regs-only (no FP instructions).
+ * Test: ai_extract_state writes to all 108 floats.
+ * Verifies the function doesn't crash and overwrites the sentinel pattern.
+ * Note: uses memset/byte checks because this test file is compiled
+ * with -mgeneral-regs-only (no FP instructions).
  */
-static void test_ai_extract_state_stub_zeros(void)
+static void test_ai_extract_state_writes_all(void)
 {
     float state[AI_STATE_DIM];
-    /* Fill with non-zero bytes to verify the stub actually writes */
-    memset(state, 0xFF, sizeof(state));
+    /* Fill with 0xDE sentinel pattern */
+    memset(state, 0xDE, sizeof(state));
 
     ai_extract_state(state);
 
-    /* All bytes should now be zero (IEEE 754 zero = all bits 0) */
+    /* Verify at least some bytes changed (core_type=1.0 is non-zero,
+     * and many features should be 0.0 — different from 0xDE). */
     uint8_t *bytes = (uint8_t *)state;
+    int changed = 0;
     for (int i = 0; i < (int)sizeof(state); i++) {
-        TEST_ASSERT_EQUAL_UINT8(0, bytes[i]);
+        if (bytes[i] != 0xDE) changed++;
     }
+    /* All 108 floats × 4 bytes = 432 bytes should have been written */
+    TEST_ASSERT_EQUAL_INT((int)sizeof(state), changed);
 }
 
 /*
- * AI inference math tests.
+ * AI inference math tests (require both CONFIG_AI_SCHEDULER and ENABLE_BOOT_TESTS).
  * These call helper functions in ai_test_helpers.c (compiled with FP
  * enabled in the ai_sched library). Each helper returns 0 on pass.
  */
+#if defined(ENABLE_BOOT_TESTS)
 extern int ai_test_matvec_basic(void);
 extern int ai_test_matvec_identity(void);
 extern int ai_test_matvec_zero_weights(void);
@@ -2870,6 +2876,84 @@ static void test_ai_mlp_action_bounds_check(void)
 
 static void test_ai_decode_roundtrip(void)
 { TEST_ASSERT_EQUAL_INT(0, ai_test_decode_roundtrip()); }
+
+/* State extraction tests (M4) */
+extern int ai_test_extract_state_core_type(void);
+extern int ai_test_extract_state_task_zero_fill(void);
+extern int ai_test_extract_state_global_offset(void);
+extern int ai_test_extract_state_utilization_range(void);
+
+static void test_ai_state_core_type(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_core_type()); }
+
+static void test_ai_state_task_zero_fill(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_task_zero_fill()); }
+
+static void test_ai_state_global_offset(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_global_offset()); }
+
+static void test_ai_state_utilization_range(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_utilization_range()); }
+
+extern int ai_test_extract_state_core_zero_fill(void);
+extern int ai_test_extract_state_isolated_core(void);
+extern int ai_test_extract_state_task_features(void);
+
+static void test_ai_state_core_zero_fill(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_core_zero_fill()); }
+
+static void test_ai_state_isolated_core(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_isolated_core()); }
+
+static void test_ai_state_task_features(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_task_features()); }
+
+#endif /* ENABLE_BOOT_TESTS — math test helpers */
+
+/*
+ * Test: arrival_time_ns is set when a task is added to the scheduler.
+ * This is an integer test (no FP) so it doesn't need ENABLE_BOOT_TESTS.
+ */
+static void test_ai_arrival_time_set(void)
+{
+#ifdef CONFIG_AI_SCHEDULER
+    struct task *t = task_create("arr_test", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    task_set_affinity(t, 0);
+    irq_flags_t flags = irq_save();
+
+    uint64_t before = slm_get_time_ns();
+    scheduler_add_task(t);
+    uint64_t after = slm_get_time_ns();
+
+    /* arrival_time_ns should be set to a time between before and after */
+    TEST_ASSERT_TRUE(t->arrival_time_ns >= before);
+    TEST_ASSERT_TRUE(t->arrival_time_ns <= after);
+
+    scheduler_remove_task(t);
+    irq_restore(flags);
+    t->id = 0;
+#else
+    TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
+#endif
+}
+
+/*
+ * Test: Per-CPU utilization counters exist in the run queue struct.
+ */
+static void test_ai_utilization_counters_exist(void)
+{
+#ifdef CONFIG_AI_SCHEDULER
+    struct cpu_runqueue *rq = sched_cpu_rq(0);
+    /* total_ticks should be advancing (scheduler_tick increments it) */
+    TEST_ASSERT_TRUE(rq->total_ticks > 0);
+    /* running_ticks <= total_ticks */
+    TEST_ASSERT_TRUE(rq->running_ticks <= rq->total_ticks);
+#else
+    TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
+#endif
+}
 
 /*
  * Test: AI policies (ai_mlp, ai_ppo) are registered and findable.
@@ -3078,12 +3162,13 @@ int test_suite_scheduler(void)
 
 #ifdef CONFIG_AI_SCHEDULER
     /* AI scheduler library tests (only with -DENABLE_AI_SCHEDULER=ON) */
-    RUN_TEST(test_ai_extract_state_stub_zeros);
+    RUN_TEST(test_ai_extract_state_writes_all);
     RUN_TEST(test_ai_policies_registered);
     RUN_TEST(test_ai_policy_switch_to_mlp_and_back);
     RUN_TEST(test_fp_save_restore_callable);
 
-    /* AI inference engine math tests (M3) */
+#if defined(ENABLE_BOOT_TESTS)
+    /* AI inference engine math tests (M3) — need FP-enabled test helpers */
     RUN_TEST(test_ai_matvec_basic);
     RUN_TEST(test_ai_matvec_identity);
     RUN_TEST(test_ai_matvec_zero_weights);
@@ -3110,6 +3195,20 @@ int test_suite_scheduler(void)
     RUN_TEST(test_ai_ppo_null_state);
     RUN_TEST(test_ai_mlp_action_bounds_check);
     RUN_TEST(test_ai_decode_roundtrip);
+
+    /* State extraction tests (M4) */
+    RUN_TEST(test_ai_state_core_type);
+    RUN_TEST(test_ai_state_task_zero_fill);
+    RUN_TEST(test_ai_state_global_offset);
+    RUN_TEST(test_ai_state_utilization_range);
+    RUN_TEST(test_ai_state_core_zero_fill);
+    RUN_TEST(test_ai_state_isolated_core);
+    RUN_TEST(test_ai_state_task_features);
+#endif /* ENABLE_BOOT_TESTS */
+
+    /* M5 counter tests (integer-only, no ENABLE_BOOT_TESTS needed) */
+    RUN_TEST(test_ai_arrival_time_set);
+    RUN_TEST(test_ai_utilization_counters_exist);
 #endif
 
     return UnityEnd();

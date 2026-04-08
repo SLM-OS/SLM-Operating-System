@@ -2,7 +2,7 @@
 
 This document tracks the integration of trained AI models (MLP, PPO, XGBoost) into the SLM-OS kernel scheduler.
 
-**Status:** In Progress — M1 (Vtable), M2 (Build System), M3 (Inference Engine) complete
+**Status:** In Progress — M1 (Vtable), M2 (Build), M3 (Inference), M4 (State), M5 (Counters) complete
 
 **Summary:** This phase implements a pluggable scheduler interface and AI-based inference engine, allowing the kernel to use trained ML models for CPU assignment, priority adjustment, and preemption decisions.
 
@@ -235,12 +235,9 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 **Note:** The state vector shape is fixed at 108 dimensions because the model was trained with this input size. On platforms with fewer physical cores (e.g., Pi 5 with 4 cores), the extra core slots (4-5) are zero-filled. This matches how the simulator handles variable core counts. Coordinate with Plan A to confirm model training configuration.
 
 ### Core State File
-- ☐ Create `kernel/sched/ai/ai_state.h` — public API
-- ☐ Create `kernel/sched/ai/ai_state.c` — implementation
-- ☐ Implement `ai_extract_state()`:
-  ```c
-  void ai_extract_state(float state[AI_STATE_DIM]);
-  ```
+- ✅ Create `kernel/sched/ai/ai_state.h` — public API (M2)
+- ✅ Create `kernel/sched/ai/ai_state.c` — full implementation
+- ✅ Implement `ai_extract_state()` with real kernel data
 
 ### Per-Core Features (36 floats)
 For each core c (0 to AI_STATE_NUM_CORES-1), features at offset `c*6`:
@@ -254,9 +251,9 @@ For each core c (0 to AI_STATE_NUM_CORES-1), features at offset `c*6`:
 | c×6+4 | isolated | `(sched.isolated_cores >> c) & 1` | Existing |
 | c×6+5 | current_task_prio | `current->effective_priority / 7.0f` | Existing |
 
-- ☐ Implement per-core feature extraction
-- ☐ Zero-fill cores beyond `cpu_count()` (for Pi 5: cores 4-5 = zeros)
-- ☐ Handle core offline/invalid states gracefully
+- ✅ Implement per-core feature extraction
+- ✅ Zero-fill cores beyond `cpu_count()` (for Pi 5: cores 4-5 = zeros)
+- ✅ Handle core offline/invalid states gracefully
 
 ### Per-Task Features (64 floats)
 Top 8 tasks by effective_priority, features at offset `36 + t*8`:
@@ -272,9 +269,9 @@ Top 8 tasks by effective_priority, features at offset `36 + t*8`:
 | t×8+6 | wait_time | `(now - arrival_time_ns) / 1e9` | New field (see M5) |
 | t×8+7 | component_type | `0.0f` | Future: slm_task_info |
 
-- ☐ Implement top-8 task collection (see M5 for caching)
-- ☐ Handle < 8 tasks gracefully (zero-fill remaining slots)
-- ☐ Implement per-task feature extraction
+- ✅ Implement top-8 task collection (cached, updated every 10 ticks)
+- ✅ Handle < 8 tasks gracefully (zero-fill remaining slots)
+- ✅ Implement per-task feature extraction
 
 ### Global Features (8 floats)
 Features at offset 100:
@@ -290,23 +287,17 @@ Features at offset 100:
 | 106 | load_imbalance | `std_dev(utils) / mean(utils)` | Clamp [0,1] |
 | 107 | episode_time | `0.0f` | Not applicable to real kernel |
 
-- ☐ Implement global feature extraction
-- ☐ Implement load imbalance calculation (std_dev / mean)
+- ✅ Implement global feature extraction
+- ✅ Implement load imbalance calculation (coefficient of variation, Newton's sqrt)
 
 ---
 
 ## Milestone 5: Scheduler Counters & Task Fields
 
 ### New Task Fields
-- ☐ Add to `struct task` (guarded by `CONFIG_AI_SCHEDULER`):
-  ```c
-  #ifdef CONFIG_AI_SCHEDULER
-      uint64_t arrival_time_ns;      // Set in scheduler_add_task()
-      uint64_t completion_time_ns;   // Set on task exit
-  #endif
-  ```
-- ☐ Initialize `arrival_time_ns` in `scheduler_add_task()`
-- ☐ Set `completion_time_ns` in task cleanup path
+- ✅ Add `arrival_time_ns` and `completion_time_ns` to `struct task` (guarded)
+- ✅ Initialize `arrival_time_ns` in `scheduler_add_task()`
+- ✅ Set `completion_time_ns` in task_exit via `sched_ai_record_completion()`
 
 ### Per-CPU Utilization Tracking
 - ☐ Add to scheduler state (per-CPU):
@@ -319,52 +310,25 @@ Features at offset 100:
   #endif
   };
   ```
-- ☐ Increment `running_ticks` in `scheduler_tick()` when current task is not idle
-- ☐ Increment `total_ticks` always
-- ☐ Utilization = `running_ticks / total_ticks`
+- ✅ Increment `running_ticks` in `scheduler_tick()` when current task is not idle
+- ✅ Increment `total_ticks` always
+- ✅ Utilization = `running_ticks / total_ticks` (computed in ai_state.c)
 
 ### Deadline Miss Tracking
-- ☐ Add deadline miss counter:
-  ```c
-  #ifdef CONFIG_AI_SCHEDULER
-  static struct {
-      uint32_t miss_count;
-      uint32_t total_count;
-      uint8_t  window_misses[100];  // Rolling window (0=hit, 1=miss)
-      uint32_t window_idx;
-  } deadline_stats;
-  #endif
-  ```
-- ☐ Update on task completion: check if `completion_time_ns > deadline_ns`
-- ☐ Implement rolling window miss rate calculation
+- ✅ Rolling window of last 100 completions in `ai_deadline_stats`
+- ✅ Update on task completion via `sched_ai_record_completion()`
+- ✅ Rolling window miss rate calculation (integer accessor for FP-safe code)
 
 ### Completion Latency Tracking
-- ☐ Add latency accumulator:
-  ```c
-  #ifdef CONFIG_AI_SCHEDULER
-  static struct {
-      uint64_t cumulative_latency_ns;
-      uint32_t completion_count;
-  } latency_stats;
-  #endif
-  ```
-- ☐ Update on task completion: `latency = completion_time_ns - arrival_time_ns`
-- ☐ Implement average latency calculation
+- ✅ Cumulative latency and count in `ai_latency_stats`
+- ✅ Update on task completion: `latency = now - arrival_time_ns`
+- ✅ Average latency calculation (integer accessor for FP-safe code)
 
 ### Top-8 Task Cache
-- ☐ Add cached task list:
-  ```c
-  #ifdef CONFIG_AI_SCHEDULER
-  static struct {
-      struct task *tasks[AI_STATE_NUM_TASKS];
-      uint32_t count;
-      uint64_t last_update_tick;
-  } top_tasks_cache;
-  #endif
-  ```
-- ☐ Update cache in `scheduler_tick()` every N ticks (not every tick)
-- ☐ Implement `ai_get_top_tasks()` that returns cached list
-- ☐ Tune update frequency (every 10 ticks = 100ms seems reasonable)
+- ✅ `ai_top_tasks` struct with task pointers, count, last_update_tick
+- ✅ Update in `scheduler_tick()` every 10 ticks (CPU 0 only)
+- ✅ `sched_ai_get_top_tasks()` returns cached list
+- ✅ Insertion sort: replaces lowest-priority task when cache is full
 
 ---
 
@@ -532,16 +496,22 @@ Features at offset 100:
 - ✅ `test_ai_validate_action_bounds` — valid/invalid core, priority, preempt, NULL
 
 #### State Extraction Tests
-- ☐ `test_ai_extract_state_dimensions` — output is 108 floats
-- ☐ `test_ai_extract_state_normalized` — values in expected ranges [0,1] or similar
-- ☐ `test_ai_extract_state_cores` — per-core features match kernel state
-- ☐ `test_ai_extract_state_zero_fill` — unused cores (beyond cpu_count) are zero
-- ☐ `test_ai_extract_state_tasks` — per-task features match known task values
+- ✅ `test_ai_extract_state_writes_all` — all 108 floats (432 bytes) written
+- ✅ `test_ai_state_core_type` — online cores=1.0, offline=0.0
+- ✅ `test_ai_state_core_zero_fill` — cores beyond cpu_count are all zeros
+- ✅ `test_ai_state_isolated_core` — isolated core shows 1.0 in state vector
+- ✅ `test_ai_state_utilization_range` — per-core utilization in [0,1]
+- ✅ `test_ai_state_task_zero_fill` — unused task slots are zeros
+- ✅ `test_ai_state_task_features` — task with known priority/deadline appears in state
+- ✅ `test_ai_state_global_offset` — global features at correct offset, valid ranges
+- ✅ `test_ai_arrival_time_set` — arrival_time_ns set between before/after timestamps
+- ✅ `test_ai_utilization_counters_exist` — running_ticks ≤ total_ticks, total > 0
 
 #### Policy Tests
-- ☐ `test_sched_policy_switch` — switch from heuristic to AI and back
-- ☐ `test_ai_policy_fallback` — invalid action triggers fallback
-- ☐ `test_ai_policy_respects_isolation` — isolated cores avoided
+- ✅ `test_ai_policy_switch_to_mlp_and_back` — switch from heuristic to AI and back (M1)
+- ✅ `test_policy_switch_calls_init_shutdown` — init/shutdown callbacks invoked (M1)
+- ☐ `test_ai_policy_fallback` — invalid action triggers fallback (needs M7)
+- ☐ `test_ai_policy_respects_isolation` — isolated cores avoided (needs M7)
 
 ### Performance Tests
 - ☐ `test_ai_inference_latency`:
@@ -609,7 +579,7 @@ Features at offset 100:
 - ✅ Pluggable scheduler interface working
 - ✅ Heuristic policy extracted and functionally identical
 - ✅ AI inference engine compiles and runs (with stub weights)
-- ☐ State vector extraction matches simulator specification
+- ✅ State vector extraction matches simulator specification
 - ☐ MLP policy makes scheduling decisions
 - ☐ FP state properly saved/restored in interrupt context
 - ☐ Shell commands for policy switching working

@@ -29,6 +29,10 @@ struct cpu_runqueue {
     struct task *idle_task;
     struct task *zombie;
     uint32_t ready_count;
+#ifdef CONFIG_AI_SCHEDULER
+    uint64_t running_ticks;     /* Ticks where current task is not idle */
+    uint64_t total_ticks;       /* Total ticks since boot on this CPU */
+#endif
 } __attribute__((aligned(64)));  /* CACHE_LINE_SIZE */
 
 /*

@@ -94,6 +94,148 @@ static struct {
     int initialized;                     /* Scheduler initialized flag */
 } sched;
 
+/* ============================================================================
+ * AI scheduler counters (M5) — guarded by CONFIG_AI_SCHEDULER
+ * ============================================================================ */
+
+#ifdef CONFIG_AI_SCHEDULER
+
+/* Deadline miss tracking: rolling window of last 100 completions */
+static struct {
+    uint32_t miss_count;              /* Misses in current window */
+    uint32_t total_count;             /* Total completions */
+    uint8_t  window[100];             /* Ring buffer: 0=hit, 1=miss */
+    uint32_t window_idx;              /* Next write position */
+} ai_deadline_stats;
+
+/* Completion latency tracking */
+static struct {
+    uint64_t cumulative_ns;           /* Sum of all task latencies */
+    uint32_t count;                   /* Number of completions */
+} ai_latency_stats;
+
+/* Top-8 task cache: updated periodically in scheduler_tick() */
+#include "ai_types.h"
+static struct {
+    struct task *tasks[AI_STATE_NUM_TASKS];
+    uint32_t count;
+    uint64_t last_update_tick;
+} ai_top_tasks;
+
+#define AI_TOP_TASKS_UPDATE_INTERVAL 10  /* Update every 10 ticks (100ms) */
+
+/*
+ * Update the top-8 task cache by scanning all run queues.
+ * Called from scheduler_tick() on CPU 0 every N ticks.
+ */
+static void ai_update_top_tasks(void)
+{
+    /* Collect tasks across all CPUs, selecting top 8 by effective_priority.
+     * Simple insertion sort into the cache — at most MAX_TASKS iterations. */
+    uint32_t count = 0;
+
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        struct cpu_runqueue *rq = cpu_rq(c);
+        struct task *t = rq->head;
+
+        while (t) {
+            if (count < AI_STATE_NUM_TASKS) {
+                /* Space available — just add */
+                ai_top_tasks.tasks[count++] = t;
+            } else {
+                /* Find the lowest priority task in cache and replace if t is higher */
+                uint32_t min_idx = 0;
+                uint8_t min_pri = ai_top_tasks.tasks[0]->effective_priority;
+                for (uint32_t i = 1; i < AI_STATE_NUM_TASKS; i++) {
+                    if (ai_top_tasks.tasks[i]->effective_priority < min_pri) {
+                        min_pri = ai_top_tasks.tasks[i]->effective_priority;
+                        min_idx = i;
+                    }
+                }
+                if (t->effective_priority > min_pri) {
+                    ai_top_tasks.tasks[min_idx] = t;
+                }
+            }
+            t = t->next;
+        }
+    }
+
+    ai_top_tasks.count = count;
+    ai_top_tasks.last_update_tick = sched.timer_ticks;
+}
+
+/*
+ * Record a task completion for deadline/latency tracking.
+ * Called from task_exit path (via sched_ai_record_completion).
+ */
+void sched_ai_record_completion(struct task *task)
+{
+    if (!task) return;
+
+    uint64_t now = slm_get_time_ns();
+    task->completion_time_ns = now;
+
+    /* Deadline miss tracking */
+    if (task->deadline_ns > 0) {
+        uint8_t missed = (now > task->deadline_ns) ? 1 : 0;
+
+        /* Update rolling window */
+        uint32_t idx = ai_deadline_stats.window_idx % 100;
+        /* Subtract old value from running count */
+        if (ai_deadline_stats.total_count >= 100) {
+            ai_deadline_stats.miss_count -= ai_deadline_stats.window[idx];
+        }
+        ai_deadline_stats.window[idx] = missed;
+        ai_deadline_stats.miss_count += missed;
+        ai_deadline_stats.window_idx++;
+        ai_deadline_stats.total_count++;
+    }
+
+    /* Latency tracking */
+    if (task->arrival_time_ns > 0) {
+        uint64_t latency = now - task->arrival_time_ns;
+        ai_latency_stats.cumulative_ns += latency;
+        ai_latency_stats.count++;
+    }
+}
+
+/*
+ * Integer accessors for ai_state.c (state vector extraction).
+ * Return raw integer values — float conversion happens in ai_state.c
+ * (which is compiled without -mgeneral-regs-only).
+ */
+void sched_ai_get_utilization_raw(uint32_t cpu, uint64_t *running, uint64_t *total)
+{
+    struct cpu_runqueue *rq = cpu_rq(cpu);
+    *running = rq->running_ticks;
+    *total = rq->total_ticks;
+}
+
+void sched_ai_get_deadline_miss_raw(uint32_t *misses, uint32_t *window_size)
+{
+    *misses = ai_deadline_stats.miss_count;
+    uint32_t ws = ai_deadline_stats.total_count;
+    if (ws > 100) ws = 100;
+    *window_size = ws;
+}
+
+void sched_ai_get_latency_raw(uint64_t *cumulative_ns, uint32_t *count)
+{
+    *cumulative_ns = ai_latency_stats.cumulative_ns;
+    *count = ai_latency_stats.count;
+}
+
+uint32_t sched_ai_get_top_tasks(struct task **out, uint32_t max)
+{
+    uint32_t n = ai_top_tasks.count;
+    if (n > max) n = max;
+    for (uint32_t i = 0; i < n; i++)
+        out[i] = ai_top_tasks.tasks[i];
+    return n;
+}
+
+#endif /* CONFIG_AI_SCHEDULER */
+
 /* Per-CPU diagnostic counters for cross-CPU dispatch debugging.
  * On Pi 5 these must be in NC memory for cross-CPU visibility —
  * secondary CPU writes to cacheable BSS are invisible to CPU 0. */
@@ -680,6 +822,10 @@ void scheduler_add_task(struct task *task)
         return;
     }
 
+#ifdef CONFIG_AI_SCHEDULER
+    task->arrival_time_ns = slm_get_time_ns();
+#endif
+
     uint32_t target_cpu;
 
     /* Affinity may have been set by another CPU */
@@ -1151,6 +1297,23 @@ void scheduler_tick(void)
         sched_diag_tick[cpu]++;
 #else
     sched_diag_tick[cpu]++;
+#endif
+
+#ifdef CONFIG_AI_SCHEDULER
+    /* Per-CPU utilization tracking */
+    {
+        struct cpu_runqueue *rq = cpu_rq(cpu);
+        rq->total_ticks++;
+        struct task *cur = task_current();
+        if (cur && cur != rq->idle_task) {
+            rq->running_ticks++;
+        }
+    }
+
+    /* Update top-8 task cache periodically (CPU 0 only) */
+    if (cpu == 0 && (sched.timer_ticks % AI_TOP_TASKS_UPDATE_INTERVAL) == 0) {
+        ai_update_top_tasks();
+    }
 #endif
 
     /* Policy tick callback (stats collection, rebalancing) */

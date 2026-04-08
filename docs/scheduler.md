@@ -582,6 +582,51 @@ Output: logits[42] → argmax → decode(core, priority_adj, preempt)
 
 Invalid actions (core out of range, isolated core) fall back to the heuristic policy.
 
+#### State Vector (108 dimensions)
+
+The AI policy observes kernel state through a fixed 108-float vector matching the training simulator's observation space:
+
+**Per-core features (36 floats = 6 cores × 6 features):**
+
+| Feature | Source | Range |
+|---------|--------|-------|
+| utilization | running_ticks / total_ticks | [0, 1] |
+| queue_depth | ready_count / 32 | [0, ~1] |
+| cache_pressure | 0.0 (future: PMU) | [0, 1] |
+| core_type | 1.0 (homogeneous) | {0, 1} |
+| isolated | sched_get_isolated_cores() bit | {0, 1} |
+| current_task_prio | effective_priority / 7 | [0, 1] |
+
+Cores beyond `cpu_count` are zero-filled (e.g., Pi 5 has 4 cores, slots 4-5 are zeros).
+
+**Per-task features (64 floats = 8 tasks × 8 features):**
+
+Top 8 tasks by effective priority, cached and updated every 100ms.
+
+| Feature | Source | Range |
+|---------|--------|-------|
+| priority | effective_priority / 7 | [0, 1] |
+| deadline_urgency | 1 - (deadline - now) / 1s | [0, 1] |
+| wait_time | (now - arrival_time) / 1s | [0, ∞) |
+| working_set, model_size, inference_dur, can_use_gpu, component_type | 0.0 (future) | — |
+
+**Global features (8 floats):**
+
+| Feature | Source |
+|---------|--------|
+| ready_count | sum(ready_count) / 64 |
+| deadline_miss_rate | rolling window of 100 completions |
+| avg_latency | cumulative / count / 10ms |
+| load_imbalance | std_dev(utils) / mean(utils), clamped [0,1] |
+| weight/workspace_pool_pressure, gpu_queue_depth, episode_time | 0.0 (future) |
+
+#### Scheduler Counters (CONFIG_AI_SCHEDULER)
+
+When `CONFIG_AI_SCHEDULER` is defined, the scheduler tracks additional metrics:
+- **Per-CPU**: `running_ticks` / `total_ticks` in `cpu_runqueue` (incremented in `scheduler_tick()`)
+- **Per-task**: `arrival_time_ns` (set in `scheduler_add_task()`), `completion_time_ns` (set in `task_exit()`)
+- **Global**: deadline miss rolling window (100 entries), cumulative latency, top-8 task cache (updated every 10 ticks)
+
 ### Runtime Configuration
 
 Timer frequency is set in `timer.c`:

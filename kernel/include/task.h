@@ -136,6 +136,12 @@ struct task {
     /* Cleanup callback (called when task is destroyed) */
     task_cleanup_t cleanup;             /* Optional cleanup function */
     void *cleanup_arg;                  /* Argument passed to cleanup function */
+
+#ifdef CONFIG_AI_SCHEDULER
+    /* AI scheduler tracking (M5) */
+    uint64_t arrival_time_ns;           /* When task was added to scheduler */
+    uint64_t completion_time_ns;        /* When task exited (0 if still running) */
+#endif
 };
 
 /* Task function prototype */
