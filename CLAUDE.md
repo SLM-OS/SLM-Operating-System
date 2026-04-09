@@ -134,6 +134,21 @@ cmake -B build/kernel -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-x86_64-none-elf.cma
 
 The Makefile automatically selects the correct toolchain, QEMU binary, and QEMU machine settings based on `PLATFORM`. For x86-64, the test target creates a bootable GRUB ISO and uses `isa-debug-exit` for clean test termination.
 
+### Clean Build Targets
+
+Always use the Makefile's clean targets instead of manual `rm -rf`:
+
+```bash
+make kernel-clean        # Clean kernel build directory (build/kernel)
+# For a full test rebuild, also remove:
+rm -rf build/kernel-test # Test kernel build (no dedicated clean target yet)
+```
+
+When switching platforms or after significant changes, a clean rebuild ensures no stale objects:
+```bash
+make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
+```
+
 ### Common Build Issues
 
 1. **"Permission denied" during link**
@@ -141,7 +156,7 @@ The Makefile automatically selects the correct toolchain, QEMU binary, and QEMU 
    - **First step:** Look for running QEMU processes and kill them
    - Note: `ps -eaf | grep qemu` may fail — grep complains about "binary input" and misses processes. Use `tasklist.exe | grep -i qemu` or Windows Task Manager instead.
    - The Makefile's `check-build-dir` target tries to detect this, but may not catch all cases
-   - Manual fix: Kill QEMU processes, then `rm -rf build/kernel` and rebuild
+   - Manual fix: Kill QEMU processes, then `make kernel-clean` and rebuild
 
 ---
 
@@ -151,9 +166,17 @@ The Makefile automatically selects the correct toolchain, QEMU binary, and QEMU 
 
 **Status:** 🟡 Partially Working — EL2 + VHE + UARTC bypasses CBB for serial and core subsystems
 
+### Known Issues
+
+**Spinlock / LSE Atomics:** On Cortex-A78AE, ARM LSE atomics (SWPALB) and exclusive operations (LDAXR/STXR) cause Synchronous External Abort before MMU enable (non-cacheable memory). `SPINLOCK_SKIP_LOCKING` is defined in `platform.h` to use barrier-only spinlocks. This is safe for early single-CPU boot; SMP data uses NC memory.
+
+**GPU CBB Firewall:** GPU registers at 0x17000000 are behind the CBB firewall. Reading NV_PMC_BOOT_0 triggers an external abort. The stub GPU driver is used on Jetson instead of the NVIDIA probe driver.
+
+**nvgpu RAS Error:** Linux's nvgpu driver leaves stale GPU DMA operations after kexec. TF-A (EL3) catches the resulting RAS Uncorrectable Error and powers off the CPU core. This is a Linux/TF-A interaction issue, not an SLM-OS bug. Workaround: needs investigation into stopping nvgpu cleanly before kexec, or resetting the GPU fabric from EL3.
+
 ### CBB Firewall — Partially Bypassed
 
-The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** enabled, SLM-OS can access UARTC, GICv3, and timer — enough to boot to the shell. UARTA (40-pin header) remains blocked.
+The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** enabled, SLM-OS can access UARTC, GICv3, and timer — enough to boot to the shell. UARTA (40-pin header) and GPU (0x17000000) remain blocked.
 
 **Working approach (April 2026):**
 - kexec from Linux → SLM-OS enters at EL2

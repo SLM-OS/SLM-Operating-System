@@ -274,6 +274,167 @@ RustPoolStats rust_weight_pool_stats(void);     // Weight pool (model parameters
 RustPoolStats rust_workspace_pool_stats(void);  // Workspace pool (inference scratch)
 ```
 
+### Model Loader (called from C)
+
+The model loader parses ONNX models and manages a registry of loaded models. Implemented in Rust (`runtime/src/loader/`) with C FFI wrappers.
+
+```c
+// Initialize the model loader registry
+// Returns: 0 on success
+int rust_model_loader_init(void);
+
+// Load an ONNX model from a buffer
+// @param name: Model name (null-terminated)
+// @param data: Pointer to ONNX protobuf data
+// @param data_len: Size of data in bytes
+// Returns: Registry index (>= 0) on success, -1 on error
+int rust_model_load(const char *name, const uint8_t *data, size_t data_len);
+
+// Unload a model by registry index
+// Returns: 0 on success, -1 on error
+int rust_model_unload(uint32_t index);
+
+// Get model info by registry index
+// Fills the RustModelInfo struct on success
+// Returns: 0 on success, -1 on error
+int rust_model_get_info(uint32_t index, RustModelInfo *info);
+
+// Get number of currently loaded models
+uint32_t rust_model_count(void);
+
+// Find a model by name (null-terminated)
+// Returns: Registry index (>= 0) if found, -1 if not found
+int rust_model_find(const char *name);
+
+// Run model loader self-tests
+// Returns: Number of failures (0 = all passed)
+int rust_model_loader_test(void);
+```
+
+#### RustModelInfo Structure
+
+```c
+typedef struct {
+    uint8_t  name[32];        // Model name (null-terminated)
+    uint8_t  format;          // 0=GGUF, 1=ONNX, 2=Raw
+    uint8_t  _pad[3];         // Alignment padding
+    uint64_t param_count;     // Total parameters across all weight tensors
+    uint64_t weight_size;     // Weight data size in bytes
+    uint64_t workspace_size;  // Workspace allocation in bytes
+    uint32_t node_count;      // Operator nodes in the graph
+    uint32_t input_count;     // Graph-level inputs (excluding initializers)
+    uint32_t output_count;    // Graph-level outputs
+    uint32_t _reserved;       // Future use
+} RustModelInfo;
+```
+
+The registry supports up to 8 simultaneously loaded models. Memory is allocated from the weight and workspace pools (see Model Memory above) and freed automatically on unload.
+
+### Inference Engine (called from C)
+
+The inference engine executes ONNX operator graphs on loaded models. Implemented in Rust (`runtime/src/inference/`) with C FFI wrappers.
+
+```c
+// Run inference on a loaded model
+// @param model_index: Registry index of loaded model
+// @param input_data: Pointer to input float array (NULL for zero input)
+// @param input_len: Number of input floats
+// @param output_buf: Buffer to receive output floats
+// @param output_len: Capacity of output buffer in floats
+// Returns: output float count on success, negative on error
+// -1 = NULL pointer, -2 = inference error, -3 = engine creation failed
+int rust_infer(uint32_t model_index, const float *input_data,
+               size_t input_len, float *output_buf, size_t output_len);
+
+// Run inference with zero input and return argmax class index
+// @param model_index: Registry index of loaded model
+// Returns: class index (>= 0) on success, -1 on error
+// Used by kernel-mode components that cannot handle FP types.
+// Internally allocates a static 784-float input buffer (zeros) and
+// a 64-float output buffer, runs the full inference pipeline, and
+// returns the index of the highest output value.
+int rust_infer_classify(uint32_t model_index);
+
+// Run inference with zero input, print results to UART
+// Prints output probabilities and predicted class
+// @param model_index: Registry index of loaded model
+// Returns: 0 on success, negative on error
+int rust_infer_and_print(uint32_t model_index);
+
+// Run inference engine self-tests
+// Returns: number of test failures (0 = all passed)
+int rust_inference_test(void);
+
+// Get inference performance statistics
+// @param stats: Pointer to RustInferStats struct to fill
+// Returns: 0 on success, -1 on error
+int rust_infer_stats(RustInferStats *stats);
+
+// Benchmark model inference latency
+// @param model_index: Registry index of loaded model
+// @param iterations: Number of inference iterations to run
+// Returns: 0 on success, negative on error
+// Runs N iterations of inference, prints min/avg/max latency results to UART
+int rust_infer_bench(uint32_t model_index, uint32_t iterations);
+```
+
+#### RustInferStats Structure
+
+```c
+typedef struct {
+    uint64_t total_inferences;  // Total inference calls completed
+    uint64_t total_errors;      // Total inference errors
+    uint64_t min_latency_us;    // Minimum inference latency (microseconds)
+    uint64_t max_latency_us;    // Maximum inference latency (microseconds)
+    uint64_t avg_latency_us;    // Average inference latency (microseconds)
+    uint64_t last_latency_us;   // Most recent inference latency (microseconds)
+} RustInferStats;
+```
+
+The `rust_infer_stats()` function fills the caller-provided struct with cumulative statistics from the inference engine. Latency values are tracked per-inference and reported in microseconds. The `rust_infer_bench()` function runs the specified number of iterations on the given model and prints a summary (min/avg/max latency) to the UART console.
+
+### GPU Compute (called from C)
+
+The GPU compute layer provides capability detection and status reporting for GPU-accelerated inference. Implemented in Rust (`runtime/src/inference/gpu.rs`) with C FFI wrappers in `kernel/src/slm_ffi.c`.
+
+```c
+// Check if GPU subsystem is available
+// Returns: 1 if available, 0 if not
+int slm_gpu_available(void);
+
+// Get GPU info for Rust
+// @param info: Pointer to RustGpuInfo struct to fill
+// Returns: 0 on success, -1 on error
+int slm_gpu_get_info(RustGpuInfo *info);
+
+// Print GPU status to UART (called from shell `model gpu` command)
+// Displays driver, device, compute status, cores, and inference backend
+void rust_gpu_print_status(void);
+
+// Run GPU compute integration tests
+// Tests capability detection, backend selection, and cache coherency stubs
+// Returns: Number of failures (0 = all passed)
+int rust_gpu_compute_test(void);
+```
+
+#### RustGpuInfo Structure
+
+```c
+typedef struct {
+    uint8_t  name[32];         // Driver name (e.g., "nvidia", "stub", "none")
+    uint8_t  device[64];       // Device description
+    uint32_t capabilities;     // GPU_CAP_* flags (COMPUTE, TENSOR_CORES, UNIFIED_MEMORY)
+    uint32_t cuda_cores;       // Number of CUDA cores (0 if N/A)
+    uint32_t tensor_cores;     // Number of tensor cores (0 if N/A)
+    uint64_t memory_size;      // GPU memory in bytes (0 for unified memory)
+    uint8_t  unified_memory;   // 1 if CPU/GPU share memory
+    uint8_t  compute_ready;    // 1 if gpu_submit/gpu_wait are implemented
+    uint8_t  _pad[6];          // Alignment padding
+} RustGpuInfo;
+```
+
+The `slm_gpu_available()` function delegates to the kernel's `gpu_available()`, which checks whether a GPU driver has been registered and initialized. The `slm_gpu_get_info()` function queries the active GPU driver via `gpu_get_info()` and copies the result into the `RustGpuInfo` layout expected by Rust.
+
 ### Component System (called from C)
 
 The component system is implemented in Rust (`runtime/src/component/`) with C FFI wrappers.
@@ -411,13 +572,19 @@ Used by the Rust model memory allocator (`gpu_map`/`gpu_unmap`) to ensure cache 
 
 ---
 
+## Syscall Interface (Phase 5 M4)
+
+Milestone 4 adds a kernel-internal syscall dispatch mechanism for user-mode (EL0) components. This is **not** an FFI boundary — syscalls use the ARM64 `SVC #0` instruction rather than C function calls. The syscall dispatch table (`kernel/src/syscall.c`) routes requests from EL0 to kernel handlers that call existing FFI functions (e.g., `rust_infer`, `msg_router_publish`).
+
+The syscall ABI is documented in `docs/component-isolation.md`. Seven syscalls are defined (SYS_EXIT through SYS_LOG), with user-side stubs in `kernel/include/user_syscall.h`.
+
+---
+
 ## Future Extensions
 
 Planned FFI additions:
-- Model loading functions (GGUF/ONNX parsing)
 - GPU command submission (requires GSP firmware)
 - Inference scheduling (request queuing, batching)
-- Tensor operations
 
 These will follow the same patterns established here.
 

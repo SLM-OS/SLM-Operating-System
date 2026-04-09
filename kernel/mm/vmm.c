@@ -116,17 +116,29 @@ static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
     }
 
     /* Access permissions */
-    if (!(flags & VMM_FLAG_WRITE)) {
-        desc |= PTE_AP_RO_EL1;  /* Read-only at EL1 */
+    if (flags & VMM_FLAG_USER) {
+        /* User-accessible (EL0 + EL1) */
+        if (!(flags & VMM_FLAG_WRITE)) {
+            desc |= PTE_AP_RO_ALL;   /* Read-only at EL1 and EL0 */
+        } else {
+            desc |= PTE_AP_RW_ALL;   /* Read-write at EL1 and EL0 */
+        }
     } else {
-        desc |= PTE_AP_RW_EL1;  /* Read-write at EL1 */
+        /* Kernel-only (EL1) */
+        if (!(flags & VMM_FLAG_WRITE)) {
+            desc |= PTE_AP_RO_EL1;  /* Read-only at EL1 */
+        } else {
+            desc |= PTE_AP_RW_EL1;  /* Read-write at EL1 */
+        }
     }
 
     /* Execute permissions (ARM uses "execute never" bits) */
     if (!(flags & VMM_FLAG_EXEC)) {
         desc |= PTE_PXN;        /* Privileged execute never */
     }
-    desc |= PTE_UXN;            /* Always block EL0 execute for kernel pages */
+    if (!(flags & VMM_FLAG_USER) || !(flags & VMM_FLAG_EXEC)) {
+        desc |= PTE_UXN;        /* Unprivileged execute never (unless user+exec) */
+    }
 
     /* SLM-specific software flags */
     if (flags & VMM_FLAG_GPU_MAPPED) {
@@ -172,17 +184,27 @@ static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
     }
 
     /* Access permissions */
-    if (!(flags & VMM_FLAG_WRITE)) {
-        desc |= PTE_AP_RO_EL1;
+    if (flags & VMM_FLAG_USER) {
+        if (!(flags & VMM_FLAG_WRITE)) {
+            desc |= PTE_AP_RO_ALL;
+        } else {
+            desc |= PTE_AP_RW_ALL;
+        }
     } else {
-        desc |= PTE_AP_RW_EL1;
+        if (!(flags & VMM_FLAG_WRITE)) {
+            desc |= PTE_AP_RO_EL1;
+        } else {
+            desc |= PTE_AP_RW_EL1;
+        }
     }
 
     /* Execute permissions */
     if (!(flags & VMM_FLAG_EXEC)) {
         desc |= PTE_PXN;
     }
-    desc |= PTE_UXN;
+    if (!(flags & VMM_FLAG_USER) || !(flags & VMM_FLAG_EXEC)) {
+        desc |= PTE_UXN;
+    }
 
     return desc;
 }
@@ -719,6 +741,10 @@ void vmm_dump(void)
  */
 static void vmm_setup_platform(void)
 {
+    /* Note: VMM_FLAG_USER (AP[1]=1) causes QEMU MMU hang on virt platform
+     * with cortex-a53, cortex-a76, and -cpu max. Root cause: unknown
+     * (PTE format is valid per ARM ARM, PAN/SPAN investigated and ruled out).
+     * EL0 data access requires AP[1]=1 — deferred to hardware testing. */
     uint32_t kernel_flags = VMM_FLAG_READ | VMM_FLAG_WRITE | VMM_FLAG_EXEC;
 
     /* L1 entry for MMIO region (GIC, UART, etc. all below 0x40000000) */

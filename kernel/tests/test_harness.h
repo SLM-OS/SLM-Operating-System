@@ -70,4 +70,19 @@ int test_suite_integration(void);
 /* x86-64 boot and platform tests (x86 only) */
 int test_suite_x86_boot(void);
 
+/* Model loader tests (ONNX parsing, registry - calls into Rust) */
+int test_suite_model_loader(void);
+
+/* Inference engine tests (tensor ops, end-to-end MNIST - calls into Rust) */
+int test_suite_inference(void);
+
+/* GPU compute integration tests (capability detection, fallback - calls into Rust) */
+int test_suite_gpu_compute(void);
+
+/* Syscall infrastructure tests (dispatch, trap frame, user task creation) */
+int test_suite_syscall(void);
+
+/* Component integration tests (infer_classify, example components) */
+int test_suite_components_m5(void);
+
 #endif /* TEST_HARNESS_H */

@@ -1022,15 +1022,11 @@ int cmd_ipc(int argc, char *argv[])
 /*
  * model - Show model memory pool statistics
  */
-int cmd_model(int argc, char *argv[])
+static void model_show_pools(void)
 {
-    (void)argc;
-    (void)argv;
-
     const size_t block_size_kb = 2048;
     RustPoolStats weight_stats = rust_weight_pool_stats();
     RustPoolStats workspace_stats = rust_workspace_pool_stats();
-
 
     uart_puts("Model Memory Pools:\r\n");
     uart_puts("\r\n");
@@ -1053,7 +1049,6 @@ int cmd_model(int argc, char *argv[])
     uart_printf("    Peak usage:      %lu\r\n", (unsigned long)workspace_stats.peak_usage);
     uart_puts("\r\n");
 
-    /* Calculate totals */
     size_t total_blocks = weight_stats.total_blocks + workspace_stats.total_blocks;
     size_t total_mb = total_blocks * block_size_kb / 1024;
     size_t free_blocks = weight_stats.free_blocks + workspace_stats.free_blocks;
@@ -1062,9 +1057,304 @@ int cmd_model(int argc, char *argv[])
     uart_printf("  Total: %lu blocks (%lu MB), %lu free (%lu MB)\r\n",
                 (unsigned long)total_blocks, (unsigned long)total_mb,
                 (unsigned long)free_blocks, (unsigned long)free_mb);
-    uart_puts("\r\n");
+}
+
+static int model_load(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: model load <path>\r\n");
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(argv[2], resolved, sizeof(resolved)) < 0) {
+        uart_puts("model load: path too long\r\n");
+        return -1;
+    }
+
+    /* Get file size */
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0) {
+        uart_printf("model load: %s: file not found\r\n", resolved);
+        return -1;
+    }
+    if (info.type != 0) {
+        uart_printf("model load: %s: not a file\r\n", resolved);
+        return -1;
+    }
+    if (info.size == 0) {
+        uart_puts("model load: file is empty\r\n");
+        return -1;
+    }
+
+    /* Allocate buffer for file contents */
+    size_t pages_needed = (info.size + 4095) / 4096;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        uart_puts("model load: out of memory for read buffer\r\n");
+        return -1;
+    }
+
+    /* Read the file */
+    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        uart_printf("model load: failed to read %s\r\n", resolved);
+        pmm_free_pages(buf, pages_needed);
+        return -1;
+    }
+
+    /* Extract filename as model name (strip path) */
+    const char *name = resolved;
+    for (const char *p = resolved; *p; p++) {
+        if (*p == '/') name = p + 1;
+    }
+    /* Strip .onnx extension if present */
+    char model_name[32];
+    size_t name_len = 0;
+    for (const char *p = name; *p && *p != '.' && name_len < 31; p++) {
+        model_name[name_len++] = *p;
+    }
+    model_name[name_len] = '\0';
+
+    /* Load via Rust FFI */
+    int result = rust_model_load(model_name, buf, (size_t)bytes_read);
+    pmm_free_pages(buf, pages_needed);
+
+    if (result < 0) {
+        uart_printf("model load: failed to load %s (parse error)\r\n", model_name);
+        return -1;
+    }
+
+    /* Show result */
+    RustModelInfo minfo;
+    if (rust_model_get_info((uint32_t)result, &minfo) == 0) {
+        uart_printf("Loaded model '%s' (slot %d)\r\n", model_name, result);
+        uart_printf("  Format:     ONNX\r\n");
+        uart_printf("  Parameters: %lu\r\n", (unsigned long)minfo.param_count);
+        uart_printf("  Weights:    %lu bytes\r\n", (unsigned long)minfo.weight_size);
+        uart_printf("  Nodes:      %lu\r\n", (unsigned long)minfo.node_count);
+        uart_printf("  Inputs:     %lu\r\n", (unsigned long)minfo.input_count);
+        uart_printf("  Outputs:    %lu\r\n", (unsigned long)minfo.output_count);
+    } else {
+        uart_printf("Loaded model '%s' (slot %d)\r\n", model_name, result);
+    }
 
     return 0;
+}
+
+static int model_list(void)
+{
+    uint32_t count = rust_model_count();
+    if (count == 0) {
+        uart_puts("No models loaded.\r\n");
+        return 0;
+    }
+
+    uart_printf("Loaded models (%lu):\r\n", (unsigned long)count);
+    uart_puts("  Idx  Name                     Params     Weights   Nodes\r\n");
+    uart_puts("  ---  ----                     ------     -------   -----\r\n");
+
+    for (uint32_t i = 0; i < 8; i++) {
+        RustModelInfo info;
+        if (rust_model_get_info(i, &info) == 0) {
+            uart_printf("  %lu    %-24s %-10lu %-9lu %lu\r\n",
+                        (unsigned long)i,
+                        (const char *)info.name,
+                        (unsigned long)info.param_count,
+                        (unsigned long)info.weight_size,
+                        (unsigned long)info.node_count);
+        }
+    }
+    return 0;
+}
+
+static int model_info(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: model info <name|idx>\r\n");
+        return -1;
+    }
+
+    /* Try as index first */
+    int idx = -1;
+    uint32_t parsed_idx;
+    if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+        idx = (int)parsed_idx;
+    } else {
+        idx = rust_model_find(argv[2]);
+    }
+
+    if (idx < 0) {
+        uart_printf("model info: '%s' not found\r\n", argv[2]);
+        return -1;
+    }
+
+    RustModelInfo info;
+    if (rust_model_get_info((uint32_t)idx, &info) != 0) {
+        uart_printf("model info: slot %d is empty\r\n", idx);
+        return -1;
+    }
+
+    uart_printf("Model: %s (slot %d)\r\n", (const char *)info.name, idx);
+    uart_printf("  Format:      %s\r\n",
+                info.format == 1 ? "ONNX" :
+                info.format == 0 ? "GGUF" : "Raw");
+    uart_printf("  Parameters:  %lu\r\n", (unsigned long)info.param_count);
+    uart_printf("  Weight size: %lu bytes\r\n", (unsigned long)info.weight_size);
+    uart_printf("  Workspace:   %lu bytes\r\n", (unsigned long)info.workspace_size);
+    uart_printf("  Nodes:       %lu\r\n", (unsigned long)info.node_count);
+    uart_printf("  Inputs:      %lu\r\n", (unsigned long)info.input_count);
+    uart_printf("  Outputs:     %lu\r\n", (unsigned long)info.output_count);
+
+    return 0;
+}
+
+static int model_unload(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: model unload <name|idx>\r\n");
+        return -1;
+    }
+
+    int idx = -1;
+    uint32_t parsed_idx;
+    if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+        idx = (int)parsed_idx;
+    } else {
+        idx = rust_model_find(argv[2]);
+    }
+
+    if (idx < 0) {
+        uart_printf("model unload: '%s' not found\r\n", argv[2]);
+        return -1;
+    }
+
+    if (rust_model_unload((uint32_t)idx) == 0) {
+        uart_printf("Unloaded model from slot %d\r\n", idx);
+        return 0;
+    } else {
+        uart_printf("model unload: failed for slot %d\r\n", idx);
+        return -1;
+    }
+}
+
+/*
+ * Run inference and print results — implemented in Rust to avoid FP
+ * operations in -mgeneral-regs-only kernel C code.
+ */
+extern int rust_infer_and_print(uint32_t model_index);
+
+static int model_infer(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("Usage: model infer <name|idx>\r\n");
+        return -1;
+    }
+
+    /* Find model */
+    int idx = -1;
+    uint32_t parsed_idx;
+    if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+        idx = (int)parsed_idx;
+    } else {
+        idx = rust_model_find(argv[2]);
+    }
+
+    if (idx < 0) {
+        uart_printf("model infer: '%s' not found\r\n", argv[2]);
+        return -1;
+    }
+
+    int result = rust_infer_and_print((uint32_t)idx);
+    if (result < 0) {
+        uart_printf("model infer: failed (error %d)\r\n", result);
+        return -1;
+    }
+
+    return 0;
+}
+
+int cmd_model(int argc, char *argv[])
+{
+    if (argc < 2) {
+        /* No subcommand — show pools + loaded model summary */
+        model_show_pools();
+        uart_puts("\r\n");
+        model_list();
+        return 0;
+    }
+
+    const char *subcmd = argv[1];
+
+    if (strcmp(subcmd, "load") == 0) {
+        return model_load(argc, argv);
+    }
+    if (strcmp(subcmd, "list") == 0) {
+        return model_list();
+    }
+    if (strcmp(subcmd, "info") == 0) {
+        return model_info(argc, argv);
+    }
+    if (strcmp(subcmd, "unload") == 0) {
+        return model_unload(argc, argv);
+    }
+    if (strcmp(subcmd, "pools") == 0) {
+        model_show_pools();
+        return 0;
+    }
+    if (strcmp(subcmd, "infer") == 0) {
+        return model_infer(argc, argv);
+    }
+    if (strcmp(subcmd, "gpu") == 0) {
+        rust_gpu_print_status();
+        return 0;
+    }
+    if (strcmp(subcmd, "stats") == 0) {
+        RustInferStats stats;
+        if (rust_infer_stats(&stats) == 0) {
+            uart_puts("Inference Statistics:\r\n");
+            uart_printf("  Total inferences: %lu\r\n", (unsigned long)stats.total_inferences);
+            if (stats.total_inferences > 0) {
+                unsigned long avg_us = (unsigned long)(stats.total_time_ns / stats.total_inferences / 1000);
+                uart_printf("  Avg latency:      %lu us\r\n", avg_us);
+                uart_printf("  Min latency:      %lu us\r\n", (unsigned long)(stats.min_time_ns / 1000));
+                uart_printf("  Max latency:      %lu us\r\n", (unsigned long)(stats.max_time_ns / 1000));
+                uart_printf("  Last latency:     %lu us\r\n", (unsigned long)(stats.last_time_ns / 1000));
+            }
+            uart_printf("  Errors:           %lu\r\n", (unsigned long)stats.errors);
+        }
+        return 0;
+    }
+    if (strcmp(subcmd, "bench") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: model bench <name|idx> [iterations]\r\n");
+            return -1;
+        }
+        int idx = -1;
+        uint32_t parsed_idx;
+        if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+            idx = (int)parsed_idx;
+        } else {
+            idx = rust_model_find(argv[2]);
+        }
+        if (idx < 0) {
+            uart_printf("model bench: '%s' not found\r\n", argv[2]);
+            return -1;
+        }
+        uint32_t iters = 10;  /* Default 10 iterations */
+        if (argc >= 4) {
+            uint32_t parsed_iters;
+            if (shell_parse_uint(argv[3], &parsed_iters) == 0 && parsed_iters > 0) {
+                iters = parsed_iters;
+            }
+        }
+        uart_printf("Benchmarking model '%s' (%lu iterations)...\r\n",
+                    argv[2], (unsigned long)iters);
+        return rust_infer_bench((uint32_t)idx, iters);
+    }
+
+    uart_puts("Usage: model [load|list|info|unload|infer|bench|stats|pools|gpu]\r\n");
+    return -1;
 }
 
 /*

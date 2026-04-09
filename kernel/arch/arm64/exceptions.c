@@ -9,27 +9,17 @@
 #include "uart.h"
 #include "debug.h"
 #include "task.h"
+#include "sched.h"
 #include "smp.h"
 #include "platform.h"
 #include "ncmem.h"
+#include "trap.h"
+#include "syscall.h"
 #include <stdint.h>
 
 /* Timer IRQ numbers */
 #define PHYS_TIMER_IRQ  30  /* Physical timer PPI 14 */
 #define VIRT_TIMER_IRQ  27  /* Virtual timer PPI 11 */
-
-/*
- * Trap frame structure (matches save_regs in vectors.S)
- */
-struct trap_frame {
-    uint64_t x0, x1, x2, x3, x4, x5, x6, x7;
-    uint64_t x8, x9, x10, x11, x12, x13, x14, x15;
-    uint64_t x16, x17, x18, x19, x20, x21, x22, x23;
-    uint64_t x24, x25, x26, x27, x28, x29;
-    uint64_t x30;
-    uint64_t elr;
-    uint64_t spsr;
-};
 
 /*
  * Decode exception class from ESR_EL1
@@ -303,4 +293,75 @@ void el1_serror_handler(struct trap_frame *tf)
           "  ELR:   0x%lx\n"
           "  SPSR:  0x%lx",
           esr, tf->elr, tf->spsr);
+}
+
+/* ============================================================================
+ * EL0 Exception Handlers (Phase 5 M4 - Component Isolation)
+ *
+ * These handle exceptions from user-mode (EL0) components.
+ * Key difference from EL1 handlers: faults terminate the component
+ * instead of panicking the kernel.
+ * ============================================================================ */
+
+/*
+ * Handle a user-mode fault.
+ *
+ * Logs diagnostic info and terminates the faulting task.
+ * The kernel continues running — only the faulting component is affected.
+ */
+static void handle_user_fault(struct trap_frame *tf, uint64_t esr,
+                              uint64_t far, uint32_t ec)
+{
+    struct task *t = task_current();
+    const char *task_name = t ? t->name : "unknown";
+
+    uart_printf("\r\n[USER FAULT] Component '%s' terminated\r\n", task_name);
+    uart_printf("  Type:    %s\r\n", decode_ec(ec));
+    uart_printf("  ELR:     0x%lx\r\n", (unsigned long)tf->elr);
+    uart_printf("  ESR:     0x%lx\r\n", (unsigned long)esr);
+    if (is_data_abort(ec) || is_instruction_abort(ec)) {
+        uart_printf("  FAR:     0x%lx\r\n", (unsigned long)far);
+    }
+    uart_printf("  SPSR:    0x%lx\r\n", (unsigned long)tf->spsr);
+
+    /* Terminate the task (does NOT panic the kernel) */
+    task_exit();
+    /* Never reached — schedule() switches to another task */
+}
+
+/*
+ * EL0 Synchronous exception handler.
+ *
+ * Dispatches SVC (syscalls) to the syscall table.
+ * All other synchronous exceptions (data abort, instruction abort,
+ * illegal instruction, etc.) terminate the component.
+ */
+void el0_sync_handler(struct trap_frame *tf)
+{
+    uint64_t esr, far;
+    __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));
+    __asm__ volatile("mrs %0, far_el1" : "=r"(far));
+
+    uint32_t ec = (esr >> 26) & 0x3F;
+
+    if (ec == 0x15) {
+        /* SVC from AArch64 EL0 — dispatch syscall */
+        syscall_dispatch(tf);
+        return;  /* restore_regs + eret returns to EL0 */
+    }
+
+    /* All other EL0 synchronous exceptions are faults */
+    handle_user_fault(tf, esr, far, ec);
+}
+
+/*
+ * EL0 SError handler.
+ *
+ * Asynchronous external abort from EL0 — terminate component.
+ */
+void el0_serror_handler(struct trap_frame *tf)
+{
+    uint64_t esr;
+    __asm__ volatile("mrs %0, esr_el1" : "=r"(esr));
+    handle_user_fault(tf, esr, 0, 0x2F);
 }

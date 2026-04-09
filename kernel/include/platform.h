@@ -210,6 +210,21 @@
  * Host1x:          0x13E00000
  */
 
+/*
+ * Spinlock policy: skip hardware locking on Jetson.
+ *
+ * After kexec, the ARM64 exclusive monitor state may be corrupted.
+ * Additionally, before MMU enable, memory is non-cacheable and
+ * LSE atomics (SWPALB) cause Synchronous External Abort on
+ * Cortex-A78AE. Use barrier-only spinlocks for safety.
+ *
+ * This is safe because:
+ *   - Single CPU until scheduler_init() boots secondaries
+ *   - IRQ masking in spin_lock_irqsave prevents interrupt-context races
+ *   - After MMU enable, SMP boot uses NC memory for cross-CPU sync
+ */
+#define SPINLOCK_SKIP_LOCKING 1
+
 #endif /* PLATFORM_JETSON_ORIN_NANO */
 
 /* ============================================================================

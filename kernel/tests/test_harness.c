@@ -114,6 +114,45 @@ int test_harness_run_all(void)
     total_failures += test_suite_lua();
 #endif
 
+#if !defined(PLATFORM_X86_64)
+    /* Phase 5 test suites (ARM64 only — use Rust runtime + ARM assembly) */
+
+    /* Model loader tests (Rust ONNX parser + registry) */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Model Loader Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_model_loader();
+
+    /* Inference engine tests (tensor ops + end-to-end MNIST) */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Inference Engine Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_inference();
+
+    /* GPU compute integration tests */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("GPU Compute Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_gpu_compute();
+
+    /* Component integration tests (M5) */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Component Integration Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_components_m5();
+
+    /* Syscall infrastructure tests */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Syscall Infrastructure Tests\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_syscall();
+#endif /* !PLATFORM_X86_64 */
+
     /* Rust FFI tests */
     uart_puts("\n");
     uart_puts("========================================\n");

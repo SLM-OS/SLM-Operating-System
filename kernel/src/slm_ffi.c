@@ -227,6 +227,62 @@ int slm_msg_recv(uint32_t queue_id, void *msg, size_t msg_size, int timeout_ms)
  * Test Support
  */
 
+/*
+ * GPU Compute (Phase 5, M3)
+ */
+
+int slm_gpu_available(void)
+{
+    return gpu_available() ? 1 : 0;
+}
+
+int slm_gpu_get_info(RustGpuInfo *info)
+{
+    if (!info) return -1;
+
+    /* Zero the struct first */
+    for (size_t i = 0; i < sizeof(RustGpuInfo); i++)
+        ((uint8_t *)info)[i] = 0;
+
+    if (!gpu_available()) {
+        /* No GPU — fill with defaults */
+        const char *name = "none";
+        for (int i = 0; name[i] && i < 31; i++)
+            info->name[i] = (uint8_t)name[i];
+        return 0;
+    }
+
+    gpu_info_t gi;
+    int ret = gpu_get_info(&gi);
+    if (ret != 0) return -1;
+
+    /* Copy strings */
+    if (gi.name) {
+        for (int i = 0; gi.name[i] && i < 31; i++)
+            info->name[i] = (uint8_t)gi.name[i];
+    }
+    if (gi.device) {
+        for (int i = 0; gi.device[i] && i < 63; i++)
+            info->device[i] = (uint8_t)gi.device[i];
+    }
+
+    info->capabilities = gi.capabilities;
+    info->cuda_cores = gi.cuda_cores;
+    info->tensor_cores = gi.tensor_cores;
+    info->memory_size = gi.memory_size;
+    info->unified_memory = gi.unified_memory ? 1 : 0;
+
+    /* Check if compute is actually ready (submit function implemented) */
+    /* The gpu driver struct is internal; detect by checking capabilities */
+    info->compute_ready = 0;  /* Currently no driver has submit/wait */
+
+    return 0;
+}
+
+/*
+ * Test Support
+ */
+
 /* Static test queue for FFI tests */
 static struct msg_queue *ffi_test_queue = (void *)0;
 

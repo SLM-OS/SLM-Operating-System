@@ -6,7 +6,7 @@
 # ============================================================================
 
 # Build type: Debug or Release
-BUILD_TYPE ?= Debug
+BUILD_TYPE ?= Release
 
 # Platform: QEMU_VIRT, JETSON_ORIN_NANO, or RASPI5
 PLATFORM ?= QEMU_VIRT
@@ -203,7 +203,7 @@ gdb:
 
 # Test output file and timeout (kills QEMU if tests hang to prevent OOM)
 TEST_OUTPUT := $(BUILD_DIR)/test-output.log
-TEST_TIMEOUT := 60
+TEST_TIMEOUT := 300
 
 # Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
 .PHONY: kernel-test

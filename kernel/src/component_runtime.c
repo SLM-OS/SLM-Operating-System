@@ -15,6 +15,7 @@
 #include "component.h"
 #include "task.h"
 #include "sched.h"
+#include "slm_ffi.h"
 /* IPC used by message router (M7); echo service uses simple mailbox */
 #include "uart.h"
 #include "debug.h"
@@ -145,6 +146,7 @@ static void echo_service_entry(void *arg)
 /* Message router API (msg_router.c) */
 extern void msg_router_init(void);
 extern int msg_router_subscribe(const char *topic_name, int component_idx);
+extern int msg_router_publish(const char *topic_name, const char *data);
 extern const char *msg_router_receive(int component_idx, char *topic_out);
 extern void msg_router_ack(int component_idx);
 
@@ -201,6 +203,149 @@ struct builtin_component {
     component_entry_t entry;
 };
 
+/* ============================================================================
+ * Phase 5 M5: Example SLM Components
+ * ============================================================================ */
+
+/*
+ * Sensor Monitor — rule-based threshold monitoring (no ML).
+ *
+ * Subscribes to /sensors/data, checks if the value exceeds a threshold,
+ * and publishes alerts to /alerts/threshold. Demonstrates component
+ * lifecycle and message routing without model loading.
+ */
+static void sensor_monitor_entry(void *arg)
+{
+    int comp_idx = (int)(uintptr_t)arg;
+    component_set_state((uint32_t)comp_idx, COMPONENT_RUNNING);
+
+    /* Subscribe to sensor data topic */
+    msg_router_subscribe("/sensors/data", comp_idx);
+
+    uart_puts("[sensor_monitor] Started, watching /sensors/data\r\n");
+
+    extern volatile uint64_t pit_ticks;
+    uint64_t timeout_tick = pit_ticks + 3000;  /* 30s timeout */
+    int alert_count = 0;
+
+    while (pit_ticks < timeout_tick) {
+        char topic_buf[16];
+        const char *data = msg_router_receive(
+            comp_idx, topic_buf);
+
+        if (data) {
+            /* Parse integer value from message (simple atoi) */
+            int value = 0;
+            for (int i = 0; data[i] >= '0' && data[i] <= '9' && i < 10; i++) {
+                value = value * 10 + (data[i] - '0');
+            }
+
+            msg_router_ack(comp_idx);
+
+            /* Threshold check */
+            if (value > 50) {
+                char alert[60];
+                int len = 0;
+                const char *prefix = "ALERT: value=";
+                for (int i = 0; prefix[i]; i++) alert[len++] = prefix[i];
+                /* Append integer value */
+                if (value >= 100) alert[len++] = '0' + (value / 100) % 10;
+                if (value >= 10) alert[len++] = '0' + (value / 10) % 10;
+                alert[len++] = '0' + value % 10;
+                alert[len] = '\0';
+
+                msg_router_publish((const char *)"/alerts/threshold\0",
+                                   (const char *)alert);
+                alert_count++;
+                uart_printf("[sensor_monitor] %s\r\n", alert);
+            } else {
+                uart_printf("[sensor_monitor] value=%d (normal)\r\n", value);
+            }
+
+            timeout_tick = pit_ticks + 3000;  /* Reset timeout on activity */
+        } else {
+            yield();
+        }
+    }
+
+    uart_printf("[sensor_monitor] Exiting (%d alerts issued)\r\n", alert_count);
+    component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
+}
+
+/*
+ * Digit Classifier — MNIST inference component.
+ *
+ * Subscribes to /input/digits, runs MNIST inference via the Rust inference
+ * engine, and publishes classification results to /output/class.
+ * Demonstrates the full AI inference pipeline within a component.
+ *
+ * Prerequisites: MNIST model must be loaded via `model load /mnt/files/mnist.onnx`
+ */
+static void digit_classifier_entry(void *arg)
+{
+    int comp_idx = (int)(uintptr_t)arg;
+    component_set_state((uint32_t)comp_idx, COMPONENT_RUNNING);
+
+    /* Find the MNIST model */
+    int model_idx = rust_model_find("mnist");
+    if (model_idx < 0) {
+        uart_puts("[digit_classifier] ERROR: MNIST model not loaded\r\n");
+        uart_puts("[digit_classifier] Load with: model load /mnt/files/mnist.onnx\r\n");
+        component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
+        return;
+    }
+
+    uart_printf("[digit_classifier] Started with model at slot %d\r\n", model_idx);
+
+    /* Subscribe to digit classification requests */
+    msg_router_subscribe((const char *)"/input/digits\0", comp_idx);
+
+    extern volatile uint64_t pit_ticks;
+    uint64_t timeout_tick = pit_ticks + 3000;  /* 30s timeout */
+    int infer_count = 0;
+
+    while (pit_ticks < timeout_tick) {
+        char topic_buf[16];
+        const char *data = msg_router_receive(
+            comp_idx, topic_buf);
+
+        if (data) {
+            msg_router_ack(comp_idx);
+
+            /* Run inference (zero input — returns argmax class) */
+            int predicted_class = rust_infer_classify((uint32_t)model_idx);
+
+            if (predicted_class >= 0) {
+                /* Publish classification result */
+                char result[60];
+                result[0] = 'c';
+                result[1] = 'l';
+                result[2] = 'a';
+                result[3] = 's';
+                result[4] = 's';
+                result[5] = '=';
+                result[6] = '0' + (char)(predicted_class % 10);
+                result[7] = '\0';
+
+                msg_router_publish((const char *)"/output/class\0",
+                                   (const char *)result);
+                infer_count++;
+                uart_printf("[digit_classifier] Predicted class: %d\r\n",
+                            predicted_class);
+            } else {
+                uart_puts("[digit_classifier] Inference failed\r\n");
+            }
+
+            timeout_tick = pit_ticks + 3000;  /* Reset timeout */
+        } else {
+            yield();
+        }
+    }
+
+    uart_printf("[digit_classifier] Exiting (%d inferences)\r\n", infer_count);
+    component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
+}
+
 static const struct builtin_component builtin_components[] = {
     {
         .name = "counter",
@@ -225,6 +370,23 @@ static const struct builtin_component builtin_components[] = {
         .type = COMPONENT_TYPE_SERVICE,
         .priority = COMPONENT_PRIORITY_IDLE,  /* Same as shell for round-robin */
         .entry = listener_service_entry,
+    },
+    /* Phase 5 M5: Example SLM components */
+    {
+        .name = "sensor_monitor",
+        .version = "1.0",
+        .description = "Rule-based sensor threshold monitoring",
+        .type = COMPONENT_TYPE_SERVICE,
+        .priority = COMPONENT_PRIORITY_IDLE,
+        .entry = sensor_monitor_entry,
+    },
+    {
+        .name = "digit_classifier",
+        .version = "1.0",
+        .description = "MNIST digit classification via inference engine",
+        .type = COMPONENT_TYPE_APPLICATION,
+        .priority = COMPONENT_PRIORITY_NORMAL,
+        .entry = digit_classifier_entry,
     },
 };
 

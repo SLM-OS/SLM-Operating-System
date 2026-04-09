@@ -186,10 +186,33 @@ el1_serror:
     eret
 
 /*
- * EL0 handlers (userspace - future)
+ * EL0 handlers (userspace - Phase 5 M4)
+ *
+ * When an exception occurs at EL0, the CPU switches from SP_EL0 to SP_EL1.
+ * SP_EL1 was set before ERET and points to the task's kernel stack.
+ * save_regs saves the EL0 return state (ELR_EL1/SPSR_EL1 contain the
+ * EL0 PC and PSTATE), and restore_regs + eret returns to EL0.
  */
+
 el0_sync:
+    save_regs
+    mov     x0, sp              /* Pass trap frame pointer */
+    bl      el0_sync_handler    /* C handler: SVC dispatch or fault */
+    restore_regs
+    eret
+
 el0_irq:
+    save_regs
+    bl      el1_irq_handler     /* Reuse EL1 IRQ handler (timer preemption) */
+    restore_regs
+    eret
+
 el0_fiq:
+    b       hang                /* FIQ not used */
+
 el0_serror:
-    b       hang                /* Not implemented yet */
+    save_regs
+    mov     x0, sp
+    bl      el0_serror_handler  /* C handler: terminate component */
+    restore_regs
+    eret

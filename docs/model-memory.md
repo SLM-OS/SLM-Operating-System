@@ -229,58 +229,96 @@ The allocator uses a spinlock for thread safety:
 
 ## Model Loader (Phase 5)
 
-A skeleton `ModelLoader` is implemented in `runtime/src/mm/model_loader.rs`:
+**Status:** Implemented (April 2026)
 
-```rust
-/// Supported model formats
-pub enum ModelFormat {
-    Gguf,       // GGUF format (llama.cpp)
-    Onnx,       // ONNX format
-    RawTensors, // Raw weight tensors
-    Unknown,
-}
+The model loader parses ONNX model files, builds an operator graph, allocates weight and workspace memory from the model memory pools, and stores entries in a fixed-size registry. The implementation is split across four Rust modules under `runtime/src/loader/`:
 
-/// Load a model from memory buffer
-let loader = ModelLoader::new();
-let model = loader.load_from_buffer(&model_data)?;
+| Module | File | Purpose |
+|--------|------|---------|
+| `protobuf` | `runtime/src/loader/protobuf.rs` | Minimal protobuf wire format parser (varint, length-delimited, fixed32/64) |
+| `onnx_parser` | `runtime/src/loader/onnx_parser.rs` | ONNX schema interpreter with hardcoded field numbers from `onnx.proto3` |
+| `graph` | `runtime/src/loader/graph.rs` | Owned operator graph representation (lifetime-free, stored in registry) |
+| `registry` | `runtime/src/loader/registry.rs` | Fixed-size model registry (max 8 models), spinlock-protected |
+
+### Parse Pipeline
+
+```
+ONNX bytes --> protobuf parser --> ONNX parser --> ParsedOnnx (borrowed)
+                                                        |
+                                             build_graph + copy weights
+                                                        |
+                                             OperatorGraph + ModelHandle (owned)
+                                                        |
+                                                   registry entry
 ```
 
-### ModelLoader API (Skeleton)
+The `ParsedOnnx` struct borrows weight data from the input buffer (zero-copy for `raw_data` fields). The `build_graph` step converts borrowed parse results into an owned `OperatorGraph` and copies weight data into allocated pool memory.
 
-| Function | Purpose | Status |
-|----------|---------|--------|
-| `detect_format(data)` | Detect GGUF/ONNX from magic bytes | Implemented |
-| `load_from_buffer(data)` | Parse and load model into memory | Skeleton |
-| `estimate_memory(data)` | Estimate weight/workspace requirements | Skeleton |
+### Model Registry
 
-### LoadedModel
+The registry stores up to 8 simultaneously loaded models. Each entry contains:
+- Weight memory handle (from weight pool)
+- Workspace memory handle (from workspace pool)
+- Operator graph (owned, lifetime-free)
+- FFI-safe metadata (`ModelInfoC` struct)
 
-A loaded model holds handles to allocated memory:
+### FFI Functions
 
-```rust
-pub struct LoadedModel {
-    weights: ModelHandle,    // From weight pool
-    workspace: ModelHandle,  // From workspace pool
-    metadata: ModelMetadata, // Format, param count, sizes
-}
+| Function | Signature | Purpose |
+|----------|-----------|---------|
+| `rust_model_loader_init` | `() -> i32` | Initialize the registry |
+| `rust_model_load` | `(name, data, len) -> i32` | Parse ONNX, allocate memory, store in registry; returns index or -1 |
+| `rust_model_unload` | `(index) -> i32` | Free weight/workspace memory, clear registry slot |
+| `rust_model_get_info` | `(index, info*) -> i32` | Fill `RustModelInfo` struct with model metadata |
+| `rust_model_count` | `() -> u32` | Number of currently loaded models |
+| `rust_model_find` | `(name) -> i32` | Find model by name; returns index or -1 |
+| `rust_model_loader_test` | `() -> i32` | Run loader self-tests; returns failure count |
+
+### RustModelInfo Structure
+
+```c
+typedef struct {
+    uint8_t  name[32];        // Model name (null-terminated)
+    uint8_t  format;          // 0=GGUF, 1=ONNX, 2=Raw
+    uint8_t  _pad[3];
+    uint64_t param_count;     // Total parameters across all tensors
+    uint64_t weight_size;     // Weight data size in bytes
+    uint64_t workspace_size;  // Workspace allocation in bytes
+    uint32_t node_count;      // Operator nodes in graph
+    uint32_t input_count;     // Graph-level inputs (excluding initializers)
+    uint32_t output_count;    // Graph-level outputs
+    uint32_t _reserved;
+} RustModelInfo;
 ```
 
-Memory is automatically freed when `LoadedModel` is dropped.
+### Stack Usage
+
+The `ParsedOnnx` struct is ~6KB, designed to fit within the 32KB kernel task stack alongside the call chain. Constants are intentionally small (max 16 nodes, max 16 initializers, 24-char names) to keep stack usage bounded. The stack was increased from 16KB to 32KB in Phase 5 to accommodate ONNX parsing plus operator graph construction in the same call chain.
+
+See `docs/onnx-support.md` for supported operators and ONNX format details.
+
+### Inference Engine
+
+The inference engine (`runtime/src/inference/engine.rs`) executes operator graphs on loaded models using the following memory strategy:
+
+- **Static 10KB workspace buffer** -- The engine uses a fixed-size 10KB buffer for intermediate tensors, avoiding heap allocation entirely. This keeps inference within the kernel task stack budget.
+- **Bump allocator with per-call reset** -- Intermediate tensors are allocated sequentially from the workspace buffer during a forward pass. The bump pointer resets to zero at the start of each inference call, so no explicit free operations are needed.
+- **WeightTable** -- Maps initializer names to byte offsets within the weight memory block allocated from the weight pool. During inference, operator inputs that correspond to model weights are resolved through this table rather than copied.
 
 ---
 
 ## Future Extensions
 
-### Demand Paging (Phase 4+)
+### Demand Paging
 - Lazy allocation: blocks allocated on first access
 - Swap to storage: evict cold model weights
 - Prefetch: load next inference batch
 
-### Multi-Model Support
-- Model registry: track loaded models by name
-- LRU eviction: unload least-recently-used models
+### Multi-Model Enhancements
+- LRU eviction: unload least-recently-used models when registry is full
 - Hot-swap: replace model without stopping inference
+- FP16/INT8 quantized weight support
 
 ---
 
-*Last updated: December 2025*
+*Last updated: April 2026*

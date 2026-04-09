@@ -137,6 +137,11 @@ struct task {
     task_cleanup_t cleanup;             /* Optional cleanup function */
     void *cleanup_arg;                  /* Argument passed to cleanup function */
 
+    /* User mode support (Phase 5 M4) */
+    uint8_t is_user;                    /* 1 if runs at EL0, 0 for kernel EL1 */
+    uint8_t _user_pad[7];              /* Alignment padding */
+    void (*user_entry)(void *arg);      /* EL0 entry point (for user tasks) */
+
 #ifdef CONFIG_AI_SCHEDULER
     /* AI scheduler tracking (M5) */
     uint64_t arrival_time_ns;           /* When task was added to scheduler */
@@ -183,6 +188,19 @@ void task_exit(void);
  * Get the currently running task.
  */
 struct task *task_current(void);
+
+/*
+ * Create a user-mode (EL0) task.
+ *
+ * The task transitions from EL1 to EL0 via ERET on first schedule.
+ * Syscalls (SVC #0) trap back to EL1. Faults terminate the task.
+ *
+ * ARM64 only (x86-64 not yet supported).
+ */
+#if !defined(PLATFORM_X86_64)
+struct task *task_create_user(const char *name, task_entry_t user_entry,
+                              void *arg, uint8_t priority);
+#endif
 
 /*
  * Get task by ID.

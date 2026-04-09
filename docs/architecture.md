@@ -2,7 +2,7 @@
 
 High-level architecture documentation for the Small Language Model Operating System.
 
-**Status:** Phase 4+ (April 2026)
+**Status:** Phase 5 (April 2026)
 
 ---
 
@@ -16,17 +16,17 @@ SLM-OS is a bare-metal operating system designed for running AI inference worklo
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
-│   │                    Application Layer (Future)                        │   │
-│   │         Components, Model Inference, User Tasks                      │   │
+│   │                    Application Layer (Phase 5)                       │   │
+│   │     Components, ONNX Inference, Message Routing, EL0 Isolation      │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                         │
 │                                    ▼                                         │
 │   ┌─────────────────────────────────────────────────────────────────────┐   │
 │   │                     Rust Runtime Layer                               │   │
-│   │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐   │   │
-│   │  │  Model Mem   │  │  Scheduler   │  │     Logging/FFI          │   │   │
-│   │  │  Allocator   │  │   Policy     │  │                          │   │   │
-│   │  └──────────────┘  └──────────────┘  └──────────────────────────┘   │   │
+│   │  ┌──────────┐ ┌──────────┐ ┌───────────┐ ┌──────────┐ ┌────────┐   │   │
+│   │  │  Model   │ │Inference │ │   GPU     │ │Scheduler │ │  FFI   │   │   │
+│   │  │  Loader  │ │  Engine  │ │  Backend  │ │  Policy  │ │  Log   │   │   │
+│   │  └──────────┘ └──────────┘ └───────────┘ └──────────┘ └────────┘   │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                    │ FFI                                     │
 │                                    ▼                                         │
@@ -270,6 +270,237 @@ See `docs/lua.md` for full documentation.
 
 ---
 
+## Phase 5: SLM Integration
+
+Phase 5 delivers the AI inference capabilities that justify the "SLM" in SLM-OS. The prior phases built the OS primitives (memory, scheduling, IPC, filesystem, components); Phase 5 connects them into a working inference pipeline.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Phase 5 Inference Stack                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   Shell Commands ──> FFI ──> Rust Runtime                               │
+│   (model load/infer/bench)    ├── Model Loader (ONNX Protobuf Parser)  │
+│                               │    ├── Protobuf wire format decoder     │
+│                               │    ├── ONNX schema interpreter          │
+│                               │    └── Model Registry (up to 8 models)  │
+│                               ├── Inference Engine                      │
+│                               │    ├── Operator dispatch (9 ops)        │
+│                               │    ├── Workspace bump allocator         │
+│                               │    └── Tensor binding table             │
+│                               ├── GPU Backend                           │
+│                               │    ├── Capability detection             │
+│                               │    ├── Operator placement heuristic     │
+│                               │    └── CPU fallback (always available)  │
+│                               └── Statistics                            │
+│                                    ├── Inference counters (atomic)      │
+│                                    └── Latency tracking (min/max/avg)   │
+│                                                                         │
+│   Components ──> Message Router ──> Inference FFI                       │
+│   (sensor_monitor,                  (rust_model_find,                   │
+│    digit_classifier)                 rust_infer_classify)               │
+│                                                                         │
+│   Syscall Interface (EL0/EL1)                                           │
+│   ├── SVC dispatch (7 syscalls)                                         │
+│   ├── Fault isolation (handle_user_fault)                               │
+│   └── User pointer validation                                           │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### ONNX Model Loader
+
+The model loader pipeline consists of three stages:
+
+1. **Protobuf parser** (`runtime/src/loader/protobuf.rs`): Decodes the ONNX protobuf wire format (varint, fixed32/64, length-delimited fields) using zero-copy iteration over borrowed byte slices. No heap allocation required.
+
+2. **ONNX parser** (`runtime/src/loader/onnx_parser.rs`): Interprets ONNX-specific field numbers (hardcoded from `onnx.proto3`) to extract the computation graph, operator nodes, weight tensors, and I/O specifications. Produces a `ParsedOnnx` struct (~6 KB, stack-allocated).
+
+3. **Model registry** (`runtime/src/loader/registry.rs`): Stores up to 8 loaded models with their operator graphs, weight tables, and memory handles. Thread-safe via spinlock. Supports load, unload, find-by-name, and enumeration.
+
+Weight data is copied from the ONNX protobuf into the model memory weight pool (2 MB aligned blocks from the Phase 3 allocator). A separate workspace allocation provides scratch space for inference.
+
+### CPU Inference Engine
+
+The inference engine (`runtime/src/inference/engine.rs`) executes operator graphs on the CPU:
+
+| Component | Purpose |
+|-----------|---------|
+| `InferenceEngine` | Static engine with spinlock serialization |
+| `BumpAllocator` | Workspace memory manager (reset between calls) |
+| Tensor binding table | Maps tensor names to data pointers (max 32 bindings) |
+| Operator dispatch | Executes nodes in topological order |
+
+**Supported operators for execution:**
+
+| Operator | Implementation |
+|----------|---------------|
+| MatMul | Matrix multiplication (M x K x K x N) |
+| Add | Element-wise addition with broadcasting |
+| Relu | Element-wise max(0, x) |
+| Softmax | Exp normalization along last axis |
+| Reshape | Tensor reshape with -1 dimension inference |
+| Conv | 2D convolution (NCHW layout) |
+| MaxPool | 2D max pooling |
+| Gemm | General matrix multiplication (A x B + C) |
+| Flatten | Flatten to 2D (batch, features) |
+
+### GPU Compute Framework
+
+The GPU backend (`runtime/src/inference/gpu.rs`) provides a framework for GPU-accelerated inference:
+
+- **Capability detection:** Queries the kernel GPU subsystem via FFI to determine hardware availability and compute readiness.
+- **Backend selection:** A heuristic routes large MatMul/Gemm operations (>4096 elements) to GPU and keeps small or element-wise operations on CPU.
+- **CPU fallback:** When no GPU compute is available (QEMU, or Jetson without GSP firmware), all operations execute on the CPU. The fallback is transparent to callers.
+- **Cache coherency:** `gpu_map_weights()` and `gpu_unmap_weights()` manage CPU cache maintenance for shared weight memory.
+
+Current status: GPU compute dispatch returns `NotReady` on all platforms (GSP firmware loading deferred). All inference runs on CPU with the GPU framework providing the architecture for future acceleration.
+
+### Component Isolation
+
+Phase 5 implements EL0/EL1 privilege separation for component isolation on ARM64:
+
+- **Syscall interface:** 7 custom syscalls (exit, yield, send, recv, infer, sleep, log) via `SVC #0` with arguments in x0-x5 and syscall number in x8.
+- **Exception handling:** EL0 synchronous exceptions dispatch to `syscall_dispatch()` for SVC or `handle_user_fault()` for faults. A faulting component is terminated without affecting the kernel.
+- **User pointer validation:** `validate_user_ptr()` checks pointers before kernel access.
+- **EL0 IRQ:** Timer preemption works transparently for user-mode tasks via the existing EL0 IRQ vector.
+
+See `docs/component-isolation.md` for the full design.
+
+### Example Components
+
+Two example components demonstrate the Phase 5 integration:
+
+**sensor_monitor** (rule-based threshold monitoring):
+- Subscribes to `/sensors/data` via the message router
+- Parses integer values from messages
+- Publishes alerts to `/alerts/threshold` when value exceeds 50
+- Demonstrates component lifecycle and message routing without inference
+
+**digit_classifier** (MNIST inference):
+- Requires MNIST model pre-loaded via `model load /mnt/files/mnist.onnx`
+- Subscribes to `/input/digits` for classification requests
+- Runs inference via `rust_infer_classify()` and publishes predicted class to `/output/class`
+- Demonstrates the full AI inference pipeline within a component
+
+Both components use the standard polling pattern: `msg_router_receive()` with `yield()` and `pit_ticks` timeout.
+
+### Inference Pipeline and Statistics
+
+The inference pipeline tracks performance via atomic counters:
+
+- **Total inferences:** Number of successful completions
+- **Latency tracking:** Min, max, average, and last inference time (nanoseconds)
+- **Error counting:** Failed inference attempts
+- **Benchmarking:** `model bench <name> [iterations]` runs repeated inference and reports statistics
+
+Statistics accumulate across all callers (shell, components) and are accessible via `model stats`.
+
+### Phase 5 Source Files
+
+| File | Purpose |
+|------|---------|
+| `runtime/src/loader/protobuf.rs` | Protobuf wire format parser |
+| `runtime/src/loader/onnx_parser.rs` | ONNX schema parser |
+| `runtime/src/loader/graph.rs` | Operator graph types |
+| `runtime/src/loader/registry.rs` | Model registry |
+| `runtime/src/inference/engine.rs` | Inference engine |
+| `runtime/src/inference/ops.rs` | Operator implementations |
+| `runtime/src/inference/gpu.rs` | GPU backend framework |
+| `runtime/src/inference/workspace.rs` | Bump allocator |
+| `runtime/src/inference/tensor.rs` | Tensor descriptor |
+| `kernel/src/component_runtime.c` | Built-in components and runtime |
+| `kernel/src/syscall.c` | Syscall dispatch |
+| `kernel/arch/arm64/user_entry.S` | EL1-to-EL0 transition |
+| `kernel/include/user_syscall.h` | User-mode syscall stubs |
+
+### Sequence Diagrams
+
+The following diagrams illustrate key data flows through the Phase 5 inference stack and syscall interface.
+
+**Model Load and Inference Flow**
+
+This diagram traces the path from a shell command through the C FFI boundary into the Rust runtime, showing how ONNX models are parsed, stored, and executed.
+
+```
+Shell                 C FFI              Rust Runtime           Model Memory
+  |                     |                     |                     |
+  | model load path     |                     |                     |
+  |-------------------->|                     |                     |
+  |                     | rust_model_load()   |                     |
+  |                     |-------------------->|                     |
+  |                     |                     | parse_onnx()        |
+  |                     |                     |----.                |
+  |                     |                     |    | protobuf parse  |
+  |                     |                     |<---'                |
+  |                     |                     | build_graph()       |
+  |                     |                     |----.                |
+  |                     |                     |<---'                |
+  |                     |                     | alloc_weights()     |
+  |                     |                     |------------------->|
+  |                     |                     |     ModelHandle    |
+  |                     |                     |<-------------------|
+  |                     |                     | copy weights       |
+  |                     |                     | store in registry  |
+  |                     |   model index       |                     |
+  |                     |<--------------------|                     |
+  | "Loaded model"      |                     |                     |
+  |<--------------------|                     |                     |
+  |                     |                     |                     |
+  | model infer name    |                     |                     |
+  |-------------------->|                     |                     |
+  |                     | rust_infer_and_print|                     |
+  |                     |-------------------->|                     |
+  |                     |                     | run_inference()     |
+  |                     |                     | init engine         |
+  |                     |                     | bind weights        |
+  |                     |                     | for each node:      |
+  |                     |                     |   dispatch op       |
+  |                     |                     |   alloc workspace   |
+  |                     |                     | copy output         |
+  |                     |   print results     |                     |
+  |                     |<--------------------|                     |
+  | "Predicted class"   |                     |                     |
+  |<--------------------|                     |                     |
+```
+
+The load path parses the ONNX protobuf on the stack (~6 KB for `ParsedOnnx`), builds an operator graph, and allocates weight storage from the 2 MB-aligned weight pool. The inference path creates a static `InferenceEngine`, binds weight pointers into the tensor binding table, and executes operators in topological order using workspace memory from the bump allocator.
+
+**Syscall Flow (EL0 Component)**
+
+This diagram shows how an EL0 component issues a syscall, how the ARM64 hardware transitions to EL1, and how the kernel dispatches and returns the result.
+
+```
+EL0 Component         ARM64 Hardware        EL1 Kernel
+  |                     |                     |
+  | sys_log(msg, len)   |                     |
+  | x8=SYS_LOG, x0=msg |                     |
+  | SVC #0              |                     |
+  |-------------------->|                     |
+  |                     | Exception to EL1    |
+  |                     | save ELR/SPSR       |
+  |                     |-------------------->|
+  |                     |                     | save_regs (vectors.S)
+  |                     |                     | el0_sync_handler()
+  |                     |                     | read ESR: EC=0x15 (SVC)
+  |                     |                     | syscall_dispatch(frame)
+  |                     |                     | frame->x8 = SYS_LOG
+  |                     |                     | sys_log_handler()
+  |                     |                     |   uart write
+  |                     |                     | frame->x0 = 0 (success)
+  |                     |                     | restore_regs
+  |                     |                     | ERET
+  |                     |<--------------------|
+  |                     | Return to EL0       |
+  |                     | restore ELR/SPSR    |
+  |<--------------------|                     |
+  | x0 = 0 (success)   |                     |
+```
+
+The `SVC #0` instruction causes an immediate exception to EL1. Hardware saves the return address in `ELR_EL1` and processor state in `SPSR_EL1`. The kernel's exception vector saves all general-purpose registers, reads `ESR_EL1` to identify the exception class (EC=0x15 for SVC from AArch64), and dispatches based on the syscall number in `x8`. The return value is placed in `x0` of the saved register frame before `ERET` restores execution at EL0.
+
+---
+
 ## Boot Sequence
 
 ```
@@ -336,7 +567,9 @@ CS-496-SLM-Operating-System/
 │       ├── log.rs        # Logging infrastructure
 │       ├── mm/           # Model memory management
 │       ├── sched/        # Scheduling policies
-│       └── component/    # Component system for SLM workloads
+│       ├── component/    # Component system for SLM workloads
+│       ├── loader/       # ONNX model loader (protobuf, parser, registry)
+│       └── inference/    # Inference engine (ops, workspace, GPU backend)
 ├── docs/                 # Documentation
 └── build/                # Build output (gitignored)
 ```
@@ -373,6 +606,23 @@ extern "C" fn slm_task_set_priority(task_id: u32, priority: u8) -> i32;
 extern "C" fn slm_task_set_deadline(task_id: u32, deadline_ns: u64) -> i32;
 ```
 
+### Phase 5 Inference FFI
+
+```c
+// Model loading
+int rust_model_load(const char *name, const uint8_t *data, size_t data_len);
+int rust_model_unload(uint32_t index);
+int rust_model_find(const char *name);
+int rust_model_get_info(uint32_t index, RustModelInfo *info);
+
+// Inference
+int rust_infer(uint32_t model_index, const float *input, size_t input_len,
+               float *output, size_t output_len);
+int rust_infer_classify(uint32_t model_index);  // Zero input, returns argmax
+int rust_infer_bench(uint32_t model_index, uint32_t iterations);
+int rust_infer_stats(RustInferStats *stats);
+```
+
 See `docs/ffi.md` for complete FFI documentation.
 
 ---
@@ -407,7 +657,7 @@ See `docs/ffi.md` for complete FFI documentation.
 - **Component system** for SLM workload lifecycle management (Rust + C)
 - **Interactive shell** with 38+ commands (filesystem ops, process management, networking, scripting)
 
-### Phase 4+ (In Progress)
+### Phase 4+ (Completed)
 - **Raspberry Pi 5 hardware bring-up**:
   - Boots to fully interactive shell on real hardware
   - RP1 UART TX/RX working (PL011 via RP1 southbridge)
@@ -419,16 +669,45 @@ See `docs/ffi.md` for complete FFI documentation.
   - Multiboot2 boot sequence (32-bit trampoline to 64-bit long mode)
   - Serial console output
   - Basic subsystem initialization
-- **Jetson Orin Nano** hardware bring-up blocked by CBB firewall (see `docs/jetson-nvidia-support.md`)
+- **Jetson Orin Nano** EL2+VHE boot, UARTC serial, 6-core SMP, GICv3 (see `docs/jetson-el2-bringup.md`)
 - **Automated lab infrastructure** via labctl (power control, serial capture, SDWireC management)
 
+### Phase 5 (Completed)
+- **ONNX Model Loader**:
+  - Minimal protobuf wire format parser (varint, fixed, length-delimited)
+  - ONNX schema parser with hardcoded field numbers (no codegen)
+  - Model registry supporting up to 8 simultaneous models
+  - Weight storage in 2 MB aligned pool blocks
+- **CPU Inference Engine**:
+  - 9 executable operators (MatMul, Add, Relu, Softmax, Reshape, Conv, MaxPool, Gemm, Flatten)
+  - Workspace bump allocator for intermediate tensors
+  - Tensor binding table for name-to-data resolution
+  - MNIST-12 end-to-end inference verified
+- **GPU Compute Framework**:
+  - Capability detection via kernel FFI
+  - Operator placement heuristic (large ops to GPU, small to CPU)
+  - CPU fallback when GPU compute unavailable
+  - Cache coherency for shared weight memory
+- **Component Isolation**:
+  - EL0/EL1 syscall interface (7 syscalls via SVC #0)
+  - Fault handling (component crash does not crash kernel)
+  - User pointer validation
+- **Example Components**:
+  - sensor_monitor: rule-based threshold monitoring with message routing
+  - digit_classifier: MNIST inference with publish/subscribe pipeline
+- **Inference Pipeline**:
+  - Atomic statistics tracking (min/max/avg latency, error count)
+  - `model bench` for repeated inference benchmarking
+  - `model stats` for cumulative performance monitoring
+
 ### Deferred to Future Phases
-- Actual GPU compute (requires TensorRT, Phase 5)
-- Model loading and inference (Phase 5)
-- User/kernel separation (FUTURE.md)
-- eMMC/SD card drivers (Phase 5)
-- ~~Pi 5 multi-core~~ **RESOLVED** — All 4 cores online via PSCI SMC. Cache coherency workaround using DC CVAC/CIVAC (SMPEN not set by TF-A, only writable at EL3)
-- Pi 5 armstub reliability (EL3→EL2 ERET intermittent failure, currently disabled)
+- GPU compute kernels (requires GSP firmware loading)
+- FP16/INT8 quantization
+- Per-component address spaces (TTBR0_EL1)
+- SIMD-optimized operators (NEON/SSE/AVX)
+- Dynamic batching and model caching
+- ~~Pi 5 multi-core~~ **RESOLVED** -- All 4 cores online via PSCI SMC
+- Pi 5 armstub reliability (EL3->EL2 ERET intermittent failure, currently disabled)
 
 ---
 

@@ -281,6 +281,175 @@ extern RustPoolStats rust_workspace_pool_stats(void);
 
 /*
  * ==========================================================================
+ * Model Loader FFI (Phase 5)
+ * ==========================================================================
+ */
+
+/*
+ * Model info structure returned by Rust model loader.
+ */
+typedef struct {
+    uint8_t  name[32];
+    uint8_t  format;        /* 0=GGUF, 1=ONNX, 2=Raw */
+    uint8_t  _pad[3];
+    uint64_t param_count;
+    uint64_t weight_size;
+    uint64_t workspace_size;
+    uint32_t node_count;
+    uint32_t input_count;
+    uint32_t output_count;
+    uint32_t _reserved;
+} RustModelInfo;
+
+/*
+ * Initialize the model loader registry.
+ * Returns: 0 on success.
+ */
+extern int rust_model_loader_init(void);
+
+/*
+ * Load an ONNX model from a buffer.
+ * Returns: Registry index (>= 0) on success, -1 on error.
+ */
+extern int rust_model_load(const char *name, const uint8_t *data, size_t data_len);
+
+/*
+ * Unload a model by registry index.
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_model_unload(uint32_t index);
+
+/*
+ * Get model info by registry index.
+ * Returns: 0 on success, -1 on error. Fills info struct.
+ */
+extern int rust_model_get_info(uint32_t index, RustModelInfo *info);
+
+/*
+ * Get number of loaded models.
+ */
+extern uint32_t rust_model_count(void);
+
+/*
+ * Find a model by name (null-terminated).
+ * Returns: Registry index (>= 0) if found, -1 if not found.
+ */
+extern int rust_model_find(const char *name);
+
+/*
+ * Run model loader tests.
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_model_loader_test(void);
+
+/*
+ * ==========================================================================
+ * Inference Engine FFI (Phase 5, M2)
+ * ==========================================================================
+ */
+
+/*
+ * Run inference on a loaded model.
+ *
+ * @model_index: Registry index (from rust_model_load)
+ * @input_data: Pointer to FP32 input array
+ * @input_len: Number of floats in input
+ * @output_buf: Buffer for FP32 output
+ * @output_len: Capacity of output buffer (in floats)
+ * Returns: Number of output floats on success, negative on error.
+ */
+/*
+ * Run inference with zero input and return the argmax class.
+ * Returns: class index (>= 0) on success, -1 on error.
+ * Used by kernel-mode components that cannot handle FP types.
+ */
+extern int rust_infer_classify(uint32_t model_index);
+
+extern int rust_infer(uint32_t model_index, const float *input_data,
+                      size_t input_len, float *output_buf, size_t output_len);
+
+/*
+ * Run inference engine tests.
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_inference_test(void);
+
+/*
+ * Inference statistics structure.
+ */
+typedef struct {
+    uint64_t total_inferences;
+    uint64_t total_time_ns;
+    uint64_t min_time_ns;
+    uint64_t max_time_ns;
+    uint64_t last_time_ns;
+    uint64_t errors;
+} RustInferStats;
+
+/*
+ * Get inference performance statistics.
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_infer_stats(RustInferStats *stats);
+
+/*
+ * Run inference benchmark (N iterations, prints results to UART).
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
+
+/*
+ * ==========================================================================
+ * GPU Compute FFI (Phase 5, M3)
+ * ==========================================================================
+ */
+
+/*
+ * GPU info structure for Rust FFI.
+ */
+typedef struct {
+    uint8_t  name[32];         /* Driver name (e.g., "nvidia" or "stub") */
+    uint8_t  device[64];       /* Device description */
+    uint32_t capabilities;     /* GPU_CAP_* flags */
+    uint32_t cuda_cores;
+    uint32_t tensor_cores;
+    uint64_t memory_size;
+    uint8_t  unified_memory;   /* 1 if CPU/GPU share memory */
+    uint8_t  compute_ready;    /* 1 if submit/wait are implemented */
+    uint8_t  _pad[6];
+} RustGpuInfo;
+
+/*
+ * Check if GPU subsystem is available.
+ * Returns: 1 if available, 0 if not.
+ */
+int slm_gpu_available(void);
+
+/*
+ * Get GPU info for Rust.
+ * Returns: 0 on success, -1 on error. Fills info struct.
+ */
+int slm_gpu_get_info(RustGpuInfo *info);
+
+/*
+ * Print GPU status to UART (called from Rust shell command).
+ */
+extern void rust_gpu_print_status(void);
+
+/*
+ * Run GPU compute integration tests.
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_gpu_compute_test(void);
+
+/*
+ * Run component integration tests.
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_component_test(void);
+
+/*
+ * ==========================================================================
  * Test Support Functions (called from Rust tests)
  * ==========================================================================
  */
