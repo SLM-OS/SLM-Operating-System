@@ -136,6 +136,7 @@ set(KERNEL_SOURCES
     # ==========================================================================
     kernel/sched/task.c
     kernel/sched/sched.c
+    kernel/sched/sched_heuristic.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
 
     # ==========================================================================
@@ -317,6 +318,7 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/include
     ${CMAKE_SOURCE_DIR}/kernel/tests
     ${CMAKE_SOURCE_DIR}/kernel/gpu
+    ${CMAKE_SOURCE_DIR}/kernel/sched/ai
     ${CMAKE_SOURCE_DIR}/kernel/lib/littlefs
     ${CMAKE_SOURCE_DIR}/kernel/lib/lwip/src/include
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src
@@ -437,6 +439,63 @@ target_compile_definitions(lua PRIVATE
 
 # Link with Lua library
 target_link_libraries(slmos.elf PRIVATE lua)
+
+# ==========================================================================
+# AI Scheduler Library (optional)
+# Uses floating-point/NEON — compiled WITHOUT -mgeneral-regs-only.
+# Same pattern as Lua library.
+# ==========================================================================
+option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
+
+if(ENABLE_AI_SCHEDULER)
+    add_compile_definitions(CONFIG_AI_SCHEDULER=1)
+
+    add_library(ai_sched STATIC
+        kernel/sched/ai/ai_inference.c
+        kernel/sched/ai/ai_state.c
+        kernel/sched/ai/sched_ai.c
+        kernel/sched/ai/ai_weights_stub.c
+        kernel/sched/ai/ai_test_helpers.c
+        $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/ai/fp_context.S>
+        $<$<STREQUAL:${PLATFORM},X86_64>:kernel/sched/ai/fp_context.S>
+    )
+
+    target_include_directories(ai_sched PRIVATE
+        ${KERNEL_INCLUDES}
+        ${CMAKE_SOURCE_DIR}/kernel/sched/ai
+    )
+
+    if(PLATFORM STREQUAL "X86_64")
+        target_compile_options(ai_sched PRIVATE
+            -ffreestanding
+            -nostdlib
+            -mno-red-zone -fno-stack-protector
+            -msse -msse2
+            -O2
+        )
+    else()
+        # ARM64: omit -mgeneral-regs-only so FP/NEON is available
+        target_compile_options(ai_sched PRIVATE
+            -ffreestanding
+            -nostdlib
+            -mcpu=${TARGET_CPU}
+            -fPIE
+            -O2
+        )
+    endif()
+
+    target_compile_definitions(ai_sched PRIVATE
+        $<$<STREQUAL:${PLATFORM},X86_64>:PLATFORM_X86_64=1>
+        $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:PLATFORM_QEMU_VIRT=1>
+        $<$<STREQUAL:${PLATFORM},RASPI5>:PLATFORM_RASPI5=1>
+        $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:PLATFORM_JETSON_ORIN_NANO=1>
+    )
+
+    target_link_libraries(slmos.elf PRIVATE ai_sched)
+    message(STATUS "  AI Scheduler: ENABLED (stub weights)")
+else()
+    message(STATUS "  AI Scheduler: disabled")
+endif()
 
 # Link with Rust runtime (weak C stubs provide fallback if not built)
 # --whole-archive forces all Rust symbols to be included, overriding weak C stubs

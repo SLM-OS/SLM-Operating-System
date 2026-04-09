@@ -141,6 +141,12 @@ struct task {
     uint8_t is_user;                    /* 1 if runs at EL0, 0 for kernel EL1 */
     uint8_t _user_pad[7];              /* Alignment padding */
     void (*user_entry)(void *arg);      /* EL0 entry point (for user tasks) */
+
+#ifdef CONFIG_AI_SCHEDULER
+    /* AI scheduler tracking (M5) */
+    uint64_t arrival_time_ns;           /* When task was added to scheduler */
+    uint64_t completion_time_ns;        /* When task exited (0 if still running) */
+#endif
 };
 
 /* Task function prototype */

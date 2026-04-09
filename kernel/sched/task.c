@@ -426,6 +426,13 @@ void task_exit(void)
      * (pick_next_task returns it, next == current → panic). */
     arch_irq_disable();
 
+#ifdef CONFIG_AI_SCHEDULER
+    {
+        extern void sched_ai_record_completion(struct task *task);
+        sched_ai_record_completion(task);
+    }
+#endif
+
     task->state = TASK_TERMINATED;
 #if !defined(PLATFORM_HAS_NC_MEMORY) && !defined(PLATFORM_X86_64)
     cache_clean(&task->state);

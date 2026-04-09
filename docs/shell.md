@@ -56,7 +56,8 @@ Available commands:
   ping      - Send ICMP echo request
   ifconfig  - Network interface config
   netstat   - Network statistics
-  lua       - Lua scripting (REPL or -e "code")
+  sched     - Scheduler policy management and stats
+  lua       - Lua scripting (REPL, -e "code", or script file)
   clear     - Clear screen
   reboot    - Restart the system
 ```
@@ -113,8 +114,13 @@ Available commands:
 | `ifconfig dhcp` | Enable DHCP |
 | `ifconfig <ip> <mask> <gw>` | Set static IP configuration |
 | `netstat` | Show network TX/RX statistics |
+| `sched` | Show current scheduler policy name |
+| `sched policy` | List all registered scheduling policies |
+| `sched policy <name>` | Switch to a named scheduling policy |
+| `sched stats` | Show scheduler statistics and per-CPU utilization |
 | `lua` | Enter Lua REPL |
 | `lua -e "code"` | Execute Lua code directly |
+| `lua <file>` | Run Lua script from filesystem |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
 
@@ -385,6 +391,44 @@ SLM-OS> find /mnt/files log*
 Pattern wildcards:
 - `*` matches any sequence of characters
 - `?` matches any single character
+
+### Scheduler Command
+
+The `sched` command provides scheduler policy management and statistics:
+
+```
+sched                                       - Show current policy name
+sched policy                                - List all registered policies
+sched policy <name>                         - Switch to named policy
+sched stats                                 - Show scheduler statistics
+```
+
+**Policy switching example:**
+```
+SLM-OS> sched
+Scheduler policy: heuristic
+SLM-OS> sched policy
+Available policies (3):
+  heuristic (active)
+  ai_mlp
+  ai_ppo
+SLM-OS> sched policy ai_mlp
+Switched to policy: ai_mlp
+SLM-OS> sched stats
+Scheduler Statistics:
+  Policy:           ai_mlp
+  Tasks:            2
+  Ready:            0
+  Context switches: 1523
+  Timer ticks:      8042
+Per-CPU Utilization:
+  CPU 0: 12% (965 / 8042 ticks)
+  CPU 1: 3% (241 / 8042 ticks)
+  CPU 2: 2% (161 / 8042 ticks)
+  CPU 3: 1% (80 / 8042 ticks)
+```
+
+**Note:** `ai_mlp` and `ai_ppo` policies are only available when the kernel is built with `-DENABLE_AI_SCHEDULER=ON`. The `heuristic` policy is always available.
 
 ### Component Command
 

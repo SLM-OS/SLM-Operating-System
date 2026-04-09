@@ -431,6 +431,15 @@ void kernel_main(void *dtb)
      * CPU 0's allocations (ramdisk, Rust heap, model memory) are complete. */
     uart_puts("\n");
     scheduler_init();
+
+#ifdef CONFIG_AI_SCHEDULER
+    /* Register AI scheduling policies (MLP, PPO) */
+    {
+        extern void sched_ai_init(void);
+        sched_ai_init();
+    }
+#endif
+
     ipc_init();
 
     /* Create main task (runs tests) */

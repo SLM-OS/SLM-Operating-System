@@ -14,8 +14,8 @@ This section documents features discussed during development that are beyond the
 | **Components** | Component System, Model Memory, GPU Stub | Sandboxing, Secure Boot |
 | **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU), Pi 5 UART, Jetson EL2 Boot, GPU Probe | Jetson GPU Compute (GSP), USB Serial, Networking (Jetson), SMP (needs UEFI boot) |
 
-**Completed Features:** 20
-**Pending Features:** 13
+**Completed Features:** 26
+**Pending Features:** 11
 
 ---
 
@@ -109,8 +109,13 @@ Embed Lua interpreter for runtime scripting and configuration.
   - `kernel/arch/arm64/setjmp.S` - setjmp/longjmp for error handling
 - ✅ Standard Lua libraries enabled: base, table, string, math
 - ✅ 22 unit tests covering state management, execution, error handling, bindings
-- ☐ Expose component/model management to Lua scripts (future)
-- ☐ Support loading scripts from filesystem (future)
+- ✅ Expose component/model management to Lua scripts
+  - `slm.component_count()`, `slm.component_list()`, `slm.component_find(name)`
+  - `slm.component_run(name)`, `slm.component_hot_swap(old, new)`
+  - `slm.model_stats()` — weight and workspace pool statistics
+- ✅ Support loading scripts from filesystem
+  - `lua_slm_dofile()` reads scripts via VFS and executes them
+  - `lua <path>` shell command loads from mounted filesystem
 
 **Effort:** 1 week
 **Value:** Runtime configurability, rapid prototyping, user-defined automation

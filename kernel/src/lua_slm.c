@@ -12,6 +12,9 @@
 #include "sched.h"
 #include "task.h"
 #include "shell.h"
+#include "vfs.h"
+#include "component.h"
+#include "slm_ffi.h"
 
 /* Lua headers - note: these may include stdio.h from newlib */
 #include "../lib/lua/src/lua.h"
@@ -182,6 +185,152 @@ static int l_cpu_id(lua_State *L) {
     return 1;
 }
 
+/* ============================================================================
+ * Component Management Bindings
+ * ============================================================================ */
+
+/**
+ * slm.component_count() - Get number of registered components
+ */
+static int l_component_count(lua_State *L) {
+    lua_pushinteger(L, (lua_Integer)component_count());
+    return 1;
+}
+
+/**
+ * slm.component_list() - Get list of all components
+ * Returns array of tables: {{name, version, type, priority, state, task_id}, ...}
+ */
+static int l_component_list(lua_State *L) {
+    uint32_t count = component_count();
+    lua_createtable(L, (int)count, 0);
+
+    int idx = 1;
+    for (uint32_t i = 0; i < COMPONENT_MAX_COUNT; i++) {
+        component_info_t info;
+        if (component_get_info(i, &info) != 0)
+            continue;
+
+        lua_createtable(L, 0, 7);
+
+        lua_pushstring(L, (const char *)info.name);
+        lua_setfield(L, -2, "name");
+
+        lua_pushstring(L, (const char *)info.version);
+        lua_setfield(L, -2, "version");
+
+        lua_pushstring(L, component_type_name((component_type_t)info.component_type));
+        lua_setfield(L, -2, "type");
+
+        lua_pushinteger(L, info.priority);
+        lua_setfield(L, -2, "priority");
+
+        lua_pushstring(L, component_state_name((component_state_t)info.state));
+        lua_setfield(L, -2, "state");
+
+        lua_pushinteger(L, info.task_id);
+        lua_setfield(L, -2, "task_id");
+
+        lua_pushinteger(L, (lua_Integer)i);
+        lua_setfield(L, -2, "index");
+
+        lua_rawseti(L, -2, idx++);
+    }
+
+    return 1;
+}
+
+/**
+ * slm.component_find(name) - Find component by name
+ * Returns index or nil if not found
+ */
+static int l_component_find(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    int idx = component_find(name);
+    if (idx < 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, idx);
+    }
+    return 1;
+}
+
+/**
+ * slm.component_run(name) - Run a built-in component
+ * Returns index or nil on failure
+ */
+static int l_component_run(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    int idx = component_run(name);
+    if (idx < 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, idx);
+    }
+    return 1;
+}
+
+/**
+ * slm.component_hot_swap(old_name, new_name) - Hot-swap a component
+ * Returns new index or nil on failure
+ */
+static int l_component_hot_swap(lua_State *L) {
+    const char *old_name = luaL_checkstring(L, 1);
+    const char *new_name = luaL_checkstring(L, 2);
+    int idx = component_hot_swap(old_name, new_name);
+    if (idx < 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, idx);
+    }
+    return 1;
+}
+
+/* ============================================================================
+ * Model Memory Bindings
+ * ============================================================================ */
+
+/**
+ * slm.model_stats() - Get model memory pool statistics
+ * Returns table: {weights={...}, workspace={...}}
+ */
+static int l_model_stats(lua_State *L) {
+    RustPoolStats w = rust_weight_pool_stats();
+    RustPoolStats ws = rust_workspace_pool_stats();
+
+    lua_createtable(L, 0, 2);
+
+    /* weights sub-table */
+    lua_createtable(L, 0, 5);
+    lua_pushinteger(L, (lua_Integer)w.total_blocks);
+    lua_setfield(L, -2, "total_blocks");
+    lua_pushinteger(L, (lua_Integer)w.free_blocks);
+    lua_setfield(L, -2, "free_blocks");
+    lua_pushinteger(L, (lua_Integer)w.allocated_blocks);
+    lua_setfield(L, -2, "allocated_blocks");
+    lua_pushinteger(L, (lua_Integer)w.shared_blocks);
+    lua_setfield(L, -2, "shared_blocks");
+    lua_pushinteger(L, (lua_Integer)w.peak_usage);
+    lua_setfield(L, -2, "peak_usage");
+    lua_setfield(L, -2, "weights");
+
+    /* workspace sub-table */
+    lua_createtable(L, 0, 5);
+    lua_pushinteger(L, (lua_Integer)ws.total_blocks);
+    lua_setfield(L, -2, "total_blocks");
+    lua_pushinteger(L, (lua_Integer)ws.free_blocks);
+    lua_setfield(L, -2, "free_blocks");
+    lua_pushinteger(L, (lua_Integer)ws.allocated_blocks);
+    lua_setfield(L, -2, "allocated_blocks");
+    lua_pushinteger(L, (lua_Integer)ws.shared_blocks);
+    lua_setfield(L, -2, "shared_blocks");
+    lua_pushinteger(L, (lua_Integer)ws.peak_usage);
+    lua_setfield(L, -2, "peak_usage");
+    lua_setfield(L, -2, "workspace");
+
+    return 1;
+}
+
 /* SLM library functions */
 static const luaL_Reg slm_lib[] = {
     {"print", l_print},
@@ -193,6 +342,14 @@ static const luaL_Reg slm_lib[] = {
     {"version", l_version},
     {"cpu_count", l_cpu_count},
     {"cpu_id", l_cpu_id},
+    /* Component management */
+    {"component_count", l_component_count},
+    {"component_list", l_component_list},
+    {"component_find", l_component_find},
+    {"component_run", l_component_run},
+    {"component_hot_swap", l_component_hot_swap},
+    /* Model memory */
+    {"model_stats", l_model_stats},
     {NULL, NULL}
 };
 
@@ -273,10 +430,25 @@ int lua_slm_dostring(lua_State *L, const char *script) {
 }
 
 int lua_slm_dofile(lua_State *L, const char *filename) {
-    /* TODO: Implement file loading via VFS */
-    (void)L;
-    uart_printf("File loading not yet implemented: %s\n", filename);
-    return -1;
+    if (!L || !filename) return -1;
+
+    char buf[4096];
+    int len = vfs_read_path(filename, buf, sizeof(buf) - 1, 0);
+    if (len < 0) {
+        uart_printf("lua: cannot open %s\n", filename);
+        return -1;
+    }
+    buf[len] = '\0';
+
+    int status = luaL_loadbufferx(L, buf, (size_t)len, filename, NULL);
+    if (status == LUA_OK)
+        status = lua_pcall(L, 0, LUA_MULTRET, 0);
+    if (status != LUA_OK) {
+        const char *msg = lua_tostring(L, -1);
+        uart_printf("Lua error: %s\n", msg ? msg : "(unknown)");
+        lua_pop(L, 1);
+    }
+    return status;
 }
 
 const char *lua_slm_geterror(lua_State *L) {

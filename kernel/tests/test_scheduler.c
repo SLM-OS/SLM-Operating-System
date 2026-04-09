@@ -7,6 +7,7 @@
 #include "unity.h"
 #include "task.h"
 #include "sched.h"
+#include "sched_policy.h"
 #include "slm_ffi.h"
 #include "spinlock.h"
 #include "smp.h"
@@ -14,8 +15,17 @@
 #include "platform.h"
 #include "uart.h"
 #include "cache.h"
+#include "string.h"
 #include <stdint.h>
 #include <stdbool.h>
+
+/* AI scheduler types (always available — header-only) */
+#include "ai_types.h"
+
+#ifdef CONFIG_AI_SCHEDULER
+#include "ai_inference.h"
+#include "ai_state.h"
+#endif
 #include <limits.h>
 
 /* Test state for tracking task execution order */
@@ -2243,6 +2253,870 @@ static void test_isolation_excludes_from_dispatch(void)
 }
 
 /* ============================================================================
+ * Pluggable Scheduler Policy Tests
+ * ============================================================================ */
+
+/*
+ * Test: Default policy is "heuristic" after scheduler_init().
+ */
+static void test_policy_default_is_heuristic(void)
+{
+    const char *name = sched_get_policy();
+    TEST_ASSERT_NOT_NULL(name);
+    TEST_ASSERT_EQUAL_STRING("heuristic", name);
+}
+
+/*
+ * Test: Heuristic policy is registered and findable.
+ */
+static void test_policy_find_heuristic(void)
+{
+    const struct sched_policy_ops *p = sched_find_policy("heuristic");
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_STRING("heuristic", p->name);
+    TEST_ASSERT_NOT_NULL(p->assign_cpu);
+}
+
+/*
+ * Test: sched_find_policy returns NULL for unknown names.
+ */
+static void test_policy_find_unknown_returns_null(void)
+{
+    const struct sched_policy_ops *p = sched_find_policy("nonexistent");
+    TEST_ASSERT_NULL(p);
+
+    p = sched_find_policy(NULL);
+    TEST_ASSERT_NULL(p);
+}
+
+/*
+ * Test: sched_policy_count returns at least 1 (the heuristic policy).
+ */
+static void test_policy_count_at_least_one(void)
+{
+    int count = sched_policy_count();
+    TEST_ASSERT_TRUE(count >= 1);
+}
+
+/*
+ * Test: sched_policy_get returns policies within range, NULL outside.
+ */
+static void test_policy_get_bounds(void)
+{
+    int count = sched_policy_count();
+
+    /* Valid indices should return non-NULL */
+    for (int i = 0; i < count; i++) {
+        const struct sched_policy_ops *p = sched_policy_get(i);
+        TEST_ASSERT_NOT_NULL(p);
+        TEST_ASSERT_NOT_NULL(p->name);
+    }
+
+    /* Out-of-bounds should return NULL */
+    TEST_ASSERT_NULL(sched_policy_get(-1));
+    TEST_ASSERT_NULL(sched_policy_get(count));
+    TEST_ASSERT_NULL(sched_policy_get(SCHED_POLICY_MAX + 1));
+}
+
+/*
+ * Test: sched_set_policy rejects NULL.
+ */
+static void test_policy_set_null_rejected(void)
+{
+    int ret = sched_set_policy(NULL);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    /* Active policy should still be heuristic */
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+}
+
+/* Stub policy for testing: always assigns to CPU 0 */
+static uint32_t stub_assign_cpu(struct task *task)
+{
+    (void)task;
+    return 0;
+}
+
+static int stub_init_called;
+static int stub_shutdown_called;
+
+static int stub_init(void)
+{
+    stub_init_called++;
+    return 0;
+}
+
+static void stub_shutdown(void)
+{
+    stub_shutdown_called++;
+}
+
+static const struct sched_policy_ops stub_policy = {
+    .name       = "test_stub",
+    .init       = stub_init,
+    .shutdown   = stub_shutdown,
+    .assign_cpu = stub_assign_cpu,
+    .tick       = NULL,
+};
+
+/*
+ * Test: Register a custom policy and find it by name.
+ */
+static void test_policy_register_and_find(void)
+{
+    int count_before = sched_policy_count();
+    int ret = sched_register_policy(&stub_policy);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_INT(count_before + 1, sched_policy_count());
+
+    const struct sched_policy_ops *p = sched_find_policy("test_stub");
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_PTR(&stub_policy, p);
+}
+
+/*
+ * Test: Switch to custom policy, verify init/shutdown callbacks called,
+ * then switch back to heuristic.
+ */
+static void test_policy_switch_calls_init_shutdown(void)
+{
+    /* Ensure stub is registered (may already be from prior test) */
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+
+    stub_init_called = 0;
+    stub_shutdown_called = 0;
+
+    /* Switch to stub */
+    int ret = sched_set_policy(&stub_policy);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_STRING("test_stub", sched_get_policy());
+    TEST_ASSERT_EQUAL_INT(1, stub_init_called);
+
+    /* Switch back to heuristic */
+    const struct sched_policy_ops *heuristic = sched_find_policy("heuristic");
+    TEST_ASSERT_NOT_NULL(heuristic);
+    ret = sched_set_policy(heuristic);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+    TEST_ASSERT_EQUAL_INT(1, stub_shutdown_called);
+}
+
+/*
+ * Test: Custom policy's assign_cpu callback is actually used.
+ */
+static void test_policy_custom_assign_cpu_called(void)
+{
+    /* Ensure stub is registered */
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+
+    /* Switch to stub policy (always returns CPU 0) */
+    stub_init_called = 0;
+    sched_set_policy(&stub_policy);
+
+    irq_flags_t flags = irq_save();
+    for (int i = 0; i < 4; i++) {
+        struct task *t = task_create("pol_test", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(t);
+        scheduler_add_task(t);
+        /* stub_assign_cpu always returns 0 */
+        TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+        scheduler_remove_task(t);
+        t->id = 0;
+    }
+    irq_restore(flags);
+
+    /* Switch back to heuristic */
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/* Tracking policy: records which CPU was assigned per call */
+static uint32_t tracking_assignments[16];
+static int tracking_count;
+
+static uint32_t tracking_assign_cpu(struct task *task)
+{
+    (void)task;
+    /* Simple round-robin across all CPUs */
+    extern uint32_t cpu_count;
+    uint32_t cpu = tracking_count % cpu_count;
+    if (tracking_count < 16)
+        tracking_assignments[tracking_count] = cpu;
+    tracking_count++;
+    return cpu;
+}
+
+static const struct sched_policy_ops tracking_policy = {
+    .name       = "test_track",
+    .init       = NULL,
+    .shutdown   = NULL,
+    .assign_cpu = tracking_assign_cpu,
+    .tick       = NULL,
+};
+
+/*
+ * Test: Tasks with explicit affinity bypass the policy callback entirely.
+ */
+static void test_policy_bypassed_for_explicit_affinity(void)
+{
+    if (!sched_find_policy("test_track")) {
+        sched_register_policy(&tracking_policy);
+    }
+
+    tracking_count = 0;
+    sched_set_policy(&tracking_policy);
+
+    irq_flags_t flags = irq_save();
+
+    /* Task with explicit affinity — should NOT call policy */
+    struct task *t = task_create("aff_pin", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    task_set_affinity(t, 0);
+    int count_before = tracking_count;
+    scheduler_add_task(t);
+    TEST_ASSERT_EQUAL_INT(count_before, tracking_count);
+    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    scheduler_remove_task(t);
+    t->id = 0;
+
+    /* Task with CPU_AFFINITY_ANY — SHOULD call policy */
+    t = task_create("aff_any", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    count_before = tracking_count;
+    scheduler_add_task(t);
+    TEST_ASSERT_EQUAL_INT(count_before + 1, tracking_count);
+    scheduler_remove_task(t);
+    t->id = 0;
+
+    irq_restore(flags);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/* Failing init policy: init() returns -1 */
+static int fail_init(void)
+{
+    return -1;
+}
+
+static const struct sched_policy_ops fail_policy = {
+    .name       = "test_fail",
+    .init       = fail_init,
+    .shutdown   = NULL,
+    .assign_cpu = stub_assign_cpu,
+    .tick       = NULL,
+};
+
+/*
+ * Test: sched_set_policy rejects a policy whose init() fails,
+ * and the previous policy remains active.
+ */
+static void test_policy_init_failure_keeps_old(void)
+{
+    if (!sched_find_policy("test_fail")) {
+        sched_register_policy(&fail_policy);
+    }
+
+    /* Start with heuristic */
+    sched_set_policy(sched_find_policy("heuristic"));
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+
+    /* Try switching to fail_policy — should fail */
+    int ret = sched_set_policy(&fail_policy);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+
+    /* Heuristic should still be active */
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+}
+
+/* Tick-counting policy: tracks tick() calls */
+static volatile uint32_t tick_calls[8];
+
+static void tick_counter(uint32_t cpu)
+{
+    if (cpu < 8) tick_calls[cpu]++;
+}
+
+static const struct sched_policy_ops tick_policy = {
+    .name       = "test_tick",
+    .init       = NULL,
+    .shutdown   = NULL,
+    .assign_cpu = stub_assign_cpu,
+    .tick       = tick_counter,
+};
+
+/*
+ * Test: Policy tick() callback is invoked by scheduler_tick().
+ */
+static void test_policy_tick_callback_invoked(void)
+{
+    if (!sched_find_policy("test_tick")) {
+        sched_register_policy(&tick_policy);
+    }
+
+    for (int i = 0; i < 8; i++) tick_calls[i] = 0;
+
+    sched_set_policy(&tick_policy);
+
+    /* scheduler_tick() is called by the timer ISR. Call it directly
+     * a few times to test the tick callback. We need preempt_disabled
+     * to be set so schedule() is skipped (we just want the tick call). */
+    extern volatile int preempt_disabled[];
+    uint32_t cpu = cpu_id();
+    preempt_disabled[cpu] = 1;
+
+    scheduler_tick();
+    scheduler_tick();
+    scheduler_tick();
+
+    preempt_disabled[cpu] = 0;
+
+    TEST_ASSERT_TRUE(tick_calls[cpu] >= 3);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/*
+ * Test: sched_register_policy rejects NULL and policies without assign_cpu.
+ */
+static void test_policy_register_rejects_invalid(void)
+{
+    int ret = sched_register_policy(NULL);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+
+    static const struct sched_policy_ops no_assign = {
+        .name       = "bad",
+        .init       = NULL,
+        .shutdown   = NULL,
+        .assign_cpu = NULL,
+        .tick       = NULL,
+    };
+    ret = sched_register_policy(&no_assign);
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: Heuristic policy still distributes tasks across CPUs
+ * (behavioral equivalence with the old inline code).
+ */
+static void test_policy_heuristic_distributes_tasks(void)
+{
+    extern uint32_t cpu_count;
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Single CPU — distribution not applicable");
+    }
+
+    /* Ensure heuristic is active */
+    sched_set_policy(sched_find_policy("heuristic"));
+
+    uint32_t cpu_hits[8] = {0};
+    irq_flags_t flags = irq_save();
+    for (int i = 0; i < 8; i++) {
+        struct task *t = task_create("dist", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(t);
+        scheduler_add_task(t);
+        uint32_t assigned = t->assigned_cpu;
+        if (assigned < 8) cpu_hits[assigned]++;
+        scheduler_remove_task(t);
+        t->id = 0;
+    }
+    irq_restore(flags);
+
+    int cpus_used = 0;
+    for (uint32_t i = 0; i < cpu_count && i < 8; i++) {
+        if (cpu_hits[i] > 0) cpus_used++;
+    }
+    TEST_ASSERT_MESSAGE(cpus_used >= 2,
+        "Heuristic policy should distribute across multiple CPUs");
+}
+
+/* ============================================================================
+ * AI Scheduler Types Tests (unconditional — ai_types.h is header-only)
+ * ============================================================================ */
+
+/*
+ * Test: ai_decode_action with index 0 → all fields zero.
+ */
+static void test_ai_decode_action_zero(void)
+{
+    struct ai_sched_action a;
+    ai_decode_action(0, &a);
+    TEST_ASSERT_EQUAL_UINT8(0, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(0, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(0, a.preempt);
+}
+
+/*
+ * Test: ai_decode_action correctly separates preempt, priority_adj, core.
+ * Encoding: idx = core * 6 + priority_adj * 2 + preempt
+ */
+static void test_ai_decode_action_components(void)
+{
+    struct ai_sched_action a;
+
+    /* preempt=1, priority_adj=0, core=0 → idx=1 */
+    ai_decode_action(1, &a);
+    TEST_ASSERT_EQUAL_UINT8(0, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(0, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(1, a.preempt);
+
+    /* preempt=0, priority_adj=1, core=0 → idx=2 */
+    ai_decode_action(2, &a);
+    TEST_ASSERT_EQUAL_UINT8(0, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(1, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(0, a.preempt);
+
+    /* preempt=0, priority_adj=0, core=1 → idx=6 */
+    ai_decode_action(6, &a);
+    TEST_ASSERT_EQUAL_UINT8(1, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(0, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(0, a.preempt);
+
+    /* preempt=1, priority_adj=2, core=2 → idx = 2*6 + 2*2 + 1 = 17 */
+    ai_decode_action(17, &a);
+    TEST_ASSERT_EQUAL_UINT8(2, a.core_assignment);
+    TEST_ASSERT_EQUAL_UINT8(2, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8(1, a.preempt);
+}
+
+/*
+ * Test: ai_decode_action with max valid index (N_ACTIONS - 1).
+ */
+static void test_ai_decode_action_max(void)
+{
+    struct ai_sched_action a;
+    /* idx = 41 (last of 42): core=6, pri_adj=2, preempt=1
+     * 41 / 2 = 20 r 1 (preempt=1)
+     * 20 / 3 = 6  r 2 (priority_adj=2)
+     * core = 6 */
+    ai_decode_action(AI_SCHED_N_ACTIONS - 1, &a);
+    TEST_ASSERT_EQUAL_UINT8(1, a.preempt);
+    TEST_ASSERT_EQUAL_UINT8(2, a.priority_adj);
+    TEST_ASSERT_EQUAL_UINT8((AI_SCHED_N_ACTIONS - 1) / 6, a.core_assignment);
+}
+
+/*
+ * Test: All valid action indices produce in-range component values.
+ */
+static void test_ai_decode_action_all_valid(void)
+{
+    struct ai_sched_action a;
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++) {
+        ai_decode_action(i, &a);
+        TEST_ASSERT_TRUE(a.preempt <= 1);
+        TEST_ASSERT_TRUE(a.priority_adj <= 2);
+        /* core_assignment upper bound depends on N_ACTIONS */
+        TEST_ASSERT_TRUE(a.core_assignment < (AI_SCHED_N_ACTIONS + 5) / 6);
+    }
+}
+
+/*
+ * Test: State vector dimension constants are self-consistent.
+ * (The _Static_assert in ai_types.h catches compile-time errors,
+ * but this verifies the runtime values match expectations.)
+ */
+static void test_ai_state_dim_constants(void)
+{
+    TEST_ASSERT_EQUAL_INT(108, AI_STATE_DIM);
+    TEST_ASSERT_EQUAL_INT(6, AI_STATE_NUM_CORES);
+    TEST_ASSERT_EQUAL_INT(6, AI_FEATURES_PER_CORE);
+    TEST_ASSERT_EQUAL_INT(8, AI_STATE_NUM_TASKS);
+    TEST_ASSERT_EQUAL_INT(8, AI_FEATURES_PER_TASK);
+    TEST_ASSERT_EQUAL_INT(8, AI_GLOBAL_FEATURES);
+    TEST_ASSERT_EQUAL_INT(AI_STATE_NUM_CORES * AI_FEATURES_PER_CORE +
+                          AI_STATE_NUM_TASKS * AI_FEATURES_PER_TASK +
+                          AI_GLOBAL_FEATURES, AI_STATE_DIM);
+}
+
+/*
+ * Test: MLP layer dimensions form a valid chain.
+ */
+static void test_ai_mlp_layer_dims(void)
+{
+    /* Each layer's output must match the next layer's input */
+    TEST_ASSERT_EQUAL_INT(AI_STATE_DIM, AI_MLP_LAYER0_IN);
+    TEST_ASSERT_EQUAL_INT(AI_MLP_LAYER0_OUT, AI_MLP_LAYER1_IN);
+    TEST_ASSERT_EQUAL_INT(AI_MLP_LAYER1_OUT, AI_MLP_LAYER2_IN);
+    TEST_ASSERT_EQUAL_INT(AI_MLP_LAYER2_OUT, AI_MLP_LAYER3_IN);
+    TEST_ASSERT_EQUAL_INT(AI_SCHED_N_ACTIONS, AI_MLP_LAYER3_OUT);
+}
+
+/* ============================================================================
+ * AI Scheduler Library Tests (only when CONFIG_AI_SCHEDULER is enabled)
+ * ============================================================================ */
+
+#if defined(CONFIG_AI_SCHEDULER)
+
+/*
+ * Test: ai_extract_state writes to all 108 floats.
+ * Verifies the function doesn't crash and overwrites the sentinel pattern.
+ * Note: uses memset/byte checks because this test file is compiled
+ * with -mgeneral-regs-only (no FP instructions).
+ */
+static void test_ai_extract_state_writes_all(void)
+{
+    float state[AI_STATE_DIM];
+    /* Fill with 0xDE sentinel pattern */
+    memset(state, 0xDE, sizeof(state));
+
+    ai_extract_state(state);
+
+    /* Verify that every 4-byte float slot was written.
+     * Check that no float still has the exact sentinel pattern (0xDEDEDEDE).
+     * A float with all bytes 0xDE = ~-1.845e+29 — extremely unlikely to be
+     * a valid feature value (features are in [0, ~1] range). */
+    uint32_t sentinel = 0xDEDEDEDE;
+    uint32_t *words = (uint32_t *)state;
+    int unwritten = 0;
+    for (int i = 0; i < AI_STATE_DIM; i++) {
+        if (words[i] == sentinel) unwritten++;
+    }
+    TEST_ASSERT_EQUAL_INT(0, unwritten);
+}
+
+/*
+ * AI inference math tests (require both CONFIG_AI_SCHEDULER and ENABLE_BOOT_TESTS).
+ * These call helper functions in ai_test_helpers.c (compiled with FP
+ * enabled in the ai_sched library). Each helper returns 0 on pass.
+ */
+#if defined(ENABLE_BOOT_TESTS)
+extern int ai_test_matvec_basic(void);
+extern int ai_test_matvec_identity(void);
+extern int ai_test_matvec_zero_weights(void);
+extern int ai_test_relu_mixed(void);
+extern int ai_test_relu_all_positive(void);
+extern int ai_test_relu_all_negative(void);
+extern int ai_test_argmax_basic(void);
+extern int ai_test_argmax_last(void);
+extern int ai_test_argmax_first(void);
+extern int ai_test_argmax_tie(void);
+extern int ai_test_argmax_negative(void);
+extern int ai_test_mlp_stub_inference(void);
+extern int ai_test_ppo_stub_inference(void);
+extern int ai_test_validate_action(void);
+extern int ai_test_argmax_empty(void);
+extern int ai_test_argmax_single(void);
+extern int ai_test_relu_single_neg(void);
+extern int ai_test_relu_empty(void);
+extern int ai_test_matvec_single_row(void);
+extern int ai_test_matvec_8x8(void);
+extern int ai_test_mlp_null_state(void);
+extern int ai_test_ppo_null_state(void);
+extern int ai_test_mlp_action_bounds(void);
+extern int ai_test_decode_roundtrip(void);
+
+static void test_ai_matvec_basic(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_basic()); }
+
+static void test_ai_matvec_identity(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_identity()); }
+
+static void test_ai_matvec_zero_weights(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_zero_weights()); }
+
+static void test_ai_relu_mixed(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_mixed()); }
+
+static void test_ai_relu_all_positive(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_all_positive()); }
+
+static void test_ai_relu_all_negative(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_all_negative()); }
+
+static void test_ai_argmax_basic(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_basic()); }
+
+static void test_ai_argmax_last(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_last()); }
+
+static void test_ai_argmax_first(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_first()); }
+
+static void test_ai_argmax_tie(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_tie()); }
+
+static void test_ai_argmax_negative(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_negative()); }
+
+static void test_ai_mlp_forward_pass(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_mlp_stub_inference()); }
+
+static void test_ai_ppo_forward_pass(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_ppo_stub_inference()); }
+
+static void test_ai_validate_action_bounds(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_validate_action()); }
+
+static void test_ai_argmax_empty(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_empty()); }
+
+static void test_ai_argmax_single(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_argmax_single()); }
+
+static void test_ai_relu_single_neg(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_single_neg()); }
+
+static void test_ai_relu_empty(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_relu_empty()); }
+
+static void test_ai_matvec_single_row(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_single_row()); }
+
+static void test_ai_matvec_8x8(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_matvec_8x8()); }
+
+static void test_ai_mlp_null_state(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_mlp_null_state()); }
+
+static void test_ai_ppo_null_state(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_ppo_null_state()); }
+
+static void test_ai_mlp_action_bounds_check(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_mlp_action_bounds()); }
+
+static void test_ai_decode_roundtrip(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_decode_roundtrip()); }
+
+/* State extraction tests (M4) */
+extern int ai_test_extract_state_core_type(void);
+extern int ai_test_extract_state_task_zero_fill(void);
+extern int ai_test_extract_state_global_offset(void);
+extern int ai_test_extract_state_utilization_range(void);
+
+static void test_ai_state_core_type(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_core_type()); }
+
+static void test_ai_state_task_zero_fill(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_task_zero_fill()); }
+
+static void test_ai_state_global_offset(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_global_offset()); }
+
+static void test_ai_state_utilization_range(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_utilization_range()); }
+
+extern int ai_test_extract_state_core_zero_fill(void);
+extern int ai_test_extract_state_isolated_core(void);
+extern int ai_test_extract_state_task_features(void);
+
+static void test_ai_state_core_zero_fill(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_core_zero_fill()); }
+
+static void test_ai_state_isolated_core(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_isolated_core()); }
+
+static void test_ai_state_task_features(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_extract_state_task_features()); }
+
+/* M6+M7: FP context and AI policy integration tests */
+extern int ai_test_policy_mlp_end_to_end(void);
+extern int ai_test_fp_repeated_save_restore(void);
+extern int ai_test_fp_state_size(void);
+extern int ai_test_policy_dispatches_any_affinity(void);
+
+static void test_ai_policy_mlp_end_to_end(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_policy_mlp_end_to_end()); }
+
+static void test_ai_fp_repeated_save_restore(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_fp_repeated_save_restore()); }
+
+static void test_ai_fp_state_size(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_fp_state_size()); }
+
+static void test_ai_policy_dispatches_any_affinity(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_policy_dispatches_any_affinity()); }
+
+/* M8: Performance, stress, and integration tests */
+extern int ai_test_inference_latency(void);
+extern int ai_test_state_extraction_latency(void);
+extern int ai_test_fp_latency(void);
+extern int ai_test_scheduler_stress(void);
+extern int ai_test_mixed_policy_switch(void);
+
+static void test_ai_inference_latency(void)
+{
+    int avg_ns = ai_test_inference_latency();
+    /* Just verify it completed (QEMU timing unreliable for latency bounds) */
+    TEST_ASSERT_TRUE(avg_ns >= 0);
+}
+
+static void test_ai_state_extraction_latency(void)
+{
+    int avg_ns = ai_test_state_extraction_latency();
+    TEST_ASSERT_TRUE(avg_ns >= 0);
+}
+
+static void test_ai_fp_save_restore_latency(void)
+{
+    int avg_ns = ai_test_fp_latency();
+    TEST_ASSERT_TRUE(avg_ns >= 0);
+}
+
+static void test_ai_scheduler_stress(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_scheduler_stress()); }
+
+static void test_ai_mixed_policy_switch(void)
+{ TEST_ASSERT_EQUAL_INT(0, ai_test_mixed_policy_switch()); }
+
+#endif /* ENABLE_BOOT_TESTS — math test helpers */
+
+/*
+ * Test: arrival_time_ns is set when a task is added to the scheduler.
+ * This is an integer test (no FP) so it doesn't need ENABLE_BOOT_TESTS.
+ */
+static void test_ai_arrival_time_set(void)
+{
+#ifdef CONFIG_AI_SCHEDULER
+    struct task *t = task_create("arr_test", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    task_set_affinity(t, 0);
+    irq_flags_t flags = irq_save();
+
+    uint64_t before = slm_get_time_ns();
+    scheduler_add_task(t);
+    uint64_t after = slm_get_time_ns();
+
+    /* arrival_time_ns should be set to a time between before and after */
+    TEST_ASSERT_TRUE(t->arrival_time_ns >= before);
+    TEST_ASSERT_TRUE(t->arrival_time_ns <= after);
+
+    scheduler_remove_task(t);
+    irq_restore(flags);
+    t->id = 0;
+#else
+    TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
+#endif
+}
+
+/*
+ * Shell command tests for sched (M8).
+ * cmd_sched is always compiled but AI subcommands only work with CONFIG_AI_SCHEDULER.
+ */
+extern int cmd_sched(int argc, char **argv);
+
+static void test_sched_cmd_no_args(void)
+{
+    /* sched with no args should show current policy and return 0 */
+    char *argv[] = {"sched"};
+    int ret = cmd_sched(1, argv);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_sched_cmd_policy_list(void)
+{
+    /* sched policy should list policies and return 0 */
+    char *argv[] = {"sched", "policy"};
+    int ret = cmd_sched(2, argv);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_sched_cmd_stats(void)
+{
+    /* sched stats should show statistics and return 0 */
+    char *argv[] = {"sched", "stats"};
+    int ret = cmd_sched(2, argv);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_sched_cmd_invalid(void)
+{
+    /* sched with invalid subcommand should return 1 */
+    char *argv[] = {"sched", "bogus"};
+    int ret = cmd_sched(2, argv);
+    TEST_ASSERT_EQUAL_INT(1, ret);
+}
+
+/*
+ * Test: Per-CPU utilization counters exist in the run queue struct.
+ */
+static void test_ai_utilization_counters_exist(void)
+{
+#ifdef CONFIG_AI_SCHEDULER
+    struct cpu_runqueue *rq = sched_cpu_rq(0);
+    /* total_ticks should be advancing (scheduler_tick increments it) */
+    TEST_ASSERT_TRUE(rq->total_ticks > 0);
+    /* running_ticks <= total_ticks */
+    TEST_ASSERT_TRUE(rq->running_ticks <= rq->total_ticks);
+#else
+    TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
+#endif
+}
+
+/*
+ * Test: AI policies (ai_mlp, ai_ppo) are registered and findable.
+ */
+static void test_ai_policies_registered(void)
+{
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    TEST_ASSERT_NOT_NULL(mlp);
+    TEST_ASSERT_EQUAL_STRING("ai_mlp", mlp->name);
+    TEST_ASSERT_NOT_NULL(mlp->assign_cpu);
+
+    const struct sched_policy_ops *ppo = sched_find_policy("ai_ppo");
+    TEST_ASSERT_NOT_NULL(ppo);
+    TEST_ASSERT_EQUAL_STRING("ai_ppo", ppo->name);
+    TEST_ASSERT_NOT_NULL(ppo->assign_cpu);
+}
+
+/*
+ * Test: Can switch to ai_mlp policy and back to heuristic.
+ */
+static void test_ai_policy_switch_to_mlp_and_back(void)
+{
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    TEST_ASSERT_NOT_NULL(mlp);
+
+    int ret = sched_set_policy(mlp);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_STRING("ai_mlp", sched_get_policy());
+
+    /* Tasks should still be assignable (stub returns CPU 0) */
+    irq_flags_t flags = irq_save();
+    struct task *t = task_create("ai_test", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    scheduler_remove_task(t);
+    t->id = 0;
+    irq_restore(flags);
+
+    /* Switch back */
+    ret = sched_set_policy(sched_find_policy("heuristic"));
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
+}
+
+/*
+ * Test: fp_save and fp_restore are callable and don't crash.
+ * (Full FP register verification requires M6; this just tests linkage
+ * and basic operation.)
+ */
+extern void fp_save(void *state);
+extern void fp_restore(const void *state);
+
+static void test_fp_save_restore_callable(void)
+{
+    /* 528 bytes = 32 x 16 (V regs) + 4 (fpcr) + 4 (fpsr), 16-byte aligned */
+    alignas(16) uint8_t fp_state[528];
+
+    /* Zero the state buffer */
+    for (int i = 0; i < 528; i++)
+        fp_state[i] = 0;
+
+    /* These should not crash */
+    fp_save(fp_state);
+    fp_restore(fp_state);
+
+    /* If we got here, save/restore linkage and basic operation work */
+    TEST_PASS();
+}
+
+#endif /* CONFIG_AI_SCHEDULER */
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -2351,6 +3225,102 @@ int test_suite_scheduler(void)
     RUN_TEST(test_scheduler_start_accepts_cpu_param);
     RUN_TEST(test_deadline_boost_raises_priority);
     RUN_TEST(test_isolation_excludes_from_dispatch);
+
+    /* Pluggable scheduler policy interface */
+    RUN_TEST(test_policy_default_is_heuristic);
+    RUN_TEST(test_policy_find_heuristic);
+    RUN_TEST(test_policy_find_unknown_returns_null);
+    RUN_TEST(test_policy_count_at_least_one);
+    RUN_TEST(test_policy_get_bounds);
+    RUN_TEST(test_policy_set_null_rejected);
+    RUN_TEST(test_policy_register_rejects_invalid);
+    RUN_TEST(test_policy_register_and_find);
+    RUN_TEST(test_policy_switch_calls_init_shutdown);
+    RUN_TEST(test_policy_custom_assign_cpu_called);
+    RUN_TEST(test_policy_bypassed_for_explicit_affinity);
+    RUN_TEST(test_policy_init_failure_keeps_old);
+    RUN_TEST(test_policy_tick_callback_invoked);
+    RUN_TEST(test_policy_heuristic_distributes_tasks);
+
+    /* AI scheduler types (unconditional — header-only) */
+    RUN_TEST(test_ai_decode_action_zero);
+    RUN_TEST(test_ai_decode_action_components);
+    RUN_TEST(test_ai_decode_action_max);
+    RUN_TEST(test_ai_decode_action_all_valid);
+    RUN_TEST(test_ai_state_dim_constants);
+    RUN_TEST(test_ai_mlp_layer_dims);
+
+#ifdef CONFIG_AI_SCHEDULER
+    /* AI scheduler library tests (only with -DENABLE_AI_SCHEDULER=ON) */
+    RUN_TEST(test_ai_extract_state_writes_all);
+    RUN_TEST(test_ai_policies_registered);
+    RUN_TEST(test_ai_policy_switch_to_mlp_and_back);
+    RUN_TEST(test_fp_save_restore_callable);
+
+#if defined(ENABLE_BOOT_TESTS)
+    /* AI inference engine math tests (M3) — need FP-enabled test helpers */
+    RUN_TEST(test_ai_matvec_basic);
+    RUN_TEST(test_ai_matvec_identity);
+    RUN_TEST(test_ai_matvec_zero_weights);
+    RUN_TEST(test_ai_relu_mixed);
+    RUN_TEST(test_ai_relu_all_positive);
+    RUN_TEST(test_ai_relu_all_negative);
+    RUN_TEST(test_ai_argmax_basic);
+    RUN_TEST(test_ai_argmax_last);
+    RUN_TEST(test_ai_argmax_first);
+    RUN_TEST(test_ai_argmax_tie);
+    RUN_TEST(test_ai_argmax_negative);
+    RUN_TEST(test_ai_mlp_forward_pass);
+    RUN_TEST(test_ai_ppo_forward_pass);
+    RUN_TEST(test_ai_validate_action_bounds);
+
+    /* Edge cases and NULL handling */
+    RUN_TEST(test_ai_argmax_empty);
+    RUN_TEST(test_ai_argmax_single);
+    RUN_TEST(test_ai_relu_single_neg);
+    RUN_TEST(test_ai_relu_empty);
+    RUN_TEST(test_ai_matvec_single_row);
+    RUN_TEST(test_ai_matvec_8x8);
+    RUN_TEST(test_ai_mlp_null_state);
+    RUN_TEST(test_ai_ppo_null_state);
+    RUN_TEST(test_ai_mlp_action_bounds_check);
+    RUN_TEST(test_ai_decode_roundtrip);
+
+    /* State extraction tests (M4) */
+    RUN_TEST(test_ai_state_core_type);
+    RUN_TEST(test_ai_state_task_zero_fill);
+    RUN_TEST(test_ai_state_global_offset);
+    RUN_TEST(test_ai_state_utilization_range);
+    RUN_TEST(test_ai_state_core_zero_fill);
+    RUN_TEST(test_ai_state_isolated_core);
+    RUN_TEST(test_ai_state_task_features);
+
+    /* M6+M7: FP context and AI policy integration */
+    RUN_TEST(test_ai_fp_state_size);
+    RUN_TEST(test_ai_fp_repeated_save_restore);
+    RUN_TEST(test_ai_policy_mlp_end_to_end);
+    RUN_TEST(test_ai_policy_dispatches_any_affinity);
+
+    /* M8: Performance tests (report-only on QEMU) */
+    RUN_TEST(test_ai_inference_latency);
+    RUN_TEST(test_ai_state_extraction_latency);
+    RUN_TEST(test_ai_fp_save_restore_latency);
+
+    /* M8: Integration/stress tests */
+    RUN_TEST(test_ai_scheduler_stress);
+    RUN_TEST(test_ai_mixed_policy_switch);
+#endif /* ENABLE_BOOT_TESTS */
+
+    /* M5 counter tests (integer-only, no ENABLE_BOOT_TESTS needed) */
+    RUN_TEST(test_ai_arrival_time_set);
+    RUN_TEST(test_ai_utilization_counters_exist);
+
+    /* Shell command tests */
+    RUN_TEST(test_sched_cmd_no_args);
+    RUN_TEST(test_sched_cmd_policy_list);
+    RUN_TEST(test_sched_cmd_stats);
+    RUN_TEST(test_sched_cmd_invalid);
+#endif
 
     return UnityEnd();
 }
