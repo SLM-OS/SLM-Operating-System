@@ -298,6 +298,14 @@ void kernel_main(void *dtb)
     uart_puts("\n");
     scheduler_init();
 
+#ifdef CONFIG_AI_SCHEDULER
+    /* Register AI scheduling policies (MLP, PPO) */
+    {
+        extern void sched_ai_init(void);
+        sched_ai_init();
+    }
+#endif
+
     /* Initialize IPC subsystem */
     ipc_init();
 

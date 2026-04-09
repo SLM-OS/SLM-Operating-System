@@ -23,9 +23,16 @@ The scheduler uses a **hybrid priority/deadline** approach:
 │   └─────────────────────────────────────────────────────────────┘   │
 │                              │                                       │
 │                              ▼ FFI                                   │
-│   C Kernel Layer (kernel/sched/sched.c)                              │
+│   C Kernel Layer (kernel/sched/)                                     │
 │   ┌─────────────────────────────────────────────────────────────┐   │
-│   │  Per-CPU Run Queues (priority-ordered)                      │   │
+│   │  Pluggable Policy Interface (sched_policy.h)                │   │
+│   │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐       │   │
+│   │  │  heuristic   │ │   ai_mlp     │ │   ai_ppo     │       │   │
+│   │  │ (default)    │ │ (Phase AI)   │ │ (Phase AI)   │       │   │
+│   │  └──────────────┘ └──────────────┘ └──────────────┘       │   │
+│   ├─────────────────────────────────────────────────────────────┤   │
+│   │  Scheduler Core (sched.c) — unchanged                       │   │
+│   │  - Per-CPU Run Queues (priority-ordered)                    │   │
 │   │  - Priority boost based on deadline proximity               │   │
 │   │  - Context switch on timer tick                             │   │
 │   │  - Task migration between CPUs                              │   │
@@ -114,6 +121,63 @@ Boost is recalculated:
 - When a task is added to the run queue
 - During `schedule()` before selecting the next task
 
+## Pluggable Policy Interface
+
+The scheduler uses a **vtable-based pluggable policy** for CPU assignment decisions. The scheduler core (run queues, locking, context switch, `pick_next_task()`) is unchanged — policies only control which CPU a new task is placed on.
+
+### Policy Vtable
+
+```c
+struct sched_policy_ops {
+    const char *name;                          /* Human-readable name */
+    int      (*init)(void);                    /* Called on activation (may be NULL) */
+    void     (*shutdown)(void);                /* Called on deactivation (may be NULL) */
+    uint32_t (*assign_cpu)(struct task *task);  /* CPU selection for new tasks */
+    void     (*tick)(uint32_t cpu);            /* Per-tick callback (may be NULL) */
+};
+```
+
+### Built-in Policy: Heuristic
+
+The default "heuristic" policy (`kernel/sched/sched_heuristic.c`) implements:
+- Round-robin load balancing with deadline pressure awareness
+- Deadline-constrained tasks routed to "performance" cores (CPU 1+)
+- Combined `ready_count + deadline_pressure` scoring per CPU
+- CPU 0 kept available for system tasks
+
+### Runtime Policy Switching
+
+Policies are registered at boot and can be switched at runtime via the shell:
+
+```
+sched                    # Show current policy
+sched policy             # List all registered policies
+sched policy <name>      # Switch to named policy
+```
+
+Programmatic API:
+
+```c
+sched_register_policy(&my_policy);            /* Register a policy */
+sched_set_policy(&my_policy);                 /* Activate (calls init/shutdown) */
+const char *name = sched_get_policy();        /* Get active policy name */
+const struct sched_policy_ops *p =
+    sched_find_policy("heuristic");           /* Look up by name */
+```
+
+Policy switching is IRQ-safe: interrupts are masked during the pointer swap. If a new policy's `init()` fails, the previous policy remains active.
+
+### Policy Bypass
+
+Tasks with explicit CPU affinity (`cpu_affinity != CPU_AFFINITY_ANY`) bypass the policy entirely and are placed directly on the specified CPU.
+
+### Adding a New Policy
+
+1. Create a `struct sched_policy_ops` with at minimum `name` and `assign_cpu`
+2. Call `sched_register_policy()` during kernel init
+3. The policy can inspect run queue state via `sched_cpu_rq(cpu)->ready_count` etc.
+4. Use `sched_get_isolated_cores()` to avoid isolated CPUs
+
 ## Run Queue Structure
 
 Each CPU has its own run queue, ordered by effective priority (highest first):
@@ -133,12 +197,14 @@ Each CPU run queue has its own spinlock to reduce contention:
 
 ```c
 struct cpu_runqueue {
-    spinlock_t lock;            /* Per-queue lock */
     struct task *head;
     struct task *tail;
     struct task *idle_task;
+    struct task *zombie;
     uint32_t ready_count;
 };
+/* Per-CPU spinlocks are separate (rq_lock[]) because ARM64 exclusive
+ * load/store requires cacheable memory, but run queues may be in NC memory. */
 ```
 
 **Lock strategy:**
@@ -172,7 +238,7 @@ uint32_t sched_get_isolated_cores(void);   /* Get bitmask */
 - CPU 0 cannot be isolated (boot CPU)
 - Tasks with `CPU_AFFINITY_ANY` skip isolated cores
 - Pinned tasks (explicit `cpu_affinity`) still run on isolated cores
-- `find_target_cpu()` selects least-loaded non-isolated CPU
+- The active policy's `assign_cpu()` selects from non-isolated CPUs
 - SPIs (Shared Peripheral Interrupts) are routed away from isolated cores
 - Timer IRQs (PPIs) are unaffected — each CPU keeps its timer for preemption
 
@@ -192,11 +258,11 @@ When placing tasks, the scheduler considers both queue depth and deadline pressu
 static uint32_t calculate_deadline_pressure(uint32_t cpu);
 ```
 
-**Task placement policy:**
+**Task placement policy (heuristic):**
 - Tasks with `deadline_ns > 0` prefer "performance cores" (CPU 1+)
 - This keeps CPU 0 available for system tasks
 - On big.LITTLE hardware, this maps to big cores
-- `find_performance_cpu()` returns least-loaded non-isolated performance CPU
+- `find_performance_cpu()` (in `sched_heuristic.c`) returns least-loaded non-isolated performance CPU
 
 ### GIC Affinity for Isolated Cores
 
@@ -461,6 +527,133 @@ The context switch saves/restores:
 #define DEADLINE_BOOST_NS     (100 * 1000000ULL)  // 100ms
 ```
 
+### AI Scheduler (Optional)
+
+The AI scheduler is an optional feature that adds MLP/PPO model-based CPU assignment policies. It is disabled by default and has no effect on the standard build.
+
+```bash
+# Build with AI scheduler (adds ai_mlp and ai_ppo policies)
+cmake -B build/kernel \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \
+  -DPLATFORM=QEMU_VIRT \
+  -DENABLE_AI_SCHEDULER=ON
+
+# Or for tests
+cmake -B build/kernel-test \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-aarch64-none-elf.cmake \
+  -DPLATFORM=QEMU_VIRT \
+  -DENABLE_BOOT_TESTS=ON \
+  -DENABLE_AI_SCHEDULER=ON
+```
+
+When enabled:
+- Defines `CONFIG_AI_SCHEDULER=1` globally
+- Builds `libai_sched.a` — a separate static library compiled **without** `-mgeneral-regs-only` (same pattern as Lua), enabling FP/NEON for inference math
+- Registers `ai_mlp` and `ai_ppo` policies at boot via `sched_ai_init()`
+- Adds ~1 MB to binary size (mostly weight arrays; stub weights are all zeros)
+
+**Files:** `kernel/sched/ai/` — `ai_types.h`, `ai_weights.h`, `ai_weights_stub.c`, `ai_inference.{c,h}`, `ai_state.{c,h}`, `sched_ai.c`, `fp_context.S`
+
+#### Inference Engine Architecture
+
+The inference engine implements a 4-layer feedforward neural network:
+
+```
+Input: state[108] (per-core, per-task, and global features)
+  ↓
+Layer 0: Linear(108→256) + ReLU     ~27K params
+Layer 1: Linear(256→256) + ReLU     ~66K params
+Layer 2: Linear(256→128) + ReLU     ~33K params
+Layer 3: Linear(128→42)             ~5K params
+  ↓
+Output: logits[42] → argmax → decode(core, priority_adj, preempt)
+```
+
+**Total:** ~131K parameters, ~262K FLOPs per inference.
+
+**Performance:** SIMD-optimized on both architectures:
+- **AArch64**: NEON intrinsics (`vfmaq_f32` fused multiply-add, `vmaxq_f32` ReLU). Estimated ~22µs on Cortex-A78 @ 1.5 GHz.
+- **x86-64**: SSE intrinsics (`_mm_mul_ps`/`_mm_add_ps` dot product, `_mm_max_ps` ReLU, shuffle-based horizontal sum).
+- **Fallback**: Scalar C code on unsupported architectures.
+
+**Thread safety:** All scratch memory is stack-allocated (two alternating 256-float buffers = 2 KB). No static globals, no locks needed. Multiple CPUs can run inference concurrently.
+
+**Action decoding:** The argmax index encodes three decisions:
+- `preempt = idx % 2` (0=no, 1=yes)
+- `priority_adj = (idx / 2) % 3` (0=none, 1=boost, 2=reduce)
+- `core_assignment = idx / 6` (0 to num_cores-1)
+
+Invalid actions (core out of range, isolated core) fall back to the heuristic policy.
+
+#### State Vector (108 dimensions)
+
+The AI policy observes kernel state through a fixed 108-float vector matching the training simulator's observation space:
+
+**Per-core features (36 floats = 6 cores × 6 features):**
+
+| Feature | Source | Range |
+|---------|--------|-------|
+| utilization | running_ticks / total_ticks | [0, 1] |
+| queue_depth | ready_count / 32 | [0, ~1] |
+| cache_pressure | 0.0 (future: PMU) | [0, 1] |
+| core_type | 1.0 (homogeneous) | {0, 1} |
+| isolated | sched_get_isolated_cores() bit | {0, 1} |
+| current_task_prio | effective_priority / 7 | [0, 1] |
+
+Cores beyond `cpu_count` are zero-filled (e.g., Pi 5 has 4 cores, slots 4-5 are zeros).
+
+**Per-task features (64 floats = 8 tasks × 8 features):**
+
+Top 8 tasks by effective priority, cached and updated every 100ms.
+
+| Feature | Source | Range |
+|---------|--------|-------|
+| priority | effective_priority / 7 | [0, 1] |
+| deadline_urgency | 1 - (deadline - now) / 1s | [0, 1] |
+| wait_time | (now - arrival_time) / 1s | [0, ∞) |
+| working_set, model_size, inference_dur, can_use_gpu, component_type | 0.0 (future) | — |
+
+**Global features (8 floats):**
+
+| Feature | Source |
+|---------|--------|
+| ready_count | sum(ready_count) / 64 |
+| deadline_miss_rate | rolling window of 100 completions |
+| avg_latency | cumulative / count / 10ms |
+| load_imbalance | std_dev(utils) / mean(utils), clamped [0,1] |
+| weight/workspace_pool_pressure, gpu_queue_depth, episode_time | 0.0 (future) |
+
+#### FP Register Safety
+
+AI inference uses FP/NEON registers, but `scheduler_add_task()` can be called from timer IRQ context (e.g., waking a sleeping task). The AI policy wraps all inference calls with `FP_CONTEXT_SAVE()` / `FP_CONTEXT_RESTORE()` (`fp_context.h`) to save and restore all 32 SIMD registers (V0-V31) + FPCR/FPSR. This adds ~520 bytes of stack usage per inference call.
+
+The save/restore is implemented in assembly (`fp_context.S`): `stp`/`ldp` pairs for ARM64, `FXSAVE`/`FXRSTOR` for x86-64.
+
+#### Heuristic Fallback
+
+The AI policy falls back to the heuristic policy when:
+- Inference returns an error (e.g., NULL state)
+- The decoded action targets an out-of-range CPU
+- The target CPU is isolated and the task has `CPU_AFFINITY_ANY`
+
+Fallback calls `sched_policy_heuristic.assign_cpu()` directly. Each fallback is counted in per-policy statistics.
+
+#### Policy Statistics
+
+Each AI policy tracks:
+- **decisions**: total `assign_cpu` calls
+- **fallbacks**: times heuristic was used instead
+- **total_latency_ns**: cumulative inference time (state extraction + forward pass)
+
+Statistics are logged when the policy is deactivated via `shutdown()`.
+
+#### Scheduler Counters (CONFIG_AI_SCHEDULER)
+
+When `CONFIG_AI_SCHEDULER` is defined, the scheduler tracks additional metrics:
+- **Per-CPU**: `running_ticks` / `total_ticks` in `cpu_runqueue` (incremented in `scheduler_tick()`)
+- **Per-task**: `arrival_time_ns` (set in `scheduler_add_task()`), `completion_time_ns` (set in `task_exit()`)
+- **Global**: deadline miss rolling window (100 entries), cumulative latency, top-8 task cache (updated every 10 ticks)
+
 ### Runtime Configuration
 
 Timer frequency is set in `timer.c`:
@@ -559,7 +752,16 @@ Full implementation will be added in Phase 5 with actual inference engine integr
 
 ## Future Work
 
-### Phase 5 (AI Integration)
+### Phase AI-Sched (AI Scheduler Integration)
+- ✅ Pluggable policy interface (`sched_policy.h`)
+- ✅ Heuristic policy extracted (`sched_heuristic.c`)
+- ✅ Shell command for runtime policy switching (`sched`)
+- ☐ AI inference engine (MLP/PPO forward pass in kernel)
+- ☐ State vector extraction (108-dim observation)
+- ☐ AI policy implementation (`sched_ai.c`)
+- See `TODO_-_PHASE_AI-Sched.md` for full tracking
+
+### Phase 5 (Inference Scheduling)
 - ☐ Implement InferenceScheduler with actual request queue
 - ☐ Batch inference requests for throughput
 - ☐ GPU/NPU task coordination
@@ -571,4 +773,4 @@ Full implementation will be added in Phase 5 with actual inference engine integr
 
 ---
 
-*Last updated: December 2025*
+*Last updated: April 2026*

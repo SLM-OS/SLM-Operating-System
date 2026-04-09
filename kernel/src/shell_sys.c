@@ -9,6 +9,7 @@
 #include "uart.h"
 #include "task.h"
 #include "sched.h"
+#include "sched_policy.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "smp.h"
@@ -1105,4 +1106,85 @@ int cmd_dtb(int argc, char *argv[])
     uart_puts("\r\n");
 
     return 0;
+}
+
+/*
+ * sched - Show or change scheduler policy.
+ *
+ *   sched              Show current policy name
+ *   sched policy       List all registered policies
+ *   sched policy <name> Switch to named policy
+ */
+int cmd_sched(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_printf("Scheduler policy: %s\r\n", sched_get_policy());
+        return 0;
+    }
+
+    if (strcmp(argv[1], "policy") == 0) {
+        if (argc < 3) {
+            /* List available policies */
+            int count = sched_policy_count();
+            const char *current = sched_get_policy();
+            uart_printf("Available policies (%d):\r\n", count);
+            for (int i = 0; i < count; i++) {
+                const struct sched_policy_ops *p = sched_policy_get(i);
+                if (p) {
+                    uart_printf("  %s%s\r\n", p->name,
+                                strcmp(p->name, current) == 0 ? " (active)" : "");
+                }
+            }
+            return 0;
+        }
+
+        /* Switch to named policy */
+        const struct sched_policy_ops *policy = sched_find_policy(argv[2]);
+        if (!policy) {
+            uart_printf("Unknown policy: '%s'\r\n", argv[2]);
+            uart_puts("Use 'sched policy' to list available policies.\r\n");
+            return 1;
+        }
+
+        int ret = sched_set_policy(policy);
+        if (ret < 0) {
+            uart_printf("Failed to switch to policy '%s'\r\n", argv[2]);
+            return 1;
+        }
+
+        uart_printf("Switched to policy: %s\r\n", policy->name);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "stats") == 0) {
+        struct sched_stats stats;
+        scheduler_get_stats(&stats);
+
+        uart_puts("Scheduler Statistics:\r\n");
+        uart_printf("  Policy:           %s\r\n", sched_get_policy());
+        uart_printf("  Tasks:            %u\r\n", stats.task_count);
+        uart_printf("  Ready:            %u\r\n", stats.ready_count);
+        uart_printf("  Context switches: %lu\r\n", (unsigned long)stats.context_switches);
+        uart_printf("  Timer ticks:      %lu\r\n", (unsigned long)stats.timer_ticks);
+
+#ifdef CONFIG_AI_SCHEDULER
+        uart_puts("\r\nPer-CPU Utilization:\r\n");
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            struct cpu_runqueue *rq = sched_cpu_rq(c);
+            uint32_t pct = 0;
+            if (rq->total_ticks > 0) {
+                pct = (uint32_t)(rq->running_ticks * 100 / rq->total_ticks);
+            }
+            uart_printf("  CPU %u: %u%% (%lu / %lu ticks)\r\n",
+                        c, pct,
+                        (unsigned long)rq->running_ticks,
+                        (unsigned long)rq->total_ticks);
+        }
+#endif
+
+        return 0;
+    }
+
+    uart_puts("Usage: sched [policy [<name>] | stats]\r\n");
+    return 1;
 }
