@@ -210,7 +210,7 @@ set(KERNEL_SOURCES
     # ==========================================================================
     kernel/gpu/gpu.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/gpu/cache.c>
-    $<$<NOT:$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/gpu/gpu_stub.c>
+    kernel/gpu/gpu_stub.c
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/gpu_nvidia.c>
 
     # ==========================================================================

@@ -17,6 +17,8 @@
 #include "gpu.h"
 #include "pmm.h"
 #include "uart.h"
+#include "spinlock.h"
+#include "platform.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -640,12 +642,78 @@ static void test_nv_architecture_constants(void)
 }
 
 /* ============================================================================
+ * Regression Tests: Jetson CBB Firewall (Phase 5)
+ *
+ * GPU registers at 0x17000000 are behind the CBB firewall on Jetson.
+ * Reading NV_PMC_BOOT_0 causes a Synchronous External Abort (bus error).
+ * The nvidia GPU driver must NOT be used for direct MMIO probe on Jetson.
+ * ============================================================================ */
+
+/*
+ * Compile-time assertion: Jetson must use SPINLOCK_SKIP_LOCKING.
+ * Without this, LSE atomics (SWPALB) in spinlock code cause Synchronous
+ * External Abort on Cortex-A78AE before MMU enable. This killed boot
+ * at the first uart_puts() call.
+ */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+static_assert(SPINLOCK_SKIP_LOCKING == 1,
+    "Jetson requires SPINLOCK_SKIP_LOCKING — LSE atomics fault before MMU enable");
+#endif
+
+/*
+ * Test: GPU stub driver is used on Jetson (not nvidia MMIO probe).
+ *
+ * Regression for: Phase 5 Jetson kexec crash (syndrome 0x92000410).
+ * The nvidia driver's nv_gpu_probe() reads GPU_BASE (0x17000000),
+ * which is CBB-protected. This test verifies the stub driver is active
+ * by checking the driver name.
+ */
+static void test_gpu_jetson_uses_stub_driver(void)
+{
+    gpu_info_t info;
+    int ret = gpu_get_info(&info);
+    TEST_ASSERT_EQUAL_INT(GPU_OK, ret);
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* On Jetson, must use stub driver (GPU registers are CBB-protected) */
+    TEST_ASSERT_EQUAL_STRING("stub", info.name);
+#endif
+    /* On all platforms, GPU init must succeed without crashing */
+    TEST_ASSERT_TRUE(gpu_available());
+}
+
+/*
+ * Test: Spinlock is barrier-only on Jetson (no exclusive ops).
+ *
+ * Regression for: Phase 5 Jetson kexec crash.
+ * Verifies that spin_lock/spin_unlock don't use LDAXR/STXR
+ * (which are compiled away by SPINLOCK_SKIP_LOCKING).
+ */
+static void test_spinlock_safe_on_jetson(void)
+{
+    spinlock_t test_lock = SPINLOCK_INIT;
+
+    /* spin_lock_irqsave / spin_unlock_irqrestore must not crash.
+     * On Jetson with SPINLOCK_SKIP_LOCKING, these are barrier-only.
+     * On other platforms, they use the runtime spinlock_hw_enabled check. */
+    irq_flags_t flags = spin_lock_irqsave(&test_lock);
+    spin_unlock_irqrestore(&test_lock, flags);
+
+    /* Verify the lock is not held after unlock */
+    TEST_ASSERT_FALSE(spin_is_locked(&test_lock));
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
 int test_suite_gpu(void)
 {
     UnityBegin("GPU Tests");
+
+    /* Regression tests: Jetson CBB firewall */
+    RUN_TEST(test_gpu_jetson_uses_stub_driver);
+    RUN_TEST(test_spinlock_safe_on_jetson);
 
     /* Initialization tests */
     RUN_TEST(test_gpu_available_after_init);

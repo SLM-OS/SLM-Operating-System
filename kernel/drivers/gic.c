@@ -242,6 +242,7 @@ static void __attribute__((unused)) gic_dist_init(void)
     uint32_t pidr2 = *(volatile uint32_t *)(GICD_BASE + 0xFE8);
     uint32_t arch_rev = (pidr2 >> 4) & 0xF;
     (void)arch_rev; /* Used by DEBUG_PRINT in debug builds */
+    (void)pidr2;    /* Used by DEBUG_PRINT in debug builds */
     DEBUG_PRINT("GICv2: %u IRQs, PIDR2=0x%x arch=%u", num_irqs, pidr2, arch_rev);
 
     /* Disable all interrupts */
@@ -526,7 +527,8 @@ void gic_init(void)
         uint32_t typer = GICD_TYPER;
         uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
         uint32_t pidr2 = *(volatile uint32_t *)(GICD_BASE + 0xFE8);
-        (void)pidr2; /* Used by DEBUG_PRINT in debug builds */
+        (void)pidr2;    /* Used by DEBUG_PRINT in debug builds */
+        (void)num_irqs; /* Used by DEBUG_PRINT in debug builds */
         DEBUG_PRINT("GICv2: %u IRQs, PIDR2=0x%x arch=%u", num_irqs, pidr2, (pidr2 >> 4) & 0xF);
 
         /* Just set SPIs to target CPU 0 and default priority */

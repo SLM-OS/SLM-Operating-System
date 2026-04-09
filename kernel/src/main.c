@@ -401,8 +401,10 @@ void kernel_main(void *dtb)
     /* Initialize GPU subsystem */
     INFO("Initializing GPU...");
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    nvidia_gpu_set_mmio_base(GPU_BASE);
-    gpu_register_driver(&gpu_nvidia_driver);
+    /* Jetson: GPU registers at 0x17000000 are behind the CBB firewall.
+     * Reading NV_PMC_BOOT_0 triggers a Synchronous External Abort (bus error).
+     * Use stub driver until CBB firewall bypass for GPU is implemented. */
+    gpu_register_driver(&gpu_stub_driver);
 #else
     gpu_register_driver(&gpu_stub_driver);
 #endif
