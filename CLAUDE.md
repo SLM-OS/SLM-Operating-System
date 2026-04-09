@@ -318,4 +318,66 @@ If labctl lacks a needed capability, inform the user and request the feature. Do
 
 ---
 
-*Last updated: 1 April 2026*
+## Issue Tracking
+
+All issues are tracked in GitHub Issues via `gh` CLI. This is the single source of truth for known bugs, investigations, enhancements, and technical debt.
+
+### Filing Issues
+
+- Use `gh issue create` with the appropriate template (`--template bug_report.md`, `--template investigation.md`, or `--template enhancement.md`)
+- Always set platform and subsystem labels on creation: `--label "platform:jetson" --label "sub:smp"`
+- Always set a priority label: `--label "P1-high"`
+- Assign a milestone when the target phase is clear: `--milestone "Capstone"`
+- For quick filing without the template form: `gh issue create --title "..." --body "..." --label "..." --label "..."`
+
+### Before Starting Work
+
+- Run `gh issue list --label "sub:<subsystem>"` to check for known issues in the area being worked on
+- Check for blockers: `gh issue list --label "blocker"`
+
+### During Implementation
+
+- When a bug or problem is discovered during implementation, file an issue immediately rather than leaving a TODO comment
+- Reference issues in commit messages: `Fix #42: correct MPIDR encoding for A78AE dual-cluster`
+- If work is blocked, create or update an issue with the `blocked` label and document what it's blocked on
+
+### Closing Issues
+
+- Close through commits when possible: the commit message `Fix #N` or `Closes #N` auto-closes on merge
+- For manual closes: `gh issue close N --comment "Fixed in <commit-hash>, verified with boot_test --count 10"`
+- Include verification details — test results, boot_test counts, UART output
+
+### Priority Escalation
+
+- P0-critical and P1-high issues should be flagged to John immediately in the session summary
+- If an issue's priority is upgraded, add a comment explaining why
+
+### Investigation Issues
+
+- Capture the current hypothesis and what's been ruled out
+- Update the issue during probing — don't let investigation context live only in conversation history
+- When an investigation resolves into a concrete bug or enhancement, file the new issue and link it, then close the investigation
+
+### Useful Queries
+
+```bash
+# All open issues by priority
+gh issue list --state open --label "P0-critical"
+gh issue list --state open --label "P1-high"
+
+# Issues for a specific platform
+gh issue list --label "platform:jetson"
+
+# Blockers
+gh issue list --label "blocker" --state open
+
+# Everything in a milestone
+gh issue list --milestone "Capstone"
+
+# Search by keyword
+gh issue list --search "MPIDR"
+```
+
+---
+
+*Last updated: 9 April 2026*
