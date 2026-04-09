@@ -15,7 +15,7 @@ Lua integration provides:
 ```
 lua              # Enter interactive REPL
 lua -e "code"    # Execute Lua code directly
-lua <file>       # Run script from file (not yet implemented)
+lua <file>       # Run script from filesystem
 ```
 
 ### Interactive REPL
@@ -50,9 +50,32 @@ slmos> lua -e "for i=1,5 do print(i) end"
 5
 ```
 
+### Script Files
+
+Scripts can be loaded from the mounted filesystem:
+
+```
+slmos> write /mnt/files/hello.lua print('Hello from file!')
+slmos> lua /mnt/files/hello.lua
+Hello from file!
+```
+
+Scripts have full access to the `slm` module:
+
+```
+slmos> write /mnt/files/status.lua slm.print('Up: ' .. slm.uptime() .. 'ms')
+slmos> lua /mnt/files/status.lua
+Up: 12345ms
+```
+
+Scripts are limited to 4KB. If the file cannot be read or contains errors,
+`lua` prints a diagnostic and returns to the shell.
+
 ## SLM-OS Kernel Bindings
 
 The `slm` module provides access to kernel functionality:
+
+### System
 
 | Function | Description |
 |----------|-------------|
@@ -65,6 +88,22 @@ The `slm` module provides access to kernel functionality:
 | `slm.version()` | Get SLM-OS version string |
 | `slm.cpu_count()` | Get number of CPUs |
 | `slm.cpu_id()` | Get current CPU ID |
+
+### Component Management
+
+| Function | Description |
+|----------|-------------|
+| `slm.component_count()` | Number of registered components |
+| `slm.component_list()` | Array of component tables (name, version, type, state, priority, task_id, index) |
+| `slm.component_find(name)` | Find component by name, returns index or nil |
+| `slm.component_run(name)` | Run a built-in component, returns index or nil |
+| `slm.component_hot_swap(old, new)` | Replace component preserving subscriptions, returns index or nil |
+
+### Model Memory
+
+| Function | Description |
+|----------|-------------|
+| `slm.model_stats()` | Pool statistics: `{weights={total_blocks, free_blocks, allocated_blocks, shared_blocks, peak_usage}, workspace={...}}` |
 
 ### Memory Statistics
 
@@ -89,6 +128,34 @@ used_kb     28144
 4       init    blocked 0
 5       test    running 1
 6       shell   running 2
+```
+
+### Component Management
+
+```lua
+>>> slm.component_run('counter')
+0
+>>> slm.component_run('echo')
+1
+>>> for _,c in ipairs(slm.component_list()) do
+...   print(c.name, c.state, c.type)
+... end
+counter   running   service
+echo      running   service
+>>> slm.component_hot_swap('counter', 'listener')
+0
+```
+
+### Model Memory Statistics
+
+```lua
+>>> stats = slm.model_stats()
+>>> w = stats.weights
+>>> print('Weight pool: ' .. w.free_blocks .. '/' .. w.total_blocks .. ' free')
+Weight pool: 128/128 free
+>>> ws = stats.workspace
+>>> print('Workspace: ' .. ws.free_blocks .. '/' .. ws.total_blocks .. ' free')
+Workspace: 64/64 free
 ```
 
 ## Implementation Details
@@ -128,7 +195,7 @@ The freestanding environment provides minimal implementations of:
 
 ## Limitations
 
-- **No file I/O**: Scripts cannot be loaded from files yet
+- **4KB script size limit**: Scripts loaded from files are limited to 4KB
 - **No coroutines**: The coroutine library is not enabled
 - **No debug library**: The debug library is not enabled
 - **No os library**: System calls are not available
@@ -136,7 +203,6 @@ The freestanding environment provides minimal implementations of:
 
 ## Future Enhancements
 
-- Load scripts from LittleFS filesystem
 - Expose more kernel APIs (IPC, networking, GPU)
 - Script-driven test automation
 - Configuration files in Lua

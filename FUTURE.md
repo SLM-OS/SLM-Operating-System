@@ -14,8 +14,8 @@ This section documents features discussed during development that are beyond the
 | **Components** | Component System, Model Memory, GPU Stub | Sandboxing, Secure Boot |
 | **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU), Pi 5 UART, Jetson EL2 Boot, GPU Probe | Jetson GPU Compute (GSP), USB Serial, Networking (Jetson), SMP (needs UEFI boot) |
 
-**Completed Features:** 20
-**Pending Features:** 13
+**Completed Features:** 26
+**Pending Features:** 11
 
 ---
 
