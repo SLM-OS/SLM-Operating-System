@@ -57,7 +57,7 @@ Available commands:
   ifconfig  - Network interface config
   netstat   - Network statistics
   sched     - Scheduler policy management and stats
-  lua       - Lua scripting (REPL or -e "code")
+  lua       - Lua scripting (REPL, -e "code", or script file)
   clear     - Clear screen
   reboot    - Restart the system
 ```
@@ -111,6 +111,7 @@ Available commands:
 | `sched stats` | Show scheduler statistics and per-CPU utilization |
 | `lua` | Enter Lua REPL |
 | `lua -e "code"` | Execute Lua code directly |
+| `lua <file>` | Run Lua script from filesystem |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
 

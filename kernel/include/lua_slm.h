@@ -63,13 +63,26 @@ void lua_shell_init(void);
  * SLM-OS Lua API (available to scripts as 'slm' table)
  * ============================================================================
  *
- * slm.print(msg)       - Print message to console
- * slm.uptime()         - Get system uptime in milliseconds
- * slm.mem_stats()      - Get memory statistics table
- * slm.tasks()          - Get list of tasks
- * slm.sleep(ms)        - Sleep for milliseconds
- * slm.yield()          - Yield CPU to scheduler
- * slm.version()        - Get SLM-OS version string
+ * System:
+ *   slm.print(msg)                    - Print message to console
+ *   slm.uptime()                      - Get system uptime in milliseconds
+ *   slm.mem_stats()                   - Get memory statistics table
+ *   slm.tasks()                       - Get list of tasks
+ *   slm.sleep(ms)                     - Sleep for milliseconds
+ *   slm.yield()                       - Yield CPU to scheduler
+ *   slm.version()                     - Get SLM-OS version string
+ *   slm.cpu_count()                   - Get number of CPUs
+ *   slm.cpu_id()                      - Get current CPU ID
+ *
+ * Component management:
+ *   slm.component_count()             - Number of registered components
+ *   slm.component_list()              - List all components (array of tables)
+ *   slm.component_find(name)          - Find component by name (index or nil)
+ *   slm.component_run(name)           - Run built-in component (index or nil)
+ *   slm.component_hot_swap(old, new)  - Hot-swap component (index or nil)
+ *
+ * Model memory:
+ *   slm.model_stats()                 - Pool stats {weights={...}, workspace={...}}
  */
 
 #endif /* LUA_SLM_H */
