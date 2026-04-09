@@ -436,6 +436,223 @@ static void test_lua_complex_script(void)
 }
 
 /* ============================================================================
+ * Component Binding Tests
+ * ============================================================================ */
+
+/*
+ * Test: slm.component_count returns a number >= 0
+ */
+static void test_slm_component_count(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "c = slm.component_count()\n"
+        "assert(type(c) == 'number', 'component_count should return number')\n"
+        "assert(c >= 0, 'count should be >= 0')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.component_list returns a table
+ */
+static void test_slm_component_list(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "list = slm.component_list()\n"
+        "assert(type(list) == 'table', 'component_list should return table')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.component_find returns nil for nonexistent component
+ */
+static void test_slm_component_find_nil(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "idx = slm.component_find('nonexistent_component_xyz')\n"
+        "assert(idx == nil, 'should return nil for unknown component')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.component_run + slm.component_find round-trip
+ */
+static void test_slm_component_run_and_find(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "idx = slm.component_run('counter')\n"
+        "assert(idx ~= nil, 'component_run should return index')\n"
+        "found = slm.component_find('counter')\n"
+        "assert(found ~= nil, 'should find running component')\n"
+        "assert(found == idx, 'find should return same index as run')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.component_list returns entries with expected fields
+ */
+static void test_slm_component_list_fields(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    /* counter component should already be running from prior test */
+    const char *code =
+        "list = slm.component_list()\n"
+        "assert(#list > 0, 'should have at least one component')\n"
+        "c = list[1]\n"
+        "assert(c.name ~= nil, 'component should have name')\n"
+        "assert(c.version ~= nil, 'component should have version')\n"
+        "assert(c.type ~= nil, 'component should have type')\n"
+        "assert(c.state ~= nil, 'component should have state')\n"
+        "assert(c.index ~= nil, 'component should have index')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/* ============================================================================
+ * Model Memory Binding Tests
+ * ============================================================================ */
+
+/*
+ * Test: slm.model_stats returns table with weights and workspace
+ */
+static void test_slm_model_stats(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "stats = slm.model_stats()\n"
+        "assert(type(stats) == 'table', 'model_stats should return table')\n"
+        "assert(type(stats.weights) == 'table', 'should have weights sub-table')\n"
+        "assert(type(stats.workspace) == 'table', 'should have workspace sub-table')\n"
+        "w = stats.weights\n"
+        "assert(w.total_blocks ~= nil, 'weights should have total_blocks')\n"
+        "assert(w.free_blocks ~= nil, 'weights should have free_blocks')\n"
+        "assert(w.allocated_blocks ~= nil, 'weights should have allocated_blocks')\n"
+        "assert(w.peak_usage ~= nil, 'weights should have peak_usage')\n"
+        "ws = stats.workspace\n"
+        "assert(ws.total_blocks ~= nil, 'workspace should have total_blocks')\n"
+        "assert(ws.free_blocks ~= nil, 'workspace should have free_blocks')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/* ============================================================================
+ * Dofile Tests
+ * ============================================================================ */
+
+/*
+ * Test: lua_slm_dofile on nonexistent file returns error
+ */
+static void test_slm_dofile_nonexistent(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int result = lua_slm_dofile(L, "/mnt/files/no_such_file.lua");
+    TEST_ASSERT_NOT_EQUAL(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: lua_slm_dofile with NULL arguments is safe
+ */
+static void test_slm_dofile_null_safe(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    TEST_ASSERT_NOT_EQUAL(0, lua_slm_dofile(NULL, "/mnt/files/test.lua"));
+    TEST_ASSERT_NOT_EQUAL(0, lua_slm_dofile(L, NULL));
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: lua_slm_dofile loads and executes a script from VFS
+ *
+ * Uses vfs_read_path (already included via lua_slm.h chain) and
+ * littlefs APIs to write a test script, then verifies dofile executes it.
+ */
+extern int littlefs_file_open(void *mnt, const char *path, int flags);
+extern int littlefs_file_write(void *mnt, int handle, const void *buf, int size);
+extern int littlefs_file_close(void *mnt, int handle);
+extern void *vfs_get_mount_ctx(const char *path, const char **subpath_out);
+
+/* LFS flags — values from lfs.h */
+#define TEST_LFS_O_WRONLY 2
+#define TEST_LFS_O_CREAT  0x0100
+#define TEST_LFS_O_TRUNC  0x0400
+
+static void test_slm_dofile_executes_script(void)
+{
+    /* Write a Lua script to the mounted filesystem */
+    const char *path = "/mnt/files/test_script.lua";
+    const char *subpath = NULL;
+    void *mnt = vfs_get_mount_ctx(path, &subpath);
+    if (!mnt) {
+        TEST_IGNORE_MESSAGE("LittleFS not mounted");
+        return;
+    }
+
+    const char *script = "test_global_from_file = 42 + 8";
+    int fd = littlefs_file_open(mnt, subpath,
+                                TEST_LFS_O_WRONLY | TEST_LFS_O_CREAT | TEST_LFS_O_TRUNC);
+    TEST_ASSERT_MESSAGE(fd >= 0, "Failed to create test script");
+    littlefs_file_write(mnt, fd, script, 30);
+    littlefs_file_close(mnt, fd);
+
+    /* Execute it via dofile */
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int result = lua_slm_dofile(L, path);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    /* Verify the script ran: check the global it set */
+    result = lua_slm_dostring(L, "assert(test_global_from_file == 50, 'script should have set global')");
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/* ============================================================================
  * Lua Heap Allocator Regression Tests
  *
  * Tests for the heap allocator in lua_stubs.c that is used by Lua.
@@ -615,6 +832,21 @@ int test_suite_lua(void)
 
     /* Complex integration */
     RUN_TEST(test_lua_complex_script);
+
+    /* Component bindings */
+    RUN_TEST(test_slm_component_count);
+    RUN_TEST(test_slm_component_list);
+    RUN_TEST(test_slm_component_find_nil);
+    RUN_TEST(test_slm_component_run_and_find);
+    RUN_TEST(test_slm_component_list_fields);
+
+    /* Model memory bindings */
+    RUN_TEST(test_slm_model_stats);
+
+    /* Dofile (script loading from filesystem) */
+    RUN_TEST(test_slm_dofile_nonexistent);
+    RUN_TEST(test_slm_dofile_null_safe);
+    RUN_TEST(test_slm_dofile_executes_script);
 
     /* Heap allocator regression tests */
     RUN_TEST(test_calloc_overflow_returns_null);
