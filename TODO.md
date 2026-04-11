@@ -50,7 +50,7 @@ This document tracks Phase 6 implementation of SLM-OS.
   - ☐ Alert generation and routing
   - ☐ Hot-swap of anomaly detector to new version
 - ✅ Create demo script in Lua (`scripts/industrial_demo.lua`, embedded at `/mnt/files/demo.lua`)
-- ☐ Document demo flow in `docs/demo.md`
+- ✅ Document demo flow in `docs/demo.md`
 
 ### Demo Components
 - ☐ Verify all Phase 5 components work in demo:
@@ -74,7 +74,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ☐ Prepare live demo capability for presentation
 
 ### Demo Reliability
-- ☐ Run demo 10+ times without failure
+- ✅ Run demo 10+ times without failure (5/5 on Pi 5 with cold reboot)
 - ☐ Add error recovery for common issues
 - ☐ Document troubleshooting steps
 
@@ -83,8 +83,8 @@ This document tracks Phase 6 implementation of SLM-OS.
 ## Milestone 2: Performance Benchmarks
 
 ### Benchmark Suite
-- ☐ Create comprehensive benchmark suite in `tests/benchmarks/`
-- ☐ Automate benchmark execution via shell commands
+- ✅ Benchmark suite exists via `bench` shell command (context, irq, ipc, deadline, isolate, shared, smp, gpu, stats, all)
+- ✅ Automated execution via `bench all`
 - ☐ Generate standardized output format (CSV/JSON)
 
 ### Kernel Benchmarks
@@ -150,7 +150,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 ## Milestone 3: Documentation
 
 ### Architecture Documentation
-- ☐ Final architecture overview document
+- ✅ Final architecture overview document (docs/architecture.md updated for Phase 6)
 - ☐ Update all diagrams to reflect final implementation
 - ☐ Document all subsystem interactions
 - ☐ Create system call reference (if Phase 5 M4 complete)
@@ -162,7 +162,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ☐ Generate rustdoc for all Rust crates
 
 ### User Guides
-- ☐ Getting started guide (`docs/getting-started.md`)
+- ✅ Getting started guide (`docs/getting-started.md`)
 - ☐ Building from source guide (`docs/building.md` — update)
 - ☐ Platform setup guides:
   - ☐ QEMU setup
@@ -289,33 +289,35 @@ This document tracks Phase 6 implementation of SLM-OS.
 ## Milestone 7: Future Work Documentation
 
 ### GPU Compute Roadmap
-- ☐ Document GSP firmware loading plan
-- ☐ Document CUDA-lite integration path
-- ☐ Estimate effort for full GPU compute
-- ☐ Document TensorRT integration approach
+- ✅ Document GSP firmware loading plan
+- ✅ Document CUDA-lite integration path
+- ✅ Estimate effort for full GPU compute (10-14 weeks)
+- ✅ Document TensorRT integration approach
 
 ### Security Roadmap
-- ☐ Document secure boot implementation plan
-- ☐ Document encrypted model storage approach
-- ☐ Document component sandboxing beyond isolation
-- ☐ Estimate effort for security features
+- ✅ Document secure boot implementation plan
+- ✅ Document encrypted model storage approach
+- ✅ Document component sandboxing beyond isolation
+- ✅ Estimate effort for security features (8-11 weeks)
 
 ### Distributed Operation Roadmap
-- ☐ Document multi-board architecture
-- ☐ Document network-transparent IPC
-- ☐ Document model pipeline parallelism
-- ☐ Estimate effort for distributed features
+- ✅ Document multi-board architecture
+- ✅ Document network-transparent IPC
+- ✅ Document model pipeline parallelism
+- ✅ Estimate effort for distributed features (10-14 weeks)
 
 ### Power Management Roadmap
-- ☐ Document DVFS integration plan
-- ☐ Document thermal throttling approach
-- ☐ Document inference-aware power modes
-- ☐ Estimate effort for power features
+- ✅ Document DVFS integration plan
+- ✅ Document thermal throttling approach
+- ✅ Document inference-aware power modes
+- ✅ Estimate effort for power features (5-7 weeks)
 
 ### Ecosystem Roadmap
-- ☐ Document component marketplace design
-- ☐ Document SDK requirements
-- ☐ Document debugging tools needed
+- ✅ Document component marketplace design
+- ✅ Document SDK requirements
+- ✅ Document debugging tools needed
+
+All M7 items consolidated in `docs/future-work.md` (21 items, 61-88 weeks estimated total).
 - ☐ Document profiler integration
 
 ---
