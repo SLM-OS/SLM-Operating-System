@@ -342,6 +342,12 @@ void kernel_main(void *dtb)
                 if (help_init() == 0) {
                     INFO("  Help system initialized (/mnt/files/help/)");
                 }
+
+                /* Write demo script to filesystem */
+                {
+                    extern int demo_init(void);
+                    demo_init();
+                }
             } else {
                 WARN("Failed to mount LittleFS");
             }

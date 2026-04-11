@@ -183,6 +183,7 @@ set(KERNEL_SOURCES
     # msg_router: Rust implementation in runtime/src/msg_router.rs
     # (linked via --whole-archive from Rust staticlib)
     kernel/src/help.c
+    kernel/src/demo_init.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     kernel/src/elf.c
     kernel/src/vfs.c

@@ -331,6 +331,37 @@ static int l_model_stats(lua_State *L) {
     return 1;
 }
 
+/* ============================================================================
+ * Message Router Bindings
+ * ============================================================================ */
+
+/**
+ * slm.msg_publish(topic, data) - Publish a message to a topic
+ * Returns number of subscribers that received the message
+ */
+extern int msg_router_publish(const char *topic_name, const char *data);
+static int l_msg_publish(lua_State *L) {
+    const char *topic = luaL_checkstring(L, 1);
+    const char *data = luaL_checkstring(L, 2);
+    int delivered = msg_router_publish(topic, data);
+    lua_pushinteger(L, delivered);
+    return 1;
+}
+
+/* ============================================================================
+ * Scheduler Bindings
+ * ============================================================================ */
+
+/**
+ * slm.sched_policy() - Get current scheduler policy name
+ * Returns string
+ */
+extern const char *sched_get_policy(void);
+static int l_sched_policy(lua_State *L) {
+    lua_pushstring(L, sched_get_policy());
+    return 1;
+}
+
 /* SLM library functions */
 static const luaL_Reg slm_lib[] = {
     {"print", l_print},
@@ -350,6 +381,10 @@ static const luaL_Reg slm_lib[] = {
     {"component_hot_swap", l_component_hot_swap},
     /* Model memory */
     {"model_stats", l_model_stats},
+    /* Message routing */
+    {"msg_publish", l_msg_publish},
+    /* Scheduler */
+    {"sched_policy", l_sched_policy},
     {NULL, NULL}
 };
 
