@@ -103,9 +103,6 @@ jobs:
 
             Rate each finding as Critical, Warning, or Suggestion.
 
-            When done, post the review as a PR comment:
-              gh pr comment ${{ github.event.pull_request.number }} --body "<your review>"
-
           show_full_output: true
 
           claude_args: |
