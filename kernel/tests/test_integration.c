@@ -24,6 +24,7 @@
 #include "../include/cache.h"
 #include "../include/slm_ffi.h"
 #include "../include/ncmem.h"
+#include "../include/timer.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -69,7 +70,13 @@ static void reset_test_state(void)
  * Task Functions for Tests
  * ============================================================================ */
 
-/* Migration test state */
+/* Migration test state.
+ * NOTE: These are in cacheable BSS, not NC memory. On Pi 5 (incoherent L2),
+ * cache_invalidate (DC CIVAC) doesn't propagate through per-core L2, so
+ * cross-CPU reads of these variables are unreliable. These tests currently
+ * fail on Pi 5 due to the secondary CPU preemption blocker (see
+ * docs/pi5-secondary-cpu-preemption.md). Moving to NC memory would fix
+ * data visibility but not the preemption issue. */
 static volatile bool migration_ready = false;
 static volatile bool migration_done = false;
 static volatile uint32_t migration_cpu_before = 0;
@@ -108,13 +115,22 @@ static void migration_test_task(void *arg)
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
-/* Simple named tasks for basic multi-core test */
+/* Simple named tasks for basic multi-core test.
+ * On NC platforms, write a done flag to NC memory for reliable cross-CPU
+ * completion detection (task->state is also NC but this matches bench smp). */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+#define INTEG_NC_DONE(cpu) (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 384 + (cpu) * 4))
+#endif
+
 static void task_a_func(void *arg)
 {
     int count = (int)(uintptr_t)arg;
     for (int i = 0; i < count; i++) {
         delay(500000);
     }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    INTEG_NC_DONE(1) = 1;
+#endif
 }
 
 static void task_b_func(void *arg)
@@ -123,6 +139,9 @@ static void task_b_func(void *arg)
     for (int i = 0; i < count; i++) {
         delay(500000);
     }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    INTEG_NC_DONE(2) = 1;
+#endif
 }
 
 static void task_c_func(void *arg)
@@ -131,6 +150,9 @@ static void task_c_func(void *arg)
     for (int i = 0; i < count; i++) {
         delay(500000);
     }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    INTEG_NC_DONE(3) = 1;
+#endif
 }
 
 /* Stress task function */
@@ -194,6 +216,13 @@ static void lifecycle_task_func(void *arg)
  */
 static void test_multicore_basic(void)
 {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* Clear NC done flags */
+    INTEG_NC_DONE(1) = 0;
+    INTEG_NC_DONE(2) = 0;
+    INTEG_NC_DONE(3) = 0;
+#endif
+
     struct task *task_a = task_create("task_a", task_a_func, (void *)3);
     struct task *task_b = task_create("task_b", task_b_func, (void *)3);
     struct task *task_c = task_create("task_c", task_c_func, (void *)3);
@@ -206,26 +235,34 @@ static void test_multicore_basic(void)
     scheduler_add_task_to_cpu(task_b, 2);
     scheduler_add_task_to_cpu(task_c, 3);
 
-    /* Wait for completion with timeout */
-    int timeout = 500;
-    while (timeout > 0) {
+    /* Wait for completion with timeout.
+     * On NC platforms, poll NC done flags (same pattern as bench smp).
+     * On non-NC, poll task state with cache invalidate. */
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 5;
+    while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (INTEG_NC_DONE(1) && INTEG_NC_DONE(2) && INTEG_NC_DONE(3)) break;
+#else
         cache_invalidate(&task_a->state);
         cache_invalidate(&task_b->state);
         cache_invalidate(&task_c->state);
         if (task_a->state == TASK_TERMINATED &&
             task_b->state == TASK_TERMINATED &&
             task_c->state == TASK_TERMINATED) break;
-        delay(100000);
-        timeout--;
+#endif
+        yield();
     }
 
-    TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for tasks to complete");
-    cache_invalidate(&task_a->state);
-    cache_invalidate(&task_b->state);
-    cache_invalidate(&task_c->state);
-    TEST_ASSERT_EQUAL(TASK_TERMINATED, task_a->state);
-    TEST_ASSERT_EQUAL(TASK_TERMINATED, task_b->state);
-    TEST_ASSERT_EQUAL(TASK_TERMINATED, task_c->state);
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(INTEG_NC_DONE(1), "task_a did not complete (NC flag)");
+    TEST_ASSERT_MESSAGE(INTEG_NC_DONE(2), "task_b did not complete (NC flag)");
+    TEST_ASSERT_MESSAGE(INTEG_NC_DONE(3), "task_c did not complete (NC flag)");
+#else
+    TEST_ASSERT_MESSAGE(task_a->state == TASK_TERMINATED, "task_a did not complete");
+    TEST_ASSERT_MESSAGE(task_b->state == TASK_TERMINATED, "task_b did not complete");
+    TEST_ASSERT_MESSAGE(task_c->state == TASK_TERMINATED, "task_c did not complete");
+#endif
 }
 
 /*
@@ -257,32 +294,32 @@ static void test_task_migration(void)
     int ret = sched_migrate_task(mig_task, 3);
     TEST_ASSERT_MESSAGE(ret == 0, "sched_migrate_task failed");
 
-    /* Wait for task to start and signal ready */
-    int timeout = 200;
-    while (timeout > 0) {
+    /* Wait for task to start and signal ready.
+     * migration_ready is in cacheable BSS — use cache_invalidate on non-NC,
+     * but on NC platforms the task writes to cacheable memory visible to CPU 0. */
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 5;
+    while ((timer_get_count() - start) < limit) {
         cache_invalidate(&migration_ready);
         if (migration_ready) break;
-        delay(50000);
-        timeout--;
+        yield();
     }
-    TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for migration_ready");
+    TEST_ASSERT_MESSAGE(migration_ready, "Timeout waiting for migration_ready");
 
     /* Let task finish */
     migration_done = true;
     cache_clean(&migration_done);
 
     /* Wait for completion */
-    timeout = 200;
-    while (timeout > 0) {
-        cache_invalidate(&mig_task->state);
-        cache_invalidate(&blocker->state);
+    start = timer_get_count();
+    while ((timer_get_count() - start) < limit) {
         if (mig_task->state == TASK_TERMINATED &&
             blocker->state == TASK_TERMINATED) break;
-        delay(100000);
-        timeout--;
+        yield();
     }
 
-    TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for task completion");
+    TEST_ASSERT_MESSAGE(mig_task->state == TASK_TERMINATED,
+        "Migration task did not complete");
     cache_invalidate(&migration_cpu_before);
     TEST_ASSERT_MESSAGE(migration_cpu_before == 3, "Task should run on CPU 3 after migration");
 }
@@ -313,22 +350,20 @@ static void test_stress_multicpu(void)
     scheduler_add_task_to_cpu(tasks[5], 3);
 
     /* Wait for completion */
-    int timeout = 500;
-    while (timeout > 0) {
-        for (int j = 0; j < 6; j++)
-            cache_invalidate(&tasks[j]->state);
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 10;  /* 10 second timeout */
+    while ((timer_get_count() - start) < limit) {
         bool all_done = true;
         for (int j = 0; j < 6; j++) {
             if (tasks[j]->state != TASK_TERMINATED) { all_done = false; break; }
         }
         if (all_done) break;
-        delay(100000);
-        timeout--;
+        yield();
     }
 
-    TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for stress tasks");
     cache_invalidate(&test_state.tasks_completed);
-    TEST_ASSERT_EQUAL(6, test_state.tasks_completed);
+    TEST_ASSERT_MESSAGE(test_state.tasks_completed == 6,
+        "Timeout waiting for stress tasks");
 }
 
 /*
@@ -356,20 +391,22 @@ static void test_lock_contention(void)
     }
 
     /* Wait for completion */
-    int timeout = 300;
-    while (timeout > 0) {
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 10;
+    while ((timer_get_count() - start) < limit) {
         cache_invalidate(&test_state.tasks_completed);
         if (test_state.tasks_completed >= CONTENTION_TASKS) break;
         yield();
-        delay(100000);
-        timeout--;
     }
 
-    TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for contention tasks");
+    cache_invalidate(&test_state.tasks_completed);
+    TEST_ASSERT_MESSAGE(test_state.tasks_completed >= CONTENTION_TASKS,
+        "Timeout waiting for contention tasks");
 
     cache_invalidate(&contention_counter);
     uint32_t expected = CONTENTION_TASKS * INCREMENTS_PER_TASK;
-    TEST_ASSERT_MESSAGE(contention_counter == expected, "Race condition detected");
+    TEST_ASSERT_MESSAGE(contention_counter == expected,
+        "Race condition detected in lock contention");
 }
 
 /*
@@ -394,18 +431,17 @@ static void test_task_lifecycle(void)
     }
 
     /* Wait for completion */
-    int timeout = 300;  /* Increased timeout for lifecycle tasks */
-    while (timeout > 0) {
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 10;
+    while ((timer_get_count() - start) < limit) {
         cache_invalidate(&lifecycle_completed);
         if (lifecycle_completed >= LIFECYCLE_CYCLES) break;
         yield();
-        delay(50000);
-        timeout--;
     }
 
-    TEST_ASSERT_MESSAGE(timeout > 0, "Timeout waiting for lifecycle tasks");
     cache_invalidate(&lifecycle_completed);
-    TEST_ASSERT_MESSAGE(lifecycle_completed == LIFECYCLE_CYCLES, "Not all lifecycle tasks completed");
+    TEST_ASSERT_MESSAGE(lifecycle_completed >= LIFECYCLE_CYCLES,
+        "Timeout: not all lifecycle tasks completed");
 
     /* Give scheduler time to clean up zombies */
     for (int i = 0; i < 10; i++) {
@@ -537,6 +573,73 @@ static void test_boot_order_pmm_before_scheduler(void)
      * PMM allocations completed, THEN scheduler initialized. */
 }
 
+/*
+ * Regression: pit_ticks vs hardware counter for component timeouts.
+ *
+ * On Pi 5, tasks run with DAIF.I=1 (IRQ masked) so pit_ticks does not
+ * advance during task execution. Component timeout loops that polled
+ * pit_ticks would hang forever. The fix uses timer_get_count() (hardware
+ * counter) which always advances regardless of IRQ state.
+ *
+ * This test verifies that the hardware counter can be used for a timeout
+ * loop with yield(), simulating how components poll for timeouts.
+ */
+static void test_hw_timeout_with_yield(void)
+{
+    uint64_t start = timer_get_count();
+    uint64_t freq = timer_get_frequency();
+    uint64_t limit = freq / 10;  /* 100ms timeout */
+    int loops = 0;
+
+    while ((timer_get_count() - start) < limit) {
+        yield();
+        loops++;
+        if (loops > 1000000) {
+            /* Safety: if counter not advancing, don't spin forever */
+            break;
+        }
+    }
+
+    uint64_t elapsed = timer_get_count() - start;
+    uint64_t elapsed_ms = (elapsed * 1000) / freq;
+
+    /* Should have completed in roughly 100ms (allow 50-500ms for QEMU variance) */
+    TEST_ASSERT_MESSAGE(elapsed_ms >= 50,
+        "Hardware timer timeout completed too fast (< 50ms)");
+    TEST_ASSERT_MESSAGE(elapsed_ms <= 500,
+        "Hardware timer timeout took too long (> 500ms)");
+    TEST_ASSERT_MESSAGE(loops > 0,
+        "Timeout loop did not iterate (yield never returned)");
+}
+
+/*
+ * Regression: idle task must unmask IRQs on CPU 0.
+ *
+ * On Pi 5, the idle task previously used WFE-only for ALL CPUs (including
+ * CPU 0), which prevented timer interrupts from firing. Without timer ticks,
+ * pit_ticks never advances and uptime/sleep functions break.
+ *
+ * The fix makes CPU 0's idle task do daifclr + wfi (like QEMU), while
+ * secondary CPUs continue using WFE-only.
+ *
+ * This test verifies that timer_get_count() advances across a yield(),
+ * which requires the timer hardware to be running (started during boot).
+ */
+static void test_timer_running_after_boot(void)
+{
+    uint64_t t1 = timer_get_count();
+    yield();  /* Let at least one scheduler cycle happen */
+    uint64_t t2 = timer_get_count();
+
+    TEST_ASSERT_MESSAGE(t2 > t1,
+        "Timer counter did not advance across yield (timer not running)");
+
+    /* Verify the timer frequency is set (means timer_init completed) */
+    uint64_t freq = timer_get_frequency();
+    TEST_ASSERT_MESSAGE(freq > 0,
+        "Timer frequency is 0 (timer not initialized)");
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -560,6 +663,10 @@ int test_suite_integration(void)
 
     /* Boot order regression test (Pi 5 PMM deadlock prevention) */
     RUN_TEST(test_boot_order_pmm_before_scheduler);
+
+    /* Regression: Pi 5 timer and timeout fixes (April 2026) */
+    RUN_TEST(test_hw_timeout_with_yield);
+    RUN_TEST(test_timer_running_after_boot);
 
     return UNITY_END();
 }

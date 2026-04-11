@@ -114,24 +114,29 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
 
     /* Clear preempt_disabled for this CPU.
      * scheduler_start() sets it to 1 before switch_to(NULL, first),
-     * but switch_to never returns — it jumps here. Must clear so
-     * timer ticks can call schedule() on this CPU.
-     * Use MPIDR directly to avoid cpu_id() which needs cacheable BSS.
-     * Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
+     * but switch_to never returns — it jumps here.
+     *
+     * Note: On Pi 5, tasks run with IRQs masked (DAIF.I=1). Timer
+     * preemption is not enabled — scheduling is cooperative via yield().
+     * pit_ticks is advanced by the idle task which unmasks IRQs in its
+     * loop. On QEMU, timer IRQs fire regardless of DAIF. */
+#if !defined(PLATFORM_X86_64)
     {
         extern volatile int preempt_disabled[];
-#if !defined(PLATFORM_X86_64)
         uint64_t mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
         uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
         if (hw_cpu < MAX_CPUS)
             preempt_disabled[hw_cpu] = 0;
         __asm__ volatile("dsb sy" ::: "memory");
+    }
 #else
+    {
+        extern volatile int preempt_disabled[];
         preempt_disabled[cpu_id()] = 0;
         __asm__ volatile("mfence" ::: "memory");
-#endif
     }
+#endif
 
     entry(arg);
     task_exit();
@@ -417,7 +422,12 @@ void task_exit(void)
 {
     struct task *task = task_current();
 
-    INFO("Task '%s' (id=%u) exiting", task->name, task->id);
+    /* Only print from CPU 0 — secondary CPUs don't have a cross-CPU
+     * UART lock, so printing from multiple CPUs causes garbled output
+     * and potential hangs. */
+    if (cpu_id() == 0) {
+        INFO("Task '%s' (id=%u) exiting", task->name, task->id);
+    }
 
     /* Mask IRQs to prevent a timer-driven schedule() from racing with
      * the state change below. Without this, the timer can fire between
@@ -499,8 +509,10 @@ void task_destroy(struct task *task)
 
     /* Verify task is terminated */
     if (task->state != TASK_TERMINATED) {
-        WARN("task_destroy: task '%s' not terminated (state=%d)",
-             task->name, task->state);
+        if (cpu_id() == 0) {
+            WARN("task_destroy: task '%s' not terminated (state=%d)",
+                 task->name, task->state);
+        }
         TASK_UNLOCK_IRQRESTORE();
         return;
     }

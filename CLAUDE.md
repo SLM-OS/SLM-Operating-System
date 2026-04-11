@@ -134,14 +134,15 @@ cmake -B build/kernel -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-x86_64-none-elf.cma
 
 The Makefile automatically selects the correct toolchain, QEMU binary, and QEMU machine settings based on `PLATFORM`. For x86-64, the test target creates a bootable GRUB ISO and uses `isa-debug-exit` for clean test termination.
 
+**QEMU safeguards:** `make test` wraps QEMU in `systemd-run --user --scope` with `MemoryMax=3G` (prevents OOM crashes) and `CPUQuota=200%` (prevents runaway busy-spin tests from pegging all host cores), plus `timeout 120` for automatic termination. These are defined in the Makefile as `QEMU_GUARD` and `TEST_TIMEOUT`.
+
 ### Clean Build Targets
 
 Always use the Makefile's clean targets instead of manual `rm -rf`:
 
 ```bash
-make kernel-clean        # Clean kernel build directory (build/kernel)
-# For a full test rebuild, also remove:
-rm -rf build/kernel-test # Test kernel build (no dedicated clean target yet)
+make kernel-clean            # Clean kernel build directory (build/kernel)
+make kernel-test-clean       # Clean test kernel build directory (build/kernel-test)
 ```
 
 When switching platforms or after significant changes, a clean rebuild ensures no stale objects:

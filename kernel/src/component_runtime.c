@@ -20,9 +20,28 @@
 #include "uart.h"
 #include "debug.h"
 #include "arch.h"
+#include "timer.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+
+/* Hardware-counter timeout helper.
+ * On Pi 5, pit_ticks doesn't advance while tasks run (IRQs masked).
+ * Use timer_get_count() which reads the always-running hardware counter.
+ *
+ * Timeout values by component:
+ *   echo_service:    60s — waits for user-initiated messages via shell
+ *   listener:        30s — demo scenario, exits after inactivity
+ *   sensor_monitor:  30s — demo scenario, resets on each received message
+ *   digit_classifier:30s — demo scenario, resets on each inference
+ *   echo send:        5s — shell command round-trip, should be near-instant */
+static inline uint64_t hw_timeout_start(void) {
+    return timer_get_count();
+}
+static inline int hw_timeout_expired(uint64_t start, uint32_t seconds) {
+    uint64_t freq = timer_get_frequency();
+    return (timer_get_count() - start) >= (freq * seconds);
+}
 
 /* ============================================================================
  * Component Task Cleanup
@@ -110,10 +129,9 @@ static void echo_service_entry(void *arg)
     int idle_polls = 0;
 
     /* Poll shared mailbox for messages using yield() instead of sleep_ms().
-     * Use pit_ticks for time-based timeout (60 seconds). */
-    extern volatile uint64_t pit_ticks;
-    uint64_t timeout_tick = pit_ticks + 6000;  /* 60s at 100 Hz */
-    while (pit_ticks < timeout_tick) {
+     * Use hardware counter for time-based timeout (60 seconds). */
+    uint64_t _hw_start = hw_timeout_start();
+    while (!hw_timeout_expired(_hw_start, 60)) {
         if (__atomic_load_n(&echo_mailbox.ready, __ATOMIC_ACQUIRE)) {
             echo_mailbox.data[63] = '\0';
             msgs_received++;
@@ -166,10 +184,8 @@ static void listener_service_entry(void *arg)
     uart_printf("[listener] Started (component %d), subscribed to 'events'\n", comp_idx);
 
     int msgs_received = 0;
-    extern volatile uint64_t pit_ticks;
-    uint64_t timeout_tick = pit_ticks + 6000;  /* 60s at 100 Hz */
-
-    while (pit_ticks < timeout_tick) {
+    uint64_t _hw_start = hw_timeout_start();
+    while (!hw_timeout_expired(_hw_start, 30)) {
         char topic_buf[16];
         const char *data = msg_router_receive(comp_idx, topic_buf);
         if (data) {
@@ -178,7 +194,7 @@ static void listener_service_entry(void *arg)
                         topic_buf, data, msgs_received);
             msg_router_ack(comp_idx);
             /* Reset timeout on activity */
-            timeout_tick = pit_ticks + 6000;
+            _hw_start = hw_timeout_start();
         } else {
             yield();
         }
@@ -224,11 +240,10 @@ static void sensor_monitor_entry(void *arg)
 
     uart_puts("[sensor_monitor] Started, watching /sensors/data\r\n");
 
-    extern volatile uint64_t pit_ticks;
-    uint64_t timeout_tick = pit_ticks + 3000;  /* 30s timeout */
+    uint64_t _hw_start = hw_timeout_start();
     int alert_count = 0;
 
-    while (pit_ticks < timeout_tick) {
+    while (!hw_timeout_expired(_hw_start, 30)) {
         char topic_buf[16];
         const char *data = msg_router_receive(
             comp_idx, topic_buf);
@@ -262,7 +277,7 @@ static void sensor_monitor_entry(void *arg)
                 uart_printf("[sensor_monitor] value=%d (normal)\r\n", value);
             }
 
-            timeout_tick = pit_ticks + 3000;  /* Reset timeout on activity */
+            _hw_start = hw_timeout_start();  /* Reset timeout on activity */
         } else {
             yield();
         }
@@ -300,11 +315,10 @@ static void digit_classifier_entry(void *arg)
     /* Subscribe to digit classification requests */
     msg_router_subscribe((const char *)"/input/digits\0", comp_idx);
 
-    extern volatile uint64_t pit_ticks;
-    uint64_t timeout_tick = pit_ticks + 3000;  /* 30s timeout */
+    uint64_t _hw_start = hw_timeout_start();
     int infer_count = 0;
 
-    while (pit_ticks < timeout_tick) {
+    while (!hw_timeout_expired(_hw_start, 30)) {
         char topic_buf[16];
         const char *data = msg_router_receive(
             comp_idx, topic_buf);
@@ -336,7 +350,7 @@ static void digit_classifier_entry(void *arg)
                 uart_puts("[digit_classifier] Inference failed\r\n");
             }
 
-            timeout_tick = pit_ticks + 3000;  /* Reset timeout */
+            _hw_start = hw_timeout_start();  /* Reset timeout */
         } else {
             yield();
         }
@@ -504,14 +518,13 @@ int component_send_echo(const char *message)
     ((volatile char *)echo_mailbox.data)[len] = '\0';
 
     /* Signal echo service and wait for acknowledgment.
-     * Use yield() + pit_ticks timeout (5 seconds). */
+     * Use yield() + hardware counter timeout (5 seconds). */
     __atomic_store_n(&echo_mailbox.ack, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&echo_mailbox.ready, 1, __ATOMIC_RELEASE);
 
     /* Both shell and echo are IDLE priority — yield() round-robins between them */
-    extern volatile uint64_t pit_ticks;
-    uint64_t send_timeout = pit_ticks + 500;  /* 5s at 100 Hz */
-    while (pit_ticks < send_timeout) {
+    uint64_t send_start = hw_timeout_start();
+    while (!hw_timeout_expired(send_start, 5)) {
         if (__atomic_load_n(&echo_mailbox.ack, __ATOMIC_ACQUIRE)) {
             uart_printf("Message delivered to echo service\n");
             return 0;

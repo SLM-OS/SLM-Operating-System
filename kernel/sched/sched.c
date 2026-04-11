@@ -306,35 +306,32 @@ int sched_set_policy(const struct sched_policy_ops *policy)
         return -1;
     }
 
+    /* Hold IRQs disabled for the entire operation — init, swap, shutdown,
+     * and log. On Pi 5, enabling IRQs mid-switch allows a timer tick that
+     * can context-switch away from the caller. If the idle task then runs
+     * with IRQs masked (Pi 5 secondary idle skips daifclr), the caller
+     * never resumes. */
+    irq_flags_t flags = irq_save();
+
     /* Init the new policy before swapping (may fail) */
     if (policy->init) {
         int ret = policy->init();
         if (ret < 0) {
+            irq_restore(flags);
             WARN("Policy '%s' init failed (%d)", policy->name, ret);
             return -1;
         }
     }
 
-    /* IRQ-safe swap */
-#if defined(PLATFORM_X86_64)
-    __asm__ volatile("cli" ::: "memory");
-#else
-    __asm__ volatile("msr daifset, #2" ::: "memory");
-#endif
-
     const struct sched_policy_ops *old = active_policy;
     active_policy = policy;
-
-#if defined(PLATFORM_X86_64)
-    __asm__ volatile("sti" ::: "memory");
-#else
-    __asm__ volatile("msr daifclr, #2" ::: "memory");
-#endif
 
     /* Shut down old policy after swap */
     if (old && old->shutdown) {
         old->shutdown();
     }
+
+    irq_restore(flags);
 
     INFO("Scheduler policy: %s -> %s",
          old ? old->name : "(none)", policy->name);
@@ -402,12 +399,17 @@ static void idle_task_func(void *arg)
         __asm__ volatile("sti" ::: "memory");
         __asm__ volatile("hlt");
 #elif defined(PLATFORM_HAS_NC_MEMORY)
-        /* Pi 5: WFE for cooperative scheduling.
-         * Timer IRQs on secondary CPUs cause an exception handler hang
-         * (under investigation) so we skip daifclr here.
-         * WFE wakes on SEV from other CPUs (sent by scheduler_add_task_to_cpu
-         * and spin_unlock). CPU sleeps until work is dispatched. */
-        __asm__ volatile("wfe" ::: "memory");
+        /* Pi 5/Jetson: CPU 0 unmasks IRQs for timer-driven preemption.
+         * Secondary CPUs use WFE only — enabling timer preemption on
+         * secondary CPUs causes scheduler re-entrancy issues (schedule()
+         * called from timer ISR does switch_to, abandoning the exception
+         * frame). Cross-CPU dispatch works via cooperative WFE/SEV. */
+        if (cpu_id() == 0) {
+            __asm__ volatile("msr daifclr, #2" ::: "memory");
+            __asm__ volatile("wfi");
+        } else {
+            __asm__ volatile("wfe" ::: "memory");
+        }
 #else
         __asm__ volatile("msr daifclr, #2" ::: "memory");
         __asm__ volatile("wfi");
@@ -1053,11 +1055,6 @@ void schedule(void)
      */
     if (next == current) {
         if (current && current->state == TASK_TERMINATED) {
-            /*
-             * This should never happen: terminated task picked as next.
-             * The terminated task should not be in the run queue, and
-             * pick_next_task should return idle_task if queue is empty.
-             */
             rq_unlock_irqrestore(this_cpu, flags);
             panic("schedule: terminated task selected as next (CPU %u, task '%s')",
                   this_cpu, current->name);
@@ -1066,6 +1063,13 @@ void schedule(void)
             current->state = TASK_RUNNING;
         }
         rq_unlock_irqrestore(this_cpu, flags);
+
+        /* NOTE: On Pi 5, tasks run with DAIF.I=1 (IRQ masked) so pit_ticks
+         * does not advance during task execution. pit_ticks only advances
+         * when the idle task runs (it does daifclr+wfi). Components that
+         * poll pit_ticks must yield frequently enough for idle to run.
+         * Timer preemption on Pi 5 is not supported (causes hangs in IPC
+         * spinlock paths). See docs/pi5-cross-cpu-dispatch-investigation.md. */
         return;
     }
 

@@ -203,7 +203,19 @@ gdb:
 
 # Test output file and timeout (kills QEMU if tests hang to prevent OOM)
 TEST_OUTPUT := $(BUILD_DIR)/test-output.log
-TEST_TIMEOUT := 300
+TEST_TIMEOUT := 120
+# Hard memory limit for QEMU process (host RSS, not guest RAM).
+# systemd-run enforces this via cgroups — kernel OOM-kills QEMU if exceeded.
+# Guest RAM is QEMU_TEST_MEMORY; this caps total process memory including overhead.
+QEMU_MEM_LIMIT := 3G
+# Guest RAM for test QEMU — must match platform.h defaults (1G for QEMU_VIRT)
+# since DTB parsing may fail and kernel falls back to hardcoded RAM size.
+QEMU_TEST_MEMORY := $(QEMU_MEMORY)
+# CPU limit for QEMU process — prevents a runaway busy-spin test from
+# pegging all host cores for the full timeout duration.
+QEMU_CPU_LIMIT := 200%
+# Wrapper to enforce memory and CPU limits (requires systemd --user)
+QEMU_GUARD := systemd-run --user --scope -q -p MemoryMax=$(QEMU_MEM_LIMIT) -p CPUQuota=$(QEMU_CPU_LIMIT)
 
 # Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
 .PHONY: kernel-test
@@ -240,11 +252,11 @@ ifeq ($(PLATFORM),X86_64)
 	@echo 'set default=0' >> $(KERNEL_TEST_BUILD_DIR)/iso/boot/grub/grub.cfg
 	@echo 'menuentry "SLM-OS Tests" { multiboot2 /boot/kernel.elf; boot; }' >> $(KERNEL_TEST_BUILD_DIR)/iso/boot/grub/grub.cfg
 	@grub-mkrescue -o $(KERNEL_TEST_ISO) $(KERNEL_TEST_BUILD_DIR)/iso 2>/dev/null
-	@timeout $(TEST_TIMEOUT) $(QEMU) \
+	@$(QEMU_GUARD) timeout $(TEST_TIMEOUT) $(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
 		-smp cores=$(QEMU_CORES) \
-		-m $(QEMU_MEMORY) \
+		-m $(QEMU_TEST_MEMORY) \
 		-nographic \
 		-device isa-debug-exit,iobase=0x501,iosize=2 \
 		-cdrom $(KERNEL_TEST_ISO) \
@@ -280,11 +292,11 @@ ifeq ($(PLATFORM),X86_64)
 		exit 1; \
 	fi
 else
-	@timeout $(TEST_TIMEOUT) $(QEMU) \
+	@$(QEMU_GUARD) timeout $(TEST_TIMEOUT) $(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
 		-smp cores=$(QEMU_CORES) \
-		-m $(QEMU_MEMORY) \
+		-m $(QEMU_TEST_MEMORY) \
 		-nographic \
 		-semihosting \
 		-kernel $(KERNEL_TEST_ELF) \
