@@ -112,6 +112,23 @@ BSS varies by platform due to: task table size (NC vs BSS), per-CPU data, platfo
 
 ---
 
+## Platform Comparison (QEMU)
+
+Emulated benchmarks on the same host. QEMU ARM64 emulates Cortex-A76; QEMU x86-64 uses host CPU passthrough. Numbers reflect emulation overhead, not native hardware performance.
+
+| Metric | QEMU ARM64 | QEMU x86-64 | Pi 5 (native) |
+|--------|-----------|-------------|---------------|
+| Context switch | ~807 ns | ~1,332 ns | **1,858 ns** |
+| IPC round-trip | ~1,709 ns | ~761 ns | **132 ns** |
+| Buffer write | 9.7 GB/s | 21.0 GB/s | **45.8 GB/s** |
+| Buffer read | 8.2 GB/s | 14.1 GB/s | **48.1 GB/s** |
+| Binary size | 973 KB | 610 KB | 824 KB |
+| Tests passing | 620+ (all) | 426/434 | 615+/620+ |
+
+QEMU numbers vary between runs due to host load and emulation non-determinism. Pi 5 native numbers are the authoritative measurements for capstone evaluation.
+
+---
+
 ## Memory Usage
 
 ### Model Memory Pools

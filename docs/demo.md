@@ -231,3 +231,39 @@ The Pi 5's BCM2712 SoC uses MPIDR Aff1 values (0x00, 0x01, 0x02, 0x03) that
 the Lua binding interprets as a larger CPU namespace. The kernel's SMP
 subsystem correctly identifies and boots only the 4 physical cores; the
 inflated count is a display issue in the Lua API binding only.
+
+---
+
+## Troubleshooting
+
+### Demo script not found
+
+```
+lua: cannot open demo.lua
+```
+
+The embedded demo is at `/mnt/files/demo.lua`, not a relative path. Use the full path:
+
+```
+slmos> lua /mnt/files/demo.lua
+```
+
+If the file is missing, the LittleFS ramdisk may not have mounted. Check boot output for `LittleFS mounted at /mnt/files`. A clean reboot should restore it (the demo is written at every boot by `demo_init()`).
+
+### Demo hangs after "Starting Sensor Monitor"
+
+The sensor monitor uses a 30-second hardware counter timeout. If the demo appears stuck, wait up to 30 seconds. If it still does not progress, the timer hardware may not be running. Verify with:
+
+```
+slmos> bench irq
+```
+
+If the timer frequency shows 0, the ARM generic timer was not initialized.
+
+### Garbled output during hot-swap
+
+Output from the old and new sensor_monitor instances may interleave briefly during the hot-swap transition. This is expected -- the UART has no cross-CPU lock on Pi 5. The garbling is cosmetic and does not indicate a functional error.
+
+### Component already running error
+
+If the demo is run twice without rebooting, `component_run` may report that the sensor_monitor is already running from the previous execution. Reboot between demo runs for a clean state, or wait for the previous instance's 30-second timeout to expire.
