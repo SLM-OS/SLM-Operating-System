@@ -147,40 +147,61 @@ The boot partition (FAT32, labeled SLMOS) contains:
 
 ## Deploying to Jetson (SSH + kexec)
 
-🟡 **Partially working** — boots to shell at EL2 via UARTC. See `docs/jetson-el2-bringup.md`.
+🟢 **Working** — boots to shell at EL2 via UARTC on both jetson-nano-1 and jetson-nano-2.
 
-The Jetson has no SDWire device. All deployment is via SSH + kexec, with serial console
-and power control via labctl. No physical handling is required after initial setup.
+The Jetson boards have no SDWire device. All deployment is via SSH + kexec, with serial
+console and power control via labctl. No physical handling is required after initial setup.
+
+### Lab Configuration
+
+| Board | IP | Serial | Status |
+|-------|-----|--------|--------|
+| jetson-nano-1 | 192.168.4.20 | tcp:4007 (CH340) | L4T 36.4.4, SD=JetPack, SSD=SLM-OS |
+| jetson-nano-2 | 192.168.4.93 | tcp:4004 (CP2102) | L4T 36.4.7, SD=SLM-OS+Linux |
 
 ### Deploy Workflow
 
 ```bash
 # 1. Build for Jetson
-make kernel-clean && make kernel PLATFORM=JETSON
+make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
 
 # 2. Copy kernel to Jetson via SSH
-scp build/kernel/slmos.elf root@192.168.4.93:/root/
+scp build/kernel/slmos.elf root@192.168.4.20:/root/
 
-# 3. Boot via kexec (from SSH session)
-ssh root@192.168.4.93 'kexec -l /root/slmos.elf --reuse-cmdline && kexec -e'
+# 3. Suspend GPU (REQUIRED — prevents RAS crash after kexec)
+ssh root@192.168.4.20 bash -c '
+    GPU=/sys/devices/platform/bus@0/17000000.gpu/power
+    systemctl stop gdm 2>/dev/null; sleep 2
+    fuser -k /dev/nvhost-gpu /dev/nvmap 2>/dev/null; sleep 1
+    echo 0 > $GPU/autosuspend_delay_ms
+    echo auto > $GPU/control
+    sleep 3
+'
 
-# 4. Observe output via serial console
-labctl serial-capture jetson-nano-2 --timeout 30
+# 4. Boot via kexec (from SSH session)
+ssh root@192.168.4.20 'kexec -l /root/slmos.elf --reuse-cmdline && kexec -e'
 
-# 5. Recover back to Linux (power cycle)
-labctl power cycle jetson-nano-2
+# 5. Observe output via serial console
+labctl serial capture jetson-nano-1 --timeout 30
+
+# 6. Recover back to Linux (power cycle)
+labctl power cycle jetson-nano-1
 ```
+
+**Important:** Step 3 (GPU suspend) is mandatory. Without it, Linux's nvgpu driver
+leaves stale GPU DMA operations that cause a TF-A RAS error after kexec, killing the
+CPU core. See GitHub issue #9.
 
 ### Recovery
 
 After kexec into SLM-OS, the Jetson cannot be reached via SSH. To recover:
 
-1. `labctl power cycle jetson-nano-2` — power cycles back to Linux
+1. `labctl power cycle jetson-nano-1` — power cycles back to Linux
 2. Wait ~40s for Linux to boot
 3. SSH is available again
 
-**Note:** The UEFI boot order has network boot first, which adds ~5 minutes if
-the SD card is not present. With SD card inserted, Linux boots in ~40 seconds.
+**Note:** Serial input (RX) works via TCU HSP mailbox on the USB-C debug port.
+Serial output uses UARTC at 0x0C280000 with DSB-guarded LSR reads.
 
 ---
 

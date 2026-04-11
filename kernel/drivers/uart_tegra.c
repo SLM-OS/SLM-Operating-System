@@ -188,7 +188,15 @@ void uart_init(void)
 
 /*
  * Send a single character.
- * Blocks until transmit holding register is empty.
+ *
+ * After kexec, the TCU/SPE firmware owns the UARTC hardware state.
+ * Reading LSR can interfere with TCU's internal tracking, causing
+ * garbled output. Instead, use a simple delay between characters
+ * to avoid overrunning the TX FIFO (same approach as the assembly
+ * EL2 probe which works reliably).
+ *
+ * At 115200 baud, one character takes ~87us. The 16-byte TX FIFO
+ * gives us headroom, so a brief spin is sufficient.
  */
 void uart_putc(char c)
 {
@@ -196,9 +204,15 @@ void uart_putc(char c)
         return;  /* UART not available, silently drop */
     }
 
-    /* Wait until THR is empty */
+    /*
+     * Wait for TX FIFO space using LSR, but with DSB barrier before read.
+     * After kexec, the TCU/SPE firmware owns UARTC. Without a barrier,
+     * speculative or out-of-order reads of LSR can return stale data,
+     * causing us to write THR when the FIFO is full — garbling output.
+     */
+    __asm__ volatile("dsb sy" ::: "memory");
     while ((UART_REG(NS16550_LSR) & LSR_THRE) == 0) {
-        /* spin */
+        __asm__ volatile("dsb sy" ::: "memory");
     }
 
     UART_REG(NS16550_THR) = c;

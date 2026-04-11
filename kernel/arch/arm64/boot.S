@@ -560,6 +560,17 @@ real_start:
 
 primary_cpu:
     /*
+     * Mask ALL exceptions immediately — before any memory access.
+     *
+     * After kexec, stale Linux interrupts (timers, peripherals) can fire
+     * at any time. Without a valid VBAR, any exception causes an
+     * unpredictable crash. This MUST be the first instruction after entry.
+     *
+     * DAIF bits: D=Debug, A=SError, I=IRQ, F=FIQ
+     */
+    msr     daifset, #0xF
+
+    /*
      * Set up the stack pointer.
      * Stack grows downward, so point to top of stack area.
      *
@@ -601,13 +612,6 @@ bss_clear:
     str     xzr, [x1], #8
     b       bss_clear
 bss_done:
-
-    /*
-     * Disable interrupts while we initialize.
-     * DAIF bits: D=Debug, A=SError, I=IRQ, F=FIQ
-     * Setting these bits masks (disables) the corresponding exceptions.
-     */
-    msr     daifset, #0xF
 
     /*
      * Set up exception vector table.
