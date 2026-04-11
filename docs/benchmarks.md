@@ -59,9 +59,30 @@ Message queue send + receive round-trip, 100 iterations.
 
 ### Scheduler Throughput
 
-| Platform | Context Switches/sec |
-|----------|---------------------|
-| Pi 5 | **69,353** |
+| Platform | Context Switches/sec | Active Tasks |
+|----------|---------------------|--------------|
+| Pi 5 (fresh boot, 3 tasks) | **69,353** | 3 |
+| Pi 5 (after demo, 8 tasks) | **40,368** | 8 |
+
+### Deadline-Boosted Dispatch
+
+Task dispatch latency with deadline boost (priority escalation for urgent tasks).
+
+| Platform | Dispatch Latency |
+|----------|-----------------|
+| Pi 5 | ~18 us |
+
+### Memory Usage (Pi 5, Runtime)
+
+| Resource | Size |
+|----------|------|
+| Total RAM | 4,188,256 KB (4 GB) |
+| Kernel used | 395,652 KB (387 MB) |
+| Free | 3,792,604 KB (3.6 GB) |
+| Model weight pool | 256 MB (128 x 2 MB blocks) |
+| Model workspace pool | 128 MB (64 x 2 MB blocks) |
+| Rust heap | 1 MB |
+| RAM disk (LittleFS) | 1 MB |
 
 ---
 
