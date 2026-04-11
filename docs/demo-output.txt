@@ -1,0 +1,57 @@
+SLM-OS Industrial IoT Demo — Pi 5 Serial Output
+Platform: Raspberry Pi 5 (BCM2712, 4x Cortex-A76, 4 GB RAM)
+Date: April 2026
+Command: lua /mnt/files/demo.lua
+
+============================================================
+  SLM-OS Industrial IoT Demo
+  Small Language Model Operating System
+============================================================
+
+--- System Overview ---
+  Version:   SLM-OS 0.1.0
+  CPUs:      8 cores
+  Scheduler: heuristic
+  Memory:    3792860 KB free / 4188256 KB total
+
+--- Starting Sensor Monitor ---
+Component 'sensor_monitor' v1.0 started (idx=0, task=4)
+  sensor_monitor started (idx=0)
+[sensor_monitor] Started, watching /sensors/data
+  Components active: 1
+
+--- Sensor Data Stream ---
+  Publishing normal readings (below threshold 50):
+[sensor_monitor] value=23 (normal)
+    Reading: 23  -> 1 subscriber(s)
+[sensor_monitor] value=31 (normal)
+    Reading: 31  -> 1 subscriber(s)
+[sensor_monitor] value=42 (normal)
+    Reading: 42  -> 1 subscriber(s)
+
+  Injecting anomalies (above threshold 50):
+[sensor_monitor] ALERT: value=78
+    ANOMALY: 78  -> 1 subscriber(s)
+[sensor_monitor] ALERT: value=95
+    ANOMALY: 95  -> 1 subscriber(s)
+
+--- Live Component Hot-Swap ---
+  Swapping sensor_monitor with new instance...
+Component 'sensor_monitor' v1.0 started (idx=0, task=5)
+Hot-swap: 'sensor_monitor' (idx 0) -> 'sensor_monitor' (idx 0), 1 subscription(s) transferred
+  Hot-swap OK (new idx=0)
+[sensor_monitor] Started, watching /sensors/data
+  Verifying new instance:
+[sensor_monitor] ALERT: value=88
+    Reading: 88  -> 2 subscriber(s)
+
+============================================================
+  Demo Complete
+
+  Demonstrated:
+    - Component lifecycle (start, hot-swap)
+    - Publish/subscribe message routing
+    - Threshold-based anomaly detection
+    - Zero-downtime component replacement
+    - 4-core scheduling
+============================================================

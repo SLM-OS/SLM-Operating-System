@@ -2,7 +2,7 @@
 
 High-level architecture documentation for the Small Language Model Operating System.
 
-**Status:** Phase 5 (April 2026)
+**Status:** Phase 6 — Demo & Polish (April 2026)
 
 ---
 
@@ -700,14 +700,50 @@ See `docs/ffi.md` for complete FFI documentation.
   - `model bench` for repeated inference benchmarking
   - `model stats` for cumulative performance monitoring
 
+### Phase 6 (In Progress)
+
+**AI Scheduler Integration (Phase AI-Sched)**
+- Pluggable scheduler policy interface (`sched_policy_ops` vtable)
+- Heuristic policy extracted from inline code (functionally identical)
+- MLP and PPO inference policies with stub weights
+- State vector extraction (108 dimensions: per-core, per-task, global features)
+- FP state save/restore for interrupt-safe inference
+- Shell commands: `sched policy`, `sched stats`
+- x86-64 SSE support for AI inference (FXSAVE/FXRSTOR)
+
+**Pi 5 Hardware Stability**
+- UART lock: IRQ-disable-only on platforms with incoherent L2 (replaces deadlocking `ldaxr`/`stxr` spinlock)
+- `sched_set_policy`: IRQ-safe wrapper prevents timer preemption during policy switch
+- Idle task: CPU 0 does `daifclr`+`wfi` for timer-driven preemption; secondary CPUs use WFE for cooperative scheduling
+- Component timeouts: hardware counter (`timer_get_count`) replaces `pit_ticks` which doesn't advance while tasks run with IRQs masked
+- 6 regression tests for all Pi 5 fixes
+
+**Industrial Demo**
+- Lua-scripted demo at `/mnt/files/demo.lua` (embedded at boot)
+- Exercises: component lifecycle, publish/subscribe messaging, anomaly detection, live hot-swap
+- New Lua bindings: `slm.msg_publish()`, `slm.sched_policy()`
+
+**Performance (Pi 5 Measured)**
+- Context switch: 1.858 µs (target < 10 µs)
+- IPC round-trip: 132 ns
+- Shared buffer: 48 GB/s read, 46 GB/s write
+- Boot to shell: ~3.5s kernel init (8.5s total with firmware)
+- Binary size: 824 KB (Pi 5), 973 KB (QEMU), 610 KB (x86-64)
+
+**Build System**
+- QEMU test safeguards: `systemd-run` with MemoryMax=3G and CPUQuota=200%
+- Test timeout reduced to 120s with automatic termination
+
 ### Deferred to Future Phases
 - GPU compute kernels (requires GSP firmware loading)
 - FP16/INT8 quantization
 - Per-component address spaces (TTBR0_EL1)
 - SIMD-optimized operators (NEON/SSE/AVX)
 - Dynamic batching and model caching
-- ~~Pi 5 multi-core~~ **RESOLVED** -- All 4 cores online via PSCI SMC
-- Pi 5 armstub reliability (EL3->EL2 ERET intermittent failure, currently disabled)
+- ~~Pi 5 multi-core~~ **RESOLVED** — all 4 cores online via PSCI SMC
+- Pi 5 secondary CPU timer preemption (see `docs/pi5-secondary-cpu-preemption.md`)
+- Real AI scheduler weights (blocked on Plan A export pipeline)
+- Jetson kexec RAS error (nvgpu GPU fabric reset needed)
 
 ---
 
