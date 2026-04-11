@@ -422,7 +422,12 @@ void task_exit(void)
 {
     struct task *task = task_current();
 
-    INFO("Task '%s' (id=%u) exiting", task->name, task->id);
+    /* Only print from CPU 0 — secondary CPUs don't have a cross-CPU
+     * UART lock, so printing from multiple CPUs causes garbled output
+     * and potential hangs. */
+    if (cpu_id() == 0) {
+        INFO("Task '%s' (id=%u) exiting", task->name, task->id);
+    }
 
     /* Mask IRQs to prevent a timer-driven schedule() from racing with
      * the state change below. Without this, the timer can fire between
@@ -504,8 +509,10 @@ void task_destroy(struct task *task)
 
     /* Verify task is terminated */
     if (task->state != TASK_TERMINATED) {
-        WARN("task_destroy: task '%s' not terminated (state=%d)",
-             task->name, task->state);
+        if (cpu_id() == 0) {
+            WARN("task_destroy: task '%s' not terminated (state=%d)",
+                 task->name, task->state);
+        }
         TASK_UNLOCK_IRQRESTORE();
         return;
     }

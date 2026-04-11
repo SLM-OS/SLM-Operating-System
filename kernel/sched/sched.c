@@ -399,10 +399,11 @@ static void idle_task_func(void *arg)
         __asm__ volatile("sti" ::: "memory");
         __asm__ volatile("hlt");
 #elif defined(PLATFORM_HAS_NC_MEMORY)
-        /* Pi 5/Jetson: CPU 0 must unmask IRQs for timer-driven preemption.
-         * Secondary CPUs use WFE only — timer IRQs on secondary CPUs cause
-         * an exception handler hang (under investigation). WFE wakes on SEV
-         * from other CPUs (sent by scheduler_add_task_to_cpu and spin_unlock). */
+        /* Pi 5/Jetson: CPU 0 unmasks IRQs for timer-driven preemption.
+         * Secondary CPUs use WFE only — enabling timer preemption on
+         * secondary CPUs causes scheduler re-entrancy issues (schedule()
+         * called from timer ISR does switch_to, abandoning the exception
+         * frame). Cross-CPU dispatch works via cooperative WFE/SEV. */
         if (cpu_id() == 0) {
             __asm__ volatile("msr daifclr, #2" ::: "memory");
             __asm__ volatile("wfi");
