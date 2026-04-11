@@ -221,8 +221,8 @@ This document tracks Phase 6 implementation of SLM-OS.
   - ☐ Async loading in background
 
 ### From Phase AI-Sched: Real Weight Integration
-- ☐ Integrate Plan A exported weights
-- ☐ Verify inference latency < 50µs with real weights
+- ✅ Integrate Plan A exported weights (MLP + PPO, imported and building)
+- ☐ Verify inference latency < 50µs with real weights on hardware
 - ☐ Compare AI scheduler decisions to heuristic
 - ☐ Measure scheduling quality improvement (if measurable)
 

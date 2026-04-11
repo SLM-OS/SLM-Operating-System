@@ -134,12 +134,12 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
   - Copies generated weights from Plan A output directory
   - Copies `ai_config.h` with platform-specific dimensions
   - Validates expected array names present
-- ☐ Add Makefile target: `make import-ai-weights` — deferred (script works standalone)
+- ⏸️ Add Makefile target: `make import-ai-weights` — deferred (script works standalone)
 
 ### Build Verification
 - ✅ Verify build with `ENABLE_AI_SCHEDULER=OFF` (existing behavior)
 - ✅ Verify build with `ENABLE_AI_SCHEDULER=ON` + stub weights
-- ☐ Verify build with `ENABLE_AI_SCHEDULER=ON` + real weights (after Plan A)
+- ✅ Verify build with `ENABLE_AI_SCHEDULER=ON` + real weights (April 2026)
 
 ---
 
@@ -169,7 +169,7 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 - ✅ NEON intrinsics in `ai_relu()` (vmaxq_f32)
 - ✅ Compile-time check: `#if defined(__aarch64__) && defined(__ARM_NEON)`
 - ✅ Verified NEON codegen: fmla, faddp, fmax instructions present in object
-- ☐ Benchmark on real hardware: target < 50µs (requires real weights)
+- ☐ Benchmark on real hardware: target < 50µs (requires Pi 5 or Jetson with AI scheduler build)
 
 ### Action Decoding
 - ✅ `struct ai_sched_action` defined in `ai_types.h` (M2)
@@ -207,7 +207,7 @@ This document tracks the integration of trained AI models (MLP, PPO, XGBoost) in
 **Depends on:** M2 (Build System)
 
 ### State Dimensions
-- ☐ Create `kernel/sched/ai/ai_types.h` with dimension constants:
+- ✅ Create `kernel/sched/ai/ai_types.h` with dimension constants:
   ```c
   // State vector is fixed at 108 dimensions (trained model input shape).
   // Platforms with fewer cores zero-fill unused core slots.
@@ -300,7 +300,7 @@ Features at offset 100:
 - ✅ Set `completion_time_ns` in task_exit via `sched_ai_record_completion()`
 
 ### Per-CPU Utilization Tracking
-- ☐ Add to scheduler state (per-CPU):
+- ✅ Add to scheduler state (per-CPU):
   ```c
   struct cpu_runqueue {
       // ... existing fields ...
@@ -343,7 +343,7 @@ Features at offset 100:
 - ✅ Current FP save/restore in context.S covers context switches; fp_context.h covers inference
 
 ### FP Save/Restore Macros
-- ☐ Create `kernel/include/fp_context.h`:
+- ✅ Create `kernel/include/fp_context.h`:
   ```c
   #ifdef CONFIG_AI_SCHEDULER
   
@@ -373,8 +373,8 @@ Features at offset 100:
 ### Integration
 - ✅ AI inference calls wrapped with FP save/restore in `sched_ai.c`
 - ✅ Self-test inference in `ai_mlp_init()` / `ai_ppo_init()` validates FP linkage
-- ☐ Measure overhead of FP save/restore (~50-100 cycles expected) — needs hardware
-- ☐ Verify no FP register corruption under stress test — needs M8 integration test
+- ✅ Measure overhead of FP save/restore (test_ai_fp_save_restore_latency — QEMU reporting only)
+- ✅ Verify no FP register corruption under stress test (test_ai_scheduler_stress, test_ai_mixed_policy_switch)
 
 ### Alternative: Deferred Inference
 - ⏸️ If FP save/restore overhead is too high:
@@ -413,7 +413,7 @@ Features at offset 100:
 - ⏸️ Uses cascaded tree inference
 
 ### Policy Registration
-- ☐ Register policies in `sched_ai_init()`:
+- ✅ Register policies in `sched_ai_init()`:
   ```c
   void sched_ai_init(void) {
       sched_register_policy(&sched_policy_ai_mlp);
@@ -478,8 +478,8 @@ Features at offset 100:
 - ✅ `test_policy_switch_calls_init_shutdown` — init/shutdown callbacks invoked (M1)
 - ✅ `test_ai_policy_mlp_end_to_end` — full dispatch path with init/shutdown (M7)
 - ✅ `test_ai_policy_dispatches_any_affinity` — ANY affinity uses AI policy (M7)
-- ☐ `test_ai_policy_fallback` — requires non-stub weights to produce invalid actions
-- ☐ `test_ai_policy_respects_isolation` — requires non-stub weights (stubs always pick core 0)
+- ☐ `test_ai_policy_fallback` — real weights produce valid actions, so fallback path not exercised
+- ☐ `test_ai_policy_respects_isolation` — requires adversarial weights that pick isolated cores
 
 ### Performance Tests
 - ✅ `test_ai_inference_latency` — 100 iterations, report avg (no QEMU assertion)
@@ -528,7 +528,7 @@ Features at offset 100:
 ### Deliverables
 - ✅ Pluggable scheduler interface working
 - ✅ Heuristic policy extracted and functionally identical
-- ✅ AI inference engine compiles and runs (with stub weights)
+- ✅ AI inference engine compiles and runs (with stub AND real weights)
 - ✅ State vector extraction matches simulator specification
 - ✅ MLP policy makes scheduling decisions (with fallback to heuristic)
 - ✅ FP state properly saved/restored in interrupt context
@@ -540,7 +540,7 @@ Features at offset 100:
 - ✅ Boot SLM-OS in QEMU with AI scheduler (verified via test builds)
 - ✅ `sched` / `sched policy` lists registered policies
 - ✅ `sched policy ai_mlp` switches to AI policy (tested in M7 end-to-end)
-- ✅ Tasks dispatched through AI policy (stub weights → core 0)
+- ✅ Tasks dispatched through AI policy (real weights → valid CPU assignment)
 - ✅ `sched stats` shows policy name, task count, switches, per-CPU utilization
 - ✅ Switch back to `heuristic` verified in integration tests
 

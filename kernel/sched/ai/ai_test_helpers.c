@@ -97,12 +97,16 @@ int ai_test_matvec_zero_weights(void)
     for (int i = 0; i < AI_MLP_LAYER0_IN; i++)
         in[i] = 1.0f;
 
-    /* Zero weights + zero bias → output should be all zeros */
+    /* Test matvec at model dimensions. With real weights, output is non-zero.
+     * With stub weights (all zeros), output = bias (also zero). Either way,
+     * verify the computation completes and produces finite values. */
     ai_test_matvec(ai_mlp_w0, ai_mlp_b0, in, out,
                    AI_MLP_LAYER0_OUT, AI_MLP_LAYER0_IN);
 
     for (int i = 0; i < AI_MLP_LAYER0_OUT; i++) {
-        if (!approx_eq(out[i], 0.0f, 0.001f)) return -1;
+        /* Verify output is a finite number (not NaN or inf) */
+        if (out[i] != out[i]) return -1;  /* NaN check */
+        if (out[i] > 1e10f || out[i] < -1e10f) return -1;  /* overflow check */
     }
     return 0;
 }
@@ -223,16 +227,17 @@ int ai_test_mlp_stub_inference(void)
     int ret = ai_schedule_mlp(state, &action);
     if (ret != 0) return -1;
 
-    /* Zero weights → all logits equal (0) → argmax picks index 0 */
-    if (action.core_assignment != 0) return -1;
-    if (action.priority_adj != 0) return -1;
-    if (action.preempt != 0) return -1;
+    /* Verify action fields are in valid ranges.
+     * With stub weights: all zeros (argmax=0). With real weights: any valid action. */
+    if (action.core_assignment >= AI_STATE_NUM_CORES + 1) return -1;  /* +1 for GPU */
+    if (action.priority_adj > 2) return -1;
+    if (action.preempt > 1) return -1;
 
     return 0;
 }
 
 /*
- * Test: PPO inference produces same result as MLP with stub weights.
+ * Test: PPO inference produces a valid scheduling action.
  */
 int ai_test_ppo_stub_inference(void)
 {
@@ -244,10 +249,10 @@ int ai_test_ppo_stub_inference(void)
     int ret = ai_schedule_ppo(state, &action);
     if (ret != 0) return -1;
 
-    /* Same zero weights → same result */
-    if (action.core_assignment != 0) return -1;
-    if (action.priority_adj != 0) return -1;
-    if (action.preempt != 0) return -1;
+    /* Verify action fields are in valid ranges */
+    if (action.core_assignment >= AI_STATE_NUM_CORES + 1) return -1;
+    if (action.priority_adj > 2) return -1;
+    if (action.preempt > 1) return -1;
 
     return 0;
 }
@@ -726,15 +731,16 @@ int ai_test_policy_dispatches_any_affinity(void)
     /* Don't set affinity — default is CPU_AFFINITY_ANY */
     scheduler_add_task(t);
 
-    /* With stub weights, argmax=0 → core 0 */
+    /* AI policy should assign to a valid CPU */
     uint32_t assigned = t->assigned_cpu;
 
     scheduler_remove_task(t);
     t->id = 0;
     sched_set_policy(sched_find_policy("heuristic"));
 
-    /* Stub weights always produce core=0 */
-    if (assigned != 0) return -3;
+    /* Verify assigned CPU is valid (real weights may pick any core) */
+    extern uint32_t cpu_count;
+    if (assigned >= cpu_count) return -3;
 
     return 0;
 }

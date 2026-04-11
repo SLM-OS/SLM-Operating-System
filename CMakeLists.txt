@@ -455,7 +455,8 @@ if(ENABLE_AI_SCHEDULER)
         kernel/sched/ai/ai_inference.c
         kernel/sched/ai/ai_state.c
         kernel/sched/ai/sched_ai.c
-        kernel/sched/ai/ai_weights_stub.c
+        kernel/sched/ai/ai_weights_mlp.c
+        kernel/sched/ai/ai_weights_ppo.c
         kernel/sched/ai/ai_test_helpers.c
         $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/ai/fp_context.S>
         $<$<STREQUAL:${PLATFORM},X86_64>:kernel/sched/ai/fp_context.S>

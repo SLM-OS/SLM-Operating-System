@@ -3093,12 +3093,13 @@ static void test_ai_policy_switch_to_mlp_and_back(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
     TEST_ASSERT_EQUAL_STRING("ai_mlp", sched_get_policy());
 
-    /* Tasks should still be assignable (stub returns CPU 0) */
+    /* Tasks should still be assignable (AI policy picks a valid CPU) */
     irq_flags_t flags = irq_save();
     struct task *t = task_create("ai_test", nop_entry, NULL);
     TEST_ASSERT_NOT_NULL(t);
     scheduler_add_task(t);
-    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    TEST_ASSERT_MESSAGE(t->assigned_cpu < cpu_count,
+        "AI policy assigned to invalid CPU");
     scheduler_remove_task(t);
     t->id = 0;
     irq_restore(flags);
