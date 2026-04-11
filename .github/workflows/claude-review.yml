@@ -102,6 +102,8 @@ jobs:
             For overall observations, post a summary comment on the PR.
             Rate each finding as Critical, Warning, or Suggestion.
 
+          show_full_output: true
+
           claude_args: |
             --model claude-sonnet-4-20250514
             --max-turns 50
