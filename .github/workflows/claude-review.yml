@@ -28,7 +28,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: read
+  issues: write
 
 # Prevent multiple reviews running simultaneously on the same PR
 concurrency:
@@ -66,6 +66,9 @@ jobs:
             and Rust (runtime/AI subsystems). There is no libc, no Linux, no
             POSIX — everything runs on bare metal.
 
+            First, get the PR diff:
+              gh pr diff ${{ github.event.pull_request.number }}
+
             Review this PR with focus on:
 
             ## Correctness & Safety
@@ -98,12 +101,14 @@ jobs:
             - TLB invalidation after page table changes
             - Correct use of non-cacheable memory for cross-CPU shared data
 
-            If you find issues, use inline comments on the specific lines.
-            For overall observations, post a summary comment on the PR.
             Rate each finding as Critical, Warning, or Suggestion.
+
+            When done, post the review as a PR comment:
+              gh pr comment ${{ github.event.pull_request.number }} --body "<your review>"
 
           show_full_output: true
 
           claude_args: |
             --model claude-sonnet-4-20250514
             --max-turns 50
+            --dangerously-skip-permissions
