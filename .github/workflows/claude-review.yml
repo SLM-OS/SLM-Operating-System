@@ -111,4 +111,4 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-20250514
             --max-turns 50
-            --dangerously-skip-permissions
+            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(git diff:*),Bash(git log:*),Read,Glob,Grep"
