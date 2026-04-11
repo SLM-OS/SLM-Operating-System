@@ -725,6 +725,10 @@ static void test_spinlock_safe_on_jetson(void)
  */
 static void test_daif_masked_at_boot(void)
 {
+#if defined(PLATFORM_X86_64)
+    /* DAIF is ARM64-only — skip on x86-64 */
+    TEST_PASS();
+#else
     /* Read current DAIF — IRQ (bit 7) and FIQ (bit 6) should be masked.
      * They get unmasked later during scheduler start, but during tests
      * (which run before the scheduler), they may or may not be masked
@@ -737,6 +741,7 @@ static void test_daif_masked_at_boot(void)
      * We just verify the register is readable and non-garbage.
      * Only bits [9:6] should be set; other bits are RES0. */
     TEST_ASSERT_EQUAL_UINT64(0, daif & ~0x3C0ULL);
+#endif
 }
 
 /*
