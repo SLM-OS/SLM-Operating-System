@@ -210,16 +210,17 @@ SLM-OS includes a Lua demo script that exercises the AI inference pipeline.
 
 2. At the shell prompt, run the demo script:
    ```
-   SLM-OS> lua scripts/demo.lua
+   slmos> lua /mnt/files/demo.lua
    ```
 
 ### What the Demo Shows
 
-The demo script walks through the major subsystems:
+The industrial IoT demo exercises the major runtime subsystems:
 
-- **Component registration** -- Lists built-in components (sensor monitor, digit classifier)
-- **Model loading** -- Loads an ONNX MNIST model from the virtual filesystem
-- **Message-driven inference** -- Routes sensor data through the component pipeline
+- **Component lifecycle** -- Starts and manages the sensor_monitor component
+- **Message routing** -- Publishes sensor readings to `/sensors/data` via pub/sub
+- **Anomaly detection** -- Threshold monitoring triggers alerts for values above 50
+- **Live hot-swap** -- Replaces the monitoring component with zero downtime
 - **Component lifecycle** -- Demonstrates start, stop, and hot-swap of running components
 
 ---

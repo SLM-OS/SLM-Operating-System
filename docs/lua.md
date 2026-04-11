@@ -99,6 +99,18 @@ The `slm` module provides access to kernel functionality:
 | `slm.component_run(name)` | Run a built-in component, returns index or nil |
 | `slm.component_hot_swap(old, new)` | Replace component preserving subscriptions, returns index or nil |
 
+### Message Routing
+
+| Function | Description |
+|----------|-------------|
+| `slm.msg_publish(topic, data)` | Publish a message to a topic. Returns number of subscribers that received it. |
+
+### Scheduler
+
+| Function | Description |
+|----------|-------------|
+| `slm.sched_policy()` | Get current scheduler policy name (e.g., "heuristic"). |
+
 ### Model Memory
 
 | Function | Description |
