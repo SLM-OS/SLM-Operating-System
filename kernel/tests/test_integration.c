@@ -70,7 +70,13 @@ static void reset_test_state(void)
  * Task Functions for Tests
  * ============================================================================ */
 
-/* Migration test state */
+/* Migration test state.
+ * NOTE: These are in cacheable BSS, not NC memory. On Pi 5 (incoherent L2),
+ * cache_invalidate (DC CIVAC) doesn't propagate through per-core L2, so
+ * cross-CPU reads of these variables are unreliable. These tests currently
+ * fail on Pi 5 due to the secondary CPU preemption blocker (see
+ * docs/pi5-secondary-cpu-preemption.md). Moving to NC memory would fix
+ * data visibility but not the preemption issue. */
 static volatile bool migration_ready = false;
 static volatile bool migration_done = false;
 static volatile uint32_t migration_cpu_before = 0;

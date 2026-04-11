@@ -27,7 +27,14 @@
 
 /* Hardware-counter timeout helper.
  * On Pi 5, pit_ticks doesn't advance while tasks run (IRQs masked).
- * Use timer_get_count() which reads the always-running hardware counter. */
+ * Use timer_get_count() which reads the always-running hardware counter.
+ *
+ * Timeout values by component:
+ *   echo_service:    60s — waits for user-initiated messages via shell
+ *   listener:        30s — demo scenario, exits after inactivity
+ *   sensor_monitor:  30s — demo scenario, resets on each received message
+ *   digit_classifier:30s — demo scenario, resets on each inference
+ *   echo send:        5s — shell command round-trip, should be near-instant */
 static inline uint64_t hw_timeout_start(void) {
     return timer_get_count();
 }

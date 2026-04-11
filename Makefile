@@ -211,8 +211,11 @@ QEMU_MEM_LIMIT := 3G
 # Guest RAM for test QEMU — must match platform.h defaults (1G for QEMU_VIRT)
 # since DTB parsing may fail and kernel falls back to hardcoded RAM size.
 QEMU_TEST_MEMORY := $(QEMU_MEMORY)
-# Wrapper to enforce memory limit (requires systemd --user)
-QEMU_GUARD := systemd-run --user --scope -q -p MemoryMax=$(QEMU_MEM_LIMIT)
+# CPU limit for QEMU process — prevents a runaway busy-spin test from
+# pegging all host cores for the full timeout duration.
+QEMU_CPU_LIMIT := 200%
+# Wrapper to enforce memory and CPU limits (requires systemd --user)
+QEMU_GUARD := systemd-run --user --scope -q -p MemoryMax=$(QEMU_MEM_LIMIT) -p CPUQuota=$(QEMU_CPU_LIMIT)
 
 # Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
 .PHONY: kernel-test
