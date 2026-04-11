@@ -13,6 +13,7 @@
 #include "component.h"
 #include "uart.h"
 #include "sched.h"
+#include "timer.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -161,7 +162,6 @@ int msg_router_publish(const char *topic_name, const char *data)
     }
 
     int delivered = 0;
-    extern volatile uint64_t pit_ticks;
 
     for (int j = 0; j < MSG_ROUTER_MAX_SUBSCRIBERS; j++) {
         if (topic->subs[j].component_idx == -1) continue;
@@ -174,9 +174,10 @@ int msg_router_publish(const char *topic_name, const char *data)
         __atomic_store_n(&mb->ack, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&mb->ready, 1, __ATOMIC_RELEASE);
 
-        /* Wait for ack (5 second timeout) */
-        uint64_t timeout = pit_ticks + 500;
-        while (pit_ticks < timeout) {
+        /* Wait for ack (5 second timeout using hardware counter) */
+        uint64_t _ack_start = timer_get_count();
+        uint64_t _ack_limit = timer_get_frequency() * 5;
+        while ((timer_get_count() - _ack_start) < _ack_limit) {
             if (__atomic_load_n(&mb->ack, __ATOMIC_ACQUIRE)) {
                 delivered++;
                 break;

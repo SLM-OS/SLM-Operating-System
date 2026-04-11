@@ -155,13 +155,39 @@ On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite
 | 0x100 | 24KB | `task_table[MAX_TASKS]` (all task structs) |
 | ~0x6100 | ... | Available for future NC allocations |
 
-**Cross-CPU dispatch status (April 7, 2026):** Working via cooperative scheduling (WFE/SEV). NC run queues and task table in use. CPU 0 pinning removed, round-robin load balancing enabled across all 4 CPUs. Tasks dispatched to secondary CPUs complete successfully (`bench smp` validates). Timer-based preemption on secondary CPUs still under investigation (IRQ handler hang). See `docs/pi5-cross-cpu-dispatch-investigation.md` for full history.
+**Cross-CPU dispatch status (April 10, 2026):** Working via cooperative scheduling (WFE/SEV). NC run queues and task table in use. CPU 0 pinning removed, round-robin load balancing enabled across all 4 CPUs. Tasks dispatched to secondary CPUs complete successfully (`bench smp` validates). Timer-based preemption on secondary CPUs still under investigation (IRQ handler hang). CPU 0 timer preemption works via idle task `daifclr` + `wfi`. All tasks run with `DAIF.I=1` (no in-task timer preemption). Full test suite completes on Pi 5 (~14s, 5 multi-core integration test failures expected). See `docs/pi5-cross-cpu-dispatch-investigation.md` for full history.
 
 ---
 
 ## Idle Task DAIF
 
 The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry. `context.S` saves this masked DAIF into idle's context. On resume, the restored DAIF keeps IRQ masked. If the unmask is only at function entry, idle would loop forever in `wfi` with IRQ disabled.
+
+**Pi 5/Jetson platform split:** CPU 0's idle task does `daifclr` + `wfi` (timer-driven preemption). Secondary CPUs use `wfe` only (cooperative via SEV) because timer IRQs on secondary CPUs cause an exception handler hang (under investigation). This means `pit_ticks` only advances when CPU 0 is idle.
+
+---
+
+## Pi 5 Timer IRQs and pit_ticks (April 2026)
+
+**Timer IRQs do not fire while tasks run on Pi 5.** Tasks are created with `DAIF.I=1` (IRQ masked) to prevent timer ISRs from corrupting partially-restored context during `switch_to`. On QEMU, timer IRQs fire regardless of DAIF masking. On real Pi 5 hardware, `DAIF.I=1` genuinely blocks all IRQ delivery.
+
+**Consequences:**
+- `pit_ticks` (incremented by timer ISR) does NOT advance while any task is running
+- `pit_ticks` ONLY advances when the idle task runs on CPU 0 (idle does `daifclr` + `wfi`)
+- Code that polls `pit_ticks` in a `yield()` loop will work IF the task yields frequently enough for idle to run and fire timer ticks between yields
+- Code that spins without yielding will never see `pit_ticks` advance
+
+**Use `timer_get_count()` instead of `pit_ticks` for timeouts.** The hardware counter (CNTPCT_EL0) always advances regardless of IRQ state. See `hw_timeout_start()` / `hw_timeout_expired()` helpers in `component_runtime.c`.
+
+**`sched_set_policy()` must hold IRQs disabled.** The function wraps init/swap/shutdown in `irq_save`/`irq_restore`. Previously it unmasked IRQs between the pointer swap and the shutdown call, which on Pi 5 allowed a timer tick (from a pending GIC HPPIR=30) to preempt the caller. The idle task then ran with IRQs masked and CPU 0 hung.
+
+---
+
+## UART Lock on Pi 5 / Jetson
+
+On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).
+
+This is safe because secondary CPUs do not print after boot (the `secondary_init` comment at smp.c:328 documents this). All UART output during normal operation comes from CPU 0 (shell, tests, INFO logs). If secondary CPU printing is needed in the future, an NC-memory-based lock must be implemented.
 
 ---
 

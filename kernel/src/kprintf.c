@@ -18,10 +18,11 @@
 #include "kprintf.h"
 #include "uart.h"
 #include "spinlock.h"
-/* ncmem.h not included — PLATFORM_HAS_NC_MEMORY is intentionally NOT
- * defined here. The uart_lock uses standard spinlocks on all platforms.
- * Cross-CPU contention on uart_lock is handled by keeping secondary CPU
- * prints minimal and relying on natural L2 eviction timing. */
+/* ncmem.h defines PLATFORM_HAS_NC_MEMORY on Pi 5 and Jetson.
+ * On these platforms, ldaxr/stxr spinlocks deadlock because per-core L2
+ * caches are incoherent (no SMPEN). The UART lock must use __atomic_test_and_set
+ * (SWPALB) instead, which bypasses L2 and operates at the point of coherency. */
+#include "ncmem.h"
 #include "string.h"
 #include <stdint.h>
 
@@ -38,24 +39,29 @@
  * MUST be in NC memory on platforms with incoherent caches. */
 /* UART lock for thread-safe printf.
  *
- * On real ARM64 hardware (Pi 5), standard ldaxr/stxr spinlocks DON'T
- * work for cross-CPU contention because ldaxr reads from incoherent L2.
- * Use __atomic_test_and_set (SWPALB on ARM64) which operates atomically
- * at the point of coherency. On QEMU and x86, use standard spinlocks. */
+ * On Pi 5/Jetson, per-core L2 caches are incoherent (no SMPEN). Both
+ * ldaxr/stxr spinlocks AND SWPALB atomics operate through L2, so they
+ * see stale data and deadlock under cross-CPU contention.
+ *
+ * Current approach: IRQ-disable only (no cross-CPU lock). This is safe
+ * because secondary CPUs on Pi 5 only print during early boot (before
+ * scheduler start) when there's no contention. After scheduler start,
+ * all UART output is from CPU 0 (shell, tests, INFO). If secondary CPUs
+ * need to print in the future, an NC-memory-based lock should be added.
+ *
+ * NOTE: The old ldaxr/stxr spinlock caused deadlocks when secondary CPUs
+ * tried to print concurrently with CPU 0. See smp.c line 328 comment. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
-static volatile uint8_t uart_atomic_lock;
 
 #define UART_LOCK_IRQSAVE() \
     irq_flags_t _uart_flags; \
     do { \
         __asm__ volatile("mrs %0, daif" : "=r"(_uart_flags)); \
         __asm__ volatile("msr daifset, #2" ::: "memory"); \
-        while (__atomic_test_and_set(&uart_atomic_lock, __ATOMIC_ACQUIRE)) {} \
     } while(0)
 
 #define UART_UNLOCK_IRQRESTORE() \
     do { \
-        __atomic_clear(&uart_atomic_lock, __ATOMIC_RELEASE); \
         __asm__ volatile("msr daif, %0" :: "r"(_uart_flags) : "memory"); \
     } while(0)
 #else
@@ -68,7 +74,11 @@ static spinlock_t uart_lock = SPINLOCK_INIT;
     spin_unlock_irqrestore(&uart_lock, _uart_flags)
 #endif
 
-void kprintf_init_nc_lock(void) {}
+void kprintf_init_nc_lock(void)
+{
+    /* On Pi 5/Jetson: UART lock is IRQ-disable only (no cross-CPU lock).
+     * Nothing to initialize. See comment above UART_LOCK_IRQSAVE. */
+}
 
 /* ========================================================================
  * Output Abstraction

@@ -24,6 +24,7 @@
 #include "../include/cache.h"
 #include "../include/slm_ffi.h"
 #include "../include/ncmem.h"
+#include "../include/timer.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -537,6 +538,73 @@ static void test_boot_order_pmm_before_scheduler(void)
      * PMM allocations completed, THEN scheduler initialized. */
 }
 
+/*
+ * Regression: pit_ticks vs hardware counter for component timeouts.
+ *
+ * On Pi 5, tasks run with DAIF.I=1 (IRQ masked) so pit_ticks does not
+ * advance during task execution. Component timeout loops that polled
+ * pit_ticks would hang forever. The fix uses timer_get_count() (hardware
+ * counter) which always advances regardless of IRQ state.
+ *
+ * This test verifies that the hardware counter can be used for a timeout
+ * loop with yield(), simulating how components poll for timeouts.
+ */
+static void test_hw_timeout_with_yield(void)
+{
+    uint64_t start = timer_get_count();
+    uint64_t freq = timer_get_frequency();
+    uint64_t limit = freq / 10;  /* 100ms timeout */
+    int loops = 0;
+
+    while ((timer_get_count() - start) < limit) {
+        yield();
+        loops++;
+        if (loops > 1000000) {
+            /* Safety: if counter not advancing, don't spin forever */
+            break;
+        }
+    }
+
+    uint64_t elapsed = timer_get_count() - start;
+    uint64_t elapsed_ms = (elapsed * 1000) / freq;
+
+    /* Should have completed in roughly 100ms (allow 50-500ms for QEMU variance) */
+    TEST_ASSERT_MESSAGE(elapsed_ms >= 50,
+        "Hardware timer timeout completed too fast (< 50ms)");
+    TEST_ASSERT_MESSAGE(elapsed_ms <= 500,
+        "Hardware timer timeout took too long (> 500ms)");
+    TEST_ASSERT_MESSAGE(loops > 0,
+        "Timeout loop did not iterate (yield never returned)");
+}
+
+/*
+ * Regression: idle task must unmask IRQs on CPU 0.
+ *
+ * On Pi 5, the idle task previously used WFE-only for ALL CPUs (including
+ * CPU 0), which prevented timer interrupts from firing. Without timer ticks,
+ * pit_ticks never advances and uptime/sleep functions break.
+ *
+ * The fix makes CPU 0's idle task do daifclr + wfi (like QEMU), while
+ * secondary CPUs continue using WFE-only.
+ *
+ * This test verifies that timer_get_count() advances across a yield(),
+ * which requires the timer hardware to be running (started during boot).
+ */
+static void test_timer_running_after_boot(void)
+{
+    uint64_t t1 = timer_get_count();
+    yield();  /* Let at least one scheduler cycle happen */
+    uint64_t t2 = timer_get_count();
+
+    TEST_ASSERT_MESSAGE(t2 > t1,
+        "Timer counter did not advance across yield (timer not running)");
+
+    /* Verify the timer frequency is set (means timer_init completed) */
+    uint64_t freq = timer_get_frequency();
+    TEST_ASSERT_MESSAGE(freq > 0,
+        "Timer frequency is 0 (timer not initialized)");
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -560,6 +628,10 @@ int test_suite_integration(void)
 
     /* Boot order regression test (Pi 5 PMM deadlock prevention) */
     RUN_TEST(test_boot_order_pmm_before_scheduler);
+
+    /* Regression: Pi 5 timer and timeout fixes (April 2026) */
+    RUN_TEST(test_hw_timeout_with_yield);
+    RUN_TEST(test_timer_running_after_boot);
 
     return UNITY_END();
 }
