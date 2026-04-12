@@ -287,6 +287,52 @@ static int l_component_hot_swap(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.component_hot_swap_stateful(old_name, new_name) - Stateful hot-swap
+ * Exports state from old component, transfers to new.
+ * Currently supports sensor_monitor (transfers alert count).
+ * Returns new index or nil on failure.
+ */
+/* Export function registry for stateful hot-swap.
+ * Components register their export callback here. */
+struct state_export_entry {
+    const char *name;
+    component_state_export_fn fn;
+};
+
+extern int sensor_monitor_export_state(uint8_t *buf, uint32_t max_size);
+
+static const struct state_export_entry export_registry[] = {
+    { "sensor_monitor", sensor_monitor_export_state },
+    { NULL, NULL }
+};
+
+static component_state_export_fn find_export_fn(const char *name)
+{
+    for (int i = 0; export_registry[i].name; i++) {
+        const char *a = name;
+        const char *b = export_registry[i].name;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == '\0' && *b == '\0') return export_registry[i].fn;
+    }
+    return NULL;
+}
+
+static int l_component_hot_swap_stateful(lua_State *L) {
+    const char *old_name = luaL_checkstring(L, 1);
+    const char *new_name = luaL_checkstring(L, 2);
+
+    component_state_export_fn export_fn = find_export_fn(old_name);
+
+    int idx = component_hot_swap_stateful(old_name, new_name, export_fn);
+    if (idx < 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, idx);
+    }
+    return 1;
+}
+
 /* ============================================================================
  * Model Memory Bindings
  * ============================================================================ */
@@ -414,6 +460,7 @@ static const luaL_Reg slm_lib[] = {
     {"component_find", l_component_find},
     {"component_run", l_component_run},
     {"component_hot_swap", l_component_hot_swap},
+    {"component_hot_swap_stateful", l_component_hot_swap_stateful},
     /* Model memory and inference */
     {"model_stats", l_model_stats},
     {"model_find", l_model_find},

@@ -98,6 +98,7 @@ The `slm` module provides access to kernel functionality:
 | `slm.component_find(name)` | Find component by name, returns index or nil |
 | `slm.component_run(name)` | Run a built-in component, returns index or nil |
 | `slm.component_hot_swap(old, new)` | Replace component preserving subscriptions, returns index or nil |
+| `slm.component_hot_swap_stateful(old, new)` | Replace component, transfer state + subscriptions. Sensor monitor transfers alert count. |
 
 ### Message Routing
 

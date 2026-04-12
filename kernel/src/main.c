@@ -389,6 +389,7 @@ void kernel_main(void *dtb)
     {
         extern void msg_router_init(void);
         msg_router_init();
+        component_direct_init();
         INFO("  Message router: OK");
     }
 

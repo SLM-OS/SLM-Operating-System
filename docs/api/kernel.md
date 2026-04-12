@@ -768,3 +768,71 @@ Return 1 if the GPU subsystem is available, 0 otherwise.
 int slm_gpu_get_info(RustGpuInfo *info);
 ```
 Fill a `RustGpuInfo` struct with GPU device information.
+
+---
+
+## Component System (`component.h`)
+
+### Registration and Query
+
+```c
+int component_register(const char *name, const char *version, uint8_t type, uint8_t priority);
+```
+Register a new component. Returns component index on success, -1 on error.
+
+```c
+int component_run(const char *name);
+```
+Run a built-in component by name. Creates a task and links it to the component.
+
+```c
+int component_find(const char *name);
+```
+Find a component by name. Returns index or -1.
+
+### Hot-Swap
+
+```c
+int component_hot_swap(const char *old_name, const char *new_name);
+```
+Replace a running component. Saves subscriptions, unregisters old, starts new, restores subscriptions.
+
+```c
+int component_hot_swap_stateful(const char *old_name, const char *new_name,
+                                component_state_export_fn export_fn);
+```
+Stateful hot-swap: calls `export_fn` to serialize old component's state (up to 256 bytes), then performs standard hot-swap. New component retrieves state via `component_get_swap_state()` during init.
+
+```c
+uint32_t component_get_swap_state(uint8_t *buf, uint32_t max_size);
+```
+Read the state buffer from the most recent stateful hot-swap. One-shot (clears after read). Returns bytes copied, or 0 if no state.
+
+### Direct Messaging
+
+```c
+int component_direct_channel_create(int sender_idx, int receiver_idx);
+```
+Create a point-to-point message channel bypassing topic routing. Returns channel ID (>= 0).
+
+```c
+int component_direct_send(int channel, const char *data, uint32_t len);
+```
+Send a message on a direct channel. Waits for ack (2s timeout). Returns 0 on success, -2 on timeout.
+
+```c
+const char *component_direct_receive(int channel);
+```
+Poll for a pending message. Returns pointer to data or NULL.
+
+```c
+void component_direct_ack(int channel);
+```
+Acknowledge receipt of a direct message.
+
+### Large Message Publish
+
+```c
+int msg_router_publish_large(const char *topic_name, const char *data, uint32_t data_len);
+```
+Publish a large message. Currently delegates to `msg_router_publish` (copies data). Future versions will pass by reference for true zero-copy in the shared address space.
