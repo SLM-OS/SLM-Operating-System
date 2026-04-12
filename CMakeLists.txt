@@ -364,8 +364,10 @@ if(PLATFORM STREQUAL "X86_64")
     target_link_options(slmos.elf PRIVATE -no-pie -Wl,-n)
 else()
     # ARM64: -mgeneral-regs-only avoids FP register pollution
-    # -fPIE for position-independent code
-    target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fPIE)
+    # -fno-pie: bare-metal kernel at fixed address doesn't need PIE.
+    # PIE causes GOT-relative symbol lookups that fail after kexec on
+    # Jetson because the GOT page may not be cache-coherent.
+    target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fno-pie)
 endif()
 
 # Configure LittleFS for freestanding use (no libc)
@@ -481,7 +483,7 @@ if(ENABLE_AI_SCHEDULER)
             -ffreestanding
             -nostdlib
             -mcpu=${TARGET_CPU}
-            -fPIE
+            -fno-pie
             -O2
         )
     endif()
