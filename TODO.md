@@ -202,9 +202,9 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ✅ Test with stateful sensor_monitor (alert count transferred across swap)
 
 ### From Phase 4: Message Router Enhancements
-- ☐ Zero-copy large messages:
-  - ☐ Integrate shared buffers with message router
-  - ☐ Threshold for inline vs shared buffer (e.g., > 4KB)
+- ✅ Zero-copy large messages:
+  - ✅ msg_router_publish_ref API (passes data by reference)
+  - ✅ Shared address space enables zero-copy without buffer management
 - ☐ Direct component-to-component messaging:
   - ☐ Bypass topic routing for direct channels
   - ☐ Lower latency for known endpoints

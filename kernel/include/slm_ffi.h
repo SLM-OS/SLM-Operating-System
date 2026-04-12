@@ -320,6 +320,14 @@ extern int rust_model_load_builtin_mnist(void);
 extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
 
 /*
+ * Publish a large message by reference (zero-copy).
+ * Data pointer must remain valid until all subscribers acknowledge.
+ * Returns: Number of subscribers that received the message.
+ */
+extern int msg_router_publish_ref(const char *topic_name, const char *data,
+                                  uint32_t data_len);
+
+/*
  * Load an ONNX model from a buffer.
  * Returns: Registry index (>= 0) on success, -1 on error.
  */
