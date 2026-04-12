@@ -12,6 +12,13 @@
 #include "debug.h"
 #include "../gpu/gpu.h"
 #include <stddef.h>
+#include <stdint.h>
+
+/* Hard cap on per-priority capacity for msg_queue_create. The total slot
+ * count is `capacity * MSG_PRIO_COUNT`; 65536 keeps the upper bound well
+ * below any plausible working-set size while preventing DoS via huge
+ * capacities. */
+#define MSG_QUEUE_MAX_CAPACITY 65536
 
 /*
  * ==========================================================================
@@ -144,13 +151,26 @@ static struct task *wake_one(struct task **wait_queue)
 
 struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
 {
-    if (capacity == 0) {
+    if (capacity == 0 || capacity > MSG_QUEUE_MAX_CAPACITY) {
         return NULL;
     }
 
     if (msg_size == 0) {
         msg_size = MSG_SIZE_DEFAULT;
     }
+
+    /*
+     * Reject inputs that would overflow the buffer-size math below.
+     * capacity is already bounded by MSG_QUEUE_MAX_CAPACITY, so
+     * `capacity * MSG_PRIO_COUNT` cannot overflow; the remaining risk is
+     * `total_capacity * msg_size`.
+     */
+    size_t total_capacity = capacity * MSG_PRIO_COUNT;
+    if (msg_size > SIZE_MAX / total_capacity) {
+        return NULL;
+    }
+    size_t buffer_size = total_capacity * msg_size;
+    size_t pages_needed = (buffer_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
     /* Allocate queue structure (1 page is more than enough) */
     struct msg_queue *queue = pmm_alloc_page();
@@ -159,14 +179,6 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
         return NULL;
     }
     ipc_memset(queue, 0, PAGE_SIZE);
-
-    /*
-     * Calculate buffer size for all priority levels.
-     * Each priority level gets 'capacity' slots.
-     */
-    size_t total_capacity = capacity * MSG_PRIO_COUNT;
-    size_t buffer_size = total_capacity * msg_size;
-    size_t pages_needed = (buffer_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
     queue->buffer = pmm_alloc_pages(pages_needed);
     if (!queue->buffer) {

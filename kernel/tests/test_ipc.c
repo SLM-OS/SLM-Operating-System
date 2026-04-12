@@ -10,6 +10,8 @@
 #include "../include/timer.h"
 #include "../include/config.h"
 #include "../gpu/gpu.h"
+#include <stdint.h>
+#include <stddef.h>
 
 /* ========================================================================= */
 /* Message Queue Tests                                                       */
@@ -685,6 +687,32 @@ static void test_queue_stress(void)
 }
 
 /* ========================================================================= */
+/* msg_queue_create validation tests (IPC-H3, IPC-L1)                        */
+/* ========================================================================= */
+
+static void test_queue_create_zero_capacity_rejected(void)
+{
+    TEST_ASSERT_NULL(msg_queue_create(0, 0));
+}
+
+/* IPC-L1: capacity above MSG_QUEUE_MAX_CAPACITY must be rejected rather than
+ * attempting a huge allocation. 65536 is the cap; exceed it by one. */
+static void test_queue_create_capacity_cap_enforced(void)
+{
+    TEST_ASSERT_NULL(msg_queue_create((size_t)65536 + 1, 0));
+}
+
+/* IPC-H3: reject msg_size values that would overflow total buffer size.
+ * capacity * MSG_PRIO_COUNT = 4, so SIZE_MAX/4 + 1 for msg_size overflows. */
+static void test_queue_create_msg_size_overflow_rejected(void)
+{
+    /* Under the cap, so the capacity check passes; msg_size then overflows
+     * the `total_capacity * msg_size` multiply. */
+    size_t huge = SIZE_MAX / 4 + 1;
+    TEST_ASSERT_NULL(msg_queue_create(1, huge));
+}
+
+/* ========================================================================= */
 /* Test Suite Entry Point                                                    */
 /* ========================================================================= */
 
@@ -697,6 +725,11 @@ int test_suite_ipc(void)
     RUN_TEST(test_queue_nonblocking_send_recv);
     RUN_TEST(test_queue_lookup_by_id);
     RUN_TEST(test_recv_empty_queue_nonblocking);
+
+    /* Validation: zero, cap, and overflow (IPC-H3, IPC-L1) */
+    RUN_TEST(test_queue_create_zero_capacity_rejected);
+    RUN_TEST(test_queue_create_capacity_cap_enforced);
+    RUN_TEST(test_queue_create_msg_size_overflow_rejected);
 
     /* Shared buffer tests */
     RUN_TEST(test_buffer_create_destroy);

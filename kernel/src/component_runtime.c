@@ -21,6 +21,8 @@
 #include "debug.h"
 #include "arch.h"
 #include "timer.h"
+#include "pmm.h"
+#include "spinlock.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -55,19 +57,28 @@ struct component_task_ctx {
 
 extern void msg_router_unsubscribe_all(int component_idx);
 
+/*
+ * Cleanup callback invoked by task_destroy() when a component task exits.
+ * The ctx is heap-allocated per task (one page) in component_start() — this
+ * gives each task its own cleanup state, so a surviving task from an earlier
+ * component cannot fire a cleanup meant for a new component that reused the
+ * same registry slot.
+ */
 static void component_task_cleanup(void *arg)
 {
     struct component_task_ctx *ctx = (struct component_task_ctx *)arg;
-    if (ctx) {
-        /* Only clean up if this component still owns the slot (not hot-swapped) */
-        component_info_t info;
-        if (component_get_info((uint32_t)ctx->component_idx, &info) == 0 &&
-            (info.state == COMPONENT_TERMINATING || info.state == COMPONENT_RUNNING)) {
-            msg_router_unsubscribe_all(ctx->component_idx);
-            component_set_state((uint32_t)ctx->component_idx, COMPONENT_UNLOADED);
-        }
-        DEBUG_PRINT("Component %d task exited", ctx->component_idx);
+    if (!ctx) return;
+
+    /* Only clean up if this component still owns the slot (not hot-swapped) */
+    component_info_t info;
+    if (component_get_info((uint32_t)ctx->component_idx, &info) == 0 &&
+        (info.state == COMPONENT_TERMINATING || info.state == COMPONENT_RUNNING)) {
+        msg_router_unsubscribe_all(ctx->component_idx);
+        component_set_state((uint32_t)ctx->component_idx, COMPONENT_UNLOADED);
     }
+    DEBUG_PRINT("Component %d task exited", ctx->component_idx);
+
+    pmm_free_page(ctx);
 }
 
 /* ============================================================================
@@ -526,21 +537,34 @@ int component_run(const char *name)
         return -1;
     }
 
-    /* Pre-initialize echo service state (before task starts) */
+    /* Pre-initialize echo service state (before task starts). Use atomics
+     * so the new task sees `echo_running == 1` via an acquire pairing with
+     * the release store below, and so any later `__atomic_load_n(&ready)`
+     * on the sender side is guaranteed to observe the zero init. */
     if (bc->entry == echo_service_entry) {
-        echo_mailbox.ready = 0;
-        echo_mailbox.ack = 0;
-        echo_running = 1;  /* Set BEFORE task starts so send sees it immediately */
+        __atomic_store_n(&echo_mailbox.ready, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&echo_mailbox.ack, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&echo_running, 1, __ATOMIC_RELEASE);
     }
 
     /* Pin component tasks to CPU 0 so they share the scheduler with shell
      * and IPC via shared memory is immediately visible (same CPU). */
     task->cpu_affinity = 0;
 
-    /* Link task to component */
-    static struct component_task_ctx cleanup_ctxs[COMPONENT_MAX_COUNT];
-    cleanup_ctxs[comp_idx].component_idx = comp_idx;
-    task_set_cleanup(task, component_task_cleanup, &cleanup_ctxs[comp_idx]);
+    /* Link task to component. The cleanup ctx is heap-allocated per task so
+     * each task carries its own reference to the registry slot: a surviving
+     * task from an earlier generation cannot fire a cleanup against a new
+     * component that reused the same index. The page is freed inside
+     * component_task_cleanup() when the task exits. */
+    struct component_task_ctx *ctx = pmm_alloc_page();
+    if (!ctx) {
+        uart_printf("Failed to allocate cleanup ctx for component '%s'\n", name);
+        task_destroy(task);
+        component_unregister((uint32_t)comp_idx);
+        return -1;
+    }
+    ctx->component_idx = comp_idx;
+    task_set_cleanup(task, component_task_cleanup, ctx);
 
     /* Add to scheduler — don't yield here, timer preemption will start the task */
     scheduler_add_task(task);
@@ -561,18 +585,27 @@ int component_send_echo(const char *message)
         return -1;
     }
 
-    /* Copy message to shared mailbox */
+    /* Copy message to shared mailbox with plain stores. Ordering against
+     * the consumer is established by the explicit release fence below,
+     * which makes every preceding store (data bytes + ack=0) globally
+     * visible before the relaxed ready=1 store. `volatile` alone does
+     * not provide this guarantee under the C memory model. */
     size_t len = 0;
     while (message[len] && len < 63) {
-        ((volatile char *)echo_mailbox.data)[len] = message[len];
+        echo_mailbox.data[len] = message[len];
         len++;
     }
-    ((volatile char *)echo_mailbox.data)[len] = '\0';
+    echo_mailbox.data[len] = '\0';
 
-    /* Signal echo service and wait for acknowledgment.
-     * Use yield() + hardware counter timeout (5 seconds). */
-    __atomic_store_n(&echo_mailbox.ack, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&echo_mailbox.ready, 1, __ATOMIC_RELEASE);
+    /* Clear the stale ack before arming ready. Relaxed is fine — the fence
+     * below covers ordering. */
+    __atomic_store_n(&echo_mailbox.ack, 0, __ATOMIC_RELAXED);
+
+    /* Publish: release fence + relaxed store on ready. Paired with the
+     * consumer's `__atomic_load_n(&ready, __ATOMIC_ACQUIRE)` in
+     * echo_service_entry. */
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&echo_mailbox.ready, 1, __ATOMIC_RELAXED);
 
     /* Both shell and echo are IDLE priority — yield() round-robins between them */
     uint64_t send_start = hw_timeout_start();
@@ -693,12 +726,18 @@ void component_direct_init(void)
 
 /* State transfer buffer for stateful hot-swap.
  * Single global buffer — only one stateful swap can be in progress at a time.
- * This is safe because component management is single-threaded (CPU 0 only). */
+ * `swap_state_lock` serialises both the export side (component_hot_swap_stateful)
+ * and the import side (component_get_swap_state) so Lua-triggered hot-swaps
+ * running on different CPUs can't race on the buffer. */
 static component_swap_state_t swap_state_buf;
+static spinlock_t swap_state_lock = SPINLOCK_INIT;
 
 uint32_t component_get_swap_state(uint8_t *buf, uint32_t max_size)
 {
+    irq_flags_t f = spin_lock_irqsave(&swap_state_lock);
+
     if (!swap_state_buf.valid || swap_state_buf.size == 0) {
+        spin_unlock_irqrestore(&swap_state_lock, f);
         return 0;
     }
     uint32_t copy_size = swap_state_buf.size;
@@ -712,13 +751,20 @@ uint32_t component_get_swap_state(uint8_t *buf, uint32_t max_size)
     swap_state_buf.valid = 0;
     swap_state_buf.size = 0;
 
+    spin_unlock_irqrestore(&swap_state_lock, f);
     return copy_size;
 }
 
 int component_hot_swap_stateful(const char *old_name, const char *new_name,
                                 component_state_export_fn export_fn)
 {
-    /* Export state from old component before teardown */
+    /* Populate swap_state_buf under the lock. The registered export
+     * callbacks (e.g. sensor_monitor_export_state) are plain memcpy-style
+     * helpers and do not yield, so holding a spinlock-irqsave across the
+     * call is safe. component_hot_swap() runs outside the lock because it
+     * calls into the task/scheduler machinery. */
+    irq_flags_t f = spin_lock_irqsave(&swap_state_lock);
+
     swap_state_buf.valid = 0;
     swap_state_buf.size = 0;
 
@@ -727,17 +773,30 @@ int component_hot_swap_stateful(const char *old_name, const char *new_name,
         if (exported > 0 && (uint32_t)exported <= COMPONENT_STATE_MAX) {
             swap_state_buf.size = (uint32_t)exported;
             swap_state_buf.valid = 1;
-            uart_printf("Hot-swap: exported %d bytes of state\r\n", exported);
         } else if (exported > (int)COMPONENT_STATE_MAX) {
+            spin_unlock_irqrestore(&swap_state_lock, f);
             uart_puts("[WARN] Hot-swap: export callback exceeded buffer size\r\n");
+            return -1;
         }
+    }
+
+    int exported_bytes = swap_state_buf.valid ? (int)swap_state_buf.size : 0;
+
+    spin_unlock_irqrestore(&swap_state_lock, f);
+
+    if (exported_bytes > 0) {
+        uart_printf("Hot-swap: exported %d bytes of state\r\n", exported_bytes);
     }
 
     /* Delegate to existing hot-swap (saves subscriptions, unregisters, starts new) */
     int new_idx = component_hot_swap(old_name, new_name);
 
     if (new_idx < 0) {
-        swap_state_buf.valid = 0;  /* Discard state on failure */
+        /* Discard state on failure under the lock */
+        f = spin_lock_irqsave(&swap_state_lock);
+        swap_state_buf.valid = 0;
+        swap_state_buf.size = 0;
+        spin_unlock_irqrestore(&swap_state_lock, f);
     }
 
     return new_idx;
