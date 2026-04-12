@@ -52,11 +52,13 @@ Use emoji markers for task status:
 | Pending | ☐ | `- ☐ Task pending` |
 | Blocked | 🔗 | `- ☐🔗 Task — requires M4` |
 | Deferred | ⏸️ | `- ⏸️ Task — deferred to Phase 4` |
+| Tracked in issue | 🎫 | `- ☐🎫 Task — #42` |
 
 **Definitions:**
 - **Pending** ☐ — Ready to work on now
 - **Blocked** 🔗 — Waiting on dependency within this phase (combine with ☐ or ⏸️)
 - **Deferred** ⏸️ — Postponed to a future phase (e.g., "deferred to Phase 5")
+- **Tracked in issue** 🎫 — Covered by an open GitHub issue; append `— #N` with the issue number (combine with ☐/⏸️/🔗). For documents that describe a whole feature in one section (like `FUTURE.md`), put `**Tracking:** 🎫 #N` at the section level instead of on every bullet.
 
 **Correct:**
 ```markdown
@@ -65,6 +67,8 @@ Use emoji markers for task status:
 - ☐🔗 Task — requires M4 (pending, has dependency)
 - ⏸️ Task — deferred to Phase 5
 - ⏸️🔗 Task — deferred, had dependency when deferred
+- ☐🎫 Task — #42 (pending, GitHub issue opened)
+- ☐🔗🎫 Task — requires M4, tracked in #47
 ```
 
 **Incorrect:**

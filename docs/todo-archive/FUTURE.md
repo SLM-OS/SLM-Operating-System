@@ -7,30 +7,31 @@ This section documents features discussed during development that are beyond the
 | Category | Completed | Pending |
 |----------|-----------|---------|
 | **Core Infrastructure** | Buddy Allocator, TLB Shootdown, UART Sync | User/Kernel Separation |
-| **Filesystem** | LittleFS, VFS, File Commands, Help System | eMMC/SD, Persistent Config |
+| **Filesystem** | LittleFS, VFS, File Commands, Help System | eMMC/SD, Persistent Config (🎫 #35) |
 | **IPC** | Priority Queues, Priority Inheritance Mutex | - |
 | **Scheduling** | Deadline Scheduler, Priority Inheritance, ELF Loader | Real-Time Guarantees (RMS) |
 | **Shell** | Working Directory, Path Resolution, 30+ Commands, Lua Scripting | POSIX Shell |
 | **Components** | Component System, Model Memory, GPU Stub | Sandboxing, Secure Boot |
-| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU), Pi 5 UART, Jetson EL2 Boot, GPU Probe | Jetson GPU Compute (GSP), USB Serial, Networking (Jetson), SMP (needs UEFI boot) |
+| **Hardware** | DTB Parser, PE/COFF Boot Header, CI/CD, Networking (QEMU), Pi 5 Port (UART/GIC/timer/SMP), Jetson EL2 Boot, Jetson SMP (6-core via PSCI), GPU Probe | Jetson GPU Compute (GSP), USB Serial, Networking (Jetson), Jetson UEFI direct boot |
 
-**Completed Features:** 26
-**Pending Features:** 11
+**Completed Features:** 28
+**Pending Features:** 14
 
 ---
 
 ### USB Serial Console (TinyUSB + Tegra XUSB)
 
+**Tracking:** 🎫 #24
 **Status:** ☐ Unblocked (April 2026) — CBB firewall bypassed via EL2+VHE. See `docs/jetson-el2-bringup.md`.
 
 Eliminate external UART adapter by implementing USB CDC-ACM device mode.
 
-- ⛔ Study Tegra XUSB device controller (`xudc@3550000`) and Linux `tegra-xudc.c` driver — BLOCKED
-- ⛔ Initialize XUSB PHY, PLLs, and power rails from bare metal — Unblocked (CBB bypassed via EL2, April 2026)
-- ⛔ Write Tegra XUSB Device Controller Driver (DCD) for TinyUSB — BLOCKED
-- ☐ Integrate TinyUSB CDC-ACM class with MicroShell — platform-independent, can proceed
-- ⛔ Test enumeration on Linux/Windows/macOS hosts — BLOCKED on Jetson
-- ⛔ Remove external UART adapter requirement from hardware setup — BLOCKED
+- ☐ Study Tegra XUSB device controller (`xudc@3550000`) and Linux `tegra-xudc.c` driver
+- ☐ Initialize XUSB PHY, PLLs, and power rails from bare metal
+- ☐ Write Tegra XUSB Device Controller Driver (DCD) for TinyUSB
+- ☐ Integrate TinyUSB CDC-ACM class with MicroShell
+- ☐ Test enumeration on Linux/Windows/macOS hosts
+- ☐ Remove external UART adapter requirement from hardware setup
 
 **Effort:** 3-5 weeks (CBB resolved via EL2)
 **Value:** Clean single-cable connection, professional demo setup
@@ -64,6 +65,9 @@ Add current working directory support and relative path resolution.
 ---
 
 ### Full POSIX Shell
+
+**Tracking:** 🎫 #33
+
 Replace MicroShell with a real shell supporting scripting, pipes, and job control.
 
 - ☐ Implement `fork()` system call (process duplication)
@@ -124,6 +128,9 @@ Embed Lua interpreter for runtime scripting and configuration.
 ---
 
 ### User/Kernel Privilege Separation
+
+**Tracking:** 🎫 #29
+
 Implement proper privilege levels for security and stability.
 
 - ☐ Configure ARM64 EL0 (user) vs EL1 (kernel) transitions
@@ -141,6 +148,9 @@ Implement proper privilege levels for security and stability.
 ---
 
 ### Component Sandboxing
+
+**Tracking:** 🎫 #30
+
 Isolate components from each other and from kernel.
 
 - ☐ Per-component address spaces (separate page tables)
@@ -157,6 +167,8 @@ Isolate components from each other and from kernel.
 ---
 
 ### Secure Boot Chain
+
+**Tracking:** 🎫 #31
 
 **Note:** Secure boot integration is a potential solution to the CBB firewall blocker. If SLM-OS were signed and integrated into the Jetson secure boot chain, it might receive proper CBB permissions. See `docs/jetson-nvidia-support.md`.
 
@@ -180,6 +192,9 @@ Verify system integrity from power-on through component loading.
 ---
 
 ### Encrypted Model Storage
+
+**Tracking:** 🎫 #32
+
 Protect model weights at rest and during loading.
 
 - ☐ Implement AES-256 decryption for model files
@@ -195,6 +210,9 @@ Protect model weights at rest and during loading.
 ---
 
 ### Distributed Operation
+
+**Tracking:** 🎫 #42
+
 Run SLM-OS across multiple boards for larger workloads.
 
 - ☐ Design distributed component communication protocol
@@ -211,6 +229,9 @@ Run SLM-OS across multiple boards for larger workloads.
 ---
 
 ### Dynamic Model Compilation
+
+**Tracking:** 🎫 #38
+
 JIT-compile or optimize models for target hardware at load time.
 
 - ☐ Integrate TensorRT or similar optimization framework
@@ -225,6 +246,9 @@ JIT-compile or optimize models for target hardware at load time.
 ---
 
 ### Advanced Power Management
+
+**Tracking:** 🎫 #39
+
 Optimize power consumption for battery/thermal-constrained deployments.
 
 - ☐ Implement CPU frequency scaling (DVFS)
@@ -295,9 +319,9 @@ TCP/IP networking for QEMU with lwIP stack and VirtIO-Net driver.
   - Help files for all network commands
 
 **Remaining (not implemented):**
-- ⛔ Write Jetson Ethernet driver (EQOS controller) — Unblocked (CBB bypassed via EL2, April 2026)
-- ☐ REST API for remote component management
-- ☐ Network console (telnet/SSH alternative)
+- ☐🎫 Write Jetson Ethernet driver (EQOS controller) — Unblocked (CBB bypassed via EL2, April 2026) — #25
+- ☐🎫 REST API for remote component management — #43
+- ☐🎫 Network console (telnet/SSH alternative) — #44
 
 **Effort:** 1 week (QEMU), 2-3 weeks (Jetson if CBB resolved)
 **Value:** Remote access, distributed systems, OTA updates
@@ -382,6 +406,9 @@ Fix garbled output during concurrent multi-core prints.
 ---
 
 ### Real-Time Guarantees
+
+**Tracking:** 🎫 #34
+
 Formal real-time scheduling with provable bounds.
 
 - ☐ Implement Rate Monotonic Scheduling (RMS) policy option
@@ -397,6 +424,9 @@ Formal real-time scheduling with provable bounds.
 ---
 
 ### Development SDK & Tooling
+
+**Tracking:** 🎫 #40
+
 Make it easy for others to develop SLM-OS components.
 
 - ☐ Component project template (Cargo/CMake)
@@ -412,6 +442,9 @@ Make it easy for others to develop SLM-OS components.
 ---
 
 ### Component Marketplace Concept
+
+**Tracking:** 🎫 #41
+
 Infrastructure for sharing and deploying SLM components.
 
 - ☐ Component registry specification (metadata, versioning)
@@ -428,6 +461,9 @@ Infrastructure for sharing and deploying SLM components.
 ---
 
 ### Demand Paging for Model Memory
+
+**Tracking:** 🎫 #36
+
 Lazy allocation and swap support for large models.
 
 - ☐ Implement lazy allocation (map on first access via page fault)
@@ -442,6 +478,7 @@ Lazy allocation and swap support for large models.
 
 ### GPU Memory Integration
 
+**Tracking:** 🎫 #27
 **Status:** ☐ Partially unblocked — GPU registers accessible from EL2 (probe working). GSP firmware loading pending. See `docs/jetson-el2-bringup.md`.
 
 Enable GPU access to model memory regions.
@@ -459,6 +496,9 @@ Enable GPU access to model memory regions.
 ---
 
 ### Multi-Model Management
+
+**Tracking:** 🎫 #37
+
 Support multiple loaded models with intelligent eviction.
 
 - ☐ Model registry: track loaded models by name/ID
@@ -473,6 +513,7 @@ Support multiple loaded models with intelligent eviction.
 
 ### TensorRT/CUDA Integration (Phase 5)
 
+**Tracking:** 🎫 #28
 **Status:** ⛔ BLOCKED on Jetson — Multiple blockers. See `docs/jetson-nvidia-support.md`.
 
 Actual GPU inference acceleration.
@@ -494,21 +535,29 @@ Actual GPU inference acceleration.
 
 ---
 
-### Raspberry Pi 5 Port
+### Raspberry Pi 5 Port ✅
 Second platform target for broader hardware support.
 
-- ☐ BCM2712 UART driver
-- ☐ BCM2712 interrupt controller driver
-- ☐ BCM2712 timer driver
-- ☐ VideoCore VII GPU stub (or actual integration)
-- ☐ Platform detection and conditional initialization
+- ✅ BCM2712 UART driver (PL011 at 0x107D001000, GPIO 14/15 mux)
+- ✅ BCM2712 interrupt controller driver (GIC-400)
+- ✅ BCM2712 timer driver (generic ARM generic timer)
+- ✅ VideoCore VII GPU stub (uses `gpu_stub.c`)
+- ✅ Platform detection and conditional initialization (`PLATFORM_RASPI5` in `platform.h`, `boot.S`, `vmm.c`, etc.)
+- ✅ SMP bring-up: 4-core boot via PSCI CPU_ON
+- ✅ NC memory region at 0xFFE00000 for cross-CPU shared data (runqueues, task table)
+- ✅ Cooperative WFE/SEV dispatch to secondary CPUs; `bench smp` validates
+- ✅ Deploy workflow via `labctl sdwire_update` + `kernel_2712.img`
 
 **Effort:** 2-3 weeks
 **Value:** Demonstrates platform abstraction, cheaper dev hardware
+**Status:** Complete (March–April 2026). See `docs/pi5-*` and memory `pi5_l2_cache_smpen.md`.
 
 ---
 
 ### EFI Stub Boot
+
+**Tracking:** 🎫 #47 (boot services integration) · 🎫 #26 (Jetson UEFI direct boot — PE/COFF `.reloc`)
+
 Boot directly from UEFI without U-Boot.
 
 - ✅ Implement PE/COFF header for EFI loading
@@ -517,9 +566,9 @@ Boot directly from UEFI without U-Boot.
   - PE32+ optional header with proper ARM64 machine type
   - Section headers for .text (code + data)
   - Works with UEFI firmware that loads ARM64 PE binaries
-- ☐ EFI boot services for memory map (deferred)
-- ☐ Exit boot services and take over hardware (deferred)
-- ☐ Parse ACPI/DTB from EFI configuration table (deferred)
+- ☐🎫 EFI boot services for memory map — #47
+- ☐🎫 Exit boot services and take over hardware — #47
+- ☐🎫 Parse ACPI/DTB from EFI configuration table — #47
 
 **Effort:** 1-2 weeks (remaining items)
 **Value:** Simpler boot chain, faster boot time
@@ -547,8 +596,8 @@ Automated testing and deployment.
   - `semihosting_exit(code)` - exits QEMU with specified code
   - Test harness calls semihosting_exit() after all tests complete
   - Eliminates timeout-based test detection
-- ☐ Coverage tracking (deferred)
-- ☐ Real hardware test farm (deferred - requires physical Jetson setup)
+- ☐🎫 Coverage tracking — #45
+- ☐🎫 Real hardware test farm — #46
 
 **Effort:** 1 week (basic), 2-3 weeks (with hardware)
 **Value:** Catch regressions early, professional development workflow
