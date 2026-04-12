@@ -235,6 +235,50 @@ int component_hot_swap_stateful(const char *old_name, const char *new_name,
 uint32_t component_get_swap_state(uint8_t *buf, uint32_t max_size);
 
 // =============================================================================
+// Direct Messaging
+// =============================================================================
+
+/**
+ * Initialize direct messaging channels. Called during boot.
+ */
+void component_direct_init(void);
+
+/**
+ * Create a direct message channel between two components.
+ * Bypasses topic routing for lower latency.
+ *
+ * @param sender_idx Sending component index
+ * @param receiver_idx Receiving component index
+ * @return Channel ID (>= 0) on success, -1 on error
+ */
+int component_direct_channel_create(int sender_idx, int receiver_idx);
+
+/**
+ * Send a message on a direct channel. Waits for acknowledgement.
+ *
+ * @param channel Channel ID from component_direct_channel_create()
+ * @param data Message data
+ * @param len Data length
+ * @return 0 on success, -1 on invalid channel, -2 on timeout
+ */
+int component_direct_send(int channel, const char *data, uint32_t len);
+
+/**
+ * Check for a pending message on a direct channel.
+ *
+ * @param channel Channel ID
+ * @return Pointer to message data, or NULL if no message
+ */
+const char *component_direct_receive(int channel);
+
+/**
+ * Acknowledge receipt of a direct message.
+ *
+ * @param channel Channel ID
+ */
+void component_direct_ack(int channel);
+
+// =============================================================================
 // State Management
 // =============================================================================
 

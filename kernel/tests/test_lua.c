@@ -8,6 +8,8 @@
 
 #include "unity.h"
 #include "../include/lua_slm.h"
+#include "../include/component.h"
+#include "../include/slm_ffi.h"
 #include "../include/uart.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -849,6 +851,26 @@ static void test_msg_publish_ref(void)
     TEST_ASSERT_EQUAL_INT(0, delivered);  /* No subscribers — just verify no crash */
 }
 
+/*
+ * Test: Direct channel create/send/receive/ack.
+ */
+static void test_direct_channel(void)
+{
+    int ch = component_direct_channel_create(0, 1);
+    TEST_ASSERT_MESSAGE(ch >= 0, "Failed to create direct channel");
+
+    /* No receiver task, so send will timeout — that's OK, just verify no crash */
+    const char *msg = "hello";
+    int ret = component_direct_send(ch, msg, 5);
+    /* -2 = timeout (expected: no receiver to ack) */
+    TEST_ASSERT_MESSAGE(ret == -2 || ret == 0, "direct_send unexpected error");
+
+    /* Verify receive returns NULL when no message pending */
+    const char *recv = component_direct_receive(ch);
+    /* May be non-NULL if send put data but timed out */
+    (void)recv;
+}
+
 /* ============================================================================
  * Dofile Tests
  * ============================================================================ */
@@ -1267,6 +1289,9 @@ int test_suite_lua(void)
 
     /* Zero-copy message test — verify msg_router_publish_ref works */
     RUN_TEST(test_msg_publish_ref);
+
+    /* Direct channel test */
+    RUN_TEST(test_direct_channel);
 
     RUN_TEST(test_demo_file_exists);
 

@@ -586,6 +586,85 @@ int msg_router_publish_ref(const char *topic_name, const char *data,
     return msg_router_publish((const uint8_t *)topic_name, (const uint8_t *)data);
 }
 
+/*
+ * Direct component-to-component message channel.
+ * Bypasses topic routing for known endpoints, providing lower latency
+ * than the publish/subscribe path. Uses a simple shared mailbox per
+ * registered channel.
+ */
+#define DIRECT_CHANNEL_MAX 4
+#define DIRECT_MSG_MAX 64
+
+struct direct_channel {
+    int sender_idx;
+    int receiver_idx;
+    volatile uint32_t ready;
+    volatile uint32_t ack;
+    char data[DIRECT_MSG_MAX];
+};
+
+static struct direct_channel direct_channels[DIRECT_CHANNEL_MAX];
+
+int component_direct_channel_create(int sender_idx, int receiver_idx)
+{
+    for (int i = 0; i < DIRECT_CHANNEL_MAX; i++) {
+        if (direct_channels[i].sender_idx == -1) {
+            direct_channels[i].sender_idx = sender_idx;
+            direct_channels[i].receiver_idx = receiver_idx;
+            direct_channels[i].ready = 0;
+            direct_channels[i].ack = 0;
+            return i;
+        }
+    }
+    return -1;  /* No free channels */
+}
+
+int component_direct_send(int channel, const char *data, uint32_t len)
+{
+    if (channel < 0 || channel >= DIRECT_CHANNEL_MAX) return -1;
+    struct direct_channel *ch = &direct_channels[channel];
+    if (ch->sender_idx == -1) return -1;
+
+    uint32_t copy = len < DIRECT_MSG_MAX ? len : DIRECT_MSG_MAX - 1;
+    for (uint32_t i = 0; i < copy; i++) ch->data[i] = data[i];
+    ch->data[copy] = '\0';
+
+    __atomic_store_n(&ch->ack, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&ch->ready, 1, __ATOMIC_RELEASE);
+
+    /* Wait for ack with hardware counter timeout */
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 2;
+    while ((timer_get_count() - start) < limit) {
+        if (__atomic_load_n(&ch->ack, __ATOMIC_ACQUIRE)) return 0;
+        yield();
+    }
+    return -2;  /* Timeout */
+}
+
+const char *component_direct_receive(int channel)
+{
+    if (channel < 0 || channel >= DIRECT_CHANNEL_MAX) return NULL;
+    struct direct_channel *ch = &direct_channels[channel];
+    if (!__atomic_load_n(&ch->ready, __ATOMIC_ACQUIRE)) return NULL;
+    return ch->data;
+}
+
+void component_direct_ack(int channel)
+{
+    if (channel < 0 || channel >= DIRECT_CHANNEL_MAX) return;
+    __atomic_store_n(&direct_channels[channel].ready, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&direct_channels[channel].ack, 1, __ATOMIC_RELEASE);
+}
+
+void component_direct_init(void)
+{
+    for (int i = 0; i < DIRECT_CHANNEL_MAX; i++) {
+        direct_channels[i].sender_idx = -1;
+        direct_channels[i].receiver_idx = -1;
+    }
+}
+
 /* State transfer buffer for stateful hot-swap */
 static component_swap_state_t swap_state_buf;
 

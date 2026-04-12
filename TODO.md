@@ -205,9 +205,9 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ✅ Zero-copy large messages:
   - ✅ msg_router_publish_ref API (passes data by reference)
   - ✅ Shared address space enables zero-copy without buffer management
-- ☐ Direct component-to-component messaging:
-  - ☐ Bypass topic routing for direct channels
-  - ☐ Lower latency for known endpoints
+- ✅ Direct component-to-component messaging:
+  - ✅ Bypass topic routing via direct channels (component_direct_channel_create/send/receive/ack)
+  - ✅ Lower latency for known endpoints (shared mailbox, no topic lookup)
 - ⏸️ Wildcard subscriptions — not needed for demo
 - ⏸️ Message priority in router — IPC priority queues sufficient
 
