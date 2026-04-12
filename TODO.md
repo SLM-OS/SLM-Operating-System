@@ -133,7 +133,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 ### Platform Comparison
 - ✅ Create comparison table:
   - ✅ QEMU ARM64 vs QEMU x86-64 vs Pi 5 (in docs/benchmarks.md)
-  - ☐ Pi 5 vs Jetson vs x86-64 PC
+  - ✅ Pi 5 vs Jetson vs x86-64 (docs/benchmarks.md comparison table)
 - ✅ Document platform-specific optimizations (docs/benchmarks.md boot phase breakdown + optimization opportunities)
 - ✅ Identify bottlenecks per platform (Pi 5: SMP boot 600ms, UART output dominates pipeline latency)
 
@@ -167,7 +167,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ✅ Platform setup guides (all in docs/getting-started.md):
   - ✅ QEMU setup
   - ✅ Raspberry Pi 5 setup
-  - ☐ Jetson Orin Nano setup — needs update for kexec workflow
+  - ✅ Jetson Orin Nano setup (slmos-kexec script, GPU suspend, -fno-pie fix)
   - ✅ x86-64 setup
 - ✅ Component development tutorial (`docs/tutorials/component.md` — from Phase 5)
 - ✅ Model preparation guide (`docs/tutorials/models.md` — from Phase 5)

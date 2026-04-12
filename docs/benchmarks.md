@@ -171,14 +171,17 @@ BSS varies by platform due to: task table size (NC vs BSS), per-CPU data, platfo
 
 Emulated benchmarks on the same host. QEMU ARM64 emulates Cortex-A76; QEMU x86-64 uses host CPU passthrough. Numbers reflect emulation overhead, not native hardware performance.
 
-| Metric | QEMU ARM64 | QEMU x86-64 | Pi 5 (native) |
-|--------|-----------|-------------|---------------|
-| Context switch | ~807 ns | ~1,332 ns | **1,858 ns** |
-| IPC round-trip | ~1,709 ns | ~761 ns | **132 ns** |
-| Buffer write | 9.7 GB/s | 21.0 GB/s | **45.8 GB/s** |
-| Buffer read | 8.2 GB/s | 14.1 GB/s | **48.1 GB/s** |
-| Binary size | 973 KB | 610 KB | 824 KB |
-| Tests passing | 620+ (all) | 426/434 | 615+/620+ |
+| Metric | QEMU ARM64 | QEMU x86-64 | Pi 5 (native) | Jetson (native) |
+|--------|-----------|-------------|---------------|-----------------|
+| Context switch | ~807 ns | ~1,332 ns | **1,858 ns** | **3,601 ns** |
+| IPC round-trip | ~1,709 ns | ~761 ns | **132 ns** | **60 ns** |
+| Buffer write | 9.7 GB/s | 21.0 GB/s | **45.8 GB/s** | **35.1 GB/s** |
+| Buffer read | 8.2 GB/s | 14.1 GB/s | **48.1 GB/s** | **68.8 GB/s** |
+| IRQ latency | — | — | **1.7 us** | **3.7 us** |
+| MNIST inference | — | — | **1,092 us** | **746 us** |
+| Binary size | 973 KB | 610 KB | 824 KB | 893 KB |
+| CPUs | 4 | 4 | 4 | 6 |
+| RAM | 1 GB | 256 MB | 4 GB | 8 GB |
 
 QEMU numbers vary between runs due to host load and emulation non-determinism. Pi 5 native numbers are the authoritative measurements for capstone evaluation.
 
@@ -301,15 +304,14 @@ x86-64 failures: 8 platform-specific tests (PIC, PCI, GPU commands not implement
 
 Measured on Jetson Orin Nano running Linux 5.15.148-tegra (6x Cortex-A78AE @ 1.5 GHz, 8 GB). Note: different hardware than Pi 5, but both are ARM64. Linux numbers represent a production JetPack deployment, not a minimal kernel.
 
-| Metric | SLM-OS (Pi 5) | Linux (Jetson) | Ratio |
-|--------|---------------|---------------|-------|
-| Context switch (pipe) | **1.858 us** | 13.6 us | **7.3x faster** |
-| IPC round-trip (UDS) | **132 ns** (msg queue) | 23.7 us (Unix socket) | **180x faster** |
-| Boot to shell | **~1.6 s** | 20.8 s (7.3s kernel + 13.5s userspace) | **13x faster** |
-| Kernel binary | **824 KB** | 41.1 MB | **51x smaller** |
-| Memory at boot | **387 MB** used | 498 MB used | **1.3x less** |
-| AI inference (MNIST) | **1.09 ms** | 0.117 ms (ONNX Runtime) | 9.3x slower* |
-| AI scheduler decision | **41.9 us** | N/A | — |
+| Metric | SLM-OS (Pi 5) | SLM-OS (Jetson) | Linux (Jetson) | SLM-OS vs Linux |
+|--------|---------------|-----------------|---------------|-----------------|
+| Context switch | **1.858 us** | **3.601 us** | 13.6 us (pipe) | **3.8x faster** |
+| IPC round-trip | **132 ns** | **60 ns** | 23.7 us (UDS) | **395x faster** |
+| Boot to shell | **~1.6 s** | ~3 s | 20.8 s | **7x faster** |
+| Kernel binary | **824 KB** | **893 KB** | 41.1 MB | **46x smaller** |
+| MNIST inference | **1.09 ms** | **0.746 ms** | 0.117 ms (ONNX RT) | 6.4x slower* |
+| CPUs | 4 | 6 | 6 | Same |
 
 *\* ONNX Runtime uses optimized BLAS (OpenBLAS/LAPACK) with cache-optimized tiling and multi-threaded matmul. SLM-OS uses a single-threaded NEON matmul without tiling. The inference engine is functionally correct and deterministic (8 µs jitter), but not performance-competitive with production inference runtimes. Optimization is documented in docs/future-work.md.*
 
