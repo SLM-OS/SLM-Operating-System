@@ -238,9 +238,10 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ⏸️ Profile inference engine on all platforms — documented in future-work.md profiler
 - ✅ NEON SIMD for ARM64 MatMul (4-wide float32x4_t, vfmaq_f32)
 - ✅ SSE fallback for x86-64
-- ⏸️ Advanced optimizations (tiling, multi-threaded matmul) — post-capstone
+- ✅ SIMD optimization: NEON for all ops (relu, add, softmax, matmul), cache-tiled matmul, im2col conv2d
 - ✅ FP16 weight loading: auto-converts FP16→FP32 at load time (IEEE 754 compliant)
-- ⏸️ INT8 quantization — post-capstone
+- ✅ FP16 native inference: TensorElemType, FP16 tensor descriptors, on-the-fly row conversion in matmul
+- ✅ INT8 quantization: quantize_fp32_to_int8(), INT8 matmul with INT32 accumulator, dequantize to FP32
 
 ### Memory Optimization
 - ✅ Weight sharing across components (refcounted 2MB blocks, share_weights/unshare API)

@@ -160,6 +160,13 @@ Run model loader tests. Returns the number of failures.
 
 Executes ONNX computation graphs using a bump-allocated workspace. Supports MatMul, Add, Relu, Softmax, Conv, MaxPool, Reshape, and Flatten operators.
 
+**SIMD Optimization:** All operators use NEON SIMD on AArch64 (4-wide float32x4_t). MatMul uses cache-friendly 32×32 tiling for large matrices. Conv2D uses im2col to reshape convolution into a single matmul call. Scalar fallback on x86-64 and other architectures (SSE intrinsics trigger an LLVM code generation crash on `x86_64-unknown-none` due to the soft-float target — see runtime/src/inference/ops.rs for details).
+
+**Precision Support:**
+- FP32: Default, all operators
+- FP16: Weight tensors can be stored as 16-bit (`TensorElemType::Float16`). MatMul converts FP16 weight rows to FP32 on-the-fly using a scratch buffer (halves weight memory, same compute precision). Native NEON FP16 compute (`float16x8_t`) deferred until Rust stabilizes `f16` (tracking issue rust-lang/rust#116909).
+- INT8: Quantized matmul with INT32 accumulation and FP32 dequantized output. `quantize_fp32_to_int8()` for post-training quantization with min/max calibration. Asymmetric quantization (scale + zero_point per tensor, stored in `QuantParams`).
+
 ```rust
 pub unsafe extern "C" fn rust_infer(
     model_index: u32, input_data: *const f32, input_len: usize,

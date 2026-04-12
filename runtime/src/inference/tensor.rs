@@ -6,15 +6,36 @@
 /// Maximum tensor dimensions.
 pub const MAX_DIMS: usize = 8;
 
+/// Element type for tensor data.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum TensorElemType {
+    Float32 = 0,
+    Float16 = 1,
+    Int8 = 2,
+}
+
+/// Quantization parameters for INT8 tensors.
+///
+/// Maps between INT8 and FP32: `real_value = scale * (int8_value - zero_point)`
+#[derive(Clone, Copy, Debug)]
+pub struct QuantParams {
+    pub scale: f32,
+    pub zero_point: i8,
+}
+
 /// A non-owning tensor descriptor.
 ///
-/// Points to FP32 data stored in workspace or weight memory blocks.
-/// ~44 bytes on 64-bit (pointer + 8×u32 + u8).
+/// Points to data stored in workspace or weight memory blocks.
+/// Supports FP32 (default) and FP16 (weights loaded from FP16 ONNX models
+/// when `skip_fp16_conversion` is enabled in the loader).
 #[derive(Clone, Copy)]
 pub struct Tensor {
     pub data: *const f32,
     pub shape: [u32; MAX_DIMS],
     pub ndim: u8,
+    pub elem_type: TensorElemType,
+    pub quant: QuantParams,
 }
 
 // SAFETY: Tensor is just a pointer + shape metadata. The underlying data
@@ -28,9 +49,11 @@ impl Tensor {
         data: core::ptr::null(),
         shape: [0; MAX_DIMS],
         ndim: 0,
+        elem_type: TensorElemType::Float32,
+        quant: QuantParams { scale: 1.0, zero_point: 0 },
     };
 
-    /// Create a tensor from a data pointer and shape.
+    /// Create a tensor from a data pointer and shape (FP32).
     pub fn new(data: *const f32, shape: &[u32]) -> Self {
         let mut t = Self::EMPTY;
         t.data = data;
@@ -40,6 +63,43 @@ impl Tensor {
         }
         t.ndim = ndim as u8;
         t
+    }
+
+    /// Create an FP16 tensor. Data pointer is cast from *const u16.
+    pub fn new_fp16(data: *const u16, shape: &[u32]) -> Self {
+        let mut t = Self::EMPTY;
+        t.data = data as *const f32; // stored as raw pointer, interpreted based on elem_type
+        t.elem_type = TensorElemType::Float16;
+        let ndim = core::cmp::min(shape.len(), MAX_DIMS);
+        for i in 0..ndim {
+            t.shape[i] = shape[i];
+        }
+        t.ndim = ndim as u8;
+        t
+    }
+
+    /// Create an INT8 quantized tensor.
+    pub fn new_int8(data: *const i8, shape: &[u32], scale: f32, zero_point: i8) -> Self {
+        let mut t = Self::EMPTY;
+        t.data = data as *const f32;
+        t.elem_type = TensorElemType::Int8;
+        t.quant = QuantParams { scale, zero_point };
+        let ndim = core::cmp::min(shape.len(), MAX_DIMS);
+        for i in 0..ndim {
+            t.shape[i] = shape[i];
+        }
+        t.ndim = ndim as u8;
+        t
+    }
+
+    /// Whether this tensor holds FP16 data.
+    pub fn is_fp16(&self) -> bool {
+        self.elem_type == TensorElemType::Float16
+    }
+
+    /// Whether this tensor holds INT8 quantized data.
+    pub fn is_int8(&self) -> bool {
+        self.elem_type == TensorElemType::Int8
     }
 
     /// Total number of elements.
@@ -54,9 +114,14 @@ impl Tensor {
         total
     }
 
-    /// Size in bytes (FP32).
+    /// Size in bytes.
     pub fn size_bytes(&self) -> usize {
-        self.num_elements() * 4
+        let elem_size = match self.elem_type {
+            TensorElemType::Float32 => 4,
+            TensorElemType::Float16 => 2,
+            TensorElemType::Int8 => 1,
+        };
+        self.num_elements() * elem_size
     }
 
     /// Get a mutable pointer to the data (for writing output tensors).
