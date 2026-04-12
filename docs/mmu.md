@@ -590,8 +590,9 @@ The VMM tests in `kernel/tests/test_vmm.c` include functional TLB tests that ver
 3. **test_remap_with_range_invalidation** — Same test using `vmm_invalidate_tlb_range()`
 4. **test_sequential_remaps** — Remaps VA through PA1→PA2→PA3→PA1
 5. **test_rapid_remap_stress** — 50 rapid remap cycles with verification
+6. **test_public_remap_invalidates_tlb** — Exercises `vmm_unmap_block`/`vmm_map_block` through the public API without any caller-side TLB invalidation; confirms the public map API performs the TLB invalidation itself.
 
-These tests use helper functions to manipulate page tables without automatic TLB invalidation, proving that explicit invalidation is necessary and working.
+Tests 1-5 use helper functions to manipulate page tables without automatic TLB invalidation, proving that explicit invalidation is necessary and working. Test 6 validates that the public mapping API preserves this invariant internally.
 
 ---
 

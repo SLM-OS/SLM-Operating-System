@@ -241,6 +241,9 @@ set(TEST_SOURCES
     kernel/tests/test_pmm.c
     kernel/tests/test_littlefs.c
     kernel/tests/test_x86_boot.c
+    kernel/tests/test_elf.c
+    # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # ARM64-specific test files (use inline asm not available on x86-64)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_scheduler.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_mem.c>

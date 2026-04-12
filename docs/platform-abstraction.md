@@ -534,9 +534,7 @@ The Pi 5's GPIO and UART are on the RP1 chip, connected via PCIe:
 
 1. **UART flag register:** Reading UART_FR causes data abort. The driver uses blind writes with delay.
 
-2. **Spinlocks:** ARM exclusive monitor operations (LDAXR/STXR) hang. `SPINLOCK_SKIP_LOCKING` is defined for Pi 5.
-
-3. **Single-core only:** Due to spinlock limitation, multi-core support is not available.
+2. **Spinlocks before MMU enable:** ARM exclusive monitor operations (LDAXR/STXR) require cacheable memory, which is not available before MMU enable. A runtime flag `spinlock_hw_enabled` (declared in `spinlock.h`, set by `vmm_init()` after MMU enable) gates real atomic locking. Pre-MMU, spinlocks are barrier-only; post-MMU, they use full ldaxr/stxr sequences. SMP is live.
 
 ### Serial Console
 

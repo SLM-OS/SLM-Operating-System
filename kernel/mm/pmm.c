@@ -31,6 +31,11 @@ extern char __kernel_end;
 #define MAX_ORDER       18          /* Maximum order: 2^18 = 262144 pages (1 GB) */
 #define MIN_BLOCK_SIZE  PAGE_SIZE   /* Minimum allocation: 4 KB */
 
+/* Allocation-failure sentinel returned by the internal buddy helpers.
+ * PA 0 is a legitimate page address (e.g. Pi 5 RAM_BASE = 0x0) once the
+ * kernel image is placed above it, so 0 cannot be reused as "failure". */
+#define PMM_ALLOC_FAIL  ((uintptr_t)-1)
+
 /* Block states for tracking */
 #define BLOCK_FREE      0
 #define BLOCK_ALLOCATED 1
@@ -129,7 +134,9 @@ static inline size_t order_to_size(unsigned int order)
  */
 static inline size_t addr_to_block_index(uintptr_t addr)
 {
-    return (addr - buddy_state.heap_start) >> PAGE_SHIFT;
+    size_t idx = (addr - buddy_state.heap_start) >> PAGE_SHIFT;
+    ASSERT(idx < MAX_BLOCKS);
+    return idx;
 }
 
 /*
@@ -208,7 +215,7 @@ static uintptr_t free_list_pop(unsigned int order)
     struct free_block *block = buddy_state.free_lists[order];
 
     if (!block) {
-        return 0;
+        return PMM_ALLOC_FAIL;
     }
 
     buddy_state.free_lists[order] = block->next;
@@ -308,7 +315,7 @@ static uintptr_t buddy_alloc(unsigned int order)
         }
     }
 
-    return 0; /* Out of memory */
+    return PMM_ALLOC_FAIL; /* Out of memory */
 }
 
 /*
@@ -497,8 +504,9 @@ void *pmm_alloc_pages(size_t count)
     uintptr_t addr = buddy_alloc(order);
     spin_unlock_irqrestore(&pmm_lock, flags);
 
-    if (addr == 0) {
+    if (addr == PMM_ALLOC_FAIL) {
         WARN("PMM: Cannot allocate %u pages (order %u)", (unsigned)count, order);
+        return NULL;
     }
 
     return (void *)addr;
@@ -638,12 +646,18 @@ void pmm_dump_stats(void)
  */
 size_t pmm_get_free_pages(void)
 {
-    return buddy_state.free_pages;
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    size_t v = buddy_state.free_pages;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return v;
 }
 
 size_t pmm_get_total_pages(void)
 {
-    return buddy_state.total_pages;
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    size_t v = buddy_state.total_pages;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return v;
 }
 
 /*

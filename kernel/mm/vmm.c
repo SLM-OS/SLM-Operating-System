@@ -10,7 +10,21 @@
 #include "platform.h"
 #include "uart.h"
 #include "debug.h"
+#include "spinlock.h"
 #include <stddef.h>
+
+/*
+ * VMM lock — protects page-table modifications in the public mapping
+ * API (vmm_map_block / vmm_unmap_block / vmm_map_region).
+ *
+ * On Pi 5 this is a real cross-CPU spinlock after MMU enable (see
+ * spinlock_hw_enabled in vmm_init). Before MMU enable only CPU 0 runs,
+ * so the lock is barrier-only and effectively a no-op. On Jetson the
+ * kernel keeps SPINLOCK_SKIP_LOCKING for the reasons documented in
+ * platform.h, so this lock is also a barrier — Jetson avoids concurrent
+ * mapping API callers by policy.
+ */
+static spinlock_t vmm_lock = SPINLOCK_INIT;
 
 /*
  * Runtime flag for spinlock hardware support.
@@ -220,6 +234,12 @@ static uint64_t make_table_desc(uint64_t table_pa)
 
 /*
  * Get the L2 table for a given virtual address, or NULL if not mapped.
+ *
+ * All public callers of this helper are gated on vmm_state.initialized,
+ * which is set true after mmu_enable(). By that point the identity map may
+ * or may not still be live, so the returned pointer must be a kernel VA
+ * rather than a raw PA. Every L2 table in SLM-OS is a statically allocated
+ * kernel symbol, so its PA differs from its KVA only by the TTBR1 offset.
  */
 static uint64_t *get_l2_table(uint64_t va)
 {
@@ -230,15 +250,9 @@ static uint64_t *get_l2_table(uint64_t va)
         return NULL;
     }
 
-    /* Extract physical address of L2 table and convert to pointer */
+    /* Extract physical address of L2 table and convert to kernel VA */
     uint64_t l2_pa = l1_entry & PTE_ADDR_MASK;
-
-    /*
-     * Note: Before MMU is enabled, we access physical addresses directly.
-     * After MMU is enabled, we need to use the kernel virtual address.
-     * For simplicity, our static L2 tables are identity-mapped initially.
-     */
-    return (uint64_t *)l2_pa;
+    return (uint64_t *)PA_TO_KVA(l2_pa);
 }
 
 /*
@@ -250,53 +264,41 @@ static uint64_t *get_l2_table(uint64_t va)
 /*
  * Map a 2MB block into the kernel address space.
  */
-int vmm_map_block(uint64_t virt, uint64_t phys, uint32_t flags)
+/*
+ * Map a 2MB block with vmm_lock already held.
+ * Must be called with vmm_state.initialized true and inputs pre-validated.
+ */
+static int vmm_map_block_locked(uint64_t virt, uint64_t phys, uint32_t flags)
 {
-    /* Alignment checks */
-    if ((virt & (BLOCK_SIZE - 1)) != 0) {
-        ERROR("vmm_map_block: virt 0x%lx not 2MB aligned", virt);
-        return -1;
-    }
-    if ((phys & (BLOCK_SIZE - 1)) != 0) {
-        ERROR("vmm_map_block: phys 0x%lx not 2MB aligned", phys);
-        return -1;
-    }
-
     uint64_t l1_idx = L1_INDEX(virt);
     uint64_t l2_idx = L2_INDEX(virt);
 
-    /* Get L2 table (must exist) */
     uint64_t *l2 = get_l2_table(virt);
     if (!l2) {
         ERROR("vmm_map_block: no L2 table for VA 0x%lx (L1[%lu])", virt, l1_idx);
         return -1;
     }
 
-    /* Check if already mapped */
     if ((l2[l2_idx] & PTE_TYPE_MASK) != PTE_TYPE_INVALID) {
         ERROR("vmm_map_block: VA 0x%lx already mapped", virt);
         return -1;
     }
 
-    /* Create block descriptor */
     l2[l2_idx] = make_block_desc(phys, flags);
     vmm_state.blocks_mapped++;
 
-    /* Ensure write is visible */
-    __asm__ volatile("dsb ishst" ::: "memory");
+    /* Ensure write is visible, then drop any stale TLB entry for this VA so
+     * a prior invalid-entry walk doesn't shadow the new mapping. */
+    vmm_invalidate_tlb(virt);
 
     return 0;
 }
 
 /*
- * Unmap a 2MB block.
+ * Unmap a 2MB block with vmm_lock already held.
  */
-int vmm_unmap_block(uint64_t virt)
+static int vmm_unmap_block_locked(uint64_t virt)
 {
-    if ((virt & (BLOCK_SIZE - 1)) != 0) {
-        return -1;
-    }
-
     uint64_t *l2 = get_l2_table(virt);
     if (!l2) {
         return -1;
@@ -310,31 +312,82 @@ int vmm_unmap_block(uint64_t virt)
     l2[l2_idx] = PTE_TYPE_INVALID;
     vmm_state.blocks_mapped--;
 
-    /* TLB invalidate for this address */
     vmm_invalidate_tlb(virt);
-
     return 0;
 }
 
+int vmm_map_block(uint64_t virt, uint64_t phys, uint32_t flags)
+{
+    if (!vmm_state.initialized) {
+        ERROR("vmm_map_block: VMM not initialized");
+        return -1;
+    }
+
+    if ((virt & (BLOCK_SIZE - 1)) != 0) {
+        ERROR("vmm_map_block: virt 0x%lx not 2MB aligned", virt);
+        return -1;
+    }
+    if ((phys & (BLOCK_SIZE - 1)) != 0) {
+        ERROR("vmm_map_block: phys 0x%lx not 2MB aligned", phys);
+        return -1;
+    }
+
+    irq_flags_t flags_save = spin_lock_irqsave(&vmm_lock);
+    int rc = vmm_map_block_locked(virt, phys, flags);
+    spin_unlock_irqrestore(&vmm_lock, flags_save);
+    return rc;
+}
+
 /*
- * Map a contiguous region.
+ * Unmap a 2MB block.
+ */
+int vmm_unmap_block(uint64_t virt)
+{
+    if (!vmm_state.initialized) {
+        ERROR("vmm_unmap_block: VMM not initialized");
+        return -1;
+    }
+
+    if ((virt & (BLOCK_SIZE - 1)) != 0) {
+        return -1;
+    }
+
+    irq_flags_t flags_save = spin_lock_irqsave(&vmm_lock);
+    int rc = vmm_unmap_block_locked(virt);
+    spin_unlock_irqrestore(&vmm_lock, flags_save);
+    return rc;
+}
+
+/*
+ * Map a contiguous region. Atomic with respect to other mapping API
+ * callers — holds vmm_lock across the whole region so partial mappings
+ * are never observable.
  */
 int vmm_map_region(uint64_t virt, uint64_t phys, uint64_t size, uint32_t flags)
 {
+    if (!vmm_state.initialized) {
+        ERROR("vmm_map_region: VMM not initialized");
+        return -1;
+    }
+
     /* Round up to 2MB */
     size = (size + BLOCK_SIZE - 1) & ~(BLOCK_SIZE - 1);
 
+    irq_flags_t flags_save = spin_lock_irqsave(&vmm_lock);
+
     for (uint64_t offset = 0; offset < size; offset += BLOCK_SIZE) {
-        int ret = vmm_map_block(virt + offset, phys + offset, flags);
+        int ret = vmm_map_block_locked(virt + offset, phys + offset, flags);
         if (ret != 0) {
             /* Unmap what we've done so far */
             for (uint64_t undo = 0; undo < offset; undo += BLOCK_SIZE) {
-                vmm_unmap_block(virt + undo);
+                vmm_unmap_block_locked(virt + undo);
             }
+            spin_unlock_irqrestore(&vmm_lock, flags_save);
             return ret;
         }
     }
 
+    spin_unlock_irqrestore(&vmm_lock, flags_save);
     return 0;
 }
 

@@ -220,10 +220,11 @@ setup_page_tables:
     or $0x3, %eax               /* Present + Writable */
     mov %eax, (%edi)
 
-    /* Set up PD entries for 2MB pages (identity map first 2GB) */
+    /* Identity-map the first 1 GiB with 2 MB pages (512 PD entries).
+     * VMM extends the mapping to cover additional PDs once C code runs. */
     mov $pd_table, %edi
     mov $0x83, %eax             /* Present + Writable + 2MB page */
-    mov $512, %ecx              /* 512 entries = 1GB (enough for now) */
+    mov $512, %ecx              /* 512 entries × 2 MB = 1 GiB */
 .Lsetup_pd_loop:
     mov %eax, (%edi)
     add $0x200000, %eax         /* Next 2MB */
