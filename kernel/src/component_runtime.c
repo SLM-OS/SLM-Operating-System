@@ -234,6 +234,9 @@ struct builtin_component {
  * Called from component_hot_swap_stateful before teardown. */
 static int sensor_monitor_alert_count = 0;
 
+/* Expose for testing — verifies state was transferred */
+int sensor_monitor_get_alert_count(void) { return sensor_monitor_alert_count; }
+
 int sensor_monitor_export_state(uint8_t *buf, uint32_t max_size)
 {
     if (max_size < 4) return -1;
@@ -632,9 +635,9 @@ int component_direct_send(int channel, const char *data, uint32_t len)
     __atomic_store_n(&ch->ack, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&ch->ready, 1, __ATOMIC_RELEASE);
 
-    /* Wait for ack with hardware counter timeout */
+    /* Wait for ack — 100ms timeout (bare-metal responses should be fast) */
     uint64_t start = timer_get_count();
-    uint64_t limit = timer_get_frequency() * 2;
+    uint64_t limit = timer_get_frequency() / 10;
     while ((timer_get_count() - start) < limit) {
         if (__atomic_load_n(&ch->ack, __ATOMIC_ACQUIRE)) return 0;
         yield();
@@ -698,10 +701,12 @@ int component_hot_swap_stateful(const char *old_name, const char *new_name,
 
     if (export_fn) {
         int exported = export_fn(swap_state_buf.data, COMPONENT_STATE_MAX);
-        if (exported > 0) {
+        if (exported > 0 && (uint32_t)exported <= COMPONENT_STATE_MAX) {
             swap_state_buf.size = (uint32_t)exported;
             swap_state_buf.valid = 1;
             uart_printf("Hot-swap: exported %d bytes of state\r\n", exported);
+        } else if (exported > (int)COMPONENT_STATE_MAX) {
+            uart_puts("[WARN] Hot-swap: export callback exceeded buffer size\r\n");
         }
     }
 
