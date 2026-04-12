@@ -126,11 +126,13 @@ int demo_init(void)
     const char *subpath = NULL;
     struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx("/mnt/files", &subpath);
     if (!mnt) {
+        uart_puts("[WARN] demo_init: /mnt/files not mounted\r\n");
         return -1;
     }
 
     int f = littlefs_file_open(mnt, "/demo.lua", LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
     if (f < 0) {
+        uart_puts("[WARN] demo_init: failed to create /mnt/files/demo.lua\r\n");
         return -1;
     }
 

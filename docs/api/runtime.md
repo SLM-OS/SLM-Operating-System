@@ -98,6 +98,12 @@ Run model memory tests. Returns the number of failures.
 
 Registry-based model loader supporting ONNX graph parsing, weight extraction, and operator dispatch.
 
+**Thread Safety:** The model registry uses internal spinlock protection for concurrent access. However, model load/unload operations are designed to be called from CPU 0 only (shell commands, boot init). Inference (`rust_infer_classify`) is safe to call from any CPU as it reads model weights without modification.
+
+**Memory Lifecycle:** Models persist in the registry until explicitly unloaded via `rust_model_unload()`. The weight pool has a finite capacity of 128 blocks (256 MB). Loading too many models will fail with -1. Model memory is freed only on unload — there is no garbage collection or LRU eviction.
+
+**Index Bounds:** All functions that accept a model index validate it against the registry size. Out-of-range indices return -1. The `rust_model_find()` function returns -1 for unknown model names.
+
 ```rust
 pub extern "C" fn rust_model_loader_init() -> i32
 ```

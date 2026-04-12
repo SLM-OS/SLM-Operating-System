@@ -164,7 +164,7 @@ static void echo_service_entry(void *arg)
 /* Message router API (msg_router.c) */
 extern void msg_router_init(void);
 extern int msg_router_subscribe(const char *topic_name, int component_idx);
-extern int msg_router_publish(const char *topic_name, const char *data);
+/* msg_router_publish declared in slm_ffi.h */
 extern const char *msg_router_receive(int component_idx, char *topic_out);
 extern void msg_router_ack(int component_idx);
 
@@ -269,8 +269,8 @@ static void sensor_monitor_entry(void *arg)
                 alert[len++] = '0' + value % 10;
                 alert[len] = '\0';
 
-                msg_router_publish((const char *)"/alerts/threshold\0",
-                                   (const char *)alert);
+                msg_router_publish((const uint8_t *)"/alerts/threshold\0",
+                                   (const uint8_t *)alert);
                 alert_count++;
                 uart_printf("[sensor_monitor] %s\r\n", alert);
             } else {
@@ -341,8 +341,8 @@ static void digit_classifier_entry(void *arg)
                 result[6] = '0' + (char)(predicted_class % 10);
                 result[7] = '\0';
 
-                msg_router_publish((const char *)"/output/class\0",
-                                   (const char *)result);
+                msg_router_publish((const uint8_t *)"/output/class\0",
+                                   (const uint8_t *)result);
                 infer_count++;
                 uart_printf("[digit_classifier] Predicted class: %d\r\n",
                             predicted_class);

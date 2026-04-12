@@ -15,6 +15,7 @@
 #include "vfs.h"
 #include "component.h"
 #include "slm_ffi.h"
+#include "sched_policy.h"
 
 /* Lua headers - note: these may include stdio.h from newlib */
 #include "../lib/lua/src/lua.h"
@@ -339,7 +340,6 @@ static int l_model_stats(lua_State *L) {
  * slm.model_infer(index) - Run inference on a loaded model
  * Returns predicted class (integer) or -1 on error
  */
-extern int rust_infer_classify(uint32_t model_index);
 static int l_model_infer(lua_State *L) {
     int idx = (int)luaL_checkinteger(L, 1);
     int result = rust_infer_classify((uint32_t)idx);
@@ -351,7 +351,6 @@ static int l_model_infer(lua_State *L) {
  * slm.model_find(name) - Find a model by name
  * Returns model index or -1 if not found
  */
-extern int rust_model_find(const char *name);
 static int l_model_find(lua_State *L) {
     const char *name = luaL_checkstring(L, 1);
     int idx = rust_model_find(name);
@@ -363,7 +362,6 @@ static int l_model_find(lua_State *L) {
  * slm.model_load_mnist() - Load the built-in MNIST model
  * Returns model index or -1 on failure
  */
-extern int rust_model_load_builtin_mnist(void);
 static int l_model_load_mnist(lua_State *L) {
     int idx = rust_model_load_builtin_mnist();
     lua_pushinteger(L, idx);
@@ -378,11 +376,10 @@ static int l_model_load_mnist(lua_State *L) {
  * slm.msg_publish(topic, data) - Publish a message to a topic
  * Returns number of subscribers that received the message
  */
-extern int msg_router_publish(const char *topic_name, const char *data);
 static int l_msg_publish(lua_State *L) {
     const char *topic = luaL_checkstring(L, 1);
     const char *data = luaL_checkstring(L, 2);
-    int delivered = msg_router_publish(topic, data);
+    int delivered = msg_router_publish((const uint8_t *)topic, (const uint8_t *)data);
     lua_pushinteger(L, delivered);
     return 1;
 }
@@ -395,7 +392,6 @@ static int l_msg_publish(lua_State *L) {
  * slm.sched_policy() - Get current scheduler policy name
  * Returns string
  */
-extern const char *sched_get_policy(void);
 static int l_sched_policy(lua_State *L) {
     lua_pushstring(L, sched_get_policy());
     return 1;
