@@ -178,6 +178,27 @@ static mut WILDCARD_SUBS: [WildcardSub; MAX_WILDCARD_SUBS] = [
     WildcardSub::new(), WildcardSub::new(),
 ];
 
+/// Tracks the mailbox source returned by the last msg_router_receive() call
+/// for each component, so msg_router_ack() targets the exact same mailbox.
+/// Prevents race conditions when a higher-priority message arrives between
+/// receive() and ack().
+const MAX_COMPONENTS: usize = 32;
+
+#[derive(Clone, Copy)]
+struct LastReceived {
+    topic_idx: i32,    // -1 = none, 0..MAX_TOPICS = exact, >=MAX_TOPICS = invalid
+    sub_idx: i32,      // subscriber slot within topic
+    wildcard_idx: i32, // -1 = not wildcard, 0..MAX_WILDCARD_SUBS = wildcard slot
+}
+
+impl LastReceived {
+    const fn none() -> Self {
+        Self { topic_idx: -1, sub_idx: -1, wildcard_idx: -1 }
+    }
+}
+
+static mut LAST_RECEIVED: [LastReceived; MAX_COMPONENTS] = [LastReceived::none(); MAX_COMPONENTS];
+
 // =============================================================================
 // String Helpers
 // =============================================================================
@@ -267,6 +288,9 @@ pub extern "C" fn msg_router_init() {
         }
         for ws in &mut WILDCARD_SUBS {
             ws.clear();
+        }
+        for lr in &mut LAST_RECEIVED {
+            *lr = LastReceived::none();
         }
     }
 }
@@ -444,6 +468,7 @@ pub extern "C" fn msg_router_publish_priority(
 /// Check if a subscriber has a pending message.
 /// Returns a pointer to the message data, or NULL if no message.
 /// When multiple messages are pending, returns the highest-priority one.
+/// Records which mailbox was returned so `msg_router_ack()` targets it exactly.
 /// Caller must call `msg_router_ack()` after processing.
 #[no_mangle]
 pub extern "C" fn msg_router_receive(
@@ -451,10 +476,10 @@ pub extern "C" fn msg_router_receive(
     topic_out: *mut u8,
 ) -> *const u8 {
     unsafe {
-        // Track the best (highest priority) pending message across all sources.
         let mut best_priority: u8 = 0;
         let mut best_data: *const u8 = core::ptr::null();
         let mut best_topic: *const [u8; TOPIC_NAME_LEN] = core::ptr::null();
+        let mut best_src = LastReceived::none();
 
         // Scan exact topic subscriptions
         for i in 0..MAX_TOPICS {
@@ -471,6 +496,11 @@ pub extern "C" fn msg_router_receive(
                         best_priority = mb.priority;
                         best_data = mb.data.as_ptr();
                         best_topic = &mb.topic;
+                        best_src = LastReceived {
+                            topic_idx: i as i32,
+                            sub_idx: j as i32,
+                            wildcard_idx: -1,
+                        };
                     }
                 }
             }
@@ -487,8 +517,18 @@ pub extern "C" fn msg_router_receive(
                     best_priority = mb.priority;
                     best_data = mb.data.as_ptr();
                     best_topic = &mb.topic;
+                    best_src = LastReceived {
+                        topic_idx: -1,
+                        sub_idx: -1,
+                        wildcard_idx: i as i32,
+                    };
                 }
             }
+        }
+
+        // Record which mailbox we returned so ack() targets it exactly
+        if component_idx >= 0 && (component_idx as usize) < MAX_COMPONENTS {
+            LAST_RECEIVED[component_idx as usize] = best_src;
         }
 
         if !best_data.is_null() && !topic_out.is_null() {
@@ -505,57 +545,35 @@ pub extern "C" fn msg_router_receive(
     }
 }
 
-/// Acknowledge receipt of a message. Clears the ready flag and sets ack.
-/// Acks the highest-priority pending message (matching receive behavior).
+/// Acknowledge receipt of a message. Targets the exact mailbox that
+/// was returned by the most recent `msg_router_receive()` call for this
+/// component, preventing race conditions with newly-arrived messages.
 #[no_mangle]
 pub extern "C" fn msg_router_ack(component_idx: i32) {
     unsafe {
-        // Find the highest-priority pending message to ack (same as receive)
-        let mut best_priority: u8 = 0;
-        let mut best_source: Option<(usize, usize, bool)> = None; // (i, j, is_wildcard)
-
-        for i in 0..MAX_TOPICS {
-            if !TOPICS[i].is_active() {
-                continue;
-            }
-            for j in 0..MAX_SUBSCRIBERS {
-                if TOPICS[i].subs[j].component_idx != component_idx {
-                    continue;
-                }
-                let mb = &TOPICS[i].subs[j].mailbox;
-                if mb.ready.load(Ordering::Acquire) != 0 {
-                    if best_source.is_none() || mb.priority > best_priority {
-                        best_priority = mb.priority;
-                        best_source = Some((i, j, false));
-                    }
-                }
-            }
+        if component_idx < 0 || (component_idx as usize) >= MAX_COMPONENTS {
+            return;
         }
 
-        for i in 0..MAX_WILDCARD_SUBS {
-            if WILDCARD_SUBS[i].component_idx != component_idx {
-                continue;
-            }
-            let mb = &WILDCARD_SUBS[i].mailbox;
+        let lr = LAST_RECEIVED[component_idx as usize];
+
+        if lr.wildcard_idx >= 0 && (lr.wildcard_idx as usize) < MAX_WILDCARD_SUBS {
+            let mb = &mut WILDCARD_SUBS[lr.wildcard_idx as usize].mailbox;
             if mb.ready.load(Ordering::Acquire) != 0 {
-                if best_source.is_none() || mb.priority > best_priority {
-                    best_priority = mb.priority;
-                    best_source = Some((i, 0, true));
-                }
+                mb.ready.store(0, Ordering::Release);
+                mb.ack.store(1, Ordering::Release);
+            }
+        } else if lr.topic_idx >= 0 && (lr.topic_idx as usize) < MAX_TOPICS
+               && lr.sub_idx >= 0 && (lr.sub_idx as usize) < MAX_SUBSCRIBERS {
+            let mb = &mut TOPICS[lr.topic_idx as usize].subs[lr.sub_idx as usize].mailbox;
+            if mb.ready.load(Ordering::Acquire) != 0 {
+                mb.ready.store(0, Ordering::Release);
+                mb.ack.store(1, Ordering::Release);
             }
         }
 
-        if let Some((i, j, is_wildcard)) = best_source {
-            if is_wildcard {
-                let mb = &mut WILDCARD_SUBS[i].mailbox;
-                mb.ready.store(0, Ordering::Release);
-                mb.ack.store(1, Ordering::Release);
-            } else {
-                let mb = &mut TOPICS[i].subs[j].mailbox;
-                mb.ready.store(0, Ordering::Release);
-                mb.ack.store(1, Ordering::Release);
-            }
-        }
+        // Clear the record
+        LAST_RECEIVED[component_idx as usize] = LastReceived::none();
     }
 }
 
