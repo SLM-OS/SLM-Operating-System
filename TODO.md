@@ -90,7 +90,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 ### Kernel Benchmarks
 - ✅ Context switch latency (formalized):
   - ✅ Measure on all platforms (Pi 5: 1.858µs, QEMU: varies)
-  - ☐ Compare to Linux baseline
+  - ✅ Compare to Linux baseline (Jetson: ctx switch 7.3x faster, IPC 180x faster)
   - ✅ Target: < 10µs (ACHIEVED: 1.858µs on Pi 5)
 - ✅ Interrupt latency:
   - ✅ Measure timer IRQ to handler entry (Pi 5: 1.705 µs avg)
@@ -138,10 +138,10 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ☐ Identify bottlenecks per platform
 
 ### Comparison with Linux
-- ☐ Run equivalent benchmarks on Linux:
-  - ☐ Context switch (Linux RT kernel)
-  - ☐ ONNX inference (ONNX Runtime)
-  - ☐ Python-based pipeline baseline
+- ✅ Run equivalent benchmarks on Linux:
+  - ✅ Context switch (Jetson Linux 5.15: 13.6 µs)
+  - ✅ ONNX inference (Jetson ONNX Runtime: 0.117 ms — 9.3x faster than SLM-OS)
+  - ✅ Python/NumPy baseline (Jetson: 0.086 ms with OpenBLAS)
 - ✅ Document where SLM-OS wins/loses (docs/benchmarks.md Linux comparison)
 - ✅ Analyze reasons for differences (tradeoff analysis in benchmarks.md)
 

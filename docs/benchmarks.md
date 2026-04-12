@@ -276,10 +276,12 @@ Measured on Jetson Orin Nano running Linux 5.15.148-tegra (6x Cortex-A78AE @ 1.5
 | Boot to shell | **~1.6 s** | 20.8 s (7.3s kernel + 13.5s userspace) | **13x faster** |
 | Kernel binary | **824 KB** | 41.1 MB | **51x smaller** |
 | Memory at boot | **387 MB** used | 498 MB used | **1.3x less** |
-| AI inference (MNIST) | **1.09 ms** | N/A (no bare-metal ONNX) | — |
+| AI inference (MNIST) | **1.09 ms** | 0.117 ms (ONNX Runtime) | 9.3x slower* |
 | AI scheduler decision | **41.9 us** | N/A | — |
 
-### Why SLM-OS is Faster
+*\* ONNX Runtime uses optimized BLAS (OpenBLAS/LAPACK) with cache-optimized tiling and multi-threaded matmul. SLM-OS uses a single-threaded NEON matmul without tiling. The inference engine is functionally correct and deterministic (8 µs jitter), but not performance-competitive with production inference runtimes. Optimization is documented in docs/future-work.md.*
+
+### Why SLM-OS is Faster (except inference)
 
 - **No syscall overhead:** function calls replace trap-based system calls
 - **No virtual memory TLB faults:** identity-mapped 2 MB blocks
