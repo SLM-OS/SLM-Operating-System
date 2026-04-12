@@ -64,7 +64,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ☐ Demo runs identically on:
   - ✅ QEMU ARM64 (Lua bindings verified via test suite, demo builds)
   - ✅ Raspberry Pi 5 (5/5 reliability, 6.6s completion)
-  - ☐ Jetson Orin Nano — blocked by kexec RAS error
+  - ☐ Jetson Orin Nano — RAS error fixed, blocked by linker symbols resolving to 0x0 (issue #23)
   - ☐ x86-64 — builds, not interactively tested
 - ✅ Document platform-specific setup steps (docs/demo.md, docs/getting-started.md)
 
@@ -275,7 +275,7 @@ This document tracks Phase 6 implementation of SLM-OS.
   - ✅ QEMU ARM64 (all tests pass)
   - ✅ QEMU x86-64 (426 pass, 8 pre-existing x86-specific failures)
   - ✅ Raspberry Pi 5 (all pass except 5 multi-core integration — known limitation)
-  - ☐ Jetson Orin Nano (blocked by nvgpu RAS error after kexec)
+  - ☐ Jetson Orin Nano (RAS fixed, blocked by linker symbols issue #23)
   - ☐ x86-64 PC
 - ✅ Document platform-specific test results (docs/benchmarks.md test suite table)
 
