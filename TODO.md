@@ -128,7 +128,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ✅ Component load time (Pi 5: 3 ms)
 - ✅ Hot-swap latency (Pi 5: 11 ms)
 - ✅ Message routing throughput (Pi 5: 6.39 ms/msg with UART output)
-- ☐ End-to-end component pipeline latency
+- ✅ End-to-end component pipeline latency (Pi 5: 7 ms publish → process → alert)
 
 ### Platform Comparison
 - ✅ Create comparison table:

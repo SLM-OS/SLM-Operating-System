@@ -69,6 +69,17 @@ Measured via Lua REPL with `slm.uptime()` timing. Includes UART output overhead.
 | Message publish + process | **6.39 ms** | Publish → route → subscriber receive → process → yield (100-msg avg, includes UART print per message) |
 | Message publish (raw) | **~0.2 ms** | Estimated without UART overhead (IPC round-trip is 132 ns) |
 
+### End-to-End Component Pipeline
+
+Measures time from message publish through component processing to result.
+
+| Pipeline | Pi 5 |
+|----------|------|
+| Publish → sensor_monitor → threshold alert | **7 ms** |
+| Publish → route → process → yield (per message, 100-msg avg) | **6.39 ms** |
+
+Includes UART output from the component (serial at 115200 baud accounts for ~4ms of the latency). Without UART output, the raw pipeline would be ~2-3 ms.
+
 ### Scheduler Overhead
 
 | Metric | Pi 5 |
