@@ -65,7 +65,7 @@ This document tracks Phase 6 implementation of SLM-OS.
   - ✅ QEMU ARM64 (Lua bindings verified via test suite, demo builds)
   - ✅ Raspberry Pi 5 (5/5 reliability, 6.6s completion)
   - ✅ Jetson Orin Nano (6-core, 8 GB — demo runs, MNIST inference works)
-  - ⏸️ x86-64 — builds, GRUB multiboot2 boot issue needs investigation
+  - ✅ x86-64 — boots via GRUB ISO, 426/434 tests pass (8 platform-specific failures)
 - ✅ Document platform-specific setup steps (docs/demo.md, docs/getting-started.md)
 
 ### Demo Recording
@@ -159,7 +159,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ✅ Complete kernel API reference (`docs/api/kernel.md`)
 - ✅ Complete runtime API reference (`docs/api/runtime.md`)
 - ✅ Shell command reference (`docs/shell.md` — existing from Phase 3)
-- ⏸️ Generate rustdoc for all Rust crates — requires host toolchain setup (no_std cross-target)
+- ✅ Generate rustdoc for Rust runtime (`make rustdoc` target, aarch64 + x86-64)
 
 ### User Guides
 - ✅ Getting started guide (`docs/getting-started.md`)
@@ -208,8 +208,8 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ✅ Direct component-to-component messaging:
   - ✅ Bypass topic routing via direct channels (component_direct_channel_create/send/receive/ack)
   - ✅ Lower latency for known endpoints (shared mailbox, no topic lookup)
-- ⏸️ Wildcard subscriptions — not needed for demo
-- ⏸️ Message priority in router — IPC priority queues sufficient
+- ✅ Wildcard subscriptions: pattern ending in '*' matches topic prefixes (e.g., "/sensors/*")
+- ✅ Message priority in router: msg_router_publish_priority(), higher priority delivered first
 
 ### From Phase 5: Model Caching
 - ✅ Implement LRU model cache:
@@ -280,7 +280,7 @@ This document tracks Phase 6 implementation of SLM-OS.
   - ✅ QEMU x86-64 (426 pass, 8 pre-existing x86-specific failures)
   - ✅ Raspberry Pi 5 (all pass except 5 multi-core integration — known limitation)
   - ✅ Jetson Orin Nano (fixed: -fno-pie eliminates GOT, closes #23)
-  - ⏸️ x86-64 PC — GRUB boot issue needs investigation (pre-existing)
+  - ✅ x86-64 PC — GRUB ISO boot fixed, 426/434 tests pass
 - ✅ Document platform-specific test results (docs/benchmarks.md test suite table)
 
 ### Regression Testing

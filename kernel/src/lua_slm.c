@@ -450,6 +450,23 @@ static int l_msg_publish(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.msg_publish_priority(topic, data, priority) - Publish with priority
+ * priority: 0 = normal, higher = more urgent
+ * Returns number of subscribers that received the message
+ */
+static int l_msg_publish_priority(lua_State *L) {
+    const char *topic = luaL_checkstring(L, 1);
+    const char *data = luaL_checkstring(L, 2);
+    int prio = (int)luaL_checkinteger(L, 3);
+    if (prio < 0) prio = 0;
+    if (prio > 255) prio = 255;
+    int delivered = msg_router_publish_priority(
+        (const uint8_t *)topic, (const uint8_t *)data, (uint8_t)prio);
+    lua_pushinteger(L, delivered);
+    return 1;
+}
+
 /* ============================================================================
  * Scheduler Bindings
  * ============================================================================ */
@@ -490,6 +507,7 @@ static const luaL_Reg slm_lib[] = {
     {"model_unpin", l_model_unpin},
     /* Message routing */
     {"msg_publish", l_msg_publish},
+    {"msg_publish_priority", l_msg_publish_priority},
     /* Scheduler */
     {"sched_policy", l_sched_policy},
     {NULL, NULL}

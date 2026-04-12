@@ -320,6 +320,14 @@ extern int rust_model_load_builtin_mnist(void);
 extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
 
 /*
+ * Publish a message with explicit priority (0 = normal, higher = more urgent).
+ * Higher-priority messages are delivered first by msg_router_receive.
+ * Returns: Number of subscribers that received the message.
+ */
+extern int msg_router_publish_priority(const uint8_t *topic_name,
+                                       const uint8_t *data, uint8_t priority);
+
+/*
  * Publish a large message. Currently delegates to msg_router_publish
  * (copies data). Future: will pass by reference for true zero-copy.
  * Returns: Number of subscribers that received the message.

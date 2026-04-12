@@ -46,6 +46,10 @@ Phase 4 implements the component registry and lifecycle management foundation:
 
 The message router (`runtime/src/msg_router.rs`) provides topic-based publish/subscribe messaging between components. Implemented in Rust with `#[no_mangle] extern "C"` FFI, components subscribe to named topics and receive messages via per-subscriber mailboxes with atomic ready/ack flags. See `docs/m7-message-router.md` for implementation details.
 
+**Wildcard subscriptions:** Topics ending in `*` match all topics with the given prefix. For example, subscribing to `"/sensors/*"` receives messages published to `"/sensors/data"`, `"/sensors/temp"`, etc.
+
+**Message priority:** `msg_router_publish_priority(topic, data, priority)` publishes with explicit priority (0 = normal, higher = more urgent). When a component has multiple pending messages, `msg_router_receive` returns the highest-priority one first.
+
 Shell commands: `msg send <topic> <data>`, `msg list`, `msg subscribe <topic> <idx>`
 
 ### Hot-Swap

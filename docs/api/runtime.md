@@ -246,22 +246,29 @@ Run component system tests. Returns the number of failures.
 
 ## Message Router (`msg_router.rs`)
 
-Topic-based publish/subscribe message router. Components subscribe to named topics and exchange 64-byte messages. All functions use `extern "C"` linkage and replace the C `msg_router.c` implementation.
+Topic-based publish/subscribe message router. Components subscribe to named topics and exchange 64-byte messages. Supports wildcard subscriptions (patterns ending in `*`) and prioritized message delivery. All functions use `extern "C"` linkage and replace the C `msg_router.c` implementation.
 
 ```rust
 pub extern "C" fn msg_router_init()
 ```
-Initialize the message router. Clears all topics and subscriptions.
+Initialize the message router. Clears all topics, subscriptions, and wildcard patterns.
 
 ```rust
 pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32) -> i32
 ```
-Subscribe a component to a topic (created on first use). Returns 0 on success, -1 on error.
+Subscribe a component to a topic (created on first use). If the topic name ends with `*`, creates a **wildcard subscription** that matches all topics with the given prefix (e.g., `"/sensors/*"` matches `"/sensors/data"`, `"/sensors/temp"`). Returns 0 on success, -1 on error.
 
 ```rust
 pub extern "C" fn msg_router_publish(topic_name: *const u8, data: *const u8) -> i32
 ```
-Publish a 64-byte message to a topic. Returns the number of subscribers that received the message.
+Publish a 64-byte message to a topic with normal priority. Delivers to both exact-match and wildcard subscribers. Returns the number of subscribers that received the message.
+
+```rust
+pub extern "C" fn msg_router_publish_priority(
+    topic_name: *const u8, data: *const u8, priority: u8,
+) -> i32
+```
+Publish with explicit priority (0 = normal, higher = more urgent). When a component has multiple pending messages, `msg_router_receive` returns the highest-priority one first. Returns the number of subscribers that received the message.
 
 ```rust
 pub extern "C" fn msg_router_receive(

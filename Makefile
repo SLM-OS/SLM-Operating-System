@@ -137,6 +137,12 @@ runtime-clean:
 .PHONY: runtime-rebuild
 runtime-rebuild: runtime-clean runtime
 
+.PHONY: rustdoc
+rustdoc:
+	@echo "Generating Rust documentation..."
+	cd runtime && cargo doc $(RUST_TARGET_FLAG) --no-deps
+	@echo "Documentation generated at runtime/target/$(if $(filter X86_64,$(PLATFORM)),x86_64-unknown-none,aarch64-unknown-none)/doc/slm_runtime/index.html"
+
 # ============================================================================
 # Combined targets
 # ============================================================================
@@ -152,9 +158,27 @@ rebuild: clean all
 # QEMU targets
 # ============================================================================
 
+# x86-64 kernel ISO (multiboot2 requires GRUB, can't use -kernel)
+KERNEL_ISO := $(KERNEL_BUILD_DIR)/slmos.iso
+
 .PHONY: run
 run: kernel
 	@echo "Running in QEMU..."
+ifeq ($(PLATFORM),X86_64)
+	@mkdir -p $(KERNEL_BUILD_DIR)/iso/boot/grub
+	@cp $(KERNEL_ELF) $(KERNEL_BUILD_DIR)/iso/boot/kernel.elf
+	@echo 'set timeout=0' > $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'set default=0' >> $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'menuentry "SLM-OS" { multiboot2 /boot/kernel.elf; boot; }' >> $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@grub-mkrescue -o $(KERNEL_ISO) $(KERNEL_BUILD_DIR)/iso 2>/dev/null
+	$(QEMU) \
+		-machine $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
+		-smp cores=$(QEMU_CORES) \
+		-m $(QEMU_MEMORY) \
+		-nographic \
+		-cdrom $(KERNEL_ISO)
+else
 	$(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
@@ -162,12 +186,28 @@ run: kernel
 		-m $(QEMU_MEMORY) \
 		-nographic \
 		-kernel $(KERNEL_ELF)
+endif
 
 .PHONY: shell
 shell: kernel
 	@echo "Running in QEMU (interactive shell)..."
 	@echo "Press Ctrl+A then X to exit QEMU"
 	@echo ""
+ifeq ($(PLATFORM),X86_64)
+	@mkdir -p $(KERNEL_BUILD_DIR)/iso/boot/grub
+	@cp $(KERNEL_ELF) $(KERNEL_BUILD_DIR)/iso/boot/kernel.elf
+	@echo 'set timeout=0' > $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'set default=0' >> $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'menuentry "SLM-OS" { multiboot2 /boot/kernel.elf; boot; }' >> $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@grub-mkrescue -o $(KERNEL_ISO) $(KERNEL_BUILD_DIR)/iso 2>/dev/null
+	$(QEMU) \
+		-machine $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
+		-smp cores=$(QEMU_CORES) \
+		-m $(QEMU_MEMORY) \
+		-nographic \
+		-cdrom $(KERNEL_ISO)
+else
 	$(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
@@ -175,11 +215,29 @@ shell: kernel
 		-m $(QEMU_MEMORY) \
 		-nographic \
 		-kernel $(KERNEL_ELF)
+endif
 
 .PHONY: debug
 debug: kernel
 	@echo "Starting QEMU with GDB server on port 1234..."
 	@echo "In another terminal, run: make gdb"
+ifeq ($(PLATFORM),X86_64)
+	@mkdir -p $(KERNEL_BUILD_DIR)/iso/boot/grub
+	@cp $(KERNEL_ELF) $(KERNEL_BUILD_DIR)/iso/boot/kernel.elf
+	@echo 'set timeout=0' > $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'set default=0' >> $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'menuentry "SLM-OS" { multiboot2 /boot/kernel.elf; boot; }' >> $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@grub-mkrescue -o $(KERNEL_ISO) $(KERNEL_BUILD_DIR)/iso 2>/dev/null
+	$(QEMU) \
+		-machine $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
+		-smp cores=$(QEMU_CORES) \
+		-m $(QEMU_MEMORY) \
+		-nographic \
+		-cdrom $(KERNEL_ISO) \
+		-S \
+		-gdb tcp::1234
+else
 	$(QEMU) \
 		-machine $(QEMU_MACHINE) \
 		-cpu $(QEMU_CPU) \
@@ -189,6 +247,7 @@ debug: kernel
 		-kernel $(KERNEL_ELF) \
 		-S \
 		-gdb tcp::1234
+endif
 
 # GDB connection settings
 GDB := aarch64-none-elf-gdb
