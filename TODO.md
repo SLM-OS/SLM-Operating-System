@@ -64,7 +64,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ☐ Demo runs identically on:
   - ✅ QEMU ARM64 (Lua bindings verified via test suite, demo builds)
   - ✅ Raspberry Pi 5 (5/5 reliability, 6.6s completion)
-  - ☐ Jetson Orin Nano — RAS error fixed, blocked by linker symbols resolving to 0x0 (issue #23)
+  - ✅ Jetson Orin Nano (6-core, 8 GB — demo runs, MNIST inference works)
   - ☐ x86-64 — builds, not interactively tested
 - ✅ Document platform-specific setup steps (docs/demo.md, docs/getting-started.md)
 
@@ -275,7 +275,7 @@ This document tracks Phase 6 implementation of SLM-OS.
   - ✅ QEMU ARM64 (all tests pass)
   - ✅ QEMU x86-64 (426 pass, 8 pre-existing x86-specific failures)
   - ✅ Raspberry Pi 5 (all pass except 5 multi-core integration — known limitation)
-  - ☐ Jetson Orin Nano (RAS fixed, blocked by linker symbols issue #23)
+  - ✅ Jetson Orin Nano (fixed: -fno-pie eliminates GOT, closes #23)
   - ☐ x86-64 PC
 - ✅ Document platform-specific test results (docs/benchmarks.md test suite table)
 
@@ -333,7 +333,7 @@ All M7 items consolidated in `docs/future-work.md` (21 items, 61-88 weeks estima
 - ✅ Build and run instructions (docs/getting-started.md)
 
 ### Technical Deliverables
-- ☐ All tests pass on all platforms (QEMU: all pass, Pi 5: 5 multi-core failures, Jetson: blocked)
+- ☐ All tests pass on all platforms (QEMU: all pass, Pi 5: 5 multi-core failures, Jetson: boots to shell)
 - ✅ Demo runs reliably (5/5 on Pi 5)
 - ✅ Performance meets targets (3 of 4 achieved, model load unmeasured for large models):
   - ✅ Context switch < 10µs (Pi 5: 1.858µs)
