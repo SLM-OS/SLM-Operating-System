@@ -414,6 +414,26 @@ static int l_model_load_mnist(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.model_pin(index) - Pin a model to prevent LRU eviction
+ * Returns 0 on success, -1 on error
+ */
+static int l_model_pin(lua_State *L) {
+    int idx = (int)luaL_checkinteger(L, 1);
+    lua_pushinteger(L, rust_model_pin((uint32_t)idx));
+    return 1;
+}
+
+/**
+ * slm.model_unpin(index) - Unpin a model (allow LRU eviction)
+ * Returns 0 on success, -1 on error
+ */
+static int l_model_unpin(lua_State *L) {
+    int idx = (int)luaL_checkinteger(L, 1);
+    lua_pushinteger(L, rust_model_unpin((uint32_t)idx));
+    return 1;
+}
+
 /* ============================================================================
  * Message Router Bindings
  * ============================================================================ */
@@ -466,6 +486,8 @@ static const luaL_Reg slm_lib[] = {
     {"model_find", l_model_find},
     {"model_infer", l_model_infer},
     {"model_load_mnist", l_model_load_mnist},
+    {"model_pin", l_model_pin},
+    {"model_unpin", l_model_unpin},
     /* Message routing */
     {"msg_publish", l_msg_publish},
     /* Scheduler */

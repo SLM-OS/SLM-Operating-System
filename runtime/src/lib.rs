@@ -946,6 +946,34 @@ pub unsafe extern "C" fn rust_model_find(name: *const u8) -> i32 {
     }
 }
 
+/// Pin a model to prevent LRU eviction.
+///
+/// Returns 0 on success, -1 if the model index is invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_pin(index: u32) -> i32 {
+    if loader::registry::pin_model(index as usize) { 0 } else { -1 }
+}
+
+/// Unpin a model (allow LRU eviction).
+///
+/// Returns 0 on success, -1 if the model index is invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_unpin(index: u32) -> i32 {
+    if loader::registry::unpin_model(index as usize) { 0 } else { -1 }
+}
+
+/// Share a model's weight memory (increment refcount).
+///
+/// Returns 0 on success, -1 on error. The caller must call
+/// rust_model_unshare() when done to release the reference.
+#[no_mangle]
+pub extern "C" fn rust_model_share_weights(index: u32) -> i32 {
+    match loader::registry::share_weights(index as usize) {
+        Some(_) => 0,
+        None => -1,
+    }
+}
+
 /// Run model loader tests.
 ///
 /// Returns number of test failures (0 = all passed).
@@ -1343,6 +1371,299 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
         }
     }
 
+    // =========================================================================
+    // FP16 conversion tests
+    // =========================================================================
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running FP16 conversion tests...\n\0".as_ptr());
+    }
+
+    // Test: FP16 conversion accuracy
+    // IEEE 754 half-precision test vectors
+    {
+        // Helper to convert FP16 bits to f32 via the registry's conversion
+        // We test by verifying known FP16 values convert correctly.
+        // FP16 1.0 = 0x3C00 (sign=0, exp=15, mant=0)
+        // FP16 0.5 = 0x3800
+        // FP16 -2.0 = 0xC000
+        // FP16 0.0 = 0x0000
+        // FP16 inf = 0x7C00
+        // We can't directly call fp16_to_f32 (private), so we test through
+        // the onnx_parser's OnnxDataType awareness and the total_weight_size_expanded.
+
+        // Verify ElemType::Float16 has size 2
+        let fp16_size = loader::graph::ElemType::Float16.size();
+        let passed = fp16_size == 2;
+        print_test_result(b"fp16: ElemType::Float16 size is 2\0", passed);
+        if !passed { failures += 1; }
+
+        // Verify OnnxDataType::Float16 element_size
+        let onnx_fp16_size = loader::onnx_parser::OnnxDataType::Float16.element_size();
+        let passed = onnx_fp16_size == 2;
+        print_test_result(b"fp16: OnnxDataType::Float16 size is 2\0", passed);
+        if !passed { failures += 1; }
+
+        // Verify from_onnx maps type 10 to Float16
+        let et = loader::graph::ElemType::from_onnx(10);
+        let passed = et == loader::graph::ElemType::Float16;
+        print_test_result(b"fp16: ElemType::from_onnx(10) = Float16\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: fp16_to_f32 known value conversions
+    {
+        use loader::registry::fp16_to_f32;
+
+        // FP16 1.0 = 0x3C00
+        let v = fp16_to_f32(0x3C00);
+        let passed = v == 1.0;
+        print_test_result(b"fp16: 0x3C00 -> 1.0\0", passed);
+        if !passed { failures += 1; }
+
+        // FP16 0.5 = 0x3800
+        let v = fp16_to_f32(0x3800);
+        let passed = v == 0.5;
+        print_test_result(b"fp16: 0x3800 -> 0.5\0", passed);
+        if !passed { failures += 1; }
+
+        // FP16 -2.0 = 0xC000
+        let v = fp16_to_f32(0xC000);
+        let passed = v == -2.0;
+        print_test_result(b"fp16: 0xC000 -> -2.0\0", passed);
+        if !passed { failures += 1; }
+
+        // FP16 0.0 = 0x0000
+        let v = fp16_to_f32(0x0000);
+        let passed = v == 0.0;
+        print_test_result(b"fp16: 0x0000 -> 0.0\0", passed);
+        if !passed { failures += 1; }
+
+        // FP16 -0.0 = 0x8000
+        let v = fp16_to_f32(0x8000);
+        let passed = v == 0.0 && v.to_bits() == 0x80000000; // negative zero
+        print_test_result(b"fp16: 0x8000 -> -0.0\0", passed);
+        if !passed { failures += 1; }
+
+        // FP16 65504.0 (max normal) = 0x7BFF
+        let v = fp16_to_f32(0x7BFF);
+        let passed = v == 65504.0;
+        print_test_result(b"fp16: 0x7BFF -> 65504.0\0", passed);
+        if !passed { failures += 1; }
+
+        // FP16 inf = 0x7C00
+        let v = fp16_to_f32(0x7C00);
+        let passed = v.is_infinite() && v > 0.0;
+        print_test_result(b"fp16: 0x7C00 -> +inf\0", passed);
+        if !passed { failures += 1; }
+
+        // FP16 smallest subnormal = 0x0001 ≈ 5.96e-8
+        let v = fp16_to_f32(0x0001);
+        let passed = v > 0.0 && v < 0.001;
+        print_test_result(b"fp16: 0x0001 -> subnormal\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // =========================================================================
+    // LRU cache tests
+    // =========================================================================
+
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running LRU cache tests...\n\0".as_ptr());
+    }
+
+    // Test 26: touch_model updates timestamp
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"lru_touch", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            // Touch the model — should not panic
+            loader::registry::touch_model(idx);
+            // Touch again — use_count increments
+            loader::registry::touch_model(idx);
+            // Model still findable
+            let passed = loader::registry::find_by_name(b"lru_touch") == Some(idx);
+            print_test_result(b"lru: touch_model works\0", passed);
+            if !passed { failures += 1; }
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"lru: touch_model works\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test 27: pin/unpin
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"lru_pin", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            let pin_ok = loader::registry::pin_model(idx);
+            let unpin_ok = loader::registry::unpin_model(idx);
+            let passed = pin_ok && unpin_ok;
+            print_test_result(b"lru: pin/unpin model\0", passed);
+            if !passed { failures += 1; }
+
+            // Pin/unpin invalid index should fail
+            let invalid_pin = !loader::registry::pin_model(99);
+            let invalid_unpin = !loader::registry::unpin_model(99);
+            let passed2 = invalid_pin && invalid_unpin;
+            print_test_result(b"lru: pin/unpin invalid index fails\0", passed2);
+            if !passed2 { failures += 1; }
+
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"lru: pin/unpin model\0", false);
+            print_test_result(b"lru: pin/unpin invalid index fails\0", false);
+            failures += 2;
+        }
+    }
+
+    // Test 28: touch_model on invalid/unloaded index is a no-op (no panic)
+    {
+        loader::registry::init();
+        loader::registry::touch_model(99);
+        loader::registry::touch_model(0); // slot 0 is empty after init
+        print_test_result(b"lru: touch invalid index no-op\0", true);
+    }
+
+    // Test 29: LRU eviction — fill all 8 slots, then load a 9th model.
+    // The oldest non-pinned model should be evicted.
+    {
+        loader::registry::init();
+        let names: [&[u8]; 8] = [
+            b"lru0", b"lru1", b"lru2", b"lru3",
+            b"lru4", b"lru5", b"lru6", b"lru7",
+        ];
+        let mut all_ok = true;
+        let mut indices = [0usize; 8];
+        for i in 0..8 {
+            match loader::registry::load_model(names[i], MNIST_ONNX) {
+                Ok(idx) => {
+                    indices[i] = idx;
+                    // Touch later models so lru0 stays oldest
+                    if i > 0 {
+                        loader::registry::touch_model(idx);
+                    }
+                }
+                Err(_) => { all_ok = false; }
+            }
+        }
+        let count_8 = loader::registry::count() == 8;
+        print_test_result(b"lru: fill 8 slots\0", all_ok && count_8);
+        if !(all_ok && count_8) { failures += 1; }
+
+        // Load a 9th model — should evict lru0 (oldest, not pinned)
+        let ninth = loader::registry::load_model(b"lru_new", MNIST_ONNX);
+        let evict_ok = ninth.is_ok();
+        print_test_result(b"lru: 9th model triggers eviction\0", evict_ok);
+        if !evict_ok { failures += 1; }
+
+        // Verify lru0 is gone
+        let lru0_gone = loader::registry::find_by_name(b"lru0").is_none();
+        print_test_result(b"lru: oldest model evicted\0", lru0_gone);
+        if !lru0_gone { failures += 1; }
+
+        // Verify lru_new is present
+        let new_found = loader::registry::find_by_name(b"lru_new").is_some();
+        print_test_result(b"lru: new model loaded in evicted slot\0", new_found);
+        if !new_found { failures += 1; }
+
+        // Still 8 models total
+        let still_8 = loader::registry::count() == 8;
+        print_test_result(b"lru: count still 8 after eviction\0", still_8);
+        if !still_8 { failures += 1; }
+
+        // Clean up
+        for i in 1..8 {
+            let _ = loader::registry::unload_model(indices[i]);
+        }
+        if let Ok(idx) = ninth {
+            let _ = loader::registry::unload_model(idx);
+        }
+    }
+
+    // Test 30: Pinned model is NOT evicted — fill 8 slots, pin slot 0,
+    // load 9th model. Slot 0 should survive; slot 1 (next oldest) evicted.
+    {
+        loader::registry::init();
+        let mut indices = [0usize; 8];
+        let mut all_ok = true;
+        for i in 0..8 {
+            let name = match i {
+                0 => b"pin0" as &[u8], 1 => b"pin1", 2 => b"pin2", 3 => b"pin3",
+                4 => b"pin4", 5 => b"pin5", 6 => b"pin6", _ => b"pin7",
+            };
+            match loader::registry::load_model(name, MNIST_ONNX) {
+                Ok(idx) => {
+                    indices[i] = idx;
+                    if i >= 2 { loader::registry::touch_model(idx); }
+                }
+                Err(_) => { all_ok = false; }
+            }
+        }
+        // Pin slot 0 (oldest)
+        if all_ok {
+            loader::registry::pin_model(indices[0]);
+        }
+        print_test_result(b"lru: fill 8 + pin oldest\0", all_ok);
+        if !all_ok { failures += 1; }
+
+        // Load 9th — should evict pin1 (oldest non-pinned), NOT pin0
+        let ninth = loader::registry::load_model(b"pin_new", MNIST_ONNX);
+        let evict_ok = ninth.is_ok();
+        print_test_result(b"lru: eviction skips pinned model\0", evict_ok);
+        if !evict_ok { failures += 1; }
+
+        // pin0 should still be there
+        let pin0_alive = loader::registry::find_by_name(b"pin0").is_some();
+        print_test_result(b"lru: pinned model survives eviction\0", pin0_alive);
+        if !pin0_alive { failures += 1; }
+
+        // pin1 should be gone
+        let pin1_gone = loader::registry::find_by_name(b"pin1").is_none();
+        print_test_result(b"lru: unpinned oldest evicted instead\0", pin1_gone);
+        if !pin1_gone { failures += 1; }
+
+        // Clean up
+        loader::registry::unpin_model(indices[0]);
+        for i in 0..8 {
+            let _ = loader::registry::unload_model(indices[i]);
+        }
+        if let Ok(idx) = ninth {
+            let _ = loader::registry::unload_model(idx);
+        }
+    }
+
+    // Test 31: share_weights returns a valid handle
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"share_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            let shared = loader::registry::share_weights(idx);
+            let passed = shared.is_some();
+            print_test_result(b"lru: share_weights returns handle\0", passed);
+            if !passed { failures += 1; }
+
+            // Unload original — shared handle keeps weight memory alive (refcount)
+            let _ = loader::registry::unload_model(idx);
+
+            // Share on invalid index should fail
+            let bad_share = loader::registry::share_weights(99);
+            let passed2 = bad_share.is_none();
+            print_test_result(b"lru: share_weights invalid index fails\0", passed2);
+            if !passed2 { failures += 1; }
+
+            // Free the shared handle
+            if let Some(h) = shared {
+                let _ = mm::free(h);
+            }
+        } else {
+            print_test_result(b"lru: share_weights returns handle\0", false);
+            print_test_result(b"lru: share_weights invalid index fails\0", false);
+            failures += 2;
+        }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
@@ -1454,6 +1775,9 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
 /// Returns: argmax class index (>= 0) on success, -1 on error.
 #[no_mangle]
 pub extern "C" fn rust_infer_classify(model_index: u32) -> i32 {
+    // Update LRU timestamp
+    loader::registry::touch_model(model_index as usize);
+
     static CLASSIFY_INPUT: [f32; 784] = [0.0; 784];
     static mut CLASSIFY_OUTPUT: [f32; 64] = [0.0; 64];
 

@@ -802,6 +802,80 @@ static void test_slm_model_load_find_infer(void)
 }
 
 /*
+ * Test: slm.model_pin / slm.model_unpin for LRU cache management.
+ */
+static void test_slm_model_pin_unpin(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "-- Load model\n"
+        "idx = slm.model_load_mnist()\n"
+        "assert(idx >= 0, 'model_load_mnist should succeed')\n"
+        "\n"
+        "-- Pin it\n"
+        "local r = slm.model_pin(idx)\n"
+        "assert(r == 0, 'model_pin should succeed')\n"
+        "\n"
+        "-- Unpin it\n"
+        "r = slm.model_unpin(idx)\n"
+        "assert(r == 0, 'model_unpin should succeed')\n"
+        "\n"
+        "-- Pin/unpin invalid index\n"
+        "r = slm.model_pin(99)\n"
+        "assert(r == -1, 'model_pin invalid should fail')\n"
+        "r = slm.model_unpin(99)\n"
+        "assert(r == -1, 'model_unpin invalid should fail')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+    rust_model_unload(0);
+}
+
+/*
+ * Test: digit_classifier preloads MNIST model via component manifest.
+ * Running digit_classifier should auto-load the MNIST model if not present.
+ */
+static void test_digit_classifier_preloads_model(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    /* Ensure no MNIST model is loaded */
+    int pre_idx = rust_model_find("mnist");
+    if (pre_idx >= 0) {
+        rust_model_unload((uint32_t)pre_idx);
+    }
+
+    /* Verify MNIST is not loaded */
+    TEST_ASSERT_EQUAL_INT(-1, rust_model_find("mnist"));
+
+    /* Run digit_classifier — should preload MNIST */
+    const char *code =
+        "local idx = slm.component_run('digit_classifier')\n"
+        "assert(idx >= 0, 'digit_classifier start failed')\n"
+        "slm.sleep(100)\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    /* Verify MNIST is now loaded (preloaded by component_run) */
+    int post_idx = rust_model_find("mnist");
+    TEST_ASSERT_MESSAGE(post_idx >= 0,
+        "MNIST should be preloaded by digit_classifier component manifest");
+
+    lua_slm_close(L);
+
+    /* Cleanup: unload model */
+    if (post_idx >= 0) {
+        rust_model_unload((uint32_t)post_idx);
+    }
+}
+
+/*
  * Test: slm.component_hot_swap_stateful transfers state.
  * Starts sensor_monitor, publishes anomalies to build up alert count,
  * then does a stateful hot-swap. The new instance should report the
@@ -1296,6 +1370,8 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_msg_publish);
     RUN_TEST(test_slm_sched_policy);
     RUN_TEST(test_slm_model_load_find_infer);
+    RUN_TEST(test_slm_model_pin_unpin);
+    RUN_TEST(test_digit_classifier_preloads_model);
     RUN_TEST(test_slm_component_hot_swap_stateful);
 
     /* Zero-copy message test — verify msg_router_publish_ref works */

@@ -217,6 +217,7 @@ struct builtin_component {
     uint8_t type;
     uint8_t priority;
     component_entry_t entry;
+    const char *model_name;  /* Model to preload on start (NULL = none) */
 };
 
 /* ============================================================================
@@ -430,6 +431,7 @@ static const struct builtin_component builtin_components[] = {
         .type = COMPONENT_TYPE_APPLICATION,
         .priority = COMPONENT_PRIORITY_NORMAL,
         .entry = digit_classifier_entry,
+        .model_name = "mnist",
     },
 };
 
@@ -492,6 +494,27 @@ int component_run(const char *name)
     }
 
     component_set_state((uint32_t)comp_idx, COMPONENT_INITIALIZING);
+
+    /* Preload model if component manifest declares one */
+    if (bc->model_name) {
+        int model_idx = rust_model_find(bc->model_name);
+        if (model_idx < 0) {
+            /* Model not loaded yet — try built-in MNIST */
+            const char *mn = bc->model_name;
+            bool is_mnist = (mn[0]=='m' && mn[1]=='n' && mn[2]=='i' &&
+                             mn[3]=='s' && mn[4]=='t' && mn[5]=='\0');
+            if (is_mnist) {
+                model_idx = rust_model_load_builtin_mnist();
+            }
+            if (model_idx >= 0) {
+                uart_printf("[component] Preloaded model '%s' (idx %d) for %s\n",
+                            bc->model_name, model_idx, bc->name);
+            } else {
+                uart_printf("[WARN] Failed to preload model '%s' for %s\n",
+                            bc->model_name, bc->name);
+            }
+        }
+    }
 
     /* Create task */
     struct task *task = task_create_with_priority(

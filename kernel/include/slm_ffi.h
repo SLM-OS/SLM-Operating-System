@@ -357,6 +357,24 @@ extern uint32_t rust_model_count(void);
 extern int rust_model_find(const char *name);
 
 /*
+ * Pin a model to prevent LRU eviction.
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_model_pin(uint32_t index);
+
+/*
+ * Unpin a model (allow LRU eviction).
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_model_unpin(uint32_t index);
+
+/*
+ * Share a model's weight memory (increment refcount).
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_model_share_weights(uint32_t index);
+
+/*
  * Run model loader tests.
  * Returns: Number of failures (0 = all passed).
  */

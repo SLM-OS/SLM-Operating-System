@@ -100,7 +100,7 @@ Registry-based model loader supporting ONNX graph parsing, weight extraction, an
 
 **Thread Safety:** The model registry uses internal spinlock protection for concurrent access. However, model load/unload operations are designed to be called from CPU 0 only (shell commands, boot init). Inference (`rust_infer_classify`) is safe to call from any CPU as it reads model weights without modification.
 
-**Memory Lifecycle:** Models persist in the registry until explicitly unloaded via `rust_model_unload()`. The weight pool has a finite capacity of 128 blocks (256 MB). Loading too many models will fail with -1. Model memory is freed only on unload — there is no garbage collection or LRU eviction.
+**Memory Lifecycle:** Models persist in the registry until explicitly unloaded via `rust_model_unload()` or evicted by the LRU cache. The registry holds up to 8 models simultaneously. When all slots are full, loading a new model evicts the least recently used non-pinned model. Models can be pinned to prevent eviction. Each inference call updates the model's LRU timestamp. FP16 weights are automatically converted to FP32 at load time. Weight memory supports reference-counted sharing via `rust_model_share_weights()`.
 
 **Index Bounds:** All functions that accept a model index validate it against the registry size. Out-of-range indices return -1. The `rust_model_find()` function returns -1 for unknown model names.
 
@@ -133,6 +133,21 @@ Return the number of currently loaded models.
 pub unsafe extern "C" fn rust_model_find(name: *const u8) -> i32
 ```
 Find a model by name. Returns the registry index (>= 0) if found, -1 if not found.
+
+```rust
+pub extern "C" fn rust_model_pin(index: u32) -> i32
+```
+Pin a model to prevent LRU eviction. Returns 0 on success, -1 if the index is invalid or the slot is empty.
+
+```rust
+pub extern "C" fn rust_model_unpin(index: u32) -> i32
+```
+Unpin a model, allowing LRU eviction. Returns 0 on success, -1 on error.
+
+```rust
+pub extern "C" fn rust_model_share_weights(index: u32) -> i32
+```
+Increment the reference count on a model's weight memory block. This allows the weight memory to survive even if the model is unloaded from the registry. The caller must eventually release the reference. Returns 0 on success, -1 on error.
 
 ```rust
 pub extern "C" fn rust_model_loader_test() -> i32

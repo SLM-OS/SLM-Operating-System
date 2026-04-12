@@ -120,6 +120,8 @@ The `slm` module provides access to kernel functionality:
 | `slm.model_load_mnist()` | Load the built-in MNIST ONNX model (26 KB). Returns model index or -1. |
 | `slm.model_find(name)` | Find a loaded model by name. Returns index or -1. |
 | `slm.model_infer(index)` | Run inference on a loaded model. Returns predicted class (0-9 for MNIST). |
+| `slm.model_pin(index)` | Pin a model to prevent LRU eviction. Returns 0 on success, -1 on error. |
+| `slm.model_unpin(index)` | Unpin a model (allow LRU eviction). Returns 0 on success, -1 on error. |
 
 ### Memory Statistics
 
