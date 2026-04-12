@@ -10,6 +10,7 @@
 #include "task.h"
 #include "sched.h"
 #include "sched_policy.h"
+#include "ai_types.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "smp.h"
@@ -1469,6 +1470,36 @@ int cmd_sched(int argc, char *argv[])
                         c, pct,
                         (unsigned long)rq->running_ticks,
                         (unsigned long)rq->total_ticks);
+        }
+
+        /* AI policy stats and action histogram */
+        {
+            extern void sched_ai_get_stats(const char *, uint32_t *, uint32_t *,
+                                           uint64_t *, const uint32_t **, int *);
+            const char *policy = sched_get_policy();
+            uint32_t ai_dec, ai_fb;
+            uint64_t ai_lat;
+            const uint32_t *hist;
+            int n_act;
+            sched_ai_get_stats(policy, &ai_dec, &ai_fb, &ai_lat, &hist, &n_act);
+            if (ai_dec > 0) {
+                uart_printf("\r\nAI Policy (%s):\r\n", policy);
+                uart_printf("  Decisions:    %u\r\n", ai_dec);
+                uart_printf("  Fallbacks:    %u\r\n", ai_fb);
+                uart_printf("  Avg latency:  %lu ns\r\n", (unsigned long)ai_lat);
+                if (hist && n_act > 0) {
+                    uart_puts("  Action distribution:\r\n");
+                    for (int a = 0; a < n_act; a++) {
+                        if (hist[a] == 0) continue;
+                        struct ai_sched_action act;
+                        ai_decode_action(a, &act);
+                        uart_printf("    [%d] core=%u pri=%u pre=%u: %u (%u%%)\r\n",
+                                    a, act.core_assignment, act.priority_adj,
+                                    act.preempt, hist[a],
+                                    (uint32_t)(hist[a] * 100 / ai_dec));
+                    }
+                }
+            }
         }
 #endif
 

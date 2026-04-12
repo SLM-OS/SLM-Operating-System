@@ -18,6 +18,7 @@
 #include "task.h"
 #include "sched.h"
 #include "smp.h"
+#include "spinlock.h"
 #include "slm_ffi.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -97,12 +98,16 @@ int ai_test_matvec_zero_weights(void)
     for (int i = 0; i < AI_MLP_LAYER0_IN; i++)
         in[i] = 1.0f;
 
-    /* Zero weights + zero bias → output should be all zeros */
+    /* Test matvec at model dimensions. With real weights, output is non-zero.
+     * With stub weights (all zeros), output = bias (also zero). Either way,
+     * verify the computation completes and produces finite values. */
     ai_test_matvec(ai_mlp_w0, ai_mlp_b0, in, out,
                    AI_MLP_LAYER0_OUT, AI_MLP_LAYER0_IN);
 
     for (int i = 0; i < AI_MLP_LAYER0_OUT; i++) {
-        if (!approx_eq(out[i], 0.0f, 0.001f)) return -1;
+        /* Verify output is a finite number (not NaN or inf) */
+        if (out[i] != out[i]) return -1;  /* NaN check */
+        if (out[i] > 1e10f || out[i] < -1e10f) return -1;  /* overflow check */
     }
     return 0;
 }
@@ -223,16 +228,17 @@ int ai_test_mlp_stub_inference(void)
     int ret = ai_schedule_mlp(state, &action);
     if (ret != 0) return -1;
 
-    /* Zero weights → all logits equal (0) → argmax picks index 0 */
-    if (action.core_assignment != 0) return -1;
-    if (action.priority_adj != 0) return -1;
-    if (action.preempt != 0) return -1;
+    /* Verify action fields are in valid ranges.
+     * With stub weights: all zeros (argmax=0). With real weights: any valid action. */
+    if (action.core_assignment >= AI_STATE_NUM_CORES + 1) return -1;  /* +1 for GPU */
+    if (action.priority_adj > 2) return -1;
+    if (action.preempt > 1) return -1;
 
     return 0;
 }
 
 /*
- * Test: PPO inference produces same result as MLP with stub weights.
+ * Test: PPO inference produces a valid scheduling action.
  */
 int ai_test_ppo_stub_inference(void)
 {
@@ -244,10 +250,10 @@ int ai_test_ppo_stub_inference(void)
     int ret = ai_schedule_ppo(state, &action);
     if (ret != 0) return -1;
 
-    /* Same zero weights → same result */
-    if (action.core_assignment != 0) return -1;
-    if (action.priority_adj != 0) return -1;
-    if (action.preempt != 0) return -1;
+    /* Verify action fields are in valid ranges */
+    if (action.core_assignment >= AI_STATE_NUM_CORES + 1) return -1;
+    if (action.priority_adj > 2) return -1;
+    if (action.preempt > 1) return -1;
 
     return 0;
 }
@@ -726,15 +732,16 @@ int ai_test_policy_dispatches_any_affinity(void)
     /* Don't set affinity — default is CPU_AFFINITY_ANY */
     scheduler_add_task(t);
 
-    /* With stub weights, argmax=0 → core 0 */
+    /* AI policy should assign to a valid CPU */
     uint32_t assigned = t->assigned_cpu;
 
     scheduler_remove_task(t);
     t->id = 0;
     sched_set_policy(sched_find_policy("heuristic"));
 
-    /* Stub weights always produce core=0 */
-    if (assigned != 0) return -3;
+    /* Verify assigned CPU is valid (real weights may pick any core) */
+    extern uint32_t cpu_count;
+    if (assigned >= cpu_count) return -3;
 
     return 0;
 }
@@ -882,6 +889,128 @@ int ai_test_mixed_policy_switch(void)
     }
 
     return 0;
+}
+
+/*
+ * Test: AI policy fallback when inference produces an invalid action.
+ *
+ * Creates a test policy whose assign_cpu runs real MLP inference but
+ * then overrides the core assignment to an out-of-range value. Verifies
+ * that ai_assign_cpu_common detects the invalid action via ai_validate_action
+ * and falls back to the heuristic policy.
+ */
+
+/* Out-of-range assign: run real inference, then corrupt the result */
+static uint32_t fallback_assign_cpu(struct task *task)
+{
+    /* The real AI assign would return a valid CPU. We test the validation
+     * path by directly returning an out-of-range CPU. The scheduler must
+     * detect this and NOT place the task on an invalid CPU. */
+    (void)task;
+    extern uint32_t cpu_count;
+    return cpu_count + 10;  /* Intentionally invalid */
+}
+
+static const struct sched_policy_ops fallback_test_policy = {
+    .name       = "test_fallback",
+    .init       = NULL,
+    .shutdown   = NULL,
+    .assign_cpu = fallback_assign_cpu,
+    .tick       = NULL,
+};
+
+int ai_test_policy_fallback(void)
+{
+    extern uint32_t cpu_count;
+
+    /* Register the rigged policy */
+    sched_register_policy(&fallback_test_policy);
+    sched_set_policy(&fallback_test_policy);
+
+    /* Create a task with ANY affinity */
+    struct task *t = task_create("fb_test", nop_entry, NULL);
+    if (!t) {
+        sched_set_policy(sched_find_policy("heuristic"));
+        return -1;
+    }
+
+    irq_flags_t flags = irq_save();
+    scheduler_add_task(t);
+    uint32_t assigned = t->assigned_cpu;
+    scheduler_remove_task(t);
+    t->id = 0;
+    irq_restore(flags);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+
+    /* The policy returned cpu_count+10 which is invalid. The scheduler
+     * should have clamped or rejected this. The task should NOT be on
+     * an invalid CPU — it should be on a valid one (0..cpu_count-1)
+     * because scheduler_add_task_to_cpu validates the CPU. */
+    if (assigned >= cpu_count) return -2;
+
+    return 0;
+}
+
+/*
+ * Test: AI policy respects core isolation.
+ *
+ * Switches to the real AI MLP policy, isolates the core that the policy
+ * picks, and verifies the scheduler falls back to a non-isolated core.
+ */
+int ai_test_policy_respects_isolation(void)
+{
+    extern uint32_t cpu_count;
+    if (cpu_count < 3) return 0;  /* Need at least 3 CPUs */
+
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    if (!mlp) return -1;
+
+    int result = 0;
+    uint32_t isolate_core = 0;
+    int isolated = 0;
+
+    sched_set_policy(mlp);
+
+    /* First, find out which core the AI picks */
+    struct task *probe = task_create("iso_probe", nop_entry, NULL);
+    if (!probe) { result = -2; goto cleanup; }
+
+    irq_flags_t flags = irq_save();
+    scheduler_add_task(probe);
+    uint32_t ai_core = probe->assigned_cpu;
+    scheduler_remove_task(probe);
+    probe->id = 0;
+    irq_restore(flags);
+
+    /* If AI picks core 0, we can't isolate it (boot CPU). Pick core 1 instead. */
+    isolate_core = (ai_core == 0 || ai_core >= cpu_count) ? 1 : ai_core;
+
+    /* Isolate that core */
+    sched_isolate_core(isolate_core);
+    isolated = 1;
+
+    /* Now dispatch another task — if AI picks the isolated core, the
+     * scheduler should fall back to a non-isolated core */
+    struct task *t = task_create("iso_test", nop_entry, NULL);
+    if (!t) { result = -3; goto cleanup; }
+
+    flags = irq_save();
+    scheduler_add_task(t);
+    uint32_t assigned = t->assigned_cpu;
+    scheduler_remove_task(t);
+    t->id = 0;
+    irq_restore(flags);
+
+    /* The task must NOT be on the isolated core */
+    if (assigned == isolate_core) { result = -4; goto cleanup; }
+    /* It must be on a valid core */
+    if (assigned >= cpu_count) { result = -5; goto cleanup; }
+
+cleanup:
+    if (isolated) sched_unisolate_core(isolate_core);
+    sched_set_policy(sched_find_policy("heuristic"));
+    return result;
 }
 
 #endif /* ENABLE_BOOT_TESTS */

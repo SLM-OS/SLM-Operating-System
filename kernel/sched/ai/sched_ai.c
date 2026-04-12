@@ -29,6 +29,7 @@ struct ai_policy_stats {
     uint32_t decisions;
     uint32_t fallbacks;
     uint64_t total_latency_ns;
+    uint32_t action_hist[AI_SCHED_N_ACTIONS];  /* Per-action index counts */
 };
 
 static struct ai_policy_stats ai_mlp_stats;
@@ -67,6 +68,15 @@ static uint32_t ai_assign_cpu_common(
     uint64_t t1 = slm_get_time_ns();
     stats->total_latency_ns += (t1 - t0);
     stats->decisions++;
+
+    /* Record action in histogram (inverse of ai_decode_action) */
+    if (ret >= 0) {
+        int idx = action.core_assignment * AI_ACTIONS_PER_CORE
+                + action.priority_adj * AI_SCHED_PREEMPT_OPTS
+                + action.preempt;
+        if (idx >= 0 && idx < AI_SCHED_N_ACTIONS)
+            stats->action_hist[idx]++;
+    }
 
     if (ret < 0) {
         stats->fallbacks++;
@@ -112,6 +122,14 @@ static int ai_mlp_init(void)
     ai_mlp_stats.decisions = 0;
     ai_mlp_stats.fallbacks = 0;
     ai_mlp_stats.total_latency_ns = 0;
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+        ai_mlp_stats.action_hist[i] = 0;
+
+    /* Validate weight dimensions match expected architecture */
+    _Static_assert(AI_MLP_LAYER0_IN == AI_STATE_DIM,
+        "MLP layer 0 input must match state dimension");
+    _Static_assert(AI_MLP_LAYER3_OUT == AI_SCHED_N_ACTIONS,
+        "MLP layer 3 output must match action count");
 
     /* Run a self-test inference to verify linkage */
     FP_CONTEXT_SAVE();
@@ -165,6 +183,8 @@ static int ai_ppo_init(void)
     ai_ppo_stats.decisions = 0;
     ai_ppo_stats.fallbacks = 0;
     ai_ppo_stats.total_latency_ns = 0;
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+        ai_ppo_stats.action_hist[i] = 0;
 
     FP_CONTEXT_SAVE();
 
@@ -207,6 +227,38 @@ const struct sched_policy_ops sched_policy_ai_ppo = {
     .assign_cpu = ai_ppo_assign_cpu,
     .tick       = NULL,
 };
+
+/* ============================================================================
+ * Statistics Access
+ * ============================================================================ */
+
+void sched_ai_get_stats(const char *policy_name,
+                        uint32_t *decisions, uint32_t *fallbacks,
+                        uint64_t *avg_latency_ns,
+                        const uint32_t **action_hist, int *n_actions)
+{
+    struct ai_policy_stats *stats = NULL;
+    if (policy_name[0] == 'a' && policy_name[3] == 'm')
+        stats = &ai_mlp_stats;
+    else if (policy_name[0] == 'a' && policy_name[3] == 'p')
+        stats = &ai_ppo_stats;
+
+    if (!stats) {
+        *decisions = 0;
+        *fallbacks = 0;
+        *avg_latency_ns = 0;
+        *action_hist = NULL;
+        *n_actions = 0;
+        return;
+    }
+
+    *decisions = stats->decisions;
+    *fallbacks = stats->fallbacks;
+    *avg_latency_ns = stats->decisions > 0
+        ? stats->total_latency_ns / stats->decisions : 0;
+    *action_hist = stats->action_hist;
+    *n_actions = AI_SCHED_N_ACTIONS;
+}
 
 /* ============================================================================
  * Registration

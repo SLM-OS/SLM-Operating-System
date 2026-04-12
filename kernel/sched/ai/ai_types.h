@@ -57,6 +57,11 @@ _Static_assert(AI_STATE_NUM_CORES * AI_FEATURES_PER_CORE +
 #define AI_SCHED_N_ACTIONS    42  /* Jetson default; overridden by ai_config.h */
 #endif
 
+/* Action encoding constants: idx = core * AI_ACTIONS_PER_CORE + priority * 2 + preempt */
+#define AI_SCHED_PRIORITY_LEVELS  3  /* 0=lower, 1=keep, 2=raise */
+#define AI_SCHED_PREEMPT_OPTS     2  /* 0=no, 1=yes */
+#define AI_ACTIONS_PER_CORE       (AI_SCHED_PRIORITY_LEVELS * AI_SCHED_PREEMPT_OPTS)  /* 6 */
+
 /*
  * Decoded scheduling action from AI inference.
  */

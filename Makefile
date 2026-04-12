@@ -11,6 +11,9 @@ BUILD_TYPE ?= Release
 # Platform: QEMU_VIRT, JETSON_ORIN_NANO, or RASPI5
 PLATFORM ?= QEMU_VIRT
 
+# AI Scheduler: OFF by default, ON to include trained ML models
+AI_SCHED ?= OFF
+
 # Directories
 BUILD_DIR := build
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
@@ -99,6 +102,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DPLATFORM=$(PLATFORM) \
+		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-clean
@@ -230,6 +234,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DPLATFORM=$(PLATFORM) \
 		-DENABLE_BOOT_TESTS=ON \
+		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-test-clean

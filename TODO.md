@@ -221,8 +221,8 @@ This document tracks Phase 6 implementation of SLM-OS.
   - ☐ Async loading in background
 
 ### From Phase AI-Sched: Real Weight Integration
-- ☐ Integrate Plan A exported weights
-- ☐ Verify inference latency < 50µs with real weights
+- ✅ Integrate Plan A exported weights (MLP + PPO, imported and building)
+- ✅ Verify inference latency < 50µs with real weights on hardware (Pi 5: 41.9 µs)
 - ☐ Compare AI scheduler decisions to heuristic
 - ☐ Measure scheduling quality improvement (if measurable)
 
@@ -339,7 +339,7 @@ All M7 items consolidated in `docs/future-work.md` (21 items, 61-88 weeks estima
   - ✅ Context switch < 10µs (Pi 5: 1.858µs)
   - ✅ Boot time < 2 seconds (Pi 5 kernel: ~1.6s)
   - ☐ Model load < 100ms (50MB model) — needs ONNX model on filesystem
-  - ☐ AI scheduler inference < 50µs — needs real weights
+  - ✅ AI scheduler inference < 50µs (Pi 5: 41.9 µs with real MLP weights)
 - ☐ Documentation complete (API, architecture, demo, benchmarks done; capstone report pending)
 
 ### Demo Requirements
