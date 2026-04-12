@@ -966,11 +966,15 @@ int ai_test_policy_respects_isolation(void)
     const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
     if (!mlp) return -1;
 
+    int result = 0;
+    uint32_t isolate_core = 0;
+    int isolated = 0;
+
     sched_set_policy(mlp);
 
     /* First, find out which core the AI picks */
     struct task *probe = task_create("iso_probe", nop_entry, NULL);
-    if (!probe) { sched_set_policy(sched_find_policy("heuristic")); return -2; }
+    if (!probe) { result = -2; goto cleanup; }
 
     irq_flags_t flags = irq_save();
     scheduler_add_task(probe);
@@ -980,19 +984,16 @@ int ai_test_policy_respects_isolation(void)
     irq_restore(flags);
 
     /* If AI picks core 0, we can't isolate it (boot CPU). Pick core 1 instead. */
-    uint32_t isolate_core = (ai_core == 0 || ai_core >= cpu_count) ? 1 : ai_core;
+    isolate_core = (ai_core == 0 || ai_core >= cpu_count) ? 1 : ai_core;
 
     /* Isolate that core */
     sched_isolate_core(isolate_core);
+    isolated = 1;
 
     /* Now dispatch another task — if AI picks the isolated core, the
      * scheduler should fall back to a non-isolated core */
     struct task *t = task_create("iso_test", nop_entry, NULL);
-    if (!t) {
-        sched_unisolate_core(isolate_core);
-        sched_set_policy(sched_find_policy("heuristic"));
-        return -3;
-    }
+    if (!t) { result = -3; goto cleanup; }
 
     flags = irq_save();
     scheduler_add_task(t);
@@ -1001,15 +1002,15 @@ int ai_test_policy_respects_isolation(void)
     t->id = 0;
     irq_restore(flags);
 
-    sched_unisolate_core(isolate_core);
-    sched_set_policy(sched_find_policy("heuristic"));
-
     /* The task must NOT be on the isolated core */
-    if (assigned == isolate_core) return -4;
+    if (assigned == isolate_core) { result = -4; goto cleanup; }
     /* It must be on a valid core */
-    if (assigned >= cpu_count) return -5;
+    if (assigned >= cpu_count) { result = -5; goto cleanup; }
 
-    return 0;
+cleanup:
+    if (isolated) sched_unisolate_core(isolate_core);
+    sched_set_policy(sched_find_policy("heuristic"));
+    return result;
 }
 
 #endif /* ENABLE_BOOT_TESTS */

@@ -69,9 +69,11 @@ static uint32_t ai_assign_cpu_common(
     stats->total_latency_ns += (t1 - t0);
     stats->decisions++;
 
-    /* Record action in histogram */
+    /* Record action in histogram (inverse of ai_decode_action) */
     if (ret >= 0) {
-        int idx = action.core_assignment * 6 + action.priority_adj * 2 + action.preempt;
+        int idx = action.core_assignment * AI_ACTIONS_PER_CORE
+                + action.priority_adj * AI_SCHED_PREEMPT_OPTS
+                + action.preempt;
         if (idx >= 0 && idx < AI_SCHED_N_ACTIONS)
             stats->action_hist[idx]++;
     }
@@ -120,6 +122,14 @@ static int ai_mlp_init(void)
     ai_mlp_stats.decisions = 0;
     ai_mlp_stats.fallbacks = 0;
     ai_mlp_stats.total_latency_ns = 0;
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+        ai_mlp_stats.action_hist[i] = 0;
+
+    /* Validate weight dimensions match expected architecture */
+    _Static_assert(AI_MLP_LAYER0_IN == AI_STATE_DIM,
+        "MLP layer 0 input must match state dimension");
+    _Static_assert(AI_MLP_LAYER3_OUT == AI_SCHED_N_ACTIONS,
+        "MLP layer 3 output must match action count");
 
     /* Run a self-test inference to verify linkage */
     FP_CONTEXT_SAVE();
@@ -173,6 +183,8 @@ static int ai_ppo_init(void)
     ai_ppo_stats.decisions = 0;
     ai_ppo_stats.fallbacks = 0;
     ai_ppo_stats.total_latency_ns = 0;
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+        ai_ppo_stats.action_hist[i] = 0;
 
     FP_CONTEXT_SAVE();
 
