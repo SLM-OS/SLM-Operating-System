@@ -341,6 +341,10 @@ make kernel PLATFORM=X86_64
 
 # Clean rebuild when switching platforms
 make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
+
+# Generate Rust API documentation
+make rustdoc
+# Output: runtime/target/aarch64-unknown-none/doc/slm_runtime/index.html
 ```
 
 ---

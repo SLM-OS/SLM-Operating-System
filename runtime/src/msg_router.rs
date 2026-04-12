@@ -20,6 +20,8 @@ const MAX_TOPICS: usize = 8;
 const MAX_SUBSCRIBERS: usize = 4;
 const MAX_MSG_LEN: usize = 60;
 const TOPIC_NAME_LEN: usize = 16;
+const MAX_WILDCARD_SUBS: usize = 8;
+const MSG_PRIORITY_NORMAL: u8 = 0;
 
 /// Ack timeout in pit_ticks (500 ticks = 5 seconds at 100 Hz).
 const ACK_TIMEOUT_TICKS: u64 = 500;
@@ -55,6 +57,8 @@ struct Mailbox {
     ack: AtomicU32,
     data: [u8; MAX_MSG_LEN],
     topic: [u8; TOPIC_NAME_LEN],
+    /// Atomic to prevent reordering: priority must be visible before ready=1.
+    priority: AtomicU32,
 }
 
 impl Mailbox {
@@ -64,6 +68,7 @@ impl Mailbox {
             ack: AtomicU32::new(0),
             data: [0; MAX_MSG_LEN],
             topic: [0; TOPIC_NAME_LEN],
+            priority: AtomicU32::new(0),
         }
     }
 
@@ -72,6 +77,18 @@ impl Mailbox {
         self.ack.store(0, Ordering::Release);
         self.data = [0; MAX_MSG_LEN];
         self.topic = [0; TOPIC_NAME_LEN];
+        self.priority.store(0, Ordering::Release);
+    }
+
+    /// Deliver a message to this mailbox. Writes data and topic first,
+    /// then priority (Release), then ready=1 (Release) so the receiver
+    /// sees consistent data when it reads ready=1 (Acquire).
+    unsafe fn deliver(&mut self, topic_name: *const u8, data: *const u8, prio: u8) {
+        str_copy(&mut self.data, data);
+        str_copy(&mut self.topic, topic_name);
+        self.ack.store(0, Ordering::Release);
+        self.priority.store(prio as u32, Ordering::Release);
+        self.ready.store(1, Ordering::Release);
     }
 }
 
@@ -139,6 +156,61 @@ static mut TOPICS: [Topic; MAX_TOPICS] = [
 ];
 static mut TOPIC_COUNT: i32 = 0;
 
+/// Wildcard subscription: pattern ending in '*' matches topic prefixes.
+struct WildcardSub {
+    pattern: [u8; TOPIC_NAME_LEN], // e.g., "/sensors/*"
+    component_idx: i32,            // -1 = unused
+    mailbox: Mailbox,
+}
+
+impl WildcardSub {
+    const fn new() -> Self {
+        Self {
+            pattern: [0; TOPIC_NAME_LEN],
+            component_idx: -1,
+            mailbox: Mailbox::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.pattern = [0; TOPIC_NAME_LEN];
+        self.component_idx = -1;
+        self.mailbox.clear();
+    }
+
+    fn is_active(&self) -> bool {
+        self.pattern[0] != 0
+    }
+}
+
+static mut WILDCARD_SUBS: [WildcardSub; MAX_WILDCARD_SUBS] = [
+    WildcardSub::new(), WildcardSub::new(),
+    WildcardSub::new(), WildcardSub::new(),
+    WildcardSub::new(), WildcardSub::new(),
+    WildcardSub::new(), WildcardSub::new(),
+];
+
+/// Tracks the mailbox source returned by the last msg_router_receive() call
+/// for each component, so msg_router_ack() targets the exact same mailbox.
+/// Prevents race conditions when a higher-priority message arrives between
+/// receive() and ack().
+const MAX_COMPONENTS: usize = 32;
+
+#[derive(Clone, Copy)]
+struct LastReceived {
+    topic_idx: i32,    // -1 = none, 0..MAX_TOPICS = exact, >=MAX_TOPICS = invalid
+    sub_idx: i32,      // subscriber slot within topic
+    wildcard_idx: i32, // -1 = not wildcard, 0..MAX_WILDCARD_SUBS = wildcard slot
+}
+
+impl LastReceived {
+    const fn none() -> Self {
+        Self { topic_idx: -1, sub_idx: -1, wildcard_idx: -1 }
+    }
+}
+
+static mut LAST_RECEIVED: [LastReceived; MAX_COMPONENTS] = [LastReceived::none(); MAX_COMPONENTS];
+
 // =============================================================================
 // String Helpers
 // =============================================================================
@@ -178,6 +250,42 @@ fn str_copy(dst: &mut [u8], src: *const u8) {
     dst[i] = 0;
 }
 
+/// Check if a pattern is a wildcard (ends with '*').
+fn is_wildcard_pattern(name: *const u8) -> bool {
+    unsafe {
+        let mut i = 0;
+        let mut last = 0u8;
+        while *name.add(i) != 0 {
+            last = *name.add(i);
+            i += 1;
+        }
+        last == b'*'
+    }
+}
+
+/// Check if a topic name matches a wildcard pattern.
+/// Pattern "/sensors/*" matches "/sensors/data", "/sensors/temp", etc.
+fn wildcard_matches(pattern: &[u8; TOPIC_NAME_LEN], topic: *const u8) -> bool {
+    // Find the '*' position in pattern
+    let mut prefix_len = 0;
+    while prefix_len < TOPIC_NAME_LEN && pattern[prefix_len] != 0 && pattern[prefix_len] != b'*' {
+        prefix_len += 1;
+    }
+    // No '*' found — not a wildcard
+    if prefix_len >= TOPIC_NAME_LEN || pattern[prefix_len] != b'*' {
+        return false;
+    }
+    // Compare prefix
+    unsafe {
+        for i in 0..prefix_len {
+            if *topic.add(i) == 0 || *topic.add(i) != pattern[i] {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 // =============================================================================
 // Public FFI API
 // =============================================================================
@@ -190,15 +298,40 @@ pub extern "C" fn msg_router_init() {
         for topic in &mut TOPICS {
             topic.clear();
         }
+        for ws in &mut WILDCARD_SUBS {
+            ws.clear();
+        }
+        for lr in &mut LAST_RECEIVED {
+            *lr = LastReceived::none();
+        }
     }
 }
 
 /// Subscribe a component to a topic. Creates the topic if it doesn't exist.
+/// If the topic name ends with '*', creates a wildcard subscription that
+/// matches all topics with the given prefix (e.g., "/sensors/*" matches
+/// "/sensors/data", "/sensors/temp").
 /// Returns 0 on success, -1 on error.
 #[no_mangle]
 pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32) -> i32 {
     if topic_name.is_null() {
         return -1;
+    }
+
+    // Wildcard subscription
+    if is_wildcard_pattern(topic_name) {
+        unsafe {
+            for i in 0..MAX_WILDCARD_SUBS {
+                if !WILDCARD_SUBS[i].is_active() {
+                    str_copy(&mut WILDCARD_SUBS[i].pattern, topic_name);
+                    WILDCARD_SUBS[i].component_idx = component_idx;
+                    WILDCARD_SUBS[i].mailbox.clear();
+                    return 0;
+                }
+            }
+            puts(b"[msg] No free wildcard slots\n\0");
+            return -1;
+        }
     }
 
     unsafe {
@@ -251,65 +384,96 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
     }
 }
 
-/// Publish a message to a topic. Delivers to all subscribers and waits
-/// for acknowledgment (yield-based, 5-second timeout).
+/// Internal publish with priority. Delivers to exact topic subscribers
+/// and wildcard subscribers, then waits for acknowledgment.
+unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8) -> i32 {
+    let mut delivered = 0i32;
+
+    /// Deliver a message to a mailbox and wait for ack.
+    /// Returns true if the subscriber acknowledged within the timeout.
+    unsafe fn deliver_and_wait(mb: &mut Mailbox, topic_name: *const u8,
+                               data: *const u8, priority: u8) -> bool {
+        mb.deliver(topic_name, data, priority);
+        let timeout = get_ticks() + ACK_TIMEOUT_TICKS;
+        while get_ticks() < timeout {
+            if mb.ack.load(Ordering::Acquire) != 0 {
+                return true;
+            }
+            sched_yield();
+        }
+        false
+    }
+
+    // Deliver to exact topic subscribers
+    let mut topic_idx: Option<usize> = None;
+    for i in 0..MAX_TOPICS {
+        if TOPICS[i].is_active() && str_eq_cstr(&TOPICS[i].name, topic_name) {
+            topic_idx = Some(i);
+            break;
+        }
+    }
+
+    if let Some(idx) = topic_idx {
+        for j in 0..MAX_SUBSCRIBERS {
+            if TOPICS[idx].subs[j].component_idx == -1 {
+                continue;
+            }
+            if deliver_and_wait(&mut TOPICS[idx].subs[j].mailbox,
+                                topic_name, data, priority) {
+                delivered += 1;
+            }
+        }
+    } else {
+        uart_printf(b"[msg] Topic '%s' not found\n\0".as_ptr(), topic_name);
+    }
+
+    // Deliver to wildcard subscribers whose pattern matches this topic
+    for i in 0..MAX_WILDCARD_SUBS {
+        if !WILDCARD_SUBS[i].is_active() || WILDCARD_SUBS[i].component_idx == -1 {
+            continue;
+        }
+        if !wildcard_matches(&WILDCARD_SUBS[i].pattern, topic_name) {
+            continue;
+        }
+        if deliver_and_wait(&mut WILDCARD_SUBS[i].mailbox,
+                            topic_name, data, priority) {
+            delivered += 1;
+        }
+    }
+
+    delivered
+}
+
+/// Publish a message to a topic with normal priority.
+/// Delivers to all subscribers (exact and wildcard) and waits for ack.
 /// Returns the number of subscribers that received the message.
 #[no_mangle]
 pub extern "C" fn msg_router_publish(topic_name: *const u8, data: *const u8) -> i32 {
     if topic_name.is_null() || data.is_null() {
         return 0;
     }
+    unsafe { publish_internal(topic_name, data, MSG_PRIORITY_NORMAL) }
+}
 
-    unsafe {
-        // Find topic
-        let mut topic_idx: Option<usize> = None;
-        for i in 0..MAX_TOPICS {
-            if TOPICS[i].is_active() && str_eq_cstr(&TOPICS[i].name, topic_name) {
-                topic_idx = Some(i);
-                break;
-            }
-        }
-
-        let idx = match topic_idx {
-            Some(i) => i,
-            None => {
-                uart_printf(b"[msg] Topic '%s' not found\n\0".as_ptr(), topic_name);
-                return 0;
-            }
-        };
-
-        let mut delivered = 0i32;
-
-        for j in 0..MAX_SUBSCRIBERS {
-            if TOPICS[idx].subs[j].component_idx == -1 {
-                continue;
-            }
-
-            let mb = &mut TOPICS[idx].subs[j].mailbox;
-
-            // Copy message into subscriber's mailbox
-            str_copy(&mut mb.data, data);
-            str_copy(&mut mb.topic, topic_name);
-            mb.ack.store(0, Ordering::Release);
-            mb.ready.store(1, Ordering::Release);
-
-            // Wait for ack (5-second timeout)
-            let timeout = get_ticks() + ACK_TIMEOUT_TICKS;
-            while get_ticks() < timeout {
-                if mb.ack.load(Ordering::Acquire) != 0 {
-                    delivered += 1;
-                    break;
-                }
-                sched_yield();
-            }
-        }
-
-        delivered
+/// Publish a message with explicit priority (0 = normal, higher = more urgent).
+/// Higher-priority messages are delivered first by msg_router_receive.
+/// Returns the number of subscribers that received the message.
+#[no_mangle]
+pub extern "C" fn msg_router_publish_priority(
+    topic_name: *const u8,
+    data: *const u8,
+    priority: u8,
+) -> i32 {
+    if topic_name.is_null() || data.is_null() {
+        return 0;
     }
+    unsafe { publish_internal(topic_name, data, priority) }
 }
 
 /// Check if a subscriber has a pending message.
 /// Returns a pointer to the message data, or NULL if no message.
+/// When multiple messages are pending, returns the highest-priority one.
+/// Records which mailbox was returned so `msg_router_ack()` targets it exactly.
 /// Caller must call `msg_router_ack()` after processing.
 #[no_mangle]
 pub extern "C" fn msg_router_receive(
@@ -317,6 +481,12 @@ pub extern "C" fn msg_router_receive(
     topic_out: *mut u8,
 ) -> *const u8 {
     unsafe {
+        let mut best_priority: u8 = 0;
+        let mut best_data: *const u8 = core::ptr::null();
+        let mut best_topic: *const [u8; TOPIC_NAME_LEN] = core::ptr::null();
+        let mut best_src = LastReceived::none();
+
+        // Scan exact topic subscriptions
         for i in 0..MAX_TOPICS {
             if !TOPICS[i].is_active() {
                 continue;
@@ -327,44 +497,90 @@ pub extern "C" fn msg_router_receive(
                 }
                 let mb = &TOPICS[i].subs[j].mailbox;
                 if mb.ready.load(Ordering::Acquire) != 0 {
-                    if !topic_out.is_null() {
-                        // Copy topic name to caller's buffer
-                        let src = &mb.topic;
-                        let mut k = 0;
-                        while k < TOPIC_NAME_LEN - 1 && src[k] != 0 {
-                            *topic_out.add(k) = src[k];
-                            k += 1;
-                        }
-                        *topic_out.add(k) = 0;
+                    let prio = mb.priority.load(Ordering::Acquire) as u8;
+                    if best_data.is_null() || prio > best_priority {
+                        best_priority = prio;
+                        best_data = mb.data.as_ptr();
+                        best_topic = &mb.topic;
+                        best_src = LastReceived {
+                            topic_idx: i as i32,
+                            sub_idx: j as i32,
+                            wildcard_idx: -1,
+                        };
                     }
-                    return mb.data.as_ptr();
                 }
             }
         }
-        core::ptr::null()
+
+        // Scan wildcard subscriptions
+        for i in 0..MAX_WILDCARD_SUBS {
+            if WILDCARD_SUBS[i].component_idx != component_idx {
+                continue;
+            }
+            let mb = &WILDCARD_SUBS[i].mailbox;
+            if mb.ready.load(Ordering::Acquire) != 0 {
+                let prio = mb.priority.load(Ordering::Acquire) as u8;
+                if best_data.is_null() || prio > best_priority {
+                    best_priority = prio;
+                    best_data = mb.data.as_ptr();
+                    best_topic = &mb.topic;
+                    best_src = LastReceived {
+                        topic_idx: -1,
+                        sub_idx: -1,
+                        wildcard_idx: i as i32,
+                    };
+                }
+            }
+        }
+
+        // Record which mailbox we returned so ack() targets it exactly
+        if component_idx >= 0 && (component_idx as usize) < MAX_COMPONENTS {
+            LAST_RECEIVED[component_idx as usize] = best_src;
+        }
+
+        if !best_data.is_null() && !topic_out.is_null() {
+            let src = &*best_topic;
+            let mut k = 0;
+            while k < TOPIC_NAME_LEN - 1 && src[k] != 0 {
+                *topic_out.add(k) = src[k];
+                k += 1;
+            }
+            *topic_out.add(k) = 0;
+        }
+
+        best_data
     }
 }
 
-/// Acknowledge receipt of a message. Clears the ready flag and sets ack.
+/// Acknowledge receipt of a message. Targets the exact mailbox that
+/// was returned by the most recent `msg_router_receive()` call for this
+/// component, preventing race conditions with newly-arrived messages.
 #[no_mangle]
 pub extern "C" fn msg_router_ack(component_idx: i32) {
     unsafe {
-        for i in 0..MAX_TOPICS {
-            if !TOPICS[i].is_active() {
-                continue;
+        if component_idx < 0 || (component_idx as usize) >= MAX_COMPONENTS {
+            return;
+        }
+
+        let lr = LAST_RECEIVED[component_idx as usize];
+
+        if lr.wildcard_idx >= 0 && (lr.wildcard_idx as usize) < MAX_WILDCARD_SUBS {
+            let mb = &mut WILDCARD_SUBS[lr.wildcard_idx as usize].mailbox;
+            if mb.ready.load(Ordering::Acquire) != 0 {
+                mb.ready.store(0, Ordering::Release);
+                mb.ack.store(1, Ordering::Release);
             }
-            for j in 0..MAX_SUBSCRIBERS {
-                if TOPICS[i].subs[j].component_idx != component_idx {
-                    continue;
-                }
-                let mb = &mut TOPICS[i].subs[j].mailbox;
-                if mb.ready.load(Ordering::Acquire) != 0 {
-                    mb.ready.store(0, Ordering::Release);
-                    mb.ack.store(1, Ordering::Release);
-                    return;
-                }
+        } else if lr.topic_idx >= 0 && (lr.topic_idx as usize) < MAX_TOPICS
+               && lr.sub_idx >= 0 && (lr.sub_idx as usize) < MAX_SUBSCRIBERS {
+            let mb = &mut TOPICS[lr.topic_idx as usize].subs[lr.sub_idx as usize].mailbox;
+            if mb.ready.load(Ordering::Acquire) != 0 {
+                mb.ready.store(0, Ordering::Release);
+                mb.ack.store(1, Ordering::Release);
             }
         }
+
+        // Clear the record
+        LAST_RECEIVED[component_idx as usize] = LastReceived::none();
     }
 }
 
@@ -387,6 +603,12 @@ pub extern "C" fn msg_router_unsubscribe_all(component_idx: i32) {
             if TOPICS[i].sub_count <= 0 {
                 TOPICS[i].clear();
                 TOPIC_COUNT -= 1;
+            }
+        }
+        // Also clear wildcard subscriptions
+        for i in 0..MAX_WILDCARD_SUBS {
+            if WILDCARD_SUBS[i].component_idx == component_idx {
+                WILDCARD_SUBS[i].clear();
             }
         }
     }

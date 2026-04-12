@@ -104,7 +104,8 @@ The `slm` module provides access to kernel functionality:
 
 | Function | Description |
 |----------|-------------|
-| `slm.msg_publish(topic, data)` | Publish a message to a topic. Returns number of subscribers that received it. |
+| `slm.msg_publish(topic, data)` | Publish a message to a topic. Returns number of subscribers that received it. Wildcard subscribers matching the topic prefix also receive the message. |
+| `slm.msg_publish_priority(topic, data, priority)` | Publish with explicit priority (0=normal, higher=more urgent). Higher-priority messages are delivered first by `msg_router_receive`. |
 
 ### Scheduler
 
