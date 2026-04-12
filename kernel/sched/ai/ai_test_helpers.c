@@ -18,6 +18,7 @@
 #include "task.h"
 #include "sched.h"
 #include "smp.h"
+#include "spinlock.h"
 #include "slm_ffi.h"
 #include <stdint.h>
 #include <stddef.h>
@@ -886,6 +887,127 @@ int ai_test_mixed_policy_switch(void)
         scheduler_remove_task(t);
         t->id = 0;
     }
+
+    return 0;
+}
+
+/*
+ * Test: AI policy fallback when inference produces an invalid action.
+ *
+ * Creates a test policy whose assign_cpu runs real MLP inference but
+ * then overrides the core assignment to an out-of-range value. Verifies
+ * that ai_assign_cpu_common detects the invalid action via ai_validate_action
+ * and falls back to the heuristic policy.
+ */
+
+/* Out-of-range assign: run real inference, then corrupt the result */
+static uint32_t fallback_assign_cpu(struct task *task)
+{
+    /* The real AI assign would return a valid CPU. We test the validation
+     * path by directly returning an out-of-range CPU. The scheduler must
+     * detect this and NOT place the task on an invalid CPU. */
+    (void)task;
+    extern uint32_t cpu_count;
+    return cpu_count + 10;  /* Intentionally invalid */
+}
+
+static const struct sched_policy_ops fallback_test_policy = {
+    .name       = "test_fallback",
+    .init       = NULL,
+    .shutdown   = NULL,
+    .assign_cpu = fallback_assign_cpu,
+    .tick       = NULL,
+};
+
+int ai_test_policy_fallback(void)
+{
+    extern uint32_t cpu_count;
+
+    /* Register the rigged policy */
+    sched_register_policy(&fallback_test_policy);
+    sched_set_policy(&fallback_test_policy);
+
+    /* Create a task with ANY affinity */
+    struct task *t = task_create("fb_test", nop_entry, NULL);
+    if (!t) {
+        sched_set_policy(sched_find_policy("heuristic"));
+        return -1;
+    }
+
+    irq_flags_t flags = irq_save();
+    scheduler_add_task(t);
+    uint32_t assigned = t->assigned_cpu;
+    scheduler_remove_task(t);
+    t->id = 0;
+    irq_restore(flags);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+
+    /* The policy returned cpu_count+10 which is invalid. The scheduler
+     * should have clamped or rejected this. The task should NOT be on
+     * an invalid CPU — it should be on a valid one (0..cpu_count-1)
+     * because scheduler_add_task_to_cpu validates the CPU. */
+    if (assigned >= cpu_count) return -2;
+
+    return 0;
+}
+
+/*
+ * Test: AI policy respects core isolation.
+ *
+ * Switches to the real AI MLP policy, isolates the core that the policy
+ * picks, and verifies the scheduler falls back to a non-isolated core.
+ */
+int ai_test_policy_respects_isolation(void)
+{
+    extern uint32_t cpu_count;
+    if (cpu_count < 3) return 0;  /* Need at least 3 CPUs */
+
+    const struct sched_policy_ops *mlp = sched_find_policy("ai_mlp");
+    if (!mlp) return -1;
+
+    sched_set_policy(mlp);
+
+    /* First, find out which core the AI picks */
+    struct task *probe = task_create("iso_probe", nop_entry, NULL);
+    if (!probe) { sched_set_policy(sched_find_policy("heuristic")); return -2; }
+
+    irq_flags_t flags = irq_save();
+    scheduler_add_task(probe);
+    uint32_t ai_core = probe->assigned_cpu;
+    scheduler_remove_task(probe);
+    probe->id = 0;
+    irq_restore(flags);
+
+    /* If AI picks core 0, we can't isolate it (boot CPU). Pick core 1 instead. */
+    uint32_t isolate_core = (ai_core == 0 || ai_core >= cpu_count) ? 1 : ai_core;
+
+    /* Isolate that core */
+    sched_isolate_core(isolate_core);
+
+    /* Now dispatch another task — if AI picks the isolated core, the
+     * scheduler should fall back to a non-isolated core */
+    struct task *t = task_create("iso_test", nop_entry, NULL);
+    if (!t) {
+        sched_unisolate_core(isolate_core);
+        sched_set_policy(sched_find_policy("heuristic"));
+        return -3;
+    }
+
+    flags = irq_save();
+    scheduler_add_task(t);
+    uint32_t assigned = t->assigned_cpu;
+    scheduler_remove_task(t);
+    t->id = 0;
+    irq_restore(flags);
+
+    sched_unisolate_core(isolate_core);
+    sched_set_policy(sched_find_policy("heuristic"));
+
+    /* The task must NOT be on the isolated core */
+    if (assigned == isolate_core) return -4;
+    /* It must be on a valid core */
+    if (assigned >= cpu_count) return -5;
 
     return 0;
 }

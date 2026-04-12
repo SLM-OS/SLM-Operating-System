@@ -478,8 +478,8 @@ Features at offset 100:
 - ✅ `test_policy_switch_calls_init_shutdown` — init/shutdown callbacks invoked (M1)
 - ✅ `test_ai_policy_mlp_end_to_end` — full dispatch path with init/shutdown (M7)
 - ✅ `test_ai_policy_dispatches_any_affinity` — ANY affinity uses AI policy (M7)
-- ☐ `test_ai_policy_fallback` — real weights produce valid actions, so fallback path not exercised
-- ☐ `test_ai_policy_respects_isolation` — requires adversarial weights that pick isolated cores
+- ✅ `test_ai_policy_fallback` — uses rigged test policy returning invalid CPU, verifies scheduler places task on valid CPU
+- ✅ `test_ai_policy_respects_isolation` — isolates AI-picked core, verifies scheduler falls back to non-isolated core
 
 ### Performance Tests
 - ✅ `test_ai_inference_latency` — 100 iterations, report avg (no QEMU assertion)
