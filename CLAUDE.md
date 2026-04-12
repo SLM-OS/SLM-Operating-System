@@ -170,7 +170,7 @@ make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
 
 **GPU CBB Firewall:** GPU registers at 0x17000000 are behind the CBB firewall. Reading NV_PMC_BOOT_0 triggers an external abort. The stub GPU driver is used on Jetson instead of the NVIDIA probe driver.
 
-**nvgpu RAS Error (Solved):** Linux's nvgpu driver leaves stale GPU DMA operations after kexec. TF-A (EL3) catches the resulting RAS Uncorrectable Error and powers off the CPU core. **Fix:** Runtime PM suspend the GPU before kexec (see kexec deploy workflow below). This power-gates the GPU and stops the PMU firmware, eliminating stale DMA. See GitHub issue #9.
+**nvgpu RAS Error (Solved):** Linux's nvgpu driver leaves stale GPU DMA operations after kexec. TF-A (EL3) catches the resulting RAS Uncorrectable Error and powers off the CPU core. **Fix:** Runtime PM suspend the GPU before kexec via the `slmos-kexec` helper (`scripts/jetson-kexec-slmos.sh`, installed to `/usr/local/bin/slmos-kexec` on both Jetsons). This power-gates the GPU and stops the PMU firmware, eliminating stale DMA. See GitHub issue #9.
 
 **Stale Interrupts After Kexec (Solved):** After kexec, stale Linux timer/peripheral interrupts can fire before SLM-OS sets up exception vectors. Without a valid VBAR, any exception crashes the CPU. **Fix:** `boot.S` masks all exceptions (`msr daifset, #0xF`) as the first instruction at `primary_cpu`, before stack setup or BSS clear.
 

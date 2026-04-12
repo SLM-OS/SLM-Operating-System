@@ -99,6 +99,19 @@ jobs:
           test_output.txt
         retention-days: 7
 
+  shell-script-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install shellcheck
+      run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+    - name: Run jetson-kexec-slmos.sh tests
+      run: scripts/tests/test-jetson-kexec.sh
+
   build-x86-64:
     runs-on: ubuntu-latest
 
