@@ -838,6 +838,19 @@ pub extern "C" fn rust_model_loader_init() -> i32 {
     0
 }
 
+/// Load the built-in MNIST ONNX model (26 KB, embedded at compile time).
+///
+/// Returns model registry index (>= 0) on success, negative error on failure.
+/// The model is registered as "mnist" and can be used with rust_infer_classify.
+#[no_mangle]
+pub extern "C" fn rust_model_load_builtin_mnist() -> i32 {
+    static MNIST_ONNX: &[u8] = include_bytes!("../../models/test/mnist.onnx");
+    match loader::registry::load_model(b"mnist", MNIST_ONNX) {
+        Ok(idx) => idx as i32,
+        Err(_) => -1,
+    }
+}
+
 /// Load an ONNX model from a buffer.
 ///
 /// Returns model registry index (>= 0) on success, negative error on failure.

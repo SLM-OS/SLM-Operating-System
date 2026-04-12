@@ -759,6 +759,46 @@ static void test_demo_file_exists(void)
     lua_slm_close(L);
 }
 
+/*
+ * Test: slm.model_load_mnist loads the embedded MNIST model.
+ * Returns a non-negative index on success.
+ */
+/*
+ * Test: slm.model_load_mnist, model_find, and model_infer.
+ * Combined into one test to avoid loading/unloading the model multiple
+ * times (the model registry is global state shared with other test suites).
+ */
+extern int rust_model_unload(uint32_t index);
+static void test_slm_model_load_find_infer(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "-- Load built-in MNIST model\n"
+        "idx = slm.model_load_mnist()\n"
+        "assert(type(idx) == 'number', 'model_load_mnist should return number')\n"
+        "assert(idx >= 0, 'model_load_mnist should succeed (idx >= 0)')\n"
+        "\n"
+        "-- Find it by name\n"
+        "found = slm.model_find('mnist')\n"
+        "assert(found == idx, 'model_find should return same index')\n"
+        "\n"
+        "-- Run inference\n"
+        "cls = slm.model_infer(idx)\n"
+        "assert(type(cls) == 'number', 'model_infer should return number')\n"
+        "assert(cls >= 0 and cls <= 9, 'MNIST class should be 0-9')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+
+    /* Clean up: unload the model so subsequent test suites
+     * (test_model_count_after_init) see an empty registry. */
+    rust_model_unload(0);
+}
+
 /* ============================================================================
  * Dofile Tests
  * ============================================================================ */
@@ -1172,6 +1212,7 @@ int test_suite_lua(void)
     /* Message router and scheduler bindings (Phase 6) */
     RUN_TEST(test_slm_msg_publish);
     RUN_TEST(test_slm_sched_policy);
+    RUN_TEST(test_slm_model_load_find_infer);
     RUN_TEST(test_demo_file_exists);
 
     /* Dofile (script loading from filesystem) */

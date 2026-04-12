@@ -308,6 +308,12 @@ typedef struct {
 extern int rust_model_loader_init(void);
 
 /*
+ * Load the built-in MNIST ONNX model (26 KB, embedded in the Rust binary).
+ * Returns model registry index (>= 0) on success, negative on failure.
+ */
+extern int rust_model_load_builtin_mnist(void);
+
+/*
  * Load an ONNX model from a buffer.
  * Returns: Registry index (>= 0) on success, -1 on error.
  */
