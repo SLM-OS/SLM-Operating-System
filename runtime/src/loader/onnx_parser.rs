@@ -321,6 +321,24 @@ impl<'a> ParsedOnnx<'a> {
         }
         total
     }
+
+    /// Total weight size after FP16→FP32 expansion.
+    ///
+    /// FP16 tensors are converted to FP32 at load time, so they need
+    /// twice the storage of their on-disk representation.
+    pub fn total_weight_size_expanded(&self) -> usize {
+        let mut total = 0usize;
+        for i in 0..self.initializer_count {
+            let t = &self.initializers[i];
+            if t.data_type == OnnxDataType::Float16 {
+                // FP16 weights will be expanded to FP32 (2 bytes → 4 bytes)
+                total = total.saturating_add(t.num_elements() * 4);
+            } else {
+                total = total.saturating_add(t.data_size());
+            }
+        }
+        total
+    }
 }
 
 // =============================================================================

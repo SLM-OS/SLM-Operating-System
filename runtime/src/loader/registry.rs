@@ -14,6 +14,43 @@ use super::graph::{OperatorGraph, WeightTable, WeightEntry, TensorName, TensorSh
 /// Maximum simultaneously loaded models.
 pub const MAX_MODELS: usize = 8;
 
+/// Convert an IEEE 754 half-precision (FP16) value to single-precision (FP32).
+///
+/// FP16: 1 sign + 5 exponent (bias 15) + 10 mantissa
+/// FP32: 1 sign + 8 exponent (bias 127) + 23 mantissa
+pub(crate) fn fp16_to_f32(half: u16) -> f32 {
+    let sign = ((half >> 15) & 1) as u32;
+    let exp = ((half >> 10) & 0x1F) as u32;
+    let mant = (half & 0x3FF) as u32;
+
+    let f32_bits = if exp == 0 {
+        if mant == 0 {
+            // Zero (positive or negative)
+            sign << 31
+        } else {
+            // Subnormal: normalize to FP32
+            let mut m = mant;
+            let mut e: i32 = -14; // FP16 subnormal exponent
+            while (m & 0x400) == 0 {
+                m <<= 1;
+                e -= 1;
+            }
+            m &= 0x3FF; // Remove implicit 1
+            let fp32_exp = ((e + 127) as u32) & 0xFF;
+            (sign << 31) | (fp32_exp << 23) | (m << 13)
+        }
+    } else if exp == 0x1F {
+        // Inf or NaN
+        (sign << 31) | (0xFF << 23) | (mant << 13)
+    } else {
+        // Normal: rebias exponent from 15 to 127
+        let fp32_exp = exp - 15 + 127;
+        (sign << 31) | (fp32_exp << 23) | (mant << 13)
+    };
+
+    f32::from_bits(f32_bits)
+}
+
 /// Model name length (matches C-side struct).
 pub const MODEL_NAME_LEN: usize = 32;
 
@@ -65,6 +102,9 @@ struct LoadedModelEntry {
     weight_table: WeightTable,
     info: ModelInfoC,
     active: bool,
+    last_used: u64,   // Timestamp from slm_get_time_ns for LRU eviction
+    use_count: u32,   // Number of inference calls
+    pinned: bool,     // If true, cannot be evicted by LRU
 }
 
 impl LoadedModelEntry {
@@ -77,6 +117,9 @@ impl LoadedModelEntry {
             weight_table: WeightTable::EMPTY,
             info: ModelInfoC::EMPTY,
             active: false,
+            last_used: 0,
+            use_count: 0,
+            pinned: false,
         }
     }
 }
@@ -168,8 +211,8 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     // Build the operator graph
     let graph = onnx_parser::build_graph(&parsed)?;
 
-    // Calculate total weight size
-    let total_weight_size = parsed.total_weight_size();
+    // Calculate total weight size (expanded for FP16→FP32 conversion)
+    let total_weight_size = parsed.total_weight_size_expanded();
     if total_weight_size == 0 {
         return Err(LoadError::InvalidFormat);
     }
@@ -226,6 +269,15 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             continue;
         };
 
+        // Check if FP16→FP32 conversion is needed
+        let is_fp16 = tensor.data_type == super::onnx_parser::OnnxDataType::Float16;
+        let stored_size = if is_fp16 {
+            // FP16: each 2-byte element becomes 4 bytes
+            (src.len() / 2) * 4
+        } else {
+            src.len()
+        };
+
         // Record weight entry in table
         if weight_table.count < super::graph::MAX_WEIGHT_ENTRIES {
             let mut shape = TensorShape::EMPTY;
@@ -238,25 +290,38 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
                 };
             }
             shape.ndim = ndim as u8;
-            shape.elem_type = ElemType::from_onnx(tensor.data_type as u32);
+            // FP16 weights are stored as FP32 after conversion
+            shape.elem_type = if is_fp16 {
+                ElemType::Float
+            } else {
+                ElemType::from_onnx(tensor.data_type as u32)
+            };
 
             weight_table.entries[weight_table.count] = WeightEntry {
                 name: TensorName::from_bytes(tensor.name.as_bytes()),
                 offset: offset as u32,
-                size: src.len() as u32,
+                size: stored_size as u32,
                 shape,
             };
             weight_table.count += 1;
         }
 
-        // SAFETY: weight_ptr is valid for BLOCK_SIZE bytes from alloc_weights,
-        // and we're writing within that range (total_weight_size <= BLOCK_SIZE
-        // is guaranteed by the allocator accepting the size).
+        // SAFETY: weight_ptr is valid for total_weight_size bytes from alloc_weights.
         unsafe {
             let dest = weight_ptr.add(offset);
-            core::ptr::copy_nonoverlapping(src.as_ptr(), dest, src.len());
+            if is_fp16 {
+                // Convert FP16 → FP32 in-place during copy
+                let n_elements = src.len() / 2;
+                let dest_f32 = dest as *mut f32;
+                for e in 0..n_elements {
+                    let half = u16::from_le_bytes([src[e * 2], src[e * 2 + 1]]);
+                    *dest_f32.add(e) = fp16_to_f32(half);
+                }
+            } else {
+                core::ptr::copy_nonoverlapping(src.as_ptr(), dest, src.len());
+            }
         }
-        offset += src.len();
+        offset += stored_size;
     }
 
     // Estimate workspace: max intermediate tensor size (rough heuristic)
@@ -302,11 +367,32 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             }
         }
 
+        // If no free slot, try LRU eviction
+        if slot_idx.is_none() {
+            let mut lru_idx: Option<usize> = None;
+            let mut lru_time: u64 = u64::MAX;
+            for (i, entry) in reg.entries.iter().enumerate() {
+                if entry.active && !entry.pinned && entry.last_used < lru_time {
+                    lru_time = entry.last_used;
+                    lru_idx = Some(i);
+                }
+            }
+            if let Some(evict_idx) = lru_idx {
+                // Evict: free memory
+                let evicted = &mut reg.entries[evict_idx];
+                let _ = mm::free(evicted.weights);
+                let _ = mm::free(evicted.workspace);
+                *evicted = LoadedModelEntry::empty();
+                slot_idx = Some(evict_idx);
+            }
+        }
+
         match slot_idx {
             Some(idx) => {
                 let mut entry_name = [0u8; MODEL_NAME_LEN];
                 entry_name[..name_len].copy_from_slice(&name[..name_len]);
 
+                let now = crate::kernel_ffi::get_time_ns();
                 reg.entries[idx] = LoadedModelEntry {
                     name: entry_name,
                     weights,
@@ -315,10 +401,13 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
                     weight_table,
                     info,
                     active: true,
+                    last_used: now,
+                    use_count: 0,
+                    pinned: false,
                 };
                 Ok(idx)
             }
-            None => Err(LoadError::ModelTooLarge), // No free slots
+            None => Err(LoadError::ModelTooLarge), // All slots pinned
         }
     };
     unlock();
@@ -330,6 +419,52 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     }
 
     result
+}
+
+/// Touch a model (update last_used timestamp and use_count).
+/// Called on each inference to maintain LRU ordering.
+pub fn touch_model(index: usize) {
+    lock();
+    unsafe {
+        let reg = &mut *REGISTRY.get();
+        if index < MAX_MODELS && reg.entries[index].active {
+            reg.entries[index].last_used = crate::kernel_ffi::get_time_ns();
+            reg.entries[index].use_count += 1;
+        }
+    }
+    unlock();
+}
+
+/// Pin a model to prevent LRU eviction.
+pub fn pin_model(index: usize) -> bool {
+    lock();
+    let ok = unsafe {
+        let reg = &mut *REGISTRY.get();
+        if index < MAX_MODELS && reg.entries[index].active {
+            reg.entries[index].pinned = true;
+            true
+        } else {
+            false
+        }
+    };
+    unlock();
+    ok
+}
+
+/// Unpin a model (allow LRU eviction).
+pub fn unpin_model(index: usize) -> bool {
+    lock();
+    let ok = unsafe {
+        let reg = &mut *REGISTRY.get();
+        if index < MAX_MODELS && reg.entries[index].active {
+            reg.entries[index].pinned = false;
+            true
+        } else {
+            false
+        }
+    };
+    unlock();
+    ok
 }
 
 /// Unload a model by registry index.

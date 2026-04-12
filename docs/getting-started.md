@@ -304,6 +304,47 @@ SLM-OS/
 
 ---
 
+## Build Configurations
+
+SLM-OS has two CMake options that affect the build:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `PLATFORM` | `QEMU_VIRT` | Target hardware. Options: `QEMU_VIRT`, `RASPI5`, `JETSON_ORIN_NANO`, `X86_64` |
+| `ENABLE_AI_SCHEDULER` | `OFF` | Include MLP/PPO AI scheduler policies (~3 MB weights each) |
+
+### Size vs Features
+
+| Configuration | Binary Size (approx) | Features |
+|---------------|---------------------|----------|
+| Default (QEMU) | 973 KB | Full kernel + Lua + ONNX inference + shell |
+| RASPI5 | 824 KB | Same features, Pi 5 drivers |
+| X86_64 | 610 KB | Reduced feature set (no SMP, no component system) |
+| Default + AI Sched | ~1.9 MB | Adds MLP/PPO trained weights and inference |
+
+The AI scheduler adds approximately 1 MB to the binary due to embedded weight files. The Makefile variable `AI_SCHED=ON` passes `ENABLE_AI_SCHEDULER=ON` to CMake.
+
+### Examples
+
+```bash
+# Minimal build (default QEMU, no AI scheduler)
+make kernel
+
+# Full build with AI scheduler
+make kernel AI_SCHED=ON
+
+# Pi 5 production build
+make kernel PLATFORM=RASPI5
+
+# x86-64 experimental
+make kernel PLATFORM=X86_64
+
+# Clean rebuild when switching platforms
+make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
+```
+
+---
+
 ## Further Reading
 
 - `docs/architecture.md` -- System architecture overview
