@@ -113,9 +113,22 @@ After hot-swap, the demo publishes one more reading (value 88, above
 threshold) to confirm the new instance is receiving messages and generating
 alerts. The subscriber count returned by `msg_publish` confirms delivery.
 
+### AI Model Inference
+
+The demo loads the built-in MNIST ONNX model (26 KB, embedded in the kernel
+binary) via `slm.model_load_mnist()`. It then runs inference with
+`slm.model_infer()`, producing a digit classification result. With zero input,
+the MNIST model predicts class 5, matching the ONNX Runtime reference output.
+
+### AI Scheduler
+
+The demo displays the current scheduling policy. When built with
+`AI_SCHED=ON`, the AI MLP and PPO policies are available and can be activated
+via `sched policy ai_mlp` from the shell.
+
 The demo concludes with a summary of the subsystems exercised: component
-lifecycle, pub/sub messaging, anomaly detection, hot-swap, and multi-core
-scheduling.
+lifecycle, pub/sub messaging, anomaly detection, hot-swap, ONNX inference,
+AI scheduling, and multi-core operation.
 
 ## Expected Output
 

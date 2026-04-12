@@ -111,11 +111,14 @@ The `slm` module provides access to kernel functionality:
 |----------|-------------|
 | `slm.sched_policy()` | Get current scheduler policy name (e.g., "heuristic"). |
 
-### Model Memory
+### Model Memory and Inference
 
 | Function | Description |
 |----------|-------------|
 | `slm.model_stats()` | Pool statistics: `{weights={total_blocks, free_blocks, allocated_blocks, shared_blocks, peak_usage}, workspace={...}}` |
+| `slm.model_load_mnist()` | Load the built-in MNIST ONNX model (26 KB). Returns model index or -1. |
+| `slm.model_find(name)` | Find a loaded model by name. Returns index or -1. |
+| `slm.model_infer(index)` | Run inference on a loaded model. Returns predicted class (0-9 for MNIST). |
 
 ### Memory Statistics
 
