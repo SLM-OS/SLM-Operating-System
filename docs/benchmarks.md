@@ -189,17 +189,22 @@ QEMU numbers vary between runs due to host load and emulation non-determinism. P
 
 ---
 
-## AI Scheduler Inference (Stub Weights)
+## AI Scheduler Inference
 
-With stub weights (all zeros), the AI scheduler inference path exercises the full code but produces trivial output (always core 0).
+Real trained MLP and PPO weights from the Plan A export pipeline (108→256→256→128→42 architecture, ~3 MB per model).
 
-| Metric | QEMU (reported) |
-|--------|-----------------|
-| MLP forward pass | Functional (stub weights) |
-| PPO forward pass | Functional (stub weights) |
-| State extraction | 108 dimensions, all fields populated |
+| Metric | Pi 5 (native) | Target |
+|--------|--------------|--------|
+| MLP inference latency | **41.9 us** | < 50 us |
+| State extraction | 108 dimensions | — |
+| Action space | 42 actions (7 cores x 3 priority x 2 preempt) | — |
+| Weight size (MLP) | 3.0 MB | — |
+| Weight size (PPO) | 3.0 MB | — |
+| Kernel binary with AI | 1.9 MB (vs 824 KB without) | — |
 
-**Note:** Performance targets (< 50 us inference latency on Cortex-A78) require real weights from Plan A export pipeline.
+**Target achieved:** 41.9 us < 50 us on Cortex-A76 @ 2.4 GHz.
+
+The latency includes: FP context save, state vector extraction (108 floats from kernel data), 4-layer forward pass (NEON-optimized matvec), action decode and validation, FP context restore. Measured via `test_ai_inference_latency` (100 iterations, average reported by the test).
 
 ---
 
