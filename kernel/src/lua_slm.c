@@ -287,6 +287,33 @@ static int l_component_hot_swap(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.component_hot_swap_stateful(old_name, new_name) - Stateful hot-swap
+ * Exports state from old component, transfers to new.
+ * Currently supports sensor_monitor (transfers alert count).
+ * Returns new index or nil on failure.
+ */
+extern int sensor_monitor_export_state(uint8_t *buf, uint32_t max_size);
+static int l_component_hot_swap_stateful(lua_State *L) {
+    const char *old_name = luaL_checkstring(L, 1);
+    const char *new_name = luaL_checkstring(L, 2);
+
+    /* Select export function based on component name */
+    component_state_export_fn export_fn = NULL;
+    /* Simple name check for sensor_monitor */
+    if (old_name[0] == 's' && old_name[7] == 'm') {
+        export_fn = sensor_monitor_export_state;
+    }
+
+    int idx = component_hot_swap_stateful(old_name, new_name, export_fn);
+    if (idx < 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, idx);
+    }
+    return 1;
+}
+
 /* ============================================================================
  * Model Memory Bindings
  * ============================================================================ */
@@ -414,6 +441,7 @@ static const luaL_Reg slm_lib[] = {
     {"component_find", l_component_find},
     {"component_run", l_component_run},
     {"component_hot_swap", l_component_hot_swap},
+    {"component_hot_swap_stateful", l_component_hot_swap_stateful},
     /* Model memory and inference */
     {"model_stats", l_model_stats},
     {"model_find", l_model_find},

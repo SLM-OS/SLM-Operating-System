@@ -230,6 +230,21 @@ struct builtin_component {
  * and publishes alerts to /alerts/threshold. Demonstrates component
  * lifecycle and message routing without model loading.
  */
+/* State export for sensor_monitor stateful hot-swap.
+ * Called from component_hot_swap_stateful before teardown. */
+static int sensor_monitor_alert_count = 0;
+
+int sensor_monitor_export_state(uint8_t *buf, uint32_t max_size)
+{
+    if (max_size < 4) return -1;
+    /* Simple serialization: 4-byte little-endian alert count */
+    buf[0] = (uint8_t)(sensor_monitor_alert_count & 0xFF);
+    buf[1] = (uint8_t)((sensor_monitor_alert_count >> 8) & 0xFF);
+    buf[2] = (uint8_t)((sensor_monitor_alert_count >> 16) & 0xFF);
+    buf[3] = (uint8_t)((sensor_monitor_alert_count >> 24) & 0xFF);
+    return 4;
+}
+
 static void sensor_monitor_entry(void *arg)
 {
     int comp_idx = (int)(uintptr_t)arg;
@@ -238,10 +253,21 @@ static void sensor_monitor_entry(void *arg)
     /* Subscribe to sensor data topic */
     msg_router_subscribe("/sensors/data", comp_idx);
 
+    /* Check for state from stateful hot-swap */
+    uint8_t state_buf[COMPONENT_STATE_MAX];
+    uint32_t state_size = component_get_swap_state(state_buf, sizeof(state_buf));
+    if (state_size >= 4) {
+        sensor_monitor_alert_count = (int)(state_buf[0] | (state_buf[1] << 8) |
+                                           (state_buf[2] << 16) | (state_buf[3] << 24));
+        uart_printf("[sensor_monitor] Resumed with %d prior alerts\r\n",
+                    sensor_monitor_alert_count);
+    } else {
+        sensor_monitor_alert_count = 0;
+    }
+
     uart_puts("[sensor_monitor] Started, watching /sensors/data\r\n");
 
     uint64_t _hw_start = hw_timeout_start();
-    int alert_count = 0;
 
     while (!hw_timeout_expired(_hw_start, 30)) {
         char topic_buf[16];
@@ -271,7 +297,7 @@ static void sensor_monitor_entry(void *arg)
 
                 msg_router_publish((const uint8_t *)"/alerts/threshold\0",
                                    (const uint8_t *)alert);
-                alert_count++;
+                sensor_monitor_alert_count++;
                 uart_printf("[sensor_monitor] %s\r\n", alert);
             } else {
                 uart_printf("[sensor_monitor] value=%d (normal)\r\n", value);
@@ -283,7 +309,7 @@ static void sensor_monitor_entry(void *arg)
         }
     }
 
-    uart_printf("[sensor_monitor] Exiting (%d alerts issued)\r\n", alert_count);
+    uart_printf("[sensor_monitor] Exiting (%d alerts issued)\r\n", sensor_monitor_alert_count);
     component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
 }
 
@@ -534,6 +560,54 @@ int component_send_echo(const char *message)
 
     uart_printf("Echo service did not acknowledge (5s timeout)\n");
     return -1;
+}
+
+/* State transfer buffer for stateful hot-swap */
+static component_swap_state_t swap_state_buf;
+
+uint32_t component_get_swap_state(uint8_t *buf, uint32_t max_size)
+{
+    if (!swap_state_buf.valid || swap_state_buf.size == 0) {
+        return 0;
+    }
+    uint32_t copy_size = swap_state_buf.size;
+    if (copy_size > max_size) copy_size = max_size;
+
+    for (uint32_t i = 0; i < copy_size; i++) {
+        buf[i] = swap_state_buf.data[i];
+    }
+
+    /* Clear after read — one-shot */
+    swap_state_buf.valid = 0;
+    swap_state_buf.size = 0;
+
+    return copy_size;
+}
+
+int component_hot_swap_stateful(const char *old_name, const char *new_name,
+                                component_state_export_fn export_fn)
+{
+    /* Export state from old component before teardown */
+    swap_state_buf.valid = 0;
+    swap_state_buf.size = 0;
+
+    if (export_fn) {
+        int exported = export_fn(swap_state_buf.data, COMPONENT_STATE_MAX);
+        if (exported > 0) {
+            swap_state_buf.size = (uint32_t)exported;
+            swap_state_buf.valid = 1;
+            uart_printf("Hot-swap: exported %d bytes of state\r\n", exported);
+        }
+    }
+
+    /* Delegate to existing hot-swap (saves subscriptions, unregisters, starts new) */
+    int new_idx = component_hot_swap(old_name, new_name);
+
+    if (new_idx < 0) {
+        swap_state_buf.valid = 0;  /* Discard state on failure */
+    }
+
+    return new_idx;
 }
 
 /*

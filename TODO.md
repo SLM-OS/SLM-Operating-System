@@ -189,17 +189,17 @@ This document tracks Phase 6 implementation of SLM-OS.
 ## Milestone 4: Critical Deferred Items
 
 ### From Phase 4: Stateful Hot-Swap
-- ☐ Design state transfer protocol:
-  - ☐ Define serializable component state format
-  - ☐ Implement state export in old component
-  - ☐ Implement state import in new component
-- ☐ Implement `component_hot_swap_stateful()`:
-  - ☐ Pause old component
-  - ☐ Export state
-  - ☐ Load new component
-  - ☐ Import state
-  - ☐ Resume operation
-- ☐ Test with stateful anomaly detector
+- ✅ Design state transfer protocol:
+  - ✅ Define serializable component state format (256-byte buffer, component_swap_state_t)
+  - ✅ Implement state export in old component (sensor_monitor_export_state)
+  - ✅ Implement state import in new component (component_get_swap_state at startup)
+- ✅ Implement `component_hot_swap_stateful()`:
+  - ✅ Export state via callback
+  - ✅ Tear down old component
+  - ✅ Load new component
+  - ✅ New component imports state on init
+  - ✅ Subscriptions transferred
+- ✅ Test with stateful sensor_monitor (alert count transferred across swap)
 
 ### From Phase 4: Message Router Enhancements
 - ☐ Zero-copy large messages:

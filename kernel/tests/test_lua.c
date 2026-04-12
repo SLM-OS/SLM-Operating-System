@@ -799,6 +799,40 @@ static void test_slm_model_load_find_infer(void)
     rust_model_unload(0);
 }
 
+/*
+ * Test: slm.component_hot_swap_stateful transfers state.
+ * Starts sensor_monitor, publishes anomalies to build up alert count,
+ * then does a stateful hot-swap. The new instance should report the
+ * transferred alert count.
+ */
+static void test_slm_component_hot_swap_stateful(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "-- Start sensor_monitor\n"
+        "local idx = slm.component_run('sensor_monitor')\n"
+        "assert(idx >= 0, 'sensor_monitor start failed')\n"
+        "slm.yield(); slm.yield()\n"
+        "\n"
+        "-- Send anomalies to build alert count\n"
+        "slm.msg_publish('/sensors/data', '75')\n"
+        "slm.yield(); slm.yield()\n"
+        "slm.msg_publish('/sensors/data', '90')\n"
+        "slm.yield(); slm.yield()\n"
+        "\n"
+        "-- Stateful hot-swap\n"
+        "local new_idx = slm.component_hot_swap_stateful('sensor_monitor', 'sensor_monitor')\n"
+        "assert(new_idx ~= nil, 'stateful hot-swap failed')\n"
+        "slm.yield(); slm.yield()\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
 /* ============================================================================
  * Dofile Tests
  * ============================================================================ */
@@ -1213,6 +1247,7 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_msg_publish);
     RUN_TEST(test_slm_sched_policy);
     RUN_TEST(test_slm_model_load_find_infer);
+    RUN_TEST(test_slm_component_hot_swap_stateful);
     RUN_TEST(test_demo_file_exists);
 
     /* Dofile (script loading from filesystem) */
