@@ -180,6 +180,105 @@ int component_run(const char *name);
 int component_hot_swap(const char *old_name, const char *new_name);
 
 // =============================================================================
+// Stateful Hot-Swap
+// =============================================================================
+
+/**
+ * Maximum state transfer buffer size for stateful hot-swap.
+ */
+#define COMPONENT_STATE_MAX 256
+
+/**
+ * State transfer buffer for stateful hot-swap.
+ *
+ * During component_hot_swap_stateful(), the old component's state_export
+ * callback fills this buffer. The new component reads it via
+ * component_get_swap_state() during initialization.
+ */
+typedef struct {
+    uint8_t data[COMPONENT_STATE_MAX];  /**< Serialized component state */
+    uint32_t size;                       /**< Bytes written (0 = no state) */
+    int valid;                           /**< 1 if state was exported */
+} component_swap_state_t;
+
+/**
+ * State export callback type.
+ * Called on the old component before teardown.
+ * Should write serialized state into buf (up to COMPONENT_STATE_MAX bytes).
+ * Returns number of bytes written, or -1 on error.
+ */
+typedef int (*component_state_export_fn)(uint8_t *buf, uint32_t max_size);
+
+/**
+ * Hot-swap with state transfer.
+ *
+ * Calls the export callback on the old component, saves state + subscriptions,
+ * tears down old, starts new, restores subscriptions. New component retrieves
+ * state via component_get_swap_state().
+ *
+ * @param old_name Name of the component to replace
+ * @param new_name Name of the replacement component
+ * @param export_fn Callback to export old component's state (may be NULL)
+ * @return New component index on success, -1 on error
+ */
+int component_hot_swap_stateful(const char *old_name, const char *new_name,
+                                component_state_export_fn export_fn);
+
+/**
+ * Get the state buffer from the most recent stateful hot-swap.
+ * Called by the new component during initialization to import state.
+ *
+ * @param buf Output buffer to copy state into
+ * @param max_size Size of output buffer
+ * @return Number of bytes copied, or 0 if no state available
+ */
+uint32_t component_get_swap_state(uint8_t *buf, uint32_t max_size);
+
+// =============================================================================
+// Direct Messaging
+// =============================================================================
+
+/**
+ * Initialize direct messaging channels. Called during boot.
+ */
+void component_direct_init(void);
+
+/**
+ * Create a direct message channel between two components.
+ * Bypasses topic routing for lower latency.
+ *
+ * @param sender_idx Sending component index
+ * @param receiver_idx Receiving component index
+ * @return Channel ID (>= 0) on success, -1 on error
+ */
+int component_direct_channel_create(int sender_idx, int receiver_idx);
+
+/**
+ * Send a message on a direct channel. Waits for acknowledgement.
+ *
+ * @param channel Channel ID from component_direct_channel_create()
+ * @param data Message data
+ * @param len Data length
+ * @return 0 on success, -1 on invalid channel, -2 on timeout
+ */
+int component_direct_send(int channel, const char *data, uint32_t len);
+
+/**
+ * Check for a pending message on a direct channel.
+ *
+ * @param channel Channel ID
+ * @return Pointer to message data, or NULL if no message
+ */
+const char *component_direct_receive(int channel);
+
+/**
+ * Acknowledge receipt of a direct message.
+ *
+ * @param channel Channel ID
+ */
+void component_direct_ack(int channel);
+
+// =============================================================================
 // State Management
 // =============================================================================
 

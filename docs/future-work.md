@@ -194,5 +194,31 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 
 ---
 
+## 22. Profiler Integration (2-3 weeks)
+
+**Current state:** Basic timing via hardware counters (`slm_get_time_ns()`, `timer_get_count()`). Inference statistics tracked (total/min/max/avg latency). No per-operator profiling or system-wide tracing.
+
+### Per-Operator Profiling
+- Instrument each ONNX operator dispatch with start/end timestamps
+- Track per-operator cumulative time, call count, and percentage of total inference
+- Report via `model stats` shell command
+- Identify bottleneck operators (likely MatMul/Gemm for MNIST)
+
+### System-Wide Tracing
+- Lightweight trace buffer (ring buffer in NC memory for cross-CPU visibility)
+- Trace points: context switch, IPC send/receive, model load, inference start/end
+- Export via serial as structured text (parseable by host-side tools)
+- Minimal overhead target: < 100 ns per trace point
+
+### Performance Counters (ARM PMU)
+- Read ARM Performance Monitor Unit counters (PMCCNTR_EL0, PMEVCNTR_EL0)
+- Track: cache misses, branch mispredictions, instructions retired
+- Correlate with inference phases for optimization guidance
+- x86-64: RDPMC for equivalent counters
+
+**Prerequisite:** None — builds on existing timing infrastructure. Useful for optimizing inference hot paths (MatMul tiling, memory access patterns).
+
+---
+
 *Created: April 2026*
 *Consolidated from: FUTURE.md, TODO.md deferred items, Phase 5 deferred list*

@@ -98,6 +98,12 @@ Run model memory tests. Returns the number of failures.
 
 Registry-based model loader supporting ONNX graph parsing, weight extraction, and operator dispatch.
 
+**Thread Safety:** The model registry uses internal spinlock protection for concurrent access. However, model load/unload operations are designed to be called from CPU 0 only (shell commands, boot init). Inference (`rust_infer_classify`) is safe to call from any CPU as it reads model weights without modification.
+
+**Memory Lifecycle:** Models persist in the registry until explicitly unloaded via `rust_model_unload()` or evicted by the LRU cache. The registry holds up to 8 models simultaneously. When all slots are full, loading a new model evicts the least recently used non-pinned model. Models can be pinned to prevent eviction. Each inference call updates the model's LRU timestamp. FP16 weights are automatically converted to FP32 at load time. Weight memory supports reference-counted sharing via `rust_model_share_weights()`.
+
+**Index Bounds:** All functions that accept a model index validate it against the registry size. Out-of-range indices return -1. The `rust_model_find()` function returns -1 for unknown model names.
+
 ```rust
 pub extern "C" fn rust_model_loader_init() -> i32
 ```
@@ -127,6 +133,21 @@ Return the number of currently loaded models.
 pub unsafe extern "C" fn rust_model_find(name: *const u8) -> i32
 ```
 Find a model by name. Returns the registry index (>= 0) if found, -1 if not found.
+
+```rust
+pub extern "C" fn rust_model_pin(index: u32) -> i32
+```
+Pin a model to prevent LRU eviction. Returns 0 on success, -1 if the index is invalid or the slot is empty.
+
+```rust
+pub extern "C" fn rust_model_unpin(index: u32) -> i32
+```
+Unpin a model, allowing LRU eviction. Returns 0 on success, -1 on error.
+
+```rust
+pub extern "C" fn rust_model_share_weights(index: u32) -> i32
+```
+Increment the reference count on a model's weight memory block. This allows the weight memory to survive even if the model is unloaded from the registry. The caller must eventually release the reference. Returns 0 on success, -1 on error.
 
 ```rust
 pub extern "C" fn rust_model_loader_test() -> i32
@@ -225,22 +246,29 @@ Run component system tests. Returns the number of failures.
 
 ## Message Router (`msg_router.rs`)
 
-Topic-based publish/subscribe message router. Components subscribe to named topics and exchange 64-byte messages. All functions use `extern "C"` linkage and replace the C `msg_router.c` implementation.
+Topic-based publish/subscribe message router. Components subscribe to named topics and exchange 64-byte messages. Supports wildcard subscriptions (patterns ending in `*`) and prioritized message delivery. All functions use `extern "C"` linkage and replace the C `msg_router.c` implementation.
 
 ```rust
 pub extern "C" fn msg_router_init()
 ```
-Initialize the message router. Clears all topics and subscriptions.
+Initialize the message router. Clears all topics, subscriptions, and wildcard patterns.
 
 ```rust
 pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32) -> i32
 ```
-Subscribe a component to a topic (created on first use). Returns 0 on success, -1 on error.
+Subscribe a component to a topic (created on first use). If the topic name ends with `*`, creates a **wildcard subscription** that matches all topics with the given prefix (e.g., `"/sensors/*"` matches `"/sensors/data"`, `"/sensors/temp"`). Returns 0 on success, -1 on error.
 
 ```rust
 pub extern "C" fn msg_router_publish(topic_name: *const u8, data: *const u8) -> i32
 ```
-Publish a 64-byte message to a topic. Returns the number of subscribers that received the message.
+Publish a 64-byte message to a topic with normal priority. Delivers to both exact-match and wildcard subscribers. Returns the number of subscribers that received the message.
+
+```rust
+pub extern "C" fn msg_router_publish_priority(
+    topic_name: *const u8, data: *const u8, priority: u8,
+) -> i32
+```
+Publish with explicit priority (0 = normal, higher = more urgent). When a component has multiple pending messages, `msg_router_receive` returns the highest-priority one first. Returns the number of subscribers that received the message.
 
 ```rust
 pub extern "C" fn msg_router_receive(

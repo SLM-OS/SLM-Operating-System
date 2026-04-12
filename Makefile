@@ -137,6 +137,12 @@ runtime-clean:
 .PHONY: runtime-rebuild
 runtime-rebuild: runtime-clean runtime
 
+.PHONY: rustdoc
+rustdoc:
+	@echo "Generating Rust documentation..."
+	cd runtime && cargo doc $(RUST_TARGET_FLAG) --no-deps
+	@echo "Documentation generated at runtime/target/$(if $(filter X86_64,$(PLATFORM)),x86_64-unknown-none,aarch64-unknown-none)/doc/slm_runtime/index.html"
+
 # ============================================================================
 # Combined targets
 # ============================================================================
@@ -152,43 +158,48 @@ rebuild: clean all
 # QEMU targets
 # ============================================================================
 
+# x86-64 kernel ISO (multiboot2 requires GRUB, can't use -kernel)
+KERNEL_ISO := $(KERNEL_BUILD_DIR)/slmos.iso
+
+# Common QEMU arguments
+QEMU_COMMON := -machine $(QEMU_MACHINE) -cpu $(QEMU_CPU) -smp cores=$(QEMU_CORES) -m $(QEMU_MEMORY) -nographic
+
+# x86-64 uses GRUB ISO (-cdrom); ARM64 uses direct kernel load (-kernel)
+ifeq ($(PLATFORM),X86_64)
+    QEMU_BOOT_ARG = -cdrom $(KERNEL_ISO)
+else
+    QEMU_BOOT_ARG = -kernel $(KERNEL_ELF)
+endif
+
+# Build GRUB ISO for x86-64 (no-op for ARM64)
+.PHONY: grub-iso
+grub-iso:
+ifeq ($(PLATFORM),X86_64)
+	@mkdir -p $(KERNEL_BUILD_DIR)/iso/boot/grub
+	@cp $(KERNEL_ELF) $(KERNEL_BUILD_DIR)/iso/boot/kernel.elf
+	@echo 'set timeout=0' > $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'set default=0' >> $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@echo 'menuentry "SLM-OS" { multiboot2 /boot/kernel.elf; boot; }' >> $(KERNEL_BUILD_DIR)/iso/boot/grub/grub.cfg
+	@grub-mkrescue -o $(KERNEL_ISO) $(KERNEL_BUILD_DIR)/iso 2>/dev/null
+endif
+
 .PHONY: run
-run: kernel
+run: kernel grub-iso
 	@echo "Running in QEMU..."
-	$(QEMU) \
-		-machine $(QEMU_MACHINE) \
-		-cpu $(QEMU_CPU) \
-		-smp cores=$(QEMU_CORES) \
-		-m $(QEMU_MEMORY) \
-		-nographic \
-		-kernel $(KERNEL_ELF)
+	$(QEMU) $(QEMU_COMMON) $(QEMU_BOOT_ARG)
 
 .PHONY: shell
-shell: kernel
+shell: kernel grub-iso
 	@echo "Running in QEMU (interactive shell)..."
 	@echo "Press Ctrl+A then X to exit QEMU"
 	@echo ""
-	$(QEMU) \
-		-machine $(QEMU_MACHINE) \
-		-cpu $(QEMU_CPU) \
-		-smp cores=$(QEMU_CORES) \
-		-m $(QEMU_MEMORY) \
-		-nographic \
-		-kernel $(KERNEL_ELF)
+	$(QEMU) $(QEMU_COMMON) $(QEMU_BOOT_ARG)
 
 .PHONY: debug
-debug: kernel
+debug: kernel grub-iso
 	@echo "Starting QEMU with GDB server on port 1234..."
 	@echo "In another terminal, run: make gdb"
-	$(QEMU) \
-		-machine $(QEMU_MACHINE) \
-		-cpu $(QEMU_CPU) \
-		-smp cores=$(QEMU_CORES) \
-		-m $(QEMU_MEMORY) \
-		-nographic \
-		-kernel $(KERNEL_ELF) \
-		-S \
-		-gdb tcp::1234
+	$(QEMU) $(QEMU_COMMON) $(QEMU_BOOT_ARG) -S -gdb tcp::1234
 
 # GDB connection settings
 GDB := aarch64-none-elf-gdb

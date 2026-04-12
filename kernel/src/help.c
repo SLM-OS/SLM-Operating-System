@@ -599,6 +599,7 @@ static const struct help_entry help_entries[] = {
         "  slm.component_find(name)    Find by name (index or nil)\n"
         "  slm.component_run(name)     Run built-in component\n"
         "  slm.component_hot_swap(o,n) Replace component, keep subscriptions\n"
+        "  slm.component_hot_swap_stateful(o,n) Replace + transfer state\n"
         "\n"
         "  Model Memory:\n"
         "  slm.model_stats()           {weights={...}, workspace={...}}\n"

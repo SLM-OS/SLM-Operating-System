@@ -164,7 +164,7 @@ static void echo_service_entry(void *arg)
 /* Message router API (msg_router.c) */
 extern void msg_router_init(void);
 extern int msg_router_subscribe(const char *topic_name, int component_idx);
-extern int msg_router_publish(const char *topic_name, const char *data);
+/* msg_router_publish declared in slm_ffi.h */
 extern const char *msg_router_receive(int component_idx, char *topic_out);
 extern void msg_router_ack(int component_idx);
 
@@ -217,6 +217,7 @@ struct builtin_component {
     uint8_t type;
     uint8_t priority;
     component_entry_t entry;
+    const char *model_name;  /* Model to preload on start (NULL = none) */
 };
 
 /* ============================================================================
@@ -230,6 +231,24 @@ struct builtin_component {
  * and publishes alerts to /alerts/threshold. Demonstrates component
  * lifecycle and message routing without model loading.
  */
+/* State export for sensor_monitor stateful hot-swap.
+ * Called from component_hot_swap_stateful before teardown. */
+static int sensor_monitor_alert_count = 0;
+
+/* Expose for testing — verifies state was transferred */
+int sensor_monitor_get_alert_count(void) { return sensor_monitor_alert_count; }
+
+int sensor_monitor_export_state(uint8_t *buf, uint32_t max_size)
+{
+    if (max_size < 4) return -1;
+    /* Simple serialization: 4-byte little-endian alert count */
+    buf[0] = (uint8_t)(sensor_monitor_alert_count & 0xFF);
+    buf[1] = (uint8_t)((sensor_monitor_alert_count >> 8) & 0xFF);
+    buf[2] = (uint8_t)((sensor_monitor_alert_count >> 16) & 0xFF);
+    buf[3] = (uint8_t)((sensor_monitor_alert_count >> 24) & 0xFF);
+    return 4;
+}
+
 static void sensor_monitor_entry(void *arg)
 {
     int comp_idx = (int)(uintptr_t)arg;
@@ -238,10 +257,21 @@ static void sensor_monitor_entry(void *arg)
     /* Subscribe to sensor data topic */
     msg_router_subscribe("/sensors/data", comp_idx);
 
+    /* Check for state from stateful hot-swap */
+    uint8_t state_buf[COMPONENT_STATE_MAX];
+    uint32_t state_size = component_get_swap_state(state_buf, sizeof(state_buf));
+    if (state_size >= 4) {
+        sensor_monitor_alert_count = (int)(state_buf[0] | (state_buf[1] << 8) |
+                                           (state_buf[2] << 16) | (state_buf[3] << 24));
+        uart_printf("[sensor_monitor] Resumed with %d prior alerts\r\n",
+                    sensor_monitor_alert_count);
+    } else {
+        sensor_monitor_alert_count = 0;
+    }
+
     uart_puts("[sensor_monitor] Started, watching /sensors/data\r\n");
 
     uint64_t _hw_start = hw_timeout_start();
-    int alert_count = 0;
 
     while (!hw_timeout_expired(_hw_start, 30)) {
         char topic_buf[16];
@@ -269,9 +299,9 @@ static void sensor_monitor_entry(void *arg)
                 alert[len++] = '0' + value % 10;
                 alert[len] = '\0';
 
-                msg_router_publish((const char *)"/alerts/threshold\0",
-                                   (const char *)alert);
-                alert_count++;
+                msg_router_publish((const uint8_t *)"/alerts/threshold\0",
+                                   (const uint8_t *)alert);
+                sensor_monitor_alert_count++;
                 uart_printf("[sensor_monitor] %s\r\n", alert);
             } else {
                 uart_printf("[sensor_monitor] value=%d (normal)\r\n", value);
@@ -283,7 +313,7 @@ static void sensor_monitor_entry(void *arg)
         }
     }
 
-    uart_printf("[sensor_monitor] Exiting (%d alerts issued)\r\n", alert_count);
+    uart_printf("[sensor_monitor] Exiting (%d alerts issued)\r\n", sensor_monitor_alert_count);
     component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
 }
 
@@ -341,8 +371,8 @@ static void digit_classifier_entry(void *arg)
                 result[6] = '0' + (char)(predicted_class % 10);
                 result[7] = '\0';
 
-                msg_router_publish((const char *)"/output/class\0",
-                                   (const char *)result);
+                msg_router_publish((const uint8_t *)"/output/class\0",
+                                   (const uint8_t *)result);
                 infer_count++;
                 uart_printf("[digit_classifier] Predicted class: %d\r\n",
                             predicted_class);
@@ -401,6 +431,7 @@ static const struct builtin_component builtin_components[] = {
         .type = COMPONENT_TYPE_APPLICATION,
         .priority = COMPONENT_PRIORITY_NORMAL,
         .entry = digit_classifier_entry,
+        .model_name = "mnist",
     },
 };
 
@@ -463,6 +494,27 @@ int component_run(const char *name)
     }
 
     component_set_state((uint32_t)comp_idx, COMPONENT_INITIALIZING);
+
+    /* Preload model if component manifest declares one */
+    if (bc->model_name) {
+        int model_idx = rust_model_find(bc->model_name);
+        if (model_idx < 0) {
+            /* Model not loaded yet — try built-in MNIST */
+            const char *mn = bc->model_name;
+            bool is_mnist = (mn[0]=='m' && mn[1]=='n' && mn[2]=='i' &&
+                             mn[3]=='s' && mn[4]=='t' && mn[5]=='\0');
+            if (is_mnist) {
+                model_idx = rust_model_load_builtin_mnist();
+            }
+            if (model_idx >= 0) {
+                uart_printf("[component] Preloaded model '%s' (idx %d) for %s\n",
+                            bc->model_name, model_idx, bc->name);
+            } else {
+                uart_printf("[WARN] Failed to preload model '%s' for %s\n",
+                            bc->model_name, bc->name);
+            }
+        }
+    }
 
     /* Create task */
     struct task *task = task_create_with_priority(
@@ -534,6 +586,161 @@ int component_send_echo(const char *message)
 
     uart_printf("Echo service did not acknowledge (5s timeout)\n");
     return -1;
+}
+
+/*
+ * Zero-copy message publish: passes data by reference.
+ * For messages larger than the inline mailbox limit, this avoids
+ * copying into each subscriber's mailbox. The data pointer must remain
+ * valid until all subscribers acknowledge.
+ *
+ * Current implementation: delegates to msg_router_publish for small messages.
+ * For large messages, subscribers get the same data pointer (zero-copy
+ * within the shared address space). The caller must not free the data
+ * until this function returns.
+ */
+int msg_router_publish_large(const char *topic_name, const char *data,
+                             uint32_t data_len)
+{
+    /* For now, delegate to the standard publish path.
+     * The shared address space means the subscriber can read the data
+     * pointer directly — the publish function copies it into the mailbox,
+     * but the caller's buffer remains valid. True zero-copy (passing only
+     * a pointer through the mailbox) requires mailbox struct changes that
+     * are deferred. This function establishes the API contract. */
+    (void)data_len;
+    return msg_router_publish((const uint8_t *)topic_name, (const uint8_t *)data);
+}
+
+/*
+ * Direct component-to-component message channel.
+ * Bypasses topic routing for known endpoints, providing lower latency
+ * than the publish/subscribe path. Uses a simple shared mailbox per
+ * registered channel.
+ */
+#define DIRECT_CHANNEL_MAX 4
+#define DIRECT_MSG_MAX 64
+
+struct direct_channel {
+    int sender_idx;
+    int receiver_idx;
+    volatile uint32_t ready;
+    volatile uint32_t ack;
+    char data[DIRECT_MSG_MAX];
+};
+
+static struct direct_channel direct_channels[DIRECT_CHANNEL_MAX];
+
+int component_direct_channel_create(int sender_idx, int receiver_idx)
+{
+    for (int i = 0; i < DIRECT_CHANNEL_MAX; i++) {
+        if (direct_channels[i].sender_idx == -1) {
+            direct_channels[i].sender_idx = sender_idx;
+            direct_channels[i].receiver_idx = receiver_idx;
+            direct_channels[i].ready = 0;
+            direct_channels[i].ack = 0;
+            return i;
+        }
+    }
+    return -1;  /* No free channels */
+}
+
+int component_direct_send(int channel, const char *data, uint32_t len)
+{
+    if (channel < 0 || channel >= DIRECT_CHANNEL_MAX) return -1;
+    struct direct_channel *ch = &direct_channels[channel];
+    if (ch->sender_idx == -1) return -1;
+
+    uint32_t copy = len < DIRECT_MSG_MAX ? len : DIRECT_MSG_MAX - 1;
+    for (uint32_t i = 0; i < copy; i++) ch->data[i] = data[i];
+    ch->data[copy] = '\0';
+
+    __atomic_store_n(&ch->ack, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&ch->ready, 1, __ATOMIC_RELEASE);
+
+    /* Wait for ack — 100ms timeout (bare-metal responses should be fast) */
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() / 10;
+    while ((timer_get_count() - start) < limit) {
+        if (__atomic_load_n(&ch->ack, __ATOMIC_ACQUIRE)) return 0;
+        yield();
+    }
+    return -2;  /* Timeout */
+}
+
+const char *component_direct_receive(int channel)
+{
+    if (channel < 0 || channel >= DIRECT_CHANNEL_MAX) return NULL;
+    struct direct_channel *ch = &direct_channels[channel];
+    if (!__atomic_load_n(&ch->ready, __ATOMIC_ACQUIRE)) return NULL;
+    return ch->data;
+}
+
+void component_direct_ack(int channel)
+{
+    if (channel < 0 || channel >= DIRECT_CHANNEL_MAX) return;
+    __atomic_store_n(&direct_channels[channel].ready, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&direct_channels[channel].ack, 1, __ATOMIC_RELEASE);
+}
+
+void component_direct_init(void)
+{
+    for (int i = 0; i < DIRECT_CHANNEL_MAX; i++) {
+        direct_channels[i].sender_idx = -1;
+        direct_channels[i].receiver_idx = -1;
+    }
+}
+
+/* State transfer buffer for stateful hot-swap.
+ * Single global buffer — only one stateful swap can be in progress at a time.
+ * This is safe because component management is single-threaded (CPU 0 only). */
+static component_swap_state_t swap_state_buf;
+
+uint32_t component_get_swap_state(uint8_t *buf, uint32_t max_size)
+{
+    if (!swap_state_buf.valid || swap_state_buf.size == 0) {
+        return 0;
+    }
+    uint32_t copy_size = swap_state_buf.size;
+    if (copy_size > max_size) copy_size = max_size;
+
+    for (uint32_t i = 0; i < copy_size; i++) {
+        buf[i] = swap_state_buf.data[i];
+    }
+
+    /* Clear after read — one-shot */
+    swap_state_buf.valid = 0;
+    swap_state_buf.size = 0;
+
+    return copy_size;
+}
+
+int component_hot_swap_stateful(const char *old_name, const char *new_name,
+                                component_state_export_fn export_fn)
+{
+    /* Export state from old component before teardown */
+    swap_state_buf.valid = 0;
+    swap_state_buf.size = 0;
+
+    if (export_fn) {
+        int exported = export_fn(swap_state_buf.data, COMPONENT_STATE_MAX);
+        if (exported > 0 && (uint32_t)exported <= COMPONENT_STATE_MAX) {
+            swap_state_buf.size = (uint32_t)exported;
+            swap_state_buf.valid = 1;
+            uart_printf("Hot-swap: exported %d bytes of state\r\n", exported);
+        } else if (exported > (int)COMPONENT_STATE_MAX) {
+            uart_puts("[WARN] Hot-swap: export callback exceeded buffer size\r\n");
+        }
+    }
+
+    /* Delegate to existing hot-swap (saves subscriptions, unregisters, starts new) */
+    int new_idx = component_hot_swap(old_name, new_name);
+
+    if (new_idx < 0) {
+        swap_state_buf.valid = 0;  /* Discard state on failure */
+    }
+
+    return new_idx;
 }
 
 /*

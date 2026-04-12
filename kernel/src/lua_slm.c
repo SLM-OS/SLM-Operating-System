@@ -15,6 +15,7 @@
 #include "vfs.h"
 #include "component.h"
 #include "slm_ffi.h"
+#include "sched_policy.h"
 
 /* Lua headers - note: these may include stdio.h from newlib */
 #include "../lib/lua/src/lua.h"
@@ -286,6 +287,52 @@ static int l_component_hot_swap(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.component_hot_swap_stateful(old_name, new_name) - Stateful hot-swap
+ * Exports state from old component, transfers to new.
+ * Currently supports sensor_monitor (transfers alert count).
+ * Returns new index or nil on failure.
+ */
+/* Export function registry for stateful hot-swap.
+ * Components register their export callback here. */
+struct state_export_entry {
+    const char *name;
+    component_state_export_fn fn;
+};
+
+extern int sensor_monitor_export_state(uint8_t *buf, uint32_t max_size);
+
+static const struct state_export_entry export_registry[] = {
+    { "sensor_monitor", sensor_monitor_export_state },
+    { NULL, NULL }
+};
+
+static component_state_export_fn find_export_fn(const char *name)
+{
+    for (int i = 0; export_registry[i].name; i++) {
+        const char *a = name;
+        const char *b = export_registry[i].name;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == '\0' && *b == '\0') return export_registry[i].fn;
+    }
+    return NULL;
+}
+
+static int l_component_hot_swap_stateful(lua_State *L) {
+    const char *old_name = luaL_checkstring(L, 1);
+    const char *new_name = luaL_checkstring(L, 2);
+
+    component_state_export_fn export_fn = find_export_fn(old_name);
+
+    int idx = component_hot_swap_stateful(old_name, new_name, export_fn);
+    if (idx < 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, idx);
+    }
+    return 1;
+}
+
 /* ============================================================================
  * Model Memory Bindings
  * ============================================================================ */
@@ -339,7 +386,6 @@ static int l_model_stats(lua_State *L) {
  * slm.model_infer(index) - Run inference on a loaded model
  * Returns predicted class (integer) or -1 on error
  */
-extern int rust_infer_classify(uint32_t model_index);
 static int l_model_infer(lua_State *L) {
     int idx = (int)luaL_checkinteger(L, 1);
     int result = rust_infer_classify((uint32_t)idx);
@@ -351,7 +397,6 @@ static int l_model_infer(lua_State *L) {
  * slm.model_find(name) - Find a model by name
  * Returns model index or -1 if not found
  */
-extern int rust_model_find(const char *name);
 static int l_model_find(lua_State *L) {
     const char *name = luaL_checkstring(L, 1);
     int idx = rust_model_find(name);
@@ -363,10 +408,29 @@ static int l_model_find(lua_State *L) {
  * slm.model_load_mnist() - Load the built-in MNIST model
  * Returns model index or -1 on failure
  */
-extern int rust_model_load_builtin_mnist(void);
 static int l_model_load_mnist(lua_State *L) {
     int idx = rust_model_load_builtin_mnist();
     lua_pushinteger(L, idx);
+    return 1;
+}
+
+/**
+ * slm.model_pin(index) - Pin a model to prevent LRU eviction
+ * Returns 0 on success, -1 on error
+ */
+static int l_model_pin(lua_State *L) {
+    int idx = (int)luaL_checkinteger(L, 1);
+    lua_pushinteger(L, rust_model_pin((uint32_t)idx));
+    return 1;
+}
+
+/**
+ * slm.model_unpin(index) - Unpin a model (allow LRU eviction)
+ * Returns 0 on success, -1 on error
+ */
+static int l_model_unpin(lua_State *L) {
+    int idx = (int)luaL_checkinteger(L, 1);
+    lua_pushinteger(L, rust_model_unpin((uint32_t)idx));
     return 1;
 }
 
@@ -378,11 +442,27 @@ static int l_model_load_mnist(lua_State *L) {
  * slm.msg_publish(topic, data) - Publish a message to a topic
  * Returns number of subscribers that received the message
  */
-extern int msg_router_publish(const char *topic_name, const char *data);
 static int l_msg_publish(lua_State *L) {
     const char *topic = luaL_checkstring(L, 1);
     const char *data = luaL_checkstring(L, 2);
-    int delivered = msg_router_publish(topic, data);
+    int delivered = msg_router_publish((const uint8_t *)topic, (const uint8_t *)data);
+    lua_pushinteger(L, delivered);
+    return 1;
+}
+
+/**
+ * slm.msg_publish_priority(topic, data, priority) - Publish with priority
+ * priority: 0 = normal, higher = more urgent
+ * Returns number of subscribers that received the message
+ */
+static int l_msg_publish_priority(lua_State *L) {
+    const char *topic = luaL_checkstring(L, 1);
+    const char *data = luaL_checkstring(L, 2);
+    int prio = (int)luaL_checkinteger(L, 3);
+    if (prio < 0) prio = 0;
+    if (prio > 255) prio = 255;
+    int delivered = msg_router_publish_priority(
+        (const uint8_t *)topic, (const uint8_t *)data, (uint8_t)prio);
     lua_pushinteger(L, delivered);
     return 1;
 }
@@ -395,7 +475,6 @@ static int l_msg_publish(lua_State *L) {
  * slm.sched_policy() - Get current scheduler policy name
  * Returns string
  */
-extern const char *sched_get_policy(void);
 static int l_sched_policy(lua_State *L) {
     lua_pushstring(L, sched_get_policy());
     return 1;
@@ -418,13 +497,17 @@ static const luaL_Reg slm_lib[] = {
     {"component_find", l_component_find},
     {"component_run", l_component_run},
     {"component_hot_swap", l_component_hot_swap},
+    {"component_hot_swap_stateful", l_component_hot_swap_stateful},
     /* Model memory and inference */
     {"model_stats", l_model_stats},
     {"model_find", l_model_find},
     {"model_infer", l_model_infer},
     {"model_load_mnist", l_model_load_mnist},
+    {"model_pin", l_model_pin},
+    {"model_unpin", l_model_unpin},
     /* Message routing */
     {"msg_publish", l_msg_publish},
+    {"msg_publish_priority", l_msg_publish_priority},
     /* Scheduler */
     {"sched_policy", l_sched_policy},
     {NULL, NULL}

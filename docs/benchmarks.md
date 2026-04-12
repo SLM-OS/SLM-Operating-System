@@ -69,6 +69,25 @@ Measured via Lua REPL with `slm.uptime()` timing. Includes UART output overhead.
 | Message publish + process | **6.39 ms** | Publish → route → subscriber receive → process → yield (100-msg avg, includes UART print per message) |
 | Message publish (raw) | **~0.2 ms** | Estimated without UART overhead (IPC round-trip is 132 ns) |
 
+### End-to-End Component Pipeline
+
+Measures time from message publish through component processing to result.
+
+| Pipeline | Pi 5 |
+|----------|------|
+| Publish → sensor_monitor → threshold alert | **7 ms** |
+| Publish → route → process → yield (per message, 100-msg avg) | **6.39 ms** |
+
+Includes UART output from the component (serial at 115200 baud accounts for ~4ms of the latency). Without UART output, the raw pipeline would be ~2-3 ms.
+
+### Scheduler Overhead
+
+| Metric | Pi 5 |
+|--------|------|
+| schedule() call | **2 µs** (measured via 1000 yields) |
+| Heuristic policy decision | ~2 µs (included in schedule) |
+| AI MLP policy decision | **41.9 µs** (state extraction + inference) |
+
 ### Scheduler Throughput
 
 | Platform | Context Switches/sec | Active Tasks |
@@ -152,14 +171,17 @@ BSS varies by platform due to: task table size (NC vs BSS), per-CPU data, platfo
 
 Emulated benchmarks on the same host. QEMU ARM64 emulates Cortex-A76; QEMU x86-64 uses host CPU passthrough. Numbers reflect emulation overhead, not native hardware performance.
 
-| Metric | QEMU ARM64 | QEMU x86-64 | Pi 5 (native) |
-|--------|-----------|-------------|---------------|
-| Context switch | ~807 ns | ~1,332 ns | **1,858 ns** |
-| IPC round-trip | ~1,709 ns | ~761 ns | **132 ns** |
-| Buffer write | 9.7 GB/s | 21.0 GB/s | **45.8 GB/s** |
-| Buffer read | 8.2 GB/s | 14.1 GB/s | **48.1 GB/s** |
-| Binary size | 973 KB | 610 KB | 824 KB |
-| Tests passing | 620+ (all) | 426/434 | 615+/620+ |
+| Metric | QEMU ARM64 | QEMU x86-64 | Pi 5 (native) | Jetson (native) |
+|--------|-----------|-------------|---------------|-----------------|
+| Context switch | ~807 ns | ~1,332 ns | **1,858 ns** | **3,601 ns** |
+| IPC round-trip | ~1,709 ns | ~761 ns | **132 ns** | **60 ns** |
+| Buffer write | 9.7 GB/s | 21.0 GB/s | **45.8 GB/s** | **35.1 GB/s** |
+| Buffer read | 8.2 GB/s | 14.1 GB/s | **48.1 GB/s** | **68.8 GB/s** |
+| IRQ latency | — | — | **1.7 us** | **3.7 us** |
+| MNIST inference | — | — | **1,092 us** | **746 us** |
+| Binary size | 973 KB | 610 KB | 824 KB | 893 KB |
+| CPUs | 4 | 4 | 4 | 6 |
+| RAM | 1 GB | 256 MB | 4 GB | 8 GB |
 
 QEMU numbers vary between runs due to host load and emulation non-determinism. Pi 5 native numbers are the authoritative measurements for capstone evaluation.
 
@@ -204,6 +226,27 @@ Real trained MLP and PPO weights from the Plan A export pipeline (108→256→25
 
 **Target achieved:** 41.9 us < 50 us on Cortex-A76 @ 2.4 GHz.
 
+### AI vs Heuristic Scheduler Comparison
+
+| Metric | Heuristic | AI MLP | Ratio |
+|--------|-----------|--------|-------|
+| Decision latency (Pi 5) | ~2 us | 41.9 us | 21x slower |
+| Decision latency (QEMU) | ~2 us | ~1,000 us | 500x slower (emulation) |
+| Fallback rate | N/A | 0-50% (depends on isolation) | — |
+| CPU assignment | Round-robin | Model-driven (trained on workload patterns) | — |
+
+The AI scheduler adds ~40 µs overhead per scheduling decision on Pi 5 hardware. This is acceptable for inference-heavy workloads where decisions happen infrequently (component dispatch, not per-tick). The heuristic policy remains the default for latency-sensitive cooperative scheduling.
+
+**When to use AI scheduling:**
+- Workloads with heterogeneous task requirements (different priority/preemption needs)
+- Systems where optimal CPU placement matters more than scheduling overhead
+- Evaluation of learned scheduling policies against heuristic baselines
+
+**When to use heuristic scheduling:**
+- Latency-sensitive cooperative workloads
+- Systems with frequent task creation/destruction
+- Benchmarking and debugging (deterministic behavior)
+
 The latency includes: FP context save, state vector extraction (108 floats from kernel data), 4-layer forward pass (NEON-optimized matvec), action decode and validation, FP context restore. Measured via `test_ai_inference_latency` (100 iterations, average reported by the test).
 
 ---
@@ -223,7 +266,24 @@ Real ONNX model inference using the built-in MNIST digit classifier (26 KB, 12 o
 | Throughput | **915 inferences/sec** |
 | Accuracy | Class 5 for zero input (matches ONNX Runtime reference) |
 
-Measured via `model bench mnist 100` on Pi 5 (100 iterations). The sub-2ms latency with ~1 µs jitter demonstrates deterministic inference suitable for real-time edge deployment.
+### Latency Distribution (1000 iterations)
+
+| Percentile | Latency |
+|------------|---------|
+| p50 | 1,092 us |
+| p95 | 1,092 us |
+| p99 | 1,092 us |
+| p100 (max) | 1,100 us |
+
+Every sample in 1000 iterations measured 1,092 µs except one outlier at 1,100 µs. The 8 µs max jitter demonstrates deterministic inference suitable for real-time edge deployment.
+
+### Model Memory Utilization
+
+| Model | Weight Blocks | Workspace Blocks | Actual Weights |
+|-------|--------------|-----------------|----------------|
+| MNIST | 1 / 128 (2 MB allocated, 24 KB used) | 1 / 64 (2 MB allocated) | 23,982 bytes |
+
+The 2 MB block granularity means small models waste most of their allocated block. For production deployment with many small models, a sub-block allocator within the weight pool would improve density.
 
 ---
 
@@ -244,17 +304,18 @@ x86-64 failures: 8 platform-specific tests (PIC, PCI, GPU commands not implement
 
 Measured on Jetson Orin Nano running Linux 5.15.148-tegra (6x Cortex-A78AE @ 1.5 GHz, 8 GB). Note: different hardware than Pi 5, but both are ARM64. Linux numbers represent a production JetPack deployment, not a minimal kernel.
 
-| Metric | SLM-OS (Pi 5) | Linux (Jetson) | Ratio |
-|--------|---------------|---------------|-------|
-| Context switch (pipe) | **1.858 us** | 13.6 us | **7.3x faster** |
-| IPC round-trip (UDS) | **132 ns** (msg queue) | 23.7 us (Unix socket) | **180x faster** |
-| Boot to shell | **~1.6 s** | 20.8 s (7.3s kernel + 13.5s userspace) | **13x faster** |
-| Kernel binary | **824 KB** | 41.1 MB | **51x smaller** |
-| Memory at boot | **387 MB** used | 498 MB used | **1.3x less** |
-| AI inference (MNIST) | **1.09 ms** | N/A (no bare-metal ONNX) | — |
-| AI scheduler decision | **41.9 us** | N/A | — |
+| Metric | SLM-OS (Pi 5) | SLM-OS (Jetson) | Linux (Jetson) | SLM-OS vs Linux |
+|--------|---------------|-----------------|---------------|-----------------|
+| Context switch | **1.858 us** | **3.601 us** | 13.6 us (pipe) | **3.8x faster** |
+| IPC round-trip | **132 ns** | **60 ns** | 23.7 us (UDS) | **395x faster** |
+| Boot to shell | **~1.6 s** | ~3 s | 20.8 s | **7x faster** |
+| Kernel binary | **824 KB** | **893 KB** | 41.1 MB | **46x smaller** |
+| MNIST inference | **1.09 ms** | **0.746 ms** | 0.117 ms (ONNX RT) | 6.4x slower* |
+| CPUs | 4 | 6 | 6 | Same |
 
-### Why SLM-OS is Faster
+*\* ONNX Runtime uses optimized BLAS (OpenBLAS/LAPACK) with cache-optimized tiling and multi-threaded matmul. SLM-OS uses a single-threaded NEON matmul without tiling. The inference engine is functionally correct and deterministic (8 µs jitter), but not performance-competitive with production inference runtimes. Optimization is documented in docs/future-work.md.*
+
+### Why SLM-OS is Faster (except inference)
 
 - **No syscall overhead:** function calls replace trap-based system calls
 - **No virtual memory TLB faults:** identity-mapped 2 MB blocks

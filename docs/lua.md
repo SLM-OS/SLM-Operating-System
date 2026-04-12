@@ -98,12 +98,14 @@ The `slm` module provides access to kernel functionality:
 | `slm.component_find(name)` | Find component by name, returns index or nil |
 | `slm.component_run(name)` | Run a built-in component, returns index or nil |
 | `slm.component_hot_swap(old, new)` | Replace component preserving subscriptions, returns index or nil |
+| `slm.component_hot_swap_stateful(old, new)` | Replace component, transfer state + subscriptions. Sensor monitor transfers alert count. |
 
 ### Message Routing
 
 | Function | Description |
 |----------|-------------|
-| `slm.msg_publish(topic, data)` | Publish a message to a topic. Returns number of subscribers that received it. |
+| `slm.msg_publish(topic, data)` | Publish a message to a topic. Returns number of subscribers that received it. Wildcard subscribers matching the topic prefix also receive the message. |
+| `slm.msg_publish_priority(topic, data, priority)` | Publish with explicit priority (0=normal, higher=more urgent). Higher-priority messages are delivered first by `msg_router_receive`. |
 
 ### Scheduler
 
@@ -119,6 +121,8 @@ The `slm` module provides access to kernel functionality:
 | `slm.model_load_mnist()` | Load the built-in MNIST ONNX model (26 KB). Returns model index or -1. |
 | `slm.model_find(name)` | Find a loaded model by name. Returns index or -1. |
 | `slm.model_infer(index)` | Run inference on a loaded model. Returns predicted class (0-9 for MNIST). |
+| `slm.model_pin(index)` | Pin a model to prevent LRU eviction. Returns 0 on success, -1 on error. |
+| `slm.model_unpin(index)` | Unpin a model (allow LRU eviction). Returns 0 on success, -1 on error. |
 
 ### Memory Statistics
 

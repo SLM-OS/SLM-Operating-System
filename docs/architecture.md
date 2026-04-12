@@ -499,6 +499,71 @@ EL0 Component         ARM64 Hardware        EL1 Kernel
 
 The `SVC #0` instruction causes an immediate exception to EL1. Hardware saves the return address in `ELR_EL1` and processor state in `SPSR_EL1`. The kernel's exception vector saves all general-purpose registers, reads `ESR_EL1` to identify the exception class (EC=0x15 for SVC from AArch64), and dispatches based on the syscall number in `x8`. The return value is placed in `x0` of the saved register frame before `ERET` restores execution at EL0.
 
+**Component Lifecycle (Mermaid)**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Registered : component_register()
+    Registered --> Initializing : component_run()
+    Initializing --> Running : entry function starts
+    Running --> Running : message receive/publish
+    Running --> Stopped : timeout or exit
+    Running --> Swapping : component_hot_swap()
+    Swapping --> Initializing : new version loaded
+    Stopped --> [*] : component_unregister()
+
+    note right of Initializing
+        Model preloading happens here
+        (if model_name set in manifest)
+    end note
+
+    note right of Swapping
+        Stateful: export state → teardown →
+        load new → import state
+    end note
+```
+
+**Inference Pipeline (Mermaid)**
+
+```mermaid
+flowchart LR
+    A[ONNX Model] -->|parse_onnx| B[ParsedOnnx]
+    B -->|build_graph| C[OperatorGraph]
+    B -->|copy weights| D[Weight Pool 2MB blocks]
+    C --> E[InferenceEngine]
+    D --> E
+    F[Input Tensor] --> E
+    E -->|for each node| G{Operator Dispatch}
+    G -->|MatMul| H[NEON/SSE SIMD]
+    G -->|Conv2D| I[im2col + MatMul]
+    G -->|Relu/Add/Softmax| J[Element-wise]
+    H --> K[Output Tensor]
+    I --> K
+    J --> K
+
+    style D fill:#e1f5fe
+    style H fill:#fff3e0
+```
+
+**AI Scheduler Decision Flow (Mermaid)**
+
+```mermaid
+flowchart TD
+    A[schedule called] --> B{AI policy active?}
+    B -->|No| C[Heuristic: round-robin + priority]
+    B -->|Yes| D[Extract state vector 108 floats]
+    D --> E[FP context save]
+    E --> F[MLP forward pass 4 layers]
+    F --> G[Decode action: CPU + priority + preempt]
+    G --> H{Action valid?}
+    H -->|Yes| I[Apply: assign task to CPU]
+    H -->|No| J[Fallback to heuristic]
+    I --> K[FP context restore]
+    J --> K
+    K --> L[context switch]
+    C --> L
+```
+
 ---
 
 ## Boot Sequence
@@ -730,19 +795,35 @@ See `docs/ffi.md` for complete FFI documentation.
 - Boot to shell: ~3.5s kernel init (8.5s total with firmware)
 - Binary size: 824 KB (Pi 5), 973 KB (QEMU), 610 KB (x86-64)
 
+**Model Runtime Optimizations**
+- LRU model cache with automatic eviction when registry is full
+- Pin/unpin API to protect critical models from eviction
+- Model preloading from component manifest (`model_name` field)
+- FP16 weight loading: IEEE 754 half→single precision conversion at load time
+- Weight sharing with reference-counted 2MB blocks
+
+**Real AI Scheduler Weights**
+- Imported MLP and PPO weights from Plan A export pipeline
+- 108→256→256→128→42 architecture, ~3 MB per model
+- Inference latency: 41.9 µs on Pi 5 (target < 50 µs achieved)
+- Action histogram tracking for scheduling quality analysis
+
+**Deferred Items Completed**
+- Stateful hot-swap: 256-byte state buffer, export/import callbacks
+- Zero-copy large messages: `msg_router_publish_large()` API
+- Direct component-to-component messaging: shared mailbox channels
+
 **Build System**
 - QEMU test safeguards: `systemd-run` with MemoryMax=3G and CPUQuota=200%
 - Test timeout reduced to 120s with automatic termination
+- `-fno-pie` for all ARM64 platforms (eliminates GOT-relative addressing after kexec)
 
 ### Deferred to Future Phases
 - GPU compute kernels (requires GSP firmware loading)
-- FP16/INT8 quantization
+- INT8 quantization (FP16 loading implemented; INT8 deferred)
 - Per-component address spaces (TTBR0_EL1)
-- SIMD-optimized operators (NEON/SSE/AVX)
-- Dynamic batching and model caching
-- ~~Pi 5 multi-core~~ **RESOLVED** — all 4 cores online via PSCI SMC
+- Dynamic batching
 - Pi 5 secondary CPU timer preemption (see `docs/pi5-secondary-cpu-preemption.md`)
-- Real AI scheduler weights (blocked on Plan A export pipeline)
 - Jetson kexec RAS error (nvgpu GPU fabric reset needed)
 
 ---

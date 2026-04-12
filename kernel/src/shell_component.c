@@ -9,6 +9,7 @@
 #include "uart.h"
 #include "component.h"
 #include "string.h"
+#include "slm_ffi.h"
 #include <stdint.h>
 
 /* Component runtime (component_runtime.c) */
@@ -20,7 +21,7 @@ extern void component_list_builtins(void);
 /* Message router (msg_router.c) */
 extern void msg_router_init(void);
 extern int msg_router_subscribe(const char *topic_name, int component_idx);
-extern int msg_router_publish(const char *topic_name, const char *data);
+/* msg_router_publish declared in slm_ffi.h */
 extern const char *msg_router_receive(int component_idx, char *topic_out);
 extern void msg_router_ack(int component_idx);
 extern void msg_router_list(void);
@@ -300,7 +301,7 @@ int cmd_msg(int argc, char *argv[])
         }
         msg[pos] = '\0';
 
-        int delivered = msg_router_publish(topic, msg);
+        int delivered = msg_router_publish((const uint8_t *)topic, (const uint8_t *)msg);
         uart_printf("Message delivered to %d subscriber(s)\r\n", delivered);
         return (delivered > 0) ? 0 : -1;
     }

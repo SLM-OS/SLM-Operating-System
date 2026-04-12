@@ -314,6 +314,28 @@ extern int rust_model_loader_init(void);
 extern int rust_model_load_builtin_mnist(void);
 
 /*
+ * Publish a message to a topic via the message router.
+ * Returns: Number of subscribers that received the message.
+ */
+extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
+
+/*
+ * Publish a message with explicit priority (0 = normal, higher = more urgent).
+ * Higher-priority messages are delivered first by msg_router_receive.
+ * Returns: Number of subscribers that received the message.
+ */
+extern int msg_router_publish_priority(const uint8_t *topic_name,
+                                       const uint8_t *data, uint8_t priority);
+
+/*
+ * Publish a large message. Currently delegates to msg_router_publish
+ * (copies data). Future: will pass by reference for true zero-copy.
+ * Returns: Number of subscribers that received the message.
+ */
+extern int msg_router_publish_large(const char *topic_name, const char *data,
+                                    uint32_t data_len);
+
+/*
  * Load an ONNX model from a buffer.
  * Returns: Registry index (>= 0) on success, -1 on error.
  */
@@ -341,6 +363,24 @@ extern uint32_t rust_model_count(void);
  * Returns: Registry index (>= 0) if found, -1 if not found.
  */
 extern int rust_model_find(const char *name);
+
+/*
+ * Pin a model to prevent LRU eviction.
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_model_pin(uint32_t index);
+
+/*
+ * Unpin a model (allow LRU eviction).
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_model_unpin(uint32_t index);
+
+/*
+ * Share a model's weight memory (increment refcount).
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_model_share_weights(uint32_t index);
 
 /*
  * Run model loader tests.
