@@ -332,6 +332,45 @@ static int l_model_stats(lua_State *L) {
 }
 
 /* ============================================================================
+ * Model Inference Bindings
+ * ============================================================================ */
+
+/**
+ * slm.model_infer(index) - Run inference on a loaded model
+ * Returns predicted class (integer) or -1 on error
+ */
+extern int rust_infer_classify(uint32_t model_index);
+static int l_model_infer(lua_State *L) {
+    int idx = (int)luaL_checkinteger(L, 1);
+    int result = rust_infer_classify((uint32_t)idx);
+    lua_pushinteger(L, result);
+    return 1;
+}
+
+/**
+ * slm.model_find(name) - Find a model by name
+ * Returns model index or -1 if not found
+ */
+extern int rust_model_find(const char *name);
+static int l_model_find(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    int idx = rust_model_find(name);
+    lua_pushinteger(L, idx);
+    return 1;
+}
+
+/**
+ * slm.model_load_mnist() - Load the built-in MNIST model
+ * Returns model index or -1 on failure
+ */
+extern int rust_model_load_builtin_mnist(void);
+static int l_model_load_mnist(lua_State *L) {
+    int idx = rust_model_load_builtin_mnist();
+    lua_pushinteger(L, idx);
+    return 1;
+}
+
+/* ============================================================================
  * Message Router Bindings
  * ============================================================================ */
 
@@ -379,8 +418,11 @@ static const luaL_Reg slm_lib[] = {
     {"component_find", l_component_find},
     {"component_run", l_component_run},
     {"component_hot_swap", l_component_hot_swap},
-    /* Model memory */
+    /* Model memory and inference */
     {"model_stats", l_model_stats},
+    {"model_find", l_model_find},
+    {"model_infer", l_model_infer},
+    {"model_load_mnist", l_model_load_mnist},
     /* Message routing */
     {"msg_publish", l_msg_publish},
     /* Scheduler */
