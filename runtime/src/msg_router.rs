@@ -57,7 +57,8 @@ struct Mailbox {
     ack: AtomicU32,
     data: [u8; MAX_MSG_LEN],
     topic: [u8; TOPIC_NAME_LEN],
-    priority: u8,
+    /// Atomic to prevent reordering: priority must be visible before ready=1.
+    priority: AtomicU32,
 }
 
 impl Mailbox {
@@ -67,7 +68,7 @@ impl Mailbox {
             ack: AtomicU32::new(0),
             data: [0; MAX_MSG_LEN],
             topic: [0; TOPIC_NAME_LEN],
-            priority: 0,
+            priority: AtomicU32::new(0),
         }
     }
 
@@ -76,7 +77,18 @@ impl Mailbox {
         self.ack.store(0, Ordering::Release);
         self.data = [0; MAX_MSG_LEN];
         self.topic = [0; TOPIC_NAME_LEN];
-        self.priority = 0;
+        self.priority.store(0, Ordering::Release);
+    }
+
+    /// Deliver a message to this mailbox. Writes data and topic first,
+    /// then priority (Release), then ready=1 (Release) so the receiver
+    /// sees consistent data when it reads ready=1 (Acquire).
+    unsafe fn deliver(&mut self, topic_name: *const u8, data: *const u8, prio: u8) {
+        str_copy(&mut self.data, data);
+        str_copy(&mut self.topic, topic_name);
+        self.ack.store(0, Ordering::Release);
+        self.priority.store(prio as u32, Ordering::Release);
+        self.ready.store(1, Ordering::Release);
     }
 }
 
@@ -377,6 +389,21 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
 unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8) -> i32 {
     let mut delivered = 0i32;
 
+    /// Deliver a message to a mailbox and wait for ack.
+    /// Returns true if the subscriber acknowledged within the timeout.
+    unsafe fn deliver_and_wait(mb: &mut Mailbox, topic_name: *const u8,
+                               data: *const u8, priority: u8) -> bool {
+        mb.deliver(topic_name, data, priority);
+        let timeout = get_ticks() + ACK_TIMEOUT_TICKS;
+        while get_ticks() < timeout {
+            if mb.ack.load(Ordering::Acquire) != 0 {
+                return true;
+            }
+            sched_yield();
+        }
+        false
+    }
+
     // Deliver to exact topic subscribers
     let mut topic_idx: Option<usize> = None;
     for i in 0..MAX_TOPICS {
@@ -391,20 +418,9 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
             if TOPICS[idx].subs[j].component_idx == -1 {
                 continue;
             }
-            let mb = &mut TOPICS[idx].subs[j].mailbox;
-            str_copy(&mut mb.data, data);
-            str_copy(&mut mb.topic, topic_name);
-            mb.priority = priority;
-            mb.ack.store(0, Ordering::Release);
-            mb.ready.store(1, Ordering::Release);
-
-            let timeout = get_ticks() + ACK_TIMEOUT_TICKS;
-            while get_ticks() < timeout {
-                if mb.ack.load(Ordering::Acquire) != 0 {
-                    delivered += 1;
-                    break;
-                }
-                sched_yield();
+            if deliver_and_wait(&mut TOPICS[idx].subs[j].mailbox,
+                                topic_name, data, priority) {
+                delivered += 1;
             }
         }
     } else {
@@ -419,20 +435,9 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
         if !wildcard_matches(&WILDCARD_SUBS[i].pattern, topic_name) {
             continue;
         }
-        let mb = &mut WILDCARD_SUBS[i].mailbox;
-        str_copy(&mut mb.data, data);
-        str_copy(&mut mb.topic, topic_name);
-        mb.priority = priority;
-        mb.ack.store(0, Ordering::Release);
-        mb.ready.store(1, Ordering::Release);
-
-        let timeout = get_ticks() + ACK_TIMEOUT_TICKS;
-        while get_ticks() < timeout {
-            if mb.ack.load(Ordering::Acquire) != 0 {
-                delivered += 1;
-                break;
-            }
-            sched_yield();
+        if deliver_and_wait(&mut WILDCARD_SUBS[i].mailbox,
+                            topic_name, data, priority) {
+            delivered += 1;
         }
     }
 
@@ -492,8 +497,9 @@ pub extern "C" fn msg_router_receive(
                 }
                 let mb = &TOPICS[i].subs[j].mailbox;
                 if mb.ready.load(Ordering::Acquire) != 0 {
-                    if best_data.is_null() || mb.priority > best_priority {
-                        best_priority = mb.priority;
+                    let prio = mb.priority.load(Ordering::Acquire) as u8;
+                    if best_data.is_null() || prio > best_priority {
+                        best_priority = prio;
                         best_data = mb.data.as_ptr();
                         best_topic = &mb.topic;
                         best_src = LastReceived {
@@ -513,8 +519,9 @@ pub extern "C" fn msg_router_receive(
             }
             let mb = &WILDCARD_SUBS[i].mailbox;
             if mb.ready.load(Ordering::Acquire) != 0 {
-                if best_data.is_null() || mb.priority > best_priority {
-                    best_priority = mb.priority;
+                let prio = mb.priority.load(Ordering::Acquire) as u8;
+                if best_data.is_null() || prio > best_priority {
+                    best_priority = prio;
                     best_data = mb.data.as_ptr();
                     best_topic = &mb.topic;
                     best_src = LastReceived {
