@@ -830,9 +830,9 @@ void component_direct_ack(int channel);
 ```
 Acknowledge receipt of a direct message.
 
-### Zero-Copy Publish
+### Large Message Publish
 
 ```c
-int msg_router_publish_ref(const char *topic_name, const char *data, uint32_t data_len);
+int msg_router_publish_large(const char *topic_name, const char *data, uint32_t data_len);
 ```
-Publish a message by reference (zero-copy in shared address space). Data pointer must remain valid until all subscribers acknowledge.
+Publish a large message. Currently delegates to `msg_router_publish` (copies data). Future versions will pass by reference for true zero-copy in the shared address space.

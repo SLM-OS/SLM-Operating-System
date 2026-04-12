@@ -573,8 +573,8 @@ int component_send_echo(const char *message)
  * within the shared address space). The caller must not free the data
  * until this function returns.
  */
-int msg_router_publish_ref(const char *topic_name, const char *data,
-                           uint32_t data_len)
+int msg_router_publish_large(const char *topic_name, const char *data,
+                             uint32_t data_len)
 {
     /* For now, delegate to the standard publish path.
      * The shared address space means the subscriber can read the data
@@ -665,7 +665,9 @@ void component_direct_init(void)
     }
 }
 
-/* State transfer buffer for stateful hot-swap */
+/* State transfer buffer for stateful hot-swap.
+ * Single global buffer — only one stateful swap can be in progress at a time.
+ * This is safe because component management is single-threaded (CPU 0 only). */
 static component_swap_state_t swap_state_buf;
 
 uint32_t component_get_swap_state(uint8_t *buf, uint32_t max_size)

@@ -839,15 +839,15 @@ static void test_slm_component_hot_swap_stateful(void)
  * Test: msg_router_publish_ref delivers zero-copy messages.
  * Verifies the ref path works by publishing a large buffer.
  */
-extern int msg_router_publish_ref(const char *topic_name, const char *data,
-                                  uint32_t data_len);
-static void test_msg_publish_ref(void)
+extern int msg_router_publish_large(const char *topic_name, const char *data,
+                                    uint32_t data_len);
+static void test_msg_publish_large(void)
 {
-    /* publish_ref to a non-existent topic should return 0 (no subscribers) */
+    /* publish_large to a non-existent topic should return 0 (no subscribers) */
     char big_buf[128];
     for (int i = 0; i < 128; i++) big_buf[i] = (char)i;
 
-    int delivered = msg_router_publish_ref("/test/zerocopy", big_buf, 128);
+    int delivered = msg_router_publish_large("/test/large_msg", big_buf, 128);
     TEST_ASSERT_EQUAL_INT(0, delivered);  /* No subscribers — just verify no crash */
 }
 
@@ -1288,7 +1288,7 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_component_hot_swap_stateful);
 
     /* Zero-copy message test — verify msg_router_publish_ref works */
-    RUN_TEST(test_msg_publish_ref);
+    RUN_TEST(test_msg_publish_large);
 
     /* Direct channel test */
     RUN_TEST(test_direct_channel);

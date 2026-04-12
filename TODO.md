@@ -203,7 +203,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 
 ### From Phase 4: Message Router Enhancements
 - ✅ Zero-copy large messages:
-  - ✅ msg_router_publish_ref API (passes data by reference)
+  - ✅ msg_router_publish_large API (delegates to publish, future: zero-copy)
   - ✅ Shared address space enables zero-copy without buffer management
 - ✅ Direct component-to-component messaging:
   - ✅ Bypass topic routing via direct channels (component_direct_channel_create/send/receive/ack)
