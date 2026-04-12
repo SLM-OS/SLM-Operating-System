@@ -69,6 +69,14 @@ Measured via Lua REPL with `slm.uptime()` timing. Includes UART output overhead.
 | Message publish + process | **6.39 ms** | Publish → route → subscriber receive → process → yield (100-msg avg, includes UART print per message) |
 | Message publish (raw) | **~0.2 ms** | Estimated without UART overhead (IPC round-trip is 132 ns) |
 
+### Scheduler Overhead
+
+| Metric | Pi 5 |
+|--------|------|
+| schedule() call | **2 µs** (measured via 1000 yields) |
+| Heuristic policy decision | ~2 µs (included in schedule) |
+| AI MLP policy decision | **41.9 µs** (state extraction + inference) |
+
 ### Scheduler Throughput
 
 | Platform | Context Switches/sec | Active Tasks |
@@ -223,7 +231,24 @@ Real ONNX model inference using the built-in MNIST digit classifier (26 KB, 12 o
 | Throughput | **915 inferences/sec** |
 | Accuracy | Class 5 for zero input (matches ONNX Runtime reference) |
 
-Measured via `model bench mnist 100` on Pi 5 (100 iterations). The sub-2ms latency with ~1 µs jitter demonstrates deterministic inference suitable for real-time edge deployment.
+### Latency Distribution (1000 iterations)
+
+| Percentile | Latency |
+|------------|---------|
+| p50 | 1,092 us |
+| p95 | 1,092 us |
+| p99 | 1,092 us |
+| p100 (max) | 1,100 us |
+
+Every sample in 1000 iterations measured 1,092 µs except one outlier at 1,100 µs. The 8 µs max jitter demonstrates deterministic inference suitable for real-time edge deployment.
+
+### Model Memory Utilization
+
+| Model | Weight Blocks | Workspace Blocks | Actual Weights |
+|-------|--------------|-----------------|----------------|
+| MNIST | 1 / 128 (2 MB allocated, 24 KB used) | 1 / 64 (2 MB allocated) | 23,982 bytes |
+
+The 2 MB block granularity means small models waste most of their allocated block. For production deployment with many small models, a sub-block allocator within the weight pool would improve density.
 
 ---
 
@@ -251,10 +276,12 @@ Measured on Jetson Orin Nano running Linux 5.15.148-tegra (6x Cortex-A78AE @ 1.5
 | Boot to shell | **~1.6 s** | 20.8 s (7.3s kernel + 13.5s userspace) | **13x faster** |
 | Kernel binary | **824 KB** | 41.1 MB | **51x smaller** |
 | Memory at boot | **387 MB** used | 498 MB used | **1.3x less** |
-| AI inference (MNIST) | **1.09 ms** | N/A (no bare-metal ONNX) | — |
+| AI inference (MNIST) | **1.09 ms** | 0.117 ms (ONNX Runtime) | 9.3x slower* |
 | AI scheduler decision | **41.9 us** | N/A | — |
 
-### Why SLM-OS is Faster
+*\* ONNX Runtime uses optimized BLAS (OpenBLAS/LAPACK) with cache-optimized tiling and multi-threaded matmul. SLM-OS uses a single-threaded NEON matmul without tiling. The inference engine is functionally correct and deterministic (8 µs jitter), but not performance-competitive with production inference runtimes. Optimization is documented in docs/future-work.md.*
+
+### Why SLM-OS is Faster (except inference)
 
 - **No syscall overhead:** function calls replace trap-based system calls
 - **No virtual memory TLB faults:** identity-mapped 2 MB blocks

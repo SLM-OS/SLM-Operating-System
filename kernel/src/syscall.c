@@ -87,8 +87,7 @@ static int64_t sys_send_handler(struct trap_frame *frame)
         return -1;
     }
 
-    /* Use the Rust message router */
-    extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
+    /* Use the Rust message router (declared in slm_ffi.h) */
     return msg_router_publish((const uint8_t *)topic, (const uint8_t *)data);
 }
 

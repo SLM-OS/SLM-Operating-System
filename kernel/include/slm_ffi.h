@@ -314,6 +314,12 @@ extern int rust_model_loader_init(void);
 extern int rust_model_load_builtin_mnist(void);
 
 /*
+ * Publish a message to a topic via the message router.
+ * Returns: Number of subscribers that received the message.
+ */
+extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
+
+/*
  * Load an ONNX model from a buffer.
  * Returns: Registry index (>= 0) on success, -1 on error.
  */
