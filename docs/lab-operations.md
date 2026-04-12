@@ -156,8 +156,23 @@ console and power control via labctl. No physical handling is required after ini
 
 | Board | IP | Serial | Status |
 |-------|-----|--------|--------|
-| jetson-nano-1 | 192.168.4.20 | tcp:4007 (CH340) | L4T 36.4.4, SD=JetPack, SSD=SLM-OS |
+| jetson-nano-1 | 192.168.4.20 | tcp:4007 (CP2102) | L4T 36.4.7, SD=JetPack, SSD=SLM-OS |
 | jetson-nano-2 | 192.168.4.93 | tcp:4004 (CP2102) | L4T 36.4.7, SD=SLM-OS+Linux |
+
+**Serial adapter requirement:** Must be CP2102 (Silicon Labs) for bidirectional
+serial. CH340 adapters only work in one direction (TX from board) on the debug
+header — input characters don't reach the SPE firmware. CH340s are fine on Pi 5.
+
+### One-time Setup: Install kexec helper on Jetson
+
+The `slmos-kexec` helper handles GPU suspend automatically (required to prevent
+the TF-A RAS crash documented in GitHub issue #9).
+
+```bash
+# Copy the helper to the Jetson's /usr/local/bin
+scp scripts/jetson-kexec-slmos.sh root@<JETSON_IP>:/usr/local/bin/slmos-kexec
+ssh root@<JETSON_IP> "chmod +x /usr/local/bin/slmos-kexec"
+```
 
 ### Deploy Workflow
 
@@ -168,29 +183,20 @@ make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
 # 2. Copy kernel to Jetson via SSH
 scp build/kernel/slmos.elf root@192.168.4.20:/root/
 
-# 3. Suspend GPU (REQUIRED — prevents RAS crash after kexec)
-ssh root@192.168.4.20 bash -c '
-    GPU=/sys/devices/platform/bus@0/17000000.gpu/power
-    systemctl stop gdm 2>/dev/null; sleep 2
-    fuser -k /dev/nvhost-gpu /dev/nvmap 2>/dev/null; sleep 1
-    echo 0 > $GPU/autosuspend_delay_ms
-    echo auto > $GPU/control
-    sleep 3
-'
+# 3. Boot via kexec (GPU suspend + kexec in one step)
+ssh root@192.168.4.20 'slmos-kexec /root/slmos.elf'
 
-# 4. Boot via kexec (from SSH session)
-ssh root@192.168.4.20 'kexec -l /root/slmos.elf --reuse-cmdline && kexec -e'
-
-# 5. Observe output via serial console
+# 4. Observe output via serial console
 labctl serial capture jetson-nano-1 --timeout 30
 
-# 6. Recover back to Linux (power cycle)
+# 5. Recover back to Linux (power cycle)
 labctl power cycle jetson-nano-1
 ```
 
-**Important:** Step 3 (GPU suspend) is mandatory. Without it, Linux's nvgpu driver
-leaves stale GPU DMA operations that cause a TF-A RAS error after kexec, killing the
-CPU core. See GitHub issue #9.
+The `slmos-kexec` helper script (`scripts/jetson-kexec-slmos.sh` in the repo)
+suspends the GPU via BPMP runtime PM before calling `kexec`. Without the GPU
+suspend, stale nvgpu DMA operations trigger a TF-A RAS Uncorrectable Error that
+kills the CPU core. See GitHub issue #9 for root-cause analysis.
 
 ### Recovery
 
