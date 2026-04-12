@@ -272,11 +272,6 @@ impl InferenceEngine {
         for i in 0..self.weight_table.count {
             let entry = &self.weight_table.entries[i];
 
-            // Calculate pointer to this weight's data
-            let ptr = unsafe {
-                self.weight_base.add(entry.offset as usize) as *const f32
-            };
-
             // Build shape
             let mut dims = [0u32; 8];
             let ndim = entry.shape.ndim as usize;
@@ -284,7 +279,15 @@ impl InferenceEngine {
                 dims[d] = entry.shape.dims[d];
             }
 
-            let tensor = Tensor::new(ptr, &dims[..ndim]);
+            // Create tensor with appropriate elem_type
+            let tensor = unsafe {
+                let raw_ptr = self.weight_base.add(entry.offset as usize);
+                if entry.shape.elem_type == crate::loader::graph::ElemType::Float16 {
+                    Tensor::new_fp16(raw_ptr as *const u16, &dims[..ndim])
+                } else {
+                    Tensor::new(raw_ptr as *const f32, &dims[..ndim])
+                }
+            };
             self.bind(entry.name, tensor);
         }
 

@@ -2253,6 +2253,188 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test: FP16 tensor creation and matmul dispatch
+    {
+        // Create an FP16 tensor and verify its properties
+        let fp16_data: [u16; 4] = [
+            0x3C00, // 1.0
+            0x4000, // 2.0
+            0x4200, // 3.0
+            0x4400, // 4.0
+        ];
+        let t = inference::Tensor::new_fp16(fp16_data.as_ptr(), &[2, 2]);
+        let is_fp16 = t.is_fp16();
+        let elem_count = t.num_elements() == 4;
+        let size_half = t.size_bytes() == 8; // 4 elements × 2 bytes
+        let passed = is_fp16 && elem_count && size_half;
+        print_test_result(b"fp16: tensor creation\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: FP32 tensor should not be FP16
+    {
+        let data: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+        let t = inference::Tensor::new(data.as_ptr(), &[2, 2]);
+        let passed = !t.is_fp16() && t.size_bytes() == 16;
+        print_test_result(b"fp16: FP32 tensor not FP16\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: INT8 tensor creation
+    {
+        let data: [i8; 6] = [1, 2, 3, 4, 5, 6];
+        let t = inference::Tensor::new_int8(data.as_ptr(), &[2, 3], 0.1, 0);
+        let is_int8 = t.is_int8();
+        let elem_count = t.num_elements() == 6;
+        let size_one = t.size_bytes() == 6; // 6 elements × 1 byte
+        let passed = is_int8 && elem_count && size_one;
+        print_test_result(b"int8: tensor creation\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: FP32→INT8 quantization round-trip
+    {
+        let fp32_data: [f32; 4] = [0.0, 0.5, 1.0, -0.5];
+        let mut int8_buf: [i8; 4] = [0; 4];
+        let qp = inference::ops::quantize_fp32_to_int8(
+            fp32_data.as_ptr(), 4, int8_buf.as_mut_ptr());
+
+        // Dequantize and check accuracy
+        let mut max_err: f32 = 0.0;
+        for i in 0..4 {
+            let dequant = qp.scale * (int8_buf[i] as f32 - qp.zero_point as f32);
+            let err = (dequant - fp32_data[i]).abs();
+            if err > max_err { max_err = err; }
+        }
+        // INT8 has 1/256 precision per unit range, so error < 0.01 is excellent
+        let passed = max_err < 0.02;
+        print_test_result(b"int8: quantize round-trip accuracy\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: INT8 matmul produces correct result
+    {
+        // A = [[1, 2], [3, 4]] (as INT8 with scale=1.0, zp=0)
+        let a_data: [i8; 4] = [1, 2, 3, 4];
+        let a = inference::Tensor::new_int8(a_data.as_ptr(), &[2, 2], 1.0, 0);
+
+        // B = [[5, 6], [7, 8]] (as INT8 with scale=1.0, zp=0)
+        let b_data: [i8; 4] = [5, 6, 7, 8];
+        let b = inference::Tensor::new_int8(b_data.as_ptr(), &[2, 2], 1.0, 0);
+
+        // Expected: C = A*B = [[19, 22], [43, 50]]
+        let mut out_data: [f32; 4] = [0.0; 4];
+        let mut out = inference::Tensor::new(out_data.as_ptr(), &[2, 2]);
+        out.data = out_data.as_mut_ptr() as *const f32;
+
+        let result = inference::ops::matmul(&a, &b, &mut out);
+        let ok = result.is_ok();
+        let vals_ok = unsafe {
+            let p = out.data;
+            (*p.add(0) - 19.0).abs() < 0.01 &&
+            (*p.add(1) - 22.0).abs() < 0.01 &&
+            (*p.add(2) - 43.0).abs() < 0.01 &&
+            (*p.add(3) - 50.0).abs() < 0.01
+        };
+        let passed = ok && vals_ok;
+        print_test_result(b"int8: matmul correctness\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: Tiled matmul (matrices > 32x32 trigger the tiling path)
+    {
+        // 64x64 × 64x64 matmul — all ones → each element should be 64.0
+        static mut A_BIG: [f32; 4096] = [1.0; 4096]; // 64x64
+        static mut B_BIG: [f32; 4096] = [1.0; 4096]; // 64x64
+        static mut C_BIG: [f32; 4096] = [0.0; 4096]; // 64x64
+        unsafe {
+            let a = inference::Tensor::new(A_BIG.as_ptr(), &[64, 64]);
+            let b = inference::Tensor::new(B_BIG.as_ptr(), &[64, 64]);
+            let mut c = inference::Tensor::new(C_BIG.as_mut_ptr(), &[64, 64]);
+            c.data = C_BIG.as_mut_ptr() as *const f32;
+            let result = inference::ops::matmul(&a, &b, &mut c);
+            let ok = result.is_ok();
+            // Each element should be 64.0 (dot product of 64 ones)
+            let mut vals_ok = true;
+            for i in 0..4096 {
+                if (C_BIG[i] - 64.0).abs() > 0.01 {
+                    vals_ok = false;
+                    break;
+                }
+            }
+            let passed = ok && vals_ok;
+            print_test_result(b"simd: tiled matmul 64x64\0", passed);
+            if !passed { failures += 1; }
+        }
+    }
+
+    // Test: FP16 matmul computation (not just tensor creation)
+    {
+        // A (FP32): [[1, 2], [3, 4]]
+        let a_data: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+        let a = inference::Tensor::new(a_data.as_ptr(), &[2, 2]);
+
+        // B (FP16): [[5, 6], [7, 8]] as IEEE 754 half-precision
+        let b_fp16: [u16; 4] = [
+            0x4500, // 5.0
+            0x4600, // 6.0
+            0x4700, // 7.0
+            0x4800, // 8.0
+        ];
+        let b = inference::Tensor::new_fp16(b_fp16.as_ptr(), &[2, 2]);
+
+        // Expected: C = A*B = [[19, 22], [43, 50]]
+        let mut out_data: [f32; 4] = [0.0; 4];
+        let mut out = inference::Tensor::new(out_data.as_ptr(), &[2, 2]);
+        out.data = out_data.as_mut_ptr() as *const f32;
+
+        let result = inference::ops::matmul(&a, &b, &mut out);
+        let ok = result.is_ok();
+        let vals_ok = unsafe {
+            let p = out.data;
+            (*p.add(0) - 19.0).abs() < 0.1 &&
+            (*p.add(1) - 22.0).abs() < 0.1 &&
+            (*p.add(2) - 43.0).abs() < 0.1 &&
+            (*p.add(3) - 50.0).abs() < 0.1
+        };
+        let passed = ok && vals_ok;
+        print_test_result(b"fp16: matmul computation\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: INT8 matmul with non-trivial scale and zero_point
+    {
+        // Represent real values via quantization:
+        // A real = [[1.0, 2.0], [3.0, 4.0]], scale=0.05, zp=-20
+        // q = round(v / 0.05) + (-20) => [0, 20, 40, 60]
+        let a_data: [i8; 4] = [0, 20, 40, 60];
+        let a = inference::Tensor::new_int8(a_data.as_ptr(), &[2, 2], 0.05, -20);
+
+        // B real = [[5.0, 6.0], [7.0, 8.0]], scale=0.1, zp=-50
+        // q = round(v / 0.1) + (-50) => [0, 10, 20, 30]
+        let b_data: [i8; 4] = [0, 10, 20, 30];
+        let b = inference::Tensor::new_int8(b_data.as_ptr(), &[2, 2], 0.1, -50);
+
+        // Expected: C = A_real * B_real = [[19, 22], [43, 50]]
+        let mut out_data: [f32; 4] = [0.0; 4];
+        let mut out = inference::Tensor::new(out_data.as_ptr(), &[2, 2]);
+        out.data = out_data.as_mut_ptr() as *const f32;
+
+        let result = inference::ops::matmul(&a, &b, &mut out);
+        let ok = result.is_ok();
+        let vals_ok = unsafe {
+            let p = out.data;
+            // Tolerance is wider for quantized — quantization introduces error
+            (*p.add(0) - 19.0).abs() < 1.0 &&
+            (*p.add(1) - 22.0).abs() < 1.0 &&
+            (*p.add(2) - 43.0).abs() < 1.0 &&
+            (*p.add(3) - 50.0).abs() < 1.0
+        };
+        let passed = ok && vals_ok;
+        print_test_result(b"int8: matmul with real scale/zp\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
