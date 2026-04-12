@@ -7,9 +7,24 @@
 //! - AArch64: NEON float32x4_t (4-wide FP32) for all operators
 //! - Scalar fallback for tail elements and unsupported platforms
 
+use core::sync::atomic::{AtomicBool, Ordering};
 use super::tensor::{Tensor, TensorElemType};
 use super::engine::EngineError;
 use crate::loader::registry::fp16_to_f32;
+
+/// Spinlock protecting static scratch buffers (IM2COL_BUF, FP16_BUF)
+/// from concurrent access on SMP systems.
+static OPS_LOCK: AtomicBool = AtomicBool::new(false);
+
+fn ops_lock() {
+    while OPS_LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        core::hint::spin_loop();
+    }
+}
+
+fn ops_unlock() {
+    OPS_LOCK.store(false, Ordering::Release);
+}
 
 // =============================================================================
 // FP16 helpers
@@ -201,9 +216,8 @@ pub fn conv2d(
         zero_buf(outp, out.num_elements());
 
         if use_im2col {
-            // im2col + matmul path
-            // Use u32 array (0u32 == 0.0f32 in IEEE 754) to avoid FP literal
-            // initialization issues on x86-64-unknown-none (no SSE for FP init).
+            // im2col + matmul path — lock protects static buffer from SMP races
+            ops_lock();
             static mut IM2COL_BUF: [u32; IM2COL_MAX] = [0; IM2COL_MAX];
             let col = IM2COL_BUF.as_mut_ptr() as *mut f32;
 
@@ -245,6 +259,7 @@ pub fn conv2d(
                     }
                 }
             }
+            ops_unlock();
         } else {
             // Direct computation fallback for large convolutions
             for n in 0..batch {
@@ -563,7 +578,8 @@ pub fn matmul(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineErro
             // INT8 quantized matmul: accumulate in INT32, dequantize to FP32
             matmul_int8(a, b, cp, m, k, n);
         } else if b.is_fp16() && n <= FP16_ROW_BUF_SIZE {
-            // FP16 weight matrix: convert each row on-the-fly
+            // FP16 weight matrix — lock protects static buffer from SMP races
+            ops_lock();
             static mut FP16_BUF: [f32; FP16_ROW_BUF_SIZE] = [0.0; FP16_ROW_BUF_SIZE];
             let ap = a.data;
             let bp_u16 = b.data as *const u16;
@@ -575,6 +591,7 @@ pub fn matmul(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineErro
                     simd_fma_row(cp.add(i * n), bp_row, a_ik, n);
                 }
             }
+            ops_unlock();
         } else {
             // Standard FP32 matmul
             let ap = a.data;
