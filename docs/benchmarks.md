@@ -223,6 +223,27 @@ Real trained MLP and PPO weights from the Plan A export pipeline (108→256→25
 
 **Target achieved:** 41.9 us < 50 us on Cortex-A76 @ 2.4 GHz.
 
+### AI vs Heuristic Scheduler Comparison
+
+| Metric | Heuristic | AI MLP | Ratio |
+|--------|-----------|--------|-------|
+| Decision latency (Pi 5) | ~2 us | 41.9 us | 21x slower |
+| Decision latency (QEMU) | ~2 us | ~1,000 us | 500x slower (emulation) |
+| Fallback rate | N/A | 0-50% (depends on isolation) | — |
+| CPU assignment | Round-robin | Model-driven (trained on workload patterns) | — |
+
+The AI scheduler adds ~40 µs overhead per scheduling decision on Pi 5 hardware. This is acceptable for inference-heavy workloads where decisions happen infrequently (component dispatch, not per-tick). The heuristic policy remains the default for latency-sensitive cooperative scheduling.
+
+**When to use AI scheduling:**
+- Workloads with heterogeneous task requirements (different priority/preemption needs)
+- Systems where optimal CPU placement matters more than scheduling overhead
+- Evaluation of learned scheduling policies against heuristic baselines
+
+**When to use heuristic scheduling:**
+- Latency-sensitive cooperative workloads
+- Systems with frequent task creation/destruction
+- Benchmarking and debugging (deterministic behavior)
+
 The latency includes: FP context save, state vector extraction (108 floats from kernel data), 4-layer forward pass (NEON-optimized matvec), action decode and validation, FP context restore. Measured via `test_ai_inference_latency` (100 iterations, average reported by the test).
 
 ---
