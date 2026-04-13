@@ -119,13 +119,24 @@ switch_to:
 
 .Lrestore:
     /*
-     * Restore new task's context
+     * Restore new task's context.
+     *
+     * DAIF restore is deferred to the END of this sequence — just before
+     * `ret` — because restoring it early opens a race where a timer IRQ
+     * can fire while SP / GPRs / FPU are still being loaded. The IRQ's
+     * save_regs would push onto stale SP and trash memory. The previous
+     * code restored DAIF first; on Pi 5 with tasks running with
+     * DAIF.I=0 (required so timer IRQs can drive preemption at all),
+     * this race manifested as deterministic corruption a few ticks into
+     * shell execution (issue #57, commit ac46e40 identified this
+     * exact problem).
+     *
+     * The IRQ mask during the restore window uses the OUTGOING task's
+     * DAIF (which caller holds masked across switch_to via
+     * rq_lock_irqsave), so no IRQs can take an exception during this
+     * window regardless of the incoming task's DAIF.
      */
     add     x2, x1, #TASK_CONTEXT_OFFSET    /* x2 = &new->context */
-
-    /* Restore DAIF (interrupt mask state) */
-    ldr     x3, [x2, #CTX_DAIF]
-    msr     daif, x3
 
     /* Restore FPCR and FPSR */
     ldr     x3, [x2, #CTX_FPCR]
@@ -163,6 +174,12 @@ switch_to:
     ldp     x25, x26, [x2, #CTX_X25]
     ldp     x27, x28, [x2, #CTX_X27]
     ldp     x29, x30, [x2, #CTX_X29]
+
+    /* Restore DAIF last — any IRQ that becomes deliverable here is
+     * safe because SP, GPRs, FPU are fully loaded. x3 is scratch and
+     * may be clobbered by the very next exception, which is fine. */
+    ldr     x3, [x2, #CTX_DAIF]
+    msr     daif, x3
 
     /* Return to new task (x30 holds return address) */
     ret
