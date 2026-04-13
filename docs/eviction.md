@@ -315,6 +315,46 @@ Runtime heap (order-of-magnitude):
 
 Total under 16 KB when CACHEUS is installed.
 
+### Runtime Contracts
+
+A few invariants are load-bearing but non-obvious; they're documented
+here so future callers don't trip over them.
+
+- **Task context only.** Every public entry in `mm::eviction::*`
+  expects to run from a task. The model_mem spinlock is not IRQ-safe,
+  and CACHEUS allocates from the global heap during `select_victim`.
+  Do not call `select_victim` / `score` / `update_feedback` /
+  `set_eviction_policy` from an interrupt handler.
+- **FP / NEON state.** The Rust eviction path uses `f32` arithmetic
+  (CACHEUS weight updates, the MLP forward pass, the feature
+  extractor's `log1pf` / divisions). This is safe on ARM64 because
+  `kernel/arch/arm64/context.S` eagerly saves all 32 NEON registers
+  plus `FPCR` / `FPSR` on every context switch (see its
+  "Save FPU/SIMD registers (eager save for SLM workloads)" comment).
+  The runtime crate is compiled without `-mgeneral-regs-only`, so
+  `f32` is a legal ISA-level operation. Kernel C callers that need to
+  emit floats directly (e.g. the shell's stats printer) must either
+  route through the AI-Sched `FP_CONTEXT_SAVE()` wrappers or use
+  integer-encoded values — M7's `expert_weights_bp: [u32; 5]` is an
+  example. Test coverage: every `make test` run under `AI_EVICTION=ON`
+  exercises 91 internal CACHEUS / MLP / feature-extraction checks
+  while QEMU's timer preempts; no FP corruption has been observed.
+- **Lock ordering.** `alloc_weights` / `alloc_workspace` release the
+  allocator `LOCK` before calling `eviction::select_victim`, and
+  re-acquire it to free the victim and retry. The registry's
+  `REGISTRY_LOCK` is therefore never nested inside the allocator
+  `LOCK`. CACHEUS's heap allocations go through
+  `linked_list_allocator::LockedHeap`, a third independent lock
+  domain — no ABBA cycle is possible.
+- **Cross-CPU coherency.** `EVICTED_CONTENT_TRACKER` is accessed
+  under the allocator `LOCK`. Its cross-CPU visibility inherits from
+  the existing model memory pools, which on cacheable Pi 5 memory
+  rely on the spinlock's `Acquire` / `Release` semantics (these map
+  to `DMB ISH` on ARM64). The same coherency question applies to the
+  whole `ModelAllocator` on Pi 5; it is tracked as part of the multi-
+  CPU concurrent alloc stress test (#116), not as an eviction-
+  specific concern.
+
 ### Shell Command (M7)
 
 `eviction` is a shell subcommand modelled on `sched`:

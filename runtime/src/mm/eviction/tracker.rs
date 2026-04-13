@@ -15,6 +15,16 @@
 //! M5 ships the tracker with a no-argument API; M6 wires
 //! `alloc_weights` / `alloc_workspace` to call `record_eviction` and
 //! `probe_on_alloc` at the right points in the allocation path.
+//!
+//! ## Cross-CPU visibility
+//!
+//! The global `EVICTED_CONTENT_TRACKER` instance lives in
+//! `mm::model_mem` behind the allocator's `LOCK`. Its cross-CPU
+//! visibility inherits from that lock, which uses `Acquire`/`Release`
+//! ordering (→ `DMB ISH` on ARM64). On platforms where per-core L2
+//! caches are incoherent (Pi 5), the same concern applies to the
+//! whole `ModelAllocator` and is tracked under #116; no eviction-
+//! specific workaround is needed.
 
 use alloc::collections::VecDeque;
 
