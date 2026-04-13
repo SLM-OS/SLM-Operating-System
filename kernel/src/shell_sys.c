@@ -812,8 +812,8 @@ int cmd_bench(int argc, char *argv[])
         /* Dispatch a task to each secondary CPU and verify it completes.
          * Uses NC memory for done flags — instantly visible cross-CPU. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
-        /* Zero done flags in NC memory */
-        for (uint32_t i = 0; i < 4; i++)
+        /* Zero done flags in NC memory — one slot per CPU (skip slot 0, unused). */
+        for (uint32_t i = 0; i < cpu_count; i++)
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + i * 4) = 0;
 #endif
         for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
