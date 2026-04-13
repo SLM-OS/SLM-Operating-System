@@ -7,19 +7,10 @@
 
 #include <stdint.h>
 
-/*
- * Serial output functions.
- * In standalone mode, these are provided by main_x86.c.
- * In integrated mode, they come from uart.h (kprintf.c).
- */
-#ifdef SLM_INTEGRATED_BUILD
+/* Serial output wrappers — thin adapters onto uart.h. */
 #include "uart.h"
 static void serial_puts(const char *s) { uart_puts(s); }
 static void serial_print_hex(uint64_t v) { uart_printf("0x%lx", v); }
-#else
-extern void serial_puts(const char *s);
-extern void serial_print_hex(uint64_t value);
-#endif
 
 /* ISR stubs from idt.S */
 extern void isr_0(void);

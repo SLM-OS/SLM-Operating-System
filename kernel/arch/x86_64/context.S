@@ -91,7 +91,12 @@ switch_to:
  *   rbx = task entry function pointer
  *   r12 = task argument
  *
- * Calls the entry function, then task_exit().
+ * Tail-calls task_entry_trampoline(entry, arg) (kernel/sched/task.c),
+ * which clears preempt_disabled[cpu] — set to 1 by the outgoing
+ * schedule()/scheduler_start() before switch_to — then invokes the
+ * task's entry function and task_exit() on return. Without this path
+ * a new task's first timeslice would run with preemption disabled
+ * until the outgoing task is resumed (fixes #91).
  */
 .global task_entry_wrapper
 .type task_entry_wrapper, @function
@@ -99,14 +104,10 @@ task_entry_wrapper:
     /* Enable interrupts (new tasks start with IF=0) */
     sti
 
-    /* Call entry(arg) */
-    mov     %r12, %rdi      /* arg → first parameter */
-    call    *%rbx            /* call entry function */
-
-    /* Entry function returned — clean up */
-    call    task_exit
-    /* Should not return */
-    ud2
+    /* Tail-call task_entry_trampoline(entry=rbx, arg=r12) */
+    mov     %rbx, %rdi      /* entry → first parameter */
+    mov     %r12, %rsi      /* arg   → second parameter */
+    jmp     task_entry_trampoline
 
 .size task_entry_wrapper, . - task_entry_wrapper
 

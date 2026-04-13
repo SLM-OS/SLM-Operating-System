@@ -558,6 +558,100 @@ add_custom_command(
     COMMENT "Creating slmos.bin"
 )
 
+# ============================================================================
+# x86-64 UEFI disk image (for bare-metal boot via SD card / USB)
+# ============================================================================
+# Produces build/kernel/slmos-x86.img: a 128 MB GPT disk with a single
+# 64 MB EFI System Partition containing GRUB (as BOOTX64.EFI) and the
+# kernel ELF. Flash to test-pc with `labctl sdwire flash test-pc ...`.
+# Replaces the standalone kernel/arch/x86_64/Makefile.test disk-int
+# target (deleted in favour of this) — keeps the kernel source list, C
+# standard, and Rust staticlib link in a single place.
+if(PLATFORM STREQUAL "X86_64")
+    find_program(GRUB_MKIMAGE grub-mkimage)
+    find_program(MFORMAT mformat)
+    find_program(MCOPY mcopy)
+    find_program(MMD mmd)
+    find_program(SGDISK sgdisk)
+
+    if(GRUB_MKIMAGE AND MFORMAT AND MCOPY AND MMD AND SGDISK)
+        set(X86_DISK_IMG      ${CMAKE_BINARY_DIR}/slmos-x86.img)
+        set(X86_GRUB_EFI      ${CMAKE_BINARY_DIR}/bootx64.efi)
+        set(X86_GRUB_CFG      ${CMAKE_BINARY_DIR}/grub-embed.cfg)
+
+        # ESP partition layout: 1 MB alignment (sector 2048) + 64 MB ESP.
+        # FAT32 requires > 65535 total sectors for a well-formed BPB
+        # (otherwise mformat / mkfs.vfat stuff the count into the legacy
+        # 16-bit TotSec16 field and leave TotSec32 = 0, which UEFI
+        # FAT drivers may reject). 64 MB = 131072 sectors, safely above
+        # the FAT32 minimum.
+        set(X86_ESP_FIRST_SECTOR 2048)
+        set(X86_ESP_LAST_SECTOR  133119) # 2048 + 64*2048 - 1
+        set(X86_ESP_SECTOR_COUNT 131072) # 64 MB
+
+        # grub.cfg baked into the EFI binary — loads the kernel as
+        # multiboot2 from the /slmos/ directory on the ESP.
+        file(WRITE ${X86_GRUB_CFG}
+"set timeout=0
+set default=0
+insmod part_gpt
+insmod fat
+insmod multiboot2
+insmod all_video
+set gfxpayload=text
+search --file --set=root /slmos/kernel.elf
+multiboot2 /slmos/kernel.elf
+boot
+")
+
+        add_custom_command(
+            OUTPUT ${X86_GRUB_EFI}
+            COMMAND ${GRUB_MKIMAGE} -O x86_64-efi -o ${X86_GRUB_EFI}
+                    -p /boot/grub -c ${X86_GRUB_CFG}
+                    part_gpt fat multiboot2 search serial all_video
+            DEPENDS ${X86_GRUB_CFG}
+            COMMENT "Building GRUB x86_64-efi binary"
+            VERBATIM
+        )
+
+        # Build a 128 MB GPT disk with one 64 MB ESP formatted in-place
+        # via mtools — no sudo / no losetup. `mformat -H` sets the BPB
+        # hidden_sectors field so UEFI firmware (which probes the FAT
+        # header at the partition offset) finds a correctly-described
+        # filesystem; without it OVMF drops into the PXE fallback.
+        add_custom_command(
+            OUTPUT ${X86_DISK_IMG}
+            # 1. Zeroed 128 MB disk, GPT with one 64 MB EFI System
+            #    Partition starting at 1 MB (sector 2048).
+            COMMAND ${CMAKE_COMMAND} -E rm -f ${X86_DISK_IMG}
+            COMMAND dd if=/dev/zero of=${X86_DISK_IMG} bs=1M count=128 status=none
+            COMMAND ${SGDISK} --clear
+                    --new=1:${X86_ESP_FIRST_SECTOR}:${X86_ESP_LAST_SECTOR}
+                    --typecode=1:EF00 --change-name=1:EFI
+                    ${X86_DISK_IMG}
+            # 2. Format the partition in place at byte offset 1 MB.
+            #    -H records the partition start (hidden_sectors); -T is
+            #    the FAT total sector count. With 131072 sectors (> 65535)
+            #    mformat writes TotSec32 correctly for FAT32.
+            COMMAND ${MFORMAT} -i ${X86_DISK_IMG}@@1M
+                    -F -v SLMOS -H ${X86_ESP_FIRST_SECTOR} -T ${X86_ESP_SECTOR_COUNT} ::
+            COMMAND ${MMD} -i ${X86_DISK_IMG}@@1M ::/EFI
+            COMMAND ${MMD} -i ${X86_DISK_IMG}@@1M ::/EFI/BOOT
+            COMMAND ${MMD} -i ${X86_DISK_IMG}@@1M ::/slmos
+            COMMAND ${MCOPY} -i ${X86_DISK_IMG}@@1M ${X86_GRUB_EFI} ::/EFI/BOOT/BOOTX64.EFI
+            COMMAND ${MCOPY} -i ${X86_DISK_IMG}@@1M $<TARGET_FILE:slmos.elf> ::/slmos/kernel.elf
+            DEPENDS ${X86_GRUB_EFI} slmos.elf
+            COMMENT "Building UEFI disk image ${X86_DISK_IMG}"
+            VERBATIM
+        )
+
+        add_custom_target(slmos-x86-disk DEPENDS ${X86_DISK_IMG})
+        message(STATUS "  x86 disk:   make slmos-x86-disk → ${X86_DISK_IMG}")
+    else()
+        message(STATUS "  x86 disk:   disabled (missing grub-mkimage / mtools / sgdisk)")
+    endif()
+endif()
+
 # Print configuration summary
 message(STATUS "")
 message(STATUS "SLM-OS Build Configuration")

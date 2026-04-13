@@ -850,6 +850,154 @@ static void test_scheduler_tick_callable(void)
     TEST_ASSERT_TRUE(true);
 }
 
+/*
+ * Test: preempt_disabled[cpu] is cleared while a task runs (#91).
+ *
+ * The x86-64 task_entry_wrapper previously called the task entry directly,
+ * bypassing task_entry_trampoline — which is where preempt_disabled[cpu]
+ * gets cleared for a new task. That left the flag stuck at 1 for the
+ * duration of the new task's first timeslice, disabling timer preemption
+ * until the outgoing task was eventually resumed. The test harness itself
+ * runs inside a task that was reached via task_entry_wrapper, so if this
+ * assertion holds we know the trampoline ran.
+ */
+static void test_preempt_disabled_cleared_in_task(void)
+{
+    extern volatile int preempt_disabled[];
+    TEST_ASSERT_EQUAL_INT(0, preempt_disabled[cpu_id()]);
+}
+
+/*
+ * Test: a single new task makes progress through yield() (#91).
+ *
+ * Before the fix, preempt_disabled stayed at 1 for the duration of a
+ * new task's first timeslice (task_entry_wrapper bypassed the
+ * trampoline that clears it). This test spawns a worker that bumps
+ * a counter after each yield; if the scheduler round-trips correctly,
+ * all four iterations complete.
+ */
+static volatile uint32_t sched_regression_worker_ticks;
+
+static void sched_regression_worker(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 4; i++) {
+        extern void yield(void);
+        yield();
+        sched_regression_worker_ticks++;
+    }
+}
+
+static void test_new_task_runs_and_yields(void)
+{
+    extern struct task *task_create(const char *name, void (*entry)(void *), void *arg);
+    extern void scheduler_add_task(struct task *task);
+    extern void sleep_ms(uint32_t ms);
+
+    sched_regression_worker_ticks = 0;
+    struct task *t = task_create("sched_regress", sched_regression_worker, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+
+    /* Give the worker enough scheduler visits to complete four yields. */
+    for (int i = 0; i < 20 && sched_regression_worker_ticks < 4; i++)
+        sleep_ms(10);
+
+    TEST_ASSERT_EQUAL_UINT32(4, sched_regression_worker_ticks);
+}
+
+/*
+ * Test: two cooperatively-yielding tasks both make progress (#91).
+ *
+ * This is the exact multi-task reproducer from
+ * docs/x86-64-scheduler-investigation.md — before the fix, two tasks
+ * bouncing yields off each other would both stall because neither
+ * outgoing schedule() frame ever got to clear preempt_disabled on the
+ * CPU. Each worker records its own iteration count into a shared
+ * array; both must advance for the test to pass.
+ */
+static volatile uint32_t sched_multi_yield_counts[2];
+
+static void sched_multi_yield_worker(void *arg)
+{
+    uintptr_t slot = (uintptr_t)arg;
+    for (int i = 0; i < 8; i++) {
+        extern void yield(void);
+        yield();
+        sched_multi_yield_counts[slot]++;
+    }
+}
+
+static void test_two_tasks_yield_both_advance(void)
+{
+    extern struct task *task_create(const char *name, void (*entry)(void *), void *arg);
+    extern void scheduler_add_task(struct task *task);
+    extern void sleep_ms(uint32_t ms);
+
+    sched_multi_yield_counts[0] = 0;
+    sched_multi_yield_counts[1] = 0;
+
+    struct task *a = task_create("sched_multi_a", sched_multi_yield_worker, (void *)0);
+    struct task *b = task_create("sched_multi_b", sched_multi_yield_worker, (void *)1);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_NOT_NULL(b);
+    scheduler_add_task(a);
+    scheduler_add_task(b);
+
+    /* Give both workers enough scheduler visits to finish 8 yields each. */
+    for (int i = 0; i < 40
+         && (sched_multi_yield_counts[0] < 8 || sched_multi_yield_counts[1] < 8);
+         i++)
+        sleep_ms(10);
+
+    TEST_ASSERT_EQUAL_UINT32(8, sched_multi_yield_counts[0]);
+    TEST_ASSERT_EQUAL_UINT32(8, sched_multi_yield_counts[1]);
+}
+
+/*
+ * Test: a brand-new task is preemptible on its first timeslice (#91).
+ *
+ * Before the fix, a new task inherited preempt_disabled=1 from the
+ * outgoing schedule() frame and ran non-preemptively until the
+ * outgoing task was eventually resumed. This test spawns a worker
+ * that snapshots preempt_disabled before doing any yield. With the
+ * fix, task_entry_trampoline runs before the entry function and
+ * clears the flag, so the snapshot must be zero.
+ */
+static volatile int sched_new_task_observed_preempt;
+static volatile uint32_t sched_new_task_cpu_seen;
+static volatile uint8_t sched_new_task_ran;
+
+static void sched_new_task_observer(void *arg)
+{
+    (void)arg;
+    extern volatile int preempt_disabled[];
+    sched_new_task_cpu_seen = cpu_id();
+    sched_new_task_observed_preempt = preempt_disabled[cpu_id()];
+    sched_new_task_ran = 1;
+}
+
+static void test_new_task_preemptible_on_first_timeslice(void)
+{
+    extern struct task *task_create(const char *name, void (*entry)(void *), void *arg);
+    extern void scheduler_add_task(struct task *task);
+    extern void sleep_ms(uint32_t ms);
+
+    sched_new_task_observed_preempt = -1;
+    sched_new_task_cpu_seen = 0xFFFFFFFF;
+    sched_new_task_ran = 0;
+
+    struct task *t = task_create("sched_observe", sched_new_task_observer, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+
+    for (int i = 0; i < 20 && !sched_new_task_ran; i++)
+        sleep_ms(10);
+
+    TEST_ASSERT_TRUE(sched_new_task_ran);
+    TEST_ASSERT_EQUAL_INT(0, sched_new_task_observed_preempt);
+}
+
 /* ============================================================================
  * ACPI Tests
  * ============================================================================ */
@@ -1981,6 +2129,10 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_gic_end_interrupt_safe);
     RUN_TEST(test_uart_putc_works);
     RUN_TEST(test_scheduler_tick_callable);
+    RUN_TEST(test_preempt_disabled_cleared_in_task);
+    RUN_TEST(test_new_task_runs_and_yields);
+    RUN_TEST(test_two_tasks_yield_both_advance);
+    RUN_TEST(test_new_task_preemptible_on_first_timeslice);
 
     /* ACPI + APIC tests */
     RUN_TEST(test_acpi_discovered_cpus);

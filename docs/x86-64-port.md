@@ -711,38 +711,33 @@ cmake --build build -j$(nproc)
 # Output: build/slmos.elf, build/slmos.bin
 ```
 
-#### Standalone Makefile (quick iterations)
+#### UEFI Disk Image
 
 ```bash
-# --- Standalone test kernel (boot + IDT + PIC + PIT only) ---
-make -f kernel/arch/x86_64/Makefile.test           # Build standalone ELF
-make -f kernel/arch/x86_64/Makefile.test disk       # UEFI disk image
-make -f kernel/arch/x86_64/Makefile.test run        # QEMU (serial)
-
-# --- Integrated kernel (full SLM-OS: scheduler, shell, PMM, VFS) ---
-make -f kernel/arch/x86_64/Makefile.test integrated # Build integrated ELF
-make -f kernel/arch/x86_64/Makefile.test disk-int   # UEFI disk image
-make -f kernel/arch/x86_64/Makefile.test run-int    # QEMU (serial)
-
-# --- Other targets ---
-make -f kernel/arch/x86_64/Makefile.test iso        # GRUB ISO (QEMU -cdrom)
-make -f kernel/arch/x86_64/Makefile.test debug      # QEMU + GDB server
-make -f kernel/arch/x86_64/Makefile.test gdb        # Connect GDB
-make -f kernel/arch/x86_64/Makefile.test clean      # Remove all build artifacts
+# Full SLM-OS kernel as a bootable UEFI disk image
+make x86-disk PLATFORM=X86_64
+# Output: build/kernel/slmos-x86.img (128 MB GPT disk, 64 MB FAT32 ESP)
 ```
+
+The `slmos-x86-disk` CMake target replaces the former
+`kernel/arch/x86_64/Makefile.test disk-int` target (deleted). The
+kernel source list, C23 standard, and Rust staticlib link are driven
+from the single top-level `CMakeLists.txt`, so the disk image can
+never drift out of sync with the ordinary `make kernel` build.
+
+Requires: `grub-mkimage`, `mtools` (`mformat`, `mcopy`, `mmd`),
+`sgdisk`. The disk is built without `sudo` / `losetup` — `mtools`
+writes the FAT32 filesystem directly to the partition offset inside
+the GPT disk image.
 
 ### Build Output
 
 ```
-build/x86_64-test/              # Standalone kernel
-├── kernel-x86.elf
-├── slmos-x86.iso / .img
-└── *.o
-
-build/x86_64-integrated/        # Integrated kernel
-├── kernel-x86.elf
-├── slmos-x86.img
-└── kernel/**/*.o               # Mirrored source tree
+build/kernel/                   # Full SLM-OS kernel
+├── slmos.elf                   # Kernel ELF
+├── slmos.bin                   # Flat binary
+├── bootx64.efi                 # GRUB EFI binary (x86-disk target)
+└── slmos-x86.img               # UEFI-bootable disk image (x86-disk target)
 ```
 
 ---
@@ -752,21 +747,17 @@ build/x86_64-integrated/        # Integrated kernel
 ### Deploy Workflow
 
 ```bash
-# Standalone test kernel
-make -f kernel/arch/x86_64/Makefile.test clean disk && \
-labctl sdwire flash test-pc build/x86_64-test/slmos-x86.img
+# Full SLM-OS kernel as a UEFI-bootable disk image
+make x86-disk PLATFORM=X86_64 && \
+labctl sdwire flash test-pc build/kernel/slmos-x86.img
 
-# Integrated kernel (full SLM-OS with shell)
-make -f kernel/arch/x86_64/Makefile.test disk-int && \
-labctl sdwire flash test-pc build/x86_64-integrated/slmos-x86.img
-
-# Capture boot output (standalone: wait for halt; integrated: wait for shell)
+# Capture boot output
 labctl serial_capture test-pc --timeout 30 --until "slm-os>"
 ```
 
 ### UEFI Disk Image Structure
 
-The `disk` target creates a 64 MB GPT image with one EFI System Partition (FAT32):
+The `slmos-x86-disk` target creates a 128 MB GPT disk image with one 64 MB EFI System Partition (FAT32):
 
 ```
 GPT Partition Table
@@ -783,7 +774,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 90 tests across 17 categories:
+The `test_x86_boot.c` test suite contains 94 tests across 17 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -805,13 +796,23 @@ The `test_x86_boot.c` test suite contains 90 tests across 17 categories:
 | Component services | 2 | Listener starts + registers, echo start + send safe |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
-| Scheduler integration | 5 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick |
+| Scheduler integration | 9 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick, preempt_disabled cleared in task, new task runs+yields, two tasks yield both advance (#91), new task preemptible on first timeslice (#91) |
 | setjmp/longjmp | 2 | setjmp/longjmp round-trip, longjmp(0) returns 1 |
 | Long mode | 2 | 64-bit operations, RIP-relative addressing |
 
 ### Running Tests
 
 Tests are integrated into the kernel and run during boot when compiled with the test harness. They use the Unity bare-metal test framework.
+
+### Disk-Image Verification
+
+`scripts/tests/verify-x86-disk.sh` validates the structural integrity of `build/kernel/slmos-x86.img` without booting it: disk size, GPT partition table, ESP partition type, FAT32 BPB (including the `TotSec32 > 0` check that #82 surfaced), and presence of `/EFI/BOOT/BOOTX64.EFI` and `/slmos/kernel.elf`. Wired in as:
+
+```bash
+make x86-disk-verify PLATFORM=X86_64
+```
+
+Runs the disk build then the verifier. Useful in CI and as a post-build gate before flashing to test-pc.
 
 ---
 
@@ -884,14 +885,13 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/arch/x86_64/main_x86.c` | Standalone test kernel entry (not used in integrated build) |
 | `kernel/arch/x86_64/idt.c` | IDT setup, exception handler, IRQ dispatch |
 | `kernel/arch/x86_64/acpi.c` | ACPI RSDP/MADT parsing (CPU discovery) |
 | `kernel/arch/x86_64/lapic.c` | Local APIC driver (init, EOI, IPI, timer) |
 | `kernel/arch/x86_64/ioapic.c` | I/O APIC driver (redirection table) |
 | `kernel/arch/x86_64/pic.c` | gic.h interface routing to LAPIC/IOAPIC |
 | `kernel/arch/x86_64/timer_x86.c` | LAPIC timer (timer.h interface, calibrated vs PIT) |
-| `kernel/arch/x86_64/platform_x86.c` | Boot glue, SMP boot (INIT-SIPI), VMM/DTB/Rust stubs |
+| `kernel/arch/x86_64/platform_x86.c` | `kernel_main_x86` entry, Multiboot2 info save, boot glue, SMP boot (INIT-SIPI), VMM/DTB/Rust stubs |
 | `kernel/arch/x86_64/pci.c` | PCI config access, bus enumeration, `pci` shell command |
 | `kernel/arch/x86_64/nvidia_gpu.c` | GPU probe, BAR mapping, register decode, VRAM test, `gpu` command |
 | `kernel/src/component_runtime.c` | Built-in component execution, `component run/send/builtins` |
@@ -902,7 +902,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/arch/x86_64/Makefile.test` | Standalone + integrated build rules |
+| `CMakeLists.txt` (slmos-x86-disk target) | UEFI disk-image build rules |
 | `kernel/kernel-x86_64.ld` | Linker script |
 
 ### Documentation

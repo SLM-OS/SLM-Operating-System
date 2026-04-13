@@ -117,6 +117,26 @@ kernel-clean:
 .PHONY: kernel-rebuild
 kernel-rebuild: kernel-clean kernel
 
+# Build the x86-64 UEFI disk image (requires PLATFORM=X86_64).
+# Produces $(KERNEL_BUILD_DIR)/slmos-x86.img for labctl sdwire flash.
+.PHONY: x86-disk
+x86-disk: kernel
+ifneq ($(PLATFORM),X86_64)
+	@echo "x86-disk requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@echo "Building x86-64 UEFI disk image..."
+	$(CMAKE) --build $(KERNEL_BUILD_DIR) --target slmos-x86-disk
+	@echo ""
+	@echo "Disk image: $(KERNEL_BUILD_DIR)/slmos-x86.img"
+	@echo "Flash with: labctl sdwire flash test-pc $(KERNEL_BUILD_DIR)/slmos-x86.img"
+
+# Run structural checks on the built disk image. Used by CI and by the
+# post-build checklist before flashing to test-pc. Validates GPT, FAT32
+# BPB, and file presence — the regressions #82 caught.
+.PHONY: x86-disk-verify
+x86-disk-verify: x86-disk
+	@scripts/tests/verify-x86-disk.sh $(KERNEL_BUILD_DIR)/slmos-x86.img
+
 # ============================================================================
 # Runtime (Rust) targets
 # ============================================================================

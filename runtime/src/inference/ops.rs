@@ -150,6 +150,9 @@ unsafe fn zero_buf(ptr: *mut f32, n: usize) {
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
+        // x86-64 falls through to scalar — stable Rust on the
+        // `x86_64-unknown-none` target cannot currently use SSE
+        // intrinsics. See GitHub #72 for the investigation.
         for i in 0..n {
             *ptr.add(i) = 0.0;
         }
@@ -427,7 +430,8 @@ pub fn reshape(input: &Tensor, new_shape: &[u32]) -> Result<Tensor, EngineError>
 
 /// Relu: out\[i\] = max(0, input\[i\])
 ///
-/// NEON: vmaxq_f32 (4-wide).
+/// NEON: vmaxq_f32 (4-wide). x86-64 falls through to scalar
+/// (see GitHub #72).
 pub fn relu(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
     let n = input.num_elements();
     if out.num_elements() != n {
