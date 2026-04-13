@@ -641,6 +641,123 @@ static void test_timer_running_after_boot(void)
 }
 
 /* ============================================================================
+ * Regression: msg_router cross-CPU publish/receive/ack (#66)
+ *
+ * Runs a publisher on one CPU and a subscriber on another. Verifies that
+ * N publish/receive/ack round-trips complete correctly under concurrent
+ * access. Also exercises the IRQ-safe SpinGuard in runtime/src/msg_router.rs
+ * — previous guard did not mask IRQs, allowing a timer ISR to reenter the
+ * router on a CPU that already held MSG_ROUTER_LOCK.
+ * ============================================================================ */
+
+extern void msg_router_init(void);
+extern int msg_router_subscribe(const uint8_t *topic_name, int component_idx);
+extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
+extern const uint8_t *msg_router_receive(int component_idx, uint8_t *topic_out);
+extern void msg_router_ack(int component_idx);
+extern void msg_router_unsubscribe_all(int component_idx);
+
+#define MSG_X_COMPONENT 17
+#define MSG_X_MESSAGES  5
+#define MSG_X_TOPIC     ((const uint8_t *)"/regress/cpu")
+
+static volatile uint32_t msg_x_received = 0;
+static volatile uint32_t msg_x_published = 0;
+static volatile uint32_t msg_x_subscriber_done = 0;
+static volatile uint32_t msg_x_publisher_done = 0;
+
+static void msg_x_subscriber(void *arg)
+{
+    (void)arg;
+    uint8_t topic_buf[16];
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 5;
+
+    while (msg_x_received < MSG_X_MESSAGES) {
+        if ((timer_get_count() - start) >= limit) break;
+        const uint8_t *data = msg_router_receive(MSG_X_COMPONENT, topic_buf);
+        if (data) {
+            msg_x_received++;
+            cache_clean((void *)&msg_x_received);
+            msg_router_ack(MSG_X_COMPONENT);
+        } else {
+            yield();
+        }
+    }
+
+    msg_x_subscriber_done = 1;
+    cache_clean((void *)&msg_x_subscriber_done);
+}
+
+static void msg_x_publisher(void *arg)
+{
+    (void)arg;
+    /* Small delay so subscriber is scheduled first. */
+    delay(50000);
+
+    for (uint32_t i = 0; i < MSG_X_MESSAGES; i++) {
+        uint8_t payload[4] = { (uint8_t)('a' + i), 0, 0, 0 };
+        int delivered = msg_router_publish(MSG_X_TOPIC, payload);
+        if (delivered == 1) {
+            msg_x_published++;
+            cache_clean((void *)&msg_x_published);
+        }
+    }
+
+    msg_x_publisher_done = 1;
+    cache_clean((void *)&msg_x_publisher_done);
+}
+
+static void test_msg_router_cross_cpu(void)
+{
+    /* Skip if we don't have at least 3 CPUs (shell on 0, pub on 1, sub on 2). */
+    if (cpu_count < 3) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 3");
+        return;
+    }
+
+    msg_router_init();
+    msg_x_received = 0;
+    msg_x_published = 0;
+    msg_x_subscriber_done = 0;
+    msg_x_publisher_done = 0;
+    cache_clean((void *)&msg_x_received);
+    cache_clean((void *)&msg_x_published);
+    cache_clean((void *)&msg_x_subscriber_done);
+    cache_clean((void *)&msg_x_publisher_done);
+
+    int ret = msg_router_subscribe(MSG_X_TOPIC, MSG_X_COMPONENT);
+    TEST_ASSERT_MESSAGE(ret == 0, "subscribe failed");
+
+    struct task *sub = task_create("msg_sub", msg_x_subscriber, NULL);
+    struct task *pub = task_create("msg_pub", msg_x_publisher, NULL);
+    TEST_ASSERT_NOT_NULL(sub);
+    TEST_ASSERT_NOT_NULL(pub);
+
+    scheduler_add_task_to_cpu(sub, 2);
+    scheduler_add_task_to_cpu(pub, 1);
+
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 8;
+    while ((timer_get_count() - start) < limit) {
+        cache_invalidate((void *)&msg_x_subscriber_done);
+        cache_invalidate((void *)&msg_x_publisher_done);
+        if (msg_x_subscriber_done && msg_x_publisher_done) break;
+        yield();
+    }
+
+    cache_invalidate((void *)&msg_x_received);
+    cache_invalidate((void *)&msg_x_published);
+
+    msg_router_unsubscribe_all(MSG_X_COMPONENT);
+
+    TEST_ASSERT_MESSAGE(msg_x_published == MSG_X_MESSAGES,
+        "publisher did not publish all messages");
+    TEST_ASSERT_MESSAGE(msg_x_received == MSG_X_MESSAGES,
+        "subscriber did not receive all messages");
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -667,6 +784,9 @@ int test_suite_integration(void)
     /* Regression: Pi 5 timer and timeout fixes (April 2026) */
     RUN_TEST(test_hw_timeout_with_yield);
     RUN_TEST(test_timer_running_after_boot);
+
+    /* Regression: msg_router cross-CPU publish/receive/ack (#66) */
+    RUN_TEST(test_msg_router_cross_cpu);
 
     return UNITY_END();
 }

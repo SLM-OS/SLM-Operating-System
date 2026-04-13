@@ -515,4 +515,21 @@ extern int rust_component_test(void);
  */
 uint32_t slm_ffi_get_test_queue(void);
 
+/*
+ * ==========================================================================
+ * IRQ Control (for Rust-side IRQ-safe locks)
+ * ==========================================================================
+ */
+
+/*
+ * Disable local IRQs and return previous DAIF/EFLAGS state.
+ * Paired with slm_irq_restore.
+ */
+uint64_t slm_irq_save(void);
+
+/*
+ * Restore local IRQ state from a prior slm_irq_save().
+ */
+void slm_irq_restore(uint64_t flags);
+
 #endif /* SLM_FFI_H */

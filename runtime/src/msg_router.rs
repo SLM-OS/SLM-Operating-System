@@ -43,6 +43,8 @@ extern "C" {
     fn timer_get_count() -> u64;
     /// ARM generic timer frequency (CNTFRQ_EL0), in Hz.
     fn timer_get_frequency() -> u64;
+    fn slm_irq_save() -> u64;
+    fn slm_irq_restore(flags: u64);
 }
 
 fn puts(s: &[u8]) {
@@ -225,23 +227,37 @@ static mut LAST_RECEIVED: [LastReceived; MAX_COMPONENTS] = [LastReceived::none()
 static MSG_ROUTER_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// RAII guard for `MSG_ROUTER_LOCK`.
-struct SpinGuard;
+///
+/// Disables local IRQs on acquire and restores them on drop. Preemption
+/// is also disabled implicitly (timer IRQ is masked) so a task holding
+/// the lock cannot be preempted into another task that tries to publish.
+/// This guards against any ISR path that calls into the router once
+/// preemptive multi-core is enabled (#57).
+struct SpinGuard {
+    irq_flags: u64,
+}
 
 impl SpinGuard {
     fn new() -> Self {
+        // SAFETY: slm_irq_save is a kernel FFI that reads DAIF (ARM64) /
+        // EFLAGS (x86_64) and masks IRQs. Always safe to call.
+        let irq_flags = unsafe { slm_irq_save() };
         while MSG_ROUTER_LOCK
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             core::hint::spin_loop();
         }
-        SpinGuard
+        SpinGuard { irq_flags }
     }
 }
 
 impl Drop for SpinGuard {
     fn drop(&mut self) {
         MSG_ROUTER_LOCK.store(false, Ordering::Release);
+        // SAFETY: restoring the caller's prior IRQ state; flags came from
+        // the paired slm_irq_save() in new().
+        unsafe { slm_irq_restore(self.irq_flags) };
     }
 }
 
