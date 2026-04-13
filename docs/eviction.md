@@ -172,6 +172,7 @@ documented in `kernel/tests/test_eviction.c`):
 | `rust_eviction_enabled() -> i32` | `1` if the `ai_eviction` feature is linked, else `0` |
 | `rust_eviction_selftest() -> i32` | Registry round-trip selftest. `0` on success, `-1` on mismatch, `-2` when feature is off |
 | `rust_eviction_run_tests() -> i32` | Comprehensive Rust-internal tests for the trait + registry + generated predictors. Returns failure count (`0` on success); `0` without running anything when feature is off. Prints `[PASS]` / `[FAIL]` per test via UART. |
+| `rust_eviction_snapshot_count() -> i32` | Count of blocks the active policy would see via `snapshot_evictable_blocks` (allocated AND `ref_count ≤ 1`). Returns `-1` when the feature is off. Used by the M1 snapshot filter test. |
 
 M3 adds classical-policy registration, M4 the ML policies, M5 CACHEUS,
 M6 wires the trait into the allocator, and M7 adds the `eviction`
@@ -180,7 +181,7 @@ shell command. This document updates as each milestone lands.
 ### Test Coverage
 
 `kernel/tests/test_eviction.c` registers the **Eviction Policy Tests**
-Unity suite (12 tests) alongside the existing `test_suite_model_mem`:
+Unity suite (13 tests) alongside the existing `test_suite_model_mem`:
 
 - **Tracking-field FFI** (9 tests, always run):
   - Alloc seeds `load_time`, `last_access_time`, and `access_count = 1`
@@ -189,12 +190,15 @@ Unity suite (12 tests) alongside the existing `test_suite_model_mem`:
     getters; invalid handles return documented sentinels; `free()`
     clears tracking; `share()`-ref releases preserve tracking on the
     primary handle.
-- **Eviction subsystem** (3 tests, skip cleanly when feature is off):
+- **Eviction subsystem** (4 tests, skip cleanly when feature is off):
   - `rust_eviction_enabled()` returns a valid boolean
   - `rust_eviction_selftest()` returns `0`
   - `rust_eviction_run_tests()` returns `0`
+  - `rust_eviction_snapshot_count()` honours the evictable-block filter
+    (excludes free blocks and pinned blocks with `ref_count > 1`;
+    re-admits them on ref drop; returns to baseline on free)
 
-`rust_eviction_run_tests()` itself exercises 48 internal invariants:
+`rust_eviction_run_tests()` itself exercises 53 internal invariants:
 
 - **Registry / trait** (17): default / swap / reset, `FirstCandidatePolicy`
   behaviour, `select_victim` / `score` / `update_feedback` helpers, default
@@ -207,6 +211,10 @@ Unity suite (12 tests) alongside the existing `test_suite_model_mem`:
   T1, ARC second access promotes to T2, ARC eviction T1→B1, ARC B1
   ghost hit grows p, ARC B2 ghost hit shrinks p, ARC reset clears all
   lists. Cases mirror the sibling parity tests candidate-for-candidate.
+- **Audit-pass edge cases** (5): LFU single-candidate, SLM fallback
+  with empty active table, LRU repeated-call stability, ARC ghost-list
+  overflow trimming, registry `update_feedback` drives ARC's
+  `notify_access` (integration through the trait).
 - **Generated predictors** (11): `MODELS_AVAILABLE` matches feature,
   `xgb_predict` / `mlp_predict` finite in [0, 1] on three input shapes
   each, stubs return exactly `0.5`.

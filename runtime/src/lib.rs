@@ -1010,6 +1010,30 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
     }
 }
 
+/// Count of currently-evictable blocks visible to the active policy.
+///
+/// Wraps `mm::snapshot_evictable_blocks().len()` for C callers that
+/// want to verify the snapshot filter without needing to marshal a
+/// `Vec<BlockMeta>` across FFI. A block is "evictable" when it is
+/// allocated and `ref_count <= 1` (shared blocks with additional refs
+/// are pinned).
+///
+/// Returns `-1` when the `ai_eviction` feature is off (snapshot API
+/// not compiled). Returns the count otherwise, capped at `i32::MAX`
+/// (which the pool-size limits of 256+64 blocks can't approach in
+/// practice).
+#[no_mangle]
+pub extern "C" fn rust_eviction_snapshot_count() -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { -1 }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        let n = mm::snapshot_evictable_blocks().len();
+        if n > i32::MAX as usize { i32::MAX } else { n as i32 }
+    }
+}
+
 /// Comprehensive Rust-internal tests for the eviction subsystem.
 ///
 /// Returns the number of failures. 0 on success. When the
@@ -1394,6 +1418,87 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                    p.t1_len() == 0 && p.t2_len() == 0
                        && p.b1_len() == 0 && p.b2_len() == 0
                        && p.target_p() == 0.0);
+        }
+
+        // --- Additional M3 coverage: edge cases surfaced in audit ---
+        {
+            // LFU with a single candidate returns 0 without tie-break
+            // shenanigans.
+            let cands = [make_full(0, 123, 7, PoolType::Weight, 0)];
+            let mut p = LfuPolicy::new();
+            check!(b"lfu_single_candidate\0", p.select_victim(&cands) == 0);
+        }
+        {
+            // SLM-Heuristic with an empty active-inferences table:
+            // every block looks inactive, so the inactive-weights rule
+            // fires and LRU wins within that bucket.
+            let cands = [
+                make_full(0, 100, 0, PoolType::Weight, 5),
+                make_full(1,  30, 0, PoolType::Weight, 6),
+                make_full(2, 200, 0, PoolType::Weight, 7),
+            ];
+            let mut p = SlmHeuristicPolicy::new();
+            // Active table left empty.
+            let v = p.select_victim(&cands);
+            check!(b"slm_empty_active_treats_all_as_inactive\0",
+                   cands[v].last_access_time == 30);
+        }
+        {
+            // LRU returns the same choice on back-to-back calls with
+            // the same candidate slice. The policy carries no hidden
+            // state; decisions depend only on inputs.
+            let cands = [
+                make_full(0, 100, 0, PoolType::Weight, 0),
+                make_full(1,  50, 0, PoolType::Weight, 0),
+                make_full(2, 200, 0, PoolType::Weight, 0),
+            ];
+            let mut p = LruPolicy::new();
+            let v1 = p.select_victim(&cands);
+            let v2 = p.select_victim(&cands);
+            let v3 = p.select_victim(&cands);
+            check!(b"lru_repeated_calls_stable\0",
+                   v1 == v2 && v2 == v3 && cands[v1].last_access_time == 50);
+        }
+        {
+            // ARC ghost lists are bounded at max_ghost; overflow trims
+            // the LRU end. Configure a tiny ghost budget and overflow
+            // B1 by evicting more T1 blocks than the budget allows.
+            let mut p = ARCPolicy::with_max_ghost(2);
+            p.notify_access(10, 0); p.notify_eviction(10);
+            p.notify_access(20, 0); p.notify_eviction(20);
+            p.notify_access(30, 0); p.notify_eviction(30);
+            check!(b"arc_b1_ghost_overflow_trims\0", p.b1_len() == 2);
+        }
+        {
+            // Registry feedback path: installing a policy through the
+            // registry and calling eviction::update_feedback drives the
+            // policy's hook. We use ARC — after notify_access promotes
+            // a block to T2 and notify_eviction moves it to B2, a
+            // feedback(fault=true) should re-enter it into T2 via
+            // ARC::update_feedback → notify_access.
+            use alloc::boxed::Box;
+            let mut preflight = ARCPolicy::new();
+            preflight.notify_access(42, 0);   // T1
+            preflight.notify_access(42, 0);   // → T2
+            preflight.notify_eviction(42);    // → B2
+            let t2_before = preflight.t2_len();
+            let b2_before = preflight.b2_len();
+            eviction::set_eviction_policy(Box::new(preflight));
+            eviction::update_feedback(42, true);
+            let (t2_after, b2_after) = eviction::with_active_policy(|p| {
+                // Can't downcast through the trait, so re-probe via
+                // a dummy score() on a block already in T2. If the
+                // block is in T2 its score is 0.3; if it's unknown
+                // it's 0.6 (matches ARCPolicy::score).
+                let probe = [make_full(42, 0, 0, PoolType::Weight, 0)];
+                let score = p.score(&probe);
+                (score[0], 0.0_f32)
+            }).unwrap_or((0.0, 0.0));
+            // score == 0.3 confirms block 42 is back in T2.
+            check!(b"registry_feedback_drives_arc\0",
+                   (t2_after - 0.3).abs() < 1e-6);
+            let _ = t2_before; let _ = b2_before; let _ = b2_after;
+            eviction::reset_to_default();
         }
 
         puts(b"\n-- eviction: generated models --\n\0");
