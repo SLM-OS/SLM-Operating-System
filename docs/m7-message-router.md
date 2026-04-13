@@ -219,5 +219,8 @@ ported to Rust (`runtime/src/msg_router.rs`). The Rust version:
 - Calls `uart_printf` for formatted output and `uart_puts` for simple strings
 - Uses `component_get_info` from the Rust component module for subscriber name lookup
 
-The C `msg_router.c` is kept in the repo but excluded from the build via CMakeLists.txt.
-The Rust staticlib is linked with `--whole-archive`, making all symbols available to C.
+The C `msg_router.c` was removed from the repository in commit `8c53ada`
+(2026-04-12) after the Session C code-review audit confirmed it had not
+been part of the build since the Rust port landed. The Rust implementation
+in `runtime/src/msg_router.rs` is the sole source of truth; its staticlib
+is linked with `--whole-archive`, making all symbols available to C.

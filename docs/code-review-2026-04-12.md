@@ -190,6 +190,15 @@
 
 ## 3. IPC, Syscall, and Component System
 
+**Session C status (2026-04-12):** Closed. 9 live-code issues fixed in
+commit `cb612c3`; dead-code file `kernel/src/msg_router.c` removed in
+`8c53ada`. The 4 issues scoped to that file (IPC-C3, IPC-M1, IPC-M3,
+IPC-H1) were never in the compile graph — `CMakeLists.txt:183` notes the
+Rust router in `runtime/src/msg_router.rs` is the live implementation
+(Session D's scope). Pi 5 `boot_test --count 5` still pending lab
+availability. See `docs/code-review-fixes/session-c-ipc-syscall.md` for the
+per-issue completion table.
+
 ### Critical
 
 **IPC-C1: Integer overflow in `sys_infer_handler`**
