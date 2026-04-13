@@ -123,6 +123,15 @@ void lapic_percpu_init(void)
 void lapic_eoi(void)
 {
     lapic_write(LAPIC_EOI, 0);
+    /*
+     * Serialize EOI before the handler epilogue returns. Without a fence
+     * OOO speculation can retire the `iret` (and begin re-dispatching the
+     * next interrupt) before the EOI store has retired to the LAPIC,
+     * allowing the same ISR to be re-entered for an interrupt it has
+     * already serviced. `lock; addl $0, (%rsp)` is a full fence on x86
+     * (mfence would also work).
+     */
+    __asm__ volatile("lock; addl $0, (%%rsp)" ::: "memory", "cc");
 }
 
 uint32_t lapic_get_id(void)

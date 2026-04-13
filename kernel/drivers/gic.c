@@ -555,6 +555,12 @@ void gic_init(void)
 
 /*
  * Enable a specific interrupt.
+ *
+ * GICD_ISENABLER / GICR_ISENABLER0 are write-1-to-set registers: writing 1
+ * to a bit enables that IRQ, writing 0 is ignored. No read-modify-write is
+ * required and any RMW (read-or-mask-write) would be incorrect — it would
+ * re-enable any IRQs set between the read and write. Always write a single
+ * mask bit per call.
  */
 void gic_enable_irq(uint32_t irq)
 {
@@ -578,6 +584,11 @@ void gic_enable_irq(uint32_t irq)
 
 /*
  * Disable a specific interrupt.
+ *
+ * GICD_ICENABLER / GICR_ICENABLER0 are write-1-to-clear registers: writing
+ * 1 to a bit disables that IRQ, writing 0 is ignored. Like ISENABLER, no
+ * read-modify-write is required. Writing a single mask bit per call avoids
+ * a races that would occur if a RMW read-back were used.
  */
 void gic_disable_irq(uint32_t irq)
 {

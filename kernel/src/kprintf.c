@@ -18,39 +18,25 @@
 #include "kprintf.h"
 #include "uart.h"
 #include "spinlock.h"
-/* ncmem.h defines PLATFORM_HAS_NC_MEMORY on Pi 5 and Jetson.
- * On these platforms, ldaxr/stxr spinlocks deadlock because per-core L2
- * caches are incoherent (no SMPEN). The UART lock must use __atomic_test_and_set
- * (SWPALB) instead, which bypasses L2 and operates at the point of coherency. */
 #include "ncmem.h"
 #include "string.h"
 #include <stdint.h>
 
-/* Global lock for synchronized UART output
- * NOTE: On Jetson after kexec, spinlock operations are no-ops (defined in
- * spinlock.h) since LDAXR/STXR hangs due to corrupted exclusive monitor state.
- */
-/* On Pi 5/Jetson, cross-CPU spinlocks must be in NC memory because
- * per-core L2 caches are incoherent (SMPEN not set). Cacheable spinlocks
- * cause deadlock under concurrent contention — both CPUs see stale
- * "unlocked" state and both acquire the lock simultaneously.
- *
- * uart_lock is shared across ALL CPUs (printf from any CPU), so it
- * MUST be in NC memory on platforms with incoherent caches. */
 /* UART lock for thread-safe printf.
  *
- * On Pi 5/Jetson, per-core L2 caches are incoherent (no SMPEN). Both
- * ldaxr/stxr spinlocks AND SWPALB atomics operate through L2, so they
- * see stale data and deadlock under cross-CPU contention.
+ * Two locking strategies, selected by PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson):
  *
- * Current approach: IRQ-disable only (no cross-CPU lock). This is safe
- * because secondary CPUs on Pi 5 only print during early boot (before
- * scheduler start) when there's no contention. After scheduler start,
- * all UART output is from CPU 0 (shell, tests, INFO). If secondary CPUs
- * need to print in the future, an NC-memory-based lock should be added.
+ *   PLATFORM_HAS_NC_MEMORY: IRQ-disable only, no cross-CPU lock.
+ *     On these platforms per-core L2 caches are incoherent (no SMPEN), so
+ *     standard ldaxr/stxr spinlocks on cacheable memory deadlock under
+ *     cross-CPU contention — each CPU sees its own stale "unlocked" state.
+ *     This is safe because secondary CPUs only print during early boot
+ *     (before scheduler start). After scheduler start, all UART output
+ *     comes from CPU 0 (shell, tests, INFO logs). See smp.c:secondary_init.
+ *     If secondary CPU printing is needed later, an NC-memory-based lock
+ *     must be added.
  *
- * NOTE: The old ldaxr/stxr spinlock caused deadlocks when secondary CPUs
- * tried to print concurrently with CPU 0. See smp.c line 328 comment. */
+ *   Default (QEMU, x86-64): standard spinlock with IRQ save/restore. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
 
 #define UART_LOCK_IRQSAVE() \
