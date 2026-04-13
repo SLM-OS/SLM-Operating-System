@@ -18,6 +18,17 @@
 //! classical experts dilutes the ensemble on the SLM workload.
 //! [`CacheusSelector::ml_only`] is the recommended runtime default;
 //! [`CacheusSelector::all_5`] is provided for ablation experiments.
+//!
+//! ## Runtime contract
+//!
+//! - **Task context only.** `select_victim` allocates a scratch
+//!   `Vec<f32>` on each call and pushes into a history `VecDeque`;
+//!   both go through the global heap. Do not call from an interrupt
+//!   handler — the heap's `LockedHeap` is not IRQ-safe.
+//! - **FP state.** Weight updates use `f32` arithmetic. ARM64 context
+//!   switches save the full NEON register file
+//!   (`kernel/arch/arm64/context.S`), so preemption mid-`select_victim`
+//!   is safe. See `docs/eviction.md` → Runtime Contracts for detail.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;

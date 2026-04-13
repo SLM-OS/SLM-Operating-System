@@ -1,14 +1,29 @@
 //! Global eviction-policy registry.
 //!
-//! Holds the `ACTIVE_POLICY` that `ModelAllocator` will consult when the
+//! Holds the `ACTIVE_POLICY` that `ModelAllocator` consults when the
 //! weight or workspace pool is full (wired up in M6). The registry is
 //! protected by a dedicated spinlock so that policy swaps and
-//! allocator-driven `select_victim` calls never race. The registry lock
-//! is separate from the allocator's pool lock — callers that need both
-//! must take the pool lock first to avoid deadlock.
+//! allocator-driven `select_victim` calls never race.
 //!
 //! Follows the `model_mem` SpinGuard RAII pattern (no `std::sync::Mutex`
 //! available in `no_std`).
+//!
+//! ## Runtime contract
+//!
+//! - **Task context only.** The SpinGuard here does not disable IRQs,
+//!   matching the `model_mem` allocator's long-standing contract.
+//!   Calling from an interrupt handler can deadlock if the interrupted
+//!   task already holds the lock.
+//! - **Lock ordering.** The allocator's pool `LOCK` (in
+//!   `mm::model_mem`) must be released before calling any public
+//!   function in this module; `mm::model_mem::evict_and_retry` already
+//!   does. The two locks are independent — CACHEUS's own heap
+//!   allocations go through `LockedHeap`, a third domain — so no ABBA
+//!   cycle is possible.
+//! - **Memory ordering.** Policy installation and lookup use the
+//!   compare-exchange's `Acquire` / `Release` semantics, which emit
+//!   `DMB ISH` on ARM64. That guarantees cross-CPU visibility of the
+//!   new `ACTIVE_POLICY` pointer after `set_eviction_policy` returns.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
