@@ -55,32 +55,39 @@ set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO" "RAS
 # Add platform define
 add_compile_definitions(PLATFORM_${PLATFORM}=1)
 
-# Pi 5: ELR-trampoline infrastructure for deferred scheduling from the
-# timer ISR. Calling switch_to() directly from an exception handler
-# hangs on Pi 5 hardware (abandoned exception frame); the trampoline
-# runs schedule() in task context after eret. See issue #57 and
+# Deferred-scheduling preemption (ELR-trampoline) for secondary CPUs.
+# Calling switch_to() directly from an exception handler hangs on real
+# ARM64 hardware (abandoned exception frame); the trampoline runs
+# schedule() in task context after eret. See issue #57 and
 # docs/pi5-secondary-cpu-preemption.md.
 #
-# Default OFF because a separate pre-existing bug prevents timer IRQs
-# from firing on this Pi 5 at all (commit ac46e40: tasks run with
-# DAIF.I=1 and the documented fix to unmask them triggers a shell hang
-# whose root cause is independent of this work). Turning the option
-# ON deploys the trampoline + makes all CPUs use `daifclr + wfi` in
-# idle — useful once the timer-IRQ-delivery blocker is resolved, but
-# regresses cooperative cross-CPU dispatch until then because secondary
-# CPUs wait for timer IRQs that never arrive.
-option(PI5_SECONDARY_PREEMPT "Enable deferred-scheduling preemption on Pi 5 secondary CPUs" OFF)
+# Capability-neutral name — works on any ARM64 platform that has this
+# problem. Pi 5 historically used `PI5_SECONDARY_PREEMPT`; that spelling
+# is kept as a backward-compatible alias below so existing Pi 5
+# Makefile / CMake invocations keep working.
+#
+# Default OFF because turning it on requires functional timer IRQ
+# delivery on all CPUs. On Pi 5 that is still blocked by #134
+# (the hardware timer-IRQ delivery regression); cooperative preemption
+# via PI5_COOP_PREEMPT is the current Pi 5 default. On Jetson this
+# option becomes relevant after the P1.0 GICR_IGROUPR0 fast-path.
+option(SECONDARY_PREEMPT "Enable deferred-scheduling preemption on secondary CPUs (ARM64)" OFF)
+# Backward-compat alias: users can still pass -DPI5_SECONDARY_PREEMPT=ON.
+option(PI5_SECONDARY_PREEMPT "Deprecated alias for SECONDARY_PREEMPT" OFF)
+if(PI5_SECONDARY_PREEMPT)
+    set(SECONDARY_PREEMPT ON)
+endif()
+if(SECONDARY_PREEMPT)
+    add_compile_definitions(SECONDARY_PREEMPT=1)
+endif()
 # Pi 5 FIQ-routed timer (Phase 2 of issue #99): el1_fiq_handler dispatches
 # GICC_AIAR on IRQ 30 to timer_handler(), because non-secure IGROUPR writes
 # cannot promote Group 0 → Group 1 on this GICv2 and the timer therefore
-# arrives as FIQ rather than IRQ. Implies PI5_SECONDARY_PREEMPT because
-# the trampoline is required to avoid switch_to from exception context.
+# arrives as FIQ rather than IRQ. Implies SECONDARY_PREEMPT because the
+# trampoline is required to avoid switch_to from exception context.
 option(PI5_FIQ_TIMER "Route timer IRQ through the FIQ vector on Pi 5 (experimental, not active for coop preempt)" OFF)
 if(PLATFORM STREQUAL "RASPI5" AND PI5_FIQ_TIMER)
     add_compile_definitions(PI5_FIQ_TIMER=1)
-endif()
-if(PLATFORM STREQUAL "RASPI5" AND PI5_SECONDARY_PREEMPT)
-    add_compile_definitions(PI5_SECONDARY_PREEMPT=1)
 endif()
 
 # Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
@@ -195,7 +202,11 @@ set(KERNEL_SOURCES
     kernel/sched/sched_heuristic.c
     kernel/sched/steal_deque.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
-    $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/sched/preempt.c>
+    # preempt.c body is guarded by #if defined(SECONDARY_PREEMPT); compile
+    # for any ARM64 platform so the Jetson SECONDARY_PREEMPT=ON build
+    # (post Jetson plan P3) and the Pi 5 SECONDARY_PREEMPT=ON build both
+    # link. On X86_64 the trampoline is not needed.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/preempt.c>
 
     # ==========================================================================
     # Inter-Process Communication
