@@ -53,36 +53,39 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 **Note:** Pure Rust refactoring — no FP, no new build flags needed. Mirrors the sibling crate `slm_os_integration/src/eviction_policy.rs` exactly so policies can be lifted unchanged.
 
 ### EvictionPolicy Trait
-- ☐ Create `runtime/src/mm/eviction_policy.rs`
-- ☐ Define `pub trait EvictionPolicy { ... }` with:
+- ✅ Create `runtime/src/mm/eviction/policy.rs` (nested module; `eviction/` hosts trait, types, and registry)
+- ✅ Define `pub trait EvictionPolicy { ... }` with:
   - `fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize`
   - `fn score(&mut self, candidates: &[BlockMeta]) -> Vec<f32>` (default impl: argmax of select_victim)
   - `fn update_feedback(&mut self, block_id: u32, was_fault: bool)` (no-op default)
   - `fn reset(&mut self)` (no-op default)
   - `fn name(&self) -> &'static str`
-- ☐ Define `pub struct BlockMeta { ... }` mirroring sibling crate (`block_id`, `pool_type`, `model_id`, `layer_idx`, `last_access_time`, `load_time`, `access_count`, `ref_count`, `gpu_mapped`, `is_dirty`, `model_priority`)
-- ☐ Define `pub enum PoolType { Weight, Workspace }`
-- ☐ Define `pub type BlockFeatures = [f32; 27]`
-- ☐ Document interface contract in module-level docs
+- ✅ Define `pub struct BlockMeta { ... }` mirroring sibling crate (`block_id`, `pool_type`, `model_id`, `layer_idx`, `last_access_time`, `load_time`, `access_count`, `ref_count`, `gpu_mapped`, `is_dirty`, `model_priority`)
+- ✅ Define `pub enum PoolType { Weight, Workspace }`
+- ✅ Define `pub type BlockFeatures = [f32; 27]`
+- ✅ Document interface contract in module-level docs
 
 ### Block Metadata Tracking
-- ☐ Extend `ModelHandle` storage in `model_mem.rs` to include the `BlockMeta` fields above
-- ☐ Update `alloc_weights()` / `alloc_workspace()` to populate `load_time`
-- ☐ On every access (FFI from kernel or Rust runtime), bump `access_count` and `last_access_time`
-- ☐ Track `ref_count` against existing share/unshare
-- ☐ Track `gpu_mapped` via the existing `gpu_map` / `gpu_unmap` paths
+- ✅ Rename internal `BlockMeta` → `BlockSlot` in `model_mem.rs` and add tracking fields (`load_time`, `last_access_time`, `access_count`, `model_id`, `layer_idx`, `gpu_mapped`, `is_dirty`, `model_priority`). Fields always on (~12 KB total) so baseline and AI builds don't diverge.
+- ✅ `alloc_weights()` / `alloc_workspace()` populate `load_time` and seed `last_access_time` / `access_count = 1`
+- ✅ `pub fn touch(handle)` bumps `access_count` and `last_access_time`; exposed as FFI `rust_model_touch`. Kernel-side callers wired in M6.
+- ✅ `ref_count` surfaced via the snapshot helper (derived from the existing `BlockSlot::refcount`)
+- ✅ `gpu_map` / `gpu_unmap` flip `gpu_mapped` through `set_gpu_mapped`
+- ☐🔗 `pub fn set_dirty` exists; caller wire-up deferred to M6 (nothing writes to blocks in the runtime yet)
 
 ### Policy Registry
-- ☐ Add `static ACTIVE_POLICY: Mutex<Box<dyn EvictionPolicy + Send>>` (or atomic-pointer variant for IRQ safety)
-- ☐ Initialize to `LruPolicy::new()` (matches today's implicit FIFO behavior closely)
-- ☐ Implement `pub fn set_eviction_policy(policy: Box<dyn EvictionPolicy + Send>)`
-- ☐ Implement `pub fn get_eviction_policy_name() -> &'static str`
-- ☐ Guard AI-specific policies with `#[cfg(feature = "ai_eviction")]`
+- ✅ Add `static ACTIVE_POLICY: Option<Box<dyn EvictionPolicy + Send>>` behind a SpinGuard (no `std::sync::Mutex` in no_std; matches the `model_mem` lock style)
+- ✅ Default is a placeholder `FirstCandidatePolicy` (M3 will swap in the ported `LruPolicy`)
+- ✅ Implement `pub fn set_eviction_policy(Box<dyn EvictionPolicy + Send>)`
+- ✅ Implement `pub fn get_eviction_policy_name() -> &'static str`
+- ✅ Implement `with_active_policy`, `select_victim`, `score`, `update_feedback`, `reset_to_default` helpers for M3–M6 use
+- ✅ Guard `pub mod eviction` in `mm::mod.rs` with `#[cfg(feature = "ai_eviction")]`; Cargo.toml declares `ai_eviction` and `ai_eviction_models` features
 
 ### Verification
-- ☐ Existing alloc/free tests pass unchanged with `LruPolicy` as default
-- ☐ Policy swap is safe under concurrent allocation (stress-test with ≥4 threads)
-- ☐ `BlockMeta` accessors return expected values across alloc/access/free cycles
+- ✅ Existing alloc/free tests pass unchanged — `make test` green (763 asserts, 0 failures)
+- ✅ FFI selftest `rust_eviction_selftest` exercises init → swap → swap → reset_to_default (returns -2 when feature off, 0 on success)
+- ☐🔗 Concurrent ≥4-thread stress test — deferred to M6 (no policy is consulted during `alloc` yet; the registry only protects the pointer swap)
+- ✅ `BlockMeta` snapshot round-trips fields across alloc / touch / free via `mm::snapshot_evictable_blocks`
 
 ---
 

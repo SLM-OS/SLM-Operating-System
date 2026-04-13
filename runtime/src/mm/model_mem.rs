@@ -102,16 +102,37 @@ enum BlockState {
     Shared = 2,
 }
 
-/// Per-block metadata.
-struct BlockMeta {
+/// Per-slot pool metadata.
+///
+/// Represents one 2 MB slot in a `MemoryPool`. The first group of
+/// fields is the allocator's own bookkeeping; the second group is
+/// eviction-policy tracking (populated on alloc and bumped by
+/// `touch()`) that M6 will feed into `ACTIVE_POLICY.select_victim`.
+struct BlockSlot {
+    // Allocator bookkeeping.
     state: BlockState,
     refcount: u16,
     generation: u8,
     size_blocks: u8,    // Contiguous blocks (for future multi-block alloc)
     owner_task: u32,
+
+    // Eviction-policy tracking (always on; ~24 B / slot).
+    //
+    // Units match the sibling `slm-os-page-sim` simulator: timestamps
+    // are a monotonic tick counter in whatever resolution the kernel
+    // feeds in (initially `kernel_ffi::tick_ns` — callers pick). Set
+    // to 0 when the slot is free.
+    load_time: u64,
+    last_access_time: u64,
+    access_count: u32,
+    model_id: u8,
+    layer_idx: i16,
+    gpu_mapped: bool,
+    is_dirty: bool,
+    model_priority: u8,
 }
 
-impl BlockMeta {
+impl BlockSlot {
     const fn new() -> Self {
         Self {
             state: BlockState::Free,
@@ -119,7 +140,28 @@ impl BlockMeta {
             generation: 0,
             size_blocks: 0,
             owner_task: 0,
+
+            load_time: 0,
+            last_access_time: 0,
+            access_count: 0,
+            model_id: 0,
+            layer_idx: 0,
+            gpu_mapped: false,
+            is_dirty: false,
+            model_priority: 0,
         }
+    }
+
+    /// Clear eviction-tracking fields when the slot goes back to the free list.
+    fn clear_tracking(&mut self) {
+        self.load_time = 0;
+        self.last_access_time = 0;
+        self.access_count = 0;
+        self.model_id = 0;
+        self.layer_idx = 0;
+        self.gpu_mapped = false;
+        self.is_dirty = false;
+        self.model_priority = 0;
     }
 }
 
@@ -131,7 +173,7 @@ impl BlockMeta {
 struct MemoryPool {
     base_addr: usize,
     block_count: usize,
-    blocks: [BlockMeta; MAX_BLOCKS_PER_POOL],
+    blocks: [BlockSlot; MAX_BLOCKS_PER_POOL],
     free_count: usize,
     peak_usage: usize,
     read_only: bool,
@@ -142,7 +184,7 @@ impl MemoryPool {
         Self {
             base_addr: 0,
             block_count: 0,
-            blocks: [const { BlockMeta::new() }; MAX_BLOCKS_PER_POOL],
+            blocks: [const { BlockSlot::new() }; MAX_BLOCKS_PER_POOL],
             free_count: 0,
             peak_usage: 0,
             read_only: false,
@@ -159,7 +201,7 @@ impl MemoryPool {
 
         // Mark all blocks as free
         for i in 0..self.block_count {
-            self.blocks[i] = BlockMeta::new();
+            self.blocks[i] = BlockSlot::new();
         }
     }
 
@@ -170,12 +212,19 @@ impl MemoryPool {
         }
 
         // Linear scan for free block (simple, works for small pools)
+        let now = kernel_ffi::get_time_ns();
         for i in 0..self.block_count {
             if self.blocks[i].state == BlockState::Free {
                 self.blocks[i].state = BlockState::Allocated;
                 self.blocks[i].refcount = 1;
                 self.blocks[i].size_blocks = 1;
                 self.blocks[i].owner_task = kernel_ffi::task_current().0;
+
+                // Eviction tracking: mark load time, treat alloc as the
+                // first access so LRU never sees an apparent zero.
+                self.blocks[i].load_time = now;
+                self.blocks[i].last_access_time = now;
+                self.blocks[i].access_count = 1;
 
                 self.free_count -= 1;
                 let used = self.block_count - self.free_count;
@@ -224,6 +273,7 @@ impl MemoryPool {
         block.refcount = 0;
         block.generation = block.generation.wrapping_add(1);
         block.owner_task = 0;
+        block.clear_tracking();
         self.free_count += 1;
 
         Ok(())
@@ -279,6 +329,95 @@ impl MemoryPool {
         }
 
         Some(block.size_blocks as usize * BLOCK_SIZE)
+    }
+
+    /// Validate a handle and return a mutable slot reference.
+    fn slot_mut(&mut self, handle: ModelHandle) -> Result<&mut BlockSlot, AllocError> {
+        let idx = handle.block_index as usize;
+        if idx >= self.block_count {
+            return Err(AllocError::InvalidHandle);
+        }
+        let block = &mut self.blocks[idx];
+        if block.state == BlockState::Free {
+            return Err(AllocError::InvalidHandle);
+        }
+        if block.generation != handle.generation {
+            return Err(AllocError::StaleHandle);
+        }
+        Ok(block)
+    }
+
+    /// Bump access tracking fields. Called by `touch()`.
+    fn touch(&mut self, handle: ModelHandle) -> Result<(), AllocError> {
+        let now = kernel_ffi::get_time_ns();
+        let slot = self.slot_mut(handle)?;
+        slot.last_access_time = now;
+        slot.access_count = slot.access_count.saturating_add(1);
+        Ok(())
+    }
+
+    /// Assign identity metadata (model_id / layer_idx / priority) to a slot.
+    fn set_metadata(
+        &mut self,
+        handle: ModelHandle,
+        model_id: u8,
+        layer_idx: i16,
+        model_priority: u8,
+    ) -> Result<(), AllocError> {
+        let slot = self.slot_mut(handle)?;
+        slot.model_id = model_id;
+        slot.layer_idx = layer_idx;
+        slot.model_priority = model_priority;
+        Ok(())
+    }
+
+    /// Mark a slot as currently mapped for GPU DMA.
+    fn set_gpu_mapped(&mut self, handle: ModelHandle, mapped: bool) -> Result<(), AllocError> {
+        let slot = self.slot_mut(handle)?;
+        slot.gpu_mapped = mapped;
+        Ok(())
+    }
+
+    /// Mark a slot as dirty (written since last flush).
+    fn set_dirty(&mut self, handle: ModelHandle, dirty: bool) -> Result<(), AllocError> {
+        let slot = self.slot_mut(handle)?;
+        slot.is_dirty = dirty;
+        Ok(())
+    }
+
+    /// Snapshot a slot into an eviction-policy `BlockMeta`.
+    ///
+    /// The `block_id` packs `(pool_id, slot_index)` into a u32 so the
+    /// policy can later pass it back through `update_feedback` and the
+    /// runtime can route the id to the correct pool.
+    #[cfg(feature = "ai_eviction")]
+    fn snapshot_at(&self, idx: usize, pool_id: u8) -> Option<super::eviction::BlockMeta> {
+        use super::eviction::{BlockMeta, PoolType};
+        if idx >= self.block_count {
+            return None;
+        }
+        let slot = &self.blocks[idx];
+        if slot.state == BlockState::Free {
+            return None;
+        }
+        let pool_type = match pool_id {
+            POOL_WEIGHT => PoolType::Weight,
+            POOL_WORKSPACE => PoolType::Workspace,
+            _ => return None,
+        };
+        Some(BlockMeta {
+            block_id: ((pool_id as u32) << 24) | (idx as u32 & 0x00FF_FFFF),
+            pool_type,
+            model_id: slot.model_id,
+            layer_idx: slot.layer_idx,
+            last_access_time: slot.last_access_time,
+            load_time: slot.load_time,
+            access_count: slot.access_count,
+            ref_count: slot.refcount.min(u8::MAX as u16) as u8,
+            gpu_mapped: slot.gpu_mapped,
+            is_dirty: slot.is_dirty,
+            model_priority: slot.model_priority,
+        })
     }
 
     /// Get pool statistics.
@@ -595,6 +734,141 @@ pub fn workspace_pool_stats() -> PoolStats {
 }
 
 // =============================================================================
+// Eviction-Policy Tracking API
+// =============================================================================
+
+/// Update access tracking for a block.
+///
+/// Bumps `access_count` and `last_access_time` so eviction policies see
+/// recent activity. Callers MUST invoke this for the policy to learn —
+/// reads/writes through `get_ptr` are opaque to the allocator.
+pub fn touch(handle: ModelHandle) -> Result<(), AllocError> {
+    if !is_initialized() {
+        return Err(AllocError::NotInitialized);
+    }
+    if handle.is_null() {
+        return Err(AllocError::InvalidHandle);
+    }
+
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        match handle.pool_id {
+            POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).touch(handle),
+            POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).touch(handle),
+            _ => Err(AllocError::InvalidHandle),
+        }
+    }
+}
+
+/// Attach identity metadata to a block for eviction-policy use.
+///
+/// `model_id` groups blocks belonging to the same model; `layer_idx`
+/// orders them within the model (negative values reserved for
+/// non-layered blocks like tokeniser tables); `model_priority` lets
+/// policies weight critical models (e.g. a safety monitor) higher.
+pub fn set_metadata(
+    handle: ModelHandle,
+    model_id: u8,
+    layer_idx: i16,
+    model_priority: u8,
+) -> Result<(), AllocError> {
+    if !is_initialized() {
+        return Err(AllocError::NotInitialized);
+    }
+    if handle.is_null() {
+        return Err(AllocError::InvalidHandle);
+    }
+
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        match handle.pool_id {
+            POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL))
+                .set_metadata(handle, model_id, layer_idx, model_priority),
+            POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL))
+                .set_metadata(handle, model_id, layer_idx, model_priority),
+            _ => Err(AllocError::InvalidHandle),
+        }
+    }
+}
+
+/// Flag or un-flag a block as currently GPU-mapped for DMA.
+pub fn set_gpu_mapped(handle: ModelHandle, mapped: bool) -> Result<(), AllocError> {
+    if !is_initialized() {
+        return Err(AllocError::NotInitialized);
+    }
+    if handle.is_null() {
+        return Err(AllocError::InvalidHandle);
+    }
+
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        match handle.pool_id {
+            POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).set_gpu_mapped(handle, mapped),
+            POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).set_gpu_mapped(handle, mapped),
+            _ => Err(AllocError::InvalidHandle),
+        }
+    }
+}
+
+/// Flag or un-flag a block as dirty (written since last flush).
+pub fn set_dirty(handle: ModelHandle, dirty: bool) -> Result<(), AllocError> {
+    if !is_initialized() {
+        return Err(AllocError::NotInitialized);
+    }
+    if handle.is_null() {
+        return Err(AllocError::InvalidHandle);
+    }
+
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        match handle.pool_id {
+            POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).set_dirty(handle, dirty),
+            POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).set_dirty(handle, dirty),
+            _ => Err(AllocError::InvalidHandle),
+        }
+    }
+}
+
+/// Build a snapshot of every allocated, non-pinned block across both
+/// pools for the active eviction policy.
+///
+/// A block is "evictable" when it is allocated and `ref_count == 0` —
+/// shared blocks are considered pinned (matches the M6 policy filter).
+/// The resulting `Vec` is heap-allocated; callers on the hot path
+/// should pre-size / reuse if this becomes a bottleneck.
+#[cfg(feature = "ai_eviction")]
+pub fn snapshot_evictable_blocks() -> alloc::vec::Vec<super::eviction::BlockMeta> {
+    let mut out: alloc::vec::Vec<super::eviction::BlockMeta> = alloc::vec::Vec::new();
+    if !is_initialized() {
+        return out;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        for (pool_id, pool_ptr) in [
+            (POOL_WEIGHT, addr_of_mut!(WEIGHT_POOL)),
+            (POOL_WORKSPACE, addr_of_mut!(WORKSPACE_POOL)),
+        ] {
+            let pool = &*pool_ptr;
+            for i in 0..pool.block_count {
+                let slot = &pool.blocks[i];
+                if slot.state == BlockState::Free || slot.refcount > 1 {
+                    continue;
+                }
+                if let Some(meta) = pool.snapshot_at(i, pool_id) {
+                    out.push(meta);
+                }
+            }
+        }
+    }
+    out
+}
+
+// =============================================================================
 // GPU Integration (Stubs)
 // =============================================================================
 
@@ -623,6 +897,10 @@ pub fn gpu_map(handle: ModelHandle) -> Result<u64, GpuError> {
         crate::kernel_ffi::slm_gpu_sync_for_device(ptr as *mut u8, size);
     }
 
+    // Flag the block as GPU-mapped for eviction policies; ignore a
+    // stale-handle error — the handle was validated by `get_ptr` above.
+    let _ = set_gpu_mapped(handle, true);
+
     // Return physical address (identity mapped in our kernel)
     Ok(ptr as u64)
 }
@@ -638,6 +916,9 @@ pub fn gpu_unmap(handle: ModelHandle) -> Result<(), GpuError> {
     unsafe {
         crate::kernel_ffi::slm_gpu_sync_for_cpu(ptr as *mut u8, size);
     }
+
+    // Clear the GPU-mapped flag for eviction policies.
+    let _ = set_gpu_mapped(handle, false);
 
     Ok(())
 }
