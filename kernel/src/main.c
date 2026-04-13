@@ -454,6 +454,13 @@ void kernel_main(void *dtb)
     if (!main_task) {
         panic("Failed to create main task");
     }
+#ifdef ENABLE_BOOT_TESTS
+    /* Pin the test harness to CPU 0 — several SMP tests assert
+     * cpu_id() == 0 and would fail if work-stealing migrated the
+     * test task to an idle AP. Non-test builds leave affinity ANY so
+     * the scheduler can balance freely. */
+    main_task->cpu_affinity = 0;
+#endif
     scheduler_add_task(main_task);
 
     /* Start shell task (interactive debug console) */

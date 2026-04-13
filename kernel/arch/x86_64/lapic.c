@@ -171,20 +171,6 @@ void lapic_timer_stop(void)
     lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
 }
 
-/*
- * Mask/unmask the LAPIC timer without stopping it.
- * Used by schedule() to prevent timer IRQ reentrance during context switch.
- */
-void lapic_timer_mask(void)
-{
-    lapic_write(LAPIC_LVT_TIMER, lapic_read(LAPIC_LVT_TIMER) | LVT_MASKED);
-}
-
-void lapic_timer_unmask(void)
-{
-    lapic_write(LAPIC_LVT_TIMER, lapic_read(LAPIC_LVT_TIMER) & ~(uint32_t)LVT_MASKED);
-}
-
 uint32_t lapic_timer_current(void)
 {
     return lapic_read(LAPIC_TIMER_CURRENT);

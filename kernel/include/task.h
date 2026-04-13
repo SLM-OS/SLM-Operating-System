@@ -55,6 +55,16 @@ struct cpu_context {
     uint64_t rsp;       /* 0x30 */
     uint64_t rip;       /* 0x38 */
     uint64_t rflags;    /* 0x40 */
+    uint64_t _pad0;     /* 0x48 — align fxsave to 16 bytes */
+    /* 512-byte FXSAVE area (D2 / P1-6). Saves x87, MMX, and XMM
+     * state across context switches so multiple concurrent tasks
+     * can safely use SSE — required as soon as Phase C's inference
+     * SIMD kernels are invoked from more than one task. The
+     * alignas(16) makes the whole cpu_context struct 16-byte aligned
+     * so the fxsave/fxrstor instructions don't #GP. Offsets above
+     * stay unchanged so kernel/arch/x86_64/context.S's CTX_* defines
+     * don't shift. */
+    alignas(16) uint8_t fxsave[512];  /* 0x50 */
 };
 
 #else /* ARM64 */

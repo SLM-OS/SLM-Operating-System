@@ -251,6 +251,41 @@ The latency includes: FP context save, state vector extraction (108 floats from 
 
 ---
 
+## Cross-Platform Inference Latency
+
+Unified view of MNIST classify latency (25 classes, 5,998 parameters)
+across every SLM-OS target. Populated by C3 on x86-64 and by the
+Jetson plan's G3/G4 on Jetson; Pi 5 numbers carried forward from
+earlier measurements.
+
+| Model | Platform | Dtype | Latency (avg) | Backend | Notes |
+|-------|----------|-------|---------------|---------|-------|
+| MNIST | Raspberry Pi 5 (Cortex-A76 @ 2.4 GHz) | FP32 | **1.09 ms** | Rust + NEON (4-wide `vfmaq_f32`) | Measured on hardware |
+| MNIST | Jetson Orin Nano (Cortex-A78AE @ 1.5 GHz) | FP32 | **0.746 ms** | Rust + NEON | Measured on hardware |
+| MNIST | test-pc (i7-6700 @ 3.4 GHz), scalar baseline | FP32 | *TBD* | Rust scalar fallback | Pre-C1 measurement; to be captured before removing this row |
+| MNIST | test-pc (i7-6700 @ 3.4 GHz), SSE-asm | FP32 | *TBD* | C SSE2 kernel (`kernel/arch/x86_64/sse_kernels.c`) | Post-C1 measurement on real hardware; QEMU numbers also published |
+| MNIST | Jetson Linux (Cortex-A78AE) — ONNX Runtime reference | FP32 | 0.117 ms | OpenBLAS + multi-threaded | Production runtime, not SLM-OS |
+
+The two "test-pc" rows will be filled in by `bench infer` runs on
+the H610M dev PC once Phase C is deployed via `make x86-disk`. The
+scalar baseline row serves as the reference for how much speedup
+the SSE kernels delivered — historical before/after data that
+future regressions can be judged against. Pre-C1, the x86-64 CPU
+path is pure scalar (no SIMD) because of the Rust `x86_64-unknown-none`
+toolchain limitation documented in GitHub #72; C1 works around it by
+putting the SIMD kernels in a C translation unit built with `-msse`.
+
+### Dispatch selection
+
+| Platform | SIMD backend | Dispatch symbol |
+|----------|--------------|-----------------|
+| aarch64  | NEON         | `ops.rs` inline `core::arch::aarch64::*` (`vmaxq_f32`, `vfmaq_f32`, …) |
+| x86_64   | SSE2         | C kernels via `extern "C"` (`slm_sse_relu_f32` etc.) compiled with `-msse -msse2` |
+| Other    | Scalar       | Plain Rust fallback |
+
+The dispatch skeleton (three `#[cfg(target_arch = ...)]` arms per
+kernel) is shared — see `runtime/src/inference/ops.rs`.
+
 ## ONNX Model Inference (MNIST)
 
 Real ONNX model inference using the built-in MNIST digit classifier (26 KB, 12 operators, 5,998 parameters). Model loaded via `rust_model_load_builtin_mnist()`, inference via `rust_infer_classify()`.

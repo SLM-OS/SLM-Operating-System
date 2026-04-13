@@ -146,8 +146,19 @@ void sleep_ms(uint32_t ms)
 {
     if (ms == 0) return;
 
-    uint64_t target = pit_ticks + ((uint64_t)ms * TIMER_HZ + 999) / 1000;
-    while (pit_ticks < target)
+    /* Drive sleep off the TSC (per-CPU, always advancing) rather
+     * than pit_ticks (only incremented on BSP). On an AP-pinned
+     * task, pit_ticks advances only via cache-coherent propagation
+     * from BSP's ISR store, which adds up to 10 ms of jitter on
+     * every sleep. TSC is read locally with rdtsc and is uniform
+     * across CPUs on any Intel chip from Nehalem onward
+     * (constant_tsc). Fallback: if tsc_freq is zero (calibration
+     * failed), timer_get_count() returns pit_ticks and
+     * timer_get_frequency() returns TIMER_HZ, so this code still
+     * works on BSP. */
+    uint64_t freq = timer_get_frequency();
+    uint64_t target = timer_get_count() + ((uint64_t)ms * freq + 999) / 1000;
+    while (timer_get_count() < target)
         yield();
 }
 
@@ -155,8 +166,10 @@ void sleep_us(uint64_t us)
 {
     if (us == 0) return;
 
-    uint64_t ms = (us + 999) / 1000;
-    sleep_ms((uint32_t)ms);
+    uint64_t freq = timer_get_frequency();
+    uint64_t target = timer_get_count() + (us * freq + 999999) / 1000000;
+    while (timer_get_count() < target)
+        yield();
 }
 
 void timer_wake_sleepers(void)

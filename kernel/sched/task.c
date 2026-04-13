@@ -326,6 +326,19 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->context.rflags = 0;                           /* IF=0: interrupts disabled */
     task->context.rbx = (uint64_t)entry;                /* Entry function */
     task->context.r12 = (uint64_t)arg;                  /* Argument */
+
+    /* FXSAVE area (D2 / P1-6). Zero the buffer so fxrstor on first
+     * switch restores an all-zero XMM/x87 state. Set FCW to the
+     * Intel i387 init value (0x037F) — round-to-nearest, unmasked
+     * precision/underflow/overflow/zero-divide/invalid, 53-bit
+     * precision. Per Intel SDM Vol. 1 §8.1.5, this matches the
+     * hardware-init state after a hard reset. */
+    for (size_t i = 0; i < sizeof(task->context.fxsave); i++)
+        task->context.fxsave[i] = 0;
+    task->context.fxsave[0] = 0x7F;                     /* FCW low  */
+    task->context.fxsave[1] = 0x03;                     /* FCW high */
+    task->context.fxsave[24] = 0x80;                    /* MXCSR = 0x1F80 */
+    task->context.fxsave[25] = 0x1F;                    /* (SSE masks) */
 #else
     task->context.sp = (uint64_t)task->stack_top;
     task->context.x30 = (uint64_t)task_entry_wrapper;  /* Return address */

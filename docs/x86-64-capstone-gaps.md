@@ -23,6 +23,38 @@ Concrete next actions at the bottom of the document.
 
 ---
 
+## Closure Log (2026-04-13)
+
+Phases A–D of the gap-closure plan are implemented on branch
+`worktree-x86-64-capstone-impl` (not yet merged — contains the full
+capstone-scope work). Status of every gap:
+
+| Gap | Status | Shipped as |
+|---|---|---|
+| P1-1 TSS IST for timer vector | ✅ CLOSED | `kernel/arch/x86_64/tss.c` + `idt[48].ist=1` in `idt.c`. Tests: `test_tss_loaded`, `test_idt48_uses_ist1`, `test_tss_per_cpu_distinct`. |
+| P1-2 Real-hardware validation | ⏳ ENABLED | Code paths hardened; `make x86-disk-verify` is CI-grade; labctl-based hw run is the remaining step (out of this PR's scope). |
+| P1-3 Idle `hlt` masks AP timers | ✅ CLOSED | Subsumed by P2-1 (reschedule IPI wakes halted APs). |
+| P1-4 `sleep_ms` BSP-only ticks | ✅ CLOSED | `timer_x86.c:sleep_ms` now uses `timer_get_count()` (TSC). Tests: `test_sleep_ms_on_bsp`, `test_sleep_ms_on_ap`. |
+| P1-5 Dead `lapic_timer_mask` | ✅ CLOSED | Removed from `lapic.c`; `docs/x86-64-scheduler-investigation.md` Phase 8 tagged reverted. |
+| P1-6 No FXSAVE in `switch_to` | ✅ CLOSED | `cpu_context.fxsave[512]` + `fxsave/fxrstor` in `context.S`. Tests: `test_context_has_fxsave`, `test_fxsave_preserves_xmm_across_preemption`. |
+| P2-1 Reschedule IPI | ✅ CLOSED | Vector 49, `smp_notify_cpu()` API (Pre-1 + B1). Tests: `test_resched_ipi_delivers`, `test_resched_ipi_self_is_noop`. |
+| P2-2 AP preempt integration test | ✅ CLOSED | `test_all_cpus_timer_preempt_under_load`. |
+| P2-3 `CONFIG_WORK_STEALING` on x86-64 | ✅ CLOSED | `CMakeLists.txt` enables on `X86_64`; `sched.c:sched_try_steal` has `preempt_disabled` early-out. Test: `test_work_stealing_enabled`. |
+| P2-4 Periodic rebalance | ✅ CLOSED | `sched_rebalance_tick()` in `sched.c` wired via `sched_heuristic.c` `.tick`. Tests: `test_rebalance_respects_affinity`, `test_rebalance_symbol_exposed`. |
+| P2-5 Coupled with P2-1 | ✅ CLOSED | Same fix. |
+| P3-1 x86-64 CPU SSE | ✅ CLOSED | `kernel/arch/x86_64/sse_kernels.c` (compiled `-msse -msse2`) + extern-C FFI from `ops.rs`. Bit-exact tests `test_sse_{relu,zero,add_scalar,fma_row}_matches_scalar`. |
+| P3-2 / P3-3 / P3-4 GSP firmware | ⏸️ POST-CAPSTONE | Phase E remains explicitly out-of-scope. |
+| P3-5 Capability detection | ✅ CLOSED | `GpuCapabilities::detect()` already returns `DetectedNoCompute` gracefully. |
+
+Test count grew from 94 → ~120 in `kernel/tests/test_x86_boot.c`.
+x86-64 QEMU baseline: 8 pre-existing failures (PMM/VMM/PCI/GIC
+cascade from a pre-existing "Model memory init failed" at boot —
+unrelated to this work). ARM64 `make test` still PASSES cleanly.
+`make x86-disk-verify` all 9 checks PASS. End-to-end OVMF boot to
+`slmos>` shell with 4 CPUs online works.
+
+---
+
 ## 1. Preemptive Multitasking on x86-64
 
 ### 1.1 What works today

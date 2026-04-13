@@ -148,10 +148,21 @@ static uint32_t heuristic_assign_cpu(struct task *task)
     return find_target_cpu();
 }
 
+/* Periodic rebalance hook (D1 / P2-4). Implemented in
+ * kernel/sched/sched_rebalance.c — only runs on BSP and only every
+ * REBALANCE_INTERVAL_TICKS timer ticks, so it's cheap to wire into
+ * every tick. */
+extern void sched_rebalance_tick(uint32_t cpu);
+
+static void heuristic_tick(uint32_t cpu)
+{
+    sched_rebalance_tick(cpu);
+}
+
 const struct sched_policy_ops sched_policy_heuristic = {
     .name       = "heuristic",
     .init       = NULL,
     .shutdown   = NULL,
     .assign_cpu = heuristic_assign_cpu,
-    .tick       = NULL,
+    .tick       = heuristic_tick,
 };

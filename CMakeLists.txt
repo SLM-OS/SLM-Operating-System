@@ -177,6 +177,8 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/pci.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/nvidia_gpu.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/ap_trampoline.S>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/tss.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/sse_kernels.c>
 
     # ==========================================================================
     # Memory Management
@@ -451,6 +453,18 @@ if(PLATFORM STREQUAL "QEMU_VIRT")
     )
 endif()
 
+# Per-file override: the x86-64 SSE inference kernels need -msse -msse2
+# to access SSE intrinsics. The rest of the kernel keeps -mno-sse
+# for safety. CR4.OSFXSR / CR4.OSXMMEXCPT / CR0.MP / CR0.EM=0 are set
+# in trampoline32.S / ap_trampoline.S (C2 / P3-1) so the SSE
+# instructions execute at CPL=0 without #UD / #NM.
+if(PLATFORM STREQUAL "X86_64")
+    set_source_files_properties(
+        kernel/arch/x86_64/sse_kernels.c
+        PROPERTIES COMPILE_FLAGS "-msse -msse2"
+    )
+endif()
+
 # Lua library - uses floating-point so it doesn't get -mgeneral-regs-only
 # setjmp.S is architecture-specific (saves callee-saved FP regs on ARM64)
 if(PLATFORM STREQUAL "X86_64")
@@ -513,10 +527,19 @@ target_link_libraries(slmos.elf PRIVATE lua)
 # ==========================================================================
 option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 
-# Work-stealing scheduler (#59 Phase B). Off by default until Phase C
-# benchmarks justify enabling. Requires #57 preemption on Pi 5 / Jetson
-# to be useful beyond the cooperative-yield case QEMU exercises today.
-option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" OFF)
+# Work-stealing scheduler (#59 Phase B). Per the cross-platform plan
+# review, each platform decides independently — no global default flip
+# in kernel/include/config.h. On x86-64 the hardware is cache-coherent
+# SMP with a working reschedule IPI (B1) and TSS IST (A1), so the
+# steal path is safe by construction. Enable automatically for X86_64
+# unless the user explicitly sets ENABLE_WORK_STEALING=OFF.
+# Pi 5 / Jetson keep the feature off until their preemption blockers
+# (#57 / #99) are closed.
+if(PLATFORM STREQUAL "X86_64")
+    option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" ON)
+else()
+    option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" OFF)
+endif()
 if(ENABLE_WORK_STEALING)
     add_compile_definitions(CONFIG_WORK_STEALING=1)
 endif()

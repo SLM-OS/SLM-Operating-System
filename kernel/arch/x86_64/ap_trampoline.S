@@ -81,9 +81,11 @@ ap_pm_entry:
     mov     %ax, %es
     mov     %ax, %ss
 
-    /* Enable PAE (CR4 bit 5) — required for long mode */
+    /* CR4: PAE (bit 5) + OSFXSR (bit 9) + OSXMMEXCPT (bit 10).
+     * Matches BSP's trampoline32.S — required for SSE at CPL=0
+     * (C1 / P3-1). */
     mov     %cr4, %eax
-    or      $0x20, %eax
+    or      $0x620, %eax
     mov     %eax, %cr4
 
     /* Load BSP's PML4 into CR3 */
@@ -96,9 +98,10 @@ ap_pm_entry:
     or      $0x100, %eax
     wrmsr
 
-    /* Enable paging (CR0.PG = 1) — activates long mode */
+    /* CR0: PG=1 (activates long mode), MP=1 (bit 1), EM=0 (bit 2). */
     mov     %cr0, %eax
-    or      $0x80000000, %eax
+    and     $~0x4, %eax
+    or      $0x80000002, %eax
     mov     %eax, %cr0
 
     /* Load the BSP's 64-bit GDT */

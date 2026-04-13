@@ -872,11 +872,11 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
     }
 #endif
 
-#if !defined(PLATFORM_X86_64)
-    /* Wake idle CPUs so they can pick up the new task.
-     * SEV wakes any CPU in WFE (used by idle loop on NC platforms). */
-    __asm__ volatile("sev" ::: "memory");
-#endif
+    /* Wake the target CPU if it's parked. Platform backend:
+     *   ARM64  — SEV (released WFE on that CPU).
+     *   x86-64 — LAPIC IPI RESCHED_VECTOR (wakes HLT, invokes schedule()).
+     * Cheap no-op when cpu == cpu_id(). */
+    smp_notify_cpu(cpu);
 }
 
 /*
@@ -1090,6 +1090,17 @@ static struct task *sched_try_steal(uint32_t this_cpu)
         if (victim == this_cpu)
             continue;
 
+        /* Cheap early-out: if the victim is currently inside its own
+         * schedule() critical section (between rq_unlock_irqrestore
+         * and switch_to — see preempt_disabled flag at sched.c:~1040),
+         * don't bother contending the lock it's almost certainly
+         * about to take again. The victim's rq_lock (acquired below)
+         * is still the primary mutual-exclusion mechanism that keeps
+         * the steal race-free; this is belt-and-suspenders per the
+         * cross-plan review (B3 / P2-3). */
+        if (preempt_disabled[victim])
+            continue;
+
         /* Drain any stale pointers along with finding a live one. Bounded
          * by deque capacity so this loop cannot spin forever. */
         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
@@ -1203,6 +1214,95 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
     preempt_disabled[cpu] = prev_preempt_disabled;
 }
 #endif /* PI5_COOP_PREEMPT */
+
+/* ---- Periodic load rebalance (D1 / P2-4) ----
+ *
+ * Every REBALANCE_INTERVAL_TICKS timer ticks on BSP, migrate one
+ * task from the busiest run queue to the idlest if the imbalance
+ * exceeds REBALANCE_IMBALANCE_MIN. Respects cpu_affinity, never
+ * touches the idle task, single-threaded (BSP-only) to keep the
+ * decision racing-free. Called from the active policy's tick().
+ */
+#define REBALANCE_INTERVAL_TICKS   100
+#define REBALANCE_IMBALANCE_MIN    2
+
+static uint64_t rebalance_tick_counter;
+static uint64_t rebalance_migrations;
+
+void sched_rebalance_tick(uint32_t cpu)
+{
+    /* Single-threaded: only BSP drives the rebalance decision. */
+    if (cpu != 0)
+        return;
+
+    rebalance_tick_counter++;
+    if ((rebalance_tick_counter % REBALANCE_INTERVAL_TICKS) != 0)
+        return;
+
+    if (cpu_count < 2)
+        return;
+
+    /* Snapshot-then-decide. Reading ready_count without a lock is
+     * racy, but the final migration locks, so a stale snapshot only
+     * means we rebalance "close to optimal". */
+    uint32_t busy_cpu = 0;
+    uint32_t idle_cpu = 0;
+    uint32_t max_ready = 0;
+    uint32_t min_ready = UINT32_MAX;
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        uint32_t ready = cpu_rq(i)->ready_count;
+        if (ready > max_ready) {
+            max_ready = ready;
+            busy_cpu = i;
+        }
+        if (ready < min_ready) {
+            min_ready = ready;
+            idle_cpu = i;
+        }
+    }
+    if (busy_cpu == idle_cpu)
+        return;
+    if (max_ready < (uint32_t)(min_ready + REBALANCE_IMBALANCE_MIN))
+        return;
+
+    /* Walk busy CPU's queue under its rq_lock, pick first migratable
+     * task (CPU_AFFINITY_ANY, not idle, state READY), dequeue. */
+    struct cpu_runqueue *busy_rq = cpu_rq(busy_cpu);
+    irq_flags_t flags = rq_lock_irqsave(busy_cpu);
+
+    struct task *candidate = NULL;
+    for (struct task *t = busy_rq->head; t != NULL; t = t->next) {
+        if (t == busy_rq->idle_task)
+            continue;
+        if (t->cpu_affinity != CPU_AFFINITY_ANY)
+            continue;
+        if (t->state != TASK_READY)
+            continue;
+        candidate = t;
+        break;
+    }
+
+    if (candidate)
+        remove_from_cpu_queue_locked(candidate, busy_cpu);
+
+    rq_unlock_irqrestore(busy_cpu, flags);
+
+    if (!candidate)
+        return;
+
+    /* scheduler_add_task_to_cpu handles rq_lock + smp_notify_cpu on
+     * the destination CPU. */
+    candidate->state = TASK_READY;
+    candidate->assigned_cpu = idle_cpu;
+    scheduler_add_task_to_cpu(candidate, idle_cpu);
+
+    rebalance_migrations++;
+}
+
+uint64_t sched_rebalance_get_migrations(void)
+{
+    return rebalance_migrations;
+}
 
 /*
  * Schedule - select next task and switch to it (per-CPU).
