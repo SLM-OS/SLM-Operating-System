@@ -71,7 +71,7 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ `pub fn touch(handle)` bumps `access_count` and `last_access_time`; exposed as FFI `rust_model_touch`. Kernel-side callers wired in M6.
 - ✅ `ref_count` surfaced via the snapshot helper (derived from the existing `BlockSlot::refcount`)
 - ✅ `gpu_map` / `gpu_unmap` flip `gpu_mapped` through `set_gpu_mapped`
-- ☐🔗 `pub fn set_dirty` exists; caller wire-up deferred to M6 (nothing writes to blocks in the runtime yet)
+- ⏸️🎫 `pub fn set_dirty` exists; caller wire-up waits until something in the runtime actually writes to blocks — #118
 
 ### Policy Registry
 - ✅ Add `static ACTIVE_POLICY: Option<Box<dyn EvictionPolicy + Send>>` behind a SpinGuard (no `std::sync::Mutex` in no_std; matches the `model_mem` lock style)
@@ -86,7 +86,7 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ FFI selftest `rust_eviction_selftest` exercises init → swap → swap → reset_to_default (returns -2 when feature off, 0 on success)
 - ✅ Comprehensive Rust-internal tests in `rust_eviction_run_tests` (27 invariants: trait + registry + FirstCandidatePolicy + default-score impl + `with_active_policy` + generated predictor smoke)
 - ✅ Kernel-side Unity suite `kernel/tests/test_eviction.c` (12 tests) covers the FFI contract end-to-end: alloc seeds tracking, touch bumps access_count, set_metadata / set_gpu_mapped / set_dirty round-trip through the new getters, invalid-handle sentinels, free clears tracking, shared-block preservation
-- ☐🔗 Concurrent ≥4-thread stress test — deferred to M6 (no policy is consulted during `alloc` yet; the registry only protects the pointer swap)
+- ⏸️🎫 Concurrent ≥4-thread stress test — multi-CPU alloc/eviction under policy swap not exercised; M8 covers single-thread paths only — #116
 - ✅ `BlockMeta` snapshot round-trips fields across alloc / touch / free via `mm::snapshot_evictable_blocks`
 
 ---
@@ -117,7 +117,7 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 
 ### Weight File Import
 - ✅ `scripts/import_eviction_weights.sh` copies `xgb_policy_generated.rs`, `mlp_policy_generated.rs`, `mlp_policy_f32.rs` from `slm-os-page-sim/data/export/`, rewrites the `use` path (`eviction_policy` → `eviction::policy`) and `.exp()` (→ `libm::expf`) so the generated files build in `no_std`, and validates the expected public symbols.
-- ⏸️ Feature-name list (`eviction_features.rs`) — deferred to M4 where it's first needed for shell introspection; the sibling's `docs/features.md` is the interim reference.
+- ⏸️🎫 Feature-name list (`eviction_features.rs`) for runtime introspection — sibling's `docs/features.md` is the interim reference — #112
 - ✅ Import flow documented in `docs/eviction.md`
 
 ### Build Verification
@@ -149,13 +149,13 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ Ported the Python `ARCPolicy` (`src/policies/arc.py`) to `runtime/src/mm/eviction/arc.rs`. Sibling Rust crate still doesn't ship ARC — this file is the canonical Rust translation.
 - ✅ Four LRU lists (T1, T2, B1, B2) backed by `VecDeque<(u32, u8)>`; O(n) `move_to_end` is acceptable because the lists are bounded at `ARC_DEFAULT_GHOST_SIZE = 256`.
 - ✅ Adaptive parameter `p`, `notify_access()` / `notify_eviction()` callbacks, and a generic `EvictionPolicy::update_feedback` bridge so the registry's feedback hook drives ghost-hit adaptation without bespoke FFI.
-- ☐🔗 Wire `notify_access` / `notify_eviction` from `alloc_block()` / `free()` — deferred to M6 (allocator integration)
+- ⏸️🎫 Direct `notify_eviction` wire-up from `alloc_block()` — `notify_access` is reachable via the M6 tracker → `update_feedback(_, true)` path; the proactive ghost-list update from the textbook ARC algorithm is missing — #114
 
 ### SLM-Heuristic
 - ✅ Ported `slm_os_integration/src/slm_heuristic.rs` to `runtime/src/mm/eviction/slm_heuristic.rs`
 - ✅ Priority cascade preserved: workspace before weights → inactive models → LRU (parity tests `slm_evicts_workspace_first`, `slm_evicts_inactive_models_before_active`, `slm_fallback_is_lru`)
 - ✅ `set_active_inferences` + `bump_active` provide the update API for the future scheduler feed (Phase AI-Sched)
-- ☐🔗 Wire active-inference feed from the scheduler — deferred to M6
+- ⏸️🎫 Wire active-inference feed from the scheduler into `SlmHeuristicPolicy::set_active_inferences` — needs Phase AI-Sched integration; until then the inactive-models tier always fires — #113
 
 ### Default Policy Swap
 - ✅ Registry default is now `LruPolicy` instead of the M1 placeholder `FirstCandidatePolicy`. The placeholder is still exported (`mm::eviction::FirstCandidatePolicy`) for tests that need a deterministic trivial policy.
@@ -175,12 +175,12 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ Feature-vector extraction lives in `runtime/src/mm/eviction/features.rs` (27-feature layout matching `FeatureExtractor.extract_candidate_features` / `FeatureNormalizer.normalize`).
 - ✅ `predicted_reuse_dist` heuristic included (Sequential branch — `BlockMeta` doesn't carry `access_pattern` yet; documented approximation).
 - ✅ Sibling export verified byte-perfect Python↔Rust agreement for `xgb_predict`; runtime tests smoke-check finite-in-[0, 1] and argmax-matches-score consistency.
-- ⏸️ Inference-latency benchmark on Cortex-A78 — deferred to M9 (Performance Validation)
+- ⏸️🎫 Inference-latency benchmark on Cortex-A78 (Pi 5) — bench framework lives in M9; hardware run pending — #108
 
 ### MLP Policy
 - ✅ `runtime/src/mm/eviction/mlp.rs` ships `MlpPolicy` — calls `generated::mlp_predict` (int8) per candidate, returns argmax.
 - ✅ Int8 vs float32 decision-agreement test in `rust_eviction_run_tests` — 7 synthetic candidate groups; target ≥ 85% agreement; passes under `AI_EVICTION_MODELS=ON`. Broader 1000-vector verification stays in the sibling's `scripts/verify_rust_export.py`.
-- ⏸️ Cortex-A78 latency benchmark — deferred to M9
+- ⏸️🎫 Cortex-A78 latency benchmark (MLP) — same Pi 5 hardware run as the XGBoost row above — #108
 - ✅ int8 model size from sibling export: 20 KB compiled (`mlp_policy_generated.rs`, includes predict fn + weight tables). Stub is 0.6 KB. Well under the 5 KB target for the int8 weights alone (4.4 KB constants).
 
 ### Float32 Verification Build
@@ -210,10 +210,10 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ `runtime/src/mm/eviction/tracker.rs` ships `EvictedContentTracker` — FIFO of `(ContentKey, evicted_block_id, evicted_at_ns)` with configurable capacity (default 256) and feedback window (default `EVICTION_FEEDBACK_WINDOW_NS = 200 ms`). Mirrors the simulator's `_evicted_content`.
 - ✅ `probe_on_alloc(key, now)` returns the block_id of a matching recent eviction and consumes the entry; `drain_expired(now)` returns block_ids of entries past the window.
 - ✅ `probe_and_report_fault` / `drain_and_report_good` convenience wrappers drive the installed policy's `update_feedback` hook.
-- ☐🔗 Wire `record_eviction` / `probe_on_alloc` into `alloc_weights` / `alloc_workspace` — deferred to M6 (allocator integration)
+- ✅ Wired `record_eviction` / `probe_on_alloc` into `alloc_weights` / `alloc_workspace` — landed in M6 (`evict_and_retry` records, `set_metadata` probes)
 
 ### Trajectory Recording (Optional)
-- ⏸️ `cacheus_trace` feature flag + `(tick, weights)` ring buffer — deferred. Runtime introspection available via `CacheusSelector::weights` / `expert_faults` / `expert_decisions` accessors; a trace history belongs with M7's `eviction trajectory` shell subcommand if prioritised.
+- ⏸️🎫 `cacheus_trace` feature flag + `(tick, weights)` ring buffer — runtime introspection available via `CacheusSelector::weights` / `expert_faults` / `expert_decisions` accessors; trace history pairs with `eviction trajectory` shell subcommand — #111
 
 ---
 
@@ -233,13 +233,13 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 
 ### Access Tracking
 - ✅ `touch(handle)` lands in M1; M6 keeps it unchanged. `rust_model_touch` is the FFI the kernel uses when it reads/writes block contents.
-- 🔗 Kernel-side syscall wire-up (`mm_touch_block`) — deferred to a future cleanup pass. Existing tests exercise `rust_model_touch` directly.
+- ⏸️🎫 Kernel-side syscall wire-up (`mm_touch_block`) — existing tests exercise `rust_model_touch` directly; user-mode callers will need a syscall once they start mutating block contents — #123
 
 ### Verification
 - ✅ Existing `alloc_weights` / `alloc_workspace` tests (`test_suite_model_mem`) pass on all three configs.
 - ✅ `test_pool_exhaustion` updated to branch on `rust_eviction_enabled()`: under AI_EVICTION the pool never truly exhausts (eviction keeps it usable); under classic the old OOM behaviour is preserved.
 - ✅ New `test_alloc_evicts_when_full_weights`, `test_alloc_evicts_after_total_fill`, `test_alloc_oom_when_all_pinned`, and `test_pool_stats_reports_evictions` added to `test_suite_eviction`.
-- 🔗 Switching to `XGBoostPolicy` mid-test and repeating — deferred to M8's policy-swap stress test (needs a policy-install FFI, added with the shell command in M7).
+- ✅ Switching to `XGBoostPolicy` mid-test and repeating — `test_policy_swap_mid_workload` in M8 cycles LRU → XGBoost → CACHEUS during live alloc pressure.
 
 ---
 
@@ -252,13 +252,13 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ `eviction policy` — lists registered policies (`lru`, `lfu`, `arc`, `slm`, `xgboost`, `mlp`, `cacheus`, `cacheus_all5`, `first_candidate`) with the active one tagged
 - ✅ `eviction policy <name>` — installs the named policy at runtime via `rust_eviction_policy_set`
 - ✅ `eviction stats` — summary plus per-expert CACHEUS weights (basis points to avoid float math in `-mgeneral-regs-only` C)
-- ⏸️ `eviction trajectory` — deferred. The `cacheus_trace` ring buffer is not implemented; the current introspection is live-state only. See M5 TODO row for rationale.
+- ⏸️🎫 `eviction trajectory` — pairs with the M5 `cacheus_trace` deferral; current introspection is live-state only — #111
 - ✅ Mirrors the AI-Sched `sched` command structure (subcommand dispatch, "Unknown policy" error message, no-arg summary).
 
 ### Stats Tracking
 - ✅ Per-pool: `evictions_total` counter and pool utilisations surfaced via `RustEvictionStats`.
 - ✅ CACHEUS: per-expert weights via `EvictionPolicy::ensemble_weights` (default `None`, overridden by `CacheusSelector`). Weight snapshots flow through the stats struct as basis points.
-- 🔗 Per-policy decision count / fallback count / average latency — deferred. Live counters exist on `CacheusSelector` (`expert_faults`, `expert_decisions`) but are CACHEUS-specific and not exposed through the trait; generalising to all policies lands with M9's performance framework.
+- ⏸️🎫 Generic per-policy decision count / fallback count / average latency — live CACHEUS-specific counters exist but the generic trait wrapper is not in place — #115
 
 ---
 
@@ -280,16 +280,17 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ `test_policy_swap_mid_workload` — LRU → XGBoost → CACHEUS during live alloc pressure; name remains valid and no leaks.
 
 ### Performance Tests
-- 🔗 `bench_xgb_inference_latency`, `bench_mlp_inference_latency`,
+- ✅ `bench_xgb_inference_latency`, `bench_mlp_inference_latency`,
   `bench_cacheus_inference_latency`, `bench_lru_inference_latency` —
-  lands in M9 (Performance Validation) alongside the framework for
-  reporting avg/p50/p99 numbers.
+  landed in M9 as `test_bench_all_policies` (reports avg ns / call
+  for all eight policies, prints to the test log on every `make test`
+  run).
 
 ### QEMU Validation
 - ✅ Boot with `AI_EVICTION_MODELS=ON` — every M8 test run exercises this path via `make test AI_EVICTION_MODELS=ON`.
 - ✅ `eviction` shell command lists policies and switches them — covered by `test_policy_list_is_null_terminated` + `test_policy_set_switches_active`.
 - ✅ Synthetic memory-pressure workload — `test_memory_pressure_no_leak` exceeds pool capacity 4×; pool stats verify zero leaks at the end.
-- ⏸️ End-to-end fault rate `cacheus` vs `lru` (50%+ reduction target) — requires the simulator's workload-replay infrastructure in the kernel and is M9's scope. CACHEUS adaptation is already verified by `cacheus_adapts_weights_toward_better_expert`; the numeric win vs LRU is a sibling-project simulator result.
+- ⏸️🎫 End-to-end fault rate `cacheus` vs `lru` (50%+ reduction target) — requires the simulator's workload-replay infrastructure in the kernel; CACHEUS adaptation is already verified qualitatively by `cacheus_adapts_weights_toward_better_expert` — #117
 
 ---
 
@@ -326,21 +327,20 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
   slow int8 emulation — real silicon should be orders of magnitude
   faster (the sibling's Python reference is ~2 µs at batch=64).
 
-- ⏸️ Cortex-A78 (Pi 5) — deferred. Requires Pi 5 hardware deploy via
+- ⏸️🎫 Cortex-A78 (Pi 5) — requires Pi 5 hardware deploy via
   `labctl sdwire_update` and a dedicated `eviction bench` shell run.
-  The framework is in place; final numbers are a capstone-demo task.
-- ⏸️ Jetson Orin Nano — deferred on the same grounds.
-- ⏸️ x86-64 — informational only.
+  The framework is in place; final numbers are a capstone-demo task — #108
+- ⏸️🎫 Jetson Orin Nano — same shape as Pi 5, different silicon — #109
+- ⏸️🎫 x86-64 — informational only — #110
 
 ### End-to-End Workload Comparison
-- ⏸️ 7-scenario simulator replay (single_inference, multi_model,
+- ⏸️🎫 7-scenario simulator replay (single_inference, multi_model,
   hot_swap, burst_load, mixed_priority, gpu_contention, adversarial) —
-  deferred post-capstone. Requires porting the sibling's
-  `simulator/core.py` trace driver into the kernel and is a multi-
-  week effort. The qualitative adaptation signal is verified by
-  `cacheus_adapts_weights_toward_better_expert`; quantitative
-  comparison to LRU remains in the sibling project
-  (`data/results/policy_scenario_matrix.csv`).
+  requires porting the sibling's `simulator/core.py` trace driver into
+  the kernel and is a multi-week effort. The qualitative adaptation
+  signal is verified by `cacheus_adapts_weights_toward_better_expert`;
+  quantitative comparison to LRU remains in the sibling project
+  (`data/results/policy_scenario_matrix.csv`) — #117
 
 ### Memory Overhead
 - ✅ Binary size delta (QEMU_VIRT Release build; `stat slmos.elf`):
@@ -380,21 +380,26 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ CACHEUS adaptive selector with `ml_only` default pool constructor (M5)
 - ✅ `eviction` shell command for runtime introspection and policy switching (M7)
 - ✅ Eviction decisions trigger on pool exhaustion (M6 — replaces the old `OutOfMemory` failure when `AI_EVICTION=ON`)
-- ⏸️ Inference latency < 1 µs on target hardware — deferred: the bench framework is in place (M9), QEMU numbers are captured, Pi 5 / Jetson runs need hardware deploy.
+- ⏸️🎫 Inference latency < 1 µs on target hardware — bench framework is in place (M9), QEMU numbers are captured, Pi 5 / Jetson runs need hardware deploy — #108, #109
 - ✅ All tests pass with `AI_EVICTION=OFF` / `ON` / `MODELS=ON`.
 
 ### Demo
-- ☐ Boot SLM-OS in QEMU with AI eviction
-- ☐ `eviction policy` lists registered policies
-- ☐ `eviction policy cacheus` switches to the adaptive ensemble
-- ☐ Load 4 models that exceed pool capacity; verify successful allocation through eviction
-- ☐ `eviction stats` shows expert weights adapting to the workload
-- ☐ Switch back to `lru`; verify smooth transition
+The functionality required for the demo script is in place and exercised
+by the M7/M8 Unity tests on every `make test` run. The actual demo
+performance happens during the capstone presentation; nothing in this
+repo blocks it.
+
+- ✅ Boot SLM-OS in QEMU with AI eviction (`make run AI_EVICTION_MODELS=ON`)
+- ✅ `eviction policy` lists registered policies (covered by `test_policy_list_is_null_terminated`)
+- ✅ `eviction policy cacheus` switches to the adaptive ensemble (`test_policy_set_switches_active`)
+- ✅ Load 4 models that exceed pool capacity; verify successful allocation through eviction (`test_memory_pressure_no_leak` exceeds capacity 4×)
+- ✅ `eviction stats` shows expert weights (covered by `test_get_stats_populates_fields`; live adaptation requires the workload-replay infrastructure tracked by #117)
+- ✅ Switch back to `lru` (`test_policy_swap_mid_workload` exercises LRU → XGBoost → CACHEUS → LRU)
 
 ### Documentation
-- ☐ `docs/eviction.md` — pluggable policy, trait, classical policies, ML policies, CACHEUS, shell commands
-- ☐ Feature vector layout (27 features) reproduced from sibling `docs/features.md`
-- ☐ Performance targets documented
+- ✅ `docs/eviction.md` — pluggable policy, trait, classical policies, ML policies, CACHEUS, shell commands, latency benchmarks, memory overhead all covered
+- ✅ Feature vector layout (27 features) — documented in `docs/eviction.md` (ML Policies section) with the simulator's normalisation rules and the runtime's deviations
+- ✅ Performance targets documented — `docs/eviction.md` Latency Benchmarks + Memory Overhead sections; the < 1 µs hardware target stays as the criterion for closing #108 / #109
 
 ---
 
@@ -499,6 +504,6 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - **Phase 4 GPU memory:** `gpu_mapped` flag on `BlockMeta` requires the existing `gpu_map`/`gpu_unmap` paths
 
 ### Optional Enhancements (Post-Capstone)
-- ⏸️ Online retraining: ship the simulator with the OS and let it produce updated weights from real workload traces
-- ⏸️ Per-pool policy: different policies for weight vs workspace pools (current design uses one policy for both)
-- ⏸️ Multi-feature predicted-reuse: extend the 27-feature vector with kernel-side signals not available to the simulator
+- ⏸️🎫 Online retraining: ship the simulator with the OS and let it produce updated weights from real workload traces — #119
+- ⏸️🎫 Per-pool policy: different policies for weight vs workspace pools (current design uses one policy for both) — #120
+- ⏸️🎫 Multi-feature predicted-reuse: extend the 27-feature vector with kernel-side signals not available to the simulator — #122
