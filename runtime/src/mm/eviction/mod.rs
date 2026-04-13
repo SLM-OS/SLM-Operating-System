@@ -28,6 +28,11 @@ pub mod features;
 pub mod xgboost;
 pub mod mlp;
 
+// Adaptive ensemble (M5). Weighted expert selection with online
+// updates. `ml_only` is the recommended runtime configuration.
+pub mod cacheus;
+pub mod tracker;
+
 pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType};
 pub use registry::{
     get_eviction_policy_name, reset_to_default, score, select_victim,
@@ -41,6 +46,12 @@ pub use arc::{ARCPolicy, ARC_DEFAULT_GHOST_SIZE};
 pub use features::{extract_features, AI_HORIZON_NS};
 pub use xgboost::XGBoostPolicy;
 pub use mlp::MlpPolicy;
+pub use cacheus::{CacheusSelector, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW};
+pub use tracker::{
+    ContentKey, EvictedContentTracker,
+    EVICTION_FEEDBACK_WINDOW_NS, EVICTION_TRACKER_CAPACITY,
+    probe_and_report_fault, drain_and_report_good,
+};
 
 /// Initialise the eviction subsystem.
 ///
