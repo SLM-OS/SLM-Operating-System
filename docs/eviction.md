@@ -356,7 +356,7 @@ shell command. This document updates as each milestone lands.
 ### Test Coverage
 
 `kernel/tests/test_eviction.c` registers the **Eviction Policy Tests**
-Unity suite (21 tests) alongside the existing `test_suite_model_mem`:
+Unity suite (23 tests) alongside the existing `test_suite_model_mem`:
 
 - **Tracking-field FFI** (9 tests, always run):
   - Alloc seeds `load_time`, `last_access_time`, and `access_count = 1`
@@ -392,9 +392,16 @@ Unity suite (21 tests) alongside the existing `test_suite_model_mem`:
   - `test_get_stats_populates_fields` — pool totals sane, snapshot ≥ 0,
     CACHEUS policy populates `cacheus_expert_count = 2` with uniform
     5000 bp weights
+- **M8 workload stress** (2 tests, skip cleanly when feature off):
+  - `test_memory_pressure_no_leak` — 4-round workspace workload that
+    exceeds pool capacity several times over; final `allocated_blocks`
+    is 0 and `free_blocks` returns to the pre-test baseline.
+  - `test_policy_swap_mid_workload` — LRU → XGBoost → CACHEUS during
+    live alloc pressure; name remains valid and no leaks.
 
-`rust_eviction_run_tests()` itself exercises 79 internal invariants (78
-when `ai_eviction_models` is off):
+`rust_eviction_run_tests()` itself exercises 91 internal invariants (87
+when `ai_eviction_models` is off — the int8-vs-f32 cross-check and
+the three Python-parity smoke cases are models-only):
 
 - **Registry / trait** (17): default / swap / reset, `FirstCandidatePolicy`
   behaviour, `select_victim` / `score` / `update_feedback` helpers, default
@@ -426,6 +433,13 @@ when `ai_eviction_models` is off):
   (`lr=0.4`, `window=200`) matches Phase 5, CACHEUS installs and
   selects via the registry, tracker stores / probes / consumes / FIFO-
   evicts / drains entries correctly.
+- **M8 workload + feedback** (8, with 3 gated on models): CACHEUS
+  adaptation on asymmetric feedback (bad-expert weight drops),
+  feedback-loop probe hit fires `update_feedback(_, true)`, probe miss
+  fires nothing, window-expiry drain fires `update_feedback(_, false)`,
+  rapid-swap stress leaves a valid active policy. Under
+  `AI_EVICTION_MODELS=ON`, three Python-parity smoke cases exercise
+  the XGBoost + MLP loaded code path.
 
 All suites pass under `make test` on the three supported configs:
 `AI_EVICTION=OFF` (default), `AI_EVICTION=ON` (stubs),

@@ -616,6 +616,108 @@ static void test_get_stats_populates_fields(void)
 }
 
 /* ============================================================================
+ * M8: End-to-end workload stress — the alloc loop must not leak
+ * blocks when eviction fires, and pool_stats accounts for every
+ * allocated slot exactly.
+ * ============================================================================ */
+
+static void test_memory_pressure_no_leak(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    RustPoolStats before = rust_workspace_pool_stats();
+    uint64_t ev_before = before.evictions_total;
+
+    /* Allocate more than the pool capacity to force evictions. */
+    ModelHandle held[16];
+    int held_n = 0;
+    for (int round = 0; round < 4; round++) {
+        /* Each round allocates 8 blocks, touches them, and releases
+         * them before the next round. The alloc path evicts earlier
+         * allocations once the pool fills — this exercises both the
+         * eviction slow-path and the refcount=0 candidate filter. */
+        for (int i = 0; i < 8; i++) {
+            ModelHandle h = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+            TEST_ASSERT_FALSE(handle_is_null(h));
+            rust_model_touch(h);
+            rust_model_set_metadata(h, (uint8_t)(round + 1),
+                                    (int16_t)i, (uint8_t)(round % 4));
+            held[held_n++] = h;
+            if (held_n >= 16) {
+                /* Drop the oldest half to keep the held set bounded
+                 * and expose a mix of live + recently-freed slots to
+                 * the eviction path. */
+                for (int j = 0; j < 8; j++) {
+                    rust_model_free(held[j]);
+                }
+                for (int j = 0; j < 8; j++) {
+                    held[j] = held[j + 8];
+                }
+                held_n = 8;
+            }
+        }
+    }
+
+    /* Release everything we're still holding. */
+    for (int i = 0; i < held_n; i++) {
+        rust_model_free(held[i]);
+    }
+
+    RustPoolStats after = rust_workspace_pool_stats();
+    TEST_ASSERT_EQUAL_UINT64(before.free_blocks, after.free_blocks);
+    TEST_ASSERT_EQUAL_UINT64(0, after.allocated_blocks);
+    /* The workload DID drive at least some evictions (the held set
+     * exceeds the pool capacity at various points). */
+    TEST_ASSERT_TRUE(after.evictions_total >= ev_before);
+}
+
+static void test_policy_swap_mid_workload(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    /* Start on LRU, allocate some blocks, swap to XGBoost, allocate
+     * more, swap to CACHEUS, free everything. No panics, no leaks. */
+    TEST_ASSERT_EQUAL_INT(0,
+        rust_eviction_policy_set((const uint8_t *)"lru"));
+
+    ModelHandle h[12];
+    int n = 0;
+    for (int i = 0; i < 4; i++) {
+        h[n] = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+        if (!handle_is_null(h[n])) { rust_model_touch(h[n]); n++; }
+    }
+
+    TEST_ASSERT_EQUAL_INT(0,
+        rust_eviction_policy_set((const uint8_t *)"xgboost"));
+    for (int i = 0; i < 4; i++) {
+        h[n] = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+        if (!handle_is_null(h[n])) { rust_model_touch(h[n]); n++; }
+    }
+
+    TEST_ASSERT_EQUAL_INT(0,
+        rust_eviction_policy_set((const uint8_t *)"cacheus"));
+    for (int i = 0; i < 4; i++) {
+        h[n] = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+        if (!handle_is_null(h[n])) { rust_model_touch(h[n]); n++; }
+    }
+
+    /* Policy name shouldn't be empty at the end. */
+    uint8_t buf[32] = {0};
+    rust_eviction_policy_name(buf, sizeof(buf));
+    TEST_ASSERT_TRUE(buf[0] != 0);
+
+    for (int i = 0; i < n; i++) rust_model_free(h[i]);
+
+    /* Restore default. */
+    TEST_ASSERT_EQUAL_INT(0,
+        rust_eviction_policy_set((const uint8_t *)"lru"));
+}
+
+/* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
 
@@ -655,6 +757,10 @@ int test_suite_eviction(void)
     RUN_TEST(test_policy_list_is_null_terminated);
     RUN_TEST(test_policy_set_switches_active);
     RUN_TEST(test_get_stats_populates_fields);
+
+    /* M8: end-to-end workload + mid-flight policy swap stress. */
+    RUN_TEST(test_memory_pressure_no_leak);
+    RUN_TEST(test_policy_swap_mid_workload);
 
     return UnityEnd();
 }

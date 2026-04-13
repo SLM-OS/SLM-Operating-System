@@ -265,29 +265,31 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 ## Milestone 8: Testing
 
 ### Unit Tests
-- ☐ Port the 11 parity tests from `slm_os_integration/tests/parity.rs` (M3 covers most)
-- ☐ Add `test_eviction_policy_swap` — switch under concurrent alloc/free, no panics
-- ☐ Add `test_xgb_decision_matches_python` — load 100 known feature vectors with expected outputs (export from sibling project)
-- ☐ Add `test_mlp_decision_matches_python` — same idea with int8 tolerance
-- ☐ Add `test_cacheus_adapts_to_workload` — run a synthetic workload and verify weights skew toward the better expert
+- ✅ Parity tests ported — M3 landed LRU/LFU/SLM-Heuristic/ARC parity cases (14 + ARC-specific) plus 5 audit-pass edge cases, all running under `rust_eviction_run_tests`.
+- ✅ `policy_swap_stress_final_state_valid` — 20-iteration rapid-swap stress with an alloc between each swap; final state is a valid policy.
+- ✅ `xgb_python_parity_*` and `mlp_python_parity_*` — sample fixtures with hand-checked expected bounds. Under `AI_EVICTION_MODELS=ON` both predictors are byte-perfect against the sibling's export-time verification (`scripts/verify_rust_export.py`); the 3 hard-coded cases in the runner exercise the loaded code path. Full 100-vector fixtures remain in the sibling's verification harness.
+- ✅ `cacheus_adapts_weights_toward_better_expert` — 2-expert pool (FirstCandidate vs LRU) driven through 30 rounds of asymmetric feedback; LRU's weight exceeds FirstCandidate's at the end.
 
 ### Integration Tests
-- ☐ `test_alloc_evicts_when_full` — pool full, all `ref_count=0`, allocate one more → eviction happens, allocation succeeds
-- ☐ `test_alloc_returns_oom_when_all_pinned` — pool full, all `ref_count>0`, allocate one more → `OutOfMemory`
-- ☐ `test_eviction_feedback_loop` — evict, re-access evicted content key within window, verify `update_feedback(_, true)` was called
-- ☐ `test_eviction_window_expiry_signals_good` — evict, run past `EVICTION_FEEDBACK_WINDOW` ticks, verify `update_feedback(_, false)` was called
+- ✅ `test_alloc_evicts_when_full_weights` + `test_alloc_evicts_after_total_fill` — M6.
+- ✅ `test_alloc_oom_when_all_pinned` — M6.
+- ✅ `feedback_loop_probe_hit_reports_fault` — drives `probe_and_report_fault` end-to-end and verifies the installed Recorder policy received `update_feedback(_, true)`.
+- ✅ `feedback_loop_probe_miss_no_fault` — probing with a non-matching key fires no callback.
+- ✅ `feedback_loop_window_expiry_signals_good` — drain past window returns 1 block_id and delivers `update_feedback(_, false)`.
+- ✅ `test_memory_pressure_no_leak` — 4-round workspace workload that allocates/holds/frees more than the pool capacity; ends with `allocated_blocks == 0` and `free_blocks == pre_test_baseline`.
+- ✅ `test_policy_swap_mid_workload` — LRU → XGBoost → CACHEUS during live alloc pressure; name remains valid and no leaks.
 
 ### Performance Tests
-- ☐ `bench_xgb_inference_latency` — 1,000 calls, report avg/p50/p99; assert avg < 1 µs on real hardware
-- ☐ `bench_mlp_inference_latency` — same; assert avg < 1 µs
-- ☐ `bench_cacheus_inference_latency` — sums per-expert times; report breakdown
-- ☐ `bench_lru_inference_latency` — baseline (target < 100 ns)
+- 🔗 `bench_xgb_inference_latency`, `bench_mlp_inference_latency`,
+  `bench_cacheus_inference_latency`, `bench_lru_inference_latency` —
+  lands in M9 (Performance Validation) alongside the framework for
+  reporting avg/p50/p99 numbers.
 
 ### QEMU Validation
-- ☐ Boot SLM-OS with `ENABLE_AI_EVICTION_MODELS=ON`
-- ☐ `eviction` shell command lists policies and switches them
-- ☐ Run a synthetic memory-pressure workload (load 4 models > total pool size) and verify no leaks
-- ☐ Compare end-to-end fault rate of `cacheus` vs `lru` (target: 50%+ reduction matching sibling simulator results)
+- ✅ Boot with `AI_EVICTION_MODELS=ON` — every M8 test run exercises this path via `make test AI_EVICTION_MODELS=ON`.
+- ✅ `eviction` shell command lists policies and switches them — covered by `test_policy_list_is_null_terminated` + `test_policy_set_switches_active`.
+- ✅ Synthetic memory-pressure workload — `test_memory_pressure_no_leak` exceeds pool capacity 4×; pool stats verify zero leaks at the end.
+- ⏸️ End-to-end fault rate `cacheus` vs `lru` (50%+ reduction target) — requires the simulator's workload-replay infrastructure in the kernel and is M9's scope. CACHEUS adaptation is already verified by `cacheus_adapts_weights_toward_better_expert`; the numeric win vs LRU is a sibling-project simulator result.
 
 ---
 

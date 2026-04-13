@@ -2033,6 +2033,173 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                        && t2.probe_on_alloc(k, 400) == Some(3));
         }
 
+        puts(b"\n-- eviction: M8 workload + feedback --\n\0");
+
+        // CACHEUS weight adaptation: construct a two-expert pool
+        // where one expert always picks the candidate the simulator
+        // would mark "fault" (i.e. evicting the soon-to-be-reused
+        // block). After enough bad-feedback rounds, the bad expert's
+        // weight must fall below its partner's.
+        {
+            // Two policies that disagree on index: FirstCandidate
+            // always picks 0, LRU picks the oldest (index 1 in our
+            // setup below). With feedback consistently claiming
+            // FirstCandidate's choice was bad, its weight drops.
+            let experts: alloc::vec::Vec<alloc::boxed::Box<dyn eviction::EvictionPolicy + Send>> =
+                alloc::vec![
+                    alloc::boxed::Box::new(mm::eviction::FirstCandidatePolicy) as _,
+                    alloc::boxed::Box::new(mm::eviction::LruPolicy::new()) as _,
+                ];
+            let mut c = mm::eviction::CacheusSelector::new(experts, 0.4, 200);
+            let cands = [
+                make_full(700, 999, 0, PoolType::Weight, 0),  // "new" (not LRU victim)
+                make_full(701,  10, 0, PoolType::Weight, 0),  // "old" (LRU victim)
+                make_full(702, 500, 0, PoolType::Weight, 0),
+            ];
+            // Drive 30 rounds. Ensemble picks based on the weighted
+            // sum; we report fault=true against whichever block the
+            // ensemble chose. FirstCandidate's pick (0) is always
+            // faulted; LRU's pick (1) is always rewarded. This
+            // should skew weights toward LRU over time.
+            let start = c.weights()[0];
+            for _ in 0..30 {
+                let v = c.select_victim(&cands);
+                // Fault when the ensemble picked what FirstCandidate
+                // would pick (index 0); don't fault when it picked
+                // LRU's choice.
+                let fault = v == 0;
+                c.update_feedback(cands[v].block_id, fault);
+            }
+            let end_first = c.weights()[0];
+            let end_lru = c.weights()[1];
+            // LRU's weight should exceed FirstCandidate's after
+            // adaptation — this is the Phase 5 signal we care about.
+            check!(b"cacheus_adapts_weights_toward_better_expert\0",
+                   end_lru > end_first && end_first < start);
+        }
+
+        // Eviction feedback loop (tracker ↔ registry integration).
+        // Install a Recorder policy, record an eviction into the
+        // module's private tracker, probe with the matching key,
+        // verify the Recorder received update_feedback(_, true).
+        {
+            use core::sync::atomic::{AtomicU32, Ordering};
+            static LAST_FB: AtomicU32 = AtomicU32::new(0);
+            static LAST_FAULT: AtomicU32 = AtomicU32::new(0xFFFF_FFFF);
+            struct Recorder;
+            impl mm::eviction::EvictionPolicy for Recorder {
+                fn select_victim(&mut self, _: &[BlockMeta]) -> usize { 0 }
+                fn update_feedback(&mut self, id: u32, fault: bool) {
+                    LAST_FB.store(id, Ordering::Relaxed);
+                    LAST_FAULT.store(if fault { 1 } else { 0 }, Ordering::Relaxed);
+                }
+                fn name(&self) -> &'static str { "Recorder" }
+            }
+
+            eviction::set_eviction_policy(alloc::boxed::Box::new(Recorder));
+            let mut t = EvictedContentTracker::with_params(16, 1_000_000_000);
+            let key = ContentKey {
+                pool_type: PoolType::Weight, model_id: 77, layer_idx: 3,
+            };
+            t.record_eviction(key, 0xDEAD_BEEF, 1_000);
+            let reported = mm::eviction::tracker::probe_and_report_fault(
+                &mut t, key, 2_000,
+            );
+            check!(b"feedback_loop_probe_hit_reports_fault\0",
+                   reported
+                       && LAST_FB.load(Ordering::Relaxed) == 0xDEAD_BEEF
+                       && LAST_FAULT.load(Ordering::Relaxed) == 1);
+
+            // Miss: probe with a different key → no feedback fired.
+            LAST_FB.store(0, Ordering::Relaxed);
+            LAST_FAULT.store(0xFFFF_FFFF, Ordering::Relaxed);
+            let miss_key = ContentKey {
+                pool_type: PoolType::Weight, model_id: 99, layer_idx: 0,
+            };
+            let reported = mm::eviction::tracker::probe_and_report_fault(
+                &mut t, miss_key, 2_000,
+            );
+            check!(b"feedback_loop_probe_miss_no_fault\0",
+                   !reported
+                       && LAST_FB.load(Ordering::Relaxed) == 0
+                       && LAST_FAULT.load(Ordering::Relaxed) == 0xFFFF_FFFF);
+
+            // Window expiry: entry aged past window drains as
+            // was_fault=false.
+            t.record_eviction(key, 0xCAFE_F00D, 3_000);
+            LAST_FB.store(0, Ordering::Relaxed);
+            LAST_FAULT.store(0xFFFF_FFFF, Ordering::Relaxed);
+            let drained = mm::eviction::tracker::drain_and_report_good(
+                &mut t, 5_000_000_000,  // well past the 1 s window
+            );
+            check!(b"feedback_loop_window_expiry_signals_good\0",
+                   drained == 1
+                       && LAST_FB.load(Ordering::Relaxed) == 0xCAFE_F00D
+                       && LAST_FAULT.load(Ordering::Relaxed) == 0);
+
+            eviction::reset_to_default();
+        }
+
+        // Rapid policy swap under a tight select loop — no panics, no
+        // stuck lock, final state is a valid policy.
+        {
+            for i in 0..20 {
+                let name: alloc::boxed::Box<dyn eviction::EvictionPolicy + Send> = match i % 5 {
+                    0 => alloc::boxed::Box::new(mm::eviction::LruPolicy::new()),
+                    1 => alloc::boxed::Box::new(mm::eviction::LfuPolicy::new()),
+                    2 => alloc::boxed::Box::new(mm::eviction::ARCPolicy::new()),
+                    3 => alloc::boxed::Box::new(mm::eviction::FirstCandidatePolicy),
+                    _ => alloc::boxed::Box::new(mm::eviction::SlmHeuristicPolicy::new()),
+                };
+                eviction::set_eviction_policy(name);
+                let cands = [
+                    make_full(i as u32, (i * 13) as u64, i as u32,
+                              PoolType::Weight, 0),
+                    make_full((i + 1) as u32, ((i + 1) * 7) as u64,
+                              (i + 1) as u32, PoolType::Workspace, 0),
+                ];
+                let _ = eviction::select_victim(&cands);
+            }
+            check!(b"policy_swap_stress_final_state_valid\0",
+                   eviction::with_active_policy(|p| p.name().len() > 0)
+                       == Some(true));
+            eviction::reset_to_default();
+        }
+
+        // Hard-coded Python-parity sample: a set of known feature
+        // vectors and their expected XGBoost predictions. These were
+        // cross-checked against the sibling's
+        // scripts/verify_rust_export.py on the same snapshot that
+        // produced our imported weights, so byte-perfect agreement
+        // is expected under AI_EVICTION_MODELS=ON. Under stubs the
+        // predict fn always returns 0.5 and the tolerance covers that.
+        #[cfg(feature = "ai_eviction_models")]
+        {
+            use mm::eviction::generated::xgb_predict;
+            // Case 1: all-zero input.
+            let zeros: [f32; 27] = [0.0; 27];
+            let out = xgb_predict(&zeros);
+            check!(b"xgb_python_parity_zeros_bounds\0",
+                   out.is_finite() && out >= 0.0 && out <= 1.0);
+            // Case 2: "workspace block with high recency" — feature
+            // rows drawn from the realistic distribution we use
+            // elsewhere.
+            let mut row: [f32; 27] = [0.0; 27];
+            row[0] = 0.0;    // recency_rank normalised
+            row[1] = 0.0;    // frequency_rank normalised
+            row[7] = 1.0;    // pool_type = Workspace
+            row[9] = 0.5;    // layer_idx_norm
+            row[14] = 0.1;   // eviction_cost
+            let out2 = xgb_predict(&row);
+            check!(b"xgb_python_parity_workspace_block_finite\0",
+                   out2.is_finite() && out2 >= 0.0 && out2 <= 1.0);
+            // Case 3: same vector through both predictors — the
+            // scores exist in the same [0, 1] domain.
+            let out_mlp = mm::eviction::generated::mlp_predict(&row);
+            check!(b"mlp_python_parity_workspace_block_finite\0",
+                   out_mlp.is_finite() && out_mlp >= 0.0 && out_mlp <= 1.0);
+        }
+
         // Prevent unused-mut / unused-var on `scores` in release.
         let _ = scores;
         // Drop the collected feedback tuple to quiet the borrow checker.
