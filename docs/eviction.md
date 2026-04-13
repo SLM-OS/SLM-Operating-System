@@ -265,6 +265,52 @@ follow the same pattern.
 can check to decide whether to fall back to a classical policy when
 the real weights are not present.
 
+### Shell Command (M7)
+
+`eviction` is a shell subcommand modelled on `sched`:
+
+```
+slmos> eviction
+AI eviction:
+  Policy:              LRU
+  Models:              trained (xgb + mlp)
+  Weight pool:         12 / 128 blocks allocated
+  Workspace pool:       3 / 64  blocks allocated
+  Evictions (weight):  0
+  Evictions (ws):      0
+  Evictable candidates (snapshot): 15
+
+slmos> eviction policy
+Available eviction policies:
+  lru (active)
+  lfu
+  arc
+  slm
+  xgboost
+  mlp
+  cacheus
+  cacheus_all5
+  first_candidate
+
+slmos> eviction policy cacheus
+Switched to policy: CACHEUS
+
+slmos> eviction stats
+AI eviction:
+  Policy:              CACHEUS
+  ...
+
+CACHEUS expert weights (2 experts):
+  expert0:  50.00%
+  expert1:  50.00%
+```
+
+The shell layer lives in `kernel/src/shell_sys.c` (`cmd_eviction`) and
+calls into four Rust FFI entry points (`rust_eviction_policy_name`,
+`_policy_list`, `_policy_set`, `_get_stats`). Weights cross the FFI in
+basis points (0..10000) so the kernel's `-mgeneral-regs-only` C code
+stays clear of float arithmetic.
+
 ### Public FFI (Phase AI-Eviction M1 / M2)
 
 The C kernel calls Rust through the following entry points. All are
@@ -310,7 +356,7 @@ shell command. This document updates as each milestone lands.
 ### Test Coverage
 
 `kernel/tests/test_eviction.c` registers the **Eviction Policy Tests**
-Unity suite (17 tests) alongside the existing `test_suite_model_mem`:
+Unity suite (21 tests) alongside the existing `test_suite_model_mem`:
 
 - **Tracking-field FFI** (9 tests, always run):
   - Alloc seeds `load_time`, `last_access_time`, and `access_count = 1`
@@ -335,6 +381,17 @@ Unity suite (17 tests) alongside the existing `test_suite_model_mem`:
     next alloc returns a null handle (no evictable candidates)
   - `test_pool_stats_reports_evictions` — `evictions_total` field is
     readable on both pool-stats snapshots
+- **Shell FFI (M7)** (4 tests, always run):
+  - `test_policy_name_returns_active` — name buffer null-terminated and
+    returns `"LRU"` (feature on) or `"none"` (feature off)
+  - `test_policy_list_is_null_terminated` — list points at static
+    storage, contains `lru` and `cacheus` tokens when feature is on
+  - `test_policy_set_switches_active` — switching lfu → cacheus → lru
+    round-trips; unknown name returns -1 and leaves the active policy
+    unchanged; feature-off returns -2
+  - `test_get_stats_populates_fields` — pool totals sane, snapshot ≥ 0,
+    CACHEUS policy populates `cacheus_expert_count = 2` with uniform
+    5000 bp weights
 
 `rust_eviction_run_tests()` itself exercises 79 internal invariants (78
 when `ai_eviction_models` is off):

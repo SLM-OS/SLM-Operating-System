@@ -285,6 +285,52 @@ extern RustPoolStats rust_workspace_pool_stats(void);
 
 /*
  * ==========================================================================
+ * Eviction-Policy Shell FFI (Phase AI-Eviction M7)
+ * ==========================================================================
+ */
+
+/* Whether the ai_eviction Cargo feature was compiled in.
+ * Returns 1 when enabled, 0 when disabled. */
+extern int rust_eviction_enabled(void);
+
+/* Copy the active policy's name into a caller-owned buffer.
+ * Returns number of bytes written (excluding the null terminator). */
+extern size_t rust_eviction_policy_name(uint8_t *out_buf, size_t buf_len);
+
+/* Space-separated null-terminated list of registered policy names.
+ * Points to static storage; do not free. */
+extern const uint8_t *rust_eviction_policy_list(void);
+
+/* Install a named policy. Returns 0 on success, -1 on unknown name,
+ * -2 when the ai_eviction feature is disabled. */
+extern int32_t rust_eviction_policy_set(const uint8_t *name);
+
+/* Snapshot of evictable-block count (pool-agnostic). -1 when feature off. */
+extern int32_t rust_eviction_snapshot_count(void);
+
+/* Combined stats blob for the `eviction` shell command.
+ * Expert weights are in basis points (0..10000, 1 bp = 0.01%) so this
+ * header stays free of floats — the kernel compiles with
+ * -mgeneral-regs-only. */
+typedef struct {
+    int32_t feature_enabled;
+    int32_t models_available;
+    uint64_t weight_evictions;
+    uint64_t workspace_evictions;
+    size_t weight_allocated;
+    size_t weight_total;
+    size_t workspace_allocated;
+    size_t workspace_total;
+    int32_t snapshot_candidates;
+    uint32_t cacheus_expert_count;
+    uint32_t expert_weights_bp[5];
+} RustEvictionStats;
+
+/* Populate `out` with the current eviction stats. Returns 0 on success. */
+extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
+
+/*
+ * ==========================================================================
  * Model Loader FFI (Phase 5)
  * ==========================================================================
  */

@@ -77,4 +77,15 @@ pub trait EvictionPolicy {
 
     /// Stable human-readable name used by the registry and shell.
     fn name(&self) -> &'static str;
+
+    /// Per-expert weights for ensemble policies (CACHEUS). Default
+    /// impl returns `None` — atomic policies don't have experts.
+    /// The shell's `eviction stats` command uses this to surface
+    /// live weights without introducing `Any`-based downcasts.
+    fn ensemble_weights(&self) -> Option<&[f32]> { None }
+
+    /// Per-expert names (CACHEUS). Default `None`.
+    fn ensemble_expert_names(&self) -> Option<alloc::vec::Vec<&'static str>> {
+        None
+    }
 }

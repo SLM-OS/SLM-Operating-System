@@ -1034,6 +1034,185 @@ pub extern "C" fn rust_eviction_snapshot_count() -> i32 {
     }
 }
 
+// -- Shell-facing FFI (Phase AI-Eviction M7) --
+
+/// Copy the active policy's name into `out_buf` (null-terminated).
+///
+/// Returns the number of bytes written (not counting the null
+/// terminator), or 0 when the `ai_eviction` feature is off.
+/// `out_buf` must point to at least `buf_len` bytes of writable
+/// storage; the caller is responsible for ensuring the pointer is
+/// valid for the declared length.
+///
+/// # Safety
+/// `out_buf` must point to `buf_len` writable bytes. If `buf_len`
+/// is zero, the function returns 0 without writing anything.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_policy_name(
+    out_buf: *mut u8,
+    buf_len: usize,
+) -> usize {
+    if buf_len == 0 || out_buf.is_null() {
+        return 0;
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let msg = b"none";
+        let n = core::cmp::min(msg.len(), buf_len - 1);
+        core::ptr::copy_nonoverlapping(msg.as_ptr(), out_buf, n);
+        *out_buf.add(n) = 0;
+        n
+    }
+    #[cfg(feature = "ai_eviction")]
+    {
+        let name = mm::eviction::get_eviction_policy_name();
+        let bytes = name.as_bytes();
+        let n = core::cmp::min(bytes.len(), buf_len - 1);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, n);
+        *out_buf.add(n) = 0;
+        n
+    }
+}
+
+/// Return a null-terminated static string listing the available
+/// policy names, space-separated. Valid for the lifetime of the
+/// kernel. Returns a pointer to `"none"` when the feature is off.
+#[no_mangle]
+pub extern "C" fn rust_eviction_policy_list() -> *const u8 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { b"none\0".as_ptr() }
+    #[cfg(feature = "ai_eviction")]
+    {
+        // Feature-gated models affect which ML policies are
+        // *meaningful*, but xgboost / mlp still link (stubs return
+        // 0.5) — so the list is stable regardless of
+        // `ai_eviction_models`.
+        b"lru lfu arc slm xgboost mlp cacheus first_candidate\0".as_ptr()
+    }
+}
+
+/// Switch the active policy to `name` (case-sensitive, ASCII).
+///
+/// Returns 0 on success, -1 on unknown name, -2 when the feature
+/// is off.
+///
+/// # Safety
+/// `name` must point to a valid null-terminated C string with
+/// length ≤ 31 bytes (longer names are rejected).
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_policy_set(name: *const u8) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = name; -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        if name.is_null() { return -1; }
+        // Bounded C-string read.
+        let mut len = 0usize;
+        while len < 32 {
+            if *name.add(len) == 0 { break; }
+            len += 1;
+        }
+        if len == 0 || len == 32 { return -1; }
+        let slice = core::slice::from_raw_parts(name, len);
+        let requested = match core::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        use alloc::boxed::Box;
+        use mm::eviction::{self, EvictionPolicy};
+        let boxed: Box<dyn EvictionPolicy + Send> = match requested {
+            "lru" => Box::new(eviction::LruPolicy::new()),
+            "lfu" => Box::new(eviction::LfuPolicy::new()),
+            "arc" => Box::new(eviction::ARCPolicy::new()),
+            "slm" => Box::new(eviction::SlmHeuristicPolicy::new()),
+            "xgboost" => Box::new(eviction::XGBoostPolicy::new()),
+            "mlp" => Box::new(eviction::MlpPolicy::new()),
+            "cacheus" => Box::new(eviction::CacheusSelector::ml_only()),
+            "cacheus_all5" => Box::new(eviction::CacheusSelector::all_5()),
+            "first_candidate" => Box::new(eviction::FirstCandidatePolicy),
+            _ => return -1,
+        };
+        eviction::set_eviction_policy(boxed);
+        0
+    }
+}
+
+/// Combined eviction-subsystem stats for the `eviction` shell command.
+/// Mirrors the layout used by `eviction_shell_stats` in slm_ffi.h.
+///
+/// Expert weights are reported as integer basis-points (0..10000,
+/// 1 bp = 0.01%) so the kernel's `-mgeneral-regs-only` C code can
+/// print them without needing float arithmetic.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RustEvictionStats {
+    pub feature_enabled: i32,
+    pub models_available: i32,
+    pub weight_evictions: u64,
+    pub workspace_evictions: u64,
+    pub weight_allocated: usize,
+    pub weight_total: usize,
+    pub workspace_allocated: usize,
+    pub workspace_total: usize,
+    pub snapshot_candidates: i32,
+    /// Number of CACHEUS expert weights reported below.
+    /// Zero when the installed policy is not an ensemble.
+    pub cacheus_expert_count: u32,
+    /// Per-expert weights in basis points (0..10000). CACHEUS caps
+    /// at 5 experts. Entries past `cacheus_expert_count` are zero.
+    pub expert_weights_bp: [u32; 5],
+}
+
+/// Fill `out` with the current eviction stats. Returns 0 on success.
+///
+/// # Safety
+/// `out` must point to a writable `RustEvictionStats`.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_get_stats(
+    out: *mut RustEvictionStats,
+) -> i32 {
+    if out.is_null() { return -1; }
+    let mut stats = RustEvictionStats::default();
+
+    stats.feature_enabled = rust_eviction_enabled();
+    #[cfg(feature = "ai_eviction")]
+    {
+        stats.models_available =
+            if mm::eviction::generated::MODELS_AVAILABLE { 1 } else { 0 };
+        stats.snapshot_candidates = rust_eviction_snapshot_count();
+    }
+    let w = mm::weight_pool_stats();
+    let ws = mm::workspace_pool_stats();
+    stats.weight_evictions = w.evictions_total;
+    stats.workspace_evictions = ws.evictions_total;
+    stats.weight_allocated = w.allocated_blocks;
+    stats.weight_total = w.total_blocks;
+    stats.workspace_allocated = ws.allocated_blocks;
+    stats.workspace_total = ws.total_blocks;
+
+    // CACHEUS weights are surfaced through the EvictionPolicy trait's
+    // `ensemble_weights` method — default `None` for atomic policies,
+    // overridden by CacheusSelector. This reads the live installed
+    // instance (no probe or duplicate state).
+    #[cfg(feature = "ai_eviction")]
+    {
+        mm::eviction::with_active_policy(|p| {
+            if let Some(w) = p.ensemble_weights() {
+                stats.cacheus_expert_count = w.len().min(5) as u32;
+                for (i, v) in w.iter().take(5).enumerate() {
+                    // Basis points: clamp to [0, 10000] and round.
+                    let bp = (v.clamp(0.0, 1.0) * 10_000.0 + 0.5) as u32;
+                    stats.expert_weights_bp[i] = bp;
+                }
+            }
+        });
+    }
+
+    core::ptr::write(out, stats);
+    0
+}
+
 /// Comprehensive Rust-internal tests for the eviction subsystem.
 ///
 /// Returns the number of failures. 0 on success. When the
