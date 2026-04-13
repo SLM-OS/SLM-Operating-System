@@ -55,6 +55,25 @@ set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO" "RAS
 # Add platform define
 add_compile_definitions(PLATFORM_${PLATFORM}=1)
 
+# Pi 5: ELR-trampoline infrastructure for deferred scheduling from the
+# timer ISR. Calling switch_to() directly from an exception handler
+# hangs on Pi 5 hardware (abandoned exception frame); the trampoline
+# runs schedule() in task context after eret. See issue #57 and
+# docs/pi5-secondary-cpu-preemption.md.
+#
+# Default OFF because a separate pre-existing bug prevents timer IRQs
+# from firing on this Pi 5 at all (commit ac46e40: tasks run with
+# DAIF.I=1 and the documented fix to unmask them triggers a shell hang
+# whose root cause is independent of this work). Turning the option
+# ON deploys the trampoline + makes all CPUs use `daifclr + wfi` in
+# idle — useful once the timer-IRQ-delivery blocker is resolved, but
+# regresses cooperative cross-CPU dispatch until then because secondary
+# CPUs wait for timer IRQs that never arrive.
+option(PI5_SECONDARY_PREEMPT "Enable deferred-scheduling preemption on Pi 5 secondary CPUs (blocked by timer-IRQ issue)" OFF)
+if(PLATFORM STREQUAL "RASPI5" AND PI5_SECONDARY_PREEMPT)
+    add_compile_definitions(PI5_SECONDARY_PREEMPT=1)
+endif()
+
 # Enable semihosting for QEMU (used for clean test exit)
 if(PLATFORM STREQUAL "QEMU_VIRT")
     add_compile_definitions(ENABLE_SEMIHOSTING=1)
@@ -138,6 +157,7 @@ set(KERNEL_SOURCES
     kernel/sched/sched.c
     kernel/sched/sched_heuristic.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
+    $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/sched/preempt.c>
 
     # ==========================================================================
     # Inter-Process Communication

@@ -166,6 +166,16 @@ el1_sync:
 el1_irq:
     save_regs
     bl      el1_irq_handler     /* Call C handler */
+#if defined(PI5_SECONDARY_PREEMPT)
+    /* After the IRQ body runs, check for a pending reschedule. When set,
+     * maybe_arm_resched_trampoline() rewrites the saved ELR_EL1 in the
+     * trap frame so the upcoming `eret` lands in resched_trampoline
+     * rather than the originally interrupted PC. That trampoline calls
+     * schedule() in task context (not exception context), avoiding the
+     * Pi 5 hang caused by switch_to inside an exception handler. */
+    mov     x0, sp
+    bl      maybe_arm_resched_trampoline
+#endif
     restore_regs
     eret
 
@@ -216,3 +226,157 @@ el0_serror:
     bl      el0_serror_handler  /* C handler: terminate component */
     restore_regs
     eret
+
+#if defined(PI5_SECONDARY_PREEMPT)
+/*
+ * resched_trampoline - Deferred-scheduling trampoline (Pi 5, issue #57).
+ *
+ * Invoked by `eret` from el1_irq when maybe_arm_resched_trampoline() has
+ * rewritten the trap frame's ELR_EL1 to point here. Runs in task
+ * context on the interrupted task's stack.
+ *
+ * Entry invariants (set by the trap-frame rewrite):
+ *   - PC = resched_trampoline (via eret)
+ *   - SPSR restored from orig_spsr, so DAIF.I=1 (IRQs masked) and
+ *     M[3:0]=0x5 (EL1h)
+ *   - SP = interrupted task's SP (SP_EL1 is not swapped on EL1->EL1)
+ *   - x0-x30 = task's values at interruption (restore_regs ran before
+ *     the first eret)
+ *
+ * Responsibilities:
+ *   1. Save all caller-saved GPRs (x0-x18) and FP/LR (x29-x30) on the
+ *      task's stack. x19-x28 are preserved across schedule() by the
+ *      AAPCS64 call convention.
+ *   2. Load orig_elr[cpu] / orig_spsr[cpu] from NC memory into stack
+ *      locals so a nested preemption can't race them.
+ *   3. Set preempt_disabled[cpu]=1 so maybe_arm_resched_trampoline()
+ *      bails on any nested timer IRQ rather than re-arming over us.
+ *   4. Unmask IRQs and bl schedule. schedule() may or may not call
+ *      switch_to. If it does, we resume here on this task's stack when
+ *      switched back in the future.
+ *   5. Re-mask IRQs, clear preempt_disabled[cpu], restore the saved
+ *      original ELR/SPSR into the system registers, restore GPRs, and
+ *      `eret` to the originally interrupted PC.
+ *
+ * Stack frame layout (192 bytes, 16-byte aligned):
+ *   [sp, #0..143]   x0-x17 (9 pairs)
+ *   [sp, #144]      x18
+ *   [sp, #152]      x29 (fp)
+ *   [sp, #160]      x30 (lr)
+ *   [sp, #168]      saved orig_elr
+ *   [sp, #176]      saved orig_spsr
+ *   [sp, #184]      padding
+ *
+ * Stack-size impact: 192 bytes per trampoline activation, on top of the
+ * ~160-byte interrupt trap frame already on the task's kernel stack at
+ * the point of preemption. Task stacks are `STACK_SIZE = 64 KB`
+ * (kernel/include/config.h), so the trampoline consumes ~0.3% of the
+ * stack — safely within budget. schedule() itself adds a small amount
+ * for its own locals + rq_lock_irqsave frames, bounded and audited.
+ */
+.global resched_trampoline
+.type resched_trampoline, @function
+resched_trampoline:
+    /* Save caller-clobbered registers. IRQs are still masked so we
+     * cannot be re-entered here. */
+    sub     sp, sp, #192
+    stp     x0, x1,   [sp, #0]
+    stp     x2, x3,   [sp, #16]
+    stp     x4, x5,   [sp, #32]
+    stp     x6, x7,   [sp, #48]
+    stp     x8, x9,   [sp, #64]
+    stp     x10, x11, [sp, #80]
+    stp     x12, x13, [sp, #96]
+    stp     x14, x15, [sp, #112]
+    stp     x16, x17, [sp, #128]
+    str     x18,      [sp, #144]
+    stp     x29, x30, [sp, #152]
+
+    /* Compute logical cpu_id inline rather than calling the C `cpu_id()`
+     * helper. Reasons:
+     *   1. We have not yet saved x19-x28 or set up a valid frame pointer
+     *      for a C call; a bl here would need extra register-save paperwork.
+     *   2. The MPIDR hack `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` is
+     *      the same one used by every other PI5_SECONDARY_PREEMPT code
+     *      site — task_entry_trampoline (task.c), NC trace points
+     *      (sched.c, exceptions.c, smp.c) — and is correct for Pi 5
+     *      (Aff1 holds CPU index) and QEMU (Aff0 holds it). The two
+     *      affinity fields are never both non-zero on these platforms.
+     *   3. Jetson uses a dual-cluster layout where this would be wrong,
+     *      but the whole trampoline is gated on PI5_SECONDARY_PREEMPT
+     *      and is only defined for PLATFORM=RASPI5 in CMakeLists.
+     *
+     * If the kernel is ever ported to a CPU with more complex affinity
+     * encoding while reusing this infrastructure, convert this into a
+     * shared asm macro alongside the existing NC-trace uses — don't
+     * silently skew one call site from the rest. */
+    mrs     x0, mpidr_el1
+    and     x1, x0, #0xFF
+    ubfx    x2, x0, #8, #8
+    orr     x0, x1, x2          /* x0 = cpu */
+
+    /* Snapshot orig_elr[cpu] / orig_spsr[cpu] to stack locals.
+     * `orig_elr` and `orig_spsr` are global pointers into NC memory
+     * (assigned by preempt_init()); `adrp + ldr` loads the pointer
+     * value, then we index by cpu. */
+    adrp    x1, orig_elr
+    ldr     x1, [x1, #:lo12:orig_elr]
+    ldr     x3, [x1, x0, lsl #3]    /* x3 = orig_elr[cpu] */
+    adrp    x2, orig_spsr
+    ldr     x2, [x2, #:lo12:orig_spsr]
+    ldr     x4, [x2, x0, lsl #3]    /* x4 = orig_spsr[cpu] */
+    stp     x3, x4, [sp, #168]
+
+    /* Mark preempt_disabled[cpu] = 1 before unmasking IRQs so any
+     * nested timer IRQ's scheduler_tick/maybe_arm check aborts and
+     * does not overwrite orig_elr[cpu]/orig_spsr[cpu]. */
+    adrp    x5, preempt_disabled
+    add     x5, x5, #:lo12:preempt_disabled
+    mov     w6, #1
+    str     w6, [x5, x0, lsl #2]
+
+    /* Unmask IRQs and call schedule(). If schedule() picks a different
+     * task, switch_to() swaps stacks. When this task is eventually
+     * switched back in, execution resumes just after the bl below. */
+    msr     daifclr, #2
+    isb
+    bl      schedule
+    msr     daifset, #2
+    isb
+
+    /* schedule() clobbered x0-x18 and the flag-clear state. Recompute
+     * cpu_id and clear preempt_disabled[cpu]. */
+    mrs     x0, mpidr_el1
+    and     x1, x0, #0xFF
+    ubfx    x2, x0, #8, #8
+    orr     x0, x1, x2
+    adrp    x5, preempt_disabled
+    add     x5, x5, #:lo12:preempt_disabled
+    str     wzr, [x5, x0, lsl #2]
+
+    /* Restore orig_elr/orig_spsr into the system registers. */
+    ldp     x3, x4, [sp, #168]
+    msr     elr_el1, x3
+    msr     spsr_el1, x4
+
+    /* Restore task's GPRs and unwind the trampoline frame. */
+    ldp     x0, x1,   [sp, #0]
+    ldp     x2, x3,   [sp, #16]
+    ldp     x4, x5,   [sp, #32]
+    ldp     x6, x7,   [sp, #48]
+    ldp     x8, x9,   [sp, #64]
+    ldp     x10, x11, [sp, #80]
+    ldp     x12, x13, [sp, #96]
+    ldp     x14, x15, [sp, #112]
+    ldp     x16, x17, [sp, #128]
+    ldr     x18,      [sp, #144]
+    ldp     x29, x30, [sp, #152]
+    add     sp, sp, #192
+
+    /* eret works outside of an exception handler: it atomically
+     * restores PSTATE from SPSR_EL1 and branches to ELR_EL1. This is
+     * the canonical way to jump-with-PSTATE-restore in kernel code. */
+    eret
+
+.size resched_trampoline, . - resched_trampoline
+#endif /* PI5_SECONDARY_PREEMPT */

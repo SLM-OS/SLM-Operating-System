@@ -21,6 +21,7 @@
 #include "timer.h"
 #include "cache.h"
 #include "ncmem.h"
+#include "preempt.h"
 #include "string.h"
 #include <stdint.h>
 
@@ -407,17 +408,26 @@ static void idle_task_func(void *arg)
         __asm__ volatile("sti" ::: "memory");
         __asm__ volatile("hlt");
 #elif defined(PLATFORM_HAS_NC_MEMORY)
-        /* Pi 5/Jetson: CPU 0 unmasks IRQs for timer-driven preemption.
-         * Secondary CPUs use WFE only — enabling timer preemption on
-         * secondary CPUs causes scheduler re-entrancy issues (schedule()
-         * called from timer ISR does switch_to, abandoning the exception
-         * frame). Cross-CPU dispatch works via cooperative WFE/SEV. */
+        /* Pi 5/Jetson idle loop.
+         *
+         * With PI5_SECONDARY_PREEMPT (Pi 5): all CPUs unmask IRQs and
+         * WFI so timer-driven preemption works on secondary CPUs too.
+         * The ELR trampoline handles the switch_to-in-ISR problem.
+         *
+         * Without PI5_SECONDARY_PREEMPT (Jetson, or Pi 5 with the kill
+         * switch): only CPU 0 takes timer IRQs in idle. Secondary CPUs
+         * use WFE and rely on cooperative cross-CPU dispatch (SEV). */
+#if defined(PI5_SECONDARY_PREEMPT)
+        __asm__ volatile("msr daifclr, #2" ::: "memory");
+        __asm__ volatile("wfi");
+#else
         if (cpu_id() == 0) {
             __asm__ volatile("msr daifclr, #2" ::: "memory");
             __asm__ volatile("wfi");
         } else {
             __asm__ volatile("wfe" ::: "memory");
         }
+#endif
 #else
         __asm__ volatile("msr daifclr, #2" ::: "memory");
         __asm__ volatile("wfi");
@@ -538,6 +548,9 @@ void scheduler_init(void)
     for (uint32_t i = 0; i < MAX_CPUS; i++)
         sched_diag_idle_loops[i] = 0;
 #endif
+
+    /* Secondary-CPU preemption state (Pi 5 only). No-op on other platforms. */
+    preempt_init();
 
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
@@ -1185,6 +1198,12 @@ void schedule(void)
     /* Resumed on our stack after being switched back.
      * Re-enable preemption so timer ticks can trigger scheduling. */
     preempt_disabled[this_cpu] = 0;
+#if defined(PI5_SECONDARY_PREEMPT)
+    /* Clear any pending reschedule flag set by scheduler_tick while
+     * we were mid-switch — we just scheduled, so an immediate re-arm
+     * after eret would be redundant. */
+    reschedule_pending[this_cpu] = 0;
+#endif
 }
 
 /*
@@ -1297,18 +1316,25 @@ void scheduler_start(uint32_t this_cpu)
 #endif
 
     /* Unmask IRQs.
-     * On Pi 5 secondary CPUs, skip daifclr for now — the idle task's
-     * while loop does its own daifclr + wfi. Enabling interrupts here
-     * on the boot stack triggers an exception path that hangs (under
-     * investigation). CPU 0 enables interrupts normally. */
+     * On Pi 5 with PI5_SECONDARY_PREEMPT: all CPUs enable here so the
+     * first timer tick can arrive while switch_to runs (preempt_disabled
+     * is already 1 to suppress re-entrant scheduling during the switch).
+     * Without the preemption fix, secondary CPUs must skip this because
+     * a timer IRQ here would follow the broken direct-schedule-from-ISR
+     * path. */
 #if defined(PLATFORM_X86_64)
     __asm__ volatile("sti" ::: "memory");
 #elif defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(PI5_SECONDARY_PREEMPT)
+    __asm__ volatile("msr daifclr, #0x2" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
+#else
     if (this_cpu == 0) {
         __asm__ volatile("msr daifclr, #0x2" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
     }
     /* Secondary CPUs: idle_task_func does daifclr in its loop */
+#endif
 #else
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");
     __asm__ volatile("isb" ::: "memory");
@@ -1383,8 +1409,18 @@ void scheduler_tick(void)
     if (preempt_disabled[cpu])
         return;
 
+#if defined(PI5_SECONDARY_PREEMPT)
+    /* Pi 5: defer the schedule() call to exception-return context via
+     * the ELR trampoline. Calling switch_to() from inside the timer
+     * ISR hangs on Pi 5 hardware because the abandoned exception
+     * frame's SPSR_EL1/ELR_EL1 are never `eret`-ed back. The trampoline
+     * arms in maybe_arm_resched_trampoline() (called from el1_irq just
+     * before restore_regs/eret), and schedule() runs in task context. */
+    reschedule_pending[cpu] = 1;
+#else
     /* Preempt current task */
     schedule();
+#endif
 }
 
 /*
