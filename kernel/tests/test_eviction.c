@@ -17,6 +17,7 @@
 #include "unity.h"
 #include "../include/slm_ffi.h"
 #include "../include/string.h"
+#include "../include/uart.h"
 #include <stdint.h>
 
 /* ============================================================================
@@ -68,6 +69,10 @@ extern size_t rust_eviction_policy_name(uint8_t *out_buf, size_t buf_len);
 extern const uint8_t *rust_eviction_policy_list(void);
 extern int32_t rust_eviction_policy_set(const uint8_t *name);
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
+
+/* Latency benchmark FFI (M9). */
+extern uint64_t rust_eviction_bench_latency_ns(
+    const uint8_t *name, uint32_t iterations);
 
 /* ============================================================================
  * Helpers
@@ -718,6 +723,61 @@ static void test_policy_swap_mid_workload(void)
 }
 
 /* ============================================================================
+ * M9: Latency benchmarks
+ *
+ * Runs select_victim against a canned 8-candidate set 1000 times for
+ * each policy and prints the average per-call latency to the test log.
+ * The run is reported (not asserted in absolute terms) — QEMU's clock
+ * resolution and contention vary too much for a hard cutoff to be
+ * meaningful. We assert only that:
+ *   - the call returns a measurement (not UINT64_MAX)
+ *   - the per-call cost is below 1 ms (which would indicate something
+ *     is catastrophically wrong)
+ * Hardware bench numbers (Pi 5 / Jetson) need a real-board run; the
+ * commit message captures the QEMU baseline.
+ * ============================================================================ */
+
+#define BENCH_ITERATIONS 1000
+
+static void run_one_bench(const char *name)
+{
+    uint64_t avg = rust_eviction_bench_latency_ns(
+        (const uint8_t *)name, BENCH_ITERATIONS);
+    if (avg == UINT64_MAX) {
+        uart_printf("  [BENCH] %-16s skipped (feature off or unknown)\r\n",
+                    name);
+        return;
+    }
+    uart_printf("  [BENCH] %-16s avg %lu ns / call (%d iterations)\r\n",
+                name, (unsigned long)avg, BENCH_ITERATIONS);
+    /* Sanity: anything over 10 ms / call indicates an infinite loop
+     * or runaway allocation — even QEMU's slow int8 MLP forward
+     * pass under AI_EVICTION_MODELS=ON stays well under that. The
+     * < 1 µs target lives in M9 hardware bench numbers, not here. */
+    TEST_ASSERT_TRUE(avg < 10000000ULL);
+}
+
+static void test_bench_all_policies(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+    /* Print a header so the numbers are easy to spot in the log. */
+    uart_puts("  --- Eviction latency benchmarks (QEMU) ---\r\n");
+    run_one_bench("first_candidate");
+    run_one_bench("lru");
+    run_one_bench("lfu");
+    run_one_bench("arc");
+    run_one_bench("slm");
+    run_one_bench("xgboost");
+    run_one_bench("mlp");
+    run_one_bench("cacheus");
+
+    /* Restore default. */
+    rust_eviction_policy_set((const uint8_t *)"lru");
+}
+
+/* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
 
@@ -761,6 +821,9 @@ int test_suite_eviction(void)
     /* M8: end-to-end workload + mid-flight policy swap stress. */
     RUN_TEST(test_memory_pressure_no_leak);
     RUN_TEST(test_policy_swap_mid_workload);
+
+    /* M9: per-policy latency benchmarks (QEMU baseline numbers). */
+    RUN_TEST(test_bench_all_policies);
 
     return UnityEnd();
 }

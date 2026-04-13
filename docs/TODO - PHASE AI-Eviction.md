@@ -299,34 +299,89 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 
 **Note:** Mirrors Phase AI-Sched M9. The sibling project measured Python latencies (XGBoost ~9 µs, MLP ~2 µs per candidate at batch=64) but those include Python overhead. Native Rust if-else chains should be sub-microsecond.
 
+### Benchmark Framework
+- ✅ `rust_eviction_bench_latency_ns(name, iterations)` FFI runs the
+  given policy against a fixed 8-candidate set; returns average
+  nanoseconds per `select_victim` call.
+- ✅ `test_bench_all_policies` (`test_suite_eviction`) reports numbers
+  for all policies under each build config. Runs as a Unity test so
+  the numbers appear in every `make test` log.
+
 ### Hardware Benchmarks
-- ☐ Run latency benches on Cortex-A78 (Pi 5) — target < 1 µs avg
-- ☐ Run on Jetson Orin Nano — target < 1 µs avg
-- ☐ Run on x86-64 — informational only, not a target platform
+- ✅ QEMU baseline numbers (aarch64 `virt`, cortex-a76, 1000 iterations per call,
+  stats from `make test AI_EVICTION=ON`):
+
+  | Policy | Stub build | Real models |
+  |--------|------------|-------------|
+  | first_candidate | 55 ns | 58 ns |
+  | lru | 71 ns | 72 ns |
+  | lfu | 90 ns | 91 ns |
+  | arc | 3989 ns | 3132 ns |
+  | slm | 1749 ns | 881 ns |
+  | xgboost | 18780 ns | 190725 ns |
+  | mlp | 18596 ns | 1583126 ns |
+  | cacheus (ml_only) | 46381 ns | 1734300 ns |
+
+  The MLP number under `AI_EVICTION_MODELS=ON` is dominated by QEMU's
+  slow int8 emulation — real silicon should be orders of magnitude
+  faster (the sibling's Python reference is ~2 µs at batch=64).
+
+- ⏸️ Cortex-A78 (Pi 5) — deferred. Requires Pi 5 hardware deploy via
+  `labctl sdwire_update` and a dedicated `eviction bench` shell run.
+  The framework is in place; final numbers are a capstone-demo task.
+- ⏸️ Jetson Orin Nano — deferred on the same grounds.
+- ⏸️ x86-64 — informational only.
 
 ### End-to-End Workload Comparison
-- ☐ Reproduce sibling project's 7 workload scenarios as kernel test programs (single_inference, multi_model, hot_swap, burst_load, mixed_priority, gpu_contention, adversarial)
-- ☐ Measure fault count and total latency under each policy
-- ☐ Generate a comparison table matching `data/results/policy_scenario_matrix.csv` from the sibling
+- ⏸️ 7-scenario simulator replay (single_inference, multi_model,
+  hot_swap, burst_load, mixed_priority, gpu_contention, adversarial) —
+  deferred post-capstone. Requires porting the sibling's
+  `simulator/core.py` trace driver into the kernel and is a multi-
+  week effort. The qualitative adaptation signal is verified by
+  `cacheus_adapts_weights_toward_better_expert`; quantitative
+  comparison to LRU remains in the sibling project
+  (`data/results/policy_scenario_matrix.csv`).
 
 ### Memory Overhead
-- ☐ Measure: total binary size delta with `ENABLE_AI_EVICTION_MODELS=ON` vs OFF — target < 2 MB
-- ☐ Measure: runtime memory overhead (CACHEUS state, eviction tracker) — target < 16 KB
-- ☐ Document overhead in `docs/eviction.md`
+- ✅ Binary size delta (QEMU_VIRT Release build; `stat slmos.elf`):
+
+  | Config | ELF size | Delta vs OFF |
+  |--------|---------:|-------------:|
+  | OFF | 2,444,536 B | — |
+  | AI_EVICTION=ON (stubs) | 2,580,376 B | +135,840 B (~133 KB) |
+  | AI_EVICTION_MODELS=ON (real) | 2,789,944 B | +345,408 B (~337 KB) |
+
+  `slmos.bin` (the stripped flash footprint) deltas are smaller:
+  +48 KB for stubs, +254 KB for full models. All well under the
+  2 MB budget.
+
+- ✅ Runtime overhead (sized against the M5 design):
+  - `CacheusSelector` (ml_only): 2 × `Box<dyn EvictionPolicy>` + 2 f32
+    weights + 2 u32 fault counters + 2 u32 decision counters +
+    200-slot `VecDeque<EvictionRecord>`, each record is an id + two
+    `usize` (small Vec on the heap). Upper bound: ~8 KB.
+  - `EvictedContentTracker` (default): 256-slot
+    `VecDeque<TrackerEntry>`, each entry `{ContentKey, u32, u64}` =
+    16 B → 4 KB + overhead.
+  - Classical policies: zero additional heap beyond the Box.
+  - **Total**: < 16 KB on the heap when CACHEUS is installed.
+
+- ✅ Overhead documented in `docs/eviction.md` (Memory Overhead
+  section alongside the table).
 
 ---
 
 ## Phase AI-Eviction Completion Checklist
 
 ### Deliverables
-- ☐ Pluggable `EvictionPolicy` trait integrated into `ModelAllocator`
-- ☐ Four classical Rust policies (LRU, LFU, ARC, SLM-Heuristic) ported from sibling crate
-- ☐ XGBoost and int8 MLP wired in via generated files; predictions agree with Python reference
-- ☐ CACHEUS adaptive selector with `ml_only` default pool
-- ☐ `eviction` shell command for runtime introspection and policy switching
-- ☐ Eviction decisions trigger on pool exhaustion (replaces today's `OutOfMemory` failure)
-- ☐ Inference latency < 1 µs on target hardware
-- ☐ All tests pass with `ENABLE_AI_EVICTION` ON and OFF
+- ✅ Pluggable `EvictionPolicy` trait integrated into `ModelAllocator` (M1 + M6)
+- ✅ Four classical Rust policies (LRU, LFU, ARC, SLM-Heuristic) ported from sibling crate (M3)
+- ✅ XGBoost and int8 MLP wired in via generated files; predictions agree with Python reference byte-perfect for XGBoost and within documented int8 quantisation tolerance for MLP (M4)
+- ✅ CACHEUS adaptive selector with `ml_only` default pool constructor (M5)
+- ✅ `eviction` shell command for runtime introspection and policy switching (M7)
+- ✅ Eviction decisions trigger on pool exhaustion (M6 — replaces the old `OutOfMemory` failure when `AI_EVICTION=ON`)
+- ⏸️ Inference latency < 1 µs on target hardware — deferred: the bench framework is in place (M9), QEMU numbers are captured, Pi 5 / Jetson runs need hardware deploy.
+- ✅ All tests pass with `AI_EVICTION=OFF` / `ON` / `MODELS=ON`.
 
 ### Demo
 - ☐ Boot SLM-OS in QEMU with AI eviction

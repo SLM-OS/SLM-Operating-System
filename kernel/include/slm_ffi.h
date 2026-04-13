@@ -329,6 +329,13 @@ typedef struct {
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
+/* Per-policy average select_victim latency in nanoseconds over
+ * `iterations` calls. Returns UINT64_MAX on error (unknown policy,
+ * feature off, bogus clock, zero iterations). Used by the M9 bench
+ * harness and the `eviction bench` shell command (future). */
+extern uint64_t rust_eviction_bench_latency_ns(
+    const uint8_t *name, uint32_t iterations);
+
 /*
  * ==========================================================================
  * Model Loader FFI (Phase 5)
