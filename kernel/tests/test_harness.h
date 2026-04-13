@@ -91,4 +91,7 @@ int test_suite_dtb(void);
 /* ELF loader tests (BOOT-H2 bounds checks) */
 int test_suite_elf(void);
 
+/* Message router tests (Rust FFI, ARM64 only) */
+int test_suite_msg_router(void);
+
 #endif /* TEST_HARNESS_H */

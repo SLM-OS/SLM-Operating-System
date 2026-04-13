@@ -23,8 +23,10 @@ const TOPIC_NAME_LEN: usize = 16;
 const MAX_WILDCARD_SUBS: usize = 8;
 const MSG_PRIORITY_NORMAL: u8 = 0;
 
-/// Ack timeout in pit_ticks (500 ticks = 5 seconds at 100 Hz).
-const ACK_TIMEOUT_TICKS: u64 = 500;
+/// Ack timeout in seconds. Converted to hardware counter cycles at the
+/// call site via `timer_get_frequency()` so the timeout is correct
+/// regardless of TIMER_HZ or whether timer IRQs are masked.
+const ACK_TIMEOUT_SECS: u64 = 5;
 
 // =============================================================================
 // External C functions
@@ -35,12 +37,12 @@ extern "C" {
     fn uart_printf(fmt: *const u8, ...);
     #[link_name = "yield"]
     fn sched_yield();
-    static pit_ticks: u64;
-}
-
-/// Read `pit_ticks` using volatile access (it's modified by ISR).
-fn get_ticks() -> u64 {
-    unsafe { core::ptr::read_volatile(&pit_ticks) }
+    /// ARM generic timer counter (CNTPCT_EL0). Always advances regardless
+    /// of DAIF.I state — safe to poll from tasks on Pi 5 where timer IRQs
+    /// don't fire while a task runs.
+    fn timer_get_count() -> u64;
+    /// ARM generic timer frequency (CNTFRQ_EL0), in Hz.
+    fn timer_get_frequency() -> u64;
 }
 
 fn puts(s: &[u8]) {
@@ -510,16 +512,27 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
 
     // Deliver and wait for ack on each target. Mailbox atomics handle
     // cross-CPU sync on the ready/ack flags.
+    //
+    // Timeout uses the ARM generic timer (CNTPCT_EL0) rather than the
+    // tick-driven `pit_ticks`. On Pi 5, tasks run with DAIF.I=1 so timer
+    // IRQs don't fire while `publish_internal` is executing, meaning
+    // `pit_ticks` never advances and the loop would hang forever. The
+    // hardware counter increments continuously regardless of IRQ mask
+    // state.
     let mut delivered = 0i32;
+    let timeout_cycles = timer_get_frequency().saturating_mul(ACK_TIMEOUT_SECS);
     for t in 0..target_count {
         // SAFETY: pointer points at a Mailbox inside the TOPICS /
         // WILDCARD_SUBS static arrays (stable storage).
         let mb = &mut *targets[t];
         mb.deliver(topic_name, data, priority);
-        let timeout = get_ticks() + ACK_TIMEOUT_TICKS;
-        while get_ticks() < timeout {
+        let start = timer_get_count();
+        loop {
             if mb.ack.load(Ordering::Acquire) != 0 {
                 delivered += 1;
+                break;
+            }
+            if timer_get_count().wrapping_sub(start) >= timeout_cycles {
                 break;
             }
             sched_yield();
