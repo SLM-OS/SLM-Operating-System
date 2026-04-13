@@ -640,6 +640,95 @@ static void test_timer_running_after_boot(void)
         "Timer frequency is 0 (timer not initialized)");
 }
 
+#if CONFIG_WORK_STEALING
+/* ============================================================================
+ * Work-stealing integration test (#59 Phase B)
+ *
+ * Queue N unpinned tasks all onto CPU 1. Without stealing they would all
+ * run on CPU 1 one after another. With stealing enabled, idle CPUs
+ * should pull from CPU 1's deque and run tasks in parallel. Pass
+ * criteria: all tasks complete AND at least two distinct CPUs observed
+ * running them.
+ * ============================================================================ */
+
+#define STEAL_TASK_COUNT 5
+static volatile uint32_t steal_cpu_recorded[STEAL_TASK_COUNT];
+static volatile uint32_t steal_done_count;
+
+static void steal_test_task(void *arg)
+{
+    uint32_t idx = (uint32_t)(uintptr_t)arg;
+    if (idx < STEAL_TASK_COUNT) {
+        steal_cpu_recorded[idx] = cpu_id() + 1;  /* +1 so 0 means "not run" */
+        cache_clean((void *)&steal_cpu_recorded[idx]);
+    }
+    /* Small work simulation so the steal window is real */
+    for (int i = 0; i < 3; i++) delay(100000);
+
+    irq_flags_t f = spin_lock_irqsave(&test_state.lock);
+    steal_done_count++;
+    cache_clean((void *)&steal_done_count);
+    spin_unlock_irqrestore(&test_state.lock, f);
+}
+
+static void test_work_stealing_distributes_load(void)
+{
+    if (cpu_count < 3) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 3");
+        return;
+    }
+
+    for (int i = 0; i < STEAL_TASK_COUNT; i++) steal_cpu_recorded[i] = 0;
+    steal_done_count = 0;
+    cache_clean((void *)&steal_done_count);
+
+    /* Queue all tasks onto CPU 1 with ANY affinity so they're stealable. */
+    for (int i = 0; i < STEAL_TASK_COUNT; i++) {
+        char name[8];
+        name[0] = 'w'; name[1] = 's'; name[2] = '0' + (char)i; name[3] = '\0';
+        struct task *t = task_create(name, steal_test_task, (void *)(uintptr_t)i);
+        TEST_ASSERT_NOT_NULL(t);
+        /* task_create defaults cpu_affinity to CPU_AFFINITY_ANY — leave it
+         * so steal_deque_push accepts this task in scheduler_add_task_to_cpu. */
+        scheduler_add_task_to_cpu(t, 1);
+    }
+
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 8;
+    while ((timer_get_count() - start) < limit) {
+        cache_invalidate((void *)&steal_done_count);
+        if (steal_done_count >= STEAL_TASK_COUNT) break;
+        yield();
+    }
+
+    cache_invalidate((void *)&steal_done_count);
+    TEST_ASSERT_MESSAGE(steal_done_count == STEAL_TASK_COUNT,
+        "work-steal test: not all tasks completed");
+
+    /* Count distinct CPUs that ran tasks. */
+    uint8_t cpu_seen[MAX_CPUS] = {0};
+    int distinct = 0;
+    for (int i = 0; i < STEAL_TASK_COUNT; i++) {
+        cache_invalidate((void *)&steal_cpu_recorded[i]);
+        uint32_t r = steal_cpu_recorded[i];
+        TEST_ASSERT_MESSAGE(r != 0, "task did not record a CPU");
+        uint32_t c = r - 1;
+        if (c < MAX_CPUS && !cpu_seen[c]) {
+            cpu_seen[c] = 1;
+            distinct++;
+        }
+    }
+
+    /*
+     * With CONFIG_WORK_STEALING on, we expect at least 2 distinct CPUs.
+     * Exact count depends on timing and which CPUs were idle; 2 is a
+     * conservative floor that proves stealing happened at all.
+     */
+    TEST_ASSERT_MESSAGE(distinct >= 2,
+        "work stealing did not distribute: only 1 CPU ran tasks");
+}
+#endif /* CONFIG_WORK_STEALING */
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -667,6 +756,11 @@ int test_suite_integration(void)
     /* Regression: Pi 5 timer and timeout fixes (April 2026) */
     RUN_TEST(test_hw_timeout_with_yield);
     RUN_TEST(test_timer_running_after_boot);
+
+#if CONFIG_WORK_STEALING
+    /* Phase B: work-stealing load distribution (#59). */
+    RUN_TEST(test_work_stealing_distributes_load);
+#endif
 
     return UNITY_END();
 }
