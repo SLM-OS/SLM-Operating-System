@@ -1,7 +1,9 @@
 # Pi 5 Cross-CPU Task Dispatch Investigation
 
-**Date:** April 3–7, 2026
-**Status:** ✅ CROSS-CPU DISPATCH WORKING. All 4 CPUs execute tasks. Cooperative scheduling via WFE/SEV. Timer-based preemption on secondary CPUs still blocked (IRQ handler hang under investigation).
+> **[Update 2026-04-13]** The "IRQ handler hang on secondary CPUs" noted below was a symptom of a broader issue: hardware timer IRQs don't deliver to EL1 on Pi 5 at all, including on CPU 0. Full investigation and resolution (`PI5_COOP_PREEMPT` — `CNTPCT_EL0`-driven cooperative preemption) in `docs/pi5-preemption-resolution.md` and `docs/pi5-irq-investigation-2026-04.md`. The `bench smp` / cross-CPU-dispatch results reported here remain correct and continue to pass.
+
+**Date:** April 3–7, 2026 (original investigation); updated 2026-04-13
+**Status:** ✅ CROSS-CPU DISPATCH WORKING. All 4 CPUs execute tasks. Cooperative scheduling via WFE/SEV. Timer-based preemption now works across all CPUs via cooperative preemption (`PI5_COOP_PREEMPT`) — synthesized at yield points from `CNTPCT_EL0` rather than hardware IRQ.
 
 ---
 

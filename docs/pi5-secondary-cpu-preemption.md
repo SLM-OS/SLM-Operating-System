@@ -1,7 +1,12 @@
 # Pi 5 Secondary CPU Timer Preemption
 
+> **[Resolved 2026-04-13]** The root problem turned out to be **no hardware timer IRQs at all on Pi 5**, not just a secondary-CPU issue. See `docs/pi5-preemption-resolution.md` and `docs/pi5-irq-investigation-2026-04.md` for the full investigation. The fix is cooperative preemption via `PI5_COOP_PREEMPT`: `schedule()` synthesizes `scheduler_tick()` from `CNTPCT_EL0` every 10 ms. The ELR-trampoline infrastructure described below (PR #98) is correct and on main but is currently **inert** — it activates only if hardware IRQ delivery is ever restored.
+>
+> The document below is retained as the historical record of the April 7-10 investigation that led to the trampoline design.
+
 **Date:** April 10, 2026
-**Status:** Deferred — root cause identified, solution designed, not yet implemented
+**Status (original):** Deferred — root cause identified, solution designed, not yet implemented
+**Status (2026-04-13):** Trampoline infra landed in PR #98; #99 resolved by coop-preempt; this phase's hardware-IRQ-based path is now a follow-up for future sessions.
 **Affects:** 5 multi-core integration tests on Pi 5 hardware
 **Does NOT affect:** QEMU (all tests pass), single-CPU scheduling, cooperative cross-CPU dispatch
 
