@@ -281,6 +281,50 @@ void el1_irq_handler(void)
 }
 
 /*
+ * EL1 FIQ handler (issue #99 Phase 1 diagnostic).
+ *
+ * Prior to this change, el1_fiq was `b hang` — a silent black hole.
+ * On GICv2 with Security Extensions, non-secure writes to GICD_IGROUPR
+ * cannot promote interrupts from Group 0 to Group 1 (this is the root
+ * cause we're probing: timer IRQs may be arriving here as FIQ because
+ * the IGROUPR writes in boot.S were silently ignored).
+ *
+ * Read GICC_AIAR (Group 0 ACK) to capture the FIQ source and EOI it.
+ * Record the IRQ number in the diag NC trace (see diag_pi5.h) so the
+ * `diag` shell command can show what's arriving as FIQ.
+ */
+void el1_fiq_handler(struct trap_frame *tf)
+{
+    (void)tf;
+#if defined(PI5_IRQ_DIAG) && defined(PLATFORM_RASPI5)
+    /* GICC_AIAR: Group 0 IAR on GICv2 — reads the pending Group 0
+     * interrupt and marks it active. */
+    volatile uint32_t *aiar =
+        (volatile uint32_t *)(GIC_CPU_BASE + 0x20UL);
+    volatile uint32_t *aeoir =
+        (volatile uint32_t *)(GIC_CPU_BASE + 0x24UL);
+
+    uint32_t irq = *aiar;
+    uint32_t irq_num = irq & 0x3FF;
+
+    /* Record the last FIQ source for this CPU in the diag trace slot.
+     * Format: high bits 0xD0000000 (marker), low 10 bits = IRQ number. */
+    uint64_t mpidr;
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+    uint32_t cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
+    if (cpu < 4) {
+        *(volatile uint32_t *)(NC_MEM_BASE + 0xFFE0UL + cpu * 4) =
+            0xD0000000u | irq_num;
+    }
+
+    /* EOI — must match the IAR value including the CPUID bits. */
+    if (irq_num != 0x3FFu) {
+        *aeoir = irq;
+    }
+#endif
+}
+
+/*
  * EL1 SError handler
  */
 void el1_serror_handler(struct trap_frame *tf)

@@ -106,6 +106,39 @@ exception_vectors:
 .endm
 
 /*
+ * Phase 1b: per-CPU, per-vector exception counter bump.
+ *
+ * Runs as the first instructions of every EL1/EL0 vector entry, before
+ * save_regs. Preserves x16-x17 across the bump so the subsequent
+ * save_regs captures the task's original register state.
+ *
+ * Layout (see kernel/include/diag_pi5.h):
+ *   base = NC_MEM_BASE + 0xFF60
+ *   per-CPU block = 32 bytes at base + cpu*0x20
+ *   offsets: sync=0x00, irq=0x08, fiq=0x10, serror=0x18
+ *
+ * cpu_id computed inline with the MPIDR hack used throughout the
+ * PI5_* paths: `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` — correct for
+ * Pi 5 (Aff1=cpu) and QEMU (Aff0=cpu). Not used on Jetson builds.
+ */
+.macro DIAG_BUMP_VEC off:req
+#if defined(PI5_IRQ_DIAG)
+    stp     x16, x17, [sp, #-16]!
+    mrs     x16, mpidr_el1
+    ubfx    x17, x16, #8, #8
+    and     x16, x16, #0xFF
+    orr     x16, x16, x17                   /* x16 = logical cpu */
+    mov     x17, #0xFF60
+    movk    x17, #0xFFE0, lsl #16
+    add     x17, x17, x16, lsl #5           /* x17 = per-CPU block base */
+    ldr     x16, [x17, #\off]
+    add     x16, x16, #1
+    str     x16, [x17, #\off]
+    ldp     x16, x17, [sp], #16
+#endif
+.endm
+
+/*
  * Macro to restore all general-purpose registers.
  */
 .macro restore_regs
@@ -154,6 +187,7 @@ el1_serror_sp0:
  * Could be: SVC, data abort, instruction abort, etc.
  */
 el1_sync:
+    DIAG_BUMP_VEC 0x00
     save_regs
     mov     x0, sp              /* Pass trap frame pointer */
     bl      el1_sync_handler    /* Call C handler */
@@ -164,6 +198,7 @@ el1_sync:
  * EL1 IRQ (kernel) - Timer interrupts come here
  */
 el1_irq:
+    DIAG_BUMP_VEC 0x08
     save_regs
     bl      el1_irq_handler     /* Call C handler */
 #if defined(PI5_SECONDARY_PREEMPT)
@@ -181,14 +216,27 @@ el1_irq:
 
 /*
  * EL1 FIQ (kernel)
+ *
+ * Previously `b hang` — a silent black hole. Now a real handler so we
+ * can see FIQ deliveries (issue #99 Phase 1). On GICv2 with Security
+ * Extensions, non-secure IGROUPR writes cannot promote Group 0 → Group 1;
+ * if timer PPIs remain in Group 0, they arrive here as FIQ rather than
+ * through el1_irq. The handler reads GICC_AIAR (Group 0 ACK) and
+ * records the IRQ number, then EOIs.
  */
 el1_fiq:
-    b       hang                /* Not used */
+    DIAG_BUMP_VEC 0x10
+    save_regs
+    mov     x0, sp
+    bl      el1_fiq_handler
+    restore_regs
+    eret
 
 /*
  * EL1 SError (kernel)
  */
 el1_serror:
+    DIAG_BUMP_VEC 0x18
     save_regs
     mov     x0, sp
     bl      el1_serror_handler
@@ -205,6 +253,7 @@ el1_serror:
  */
 
 el0_sync:
+    DIAG_BUMP_VEC 0x00
     save_regs
     mov     x0, sp              /* Pass trap frame pointer */
     bl      el0_sync_handler    /* C handler: SVC dispatch or fault */
@@ -212,15 +261,22 @@ el0_sync:
     eret
 
 el0_irq:
+    DIAG_BUMP_VEC 0x08
     save_regs
     bl      el1_irq_handler     /* Reuse EL1 IRQ handler (timer preemption) */
     restore_regs
     eret
 
 el0_fiq:
-    b       hang                /* FIQ not used */
+    DIAG_BUMP_VEC 0x10
+    save_regs
+    mov     x0, sp
+    bl      el1_fiq_handler     /* Reuse EL1 FIQ handler (diag) */
+    restore_regs
+    eret
 
 el0_serror:
+    DIAG_BUMP_VEC 0x18
     save_regs
     mov     x0, sp
     bl      el0_serror_handler  /* C handler: terminate component */

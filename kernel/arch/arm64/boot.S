@@ -293,10 +293,41 @@ real_start:
 
     /* Check current exception level */
     mrs     x10, CurrentEL
+
+#if defined(PI5_IRQ_DIAG)
+    /*
+     * Phase 1a: EL2 register snapshot for issue #99.
+     *
+     * Writes diagnostic values to NC region at 0xFFE0FF00..+0x50. MMU
+     * is not yet enabled here, so the CPU uses nGnRnE attributes and
+     * these writes hit DRAM directly; after MMU enable, the NC mapping
+     * exposes them back. Layout must match `struct diag_el2_snapshot`
+     * in kernel/include/diag_pi5.h.
+     *
+     * Scratch: x15 (snapshot base), x16-x17 (values). Preserve x10
+     * which holds CurrentEL from the mrs above.
+     */
+    mov     x15, #0xFF00
+    movk    x15, #0xFFE0, lsl #16           /* x15 = 0xFFE0FF00 */
+
+    str     x10, [x15, #0x18]               /* [+0x18] = CurrentEL at entry */
+
+    mrs     x16, midr_el1
+    str     x16, [x15, #0x20]               /* [+0x20] = MIDR_EL1 */
+    mrs     x16, id_aa64pfr0_el1
+    str     x16, [x15, #0x28]               /* [+0x28] = ID_AA64PFR0_EL1 */
+#endif
+
     cmp     x10, #8                 /* EL2 = 0b1000 (CurrentEL bits [3:2] = 2) */
     b.ne    .Lpi5_in_el1            /* Already in EL1, skip transition */
 
     /* We're in EL2 - configure and transition to EL1 */
+
+#if defined(PI5_IRQ_DIAG)
+    /* HCR_EL2 pre-our-write (still in EL2 here, so mrs is legal). */
+    mrs     x16, hcr_el2
+    str     x16, [x15, #0x00]               /* [+0x00] = HCR_EL2 pre */
+#endif
 
     /* Disable coprocessor traps to EL2 */
     mov     x10, #0x33ff
@@ -311,6 +342,10 @@ real_start:
     mov     x10, #3
     msr     cnthctl_el2, x10
     msr     cntvoff_el2, xzr        /* No virtual offset */
+
+#if defined(PI5_IRQ_DIAG)
+    str     x10, [x15, #0x10]               /* [+0x10] = CNTHCTL_EL2 as written */
+#endif
 
     /*
      * Configure GIC-400 interrupt groups from EL2.
@@ -335,6 +370,16 @@ real_start:
     and     w11, w11, #0x1F         /* ITLinesNumber field */
     add     w11, w11, #1            /* Number of 32-IRQ groups */
 
+#if defined(PI5_IRQ_DIAG)
+    /* Snapshot GICD_IGROUPR[0] pre-our-write. */
+    ldr     w16, [x10, #0x080]
+    str     x16, [x15, #0x48]               /* [+0x48] = IGROUPR[0] pre */
+    /* Snapshot GICD_CTLR pre-our-write (saved again into w14 below for
+     * legacy reasons; keep both paths so the existing code is untouched). */
+    ldr     w16, [x10, #0x000]
+    str     x16, [x15, #0x30]               /* [+0x30] = GICD_CTLR pre */
+#endif
+
     /* Set all GICD_IGROUPR registers to 0xFFFFFFFF (all Group 1) */
     mov     x12, x10
     add     x12, x12, #0x080       /* GICD_IGROUPR0 offset */
@@ -346,6 +391,19 @@ real_start:
     cmp     w13, w11
     b.lt    .Lgroup_loop
 
+#if defined(PI5_IRQ_DIAG)
+    /*
+     * Load-bearing readback: on GICv2 with Security Extensions,
+     * non-secure writes to GICD_IGROUPR cannot promote interrupts
+     * from Group 0 to Group 1. If this readback returns 0 (or anything
+     * other than 0xFFFFFFFF), the writes we just did were no-ops and
+     * the FIQ hypothesis for #99 is confirmed.
+     */
+    dsb     sy
+    ldr     w16, [x10, #0x080]
+    str     x16, [x15, #0x40]               /* [+0x40] = IGROUPR[0] post-readback */
+#endif
+
     /* Read GICD_CTLR before we modify it (to see what TF-A left) */
     ldr     w14, [x10, #0x000]      /* Save original GICD_CTLR in w14 */
 
@@ -355,6 +413,13 @@ real_start:
 
     /* Configure CPU interface */
     ldr     x10, =0x107FFFA000      /* GICC base */
+
+#if defined(PI5_IRQ_DIAG)
+    /* Snapshot GICC_CTLR pre-our-write. */
+    ldr     w16, [x10, #0x000]
+    str     x16, [x15, #0x38]               /* [+0x38] = GICC_CTLR pre */
+#endif
+
     mov     w11, #0xFF
     str     w11, [x10, #0x004]      /* GICC_PMR = 0xFF (allow all) */
     /* Enable Group 0+1 with bypass disable bits.
@@ -429,6 +494,40 @@ real_start:
     /* Initialize HCR_EL2 for 64-bit EL1 */
     mov     x10, #(1 << 31)         /* RW bit = 1 for AArch64 */
     msr     hcr_el2, x10
+
+#if defined(PI5_IRQ_DIAG)
+    /* Snapshot HCR_EL2 after the write. If firmware had IMO/FMO/AMO
+     * bits set and our mov-then-msr didn't clear them explicitly, this
+     * readback will show it. */
+    isb
+    mrs     x16, hcr_el2
+    str     x16, [x15, #0x08]               /* [+0x08] = HCR_EL2 post */
+
+    /* Mark the snapshot valid so the shell can distinguish "never ran
+     * EL2 block" from "ran but all zeros". */
+    mov     x16, #0x5EE1
+    movk    x16, #0x5EE1, lsl #16
+    movk    x16, #0x5EE1, lsl #32
+    movk    x16, #0x5EE1, lsl #48
+    str     x16, [x15, #0x50]               /* [+0x50] = DIAG_EL2_MAGIC */
+
+    /*
+     * Zero the per-CPU exception counters (0xFF60..0xFFDF, 128 bytes)
+     * and the FIQ trace (0xFFE0..0xFFEF, 16 bytes). NC memory at a
+     * fixed physical address is not cleared on power cycle, so without
+     * this the counters read as whatever DRAM happened to hold.
+     * Primary CPU only — secondary CPUs must not wipe the primary's
+     * collected counts.
+     */
+    mov     x16, #0xFF60
+    movk    x16, #0xFFE0, lsl #16           /* x16 = 0xFFE0FF60 */
+    mov     x17, #18                         /* 18 × 8 = 144 bytes */
+.Ldiag_zero_loop:
+    str     xzr, [x16], #8
+    subs    x17, x17, #1
+    b.ne    .Ldiag_zero_loop
+    dsb     sy
+#endif
 
     /* SCTLR_EL1 - safe initial value (from Circle) */
     mov     x10, #0x0800

@@ -74,6 +74,16 @@ if(PLATFORM STREQUAL "RASPI5" AND PI5_SECONDARY_PREEMPT)
     add_compile_definitions(PI5_SECONDARY_PREEMPT=1)
 endif()
 
+# Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
+# snapshot in boot.S, per-CPU per-vector exception counters in vectors.S,
+# a real el1_fiq handler that captures the FIQ source, and the `diag`
+# shell command. Behavior-preserving; turn OFF once #99 is root-caused
+# and the Phase 2 fix is in place.
+option(PI5_IRQ_DIAG "Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1)" ON)
+if(PLATFORM STREQUAL "RASPI5" AND PI5_IRQ_DIAG)
+    add_compile_definitions(PI5_IRQ_DIAG=1)
+endif()
+
 # Enable semihosting for QEMU (used for clean test exit)
 if(PLATFORM STREQUAL "QEMU_VIRT")
     add_compile_definitions(ENABLE_SEMIHOSTING=1)
