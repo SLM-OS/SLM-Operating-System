@@ -11,6 +11,7 @@
 
 pub mod policy;
 pub mod registry;
+pub mod generated;
 
 pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType};
 pub use registry::{
