@@ -1010,6 +1010,36 @@ static void diag_print_vec(void)
     }
 }
 
+static void diag_print_gic_runtime(void)
+{
+#if defined(PLATFORM_RASPI5)
+    volatile uint32_t *gicd_isenabler0 =
+        (volatile uint32_t *)(GIC_DIST_BASE + 0x100UL);
+    volatile uint32_t *gicd_ispendr0 =
+        (volatile uint32_t *)(GIC_DIST_BASE + 0x200UL);
+    volatile uint32_t *gicd_iactiver0 =
+        (volatile uint32_t *)(GIC_DIST_BASE + 0x300UL);
+    volatile uint32_t *gicc_ctlr =
+        (volatile uint32_t *)(GIC_CPU_BASE + 0x000UL);
+    volatile uint32_t *gicc_pmr =
+        (volatile uint32_t *)(GIC_CPU_BASE + 0x004UL);
+    uint32_t iser = *gicd_isenabler0;
+    uint32_t ispr = *gicd_ispendr0;
+    uint32_t iacr = *gicd_iactiver0;
+    uart_puts("\r\nGIC runtime state (read from shell task):\r\n");
+    uart_printf("  GICC_CTLR = 0x%x  (bit0=EnGrp1 bit4=FIQByp!disG1 "
+                "bit5=IRQByp!disG1 bit9=EOImodeNS)\r\n",
+                *gicc_ctlr);
+    uart_printf("  GICC_PMR  = 0x%x\r\n", *gicc_pmr);
+    uart_printf("  GICD_ISENABLER0 = 0x%x  (bit 30 [timer PPI] = %u)\r\n",
+                iser, (iser >> 30) & 1);
+    uart_printf("  GICD_ISPENDR0   = 0x%x  (bit 30 [timer pending] = %u)\r\n",
+                ispr, (ispr >> 30) & 1);
+    uart_printf("  GICD_IACTIVER0  = 0x%x  (bit 30 [timer active] = %u)\r\n",
+                iacr, (iacr >> 30) & 1);
+#endif
+}
+
 static void diag_print_fiq(void)
 {
     extern uint32_t cpu_count;
@@ -1037,10 +1067,13 @@ int cmd_diag(int argc, char *argv[])
         diag_print_vec();
     } else if (strcmp(what, "fiq") == 0) {
         diag_print_fiq();
+    } else if (strcmp(what, "gic") == 0) {
+        diag_print_gic_runtime();
     } else if (strcmp(what, "all") == 0) {
         diag_print_el2();
         diag_print_vec();
         diag_print_fiq();
+        diag_print_gic_runtime();
     } else {
         uart_puts("Usage: diag <el2|vec|fiq|all>\r\n");
         return 1;
