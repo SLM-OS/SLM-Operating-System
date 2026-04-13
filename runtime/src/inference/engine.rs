@@ -90,6 +90,8 @@ pub enum EngineError {
     WorkspaceExhausted,
     UnsupportedOp,
     ShapeMismatch,
+    /// Shape dimensions multiplied past `usize::MAX` — malformed model input.
+    ShapeOverflow,
     InvalidInput,
     WeightNotFound,
     InternalError,
@@ -403,8 +405,7 @@ impl InferenceEngine {
         let m = a.rows() as usize;
         let n = b.cols() as usize;
 
-        let mut out = self.workspace.alloc_tensor(&[m as u32, n as u32])
-            .ok_or(EngineError::WorkspaceExhausted)?;
+        let mut out = self.workspace.alloc_tensor(&[m as u32, n as u32])?;
 
         ops::matmul(&a, &b, &mut out)?;
         self.bind_output(node, 0, out);
@@ -423,8 +424,7 @@ impl InferenceEngine {
             out_shape[i] = a.shape[i];
         }
 
-        let mut out = self.workspace.alloc_tensor(&out_shape[..ndim])
-            .ok_or(EngineError::WorkspaceExhausted)?;
+        let mut out = self.workspace.alloc_tensor(&out_shape[..ndim])?;
 
         ops::add(&a, &b, &mut out)?;
         self.bind_output(node, 0, out);
@@ -441,8 +441,7 @@ impl InferenceEngine {
             out_shape[i] = input.shape[i];
         }
 
-        let mut out = self.workspace.alloc_tensor(&out_shape[..ndim])
-            .ok_or(EngineError::WorkspaceExhausted)?;
+        let mut out = self.workspace.alloc_tensor(&out_shape[..ndim])?;
 
         ops::relu(&input, &mut out)?;
         self.bind_output(node, 0, out);
@@ -459,8 +458,7 @@ impl InferenceEngine {
             out_shape[i] = input.shape[i];
         }
 
-        let mut out = self.workspace.alloc_tensor(&out_shape[..ndim])
-            .ok_or(EngineError::WorkspaceExhausted)?;
+        let mut out = self.workspace.alloc_tensor(&out_shape[..ndim])?;
 
         ops::softmax(&input, &mut out)?;
         self.bind_output(node, 0, out);
@@ -480,8 +478,7 @@ impl InferenceEngine {
         let m = a.rows() as usize;
         let n = b.cols() as usize;
 
-        let mut out = self.workspace.alloc_tensor(&[m as u32, n as u32])
-            .ok_or(EngineError::WorkspaceExhausted)?;
+        let mut out = self.workspace.alloc_tensor(&[m as u32, n as u32])?;
 
         ops::gemm(&a, &b, c.as_ref(), &mut out)?;
         self.bind_output(node, 0, out);
@@ -534,7 +531,7 @@ impl InferenceEngine {
 
         let mut out = self.workspace.alloc_tensor(
             &[batch as u32, c_out as u32, h_out, w_out],
-        ).ok_or(EngineError::WorkspaceExhausted)?;
+        )?;
 
         ops::conv2d(&input, &weight, bias.as_ref(), &mut out, kh, kw, sh, sw, ph, pw)?;
         self.bind_output(node, 0, out);
@@ -565,7 +562,7 @@ impl InferenceEngine {
 
         let mut out = self.workspace.alloc_tensor(
             &[batch as u32, channels as u32, h_out, w_out],
-        ).ok_or(EngineError::WorkspaceExhausted)?;
+        )?;
 
         ops::maxpool2d(&input, &mut out, kh, kw, sh, sw)?;
         self.bind_output(node, 0, out);
@@ -592,8 +589,7 @@ impl InferenceEngine {
         let k = a.cols() as usize;
         let n = b.cols() as usize;
 
-        let mut out = self.workspace.alloc_tensor(&[m as u32, n as u32])
-            .ok_or(EngineError::WorkspaceExhausted)?;
+        let mut out = self.workspace.alloc_tensor(&[m as u32, n as u32])?;
 
         super::gpu::gpu_execute_matmul(a.data, b.data, out.data_mut(), m, k, n)
             .map_err(|_| EngineError::UnsupportedOp)?;

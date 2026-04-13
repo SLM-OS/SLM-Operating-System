@@ -230,7 +230,10 @@ impl<'a> TensorInfo<'a> {
         if let Some(i64s) = self.int64_data {
             return i64s.len();
         }
-        self.num_elements() * self.data_type.element_size()
+        // `num_elements` already saturates; pair with saturating_mul so a
+        // malformed tensor (huge shape, no data payload) returns
+        // `usize::MAX` rather than wrapping.
+        self.num_elements().saturating_mul(self.data_type.element_size())
     }
 }
 

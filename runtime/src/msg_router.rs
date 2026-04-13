@@ -10,7 +10,7 @@
 //! C API in `msg_router.c` (which is removed from the build when
 //! the Rust library is linked).
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 // =============================================================================
 // Constants
@@ -83,9 +83,13 @@ impl Mailbox {
     /// Deliver a message to this mailbox. Writes data and topic first,
     /// then priority (Release), then ready=1 (Release) so the receiver
     /// sees consistent data when it reads ready=1 (Acquire).
+    ///
+    /// # Safety
+    /// Caller promises `topic_name` and `data` are NUL-terminated within
+    /// `TOPIC_NAME_LEN` and `MAX_MSG_LEN` bytes respectively.
     unsafe fn deliver(&mut self, topic_name: *const u8, data: *const u8, prio: u8) {
-        str_copy(&mut self.data, data);
-        str_copy(&mut self.topic, topic_name);
+        str_copy(&mut self.data, data, MAX_MSG_LEN);
+        str_copy(&mut self.topic, topic_name, TOPIC_NAME_LEN);
         self.ack.store(0, Ordering::Release);
         self.priority.store(prio as u32, Ordering::Release);
         self.ready.store(1, Ordering::Release);
@@ -211,34 +215,84 @@ impl LastReceived {
 
 static mut LAST_RECEIVED: [LastReceived; MAX_COMPONENTS] = [LastReceived::none(); MAX_COMPONENTS];
 
+/// Spinlock protecting all router state: `TOPICS`, `TOPIC_COUNT`,
+/// `WILDCARD_SUBS`, `LAST_RECEIVED`.
+///
+/// The lock is released before the publish ack-wait loop (which yields)
+/// to avoid deadlocking with subscribers that call `msg_router_ack()`.
+static MSG_ROUTER_LOCK: AtomicBool = AtomicBool::new(false);
+
+/// RAII guard for `MSG_ROUTER_LOCK`.
+struct SpinGuard;
+
+impl SpinGuard {
+    fn new() -> Self {
+        while MSG_ROUTER_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        SpinGuard
+    }
+}
+
+impl Drop for SpinGuard {
+    fn drop(&mut self) {
+        MSG_ROUTER_LOCK.store(false, Ordering::Release);
+    }
+}
+
 // =============================================================================
 // String Helpers
 // =============================================================================
 
-/// Compare a C string (null-terminated) with a byte slice in our topic name buffer.
+/// Compare a C string (null-terminated) with a byte slice in our topic
+/// name buffer. Bounded by `buf.len() + 1` bytes on the cstr side — the
+/// extra byte is the null terminator check at `i == buf.len()`.
 fn str_eq_cstr(buf: &[u8], cstr: *const u8) -> bool {
-    unsafe {
-        let mut i = 0;
-        loop {
-            let a = if i < buf.len() { buf[i] } else { 0 };
-            let b = *cstr.add(i);
-            if a == 0 && b == 0 {
-                return true;
-            }
-            if a != b {
-                return false;
-            }
-            i += 1;
+    let mut i = 0;
+    // Walk at most `buf.len()` positions; the final iteration reads one
+    // more byte from `cstr` to confirm termination, which is within the
+    // caller's bound as long as `cstr` has at least `buf.len() + 1` bytes
+    // of readable memory (true for all callers — strings passed in are
+    // NUL-terminated within TOPIC_NAME_LEN).
+    loop {
+        let a = if i < buf.len() { buf[i] } else { 0 };
+        // SAFETY: `i <= buf.len()` and caller contract guarantees cstr is
+        // NUL-terminated within buf.len() + 1 bytes.
+        let b = unsafe { *cstr.add(i) };
+        if a == 0 && b == 0 {
+            return true;
         }
+        if a != b {
+            return false;
+        }
+        if i >= buf.len() {
+            // Should not reach here if either a or b was 0 above.
+            return false;
+        }
+        i += 1;
     }
 }
 
-/// Copy a C string into a fixed-size buffer.
-fn str_copy(dst: &mut [u8], src: *const u8) {
-    let max = dst.len();
+/// Copy a NUL-terminated C string into a fixed-size buffer.
+///
+/// Reads at most `max_src_len` bytes from `src`, leaves space for a NUL
+/// terminator in `dst`. The caller must pass the upper bound for the
+/// source string so an unterminated input cannot read past allocated
+/// memory.
+fn str_copy(dst: &mut [u8], src: *const u8, max_src_len: usize) {
+    let max_dst = dst.len();
+    if max_dst == 0 {
+        return;
+    }
+    let limit = core::cmp::min(max_dst - 1, max_src_len);
     let mut i = 0;
+    // SAFETY: the loop guard `i < limit` keeps the deref within
+    // `max_src_len` of `src`, which the caller guarantees is readable.
     unsafe {
-        while i < max - 1 {
+        while i < limit {
             let c = *src.add(i);
             if c == 0 {
                 break;
@@ -250,17 +304,22 @@ fn str_copy(dst: &mut [u8], src: *const u8) {
     dst[i] = 0;
 }
 
-/// Check if a pattern is a wildcard (ends with '*').
-fn is_wildcard_pattern(name: *const u8) -> bool {
+/// Check if a pattern (NUL-terminated within `max_len` bytes) ends with '*'.
+fn is_wildcard_pattern(name: *const u8, max_len: usize) -> bool {
+    let mut i = 0;
+    let mut last = 0u8;
+    // SAFETY: loop guard bounds deref within `max_len` of `name`.
     unsafe {
-        let mut i = 0;
-        let mut last = 0u8;
-        while *name.add(i) != 0 {
-            last = *name.add(i);
+        while i < max_len {
+            let c = *name.add(i);
+            if c == 0 {
+                break;
+            }
+            last = c;
             i += 1;
         }
-        last == b'*'
     }
+    last == b'*'
 }
 
 /// Check if a topic name matches a wildcard pattern.
@@ -293,15 +352,17 @@ fn wildcard_matches(pattern: &[u8; TOPIC_NAME_LEN], topic: *const u8) -> bool {
 /// Initialize the message router. Clears all topics and subscriptions.
 #[no_mangle]
 pub extern "C" fn msg_router_init() {
+    let _g = SpinGuard::new();
+    // SAFETY: MSG_ROUTER_LOCK held — exclusive access to router statics.
     unsafe {
         TOPIC_COUNT = 0;
-        for topic in &mut TOPICS {
+        for topic in &mut *core::ptr::addr_of_mut!(TOPICS) {
             topic.clear();
         }
-        for ws in &mut WILDCARD_SUBS {
+        for ws in &mut *core::ptr::addr_of_mut!(WILDCARD_SUBS) {
             ws.clear();
         }
-        for lr in &mut LAST_RECEIVED {
+        for lr in &mut *core::ptr::addr_of_mut!(LAST_RECEIVED) {
             *lr = LastReceived::none();
         }
     }
@@ -319,21 +380,25 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
     }
 
     // Wildcard subscription
-    if is_wildcard_pattern(topic_name) {
+    if is_wildcard_pattern(topic_name, TOPIC_NAME_LEN) {
+        let _g = SpinGuard::new();
+        // SAFETY: MSG_ROUTER_LOCK held — exclusive access to WILDCARD_SUBS.
         unsafe {
             for i in 0..MAX_WILDCARD_SUBS {
                 if !WILDCARD_SUBS[i].is_active() {
-                    str_copy(&mut WILDCARD_SUBS[i].pattern, topic_name);
+                    str_copy(&mut WILDCARD_SUBS[i].pattern, topic_name, TOPIC_NAME_LEN);
                     WILDCARD_SUBS[i].component_idx = component_idx;
                     WILDCARD_SUBS[i].mailbox.clear();
                     return 0;
                 }
             }
-            puts(b"[msg] No free wildcard slots\n\0");
-            return -1;
         }
+        puts(b"[msg] No free wildcard slots\n\0");
+        return -1;
     }
 
+    let _g = SpinGuard::new();
+    // SAFETY: MSG_ROUTER_LOCK held — exclusive access to TOPICS / TOPIC_COUNT.
     unsafe {
         // Find existing topic
         let mut topic_idx: Option<usize> = None;
@@ -348,7 +413,7 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
         if topic_idx.is_none() {
             for i in 0..MAX_TOPICS {
                 if !TOPICS[i].is_active() {
-                    str_copy(&mut TOPICS[i].name, topic_name);
+                    str_copy(&mut TOPICS[i].name, topic_name, TOPIC_NAME_LEN);
                     TOPICS[i].sub_count = 0;
                     topic_idx = Some(i);
                     TOPIC_COUNT += 1;
@@ -386,58 +451,78 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
 
 /// Internal publish with priority. Delivers to exact topic subscribers
 /// and wildcard subscribers, then waits for acknowledgment.
+///
+/// # Concurrency
+/// Holds `MSG_ROUTER_LOCK` only while scanning the topic/wildcard arrays
+/// to gather target mailbox pointers. The lock is released before the
+/// ack-wait loop (which calls `sched_yield`) so subscribers calling
+/// `msg_router_ack()` — which also acquires the lock — cannot deadlock.
+///
+/// # Safety
+/// Caller promises `topic_name` (≤ TOPIC_NAME_LEN + NUL) and `data`
+/// (≤ MAX_MSG_LEN + NUL) are readable NUL-terminated C strings.
 unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8) -> i32 {
-    let mut delivered = 0i32;
+    const MAX_TARGETS: usize = MAX_SUBSCRIBERS + MAX_WILDCARD_SUBS;
+    let mut targets: [*mut Mailbox; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
+    let mut target_count = 0usize;
+    let mut found_topic = false;
 
-    /// Deliver a message to a mailbox and wait for ack.
-    /// Returns true if the subscriber acknowledged within the timeout.
-    unsafe fn deliver_and_wait(mb: &mut Mailbox, topic_name: *const u8,
-                               data: *const u8, priority: u8) -> bool {
+    // Gather target mailbox pointers under the lock, then release it
+    // before the yield-wait loop.
+    {
+        let _g = SpinGuard::new();
+        // SAFETY: MSG_ROUTER_LOCK held — exclusive access to TOPICS /
+        // WILDCARD_SUBS. Mailbox addresses taken here remain valid for
+        // the rest of this call because the mailboxes live in static
+        // arrays; they can only be torn down by `unsubscribe_all()`,
+        // which also takes the lock (contention window is narrow and
+        // acceptable for current workloads).
+        for i in 0..MAX_TOPICS {
+            if TOPICS[i].is_active() && str_eq_cstr(&TOPICS[i].name, topic_name) {
+                found_topic = true;
+                for j in 0..MAX_SUBSCRIBERS {
+                    if TOPICS[i].subs[j].component_idx == -1 {
+                        continue;
+                    }
+                    targets[target_count] = &mut TOPICS[i].subs[j].mailbox;
+                    target_count += 1;
+                }
+                break;
+            }
+        }
+        for i in 0..MAX_WILDCARD_SUBS {
+            if !WILDCARD_SUBS[i].is_active() || WILDCARD_SUBS[i].component_idx == -1 {
+                continue;
+            }
+            if !wildcard_matches(&WILDCARD_SUBS[i].pattern, topic_name) {
+                continue;
+            }
+            if target_count < MAX_TARGETS {
+                targets[target_count] = &mut WILDCARD_SUBS[i].mailbox;
+                target_count += 1;
+            }
+        }
+    } // MSG_ROUTER_LOCK released
+
+    if !found_topic {
+        uart_printf(b"[msg] Topic '%s' not found\n\0".as_ptr(), topic_name);
+    }
+
+    // Deliver and wait for ack on each target. Mailbox atomics handle
+    // cross-CPU sync on the ready/ack flags.
+    let mut delivered = 0i32;
+    for t in 0..target_count {
+        // SAFETY: pointer points at a Mailbox inside the TOPICS /
+        // WILDCARD_SUBS static arrays (stable storage).
+        let mb = &mut *targets[t];
         mb.deliver(topic_name, data, priority);
         let timeout = get_ticks() + ACK_TIMEOUT_TICKS;
         while get_ticks() < timeout {
             if mb.ack.load(Ordering::Acquire) != 0 {
-                return true;
+                delivered += 1;
+                break;
             }
             sched_yield();
-        }
-        false
-    }
-
-    // Deliver to exact topic subscribers
-    let mut topic_idx: Option<usize> = None;
-    for i in 0..MAX_TOPICS {
-        if TOPICS[i].is_active() && str_eq_cstr(&TOPICS[i].name, topic_name) {
-            topic_idx = Some(i);
-            break;
-        }
-    }
-
-    if let Some(idx) = topic_idx {
-        for j in 0..MAX_SUBSCRIBERS {
-            if TOPICS[idx].subs[j].component_idx == -1 {
-                continue;
-            }
-            if deliver_and_wait(&mut TOPICS[idx].subs[j].mailbox,
-                                topic_name, data, priority) {
-                delivered += 1;
-            }
-        }
-    } else {
-        uart_printf(b"[msg] Topic '%s' not found\n\0".as_ptr(), topic_name);
-    }
-
-    // Deliver to wildcard subscribers whose pattern matches this topic
-    for i in 0..MAX_WILDCARD_SUBS {
-        if !WILDCARD_SUBS[i].is_active() || WILDCARD_SUBS[i].component_idx == -1 {
-            continue;
-        }
-        if !wildcard_matches(&WILDCARD_SUBS[i].pattern, topic_name) {
-            continue;
-        }
-        if deliver_and_wait(&mut WILDCARD_SUBS[i].mailbox,
-                            topic_name, data, priority) {
-            delivered += 1;
         }
     }
 
@@ -480,6 +565,9 @@ pub extern "C" fn msg_router_receive(
     component_idx: i32,
     topic_out: *mut u8,
 ) -> *const u8 {
+    let _g = SpinGuard::new();
+    // SAFETY: MSG_ROUTER_LOCK held — exclusive access to TOPICS /
+    // WILDCARD_SUBS / LAST_RECEIVED for the duration of this call.
     unsafe {
         let mut best_priority: u8 = 0;
         let mut best_data: *const u8 = core::ptr::null();
@@ -557,11 +645,14 @@ pub extern "C" fn msg_router_receive(
 /// component, preventing race conditions with newly-arrived messages.
 #[no_mangle]
 pub extern "C" fn msg_router_ack(component_idx: i32) {
-    unsafe {
-        if component_idx < 0 || (component_idx as usize) >= MAX_COMPONENTS {
-            return;
-        }
+    if component_idx < 0 || (component_idx as usize) >= MAX_COMPONENTS {
+        return;
+    }
 
+    let _g = SpinGuard::new();
+    // SAFETY: MSG_ROUTER_LOCK held — exclusive access to LAST_RECEIVED,
+    // TOPICS, and WILDCARD_SUBS.
+    unsafe {
         let lr = LAST_RECEIVED[component_idx as usize];
 
         if lr.wildcard_idx >= 0 && (lr.wildcard_idx as usize) < MAX_WILDCARD_SUBS {
@@ -588,6 +679,9 @@ pub extern "C" fn msg_router_ack(component_idx: i32) {
 /// subscribers. Called during component unload to prevent orphaned subscriptions.
 #[no_mangle]
 pub extern "C" fn msg_router_unsubscribe_all(component_idx: i32) {
+    let _g = SpinGuard::new();
+    // SAFETY: MSG_ROUTER_LOCK held — exclusive access to TOPICS /
+    // WILDCARD_SUBS / TOPIC_COUNT.
     unsafe {
         for i in 0..MAX_TOPICS {
             if !TOPICS[i].is_active() {
@@ -627,6 +721,8 @@ pub extern "C" fn msg_router_get_subscriptions(
     if topic_names.is_null() || count_out.is_null() {
         return;
     }
+    let _g = SpinGuard::new();
+    // SAFETY: MSG_ROUTER_LOCK held — exclusive read access to TOPICS.
     unsafe {
         let mut count = 0i32;
         for i in 0..MAX_TOPICS {
@@ -651,6 +747,11 @@ pub extern "C" fn msg_router_get_subscriptions(
 /// List all topics and their subscribers.
 #[no_mangle]
 pub extern "C" fn msg_router_list() {
+    let _g = SpinGuard::new();
+    // SAFETY: MSG_ROUTER_LOCK held — exclusive read access to TOPICS /
+    // TOPIC_COUNT. The component_get_info() FFI call takes its own lock
+    // (component::registry::LOCK) and does not touch msg_router state,
+    // so no lock inversion.
     unsafe {
         uart_printf(
             b"Message Router (%d topics):\n\0".as_ptr(),

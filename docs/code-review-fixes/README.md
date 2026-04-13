@@ -6,14 +6,14 @@ Code session for review granularity and context freshness.
 
 ## Sessions
 
-| Session | Area | File | Issues | Dependency |
-|---------|------|------|--------|------------|
-| A | Memory + Boot | [session-a-memory-boot.md](session-a-memory-boot.md) | 20 | Independent |
-| B | Scheduler + SMP | [session-b-scheduler-smp.md](session-b-scheduler-smp.md) | 12 | Independent |
-| C | IPC + Syscall + Components | [session-c-ipc-syscall.md](session-c-ipc-syscall.md) | 13 | Independent |
-| D | Rust Runtime | [session-d-rust-runtime.md](session-d-rust-runtime.md) | 12 | Independent (Rust-only) |
-| E | Drivers | [session-e-drivers.md](session-e-drivers.md) | 9 | Independent |
-| F | Kernel Core / Shell / Strings | [session-f-kernel-core.md](session-f-kernel-core.md) | 16 | Independent |
+| Session | Area | File | Issues | Dependency | Status |
+|---------|------|------|--------|------------|--------|
+| A | Memory + Boot | [session-a-memory-boot.md](session-a-memory-boot.md) | 20 | Independent | ✅ (merged in #75) |
+| B | Scheduler + SMP | [session-b-scheduler-smp.md](session-b-scheduler-smp.md) | 12 | Independent | ☐ |
+| C | IPC + Syscall + Components | [session-c-ipc-syscall.md](session-c-ipc-syscall.md) | 13 | Independent | ☐ |
+| D | Rust Runtime | [session-d-rust-runtime.md](session-d-rust-runtime.md) | 12 | Independent (Rust-only) | ✅ (Pi 5 hardware verified; publish-with-ack stress blocked by pre-existing #80) |
+| E | Drivers | [session-e-drivers.md](session-e-drivers.md) | 9 | Independent | ☐ |
+| F | Kernel Core / Shell / Strings | [session-f-kernel-core.md](session-f-kernel-core.md) | 16 | Independent | ☐ |
 
 ## Cross-session coordination
 

@@ -347,20 +347,34 @@ static LOCK: AtomicBool = AtomicBool::new(false);
 static INITIALIZED: AtomicU8 = AtomicU8::new(0);
 
 /// Global allocator instance.
-/// SAFETY: Only accessed while holding LOCK.
+/// SAFETY: Only accessed while holding LOCK (enforced by SpinGuard).
 static mut WEIGHT_POOL: MemoryPool = MemoryPool::new();
 static mut WORKSPACE_POOL: MemoryPool = MemoryPool::new();
 
-/// Acquire spinlock.
-fn lock_acquire() {
-    while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        core::hint::spin_loop();
+/// RAII guard for the allocator spinlock.
+///
+/// Replaces manual `lock_acquire`/`lock_release` pairs: the lock is
+/// released on drop, so panics or early returns can't leak the lock.
+/// (We compile with `panic = "abort"`, but RAII still protects against
+/// accidental `?` / early-return leaks.)
+struct SpinGuard;
+
+impl SpinGuard {
+    fn new() -> Self {
+        while LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        SpinGuard
     }
 }
 
-/// Release spinlock.
-fn lock_release() {
-    LOCK.store(false, Ordering::Release);
+impl Drop for SpinGuard {
+    fn drop(&mut self) {
+        LOCK.store(false, Ordering::Release);
+    }
 }
 
 /// Check if initialized.
@@ -410,15 +424,16 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
         })?;
     let workspace_base = workspace_base_ptr.as_ptr() as usize;
 
-    lock_acquire();
-    // SAFETY: We hold the spinlock, so exclusive access is guaranteed.
-    // Use addr_of_mut! to avoid creating references to mutable statics.
-    unsafe {
-        (*addr_of_mut!(WEIGHT_POOL)).init(weight_base, weight_blocks, true);
-        (*addr_of_mut!(WORKSPACE_POOL)).init(workspace_base, workspace_blocks, false);
+    {
+        let _g = SpinGuard::new();
+        // SAFETY: SpinGuard held — exclusive access to the pool statics.
+        // `addr_of_mut!` avoids creating a reference to the mutable static.
+        unsafe {
+            (*addr_of_mut!(WEIGHT_POOL)).init(weight_base, weight_blocks, true);
+            (*addr_of_mut!(WORKSPACE_POOL)).init(workspace_base, workspace_blocks, false);
+        }
+        INITIALIZED.store(1, Ordering::Release);
     }
-    INITIALIZED.store(1, Ordering::Release);
-    lock_release();
 
     Ok(())
 }
@@ -435,11 +450,9 @@ pub fn alloc_weights(_size: usize) -> Result<ModelHandle, AllocError> {
     // For now, we allocate whole 2MB blocks regardless of size
     // Future: support multi-block allocations for larger models
 
-    lock_acquire();
-    // SAFETY: Spinlock held, exclusive access guaranteed
-    let result = unsafe { (*addr_of_mut!(WEIGHT_POOL)).alloc(POOL_WEIGHT) };
-    lock_release();
-    result
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to WEIGHT_POOL.
+    unsafe { (*addr_of_mut!(WEIGHT_POOL)).alloc(POOL_WEIGHT) }
 }
 
 /// Allocate model memory from the workspace pool.
@@ -451,11 +464,9 @@ pub fn alloc_workspace(_size: usize) -> Result<ModelHandle, AllocError> {
         return Err(AllocError::NotInitialized);
     }
 
-    lock_acquire();
-    // SAFETY: Spinlock held, exclusive access guaranteed
-    let result = unsafe { (*addr_of_mut!(WORKSPACE_POOL)).alloc(POOL_WORKSPACE) };
-    lock_release();
-    result
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to WORKSPACE_POOL.
+    unsafe { (*addr_of_mut!(WORKSPACE_POOL)).alloc(POOL_WORKSPACE) }
 }
 
 /// Free model memory.
@@ -470,17 +481,15 @@ pub fn free(handle: ModelHandle) -> Result<(), AllocError> {
         return Err(AllocError::InvalidHandle);
     }
 
-    lock_acquire();
-    // SAFETY: Spinlock held, exclusive access guaranteed
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
         match handle.pool_id {
             POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).free(handle),
             POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).free(handle),
             _ => Err(AllocError::InvalidHandle),
         }
-    };
-    lock_release();
-    result
+    }
 }
 
 /// Share model memory with another component.
@@ -495,17 +504,15 @@ pub fn share(handle: ModelHandle) -> Result<ModelHandle, AllocError> {
         return Err(AllocError::InvalidHandle);
     }
 
-    lock_acquire();
-    // SAFETY: Spinlock held, exclusive access guaranteed
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
         match handle.pool_id {
             POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).share(handle),
             POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).share(handle),
             _ => Err(AllocError::InvalidHandle),
         }
-    };
-    lock_release();
-    result
+    }
 }
 
 /// Release a shared reference to model memory.
@@ -523,17 +530,15 @@ pub fn get_ptr(handle: ModelHandle) -> Option<*mut u8> {
         return None;
     }
 
-    lock_acquire();
-    // SAFETY: Spinlock held, exclusive access guaranteed
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
         match handle.pool_id {
             POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).get_ptr(handle),
             POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).get_ptr(handle),
             _ => None,
         }
-    };
-    lock_release();
-    result
+    }
 }
 
 /// Get size of allocation in bytes.
@@ -544,17 +549,15 @@ pub fn get_size(handle: ModelHandle) -> Option<usize> {
         return None;
     }
 
-    lock_acquire();
-    // SAFETY: Spinlock held, exclusive access guaranteed
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
         match handle.pool_id {
             POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).get_size(handle),
             POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).get_size(handle),
             _ => None,
         }
-    };
-    lock_release();
-    result
+    }
 }
 
 /// Get weight pool statistics.
@@ -569,11 +572,9 @@ pub fn weight_pool_stats() -> PoolStats {
         };
     }
 
-    lock_acquire();
-    // SAFETY: Spinlock held, exclusive access guaranteed
-    let stats = unsafe { (*addr_of_mut!(WEIGHT_POOL)).stats() };
-    lock_release();
-    stats
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to WEIGHT_POOL.
+    unsafe { (*addr_of_mut!(WEIGHT_POOL)).stats() }
 }
 
 /// Get workspace pool statistics.
@@ -588,11 +589,9 @@ pub fn workspace_pool_stats() -> PoolStats {
         };
     }
 
-    lock_acquire();
-    // SAFETY: Spinlock held, exclusive access guaranteed
-    let stats = unsafe { (*addr_of_mut!(WORKSPACE_POOL)).stats() };
-    lock_release();
-    stats
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to WORKSPACE_POOL.
+    unsafe { (*addr_of_mut!(WORKSPACE_POOL)).stats() }
 }
 
 // =============================================================================

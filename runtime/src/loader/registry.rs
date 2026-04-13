@@ -168,17 +168,29 @@ impl<T> SyncWrapper<T> {
 static REGISTRY: SyncWrapper<ModelRegistry> = SyncWrapper::new(ModelRegistry::new());
 static LOCK: AtomicBool = AtomicBool::new(false);
 
-fn lock() {
-    while LOCK
-        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
-    {
-        core::hint::spin_loop();
+/// RAII guard for the registry spinlock.
+///
+/// Released on drop so early returns via `?` or panics (even with
+/// `panic = "abort"`, this remains the safer pattern) can't leak the
+/// lock.
+struct SpinGuard;
+
+impl SpinGuard {
+    fn new() -> Self {
+        while LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        SpinGuard
     }
 }
 
-fn unlock() {
-    LOCK.store(false, Ordering::Release);
+impl Drop for SpinGuard {
+    fn drop(&mut self) {
+        LOCK.store(false, Ordering::Release);
+    }
 }
 
 // =============================================================================
@@ -187,8 +199,8 @@ fn unlock() {
 
 /// Initialize the model registry.
 pub fn init() {
-    lock();
-    // SAFETY: We hold the lock
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to REGISTRY.
     unsafe {
         let reg = &mut *REGISTRY.get();
         if !reg.initialized {
@@ -198,7 +210,6 @@ pub fn init() {
             reg.initialized = true;
         }
     }
-    unlock();
 }
 
 /// Load an ONNX model from a buffer.
@@ -250,20 +261,23 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             floats
         } else if let Some(i64_packed) = tensor.int64_data {
             // Decode varint-encoded int64 values to raw little-endian bytes.
-            // SAFETY: load_model is serialized by the registry lock.
+            // SAFETY: load_model is serialized by the registry lock, so
+            // I64_DECODE_BUF is not concurrently accessed.
             unsafe {
-                let mut decode_offset = 0usize;
+                let max_items = I64_DECODE_BUF.len() / 8;
+                let mut item_count: usize = 0;
                 for val in super::protobuf::packed_varint_i64(i64_packed) {
+                    if item_count >= max_items {
+                        break;
+                    }
                     if let Ok(v) = val {
-                        if decode_offset + 8 <= I64_DECODE_BUF.len() {
-                            let bytes = (v as i64).to_le_bytes();
-                            I64_DECODE_BUF[decode_offset..decode_offset + 8]
-                                .copy_from_slice(&bytes);
-                            decode_offset += 8;
-                        }
+                        let bytes = (v as i64).to_le_bytes();
+                        let off = item_count * 8;
+                        I64_DECODE_BUF[off..off + 8].copy_from_slice(&bytes);
+                        item_count += 1;
                     }
                 }
-                &I64_DECODE_BUF[..decode_offset]
+                &I64_DECODE_BUF[..item_count * 8]
             }
         } else {
             continue;
@@ -354,9 +368,11 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     info.output_count = graph.output_count as u32;
 
     // Store in registry
-    lock();
-    let result = unsafe {
-        let reg = &mut *REGISTRY.get();
+    let result = {
+        let _g = SpinGuard::new();
+        // SAFETY: SpinGuard held — exclusive access to REGISTRY.
+        unsafe {
+            let reg = &mut *REGISTRY.get();
 
         // Find a free slot
         let mut slot_idx = None;
@@ -407,10 +423,10 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
                 };
                 Ok(idx)
             }
-            None => Err(LoadError::ModelTooLarge), // All slots pinned
+                None => Err(LoadError::ModelTooLarge), // All slots pinned
+            }
         }
     };
-    unlock();
 
     if result.is_err() {
         // Clean up on failure
@@ -424,7 +440,8 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
 /// Touch a model (update last_used timestamp and use_count).
 /// Called on each inference to maintain LRU ordering.
 pub fn touch_model(index: usize) {
-    lock();
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to REGISTRY.
     unsafe {
         let reg = &mut *REGISTRY.get();
         if index < MAX_MODELS && reg.entries[index].active {
@@ -432,13 +449,13 @@ pub fn touch_model(index: usize) {
             reg.entries[index].use_count += 1;
         }
     }
-    unlock();
 }
 
 /// Pin a model to prevent LRU eviction.
 pub fn pin_model(index: usize) -> bool {
-    lock();
-    let ok = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to REGISTRY.
+    unsafe {
         let reg = &mut *REGISTRY.get();
         if index < MAX_MODELS && reg.entries[index].active {
             reg.entries[index].pinned = true;
@@ -446,15 +463,14 @@ pub fn pin_model(index: usize) -> bool {
         } else {
             false
         }
-    };
-    unlock();
-    ok
+    }
 }
 
 /// Unpin a model (allow LRU eviction).
 pub fn unpin_model(index: usize) -> bool {
-    lock();
-    let ok = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to REGISTRY.
+    unsafe {
         let reg = &mut *REGISTRY.get();
         if index < MAX_MODELS && reg.entries[index].active {
             reg.entries[index].pinned = false;
@@ -462,15 +478,14 @@ pub fn unpin_model(index: usize) -> bool {
         } else {
             false
         }
-    };
-    unlock();
-    ok
+    }
 }
 
 /// Unload a model by registry index.
 pub fn unload_model(index: usize) -> Result<(), LoadError> {
-    lock();
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to REGISTRY.
+    unsafe {
         let reg = &mut *REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             Err(LoadError::InvalidFormat)
@@ -484,54 +499,49 @@ pub fn unload_model(index: usize) -> Result<(), LoadError> {
             let _ = mm::free(ws);
             Ok(())
         }
-    };
-    unlock();
-    result
+    }
 }
 
 /// Get model info by index.
 pub fn get_info(index: usize) -> Option<ModelInfoC> {
-    lock();
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             None
         } else {
             Some(reg.entries[index].info)
         }
-    };
-    unlock();
-    result
+    }
 }
 
 /// Get the operator graph for a loaded model.
 pub fn get_graph(index: usize) -> Option<OperatorGraph> {
-    lock();
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             None
         } else {
             Some(reg.entries[index].graph.clone())
         }
-    };
-    unlock();
-    result
+    }
 }
 
 /// Get the weight memory handle for a loaded model.
 pub fn get_weights(index: usize) -> Option<ModelHandle> {
-    lock();
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             None
         } else {
             Some(reg.entries[index].weights)
         }
-    };
-    unlock();
-    result
+    }
 }
 
 /// Share a model's weight memory with another consumer.
@@ -540,47 +550,44 @@ pub fn get_weights(index: usize) -> Option<ModelHandle> {
 /// even if the original model is unloaded. The caller must call
 /// `mm::free()` on the returned handle when done.
 pub fn share_weights(index: usize) -> Option<ModelHandle> {
-    lock();
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             None
         } else {
             mm::share(reg.entries[index].weights).ok()
         }
-    };
-    unlock();
-    result
+    }
 }
 
 /// Get the workspace memory handle for a loaded model.
 pub fn get_workspace(index: usize) -> Option<ModelHandle> {
-    lock();
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             None
         } else {
             Some(reg.entries[index].workspace)
         }
-    };
-    unlock();
-    result
+    }
 }
 
 /// Get the weight table for a loaded model.
 pub fn get_weight_table(index: usize) -> Option<WeightTable> {
-    lock();
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             None
         } else {
             Some(reg.entries[index].weight_table.clone())
         }
-    };
-    unlock();
-    result
+    }
 }
 
 /// Find a model by name (null-terminated or exact-length byte slice).
@@ -592,8 +599,9 @@ pub fn find_by_name(name: &[u8]) -> Option<usize> {
         name
     };
 
-    lock();
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         let mut found = None;
         for (i, entry) in reg.entries.iter().enumerate() {
@@ -609,17 +617,16 @@ pub fn find_by_name(name: &[u8]) -> Option<usize> {
             }
         }
         found
-    };
-    unlock();
-    result
+    }
 }
 
 /// Copy a model's operator graph directly into a caller-provided buffer.
 ///
 /// Avoids returning the 6KB OperatorGraph by value (stack overflow in debug).
 pub fn copy_graph_into(index: usize, dest: &mut OperatorGraph) -> bool {
-    lock();
-    let ok = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             false
@@ -632,15 +639,14 @@ pub fn copy_graph_into(index: usize, dest: &mut OperatorGraph) -> bool {
             );
             true
         }
-    };
-    unlock();
-    ok
+    }
 }
 
 /// Copy a model's weight table directly into a caller-provided buffer.
 pub fn copy_weight_table_into(index: usize, dest: &mut WeightTable) -> bool {
-    lock();
-    let ok = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         if index >= MAX_MODELS || !reg.entries[index].active {
             false
@@ -652,18 +658,15 @@ pub fn copy_weight_table_into(index: usize, dest: &mut WeightTable) -> bool {
             );
             true
         }
-    };
-    unlock();
-    ok
+    }
 }
 
 /// Get the number of loaded models.
 pub fn count() -> usize {
-    lock();
-    let c = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         reg.entries.iter().filter(|e| e.active).count()
-    };
-    unlock();
-    c
+    }
 }

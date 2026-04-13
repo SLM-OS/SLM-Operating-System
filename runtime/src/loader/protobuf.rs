@@ -186,13 +186,21 @@ impl<'a> Iterator for ProtoIter<'a> {
                 }
             }
             WireType::LengthDelimited => {
-                let (len, len_bytes) = match decode_varint(value_data) {
+                let (len_u64, len_bytes) = match decode_varint(value_data) {
                     Ok(v) => v,
                     Err(e) => return Some(Err(e)),
                 };
-                let len = len as usize;
+                // A malicious/truncated input could encode a length larger
+                // than `usize` or larger than the remaining buffer.
+                // `saturating_sub` prevents the additive bounds check from
+                // wrapping on 32-bit targets (and is harmless on 64-bit).
+                let len = match usize::try_from(len_u64) {
+                    Ok(v) => v,
+                    Err(_) => return Some(Err(ParseError::LengthOverflow)),
+                };
                 let data_start = len_bytes;
-                if data_start + len > value_data.len() {
+                let remaining_after_len = value_data.len().saturating_sub(data_start);
+                if len > remaining_after_len {
                     return Some(Err(ParseError::LengthOverflow));
                 }
                 let bytes = &value_data[data_start..data_start + len];
