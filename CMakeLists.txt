@@ -66,19 +66,33 @@ add_compile_definitions(PLATFORM_${PLATFORM}=1)
 # is kept as a backward-compatible alias below so existing Pi 5
 # Makefile / CMake invocations keep working.
 #
+# Only applicable on platforms that have the exception-frame problem
+# AND the NC memory backing for the trampoline's per-CPU state. That is
+# the PLATFORM_HAS_NC_MEMORY platforms today — Pi 5 and Jetson. QEMU
+# virt does not need the trampoline (its emulated timer IRQ allows
+# schedule-from-ISR), and x86-64 has no ELR. If SECONDARY_PREEMPT=ON
+# is passed on a non-applicable platform it is silently ignored, with
+# a status message for diagnosability.
+#
 # Default OFF because turning it on requires functional timer IRQ
 # delivery on all CPUs. On Pi 5 that is still blocked by #134
 # (the hardware timer-IRQ delivery regression); cooperative preemption
 # via PI5_COOP_PREEMPT is the current Pi 5 default. On Jetson this
-# option becomes relevant after the P1.0 GICR_IGROUPR0 fast-path.
-option(SECONDARY_PREEMPT "Enable deferred-scheduling preemption on secondary CPUs (ARM64)" OFF)
+# option becomes relevant after the P1.0 GICR_IGROUPR0 fast-path plus
+# the MPIDR formula fix in vectors.S (Jetson plan P3 step 2).
+option(SECONDARY_PREEMPT "Enable deferred-scheduling preemption on secondary CPUs (ARM64, NC-memory platforms)" OFF)
 # Backward-compat alias: users can still pass -DPI5_SECONDARY_PREEMPT=ON.
 option(PI5_SECONDARY_PREEMPT "Deprecated alias for SECONDARY_PREEMPT" OFF)
 if(PI5_SECONDARY_PREEMPT)
     set(SECONDARY_PREEMPT ON)
 endif()
 if(SECONDARY_PREEMPT)
-    add_compile_definitions(SECONDARY_PREEMPT=1)
+    if(PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
+        add_compile_definitions(SECONDARY_PREEMPT=1)
+    else()
+        message(STATUS "SECONDARY_PREEMPT=ON ignored on PLATFORM=${PLATFORM} "
+                       "(only Pi 5 and Jetson use the ELR trampoline)")
+    endif()
 endif()
 # Pi 5 FIQ-routed timer (Phase 2 of issue #99): el1_fiq_handler dispatches
 # GICC_AIAR on IRQ 30 to timer_handler(), because non-secure IGROUPR writes

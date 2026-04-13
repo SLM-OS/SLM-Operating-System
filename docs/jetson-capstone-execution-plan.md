@@ -46,45 +46,29 @@ The Jetson plan runs in parallel with the Pi 5 and x86-64 plans in `docs/pi5-pre
 
 Each is small (15 minutes to a day of scope). Total Week-1 effort: roughly half a day.
 
-### Prereq #1 — `el1_fiq` handler + per-vector NC counters (Pi 5 plan owns)
+### Prereq #1 — `el1_fiq` handler + per-vector NC counters (Pi 5 plan owns) ✅ DONE
 
-Pi 5 Phase 1b owns the implementation (`kernel/arch/arm64/vectors.S`, `kernel/arch/arm64/exceptions.c`). Replaces the bare `el1_fiq: b hang` with a real handler that increments a per-CPU NC counter so IRQ-vs-FIQ misrouting is visible in the `cpu` shell diagnostics.
+Merged as part of `#99` Phase 1 (commit `e98c3d7`). `kernel/arch/arm64/vectors.S` has real `el1_fiq` / `el1_fiq_sp0` handlers dispatching to `el1_fiq_handler` in `exceptions.c` with per-CPU NC counters. Exposed to diagnostics via the `diag gic` shell command (from `#99` Phase 2, commit `1eb5e80`).
 
 **Why Jetson depends on this:** P1.0's fast-path hypothesis is that PPI 30 is being delivered as FIQ (because `GICR_IGROUPR0` is never written, leaving PPIs in Group 0). Without the FIQ counter, the fast-path fix succeeds but the diagnostic signal is invisible. If P1.0 fails, the FIQ counter is the primary diagnostic for ruling out the FIQ hypothesis.
 
-**Test surface:** QEMU with GICv2 (Pi 5 config) and GICv3 (Jetson config).
+### Prereq #2 — Rename `PI5_SECONDARY_PREEMPT` → `SECONDARY_PREEMPT` ✅ DONE
 
-### Prereq #2 — Rename `PI5_SECONDARY_PREEMPT` → `SECONDARY_PREEMPT`
+Done in commit `b820bee`. `CMakeLists.txt` exposes `SECONDARY_PREEMPT` (default OFF) and keeps `PI5_SECONDARY_PREEMPT` as a deprecated alias. The RASPI5-only gate is dropped — any NC-memory ARM64 platform (Pi 5 + Jetson) can opt in. `Makefile` forwards both names. Source guards in `preempt.h`, `preempt.c`, `vectors.S`, `sched.c`, `exceptions.c` all renamed. `kernel/sched/preempt.c` now compiles on all ARM64 platforms (it was RASPI5-only).
 
-Standalone PR that renames the compile flag across `CMakeLists.txt:72-75`, `kernel/sched/preempt.c:14`, `kernel/sched/sched.c:420, 1201, 1319`, and any vectors.S reference. Keep a `PI5_SECONDARY_PREEMPT` alias in `CMakeLists.txt` so the Pi 5 Makefile option keeps working.
+**Regression test:** `scripts/tests/verify-secondary-preempt-build-matrix.sh` runs 7 build + `nm` checks (default OFF on each platform, new name ON on Pi 5 / Jetson, legacy alias ON on Pi 5, QEMU silently ignored). All pass.
 
-**Why this is a Week-1 PR, not part of P3:** both ARM64 plans (Pi 5 Phase 3d and Jetson P3) need the new name. Whichever lands first forces the other to merge-resolve a symbol rename across several files. Doing the rename once, in isolation, costs 15 minutes and blocks nothing.
+**Caveat:** enabling `SECONDARY_PREEMPT=ON` on Jetson compiles but is not safe at runtime yet — the trampoline's MPIDR formula collides on cluster 1 (P3 step 2 owns the fix).
 
-**Test surface:** `make kernel PLATFORM=RASPI5 PI5_SECONDARY_PREEMPT=ON` still builds.
+### Prereq #3 — `smp_notify_cpu(cpu)` abstraction ✅ DONE
 
-### Prereq #3 — `smp_notify_cpu(cpu)` abstraction
+Done in commit `5c61ed6`. `kernel/include/smp.h` declares `void smp_notify_cpu(uint32_t cpu)`; implementations in `kernel/sched/smp.c` (ARM64 — `sev` broadcast) and `kernel/arch/x86_64/platform_x86.c` (x86-64 — no-op stub). `scheduler_add_task_to_cpu()` in `sched.c` now calls it unconditionally instead of the `#if !defined(PLATFORM_X86_64)` block.
 
-Define in `kernel/include/smp.h`:
+ARM64 upgrade to targeted SGI deferred until P3 step 3 fixes `gic_send_sgi()` for dual-cluster MPIDR. x86-64 B1 will replace the stub with `lapic_send_ipi(apic_id_of(cpu), VEC_RESCHED, 0)` plus IDT wiring.
 
-```c
-/* Notify a specific CPU that it should re-check its run queue. Platform
- * implementation: x86-64 sends a LAPIC IPI; ARM64 issues SEV (broadcast
- * for now, upgradeable to a targeted GIC SGI once gic_send_sgi() is
- * fixed for dual-cluster — Jetson P3 step 3). */
-void smp_notify_cpu(uint32_t cpu);
-```
+**Functional tests:** `test_smp_notify_cpu_safe` (direct API call on every CPU id) and `test_smp_notify_cpu_wakes_secondary` (queues a probe task on CPU 1 and asserts the sentinel write fires within 3 s) in `kernel/tests/test_integration.c`. Both pass in QEMU ARM64 `make test`. Jetson hardware: `bench smp` still 5/5 COMPLETED, confirming the cross-CPU wake path survived the abstraction.
 
-Per-platform weak defaults:
-- `kernel/arch/x86_64/platform_x86.c`: calls `lapic_send_ipi(cpu, IPI_RESCHED)`.
-- `kernel/sched/smp.c` (ARM64): issues `sev` for now. Upgrade to `gic_send_sgi(cpu, SGI_RESCHED)` after P3 step 3.
-
-Replace the existing `sev` and x86 IPI calls in `scheduler_add_task_to_cpu()` with a single unconditional `smp_notify_cpu(cpu)` call.
-
-**Why this is a Week-1 PR:** x86-64's B1 currently adds `#if defined(PLATFORM_X86_64)` around the IPI call in sched.c. If that lands as-is, the next platform that wants targeted notification adds another ifdef. The abstraction costs 30 minutes and keeps `sched.c` platform-agnostic.
-
-**Test surface:** `make test` across QEMU, Pi 5, x86-64, Jetson.
-
-### Prereq #4 — Inference `ops.rs` dispatch skeleton
+### Prereq #4 — Inference `ops.rs` dispatch skeleton ✅ DONE
 
 Land the `cfg_if!` scaffolding in `runtime/src/inference/ops.rs` for the operators that G1-G3 and x86-64 C1 will both extend:
 
@@ -102,18 +86,20 @@ Each platform fills its own `_neon` / `_sse` body in subsequent PRs; the scalar 
 
 **Why this is a Week-1 PR:** G1 (NEON) and x86-64 C1 (SSE) both start Week 2-3 and both modify the same functions in `ops.rs`. Whichever lands second eats a merge conflict. Landing the dispatch first makes the two tracks truly independent.
 
-**Test surface:** scalar fallback unit tests pass on all platforms.
+Merged as PR #131 (commit `07c0020`). 7 SIMD helper sites in `ops.rs` now use a three-way `aarch64 / x86_64 / not(any)` cfg split. Each `#[cfg(target_arch = "x86_64")]` block currently holds scalar code marked `TODO(x86-64 C1)`; x86-64's Phase C1 fills these in with SSE.
 
-### Recommended Week-1 Merge Sequence
+### Prerequisites status summary
 
-| Day | PR | Owner |
+All four Week-1 prereqs are DONE:
+
+| Prereq | Status | Commit |
 |---|---|---|
-| Mon | Prereq #2 (rename) | Whoever starts first |
-| Tue | Prereq #1 (FIQ handler) | Pi 5 plan |
-| Wed | Prereq #3 (`smp_notify_cpu`) | x86-64 plan |
-| Thu | Prereq #4 (dispatch skeleton) | Jetson plan |
+| #1 — FIQ handler + per-vector counters | ✅ (Pi 5 plan) | `e98c3d7` + `1eb5e80` |
+| #2 — `SECONDARY_PREEMPT` rename | ✅ (Jetson plan) | `b820bee` |
+| #3 — `smp_notify_cpu` abstraction | ✅ (Jetson plan) | `5c61ed6` |
+| #4 — `ops.rs` dispatch skeleton | ✅ (Jetson plan, PR #131) | `07c0020` |
 
-After these land, Tracks P/S/G in this plan can run without coordination friction.
+After these land, Tracks P/S/G in this plan can run without coordination friction. Jetson plan's remaining blocker: **P1.0** (the `GICR_IGROUPR0` fast-path fix for timer IRQ delivery) is the next highest-leverage item.
 
 ---
 

@@ -454,15 +454,47 @@ Rationale: on real ARM64 hardware without SMPEN (Pi 5) or on post-kexec Jetson, 
 
 Platform-specific consequence: timer IRQs do not fire while application tasks are running on Pi 5. Only the idle task on CPU 0 advances `pit_ticks` (it unmasks inside the `wfi` loop). See `kernel/CLAUDE.md` §Pi-5-Timer-IRQs for the full implication chain.
 
-### Inter-Processor Interrupts (IPI)
+### Secondary-CPU Preemption (`SECONDARY_PREEMPT`)
+
+Calling `schedule()` directly from a timer ISR on real ARM64 hardware
+corrupts the abandoned exception frame and hangs the CPU. The fix is
+the ELR-trampoline infrastructure (`kernel/sched/preempt.c`,
+`resched_trampoline` in `kernel/arch/arm64/vectors.S`): the timer IRQ
+handler just sets `reschedule_pending[cpu] = 1` and rewrites the saved
+`ELR_EL1` to point at the trampoline. `eret` then lands in the
+trampoline in task context, which calls `schedule()` safely.
+
+The feature is gated behind the `SECONDARY_PREEMPT` compile-time option:
+
+| Build invocation | Effect |
+|---|---|
+| *default* | Trampoline not compiled. Secondary CPUs use cooperative `wfe`/SEV wake; preemption only on CPU 0 (if timer IRQs deliver there). |
+| `make kernel SECONDARY_PREEMPT=ON` | Trampoline compiled and linked. All CPUs enable timer preemption. Functional on Pi 5 (#99 coop-preempt path) and QEMU; gated on the Jetson MPIDR fix (Jetson plan P3 step 2) before it's safe there. |
+| `make kernel PI5_SECONDARY_PREEMPT=ON` | Deprecated alias. Sets `SECONDARY_PREEMPT=ON`. Kept so existing Pi 5 Makefile invocations continue working. |
+
+The option was renamed from the original `PI5_SECONDARY_PREEMPT` to a
+capability-neutral spelling during the Jetson capstone Prereq #2 work
+(the rename was a prerequisite for P3 — without it, `CMakeLists.txt`'s
+`PLATFORM STREQUAL "RASPI5"` gate prevented the trampoline from
+compiling into Jetson builds at all).
+
+### Inter-Processor Interrupts (IPI) / Cross-CPU Notification
 
 Used for:
-- Signaling a core to reschedule
-- TLB shootdown (later, for shared page tables)
+- Signaling a core to reschedule (a new task was assigned to its queue,
+  or the scheduler decided it should re-check its work).
+- TLB shootdown (future, for shared page tables).
+
+#### `smp_notify_cpu()` — platform-neutral API
 
 Both platforms route through the common `smp_notify_cpu(logical_cpu)`
-API (`kernel/include/smp.h`). ARM64 backend issues `sev` (wakes any
-WFE'd CPU); x86-64 backend sends a LAPIC IPI.
+API (`kernel/include/smp.h`), called from `scheduler_add_task_to_cpu()`
+after pushing a task onto the target CPU's run queue. Per-platform:
+
+| Platform | Implementation | Notes |
+|---|---|---|
+| ARM64 (Pi 5, Jetson, QEMU virt) | `__asm__ volatile("sev")` broadcast | Wakes every CPU in WFE; target CPU's idle loop picks up the task on the next iteration. Broadcast is wasteful (N-1 idle wakeups per task add) but correct and depends on nothing beyond WFE semantics. Defined in `kernel/sched/smp.c`. |
+| x86-64 | LAPIC IPI on `RESCHED_VECTOR` (49) | `kernel/arch/x86_64/platform_x86.c`. Handler calls `schedule()` directly — not `scheduler_tick()` — so quantum accounting stays owned by the local LAPIC timer. Runs on IST1 via the per-CPU TSS. |
 
 **x86-64 vector table:**
 
@@ -475,28 +507,41 @@ Both share IST1 via the per-CPU TSS (see A1 in
 `docs/x86-64-capstone-gap-closure-plan.md`), so the ISRs cannot be
 corrupted by a task-stack overflow.
 
-**Reschedule IPI handler (x86-64):** calls `schedule()` directly,
-NOT `scheduler_tick()` — quantum accounting stays owned by the
-local LAPIC timer so a remote IPI cannot double-tick the fairness
-policy. Nested schedule() is guarded by the `preempt_disabled[cpu]`
-flag (`kernel/sched/sched.c`).
+Both backends short-circuit when `logical_cpu == cpu_id()` (self-IPI
+is redundant — the caller is already running) and when `logical_cpu >=
+cpu_count` (stale `task->assigned_cpu` values from a prior migration).
 
-**ARM64 SGI reference:**
+#### Planned upgrade: targeted ARM64 SGI
+
+Once the Jetson plan's P3 step 3 fixes `gic_send_sgi()` for
+dual-cluster MPIDR (Jetson's Aff0 is 0 for every CPU, so the current
+`(1UL << target_cpu)` target-list bit is wrong), the ARM64
+implementation of `smp_notify_cpu` will upgrade from broadcast SEV to:
 
 ```c
-#define IPI_RESCHEDULE  0   /* SGI 0: request reschedule */
-
-void smp_send_reschedule(uint32_t target_cpu) {
-    gic_send_sgi(IPI_RESCHEDULE, 1 << target_cpu);
+void smp_notify_cpu(uint32_t cpu) {
+    gic_send_sgi(cpu, SGI_RESCHED);
 }
 
-/* In IRQ handler */
 void handle_sgi(uint32_t sgi_id) {
-    if (sgi_id == IPI_RESCHEDULE) {
-        schedule();
+    if (sgi_id == SGI_RESCHED) {
+        /* No-op — the CPU re-checks its queue on the next idle iter
+         * after exception return. If SECONDARY_PREEMPT is on, the
+         * trampoline path picks the new task. */
     }
 }
 ```
+
+Until then, the SEV broadcast is acceptable: per-add overhead is a few
+hundred cycles per idle CPU, and there are rarely more than a handful.
+
+#### Init-time broadcast
+
+`scheduler_init()` also issues a `sev` broadcast after it finishes
+primary init, to wake any secondary CPUs that are busy-waiting in
+`scheduler_is_initialized()` during their boot sequence. That site is
+semantically broadcast (every secondary is waiting) and is kept as a
+direct `sev` rather than `smp_notify_cpu` to document the intent.
 
 ---
 

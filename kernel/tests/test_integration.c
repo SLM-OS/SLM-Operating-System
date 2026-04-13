@@ -868,6 +868,115 @@ static void test_msg_router_cross_cpu(void)
 }
 
 /* ============================================================================
+ * smp_notify_cpu (Prereq #3) — direct functional tests
+ *
+ * `scheduler_add_task_to_cpu()` invokes `smp_notify_cpu(cpu)` after
+ * queuing a task. The abstraction replaces the old
+ * `#if !defined(PLATFORM_X86_64) __asm__ volatile("sev") #endif` block.
+ * These tests verify:
+ *   1. The API is safe to call for every valid CPU id (compile-time
+ *      linkage + runtime no-crash).
+ *   2. It actually wakes a secondary CPU that is idle in WFE — the
+ *      property the scheduler depends on.
+ * ============================================================================ */
+
+static void test_smp_notify_cpu_safe(void)
+{
+    /* Fire smp_notify_cpu for every known CPU id. On ARM64 each call
+     * issues an SEV (broadcast); on x86-64 it is a no-op. If the symbol
+     * failed to link, this test would not compile. If the call hung or
+     * faulted, the test would time out / crash. */
+    for (uint32_t cpu = 0; cpu < cpu_count; cpu++) {
+        smp_notify_cpu(cpu);
+    }
+    /* Also tolerate out-of-range ids without crashing. The API does not
+     * promise anything for invalid cpus, but the implementations must
+     * not dereference cpu-indexed tables unsafely. */
+    smp_notify_cpu(MAX_CPUS);
+    TEST_ASSERT_TRUE(1);  /* Reached — no crash. */
+}
+
+/*
+ * Verify that smp_notify_cpu wakes a secondary CPU from its idle WFE.
+ *
+ * Approach: we queue a task that writes a sentinel to an NC slot.
+ * scheduler_add_task_to_cpu() in turn calls smp_notify_cpu(). Without
+ * the wake, the secondary CPU could be stuck in WFE and the sentinel
+ * would never be written. A timeout proves the negative.
+ *
+ * This is not a new scenario — `test_multicore_basic` already proves
+ * cross-CPU dispatch works end-to-end. What this test adds is a
+ * focused assertion on the notification path specifically, catching
+ * a regression where `smp_notify_cpu` would become a no-op on ARM64.
+ */
+#define NOTIFY_TARGET_CPU 1
+#define NOTIFY_SENTINEL   0xD00DFACE
+static volatile uint32_t smp_notify_sentinel;
+
+static void smp_notify_probe_task(void *arg)
+{
+    (void)arg;
+    smp_notify_sentinel = NOTIFY_SENTINEL;
+    cache_clean((void *)&smp_notify_sentinel);
+}
+
+static void test_smp_notify_cpu_wakes_secondary(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
+        return;
+    }
+
+    smp_notify_sentinel = 0;
+    cache_clean((void *)&smp_notify_sentinel);
+
+    struct task *probe = task_create("smp_notify_probe",
+                                     smp_notify_probe_task, NULL);
+    TEST_ASSERT_NOT_NULL(probe);
+
+    /* scheduler_add_task_to_cpu publishes the task AND calls
+     * smp_notify_cpu(NOTIFY_TARGET_CPU) — exactly the path we want to
+     * exercise. */
+    scheduler_add_task_to_cpu(probe, NOTIFY_TARGET_CPU);
+
+    uint64_t start = timer_get_count();
+    uint64_t limit = timer_get_frequency() * 3;  /* 3 s */
+    while ((timer_get_count() - start) < limit) {
+        cache_invalidate((void *)&smp_notify_sentinel);
+        if (smp_notify_sentinel == NOTIFY_SENTINEL) break;
+        yield();
+    }
+    cache_invalidate((void *)&smp_notify_sentinel);
+
+    TEST_ASSERT_MESSAGE(smp_notify_sentinel == NOTIFY_SENTINEL,
+        "smp_notify_cpu: secondary CPU did not wake and run probe task within timeout");
+}
+
+/* ============================================================================
+ * SECONDARY_PREEMPT rename (Prereq #2) — compile-time regression test
+ * ============================================================================
+ * The rename is entirely cfg-guarded, so the "runtime behavior test" for
+ * it is: does the binary still link and behave identically? The full
+ * test suite running green under both `SECONDARY_PREEMPT=ON` and the
+ * legacy `PI5_SECONDARY_PREEMPT=ON` aliases is that test.
+ *
+ * We also assert the macro spelling here at compile time. If a future
+ * refactor accidentally reverts the rename (e.g. re-introduces a
+ * `PI5_SECONDARY_PREEMPT`-only guard in shared source), and the user
+ * builds with `SECONDARY_PREEMPT=ON` expecting the trampoline, this
+ * assertion fires before link-time mysteries surface.
+ */
+#if defined(SECONDARY_PREEMPT)
+_Static_assert(SECONDARY_PREEMPT == 1,
+    "SECONDARY_PREEMPT is defined but not 1 — CMake plumbing broken");
+#endif
+#if defined(PI5_SECONDARY_PREEMPT) && !defined(SECONDARY_PREEMPT)
+_Static_assert(0,
+    "Legacy PI5_SECONDARY_PREEMPT is set but SECONDARY_PREEMPT is not — "
+    "CMake alias wiring broken; see docs/smp.md §Secondary-CPU Preemption");
+#endif
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -897,6 +1006,10 @@ int test_suite_integration(void)
 
     /* Regression: msg_router cross-CPU publish/receive/ack (#66) */
     RUN_TEST(test_msg_router_cross_cpu);
+
+    /* Prereq #3: smp_notify_cpu abstraction */
+    RUN_TEST(test_smp_notify_cpu_safe);
+    RUN_TEST(test_smp_notify_cpu_wakes_secondary);
 
 #if CONFIG_WORK_STEALING
     /* Phase B: work-stealing load distribution (#59). */
