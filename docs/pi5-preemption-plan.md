@@ -1,5 +1,15 @@
 # Pi 5 Preemptive Multitasking + SMP Plan
 
+> **[Resolved 2026-04-13]** The Pi 5-specific phases in this plan (Phases 1-4 — root-cause and fix the hardware timer IRQ delivery blocker) were superseded mid-execution. Hardware timer IRQs turned out to be blocked by TF-A/GIC configuration we cannot reach from EL1/EL2. The capstone-shippable resolution is **cooperative preemption** (`PI5_COOP_PREEMPT` in `kernel/sched/sched.c`) — `schedule()` synthesizes a `scheduler_tick()` from `CNTPCT_EL0` every 10 ms per CPU. Full investigation and rationale in `docs/pi5-preemption-resolution.md`; merged via PR #126 (closes #99).
+>
+> **What still applies from this plan:**
+> - The **Cross-platform coordination** section below remains the active reference for the Jetson (ARM64) and x86-64 preemption/SMP tracks. The four prerequisite infrastructure PRs are still worth landing.
+> - Phase 5 (doc cleanup) executed as part of PR #126.
+> - Phase 6 (SMP correctness expansion — migration stress, lock contention under preemption, timer drift) remains a valid post-capstone follow-up.
+>
+> **What no longer applies:**
+> - Phases 1-4 as written assume the hardware-IRQ-path fix that did not pan out. Issue #134 tracks the deeper armstub / `ICC_SRE` investigation needed to ever restore that path, as post-capstone work. Those phases are retained below as historical record of the approach considered.
+
 Execution checklist for bringing Raspberry Pi 5 to full preemptive multitasking and SMP parity with the QEMU_VIRT and JETSON_ORIN_NANO platforms. Subsequent sessions should track progress against the phases below.
 
 ## Problem statement
@@ -39,7 +49,7 @@ A cross-plan review covering the Pi 5, Jetson, and x86-64 preemption/SMP plans i
 
 ---
 
-## Phase 1 — Root-cause #99 (diagnostic-only, no behavior change)
+## Phase 1 — Root-cause #99 (diagnostic-only, no behavior change) *[superseded — executed; results recorded in `docs/pi5-irq-investigation-2026-04.md`]*
 
 The blocker has multiple plausible causes, indistinguishable from EL1 alone because most of the relevant registers (`HCR_EL2`, `SCR_EL3`, `CNTHCTL_EL2`, `IGROUPR` from non-secure) cannot be read post-boot. Capture them at EL2 during boot and expose the snapshot via non-cacheable memory; simultaneously turn the silent `el1_fiq` hang into a first-class diagnostic so we stop missing FIQ deliveries.
 
@@ -110,7 +120,7 @@ A write-up at `docs/pi5-irq-investigation-2026-04.md` naming the root cause with
 
 ---
 
-## Phase 2 — Fix timer IRQ delivery
+## Phase 2 — Fix timer IRQ delivery *[superseded — no viable fix from EL1/EL2; tracked as post-capstone #134]*
 
 Branches based on the Phase 1 finding. Paths are ordered by likelihood per external-review analysis; the first confirmation in Phase 1c drives selection.
 
@@ -171,7 +181,7 @@ Branch `fix/99-pi5-timer-irq-delivery`, merged to main, closing issue #99.
 
 ---
 
-## Phase 3 — Task `DAIF` unmask (safe to deploy)
+## Phase 3 — Task `DAIF` unmask (safe to deploy) *[superseded — unnecessary under coop-preempt; applies only if Phase 2 is ever delivered]*
 
 With #99 fixed, tasks must run with `DAIF.I=0` so timer IRQs can actually preempt them. Reinstate what `ac46e40` originally proposed:
 
@@ -207,7 +217,7 @@ Pi 5 boots cleanly to shell with preemption active on CPU 0. No regression in QE
 
 ---
 
-## Phase 4 — Validate preemption on all 4 CPUs
+## Phase 4 — Validate preemption on all 4 CPUs *[partially superseded — the cross-CPU tick validation and `test_coop_preempt.c` tests landed via PR #126. The 5 previously-ignored integration tests passed on QEMU after the yielding `delay()` change; running them on Pi 5 hardware boot-tests remains a follow-up.]*
 
 ### 4a. Cross-CPU tick delivery
 
@@ -246,7 +256,7 @@ Test log showing 5/5 previously-ignored tests passing, `bench smp` timing data, 
 
 ---
 
-## Phase 5 — Documentation + issue cleanup
+## Phase 5 — Documentation + issue cleanup *[completed in PR #126]*
 
 ### 5a. Update status docs
 
@@ -339,4 +349,11 @@ Acceptance check sequence after Phase 4:
   - Added Phase 4a.1 — **secondary-CPU boot-stack headroom** check; 16 KB is tight under preemption.
   - Replaced stale `boot.S:XXX-YYY` line-number references with pattern/symbol searches to survive source drift.
 
-*Last updated: 2026-04-13 (rev 3).*
+## rev 4 — post-resolution banner (2026-04-13 later)
+
+- Added the top-of-file resolution banner after PR #126 merged. #99 was resolved mid-execution by cooperative preemption (`PI5_COOP_PREEMPT`), not by the hardware-IRQ-path fix Phases 1-4 had prescribed.
+- Marked Phases 1-4 inline as superseded or partially-superseded, pointing readers at the artifacts that replaced them (`docs/pi5-preemption-resolution.md`, PR #126, issue #134 for the post-capstone hardware-IRQ investigation).
+- Marked Phase 5 as completed.
+- Kept the **Cross-platform coordination** section unchanged — its four prerequisite infrastructure PRs still apply to the Jetson and x86-64 tracks and haven't landed.
+
+*Last updated: 2026-04-13 (rev 4).*
