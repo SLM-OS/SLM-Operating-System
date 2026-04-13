@@ -28,6 +28,18 @@
 #define TIMER_HZ            100             /* Timer frequency: 100 Hz = 10ms tick */
 #define TIME_SLICE_MS       (1000 / TIMER_HZ)   /* Time slice in milliseconds */
 
+/*
+ * Work-stealing scheduler (#59 Phase B).
+ *
+ * When set to 1, idle CPUs try to pull unpinned tasks from other CPUs'
+ * run queues via kernel/sched/steal_deque. Default off until Phase C
+ * benchmarks justify enabling by default (requires #57 preemption on
+ * all platforms).
+ */
+#ifndef CONFIG_WORK_STEALING
+#define CONFIG_WORK_STEALING 0
+#endif
+
 /* ============================================================================
  * Task Configuration
  * ============================================================================ */

@@ -476,6 +476,14 @@ target_link_libraries(slmos.elf PRIVATE lua)
 # ==========================================================================
 option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 
+# Work-stealing scheduler (#59 Phase B). Off by default until Phase C
+# benchmarks justify enabling. Requires #57 preemption on Pi 5 / Jetson
+# to be useful beyond the cooperative-yield case QEMU exercises today.
+option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" OFF)
+if(ENABLE_WORK_STEALING)
+    add_compile_definitions(CONFIG_WORK_STEALING=1)
+endif()
+
 if(ENABLE_AI_SCHEDULER)
     add_compile_definitions(CONFIG_AI_SCHEDULER=1)
 
