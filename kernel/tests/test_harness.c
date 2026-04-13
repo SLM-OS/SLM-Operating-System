@@ -113,6 +113,7 @@ int test_harness_run_all(void)
 #if !defined(PLATFORM_X86_64)
     total_failures += test_suite_dtb();
     total_failures += test_suite_model_mem();
+    total_failures += test_suite_eviction();
     total_failures += test_suite_scheduler();
     total_failures += test_suite_component();
     total_failures += test_suite_vmm();

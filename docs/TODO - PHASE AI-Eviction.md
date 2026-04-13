@@ -82,8 +82,10 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 - ✅ Guard `pub mod eviction` in `mm::mod.rs` with `#[cfg(feature = "ai_eviction")]`; Cargo.toml declares `ai_eviction` and `ai_eviction_models` features
 
 ### Verification
-- ✅ Existing alloc/free tests pass unchanged — `make test` green (763 asserts, 0 failures)
+- ✅ Existing alloc/free tests pass unchanged — `make test` green on OFF / `AI_EVICTION=ON` / `AI_EVICTION_MODELS=ON`
 - ✅ FFI selftest `rust_eviction_selftest` exercises init → swap → swap → reset_to_default (returns -2 when feature off, 0 on success)
+- ✅ Comprehensive Rust-internal tests in `rust_eviction_run_tests` (27 invariants: trait + registry + FirstCandidatePolicy + default-score impl + `with_active_policy` + generated predictor smoke)
+- ✅ Kernel-side Unity suite `kernel/tests/test_eviction.c` (12 tests) covers the FFI contract end-to-end: alloc seeds tracking, touch bumps access_count, set_metadata / set_gpu_mapped / set_dirty round-trip through the new getters, invalid-handle sentinels, free clears tracking, shared-block preservation
 - ☐🔗 Concurrent ≥4-thread stress test — deferred to M6 (no policy is consulted during `alloc` yet; the registry only protects the pointer swap)
 - ✅ `BlockMeta` snapshot round-trips fields across alloc / touch / free via `mm::snapshot_evictable_blocks`
 

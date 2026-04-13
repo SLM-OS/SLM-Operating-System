@@ -833,6 +833,49 @@ pub fn set_dirty(handle: ModelHandle, dirty: bool) -> Result<(), AllocError> {
     }
 }
 
+/// Read-only accessor for a block's tracking fields.
+///
+/// `None` on invalid / stale / free handles. Tuple is
+/// `(load_time, last_access_time, access_count, model_id, layer_idx,
+/// model_priority, gpu_mapped, is_dirty)`. Useful for tests that need
+/// to inspect state between operations; hot-path consumers should use
+/// `snapshot_evictable_blocks` instead.
+pub fn get_tracking(
+    handle: ModelHandle,
+) -> Option<(u64, u64, u32, u8, i16, u8, bool, bool)> {
+    if !is_initialized() || handle.is_null() {
+        return None;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to pool statics.
+    unsafe {
+        let pool_ptr = match handle.pool_id {
+            POOL_WEIGHT => addr_of_mut!(WEIGHT_POOL),
+            POOL_WORKSPACE => addr_of_mut!(WORKSPACE_POOL),
+            _ => return None,
+        };
+        let pool = &*pool_ptr;
+        let idx = handle.block_index as usize;
+        if idx >= pool.block_count {
+            return None;
+        }
+        let slot = &pool.blocks[idx];
+        if slot.state == BlockState::Free || slot.generation != handle.generation {
+            return None;
+        }
+        Some((
+            slot.load_time,
+            slot.last_access_time,
+            slot.access_count,
+            slot.model_id,
+            slot.layer_idx,
+            slot.model_priority,
+            slot.gpu_mapped,
+            slot.is_dirty,
+        ))
+    }
+}
+
 /// Build a snapshot of every allocated, non-pinned block across both
 /// pools for the active eviction policy.
 ///
