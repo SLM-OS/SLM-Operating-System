@@ -137,30 +137,32 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 **Note:** All four implementations exist in the sibling crate `slm_os_integration/src/{lru,lfu,slm_heuristic,arc}.rs` and pass parity tests against the Python reference. This milestone is largely a copy-with-light-renaming.
 
 ### LRU
-- ☐ Port `slm_os_integration/src/lru.rs` to `runtime/src/mm/eviction/lru.rs`
-- ☐ Verify `select_victim` returns the candidate with the smallest `last_access_time`
-- ☐ Verify `score` produces inverse-recency in `[0, 1]`
+- ✅ Ported `slm_os_integration/src/lru.rs` to `runtime/src/mm/eviction/lru.rs`
+- ✅ `select_victim` picks the candidate with the smallest `last_access_time` (parity test `lru_evicts_oldest`)
+- ✅ `score` produces inverse-recency in `[0, 1]` (parity test `lru_score_monotonic`)
 
 ### LFU
-- ☐ Port `slm_os_integration/src/lfu.rs` to `runtime/src/mm/eviction/lfu.rs`
-- ☐ Verify ties broken by older `last_access_time` (LRU within tied set)
+- ✅ Ported `slm_os_integration/src/lfu.rs` to `runtime/src/mm/eviction/lfu.rs`
+- ✅ Ties broken by older `last_access_time` — parity test `lfu_breaks_ties_by_lru`
 
 ### ARC
-- ☐ Port the Python `ARCPolicy` (`src/policies/arc.py` in the sibling project) to Rust
-  - **Note:** ARC is not yet in the sibling Rust crate. Use the Python implementation as the reference.
-- ☐ Implement the four LRU lists (T1, T2, B1, B2) as `VecDeque`s
-- ☐ Implement adaptive parameter `p` and the `replace()` and `notify_access()` / `notify_eviction()` callbacks
-- ☐ Wire `notify_access` and `notify_eviction` into `alloc_block()` / `free()` (M5)
+- ✅ Ported the Python `ARCPolicy` (`src/policies/arc.py`) to `runtime/src/mm/eviction/arc.rs`. Sibling Rust crate still doesn't ship ARC — this file is the canonical Rust translation.
+- ✅ Four LRU lists (T1, T2, B1, B2) backed by `VecDeque<(u32, u8)>`; O(n) `move_to_end` is acceptable because the lists are bounded at `ARC_DEFAULT_GHOST_SIZE = 256`.
+- ✅ Adaptive parameter `p`, `notify_access()` / `notify_eviction()` callbacks, and a generic `EvictionPolicy::update_feedback` bridge so the registry's feedback hook drives ghost-hit adaptation without bespoke FFI.
+- ☐🔗 Wire `notify_access` / `notify_eviction` from `alloc_block()` / `free()` — deferred to M6 (allocator integration)
 
 ### SLM-Heuristic
-- ☐ Port `slm_os_integration/src/slm_heuristic.rs` to `runtime/src/mm/eviction/slm_heuristic.rs`
-- ☐ Maintain the priority cascade: workspace before weights → inactive models → LRU
-- ☐ Wire active-inference table from the scheduler (Phase AI-Sched provides per-task model_id)
+- ✅ Ported `slm_os_integration/src/slm_heuristic.rs` to `runtime/src/mm/eviction/slm_heuristic.rs`
+- ✅ Priority cascade preserved: workspace before weights → inactive models → LRU (parity tests `slm_evicts_workspace_first`, `slm_evicts_inactive_models_before_active`, `slm_fallback_is_lru`)
+- ✅ `set_active_inferences` + `bump_active` provide the update API for the future scheduler feed (Phase AI-Sched)
+- ☐🔗 Wire active-inference feed from the scheduler — deferred to M6
+
+### Default Policy Swap
+- ✅ Registry default is now `LruPolicy` instead of the M1 placeholder `FirstCandidatePolicy`. The placeholder is still exported (`mm::eviction::FirstCandidatePolicy`) for tests that need a deterministic trivial policy.
 
 ### Parity Tests
-- ☐ Port `slm_os_integration/tests/parity.rs` to `runtime/tests/eviction_parity.rs`
-- ☐ Add the same hand-crafted candidate sets (≥11 cases) and assert identical decisions
-- ☐ All tests pass under `cargo test --features ai_eviction`
+- ✅ 14 classical-policy parity cases + 7 ARC invariants added to `rust_eviction_run_tests()`. Runs under `make test` on all three configs.
+  - Note: `cargo test --features ai_eviction` is not a viable target in this repo — the runtime crate has pre-existing `cargo test` compile errors unrelated to eviction. All Rust-internal tests run via the kernel test harness instead.
 
 ---
 

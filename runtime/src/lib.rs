@@ -990,7 +990,7 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
         }
 
         eviction::init();
-        if eviction::get_eviction_policy_name() != "FirstCandidate" {
+        if eviction::get_eviction_policy_name() != "LRU" {
             return -1;
         }
         eviction::set_eviction_policy(Box::new(Tagged("SelfTestA")));
@@ -1003,7 +1003,7 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
         }
         // Restore the default so real callers aren't surprised.
         eviction::reset_to_default();
-        if eviction::get_eviction_policy_name() != "FirstCandidate" {
+        if eviction::get_eviction_policy_name() != "LRU" {
             return -1;
         }
         0
@@ -1093,26 +1093,31 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
 
         // Start from a known state.
         eviction::reset_to_default();
-        check!(b"default_policy_is_FirstCandidate\0",
-               eviction::get_eviction_policy_name() == "FirstCandidate");
+        check!(b"default_policy_is_LRU\0",
+               eviction::get_eviction_policy_name() == "LRU");
 
-        // FirstCandidate always picks index 0.
+        // With all candidates sharing last_access_time=0, LRU's tie-break
+        // picks the first candidate.
         let cands = [make_block(1), make_block(2), make_block(3)];
         let picked = eviction::select_victim(&cands);
-        check!(b"FirstCandidate_picks_zero\0", picked == Some(0));
+        check!(b"default_lru_picks_zero_when_tied\0", picked == Some(0));
 
         // Empty candidate list → None.
         let empty: [BlockMeta; 0] = [];
         check!(b"select_victim_none_on_empty\0",
                eviction::select_victim(&empty).is_none());
 
-        // Default score impl: victim gets 1.0, others 0.0, length matches.
+        // Default score() impl (from the trait, not LRU's override):
+        // victim gets 1.0, others 0.0, length matches. Install
+        // FirstCandidatePolicy — it inherits the default impl.
+        eviction::set_eviction_policy(Box::new(eviction::FirstCandidatePolicy));
         let scores = eviction::score(&cands);
         check!(b"score_vec_matches_candidates_len\0", scores.len() == cands.len());
         check!(b"score_victim_is_one\0", scores[0] == 1.0);
         check!(b"score_nonvictim_is_zero\0",
                scores[1] == 0.0 && scores[2] == 0.0);
         check!(b"score_empty_on_empty\0", eviction::score(&empty).is_empty());
+        eviction::reset_to_default();
 
         // Swap in a Recorder, verify invocations go to it.
         eviction::set_eviction_policy(Box::new(Recorder {
@@ -1155,16 +1160,17 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         // reset_to_default restores the default.
         eviction::reset_to_default();
         check!(b"reset_to_default_restores_default\0",
-               eviction::get_eviction_policy_name() == "FirstCandidate");
+               eviction::get_eviction_policy_name() == "LRU");
 
         // select_victim on the default with non-empty input still returns Some(0).
         check!(b"default_select_victim_after_reset\0",
                eviction::select_victim(&cands) == Some(0));
 
-        // Registry helpers are no-ops but non-panicking when candidates empty.
-        check!(b"score_default_impl_length_match\0", {
+        // LRU default's score() override returns inverse-recency. With
+        // all candidates tied on last_access_time, scores collapse to 0.
+        check!(b"lru_default_score_length_matches\0", {
             let s = eviction::score(&cands);
-            s.len() == cands.len() && s[0] == 1.0
+            s.len() == cands.len()
         });
 
         // Multiple swaps in a row stay consistent (reference counting).
@@ -1186,6 +1192,209 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             true
         });
         eviction::reset_to_default();
+
+        puts(b"\n-- eviction: classical policies --\n\0");
+
+        use mm::eviction::{LruPolicy, LfuPolicy, SlmHeuristicPolicy, ARCPolicy};
+        use alloc::collections::BTreeMap;
+
+        // Helper: build a candidate with explicit metadata (mirrors the
+        // `make_block` factory in the sibling parity tests).
+        fn make_full(
+            id: u32,
+            last_access: u64,
+            access_count: u32,
+            pool: PoolType,
+            model_id: u8,
+        ) -> BlockMeta {
+            BlockMeta {
+                block_id: id,
+                pool_type: pool,
+                model_id,
+                layer_idx: 0,
+                last_access_time: last_access,
+                load_time: 0,
+                access_count,
+                ref_count: 0,
+                gpu_mapped: false,
+                is_dirty: false,
+                model_priority: 0,
+            }
+        }
+
+        // --- LRU parity ---
+        {
+            let cands = [
+                make_full(0, 100, 0, PoolType::Weight, 0),
+                make_full(1, 50,  0, PoolType::Weight, 0),
+                make_full(2, 200, 0, PoolType::Weight, 0),
+            ];
+            let mut p = LruPolicy::new();
+            let v = p.select_victim(&cands);
+            check!(b"lru_evicts_oldest\0", cands[v].last_access_time == 50);
+        }
+        {
+            let cands = [make_full(0, 100, 0, PoolType::Weight, 0)];
+            let mut p = LruPolicy::new();
+            check!(b"lru_single_candidate\0", p.select_victim(&cands) == 0);
+        }
+        {
+            let cands = [
+                make_full(0, 100, 0, PoolType::Weight, 0),
+                make_full(1, 50,  0, PoolType::Weight, 0),
+                make_full(2, 200, 0, PoolType::Weight, 0),
+            ];
+            let mut p = LruPolicy::new();
+            let s = p.score(&cands);
+            // Oldest (index 1, time=50) has the highest score; newest
+            // (index 2, time=200) has the lowest.
+            check!(b"lru_score_monotonic\0", s[1] > s[0] && s[0] > s[2]);
+        }
+
+        // --- LFU parity ---
+        {
+            let cands = [
+                make_full(0, 0, 10, PoolType::Weight, 0),
+                make_full(1, 0,  1, PoolType::Weight, 0),
+                make_full(2, 0,  5, PoolType::Weight, 0),
+            ];
+            let mut p = LfuPolicy::new();
+            let v = p.select_victim(&cands);
+            check!(b"lfu_evicts_least_accessed\0", cands[v].access_count == 1);
+        }
+        {
+            let cands = [
+                make_full(0, 200, 1, PoolType::Weight, 0),
+                make_full(1, 100, 1, PoolType::Weight, 0),
+                make_full(2, 300, 5, PoolType::Weight, 0),
+            ];
+            let mut p = LfuPolicy::new();
+            let v = p.select_victim(&cands);
+            check!(b"lfu_breaks_ties_by_lru\0", cands[v].last_access_time == 100);
+        }
+
+        // --- SLM-Heuristic parity ---
+        {
+            let cands = [
+                make_full(0, 100, 0, PoolType::Weight,   0),
+                make_full(1, 200, 0, PoolType::Workspace, 0),
+                make_full(2, 50,  0, PoolType::Weight,   0),
+            ];
+            let mut p = SlmHeuristicPolicy::new();
+            let v = p.select_victim(&cands);
+            check!(b"slm_evicts_workspace_first\0",
+                   cands[v].pool_type == PoolType::Workspace);
+        }
+        {
+            // Model 0 is active; model 1 is inactive. The workspace-first
+            // rule doesn't fire (both candidates are weights), so the
+            // inactive-model rule picks model_id=1.
+            let cands = [
+                make_full(0, 100, 0, PoolType::Weight, 0),
+                make_full(1, 200, 0, PoolType::Weight, 1),
+                make_full(2, 50,  0, PoolType::Weight, 0),
+            ];
+            let mut p = SlmHeuristicPolicy::new();
+            let mut active = BTreeMap::new();
+            active.insert(0u8, 1u32);
+            p.set_active_inferences(active);
+            let v = p.select_victim(&cands);
+            check!(b"slm_evicts_inactive_models_before_active\0",
+                   cands[v].model_id == 1);
+        }
+        {
+            // Fallback: all candidates are active-model weights. Policy
+            // picks the LRU overall.
+            let cands = [
+                make_full(0, 100, 0, PoolType::Weight, 0),
+                make_full(1, 50,  0, PoolType::Weight, 0),
+                make_full(2, 200, 0, PoolType::Weight, 0),
+            ];
+            let mut p = SlmHeuristicPolicy::new();
+            let mut active = BTreeMap::new();
+            active.insert(0u8, 1u32);
+            p.set_active_inferences(active);
+            let v = p.select_victim(&cands);
+            check!(b"slm_fallback_is_lru\0", cands[v].last_access_time == 50);
+        }
+
+        // --- ARC ---
+        {
+            // With no observations (p=0, T1=T2=empty), ARC falls back
+            // to global LRU.
+            let cands = [
+                make_full(0, 100, 0, PoolType::Weight, 0),
+                make_full(1, 50,  0, PoolType::Weight, 0),
+                make_full(2, 200, 0, PoolType::Weight, 0),
+            ];
+            let mut p = ARCPolicy::new();
+            let v = p.select_victim(&cands);
+            check!(b"arc_fallback_is_lru\0", cands[v].last_access_time == 50);
+        }
+        {
+            // notify_access three distinct blocks → all in T1.
+            let mut p = ARCPolicy::new();
+            p.notify_access(10, 0);
+            p.notify_access(20, 0);
+            p.notify_access(30, 0);
+            check!(b"arc_initial_accesses_fill_t1\0",
+                   p.t1_len() == 3 && p.t2_len() == 0);
+        }
+        {
+            // Second hit on the same block → promote from T1 to T2.
+            let mut p = ARCPolicy::new();
+            p.notify_access(10, 0);
+            p.notify_access(10, 0);
+            check!(b"arc_second_access_promotes_to_t2\0",
+                   p.t1_len() == 0 && p.t2_len() == 1);
+        }
+        {
+            // Eviction moves the entry from T1 into B1.
+            let mut p = ARCPolicy::new();
+            p.notify_access(10, 0);
+            p.notify_eviction(10);
+            check!(b"arc_eviction_from_t1_to_b1\0",
+                   p.t1_len() == 0 && p.b1_len() == 1);
+        }
+        {
+            // Ghost hit in B1 grows p (favour recency). Walk one entry
+            // through: access → evict → re-access. p should be >= 1.
+            let mut p = ARCPolicy::new();
+            p.notify_access(10, 0);
+            p.notify_eviction(10);
+            let p_before = p.target_p();
+            p.notify_access(10, 0);   // Ghost hit in B1
+            check!(b"arc_b1_ghost_hit_increases_p\0", p.target_p() > p_before);
+        }
+        {
+            // Ghost hit in B2 shrinks p. To populate B2, we need to
+            // promote a block to T2 and then evict it.
+            let mut p = ARCPolicy::new();
+            p.notify_access(10, 0);  // T1
+            p.notify_access(10, 0);  // T2
+            p.notify_eviction(10);   // → B2
+            // First grow p artificially via B1 path so a decrement is
+            // visible (p is clamped at 0.0).
+            p.notify_access(20, 0);
+            p.notify_eviction(20);
+            p.notify_access(20, 0);  // B1 ghost hit → p grows
+            let p_before = p.target_p();
+            p.notify_access(10, 0);  // B2 ghost hit → p shrinks
+            check!(b"arc_b2_ghost_hit_decreases_p\0",
+                   p.target_p() < p_before);
+        }
+        {
+            // Reset clears everything.
+            let mut p = ARCPolicy::new();
+            p.notify_access(10, 0);
+            p.notify_access(10, 0);
+            p.notify_eviction(10);
+            p.reset();
+            check!(b"arc_reset_clears_lists\0",
+                   p.t1_len() == 0 && p.t2_len() == 0
+                       && p.b1_len() == 0 && p.b2_len() == 0
+                       && p.target_p() == 0.0);
+        }
 
         puts(b"\n-- eviction: generated models --\n\0");
 

@@ -15,15 +15,26 @@ use alloc::vec::Vec;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use super::lru::LruPolicy;
 use super::policy::{BlockMeta, EvictionPolicy};
 
-/// Placeholder policy used until M3 ports `LruPolicy`.
+/// Construct the default eviction policy.
 ///
-/// Returns the first candidate every time — intentionally minimal: M1
-/// only needs *some* installable default so the registry swap paths can
-/// be exercised. M3 replaces the default with `LruPolicy` via
-/// `set_eviction_policy`.
-struct FirstCandidatePolicy;
+/// M3 picked LRU: it is the strongest classical baseline in the
+/// sibling project's Phase 5 sweep, and it matches the implicit
+/// first-fit-then-FIFO behaviour of the pre-M6 allocator most
+/// closely. Tests that need a deterministic trivial policy can
+/// install [`FirstCandidatePolicy`] explicitly via
+/// [`set_eviction_policy`].
+fn default_policy() -> Box<dyn EvictionPolicy + Send> {
+    Box::new(LruPolicy::new())
+}
+
+/// Deterministic policy that always picks index 0.
+///
+/// Kept public so tests can install it via [`set_eviction_policy`].
+/// Not used as the default any more (see [`default_policy`]).
+pub struct FirstCandidatePolicy;
 
 impl EvictionPolicy for FirstCandidatePolicy {
     fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize {
@@ -71,7 +82,7 @@ pub fn init_default() {
     // SAFETY: _g held — exclusive access.
     unsafe {
         if (*addr_of_mut!(ACTIVE_POLICY)).is_none() {
-            *addr_of_mut!(ACTIVE_POLICY) = Some(Box::new(FirstCandidatePolicy));
+            *addr_of_mut!(ACTIVE_POLICY) = Some(default_policy());
         }
     }
 }
@@ -82,7 +93,7 @@ pub fn reset_to_default() {
     let _g = SpinGuard::new();
     // SAFETY: _g held — exclusive access.
     unsafe {
-        *addr_of_mut!(ACTIVE_POLICY) = Some(Box::new(FirstCandidatePolicy));
+        *addr_of_mut!(ACTIVE_POLICY) = Some(default_policy());
     }
 }
 
@@ -175,9 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn default_is_first_candidate() {
+    fn default_is_lru() {
         init_default();
-        assert_eq!(get_eviction_policy_name(), "FirstCandidate");
+        assert_eq!(get_eviction_policy_name(), "LRU");
     }
 
     #[test]
