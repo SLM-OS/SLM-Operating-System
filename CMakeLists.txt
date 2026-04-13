@@ -75,9 +75,8 @@ option(PI5_SECONDARY_PREEMPT "Enable deferred-scheduling preemption on Pi 5 seco
 # cannot promote Group 0 → Group 1 on this GICv2 and the timer therefore
 # arrives as FIQ rather than IRQ. Implies PI5_SECONDARY_PREEMPT because
 # the trampoline is required to avoid switch_to from exception context.
-option(PI5_FIQ_TIMER "Route timer IRQ through the FIQ vector on Pi 5 (issue #99 Phase 2)" ON)
+option(PI5_FIQ_TIMER "Route timer IRQ through the FIQ vector on Pi 5 (experimental, not active for coop preempt)" OFF)
 if(PLATFORM STREQUAL "RASPI5" AND PI5_FIQ_TIMER)
-    set(PI5_SECONDARY_PREEMPT ON CACHE BOOL "Implied by PI5_FIQ_TIMER" FORCE)
     add_compile_definitions(PI5_FIQ_TIMER=1)
 endif()
 if(PLATFORM STREQUAL "RASPI5" AND PI5_SECONDARY_PREEMPT)
@@ -92,6 +91,22 @@ endif()
 option(PI5_IRQ_DIAG "Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1)" ON)
 if(PLATFORM STREQUAL "RASPI5" AND PI5_IRQ_DIAG)
     add_compile_definitions(PI5_IRQ_DIAG=1)
+endif()
+
+# Pi 5 cooperative-preemption fallback (issue #99 resolution path).
+# Pi 5's GICv2 + TF-A configuration does not deliver timer IRQs to
+# EL1 (confirmed in Phase 1: HPPIR shows IRQ 30 pending, but no
+# vector entry ever fires; armstub experiments break PSCI or UNDEF
+# on ICC_SRE_EL3). Rather than block preemption entirely, run
+# scheduler_tick() from schedule() whenever CNTPCT_EL0 has advanced
+# by ≥10 ms on this CPU since the last synthetic tick. This gives
+# "cooperative preemption" — scheduling decisions (AI policy, deadline
+# boosts, migration) take effect at the next yield for any workload
+# that yields at all, which covers all tasks that poll UART / message
+# queues / locks.
+option(PI5_COOP_PREEMPT "Pi 5 cooperative preemption via CNTPCT-driven scheduler_tick" ON)
+if(PLATFORM STREQUAL "RASPI5" AND PI5_COOP_PREEMPT)
+    add_compile_definitions(PI5_COOP_PREEMPT=1)
 endif()
 
 # Enable semihosting for QEMU (used for clean test exit)

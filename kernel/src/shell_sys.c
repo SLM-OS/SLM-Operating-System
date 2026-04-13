@@ -1026,6 +1026,17 @@ static void diag_print_gic_runtime(void)
     uint32_t iser = *gicd_isenabler0;
     uint32_t ispr = *gicd_ispendr0;
     uint32_t iacr = *gicd_iactiver0;
+
+    /* ICC_SRE_EL2 snapshots from boot.S would go here, but reading
+     * ICC_SRE_EL2 from EL2 traps to EL3 on this platform (TF-A set
+     * ICC_SRE_EL3.Enable=0). Confirmed empirically — the read mrs
+     * instruction caused EL3 firmware to halt the CPU. SRE state is
+     * therefore opaque from below EL3, and any fix that needs to
+     * change it must run at EL3 (armstub). */
+    uint64_t sre_pre  = 0;
+    uint64_t sre_post = 0;
+    (void)sre_pre; (void)sre_post;
+
     uart_puts("\r\nGIC runtime state (read from shell task):\r\n");
     uart_printf("  GICC_CTLR = 0x%x  (bit0=EnGrp1 bit4=FIQByp!disG1 "
                 "bit5=IRQByp!disG1 bit9=EOImodeNS)\r\n",
@@ -1037,6 +1048,8 @@ static void diag_print_gic_runtime(void)
                 ispr, (ispr >> 30) & 1);
     uart_printf("  GICD_IACTIVER0  = 0x%x  (bit 30 [timer active] = %u)\r\n",
                 iacr, (iacr >> 30) & 1);
+    uart_puts("  ICC_SRE_EL2     = (not probed — access from EL2 "
+              "traps to EL3 on this platform)\r\n");
 #endif
 }
 

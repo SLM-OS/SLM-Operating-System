@@ -1118,6 +1118,76 @@ static struct task *sched_try_steal(uint32_t this_cpu)
 }
 #endif /* CONFIG_WORK_STEALING */
 
+#if defined(PI5_COOP_PREEMPT)
+/*
+ * Cooperative-preemption tick driver.
+ *
+ * Pi 5's GICv2 + TF-A configuration does not deliver timer IRQs to EL1
+ * (confirmed by Phase 1 diagnostics: HPPIR shows IRQ 30 pending, but
+ * no exception vector ever fires). Rather than block preemption
+ * entirely, drive scheduler_tick() from schedule() whenever CNTPCT_EL0
+ * has advanced by >= one tick period (10 ms at 100 Hz) on this CPU
+ * since the last synthetic tick. This gives "cooperative preemption":
+ * scheduling decisions — AI policy, deadline boosts, migration —
+ * become observable at the next yield or schedule() call, which covers
+ * any workload that polls UART / message queues / locks.
+ *
+ * Tasks that busy-wait without yielding won't preempt mid-execution;
+ * that's a known limitation documented in the coop-preempt rationale.
+ */
+static volatile uint64_t coop_last_tick_cntpct[MAX_CPUS]
+    __attribute__((aligned(64)));
+
+/* Declared in timer.c; we poke them directly so existing pit_ticks /
+ * timer_handler_count-based observability keeps working. */
+extern volatile uint32_t timer_handler_count;
+extern volatile uint64_t pit_ticks;
+
+static inline void coop_preempt_maybe_tick(uint32_t cpu)
+{
+    uint64_t freq = timer_get_frequency();
+    if (freq == 0)
+        return;
+    uint64_t period = freq / TIMER_HZ;       /* cycles per tick */
+    uint64_t now = timer_get_count();
+    uint64_t last = coop_last_tick_cntpct[cpu];
+    if (last == 0) {
+        coop_last_tick_cntpct[cpu] = now;
+        return;
+    }
+    if (now - last < period)
+        return;
+
+    /* Catch up — if we haven't scheduled in a long time (idle wfi or
+     * long busy-wait), replay one tick and advance our marker by one
+     * period. We only do one call per schedule entry to keep this path
+     * bounded; the next schedule() call will catch up further. */
+    coop_last_tick_cntpct[cpu] = last + period;
+
+    /* Mirror what the real timer ISR does so downstream counters and
+     * sleeper wakeups work: bump the global tick counters, then call
+     * scheduler_tick to drive the policy. timer_handler_count doubles
+     * as "cooperative preemption is live" in the `cpu` diag output. */
+    timer_handler_count++;
+    pit_ticks++;
+
+    /* scheduler_tick would recursively call schedule() on the non-
+     * PI5_SECONDARY_PREEMPT path; suppress that recursion by holding
+     * preempt_disabled across the call. We're already inside schedule()
+     * and about to pick next — the tick's policy work should run but
+     * its "schedule now" side effect is redundant.
+     *
+     * Save-and-restore preempt_disabled so we don't clobber state the
+     * outer schedule() may have set earlier (at boot, scheduler_start
+     * pre-sets preempt_disabled=1 before first switch_to). */
+    int prev_preempt_disabled = preempt_disabled[cpu];
+    preempt_disabled[cpu] = 1;
+    extern void scheduler_tick(void);
+    scheduler_tick();
+    preempt_disabled[cpu] = prev_preempt_disabled;
+}
+#endif /* PI5_COOP_PREEMPT */
+
 /*
  * Schedule - select next task and switch to it (per-CPU).
  */
@@ -1126,6 +1196,12 @@ void schedule(void)
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
     sched_diag_schedule[this_cpu]++;
+
+#if defined(PI5_COOP_PREEMPT)
+    /* Cooperative preemption: drive scheduler_tick off CNTPCT when the
+     * hardware timer IRQ path isn't delivering (see issue #99). */
+    coop_preempt_maybe_tick(this_cpu);
+#endif
 
     /* On non-NC platforms, invalidate cached copy of run queue before reading.
      * On Pi 5 with NC run queues, this is a no-op (NC data not cached). */

@@ -67,6 +67,22 @@ struct diag_vec_counts {
 #define DIAG_FIQ_TRACE      (NC_MEM_BASE + 0xFFE0UL)
 
 /*
+ * ICC_SRE_EL2 snapshots (issue #99 root-cause probe).
+ *
+ * Pi 5 has GIC-400 (GICv2 only) but Cortex-A76 supports the GICv3
+ * system-register interface. If TF-A enabled `ICC_SRE_EL3.SRE`, the
+ * CPU routes IRQ delivery through the sysreg interface, which does
+ * not connect to GIC-400 — IRQs are then never delivered through the
+ * memory-mapped GICC interface.
+ *
+ * boot.S captures pre/post snapshots: pre = value left by firmware,
+ * post = value after attempting to clear SRE from EL2. If both have
+ * SRE=1, the bit is locked and the only fix is via EL3 (armstub).
+ */
+#define DIAG_ICC_SRE_EL2_PRE   (NC_MEM_BASE + 0xFF58UL)
+#define DIAG_ICC_SRE_EL2_POST  (NC_MEM_BASE + 0xFFF0UL)
+
+/*
  * Accessors. These are inline so the NC addresses compile to direct
  * absolute loads/stores — consistent with how the rest of the kernel
  * reaches NC memory.

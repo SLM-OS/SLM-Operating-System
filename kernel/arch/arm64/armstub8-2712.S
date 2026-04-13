@@ -79,19 +79,24 @@ _start:
     msr     cptr_el3, xzr
 
     /*
-     * SCR_EL3: Configure security state for EL2.
+     * SCR_EL3: read-modify-write to preserve TF-A's IMPLEMENTATION
+     * DEFINED bits (we don't have visibility into what TF-A on Pi 5
+     * relies on; clobbering everything causes PSCI / SMC routing to
+     * malfunction). Only set the bits we need:
+     *
      *   NS  [0]  = 1  Non-secure (EL2/EL1 run in non-secure world)
-     *   IRQ [1]  = 0  Don't route IRQ to EL3
-     *   FIQ [2]  = 0  Don't route FIQ to EL3
-     *   EA  [3]  = 0  Don't route external aborts to EL3
-     *   RES1[4]  = 1  Reserved, must be 1
-     *   RES1[5]  = 1  Reserved, must be 1
-     *   SMD [7]  = 1  Disable SMC instruction
+     *   SMD [7]  = 0  ALLOW SMC — required for PSCI (CPU_ON, etc.).
+     *                 SMD=1 is fatal: secondaries can never boot.
      *   HCE [8]  = 1  Enable HVC instruction
      *   RW  [10] = 1  EL2 is AArch64
-     *   = 0x5b1
+     *
+     * Leave bits 1-6 (IRQ/FIQ/EA/RES1/RES1) and high bits as TF-A set.
      */
-    ldr     x0, =0x5b1
+    mrs     x0, scr_el3
+    orr     x0, x0, #(1 << 0)               /* NS = 1 */
+    orr     x0, x0, #(1 << 8)               /* HCE = 1 */
+    orr     x0, x0, #(1 << 10)              /* RW = 1 */
+    bic     x0, x0, #(1 << 7)               /* SMD = 0 (allow SMC for PSCI) */
     msr     scr_el3, x0
 
     /*
