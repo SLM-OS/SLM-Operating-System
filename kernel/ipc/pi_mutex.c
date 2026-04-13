@@ -6,6 +6,8 @@
 
 #include "pi_mutex.h"
 #include "task.h"
+#include "sched.h"
+#include "spinlock.h"
 #include "debug.h"
 #include "smp.h"
 
@@ -84,17 +86,23 @@ void pi_mutex_lock(pi_mutex_t *mutex)
         spin_unlock_irqrestore(&mutex->guard, flags);
 
         /*
-         * Spin-wait with IRQs enabled.
-         * This allows the scheduler to preempt us and run
-         * the (now potentially boosted) owner.
+         * Spin-wait for the owner to release the mutex.
+         *
+         * Each iteration briefly masks IRQs around the mutex->locked read
+         * so a timer ISR (which could reach back into pi_mutex paths on
+         * another thread and deadlock on guard) can only fire when we're
+         * not mid-probe. This is the conservative, capstone-ready fix —
+         * a proper sleep queue (block on wait condition, wake on release)
+         * is tracked as a post-capstone enhancement.
          */
         while (mutex->locked) {
-            /* Yield to let the owner run */
-#if defined(PLATFORM_X86_64)
-            __asm__ volatile("pause" ::: "memory");
-#else
-            __asm__ volatile("yield" ::: "memory");
-#endif
+            irq_flags_t f = irq_save();
+            if (!mutex->locked) {
+                irq_restore(f);
+                break;
+            }
+            irq_restore(f);
+            yield();
         }
     }
 }

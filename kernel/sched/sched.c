@@ -127,39 +127,47 @@ static struct {
 /*
  * Update the top-8 task cache by scanning all run queues.
  * Called from scheduler_tick() on CPU 0 every N ticks.
+ *
+ * Locking: acquires each CPU's rq_lock one at a time, walks that queue,
+ * then releases before moving on. Never holds more than one rq_lock at a
+ * time (avoids starving other CPUs and prevents deadlock). The staging
+ * buffer accumulates across CPUs; only the final snapshot is published
+ * to ai_top_tasks so FFI consumers never see a half-built list.
  */
 static void ai_update_top_tasks(void)
 {
-    /* Collect tasks across all CPUs, selecting top 8 by effective_priority.
-     * Simple insertion sort into the cache — at most MAX_TASKS iterations. */
+    struct task *staging[AI_STATE_NUM_TASKS];
     uint32_t count = 0;
 
     for (uint32_t c = 0; c < cpu_count; c++) {
+        irq_flags_t flags = rq_lock_irqsave(c);
         struct cpu_runqueue *rq = cpu_rq(c);
         struct task *t = rq->head;
 
         while (t) {
             if (count < AI_STATE_NUM_TASKS) {
-                /* Space available — just add */
-                ai_top_tasks.tasks[count++] = t;
+                staging[count++] = t;
             } else {
-                /* Find the lowest priority task in cache and replace if t is higher */
                 uint32_t min_idx = 0;
-                uint8_t min_pri = ai_top_tasks.tasks[0]->effective_priority;
+                uint8_t min_pri = staging[0]->effective_priority;
                 for (uint32_t i = 1; i < AI_STATE_NUM_TASKS; i++) {
-                    if (ai_top_tasks.tasks[i]->effective_priority < min_pri) {
-                        min_pri = ai_top_tasks.tasks[i]->effective_priority;
+                    if (staging[i]->effective_priority < min_pri) {
+                        min_pri = staging[i]->effective_priority;
                         min_idx = i;
                     }
                 }
                 if (t->effective_priority > min_pri) {
-                    ai_top_tasks.tasks[min_idx] = t;
+                    staging[min_idx] = t;
                 }
             }
             t = t->next;
         }
+
+        rq_unlock_irqrestore(c, flags);
     }
 
+    for (uint32_t i = 0; i < count; i++)
+        ai_top_tasks.tasks[i] = staging[i];
     ai_top_tasks.count = count;
     ai_top_tasks.last_update_tick = sched.timer_ticks;
 }
@@ -376,7 +384,7 @@ static void idle_task_func(void *arg)
     (void)arg;
 
     while (1) {
-#if defined(PLATFORM_HAS_NC_MEMORY)
+#if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
         /* Use fixed NC address — sched_diag_idle_loops pointer is in
          * cacheable BSS and may not be visible to secondary CPUs.
          * Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
@@ -386,7 +394,7 @@ static void idle_task_func(void *arg)
             uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
             (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
         }
-#else
+#elif !defined(PLATFORM_HAS_NC_MEMORY)
         sched_diag_idle_loops[cpu_id()]++;
 #endif
 
@@ -873,6 +881,36 @@ void scheduler_remove_task(struct task *task)
 }
 
 /*
+ * Mark a task TERMINATED and dequeue it atomically under rq_lock.
+ * Called by task_exit to close the pick-a-terminated-task race:
+ * without a single locked region around state=TERMINATED + dequeue,
+ * a cross-CPU scheduler could see stale state and pick the zombie.
+ */
+void scheduler_terminate_task(struct task *task)
+{
+    if (!task) {
+        return;
+    }
+
+    uint32_t cpu = task->assigned_cpu;
+    struct cpu_runqueue *rq __attribute__((unused)) = cpu_rq(cpu);
+    irq_flags_t flags = rq_lock_irqsave(cpu);
+
+    task->state = TASK_TERMINATED;
+#if !defined(PLATFORM_HAS_NC_MEMORY) && !defined(PLATFORM_X86_64)
+    cache_clean(&task->state);
+#endif
+
+    if (remove_from_cpu_queue_locked(task, cpu)) {
+        sched.task_count--;
+        DEBUG_PRINT("Terminated task '%s' on CPU %u (ready=%u)",
+                    task->name, cpu, rq->ready_count);
+    }
+
+    rq_unlock_irqrestore(cpu, flags);
+}
+
+/*
  * Migrate a task to a different CPU.
  *
  * Locks both source and target queues in CPU ID order to prevent deadlock.
@@ -994,6 +1032,14 @@ void schedule(void)
     /*
      * Clean up zombie task from previous schedule cycle.
      * This is safe because we've already switched away from it.
+     *
+     * State stays TASK_TERMINATED here so tests / external callers that
+     * wait for TERMINATED can observe it before the slot is cleared.
+     * The picker's TERMINATED/DESTROYED skip (pick_next_task) is the
+     * authoritative guard against stale-queue races; the state flip to
+     * TASK_DESTROYED happens inside task_destroy once the state check
+     * there has passed, making the transition observable only after
+     * reclamation has started.
      */
     if (rq->zombie) {
         struct task *zombie = rq->zombie;
@@ -1054,10 +1100,11 @@ void schedule(void)
      * If the current task is terminated, we MUST switch to a different task.
      */
     if (next == current) {
-        if (current && current->state == TASK_TERMINATED) {
+        if (current && (current->state == TASK_TERMINATED ||
+                        current->state == TASK_DESTROYED)) {
             rq_unlock_irqrestore(this_cpu, flags);
-            panic("schedule: terminated task selected as next (CPU %u, task '%s')",
-                  this_cpu, current->name);
+            panic("schedule: terminated/destroyed task selected as next (CPU %u, task '%s', state=%d)",
+                  this_cpu, current->name, (int)current->state);
         }
         if (current) {
             current->state = TASK_RUNNING;
@@ -1117,14 +1164,17 @@ void schedule(void)
      * Between rq_unlock (which re-enables IRQs) and switch_to completion,
      * a timer IRQ could fire and call scheduler_tick() → schedule().
      * That reentrant schedule() would see stale task_current() (already
-     * set to `next` at line 846, but we're still on `current`'s stack).
-     *
-     * The preempt_disabled flag tells scheduler_tick() to skip the
+     * set to `next`, but we're still on `current`'s stack). The
+     * preempt_disabled flag tells scheduler_tick() to skip the
      * schedule() call during this window. The timer still fires and
      * increments tick counters — it just doesn't try to context-switch.
      *
-     * After switch_to returns (on the resumed task's stack), we clear
-     * the flag so preemption resumes normally.
+     * Placement: AFTER the task_set_current / cache_clean sequence is
+     * correct because rq_lock_irqsave (above) has already disabled local
+     * IRQs, so no timer can deliver between task_set_current and
+     * preempt_disabled=1. (SCHED-M1 originally proposed moving this
+     * earlier, but the race it targeted does not exist — rq_lock_irqsave
+     * already closes the window.)
      */
     preempt_disabled[this_cpu] = 1;
 

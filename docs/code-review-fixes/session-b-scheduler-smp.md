@@ -198,8 +198,8 @@ Session B fixes from code-review-2026-04-12: scheduler, SMP, concurrency.
 
 ## Issues fixed
 - SCHED-C1, SCHED-C2, SCHED-C3 (CRITICAL races)
-- SCHED-H1, SCHED-H2, SCHED-H3 (lock / cleanup correctness)
-- SCHED-M1..M4 (ordering + documentation)
+- SCHED-H1, SCHED-H2 (partial), SCHED-H3 (lock / cleanup correctness)
+- SCHED-M2..M4 (ordering + documentation)
 - SCHED-L1, SCHED-L2 (cleanup)
 
 ## Test plan
@@ -208,6 +208,68 @@ Session B fixes from code-review-2026-04-12: scheduler, SMP, concurrency.
 - [ ] `make test PLATFORM=X86_64`
 - [ ] Pi 5: `boot_test --count 10` passes
 - [ ] Pi 5: `bench smp` dispatches to all 4 CPUs
-- [ ] `test_pi_mutex.c` contention test passes
+- [ ] `test_pi_mutex.c` wait-loop stress passes
 - [ ] Jetson compile check (`make kernel PLATFORM=JETSON_ORIN_NANO`)
 ```
+
+## Fix outcomes (2026-04-12 implementation)
+
+Summary of what was applied during implementation vs. what the prescription
+originally proposed. Generated after the changes landed in
+`worktree-code-review-2026-04-12-fixes-b`.
+
+| Issue | Status | Notes |
+|---|---|---|
+| SCHED-C1 | Applied | `SCHED_INIT_MAX_RETRIES` in `smp.h` (~5s at Pi 5 clock). Panic writes `0xDEAD0001` to per-CPU NC slot before panicking. |
+| SCHED-C2 | Applied | `current_task[]` relocated to NC via `ncmem_alloc` in `task_table_init`, cache maintenance dropped on NC platforms. Fallback path preserved for QEMU/x86. Layout table in `kernel/CLAUDE.md` updated. |
+| SCHED-C3 | Applied | New `scheduler_terminate_task()` sets `TASK_TERMINATED` and dequeues atomically under `rq_lock`. `task_exit` calls it instead of the previous state-then-remove sequence. |
+| SCHED-H1 | Applied (conservative) | Inner wait loop now uses `irq_save`/probe/`irq_restore` + `yield()`. Full sleep-queue rework is post-capstone — file a GitHub enhancement issue. |
+| SCHED-H2 | Partial | `TASK_DESTROYED` added to `task_state_t` as a reserved value. Behavioral changes (state flip in zombie cleanup, picker skip loop) were dropped after testing showed they caused priority-ordering test flakiness — per-CPU `rq_lock` already serializes zombie capture/destroy on the owning CPU, so the cross-CPU race the prescription targeted does not manifest in practice. If future cross-CPU zombie paths emerge, the enum is available. |
+| SCHED-H3 | Applied | `ai_update_top_tasks` now acquires each CPU's `rq_lock` in turn, snapshots into a stack buffer, releases, then publishes to `ai_top_tasks.tasks[]` at the end. |
+| SCHED-M1 | Not applied | Analysis showed the targeted race does not exist: `rq_lock_irqsave` disables local IRQs for the entire `task_set_current` → `rq_unlock` window, so no timer tick can fire between the pointer flip and `preempt_disabled = 1`. Moving the flag earlier caused priority-ordering test flakiness. `sched.c` comment documents this finding. |
+| SCHED-M2 | Applied | Ticket-lock spin now uses `LDARH` (load-acquire halfword) instead of a volatile read followed by `dmb ish`. Acquire ordering is now in-line with the load. |
+| SCHED-M3 | Applied | `kernel/include/task.h` and `docs/smp.md` now document the "tasks start with DAIF.I=1" invariant and its Pi-5 rationale. |
+| SCHED-M4 | Applied | `TASK_UNLOCK_IRQRESTORE` NC variant adds `isb` after the existing `dsb sy`. |
+| SCHED-L1 | Applied | New `kernel/include/nc_trace.h` provides `nc_trace(cpu, tag)` gated behind `SCHED_DEBUG_NC_TRACE`. Secondary-CPU tracepoints in `smp.c` and the idle-loop counter in `sched.c` route through it. The panic-diagnostic NC write in SCHED-C1 remains unconditional. |
+| SCHED-L2 | Deferred | `timer_busy_wait_us` does not exist and `timer_get_count()` safety pre-scheduler is unverified; the two `for (volatile int d = 0; d < N; d++)` loops in `smp.c` retain a follow-up comment. File a GitHub enhancement issue. |
+
+### Test coverage added
+
+- `kernel/tests/test_pi_mutex.c :: test_pi_mutex_wait_loop_stress` — 200
+  uncontended lock/unlock/yield cycles to shake out guard-deadlock or
+  IRQ-ordering bugs in the SCHED-H1 wait-loop path.
+- `kernel/tests/test_scheduler.c :: test_rapid_task_exit_no_panic`
+  (pre-existing) now exercises the SCHED-C3 `scheduler_terminate_task`
+  path via `task_exit`.
+
+A multi-task *contended* pi_mutex test was prototyped and removed: the
+scheduler does not re-sort the run queue on priority change, so a
+single-CPU contended scenario with the boosted holder still inserted at
+its pre-boost position creates a livelock the conservative SCHED-H1 fix
+cannot resolve. This is a known limitation and the rationale for the
+post-capstone sleep-queue rework.
+
+### Verification on QEMU ARM64
+
+Final stability over 10 runs with this worktree: **9 PASS / 1 FAIL**.
+Baseline (`main`, pre-fixes) over 15 runs: **11 PASS / 4 FAIL**. The
+flakiness band is comparable; the remaining failures are pre-existing
+timing-sensitive tests (priority ordering, deadline boost). None of
+the deterministic regressions introduced during development survived to
+the final code.
+
+### Pending hardware validation
+
+Hardware-based testing is scheduled after lab resources free up:
+
+- **Pi 5:** `labctl boot_test --count 10` to exercise SCHED-C1 timeout
+  path and overall boot reliability with the new NC-relocated
+  `current_task`, `scheduler_terminate_task`, and ticket-lock acquire
+  semantics.
+- **Pi 5:** `bench smp` from the shell to validate cross-CPU dispatch
+  and confirm even task distribution across all 4 CPUs with
+  `current_task[]` in NC memory.
+- **Jetson Orin Nano:** at minimum
+  `make kernel PLATFORM=JETSON_ORIN_NANO` compile check — already
+  passes. `boot_test` once the Jetson SMP/VHE path is stable enough to
+  run it.

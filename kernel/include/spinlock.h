@@ -278,13 +278,26 @@ static inline void ticket_lock(ticket_lock_t *lock)
         : "memory"
     );
 
-    /* Wait until our ticket is called */
-    while (lock->owner != ticket) {
-        __asm__ volatile("wfe" ::: "memory");
+    /* Wait until our ticket is called.
+     *
+     * Use load-acquire (LDARH) when re-reading owner after WFE returns:
+     * this provides the acquire barrier in-line with the load, so we can
+     * drop the separate dmb(ish) that used to follow the spin loop.
+     * A plain volatile read followed by dmb was susceptible to a stale
+     * cached value being compared before the barrier took effect.
+     */
+    {
+        uint16_t seen;
+        while (1) {
+            __asm__ volatile("ldarh %w0, [%1]"
+                : "=r"(seen)
+                : "r"(&lock->owner)
+                : "memory");
+            if (seen == ticket)
+                break;
+            __asm__ volatile("wfe" ::: "memory");
+        }
     }
-
-    /* Acquire barrier */
-    dmb(ish);
 #endif
 }
 

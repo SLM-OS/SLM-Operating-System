@@ -446,6 +446,14 @@ The `schedule()` function runs on each CPU independently:
 
 The idle task's IRQ unmask (`msr daifclr, #2`) must be inside the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry, and `context.S` saves this masked DAIF. On resume, the restored DAIF would keep IRQ masked, causing `wfi` to hang. Re-clearing DAIF each iteration prevents this.
 
+### Task Initial DAIF — Tasks Start With IRQ Masked (Pi 5 / Jetson)
+
+All tasks are created with `DAIF.I=1` (IRQ masked). `task_create()` in `kernel/sched/task.c` writes `task->context.daif = 0x080`, and `context.S:126-128` restores DAIF early in the switch sequence — before GP registers and SP are fully loaded.
+
+Rationale: on real ARM64 hardware without SMPEN (Pi 5) or on post-kexec Jetson, a timer IRQ taken mid-context-restore causes the ISR to run on a partially-restored task context, corrupting state. Starting tasks with IRQs masked closes this window. Task code unmasks naturally on the first `spin_unlock_irqrestore` or the idle task's explicit `daifclr`. On QEMU the same masking applies for uniformity — QEMU delivers IRQs regardless, but the invariant matches real hardware behavior.
+
+Platform-specific consequence: timer IRQs do not fire while application tasks are running on Pi 5. Only the idle task on CPU 0 advances `pit_ticks` (it unmasks inside the `wfi` loop). See `kernel/CLAUDE.md` §Pi-5-Timer-IRQs for the full implication chain.
+
 ### Inter-Processor Interrupts (IPI)
 
 Used for:

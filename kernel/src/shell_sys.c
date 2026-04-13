@@ -10,7 +10,9 @@
 #include "task.h"
 #include "sched.h"
 #include "sched_policy.h"
+#ifdef CONFIG_AI_SCHEDULER
 #include "ai_types.h"
+#endif
 #include "pmm.h"
 #include "vmm.h"
 #include "smp.h"

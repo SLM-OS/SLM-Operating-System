@@ -158,6 +158,17 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 - Priority ceiling protocol for mutex
 - Worst-case execution time (WCET) analysis tooling
 
+### pi_mutex Sleep Queue (1-2 weeks)
+- Replace the spin-wait loop in `pi_mutex_lock` with a wait-queue model: waiter blocks (TASK_BLOCKED), owner's `pi_mutex_unlock` wakes one waiter
+- Removes the single-CPU contended livelock documented in `docs/scheduler.md` ("Known Limitation — Single-CPU Contended Priority Inheritance")
+- Also eliminates the need for `DAIF`-aware timer preemption to make progress on contended mutexes
+- Blocked by timer-driven wakeup on secondary CPUs on Pi 5 (see "Secondary CPU Timer Preemption" above); once that lands, the sleep queue is a straightforward addition
+
+### Timer-Driven Busy-Wait Helper (small)
+- Add `timer_busy_wait_us(us)` using `CNTPCT_EL0` (always advances regardless of IRQ state)
+- Replace the hand-rolled `for (volatile int d = 0; d < N; d++)` delay loops in `kernel/sched/smp.c` (secondary-CPU scheduler-init poll, boot-flag poll)
+- Portable across QEMU / Pi 5 / Jetson; required for SCHED-L2 cleanup from the 2026-04-12 code review
+
 ---
 
 ## Effort Summary

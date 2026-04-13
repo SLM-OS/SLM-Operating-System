@@ -84,6 +84,15 @@ void scheduler_add_task(struct task *task);
 void scheduler_remove_task(struct task *task);
 
 /*
+ * Mark a task TERMINATED and dequeue it atomically under rq_lock.
+ * Used by task_exit to close the pick-a-terminated-task race:
+ * without a single locked region around state=TERMINATED + dequeue,
+ * a cross-CPU scheduler on Pi 5 could observe stale state and pick
+ * the zombie.
+ */
+void scheduler_terminate_task(struct task *task);
+
+/*
  * Select next task and perform context switch.
  *
  * Called by:

@@ -30,7 +30,8 @@ typedef enum {
     TASK_READY,         /* Ready to run, in run queue */
     TASK_RUNNING,       /* Currently executing on CPU */
     TASK_BLOCKED,       /* Waiting for something (I/O, sleep, etc.) */
-    TASK_TERMINATED     /* Finished execution, awaiting cleanup */
+    TASK_TERMINATED,    /* Finished execution, awaiting cleanup */
+    TASK_DESTROYED      /* Reclamation in progress; must not be picked */
 } task_state_t;
 
 #if defined(PLATFORM_X86_64)
@@ -63,6 +64,15 @@ struct cpu_context {
  * Callee-saved: x19-x28, x29 (fp), x30 (lr), sp.
  * FPU/SIMD: v0-v31, fpcr, fpsr (eager save for SLM workloads).
  * Interrupt state: DAIF register.
+ *
+ * Task-DAIF invariant (Pi 5 / Jetson):
+ *   New tasks are created with DAIF.I=1 (IRQ masked). See task.c where
+ *   task->context.daif is initialized to 0x080, and context.S where DAIF
+ *   is restored early in the switch sequence. This invariant is platform-
+ *   required: on real hardware without SMPEN, a timer IRQ taken mid-
+ *   context-restore corrupts the partially-restored task state. On QEMU
+ *   the same masking applies for uniformity.
+ *   Rationale: docs/smp.md and kernel/CLAUDE.md §Pi-5-Timer-IRQs.
  */
 struct cpu_context {
     /* Callee-saved general purpose registers */

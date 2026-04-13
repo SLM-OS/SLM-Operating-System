@@ -14,6 +14,7 @@
 #include "dtb.h"
 #include "cache.h"
 #include "ncmem.h"
+#include "nc_trace.h"
 
 #include <stddef.h>
 
@@ -291,11 +292,8 @@ static const char *psci_error_str(int err)
  */
 void secondary_init(uint32_t logical_cpu_id)
 {
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Immediate NC write at function entry — confirms C code is reached.
-     * 0xEE = distinctive value to distinguish from stale previous-boot data. */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4) = 0xEE;
-#endif
+    /* Trace: 0xEE = reached C entry from smp_boot.S */
+    nc_trace(logical_cpu_id, 0xEE);
     DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
 
     /* Verify SMPEN was set from EL2 on this secondary core */
@@ -333,44 +331,47 @@ void secondary_init(uint32_t logical_cpu_id)
      * Wait for CPU 0 to initialize the scheduler.
      * This is necessary because smp_init() runs before scheduler_init().
      */
-    /* Debug: write to FIXED NC addresses to trace secondary CPU progress.
-     * NC writes are instantly visible to CPU 0 — no L2 eviction needed.
-     * Use NC_MEM_BASE + NC_MEM_SIZE - 256 + cpu*4 to avoid collisions. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Write what we READ from the NC init flag — diagnostic to see if
-     * secondary CPUs can read CPU 0's NC writes. */
+    /* Trace: 0xAA = about to poll scheduler_is_initialized.
+     * Second slot records the observed NC init flag value — useful for
+     * confirming secondary CPUs can read CPU 0's NC writes. */
+#if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
+    nc_trace(logical_cpu_id, 0xAA);
     {
-        volatile uint32_t *nc_flag = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
-        volatile uint32_t *nc_dbg = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4);
-        *nc_dbg = 0xAA;  /* Marker: reached this point */
-        /* Read the NC init flag value and write to NC debug */
-        uint32_t flag_val = *nc_flag;
-        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 192 + logical_cpu_id * 4) = flag_val;
+        uint32_t flag_val = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
+        nc_trace_at(192, logical_cpu_id, flag_val);
     }
 #endif
 
-    while (!scheduler_is_initialized()) {
-        for (volatile int d = 0; d < 100000; d++) {}
-    }
-
+    /* SCHED-L2 follow-up: replace the inner volatile delay with a
+     * timer-driven wait (e.g. CNTPCT_EL0-based busy_wait_us) once such
+     * a helper exists and is confirmed safe to call before scheduler
+     * start on all platforms. Tracked as a GitHub enhancement issue. */
+    {
+        int retry;
+        for (retry = 0; retry < SCHED_INIT_MAX_RETRIES; retry++) {
+            if (scheduler_is_initialized())
+                break;
+            for (volatile int d = 0; d < 100000; d++) {}
+        }
+        if (!scheduler_is_initialized()) {
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4) = 0xBD;
+            *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256
+                + logical_cpu_id * 4) = 0xDEAD0001;
 #endif
+            panic("CPU %u: scheduler init timeout", logical_cpu_id);
+        }
+    }
+
+    nc_trace(logical_cpu_id, 0xBD);  /* scheduler init observed */
 
     /* Initialize scheduler for this CPU (creates idle task) */
     scheduler_init_secondary(logical_cpu_id);
 
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xBC = returned from scheduler_init_secondary */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4) = 0xBC;
-#endif
+    nc_trace(logical_cpu_id, 0xBC);  /* returned from scheduler_init_secondary */
 
     /* Start scheduler — this starts the timer, enables interrupts,
      * and switches to the idle task. Does not return. */
-#if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xBE = about to call scheduler_start */
-    *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + logical_cpu_id * 4) = 0xBE;
-#endif
+    nc_trace(logical_cpu_id, 0xBE);  /* about to call scheduler_start */
     scheduler_start(logical_cpu_id);
 
     /* Should never reach here */
@@ -432,7 +433,9 @@ static int boot_secondary(uint32_t cpu)
         if (cpu_boot_flag[cpu]) {
             return PSCI_SUCCESS;
         }
-        /* Brief delay between checks (~1ms) */
+        /* Brief delay between checks (~1ms).
+         * SCHED-L2 follow-up: replace with timer-driven busy_wait_us once
+         * a portable helper exists. Tracked as a GitHub enhancement issue. */
         for (volatile int d = 0; d < 100000; d++);
     }
 
