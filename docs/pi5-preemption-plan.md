@@ -8,7 +8,7 @@ SLM-OS on Pi 5 currently operates in **cooperative multitasking** mode. Timer IR
 
 Two blockers together gate preemption + SMP:
 
-- **#99** — Timer IRQs never reach EL1. Suspected causes: GIC Group 1 configuration gap since the `armstub8-2712.bin` was disabled, potential `HCR_EL2.IMO` routing IRQs to EL2, or `SCR_EL3` state left by firmware. `IGROUPR` reads as `0` from non-secure EL1 (documented in commit `5a9b143`), so verifying the group state post-boot is not possible from userland — the setup in `boot.S:338-347` happens only if firmware entered at EL2.
+- **#99** — Timer IRQs never reach EL1. Leading hypothesis (see Phase 1): timer IRQs arrive as **FIQ** because they remain in GICv2 Group 0, and the current `el1_fiq: b hang` handler silently eats them. Non-secure state (EL1 or EL2) **cannot** promote a Group 0 interrupt to Group 1 on GICv2 with Security Extensions — only Secure EL3 can. That makes the `GICD_IGROUPR` writes in `boot.S`'s EL2 block almost certainly no-ops, and explains why `IGROUPR` always reads as `0` from non-secure (documented in commit `5a9b143`). Other possible contributors: firmware entering at EL1 and skipping the EL2 block entirely; `HCR_EL2.IMO` routing IRQs to EL2; `SCR_EL3` state left by TF-A.
 - **#57 residual** — ELR-trampoline infrastructure merged on main (PR #98) but the `PI5_SECONDARY_PREEMPT` CMake option defaults OFF. Once #99 is fixed, activating the option must deliver real preemption across all 4 CPUs. The remaining work is unmasking `DAIF` on tasks without re-triggering the shell-banner hang first documented in commit `ac46e40`.
 
 ## Success criteria
@@ -22,11 +22,11 @@ Two blockers together gate preemption + SMP:
 
 ## Phase 1 — Root-cause #99 (diagnostic-only, no behavior change)
 
-The blocker has four plausible causes, indistinguishable from EL1 alone because most of the relevant registers (`HCR_EL2`, `SCR_EL3`, `CNTHCTL_EL2`, `IGROUPR` from non-secure) cannot be read post-boot. Capture them at EL2 during boot and expose the snapshot via non-cacheable memory.
+The blocker has multiple plausible causes, indistinguishable from EL1 alone because most of the relevant registers (`HCR_EL2`, `SCR_EL3`, `CNTHCTL_EL2`, `IGROUPR` from non-secure) cannot be read post-boot. Capture them at EL2 during boot and expose the snapshot via non-cacheable memory; simultaneously turn the silent `el1_fiq` hang into a first-class diagnostic so we stop missing FIQ deliveries.
 
 ### 1a. EL2 register snapshot in `boot.S`
 
-Extend `boot.S` right before the `eret` to EL1 (around line 450) to write, to a fixed NC slot, these `u64` values:
+Extend `boot.S` right before the `eret` to EL1 (locate by searching for the `SPSR_EL2` write and `eret` pair — line numbers have drifted from earlier revisions). Write, to a fixed NC slot, these `u64` values:
 
 | Offset from `NC_MEM_BASE` | Register |
 |---|---|
@@ -38,23 +38,42 @@ Extend `boot.S` right before the `eret` to EL1 (around line 450) to write, to a 
 | `0xFF28` | `ID_AA64PFR0_EL1` (confirms EL2 is implemented) |
 | `0xFF30` | `GICD_CTLR` pre-our-writes |
 | `0xFF38` | `GICC_CTLR` pre-our-writes |
+| `0xFF40` | `GICD_IGROUPR[0]` **post**-our-write (readback — critical) |
+| `0xFF48` | `GICD_IGROUPR[0]` pre-our-write |
+
+The IGROUPR readback is load-bearing: if we wrote `0xFFFFFFFF` to `GICD_IGROUPR[0]` from non-secure EL2 and the readback still shows `0` (or anything other than what we wrote), the writes are being silently discarded by the GICv2 security model. That directly implicates the FIQ hypothesis below.
 
 Add a shell command `diag el2` that dumps these slots. No behavior change; only visibility.
 
-### 1b. Per-vector exception counters
+### 1b. Per-vector exception counters + real FIQ handler
 
-Increment a per-CPU NC counter at the very first instruction of `el1_irq`, `el1_sync`, `el1_fiq`, `el1_serror` (before `save_regs`). Expose via the `cpu` shell command. Closes an ambiguity from the previous session: confirms whether *any* exception type is being delivered, even if IRQ is not.
+Increment a per-CPU NC counter at the very first instruction of `el1_irq`, `el1_sync`, `el1_fiq`, `el1_serror` (before `save_regs`). Expose via the `cpu` shell command.
+
+**Critical:** today `el1_fiq: b hang` (in `kernel/arch/arm64/vectors.S`) silently consumes FIQs. If timer IRQs are arriving as FIQ because they remained in GIC Group 0, this handler is the reason `timer_handler_count` stays `0` without *any* diagnostic trace. Replace with a real handler:
+
+```asm
+el1_fiq:
+    /* NC counter for diagnostic (same pattern as el1_irq counter). */
+    save_regs
+    bl      el1_fiq_handler        /* C handler in exceptions.c */
+    restore_regs
+    eret
+```
+
+`el1_fiq_handler()` in `exceptions.c` initially reads the same GIC interrupt-acknowledge register the IRQ path uses (on GICv2 that's `GICC_IAR` for Group 1 and `GICC_AIAR` for Group 0 — the handler must be aware of both). It logs the observed IRQ number via NC trace and returns. This isolates the "FIQ-delivered timer" case; Phase 2d below turns it into a working timer path if that is indeed the cause.
 
 ### 1c. Decision table
 
-Force `DAIF.I=0` briefly in `main` (before shell spawns), read diagnostics:
+Force `DAIF.I=0` and `DAIF.F=0` briefly in `main` (before shell spawns), read diagnostics:
 
 | Observation | Root cause implicated |
 |---|---|
-| `HCR_EL2.IMO` set post-our-write | IRQs routed to EL2 |
-| `CurrentEL != 8` at firmware entry | Firmware entered at EL1; GIC group setup skipped |
-| IRQ counter increments but `el1_irq_handler` hangs | Routing works; handler-side bug |
-| All exception counters stay 0 | GIC group / distributor blocks delivery |
+| `el1_fiq` counter increments; `GICC_AIAR` returns IRQ 30 | **Primary hypothesis confirmed:** Timer IRQs arriving as FIQ — PPI 30 is in Group 0, non-secure IGROUPR writes were ignored |
+| `GICD_IGROUPR[0]` post-write readback `≠ 0xFFFFFFFF` | Same as above (GICv2 security model prevents NS→Group-1 promotion) |
+| `el1_irq` counter increments but `el1_irq_handler` hangs | Routing works; handler-side bug (revisit `ac46e40`-style regression) |
+| `HCR_EL2.IMO` set post-our-write | IRQs routed to EL2 instead of EL1 |
+| `CurrentEL != 8` at firmware entry | Firmware entered at EL1; EL2 block skipped entirely |
+| All exception counters stay 0 | Distributor-level blocking, `SCR_EL3`, or timer not actually firing |
 | `SCR_EL3` unreachable (traps) | Expected; TF-A controls EL3 |
 
 ### 1d. External reference comparison
@@ -74,31 +93,54 @@ A write-up at `docs/pi5-irq-investigation-2026-04.md` naming the root cause with
 
 ## Phase 2 — Fix timer IRQ delivery
 
-Branches based on the Phase 1 finding.
+Branches based on the Phase 1 finding. Paths are ordered by likelihood per external-review analysis; the first confirmation in Phase 1c drives selection.
 
-### 2a. If cause is `HCR_EL2.IMO=1` (IRQs routed to EL2)
+### Pre-condition (shared) — UART reentrance audit
 
-Change `boot.S:429-431` to write `HCR_EL2 = 0x80000001` with explicit clears of `IMO | FMO | AMO` rather than assuming firmware leaves those bits at 0. Add a barrier + re-read to confirm the write held.
+**Blocking prerequisite** before any DAIF unmask ships: audit every function reachable from `el1_irq_handler → timer_handler → scheduler_tick` (and the equivalent FIQ path if taken) and confirm **none** call `uart_printf`, `uart_puts`, `DEBUG_PRINT`, `INFO`, `WARN`, or any other UART-emitting routine. A task spinning on `FR_TXFF` in `uart_putc` that gets preempted, then re-enters UART output from IRQ/FIQ context, deadlocks on the implicit UART lock. This is the likely root cause of the `ac46e40` shell-banner hang at `[2]SLM-[a]OS`. Strip hits or gate them behind `uart_trylock`. Record the audit result as a sign-off before Phase 3.
 
-### 2b. If cause is "firmware entered at EL1, GIC group writes skipped"
+### 2a. If cause is "timer IRQs delivered as FIQ" (leading hypothesis)
 
-The EL2 block in `boot.S:299-465` never executes. Options:
+Two sub-options:
 
-- **b.1 — Re-enable `armstub8-2712.bin`.** Root-cause the 60% boot-garble rate (investigated and abandoned per `pi5-baremetal-status.md`) as a separate work stream. Fallback option.
-- **b.2 — Configure GIC Group 1 from EL1.** Non-secure EL1 can write `GICD_IGROUPR` when TF-A grants access. Try it; verify via exception delivery. Preferred.
-- **b.3 — Move to virtual timer (CNTV, IRQ 27).** Historical commit `12bef99` paired virtual timer with armstub. Requires `CNTVOFF_EL2=0` which must be set at EL2 — not viable if we're stuck at EL1.
+- **2a.1 — Handle the timer in the FIQ vector (fast path).** `el1_fiq_handler()` dispatches on `GICC_AIAR` (Group 0 ACK); when it sees IRQ 30, invoke the existing `timer_handler()`. `switch_to`-from-exception safety is identical to the IRQ path because the ELR trampoline (PR #98) already decouples scheduling from exception context. Ugly but correct; gets preemption working in one deploy cycle.
+- **2a.2 — Re-enable `armstub8-2712.bin` to configure Group 1 from EL3 (clean path).** On GICv2 with Security Extensions, only Secure EL3 can promote an interrupt from Group 0 to Group 1. This is the architecturally correct fix and the only way to run the timer through `el1_irq`. Blocked on resolving the ~60% boot-garble rate that led to the armstub being disabled; that diagnosis is a separate sub-task.
 
-### 2c. If cause is "exception delivered but handler hangs"
+Recommend landing 2a.1 first so preemption + SMP unblock, then 2a.2 as a later cleanup that migrates the timer back to the IRQ vector behind the same `PI5_SECONDARY_PREEMPT` kill switch.
 
-The `ac46e40` shell-banner hang landed at `[2]SLM-[a]OS` — mid-`uart_puts`. Revisit with Phase 1's new counters in place; likely a DAIF-handling edge case in the IRQ return path. Candidate fixes:
+### 2b. If cause is `HCR_EL2.IMO=1` (IRQs routed to EL2)
 
-- Verify `gic_end_interrupt(irq)` completes before `scheduler_tick` returns (already done per `exceptions.c:247-264`).
-- Check `uart_putc`'s `FR_TXFF` spin is re-entrant across IRQ.
-- Confirm the trampoline's `preempt_disabled[cpu]=1`-before-`daifclr` window holds.
+In `boot.S`'s EL2 block, change the `HCR_EL2` write (locate by searching for `msr hcr_el2` near the `mov ... #(1 << 31)` sequence) to explicitly clear `IMO | FMO | AMO` rather than assuming firmware left them at `0`. Add a `dsb sy` and a readback into the NC snapshot (Phase 1a offset `0xFF08`) to confirm the write held.
 
-### 2d. Validation for Phase 2
+### 2c. If cause is "firmware entered at EL1, EL2 block skipped"
 
-- `cpu` shell command shows `timer_handler_count > 0` and `sched_diag_tick > 0` on CPU 0 within ~100 ms of boot.
+The EL2 block (`boot.S`'s `cmp x_, #8` / `b.ne` / … / `eret` region) never executes; nothing configures `HCR_EL2`, `CNTHCTL_EL2`, `IGROUPR`, or `GICD_CTLR`. Options:
+
+- **c.1 — Re-enable `armstub8-2712.bin`.** Same as 2a.2 — the only architecturally correct fix and the only way to reach EL3 to set the right groups.
+- **c.2 — Configure GIC Group 1 from non-secure EL1.** **Not viable** on GICv2 with Security Extensions: non-secure writes to `GICD_IGROUPR` cannot promote Group 0 interrupts to Group 1. The initial plan listed this as preferred; the external review correctly flagged it as a no-op on this hardware.
+- **c.3 — Move to virtual timer (CNTV, IRQ 27).** Historical commit `12bef99` paired virtual timer with the armstub. Requires `CNTVOFF_EL2=0` which must be set at EL2 — not viable if firmware entered at EL1.
+
+Recommend c.1 (armstub re-enablement); handle boot-garble diagnosis as a dependent sub-task.
+
+### 2d. If cause is "exception delivered but handler hangs" (handler-side bug)
+
+With Phase 1b's counters in place, this case surfaces as `el1_irq` counter incrementing but `timer_handler_count` staying low or frozen. Candidate fixes:
+
+- Verify `gic_end_interrupt(irq)` completes before `scheduler_tick` returns (confirm at the active line in `exceptions.c`; previous investigations located it around the timer case of `el1_irq_handler`).
+- Confirm the trampoline's `preempt_disabled[cpu]=1`-before-`daifclr` window holds under repeated fire.
+- Apply the UART-reentrance audit from the Phase 2 pre-condition — this is likely the root cause regardless of delivery path.
+
+### 2e. Secondary-CPU GIC configuration
+
+`kernel/sched/smp.c` / `smp_boot.S` perform the EL2→EL1 drop for secondary CPUs but do **not** replicate the primary CPU's GIC configuration. For PPIs (per-CPU private interrupts like timer IRQ 30), `GICD_IGROUPR` bits are banked — each CPU has its own copy — so even a working primary-CPU setup does not carry over. Whatever GIC configuration resolves the primary CPU issue must also run in `secondary_init()` or the secondary-CPU EL2 block, before `scheduler_start()` arms the local timer.
+
+- If the fix path is 2a.1 (FIQ handler), nothing extra here — the vector table is shared across CPUs.
+- If the fix is 2a.2 / 2c.1 (armstub), TF-A must configure PPIs for all CPUs; verify in the armstub source.
+- If the fix is 2b (`HCR_EL2` clear), replicate in the secondary EL2 block.
+
+### 2f. Validation for Phase 2
+
+- `cpu` shell command shows `timer_handler_count > 0` and `sched_diag_tick[0] > 0` within ~100 ms of boot.
 - A spin-forever task pinned to CPU 0 is preempted — visible because shell responds to input while it runs.
 - `labctl boot_test --count 10` returns 10/10.
 
@@ -148,6 +190,10 @@ Pi 5 boots cleanly to shell with preemption active on CPU 0. No regression in QE
 
 - Every CPU's `sched_diag_tick[cpu]` must advance (currently only CPU 0's does, and only when idle).
 - `bench smp` completes in ≤100 ms (currently ~2 s in cooperative mode).
+
+### 4a.1. Secondary-CPU boot-stack headroom
+
+`smp_boot.S` sets per-CPU boot stacks at 16 KB (`lsl x2, x2, #14`) while task stacks are `STACK_SIZE = 64 KB`. Cooperative mode barely exercises the secondary boot stack, but preemption drives it much harder (ISR entry → trampoline → `schedule()` → potential `switch_to` — all on top of whatever depth `secondary_init()` leaves behind). Before Phase 4b runs, inspect `secondary_init()` stack depth (any allocator / task-creation calls) and raise the per-CPU boot stack to 32 KB — or 64 KB to match task stacks — if the new trampoline + scheduler path meaningfully approaches the limit. Stress `bench smp` with deliberately deep call chains as a sanity check.
 
 ### 4b. The 5 integration tests
 
@@ -248,4 +294,16 @@ Acceptance check sequence after Phase 4:
 
 ---
 
-*Last updated: 2026-04-13.*
+## Revision notes
+
+- **2026-04-13 (rev 2):** External review pass integrated. Key changes:
+  - Elevated the **FIQ-delivery hypothesis** (`el1_fiq: b hang` silently consuming Group 0 timer IRQs) to the primary cause in Phase 1c; added an explicit Phase 2a fix path (FIQ handler as fast path, armstub re-enablement as clean path).
+  - Marked the original "configure Group 1 from non-secure EL1" approach (old 2b.2) as **non-viable**: GICv2 with Security Extensions does not allow NS→Group-1 promotion. Only EL3 can.
+  - Added **`GICD_IGROUPR[0]` post-write readback** (Phase 1a offset `0xFF40`) so we definitively detect when non-secure group writes are silently discarded.
+  - Added a **real `el1_fiq` handler** to Phase 1b — today's `b hang` is a diagnostic black hole regardless of FIQ root cause.
+  - Added a **UART-reentrance audit** as the shared Phase 2 pre-condition blocking Phase 3 (likely root cause of the `ac46e40` `[2]SLM-[a]OS` hang).
+  - Added Phase 2e — **secondary-CPU GIC configuration** (IGROUPR is banked per-CPU; whatever fix lands must replicate for CPUs 1–3).
+  - Added Phase 4a.1 — **secondary-CPU boot-stack headroom** check; 16 KB is tight under preemption.
+  - Replaced stale `boot.S:XXX-YYY` line-number references with pattern/symbol searches to survive source drift.
+
+*Last updated: 2026-04-13 (rev 2).*
