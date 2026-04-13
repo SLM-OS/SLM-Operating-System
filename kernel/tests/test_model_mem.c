@@ -39,6 +39,7 @@ extern int rust_model_free(ModelHandle handle);
 extern ModelHandle rust_model_share(ModelHandle handle);
 extern void *rust_model_get_ptr(ModelHandle handle);
 extern size_t rust_model_get_size(ModelHandle handle);
+extern int rust_eviction_enabled(void);
 
 /* Helper to check if handle is null */
 static int handle_is_null(ModelHandle h)
@@ -241,19 +242,29 @@ static void test_pool_exhaustion(void)
         allocated++;
     }
 
-    /* Should have allocated exactly WEIGHT_POOL_BLOCKS */
-    TEST_ASSERT_EQUAL_INT(WEIGHT_POOL_BLOCKS, allocated);
-
-    /* One more should fail */
-    ModelHandle overflow = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
-    TEST_ASSERT_TRUE(handle_is_null(overflow));
-
-    /* Free all */
-    for (int i = 0; i < allocated; i++) {
-        rust_model_free(handles[i]);
+    if (rust_eviction_enabled()) {
+        /* With AI eviction ON, `alloc_weights` evicts one of the
+         * existing blocks on OOM. Every request succeeds until the
+         * test array is full, and the last handle points at a freshly
+         * allocated slot whose predecessor was evicted. */
+        TEST_ASSERT_EQUAL_INT(WEIGHT_POOL_BLOCKS + 2, allocated);
+        /* One of the original handles is now stale (its slot was the
+         * eviction victim). Freeing it returns an error — we tolerate
+         * that and free the rest. */
+        for (int i = 0; i < allocated; i++) {
+            (void)rust_model_free(handles[i]);
+        }
+    } else {
+        /* Classic behaviour: pool fills, subsequent allocs fail. */
+        TEST_ASSERT_EQUAL_INT(WEIGHT_POOL_BLOCKS, allocated);
+        ModelHandle overflow = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+        TEST_ASSERT_TRUE(handle_is_null(overflow));
+        for (int i = 0; i < allocated; i++) {
+            rust_model_free(handles[i]);
+        }
     }
 
-    /* Now allocation should work again */
+    /* Either way, a fresh alloc now succeeds. */
     ModelHandle recovered = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
     TEST_ASSERT_FALSE(handle_is_null(recovered));
     rust_model_free(recovered);

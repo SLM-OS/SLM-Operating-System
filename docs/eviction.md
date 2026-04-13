@@ -220,7 +220,46 @@ default) are drained as "good" evictions and trigger
 The tracker is separate from CACHEUS so it can also drive future
 non-CACHEUS feedback paths (e.g. a traced ARC variant). `probe_and_report_fault`
 and `drain_and_report_good` are the one-call-does-both wrappers M6
-will invoke from the allocator's slow path.
+invokes from the allocator's slow path.
+
+### Allocator Integration (M6)
+
+`alloc_weights` / `alloc_workspace` now route through
+`alloc_with_eviction(pool_id)`:
+
+1. **Fast path**: take the allocator lock, try the pool's free-block
+   scan. Success returns immediately.
+2. **Slow path** (only when `ai_eviction` is on, and only on
+   `OutOfMemory`):
+   1. Drain expired tracker entries and fire
+      `update_feedback(block_id, was_fault=false)` for each (credits
+      good evictions).
+   2. Snapshot non-pinned candidates for the requested pool via
+      `snapshot_evictable_blocks` and filter by `PoolType`.
+   3. If `candidates.is_empty()` (every block pinned): return
+      `AllocError::OutOfMemory`.
+   4. Ask `ACTIVE_POLICY.select_victim(&candidates)` for a victim.
+   5. Free the victim under the pool lock, record the
+      `(pool_type, model_id, layer_idx)` key in the tracker, bump
+      `evictions_total`.
+   6. Retry the allocation. Any stale-handle race on the victim's
+      free is tolerated — the retry still succeeds if another slot
+      opens up.
+
+`set_metadata(handle, model_id, layer_idx, ...)` probes the tracker
+after writing the block's content key. A hit means the caller just
+"re-admitted" a content key that was evicted recently, so the tracker
+reports it to the active policy via `update_feedback(old_id,
+was_fault=true)`. The allocator itself never sees content keys — they
+arrive once the caller labels the block — so this split keeps the
+feedback loop complete without forcing callers to set metadata before
+allocation.
+
+**Lock ordering**: the allocator's `LOCK` and the eviction registry's
+`REGISTRY_LOCK` are never held simultaneously. `evict_and_retry`
+releases the allocator lock before calling `eviction::select_victim`,
+then re-acquires it to free the victim and retry. Feedback callbacks
+follow the same pattern.
 
 `mm::eviction::generated::MODELS_AVAILABLE` is a `const bool` callers
 can check to decide whether to fall back to a classical policy when
@@ -271,7 +310,7 @@ shell command. This document updates as each milestone lands.
 ### Test Coverage
 
 `kernel/tests/test_eviction.c` registers the **Eviction Policy Tests**
-Unity suite (13 tests) alongside the existing `test_suite_model_mem`:
+Unity suite (17 tests) alongside the existing `test_suite_model_mem`:
 
 - **Tracking-field FFI** (9 tests, always run):
   - Alloc seeds `load_time`, `last_access_time`, and `access_count = 1`
@@ -287,6 +326,15 @@ Unity suite (13 tests) alongside the existing `test_suite_model_mem`:
   - `rust_eviction_snapshot_count()` honours the evictable-block filter
     (excludes free blocks and pinned blocks with `ref_count > 1`;
     re-admits them on ref drop; returns to baseline on free)
+- **Allocator integration (M6)** (4 tests, skip cleanly when feature is off):
+  - `test_alloc_evicts_when_full_weights` — eviction path doesn't
+    crash when the fill does not reach pool exhaustion
+  - `test_alloc_evicts_after_total_fill` — fully drain the workspace
+    pool, next alloc evicts (`evictions_total += 1`, new handle valid)
+  - `test_alloc_oom_when_all_pinned` — drain + share every block,
+    next alloc returns a null handle (no evictable candidates)
+  - `test_pool_stats_reports_evictions` — `evictions_total` field is
+    readable on both pool-stats snapshots
 
 `rust_eviction_run_tests()` itself exercises 79 internal invariants (78
 when `ai_eviction_models` is off):

@@ -224,25 +224,22 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 **Note:** This is the actual integration point — making `alloc_weights` / `alloc_workspace` consult the active policy.
 
 ### Allocation Path Changes
-- ☐ Modify `runtime/src/mm/model_mem.rs:alloc_weights()`:
-  - When the weight pool has no free block, build the candidate list from currently-allocated blocks with `ref_count == 0`
-  - If `candidates.is_empty()`: return `AllocError::OutOfMemory` (all blocks pinned)
-  - Otherwise, call `ACTIVE_POLICY.lock().select_victim(&candidates)`
-  - Free the chosen block (call existing `free()` internals), then allocate
-  - Record the eviction in the `EvictedContentTracker` for CACHEUS feedback (M5)
-- ☐ Same change to `alloc_workspace()`
-- ☐ Update `PoolStats` to include `evictions_total` counter
+- ✅ `alloc_weights` and `alloc_workspace` centralise through `alloc_with_eviction(pool_id)`. First attempt hits the pool fast-path; on `OutOfMemory` with `ai_eviction` on, `evict_and_retry` is invoked.
+- ✅ `evict_and_retry` snapshots the pool's non-pinned candidates (`snapshot_evictable_blocks` filtered by `PoolType`), consults `ACTIVE_POLICY.select_victim`, frees the victim, records the eviction into `EVICTED_CONTENT_TRACKER`, and retries the allocation. `StaleHandle` on the victim-free is treated as a benign race (the retry still fires).
+- ✅ `candidates.is_empty()` (every block pinned) returns `AllocError::OutOfMemory` — matches the TODO's intent.
+- ✅ Expired-tracker entries drain at the top of `evict_and_retry` and drive `update_feedback(_, false)` on the installed policy (good-eviction credit).
+- ✅ `set_metadata` probes `EVICTED_CONTENT_TRACKER` after writing the content key; a hit drives `update_feedback(_, true)` — this is the CACHEUS fault signal that couldn't be produced from the alloc path alone (the content key isn't known until the caller labels the block).
+- ✅ `PoolStats` gains `evictions_total`; `RustPoolStats` in `slm_ffi.h` mirrors the Rust layout.
 
 ### Access Tracking
-- ☐ Add `pub fn touch(handle: ModelHandle)` that bumps `access_count` and updates `last_access_time`
-- ☐ Call `touch()` from any FFI path that reads/writes block contents (kernel side via `mm_touch_block` syscall)
-- ☐ Document the contract: callers MUST `touch()` for the policy to learn
+- ✅ `touch(handle)` lands in M1; M6 keeps it unchanged. `rust_model_touch` is the FFI the kernel uses when it reads/writes block contents.
+- 🔗 Kernel-side syscall wire-up (`mm_touch_block`) — deferred to a future cleanup pass. Existing tests exercise `rust_model_touch` directly.
 
 ### Verification
-- ☐ Existing tests for `alloc_weights` / `alloc_workspace` still pass with default `LruPolicy`
-- ☐ New test: fill the pool, free nothing, allocate one more — verify the LRU candidate is evicted
-- ☐ New test: pin every block (`ref_count > 0`), allocate one more — verify `OutOfMemory`
-- ☐ New test: switch to `XGBoostPolicy`, repeat the fill-and-allocate test, verify eviction happens
+- ✅ Existing `alloc_weights` / `alloc_workspace` tests (`test_suite_model_mem`) pass on all three configs.
+- ✅ `test_pool_exhaustion` updated to branch on `rust_eviction_enabled()`: under AI_EVICTION the pool never truly exhausts (eviction keeps it usable); under classic the old OOM behaviour is preserved.
+- ✅ New `test_alloc_evicts_when_full_weights`, `test_alloc_evicts_after_total_fill`, `test_alloc_oom_when_all_pinned`, and `test_pool_stats_reports_evictions` added to `test_suite_eviction`.
+- 🔗 Switching to `XGBoostPolicy` mid-test and repeating — deferred to M8's policy-swap stress test (needs a policy-install FFI, added with the shell command in M7).
 
 ---
 

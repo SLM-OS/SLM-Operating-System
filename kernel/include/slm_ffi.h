@@ -265,6 +265,10 @@ typedef struct {
     size_t allocated_blocks;
     size_t shared_blocks;
     size_t peak_usage;
+    /* Total eviction count (Phase AI-Eviction M6). When AI_EVICTION
+     * is off this stays 0 for every snapshot — the allocator has no
+     * policy path to increment it. */
+    uint64_t evictions_total;
 } RustPoolStats;
 
 /*

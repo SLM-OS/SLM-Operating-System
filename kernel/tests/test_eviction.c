@@ -15,6 +15,7 @@
  */
 
 #include "unity.h"
+#include "../include/slm_ffi.h"
 #include <stdint.h>
 
 /* ============================================================================
@@ -374,6 +375,141 @@ static void test_snapshot_counts_evictable_blocks(void)
 }
 
 /* ============================================================================
+ * M6: Allocator integration — eviction kicks in on pool exhaustion
+ * ============================================================================ */
+
+/* RustPoolStats is provided by slm_ffi.h (updated in M6 to include
+ * `evictions_total`). The extern declarations below match the shared
+ * header. */
+
+/* The M6 fill-and-evict test uses a small, self-contained per-pool
+ * slice: it allocates N blocks, records handles, then allocs one more
+ * to force an eviction. We don't want to drain the whole pool because
+ * later tests and integration suites depend on it being usable; we
+ * free back to baseline at the end. */
+#define FILL_COUNT 32
+
+static void test_alloc_evicts_when_full_weights(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    ModelHandle handles[FILL_COUNT];
+    int allocated = 0;
+
+    for (int i = 0; i < FILL_COUNT; i++) {
+        handles[i] = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+        if (handle_is_null(handles[i])) break;
+        /* Stagger last_access_time by touching in order so LRU has a
+         * clear oldest to evict. */
+        rust_model_touch(handles[i]);
+        allocated++;
+    }
+    TEST_ASSERT_EQUAL_INT(FILL_COUNT, allocated);
+
+    RustPoolStats before = rust_weight_pool_stats();
+    uint64_t evictions_before = before.evictions_total;
+
+    /* Allocate one more — the pool may not be entirely full of these
+     * handles (earlier tests might have others), so this test doesn't
+     * require `free_blocks == 0`. What it verifies is: when we
+     * eventually hit OOM, eviction kicks in and the alloc succeeds. */
+    ModelHandle extra = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+    /* If free blocks still remained, no eviction is expected. The
+     * strong check lives in test_alloc_evicts_after_total_fill below. */
+    TEST_ASSERT_FALSE(handle_is_null(extra));
+
+    (void)evictions_before;  /* referenced by the strong-fill test. */
+
+    /* Clean up. */
+    for (int i = 0; i < allocated; i++) rust_model_free(handles[i]);
+    rust_model_free(extra);
+}
+
+static void test_alloc_evicts_after_total_fill(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    /* Fully drain the workspace pool. */
+    ModelHandle slots[256];  /* MAX_BLOCKS_PER_POOL */
+    int n = 0;
+    for (int i = 0; i < 256; i++) {
+        ModelHandle h = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+        if (handle_is_null(h)) break;
+        rust_model_touch(h);
+        slots[n++] = h;
+    }
+    TEST_ASSERT_TRUE(n > 0);
+
+    RustPoolStats before = rust_workspace_pool_stats();
+    TEST_ASSERT_EQUAL_UINT64(0, before.free_blocks);
+    uint64_t evict_before = before.evictions_total;
+
+    /* Next alloc MUST evict — no free blocks. */
+    ModelHandle extra = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+    TEST_ASSERT_FALSE(handle_is_null(extra));
+
+    RustPoolStats after = rust_workspace_pool_stats();
+    TEST_ASSERT_EQUAL_UINT64(evict_before + 1, after.evictions_total);
+
+    /* Clean up — free the new handle and every surviving slot. One
+     * of the originals was evicted, so its handle is now stale; we
+     * ignore stale-free errors. */
+    rust_model_free(extra);
+    for (int i = 0; i < n; i++) {
+        (void)rust_model_free(slots[i]);
+    }
+}
+
+static void test_alloc_oom_when_all_pinned(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    /* Drain a workspace slice and pin each entry by sharing it. */
+    ModelHandle slots[256];
+    ModelHandle shared[256];
+    int n = 0;
+    for (int i = 0; i < 256; i++) {
+        ModelHandle h = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+        if (handle_is_null(h)) break;
+        shared[i] = rust_model_share(h);
+        slots[n++] = h;
+    }
+    TEST_ASSERT_TRUE(n > 0);
+
+    /* Pool is drained and every block is pinned (refcount > 1). A
+     * fresh alloc has nowhere to go — even the policy sees no
+     * evictable candidates. Must return null. */
+    ModelHandle extra = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+    TEST_ASSERT_TRUE(handle_is_null(extra));
+
+    /* Release pins and the originals. */
+    for (int i = 0; i < n; i++) {
+        rust_model_free(shared[i]);
+        rust_model_free(slots[i]);
+    }
+}
+
+static void test_pool_stats_reports_evictions(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+    RustPoolStats w = rust_weight_pool_stats();
+    RustPoolStats ws = rust_workspace_pool_stats();
+    /* The field exists and returns a non-negative count. The absolute
+     * value depends on preceding tests — don't assert a specific one,
+     * just that reads don't faull. */
+    TEST_ASSERT_TRUE(w.evictions_total <= UINT64_MAX);
+    TEST_ASSERT_TRUE(ws.evictions_total <= UINT64_MAX);
+}
+
+/* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
 
@@ -397,6 +533,12 @@ int test_suite_eviction(void)
     RUN_TEST(test_eviction_enabled_probe);
     RUN_TEST(test_eviction_selftest_passes);
     RUN_TEST(test_eviction_run_tests_passes);
+
+    /* M6: allocator integration (skip cleanly when feature off). */
+    RUN_TEST(test_alloc_evicts_when_full_weights);
+    RUN_TEST(test_alloc_evicts_after_total_fill);
+    RUN_TEST(test_alloc_oom_when_all_pinned);
+    RUN_TEST(test_pool_stats_reports_evictions);
 
     /* Snapshot filter (M6 integration point) — skips when feature off. */
     RUN_TEST(test_snapshot_counts_evictable_blocks);

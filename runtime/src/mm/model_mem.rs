@@ -177,6 +177,9 @@ struct MemoryPool {
     free_count: usize,
     peak_usage: usize,
     read_only: bool,
+    /// Count of evictions performed on this pool — surfaced through
+    /// `PoolStats.evictions_total` for the `eviction` shell command.
+    evictions_total: u64,
 }
 
 impl MemoryPool {
@@ -188,6 +191,7 @@ impl MemoryPool {
             free_count: 0,
             peak_usage: 0,
             read_only: false,
+            evictions_total: 0,
         }
     }
 
@@ -439,6 +443,7 @@ impl MemoryPool {
             allocated_blocks: allocated,
             shared_blocks: shared,
             peak_usage: self.peak_usage,
+            evictions_total: self.evictions_total,
         }
     }
 }
@@ -456,6 +461,10 @@ pub struct PoolStats {
     pub allocated_blocks: usize,
     pub shared_blocks: usize,
     pub peak_usage: usize,
+    /// Total number of blocks the allocator evicted to satisfy an
+    /// incoming request. Monotonically increasing; reset only on
+    /// `model_mem_init`. M6 wires this counter; earlier phases saw 0.
+    pub evictions_total: u64,
 }
 
 impl PoolStats {
@@ -489,6 +498,17 @@ static INITIALIZED: AtomicU8 = AtomicU8::new(0);
 /// SAFETY: Only accessed while holding LOCK (enforced by SpinGuard).
 static mut WEIGHT_POOL: MemoryPool = MemoryPool::new();
 static mut WORKSPACE_POOL: MemoryPool = MemoryPool::new();
+
+/// Recently-evicted content tracker. `None` until `model_mem_init`
+/// constructs it; retained for the life of the runtime. Protected by
+/// the allocator's `LOCK` so callers holding the SpinGuard can
+/// inspect or mutate it freely.
+///
+/// The tracker lives behind the `ai_eviction` feature gate; in
+/// baseline builds the static is still present (as `None`) for
+/// allocator simplicity but is never read. LTO drops it.
+#[cfg(feature = "ai_eviction")]
+static mut EVICTED_CONTENT_TRACKER: Option<super::eviction::EvictedContentTracker> = None;
 
 /// RAII guard for the allocator spinlock.
 ///
@@ -570,6 +590,14 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
         unsafe {
             (*addr_of_mut!(WEIGHT_POOL)).init(weight_base, weight_blocks, true);
             (*addr_of_mut!(WORKSPACE_POOL)).init(workspace_base, workspace_blocks, false);
+
+            // Install the eviction-feedback tracker once the heap is up.
+            #[cfg(feature = "ai_eviction")]
+            {
+                *addr_of_mut!(EVICTED_CONTENT_TRACKER) =
+                    Some(super::eviction::EvictedContentTracker::new());
+                super::eviction::init();
+            }
         }
         INITIALIZED.store(1, Ordering::Release);
     }
@@ -580,32 +608,177 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
 /// Allocate model memory from the weight pool.
 ///
 /// Weight memory is intended for read-only model parameters.
-/// Returns a 2MB-aligned block.
+/// Returns a 2MB-aligned block. On pool exhaustion the active
+/// eviction policy (gated on `ai_eviction`) selects a victim and the
+/// alloc is retried once; if every block is pinned (`refcount > 1`)
+/// the call still returns `AllocError::OutOfMemory`.
 pub fn alloc_weights(_size: usize) -> Result<ModelHandle, AllocError> {
-    if !is_initialized() {
-        return Err(AllocError::NotInitialized);
-    }
-
-    // For now, we allocate whole 2MB blocks regardless of size
-    // Future: support multi-block allocations for larger models
-
-    let _g = SpinGuard::new();
-    // SAFETY: SpinGuard held — exclusive access to WEIGHT_POOL.
-    unsafe { (*addr_of_mut!(WEIGHT_POOL)).alloc(POOL_WEIGHT) }
+    alloc_with_eviction(POOL_WEIGHT)
 }
 
 /// Allocate model memory from the workspace pool.
 ///
 /// Workspace memory is for per-inference scratch space.
-/// Returns a 2MB-aligned block.
+/// Returns a 2MB-aligned block. Eviction semantics as `alloc_weights`.
 pub fn alloc_workspace(_size: usize) -> Result<ModelHandle, AllocError> {
+    alloc_with_eviction(POOL_WORKSPACE)
+}
+
+/// Fast-path allocation with optional eviction retry.
+///
+/// Takes the pool lock, tries the pool's `alloc`, and on
+/// `OutOfMemory` hands the candidate list to the registered eviction
+/// policy (when `ai_eviction` is on). The picked victim is freed
+/// inside the same lock so no caller observes an empty pool between
+/// eviction and retry.
+fn alloc_with_eviction(pool_id: u8) -> Result<ModelHandle, AllocError> {
     if !is_initialized() {
         return Err(AllocError::NotInitialized);
     }
 
+    // First attempt — the common case, lock held once.
+    let first = {
+        let _g = SpinGuard::new();
+        // SAFETY: SpinGuard held — exclusive access to the pool static.
+        unsafe { pool_alloc_raw(pool_id) }
+    };
+    match first {
+        Ok(h) => return Ok(h),
+        Err(AllocError::OutOfMemory) => {
+            #[cfg(feature = "ai_eviction")]
+            {
+                return evict_and_retry(pool_id);
+            }
+            #[cfg(not(feature = "ai_eviction"))]
+            {
+                return Err(AllocError::OutOfMemory);
+            }
+        }
+        Err(e) => return Err(e),
+    }
+}
+
+/// Invoke `alloc` on the pool identified by `pool_id`.
+/// Caller must hold the allocator SpinGuard.
+///
+/// # Safety
+/// Callers must hold `LOCK` (via SpinGuard) before invoking.
+unsafe fn pool_alloc_raw(pool_id: u8) -> Result<ModelHandle, AllocError> {
+    match pool_id {
+        POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).alloc(pool_id),
+        POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).alloc(pool_id),
+        _ => Err(AllocError::InvalidHandle),
+    }
+}
+
+/// Eviction retry path — only compiled when the `ai_eviction`
+/// feature is on. Snapshots the requested pool's non-pinned
+/// candidates, consults the active policy, frees the victim, and
+/// retries the allocation.
+#[cfg(feature = "ai_eviction")]
+fn evict_and_retry(pool_id: u8) -> Result<ModelHandle, AllocError> {
+    use super::eviction;
+
+    // Flush expired tracker entries up-front. This is a cheap
+    // background-cleanup step and produces a stream of
+    // `was_fault=false` feedback for the CACHEUS selector. We
+    // collect IDs under the allocator lock and drive feedback after
+    // releasing it so the registry lock is never nested inside ours.
+    let now = kernel_ffi::get_time_ns();
+    let expired_ids: alloc::vec::Vec<u32> = {
+        let _g = SpinGuard::new();
+        // SAFETY: _g held — exclusive access.
+        unsafe {
+            match &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
+                Some(t) => t.drain_expired(now),
+                None => alloc::vec::Vec::new(),
+            }
+        }
+    };
+    for id in expired_ids {
+        eviction::update_feedback(id, false);
+    }
+
+    // Build candidate set for this pool. `snapshot_evictable_blocks`
+    // returns both pools' candidates — we filter to the requested one.
+    let candidates: alloc::vec::Vec<eviction::BlockMeta> =
+        snapshot_evictable_blocks()
+            .into_iter()
+            .filter(|m| {
+                let want_pool = match pool_id {
+                    POOL_WEIGHT => eviction::PoolType::Weight,
+                    POOL_WORKSPACE => eviction::PoolType::Workspace,
+                    _ => return false,
+                };
+                m.pool_type == want_pool
+            })
+            .collect();
+
+    if candidates.is_empty() {
+        // Every block in the pool is free (shouldn't happen here —
+        // we're in the OOM branch) or pinned (ref_count > 1). Either
+        // way, OOM is the right answer.
+        return Err(AllocError::OutOfMemory);
+    }
+
+    // Ask the active policy to pick a victim.
+    let victim_idx = match eviction::select_victim(&candidates) {
+        Some(idx) => idx,
+        None => return Err(AllocError::OutOfMemory), // no policy installed
+    };
+    let victim = candidates[victim_idx];
+
+    // Decode block_id → ModelHandle. block_id encoding is
+    // `(pool_id << 24) | slot_idx`. Generation is fetched live so
+    // a concurrent free/realloc between snapshot and free is caught
+    // as `StaleHandle` — in which case we retry directly.
+    let slot_idx = (victim.block_id & 0x00FF_FFFF) as usize;
+
+    // Perform the free under the pool lock. Record the eviction's
+    // content key in the tracker so a subsequent alloc with the same
+    // (model_id, layer_idx, pool_type) can credit CACHEUS.
+    let content_key = eviction::ContentKey {
+        pool_type: victim.pool_type,
+        model_id: victim.model_id,
+        layer_idx: victim.layer_idx,
+    };
+    {
+        let _g = SpinGuard::new();
+        // SAFETY: _g held — exclusive access.
+        unsafe {
+            let pool_ptr = match pool_id {
+                POOL_WEIGHT => addr_of_mut!(WEIGHT_POOL),
+                POOL_WORKSPACE => addr_of_mut!(WORKSPACE_POOL),
+                _ => return Err(AllocError::InvalidHandle),
+            };
+            let pool = &mut *pool_ptr;
+            if slot_idx >= pool.block_count {
+                return Err(AllocError::InvalidHandle);
+            }
+            let generation = pool.blocks[slot_idx].generation;
+            let h = ModelHandle {
+                block_index: slot_idx as u16,
+                pool_id,
+                generation,
+                _reserved: 0,
+            };
+            // Free via the pool's free (handles refcount internally,
+            // wipes tracking). We accept StaleHandle as a benign race
+            // and fall through to the retry.
+            let _ = pool.free(h);
+            pool.evictions_total = pool.evictions_total.saturating_add(1);
+
+            if let Some(t) = &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
+                t.record_eviction(content_key, victim.block_id, now);
+            }
+        }
+    }
+
+    // Retry allocation. If this still fails, the pool is genuinely
+    // broken — return whatever error the retry produces.
     let _g = SpinGuard::new();
-    // SAFETY: SpinGuard held — exclusive access to WORKSPACE_POOL.
-    unsafe { (*addr_of_mut!(WORKSPACE_POOL)).alloc(POOL_WORKSPACE) }
+    // SAFETY: SpinGuard held.
+    unsafe { pool_alloc_raw(pool_id) }
 }
 
 /// Free model memory.
@@ -708,6 +881,7 @@ pub fn weight_pool_stats() -> PoolStats {
             allocated_blocks: 0,
             shared_blocks: 0,
             peak_usage: 0,
+            evictions_total: 0,
         };
     }
 
@@ -725,6 +899,7 @@ pub fn workspace_pool_stats() -> PoolStats {
             allocated_blocks: 0,
             shared_blocks: 0,
             peak_usage: 0,
+            evictions_total: 0,
         };
     }
 
@@ -780,17 +955,50 @@ pub fn set_metadata(
         return Err(AllocError::InvalidHandle);
     }
 
-    let _g = SpinGuard::new();
-    // SAFETY: SpinGuard held — exclusive access to pool statics.
-    unsafe {
-        match handle.pool_id {
-            POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL))
-                .set_metadata(handle, model_id, layer_idx, model_priority),
-            POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL))
-                .set_metadata(handle, model_id, layer_idx, model_priority),
-            _ => Err(AllocError::InvalidHandle),
+    let result = {
+        let _g = SpinGuard::new();
+        // SAFETY: SpinGuard held — exclusive access to pool statics.
+        unsafe {
+            match handle.pool_id {
+                POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL))
+                    .set_metadata(handle, model_id, layer_idx, model_priority),
+                POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL))
+                    .set_metadata(handle, model_id, layer_idx, model_priority),
+                _ => Err(AllocError::InvalidHandle),
+            }
+        }
+    };
+    // After the caller labels the block, probe the content tracker —
+    // a hit means this alloc just "re-admitted" a content key that
+    // was evicted recently, which is the CACHEUS fault signal. Done
+    // with the allocator lock released so the registry's lock isn't
+    // nested inside ours.
+    #[cfg(feature = "ai_eviction")]
+    if result.is_ok() {
+        let pool_type = match handle.pool_id {
+            POOL_WEIGHT => super::eviction::PoolType::Weight,
+            POOL_WORKSPACE => super::eviction::PoolType::Workspace,
+            _ => return result,
+        };
+        let key = super::eviction::ContentKey {
+            pool_type, model_id, layer_idx,
+        };
+        let now = kernel_ffi::get_time_ns();
+        let hit_id = {
+            let _g = SpinGuard::new();
+            // SAFETY: _g held — exclusive access.
+            unsafe {
+                match &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
+                    Some(t) => t.probe_on_alloc(key, now),
+                    None => None,
+                }
+            }
+        };
+        if let Some(old_id) = hit_id {
+            super::eviction::update_feedback(old_id, true);
         }
     }
+    result
 }
 
 /// Flag or un-flag a block as currently GPU-mapped for DMA.
