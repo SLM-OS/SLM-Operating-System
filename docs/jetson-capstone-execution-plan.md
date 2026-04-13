@@ -40,6 +40,83 @@ The **minimum capstone path** is `G1 → G2 → G3 → G4 → G5 → G6`. Tracks
 
 ---
 
+## Shared Infrastructure Prerequisites (Week 1)
+
+The Jetson plan runs in parallel with the Pi 5 and x86-64 plans in `docs/pi5-preemption-plan.md` and `docs/x86-64-capstone-closure-plan.md`. Several items touch shared code (`kernel/sched/sched.c`, `kernel/arch/arm64/vectors.S`, `runtime/src/inference/ops.rs`, `kernel/include/config.h`). Landing the four preparatory PRs below in Week 1 — before any platform-specific preemption or inference work begins — eliminates every guaranteed merge conflict between the three plans.
+
+Each is small (15 minutes to a day of scope). Total Week-1 effort: roughly half a day.
+
+### Prereq #1 — `el1_fiq` handler + per-vector NC counters (Pi 5 plan owns)
+
+Pi 5 Phase 1b owns the implementation (`kernel/arch/arm64/vectors.S`, `kernel/arch/arm64/exceptions.c`). Replaces the bare `el1_fiq: b hang` with a real handler that increments a per-CPU NC counter so IRQ-vs-FIQ misrouting is visible in the `cpu` shell diagnostics.
+
+**Why Jetson depends on this:** P1.0's fast-path hypothesis is that PPI 30 is being delivered as FIQ (because `GICR_IGROUPR0` is never written, leaving PPIs in Group 0). Without the FIQ counter, the fast-path fix succeeds but the diagnostic signal is invisible. If P1.0 fails, the FIQ counter is the primary diagnostic for ruling out the FIQ hypothesis.
+
+**Test surface:** QEMU with GICv2 (Pi 5 config) and GICv3 (Jetson config).
+
+### Prereq #2 — Rename `PI5_SECONDARY_PREEMPT` → `SECONDARY_PREEMPT`
+
+Standalone PR that renames the compile flag across `CMakeLists.txt:72-75`, `kernel/sched/preempt.c:14`, `kernel/sched/sched.c:420, 1201, 1319`, and any vectors.S reference. Keep a `PI5_SECONDARY_PREEMPT` alias in `CMakeLists.txt` so the Pi 5 Makefile option keeps working.
+
+**Why this is a Week-1 PR, not part of P3:** both ARM64 plans (Pi 5 Phase 3d and Jetson P3) need the new name. Whichever lands first forces the other to merge-resolve a symbol rename across several files. Doing the rename once, in isolation, costs 15 minutes and blocks nothing.
+
+**Test surface:** `make kernel PLATFORM=RASPI5 PI5_SECONDARY_PREEMPT=ON` still builds.
+
+### Prereq #3 — `smp_notify_cpu(cpu)` abstraction
+
+Define in `kernel/include/smp.h`:
+
+```c
+/* Notify a specific CPU that it should re-check its run queue. Platform
+ * implementation: x86-64 sends a LAPIC IPI; ARM64 issues SEV (broadcast
+ * for now, upgradeable to a targeted GIC SGI once gic_send_sgi() is
+ * fixed for dual-cluster — Jetson P3 step 3). */
+void smp_notify_cpu(uint32_t cpu);
+```
+
+Per-platform weak defaults:
+- `kernel/arch/x86_64/platform_x86.c`: calls `lapic_send_ipi(cpu, IPI_RESCHED)`.
+- `kernel/sched/smp.c` (ARM64): issues `sev` for now. Upgrade to `gic_send_sgi(cpu, SGI_RESCHED)` after P3 step 3.
+
+Replace the existing `sev` and x86 IPI calls in `scheduler_add_task_to_cpu()` with a single unconditional `smp_notify_cpu(cpu)` call.
+
+**Why this is a Week-1 PR:** x86-64's B1 currently adds `#if defined(PLATFORM_X86_64)` around the IPI call in sched.c. If that lands as-is, the next platform that wants targeted notification adds another ifdef. The abstraction costs 30 minutes and keeps `sched.c` platform-agnostic.
+
+**Test surface:** `make test` across QEMU, Pi 5, x86-64, Jetson.
+
+### Prereq #4 — Inference `ops.rs` dispatch skeleton
+
+Land the `cfg_if!` scaffolding in `runtime/src/inference/ops.rs` for the operators that G1-G3 and x86-64 C1 will both extend:
+
+```rust
+pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "aarch64")] { matmul_f32_neon(a, b, c, m, n, k); }
+        else if #[cfg(target_arch = "x86_64")] { matmul_f32_sse(a, b, c, m, n, k); }
+        else { matmul_f32_scalar(a, b, c, m, n, k); }
+    }
+}
+```
+
+Each platform fills its own `_neon` / `_sse` body in subsequent PRs; the scalar fallback ships in the skeleton.
+
+**Why this is a Week-1 PR:** G1 (NEON) and x86-64 C1 (SSE) both start Week 2-3 and both modify the same functions in `ops.rs`. Whichever lands second eats a merge conflict. Landing the dispatch first makes the two tracks truly independent.
+
+**Test surface:** scalar fallback unit tests pass on all platforms.
+
+### Recommended Week-1 Merge Sequence
+
+| Day | PR | Owner |
+|---|---|---|
+| Mon | Prereq #2 (rename) | Whoever starts first |
+| Tue | Prereq #1 (FIQ handler) | Pi 5 plan |
+| Wed | Prereq #3 (`smp_notify_cpu`) | x86-64 plan |
+| Thu | Prereq #4 (dispatch skeleton) | Jetson plan |
+
+After these land, Tracks P/S/G in this plan can run without coordination friction.
+
+---
+
 ## Track P — Preemption
 
 ### Phase P1 — Diagnose timer-IRQ delivery on Jetson
@@ -125,11 +202,7 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
 
 **Steps:**
 
-1. **Rename the compile flag from platform-specific to capability-based.** Replace `PI5_SECONDARY_PREEMPT` with `SECONDARY_PREEMPT` in:
-   - `CMakeLists.txt:72-75` — drop the `PLATFORM STREQUAL "RASPI5"` guard.
-   - `kernel/sched/preempt.c:14` — replace `#if defined(PI5_SECONDARY_PREEMPT)` with the new symbol.
-   - `kernel/sched/sched.c:420, 1201, 1319` — same rename.
-   - Keep a `PI5_SECONDARY_PREEMPT` alias for the Pi 5 Makefile option for backwards compat.
+1. **Confirm Prereq #2 (rename) has landed.** The standalone `SECONDARY_PREEMPT` rename is a Week-1 shared infrastructure PR (see top of this plan). If it has not yet landed, do that first — not as part of P3. The rest of P3 assumes the new symbol exists. Drop the `PLATFORM STREQUAL "RASPI5"` guard in `CMakeLists.txt` here so Jetson builds can enable preemption.
 2. **Fix the MPIDR formula in `resched_trampoline`** (`kernel/arch/arm64/vectors.S:313-316`). **This is a correctness blocker for Jetson — the current code produces wrong CPU indices for cluster 1.** Today:
     ```asm
     mrs     x0, mpidr_el1
@@ -142,7 +215,9 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
    - **Preferred:** add a small NC-memory lookup: compute a hash of the MPIDR affinity bits and index into `cpu_logical_map[]` (already in NC memory per `kernel/sched/smp.c`). Requires loading the map pointer in asm (adrp/ldr) — one-time cost per preemption.
    - **Alternative:** an asm macro `mpidr_to_cpu` that branches on `mpidr & 0x10000` to add 2 when Aff2=1. Works but Jetson-specific; future ports need to touch it again.
    Apply the same fix to the other two `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` sites (task.c task_entry_trampoline, NC trace points in sched.c / exceptions.c / smp.c) — consolidate into the shared macro the comment already asks for.
+   **Shared-code impact:** the MPIDR sites in `task.c`, `sched.c`, `exceptions.c`, and `smp.c` are compiled for all ARM64 platforms. The lookup-table approach produces the same result on Pi 5 (where the formula is already correct), but the code path changes. **Test the MPIDR consolidation PR on Pi 5 QEMU and, if available, Pi 5 hardware before merging.** If the Pi 5 plan's Phase 2 validation is in flight when this lands, flag it in the Pi 5 plan's Phase 3 notes for a rebase.
 3. **Fix `gic_send_sgi()` for dual-cluster MPIDR** (`kernel/drivers/gic.c:697-712`). The current `(1UL << target_cpu)` target-list assumes Aff0 identifies the CPU. On Jetson, Aff0 is 0 for all CPUs; the target bit must always be bit 0, and the ICC_SGI1R_EL1 value must set `Aff1` (bits 23:16) and `Aff2` (bits 39:32) from the target's MPIDR. Not blocking for timer PPIs (per-CPU), but required before any future cross-CPU IPI notification (e.g., work-stealing wake-ups in Track S).
+   Once this is fixed, upgrade the ARM64 `smp_notify_cpu()` implementation (from Prereq #3) from `sev` broadcast to a targeted `gic_send_sgi(cpu, SGI_RESCHED)`.
 4. **Enable the trampoline in Jetson builds.** Add `-DSECONDARY_PREEMPT=1` to the Jetson CMake configure, or add a Jetson Makefile option `JETSON_SECONDARY_PREEMPT=ON`.
 5. **Add NC diagnostic slots for per-CPU `reschedule_pending`.** The trampoline already uses these for Pi 5; verify no collision with Jetson's NC layout (`0xBDE00000` run queues, `0xBDFFFF00` diag slots).
 6. **Test on hardware.** Kick off a CPU-bound task on CPU 4 or 5 specifically (cluster 1) and confirm it is preempted — this exercises the MPIDR fix. Repeat for CPU 1-3.
@@ -162,7 +237,9 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
 
 **Goal:** with preemptive SMP, any CPU may want to print. The current UART lock is IRQ-disable-only (safe cooperative, unsafe preemptive-multi-core). Replace with an NC-memory-based spinlock.
 
-**Prerequisites:** P3 complete.
+**Prerequisites:**
+- P3 complete.
+- **Pi 5 plan's UART-ISR-path audit** (Pi 5 Phase 2 pre-condition) has landed — this is a shared prerequisite. The audit strips or gates UART calls from ISR paths across all platforms; it prevents deadlock regardless of lock implementation. P4's NC ticket lock is the *additional* piece needed on ARM64 where `SPINLOCK_SKIP_LOCKING` makes the standard IRQ-disable-only lock insufficient under preemption. x86-64 doesn't need the NC lock — `spin_lock_irqsave` on the UART path is sufficient there, as the x86-64 plan correctly notes.
 
 **Steps:**
 
@@ -182,11 +259,15 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
 
 ### Phase P5 — DAIF.I=1 invariant audit + spinlock discipline
 
-**Goal:** preemptive tasks run with IRQs unmasked between cooperative yields. Many call sites silently assume the old invariant (`DAIF.I=1` throughout task body). Decide per-site: keep invariant (by explicit local IRQ disable) or relax.
+**Goal:** preemptive tasks run with IRQs unmasked between cooperative yields. Many call sites silently assume the old invariant (`DAIF.I=1` throughout task body). Audit each and either relax or explicitly preserve the invariant locally.
 
 **Also:** verify every kernel spinlock path reachable under preemption uses `spin_lock_irqsave`, not plain `spin_lock`. Under `SPINLOCK_SKIP_LOCKING` (Jetson) plain `spin_lock` degrades to `dmb ish` — safe under cooperative but **no mutual exclusion under preemption**. If a preempted critical section is re-entered on the same CPU, both paths run concurrently.
 
 **Prerequisites:** P3 complete.
+
+**Approach — IRQ unmasking mechanism:** adopt the Pi 5 plan's trampoline approach. Keep `context.daif = 0x080` in `task_create_with_priority()` unchanged; the `task_entry_trampoline` in `kernel/sched/task.c` issues `daifclr #2; isb` before calling the task entry function. This matches what Pi 5's Phase 3a already implements and avoids a second, divergent mechanism in shared code.
+
+**Do not** change the default `context.daif` bits in `task_create_with_priority()`. That function is shared across all platforms, and flipping it would change Pi 5's invariant asymmetrically with its own plan.
 
 **Steps:**
 
@@ -200,12 +281,12 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
    - `msg_router` — now uses `timer_get_count` for timeouts (fixed in #80). OK.
    - `component_runtime` — uses `hw_timeout_*` helpers. OK.
    - Any task body that spins on a flag without yielding. Under preemption, these will work correctly; under cooperative-only, they rely on being scheduled in. Check each for yield() calls.
-3. **Write `docs/preemptive-multitasking.md`** capturing:
+3. **Verify the trampoline unmask fires on every scheduled task.** Once `SECONDARY_PREEMPT=ON`, a test task that busy-loops should still allow preemption (proving IRQs are unmasked). If it hangs, the trampoline path is not being reached on Jetson — investigate before shipping.
+4. **Write `docs/preemptive-multitasking.md`** capturing:
    - New invariant: tasks may be preempted at any instruction.
    - Places that must disable IRQs locally: any read-modify-write on shared state without a lock.
    - Cheat-sheet for `spin_lock_irqsave` vs plain `spin_lock`.
    - The `SPINLOCK_SKIP_LOCKING`-plus-preemption hazard explicitly called out.
-4. **Flip default `DAIF` in task init** to `D=1, I=0, F=1` (previously `D=1, I=1, F=1`). Guard with `SECONDARY_PREEMPT` so the cooperative path can still opt out if regressions surface.
 
 **Exit criteria:**
 - Spinlock audit complete — every unwrapped `spin_lock()` converted or explicitly justified.
@@ -243,19 +324,19 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
 
 ### Phase S1 — Move `cpu_steal_deques[]` to NC memory
 
-**Goal:** make work-stealing correct on Jetson's incoherent L2 by placing the per-CPU deques in NC memory, not cacheable BSS.
+**Goal:** make work-stealing correct on both Jetson and Pi 5's incoherent L2 by placing the per-CPU deques in NC memory, not cacheable BSS.
 
 **Prerequisites:** none (can start immediately).
 
 **Steps:**
 
-1. In `scheduler_init()` (`kernel/sched/sched.c`), allocate `cpu_steal_deques` from `ncmem_alloc` when `PLATFORM_HAS_NC_MEMORY` is defined.
+1. In `scheduler_init()` (`kernel/sched/sched.c`), allocate `cpu_steal_deques` from `ncmem_alloc` when `PLATFORM_HAS_NC_MEMORY` is defined. This macro is set on both Pi 5 and Jetson — the change applies to both.
 2. `steal_deque_t` is ~280 bytes; with MAX_CPUS=8 that's ~2.2 KB plus cache-line alignment. Fits comfortably in NC memory.
 3. Keep the cacheable fallback for x86-64 and any platform without NC memory.
 4. Add a regression test that verifies the deques live at a NC address on Pi 5 / Jetson builds.
 
 **Exit criteria:**
-- `make test WORK_STEALING=ON` passes.
+- `make test WORK_STEALING=ON` passes on QEMU ARM64 (no NC), Pi 5 QEMU (has NC), and Jetson. Pi 5 hardware testing is desirable but gated on Pi 5 plan's preemption work.
 - `cpu` shell command reports deque addresses in NC region on NC platforms.
 
 **Effort:** 1 day.
@@ -312,11 +393,16 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
 
 ---
 
-### Phase S4 — Flip `CONFIG_WORK_STEALING` default
+### Phase S4 — Flip `CONFIG_WORK_STEALING` default (multi-platform decision)
 
-**Goal:** make work-stealing the default scheduling behavior if S3 justifies it.
+**Goal:** make work-stealing the default scheduling behavior if benchmark data from **at least two platforms** justifies it.
 
-**Prerequisites:** S3.
+`CONFIG_WORK_STEALING` is a shared `config.h` setting. A unilateral flip from this plan would change scheduler behavior on x86-64 and Pi 5 without their own benchmark data. The x86-64 plan's B3 should validate on x86-64 using a platform-specific CMake override (`cmake -DCONFIG_WORK_STEALING=1`), not by editing the shared header.
+
+**Prerequisites:**
+- S3 complete (Jetson Phase C data).
+- x86-64 B3 has validated work-stealing on x86-64 and has publishable data.
+- Pi 5 plan's equivalent benchmark (if any) has run, or the Pi 5 plan owners have explicitly signed off on the flip based on Jetson + x86-64 data.
 
 **Steps:**
 
@@ -327,8 +413,9 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
 **Exit criteria:**
 - Builds default to stealing on; QEMU tests pass.
 - Opt-out works and builds pass.
+- Benchmark data from ≥2 platforms documented in `docs/work-stealing-bench.md`.
 
-**Effort:** 0.5 day.
+**Effort:** 0.5 day (the flip itself); coordination time across the three plans before it fires.
 
 ---
 
@@ -363,7 +450,8 @@ Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
 
 FP32 only in G1. FP16 and INT8 deferred to G4 where they pair with quantization work — keeping the FP16 intrinsic handling (which may require `unsafe` inline asm rather than stable Rust intrinsics on A78AE) out of the critical path.
 
-**Prerequisites:** none.
+**Prerequisites:**
+- **Prereq #4 (inference dispatch skeleton) has landed** — see the Shared Infrastructure Prerequisites section at the top of this plan. G1 fills in the `matmul_f32_neon()` body; the `cfg_if!` scaffolding and scalar fallback already exist. Without the skeleton, G1 and x86-64 C1 both modify the same functions in `ops.rs` and eat a merge conflict.
 
 **Steps:**
 
@@ -446,11 +534,13 @@ FP32 only in G1. FP16 and INT8 deferred to G4 where they pair with quantization 
 
 ---
 
-### Phase G5 — Cross-platform benchmark harness
+### Phase G5 — Cross-platform benchmark harness (unified deliverable)
 
-**Goal:** the capstone deliverable — reproducible inference benchmarks across Jetson, Pi 5, x86-64, QEMU.
+**Goal:** the capstone benchmark deliverable — reproducible inference numbers across Jetson, Pi 5, x86-64, QEMU.
 
-**Prerequisites:** G1-G4.
+**This phase owns the single unified benchmark doc** `docs/cross-platform-inference-bench.md`. The x86-64 plan's C3 (benchmarks) contributes its platform's rows into this file rather than producing a separate `docs/benchmarks.md`. G5 is sequenced last in the parallel calendar (Week 9-10), so it runs after both G4 (Jetson kernels) and x86-64 C2-C3 (x86-64 kernels + bench) have data ready. Pi 5's numbers drop in from whatever state the Pi 5 plan has reached at that point.
+
+**Prerequisites:** G1-G4. Coordinate with x86-64 C3 owner — expect their SSE numbers as input.
 
 **Note on the GPU allocator on Jetson:** `bench gpu` on Jetson exercises the **stub driver** (registered via `gpu_register_driver(&gpu_stub_driver)` in `kernel/src/main.c`), not the NVIDIA probe driver. The stub allocates via PMM and performs the cache-maintenance calls, but the "GPU address" is the CPU physical address — no GPU DMA happens. Benchmark numbers from `bench gpu` therefore reflect allocator + cache-maintenance overhead, not GPU bandwidth. G5 should either (a) clearly label these as "allocator overhead" in the doc, or (b) switch `bench gpu` to use the NVIDIA unified-memory allocator once the CBB-bypass-at-EL2 path is known safe.
 
@@ -506,16 +596,16 @@ Assuming ~25 hrs/wk on the capstone from 2026-04-14 onward.
 
 | Week | Primary | Secondary (parallel) |
 |---|---|---|
-| 1 | **P1.0 fast-path** (1 hour); S1 (NC deque migration — 1 day); S2 (steal metrics — 0.5 day); G1 FP32 MatMul begins | — |
+| 1 | **Shared infrastructure PRs (half a day total):** Prereq #1 FIQ handler (Pi 5 plan), #2 rename, #3 `smp_notify_cpu`, #4 inference dispatch skeleton. Plus: **P1.0 fast-path** (1 hour); S1 (NC deque migration — 1 day); S2 (steal metrics — 0.5 day); G1 FP32 MatMul begins | — |
 | 2 | P1.1 full diagnostic (if P1.0 failed) **or** P2 CPU-0 preemption (if P1.0 worked) | G1 MatMul continues |
-| 3 | P2 CPU-0 preemption **or** P3 secondary preemption (including MPIDR + SGI fixes) | G1 MatMul wraps |
-| 4 | P3 secondary preemption continues; P4 UART lock | G2 Conv begins |
-| 5 | P5 DAIF + spinlock audit + doc | G2 Conv wraps |
+| 3 | P2 CPU-0 preemption **or** P3 secondary preemption (including MPIDR + SGI fixes — **test MPIDR consolidation on Pi 5 QEMU before merging**) | G1 MatMul wraps |
+| 4 | P3 secondary preemption continues; P4 UART lock (after Pi 5 plan's UART-ISR-path audit has landed) | G2 Conv begins |
+| 5 | P5 DAIF + spinlock audit + doc (trampoline approach, no context.daif flip) | G2 Conv wraps |
 | 6 | P6 regression sweep on Pi 5 + Jetson | G3 Softmax / LN / GELU |
 | 7 | S3 Phase C benchmarks (unblocked by P3) | G4 FP16 + INT8 quantization begins |
-| 8 | S4 flip work-stealing default (if S3 justifies) | G4 Quantization wraps |
-| 9 | GSP blocker doc polish | G5 Cross-platform benchmark begins |
-| 10 | G5 Cross-platform benchmark wraps | (buffer) |
+| 8 | S4 flip work-stealing default **iff** x86-64 B3 data also supports it (coordinate with x86-64 plan owners) | G4 Quantization wraps |
+| 9 | GSP blocker doc polish | G5 Cross-platform benchmark begins (unified doc) |
+| 10 | G5 Cross-platform benchmark wraps (incorporates x86-64 C3 data) | (buffer) |
 | 11 | G6 Thesis framing | Integration testing, demo prep |
 | 12 | Demo rehearsal, polish | — |
 
@@ -620,6 +710,20 @@ Each phase produces one or more of:
 - **G1 split FP32-only** — FP16 moved to G4 (paired with quantization). Timeline lengthened to 2-3 weeks to reflect tiling complexity and edge-case handling.
 - **G5 GPU-path clarification** — `bench gpu` on Jetson exercises the stub driver, not the NVIDIA unified-memory allocator. Doc must label paths clearly.
 
+**2026-04-13 v3** — incorporated cross-plan review findings after the Pi 5 (`docs/pi5-preemption-plan.md`) and x86-64 (`docs/x86-64-capstone-closure-plan.md`) plans merged. Coordination fixes:
+
+- **Shared Infrastructure Prerequisites section added** (between the dependency graph and Track P). Enumerates the four Week-1 PRs that eliminate guaranteed merge conflicts: FIQ handler (Pi 5 owns), `SECONDARY_PREEMPT` rename, `smp_notify_cpu()` abstraction, inference `ops.rs` dispatch skeleton.
+- **P3 step 1** — references Prereq #2 rename as a Week-1 standalone PR rather than part of P3.
+- **P3 step 2** — MPIDR consolidation touches shared code (`task.c`, `sched.c`, `exceptions.c`, `smp.c` NC trace sites) that also compiles for Pi 5; explicit instruction added to test on Pi 5 QEMU (and hardware if available) before merging.
+- **P3 step 3** — once `gic_send_sgi()` dual-cluster fix lands, upgrade the ARM64 `smp_notify_cpu` from `sev` broadcast to targeted SGI.
+- **P4** — Pi 5 plan's UART-ISR-path audit is now an explicit prerequisite; it benefits all platforms and must land before P4's NC ticket lock.
+- **P5** — dropped the "flip default DAIF" step. Adopt the Pi 5 trampoline approach (`daifclr` in `task_entry_trampoline`, keep `context.daif = 0x080`). Keeping two different DAIF-unmask mechanisms in shared `task.c` would diverge from Pi 5's invariant.
+- **S1** — explicit instruction to test the NC deque migration on Pi 5 QEMU in addition to Jetson (both define `PLATFORM_HAS_NC_MEMORY`).
+- **S4** — `CONFIG_WORK_STEALING` default flip is now a multi-platform coordination point, not a unilateral Jetson change. Requires x86-64 B3 data before firing, and x86-64 B3 itself should use a CMake override, not edit the shared header.
+- **G1** — Prereq #4 (inference dispatch skeleton) is now an explicit prerequisite; G1 fills in the aarch64 arm and x86-64 C1 fills in the x86_64 arm without conflicting.
+- **G5** — now the unified cross-platform benchmark deliverable. Merges with x86-64 plan's C3; single doc `docs/cross-platform-inference-bench.md`.
+- **Week 1 calendar** — now explicitly starts with the half-day of shared infrastructure PRs before any platform-specific work.
+
 ---
 
-*Plan compiled 2026-04-13, revised 2026-04-13 v2. To be revisited at each Gate.*
+*Plan compiled 2026-04-13, revised 2026-04-13 v2, revised 2026-04-13 v3. To be revisited at each Gate.*
