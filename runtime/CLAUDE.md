@@ -126,6 +126,126 @@ unsafe {
 }
 ```
 
+### Checked arithmetic at boundaries
+
+Input that crosses the FFI boundary (from C or from a parsed file) can be
+malicious or malformed. Use `checked_mul`, `checked_add`, `saturating_*`,
+or `usize::try_from` before any buffer-size arithmetic — **never** trust
+that multiplication stays in range.
+
+```rust
+// Good:
+let n_elem = shape.iter().try_fold(1usize, |acc, &d| {
+    acc.checked_mul(d as usize).ok_or(EngineError::ShapeOverflow)
+})?;
+let bytes = n_elem.checked_mul(size_of::<f32>()).ok_or(EngineError::ShapeOverflow)?;
+
+// Bad (can wrap silently and under-allocate):
+let n_elem: usize = shape.iter().map(|&d| d as usize).product();
+let bytes = n_elem * size_of::<f32>();
+```
+
+### C-string bounds-before-deref
+
+When converting a `*const c_char` to a slice, bound-check the index
+**before** the dereference. A pointer that is not NUL-terminated must not
+be read past `max_len`.
+
+```rust
+// Good:
+while len < MAX_NAME_LEN {
+    let c = unsafe { *p };  // SAFETY: len < MAX_NAME_LEN
+    if c == 0 { break; }
+    len += 1;
+    p = unsafe { p.add(1) };
+}
+
+// Bad (reads *p before bound check):
+while unsafe { *p } != 0 {
+    len += 1;
+    p = unsafe { p.add(1) };
+    if len >= MAX_NAME_LEN { break; }
+}
+```
+
+`msg_router::str_copy` takes an explicit `max_src_len` for the same
+reason.
+
+---
+
+## Locking
+
+### SpinGuard RAII pattern
+
+Spinlocks wrapping static mutable state (pool allocators, registries,
+the message router) use an RAII guard so early returns via `?` cannot
+leak the lock:
+
+```rust
+static LOCK: AtomicBool = AtomicBool::new(false);
+
+struct SpinGuard;
+impl SpinGuard {
+    fn new() -> Self {
+        while LOCK.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            core::hint::spin_loop();
+        }
+        SpinGuard
+    }
+}
+impl Drop for SpinGuard {
+    fn drop(&mut self) { LOCK.store(false, Ordering::Release); }
+}
+
+// Usage:
+pub fn some_op() -> Result<T, E> {
+    let _g = SpinGuard::new();
+    // SAFETY: _g held — exclusive access to the protected statics.
+    unsafe { /* ... */ }
+    // _g dropped here, lock released on every exit path
+}
+```
+
+Panics compile to `abort` (`Cargo.toml [profile.*] panic = "abort"`), so
+the RAII guard does not protect against unwinding — but `?` early
+returns and intentional control flow still benefit.
+
+Every place that touches `static mut` must take the corresponding lock.
+Mutable statics without a held lock are UB under the Rust memory model;
+the compiler warns `static_mut_refs` on any unguarded reference.
+
+### Publish/ack deadlock avoidance
+
+`msg_router::publish_internal` holds `MSG_ROUTER_LOCK` only while it
+scans the topic/wildcard arrays and gathers target mailbox pointers.
+The lock is released *before* the ack-wait loop — otherwise a subscriber
+calling `msg_router_ack()` (which also acquires the lock) would
+deadlock. Mailbox `ready`/`ack` atomics handle cross-CPU sync on the
+individual slot; the lock is only needed for array-level consistency.
+
+---
+
+## SIMD
+
+### `#[target_feature]` on unsafe NEON helpers
+
+`unsafe` functions that use NEON intrinsics are annotated with:
+
+```rust
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+unsafe fn foo_simd(ptr: *mut f32, n: usize) {
+    #[cfg(target_arch = "aarch64")]
+    { use core::arch::aarch64::*; /* ... */ }
+    #[cfg(not(target_arch = "aarch64"))]
+    { /* scalar fallback */ }
+}
+```
+
+`cfg_attr` applies `target_feature` only on aarch64, leaving the
+function callable (via the scalar branch) on x86_64 test builds. NEON
+is mandated by ARMv8-A, so the attribute mostly documents intent and
+matches the explicit `+neon` in `.cargo/config.toml`.
+
 ---
 
 ## Memory Management
@@ -194,4 +314,4 @@ make BUILD_TYPE=Release kernel  # Optimized, LTO enabled
 
 ---
 
-*Last updated: December 2025*
+*Last updated: 12 April 2026*

@@ -3,6 +3,7 @@
 //! Allocates tensor storage from a contiguous 2MB workspace block.
 //! Reset between inference calls for O(1) "free all".
 
+use super::engine::EngineError;
 use super::tensor::Tensor;
 
 /// Alignment for tensor data (16 bytes for NEON/SSE compatibility).
@@ -39,13 +40,25 @@ impl BumpAllocator {
 
     /// Allocate `size` bytes with the given alignment.
     ///
-    /// Returns null if workspace is exhausted.
+    /// Returns null if workspace is exhausted or the alignment arithmetic
+    /// would wrap `usize`. Caller must pass `align` as a non-zero power of
+    /// two.
     pub fn alloc(&mut self, size: usize, align: usize) -> *mut u8 {
-        // Align offset up
-        let aligned = (self.offset + align - 1) & !(align - 1);
-        if aligned + size > self.capacity {
+        // Align offset up with explicit overflow check — the naive
+        // `(offset + align - 1) & !(align - 1)` can wrap near `usize::MAX`
+        // and yield a bogus pointer that still passes a wrap-unaware
+        // capacity check.
+        let aligned = match self.offset.checked_add(align - 1) {
+            Some(a) => a & !(align - 1),
+            None => return core::ptr::null_mut(),
+        };
+        // `capacity - aligned` without underflow; also fails if `size`
+        // won't fit in the remainder.
+        if self.capacity.checked_sub(aligned).map_or(true, |rem| rem < size) {
             return core::ptr::null_mut();
         }
+        // SAFETY: `aligned + size <= capacity` verified above, and
+        // `base..base + capacity` is a valid kernel-owned workspace region.
         let ptr = unsafe { self.base.add(aligned) };
         self.offset = aligned + size;
         ptr
@@ -53,18 +66,24 @@ impl BumpAllocator {
 
     /// Allocate a tensor with the given shape (FP32).
     ///
-    /// Returns a Tensor descriptor pointing to the allocated workspace memory.
-    pub fn alloc_tensor(&mut self, shape: &[u32]) -> Option<Tensor> {
+    /// Returns `ShapeOverflow` if the shape dimensions multiplied beyond
+    /// `usize::MAX` (malformed model), `WorkspaceExhausted` if the bump
+    /// allocator is full.
+    pub fn alloc_tensor(&mut self, shape: &[u32]) -> Result<Tensor, EngineError> {
         let mut n_elem: usize = 1;
         for &d in shape {
-            n_elem *= d as usize;
+            n_elem = n_elem
+                .checked_mul(d as usize)
+                .ok_or(EngineError::ShapeOverflow)?;
         }
-        let size = n_elem * 4; // FP32
+        let size = n_elem
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or(EngineError::ShapeOverflow)?;
         let ptr = self.alloc(size, TENSOR_ALIGN);
         if ptr.is_null() {
-            return None;
+            return Err(EngineError::WorkspaceExhausted);
         }
-        Some(Tensor::new(ptr as *const f32, shape))
+        Ok(Tensor::new(ptr as *const f32, shape))
     }
 
     /// Reset the allocator — frees all workspace allocations in O(1).

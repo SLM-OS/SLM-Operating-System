@@ -79,16 +79,21 @@ pub extern "C" fn component_find(name: *const c_char) -> i32 {
         return -1;
     }
 
-    // Convert C string to Rust slice
+    // Convert C string to Rust slice. Bound-check len BEFORE dereferencing,
+    // so a non-NUL-terminated input can't read past MAX_NAME_LEN bytes.
     let name_str = unsafe {
         let mut len = 0;
         let mut p = name;
-        while *p != 0 {
-            len += 1;
-            p = p.add(1);
-            if len >= MAX_NAME_LEN {
+        while len < MAX_NAME_LEN {
+            // SAFETY: `len < MAX_NAME_LEN` and the caller's contract is
+            // that `name` points to at least MAX_NAME_LEN bytes or a
+            // NUL-terminated string — whichever comes first.
+            let c = *p;
+            if c == 0 {
                 break;
             }
+            len += 1;
+            p = p.add(1);
         }
         core::slice::from_raw_parts(name as *const u8, len)
     };
@@ -191,17 +196,23 @@ pub extern "C" fn component_unregister(index: u32) -> i32 {
 /// Convert a C string to a byte slice.
 ///
 /// # Safety
-/// - `s` must be a valid, null-terminated C string
-/// - The returned slice is valid only as long as `s` is valid
+/// - `s` must be a valid pointer to at least `max_len` bytes or a
+///   NUL-terminated string — whichever ends first.
+/// - The returned slice is valid only as long as `s` is valid.
 unsafe fn c_str_to_bytes(s: *const c_char, max_len: usize) -> &'static [u8] {
+    // Bound-check len BEFORE dereferencing so a missing NUL terminator
+    // cannot read past `max_len` bytes.
     let mut len = 0;
     let mut p = s;
-    while *p != 0 {
-        len += 1;
-        p = p.add(1);
-        if len >= max_len {
+    while len < max_len {
+        // SAFETY: `len < max_len` guarantees the deref is within the
+        // caller's promised range.
+        let c = *p;
+        if c == 0 {
             break;
         }
+        len += 1;
+        p = p.add(1);
     }
     core::slice::from_raw_parts(s as *const u8, len)
 }

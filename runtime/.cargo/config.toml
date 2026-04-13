@@ -11,6 +11,10 @@ linker = "aarch64-none-elf-gcc"
 rustflags = [
     "-C", "link-arg=-nostdlib",
     "-C", "link-arg=-static",
+    # NEON is baseline for aarch64 (ARMv8-A mandates it), but make it
+    # explicit so the `#[target_feature(enable = "neon")]` attributes on
+    # SIMD helpers in inference/ops.rs are consistent with build config.
+    "-C", "target-feature=+neon",
 ]
 
 [target.x86_64-unknown-none]
@@ -19,4 +23,8 @@ rustflags = [
     "-C", "link-arg=-nostdlib",
     "-C", "link-arg=-static",
     "-C", "relocation-model=static",
+    # SSE/SSE2 are baseline for x86_64, but make it explicit for
+    # consistency with aarch64. SIMD paths are aarch64-only today; this
+    # is forward-looking in case x86 gains SSE intrinsics.
+    "-C", "target-feature=+sse,+sse2",
 ]

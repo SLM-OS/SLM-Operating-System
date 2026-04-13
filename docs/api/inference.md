@@ -223,11 +223,18 @@ pub enum EngineError {
     WorkspaceExhausted,
     UnsupportedOp,
     ShapeMismatch,
+    /// Shape dimensions multiplied past usize::MAX — malformed model input.
+    ShapeOverflow,
     InvalidInput,
     WeightNotFound,
     InternalError,
 }
 ```
+
+`ShapeOverflow` is distinct from `WorkspaceExhausted`: overflow indicates
+a malformed model (dimensions that can't fit in `usize`), whereas
+`WorkspaceExhausted` means the bump allocator ran out of space for a
+shape that was arithmetically valid.
 
 ---
 
@@ -277,8 +284,8 @@ pub struct BumpAllocator {
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `new` | `fn new(base: *mut u8, capacity: usize) -> Self` | Create over a workspace block |
-| `alloc` | `fn alloc(&mut self, size: usize, align: usize) -> *mut u8` | Allocate bytes (null on exhaustion) |
-| `alloc_tensor` | `fn alloc_tensor(&mut self, shape: &[u32]) -> Option<Tensor>` | Allocate an FP32 tensor |
+| `alloc` | `fn alloc(&mut self, size: usize, align: usize) -> *mut u8` | Allocate bytes (null on exhaustion or arithmetic overflow) |
+| `alloc_tensor` | `fn alloc_tensor(&mut self, shape: &[u32]) -> Result<Tensor, EngineError>` | Allocate an FP32 tensor; `Err(ShapeOverflow)` on dim overflow, `Err(WorkspaceExhausted)` on OOM |
 | `reset` | `fn reset(&mut self)` | Free all allocations in O(1) |
 | `remaining` | `fn remaining(&self) -> usize` | Bytes remaining |
 | `used` | `fn used(&self) -> usize` | Bytes used |

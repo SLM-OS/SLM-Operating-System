@@ -126,6 +126,12 @@ pub fn quantize_fp32_to_int8(
 // =============================================================================
 
 /// Zero a buffer using SIMD where possible.
+///
+/// # Safety
+/// `ptr..ptr+n` must be writable and properly aligned for f32 SIMD stores.
+/// Caller guarantees `target_feature(neon)` on aarch64 (enabled globally by
+/// the build config; aarch64 baseline mandates NEON).
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn zero_buf(ptr: *mut f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
     {
@@ -218,8 +224,9 @@ pub fn conv2d(
         if use_im2col {
             // im2col + matmul path — lock protects static buffer from SMP races
             ops_lock();
-            static mut IM2COL_BUF: [u32; IM2COL_MAX] = [0; IM2COL_MAX];
-            let col = IM2COL_BUF.as_mut_ptr() as *mut f32;
+            static mut IM2COL_BUF: [f32; IM2COL_MAX] = [0.0; IM2COL_MAX];
+            // SAFETY: OPS_LOCK held — no concurrent access to IM2COL_BUF.
+            let col = IM2COL_BUF.as_mut_ptr();
 
             for n in 0..batch {
                 // Build im2col matrix: unroll input patches into columns
@@ -298,6 +305,10 @@ pub fn conv2d(
 }
 
 /// Add a scalar to each element of a buffer using SIMD.
+///
+/// # Safety
+/// `ptr..ptr+n` readable/writable, aligned for f32 SIMD access.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn add_scalar_simd(ptr: *mut f32, scalar: f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
     {
@@ -511,6 +522,10 @@ pub fn add(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineError> 
 }
 
 /// Element-wise add using SIMD.
+///
+/// # Safety
+/// `ap`, `bp` readable and `outp` writable for `n` f32s.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn add_elementwise_simd(ap: *const f32, bp: *const f32, outp: *mut f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
     {
@@ -661,6 +676,10 @@ unsafe fn matmul_simd(ap: *const f32, bp: *const f32, cp: *mut f32,
 
 /// C[0..n] += scalar * B[0..n] using SIMD.
 /// Core inner loop for matmul — processes 4 elements at a time.
+///
+/// # Safety
+/// `cp`, `bp` cover `n` f32s and are properly aligned for SIMD.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn simd_fma_row(cp: *mut f32, bp: *const f32, scalar: f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
     {
@@ -761,6 +780,10 @@ pub fn softmax(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
 }
 
 /// Find max value in a buffer using SIMD.
+///
+/// # Safety
+/// `ptr..ptr+n` readable and aligned for f32 SIMD loads.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn simd_max_reduce(ptr: *const f32, n: usize) -> f32 {
     #[cfg(target_arch = "aarch64")]
     {
@@ -794,6 +817,10 @@ unsafe fn simd_max_reduce(ptr: *const f32, n: usize) -> f32 {
 }
 
 /// Multiply each element by a scalar using SIMD.
+///
+/// # Safety
+/// `ptr..ptr+n` readable/writable and aligned for f32 SIMD access.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn simd_mul_scalar(ptr: *mut f32, scalar: f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
     {

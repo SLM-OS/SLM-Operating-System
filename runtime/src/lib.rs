@@ -1943,7 +1943,7 @@ pub extern "C" fn rust_inference_test() -> i32 {
         let mut buf = [0u8; 4096];
         let mut alloc = inference::BumpAllocator::new(buf.as_mut_ptr(), buf.len());
         let t = alloc.alloc_tensor(&[2, 3]);
-        let passed = t.is_some() && t.unwrap().num_elements() == 6;
+        let passed = t.as_ref().map(|x| x.num_elements() == 6).unwrap_or(false);
         print_test_result(b"workspace: tensor alloc\0", passed);
         if !passed { failures += 1; }
     }
@@ -2146,8 +2146,136 @@ pub extern "C" fn rust_inference_test() -> i32 {
         let mut buf = [0u8; 64];
         let mut alloc = inference::BumpAllocator::new(buf.as_mut_ptr(), buf.len());
         let result = alloc.alloc_tensor(&[1000]);
-        let passed = result.is_none();
-        print_test_result(b"workspace: exhaustion returns None\0", passed);
+        let passed = matches!(result, Err(inference::EngineError::WorkspaceExhausted));
+        print_test_result(b"workspace: exhaustion returns WorkspaceExhausted\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 12b: Shape-dimension multiplication overflow (RUST-C1)
+    // Two u32::MAX dims multiplied exceed usize::MAX on every target.
+    {
+        let mut buf = [0u8; 64];
+        let mut alloc = inference::BumpAllocator::new(buf.as_mut_ptr(), buf.len());
+        let result = alloc.alloc_tensor(&[u32::MAX, u32::MAX, u32::MAX]);
+        let passed = matches!(result, Err(inference::EngineError::ShapeOverflow));
+        print_test_result(b"workspace: shape overflow returns ShapeOverflow\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 12c: BumpAllocator alignment arithmetic doesn't wrap (RUST-C2)
+    // Construct a bump allocator with a tiny capacity but a near-max offset
+    // would require mocking base; instead, verify normal behavior is unchanged
+    // and that a huge size request returns null without wrapping.
+    {
+        let mut buf = [0u8; 128];
+        let mut alloc = inference::BumpAllocator::new(buf.as_mut_ptr(), buf.len());
+        // Request more than capacity — must return null, not wrap into a bogus pointer.
+        let p = alloc.alloc(usize::MAX - 16, 16);
+        let passed = p.is_null();
+        print_test_result(b"workspace: alloc size overflow returns null\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 12d: Truncated / malformed ONNX input must error, not panic (RUST-M2)
+    {
+        loader::registry::init();
+        // Tiny truncated buffer: one varint header byte promising lots of
+        // data that isn't there. Must produce a LoadError, not a panic.
+        let truncated: [u8; 4] = [0x0A, 0xFF, 0xFF, 0x7F]; // field 1, wire 2, len=varint continuation
+        let result = loader::registry::load_model(b"truncated", &truncated);
+        let passed = result.is_err();
+        print_test_result(b"loader: truncated ONNX rejected without panic\0", passed);
+        if !passed { failures += 1; }
+
+        // Empty buffer is also a valid malformed case.
+        let empty_result = loader::registry::load_model(b"empty", &[]);
+        let passed_empty = empty_result.is_err();
+        print_test_result(b"loader: empty ONNX rejected without panic\0", passed_empty);
+        if !passed_empty { failures += 1; }
+    }
+
+    // Test 12e: msg_router bounded str_copy (RUST-C3)
+    // Pass a topic name buffer that is exactly TOPIC_NAME_LEN bytes of a
+    // repeating pattern with no NUL terminator. The old str_copy would
+    // over-read past the buffer; the fix bounds reads at the explicit
+    // max_src_len. We verify the subscription was created (no crash) and
+    // that the stored name is truncated to TOPIC_NAME_LEN-1 chars + NUL.
+    {
+        msg_router::msg_router_init();
+        // 32-byte buffer with two halves of distinct non-NUL bytes so we
+        // can detect over-reads via stored topic name contents.
+        let mut src_buf = [0u8; 32];
+        for i in 0..16 { src_buf[i] = b'A'; }
+        for i in 16..32 { src_buf[i] = b'B'; }
+        let ret = msg_router::msg_router_subscribe(src_buf.as_ptr(), 7);
+        let subscribed = ret == 0;
+
+        let mut topic_names = [[0u8; 16]; 1];
+        let mut count: i32 = 0;
+        msg_router::msg_router_get_subscriptions(
+            7,
+            topic_names.as_mut_ptr(),
+            &mut count,
+            1,
+        );
+        // Stored name must be 15 'A's + NUL, proving reads stopped at
+        // max_src_len = TOPIC_NAME_LEN and did NOT leak 'B' bytes.
+        let mut expected = [b'A'; 16];
+        expected[15] = 0;
+        let passed = subscribed && count == 1 && topic_names[0] == expected;
+        print_test_result(b"msg_router: str_copy bounded (no over-read)\0", passed);
+        if !passed { failures += 1; }
+
+        // Re-init so subsequent tests start clean.
+        msg_router::msg_router_init();
+    }
+
+    // Test 12f: component_find bounded deref (RUST-C5 / RUST-H2)
+    // Pass a 32-byte name with no NUL terminator. The old code dereferenced
+    // before the len < MAX_NAME_LEN check and could read byte 32. The fix
+    // caps reads at MAX_NAME_LEN. Verify no crash and that the lookup
+    // returns -1 (no such component registered).
+    {
+        let mut name_buf = [0u8; 64];
+        for i in 0..32 { name_buf[i] = b'Z'; }
+        for i in 32..64 { name_buf[i] = b'Y'; }
+        let ret = component::component_find(name_buf.as_ptr() as *const core::ffi::c_char);
+        let passed = ret == -1;
+        print_test_result(b"component: find bounded deref (no over-read)\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 12g: protobuf packed_varint_i64 iterator correctness (RUST-C6)
+    // Encode 20 small varints (0..20) and confirm the iterator decodes
+    // exactly 20 values. The registry.rs cap logic (max 16 items written
+    // into I64_DECODE_BUF) relies on this iterator's completeness — the
+    // cap is enforced by the surrounding loop, not the iterator itself.
+    {
+        let mut buf = [0u8; 32];
+        let mut pos = 0;
+        for v in 0u8..20 {
+            buf[pos] = v;
+            pos += 1;
+        }
+        let count = loader::protobuf::packed_varint_i64(&buf[..pos])
+            .filter_map(|r| r.ok())
+            .count();
+        let passed = count == 20;
+        print_test_result(b"protobuf: packed_varint_i64 decodes all entries\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 12h: protobuf rejects length overflow (RUST-M2)
+    // A length-delimited field whose varint length exceeds the buffer
+    // must return LengthOverflow, not panic or out-of-bounds read.
+    {
+        // field 1, wire type 2 (length-delimited), length = 0xFF (255 bytes)
+        // but buffer has only 2 bytes after the length byte.
+        let buf: [u8; 4] = [0x0A, 0xFF, 0x01, 0x02];
+        let mut iter = loader::protobuf::ProtoIter::new(&buf);
+        let first = iter.next();
+        let passed = matches!(first, Some(Err(loader::protobuf::ParseError::LengthOverflow)));
+        print_test_result(b"protobuf: length overflow detected\0", passed);
         if !passed { failures += 1; }
     }
 
