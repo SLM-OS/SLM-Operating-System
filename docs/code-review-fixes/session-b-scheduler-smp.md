@@ -11,12 +11,16 @@ bring-up path, and the priority-inheritance mutex. Several issues stem from
 the Pi 5 cache coherency model (no SMPEN, per-core L2) — fixes either route
 through NC memory or insert explicit cache maintenance.
 
-## Dependency on Session A
+## Dependency on other sessions
 
-If Session A is running concurrently and decides to relocate NC memory
-structures (unlikely but possible), rebase onto A's branch before starting
-SCHED-C2. If A has already merged, pull main. Otherwise, this session is
-independent.
+This session is independent. A's `ncmem` work only fixes accounting math
+inside `ncmem_alloc`; it doesn't change NC layout. SCHED-C2 adds a new
+`ncmem_alloc` call for `current_task[]` and does not collide with A.
+
+Minor conditional overlap: if A tackles MM-C2 (runtime-flag spinlock) and
+this session tackles SCHED-M2 (ticket_lock acquire), both touch
+`kernel/include/spinlock.h`. MM-C2 is likely deferred, so this conflict
+probably won't materialize.
 
 ## Working rules
 
@@ -68,7 +72,6 @@ independent.
   specific orderings (see `kernel/CLAUDE.md` DC CIVAC rule).
 - **Verification:** Pi 5 `bench smp` dispatches correctly to all CPUs; full
   test suite; `labctl boot_test --count 10`.
-- **Cross-session check:** Coordinate with Session A if NC layout changes.
 
 #### SCHED-C3 — Task teardown race between `task_exit` and `schedule`
 - **File:** `kernel/sched/task.c:446` (`task_exit`), `kernel/sched/sched.c:1013` (picker)
@@ -170,7 +173,7 @@ independent.
 4. **SCHED-H1** (30 min) — pi_mutex IRQ masking (conservative fix)
 5. **SCHED-C3** (1 hr) — task_exit + rq_lock
 6. **SCHED-H2** (30 min) — zombie cleanup flag
-7. **SCHED-C2** (1-2 hr) — `current_task[]` NC relocation — **coordinate with Session A**
+7. **SCHED-C2** (1-2 hr) — `current_task[]` NC relocation
 8. **SCHED-M2** (15 min) — ticket_lock acquire
 9. **SCHED-M3, M4** (15 min) — docs + ISB
 10. **SCHED-L1, L2** (30 min) — diagnostic cleanup

@@ -8,8 +8,8 @@ Code session for review granularity and context freshness.
 
 | Session | Area | File | Issues | Dependency |
 |---------|------|------|--------|------------|
-| A | Memory + Boot | [session-a-memory-boot.md](session-a-memory-boot.md) | 20 | Run first — others may depend on NC memory layout |
-| B | Scheduler + SMP | [session-b-scheduler-smp.md](session-b-scheduler-smp.md) | 12 | Depends on A's NC layout |
+| A | Memory + Boot | [session-a-memory-boot.md](session-a-memory-boot.md) | 20 | Independent |
+| B | Scheduler + SMP | [session-b-scheduler-smp.md](session-b-scheduler-smp.md) | 12 | Independent |
 | C | IPC + Syscall + Components | [session-c-ipc-syscall.md](session-c-ipc-syscall.md) | 13 | Independent |
 | D | Rust Runtime | [session-d-rust-runtime.md](session-d-rust-runtime.md) | 12 | Independent (Rust-only) |
 | E | Drivers | [session-e-drivers.md](session-e-drivers.md) | 9 | Independent |
@@ -17,16 +17,20 @@ Code session for review granularity and context freshness.
 
 ## Cross-session coordination
 
-- **A → B:** SCHED-C2 (`current_task[]` in NC memory) depends on Session A
-  having a stable NC layout. If A relocates NC structures, B should rebase
-  onto A's branch before starting.
-- **C ↔ D:** Both touch message routing — C on the C side (`msg_router.c`),
-  D on the Rust side (`msg_router.rs`). Files don't overlap but keep semantics
-  consistent. Use one as a reference for the other.
-- **F ∩ C:** `kernel/src/elf.c` (CORE-C1) and `kernel/src/syscall.c` (IPC-C1)
-  are independent files; no overlap.
-- **E ∩ A:** `kernel/drivers/virtio_net.c` (DRV-H2) uses `cache.h` helpers
-  that A may tweak — follow A's pattern if both run simultaneously.
+All six sessions can run in parallel. The only file-level overlap:
+
+- **F ∩ A on `kernel/src/elf.c`:** A's BOOT-H2 touches `elf_load()` (~line 165);
+  F's CORE-C1 touches `elf_setup_argv()` (~line 411). Different functions,
+  same file. Whichever branch merges second should rebase.
+- **C ↔ D (soft):** Both touch message routing — C on the C side
+  (`msg_router.c`), D on the Rust side (`msg_router.rs`). Files don't
+  overlap, but keep publish/subscribe semantics consistent between the two.
+- **A ∩ B on `kernel/include/spinlock.h` (conditional):** Only if A tackles
+  MM-C2 (runtime-flag spinlock refactor) and B tackles SCHED-M2 (ticket_lock
+  acquire). MM-C2 is likely deferred, so this probably won't materialize.
+- **E ∩ F on `kernel/src/kprintf.c` (minor):** E's DRV-L2 touches comments at
+  lines 43-53; F's CORE-H1 touches the return clamp near line 545. Different
+  regions, trivial merge.
 
 ## Ground rules (all sessions)
 
