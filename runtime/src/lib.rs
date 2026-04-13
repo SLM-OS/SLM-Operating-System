@@ -8,6 +8,13 @@
 #![no_std]
 #![no_main]
 
+// `alloc` provides `Box`, `Vec`, `VecDeque`, `BTreeMap`, etc. We enable
+// it unconditionally; it links fine without a global allocator, and
+// `linked_list_allocator` installs one below. The eviction subsystem
+// (and future ML policies) require it; other modules can remain pure
+// `core` + static arrays as they do today.
+extern crate alloc;
+
 use core::panic::PanicInfo;
 use linked_list_allocator::LockedHeap;
 
@@ -825,6 +832,95 @@ pub extern "C" fn rust_weight_pool_stats() -> mm::PoolStats {
 #[no_mangle]
 pub extern "C" fn rust_workspace_pool_stats() -> mm::PoolStats {
     mm::workspace_pool_stats()
+}
+
+/// Bump access tracking fields for a block (eviction-policy input).
+///
+/// Returns 0 on success, -1 on any error. Safe to call even when the
+/// `ai_eviction` feature is off — the tracking fields exist unconditionally
+/// so the transition to M6 (policy consultation in alloc path) is lossless.
+#[no_mangle]
+pub extern "C" fn rust_model_touch(handle: mm::ModelHandle) -> i32 {
+    match mm::touch(handle) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Attach identity metadata (model_id / layer_idx / priority) to a block.
+///
+/// Returns 0 on success, -1 on any error. See `mm::set_metadata`.
+#[no_mangle]
+pub extern "C" fn rust_model_set_metadata(
+    handle: mm::ModelHandle,
+    model_id: u8,
+    layer_idx: i16,
+    model_priority: u8,
+) -> i32 {
+    match mm::set_metadata(handle, model_id, layer_idx, model_priority) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+// =============================================================================
+// Eviction Policy Self-Test (Phase AI-Eviction M1)
+// =============================================================================
+
+/// Whether the `ai_eviction` feature was compiled in.
+///
+/// Returns 1 if the eviction-policy subsystem is available, 0 otherwise.
+/// Kernel-side code uses this to decide whether to call eviction APIs.
+#[no_mangle]
+pub extern "C" fn rust_eviction_enabled() -> i32 {
+    if cfg!(feature = "ai_eviction") { 1 } else { 0 }
+}
+
+/// Exercise the eviction registry swap path end to end.
+///
+/// - When the feature is OFF: returns -2 (skipped).
+/// - When the feature is ON: installs the default, verifies the name,
+///   swaps to a test policy, verifies the swap, swaps back, and
+///   returns 0.
+/// - Any detected mismatch returns -1.
+///
+/// Intended to be invoked from a kernel-side test after the Rust heap
+/// is initialised.
+#[no_mangle]
+pub extern "C" fn rust_eviction_selftest() -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { -2 }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        use mm::eviction::{self, EvictionPolicy, BlockMeta};
+        use alloc::boxed::Box;
+
+        struct Tagged(&'static str);
+        impl EvictionPolicy for Tagged {
+            fn select_victim(&mut self, _: &[BlockMeta]) -> usize { 0 }
+            fn name(&self) -> &'static str { self.0 }
+        }
+
+        eviction::init();
+        if eviction::get_eviction_policy_name() != "FirstCandidate" {
+            return -1;
+        }
+        eviction::set_eviction_policy(Box::new(Tagged("SelfTestA")));
+        if eviction::get_eviction_policy_name() != "SelfTestA" {
+            return -1;
+        }
+        eviction::set_eviction_policy(Box::new(Tagged("SelfTestB")));
+        if eviction::get_eviction_policy_name() != "SelfTestB" {
+            return -1;
+        }
+        // Restore the default so real callers aren't surprised.
+        eviction::reset_to_default();
+        if eviction::get_eviction_policy_name() != "FirstCandidate" {
+            return -1;
+        }
+        0
+    }
 }
 
 // =============================================================================
