@@ -72,6 +72,15 @@ The output binary is `build/kernel/slmos.bin`, which must be copied to the Pi 5 
 make kernel PLATFORM=X86_64
 ```
 
+To produce a UEFI-bootable disk image for real hardware (flashed to test-pc via `labctl sdwire`):
+
+```bash
+make x86-disk PLATFORM=X86_64         # build/kernel/slmos-x86.img
+make x86-disk-verify PLATFORM=X86_64  # build + structural validation
+```
+
+Requires `grub-mkimage`, `mtools` (`mformat`, `mcopy`, `mmd`), and `sgdisk`. The image is built without `sudo`/`losetup` — `mtools` writes the FAT32 filesystem directly at the partition offset inside the GPT disk.
+
 ### Jetson Orin Nano
 
 ```bash

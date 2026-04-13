@@ -774,7 +774,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 90 tests across 17 categories:
+The `test_x86_boot.c` test suite contains 94 tests across 17 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -796,13 +796,23 @@ The `test_x86_boot.c` test suite contains 90 tests across 17 categories:
 | Component services | 2 | Listener starts + registers, echo start + send safe |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
 | Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
-| Scheduler integration | 5 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick |
+| Scheduler integration | 9 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick, preempt_disabled cleared in task, new task runs+yields, two tasks yield both advance (#91), new task preemptible on first timeslice (#91) |
 | setjmp/longjmp | 2 | setjmp/longjmp round-trip, longjmp(0) returns 1 |
 | Long mode | 2 | 64-bit operations, RIP-relative addressing |
 
 ### Running Tests
 
 Tests are integrated into the kernel and run during boot when compiled with the test harness. They use the Unity bare-metal test framework.
+
+### Disk-Image Verification
+
+`scripts/tests/verify-x86-disk.sh` validates the structural integrity of `build/kernel/slmos-x86.img` without booting it: disk size, GPT partition table, ESP partition type, FAT32 BPB (including the `TotSec32 > 0` check that #82 surfaced), and presence of `/EFI/BOOT/BOOTX64.EFI` and `/slmos/kernel.elf`. Wired in as:
+
+```bash
+make x86-disk-verify PLATFORM=X86_64
+```
+
+Runs the disk build then the verifier. Useful in CI and as a post-build gate before flashing to test-pc.
 
 ---
 
@@ -875,14 +885,13 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/arch/x86_64/main_x86.c` | Standalone test kernel entry (not used in integrated build) |
 | `kernel/arch/x86_64/idt.c` | IDT setup, exception handler, IRQ dispatch |
 | `kernel/arch/x86_64/acpi.c` | ACPI RSDP/MADT parsing (CPU discovery) |
 | `kernel/arch/x86_64/lapic.c` | Local APIC driver (init, EOI, IPI, timer) |
 | `kernel/arch/x86_64/ioapic.c` | I/O APIC driver (redirection table) |
 | `kernel/arch/x86_64/pic.c` | gic.h interface routing to LAPIC/IOAPIC |
 | `kernel/arch/x86_64/timer_x86.c` | LAPIC timer (timer.h interface, calibrated vs PIT) |
-| `kernel/arch/x86_64/platform_x86.c` | Boot glue, SMP boot (INIT-SIPI), VMM/DTB/Rust stubs |
+| `kernel/arch/x86_64/platform_x86.c` | `kernel_main_x86` entry, Multiboot2 info save, boot glue, SMP boot (INIT-SIPI), VMM/DTB/Rust stubs |
 | `kernel/arch/x86_64/pci.c` | PCI config access, bus enumeration, `pci` shell command |
 | `kernel/arch/x86_64/nvidia_gpu.c` | GPU probe, BAR mapping, register decode, VRAM test, `gpu` command |
 | `kernel/src/component_runtime.c` | Built-in component execution, `component run/send/builtins` |

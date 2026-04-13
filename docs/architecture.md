@@ -105,8 +105,8 @@ This hybrid approach leverages:
 | DTB Parser | `kernel/src/dtb.c` | Device Tree parsing for hardware discovery |
 | Platform Info | `kernel/include/platform.h` | Compile-time fallback values |
 | RP1 UART Driver | `kernel/drivers/uart_rp1_bitbang.c` | Pi 5 UART via RP1 southbridge |
-| x86-64 Boot | `kernel/arch/x86_64/boot.S`, `entry64.S` | Multiboot2 boot, long mode entry |
-| x86-64 Main | `kernel/arch/x86_64/main_x86.c` | x86-64 kernel entry point |
+| x86-64 Boot | `kernel/arch/x86_64/trampoline32.S`, `entry64.S` | Multiboot2 header, 32-bit trampoline to long mode |
+| x86-64 Main | `kernel/arch/x86_64/platform_x86.c` (`kernel_main_x86`) | x86-64 kernel entry point, dispatches into `kernel_main` |
 
 **Supported Platforms:**
 
