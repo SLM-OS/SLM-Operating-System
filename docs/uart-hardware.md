@@ -231,6 +231,21 @@ void ns16550_init(uintptr_t base) {
 }
 ```
 
+### Post-kexec MMIO Ordering
+
+Both the TCU-mailbox path and the direct NS16550 fallback in
+`uart_tegra.c` issue `dsb sy` before every LSR read. After kexec from
+Linux, speculative MMIO reads can return stale values — LSR_DR can
+appear clear when data is actually present, or LSR_THRE can appear set
+when the holding register is still full. The barrier forces the
+previous writes to complete and retires any speculative reads before
+the driver samples the status register.
+
+This is the same class of bug documented for TX in the root
+`CLAUDE.md` ("UART LSR Read After Kexec"); DRV-H1 extended the fix to
+the non-TCU RX fallback for consistency (see
+`kernel/drivers/uart_tegra.c` — the `#else` arm of `#ifdef TCU_RX_MBOX`).
+
 ### References
 
 - [NVIDIA Jetson Orin Nano Developer Kit](https://developer.nvidia.com/embedded/jetson-orin-nano-developer-kit)
@@ -277,6 +292,20 @@ GPIO14 (TXD) and GPIO15 (RXD) must be configured for UART function:
 FUNCSEL values:
 - 4 = UART function (TXD on GPIO14, RXD on GPIO15)
 - 5 = SYS_RIO (direct GPIO control via RIO registers)
+
+#### FUNCSEL Sequencing for RXD
+
+Programming GPIO15 directly from the reset default (FUNCSEL=31/NULL) to
+UART (FUNCSEL=4) does not reliably enable the PL011 RX input path. The
+driver first writes SYS_RIO (5), briefly delays, then writes UART (4).
+The intermediate state must be held long enough for the pinmux to latch
+before the final selection; this was characterized empirically (1000
+iterations of a volatile busy loop is the tested minimum). There is no
+RP1 documentation describing this quirk. A timer-based delay would be
+preferable, but `uart_init()` runs before `timer_init()` in the boot
+sequence (`main.c`), so a busy loop is used. See the expanded comment
+at `kernel/drivers/uart_rp1.c:FUNCSEL sequencing` for the rationale
+(DRV-L1).
 
 ### Known Limitations
 

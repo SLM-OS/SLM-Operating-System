@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "debug.h"
 
 /* Framebuffer info passed from boot code */
 static struct {
@@ -219,12 +220,27 @@ static void fb_drawchar(uint32_t px, uint32_t py, char c, uint32_t fg, uint32_t 
  */
 static void fb_scroll(void)
 {
-    /* Move all lines up by one */
-    uint8_t *fb = (uint8_t *)fb_info.addr;
-    uint32_t line_bytes = fb_info.pitch * char_height;
-    uint32_t total_bytes = fb_info.pitch * fb_info.height;
+    /*
+     * Bail out if the framebuffer is too small to scroll. char_height must
+     * fit within fb_info.height; otherwise the copy-up loop would have a
+     * negative lower bound and underflow unsigned arithmetic.
+     */
+    if (fb_info.height < char_height) {
+        return;
+    }
 
-    /* Copy lines 1..rows-1 to 0..rows-2 */
+    /*
+     * Sanity check the geometry. `rows` is derived from
+     * fb_info.height / char_height in fb_console_init and must remain
+     * consistent with fb_info.height. A mismatch would mean rows was
+     * computed from one geometry and the memory bounds from another.
+     */
+    ASSERT((uint64_t)fb_info.pitch * fb_info.height >= (uint64_t)fb_info.width * 4);
+    ASSERT(rows * char_height <= fb_info.height);
+
+    uint8_t *fb = (uint8_t *)fb_info.addr;
+
+    /* Copy lines char_height..fb_info.height-1 up by char_height rows. */
     for (uint32_t y = char_height; y < fb_info.height; y++) {
         uint8_t *src = fb + y * fb_info.pitch;
         uint8_t *dst = fb + (y - char_height) * fb_info.pitch;
@@ -233,9 +249,16 @@ static void fb_scroll(void)
         }
     }
 
-    /* Clear the last line */
+    /*
+     * Clear the last text line. Because rows = fb_info.height/char_height
+     * truncates, fb_info.height can exceed rows*char_height by up to
+     * char_height-1 pixels. Clear from (rows-1)*char_height through
+     * fb_info.height so that trailing remainder pixels are also cleared;
+     * the explicit `y < fb_info.height` bound guards against any rows
+     * miscomputation.
+     */
     uint32_t last_line_y = (rows - 1) * char_height;
-    for (uint32_t y = last_line_y; y < fb_info.height && y < last_line_y + char_height; y++) {
+    for (uint32_t y = last_line_y; y < fb_info.height; y++) {
         uint32_t *row = (uint32_t *)(fb_info.addr + y * fb_info.pitch);
         for (uint32_t x = 0; x < fb_info.width; x++) {
             row[x] = bg_color;
@@ -305,7 +328,22 @@ void fb_console_init(void *multiboot_info)
 }
 
 /*
- * Output a single character to the framebuffer console
+ * Output a single character to the framebuffer console.
+ *
+ * Concurrency invariant: this function mutates shared cursor state
+ * (cursor_x, cursor_y) and calls fb_scroll which mutates the shared
+ * framebuffer region. It is NOT internally synchronized.
+ *
+ * On x86-64 (the only platform that uses fb_console) all callers reach
+ * this function via uart_putc/uart_puts/uart_printf, which are serialized
+ * by the UART_LOCK spinlock in kprintf.c. Do not call fb_console_putc or
+ * fb_console_puts directly from a context that is not already holding
+ * UART_LOCK — concurrent calls from multiple CPUs will race on cursor
+ * state and corrupt the framebuffer.
+ *
+ * Unlocked fallbacks (uart_puts_unlocked, uart_printf_unlocked) also call
+ * this function and are reserved for panic handlers / very early boot
+ * where only one CPU is running.
  */
 void fb_console_putc(char c)
 {

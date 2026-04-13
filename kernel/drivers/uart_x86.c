@@ -43,12 +43,27 @@ void uart_init(void)
 {
     uint16_t base = (uint16_t)UART_BASE;
 
+    /*
+     * x86 `outb` to legacy I/O ports is hardware-serialized — each outb
+     * retires before the next is issued. The explicit compiler barriers
+     * below (`memory` clobber on an empty asm) exist only to forbid the
+     * compiler from reordering these writes relative to each other or
+     * to surrounding code. This matters because the sequence is
+     * order-dependent: DLAB must be set before writing DLL/DLH, then
+     * cleared before writing FCR/MCR.
+     */
     outb(base + UART_IER, 0x00);   /* Disable interrupts */
+    __asm__ volatile("" ::: "memory");
     outb(base + UART_LCR, 0x80);   /* Enable DLAB */
+    __asm__ volatile("" ::: "memory");
     outb(base + UART_DLL, 0x01);   /* Divisor low: 115200 baud */
+    __asm__ volatile("" ::: "memory");
     outb(base + UART_DLH, 0x00);   /* Divisor high */
+    __asm__ volatile("" ::: "memory");
     outb(base + UART_LCR, 0x03);   /* 8N1, DLAB off */
+    __asm__ volatile("" ::: "memory");
     outb(base + UART_FCR, 0xC7);   /* Enable FIFO, clear, 14-byte threshold */
+    __asm__ volatile("" ::: "memory");
     outb(base + UART_MCR, 0x0B);   /* DTR + RTS + OUT2 */
 }
 

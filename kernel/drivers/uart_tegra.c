@@ -282,11 +282,22 @@ char uart_getc(void)
 
     return tcu_rx_buf[0];
 #else
-    /* Non-TCU path: read directly from UART RBR */
-    while ((UART_REG(NS16550_LSR) & LSR_DR) == 0) {
-        /* spin */
+    /*
+     * Non-TCU path: read directly from UART RBR.
+     *
+     * Issue `dsb sy` before each LSR read. After kexec from Linux,
+     * speculative MMIO reads return stale data — the same failure mode
+     * documented for uart_putc (see the "UART LSR Read After Kexec" note
+     * in the root CLAUDE.md). Without the barrier, LSR_DR may appear
+     * clear when data is actually present (or vice versa), causing this
+     * loop to hang or pull garbage from RBR.
+     */
+    for (;;) {
+        __asm__ volatile("dsb sy" ::: "memory");
+        if ((UART_REG(NS16550_LSR) & LSR_DR) != 0) break;
     }
 
+    __asm__ volatile("dsb sy" ::: "memory");
     return (char)(UART_REG(NS16550_RBR) & 0xFF);
 #endif
 }

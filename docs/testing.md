@@ -27,10 +27,13 @@ kernel/tests/
 ├── test_vfs.c         # Virtual filesystem tests
 ├── test_shell.c       # Shell command and path resolution tests (106 tests)
 ├── test_littlefs.c    # LittleFS and block device tests (26 tests)
-├── test_net.c         # Networking tests (QEMU only)
+├── test_net.c         # Networking tests — IP utils + virtqueue ring
+│                      #   bookkeeping under cache maintenance (QEMU only)
 ├── test_lua.c         # Lua scripting tests
 ├── test_integration.c # Multi-core integration tests (5 tests)
-└── test_x86_boot.c    # x86-64 boot and platform tests (20 tests, x86 only)
+└── test_x86_boot.c    # x86-64 boot and platform tests (x86 only) —
+                       # includes LAPIC EOI fence stress + framebuffer
+                       # scroll regression coverage
 ```
 
 ### Available Assertions

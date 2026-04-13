@@ -917,6 +917,30 @@ static void test_lapic_eoi_safe(void)
 }
 
 /*
+ * Test: LAPIC EOI serialization fence (DRV-C2).
+ *
+ * lapic_eoi() ends with `lock; addl $0, (%rsp)` to fence the EOI store
+ * before the handler epilogue returns. This test exercises the fence
+ * many times and verifies that it does not corrupt the stack, registers,
+ * or flags. A regression here (e.g. removing the "cc" clobber, dropping
+ * the memory clobber, or using an invalid addressing mode) would crash
+ * or miscompile nearby code.
+ */
+static void test_lapic_eoi_fence_many(void)
+{
+    volatile uint64_t canary_a = 0xCAFEBABEDEADBEEFULL;
+    volatile uint64_t canary_b = 0x123456789ABCDEF0ULL;
+
+    for (int i = 0; i < 4096; i++) {
+        lapic_eoi();
+    }
+
+    /* Stack canaries untouched — fence did not clobber caller's frame. */
+    TEST_ASSERT_EQUAL_UINT64(0xCAFEBABEDEADBEEFULL, canary_a);
+    TEST_ASSERT_EQUAL_UINT64(0x123456789ABCDEF0ULL, canary_b);
+}
+
+/*
  * Test: LAPIC timer is delivering ticks (pit_ticks advances).
  */
 static void test_lapic_timer_running(void)
@@ -927,6 +951,20 @@ static void test_lapic_timer_running(void)
         __asm__ volatile("hlt");
     TEST_ASSERT_TRUE(pit_ticks > start);
 }
+
+/*
+ * Note on DRV-C1 (fb_console) tests:
+ *
+ * `kernel/drivers/fb_console.c` is not currently linked into any build —
+ * it is not listed in `CMakeLists.txt` and no production code calls
+ * `fb_console_putc` / `fb_console_puts`. The actual x86-64 UART path
+ * routes through `kernel/drivers/uart_x86.c` (serial via outb). The
+ * DRV-C1 (scroll bounds) and DRV-M1 (concurrency invariant) fixes
+ * still apply to the fb_console source if it is ever re-wired, but
+ * functional tests cannot be added without undefined references. Runtime
+ * ASSERTs inside fb_scroll provide in-line checks if/when the code
+ * becomes active.
+ */
 
 /* ============================================================================
  * SMP Tests
@@ -1950,6 +1988,7 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_acpi_ioapic_address);
     RUN_TEST(test_lapic_initialized);
     RUN_TEST(test_lapic_eoi_safe);
+    RUN_TEST(test_lapic_eoi_fence_many);
     RUN_TEST(test_lapic_timer_running);
 
     /* SMP tests */

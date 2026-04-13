@@ -174,6 +174,15 @@ void uart_init(void)
     __asm__ volatile("dsb sy" ::: "memory");
     *gpio15_ctrl = (4 << 5) | FUNCSEL_SYS_RIO;  /* F_M=4, FUNCSEL=5 first */
     __asm__ volatile("dsb sy" ::: "memory");
+    /*
+     * Empirical delay: a direct back-to-back write of FUNCSEL_SYS_RIO -> FUNCSEL_UART
+     * does not reliably enable the PL011 RX input path. The RP1 pinmux appears to
+     * require the intermediate SYS_RIO state to be held briefly before the final
+     * UART selection latches. The iteration count was determined experimentally;
+     * at 1000 iterations RX is reliable. No RP1 documentation describes this; a
+     * timer-based delay would be preferable but timer_init() runs after uart_init()
+     * in the boot sequence (see main.c:183,274), so a busy loop is used here.
+     */
     for (volatile int d = 0; d < 1000; d++);
     *gpio15_ctrl = (4 << 5) | FUNCSEL_UART;      /* F_M=4, FUNCSEL=4 */
     __asm__ volatile("dsb sy" ::: "memory");

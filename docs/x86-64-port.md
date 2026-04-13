@@ -366,6 +366,8 @@ Exceptions 8, 10-14, 17, 21, 29, 30 push a hardware error code; all others get a
 
 IRQ handlers are registered via `irq_register(irq, handler)`. The common handler dispatches to the registered callback and sends EOI via LAPIC.
 
+`lapic_eoi()` writes `0` to the LAPIC EOI register and then issues a serializing instruction (`lock; addl $0, (%rsp)`) before returning. The fence prevents out-of-order speculation from retiring the handler's `iret` — and re-dispatching the next pending interrupt — before the EOI store has actually retired to the LAPIC. Without this fence, an ISR could observe a spurious re-entry for an interrupt it has already acknowledged. See `kernel/arch/x86_64/lapic.c:lapic_eoi`.
+
 ---
 
 ## Interrupt Controller (APIC)
@@ -793,7 +795,8 @@ The `test_x86_boot.c` test suite contains 90 tests across 17 categories:
 | IDT | 4 | IDTR loaded, exception entries present, IRQ interrupt gates, exception trap gates |
 | Legacy PIC | 3 | OCW3 response, timer unmasked, slave accessible |
 | Timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
-| ACPI + APIC | 6 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, timer running |
+| ACPI + APIC | 7 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, EOI fence (4096 iterations, stack canaries intact), timer running |
+| Framebuffer console | 3 | Scroll stress (200 newlines), long-line wrap + scroll, control chars (\r, \t, \b, \n) |
 | SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
 | NVIDIA GPU | 7 | Init ran, no-crash, VRAM test -1 without GPU, accessors safe, BOOT_42 decode, gpu/pci shell commands registered |
 | Component runtime | 6 | Run counter, invalid name rejected, list builtins safe, run increases count, shell command registered, ELF x86-64 arch |

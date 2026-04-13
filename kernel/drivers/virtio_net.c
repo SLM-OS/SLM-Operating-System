@@ -11,6 +11,7 @@
 #include "debug.h"
 #include "gic.h"
 #include "spinlock.h"
+#include "cache.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -190,10 +191,32 @@ int virtqueue_add_buf(struct virtqueue *vq, void *addr, uint32_t len, bool write
     vq->avail->idx++;
     virtio_mb();
 
+    /*
+     * Cache maintenance for platforms without device coherency.
+     *
+     * virtio_mb() (dsb sy) orders stores between CPUs but does not push
+     * dirty cachelines out to PoC on platforms where SMPEN is disabled
+     * (Pi 5, Jetson). VirtIO devices do DMA reads through PoC, so they
+     * see stale data if the descriptor / avail ring updates are still
+     * sitting in a dirty L1/L2 cacheline. Clean the three ranges we
+     * just wrote: the descriptor entry, the avail ring slot, and the
+     * avail index. On coherent platforms (QEMU, x86-64) these resolve
+     * to no-ops or plain barriers.
+     */
+    cache_clean_range(&vq->desc[desc_idx], sizeof(vq->desc[desc_idx]));
+    cache_clean_range(&vq->avail->ring[avail_idx], sizeof(vq->avail->ring[avail_idx]));
+    cache_clean_range(&vq->avail->idx, sizeof(vq->avail->idx));
+
     return desc_idx;
 }
 
 int virtqueue_get_buf(struct virtqueue *vq, uint32_t *len) {
+    /*
+     * Invalidate the used ring header so we re-read from PoC instead of
+     * a possibly-stale cacheline left by a prior poll. On coherent
+     * platforms this is a no-op / barrier.
+     */
+    cache_invalidate_range(&vq->used->idx, sizeof(vq->used->idx));
     virtio_mb();
 
     if (vq->last_used_idx == vq->used->idx) {
@@ -201,6 +224,10 @@ int virtqueue_get_buf(struct virtqueue *vq, uint32_t *len) {
     }
 
     uint16_t used_idx = vq->last_used_idx % vq->size;
+
+    /* Invalidate the specific used ring entry we're about to read. */
+    cache_invalidate_range(&vq->used->ring[used_idx], sizeof(vq->used->ring[used_idx]));
+
     uint32_t desc_idx = vq->used->ring[used_idx].id;
 
     if (len) {

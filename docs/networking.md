@@ -180,6 +180,28 @@ The driver uses VirtIO MMIO transport at address 0x0A000000:
 3. **Queue Setup**: Initialize TX and RX virtqueues
 4. **Packet I/O**: DMA-based packet transmission and reception
 
+### Descriptor Ring Cache Maintenance
+
+VirtIO devices DMA through the point of coherency (PoC). On platforms
+where secondary-CPU L1/L2 caches do not participate in coherency
+(`PLATFORM_HAS_NC_MEMORY` — Pi 5, Jetson — SMPEN not set), a plain
+`dsb sy` is not enough: dirty cachelines for the descriptor table, the
+`avail` ring slot, and `avail->idx` stay in L1/L2 and the device reads
+stale data from DRAM.
+
+`virtqueue_add_buf()` in `kernel/drivers/virtio_net.c` pairs each
+`virtio_mb()` with `cache_clean_range()` on the three regions it wrote.
+`virtqueue_get_buf()` uses `cache_invalidate_range()` on `used->idx`
+and the used-ring slot so the CPU re-reads PoC values written by the
+device. On coherent platforms the cache helpers resolve to a `dmb ish`
+(QEMU ARM64) or a compiler barrier (x86-64) — there is no per-platform
+`#ifdef` in the driver.
+
+A set of synthetic-virtqueue unit tests in `kernel/tests/test_net.c`
+exercises `virtqueue_add_buf` / `virtqueue_get_buf` bookkeeping (free
+list, avail-idx wrap, descriptor reuse) independent of any device, so
+regressions in the cache-maintenance calls surface in `make test`.
+
 ### lwIP Integration
 
 The integration runs in `NO_SYS` mode (single-threaded):
