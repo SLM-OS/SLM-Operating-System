@@ -362,6 +362,25 @@ Continue using spinlocks for:
 - Interrupt handlers (IRQ context)
 - Single-CPU scenarios
 
+### Wait-Loop Implementation (SCHED-H1, April 2026)
+
+`pi_mutex_lock`'s inner spin loop now guards each probe of `mutex->locked` with a local `irq_save` / `irq_restore` pair and calls `yield()` between probes. This closes a narrow window where a timer ISR could re-enter `pi_mutex` paths with interrupts already enabled and deadlock against another waiter's `guard` acquire. The pseudocode:
+
+```c
+while (mutex->locked) {
+    irq_flags_t f = irq_save();
+    if (!mutex->locked) { irq_restore(f); break; }
+    irq_restore(f);
+    yield();
+}
+```
+
+### Known Limitation — Single-CPU Contended Priority Inheritance
+
+The boost path in `try_boost_owner` updates `effective_priority` but does not re-sort the run queue. A holder that was enqueued at `LOW` remains in its `LOW` slot in the per-CPU queue even after being boosted to `HIGH`. In a single-CPU scenario with one holder and one HIGH-priority waiter, the scheduler picks the waiter (rq head), which spins/yields and is itself re-queued at HIGH — starving the boosted holder. On real Pi 5 hardware this is exacerbated because `DAIF.I=1` blocks timer preemption inside tasks.
+
+The capstone-ready conservative fix (SCHED-H1) handles the IRQ-safety issue but does not resolve the single-CPU livelock. The proper fix is a sleep-queue model — the waiter blocks on a wait condition and is woken by `pi_mutex_unlock` — and is tracked as a post-capstone enhancement.
+
 ## FFI Task API
 
 The Rust runtime interacts with the C scheduler through FFI functions:

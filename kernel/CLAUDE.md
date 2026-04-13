@@ -146,14 +146,19 @@ On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite
 
 **Task table:** `task_table` is allocated from NC memory at boot via `task_table_init()` in `task.c`. All task struct fields are NC-visible. The `task_table_fallback[MAX_TASKS]` BSS array is used on platforms without NC memory. Task STACKS remain in cacheable PMM (only accessed by owning CPU).
 
+**Current-task pointers:** `current_task[MAX_CPUS]` is also allocated from NC memory in `task_table_init()` (SCHED-C2 fix, April 2026). Previously this lived in BSS and relied on DC CIVAC for cross-CPU visibility, which has a known failure mode on Pi 5 (writer's stale cacheline can be written back during an invalidate, clobbering a newer cross-CPU write). NC relocation makes writes from one CPU's `task_set_current` instantly visible to other CPUs' `task_current` without cache maintenance. `current_task_fallback[MAX_CPUS]` is the BSS fallback if NC allocation fails.
+
 **When to use NC memory:** Only for data that MUST be visible across CPUs without cache maintenance. NC memory is slower than cached memory (every access goes to DRAM). Do not use for hot-path per-CPU data.
 
-**NC memory layout:**
-| Offset from NC_MEM_BASE | Size | Contents |
+**NC memory layout** (allocator is a bump allocator — offsets shown are approximate, based on allocation order in `scheduler_init` then `task_table_init`):
+| Contents | Size | Notes |
 |---|---|---|
-| 0x000 | 256B | `cpu_runqueue[MAX_CPUS]` (run queue metadata) |
-| 0x100 | 24KB | `task_table[MAX_TASKS]` (all task structs) |
-| ~0x6100 | ... | Available for future NC allocations |
+| `cpu_runqueue[MAX_CPUS]` | ~256B | First alloc; address pinned via `cpu_rq()` computing from `NC_MEM_BASE` |
+| `nc_cpu_logical_map[MAX_CPUS]` | ~32B | MPIDR→logical CPU map |
+| `sched_diag_*[MAX_CPUS]` | ~1KB | Diagnostic counters (tick, schedule, picked, idle_loops) |
+| `task_table[MAX_TASKS]` | ~24KB | All task structs |
+| `current_task[MAX_CPUS]` | ~32B | Per-CPU current running task pointer |
+| (Trace slots at `NC_MEM_SIZE - 256`) | 256B | Reserved for `nc_trace.h` diagnostics (not allocated) |
 
 **Cross-CPU dispatch status (April 10, 2026):** Working via cooperative scheduling (WFE/SEV). NC run queues and task table in use. CPU 0 pinning removed, round-robin load balancing enabled across all 4 CPUs. Tasks dispatched to secondary CPUs complete successfully (`bench smp` validates). Timer-based preemption on secondary CPUs still under investigation (IRQ handler hang). CPU 0 timer preemption works via idle task `daifclr` + `wfi`. All tasks run with `DAIF.I=1` (no in-task timer preemption). Full test suite completes on Pi 5 (~14s, 5 multi-core integration test failures expected). See `docs/pi5-cross-cpu-dispatch-investigation.md` for full history.
 

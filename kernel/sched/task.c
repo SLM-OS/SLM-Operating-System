@@ -34,6 +34,7 @@ static spinlock_t task_lock __attribute__((aligned(64))) = SPINLOCK_INIT;
         spin_unlock_irqrestore(&task_lock, _task_flags); \
         __asm__ volatile("dc civac, %0" :: "r"(&task_lock) : "memory"); \
         __asm__ volatile("dsb sy" ::: "memory"); \
+        __asm__ volatile("isb" ::: "memory"); \
     } while(0)
 #else
 static spinlock_t task_lock = SPINLOCK_INIT;
@@ -43,8 +44,22 @@ static spinlock_t task_lock = SPINLOCK_INIT;
     spin_unlock_irqrestore(&task_lock, _task_flags)
 #endif
 
-/* Per-CPU current running task (set by scheduler) */
+/* Per-CPU current running task (set by scheduler).
+ *
+ * On Pi 5 / Jetson (PLATFORM_HAS_NC_MEMORY), this lives in non-cacheable
+ * memory so cross-CPU readers see writes immediately without cache
+ * maintenance. DC CIVAC has a known failure mode on this topology
+ * (writer's stale cacheline can be written back, clobbering a newer
+ * cross-CPU write), so NC relocation is preferred over cache maintenance.
+ *
+ * On other platforms, we keep the BSS array and the existing
+ * cache_clean/cache_invalidate pattern in task_current/task_set_current. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+static struct task **current_task;
+static struct task *current_task_fallback[MAX_CPUS];
+#else
 static struct task *current_task[MAX_CPUS];
+#endif
 
 void task_table_init(void)
 {
@@ -52,11 +67,23 @@ void task_table_init(void)
     task_table = ncmem_alloc(MAX_TASKS * sizeof(struct task), CACHE_LINE_SIZE);
     if (!task_table) {
         task_table = task_table_fallback;
-        return;
+    } else {
+        volatile uint8_t *p = (volatile uint8_t *)task_table;
+        for (size_t i = 0; i < MAX_TASKS * sizeof(struct task); i++)
+            p[i] = 0;
     }
-    volatile uint8_t *p = (volatile uint8_t *)task_table;
-    for (size_t i = 0; i < MAX_TASKS * sizeof(struct task); i++)
-        p[i] = 0;
+
+    current_task = ncmem_alloc(MAX_CPUS * sizeof(struct task *),
+                               CACHE_LINE_SIZE);
+    if (!current_task) {
+        /* NC exhausted — fall back to BSS. task_current/task_set_current
+         * will not have cache maintenance here (NC build path elides it),
+         * so this fallback loses cross-CPU coherency. Flag loudly. */
+        WARN("current_task: NC alloc failed, falling back to BSS (cross-CPU coherency degraded)");
+        current_task = current_task_fallback;
+    }
+    for (uint32_t i = 0; i < MAX_CPUS; i++)
+        current_task[i] = NULL;
 #else
     task_table = task_table_fallback;
 #endif
@@ -431,7 +458,7 @@ void task_exit(void)
 
     /* Mask IRQs to prevent a timer-driven schedule() from racing with
      * the state change below. Without this, the timer can fire between
-     * setting TASK_TERMINATED and scheduler_remove_task(), causing
+     * setting TASK_TERMINATED and scheduler_terminate_task(), causing
      * schedule() to find a terminated task still in the run queue
      * (pick_next_task returns it, next == current → panic). */
     arch_irq_disable();
@@ -443,16 +470,15 @@ void task_exit(void)
     }
 #endif
 
-    task->state = TASK_TERMINATED;
-#if !defined(PLATFORM_HAS_NC_MEMORY) && !defined(PLATFORM_X86_64)
-    cache_clean(&task->state);
-#endif
+    /* Atomically set TASK_TERMINATED and dequeue under rq_lock.
+     * Without this, a cross-CPU scheduler on Pi 5 (no SMPEN, per-core L2)
+     * could observe the task still in the queue after the state flip but
+     * before dequeue runs, picking a terminated task and panicking. */
+    scheduler_terminate_task(task);
 
-    /* Remove from run queue and schedule next task.
-     * schedule() -> spin_lock_irqsave saves our masked DAIF state.
-     * The context switch to the next task restores that task's DAIF,
-     * which will have IRQs unmasked. */
-    scheduler_remove_task(task);
+    /* Context-switch away. schedule() -> spin_lock_irqsave saves our
+     * masked DAIF state. The context switch to the next task restores
+     * that task's DAIF. */
     schedule();
 
     /* Should never reach here */
@@ -461,11 +487,17 @@ void task_exit(void)
 
 /*
  * Get current running task (for this CPU).
+ *
+ * On PLATFORM_HAS_NC_MEMORY, current_task is in non-cacheable memory —
+ * every read bypasses L1/L2 and hits DRAM directly, so writes from other
+ * CPUs are instantly visible without cache maintenance.
  */
 struct task *task_current(void)
 {
     uint32_t cpu = cpu_id();
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&current_task[cpu]);
+#endif
     return current_task[cpu];
 }
 
@@ -476,7 +508,9 @@ void task_set_current(struct task *task)
 {
     uint32_t cpu = cpu_id();
     current_task[cpu] = task;
+#if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_clean(&current_task[cpu]);
+#endif
 }
 
 /*

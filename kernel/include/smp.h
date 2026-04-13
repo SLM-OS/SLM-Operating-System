@@ -35,6 +35,12 @@
 #define PSCI_DISABLED           (-8)
 #define PSCI_INVALID_ADDRESS    (-9)
 
+/* Secondary-CPU wait bound for scheduler_init_primary() to complete.
+ * Inner delay is ~100k iterations of a volatile loop. On Pi 5 (~2.4 GHz)
+ * that's ~40 us per retry, so 125k retries ≈ 5 s. Matched to allow for
+ * the slowest path through scheduler_init. */
+#define SCHED_INIT_MAX_RETRIES  125000
+
 /* MPIDR masks */
 #define MPIDR_AFF0_MASK         0x000000FFUL
 #define MPIDR_AFF1_MASK         0x0000FF00UL
