@@ -253,7 +253,7 @@ Run component system tests. Returns the number of failures.
 
 ## Message Router (`msg_router.rs`)
 
-Topic-based publish/subscribe message router. Components subscribe to named topics and exchange 64-byte messages. Supports wildcard subscriptions (patterns ending in `*`) and prioritized message delivery. All functions use `extern "C"` linkage and replace the C `msg_router.c` implementation.
+Topic-based publish/subscribe message router. Components subscribe to named topics and exchange 64-byte messages. Supports wildcard subscriptions (patterns ending in `*`) and prioritized message delivery. All functions use `extern "C"` linkage and are the sole implementation — the former C file `kernel/src/msg_router.c` was removed in commit `8c53ada`.
 
 ```rust
 pub extern "C" fn msg_router_init()

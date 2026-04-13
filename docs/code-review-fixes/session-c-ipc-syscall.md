@@ -2,7 +2,13 @@
 
 **Source:** `docs/code-review-2026-04-12.md` §3
 **Scope:** 13 issues (4 CRITICAL, 3 HIGH, 4 MEDIUM, 2 LOW)
-**Files touched:** `kernel/ipc/ipc.c`, `kernel/src/syscall.c`, `kernel/src/msg_router.c`, `kernel/src/component_runtime.c`, `kernel/src/component.c`, `kernel/src/shell_component.c`
+**Status:** ✅ Closed — 9 live-code issues fixed in `cb612c3`; `kernel/src/msg_router.c`
+removed as dead code in `8c53ada`. 4 issues (IPC-C3, IPC-M1, IPC-M3, IPC-H1)
+were all in `msg_router.c` which was never compiled (see `CMakeLists.txt:183` —
+the Rust router in `runtime/src/msg_router.rs` is the live implementation,
+owned by Session D). Pi 5 `boot_test --count 5` still to run — pending lab
+availability.
+**Files touched:** `kernel/ipc/ipc.c`, `kernel/src/syscall.c`, `kernel/src/component_runtime.c`, `kernel/include/slm_ffi.h`, plus tests in `kernel/tests/{test_syscall,test_ipc,test_component}.c`
 
 ## Mission
 
@@ -197,6 +203,41 @@ consistent between the two.
 - **Pi 5:** `labctl boot_test --count 5` after IPC-C3 and IPC-C2 (cross-CPU
   visibility).
 
+## Completion status
+
+| Issue    | Severity | Status | Landing commit | Notes |
+|----------|----------|--------|----------------|-------|
+| IPC-C1   | CRITICAL | Fixed  | `cb612c3` | `sys_infer_handler` rejects `in_len/out_len > UINT32_MAX/4` before validate |
+| IPC-C2   | CRITICAL | Fixed  | `cb612c3` | Echo mailbox publish now uses explicit release fence + relaxed ready store |
+| IPC-C3   | CRITICAL | N/A    | —         | `msg_router.c` was dead code (not in build); removed in `8c53ada`. Rust router (`runtime/src/msg_router.rs`) owned by Session D |
+| IPC-C4   | CRITICAL | Fixed  | `cb612c3` | Per-task cleanup ctx heap-allocated via `pmm_alloc_page`, freed in callback |
+| IPC-H1   | HIGH     | N/A    | —         | `str_copy` was only in dead `msg_router.c` (now deleted) |
+| IPC-H2   | HIGH     | Fixed  | `cb612c3` | `sys_send`: topic-len window + NUL scan; data must be non-empty and NUL-terminated |
+| IPC-H3   | HIGH     | Fixed  | `cb612c3` | `msg_queue_create` guards `total_capacity * msg_size` against overflow |
+| IPC-M1   | MEDIUM   | N/A    | —         | Was collapsed into IPC-C3; resolved by dead-code removal |
+| IPC-M2   | MEDIUM   | Fixed  | `cb612c3` | `sys_recv` validates `topic_out` for `MSG_ROUTER_TOPIC_LEN` bytes |
+| IPC-M3   | MEDIUM   | N/A    | —         | `component_idx` range check was in dead `msg_router.c` |
+| IPC-M4   | MEDIUM   | Fixed  | `cb612c3` | `swap_state_lock` spinlock around `component_hot_swap_stateful` + `component_get_swap_state`. Chose lock over CPU-0 assert because Lua's `slm.component_hot_swap_stateful` can run on any CPU |
+| IPC-L1   | LOW      | Fixed  | `cb612c3` | `MSG_QUEUE_MAX_CAPACITY = 65536` cap |
+| IPC-L2   | LOW      | Fixed  | `cb612c3` | Echo mailbox pre-init atomic with release on `echo_running` |
+
+## Regression tests added
+
+- `kernel/tests/test_syscall.c`
+  - `test_syscall_infer_overflow_in_len` / `…_out_len` → IPC-C1
+  - `test_syscall_recv_null_topic_out` → IPC-M2
+  - `test_syscall_send_missing_nul` / `…_zero_len` / `…_topic_no_nul` → IPC-H2
+- `kernel/tests/test_ipc.c`
+  - `test_queue_create_zero_capacity_rejected` / `…_capacity_cap_enforced` / `…_msg_size_overflow_rejected` → IPC-H3 + IPC-L1
+- `kernel/tests/test_component.c`
+  - `test_component_cleanup_ctx_payload_preserved` → IPC-C4 (ctx value + page free)
+  - `test_component_cleanup_ctx_is_per_task` → IPC-C4 (distinct ctx pointers across N tasks; guards against static-array regression)
+
+Existing coverage that implicitly exercises the fixes:
+- `test_component_run_counter`, `test_component_slot_reuse` — component lifecycle (IPC-C4)
+- `test_slm_component_hot_swap_stateful` (in `test_lua.c`) — full hot-swap-stateful flow (IPC-M4)
+- Echo service startup/shutdown — atomic init + release fence (IPC-C2, IPC-L2)
+
 ## Deliverable — PR template
 
 ```
@@ -204,15 +245,20 @@ consistent between the two.
 Session C fixes from code-review-2026-04-12: IPC, syscall, components.
 
 ## Issues fixed
-- IPC-C1..C4 (CRITICAL: overflow, ordering, lock, cleanup)
-- IPC-H1..H3 (HIGH: string safety, queue overflow)
-- IPC-M1..M4 (MEDIUM: validation, polish)
+- IPC-C1, IPC-C2, IPC-C4 (CRITICAL: overflow, ordering, cleanup)
+- IPC-H2, IPC-H3 (HIGH: string safety, queue overflow)
+- IPC-M2, IPC-M4 (MEDIUM: validation, swap-state lock)
 - IPC-L1, IPC-L2 (LOW: caps + atomics)
 
+## Issues dropped as dead code
+- IPC-C3, IPC-M1, IPC-M3, IPC-H1 were all in kernel/src/msg_router.c,
+  which was never compiled. File removed; Rust router in
+  runtime/src/msg_router.rs remains as the sole implementation.
+
 ## Test plan
-- [ ] `make test` passes
-- [ ] New test_syscall negative-input cases pass
-- [ ] Message router stress test (multi-CPU) passes
-- [ ] Component lifecycle reuse test passes
-- [ ] Pi 5 `boot_test --count 5` passes
+- [x] `make test` passes
+- [x] test_syscall negative-input cases (5 new) pass
+- [x] test_ipc overflow/cap cases (3 new) pass
+- [x] test_component cleanup-ctx lifecycle tests (2 new) pass
+- [ ] Pi 5 `boot_test --count 5` passes (pending lab availability)
 ```

@@ -16,6 +16,20 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/*
+ * Scan a validated user buffer for a NUL byte within [0, max_len).
+ * The caller must have already validated the pointer is readable for
+ * max_len bytes via validate_user_ptr(). Returns 1 if a NUL was found,
+ * 0 otherwise.
+ */
+static int user_str_has_nul(const char *p, size_t max_len)
+{
+    for (size_t i = 0; i < max_len; i++) {
+        if (p[i] == '\0') return 1;
+    }
+    return 0;
+}
+
 /* ============================================================================
  * Pointer Validation
  * ============================================================================ */
@@ -83,7 +97,19 @@ static int64_t sys_send_handler(struct trap_frame *frame)
     const char *data = (const char *)frame->x1;
     uint32_t len = (uint32_t)frame->x2;
 
-    if (!validate_user_ptr(topic, 1) || !validate_user_ptr(data, len)) {
+    /* Topic: must be a NUL-terminated C string within the router's
+     * topic-name window. Validate the whole window is readable before
+     * scanning, then require a terminator within it. */
+    if (!validate_user_ptr(topic, MSG_ROUTER_TOPIC_LEN)) {
+        return -1;
+    }
+    if (!user_str_has_nul(topic, MSG_ROUTER_TOPIC_LEN)) {
+        return -1;
+    }
+
+    /* Data: caller-sized, but the Rust router treats it as a C string.
+     * Require non-empty and explicit NUL in the final byte. */
+    if (len == 0 || !validate_user_ptr(data, len) || data[len - 1] != '\0') {
         return -1;
     }
 
@@ -100,6 +126,9 @@ static int64_t sys_recv_handler(struct trap_frame *frame)
     uint32_t timeout_ms = (uint32_t)frame->x3;
 
     if (!validate_user_ptr(buf, len)) {
+        return -1;
+    }
+    if (!validate_user_ptr(topic_out, MSG_ROUTER_TOPIC_LEN)) {
         return -1;
     }
 
@@ -133,6 +162,11 @@ static int64_t sys_infer_handler(struct trap_frame *frame)
     void *output = (void *)frame->x3;
     uint32_t out_len = (uint32_t)frame->x4;
 
+    /* Reject lengths that would overflow `len * sizeof(float)` before the
+     * validate_user_ptr bounds check. */
+    if (in_len > UINT32_MAX / 4 || out_len > UINT32_MAX / 4) {
+        return -1;
+    }
     if (!validate_user_ptr(input, in_len * 4) || !validate_user_ptr(output, out_len * 4)) {
         return -1;
     }

@@ -314,6 +314,14 @@ extern int rust_model_loader_init(void);
 extern int rust_model_load_builtin_mnist(void);
 
 /*
+ * Topic-name buffer length used by the Rust message router. The router
+ * copies up to this many bytes (including NUL) into a `topic_out` buffer
+ * passed to msg_router_receive(), so callers must provide at least this
+ * much storage.
+ */
+#define MSG_ROUTER_TOPIC_LEN 16
+
+/*
  * Publish a message to a topic via the message router.
  * Returns: Number of subscribers that received the message.
  */

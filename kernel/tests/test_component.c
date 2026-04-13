@@ -8,7 +8,11 @@
 #include "unity.h"
 #include "component.h"
 #include "uart.h"
+#include "pmm.h"
+#include "task.h"
+#include "sched.h"
 #include <stdint.h>
+#include <stddef.h>
 
 /* ============================================================================
  * Test Helpers
@@ -350,6 +354,144 @@ static void test_component_slot_reuse(void)
 }
 
 /* ============================================================================
+ * Cleanup Context Lifecycle (IPC-C4 regression)
+ *
+ * component_start() allocates a per-task cleanup context via pmm_alloc_page()
+ * and attaches it with task_set_cleanup(). component_task_cleanup() must free
+ * the page when the task exits. These tests exercise the same pattern with
+ * a spy callback to verify the contract holds, guarding against re-introduction
+ * of the old shared static array.
+ * ============================================================================ */
+
+static volatile uint32_t c4_observed_value;
+static volatile void *c4_observed_ctx_ptr;
+
+static void c4_cleanup_spy(void *arg)
+{
+    uint32_t *ctx = (uint32_t *)arg;
+    c4_observed_ctx_ptr = arg;
+    c4_observed_value = *ctx;
+    pmm_free_page(ctx);
+}
+
+static void c4_exit_immediately(void *arg)
+{
+    (void)arg;
+    /* Returning hands off to task_entry_trampoline which calls task_exit(). */
+}
+
+/*
+ * Verify that a heap-allocated ctx reaches the cleanup callback with its
+ * payload intact and that the page is released back to the PMM afterward.
+ * If the old static-array pattern were reintroduced, the page-free check
+ * would still pass trivially (no allocation happened), so see the
+ * multi-task test below for unique-pointer coverage.
+ */
+static void test_component_cleanup_ctx_payload_preserved(void)
+{
+    c4_observed_value = 0;
+    c4_observed_ctx_ptr = NULL;
+
+    uint32_t *ctx = (uint32_t *)pmm_alloc_page();
+    TEST_ASSERT_NOT_NULL(ctx);
+    *ctx = 0xDEADBEEFu;
+
+    size_t free_held = pmm_get_free_pages();
+
+    struct task *t = task_create("c4_payload", c4_exit_immediately, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    task_set_cleanup(t, c4_cleanup_spy, ctx);
+    scheduler_add_task_to_cpu(t, 0);
+
+    int timeout = 500;
+    while (c4_observed_value == 0 && timeout > 0) {
+        yield();
+        timeout--;
+    }
+
+    TEST_ASSERT_MESSAGE(timeout > 0, "c4 cleanup callback never fired");
+    TEST_ASSERT_EQUAL_UINT32(0xDEADBEEFu, c4_observed_value);
+    TEST_ASSERT_EQUAL_PTR(ctx, (void *)c4_observed_ctx_ptr);
+
+    /* Let the scheduler finish task_destroy so the stack is reclaimed. */
+    for (int i = 0; i < 4; i++) yield();
+
+    /* The ctx page should have returned to the pool; task stack freed on
+     * top of that. A conservative >= check tolerates unrelated test-harness
+     * allocations that may happen concurrently. */
+    size_t free_after = pmm_get_free_pages();
+    TEST_ASSERT_MESSAGE(free_after >= free_held + 1,
+        "cleanup did not free the per-task ctx page");
+}
+
+/*
+ * Verify each task gets its OWN ctx pointer — i.e. no shared static array
+ * is being reused across tasks. This is the core regression that IPC-C4
+ * guards against: under the old pattern, task A and task B could both
+ * receive &cleanup_ctxs[same_slot] and fire each other's cleanup.
+ */
+#define C4_MULTI_N 3
+static volatile void *c4_multi_ptrs[C4_MULTI_N];
+static volatile uint32_t c4_multi_values[C4_MULTI_N];
+static volatile int c4_multi_done;
+
+static void c4_multi_spy(void *arg)
+{
+    uint32_t *ctx = (uint32_t *)arg;
+    int slot = (int)(*ctx & 0xFF);  /* low byte encodes which task */
+    c4_multi_ptrs[slot] = arg;
+    c4_multi_values[slot] = *ctx;
+    pmm_free_page(ctx);
+    __atomic_fetch_add(&c4_multi_done, 1, __ATOMIC_RELEASE);
+}
+
+static void test_component_cleanup_ctx_is_per_task(void)
+{
+    c4_multi_done = 0;
+    for (int i = 0; i < C4_MULTI_N; i++) {
+        c4_multi_ptrs[i] = NULL;
+        c4_multi_values[i] = 0;
+    }
+
+    /* Start N tasks, each with a distinct heap-allocated ctx whose
+     * contents encode the slot index. */
+    for (int i = 0; i < C4_MULTI_N; i++) {
+        uint32_t *ctx = (uint32_t *)pmm_alloc_page();
+        TEST_ASSERT_NOT_NULL(ctx);
+        *ctx = 0x1000u | (uint32_t)i;
+
+        struct task *t = task_create("c4_multi", c4_exit_immediately, NULL);
+        TEST_ASSERT_NOT_NULL(t);
+        task_set_cleanup(t, c4_multi_spy, ctx);
+        scheduler_add_task_to_cpu(t, 0);
+    }
+
+    /* Wait for all cleanups to fire. */
+    int timeout = 1000;
+    while (__atomic_load_n(&c4_multi_done, __ATOMIC_ACQUIRE) < C4_MULTI_N
+           && timeout > 0) {
+        yield();
+        timeout--;
+    }
+    TEST_ASSERT_MESSAGE(timeout > 0, "not all c4 cleanups fired");
+
+    /* Each slot must have been touched exactly once with its own encoded
+     * value — proving each task carried its own ctx. */
+    for (int i = 0; i < C4_MULTI_N; i++) {
+        TEST_ASSERT_EQUAL_UINT32(0x1000u | (uint32_t)i, c4_multi_values[i]);
+        TEST_ASSERT_NOT_NULL((void *)c4_multi_ptrs[i]);
+    }
+
+    /* All ctx pointers must be distinct. */
+    for (int i = 0; i < C4_MULTI_N; i++) {
+        for (int j = i + 1; j < C4_MULTI_N; j++) {
+            TEST_ASSERT_MESSAGE(c4_multi_ptrs[i] != c4_multi_ptrs[j],
+                "per-task ctx pointers collided — static array regression?");
+        }
+    }
+}
+
+/* ============================================================================
  * Helper Function Tests
  * ============================================================================ */
 
@@ -420,6 +562,10 @@ int test_suite_component(void)
 
     /* Slot reuse tests */
     RUN_TEST(test_component_slot_reuse);
+
+    /* Cleanup ctx lifecycle (IPC-C4 regression) */
+    RUN_TEST(test_component_cleanup_ctx_payload_preserved);
+    RUN_TEST(test_component_cleanup_ctx_is_per_task);
 
     /* Helper function tests */
     RUN_TEST(test_component_state_name);

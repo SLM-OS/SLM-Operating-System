@@ -134,6 +134,126 @@ static void test_syscall_infer_invalid_model(void)
     TEST_ASSERT_TRUE((int64_t)frame.x0 < 0);
 }
 
+/* Test: SYS_INFER rejects in_len that would overflow `in_len * sizeof(float)`
+ * before the validate_user_ptr bounds check. Regression for IPC-C1. */
+static void test_syscall_infer_overflow_in_len(void)
+{
+    struct trap_frame frame;
+    /* A small scratch buffer — the input pointer must be non-NULL so that
+     * validate_user_ptr only fails due to the overflow guard, not a NULL
+     * pointer. */
+    uint32_t scratch[4] = {0};
+
+    memset(&frame, 0, sizeof(frame));
+    frame.x8 = SYS_INFER;
+    frame.x0 = 0;                      /* model idx */
+    frame.x1 = (uint64_t)scratch;      /* input */
+    frame.x2 = 0x40000001;             /* in_len: triggers in_len > UINT32_MAX/4 */
+    frame.x3 = (uint64_t)scratch;      /* output */
+    frame.x4 = 1;                      /* out_len */
+
+    syscall_dispatch(&frame);
+
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)frame.x0);
+}
+
+/* Test: SYS_INFER rejects out_len overflow symmetrically. Regression for IPC-C1. */
+static void test_syscall_infer_overflow_out_len(void)
+{
+    struct trap_frame frame;
+    uint32_t scratch[4] = {0};
+
+    memset(&frame, 0, sizeof(frame));
+    frame.x8 = SYS_INFER;
+    frame.x0 = 0;
+    frame.x1 = (uint64_t)scratch;
+    frame.x2 = 1;
+    frame.x3 = (uint64_t)scratch;
+    frame.x4 = 0x40000001;             /* out_len triggers the overflow guard */
+
+    syscall_dispatch(&frame);
+
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)frame.x0);
+}
+
+/* Test: SYS_RECV with a NULL topic_out fails validation. Regression for IPC-M2. */
+static void test_syscall_recv_null_topic_out(void)
+{
+    struct trap_frame frame;
+    char data_buf[64];
+    memset(&frame, 0, sizeof(frame));
+    memset(data_buf, 0, sizeof(data_buf));
+
+    frame.x8 = SYS_RECV;
+    frame.x0 = 0;                      /* topic_out = NULL */
+    frame.x1 = (uint64_t)data_buf;
+    frame.x2 = sizeof(data_buf);
+    frame.x3 = 0;
+
+    syscall_dispatch(&frame);
+
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)frame.x0);
+}
+
+/* Test: SYS_SEND rejects data that is not NUL-terminated within `len`.
+ * Regression for IPC-H2. */
+static void test_syscall_send_missing_nul(void)
+{
+    struct trap_frame frame;
+    char topic[] = "t\0xxxxxxxxxxxxx";  /* NUL within MSG_ROUTER_TOPIC_LEN */
+    /* Data buffer intentionally lacks a NUL in the last byte. */
+    char data[4] = {'a', 'b', 'c', 'd'};
+
+    memset(&frame, 0, sizeof(frame));
+    frame.x8 = SYS_SEND;
+    frame.x0 = (uint64_t)topic;
+    frame.x1 = (uint64_t)data;
+    frame.x2 = sizeof(data);           /* last byte is 'd', not '\0' */
+
+    syscall_dispatch(&frame);
+
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)frame.x0);
+}
+
+/* Test: SYS_SEND rejects len == 0. Regression for IPC-H2. */
+static void test_syscall_send_zero_len(void)
+{
+    struct trap_frame frame;
+    char topic[] = "t\0xxxxxxxxxxxxx";
+    char data = 0;
+
+    memset(&frame, 0, sizeof(frame));
+    frame.x8 = SYS_SEND;
+    frame.x0 = (uint64_t)topic;
+    frame.x1 = (uint64_t)&data;
+    frame.x2 = 0;
+
+    syscall_dispatch(&frame);
+
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)frame.x0);
+}
+
+/* Test: SYS_SEND rejects a topic buffer with no NUL terminator in the first
+ * MSG_ROUTER_TOPIC_LEN bytes. Regression for IPC-H2. */
+static void test_syscall_send_topic_no_nul(void)
+{
+    struct trap_frame frame;
+    /* 16 bytes, no NUL byte anywhere. */
+    char topic[16];
+    memset(topic, 'x', sizeof(topic));
+    char data[] = "hi";
+
+    memset(&frame, 0, sizeof(frame));
+    frame.x8 = SYS_SEND;
+    frame.x0 = (uint64_t)topic;
+    frame.x1 = (uint64_t)data;
+    frame.x2 = sizeof(data);
+
+    syscall_dispatch(&frame);
+
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)frame.x0);
+}
+
 /* Test: SYS_RECV with no pending messages returns -1 */
 static void test_syscall_recv_no_message(void)
 {
@@ -212,6 +332,12 @@ int test_suite_syscall(void)
     RUN_TEST(test_syscall_log);
     RUN_TEST(test_syscall_sleep_zero);
     RUN_TEST(test_syscall_infer_invalid_model);
+    RUN_TEST(test_syscall_infer_overflow_in_len);
+    RUN_TEST(test_syscall_infer_overflow_out_len);
+    RUN_TEST(test_syscall_recv_null_topic_out);
+    RUN_TEST(test_syscall_send_missing_nul);
+    RUN_TEST(test_syscall_send_zero_len);
+    RUN_TEST(test_syscall_send_topic_no_nul);
     RUN_TEST(test_syscall_recv_no_message);
 
     /* Syscall number constants */
