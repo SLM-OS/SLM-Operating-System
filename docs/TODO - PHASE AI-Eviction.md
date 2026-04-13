@@ -94,45 +94,37 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 **Note:** Required before M3 (ML inference) since the generated XGBoost code is ~1.3 MB and not always desired. Mirrors the AI-Sched feature-gate pattern.
 
 ### Cargo Feature Configuration
-- ☐ Add to `runtime/Cargo.toml`:
+- ✅ Declared in `runtime/Cargo.toml` (M1):
   ```toml
   [features]
   default = []
-  ai_eviction = []          # Brings in pluggable trait + classical Rust policies
-  ai_eviction_models = ["ai_eviction"]  # Also pulls in generated XGBoost + MLP
+  ai_eviction = []
+  ai_eviction_models = ["ai_eviction"]
   ```
-- ☐ Wire `ai_eviction` cfg into `runtime/src/mm/mod.rs`
+- ✅ `pub mod eviction` in `runtime/src/mm/mod.rs` is `#[cfg(feature = "ai_eviction")]`
 
 ### CMake / Top-Level Integration
-- ☐ Add to `CMakeLists.txt`:
-  ```cmake
-  option(ENABLE_AI_EVICTION "Include AI eviction policies" OFF)
-  option(ENABLE_AI_EVICTION_MODELS "Include trained XGBoost + MLP weights" OFF)
-
-  if(ENABLE_AI_EVICTION_MODELS AND NOT ENABLE_AI_EVICTION)
-      message(FATAL_ERROR "ENABLE_AI_EVICTION_MODELS requires ENABLE_AI_EVICTION")
-  endif()
-  ```
-- ☐ Pass cargo features through to the runtime build
-- ☐ Document the two-tier feature flag in `docs/build.md`
+- ✅ `CMakeLists.txt` declares `ENABLE_AI_EVICTION` and `ENABLE_AI_EVICTION_MODELS` options; a `FATAL_ERROR` fires if `MODELS` is set without `EVICTION`. Sets `CONFIG_AI_EVICTION` / `CONFIG_AI_EVICTION_MODELS` compile definitions and a status-summary line.
+- ✅ Makefile threads `AI_EVICTION` / `AI_EVICTION_MODELS` through as `-D` CMake flags and as `--features ai_eviction` / `--features ai_eviction_models` on cargo. `AI_EVICTION_MODELS=ON` auto-implies `AI_EVICTION=ON`.
+- ✅ Documented the flags in `docs/eviction.md` and cross-linked from `docs/building.md`
 
 ### Stub Models for Development
-- ☐ Create `runtime/src/mm/eviction/generated/stub.rs` with all-zero weight tables matching the real export's shape
-- ☐ Create `runtime/src/mm/eviction/generated/mod.rs` selecting stub vs real at compile time
-- ☐ Verify the stub compiles standalone (`cargo build -p runtime --features ai_eviction`)
+- ✅ `runtime/src/mm/eviction/generated/xgb_stub.rs` and `mlp_stub.rs` ship `pub fn xgb_predict` / `mlp_predict` that return `0.5`. Exposes `MODELS_AVAILABLE` constant so callers can detect stub vs real at runtime.
+- ✅ `runtime/src/mm/eviction/generated/mod.rs` selects stub vs real via `#[cfg(feature = "ai_eviction_models")]` so the same import path (`generated::xgb_predict`) works either way.
+- ✅ Stub build verified: `make kernel AI_EVICTION=ON` builds clean.
 
 ### Weight File Import
-- ☐ Create `scripts/import_eviction_weights.sh`:
-  - Copies `xgb_policy_generated.rs`, `mlp_policy_generated.rs`, `mlp_policy_f32.rs` from sibling project's `data/export/` into `runtime/src/mm/eviction/generated/`
-  - Copies feature-name list into `eviction_features.rs` for runtime introspection
-  - Validates expected `pub fn xgb_predict` / `pub fn mlp_predict` symbols are present
-- ☐ Document the import flow in `docs/eviction.md`
+- ✅ `scripts/import_eviction_weights.sh` copies `xgb_policy_generated.rs`, `mlp_policy_generated.rs`, `mlp_policy_f32.rs` from `slm-os-page-sim/data/export/`, rewrites the `use` path (`eviction_policy` → `eviction::policy`) and `.exp()` (→ `libm::expf`) so the generated files build in `no_std`, and validates the expected public symbols.
+- ⏸️ Feature-name list (`eviction_features.rs`) — deferred to M4 where it's first needed for shell introspection; the sibling's `docs/features.md` is the interim reference.
+- ✅ Import flow documented in `docs/eviction.md`
 
 ### Build Verification
-- ☐ Build with `ENABLE_AI_EVICTION=OFF` (existing behavior, no AI code)
-- ☐ Build with `ENABLE_AI_EVICTION=ON` + stub models
-- ☐ Build with `ENABLE_AI_EVICTION_MODELS=ON` + real models from sibling export
-- ☐ Verify final binary size impact: target < 2 MB additional when models enabled
+- ✅ `AI_EVICTION=OFF`: existing behaviour, no AI code (2423648-byte ELF)
+- ✅ `AI_EVICTION=ON`: stub compiles (2452000-byte ELF, +28 KB)
+- ✅ `AI_EVICTION_MODELS=ON`: real models compile (2452000-byte ELF; XGBoost + MLP tables dead-code-eliminated by LTO until M4 references them)
+- ✅ Binary-size impact well under the 2 MB budget on all three configs
+- ✅ CMake `FATAL_ERROR` fires when `-DENABLE_AI_EVICTION_MODELS=ON -DENABLE_AI_EVICTION=OFF` is passed directly to `cmake`
+- ✅ `make test` passes on default and on `AI_EVICTION=ON`
 
 ---
 

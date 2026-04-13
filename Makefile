@@ -17,6 +17,33 @@ AI_SCHED ?= OFF
 # Work-stealing scheduler (#59 Phase B): OFF by default.
 WORK_STEALING ?= OFF
 
+# AI Eviction (Phase AI-Eviction):
+#   AI_EVICTION=ON         — compile the pluggable EvictionPolicy trait +
+#                            classical Rust policies (stub XGBoost/MLP).
+#   AI_EVICTION_MODELS=ON  — additionally pull in the trained XGBoost +
+#                            int8 MLP weights. Run scripts/import_eviction_weights.sh
+#                            first to stage the generated files from the sibling
+#                            slm-os-page-sim project. Implies AI_EVICTION=ON.
+AI_EVICTION ?= OFF
+AI_EVICTION_MODELS ?= OFF
+ifeq ($(AI_EVICTION_MODELS),ON)
+    # Models imply the trait layer; callers don't have to set both.
+    AI_EVICTION := ON
+endif
+
+# Cargo feature list built from the flags above.
+CARGO_FEATURES :=
+ifeq ($(AI_EVICTION_MODELS),ON)
+    CARGO_FEATURES := ai_eviction_models
+else ifeq ($(AI_EVICTION),ON)
+    CARGO_FEATURES := ai_eviction
+endif
+ifeq ($(CARGO_FEATURES),)
+    CARGO_FEATURES_FLAG :=
+else
+    CARGO_FEATURES_FLAG := --features $(CARGO_FEATURES)
+endif
+
 # Directories
 BUILD_DIR := build
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
@@ -107,6 +134,8 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		-DPLATFORM=$(PLATFORM) \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
+		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-clean
@@ -150,8 +179,8 @@ endif
 
 .PHONY: runtime
 runtime:
-	@echo "Building runtime..."
-	cd runtime && cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,)
+	@echo "Building runtime... (cargo features: $(if $(CARGO_FEATURES),$(CARGO_FEATURES),none))"
+	cd runtime && cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,) $(CARGO_FEATURES_FLAG)
 
 .PHONY: runtime-clean
 runtime-clean:
@@ -271,6 +300,8 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		-DENABLE_BOOT_TESTS=ON \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
+		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-test-clean

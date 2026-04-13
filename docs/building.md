@@ -350,6 +350,19 @@ make BUILD_TYPE=Release  # Optimized, no debug symbols
 -O2 -DNDEBUG
 ```
 
+### Optional Features
+
+```bash
+make kernel AI_SCHED=ON               # AI scheduler (MLP/PPO, kernel-side, C)
+make kernel AI_EVICTION=ON            # AI eviction trait + classical policies (Rust, stub models)
+make kernel AI_EVICTION_MODELS=ON     # AI eviction with trained XGBoost + int8 MLP (Rust)
+```
+
+`AI_EVICTION_MODELS=ON` implies `AI_EVICTION=ON`. Before enabling
+`AI_EVICTION_MODELS`, run `./scripts/import_eviction_weights.sh` to
+stage the generated weight files from the sibling `slm-os-page-sim`
+project. See `docs/eviction.md` for the full workflow.
+
 ### Compiler Flags
 
 Defined in `CMakeLists.txt`. Uses **C23 standard** with strict warnings:
