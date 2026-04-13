@@ -110,6 +110,12 @@ runtime/src/mm/eviction/
 │                    # normalised to match the simulator's FeatureNormalizer
 ├── xgboost.rs       # XGBoostPolicy — thin wrapper over generated::xgb_predict
 ├── mlp.rs           # MlpPolicy — thin wrapper over generated::mlp_predict
+├── cacheus.rs       # CacheusSelector — weighted expert ensemble with
+│                    # multiplicative weight updates. ml_only() is the
+│                    # recommended runtime configuration.
+├── tracker.rs       # EvictedContentTracker — recent-eviction FIFO that
+│                    # feeds CACHEUS's update_feedback when a just-
+│                    # allocated content key matches a past eviction
 └── generated/
     ├── mod.rs       # Selects stub vs real at compile time
     ├── xgb_stub.rs  # xgb_predict(_) -> 0.5 when models are off
@@ -170,6 +176,51 @@ to keep them in the simulator's training range. Access-count
 normalisation uses a fixed `log1p(1024)` denominator rather than a
 running max — acceptable because `log1p` is forgiving past the
 training ceiling.
+
+### CACHEUS Adaptive Ensemble (M5)
+
+`CacheusSelector` combines a weighted pool of expert policies and
+updates the weights online based on feedback from the
+`EvictedContentTracker` (below). Per-candidate scores are the
+weighted sum of expert scores; the ensemble picks the argmax. On
+feedback (`update_feedback(block_id, was_fault)`):
+
+- **was_fault = true** (evicted block was re-accessed): experts that
+  agreed with the ensemble's choice are penalised by `(1 - lr)`;
+  experts that disagreed get a small reward `(1 + 0.5 * lr)`.
+- **was_fault = false**: agreeing experts get a reward `(1 + lr)`.
+- Weights are floored at `min_weight = 0.01` and renormalised so no
+  expert is silenced permanently.
+
+Two named constructors:
+
+| Constructor | Experts | Default use |
+|-------------|---------|-------------|
+| `CacheusSelector::ml_only()` | XGBoost + int8 MLP | Recommended runtime configuration. Wins the sibling Phase 5 sweep at 0.212 mean normalised fault rate. |
+| `CacheusSelector::all_5()` | LRU + LFU + SLM-Heuristic + XGBoost + MLP | Ablation experiments only. Loses to `ml_only` (0.427 vs 0.212) because the classical experts dilute the ensemble on the SLM workload. |
+
+Tuning constants (`CACHEUS_DEFAULT_LR = 0.4`,
+`CACHEUS_DEFAULT_WINDOW = 200`) match the sibling's Phase 5 sweep.
+Accessors (`weights`, `expert_names`, `expert_faults`,
+`expert_decisions`, `history_len`) enable runtime introspection for
+the upcoming `eviction stats` shell subcommand (M7).
+
+### Eviction-Feedback Tracker
+
+`EvictedContentTracker` records a `ContentKey`
+(`pool_type`, `model_id`, `layer_idx`) alongside the evicted
+`block_id` and the eviction timestamp. When the allocator later
+admits a new block with the same key, `probe_on_alloc` reports a hit
+and clears the entry — M6's allocator integration funnels this back
+into `update_feedback(_, true)` so CACHEUS learns the eviction was
+bad. Entries older than `EVICTION_FEEDBACK_WINDOW_NS` (200 ms
+default) are drained as "good" evictions and trigger
+`update_feedback(_, false)`.
+
+The tracker is separate from CACHEUS so it can also drive future
+non-CACHEUS feedback paths (e.g. a traced ARC variant). `probe_and_report_fault`
+and `drain_and_report_good` are the one-call-does-both wrappers M6
+will invoke from the allocator's slow path.
 
 `mm::eviction::generated::MODELS_AVAILABLE` is a `const bool` callers
 can check to decide whether to fall back to a classical policy when
@@ -237,7 +288,7 @@ Unity suite (13 tests) alongside the existing `test_suite_model_mem`:
     (excludes free blocks and pinned blocks with `ref_count > 1`;
     re-admits them on ref drop; returns to baseline on free)
 
-`rust_eviction_run_tests()` itself exercises 64 internal invariants (63
+`rust_eviction_run_tests()` itself exercises 79 internal invariants (78
 when `ai_eviction_models` is off):
 
 - **Registry / trait** (17): default / swap / reset, `FirstCandidatePolicy`
@@ -263,6 +314,13 @@ when `ai_eviction_models` is off):
   indices and finite scores in [0, 1], victim matches argmax of scores
   for both, and — only under `AI_EVICTION_MODELS=ON` — int8 MLP vs
   float32 MLP decision agreement (≥ 85% across 7 candidate groups).
+- **CACHEUS + tracker (M5)** (15): initial uniform weights, weights
+  sum to 1 after update, reset restores uniform, min_weight floor
+  protects experts after many penalties, `ml_only` / `all_5`
+  constructors produce the expected experts, default tuning
+  (`lr=0.4`, `window=200`) matches Phase 5, CACHEUS installs and
+  selects via the registry, tracker stores / probes / consumes / FIFO-
+  evicts / drains entries correctly.
 
 All suites pass under `make test` on the three supported configs:
 `AI_EVICTION=OFF` (default), `AI_EVICTION=ON` (stubs),

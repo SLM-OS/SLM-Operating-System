@@ -196,26 +196,24 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 **Note:** Full implementation already exists in `slm_os_integration/src/cacheus.rs` with the corrected weight-update rule from the sibling project's Phase 5 work. Port directly.
 
 ### CacheusSelector
-- ☐ Port `slm_os_integration/src/cacheus.rs` to `runtime/src/mm/eviction/cacheus.rs`
-- ☐ Use `Vec<Box<dyn EvictionPolicy + Send>>` for the expert pool
-- ☐ Multiplicative weight update with `f32` arithmetic (acceptable outside the hot path)
-- ☐ Circular feedback buffer via `VecDeque<EvictionRecord>` (default `window_size=200`)
-- ☐ `EvictionRecord` stores the **ensemble's actual choice** (not the last expert's choice — that was the original bug fixed in the sibling)
-- ☐ Weight floor at `min_weight=0.01` then renormalize after each update
+- ✅ Ported `slm_os_integration/src/cacheus.rs` to `runtime/src/mm/eviction/cacheus.rs`
+- ✅ `Vec<Box<dyn EvictionPolicy + Send>>` expert pool with multiplicative f32 weight updates
+- ✅ Circular feedback buffer via `VecDeque<EvictionRecord>` (default `window_size=200`)
+- ✅ `EvictionRecord` stores the ensemble's actual choice (Phase 5 fix preserved)
+- ✅ Weight floor at `min_weight=0.01` with renormalisation after each update
 
 ### Recommended Default Pool
-- ☐ Wire the **`ml_only` pool** (XGBoost + MLP, `lr=0.4`, `window=200`) as the default `CACHEUS` instance — sibling Phase 5 sweep showed this beats `all_5` (0.212 vs 0.427 mean norm rate). Adding classical experts dilutes the ensemble.
-- ☐ Provide `cacheus_all5()` constructor for ablation experiments
+- ✅ `CacheusSelector::ml_only()` constructor — XGBoost + MLP, `lr=0.4`, `window=200`. Matches the sibling Phase 5 winning configuration.
+- ✅ `CacheusSelector::all_5()` constructor — LRU + LFU + SLM-Heuristic + XGBoost + MLP. Available for ablation experiments.
 
 ### Eviction Feedback Plumbing
-- ☐ When `alloc_block()` evicts a block, record the `(model_id, layer_idx, pool_type)` content key in a small `EvictedContentTracker`
-- ☐ When the next miss tries to load a block whose content key was recently evicted (within `EVICTION_FEEDBACK_WINDOW=200` ticks), call `policy.update_feedback(evicted_block_id, true)`
-- ☐ Periodically (or on tracker overflow) flush stale records as `update_feedback(_, false)` — these were good evictions
-- ☐ Mirror the simulator's `_evicted_content` design (`src/simulator/core.py:175-186`)
+- ✅ `runtime/src/mm/eviction/tracker.rs` ships `EvictedContentTracker` — FIFO of `(ContentKey, evicted_block_id, evicted_at_ns)` with configurable capacity (default 256) and feedback window (default `EVICTION_FEEDBACK_WINDOW_NS = 200 ms`). Mirrors the simulator's `_evicted_content`.
+- ✅ `probe_on_alloc(key, now)` returns the block_id of a matching recent eviction and consumes the entry; `drain_expired(now)` returns block_ids of entries past the window.
+- ✅ `probe_and_report_fault` / `drain_and_report_good` convenience wrappers drive the installed policy's `update_feedback` hook.
+- ☐🔗 Wire `record_eviction` / `probe_on_alloc` into `alloc_weights` / `alloc_workspace` — deferred to M6 (allocator integration)
 
 ### Trajectory Recording (Optional)
-- ☐ Behind a separate `cacheus_trace` feature flag, append `(tick, weights)` to a bounded ring buffer for shell inspection
-- ☐ Expose via `eviction trajectory` shell subcommand (M7)
+- ⏸️ `cacheus_trace` feature flag + `(tick, weights)` ring buffer — deferred. Runtime introspection available via `CacheusSelector::weights` / `expert_faults` / `expert_decisions` accessors; a trace history belongs with M7's `eviction trajectory` shell subcommand if prioritised.
 
 ---
 

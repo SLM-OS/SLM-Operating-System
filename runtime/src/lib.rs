@@ -1695,6 +1695,165 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                    agree * 100 >= total * 85);
         }
 
+        puts(b"\n-- eviction: CACHEUS (M5) --\n\0");
+
+        use mm::eviction::{CacheusSelector, CACHEUS_DEFAULT_LR,
+                            CACHEUS_DEFAULT_WINDOW};
+        use mm::eviction::tracker::{ContentKey, EvictedContentTracker};
+
+        // Initial weights uniform, sum to 1.
+        {
+            let c = CacheusSelector::ml_only();
+            let w = c.weights();
+            check!(b"cacheus_initial_weights_uniform\0",
+                   w.len() == 2
+                       && (w[0] - 0.5).abs() < 1e-6
+                       && (w[1] - 0.5).abs() < 1e-6);
+        }
+
+        // Two experts → weights sum to 1 after an update.
+        {
+            let mut c = CacheusSelector::ml_only();
+            let cands = [
+                make_full(50,       0, 0, PoolType::Weight, 0),
+                make_full(51, 1_000_000, 0, PoolType::Weight, 0),
+                make_full(52, 2_000_000, 0, PoolType::Weight, 0),
+            ];
+            let v = c.select_victim(&cands);
+            c.update_feedback(cands[v].block_id, true);
+            let total: f32 = c.weights().iter().sum();
+            check!(b"cacheus_weights_sum_to_one_after_update\0",
+                   (total - 1.0).abs() < 1e-5);
+        }
+
+        // Reset restores uniform weights.
+        {
+            let mut c = CacheusSelector::new(
+                alloc::vec![
+                    alloc::boxed::Box::new(mm::eviction::LruPolicy::new())
+                        as alloc::boxed::Box<dyn mm::eviction::EvictionPolicy + Send>,
+                    alloc::boxed::Box::new(mm::eviction::LfuPolicy::new()) as _,
+                ],
+                0.5, 50,
+            );
+            let cands = [
+                make_full(0, 100, 5, PoolType::Weight, 0),
+                make_full(1,  50, 1, PoolType::Weight, 0),
+                make_full(2, 200,10, PoolType::Weight, 0),
+            ];
+            for _ in 0..10 {
+                let v = c.select_victim(&cands);
+                c.update_feedback(cands[v].block_id, true);
+            }
+            c.reset();
+            let w = c.weights();
+            check!(b"cacheus_reset_restores_uniform\0",
+                   (w[0] - 0.5).abs() < 1e-6 && (w[1] - 0.5).abs() < 1e-6);
+        }
+
+        // Min-weight floor: experts aren't silenced even after many penalties.
+        {
+            let mut c = CacheusSelector::new(
+                alloc::vec![
+                    alloc::boxed::Box::new(mm::eviction::LruPolicy::new())
+                        as alloc::boxed::Box<dyn mm::eviction::EvictionPolicy + Send>,
+                    alloc::boxed::Box::new(mm::eviction::LfuPolicy::new()) as _,
+                ],
+                0.9, 100,
+            );
+            let cands = [
+                make_full(0, 100, 5, PoolType::Weight, 0),
+                make_full(1,  50, 1, PoolType::Weight, 0),
+                make_full(2, 200,10, PoolType::Weight, 0),
+            ];
+            for _ in 0..50 {
+                let v = c.select_victim(&cands);
+                c.update_feedback(cands[v].block_id, true);
+            }
+            check!(b"cacheus_min_weight_floor_protects_experts\0",
+                   c.weights().iter().all(|&w| w >= 0.01 - 1e-6));
+        }
+
+        // ml_only and all_5 constructors expose the expected experts.
+        {
+            let ml = CacheusSelector::ml_only();
+            let names = ml.expert_names();
+            check!(b"cacheus_ml_only_has_two_experts\0", names.len() == 2);
+            check!(b"cacheus_ml_only_contains_xgboost_and_mlp\0",
+                   names.contains(&"XGBoost") && names.contains(&"MLP"));
+
+            let all = CacheusSelector::all_5();
+            check!(b"cacheus_all_5_has_five_experts\0",
+                   all.expert_names().len() == 5);
+        }
+
+        // Default learning rate and window match Phase 5.
+        check!(b"cacheus_defaults_match_phase5\0",
+               (CACHEUS_DEFAULT_LR - 0.4).abs() < 1e-6
+                   && CACHEUS_DEFAULT_WINDOW == 200);
+
+        // CACHEUS as installed policy: registry plumbing works end-to-end.
+        {
+            eviction::set_eviction_policy(
+                alloc::boxed::Box::new(CacheusSelector::ml_only()),
+            );
+            let cands = [
+                make_full(80,       0, 2, PoolType::Weight, 1),
+                make_full(81, 1_000_000, 7, PoolType::Workspace, 2),
+            ];
+            let v = eviction::select_victim(&cands);
+            check!(b"cacheus_installs_and_selects_via_registry\0",
+                   v.is_some() && v.unwrap() < cands.len());
+            eviction::reset_to_default();
+        }
+
+        // EvictedContentTracker: record → probe with match → hit; window
+        // expiry flushes expired entries as "good" feedback candidates.
+        {
+            let mut t = EvictedContentTracker::with_params(4, 1_000_000); // 4 entries, 1 ms window
+            let key_a = ContentKey {
+                pool_type: PoolType::Weight, model_id: 3, layer_idx: 7,
+            };
+            let key_b = ContentKey {
+                pool_type: PoolType::Workspace, model_id: 3, layer_idx: 7,
+            };
+            t.record_eviction(key_a, 100, 1_000);
+            t.record_eviction(key_b, 200, 2_000);
+            check!(b"tracker_stores_entries\0", t.len() == 2);
+
+            // Probe within window: matches, entry removed.
+            let hit = t.probe_on_alloc(key_a, 3_000);
+            check!(b"tracker_probe_hit_returns_block_id\0",
+                   hit == Some(100));
+            check!(b"tracker_probe_consumes_entry\0", t.len() == 1);
+
+            // Probe miss: no match.
+            let key_c = ContentKey {
+                pool_type: PoolType::Weight, model_id: 99, layer_idx: 0,
+            };
+            check!(b"tracker_probe_miss_returns_none\0",
+                   t.probe_on_alloc(key_c, 4_000).is_none());
+
+            // Age past window: drain_expired flushes.
+            let drained = t.drain_expired(100_000_000);
+            check!(b"tracker_drains_expired_entries\0",
+                   drained.contains(&200) && t.is_empty());
+
+            // Capacity: FIFO eviction on overflow.
+            let mut t2 = EvictedContentTracker::with_params(
+                2, 1_000_000_000,
+            );
+            let k = ContentKey {
+                pool_type: PoolType::Weight, model_id: 0, layer_idx: 0,
+            };
+            t2.record_eviction(k, 1, 100);
+            t2.record_eviction(k, 2, 200);
+            t2.record_eviction(k, 3, 300);
+            check!(b"tracker_fifo_evicts_oldest\0",
+                   t2.len() == 2
+                       && t2.probe_on_alloc(k, 400) == Some(3));
+        }
+
         // Prevent unused-mut / unused-var on `scores` in release.
         let _ = scores;
         // Drop the collected feedback tuple to quiet the borrow checker.
