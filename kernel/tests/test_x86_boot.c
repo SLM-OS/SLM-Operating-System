@@ -850,6 +850,64 @@ static void test_scheduler_tick_callable(void)
     TEST_ASSERT_TRUE(true);
 }
 
+/*
+ * Test: preempt_disabled[cpu] is cleared while a task runs (#91).
+ *
+ * The x86-64 task_entry_wrapper previously called the task entry directly,
+ * bypassing task_entry_trampoline — which is where preempt_disabled[cpu]
+ * gets cleared for a new task. That left the flag stuck at 1 for the
+ * duration of the new task's first timeslice, disabling timer preemption
+ * until the outgoing task was eventually resumed. The test harness itself
+ * runs inside a task that was reached via task_entry_wrapper, so if this
+ * assertion holds we know the trampoline ran.
+ */
+static void test_preempt_disabled_cleared_in_task(void)
+{
+    extern volatile int preempt_disabled[];
+    TEST_ASSERT_EQUAL_INT(0, preempt_disabled[cpu_id()]);
+}
+
+/*
+ * Test: two tasks doing yield()-based sleep both make progress (#91).
+ *
+ * This is the bare-metal reproducer distilled from
+ * docs/x86-64-scheduler-investigation.md: before the fix, a secondary
+ * task calling sleep_ms()/yield() would stall because preempt_disabled
+ * was stuck at 1 on its first timeslice, blocking timer preemption that
+ * pit_ticks-polling relies on indirectly. Here we spawn a worker that
+ * bumps a counter after a yield loop; if the worker is stuck, the
+ * counter stays at 0 and the test fails.
+ */
+static volatile uint32_t sched_regression_worker_ticks;
+
+static void sched_regression_worker(void *arg)
+{
+    (void)arg;
+    for (int i = 0; i < 4; i++) {
+        extern void yield(void);
+        yield();
+        sched_regression_worker_ticks++;
+    }
+}
+
+static void test_new_task_runs_and_yields(void)
+{
+    extern struct task *task_create(const char *name, void (*entry)(void *), void *arg);
+    extern void scheduler_add_task(struct task *task);
+    extern void sleep_ms(uint32_t ms);
+
+    sched_regression_worker_ticks = 0;
+    struct task *t = task_create("sched_regress", sched_regression_worker, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+
+    /* Give the worker enough scheduler visits to complete four yields. */
+    for (int i = 0; i < 20 && sched_regression_worker_ticks < 4; i++)
+        sleep_ms(10);
+
+    TEST_ASSERT_EQUAL_UINT32(4, sched_regression_worker_ticks);
+}
+
 /* ============================================================================
  * ACPI Tests
  * ============================================================================ */
@@ -1981,6 +2039,8 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_gic_end_interrupt_safe);
     RUN_TEST(test_uart_putc_works);
     RUN_TEST(test_scheduler_tick_callable);
+    RUN_TEST(test_preempt_disabled_cleared_in_task);
+    RUN_TEST(test_new_task_runs_and_yields);
 
     /* ACPI + APIC tests */
     RUN_TEST(test_acpi_discovered_cpus);

@@ -1,8 +1,11 @@
 # x86-64 Scheduler Reentrance Investigation
 
-**Status:** Open — partially mitigated, multi-task yield still broken
+**Status:** ✅ Resolved (April 12, 2026) — #91 fixed by routing the x86-64
+`task_entry_wrapper` through `task_entry_trampoline`, which clears
+`preempt_disabled[cpu]` on new-task entry. See the "Resolution" section
+at the end of this document.
 **Platform:** x86-64 (i7-6700, 8 CPUs)
-**Dates:** April 5–6, 2026
+**Dates:** April 5–6, 2026 (investigation), April 12, 2026 (fix)
 **Related commits:** `cf1a6f8` through `865f571` on `x86-64-port` branch
 
 ---
@@ -346,5 +349,46 @@ Avoid yield()-based polling entirely. Use a callback/event-driven IPC pattern wh
 
 ---
 
-*Last updated: April 6, 2026*
-*Next step: GDB debugging via QEMU or preemption-disable approach (Option 4)*
+## Resolution (April 12, 2026)
+
+**Root cause identified.** The x86-64 `task_entry_wrapper` in
+`kernel/arch/x86_64/context.S` called the task's entry function
+directly, bypassing `task_entry_trampoline` (the shared C trampoline in
+`kernel/sched/task.c` that ARM64 already routed through). That
+trampoline is the only code path that clears `preempt_disabled[cpu]` on
+new-task entry. On x86-64, `preempt_disabled` therefore stayed at `1`
+throughout a new task's first timeslice — the value set by the
+outgoing `schedule()` (or `scheduler_start()`) immediately before
+`switch_to`. Until the outgoing task was resumed (which required a
+cooperative yield from the new task) timer preemption was suppressed
+on the whole CPU, so any cooperative workload that waited on
+`pit_ticks` or another task's yield would stall.
+
+**Fix.** Rewrite the x86-64 wrapper as a tail call to
+`task_entry_trampoline(entry=rbx, arg=r12)`:
+
+```asm
+task_entry_wrapper:
+    sti
+    mov     %rbx, %rdi     /* entry → first parameter */
+    mov     %r12, %rsi     /* arg   → second parameter */
+    jmp     task_entry_trampoline
+```
+
+`task_entry_trampoline` already contained an `#if defined(PLATFORM_X86_64)`
+branch that clears `preempt_disabled[cpu_id()]` and `mfence`s — that
+branch had simply never been reached on x86-64 because nothing called
+it. After this change both platforms share the trampoline; the
+"switch to a new task" case no longer gets stuck non-preemptible.
+
+**Regression tests** (in `kernel/tests/test_x86_boot.c`):
+- `test_preempt_disabled_cleared_in_task` — asserts
+  `preempt_disabled[cpu_id()] == 0` from inside a running task.
+- `test_new_task_runs_and_yields` — spawns a worker that yields four
+  times and asserts the counter advances, exercising the first-
+  timeslice preemption path.
+
+Both fail pre-fix (the worker stalls because `preempt_disabled` was
+never cleared on its first timeslice) and pass post-fix.
+
+*Last updated: April 12, 2026*

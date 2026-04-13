@@ -711,38 +711,33 @@ cmake --build build -j$(nproc)
 # Output: build/slmos.elf, build/slmos.bin
 ```
 
-#### Standalone Makefile (quick iterations)
+#### UEFI Disk Image
 
 ```bash
-# --- Standalone test kernel (boot + IDT + PIC + PIT only) ---
-make -f kernel/arch/x86_64/Makefile.test           # Build standalone ELF
-make -f kernel/arch/x86_64/Makefile.test disk       # UEFI disk image
-make -f kernel/arch/x86_64/Makefile.test run        # QEMU (serial)
-
-# --- Integrated kernel (full SLM-OS: scheduler, shell, PMM, VFS) ---
-make -f kernel/arch/x86_64/Makefile.test integrated # Build integrated ELF
-make -f kernel/arch/x86_64/Makefile.test disk-int   # UEFI disk image
-make -f kernel/arch/x86_64/Makefile.test run-int    # QEMU (serial)
-
-# --- Other targets ---
-make -f kernel/arch/x86_64/Makefile.test iso        # GRUB ISO (QEMU -cdrom)
-make -f kernel/arch/x86_64/Makefile.test debug      # QEMU + GDB server
-make -f kernel/arch/x86_64/Makefile.test gdb        # Connect GDB
-make -f kernel/arch/x86_64/Makefile.test clean      # Remove all build artifacts
+# Full SLM-OS kernel as a bootable UEFI disk image
+make x86-disk PLATFORM=X86_64
+# Output: build/kernel/slmos-x86.img (128 MB GPT disk, 64 MB FAT32 ESP)
 ```
+
+The `slmos-x86-disk` CMake target replaces the former
+`kernel/arch/x86_64/Makefile.test disk-int` target (deleted). The
+kernel source list, C23 standard, and Rust staticlib link are driven
+from the single top-level `CMakeLists.txt`, so the disk image can
+never drift out of sync with the ordinary `make kernel` build.
+
+Requires: `grub-mkimage`, `mtools` (`mformat`, `mcopy`, `mmd`),
+`sgdisk`. The disk is built without `sudo` / `losetup` — `mtools`
+writes the FAT32 filesystem directly to the partition offset inside
+the GPT disk image.
 
 ### Build Output
 
 ```
-build/x86_64-test/              # Standalone kernel
-├── kernel-x86.elf
-├── slmos-x86.iso / .img
-└── *.o
-
-build/x86_64-integrated/        # Integrated kernel
-├── kernel-x86.elf
-├── slmos-x86.img
-└── kernel/**/*.o               # Mirrored source tree
+build/kernel/                   # Full SLM-OS kernel
+├── slmos.elf                   # Kernel ELF
+├── slmos.bin                   # Flat binary
+├── bootx64.efi                 # GRUB EFI binary (x86-disk target)
+└── slmos-x86.img               # UEFI-bootable disk image (x86-disk target)
 ```
 
 ---
@@ -752,21 +747,17 @@ build/x86_64-integrated/        # Integrated kernel
 ### Deploy Workflow
 
 ```bash
-# Standalone test kernel
-make -f kernel/arch/x86_64/Makefile.test clean disk && \
-labctl sdwire flash test-pc build/x86_64-test/slmos-x86.img
+# Full SLM-OS kernel as a UEFI-bootable disk image
+make x86-disk PLATFORM=X86_64 && \
+labctl sdwire flash test-pc build/kernel/slmos-x86.img
 
-# Integrated kernel (full SLM-OS with shell)
-make -f kernel/arch/x86_64/Makefile.test disk-int && \
-labctl sdwire flash test-pc build/x86_64-integrated/slmos-x86.img
-
-# Capture boot output (standalone: wait for halt; integrated: wait for shell)
+# Capture boot output
 labctl serial_capture test-pc --timeout 30 --until "slm-os>"
 ```
 
 ### UEFI Disk Image Structure
 
-The `disk` target creates a 64 MB GPT image with one EFI System Partition (FAT32):
+The `slmos-x86-disk` target creates a 128 MB GPT disk image with one 64 MB EFI System Partition (FAT32):
 
 ```
 GPT Partition Table
@@ -902,7 +893,7 @@ Lua commands are available in the shell via `lua <expression>`.
 
 | File | Purpose |
 |------|---------|
-| `kernel/arch/x86_64/Makefile.test` | Standalone + integrated build rules |
+| `CMakeLists.txt` (slmos-x86-disk target) | UEFI disk-image build rules |
 | `kernel/kernel-x86_64.ld` | Linker script |
 
 ### Documentation
