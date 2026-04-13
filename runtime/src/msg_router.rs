@@ -222,8 +222,45 @@ static mut LAST_RECEIVED: [LastReceived; MAX_COMPONENTS] = [LastReceived::none()
 /// Spinlock protecting all router state: `TOPICS`, `TOPIC_COUNT`,
 /// `WILDCARD_SUBS`, `LAST_RECEIVED`.
 ///
-/// The lock is released before the publish ack-wait loop (which yields)
-/// to avoid deadlocking with subscribers that call `msg_router_ack()`.
+/// # Lock ordering
+///
+/// The router uses a single global lock; there is no intra-router nesting.
+/// The following rules apply to code that holds `MSG_ROUTER_LOCK`:
+///
+/// 1. **Do not hold the lock across `sched_yield()` or any call that may
+///    block.** A task calling `msg_router_receive`/`ack` while the holder
+///    is asleep would spin forever (the holder cannot run to release
+///    without its own CPU, and on single-core the holder never resumes).
+///    `publish_internal` deliberately drops the guard before its
+///    ack-wait loop — per-mailbox atomics carry the handoff instead.
+///
+/// 2. **Lock order across subsystems: `MSG_ROUTER_LOCK` → `component::registry::LOCK`.**
+///    `msg_router_list` calls `component::component_get_info()` while
+///    holding the router lock; that FFI acquires the component registry
+///    lock internally. The reverse order is forbidden — component code
+///    must not call any `msg_router_*` entry point while holding the
+///    registry lock, or the two paths will deadlock. If a future call
+///    site needs registry data inside a router operation, snapshot the
+///    component indices first, drop the router lock, then look up names.
+///
+/// 3. **IRQ state is captured on acquire and restored on drop** (see
+///    `SpinGuard`). Code inside the critical section runs with local
+///    IRQs masked; a timer or other ISR cannot reenter the router on
+///    the holding CPU. This is required once preemptive multi-core is
+///    enabled (#57).
+///
+/// 4. **UART calls (`uart_puts`, `uart_printf`) are permitted** inside
+///    the critical section: on platforms with `PLATFORM_HAS_NC_MEMORY`
+///    the UART lock is IRQ-disable-only (no cross-CPU spin), so it
+///    cannot create a circular wait with `MSG_ROUTER_LOCK`. On QEMU the
+///    UART lock is a plain spinlock but is never held across a router
+///    call, so no inversion is possible.
+///
+/// 5. **No nested `SpinGuard::new()` calls.** The guard uses a simple
+///    test-and-set, not a recursive lock; re-entering from the same task
+///    would self-deadlock. All public entry points create at most one
+///    guard per call, and `publish_internal` releases its guard before
+///    yielding.
 static MSG_ROUTER_LOCK: AtomicBool = AtomicBool::new(false);
 
 /// RAII guard for `MSG_ROUTER_LOCK`.
