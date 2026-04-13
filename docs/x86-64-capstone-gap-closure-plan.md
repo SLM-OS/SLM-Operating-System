@@ -34,6 +34,22 @@ Phases A, B, C, D are **in capstone scope** (≈5 weeks, ~20 engineer-days).
 Phase E is **post-capstone**; included here because the ask was to plan
 closure of every gap.
 
+### Pre-Phase: cross-platform infrastructure PRs (Week 0)
+
+Per the cross-platform review across the Pi 5 / Jetson / x86-64 plans,
+three small infrastructure PRs land before any platform-specific work
+starts. The x86-64 plan depends on two of them; they are referenced
+from B1 and C1 below.
+
+| PR | Scope | Affects | Blocks |
+|---|---|---|---|
+| Pre-0 | **Rename `PI5_SECONDARY_PREEMPT` → `SECONDARY_PREEMPT`** in `CMakeLists.txt`, `preempt.c`, `sched.c`, `vectors.S`. | Pi 5 + Jetson only — x86-64 does not use the symbol today. | (informational for x86-64) |
+| Pre-1 | **Add `smp_notify_cpu(uint32_t logical_cpu)`** as a common API in `kernel/include/smp.h`. ARM64 backend: `sev`. x86-64 backend: LAPIC IPI (defined in B1 below). Callers — `scheduler_add_task_to_cpu()`, work-stealing wakeup — use the common name. | All platforms. | **B1**, **B3** |
+| Pre-2 | **Add the SIMD dispatch skeleton** in `runtime/src/inference/ops.rs` — `#[cfg(target_arch = ...)]`-gated wrappers around `matmul`, `relu`, `add_scalar`, `simd_fma_row`, `zero_buf`, `softmax`. Each wrapper contains an empty `aarch64` arm and an empty `x86_64` arm; the current NEON paths stay on the aarch64 arm. | aarch64 (Pi 5, Jetson) + x86-64. | **C1**, Jetson G1 |
+
+Pre-0, Pre-1, Pre-2 are 15-minute, 2-hour, and 3-hour PRs
+respectively; all three land before Week 1.
+
 Critical-path dependency graph:
 
 ```
@@ -244,23 +260,26 @@ preemption with a specific test.
   guard in `schedule()` still protects the critical window — if the
   IPI fires while `schedule()` is already in flight on this CPU, the
   inner `schedule()` no-ops (see `sched.c:1041`).
-- New public API in `kernel/include/smp.h`:
-  `void smp_resched_cpu(uint32_t logical_cpu);`
-- New implementation in `kernel/arch/x86_64/platform_x86.c`:
+- **Reuses the `smp_notify_cpu(uint32_t logical_cpu)` API** landed
+  in infrastructure PR Pre-1. B1 fills in the x86-64 backend;
+  ARM64's backend (`sev`) already exists. Common caller sites —
+  `scheduler_add_task_to_cpu()`, work-stealing remote-wakeup — use
+  the same symbol on all platforms, so B1 does not re-touch
+  `sched.c`.
+- New implementation of the x86-64 backend in
+  `kernel/arch/x86_64/platform_x86.c`:
   ```c
-  void smp_resched_cpu(uint32_t logical_cpu) {
+  /* x86-64 backend for smp_notify_cpu (declared in smp.h). */
+  void smp_notify_cpu(uint32_t logical_cpu) {
       if (logical_cpu == cpu_id()) return;
       uint32_t apic_id = cpu_data[logical_cpu].mpidr;
       lapic_send_ipi(apic_id, RESCHED_VECTOR, ICR_FIXED);
   }
   ```
-- Modify `kernel/sched/sched.c:scheduler_add_task_to_cpu()` at line
-  819: after `rq_unlock_irqrestore()`, if `cpu != cpu_id()` and the
-  target's run queue was previously empty, call `smp_resched_cpu(cpu)`.
-  (On ARM64 this is already `sev` — conditionalise with
-  `PLATFORM_X86_64`.)
-- ARM64 stub: `smp_resched_cpu()` already exists conceptually via
-  `sev`; keep the existing path, just rename for symmetry.
+- `kernel/sched/sched.c:scheduler_add_task_to_cpu()` already calls
+  `smp_notify_cpu()` after Pre-1 lands (ARM64 arm = `sev`, x86-64
+  arm = undefined until B1). B1 just adds the missing implementation
+  — no scheduler edits, no `#ifdef PLATFORM_X86_64` sprinkling.
 
 **Design.**
 - The IPI unblocks an idle AP from `hlt`. On return from ISR, the
@@ -272,7 +291,7 @@ preemption with a specific test.
   prevents IPI storms during burst dispatch.
 
 **Tests** (`kernel/tests/test_x86_boot.c`):
-- `test_resched_ipi_delivers` — BSP calls `smp_resched_cpu(1)`;
+- `test_resched_ipi_delivers` — BSP calls `smp_notify_cpu(1)`;
   verifies a counter in the IPI handler incremented within 1 ms.
 - `test_cross_cpu_dispatch_latency` — BSP creates a task pinned to
   CPU 7; measures wall-clock time (via `rdtsc`) from
@@ -322,8 +341,15 @@ preemption with a specific test.
 ### B3. Enable and validate `CONFIG_WORK_STEALING` (P2-3)
 
 **Deliverables.**
-- Flip the default in `kernel/include/config.h:40` from
-  `#define CONFIG_WORK_STEALING 0` to `1`.
+- Do **not** flip the global default in `kernel/include/config.h:40`.
+  Per the cross-platform review, each platform opts in independently
+  until benchmark data from ≥ 2 platforms justifies the shared flip:
+  - x86-64: `CMakeLists.txt` passes `-DCONFIG_WORK_STEALING=1` only
+    when `PLATFORM=X86_64`.
+  - Jetson S4 decides its own value based on its Gate-2 bench.
+  - Pi 5 keeps it off until its IRQ blocker lands.
+  `config.h:39-40` stays `#ifndef CONFIG_WORK_STEALING; #define
+  CONFIG_WORK_STEALING 0; #endif` so the CMake override wins.
 - **Audit the existing lock discipline** (primary defense). The
   current `sched_try_steal()` at `sched.c:1077-1110`:
   1. Calls `steal_deque_steal()` which holds the deque's own
@@ -375,8 +401,16 @@ LLVM soft-float legalizer bug tracked in #72.
 ### C1. Inline-assembly SSE matmul
 
 **Deliverables.**
+- **Depends on infrastructure PR Pre-2** (SIMD dispatch skeleton).
+  Pre-2 lands empty `x86_64` and `aarch64` arms in every dispatch
+  wrapper; C1 fills the `x86_64` arm. The Jetson plan's G1 fills
+  the `aarch64` arm on the same timeline. No further changes to
+  `matmul()`, `relu()`, `zero_buf()`, `add_scalar_simd()`,
+  `simd_fma_row()` dispatch shape are needed — only the inner
+  kernels.
 - Four new `unsafe fn`s in `runtime/src/inference/ops.rs`, gated on
-  `#[cfg(target_arch = "x86_64")]`:
+  `#[cfg(target_arch = "x86_64")]`, invoked from the Pre-2
+  skeleton's `x86_64` arm:
   - `relu_sse2_asm(inp: *const f32, outp: *mut f32, n: usize)`
   - `zero_buf_sse2_asm(ptr: *mut f32, n: usize)`
   - `add_scalar_sse2_asm(ptr: *mut f32, scalar: f32, n: usize)`
@@ -388,9 +422,6 @@ LLVM soft-float legalizer bug tracked in #72.
 - The asm blocks use only SSE/SSE2 instructions (`movups`, `maxps`,
   `mulps`, `addps`, `xorps`, `shufps`, `movaps` where alignment is
   guaranteed by the caller).
-- Update `relu()`, `zero_buf()`, `add_scalar_simd()`, `simd_fma_row()`
-  in `ops.rs` to dispatch to the new asm kernels on x86-64, matching
-  the existing aarch64 NEON gate pattern.
 
 **Design.**
 - **Why inline asm works where intrinsics don't**: inline `asm!`
@@ -502,13 +533,21 @@ the current kernel is relying on firmware luck.
 ### C3. Update docs/benchmarks.md with x86-64 numbers
 
 **Deliverables.**
-- New rows in `docs/benchmarks.md`: MNIST classify latency on
-  test-pc, scalar baseline + SSE-asm, with ARM64 Pi 5 and Jetson
-  rows for comparison.
-- Inference workflow section updated to mention the x86-64 SSE asm
-  path and why it's different from NEON.
+- **Shared table with the Jetson plan's G3/G4 workstream.** The
+  cross-platform review flagged separate x86-64-only and
+  Jetson-only benchmark sections as an overlap. Collapse into one
+  "Inference latency across platforms" table in `docs/benchmarks.md`
+  with columns: model, dtype, Pi 5, Jetson, test-pc (scalar),
+  test-pc (SSE-asm), ARM Linux ONNX Runtime (reference).
+- Inference-workflow section explains the NEON / SSE / scalar
+  dispatch (one paragraph per arch) with links to the relevant
+  op implementations.
+- C3 commits the "test-pc" columns; Jetson G3/G4 commits the
+  "Jetson" column on the same table. Whichever workstream lands
+  first creates the table scaffold.
 
-**Acceptance criteria.** Numbers committed, reviewed.
+**Acceptance criteria.** Numbers committed, reviewed; Jetson plan
+owner confirms the table shape is compatible.
 
 **Est.** 0.5 day.
 
@@ -777,16 +816,18 @@ After each phase lands, update:
 
 | Workstream | Days | Dependencies | Unlocks |
 |---|---|---|---|
+| **Pre-1 `smp_notify_cpu()` API** | 0.25 | — | B1, B3, and equivalent SMP work on Pi 5 / Jetson |
+| **Pre-2 SIMD dispatch skeleton** | 0.4 | — | C1, Jetson G1 |
 | A1 TSS IST | 2 | — | B1 (IPI can reuse IST1) |
 | A2 HW validation | 1 | A1 | Confidence for all subsequent hw work |
 | A3 Dead code | 0 | (folded into A1) | — |
 | A4 TSC-based `sleep_ms` | 1 | — | Trustworthy Phase C benchmarks |
-| B1 Reschedule IPI | 3 | A1 | D1 rebalance (needs IPI) |
+| B1 Reschedule IPI | 3 | A1, Pre-1 | D1 rebalance (needs IPI) |
 | B2 AP preempt test | 1 | — | — |
-| B3 Work stealing | 2 | B1 (steal uses IPI for remote wake) | — |
-| C1 Inline asm SSE | 4 | C2 | C3 bench |
+| B3 Work stealing | 2 | B1, Pre-1 | — |
+| C1 Inline asm SSE | 4 | C2, Pre-2 | C3 bench |
 | C2 CR4 / CR0 setup | 0 | (folded into C1) | C1 runs |
-| C3 Bench docs | 0.5 | C1 | — |
+| C3 Bench docs | 0.5 | C1 | Jetson G3/G4 share the same table |
 | D1 Rebalance | 4 | B1, B3 | — |
 | D2 FXSAVE / FXRSTOR | 2 | C1 | Multi-task SSE inference |
 | E1 Firmware | 2 | (firmware access) | E2 |
@@ -797,10 +838,12 @@ After each phase lands, update:
 | E6 Full GPU pipeline | 10 | E5 | — |
 | X1 CI | 1 | — | — |
 
-**Capstone scope (A + B + C + D + X1):** ~24 engineer-days = ~5
-weeks by one engineer or ~2.5–3 weeks parallelised across two.
-(Added A4 at +1 day, D2 FXSAVE at +2 days — offset by moving P1-4
-out of Phase D and P1-3 being fully absorbed into B1.)
+**Capstone scope (Pre-1/Pre-2 + A + B + C + D + X1):** ~25
+engineer-days (added 0.65 day for the two infrastructure PRs,
+rounding in). ~5 weeks by one engineer or ~2.5–3 weeks parallelised
+across two. Note: Pre-0 (the `PI5_SECONDARY_PREEMPT` rename) is
+owned by the Pi 5 / Jetson plans and does not consume x86-64
+engineering time.
 
 **Full closure including Phase E:** ~86 engineer-days = ~17 weeks
 single-threaded, or ~10 weeks parallelised, assuming GSP firmware
@@ -812,6 +855,7 @@ access is secured at day 0.
 
 | Risk | Probability | Impact | Mitigation |
 |---|---|---|---|
+| Pre-1 / Pre-2 do not land before Week 1 | Medium | High | All Phase B / Phase C work blocks until they merge. Mitigation: land the two tiny infrastructure PRs (30 min + 3 h) in Week 0. Fall-back: if Pre-2 slips, C1 can ship its own dispatch arm temporarily, with a tracking issue to reunify after Jetson G1 lands. |
 | A1 TSS layout change collides with an existing inline-asm assumption in `context.S` | Low | Medium | Grep for `ltr`, `str`, task-register uses before landing. |
 | B1 IPI storms under high-dispatch workloads | Medium | Medium | Rate-limit via the "queue was empty" gate; bench on test-pc. |
 | C1 Inline asm produces wrong results on tail elements (n % 4 != 0) | Medium | Low | Bit-exact test against scalar is mandatory before landing. |
