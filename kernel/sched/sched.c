@@ -1135,13 +1135,21 @@ static struct task *sched_try_steal(uint32_t this_cpu)
  * Tasks that busy-wait without yielding won't preempt mid-execution;
  * that's a known limitation documented in the coop-preempt rationale.
  */
+/*
+ * 64-byte alignment places each per-CPU entry on its own cache line
+ * (no false sharing). Each CPU only reads/writes its own index, so
+ * there's no true cross-CPU contention on this array; the alignment
+ * is purely to stop other CPUs' dirty updates from ping-ponging a
+ * neighboring entry's line. volatile on the declaration prevents
+ * the compiler from holding stale values across the coop_preempt
+ * tick computation.
+ */
 static volatile uint64_t coop_last_tick_cntpct[MAX_CPUS]
     __attribute__((aligned(64)));
 
-/* Declared in timer.c; we poke them directly so existing pit_ticks /
- * timer_handler_count-based observability keeps working. */
-extern volatile uint32_t timer_handler_count;
-extern volatile uint64_t pit_ticks;
+/* timer_handler_count and pit_ticks are declared in timer.h. */
+
+void scheduler_tick(void);
 
 static inline void coop_preempt_maybe_tick(uint32_t cpu)
 {
@@ -1153,6 +1161,9 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
     uint64_t last = coop_last_tick_cntpct[cpu];
     if (last == 0) {
         coop_last_tick_cntpct[cpu] = now;
+        /* Publish the initial timestamp so subsequent reads on this
+         * CPU — and any observer — see the non-zero marker. */
+        __asm__ volatile("dmb ish" ::: "memory");
         return;
     }
     if (now - last < period)
@@ -1163,6 +1174,12 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
      * period. We only do one call per schedule entry to keep this path
      * bounded; the next schedule() call will catch up further. */
     coop_last_tick_cntpct[cpu] = last + period;
+
+    /* dmb before bumping the global counters so any observer reading
+     * timer_handler_count / pit_ticks sees our timestamp update as
+     * already committed. The coop_last_tick_cntpct slot itself is
+     * per-CPU, but the globals below are observed across CPUs. */
+    __asm__ volatile("dmb ish" ::: "memory");
 
     /* Mirror what the real timer ISR does so downstream counters and
      * sleeper wakeups work: bump the global tick counters, then call
@@ -1182,7 +1199,6 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
      * pre-sets preempt_disabled=1 before first switch_to). */
     int prev_preempt_disabled = preempt_disabled[cpu];
     preempt_disabled[cpu] = 1;
-    extern void scheduler_tick(void);
     scheduler_tick();
     preempt_disabled[cpu] = prev_preempt_disabled;
 }

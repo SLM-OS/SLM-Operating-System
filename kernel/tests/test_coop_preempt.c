@@ -24,8 +24,7 @@
 #include <stdint.h>
 
 extern void yield(void);
-extern volatile uint32_t timer_handler_count;
-extern volatile uint64_t pit_ticks;
+/* timer_handler_count and pit_ticks come from timer.h above. */
 
 /*
  * Verify that yielding in a loop for ~50 ms of wall-clock time causes

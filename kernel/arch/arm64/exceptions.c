@@ -307,8 +307,14 @@ void el1_fiq_handler(struct trap_frame *tf)
     volatile uint32_t *aeoir =
         (volatile uint32_t *)(GIC_CPU_BASE + 0x24UL);
 
+    /* GICC IAR low bits hold the IRQ number; top bits encode CPUID
+     * for SGIs but we don't care for the diag trace. 1023 (all ones
+     * in the low 10 bits) is the spurious-IRQ marker. */
+    #define GIC_IAR_IRQ_MASK   0x3FFu
+    #define GIC_IAR_SPURIOUS   0x3FFu
+
     uint32_t irq = *aiar;
-    uint32_t irq_num = irq & 0x3FF;
+    uint32_t irq_num = irq & GIC_IAR_IRQ_MASK;
 
 #if defined(PI5_IRQ_DIAG)
     /* Record the last FIQ source for this CPU in the diag trace slot.
@@ -316,7 +322,7 @@ void el1_fiq_handler(struct trap_frame *tf)
     uint64_t mpidr;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     uint32_t cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
-    if (cpu < 4) {
+    if (cpu < MAX_CPUS) {
         *(volatile uint32_t *)(NC_MEM_BASE + 0xFFE0UL + cpu * 4) =
             0xD0000000u | irq_num;
     }
@@ -335,9 +341,12 @@ void el1_fiq_handler(struct trap_frame *tf)
 #endif
 
     /* EOI for non-timer FIQ sources. */
-    if (irq_num != 0x3FFu) {
+    if (irq_num != GIC_IAR_SPURIOUS) {
         *aeoir = irq;
     }
+
+    #undef GIC_IAR_IRQ_MASK
+    #undef GIC_IAR_SPURIOUS
 #else
     (void)tf;
 #endif
