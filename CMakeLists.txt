@@ -156,6 +156,7 @@ set(KERNEL_SOURCES
     kernel/sched/task.c
     kernel/sched/sched.c
     kernel/sched/sched_heuristic.c
+    kernel/sched/steal_deque.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
     $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/sched/preempt.c>
 
@@ -255,6 +256,7 @@ set(TEST_SOURCES
     kernel/tests/test_harness.c
     kernel/tests/test_ipc.c
     kernel/tests/test_pi_mutex.c
+    kernel/tests/test_steal_deque.c
     kernel/tests/test_gpu.c
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c

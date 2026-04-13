@@ -94,4 +94,7 @@ int test_suite_elf(void);
 /* Message router tests (Rust FFI, ARM64 only) */
 int test_suite_msg_router(void);
 
+/* Steal-deque unit tests (#59 Phase A) */
+int test_suite_steal_deque(void);
+
 #endif /* TEST_HARNESS_H */
