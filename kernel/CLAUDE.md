@@ -172,19 +172,18 @@ The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)`
 
 ---
 
-## Pi 5 Timer IRQs and pit_ticks (April 2026)
+## Pi 5 Timer IRQs — cooperative preemption (April 2026, updated 2026-04-13)
 
-**Timer IRQs do not fire while tasks run on Pi 5.** Tasks are created with `DAIF.I=1` (IRQ masked) to prevent timer ISRs from corrupting partially-restored context during `switch_to`. On QEMU, timer IRQs fire regardless of DAIF masking. On real Pi 5 hardware, `DAIF.I=1` genuinely blocks all IRQ delivery.
+**Hardware timer IRQs do not deliver to EL1 on Pi 5.** TF-A's firmware/GIC configuration blocks delivery through every path reachable from kernel code. Full investigation and evidence in `docs/pi5-preemption-resolution.md`; Phase 1 register snapshots in `docs/pi5-irq-investigation-2026-04.md`. `GICC_HPPIR=30` at runtime confirms the GIC has timer IRQs pending, but no exception vector ever fires.
+
+**Resolution — `PI5_COOP_PREEMPT` (CMake option, default `ON` for RASPI5):** `schedule()` checks `CNTPCT_EL0` on every entry and synthesizes a `scheduler_tick()` call whenever ≥10 ms has elapsed on that CPU since the last tick. See `coop_preempt_maybe_tick()` in `kernel/sched/sched.c`. This drives the AI scheduler, deadline boosts, migration, and `pit_ticks` / `timer_handler_count` observability at yield points rather than preemptively.
 
 **Consequences:**
-- `pit_ticks` (incremented by timer ISR) does NOT advance while any task is running
-- `pit_ticks` ONLY advances when the idle task runs on CPU 0 (idle does `daifclr` + `wfi`)
-- Code that polls `pit_ticks` in a `yield()` loop will work IF the task yields frequently enough for idle to run and fire timer ticks between yields
-- Code that spins without yielding will never see `pit_ticks` advance
+- `pit_ticks` and `timer_handler_count` advance on all 4 CPUs when those CPUs yield.
+- A pure CPU-bound loop that never yields still monopolizes its CPU. The `delay()` helper in `kernel/tests/test_integration.c` yields every ~1k iterations for this reason.
+- `timer_get_count()` (CNTPCT_EL0) remains the authoritative wall-clock source for timeouts; see `hw_timeout_start()` / `hw_timeout_expired()` in `component_runtime.c`. Works regardless of IRQ delivery state.
 
-**Use `timer_get_count()` instead of `pit_ticks` for timeouts.** The hardware counter (CNTPCT_EL0) always advances regardless of IRQ state. See `hw_timeout_start()` / `hw_timeout_expired()` helpers in `component_runtime.c`.
-
-**`sched_set_policy()` must hold IRQs disabled.** The function wraps init/swap/shutdown in `irq_save`/`irq_restore`. Previously it unmasked IRQs between the pointer swap and the shutdown call, which on Pi 5 allowed a timer tick (from a pending GIC HPPIR=30) to preempt the caller. The idle task then ran with IRQs masked and CPU 0 hung.
+**`sched_set_policy()` must hold IRQs disabled.** The function wraps init/swap/shutdown in `irq_save`/`irq_restore`. Retained because the ELR-trampoline path (PR #98, inert under coop-preempt but kept for future hardware-IRQ restoration) still relies on it.
 
 ---
 

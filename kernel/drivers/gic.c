@@ -461,9 +461,16 @@ static void gic_cpu_init(void)
     /* No priority grouping (all bits for priority) */
     GICC_BPR = 0;
 
-    /* Enable CPU interface for Group 1 (non-secure IRQ).
-     * Use value 0x1 (just EnableGrp1), matching Linux gic driver. */
-    GICC_CTLR = GICC_CTLR_ENABLE;
+    /* Enable CPU interface for Group 1 (non-secure IRQ). Preserve the
+     * bypass-disable bits (4 = FIQBypDisGrp1, 5 = IRQBypDisGrp1) from
+     * whatever boot.S / firmware left in place — clearing them lets
+     * GIC nIRQ/nFIQ outputs follow the external bypass signal, which
+     * on Pi 5 is not driven and therefore suppresses all GIC-sourced
+     * interrupts. Linux GIC driver reads existing value and preserves
+     * bypass bits; we match that pattern. */
+    uint32_t ctlr = GICC_CTLR;
+    uint32_t bypass = ctlr & ((1u << 4) | (1u << 5));
+    GICC_CTLR = GICC_CTLR_ENABLE | bypass;
 }
 
 #else /* GIC_VERSION == 3 */

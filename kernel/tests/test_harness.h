@@ -100,4 +100,7 @@ int test_suite_msg_router(void);
 /* Steal-deque unit tests (#59 Phase A) */
 int test_suite_steal_deque(void);
 
+/* Cooperative-preemption tests (issue #99 resolution) */
+int test_suite_coop_preempt(void);
+
 #endif /* TEST_HARNESS_H */

@@ -1,21 +1,21 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
-**Date:** April 7, 2026
-**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC, preemptive scheduling active. Full test suite passes (431 tests: 415 pass, 16 ignored, 0 failures). 100% boot reliability (92/92 power cycles). Context switch: 1.7 µs.
+**Date:** 2026-04-13 (preemption resolution)
+**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC. **Cooperative preemption** active via `PI5_COOP_PREEMPT` (CNTPCT-driven `scheduler_tick` from `schedule()`); hardware timer IRQ delivery remains blocked by TF-A/GIC configuration — see `docs/pi5-preemption-resolution.md` and issue #99. 100% boot reliability (10/10 on latest `boot_test`). Context switch: 1.7 µs.
 
 ## Summary
 
-SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting. The full test suite (431 tests across 14 suites) passes with zero failures on Pi 5 hardware.
+SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All kernel subsystems initialize successfully: PMM, VMM, GIC, SMP (4-core, all online via PSCI SMC + DC CVAC/CIVAC cache workaround), IPC, VFS, LittleFS, Rust runtime, component system, and Lua scripting.
 
-**Preemptive scheduling is active** — timer interrupts drive context switching at 100 Hz. The shell accepts input and responds to commands with preemption enabled. Two RP1-specific GPIO pad configurations were required for UART RX (OD=1, FUNCSEL sequencing). The armstub is currently disabled (separate issue; see Known Limitations).
+**Preemption model:** cooperative preemption. `schedule()` checks `CNTPCT_EL0` on every entry and synthesizes a `scheduler_tick()` call whenever ≥10 ms has elapsed on that CPU since the last tick. This drives the AI scheduler's `policy->tick`, deadline boosts, migration decisions, and all `pit_ticks` / `timer_handler_count` observability — for any workload that yields (all message-router / lock / UART-polling tasks). Pure busy-wait loops still monopolize their CPU; the `delay()` helper in the integration tests yields every ~1k iterations to exercise the coop path. Hardware timer IRQs to EL1 remain undeliverable on this firmware/TF-A configuration after extensive investigation (see #99).
 
 **Key achievements:**
 1. EL2→EL1 transition for peripheral access
 2. RP1 UART TX via PL011 flag register polling (works after MMU enable)
 3. Serial console output at 115200 baud on GPIO14/15
 4. Platform-specific VMM mappings (1GB L1 block descriptors for RAM, L2 tables for MMIO)
-5. GIC Group 1 configuration from EL2 in boot.S (armstub disabled)
-6. Timer interrupts working (physical timer, IRQ 30) with preemptive scheduling
+5. Cooperative preemption driven by `CNTPCT_EL0` (`PI5_COOP_PREEMPT`); `sched_diag_tick` advances on all 4 CPUs, AI scheduler `policy->tick` fires
+6. Cross-CPU dispatch (`bench smp`): 3/3 target CPUs complete
 7. All subsystems boot: PMM, VMM, GIC, scheduler, IPC, VFS, LittleFS, Rust, Lua
 8. Automated deploy via SDWireC + labctl
 

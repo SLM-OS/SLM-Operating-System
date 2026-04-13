@@ -74,6 +74,9 @@ const shell_cmd_t builtin_commands[] = {
     {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
+#if defined(PI5_IRQ_DIAG)
+    {"diag",   cmd_diag,   "Pi 5 IRQ-delivery diagnostics (diag <el2|vec|fiq|all>)"},
+#endif
 };
 
 const int NUM_BUILTIN_COMMANDS = sizeof(builtin_commands) / sizeof(builtin_commands[0]);

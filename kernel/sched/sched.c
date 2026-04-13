@@ -435,9 +435,18 @@ static void idle_task_func(void *arg)
          *
          * Without PI5_SECONDARY_PREEMPT (Jetson, or Pi 5 with the kill
          * switch): only CPU 0 takes timer IRQs in idle. Secondary CPUs
-         * use WFE and rely on cooperative cross-CPU dispatch (SEV). */
-#if defined(PI5_SECONDARY_PREEMPT)
+         * use WFE and rely on cooperative cross-CPU dispatch (SEV).
+         *
+         * With PI5_FIQ_TIMER: also clear DAIF.F. On this GICv2 the
+         * timer PPI remains in Group 0 and arrives as FIQ; masking F
+         * would keep the interrupt line dead. (daifclr #3 clears I+F.) */
+#if defined(PI5_FIQ_TIMER)
+        __asm__ volatile("msr daifclr, #3" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+        __asm__ volatile("wfi");
+#elif defined(PI5_SECONDARY_PREEMPT)
         __asm__ volatile("msr daifclr, #2" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
         __asm__ volatile("wfi");
 #else
         if (cpu_id() == 0) {
@@ -1109,6 +1118,92 @@ static struct task *sched_try_steal(uint32_t this_cpu)
 }
 #endif /* CONFIG_WORK_STEALING */
 
+#if defined(PI5_COOP_PREEMPT)
+/*
+ * Cooperative-preemption tick driver.
+ *
+ * Pi 5's GICv2 + TF-A configuration does not deliver timer IRQs to EL1
+ * (confirmed by Phase 1 diagnostics: HPPIR shows IRQ 30 pending, but
+ * no exception vector ever fires). Rather than block preemption
+ * entirely, drive scheduler_tick() from schedule() whenever CNTPCT_EL0
+ * has advanced by >= one tick period (10 ms at 100 Hz) on this CPU
+ * since the last synthetic tick. This gives "cooperative preemption":
+ * scheduling decisions — AI policy, deadline boosts, migration —
+ * become observable at the next yield or schedule() call, which covers
+ * any workload that polls UART / message queues / locks.
+ *
+ * Tasks that busy-wait without yielding won't preempt mid-execution;
+ * that's a known limitation documented in the coop-preempt rationale.
+ */
+/*
+ * 64-byte alignment places each per-CPU entry on its own cache line
+ * (no false sharing). Each CPU only reads/writes its own index, so
+ * there's no true cross-CPU contention on this array; the alignment
+ * is purely to stop other CPUs' dirty updates from ping-ponging a
+ * neighboring entry's line. volatile on the declaration prevents
+ * the compiler from holding stale values across the coop_preempt
+ * tick computation.
+ */
+static volatile uint64_t coop_last_tick_cntpct[MAX_CPUS]
+    __attribute__((aligned(64)));
+
+/* timer_handler_count and pit_ticks are declared in timer.h. */
+
+void scheduler_tick(void);
+
+static inline void coop_preempt_maybe_tick(uint32_t cpu)
+{
+    uint64_t freq = timer_get_frequency();
+    if (freq == 0)
+        return;
+    uint64_t period = freq / TIMER_HZ;       /* cycles per tick */
+    uint64_t now = timer_get_count();
+    uint64_t last = coop_last_tick_cntpct[cpu];
+    if (last == 0) {
+        coop_last_tick_cntpct[cpu] = now;
+        /* Publish the initial timestamp so subsequent reads on this
+         * CPU — and any observer — see the non-zero marker. */
+        __asm__ volatile("dmb ish" ::: "memory");
+        return;
+    }
+    if (now - last < period)
+        return;
+
+    /* Catch up — if we haven't scheduled in a long time (idle wfi or
+     * long busy-wait), replay one tick and advance our marker by one
+     * period. We only do one call per schedule entry to keep this path
+     * bounded; the next schedule() call will catch up further. */
+    coop_last_tick_cntpct[cpu] = last + period;
+
+    /* dmb before bumping the global counters so any observer reading
+     * timer_handler_count / pit_ticks sees our timestamp update as
+     * already committed. The coop_last_tick_cntpct slot itself is
+     * per-CPU, but the globals below are observed across CPUs. */
+    __asm__ volatile("dmb ish" ::: "memory");
+
+    /* Mirror what the real timer ISR does so downstream counters and
+     * sleeper wakeups work: bump the global tick counters, then call
+     * scheduler_tick to drive the policy. timer_handler_count doubles
+     * as "cooperative preemption is live" in the `cpu` diag output. */
+    timer_handler_count++;
+    pit_ticks++;
+
+    /* scheduler_tick would recursively call schedule() on the non-
+     * PI5_SECONDARY_PREEMPT path; suppress that recursion by holding
+     * preempt_disabled across the call. We're already inside schedule()
+     * and about to pick next — the tick's policy work should run but
+     * its "schedule now" side effect is redundant.
+     *
+     * Save-and-restore preempt_disabled so we don't clobber state the
+     * outer schedule() may have set earlier (at boot, scheduler_start
+     * pre-sets preempt_disabled=1 before first switch_to). */
+    int prev_preempt_disabled = preempt_disabled[cpu];
+    preempt_disabled[cpu] = 1;
+    scheduler_tick();
+    preempt_disabled[cpu] = prev_preempt_disabled;
+}
+#endif /* PI5_COOP_PREEMPT */
+
 /*
  * Schedule - select next task and switch to it (per-CPU).
  */
@@ -1117,6 +1212,12 @@ void schedule(void)
     uint32_t this_cpu = cpu_id();
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
     sched_diag_schedule[this_cpu]++;
+
+#if defined(PI5_COOP_PREEMPT)
+    /* Cooperative preemption: drive scheduler_tick off CNTPCT when the
+     * hardware timer IRQ path isn't delivering (see issue #99). */
+    coop_preempt_maybe_tick(this_cpu);
+#endif
 
     /* On non-NC platforms, invalidate cached copy of run queue before reading.
      * On Pi 5 with NC run queues, this is a no-op (NC data not cached). */
@@ -1428,7 +1529,11 @@ void scheduler_start(uint32_t this_cpu)
 #if defined(PLATFORM_X86_64)
     __asm__ volatile("sti" ::: "memory");
 #elif defined(PLATFORM_HAS_NC_MEMORY)
-#if defined(PI5_SECONDARY_PREEMPT)
+#if defined(PI5_FIQ_TIMER)
+    /* Unmask both I and F — timer arrives as FIQ on this GICv2. */
+    __asm__ volatile("msr daifclr, #0x3" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
+#elif defined(PI5_SECONDARY_PREEMPT)
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");
     __asm__ volatile("isb" ::: "memory");
 #else
