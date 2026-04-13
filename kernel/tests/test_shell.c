@@ -7,6 +7,7 @@
 
 #include "unity.h"
 #include "../include/shell.h"
+#include "../include/shell_internal.h"
 #include "../include/component.h"
 #include "../include/vfs.h"
 #include "../include/task.h"
@@ -1625,6 +1626,188 @@ static void test_shell_cmd_truncate_no_args(void)
 }
 
 /* ============================================================================
+ * sleep Command Validation (CORE-M1)
+ *
+ * cmd_sleep now uses shell_parse_uint instead of atoi, so it rejects
+ * non-numeric input, negative durations, and "0". The happy-path sleeps
+ * for real, so that is not exercised here.
+ * ============================================================================ */
+
+static void test_shell_cmd_sleep_rejects_non_numeric(void)
+{
+    /* "abc" is not a valid uint — parse fails. */
+    int ret = shell_execute("sleep abc");
+    TEST_ASSERT_EQUAL_INT(1, ret);
+}
+
+static void test_shell_cmd_sleep_rejects_zero(void)
+{
+    /* "0" parses but is rejected (duration must be > 0). */
+    int ret = shell_execute("sleep 0");
+    TEST_ASSERT_EQUAL_INT(1, ret);
+}
+
+static void test_shell_cmd_sleep_rejects_negative(void)
+{
+    /* shell_parse_uint rejects strings with non-digit chars including '-'. */
+    int ret = shell_execute("sleep -5");
+    TEST_ASSERT_EQUAL_INT(1, ret);
+}
+
+static void test_shell_cmd_sleep_rejects_trailing_garbage(void)
+{
+    /* "10x" has trailing garbage — shell_parse_uint rejects. atoi would
+     * silently return 10 and sleep for 10ms. */
+    int ret = shell_execute("sleep 10x");
+    TEST_ASSERT_EQUAL_INT(1, ret);
+}
+
+static void test_shell_cmd_sleep_missing_args(void)
+{
+    int ret = shell_execute("sleep");
+    TEST_ASSERT_EQUAL_INT(1, ret);
+}
+
+/* ============================================================================
+ * Path Resolution Unit Tests (CORE-H4)
+ *
+ * Direct tests for shell_resolve_path() covering canonicalization of "..",
+ * ".", empty strings, double slashes, trailing slashes, and overflow.
+ * ============================================================================ */
+
+/* Restore shell_cwd after each test in this group. */
+static void resolve_path_setup(char *saved_cwd)
+{
+    strcpy(saved_cwd, shell_cwd);
+    strcpy(shell_cwd, "/");
+}
+
+static void resolve_path_teardown(const char *saved_cwd)
+{
+    strcpy(shell_cwd, saved_cwd);
+}
+
+static void test_shell_resolve_path_absolute_simple(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("/foo/bar", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/foo/bar", out);
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_dotdot(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("/foo/../bar", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/bar", out);
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_dot(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("/foo/./bar", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/foo/bar", out);
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_dotdot_at_root(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+
+    /* ".." at root stays at root, then "etc" is appended. */
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("/../etc", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/etc", out);
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_double_slash(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("/foo//bar", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/foo/bar", out);
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_trailing_slash(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("/foo/bar/", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/foo/bar", out);
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_empty(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+    strcpy(shell_cwd, "/sys");
+
+    /* Empty path resolves to current working directory. */
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/sys", out);
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_relative(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+    strcpy(shell_cwd, "/foo");
+
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("bar", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/foo/bar", out);
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_overflow(void)
+{
+    char saved_cwd[VFS_MAX_PATH];
+    resolve_path_setup(saved_cwd);
+
+    /* Tiny output buffer forces the length check to fail. */
+    char out[4];
+    TEST_ASSERT_EQUAL_INT(-1, shell_resolve_path("/foo/bar", out, sizeof(out)));
+
+    resolve_path_teardown(saved_cwd);
+}
+
+static void test_shell_resolve_path_rejects_null(void)
+{
+    char out[VFS_MAX_PATH];
+    TEST_ASSERT_EQUAL_INT(-1, shell_resolve_path(NULL, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_INT(-1, shell_resolve_path("/foo", NULL, sizeof(out)));
+    TEST_ASSERT_EQUAL_INT(-1, shell_resolve_path("/foo", out, 1));
+}
+
+/* ============================================================================
  * Shared String Function Regression Tests (CORE-L1)
  *
  * Previously, 6 files had their own static copies of strcmp/strlen/strcpy.
@@ -1921,6 +2104,25 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_append_no_args);
     RUN_TEST(test_shell_cmd_truncate);
     RUN_TEST(test_shell_cmd_truncate_no_args);
+
+    /* sleep command validation (CORE-M1) */
+    RUN_TEST(test_shell_cmd_sleep_rejects_non_numeric);
+    RUN_TEST(test_shell_cmd_sleep_rejects_zero);
+    RUN_TEST(test_shell_cmd_sleep_rejects_negative);
+    RUN_TEST(test_shell_cmd_sleep_rejects_trailing_garbage);
+    RUN_TEST(test_shell_cmd_sleep_missing_args);
+
+    /* Path resolution unit tests (CORE-H4) */
+    RUN_TEST(test_shell_resolve_path_absolute_simple);
+    RUN_TEST(test_shell_resolve_path_dotdot);
+    RUN_TEST(test_shell_resolve_path_dot);
+    RUN_TEST(test_shell_resolve_path_dotdot_at_root);
+    RUN_TEST(test_shell_resolve_path_double_slash);
+    RUN_TEST(test_shell_resolve_path_trailing_slash);
+    RUN_TEST(test_shell_resolve_path_empty);
+    RUN_TEST(test_shell_resolve_path_relative);
+    RUN_TEST(test_shell_resolve_path_overflow);
+    RUN_TEST(test_shell_resolve_path_rejects_null);
 
     /* String function regression tests */
     RUN_TEST(test_string_strcmp_basic);

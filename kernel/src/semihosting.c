@@ -88,6 +88,10 @@ void semihosting_exit(int exit_code)
 
 int semihosting_available(void)
 {
+    /* ENABLE_SEMIHOSTING is defined by CMakeLists.txt only when PLATFORM=
+     * QEMU_VIRT. On Pi 5 and Jetson the flag is absent, so this returns 0
+     * and callers never issue the HLT #0xF000 probe that would trap on
+     * real hardware without a semihosting host. */
 #ifdef ENABLE_SEMIHOSTING
     return 1;
 #else

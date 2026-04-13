@@ -494,3 +494,4 @@ The block device layer supports multiple devices:
 ---
 
 *Created: December 2025*
+*Last updated: April 2026 — file paths and APIs verified against current source*
