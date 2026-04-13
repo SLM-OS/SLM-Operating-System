@@ -20,6 +20,25 @@ Two blockers together gate preemption + SMP:
 
 ---
 
+## Cross-platform coordination (prerequisite infrastructure)
+
+A cross-plan review covering the Pi 5, Jetson, and x86-64 preemption/SMP plans identified four small infrastructure PRs that should land in Week 1 — **before** Phase 2+ of this plan proceeds — to eliminate guaranteed merge conflicts with the parallel Jetson and x86-64 tracks. Each is small (15 minutes to ~2 hours of work). The Pi 5 plan's Phase 3-4 work assumes these have landed.
+
+| # | Infrastructure PR | Owner | Pi 5 plan dependency |
+|---|---|---|---|
+| 1 | **Rename `PI5_SECONDARY_PREEMPT` → `SECONDARY_PREEMPT`** in `CMakeLists.txt`, `kernel/sched/preempt.c`, `kernel/sched/sched.c`, `kernel/arch/arm64/vectors.S`. Keep a backward-compat `#define PI5_SECONDARY_PREEMPT SECONDARY_PREEMPT` so existing build invocations don't break. | Either platform's first activation PR | Phase 3d (CMake flip) and Phase 1b (`vectors.S` `#if` guards) reference the new symbol. The Pi 5 plan defers symbol naming to whichever PR lands first. |
+| 2 | **`smp_notify_cpu()` abstraction** in `kernel/include/smp.h` (or new `kernel/include/smp_arch.h`). Wraps platform-specific cross-CPU wake (`SEV` on ARM64, `IPI` on x86-64). Initial bodies are platform-conditional. | Cross-platform | Phase 4a's `bench smp` tests rely on whichever path the abstraction picks for ARM64; if Jetson lands work-stealing-related changes that switch to the new helper, Pi 5 must follow. |
+| 3 | **MPIDR → cpu_id helper consolidation.** A single `kernel/include/cpu_id.h` (or extension of `smp.h`) exposing `static inline uint32_t cpu_logical_id_from_mpidr(uint64_t)`. Replaces the inline `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` hack used in seven sites today (`vectors.S` trampoline, `task.c`, `sched.c`, `smp.c`, `exceptions.c`, multiple NC trace points). The Jetson plan's P3 step 2 prescribes the dual-cluster MPIDR fix; the helper hides that platform variation behind one symbol. | Jetson (per Jetson P3) — Pi 5 consumes | Phase 1b's `DIAG_BUMP_VEC` macro and Phase 4a's secondary-CPU paths use the inline hack today; once the helper exists, both should call it instead. Until then, the inline hack continues to work on Pi 5 (`Aff1` only) but must be tested on Pi 5 after the Jetson PR lands so the dual-cluster fix doesn't regress the single-cluster case. |
+| 4 | **UART ISR-reentrance audit + per-platform NC lock.** Audit every function reachable from `el1_irq_handler → timer_handler → scheduler_tick` (and the FIQ counterpart) across all platforms; strip `uart_printf`/`uart_puts`/`DEBUG_PRINT` calls or gate behind `uart_trylock`. The Pi 5, Jetson, and QEMU UART drivers each get the same treatment. | Cross-platform | Phase 2's pre-condition (currently scoped Pi-5-only in this plan) should be folded into this shared PR. Removes a duplicated audit between platform tracks. |
+
+**Sequencing.** Items 1, 2, and 4 should land before either platform's preemption activation PR. Item 3 should land before — or as part of — Jetson P3 step 2; the Pi 5 plan can reuse it lazily as Phase 1b's macro and Phase 4a's tests are touched.
+
+**Already-merged infrastructure that other tracks depend on:**
+
+- **ELR trampoline** (`kernel/arch/arm64/vectors.S`, `kernel/sched/preempt.c`) — Pi 5 owns this implementation (PR #98 merged). The Jetson plan should reference it as a dependency rather than re-deriving the same trampoline; both ARM64 platforms share the same `switch_to`-from-exception hazard. The Jetson plan's earlier `context.daif` flip (cross-plan C5) should be dropped in favour of using this trampoline.
+
+---
+
 ## Phase 1 — Root-cause #99 (diagnostic-only, no behavior change)
 
 The blocker has multiple plausible causes, indistinguishable from EL1 alone because most of the relevant registers (`HCR_EL2`, `SCR_EL3`, `CNTHCTL_EL2`, `IGROUPR` from non-secure) cannot be read post-boot. Capture them at EL2 during boot and expose the snapshot via non-cacheable memory; simultaneously turn the silent `el1_fiq` hang into a first-class diagnostic so we stop missing FIQ deliveries.
@@ -47,7 +66,7 @@ Add a shell command `diag el2` that dumps these slots. No behavior change; only 
 
 ### 1b. Per-vector exception counters + real FIQ handler
 
-Increment a per-CPU NC counter at the very first instruction of `el1_irq`, `el1_sync`, `el1_fiq`, `el1_serror` (before `save_regs`). Expose via the `cpu` shell command.
+Increment a per-CPU NC counter at the very first instruction of `el1_irq`, `el1_sync`, `el1_fiq`, `el1_serror` (before `save_regs`). Expose via the `cpu` shell command. The counter increment computes the logical CPU index from `MPIDR_EL1`. Use the inline hack `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` for the initial implementation (consistent with every other `PI5_*` site); once Infrastructure PR #3 (cross-platform MPIDR helper) lands, switch to the helper so the dual-cluster Jetson case works the same way.
 
 **Critical:** today `el1_fiq: b hang` (in `kernel/arch/arm64/vectors.S`) silently consumes FIQs. If timer IRQs are arriving as FIQ because they remained in GIC Group 0, this handler is the reason `timer_handler_count` stays `0` without *any* diagnostic trace. Replace with a real handler:
 
@@ -98,6 +117,8 @@ Branches based on the Phase 1 finding. Paths are ordered by likelihood per exter
 ### Pre-condition (shared) — UART reentrance audit
 
 **Blocking prerequisite** before any DAIF unmask ships: audit every function reachable from `el1_irq_handler → timer_handler → scheduler_tick` (and the equivalent FIQ path if taken) and confirm **none** call `uart_printf`, `uart_puts`, `DEBUG_PRINT`, `INFO`, `WARN`, or any other UART-emitting routine. A task spinning on `FR_TXFF` in `uart_putc` that gets preempted, then re-enters UART output from IRQ/FIQ context, deadlocks on the implicit UART lock. This is the likely root cause of the `ac46e40` shell-banner hang at `[2]SLM-[a]OS`. Strip hits or gate them behind `uart_trylock`. Record the audit result as a sign-off before Phase 3.
+
+**Cross-platform note:** per the cross-plan review, this audit should be done as **Infrastructure PR #4** (see "Cross-platform coordination" above) covering the Pi 5 PL011 path, the Jetson UARTC/TCU path, the QEMU PL011 path, and the x86-64 16550 path together — not as a Pi-5-only follow-up. Land the shared audit PR before this Phase 2's branch picks up its consequences.
 
 ### 2a. If cause is "timer IRQs delivered as FIQ" (leading hypothesis)
 
@@ -156,22 +177,26 @@ With #99 fixed, tasks must run with `DAIF.I=0` so timer IRQs can actually preemp
 
 ### 3a. Task entry unmask
 
-Re-enable `daifclr #2 + isb` in `kernel/sched/task.c:task_entry_trampoline`, gated on `PI5_SECONDARY_PREEMPT`. (Present in PR #98 branch history; needs un-commenting.)
+Re-enable `daifclr #2 + isb` in `kernel/sched/task.c:task_entry_trampoline`, gated on the secondary-preempt CMake symbol (`SECONDARY_PREEMPT` after Infrastructure PR #1 lands; `PI5_SECONDARY_PREEMPT` if Phase 3 begins before that PR — the backward-compat alias keeps either name working). Present in PR #98 branch history; needs un-commenting.
 
 ### 3b. Context switch DAIF handling
 
-`kernel/arch/arm64/context.S` already restores `DAIF` **last** (PR #98), closing the `ac46e40` "DAIF restored before SP/GPRs → mid-restore IRQ corrupts state" race. Re-verify by inspection after Phase 2 lands.
+`kernel/arch/arm64/context.S` already restores `DAIF` **last** (PR #98), closing the `ac46e40` "DAIF restored before SP/GPRs → mid-restore IRQ corrupts state" race. Re-verify by inspection after Phase 2 lands. The Jetson plan should drop its earlier `context.daif = 0` flip in favour of relying on this same fix; raised under cross-plan C5.
 
 ### 3c. Boot-stack `daifclr` removal
 
-`scheduler_start()` does not `daifclr` on the boot stack before `switch_to(NULL, first_task)` when `PI5_SECONDARY_PREEMPT=ON` (PR #98). Confirm this remains off for Pi 5; an IRQ on the boot stack mid-`switch_to` would be unsafe because the boot stack is not a valid task stack.
+`scheduler_start()` does not `daifclr` on the boot stack before `switch_to(NULL, first_task)` when the secondary-preempt symbol is on (PR #98). Confirm this remains off for Pi 5; an IRQ on the boot stack mid-`switch_to` would be unsafe because the boot stack is not a valid task stack.
 
 ### 3d. Activate the kill switch
 
-Flip the CMake option default:
+Flip the CMake option default to `ON`. Use the symbol name that exists at the time this phase runs:
 
 ```cmake
-option(PI5_SECONDARY_PREEMPT ... OFF)  →  option(PI5_SECONDARY_PREEMPT ... ON)
+# After Infrastructure PR #1 lands (the rename):
+option(SECONDARY_PREEMPT ... OFF)        →  option(SECONDARY_PREEMPT ... ON)
+
+# Before Infrastructure PR #1 lands (use the original symbol):
+option(PI5_SECONDARY_PREEMPT ... OFF)    →  option(PI5_SECONDARY_PREEMPT ... ON)
 ```
 
 Keep the option available so regression bisects can still turn it off.
@@ -296,6 +321,14 @@ Acceptance check sequence after Phase 4:
 
 ## Revision notes
 
+- **2026-04-13 (rev 3):** Cross-plan review (Pi 5 + Jetson + x86-64) integrated. Key changes:
+  - Added a **"Cross-platform coordination"** section near the top listing four prerequisite infrastructure PRs (rename `PI5_SECONDARY_PREEMPT`, `smp_notify_cpu()` abstraction, MPIDR helper consolidation, shared UART-reentrance audit). All four should land in Week 1 before Phase 2+ proceeds, and the Pi 5 plan defers symbol naming to whichever PR lands first.
+  - Phase 1b now references the upcoming MPIDR helper (Infrastructure PR #3) — interim implementation uses the existing inline hack consistent with other `PI5_*` sites.
+  - Phase 2 pre-condition (UART-reentrance audit) explicitly redirected to **Infrastructure PR #4** so the audit covers Pi 5, Jetson, QEMU, and x86-64 in one PR rather than being repeated per-platform.
+  - Phase 3a/3d updated to reference `SECONDARY_PREEMPT` (post-rename) with a fallback to `PI5_SECONDARY_PREEMPT` if Phase 3 begins before Infrastructure PR #1 lands.
+  - Phase 3b notes that the Jetson plan should drop its `context.daif = 0` flip in favour of the same `context.S` DAIF-restore-last fix already in PR #98 (cross-plan C5).
+  - Cross-plan ELR-trampoline ownership clarified — Pi 5 owns the implementation (PR #98 merged); Jetson references it as a dependency rather than re-deriving.
+
 - **2026-04-13 (rev 2):** External review pass integrated. Key changes:
   - Elevated the **FIQ-delivery hypothesis** (`el1_fiq: b hang` silently consuming Group 0 timer IRQs) to the primary cause in Phase 1c; added an explicit Phase 2a fix path (FIQ handler as fast path, armstub re-enablement as clean path).
   - Marked the original "configure Group 1 from non-secure EL1" approach (old 2b.2) as **non-viable**: GICv2 with Security Extensions does not allow NS→Group-1 promotion. Only EL3 can.
@@ -306,4 +339,4 @@ Acceptance check sequence after Phase 4:
   - Added Phase 4a.1 — **secondary-CPU boot-stack headroom** check; 16 KB is tight under preemption.
   - Replaced stale `boot.S:XXX-YYY` line-number references with pattern/symbol searches to survive source drift.
 
-*Last updated: 2026-04-13 (rev 2).*
+*Last updated: 2026-04-13 (rev 3).*
