@@ -1034,6 +1034,123 @@ pub extern "C" fn rust_eviction_snapshot_count() -> i32 {
     }
 }
 
+// -- Latency benchmark FFI (Phase AI-Eviction M9) --
+
+/// Per-policy average `select_victim` latency in nanoseconds,
+/// measured over `iterations` calls on a canned 8-candidate set.
+///
+/// Returns `u64::MAX` when:
+///   - `ai_eviction` is off
+///   - the policy name is unrecognised
+///   - `iterations` is 0
+///   - the kernel clock returns bogus values (elapsed < 0)
+///
+/// The candidate set is built by `build_bench_candidates()` — 8
+/// blocks with distinct tracking fields so the ML policies see
+/// meaningful input variation. All policies are evaluated against
+/// the same set so their numbers are directly comparable.
+///
+/// # Safety
+/// `name` must be a valid null-terminated C string ≤ 31 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_bench_latency_ns(
+    name: *const u8,
+    iterations: u32,
+) -> u64 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (name, iterations); u64::MAX }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        if name.is_null() || iterations == 0 { return u64::MAX; }
+        let mut len = 0usize;
+        while len < 32 {
+            if *name.add(len) == 0 { break; }
+            len += 1;
+        }
+        if len == 0 || len == 32 { return u64::MAX; }
+        let slice = core::slice::from_raw_parts(name, len);
+        let req = match core::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(_) => return u64::MAX,
+        };
+
+        use alloc::boxed::Box;
+        use mm::eviction::{self, EvictionPolicy};
+        let mut policy: Box<dyn EvictionPolicy + Send> = match req {
+            "lru" => Box::new(eviction::LruPolicy::new()),
+            "lfu" => Box::new(eviction::LfuPolicy::new()),
+            "arc" => Box::new(eviction::ARCPolicy::new()),
+            "slm" => Box::new(eviction::SlmHeuristicPolicy::new()),
+            "xgboost" => Box::new(eviction::XGBoostPolicy::new()),
+            "mlp" => Box::new(eviction::MlpPolicy::new()),
+            "cacheus" => Box::new(eviction::CacheusSelector::ml_only()),
+            "first_candidate" => Box::new(eviction::FirstCandidatePolicy),
+            _ => return u64::MAX,
+        };
+
+        let cands = build_bench_candidates();
+        // Warm-up pass so the int8 MLP's first-touch cache misses
+        // don't skew the average.
+        for _ in 0..32 {
+            let _ = policy.select_victim(&cands);
+        }
+
+        let start = kernel_ffi::get_time_ns();
+        for _ in 0..iterations {
+            // `core::hint::black_box` keeps the compiler from
+            // hoisting invariant work out of the loop.
+            let v = core::hint::black_box(policy.select_victim(
+                core::hint::black_box(&cands),
+            ));
+            core::hint::black_box(v);
+        }
+        let end = kernel_ffi::get_time_ns();
+        if end <= start { return u64::MAX; }
+        (end - start) / iterations as u64
+    }
+}
+
+/// Canonical candidate set for the latency benches.
+#[cfg(feature = "ai_eviction")]
+fn build_bench_candidates() -> [mm::eviction::BlockMeta; 8] {
+    use mm::eviction::{BlockMeta, PoolType};
+    [
+        BlockMeta { block_id: 900, pool_type: PoolType::Weight,
+                    model_id: 1, layer_idx:  0, last_access_time:  1_000_000,
+                    load_time:  500_000, access_count:  5, ref_count: 0,
+                    gpu_mapped: false, is_dirty: false, model_priority: 3 },
+        BlockMeta { block_id: 901, pool_type: PoolType::Weight,
+                    model_id: 1, layer_idx:  1, last_access_time:  2_000_000,
+                    load_time:  600_000, access_count: 10, ref_count: 0,
+                    gpu_mapped: false, is_dirty: false, model_priority: 3 },
+        BlockMeta { block_id: 902, pool_type: PoolType::Workspace,
+                    model_id: 2, layer_idx: -1, last_access_time:  1_500_000,
+                    load_time:  700_000, access_count:  1, ref_count: 0,
+                    gpu_mapped: true,  is_dirty: true,  model_priority: 5 },
+        BlockMeta { block_id: 903, pool_type: PoolType::Weight,
+                    model_id: 3, layer_idx:  5, last_access_time:  3_000_000,
+                    load_time:  800_000, access_count:  2, ref_count: 0,
+                    gpu_mapped: false, is_dirty: false, model_priority: 2 },
+        BlockMeta { block_id: 904, pool_type: PoolType::Weight,
+                    model_id: 3, layer_idx:  6, last_access_time:  4_000_000,
+                    load_time:  900_000, access_count:  3, ref_count: 0,
+                    gpu_mapped: false, is_dirty: false, model_priority: 2 },
+        BlockMeta { block_id: 905, pool_type: PoolType::Workspace,
+                    model_id: 4, layer_idx: -1, last_access_time:  5_000_000,
+                    load_time: 1_000_000, access_count:  7, ref_count: 0,
+                    gpu_mapped: false, is_dirty: false, model_priority: 1 },
+        BlockMeta { block_id: 906, pool_type: PoolType::Weight,
+                    model_id: 5, layer_idx:  0, last_access_time:  6_000_000,
+                    load_time: 1_100_000, access_count:  4, ref_count: 0,
+                    gpu_mapped: true,  is_dirty: false, model_priority: 4 },
+        BlockMeta { block_id: 907, pool_type: PoolType::Weight,
+                    model_id: 5, layer_idx:  2, last_access_time:  7_000_000,
+                    load_time: 1_200_000, access_count:  6, ref_count: 0,
+                    gpu_mapped: false, is_dirty: false, model_priority: 4 },
+    ]
+}
+
 // -- Shell-facing FFI (Phase AI-Eviction M7) --
 
 /// Copy the active policy's name into `out_buf` (null-terminated).

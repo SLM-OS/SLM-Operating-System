@@ -265,6 +265,56 @@ follow the same pattern.
 can check to decide whether to fall back to a classical policy when
 the real weights are not present.
 
+### Latency Benchmarks (M9)
+
+`rust_eviction_bench_latency_ns(name, iterations)` drives each
+policy's `select_victim` 1000 times against a canned 8-candidate
+set and returns the average per-call latency in nanoseconds. The
+`test_bench_all_policies` Unity test prints numbers for every
+registered policy so the values land in each `make test` log.
+
+**QEMU baseline** (aarch64 `virt`, cortex-a76, Release build):
+
+| Policy | Stub (AI_EVICTION=ON) | Real models (AI_EVICTION_MODELS=ON) |
+|--------|---------:|---------:|
+| first_candidate | 55 ns | 58 ns |
+| lru | 71 ns | 72 ns |
+| lfu | 90 ns | 91 ns |
+| arc | 3,989 ns | 3,132 ns |
+| slm | 1,749 ns | 881 ns |
+| xgboost | 18,780 ns | 190,725 ns |
+| mlp | 18,596 ns | 1,583,126 ns |
+| cacheus (ml_only) | 46,381 ns | 1,734,300 ns |
+
+QEMU emulates the int8 MLP forward pass slowly — real silicon will
+be orders of magnitude faster. The sibling project's Python MLP
+reference is ~2 µs per inference at batch=64; native Rust on
+Cortex-A78 is expected to sit in the same ballpark. Pi 5 and Jetson
+numbers are pending a hardware run.
+
+### Memory Overhead (M9)
+
+Binary size (QEMU_VIRT Release `slmos.elf`):
+
+| Config | ELF size | Δ vs OFF |
+|--------|---------:|---------:|
+| OFF | 2,444,536 B | — |
+| AI_EVICTION=ON (stubs) | 2,580,376 B | +135,840 B (~133 KB) |
+| AI_EVICTION_MODELS=ON | 2,789,944 B | +345,408 B (~337 KB) |
+
+The stripped `slmos.bin` footprint is smaller (+48 KB stubs /
++254 KB real), well under the 2 MB M9 target.
+
+Runtime heap (order-of-magnitude):
+
+- `CacheusSelector::ml_only`: 2 boxed experts + 2 f32 weights +
+  counters + a 200-slot `VecDeque<EvictionRecord>`. Upper bound ~8 KB.
+- `EvictedContentTracker` (default): 256-slot
+  `VecDeque<TrackerEntry>` at 16 B/entry = ~4 KB.
+- Classical policies: zero additional heap beyond the `Box`.
+
+Total under 16 KB when CACHEUS is installed.
+
 ### Shell Command (M7)
 
 `eviction` is a shell subcommand modelled on `sched`:
@@ -356,7 +406,7 @@ shell command. This document updates as each milestone lands.
 ### Test Coverage
 
 `kernel/tests/test_eviction.c` registers the **Eviction Policy Tests**
-Unity suite (23 tests) alongside the existing `test_suite_model_mem`:
+Unity suite (24 tests) alongside the existing `test_suite_model_mem`:
 
 - **Tracking-field FFI** (9 tests, always run):
   - Alloc seeds `load_time`, `last_access_time`, and `access_count = 1`
@@ -398,6 +448,13 @@ Unity suite (23 tests) alongside the existing `test_suite_model_mem`:
     is 0 and `free_blocks` returns to the pre-test baseline.
   - `test_policy_swap_mid_workload` — LRU → XGBoost → CACHEUS during
     live alloc pressure; name remains valid and no leaks.
+- **M9 latency benchmarks** (1 test, skips when feature off):
+  - `test_bench_all_policies` — runs `rust_eviction_bench_latency_ns`
+    against every registered policy (8 total), prints the QEMU
+    numbers to the test log, and asserts each stays under 10 ms per
+    call (sanity cap; the < 1 µs hardware target lives in the
+    benchmarks table above). Numbers surface in every `make test`
+    run under `AI_EVICTION=ON`.
 
 `rust_eviction_run_tests()` itself exercises 91 internal invariants (87
 when `ai_eviction_models` is off — the int8-vs-f32 cross-check and
