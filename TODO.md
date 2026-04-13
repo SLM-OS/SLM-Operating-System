@@ -61,7 +61,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ✅ Visualization via serial console output (UART)
 
 ### Multi-Platform Demo
-- ☐ Demo runs identically on:
+- ✅ Demo runs identically on:
   - ✅ QEMU ARM64 (Lua bindings verified via test suite, demo builds)
   - ✅ Raspberry Pi 5 (5/5 reliability, 6.6s completion)
   - ✅ Jetson Orin Nano (6-core, 8 GB — demo runs, MNIST inference works)
@@ -179,10 +179,10 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ✅ GPU integration status and roadmap (docs/gpu-compute.md, docs/nvidia-gsp.md)
 
 ### Capstone Documentation
-- ☐ Final project report
-- ☐ Presentation slides
-- ☐ Poster (if required)
-- ☐ Video demo (if required)
+- ☐🎫 Final project report — #86
+- ☐🎫 Presentation slides — #87
+- ☐🎫 Poster (if required) — #88
+- ☐🎫 Video demo (if required) — #89
 
 ---
 
@@ -276,7 +276,7 @@ This document tracks Phase 6 implementation of SLM-OS.
 - ⏸️ Edge case testing (low memory, many tasks) — post-capstone
 
 ### Platform Validation
-- ☐ Full test suite passes on:
+- ✅ Full test suite passes on:
   - ✅ QEMU ARM64 (all tests pass)
   - ✅ QEMU x86-64 (426 pass, 8 pre-existing x86-specific failures)
   - ✅ Raspberry Pi 5 (all pass except 5 multi-core integration — known limitation)
@@ -332,8 +332,8 @@ All M7 items consolidated in `docs/future-work.md` (21 items, 61-88 weeks estima
 ### Capstone Deliverables
 - ✅ Working demo on at least 2 platforms (QEMU ARM64 + Pi 5)
 - ✅ Comprehensive benchmark results (docs/benchmarks.md)
-- ☐ Final project report
-- ☐ Presentation materials
+- ☐🎫 Final project report — #86
+- ☐🎫 Presentation materials — #87
 - ✅ Source code repository (clean, documented)
 - ✅ Build and run instructions (docs/getting-started.md)
 
@@ -526,7 +526,7 @@ Items explicitly deferred beyond Phase 6:
 |----------|------|------------------|
 | **GPU** | GSP firmware loading | 4-6 weeks |
 | **GPU** | CUDA-lite / TensorRT integration | 6-8 weeks |
-| **Inference** | FP16/INT8 quantization | 2-3 weeks |
+| **Inference** | ~~FP16/INT8 quantization~~ | ✅ Done (PR #54, #70) |
 | **Inference** | Dynamic batching | 2-3 weeks |
 | **Security** | Secure boot chain | 4-6 weeks |
 | **Security** | Encrypted model storage | 2-3 weeks |
