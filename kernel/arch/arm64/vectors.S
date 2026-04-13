@@ -266,6 +266,13 @@ el0_serror:
  *   [sp, #168]      saved orig_elr
  *   [sp, #176]      saved orig_spsr
  *   [sp, #184]      padding
+ *
+ * Stack-size impact: 192 bytes per trampoline activation, on top of the
+ * ~160-byte interrupt trap frame already on the task's kernel stack at
+ * the point of preemption. Task stacks are `STACK_SIZE = 64 KB`
+ * (kernel/include/config.h), so the trampoline consumes ~0.3% of the
+ * stack — safely within budget. schedule() itself adds a small amount
+ * for its own locals + rq_lock_irqsave frames, bounded and audited.
  */
 .global resched_trampoline
 .type resched_trampoline, @function
@@ -285,11 +292,24 @@ resched_trampoline:
     str     x18,      [sp, #144]
     stp     x29, x30, [sp, #152]
 
-    /* Compute logical cpu_id the same way NC trace points do:
-     *   (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)
-     * This gives the correct logical index on both QEMU (Aff0) and
-     * Pi 5 (Aff1). Works because the two affinity nibbles are never
-     * both non-zero on these platforms. */
+    /* Compute logical cpu_id inline rather than calling the C `cpu_id()`
+     * helper. Reasons:
+     *   1. We have not yet saved x19-x28 or set up a valid frame pointer
+     *      for a C call; a bl here would need extra register-save paperwork.
+     *   2. The MPIDR hack `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` is
+     *      the same one used by every other PI5_SECONDARY_PREEMPT code
+     *      site — task_entry_trampoline (task.c), NC trace points
+     *      (sched.c, exceptions.c, smp.c) — and is correct for Pi 5
+     *      (Aff1 holds CPU index) and QEMU (Aff0 holds it). The two
+     *      affinity fields are never both non-zero on these platforms.
+     *   3. Jetson uses a dual-cluster layout where this would be wrong,
+     *      but the whole trampoline is gated on PI5_SECONDARY_PREEMPT
+     *      and is only defined for PLATFORM=RASPI5 in CMakeLists.
+     *
+     * If the kernel is ever ported to a CPU with more complex affinity
+     * encoding while reusing this infrastructure, convert this into a
+     * shared asm macro alongside the existing NC-trace uses — don't
+     * silently skew one call site from the rest. */
     mrs     x0, mpidr_el1
     and     x1, x0, #0xFF
     ubfx    x2, x0, #8, #8

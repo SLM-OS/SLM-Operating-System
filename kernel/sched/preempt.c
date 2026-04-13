@@ -16,6 +16,7 @@
 #include "ncmem.h"
 #include "smp.h"
 #include "trap.h"
+#include "debug.h"
 #include "config.h"
 #include <stdint.h>
 
@@ -44,6 +45,19 @@ void preempt_init(void)
     reschedule_pending = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
     orig_elr  = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
     orig_spsr = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
+
+    /* NC allocation failure is non-recoverable: maybe_arm_resched_trampoline
+     * and the asm trampoline both unconditionally dereference these
+     * pointers on every timer IRQ, so a NULL would take down the first
+     * preempted task with an unrecoverable fault. Fail early with a
+     * clear panic message instead. */
+    if (!reschedule_pending || !orig_elr || !orig_spsr) {
+        panic("preempt_init: ncmem_alloc failed (pending=%p elr=%p spsr=%p, "
+              "ncmem used=%lu/%lu)",
+              reschedule_pending, orig_elr, orig_spsr,
+              (unsigned long)ncmem_used(), (unsigned long)NC_MEM_SIZE);
+    }
+
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         reschedule_pending[i] = 0;
         orig_elr[i]  = 0;
