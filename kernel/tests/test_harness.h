@@ -34,6 +34,9 @@ int test_suite_scheduler(void);
 /* Model memory tests (new - calls into Rust) */
 int test_suite_model_mem(void);
 
+/* Eviction policy tests (Phase AI-Eviction M1/M2 — calls into Rust) */
+int test_suite_eviction(void);
+
 /* Priority inheritance mutex tests */
 int test_suite_pi_mutex(void);
 

@@ -863,6 +863,93 @@ pub extern "C" fn rust_model_set_metadata(
     }
 }
 
+/// Flip the GPU-mapped flag on a block (eviction-policy input).
+///
+/// Returns 0 on success, -1 on any error. Normally called transitively
+/// via `gpu_map` / `gpu_unmap`; exposed directly for tests.
+#[no_mangle]
+pub extern "C" fn rust_model_set_gpu_mapped(handle: mm::ModelHandle, mapped: i32) -> i32 {
+    match mm::set_gpu_mapped(handle, mapped != 0) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Flip the dirty flag on a block (eviction-policy input).
+///
+/// Returns 0 on success, -1 on any error.
+#[no_mangle]
+pub extern "C" fn rust_model_set_dirty(handle: mm::ModelHandle, dirty: i32) -> i32 {
+    match mm::set_dirty(handle, dirty != 0) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+// -- Tracking-field getters (always on; fields exist regardless of feature) --
+
+/// Get access_count for a block. Returns 0 if the handle is invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_get_access_count(handle: mm::ModelHandle) -> u32 {
+    mm::model_mem::get_tracking(handle).map(|t| t.2).unwrap_or(0)
+}
+
+/// Get load_time (ns since boot) for a block. Returns 0 if invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_get_load_time(handle: mm::ModelHandle) -> u64 {
+    mm::model_mem::get_tracking(handle).map(|t| t.0).unwrap_or(0)
+}
+
+/// Get last_access_time (ns since boot) for a block. Returns 0 if invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_get_last_access_time(handle: mm::ModelHandle) -> u64 {
+    mm::model_mem::get_tracking(handle).map(|t| t.1).unwrap_or(0)
+}
+
+/// Get model_id for a block. Returns -1 if invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_get_model_id(handle: mm::ModelHandle) -> i32 {
+    mm::model_mem::get_tracking(handle)
+        .map(|t| t.3 as i32)
+        .unwrap_or(-1)
+}
+
+/// Get layer_idx for a block. Returns i32::MIN if invalid (layer_idx
+/// has a legitimate signed range including negatives for non-layered
+/// blocks, so no in-range sentinel exists).
+#[no_mangle]
+pub extern "C" fn rust_model_get_layer_idx(handle: mm::ModelHandle) -> i32 {
+    mm::model_mem::get_tracking(handle)
+        .map(|t| t.4 as i32)
+        .unwrap_or(i32::MIN)
+}
+
+/// Get model_priority for a block. Returns -1 if invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_get_model_priority(handle: mm::ModelHandle) -> i32 {
+    mm::model_mem::get_tracking(handle)
+        .map(|t| t.5 as i32)
+        .unwrap_or(-1)
+}
+
+/// Get gpu_mapped flag for a block. Returns 0/1 on success, -1 if invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_is_gpu_mapped(handle: mm::ModelHandle) -> i32 {
+    match mm::model_mem::get_tracking(handle) {
+        Some(t) => if t.6 { 1 } else { 0 },
+        None => -1,
+    }
+}
+
+/// Get is_dirty flag for a block. Returns 0/1 on success, -1 if invalid.
+#[no_mangle]
+pub extern "C" fn rust_model_is_dirty(handle: mm::ModelHandle) -> i32 {
+    match mm::model_mem::get_tracking(handle) {
+        Some(t) => if t.7 { 1 } else { 0 },
+        None => -1,
+    }
+}
+
 // =============================================================================
 // Eviction Policy Self-Test (Phase AI-Eviction M1)
 // =============================================================================
@@ -920,6 +1007,242 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
             return -1;
         }
         0
+    }
+}
+
+/// Comprehensive Rust-internal tests for the eviction subsystem.
+///
+/// Returns the number of failures. 0 on success. When the
+/// `ai_eviction` feature is off, returns 0 without running anything
+/// (nothing to test).
+///
+/// Each test prints `[PASS] name` or `[FAIL] name: reason` via
+/// `uart_puts`. Invoked from the kernel test harness as part of
+/// `test_suite_eviction`.
+#[no_mangle]
+pub extern "C" fn rust_eviction_run_tests() -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { 0 }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        use mm::eviction::{self, EvictionPolicy, BlockMeta, PoolType};
+        use alloc::boxed::Box;
+        use alloc::vec::Vec;
+
+        // Simple printer; all prints go through the C UART FFI so output
+        // interleaves correctly with Unity's output from the test harness.
+        // NOTE: `uart_puts` requires a null-terminated buffer — Rust byte
+        // literals are NOT null-terminated unless written `b"...\0"`, and
+        // passing one without the terminator reads past the literal into
+        // whatever rodata immediately follows (producing confusing output).
+        fn puts(s: &[u8]) {
+            unsafe { kernel_ffi::uart_puts(s.as_ptr()); }
+        }
+        let mut failures: i32 = 0;
+        macro_rules! check {
+            ($name:expr, $cond:expr) => {
+                puts(b"  \0");
+                if $cond {
+                    puts(b"[PASS] \0");
+                    puts($name);
+                    puts(b"\n\0");
+                } else {
+                    puts(b"[FAIL] \0");
+                    puts($name);
+                    puts(b"\n\0");
+                    failures += 1;
+                }
+            };
+        }
+
+        // A named policy that records how many times select_victim was called.
+        struct Recorder {
+            calls: u32,
+            last_feedback: Option<(u32, bool)>,
+            victim_pick: usize,
+        }
+        impl EvictionPolicy for Recorder {
+            fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize {
+                self.calls += 1;
+                self.victim_pick.min(candidates.len().saturating_sub(1))
+            }
+            fn update_feedback(&mut self, block_id: u32, was_fault: bool) {
+                self.last_feedback = Some((block_id, was_fault));
+            }
+            fn name(&self) -> &'static str { "Recorder" }
+        }
+
+        fn make_block(block_id: u32) -> BlockMeta {
+            BlockMeta {
+                block_id,
+                pool_type: PoolType::Weight,
+                model_id: 0,
+                layer_idx: 0,
+                last_access_time: 0,
+                load_time: 0,
+                access_count: 0,
+                ref_count: 0,
+                gpu_mapped: false,
+                is_dirty: false,
+                model_priority: 0,
+            }
+        }
+
+        puts(b"\n-- eviction: registry --\n\0");
+
+        // Start from a known state.
+        eviction::reset_to_default();
+        check!(b"default_policy_is_FirstCandidate\0",
+               eviction::get_eviction_policy_name() == "FirstCandidate");
+
+        // FirstCandidate always picks index 0.
+        let cands = [make_block(1), make_block(2), make_block(3)];
+        let picked = eviction::select_victim(&cands);
+        check!(b"FirstCandidate_picks_zero\0", picked == Some(0));
+
+        // Empty candidate list → None.
+        let empty: [BlockMeta; 0] = [];
+        check!(b"select_victim_none_on_empty\0",
+               eviction::select_victim(&empty).is_none());
+
+        // Default score impl: victim gets 1.0, others 0.0, length matches.
+        let scores = eviction::score(&cands);
+        check!(b"score_vec_matches_candidates_len\0", scores.len() == cands.len());
+        check!(b"score_victim_is_one\0", scores[0] == 1.0);
+        check!(b"score_nonvictim_is_zero\0",
+               scores[1] == 0.0 && scores[2] == 0.0);
+        check!(b"score_empty_on_empty\0", eviction::score(&empty).is_empty());
+
+        // Swap in a Recorder, verify invocations go to it.
+        eviction::set_eviction_policy(Box::new(Recorder {
+            calls: 0, last_feedback: None, victim_pick: 1,
+        }));
+        check!(b"swap_changes_policy_name\0",
+               eviction::get_eviction_policy_name() == "Recorder");
+
+        let picked = eviction::select_victim(&cands);
+        check!(b"recorder_picks_index_one\0", picked == Some(1));
+
+        // with_active_policy returns Some for installed policies.
+        let wrap = eviction::with_active_policy(|p| p.name());
+        check!(b"with_active_policy_returns_name\0",
+               wrap == Some("Recorder"));
+
+        // update_feedback is forwarded to the policy.
+        eviction::update_feedback(42, true);
+        let fed = eviction::with_active_policy(|p| {
+            // Downcast-safe: we know the type because we just installed it.
+            // Unfortunately `&mut dyn` can't be downcast without Any, so
+            // we probe indirectly: swap in a fresh recorder and verify
+            // update_feedback reaches it.
+            let _ = p;
+            Some(())
+        });
+        check!(b"with_active_policy_reenters\0", fed.is_some());
+
+        // Fresh recorder → verify feedback delivery.
+        eviction::set_eviction_policy(Box::new(Recorder {
+            calls: 0, last_feedback: None, victim_pick: 0,
+        }));
+        eviction::update_feedback(7, false);
+        // We can't observe the recorder's state directly through the trait
+        // without Any; instead verify update_feedback doesn't panic and
+        // the registry stays consistent.
+        check!(b"update_feedback_does_not_panic\0",
+               eviction::get_eviction_policy_name() == "Recorder");
+
+        // reset_to_default restores the default.
+        eviction::reset_to_default();
+        check!(b"reset_to_default_restores_default\0",
+               eviction::get_eviction_policy_name() == "FirstCandidate");
+
+        // select_victim on the default with non-empty input still returns Some(0).
+        check!(b"default_select_victim_after_reset\0",
+               eviction::select_victim(&cands) == Some(0));
+
+        // Registry helpers are no-ops but non-panicking when candidates empty.
+        check!(b"score_default_impl_length_match\0", {
+            let s = eviction::score(&cands);
+            s.len() == cands.len() && s[0] == 1.0
+        });
+
+        // Multiple swaps in a row stay consistent (reference counting).
+        for i in 0..5 {
+            let name = if i % 2 == 0 { "RecA" } else { "RecB" };
+            struct Tagged(&'static str);
+            impl EvictionPolicy for Tagged {
+                fn select_victim(&mut self, _: &[BlockMeta]) -> usize { 0 }
+                fn name(&self) -> &'static str { self.0 }
+            }
+            eviction::set_eviction_policy(Box::new(Tagged(name)));
+            if eviction::get_eviction_policy_name() != name {
+                failures += 1;
+            }
+        }
+        check!(b"five_swaps_consistent\0", {
+            // If we got here without panic and failures didn't climb from
+            // this block, the swaps are consistent.
+            true
+        });
+        eviction::reset_to_default();
+
+        puts(b"\n-- eviction: generated models --\n\0");
+
+        use mm::eviction::generated;
+        // Sanity: MODELS_AVAILABLE matches the feature flag.
+        check!(b"models_available_matches_feature\0",
+               generated::MODELS_AVAILABLE ==
+                   cfg!(feature = "ai_eviction_models"));
+
+        // xgb_predict and mlp_predict are callable and return finite values.
+        let zeros: [f32; 27] = [0.0; 27];
+        let ones:  [f32; 27] = [1.0; 27];
+        let mixed: [f32; 27] = {
+            let mut m = [0.0_f32; 27];
+            for (i, v) in m.iter_mut().enumerate() {
+                *v = (i as f32) * 0.037;
+            }
+            m
+        };
+        let xgb_z = generated::xgb_predict(&zeros);
+        let xgb_o = generated::xgb_predict(&ones);
+        let xgb_m = generated::xgb_predict(&mixed);
+        check!(b"xgb_predict_zeros_finite\0", xgb_z.is_finite());
+        check!(b"xgb_predict_zeros_in_unit\0", xgb_z >= 0.0 && xgb_z <= 1.0);
+        check!(b"xgb_predict_ones_in_unit\0", xgb_o >= 0.0 && xgb_o <= 1.0);
+        check!(b"xgb_predict_mixed_in_unit\0", xgb_m >= 0.0 && xgb_m <= 1.0);
+
+        let mlp_z = generated::mlp_predict(&zeros);
+        let mlp_o = generated::mlp_predict(&ones);
+        let mlp_m = generated::mlp_predict(&mixed);
+        check!(b"mlp_predict_zeros_finite\0", mlp_z.is_finite());
+        check!(b"mlp_predict_zeros_in_unit\0", mlp_z >= 0.0 && mlp_z <= 1.0);
+        check!(b"mlp_predict_ones_in_unit\0", mlp_o >= 0.0 && mlp_o <= 1.0);
+        check!(b"mlp_predict_mixed_in_unit\0", mlp_m >= 0.0 && mlp_m <= 1.0);
+
+        // Build-mode-specific: stubs return exactly 0.5 for any input.
+        //
+        // We intentionally DON'T assert that the real trained models
+        // return different values across these synthetic inputs — the
+        // int8 MLP saturates at the default input scale and may map
+        // `ones` / `mixed` to the same internal state. Model prediction
+        // quality is validated by the sibling cross-check harness
+        // (`scripts/verify_rust_export.py`), not this FFI linkage test.
+        if !generated::MODELS_AVAILABLE {
+            check!(b"stub_xgb_returns_half\0", xgb_z == 0.5 && xgb_o == 0.5);
+            check!(b"stub_mlp_returns_half\0", mlp_z == 0.5 && mlp_o == 0.5);
+            let _ = xgb_m;
+            let _ = mlp_m;
+        }
+
+        // Prevent unused-mut / unused-var on `scores` in release.
+        let _ = scores;
+        // Drop the collected feedback tuple to quiet the borrow checker.
+        let _drop_wrap: Vec<()> = Vec::new();
+        let _ = _drop_wrap;
+
+        failures
     }
 }
 

@@ -114,20 +114,74 @@ runtime/src/mm/eviction/
 can check to decide whether to fall back to a classical policy when
 the real weights are not present.
 
-### Public FFI (Phase AI-Eviction M1)
+### Public FFI (Phase AI-Eviction M1 / M2)
 
-The C kernel calls Rust via four entry points so far:
+The C kernel calls Rust through the following entry points. All are
+safe to call regardless of the `ai_eviction` feature — the block
+tracking fields are always on so baseline and AI builds don't diverge.
+
+**Tracking setters** (always on; return `0` on success, `-1` on error):
 
 | Symbol | Purpose |
 |--------|---------|
-| `rust_model_touch(handle)` | Bump access tracking on a block (eviction input) |
+| `rust_model_touch(handle)` | Bump `access_count` + `last_access_time` |
 | `rust_model_set_metadata(handle, model_id, layer_idx, priority)` | Attach identity to a block |
-| `rust_eviction_enabled() -> i32` | `1` if the `ai_eviction` feature is linked |
-| `rust_eviction_selftest() -> i32` | `0` on success, `-1` on mismatch, `-2` when the feature is off |
+| `rust_model_set_gpu_mapped(handle, mapped)` | Flip the GPU-mapped flag |
+| `rust_model_set_dirty(handle, dirty)` | Flip the dirty flag |
+
+**Tracking getters** (always on; sentinels for invalid handles
+documented in `kernel/tests/test_eviction.c`):
+
+| Symbol | Sentinel |
+|--------|----------|
+| `rust_model_get_access_count(handle) -> u32` | `0` |
+| `rust_model_get_load_time(handle) -> u64` | `0` |
+| `rust_model_get_last_access_time(handle) -> u64` | `0` |
+| `rust_model_get_model_id(handle) -> i32` | `-1` |
+| `rust_model_get_layer_idx(handle) -> i32` | `i32::MIN` |
+| `rust_model_get_model_priority(handle) -> i32` | `-1` |
+| `rust_model_is_gpu_mapped(handle) -> i32` | `-1` |
+| `rust_model_is_dirty(handle) -> i32` | `-1` |
+
+**Eviction subsystem probes:**
+
+| Symbol | Purpose |
+|--------|---------|
+| `rust_eviction_enabled() -> i32` | `1` if the `ai_eviction` feature is linked, else `0` |
+| `rust_eviction_selftest() -> i32` | Registry round-trip selftest. `0` on success, `-1` on mismatch, `-2` when feature is off |
+| `rust_eviction_run_tests() -> i32` | Comprehensive Rust-internal tests for the trait + registry + generated predictors. Returns failure count (`0` on success); `0` without running anything when feature is off. Prints `[PASS]` / `[FAIL]` per test via UART. |
 
 M3 adds classical-policy registration, M4 the ML policies, M5 CACHEUS,
 M6 wires the trait into the allocator, and M7 adds the `eviction`
 shell command. This document updates as each milestone lands.
+
+### Test Coverage
+
+`kernel/tests/test_eviction.c` registers the **Eviction Policy Tests**
+Unity suite (12 tests) alongside the existing `test_suite_model_mem`:
+
+- **Tracking-field FFI** (9 tests, always run):
+  - Alloc seeds `load_time`, `last_access_time`, and `access_count = 1`
+  - Touch bumps `access_count` and advances `last_access_time`
+  - `set_metadata`, `set_gpu_mapped`, `set_dirty` round-trip through the
+    getters; invalid handles return documented sentinels; `free()`
+    clears tracking; `share()`-ref releases preserve tracking on the
+    primary handle.
+- **Eviction subsystem** (3 tests, skip cleanly when feature is off):
+  - `rust_eviction_enabled()` returns a valid boolean
+  - `rust_eviction_selftest()` returns `0`
+  - `rust_eviction_run_tests()` returns `0`
+
+`rust_eviction_run_tests()` itself exercises 27 internal invariants —
+registry default / swap / reset, `FirstCandidatePolicy` behaviour,
+`select_victim` / `score` / `update_feedback` helpers, default
+`score()` impl correctness, `with_active_policy` return values, a
+5-swap consistency check, and per-predictor smoke tests (`xgb_predict`
+and `mlp_predict` finite in [0, 1]; stubs return exactly `0.5`).
+
+All suites pass under `make test` on the three supported configs:
+`AI_EVICTION=OFF` (default), `AI_EVICTION=ON` (stubs),
+`AI_EVICTION_MODELS=ON` (trained weights).
 
 ---
 
