@@ -23,6 +23,9 @@
 #include "ncmem.h"
 #include "preempt.h"
 #include "string.h"
+#if CONFIG_WORK_STEALING
+#include "steal_deque.h"
+#endif
 #include <stdint.h>
 
 /* Deadline boost thresholds (in nanoseconds) */
@@ -54,6 +57,22 @@ volatile int preempt_disabled[MAX_CPUS];
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
  * used by spinlocks may not work on Non-Cacheable memory (BCM2712). */
 static spinlock_t rq_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
+
+#if CONFIG_WORK_STEALING
+/*
+ * Per-CPU stealable task deque (#59 Phase B). One entry per CPU. Tasks
+ * are pushed here (in addition to the linked-list run queue) when
+ * scheduler_add_task_to_cpu is called with a task whose cpu_affinity is
+ * CPU_AFFINITY_ANY. Idle CPUs drain these in sched_try_steal() before
+ * going to WFE.
+ *
+ * The deque may contain stale pointers (tasks that have since run or
+ * been terminated); sched_try_steal() validates under victim's rq_lock
+ * before accepting a steal. Kept in cacheable BSS — acceptable for
+ * QEMU and pending NC-memory placement for Pi 5 / Jetson in a follow-up.
+ */
+static steal_deque_t cpu_steal_deques[MAX_CPUS];
+#endif
 
 /* Lock helpers that use the correct lock for a given CPU */
 static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
@@ -560,6 +579,9 @@ void scheduler_init(void)
         cpu_rq(i)->idle_task = NULL;
         cpu_rq(i)->zombie = NULL;
         cpu_rq(i)->ready_count = 0;
+#if CONFIG_WORK_STEALING
+        steal_deque_init(&cpu_steal_deques[i]);
+#endif
     }
 
     /* Create idle task for boot CPU (CPU 0) */
@@ -827,6 +849,20 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
 
     rq_unlock_irqrestore(cpu, flags);
 
+#if CONFIG_WORK_STEALING
+    /*
+     * Work-stealing: publish unpinned tasks to this CPU's steal deque so
+     * other CPUs can pull them. Pinned tasks (cpu_affinity != ANY) stay
+     * on their target CPU. Push failures (deque full) are non-fatal —
+     * the task still runs on its owner, just not stealable. Idle tasks
+     * are never stealable.
+     */
+    if (task->cpu_affinity == CPU_AFFINITY_ANY &&
+        task != cpu_rq(cpu)->idle_task) {
+        steal_deque_push(&cpu_steal_deques[cpu], task);
+    }
+#endif
+
 #if !defined(PLATFORM_X86_64)
     /* Wake idle CPUs so they can pick up the new task.
      * SEV wakes any CPU in WFE (used by idle loop on NC platforms). */
@@ -1025,6 +1061,54 @@ static struct task *pick_next_task(uint32_t cpu)
     return rq->idle_task;
 }
 
+#if CONFIG_WORK_STEALING
+/*
+ * Attempt to steal one READY task from another CPU's run queue.
+ *
+ * Must be called with no rq_lock held (takes the victim's rq_lock
+ * internally). Returns the stolen task on success — caller owns it and
+ * must add it to their own run queue. Returns NULL if no task was
+ * stolen after scanning all other CPUs.
+ *
+ * Stale pointers in the deque are discarded during validation; each
+ * failed validation pops one stale entry so the deque does not
+ * accumulate garbage indefinitely.
+ */
+static struct task *sched_try_steal(uint32_t this_cpu)
+{
+    for (uint32_t i = 1; i < cpu_count; i++) {
+        uint32_t victim = (this_cpu + i) % cpu_count;
+        if (victim == this_cpu)
+            continue;
+
+        /* Drain any stale pointers along with finding a live one. Bounded
+         * by deque capacity so this loop cannot spin forever. */
+        for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
+            struct task *candidate = steal_deque_steal(&cpu_steal_deques[victim]);
+            if (!candidate)
+                break;  /* Empty — try next victim */
+
+            irq_flags_t flags = rq_lock_irqsave(victim);
+
+            int stealable =
+                candidate->state == TASK_READY &&
+                candidate->assigned_cpu == victim &&
+                candidate->cpu_affinity == CPU_AFFINITY_ANY &&
+                remove_from_cpu_queue_locked(candidate, victim);
+
+            rq_unlock_irqrestore(victim, flags);
+
+            if (stealable) {
+                return candidate;
+            }
+            /* Otherwise: stale pointer, already popped from deque.
+             * Loop again to drain another entry on the same victim. */
+        }
+    }
+    return NULL;
+}
+#endif /* CONFIG_WORK_STEALING */
+
 /*
  * Schedule - select next task and switch to it (per-CPU).
  */
@@ -1038,6 +1122,25 @@ void schedule(void)
      * On Pi 5 with NC run queues, this is a no-op (NC data not cached). */
 #if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate_range(rq, sizeof(*rq));
+#endif
+
+#if CONFIG_WORK_STEALING
+    /*
+     * Work-stealing: if the local queue is empty, try to pull a task
+     * from another CPU before falling through to idle. Done outside the
+     * local rq_lock to avoid nesting with the victim's rq_lock. The
+     * read of rq->head is racy (another CPU may add work just after we
+     * check), but missing a task is benign — we just go idle and the
+     * next schedule() call picks it up.
+     */
+    if (!rq->head) {
+        struct task *stolen = sched_try_steal(this_cpu);
+        if (stolen) {
+            irq_flags_t sf = rq_lock_irqsave(this_cpu);
+            add_to_cpu_queue_locked(stolen, this_cpu);
+            rq_unlock_irqrestore(this_cpu, sf);
+        }
+    }
 #endif
 
     irq_flags_t flags = rq_lock_irqsave(this_cpu);

@@ -14,6 +14,9 @@ PLATFORM ?= QEMU_VIRT
 # AI Scheduler: OFF by default, ON to include trained ML models
 AI_SCHED ?= OFF
 
+# Work-stealing scheduler (#59 Phase B): OFF by default.
+WORK_STEALING ?= OFF
+
 # Directories
 BUILD_DIR := build
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
@@ -103,6 +106,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DPLATFORM=$(PLATFORM) \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
+		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-clean
@@ -246,6 +250,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		-DPLATFORM=$(PLATFORM) \
 		-DENABLE_BOOT_TESTS=ON \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
+		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-test-clean
