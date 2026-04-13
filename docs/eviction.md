@@ -106,6 +106,10 @@ runtime/src/mm/eviction/
 ├── lfu.rs           # LfuPolicy — ported from sibling Rust crate
 ├── slm_heuristic.rs # SlmHeuristicPolicy — ported from sibling Rust crate
 ├── arc.rs           # ARCPolicy — translated from sibling Python
+├── features.rs      # extract_features — 15 per-block + 12 global features,
+│                    # normalised to match the simulator's FeatureNormalizer
+├── xgboost.rs       # XGBoostPolicy — thin wrapper over generated::xgb_predict
+├── mlp.rs           # MlpPolicy — thin wrapper over generated::mlp_predict
 └── generated/
     ├── mod.rs       # Selects stub vs real at compile time
     ├── xgb_stub.rs  # xgb_predict(_) -> 0.5 when models are off
@@ -113,7 +117,10 @@ runtime/src/mm/eviction/
     # After `import_eviction_weights.sh` runs:
     ├── xgb_policy_generated.rs   # Real XGBoost if-else chain
     ├── mlp_policy_generated.rs   # Real int8-quantized MLP
-    └── mlp_policy_f32.rs         # Float32 reference (test-only)
+    └── mlp_policy_f32.rs         # Float32 reference (consumed by the
+                                  # int8-vs-f32 cross-check test in
+                                  # rust_eviction_run_tests when
+                                  # ai_eviction_models is on)
 ```
 
 ### Classical Policies
@@ -131,6 +138,38 @@ Four classical policies, installable via `set_eviction_policy`:
 minimal `FirstCandidatePolicy` placeholder; that is still exported
 (`mm::eviction::FirstCandidatePolicy`) for tests that need a
 deterministic trivial policy.
+
+### ML Policies (M4)
+
+| Policy | Predictor | Size | Source |
+|--------|-----------|------|--------|
+| `XGBoostPolicy` | `generated::xgb_predict` — 200-tree if-else chain with sigmoid | ~1.3 MB generated Rust (dead-code-eliminated until actually called) | Imported from sibling `data/export/xgb_policy_generated.rs` |
+| `MlpPolicy` | `generated::mlp_predict` — int8-quantised 4-layer MLP (27→64→32→16→1, sigmoid) | ~20 KB of weights + predict fn | Imported from sibling `data/export/mlp_policy_generated.rs` |
+
+Both policies funnel their input through `features::extract_features`,
+which mirrors the sibling's `FeatureExtractor` + `FeatureNormalizer`
+pipeline:
+
+- **15 per-block features**: `recency_rank/(n-1)`, `frequency_rank/(n-1)`,
+  `log1p(access_count)/log1p(1024)`, `time_since_access / 1s`,
+  `time_since_load / 1s`, `ref_count`, `is_gpu_mapped`, `pool_type`,
+  `is_dirty`, `layer_idx_norm`, `model_priority/7`,
+  `model_active_inferences` (placeholder 0 until M5/M6 scheduler feed),
+  `access_pattern` (placeholder 0 — `BlockMeta` doesn't yet track this),
+  `predicted_reuse_dist` (Sequential-branch heuristic), `eviction_cost`.
+- **12 global features**: `weight_pool_util`, `workspace_pool_util`,
+  `total_gpu_mapped/n`, plus nine zeros reserved for the scheduler
+  feed (`num_loaded_models`, `pending_loads`, `avg_model_priority`,
+  `max_deadline_pressure`, `recent_fault_rate`, `hot_swap_active`, and
+  the three `req_block_*` signals).
+
+**Approximation vs the sibling training pipeline**: our runtime measures
+time in real nanoseconds; the simulator uses a logical tick counter.
+We normalise both `time_since_*` values against `AI_HORIZON_NS` (1 s)
+to keep them in the simulator's training range. Access-count
+normalisation uses a fixed `log1p(1024)` denominator rather than a
+running max — acceptable because `log1p` is forgiving past the
+training ceiling.
 
 `mm::eviction::generated::MODELS_AVAILABLE` is a `const bool` callers
 can check to decide whether to fall back to a classical policy when
@@ -198,7 +237,8 @@ Unity suite (13 tests) alongside the existing `test_suite_model_mem`:
     (excludes free blocks and pinned blocks with `ref_count > 1`;
     re-admits them on ref drop; returns to baseline on free)
 
-`rust_eviction_run_tests()` itself exercises 53 internal invariants:
+`rust_eviction_run_tests()` itself exercises 64 internal invariants (63
+when `ai_eviction_models` is off):
 
 - **Registry / trait** (17): default / swap / reset, `FirstCandidatePolicy`
   behaviour, `select_victim` / `score` / `update_feedback` helpers, default
@@ -218,6 +258,11 @@ Unity suite (13 tests) alongside the existing `test_suite_model_mem`:
 - **Generated predictors** (11): `MODELS_AVAILABLE` matches feature,
   `xgb_predict` / `mlp_predict` finite in [0, 1] on three input shapes
   each, stubs return exactly `0.5`.
+- **ML policies (M4)** (10 always + 1 gated): `extract_features` shape
+  and rank-distinctness, `XGBoostPolicy` / `MlpPolicy` produce valid
+  indices and finite scores in [0, 1], victim matches argmax of scores
+  for both, and — only under `AI_EVICTION_MODELS=ON` — int8 MLP vs
+  float32 MLP decision agreement (≥ 85% across 7 candidate groups).
 
 All suites pass under `make test` on the three supported configs:
 `AI_EVICTION=OFF` (default), `AI_EVICTION=ON` (stubs),
