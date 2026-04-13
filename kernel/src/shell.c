@@ -71,6 +71,7 @@ const shell_cmd_t builtin_commands[] = {
     {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)"},
     {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)"},
     {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | stats])"},
+    {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
 };

@@ -231,4 +231,12 @@ impl EvictionPolicy for CacheusSelector {
     }
 
     fn name(&self) -> &'static str { "CACHEUS" }
+
+    fn ensemble_weights(&self) -> Option<&[f32]> {
+        Some(&self.weights)
+    }
+
+    fn ensemble_expert_names(&self) -> Option<Vec<&'static str>> {
+        Some(self.experts.iter().map(|e| e.name()).collect())
+    }
 }

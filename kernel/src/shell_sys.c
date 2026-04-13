@@ -1511,3 +1511,135 @@ int cmd_sched(int argc, char *argv[])
     uart_puts("Usage: sched [policy [<name>] | stats]\r\n");
     return 1;
 }
+
+/* ============================================================================
+ * eviction — AI eviction policy inspection and control (Phase AI-Eviction M7)
+ * ============================================================================
+ *
+ * Subcommands:
+ *   eviction                — summary: current policy, pool utilisation,
+ *                             eviction counts
+ *   eviction policy         — list available policies (active one tagged)
+ *   eviction policy <name>  — switch to the named policy at runtime
+ *   eviction stats          — detailed snapshot including CACHEUS expert
+ *                             weights when the installed policy is an
+ *                             ensemble selector
+ */
+
+static void eviction_print_summary(const RustEvictionStats *s, const char *name)
+{
+    if (!s->feature_enabled) {
+        uart_puts("AI eviction: disabled (build with AI_EVICTION=ON)\r\n");
+        return;
+    }
+    uart_puts("AI eviction:\r\n");
+    uart_printf("  Policy:              %s\r\n", name);
+    uart_printf("  Models:              %s\r\n",
+                s->models_available ? "trained (xgb + mlp)" : "stubs");
+    uart_printf("  Weight pool:         %zu / %zu blocks allocated\r\n",
+                s->weight_allocated, s->weight_total);
+    uart_printf("  Workspace pool:      %zu / %zu blocks allocated\r\n",
+                s->workspace_allocated, s->workspace_total);
+    uart_printf("  Evictions (weight):  %lu\r\n",
+                (unsigned long)s->weight_evictions);
+    uart_printf("  Evictions (ws):      %lu\r\n",
+                (unsigned long)s->workspace_evictions);
+    uart_printf("  Evictable candidates (snapshot): %d\r\n",
+                s->snapshot_candidates);
+}
+
+static void eviction_print_policies(const char *active)
+{
+    const uint8_t *list = rust_eviction_policy_list();
+    uart_puts("Available eviction policies:\r\n");
+    /* `list` is a single space-separated string terminated by NUL. */
+    const char *cursor = (const char *)list;
+    while (*cursor) {
+        /* Skip leading spaces. */
+        while (*cursor == ' ') cursor++;
+        if (!*cursor) break;
+        /* Find end of this token. */
+        const char *end = cursor;
+        while (*end && *end != ' ') end++;
+        size_t len = (size_t)(end - cursor);
+        bool is_active = false;
+        if (active) {
+            size_t alen = 0;
+            while (active[alen] != 0) alen++;
+            if (alen == len && strncmp(cursor, active, len) == 0) {
+                is_active = true;
+            }
+        }
+        uart_puts("  ");
+        for (size_t i = 0; i < len; i++) {
+            uart_putc(cursor[i]);
+        }
+        if (is_active) uart_puts(" (active)");
+        uart_puts("\r\n");
+        cursor = end;
+    }
+}
+
+static void eviction_print_stats(const RustEvictionStats *s, const char *name)
+{
+    eviction_print_summary(s, name);
+    if (s->cacheus_expert_count > 0) {
+        uart_printf("\r\nCACHEUS expert weights (%u experts):\r\n",
+                    s->cacheus_expert_count);
+        const char *expert_labels[5] = {"expert0","expert1","expert2","expert3","expert4"};
+        /* Weights are supplied in basis points (0..10000) so this
+         * formatter stays entirely in integer arithmetic. The trait
+         * doesn't expose per-expert names through the stats blob;
+         * ml_only is (XGBoost, MLP) in order; all_5 is (LRU, LFU,
+         * SLM, XGBoost, MLP). */
+        for (uint32_t i = 0; i < s->cacheus_expert_count && i < 5; i++) {
+            uint32_t bp = s->expert_weights_bp[i];
+            /* Render as D.DD% from basis points. */
+            uart_printf("  %s: %3u.%02u%%\r\n",
+                        expert_labels[i], bp / 100, bp % 100);
+        }
+    }
+}
+
+int cmd_eviction(int argc, char *argv[])
+{
+    char name_buf[32];
+    name_buf[0] = 0;
+    rust_eviction_policy_name((uint8_t *)name_buf, sizeof(name_buf));
+
+    RustEvictionStats stats = {0};
+    rust_eviction_get_stats(&stats);
+
+    if (argc < 2) {
+        eviction_print_summary(&stats, name_buf);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "policy") == 0) {
+        if (argc < 3) {
+            eviction_print_policies(name_buf);
+            return 0;
+        }
+        int rc = rust_eviction_policy_set((const uint8_t *)argv[2]);
+        if (rc == -2) {
+            uart_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
+            return 1;
+        }
+        if (rc != 0) {
+            uart_printf("Unknown policy: '%s'\r\n", argv[2]);
+            uart_puts("Use 'eviction policy' to list available policies.\r\n");
+            return 1;
+        }
+        rust_eviction_policy_name((uint8_t *)name_buf, sizeof(name_buf));
+        uart_printf("Switched to policy: %s\r\n", name_buf);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "stats") == 0) {
+        eviction_print_stats(&stats, name_buf);
+        return 0;
+    }
+
+    uart_puts("Usage: eviction [policy [<name>] | stats]\r\n");
+    return 1;
+}

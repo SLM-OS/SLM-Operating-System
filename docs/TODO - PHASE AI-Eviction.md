@@ -248,18 +248,17 @@ This document tracks the integration of trained AI eviction policies (XGBoost, M
 **Depends on:** M6
 
 ### `eviction` Subcommand
-- ☐ Add to the existing shell:
-  - `eviction` — show current policy name, total evictions, current pool utilizations
-  - `eviction policy` — list available policies (`lru`, `lfu`, `arc`, `slm`, `xgboost`, `mlp`, `cacheus`)
-  - `eviction policy <name>` — switch policy at runtime
-  - `eviction stats` — per-policy decision count, expert weights (CACHEUS), recent fault rate
-  - `eviction trajectory` — last N (cap 100) `(tick, weights)` records (CACHEUS only, gated on `cacheus_trace`)
-- ☐ Mirror the AI-Sched `sched` command structure
+- ✅ `eviction` — summary: current policy, pool utilisations (weight + workspace), eviction counts, evictable-candidate snapshot
+- ✅ `eviction policy` — lists registered policies (`lru`, `lfu`, `arc`, `slm`, `xgboost`, `mlp`, `cacheus`, `cacheus_all5`, `first_candidate`) with the active one tagged
+- ✅ `eviction policy <name>` — installs the named policy at runtime via `rust_eviction_policy_set`
+- ✅ `eviction stats` — summary plus per-expert CACHEUS weights (basis points to avoid float math in `-mgeneral-regs-only` C)
+- ⏸️ `eviction trajectory` — deferred. The `cacheus_trace` ring buffer is not implemented; the current introspection is live-state only. See M5 TODO row for rationale.
+- ✅ Mirrors the AI-Sched `sched` command structure (subcommand dispatch, "Unknown policy" error message, no-arg summary).
 
 ### Stats Tracking
-- ☐ Per-policy: total decisions, total fallbacks, average decision latency
-- ☐ CACHEUS-specific: per-expert decision count, per-expert weight, per-expert fault rate
-- ☐ Per-pool: total evictions, evictions/sec rolling average
+- ✅ Per-pool: `evictions_total` counter and pool utilisations surfaced via `RustEvictionStats`.
+- ✅ CACHEUS: per-expert weights via `EvictionPolicy::ensemble_weights` (default `None`, overridden by `CacheusSelector`). Weight snapshots flow through the stats struct as basis points.
+- 🔗 Per-policy decision count / fallback count / average latency — deferred. Live counters exist on `CacheusSelector` (`expert_faults`, `expert_decisions`) but are CACHEUS-specific and not exposed through the trait; generalising to all policies lands with M9's performance framework.
 
 ---
 

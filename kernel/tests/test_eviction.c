@@ -16,6 +16,7 @@
 
 #include "unity.h"
 #include "../include/slm_ffi.h"
+#include "../include/string.h"
 #include <stdint.h>
 
 /* ============================================================================
@@ -61,6 +62,12 @@ extern int rust_eviction_enabled(void);
 extern int rust_eviction_selftest(void);
 extern int rust_eviction_run_tests(void);
 extern int rust_eviction_snapshot_count(void);
+
+/* Shell-facing FFI (M7). */
+extern size_t rust_eviction_policy_name(uint8_t *out_buf, size_t buf_len);
+extern const uint8_t *rust_eviction_policy_list(void);
+extern int32_t rust_eviction_policy_set(const uint8_t *name);
+extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
 /* ============================================================================
  * Helpers
@@ -510,6 +517,105 @@ static void test_pool_stats_reports_evictions(void)
 }
 
 /* ============================================================================
+ * M7: Shell FFI — policy name, list, set, stats
+ * ============================================================================ */
+
+static void test_policy_name_returns_active(void)
+{
+    uint8_t buf[32] = {0};
+    size_t n = rust_eviction_policy_name(buf, sizeof(buf));
+    TEST_ASSERT_TRUE(n > 0);
+    /* Name must be null-terminated within the buffer. */
+    TEST_ASSERT_TRUE(buf[n] == 0);
+    if (rust_eviction_enabled()) {
+        /* Default policy is LRU after M3. */
+        TEST_ASSERT_EQUAL_STRING("LRU", (const char *)buf);
+    } else {
+        TEST_ASSERT_EQUAL_STRING("none", (const char *)buf);
+    }
+}
+
+static void test_policy_list_is_null_terminated(void)
+{
+    const uint8_t *list = rust_eviction_policy_list();
+    TEST_ASSERT_NOT_NULL(list);
+    /* Walk to the null terminator — must find one within 256 bytes. */
+    size_t len = 0;
+    while (len < 256 && list[len] != 0) len++;
+    TEST_ASSERT_TRUE(len > 0 && len < 256);
+    if (rust_eviction_enabled()) {
+        /* Must contain at least "lru" and "cacheus" tokens. Manual
+         * substring walk — the kernel's string.h doesn't export
+         * strstr. */
+        const char *s = (const char *)list;
+        bool saw_lru = false, saw_cacheus = false;
+        for (size_t i = 0; i + 3 <= len; i++) {
+            if (!saw_lru && strncmp(s + i, "lru", 3) == 0) saw_lru = true;
+            if (!saw_cacheus && i + 7 <= len
+                && strncmp(s + i, "cacheus", 7) == 0) saw_cacheus = true;
+            if (saw_lru && saw_cacheus) break;
+        }
+        TEST_ASSERT_TRUE(saw_lru);
+        TEST_ASSERT_TRUE(saw_cacheus);
+    }
+}
+
+static void test_policy_set_switches_active(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_ASSERT_EQUAL_INT(-2,
+            rust_eviction_policy_set((const uint8_t *)"lru"));
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+    /* Switch to LFU and verify. */
+    TEST_ASSERT_EQUAL_INT(0,
+        rust_eviction_policy_set((const uint8_t *)"lfu"));
+    uint8_t buf[32] = {0};
+    rust_eviction_policy_name(buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("LFU", (const char *)buf);
+
+    /* Switch to CACHEUS. */
+    TEST_ASSERT_EQUAL_INT(0,
+        rust_eviction_policy_set((const uint8_t *)"cacheus"));
+    rust_eviction_policy_name(buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("CACHEUS", (const char *)buf);
+
+    /* Unknown policy → -1, active unchanged. */
+    TEST_ASSERT_EQUAL_INT(-1,
+        rust_eviction_policy_set((const uint8_t *)"nonsense"));
+    rust_eviction_policy_name(buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("CACHEUS", (const char *)buf);
+
+    /* Restore LRU to leave the registry in its default state. */
+    TEST_ASSERT_EQUAL_INT(0,
+        rust_eviction_policy_set((const uint8_t *)"lru"));
+}
+
+static void test_get_stats_populates_fields(void)
+{
+    RustEvictionStats s = {0};
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_get_stats(&s));
+
+    TEST_ASSERT_EQUAL_INT(rust_eviction_enabled(), s.feature_enabled);
+    if (s.feature_enabled) {
+        TEST_ASSERT_TRUE(s.weight_total > 0);
+        TEST_ASSERT_TRUE(s.workspace_total > 0);
+        TEST_ASSERT_TRUE(s.snapshot_candidates >= 0);
+        /* Switching to CACHEUS populates expert weights. */
+        TEST_ASSERT_EQUAL_INT(0,
+            rust_eviction_policy_set((const uint8_t *)"cacheus"));
+        rust_eviction_get_stats(&s);
+        TEST_ASSERT_EQUAL_UINT32(2, s.cacheus_expert_count);
+        /* Initial weights are uniform: 50% each = 5000 bp. */
+        TEST_ASSERT_EQUAL_UINT32(5000, s.expert_weights_bp[0]);
+        TEST_ASSERT_EQUAL_UINT32(5000, s.expert_weights_bp[1]);
+        /* Restore default. */
+        TEST_ASSERT_EQUAL_INT(0,
+            rust_eviction_policy_set((const uint8_t *)"lru"));
+    }
+}
+
+/* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
 
@@ -542,6 +648,13 @@ int test_suite_eviction(void)
 
     /* Snapshot filter (M6 integration point) — skips when feature off. */
     RUN_TEST(test_snapshot_counts_evictable_blocks);
+
+    /* M7: shell FFI surface — always runs; individual tests IGNORE
+     * when the feature is disabled and the check doesn't make sense. */
+    RUN_TEST(test_policy_name_returns_active);
+    RUN_TEST(test_policy_list_is_null_terminated);
+    RUN_TEST(test_policy_set_switches_active);
+    RUN_TEST(test_get_stats_populates_fields);
 
     return UnityEnd();
 }
