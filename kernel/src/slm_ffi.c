@@ -12,6 +12,7 @@
 #include "task.h"
 #include "sched.h"
 #include "ipc.h"
+#include "spinlock.h"
 #include "../gpu/gpu.h"
 
 /*
@@ -296,4 +297,18 @@ uint32_t slm_ffi_get_test_queue(void)
         }
     }
     return ffi_test_queue->id;
+}
+
+/*
+ * IRQ Control
+ */
+
+uint64_t slm_irq_save(void)
+{
+    return (uint64_t)irq_save();
+}
+
+void slm_irq_restore(uint64_t flags)
+{
+    irq_restore((irq_flags_t)flags);
 }
