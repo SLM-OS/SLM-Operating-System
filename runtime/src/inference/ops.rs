@@ -3,9 +3,30 @@
 //! All operators are pure functions that read input tensors and write to
 //! pre-allocated output tensors. No dynamic allocation.
 //!
-//! SIMD optimization:
-//! - AArch64: NEON float32x4_t (4-wide FP32) for all operators
-//! - Scalar fallback for tail elements and unsupported platforms
+//! ## SIMD platform dispatch
+//!
+//! Each SIMD helper uses a three-way `cfg` split:
+//!
+//! ```text
+//! #[cfg(target_arch = "aarch64")]                                       // NEON path (live)
+//! { use core::arch::aarch64::*; /* NEON intrinsics */ }
+//! #[cfg(target_arch = "x86_64")]                                        // SSE slot
+//! { /* TODO(x86-64 C1): SSE intrinsics; scalar placeholder for now. */ }
+//! #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]     // Fallback
+//! { /* scalar */ }
+//! ```
+//!
+//! - **aarch64** runs NEON (Jetson capstone Track G fills in additional
+//!   FP16/INT8 NEON paths in the same blocks).
+//! - **x86_64** currently falls through to scalar; the x86-64 capstone
+//!   plan's Phase C1 fills in SSE/SSE2 intrinsics in the marked
+//!   `#[cfg(target_arch = "x86_64")]` blocks. Keeping the slot separate
+//!   means C1 and Track G can edit the same file without merge conflicts.
+//! - **Other arches** (RISC-V, host x86-64 unit-test binaries) get the
+//!   scalar fallback for free.
+//!
+//! See `docs/jetson-capstone-execution-plan.md` "Shared Infrastructure
+//! Prerequisites" for context on this dispatch scaffolding.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use super::tensor::{Tensor, TensorElemType};
@@ -131,6 +152,12 @@ pub fn quantize_fp32_to_int8(
 /// `ptr..ptr+n` must be writable and properly aligned for f32 SIMD stores.
 /// Caller guarantees `target_feature(neon)` on aarch64 (enabled globally by
 /// the build config; aarch64 baseline mandates NEON).
+///
+/// Platform dispatch is three-way:
+/// - `aarch64` — NEON path (live).
+/// - `x86_64` — SSE slot: currently scalar placeholder. The x86-64
+///   capstone plan's Phase C1 fills in SSE intrinsics here.
+/// - other — scalar fallback.
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn zero_buf(ptr: *mut f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
@@ -148,11 +175,16 @@ unsafe fn zero_buf(ptr: *mut f32, n: usize) {
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        // x86-64 falls through to scalar — stable Rust on the
-        // `x86_64-unknown-none` target cannot currently use SSE
-        // intrinsics. See GitHub #72 for the investigation.
+        // TODO(x86-64 C1): SSE/SSE2 intrinsics. See GitHub #72 for why
+        // stable Rust on `x86_64-unknown-none` currently uses scalar.
+        for i in 0..n {
+            *ptr.add(i) = 0.0;
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
         for i in 0..n {
             *ptr.add(i) = 0.0;
         }
@@ -211,10 +243,13 @@ pub fn conv2d(
     // Static im2col buffer for reshaping convolution into matmul.
     // im2col is only used on AArch64 (x86-64-unknown-none soft-float + LTO
     // triggers an LLVM crash with the large static buffer + FP operations).
+    // x86-64 plan Phase C1 may re-enable this when SSE/AVX kernels land.
     const IM2COL_MAX: usize = 16384;
     #[cfg(target_arch = "aarch64")]
     let use_im2col = col_rows * col_cols <= IM2COL_MAX;
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    let use_im2col = false;  // TODO(x86-64 C1): re-enable when SSE matmul lands.
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     let use_im2col = false;
 
     unsafe {
@@ -311,6 +346,9 @@ pub fn conv2d(
 ///
 /// # Safety
 /// `ptr..ptr+n` readable/writable, aligned for f32 SIMD access.
+///
+/// Dispatch: aarch64 NEON; x86_64 scalar placeholder (C1 fills in SSE);
+/// other scalar fallback.
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn add_scalar_simd(ptr: *mut f32, scalar: f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
@@ -329,7 +367,14 @@ unsafe fn add_scalar_simd(ptr: *mut f32, scalar: f32, n: usize) {
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        // TODO(x86-64 C1): SSE addps.
+        for i in 0..n {
+            *ptr.add(i) += scalar;
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         for i in 0..n {
             *ptr.add(i) += scalar;
@@ -459,7 +504,16 @@ pub fn relu(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
             }
         }
 
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
+        {
+            // TODO(x86-64 C1): SSE pmax against zero vector.
+            for i in 0..n {
+                let v = *inp.add(i);
+                *outp.add(i) = if v > 0.0 { v } else { 0.0 };
+            }
+        }
+
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             for i in 0..n {
                 let v = *inp.add(i);
@@ -529,6 +583,9 @@ pub fn add(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineError> 
 ///
 /// # Safety
 /// `ap`, `bp` readable and `outp` writable for `n` f32s.
+///
+/// Dispatch: aarch64 NEON; x86_64 scalar placeholder (C1 fills in SSE);
+/// other scalar fallback.
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn add_elementwise_simd(ap: *const f32, bp: *const f32, outp: *mut f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
@@ -547,7 +604,14 @@ unsafe fn add_elementwise_simd(ap: *const f32, bp: *const f32, outp: *mut f32, n
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        // TODO(x86-64 C1): SSE addps.
+        for i in 0..n {
+            *outp.add(i) = *ap.add(i) + *bp.add(i);
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         for i in 0..n {
             *outp.add(i) = *ap.add(i) + *bp.add(i);
@@ -683,6 +747,9 @@ unsafe fn matmul_simd(ap: *const f32, bp: *const f32, cp: *mut f32,
 ///
 /// # Safety
 /// `cp`, `bp` cover `n` f32s and are properly aligned for SIMD.
+///
+/// Dispatch: aarch64 NEON FMA; x86_64 scalar placeholder (C1 fills in
+/// SSE/SSE2 mulps+addps or AVX FMA); other scalar fallback.
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn simd_fma_row(cp: *mut f32, bp: *const f32, scalar: f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
@@ -702,7 +769,14 @@ unsafe fn simd_fma_row(cp: *mut f32, bp: *const f32, scalar: f32, n: usize) {
             j += 1;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        // TODO(x86-64 C1): mulps + addps (SSE) or vfmadd231ps (AVX2/FMA).
+        for j in 0..n {
+            *cp.add(j) += scalar * *bp.add(j);
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         for j in 0..n {
             *cp.add(j) += scalar * *bp.add(j);
@@ -787,6 +861,9 @@ pub fn softmax(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
 ///
 /// # Safety
 /// `ptr..ptr+n` readable and aligned for f32 SIMD loads.
+///
+/// Dispatch: aarch64 NEON max + horizontal reduce; x86_64 scalar
+/// placeholder (C1 fills in SSE max + horizontal reduce); other scalar.
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn simd_max_reduce(ptr: *const f32, n: usize) -> f32 {
     #[cfg(target_arch = "aarch64")]
@@ -809,7 +886,17 @@ unsafe fn simd_max_reduce(ptr: *const f32, n: usize) -> f32 {
         }
         max_val
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        // TODO(x86-64 C1): SSE maxps + horizontal reduce.
+        let mut max_val = *ptr;
+        for i in 1..n {
+            let v = *ptr.add(i);
+            if v > max_val { max_val = v; }
+        }
+        max_val
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let mut max_val = *ptr;
         for i in 1..n {
@@ -824,6 +911,9 @@ unsafe fn simd_max_reduce(ptr: *const f32, n: usize) -> f32 {
 ///
 /// # Safety
 /// `ptr..ptr+n` readable/writable and aligned for f32 SIMD access.
+///
+/// Dispatch: aarch64 NEON; x86_64 scalar placeholder (C1 fills in SSE);
+/// other scalar fallback.
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn simd_mul_scalar(ptr: *mut f32, scalar: f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
@@ -842,7 +932,14 @@ unsafe fn simd_mul_scalar(ptr: *mut f32, scalar: f32, n: usize) {
             i += 1;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        // TODO(x86-64 C1): SSE mulps.
+        for i in 0..n {
+            *ptr.add(i) *= scalar;
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         for i in 0..n {
             *ptr.add(i) *= scalar;
