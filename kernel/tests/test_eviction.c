@@ -59,6 +59,7 @@ extern int32_t  rust_model_is_dirty(ModelHandle handle);
 extern int rust_eviction_enabled(void);
 extern int rust_eviction_selftest(void);
 extern int rust_eviction_run_tests(void);
+extern int rust_eviction_snapshot_count(void);
 
 /* ============================================================================
  * Helpers
@@ -329,6 +330,50 @@ static void test_eviction_run_tests_passes(void)
 }
 
 /* ============================================================================
+ * M1: snapshot_evictable_blocks filter — verifies the M6 integration
+ * point returns the correct candidate set (allocated AND not pinned).
+ * ============================================================================ */
+
+static void test_snapshot_counts_evictable_blocks(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_ASSERT_EQUAL_INT(-1, rust_eviction_snapshot_count());
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    /* Baseline count (may be non-zero due to earlier tests leaving
+     * allocations; we measure deltas, not absolutes). */
+    int baseline = rust_eviction_snapshot_count();
+    TEST_ASSERT_TRUE(baseline >= 0);
+
+    /* Allocate three blocks in mixed pools. */
+    ModelHandle h1 = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+    ModelHandle h2 = rust_model_alloc_workspace(MODEL_BLOCK_SIZE);
+    ModelHandle h3 = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+    TEST_ASSERT_FALSE(handle_is_null(h1));
+    TEST_ASSERT_FALSE(handle_is_null(h2));
+    TEST_ASSERT_FALSE(handle_is_null(h3));
+
+    /* Snapshot grows by exactly three — all evictable (ref_count = 1). */
+    TEST_ASSERT_EQUAL_INT(baseline + 3, rust_eviction_snapshot_count());
+
+    /* Sharing h2 lifts its ref_count above 1 → pinned → excluded. */
+    ModelHandle h2_shared = rust_model_share(h2);
+    TEST_ASSERT_FALSE(handle_is_null(h2_shared));
+    TEST_ASSERT_EQUAL_INT(baseline + 2, rust_eviction_snapshot_count());
+
+    /* Dropping the extra reference re-admits h2 to the candidate set. */
+    rust_model_free(h2_shared);
+    TEST_ASSERT_EQUAL_INT(baseline + 3, rust_eviction_snapshot_count());
+
+    /* Free everything; back to baseline. */
+    rust_model_free(h1);
+    rust_model_free(h2);
+    rust_model_free(h3);
+    TEST_ASSERT_EQUAL_INT(baseline, rust_eviction_snapshot_count());
+}
+
+/* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
 
@@ -352,6 +397,9 @@ int test_suite_eviction(void)
     RUN_TEST(test_eviction_enabled_probe);
     RUN_TEST(test_eviction_selftest_passes);
     RUN_TEST(test_eviction_run_tests_passes);
+
+    /* Snapshot filter (M6 integration point) — skips when feature off. */
+    RUN_TEST(test_snapshot_counts_evictable_blocks);
 
     return UnityEnd();
 }
