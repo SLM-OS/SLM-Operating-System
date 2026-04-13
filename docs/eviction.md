@@ -98,8 +98,14 @@ runtime/src/mm/eviction/
 ├── mod.rs           # init(), public re-exports (gated on `ai_eviction`)
 ├── policy.rs        # EvictionPolicy trait, BlockMeta, PoolType,
 │                    # BlockFeatures = [f32; 27]
-├── registry.rs      # ACTIVE_POLICY, set/get/with_active_policy,
+├── registry.rs      # ACTIVE_POLICY (default LruPolicy),
+│                    # FirstCandidatePolicy (test-only trivial policy),
+│                    # set/get/with_active_policy,
 │                    # select_victim / score / update_feedback helpers
+├── lru.rs           # LruPolicy — ported from sibling Rust crate
+├── lfu.rs           # LfuPolicy — ported from sibling Rust crate
+├── slm_heuristic.rs # SlmHeuristicPolicy — ported from sibling Rust crate
+├── arc.rs           # ARCPolicy — translated from sibling Python
 └── generated/
     ├── mod.rs       # Selects stub vs real at compile time
     ├── xgb_stub.rs  # xgb_predict(_) -> 0.5 when models are off
@@ -109,6 +115,22 @@ runtime/src/mm/eviction/
     ├── mlp_policy_generated.rs   # Real int8-quantized MLP
     └── mlp_policy_f32.rs         # Float32 reference (test-only)
 ```
+
+### Classical Policies
+
+Four classical policies, installable via `set_eviction_policy`:
+
+| Policy | Behaviour | Source |
+|--------|-----------|--------|
+| `LruPolicy` | Picks the candidate with the smallest `last_access_time`; first-index tie break. `score()` returns inverse recency in [0, 1]. | Ported from sibling Rust |
+| `LfuPolicy` | Picks the smallest `access_count`; LRU tie-break within the tied set. | Ported from sibling Rust |
+| `SlmHeuristicPolicy` | Priority cascade: workspace → inactive-model weights → global LRU. `set_active_inferences(map)` and `bump_active(id, delta)` feed the scheduler signal. | Ported from sibling Rust |
+| `ARCPolicy` | Adaptive Replacement Cache (Megiddo & Modha FAST 2003). Four LRU lists (T1, T2, B1, B2) with adaptive `p`. `notify_access` / `notify_eviction` drive the ghost-list adaptation; `update_feedback` bridges the generic trait hook. | Translated from sibling Python (`src/policies/arc.py`) |
+
+`LruPolicy` is the default installed by `mm::eviction::init()`. M1 used a
+minimal `FirstCandidatePolicy` placeholder; that is still exported
+(`mm::eviction::FirstCandidatePolicy`) for tests that need a
+deterministic trivial policy.
 
 `mm::eviction::generated::MODELS_AVAILABLE` is a `const bool` callers
 can check to decide whether to fall back to a classical policy when
@@ -172,12 +194,22 @@ Unity suite (12 tests) alongside the existing `test_suite_model_mem`:
   - `rust_eviction_selftest()` returns `0`
   - `rust_eviction_run_tests()` returns `0`
 
-`rust_eviction_run_tests()` itself exercises 27 internal invariants —
-registry default / swap / reset, `FirstCandidatePolicy` behaviour,
-`select_victim` / `score` / `update_feedback` helpers, default
-`score()` impl correctness, `with_active_policy` return values, a
-5-swap consistency check, and per-predictor smoke tests (`xgb_predict`
-and `mlp_predict` finite in [0, 1]; stubs return exactly `0.5`).
+`rust_eviction_run_tests()` itself exercises 48 internal invariants:
+
+- **Registry / trait** (17): default / swap / reset, `FirstCandidatePolicy`
+  behaviour, `select_victim` / `score` / `update_feedback` helpers, default
+  `score()` impl correctness, `with_active_policy` return values, and a
+  5-swap consistency check.
+- **Classical-policy parity** (14): LRU evicts oldest, LRU single-
+  candidate, LRU score monotonic, LFU evicts least-accessed, LFU breaks
+  ties by LRU, SLM evicts workspace first, SLM prefers inactive models,
+  SLM fallback is LRU, ARC fallback is LRU, ARC initial accesses fill
+  T1, ARC second access promotes to T2, ARC eviction T1→B1, ARC B1
+  ghost hit grows p, ARC B2 ghost hit shrinks p, ARC reset clears all
+  lists. Cases mirror the sibling parity tests candidate-for-candidate.
+- **Generated predictors** (11): `MODELS_AVAILABLE` matches feature,
+  `xgb_predict` / `mlp_predict` finite in [0, 1] on three input shapes
+  each, stubs return exactly `0.5`.
 
 All suites pass under `make test` on the three supported configs:
 `AI_EVICTION=OFF` (default), `AI_EVICTION=ON` (stubs),

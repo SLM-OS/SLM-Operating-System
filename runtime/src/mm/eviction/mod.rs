@@ -13,11 +13,25 @@ pub mod policy;
 pub mod registry;
 pub mod generated;
 
+// Classical policies (M3). Ports of the sibling `slm-os-page-sim`
+// reference crate + Python ARC. Decisions match the Python simulator
+// candidate-for-candidate (enforced by the parity tests in
+// `lib::rust_eviction_run_tests`).
+pub mod lru;
+pub mod lfu;
+pub mod slm_heuristic;
+pub mod arc;
+
 pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType};
 pub use registry::{
     get_eviction_policy_name, reset_to_default, score, select_victim,
     set_eviction_policy, update_feedback, with_active_policy,
+    FirstCandidatePolicy,
 };
+pub use lru::LruPolicy;
+pub use lfu::LfuPolicy;
+pub use slm_heuristic::SlmHeuristicPolicy;
+pub use arc::{ARCPolicy, ARC_DEFAULT_GHOST_SIZE};
 
 /// Initialise the eviction subsystem.
 ///
