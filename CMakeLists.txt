@@ -69,7 +69,17 @@ add_compile_definitions(PLATFORM_${PLATFORM}=1)
 # idle — useful once the timer-IRQ-delivery blocker is resolved, but
 # regresses cooperative cross-CPU dispatch until then because secondary
 # CPUs wait for timer IRQs that never arrive.
-option(PI5_SECONDARY_PREEMPT "Enable deferred-scheduling preemption on Pi 5 secondary CPUs (blocked by timer-IRQ issue)" OFF)
+option(PI5_SECONDARY_PREEMPT "Enable deferred-scheduling preemption on Pi 5 secondary CPUs" OFF)
+# Pi 5 FIQ-routed timer (Phase 2 of issue #99): el1_fiq_handler dispatches
+# GICC_AIAR on IRQ 30 to timer_handler(), because non-secure IGROUPR writes
+# cannot promote Group 0 → Group 1 on this GICv2 and the timer therefore
+# arrives as FIQ rather than IRQ. Implies PI5_SECONDARY_PREEMPT because
+# the trampoline is required to avoid switch_to from exception context.
+option(PI5_FIQ_TIMER "Route timer IRQ through the FIQ vector on Pi 5 (issue #99 Phase 2)" ON)
+if(PLATFORM STREQUAL "RASPI5" AND PI5_FIQ_TIMER)
+    set(PI5_SECONDARY_PREEMPT ON CACHE BOOL "Implied by PI5_FIQ_TIMER" FORCE)
+    add_compile_definitions(PI5_FIQ_TIMER=1)
+endif()
 if(PLATFORM STREQUAL "RASPI5" AND PI5_SECONDARY_PREEMPT)
     add_compile_definitions(PI5_SECONDARY_PREEMPT=1)
 endif()

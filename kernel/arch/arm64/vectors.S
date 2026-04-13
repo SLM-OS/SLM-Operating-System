@@ -229,6 +229,14 @@ el1_fiq:
     save_regs
     mov     x0, sp
     bl      el1_fiq_handler
+#if defined(PI5_SECONDARY_PREEMPT)
+    /* Same trampoline-arming hook as el1_irq: when timer_handler has
+     * set reschedule_pending for this CPU, rewrite the saved ELR so
+     * eret lands in resched_trampoline and schedule() runs in task
+     * context (not exception context — fatal on Pi 5 otherwise). */
+    mov     x0, sp
+    bl      maybe_arm_resched_trampoline
+#endif
     restore_regs
     eret
 

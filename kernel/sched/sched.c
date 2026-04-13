@@ -435,9 +435,18 @@ static void idle_task_func(void *arg)
          *
          * Without PI5_SECONDARY_PREEMPT (Jetson, or Pi 5 with the kill
          * switch): only CPU 0 takes timer IRQs in idle. Secondary CPUs
-         * use WFE and rely on cooperative cross-CPU dispatch (SEV). */
-#if defined(PI5_SECONDARY_PREEMPT)
+         * use WFE and rely on cooperative cross-CPU dispatch (SEV).
+         *
+         * With PI5_FIQ_TIMER: also clear DAIF.F. On this GICv2 the
+         * timer PPI remains in Group 0 and arrives as FIQ; masking F
+         * would keep the interrupt line dead. (daifclr #3 clears I+F.) */
+#if defined(PI5_FIQ_TIMER)
+        __asm__ volatile("msr daifclr, #3" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
+        __asm__ volatile("wfi");
+#elif defined(PI5_SECONDARY_PREEMPT)
         __asm__ volatile("msr daifclr, #2" ::: "memory");
+        __asm__ volatile("isb" ::: "memory");
         __asm__ volatile("wfi");
 #else
         if (cpu_id() == 0) {
@@ -1428,7 +1437,11 @@ void scheduler_start(uint32_t this_cpu)
 #if defined(PLATFORM_X86_64)
     __asm__ volatile("sti" ::: "memory");
 #elif defined(PLATFORM_HAS_NC_MEMORY)
-#if defined(PI5_SECONDARY_PREEMPT)
+#if defined(PI5_FIQ_TIMER)
+    /* Unmask both I and F — timer arrives as FIQ on this GICv2. */
+    __asm__ volatile("msr daifclr, #0x3" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
+#elif defined(PI5_SECONDARY_PREEMPT)
     __asm__ volatile("msr daifclr, #0x2" ::: "memory");
     __asm__ volatile("isb" ::: "memory");
 #else

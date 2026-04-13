@@ -296,9 +296,12 @@ void el1_irq_handler(void)
 void el1_fiq_handler(struct trap_frame *tf)
 {
     (void)tf;
-#if defined(PI5_IRQ_DIAG) && defined(PLATFORM_RASPI5)
+#if defined(PLATFORM_RASPI5)
     /* GICC_AIAR: Group 0 IAR on GICv2 — reads the pending Group 0
-     * interrupt and marks it active. */
+     * interrupt and marks it active. On this hardware timer PPI 30
+     * remains in Group 0 (non-secure IGROUPR writes are silently
+     * discarded), so timer delivers here as FIQ. See
+     * docs/pi5-irq-investigation-2026-04.md. */
     volatile uint32_t *aiar =
         (volatile uint32_t *)(GIC_CPU_BASE + 0x20UL);
     volatile uint32_t *aeoir =
@@ -307,6 +310,7 @@ void el1_fiq_handler(struct trap_frame *tf)
     uint32_t irq = *aiar;
     uint32_t irq_num = irq & 0x3FF;
 
+#if defined(PI5_IRQ_DIAG)
     /* Record the last FIQ source for this CPU in the diag trace slot.
      * Format: high bits 0xD0000000 (marker), low 10 bits = IRQ number. */
     uint64_t mpidr;
@@ -316,11 +320,26 @@ void el1_fiq_handler(struct trap_frame *tf)
         *(volatile uint32_t *)(NC_MEM_BASE + 0xFFE0UL + cpu * 4) =
             0xD0000000u | irq_num;
     }
+#endif
 
-    /* EOI — must match the IAR value including the CPUID bits. */
+#if defined(PI5_FIQ_TIMER)
+    /* Phase 2: dispatch the timer. When PPI 30 arrives, run the same
+     * handler the IRQ path uses so scheduler_tick fires and (with
+     * PI5_SECONDARY_PREEMPT on) reschedule_pending is set. EOI before
+     * the handler so GIC re-priority works if a nested FIQ is posted. */
+    if (irq_num == 30) {
+        *aeoir = irq;
+        timer_handler();
+        return;
+    }
+#endif
+
+    /* EOI for non-timer FIQ sources. */
     if (irq_num != 0x3FFu) {
         *aeoir = irq;
     }
+#else
+    (void)tf;
 #endif
 }
 
