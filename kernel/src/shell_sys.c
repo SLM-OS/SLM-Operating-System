@@ -938,6 +938,117 @@ int cmd_bench(int argc, char *argv[])
     return 0;
 }
 
+#if defined(PI5_IRQ_DIAG)
+#include "diag_pi5.h"
+
+/*
+ * diag - Dump Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1).
+ *
+ * Sub-commands:
+ *   diag el2   — EL2 register snapshot captured by boot.S.
+ *   diag vec   — per-CPU per-vector exception counters.
+ *   diag fiq   — last FIQ source IRQ seen per CPU.
+ *   diag all   — all of the above (default).
+ */
+static void diag_print_el2(void)
+{
+    struct diag_el2_snapshot *s = diag_el2_snap();
+    uart_puts("\r\nEL2 register snapshot (boot.S, issue #99):\r\n");
+    if (s->magic != DIAG_EL2_MAGIC) {
+        uart_printf("  magic=0x%lx  INVALID — EL2 block did not run "
+                    "(firmware entered at EL%lu?)\r\n",
+                    (unsigned long)s->magic,
+                    (unsigned long)((s->current_el_entry >> 2) & 3));
+        return;
+    }
+    uart_printf("  CurrentEL at entry:     0x%lx (EL%lu)\r\n",
+                (unsigned long)s->current_el_entry,
+                (unsigned long)((s->current_el_entry >> 2) & 3));
+    uart_printf("  MIDR_EL1:               0x%lx\r\n",
+                (unsigned long)s->midr_el1);
+    uart_printf("  ID_AA64PFR0_EL1:        0x%lx\r\n",
+                (unsigned long)s->id_aa64pfr0_el1);
+    uart_printf("  HCR_EL2 pre:            0x%lx\r\n",
+                (unsigned long)s->hcr_el2_pre);
+    uart_printf("  HCR_EL2 post (written): 0x%lx  (IMO=%lu FMO=%lu AMO=%lu RW=%lu)\r\n",
+                (unsigned long)s->hcr_el2_post,
+                (unsigned long)((s->hcr_el2_post >> 4) & 1),
+                (unsigned long)((s->hcr_el2_post >> 3) & 1),
+                (unsigned long)((s->hcr_el2_post >> 5) & 1),
+                (unsigned long)((s->hcr_el2_post >> 31) & 1));
+    uart_printf("  CNTHCTL_EL2:            0x%lx\r\n",
+                (unsigned long)s->cnthctl_el2);
+    uart_printf("  GICD_CTLR pre:          0x%lx\r\n",
+                (unsigned long)s->gicd_ctlr_pre);
+    uart_printf("  GICC_CTLR pre:          0x%lx\r\n",
+                (unsigned long)s->gicc_ctlr_pre);
+    uart_printf("  GICD_IGROUPR[0] pre:    0x%lx\r\n",
+                (unsigned long)s->gicd_igroupr0_pre);
+    uart_printf("  GICD_IGROUPR[0] post:   0x%lx  %s\r\n",
+                (unsigned long)s->gicd_igroupr0_post,
+                (s->gicd_igroupr0_post == 0xFFFFFFFFul)
+                    ? "(writes held)"
+                    : (s->gicd_igroupr0_post == 0ul)
+                          ? "(writes SILENTLY DISCARDED — FIQ hypothesis likely)"
+                          : "(partial)");
+}
+
+static void diag_print_vec(void)
+{
+    extern uint32_t cpu_count;
+    uart_puts("\r\nPer-CPU exception counters (Phase 1b):\r\n");
+    uart_puts("  CPU   Sync       IRQ        FIQ        SError\r\n");
+    uart_puts("  ---   --------   --------   --------   --------\r\n");
+    for (uint32_t c = 0; c < cpu_count && c < 4; c++) {
+        struct diag_vec_counts *v = diag_vec_counts_cpu(c);
+        uart_printf("  %3lu   %8lu   %8lu   %8lu   %8lu\r\n",
+                    (unsigned long)c,
+                    (unsigned long)v->sync,
+                    (unsigned long)v->irq,
+                    (unsigned long)v->fiq,
+                    (unsigned long)v->serror);
+    }
+}
+
+static void diag_print_fiq(void)
+{
+    extern uint32_t cpu_count;
+    uart_puts("\r\nLast FIQ source per CPU (el1_fiq_handler GICC_AIAR):\r\n");
+    for (uint32_t c = 0; c < cpu_count && c < 4; c++) {
+        uint32_t v = diag_fiq_last(c);
+        if ((v & 0xF0000000u) == 0xD0000000u) {
+            uart_printf("  CPU %lu  IRQ=%lu\r\n",
+                        (unsigned long)c,
+                        (unsigned long)(v & 0x3FFu));
+        } else {
+            uart_printf("  CPU %lu  (no FIQ observed)\r\n",
+                        (unsigned long)c);
+        }
+    }
+}
+
+int cmd_diag(int argc, char *argv[])
+{
+    const char *what = (argc >= 2) ? argv[1] : "all";
+
+    if (strcmp(what, "el2") == 0) {
+        diag_print_el2();
+    } else if (strcmp(what, "vec") == 0) {
+        diag_print_vec();
+    } else if (strcmp(what, "fiq") == 0) {
+        diag_print_fiq();
+    } else if (strcmp(what, "all") == 0) {
+        diag_print_el2();
+        diag_print_vec();
+        diag_print_fiq();
+    } else {
+        uart_puts("Usage: diag <el2|vec|fiq|all>\r\n");
+        return 1;
+    }
+    return 0;
+}
+#endif /* PI5_IRQ_DIAG */
+
 int cmd_reboot(int argc, char *argv[])
 {
     (void)argc;
