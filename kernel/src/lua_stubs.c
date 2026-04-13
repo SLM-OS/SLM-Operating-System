@@ -21,6 +21,19 @@
 #include "sched.h"
 #include "string.h"  /* Our kernel string functions */
 
+/* === CORE-C3 regression guard ==============================================
+ * Do NOT redefine these 13 canonical string/mem functions in this file.
+ * They live in kernel/src/string.c and are declared in kernel/include/string.h
+ * above. Adding a duplicate definition here would create a linker symbol
+ * collision (or worse, silently replace the kernel's implementation if the
+ * link order changes). lua_stubs.c may define additional helpers that
+ * string.c does not (strrchr, strcat, strstr, etc.) — those are fine.
+ *
+ *   strlen   strcmp   strcpy   strncpy   strchr
+ *   strspn   strcspn  strncmp  atoi
+ *   memcpy   memset   memcmp   memmove
+ * ========================================================================= */
+
 /* Forward declare FILE type for our stubs */
 typedef struct __slm_file {
     int fd;
@@ -739,10 +752,35 @@ double tan(double x) {
     return sin(x) / c;
 }
 
-double asin(double x) { (void)x; return 0.0; }  /* TODO: implement */
-double acos(double x) { (void)x; return 0.0; }  /* TODO: implement */
-double atan(double x) { (void)x; return 0.0; }  /* TODO: implement */
-double atan2(double y, double x) { (void)y; (void)x; return 0.0; }  /* TODO */
+/* Inverse-trig stubs: capstone-scope placeholder.
+ *
+ * Returning 0.0 silently masks bugs in Lua code that relies on real inverse-
+ * trig values. Each wrapper warns once on first call so any accidental use
+ * surfaces in the log. See docs/lua.md for limitations. */
+static void warn_trig_stub_once(const char *name)
+{
+    static int warned_asin, warned_acos, warned_atan, warned_atan2;
+    int *flag = 0;
+    if (name[0] == 's') flag = &warned_asin;       /* asin */
+    else if (name[0] == 'c') flag = &warned_acos;  /* acos */
+    else if (name[1] == 't' && name[4] == 0)
+        flag = &warned_atan;                       /* atan */
+    else flag = &warned_atan2;                     /* atan2 */
+    if (flag && !*flag) {
+        *flag = 1;
+        extern int uart_printf(const char *fmt, ...);
+        uart_printf("[WARN] %s() is a stub returning 0.0; see docs/lua.md\n", name);
+    }
+}
+
+double asin(double x)  { (void)x; warn_trig_stub_once("asin");  return 0.0; }
+double acos(double x)  { (void)x; warn_trig_stub_once("acos");  return 0.0; }
+double atan(double x)  { (void)x; warn_trig_stub_once("atan");  return 0.0; }
+double atan2(double y, double x) {
+    (void)y; (void)x;
+    warn_trig_stub_once("atan2");
+    return 0.0;
+}
 
 double sinh(double x) { return (exp(x) - exp(-x)) / 2.0; }
 double cosh(double x) { return (exp(x) + exp(-x)) / 2.0; }

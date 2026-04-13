@@ -19,6 +19,7 @@
 #include "../include/vfs.h"
 #include "../include/pmm.h"
 #include "../include/uart.h"
+#include <stdint.h>
 #include <string.h>
 
 /* Forward declarations for string functions */
@@ -570,6 +571,19 @@ static void test_vfs_read_with_offset(void)
     TEST_ASSERT_EQUAL_MEMORY("from SLM-O", buf, 10);
 }
 
+/* CORE-M2: littlefs_file_seek takes int32_t; offsets beyond INT32_MAX must
+ * be rejected rather than silently truncated by the cast. */
+static void test_vfs_read_offset_overflow(void)
+{
+    char buf[16];
+    /* Cast constant to size_t so the comparison inside the VFS read matches
+     * the guard we added. (size_t)INT32_MAX + 1 triggers the guard. */
+    size_t huge_offset = (size_t)INT32_MAX + 1;
+    int result = vfs_read_path("/mnt/files/hello.txt", buf, sizeof(buf),
+                               huge_offset);
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
 /* ============================================================================
  * Write Through Mount Point Tests
  * ============================================================================ */
@@ -810,6 +824,7 @@ int test_suite_littlefs(void)
     /* VFS mount context tests */
     RUN_TEST(test_vfs_get_mount_ctx);
     RUN_TEST(test_vfs_read_with_offset);
+    RUN_TEST(test_vfs_read_offset_overflow);
 
     /* Write through mount point tests */
     RUN_TEST(test_write_through_mount);

@@ -540,6 +540,13 @@ int uart_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
         buf[size - 1] = '\0';
     }
 
+    /* out.count is an int; if a pathological format drove it past INT_MAX it
+     * would have wrapped to negative. Clamp so callers never see a negative
+     * length. __INT_MAX__ is a GCC built-in so this works in the -nostdinc
+     * integrated x86 build without pulling in <limits.h>. */
+    if (out.count < 0) {
+        return __INT_MAX__;
+    }
     return out.count;
 }
 

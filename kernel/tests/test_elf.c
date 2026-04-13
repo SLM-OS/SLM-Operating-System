@@ -80,6 +80,74 @@ static void test_elf_validate_rejects_overflow_phoff(void)
     TEST_ASSERT_EQUAL_INT(ELF_ERR_TRUNCATED, elf_validate(&ehdr, 4096));
 }
 
+/* CORE-C1: copy several argv strings into a buffer with just enough room. */
+static void test_elf_argv_copy_fits(void)
+{
+    char buf[64];
+    char *arg_locations[ELF_MAX_ARGV];
+    char *argv[] = { (char *)"hello", (char *)"world", (char *)"!" };
+    int argc = 3;
+
+    int rc = elf_copy_argv_strings(buf, sizeof(buf), argc, argv, arg_locations);
+    TEST_ASSERT_EQUAL_INT(ELF_OK, rc);
+
+    /* arg_locations should point into buf in order, each followed by the
+     * written string + NUL terminator. */
+    TEST_ASSERT_EQUAL_PTR(buf, arg_locations[0]);
+    TEST_ASSERT_EQUAL_STRING("hello", arg_locations[0]);
+    TEST_ASSERT_EQUAL_STRING("world", arg_locations[1]);
+    TEST_ASSERT_EQUAL_STRING("!", arg_locations[2]);
+}
+
+/* CORE-C1: buffer must be rejected when an argv string would overflow it. */
+static void test_elf_argv_copy_rejects_overflow(void)
+{
+    char buf[8];  /* room for "hello\0" but not "hello\0world\0" */
+    char *arg_locations[ELF_MAX_ARGV];
+    char *argv[] = { (char *)"hello", (char *)"world" };
+
+    int rc = elf_copy_argv_strings(buf, sizeof(buf), 2, argv, arg_locations);
+    TEST_ASSERT_EQUAL_INT(ELF_ERR_ARGV_TOO_LARGE, rc);
+}
+
+/* CORE-C1: single oversized arg must be rejected cleanly. */
+static void test_elf_argv_copy_rejects_single_oversize(void)
+{
+    char buf[4];
+    char *arg_locations[ELF_MAX_ARGV];
+    char *argv[] = { (char *)"too-long-to-fit" };
+
+    int rc = elf_copy_argv_strings(buf, sizeof(buf), 1, argv, arg_locations);
+    TEST_ASSERT_EQUAL_INT(ELF_ERR_ARGV_TOO_LARGE, rc);
+}
+
+/* CORE-C1: argc beyond ELF_MAX_ARGV must be rejected to protect the caller's
+ * arg_locations[] array. */
+static void test_elf_argv_copy_rejects_argc_over_limit(void)
+{
+    char buf[256];
+    char *arg_locations[ELF_MAX_ARGV];
+    char *argv[ELF_MAX_ARGV + 1];
+    for (int i = 0; i <= ELF_MAX_ARGV; i++) {
+        argv[i] = (char *)"a";
+    }
+
+    int rc = elf_copy_argv_strings(buf, sizeof(buf), ELF_MAX_ARGV + 1,
+                                   argv, arg_locations);
+    TEST_ASSERT_EQUAL_INT(ELF_ERR_INVALID, rc);
+}
+
+/* CORE-C1: argc == 0 is a valid no-op. */
+static void test_elf_argv_copy_zero_argc(void)
+{
+    char buf[8];
+    char *arg_locations[ELF_MAX_ARGV];
+    char *argv[] = { NULL };
+
+    int rc = elf_copy_argv_strings(buf, sizeof(buf), 0, argv, arg_locations);
+    TEST_ASSERT_EQUAL_INT(ELF_OK, rc);
+}
+
 int test_suite_elf(void)
 {
     UnityBegin("ELF Loader Tests");
@@ -89,6 +157,11 @@ int test_suite_elf(void)
     RUN_TEST(test_elf_validate_rejects_phoff_past_size);
     RUN_TEST(test_elf_validate_rejects_phdr_array_truncated);
     RUN_TEST(test_elf_validate_rejects_overflow_phoff);
+    RUN_TEST(test_elf_argv_copy_fits);
+    RUN_TEST(test_elf_argv_copy_rejects_overflow);
+    RUN_TEST(test_elf_argv_copy_rejects_single_oversize);
+    RUN_TEST(test_elf_argv_copy_rejects_argc_over_limit);
+    RUN_TEST(test_elf_argv_copy_zero_argc);
 
     return UnityEnd();
 }

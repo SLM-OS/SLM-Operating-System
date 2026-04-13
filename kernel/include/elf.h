@@ -98,13 +98,17 @@ struct elf_info {
 };
 
 /* Error codes */
-#define ELF_OK              0
-#define ELF_ERR_INVALID     (-1)    /* Not a valid ELF file */
-#define ELF_ERR_ARCH        (-2)    /* Wrong architecture */
-#define ELF_ERR_TYPE        (-3)    /* Not an executable */
-#define ELF_ERR_NOMEM       (-4)    /* Out of memory */
-#define ELF_ERR_SEGMENTS    (-5)    /* Too many segments */
-#define ELF_ERR_TRUNCATED   (-6)    /* File truncated */
+#define ELF_OK                  0
+#define ELF_ERR_INVALID         (-1)   /* Not a valid ELF file */
+#define ELF_ERR_ARCH            (-2)   /* Wrong architecture */
+#define ELF_ERR_TYPE            (-3)   /* Not an executable */
+#define ELF_ERR_NOMEM           (-4)   /* Out of memory */
+#define ELF_ERR_SEGMENTS        (-5)   /* Too many segments */
+#define ELF_ERR_TRUNCATED       (-6)   /* File truncated */
+#define ELF_ERR_ARGV_TOO_LARGE  (-7)   /* argv strings exceed stack budget */
+
+/* Maximum number of argv entries supported by elf_create_task_with_args. */
+#define ELF_MAX_ARGV            16
 
 /*
  * Validate an ELF file without loading.
@@ -192,5 +196,31 @@ struct task *elf_create_task(const struct elf_info *info, const char *name);
 struct task *elf_create_task_with_args(const struct elf_info *info,
                                         const char *name,
                                         int argc, char *argv[]);
+
+/*
+ * Copy argv strings into a bounded destination buffer, recording the
+ * resulting pointers in arg_locations[]. This is the bounds-checked core
+ * of elf_create_task_with_args's argv setup, extracted so it can be tested
+ * without constructing a full ELF task.
+ *
+ * The function walks argv[0..argc-1], copying each string (including its
+ * NUL terminator) into dst and recording the per-arg pointer in
+ * arg_locations. It refuses to write past dst + dst_size; TOCTOU growth
+ * of argv[i] between the caller's sizing pass and the copy is caught.
+ *
+ * @dst:           Destination buffer.
+ * @dst_size:      Size of destination buffer in bytes.
+ * @argc:          Number of arguments (must be 0..ELF_MAX_ARGV).
+ * @argv:          Argument vector (each element NUL-terminated).
+ * @arg_locations: Output array; arg_locations[i] receives a pointer into
+ *                 dst for argv[i]'s copy. Must have room for argc entries.
+ *
+ * Returns: ELF_OK on success, ELF_ERR_ARGV_TOO_LARGE if the strings don't
+ *          fit in dst, ELF_ERR_INVALID on NULL arguments or argc out of
+ *          range.
+ */
+int elf_copy_argv_strings(char *dst, size_t dst_size,
+                          int argc, char *const argv[],
+                          char *arg_locations[]);
 
 #endif /* ELF_H */

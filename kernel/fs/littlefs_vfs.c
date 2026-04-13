@@ -8,6 +8,7 @@
 #include "../include/littlefs_slm.h"
 #include "../include/vfs.h"
 #include "../include/debug.h"
+#include <stdint.h>
 
 /* ---- VFS Filesystem Operations ---- */
 
@@ -33,8 +34,13 @@ static int lfs_vfs_read(void *ctx, const char *path, char *buf,
         return -1;
     }
 
-    /* Seek to offset if needed */
+    /* Seek to offset if needed. littlefs_file_seek takes int32_t; reject
+     * offsets that would silently truncate on the cast. */
     if (offset > 0) {
+        if (offset > (size_t)INT32_MAX) {
+            littlefs_file_close(mnt, handle);
+            return -1;
+        }
         int pos = littlefs_file_seek(mnt, handle, (int32_t)offset, LFS_SEEK_SET);
         if (pos < 0) {
             littlefs_file_close(mnt, handle);

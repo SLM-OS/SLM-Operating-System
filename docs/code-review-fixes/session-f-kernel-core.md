@@ -240,3 +240,61 @@ Lua, strings, tests.
 - [ ] New ELF argv-bounds test passes
 - [ ] test_lua.c still passes (regression for string dedup)
 ```
+
+---
+
+## Outcomes (April 12, 2026)
+
+Three items in the original doc were stale against current source and
+reduced in scope after investigation. Noted in the outcome table so the
+deviation from the plan is explicit.
+
+| ID | Status | Notes |
+|---|---|---|
+| CORE-C1 | Fixed | `elf_copy_argv_strings` helper added to `kernel/src/elf.c`; `kernel/tests/test_elf.c` gets 5 unit tests. New error code `ELF_ERR_ARGV_TOO_LARGE` and `ELF_MAX_ARGV` constant in `kernel/include/elf.h`. |
+| CORE-C2 | Fixed (defensive) | `#ifdef PLATFORM_JETSON_ORIN_NANO` early-return in `nv_gpu_probe`. Runtime path in `kernel/src/main.c:410-417` already registered the stub driver on Jetson, so the probe was unreachable — the guard is belt-and-suspenders. Downgraded from CRITICAL to MEDIUM. |
+| CORE-C3 | Reduced scope — see below | Carry-over no longer reproducible: `lua_stubs.c:22` already `#include "string.h"` and none of the 13 canonical functions are redefined there. Added a regression-guard comment block in `lua_stubs.c`; `nm` verified all four platforms show exactly one `T` definition per canonical symbol. Long-term consolidation into a core library is tracked as a follow-up enhancement. |
+| CORE-H1 | Fixed | `uart_vsnprintf` in `kernel/src/kprintf.c` clamps the return value when `out.count` would have wrapped negative. |
+| CORE-H2 | Fixed | `lua_slm_dostring` and `lua_slm_dofile` capture `lua_gettop` on entry and restore it on exit, regardless of success/error. Four tests in `kernel/tests/test_lua.c` pin the behavior (stack clean after error, after success, no leak across 50 iterations, NULL state rejected). |
+| CORE-H3 | Deferred | Filed as GitHub issue #78 (`P2-medium`, `sub:shell`, `tech-debt`). |
+| CORE-H4 | Fixed | Ten `test_shell_resolve_path_*` unit tests added. The tests exposed and we fixed a latent double-slash bug in the relative-path branch of `shell_resolve_path` at `kernel/src/shell.c:150-155`. |
+| CORE-H5 | Closed as N/A, retargeted | VFS node pool at `kernel/src/vfs.c:22-40` is bump-only (`next_node++`, no free), so the "generation on node + fd" fix from the doc doesn't apply. The real reuse vulnerability is in `kernel/fs/littlefs_slm.c` `struct file_handle` — filed as GitHub issue #79. |
+| CORE-H6 | Fixed | `if (!L) return 0;` defensive guard at the top of all 24 `l_*` callbacks registered in `slm_lib[]`. |
+| CORE-H7 | Fixed (already correct) | Audit found the ARM64 `semihosting_available()` was already a compile-time constant gated by `ENABLE_SEMIHOSTING`, which `CMakeLists.txt:60` sets only for `PLATFORM=QEMU_VIRT`. Pi 5 and Jetson never execute the `HLT #0xF000` probe. Added a clarifying code comment. The doc's concern is stale — but no behavior change needed. |
+| CORE-M1 | Fixed | `cmd_sleep` in `kernel/src/shell_sys.c:417` switched from `atoi` to `shell_parse_uint`. `atoi` in `kernel/src/string.c:175` carries a deprecation comment noting it is retained for `kernel/lib/lwip` third-party code but should not be used for new shell/kernel parsing. Five `test_shell_cmd_sleep_*` tests added. |
+| CORE-M2 | Fixed | `kernel/fs/littlefs_vfs.c` guards `offset > INT32_MAX` before the `int32_t` cast into `littlefs_file_seek`. Test `test_vfs_read_offset_overflow` added to `kernel/tests/test_littlefs.c`. |
+| CORE-M3 | Fixed | `ASSERT(buf->cpu_addr != NULL)` at the end of `nvidia_alloc` surfaces the "silent allocator NULL" case during development. |
+| CORE-M4 | Partial | `docs/filesystem.md` file-path references verified against current source; footer refreshed. No `docs/phase-3-*.md` exists in this tree — the doc's reference was stale. |
+| CORE-L1 | Fixed | `asin`/`acos`/`atan`/`atan2` wrap a one-time WARN via `warn_trig_stub_once` (static flags per function) before returning 0.0. `docs/lua.md` Limitations section documents the stub behavior. `test_lua_trig_stubs_return_zero` pins the contract. |
+| CORE-L2 | Closed as not reproduced | Inspection of `kernel/src/shell.c:414-430` shows `parse_line` is called exactly once per REPL iteration. The doc's claim of duplicate parsing is stale. |
+
+### Test coverage summary
+
+New tests added in this session:
+- `kernel/tests/test_elf.c` — 5 tests for `elf_copy_argv_strings` (fits, overflow, single-oversize, argc-over-limit, zero-argc).
+- `kernel/tests/test_shell.c` — 10 `shell_resolve_path` unit tests (absolute, `..`, `.`, `..` at root, double slash, trailing slash, empty, relative, overflow, NULL rejection) + 5 sleep validation tests.
+- `kernel/tests/test_lua.c` — 4 stack hygiene tests for CORE-H2 + 1 trig-stub test for CORE-L1.
+- `kernel/tests/test_littlefs.c` — 1 test for offset overflow (CORE-M2).
+
+Total: 26 new functional tests.
+
+### Verification matrix
+
+| Platform | Build | Tests | nm check |
+|---|---|---|---|
+| QEMU_VIRT (ARM64) | ✓ | ✓ | 13/13 single definitions |
+| X86_64 | ✓ | ✗ pre-existing GRUB boot failure from Session A merge (reproducible without this branch's edits) | 13/13 single definitions |
+| RASPI5 | ✓ | — (needs hardware) | 13/13 single definitions |
+| JETSON_ORIN_NANO | ✓ | — (needs hardware) | 13/13 single definitions |
+
+### Deferred to hardware testing
+
+- Pi 5 boot smoke test via `labctl boot_test --count 5` — confirms
+  semihosting probe does not trap, shell reaches prompt, sleep command
+  validation works end-to-end, and the double-slash fix in
+  `shell_resolve_path` is visible from `cd`/`pwd` round-trips.
+- Jetson boot smoke test — confirms no CBB abort during GPU init (stub
+  driver continues to be registered; defensive `#ifdef` in `nv_gpu_probe`
+  never reached in practice).
+
+Hardware tests are pending lab resource availability.

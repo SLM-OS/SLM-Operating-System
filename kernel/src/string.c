@@ -171,7 +171,13 @@ void *memmove(void *dest, const void *src, size_t n)
     return dest;
 }
 
-/* Convert string to integer */
+/* Convert string to integer.
+ *
+ * Deprecated for new code: this silently overflows on large inputs and can't
+ * distinguish "0" from a parse failure. Use shell_parse_uint() (overflow-
+ * checked, positive integers) from shell_internal.h where numeric range
+ * matters. Retained here because third-party code under kernel/lib/lwip
+ * expects the standard libc name. */
 int atoi(const char *str)
 {
     int result = 0;

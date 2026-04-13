@@ -414,9 +414,9 @@ int cmd_sleep(int argc, char *argv[])
         return 1;
     }
 
-    uint32_t ms = (uint32_t)atoi(argv[1]);
-    if (ms == 0) {
-        uart_puts("sleep: duration must be > 0\r\n");
+    uint32_t ms;
+    if (shell_parse_uint(argv[1], &ms) < 0 || ms == 0) {
+        uart_puts("sleep: duration must be a positive integer\r\n");
         return 1;
     }
 

@@ -219,6 +219,10 @@ The freestanding environment provides minimal implementations of:
 - **No debug library**: The debug library is not enabled
 - **No os library**: System calls are not available
 - **Limited math precision**: Math functions use Taylor series approximations
+- **Inverse-trig stubs**: `math.asin`, `math.acos`, `math.atan`, `math.atan2`
+  are placeholder stubs that return `0.0`. The first call to each logs a
+  one-time warning to the kernel console. Lua code that depends on inverse
+  trig must implement the approximation locally or run on a host build.
 
 ## Future Enhancements
 

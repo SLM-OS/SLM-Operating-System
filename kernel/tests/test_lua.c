@@ -11,6 +11,7 @@
 #include "../include/component.h"
 #include "../include/slm_ffi.h"
 #include "../include/uart.h"
+#include "../lib/lua/src/lua.h"  /* lua_gettop, lua_settop — CORE-H2 test */
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -1438,6 +1439,102 @@ static void test_lua_heap_reset_across_sessions(void)
 }
 
 /* ============================================================================
+ * Lua Stack Hygiene (CORE-H2)
+ *
+ * lua_slm_dostring / lua_slm_dofile must leave the stack at the caller's
+ * original top whether the script succeeds, errors at load, or errors at
+ * runtime. Previous code only popped on error and left return values pushed
+ * on success — callers assumed a clean stack but didn't get one.
+ * ============================================================================ */
+
+/* After a runtime error, the stack should be restored to the caller's top. */
+static void test_lua_dostring_stack_clean_after_error(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int top_before = lua_gettop(L);
+
+    /* Force a runtime error. */
+    int result = lua_slm_dostring(L, "error('boom')");
+    TEST_ASSERT_NOT_EQUAL(0, result);
+
+    TEST_ASSERT_EQUAL_INT(top_before, lua_gettop(L));
+
+    lua_slm_close(L);
+}
+
+/* After a successful script with a return value, the stack should still be
+ * restored — the wrapper doesn't expose return values to the C caller. */
+static void test_lua_dostring_stack_clean_after_success(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int top_before = lua_gettop(L);
+
+    int result = lua_slm_dostring(L, "return 1, 2, 3");
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    TEST_ASSERT_EQUAL_INT(top_before, lua_gettop(L));
+
+    lua_slm_close(L);
+}
+
+/* Many repeated error calls must not grow the stack (regression for the
+ * original leak where error messages accumulated). */
+static void test_lua_dostring_no_stack_leak_over_iterations(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int top_before = lua_gettop(L);
+    for (int i = 0; i < 50; i++) {
+        (void)lua_slm_dostring(L, "error('iter')");
+    }
+    TEST_ASSERT_EQUAL_INT(top_before, lua_gettop(L));
+
+    lua_slm_close(L);
+}
+
+/* NULL L must return an error without crashing (CORE-H2 defensive guard). */
+static void test_lua_dostring_null_state(void)
+{
+    int result = lua_slm_dostring(NULL, "return 1");
+    TEST_ASSERT_NOT_EQUAL(0, result);
+}
+
+/* ============================================================================
+ * Lua Math Stubs (CORE-L1)
+ *
+ * asin/acos/atan/atan2 are placeholders returning 0.0 with a one-time WARN.
+ * These tests pin the current behavior so the contract is explicit: the
+ * functions don't crash and are callable from Lua.
+ * ============================================================================ */
+
+static void test_lua_trig_stubs_return_zero(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    /* All four stubs should succeed and return 0. First call also emits
+     * the warn-once line to UART; we can't easily assert on that, but the
+     * test at minimum confirms the stubs don't panic. */
+    int r = lua_slm_dostring(L,
+        "local a = math.asin(0.5)\n"
+        "local b = math.acos(0.5)\n"
+        "local c = math.atan(1.0)\n"
+        "local d = math.atan(1.0, 2.0)\n"
+        "assert(a == 0, 'asin stub should return 0')\n"
+        "assert(b == 0, 'acos stub should return 0')\n"
+        "assert(c == 0, 'atan stub should return 0')\n"
+        "assert(d == 0, 'atan2 stub should return 0')\n");
+    TEST_ASSERT_EQUAL_INT(0, r);
+
+    lua_slm_close(L);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1535,6 +1632,15 @@ int test_suite_lua(void)
 
     /* Heap management regression tests */
     RUN_TEST(test_lua_heap_reset_across_sessions);
+
+    /* Lua stack hygiene (CORE-H2) */
+    RUN_TEST(test_lua_dostring_stack_clean_after_error);
+    RUN_TEST(test_lua_dostring_stack_clean_after_success);
+    RUN_TEST(test_lua_dostring_no_stack_leak_over_iterations);
+    RUN_TEST(test_lua_dostring_null_state);
+
+    /* Math stubs (CORE-L1) */
+    RUN_TEST(test_lua_trig_stubs_return_zero);
 
     return UNITY_END();
 }

@@ -141,18 +141,14 @@ int shell_resolve_path(const char *path, char *out, size_t max_len)
 
     /* Start with cwd for relative paths, empty for absolute */
     if (path[0] != '/') {
-        /* Relative path - start with cwd */
+        /* Relative path - start with cwd. Do NOT append a separator here;
+         * the component-append loop below inserts one as needed. Previously
+         * this branch appended '/' eagerly, which combined with the loop's
+         * own separator produced "/foo//bar" for cwd=/foo, path=bar. */
         size_t cwd_len = strlen(shell_cwd);
         if (cwd_len >= sizeof(work)) return -1;
         strcpy(work, shell_cwd);
         work_len = cwd_len;
-
-        /* Ensure there's a separator if cwd isn't just "/" */
-        if (work_len > 1) {
-            if (work_len + 1 >= sizeof(work)) return -1;
-            work[work_len++] = '/';
-            work[work_len] = '\0';
-        }
     } else {
         /* Absolute path */
         work[0] = '/';

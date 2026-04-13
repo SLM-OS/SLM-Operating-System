@@ -33,6 +33,7 @@
  * slm.print(msg) - Print message to console
  */
 static int l_print(lua_State *L) {
+    if (!L) return 0;
     int nargs = lua_gettop(L);
     for (int i = 1; i <= nargs; i++) {
         if (i > 1) uart_printf("\t");
@@ -57,6 +58,7 @@ static int l_print(lua_State *L) {
  * slm.uptime() - Get system uptime in milliseconds
  */
 static int l_uptime(lua_State *L) {
+    if (!L) return 0;
     uint64_t count = timer_get_count();
     uint64_t freq = timer_get_frequency();
     uint64_t ms = count / (freq / 1000);
@@ -69,6 +71,7 @@ static int l_uptime(lua_State *L) {
  * Returns table: {total_kb, free_kb, used_kb}
  */
 static int l_mem_stats(lua_State *L) {
+    if (!L) return 0;
     size_t total_pages = pmm_get_total_pages();
     size_t free_pages = pmm_get_free_pages();
     size_t used_pages = total_pages - free_pages;
@@ -92,6 +95,7 @@ static int l_mem_stats(lua_State *L) {
  * Returns array of tables: {{id, name, state, cpu}, ...}
  */
 static int l_tasks(lua_State *L) {
+    if (!L) return 0;
     lua_newtable(L);
 
     int idx = 1;
@@ -134,6 +138,7 @@ static int l_tasks(lua_State *L) {
  * slm.sleep(ms) - Sleep for milliseconds (busy wait)
  */
 static int l_sleep(lua_State *L) {
+    if (!L) return 0;
     lua_Integer ms = luaL_checkinteger(L, 1);
     if (ms > 0) {
         /* Busy wait - proper sleep would require scheduler support */
@@ -151,7 +156,7 @@ static int l_sleep(lua_State *L) {
  * slm.yield() - Yield CPU to scheduler
  */
 static int l_yield(lua_State *L) {
-    (void)L;
+    if (!L) return 0;
     yield();
     return 0;
 }
@@ -160,6 +165,7 @@ static int l_yield(lua_State *L) {
  * slm.version() - Get SLM-OS version string
  */
 static int l_version(lua_State *L) {
+    if (!L) return 0;
     lua_pushstring(L, "SLM-OS " SLM_VERSION);
     return 1;
 }
@@ -168,6 +174,7 @@ static int l_version(lua_State *L) {
  * slm.cpu_count() - Get number of CPUs
  */
 static int l_cpu_count(lua_State *L) {
+    if (!L) return 0;
     lua_pushinteger(L, MAX_CPUS);
     return 1;
 }
@@ -176,6 +183,7 @@ static int l_cpu_count(lua_State *L) {
  * slm.cpu_id() - Get current CPU ID
  */
 static int l_cpu_id(lua_State *L) {
+    if (!L) return 0;
 #if defined(PLATFORM_X86_64)
     lua_pushinteger(L, 0);
 #else
@@ -194,6 +202,7 @@ static int l_cpu_id(lua_State *L) {
  * slm.component_count() - Get number of registered components
  */
 static int l_component_count(lua_State *L) {
+    if (!L) return 0;
     lua_pushinteger(L, (lua_Integer)component_count());
     return 1;
 }
@@ -203,6 +212,7 @@ static int l_component_count(lua_State *L) {
  * Returns array of tables: {{name, version, type, priority, state, task_id}, ...}
  */
 static int l_component_list(lua_State *L) {
+    if (!L) return 0;
     uint32_t count = component_count();
     lua_createtable(L, (int)count, 0);
 
@@ -246,6 +256,7 @@ static int l_component_list(lua_State *L) {
  * Returns index or nil if not found
  */
 static int l_component_find(lua_State *L) {
+    if (!L) return 0;
     const char *name = luaL_checkstring(L, 1);
     int idx = component_find(name);
     if (idx < 0) {
@@ -261,6 +272,7 @@ static int l_component_find(lua_State *L) {
  * Returns index or nil on failure
  */
 static int l_component_run(lua_State *L) {
+    if (!L) return 0;
     const char *name = luaL_checkstring(L, 1);
     int idx = component_run(name);
     if (idx < 0) {
@@ -276,6 +288,7 @@ static int l_component_run(lua_State *L) {
  * Returns new index or nil on failure
  */
 static int l_component_hot_swap(lua_State *L) {
+    if (!L) return 0;
     const char *old_name = luaL_checkstring(L, 1);
     const char *new_name = luaL_checkstring(L, 2);
     int idx = component_hot_swap(old_name, new_name);
@@ -319,6 +332,7 @@ static component_state_export_fn find_export_fn(const char *name)
 }
 
 static int l_component_hot_swap_stateful(lua_State *L) {
+    if (!L) return 0;
     const char *old_name = luaL_checkstring(L, 1);
     const char *new_name = luaL_checkstring(L, 2);
 
@@ -342,6 +356,7 @@ static int l_component_hot_swap_stateful(lua_State *L) {
  * Returns table: {weights={...}, workspace={...}}
  */
 static int l_model_stats(lua_State *L) {
+    if (!L) return 0;
     RustPoolStats w = rust_weight_pool_stats();
     RustPoolStats ws = rust_workspace_pool_stats();
 
@@ -387,6 +402,7 @@ static int l_model_stats(lua_State *L) {
  * Returns predicted class (integer) or -1 on error
  */
 static int l_model_infer(lua_State *L) {
+    if (!L) return 0;
     int idx = (int)luaL_checkinteger(L, 1);
     int result = rust_infer_classify((uint32_t)idx);
     lua_pushinteger(L, result);
@@ -398,6 +414,7 @@ static int l_model_infer(lua_State *L) {
  * Returns model index or -1 if not found
  */
 static int l_model_find(lua_State *L) {
+    if (!L) return 0;
     const char *name = luaL_checkstring(L, 1);
     int idx = rust_model_find(name);
     lua_pushinteger(L, idx);
@@ -409,6 +426,7 @@ static int l_model_find(lua_State *L) {
  * Returns model index or -1 on failure
  */
 static int l_model_load_mnist(lua_State *L) {
+    if (!L) return 0;
     int idx = rust_model_load_builtin_mnist();
     lua_pushinteger(L, idx);
     return 1;
@@ -419,6 +437,7 @@ static int l_model_load_mnist(lua_State *L) {
  * Returns 0 on success, -1 on error
  */
 static int l_model_pin(lua_State *L) {
+    if (!L) return 0;
     int idx = (int)luaL_checkinteger(L, 1);
     lua_pushinteger(L, rust_model_pin((uint32_t)idx));
     return 1;
@@ -429,6 +448,7 @@ static int l_model_pin(lua_State *L) {
  * Returns 0 on success, -1 on error
  */
 static int l_model_unpin(lua_State *L) {
+    if (!L) return 0;
     int idx = (int)luaL_checkinteger(L, 1);
     lua_pushinteger(L, rust_model_unpin((uint32_t)idx));
     return 1;
@@ -443,6 +463,7 @@ static int l_model_unpin(lua_State *L) {
  * Returns number of subscribers that received the message
  */
 static int l_msg_publish(lua_State *L) {
+    if (!L) return 0;
     const char *topic = luaL_checkstring(L, 1);
     const char *data = luaL_checkstring(L, 2);
     int delivered = msg_router_publish((const uint8_t *)topic, (const uint8_t *)data);
@@ -456,6 +477,7 @@ static int l_msg_publish(lua_State *L) {
  * Returns number of subscribers that received the message
  */
 static int l_msg_publish_priority(lua_State *L) {
+    if (!L) return 0;
     const char *topic = luaL_checkstring(L, 1);
     const char *data = luaL_checkstring(L, 2);
     int prio = (int)luaL_checkinteger(L, 3);
@@ -476,6 +498,7 @@ static int l_msg_publish_priority(lua_State *L) {
  * Returns string
  */
 static int l_sched_policy(lua_State *L) {
+    if (!L) return 0;
     lua_pushstring(L, sched_get_policy());
     return 1;
 }
@@ -580,17 +603,23 @@ void lua_slm_close(lua_State *L) {
 }
 
 int lua_slm_dostring(lua_State *L, const char *script) {
+    if (!L) return -1;
+    int saved_top = lua_gettop(L);
     int status = luaL_dostring(L, script);
     if (status != LUA_OK) {
         const char *msg = lua_tostring(L, -1);
         uart_printf("Lua error: %s\n", msg ? msg : "(unknown)");
-        lua_pop(L, 1);
     }
+    /* Restore stack to caller's view regardless of outcome: luaL_dostring
+     * leaves either the results of the chunk or the error message, and
+     * callers of this wrapper don't read them. */
+    lua_settop(L, saved_top);
     return status;
 }
 
 int lua_slm_dofile(lua_State *L, const char *filename) {
     if (!L || !filename) return -1;
+    int saved_top = lua_gettop(L);
 
     char buf[4096];
     int len = vfs_read_path(filename, buf, sizeof(buf) - 1, 0);
@@ -606,8 +635,8 @@ int lua_slm_dofile(lua_State *L, const char *filename) {
     if (status != LUA_OK) {
         const char *msg = lua_tostring(L, -1);
         uart_printf("Lua error: %s\n", msg ? msg : "(unknown)");
-        lua_pop(L, 1);
     }
+    lua_settop(L, saved_top);
     return status;
 }
 

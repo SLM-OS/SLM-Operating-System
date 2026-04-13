@@ -320,6 +320,34 @@ static void *vaddr_to_phys(const struct elf_info *info, uint64_t vaddr)
     return NULL;
 }
 
+int elf_copy_argv_strings(char *dst, size_t dst_size,
+                          int argc, char *const argv[],
+                          char *arg_locations[])
+{
+    if (!dst || !argv || !arg_locations || argc < 0 || argc > ELF_MAX_ARGV) {
+        return ELF_ERR_INVALID;
+    }
+
+    char *str_ptr = dst;
+    size_t remaining = dst_size;
+
+    for (int i = 0; i < argc; i++) {
+        if (!argv[i]) {
+            return ELF_ERR_INVALID;
+        }
+        size_t need = strlen(argv[i]) + 1;  /* +1 for NUL */
+        if (need > remaining) {
+            return ELF_ERR_ARGV_TOO_LARGE;
+        }
+        arg_locations[i] = str_ptr;
+        memcpy(str_ptr, argv[i], need);
+        str_ptr += need;
+        remaining -= need;
+    }
+
+    return ELF_OK;
+}
+
 struct task *elf_create_task(const struct elf_info *info, const char *name)
 {
     /* Delegate to elf_create_task_with_args with no arguments */
@@ -394,6 +422,10 @@ struct task *elf_create_task_with_args(const struct elf_info *info,
     char **argv_ptrs = NULL;
 
     if (argc > 0 && argv != NULL) {
+        /* Clamp before any per-arg work so strings_size and the copy loop
+         * see a consistent count. */
+        if (argc > ELF_MAX_ARGV) argc = ELF_MAX_ARGV;
+
         /* First, calculate total string space needed */
         size_t strings_size = 0;
         for (int i = 0; i < argc; i++) {
@@ -407,15 +439,15 @@ struct task *elf_create_task_with_args(const struct elf_info *info,
         sp -= strings_size;
         char *strings_area = (char *)sp;
 
-        /* Copy strings and record their locations */
-        char *str_ptr = strings_area;
-        char *arg_locations[16];  /* Support up to 16 args */
-        if (argc > 16) argc = 16;
-
-        for (int i = 0; i < argc; i++) {
-            arg_locations[i] = str_ptr;
-            strcpy(str_ptr, argv[i]);
-            str_ptr += strlen(argv[i]) + 1;
+        /* Copy strings with explicit bounds; rejects TOCTOU growth of
+         * argv[i] between the sizing pass above and the copy. */
+        char *arg_locations[ELF_MAX_ARGV];
+        int copy_err = elf_copy_argv_strings(strings_area, strings_size,
+                                             argc, argv, arg_locations);
+        if (copy_err != ELF_OK) {
+            WARN("elf_create_task: argv copy failed (%d)", copy_err);
+            pmm_free_pages(stack, stack_pages);
+            return NULL;
         }
 
         /* Reserve space for argv array (argc + 1 pointers, including NULL) */
