@@ -37,9 +37,14 @@ mod mlp_policy_generated;
 #[cfg(feature = "ai_eviction_models")]
 pub use mlp_policy_generated::mlp_predict;
 
-// Float32 MLP (cross-check reference used by #[cfg(test)] only).
-#[cfg(all(feature = "ai_eviction_models", test))]
+// Float32 MLP (cross-check reference). Available whenever
+// `ai_eviction_models` is on; consumed by the int8-vs-f32 agreement
+// check in `lib::rust_eviction_run_tests`. Not used in the hot path.
+#[cfg(feature = "ai_eviction_models")]
 pub mod mlp_policy_f32;
+
+#[cfg(feature = "ai_eviction_models")]
+pub use mlp_policy_f32::mlp_predict_f32;
 
 /// `true` when the generated model files are linked in, `false` when
 /// the stub is active. Runtime code can use this to decide whether to

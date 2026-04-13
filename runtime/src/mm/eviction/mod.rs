@@ -22,6 +22,12 @@ pub mod lfu;
 pub mod slm_heuristic;
 pub mod arc;
 
+// ML policies (M4). Feature extraction + thin wrappers around the
+// generated XGBoost / int8-MLP predict functions.
+pub mod features;
+pub mod xgboost;
+pub mod mlp;
+
 pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType};
 pub use registry::{
     get_eviction_policy_name, reset_to_default, score, select_victim,
@@ -32,6 +38,9 @@ pub use lru::LruPolicy;
 pub use lfu::LfuPolicy;
 pub use slm_heuristic::SlmHeuristicPolicy;
 pub use arc::{ARCPolicy, ARC_DEFAULT_GHOST_SIZE};
+pub use features::{extract_features, AI_HORIZON_NS};
+pub use xgboost::XGBoostPolicy;
+pub use mlp::MlpPolicy;
 
 /// Initialise the eviction subsystem.
 ///

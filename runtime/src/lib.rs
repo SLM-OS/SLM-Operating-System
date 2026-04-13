@@ -1550,6 +1550,151 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             let _ = mlp_m;
         }
 
+        puts(b"\n-- eviction: ML policies (M4) --\n\0");
+
+        use mm::eviction::{MlpPolicy, XGBoostPolicy, extract_features};
+
+        // Build a small candidate set with deliberate variation across
+        // the per-block features so the ML policies have something to
+        // distinguish.
+        let ml_cands = [
+            make_full(100, 1_000_000_000,   1, PoolType::Weight,    1),
+            make_full(101, 2_000_000_000,   8, PoolType::Workspace, 2),
+            make_full(102,    50_000_000,  20, PoolType::Weight,    3),
+            make_full(103, 3_500_000_000, 100, PoolType::Weight,    4),
+        ];
+
+        // extract_features produces one row per candidate with 27 floats.
+        let rows = extract_features(&ml_cands);
+        check!(b"extract_features_shape\0",
+               rows.len() == ml_cands.len() && rows[0].len() == 27);
+        // The per-candidate rows have unique recency ranks. Ranks are
+        // normalised to [0, 1] by division by (n-1), so we compare the
+        // raw f32 values for distinctness with a small epsilon rather
+        // than casting to integer.
+        let ranks_distinct = {
+            let mut ok = true;
+            for i in 0..rows.len() {
+                for j in (i + 1)..rows.len() {
+                    if (rows[i][0] - rows[j][0]).abs() < 1e-4 {
+                        ok = false;
+                    }
+                }
+            }
+            ok
+        };
+        check!(b"extract_features_recency_rank_unique\0", ranks_distinct);
+
+        // XGBoostPolicy: select a victim and produce scores.
+        {
+            let mut p = XGBoostPolicy::new();
+            let v = p.select_victim(&ml_cands);
+            check!(b"xgboost_select_victim_returns_valid_index\0",
+                   v < ml_cands.len());
+            let s = p.score(&ml_cands);
+            check!(b"xgboost_score_len_matches_candidates\0",
+                   s.len() == ml_cands.len());
+            let s_ok = s.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0);
+            check!(b"xgboost_scores_finite_in_unit\0", s_ok);
+        }
+
+        // MlpPolicy: same smoke tests.
+        {
+            let mut p = MlpPolicy::new();
+            let v = p.select_victim(&ml_cands);
+            check!(b"mlp_select_victim_returns_valid_index\0",
+                   v < ml_cands.len());
+            let s = p.score(&ml_cands);
+            check!(b"mlp_score_len_matches_candidates\0",
+                   s.len() == ml_cands.len());
+            let s_ok = s.iter().all(|v| v.is_finite() && *v >= 0.0 && *v <= 1.0);
+            check!(b"mlp_scores_finite_in_unit\0", s_ok);
+        }
+
+        // Argmax consistency: select_victim's pick matches the argmax
+        // of score() (both policies should agree with themselves).
+        {
+            let mut p = XGBoostPolicy::new();
+            let v = p.select_victim(&ml_cands);
+            let s = p.score(&ml_cands);
+            let mut max_i = 0;
+            for (i, x) in s.iter().enumerate() {
+                if *x > s[max_i] { max_i = i; }
+            }
+            check!(b"xgboost_victim_matches_argmax_of_scores\0", v == max_i);
+        }
+        {
+            let mut p = MlpPolicy::new();
+            let v = p.select_victim(&ml_cands);
+            let s = p.score(&ml_cands);
+            let mut max_i = 0;
+            for (i, x) in s.iter().enumerate() {
+                if *x > s[max_i] { max_i = i; }
+            }
+            check!(b"mlp_victim_matches_argmax_of_scores\0", v == max_i);
+        }
+
+        // Int8 MLP vs Float32 MLP: agreement on feature vectors drawn
+        // from the same extract_features pipeline that would feed the
+        // live system. We avoid synthesising raw [0, 1] floats — the
+        // int8 quantiser's L1 scale (~0.0495) saturates such inputs
+        // immediately, so the two paths would disagree by design.
+        //
+        // Instead we build a pool of BlockMeta rows with varied
+        // tracking fields and feed them through the real extractor.
+        // Decision agreement (both models pick the same victim index)
+        // is the signal we care about — exact score agreement isn't
+        // required because int8 quantisation is lossy by construction.
+        #[cfg(feature = "ai_eviction_models")]
+        {
+            use mm::eviction::generated::mlp_predict_f32;
+            let mut agree = 0u32;
+            let mut total = 0u32;
+            // Seven distinct candidate groups, each with 4 blocks that
+            // differ across recency / frequency / pool / priority.
+            // Mirrors the small-decision groups the sibling's
+            // verify_rust_export harness uses.
+            for group_seed in 0..7u32 {
+                let base_tick = 100_000_000u64 * (group_seed as u64 + 1);
+                let group = [
+                    make_full(200 + group_seed * 4 + 0,
+                              base_tick,
+                              (group_seed * 3 + 1) as u32,
+                              PoolType::Weight, (group_seed % 4) as u8),
+                    make_full(200 + group_seed * 4 + 1,
+                              base_tick + 25_000_000,
+                              (group_seed * 5 + 7) as u32,
+                              PoolType::Workspace, ((group_seed + 1) % 4) as u8),
+                    make_full(200 + group_seed * 4 + 2,
+                              base_tick + 60_000_000,
+                              (group_seed + 2) as u32,
+                              PoolType::Weight, ((group_seed + 2) % 4) as u8),
+                    make_full(200 + group_seed * 4 + 3,
+                              base_tick + 80_000_000,
+                              (group_seed * 11 + 2) as u32,
+                              PoolType::Weight, ((group_seed + 3) % 4) as u8),
+                ];
+                let rows = extract_features(&group);
+                // Compute int8 and f32 victims.
+                let (mut int8_best, mut int8_score) = (0, f32::MIN);
+                let (mut f32_best,  mut f32_score ) = (0, f32::MIN);
+                for (i, r) in rows.iter().enumerate() {
+                    let s8 = generated::mlp_predict(r);
+                    let sf = mlp_predict_f32(r);
+                    if s8 > int8_score { int8_score = s8; int8_best = i; }
+                    if sf > f32_score  { f32_score  = sf; f32_best  = i; }
+                }
+                if int8_best == f32_best { agree += 1; }
+                total += 1;
+            }
+            // Target ≥ 85% decision agreement across groups. The sibling
+            // reports 95% on 1000 vectors; 7 groups is a smoke check,
+            // not a statistical test — the broader verification lives
+            // in scripts/verify_rust_export.py.
+            check!(b"int8_vs_f32_mlp_decision_agreement\0",
+                   agree * 100 >= total * 85);
+        }
+
         // Prevent unused-mut / unused-var on `scores` in release.
         let _ = scores;
         // Drop the collected feedback tuple to quiet the borrow checker.
