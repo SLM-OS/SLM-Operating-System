@@ -179,4 +179,24 @@ void secondary_init(uint32_t cpu_id);
  */
 extern void secondary_entry(void);
 
+/*
+ * smp_notify_cpu() — nudge a remote CPU to re-check its run queue.
+ *
+ * The scheduler calls this after enqueuing a task on another CPU's
+ * run queue so that the target CPU, if it is currently idle (WFE on
+ * ARM64 / HLT on x86-64), wakes up and picks up the new task
+ * without waiting for its next timer tick.
+ *
+ * Backends:
+ *   ARM64 — issues `SEV`; the target CPU's WFE falls through and
+ *           the idle loop re-checks the run queue.
+ *   x86-64 — sends a RESCHED_VECTOR LAPIC IPI to the target's APIC
+ *            ID; the IPI handler calls schedule() directly.
+ *
+ * A call with @logical_cpu == cpu_id() is a cheap no-op.
+ * If @logical_cpu >= cpu_count the implementation must ignore it
+ * (some callers compute from task->assigned_cpu which can be stale).
+ */
+void smp_notify_cpu(uint32_t logical_cpu);
+
 #endif /* SMP_H */

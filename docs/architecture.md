@@ -105,8 +105,10 @@ This hybrid approach leverages:
 | DTB Parser | `kernel/src/dtb.c` | Device Tree parsing for hardware discovery |
 | Platform Info | `kernel/include/platform.h` | Compile-time fallback values |
 | RP1 UART Driver | `kernel/drivers/uart_rp1_bitbang.c` | Pi 5 UART via RP1 southbridge |
-| x86-64 Boot | `kernel/arch/x86_64/trampoline32.S`, `entry64.S` | Multiboot2 header, 32-bit trampoline to long mode |
-| x86-64 Main | `kernel/arch/x86_64/platform_x86.c` (`kernel_main_x86`) | x86-64 kernel entry point, dispatches into `kernel_main` |
+| x86-64 Boot | `kernel/arch/x86_64/trampoline32.S`, `entry64.S` | Multiboot2 header, 32-bit trampoline to long mode, CR4.OSFXSR/OSXMMEXCPT + CR0.MP for SSE at CPL=0 |
+| x86-64 Main | `kernel/arch/x86_64/platform_x86.c` (`kernel_main_x86`) | x86-64 kernel entry point, dispatches into `kernel_main`; hosts reschedule IPI handler |
+| x86-64 TSS + IST | `kernel/arch/x86_64/tss.c` | Per-CPU TSS with a 4 KiB IST1 stack — LAPIC timer and reschedule IPI use this stack instead of the interrupted task's kernel stack |
+| x86-64 SSE inference kernels | `kernel/arch/x86_64/sse_kernels.c` | Hot inference paths (relu / zero / add_scalar / fma_row) compiled with `-msse -msse2`, called via extern-C from the Rust runtime |
 
 **Supported Platforms:**
 
@@ -115,7 +117,7 @@ This hybrid approach leverages:
 | QEMU virt | Primary development | Full feature set, VirtIO-Net networking |
 | Raspberry Pi 5 | Hardware target | 4-core SMP, boots to interactive shell, UART TX/RX working, preemptive scheduling at 100 Hz. See `docs/pi5-baremetal-status.md` |
 | Jetson Orin Nano | Working | EL2+VHE boot, UARTC serial, GICv3, 6.7GB RAM, GPU probe. Single-core (SMP needs UEFI boot). See `docs/jetson-el2-bringup.md` |
-| x86-64 | Experimental | Multiboot2 boot, serial output, basic subsystem init |
+| x86-64 | Capstone-complete | 8-core SMP via INIT-SIPI-SIPI, TSS+IST for timer ISR stack isolation, reschedule IPI for cross-CPU dispatch, FXSAVE/FXRSTOR context switch, SSE2 inference kernels, periodic load rebalance, work-stealing enabled by default. GPU compute (GSP) deferred post-capstone. See `docs/x86-64-port.md` + `docs/x86-64-capstone-gap-closure-plan.md`. |
 
 **Phase 3 Learnings:**
 - DTB passed in x0 by bootloader (U-Boot, UEFI)

@@ -47,7 +47,12 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 | 4-level paging (up to 20 GB) | ✅ 4 GB | ✅ 20 GB | Identity mapped, 2MB pages |
 | SMP (INIT-SIPI-SIPI) | ✅ 4 CPUs | ✅ 8 CPUs | All cores + hyperthreads |
 | Preemptive scheduler | ✅ | ✅ | LAPIC timer, 100 Hz, per-CPU |
-| IDT + LAPIC + IOAPIC | ✅ | ✅ | 64 vectors, exception handling |
+| Per-CPU TSS + IST1 for timer ISR | ✅ | ✅ | A1 / P1-1 — timer stack-switches on delivery |
+| Reschedule IPI (vector 49) | ✅ | ✅ | B1 / P2-1 — cross-CPU dispatch latency < 10 ms |
+| Work-stealing (CONFIG_WORK_STEALING) | ✅ | ✅ | B3 / P2-3 — enabled by default on x86-64 |
+| Periodic load rebalance | ✅ | ✅ | D1 / P2-4 — 1 Hz, BSP-driven, respects cpu_affinity |
+| FXSAVE / FXRSTOR in switch_to | ✅ | ✅ | D2 / P1-6 — multi-task SSE safe |
+| IDT + LAPIC + IOAPIC | ✅ | ✅ | 64 vectors, exception handling, reschedule IPI |
 | Spinlocks (TTAS atomic) | ✅ | ✅ | Correct under SMP load |
 | PCI enumeration | ✅ 6 devices | ✅ 21 devices | ECAM on hardware, legacy I/O in QEMU |
 | NVIDIA GPU identification | N/A | ✅ GA107 | BOOT_42 → chip 0x177, Ampere, Rev 10.1 |
@@ -59,7 +64,8 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 | Component system | ✅ | ✅ | Counter, echo, listener services |
 | Message router (pub/sub) | ✅ | N/A | Topic-based IPC, yield-based delivery |
 | Echo IPC (shared mailbox) | ✅ | ✅ | Atomic mailbox, round-robin scheduling |
-| GPU compute / 3D | ❌ | ❌ | Requires GSP firmware (documented) |
+| SSE inference kernels (relu/zero/add/fma) | ✅ | ✅ | C1 / P3-1 — C kernels `-msse -msse2`, called from Rust runtime |
+| GPU compute / 3D | ❌ | ❌ | Requires GSP firmware (Phase E — post-capstone) |
 
 ### Milestone Completion
 
@@ -774,7 +780,7 @@ GRUB is built with `grub-mkimage` (not `grub-mkstandalone`) to avoid the `normal
 
 ### Functional Tests
 
-The `test_x86_boot.c` test suite contains 94 tests across 17 categories:
+The `test_x86_boot.c` test suite contains ~120 tests across 20 categories:
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -786,19 +792,22 @@ The `test_x86_boot.c` test suite contains 94 tests across 17 categories:
 | IDT | 4 | IDTR loaded, exception entries present, IRQ interrupt gates, exception trap gates |
 | Legacy PIC | 3 | OCW3 response, timer unmasked, slave accessible |
 | Timer | 3 | IF flag set, ticks incrementing, ~100 Hz rate |
-| ACPI + APIC | 7 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, EOI fence (4096 iterations, stack canaries intact), timer running |
-| Framebuffer console | 3 | Scroll stress (200 newlines), long-line wrap + scroll, control chars (\r, \t, \b, \n) |
+| ACPI + APIC | 7 | CPU count, LAPIC/IOAPIC addresses, LAPIC initialized, EOI safe, EOI fence, timer running |
+| Framebuffer console | 3 | Scroll stress, long-line wrap + scroll, control chars |
 | SMP | 11 | CPU count, all online, BSP cpu_id, unique APIC IDs, AP stacks, LAPIC ID match, cpu_logical_id found/not-found, logical map, spinlock mutual exclusion, param offsets |
 | NVIDIA GPU | 7 | Init ran, no-crash, VRAM test -1 without GPU, accessors safe, BOOT_42 decode, gpu/pci shell commands registered |
 | Component runtime | 6 | Run counter, invalid name rejected, list builtins safe, run increases count, shell command registered, ELF x86-64 arch |
-| Message router (C tests) | 18 | Init, subscribe (single/multiple/multi-topic/overflow), receive (empty/unsubscribed/null), publish (none/timeout), ack no-pending, reinit, shell commands (list/subscribe/send) |
+| Message router (C tests) | 18 | Init, subscribe (single/multiple/multi-topic/overflow), receive (empty/unsubscribed/null), publish (none/timeout), ack no-pending, reinit, shell commands |
 | Message router (Rust tests) | 10 | Init+subscribe, multi-subscribe, subscriber overflow, topic overflow, receive empty/unsubscribed, publish nonexistent, reinit clears, ack no-pending, list safe |
 | Component services | 2 | Listener starts + registers, echo start + send safe |
 | PCI | 11 | Host bridge exists, nonexistent 0xFFFF, enumeration count, host/ISA bridge found, device at index, config read8/16, find by ID, find not found, multi-function |
-| Platform abstraction | 9 | cpu_context offset/fields/size, platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
-| Scheduler integration | 9 | gic_init loads IDT, task stack, gic_end_interrupt, uart_putc, scheduler_tick, preempt_disabled cleared in task, new task runs+yields, two tasks yield both advance (#91), new task preemptible on first timeslice (#91) |
-| setjmp/longjmp | 2 | setjmp/longjmp round-trip, longjmp(0) returns 1 |
-| Long mode | 2 | 64-bit operations, RIP-relative addressing |
+| Platform abstraction | 9 | cpu_context offset/fields/size (post-D2 includes FXSAVE), platform defines, irq_save/restore, spinlock roundtrip, gic enable/disable, timer frequency/count |
+| Preemption (capstone Phase A) | 7 | `preempt_disabled` cleared in task (#91); new task yields; two-task yield both advance (#91); new task preemptible first timeslice (#91); `sleep_ms` bsp + AP TSC-based (A4); TSS loaded + IDT[48].ist=1 + per-CPU TSS distinct (A1). |
+| SMP responsiveness (Phase B) | 5 | Reschedule IPI delivers; self-notify is no-op; cross-CPU dispatch latency under 10 ms; AP timer preemption under load on every CPU; CONFIG_WORK_STEALING enabled on x86-64. |
+| x86-64 SSE inference (Phase C) | 7 | CR4.OSFXSR + CR4.OSXMMEXCPT enabled; CR0.EM clear + MP set; bit-exact SSE vs scalar for relu / zero / add_scalar / fma_row. |
+| Scheduler rebalance + SSE polish (Phase D) | 5 | Rebalance respects explicit cpu_affinity; rebalance migration counter exposed; rebalance-after-burst spreads across CPUs; new tasks get FCW=0x037F via fxsave init; FXSAVE preserves XMM across preemption. |
+| setjmp/longjmp | 2 | round-trip; longjmp(0) returns 1 |
+| Long mode | 2 | 64-bit operations; RIP-relative addressing |
 
 ### Running Tests
 
@@ -888,6 +897,8 @@ Lua commands are available in the shell via `lua <expression>`.
 | `kernel/arch/x86_64/idt.c` | IDT setup, exception handler, IRQ dispatch |
 | `kernel/arch/x86_64/acpi.c` | ACPI RSDP/MADT parsing (CPU discovery) |
 | `kernel/arch/x86_64/lapic.c` | Local APIC driver (init, EOI, IPI, timer) |
+| `kernel/arch/x86_64/tss.c` | Per-CPU TSS + IST1 stack install (A1 / P1-1) |
+| `kernel/arch/x86_64/sse_kernels.c` | SSE2 inference kernels — compiled `-msse -msse2` (C1 / P3-1) |
 | `kernel/arch/x86_64/ioapic.c` | I/O APIC driver (redirection table) |
 | `kernel/arch/x86_64/pic.c` | gic.h interface routing to LAPIC/IOAPIC |
 | `kernel/arch/x86_64/timer_x86.c` | LAPIC timer (timer.h interface, calibrated vs PIT) |

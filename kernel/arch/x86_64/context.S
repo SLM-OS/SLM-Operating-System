@@ -28,6 +28,8 @@
 #define CTX_RSP     0x30
 #define CTX_RIP     0x38
 #define CTX_RFLAGS  0x40
+/* 0x48: 8-byte pad to align fxsave area (task.h's _pad0). */
+#define CTX_FXSAVE  0x50    /* 512-byte FXSAVE area (D2 / P1-6) */
 
 .global switch_to
 .type switch_to, @function
@@ -56,9 +58,23 @@ switch_to:
     pop     %rax
     mov     %rax, CTX_RFLAGS(%rdx)
 
+    /* Save x87 + MMX + XMM state (D2 / P1-6). fxsave requires a
+     * 16-byte aligned destination — task.h forces the fxsave array
+     * to 16-byte alignment and _pad0 ensures the offset 0x50 is
+     * 16-aligned within cpu_context (which itself starts at
+     * task offset 0x20, 16-aligned).
+     * Note: CR4.OSFXSR is set in trampoline32.S / ap_trampoline.S
+     * (C2) so fxsave executes at CPL=0 without #UD. */
+    fxsave  CTX_FXSAVE(%rdx)
+
 .Lrestore:
     /* Restore new task's context */
     lea     TASK_CONTEXT_OFFSET(%rsi), %rdx
+
+    /* Restore x87 + MMX + XMM state BEFORE GPRs — fxrstor clobbers
+     * no GPRs and the incoming xmm state must be live before the
+     * task resumes executing its own code. */
+    fxrstor CTX_FXSAVE(%rdx)
 
     mov     CTX_RBX(%rdx), %rbx
     mov     CTX_RBP(%rdx), %rbp

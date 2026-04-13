@@ -460,6 +460,29 @@ Used for:
 - Signaling a core to reschedule
 - TLB shootdown (later, for shared page tables)
 
+Both platforms route through the common `smp_notify_cpu(logical_cpu)`
+API (`kernel/include/smp.h`). ARM64 backend issues `sev` (wakes any
+WFE'd CPU); x86-64 backend sends a LAPIC IPI.
+
+**x86-64 vector table:**
+
+| Vector | Purpose | IST |
+|---|---|---|
+| 48 | LAPIC timer (100 Hz, `scheduler_tick`) | 1 |
+| 49 | Reschedule IPI — `smp_notify_cpu` target | 1 |
+
+Both share IST1 via the per-CPU TSS (see A1 in
+`docs/x86-64-capstone-gap-closure-plan.md`), so the ISRs cannot be
+corrupted by a task-stack overflow.
+
+**Reschedule IPI handler (x86-64):** calls `schedule()` directly,
+NOT `scheduler_tick()` — quantum accounting stays owned by the
+local LAPIC timer so a remote IPI cannot double-tick the fairness
+policy. Nested schedule() is guarded by the `preempt_disabled[cpu]`
+flag (`kernel/sched/sched.c`).
+
+**ARM64 SGI reference:**
+
 ```c
 #define IPI_RESCHEDULE  0   /* SGI 0: request reschedule */
 

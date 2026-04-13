@@ -60,10 +60,23 @@ static void pic_disable(void)
 
 /* ---- gic.h Interface ---- */
 
+extern void tss_install_current_cpu(uint32_t cpu_id);
+extern void smp_resched_ipi_init(void);
+
 void gic_init(void)
 {
     /* Load IDT (x86-64 interrupt vector table) */
     idt_init();
+
+    /* Install per-CPU TSS + IST1 stack BEFORE enabling interrupts.
+     * idt_init() sets ist=1 on the LAPIC timer vector (48) so the
+     * timer ISR will stack-switch to TSS.ist1 on delivery — if TR
+     * is not loaded first, the CPU #TS-faults on the first tick.
+     * BSP is always logical CPU 0. A1 / P1-1. */
+    tss_install_current_cpu(0);
+
+    /* Register the reschedule IPI handler (B1 / P2-1). */
+    smp_resched_ipi_init();
 
     /* Disable legacy 8259 PIC */
     pic_disable();

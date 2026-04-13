@@ -111,6 +111,27 @@ int cpu_logical_id(uint64_t mpidr)
 }
 
 /*
+ * ARM64 backend for smp_notify_cpu() (see include/smp.h).
+ *
+ * Issues SEV. Any CPU currently in WFE falls through to its idle
+ * loop, which re-checks its run queue. On ARM64 all secondary-CPU
+ * idle paths use WFE (see idle_task_func in sched.c); the BSP uses
+ * WFI. SEV wakes WFE but not WFI — that's fine because the BSP runs
+ * schedule() on every local timer tick anyway.
+ *
+ * Platform-shared: the x86-64 backend is in kernel/arch/x86_64/platform_x86.c.
+ * This definition only compiles when the target is not X86_64.
+ */
+void smp_notify_cpu(uint32_t logical_cpu)
+{
+    if (logical_cpu == cpu_id())
+        return;
+    if (logical_cpu >= cpu_count)
+        return;
+    __asm__ volatile("sev" ::: "memory");
+}
+
+/*
  * Power on a secondary CPU via PSCI.
  */
 int psci_cpu_on(uint64_t target_mpidr, uintptr_t entry_point,

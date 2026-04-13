@@ -24,6 +24,68 @@
 
 /* ---- Boot entry bridge ---- */
 
+/* ---- Reschedule IPI (B1 / P2-1) ----
+ *
+ * A tiny, high-priority IPI that nudges an idle or busy remote CPU
+ * to re-check its run queue. Handler calls schedule() directly —
+ * NOT scheduler_tick() — because a tick advances quantum accounting
+ * and doing that on every cross-CPU dispatch would corrupt the
+ * fairness policy. The LAPIC timer remains the sole source of
+ * quantum ticks; the IPI just requests an immediate scheduling
+ * opportunity.
+ *
+ * Vector 49: the idt.S stub is already in place (originally reserved
+ * for "future SMP IPI"). Runs on IST1 so it cannot corrupt the
+ * interrupted task's stack (A1 / P1-1).
+ */
+#define RESCHED_VECTOR  49
+
+/* Diagnostic counter exported for tests. */
+volatile uint64_t smp_resched_ipi_count[MAX_CPUS];
+
+extern void schedule(void);
+extern void lapic_eoi(void);
+extern void lapic_send_ipi(uint32_t apic_id, uint32_t vector, uint32_t flags);
+
+static void resched_ipi_handler(uint8_t irq)
+{
+    (void)irq;
+    uint32_t cpu = cpu_id();
+    if (cpu < MAX_CPUS)
+        smp_resched_ipi_count[cpu]++;
+    /* schedule() internally guards with preempt_disabled[cpu], so a
+     * nested call while schedule() is already in flight no-ops
+     * safely. */
+    schedule();
+}
+
+extern void irq_register(uint8_t irq, void (*handler)(uint8_t));
+
+void smp_resched_ipi_init(void)
+{
+    /* irq_register takes (vector - 32) as its index. */
+    irq_register(RESCHED_VECTOR - 32, resched_ipi_handler);
+}
+
+/* smp_notify_cpu() — x86-64 backend (see include/smp.h).
+ *
+ * Sends a RESCHED_VECTOR IPI to @logical_cpu's LAPIC. If that CPU
+ * is in `hlt` it wakes immediately; if it is running user code the
+ * ISR runs as soon as RFLAGS.IF allows and calls schedule(). A call
+ * with @logical_cpu == cpu_id() is a cheap no-op — self-IPI isn't
+ * needed because the caller will hit its own timer tick or explicit
+ * yield().
+ */
+void smp_notify_cpu(uint32_t logical_cpu)
+{
+    if (logical_cpu == cpu_id())
+        return;
+    if (logical_cpu >= cpu_count)
+        return;
+    uint32_t apic_id = (uint32_t)cpu_data[logical_cpu].mpidr;
+    lapic_send_ipi(apic_id, RESCHED_VECTOR, 0);
+}
+
 /* Saved Multiboot2 info address (set by entry64.S → kernel_main_x86) */
 uint32_t multiboot_info_addr;
 
@@ -124,8 +186,16 @@ static void delay_ms(uint32_t ms)
  * Runs on the AP's own stack in long mode. Performs per-CPU init and enters
  * the scheduler.
  */
+extern void tss_install_current_cpu(uint32_t cpu_id);
+
 static void ap_entry_64(uint32_t logical_cpu_id)
 {
+    /* Install this AP's TSS + IST1 BEFORE any interrupt can fire.
+     * The shared IDT has LAPIC timer vector 48 flagged ist=1; without
+     * a loaded TR the first tick #TS-faults. Must run before
+     * timer_percpu_init() enables the local LAPIC timer. A1 / P1-1. */
+    tss_install_current_cpu(logical_cpu_id);
+
     /* Initialize per-CPU LAPIC */
     gic_percpu_init();
 

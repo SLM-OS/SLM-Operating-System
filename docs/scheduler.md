@@ -792,4 +792,66 @@ Full implementation will be added in Phase 5 with actual inference engine integr
 
 ---
 
+## Cross-CPU wakeup: `smp_notify_cpu()` (Pre-1)
+
+`scheduler_add_task_to_cpu()` calls `smp_notify_cpu(logical_cpu)`
+after enqueuing a task on another CPU's run queue so that the
+target, if currently idle (WFE on ARM64 / HLT on x86-64), wakes
+immediately and picks up the new task without waiting for its next
+local timer tick. A call with `logical_cpu == cpu_id()` is a cheap
+no-op.
+
+| Platform | Backend |
+|---|---|
+| ARM64 (Pi 5, Jetson, QEMU_VIRT) | `sev` — in `kernel/sched/smp.c` |
+| x86-64 | Reschedule IPI on LAPIC vector 49 — handler in `kernel/arch/x86_64/platform_x86.c` |
+
+The x86-64 handler calls `schedule()` directly (NOT `scheduler_tick()`) so
+quantum accounting stays owned by the LAPIC timer. The reschedule IPI is
+gated through IDT entry 49 with `ist=1`, sharing IST1 with the timer —
+see A1 in `docs/x86-64-capstone-gap-closure-plan.md` for the stack rationale.
+
+## Periodic load rebalance (`sched_rebalance_tick`)
+
+Every `REBALANCE_INTERVAL_TICKS` (default 100 = 1 s at 100 Hz) on BSP,
+`sched_rebalance_tick(cpu)` — invoked via the active policy's `tick`
+callback — scans `cpu_rq(i)->ready_count` across CPUs. If the
+`(max − min)` delta exceeds `REBALANCE_IMBALANCE_MIN` (2), one
+migratable task moves from the busiest CPU to the idlest. Migration
+is gated on:
+
+- `cpu_affinity == CPU_AFFINITY_ANY` — tasks pinned via explicit
+  affinity are never moved.
+- `task != busy_rq->idle_task` — the per-CPU idle task never migrates.
+- `state == TASK_READY` — runnable tasks only.
+
+Migration sequence:
+1. Acquire busy CPU's `rq_lock_irqsave` → walk list → dequeue.
+2. Drop busy CPU's lock.
+3. `scheduler_add_task_to_cpu(task, idle_cpu)` — which takes the
+   idle CPU's lock, enqueues, calls `smp_notify_cpu(idle_cpu)`.
+
+`sched_rebalance_get_migrations()` exposes a diagnostic counter for
+tests.
+
+## Work stealing (Pre-existing + B3 activation)
+
+`kernel/sched/steal_deque.c` implements a Chase–Lev-style deque per
+CPU. When a CPU's own run queue goes empty inside `schedule()`, and
+`CONFIG_WORK_STEALING` is on, it calls `sched_try_steal()` to pull
+work from another CPU's deque. Enabled by default on x86-64 via
+`CMakeLists.txt` gate (`ENABLE_WORK_STEALING=ON` for `PLATFORM=X86_64`).
+ARM platforms keep it off until their preemption blockers close.
+
+**Correctness invariants:**
+- `sched_try_steal()` acquires the victim's `rq_lock_irqsave` for
+  the validation + dequeue — this is mutual exclusion with the
+  victim's own `schedule()`, so the stolen task cannot be the one
+  the victim is currently in the middle of switching to.
+- `preempt_disabled[victim]` is checked as a cheap early-out (not a
+  correctness requirement) to avoid contending a lock the victim is
+  almost certainly about to take.
+
+---
+
 *Last updated: April 2026*

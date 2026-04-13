@@ -325,6 +325,13 @@ void idt_init(void)
 
     /* Extended vectors (48-63) for LAPIC timer, IPIs, etc. */
     idt_set_gate(48, isr_48, IDT_INTERRUPT_GATE);
+    /* LAPIC timer runs on IST1 so a stack-overflowing task cannot
+     * corrupt the timer ISR's frame. Requires tss_install_current_cpu()
+     * to have run on this CPU before interrupts are enabled. A1 / P1-1. */
+    idt[48].ist = 1;
+    /* Reschedule IPI (vector 49) shares IST1 with the timer — both
+     * are "preemption trigger" ISRs. B1 / P2-1. */
+    idt[49].ist = 1;
     idt_set_gate(49, isr_49, IDT_INTERRUPT_GATE);
     idt_set_gate(50, isr_50, IDT_INTERRUPT_GATE);
     idt_set_gate(51, isr_51, IDT_INTERRUPT_GATE);

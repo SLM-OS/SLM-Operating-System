@@ -169,7 +169,12 @@ irq_restore(flags);               // flags from THIS task's stack
 
 **Partial success — demonstrated that preventing timer reentrance fixes the deadlock for simple cases.**
 
-### Phase 8: Fix Attempt 4 — LAPIC Timer Masking (April 6)
+### Phase 8: Fix Attempt 4 — LAPIC Timer Masking (April 6, reverted)
+
+**Abandoned.** The `lapic_timer_mask()` / `lapic_timer_unmask()` helpers
+were removed in April 2026 after the `preempt_disabled` flag proved
+sufficient. The analysis below is retained for historical context;
+see the Resolution section for the final fix.
 
 **Approach:** Mask the LAPIC timer LVT entry before releasing the lock. The timer can't fire during the switch_to window. Unmask after switch_to returns.
 
@@ -331,7 +336,7 @@ Avoid yield()-based polling entirely. Use a callback/event-driven IPC pattern wh
 | `kernel/sched/sched.c` | schedule(), scheduler_tick(), yield() |
 | `kernel/arch/x86_64/context.S` | switch_to(), task_entry_wrapper |
 | `kernel/arch/x86_64/timer_x86.c` | lapic_timer_irq, sleep_ms |
-| `kernel/arch/x86_64/lapic.c` | lapic_timer_mask/unmask, LAPIC LVT |
+| `kernel/arch/x86_64/lapic.c` | LAPIC LVT, EOI fence, timer calibration (timer-mask helpers removed after the approach was abandoned) |
 | `kernel/src/component_runtime.c` | echo service, component_send_echo |
 | `kernel/arch/x86_64/idt.c` | exception_handler, IRQ dispatch |
 

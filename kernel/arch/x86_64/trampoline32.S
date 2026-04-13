@@ -131,9 +131,13 @@ _start:
     dec %ecx
     jnz 1b
 
-    /* Enable PAE */
+    /* Enable PAE (CR4 bit 5) + SSE FXSAVE/FXRSTOR (CR4.OSFXSR, bit 9)
+     * + unmasked SSE exceptions (CR4.OSXMMEXCPT, bit 10).
+     * OSFXSR + OSXMMEXCPT are required for any SSE instruction at
+     * CPL=0 to execute without #UD / #NM. The inline-asm SSE kernels
+     * in runtime/src/inference/ops.rs (C1 / P3-1) rely on this. */
     mov %cr4, %eax
-    or $0x20, %eax
+    or $0x620, %eax
     mov %eax, %cr4
 
     /* Load PML4 into CR3 */
@@ -146,9 +150,13 @@ _start:
     or $0x100, %eax
     wrmsr
 
-    /* Enable paging (activates long mode) */
+    /* Enable paging (PG bit 31), set MP (bit 1), clear EM (bit 2).
+     * MP/EM control how x87 and SSE are trapped — EM=0 means don't
+     * emulate (SSE executes natively), MP=1 means monitor coprocessor
+     * writes (required for FXSAVE). PE (bit 0) is already set. */
     mov %cr0, %eax
-    or $0x80000001, %eax
+    and $~0x4, %eax
+    or  $0x80000003, %eax
     mov %eax, %cr0
 
     /*

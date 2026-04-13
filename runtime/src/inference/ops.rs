@@ -153,11 +153,11 @@ pub fn quantize_fp32_to_int8(
 /// Caller guarantees `target_feature(neon)` on aarch64 (enabled globally by
 /// the build config; aarch64 baseline mandates NEON).
 ///
-/// Platform dispatch is three-way:
-/// - `aarch64` — NEON path (live).
-/// - `x86_64` — SSE slot: currently scalar placeholder. The x86-64
-///   capstone plan's Phase C1 fills in SSE intrinsics here.
-/// - other — scalar fallback.
+/// Pre-2 dispatch skeleton: the three arms below are the shape every
+/// hot SIMD kernel in this file follows. The `aarch64` arm holds NEON
+/// code; the `x86_64` arm holds SSE-asm once C1 fills it in (today
+/// it's scalar); the final arm is the generic scalar fallback for
+/// any other target.
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 unsafe fn zero_buf(ptr: *mut f32, n: usize) {
     #[cfg(target_arch = "aarch64")]
@@ -177,11 +177,7 @@ unsafe fn zero_buf(ptr: *mut f32, n: usize) {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        // TODO(x86-64 C1): SSE/SSE2 intrinsics. See GitHub #72 for why
-        // stable Rust on `x86_64-unknown-none` currently uses scalar.
-        for i in 0..n {
-            *ptr.add(i) = 0.0;
-        }
+        slm_sse_zero_f32(ptr, n);
     }
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
@@ -369,10 +365,7 @@ unsafe fn add_scalar_simd(ptr: *mut f32, scalar: f32, n: usize) {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        // TODO(x86-64 C1): SSE addps.
-        for i in 0..n {
-            *ptr.add(i) += scalar;
-        }
+        slm_sse_add_scalar_f32(ptr, scalar.to_bits(), n);
     }
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
@@ -506,13 +499,8 @@ pub fn relu(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
 
         #[cfg(target_arch = "x86_64")]
         {
-            // TODO(x86-64 C1): SSE pmax against zero vector.
-            for i in 0..n {
-                let v = *inp.add(i);
-                *outp.add(i) = if v > 0.0 { v } else { 0.0 };
-            }
+            slm_sse_relu_f32(inp, outp, n);
         }
-
         #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             for i in 0..n {
@@ -522,6 +510,27 @@ pub fn relu(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
         }
     }
     Ok(())
+}
+
+/* x86-64 SSE kernels are implemented in kernel/arch/x86_64/sse_kernels.c,
+ * compiled with `-msse -msse2` per-file. This avoids the rustc
+ * `x86_64-unknown-none` soft-float ABI limitations documented in #72
+ * (rustc inline asm refuses xmm register allocation, and `__m128`
+ * intrinsics trip LLVM's soft-float legalizer). CR4.OSFXSR +
+ * CR4.OSXMMEXCPT + CR0.MP are set in trampoline32.S / ap_trampoline.S
+ * (C2) so these execute at CPL=0.
+ */
+/* Scalar arguments are passed as `u32` (IEEE 754 bit pattern)
+ * because the kernel is compiled `-mno-sse`; a `float` arg would
+ * traverse the x87 FPU via the C caller, not xmm1 as the SSE callee
+ * expects. Integer ABI is unambiguous regardless of -mno-sse. The
+ * C side bit-casts back via a union. */
+#[cfg(target_arch = "x86_64")]
+extern "C" {
+    fn slm_sse_relu_f32(inp: *const f32, outp: *mut f32, n: usize);
+    fn slm_sse_zero_f32(ptr: *mut f32, n: usize);
+    fn slm_sse_add_scalar_f32(ptr: *mut f32, scalar_bits: u32, n: usize);
+    fn slm_sse_fma_row_f32(cp: *mut f32, bp: *const f32, scalar_bits: u32, n: usize);
 }
 
 // =============================================================================
@@ -771,10 +780,7 @@ unsafe fn simd_fma_row(cp: *mut f32, bp: *const f32, scalar: f32, n: usize) {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        // TODO(x86-64 C1): mulps + addps (SSE) or vfmadd231ps (AVX2/FMA).
-        for j in 0..n {
-            *cp.add(j) += scalar * *bp.add(j);
-        }
+        slm_sse_fma_row_f32(cp, bp, scalar.to_bits(), n);
     }
     #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
