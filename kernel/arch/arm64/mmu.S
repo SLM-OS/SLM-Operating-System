@@ -82,9 +82,15 @@ mmu_enable:
      * If the MMU was already enabled (boot.S → vmm_init transition),
      * old TLB entries for L1[3] = 1GB cacheable block persist.
      * Without this, the NC region at 0xFFE00000 is accessed as cacheable.
+     *
+     * `tlbi vmalle1` is not the Inner-Shareable broadcast variant, so
+     * `dsb nsh` is sufficient to order against this core's own page
+     * table walker — matching the `dsb nsh` used for the earlier
+     * `tlbi vmalle1` above. We are still pre-SMP here; secondary CPUs
+     * are started only after vmm_init() completes.
      */
     tlbi    vmalle1
-    dsb     ish
+    dsb     nsh
     isb
 
     /*

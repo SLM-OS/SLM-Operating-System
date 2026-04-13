@@ -4,6 +4,49 @@
 **Scope:** 20 issues (3 CRITICAL, 6 HIGH, 7 MEDIUM, 4 LOW)
 **Files touched:** `kernel/mm/*.c`, `kernel/arch/arm64/mmu.S`, `kernel/arch/arm64/boot.S`, `kernel/arch/arm64/smp_boot.S`, `kernel/arch/x86_64/boot.S`, `kernel/arch/x86_64/entry64.S`, `kernel/src/dtb.c`, `kernel/src/elf.c`
 
+## Completion summary (2026-04-12)
+
+All 20 issues resolved:
+
+| ID | Status | Notes |
+|----|--------|-------|
+| MM-C1 | Fixed | `get_l2_table` now returns `PA_TO_KVA(l2_pa)` |
+| MM-C2 | Already resolved | Pi 5 uses `spinlock_hw_enabled` runtime flag (set in `vmm_init`); `SPINLOCK_SKIP_LOCKING` remains a deliberate Jetson-only policy (NC memory + IRQ-disable UART lock) |
+| MM-C3 | Fixed | Bogus `nc_total_allocated` expression removed; two overflow guards added; unit tests in `test_pmm.c` |
+| MM-H1 | Fixed | `vmm_map_block` calls `vmm_invalidate_tlb` after L2 write; new `test_public_remap_invalidates_tlb` |
+| MM-H2 | Fixed | `vmm_lock` + internal `_locked` helpers protect all three public mapping APIs |
+| MM-H3 | Fixed | `vmm_state.initialized` guard added to each public mapping API |
+| MM-H4 | Fixed | `pmm_get_free_pages` / `pmm_get_total_pages` snapshot under the lock |
+| MM-M1 | Fixed | `PMM_ALLOC_FAIL = ((uintptr_t)-1)` sentinel replaces 0 in `buddy_alloc` / `free_list_pop` |
+| MM-M2 | Already resolved | All `vmm_state.blocks_mapped * BLOCK_SIZE` expressions already have `(uint64_t)` casts |
+| MM-M3 | Already resolved | `pmm_get_buddy_stats` already snapshots-only; `pmm_dump_stats` uses the snapshot |
+| MM-L1 | Fixed | `ASSERT(idx < MAX_BLOCKS)` added in `addr_to_block_index` |
+| BOOT-H1 | Fixed | `dtb_validate` bounds-checks `off_dt_struct + size_dt_struct` with overflow defense; new `test_dtb.c` |
+| BOOT-H2 | Fixed | `elf.c` validator checks `e_phoff ≤ size` before subtracting; new `test_elf.c` |
+| BOOT-M1 | Fixed | `dsb nsh` → `dsb sy` after `ic ialluis` on UEFI path |
+| BOOT-M2 | Fixed | `mmu.S` uses `dsb nsh` consistently for pre-SMP TLBI sequences |
+| BOOT-M3 | Fixed | `dc ivac` + `dsb sy` before each `secondary_mmu_*` read in `smp_boot.S` |
+| BOOT-M4 | Fixed | `isb` inserted before `eret` in both `boot.S` and `smp_boot.S` (ARM ARM D.1.21.1) |
+| BOOT-L1 | Fixed | Comment at `primary_cpu:` clarified — DAIF mask is first instruction after the label; real_start runs a handful of instructions before reaching primary_cpu and does not touch stack/BSS |
+| BOOT-L2 | Fixed | x86-64 `boot.S` PD-coverage comment corrected (512 × 2 MB = 1 GiB) |
+| BOOT-C1 | Not-a-bug | Investigated and filed as enhancement issue #73. x86-64 LGDT in 32-bit mode is correct while the kernel stays below 4 GiB. Comment added in `trampoline32.S`; doc paragraph added in `docs/x86-64-port.md` §GDT-and-Segments |
+
+### Testing
+
+- QEMU ARM64 `make test`: 5/5 runs pass.
+- QEMU x86-64 `make test`: 8 failures — all pre-existing, confirmed via `git stash`.
+- Pi 5 `boot_test --count 20`: 19/20 success with combined fixes (1 Kasa power-plug auth error, not a kernel failure). Followed by `--count 3`: 3/3.
+- Jetson (via kexec on `jetson-nano-2`): 3/3, all six CPUs online.
+- test-pc (x86-64 UEFI via SDWire ISO): 3/3.
+- Jetson `make kernel PLATFORM=JETSON_ORIN_NANO`: clean compile.
+
+### New tests
+
+- `kernel/tests/test_dtb.c` — 6 tests covering `dtb_validate` (null, bad magic, old version, well-formed, struct-past-total, overflow).
+- `kernel/tests/test_elf.c` — 5 tests covering `elf_validate` (tiny buffer, no phdrs, phoff-past-size, phdr-array-truncated, overflow-phoff).
+- `kernel/tests/test_pmm.c` — 5 NC memory tests guarded by `PLATFORM_HAS_NC_MEMORY` (invalid-args, alignment, monotonic usage, oversize, overflow).
+- `kernel/tests/test_vmm.c` — new `test_public_remap_invalidates_tlb` exercises the full public unmap/map cycle without caller-side TLBI.
+
 ## Mission
 
 This session hardens the lowest layer of the kernel: physical/virtual memory

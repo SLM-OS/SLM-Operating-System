@@ -518,6 +518,52 @@ static void test_bar3_mip0_routing(void)
 #endif
 }
 
+/*
+ * Test: unmap + map via public API without manual TLBI (MM-H1 regression)
+ *
+ * vmm_map_block() now issues its own TLBI after writing the L2 entry.
+ * This test exercises unmap → map via the public API and verifies that
+ * reads reflect the new mapping without the caller invalidating the TLB.
+ */
+static void test_public_remap_invalidates_tlb(void)
+{
+    uint64_t original_pte = vmm_test_get_l2_entry(TEST_VA);
+    if (original_pte == 0) {
+        TEST_IGNORE_MESSAGE("L1 block mapping: no L2 entry to remap");
+        return;
+    }
+
+    volatile uint64_t *pa1_ptr = (volatile uint64_t *)TEST_PA1;
+    volatile uint64_t *pa2_ptr = (volatile uint64_t *)TEST_PA2;
+    uint64_t original_pa1 = *pa1_ptr;
+    uint64_t original_pa2 = *pa2_ptr;
+
+    *pa1_ptr = MARKER_PA1;
+    *pa2_ptr = MARKER_PA2;
+    __asm__ volatile("dsb ish" ::: "memory");
+
+    volatile uint64_t *test_ptr = (volatile uint64_t *)TEST_VA;
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA1, *test_ptr);
+
+    /* Remap via public API — no manual TLBI by caller */
+    int rc = vmm_unmap_block(TEST_VA);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    rc = vmm_map_block(TEST_VA, TEST_PA2, VMM_FLAGS_KERNEL_DATA);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* Public API must have invalidated the TLB itself */
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA2, *test_ptr);
+
+    /* Restore original mapping */
+    vmm_unmap_block(TEST_VA);
+    rc = vmm_map_block(TEST_VA, TEST_PA1, VMM_FLAGS_KERNEL_DATA);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_HEX64(MARKER_PA1, *test_ptr);
+
+    *pa1_ptr = original_pa1;
+    *pa2_ptr = original_pa2;
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -540,6 +586,7 @@ int test_suite_vmm(void)
     RUN_TEST(test_remap_requires_invalidation);
     RUN_TEST(test_remap_with_full_flush);
     RUN_TEST(test_remap_with_range_invalidation);
+    RUN_TEST(test_public_remap_invalidates_tlb);
 
     /* Edge cases */
     RUN_TEST(test_sequential_remaps);

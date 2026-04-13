@@ -13,6 +13,7 @@
 #include "unity.h"
 #include "../include/pmm.h"
 #include "../include/uart.h"
+#include "../include/ncmem.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -777,6 +778,83 @@ static void test_mixed_workload_stress(void)
 }
 
 /* ============================================================================
+ * NC Memory Allocator Tests (Pi 5 / Jetson only)
+ * ============================================================================ */
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+
+/*
+ * Test: zero size / zero alignment are rejected
+ */
+static void test_ncmem_rejects_invalid_args(void)
+{
+    TEST_ASSERT_NULL(ncmem_alloc(0, 8));
+    TEST_ASSERT_NULL(ncmem_alloc(64, 0));
+}
+
+/*
+ * Test: allocations return addresses with the requested alignment
+ */
+static void test_ncmem_alignment(void)
+{
+    const size_t alignments[] = {1, 8, 16, 64, 256, 4096};
+    for (size_t i = 0; i < sizeof(alignments) / sizeof(alignments[0]); i++) {
+        size_t align = alignments[i];
+        void *p = ncmem_alloc(32, align);
+        TEST_ASSERT_NOT_NULL(p);
+        TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)p & (align - 1));
+    }
+}
+
+/*
+ * Test: ncmem_used grows monotonically and matches cumulative footprint
+ */
+static void test_ncmem_used_monotonic(void)
+{
+    size_t used_before = ncmem_used();
+
+    void *p1 = ncmem_alloc(128, 16);
+    TEST_ASSERT_NOT_NULL(p1);
+    size_t used_after_first = ncmem_used();
+    TEST_ASSERT_TRUE(used_after_first > used_before);
+
+    void *p2 = ncmem_alloc(256, 64);
+    TEST_ASSERT_NOT_NULL(p2);
+    size_t used_after_second = ncmem_used();
+    TEST_ASSERT_TRUE(used_after_second > used_after_first);
+
+    /* Second allocation's address must sit above first allocation's end */
+    TEST_ASSERT_TRUE((uintptr_t)p2 >= (uintptr_t)p1 + 128);
+}
+
+/*
+ * Test: requests larger than the NC region fail gracefully
+ */
+static void test_ncmem_oversize_rejected(void)
+{
+    /* Request > NC_MEM_SIZE — must return NULL and not corrupt state */
+    size_t used_before = ncmem_used();
+    void *p = ncmem_alloc(NC_MEM_SIZE + 4096, 16);
+    TEST_ASSERT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT64(used_before, ncmem_used());
+}
+
+/*
+ * Test: overflow in alignment rounding or size addition is rejected
+ */
+static void test_ncmem_overflow_rejected(void)
+{
+    size_t used_before = ncmem_used();
+
+    /* Pathological: SIZE_MAX size — aligned + size must overflow */
+    void *p = ncmem_alloc((size_t)-1, 16);
+    TEST_ASSERT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT64(used_before, ncmem_used());
+}
+
+#endif /* PLATFORM_HAS_NC_MEMORY */
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -831,6 +909,15 @@ int test_suite_pmm(void)
     /* Stress tests */
     RUN_TEST(test_no_memory_leak);
     RUN_TEST(test_mixed_workload_stress);
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    /* NC allocator (Pi 5 / Jetson only) */
+    RUN_TEST(test_ncmem_rejects_invalid_args);
+    RUN_TEST(test_ncmem_alignment);
+    RUN_TEST(test_ncmem_used_monotonic);
+    RUN_TEST(test_ncmem_oversize_rejected);
+    RUN_TEST(test_ncmem_overflow_rejected);
+#endif
 
     return UnityEnd();
 }

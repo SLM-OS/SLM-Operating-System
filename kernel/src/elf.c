@@ -127,8 +127,14 @@ static int validate_header(const Elf64_Ehdr *ehdr, size_t size)
         return ELF_ERR_INVALID;
     }
 
-    /* Check program headers are within file */
-    if (ehdr->e_phoff + ehdr->e_phnum * sizeof(Elf64_Phdr) > size) {
+    /* Check program headers are within file. Compute in 64-bit and guard
+     * the addition against overflow — a crafted ehdr could otherwise wrap
+     * and produce a small sum that passes a naive bounds check. */
+    if (ehdr->e_phoff > size) {
+        return ELF_ERR_TRUNCATED;
+    }
+    uint64_t phdr_bytes = (uint64_t)ehdr->e_phnum * sizeof(Elf64_Phdr);
+    if (phdr_bytes > size - ehdr->e_phoff) {
         return ELF_ERR_TRUNCATED;
     }
 

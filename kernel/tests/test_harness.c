@@ -105,7 +105,9 @@ int test_harness_run_all(void)
     total_failures += test_suite_pmm();
     total_failures += test_suite_littlefs();
     total_failures += test_suite_x86_boot();
+    total_failures += test_suite_elf();
 #if !defined(PLATFORM_X86_64)
+    total_failures += test_suite_dtb();
     total_failures += test_suite_model_mem();
     total_failures += test_suite_scheduler();
     total_failures += test_suite_component();

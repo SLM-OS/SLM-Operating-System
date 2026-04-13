@@ -240,9 +240,15 @@ real_start:
      * (SCTLR_EL2.C=0, I=0 from efi_disable_mmu), the stp writes went
      * directly to memory. But stale I-cache lines from UEFI's previous
      * execution at 0x80000000 must be flushed before we jump there.
+     *
+     * `ic ialluis` broadcasts to all PEs in the Inner Shareable domain.
+     * Use `dsb sy` (system-wide) rather than `dsb nsh` so the broadcast
+     * is ordered across CPUs on platforms where per-core L2 is not
+     * automatically coherent (Pi 5, Jetson). `nsh` would only order
+     * against this core's cache levels, which is insufficient here.
      */
     ic      ialluis
-    dsb     nsh
+    dsb     sy
     isb
 
     /*
@@ -450,6 +456,12 @@ real_start:
 
     adr     x10, .Lpi5_in_el1
     msr     elr_el2, x10
+    /*
+     * ISB required between ELR_EL2/SPSR_EL2 writes and ERET
+     * (ARM ARM D.1.21.1) — ensures the exception-return context is
+     * observable before the exception return executes.
+     */
+    isb
     eret
 
 .Lpi5_in_el1:
@@ -560,11 +572,18 @@ real_start:
 
 primary_cpu:
     /*
-     * Mask ALL exceptions immediately — before any memory access.
+     * Mask ALL exceptions before any stack/BSS/FPU setup.
      *
-     * After kexec, stale Linux interrupts (timers, peripherals) can fire
-     * at any time. Without a valid VBAR, any exception causes an
-     * unpredictable crash. This MUST be the first instruction after entry.
+     * After kexec on Jetson, stale Linux interrupts (timers, peripherals)
+     * can fire at any time. Without a valid VBAR, any exception causes an
+     * unpredictable crash. This MUST be the first instruction after the
+     * primary_cpu: label, before stack/FPU/BSS setup.
+     *
+     * Note: on non-Pi5 platforms, some code at real_start runs before we
+     * reach primary_cpu (EFI detection, UART debug). That code does not
+     * allocate a stack or touch BSS, so a spurious exception would only
+     * corrupt scratch GPRs — survivable. After this instruction, DAIF is
+     * masked until vectors_init() installs a handler.
      *
      * DAIF bits: D=Debug, A=SError, I=IRQ, F=FIQ
      */

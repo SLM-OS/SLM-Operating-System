@@ -79,6 +79,8 @@ secondary_entry:
     msr     spsr_el2, x0
     adr     x0, .Lsec_in_el1
     msr     elr_el2, x0
+    /* ISB between ELR/SPSR writes and ERET (ARM ARM D.1.21.1). */
+    isb
     eret
 #endif /* PLATFORM_JETSON_ORIN_NANO */
 
@@ -94,16 +96,35 @@ secondary_entry:
      * We read the page table base from the primary CPU's TTBR0_EL1
      * saved value (stored at a known location by vmm_init).
      */
+    /*
+     * Read MMU config written by CPU 0. These three globals live in
+     * cacheable memory and the primary CPU wrote them through CPU 0's
+     * cache hierarchy. With our MMU still off, the secondary's reads
+     * bypass the Inner-Shareable coherency domain, so on Pi 5 / Jetson
+     * the CPU may satisfy the load from stale (or zero-initialized) DRAM
+     * while CPU 0's updated value still sits in its L2. Invalidate the
+     * cache line covering each global before the load so the reissued
+     * access hits whatever has actually been written back to DRAM.
+     *
+     * `dc ivac` on the symbol address is conservative and harmless on
+     * QEMU where caches are already coherent.
+     */
     ldr     x0, =secondary_mmu_ttbr
+    dc      ivac, x0
+    dsb     sy
     ldr     x0, [x0]               /* x0 = page table physical address */
     cbz     x0, .Lsec_skip_mmu     /* If 0, MMU was never set up (shouldn't happen) */
 
     /* Load MAIR and TCR from saved values */
     ldr     x1, =secondary_mmu_mair
+    dc      ivac, x1
+    dsb     sy
     ldr     x1, [x1]
     msr     mair_el1, x1
 
     ldr     x1, =secondary_mmu_tcr
+    dc      ivac, x1
+    dsb     sy
     ldr     x1, [x1]
     msr     tcr_el1, x1
 

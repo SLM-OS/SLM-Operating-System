@@ -40,6 +40,14 @@ void *ncmem_alloc(size_t size, size_t align)
     /* Round up to alignment */
     uintptr_t aligned = (nc_next_free + align - 1) & ~(align - 1);
 
+    /* Rounding wrapped — treat as out of memory */
+    if (aligned < nc_next_free)
+        return NULL;
+
+    /* size addition wrapped — treat as out of memory */
+    if (aligned + size < aligned)
+        return NULL;
+
     if (aligned + size > NC_MEM_BASE + NC_MEM_SIZE) {
         WARN("ncmem_alloc: out of NC memory (requested %zu, used %zu/%lu)",
              size, nc_total_allocated, (unsigned long)NC_MEM_SIZE);
@@ -47,7 +55,6 @@ void *ncmem_alloc(size_t size, size_t align)
     }
 
     nc_next_free = aligned + size;
-    nc_total_allocated += size + (aligned - (nc_next_free - size - (aligned - nc_next_free)));
     nc_total_allocated = nc_next_free - NC_MEM_BASE;
 
     return (void *)aligned;

@@ -151,7 +151,19 @@ _start:
     or $0x80000001, %eax
     mov %eax, %cr0
 
-    /* Load 64-bit GDT */
+    /*
+     * Load 64-bit GDT.
+     *
+     * This LGDT runs in 32-bit protected mode and reads a 6-byte
+     * pseudo-descriptor (2-byte limit + 4-byte base). The kernel is
+     * linked at 1 MiB (see kernel-x86_64.ld), so the GDT base always
+     * fits in 32 bits; the CPU zero-extends it into the 64-bit GDTR
+     * when entering IA-32e mode, and the far jump below changes only
+     * CS. No 64-bit-mode reload is needed. A reload would only become
+     * mandatory if the kernel moved to a higher-half mapping (GDT VA
+     * above 4 GiB). See docs/x86-64-port.md §GDT-and-Segments and
+     * GitHub issue #73.
+     */
     lgdt gdt64_ptr
 
     /* Far jump to 64-bit code */

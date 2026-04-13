@@ -85,4 +85,10 @@ int test_suite_syscall(void);
 /* Component integration tests (infer_classify, example components) */
 int test_suite_components_m5(void);
 
+/* DTB parser tests (BOOT-H1 bounds checks) */
+int test_suite_dtb(void);
+
+/* ELF loader tests (BOOT-H2 bounds checks) */
+int test_suite_elf(void);
+
 #endif /* TEST_HARNESS_H */

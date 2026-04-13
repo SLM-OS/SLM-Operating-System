@@ -366,6 +366,17 @@ int dtb_validate(const void *dtb)
         return FDT_ERR_BADVERSION;
     }
 
+    /* Bounds-check structure block: off_dt_struct + size_dt_struct must
+     * not overflow and must lie within totalsize. Defends against crafted
+     * headers that could cause the parser to walk past the DTB into
+     * arbitrary memory. */
+    uint32_t off = be32_to_cpu(hdr->off_dt_struct);
+    uint32_t sz  = be32_to_cpu(hdr->size_dt_struct);
+    uint32_t total = be32_to_cpu(hdr->totalsize);
+    if (off + sz < off || off + sz > total) {
+        return FDT_ERR_BADSTRUCT;
+    }
+
     return FDT_OK;
 }
 

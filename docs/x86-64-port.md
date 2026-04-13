@@ -316,6 +316,16 @@ Offset  Segment         Description
 /* Data64: 0x00CF92000000FFFF */
 ```
 
+### Why the GDT is Not Reloaded After Entering Long Mode
+
+`trampoline32.S` executes a single `lgdt gdt64_ptr` in 32-bit protected mode before the far jump to 64-bit CS. `gdt64_ptr` is a 6-byte pseudo-descriptor (2-byte limit + 4-byte base), which is the form LGDT expects in protected mode.
+
+When the CPU transitions to IA-32e mode, the internal GDTR is 80 bits (16-bit limit + 64-bit base). The 4-byte base loaded in 32-bit mode is zero-extended into the 64-bit field and persists across the mode change — `ljmp` only changes CS, not GDTR.
+
+The linker pins the kernel at 1 MiB (`KERNEL_PHYS = 0x100000`); the GDT lives in `.rodata.gdt` at roughly 0x13E000. Because the GDT base is always far below 4 GiB, the zero-extension is lossless and a second LGDT in 64-bit mode would be a no-op.
+
+A 64-bit-mode reload becomes mandatory only if the kernel moves to a higher-half virtual-memory layout (VA above 4 GiB), the GDT is randomized, or the GDT is relocated into a kernel-virtual page whose address requires more than 32 bits. None of these apply today. Tracked as a future enhancement: GitHub issue #73.
+
 ---
 
 ## IDT and Exceptions
