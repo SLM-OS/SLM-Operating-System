@@ -4,8 +4,8 @@
  * Validates that pit_ticks and timer_handler_count advance over real
  * wall-clock time regardless of IRQ-delivery path:
  *
- *   - On QEMU / Jetson: hardware timer ISR increments the counters.
- *   - On Pi 5 with PI5_COOP_PREEMPT: schedule() synthesizes
+ *   - On QEMU / x86-64: hardware timer ISR increments the counters.
+ *   - On Pi 5 / Jetson with COOP_PREEMPT: schedule() synthesizes
  *     scheduler_tick() from CNTPCT_EL0 every 10 ms. The test's yield
  *     loop drives schedule(), which fires coop_preempt_maybe_tick,
  *     which advances the counters.
@@ -13,7 +13,7 @@
  * The test passes on every platform the kernel builds for, and
  * regresses if:
  *   - QEMU timer ISR stops firing
- *   - PI5_COOP_PREEMPT is accidentally disabled
+ *   - COOP_PREEMPT is accidentally disabled on Pi 5 or Jetson
  *   - coop_preempt_maybe_tick() computes the period wrong
  *   - schedule() stops calling the coop tick helper
  */

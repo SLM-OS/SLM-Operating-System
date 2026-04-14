@@ -784,7 +784,7 @@ void smp_test_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|gpu|stats|all>\r\n");
+        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|matmul|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -860,6 +860,20 @@ int cmd_bench(int argc, char *argv[])
         uart_puts("Shared Buffer Throughput Benchmark\r\n");
         uart_puts("==================================\r\n");
         bench_shared_buffer();
+    } else if (strcmp(argv[1], "matmul") == 0) {
+        uart_puts("NEON FP32 MatMul Benchmark\r\n");
+        uart_puts("==========================\r\n");
+        /* Default 20 iterations — enough for a stable min/avg/max
+         * without dominating the shell session. User can override by
+         * passing a count: `bench matmul 100`. */
+        uint32_t iters = 20;
+        if (argc >= 3) {
+            uint32_t n;
+            if (shell_parse_uint(argv[2], &n) == 0 && n > 0 && n <= 10000) {
+                iters = n;
+            }
+        }
+        rust_matmul_bench_fp32(iters);
     } else if (strcmp(argv[1], "gpu") == 0) {
         uart_puts("GPU Cache Sync Benchmark\r\n");
         uart_puts("========================\r\n");

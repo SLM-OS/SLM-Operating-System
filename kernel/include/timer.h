@@ -13,7 +13,7 @@
 /*
  * Tick counters — updated by the timer ISR on platforms with working
  * timer IRQ delivery, or synthesized from CNTPCT_EL0 under
- * PI5_COOP_PREEMPT. Exposed so the scheduler and diag code can poke
+ * COOP_PREEMPT. Exposed so the scheduler and diag code can poke
  * them without re-declaring extern at function scope.
  */
 extern volatile uint32_t timer_handler_count;

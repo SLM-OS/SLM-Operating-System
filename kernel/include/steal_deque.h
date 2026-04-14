@@ -62,4 +62,19 @@ uint32_t steal_deque_size(const steal_deque_t *d);
 /* True if the deque has no tasks (racy without the lock). */
 int steal_deque_is_empty(const steal_deque_t *d);
 
+/*
+ * Best-effort remove of a specific task pointer from the deque. O(n)
+ * scan from top to bottom; sets the matching slot to NULL if found.
+ * Callers: `scheduler_terminate_task` and anywhere else a task pointer
+ * is about to become stale (task_destroy, task_table recycle), to
+ * prevent an ABA race where a thief steals a NULL-cleared slot and
+ * a recycled task pointer reuses that slot before the thief validates.
+ *
+ * The steal path skips NULL slots during traversal, so a NULL'd slot
+ * is effectively gone.
+ *
+ * Returns the number of slots cleared (0 or 1). Always takes the lock.
+ */
+int steal_deque_remove(steal_deque_t *d, struct task *t);
+
 #endif /* STEAL_DEQUE_H */
