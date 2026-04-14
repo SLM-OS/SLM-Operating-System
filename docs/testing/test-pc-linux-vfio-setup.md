@@ -14,6 +14,12 @@ UEFI POST. Our userspace harness (`host-tools/gsp-harness/`) can then
 `mmap` BAR0 and BAR1 and run the same GSP-RM bringup code that SLM-OS
 would run bare-metal.
 
+**Automation:** Sections §2, §4, and §6 are packaged as
+[`test-pc-vfio-postinstall.sh`](./test-pc-vfio-postinstall.sh) —
+run it as root after a fresh Ubuntu Desktop install to apply the
+VFIO config, IOMMU cmdline, and serial console in one shot. The
+manual steps below remain the reference.
+
 ---
 
 ## 1. Install Ubuntu 24.04 LTS (on the external SSD)
@@ -97,6 +103,13 @@ Two functions share the IOMMU group — GPU at `01:00.0` and its HDMI
 audio at `01:00.1`. Both need to bind to vfio-pci together. Note the
 PCI IDs: `10de:2584` for the GPU, `10de:228e` for the audio.
 
+**Variant note — RTX 3050 6 GB (2024):** The newer 6 GB variant shares
+the GA107 GPU device ID (`10de:2584`) but its HDMI audio function uses
+a different ID: `10de:2291` instead of `10de:228e`. Always check the
+`01:00.1` line on the installed card and adjust §4b accordingly, or
+list both audio IDs in `vfio.conf` so the same config works across
+variants (unused IDs are silently ignored by vfio-pci).
+
 Check the IOMMU group (they MUST be alone or with each other only):
 
 ```bash
@@ -134,9 +147,11 @@ EOF
 
 ```bash
 sudo tee /etc/modprobe.d/vfio.conf <<'EOF'
-# Grab the RTX 3050 (10de:2584) and its HDMI audio (10de:228e)
+# Grab the RTX 3050 (10de:2584) and its HDMI audio
 # before nouveau/nvidia can touch them.
-options vfio-pci ids=10de:2584,10de:228e
+# Both 228e (8 GB) and 2291 (6 GB) audio IDs are listed so this
+# config is variant-agnostic; vfio-pci ignores IDs not present.
+options vfio-pci ids=10de:2584,10de:228e,10de:2291
 EOF
 ```
 
