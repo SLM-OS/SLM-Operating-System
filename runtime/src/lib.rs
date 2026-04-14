@@ -3570,6 +3570,220 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test 8b: Conv2D multi-channel non-tile-aligned (G2 regression)
+    //
+    // 1x3x7x11 input, 5x3x3x3 weight, stride=1, pad=1 → 1x5x7x11 output.
+    // Sizes are coprime to the inner tile constants so both the im2col
+    // column count (7*11=77) and the matmul output rows (5) force the
+    // tiling path to handle partial tiles in M and N. C_in=3 exercises
+    // the per-channel im2col loop; pad=1 exercises the boundary zero
+    // fill. Reference is computed via a direct 7-loop conv; NEON/matmul
+    // output must match within FP32 round-off.
+    {
+        const BATCH: usize = 1;
+        const CIN: usize = 3;
+        const COUT: usize = 5;
+        const H: usize = 7;
+        const W: usize = 11;
+        const KH: usize = 3;
+        const KW: usize = 3;
+        const HOUT: usize = H;   // pad=1 stride=1 kh=3 → h_out=h_in
+        const WOUT: usize = W;
+        static mut CONV_IN:  [f32; BATCH * CIN * H * W]            = [0.0; BATCH * CIN * H * W];
+        static mut CONV_WT:  [f32; COUT * CIN * KH * KW]           = [0.0; COUT * CIN * KH * KW];
+        static mut CONV_OUT: [f32; BATCH * COUT * HOUT * WOUT]     = [0.0; BATCH * COUT * HOUT * WOUT];
+        static mut CONV_REF: [f32; BATCH * COUT * HOUT * WOUT]     = [0.0; BATCH * COUT * HOUT * WOUT];
+
+        unsafe {
+            for i in 0..(BATCH * CIN * H * W) {
+                CONV_IN[i] = ((i % 13) as f32) * 0.1;
+            }
+            for i in 0..(COUT * CIN * KH * KW) {
+                CONV_WT[i] = ((i % 5) as f32 - 2.0) * 0.05;  // small signed
+            }
+
+            // Scalar reference.
+            for n in 0..BATCH {
+                for co in 0..COUT {
+                    for ho in 0..HOUT {
+                        for wo in 0..WOUT {
+                            let mut acc = 0.0_f32;
+                            for ci in 0..CIN {
+                                for khi in 0..KH {
+                                    for kwi in 0..KW {
+                                        let hi = ho as isize + khi as isize - 1;  // pad=1
+                                        let wi = wo as isize + kwi as isize - 1;
+                                        if hi >= 0 && hi < H as isize
+                                            && wi >= 0 && wi < W as isize {
+                                            let in_idx = ((n * CIN + ci) * H + hi as usize) * W + wi as usize;
+                                            let wt_idx = ((co * CIN + ci) * KH + khi) * KW + kwi;
+                                            acc += CONV_IN[in_idx] * CONV_WT[wt_idx];
+                                        }
+                                    }
+                                }
+                            }
+                            CONV_REF[((n * COUT + co) * HOUT + ho) * WOUT + wo] = acc;
+                        }
+                    }
+                }
+            }
+
+            let input  = inference::Tensor::new(CONV_IN.as_ptr(),  &[BATCH as u32, CIN as u32, H as u32, W as u32]);
+            let weight = inference::Tensor::new(CONV_WT.as_ptr(),  &[COUT as u32, CIN as u32, KH as u32, KW as u32]);
+            let mut out = inference::Tensor::new(
+                CONV_OUT.as_mut_ptr() as *const f32,
+                &[BATCH as u32, COUT as u32, HOUT as u32, WOUT as u32]);
+
+            let result = inference::ops::conv2d(
+                &input, &weight, None, &mut out,
+                KH as u32, KW as u32, 1, 1, 1, 1,
+            );
+            let ok = result.is_ok();
+
+            let mut vals_ok = true;
+            for i in 0..(BATCH * COUT * HOUT * WOUT) {
+                if (CONV_OUT[i] - CONV_REF[i]).abs() > 0.001 {
+                    vals_ok = false;
+                    break;
+                }
+            }
+            let passed = ok && vals_ok;
+            print_test_result(b"simd: conv2d 1x3x7x11 k=3x3 pad=1 (non-aligned)\0", passed);
+            if !passed { failures += 1; }
+        }
+    }
+
+    // Test 8c: LayerNorm (G3 regression)
+    // 2 rows × 5 features — non-multiple-of-4 width exercises the
+    // simd_sum_sumsq tail loop. Reference values computed by scalar
+    // mean/variance; FP32 tolerance 1e-4.
+    {
+        const ROWS: usize = 2;
+        const D: usize = 5;
+        let input_data: [f32; ROWS * D] = [
+            1.0, 2.0, 3.0, 4.0,  5.0,
+           -1.0, 0.5, 0.0, 2.5, -0.5,
+        ];
+        let gamma_data: [f32; D] = [1.0, 0.5, 2.0, 1.0, 0.25];
+        let beta_data:  [f32; D] = [0.1, 0.0, -0.2, 0.5, 0.0];
+        let mut out_data: [f32; ROWS * D] = [0.0; ROWS * D];
+
+        let input = inference::Tensor::new(input_data.as_ptr(), &[ROWS as u32, D as u32]);
+        let gamma = inference::Tensor::new(gamma_data.as_ptr(), &[D as u32]);
+        let beta  = inference::Tensor::new(beta_data.as_ptr(),  &[D as u32]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[ROWS as u32, D as u32]);
+
+        let eps = 1.0e-5_f32;
+        let result = inference::ops::layer_norm(&input, &gamma, Some(&beta), &mut out, eps);
+
+        // Scalar reference
+        let mut ref_out = [0.0_f32; ROWS * D];
+        for r in 0..ROWS {
+            let base = r * D;
+            let mut sum = 0.0_f32;
+            let mut sq = 0.0_f32;
+            for j in 0..D {
+                let v = input_data[base + j];
+                sum += v; sq += v * v;
+            }
+            let mean = sum / D as f32;
+            let var = (sq / D as f32) - mean * mean;
+            let var = if var > 0.0 { var } else { 0.0 };
+            let inv_std = 1.0_f32 / libm::sqrtf(var + eps);
+            for j in 0..D {
+                ref_out[base + j] =
+                    (input_data[base + j] - mean) * inv_std * gamma_data[j] + beta_data[j];
+            }
+        }
+        let mut vals_ok = true;
+        for i in 0..(ROWS * D) {
+            if (out_data[i] - ref_out[i]).abs() > 1.0e-4 { vals_ok = false; break; }
+        }
+        let passed = result.is_ok() && vals_ok;
+        print_test_result(b"simd: layer_norm 2x5 with gamma+beta\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8d: LayerNorm shape mismatch (gamma wrong dim)
+    {
+        let input_data: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+        let gamma_data: [f32; 3] = [1.0; 3];  // should be 4
+        let mut out_data: [f32; 4] = [0.0; 4];
+        let input = inference::Tensor::new(input_data.as_ptr(), &[1, 4]);
+        let gamma = inference::Tensor::new(gamma_data.as_ptr(), &[3]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[1, 4]);
+        let result = inference::ops::layer_norm(&input, &gamma, None, &mut out, 1.0e-5);
+        let passed = matches!(result, Err(inference::EngineError::ShapeMismatch));
+        print_test_result(b"simd: layer_norm shape mismatch rejected\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8e: RMSNorm (Llama-style) (G3 regression)
+    {
+        const ROWS: usize = 2;
+        const D: usize = 6;
+        let input_data: [f32; ROWS * D] = [
+            1.0, 2.0, 3.0, 4.0, 5.0,  6.0,
+           -1.0, 0.5, 0.0, 2.5, -0.5, 1.5,
+        ];
+        let gamma_data: [f32; D] = [1.0, 1.0, 0.5, 2.0, 1.0, 0.25];
+        let mut out_data: [f32; ROWS * D] = [0.0; ROWS * D];
+
+        let input = inference::Tensor::new(input_data.as_ptr(), &[ROWS as u32, D as u32]);
+        let gamma = inference::Tensor::new(gamma_data.as_ptr(), &[D as u32]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[ROWS as u32, D as u32]);
+
+        let eps = 1.0e-5_f32;
+        let result = inference::ops::rms_norm(&input, &gamma, &mut out, eps);
+
+        let mut ref_out = [0.0_f32; ROWS * D];
+        for r in 0..ROWS {
+            let base = r * D;
+            let mut sq = 0.0_f32;
+            for j in 0..D { let v = input_data[base + j]; sq += v * v; }
+            let mean_sq = sq / D as f32;
+            let inv_rms = 1.0_f32 / libm::sqrtf(mean_sq + eps);
+            for j in 0..D {
+                ref_out[base + j] = input_data[base + j] * inv_rms * gamma_data[j];
+            }
+        }
+        let mut vals_ok = true;
+        for i in 0..(ROWS * D) {
+            if (out_data[i] - ref_out[i]).abs() > 1.0e-4 { vals_ok = false; break; }
+        }
+        let passed = result.is_ok() && vals_ok;
+        print_test_result(b"simd: rms_norm 2x6 with gamma\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8f: GELU tanh approximation (G3 regression)
+    // Compare against scalar reference with libm::tanhf; tolerance 1e-5.
+    {
+        const N: usize = 9;
+        let input_data: [f32; N] = [-3.0, -1.5, -0.5, -0.1, 0.0, 0.1, 0.5, 1.5, 3.0];
+        let mut out_data: [f32; N] = [0.0; N];
+        let input = inference::Tensor::new(input_data.as_ptr(), &[N as u32]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[N as u32]);
+
+        let result = inference::ops::gelu(&input, &mut out);
+
+        const K: f32 = 0.7978845608028654;
+        const C: f32 = 0.044715;
+        let mut ref_out = [0.0_f32; N];
+        for i in 0..N {
+            let x = input_data[i];
+            let t = K * (x + C * x * x * x);
+            ref_out[i] = 0.5 * x * (1.0 + libm::tanhf(t));
+        }
+        let mut vals_ok = true;
+        for i in 0..N {
+            if (out_data[i] - ref_out[i]).abs() > 1.0e-5 { vals_ok = false; break; }
+        }
+        let passed = result.is_ok() && vals_ok;
+        print_test_result(b"simd: gelu tanh approximation\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Test 9: MaxPool2D unit test
     // 1x1x4x4 input with values 1..16, 2x2 pool stride 2
     // output 1x1x2x2 = [6, 8, 14, 16]
@@ -4128,6 +4342,25 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test: f32_to_fp16 round-trip (G4 — backs FP16 bench setup)
+    // Values chosen to exercise exponent re-bias, zero, negative,
+    // and mantissa truncation paths.
+    {
+        let cases: [f32; 7] = [0.0, 1.0, -1.0, 0.25, -0.125, 2.5, 1024.0];
+        let mut max_err: f32 = 0.0;
+        for &v in &cases {
+            let h = f32_to_fp16(v);
+            let back = loader::registry::fp16_to_f32(h);
+            let err = (back - v).abs();
+            if err > max_err { max_err = err; }
+        }
+        // FP16 has ~1e-3 relative precision for these magnitudes;
+        // round-to-zero in f32_to_fp16 adds up to 1 ULP more.
+        let passed = max_err < 0.01;
+        print_test_result(b"fp16: f32_to_fp16 round-trip\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
@@ -4532,6 +4765,324 @@ pub extern "C" fn rust_matmul_bench_fp32(iterations: u32) -> i32 {
         uart_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
                     avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
                     min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
+    }
+    0
+}
+
+/// FP32 Conv2D benchmark — `bench conv` backend.
+///
+/// Runs a small but im2col-representative Conv:
+///   input  = 1 × 4 × 28 × 28   (MNIST-style)
+///   weight = 8 × 4 × 3 × 3
+///   stride = 1, pad = 1
+/// Repeats `iterations` times, reports min/avg/max latency + GFLOPS.
+///
+/// Drives the same NEON matmul inner kernel G1 benchmarks (via the
+/// im2col → matmul path in `ops::conv2d`), so this is complementary to
+/// `bench matmul` — exposes per-iter im2col overhead plus the matmul
+/// cost for a shape that actually appears in the MNIST model.
+///
+/// FLOPs/call = 2 · C_out · C_in · kH · kW · H_out · W_out
+///            = 2 · 8 · 4 · 3 · 3 · 28 · 28  ≈ 450k
+/// so each call is sub-millisecond on NEON.
+#[no_mangle]
+pub extern "C" fn rust_conv_bench_fp32(iterations: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if iterations == 0 {
+        return -1;
+    }
+
+    const BATCH: usize = 1;
+    const CIN:   usize = 4;
+    const COUT:  usize = 8;
+    const H:     usize = 28;
+    const W:     usize = 28;
+    const KH:    usize = 3;
+    const KW:    usize = 3;
+    const HOUT:  usize = H;   // pad=1 stride=1 kh=3 → h_out=h_in
+    const WOUT:  usize = W;
+
+    static IN_BUF:  [f32; BATCH * CIN * H * W]         = [1.0; BATCH * CIN * H * W];
+    static WT_BUF:  [f32; COUT * CIN * KH * KW]        = [0.1; COUT * CIN * KH * KW];
+    static mut OUT_BUF: [f32; BATCH * COUT * HOUT * WOUT] = [0.0; BATCH * COUT * HOUT * WOUT];
+
+    let input = inference::Tensor::new(IN_BUF.as_ptr(),
+        &[BATCH as u32, CIN as u32, H as u32, W as u32]);
+    let weight = inference::Tensor::new(WT_BUF.as_ptr(),
+        &[COUT as u32, CIN as u32, KH as u32, KW as u32]);
+    let mut out = unsafe {
+        inference::Tensor::new(
+            core::ptr::addr_of_mut!(OUT_BUF) as *const f32,
+            &[BATCH as u32, COUT as u32, HOUT as u32, WOUT as u32])
+    };
+
+    let mut min_ns = u64::MAX;
+    let mut max_ns = 0u64;
+    let mut total_ns = 0u64;
+    let mut success = 0u32;
+
+    for _ in 0..iterations {
+        let start = kernel_ffi::get_time_ns();
+        let result = inference::ops::conv2d(
+            &input, &weight, None, &mut out,
+            KH as u32, KW as u32, 1, 1, 1, 1,
+        );
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+
+        if result.is_ok() {
+            if elapsed < min_ns { min_ns = elapsed; }
+            if elapsed > max_ns { max_ns = elapsed; }
+            total_ns += elapsed;
+            success += 1;
+        }
+    }
+
+    if success == 0 {
+        return -1;
+    }
+
+    let avg_ns = total_ns / success as u64;
+    let flops_per_call: u64 =
+        2 * (COUT as u64) * (CIN as u64) * (KH as u64) * (KW as u64) *
+        (HOUT as u64) * (WOUT as u64);
+    let avg_mflops_x1000 = if avg_ns > 0 {
+        (flops_per_call * 1_000_000) / avg_ns
+    } else {
+        0
+    };
+    let min_mflops_x1000 = if min_ns > 0 {
+        (flops_per_call * 1_000_000) / min_ns
+    } else {
+        0
+    };
+
+    unsafe {
+        uart_printf(b"  Input:       %lux%lux%lux%lu FP32\n\0".as_ptr(),
+                    BATCH as u64, CIN as u64, H as u64, W as u64);
+        uart_printf(b"  Weight:      %lux%lux%lux%lu (C_out x C_in x kH x kW)\n\0".as_ptr(),
+                    COUT as u64, CIN as u64, KH as u64, KW as u64);
+        uart_printf(b"  Output:      %lux%lux%lux%lu  stride=1 pad=1\n\0".as_ptr(),
+                    BATCH as u64, COUT as u64, HOUT as u64, WOUT as u64);
+        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+                    iterations as u64, success as u64);
+        uart_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+                    min_ns / 1000, avg_ns / 1000, max_ns / 1000);
+        uart_printf(b"  Throughput:  avg=%lu.%03lu MFLOPS  peak=%lu.%03lu MFLOPS\n\0".as_ptr(),
+                    avg_mflops_x1000 / 1_000_000, (avg_mflops_x1000 / 1000) % 1000,
+                    min_mflops_x1000 / 1_000_000, (min_mflops_x1000 / 1000) % 1000);
+    }
+    0
+}
+
+/// Convert a finite FP32 value to IEEE-754 half-precision (round-to-zero).
+///
+/// Used only by benchmark setup — NaN/Inf/subnormal corner cases are
+/// not needed for deterministic synthetic data.
+fn f32_to_fp16(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 31) & 0x1) as u16;
+    let exp_f32 = ((bits >> 23) & 0xFF) as i32;
+    let mant_f32 = bits & 0x007F_FFFF;
+
+    if exp_f32 == 0 {
+        // Zero or subnormal → flush to zero.
+        return sign << 15;
+    }
+    if exp_f32 == 0xFF {
+        // Inf / NaN → map to FP16 Inf (NaN→Inf is fine for benchmark).
+        return (sign << 15) | (0x1F << 10);
+    }
+
+    let exp_f16 = exp_f32 - 127 + 15;
+    if exp_f16 >= 0x1F {
+        // Overflow → Inf
+        return (sign << 15) | (0x1F << 10);
+    }
+    if exp_f16 <= 0 {
+        // Underflow → zero (don't bother with subnormals)
+        return sign << 15;
+    }
+    let mant_f16 = (mant_f32 >> 13) as u16;
+    (sign << 15) | ((exp_f16 as u16) << 10) | mant_f16
+}
+
+/// FP16 MatMul benchmark — `bench matmul-fp16` backend.
+///
+/// Same 128×128×128 shape as `rust_matmul_bench_fp32` but with the B
+/// matrix stored as FP16. Exercises the per-row FP16→FP32 conversion
+/// path in `ops::matmul` (lock-protected FP16_BUF scratch), so
+/// comparing against the FP32 bench reveals the dequantization cost.
+#[no_mangle]
+pub extern "C" fn rust_matmul_bench_fp16(iterations: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if iterations == 0 {
+        return -1;
+    }
+
+    const SIZE: usize = 128;
+    static A_BUF: [f32; SIZE * SIZE] = [0.125; SIZE * SIZE];
+    static mut B_FP16: [u16; SIZE * SIZE] = [0; SIZE * SIZE];
+    static mut C_BUF: [f32; SIZE * SIZE] = [0.0; SIZE * SIZE];
+
+    // Initialize FP16 weights to 0.25 (bit pattern for +0.25 is 0x3400).
+    unsafe {
+        let pat = f32_to_fp16(0.25);
+        for i in 0..(SIZE * SIZE) {
+            B_FP16[i] = pat;
+        }
+    }
+
+    let size_u32 = SIZE as u32;
+    let a = inference::Tensor::new(A_BUF.as_ptr(), &[size_u32, size_u32]);
+    let b = unsafe {
+        inference::Tensor::new_fp16(
+            core::ptr::addr_of!(B_FP16) as *const u16,
+            &[size_u32, size_u32],
+        )
+    };
+    let mut c = unsafe {
+        inference::Tensor::new(
+            core::ptr::addr_of_mut!(C_BUF) as *const f32,
+            &[size_u32, size_u32],
+        )
+    };
+
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    let mut total_ns: u64 = 0;
+    let mut success: u32 = 0;
+
+    for _ in 0..iterations {
+        let start = kernel_ffi::get_time_ns();
+        let result = inference::ops::matmul(&a, &b, &mut c);
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+        if result.is_ok() {
+            if elapsed < min_ns { min_ns = elapsed; }
+            if elapsed > max_ns { max_ns = elapsed; }
+            total_ns += elapsed;
+            success += 1;
+        }
+    }
+
+    if success == 0 {
+        return -1;
+    }
+
+    let avg_ns = total_ns / success as u64;
+    let flops_per_call: u64 = 2 * (SIZE as u64) * (SIZE as u64) * (SIZE as u64);
+    let avg_gflops_x1000 = if avg_ns > 0 { (flops_per_call * 1000) / avg_ns } else { 0 };
+    let min_gflops_x1000 = if min_ns > 0 { (flops_per_call * 1000) / min_ns } else { 0 };
+
+    unsafe {
+        uart_printf(b"  Size:        %lux%lux%lu  A=FP32 B=FP16\n\0".as_ptr(),
+                    SIZE as u64, SIZE as u64, SIZE as u64);
+        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+                    iterations as u64, success as u64);
+        uart_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+                    min_ns / 1000, avg_ns / 1000, max_ns / 1000);
+        uart_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
+                    avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
+                    min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
+    }
+    0
+}
+
+/// INT8 MatMul benchmark — `bench matmul-int8` backend.
+///
+/// Same 128×128×128 shape; both A and B are INT8 with asymmetric
+/// quantization (scale + zero_point). Exercises the INT32-accumulating
+/// `matmul_int8` path in `ops::matmul`. The ratio vs. `bench matmul`
+/// FP32 shows the speedup from 8-bit weights (or the lack thereof on
+/// platforms without an INT8 NEON path — today the inner accumulator
+/// is scalar i32).
+#[no_mangle]
+pub extern "C" fn rust_matmul_bench_int8(iterations: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if iterations == 0 {
+        return -1;
+    }
+
+    const SIZE: usize = 128;
+    static mut A_I8: [i8; SIZE * SIZE] = [0; SIZE * SIZE];
+    static mut B_I8: [i8; SIZE * SIZE] = [0; SIZE * SIZE];
+    static mut C_BUF: [f32; SIZE * SIZE] = [0.0; SIZE * SIZE];
+
+    // Fill with deterministic INT8 values.
+    unsafe {
+        for i in 0..(SIZE * SIZE) {
+            A_I8[i] = ((i as i32 % 7) - 3) as i8;   // -3..3
+            B_I8[i] = ((i as i32 % 11) - 5) as i8;  // -5..5
+        }
+    }
+
+    let size_u32 = SIZE as u32;
+    let a = unsafe {
+        inference::Tensor::new_int8(
+            core::ptr::addr_of!(A_I8) as *const i8,
+            &[size_u32, size_u32], 0.05, 0,
+        )
+    };
+    let b = unsafe {
+        inference::Tensor::new_int8(
+            core::ptr::addr_of!(B_I8) as *const i8,
+            &[size_u32, size_u32], 0.1, 0,
+        )
+    };
+    let mut c = unsafe {
+        inference::Tensor::new(
+            core::ptr::addr_of_mut!(C_BUF) as *const f32,
+            &[size_u32, size_u32],
+        )
+    };
+
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    let mut total_ns: u64 = 0;
+    let mut success: u32 = 0;
+
+    for _ in 0..iterations {
+        let start = kernel_ffi::get_time_ns();
+        let result = inference::ops::matmul(&a, &b, &mut c);
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+        if result.is_ok() {
+            if elapsed < min_ns { min_ns = elapsed; }
+            if elapsed > max_ns { max_ns = elapsed; }
+            total_ns += elapsed;
+            success += 1;
+        }
+    }
+
+    if success == 0 {
+        return -1;
+    }
+
+    let avg_ns = total_ns / success as u64;
+    let ops_per_call: u64 = 2 * (SIZE as u64) * (SIZE as u64) * (SIZE as u64);
+    let avg_gops_x1000 = if avg_ns > 0 { (ops_per_call * 1000) / avg_ns } else { 0 };
+    let min_gops_x1000 = if min_ns > 0 { (ops_per_call * 1000) / min_ns } else { 0 };
+
+    unsafe {
+        uart_printf(b"  Size:        %lux%lux%lu  INT8 (dequant -> FP32 output)\n\0".as_ptr(),
+                    SIZE as u64, SIZE as u64, SIZE as u64);
+        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+                    iterations as u64, success as u64);
+        uart_printf(b"  Ops/call:    %lu\n\0".as_ptr(), ops_per_call);
+        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+                    min_ns / 1000, avg_ns / 1000, max_ns / 1000);
+        uart_printf(b"  Throughput:  avg=%lu.%03lu GOPS  peak=%lu.%03lu GOPS\n\0".as_ptr(),
+                    avg_gops_x1000 / 1000, avg_gops_x1000 % 1000,
+                    min_gops_x1000 / 1000, min_gops_x1000 % 1000);
     }
     0
 }

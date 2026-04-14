@@ -209,6 +209,35 @@ int cmd_cpu(int argc, char *argv[])
         }
         uart_printf("  timer_handler_count: %u\r\n", timer_handler_count);
 
+#if CONFIG_WORK_STEALING
+        /* Work-stealing per-CPU counters (#105). Written by the
+         * thief in sched_try_steal; helpful for tuning Phase C
+         * benchmarks and deciding whether CONFIG_WORK_STEALING should
+         * default to ON. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        extern volatile uint32_t *sched_diag_steal_attempts;
+        extern volatile uint32_t *sched_diag_steal_successes;
+        extern volatile uint32_t *sched_diag_steal_stale;
+        extern volatile uint32_t *sched_diag_steal_empty_victim;
+#else
+        extern volatile uint32_t sched_diag_steal_attempts[];
+        extern volatile uint32_t sched_diag_steal_successes[];
+        extern volatile uint32_t sched_diag_steal_stale[];
+        extern volatile uint32_t sched_diag_steal_empty_victim[];
+#endif
+        uart_printf("\r\n  Per-CPU work-stealing counters:\r\n");
+        uart_printf("  CPU  Attempts  Success   Stale     EmptyVic\r\n");
+        uart_printf("  ---  --------  --------  --------  --------\r\n");
+        for (uint32_t i = 0; i < cpu_count; i++) {
+            uart_printf("  %3lu  %8u  %8u  %8u  %8u\r\n",
+                        i,
+                        sched_diag_steal_attempts[i],
+                        sched_diag_steal_successes[i],
+                        sched_diag_steal_stale[i],
+                        sched_diag_steal_empty_victim[i]);
+        }
+#endif /* CONFIG_WORK_STEALING */
+
 #if !defined(PLATFORM_X86_64)
         /* Show secondary CPU TTBR0 values (stored in boot_flag slots) */
         {
@@ -781,10 +810,59 @@ void smp_test_task(void *arg)
 #endif
 }
 
+/* S3 (Phase C): work-stealing load-imbalance benchmark task.
+ *
+ * All tasks in the benchmark are dispatched to CPU 1 ("victim"). Each
+ * task runs a fixed amount of arithmetic work, records which CPU
+ * actually executed it, and writes a global done counter. If
+ * CONFIG_WORK_STEALING is ON, idle CPUs (2/3/...) will pull tasks
+ * off CPU 1's deque and wall-clock time drops toward N/P of the
+ * single-CPU number. If OFF, the N tasks run sequentially on CPU 1.
+ *
+ * Shared state is per-platform:
+ *   - PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson): NC memory at
+ *     NC_MEM_BASE + NC_MEM_SIZE - 512, no cache maintenance needed.
+ *   - Other (QEMU ARM64, x86-64): cacheable BSS arrays. Caches are
+ *     coherent on these targets so cross-CPU visibility is
+ *     automatic.
+ */
+#define S3_MAX_TASKS 64
+
+#if defined(PLATFORM_HAS_NC_MEMORY)
+#define S3_SLOT_BASE_OFFSET   (NC_MEM_SIZE - 512)
+#define S3_DONE_COUNTER_OFFSET (NC_MEM_SIZE - 256)
+#define S3_SLOT_ADDR(i) ((volatile uint32_t *)(NC_MEM_BASE + S3_SLOT_BASE_OFFSET + (i) * 4))
+#define S3_DONE_ADDR()  ((volatile uint32_t *)(NC_MEM_BASE + S3_DONE_COUNTER_OFFSET))
+#else
+static volatile uint32_t s3_slots[S3_MAX_TASKS];
+static volatile uint32_t s3_done;
+#define S3_SLOT_ADDR(i) (&s3_slots[(i)])
+#define S3_DONE_ADDR()  (&s3_done)
+#endif
+
+static void s3_steal_work_task(void *arg)
+{
+    uintptr_t slot = (uintptr_t)arg;
+    /* Fixed-size chunk of arithmetic work — chosen so one task takes
+     * on the order of a few hundred microseconds on Pi 5 / Jetson.
+     * A CPU-bound loop (not just a timer busy-wait) lets work
+     * genuinely parallelize when stealing is on. */
+    volatile uint64_t x = 1;
+    for (uint64_t i = 1; i < 400000; i++) {
+        x = x * 1103515245 + 12345;
+    }
+    (void)x;
+
+    *S3_SLOT_ADDR(slot) = cpu_id() + 1;
+    /* Atomic increment of the done counter so the driver can poll a
+     * single location instead of scanning all N slots. */
+    __atomic_fetch_add(S3_DONE_ADDR(), 1, __ATOMIC_RELEASE);
+}
+
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|matmul|gpu|stats|all>\r\n");
+        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|stealing|matmul|conv|quant|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -874,6 +952,172 @@ int cmd_bench(int argc, char *argv[])
             }
         }
         rust_matmul_bench_fp32(iters);
+    } else if (strcmp(argv[1], "conv") == 0) {
+        uart_puts("NEON FP32 Conv2D Benchmark\r\n");
+        uart_puts("==========================\r\n");
+        uint32_t iters = 50;
+        if (argc >= 3) {
+            uint32_t n;
+            if (shell_parse_uint(argv[2], &n) == 0 && n > 0 && n <= 10000) {
+                iters = n;
+            }
+        }
+        rust_conv_bench_fp32(iters);
+    } else if (strcmp(argv[1], "stealing") == 0) {
+        /* S3: work-stealing Phase C load-imbalance benchmark.
+         *
+         * Dispatches N identical CPU-bound tasks all to CPU 1 (the
+         * "victim"). Wall-clock time to N completions is the headline
+         * number. Also reports:
+         *   - per-CPU counts (which CPU actually ran each task), to
+         *     show how stealing balanced the load
+         *   - steal counter deltas for the thief CPUs
+         *   - steal-counter totals before/after so repeated runs are
+         *     comparable
+         *
+         * Compare between builds:
+         *   make kernel                       (CONFIG_WORK_STEALING=OFF)
+         *   make kernel WORK_STEALING=ON      (ON)
+         * and diff the wall-clock numbers. Input to S4 (default flip).
+         */
+        uint32_t n_tasks = 16;
+        if (argc >= 3) {
+            uint32_t n;
+            if (shell_parse_uint(argv[2], &n) == 0 && n > 0 && n <= S3_MAX_TASKS) {
+                n_tasks = n;
+            }
+        }
+        if (cpu_count < 2) {
+            uart_puts("  Need at least 2 CPUs for load-imbalance test\r\n");
+            return 0;
+        }
+        uart_puts("Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)\r\n");
+        uart_puts("=====================================================\r\n");
+        uart_printf("  Tasks dispatched:  %lu (all to CPU 1)\r\n",
+                    (unsigned long)n_tasks);
+        uart_printf("  Online CPUs:       %lu\r\n", (unsigned long)cpu_count);
+#if CONFIG_WORK_STEALING
+        uart_puts("  CONFIG_WORK_STEALING: ON  (expect parallel completion)\r\n");
+#else
+        uart_puts("  CONFIG_WORK_STEALING: OFF (expect sequential completion)\r\n");
+#endif
+
+        /* Zero slot array and done counter. */
+        for (uint32_t i = 0; i < n_tasks; i++) {
+            *S3_SLOT_ADDR(i) = 0;
+        }
+        *S3_DONE_ADDR() = 0;
+
+#if CONFIG_WORK_STEALING
+        /* Snapshot steal counters so we report deltas, not absolute
+         * values that include prior shell activity. */
+        uint32_t pre_attempts[MAX_CPUS] = {0};
+        uint32_t pre_successes[MAX_CPUS] = {0};
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        extern volatile uint32_t *sched_diag_steal_attempts;
+        extern volatile uint32_t *sched_diag_steal_successes;
+#else
+        extern volatile uint32_t sched_diag_steal_attempts[];
+        extern volatile uint32_t sched_diag_steal_successes[];
+#endif
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            pre_attempts[c] = sched_diag_steal_attempts[c];
+            pre_successes[c] = sched_diag_steal_successes[c];
+        }
+#endif
+
+        uint64_t t0 = timer_get_count();
+        for (uint32_t i = 0; i < n_tasks; i++) {
+            char name[16];
+            name[0] = 's'; name[1] = '3'; name[2] = '_';
+            uint32_t idx = i;
+            if (idx >= 10) {
+                name[3] = '0' + (idx / 10);
+                name[4] = '0' + (idx % 10);
+                name[5] = '\0';
+            } else {
+                name[3] = '0' + idx;
+                name[4] = '\0';
+            }
+            struct task *t = task_create(name, s3_steal_work_task,
+                                         (void *)(uintptr_t)i);
+            if (t) {
+                scheduler_add_task_to_cpu(t, 1);
+            }
+        }
+
+        /* Poll done counter. Timeout at 30 seconds converted to timer
+         * ticks. */
+        uint64_t freq = timer_get_frequency();
+        uint64_t deadline = t0 + 30ULL * freq;
+        while (1) {
+            uint32_t done = *S3_DONE_ADDR();
+            if (done >= n_tasks) break;
+            if (timer_get_count() > deadline) {
+                uart_printf("  TIMEOUT after 30s — %u / %u tasks done\r\n",
+                            done, n_tasks);
+                break;
+            }
+            /* Cooperative yield so CPU 0 doesn't spin at 100%. */
+            yield();
+        }
+        uint64_t t1 = timer_get_count();
+        uint64_t elapsed_ns = (t1 - t0) * 1000000000ULL / freq;
+        uint32_t done_now = *S3_DONE_ADDR();
+
+        /* Per-CPU execution distribution. */
+        uint32_t cpu_count_exec[MAX_CPUS] = {0};
+        for (uint32_t i = 0; i < n_tasks; i++) {
+            uint32_t slot = *S3_SLOT_ADDR(i);
+            if (slot > 0 && slot <= MAX_CPUS) {
+                cpu_count_exec[slot - 1]++;
+            }
+        }
+
+        uart_printf("\r\n  Results:\r\n");
+        uart_printf("    Completed:    %u / %u\r\n", done_now, n_tasks);
+        uart_printf("    Wall-clock:   %lu ms (%lu us)\r\n",
+                    (unsigned long)(elapsed_ns / 1000000),
+                    (unsigned long)(elapsed_ns / 1000));
+        if (done_now > 0) {
+            uart_printf("    Per-task avg: %lu us\r\n",
+                        (unsigned long)(elapsed_ns / 1000 / done_now));
+        }
+        uart_puts("\r\n    Per-CPU execution distribution:\r\n");
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            uart_printf("      CPU %lu: %u task%s\r\n",
+                        (unsigned long)c, cpu_count_exec[c],
+                        cpu_count_exec[c] == 1 ? "" : "s");
+        }
+#if CONFIG_WORK_STEALING
+        uart_puts("\r\n    Steal counter deltas this run:\r\n");
+        uart_puts("    CPU  Attempts  Successes\r\n");
+        uart_puts("    ---  --------  ---------\r\n");
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            uint32_t da = sched_diag_steal_attempts[c] - pre_attempts[c];
+            uint32_t ds = sched_diag_steal_successes[c] - pre_successes[c];
+            uart_printf("    %3lu  %8u  %9u\r\n",
+                        (unsigned long)c, da, ds);
+        }
+#endif
+    } else if (strcmp(argv[1], "quant") == 0) {
+        /* G4: run FP32, FP16, and INT8 matmuls at the same shape so the
+         * FP32 line is the baseline for comparing dequant / INT8 cost. */
+        uint32_t iters = 20;
+        if (argc >= 3) {
+            uint32_t n;
+            if (shell_parse_uint(argv[2], &n) == 0 && n > 0 && n <= 10000) {
+                iters = n;
+            }
+        }
+        uart_puts("Quantization MatMul Benchmark (FP32 / FP16 / INT8)\r\n");
+        uart_puts("==================================================\r\n");
+        uart_puts("--- FP32 baseline ---\r\n");
+        rust_matmul_bench_fp32(iters);
+        uart_puts("--- FP16 (B matrix half-precision) ---\r\n");
+        rust_matmul_bench_fp16(iters);
+        uart_puts("--- INT8 (A and B quantized, FP32 output) ---\r\n");
+        rust_matmul_bench_int8(iters);
     } else if (strcmp(argv[1], "gpu") == 0) {
         uart_puts("GPU Cache Sync Benchmark\r\n");
         uart_puts("========================\r\n");
