@@ -452,6 +452,15 @@ static void gic_redist_init(uint32_t cpu)
      * revision notes v4 for the full chain of reasoning. */
     GICR_IGROUPR0(cpu)  = 0xFFFFFFFF;  /* Group 1 (best-effort) */
     GICR_IGRPMODR0(cpu) = 0x00000000;  /* Group 1 Non-secure */
+    /* DSB SY: ensure the Group-register MMIO writes have reached the
+     * GIC before the subsequent enable/priority writes. The GICv3 spec
+     * requires an explicit barrier for device-type memory writes that
+     * must be ordered against other observers; without it, a read-
+     * back (e.g. from the diagnostic print) can see the pre-write
+     * value even though the store has retired on this CPU. Cheap
+     * (one instruction) and matches the ISB-after-ICC-register-write
+     * pattern used elsewhere in this file. */
+    __asm__ volatile("dsb sy" ::: "memory");
 
     /* Disable all SGIs and PPIs */
     GICR_ICENABLER0(cpu) = 0xFFFFFFFF;
