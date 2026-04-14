@@ -209,6 +209,35 @@ int cmd_cpu(int argc, char *argv[])
         }
         uart_printf("  timer_handler_count: %u\r\n", timer_handler_count);
 
+#if CONFIG_WORK_STEALING
+        /* Work-stealing per-CPU counters (#105). Written by the
+         * thief in sched_try_steal; helpful for tuning Phase C
+         * benchmarks and deciding whether CONFIG_WORK_STEALING should
+         * default to ON. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        extern volatile uint32_t *sched_diag_steal_attempts;
+        extern volatile uint32_t *sched_diag_steal_successes;
+        extern volatile uint32_t *sched_diag_steal_stale;
+        extern volatile uint32_t *sched_diag_steal_empty_victim;
+#else
+        extern volatile uint32_t sched_diag_steal_attempts[];
+        extern volatile uint32_t sched_diag_steal_successes[];
+        extern volatile uint32_t sched_diag_steal_stale[];
+        extern volatile uint32_t sched_diag_steal_empty_victim[];
+#endif
+        uart_printf("\r\n  Per-CPU work-stealing counters:\r\n");
+        uart_printf("  CPU  Attempts  Success   Stale     EmptyVic\r\n");
+        uart_printf("  ---  --------  --------  --------  --------\r\n");
+        for (uint32_t i = 0; i < cpu_count; i++) {
+            uart_printf("  %3lu  %8u  %8u  %8u  %8u\r\n",
+                        i,
+                        sched_diag_steal_attempts[i],
+                        sched_diag_steal_successes[i],
+                        sched_diag_steal_stale[i],
+                        sched_diag_steal_empty_victim[i]);
+        }
+#endif /* CONFIG_WORK_STEALING */
+
 #if !defined(PLATFORM_X86_64)
         /* Show secondary CPU TTBR0 values (stored in boot_flag slots) */
         {

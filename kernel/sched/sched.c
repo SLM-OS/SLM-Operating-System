@@ -291,6 +291,15 @@ volatile uint32_t *sched_diag_tick;
 volatile uint32_t *sched_diag_schedule;
 volatile uint32_t *sched_diag_picked;
 volatile uint32_t *sched_diag_idle_loops;  /* idle task iteration count per CPU */
+/* Work-stealing observability counters (#105). Incremented by
+ * sched_try_steal on the thief's CPU and read by the `cpu` shell
+ * command. NC-backed on PLATFORM_HAS_NC_MEMORY for the same
+ * cross-CPU visibility reasons as the other sched_diag_* counters.
+ * All four are initialised to zero by scheduler_init. */
+volatile uint32_t *sched_diag_steal_attempts;      /* sched_try_steal entries  */
+volatile uint32_t *sched_diag_steal_successes;     /* live task returned       */
+volatile uint32_t *sched_diag_steal_stale;         /* stale pointer discarded  */
+volatile uint32_t *sched_diag_steal_empty_victim;  /* victim had nothing to take */
 /* Scheduler init flag — uses the SAME pattern as the working cpu_boot_flag
  * handshake: cacheline-aligned, atomic store + cache_invalidate polling
  * with delay for natural L2 eviction. */
@@ -301,6 +310,10 @@ volatile uint32_t sched_diag_tick[MAX_CPUS];
 volatile uint32_t sched_diag_schedule[MAX_CPUS];
 volatile uint32_t sched_diag_picked[MAX_CPUS];
 volatile uint32_t sched_diag_idle_loops[MAX_CPUS];
+volatile uint32_t sched_diag_steal_attempts[MAX_CPUS];
+volatile uint32_t sched_diag_steal_successes[MAX_CPUS];
+volatile uint32_t sched_diag_steal_stale[MAX_CPUS];
+volatile uint32_t sched_diag_steal_empty_victim[MAX_CPUS];
 #endif
 
 /* cpu_rq() implementation — must be after sched struct definition */
@@ -593,6 +606,18 @@ void scheduler_init(void)
     sched_diag_idle_loops = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
     for (uint32_t i = 0; i < MAX_CPUS; i++)
         sched_diag_idle_loops[i] = 0;
+
+    /* Work-stealing observability counters (#105). */
+    sched_diag_steal_attempts     = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    sched_diag_steal_successes    = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    sched_diag_steal_stale        = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    sched_diag_steal_empty_victim = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        sched_diag_steal_attempts[i] = 0;
+        sched_diag_steal_successes[i] = 0;
+        sched_diag_steal_stale[i] = 0;
+        sched_diag_steal_empty_victim[i] = 0;
+    }
 #endif
 
     /* Secondary-CPU preemption state (Pi 5 only). No-op on other platforms. */
@@ -1128,6 +1153,12 @@ static struct task *pick_next_task(uint32_t cpu)
  */
 static struct task *sched_try_steal(uint32_t this_cpu)
 {
+    /* #105: per-CPU observability counters. `sched_diag_steal_*` are
+     * incremented on the THIEF's CPU (this_cpu) so a `cpu` shell
+     * dump reports the per-core balance of attempts/hits/stale
+     * discards/empty-victim scans. */
+    sched_diag_steal_attempts[this_cpu]++;
+
     for (uint32_t i = 1; i < cpu_count; i++) {
         uint32_t victim = (this_cpu + i) % cpu_count;
         if (victim == this_cpu)
@@ -1146,10 +1177,12 @@ static struct task *sched_try_steal(uint32_t this_cpu)
 
         /* Drain any stale pointers along with finding a live one. Bounded
          * by deque capacity so this loop cannot spin forever. */
+        int victim_had_entry = 0;
         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
             struct task *candidate = steal_deque_steal(&cpu_steal_deques[victim]);
             if (!candidate)
                 break;  /* Empty — try next victim */
+            victim_had_entry = 1;
 
             irq_flags_t flags = rq_lock_irqsave(victim);
 
@@ -1162,10 +1195,15 @@ static struct task *sched_try_steal(uint32_t this_cpu)
             rq_unlock_irqrestore(victim, flags);
 
             if (stealable) {
+                sched_diag_steal_successes[this_cpu]++;
                 return candidate;
             }
             /* Otherwise: stale pointer, already popped from deque.
              * Loop again to drain another entry on the same victim. */
+            sched_diag_steal_stale[this_cpu]++;
+        }
+        if (!victim_had_entry) {
+            sched_diag_steal_empty_victim[this_cpu]++;
         }
     }
     return NULL;
