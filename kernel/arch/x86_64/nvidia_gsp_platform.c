@@ -128,9 +128,32 @@ extern int  nvidia_gpu_get_pci_address(uint8_t *bus, uint8_t *dev, uint8_t *func
  * (firmware never allocated the BAR — unusual, but happens in some
  * QEMU configs and with NVIDIA GPUs in iGPU-primary setups).
  */
+/*
+ * Sanity bounds for the ROM BAR physical address. Modern PCIe GPUs
+ * have their BARs allocated above 4 GB by UEFI (x86_64-class firmware)
+ * OR in the "PCI memory hole" at 0x80000000..0xFFFFF800. Anything
+ * below 0x80000000 would overlap with OS-critical physical memory
+ * (RAM, ACPI tables, legacy BIOS regions) and is a hard error. We
+ * also cap the upper bound at the 4 GB identity-map limit since
+ * trampoline32.S only maps the first 4 GB. If that changes, this
+ * check must too.
+ *
+ * ROM size cap of 2 MB: modern NVIDIA VBIOSes are 128–512 KB; 2 MB
+ * is well past every known real shipping VBIOS. Larger claims are
+ * almost certainly a misread BAR or attacker input.
+ */
+#define PCI_ROM_PHYS_MIN    0x80000000u
+#define PCI_ROM_PHYS_MAX    0xFFFFF800u
+#define PCI_ROM_SIZE_MAX    (2u * 1024u * 1024u)
+
 static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
                                   uint8_t *dst, size_t max)
 {
+    /* Caller must give us room for at least the 3-byte ROM header
+     * we probe (PCI sig + size byte). Defense-in-depth — the only
+     * in-tree caller passes a 256 KB buffer. */
+    if (!dst || max < 3) return -1;
+
     /* The ROM BAR holds a physical address in its upper bits; bit 0
      * enables ROM decoding. Save + restore the original value so we
      * don't strand any other driver's mapping. */
@@ -138,8 +161,17 @@ static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
     uint32_t saved_cmd = pci_config_read32(bus, dev, func, PCI_CFG_COMMAND);
 
     uint32_t rom_phys = saved_rom & 0xFFFFF800u;
-    if (rom_phys == 0 || rom_phys == 0xFFFFF800u)
-        return -1;     /* No address assigned — firmware didn't set up */
+
+    /* Physical-address range validation. Reject:
+     *   - unassigned (0 or all-1s from a disabled BAR)
+     *   - anything below PCI_ROM_PHYS_MIN (would overlap OS memory)
+     *   - anything at or above our identity-map ceiling
+     * A hostile or buggy firmware that parked the BAR at e.g. 0x1000
+     * would otherwise have us reading RAM as if it were VBIOS. */
+    if (rom_phys == 0 || rom_phys == 0xFFFFF800u ||
+        rom_phys < PCI_ROM_PHYS_MIN ||
+        rom_phys >= PCI_ROM_PHYS_MAX)
+        return -1;
 
     /* Ensure memory-space decoding is enabled. */
     pci_config_write32(bus, dev, func, PCI_CFG_COMMAND,
@@ -150,12 +182,13 @@ static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
 
     /* The ROM is now mapped at rom_phys in physical memory. Our
      * x86-64 kernel identity-maps the first 4 GB via trampoline32.S,
-     * so rom_phys is directly dereferenceable. */
+     * so rom_phys is directly dereferenceable. The range check above
+     * keeps us inside that window. */
     const volatile uint8_t *rom = (const volatile uint8_t *)(uintptr_t)rom_phys;
 
     /* PCI expansion ROMs declare their size in byte 2 (units of 512).
      * Read just enough to discover, then copy the claimed size (bounded
-     * by our buffer). */
+     * by our buffer and the hard 2 MB cap). */
     if (rom[0] != 0x55 || rom[1] != 0xAA) {
         /* Disable ROM, restore command. */
         pci_config_write32(bus, dev, func, PCI_CFG_ROM_BAR, saved_rom);
@@ -163,9 +196,12 @@ static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
         return -1;
     }
 
+    /* rom[2] is a byte (0..255), so declared fits in 17 bits — no
+     * overflow on 32-bit arithmetic even on 32-bit size_t platforms. */
     size_t declared = (size_t)rom[2] * 512u;
     size_t copy_len = declared;
     if (copy_len == 0 || copy_len > max) copy_len = max;
+    if (copy_len > PCI_ROM_SIZE_MAX)     copy_len = PCI_ROM_SIZE_MAX;
 
     for (size_t i = 0; i < copy_len; i++)
         dst[i] = rom[i];

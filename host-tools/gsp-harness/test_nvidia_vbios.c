@@ -479,6 +479,54 @@ static void test_fwsec_rejects_unparsed_struct(void)
     REQUIRE(nvidia_vbios_get_fwsec(&vb, &p, &size) < 0);
 }
 
+static void test_reject_entry_overlaps_bit_table(void)
+{
+    /* Defensive rejection: an entry whose data region overlaps the
+     * BIT header or entry list is structurally invalid (a real VBIOS
+     * places all data after the entry list). A crafted image could
+     * otherwise let a caller read the BIT table's metadata as if it
+     * were payload. */
+    uint8_t buf[VBIOS_SIZE];
+    build_good_vbios(buf, 0x3E0, 10);
+
+    /* Rewrite entry[0] ('I' v1) to have data_offset pointing INTO the
+     * BIT entry list itself. BIT is at 0x1E0, hdr = 12, entries span
+     * 3*6 = 18 bytes — entries end at 0x1E0 + 30 = 0x1FE. Pointing
+     * into the middle of that range (0x1F0) must be rejected. */
+    uint32_t e0 = 0x1E0 + 12;
+    buf[e0 + 2] = 0x08; buf[e0 + 3] = 0;    /* data_len = 8 */
+    buf[e0 + 4] = 0xF0; buf[e0 + 5] = 0x01; /* data_offset = 0x1F0 */
+
+    struct nvidia_vbios vb;
+    REQUIRE(nvidia_vbios_parse(buf, sizeof(buf), &vb) == 0);
+
+    uint32_t off = 0, len = 0;
+    REQUIRE(nvidia_vbios_find_entry(&vb, VBIOS_BIT_ID_I, 1, &off, &len) < 0);
+}
+
+static void test_entry_at_bit_region_boundary(void)
+{
+    /* An entry whose data starts exactly at the byte after the BIT
+     * entry list must be accepted — the region-overlap check uses
+     * strict inequality on the end bound. */
+    uint8_t buf[VBIOS_SIZE];
+    build_good_vbios(buf, 0x3E0, 10);
+
+    /* BIT region ends at 0x1E0 + 12 + 3*6 = 0x1FE.
+     * Point 'I' entry at 0x1FE with length 2 — should parse fine. */
+    uint32_t e0 = 0x1E0 + 12;
+    buf[e0 + 2] = 0x02; buf[e0 + 3] = 0;
+    buf[e0 + 4] = 0xFE; buf[e0 + 5] = 0x01;
+
+    struct nvidia_vbios vb;
+    REQUIRE(nvidia_vbios_parse(buf, sizeof(buf), &vb) == 0);
+
+    uint32_t off = 0, len = 0;
+    REQUIRE(nvidia_vbios_find_entry(&vb, VBIOS_BIT_ID_I, 1, &off, &len) == 0);
+    REQUIRE(off == 0x1FE);
+    REQUIRE(len == 2);
+}
+
 int main(void)
 {
     /* ---- Happy paths ---- */
@@ -509,6 +557,8 @@ int main(void)
     test_find_entry_multi_version();
     test_bit_signature_deep_scan();
     test_fwsec_rejects_unparsed_struct();
+    test_reject_entry_overlaps_bit_table();
+    test_entry_at_bit_region_boundary();
 
     if (failures == 0) {
         printf("test_nvidia_vbios: all tests PASS\n");

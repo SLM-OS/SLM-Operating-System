@@ -97,9 +97,14 @@ int nvidia_vbios_parse(const uint8_t *image, size_t image_size,
     if (find_bit_signature(image, image_size, &bit_off) < 0)
         return -1;
 
-    /* BIT header must fit in the image with room for the claimed
-     * number of entries. */
-    if (bit_off + BIT_HDR_SIZE_MIN > image_size)
+    /* Defensive arithmetic — find_bit_signature caps at 64 KB and
+     * image_size at NVIDIA_VBIOS_MAX_SIZE (1 MB), so with
+     * BIT_HDR_SIZE_MIN (12) this can't overflow size_t on any
+     * platform where size_t ≥ 32 bits. But we spell out each
+     * addend in `size_t` space anyway so future tightening
+     * (raising the 1 MB cap, etc.) can't regress this check. */
+    if (bit_off > image_size ||
+        (size_t)bit_off + BIT_HDR_SIZE_MIN > image_size)
         return -1;
 
     uint8_t hdr_size    = image[bit_off + 8];
@@ -110,9 +115,14 @@ int nvidia_vbios_parse(const uint8_t *image, size_t image_size,
     if (entry_size  != BIT_ENTRY_SIZE)  return -1;
     if (num_entries > BIT_MAX_ENTRIES)  return -1;
 
-    uint32_t entries_end = bit_off + hdr_size + (uint32_t)num_entries * entry_size;
-    if (entries_end > image_size)
-        return -1;
+    /* Overflow-safe: hdr_size is a byte (≤255), num_entries ≤ 64,
+     * entry_size = 6. Max addend is 64*6 = 384. All comparisons in
+     * size_t space to survive future tightening. */
+    size_t hdr_bytes    = (size_t)bit_off + hdr_size;
+    size_t entries_end  = hdr_bytes + (size_t)num_entries * entry_size;
+    if (hdr_bytes < (size_t)bit_off)       return -1;  /* paranoia */
+    if (entries_end < hdr_bytes)           return -1;  /* paranoia */
+    if (entries_end > image_size)          return -1;
 
     out->image       = image;
     out->image_size  = image_size;
@@ -132,6 +142,12 @@ int nvidia_vbios_find_entry(const struct nvidia_vbios *vb,
 
     const uint8_t *image = vb->image;
     uint32_t entry_base = vb->bit_offset + vb->hdr_size;
+    /* Region occupied by the BIT header + entry list. Entry data is
+     * rejected if it points into this range — a malformed entry that
+     * aliases back onto the BIT table bytes could let a caller read
+     * structural metadata as if it were payload. */
+    uint32_t bit_region_start = vb->bit_offset;
+    uint32_t bit_region_end   = entry_base + (uint32_t)vb->num_entries * vb->entry_size;
 
     for (uint8_t i = 0; i < vb->num_entries; i++) {
         uint32_t e = entry_base + (uint32_t)i * vb->entry_size;
@@ -143,8 +159,21 @@ int nvidia_vbios_find_entry(const struct nvidia_vbios *vb,
         if (eid != id) continue;
         if (version >= 0 && (int)ever != version) continue;
 
-        /* Validate the referenced data is actually inside the image. */
-        if ((uint32_t)eoff + elen > vb->image_size) return -1;
+        /* Size-t arithmetic so the bound check survives a future
+         * enlargement of entry length to u32. Also guards against
+         * the pathological case where eoff + elen wraps a 16-bit
+         * intermediate — we promote both to size_t explicitly. */
+        size_t data_end = (size_t)eoff + (size_t)elen;
+        if (data_end < (size_t)eoff) return -1;          /* overflow */
+        if (data_end > vb->image_size) return -1;        /* past end  */
+
+        /* Reject entries whose data region overlaps the BIT header
+         * or entry list. A real VBIOS never does this (pointers go
+         * forward, past the table), but a crafted image could. */
+        if (elen > 0 && eoff < bit_region_end &&
+            (eoff + elen) > bit_region_start) {
+            return -1;
+        }
 
         if (out_data_off) *out_data_off = eoff;
         if (out_data_len) *out_data_len = elen;
