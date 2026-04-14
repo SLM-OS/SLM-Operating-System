@@ -3653,6 +3653,137 @@ pub extern "C" fn rust_inference_test() -> i32 {
         }
     }
 
+    // Test 8c: LayerNorm (G3 regression)
+    // 2 rows × 5 features — non-multiple-of-4 width exercises the
+    // simd_sum_sumsq tail loop. Reference values computed by scalar
+    // mean/variance; FP32 tolerance 1e-4.
+    {
+        const ROWS: usize = 2;
+        const D: usize = 5;
+        let input_data: [f32; ROWS * D] = [
+            1.0, 2.0, 3.0, 4.0,  5.0,
+           -1.0, 0.5, 0.0, 2.5, -0.5,
+        ];
+        let gamma_data: [f32; D] = [1.0, 0.5, 2.0, 1.0, 0.25];
+        let beta_data:  [f32; D] = [0.1, 0.0, -0.2, 0.5, 0.0];
+        let mut out_data: [f32; ROWS * D] = [0.0; ROWS * D];
+
+        let input = inference::Tensor::new(input_data.as_ptr(), &[ROWS as u32, D as u32]);
+        let gamma = inference::Tensor::new(gamma_data.as_ptr(), &[D as u32]);
+        let beta  = inference::Tensor::new(beta_data.as_ptr(),  &[D as u32]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[ROWS as u32, D as u32]);
+
+        let eps = 1.0e-5_f32;
+        let result = inference::ops::layer_norm(&input, &gamma, Some(&beta), &mut out, eps);
+
+        // Scalar reference
+        let mut ref_out = [0.0_f32; ROWS * D];
+        for r in 0..ROWS {
+            let base = r * D;
+            let mut sum = 0.0_f32;
+            let mut sq = 0.0_f32;
+            for j in 0..D {
+                let v = input_data[base + j];
+                sum += v; sq += v * v;
+            }
+            let mean = sum / D as f32;
+            let var = (sq / D as f32) - mean * mean;
+            let var = if var > 0.0 { var } else { 0.0 };
+            let inv_std = 1.0_f32 / libm::sqrtf(var + eps);
+            for j in 0..D {
+                ref_out[base + j] =
+                    (input_data[base + j] - mean) * inv_std * gamma_data[j] + beta_data[j];
+            }
+        }
+        let mut vals_ok = true;
+        for i in 0..(ROWS * D) {
+            if (out_data[i] - ref_out[i]).abs() > 1.0e-4 { vals_ok = false; break; }
+        }
+        let passed = result.is_ok() && vals_ok;
+        print_test_result(b"simd: layer_norm 2x5 with gamma+beta\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8d: LayerNorm shape mismatch (gamma wrong dim)
+    {
+        let input_data: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+        let gamma_data: [f32; 3] = [1.0; 3];  // should be 4
+        let mut out_data: [f32; 4] = [0.0; 4];
+        let input = inference::Tensor::new(input_data.as_ptr(), &[1, 4]);
+        let gamma = inference::Tensor::new(gamma_data.as_ptr(), &[3]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[1, 4]);
+        let result = inference::ops::layer_norm(&input, &gamma, None, &mut out, 1.0e-5);
+        let passed = matches!(result, Err(inference::EngineError::ShapeMismatch));
+        print_test_result(b"simd: layer_norm shape mismatch rejected\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8e: RMSNorm (Llama-style) (G3 regression)
+    {
+        const ROWS: usize = 2;
+        const D: usize = 6;
+        let input_data: [f32; ROWS * D] = [
+            1.0, 2.0, 3.0, 4.0, 5.0,  6.0,
+           -1.0, 0.5, 0.0, 2.5, -0.5, 1.5,
+        ];
+        let gamma_data: [f32; D] = [1.0, 1.0, 0.5, 2.0, 1.0, 0.25];
+        let mut out_data: [f32; ROWS * D] = [0.0; ROWS * D];
+
+        let input = inference::Tensor::new(input_data.as_ptr(), &[ROWS as u32, D as u32]);
+        let gamma = inference::Tensor::new(gamma_data.as_ptr(), &[D as u32]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[ROWS as u32, D as u32]);
+
+        let eps = 1.0e-5_f32;
+        let result = inference::ops::rms_norm(&input, &gamma, &mut out, eps);
+
+        let mut ref_out = [0.0_f32; ROWS * D];
+        for r in 0..ROWS {
+            let base = r * D;
+            let mut sq = 0.0_f32;
+            for j in 0..D { let v = input_data[base + j]; sq += v * v; }
+            let mean_sq = sq / D as f32;
+            let inv_rms = 1.0_f32 / libm::sqrtf(mean_sq + eps);
+            for j in 0..D {
+                ref_out[base + j] = input_data[base + j] * inv_rms * gamma_data[j];
+            }
+        }
+        let mut vals_ok = true;
+        for i in 0..(ROWS * D) {
+            if (out_data[i] - ref_out[i]).abs() > 1.0e-4 { vals_ok = false; break; }
+        }
+        let passed = result.is_ok() && vals_ok;
+        print_test_result(b"simd: rms_norm 2x6 with gamma\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8f: GELU tanh approximation (G3 regression)
+    // Compare against scalar reference with libm::tanhf; tolerance 1e-5.
+    {
+        const N: usize = 9;
+        let input_data: [f32; N] = [-3.0, -1.5, -0.5, -0.1, 0.0, 0.1, 0.5, 1.5, 3.0];
+        let mut out_data: [f32; N] = [0.0; N];
+        let input = inference::Tensor::new(input_data.as_ptr(), &[N as u32]);
+        let mut out = inference::Tensor::new(out_data.as_mut_ptr() as *const f32, &[N as u32]);
+
+        let result = inference::ops::gelu(&input, &mut out);
+
+        const K: f32 = 0.7978845608028654;
+        const C: f32 = 0.044715;
+        let mut ref_out = [0.0_f32; N];
+        for i in 0..N {
+            let x = input_data[i];
+            let t = K * (x + C * x * x * x);
+            ref_out[i] = 0.5 * x * (1.0 + libm::tanhf(t));
+        }
+        let mut vals_ok = true;
+        for i in 0..N {
+            if (out_data[i] - ref_out[i]).abs() > 1.0e-5 { vals_ok = false; break; }
+        }
+        let passed = result.is_ok() && vals_ok;
+        print_test_result(b"simd: gelu tanh approximation\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Test 9: MaxPool2D unit test
     // 1x1x4x4 input with values 1..16, 2x2 pool stride 2
     // output 1x1x2x2 = [6, 8, 14, 16]

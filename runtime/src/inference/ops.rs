@@ -952,3 +952,232 @@ unsafe fn simd_mul_scalar(ptr: *mut f32, scalar: f32, n: usize) {
         }
     }
 }
+
+/// Sum of all elements and sum of squares, computed together in one
+/// SIMD-accumulated pass. Returns `(sum, sum_sq)`.
+///
+/// Single pass so the input cache line is touched once per element,
+/// not twice. LayerNorm needs both reductions and an naive
+/// implementation would do two separate passes; doing them together
+/// roughly halves the memory traffic on large vectors.
+///
+/// # Safety
+/// `ptr..ptr+n` readable and properly aligned for f32 SIMD loads.
+///
+/// Dispatch: aarch64 NEON vaddvq_f32; x86_64 scalar placeholder (C1);
+/// other scalar fallback.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+unsafe fn simd_sum_sumsq(ptr: *const f32, n: usize) -> (f32, f32) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::arch::aarch64::*;
+        let mut sum_vec = vdupq_n_f32(0.0);
+        let mut sq_vec  = vdupq_n_f32(0.0);
+        let n4 = n & !3;
+        let mut i = 0;
+        while i < n4 {
+            let v = vld1q_f32(ptr.add(i));
+            sum_vec = vaddq_f32(sum_vec, v);
+            sq_vec  = vfmaq_f32(sq_vec, v, v);
+            i += 4;
+        }
+        let mut sum = vaddvq_f32(sum_vec);
+        let mut sq  = vaddvq_f32(sq_vec);
+        while i < n {
+            let v = *ptr.add(i);
+            sum += v;
+            sq  += v * v;
+            i += 1;
+        }
+        (sum, sq)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // TODO(x86-64 C1): SSE haddps + vfmadd.
+        let mut sum = 0.0_f32;
+        let mut sq  = 0.0_f32;
+        for i in 0..n {
+            let v = *ptr.add(i);
+            sum += v;
+            sq  += v * v;
+        }
+        (sum, sq)
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        let mut sum = 0.0_f32;
+        let mut sq  = 0.0_f32;
+        for i in 0..n {
+            let v = *ptr.add(i);
+            sum += v;
+            sq  += v * v;
+        }
+        (sum, sq)
+    }
+}
+
+// =============================================================================
+// LayerNorm — (x - mean) / sqrt(var + eps) * gamma + beta
+// =============================================================================
+
+/// LayerNorm over the last dimension of `input`.
+///
+/// input:  [*, D]
+/// gamma:  [D]   — scale (per-feature)
+/// beta:   [D] or None — bias (per-feature)
+/// eps:    small constant added to variance for numerical stability
+///
+/// out[i, j] = (input[i, j] - mean_i) / sqrt(var_i + eps) * gamma[j]
+///             (+ beta[j] if provided)
+///
+/// NEON-accelerated via `simd_sum_sumsq` for the per-row reductions
+/// and scalar-per-element normalization for the output — the
+/// gamma/beta multiply-add loop is already memory-bound so a dedicated
+/// NEON fused-multiply helper would not help.
+pub fn layer_norm(
+    input: &Tensor,
+    gamma: &Tensor,
+    beta: Option<&Tensor>,
+    out: &mut Tensor,
+    eps: f32,
+) -> Result<(), EngineError> {
+    let total = input.num_elements();
+    if out.num_elements() != total {
+        return Err(EngineError::ShapeMismatch);
+    }
+    if input.ndim < 1 {
+        return Err(EngineError::ShapeMismatch);
+    }
+    let d = input.shape[input.ndim as usize - 1] as usize;
+    if d == 0 || total % d != 0 {
+        return Err(EngineError::ShapeMismatch);
+    }
+    if gamma.num_elements() != d {
+        return Err(EngineError::ShapeMismatch);
+    }
+    if let Some(b) = beta {
+        if b.num_elements() != d {
+            return Err(EngineError::ShapeMismatch);
+        }
+    }
+    let rows = total / d;
+    let d_inv = 1.0_f32 / d as f32;
+
+    unsafe {
+        let inp = input.data;
+        let outp = out.data_mut();
+        let gp = gamma.data;
+        let bp = beta.map(|t| t.data);
+
+        for r in 0..rows {
+            let base = r * d;
+            let (sum, sumsq) = simd_sum_sumsq(inp.add(base), d);
+            let mean = sum * d_inv;
+            // variance via E[x^2] - (E[x])^2
+            let var = (sumsq * d_inv) - mean * mean;
+            // guard against negative due to FP32 round-off on near-constant rows
+            let var = if var > 0.0 { var } else { 0.0 };
+            let inv_std = 1.0_f32 / libm::sqrtf(var + eps);
+
+            if let Some(bp) = bp {
+                for j in 0..d {
+                    let x = *inp.add(base + j);
+                    *outp.add(base + j) =
+                        (x - mean) * inv_std * *gp.add(j) + *bp.add(j);
+                }
+            } else {
+                for j in 0..d {
+                    let x = *inp.add(base + j);
+                    *outp.add(base + j) = (x - mean) * inv_std * *gp.add(j);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// =============================================================================
+// RMSNorm — x / sqrt(mean(x²) + eps) * gamma  (no centering)
+// =============================================================================
+
+/// Root-mean-square layer normalization (Llama-style).
+///
+/// out[i, j] = input[i, j] / sqrt(mean_of_squares_i + eps) * gamma[j]
+///
+/// Simpler than LayerNorm — no mean subtraction, one reduction.
+pub fn rms_norm(
+    input: &Tensor,
+    gamma: &Tensor,
+    out: &mut Tensor,
+    eps: f32,
+) -> Result<(), EngineError> {
+    let total = input.num_elements();
+    if out.num_elements() != total {
+        return Err(EngineError::ShapeMismatch);
+    }
+    if input.ndim < 1 {
+        return Err(EngineError::ShapeMismatch);
+    }
+    let d = input.shape[input.ndim as usize - 1] as usize;
+    if d == 0 || total % d != 0 {
+        return Err(EngineError::ShapeMismatch);
+    }
+    if gamma.num_elements() != d {
+        return Err(EngineError::ShapeMismatch);
+    }
+    let rows = total / d;
+    let d_inv = 1.0_f32 / d as f32;
+
+    unsafe {
+        let inp = input.data;
+        let outp = out.data_mut();
+        let gp = gamma.data;
+
+        for r in 0..rows {
+            let base = r * d;
+            let (_sum, sumsq) = simd_sum_sumsq(inp.add(base), d);
+            let mean_sq = sumsq * d_inv;
+            let inv_rms = 1.0_f32 / libm::sqrtf(mean_sq + eps);
+
+            for j in 0..d {
+                *outp.add(base + j) = *inp.add(base + j) * inv_rms * *gp.add(j);
+            }
+        }
+    }
+    Ok(())
+}
+
+// =============================================================================
+// GELU — Gaussian Error Linear Unit
+// =============================================================================
+
+/// Element-wise GELU activation, tanh approximation:
+///   y = 0.5 · x · (1 + tanh(√(2/π) · (x + 0.044715 · x³)))
+///
+/// This is the "approximate" GELU used by GPT-2/3 and most transformer
+/// implementations — fast and within ~1e-4 of the exact erf-based GELU.
+pub fn gelu(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
+    let n = input.num_elements();
+    if out.num_elements() != n {
+        return Err(EngineError::ShapeMismatch);
+    }
+    // √(2/π)  ≈ 0.7978845608028654
+    const K: f32 = 0.7978845608028654;
+    const C: f32 = 0.044715;
+
+    unsafe {
+        let inp = input.data;
+        let outp = out.data_mut();
+        for i in 0..n {
+            let x = *inp.add(i);
+            let x3 = x * x * x;
+            let t = K * (x + C * x3);
+            // tanh via libm — no good scalar NEON path without a
+            // polynomial approximation, and libm::tanhf is already
+            // fast enough that this loop is memory-bound for the
+            // hidden-dim sizes GELU normally sees.
+            *outp.add(i) = 0.5 * x * (1.0 + libm::tanhf(t));
+        }
+    }
+    Ok(())
+}
