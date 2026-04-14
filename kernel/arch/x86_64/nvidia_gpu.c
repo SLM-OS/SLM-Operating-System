@@ -252,6 +252,30 @@ void nvidia_gpu_init(void)
     /* Read engine enable status */
     uint32_t pmc_enable = nvidia_gpu.bar0[NV_PMC_ENABLE / 4];
     uart_printf("[GPU] PMC_ENABLE: 0x%08x\n", pmc_enable);
+
+    /* Install the x86-64 platform shim for the shared GSP-RM code
+     * (kernel/gpu/nvidia/gsp.c). Does NOT yet kick off gsp_init();
+     * that happens once the shell-level `gpu init` command is wired
+     * up (E3), so a developer can explicitly trigger the multi-
+     * second bringup when ready rather than at every boot. */
+    extern void x86_gsp_platform_install(void);
+    x86_gsp_platform_install();
+}
+
+/*
+ * Accessor for the probed NVIDIA GPU's PCI bus/dev/func.
+ * Used by nvidia_gsp_platform.c:nvidia_vbios_platform_load() to
+ * toggle the Expansion ROM BAR. Returns 0 on success, -1 if no
+ * NVIDIA GPU was found.
+ */
+int nvidia_gpu_get_pci_address(uint8_t *out_bus, uint8_t *out_dev,
+                               uint8_t *out_func)
+{
+    if (!nvidia_gpu.found) return -1;
+    if (out_bus)  *out_bus  = nvidia_gpu.bus;
+    if (out_dev)  *out_dev  = nvidia_gpu.dev;
+    if (out_func) *out_func = nvidia_gpu.func;
+    return 0;
 }
 
 /*

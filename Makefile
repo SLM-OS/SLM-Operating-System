@@ -177,6 +177,63 @@ x86-disk-verify: x86-disk
 	@scripts/tests/verify-x86-disk.sh $(KERNEL_BUILD_DIR)/slmos-x86.img
 
 # ============================================================================
+# gsp-harness — Linux userspace tool for GSP-RM development (Phase E).
+# ============================================================================
+# Builds a native Linux ELF that links the shared GSP-RM core
+# (kernel/gpu/nvidia/gsp.c) with a Linux-userspace implementation of
+# the gsp_platform_ops vtable. Requires the test-pc one-time setup in
+# docs/testing/test-pc-linux-vfio-setup.md.
+
+GSP_HARNESS_OUT := build/host-tools/gsp-harness
+GSP_HARNESS_SRCS := \
+    host-tools/gsp-harness/main.c \
+    host-tools/gsp-harness/linux_platform.c \
+    kernel/gpu/nvidia/gsp.c \
+    kernel/gpu/nvidia/nvidia_vbios.c
+
+# Native CFLAGS — these differ substantially from the bare-metal
+# kernel build. The shared GSP core uses `uart_puts`, `uart_printf`
+# for diagnostics; we stub them with printf equivalents.
+GSP_HARNESS_CFLAGS := \
+    -std=c11 -Wall -Wextra -O2 -g \
+    -Ihost-tools/gsp-harness \
+    -Ikernel/gpu/nvidia \
+    -D_GNU_SOURCE \
+    -DSLM_HOST_HARNESS=1
+
+.PHONY: gsp-harness
+gsp-harness:
+	@mkdir -p $(dir $(GSP_HARNESS_OUT))
+	@echo "Building Linux GSP harness..."
+	$(CC) $(GSP_HARNESS_CFLAGS) -o $(GSP_HARNESS_OUT) $(GSP_HARNESS_SRCS)
+	@echo "Built $(GSP_HARNESS_OUT)"
+	@echo "Run: sudo $(GSP_HARNESS_OUT) --probe"
+
+.PHONY: gsp-harness-clean
+gsp-harness-clean:
+	rm -f $(GSP_HARNESS_OUT)
+
+# VBIOS parser unit tests — runs on the host, no GPU required.
+# Synthetic VBIOS image built in the test, no proprietary binaries.
+.PHONY: test-vbios
+test-vbios:
+	@mkdir -p build/host-tools
+	@echo "Building + running VBIOS parser tests..."
+	$(CC) -std=c11 -Wall -Wextra -O2 -g \
+	    -o build/host-tools/test_nvidia_vbios \
+	    host-tools/gsp-harness/test_nvidia_vbios.c \
+	    kernel/gpu/nvidia/nvidia_vbios.c
+	@./build/host-tools/test_nvidia_vbios
+
+# GSP firmware extraction script failure-mode tests.
+# Runs on the host; no hardware required. If /lib/firmware/nvidia/ga107
+# is installed locally, also exercises the happy path.
+.PHONY: test-gsp-extract
+test-gsp-extract:
+	@echo "Running extract-gsp-firmware.sh functional tests..."
+	@bash scripts/tools/test-extract-gsp-firmware.sh
+
+# ============================================================================
 # Runtime (Rust) targets
 # ============================================================================
 

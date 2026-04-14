@@ -219,6 +219,13 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/ap_trampoline.S>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/tss.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/sse_kernels.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/nvidia_gsp_platform.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/arch/x86_64/nvidia_gsp_firmware.S>
+    # GSP-RM shared core (x86-64 + Jetson — same Ampere architecture)
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/gsp.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/gsp.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/nvidia_vbios.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/nvidia_vbios.c>
 
     # ==========================================================================
     # Memory Management
@@ -586,6 +593,73 @@ else()
 endif()
 if(ENABLE_WORK_STEALING)
     add_compile_definitions(CONFIG_WORK_STEALING=1)
+endif()
+
+# ============================================================================
+# GSP-RM firmware embedding (Phase E / #28 / x86-64 + Jetson)
+# ============================================================================
+# NVIDIA GSP-RM firmware is proprietary and lives in /lib/firmware/nvidia/
+# on any machine with the NVIDIA driver (or JetPack BSP). Build-time
+# extraction via scripts/tools/extract-gsp-firmware.sh produces raw
+# binaries under ${CMAKE_BINARY_DIR}/gsp_fw/, which kernel/arch/x86_64/
+# nvidia_gsp_firmware.S embeds via `.incbin`. Zero proprietary bytes
+# live in the repo.
+#
+# Default: ON for X86_64 and JETSON_ORIN_NANO; OFF otherwise. Also
+# auto-off when the firmware source directory is missing, so CI and
+# dev machines without NVIDIA drivers still build.
+if(PLATFORM STREQUAL "X86_64")
+    set(GSP_CHIP "ga107")
+    set(_gsp_default ON)
+elseif(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+    set(GSP_CHIP "ga10b")
+    set(_gsp_default ON)
+else()
+    set(GSP_CHIP "")
+    set(_gsp_default OFF)
+endif()
+option(ENABLE_GSP_FIRMWARE "Embed NVIDIA GSP firmware blobs (Phase E)" ${_gsp_default})
+
+if(ENABLE_GSP_FIRMWARE AND GSP_CHIP)
+    if(NOT EXISTS "/lib/firmware/nvidia/${GSP_CHIP}/gsp")
+        message(WARNING
+            "ENABLE_GSP_FIRMWARE=ON but /lib/firmware/nvidia/${GSP_CHIP}/gsp not found. "
+            "Install the NVIDIA driver (apt install linux-firmware) or pass "
+            "-DENABLE_GSP_FIRMWARE=OFF. Disabling automatically."
+        )
+        set(ENABLE_GSP_FIRMWARE OFF)
+    endif()
+endif()
+
+if(ENABLE_GSP_FIRMWARE AND GSP_CHIP AND PLATFORM STREQUAL "X86_64")
+    set(GSP_FW_DIR "${CMAKE_BINARY_DIR}/gsp_fw")
+    set(GSP_FW_STAMP "${GSP_FW_DIR}/.stamp")
+
+    add_custom_command(
+        OUTPUT ${GSP_FW_STAMP}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GSP_FW_DIR}
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/tools/extract-gsp-firmware.sh
+                ${GSP_FW_DIR} ${GSP_CHIP}
+        COMMAND ${CMAKE_COMMAND} -E touch ${GSP_FW_STAMP}
+        DEPENDS ${CMAKE_SOURCE_DIR}/scripts/tools/extract-gsp-firmware.sh
+        COMMENT "Extracting NVIDIA GSP firmware (${GSP_CHIP}) from /lib/firmware"
+        VERBATIM
+    )
+    add_custom_target(gsp_firmware DEPENDS ${GSP_FW_STAMP})
+
+    # Feed per-blob absolute paths as preprocessor defines into
+    # the .S file. GAS's `.incbin` takes a string literal — we
+    # can't concatenate "<dir>" "/gsp.bin" the way C does, so each
+    # blob gets its own fully-qualified define.
+    set_source_files_properties(
+        kernel/arch/x86_64/nvidia_gsp_firmware.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "ENABLE_GSP_FIRMWARE=1;GSP_FW_GSP_PATH=${GSP_FW_DIR}/gsp.bin;GSP_FW_BOOTLOADER_PATH=${GSP_FW_DIR}/bootloader.bin;GSP_FW_BOOTER_LOAD_PATH=${GSP_FW_DIR}/booter_load.bin;GSP_FW_BOOTER_UNLOAD_PATH=${GSP_FW_DIR}/booter_unload.bin"
+        OBJECT_DEPENDS "${GSP_FW_STAMP}"
+    )
+    add_compile_definitions(ENABLE_GSP_FIRMWARE=1)
+
+    message(STATUS "  GSP firmware: ${GSP_FW_DIR} (chip ${GSP_CHIP})")
 endif()
 
 if(ENABLE_AI_SCHEDULER)

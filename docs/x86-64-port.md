@@ -2,7 +2,7 @@
 
 This document describes the x86-64 port of SLM-OS, including architecture details, boot sequence, build instructions, and design decisions.
 
-**Status:** Milestones M1–M7 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, NVIDIA RTX 3050 GPU identification + VRAM access, and topic-based message routing (pub/sub IPC). GSP firmware loading (required for GPU compute) documented as future work.
+**Status:** Milestones M1–M7 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, NVIDIA RTX 3050 GPU identification + VRAM access, and topic-based message routing (pub/sub IPC). Phase E (GPU compute via GSP-RM) is actively in progress: E1 (firmware embedding) and E2 (shared VBIOS parser) have shipped; E2.5 (FWSEC discovery) is the current blocker — see `docs/x86-64-capstone-gap-closure-plan.md` and #143.
 
 ---
 
@@ -65,7 +65,7 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 | Message router (pub/sub) | ✅ | N/A | Topic-based IPC, yield-based delivery |
 | Echo IPC (shared mailbox) | ✅ | ✅ | Atomic mailbox, round-robin scheduling |
 | SSE inference kernels (relu/zero/add/fma) | ✅ | ✅ | C1 / P3-1 — C kernels `-msse -msse2`, called from Rust runtime |
-| GPU compute / 3D | ❌ | ❌ | Requires GSP firmware (Phase E — post-capstone) |
+| GPU compute / 3D | ❌ | ❌ | Requires GSP firmware (Phase E — **in progress**; E1 + E2 shipped, E2.5 blocker at #143) |
 
 ### Milestone Completion
 
@@ -600,9 +600,17 @@ Result: PASSED
 
 Registers belonging to uninitialized engines (PBUS, PMC_INTR) return 0xBADF5040 — the GPU's default "engine not initialized" response. This indicates GSP firmware has not been loaded. PTIMER and PSTRAPS are readable because they don't require GSP.
 
-### GSP Firmware (Future Work)
+### GSP Firmware (Phase E — In Progress)
 
 Full GPU compute requires loading the GSP (GPU System Processor) firmware — a 38 MB RISC-V binary that runs the GPU Resource Manager. This involves VBIOS parsing, SEC2 Falcon programming, cryptographic verification, and an RPC stack. GSP is mandatory on Ampere; there is no legacy register-programming mode.
+
+**Current progress:**
+- E1 (firmware embedding via `.incbin`) — shipped; `ENABLE_GSP_FIRMWARE` CMake option extracts from `/lib/firmware/nvidia/<chip>/gsp/` at build time.
+- E2 (shared VBIOS BIT-table parser) — shipped; lives at `kernel/gpu/nvidia/nvidia_vbios.{h,c}`, validated synthetically and against real GTX 1070 + RTX 3050 VBIOSes.
+- Linux userspace harness (`host-tools/gsp-harness/`) reproduces bringup over a vfio-pci-bound GPU with ~5-second iteration cycle.
+- E2.5 (FWSEC discovery on NPDS-format Ampere VBIOSes) — the current blocker. See `docs/x86-64-gsp-fwsec-investigation.md` and #143.
+
+Execution plan: `docs/x86-64-capstone-gap-closure-plan.md` §E.
 
 See **`docs/nvidia-gsp.md`** for the complete 7-phase boot sequence, register map, firmware file locations, and nouveau source file roadmap.
 

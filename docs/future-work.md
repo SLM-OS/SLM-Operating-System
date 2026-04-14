@@ -6,26 +6,22 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 
 ## 1. GPU Compute
 
-**Current state:** GPU memory integration works (cache coherency, alloc/free). GPU probe detects NVIDIA hardware. Stub driver provides API on QEMU. GSP firmware loading is the primary blocker for actual compute.
+**Current state (2026-04-14):** GPU memory integration works (cache coherency, alloc/free). GPU probe detects NVIDIA hardware. Phase E (GSP-RM bringup) is actively in progress — no longer deferred post-capstone.
 
-### GSP Firmware Loading (4-6 weeks)
-- Load GSP RISC-V firmware from filesystem
-- Initialize GSP mailbox communication
-- Implement GSP boot sequence (documented in `docs/nvidia-gsp.md`)
-- Handle firmware versioning and compatibility
+- **E1** — firmware embedding via `.incbin`: ✅ shipped.
+- **E2** — shared VBIOS BIT-table parser (`kernel/gpu/nvidia/nvidia_vbios.{h,c}`): ✅ shipped, validated on real GTX 1070 + RTX 3050.
+- **Linux userspace harness** (`host-tools/gsp-harness/`): ✅ shipped, mmaps BAR0/BAR1 via vfio-pci for ~5-second iteration cycles on test-pc.
+- **E2.5** — FWSEC ucode discovery on NPDS-format Ampere VBIOSes: 🔴 **current blocker**. See [#143](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/143) + `docs/x86-64-gsp-fwsec-investigation.md`.
+- **E3** — Falcon/RISC-V bringup: ⏸️ blocked on E2.5. Tracked by [#27](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/27).
+- **E4** — GSP-RM RPC ring: ⏸️ blocked on E3. Tracked by [#28](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/28).
+- **E5/E6** — compute engine + full inference: ⏸️ blocked on E4. Tracked by #29/#30.
 
-### Compute Kernel Submission (6-8 weeks)
-- Submit compute commands via GSP channel
-- Implement GPU-side MatMul for large matrices (> 4096 elements)
-- Memory mapping for GPU-accessible model weights
-- Fence/sync primitives for CPU-GPU coordination
-
-### TensorRT Integration
+### TensorRT Integration (still post-capstone)
 - Requires working GSP + CUDA runtime
 - Pre-compiled TensorRT engines for supported models
 - Fallback to CPU inference when GPU unavailable
 
-**Prerequisite:** GSP firmware documentation (partially reverse-engineered from nouveau). See `docs/nvidia-gsp.md` for current understanding.
+**Plan:** `docs/x86-64-capstone-gap-closure-plan.md` §E.
 
 ---
 
