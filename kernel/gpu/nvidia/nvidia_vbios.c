@@ -46,9 +46,206 @@
 #define BIT_ENTRY_SIZE      6
 #define BIT_MAX_ENTRIES     64      /* defensive cap */
 
+/* PCI Option ROM sub-image constants. openrm 595+ and nova-core
+ * both accept PCIR and NPDS signatures; earlier openrm (535.113.01)
+ * only accepts PCIR and would miss NPDS-format FwSec images. We
+ * accept both. */
+#define PCIR_SIG_0          'P'
+#define PCIR_SIG_1          'C'
+#define PCIR_SIG_2          'I'
+#define PCIR_SIG_3          'R'
+#define NPDS_SIG_0          'N'
+#define NPDS_SIG_1          'P'
+#define NPDS_SIG_2          'D'
+#define NPDS_SIG_3          'S'
+#define NPDE_SIG_0          'N'
+#define NPDE_SIG_1          'P'
+#define NPDE_SIG_2          'D'
+#define NPDE_SIG_3          'E'
+
+/* PCIR/NPDS common offsets (both layouts are byte-identical). */
+#define PCIR_OFF_PCIR_LEN       0x0A    /* u16 — length of this struct */
+#define PCIR_OFF_IMG_LEN        0x10    /* u16 — image length, 512-byte blocks */
+#define PCIR_OFF_CODE_TYPE      0x14    /* u8  — 0x00 x86 / 0x03 EFI / 0xE0 FwSec */
+#define PCIR_OFF_LAST_IMAGE     0x15    /* u8  — bit 7 = last */
+
+/* NPDE extension offsets. */
+#define NPDE_OFF_LEN            0x06    /* u16 — length of this NPDE */
+#define NPDE_OFF_SUB_IMG_LEN    0x08    /* u16 — sub-image length, 512-byte blocks */
+#define NPDE_OFF_LAST_IMAGE     0x0A    /* u8  — bit 7 = last (preferred over PCIR) */
+
+/* Falcon ucode descriptor table (pointed to by the BIT 'p' entry's
+ * u32 FalconUcodeTablePtr, after the nova-core arithmetic).
+ *
+ * FALCON_UCODE_TABLE_HDR_V1 (6 bytes):
+ *   +0 u8 version    (must be 1)
+ *   +1 u8 hdr_size   (must be 6)
+ *   +2 u8 entry_size (must be 6)
+ *   +3 u8 entry_count
+ *   +4 u8 desc_version  (2 on Turing TU10x, 3 on Ampere GA10x)
+ *   +5 u8 desc_size     (60 for V2, 44 for V3)
+ *
+ * Each FALCON_UCODE_TABLE_ENTRY_V1 (6 bytes):
+ *   +0 u8  application_id (0x85 = FWSEC_PROD, 0x45 = FWSEC_DBG)
+ *   +1 u8  target_id
+ *   +2 u32 desc_ptr       (same ptr-space as FalconUcodeTablePtr)
+ */
+#define FALCON_TABLE_HDR_SIZE     6
+#define FALCON_TABLE_ENTRY_SIZE   6
+
+/* FALCON_UCODE_DESC header (both V2 and V3 start with this u32):
+ *   bits  0:0  version-available flag
+ *   bits 15:8  descriptor version (2 or 3)
+ *   bits 31:16 descriptor size in bytes
+ */
+#define FALCON_DESC_VER_SHIFT     8
+#define FALCON_DESC_VER_MASK      0xFFu
+#define FALCON_DESC_SIZE_SHIFT    16
+#define FALCON_DESC_SIZE_MASK     0xFFFFu
+
+/* V3 descriptor (44 bytes, Ampere / GA10x) — fields we need to
+ * compute payload size. */
+#define FALCON_DESC_V3_IMEM_LOAD_SIZE   20
+#define FALCON_DESC_V3_DMEM_LOAD_SIZE   32
+#define FALCON_DESC_V3_SIG_COUNT        39
+
+/* V2 descriptor (60 bytes, Turing TU10x) — analogous offsets. */
+#define FALCON_DESC_V2_IMEM_LOAD_SIZE   24
+#define FALCON_DESC_V2_DMEM_LOAD_SIZE   48
+/* V2 has no signature count field; signatures (if any) are inlined. */
+
+/* BCRT30 RSA-3K signature block length (when present). */
+#define FALCON_SIGNATURE_SIZE           384
+
 static inline uint16_t rd16(const uint8_t *p)
 {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline uint32_t rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0]
+         | ((uint32_t)p[1] <<  8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+
+/*
+ * Walk the PCIR/NPDS sub-image chain starting at offset 0 of @image.
+ * Fills @out->subimages[] and populates the pciat_idx / first_fwsec_idx /
+ * second_fwsec_idx helpers. Returns 0 on success (valid chain, at least
+ * one sub-image), -1 on malformed structure.
+ *
+ * Follows openrm 595's s_locateExpansionRoms (also matches nova-core
+ * 2026-04-14 mainline):
+ *   - Either PCIR or NPDS at the pcir_ptr offset is valid.
+ *   - If NPDE is present immediately after PCIR/NPDS (16-byte aligned),
+ *     use its sub_image_len and last_image bit instead of PCIR's.
+ *   - Stop at the first image marked "last" in whichever source wins.
+ */
+static int walk_subimages(const uint8_t *image, size_t image_size,
+                          struct nvidia_vbios *out)
+{
+    uint32_t off = 0;
+    out->num_subimages = 0;
+    out->pciat_idx        = -1;
+    out->first_fwsec_idx  = -1;
+    out->second_fwsec_idx = -1;
+
+    for (uint8_t i = 0; i < VBIOS_MAX_SUBIMAGES; i++) {
+        /* End-of-buffer or insufficient room for an image header —
+         * only a hard error on image 0; otherwise treat what we've
+         * walked so far as the complete chain. This is the common
+         * case when the Linux kernel's `/sys/.../rom` interface
+         * truncates at PCIR LAST and the rest of the chain isn't
+         * served. */
+        if (off + 0x1A > image_size) {
+            if (i == 0) return -1;
+            break;
+        }
+
+        /* The first sub-image must start with 0x55AA. Subsequent
+         * sub-images may use NPDS-only layout and start with an
+         * arbitrary byte (e.g. the "VN" block seen on GA107). So we
+         * require 0x55AA only for image 0. */
+        if (i == 0 && (image[off] != PCI_ROM_SIG_0 ||
+                       image[off+1] != PCI_ROM_SIG_1))
+            return -1;
+
+        uint16_t pcir_ptr = rd16(&image[off + 0x18]);
+        size_t pcir = (size_t)off + pcir_ptr;
+        if (pcir + 0x18 > image_size) {
+            if (i == 0) return -1;
+            break;
+        }
+
+        int is_pcir = (image[pcir]   == PCIR_SIG_0 &&
+                       image[pcir+1] == PCIR_SIG_1 &&
+                       image[pcir+2] == PCIR_SIG_2 &&
+                       image[pcir+3] == PCIR_SIG_3);
+        int is_npds = (image[pcir]   == NPDS_SIG_0 &&
+                       image[pcir+1] == NPDS_SIG_1 &&
+                       image[pcir+2] == NPDS_SIG_2 &&
+                       image[pcir+3] == NPDS_SIG_3);
+        if (!is_pcir && !is_npds) {
+            /* End of chain — anything after the last valid image
+             * is padding or unrecognized data. Not an error. */
+            break;
+        }
+
+        uint16_t pcir_len  = rd16(&image[pcir + PCIR_OFF_PCIR_LEN]);
+        uint16_t img_blks  = rd16(&image[pcir + PCIR_OFF_IMG_LEN]);
+        uint8_t  code_type = image[pcir + PCIR_OFF_CODE_TYPE];
+        uint8_t  indicator = image[pcir + PCIR_OFF_LAST_IMAGE];
+
+        uint32_t img_len   = (uint32_t)img_blks * 512;
+        uint32_t sub_len   = img_len;
+        int      last      = (indicator & 0x80) != 0;
+
+        /* NPDE sits immediately after PCIR/NPDS, padded to 16-byte
+         * alignment. Overrides image length and last-image flag. */
+        size_t npde = (pcir + pcir_len + 0xF) & ~(size_t)0xF;
+        if (npde + 4 < image_size &&
+            image[npde]   == NPDE_SIG_0 &&
+            image[npde+1] == NPDE_SIG_1 &&
+            image[npde+2] == NPDE_SIG_2 &&
+            image[npde+3] == NPDE_SIG_3) {
+            uint16_t npde_len = rd16(&image[npde + NPDE_OFF_LEN]);
+            uint16_t sub_blks = rd16(&image[npde + NPDE_OFF_SUB_IMG_LEN]);
+            sub_len = (uint32_t)sub_blks * 512;
+            if (npde_len >= 0x0B) {
+                uint8_t last_byte = image[npde + NPDE_OFF_LAST_IMAGE];
+                last = (last_byte & 0x80) != 0;
+            }
+        }
+
+        /* Record the image. Treat the claimed length as declarative —
+         * truncation by the reader (our /dev/mem dump is capped at the
+         * ROM BAR size, which may be smaller than what NPDS declares)
+         * is a valid state that downstream code must handle. */
+        out->subimages[i].offset    = off;
+        out->subimages[i].length    = sub_len;
+        out->subimages[i].code_type = code_type;
+        out->num_subimages = (uint8_t)(i + 1);
+
+        if (code_type == VBIOS_CODE_TYPE_X86 && out->pciat_idx < 0)
+            out->pciat_idx = (int8_t)i;
+        else if (code_type == VBIOS_CODE_TYPE_VBIOS_EXT) {
+            if (out->first_fwsec_idx < 0)
+                out->first_fwsec_idx = (int8_t)i;
+            else if (out->second_fwsec_idx < 0)
+                out->second_fwsec_idx = (int8_t)i;
+        }
+
+        if (last || sub_len == 0) break;
+        off += sub_len;
+    }
+
+    /* A VBIOS always has at least a PciAt image. FwSec images are
+     * Turing+ only — their absence is not an error here; it just means
+     * get_fwsec will return -1. */
+    if (out->pciat_idx < 0) return -1;
+    return 0;
 }
 
 /*
@@ -130,6 +327,17 @@ int nvidia_vbios_parse(const uint8_t *image, size_t image_size,
     out->hdr_size    = hdr_size;
     out->entry_size  = entry_size;
     out->num_entries = num_entries;
+
+    /* Walk the PCIR/NPDS sub-image chain and record offsets. Failure
+     * here means the Option ROM chain is malformed — reject outright
+     * so callers don't try to extract FWSEC from a corrupt image.
+     * (A Pascal-shape VBIOS with no FwSec images walks successfully;
+     * first_fwsec_idx just stays -1.) */
+    if (walk_subimages(image, image_size, out) < 0) {
+        out->num_subimages = 0;
+        return -1;
+    }
+
     out->parsed_ok   = true;
     return 0;
 }
@@ -183,34 +391,191 @@ int nvidia_vbios_find_entry(const struct nvidia_vbios *vb,
 }
 
 /*
- * FWSEC ucode discovery. ALWAYS RETURNS -1 ON CURRENT CARDS — the
- * "BIT id 0x85" path was a pre-release Turing artifact; production
- * Turing/Ampere VBIOSes carry FWSEC inside PMU ucode descriptors
- * reachable via the 'I' (init scripts) BIT entry, not as a top-level
- * BIT entry. Walking those descriptors is an E3 prereq — see the
- * tracking issue. Until that lands this function exists so the
- * vtable shape is complete and so callers see a clean -1 instead
- * of a link error.
+ * Translate a "concatenated PciAt|FwSec1|FwSec2 buffer" offset into a
+ * full-image absolute offset. This is the nova-core algorithm
+ * (`setup_falcon_data` in drivers/gpu/nova-core/vbios.rs): the VBIOS
+ * pointers are expressed as if PciAt and all FwSec images were glued
+ * together with the EFI image stripped out. We walk back the stripping
+ * and land on the real byte in the dump.
+ *
+ * Writes the FwSec sub-image index the offset resolves to, so callers
+ * can validate the pointer stays inside that image even when the
+ * image's declared length exceeds what our ROM dump actually holds
+ * (a common gotcha on GA107 where the ROM BAR is 512 KB but NPDS
+ * declares more).
+ *
+ * Returns 0 on success with *out_abs set. Returns -1 if the offset
+ * resolves to a position past any FwSec image we recorded (including
+ * "past the end of our truncated dump").
+ */
+static int falcon_ptr_resolve(const struct nvidia_vbios *vb,
+                              uint32_t ptr,
+                              uint32_t *out_abs, int *out_fwsec_idx)
+{
+    if (vb->pciat_idx < 0 || vb->first_fwsec_idx < 0) return -1;
+
+    uint32_t pciat_len = vb->subimages[vb->pciat_idx].length;
+    if (ptr < pciat_len) {
+        /* Pointer targets inside PciAt — rare / unexpected on
+         * Turing+; openrm and nova-core both interpret FalconData
+         * pointers as living in the FwSec chain. Reject. */
+        return -1;
+    }
+
+    uint32_t off = ptr - pciat_len;
+
+    const struct nvidia_vbios_subimage *fw1 = &vb->subimages[vb->first_fwsec_idx];
+    if (off < fw1->length) {
+        /* Inside FwSec1. */
+        uint32_t abs = fw1->offset + off;
+        if (abs >= vb->image_size) return -1;
+        if (out_abs)        *out_abs = abs;
+        if (out_fwsec_idx)  *out_fwsec_idx = vb->first_fwsec_idx;
+        return 0;
+    }
+
+    if (vb->second_fwsec_idx < 0) return -1;
+    off -= fw1->length;
+
+    const struct nvidia_vbios_subimage *fw2 = &vb->subimages[vb->second_fwsec_idx];
+    if (off >= fw2->length) return -1;
+
+    uint32_t abs = fw2->offset + off;
+    if (abs >= vb->image_size) return -1;
+
+    if (out_abs)        *out_abs = abs;
+    if (out_fwsec_idx)  *out_fwsec_idx = vb->second_fwsec_idx;
+    return 0;
+}
+
+/*
+ * FWSEC ucode discovery on Turing+ / Ampere via the BIT 'p' entry
+ * (BIT_TOKEN_FALCON_DATA, id 0x70). See the header comment on
+ * nvidia_vbios_get_fwsec for the full algorithm.
+ *
+ * Pre-Turing cards (Pascal and earlier) don't have FwSec images — the
+ * sub-image walker leaves first_fwsec_idx = -1 and the function
+ * returns -1 quietly.
+ *
+ * This function also handles the "historic id 0x85" case as a
+ * forward-compat fallback — any future card that does ship FWSEC
+ * under that id works without a rebuild.
  */
 int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
                            const uint8_t **out_data, uint32_t *out_size)
 {
     if (!vb || !vb->parsed_ok) return -1;
+    if (out_data) *out_data = NULL;
+    if (out_size) *out_size = 0;
 
-    /* Try the historic id 0x85 first — harmless lookup, returns -1
-     * on every card we've validated. Kept so that if NVIDIA ever
-     * ships a card that does use this id, it'll work without a
-     * rebuild. */
-    uint32_t data_off = 0, data_len = 0;
-    if (nvidia_vbios_find_entry(vb, VBIOS_BIT_ID_FWSEC, -1,
-                                &data_off, &data_len) == 0
-        && data_len > 0) {
-        if (out_data) *out_data = vb->image + data_off;
-        if (out_size) *out_size = data_len;
-        return 0;
+    /* Historic path — harmless lookup, misses on every production
+     * Turing/Ampere card we've seen. */
+    {
+        uint32_t data_off = 0, data_len = 0;
+        if (nvidia_vbios_find_entry(vb, VBIOS_BIT_ID_FWSEC, -1,
+                                    &data_off, &data_len) == 0
+            && data_len > 0) {
+            if (out_data) *out_data = vb->image + data_off;
+            if (out_size) *out_size = data_len;
+            return 0;
+        }
     }
 
-    /* Production Turing+ path — not yet implemented (E3 prereq).
-     * Return -1 cleanly so callers can branch instead of crashing. */
-    return -1;
+    /* Modern path — BIT 'p' → FalconUcodeTablePtr. */
+    uint32_t ftp_entry_off = 0, ftp_entry_len = 0;
+    if (nvidia_vbios_find_entry(vb, VBIOS_BIT_ID_FALCON_DATA, -1,
+                                &ftp_entry_off, &ftp_entry_len) < 0)
+        return -1;
+    if (ftp_entry_len < 4) return -1;
+    if ((size_t)ftp_entry_off + 4 > vb->image_size) return -1;
+
+    uint32_t falcon_ucode_table_ptr = rd32(&vb->image[ftp_entry_off]);
+
+    /* Resolve through the PciAt|FwSec1|FwSec2 concatenation. */
+    uint32_t tbl_abs = 0;
+    int tbl_fwsec_idx = -1;
+    if (falcon_ptr_resolve(vb, falcon_ucode_table_ptr, &tbl_abs, &tbl_fwsec_idx) < 0)
+        return -1;
+    if ((size_t)tbl_abs + FALCON_TABLE_HDR_SIZE > vb->image_size) return -1;
+
+    const uint8_t *tbl = &vb->image[tbl_abs];
+    uint8_t t_version   = tbl[0];
+    uint8_t t_hdr_size  = tbl[1];
+    uint8_t t_entry_sz  = tbl[2];
+    uint8_t t_count     = tbl[3];
+    uint8_t t_desc_ver  = tbl[4];
+    uint8_t t_desc_sz   = tbl[5];
+
+    if (t_version != 1 || t_hdr_size != FALCON_TABLE_HDR_SIZE ||
+        t_entry_sz != FALCON_TABLE_ENTRY_SIZE) return -1;
+    if (t_count == 0 || t_count > 32) return -1;       /* sanity cap */
+    if (t_desc_ver != 2 && t_desc_ver != 3) return -1;
+    (void)t_desc_sz;
+
+    /* Entries immediately follow the header. */
+    uint32_t entries_start = tbl_abs + FALCON_TABLE_HDR_SIZE;
+    uint32_t entries_end   = entries_start + (uint32_t)t_count * FALCON_TABLE_ENTRY_SIZE;
+    if (entries_end > vb->image_size) return -1;
+
+    /* Find FWSEC_PROD (0x85). Debug-signed FWSEC_DBG (0x45) is not
+     * used on production cards — if neither is found, return -1. */
+    uint32_t fwsec_desc_ptr = 0;
+    bool found = false;
+    for (uint8_t i = 0; i < t_count; i++) {
+        const uint8_t *e = &vb->image[entries_start + i * FALCON_TABLE_ENTRY_SIZE];
+        uint8_t app_id = e[0];
+        if (app_id != VBIOS_FALCON_APPID_FWSEC_PROD) continue;
+        fwsec_desc_ptr = rd32(&e[2]);
+        found = true;
+        break;
+    }
+    if (!found) return -1;
+
+    /* DescPtr is in the same PciAt|FwSec1|FwSec2 space — same
+     * two-subtraction resolution. */
+    uint32_t desc_abs = 0;
+    int desc_fwsec_idx = -1;
+    if (falcon_ptr_resolve(vb, fwsec_desc_ptr, &desc_abs, &desc_fwsec_idx) < 0)
+        return -1;
+    if ((size_t)desc_abs + 4 > vb->image_size) return -1;
+
+    /* Descriptor header tells us which version + size we're reading. */
+    uint32_t dhdr = rd32(&vb->image[desc_abs]);
+    uint32_t dver = (dhdr >> FALCON_DESC_VER_SHIFT) & FALCON_DESC_VER_MASK;
+    uint32_t dsize = (dhdr >> FALCON_DESC_SIZE_SHIFT) & FALCON_DESC_SIZE_MASK;
+
+    if ((dver != 2 && dver != 3) || dsize < 16 || dsize > 256) return -1;
+    if ((size_t)desc_abs + dsize > vb->image_size) return -1;
+
+    /* Compute total payload size = desc + signatures + IMEM + DMEM. */
+    uint32_t imem_load = 0, dmem_load = 0, sig_count = 0;
+    if (dver == 3) {
+        if (dsize < 44) return -1;
+        imem_load = rd32(&vb->image[desc_abs + FALCON_DESC_V3_IMEM_LOAD_SIZE]);
+        dmem_load = rd32(&vb->image[desc_abs + FALCON_DESC_V3_DMEM_LOAD_SIZE]);
+        sig_count = vb->image[desc_abs + FALCON_DESC_V3_SIG_COUNT];
+    } else {
+        if (dsize < 60) return -1;
+        imem_load = rd32(&vb->image[desc_abs + FALCON_DESC_V2_IMEM_LOAD_SIZE]);
+        dmem_load = rd32(&vb->image[desc_abs + FALCON_DESC_V2_DMEM_LOAD_SIZE]);
+        /* V2 inlines the signature block; count is implicit. */
+        sig_count = 0;
+    }
+
+    /* Guard against unreasonable sizes. 4 MB per segment is well
+     * over anything NVIDIA ships. */
+    if (imem_load > 4u * 1024u * 1024u ||
+        dmem_load > 4u * 1024u * 1024u ||
+        sig_count > 16) return -1;
+
+    uint32_t payload_size = dsize
+                          + (uint32_t)sig_count * FALCON_SIGNATURE_SIZE
+                          + imem_load
+                          + dmem_load;
+
+    if ((size_t)desc_abs + payload_size > vb->image_size) return -1;
+
+    if (out_data) *out_data = &vb->image[desc_abs];
+    if (out_size) *out_size = payload_size;
+    return 0;
 }
