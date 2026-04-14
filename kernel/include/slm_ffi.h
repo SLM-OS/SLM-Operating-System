@@ -525,6 +525,22 @@ extern int rust_matmul_bench_fp32(uint32_t iterations);
 extern int rust_conv_bench_fp32(uint32_t iterations);
 
 /*
+ * Square matmul benchmark with B matrix stored as FP16 (128×128×128, N
+ * iterations). Exercises the on-the-fly FP16→FP32 row conversion in
+ * ops::matmul. Compare against rust_matmul_bench_fp32 to see
+ * dequantization overhead. Returns 0 / -1.
+ */
+extern int rust_matmul_bench_fp16(uint32_t iterations);
+
+/*
+ * Square matmul benchmark with A and B stored as INT8 with scale +
+ * zero_point (128×128×128, N iterations). Output is FP32 (dequantized).
+ * Exercises the scalar INT32-accumulating path today; future NEON INT8
+ * kernels will plug in here. Returns 0 / -1.
+ */
+extern int rust_matmul_bench_int8(uint32_t iterations);
+
+/*
  * ==========================================================================
  * GPU Compute FFI (Phase 5, M3)
  * ==========================================================================

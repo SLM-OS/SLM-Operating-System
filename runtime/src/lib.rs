@@ -4342,6 +4342,25 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test: f32_to_fp16 round-trip (G4 — backs FP16 bench setup)
+    // Values chosen to exercise exponent re-bias, zero, negative,
+    // and mantissa truncation paths.
+    {
+        let cases: [f32; 7] = [0.0, 1.0, -1.0, 0.25, -0.125, 2.5, 1024.0];
+        let mut max_err: f32 = 0.0;
+        for &v in &cases {
+            let h = f32_to_fp16(v);
+            let back = loader::registry::fp16_to_f32(h);
+            let err = (back - v).abs();
+            if err > max_err { max_err = err; }
+        }
+        // FP16 has ~1e-3 relative precision for these magnitudes;
+        // round-to-zero in f32_to_fp16 adds up to 1 ULP more.
+        let passed = max_err < 0.01;
+        print_test_result(b"fp16: f32_to_fp16 round-trip\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
@@ -4855,6 +4874,215 @@ pub extern "C" fn rust_conv_bench_fp32(iterations: u32) -> i32 {
         uart_printf(b"  Throughput:  avg=%lu.%03lu MFLOPS  peak=%lu.%03lu MFLOPS\n\0".as_ptr(),
                     avg_mflops_x1000 / 1_000_000, (avg_mflops_x1000 / 1000) % 1000,
                     min_mflops_x1000 / 1_000_000, (min_mflops_x1000 / 1000) % 1000);
+    }
+    0
+}
+
+/// Convert a finite FP32 value to IEEE-754 half-precision (round-to-zero).
+///
+/// Used only by benchmark setup — NaN/Inf/subnormal corner cases are
+/// not needed for deterministic synthetic data.
+fn f32_to_fp16(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 31) & 0x1) as u16;
+    let exp_f32 = ((bits >> 23) & 0xFF) as i32;
+    let mant_f32 = bits & 0x007F_FFFF;
+
+    if exp_f32 == 0 {
+        // Zero or subnormal → flush to zero.
+        return sign << 15;
+    }
+    if exp_f32 == 0xFF {
+        // Inf / NaN → map to FP16 Inf (NaN→Inf is fine for benchmark).
+        return (sign << 15) | (0x1F << 10);
+    }
+
+    let exp_f16 = exp_f32 - 127 + 15;
+    if exp_f16 >= 0x1F {
+        // Overflow → Inf
+        return (sign << 15) | (0x1F << 10);
+    }
+    if exp_f16 <= 0 {
+        // Underflow → zero (don't bother with subnormals)
+        return sign << 15;
+    }
+    let mant_f16 = (mant_f32 >> 13) as u16;
+    (sign << 15) | ((exp_f16 as u16) << 10) | mant_f16
+}
+
+/// FP16 MatMul benchmark — `bench matmul-fp16` backend.
+///
+/// Same 128×128×128 shape as `rust_matmul_bench_fp32` but with the B
+/// matrix stored as FP16. Exercises the per-row FP16→FP32 conversion
+/// path in `ops::matmul` (lock-protected FP16_BUF scratch), so
+/// comparing against the FP32 bench reveals the dequantization cost.
+#[no_mangle]
+pub extern "C" fn rust_matmul_bench_fp16(iterations: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if iterations == 0 {
+        return -1;
+    }
+
+    const SIZE: usize = 128;
+    static A_BUF: [f32; SIZE * SIZE] = [0.125; SIZE * SIZE];
+    static mut B_FP16: [u16; SIZE * SIZE] = [0; SIZE * SIZE];
+    static mut C_BUF: [f32; SIZE * SIZE] = [0.0; SIZE * SIZE];
+
+    // Initialize FP16 weights to 0.25 (bit pattern for +0.25 is 0x3400).
+    unsafe {
+        let pat = f32_to_fp16(0.25);
+        for i in 0..(SIZE * SIZE) {
+            B_FP16[i] = pat;
+        }
+    }
+
+    let size_u32 = SIZE as u32;
+    let a = inference::Tensor::new(A_BUF.as_ptr(), &[size_u32, size_u32]);
+    let b = unsafe {
+        inference::Tensor::new_fp16(
+            core::ptr::addr_of!(B_FP16) as *const u16,
+            &[size_u32, size_u32],
+        )
+    };
+    let mut c = unsafe {
+        inference::Tensor::new(
+            core::ptr::addr_of_mut!(C_BUF) as *const f32,
+            &[size_u32, size_u32],
+        )
+    };
+
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    let mut total_ns: u64 = 0;
+    let mut success: u32 = 0;
+
+    for _ in 0..iterations {
+        let start = kernel_ffi::get_time_ns();
+        let result = inference::ops::matmul(&a, &b, &mut c);
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+        if result.is_ok() {
+            if elapsed < min_ns { min_ns = elapsed; }
+            if elapsed > max_ns { max_ns = elapsed; }
+            total_ns += elapsed;
+            success += 1;
+        }
+    }
+
+    if success == 0 {
+        return -1;
+    }
+
+    let avg_ns = total_ns / success as u64;
+    let flops_per_call: u64 = 2 * (SIZE as u64) * (SIZE as u64) * (SIZE as u64);
+    let avg_gflops_x1000 = if avg_ns > 0 { (flops_per_call * 1000) / avg_ns } else { 0 };
+    let min_gflops_x1000 = if min_ns > 0 { (flops_per_call * 1000) / min_ns } else { 0 };
+
+    unsafe {
+        uart_printf(b"  Size:        %lux%lux%lu  A=FP32 B=FP16\n\0".as_ptr(),
+                    SIZE as u64, SIZE as u64, SIZE as u64);
+        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+                    iterations as u64, success as u64);
+        uart_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+                    min_ns / 1000, avg_ns / 1000, max_ns / 1000);
+        uart_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
+                    avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
+                    min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
+    }
+    0
+}
+
+/// INT8 MatMul benchmark — `bench matmul-int8` backend.
+///
+/// Same 128×128×128 shape; both A and B are INT8 with asymmetric
+/// quantization (scale + zero_point). Exercises the INT32-accumulating
+/// `matmul_int8` path in `ops::matmul`. The ratio vs. `bench matmul`
+/// FP32 shows the speedup from 8-bit weights (or the lack thereof on
+/// platforms without an INT8 NEON path — today the inner accumulator
+/// is scalar i32).
+#[no_mangle]
+pub extern "C" fn rust_matmul_bench_int8(iterations: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if iterations == 0 {
+        return -1;
+    }
+
+    const SIZE: usize = 128;
+    static mut A_I8: [i8; SIZE * SIZE] = [0; SIZE * SIZE];
+    static mut B_I8: [i8; SIZE * SIZE] = [0; SIZE * SIZE];
+    static mut C_BUF: [f32; SIZE * SIZE] = [0.0; SIZE * SIZE];
+
+    // Fill with deterministic INT8 values.
+    unsafe {
+        for i in 0..(SIZE * SIZE) {
+            A_I8[i] = ((i as i32 % 7) - 3) as i8;   // -3..3
+            B_I8[i] = ((i as i32 % 11) - 5) as i8;  // -5..5
+        }
+    }
+
+    let size_u32 = SIZE as u32;
+    let a = unsafe {
+        inference::Tensor::new_int8(
+            core::ptr::addr_of!(A_I8) as *const i8,
+            &[size_u32, size_u32], 0.05, 0,
+        )
+    };
+    let b = unsafe {
+        inference::Tensor::new_int8(
+            core::ptr::addr_of!(B_I8) as *const i8,
+            &[size_u32, size_u32], 0.1, 0,
+        )
+    };
+    let mut c = unsafe {
+        inference::Tensor::new(
+            core::ptr::addr_of_mut!(C_BUF) as *const f32,
+            &[size_u32, size_u32],
+        )
+    };
+
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    let mut total_ns: u64 = 0;
+    let mut success: u32 = 0;
+
+    for _ in 0..iterations {
+        let start = kernel_ffi::get_time_ns();
+        let result = inference::ops::matmul(&a, &b, &mut c);
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+        if result.is_ok() {
+            if elapsed < min_ns { min_ns = elapsed; }
+            if elapsed > max_ns { max_ns = elapsed; }
+            total_ns += elapsed;
+            success += 1;
+        }
+    }
+
+    if success == 0 {
+        return -1;
+    }
+
+    let avg_ns = total_ns / success as u64;
+    let ops_per_call: u64 = 2 * (SIZE as u64) * (SIZE as u64) * (SIZE as u64);
+    let avg_gops_x1000 = if avg_ns > 0 { (ops_per_call * 1000) / avg_ns } else { 0 };
+    let min_gops_x1000 = if min_ns > 0 { (ops_per_call * 1000) / min_ns } else { 0 };
+
+    unsafe {
+        uart_printf(b"  Size:        %lux%lux%lu  INT8 (dequant -> FP32 output)\n\0".as_ptr(),
+                    SIZE as u64, SIZE as u64, SIZE as u64);
+        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+                    iterations as u64, success as u64);
+        uart_printf(b"  Ops/call:    %lu\n\0".as_ptr(), ops_per_call);
+        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+                    min_ns / 1000, avg_ns / 1000, max_ns / 1000);
+        uart_printf(b"  Throughput:  avg=%lu.%03lu GOPS  peak=%lu.%03lu GOPS\n\0".as_ptr(),
+                    avg_gops_x1000 / 1000, avg_gops_x1000 % 1000,
+                    min_gops_x1000 / 1000, min_gops_x1000 % 1000);
     }
     0
 }

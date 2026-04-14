@@ -784,7 +784,7 @@ void smp_test_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|matmul|conv|gpu|stats|all>\r\n");
+        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|matmul|conv|quant|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -885,6 +885,24 @@ int cmd_bench(int argc, char *argv[])
             }
         }
         rust_conv_bench_fp32(iters);
+    } else if (strcmp(argv[1], "quant") == 0) {
+        /* G4: run FP32, FP16, and INT8 matmuls at the same shape so the
+         * FP32 line is the baseline for comparing dequant / INT8 cost. */
+        uint32_t iters = 20;
+        if (argc >= 3) {
+            uint32_t n;
+            if (shell_parse_uint(argv[2], &n) == 0 && n > 0 && n <= 10000) {
+                iters = n;
+            }
+        }
+        uart_puts("Quantization MatMul Benchmark (FP32 / FP16 / INT8)\r\n");
+        uart_puts("==================================================\r\n");
+        uart_puts("--- FP32 baseline ---\r\n");
+        rust_matmul_bench_fp32(iters);
+        uart_puts("--- FP16 (B matrix half-precision) ---\r\n");
+        rust_matmul_bench_fp16(iters);
+        uart_puts("--- INT8 (A and B quantized, FP32 output) ---\r\n");
+        rust_matmul_bench_int8(iters);
     } else if (strcmp(argv[1], "gpu") == 0) {
         uart_puts("GPU Cache Sync Benchmark\r\n");
         uart_puts("========================\r\n");
