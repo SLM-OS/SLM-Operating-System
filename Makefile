@@ -225,6 +225,14 @@ test-vbios:
 	    kernel/gpu/nvidia/nvidia_vbios.c
 	@./build/host-tools/test_nvidia_vbios
 
+# GSP firmware extraction script failure-mode tests.
+# Runs on the host; no hardware required. If /lib/firmware/nvidia/ga107
+# is installed locally, also exercises the happy path.
+.PHONY: test-gsp-extract
+test-gsp-extract:
+	@echo "Running extract-gsp-firmware.sh functional tests..."
+	@bash scripts/tools/test-extract-gsp-firmware.sh
+
 # ============================================================================
 # Runtime (Rust) targets
 # ============================================================================

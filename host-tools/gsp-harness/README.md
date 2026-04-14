@@ -32,6 +32,10 @@ Produces `build/host-tools/gsp-harness` — a regular Linux ELF.
 # Baseline probe — verifies BAR0/BAR1 are mapped, reads GPU ID.
 sudo ./build/host-tools/gsp-harness --probe
 
+# Read + parse the VBIOS via /sys/bus/pci/.../rom. Reports BIT-table
+# summary and FWSEC presence. Doesn't touch GSP.
+sudo ./build/host-tools/gsp-harness --vbios
+
 # Attempt Phase 0 only (firmware manifest sanity check, no hardware).
 ./build/host-tools/gsp-harness --phase 0
 
@@ -44,7 +48,25 @@ sudo ./build/host-tools/gsp-harness --bringup --trace
 ```
 
 Requires `CAP_SYS_RAWIO` to map `/sys/bus/pci/devices/*/resource*`;
-`sudo` is the easiest way.
+`sudo` is the easiest way. The GPU must be in D0 (not D3hot) — set
+via `echo on > /sys/bus/pci/devices/0000:01:00.0/power/control`
+before running. The VFIO post-install script
+`docs/testing/test-pc-vfio-postinstall.sh` does this.
+
+## Host-side tests
+
+The following Makefile targets run without hardware and are safe
+to wire into CI:
+
+```bash
+# VBIOS parser — synthetic images + malformed / edge-case inputs.
+make test-vbios
+
+# Firmware extraction script — exit-code coverage for missing zstd,
+# missing firmware dir, and (if locally installed) a full
+# /lib/firmware/nvidia/ga107/ happy path.
+make test-gsp-extract
+```
 
 ## Recovering from a hung GPU
 

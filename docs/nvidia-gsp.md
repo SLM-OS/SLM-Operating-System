@@ -2,13 +2,15 @@
 
 This document captures research into the NVIDIA GPU System Processor (GSP) firmware boot sequence, based on analysis of the NVIDIA open-gpu-kernel-modules source and the nouveau Linux kernel driver. These findings were gathered during Phase 4X (x86-64 port) to understand what is required for bare-metal GPU compute on Ampere architecture.
 
+> **Phase E status (2026-04-14):** GSP bringup is in progress, not post-capstone. E1 (firmware embedding via `.incbin`) and E2 (shared VBIOS BIT-table parser) have shipped; the parser is validated against a real RTX 3050 over a VFIO-backed Linux harness at `host-tools/gsp-harness/`. E2.5 (FWSEC discovery on NPDS-format Ampere VBIOSes) is the active blocker — see [#143](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/143) and `docs/x86-64-gsp-fwsec-investigation.md`. Execution plan in `docs/x86-64-capstone-gap-closure-plan.md` §E.
+
 ---
 
 ## Summary
 
 **GSP is mandatory on Ampere (GA10x) and later.** There is no legacy register-programming mode. The GPU gates engine access behind GSP-RM initialization — uninitialized engine registers return `0xBADF5040`. Without GSP, SLM-OS can enumerate the GPU, read identification registers, and access VRAM via BAR1, but cannot perform compute, 3D, or display operations.
 
-**Loading GSP firmware is impractically complex for a bare-metal OS** without the infrastructure of a full OS (DMA allocator, firmware loader, VBIOS parser). The boot chain involves two separate microcontrollers (SEC2 Falcon and GSP RISC-V), cryptographic verification, a 38 MB firmware blob, and a full RPC communication stack.
+**Bringing GSP up is complex but tractable.** The boot chain involves two separate microcontrollers (SEC2 Falcon and GSP RISC-V), cryptographic verification, a 38 MB firmware blob, and a full RPC communication stack. SLM-OS now has the firmware embedded in the kernel image (E1), the BIT-table parser shared across platforms (E2), and a vtable-based platform shim (`struct gsp_platform_ops`) that lets x86-64 bare-metal, the Linux userspace harness, and future Jetson bare-metal all drive the same shared core.
 
 ---
 
@@ -101,7 +103,14 @@ FB Top (e.g., 6 GB for RTX 3050)
 
 ### Phase 3: FWSEC-FRTS Execution
 
-1. Parse FWSEC ucode from VBIOS (type 0x85 in BIT table)
+1. Parse FWSEC ucode from VBIOS — *empirically* the FWSEC ucode is
+   NOT a top-level BIT entry with id 0x85 as originally documented
+   here. On production Ampere (validated against an RTX 3050), FWSEC
+   is reachable via the PMU ucode descriptor table pointed to by the
+   `BIT_TOKEN_FALCON_DATA` entry (id 0x70). The NPDS sub-image format
+   adds a further wrinkle not handled by openrm 535.113.01 or
+   nova-core mainline. Full write-up in `docs/x86-64-gsp-fwsec-investigation.md`
+   and [issue #143](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/143).
 2. Load FWSEC into GSP Falcon's IMEM/DMEM via PIO
 3. Boot the Falcon to run FWSEC, which establishes the **Write Protected Region** (WPR2)
 4. Verify WPR2 via registers `0x1FA824` (WPR2_LO) and `0x1FA828` (WPR2_HI)
