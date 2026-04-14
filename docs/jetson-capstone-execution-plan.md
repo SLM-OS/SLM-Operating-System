@@ -99,39 +99,71 @@ All four Week-1 prereqs are DONE:
 | #3 — `smp_notify_cpu` abstraction | ✅ (Jetson plan) | `5c61ed6` |
 | #4 — `ops.rs` dispatch skeleton | ✅ (Jetson plan, PR #131) | `07c0020` |
 
-After these land, Tracks P/S/G in this plan can run without coordination friction. Jetson plan's remaining blocker: **P1.0** (the `GICR_IGROUPR0` fast-path fix for timer IRQ delivery) is the next highest-leverage item.
+After these land, Tracks P/S/G in this plan can run without coordination friction.
 
 ---
 
 ## Track P — Preemption
 
-### Phase P1 — Diagnose timer-IRQ delivery on Jetson
+### Phase P1 — Cooperative preemption on Jetson ✅ DONE
 
-**Goal:** identify the reason `timer_handler_count` stays at zero on Jetson after kexec.
+**Outcome (commit `8de6b00`, 2026-04-13):** `timer_handler_count` on jetson-nano-2 advances at run time (`0 → 18 → 36` across two `bench smp` invocations). Cooperative preemption is functional via the `COOP_PREEMPT` mechanism originally written for Pi 5 (#99 resolution), now extended to Jetson by a CMakeLists-only change.
 
-**Prerequisites:** jetson-nano-2 accessible via labctl; working serial console.
+The original P1.0 fast-path hypothesis (write `GICR_IGROUPR0` / `GICR_IGRPMODR0` from the kernel) was tried first and **falsified on hardware** — the writes are silently ignored because Jetson runs at NS EL2 and the GIC has two security states; the Group config is owned by EL3. Same structural blocker as Pi 5's #99. The IGROUPR writes were kept in `gic_redist_init()` as best-effort hardening for platforms without security extensions.
 
-#### P1.0 — Fast-path fix attempt (before any diagnostic work)
+The full diagnostic sequence (P1.1 below) was never needed because the root cause matched #99's at the GIC layer; the resolution was to apply the same cooperative-preempt workaround.
+
+**What this gives us on Jetson:**
+
+- Scheduler tick (`scheduler_tick()`) runs every ~10 ms of wall-clock per CPU at the next yield/`schedule()` entry on that CPU.
+- AI policy, deadline boosts, and migration decisions take effect at the next yield.
+- `pit_ticks` and `timer_handler_count` advance on all CPUs that yield.
+- A pure CPU-bound loop with no yield still monopolizes its CPU — same caveat Pi 5 has documented.
+
+**What this does NOT give us:**
+
+- No timer-IRQ-driven preemption between yield points. P3 (secondary preemption via the ELR trampoline) is moot on Jetson until the underlying IRQ-delivery issue is fixed (see P1.2 below).
+
+#### P1.0 — Fast-path fix attempt (FALSIFIED on hardware)
+
+Original hypothesis (kept here for the historical record):
+
+> Audit of `gic_redist_init()` confirms it never writes `GICR_IGROUPR0` or `GICR_IGRPMODR0`. If the kexec-inherited state leaves PPI 30 in Group 0 (Secure), the interrupt delivers as **FIQ** and hits the FIQ handler — silent black hole.
+
+Implemented (`gic.c` lines added in this branch's first commit):
 
 Audit of `gic_redist_init()` in `kernel/drivers/gic.c:407-448` confirms it never writes `GICR_IGROUPR0` or `GICR_IGRPMODR0`. If the kexec-inherited state leaves PPI 30 in Group 0 (Secure), the interrupt delivers as **FIQ** and hits `el1_fiq: b hang` — a silent black hole that matches the observed zero-IRQ symptom.
 
-**Try this first, 1 hour:**
-
 ```c
-/* Add to gic_redist_init() after the existing GICR_ICENABLER0 write: */
-GICR_IGROUPR0(cpu)  = 0xFFFFFFFF;   /* all SGIs/PPIs Group 1 NS */
+GICR_IGROUPR0(cpu)  = 0xFFFFFFFF;
 GICR_IGRPMODR0(cpu) = 0x00000000;
 ```
 
-(May need a `GICR_IGROUPR0(cpu)` macro alongside the existing `GICR_ICENABLER0(cpu)` at line 112 — same `gicr_sgi_base(cpu) + 0x080` pattern.)
+**Hardware result on jetson-nano-2:** `timer_handler_count` stayed at 0. The `[JDIAG]` boot-time printout added during this work showed `GICR_IGROUPR0=0x0` after the write — i.e. the write was silently ignored. This is consistent with GICv3 + two security states + NS access: writes to those registers from NS are no-ops. The Pi 5 #99 work documented the same pattern on GICv2 (`GICD_IGROUPR` ignored from NS).
 
-Rebuild, deploy, check `cpu` shell output for `timer_handler_count > 0`.
+The IGROUPR writes were nevertheless kept in `gic_redist_init()` as best-effort. They cost nothing on platforms that ignore them and provide correct behavior on platforms without security extensions (or platforms running at S EL3).
 
-**If it fires:** the diagnosis is confirmed. Proceed directly to P2. Pi 5's #99 likely has the same root cause via GICv2 `GICD_IGROUPR` — file a note in #99.
+#### P1.1 — Cooperative preemption (the actual resolution)
 
-**If it doesn't fire:** proceed with the full diagnostic below.
+Apply the Pi 5 #99 resolution to Jetson. The `coop_preempt_maybe_tick()` helper in `kernel/sched/sched.c` polls `CNTPCT_EL0` at the start of every `schedule()` entry and synthesizes a `scheduler_tick()` call when ≥10 ms of wall-clock has elapsed on that CPU since the last synthetic tick. The implementation is platform-agnostic (uses `timer_get_frequency`, `timer_get_count`, `MAX_CPUS`, `TIMER_HZ`).
 
-#### P1.1 — Full diagnostic sequence (if P1.0 doesn't resolve)
+CMakeLists.txt change (commit `8de6b00`):
+
+- `option(PI5_COOP_PREEMPT ...)` renamed to `option(COOP_PREEMPT ...)`. Legacy `PI5_COOP_PREEMPT` retained as alias.
+- Activation extended from `PLATFORM STREQUAL "RASPI5"` to `RASPI5 OR JETSON_ORIN_NANO`.
+- Both `COOP_PREEMPT=1` and `PI5_COOP_PREEMPT=1` macros are defined when active so the existing 12 source sites (in sched.c, docs, test_integration.c, test_coop_preempt.c, etc.) keep building. A follow-up PR can rename the source sites; this PR keeps the diff small.
+
+**Hardware result on jetson-nano-2:** `timer_handler_count` advances `0 → 18 → 36` across two `bench smp` invocations. Per-CPU `Ticks` counter shows non-zero values on CPUs 1-5. `bench smp` still 5/5 COMPLETED — no SMP regression.
+
+#### P1.2 — Future: real hardware timer IRQ on Jetson (deferred)
+
+Same shape as Pi 5's #134. Would require either:
+- TF-A reconfiguration to surrender the GIC group bits to Non-secure (unlikely without NVIDIA's source).
+- A FIQ-routed timer path à la Pi 5's `PI5_FIQ_TIMER` (the el1_fiq handler from #99 Phase 1 already works; would need GICv3-aware GICC_AIAR-equivalent dispatch).
+
+Neither is required for the capstone — cooperative preemption covers the workload.
+
+#### P1.x — Reference: full diagnostic sequence (if needed for future debug)
 
 1. **Add a `gicdump` shell command** in `kernel/src/shell_sys.c` that prints per-CPU GICv3 state:
    - `GICR_CTLR`, `GICR_WAKER`, `GICR_IGROUPR0`, `GICR_IGRPMODR0`, `GICR_ISENABLER0`, `GICR_IPRIORITYR[7]` (PPI 30's priority byte).
@@ -712,4 +744,13 @@ Each phase produces one or more of:
 
 ---
 
-*Plan compiled 2026-04-13, revised 2026-04-13 v2, revised 2026-04-13 v3. To be revisited at each Gate.*
+**2026-04-13 v4** — recorded the actual outcome of P1 on Jetson hardware. Material updates:
+
+- **P1.0 hypothesis falsified.** `GICR_IGROUPR0`/`GICR_IGRPMODR0` writes from NS EL2 are silently ignored by the GIC because the Group config is owned by EL3. Same structural blocker as Pi 5 #99. Boot-time `[JDIAG]` print captured `GICR_IGROUPR0=0x0` after the write to confirm.
+- **P1.1 cooperative-preempt path adopted.** Renamed `PI5_COOP_PREEMPT` → `COOP_PREEMPT` and extended activation to Jetson. Hardware verified: `timer_handler_count` advances `0 → 18 → 36`, per-CPU `Ticks` counter non-zero on CPUs 1-5.
+- **P3 secondary preemption is moot** until a future P1.2 fixes hardware timer IRQ delivery (deferred — not required for capstone).
+- IGROUPR writes kept in `gic_redist_init()` as best-effort hardening; comment updated to document the Jetson observation.
+
+---
+
+*Plan compiled 2026-04-13, revised 2026-04-13 v2, v3, v4. To be revisited at each Gate.*
