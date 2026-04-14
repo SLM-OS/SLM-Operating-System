@@ -510,6 +510,14 @@ extern int rust_infer_stats(RustInferStats *stats);
 extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
 
 /*
+ * Square FP32 matmul benchmark (128×128×128, N iterations). Prints
+ * latency and achieved GFLOPS. Exercises the NEON-tiled FP32 kernel
+ * on aarch64; scalar fallback on other archs.
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_matmul_bench_fp32(uint32_t iterations);
+
+/*
  * ==========================================================================
  * GPU Compute FFI (Phase 5, M3)
  * ==========================================================================

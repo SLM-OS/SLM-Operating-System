@@ -3996,6 +3996,71 @@ pub extern "C" fn rust_inference_test() -> i32 {
         }
     }
 
+    // Test: Non-tile-aligned matmul (G1 edge-case regression).
+    //
+    // The cache-tiled path in ops::matmul splits M/K/N into 32-element
+    // tiles; the NEON inner loop processes 4 elements at a time. A
+    // matrix shape that's coprime to both 32 and 4 — 33x37 × 37x41 —
+    // exercises every edge case at once:
+    //   - tile iteration with a final partial tile  (33 = 32 + 1)
+    //   - inner SIMD loop with a scalar tail        (33 & 3 = 1)
+    //   - K-dimension not tile-aligned              (37 = 32 + 5)
+    //   - C dims not tile-aligned in either axis    (33, 41)
+    //
+    // Operands are ramp patterns so every cell has a unique expected
+    // value (unlike "all ones" which can hide index bugs). Reference is
+    // computed with a plain triple-nested scalar loop; NEON output must
+    // match within FP32 round-off tolerance.
+    {
+        const M: usize = 33;
+        const K: usize = 37;
+        const N: usize = 41;
+        static mut A_ODD: [f32; M * K] = [0.0; M * K];
+        static mut B_ODD: [f32; K * N] = [0.0; K * N];
+        static mut C_ODD: [f32; M * N] = [0.0; M * N];
+        static mut C_REF: [f32; M * N] = [0.0; M * N];
+
+        unsafe {
+            // Ramp fills. Values kept small so K=37 accumulation fits
+            // cleanly in FP32 without round-off blowing past 0.01.
+            for i in 0..(M * K) {
+                A_ODD[i] = ((i % 7) as f32) * 0.01;
+            }
+            for i in 0..(K * N) {
+                B_ODD[i] = ((i % 11) as f32) * 0.01;
+            }
+
+            // Scalar reference.
+            for i in 0..M {
+                for j in 0..N {
+                    let mut acc = 0.0_f32;
+                    for kk in 0..K {
+                        acc += A_ODD[i * K + kk] * B_ODD[kk * N + j];
+                    }
+                    C_REF[i * N + j] = acc;
+                }
+            }
+
+            let a = inference::Tensor::new(A_ODD.as_ptr(), &[M as u32, K as u32]);
+            let b = inference::Tensor::new(B_ODD.as_ptr(), &[K as u32, N as u32]);
+            let mut c = inference::Tensor::new(
+                C_ODD.as_mut_ptr() as *const f32, &[M as u32, N as u32]);
+            let result = inference::ops::matmul(&a, &b, &mut c);
+            let ok = result.is_ok();
+
+            let mut vals_ok = true;
+            for i in 0..(M * N) {
+                if (C_ODD[i] - C_REF[i]).abs() > 0.001 {
+                    vals_ok = false;
+                    break;
+                }
+            }
+            let passed = ok && vals_ok;
+            print_test_result(b"simd: matmul 33x37 * 37x41 (non-tile-aligned)\0", passed);
+            if !passed { failures += 1; }
+        }
+    }
+
     // Test: FP16 matmul computation (not just tensor creation)
     {
         // A (FP32): [[1, 2], [3, 4]]
@@ -4374,4 +4439,99 @@ pub extern "C" fn rust_component_test() -> i32 {
     }
 
     failures
+}
+
+/// FP32 MatMul benchmark — `bench matmul` backend.
+///
+/// Runs a square SIZE×SIZE×SIZE matmul `iterations` times and reports
+/// min/avg/max latency plus achieved GFLOPS. Exercises the aarch64
+/// NEON path in `inference::ops::matmul` (which uses cache-tiled
+/// `simd_fma_row` with `vfmaq_f32`) on Jetson / Pi 5, and the scalar
+/// fallback on other platforms.
+///
+/// Hardcoded to a single 128×128×128 run today — static buffers of
+/// 128² f32 = 64 KB each, three buffers = 192 KB BSS. Plenty of
+/// headroom on Jetson's 3.7 MB BSS budget. FLOPS = 2·M·K·N = ~4.2M
+/// per call, so typical runtime on NEON is sub-millisecond.
+#[no_mangle]
+pub extern "C" fn rust_matmul_bench_fp32(iterations: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if iterations == 0 {
+        return -1;
+    }
+
+    const SIZE: usize = 128;
+    static A_BUF: [f32; SIZE * SIZE] = [0.0; SIZE * SIZE];
+    static B_BUF: [f32; SIZE * SIZE] = [0.0; SIZE * SIZE];
+    static mut C_BUF: [f32; SIZE * SIZE] = [0.0; SIZE * SIZE];
+
+    let size_u32 = SIZE as u32;
+    let a = inference::Tensor::new(A_BUF.as_ptr(), &[size_u32, size_u32]);
+    let b = inference::Tensor::new(B_BUF.as_ptr(), &[size_u32, size_u32]);
+    // SAFETY: C_BUF is static mut. We take a mut raw pointer via
+    // as_mut_ptr() while holding no other reference — Tensor only
+    // stores the pointer. Subsequent matmul writes through that
+    // pointer under `unsafe { ... }` inside ops::matmul.
+    let mut c = unsafe {
+        inference::Tensor::new(
+            core::ptr::addr_of_mut!(C_BUF) as *const f32,
+            &[size_u32, size_u32],
+        )
+    };
+
+    let mut min_ns: u64 = u64::MAX;
+    let mut max_ns: u64 = 0;
+    let mut total_ns: u64 = 0;
+    let mut success: u32 = 0;
+
+    for _ in 0..iterations {
+        let start = kernel_ffi::get_time_ns();
+        let result = inference::ops::matmul(&a, &b, &mut c);
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+
+        if result.is_ok() {
+            if elapsed < min_ns { min_ns = elapsed; }
+            if elapsed > max_ns { max_ns = elapsed; }
+            total_ns += elapsed;
+            success += 1;
+        }
+    }
+
+    if success == 0 {
+        return -1;
+    }
+
+    let avg_ns = total_ns / success as u64;
+    // 2 · M · K · N FLOPs per matmul
+    let flops_per_call: u64 = 2 * (SIZE as u64) * (SIZE as u64) * (SIZE as u64);
+    // GFLOPS = flops / elapsed_ns × 10^9 / 10^9 = flops / elapsed_ns.
+    // With integer division, scale: gflops × 1000 = flops · 1000 / ns.
+    // For a ~4.2 MFLOP kernel at 500 us we get ~8.4 GFLOPS.
+    let avg_gflops_x1000 = if avg_ns > 0 {
+        (flops_per_call * 1000) / avg_ns
+    } else {
+        0
+    };
+    let min_gflops_x1000 = if min_ns > 0 {
+        (flops_per_call * 1000) / min_ns
+    } else {
+        0
+    };
+
+    unsafe {
+        uart_printf(b"  Size:        %lux%lux%lu FP32\n\0".as_ptr(),
+                    SIZE as u64, SIZE as u64, SIZE as u64);
+        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+                    iterations as u64, success as u64);
+        uart_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+                    min_ns / 1000, avg_ns / 1000, max_ns / 1000);
+        uart_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
+                    avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
+                    min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
+    }
+    0
 }
