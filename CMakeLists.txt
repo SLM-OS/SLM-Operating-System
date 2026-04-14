@@ -114,19 +114,42 @@ if(PLATFORM STREQUAL "RASPI5" AND PI5_IRQ_DIAG)
     add_compile_definitions(PI5_IRQ_DIAG=1)
 endif()
 
-# Pi 5 cooperative-preemption fallback (issue #99 resolution path).
-# Pi 5's GICv2 + TF-A configuration does not deliver timer IRQs to
-# EL1 (confirmed in Phase 1: HPPIR shows IRQ 30 pending, but no
-# vector entry ever fires; armstub experiments break PSCI or UNDEF
-# on ICC_SRE_EL3). Rather than block preemption entirely, run
-# scheduler_tick() from schedule() whenever CNTPCT_EL0 has advanced
-# by ≥10 ms on this CPU since the last synthetic tick. This gives
-# "cooperative preemption" — scheduling decisions (AI policy, deadline
-# boosts, migration) take effect at the next yield for any workload
-# that yields at all, which covers all tasks that poll UART / message
-# queues / locks.
-option(PI5_COOP_PREEMPT "Pi 5 cooperative preemption via CNTPCT-driven scheduler_tick" ON)
-if(PLATFORM STREQUAL "RASPI5" AND PI5_COOP_PREEMPT)
+# Cooperative-preemption fallback — for ARM64 platforms where the GIC
+# security configuration prevents timer IRQs from reaching the kernel.
+# See docs/pi5-preemption-resolution.md for the Pi 5 diagnostic chain
+# and docs/jetson-capstone-execution-plan.md revision v4 for the
+# identical issue on Jetson Orin Nano.
+#
+# Symptom on both platforms: NS writes to the GIC's group registers
+# (GICD_IGROUPR on Pi 5's GICv2, GICR_IGROUPR0 on Jetson's GICv3) are
+# silently ignored by the hardware because the GIC runs with two
+# security states and the group config is owned by EL3 firmware. Timer
+# PPIs therefore stay in Group 0 and arrive as FIQ rather than IRQ; the
+# EL1 IRQ vector never fires.
+#
+# Workaround: `schedule()` checks `CNTPCT_EL0` on every entry and
+# synthesizes a `scheduler_tick()` call whenever ≥10 ms has elapsed on
+# that CPU since the last synthetic tick. This gives "cooperative
+# preemption" — scheduling decisions (AI policy, deadline boosts,
+# migration) take effect at the next yield for any workload that yields
+# at all, which covers all tasks that poll UART / message queues / locks.
+# A pure CPU-bound loop with no yield still monopolizes its CPU.
+#
+# Enabled by default on platforms where the real timer-IRQ path is
+# blocked (Pi 5 and Jetson). The legacy `PI5_COOP_PREEMPT` option is
+# kept as a backward-compatible alias.
+option(COOP_PREEMPT "Cooperative preemption via CNTPCT-driven scheduler_tick (ARM64 NC-memory platforms)" ON)
+option(PI5_COOP_PREEMPT "Deprecated alias for COOP_PREEMPT" ON)
+# Alias propagation: either knob being OFF disables the feature. If a
+# user sets only one explicitly, respect that.
+if(NOT PI5_COOP_PREEMPT)
+    set(COOP_PREEMPT OFF)
+endif()
+if(COOP_PREEMPT AND (PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO"))
+    add_compile_definitions(COOP_PREEMPT=1)
+    # Keep legacy macro for source sites that have not been renamed yet.
+    # TODO: rename PI5_COOP_PREEMPT → COOP_PREEMPT in source (12 files)
+    # in a follow-up PR; for now the macro alias keeps everything building.
     add_compile_definitions(PI5_COOP_PREEMPT=1)
 endif()
 
