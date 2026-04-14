@@ -201,7 +201,7 @@ el1_irq:
     DIAG_BUMP_VEC 0x08
     save_regs
     bl      el1_irq_handler     /* Call C handler */
-#if defined(PI5_SECONDARY_PREEMPT)
+#if defined(SECONDARY_PREEMPT)
     /* After the IRQ body runs, check for a pending reschedule. When set,
      * maybe_arm_resched_trampoline() rewrites the saved ELR_EL1 in the
      * trap frame so the upcoming `eret` lands in resched_trampoline
@@ -229,7 +229,7 @@ el1_fiq:
     save_regs
     mov     x0, sp
     bl      el1_fiq_handler
-#if defined(PI5_SECONDARY_PREEMPT)
+#if defined(SECONDARY_PREEMPT)
     /* Same trampoline-arming hook as el1_irq: when timer_handler has
      * set reschedule_pending for this CPU, rewrite the saved ELR so
      * eret lands in resched_trampoline and schedule() runs in task
@@ -291,7 +291,7 @@ el0_serror:
     restore_regs
     eret
 
-#if defined(PI5_SECONDARY_PREEMPT)
+#if defined(SECONDARY_PREEMPT)
 /*
  * resched_trampoline - Deferred-scheduling trampoline (Pi 5, issue #57).
  *
@@ -361,14 +361,17 @@ resched_trampoline:
      *   1. We have not yet saved x19-x28 or set up a valid frame pointer
      *      for a C call; a bl here would need extra register-save paperwork.
      *   2. The MPIDR hack `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` is
-     *      the same one used by every other PI5_SECONDARY_PREEMPT code
+     *      the same one used by every other SECONDARY_PREEMPT code
      *      site — task_entry_trampoline (task.c), NC trace points
      *      (sched.c, exceptions.c, smp.c) — and is correct for Pi 5
      *      (Aff1 holds CPU index) and QEMU (Aff0 holds it). The two
      *      affinity fields are never both non-zero on these platforms.
-     *   3. Jetson uses a dual-cluster layout where this would be wrong,
-     *      but the whole trampoline is gated on PI5_SECONDARY_PREEMPT
-     *      and is only defined for PLATFORM=RASPI5 in CMakeLists.
+     *   3. Jetson uses a dual-cluster layout where this formula is WRONG
+     *      for cluster 1 CPUs (CPU 4 MPIDR 0x10200 → 2, collides with
+     *      CPU 2). Jetson plan P3 step 2 replaces this with a lookup
+     *      into cpu_logical_map[] before enabling SECONDARY_PREEMPT on
+     *      Jetson builds. Do NOT enable SECONDARY_PREEMPT on Jetson
+     *      without that fix.
      *
      * If the kernel is ever ported to a CPU with more complex affinity
      * encoding while reusing this infrastructure, convert this into a
@@ -443,4 +446,4 @@ resched_trampoline:
     eret
 
 .size resched_trampoline, . - resched_trampoline
-#endif /* PI5_SECONDARY_PREEMPT */
+#endif /* SECONDARY_PREEMPT */

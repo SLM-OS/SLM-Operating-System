@@ -187,6 +187,68 @@ The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)`
 
 ---
 
+## Secondary-CPU preemption — `SECONDARY_PREEMPT` (April 2026)
+
+The ELR-trampoline infrastructure (`kernel/sched/preempt.c`,
+`resched_trampoline` in `kernel/arch/arm64/vectors.S`) is gated behind
+the CMake option `SECONDARY_PREEMPT` (default OFF). When ON, timer IRQs
+on secondary CPUs are deferred to task context via the trampoline
+rather than calling `schedule()` from the ISR (which corrupts the
+abandoned exception frame on real ARM64 hardware).
+
+**Invocation:**
+
+- `make kernel SECONDARY_PREEMPT=ON` — enable on any ARM64 platform.
+- `make kernel PI5_SECONDARY_PREEMPT=ON` — deprecated alias; still maps
+  to `SECONDARY_PREEMPT=ON`. Pi 5 Makefiles that use the old name keep
+  working.
+
+**Platform status:**
+
+- **Pi 5:** functional in combination with `PI5_COOP_PREEMPT` (the
+  trampoline path is inert today because timer IRQs don't deliver;
+  infrastructure kept for when #134 restores hardware IRQ delivery).
+- **Jetson:** compiles but **not safe to enable yet** — the
+  `resched_trampoline` in `vectors.S:377-380` uses
+  `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` to compute the CPU index,
+  which collides on dual-cluster CPU 4/5. Jetson plan P3 step 2 owns
+  the fix.
+- **QEMU:** works today but rarely needed — QEMU's timer IRQ from an
+  ISR doesn't crash the kernel; the default cooperative path is fine.
+
+The option was originally `PI5_SECONDARY_PREEMPT`; it was renamed
+during the Jetson capstone Prereq #2 (commit `b820bee`) so Jetson
+builds could compile the trampoline, which had been gated behind
+`PLATFORM STREQUAL "RASPI5"`. See `docs/smp.md` §"Secondary-CPU
+Preemption" for the full history.
+
+---
+
+## Cross-CPU notification — `smp_notify_cpu()`
+
+Scheduler code calls `smp_notify_cpu(cpu)` to wake a specific CPU that
+may have just gained work on its run queue. API in
+`kernel/include/smp.h`, platform implementations split:
+
+- **ARM64** (`kernel/sched/smp.c`): `sev` broadcast. SEV wakes every
+  CPU in WFE and the target picks up the task on its next idle loop
+  iteration. Upgrade to `gic_send_sgi(cpu, SGI_RESCHED)` once Jetson
+  plan P3 step 3 fixes `gic_send_sgi` for dual-cluster MPIDR.
+- **x86-64** (`kernel/arch/x86_64/platform_x86.c`): LAPIC IPI on
+  `RESCHED_VECTOR` (49). The handler calls `schedule()` directly —
+  not `scheduler_tick()` — so quantum accounting stays owned by the
+  local timer. Runs on IST1 so a task-stack overflow cannot corrupt
+  the IPI frame.
+
+Both backends short-circuit self-notifications and out-of-range
+`cpu` ids. Replaces the previous
+`#if !defined(PLATFORM_X86_64) __asm__ volatile("sev") #endif` pattern
+in `scheduler_add_task_to_cpu()`. Platform-specific wake logic no
+longer leaks into `kernel/sched/sched.c`. See `docs/smp.md` §"IPI /
+Cross-CPU Notification".
+
+---
+
 ## UART Lock on Pi 5 / Jetson
 
 On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).

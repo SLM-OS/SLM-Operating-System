@@ -331,7 +331,7 @@ void el1_fiq_handler(struct trap_frame *tf)
 #if defined(PI5_FIQ_TIMER)
     /* Phase 2: dispatch the timer. When PPI 30 arrives, run the same
      * handler the IRQ path uses so scheduler_tick fires and (with
-     * PI5_SECONDARY_PREEMPT on) reschedule_pending is set. EOI before
+     * SECONDARY_PREEMPT on) reschedule_pending is set. EOI before
      * the handler so GIC re-priority works if a nested FIQ is posted. */
     if (irq_num == 30) {
         *aeoir = irq;

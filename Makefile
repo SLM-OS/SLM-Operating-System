@@ -17,6 +17,15 @@ AI_SCHED ?= OFF
 # Work-stealing scheduler (#59 Phase B): OFF by default.
 WORK_STEALING ?= OFF
 
+# Secondary-CPU preemption via ELR trampoline: OFF by default. Required
+# for Jetson / Pi 5 to get timer-driven preemption on CPUs 1..N. Replaces
+# the platform-specific PI5_SECONDARY_PREEMPT; legacy name still works.
+SECONDARY_PREEMPT ?= OFF
+PI5_SECONDARY_PREEMPT ?= OFF
+ifeq ($(PI5_SECONDARY_PREEMPT),ON)
+    SECONDARY_PREEMPT := ON
+endif
+
 # AI Eviction (Phase AI-Eviction):
 #   AI_EVICTION=ON         — compile the pluggable EvictionPolicy trait +
 #                            classical Rust policies (stub XGBoost/MLP).
@@ -134,6 +143,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		-DPLATFORM=$(PLATFORM) \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
 		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
 		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
 		$(MAKE_PROGRAM_ARG)
@@ -300,6 +310,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		-DENABLE_BOOT_TESTS=ON \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
 		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
 		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
 		$(MAKE_PROGRAM_ARG)

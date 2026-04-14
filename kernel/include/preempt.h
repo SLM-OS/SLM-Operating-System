@@ -1,5 +1,5 @@
 /*
- * preempt.h - Secondary-CPU preemption support (Pi 5)
+ * preempt.h - Secondary-CPU preemption support
  *
  * Exposes the per-CPU state used by the deferred-scheduling exception
  * return path. scheduler_tick() sets reschedule_pending[cpu] instead of
@@ -7,9 +7,10 @@
  * and, when set, points ELR_EL1 at resched_trampoline so schedule()
  * runs in task context rather than inside the exception handler.
  *
- * Only active when PI5_SECONDARY_PREEMPT is defined (PLATFORM_RASPI5
- * kernel build). On QEMU the old direct-schedule-from-ISR path still
- * works and no trampoline is needed.
+ * Only active when SECONDARY_PREEMPT is defined (ARM64 hardware where
+ * schedule-from-ISR corrupts the exception frame — Pi 5 today, Jetson
+ * once P1.0 / P3 enable it). On QEMU the old direct-schedule-from-ISR
+ * path still works and no trampoline is needed.
  */
 
 #ifndef PREEMPT_H
@@ -18,7 +19,7 @@
 #include <stdint.h>
 #include "config.h"
 
-#if defined(PI5_SECONDARY_PREEMPT)
+#if defined(SECONDARY_PREEMPT)
 
 /*
  * Per-CPU "reschedule pending" flag. Set by scheduler_tick() when the
@@ -57,7 +58,7 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf);
 /* Initialize per-CPU preemption state. Called from scheduler_init(). */
 void preempt_init(void);
 
-#else /* !PI5_SECONDARY_PREEMPT */
+#else /* !SECONDARY_PREEMPT */
 
 static inline void preempt_init(void) {}
 

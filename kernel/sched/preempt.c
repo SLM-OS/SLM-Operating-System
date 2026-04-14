@@ -1,5 +1,5 @@
 /*
- * preempt.c - Secondary-CPU preemption support (Pi 5)
+ * preempt.c - Secondary-CPU preemption support
  *
  * Implements maybe_arm_resched_trampoline(): the C-side of the ELR
  * trampoline scheme used to defer schedule() calls from timer IRQs to
@@ -11,7 +11,7 @@
 
 #include "preempt.h"
 
-#if defined(PI5_SECONDARY_PREEMPT)
+#if defined(SECONDARY_PREEMPT)
 
 #include "ncmem.h"
 #include "smp.h"
@@ -113,4 +113,4 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
     tf->spsr |= PSR_I;
 }
 
-#endif /* PI5_SECONDARY_PREEMPT */
+#endif /* SECONDARY_PREEMPT */
