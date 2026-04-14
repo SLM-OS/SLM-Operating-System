@@ -35,20 +35,20 @@
 /*
  * Busy-wait for multi-core integration tests.
  *
- * On Pi 5 coop-preempt (no hardware timer IRQs — see
- * docs/pi5-preemption-resolution.md), a task that never yields will
- * never let the scheduler migrate it, boost its priority, or observe
- * another CPU's progress. Yield every ~1k iterations under
- * PI5_COOP_PREEMPT to give the scheduler a tick.
+ * On COOP_PREEMPT platforms (Pi 5, Jetson — no hardware timer IRQs, see
+ * docs/pi5-preemption-resolution.md and the Jetson plan v4 resolution),
+ * a task that never yields will never let the scheduler migrate it,
+ * boost its priority, or observe another CPU's progress. Yield every
+ * ~1k iterations under COOP_PREEMPT to give the scheduler a tick.
  *
- * On platforms with hardware timer IRQs (QEMU, Jetson): keep the pure
+ * On platforms with hardware timer IRQs (QEMU, x86-64): keep the pure
  * nop loop. Yielding here changes scheduler behavior — the integration
  * tests are timing-sensitive and repeated voluntary reschedules can
  * push their work-completion windows past the test timeouts.
  */
 static void delay(volatile uint32_t count)
 {
-#if defined(PI5_COOP_PREEMPT)
+#if defined(COOP_PREEMPT)
     extern void yield(void);
     volatile uint32_t spin = 0;
     while (count--) {

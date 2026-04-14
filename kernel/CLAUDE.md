@@ -172,14 +172,16 @@ The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)`
 
 ---
 
-## Pi 5 Timer IRQs — cooperative preemption (April 2026, updated 2026-04-13)
+## ARM64 Hardware Timer IRQs — cooperative preemption (April 2026)
 
-**Hardware timer IRQs do not deliver to EL1 on Pi 5.** TF-A's firmware/GIC configuration blocks delivery through every path reachable from kernel code. Full investigation and evidence in `docs/pi5-preemption-resolution.md`; Phase 1 register snapshots in `docs/pi5-irq-investigation-2026-04.md`. `GICC_HPPIR=30` at runtime confirms the GIC has timer IRQs pending, but no exception vector ever fires.
+**Hardware timer IRQs do not deliver to EL1/EL2 on Pi 5 or Jetson.** The GIC in both platforms runs with two security states; the Group register that routes a PPI to IRQ vs FIQ is owned by EL3 firmware and Non-secure writes are silently ignored. Pi 5 evidence: `docs/pi5-preemption-resolution.md`. Jetson evidence: PR #138 (`timer_handler_count: 0` pre-fix, `[JDIAG]` confirming `GICR_IGROUPR0` stays at `0x0` after our NS write).
 
-**Resolution — `PI5_COOP_PREEMPT` (CMake option, default `ON` for RASPI5):** `schedule()` checks `CNTPCT_EL0` on every entry and synthesizes a `scheduler_tick()` call whenever ≥10 ms has elapsed on that CPU since the last tick. See `coop_preempt_maybe_tick()` in `kernel/sched/sched.c`. This drives the AI scheduler, deadline boosts, migration, and `pit_ticks` / `timer_handler_count` observability at yield points rather than preemptively.
+**Resolution — `COOP_PREEMPT` (CMake option, default `ON` for RASPI5 and JETSON_ORIN_NANO):** `schedule()` checks `CNTPCT_EL0` on every entry and synthesizes a `scheduler_tick()` call whenever ≥10 ms has elapsed on that CPU since the last tick. See `coop_preempt_maybe_tick()` in `kernel/sched/sched.c`. This drives the AI scheduler, deadline boosts, migration, and `pit_ticks` / `timer_handler_count` observability at yield points rather than preemptively.
+
+The `PI5_COOP_PREEMPT` spelling is retained as a deprecated Makefile/CMake alias for backward compatibility; source code uses `COOP_PREEMPT` everywhere.
 
 **Consequences:**
-- `pit_ticks` and `timer_handler_count` advance on all 4 CPUs when those CPUs yield.
+- `pit_ticks` and `timer_handler_count` advance on all CPUs when those CPUs yield.
 - A pure CPU-bound loop that never yields still monopolizes its CPU. The `delay()` helper in `kernel/tests/test_integration.c` yields every ~1k iterations for this reason.
 - `timer_get_count()` (CNTPCT_EL0) remains the authoritative wall-clock source for timeouts; see `hw_timeout_start()` / `hw_timeout_expired()` in `component_runtime.c`. Works regardless of IRQ delivery state.
 
@@ -205,7 +207,7 @@ abandoned exception frame on real ARM64 hardware).
 
 **Platform status:**
 
-- **Pi 5:** functional in combination with `PI5_COOP_PREEMPT` (the
+- **Pi 5:** functional in combination with `COOP_PREEMPT` (the
   trampoline path is inert today because timer IRQs don't deliver;
   infrastructure kept for when #134 restores hardware IRQ delivery).
 - **Jetson:** compiles but **not safe to enable yet** — the

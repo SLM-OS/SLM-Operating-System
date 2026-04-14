@@ -147,10 +147,6 @@ if(NOT PI5_COOP_PREEMPT)
 endif()
 if(COOP_PREEMPT AND (PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO"))
     add_compile_definitions(COOP_PREEMPT=1)
-    # Keep legacy macro for source sites that have not been renamed yet.
-    # TODO: rename PI5_COOP_PREEMPT → COOP_PREEMPT in source (12 files)
-    # in a follow-up PR; for now the macro alias keeps everything building.
-    add_compile_definitions(PI5_COOP_PREEMPT=1)
 endif()
 
 # Enable semihosting for QEMU (used for clean test exit)

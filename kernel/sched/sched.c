@@ -1129,7 +1129,7 @@ static struct task *sched_try_steal(uint32_t this_cpu)
 }
 #endif /* CONFIG_WORK_STEALING */
 
-#if defined(PI5_COOP_PREEMPT)
+#if defined(COOP_PREEMPT)
 /*
  * Cooperative-preemption tick driver.
  *
@@ -1213,7 +1213,7 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
     scheduler_tick();
     preempt_disabled[cpu] = prev_preempt_disabled;
 }
-#endif /* PI5_COOP_PREEMPT */
+#endif /* COOP_PREEMPT */
 
 /* ---- Periodic load rebalance (D1 / P2-4) ----
  *
@@ -1313,7 +1313,7 @@ void schedule(void)
     struct cpu_runqueue *rq = cpu_rq(this_cpu);
     sched_diag_schedule[this_cpu]++;
 
-#if defined(PI5_COOP_PREEMPT)
+#if defined(COOP_PREEMPT)
     /* Cooperative preemption: drive scheduler_tick off CNTPCT when the
      * hardware timer IRQ path isn't delivering (see issue #99). */
     coop_preempt_maybe_tick(this_cpu);
