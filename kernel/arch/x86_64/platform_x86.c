@@ -96,9 +96,44 @@ extern void kernel_main(void *dtb);
  * x86-64 boot entry point — called from entry64.S.
  * Saves the multiboot info pointer, then calls the main kernel.
  */
+/*
+ * Snapshot of the GRUB-supplied Multiboot2 info structure.
+ *
+ * GRUB places the info immediately above the kernel's LOAD segment.
+ * With a small kernel that happens to land in kernel-owned memory;
+ * with a 40 MB kernel (post-Phase-E GSP firmware embedding) it
+ * lands in memory that PMM later free-lists, and subsequent
+ * allocations corrupt it. Copying the entire structure into a
+ * static BSS buffer here — before any other init runs — makes it
+ * survive PMM bring-up and any later kernel allocation.
+ *
+ * 64 KiB is Multiboot2's documented upper bound on info-structure
+ * size (the test suite's test_multiboot2_structure_valid asserts
+ * the same bound).
+ */
+#define MB2_SNAPSHOT_MAX (64 * 1024)
+alignas(8) static uint8_t mb2_snapshot[MB2_SNAPSHOT_MAX];
+
 void kernel_main_x86(uint32_t mb_addr)
 {
-    multiboot_info_addr = mb_addr;
+    /* Read the size from the live structure FIRST — before anything
+     * else runs that could alter the page it lives on. Then clamp
+     * to the snapshot buffer and memcpy in. */
+    const uint8_t *src = (const uint8_t *)(uintptr_t)mb_addr;
+    uint32_t total_size = *(const uint32_t *)src;
+    if (total_size > MB2_SNAPSHOT_MAX)
+        total_size = MB2_SNAPSHOT_MAX;
+    for (uint32_t i = 0; i < total_size; i++)
+        mb2_snapshot[i] = src[i];
+
+    /* Point the rest of the kernel at the snapshot. Both the
+     * assembly symbol (multiboot_ptr, read by tests via extern) and
+     * the C variable (multiboot_info_addr, read by detect_ram_end)
+     * now reference kernel-owned memory. */
+    extern uint32_t multiboot_ptr;
+    multiboot_ptr = (uint32_t)(uintptr_t)&mb2_snapshot[0];
+    multiboot_info_addr = (uint32_t)(uintptr_t)&mb2_snapshot[0];
+
     kernel_main(NULL);  /* No DTB on x86-64 */
 }
 

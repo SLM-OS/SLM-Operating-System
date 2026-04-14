@@ -252,6 +252,14 @@ void nvidia_gpu_init(void)
     /* Read engine enable status */
     uint32_t pmc_enable = nvidia_gpu.bar0[NV_PMC_ENABLE / 4];
     uart_printf("[GPU] PMC_ENABLE: 0x%08x\n", pmc_enable);
+
+    /* Install the x86-64 platform shim for the shared GSP-RM code
+     * (kernel/gpu/nvidia/gsp.c). Does NOT yet kick off gsp_init();
+     * that happens once the shell-level `gpu init` command is wired
+     * up (E3), so a developer can explicitly trigger the multi-
+     * second bringup when ready rather than at every boot. */
+    extern void x86_gsp_platform_install(void);
+    x86_gsp_platform_install();
 }
 
 /*

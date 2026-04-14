@@ -2107,6 +2107,72 @@ static void test_nvidia_gpu_accessors_safe(void)
  */
 extern int shell_execute(const char *cmdline);
 
+/*
+ * Test: GSP firmware manifest reports all four blobs with plausible
+ * sizes (E1 / Phase E). Skipped when ENABLE_GSP_FIRMWARE is off.
+ *
+ * Proves the .incbin extraction worked: gsp.bin is the large one
+ * (> 1 MB, typically ~38 MB); the three Falcon blobs are small
+ * (> 1 KB, < 1 MB). Any zero-sized or suspiciously-sized blob
+ * fails this test and indicates a broken build-time extraction.
+ */
+static void test_gsp_firmware_manifest(void)
+{
+#if defined(ENABLE_GSP_FIRMWARE)
+    /* Only run when the GSP platform shim is installed (i.e. an
+     * NVIDIA GPU was detected). Testing on a GPU-less QEMU still
+     * has the firmware symbols thanks to .incbin, but gsp_platform
+     * is NULL, so we call into the x86 accessor directly via its
+     * symbols. Structural check — not a boot attempt. */
+    extern const uint8_t gsp_fw_gsp_start[];
+    extern const uint8_t gsp_fw_gsp_end[];
+    extern const uint8_t gsp_fw_bootloader_start[];
+    extern const uint8_t gsp_fw_bootloader_end[];
+    extern const uint8_t gsp_fw_booter_load_start[];
+    extern const uint8_t gsp_fw_booter_load_end[];
+    extern const uint8_t gsp_fw_booter_unload_start[];
+    extern const uint8_t gsp_fw_booter_unload_end[];
+
+    size_t gsp_sz = (size_t)(gsp_fw_gsp_end - gsp_fw_gsp_start);
+    size_t bl_sz  = (size_t)(gsp_fw_bootloader_end - gsp_fw_bootloader_start);
+    size_t bload  = (size_t)(gsp_fw_booter_load_end - gsp_fw_booter_load_start);
+    size_t bul_sz = (size_t)(gsp_fw_booter_unload_end - gsp_fw_booter_unload_start);
+
+    /* GSP-RM firmware is the big payload. Under 1 MB indicates
+     * extraction of a different (wrong) driver version or a zstd
+     * failure. */
+    TEST_ASSERT_TRUE(gsp_sz > 1024 * 1024);
+    TEST_ASSERT_TRUE(gsp_sz < 100 * 1024 * 1024);
+
+    /* Falcon ucodes are smaller. Just sanity check they're nonzero
+     * and under ~1 MB. */
+    TEST_ASSERT_TRUE(bl_sz > 1024 && bl_sz < 1024 * 1024);
+    TEST_ASSERT_TRUE(bload > 1024 && bload < 1024 * 1024);
+    TEST_ASSERT_TRUE(bul_sz > 1024 && bul_sz < 1024 * 1024);
+#else
+    /* Build without GSP firmware — nothing to assert. */
+    TEST_ASSERT_TRUE(true);
+#endif
+}
+
+/*
+ * Test: gsp_init fails cleanly at phase 0 when invoked on a GPU-less
+ * QEMU host (E1). Confirms we never hang waiting for a non-existent
+ * GSP RPC channel — CI must pass even when the kernel happens to
+ * carry firmware it can't use.
+ */
+static void test_gsp_init_graceful_without_gpu(void)
+{
+    extern int gsp_init(void);
+    extern int gsp_last_error_phase(void);
+    /* With no real NVIDIA GPU on QEMU, nvidia_gpu_init skipped
+     * x86_gsp_platform_install, so gsp_platform is NULL. Phase 0
+     * detects the missing vtable and fails cleanly. */
+    int rc = gsp_init();
+    TEST_ASSERT_TRUE(rc < 0);
+    TEST_ASSERT_EQUAL_INT(0, gsp_last_error_phase());
+}
+
 static void test_nvidia_gpu_shell_command_registered(void)
 {
     /* shell_execute returns 0 on success, -1 if command not found */
@@ -2964,6 +3030,8 @@ int test_suite_x86_boot(void)
 
     /* NVIDIA GPU tests */
     RUN_TEST(test_nvidia_gpu_init_ran);
+    RUN_TEST(test_gsp_firmware_manifest);
+    RUN_TEST(test_gsp_init_graceful_without_gpu);
     RUN_TEST(test_nvidia_gpu_no_crash_without_gpu);
     RUN_TEST(test_nvidia_gpu_vram_test_without_gpu);
     RUN_TEST(test_nvidia_gpu_accessors_safe);
