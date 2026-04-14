@@ -162,6 +162,19 @@ struct task {
     uint8_t _user_pad[7];              /* Alignment padding */
     void (*user_entry)(void *arg);      /* EL0 entry point (for user tasks) */
 
+    /* Slot generation counter for work-stealing ABA avoidance (#139).
+     *
+     * Bumped by task_destroy each time this task_table slot is freed,
+     * so the same `struct task *` pointer reused by task_create after
+     * recycle has a different generation value. steal_deque_t captures
+     * this at push time; sched_try_steal re-reads and compares under
+     * the victim's rq_lock — mismatch means the captured entry refers
+     * to a prior logical task (now gone) and must be discarded.
+     *
+     * Placed after context to preserve TASK_CONTEXT_OFFSET. */
+    uint32_t generation;
+    uint32_t _gen_pad;                  /* Alignment padding for next field */
+
 #ifdef CONFIG_AI_SCHEDULER
     /* AI scheduler tracking (M5) */
     uint64_t arrival_time_ns;           /* When task was added to scheduler */

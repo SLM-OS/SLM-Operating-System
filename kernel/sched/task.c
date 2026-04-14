@@ -580,6 +580,14 @@ void task_destroy(struct task *task)
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
 
+    /* Bump the slot generation (#139) so any still-cached captures in
+     * per-CPU steal deques from the previous life of this slot will
+     * fail the validator when a thief tries to accept them. Wraps
+     * naturally — collisions require 2^32 reuses of the same slot
+     * between a push and a still-outstanding steal probe, which is
+     * not reachable by a realistic workload. */
+    task->generation++;
+
     TASK_UNLOCK_IRQRESTORE();
 
     /* Call cleanup callback first (e.g., to free ELF segment memory) */

@@ -102,11 +102,13 @@ labctl serial_send jetson-nano-2 "bench stealing 24"  # 6 cores
 | OFF | TBD | TBD | — |
 | ON  | TBD | TBD | TBD |
 
-**Jetson-specific caveat:** the known ABA race in the work-stealing
-deque (#139) is still present. `bench stealing` at N ≤ 32 has not
-reproduced it in testing, but if the benchmark hangs or reports
-task counts ≠ N, rebuild with `WORK_STEALING=OFF` and re-run to
-isolate.
+**Jetson-specific caveat (resolved 2026-04-14):** the previously-known
+ABA race in the work-stealing deque (#139) is closed by the per-slot
+generation counter in `struct task` — `steal_deque_push` captures
+`task->generation`, `sched_try_steal` re-checks under the victim's
+`rq_lock`, and `task_destroy` bumps the counter on slot recycle so a
+stale captured entry with a matching pointer fails the validator.
+The benchmark no longer carries a "might hang on Jetson" caveat.
 
 ## x86-64 — pending unblock
 
@@ -146,11 +148,11 @@ Based on QEMU ARM64 alone:
   suite (`make test` passes in both configurations).
 - ⏳ Pi 5 / Jetson / x86-64 data still pending.
 
-**Blocker for flipping the default:** Jetson #139 (ABA race) is the
-last known bug. The S4 plan requires at least two platforms' data to
-be green before flipping; once Pi 5 and Jetson numbers confirm
-speedup without reviving #139, `CONFIG_WORK_STEALING` should move
-from default-OFF to default-ON.
+**Blocker for flipping the default:** #139 (ABA race) is closed
+(2026-04-14, generation-counter fix). The S4 plan requires at least
+two platforms' data to be green before flipping; once Pi 5 and Jetson
+hardware numbers land in the tables above and confirm speedup,
+`CONFIG_WORK_STEALING` should move from default-OFF to default-ON.
 
 ## Related
 
@@ -158,6 +160,6 @@ from default-OFF to default-ON.
   implementation.
 - `kernel/src/shell_sys.c` (`bench stealing`) — benchmark driver.
 - GitHub #105 — observability counters (Phase S2).
-- GitHub #139 — known ABA race on Jetson `bench smp` with
-  `WORK_STEALING=ON`.
+- GitHub #139 — ABA race, closed 2026-04-14 via per-slot
+  generation counter.
 - `docs/jetson-capstone-execution-plan.md` §S3 — phase description.

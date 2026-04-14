@@ -1179,14 +1179,25 @@ static struct task *sched_try_steal(uint32_t this_cpu)
          * by deque capacity so this loop cannot spin forever. */
         int victim_had_entry = 0;
         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
-            struct task *candidate = steal_deque_steal(&cpu_steal_deques[victim]);
+            uint32_t captured_gen = 0;
+            struct task *candidate =
+                steal_deque_steal(&cpu_steal_deques[victim], &captured_gen);
             if (!candidate)
                 break;  /* Empty — try next victim */
             victim_had_entry = 1;
 
             irq_flags_t flags = rq_lock_irqsave(victim);
 
+            /* Generation check (#139) closes the ABA window: if this
+             * deque slot captured a previous life of the task_table
+             * slot (same pointer, new logical task), the live
+             * task->generation differs and we must discard even
+             * though state/affinity/assigned_cpu may all read as
+             * valid for the current resident. Checked first so we
+             * don't bother with the full structural validation for
+             * an entry we already know is stale. */
             int stealable =
+                candidate->generation == captured_gen &&
                 candidate->state == TASK_READY &&
                 candidate->assigned_cpu == victim &&
                 candidate->cpu_affinity == CPU_AFFINITY_ANY &&
@@ -1198,8 +1209,9 @@ static struct task *sched_try_steal(uint32_t this_cpu)
                 sched_diag_steal_successes[this_cpu]++;
                 return candidate;
             }
-            /* Otherwise: stale pointer, already popped from deque.
-             * Loop again to drain another entry on the same victim. */
+            /* Otherwise: stale pointer (structural mismatch or
+             * generation mismatch), already popped from deque. Loop
+             * again to drain another entry on the same victim. */
             sched_diag_steal_stale[this_cpu]++;
         }
         if (!victim_had_entry) {

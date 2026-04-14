@@ -29,6 +29,14 @@ struct task; /* forward declaration */
 
 typedef struct {
     struct task *buf[STEAL_DEQUE_CAPACITY];
+    /* Parallel array of generation captures (#139). gen_buf[i] is the
+     * value of buf[i]->generation at push time. Steal / pop return
+     * this alongside the pointer so the validator in sched_try_steal
+     * can detect an ABA — if the current task->generation no longer
+     * matches, the slot points at a recycled logical task and must
+     * be discarded even if the state / assigned_cpu / affinity checks
+     * would otherwise pass. */
+    uint32_t gen_buf[STEAL_DEQUE_CAPACITY];
     uint32_t bottom;      /* next free slot on owner side */
     uint32_t top;         /* next slot to steal on thief side */
     spinlock_t lock;
@@ -47,14 +55,19 @@ int steal_deque_push(steal_deque_t *d, struct task *t);
 /*
  * Owner-side pop (from bottom, LIFO). Returns the task or NULL if empty.
  * Intended for the owning CPU's schedule() fast path.
+ *
+ * If `out_gen` is non-NULL and the return is non-NULL, the captured
+ * generation counter for the returned task is written there. Callers
+ * who need ABA detection (sched_try_steal) pass a real pointer;
+ * callers that only need the task pointer pass NULL.
  */
-struct task *steal_deque_pop(steal_deque_t *d);
+struct task *steal_deque_pop(steal_deque_t *d, uint32_t *out_gen);
 
 /*
  * Thief-side steal (from top, FIFO). Returns the task or NULL if empty.
- * Callable from any CPU.
+ * Callable from any CPU. `out_gen` semantics as for steal_deque_pop.
  */
-struct task *steal_deque_steal(steal_deque_t *d);
+struct task *steal_deque_steal(steal_deque_t *d, uint32_t *out_gen);
 
 /* Current count of tasks in the deque (racy without the lock). */
 uint32_t steal_deque_size(const steal_deque_t *d);
