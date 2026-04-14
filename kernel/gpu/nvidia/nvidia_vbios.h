@@ -44,7 +44,15 @@
 #define VBIOS_BIT_ID_I      0x49    /* 'I': Init scripts */
 #define VBIOS_BIT_ID_B      0x42    /* 'B': BIOS info */
 #define VBIOS_BIT_ID_P      0x50    /* 'P': Performance / pstates */
-#define VBIOS_BIT_ID_FWSEC  0x85    /* FWSEC ucode — Turing+ only */
+#define VBIOS_BIT_ID_FWSEC  0x85    /* Reserved id; pre-release Turing
+                                     * docs listed FWSEC here. Empirically
+                                     * absent on production Ampere VBIOS
+                                     * (validated 2026-04-14 against an
+                                     * ASUS RTX 3050 6GB / GA107). Real
+                                     * FWSEC discovery on Turing+ walks
+                                     * PMU ucode descriptors via the 'I'
+                                     * (init scripts) BIT entry — see
+                                     * GitHub issue tracking E3 prereq. */
 
 /*
  * Parsed VBIOS state. Callers treat this as opaque; the fields are

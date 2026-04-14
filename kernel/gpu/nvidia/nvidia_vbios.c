@@ -154,24 +154,34 @@ int nvidia_vbios_find_entry(const struct nvidia_vbios *vb,
 }
 
 /*
- * FWSEC (type 0x85) is a Turing/Ampere-only entry. The data it
- * points to is an NVIDIA-signed Falcon ucode blob used for GSP boot
- * (nouveau tu102.c: nvkm_gsp_fwsec). Pre-Turing VBIOSes have no
- * such entry.
+ * FWSEC ucode discovery. ALWAYS RETURNS -1 ON CURRENT CARDS — the
+ * "BIT id 0x85" path was a pre-release Turing artifact; production
+ * Turing/Ampere VBIOSes carry FWSEC inside PMU ucode descriptors
+ * reachable via the 'I' (init scripts) BIT entry, not as a top-level
+ * BIT entry. Walking those descriptors is an E3 prereq — see the
+ * tracking issue. Until that lands this function exists so the
+ * vtable shape is complete and so callers see a clean -1 instead
+ * of a link error.
  */
 int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
                            const uint8_t **out_data, uint32_t *out_size)
 {
     if (!vb || !vb->parsed_ok) return -1;
 
+    /* Try the historic id 0x85 first — harmless lookup, returns -1
+     * on every card we've validated. Kept so that if NVIDIA ever
+     * ships a card that does use this id, it'll work without a
+     * rebuild. */
     uint32_t data_off = 0, data_len = 0;
     if (nvidia_vbios_find_entry(vb, VBIOS_BIT_ID_FWSEC, -1,
-                                &data_off, &data_len) < 0)
-        return -1;
+                                &data_off, &data_len) == 0
+        && data_len > 0) {
+        if (out_data) *out_data = vb->image + data_off;
+        if (out_size) *out_size = data_len;
+        return 0;
+    }
 
-    if (data_len == 0) return -1;
-
-    if (out_data) *out_data = vb->image + data_off;
-    if (out_size) *out_size = data_len;
-    return 0;
+    /* Production Turing+ path — not yet implemented (E3 prereq).
+     * Return -1 cleanly so callers can branch instead of crashing. */
+    return -1;
 }
