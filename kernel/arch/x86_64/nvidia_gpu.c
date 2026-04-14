@@ -263,6 +263,22 @@ void nvidia_gpu_init(void)
 }
 
 /*
+ * Accessor for the probed NVIDIA GPU's PCI bus/dev/func.
+ * Used by nvidia_gsp_platform.c:nvidia_vbios_platform_load() to
+ * toggle the Expansion ROM BAR. Returns 0 on success, -1 if no
+ * NVIDIA GPU was found.
+ */
+int nvidia_gpu_get_pci_address(uint8_t *out_bus, uint8_t *out_dev,
+                               uint8_t *out_func)
+{
+    if (!nvidia_gpu.found) return -1;
+    if (out_bus)  *out_bus  = nvidia_gpu.bus;
+    if (out_dev)  *out_dev  = nvidia_gpu.dev;
+    if (out_func) *out_func = nvidia_gpu.func;
+    return 0;
+}
+
+/*
  * Test VRAM access by writing and reading a pattern.
  * Returns 0 on success, -1 on failure.
  */

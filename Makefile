@@ -188,7 +188,8 @@ GSP_HARNESS_OUT := build/host-tools/gsp-harness
 GSP_HARNESS_SRCS := \
     host-tools/gsp-harness/main.c \
     host-tools/gsp-harness/linux_platform.c \
-    kernel/gpu/nvidia/gsp.c
+    kernel/gpu/nvidia/gsp.c \
+    kernel/gpu/nvidia/nvidia_vbios.c
 
 # Native CFLAGS — these differ substantially from the bare-metal
 # kernel build. The shared GSP core uses `uart_puts`, `uart_printf`
@@ -211,6 +212,18 @@ gsp-harness:
 .PHONY: gsp-harness-clean
 gsp-harness-clean:
 	rm -f $(GSP_HARNESS_OUT)
+
+# VBIOS parser unit tests — runs on the host, no GPU required.
+# Synthetic VBIOS image built in the test, no proprietary binaries.
+.PHONY: test-vbios
+test-vbios:
+	@mkdir -p build/host-tools
+	@echo "Building + running VBIOS parser tests..."
+	$(CC) -std=c11 -Wall -Wextra -O2 -g \
+	    -o build/host-tools/test_nvidia_vbios \
+	    host-tools/gsp-harness/test_nvidia_vbios.c \
+	    kernel/gpu/nvidia/nvidia_vbios.c
+	@./build/host-tools/test_nvidia_vbios
 
 # ============================================================================
 # Runtime (Rust) targets

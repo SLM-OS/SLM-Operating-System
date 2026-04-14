@@ -224,6 +224,8 @@ set(KERNEL_SOURCES
     # GSP-RM shared core (x86-64 + Jetson — same Ampere architecture)
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/gsp.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/gsp.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/nvidia_vbios.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/nvidia_vbios.c>
 
     # ==========================================================================
     # Memory Management

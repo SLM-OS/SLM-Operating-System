@@ -12,7 +12,7 @@
  * host configuration.
  */
 
-#define _GNU_SOURCE
+/* _GNU_SOURCE is provided by the Makefile's -D flag. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include "../../kernel/gpu/nvidia/gsp.h"
+#include "../../kernel/gpu/nvidia/nvidia_vbios.h"
 
 /* ---- Global state for the Linux platform ops ----
  *
@@ -39,6 +40,18 @@ static size_t             g_bar0_size;
 static volatile uint8_t  *g_bar1;    /* BAR1 VRAM — 256 MB mapping */
 static size_t             g_bar1_size;
 static bool               g_trace;
+
+/* PCI device sysfs path captured at init — needed again by the lazy
+ * VBIOS loader. Owned by the caller of linux_gsp_platform_init(),
+ * which guarantees the string outlives the harness process. */
+static const char *g_pci_path;
+
+/* VBIOS state: the raw bytes live in g_vbios_buf (grown via malloc),
+ * the parsed view lives in g_vbios. Loaded on first fwsec request. */
+static uint8_t              *g_vbios_buf;
+static size_t                g_vbios_buf_size;
+static struct nvidia_vbios   g_vbios;
+static bool                  g_vbios_loaded;
 
 /* Firmware blobs loaded from /lib/firmware via the Linux VFS, in
  * the same format the bare-metal build embeds via .incbin. */
@@ -159,16 +172,132 @@ static void linux_gsp_firmware_get(enum gsp_firmware_kind kind,
     out->version = VERSION_STR;
 }
 
-/* ---- VBIOS ---- */
+/* ---- VBIOS ----
+ *
+ * Linux exposes the GPU expansion ROM at
+ *   /sys/bus/pci/devices/<BDF>/rom
+ * but the file is empty until you enable ROM reads by writing "1"
+ * to it. This matches the bare-metal ROM BAR toggle — the kernel is
+ * doing the same PCI config write under the hood.
+ *
+ * Sequence:
+ *   1. open  .../rom  O_RDWR
+ *   2. write "1\n"    enables ROM decoding on the device
+ *   3. read  bytes    until EOF (image size typically 128–512 KB)
+ *   4. write "0\n"    restore (optional — the kernel also does this
+ *                     when the fd closes, but being explicit is cheap)
+ */
+int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
+{
+    if (g_vbios_loaded) {
+        if (out_data) *out_data = g_vbios.image;
+        if (out_size) *out_size = g_vbios.image_size;
+        return g_vbios.parsed_ok ? 0 : -1;
+    }
+
+    if (!g_pci_path) {
+        fprintf(stderr, "[VBIOS] platform not initialized\n");
+        return -1;
+    }
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/rom", g_pci_path);
+
+    int fd = open(path, O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "[VBIOS] open %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    /* Enable ROM decoding. */
+    if (write(fd, "1\n", 2) != 2) {
+        fprintf(stderr, "[VBIOS] enable ROM: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    /* Seek back — some kernels advance the offset on the enable-write. */
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        fprintf(stderr, "[VBIOS] lseek: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    /* Grow buffer as we read. 256 KB start covers nearly all GPUs. */
+    size_t cap = 256 * 1024;
+    size_t n = 0;
+    uint8_t *buf = malloc(cap);
+    if (!buf) { close(fd); return -1; }
+
+    for (;;) {
+        if (n == cap) {
+            if (cap >= NVIDIA_VBIOS_MAX_SIZE) break;
+            cap *= 2;
+            if (cap > NVIDIA_VBIOS_MAX_SIZE) cap = NVIDIA_VBIOS_MAX_SIZE;
+            uint8_t *nb = realloc(buf, cap);
+            if (!nb) { free(buf); close(fd); return -1; }
+            buf = nb;
+        }
+        ssize_t got = read(fd, buf + n, cap - n);
+        if (got < 0) {
+            fprintf(stderr, "[VBIOS] read: %s\n", strerror(errno));
+            free(buf); close(fd);
+            return -1;
+        }
+        if (got == 0) break;
+        n += (size_t)got;
+    }
+
+    /* Best-effort restore — ignore errors, we're about to close.
+     * The ssize_t capture is to keep -Wunused-result quiet; gcc's
+     * `warn_unused_result` attribute on write(2) ignores the (void)
+     * cast. */
+    if (lseek(fd, 0, SEEK_SET) < 0) { /* ignored */ }
+    ssize_t _disable_rc = write(fd, "0\n", 2);
+    (void)_disable_rc;
+    close(fd);
+
+    if (n < 4) {
+        fprintf(stderr, "[VBIOS] only %zu bytes from %s\n", n, path);
+        free(buf);
+        return -1;
+    }
+
+    if (nvidia_vbios_parse(buf, n, &g_vbios) < 0) {
+        fprintf(stderr, "[VBIOS] parse failed (%zu bytes)\n", n);
+        free(buf);
+        return -1;
+    }
+
+    g_vbios_buf = buf;
+    g_vbios_buf_size = n;
+    g_vbios_loaded = true;
+    fprintf(stderr, "[VBIOS] parsed %zu bytes, %u BIT entries\n",
+            n, g_vbios.num_entries);
+
+    if (out_data) *out_data = g_vbios.image;
+    if (out_size) *out_size = g_vbios.image_size;
+    return 0;
+}
 
 static int linux_gsp_vbios_get_fwsec(const void **out_data, size_t *out_size)
 {
-    /* E2 fills this in: read /sys/bus/pci/devices/0000:01:00.0/rom
-     * (requires `echo 1 > rom` first to enable), parse BIT table for
-     * FWSEC ucode. Stub for now. */
-    *out_data = NULL;
-    *out_size = 0;
-    return -ENOSYS;
+    if (!g_vbios_loaded) {
+        const uint8_t *tmp; size_t tsz;
+        if (nvidia_vbios_platform_load(&tmp, &tsz) < 0) {
+            *out_data = NULL; *out_size = 0;
+            return -1;
+        }
+    }
+    const uint8_t *fw = NULL;
+    uint32_t fw_size = 0;
+    if (nvidia_vbios_get_fwsec(&g_vbios, &fw, &fw_size) < 0) {
+        *out_data = NULL; *out_size = 0;
+        return -1;
+    }
+    *out_data = fw;
+    *out_size = fw_size;
+    return 0;
 }
 
 /* ---- Vtable ---- */
@@ -278,6 +407,7 @@ int linux_gsp_platform_init(const char *pci_path, const char *chip,
                             bool trace)
 {
     g_trace = trace;
+    g_pci_path = pci_path;
 
     if (map_bar(pci_path, 0, (volatile void **)&g_bar0, &g_bar0_size) < 0)
         return -1;

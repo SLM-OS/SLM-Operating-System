@@ -676,25 +676,46 @@ or extracted from a GeForce driver package).
 
 ---
 
-### E2. VBIOS parser (P3-3)
+### E2. VBIOS parser (P3-3) — **DONE**
 
-**Deliverables.**
-- New file: `kernel/arch/x86_64/nvidia_vbios.c`.
-- Map the GPU's PCI expansion ROM (BAR offset from `nvidia_gpu.c`
-  config-space read of Expansion ROM Base Address Register).
-- Parse the VBIOS BIT table for:
-  - Type 0x85 (FWSEC firmware image)
-  - Register 0x625F04 (VGA workspace size)
-  - Memory training tables
-- Export a `nvidia_vbios_get_fwsec()` API that returns
-  `(void *image, size_t size)`.
+**Shipped.**
+- Shared parser: `kernel/gpu/nvidia/nvidia_vbios.{h,c}`. The parser
+  is platform-agnostic — both x86-64 bare-metal and Jetson can link
+  it. (Original plan called for `kernel/arch/x86_64/nvidia_vbios.c`;
+  refactored during implementation per the "share as much as
+  possible across platforms" directive.)
+- x86-64 platform loader: `nvidia_vbios_platform_load()` lives in
+  `kernel/arch/x86_64/nvidia_gsp_platform.c`. Reads the expansion
+  ROM via PCI Config Space ROM BAR toggle (save, enable, copy,
+  restore), handing the raw bytes to the shared parser.
+- Linux harness loader: `nvidia_vbios_platform_load()` in
+  `host-tools/gsp-harness/linux_platform.c` reads via
+  `/sys/bus/pci/devices/<BDF>/rom` (same `echo 1 > rom` dance).
+- BIT table parser handles:
+  - Signature detection (0x55AA PCI ROM, `0xFFB8 BIT\0`).
+  - Defensive bounds (hdr_size ≥ 12, entry_size = 6,
+    num_entries ≤ 64, entry offsets within image).
+  - Lookup by `(id, version)` incl. wildcard version.
+- FWSEC (BIT id 0x85): `nvidia_vbios_get_fwsec()` returns the
+  ucode pointer + length for Turing+. Returns `-1` on Pascal
+  (expected — no FWSEC entry).
+
+**Wired into the GSP vtable.**
+`struct gsp_platform_ops::vbios_get_fwsec` is live on both
+platforms — the shared GSP bringup code calls into the platform
+loader without knowing which one it is.
 
 **Tests.**
-- `test_vbios_bit_signature` — asserts BIT table signature is
-  recognised on test-pc.
-- `test_vbios_fwsec_extractable` — non-null pointer, non-zero size.
+- `make test-vbios` — 9 synthetic-image tests covering good parse,
+  bad PCI signature, missing BIT, malformed entry_size, over-cap
+  num_entries, entry off-end, find_entry by id+version, FWSEC
+  extraction, FWSEC absent (Pascal layout). All pass.
+- Validated against a real GTX 1070 VBIOS dump: 17 BIT entries,
+  bit_offset=0x1e0, FWSEC absent as expected on Pascal.
+- Real RTX 3050 validation (Turing+ FWSEC path) deferred to
+  test-pc once the Linux/VFIO harness is online.
 
-**Est.** 5 days (complex binary format, lots of per-board variation).
+**Actual:** ~1 day.
 
 ---
 
