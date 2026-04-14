@@ -3570,6 +3570,89 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test 8b: Conv2D multi-channel non-tile-aligned (G2 regression)
+    //
+    // 1x3x7x11 input, 5x3x3x3 weight, stride=1, pad=1 → 1x5x7x11 output.
+    // Sizes are coprime to the inner tile constants so both the im2col
+    // column count (7*11=77) and the matmul output rows (5) force the
+    // tiling path to handle partial tiles in M and N. C_in=3 exercises
+    // the per-channel im2col loop; pad=1 exercises the boundary zero
+    // fill. Reference is computed via a direct 7-loop conv; NEON/matmul
+    // output must match within FP32 round-off.
+    {
+        const BATCH: usize = 1;
+        const CIN: usize = 3;
+        const COUT: usize = 5;
+        const H: usize = 7;
+        const W: usize = 11;
+        const KH: usize = 3;
+        const KW: usize = 3;
+        const HOUT: usize = H;   // pad=1 stride=1 kh=3 → h_out=h_in
+        const WOUT: usize = W;
+        static mut CONV_IN:  [f32; BATCH * CIN * H * W]            = [0.0; BATCH * CIN * H * W];
+        static mut CONV_WT:  [f32; COUT * CIN * KH * KW]           = [0.0; COUT * CIN * KH * KW];
+        static mut CONV_OUT: [f32; BATCH * COUT * HOUT * WOUT]     = [0.0; BATCH * COUT * HOUT * WOUT];
+        static mut CONV_REF: [f32; BATCH * COUT * HOUT * WOUT]     = [0.0; BATCH * COUT * HOUT * WOUT];
+
+        unsafe {
+            for i in 0..(BATCH * CIN * H * W) {
+                CONV_IN[i] = ((i % 13) as f32) * 0.1;
+            }
+            for i in 0..(COUT * CIN * KH * KW) {
+                CONV_WT[i] = ((i % 5) as f32 - 2.0) * 0.05;  // small signed
+            }
+
+            // Scalar reference.
+            for n in 0..BATCH {
+                for co in 0..COUT {
+                    for ho in 0..HOUT {
+                        for wo in 0..WOUT {
+                            let mut acc = 0.0_f32;
+                            for ci in 0..CIN {
+                                for khi in 0..KH {
+                                    for kwi in 0..KW {
+                                        let hi = ho as isize + khi as isize - 1;  // pad=1
+                                        let wi = wo as isize + kwi as isize - 1;
+                                        if hi >= 0 && hi < H as isize
+                                            && wi >= 0 && wi < W as isize {
+                                            let in_idx = ((n * CIN + ci) * H + hi as usize) * W + wi as usize;
+                                            let wt_idx = ((co * CIN + ci) * KH + khi) * KW + kwi;
+                                            acc += CONV_IN[in_idx] * CONV_WT[wt_idx];
+                                        }
+                                    }
+                                }
+                            }
+                            CONV_REF[((n * COUT + co) * HOUT + ho) * WOUT + wo] = acc;
+                        }
+                    }
+                }
+            }
+
+            let input  = inference::Tensor::new(CONV_IN.as_ptr(),  &[BATCH as u32, CIN as u32, H as u32, W as u32]);
+            let weight = inference::Tensor::new(CONV_WT.as_ptr(),  &[COUT as u32, CIN as u32, KH as u32, KW as u32]);
+            let mut out = inference::Tensor::new(
+                CONV_OUT.as_mut_ptr() as *const f32,
+                &[BATCH as u32, COUT as u32, HOUT as u32, WOUT as u32]);
+
+            let result = inference::ops::conv2d(
+                &input, &weight, None, &mut out,
+                KH as u32, KW as u32, 1, 1, 1, 1,
+            );
+            let ok = result.is_ok();
+
+            let mut vals_ok = true;
+            for i in 0..(BATCH * COUT * HOUT * WOUT) {
+                if (CONV_OUT[i] - CONV_REF[i]).abs() > 0.001 {
+                    vals_ok = false;
+                    break;
+                }
+            }
+            let passed = ok && vals_ok;
+            print_test_result(b"simd: conv2d 1x3x7x11 k=3x3 pad=1 (non-aligned)\0", passed);
+            if !passed { failures += 1; }
+        }
+    }
+
     // Test 9: MaxPool2D unit test
     // 1x1x4x4 input with values 1..16, 2x2 pool stride 2
     // output 1x1x2x2 = [6, 8, 14, 16]
@@ -4532,6 +4615,115 @@ pub extern "C" fn rust_matmul_bench_fp32(iterations: u32) -> i32 {
         uart_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
                     avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
                     min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
+    }
+    0
+}
+
+/// FP32 Conv2D benchmark — `bench conv` backend.
+///
+/// Runs a small but im2col-representative Conv:
+///   input  = 1 × 4 × 28 × 28   (MNIST-style)
+///   weight = 8 × 4 × 3 × 3
+///   stride = 1, pad = 1
+/// Repeats `iterations` times, reports min/avg/max latency + GFLOPS.
+///
+/// Drives the same NEON matmul inner kernel G1 benchmarks (via the
+/// im2col → matmul path in `ops::conv2d`), so this is complementary to
+/// `bench matmul` — exposes per-iter im2col overhead plus the matmul
+/// cost for a shape that actually appears in the MNIST model.
+///
+/// FLOPs/call = 2 · C_out · C_in · kH · kW · H_out · W_out
+///            = 2 · 8 · 4 · 3 · 3 · 28 · 28  ≈ 450k
+/// so each call is sub-millisecond on NEON.
+#[no_mangle]
+pub extern "C" fn rust_conv_bench_fp32(iterations: u32) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if iterations == 0 {
+        return -1;
+    }
+
+    const BATCH: usize = 1;
+    const CIN:   usize = 4;
+    const COUT:  usize = 8;
+    const H:     usize = 28;
+    const W:     usize = 28;
+    const KH:    usize = 3;
+    const KW:    usize = 3;
+    const HOUT:  usize = H;   // pad=1 stride=1 kh=3 → h_out=h_in
+    const WOUT:  usize = W;
+
+    static IN_BUF:  [f32; BATCH * CIN * H * W]         = [1.0; BATCH * CIN * H * W];
+    static WT_BUF:  [f32; COUT * CIN * KH * KW]        = [0.1; COUT * CIN * KH * KW];
+    static mut OUT_BUF: [f32; BATCH * COUT * HOUT * WOUT] = [0.0; BATCH * COUT * HOUT * WOUT];
+
+    let input = inference::Tensor::new(IN_BUF.as_ptr(),
+        &[BATCH as u32, CIN as u32, H as u32, W as u32]);
+    let weight = inference::Tensor::new(WT_BUF.as_ptr(),
+        &[COUT as u32, CIN as u32, KH as u32, KW as u32]);
+    let mut out = unsafe {
+        inference::Tensor::new(
+            core::ptr::addr_of_mut!(OUT_BUF) as *const f32,
+            &[BATCH as u32, COUT as u32, HOUT as u32, WOUT as u32])
+    };
+
+    let mut min_ns = u64::MAX;
+    let mut max_ns = 0u64;
+    let mut total_ns = 0u64;
+    let mut success = 0u32;
+
+    for _ in 0..iterations {
+        let start = kernel_ffi::get_time_ns();
+        let result = inference::ops::conv2d(
+            &input, &weight, None, &mut out,
+            KH as u32, KW as u32, 1, 1, 1, 1,
+        );
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+
+        if result.is_ok() {
+            if elapsed < min_ns { min_ns = elapsed; }
+            if elapsed > max_ns { max_ns = elapsed; }
+            total_ns += elapsed;
+            success += 1;
+        }
+    }
+
+    if success == 0 {
+        return -1;
+    }
+
+    let avg_ns = total_ns / success as u64;
+    let flops_per_call: u64 =
+        2 * (COUT as u64) * (CIN as u64) * (KH as u64) * (KW as u64) *
+        (HOUT as u64) * (WOUT as u64);
+    let avg_mflops_x1000 = if avg_ns > 0 {
+        (flops_per_call * 1_000_000) / avg_ns
+    } else {
+        0
+    };
+    let min_mflops_x1000 = if min_ns > 0 {
+        (flops_per_call * 1_000_000) / min_ns
+    } else {
+        0
+    };
+
+    unsafe {
+        uart_printf(b"  Input:       %lux%lux%lux%lu FP32\n\0".as_ptr(),
+                    BATCH as u64, CIN as u64, H as u64, W as u64);
+        uart_printf(b"  Weight:      %lux%lux%lux%lu (C_out x C_in x kH x kW)\n\0".as_ptr(),
+                    COUT as u64, CIN as u64, KH as u64, KW as u64);
+        uart_printf(b"  Output:      %lux%lux%lux%lu  stride=1 pad=1\n\0".as_ptr(),
+                    BATCH as u64, COUT as u64, HOUT as u64, WOUT as u64);
+        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+                    iterations as u64, success as u64);
+        uart_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+                    min_ns / 1000, avg_ns / 1000, max_ns / 1000);
+        uart_printf(b"  Throughput:  avg=%lu.%03lu MFLOPS  peak=%lu.%03lu MFLOPS\n\0".as_ptr(),
+                    avg_mflops_x1000 / 1_000_000, (avg_mflops_x1000 / 1000) % 1000,
+                    min_mflops_x1000 / 1_000_000, (min_mflops_x1000 / 1000) % 1000);
     }
     0
 }

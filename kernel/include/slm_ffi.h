@@ -518,6 +518,13 @@ extern int rust_infer_bench(uint32_t model_index, uint32_t iterations);
 extern int rust_matmul_bench_fp32(uint32_t iterations);
 
 /*
+ * Run an MNIST-shape Conv2D benchmark (1x4x28x28 × 8x4x3x3, pad=1,
+ * stride=1, N iterations). Prints latency and achieved MFLOPS.
+ * Returns: 0 on success, -1 on error.
+ */
+extern int rust_conv_bench_fp32(uint32_t iterations);
+
+/*
  * ==========================================================================
  * GPU Compute FFI (Phase 5, M3)
  * ==========================================================================

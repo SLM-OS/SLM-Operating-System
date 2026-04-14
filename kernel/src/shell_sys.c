@@ -784,7 +784,7 @@ void smp_test_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|matmul|gpu|stats|all>\r\n");
+        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|matmul|conv|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -874,6 +874,17 @@ int cmd_bench(int argc, char *argv[])
             }
         }
         rust_matmul_bench_fp32(iters);
+    } else if (strcmp(argv[1], "conv") == 0) {
+        uart_puts("NEON FP32 Conv2D Benchmark\r\n");
+        uart_puts("==========================\r\n");
+        uint32_t iters = 50;
+        if (argc >= 3) {
+            uint32_t n;
+            if (shell_parse_uint(argv[2], &n) == 0 && n > 0 && n <= 10000) {
+                iters = n;
+            }
+        }
+        rust_conv_bench_fp32(iters);
     } else if (strcmp(argv[1], "gpu") == 0) {
         uart_puts("GPU Cache Sync Benchmark\r\n");
         uart_puts("========================\r\n");
