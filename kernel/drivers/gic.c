@@ -108,6 +108,7 @@ static inline uintptr_t gicr_sgi_base(uint32_t cpu)
 #define GICR_TYPER(cpu)     (*(volatile uint64_t *)(gicr_rd_base(cpu) + 0x008))
 
 /* GICR_SGI registers (for PPIs and SGIs) */
+#define GICR_IGROUPR0(cpu)      (*(volatile uint32_t *)(gicr_sgi_base(cpu) + 0x080))
 #define GICR_ISENABLER0(cpu)    (*(volatile uint32_t *)(gicr_sgi_base(cpu) + 0x100))
 #define GICR_ICENABLER0(cpu)    (*(volatile uint32_t *)(gicr_sgi_base(cpu) + 0x180))
 #define GICR_ISPENDR0(cpu)      (*(volatile uint32_t *)(gicr_sgi_base(cpu) + 0x200))
@@ -115,6 +116,7 @@ static inline uintptr_t gicr_sgi_base(uint32_t cpu)
 #define GICR_IPRIORITYR(cpu, n) (*(volatile uint32_t *)(gicr_sgi_base(cpu) + 0x400 + 4 * (n)))
 #define GICR_ICFGR0(cpu)        (*(volatile uint32_t *)(gicr_sgi_base(cpu) + 0xC00))
 #define GICR_ICFGR1(cpu)        (*(volatile uint32_t *)(gicr_sgi_base(cpu) + 0xC04))
+#define GICR_IGRPMODR0(cpu)     (*(volatile uint32_t *)(gicr_sgi_base(cpu) + 0xD00))
 
 /* GICR_WAKER bits */
 #define GICR_WAKER_ProcessorSleep   (1 << 1)
@@ -430,6 +432,35 @@ static void gic_redist_init(uint32_t cpu)
     }
 
     DEBUG_PRINT("GICv3: Redistributor %u awake", cpu);
+
+    /* Attempt to place all SGIs and PPIs in Group 1 Non-secure.
+     *
+     * On GICv3 with two security states (Jetson, and any SoC with
+     * EL3 firmware holding the GIC in secure mode), a Non-secure
+     * write to these registers is silently ignored — the Group
+     * configuration is owned by EL3. We write 0xFFFFFFFF / 0 anyway
+     * as a best-effort hint for platforms without security (QEMU
+     * virt, or a future board with a single-security-state GIC),
+     * and the write is harmless on platforms that ignore it.
+     *
+     * Observed on Jetson Orin Nano 2026-04-13: `GICR_IGROUPR0` reads
+     * back as 0x0 after the write (i.e. PPIs stay in Group 0 →
+     * deliver as FIQ). The Pi 5 capstone work at #99 hit the same
+     * class of issue on GICv2. Both platforms instead rely on
+     * cooperative preemption (`COOP_PREEMPT`) via CNTPCT polling at
+     * schedule() entry. See docs/jetson-capstone-execution-plan.md
+     * revision notes v4 for the full chain of reasoning. */
+    GICR_IGROUPR0(cpu)  = 0xFFFFFFFF;  /* Group 1 (best-effort) */
+    GICR_IGRPMODR0(cpu) = 0x00000000;  /* Group 1 Non-secure */
+    /* DSB SY: ensure the Group-register MMIO writes have reached the
+     * GIC before the subsequent enable/priority writes. The GICv3 spec
+     * requires an explicit barrier for device-type memory writes that
+     * must be ordered against other observers; without it, a read-
+     * back (e.g. from the diagnostic print) can see the pre-write
+     * value even though the store has retired on this CPU. Cheap
+     * (one instruction) and matches the ISB-after-ICC-register-write
+     * pattern used elsewhere in this file. */
+    __asm__ volatile("dsb sy" ::: "memory");
 
     /* Disable all SGIs and PPIs */
     GICR_ICENABLER0(cpu) = 0xFFFFFFFF;
