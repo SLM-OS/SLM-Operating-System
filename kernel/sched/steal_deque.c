@@ -30,8 +30,10 @@ void steal_deque_init(steal_deque_t *d)
 {
     d->bottom = 0;
     d->top = 0;
-    for (uint32_t i = 0; i < STEAL_DEQUE_CAPACITY; i++)
+    for (uint32_t i = 0; i < STEAL_DEQUE_CAPACITY; i++) {
         d->buf[i] = (struct task *)0;
+        d->gen_buf[i] = 0;
+    }
     spin_init(&d->lock);
 }
 
@@ -45,14 +47,20 @@ int steal_deque_push(steal_deque_t *d, struct task *t)
         return -1;
     }
 
-    d->buf[d->bottom & DEQUE_MASK] = t;
+    uint32_t idx = d->bottom & DEQUE_MASK;
+    d->buf[idx] = t;
+    /* Capture the task's current generation (#139). The task pointer
+     * this slot holds is this-task's-life-number `t->generation` —
+     * any later task_destroy + recycle will bump `t->generation` so
+     * the still-in-deque entry becomes distinguishable as stale. */
+    d->gen_buf[idx] = t->generation;
     d->bottom++;
 
     spin_unlock_irqrestore(&d->lock, flags);
     return 0;
 }
 
-struct task *steal_deque_pop(steal_deque_t *d)
+struct task *steal_deque_pop(steal_deque_t *d, uint32_t *out_gen)
 {
     irq_flags_t flags = spin_lock_irqsave(&d->lock);
 
@@ -63,9 +71,13 @@ struct task *steal_deque_pop(steal_deque_t *d)
      * sit deeper in the live range. */
     while (d->bottom != d->top) {
         d->bottom--;
-        struct task *t = d->buf[d->bottom & DEQUE_MASK];
-        d->buf[d->bottom & DEQUE_MASK] = (struct task *)0;
+        uint32_t idx = d->bottom & DEQUE_MASK;
+        struct task *t = d->buf[idx];
+        uint32_t gen = d->gen_buf[idx];
+        d->buf[idx] = (struct task *)0;
+        d->gen_buf[idx] = 0;
         if (t) {
+            if (out_gen) *out_gen = gen;
             spin_unlock_irqrestore(&d->lock, flags);
             return t;
         }
@@ -75,16 +87,20 @@ struct task *steal_deque_pop(steal_deque_t *d)
     return (struct task *)0;
 }
 
-struct task *steal_deque_steal(steal_deque_t *d)
+struct task *steal_deque_steal(steal_deque_t *d, uint32_t *out_gen)
 {
     irq_flags_t flags = spin_lock_irqsave(&d->lock);
 
     /* Same NULL-skip as pop. Bounded by (bottom - top) probes. */
     while (d->top != d->bottom) {
-        struct task *t = d->buf[d->top & DEQUE_MASK];
-        d->buf[d->top & DEQUE_MASK] = (struct task *)0;
+        uint32_t idx = d->top & DEQUE_MASK;
+        struct task *t = d->buf[idx];
+        uint32_t gen = d->gen_buf[idx];
+        d->buf[idx] = (struct task *)0;
+        d->gen_buf[idx] = 0;
         d->top++;
         if (t) {
+            if (out_gen) *out_gen = gen;
             spin_unlock_irqrestore(&d->lock, flags);
             return t;
         }
@@ -126,6 +142,7 @@ int steal_deque_remove(steal_deque_t *d, struct task *t)
     for (uint32_t i = d->top; i != d->bottom; i++) {
         if (d->buf[i & DEQUE_MASK] == t) {
             d->buf[i & DEQUE_MASK] = (struct task *)0;
+            d->gen_buf[i & DEQUE_MASK] = 0;
             cleared = 1;
             break;
         }
