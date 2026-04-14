@@ -60,19 +60,37 @@ static spinlock_t rq_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
 
 #if CONFIG_WORK_STEALING
 /*
- * Per-CPU stealable task deque (#59 Phase B). One entry per CPU. Tasks
- * are pushed here (in addition to the linked-list run queue) when
- * scheduler_add_task_to_cpu is called with a task whose cpu_affinity is
- * CPU_AFFINITY_ANY. Idle CPUs drain these in sched_try_steal() before
- * going to WFE.
+ * Per-CPU stealable task deque (#59 Phase B, S1 NC placement). One
+ * entry per CPU. Tasks are pushed here (in addition to the linked-list
+ * run queue) when scheduler_add_task_to_cpu is called with a task whose
+ * cpu_affinity is CPU_AFFINITY_ANY. Idle CPUs drain these in
+ * sched_try_steal() before going to WFE.
  *
  * The deque may contain stale pointers (tasks that have since run or
  * been terminated); sched_try_steal() validates under victim's rq_lock
- * before accepting a steal. Kept in cacheable BSS — acceptable for
- * QEMU and pending NC-memory placement for Pi 5 / Jetson in a follow-up.
+ * before accepting a steal.
+ *
+ * Placement:
+ *   - PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson) — allocated from NC memory
+ *     at scheduler_init(). Cross-CPU steals see writes instantly, no
+ *     DC CIVAC/CVAC needed. The embedded spinlock is safe in NC because
+ *     SPINLOCK_SKIP_LOCKING degrades to barrier-only on these
+ *     platforms; ldaxr/stxr on NC memory is never executed.
+ *   - Other (QEMU ARM64, x86-64) — cacheable BSS array. Caches are
+ *     coherent; no NC backing needed.
+ *
+ * The two configurations share the same access pattern through
+ * `cpu_steal_deques[cpu]`; the definition below selects storage.
  */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+/* cpu_steal_deques is a pointer into NC memory, assigned in
+ * scheduler_init() from ncmem_alloc. Indexed via cpu_steal_deques[cpu]
+ * at every call site, same spelling as the BSS array below. */
+static steal_deque_t *cpu_steal_deques;
+#else
 static steal_deque_t cpu_steal_deques[MAX_CPUS];
 #endif
+#endif /* CONFIG_WORK_STEALING */
 
 /* Lock helpers that use the correct lock for a given CPU */
 static inline irq_flags_t rq_lock_irqsave(uint32_t cpu)
@@ -580,6 +598,20 @@ void scheduler_init(void)
     /* Secondary-CPU preemption state (Pi 5 only). No-op on other platforms. */
     preempt_init();
 
+#if CONFIG_WORK_STEALING && defined(PLATFORM_HAS_NC_MEMORY)
+    /* Allocate the per-CPU steal deque array from NC memory so cross-CPU
+     * steals see writes without cache maintenance. `steal_deque_t`
+     * contains a spinlock, which relies on SPINLOCK_SKIP_LOCKING
+     * (barrier-only) on NC-memory platforms; ldaxr/stxr on NC memory
+     * is never executed. See the comment above the cpu_steal_deques
+     * declaration. */
+    cpu_steal_deques = ncmem_alloc(MAX_CPUS * sizeof(steal_deque_t),
+                                   CACHE_LINE_SIZE);
+    if (!cpu_steal_deques) {
+        panic("scheduler_init: failed to allocate cpu_steal_deques from NC memory");
+    }
+#endif
+
     /* Initialize per-CPU run queues with per-queue locks */
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         spin_init(&rq_lock[i]);
@@ -966,6 +998,17 @@ void scheduler_terminate_task(struct task *task)
     }
 
     rq_unlock_irqrestore(cpu, flags);
+
+#if CONFIG_WORK_STEALING
+    /* Clear the task's pointer from its owner's steal deque so a thief
+     * doesn't grab a stale entry that later refers to a recycled task
+     * slot (ABA race). See docs/jetson-capstone-execution-plan.md S1
+     * for the panic that surfaced this — became observable on Jetson
+     * after cpu_steal_deques moved to NC memory in commit <pending>
+     * (before that, incoherent caches hid the race by failing the
+     * steal silently). */
+    steal_deque_remove(&cpu_steal_deques[cpu], task);
+#endif
 }
 
 /*

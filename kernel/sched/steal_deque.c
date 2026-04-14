@@ -56,34 +56,42 @@ struct task *steal_deque_pop(steal_deque_t *d)
 {
     irq_flags_t flags = spin_lock_irqsave(&d->lock);
 
-    if (d->bottom == d->top) {
-        spin_unlock_irqrestore(&d->lock, flags);
-        return (struct task *)0;
+    /* Skip NULL slots left behind by `steal_deque_remove` — those were
+     * live entries at push time but the task has been terminated or
+     * recycled. Not advancing past them would let the caller see a
+     * NULL and mistake the deque for empty, while actual live tasks
+     * sit deeper in the live range. */
+    while (d->bottom != d->top) {
+        d->bottom--;
+        struct task *t = d->buf[d->bottom & DEQUE_MASK];
+        d->buf[d->bottom & DEQUE_MASK] = (struct task *)0;
+        if (t) {
+            spin_unlock_irqrestore(&d->lock, flags);
+            return t;
+        }
     }
 
-    d->bottom--;
-    struct task *t = d->buf[d->bottom & DEQUE_MASK];
-    d->buf[d->bottom & DEQUE_MASK] = (struct task *)0;
-
     spin_unlock_irqrestore(&d->lock, flags);
-    return t;
+    return (struct task *)0;
 }
 
 struct task *steal_deque_steal(steal_deque_t *d)
 {
     irq_flags_t flags = spin_lock_irqsave(&d->lock);
 
-    if (d->top == d->bottom) {
-        spin_unlock_irqrestore(&d->lock, flags);
-        return (struct task *)0;
+    /* Same NULL-skip as pop. Bounded by (bottom - top) probes. */
+    while (d->top != d->bottom) {
+        struct task *t = d->buf[d->top & DEQUE_MASK];
+        d->buf[d->top & DEQUE_MASK] = (struct task *)0;
+        d->top++;
+        if (t) {
+            spin_unlock_irqrestore(&d->lock, flags);
+            return t;
+        }
     }
 
-    struct task *t = d->buf[d->top & DEQUE_MASK];
-    d->buf[d->top & DEQUE_MASK] = (struct task *)0;
-    d->top++;
-
     spin_unlock_irqrestore(&d->lock, flags);
-    return t;
+    return (struct task *)0;
 }
 
 uint32_t steal_deque_size(const steal_deque_t *d)
@@ -94,4 +102,35 @@ uint32_t steal_deque_size(const steal_deque_t *d)
 int steal_deque_is_empty(const steal_deque_t *d)
 {
     return d->bottom == d->top;
+}
+
+int steal_deque_remove(steal_deque_t *d, struct task *t)
+{
+    if (t == (struct task *)0)
+        return 0;
+
+    irq_flags_t flags = spin_lock_irqsave(&d->lock);
+
+    int cleared = 0;
+    /* Walk the live range [top, bottom). Monotonic indices; mask at
+     * access time. A matching slot is cleared to NULL in-place rather
+     * than compacted — the steal and pop paths skip NULL slots, so
+     * leaving a gap costs one extra probe at steal time but avoids
+     * moving elements (which would require updating both top and
+     * bottom atomically under the lock).
+     *
+     * Exit on first match: a task pointer should appear at most once.
+     * If a user pushes the same pointer twice (a bug), only the first
+     * hit is cleared; the second will be surfaced by a later steal and
+     * rejected by the state validation in sched_try_steal. */
+    for (uint32_t i = d->top; i != d->bottom; i++) {
+        if (d->buf[i & DEQUE_MASK] == t) {
+            d->buf[i & DEQUE_MASK] = (struct task *)0;
+            cleared = 1;
+            break;
+        }
+    }
+
+    spin_unlock_irqrestore(&d->lock, flags);
+    return cleared;
 }
