@@ -474,6 +474,42 @@ Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a
 
 ---
 
+## Final State (April 2026) — Capstone Delivery
+
+> This section is authored during Phase G6 of the Jetson capstone
+> execution plan to consolidate the final Jetson support status for
+> the capstone report.
+
+**Boot & serial:** Resolved by running SLM-OS at **NS EL2 with VHE**
+after kexec from Linux. UARTC (0x0C280000) is reachable; TCU
+continues routing USB-C debug serial. UARTA on the 40-pin header
+remains blocked by the CBB firewall even at EL2 — no known workaround
+short of an L4T-side firewall reconfiguration, which is out of scope.
+See `docs/jetson-el2-bringup.md` for the full boot chain.
+
+**SMP:** 6 cores on-line via PSCI `CPU_ON` after the MPIDR encoding
+bug was fixed (`docs/smp.md`). Cross-CPU dispatch validated via
+`bench smp`. Secondary-core timer IRQ delivery is the same GIC
+Group-config problem Pi 5 has (see below) — cooperative preemption
+(`COOP_PREEMPT`) drives scheduler ticks at yield points on all 6
+cores.
+
+**GPU compute:** Blocked on GSP firmware loading. Detection and
+BAR / MMIO access through the non-engine register space work from
+EL2 (same path demonstrated on a discrete RTX 3050 in
+`docs/nvidia-gsp.md`). The Orin Nano uses the same Ampere GSP
+sequence; a bare-metal loader is out of capstone scope.
+
+**Thesis framing:** `docs/capstone-thesis-framing.md` explains how
+the GPU work splits into "infrastructure delivered" (memory, cache,
+detection, enumeration) vs. "compute blocked by proprietary firmware"
+for the capstone narrative.
+
+**Open for future work:** See GitHub issue #142 ("Future work: GSP
+bare-metal loader for Ampere / Orin").
+
+---
+
 ## Related Documentation
 
 ### Project Documentation
@@ -483,6 +519,8 @@ Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a
 - `docs/jetson-tcu.md` — TCU/HSP architecture research
 - `docs/platform-abstraction.md` — QEMU vs Jetson comparison
 - `docs/gpu.md` — GPU integration (blocked by GSP firmware requirement)
+- `docs/nvidia-gsp.md` — GSP boot sequence research (Ampere / GA10x / GA10B)
+- `docs/capstone-thesis-framing.md` — Thesis narrative (Phase G6 draft)
 
 ### NVIDIA Forum Threads
 
