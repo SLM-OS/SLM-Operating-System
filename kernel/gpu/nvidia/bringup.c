@@ -19,11 +19,26 @@ extern const struct gsp_platform_ops *gsp_platform;
 
 /* ---- WPR2 / FRTS region placement (Ampere, GA107 6 GB) ----
  *
- * Nouveau computes WPR2 FRTS from the VBIOS workspace register
- * (0x625F04). Without a fully-initialized display engine we use
- * nouveau's fallback path: `wpr2.frts.addr = fb_size - 0x120000`,
- * size = 1 MB. For GA107 6 GB that's 0x17FE00000 — confirmed against
- * the reference doc's worked example.
+ * Nouveau (`tu102_gsp_oneinit` + `tu102_gsp_vga_workspace_addr`)
+ * computes the FRTS placement bottom-up from the VBIOS workspace:
+ *
+ *   vga_workspace.addr = (display ? bios_reg_625f04 : fb_size - 0x100000)
+ *   wpr2.frts.size     = 0x100000              (1 MB)
+ *   wpr2.frts.addr     = ALIGN_DOWN(vga_workspace.addr, 0x20000)
+ *                        - wpr2.frts.size
+ *
+ * Without a fully-initialized display, vga_workspace.addr collapses
+ * to `fb_size - 0x100000`; that's already 1 MB-aligned so the
+ * ALIGN_DOWN is a no-op, leaving:
+ *
+ *   wpr2.frts.addr = fb_size - 0x100000 - 0x100000 = fb_size - 0x200000
+ *
+ * For GA107 6 GB that's 0x17FE00000 — verified against nouveau on
+ * real hardware. An earlier draft of this file (and the reference
+ * doc that mirrored it) used 0x120000 as the offset which placed
+ * WPR2 at 0x17FEE0000, mid-VGA-workspace; FWSEC rejected the
+ * region and busy-looped instead of halting, producing the exact
+ * "ucode runs but never halts" symptom that motivated the audit.
  *
  * Reading the real FB size requires programming a handful of PFB
  * registers; for E3.4 we hardcode 6 GB for this card and leave
@@ -31,7 +46,8 @@ extern const struct gsp_platform_ops *gsp_platform;
  * `nvidia_gpu_init` will fill this in eventually — tracked below). */
 #define GA107_FB_SIZE_BYTES         0x180000000ull   /* 6 GB */
 #define WPR2_FRTS_SIZE              0x100000ull      /* 1 MB */
-#define WPR2_FRTS_BASE_FROM_TOP     0x120000ull      /* offset below FB end */
+#define VGA_WORKSPACE_SIZE          0x100000ull      /* 1 MB, no-display fallback */
+#define WPR2_FRTS_BASE_FROM_TOP     (VGA_WORKSPACE_SIZE + WPR2_FRTS_SIZE) /* 0x200000 */
 
 /* Ampere BAR0 offsets observable after FWSEC-FRTS run — definitions
  * in bringup.h so the harness diagnostic dump uses the same names. */

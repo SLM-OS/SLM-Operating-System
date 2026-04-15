@@ -328,15 +328,30 @@ int main(int argc, char **argv)
             uint32_t bcrctl  = gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_RISCV_BCR_CTRL);
             uint32_t modsel  = gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_BROM_MOD_SEL);
             uint32_t paraaddr= gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_BROM_PARAADDR0);
+            uint32_t os_reg  = gsp_platform->read32(NV_PGSP_BASE       + FALCON_OS);
+            uint32_t dbginfo = gsp_platform->read32(NV_PGSP_BASE       + FALCON_DEBUGINFO);
+            uint32_t engr    = gsp_platform->read32(NV_PGSP_BASE       + FALCON_ENGINE);
+            uint32_t dmactl  = gsp_platform->read32(NV_PGSP_BASE       + FALCON_DMACTL);
+            uint32_t trfcmd  = gsp_platform->read32(NV_PGSP_BASE       + FALCON_DMATRFCMD);
+            /* Sample CPUCTL twice to detect "stuck running" vs "halted-
+             * in-the-clear" — if the engine is alive its CPUCTL low bits
+             * may not be perfectly stable, but the HALTED bit (4) and
+             * the IINVAL bit (0) latch. */
+            uint32_t cpuctl2 = gsp_platform->read32(NV_PGSP_BASE       + FALCON_CPUCTL);
             printf("                GSP Falcon state:\n");
-            printf("                  CPUCTL=0x%08x (halted=%d, started=%d)\n",
-                   cpuctl, !!(cpuctl & FALCON_CPUCTL_HALTED),
-                   !(cpuctl & FALCON_CPUCTL_HALTED));
-            printf("                  MAILBOX0=0x%08x MAILBOX1=0x%08x\n", mbox0, mbox1);
+            printf("                  CPUCTL=0x%08x → 0x%08x (halted=%d, alias_en=%d, iinval=%d)\n",
+                   cpuctl, cpuctl2,
+                   !!(cpuctl2 & FALCON_CPUCTL_HALTED),
+                   !!(cpuctl2 & FALCON_CPUCTL_ALIAS_EN),
+                   !!(cpuctl2 & 1));
+            printf("                  MAILBOX0=0x%08x MAILBOX1=0x%08x  OS=0x%08x DEBUGINFO=0x%08x\n",
+                   mbox0, mbox1, os_reg, dbginfo);
             printf("                  IRQSTAT=0x%08x (halt=%d, swgen0=%d)\n",
                    irqstat, !!(irqstat & 0x10), !!(irqstat & 0x40));
-            printf("                  HWCFG2=0x%08x BCR_CTRL=0x%08x\n", hwcfg2, bcrctl);
-            printf("                  MOD_SEL=0x%08x PARAADDR0=0x%08x\n", modsel, paraaddr);
+            printf("                  HWCFG2=0x%08x ENGINE=0x%08x DMACTL=0x%08x DMATRFCMD=0x%08x\n",
+                   hwcfg2, engr, dmactl, trfcmd);
+            printf("                  BCR_CTRL=0x%08x MOD_SEL=0x%08x PARAADDR0=0x%08x\n",
+                   bcrctl, modsel, paraaddr);
             return 1;
         }
         printf("[GSP-HARNESS] FWSEC-FRTS ok — WPR2 registers:\n");
