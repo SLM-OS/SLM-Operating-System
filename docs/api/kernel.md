@@ -699,7 +699,18 @@ Unmap a region from kernel virtual address space.
 ```c
 uint64_t slm_get_time_ns(void);
 ```
-Return nanoseconds elapsed since boot.
+Return nanoseconds elapsed since boot. Uses a split-multiply
+(`secs * 1e9 + (frac_ticks * 1e9) / freq`) internally so the
+conversion does not overflow past a few seconds of uptime on
+high-frequency timers like the x86-64 TSC (#171).
+
+```c
+uint64_t slm_time_ticks_to_ns(uint64_t ticks, uint64_t freq);
+```
+Pure helper: convert a raw tick count at a given timer frequency
+into nanoseconds using the same overflow-safe formula as
+`slm_get_time_ns`. Primarily useful for unit tests that need to
+exercise the conversion against synthetic tick values.
 
 ```c
 void slm_sleep_ms(uint32_t ms);

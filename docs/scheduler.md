@@ -834,6 +834,30 @@ Migration sequence:
 `sched_rebalance_get_migrations()` exposes a diagnostic counter for
 tests.
 
+## Proactive load-balance override (plan §S5)
+
+`scheduler_add_task()` runs an override after the active policy picks
+a target CPU. If the target's `ready_count >= 2` and
+`2 * target_ready * active > 3 * sum` (integer form of
+`target > 1.5 × average` across the non-isolated CPUs), the task is
+redirected to `least_loaded_cpu()` instead — the same CPU that
+`sched_rebalance_tick` would migrate toward, but applied at task
+creation rather than at the next tick. This closes the window where
+a hot policy keeps piling tasks onto one CPU before the reactive
+rebalancer notices.
+
+Gating:
+
+- Only for unpinned tasks (`task->cpu_affinity == CPU_AFFINITY_ANY`).
+- `target_ready >= 2` — the policy stays authoritative under light
+  load where warmth bonuses (cache affinity, deadline boost) matter.
+- Isolated CPUs are excluded from both the candidate set and the
+  average, so the override never violates `sched_isolate_core`.
+- No redirect if the least-loaded CPU is already at or above the
+  target's load.
+
+Test: `test_proactive_load_balance_redirect` in `test_scheduler.c`.
+
 ## Work stealing (Pre-existing + B3 activation + S4 default flip)
 
 `kernel/sched/steal_deque.c` implements a Chase–Lev-style deque per
@@ -841,14 +865,14 @@ CPU. When a CPU's own run queue goes empty inside `schedule()`, and
 `CONFIG_WORK_STEALING` is on, it calls `sched_try_steal()` to pull
 work from another CPU's deque.
 
-**Default by platform (after Jetson capstone S4, 2026-04-14):**
+**Default by platform (after S4 Jetson follow-up, 2026-04-15):**
 
 | Platform | Default | Notes |
 |---|---|---|
 | x86-64 | ON | Since Phase B; cache-coherent SMP + LAPIC IPI |
-| QEMU ARM64 | ON | 1.7× speedup measured (S3) |
+| QEMU ARM64 | OFF | 1.7× speedup measured (S3), but several integration tests use timing-sensitive assumptions that fight the more aggressive cross-CPU migration; opt in via `WORK_STEALING=ON` for regression testing |
 | Raspberry Pi 5 | ON | 3.12× speedup measured on hardware (`docs/work-stealing-bench.md`); closed #158 |
-| Jetson Orin Nano | OFF | Residual page fault during bench stealing (#166); opt-in via `WORK_STEALING=ON` |
+| Jetson Orin Nano | ON | 3 consecutive clean `bench stealing 16` runs on hardware (20.9 ms, 2/4/4/4/1/1 distribution) after the #166 spinlock fix |
 
 Override: `make kernel PLATFORM=<p> WORK_STEALING=ON` or `WORK_STEALING=OFF` maps to `-DENABLE_WORK_STEALING=ON/OFF`, bypassing the CMake per-platform default.
 
@@ -860,9 +884,12 @@ serialized by `steal_deque_lock[MAX_CPUS]` — a separate cacheable
 `rq_lock[]`. The deque struct itself lives in NC memory on
 `PLATFORM_HAS_NC_MEMORY` (Pi 5, Jetson) for instant cross-CPU
 visibility without cache maintenance. The deque used to embed its
-own spinlock, but on Jetson `SPINLOCK_SKIP_LOCKING` reduced that to
-a barrier-only no-op, letting concurrent pushes/pops corrupt the
-deque — see #158 and commit `a3b3a0e` for the move.
+own spinlock; on Jetson the former blanket `SPINLOCK_SKIP_LOCKING`
+reduced it to a barrier-only no-op, letting concurrent pushes/pops
+corrupt the deque — see #158 and commit `a3b3a0e` for the move to
+the external cacheable lock. Jetson has since moved to Pi 5's runtime
+`spinlock_hw_enabled` model (commit `e180244`, #166), so the "lock is
+a no-op" concern no longer applies there either.
 
 Every `steal_deque_push` / `_pop` / `_steal` / `_remove` call in
 `sched.c` is wrapped with `spin_lock_irqsave(&steal_deque_lock[cpu])` /
@@ -881,6 +908,25 @@ they trust the caller.
 - `preempt_disabled[victim]` is checked as a cheap early-out (not a
   correctness requirement) to avoid contending a lock the victim is
   almost certainly about to take.
+
+**Observability (sched_diag_steal_* counters):**
+
+Five per-CPU counters are exposed via the `cpu` shell command and
+the `bench stealing` output:
+
+| Counter | Meaning |
+|---|---|
+| `Attempts`  | `sched_try_steal()` entries on the thief side |
+| `Successes` | live task returned |
+| `Stale`     | stale pointer popped and rejected (state/generation mismatch) |
+| `EmptyVic`  | every probed victim had an empty deque |
+| `PushFull`  | `scheduler_add_task_to_cpu` saw `steal_deque_push` return -1 (deque at capacity) — #175 |
+
+`PushFull` is expected to stay at zero under normal workloads
+(`STEAL_DEQUE_CAPACITY = 32` is generous). Non-zero values flag
+either a workload burst that needs a larger capacity or a migration
+thrash pattern re-adding to an already-loaded CPU. Asserted zero
+in `test_work_stealing_distributes_load`.
 
 ---
 

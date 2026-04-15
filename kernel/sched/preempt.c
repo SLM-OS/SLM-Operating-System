@@ -66,6 +66,43 @@ void preempt_init(void)
 }
 
 /*
+ * Pure fold. Must match the inline asm at the top of
+ * `resched_trampoline` (kernel/arch/arm64/vectors.S):
+ *
+ *     and  x1, x0, #0xFF         // Aff0
+ *     ubfx x2, x0, #8, #8        // Aff1
+ *     orr  x0, x1, x2            // cpu = Aff0 | Aff1
+ */
+uint32_t preempt_trampoline_cpu_for_mpidr(uint64_t mpidr)
+{
+    return (uint32_t)((mpidr & 0xFFULL) | ((mpidr >> 8) & 0xFFULL));
+}
+
+/*
+ * #137: guard against the resched_trampoline's MPIDR-folding formula
+ * silently mis-indexing on platforms with dual-cluster encodings.
+ * The per-CPU invariant "trampoline_cpu_id(MPIDR) == logical_cpu_id"
+ * is sufficient for uniqueness: if it holds on every CPU, then no
+ * two CPUs map to the same trampoline slot.
+ */
+void preempt_check_cpu_mpidr(uint32_t this_cpu)
+{
+    uint64_t mpidr = cpu_get_mpidr();
+    uint32_t trampoline_cpu = preempt_trampoline_cpu_for_mpidr(mpidr);
+
+    if (trampoline_cpu != this_cpu) {
+        panic("SECONDARY_PREEMPT: trampoline cpu-id formula yields %u for "
+              "MPIDR=0x%lx but logical cpu is %u. Per-CPU trampoline slot "
+              "would collide — port the vectors.S MPIDR fold to this "
+              "platform's affinity layout (see `resched_trampoline` in "
+              "kernel/arch/arm64/vectors.S and Jetson plan P3 step 2) "
+              "before enabling SECONDARY_PREEMPT.",
+              (unsigned)trampoline_cpu, (unsigned long)mpidr,
+              (unsigned)this_cpu);
+    }
+}
+
+/*
  * Called from el1_irq after el1_irq_handler returns, before restore_regs.
  *
  * If a reschedule is pending on this CPU, rewrite the trap frame's ELR

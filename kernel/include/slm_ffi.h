@@ -91,6 +91,15 @@ void slm_print(const char *s);
 uint64_t slm_get_time_ns(void);
 
 /*
+ * Pure helper: convert a tick count and timer frequency to nanoseconds
+ * without overflowing for realistic uptimes. Split-multiply form of
+ * `ticks * 1e9 / freq`; see the implementation comment for bounds.
+ * Primarily exported so unit tests can drive synthetic tick values
+ * past the x86-64 ~5 s overflow boundary (#171).
+ */
+uint64_t slm_time_ticks_to_ns(uint64_t ticks, uint64_t freq);
+
+/*
  * Sleep the current task for the given number of milliseconds.
  *
  * @ms: Sleep duration in milliseconds (0 returns immediately)

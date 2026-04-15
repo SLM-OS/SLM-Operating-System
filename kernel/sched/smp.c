@@ -11,6 +11,7 @@
 #include "gic.h"
 #include "timer.h"
 #include "sched.h"
+#include "preempt.h"
 #include "dtb.h"
 #include "cache.h"
 #include "ncmem.h"
@@ -316,6 +317,12 @@ void secondary_init(uint32_t logical_cpu_id)
     /* Trace: 0xEE = reached C entry from smp_boot.S */
     nc_trace(logical_cpu_id, 0xEE);
     DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
+
+    /* #137: confirm the trampoline's MPIDR fold produces this CPU's
+     * logical id. Panics early on platforms where the formula
+     * collides (e.g. dual-cluster Jetson under SECONDARY_PREEMPT).
+     * No-op when SECONDARY_PREEMPT is undefined. */
+    preempt_check_cpu_mpidr(logical_cpu_id);
 
     /* Verify SMPEN was set from EL2 on this secondary core */
     if (cpu_has_smpen()) {

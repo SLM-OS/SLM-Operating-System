@@ -1718,6 +1718,88 @@ static void test_timer_irq_is_physical(void)
     TEST_ASSERT_EQUAL_INT(30, TIMER_IRQ);
 }
 
+/*
+ * #137: resched_trampoline's MPIDR fold gives unique ids for Pi 5
+ * and QEMU virt, but collides on Jetson (dual-cluster A78AE) —
+ * cluster 1's CPU 4 (MPIDR 0x10200) and CPU 5 (0x10300) fold to
+ * 2 and 3, the same slots as cluster 0's CPU 2 and 3. The boot-
+ * time sanity check calls this helper per-CPU; verify the helper
+ * itself agrees with every known platform encoding.
+ */
+#include "preempt.h"
+
+static void test_preempt_trampoline_cpu_fold(void)
+{
+    /* Pi 5 — Aff1 holds the CPU index, Aff0 always 0. */
+    TEST_ASSERT_EQUAL_UINT32(0, preempt_trampoline_cpu_for_mpidr(0x000));
+    TEST_ASSERT_EQUAL_UINT32(1, preempt_trampoline_cpu_for_mpidr(0x100));
+    TEST_ASSERT_EQUAL_UINT32(2, preempt_trampoline_cpu_for_mpidr(0x200));
+    TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x300));
+
+    /* QEMU virt — Aff0 holds the CPU index, Aff1 always 0. */
+    TEST_ASSERT_EQUAL_UINT32(0, preempt_trampoline_cpu_for_mpidr(0x00));
+    TEST_ASSERT_EQUAL_UINT32(1, preempt_trampoline_cpu_for_mpidr(0x01));
+    TEST_ASSERT_EQUAL_UINT32(2, preempt_trampoline_cpu_for_mpidr(0x02));
+    TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x03));
+
+    /* Jetson dual-cluster A78AE — cluster 0 Aff1 = cpu, cluster 1
+     * Aff2 = 1 and Aff1 = 2/3. The fold ignores Aff2, so cluster
+     * 1's CPU 4 (0x10200) and CPU 5 (0x10300) collide with
+     * cluster 0's CPU 2/3. This is the exact bug the boot-time
+     * check must catch. */
+    TEST_ASSERT_EQUAL_UINT32(0, preempt_trampoline_cpu_for_mpidr(0x00000));
+    TEST_ASSERT_EQUAL_UINT32(1, preempt_trampoline_cpu_for_mpidr(0x00100));
+    TEST_ASSERT_EQUAL_UINT32(2, preempt_trampoline_cpu_for_mpidr(0x00200));
+    TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x00300));
+    /* CPU 4 wants slot 4 but the fold yields 2 — collision. */
+    TEST_ASSERT_EQUAL_UINT32(2, preempt_trampoline_cpu_for_mpidr(0x10200));
+    /* CPU 5 wants slot 5 but the fold yields 3 — collision. */
+    TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x10300));
+}
+
+/*
+ * #171: slm_time_ticks_to_ns must not overflow for realistic uptimes
+ * on any supported timer frequency. The naive `ticks * 1e9 / freq`
+ * wraps on x86-64 TSC (~3.4 GHz) after roughly 5.4 seconds.
+ */
+static void test_slm_time_ticks_to_ns_no_overflow(void)
+{
+    extern uint64_t slm_time_ticks_to_ns(uint64_t ticks, uint64_t freq);
+
+    /* Sanity: zero ticks is zero nanoseconds, any freq. */
+    TEST_ASSERT_EQUAL_UINT64(0, slm_time_ticks_to_ns(0, 62500000ULL));
+    TEST_ASSERT_EQUAL_UINT64(0, slm_time_ticks_to_ns(0, 3400000000ULL));
+    /* Zero freq → zero (defensive — slm_get_time_ns short-circuits). */
+    TEST_ASSERT_EQUAL_UINT64(0, slm_time_ticks_to_ns(1000, 0));
+
+    /* QEMU virt: 62.5 MHz, fast path (1e9 / 62.5e6 = 16 ns/tick). */
+    TEST_ASSERT_EQUAL_UINT64(16ULL, slm_time_ticks_to_ns(1, 62500000ULL));
+    TEST_ASSERT_EQUAL_UINT64(1000000000ULL,
+        slm_time_ticks_to_ns(62500000ULL, 62500000ULL));
+
+    /* x86-64 TSC ~3.4 GHz, general path with remainder.
+     * 10 seconds of uptime = 3.4e10 ticks; naive multiply would
+     * have overflowed u64 past 5.4 s. Post-fix the value must
+     * match 10e9 ns within the per-second rounding slop of the
+     * frac-tick division (< freq ns per integer second). */
+    uint64_t tsc_freq = 3400000000ULL;
+    uint64_t ns_10s = slm_time_ticks_to_ns(10ULL * tsc_freq, tsc_freq);
+    TEST_ASSERT_TRUE(ns_10s >= 9999999900ULL && ns_10s <= 10000000100ULL);
+
+    /* 60 seconds at the same TSC — well past the 5.4 s overflow
+     * boundary reported in #171. Monotonicity and magnitude must
+     * both hold. */
+    uint64_t ns_60s = slm_time_ticks_to_ns(60ULL * tsc_freq, tsc_freq);
+    TEST_ASSERT_TRUE(ns_60s > ns_10s);
+    TEST_ASSERT_TRUE(ns_60s >= 59999999400ULL && ns_60s <= 60000000600ULL);
+
+    /* Monotonicity across a tick boundary at high uptime. */
+    uint64_t big = 100ULL * tsc_freq + 12345ULL;
+    TEST_ASSERT_TRUE(
+        slm_time_ticks_to_ns(big + 1, tsc_freq) >=
+        slm_time_ticks_to_ns(big, tsc_freq));
+}
+
 /* ============================================================================
  * Spinlock Hardware Mode Tests (post-MMU)
  *
@@ -2555,6 +2637,151 @@ static void test_policy_bypassed_for_explicit_affinity(void)
     sched_set_policy(sched_find_policy("heuristic"));
 }
 
+/*
+ * Test: S5 proactive load-balance override.
+ *
+ * Under a stub policy that always returns CPU 0, adding N unpinned
+ * tasks in a row should cause some to land elsewhere than CPU 0 —
+ * the override fires once CPU 0's `ready_count` is high enough vs.
+ * the system average. If cpu_count < 2 the override is a no-op.
+ *
+ * Uses deltas from baseline rather than absolute counts so prior
+ * tests' residual state on CPU 0's queue doesn't matter.
+ */
+static void test_proactive_load_balance_redirect(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("S5 override requires cpu_count >= 2");
+        return;
+    }
+
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+    sched_set_policy(&stub_policy);
+
+    /* Add 6 tasks in one irq-save region so no scheduler tick fires
+     * mid-test. Stub policy returns CPU 0 for every call; we want to
+     * see at least one redirect to a non-zero CPU. */
+    irq_flags_t flags = irq_save();
+    const int N = 6;
+    struct task *tasks[6];
+    for (int i = 0; i < N; i++) {
+        tasks[i] = task_create("s5_bal", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(tasks[i]);
+        scheduler_add_task(tasks[i]);
+    }
+
+    int on_cpu0 = 0;
+    int off_cpu0 = 0;
+    for (int i = 0; i < N; i++) {
+        if (tasks[i]->assigned_cpu == 0) on_cpu0++;
+        else off_cpu0++;
+    }
+    TEST_ASSERT_MESSAGE(off_cpu0 >= 1,
+        "S5 override never redirected away from overloaded CPU 0");
+    TEST_ASSERT_MESSAGE(on_cpu0 < N,
+        "all tasks landed on CPU 0 — override is inert");
+
+    for (int i = 0; i < N; i++) {
+        scheduler_remove_task(tasks[i]);
+        tasks[i]->id = 0;
+    }
+    irq_restore(flags);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/*
+ * Test: S5 override never redirects to an isolated CPU.
+ *
+ * With CPUs 2+ isolated, stub policy returning CPU 0, adding many
+ * unpinned tasks: the override must keep them on non-isolated CPUs
+ * (0 and 1), never push to an isolated CPU. Regression for the
+ * isolation gate in `least_loaded_cpu` + the `!isolated` check in
+ * `scheduler_add_task`.
+ */
+static void test_proactive_load_balance_respects_isolation(void)
+{
+    if (cpu_count < 3) {
+        TEST_IGNORE_MESSAGE("Isolation test requires cpu_count >= 3");
+        return;
+    }
+
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+    sched_set_policy(&stub_policy);
+
+    /* Isolate CPUs 2 and above. CPU 0 and CPU 1 remain the only
+     * legitimate redirect destinations. */
+    for (uint32_t c = 2; c < cpu_count; c++) {
+        sched_isolate_core(c);
+    }
+
+    irq_flags_t flags = irq_save();
+    const int N = 6;
+    struct task *tasks[6];
+    for (int i = 0; i < N; i++) {
+        tasks[i] = task_create("s5_iso", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(tasks[i]);
+        scheduler_add_task(tasks[i]);
+    }
+
+    for (int i = 0; i < N; i++) {
+        TEST_ASSERT_MESSAGE(tasks[i]->assigned_cpu < 2,
+            "S5 redirected onto an isolated CPU");
+    }
+
+    for (int i = 0; i < N; i++) {
+        scheduler_remove_task(tasks[i]);
+        tasks[i]->id = 0;
+    }
+    irq_restore(flags);
+
+    for (uint32_t c = 2; c < cpu_count; c++) {
+        sched_unisolate_core(c);
+    }
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/*
+ * Test: S5 override stays inert under light load.
+ *
+ * A single task added to an empty system must land on exactly the
+ * CPU the policy chose — the `target_ready >= 2` gate exists
+ * precisely so warmth heuristics win the low-load regime. Uses the
+ * same stub policy (always returns CPU 0).
+ */
+static void test_proactive_load_balance_inert_when_light(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
+        return;
+    }
+
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+    sched_set_policy(&stub_policy);
+
+    irq_flags_t flags = irq_save();
+
+    /* One task; target_ready will be 0 or 1, gate `>= 2` blocks the
+     * override. Result must be CPU 0 regardless of what other CPUs
+     * have queued. */
+    struct task *t = task_create("s5_light", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    scheduler_remove_task(t);
+    t->id = 0;
+
+    irq_restore(flags);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
 /* Failing init policy: init() returns -1 */
 static int fail_init(void)
 {
@@ -3364,6 +3591,8 @@ int test_suite_scheduler(void)
     RUN_TEST(test_timer_counter_advances);
     RUN_TEST(test_timer_frequency_reasonable);
     RUN_TEST(test_timer_irq_is_physical);
+    RUN_TEST(test_slm_time_ticks_to_ns_no_overflow);
+    RUN_TEST(test_preempt_trampoline_cpu_fold);
 
     /* Spinlock hardware mode tests (post-MMU) */
     RUN_TEST(test_spinlock_hw_enabled_after_boot);
@@ -3418,6 +3647,9 @@ int test_suite_scheduler(void)
     RUN_TEST(test_policy_switch_calls_init_shutdown);
     RUN_TEST(test_policy_custom_assign_cpu_called);
     RUN_TEST(test_policy_bypassed_for_explicit_affinity);
+    RUN_TEST(test_proactive_load_balance_redirect);
+    RUN_TEST(test_proactive_load_balance_respects_isolation);
+    RUN_TEST(test_proactive_load_balance_inert_when_light);
     RUN_TEST(test_policy_init_failure_keeps_old);
     RUN_TEST(test_policy_tick_callback_invoked);
     RUN_TEST(test_policy_heuristic_distributes_tasks);

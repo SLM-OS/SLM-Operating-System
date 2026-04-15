@@ -64,19 +64,36 @@ void slm_print(const char *s)
  * Timing
  */
 
-uint64_t slm_get_time_ns(void)
+/*
+ * Convert a tick count to nanoseconds given a timer frequency in Hz.
+ *
+ * The naive `ticks * 1e9 / freq` overflows on x86-64: TSC at
+ * ~3.4 GHz reaches UINT64_MAX / 1e9 ≈ 1.84e10 ticks after only
+ * ~5.4 seconds of uptime, wrapping the multiply. Fix #171 by
+ * splitting the computation along the integer division:
+ *
+ *   secs       = ticks / freq           (seconds of uptime)
+ *   frac_ticks = ticks % freq           (0 .. freq-1)
+ *   ns         = secs * 1e9 + (frac_ticks * 1e9) / freq
+ *
+ * Both multiplies are bounded:
+ *   - `secs * 1e9`: u64 seconds × 1e9 overflows only past
+ *     ~585 years of uptime.
+ *   - `frac_ticks * 1e9`: `frac_ticks < freq`. For a 3.4 GHz TSC
+ *     that is < 3.4e9, so the product is < 3.4e18 — well under
+ *     UINT64_MAX (≈1.84e19). ARM64 platforms (1-62.5 MHz) have
+ *     even more headroom.
+ *
+ * Fast path retained for freqs that divide 1e9 evenly (QEMU virt
+ * 62.5 MHz → 16 ns/tick): same correctness, avoids two divisions.
+ *
+ * Exposed (not static) so `test_scheduler.c` can exercise the
+ * overflow boundary with synthetic inputs — `slm_get_time_ns`
+ * itself reads the real timer and cannot be driven to post-5 s
+ * values in unit-test time.
+ */
+uint64_t slm_time_ticks_to_ns(uint64_t ticks, uint64_t freq)
 {
-    uint64_t ticks = timer_get_count();
-    uint64_t freq = timer_get_frequency();
-
-    /*
-     * Convert ticks to nanoseconds: ns = ticks * 1e9 / freq
-     * To avoid overflow with large tick counts, we compute:
-     * ns = ticks * (1e9 / freq) when freq divides 1e9 evenly,
-     * otherwise use: ns = (ticks / freq) * 1e9 + ((ticks % freq) * 1e9) / freq
-     *
-     * For QEMU virt (62.5 MHz), 1e9/freq = 16, so each tick = 16ns.
-     */
     if (freq == 0) {
         return 0;
     }
@@ -84,13 +101,18 @@ uint64_t slm_get_time_ns(void)
     uint64_t ns_per_tick = 1000000000ULL / freq;
     uint64_t remainder = 1000000000ULL % freq;
 
-    /* Fast path for common frequencies that divide evenly */
     if (remainder == 0) {
         return ticks * ns_per_tick;
     }
 
-    /* General case with remainder handling */
-    return ticks * ns_per_tick + (ticks * remainder) / freq;
+    uint64_t secs = ticks / freq;
+    uint64_t frac_ticks = ticks % freq;
+    return secs * 1000000000ULL + (frac_ticks * 1000000000ULL) / freq;
+}
+
+uint64_t slm_get_time_ns(void)
+{
+    return slm_time_ticks_to_ns(timer_get_count(), timer_get_frequency());
 }
 
 /*

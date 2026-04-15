@@ -219,22 +219,25 @@ int cmd_cpu(int argc, char *argv[])
         extern volatile uint32_t *sched_diag_steal_successes;
         extern volatile uint32_t *sched_diag_steal_stale;
         extern volatile uint32_t *sched_diag_steal_empty_victim;
+        extern volatile uint32_t *sched_diag_steal_push_full;
 #else
         extern volatile uint32_t sched_diag_steal_attempts[];
         extern volatile uint32_t sched_diag_steal_successes[];
         extern volatile uint32_t sched_diag_steal_stale[];
         extern volatile uint32_t sched_diag_steal_empty_victim[];
+        extern volatile uint32_t sched_diag_steal_push_full[];
 #endif
         uart_printf("\r\n  Per-CPU work-stealing counters:\r\n");
-        uart_printf("  CPU  Attempts  Success   Stale     EmptyVic\r\n");
-        uart_printf("  ---  --------  --------  --------  --------\r\n");
+        uart_printf("  CPU  Attempts  Success   Stale     EmptyVic  PushFull\r\n");
+        uart_printf("  ---  --------  --------  --------  --------  --------\r\n");
         for (uint32_t i = 0; i < cpu_count; i++) {
-            uart_printf("  %3lu  %8u  %8u  %8u  %8u\r\n",
+            uart_printf("  %3lu  %8u  %8u  %8u  %8u  %8u\r\n",
                         i,
                         sched_diag_steal_attempts[i],
                         sched_diag_steal_successes[i],
                         sched_diag_steal_stale[i],
-                        sched_diag_steal_empty_victim[i]);
+                        sched_diag_steal_empty_victim[i],
+                        sched_diag_steal_push_full[i]);
         }
 #endif /* CONFIG_WORK_STEALING */
 
@@ -1019,16 +1022,20 @@ int cmd_bench(int argc, char *argv[])
          * values that include prior shell activity. */
         uint32_t pre_attempts[MAX_CPUS] = {0};
         uint32_t pre_successes[MAX_CPUS] = {0};
+        uint32_t pre_push_full[MAX_CPUS] = {0};
 #if defined(PLATFORM_HAS_NC_MEMORY)
         extern volatile uint32_t *sched_diag_steal_attempts;
         extern volatile uint32_t *sched_diag_steal_successes;
+        extern volatile uint32_t *sched_diag_steal_push_full;
 #else
         extern volatile uint32_t sched_diag_steal_attempts[];
         extern volatile uint32_t sched_diag_steal_successes[];
+        extern volatile uint32_t sched_diag_steal_push_full[];
 #endif
         for (uint32_t c = 0; c < cpu_count; c++) {
             pre_attempts[c] = sched_diag_steal_attempts[c];
             pre_successes[c] = sched_diag_steal_successes[c];
+            pre_push_full[c] = sched_diag_steal_push_full[c];
         }
 #endif
 
@@ -1102,13 +1109,14 @@ int cmd_bench(int argc, char *argv[])
         }
 #if CONFIG_WORK_STEALING
         uart_puts("\r\n    Steal counter deltas this run:\r\n");
-        uart_puts("    CPU  Attempts  Successes\r\n");
-        uart_puts("    ---  --------  ---------\r\n");
+        uart_puts("    CPU  Attempts  Successes  PushFull\r\n");
+        uart_puts("    ---  --------  ---------  --------\r\n");
         for (uint32_t c = 0; c < cpu_count; c++) {
             uint32_t da = sched_diag_steal_attempts[c] - pre_attempts[c];
             uint32_t ds = sched_diag_steal_successes[c] - pre_successes[c];
-            uart_printf("    %3lu  %8u  %9u\r\n",
-                        (unsigned long)c, da, ds);
+            uint32_t dpf = sched_diag_steal_push_full[c] - pre_push_full[c];
+            uart_printf("    %3lu  %8u  %9u  %8u\r\n",
+                        (unsigned long)c, da, ds, dpf);
         }
 #endif
     } else if (strcmp(argv[1], "quant") == 0) {
