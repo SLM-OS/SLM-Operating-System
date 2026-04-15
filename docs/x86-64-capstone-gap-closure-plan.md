@@ -719,28 +719,64 @@ loader without knowing which one it is.
 
 ---
 
-### E3. Falcon / RISC-V bringup (P3-2 prereq)
+### E3. Falcon / RISC-V bringup (P3-2 prereq) — **PARTIAL**
 
-**Deliverables.**
-- New file: `kernel/arch/x86_64/nvidia_falcon.c`.
-- Implement Falcon DMA (code/data upload), boot, and polling for
-  "GSP halted / ready" status. Falcon is the small security
-  processor used to bootstrap RISC-V.
-- Implement SEC2 "Booter Load" execution: DMA ucode, set boot
-  vector, release halt, poll completion.
-- Implement the RISC-V bring-up sequence: program BCR_CTRL
-  (BAR0+0x668), write boot vector, release reset, poll until RISC-V
-  reports "GSP-RM alive" in mailbox 0x110.
+**Shipped (PR #162 merged 2026-04-15):**
 
-**Reference.** Port from nouveau
-`drivers/gpu/drm/nouveau/nvkm/subdev/gsp/tu102.c` (Turing) adapted
-to `ga102.c` (Ampere) register offsets.
+- **E3.1** — Falcon v4 register map + reset/halt/start/DMA primitives.
+  `kernel/gpu/nvidia/falcon.{h,c}`. 19 unit tests via `make test-falcon`.
+  Hardware-validated against GSP Falcon (0x110000, RISC-V capable) and
+  SEC2 Falcon (0x840000) on real RTX 3050. Original plan called for
+  this in `kernel/arch/x86_64/nvidia_falcon.c`; refactored into the
+  shared NVIDIA core (`kernel/gpu/nvidia/`) per the cross-platform
+  directive — Jetson reuses unchanged.
 
-**Tests.**
-- `test_gsp_falcon_boots` — after `nvidia_falcon_bringup()`, poll
-  BAR0+0x110 for the "alive" token (0xBEEFBEEF or similar).
+- **E3.2** — VFIO IOMMU integration. `host-tools/gsp-harness/vfio.{h,c}`.
+  Persistent container/group/device session, IOVA bump allocator,
+  `VFIO_IOMMU_MAP_DMA` per allocation. `gsp-harness --dma-test`
+  confirms 4 KB / 64 KB / 1 MB allocations all return GPU-reachable
+  IOVAs in the 0x10000000+ range.
 
-**Est.** 10 days.
+- **E3.3** — NVIDIA HS firmware container parser
+  (`nvfw_bin_hdr` → `nvfw_hs_header_v2` → `nvfw_hs_load_header_v2`).
+  `kernel/gpu/nvidia/nvfw.{h,c}`. 14 unit tests + validated against
+  real R535 booter_load.bin (engine_id=0x1 SEC2, ucode_id=3) +
+  booter_unload.bin. Correctly rejects non-HS files (bootloader.bin
+  uses `nvfw_bl_desc`, gsp.bin is plain ELF — both flagged with
+  follow-up parsers needed).
+
+- **E3.4 (scaffolding)** — FWSEC-FRTS bringup state machine.
+  `kernel/gpu/nvidia/bringup.{h,c}`. Generic `falcon_hs_boot()` helper
+  + VBIOS FWSEC split (`nvidia_vbios_get_fwsec_parts`) + DMEMMAPPER
+  patcher + nouveau-ga102 sig-index algorithm. 15 unit tests via
+  `make test-bringup`. Runs end-to-end on real RTX 3050 via
+  `gsp-harness --fwsec-frts`.
+
+**WIP (still in #27):**
+
+- **E3.4 (hardware completion)** — FWSEC ucode executes (MAILBOX0
+  goes from 0xCAFEBEEF sentinel to 0, confirming start) but Falcon
+  doesn't transition to HALTED. WPR2 registers stay at baseline.
+  Bounded register-level debug remaining; harness reports full
+  Falcon state at failure for fast iteration.
+- **E3.4.d** — Booter Load on SEC2 (DMA booter_load.bin parsed by
+  nvfw, program SEC2 BROM, set MAILBOX0/1 to WPR_meta phys, start).
+- **E3.4.e** — GSP RISC-V bringup (BCR_CTRL = VALID|RISCV|BRFETCH at
+  0x111668, set boot vector, release reset, poll RISCV_CPUCTL bit 7).
+
+**Tests landed:** 76 host-side unit tests across 4 suites
+(test-vbios 30, test-falcon 19, test-nvfw 14, test-bringup 15) +
+hardware integration via 5 harness actions
+(`--probe`, `--vbios`, `--falcons`, `--dma-test`, `--fwsec-frts`).
+
+**Reference.** Ported from nouveau's
+`drivers/gpu/drm/nouveau/nvkm/{falcon,subdev/gsp}/{ga102,r535}.c`
+plus NVIDIA `open-gpu-kernel-modules` 595 register headers. Twenty-
+plus reference files cached in `docs/reference/` for reproducibility.
+
+**Original est.** 10 days; **actual:** ~3 sessions of work shipped,
+remaining hardware-debug for FWSEC-FRTS execution unbounded but
+infrastructure complete.
 
 ---
 

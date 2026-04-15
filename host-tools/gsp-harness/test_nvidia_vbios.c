@@ -674,6 +674,58 @@ static void build_ampere_vbios(uint8_t *buf,
     if (out_payload_size) *out_payload_size = 44 + 0 + 64 + 32;    /* 140 */
 }
 
+static void test_fwsec_get_parts_splits_correctly(void)
+{
+    /* The Ampere VBIOS builder produces a V3 descriptor whose
+     * payload is laid out as desc(44) | sigs(0) | imem(64) | dmem(32).
+     * Confirm get_fwsec_parts returns pointers to each section
+     * with the right sizes — this is the API E3.4 bringup uses
+     * to extract IMEM/DMEM from the FWSEC payload. */
+    uint8_t *buf = calloc(1, AMPERE_VBIOS_SIZE);
+    uint32_t exp_off = 0, exp_size = 0;
+    build_ampere_vbios(buf, &exp_off, &exp_size);
+
+    struct nvidia_vbios vb;
+    REQUIRE(nvidia_vbios_parse(buf, AMPERE_VBIOS_SIZE, &vb) == 0);
+
+    struct nvidia_vbios_fwsec_parts p;
+    REQUIRE(nvidia_vbios_get_fwsec_parts(&vb, &p) == 0);
+
+    /* desc points at the 44-byte V3 header. */
+    REQUIRE(p.desc == buf + exp_off);
+
+    /* sigs immediately follow the header (zero size in this test). */
+    REQUIRE(p.sigs == buf + exp_off + 44);
+    REQUIRE(p.sigs_size == 0);
+
+    /* imem and dmem sizes match what build_ampere_vbios wrote. */
+    REQUIRE(p.imem_size == 64);
+    REQUIRE(p.dmem_size == 32);
+
+    /* imem starts at desc + 44 (since sigs_size = 0). */
+    REQUIRE(p.imem == buf + exp_off + 44);
+    /* dmem starts after imem. */
+    REQUIRE(p.dmem == buf + exp_off + 44 + 64);
+
+    free(buf);
+}
+
+static void test_fwsec_get_parts_rejects_no_fwsec(void)
+{
+    /* Pascal-shape VBIOS — no FWSEC entry. get_fwsec_parts must
+     * return -1 cleanly so bringup fails closed, not on a NULL deref. */
+    uint8_t buf[VBIOS_SIZE];
+    build_good_vbios(buf, 0x3E0, 10);
+    /* Overwrite FWSEC entry id to 'B' so it isn't found. */
+    buf[0x1E0 + 12 + 12 + 0] = 0x42;
+
+    struct nvidia_vbios vb;
+    REQUIRE(nvidia_vbios_parse(buf, sizeof(buf), &vb) == 0);
+
+    struct nvidia_vbios_fwsec_parts p;
+    REQUIRE(nvidia_vbios_get_fwsec_parts(&vb, &p) < 0);
+}
+
 static void test_ampere_fwsec_full_chain(void)
 {
     uint8_t *buf = calloc(1, AMPERE_VBIOS_SIZE);
@@ -821,6 +873,8 @@ int main(void)
     test_entry_at_bit_region_boundary();
 
     /* ---- Ampere multi-sub-image + PMU descriptor walk ---- */
+    test_fwsec_get_parts_splits_correctly();
+    test_fwsec_get_parts_rejects_no_fwsec();
     test_ampere_fwsec_full_chain();
     test_ampere_fwsec_rejects_ptr_past_fwsec2();
     test_ampere_fwsec_rejects_no_fwsec_prod_entry();

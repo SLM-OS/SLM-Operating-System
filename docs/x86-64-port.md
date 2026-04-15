@@ -2,7 +2,7 @@
 
 This document describes the x86-64 port of SLM-OS, including architecture details, boot sequence, build instructions, and design decisions.
 
-**Status:** Milestones M1–M7 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, NVIDIA RTX 3050 GPU identification + VRAM access, and topic-based message routing (pub/sub IPC). Phase E (GPU compute via GSP-RM) is actively in progress: E1 (firmware embedding) and E2 (shared VBIOS parser) have shipped; E2.5 (FWSEC discovery) is the current blocker — see `docs/x86-64-capstone-gap-closure-plan.md` and #143.
+**Status:** Milestones M1–M7 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, NVIDIA RTX 3050 GPU identification + VRAM access, and topic-based message routing (pub/sub IPC). Phase E (GPU compute via GSP-RM) is actively in progress: E1 (firmware embedding), E2 (shared VBIOS parser), E2.5 (FWSEC extraction), E3.1 (Falcon primitives), E3.2 (VFIO IOMMU DMA), and E3.3 (nvfw container parser) all shipped. E3.4 (FWSEC-FRTS execution on GSP Falcon) has the full scaffolding wired and runs end-to-end on real hardware, but the ucode itself stalls — bounded hardware-debug remaining. See `docs/x86-64-capstone-gap-closure-plan.md` and #27.
 
 ---
 
@@ -65,7 +65,7 @@ This document describes the x86-64 port of SLM-OS, including architecture detail
 | Message router (pub/sub) | ✅ | N/A | Topic-based IPC, yield-based delivery |
 | Echo IPC (shared mailbox) | ✅ | ✅ | Atomic mailbox, round-robin scheduling |
 | SSE inference kernels (relu/zero/add/fma) | ✅ | ✅ | C1 / P3-1 — C kernels `-msse -msse2`, called from Rust runtime |
-| GPU compute / 3D | ❌ | ❌ | Requires GSP firmware (Phase E — **in progress**; E1 + E2 shipped, E2.5 blocker at #143) |
+| GPU compute / 3D | ❌ | ❌ | Requires GSP firmware (Phase E — **in progress**; E1/E2/E2.5/E3.1–E3.3 shipped, E3.4 FWSEC-FRTS WIP at #27) |
 
 ### Milestone Completion
 
@@ -605,10 +605,14 @@ Registers belonging to uninitialized engines (PBUS, PMC_INTR) return 0xBADF5040 
 Full GPU compute requires loading the GSP (GPU System Processor) firmware — a 38 MB RISC-V binary that runs the GPU Resource Manager. This involves VBIOS parsing, SEC2 Falcon programming, cryptographic verification, and an RPC stack. GSP is mandatory on Ampere; there is no legacy register-programming mode.
 
 **Current progress:**
-- E1 (firmware embedding via `.incbin`) — shipped; `ENABLE_GSP_FIRMWARE` CMake option extracts from `/lib/firmware/nvidia/<chip>/gsp/` at build time.
-- E2 (shared VBIOS BIT-table parser) — shipped; lives at `kernel/gpu/nvidia/nvidia_vbios.{h,c}`, validated synthetically and against real GTX 1070 + RTX 3050 VBIOSes.
-- Linux userspace harness (`host-tools/gsp-harness/`) reproduces bringup over a vfio-pci-bound GPU with ~5-second iteration cycle.
-- E2.5 (FWSEC discovery on NPDS-format Ampere VBIOSes) — the current blocker. See `docs/x86-64-gsp-fwsec-investigation.md` and #143.
+- **E1** firmware embedding via `.incbin` — shipped. `ENABLE_GSP_FIRMWARE` CMake option extracts from `/lib/firmware/nvidia/<chip>/gsp/` at build time.
+- **E2** shared VBIOS BIT-table parser — shipped at `kernel/gpu/nvidia/nvidia_vbios.{h,c}`. Validated against real GTX 1070 + RTX 3050 VBIOSes.
+- **E2.5** FWSEC ucode extraction from VBIOS — shipped. PCIR/NPDS chain walker + nova-core PciAt|FwSec1|FwSec2 pointer math. `gsp-harness --vbios` reports 62,124-byte FWSEC payload.
+- **E3.1** Falcon v4 register map + DMA/halt/start primitives — shipped at `kernel/gpu/nvidia/falcon.{h,c}`. 19 unit tests + hardware-validated against GSP + SEC2 Falcons on RTX 3050.
+- **E3.2** Persistent VFIO session + IOMMU-mapped DMA — shipped at `host-tools/gsp-harness/vfio.{h,c}`. `gsp-harness --dma-test` confirms IOMMU-space IOVAs.
+- **E3.3** NVIDIA HS firmware container parser — shipped at `kernel/gpu/nvidia/nvfw.{h,c}`. 14 unit tests + validated against real R535 booter_load.bin (engine_id=SEC2, ucode_id=3).
+- **E3.4** FWSEC-FRTS bringup state machine — scaffolding shipped at `kernel/gpu/nvidia/bringup.{h,c}` with 15 unit tests for pure-logic helpers (sig-index algorithm, DMEMMAPPER patcher). Runs end-to-end on real hardware via `gsp-harness --fwsec-frts` — ucode executes (MAILBOX0 changes from sentinel) but doesn't transition to HALTED. Hardware-debug WIP, tracked in #27.
+- **Harness** (`host-tools/gsp-harness/`) — reproduces bringup over a vfio-pci-bound GPU with ~5-second iteration cycle.
 
 Execution plan: `docs/x86-64-capstone-gap-closure-plan.md` §E.
 

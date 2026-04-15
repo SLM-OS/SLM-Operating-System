@@ -93,6 +93,42 @@ static inline uint32_t fls32(uint32_t v)
     return n;
 }
 
+int gsp_bringup_select_sig_index(uint32_t fuse_reg, uint16_t sig_versions,
+                                 uint8_t sig_count)
+{
+    if (sig_count == 0) return -1;
+
+    /* Dev-kit / no-fuse case — match nova-core's fallback to the
+     * last available signature. Nouveau errors here; we accept it
+     * because retail cards always have non-zero fuse_reg and a
+     * dev-kit failing on signature picks the most recent sig. */
+    if (fuse_reg == 0)
+        return (int)sig_count - 1;
+
+    /* Nouveau ga102 algorithm:
+     *   reg_bit = 1 << fls(fuse_reg)
+     *   if !(reg_bit & sig_versions): no matching sig → error
+     *   idx = 0
+     *   while !(reg_bit & sig_versions & 1):
+     *       idx += sig_versions & 1
+     *       reg_bit >>= 1
+     *       sig_versions >>= 1
+     *   return idx
+     */
+    uint32_t reg_bit  = 1u << fls32(fuse_reg);
+    uint32_t working  = sig_versions;
+    if (!(reg_bit & working)) return -1;
+
+    uint32_t idx = 0;
+    while (!(reg_bit & working & 1u)) {
+        idx     += working & 1u;
+        reg_bit >>= 1;
+        working >>= 1;
+    }
+    if (idx >= sig_count) idx = sig_count - 1;
+    return (int)idx;
+}
+
 static inline void wr32le(uint8_t *p, uint32_t v)
 {
     p[0] = v & 0xffu;
@@ -109,16 +145,11 @@ static inline uint32_t rd32le(const uint8_t *p)
          | ((uint32_t)p[3] << 24);
 }
 
-/*
- * Walk the DMEMMAPPER app-interface table in @dmem looking for the
- * entry with id = 0x04. Writes init_cmd = FRTS and the frts_region
- * struct (type=FB, addr/size shifted >>12) at the locations the
- * ucode expects. Returns 0 on success, -1 if the interface table
- * looks malformed or DMEMMAPPER isn't present.
- */
-static int patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
-                                 uint32_t interface_off,
-                                 uint64_t wpr_addr, uint64_t wpr_size)
+/* Public entry point — declared in bringup.h. Logic body below
+ * is shared with the static __ test wrapper. */
+int gsp_bringup_patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
+                                      uint32_t interface_off,
+                                      uint64_t wpr_addr, uint64_t wpr_size)
 {
     if (interface_off + 4 > dmem_size) return -1;
     uint8_t *itab = dmem + interface_off;
@@ -301,22 +332,9 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
      * (bits set in sig_versions) are indexed in order of the
      * register's position — counting how many SUPPORTED fuse
      * versions come BEFORE the currently-burned one. */
-    uint32_t sig_index = 0;
-    if (fuse_reg == 0 || sig_count == 0) {
-        /* Dev-kit case — nouveau errors; we fall through to the
-         * last sig which matches nova-core's behavior. */
-        sig_index = sig_count > 0 ? (uint32_t)sig_count - 1u : 0u;
-    } else {
-        uint32_t reg_bit      = 1u << fls32(fuse_reg);
-        uint32_t working_sigv = sig_versions;
-        if (!(reg_bit & working_sigv)) goto fail_free;    /* no matching sig */
-        while (!(reg_bit & working_sigv & 1u)) {
-            sig_index += working_sigv & 1u;
-            reg_bit    >>= 1;
-            working_sigv >>= 1;
-        }
-    }
-    if (sig_index >= sig_count) sig_index = sig_count - 1;
+    int isig = gsp_bringup_select_sig_index(fuse_reg, sig_versions, sig_count);
+    if (isig < 0) goto fail_free;    /* no matching sig — fail closed */
+    uint32_t sig_index = (uint32_t)isig;
     b->diag_sig_index = sig_index;
 
     if (b->fwsec_sigs_size < sig_size * (sig_index + 1)) goto fail_free;
@@ -328,9 +346,9 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
 
     /* Patch DMEMMAPPER in the DMA'd DMEM with our FRTS request. */
     b->last_error_phase = 2;
-    if (patch_dmemmapper_frts(b->dma_dmem_va, b->dma_dmem_size,
-                              b->fwsec_interface_offset,
-                              b->wpr2_addr, b->wpr2_size) < 0) {
+    if (gsp_bringup_patch_dmemmapper_frts(b->dma_dmem_va, b->dma_dmem_size,
+                                          b->fwsec_interface_offset,
+                                          b->wpr2_addr, b->wpr2_size) < 0) {
         goto fail_free;
     }
 

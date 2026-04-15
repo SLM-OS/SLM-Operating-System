@@ -249,6 +249,24 @@ test-nvfw:
 	    kernel/gpu/nvidia/nvfw.c
 	@./build/host-tools/test_nvfw
 
+# GSP-RM bringup logic unit tests — pure functions only (sig-index
+# algorithm, DMEMMAPPER patcher). Hardware integration is exercised
+# via `gsp-harness --fwsec-frts` against a real GPU.
+.PHONY: test-bringup
+test-bringup:
+	@mkdir -p build/host-tools
+	@echo "Building + running bringup logic tests..."
+	$(CC) -std=c11 -Wall -Wextra -O2 -g \
+	    -Ihost-tools/gsp-harness -Ikernel/gpu/nvidia \
+	    -DSLM_HOST_HARNESS=1 \
+	    -o build/host-tools/test_bringup \
+	    host-tools/gsp-harness/test_bringup.c \
+	    kernel/gpu/nvidia/bringup.c \
+	    kernel/gpu/nvidia/falcon.c \
+	    kernel/gpu/nvidia/nvidia_vbios.c \
+	    kernel/gpu/nvidia/gsp.c
+	@./build/host-tools/test_bringup
+
 # Falcon v4 driver unit tests — uses a mock BAR0 vtable, no GPU
 # required. Exercises probe, reset/scrub, halt polling, DMA protocol,
 # alignment checks, 40-bit IOVA splitting.

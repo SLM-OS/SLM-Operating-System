@@ -6,14 +6,17 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 
 ## 1. GPU Compute
 
-**Current state (2026-04-14):** GPU memory integration works (cache coherency, alloc/free). GPU probe detects NVIDIA hardware. Phase E (GSP-RM bringup) is actively in progress — no longer deferred post-capstone.
+**Current state (2026-04-15):** GPU memory integration works (cache coherency, alloc/free). GPU probe detects NVIDIA hardware. Phase E (GSP-RM bringup) is actively in progress — no longer deferred post-capstone.
 
 - **E1** — firmware embedding via `.incbin`: ✅ shipped.
 - **E2** — shared VBIOS BIT-table parser (`kernel/gpu/nvidia/nvidia_vbios.{h,c}`): ✅ shipped, validated on real GTX 1070 + RTX 3050.
-- **Linux userspace harness** (`host-tools/gsp-harness/`): ✅ shipped, mmaps BAR0/BAR1 via vfio-pci for ~5-second iteration cycles on test-pc.
-- **E2.5** — FWSEC ucode discovery on NPDS-format Ampere VBIOSes: 🔴 **current blocker**. See [#143](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/143) + `docs/x86-64-gsp-fwsec-investigation.md`.
-- **E3** — Falcon/RISC-V bringup: ⏸️ blocked on E2.5. Tracked by [#27](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/27).
-- **E4** — GSP-RM RPC ring: ⏸️ blocked on E3. Tracked by [#28](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/28).
+- **E2.5** — FWSEC ucode extraction from VBIOS: ✅ shipped + closed (#143). 62-KB FWSEC payload extracted cleanly via BAR0 PROM window (NV_PROM_DATA at 0x300000) + nova-core PciAt|FwSec1|FwSec2 pointer math.
+- **E3.1** — Falcon v4 register map + DMA/halt/start primitives: ✅ shipped, 19 unit tests + hardware-validated.
+- **E3.2** — VFIO IOMMU + IOMMU-mapped DMA: ✅ shipped, hardware-validated.
+- **E3.3** — NVIDIA HS firmware container parser (nvfw_bin_hdr): ✅ shipped, 14 unit tests + validated against real R535 booter_load.bin.
+- **E3.4** — FWSEC-FRTS bringup state machine: 🟡 scaffolding shipped + 15 unit tests; ucode executes on real RTX 3050 but doesn't halt (WIP — bounded debug remaining). Tracked by [#27](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/27).
+- **Linux userspace harness** (`host-tools/gsp-harness/`): ✅ shipped, six actions (`--probe`/`--vbios`/`--falcons`/`--dma-test`/`--fwsec-frts`/`--bringup`) for ~5-second hardware iteration on test-pc.
+- **E4** — GSP-RM RPC ring: ⏸️ blocked on E3 hardware completion. Tracked by [#28](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/28).
 - **E5/E6** — compute engine + full inference: ⏸️ blocked on E4. Tracked by #29/#30.
 
 ### TensorRT Integration (still post-capstone)

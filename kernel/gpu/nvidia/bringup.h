@@ -113,4 +113,47 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b);
 int gsp_bringup_booter_load(struct gsp_bringup *b);   /* TODO */
 int gsp_bringup_riscv_start(struct gsp_bringup *b);   /* TODO */
 
+/* ---- Pure-logic helpers exposed for unit testing ----
+ *
+ * These are called from inside the FWSEC-FRTS state machine but
+ * have no GPU dependency — they're plain byte-shuffling and
+ * arithmetic that's worth testing in isolation. */
+
+/*
+ * Patch the DMEMMAPPER application interface in @dmem to request
+ * FRTS, with the WPR2 region pointed at by (@wpr_addr, @wpr_size).
+ *
+ * Walks the app-interface table at @dmem[interface_off] looking for
+ * id = 0x04, then writes:
+ *   - init_cmd = 0x15 (FRTS) at app.dmem_base + 0x2c
+ *   - read_vbios sub-struct (24 bytes) at app.cmd_in_buffer_offset
+ *   - frts_region (20 bytes) at app.cmd_in_buffer_offset + 24
+ *
+ * Returns 0 on success, -1 if the interface table is malformed,
+ * DMEMMAPPER isn't present, or any write would overrun @dmem_size.
+ *
+ * Pure function (no platform-vtable calls) — caller is responsible
+ * for memcpy'ing the result into the DMA buffer.
+ */
+int gsp_bringup_patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
+                                      uint32_t interface_off,
+                                      uint64_t wpr_addr, uint64_t wpr_size);
+
+/*
+ * Pick the FWSEC signature index to patch into DMEM. Wraps the
+ * exact algorithm from nouveau ga102_gsp_fwsec_signature.
+ *
+ *   @fuse_reg     — value read from BAR0 fuse register
+ *                   (0x8241C0 + (ucode_id-1)*4)
+ *   @sig_versions — V3 descriptor's SignatureVersions field
+ *   @sig_count    — V3 descriptor's SignatureCount field
+ *
+ * Returns the chosen index (0..sig_count-1) on success. Returns
+ * -1 if no signature in the ucode matches the chip's fuse version.
+ *
+ * Pure function — no register reads, all inputs explicit.
+ */
+int gsp_bringup_select_sig_index(uint32_t fuse_reg, uint16_t sig_versions,
+                                 uint8_t sig_count);
+
 #endif /* GPU_NVIDIA_BRINGUP_H */
