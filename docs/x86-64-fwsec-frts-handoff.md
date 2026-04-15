@@ -1,6 +1,6 @@
 # E3.4 FWSEC-FRTS hardware completion — handoff doc
 
-**Last updated:** 2026-04-15 (session 2 — probes A, 4.1, 4.2, 4.3 done; new hypothesis: missing DEVINIT)
+**Last updated:** 2026-04-15 (session 2 — root cause identified: VBIOS DEVINIT never ran on the RTX 3050)
 **Owner role:** open
 **Tracking issue:** [#27](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/27)
 **Companion docs:**
@@ -98,43 +98,65 @@ post-timeout samples (100 ms apart):
 eventually times out internally, and halts without doing FRTS/SB
 work. We need to find what it's waiting for.
 
-### 0.4 Hypothesis for the next session — missing DEVINIT
+### 0.4 Root cause — VBIOS DEVINIT never ran on the RTX 3050 ✅
 
-Strongest remaining candidate, not yet tested:
+**Confirmed via `gsp-harness --check-devinit` on test-pc
+(2026-04-15):**
 
-**test-pc's RTX 3050 may never have had VBIOS DEVINIT executed.**
+```
+[GSP-HARNESS] DEVINIT check:
+  0x118128 (GR5 PLM)         = 0x00008b8f  (bit 0 SET — scratch readable)
+  0x118234 (GR5_SCRATCH[0])  = 0x00000101  (byte 0 = 0x01 — DEVINIT NOT done)
+[GSP-HARNESS] Verdict: VBIOS DEVINIT has NOT completed.
+```
 
-- DEVINIT is the early-boot init script in the GPU's VBIOS. It sets
-  up the memory controller (NV_PFB), clock trees, PCIe lane config,
-  and other hardware state that later stages (including FWSEC)
-  depend on.
-- UEFI firmware runs DEVINIT only on the *primary display*. On
-  test-pc, the primary display is the i7-6700's iGPU (the HDMI is
-  wired to the mobo, not the dGPU). So UEFI likely never ran the
-  RTX 3050's VBIOS.
-- At Linux boot, `vfio-pci` binds the dGPU without running DEVINIT.
-  Nouveau / nova-core *do* run DEVINIT at probe time; our harness
-  does not.
-- If DEVINIT hasn't run, FB memory is uninitialized, some PRI
-  blocks may be gated off, and FWSEC's expectation of "VBIOS already
-  applied" fails → it waits for something that will never happen →
-  internal timeout → halt with no output.
+`NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0]` byte 0 should read `0xff`
+after DEVINIT success (nouveau's `tu102_devinit_wait`,
+`drivers/gpu/drm/nouveau/nvkm/subdev/devinit/tu102.c`). We see
+`0x01` — so DEVINIT has never completed on this GPU.
 
-**Next probes:**
+**Why:** The RTX 3050 is NOT test-pc's primary display (the i7-6700
+iGPU has the HDMI). UEFI runs VBIOS DEVINIT only on the primary, so
+our dGPU stayed uninitialized at boot. `vfio-pci` then bound the
+device without running DEVINIT either (by design — VFIO is transport-
+only; it's nouveau / nova-core that would run DEVINIT during probe).
 
-1. **Check if DEVINIT was run.** Read `NV_PGC6_BSI_VBIOS_GOLD_DONE`
-   (or equivalent) — nouveau checks this as the "devinit already
-   ran" flag. If clear, DEVINIT wasn't run.
-2. **Plumb DEVINIT into the harness.** The VBIOS carries a DEVINIT
-   script (in the BIT table). Nouveau's
-   `nvkm_devinit_post()` / `ga100_devinit_post()` walks it. This is
-   a significant piece of work but is the most likely root-cause
-   fix.
-3. **Alternative fast test:** temporarily boot the dGPU as primary
-   display (swap HDMI cable, or disable iGPU in BIOS) so UEFI runs
-   DEVINIT, then rebind to `vfio-pci` and re-run `--fwsec-frts`. If
-   that works, we've confirmed the hypothesis and know the long-term
-   fix is to plumb DEVINIT into SLM-OS itself.
+Without DEVINIT:
+- Memory controller clocks and training are not applied.
+- Some PRI blocks stay gated (we see `DMACTL=0x80` post-FWSEC,
+  likely an "access-denied" indication).
+- FWSEC's common prologue reaches a phase that depends on some
+  POST-state invariant, writes `0xda55` to DEBUGINFO, waits for
+  whatever it expects to be true, eventually halts after a long
+  internal timeout without writing WPR2 or OS.
+
+**Fix options, ordered by effort:**
+
+1. **Swap HDMI to the dGPU** (or disable the iGPU in BIOS) so UEFI
+   runs DEVINIT on the RTX 3050 at boot. Then rebind to `vfio-pci`
+   and rerun `--fwsec-frts`. Cheapest validation of the fix;
+   user-only action (physical access + UEFI). This is the
+   recommended next step.
+
+2. **Temporarily bind the proprietary `nvidia` driver** (which runs
+   DEVINIT) to the dGPU, let it probe, then unbind and rebind
+   `vfio-pci`. Works on systems with the nvidia driver available;
+   test-pc currently has only `vfio-pci` staged, so this needs
+   `apt install nvidia-driver-550` (or similar) + initramfs update.
+
+3. **Implement a VBIOS init-script interpreter in the harness /
+   SLM-OS.** Walk the DEVINIT script table from the BIT header,
+   interpret each opcode (INIT_IO, INIT_COPY, INIT_DELAY, etc.),
+   and apply it to the GPU. Substantial work — nouveau's
+   `nvkm_bios_init*` is ~2500 lines. But it's the real long-term
+   fix because SLM-OS won't have UEFI-DEVINIT help on arbitrary
+   hosts, and requiring the nvidia driver is a non-starter.
+
+**Harness support added this session:**
+`--check-devinit` runs the nouveau-equivalent check against the
+live GPU. Returns rc=0 if DEVINIT has completed, rc=2 if not. Use
+this as a pre-flight check on any new test host before running
+`--fwsec-frts`.
 
 ### 0.5 Harness additions landed this session
 
@@ -160,6 +182,10 @@ Strongest remaining candidate, not yet tested:
   failure dump (10 × 100 ms). This is how §0.3 was measured.
 - `FALCON_HALT_TIMEOUT_US` bumped from 2 s to 5 s. Still catches the
   halt one sample too late on test-pc, but closer.
+- `--check-devinit` action: reads the nouveau
+  `tu102_devinit_wait` scratch pair (BAR0+0x118128 bit 0,
+  BAR0+0x118234 byte 0) and reports whether VBIOS DEVINIT has
+  completed. rc=0 if done, rc=2 if not.
 
 ---
 

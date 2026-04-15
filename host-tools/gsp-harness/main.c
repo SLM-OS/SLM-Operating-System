@@ -66,6 +66,12 @@ static void usage(const char *argv0)
 "                   CPUCTL / OS at 1/10/50/200/500/1000/2000 ms to\n"
 "                   disambiguate 'stuck at one instruction' from\n"
 "                   'slow progress'. See handoff §4.2.\n"
+"  --check-devinit  Read the NV_PGC6_AON_SECURE_SCRATCH_GROUP_05\n"
+"                   registers (BAR0+0x118128 / +0x118234) to decide\n"
+"                   whether the GPU's VBIOS DEVINIT has completed.\n"
+"                   Matches nouveau's tu102_devinit_wait check. If\n"
+"                   DEVINIT hasn't run, FWSEC-FRTS is expected to\n"
+"                   hang/abort without progress. See handoff §0.4.\n"
 "  --booter-load    Run Booter Load on SEC2 (E3.4.d). Requires that\n"
 "                   --fwsec-frts succeeded; reuses the WPR2 setup.\n"
 "  --riscv-start    Flip GSP into RISC-V mode and start the core\n"
@@ -93,7 +99,7 @@ int main(int argc, char **argv)
     bool trace           = false;
     enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_FALCONS, ACT_DMA_TEST,
            ACT_FWSEC_FRTS, ACT_FWSEC_SB, ACT_FWSEC_TRACE,
-           ACT_BOOTER_LOAD, ACT_RISCV_START,
+           ACT_CHECK_DEVINIT, ACT_BOOTER_LOAD, ACT_RISCV_START,
            ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
     int phase = -1;
 
@@ -107,6 +113,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--fwsec-frts") == 0)  { action = ACT_FWSEC_FRTS; }
         else if (strcmp(a, "--fwsec-sb") == 0)    { action = ACT_FWSEC_SB; }
         else if (strcmp(a, "--fwsec-trace") == 0) { action = ACT_FWSEC_TRACE; }
+        else if (strcmp(a, "--check-devinit") == 0) { action = ACT_CHECK_DEVINIT; }
         else if (strcmp(a, "--booter-load") == 0) { action = ACT_BOOTER_LOAD; }
         else if (strcmp(a, "--riscv-start") == 0) { action = ACT_RISCV_START; }
         else if (strcmp(a, "--bringup") == 0) { action = ACT_BRINGUP; }
@@ -148,6 +155,40 @@ int main(int argc, char **argv)
                eng,
                eng == 0xBADF5040 ? " (GSP not loaded — expected)" : "");
         return 0;
+    }
+    case ACT_CHECK_DEVINIT: {
+        /* Matches nouveau tu102_devinit_wait:
+         *
+         *   if (rd32(0x118128) & 0x1)             // GR5 PLM allows read
+         *     if ((rd32(0x118234) & 0xff) == 0xff) // DEVINIT done
+         *       OK
+         *
+         * On GA10x, 0x118128 is
+         * NV_PGC6_AON_SECURE_SCRATCH_GROUP_05_PRIV_LEVEL_MASK and
+         * 0x118234 is NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0]. The
+         * byte-0 = 0xff convention is written by the VBIOS init-script
+         * engine at the end of POST/DEVINIT on Turing+.
+         *
+         * Reference: nouveau drivers/gpu/drm/nouveau/nvkm/subdev/
+         *            devinit/tu102.c:tu102_devinit_wait. */
+        uint32_t plm  = gsp_platform->read32(0x00118128);
+        uint32_t scr0 = gsp_platform->read32(0x00118234);
+        bool plm_ok   = (plm & 0x1u) != 0;
+        bool scr0_ok  = (scr0 & 0xffu) == 0xffu;
+        printf("[GSP-HARNESS] DEVINIT check:\n");
+        printf("                0x118128 (GR5 PLM)           = 0x%08x  (bit 0 %s)\n",
+               plm,  plm_ok  ? "SET  — scratch readable" : "CLR  — readable from priv?");
+        printf("                0x118234 (GR5_SCRATCH[0])    = 0x%08x  (byte 0 = 0x%02x %s)\n",
+               scr0, scr0 & 0xffu,
+               scr0_ok ? "— DEVINIT done" : "— DEVINIT NOT done / not run");
+        if (plm_ok && scr0_ok) {
+            printf("[GSP-HARNESS] Verdict: VBIOS DEVINIT has completed on this GPU.\n");
+            return 0;
+        }
+        printf("[GSP-HARNESS] Verdict: VBIOS DEVINIT has NOT completed.\n"
+               "                This matches the hypothesis that FWSEC-FRTS fails\n"
+               "                because uninitialized hardware state is missing.\n");
+        return 2;
     }
     case ACT_VBIOS: {
         const uint8_t *raw = NULL;
