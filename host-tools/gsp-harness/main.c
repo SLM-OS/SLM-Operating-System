@@ -136,18 +136,42 @@ int main(int argc, char **argv)
         printf("[GSP-HARNESS] BIT @0x%x: hdr_size=%u entry_size=%u entries=%u\n",
                vb.bit_offset, vb.hdr_size, vb.entry_size, vb.num_entries);
 
+        /* Sub-image map — useful for E2.5 debugging. */
+        printf("[GSP-HARNESS] sub-images (%u):\n", vb.num_subimages);
+        for (uint8_t i = 0; i < vb.num_subimages; i++) {
+            const struct nvidia_vbios_subimage *si = &vb.subimages[i];
+            const char *n =
+                (si->code_type == VBIOS_CODE_TYPE_X86)       ? "PciAt (x86 legacy)" :
+                (si->code_type == VBIOS_CODE_TYPE_EFI)       ? "EFI" :
+                (si->code_type == VBIOS_CODE_TYPE_VBIOS_EXT) ? "FwSec (VBIOS_EXT)" :
+                "other";
+            printf("              [%u] @0x%06x  code_type=0x%02x (%-20s)  len=%u\n",
+                   i, si->offset, si->code_type, n, si->length);
+        }
+
         const void *fw = NULL; size_t fw_size = 0;
         if (gsp_platform->vbios_get_fwsec(&fw, &fw_size) == 0) {
             printf("[GSP-HARNESS] FWSEC: %zu bytes @ %p\n", fw_size, fw);
         } else {
-            /* Validated 2026-04-14: production Ampere VBIOSes have
-             * NO BIT entry with id 0x85. FWSEC really lives inside
-             * PMU ucode descriptors reachable from the 'I' (init)
-             * BIT entry. Walking that path is an E3 prereq. */
-            printf("[GSP-HARNESS] FWSEC: not found via top-level BIT lookup\n"
-                   "                  (expected on production Turing/Ampere —\n"
-                   "                   real FWSEC discovery via PMU descriptors\n"
-                   "                   is an E3 prereq, not yet implemented)\n");
+            /* FWSEC discovery implements the full nova-core path
+             * (BIT 'p' → FalconUcodeTablePtr → PciAt|FwSec1|FwSec2
+             * concatenated offset → PMU table → FWSEC_PROD entry →
+             * FalconUCodeDescV3 header → payload size). Common failure
+             * cause on GA107: NPDS declares FwSec2 length larger than
+             * what fits in the 512 KB ROM BAR, so the pointer resolves
+             * past the bytes the BAR exposes. This isn't a Linux
+             * truncation (we read via /dev/mem to bypass kernel-side
+             * caps); it's that the GPU literally only exposes 512 KB
+             * of its ~568 KB SPI-flash VBIOS through the ROM BAR. The
+             * remaining 56 KB lives in flash regions reachable only
+             * via chip-specific paths — see #150. */
+            printf("[GSP-HARNESS] FWSEC: not extractable from this image\n"
+                   "                  (possible causes: Pascal-era card with no\n"
+                   "                   FwSec entries, missing BIT 'p' entry, or — most\n"
+                   "                   common on GA107 — the GPU's ROM BAR exposes only\n"
+                   "                   the first ~512 KB of an >568 KB VBIOS, and FWSEC\n"
+                   "                   lives in the missing tail. See issue #150 for the\n"
+                   "                   work to read the rest via PRAMIN / VRAM shadow.)\n");
         }
         return 0;
     }

@@ -55,6 +55,19 @@ static void build_good_vbios(uint8_t *buf,
     buf[1] = 0xAA;
     buf[2] = 2;                         /* 2 × 512 = 1024 bytes */
 
+    /* PCIR sub-image record — new in 2026-04-14 to satisfy the
+     * sub-image chain walker. The synthetic single-image VBIOS is a
+     * PciAt-only shape: code_type=0x00, indicator=0x80 (LAST). */
+    buf[0x18] = 0x80; buf[0x19] = 0x00;    /* pcir_ptr = 0x80 */
+    uint32_t pcir = 0x80;
+    buf[pcir+0]='P'; buf[pcir+1]='C'; buf[pcir+2]='I'; buf[pcir+3]='R';
+    buf[pcir+4]=0xDE; buf[pcir+5]=0x10;    /* vendor 0x10DE */
+    buf[pcir+6]=0x84; buf[pcir+7]=0x25;    /* device 0x2584 */
+    buf[pcir+0x0A]=0x18; buf[pcir+0x0B]=0; /* pcir_len = 24 */
+    buf[pcir+0x10]=0x02; buf[pcir+0x11]=0; /* img_len = 2 blocks = 1024 */
+    buf[pcir+0x14]=0x00;                    /* code_type = x86 legacy */
+    buf[pcir+0x15]=0x80;                    /* indicator = LAST */
+
     /* BIT signature at 0x1E0. */
     uint32_t bit = 0x1E0;
     buf[bit + 0] = 0xFF;
@@ -454,6 +467,17 @@ static void test_bit_signature_deep_scan(void)
     buf[0] = 0x55; buf[1] = 0xAA;
     buf[2] = 16;   /* 16 × 512 = 8192 bytes */
 
+    /* Include a PCIR so the sub-image chain walker is satisfied. */
+    buf[0x18] = 0x80; buf[0x19] = 0;
+    uint32_t pcir = 0x80;
+    buf[pcir+0]='P'; buf[pcir+1]='C'; buf[pcir+2]='I'; buf[pcir+3]='R';
+    buf[pcir+4]=0xDE; buf[pcir+5]=0x10;
+    buf[pcir+6]=0x84; buf[pcir+7]=0x25;
+    buf[pcir+0x0A]=0x18; buf[pcir+0x0B]=0;
+    buf[pcir+0x10]=0x10; buf[pcir+0x11]=0;  /* 16 blocks = 8192 */
+    buf[pcir+0x14]=0x00;
+    buf[pcir+0x15]=0x80;    /* LAST */
+
     uint32_t bit = 0x1200;   /* 4608 — well beyond the usual 0x1E0 */
     buf[bit+0] = 0xFF; buf[bit+1] = 0xB8;
     buf[bit+2] = 'B'; buf[bit+3] = 'I'; buf[bit+4] = 'T'; buf[bit+5] = 0;
@@ -502,6 +526,242 @@ static void test_reject_entry_overlaps_bit_table(void)
 
     uint32_t off = 0, len = 0;
     REQUIRE(nvidia_vbios_find_entry(&vb, VBIOS_BIT_ID_I, 1, &off, &len) < 0);
+}
+
+/* ---- Multi-sub-image + Falcon ucode table tests (2026-04-14) ----
+ *
+ * Build a synthetic Ampere-shape VBIOS with PciAt + FwSec1 + FwSec2
+ * sub-images, a BIT 'p' entry carrying a FalconUcodeTablePtr, a
+ * Falcon ucode table with one FWSEC_PROD entry, and a
+ * FalconUCodeDescV3 + IMEM + DMEM payload. Confirms the full
+ * nova-core-style extraction path returns the right pointer + size.
+ */
+#define AMPERE_VBIOS_SIZE   (16 * 1024)
+
+static void build_ampere_vbios(uint8_t *buf,
+                               uint32_t *out_payload_off,
+                               uint32_t *out_payload_size)
+{
+    memset(buf, 0, AMPERE_VBIOS_SIZE);
+
+    /* Layout (bytes):
+     *   0x0000 .. 0x0FFF  PciAt (4 KB)  — 0x55AA + PCIR + BIT
+     *   0x1000 .. 0x1FFF  FwSec1 (4 KB) — 0x55AA + NPDS, payload filler
+     *   0x2000 .. 0x3FFF  FwSec2 (8 KB) — 0x55AA + NPDS + PMU table
+     *                                     + FWSEC descriptor
+     */
+    uint32_t pciat_off = 0x0000;
+    uint32_t fw1_off   = 0x1000;
+    uint32_t fw2_off   = 0x2000;
+    uint32_t pciat_len = 0x1000;
+    uint32_t fw1_len   = 0x1000;
+    uint32_t fw2_len   = 0x2000;
+
+    /* ---- PciAt image ---- */
+    buf[pciat_off+0] = 0x55;
+    buf[pciat_off+1] = 0xAA;
+    buf[pciat_off+2] = pciat_len / 512;
+    /* PCIR at offset 0x80 */
+    buf[pciat_off+0x18] = 0x80; buf[pciat_off+0x19] = 0;
+    {
+        uint32_t pcir = pciat_off + 0x80;
+        buf[pcir+0]='P'; buf[pcir+1]='C'; buf[pcir+2]='I'; buf[pcir+3]='R';
+        buf[pcir+4]=0xDE; buf[pcir+5]=0x10;
+        buf[pcir+6]=0x84; buf[pcir+7]=0x25;
+        buf[pcir+0x0A]=0x18; buf[pcir+0x0B]=0;        /* pcir_len */
+        buf[pcir+0x10]=pciat_len/512; buf[pcir+0x11]=0; /* img_len */
+        buf[pcir+0x14]=0x00;                            /* code_type x86 */
+        buf[pcir+0x15]=0x00;                            /* NOT LAST */
+    }
+
+    /* BIT at 0x200, with a 'p' entry pointing to the PMU table */
+    uint32_t bit = 0x200;
+    buf[bit+0]=0xFF; buf[bit+1]=0xB8;
+    buf[bit+2]='B'; buf[bit+3]='I'; buf[bit+4]='T'; buf[bit+5]=0;
+    buf[bit+8]=12; buf[bit+9]=6; buf[bit+10]=1;  /* 1 entry */
+
+    /* Entry 0: 'p' (0x70) v2 — 4 bytes of data pointing at 0x400 */
+    uint32_t ent = bit + 12;
+    buf[ent+0]=VBIOS_BIT_ID_FALCON_DATA;
+    buf[ent+1]=2;
+    buf[ent+2]=4; buf[ent+3]=0;
+    buf[ent+4]=0x00; buf[ent+5]=0x04;  /* data_offset = 0x400 */
+
+    /* FalconUcodeTablePtr placed at 0x400 inside PciAt.
+     * We want the target address (after PciAt|FwSec1|FwSec2 math) to
+     * land inside FwSec2 at offset 0x100 (absolute 0x2100).
+     * Pointer formula (nova-core):
+     *   target_in_concat = PciAt_len + FwSec1_len + offset_in_fwsec2
+     *                    = 0x1000 + 0x1000 + 0x100
+     *                    = 0x2100
+     */
+    uint32_t falcon_ptr = pciat_len + fw1_len + 0x100;
+    buf[0x400]=falcon_ptr & 0xff;
+    buf[0x401]=(falcon_ptr >> 8) & 0xff;
+    buf[0x402]=(falcon_ptr >> 16) & 0xff;
+    buf[0x403]=(falcon_ptr >> 24) & 0xff;
+
+    /* ---- FwSec1 image (4 KB) ---- */
+    buf[fw1_off+0] = 0x55;
+    buf[fw1_off+1] = 0xAA;
+    buf[fw1_off+2] = fw1_len / 512;
+    /* NPDS at offset 0x80 */
+    buf[fw1_off+0x18] = 0x80; buf[fw1_off+0x19] = 0;
+    {
+        uint32_t pcir = fw1_off + 0x80;
+        buf[pcir+0]='N'; buf[pcir+1]='P'; buf[pcir+2]='D'; buf[pcir+3]='S';
+        buf[pcir+4]=0xDE; buf[pcir+5]=0x10;
+        buf[pcir+6]=0x84; buf[pcir+7]=0x25;
+        buf[pcir+0x0A]=0x18; buf[pcir+0x0B]=0;
+        buf[pcir+0x10]=fw1_len/512; buf[pcir+0x11]=0;
+        buf[pcir+0x14]=0xE0;                            /* code_type FwSec */
+        buf[pcir+0x15]=0x00;                            /* NOT LAST */
+    }
+
+    /* ---- FwSec2 image (8 KB) ---- */
+    buf[fw2_off+0] = 0x55;
+    buf[fw2_off+1] = 0xAA;
+    buf[fw2_off+2] = fw2_len / 512;
+    buf[fw2_off+0x18] = 0x80; buf[fw2_off+0x19] = 0;
+    {
+        uint32_t pcir = fw2_off + 0x80;
+        buf[pcir+0]='N'; buf[pcir+1]='P'; buf[pcir+2]='D'; buf[pcir+3]='S';
+        buf[pcir+4]=0xDE; buf[pcir+5]=0x10;
+        buf[pcir+6]=0x84; buf[pcir+7]=0x25;
+        buf[pcir+0x0A]=0x18; buf[pcir+0x0B]=0;
+        buf[pcir+0x10]=fw2_len/512; buf[pcir+0x11]=0;
+        buf[pcir+0x14]=0xE0;
+        buf[pcir+0x15]=0x80;                            /* LAST */
+    }
+
+    /* PMU table at FwSec2 offset 0x100 (absolute 0x2100).
+     * FALCON_UCODE_TABLE_HDR_V1: version=1, hdr=6, entry_size=6,
+     *   entry_count=1, desc_version=3 (V3 = Ampere), desc_size=44. */
+    uint32_t tbl = fw2_off + 0x100;
+    buf[tbl+0]=1; buf[tbl+1]=6; buf[tbl+2]=6;
+    buf[tbl+3]=1; buf[tbl+4]=3; buf[tbl+5]=44;
+
+    /* One entry: app_id=FWSEC_PROD, target=0, desc_ptr → 0x200 in FwSec2.
+     * Pointer math (same scheme): concatenated offset =
+     *   PciAt_len + FwSec1_len + 0x200 = 0x2200. */
+    uint32_t entry = tbl + 6;
+    uint32_t desc_ptr = pciat_len + fw1_len + 0x200;
+    buf[entry+0]=VBIOS_FALCON_APPID_FWSEC_PROD;
+    buf[entry+1]=0;
+    buf[entry+2]=desc_ptr & 0xff;
+    buf[entry+3]=(desc_ptr >> 8) & 0xff;
+    buf[entry+4]=(desc_ptr >> 16) & 0xff;
+    buf[entry+5]=(desc_ptr >> 24) & 0xff;
+
+    /* FalconUCodeDescV3 header at FwSec2 offset 0x200 (absolute 0x2200).
+     *   hdr = (size << 16) | (ver << 8) | 1
+     *   ver = 3, size = 44 */
+    uint32_t desc = fw2_off + 0x200;
+    uint32_t hdr = (44u << 16) | (3u << 8) | 1u;
+    buf[desc+0]=hdr & 0xff;
+    buf[desc+1]=(hdr>>8) & 0xff;
+    buf[desc+2]=(hdr>>16) & 0xff;
+    buf[desc+3]=(hdr>>24) & 0xff;
+
+    /* imem_load_size at offset 20 (V3) = 64 bytes */
+    buf[desc+20]=64; buf[desc+21]=0; buf[desc+22]=0; buf[desc+23]=0;
+    /* dmem_load_size at offset 32 = 32 bytes */
+    buf[desc+32]=32; buf[desc+33]=0; buf[desc+34]=0; buf[desc+35]=0;
+    /* sig_count at offset 39 = 0 (no signatures for test) */
+    buf[desc+39]=0;
+
+    if (out_payload_off)  *out_payload_off  = desc;
+    if (out_payload_size) *out_payload_size = 44 + 0 + 64 + 32;    /* 140 */
+}
+
+static void test_ampere_fwsec_full_chain(void)
+{
+    uint8_t *buf = calloc(1, AMPERE_VBIOS_SIZE);
+    uint32_t exp_off = 0, exp_size = 0;
+    build_ampere_vbios(buf, &exp_off, &exp_size);
+
+    struct nvidia_vbios vb;
+    REQUIRE(nvidia_vbios_parse(buf, AMPERE_VBIOS_SIZE, &vb) == 0);
+    REQUIRE(vb.num_subimages == 3);
+    REQUIRE(vb.pciat_idx == 0);
+    REQUIRE(vb.first_fwsec_idx == 1);
+    REQUIRE(vb.second_fwsec_idx == 2);
+
+    const uint8_t *fw = NULL;
+    uint32_t fw_size = 0;
+    REQUIRE(nvidia_vbios_get_fwsec(&vb, &fw, &fw_size) == 0);
+    REQUIRE(fw == buf + exp_off);
+    REQUIRE(fw_size == exp_size);
+
+    free(buf);
+}
+
+static void test_ampere_fwsec_rejects_ptr_past_fwsec2(void)
+{
+    /* If FalconUcodeTablePtr resolves to a position past the end of
+     * FwSec2 (which happens if the image is truncated), extraction
+     * must fail cleanly instead of reading off the buffer end. */
+    uint8_t *buf = calloc(1, AMPERE_VBIOS_SIZE);
+    build_ampere_vbios(buf, NULL, NULL);
+
+    /* Rewrite the FalconUcodeTablePtr to point past FwSec2 end. */
+    uint32_t bad_ptr = 0x1000 + 0x1000 + 0x2000 + 0x100;   /* FwSec2 end + 256 */
+    buf[0x400]=bad_ptr & 0xff;
+    buf[0x401]=(bad_ptr>>8) & 0xff;
+    buf[0x402]=(bad_ptr>>16) & 0xff;
+    buf[0x403]=(bad_ptr>>24) & 0xff;
+
+    struct nvidia_vbios vb;
+    REQUIRE(nvidia_vbios_parse(buf, AMPERE_VBIOS_SIZE, &vb) == 0);
+
+    const uint8_t *fw = NULL;
+    uint32_t fw_size = 0;
+    REQUIRE(nvidia_vbios_get_fwsec(&vb, &fw, &fw_size) < 0);
+    REQUIRE(fw == NULL);
+    REQUIRE(fw_size == 0);
+
+    free(buf);
+}
+
+static void test_ampere_fwsec_rejects_no_fwsec_prod_entry(void)
+{
+    /* Falcon ucode table exists but has no FWSEC_PROD (0x85) entry —
+     * e.g. only debug-signed entries. Must return -1. */
+    uint8_t *buf = calloc(1, AMPERE_VBIOS_SIZE);
+    build_ampere_vbios(buf, NULL, NULL);
+
+    /* Change entry app_id to FWSEC_DBG (0x45) — we only accept
+     * production. */
+    uint32_t entry = 0x2000 + 0x100 + 6;
+    buf[entry+0] = VBIOS_FALCON_APPID_FWSEC_DBG;
+
+    struct nvidia_vbios vb;
+    REQUIRE(nvidia_vbios_parse(buf, AMPERE_VBIOS_SIZE, &vb) == 0);
+
+    const uint8_t *fw = NULL;
+    uint32_t fw_size = 0;
+    REQUIRE(nvidia_vbios_get_fwsec(&vb, &fw, &fw_size) < 0);
+
+    free(buf);
+}
+
+static void test_ampere_fwsec_rejects_bad_desc_version(void)
+{
+    uint8_t *buf = calloc(1, AMPERE_VBIOS_SIZE);
+    build_ampere_vbios(buf, NULL, NULL);
+
+    /* Clobber descriptor version to something bogus (V1 is not used). */
+    uint32_t desc = 0x2000 + 0x200;
+    buf[desc+1] = 1;    /* version byte — 1 is rejected */
+
+    struct nvidia_vbios vb;
+    REQUIRE(nvidia_vbios_parse(buf, AMPERE_VBIOS_SIZE, &vb) == 0);
+
+    const uint8_t *fw = NULL;
+    uint32_t fw_size = 0;
+    REQUIRE(nvidia_vbios_get_fwsec(&vb, &fw, &fw_size) < 0);
+
+    free(buf);
 }
 
 static void test_entry_at_bit_region_boundary(void)
@@ -559,6 +819,12 @@ int main(void)
     test_fwsec_rejects_unparsed_struct();
     test_reject_entry_overlaps_bit_table();
     test_entry_at_bit_region_boundary();
+
+    /* ---- Ampere multi-sub-image + PMU descriptor walk ---- */
+    test_ampere_fwsec_full_chain();
+    test_ampere_fwsec_rejects_ptr_past_fwsec2();
+    test_ampere_fwsec_rejects_no_fwsec_prod_entry();
+    test_ampere_fwsec_rejects_bad_desc_version();
 
     if (failures == 0) {
         printf("test_nvidia_vbios: all tests PASS\n");
