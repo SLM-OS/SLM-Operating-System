@@ -2555,6 +2555,61 @@ static void test_policy_bypassed_for_explicit_affinity(void)
     sched_set_policy(sched_find_policy("heuristic"));
 }
 
+/*
+ * Test: S5 proactive load-balance override.
+ *
+ * Under a stub policy that always returns CPU 0, adding N unpinned
+ * tasks in a row should cause some to land elsewhere than CPU 0 —
+ * the override fires once CPU 0's `ready_count` is high enough vs.
+ * the system average. If cpu_count < 2 the override is a no-op.
+ *
+ * Uses deltas from baseline rather than absolute counts so prior
+ * tests' residual state on CPU 0's queue doesn't matter.
+ */
+static void test_proactive_load_balance_redirect(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("S5 override requires cpu_count >= 2");
+        return;
+    }
+
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+    sched_set_policy(&stub_policy);
+
+    /* Add 6 tasks in one irq-save region so no scheduler tick fires
+     * mid-test. Stub policy returns CPU 0 for every call; we want to
+     * see at least one redirect to a non-zero CPU. */
+    irq_flags_t flags = irq_save();
+    const int N = 6;
+    struct task *tasks[6];
+    for (int i = 0; i < N; i++) {
+        tasks[i] = task_create("s5_bal", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(tasks[i]);
+        scheduler_add_task(tasks[i]);
+    }
+
+    int on_cpu0 = 0;
+    int off_cpu0 = 0;
+    for (int i = 0; i < N; i++) {
+        if (tasks[i]->assigned_cpu == 0) on_cpu0++;
+        else off_cpu0++;
+    }
+    TEST_ASSERT_MESSAGE(off_cpu0 >= 1,
+        "S5 override never redirected away from overloaded CPU 0");
+    TEST_ASSERT_MESSAGE(on_cpu0 < N,
+        "all tasks landed on CPU 0 — override is inert");
+
+    for (int i = 0; i < N; i++) {
+        scheduler_remove_task(tasks[i]);
+        tasks[i]->id = 0;
+    }
+    irq_restore(flags);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
 /* Failing init policy: init() returns -1 */
 static int fail_init(void)
 {
@@ -3418,6 +3473,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_policy_switch_calls_init_shutdown);
     RUN_TEST(test_policy_custom_assign_cpu_called);
     RUN_TEST(test_policy_bypassed_for_explicit_affinity);
+    RUN_TEST(test_proactive_load_balance_redirect);
     RUN_TEST(test_policy_init_failure_keeps_old);
     RUN_TEST(test_policy_tick_callback_invoked);
     RUN_TEST(test_policy_heuristic_distributes_tasks);

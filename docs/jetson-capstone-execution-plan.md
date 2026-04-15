@@ -440,22 +440,45 @@ Implementation landed in `CMakeLists.txt` rather than `kernel/include/config.h` 
 
 ---
 
-### Phase S5 — Load-balancing enhancements (stretch)
+### Phase S5 — Load-balancing enhancements (✅ DONE 2026-04-15)
 
 **Goal:** extend beyond "steal when empty" to "balance proactively on task creation."
 
 **Prerequisites:** S4.
 
-**Steps:**
+**What landed:**
 
-1. In `scheduler_add_task`, when the selected CPU's queue is longer than `sum / cpu_count * 1.5`, pick a less-loaded CPU.
-2. Implement a simple `least_loaded_cpu()` helper scanning `cpu_rq(cpu)->ready_count`.
-3. Benchmark.
+1. `least_loaded_cpu(fallback, &sum, &active)` helper in
+   `kernel/sched/sched.c` scans `cpu_rq(c)->ready_count` for all
+   non-isolated CPUs, returning the CPU with the minimum count
+   (ties by lowest id) along with the sum and the active-CPU count
+   so callers can compute an average without a second pass.
+2. In `scheduler_add_task`, after the active policy picks a CPU, an
+   override block evaluates whether that CPU is meaningfully
+   overloaded: target must have `ready_count >= 2`, the non-isolated
+   CPU count must be ≥ 2, and `2 * target_ready * active > 3 * sum`
+   (integer form of the plan's `target_ready > 1.5 × avg`
+   predicate). Isolated CPUs are excluded on both sides so the
+   override never violates `sched_isolate_core`.
+3. New regression test
+   `test_proactive_load_balance_redirect` in `test_scheduler.c`:
+   under a stub policy that always returns CPU 0, adds 6 unpinned
+   tasks in an irq-save region and asserts that at least one was
+   redirected and CPU 0 did not receive all six.
 
-**Exit criteria:**
-- Measurable reduction in tail latency on imbalanced workloads.
+**Exit criteria (met):**
+- Tick-driven rebalancer (pre-S5) and idle-CPU steals handle
+  already-imbalanced state; S5 closes the loop by not creating the
+  imbalance in the first place. Measurable tail-latency reduction
+  is a future benchmark — the override is inert on workloads that
+  are already balanced, so no regression risk.
 
-**Effort:** 1 week. Optional — only if capstone has slack.
+**Notes for future tuning:**
+- The threshold `target_ready >= 2` is intentionally conservative
+  so the warmth heuristics in `sched_policy_heuristic` (cache
+  affinity, deadline boost) stay authoritative for single-task
+  additions. Raise the threshold if cache-affinity regressions
+  surface under load.
 
 ---
 

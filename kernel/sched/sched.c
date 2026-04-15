@@ -966,10 +966,61 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
 }
 
 /*
+ * Proactive load-balancing helper (plan §S5).
+ *
+ * Scans every non-isolated CPU's `ready_count` and returns the CPU
+ * with the smallest count. Ties broken by lower CPU id. The read
+ * is racy — another CPU's `add_to_cpu_queue_locked` may be in
+ * flight — but the caller's `scheduler_add_task_to_cpu` locks the
+ * final target's rq, so a stale read only costs a slightly-imperfect
+ * placement.
+ *
+ * Also computes and returns the sum of `ready_count` across the
+ * same non-isolated set so the caller can decide whether the
+ * policy-chosen target is "meaningfully overloaded" relative to
+ * the average.
+ *
+ * Isolated CPUs are excluded on both sides — the override must not
+ * redirect a task onto a core the admin told the scheduler to keep
+ * exclusive. If every CPU is isolated, returns `fallback`.
+ */
+static uint32_t least_loaded_cpu(uint32_t fallback, uint32_t *out_sum,
+                                 uint32_t *out_count)
+{
+    uint32_t best_cpu = fallback;
+    uint32_t best_ready = UINT32_MAX;
+    uint32_t sum = 0;
+    uint32_t n = 0;
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        if (sched.isolated_cores & (1U << c))
+            continue;
+        uint32_t r = cpu_rq(c)->ready_count;
+        sum += r;
+        n++;
+        if (r < best_ready) {
+            best_ready = r;
+            best_cpu = c;
+        }
+    }
+    if (out_sum)
+        *out_sum = sum;
+    if (out_count)
+        *out_count = n;
+    return best_cpu;
+}
+
+/*
  * Add a task to the run queue (assigns to a CPU based on affinity/policy).
  *
  * Tasks with explicit CPU affinity are placed on that CPU directly.
- * Tasks with CPU_AFFINITY_ANY are assigned by the active scheduling policy.
+ * Tasks with CPU_AFFINITY_ANY are assigned by the active scheduling
+ * policy, then passed through a proactive load-balance override
+ * (plan §S5): if the policy's target queue is ≥1.5× the average
+ * load across all CPUs AND a strictly-less-loaded CPU exists, the
+ * task is redirected there. This complements work-stealing — the
+ * tick-driven rebalancer and idle-CPU steals fix imbalance that has
+ * already happened; this avoids creating imbalance in the first
+ * place on bursty workloads like `bench stealing`.
  */
 void scheduler_add_task(struct task *task)
 {
@@ -992,6 +1043,36 @@ void scheduler_add_task(struct task *task)
         target_cpu = task->cpu_affinity;
     } else {
         target_cpu = active_policy->assign_cpu(task);
+
+        /* S5 proactive load-balance override. Only for unpinned tasks,
+         * never to isolated CPUs, never when the target is lightly
+         * loaded, and only if we actually have somewhere better to
+         * put it. The policy is authoritative for the first placement;
+         * S5 only intervenes when the target is meaningfully more
+         * loaded than the average across the non-isolated set. */
+        if (cpu_count > 1 && target_cpu < cpu_count &&
+            !(sched.isolated_cores & (1U << target_cpu))) {
+            uint32_t target_ready = cpu_rq(target_cpu)->ready_count;
+            /* Don't override on lightly-loaded systems — single-digit
+             * ready counts are exactly where the policy's warmth
+             * heuristics (cache affinity, deadline boost) pay off.
+             * Threshold of 2 guarantees we only act after the target
+             * actually starts building a backlog. */
+            if (target_ready >= 2) {
+                uint32_t sum = 0;
+                uint32_t active = 0;
+                uint32_t idle = least_loaded_cpu(target_cpu, &sum, &active);
+                if (active >= 2 && idle != target_cpu) {
+                    uint32_t idle_ready = cpu_rq(idle)->ready_count;
+                    /* Predicate: target_ready > (sum / active) * 1.5.
+                     * Integer form: 2 * target_ready * active > 3 * sum. */
+                    if (idle_ready < target_ready &&
+                        2ULL * target_ready * active > 3ULL * sum) {
+                        target_cpu = idle;
+                    }
+                }
+            }
+        }
     }
 
     scheduler_add_task_to_cpu(task, target_cpu);

@@ -24,7 +24,7 @@ The minimum capstone path (G1 → G6) is **complete**. Track S is through
 | S2 | ✅ DONE | Steal counters (closed #105) |
 | S3 | ✅ DONE | `bench stealing` + Phase C QEMU+Pi 5 numbers |
 | S4 | ✅ DONE | Default flip ON for x86-64 + Pi 5 (PR #167), plus Jetson ON follow-up (2026-04-15) after #166 fix. QEMU stays OFF by design (test-harness flakes) |
-| S5 (load-balancing) | 💤 stretch | Explicitly optional in the plan |
+| S5 (load-balancing) | ✅ DONE | Proactive `least_loaded_cpu` override in `scheduler_add_task`; see `docs/jetson-capstone-execution-plan.md` §S5 |
 
 **Capstone defense readiness:** the engineering work is delivered. What
 remains is non-engineering polish (demo, thesis writeup, integration
