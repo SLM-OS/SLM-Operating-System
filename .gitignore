@@ -9,6 +9,7 @@ cmake-build-*/
 
 # Claude Code personal settings
 .claude/settings.local.json
+.claude/worktrees
 
 # Temporary output file
 CLAUDE_OUTPUT.md

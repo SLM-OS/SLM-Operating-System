@@ -1,5 +1,7 @@
 ## Future Work & Stretch Goals
 
+**All outstanding items in this document have been moved to issue tickets**
+
 This section documents features discussed during development that are beyond the capstone scope but would enhance SLM-OS in future iterations or as time permits.
 
 ### Status Summary
