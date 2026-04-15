@@ -15,6 +15,7 @@
 #include "../../kernel/gpu/nvidia/gsp.h"
 #include "../../kernel/gpu/nvidia/nvidia_vbios.h"
 #include "../../kernel/gpu/nvidia/falcon.h"
+#include "../../kernel/gpu/nvidia/nvfw.h"
 
 extern int linux_gsp_platform_init(const char *pci_path, const char *chip,
                                    bool trace);
