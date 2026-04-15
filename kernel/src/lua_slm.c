@@ -518,7 +518,7 @@ static int l_sched_policy(lua_State *L) {
  */
 static int l_read_line(lua_State *L) {
     if (!L) return 0;
-    static char buf[SHELL_MAX_LINE];
+    char buf[SHELL_MAX_LINE];
     int n = shell_read_line(buf, (int)sizeof(buf));
     if (n < 0) {
         lua_pushnil(L);
@@ -535,10 +535,17 @@ static int l_read_line(lua_State *L) {
  * the user could type (e.g. "bench smp", "tasks", "run test") works from
  * Lua. Output goes to UART as it normally would. Returns the command's
  * integer return value, or -1 if the command was not found / line too long.
+ *
+ * Validates the command length at the binding boundary so a too-long input
+ * raises a clean Lua error (with arg position) instead of falling through
+ * to shell_execute's UART warning.
  */
 static int l_shell_exec(lua_State *L) {
     if (!L) return 0;
-    const char *cmd = luaL_checkstring(L, 1);
+    size_t len;
+    const char *cmd = luaL_checklstring(L, 1, &len);
+    luaL_argcheck(L, len < SHELL_MAX_LINE, 1,
+                  "command exceeds SHELL_MAX_LINE");
     int rc = shell_execute(cmd);
     lua_pushinteger(L, rc);
     return 1;
