@@ -35,6 +35,35 @@ extern const struct gsp_platform_ops *gsp_platform;
 #define MSGQ_WPTR_OFFSET          0x100u
 #define MSGQ_RPTR_OFFSET          0x104u
 
+void gsp_rpc_publish_word(volatile uint32_t *cell, uint32_t value)
+{
+    if (!cell || !gsp_platform) return;
+    *cell = value;
+    /* Flush the cell's cache line to PoC, then `dsb sy` so any
+     * subsequent observable event (another publish, an MMIO doorbell
+     * write) is ordered after the GSP can see this update. The order
+     * matters: cache_clean(cell) BEFORE the barrier, otherwise the
+     * GSP can observe the value via the coherent path while the
+     * barrier-protected dirty cache line still hasn't drained. */
+    if (gsp_platform->cache_clean)
+        gsp_platform->cache_clean((const void *)cell, sizeof(*cell));
+    if (gsp_platform->mb)
+        gsp_platform->mb();
+}
+
+uint32_t gsp_rpc_snapshot_word(volatile uint32_t *cell)
+{
+    if (!cell || !gsp_platform) return 0;
+    /* Mirror image of publish: invalidate the cache line so any
+     * stale CPU-side copy is dropped, barrier so the read below
+     * doesn't speculate ahead of the invalidate. */
+    if (gsp_platform->cache_invalidate)
+        gsp_platform->cache_invalidate((void *)cell, sizeof(*cell));
+    if (gsp_platform->mb)
+        gsp_platform->mb();
+    return *cell;
+}
+
 uint32_t gsp_rpc_pages_for_payload(uint32_t rpc_payload_len)
 {
     /* Element header is part of the framing in the first page; a
@@ -102,24 +131,29 @@ int gsp_rpc_init(struct gsp_rpc_channel *ch)
     ch->msgq.base = p + SHM_PTR_PAGE_BYTES + GSP_CMDQ_SIZE;
     ch->msgq.page_count = GSP_RING_PAGE_COUNT;
 
-    *ch->cmdq.wptr = 0;
-    *ch->cmdq.rptr = 0;
-    *ch->msgq.wptr = 0;
-    *ch->msgq.rptr = 0;
+    /* Initialize ring pointers via the publish helper so the
+     * canonical "store + cache_clean + dsb sy" sequence is exercised
+     * exactly once per cell. Anything weaker would let the GSP read
+     * a non-zero stale rptr on first poll. */
+    gsp_rpc_publish_word(ch->cmdq.wptr, 0);
+    gsp_rpc_publish_word(ch->cmdq.rptr, 0);
+    gsp_rpc_publish_word(ch->msgq.wptr, 0);
+    gsp_rpc_publish_word(ch->msgq.rptr, 0);
     ch->cmdq.seq = 1;
 
     /* Cross-domain coherency: on ARM64 (Jetson), DMA-allocated sysmem
      * may be cached on the CPU side. The memset above only updated
      * cache lines — the actual DRAM pages the GSP DMAs from could
      * still hold stale data. Flush the entire region to PoC so the
-     * GSP, when it eventually reads cmdq/rptr/wptr or any payload
-     * page, sees the zeroed contents we just wrote.
+     * GSP, when it eventually reads any payload page, sees the
+     * zeroed contents we just wrote. The mb() pairs the flush with
+     * a `dsb sy` barrier so any subsequent observable event (another
+     * cache op, an MMIO write that wakes the GSP) is ordered after
+     * the dirty lines have drained.
      *
-     * On x86-64 this is a no-op (PCIe DMA is coherent with CPU caches);
-     * on Jetson it walks the region issuing `dc cvac` per cache line.
-     * The ongoing send/wait paths must follow the same discipline:
-     * cache_clean before bumping wptr, cache_invalidate before reading
-     * msgq fields the GSP wrote. */
+     * On x86-64 this whole block degenerates to one mfence (cache_*
+     * are no-ops on coherent PCIe). The send/wait paths follow the
+     * same discipline via gsp_rpc_publish_word / _snapshot_word. */
     gsp_platform->cache_clean(ch->shm_va, ch->shm_size);
     gsp_platform->mb();
 

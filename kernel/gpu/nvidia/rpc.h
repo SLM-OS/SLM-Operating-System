@@ -112,6 +112,68 @@ int gsp_rpc_init(struct gsp_rpc_channel *ch);
  */
 void gsp_rpc_dtor(struct gsp_rpc_channel *ch);
 
+/* ---- Coherency + ordering discipline ----
+ *
+ * On ARM64 (Jetson), the host CPU and the GSP RISC-V core observe
+ * shared sysmem through different paths: CPU through L1+L2 caches,
+ * GSP through the SoC fabric (or coherent PCIe on x86). Two failure
+ * modes the GSP-RM RPC code must defend against:
+ *
+ *  1. **Stale data** — CPU writes a payload, then bumps wptr, but
+ *     the payload sits in a dirty cache line until eviction. The
+ *     GSP, reading via the coherent path, may see an advanced wptr
+ *     pointing at memory that still holds the previous message.
+ *     **Fix**: cache_clean(payload_page, len) before publishing wptr.
+ *
+ *  2. **Reorder** — CPU writes payload + cache_clean, then writes
+ *     wptr, but absent a barrier the wptr write may surface to the
+ *     coherent fabric before the cache_clean of the payload region
+ *     completes. **Fix**: mb() (`dsb sy` on ARM64, `mfence` on x86)
+ *     between the cache_clean and the wptr publish.
+ *
+ * The publish/consume contract:
+ *
+ *   Producer (host → cmdq, or GSP → msgq, mirrored on the consumer
+ *   side):
+ *     1. Write payload bytes into ring page(s).
+ *     2. cache_clean(payload, len) + mb().
+ *     3. Update wptr cell.
+ *     4. cache_clean(wptr, 4) + mb().
+ *     5. (optional) MMIO doorbell to wake the consumer.
+ *
+ *   Consumer:
+ *     1. cache_invalidate(rptr_cell_or_wptr_view, 4) + mb().
+ *     2. Read updated index.
+ *     3. cache_invalidate(payload_page, len) + mb().
+ *     4. Read payload.
+ *     5. Update own rptr (writes follow the producer rules above).
+ *
+ * On x86-64 (PCIe coherent): cache_* are no-ops, mb() is `mfence`.
+ * On ARM64 (Jetson): cache_* walk PoC, mb() is `dsb sy`.
+ *
+ * `gsp_rpc_publish_word()` below packages the "write a u32 cell +
+ * flush + barrier" sequence so future send/wait implementations
+ * can't accidentally drop the barrier.
+ */
+
+/*
+ * Publish a 32-bit shared-memory cell with the right
+ * coherency + barrier discipline for cross-domain visibility.
+ * Use this for wptr/rptr bumps and any other GSP-visible flag the
+ * host writes — the open-coded "*ptr = v; cache_clean(ptr,4); mb()"
+ * pattern would be repeated everywhere otherwise and is easy to
+ * get wrong. No-op-fast on x86-64 (cache_clean / mb are stubs).
+ */
+void gsp_rpc_publish_word(volatile uint32_t *cell, uint32_t value);
+
+/*
+ * Snapshot a 32-bit shared-memory cell with the right invalidate +
+ * barrier sequence for reading something the GSP wrote. Use this
+ * for the wptr-of-msgq / rptr-of-cmdq updates the GSP performs.
+ * Returns the freshly-invalidated value.
+ */
+uint32_t gsp_rpc_snapshot_word(volatile uint32_t *cell);
+
 /*
  * Send an RPC. Builds the element header + RPC header + payload
  * directly into the cmdq pages, advances writePtr.

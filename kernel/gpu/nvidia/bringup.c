@@ -555,8 +555,11 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * Falcon PIO upload reads it back into IMEM/DMEM via writes
      * through the host-side mapping). On ARM64 (Jetson) the memcpy
      * above only updates CPU cache lines — flush to PoC so the GPU
-     * reads the patched ucode, not stale DRAM. No-op on x86-64. */
+     * reads the patched ucode, not stale DRAM. The mb() pairs the
+     * flush with a `dsb sy` so any subsequent MMIO that kicks DMA
+     * is ordered after the cache flush completes. No-op on x86-64. */
     gsp_platform->cache_clean(b->dma_booter_va, b->dma_booter_size);
+    gsp_platform->mb();
 
     /* ---- Phase 4: allocate WprMeta DMA buffer ----
      *
