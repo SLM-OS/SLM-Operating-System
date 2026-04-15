@@ -60,8 +60,20 @@ static void     mock_bar1_read(uint32_t off, void *d, size_t n)
                               { (void)off; memset(d, 0, n); }
 static void     mock_bar1_write(uint32_t off, const void *s, size_t n)
                               { (void)off; (void)s; (void)n; }
-static void     mock_cache(const void *p, size_t s) { (void)p; (void)s; }
-static void     mock_cache_inv(void *p, size_t s) { (void)p; (void)s; }
+/* Cache-maintenance call capture. The bare-metal Jetson backend
+ * issues `dc cvac` per cacheline; our mock records the cumulative
+ * (addr, size) so tests can assert the RPC code actually flushes
+ * after writing shared-mem fields the GSP will read. */
+static const void *g_last_clean_addr;
+static size_t      g_last_clean_size;
+static uint32_t    g_clean_count;
+static void mock_cache(const void *p, size_t s)
+{
+    g_last_clean_addr = p;
+    g_last_clean_size = s;
+    g_clean_count++;
+}
+static void mock_cache_inv(void *p, size_t s) { (void)p; (void)s; }
 static void     mock_mb(void) {}
 static void     mock_fwget(enum gsp_firmware_kind k, struct gsp_firmware_blob *o)
                           { (void)k; o->data = NULL; o->size = 0; o->version = NULL; }
@@ -237,6 +249,28 @@ static void test_rpc_init_null_arg_rejected(void)
     REQUIRE(gsp_rpc_init(NULL) == GSP_ERR_INVAL);
 }
 
+static void test_rpc_init_flushes_shm_for_arm64(void)
+{
+    /* Cross-domain coherency check: gsp_rpc_init must call
+     * cache_clean on the entire shm region after zeroing it, so
+     * the Jetson backend's `dc cvac` actually pushes the zeros to
+     * PoC before the GSP reads them. Without this, an integrated
+     * GPU on Jetson would see stale DRAM contents in the rings. */
+    gsp_platform = &mock_ops;
+    g_clean_count = 0;
+    g_last_clean_addr = NULL;
+    g_last_clean_size = 0;
+
+    struct gsp_rpc_channel ch;
+    REQUIRE(gsp_rpc_init(&ch) == GSP_OK);
+    REQUIRE(g_clean_count >= 1);
+    /* The flush must cover the full shm region — anything less leaves
+     * a window where the GSP could observe stale ring entries. */
+    REQUIRE(g_last_clean_addr == ch.shm_va);
+    REQUIRE(g_last_clean_size == ch.shm_size);
+    gsp_rpc_dtor(&ch);
+}
+
 static void test_rpc_send_oversize_rejected(void)
 {
     gsp_platform = &mock_ops;
@@ -272,6 +306,7 @@ int main(void)
     test_rpc_init_pointers_at_canonical_offsets();
     test_rpc_send_rejects_when_gsp_not_alive();
     test_rpc_init_null_arg_rejected();
+    test_rpc_init_flushes_shm_for_arm64();
     test_rpc_send_oversize_rejected();
 
     if (failures == 0) {

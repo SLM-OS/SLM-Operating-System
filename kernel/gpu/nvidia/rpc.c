@@ -73,7 +73,8 @@ uint32_t gsp_rpc_free_pages(uint32_t wptr, uint32_t rptr, uint32_t page_count)
 int gsp_rpc_init(struct gsp_rpc_channel *ch)
 {
     if (!ch) return GSP_ERR_INVAL;
-    if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free)
+    if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free
+        || !gsp_platform->cache_clean)
         return GSP_ERR_INVAL;
 
     memset(ch, 0, sizeof(*ch));
@@ -106,6 +107,21 @@ int gsp_rpc_init(struct gsp_rpc_channel *ch)
     *ch->msgq.wptr = 0;
     *ch->msgq.rptr = 0;
     ch->cmdq.seq = 1;
+
+    /* Cross-domain coherency: on ARM64 (Jetson), DMA-allocated sysmem
+     * may be cached on the CPU side. The memset above only updated
+     * cache lines — the actual DRAM pages the GSP DMAs from could
+     * still hold stale data. Flush the entire region to PoC so the
+     * GSP, when it eventually reads cmdq/rptr/wptr or any payload
+     * page, sees the zeroed contents we just wrote.
+     *
+     * On x86-64 this is a no-op (PCIe DMA is coherent with CPU caches);
+     * on Jetson it walks the region issuing `dc cvac` per cache line.
+     * The ongoing send/wait paths must follow the same discipline:
+     * cache_clean before bumping wptr, cache_invalidate before reading
+     * msgq fields the GSP wrote. */
+    gsp_platform->cache_clean(ch->shm_va, ch->shm_size);
+    gsp_platform->mb();
 
     ch->initialized = true;
     return GSP_OK;

@@ -351,6 +351,17 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
         goto fail_free;
     }
 
+    /* Cross-domain coherency: GSP Falcon DMA reads from these buffers
+     * via PCIe (x86) or the SoC bus (Jetson). On ARM64 the memcpy
+     * + sig patch + DMEMMAPPER patch above only touched CPU cache
+     * lines — flush IMEM and DMEM staging buffers to PoC before the
+     * Falcon DMA starts. No-op on x86-64 (PCIe DMA is coherent). */
+    if (gsp_platform->cache_clean) {
+        gsp_platform->cache_clean(b->dma_imem_va, b->dma_imem_size);
+        gsp_platform->cache_clean(b->dma_dmem_va, b->dma_dmem_size);
+        gsp_platform->mb();
+    }
+
     /* Reset GSP Falcon — kills whatever was running pre-bringup
      * (usually nothing — but SEC2/GSP state from the prior OS is
      * possible, and reset also clears IMEM/DMEM). */
@@ -540,6 +551,13 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     memcpy((uint8_t *)b->dma_booter_va + img.os_data_offset + b->booter_dmem_sign,
            img.bytes + sig_prod_at, sig_size);
 
+    /* Cross-domain coherency: SEC2 will DMA from this buffer (and
+     * Falcon PIO upload reads it back into IMEM/DMEM via writes
+     * through the host-side mapping). On ARM64 (Jetson) the memcpy
+     * above only updates CPU cache lines — flush to PoC so the GPU
+     * reads the patched ucode, not stale DRAM. No-op on x86-64. */
+    gsp_platform->cache_clean(b->dma_booter_va, b->dma_booter_size);
+
     /* ---- Phase 4: allocate WprMeta DMA buffer ----
      *
      * Booter reads MAILBOX0/1 as a phys addr to GspFwWprMeta. For the
@@ -554,6 +572,10 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     if (!b->dma_wpr_meta_va) { rc = GSP_ERR_NOMEM; goto fail; }
     b->dma_wpr_meta_size = WPR_META_BUFFER_SIZE;
     memset(b->dma_wpr_meta_va, 0, WPR_META_BUFFER_SIZE);
+    /* Same cross-domain flush as the booter image — SEC2 will read
+     * the WprMeta as soon as it sees its address in MAILBOX0/1. */
+    gsp_platform->cache_clean(b->dma_wpr_meta_va, b->dma_wpr_meta_size);
+    gsp_platform->mb();
 
     /* ---- Phase 5: reset SEC2, pre-PIO setup ---- */
     b->last_error_phase = 103;
