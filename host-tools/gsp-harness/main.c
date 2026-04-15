@@ -14,6 +14,7 @@
 
 #include "../../kernel/gpu/nvidia/gsp.h"
 #include "../../kernel/gpu/nvidia/nvidia_vbios.h"
+#include "../../kernel/gpu/nvidia/falcon.h"
 
 extern int linux_gsp_platform_init(const char *pci_path, const char *chip,
                                    bool trace);
@@ -45,8 +46,10 @@ static void usage(const char *argv0)
 "\n"
 "Actions (pick one):\n"
 "  --probe          Map BARs, load firmware, read BOOT_42. Baseline check.\n"
-"  --vbios          Read + parse VBIOS via /sys/.../rom. Reports BIT entries\n"
-"                   and FWSEC presence (Turing+) without touching GSP.\n"
+"  --vbios          Read + parse VBIOS via BAR0 PROM window. Reports BIT\n"
+"                   entries and FWSEC presence (Turing+) without touching GSP.\n"
+"  --falcons        Probe GSP + SEC2 Falcon engines: IMEM/DMEM sizes, halt\n"
+"                   state, RISC-V capability. Hardware smoke test for E3.\n"
 "  --phase N        Attempt GSP bringup phase N only (0..7).\n"
 "  --bringup        Run full gsp_init() — phases 0 through 7.\n"
 "\n"
@@ -68,7 +71,7 @@ int main(int argc, char **argv)
     const char *pci_path = "/sys/bus/pci/devices/0000:01:00.0";
     const char *chip     = "ga107";
     bool trace           = false;
-    enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
+    enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_FALCONS, ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
     int phase = -1;
 
     for (int i = 1; i < argc; i++) {
@@ -76,6 +79,7 @@ int main(int argc, char **argv)
         if (strcmp(a, "--help") == 0) { usage(argv[0]); return 0; }
         else if (strcmp(a, "--probe") == 0) { action = ACT_PROBE; }
         else if (strcmp(a, "--vbios") == 0) { action = ACT_VBIOS; }
+        else if (strcmp(a, "--falcons") == 0) { action = ACT_FALCONS; }
         else if (strcmp(a, "--bringup") == 0) { action = ACT_BRINGUP; }
         else if (strcmp(a, "--trace") == 0) { trace = true; }
         else if (strcmp(a, "--phase") == 0 && i + 1 < argc) {
@@ -172,6 +176,36 @@ int main(int argc, char **argv)
                    "                   the first ~512 KB of an >568 KB VBIOS, and FWSEC\n"
                    "                   lives in the missing tail. See issue #150 for the\n"
                    "                   work to read the rest via PRAMIN / VRAM shadow.)\n");
+        }
+        return 0;
+    }
+    case ACT_FALCONS: {
+        /* Hardware smoke test for the Falcon v4 register map in
+         * kernel/gpu/nvidia/falcon.c — probes both engines and
+         * reports what they look like on real Ampere silicon.
+         * Read-only; safe to run without affecting GSP state. */
+        struct falcon gsp_flcn, sec2_flcn;
+
+        if (falcon_probe(&gsp_flcn, NV_PGSP_BASE) < 0) {
+            printf("[GSP-HARNESS] GSP Falcon probe failed\n");
+        } else {
+            printf("[GSP-HARNESS] GSP Falcon @0x%08x  IMEM=%u KB  DMEM=%u KB  RISC-V=%s  idle=%s\n",
+                   gsp_flcn.base,
+                   gsp_flcn.imem_size / 1024,
+                   gsp_flcn.dmem_size / 1024,
+                   gsp_flcn.has_riscv ? "yes" : "no",
+                   falcon_is_idle(&gsp_flcn) ? "yes" : "no");
+        }
+
+        if (falcon_probe(&sec2_flcn, NV_PSEC2_BASE) < 0) {
+            printf("[GSP-HARNESS] SEC2 Falcon probe failed\n");
+        } else {
+            printf("[GSP-HARNESS] SEC2 Falcon @0x%08x  IMEM=%u KB  DMEM=%u KB  RISC-V=%s  idle=%s\n",
+                   sec2_flcn.base,
+                   sec2_flcn.imem_size / 1024,
+                   sec2_flcn.dmem_size / 1024,
+                   sec2_flcn.has_riscv ? "yes" : "no",
+                   falcon_is_idle(&sec2_flcn) ? "yes" : "no");
         }
         return 0;
     }

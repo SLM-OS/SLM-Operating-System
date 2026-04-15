@@ -226,6 +226,8 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/gsp.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/nvidia_vbios.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/nvidia_vbios.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/falcon.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/falcon.c>
 
     # ==========================================================================
     # Memory Management

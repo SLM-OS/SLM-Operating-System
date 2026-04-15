@@ -189,7 +189,8 @@ GSP_HARNESS_SRCS := \
     host-tools/gsp-harness/main.c \
     host-tools/gsp-harness/linux_platform.c \
     kernel/gpu/nvidia/gsp.c \
-    kernel/gpu/nvidia/nvidia_vbios.c
+    kernel/gpu/nvidia/nvidia_vbios.c \
+    kernel/gpu/nvidia/falcon.c
 
 # Native CFLAGS — these differ substantially from the bare-metal
 # kernel build. The shared GSP core uses `uart_puts`, `uart_printf`
@@ -232,6 +233,22 @@ test-vbios:
 test-gsp-extract:
 	@echo "Running extract-gsp-firmware.sh functional tests..."
 	@bash scripts/tools/test-extract-gsp-firmware.sh
+
+# Falcon v4 driver unit tests — uses a mock BAR0 vtable, no GPU
+# required. Exercises probe, reset/scrub, halt polling, DMA protocol,
+# alignment checks, 40-bit IOVA splitting.
+.PHONY: test-falcon
+test-falcon:
+	@mkdir -p build/host-tools
+	@echo "Building + running Falcon driver tests..."
+	$(CC) -std=c11 -Wall -Wextra -O2 -g \
+	    -Ihost-tools/gsp-harness -Ikernel/gpu/nvidia \
+	    -DSLM_HOST_HARNESS=1 \
+	    -o build/host-tools/test_falcon \
+	    host-tools/gsp-harness/test_falcon.c \
+	    kernel/gpu/nvidia/falcon.c \
+	    kernel/gpu/nvidia/gsp.c
+	@./build/host-tools/test_falcon
 
 # ============================================================================
 # Runtime (Rust) targets
