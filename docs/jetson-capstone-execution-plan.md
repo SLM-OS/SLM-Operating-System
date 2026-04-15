@@ -262,7 +262,7 @@ Neither is required for the capstone — cooperative preemption covers the workl
 **Steps:**
 
 1. **Add a small ticket-lock-style structure in NC memory.** Single `uint32_t next` and `uint32_t owner` in `0xBDE06xxx` region. Use `ncmem_alloc`.
-2. **Acquire via atomic add on `next`** (on Jetson with `SPINLOCK_SKIP_LOCKING` this must use a fallback — a cross-CPU atomic on NC memory may or may not be supported. Verify first with a small test task before rolling out).
+2. **Acquire via atomic add on `next`** (historical caveat: before #166 Jetson had `SPINLOCK_SKIP_LOCKING` defined, which would have degraded this primitive too; now that Jetson uses the runtime `spinlock_hw_enabled` flag, LDAXR/STXR on cacheable memory is available. LDAXR/STXR on NC memory still isn't — verify with a small test task before rolling out on NC-resident data).
 3. **Replace the UART lock's acquire/release paths** in `kernel/drivers/uart_tegra.c` (and `uart_pl011.c` for cross-platform consistency).
 4. **Verify under stress.** Spawn 6 tasks that print in tight loops and confirm no interleaving at the character level.
 
@@ -279,7 +279,7 @@ Neither is required for the capstone — cooperative preemption covers the workl
 
 **Goal:** preemptive tasks run with IRQs unmasked between cooperative yields. Many call sites silently assume the old invariant (`DAIF.I=1` throughout task body). Audit each and either relax or explicitly preserve the invariant locally.
 
-**Also:** verify every kernel spinlock path reachable under preemption uses `spin_lock_irqsave`, not plain `spin_lock`. Under `SPINLOCK_SKIP_LOCKING` (Jetson) plain `spin_lock` degrades to `dmb ish` — safe under cooperative but **no mutual exclusion under preemption**. If a preempted critical section is re-entered on the same CPU, both paths run concurrently.
+**Also:** verify every kernel spinlock path reachable under preemption uses `spin_lock_irqsave`, not plain `spin_lock`. Historical note (pre-#166, pre-2026-04-15): Jetson used to define `SPINLOCK_SKIP_LOCKING` unconditionally, which degraded every `spin_lock` to a barrier and left cacheable critical sections unprotected cross-CPU. That has been retired; Jetson now uses the Pi 5 runtime-flag model so `spin_lock` executes real LDAXR/STXR post-MMU. The plain-vs-irqsave discipline still matters for on-CPU re-entry via preemption (ISR re-entering a locked path the running task holds) — the `spin_lock_irqsave` rule covers that case.
 
 **Prerequisites:** P3 complete.
 
@@ -304,7 +304,7 @@ Neither is required for the capstone — cooperative preemption covers the workl
    - New invariant: tasks may be preempted at any instruction.
    - Places that must disable IRQs locally: any read-modify-write on shared state without a lock.
    - Cheat-sheet for `spin_lock_irqsave` vs plain `spin_lock`.
-   - The `SPINLOCK_SKIP_LOCKING`-plus-preemption hazard explicitly called out.
+   - The historical `SPINLOCK_SKIP_LOCKING` hazard (pre-#166) explicitly called out, plus the current runtime-flag model so future maintainers don't revive the blanket-compile-time-skip pattern.
 
 **Exit criteria:**
 - Spinlock audit complete — every unwrapped `spin_lock()` converted or explicitly justified.
@@ -777,6 +777,25 @@ Each phase produces one or more of:
 - **P3 secondary preemption is moot** until a future P1.2 fixes hardware timer IRQ delivery (deferred — not required for capstone).
 - IGROUPR writes kept in `gic_redist_init()` as best-effort hardening; comment updated to document the Jetson observation.
 
+**2026-04-15 v5** — post-S4 bug-backlog sweep, S5 landed, #166 resolved.
+
+- **#166 retired `SPINLOCK_SKIP_LOCKING` on Jetson.** The blanket
+  compile-time skip made every cacheable spinlock a no-op under SMP
+  and caused a `pmm_free_pages` free-list fault during `bench stealing`
+  with `WORK_STEALING=ON`. Jetson now uses the Pi 5 runtime
+  `spinlock_hw_enabled` model (barrier-only pre-MMU, real LDAXR/STXR
+  post-MMU). Commit `e180244`.
+- **S4 flipped default ON for Jetson** once #166 was verified on
+  hardware (3 clean runs, 20.9 ms, 2/4/4/4/1/1 distribution).
+  Commit `127b0c6`.
+- **S5 landed** (plan §S5): `least_loaded_cpu` + proactive override
+  in `scheduler_add_task`. Three regression tests cover redirect,
+  isolation, and light-load inertness. Commit `c767d50`.
+- **#174 / #175 / #171 / #137 closed** as part of the sweep —
+  steal_deque docs, push-full counter, x86-64 time-overflow, and
+  SECONDARY_PREEMPT MPIDR uniqueness check. Commits `3aeef62`,
+  `c7443dc`, `d39f8bc`, `2050388`.
+
 ---
 
-*Plan compiled 2026-04-13, revised 2026-04-13 v2, v3, v4. To be revisited at each Gate.*
+*Plan compiled 2026-04-13, revised 2026-04-13 v2, v3, v4, 2026-04-15 v5. To be revisited at each Gate.*

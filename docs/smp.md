@@ -478,6 +478,20 @@ capability-neutral spelling during the Jetson capstone Prereq #2 work
 `PLATFORM STREQUAL "RASPI5"` gate prevented the trampoline from
 compiling into Jetson builds at all).
 
+**Boot-time MPIDR uniqueness check (#137):** when
+`SECONDARY_PREEMPT` is defined, `preempt_check_cpu_mpidr(this_cpu)`
+runs once per CPU — from `scheduler_init` on the boot CPU and from
+`secondary_init` on each secondary. It replicates the
+`resched_trampoline` MPIDR fold
+(`(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)`) in C and panics if the
+fold's result disagrees with the caller's known logical CPU id.
+That makes Jetson+`SECONDARY_PREEMPT` loud-fail at boot rather than
+silently corrupting context when cluster 1 CPUs map to the wrong
+trampoline slot. The pure fold helper
+`preempt_trampoline_cpu_for_mpidr(mpidr)` is exercised by
+`test_preempt_trampoline_cpu_fold` with Pi 5 / QEMU / Jetson
+encodings.
+
 ### Inter-Processor Interrupts (IPI) / Cross-CPU Notification
 
 Used for:

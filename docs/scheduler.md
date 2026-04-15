@@ -834,6 +834,30 @@ Migration sequence:
 `sched_rebalance_get_migrations()` exposes a diagnostic counter for
 tests.
 
+## Proactive load-balance override (plan §S5)
+
+`scheduler_add_task()` runs an override after the active policy picks
+a target CPU. If the target's `ready_count >= 2` and
+`2 * target_ready * active > 3 * sum` (integer form of
+`target > 1.5 × average` across the non-isolated CPUs), the task is
+redirected to `least_loaded_cpu()` instead — the same CPU that
+`sched_rebalance_tick` would migrate toward, but applied at task
+creation rather than at the next tick. This closes the window where
+a hot policy keeps piling tasks onto one CPU before the reactive
+rebalancer notices.
+
+Gating:
+
+- Only for unpinned tasks (`task->cpu_affinity == CPU_AFFINITY_ANY`).
+- `target_ready >= 2` — the policy stays authoritative under light
+  load where warmth bonuses (cache affinity, deadline boost) matter.
+- Isolated CPUs are excluded from both the candidate set and the
+  average, so the override never violates `sched_isolate_core`.
+- No redirect if the least-loaded CPU is already at or above the
+  target's load.
+
+Test: `test_proactive_load_balance_redirect` in `test_scheduler.c`.
+
 ## Work stealing (Pre-existing + B3 activation + S4 default flip)
 
 `kernel/sched/steal_deque.c` implements a Chase–Lev-style deque per
@@ -884,6 +908,25 @@ they trust the caller.
 - `preempt_disabled[victim]` is checked as a cheap early-out (not a
   correctness requirement) to avoid contending a lock the victim is
   almost certainly about to take.
+
+**Observability (sched_diag_steal_* counters):**
+
+Five per-CPU counters are exposed via the `cpu` shell command and
+the `bench stealing` output:
+
+| Counter | Meaning |
+|---|---|
+| `Attempts`  | `sched_try_steal()` entries on the thief side |
+| `Successes` | live task returned |
+| `Stale`     | stale pointer popped and rejected (state/generation mismatch) |
+| `EmptyVic`  | every probed victim had an empty deque |
+| `PushFull`  | `scheduler_add_task_to_cpu` saw `steal_deque_push` return -1 (deque at capacity) — #175 |
+
+`PushFull` is expected to stay at zero under normal workloads
+(`STEAL_DEQUE_CAPACITY = 32` is generous). Non-zero values flag
+either a workload burst that needs a larger capacity or a migration
+thrash pattern re-adding to an already-loaded CPU. Asserted zero
+in `test_work_stealing_distributes_load`.
 
 ---
 

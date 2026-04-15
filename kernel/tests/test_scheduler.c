@@ -2692,6 +2692,96 @@ static void test_proactive_load_balance_redirect(void)
     sched_set_policy(sched_find_policy("heuristic"));
 }
 
+/*
+ * Test: S5 override never redirects to an isolated CPU.
+ *
+ * With CPUs 2+ isolated, stub policy returning CPU 0, adding many
+ * unpinned tasks: the override must keep them on non-isolated CPUs
+ * (0 and 1), never push to an isolated CPU. Regression for the
+ * isolation gate in `least_loaded_cpu` + the `!isolated` check in
+ * `scheduler_add_task`.
+ */
+static void test_proactive_load_balance_respects_isolation(void)
+{
+    if (cpu_count < 3) {
+        TEST_IGNORE_MESSAGE("Isolation test requires cpu_count >= 3");
+        return;
+    }
+
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+    sched_set_policy(&stub_policy);
+
+    /* Isolate CPUs 2 and above. CPU 0 and CPU 1 remain the only
+     * legitimate redirect destinations. */
+    for (uint32_t c = 2; c < cpu_count; c++) {
+        sched_isolate_core(c);
+    }
+
+    irq_flags_t flags = irq_save();
+    const int N = 6;
+    struct task *tasks[6];
+    for (int i = 0; i < N; i++) {
+        tasks[i] = task_create("s5_iso", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(tasks[i]);
+        scheduler_add_task(tasks[i]);
+    }
+
+    for (int i = 0; i < N; i++) {
+        TEST_ASSERT_MESSAGE(tasks[i]->assigned_cpu < 2,
+            "S5 redirected onto an isolated CPU");
+    }
+
+    for (int i = 0; i < N; i++) {
+        scheduler_remove_task(tasks[i]);
+        tasks[i]->id = 0;
+    }
+    irq_restore(flags);
+
+    for (uint32_t c = 2; c < cpu_count; c++) {
+        sched_unisolate_core(c);
+    }
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+/*
+ * Test: S5 override stays inert under light load.
+ *
+ * A single task added to an empty system must land on exactly the
+ * CPU the policy chose — the `target_ready >= 2` gate exists
+ * precisely so warmth heuristics win the low-load regime. Uses the
+ * same stub policy (always returns CPU 0).
+ */
+static void test_proactive_load_balance_inert_when_light(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
+        return;
+    }
+
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+    sched_set_policy(&stub_policy);
+
+    irq_flags_t flags = irq_save();
+
+    /* One task; target_ready will be 0 or 1, gate `>= 2` blocks the
+     * override. Result must be CPU 0 regardless of what other CPUs
+     * have queued. */
+    struct task *t = task_create("s5_light", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+    TEST_ASSERT_EQUAL_UINT32(0, t->assigned_cpu);
+    scheduler_remove_task(t);
+    t->id = 0;
+
+    irq_restore(flags);
+
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
 /* Failing init policy: init() returns -1 */
 static int fail_init(void)
 {
@@ -3558,6 +3648,8 @@ int test_suite_scheduler(void)
     RUN_TEST(test_policy_custom_assign_cpu_called);
     RUN_TEST(test_policy_bypassed_for_explicit_affinity);
     RUN_TEST(test_proactive_load_balance_redirect);
+    RUN_TEST(test_proactive_load_balance_respects_isolation);
+    RUN_TEST(test_proactive_load_balance_inert_when_light);
     RUN_TEST(test_policy_init_failure_keeps_old);
     RUN_TEST(test_policy_tick_callback_invoked);
     RUN_TEST(test_policy_heuristic_distributes_tasks);

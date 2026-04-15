@@ -192,7 +192,13 @@ void slm_print(const char *s);  // Null-terminated string
 
 ```c
 uint64_t slm_get_time_ns(void);  // Nanoseconds since boot
+uint64_t slm_time_ticks_to_ns(uint64_t ticks, uint64_t freq);
 ```
+The `slm_get_time_ns` conversion uses an overflow-safe
+split-multiply internally so it stays correct on high-frequency
+timers (x86-64 TSC). `slm_time_ticks_to_ns` exposes the same
+helper for tests and callers that need to convert explicit
+tick counts.
 
 ### Task Management
 
