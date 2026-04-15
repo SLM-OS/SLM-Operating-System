@@ -586,15 +586,33 @@ target_link_libraries(slmos.elf PRIVATE lua)
 # ==========================================================================
 option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 
-# Work-stealing scheduler (#59 Phase B). Per the cross-platform plan
-# review, each platform decides independently — no global default flip
-# in kernel/include/config.h. On x86-64 the hardware is cache-coherent
-# SMP with a working reschedule IPI (B1) and TSS IST (A1), so the
-# steal path is safe by construction. Enable automatically for X86_64
-# unless the user explicitly sets ENABLE_WORK_STEALING=OFF.
-# Pi 5 / Jetson keep the feature off until their preemption blockers
-# (#57 / #99) are closed.
-if(PLATFORM STREQUAL "X86_64")
+# Work-stealing scheduler (#59 Phase B, S4 default flip).
+#
+# Default is ON for the platforms where hardware evidence in
+# docs/work-stealing-bench.md supports it; OFF elsewhere. Per
+# platform:
+#
+#   - x86-64: cache-coherent SMP, working reschedule IPI (B1) +
+#     TSS IST (A1). Safe by construction. Default ON since Phase B.
+#   - Raspberry Pi 5: 3.12× speedup on bench stealing 16 real
+#     hardware after the external-lock fix (#158 closed). Default
+#     ON.
+#   - QEMU ARM64: 1.7× speedup on bench stealing — but several
+#     pre-existing integration-test assumptions (strict priority
+#     ordering, tight memory-leak thresholds) are incompatible
+#     with the more aggressive cross-CPU scheduling work-stealing
+#     produces. Default OFF for now so `make test` stays
+#     reliably green; flip explicitly with
+#     `make kernel WORK_STEALING=ON` / `make test WORK_STEALING=ON`
+#     for regression testing. Full test-harness stabilization
+#     is out of scope for S4.
+#   - Jetson Orin Nano: residual page fault during bench stealing
+#     tracked as #166. Default OFF; opt-in via WORK_STEALING=ON.
+#
+# Override path (either direction) is the Makefile `WORK_STEALING=ON`
+# / `WORK_STEALING=OFF` variable, which maps to
+# `-DENABLE_WORK_STEALING=ON/OFF`.
+if(PLATFORM STREQUAL "X86_64" OR PLATFORM STREQUAL "RASPI5")
     option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" ON)
 else()
     option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" OFF)

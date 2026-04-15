@@ -10,10 +10,12 @@
  *     races straightforward to reason about in a future lock-free port.
  *   - Capacity MUST be a power of two; the mask (`CAP - 1`) avoids a
  *     divide instruction.
- *   - All entry points take `d->lock` for the whole operation. A
- *     Chase-Lev-style lock-free path can replace `steal_deque_steal` and
- *     the unsynchronized parts of `steal_deque_pop` later without
- *     changing the API.
+ *   - All entry points are **lockless internally** — the caller is
+ *     responsible for serializing access. sched.c holds
+ *     `steal_deque_lock[cpu]` (cacheable) across every push / pop /
+ *     steal / remove. The deque itself lives in NC memory on
+ *     PLATFORM_HAS_NC_MEMORY, where an embedded spinlock would be
+ *     neutered by SPINLOCK_SKIP_LOCKING.
  */
 
 #include "steal_deque.h"
@@ -34,16 +36,12 @@ void steal_deque_init(steal_deque_t *d)
         d->buf[i] = (struct task *)0;
         d->gen_buf[i] = 0;
     }
-    spin_init(&d->lock);
 }
 
 int steal_deque_push(steal_deque_t *d, struct task *t)
 {
-    irq_flags_t flags = spin_lock_irqsave(&d->lock);
-
     uint32_t size = d->bottom - d->top;
     if (size >= STEAL_DEQUE_CAPACITY) {
-        spin_unlock_irqrestore(&d->lock, flags);
         return -1;
     }
 
@@ -56,14 +54,11 @@ int steal_deque_push(steal_deque_t *d, struct task *t)
     d->gen_buf[idx] = t->generation;
     d->bottom++;
 
-    spin_unlock_irqrestore(&d->lock, flags);
     return 0;
 }
 
 struct task *steal_deque_pop(steal_deque_t *d, uint32_t *out_gen)
 {
-    irq_flags_t flags = spin_lock_irqsave(&d->lock);
-
     /* Skip NULL slots left behind by `steal_deque_remove` — those were
      * live entries at push time but the task has been terminated or
      * recycled. Not advancing past them would let the caller see a
@@ -78,19 +73,15 @@ struct task *steal_deque_pop(steal_deque_t *d, uint32_t *out_gen)
         d->gen_buf[idx] = 0;
         if (t) {
             if (out_gen) *out_gen = gen;
-            spin_unlock_irqrestore(&d->lock, flags);
             return t;
         }
     }
 
-    spin_unlock_irqrestore(&d->lock, flags);
     return (struct task *)0;
 }
 
 struct task *steal_deque_steal(steal_deque_t *d, uint32_t *out_gen)
 {
-    irq_flags_t flags = spin_lock_irqsave(&d->lock);
-
     /* Same NULL-skip as pop. Bounded by (bottom - top) probes. */
     while (d->top != d->bottom) {
         uint32_t idx = d->top & DEQUE_MASK;
@@ -101,12 +92,10 @@ struct task *steal_deque_steal(steal_deque_t *d, uint32_t *out_gen)
         d->top++;
         if (t) {
             if (out_gen) *out_gen = gen;
-            spin_unlock_irqrestore(&d->lock, flags);
             return t;
         }
     }
 
-    spin_unlock_irqrestore(&d->lock, flags);
     return (struct task *)0;
 }
 
@@ -125,15 +114,13 @@ int steal_deque_remove(steal_deque_t *d, struct task *t)
     if (t == (struct task *)0)
         return 0;
 
-    irq_flags_t flags = spin_lock_irqsave(&d->lock);
-
     int cleared = 0;
     /* Walk the live range [top, bottom). Monotonic indices; mask at
      * access time. A matching slot is cleared to NULL in-place rather
      * than compacted — the steal and pop paths skip NULL slots, so
      * leaving a gap costs one extra probe at steal time but avoids
      * moving elements (which would require updating both top and
-     * bottom atomically under the lock).
+     * bottom atomically).
      *
      * Exit on first match: a task pointer should appear at most once.
      * If a user pushes the same pointer twice (a bug), only the first
@@ -148,6 +135,5 @@ int steal_deque_remove(steal_deque_t *d, struct task *t)
         }
     }
 
-    spin_unlock_irqrestore(&d->lock, flags);
     return cleared;
 }

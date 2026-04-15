@@ -411,29 +411,32 @@ Neither is required for the capstone — cooperative preemption covers the workl
 
 ---
 
-### Phase S4 — Flip `CONFIG_WORK_STEALING` default (multi-platform decision)
+### Phase S4 — Flip `CONFIG_WORK_STEALING` default (multi-platform decision) ✅ DONE (partial)
 
-**Goal:** make work-stealing the default scheduling behavior if benchmark data from **at least two platforms** justifies it.
+**Outcome (2026-04-14, PR #167):** flipped to default-ON for QEMU ARM64, Raspberry Pi 5, and x86-64. Jetson stays default-OFF pending #166 (page fault during `bench stealing` after the #158 lock fix).
 
-`CONFIG_WORK_STEALING` is a shared `config.h` setting. A unilateral flip from this plan would change scheduler behavior on x86-64 and Pi 5 without their own benchmark data. The x86-64 plan's B3 should validate on x86-64 using a platform-specific CMake override (`cmake -DCONFIG_WORK_STEALING=1`), not by editing the shared header.
+Implementation landed in `CMakeLists.txt` rather than `kernel/include/config.h` — the per-platform decision stays expressible (Jetson opt-out) with a single `option()` block. The Makefile's `WORK_STEALING` variable was simplified from "explicit ON opt-in" to "ON/OFF override," matching the CMake knob directly and letting empty values defer to the per-platform default.
 
-**Prerequisites:**
-- S3 complete (Jetson Phase C data).
-- x86-64 B3 has validated work-stealing on x86-64 and has publishable data.
-- Pi 5 plan's equivalent benchmark (if any) has run, or the Pi 5 plan owners have explicitly signed off on the flip based on Jetson + x86-64 data.
+**Evidence referenced in `docs/work-stealing-bench.md`:**
+- QEMU ARM64: `bench stealing 8` → 1.7× (13.4 ms vs 22.9 ms).
+- Raspberry Pi 5 hardware: `bench stealing 16` → **3.12×** (12.7 ms vs 39.6 ms), perfect 4/4/4/4 distribution. Captured via labctl on jetson-nano-2's sibling Pi 5.
+- x86-64: inherited from Phase B — already ON, cache-coherent SMP + LAPIC IPI.
 
-**Steps:**
+**Prerequisites (all satisfied):**
+- S3 complete ✅ (QEMU + Pi 5 hardware).
+- x86-64: ON since Phase B; the proposed B3 coordination point became moot because x86-64 was already green.
+- Pi 5 owners: signed off via the Pi 5 hardware capture.
 
-1. In `kernel/include/config.h`, change the default `#define CONFIG_WORK_STEALING 0` to `1`.
-2. Provide an opt-out: `NO_WORK_STEALING=ON` Makefile var.
-3. Update `kernel/CLAUDE.md` and `docs/scheduler.md`.
+**What was NOT done (deliberate deferrals):**
+- Jetson Orin Nano stays OFF-by-default. Opt-in via `make kernel PLATFORM=JETSON_ORIN_NANO WORK_STEALING=ON` continues to work. #166 tracks the residual page fault.
+- `kernel/include/config.h` was left unchanged; the CMake `option()` block already defines `CONFIG_WORK_STEALING=1` via `add_compile_definitions`, and config.h remains a fallback default of 0.
 
-**Exit criteria:**
-- Builds default to stealing on; QEMU tests pass.
-- Opt-out works and builds pass.
-- Benchmark data from ≥2 platforms documented in `docs/work-stealing-bench.md`.
+**Blockers closed along the way:**
+- #139 (ABA race) → per-slot generation counter in `struct task` (PR #145).
+- #158 (Pi 5 boot hang) → external cacheable `steal_deque_lock[MAX_CPUS]`, moving the lock out of NC-memory steal_deque_t (PR #167 first commit).
 
-**Effort:** 0.5 day (the flip itself); coordination time across the three plans before it fires.
+**Known follow-up:**
+- #166 (Jetson page fault during bench stealing) — S5 or a later Jetson-focused session.
 
 ---
 

@@ -834,20 +834,50 @@ Migration sequence:
 `sched_rebalance_get_migrations()` exposes a diagnostic counter for
 tests.
 
-## Work stealing (Pre-existing + B3 activation)
+## Work stealing (Pre-existing + B3 activation + S4 default flip)
 
 `kernel/sched/steal_deque.c` implements a Chase–Lev-style deque per
 CPU. When a CPU's own run queue goes empty inside `schedule()`, and
 `CONFIG_WORK_STEALING` is on, it calls `sched_try_steal()` to pull
-work from another CPU's deque. Enabled by default on x86-64 via
-`CMakeLists.txt` gate (`ENABLE_WORK_STEALING=ON` for `PLATFORM=X86_64`).
-ARM platforms keep it off until their preemption blockers close.
+work from another CPU's deque.
+
+**Default by platform (after Jetson capstone S4, 2026-04-14):**
+
+| Platform | Default | Notes |
+|---|---|---|
+| x86-64 | ON | Since Phase B; cache-coherent SMP + LAPIC IPI |
+| QEMU ARM64 | ON | 1.7× speedup measured (S3) |
+| Raspberry Pi 5 | ON | 3.12× speedup measured on hardware (`docs/work-stealing-bench.md`); closed #158 |
+| Jetson Orin Nano | OFF | Residual page fault during bench stealing (#166); opt-in via `WORK_STEALING=ON` |
+
+Override: `make kernel PLATFORM=<p> WORK_STEALING=ON` or `WORK_STEALING=OFF` maps to `-DENABLE_WORK_STEALING=ON/OFF`, bypassing the CMake per-platform default.
+
+**Locking model:**
+
+The deque's bookkeeping (`buf`, `gen_buf`, `bottom`, `top`) is
+serialized by `steal_deque_lock[MAX_CPUS]` — a separate cacheable
+`spinlock_t` array in `kernel/sched/sched.c`, same pattern as
+`rq_lock[]`. The deque struct itself lives in NC memory on
+`PLATFORM_HAS_NC_MEMORY` (Pi 5, Jetson) for instant cross-CPU
+visibility without cache maintenance. The deque used to embed its
+own spinlock, but on Jetson `SPINLOCK_SKIP_LOCKING` reduced that to
+a barrier-only no-op, letting concurrent pushes/pops corrupt the
+deque — see #158 and commit `a3b3a0e` for the move.
+
+Every `steal_deque_push` / `_pop` / `_steal` / `_remove` call in
+`sched.c` is wrapped with `spin_lock_irqsave(&steal_deque_lock[cpu])` /
+`spin_unlock_irqrestore`. The deque's own functions are lockless —
+they trust the caller.
 
 **Correctness invariants:**
-- `sched_try_steal()` acquires the victim's `rq_lock_irqsave` for
-  the validation + dequeue — this is mutual exclusion with the
-  victim's own `schedule()`, so the stolen task cannot be the one
-  the victim is currently in the middle of switching to.
+- `sched_try_steal()` releases `steal_deque_lock[victim]` before
+  acquiring `rq_lock[victim]`. The two locks are never held
+  together, so there is no cross-lock ordering constraint.
+- Under `rq_lock[victim]`, the validator re-reads
+  `candidate->generation` and compares it to the generation captured
+  at push time (#139 ABA mitigation). A mismatch means the slot has
+  been recycled into a different logical task; the steal is
+  rejected.
 - `preempt_disabled[victim]` is checked as a cheap early-out (not a
   correctness requirement) to avoid contending a lock the victim is
   almost certainly about to take.

@@ -813,11 +813,20 @@ void smp_test_task(void *arg)
 /* S3 (Phase C): work-stealing load-imbalance benchmark task.
  *
  * All tasks in the benchmark are dispatched to CPU 1 ("victim"). Each
- * task runs a fixed amount of arithmetic work, records which CPU
- * actually executed it, and writes a global done counter. If
- * CONFIG_WORK_STEALING is ON, idle CPUs (2/3/...) will pull tasks
- * off CPU 1's deque and wall-clock time drops toward N/P of the
- * single-CPU number. If OFF, the N tasks run sequentially on CPU 1.
+ * task runs a fixed amount of arithmetic work, then records which
+ * CPU actually executed it by writing cpu_id()+1 into its own slot
+ * (0 = not yet run). If CONFIG_WORK_STEALING is ON, idle CPUs
+ * (2/3/...) will pull tasks off CPU 1's deque and wall-clock time
+ * drops toward N/P of the single-CPU number. If OFF, the N tasks
+ * run sequentially on CPU 1.
+ *
+ * Completion detection uses a *per-task* non-zero write — the driver
+ * scans all N slots and counts non-zero entries. This avoids a
+ * central atomic counter, which is unreliable on Pi 5's NC memory:
+ * per ARM ARM and kernel/CLAUDE.md "NC memory atomic ops may fault
+ * (implementation-defined per ARM ARM)". A per-slot single-writer
+ * u32 store is guaranteed-visible on NC (no atomic needed) and is
+ * benign under regular stores on cacheable BSS.
  *
  * Shared state is per-platform:
  *   - PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson): NC memory at
@@ -829,24 +838,11 @@ void smp_test_task(void *arg)
 #define S3_MAX_TASKS 64
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
-/* Reserve the top 512 bytes of NC memory for `bench stealing` shared
- * state. Layout (top-down):
- *   [NC_MEM_SIZE - 512 .. NC_MEM_SIZE - 256)  S3 slot array
- *      256 bytes = S3_MAX_TASKS (64) × sizeof(uint32_t).
- *   [NC_MEM_SIZE - 256 .. NC_MEM_SIZE)        Done counter region
- *      Only 4 bytes are read/written, but the rest of this 256 B
- *      block is reserved so the counter sits on its own cacheline-
- *      sized chunk away from the slot writes (avoids false sharing
- *      and leaves headroom for additional bench counters). */
 #define S3_SLOT_BASE_OFFSET   (NC_MEM_SIZE - 512)
-#define S3_DONE_COUNTER_OFFSET (NC_MEM_SIZE - 256)
 #define S3_SLOT_ADDR(i) ((volatile uint32_t *)(NC_MEM_BASE + S3_SLOT_BASE_OFFSET + (i) * 4))
-#define S3_DONE_ADDR()  ((volatile uint32_t *)(NC_MEM_BASE + S3_DONE_COUNTER_OFFSET))
 #else
 static volatile uint32_t s3_slots[S3_MAX_TASKS];
-static volatile uint32_t s3_done;
 #define S3_SLOT_ADDR(i) (&s3_slots[(i)])
-#define S3_DONE_ADDR()  (&s3_done)
 #endif
 
 static void s3_steal_work_task(void *arg)
@@ -862,10 +858,11 @@ static void s3_steal_work_task(void *arg)
     }
     (void)x;
 
+    /* Single-writer release store: cpu_id()+1 into this task's slot.
+     * The driver treats non-zero == done. No atomic; NC memory on
+     * Pi 5 / Jetson would potentially fault an LSE op (per
+     * kernel/CLAUDE.md). */
     *S3_SLOT_ADDR(slot) = cpu_id() + 1;
-    /* Atomic increment of the done counter so the driver can poll a
-     * single location instead of scanning all N slots. */
-    __atomic_fetch_add(S3_DONE_ADDR(), 1, __ATOMIC_RELEASE);
 }
 
 int cmd_bench(int argc, char *argv[])
@@ -1011,11 +1008,11 @@ int cmd_bench(int argc, char *argv[])
         uart_puts("  CONFIG_WORK_STEALING: OFF (expect sequential completion)\r\n");
 #endif
 
-        /* Zero slot array and done counter. */
+        /* Zero slot array. Each task writes its slot when done; the
+         * driver scans for all-non-zero to detect completion. */
         for (uint32_t i = 0; i < n_tasks; i++) {
             *S3_SLOT_ADDR(i) = 0;
         }
-        *S3_DONE_ADDR() = 0;
 
 #if CONFIG_WORK_STEALING
         /* Snapshot steal counters so we report deltas, not absolute
@@ -1056,16 +1053,19 @@ int cmd_bench(int argc, char *argv[])
         }
 
         /* Poll done counter. Timeout at 30 seconds converted to timer
-         * ticks. The most recent `done` read from the loop is the
-         * value at exit (whether we hit n_tasks or timed out), so
-         * carry it out instead of re-reading after the break. */
+         * ticks. */
         uint64_t freq = timer_get_frequency();
         uint64_t deadline = t0 + 30ULL * freq;
         uint32_t done_now = 0;
         while (1) {
-            done_now = *S3_DONE_ADDR();
-            if (done_now >= n_tasks) break;
+            /* Count non-zero slots — one per completed task. */
+            uint32_t done = 0;
+            for (uint32_t i = 0; i < n_tasks; i++) {
+                if (*S3_SLOT_ADDR(i) != 0) done++;
+            }
+            if (done >= n_tasks) { done_now = done; break; }
             if (timer_get_count() > deadline) {
+                done_now = done;
                 uart_printf("  TIMEOUT after 30s — %u / %u tasks done\r\n",
                             done_now, n_tasks);
                 break;
