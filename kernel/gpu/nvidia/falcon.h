@@ -110,6 +110,24 @@
 
 #define FALCON_ENGINE_RESET           (1u << 0)   /* self-clearing */
 
+/* Pre-DMA setup registers (Ampere GA10x — from nouveau ga102_flcn_fw_load).
+ *
+ * These aren't used on pre-Ampere. Their exact semantics are
+ * undocumented publicly, but the sequence below is what the
+ * proprietary driver + nouveau both issue before DMA works on a
+ * dual-mode (Falcon + RISC-V) engine:
+ *
+ *   falcon[0x624] |= 0x80       // enable some transfer gating
+ *   falcon[0x10c] = 0           // clear DMACTL
+ *   falcon[0x600] mask 0x00010007, (0<<16) | (1<<2) | 1
+ *                               // TRANSCFG: mem_type=1, target=1
+ */
+#define FALCON_PRE_DMA_624            0x624u
+#define FALCON_PRE_DMA_624_BIT        0x80u
+#define FALCON_PRE_DMA_600            0x600u
+#define FALCON_PRE_DMA_600_MASK       0x00010007u
+#define FALCON_PRE_DMA_600_VAL        ((0u << 16) | (1u << 2) | 1u)
+
 /* ---- GSP RISC-V PRI (only valid when engine_base == NV_PGSP_BASE) ---- */
 
 #define FALCON_RISCV_CPUCTL           0x388u      /* relative to NV_PGSP_RISCV_BASE */
@@ -249,5 +267,27 @@ int falcon_hs_boot(struct falcon *f,
                    uint32_t ucode_id,
                    uint32_t boot_vec,
                    uint32_t timeout_us);
+
+/*
+ * On dual-mode engines (GSP Falcon), force Falcon (non-RISC-V)
+ * mode. Reads BCR_CTRL (RISC-V PRI aperture + 0x668); if
+ * CORE_SELECT is set to RISC-V, clears BCR_CTRL and polls for
+ * VALID. No-op on SEC2 (has no RISC-V aperture). Must be called
+ * after falcon_reset and before falcon_hs_boot / falcon_dma_upload
+ * when targeting a dual-mode engine with a Falcon ucode.
+ *
+ * Returns 0 on success or if the engine is already in Falcon mode.
+ * -1 on timeout waiting for BCR_CTRL.VALID.
+ */
+int falcon_select_falcon_mode(struct falcon *f);
+
+/*
+ * Ampere pre-DMA setup poke sequence. Must run once after reset
+ * and before falcon_dma_upload on a fresh engine. Writes three
+ * Ampere-specific config registers (0x624, 0x10c, 0x600) in the
+ * exact sequence nouveau's ga102_flcn_fw_load uses. Safe to
+ * call on any Ampere Falcon (GSP or SEC2).
+ */
+void falcon_pre_dma_setup(struct falcon *f);
 
 #endif /* GPU_NVIDIA_FALCON_H */

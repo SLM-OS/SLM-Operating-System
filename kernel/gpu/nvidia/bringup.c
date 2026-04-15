@@ -210,6 +210,24 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     memset(b->dma_dmem_va, 0, dmem_aligned);
     memcpy(b->dma_dmem_va, b->fwsec_dmem, b->fwsec_dmem_size);
 
+    /* Patch the production signature into DMEM at PKCDataOffset.
+     * The BROM reads 384 bytes from DMEM[pkc_data_off] and validates
+     * them against the image. Without this the BROM keeps spinning /
+     * the ucode never starts executing.
+     *
+     * Signature index selection — FWSEC ships multiple signatures
+     * (one per allowed fuse version). Production cards typically use
+     * index 0 (the "current" signature). Multi-fuse selection is a
+     * follow-up; for now index 0 works on RTX 3050 retail boards. */
+    b->last_error_phase = 201;
+    const uint32_t sig_size = 384u;
+    const uint32_t sig_index = 0;
+    if (b->fwsec_sigs_size < sig_size * (sig_index + 1)) goto fail_free;
+    if (b->fwsec_pkc_data_off + sig_size > b->dma_dmem_size) goto fail_free;
+    memcpy((uint8_t *)b->dma_dmem_va + b->fwsec_pkc_data_off,
+           b->fwsec_sigs + sig_index * sig_size,
+           sig_size);
+
     /* Patch DMEMMAPPER in the DMA'd DMEM with our FRTS request. */
     b->last_error_phase = 2;
     if (patch_dmemmapper_frts(b->dma_dmem_va, b->dma_dmem_size,
@@ -224,6 +242,16 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     b->last_error_phase = 3;
     if (falcon_reset(&b->gsp_flcn) < 0) goto fail_free;
 
+    /* On dual-mode GSP Falcon, force Falcon (non-RISC-V) core
+     * select. FWSEC is a Falcon ucode — if the engine was last
+     * used in RISC-V mode, DMA and STARTCPU go to the wrong core.
+     * No-op on SEC2. */
+    b->last_error_phase = 301;
+    if (falcon_select_falcon_mode(&b->gsp_flcn) < 0) goto fail_free;
+
+    /* Ampere-specific pre-DMA config (nouveau ga102_flcn_fw_load). */
+    falcon_pre_dma_setup(&b->gsp_flcn);
+
     /* DMA IMEM then DMEM into GSP Falcon. */
     b->last_error_phase = 4;
     if (falcon_dma_upload(&b->gsp_flcn, b->dma_imem_iova,
@@ -232,6 +260,10 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     b->last_error_phase = 5;
     if (falcon_dma_upload(&b->gsp_flcn, b->dma_dmem_iova,
                           0, dmem_aligned, false) < 0) goto fail_free;
+
+    /* Clear MAILBOX0/1 — nouveau passes mbox0=0 for FWSEC. */
+    gsp_platform->write32(NV_PGSP_BASE + FALCON_MAILBOX0, 0);
+    gsp_platform->write32(NV_PGSP_BASE + FALCON_MAILBOX1, 0);
 
     /* Heavy-signed boot. GSP Falcon BROM is at 0x111000 (the RISC-V
      * PRI aperture doubles as the BROM aperture on the dual-mode core). */

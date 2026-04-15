@@ -296,12 +296,32 @@ int main(int argc, char **argv)
         if (rc < 0) {
             printf("[GSP-HARNESS] FWSEC-FRTS FAILED at phase %u\n",
                    b.last_error_phase);
-            uint32_t err = gsp_platform->read32(0x00001438);
+            uint32_t err    = gsp_platform->read32(0x00001438);
             uint32_t wpr_lo = gsp_platform->read32(0x001fa824);
             uint32_t wpr_hi = gsp_platform->read32(0x001fa828);
-            printf("                FWSEC err reg=0x%08x (err_code=%u)\n",
+            printf("                FWSEC err reg = 0x%08x (err_code=%u)\n",
                    err, err >> 16);
-            printf("                WPR2 lo=0x%08x hi=0x%08x\n", wpr_lo, wpr_hi);
+            printf("                WPR2 lo = 0x%08x  hi = 0x%08x\n", wpr_lo, wpr_hi);
+
+            /* Dump GSP Falcon state to show whether BROM rejected
+             * the signature, the ucode is looping, or DMA/TRFCFG
+             * didn't fire. */
+            uint32_t cpuctl  = gsp_platform->read32(0x00110100);
+            uint32_t mbox0   = gsp_platform->read32(0x00110040);
+            uint32_t mbox1   = gsp_platform->read32(0x00110044);
+            uint32_t irqstat = gsp_platform->read32(0x00110008);
+            uint32_t hwcfg2  = gsp_platform->read32(0x001100f4);
+            uint32_t bcrctl  = gsp_platform->read32(0x00111668);
+            uint32_t modsel  = gsp_platform->read32(0x00111180);
+            uint32_t paraaddr= gsp_platform->read32(0x00111210);
+            printf("                GSP Falcon state:\n");
+            printf("                  CPUCTL=0x%08x (halted=%d, started=%d)\n",
+                   cpuctl, !!(cpuctl & 0x10), !(cpuctl & 0x10));
+            printf("                  MAILBOX0=0x%08x MAILBOX1=0x%08x\n", mbox0, mbox1);
+            printf("                  IRQSTAT=0x%08x (halt=%d, swgen0=%d)\n",
+                   irqstat, !!(irqstat & 0x10), !!(irqstat & 0x40));
+            printf("                  HWCFG2=0x%08x BCR_CTRL=0x%08x\n", hwcfg2, bcrctl);
+            printf("                  MOD_SEL=0x%08x PARAADDR0=0x%08x\n", modsel, paraaddr);
             return 1;
         }
         printf("[GSP-HARNESS] FWSEC-FRTS ok — WPR2 registers:\n");

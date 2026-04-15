@@ -200,6 +200,47 @@ bool falcon_is_idle(const struct falcon *f)
     return true;
 }
 
+int falcon_select_falcon_mode(struct falcon *f)
+{
+    if (!f || !f->initialized) return -1;
+    if (!f->has_riscv) return 0;     /* SEC2 etc — no-op */
+
+    /* BCR_CTRL bit 4 = CORE_SELECT. 0 = Falcon, 1 = RISC-V.
+     * If RISC-V mode is currently selected, clear the register to
+     * force Falcon mode and poll for VALID bit. */
+    uint32_t bcr = riscv_r32(f, FALCON_RISCV_BCR_CTRL);
+    if ((bcr & FALCON_RISCV_BCR_CORE_SELECT) == 0) return 0;
+
+    gsp_platform->write32(NV_PGSP_RISCV_BASE + FALCON_RISCV_BCR_CTRL, 0);
+    gsp_platform->mb();
+
+    uint32_t budget = us_to_iters(10 * 1000);
+    while (budget--) {
+        uint32_t v = riscv_r32(f, FALCON_RISCV_BCR_CTRL);
+        if (v == 0xFFFFFFFFu) return -1;
+        if (v & FALCON_RISCV_BCR_VALID) return 0;
+    }
+    return -1;
+}
+
+void falcon_pre_dma_setup(struct falcon *f)
+{
+    if (!f || !f->initialized) return;
+
+    /* falcon[0x624] |= 0x80 */
+    uint32_t v = flcn_r32(f, FALCON_PRE_DMA_624);
+    flcn_w32(f, FALCON_PRE_DMA_624, v | FALCON_PRE_DMA_624_BIT);
+
+    /* Clear DMACTL. */
+    flcn_w32(f, FALCON_DMACTL, 0);
+
+    /* TRANSCFG mask/value. */
+    v = flcn_r32(f, FALCON_PRE_DMA_600);
+    v = (v & ~FALCON_PRE_DMA_600_MASK) | FALCON_PRE_DMA_600_VAL;
+    flcn_w32(f, FALCON_PRE_DMA_600, v);
+    gsp_platform->mb();
+}
+
 int falcon_hs_boot(struct falcon *f,
                    uint32_t brom_base,
                    uint32_t dmem_sign_off,
