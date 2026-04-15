@@ -180,7 +180,7 @@ struct falcon {
 #define FALCON_SCRUB_TIMEOUT_US       (500u * 1000u)  /* 500 ms */
 #define FALCON_RESET_TIMEOUT_US       (100u * 1000u)  /* 100 ms */
 #define FALCON_DMA_TIMEOUT_US         (100u * 1000u)
-#define FALCON_HALT_TIMEOUT_US        (2u * 1000u * 1000u)  /* 2 s for Booter / FWSEC */
+#define FALCON_HALT_TIMEOUT_US        (5u * 1000u * 1000u)  /* 5 s — GA107 FWSEC-FRTS halts at ~2.1 s post-STARTCPU on test-pc (handoff §4.2). 2 s was too tight. */
 
 /*
  * Probe a Falcon engine. Reads HWCFG / HWCFG2 to fill in imem/dmem
@@ -267,6 +267,22 @@ int falcon_hs_boot(struct falcon *f,
                    uint32_t ucode_id,
                    uint32_t boot_vec,
                    uint32_t timeout_us);
+
+/*
+ * falcon_hs_boot split for tracing: program BROM + kick STARTCPU
+ * without waiting for halt. Caller polls DEBUGINFO / MAILBOX / CPUCTL
+ * itself before calling falcon_wait_halted (or giving up).
+ *
+ * Used by `gsp-harness --fwsec-trace` to sample FWSEC progress
+ * markers over time — disambiguates "stuck at one instruction" from
+ * "slow progression" when MAILBOX0 cleared but HALTED never sets.
+ */
+int falcon_hs_kick(struct falcon *f,
+                   uint32_t brom_base,
+                   uint32_t dmem_sign_off,
+                   uint32_t engine_id,
+                   uint32_t ucode_id,
+                   uint32_t boot_vec);
 
 /*
  * On dual-mode engines (GSP Falcon), force Falcon (non-RISC-V)

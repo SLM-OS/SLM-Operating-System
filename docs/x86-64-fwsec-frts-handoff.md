@@ -1,6 +1,6 @@
 # E3.4 FWSEC-FRTS hardware completion — handoff doc
 
-**Last updated:** 2026-04-15 (after PR #181 merged WPR2 placement fix)
+**Last updated:** 2026-04-15 (session 2 — probes A, 4.1, 4.2, 4.3 done; new hypothesis: missing DEVINIT)
 **Owner role:** open
 **Tracking issue:** [#27](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/27)
 **Companion docs:**
@@ -12,6 +12,154 @@
 This document is self-contained: if you're a new agent (or human)
 picking up E3.4, read this end-to-end and you should be able to make
 the next probe without re-deriving the context.
+
+---
+
+## 0. Session-2 findings (2026-04-15, post-PR-#181)
+
+Four probes from §4 executed. None made FWSEC succeed, but they
+disambiguate the failure mode significantly.
+
+### 0.1 Probe A (§4.1) — init_cmd = SB instead of FRTS
+
+Added `--fwsec-sb` to the harness; runs FWSEC with `init_cmd=0x19`
+(subsequent boot — no WPR2 setup, no frts_region sub-struct) instead
+of FRTS (`0x15`). Result: **hangs identically**. Same
+`DEBUGINFO=0xda550000`, `MAILBOX0` cleared from sentinel,
+`CPUCTL=0x00000000` throughout the halt poll.
+
+**Conclusion:** the hang is **upstream of the init_cmd dispatch** —
+in FWSEC's common prologue that runs before both FRTS and SB paths.
+The only code that runs in both is the `read_vbios` sub-struct
+processing.
+
+### 0.2 Probe 4.3 — ROM BAR state under VFIO
+
+`lspci -vvv -s 01:00.0` reports `Expansion ROM at 54000000
+[disabled] [size=512K]`. Initially flagged as a candidate root cause
+but disproved on further reading:
+
+- `read_vbios.flags=2` means **use BAR0+0x300000 PROM window**
+  (NV_PROM_DATA), NOT the PCI Expansion ROM BAR. Confirmed against
+  `docs/reference/nvidia-vbios-bar0-prom-access.md` and NVIDIA's
+  `kgspExtractVbiosFromRom_TU102` in
+  `docs/reference/nvidia-openrm-595-kernel-gsp-vbios-tu102.c:59-85`.
+- FWSEC never touches the Expansion ROM BAR. nouveau doesn't enable
+  it either.
+
+**Conclusion:** disabled ROM BAR is a red herring.
+
+### 0.3 Probe 4.2 — DEBUGINFO=0xda550000 time series
+
+Added post-timeout sampling to `--fwsec-frts` (100 ms × 10 samples).
+Observed on test-pc with `FALCON_HALT_TIMEOUT_US` set to both 2 s
+and 5 s:
+
+```
+GSP Falcon state at timeout:
+  CPUCTL=0x00000000   (NOT halted)
+  DEBUGINFO=0xda550000
+  MAILBOX0=0   OS=0   WPR2_LO=0   WPR2_HI=0xE00 (device default)
+
+post-timeout samples (100 ms apart):
+  t+100ms  CPUCTL=0x00000000  DEBUGINFO=0xda550000
+  t+200ms  CPUCTL=0x00000010  DEBUGINFO=0xda550000  ← HALTED bit flips on
+  t+300ms  CPUCTL=0x00000010  DEBUGINFO=0xda550000
+  ... (stays halted, DEBUGINFO stays at 0xda550000)
+```
+
+**New facts:**
+
+1. `DEBUGINFO` stays at `0xda550000` *from STARTCPU through halt* —
+   this value was written early and never updated. Either the
+   phase-ID register is only written once, or FWSEC never progressed
+   past the point where `0xda55` was written.
+2. FWSEC **does eventually halt** — it's not infinitely stuck. But
+   the halt happens **~100–200 ms past our halt timeout**, whether
+   that timeout is 2 s or 5 s. That strongly suggests one of:
+   - FWSEC has its own internal timeout that fires shortly after
+     our host-side timeout. We stop polling; its internal timer
+     fires; it bails with a HALT.
+   - The halt is *correlated* with us ending the MMIO poll loop —
+     unlikely, but possible if FWSEC is waiting on a PRI bus
+     condition that frees up when we stop hammering it.
+3. When FWSEC halts this way: **OS=0, WPR2 unset, err_reg=0**. That
+   is NOT the success path (OS would be a non-zero app version; WPR2
+   would be populated; err_reg would still be 0). Nor is it the
+   bail-with-error path (err_reg would hold an error code). FWSEC
+   is halting in an *aborted-without-error* state.
+4. The open NVIDIA/nouveau/nova-core sources contain **no** hits for
+   `0xda55` — it's an FWSEC-internal marker that isn't documented
+   externally. Searching the FWSEC ucode binary itself for the
+   literal bytes is the only remaining source angle; a new probe
+   would need to do that.
+
+**Conclusion:** FWSEC is stuck in a wait state (`0xda55` phase),
+eventually times out internally, and halts without doing FRTS/SB
+work. We need to find what it's waiting for.
+
+### 0.4 Hypothesis for the next session — missing DEVINIT
+
+Strongest remaining candidate, not yet tested:
+
+**test-pc's RTX 3050 may never have had VBIOS DEVINIT executed.**
+
+- DEVINIT is the early-boot init script in the GPU's VBIOS. It sets
+  up the memory controller (NV_PFB), clock trees, PCIe lane config,
+  and other hardware state that later stages (including FWSEC)
+  depend on.
+- UEFI firmware runs DEVINIT only on the *primary display*. On
+  test-pc, the primary display is the i7-6700's iGPU (the HDMI is
+  wired to the mobo, not the dGPU). So UEFI likely never ran the
+  RTX 3050's VBIOS.
+- At Linux boot, `vfio-pci` binds the dGPU without running DEVINIT.
+  Nouveau / nova-core *do* run DEVINIT at probe time; our harness
+  does not.
+- If DEVINIT hasn't run, FB memory is uninitialized, some PRI
+  blocks may be gated off, and FWSEC's expectation of "VBIOS already
+  applied" fails → it waits for something that will never happen →
+  internal timeout → halt with no output.
+
+**Next probes:**
+
+1. **Check if DEVINIT was run.** Read `NV_PGC6_BSI_VBIOS_GOLD_DONE`
+   (or equivalent) — nouveau checks this as the "devinit already
+   ran" flag. If clear, DEVINIT wasn't run.
+2. **Plumb DEVINIT into the harness.** The VBIOS carries a DEVINIT
+   script (in the BIT table). Nouveau's
+   `nvkm_devinit_post()` / `ga100_devinit_post()` walks it. This is
+   a significant piece of work but is the most likely root-cause
+   fix.
+3. **Alternative fast test:** temporarily boot the dGPU as primary
+   display (swap HDMI cable, or disable iGPU in BIOS) so UEFI runs
+   DEVINIT, then rebind to `vfio-pci` and re-run `--fwsec-frts`. If
+   that works, we've confirmed the hypothesis and know the long-term
+   fix is to plumb DEVINIT into SLM-OS itself.
+
+### 0.5 Harness additions landed this session
+
+- `--fwsec-sb` — probe variant using init_cmd=SB. Preserves
+  frts_region write semantics (nouveau only writes it for FRTS).
+- `falcon_hs_kick()` — split of `falcon_hs_boot` into kick + wait,
+  for callers that need to intervene between STARTCPU and halt poll.
+  `falcon_hs_boot` still works as before (calls kick + wait).
+- `struct gsp_bringup::init_cmd`, `trace_mode` — knobs the harness
+  sets before calling `gsp_bringup_fwsec_frts`. Default init_cmd
+  remains FRTS.
+- `gsp_bringup_patch_dmemmapper(... init_cmd ...)` — generic patcher
+  used by both FRTS and SB paths. Skips frts_region sub-struct when
+  init_cmd != FRTS. Legacy `_frts` name preserved as a wrapper so
+  test_bringup keeps passing.
+- `gsp_bringup_free(b)` — extracted DMA cleanup.
+- `--fwsec-trace` — scaffolding for a kick-then-poll trace mode. Not
+  working on current hardware (engine doesn't re-halt between runs;
+  is_idle check fails at kick). Kept in the tree because the
+  *concept* is still useful once we can FLR / device-reset the GPU.
+  Don't delete without reconsidering.
+- Post-timeout DEBUGINFO time-series sampling in the `--fwsec-frts`
+  failure dump (10 × 100 ms). This is how §0.3 was measured.
+- `FALCON_HALT_TIMEOUT_US` bumped from 2 s to 5 s. Still catches the
+  halt one sample too late on test-pc, but closer.
 
 ---
 

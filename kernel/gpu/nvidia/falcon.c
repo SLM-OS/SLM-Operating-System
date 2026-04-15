@@ -252,13 +252,12 @@ void falcon_pre_dma_setup(struct falcon *f)
     gsp_platform->mb();
 }
 
-int falcon_hs_boot(struct falcon *f,
+int falcon_hs_kick(struct falcon *f,
                    uint32_t brom_base,
                    uint32_t dmem_sign_off,
                    uint32_t engine_id,
                    uint32_t ucode_id,
-                   uint32_t boot_vec,
-                   uint32_t timeout_us)
+                   uint32_t boot_vec)
 {
     if (!f || !f->initialized) return -1;
     if (!falcon_is_idle(f))    return -1;
@@ -276,6 +275,20 @@ int falcon_hs_boot(struct falcon *f,
     gsp_platform->mb();
 
     falcon_start(f, boot_vec);
+    return 0;
+}
+
+int falcon_hs_boot(struct falcon *f,
+                   uint32_t brom_base,
+                   uint32_t dmem_sign_off,
+                   uint32_t engine_id,
+                   uint32_t ucode_id,
+                   uint32_t boot_vec,
+                   uint32_t timeout_us)
+{
+    int rc = falcon_hs_kick(f, brom_base, dmem_sign_off,
+                            engine_id, ucode_id, boot_vec);
+    if (rc < 0) return rc;
     return falcon_wait_halted(f, timeout_us);
 }
 
