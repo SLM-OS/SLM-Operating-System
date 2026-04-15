@@ -14,6 +14,9 @@
 
 #include "../../kernel/gpu/nvidia/gsp.h"
 #include "../../kernel/gpu/nvidia/nvidia_vbios.h"
+#include "../../kernel/gpu/nvidia/falcon.h"
+#include "../../kernel/gpu/nvidia/nvfw.h"
+#include "../../kernel/gpu/nvidia/bringup.h"
 
 extern int linux_gsp_platform_init(const char *pci_path, const char *chip,
                                    bool trace);
@@ -45,8 +48,14 @@ static void usage(const char *argv0)
 "\n"
 "Actions (pick one):\n"
 "  --probe          Map BARs, load firmware, read BOOT_42. Baseline check.\n"
-"  --vbios          Read + parse VBIOS via /sys/.../rom. Reports BIT entries\n"
-"                   and FWSEC presence (Turing+) without touching GSP.\n"
+"  --vbios          Read + parse VBIOS via BAR0 PROM window. Reports BIT\n"
+"                   entries and FWSEC presence (Turing+) without touching GSP.\n"
+"  --falcons        Probe GSP + SEC2 Falcon engines: IMEM/DMEM sizes, halt\n"
+"                   state, RISC-V capability. Hardware smoke test for E3.\n"
+"  --dma-test       Allocate + IOMMU-map + free a DMA buffer via VFIO.\n"
+"                   Confirms E3.2 DMA plumbing works end-to-end.\n"
+"  --fwsec-frts     Run FWSEC-FRTS on GSP Falcon. First real GSP-RM\n"
+"                   bringup step — sets up the WPR2 region in FB.\n"
 "  --phase N        Attempt GSP bringup phase N only (0..7).\n"
 "  --bringup        Run full gsp_init() — phases 0 through 7.\n"
 "\n"
@@ -68,7 +77,8 @@ int main(int argc, char **argv)
     const char *pci_path = "/sys/bus/pci/devices/0000:01:00.0";
     const char *chip     = "ga107";
     bool trace           = false;
-    enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
+    enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_FALCONS, ACT_DMA_TEST,
+           ACT_FWSEC_FRTS, ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
     int phase = -1;
 
     for (int i = 1; i < argc; i++) {
@@ -76,6 +86,9 @@ int main(int argc, char **argv)
         if (strcmp(a, "--help") == 0) { usage(argv[0]); return 0; }
         else if (strcmp(a, "--probe") == 0) { action = ACT_PROBE; }
         else if (strcmp(a, "--vbios") == 0) { action = ACT_VBIOS; }
+        else if (strcmp(a, "--falcons") == 0) { action = ACT_FALCONS; }
+        else if (strcmp(a, "--dma-test") == 0) { action = ACT_DMA_TEST; }
+        else if (strcmp(a, "--fwsec-frts") == 0) { action = ACT_FWSEC_FRTS; }
         else if (strcmp(a, "--bringup") == 0) { action = ACT_BRINGUP; }
         else if (strcmp(a, "--trace") == 0) { trace = true; }
         else if (strcmp(a, "--phase") == 0 && i + 1 < argc) {
@@ -173,6 +186,155 @@ int main(int argc, char **argv)
                    "                   lives in the missing tail. See issue #150 for the\n"
                    "                   work to read the rest via PRAMIN / VRAM shadow.)\n");
         }
+        return 0;
+    }
+    case ACT_FALCONS: {
+        /* Hardware smoke test for the Falcon v4 register map in
+         * kernel/gpu/nvidia/falcon.c — probes both engines and
+         * reports what they look like on real Ampere silicon.
+         * Read-only; safe to run without affecting GSP state. */
+        struct falcon gsp_flcn, sec2_flcn;
+
+        if (falcon_probe(&gsp_flcn, NV_PGSP_BASE) < 0) {
+            printf("[GSP-HARNESS] GSP Falcon probe failed\n");
+        } else {
+            printf("[GSP-HARNESS] GSP Falcon @0x%08x  IMEM=%u KB  DMEM=%u KB  RISC-V=%s  idle=%s\n",
+                   gsp_flcn.base,
+                   gsp_flcn.imem_size / 1024,
+                   gsp_flcn.dmem_size / 1024,
+                   gsp_flcn.has_riscv ? "yes" : "no",
+                   falcon_is_idle(&gsp_flcn) ? "yes" : "no");
+        }
+
+        if (falcon_probe(&sec2_flcn, NV_PSEC2_BASE) < 0) {
+            printf("[GSP-HARNESS] SEC2 Falcon probe failed\n");
+        } else {
+            printf("[GSP-HARNESS] SEC2 Falcon @0x%08x  IMEM=%u KB  DMEM=%u KB  RISC-V=%s  idle=%s\n",
+                   sec2_flcn.base,
+                   sec2_flcn.imem_size / 1024,
+                   sec2_flcn.dmem_size / 1024,
+                   sec2_flcn.has_riscv ? "yes" : "no",
+                   falcon_is_idle(&sec2_flcn) ? "yes" : "no");
+        }
+        return 0;
+    }
+    case ACT_DMA_TEST: {
+        /* E3.2 DMA plumbing smoke test: allocate + IOMMU-map + free
+         * three buffers of different sizes, write a recognizable
+         * pattern into each, and confirm the DMA address we get is
+         * reasonable (IOMMU-space, not a raw VA).
+         *
+         * We can't directly confirm the GPU can read our buffer
+         * without actually programming Falcon DMA (that's E3.4 work).
+         * What this test CAN confirm: the VFIO session opens, the
+         * Type1 IOMMU accepts our maps, and the IOVAs come back in
+         * the expected 0x10000000+ range. */
+        struct {
+            size_t size;
+            size_t align;
+        } cases[] = {
+            { 4096,       0 },
+            { 64 * 1024,  256 },
+            { 1024 * 1024, 4096 },
+        };
+        int ncases = (int)(sizeof(cases) / sizeof(cases[0]));
+
+        int failed = 0;
+        for (int i = 0; i < ncases; i++) {
+            uint64_t iova = 0;
+            void *va = gsp_platform->dma_alloc(cases[i].size, cases[i].align, &iova);
+            if (!va) {
+                printf("[GSP-HARNESS] dma_alloc(%zu) FAILED\n", cases[i].size);
+                failed++;
+                continue;
+            }
+            if (iova < 0x10000000ull) {
+                printf("[GSP-HARNESS] dma_alloc(%zu): iova 0x%lx looks like a raw VA\n"
+                       "                             (VFIO probably unavailable — "
+                       "see earlier init line)\n",
+                       cases[i].size, (unsigned long)iova);
+                failed++;
+            } else {
+                printf("[GSP-HARNESS] dma_alloc(%zu, align=%zu): va=%p iova=0x%lx\n",
+                       cases[i].size, cases[i].align, va, (unsigned long)iova);
+            }
+            /* Light write+read check that the buffer is writable. */
+            uint8_t *bytes = (uint8_t *)va;
+            bytes[0] = 0xA5;
+            bytes[cases[i].size - 1] = 0x5A;
+            if (bytes[0] != 0xA5 || bytes[cases[i].size - 1] != 0x5A) {
+                printf("[GSP-HARNESS] buffer not host-writable!\n");
+                failed++;
+            }
+            gsp_platform->dma_free(va, cases[i].size);
+        }
+
+        if (failed) {
+            printf("[GSP-HARNESS] --dma-test: %d/%d FAILED\n", failed, ncases);
+            return 1;
+        }
+        printf("[GSP-HARNESS] --dma-test: all %d cases PASS\n", ncases);
+        return 0;
+    }
+    case ACT_FWSEC_FRTS: {
+        struct gsp_bringup b;
+        if (gsp_bringup_prepare(&b) < 0) {
+            printf("[GSP-HARNESS] bringup prepare FAILED\n");
+            return 1;
+        }
+        printf("[GSP-HARNESS] FWSEC ucode: imem=%u bytes dmem=%u bytes\n"
+               "                engine_id=0x%x ucode_id=%u pkc_data_off=0x%x\n"
+               "                imem_virt_base=0x%x interface_off=0x%x\n",
+               b.fwsec_imem_size, b.fwsec_dmem_size,
+               b.fwsec_engine_id, b.fwsec_ucode_id, b.fwsec_pkc_data_off,
+               b.fwsec_imem_virt_base, b.fwsec_interface_offset);
+        printf("[GSP-HARNESS] WPR2 target: addr=0x%llx size=0x%llx\n",
+               (unsigned long long)b.wpr2_addr,
+               (unsigned long long)b.wpr2_size);
+
+        int rc = gsp_bringup_fwsec_frts(&b);
+        if (b.diag_sig_count) {
+            printf("[GSP-HARNESS] sig selection: fuse_reg[0x%x]=0x%x sig_count=%u\n"
+                   "                sig_versions=0x%x → sig_index=%u\n",
+                   b.diag_fuse_reg_off, b.diag_fuse_reg_val,
+                   b.diag_sig_count, b.diag_sig_versions, b.diag_sig_index);
+        }
+        if (rc < 0) {
+            printf("[GSP-HARNESS] FWSEC-FRTS FAILED at phase %u\n",
+                   b.last_error_phase);
+            uint32_t err    = gsp_platform->read32(0x00001438);
+            uint32_t wpr_lo = gsp_platform->read32(0x001fa824);
+            uint32_t wpr_hi = gsp_platform->read32(0x001fa828);
+            printf("                FWSEC err reg = 0x%08x (err_code=%u)\n",
+                   err, err >> 16);
+            printf("                WPR2 lo = 0x%08x  hi = 0x%08x\n", wpr_lo, wpr_hi);
+
+            /* Dump GSP Falcon state to show whether BROM rejected
+             * the signature, the ucode is looping, or DMA/TRFCFG
+             * didn't fire. */
+            uint32_t cpuctl  = gsp_platform->read32(0x00110100);
+            uint32_t mbox0   = gsp_platform->read32(0x00110040);
+            uint32_t mbox1   = gsp_platform->read32(0x00110044);
+            uint32_t irqstat = gsp_platform->read32(0x00110008);
+            uint32_t hwcfg2  = gsp_platform->read32(0x001100f4);
+            uint32_t bcrctl  = gsp_platform->read32(0x00111668);
+            uint32_t modsel  = gsp_platform->read32(0x00111180);
+            uint32_t paraaddr= gsp_platform->read32(0x00111210);
+            printf("                GSP Falcon state:\n");
+            printf("                  CPUCTL=0x%08x (halted=%d, started=%d)\n",
+                   cpuctl, !!(cpuctl & 0x10), !(cpuctl & 0x10));
+            printf("                  MAILBOX0=0x%08x MAILBOX1=0x%08x\n", mbox0, mbox1);
+            printf("                  IRQSTAT=0x%08x (halt=%d, swgen0=%d)\n",
+                   irqstat, !!(irqstat & 0x10), !!(irqstat & 0x40));
+            printf("                  HWCFG2=0x%08x BCR_CTRL=0x%08x\n", hwcfg2, bcrctl);
+            printf("                  MOD_SEL=0x%08x PARAADDR0=0x%08x\n", modsel, paraaddr);
+            return 1;
+        }
+        printf("[GSP-HARNESS] FWSEC-FRTS ok — WPR2 registers:\n");
+        uint32_t wpr_lo = gsp_platform->read32(0x001fa824);
+        uint32_t wpr_hi = gsp_platform->read32(0x001fa828);
+        printf("                WPR2_LO = 0x%08x\n                WPR2_HI = 0x%08x\n",
+               wpr_lo, wpr_hi);
         return 0;
     }
     case ACT_PHASE: {

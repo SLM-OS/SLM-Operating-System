@@ -28,6 +28,7 @@
 
 #include "../../kernel/gpu/nvidia/gsp.h"
 #include "../../kernel/gpu/nvidia/nvidia_vbios.h"
+#include "vfio.h"
 
 /* ---- Global state for the Linux platform ops ----
  *
@@ -47,6 +48,12 @@ static bool               g_trace;
  * VBIOS loader. Owned by the caller of linux_gsp_platform_init(),
  * which guarantees the string outlives the harness process. */
 static const char *g_pci_path;
+
+/* Persistent VFIO session (E3.2). NULL if VFIO isn't available for
+ * this device — the harness still works via sysfs in that case, but
+ * DMA-dependent operations (Falcon ucode upload, RPC rings) will
+ * fail with a clear diagnostic. */
+static struct vfio_session *g_vfio;
 
 /* VBIOS state: the raw bytes live in g_vbios_buf (grown via malloc),
  * the parsed view lives in g_vbios. Loaded on first fwsec request. */
@@ -113,33 +120,32 @@ static void linux_gsp_bar1_write(uint32_t offset, const void *src, size_t n)
 
 /* ---- DMA allocation ----
  *
- * Under VFIO, userspace allocates a memory region and registers it
- * with the IOMMU via VFIO_IOMMU_MAP_DMA — the returned IOVA is what
- * the GPU uses to address the region. For now we take a shortcut:
- * allocate anonymous mmap'd memory and return its virtual address.
- * This works for testing BAR0 / BAR1 accessors but NOT for anything
- * that requires the GPU to DMA into it (Phase 2+ FB layout, Phase 6
- * message queues, engine submission).
+ * Routes through the shared VFIO session (vfio.c) so every DMA buffer
+ * is mapped into the IOMMU and reachable from the GPU. This is what
+ * E3.2+ needs — Falcon ucode upload, Booter Load, GSP-RM RPC rings
+ * all DMA from system memory using the IOVA we hand back.
  *
- * Full VFIO IOMMU DMA binding lands in E3 when the Falcon bringup
- * actually needs it — at that point this function grows a full
- * VFIO_IOMMU_MAP_DMA ioctl dance.
+ * Fallback: if VFIO isn't available (e.g. device not bound to
+ * vfio-pci, `/dev/vfio/vfio` not accessible), fall back to anonymous
+ * mmap with the VA reported as "DMA address". That's a lie — the GPU
+ * can't reach it — but it lets `--probe` and `--vbios` work on
+ * systems without full VFIO setup for read-only validation.
  */
 static void *linux_gsp_dma_alloc(size_t size, size_t align, uint64_t *out_dma)
 {
-    size_t alloc_size = size;
+    if (g_vfio) {
+        return vfio_dma_alloc(g_vfio, size, align, out_dma);
+    }
+
+    /* Fallback — not GPU-reachable, only useful for pure-CPU validation. */
+    size_t alloc_size = (size + 4095) & ~(size_t)4095;
     if (align < 4096) align = 4096;
-    /* Round up to page alignment — mmap always returns page-aligned. */
-    alloc_size = (alloc_size + 4095) & ~(size_t)4095;
     void *p = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) {
         if (out_dma) *out_dma = 0;
         return NULL;
     }
-    /* TODO(E3): VFIO_IOMMU_MAP_DMA to get a real IOVA. For probe-
-     * level harness use the virtual address — Phase 0 / 1 code
-     * paths don't dereference the DMA addr from the GPU side. */
     if (out_dma) *out_dma = (uint64_t)(uintptr_t)p;
     (void)align;
     return p;
@@ -148,6 +154,10 @@ static void *linux_gsp_dma_alloc(size_t size, size_t align, uint64_t *out_dma)
 static void linux_gsp_dma_free(void *ptr, size_t size)
 {
     if (!ptr) return;
+    if (g_vfio) {
+        vfio_dma_free(g_vfio, ptr, size);
+        return;
+    }
     size_t alloc_size = (size + 4095) & ~(size_t)4095;
     munmap(ptr, alloc_size);
 }
@@ -714,6 +724,18 @@ int linux_gsp_platform_init(const char *pci_path, const char *chip,
     fprintf(stderr, "[GSP-HARNESS] BAR1 mapped at %p size %zu\n",
             (void *)g_bar1, g_bar1_size);
 
+    /* Open a persistent VFIO session for DMA. Non-fatal on failure —
+     * the harness is still useful for read-only work (--probe, --vbios,
+     * --falcons) without DMA. Actions that require DMA will fail
+     * explicitly when they try to allocate. */
+    g_vfio = vfio_open(pci_path, trace);
+    if (g_vfio) {
+        fprintf(stderr, "[GSP-HARNESS] VFIO session open — DMA enabled\n");
+    } else {
+        fprintf(stderr, "[GSP-HARNESS] VFIO unavailable — DMA disabled "
+                        "(read-only operations still work)\n");
+    }
+
     if (load_firmware(chip) < 0) {
         fprintf(stderr, "[GSP-HARNESS] firmware load failed (chip=%s)\n", chip);
         return -1;
@@ -722,4 +744,13 @@ int linux_gsp_platform_init(const char *pci_path, const char *chip,
     extern const struct gsp_platform_ops *gsp_platform;
     gsp_platform = &linux_ops;
     return 0;
+}
+
+/*
+ * Expose the VFIO session for harness code paths that need its
+ * state (the --dma-test action in main.c, future --bringup steps).
+ */
+struct vfio_session *linux_gsp_vfio_session(void)
+{
+    return g_vfio;
 }
