@@ -183,6 +183,20 @@ endif
 x86-disk-verify: x86-disk
 	@scripts/tests/verify-x86-disk.sh $(KERNEL_BUILD_DIR)/slmos-x86.img
 
+# P1-2 real-hardware validation: flash slmos-x86.img to test-pc via
+# labctl, run boot_test --count 10, run the 5× sleep-while-echo
+# multi-task preemption check, and verify bench smp dispatch. Gated on
+# SLMOS_LABCTL=1 so CI without lab access doesn't attempt it.
+.PHONY: x86-hw-validate
+x86-hw-validate: x86-disk-verify
+ifneq ($(PLATFORM),X86_64)
+	@echo "x86-hw-validate requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+ifneq ($(SLMOS_LABCTL),1)
+	@echo "x86-hw-validate requires SLMOS_LABCTL=1 (lab hardware access)."; exit 1
+endif
+	@scripts/tests/x86-multitask-boot-test.sh
+
 # ============================================================================
 # gsp-harness — Linux userspace tool for GSP-RM development (Phase E).
 # ============================================================================
