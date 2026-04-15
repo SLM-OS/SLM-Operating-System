@@ -16,6 +16,7 @@
 
 pub mod tensor;
 pub mod workspace;
+pub mod mathf;
 pub mod ops;
 pub mod engine;
 pub mod gpu;

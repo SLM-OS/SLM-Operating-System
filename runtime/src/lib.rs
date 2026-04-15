@@ -3689,7 +3689,7 @@ pub extern "C" fn rust_inference_test() -> i32 {
             let mean = sum / D as f32;
             let var = (sq / D as f32) - mean * mean;
             let var = if var > 0.0 { var } else { 0.0 };
-            let inv_std = 1.0_f32 / libm::sqrtf(var + eps);
+            let inv_std = 1.0_f32 / inference::mathf::sqrtf(var + eps);
             for j in 0..D {
                 ref_out[base + j] =
                     (input_data[base + j] - mean) * inv_std * gamma_data[j] + beta_data[j];
@@ -3742,7 +3742,7 @@ pub extern "C" fn rust_inference_test() -> i32 {
             let mut sq = 0.0_f32;
             for j in 0..D { let v = input_data[base + j]; sq += v * v; }
             let mean_sq = sq / D as f32;
-            let inv_rms = 1.0_f32 / libm::sqrtf(mean_sq + eps);
+            let inv_rms = 1.0_f32 / inference::mathf::sqrtf(mean_sq + eps);
             for j in 0..D {
                 ref_out[base + j] = input_data[base + j] * inv_rms * gamma_data[j];
             }
@@ -3773,7 +3773,7 @@ pub extern "C" fn rust_inference_test() -> i32 {
         for i in 0..N {
             let x = input_data[i];
             let t = K * (x + C * x * x * x);
-            ref_out[i] = 0.5 * x * (1.0 + libm::tanhf(t));
+            ref_out[i] = 0.5 * x * (1.0 + inference::mathf::tanhf(t));
         }
         let mut vals_ok = true;
         for i in 0..N {
