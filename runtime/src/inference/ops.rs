@@ -1077,7 +1077,7 @@ pub fn layer_norm(
             let var = (sumsq * d_inv) - mean * mean;
             // guard against negative due to FP32 round-off on near-constant rows
             let var = if var > 0.0 { var } else { 0.0 };
-            let inv_std = 1.0_f32 / libm::sqrtf(var + eps);
+            let inv_std = 1.0_f32 / super::mathf::sqrtf(var + eps);
 
             if let Some(bp) = bp {
                 for j in 0..d {
@@ -1137,7 +1137,7 @@ pub fn rms_norm(
             let base = r * d;
             let (_sum, sumsq) = simd_sum_sumsq(inp.add(base), d);
             let mean_sq = sumsq * d_inv;
-            let inv_rms = 1.0_f32 / libm::sqrtf(mean_sq + eps);
+            let inv_rms = 1.0_f32 / super::mathf::sqrtf(mean_sq + eps);
 
             for j in 0..d {
                 *outp.add(base + j) = *inp.add(base + j) * inv_rms * *gp.add(j);
@@ -1172,11 +1172,14 @@ pub fn gelu(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
             let x = *inp.add(i);
             let x3 = x * x * x;
             let t = K * (x + C * x3);
-            // tanh via libm — no good scalar NEON path without a
-            // polynomial approximation, and libm::tanhf is already
-            // fast enough that this loop is memory-bound for the
-            // hidden-dim sizes GELU normally sees.
-            *outp.add(i) = 0.5 * x * (1.0 + libm::tanhf(t));
+            // tanh via our scalar Padé(7,7) approximation in
+            // `mathf` — replaces libm::tanhf, which would otherwise
+            // pull libm's f16 paths into the build and trip the
+            // x86_64-unknown-none soften-operand crash (#141).
+            // Padé(7,7) is accurate to ~1e-6 inside [-5, 5] and
+            // saturates at ±1 outside; tighter than the GELU test's
+            // 1e-5 tolerance and faster than the library call.
+            *outp.add(i) = 0.5 * x * (1.0 + super::mathf::tanhf(t));
         }
     }
     Ok(())
