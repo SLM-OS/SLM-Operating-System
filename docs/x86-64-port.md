@@ -2,7 +2,7 @@
 
 This document describes the x86-64 port of SLM-OS, including architecture details, boot sequence, build instructions, and design decisions.
 
-**Status:** Milestones M1–M7 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, NVIDIA RTX 3050 GPU identification + VRAM access, and topic-based message routing (pub/sub IPC). Phase E (GPU compute via GSP-RM) is actively in progress: E1 (firmware embedding), E2 (shared VBIOS parser), E2.5 (FWSEC extraction), E3.1 (Falcon primitives), E3.2 (VFIO IOMMU DMA), and E3.3 (nvfw container parser) all shipped. E3.4 (FWSEC-FRTS execution on GSP Falcon) has the full scaffolding wired and runs end-to-end on real hardware, but the ucode itself stalls — bounded hardware-debug remaining. See `docs/x86-64-capstone-gap-closure-plan.md` and #27.
+**Status:** Milestones M1–M7 complete. Full OS boots on real hardware with 8-CPU SMP, PCI enumeration, NVIDIA RTX 3050 GPU identification + VRAM access, and topic-based message routing (pub/sub IPC). Phase E (GPU compute via GSP-RM) is actively in progress: E1 (firmware embedding), E2 (shared VBIOS parser), E2.5 (FWSEC extraction), E3.1 (Falcon primitives), E3.2 (VFIO IOMMU DMA), E3.3 (nvfw container parser), E3.4 FWSEC bug audit, E3.4.d (Booter Load on SEC2), E3.4.e (GSP RISC-V startup) and E4 (RPC ring skeleton) all shipped. The audited FWSEC code paths still need a hardware re-test on test-pc to confirm WPR2 populates after the BOOTVEC=0 + CPUCTL_ALIAS fixes. See `docs/x86-64-capstone-gap-closure-plan.md` and #27.
 
 ---
 

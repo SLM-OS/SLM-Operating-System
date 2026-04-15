@@ -752,22 +752,48 @@ loader without knowing which one it is.
   `make test-bringup`. Runs end-to-end on real RTX 3050 via
   `gsp-harness --fwsec-frts`.
 
-**WIP (still in #27):**
+**Shipped follow-up (worktree-x86-64-capstone-gap-work):**
 
-- **E3.4 (hardware completion)** — FWSEC ucode executes (MAILBOX0
-  goes from 0xCAFEBEEF sentinel to 0, confirming start) but Falcon
-  doesn't transition to HALTED. WPR2 registers stay at baseline.
-  Bounded register-level debug remaining; harness reports full
-  Falcon state at failure for fast iteration.
-- **E3.4.d** — Booter Load on SEC2 (DMA booter_load.bin parsed by
-  nvfw, program SEC2 BROM, set MAILBOX0/1 to WPR_meta phys, start).
-- **E3.4.e** — GSP RISC-V bringup (BCR_CTRL = VALID|RISCV|BRFETCH at
-  0x111668, set boot vector, release reset, poll RISCV_CPUCTL bit 7).
+- **E3.4 (FWSEC bug audit)** — Code-review pass against nouveau and
+  nova-core sources surfaced two bugs in the FWSEC-FRTS path that
+  match the symptom "ucode runs but never halts":
+  1. `falcon_hs_boot()` was passed `imem_virt_base` as the boot
+     vector. Both `nvkm_gsp_fwsec_v3` and nova-core's
+     `FwsecFirmware::boot_addr()` hard-code BOOTVEC=0 for FWSEC v3.
+     A non-zero BOOTVEC starts the Falcon at a stale VA and the
+     ucode runs into garbage. Fixed in `bringup.c`.
+  2. `falcon_start()` always wrote `CPUCTL` (0x100). nova-core
+     checks `CPUCTL.ALIAS_EN` (bit 6) and uses `CPUCTL_ALIAS`
+     (0x130) when set — required after the BROM hands off. Fixed
+     in `falcon.c`.
+  Hardware re-test required to confirm WPR2 now populates.
 
-**Tests landed:** 76 host-side unit tests across 4 suites
-(test-vbios 30, test-falcon 19, test-nvfw 14, test-bringup 15) +
-hardware integration via 5 harness actions
-(`--probe`, `--vbios`, `--falcons`, `--dma-test`, `--fwsec-frts`).
+- **E3.4.d** — Booter Load on SEC2. New PIO IMEM/DMEM upload
+  helpers (`falcon_pio_upload_imem` / `falcon_pio_upload_dmem`)
+  matching `gm200_flcn_fw_load`'s loader path used by booter on
+  GA10x. `gsp_bringup_booter_load()` parses `booter_load-535.113.01.bin`
+  via nvfw, builds a DMA-mapped mutable copy with signature 0
+  patched into DMEM, programs SEC2 BROM, hands MAILBOX0/1 the
+  WprMeta phys addr, kicks STARTCPU, polls halt. WprMeta is
+  zero-initialized at this milestone (the booter halts with a
+  non-zero MAILBOX0 status without a populated WprMeta — the halt
+  itself is the deliverable; full WprMeta layout is owned by E4).
+
+- **E3.4.e** — GSP RISC-V bringup. `gsp_bringup_riscv_start()`
+  resets GSP Falcon, flips BCR_CTRL = VALID|CORE_SELECT(RISC-V)|
+  BRFETCH at 0x111668, hands off the libos arg pointer via
+  MAILBOX0/1, releases reset via STARTCPU, polls RISCV_CPUCTL.ACTIVE
+  (bit 7) for "RISC-V running".
+
+- **Harness CLI** — `gsp-harness --booter-load` and
+  `--riscv-start` run the full chain through each milestone with
+  diagnostics dumped on failure.
+
+**Tests landed:** 91 host-side unit tests across 5 suites
+(test-vbios 30, test-falcon 19, test-nvfw 14, test-bringup 15,
+test-rpc 15) + hardware integration via 7 harness actions
+(`--probe`, `--vbios`, `--falcons`, `--dma-test`, `--fwsec-frts`,
+`--booter-load`, `--riscv-start`).
 
 **Reference.** Ported from nouveau's
 `drivers/gpu/drm/nouveau/nvkm/{falcon,subdev/gsp}/{ga102,r535}.c`
@@ -780,25 +806,39 @@ infrastructure complete.
 
 ---
 
-### E4. GSP-RM RPC message ring (P3-4)
+### E4. GSP-RM RPC message ring (P3-4) — **SKELETON SHIPPED**
 
-**Deliverables.**
-- New file: `kernel/arch/x86_64/nvidia_gsp_rpc.c`.
-- Allocate command ring and status ring in FB (VRAM) via BAR1 writes.
-- Implement `gsp_rpc_send(opcode, payload, len)` and
-  `gsp_rpc_wait(opcode, timeout_ms) -> response`.
-- Handle the initial `GSP_INIT_DONE` handshake before any user RPC.
-- Implement the subset of RPCs needed for matmul:
+**Shipped (worktree-x86-64-capstone-gap-work):**
+
+- Shared core: `kernel/gpu/nvidia/rpc.{h,c}`. Single contiguous
+  shared-memory region holding the head/tail pointer page plus
+  cmdq + msgq (256 KB each, matching nouveau / openrm framing).
+- Pure ring math (page sizing, modular pointer advance, full/empty
+  disambiguation) implemented and unit-tested with 15 cases via
+  `make test-rpc`. The tests cover wrap-around, exact-page edge
+  cases, the "subtract one to disambiguate" rule, and the
+  init/dtor pair against a mock platform vtable.
+- `gsp_rpc_init()` / `gsp_rpc_dtor()` allocate the shm region and
+  lay out the rings at the canonical offsets the GSP side expects
+  (cmdq w/r at byte 0/4, msgq w/r at byte 0x100/0x104).
+- `gsp_rpc_send()` / `gsp_rpc_wait()` — the framing-aware send and
+  blocking poll. Returns ENOSYS (-1) until the channel sees
+  GSP_INIT_DONE — without GSP-RM alive on the RISC-V core, the
+  consumer never advances rptr and posting would silently fill
+  the ring.
+
+**Remaining hardware work (post-bringup):**
+
+- Element-header + RPC-header marshalling into the cmdq pages.
+- GSP_INIT_DONE polling loop in `gsp_rpc_wait()`.
+- The subset of RPCs needed for matmul:
   - `NV_GSP_RPC_INIT` — hand off host-side layout info.
   - `NV_GSP_RPC_ALLOC_MEM` — carve out VRAM.
   - `NV_GSP_RPC_SUBMIT_COMPUTE` — enqueue a compute kernel.
 
-**Tests.**
-- `test_gsp_rpc_init_done` — assert handshake completes within 10 s.
-- `test_gsp_rpc_echo` — if GSP exposes a debug echo opcode, use it;
-  otherwise check `NV_GSP_RPC_ALLOC_MEM` returns a plausible address.
-
-**Est.** 10 days.
+**Original est.** 10 days; **actual:** ~3 hours for the skeleton
++ pure-logic tests; the hardware-dependent send/wait completion
+remains.
 
 ---
 

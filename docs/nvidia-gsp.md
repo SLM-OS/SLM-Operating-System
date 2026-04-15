@@ -2,7 +2,7 @@
 
 This document captures research into the NVIDIA GPU System Processor (GSP) firmware boot sequence, based on analysis of the NVIDIA open-gpu-kernel-modules source and the nouveau Linux kernel driver. These findings were gathered during Phase 4X (x86-64 port) to understand what is required for bare-metal GPU compute on Ampere architecture.
 
-> **Phase E status (2026-04-14):** GSP bringup is in progress, not post-capstone. E1 (firmware embedding via `.incbin`) and E2 (shared VBIOS BIT-table parser) have shipped; the parser is validated against a real RTX 3050 over a VFIO-backed Linux harness at `host-tools/gsp-harness/`. E2.5 (FWSEC discovery on NPDS-format Ampere VBIOSes) is the active blocker — see [#143](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/143) and `docs/x86-64-gsp-fwsec-investigation.md`. Execution plan in `docs/x86-64-capstone-gap-closure-plan.md` §E.
+> **Phase E status (2026-04-15):** GSP bringup is in progress. Shipped: E1 (firmware embedding via `.incbin`), E2 (shared VBIOS BIT-table parser), E2.5 (FWSEC discovery on NPDS-format Ampere VBIOSes), E3.1 (Falcon v4 register driver), E3.2 (VFIO IOMMU DMA via `host-tools/gsp-harness/`), E3.3 (nvfw HS-firmware container parser), E3.4 scaffolding (FWSEC-FRTS state machine), E3.4 audit (BOOTVEC=0 + CPUCTL.ALIAS_EN routing fixes — see "Implementation notes" below), E3.4.d (Booter Load on SEC2 via PIO IMEM/DMEM), E3.4.e (GSP RISC-V startup via BCR_CTRL flip), and E4 RPC ring skeleton (`kernel/gpu/nvidia/rpc.{h,c}`). Outstanding: hardware re-test on test-pc to confirm WPR2 populates after the audit fixes; full `GspFwWprMeta` layout; RPC element-header marshalling + GSP_INIT_DONE wait. Execution plan in `docs/x86-64-capstone-gap-closure-plan.md` §E.
 
 ---
 
@@ -214,9 +214,45 @@ The key difference is that on Jetson, the GSP firmware may be pre-loaded by the 
 
 ---
 
+## Implementation notes (E3.4 audit)
+
+Two bugs in the FWSEC-FRTS path were caught by a code-level audit
+against nouveau and nova-core during E3.4 hardware bringup. Both
+reproduce the symptom "FWSEC ucode starts (MAILBOX0 transitions
+from 0xCAFEBEEF → 0) but Falcon never halts and WPR2 stays at
+baseline".
+
+1. **BOOTVEC must be 0 for FWSEC v3.** Both `nvkm_gsp_fwsec_v3`
+   (`fw->boot_addr = 0`) and nova-core
+   (`FwsecFirmware::boot_addr() -> 0`) hard-code this. The
+   descriptor's `IMEMVirtBase` field is metadata about where the
+   ucode was BUILT to run — it is **not** the entry PC after BROM
+   verify. Passing `IMEMVirtBase` to BOOTVEC starts the Falcon at a
+   non-zero PC inside garbage memory.
+
+2. **CPUCTL.ALIAS_EN must be honoured at STARTCPU time.** After
+   BROM verifies the signed ucode, it sets `CPUCTL.ALIAS_EN`
+   (bit 6) and gates writes to `CPUCTL` (`0x100`). The release path
+   is `CPUCTL_ALIAS` (`0x130`). nova-core checks this on every
+   start; nouveau happens to dodge the bug because the cards it
+   tests clear ALIAS_EN quickly. Both bugs were fixed in
+   `kernel/gpu/nvidia/{bringup,falcon}.c` and have regression
+   tests in `host-tools/gsp-harness/test_falcon.c`
+   (`test_start_uses_cpuctl_alias_when_en_set`).
+
+Hardware re-test on test-pc (RTX 3050) is required to confirm
+WPR2 now populates and the ucode HALTs cleanly.
+
 ## Conclusion
 
-SLM-OS demonstrates bare-metal GPU access on NVIDIA Ampere: PCI enumeration, chip identification (GA107/RTX 3050), BAR0 register reads, and verified VRAM read/write via BAR1. Full GPU compute requires GSP firmware loading, which involves VBIOS parsing, SEC2 Falcon programming, cryptographic verification, and an RPC stack — a separate project-scale effort documented here for future work.
+SLM-OS demonstrates bare-metal GPU access on NVIDIA Ampere: PCI
+enumeration, chip identification (GA107/RTX 3050), BAR0 register
+reads, verified VRAM read/write via BAR1, and a cross-platform
+shared GSP-RM bringup core (`kernel/gpu/nvidia/`) that drives
+FWSEC-FRTS, Booter Load on SEC2 (E3.4.d), GSP RISC-V startup
+(E3.4.e), and the RPC ring scaffolding (E4). Full GPU compute
+remains gated on hardware completion of FWSEC, full WprMeta
+population, and the RPC marshalling that lights up GSP_INIT_DONE.
 
 ---
 

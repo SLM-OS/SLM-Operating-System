@@ -35,6 +35,18 @@ enum gsp_bringup_state {
     GSP_BRINGUP_FAILED,
 };
 
+/* ---- BAR0 register offsets observed by bringup ----
+ *
+ * Exposed in the header so the harness diagnostic dumps assert on the
+ * same constants the bringup code uses — no parallel magic-number
+ * tables to drift. Ampere GA10x layout. Per-Falcon offsets
+ * (CPUCTL, MAILBOX0/1, etc.) live in falcon.h and apply to either
+ * NV_PGSP_BASE or NV_PSEC2_BASE. The constants below are whole-chip
+ * (FB / FWSEC) registers populated by FWSEC-FRTS execution. */
+#define NV_PFB_PRI_MMU_WPR2_ADDR_LO   0x001fa824u
+#define NV_PFB_PRI_MMU_WPR2_ADDR_HI   0x001fa828u
+#define NV_FWSEC_FRTS_ERR_REG         0x00001438u   /* top 16 bits = err code */
+
 struct gsp_bringup {
     struct falcon gsp_flcn;     /* NV_PGSP_BASE */
     struct falcon sec2_flcn;    /* NV_PSEC2_BASE */
@@ -82,6 +94,38 @@ struct gsp_bringup {
     uint8_t  diag_sig_count;
     uint16_t diag_sig_versions;
     uint32_t diag_sig_index;
+
+    /* Booter Load state (E3.4.d). The booter ucode is a small HS-
+     * signed Falcon program shipped as booter_load-535.113.01.bin.
+     * It runs on SEC2 and reads MAILBOX0/1 as a phys address pointing
+     * at a `GspFwWprMeta` struct in sysmem. */
+    void          *dma_booter_va;        /* mutable copy of booter image */
+    uint64_t       dma_booter_iova;
+    size_t         dma_booter_size;
+    uint32_t       booter_dmem_sign;     /* DMEM byte offset for sig patch */
+    uint32_t       booter_engine_id;     /* SEC2 == 0x1 */
+    uint32_t       booter_ucode_id;      /* per-engine fuse-locked id */
+    uint32_t       booter_imem_sec_off;  /* IMEM offset where sec section lands */
+    uint32_t       booter_imem_sec_size;
+    uint32_t       booter_imem_ns_size;  /* non-secure section comes first */
+    uint32_t       booter_dmem_offset;   /* file byte offset of DMEM portion */
+    uint32_t       booter_dmem_size;
+    uint32_t       booter_boot_addr;     /* BOOTVEC = NS code start */
+    uint32_t       booter_mbox0_post;    /* MAILBOX0 read after halt — diagnostics */
+
+    /* WprMeta DMA buffer (E3.4.d input). Booter reads this struct
+     * via the MAILBOX-handed pointer to find GSP-RM ELF, signature,
+     * bootloader, etc. For E3.4 we allocate the buffer but only
+     * partially populate it — the booter halts with a non-zero
+     * MAILBOX0 error code in that case, which is enough to prove
+     * the bringup plumbing reached SEC2. Full WprMeta layout is
+     * tracked as part of the GSP RPC work in E4. */
+    void          *dma_wpr_meta_va;
+    uint64_t       dma_wpr_meta_iova;
+    size_t         dma_wpr_meta_size;
+
+    /* GSP RISC-V state (E3.4.e). Set after gsp_bringup_riscv_start. */
+    bool           gsp_riscv_active;
 };
 
 /*
@@ -109,9 +153,56 @@ int gsp_bringup_prepare(struct gsp_bringup *b);
  */
 int gsp_bringup_fwsec_frts(struct gsp_bringup *b);
 
-/* E3.4 future steps (declared here, implemented in later commits): */
-int gsp_bringup_booter_load(struct gsp_bringup *b);   /* TODO */
-int gsp_bringup_riscv_start(struct gsp_bringup *b);   /* TODO */
+/*
+ * Phase 2 (E3.4.d): Booter Load on SEC2.
+ *
+ *   - Load booter_load-535.113.01.bin via the platform firmware
+ *     accessor and parse its nvfw_bin_hdr → hs_header_v2 →
+ *     load_header_v2 chain.
+ *   - Allocate a DMA-mapped, mutable copy of the booter's data
+ *     section and patch signature 0 into the location declared by
+ *     the HS header (the BROM verifies it via PARAADDR0).
+ *   - Allocate a DMA buffer for GspFwWprMeta and zero it (full
+ *     layout populated in the E4 RPC step).
+ *   - Reset SEC2, pre-PIO setup, PIO upload non-secure IMEM,
+ *     secure IMEM, then DMEM (matches nouveau's `gm200_flcn_fw`
+ *     loader path that GA10x SEC2 booter uses).
+ *   - Program SEC2 BROM (PARAADDR0/UCODE_ID/ENGIDMASK/MOD_SEL=RSA3K).
+ *   - Set MAILBOX0/1 = wpr_meta phys addr lo/hi, BOOTVEC = NS
+ *     section start, kick STARTCPU, poll halt.
+ *   - On halt, read MAILBOX0; capture into @booter_mbox0_post for
+ *     diagnostics. 0 == booter completed without error; non-zero
+ *     == booter halted but reported a status (commonly because
+ *     WprMeta is incomplete).
+ *
+ * Returns 0 if SEC2 halts within the timeout regardless of mailbox
+ * value (the halt itself is the milestone — interpretation of
+ * MAILBOX0 is the caller's job). -1 on timeout / setup failure
+ * with @last_error_phase populated.
+ */
+int gsp_bringup_booter_load(struct gsp_bringup *b);
+
+/*
+ * Phase 3 (E3.4.e): flip GSP into RISC-V mode and start the core.
+ *
+ * Preconditions: Booter Load ran (the booter set up the GSP-RM
+ * image inside WPR2 and pre-loaded the RISC-V bootloader). This
+ * function does the post-booter dance:
+ *
+ *   - Reset GSP Falcon.
+ *   - Write BCR_CTRL = VALID | CORE_SELECT(=RISC-V) | BRFETCH at
+ *     0x111668.
+ *   - Set GSP boot vector / mailbox handoff (libos addr).
+ *   - Release reset via STARTCPU.
+ *   - Poll RISCV_CPUCTL.ACTIVE_STAT (bit 7) for "RISC-V running".
+ *
+ * Sets @gsp_riscv_active = true on success. Returns 0 on success,
+ * -1 on timeout. Reaching this state proves the bringup chain up
+ * through the RISC-V handoff worked; the next milestone (waiting
+ * for GSP_INIT_DONE on the message ring) is owned by the E4 RPC
+ * code.
+ */
+int gsp_bringup_riscv_start(struct gsp_bringup *b);
 
 /* ---- Pure-logic helpers exposed for unit testing ----
  *

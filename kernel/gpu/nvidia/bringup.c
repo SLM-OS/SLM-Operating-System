@@ -10,6 +10,7 @@
 #include "bringup.h"
 #include "gsp.h"
 #include "falcon.h"
+#include "nvfw.h"
 #include "nvidia_vbios.h"
 
 #include <string.h>
@@ -32,10 +33,8 @@ extern const struct gsp_platform_ops *gsp_platform;
 #define WPR2_FRTS_SIZE              0x100000ull      /* 1 MB */
 #define WPR2_FRTS_BASE_FROM_TOP     0x120000ull      /* offset below FB end */
 
-/* Ampere BAR0 offsets — observable results of FWSEC-FRTS. */
-#define NV_PFB_PRI_MMU_WPR2_ADDR_LO 0x001fa824u
-#define NV_PFB_PRI_MMU_WPR2_ADDR_HI 0x001fa828u
-#define NV_FWSEC_FRTS_ERR           0x00001438u      /* top 16 bits = err code */
+/* Ampere BAR0 offsets observable after FWSEC-FRTS run — definitions
+ * in bringup.h so the harness diagnostic dump uses the same names. */
 
 /* DMEMMAPPER FWSEC application interface layout (see reference:
  * docs/reference/nouveau-falcon-hs-boot.md).
@@ -352,6 +351,17 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
         goto fail_free;
     }
 
+    /* Cross-domain coherency: GSP Falcon DMA reads from these buffers
+     * via PCIe (x86) or the SoC bus (Jetson). On ARM64 the memcpy
+     * + sig patch + DMEMMAPPER patch above only touched CPU cache
+     * lines — flush IMEM and DMEM staging buffers to PoC before the
+     * Falcon DMA starts. No-op on x86-64 (PCIe DMA is coherent). */
+    if (gsp_platform->cache_clean) {
+        gsp_platform->cache_clean(b->dma_imem_va, b->dma_imem_size);
+        gsp_platform->cache_clean(b->dma_dmem_va, b->dma_dmem_size);
+        gsp_platform->mb();
+    }
+
     /* Reset GSP Falcon — kills whatever was running pre-bringup
      * (usually nothing — but SEC2/GSP state from the prior OS is
      * possible, and reset also clears IMEM/DMEM). */
@@ -385,21 +395,30 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     gsp_platform->write32(NV_PGSP_BASE + FALCON_MAILBOX1, 0);
 
     /* Heavy-signed boot. GSP Falcon BROM is at 0x111000 (the RISC-V
-     * PRI aperture doubles as the BROM aperture on the dual-mode core). */
+     * PRI aperture doubles as the BROM aperture on the dual-mode core).
+     *
+     * BOOTVEC for FWSEC v3 is 0 — both nouveau (`nvkm_gsp_fwsec_v3`
+     * sets `fw->boot_addr = 0`) and nova-core
+     * (`FwsecFirmware::boot_addr() -> 0`) hard-code this. The
+     * descriptor's IMEMVirtBase field is metadata about where the
+     * ucode was BUILT to run; the actual entry PC after BROM verify
+     * is the start of IMEM (offset 0). Earlier scaffolding passed
+     * IMEMVirtBase here, which started the Falcon at a non-zero PC
+     * and produced "ucode runs but never halts" on real hardware. */
     b->last_error_phase = 6;
     if (falcon_hs_boot(&b->gsp_flcn,
                        NV_PGSP_RISCV_BASE,
                        b->fwsec_pkc_data_off,
                        b->fwsec_engine_id,
                        b->fwsec_ucode_id,
-                       b->fwsec_imem_virt_base,
+                       0,
                        FALCON_HALT_TIMEOUT_US) < 0) {
         goto fail_free;
     }
 
     /* Observable outcome: WPR2 registers populated, FRTS err reg clean. */
     b->last_error_phase = 7;
-    uint32_t err = gsp_platform->read32(NV_FWSEC_FRTS_ERR);
+    uint32_t err = gsp_platform->read32(NV_FWSEC_FRTS_ERR_REG);
     uint16_t err_code = (uint16_t)(err >> 16);
     if (err_code != 0) goto fail_free;
 
@@ -420,25 +439,299 @@ fail_free:
     return -1;
 }
 
-/* E3.4.d + E3.4.e stubs — will land in follow-up commits on this branch. */
+/* ---- E3.4.d: Booter Load on SEC2 Falcon ----
+ *
+ * Walks booter_load-535.113.01.bin → DMA-mapped mutable copy of the
+ * data section → patch signature → PIO upload IMEM/DMEM → BROM
+ * program → STARTCPU → halt poll.
+ *
+ * Reference: docs/reference/nouveau-gsp-tu102.c `tu102_gsp_booter_ctor`
+ * + nouveau-falcon-fw.c `nvkm_falcon_fw_boot` + nouveau-falcon-gm200.c
+ * `gm200_flcn_fw_load` + `gm200_flcn_fw_boot`. We use PIO (matching
+ * nouveau's `gm200_flcn_fw` func table for booter on Ampere) rather
+ * than DMA — the booter blob is small (< 100 KB) and PIO avoids the
+ * FBIF_TRANSCFG dance the DMA path requires. */
+
+/* WprMeta is a >200-byte struct; we allocate one full page so the
+ * address is well-aligned and we have room to populate fields in the
+ * E4 RPC step without re-allocating. */
+#define WPR_META_BUFFER_SIZE   4096u
+
+/* Booter expects MAILBOX0 == 0 on completion in nominal flow. With
+ * an incomplete WprMeta (E3.4 milestone), the booter may halt with a
+ * non-zero status. We accept "halt within timeout" as the success
+ * criterion at this step and surface the mailbox value via diagnostics. */
 
 int gsp_bringup_booter_load(struct gsp_bringup *b)
 {
-    if (!b) return -1;
-    /* TODO(E3.4.d): DMA booter_load.bin (parsed by nvfw) into SEC2
-     * Falcon, program BROM from its meta (engine_id=1, ucode_id=3),
-     * set MAILBOX0/1 to WPR meta phys addr, start, poll halt.
-     * See docs/reference/nvidia-gsp-bringup-sequence.md §3.1. */
+    if (!b) return GSP_ERR_INVAL;
+    if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free
+        || !gsp_platform->firmware_get)
+        return GSP_ERR_INVAL;
+    if (b->state != GSP_BRINGUP_FWSEC_FRTS_DONE) {
+        /* Allow re-entry on a partially-failed bringup, but the WPR2
+         * registers must be set — booter dereferences WprMeta to find
+         * the WPR boundaries SEC2 will fill. */
+        return GSP_ERR_INVAL;
+    }
+
     b->last_error_phase = 100;
-    return -1;
+
+    /* ---- Phase 1: load + parse booter_load.bin ---- */
+    struct gsp_firmware_blob blob;
+    gsp_platform->firmware_get(GSP_FW_BOOTER_LOAD, &blob);
+    if (!blob.data || blob.size == 0) return GSP_ERR_FAULT;
+
+    struct nvfw_image img;
+    if (nvfw_parse(blob.data, blob.size, &img) < 0) return GSP_ERR_FAULT;
+    if (img.num_apps == 0) return GSP_ERR_FAULT;
+
+    /* On 0x10DE-magic blobs (R535 mainline) num_sig is itself a file
+     * offset to the count — same indirection as patch_loc/patch_sig.
+     * On older 0x3B1D14F0 blobs num_sig is the count directly. We
+     * treat the value as authoritative when small (< 64); otherwise
+     * dereference. */
+    uint32_t sig_count = img.num_sig;
+    if (img.bin_magic == NVFW_BIN_MAGIC_STD && sig_count >= 64) {
+        if (sig_count + 4 > img.size) return GSP_ERR_FAULT;
+        sig_count = (uint32_t)img.bytes[sig_count]
+                  | ((uint32_t)img.bytes[sig_count + 1] <<  8)
+                  | ((uint32_t)img.bytes[sig_count + 2] << 16)
+                  | ((uint32_t)img.bytes[sig_count + 3] << 24);
+    }
+    if (sig_count == 0 || sig_count > 64) return GSP_ERR_FAULT;
+    if (img.sig_prod_size == 0) return GSP_ERR_FAULT;
+    uint32_t sig_size = img.sig_prod_size / sig_count;
+    if (sig_size == 0 || sig_size > 4096) return GSP_ERR_FAULT;
+
+    /* ---- Phase 2: layout the booter image ---- */
+    /* Per nouveau tu102_gsp_booter_ctor:
+     *   nmem source = data_offset + 0,           target IMEM = os_code_offset
+     *   imem source = data_offset + os_code_size, target IMEM = app[0].offset (sec)
+     *   dmem source = data_offset + os_data_offset, target DMEM = 0
+     *   dmem_sign   = patch_loc - os_data_offset (DMEM byte offset of sig) */
+    if (img.os_code_offset + img.os_code_size > img.data_size) return GSP_ERR_FAULT;
+    if (img.os_data_offset + img.os_data_size > img.data_size) return GSP_ERR_FAULT;
+    if (img.apps[0].offset + img.apps[0].size > img.data_size) return GSP_ERR_FAULT;
+    if (img.patch_loc < img.os_data_offset) return GSP_ERR_FAULT;
+    if (img.patch_loc + sig_size > img.os_data_offset + img.os_data_size) return GSP_ERR_FAULT;
+    if (img.sig_prod_offset + img.sig_prod_size > img.size) return GSP_ERR_FAULT;
+
+    b->booter_imem_ns_size  = img.os_code_size;
+    b->booter_imem_sec_off  = img.apps[0].offset;
+    b->booter_imem_sec_size = img.apps[0].size;
+    b->booter_dmem_offset   = img.os_data_offset;
+    b->booter_dmem_size     = img.os_data_size;
+    b->booter_dmem_sign     = img.patch_loc - img.os_data_offset;
+    b->booter_engine_id     = img.engine_id;
+    b->booter_ucode_id      = img.ucode_id;
+    b->booter_boot_addr     = img.os_code_offset;
+
+    /* Track the most-recent failure code through the goto-fail path
+     * so callers see _why_ booter setup gave up, not just _that_ it
+     * did. last_error_phase still narrows the location. */
+    int rc = GSP_OK;
+
+    /* ---- Phase 3: allocate DMA-mapped mutable copy of data section ---- */
+    b->last_error_phase = 101;
+    b->dma_booter_va = gsp_platform->dma_alloc(img.data_size, 256,
+                                                &b->dma_booter_iova);
+    if (!b->dma_booter_va) return GSP_ERR_NOMEM;
+    b->dma_booter_size = img.data_size;
+    memcpy(b->dma_booter_va, img.bytes + img.data_offset, img.data_size);
+
+    /* Patch signature 0 into DMEM at sig location. gm200_flcn_fw_signature
+     * always picks idx=0 for production sigs (debug-mode flips to a
+     * different sig but we never run in debug). The signature lives at
+     * sig_prod_offset + patch_sig within the file — patch_sig is the
+     * offset INTO the sig table (not the file). */
+    uint32_t sig_prod_at = img.sig_prod_offset + img.patch_sig;
+    if (sig_prod_at + sig_size > img.size) { rc = GSP_ERR_FAULT; goto fail; }
+    /* Write signature into DMEM portion of our DMA buffer. */
+    memcpy((uint8_t *)b->dma_booter_va + img.os_data_offset + b->booter_dmem_sign,
+           img.bytes + sig_prod_at, sig_size);
+
+    /* Cross-domain coherency: SEC2 will DMA from this buffer (and
+     * Falcon PIO upload reads it back into IMEM/DMEM via writes
+     * through the host-side mapping). On ARM64 (Jetson) the memcpy
+     * above only updates CPU cache lines — flush to PoC so the GPU
+     * reads the patched ucode, not stale DRAM. The mb() pairs the
+     * flush with a `dsb sy` so any subsequent MMIO that kicks DMA
+     * is ordered after the cache flush completes. No-op on x86-64. */
+    gsp_platform->cache_clean(b->dma_booter_va, b->dma_booter_size);
+    gsp_platform->mb();
+
+    /* ---- Phase 4: allocate WprMeta DMA buffer ----
+     *
+     * Booter reads MAILBOX0/1 as a phys addr to GspFwWprMeta. For the
+     * E3.4 milestone we allocate the buffer but leave it zero — the
+     * booter will halt with an error code in MAILBOX0 (which we
+     * capture as a diagnostic). Filling WprMeta correctly requires
+     * the GSP-RM ELF radix3 setup that lives in E4. */
+    b->last_error_phase = 102;
+    b->dma_wpr_meta_va = gsp_platform->dma_alloc(WPR_META_BUFFER_SIZE,
+                                                  4096,
+                                                  &b->dma_wpr_meta_iova);
+    if (!b->dma_wpr_meta_va) { rc = GSP_ERR_NOMEM; goto fail; }
+    b->dma_wpr_meta_size = WPR_META_BUFFER_SIZE;
+    memset(b->dma_wpr_meta_va, 0, WPR_META_BUFFER_SIZE);
+    /* Same cross-domain flush as the booter image — SEC2 will read
+     * the WprMeta as soon as it sees its address in MAILBOX0/1. */
+    gsp_platform->cache_clean(b->dma_wpr_meta_va, b->dma_wpr_meta_size);
+    gsp_platform->mb();
+
+    /* ---- Phase 5: reset SEC2, pre-PIO setup ---- */
+    b->last_error_phase = 103;
+    if (falcon_reset(&b->sec2_flcn) < 0) { rc = GSP_ERR_IO; goto fail; }
+    falcon_pre_pio_setup(&b->sec2_flcn);
+
+    /* ---- Phase 6: PIO upload non-secure IMEM, secure IMEM, DMEM ---- */
+    b->last_error_phase = 104;
+    /* Round all PIO sizes up to 4-byte boundaries (the upload helper
+     * requires u32 alignment). The Falcon's IMEM/DMEM is byte-addressed
+     * but PIO writes through u32 ports. Trailing bytes past the actual
+     * ucode end are treated as scratch by the running ucode. */
+    uint32_t ns_round  = (img.os_code_size + 3u) & ~3u;
+    uint32_t sec_round = (img.apps[0].size + 3u) & ~3u;
+    uint32_t dmem_round = (img.os_data_size + 3u) & ~3u;
+
+    rc = falcon_pio_upload_imem(&b->sec2_flcn,
+                                (uint8_t *)b->dma_booter_va + 0,
+                                ns_round,
+                                img.os_code_offset,
+                                false);
+    if (rc < 0) goto fail;
+
+    rc = falcon_pio_upload_imem(&b->sec2_flcn,
+                                (uint8_t *)b->dma_booter_va + img.os_code_size,
+                                sec_round,
+                                img.apps[0].offset,
+                                true);
+    if (rc < 0) goto fail;
+
+    rc = falcon_pio_upload_dmem(&b->sec2_flcn,
+                                (uint8_t *)b->dma_booter_va + img.os_data_offset,
+                                dmem_round,
+                                0);
+    if (rc < 0) goto fail;
+
+    /* ---- Phase 7: program SEC2 BROM ----
+     * Order matters: PARAADDR, ENGIDMASK, UCODE_ID, then MOD_SEL last
+     * (writing MOD_SEL kicks the BROM to verify everything queued). */
+    b->last_error_phase = 105;
+    gsp_platform->write32(NV_PSEC2_BROM_BASE + FALCON_BROM_PARAADDR0,
+                          b->booter_dmem_sign);
+    gsp_platform->write32(NV_PSEC2_BROM_BASE + FALCON_BROM_ENGIDMASK,
+                          b->booter_engine_id);
+    gsp_platform->write32(NV_PSEC2_BROM_BASE + FALCON_BROM_UCODE_ID,
+                          b->booter_ucode_id);
+    gsp_platform->mb();
+    gsp_platform->write32(NV_PSEC2_BROM_BASE + FALCON_BROM_MOD_SEL,
+                          FALCON_BROM_MOD_SEL_RSA3K);
+    gsp_platform->mb();
+
+    /* ---- Phase 8: hand booter the WprMeta phys addr via MAILBOX0/1 ---- */
+    gsp_platform->write32(NV_PSEC2_BASE + FALCON_MAILBOX0,
+                          (uint32_t)(b->dma_wpr_meta_iova & 0xFFFFFFFFu));
+    gsp_platform->write32(NV_PSEC2_BASE + FALCON_MAILBOX1,
+                          (uint32_t)(b->dma_wpr_meta_iova >> 32));
+
+    /* ---- Phase 9: STARTCPU + halt poll ---- */
+    b->last_error_phase = 106;
+    falcon_start(&b->sec2_flcn, b->booter_boot_addr);
+    if (falcon_wait_halted(&b->sec2_flcn, FALCON_HALT_TIMEOUT_US) < 0) {
+        rc = GSP_ERR_TIMEOUT;
+        goto fail;
+    }
+
+    /* Booter halted. Read MAILBOX0 — caller interprets. */
+    b->booter_mbox0_post = gsp_platform->read32(NV_PSEC2_BASE + FALCON_MAILBOX0);
+
+    b->state = GSP_BRINGUP_BOOTER_LOAD_DONE;
+    b->last_error_phase = 0;
+    return GSP_OK;
+
+fail:
+    if (b->dma_booter_va) {
+        gsp_platform->dma_free(b->dma_booter_va, b->dma_booter_size);
+        b->dma_booter_va = NULL;
+    }
+    if (b->dma_wpr_meta_va) {
+        gsp_platform->dma_free(b->dma_wpr_meta_va, b->dma_wpr_meta_size);
+        b->dma_wpr_meta_va = NULL;
+    }
+    b->state = GSP_BRINGUP_FAILED;
+    return rc ? rc : GSP_ERR_IO;
 }
+
+/* ---- E3.4.e: GSP RISC-V startup ---- */
+
+/* GSP libos handoff — the RISC-V bootloader picks up its argument
+ * struct from MAILBOX0/1. For E3.4.e milestone we hand it the WprMeta
+ * address that booter just consumed (matching nouveau's pattern in
+ * tu102_gsp_oneinit step 7); the libos arg struct itself is built
+ * by E4 and the address re-handed before final RISC-V launch. */
 
 int gsp_bringup_riscv_start(struct gsp_bringup *b)
 {
-    if (!b) return -1;
-    /* TODO(E3.4.e): reset GSP Falcon, write BCR_CTRL = VALID|RISCV|BRFETCH
-     * at 0x111668, set boot vector, release reset, poll RISCV_CPUCTL bit 7.
-     * See docs/reference/nvidia-gsp-bringup-sequence.md §4. */
+    if (!b) return GSP_ERR_INVAL;
+    if (b->state != GSP_BRINGUP_BOOTER_LOAD_DONE) return GSP_ERR_INVAL;
+    if (!gsp_platform) return GSP_ERR_INVAL;
+
     b->last_error_phase = 200;
-    return -1;
+
+    /* Reset GSP Falcon — clears pre-existing state and scrubs IMEM/DMEM. */
+    if (falcon_reset(&b->gsp_flcn) < 0) return GSP_ERR_IO;
+
+    /* Flip the boot-control register into RISC-V mode.
+     * Mask: 0x111 → set VALID | CORE_SELECT(=RISC-V, bit 4) | BRFETCH (bit 8).
+     * Nouveau equivalent (ga102_gsp_reset / r535 init):
+     *   nvkm_falcon_mask(&gsp->falcon, 0x1668, 0x111, 0x111)
+     * which reads register at NV_PGSP_BASE+0x1000+0x668 = 0x111668. */
+    b->last_error_phase = 201;
+    uint32_t bcr = gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_RISCV_BCR_CTRL);
+    if (bcr == 0xFFFFFFFFu) return GSP_ERR_IO;
+    bcr &= ~(uint32_t)(FALCON_RISCV_BCR_VALID
+                       | FALCON_RISCV_BCR_CORE_SELECT
+                       | FALCON_RISCV_BCR_BRFETCH);
+    bcr |=  FALCON_RISCV_BCR_VALID
+         |  FALCON_RISCV_BCR_CORE_SELECT
+         |  FALCON_RISCV_BCR_BRFETCH;
+    gsp_platform->write32(NV_PGSP_RISCV_BASE + FALCON_RISCV_BCR_CTRL, bcr);
+    gsp_platform->mb();
+
+    /* Hand the libos arg pointer to the RISC-V bootloader via the
+     * GSP Falcon mailboxes. For E3.4.e we use the WprMeta address
+     * we already DMA-allocated; the E4 RPC step replaces this with
+     * a proper libos arg struct. */
+    gsp_platform->write32(NV_PGSP_BASE + FALCON_MAILBOX0,
+                          (uint32_t)(b->dma_wpr_meta_iova & 0xFFFFFFFFu));
+    gsp_platform->write32(NV_PGSP_BASE + FALCON_MAILBOX1,
+                          (uint32_t)(b->dma_wpr_meta_iova >> 32));
+
+    /* Release reset by writing STARTCPU. The BCR programming above
+     * tells the engine to fetch RISC-V boot code rather than the
+     * Falcon entry. */
+    b->last_error_phase = 202;
+    falcon_start(&b->gsp_flcn, 0);
+
+    /* Poll RISCV_CPUCTL.ACTIVE_STAT (bit 7). On success the GSP RISC-V
+     * core is running and will eventually post GSP_INIT_DONE on the
+     * sysmem msgq (E4 work). We allow up to 2 s — the bootloader
+     * does considerable setup before flagging ACTIVE. */
+    b->last_error_phase = 203;
+    uint32_t budget = 2u * 1000u * 1000u;     /* 2 s in µs */
+    /* Reuse falcon's iter heuristic: 10 iters/µs. */
+    uint32_t iters = (budget > (1u << 30) / 10u) ? (1u << 30) : budget * 10u;
+    while (iters--) {
+        uint32_t v = gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_RISCV_CPUCTL);
+        if (v == 0xFFFFFFFFu) return GSP_ERR_IO;
+        if (v & FALCON_RISCV_CPUCTL_ACTIVE) {
+            b->gsp_riscv_active = true;
+            b->state = GSP_BRINGUP_RISCV_RUNNING;
+            b->last_error_phase = 0;
+            return GSP_OK;
+        }
+    }
+    return GSP_ERR_TIMEOUT;
 }

@@ -36,6 +36,27 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+/* ---- GSP-shared error codes ----
+ *
+ * Bare-metal C lacks <errno.h> (it's not a freestanding header — see
+ * kernel/CLAUDE.md), so we publish a small set of named negative
+ * constants for the GSP/Falcon/RPC code to return. Values match the
+ * common Linux errno mapping for familiarity, all of which are
+ * negative so any caller doing `if (rc < 0)` keeps working unchanged.
+ *
+ * Choose a code per failure mode rather than blanket -1; the harness
+ * surfaces these via `b.last_error_phase` for hardware-debug triage
+ * (a NOMEM at phase 102 vs a TIMEOUT at phase 106 are very different
+ * stories for the same caller). */
+#define GSP_OK              0
+#define GSP_ERR_INVAL     (-22)   /* invalid argument or wrong state */
+#define GSP_ERR_IO        (-5)    /* hardware fault — register reads garbage */
+#define GSP_ERR_NOMEM     (-12)   /* DMA / shm allocation failed */
+#define GSP_ERR_FAULT     (-14)   /* corrupt firmware / unparseable header */
+#define GSP_ERR_NOSPC     (-28)   /* ring full / no headroom */
+#define GSP_ERR_NOSYS     (-38)   /* feature not yet wired (e.g. RPC pre-init) */
+#define GSP_ERR_TIMEOUT   (-110)  /* hardware poll exceeded budget */
+
 /* ---- Firmware manifest ---- */
 
 enum gsp_firmware_kind {

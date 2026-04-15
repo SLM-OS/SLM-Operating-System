@@ -829,6 +829,15 @@ void smp_test_task(void *arg)
 #define S3_MAX_TASKS 64
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
+/* Reserve the top 512 bytes of NC memory for `bench stealing` shared
+ * state. Layout (top-down):
+ *   [NC_MEM_SIZE - 512 .. NC_MEM_SIZE - 256)  S3 slot array
+ *      256 bytes = S3_MAX_TASKS (64) × sizeof(uint32_t).
+ *   [NC_MEM_SIZE - 256 .. NC_MEM_SIZE)        Done counter region
+ *      Only 4 bytes are read/written, but the rest of this 256 B
+ *      block is reserved so the counter sits on its own cacheline-
+ *      sized chunk away from the slot writes (avoids false sharing
+ *      and leaves headroom for additional bench counters). */
 #define S3_SLOT_BASE_OFFSET   (NC_MEM_SIZE - 512)
 #define S3_DONE_COUNTER_OFFSET (NC_MEM_SIZE - 256)
 #define S3_SLOT_ADDR(i) ((volatile uint32_t *)(NC_MEM_BASE + S3_SLOT_BASE_OFFSET + (i) * 4))
@@ -1047,15 +1056,18 @@ int cmd_bench(int argc, char *argv[])
         }
 
         /* Poll done counter. Timeout at 30 seconds converted to timer
-         * ticks. */
+         * ticks. The most recent `done` read from the loop is the
+         * value at exit (whether we hit n_tasks or timed out), so
+         * carry it out instead of re-reading after the break. */
         uint64_t freq = timer_get_frequency();
         uint64_t deadline = t0 + 30ULL * freq;
+        uint32_t done_now = 0;
         while (1) {
-            uint32_t done = *S3_DONE_ADDR();
-            if (done >= n_tasks) break;
+            done_now = *S3_DONE_ADDR();
+            if (done_now >= n_tasks) break;
             if (timer_get_count() > deadline) {
                 uart_printf("  TIMEOUT after 30s — %u / %u tasks done\r\n",
-                            done, n_tasks);
+                            done_now, n_tasks);
                 break;
             }
             /* Cooperative yield so CPU 0 doesn't spin at 100%. */
@@ -1063,7 +1075,6 @@ int cmd_bench(int argc, char *argv[])
         }
         uint64_t t1 = timer_get_count();
         uint64_t elapsed_ns = (t1 - t0) * 1000000000ULL / freq;
-        uint32_t done_now = *S3_DONE_ADDR();
 
         /* Per-CPU execution distribution. */
         uint32_t cpu_count_exec[MAX_CPUS] = {0};
