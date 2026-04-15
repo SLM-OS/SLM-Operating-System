@@ -1,18 +1,19 @@
 /*
  * steal_deque.h - Bounded deque for per-CPU work-stealing run queues
  *
- * Issue #59, Phase A: data structure + unit tests. Not yet wired into the
- * scheduler — the existing linked-list cpu_runqueue stays authoritative
- * until Phase B.
+ * Issue #59, Phase A data structure + unit tests; wired into the
+ * scheduler by Phase B.
  *
  * Semantics:
  *   - Owner CPU pushes and pops at the "bottom" end (LIFO — cache-warm).
  *   - Thief CPUs steal at the "top" end (FIFO — oldest task).
  *   - Capacity is fixed and must be a power of two (cheap modulo).
- *   - A single spinlock_t serializes all operations. This is Phase A's
- *     "A2" choice: simpler than Chase-Lev, works on platforms where the
- *     ARM exclusive monitor is unreliable post-kexec (Jetson). A
- *     lock-free variant is deferred to a follow-up.
+ *   - **Lockless internally** — callers are responsible for serializing
+ *     every entry point externally. The scheduler uses
+ *     `steal_deque_lock[MAX_CPUS]` (cacheable) for this; the deque
+ *     itself lives in NC memory on PLATFORM_HAS_NC_MEMORY where an
+ *     embedded spinlock would be neutered by SPINLOCK_SKIP_LOCKING.
+ *     Tests hold no lock and rely on single-thread execution.
  *
  * The deque stores struct task pointers; a NULL return signals empty.
  */
@@ -21,7 +22,6 @@
 #define STEAL_DEQUE_H
 
 #include <stdint.h>
-#include "spinlock.h"
 
 struct task; /* forward declaration */
 
@@ -39,22 +39,22 @@ typedef struct {
     uint32_t gen_buf[STEAL_DEQUE_CAPACITY];
     uint32_t bottom;      /* next free slot on owner side */
     uint32_t top;         /* next slot to steal on thief side */
-    spinlock_t lock;
 } steal_deque_t;
 
-/* Initialize an empty deque. */
+/* Initialize an empty deque. Caller must hold the appropriate external
+ * lock if initialization can race with concurrent access. */
 void steal_deque_init(steal_deque_t *d);
 
 /*
  * Owner-side push (at bottom). Returns 0 on success, -1 if full.
- * Intended to be called only from the CPU that owns this deque; still
- * takes the lock so concurrent steals are safe.
+ * Caller must hold the external steal-deque lock for this deque.
  */
 int steal_deque_push(steal_deque_t *d, struct task *t);
 
 /*
  * Owner-side pop (from bottom, LIFO). Returns the task or NULL if empty.
  * Intended for the owning CPU's schedule() fast path.
+ * Caller must hold the external steal-deque lock.
  *
  * If `out_gen` is non-NULL and the return is non-NULL, the captured
  * generation counter for the returned task is written there. Callers
@@ -65,14 +65,15 @@ struct task *steal_deque_pop(steal_deque_t *d, uint32_t *out_gen);
 
 /*
  * Thief-side steal (from top, FIFO). Returns the task or NULL if empty.
- * Callable from any CPU. `out_gen` semantics as for steal_deque_pop.
+ * Callable from any CPU. Caller must hold the external steal-deque
+ * lock. `out_gen` semantics as for steal_deque_pop.
  */
 struct task *steal_deque_steal(steal_deque_t *d, uint32_t *out_gen);
 
-/* Current count of tasks in the deque (racy without the lock). */
+/* Current count of tasks in the deque (racy without external lock). */
 uint32_t steal_deque_size(const steal_deque_t *d);
 
-/* True if the deque has no tasks (racy without the lock). */
+/* True if the deque has no tasks (racy without external lock). */
 int steal_deque_is_empty(const steal_deque_t *d);
 
 /*
@@ -86,7 +87,8 @@ int steal_deque_is_empty(const steal_deque_t *d);
  * The steal path skips NULL slots during traversal, so a NULL'd slot
  * is effectively gone.
  *
- * Returns the number of slots cleared (0 or 1). Always takes the lock.
+ * Returns the number of slots cleared (0 or 1). Caller must hold the
+ * external steal-deque lock.
  */
 int steal_deque_remove(steal_deque_t *d, struct task *t);
 

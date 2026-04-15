@@ -68,16 +68,25 @@ static spinlock_t rq_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
  *
  * The deque may contain stale pointers (tasks that have since run or
  * been terminated); sched_try_steal() validates under victim's rq_lock
- * before accepting a steal.
+ * and the per-slot generation counter (#139) before accepting a steal.
  *
  * Placement:
  *   - PLATFORM_HAS_NC_MEMORY (Pi 5, Jetson) — allocated from NC memory
  *     at scheduler_init(). Cross-CPU steals see writes instantly, no
- *     DC CIVAC/CVAC needed. The embedded spinlock is safe in NC because
- *     SPINLOCK_SKIP_LOCKING degrades to barrier-only on these
- *     platforms; ldaxr/stxr on NC memory is never executed.
+ *     DC CIVAC/CVAC needed.
  *   - Other (QEMU ARM64, x86-64) — cacheable BSS array. Caches are
  *     coherent; no NC backing needed.
+ *
+ * Locking: see `steal_deque_lock[MAX_CPUS]` below. The deque's own
+ * `steal_deque_*` functions are lockless and the callers in sched.c
+ * are responsible for serializing access. The steal_deque_t used to
+ * embed its own spinlock, but on Jetson `SPINLOCK_SKIP_LOCKING` made
+ * that lock a no-op (exclusive monitors don't work on NC memory /
+ * post-kexec A78AE), so concurrent push/pop/steal could corrupt the
+ * deque — observed as Instruction Abort at ELR=0x0 during `bench
+ * stealing` on jetson-nano-2. The external-lock pattern matches
+ * `rq_lock[]`: the lock lives in cacheable memory and uses real
+ * exclusive monitors on every platform that supports them.
  *
  * The two configurations share the same access pattern through
  * `cpu_steal_deques[cpu]`; the definition below selects storage.
@@ -90,6 +99,13 @@ static steal_deque_t *cpu_steal_deques;
 #else
 static steal_deque_t cpu_steal_deques[MAX_CPUS];
 #endif
+
+/* Per-CPU steal-deque locks. Cacheable so exclusive-monitor
+ * primitives work on every platform, unlike the embedded lock in
+ * steal_deque_t which was neutered by SPINLOCK_SKIP_LOCKING on
+ * Jetson. Acquire the victim's lock before any steal_deque_*
+ * operation; never held across other locks. */
+static spinlock_t steal_deque_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
 #endif /* CONFIG_WORK_STEALING */
 
 /* Lock helpers that use the correct lock for a given CPU */
@@ -646,6 +662,7 @@ void scheduler_init(void)
         cpu_rq(i)->zombie = NULL;
         cpu_rq(i)->ready_count = 0;
 #if CONFIG_WORK_STEALING
+        spin_init(&steal_deque_lock[i]);
         steal_deque_init(&cpu_steal_deques[i]);
 #endif
     }
@@ -922,10 +939,16 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
      * on their target CPU. Push failures (deque full) are non-fatal —
      * the task still runs on its owner, just not stealable. Idle tasks
      * are never stealable.
+     *
+     * Serialized by steal_deque_lock[cpu] (cacheable, real exclusive
+     * monitors on every platform). The embedded lock inside the
+     * deque is a no-op on Jetson.
      */
     if (task->cpu_affinity == CPU_AFFINITY_ANY &&
         task != cpu_rq(cpu)->idle_task) {
+        irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
         steal_deque_push(&cpu_steal_deques[cpu], task);
+        spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
     }
 #endif
 
@@ -1031,8 +1054,12 @@ void scheduler_terminate_task(struct task *task)
      * for the panic that surfaced this — became observable on Jetson
      * after cpu_steal_deques moved to NC memory in commit <pending>
      * (before that, incoherent caches hid the race by failing the
-     * steal silently). */
-    steal_deque_remove(&cpu_steal_deques[cpu], task);
+     * steal silently). Serialized by steal_deque_lock[cpu]. */
+    {
+        irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
+        steal_deque_remove(&cpu_steal_deques[cpu], task);
+        spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
+    }
 #endif
 }
 
@@ -1180,8 +1207,17 @@ static struct task *sched_try_steal(uint32_t this_cpu)
         int victim_had_entry = 0;
         for (uint32_t probe = 0; probe < STEAL_DEQUE_CAPACITY; probe++) {
             uint32_t captured_gen = 0;
+            /* Serialize this steal against owner's pushes / other
+             * thieves' steals on the same victim's deque. Held
+             * briefly (for the pop) and released before we take
+             * rq_lock[victim] — the two locks are never held
+             * together so no ordering constraint exists between
+             * them. */
+            irq_flags_t sd_flags =
+                spin_lock_irqsave(&steal_deque_lock[victim]);
             struct task *candidate =
                 steal_deque_steal(&cpu_steal_deques[victim], &captured_gen);
+            spin_unlock_irqrestore(&steal_deque_lock[victim], sd_flags);
             if (!candidate)
                 break;  /* Empty — try next victim */
             victim_had_entry = 1;
