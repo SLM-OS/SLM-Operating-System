@@ -734,6 +734,20 @@ static void test_work_stealing_distributes_load(void)
     const int REQUIRED_SUCCESSES = 2;
     int success_count = 0;
 
+    /* #175: snapshot the per-CPU push-failure counter. STEAL_TASK_COUNT (5)
+     * << STEAL_DEQUE_CAPACITY (32), so this workload should never fill
+     * the deque; any delta indicates `scheduler_add_task_to_cpu` thinks
+     * it couldn't push and either a workload regression (e.g. capacity
+     * shrunk) or a counter-bookkeeping bug. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    extern volatile uint32_t *sched_diag_steal_push_full;
+#else
+    extern volatile uint32_t sched_diag_steal_push_full[];
+#endif
+    uint32_t pre_push_full[MAX_CPUS] = {0};
+    for (uint32_t c = 0; c < cpu_count; c++)
+        pre_push_full[c] = sched_diag_steal_push_full[c];
+
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
         for (int i = 0; i < STEAL_TASK_COUNT; i++) steal_cpu_recorded[i] = 0;
         steal_done_count = 0;
@@ -782,6 +796,13 @@ static void test_work_stealing_distributes_load(void)
 
     TEST_ASSERT_MESSAGE(success_count >= REQUIRED_SUCCESSES,
         "work stealing never distributed across CPUs in 8 attempts");
+
+    /* #175: push-full counter must not advance for this workload. */
+    for (uint32_t c = 0; c < cpu_count; c++) {
+        uint32_t delta = sched_diag_steal_push_full[c] - pre_push_full[c];
+        TEST_ASSERT_MESSAGE(delta == 0,
+            "steal_deque push overflowed during distributes-load test");
+    }
 }
 #endif /* CONFIG_WORK_STEALING */
 

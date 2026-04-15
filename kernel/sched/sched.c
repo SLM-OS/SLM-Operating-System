@@ -316,6 +316,7 @@ volatile uint32_t *sched_diag_steal_attempts;      /* sched_try_steal entries  *
 volatile uint32_t *sched_diag_steal_successes;     /* live task returned       */
 volatile uint32_t *sched_diag_steal_stale;         /* stale pointer discarded  */
 volatile uint32_t *sched_diag_steal_empty_victim;  /* victim had nothing to take */
+volatile uint32_t *sched_diag_steal_push_full;     /* push failed — deque full (#175) */
 /* Scheduler init flag — uses the SAME pattern as the working cpu_boot_flag
  * handshake: cacheline-aligned, atomic store + cache_invalidate polling
  * with delay for natural L2 eviction. */
@@ -330,6 +331,7 @@ volatile uint32_t sched_diag_steal_attempts[MAX_CPUS];
 volatile uint32_t sched_diag_steal_successes[MAX_CPUS];
 volatile uint32_t sched_diag_steal_stale[MAX_CPUS];
 volatile uint32_t sched_diag_steal_empty_victim[MAX_CPUS];
+volatile uint32_t sched_diag_steal_push_full[MAX_CPUS];
 #endif
 
 /* cpu_rq() implementation — must be after sched struct definition */
@@ -623,16 +625,18 @@ void scheduler_init(void)
     for (uint32_t i = 0; i < MAX_CPUS; i++)
         sched_diag_idle_loops[i] = 0;
 
-    /* Work-stealing observability counters (#105). */
+    /* Work-stealing observability counters (#105, #175). */
     sched_diag_steal_attempts     = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
     sched_diag_steal_successes    = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
     sched_diag_steal_stale        = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
     sched_diag_steal_empty_victim = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
+    sched_diag_steal_push_full    = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
     for (uint32_t i = 0; i < MAX_CPUS; i++) {
         sched_diag_steal_attempts[i] = 0;
         sched_diag_steal_successes[i] = 0;
         sched_diag_steal_stale[i] = 0;
         sched_diag_steal_empty_victim[i] = 0;
+        sched_diag_steal_push_full[i] = 0;
     }
 #endif
 
@@ -947,8 +951,10 @@ void scheduler_add_task_to_cpu(struct task *task, uint32_t cpu)
     if (task->cpu_affinity == CPU_AFFINITY_ANY &&
         task != cpu_rq(cpu)->idle_task) {
         irq_flags_t sd_flags = spin_lock_irqsave(&steal_deque_lock[cpu]);
-        steal_deque_push(&cpu_steal_deques[cpu], task);
+        int rc = steal_deque_push(&cpu_steal_deques[cpu], task);
         spin_unlock_irqrestore(&steal_deque_lock[cpu], sd_flags);
+        if (rc < 0)
+            sched_diag_steal_push_full[cpu]++;
     }
 #endif
 
