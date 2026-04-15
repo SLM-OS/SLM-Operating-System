@@ -32,9 +32,25 @@ Produces `build/host-tools/gsp-harness` — a regular Linux ELF.
 # Baseline probe — verifies BAR0/BAR1 are mapped, reads GPU ID.
 sudo ./build/host-tools/gsp-harness --probe
 
-# Read + parse the VBIOS via /sys/bus/pci/.../rom. Reports BIT-table
-# summary and FWSEC presence. Doesn't touch GSP.
+# Read + parse the VBIOS via the BAR0 PROM window (NV_PROM_DATA at
+# offset 0x300000). Reports the sub-image map, BIT entries, and
+# FWSEC presence. Doesn't touch GSP.
 sudo ./build/host-tools/gsp-harness --vbios
+
+# Probe GSP + SEC2 Falcon engines. Reads HWCFG to report IMEM/DMEM
+# sizes, reset/halt state, RISC-V capability. Hardware smoke test
+# for the E3.1 Falcon driver — no engine state change. (E3)
+sudo ./build/host-tools/gsp-harness --falcons
+
+# Allocate + IOMMU-map + free three DMA buffers via VFIO. Confirms
+# the E3.2 DMA plumbing works end-to-end and the IOMMU returns
+# IOVAs in the expected high range. (E3)
+sudo ./build/host-tools/gsp-harness --dma-test
+
+# Run FWSEC-FRTS on GSP Falcon. The first real GSP-RM bringup
+# step — sets up the WPR2 region in FB. Reports sig-index
+# selection, WPR2 target, and post-boot Falcon state. (E3.4 WIP)
+sudo ./build/host-tools/gsp-harness --fwsec-frts
 
 # Attempt Phase 0 only (firmware manifest sanity check, no hardware).
 ./build/host-tools/gsp-harness --phase 0
@@ -59,13 +75,30 @@ The following Makefile targets run without hardware and are safe
 to wire into CI:
 
 ```bash
-# VBIOS parser — synthetic images + malformed / edge-case inputs.
+# VBIOS parser — synthetic images + malformed / edge-case inputs +
+# Ampere multi-sub-image chain + FWSEC split helper.
 make test-vbios
 
 # Firmware extraction script — exit-code coverage for missing zstd,
 # missing firmware dir, and (if locally installed) a full
 # /lib/firmware/nvidia/ga107/ happy path.
 make test-gsp-extract
+
+# Falcon v4 driver — mock BAR0 vtable, exercises probe / reset /
+# halt poll / DMA protocol / 40-bit IOVA splitting / HS-boot
+# BROM programming.
+make test-falcon
+
+# nvfw container parser — both bin_magic variants + every
+# rejection path. Validated against real R535 booter_load.bin
+# at run time.
+make test-nvfw
+
+# GSP-RM bringup pure-logic helpers — sig-index algorithm
+# (matches nouveau ga102_gsp_fwsec_signature) + DMEMMAPPER
+# patcher. The full FWSEC-FRTS sequence is hardware-only and
+# runs via `--fwsec-frts` above.
+make test-bringup
 ```
 
 ## Recovering from a hung GPU
