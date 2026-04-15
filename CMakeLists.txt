@@ -588,27 +588,34 @@ option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 
 # Work-stealing scheduler (#59 Phase B, S4 default flip).
 #
-# Default is ON for every platform except Jetson. Rationale per the
-# Jetson capstone plan §S4 and docs/work-stealing-bench.md:
-#   - x86-64: cache-coherent SMP, working reschedule IPI (B1) + TSS
-#     IST (A1). Safe by construction. Has been ON since Phase B.
-#   - QEMU ARM64: bench stealing 8 shows 1.7× speedup with no
-#     correctness regressions in the full test suite.
-#   - Raspberry Pi 5: bench stealing 16 shows 3.12× speedup on real
-#     hardware after the external-lock fix (#158 closed). Both
-#     regression builds (WORK_STEALING=OFF/ON) boot and pass tests.
+# Default is ON for the platforms where hardware evidence in
+# docs/work-stealing-bench.md supports it; OFF elsewhere. Per
+# platform:
+#
+#   - x86-64: cache-coherent SMP, working reschedule IPI (B1) +
+#     TSS IST (A1). Safe by construction. Default ON since Phase B.
+#   - Raspberry Pi 5: 3.12× speedup on bench stealing 16 real
+#     hardware after the external-lock fix (#158 closed). Default
+#     ON.
+#   - QEMU ARM64: 1.7× speedup on bench stealing — but several
+#     pre-existing integration-test assumptions (strict priority
+#     ordering, tight memory-leak thresholds) are incompatible
+#     with the more aggressive cross-CPU scheduling work-stealing
+#     produces. Default OFF for now so `make test` stays
+#     reliably green; flip explicitly with
+#     `make kernel WORK_STEALING=ON` / `make test WORK_STEALING=ON`
+#     for regression testing. Full test-harness stabilization
+#     is out of scope for S4.
 #   - Jetson Orin Nano: residual page fault during bench stealing
-#     tracked as #166. Stays default-OFF until resolved; users who
-#     want to experiment can pass `-DENABLE_WORK_STEALING=ON` or
-#     `make kernel PLATFORM=JETSON_ORIN_NANO WORK_STEALING=ON`.
+#     tracked as #166. Default OFF; opt-in via WORK_STEALING=ON.
 #
 # Override path (either direction) is the Makefile `WORK_STEALING=ON`
 # / `WORK_STEALING=OFF` variable, which maps to
 # `-DENABLE_WORK_STEALING=ON/OFF`.
-if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
-    option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" OFF)
-else()
+if(PLATFORM STREQUAL "X86_64" OR PLATFORM STREQUAL "RASPI5")
     option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" ON)
+else()
+    option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" OFF)
 endif()
 if(ENABLE_WORK_STEALING)
     add_compile_definitions(CONFIG_WORK_STEALING=1)

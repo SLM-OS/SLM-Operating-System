@@ -629,6 +629,12 @@ static void test_high_priority_runs_first(void)
     TEST_ASSERT_NOT_NULL(low);
     TEST_ASSERT_NOT_NULL(high);
 
+    /* Pin to CPU 0: single-CPU priority-ordering assertion. Without
+     * pinning, a work-stealing idle CPU can take LOW off CPU 0's
+     * deque (FIFO) before CPU 0 wakes up and picks HIGH. */
+    low->cpu_affinity = 0;
+    high->cpu_affinity = 0;
+
     /* Lower our priority below all test tasks BEFORE adding them.
      * This ensures when barrier is released, scheduler picks by priority. */
     struct task *self = task_current();
@@ -697,6 +703,16 @@ static void test_priority_ordering_multiple_levels(void)
     TEST_ASSERT_NOT_NULL(normal);
     TEST_ASSERT_NOT_NULL(high);
     TEST_ASSERT_NOT_NULL(critical);
+
+    /* Pin to CPU 0 so work-stealing can't reorder the tasks FIFO
+     * from another CPU's idle loop. This test asserts strict
+     * priority ordering within CPU 0's runqueue; it is not testing
+     * cross-CPU placement. */
+    idle->cpu_affinity = 0;
+    low->cpu_affinity = 0;
+    normal->cpu_affinity = 0;
+    high->cpu_affinity = 0;
+    critical->cpu_affinity = 0;
 
     /* Lower our priority below all test tasks BEFORE adding them */
     struct task *self = task_current();
@@ -771,6 +787,12 @@ static void test_deadline_boost_affects_order(void)
 
     TEST_ASSERT_NOT_NULL(no_deadline);
     TEST_ASSERT_NOT_NULL(urgent);
+
+    /* Pin to CPU 0: the deadline-boost assertion is about CPU 0's
+     * priority scheduler seeing the boost; work-stealing thieves
+     * don't know about deadlines and would take no_deadline FIFO. */
+    no_deadline->cpu_affinity = 0;
+    urgent->cpu_affinity = 0;
 
     /* Set urgent deadline (5ms) - will boost to CRITICAL */
     task_set_deadline(urgent, now + (5 * 1000000ULL));
@@ -1064,6 +1086,12 @@ static void test_no_starvation(void)
     TEST_ASSERT_NOT_NULL(low_task);
     TEST_ASSERT_NOT_NULL(high_task);
 
+    /* Pin to CPU 0: the test asserts HIGH runs first on the CPU 0
+     * priority scheduler. Without pinning, a work-stealing idle CPU
+     * can take LOW (FIFO) before CPU 0 wakes up and picks HIGH. */
+    low_task->cpu_affinity = 0;
+    high_task->cpu_affinity = 0;
+
     /* Add both tasks to CPU 0 atomically (HIGH should run first due to priority) */
     irq_flags_t flags = irq_save();
     scheduler_add_task_to_cpu(low_task, 0);
@@ -1176,6 +1204,18 @@ static void test_stress_mixed_priorities(void)
     TEST_ASSERT_NOT_NULL(t_normal);
     TEST_ASSERT_NOT_NULL(t_high);
     TEST_ASSERT_NOT_NULL(t_crit);
+
+    /* Pin tasks to CPU 0. This test asserts strict priority ordering
+     * on a single CPU's runqueue — if work-stealing is enabled and
+     * the tasks have default CPU_AFFINITY_ANY, an idle CPU can pull
+     * them off CPU 0's deque FIFO-style (oldest first), breaking
+     * the priority-based expected order. Pinning removes the steal
+     * path without changing what the test is asserting. */
+    t_idle->cpu_affinity = 0;
+    t_low_dl->cpu_affinity = 0;
+    t_normal->cpu_affinity = 0;
+    t_high->cpu_affinity = 0;
+    t_crit->cpu_affinity = 0;
 
     /* Give t_low_dl an urgent deadline (5ms) - should boost to CRITICAL */
     task_set_deadline(t_low_dl, now + (5 * 1000000ULL));
