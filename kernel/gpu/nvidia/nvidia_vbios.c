@@ -104,10 +104,32 @@
 #define FALCON_DESC_SIZE_MASK     0xFFFFu
 
 /* V3 descriptor (44 bytes, Ampere / GA10x) — fields we need to
- * compute payload size. */
+ * compute payload size and populate Falcon BROM registers.
+ *
+ * Field map (all u32 unless noted):
+ *   0x00  Hdr            (bits 15:8 version, 31:16 size)
+ *   0x04  StoredSize
+ *   0x08  PKCDataOffset  (DMEM byte offset of signature block)
+ *   0x0C  InterfaceOffset (DMEM byte offset of app-interface table)
+ *   0x10  IMEMPhysBase
+ *   0x14  IMEMLoadSize   ← size of IMEM section in bytes
+ *   0x18  IMEMVirtBase   ← BOOTVEC value
+ *   0x1C  DMEMPhysBase
+ *   0x20  DMEMLoadSize   ← size of DMEM section in bytes
+ *   0x24  u16 EngineIdMask   (BROM ENGIDMASK)
+ *   0x26  u8  UcodeId        (BROM UCODE_ID)
+ *   0x27  u8  SignatureCount
+ *   ...
+ */
+#define FALCON_DESC_V3_PKC_DATA_OFF     8
+#define FALCON_DESC_V3_INTERFACE_OFF    12
 #define FALCON_DESC_V3_IMEM_LOAD_SIZE   20
+#define FALCON_DESC_V3_IMEM_VIRT_BASE   24
 #define FALCON_DESC_V3_DMEM_LOAD_SIZE   32
+#define FALCON_DESC_V3_ENGINE_ID_MASK   36     /* u16 */
+#define FALCON_DESC_V3_UCODE_ID         38     /* u8 */
 #define FALCON_DESC_V3_SIG_COUNT        39
+#define FALCON_DESC_V3_SIZE             44
 
 /* V2 descriptor (60 bytes, Turing TU10x) — analogous offsets. */
 #define FALCON_DESC_V2_IMEM_LOAD_SIZE   24
@@ -601,5 +623,68 @@ int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
 
     if (out_data) *out_data = &vb->image[desc_abs];
     if (out_size) *out_size = payload_size;
+    return 0;
+}
+
+int nvidia_vbios_get_fwsec_parts(const struct nvidia_vbios *vb,
+                                 struct nvidia_vbios_fwsec_parts *out)
+{
+    if (!vb || !vb->parsed_ok || !out) return -1;
+
+    /* Use the existing lookup to get the descriptor pointer. The
+     * returned payload pointer IS the descriptor — we then split it
+     * into desc / sigs / imem / dmem using the V3 header fields. */
+    const uint8_t *payload = NULL;
+    uint32_t payload_size = 0;
+    if (nvidia_vbios_get_fwsec(vb, &payload, &payload_size) < 0) return -1;
+    if (!payload || payload_size < FALCON_DESC_V3_SIZE) return -1;
+
+    /* Parse the V3 header. */
+    uint32_t dhdr  = rd32(payload);
+    if ((dhdr & 1u) == 0) return -1;
+    uint32_t dver  = (dhdr >> FALCON_DESC_VER_SHIFT)  & FALCON_DESC_VER_MASK;
+    uint32_t dsize = (dhdr >> FALCON_DESC_SIZE_SHIFT) & FALCON_DESC_SIZE_MASK;
+
+    /* V3 only — the split for V2 has a different signature layout
+     * that we don't need on Ampere. V2 support would be a separate
+     * path if we ever target Turing TU10x. */
+    if (dver != 3 || dsize < FALCON_DESC_V3_SIZE) return -1;
+
+    uint32_t pkc_data_off   = rd32(payload + FALCON_DESC_V3_PKC_DATA_OFF);
+    uint32_t interface_off  = rd32(payload + FALCON_DESC_V3_INTERFACE_OFF);
+    uint32_t imem_load_size = rd32(payload + FALCON_DESC_V3_IMEM_LOAD_SIZE);
+    uint32_t imem_virt_base = rd32(payload + FALCON_DESC_V3_IMEM_VIRT_BASE);
+    uint32_t dmem_load_size = rd32(payload + FALCON_DESC_V3_DMEM_LOAD_SIZE);
+    uint16_t engine_id_mask = (uint16_t)rd16(payload + FALCON_DESC_V3_ENGINE_ID_MASK);
+    uint8_t  ucode_id       = payload[FALCON_DESC_V3_UCODE_ID];
+    uint8_t  sig_count      = payload[FALCON_DESC_V3_SIG_COUNT];
+
+    /* Layout in the payload buffer:
+     *   [0 .. dsize)                               descriptor header + extras
+     *   [dsize .. dsize + sig_count*384)           signature block
+     *   [imem_start .. imem_start + imem_load_size)  IMEM
+     *   [dmem_start .. dmem_start + dmem_load_size)  DMEM
+     *
+     * openrm's naming: "descSize" in the header = dsize = 44 + sigs.
+     * So IMEM starts exactly at dsize, DMEM at dsize + imem_load_size. */
+    uint32_t sigs_size = (uint32_t)sig_count * 384u;
+    if (dsize < FALCON_DESC_V3_SIZE + sigs_size) return -1;
+    uint32_t imem_off = dsize;
+    uint32_t dmem_off = imem_off + imem_load_size;
+    uint32_t total    = dmem_off + dmem_load_size;
+    if (total > payload_size) return -1;
+
+    out->desc            = payload;
+    out->sigs            = payload + FALCON_DESC_V3_SIZE;
+    out->sigs_size       = sigs_size;
+    out->imem            = payload + imem_off;
+    out->imem_size       = imem_load_size;
+    out->dmem            = payload + dmem_off;
+    out->dmem_size       = dmem_load_size;
+    out->interface_off   = interface_off;
+    out->engine_id       = engine_id_mask;
+    out->ucode_id        = ucode_id;
+    out->pkc_data_off    = pkc_data_off;
+    out->imem_virt_base  = imem_virt_base;
     return 0;
 }

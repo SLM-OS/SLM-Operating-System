@@ -230,6 +230,8 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/falcon.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/nvfw.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/nvfw.c>
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/bringup.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/bringup.c>
 
     # ==========================================================================
     # Memory Management

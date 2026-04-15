@@ -200,6 +200,33 @@ bool falcon_is_idle(const struct falcon *f)
     return true;
 }
 
+int falcon_hs_boot(struct falcon *f,
+                   uint32_t brom_base,
+                   uint32_t dmem_sign_off,
+                   uint32_t engine_id,
+                   uint32_t ucode_id,
+                   uint32_t boot_vec,
+                   uint32_t timeout_us)
+{
+    if (!f || !f->initialized) return -1;
+    if (!falcon_is_idle(f))    return -1;
+
+    /* Program BROM in the exact order nouveau uses. MOD_SEL last —
+     * writing it triggers the signature verify, so everything the
+     * verify consumes (PARAADDR, UCODE_ID, ENGIDMASK) must already
+     * be in place. */
+    gsp_platform->write32(brom_base + FALCON_BROM_PARAADDR0, dmem_sign_off);
+    gsp_platform->write32(brom_base + FALCON_BROM_ENGIDMASK, engine_id);
+    gsp_platform->write32(brom_base + FALCON_BROM_UCODE_ID,  ucode_id);
+    gsp_platform->mb();
+    gsp_platform->write32(brom_base + FALCON_BROM_MOD_SEL,
+                          FALCON_BROM_MOD_SEL_RSA3K);
+    gsp_platform->mb();
+
+    falcon_start(f, boot_vec);
+    return falcon_wait_halted(f, timeout_us);
+}
+
 /* Suppress "unused function" warnings from some compilers when
  * riscv_r32 isn't called in this TU (future E3 step wires it). */
 static inline __attribute__((unused)) uint32_t

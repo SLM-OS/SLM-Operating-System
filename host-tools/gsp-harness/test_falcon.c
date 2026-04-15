@@ -45,6 +45,7 @@ struct mock_engine {
     uint32_t dmem_size;
     bool     has_riscv;
     bool     cpu_running;    /* false = halted */
+    uint32_t halt_after;     /* CPUCTL-reads until auto-halt; 0 = never */
     uint32_t last_bootvec;
     uint32_t dma_steps;      /* decrements each DMATRFCMD poll; 0 → IDLE */
     /* Capture of DMA commands the driver issued — tests assert on these. */
@@ -77,6 +78,10 @@ static uint32_t mock_read32(uint32_t addr)
         uint32_t off = addr - e->base;
         switch (off) {
         case FALCON_CPUCTL:
+            if (e->cpu_running && e->halt_after > 0) {
+                e->halt_after--;
+                if (e->halt_after == 0) e->cpu_running = false;
+            }
             return e->cpu_running ? 0 : FALCON_CPUCTL_HALTED;
         case FALCON_HWCFG: {
             uint32_t imem_blk = e->imem_size / FALCON_DMA_CHUNK;
@@ -429,6 +434,58 @@ static void test_uninitialized_rejects(void)
     falcon_start(&f, 0);
 }
 
+static void test_hs_boot_programs_brom_and_starts(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+    /* Simulate ucode execution — halts after a few CPUCTL polls. */
+    e->halt_after = 5;
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    REQUIRE(falcon_hs_boot(&f, NV_PSEC2_BROM_BASE,
+                           /*dmem_sign*/ 0x200,
+                           /*engine_id*/ 0x01,
+                           /*ucode_id*/  3,
+                           /*boot_vec*/  0x100,
+                           /*timeout*/   10000) == 0);
+
+    /* BROM register writes landed on the absolute BAR0 addresses for SEC2. */
+    REQUIRE(g_bar0[(NV_PSEC2_BROM_BASE + FALCON_BROM_PARAADDR0) / 4] == 0x200);
+    REQUIRE(g_bar0[(NV_PSEC2_BROM_BASE + FALCON_BROM_ENGIDMASK) / 4] == 0x01);
+    REQUIRE(g_bar0[(NV_PSEC2_BROM_BASE + FALCON_BROM_UCODE_ID) / 4]  == 3);
+    REQUIRE(g_bar0[(NV_PSEC2_BROM_BASE + FALCON_BROM_MOD_SEL) / 4]
+            == FALCON_BROM_MOD_SEL_RSA3K);
+    REQUIRE(e->last_bootvec == 0x100);
+    /* CPU has halted after the simulated execution. */
+    REQUIRE(!e->cpu_running);
+}
+
+static void test_hs_boot_times_out_when_never_halts(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+    e->halt_after = 0;    /* never halts */
+    (void)e;
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    REQUIRE(falcon_hs_boot(&f, NV_PSEC2_BROM_BASE,
+                           0x200, 0x01, 3, 0x100,
+                           /*timeout*/ 200) < 0);
+}
+
+static void test_hs_boot_rejects_non_idle(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+    e->cpu_running = true;   /* engine in use — hs_boot must refuse */
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    REQUIRE(falcon_hs_boot(&f, NV_PSEC2_BROM_BASE, 0, 0, 0, 0, 100) < 0);
+}
+
 int main(void)
 {
     test_probe_gsp_falcon();
@@ -447,6 +504,9 @@ int main(void)
     test_is_idle_after_probe();
     test_is_idle_rejects_cpu_running();
     test_uninitialized_rejects();
+    test_hs_boot_programs_brom_and_starts();
+    test_hs_boot_rejects_non_idle();
+    test_hs_boot_times_out_when_never_halts();
 
     if (failures == 0) {
         printf("test_falcon: all tests PASS\n");

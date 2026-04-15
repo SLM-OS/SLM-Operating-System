@@ -164,6 +164,50 @@ int nvidia_vbios_find_entry(const struct nvidia_vbios *vb,
 int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
                            const uint8_t **out_data, uint32_t *out_size);
 
+/*
+ * Same ucode, split into the sections needed by E3.4 Falcon bringup.
+ * Values come from the FalconUCodeDescV3 header inside the VBIOS.
+ *
+ *   desc             V3 header (44 bytes) — caller uses this to
+ *                    read per-descriptor fields for BROM setup
+ *   sigs             signature block (sig_count × 384 bytes)
+ *   sigs_size        total signature bytes
+ *   imem             IMEM payload (runs on Falcon as code)
+ *   imem_size        imem_load_size from descriptor
+ *   dmem             DMEM payload (data section)
+ *   dmem_size        dmem_load_size from descriptor
+ *   interface_off    byte offset into @dmem where the app-interface
+ *                    table lives — caller walks it to find DMEMMAPPER
+ *   engine_id        EngineIdMask from descriptor (goes to BROM)
+ *   ucode_id         UcodeId from descriptor (goes to BROM)
+ *   pkc_data_off     PKCDataOffset from descriptor — DMEM byte offset
+ *                    where signatures are placed for BROM validation
+ *   imem_virt_base   Falcon virtual address where IMEM is mapped
+ *                    (BOOTVEC for falcon_start)
+ *
+ * Returns 0 on success. -1 if FWSEC couldn't be found (Pascal card,
+ * truncated ROM) or if the descriptor version isn't V3 (only V3 is
+ * supported for this split — V2 has a different signature layout
+ * that isn't used on Ampere).
+ */
+struct nvidia_vbios_fwsec_parts {
+    const uint8_t *desc;
+    const uint8_t *sigs;
+    uint32_t       sigs_size;
+    const uint8_t *imem;
+    uint32_t       imem_size;
+    const uint8_t *dmem;
+    uint32_t       dmem_size;
+    uint32_t       interface_off;
+    uint32_t       engine_id;
+    uint32_t       ucode_id;
+    uint32_t       pkc_data_off;
+    uint32_t       imem_virt_base;
+};
+
+int nvidia_vbios_get_fwsec_parts(const struct nvidia_vbios *vb,
+                                 struct nvidia_vbios_fwsec_parts *out);
+
 /* ---- Platform-side VBIOS access ----
  *
  * Bare-metal x86-64 reads the expansion ROM via the PCI BAR; Linux

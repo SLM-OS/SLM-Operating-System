@@ -120,6 +120,25 @@
 #define FALCON_RISCV_BCR_CORE_SELECT  (1u << 4)   /* 0 = Falcon, 1 = RISC-V */
 #define FALCON_RISCV_BCR_BRFETCH      (1u << 8)
 
+/* ---- Falcon v4 BROM (Boot ROM) registers ----
+ *
+ * The BROM lives at a separate PRI aperture: 0x111000 for GSP,
+ * 0x841000 for SEC2. After IMEM+DMEM are uploaded but before
+ * CPUCTL.STARTCPU, the driver programs these four registers so the
+ * BROM knows which signature in the DMEM to validate against, the
+ * engine the ucode targets, and the signing algorithm. Order
+ * matters: MOD_SEL must be last (it triggers the actual verify).
+ *
+ * Offsets are relative to the BROM base (0x111000 / 0x841000),
+ * not the Falcon base. See `docs/reference/nouveau-falcon-hs-boot.md`.
+ */
+#define FALCON_BROM_PARAADDR0         0x210u      /* DMEM byte offset of signature */
+#define FALCON_BROM_UCODE_ID          0x198u      /* from descriptor's UcodeId */
+#define FALCON_BROM_ENGIDMASK         0x19Cu      /* from descriptor's EngineIdMask */
+#define FALCON_BROM_MOD_SEL           0x180u      /* signing algo; triggers verify */
+#define FALCON_BROM_MOD_SEL_RSA3K     1u
+
+
 /* ---- Public API ----
  *
  * Every function operates on a `struct falcon` that records the
@@ -200,5 +219,35 @@ int falcon_dma_upload(struct falcon *f, uint64_t src_dma,
  * AND no memory scrub in progress.
  */
 bool falcon_is_idle(const struct falcon *f);
+
+/*
+ * Boot a heavy-signed ucode on a Falcon.
+ *
+ * Preconditions:
+ *   - IMEM and DMEM images already DMA'd into @f via falcon_dma_upload().
+ *   - Signature was included in the DMEM image at offset @dmem_sign_off
+ *     (relative to DMEM start).
+ *   - @engine_id / @ucode_id / @boot_vec come from the ucode's
+ *     V3 descriptor (EngineIdMask, UcodeId, InterfaceOffset).
+ *   - @brom_base is NV_PGSP_RISCV_BASE (for GSP Falcon) or
+ *     NV_PSEC2_BROM_BASE (for SEC2).
+ *
+ * Programs BROM PARAADDR/UCODE_ID/ENGIDMASK, sets MOD_SEL=RSA3K
+ * (triggers signature verify), writes BOOTVEC, kicks STARTCPU,
+ * polls CPUCTL.HALTED up to @timeout_us.
+ *
+ * Returns 0 if the Falcon halts within the timeout. -1 on timeout
+ * or if the engine is not in a clean state to start from. Does NOT
+ * verify the ucode-level success code — caller reads MAILBOX0 or
+ * engine-specific error registers to decide "did the ucode do what
+ * it was supposed to".
+ */
+int falcon_hs_boot(struct falcon *f,
+                   uint32_t brom_base,
+                   uint32_t dmem_sign_off,
+                   uint32_t engine_id,
+                   uint32_t ucode_id,
+                   uint32_t boot_vec,
+                   uint32_t timeout_us);
 
 #endif /* GPU_NVIDIA_FALCON_H */

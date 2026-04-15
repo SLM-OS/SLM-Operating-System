@@ -192,7 +192,8 @@ GSP_HARNESS_SRCS := \
     kernel/gpu/nvidia/gsp.c \
     kernel/gpu/nvidia/nvidia_vbios.c \
     kernel/gpu/nvidia/falcon.c \
-    kernel/gpu/nvidia/nvfw.c
+    kernel/gpu/nvidia/nvfw.c \
+    kernel/gpu/nvidia/bringup.c
 
 # Native CFLAGS — these differ substantially from the bare-metal
 # kernel build. The shared GSP core uses `uart_puts`, `uart_printf`
