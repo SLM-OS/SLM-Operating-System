@@ -19,10 +19,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <linux/vfio.h>
 
 #include "../../kernel/gpu/nvidia/gsp.h"
 #include "../../kernel/gpu/nvidia/nvidia_vbios.h"
@@ -174,56 +176,271 @@ static void linux_gsp_firmware_get(enum gsp_firmware_kind kind,
 
 /* ---- VBIOS ----
  *
- * Linux exposes the GPU expansion ROM at
- *   /sys/bus/pci/devices/<BDF>/rom
- * but the file is empty until you enable ROM reads by writing "1"
- * to it. This matches the bare-metal ROM BAR toggle — the kernel is
- * doing the same PCI config write under the hood.
+ * Three access paths, tried in order:
  *
- * Sequence:
- *   1. open  .../rom  O_RDWR
- *   2. write "1\n"    enables ROM decoding on the device
- *   3. read  bytes    until EOF (image size typically 128–512 KB)
- *   4. write "0\n"    restore (optional — the kernel also does this
- *                     when the fd closes, but being explicit is cheap)
+ * 1. /dev/mem at the ROM BAR physical address (preferred). Reads
+ *    the raw 512 KB BAR contents — bypasses the Linux kernel's
+ *    `pci_read_rom()` cap that stops at PCIR LAST. This is the only
+ *    path that returns data past byte ~149 KB on a typical Ampere
+ *    GA10x: both sysfs `/sys/.../rom` and VFIO ROM region use
+ *    `pci_map_rom()` under the hood and return garbage (or stop)
+ *    past the chain's LAST marker, even though the BAR exposes more.
+ *
+ * 2. **VFIO ROM region**. Same content as sysfs but with the ROM
+ *    BAR enable side-effect handled via VFIO config write — kept
+ *    as a fallback when /dev/mem isn't available (locked-down
+ *    kernel, security policy).
+ *
+ * 3. **sysfs `/sys/bus/pci/devices/<BDF>/rom`**. Last resort.
+ *
+ * Even /dev/mem doesn't get us past the BAR size, which on the
+ * RTX 3050 / GA107 is 512 KB — smaller than the ~568 KB the VBIOS
+ * declares. See #150 for the remaining gap (ACPI _ROM / PRAMIN /
+ * etc) on cards where FWSEC lives in the missing tail.
  */
-int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
+
+#define PCI_CFG_COMMAND_OFF   0x04
+#define PCI_CFG_ROM_BAR_OFF   0x30
+
+/*
+ * Try /dev/mem at the ROM BAR's physical address. Reads PCI config
+ * via sysfs (works even when vfio-pci is bound — sysfs config writes
+ * are gated, but we read first to find the address, then write to
+ * enable the BAR via VFIO config space if available).
+ *
+ * Returns positive byte count on success, 0 if path not viable
+ * (no /dev/mem access, can't enable the BAR), -1 on failure.
+ */
+static ssize_t read_vbios_via_devmem(const char *pci_path,
+                                     uint8_t **out_buf)
 {
-    if (g_vbios_loaded) {
-        if (out_data) *out_data = g_vbios.image;
-        if (out_size) *out_size = g_vbios.image_size;
-        return g_vbios.parsed_ok ? 0 : -1;
+    char cfg_path[256];
+    snprintf(cfg_path, sizeof(cfg_path), "%s/config", pci_path);
+
+    int cfg_fd = open(cfg_path, O_RDWR);
+    if (cfg_fd < 0) {
+        if (g_trace) fprintf(stderr, "[VBIOS] open %s: %s (try sudo)\n",
+                             cfg_path, strerror(errno));
+        return 0;
     }
 
-    if (!g_pci_path) {
-        fprintf(stderr, "[VBIOS] platform not initialized\n");
-        return -1;
+    /* Read ROM_BAR (offset 0x30) and COMMAND (offset 0x04). */
+    uint32_t saved_rom = 0, saved_cmd = 0;
+    if (pread(cfg_fd, &saved_rom, 4, 0x30) != 4 ||
+        pread(cfg_fd, &saved_cmd, 4, 0x04) != 4) {
+        close(cfg_fd);
+        return 0;
     }
 
+    uint32_t rom_phys = saved_rom & 0xFFFFF800u;
+    if (rom_phys == 0 || rom_phys == 0xFFFFF800u) {
+        if (g_trace) fprintf(stderr, "[VBIOS] no ROM BAR address assigned\n");
+        close(cfg_fd);
+        return 0;
+    }
+
+    /* Probe BAR size: write all-1s, read back. The 0 in bit 0 keeps
+     * ROM disabled during the probe. */
+    uint32_t probe = 0xFFFFF800u;
+    if (pwrite(cfg_fd, &probe, 4, 0x30) != 4) {
+        close(cfg_fd);
+        return 0;
+    }
+    uint32_t sized = 0;
+    if (pread(cfg_fd, &sized, 4, 0x30) != 4) {
+        close(cfg_fd);
+        return 0;
+    }
+    uint32_t bar_size = ~(sized & 0xFFFFF800u) + 1;
+    if (bar_size == 0 || bar_size > 16 * 1024 * 1024) {
+        if (g_trace) fprintf(stderr, "[VBIOS] implausible BAR size %u\n", bar_size);
+        /* Restore and bail. */
+        ssize_t _r = pwrite(cfg_fd, &saved_rom, 4, 0x30);
+        (void)_r;
+        close(cfg_fd);
+        return 0;
+    }
+    if (g_trace) fprintf(stderr, "[VBIOS] ROM BAR @ 0x%x size %u\n",
+                         rom_phys, bar_size);
+
+    /* Enable ROM (bit 0) + memory-space decoding. */
+    uint32_t enabled_rom = rom_phys | 1u;
+    uint32_t enabled_cmd = saved_cmd | 0x2u;
+    if (pwrite(cfg_fd, &enabled_rom, 4, 0x30) != 4 ||
+        pwrite(cfg_fd, &enabled_cmd, 4, 0x04) != 4) {
+        if (g_trace) fprintf(stderr, "[VBIOS] cannot enable ROM BAR via /sys/.../config\n");
+        ssize_t _r1 = pwrite(cfg_fd, &saved_rom, 4, 0x30);
+        ssize_t _r2 = pwrite(cfg_fd, &saved_cmd, 4, 0x04);
+        (void)_r1; (void)_r2;
+        close(cfg_fd);
+        return 0;
+    }
+
+    /* mmap /dev/mem at the ROM BAR physical address. */
+    int mem_fd = open("/dev/mem", O_RDONLY | O_SYNC);
+    if (mem_fd < 0) {
+        if (g_trace) fprintf(stderr, "[VBIOS] /dev/mem: %s\n", strerror(errno));
+        ssize_t _r1 = pwrite(cfg_fd, &saved_rom, 4, 0x30);
+        ssize_t _r2 = pwrite(cfg_fd, &saved_cmd, 4, 0x04);
+        (void)_r1; (void)_r2;
+        close(cfg_fd);
+        return 0;
+    }
+
+    void *mp = mmap(NULL, bar_size, PROT_READ, MAP_SHARED, mem_fd, (off_t)rom_phys);
+    if (mp == MAP_FAILED) {
+        if (g_trace) fprintf(stderr, "[VBIOS] mmap /dev/mem @0x%x: %s\n",
+                             rom_phys, strerror(errno));
+        close(mem_fd);
+        ssize_t _r1 = pwrite(cfg_fd, &saved_rom, 4, 0x30);
+        ssize_t _r2 = pwrite(cfg_fd, &saved_cmd, 4, 0x04);
+        (void)_r1; (void)_r2;
+        close(cfg_fd);
+        return 0;
+    }
+
+    /* Copy via 4-byte MMIO reads to keep the bus access aligned. */
+    uint8_t *buf = malloc(bar_size);
+    if (buf) {
+        const volatile uint32_t *src = (const volatile uint32_t *)mp;
+        uint32_t *dst = (uint32_t *)buf;
+        for (size_t i = 0; i < bar_size / 4; i++) dst[i] = src[i];
+    }
+
+    munmap(mp, bar_size);
+    close(mem_fd);
+
+    /* Restore ROM BAR + COMMAND. */
+    ssize_t _r1 = pwrite(cfg_fd, &saved_rom, 4, 0x30);
+    ssize_t _r2 = pwrite(cfg_fd, &saved_cmd, 4, 0x04);
+    (void)_r1; (void)_r2;
+    close(cfg_fd);
+
+    if (!buf) return -1;
+    *out_buf = buf;
+    return (ssize_t)bar_size;
+}
+
+static int read_vfio_iommu_group(const char *pci_path)
+{
+    /* /sys/bus/pci/devices/<BDF>/iommu_group is a symlink to
+     * /sys/kernel/iommu_groups/<id>. We just want the trailing id. */
+    char link[256], target[256];
+    snprintf(link, sizeof(link), "%s/iommu_group", pci_path);
+    ssize_t n = readlink(link, target, sizeof(target) - 1);
+    if (n <= 0) return -1;
+    target[n] = '\0';
+    char *slash = strrchr(target, '/');
+    if (!slash) return -1;
+    return atoi(slash + 1);
+}
+
+/*
+ * Returns positive byte count of bytes read into *out_buf (caller
+ * frees), 0 if VFIO isn't usable for this device, -1 on failure.
+ */
+static ssize_t read_vbios_via_vfio(const char *pci_path,
+                                   uint8_t **out_buf)
+{
+    int group_id = read_vfio_iommu_group(pci_path);
+    if (group_id < 0) {
+        if (g_trace) fprintf(stderr, "[VBIOS] no IOMMU group — VFIO unusable\n");
+        return 0;
+    }
+
+    int container = open("/dev/vfio/vfio", O_RDWR);
+    if (container < 0) {
+        if (g_trace) fprintf(stderr, "[VBIOS] /dev/vfio/vfio: %s\n", strerror(errno));
+        return 0;
+    }
+
+    char gpath[64];
+    snprintf(gpath, sizeof(gpath), "/dev/vfio/%d", group_id);
+    int group = open(gpath, O_RDWR);
+    if (group < 0) { close(container); return 0; }
+
+    struct vfio_group_status gstat = { .argsz = sizeof(gstat) };
+    if (ioctl(group, VFIO_GROUP_GET_STATUS, &gstat) < 0 ||
+        !(gstat.flags & VFIO_GROUP_FLAGS_VIABLE)) {
+        close(group); close(container); return 0;
+    }
+    if (ioctl(group, VFIO_GROUP_SET_CONTAINER, &container) < 0 ||
+        ioctl(container, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU) < 0) {
+        close(group); close(container); return 0;
+    }
+
+    /* The BDF VFIO needs is just the trailing component of pci_path. */
+    const char *bdf = strrchr(pci_path, '/');
+    bdf = bdf ? bdf + 1 : pci_path;
+    int device = ioctl(group, VFIO_GROUP_GET_DEVICE_FD, bdf);
+    if (device < 0) {
+        fprintf(stderr, "[VBIOS] VFIO_GROUP_GET_DEVICE_FD %s: %s\n",
+                bdf, strerror(errno));
+        close(group); close(container); return 0;
+    }
+
+    /* Find config space region — its index is VFIO_PCI_CONFIG_REGION_INDEX (7). */
+    struct vfio_region_info cfg = {
+        .argsz = sizeof(cfg),
+        .index = VFIO_PCI_CONFIG_REGION_INDEX,
+    };
+    if (ioctl(device, VFIO_DEVICE_GET_REGION_INFO, &cfg) < 0) {
+        close(device); close(group); close(container); return -1;
+    }
+
+    /* Save current ROM BAR + COMMAND, then enable. */
+    uint32_t saved_rom = 0, saved_cmd = 0;
+    if (pread(device, &saved_rom, 4, cfg.offset + PCI_CFG_ROM_BAR_OFF) != 4 ||
+        pread(device, &saved_cmd, 4, cfg.offset + PCI_CFG_COMMAND_OFF) != 4) {
+        close(device); close(group); close(container); return -1;
+    }
+    uint32_t enabled_rom = (saved_rom & 0xFFFFF800u) | 1u;
+    uint32_t enabled_cmd = saved_cmd | 0x2u;        /* memory-space enable */
+    if (pwrite(device, &enabled_rom, 4, cfg.offset + PCI_CFG_ROM_BAR_OFF) != 4 ||
+        pwrite(device, &enabled_cmd, 4, cfg.offset + PCI_CFG_COMMAND_OFF) != 4) {
+        close(device); close(group); close(container); return -1;
+    }
+
+    struct vfio_region_info rom = {
+        .argsz = sizeof(rom),
+        .index = VFIO_PCI_ROM_REGION_INDEX,
+    };
+    ssize_t n = -1;
+    if (ioctl(device, VFIO_DEVICE_GET_REGION_INFO, &rom) == 0 && rom.size > 0) {
+        uint8_t *buf = malloc(rom.size);
+        if (buf) {
+            n = pread(device, buf, rom.size, rom.offset);
+            if (n > 0) {
+                *out_buf = buf;
+            } else {
+                free(buf);
+                n = -1;
+            }
+        }
+    }
+
+    /* Restore — best-effort. The ssize_t captures suppress
+     * -Wunused-result; gcc's `warn_unused_result` attribute on
+     * pwrite ignores the (void) cast. */
+    ssize_t _r1 = pwrite(device, &saved_rom, 4, cfg.offset + PCI_CFG_ROM_BAR_OFF);
+    ssize_t _r2 = pwrite(device, &saved_cmd, 4, cfg.offset + PCI_CFG_COMMAND_OFF);
+    (void)_r1; (void)_r2;
+    close(device); close(group); close(container);
+    return n;
+}
+
+static ssize_t read_vbios_via_sysfs(const char *pci_path,
+                                    uint8_t **out_buf)
+{
     char path[256];
-    snprintf(path, sizeof(path), "%s/rom", g_pci_path);
+    snprintf(path, sizeof(path), "%s/rom", pci_path);
 
     int fd = open(path, O_RDWR);
-    if (fd < 0) {
-        fprintf(stderr, "[VBIOS] open %s: %s\n", path, strerror(errno));
-        return -1;
-    }
+    if (fd < 0) return -1;
 
-    /* Enable ROM decoding. */
-    if (write(fd, "1\n", 2) != 2) {
-        fprintf(stderr, "[VBIOS] enable ROM: %s\n", strerror(errno));
-        close(fd);
-        return -1;
-    }
+    if (write(fd, "1\n", 2) != 2) { close(fd); return -1; }
+    if (lseek(fd, 0, SEEK_SET) < 0) { close(fd); return -1; }
 
-    /* Seek back — some kernels advance the offset on the enable-write. */
-    if (lseek(fd, 0, SEEK_SET) < 0) {
-        fprintf(stderr, "[VBIOS] lseek: %s\n", strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    /* Grow buffer as we read. 256 KB start covers nearly all GPUs. */
     size_t cap = 256 * 1024;
     size_t n = 0;
     uint8_t *buf = malloc(cap);
@@ -239,41 +456,68 @@ int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
             buf = nb;
         }
         ssize_t got = read(fd, buf + n, cap - n);
-        if (got < 0) {
-            fprintf(stderr, "[VBIOS] read: %s\n", strerror(errno));
-            free(buf); close(fd);
-            return -1;
-        }
+        if (got < 0) { free(buf); close(fd); return -1; }
         if (got == 0) break;
         n += (size_t)got;
     }
 
-    /* Best-effort restore — ignore errors, we're about to close.
-     * The ssize_t capture is to keep -Wunused-result quiet; gcc's
-     * `warn_unused_result` attribute on write(2) ignores the (void)
-     * cast. */
     if (lseek(fd, 0, SEEK_SET) < 0) { /* ignored */ }
     ssize_t _disable_rc = write(fd, "0\n", 2);
     (void)_disable_rc;
     close(fd);
+    *out_buf = buf;
+    return (ssize_t)n;
+}
 
+int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
+{
+    if (g_vbios_loaded) {
+        if (out_data) *out_data = g_vbios.image;
+        if (out_size) *out_size = g_vbios.image_size;
+        return g_vbios.parsed_ok ? 0 : -1;
+    }
+
+    if (!g_pci_path) {
+        fprintf(stderr, "[VBIOS] platform not initialized\n");
+        return -1;
+    }
+
+    /* Try /dev/mem first — only path that returns full BAR contents
+     * past the kernel's PCIR-LAST cap. Fall back to VFIO (which has
+     * the same cap as sysfs but doesn't need root if the device is
+     * already vfio-bound). Last resort is sysfs. */
+    uint8_t *buf = NULL;
+    ssize_t n = read_vbios_via_devmem(g_pci_path, &buf);
+    const char *via = "devmem";
+    if (n <= 0) {
+        n = read_vbios_via_vfio(g_pci_path, &buf);
+        via = "vfio";
+    }
+    if (n <= 0) {
+        n = read_vbios_via_sysfs(g_pci_path, &buf);
+        via = "sysfs";
+    }
+    if (n <= 0) {
+        fprintf(stderr, "[VBIOS] both VFIO and sysfs failed\n");
+        return -1;
+    }
     if (n < 4) {
-        fprintf(stderr, "[VBIOS] only %zu bytes from %s\n", n, path);
+        fprintf(stderr, "[VBIOS] only %zd bytes via %s\n", n, via);
         free(buf);
         return -1;
     }
 
-    if (nvidia_vbios_parse(buf, n, &g_vbios) < 0) {
-        fprintf(stderr, "[VBIOS] parse failed (%zu bytes)\n", n);
+    if (nvidia_vbios_parse(buf, (size_t)n, &g_vbios) < 0) {
+        fprintf(stderr, "[VBIOS] parse failed (%zd bytes via %s)\n", n, via);
         free(buf);
         return -1;
     }
 
     g_vbios_buf = buf;
-    g_vbios_buf_size = n;
+    g_vbios_buf_size = (size_t)n;
     g_vbios_loaded = true;
-    fprintf(stderr, "[VBIOS] parsed %zu bytes, %u BIT entries\n",
-            n, g_vbios.num_entries);
+    fprintf(stderr, "[VBIOS] parsed %zd bytes via %s, %u BIT entries\n",
+            n, via, g_vbios.num_entries);
 
     if (out_data) *out_data = g_vbios.image;
     if (out_size) *out_size = g_vbios.image_size;

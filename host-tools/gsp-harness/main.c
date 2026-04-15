@@ -153,22 +153,25 @@ int main(int argc, char **argv)
         if (gsp_platform->vbios_get_fwsec(&fw, &fw_size) == 0) {
             printf("[GSP-HARNESS] FWSEC: %zu bytes @ %p\n", fw_size, fw);
         } else {
-            /* FWSEC discovery now implements the full nova-core path
+            /* FWSEC discovery implements the full nova-core path
              * (BIT 'p' → FalconUcodeTablePtr → PciAt|FwSec1|FwSec2
              * concatenated offset → PMU table → FWSEC_PROD entry →
-             * FalconUCodeDescV3 header → payload size). Real failure
-             * cause on Ampere dumped via /sys/.../rom or /dev/mem:
-             * the ROM BAR caps at 512 KB but the VBIOS declares a
-             * larger image, so the pointer lands past our truncated
-             * dump. ACPI _ROM or VFIO ROM ioctl gives the full image
-             * — follow-up issue tracks that. */
+             * FalconUCodeDescV3 header → payload size). Common failure
+             * cause on GA107: NPDS declares FwSec2 length larger than
+             * what fits in the 512 KB ROM BAR, so the pointer resolves
+             * past the bytes the BAR exposes. This isn't a Linux
+             * truncation (we read via /dev/mem to bypass kernel-side
+             * caps); it's that the GPU literally only exposes 512 KB
+             * of its ~568 KB SPI-flash VBIOS through the ROM BAR. The
+             * remaining 56 KB lives in flash regions reachable only
+             * via chip-specific paths — see #150. */
             printf("[GSP-HARNESS] FWSEC: not extractable from this image\n"
                    "                  (possible causes: Pascal-era card with no\n"
-                   "                   FwSec entries, missing BIT 'p' entry, or\n"
-                   "                   truncated ROM dump — on GA10x, the ROM BAR\n"
-                   "                   often caps at 512 KB even when the VBIOS\n"
-                   "                   declares more. Use ACPI _ROM or a full VFIO\n"
-                   "                   ROM read to get the rest.)\n");
+                   "                   FwSec entries, missing BIT 'p' entry, or — most\n"
+                   "                   common on GA107 — the GPU's ROM BAR exposes only\n"
+                   "                   the first ~512 KB of an >568 KB VBIOS, and FWSEC\n"
+                   "                   lives in the missing tail. See issue #150 for the\n"
+                   "                   work to read the rest via PRAMIN / VRAM shadow.)\n");
         }
         return 0;
     }
