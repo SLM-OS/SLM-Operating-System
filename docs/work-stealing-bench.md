@@ -150,17 +150,18 @@ expected under contention — the ABA mitigation in
 `scheduler_terminate_task` removes the terminating task from all
 deques but can race with in-flight steals.
 
-## S4 status — default flipped (2026-04-14)
+## S4 status — default flipped (2026-04-14, Jetson follow-up 2026-04-15)
 
-After hardware capture, `ENABLE_WORK_STEALING` now defaults **ON** in
-`CMakeLists.txt` for every platform except Jetson. Rationale:
+After hardware capture, `ENABLE_WORK_STEALING` defaults **ON** in
+`CMakeLists.txt` for every hardware platform; QEMU stays OFF to keep
+the integration test harness green. Rationale:
 
 | Platform | ON default? | Evidence |
 |---|---|---|
-| QEMU ARM64 | ✅ | 1.7× speedup (S3 capture), all tests green in both configs |
-| Raspberry Pi 5 | ✅ | 3.12× speedup on bench stealing 16, boots cleanly (#158 closed) |
 | x86-64 | ✅ | ON since Phase B; cache-coherent SMP + LAPIC IPI make the path safe |
-| Jetson Orin Nano | ❌ (default) | #166 was the original blocker and is now closed (2026-04-15). Jetson boots and runs `bench stealing` cleanly with `WORK_STEALING=ON`; a follow-up flip of the S4 default to ON is a scope decision that belongs in the plan, not in this fix. Use `make kernel PLATFORM=JETSON_ORIN_NANO WORK_STEALING=ON` explicitly until then. |
+| Raspberry Pi 5 | ✅ | 3.12× speedup on bench stealing 16, boots cleanly (#158 closed) |
+| Jetson Orin Nano | ✅ | 3 consecutive clean `bench stealing 16` runs (20.9 ms, 2/4/4/4/1/1 distribution across 6 CPUs) after #166 fix on 2026-04-15; default flipped ON in the follow-up commit |
+| QEMU ARM64 | ❌ | 1.7× speedup (S3 capture), but several integration tests carry timing assumptions that conflict with aggressive cross-CPU migration. Kept OFF so `make test` stays reliably green; use `make test WORK_STEALING=ON` for regression coverage |
 
 Opt-out path: `make kernel PLATFORM=<platform> WORK_STEALING=OFF` passes `-DENABLE_WORK_STEALING=OFF` to CMake, overriding the per-platform default.
 

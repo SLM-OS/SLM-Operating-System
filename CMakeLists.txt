@@ -611,13 +611,16 @@ option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 #     `make kernel WORK_STEALING=ON` / `make test WORK_STEALING=ON`
 #     for regression testing. Full test-harness stabilization
 #     is out of scope for S4.
-#   - Jetson Orin Nano: residual page fault during bench stealing
-#     tracked as #166. Default OFF; opt-in via WORK_STEALING=ON.
+#   - Jetson Orin Nano: 3 consecutive clean `bench stealing 16` runs
+#     on jetson-nano-2 (20.9 ms, 2/4/4/4/1/1 distribution across all
+#     6 CPUs) after #166 was resolved by moving Jetson onto the Pi 5
+#     runtime `spinlock_hw_enabled` model. Default ON.
 #
 # Override path (either direction) is the Makefile `WORK_STEALING=ON`
 # / `WORK_STEALING=OFF` variable, which maps to
 # `-DENABLE_WORK_STEALING=ON/OFF`.
-if(PLATFORM STREQUAL "X86_64" OR PLATFORM STREQUAL "RASPI5")
+if(PLATFORM STREQUAL "X86_64" OR PLATFORM STREQUAL "RASPI5" OR
+   PLATFORM STREQUAL "JETSON_ORIN_NANO")
     option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" ON)
 else()
     option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" OFF)

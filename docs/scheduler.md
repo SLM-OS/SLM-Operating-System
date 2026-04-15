@@ -841,14 +841,14 @@ CPU. When a CPU's own run queue goes empty inside `schedule()`, and
 `CONFIG_WORK_STEALING` is on, it calls `sched_try_steal()` to pull
 work from another CPU's deque.
 
-**Default by platform (after Jetson capstone S4, 2026-04-14):**
+**Default by platform (after S4 Jetson follow-up, 2026-04-15):**
 
 | Platform | Default | Notes |
 |---|---|---|
 | x86-64 | ON | Since Phase B; cache-coherent SMP + LAPIC IPI |
-| QEMU ARM64 | ON | 1.7× speedup measured (S3) |
+| QEMU ARM64 | OFF | 1.7× speedup measured (S3), but several integration tests use timing-sensitive assumptions that fight the more aggressive cross-CPU migration; opt in via `WORK_STEALING=ON` for regression testing |
 | Raspberry Pi 5 | ON | 3.12× speedup measured on hardware (`docs/work-stealing-bench.md`); closed #158 |
-| Jetson Orin Nano | OFF | Residual page fault during bench stealing (#166); opt-in via `WORK_STEALING=ON` |
+| Jetson Orin Nano | ON | 3 consecutive clean `bench stealing 16` runs on hardware (20.9 ms, 2/4/4/4/1/1 distribution) after the #166 spinlock fix |
 
 Override: `make kernel PLATFORM=<p> WORK_STEALING=ON` or `WORK_STEALING=OFF` maps to `-DENABLE_WORK_STEALING=ON/OFF`, bypassing the CMake per-platform default.
 
@@ -860,9 +860,12 @@ serialized by `steal_deque_lock[MAX_CPUS]` — a separate cacheable
 `rq_lock[]`. The deque struct itself lives in NC memory on
 `PLATFORM_HAS_NC_MEMORY` (Pi 5, Jetson) for instant cross-CPU
 visibility without cache maintenance. The deque used to embed its
-own spinlock, but on Jetson `SPINLOCK_SKIP_LOCKING` reduced that to
-a barrier-only no-op, letting concurrent pushes/pops corrupt the
-deque — see #158 and commit `a3b3a0e` for the move.
+own spinlock; on Jetson the former blanket `SPINLOCK_SKIP_LOCKING`
+reduced it to a barrier-only no-op, letting concurrent pushes/pops
+corrupt the deque — see #158 and commit `a3b3a0e` for the move to
+the external cacheable lock. Jetson has since moved to Pi 5's runtime
+`spinlock_hw_enabled` model (commit `e180244`, #166), so the "lock is
+a no-op" concern no longer applies there either.
 
 Every `steal_deque_push` / `_pop` / `_steal` / `_remove` call in
 `sched.c` is wrapped with `spin_lock_irqsave(&steal_deque_lock[cpu])` /

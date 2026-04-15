@@ -23,7 +23,7 @@ The minimum capstone path (G1 → G6) is **complete**. Track S is through
 | S1 | ✅ DONE | NC-memory steal deque placement |
 | S2 | ✅ DONE | Steal counters (closed #105) |
 | S3 | ✅ DONE | `bench stealing` + Phase C QEMU+Pi 5 numbers |
-| S4 | ✅ DONE | Default flip ON for x86-64 + Pi 5; OFF for Jetson + QEMU. PR #167 |
+| S4 | ✅ DONE | Default flip ON for x86-64 + Pi 5 (PR #167), plus Jetson ON follow-up (2026-04-15) after #166 fix. QEMU stays OFF by design (test-harness flakes) |
 | S5 (load-balancing) | 💤 stretch | Explicitly optional in the plan |
 
 **Capstone defense readiness:** the engineering work is delivered. What
@@ -80,12 +80,7 @@ If picking what to do next, the honest order is:
 
 1. **Thesis writeup + demo prep** — time-boxed project management,
    no engineering blockers.
-2. **S4 scope decision** — Jetson now runs clean with
-   `WORK_STEALING=ON` (see §3a row for #166). Flipping
-   `ENABLE_WORK_STEALING` default ON for Jetson in `CMakeLists.txt`
-   is a one-line change plus a test pass; it was deliberately left
-   out of the #166 fix to keep scope small.
-3. **#174 / #175 / S5** — genuinely optional polish.
+2. **#174 / #175 / S5** — genuinely optional polish.
 
 ---
 
