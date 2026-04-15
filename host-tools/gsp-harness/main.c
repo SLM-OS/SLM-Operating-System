@@ -293,6 +293,12 @@ int main(int argc, char **argv)
                (unsigned long long)b.wpr2_size);
 
         int rc = gsp_bringup_fwsec_frts(&b);
+        if (b.diag_sig_count) {
+            printf("[GSP-HARNESS] sig selection: fuse_reg[0x%x]=0x%x sig_count=%u\n"
+                   "                sig_versions=0x%x → sig_index=%u\n",
+                   b.diag_fuse_reg_off, b.diag_fuse_reg_val,
+                   b.diag_sig_count, b.diag_sig_versions, b.diag_sig_index);
+        }
         if (rc < 0) {
             printf("[GSP-HARNESS] FWSEC-FRTS FAILED at phase %u\n",
                    b.last_error_phase);

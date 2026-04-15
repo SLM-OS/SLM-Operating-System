@@ -73,6 +73,15 @@ struct gsp_bringup {
 
     enum gsp_bringup_state state;
     uint32_t last_error_phase;
+
+    /* Diagnostic fields populated during fwsec_frts regardless of
+     * success/failure — the harness reads these to show the sig
+     * index selection math. */
+    uint32_t diag_fuse_reg_off;
+    uint32_t diag_fuse_reg_val;
+    uint8_t  diag_sig_count;
+    uint16_t diag_sig_versions;
+    uint32_t diag_sig_index;
 };
 
 /*

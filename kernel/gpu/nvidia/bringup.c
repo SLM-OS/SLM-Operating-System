@@ -58,8 +58,40 @@ extern const struct gsp_platform_ops *gsp_platform;
 #define DMEMMAPPER_INIT_CMD_FRTS       0x15u
 #define DMEMMAPPER_CMD_IN_BUF_OFFSET   0x08u
 #define DMEMMAPPER_INIT_CMD_OFFSET     0x2Cu
+#define READ_VBIOS_STRUCT_SIZE         24u   /* ver + hdr + u64 addr + size + flags */
+#define READ_VBIOS_FLAGS_DEFAULT       2u
 #define FRTS_REGION_OFFSET_FROM_CMDBUF 24u
 #define FRTS_REGION_TYPE_FB            2u
+
+/* Per-ucode fuse-version registers. GA10x layout:
+ *   0x008241C0 + (ucode_id - 1) * 4. We read the register for our
+ *   ucode_id=9, then pick the right signature:
+ *     idx = sig_versions - fls(reg)  (when reg != 0)
+ *     idx = sig_count - 1            (when reg == 0 — no fuse)
+ *
+ * Nouveau's `ga100_flcn_fw_signature` does exactly this. Without
+ * the right index the BROM's RSA3K verify fails silently and
+ * CPUCTL stays 0 forever — exactly what we're observing. */
+#define NV_FUSE_VERSION_REG_BASE       0x008241C0u
+
+/* FalconUCodeDescV3 fields we need for the sig index calc. */
+#define DESC_V3_SIG_COUNT_OFF          39
+#define DESC_V3_SIG_VERSIONS_OFF       40
+
+/* MAILBOX0 sentinel — nouveau writes 0xCAFEBEEF when no caller
+ * value is provided. Lets post-boot state distinguish "FWSEC ran
+ * and wrote the result" from "ucode never executed". */
+#define FWSEC_MBOX0_SENTINEL           0xCAFEBEEFu
+
+static inline uint32_t fls32(uint32_t v)
+{
+    /* find-last-set: bit position of the highest set bit, 1-indexed.
+     * 0 → 0, 1 → 1, 2 → 2, 4 → 3, 8 → 4, ... */
+    if (v == 0) return 0;
+    uint32_t n = 0;
+    while (v) { n++; v >>= 1; }
+    return n;
+}
 
 static inline void wr32le(uint8_t *p, uint32_t v)
 {
@@ -113,20 +145,32 @@ static int patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
         wr32le(dmem + dmem_base + DMEMMAPPER_INIT_CMD_OFFSET,
                DMEMMAPPER_INIT_CMD_FRTS);
 
-        /* cmd_in_buffer_offset is at +0x08; the buffer itself is
-         * at dmem + cmd_in_buffer_offset, and the FRTS region
-         * struct goes 24 bytes in (past a read_vbios sub-struct
-         * that FWSEC always consults first). */
+        /* cmd_in_buffer_offset is at +0x08; FWSEC reads its entire
+         * command block from there. Block layout (nouveau/openrm):
+         *   [+0 .. +24)   read_vbios sub-struct — FWSEC ALWAYS
+         *                 reads this first; skipping it causes the
+         *                 ucode to bail silently before FRTS runs.
+         *   [+24 .. +44)  frts_region sub-struct
+         */
         uint32_t cmdbuf = rd32le(dmem + dmem_base + DMEMMAPPER_CMD_IN_BUF_OFFSET);
-        uint32_t frts   = cmdbuf + FRTS_REGION_OFFSET_FROM_CMDBUF;
-        if (frts + 20 > dmem_size) return -1;
+        if (cmdbuf + READ_VBIOS_STRUCT_SIZE + 20 > dmem_size) return -1;
 
-        /* struct { u32 ver, hdr, addr, size, type } — 20 bytes. */
-        wr32le(dmem + frts +  0, 1);                                /* ver */
-        wr32le(dmem + frts +  4, 20);                               /* hdr */
-        wr32le(dmem + frts +  8, (uint32_t)(wpr_addr >> 12));       /* addr */
-        wr32le(dmem + frts + 12, (uint32_t)(wpr_size >> 12));       /* size */
-        wr32le(dmem + frts + 16, FRTS_REGION_TYPE_FB);              /* type */
+        /* read_vbios: { u32 ver=1; u32 hdr=24; u64 addr=0; u32 size=0; u32 flags=2 } */
+        uint8_t *rv = dmem + cmdbuf;
+        wr32le(rv +  0, 1);
+        wr32le(rv +  4, READ_VBIOS_STRUCT_SIZE);
+        wr32le(rv +  8, 0);                          /* addr lo */
+        wr32le(rv + 12, 0);                          /* addr hi */
+        wr32le(rv + 16, 0);                          /* size */
+        wr32le(rv + 20, READ_VBIOS_FLAGS_DEFAULT);
+
+        /* frts_region at cmdbuf + 24: { u32 ver, hdr, addr, size, type }. */
+        uint8_t *frts = dmem + cmdbuf + FRTS_REGION_OFFSET_FROM_CMDBUF;
+        wr32le(frts +  0, 1);                                /* ver */
+        wr32le(frts +  4, 20);                               /* hdr */
+        wr32le(frts +  8, (uint32_t)(wpr_addr >> 12));       /* addr */
+        wr32le(frts + 12, (uint32_t)(wpr_size >> 12));       /* size */
+        wr32le(frts + 16, FRTS_REGION_TYPE_FB);              /* type */
         return 0;
     }
     return -1;    /* DMEMMAPPER entry not found */
@@ -215,15 +259,69 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
      * them against the image. Without this the BROM keeps spinning /
      * the ucode never starts executing.
      *
-     * Signature index selection — FWSEC ships multiple signatures
-     * (one per allowed fuse version). Production cards typically use
-     * index 0 (the "current" signature). Multi-fuse selection is a
-     * follow-up; for now index 0 works on RTX 3050 retail boards. */
+     * Signature index selection (nouveau ga100_flcn_fw_signature):
+     *   reg = BAR0[0x8241C0 + (ucode_id - 1) * 4]
+     *   if reg != 0:  idx = sig_versions - fls(reg)
+     *   else:         idx = sig_count - 1     (no fuse burned — default)
+     *
+     * sig_versions comes from the V3 descriptor's SignatureVersions
+     * field; sig_count from SignatureCount. Without the right index,
+     * BROM's RSA3K verify fails silently and CPUCTL stays 0 forever
+     * — which exactly matches what we observe on the retail GA107. */
     b->last_error_phase = 201;
     const uint32_t sig_size = 384u;
-    const uint32_t sig_index = 0;
+
+    uint8_t  sig_count    = b->fwsec_desc[DESC_V3_SIG_COUNT_OFF];
+    uint16_t sig_versions =
+        (uint16_t)b->fwsec_desc[DESC_V3_SIG_VERSIONS_OFF] |
+        ((uint16_t)b->fwsec_desc[DESC_V3_SIG_VERSIONS_OFF + 1] << 8);
+    uint32_t fuse_reg_off = NV_FUSE_VERSION_REG_BASE
+                          + (uint32_t)(b->fwsec_ucode_id - 1) * 4u;
+    uint32_t fuse_reg     = gsp_platform->read32(fuse_reg_off);
+
+    b->diag_fuse_reg_off   = fuse_reg_off;
+    b->diag_fuse_reg_val   = fuse_reg;
+    b->diag_sig_count      = sig_count;
+    b->diag_sig_versions   = sig_versions;
+
+    /* Exact algorithm from nouveau ga102_gsp_fwsec_signature:
+     *
+     *   reg_bit = 1 << (fls(fuse_reg))    // highest burned fuse
+     *   if (!(reg_bit & sig_versions))    // no matching signature
+     *       fail
+     *   idx = 0
+     *   while (!(reg_bit & sig_versions & 1)):
+     *       idx += sig_versions & 1
+     *       reg_bit >>= 1
+     *       sig_versions >>= 1
+     *   return idx
+     *
+     * For RTX 3050: fuse_reg=0x3, fls=2, reg_bit=0x4, sig_versions=0xF
+     * produces idx=2. The ucode fuse versions it claims to support
+     * (bits set in sig_versions) are indexed in order of the
+     * register's position — counting how many SUPPORTED fuse
+     * versions come BEFORE the currently-burned one. */
+    uint32_t sig_index = 0;
+    if (fuse_reg == 0 || sig_count == 0) {
+        /* Dev-kit case — nouveau errors; we fall through to the
+         * last sig which matches nova-core's behavior. */
+        sig_index = sig_count > 0 ? (uint32_t)sig_count - 1u : 0u;
+    } else {
+        uint32_t reg_bit      = 1u << fls32(fuse_reg);
+        uint32_t working_sigv = sig_versions;
+        if (!(reg_bit & working_sigv)) goto fail_free;    /* no matching sig */
+        while (!(reg_bit & working_sigv & 1u)) {
+            sig_index += working_sigv & 1u;
+            reg_bit    >>= 1;
+            working_sigv >>= 1;
+        }
+    }
+    if (sig_index >= sig_count) sig_index = sig_count - 1;
+    b->diag_sig_index = sig_index;
+
     if (b->fwsec_sigs_size < sig_size * (sig_index + 1)) goto fail_free;
     if (b->fwsec_pkc_data_off + sig_size > b->dma_dmem_size) goto fail_free;
+
     memcpy((uint8_t *)b->dma_dmem_va + b->fwsec_pkc_data_off,
            b->fwsec_sigs + sig_index * sig_size,
            sig_size);
@@ -261,8 +359,11 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     if (falcon_dma_upload(&b->gsp_flcn, b->dma_dmem_iova,
                           0, dmem_aligned, false) < 0) goto fail_free;
 
-    /* Clear MAILBOX0/1 — nouveau passes mbox0=0 for FWSEC. */
-    gsp_platform->write32(NV_PGSP_BASE + FALCON_MAILBOX0, 0);
+    /* MAILBOX0 sentinel — nouveau writes 0xCAFEBEEF when caller
+     * passes no value. Post-boot state is then diagnosable: 0 =
+     * FWSEC ran and cleared the mailbox; 0xCAFEBEEF = ucode never
+     * executed. MAILBOX1 stays 0. */
+    gsp_platform->write32(NV_PGSP_BASE + FALCON_MAILBOX0, FWSEC_MBOX0_SENTINEL);
     gsp_platform->write32(NV_PGSP_BASE + FALCON_MAILBOX1, 0);
 
     /* Heavy-signed boot. GSP Falcon BROM is at 0x111000 (the RISC-V
