@@ -97,9 +97,13 @@ is what the plan asks for, but see finding #2 below for the followup.
    computing `ticks * 1e9 / freq`: on i7-6700 with a ~3.4 GHz TSC,
    `ticks` exceeds `UINT64_MAX / 1e9 ≈ 1.84e10` after ~5 s of uptime,
    so the multiply wraps before the divide. Wall-clock behavior is
-   fine (verified above); only the display is wrong. Fix is a
-   mulshift (Barrett-style) or a `__uint128_t` intermediate.
-   **Filed as a follow-up issue.**
+   fine (verified above); only the display is wrong.
+   **Fixed 2026-04-15** (#171): split the computation into
+   `secs * 1e9 + (frac_ticks * 1e9) / freq` — both multiplies
+   bounded for any realistic uptime on supported timer frequencies.
+   Pure helper `slm_time_ticks_to_ns()` extracted so the overflow
+   boundary is unit-testable (`test_slm_time_ticks_to_ns_no_overflow`
+   in `test_scheduler.c`).
 
 2. **`bench smp` completion wait is ARM64-only** — the per-CPU done
    flags live in NC memory; x86-64 prints "(NC memory required)" and

@@ -1718,6 +1718,49 @@ static void test_timer_irq_is_physical(void)
     TEST_ASSERT_EQUAL_INT(30, TIMER_IRQ);
 }
 
+/*
+ * #171: slm_time_ticks_to_ns must not overflow for realistic uptimes
+ * on any supported timer frequency. The naive `ticks * 1e9 / freq`
+ * wraps on x86-64 TSC (~3.4 GHz) after roughly 5.4 seconds.
+ */
+static void test_slm_time_ticks_to_ns_no_overflow(void)
+{
+    extern uint64_t slm_time_ticks_to_ns(uint64_t ticks, uint64_t freq);
+
+    /* Sanity: zero ticks is zero nanoseconds, any freq. */
+    TEST_ASSERT_EQUAL_UINT64(0, slm_time_ticks_to_ns(0, 62500000ULL));
+    TEST_ASSERT_EQUAL_UINT64(0, slm_time_ticks_to_ns(0, 3400000000ULL));
+    /* Zero freq → zero (defensive — slm_get_time_ns short-circuits). */
+    TEST_ASSERT_EQUAL_UINT64(0, slm_time_ticks_to_ns(1000, 0));
+
+    /* QEMU virt: 62.5 MHz, fast path (1e9 / 62.5e6 = 16 ns/tick). */
+    TEST_ASSERT_EQUAL_UINT64(16ULL, slm_time_ticks_to_ns(1, 62500000ULL));
+    TEST_ASSERT_EQUAL_UINT64(1000000000ULL,
+        slm_time_ticks_to_ns(62500000ULL, 62500000ULL));
+
+    /* x86-64 TSC ~3.4 GHz, general path with remainder.
+     * 10 seconds of uptime = 3.4e10 ticks; naive multiply would
+     * have overflowed u64 past 5.4 s. Post-fix the value must
+     * match 10e9 ns within the per-second rounding slop of the
+     * frac-tick division (< freq ns per integer second). */
+    uint64_t tsc_freq = 3400000000ULL;
+    uint64_t ns_10s = slm_time_ticks_to_ns(10ULL * tsc_freq, tsc_freq);
+    TEST_ASSERT_TRUE(ns_10s >= 9999999900ULL && ns_10s <= 10000000100ULL);
+
+    /* 60 seconds at the same TSC — well past the 5.4 s overflow
+     * boundary reported in #171. Monotonicity and magnitude must
+     * both hold. */
+    uint64_t ns_60s = slm_time_ticks_to_ns(60ULL * tsc_freq, tsc_freq);
+    TEST_ASSERT_TRUE(ns_60s > ns_10s);
+    TEST_ASSERT_TRUE(ns_60s >= 59999999400ULL && ns_60s <= 60000000600ULL);
+
+    /* Monotonicity across a tick boundary at high uptime. */
+    uint64_t big = 100ULL * tsc_freq + 12345ULL;
+    TEST_ASSERT_TRUE(
+        slm_time_ticks_to_ns(big + 1, tsc_freq) >=
+        slm_time_ticks_to_ns(big, tsc_freq));
+}
+
 /* ============================================================================
  * Spinlock Hardware Mode Tests (post-MMU)
  *
@@ -3419,6 +3462,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_timer_counter_advances);
     RUN_TEST(test_timer_frequency_reasonable);
     RUN_TEST(test_timer_irq_is_physical);
+    RUN_TEST(test_slm_time_ticks_to_ns_no_overflow);
 
     /* Spinlock hardware mode tests (post-MMU) */
     RUN_TEST(test_spinlock_hw_enabled_after_boot);
