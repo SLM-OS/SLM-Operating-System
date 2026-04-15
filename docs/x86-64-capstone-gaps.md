@@ -23,11 +23,13 @@ Concrete next actions at the bottom of the document.
 
 ---
 
-## Closure Log (2026-04-13)
+## Closure Log (2026-04-15)
 
-Phases A–D of the gap-closure plan are implemented on branch
-`worktree-x86-64-capstone-impl` (not yet merged — contains the full
-capstone-scope work). Status of every gap:
+Phases A–D of the gap-closure plan landed on `main` via PR #135.
+Phase E E1–E3.4 (scaffolding) shipped via PRs #146, #159, #162, #165.
+Phase E E3.4 audit + E3.4.d (Booter Load on SEC2) + E3.4.e (GSP
+RISC-V startup) + E4 (RPC ring skeleton) shipped on
+`worktree-x86-64-capstone-gap-work`. Status of every gap:
 
 | Gap | Status | Shipped as |
 |---|---|---|
@@ -43,7 +45,7 @@ capstone-scope work). Status of every gap:
 | P2-4 Periodic rebalance | ✅ CLOSED | `sched_rebalance_tick()` in `sched.c` wired via `sched_heuristic.c` `.tick`. Tests: `test_rebalance_respects_affinity`, `test_rebalance_symbol_exposed`. |
 | P2-5 Coupled with P2-1 | ✅ CLOSED | Same fix. |
 | P3-1 x86-64 CPU SSE | ✅ CLOSED | `kernel/arch/x86_64/sse_kernels.c` (compiled `-msse -msse2`) + extern-C FFI from `ops.rs`. Bit-exact tests `test_sse_{relu,zero,add_scalar,fma_row}_matches_scalar`. |
-| P3-2 / P3-3 / P3-4 GSP firmware | ⏸️ POST-CAPSTONE | Phase E remains explicitly out-of-scope. |
+| P3-2 / P3-3 / P3-4 GSP firmware | 🚧 IN PROGRESS | E1, E2, E2.5, E3.1, E3.2, E3.3, E3.4 (scaffolding + audit fixes), E3.4.d (Booter Load), E3.4.e (RISC-V startup), and E4 RPC skeleton shipped. Outstanding: hardware re-test of FWSEC after the BOOTVEC=0 + CPUCTL_ALIAS fixes; full WprMeta layout; RPC marshalling + GSP_INIT_DONE wait. Tracked in #27. |
 | P3-5 Capability detection | ✅ CLOSED | `GpuCapabilities::detect()` already returns `DetectedNoCompute` gracefully. |
 
 Test count grew from 94 → ~120 in `kernel/tests/test_x86_boot.c`.
@@ -52,6 +54,16 @@ cascade from a pre-existing "Model memory init failed" at boot —
 unrelated to this work). ARM64 `make test` still PASSES cleanly.
 `make x86-disk-verify` all 9 checks PASS. End-to-end OVMF boot to
 `slmos>` shell with 4 CPUs online works.
+
+**Host-side test suites (Phase E, no GPU required):** 102 total.
+
+| Suite | Cases | Coverage |
+|---|---|---|
+| `make test-vbios` | 30 | VBIOS BIT parser, PCIR walker, FWSEC discovery |
+| `make test-falcon` | 30 | Falcon v4 register protocol — probe, reset/scrub, halt poll, DMA framing, **PIO IMEM/DMEM upload (E3.4.d)**, **CPUCTL.ALIAS_EN routing**, **pre-PIO setup**, HS-boot BROM sequence |
+| `make test-nvfw` | 14 | nvfw_bin_hdr / hs_header_v2 / hs_load_header_v2 framing |
+| `make test-bringup` | 19 | Sig-index algorithm, DMEMMAPPER patcher, **booter_load + riscv_start state-machine guards** |
+| `make test-rpc` | 15 | RPC ring math (page sizing, modular pointer advance, full/empty rule), shm region init/dtor, send-rejected-when-not-alive |
 
 ---
 

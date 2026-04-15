@@ -54,6 +54,30 @@ struct mock_engine {
     uint32_t last_dma_moffs;
     uint32_t last_dma_fboffs;
     uint32_t last_dma_cmd;
+
+    /* CPUCTL.ALIAS_EN simulation. When true, reads of CPUCTL set
+     * the ALIAS_EN bit (mocking the BROM-handed-off state). The
+     * driver must then route STARTCPU through CPUCTL_ALIAS rather
+     * than CPUCTL — we capture which path was actually used. */
+    bool     alias_en;
+    uint32_t startcpu_via_cpuctl;       /* count of writes to 0x100 */
+    uint32_t startcpu_via_cpuctl_alias; /* count of writes to 0x130 */
+
+    /* PIO IMEM/DMEM upload capture — a few hundred 4-byte slots so
+     * tests can read back what the driver streamed through the data
+     * port. The mock auto-increments because IMEMC/DMEMC AINCW=1. */
+    uint32_t imem_pio_ctrl;
+    uint32_t imem_pio_tag;
+    uint32_t imem_pio_words[1024];
+    uint32_t imem_pio_count;
+    uint32_t dmem_pio_ctrl;
+    uint32_t dmem_pio_words[1024];
+    uint32_t dmem_pio_count;
+
+    /* Pre-PIO setup capture: the driver should mask-set 0x624 bit 7
+     * and clear DMACTL (0x10c). */
+    uint32_t r0x624_after_setup;
+    bool     dmactl_cleared_in_pre_pio;
 };
 
 static struct mock_engine g_engines[4];
@@ -77,12 +101,15 @@ static uint32_t mock_read32(uint32_t addr)
     if (e) {
         uint32_t off = addr - e->base;
         switch (off) {
-        case FALCON_CPUCTL:
+        case FALCON_CPUCTL: {
             if (e->cpu_running && e->halt_after > 0) {
                 e->halt_after--;
                 if (e->halt_after == 0) e->cpu_running = false;
             }
-            return e->cpu_running ? 0 : FALCON_CPUCTL_HALTED;
+            uint32_t v = e->cpu_running ? 0 : FALCON_CPUCTL_HALTED;
+            if (e->alias_en) v |= FALCON_CPUCTL_ALIAS_EN;
+            return v;
+        }
         case FALCON_HWCFG: {
             uint32_t imem_blk = e->imem_size / FALCON_DMA_CHUNK;
             uint32_t dmem_blk = e->dmem_size / FALCON_DMA_CHUNK;
@@ -133,7 +160,46 @@ static void mock_write32(uint32_t addr, uint32_t v)
             }
             break;
         case FALCON_CPUCTL:
-            if (v & FALCON_CPUCTL_STARTCPU) e->cpu_running = true;
+            if (v & FALCON_CPUCTL_STARTCPU) {
+                e->cpu_running = true;
+                e->startcpu_via_cpuctl++;
+            }
+            break;
+        case FALCON_CPUCTL_ALIAS:
+            if (v & FALCON_CPUCTL_STARTCPU) {
+                e->cpu_running = true;
+                e->startcpu_via_cpuctl_alias++;
+            }
+            break;
+        case FALCON_DMACTL:
+            if (v == 0) e->dmactl_cleared_in_pre_pio = true;
+            break;
+        /* Pre-PIO/DMA setup capture: 0x624 mask-set bit 7. */
+        case 0x624:
+            e->r0x624_after_setup = v;
+            break;
+        /* PIO IMEM port 0 — three registers (IMEMC/IMEMT/IMEMD)
+         * followed by a stream of u32 writes to IMEMD. AINCW=1 auto-
+         * increments, so we just append each IMEMD write. */
+        case FALCON_IMEMC(0):
+            e->imem_pio_ctrl = v;
+            break;
+        case FALCON_IMEMT(0):
+            e->imem_pio_tag = v;
+            break;
+        case FALCON_IMEMD(0):
+            if (e->imem_pio_count <
+                sizeof(e->imem_pio_words) / sizeof(e->imem_pio_words[0]))
+                e->imem_pio_words[e->imem_pio_count++] = v;
+            break;
+        /* PIO DMEM port 0. */
+        case FALCON_DMEMC(0):
+            e->dmem_pio_ctrl = v;
+            break;
+        case FALCON_DMEMD(0):
+            if (e->dmem_pio_count <
+                sizeof(e->dmem_pio_words) / sizeof(e->dmem_pio_words[0]))
+                e->dmem_pio_words[e->dmem_pio_count++] = v;
             break;
         case FALCON_BOOTVEC:
             e->last_bootvec = v;
@@ -486,6 +552,197 @@ static void test_hs_boot_rejects_non_idle(void)
     REQUIRE(falcon_hs_boot(&f, NV_PSEC2_BROM_BASE, 0, 0, 0, 0, 100) < 0);
 }
 
+/* ---- ALIAS_EN routing test (regression for the BROM-handoff bug) ----
+ *
+ * After the BROM finishes verifying an HS ucode, CPUCTL.ALIAS_EN
+ * (bit 6) is set and STARTCPU writes to CPUCTL (0x100) are gated.
+ * The driver must route through CPUCTL_ALIAS (0x130) instead.
+ * This is the second of two bugs found in the FWSEC audit.
+ */
+static void test_start_uses_cpuctl_alias_when_en_set(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PGSP_BASE, 0x10000, 0x10000, true);
+    e->alias_en = true;     /* mock the BROM-handed-off state */
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PGSP_BASE) == 0);
+    falcon_start(&f, 0x42);
+    /* Driver must have written STARTCPU to CPUCTL_ALIAS, not CPUCTL. */
+    REQUIRE(e->startcpu_via_cpuctl_alias == 1);
+    REQUIRE(e->startcpu_via_cpuctl == 0);
+    REQUIRE(e->last_bootvec == 0x42);
+}
+
+static void test_start_uses_cpuctl_when_alias_clear(void)
+{
+    /* Existing path: ALIAS_EN clear → write CPUCTL as before. The
+     * stock test_start_writes_bootvec_and_starts already covers
+     * this, but we re-assert here to make the contract symmetric. */
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PGSP_BASE, 0x10000, 0x10000, true);
+    /* alias_en defaults false. */
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PGSP_BASE) == 0);
+    falcon_start(&f, 0x100);
+    REQUIRE(e->startcpu_via_cpuctl == 1);
+    REQUIRE(e->startcpu_via_cpuctl_alias == 0);
+}
+
+/* ---- pre_pio_setup test ---- */
+
+static void test_pre_pio_setup_writes_correct_regs(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    /* Pre-seed 0x624 with bit 0 set; pre_pio_setup must mask-set
+     * bit 7 without clearing other bits. */
+    g_bar0[(NV_PSEC2_BASE + 0x624) / 4] = 0x01;
+    falcon_pre_pio_setup(&f);
+    REQUIRE(e->r0x624_after_setup == 0x81);     /* 0x01 | 0x80 */
+    REQUIRE(e->dmactl_cleared_in_pre_pio);
+}
+
+/* ---- PIO upload tests ----
+ *
+ * Cover alignment + bounds rejection, the IMEMC/IMEMT/IMEMD register
+ * sequence, the SECURE bit, and that bytes stream through in the
+ * declared little-endian-u32 order.
+ */
+
+static void test_pio_imem_rejects_misaligned_offset(void)
+{
+    reset_mock();
+    add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    uint8_t src[16] = { 0 };
+    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src), 0x123, false) < 0);
+}
+
+static void test_pio_imem_rejects_misaligned_length(void)
+{
+    reset_mock();
+    add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    uint8_t src[10] = { 0 };
+    REQUIRE(falcon_pio_upload_imem(&f, src, 10, 0, false) < 0);
+}
+
+static void test_pio_imem_rejects_overflow(void)
+{
+    reset_mock();
+    add_engine(NV_PSEC2_BASE, 0x1000, 0x1000, false);   /* 4 KB IMEM */
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    uint8_t src[16] = { 0 };
+    /* Tail past IMEM end. */
+    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src), 0xFF8, false) < 0);
+}
+
+static void test_pio_imem_writes_words_in_order(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    /* 12 bytes = 3 words, distinct LE patterns so we can confirm
+     * the assembly order. */
+    uint8_t src[12] = { 0x01, 0x02, 0x03, 0x04,
+                         0xAA, 0xBB, 0xCC, 0xDD,
+                         0xFF, 0x00, 0x55, 0xAA };
+    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src),
+                                   /*falcon_off*/ 0x100,
+                                   /*is_secure*/ false) == 0);
+    REQUIRE(e->imem_pio_count == 3);
+    REQUIRE(e->imem_pio_words[0] == 0x04030201u);
+    REQUIRE(e->imem_pio_words[1] == 0xDDCCBBAAu);
+    REQUIRE(e->imem_pio_words[2] == 0xAA5500FFu);
+    /* IMEMC must carry AINCW + the target offset in the low 24 bits. */
+    REQUIRE((e->imem_pio_ctrl & (1u << 24)) != 0);
+    REQUIRE((e->imem_pio_ctrl & 0x00FFFFFFu) == 0x100);
+    /* SECURE bit 28 clear because we passed false. */
+    REQUIRE((e->imem_pio_ctrl & (1u << 28)) == 0);
+    /* IMEMT == falcon_off >> 8 (page tag). */
+    REQUIRE(e->imem_pio_tag == (0x100u >> 8));
+}
+
+static void test_pio_imem_secure_sets_bit28(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    uint8_t src[4] = { 0 };
+    REQUIRE(falcon_pio_upload_imem(&f, src, 4, 0x200, /*is_secure*/ true) == 0);
+    REQUIRE((e->imem_pio_ctrl & (1u << 28)) != 0);
+}
+
+static void test_pio_dmem_writes_words_in_order(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    uint8_t src[8] = { 0xDE, 0xAD, 0xBE, 0xEF,
+                        0xCA, 0xFE, 0xBA, 0xBE };
+    REQUIRE(falcon_pio_upload_dmem(&f, src, sizeof(src), 0x80) == 0);
+    REQUIRE(e->dmem_pio_count == 2);
+    REQUIRE(e->dmem_pio_words[0] == 0xEFBEADDEu);
+    REQUIRE(e->dmem_pio_words[1] == 0xBEBAFECAu);
+    REQUIRE((e->dmem_pio_ctrl & (1u << 24)) != 0);
+    REQUIRE((e->dmem_pio_ctrl & 0x00FFFFFFu) == 0x80);
+}
+
+static void test_pio_dmem_rejects_misaligned(void)
+{
+    reset_mock();
+    add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    uint8_t src[10] = { 0 };
+    REQUIRE(falcon_pio_upload_dmem(&f, src, 10, 0) < 0);
+    REQUIRE(falcon_pio_upload_dmem(&f, src, 8, 0x123) < 0);
+}
+
+static void test_pio_zero_len_succeeds(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    uint8_t src[4] = { 0 };
+    REQUIRE(falcon_pio_upload_imem(&f, src, 0, 0, false) == 0);
+    REQUIRE(falcon_pio_upload_dmem(&f, src, 0, 0) == 0);
+    /* No port writes for zero-length uploads. */
+    REQUIRE(e->imem_pio_count == 0);
+    REQUIRE(e->dmem_pio_count == 0);
+}
+
+static void test_pio_uninitialized_rejects(void)
+{
+    reset_mock();
+    struct falcon f = { 0 };    /* not probed */
+    uint8_t src[4] = { 0 };
+    REQUIRE(falcon_pio_upload_imem(&f, src, 4, 0, false) < 0);
+    REQUIRE(falcon_pio_upload_dmem(&f, src, 4, 0) < 0);
+    /* pre_pio_setup is void — must no-op cleanly. */
+    falcon_pre_pio_setup(&f);
+}
+
 int main(void)
 {
     test_probe_gsp_falcon();
@@ -507,6 +764,18 @@ int main(void)
     test_hs_boot_programs_brom_and_starts();
     test_hs_boot_rejects_non_idle();
     test_hs_boot_times_out_when_never_halts();
+    test_start_uses_cpuctl_alias_when_en_set();
+    test_start_uses_cpuctl_when_alias_clear();
+    test_pre_pio_setup_writes_correct_regs();
+    test_pio_imem_rejects_misaligned_offset();
+    test_pio_imem_rejects_misaligned_length();
+    test_pio_imem_rejects_overflow();
+    test_pio_imem_writes_words_in_order();
+    test_pio_imem_secure_sets_bit28();
+    test_pio_dmem_writes_words_in_order();
+    test_pio_dmem_rejects_misaligned();
+    test_pio_zero_len_succeeds();
+    test_pio_uninitialized_rejects();
 
     if (failures == 0) {
         printf("test_falcon: all tests PASS\n");

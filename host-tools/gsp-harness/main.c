@@ -56,6 +56,10 @@ static void usage(const char *argv0)
 "                   Confirms E3.2 DMA plumbing works end-to-end.\n"
 "  --fwsec-frts     Run FWSEC-FRTS on GSP Falcon. First real GSP-RM\n"
 "                   bringup step — sets up the WPR2 region in FB.\n"
+"  --booter-load    Run Booter Load on SEC2 (E3.4.d). Requires that\n"
+"                   --fwsec-frts succeeded; reuses the WPR2 setup.\n"
+"  --riscv-start    Flip GSP into RISC-V mode and start the core\n"
+"                   (E3.4.e). Requires Booter Load completed.\n"
 "  --phase N        Attempt GSP bringup phase N only (0..7).\n"
 "  --bringup        Run full gsp_init() — phases 0 through 7.\n"
 "\n"
@@ -78,7 +82,8 @@ int main(int argc, char **argv)
     const char *chip     = "ga107";
     bool trace           = false;
     enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_FALCONS, ACT_DMA_TEST,
-           ACT_FWSEC_FRTS, ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
+           ACT_FWSEC_FRTS, ACT_BOOTER_LOAD, ACT_RISCV_START,
+           ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
     int phase = -1;
 
     for (int i = 1; i < argc; i++) {
@@ -88,7 +93,9 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--vbios") == 0) { action = ACT_VBIOS; }
         else if (strcmp(a, "--falcons") == 0) { action = ACT_FALCONS; }
         else if (strcmp(a, "--dma-test") == 0) { action = ACT_DMA_TEST; }
-        else if (strcmp(a, "--fwsec-frts") == 0) { action = ACT_FWSEC_FRTS; }
+        else if (strcmp(a, "--fwsec-frts") == 0)  { action = ACT_FWSEC_FRTS; }
+        else if (strcmp(a, "--booter-load") == 0) { action = ACT_BOOTER_LOAD; }
+        else if (strcmp(a, "--riscv-start") == 0) { action = ACT_RISCV_START; }
         else if (strcmp(a, "--bringup") == 0) { action = ACT_BRINGUP; }
         else if (strcmp(a, "--trace") == 0) { trace = true; }
         else if (strcmp(a, "--phase") == 0 && i + 1 < argc) {
@@ -335,6 +342,69 @@ int main(int argc, char **argv)
         uint32_t wpr_hi = gsp_platform->read32(0x001fa828);
         printf("                WPR2_LO = 0x%08x\n                WPR2_HI = 0x%08x\n",
                wpr_lo, wpr_hi);
+        return 0;
+    }
+    case ACT_BOOTER_LOAD: {
+        /* Runs the full FWSEC-FRTS → Booter Load chain. The booter
+         * is gated on FWSEC-FRTS having set up WPR2; running it
+         * standalone would fail with an obscure SEC2 hang because
+         * SEC2's first action is to dereference WPR2. */
+        struct gsp_bringup b;
+        if (gsp_bringup_prepare(&b) < 0) {
+            printf("[GSP-HARNESS] bringup prepare FAILED\n"); return 1;
+        }
+        if (gsp_bringup_fwsec_frts(&b) < 0) {
+            printf("[GSP-HARNESS] FWSEC-FRTS FAILED at phase %u — "
+                   "see --fwsec-frts for full diagnostics\n", b.last_error_phase);
+            return 1;
+        }
+        printf("[GSP-HARNESS] FWSEC-FRTS ok (WPR2 set), running Booter Load…\n");
+        int rc = gsp_bringup_booter_load(&b);
+        if (rc < 0) {
+            printf("[GSP-HARNESS] Booter Load FAILED at phase %u\n",
+                   b.last_error_phase);
+            uint32_t cpuctl = gsp_platform->read32(0x00840100);
+            uint32_t mbox0  = gsp_platform->read32(0x00840040);
+            uint32_t mbox1  = gsp_platform->read32(0x00840044);
+            printf("                SEC2 CPUCTL=0x%08x (halted=%d) "
+                   "MBOX0=0x%08x MBOX1=0x%08x\n",
+                   cpuctl, !!(cpuctl & 0x10), mbox0, mbox1);
+            return 1;
+        }
+        printf("[GSP-HARNESS] Booter Load halted ok — MAILBOX0 post = 0x%08x\n",
+               b.booter_mbox0_post);
+        printf("                (0 == nominal completion; non-zero == "
+               "booter halted with status — common when WprMeta is "
+               "incomplete pending E4)\n");
+        return 0;
+    }
+    case ACT_RISCV_START: {
+        /* Full chain through E3.4.e. Will fail at riscv_start unless
+         * the booter populated WPR2 with a usable GSP-RM image — which
+         * itself depends on a fully-formed WprMeta (E4 work). */
+        struct gsp_bringup b;
+        if (gsp_bringup_prepare(&b) < 0) {
+            printf("[GSP-HARNESS] bringup prepare FAILED\n"); return 1;
+        }
+        if (gsp_bringup_fwsec_frts(&b) < 0) {
+            printf("[GSP-HARNESS] FWSEC-FRTS FAILED at phase %u\n",
+                   b.last_error_phase); return 1;
+        }
+        if (gsp_bringup_booter_load(&b) < 0) {
+            printf("[GSP-HARNESS] Booter Load FAILED at phase %u\n",
+                   b.last_error_phase); return 1;
+        }
+        int rc = gsp_bringup_riscv_start(&b);
+        if (rc < 0) {
+            printf("[GSP-HARNESS] RISC-V start FAILED at phase %u\n",
+                   b.last_error_phase);
+            uint32_t bcr = gsp_platform->read32(0x00111668);
+            uint32_t cc  = gsp_platform->read32(0x00111388);
+            printf("                BCR_CTRL=0x%08x RISCV_CPUCTL=0x%08x\n",
+                   bcr, cc);
+            return 1;
+        }
+        printf("[GSP-HARNESS] RISC-V active ✓ — GSP_INIT_DONE wait owned by E4\n");
         return 0;
     }
     case ACT_PHASE: {

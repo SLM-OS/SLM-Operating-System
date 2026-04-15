@@ -126,7 +126,18 @@ void falcon_start(struct falcon *f, uint32_t boot_pc)
     if (!f || !f->initialized) return;
     flcn_w32(f, FALCON_BOOTVEC, boot_pc);
     gsp_platform->mb();
-    flcn_w32(f, FALCON_CPUCTL, FALCON_CPUCTL_STARTCPU);
+
+    /* When BROM has handed control to the engine, CPUCTL.ALIAS_EN
+     * (bit 6) is set and STARTCPU writes via 0x100 are gated. The
+     * release path is CPUCTL_ALIAS (0x130). nova-core does this
+     * check on every start; nouveau gets away with always writing
+     * 0x100 because BROM-gated cases happen to clear quickly on the
+     * cards it tests, but the contract is "honour ALIAS_EN". */
+    uint32_t cpuctl = flcn_r32(f, FALCON_CPUCTL);
+    if (cpuctl & FALCON_CPUCTL_ALIAS_EN)
+        flcn_w32(f, FALCON_CPUCTL_ALIAS, FALCON_CPUCTL_STARTCPU);
+    else
+        flcn_w32(f, FALCON_CPUCTL, FALCON_CPUCTL_STARTCPU);
     gsp_platform->mb();
 }
 
@@ -275,4 +286,80 @@ falcon_riscv_cpuctl(const struct falcon *f)
 {
     if (!f->has_riscv) return 0xFFFFFFFFu;
     return riscv_r32(f, FALCON_RISCV_CPUCTL);
+}
+
+void falcon_pre_pio_setup(struct falcon *f)
+{
+    if (!f || !f->initialized) return;
+
+    /* Mask-set 0x624 bit 7 (same gate the DMA path opens). */
+    uint32_t v = flcn_r32(f, FALCON_PRE_DMA_624);
+    flcn_w32(f, FALCON_PRE_DMA_624, v | FALCON_PRE_DMA_624_BIT);
+
+    /* Clear DMACTL — REQUIRE_CTX off, scrub bits are RO. */
+    flcn_w32(f, FALCON_DMACTL, 0);
+    gsp_platform->mb();
+}
+
+/* IMEMC bits — see dev_falcon_v4.h. */
+#define FALCON_IMEMC_AINCW        (1u << 24)
+#define FALCON_IMEMC_SECURE       (1u << 28)
+/* DMEMC bits. */
+#define FALCON_DMEMC_AINCW        (1u << 24)
+
+int falcon_pio_upload_imem(struct falcon *f, const uint8_t *src,
+                           uint32_t len, uint32_t falcon_off, bool is_secure)
+{
+    if (!f || !f->initialized || !src) return -1;
+    if ((falcon_off & 3u) != 0 || (len & 3u) != 0) return -1;
+    if (falcon_off + len > f->imem_size) return -1;
+    if (len == 0) return 0;
+
+    /* IMEMC port 0: AINCW=1 (auto-increment write addr), set OFFS+BLK
+     * to falcon_off. SECURE bit enters secure IMEM aperture. */
+    uint32_t ctrl = FALCON_IMEMC_AINCW | (falcon_off & 0x00FFFFFFu);
+    if (is_secure) ctrl |= FALCON_IMEMC_SECURE;
+    flcn_w32(f, FALCON_IMEMC(0), ctrl);
+
+    /* IMEMT — instruction-page tag (PC>>8). Falcon uses this to
+     * map IMEM blocks to virtual instruction addresses; for PIO
+     * upload of a flat ucode at falcon_off, the tag matches. */
+    flcn_w32(f, FALCON_IMEMT(0), falcon_off >> 8);
+    gsp_platform->mb();
+
+    /* Stream u32 words. Source is little-endian on disk; assemble
+     * explicitly so a misaligned host pointer works (the booter
+     * blob's IMEM section is u32-aligned in practice but we don't
+     * want to assume that on every platform). */
+    for (uint32_t i = 0; i < len; i += 4) {
+        uint32_t w = (uint32_t)src[i + 0]
+                   | ((uint32_t)src[i + 1] <<  8)
+                   | ((uint32_t)src[i + 2] << 16)
+                   | ((uint32_t)src[i + 3] << 24);
+        flcn_w32(f, FALCON_IMEMD(0), w);
+    }
+    gsp_platform->mb();
+    return 0;
+}
+
+int falcon_pio_upload_dmem(struct falcon *f, const uint8_t *src,
+                           uint32_t len, uint32_t falcon_off)
+{
+    if (!f || !f->initialized || !src) return -1;
+    if ((falcon_off & 3u) != 0 || (len & 3u) != 0) return -1;
+    if (falcon_off + len > f->dmem_size) return -1;
+    if (len == 0) return 0;
+
+    flcn_w32(f, FALCON_DMEMC(0), FALCON_DMEMC_AINCW | (falcon_off & 0x00FFFFFFu));
+    gsp_platform->mb();
+
+    for (uint32_t i = 0; i < len; i += 4) {
+        uint32_t w = (uint32_t)src[i + 0]
+                   | ((uint32_t)src[i + 1] <<  8)
+                   | ((uint32_t)src[i + 2] << 16)
+                   | ((uint32_t)src[i + 3] << 24);
+        flcn_w32(f, FALCON_DMEMD(0), w);
+    }
+    gsp_platform->mb();
+    return 0;
 }

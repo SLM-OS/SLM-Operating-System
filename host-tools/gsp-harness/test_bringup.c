@@ -317,6 +317,50 @@ static void test_patch_skips_non_dmemmapper_entries(void)
     REQUIRE(rd32(dmem + 0x180 + 0x2c) == 0);
 }
 
+/* ---- State-machine guard tests ----
+ *
+ * Both gsp_bringup_booter_load and gsp_bringup_riscv_start are
+ * driven by `b->state`; calling them out of order — the only fast-
+ * to-detect bringup mistake — must fail-closed before any hardware
+ * is touched. These tests verify the state guards work without
+ * requiring a populated platform vtable.
+ */
+
+static void test_booter_load_refuses_pre_fwsec(void)
+{
+    struct gsp_bringup b;
+    memset(&b, 0, sizeof(b));
+    b.state = GSP_BRINGUP_INIT;     /* not FWSEC_FRTS_DONE yet */
+    /* Without FWSEC having set up WPR2, booter would dereference
+     * uninitialized FB. The guard must catch this. */
+    REQUIRE(gsp_bringup_booter_load(&b) < 0);
+    /* State should NOT advance to BOOTER_LOAD_DONE. */
+    REQUIRE(b.state != GSP_BRINGUP_BOOTER_LOAD_DONE);
+}
+
+static void test_riscv_start_refuses_pre_booter(void)
+{
+    struct gsp_bringup b;
+    memset(&b, 0, sizeof(b));
+    b.state = GSP_BRINGUP_FWSEC_FRTS_DONE;     /* WPR2 set, but no booter */
+    REQUIRE(gsp_bringup_riscv_start(&b) < 0);
+    REQUIRE(b.state != GSP_BRINGUP_RISCV_RUNNING);
+}
+
+static void test_riscv_start_refuses_init_state(void)
+{
+    struct gsp_bringup b;
+    memset(&b, 0, sizeof(b));
+    b.state = GSP_BRINGUP_INIT;
+    REQUIRE(gsp_bringup_riscv_start(&b) < 0);
+}
+
+static void test_null_args_rejected(void)
+{
+    REQUIRE(gsp_bringup_booter_load(NULL) < 0);
+    REQUIRE(gsp_bringup_riscv_start(NULL) < 0);
+}
+
 int main(void)
 {
     /* Sig-index algorithm */
@@ -337,6 +381,12 @@ int main(void)
     test_patch_rejects_interface_off_past_end();
     test_patch_rejects_cmd_buf_overflow();
     test_patch_skips_non_dmemmapper_entries();
+
+    /* State-machine guards (E3.4.d / E3.4.e) */
+    test_booter_load_refuses_pre_fwsec();
+    test_riscv_start_refuses_pre_booter();
+    test_riscv_start_refuses_init_state();
+    test_null_args_rejected();
 
     if (failures == 0) {
         printf("test_bringup: all tests PASS\n");

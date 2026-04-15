@@ -290,4 +290,44 @@ int falcon_select_falcon_mode(struct falcon *f);
  */
 void falcon_pre_dma_setup(struct falcon *f);
 
+/*
+ * Pre-PIO setup: matches the `else` branch of nouveau's
+ * `gm200_flcn_fw_load`. Two register writes before the booter
+ * (PIO-loaded HS ucode) is uploaded to SEC2:
+ *
+ *   falcon[0x624] |= 0x80   // mask-set bit 7
+ *   falcon[0x10c]  = 0      // clear DMACTL
+ *
+ * Notably no FBIF_TRANSCFG (0x600) — PIO doesn't go through FBIF.
+ * Safe on any Ampere Falcon.
+ */
+void falcon_pre_pio_setup(struct falcon *f);
+
+/*
+ * PIO upload bytes from system memory into Falcon IMEM via the
+ * IMEMC/IMEMT/IMEMD register triplet at port 0.
+ *
+ * @src         pointer to source bytes (host memory; no DMA needed).
+ * @len         number of bytes to copy. Must be a multiple of 4.
+ * @falcon_off  byte offset within IMEM to upload to. Must be 4-byte
+ *              aligned. The "tag" written to IMEMT is `falcon_off >> 8`
+ *              — same convention nouveau uses (instruction-page tag).
+ * @is_secure   when true, sets IMEMC.SECURE (bit 28) so the upload
+ *              targets the secure IMEM region. Booter has both a
+ *              non-secure section (false) and a secure section (true).
+ *
+ * No completion polling — IMEMD writes complete synchronously on the
+ * PRI bus. Returns 0 on success, -1 on alignment violation.
+ */
+int falcon_pio_upload_imem(struct falcon *f, const uint8_t *src,
+                           uint32_t len, uint32_t falcon_off, bool is_secure);
+
+/*
+ * PIO upload bytes from system memory into Falcon DMEM via the
+ * DMEMC/DMEMD register pair at port 0. Same constraints as
+ * falcon_pio_upload_imem but DMEM has no secure-bit and no tag.
+ */
+int falcon_pio_upload_dmem(struct falcon *f, const uint8_t *src,
+                           uint32_t len, uint32_t falcon_off);
+
 #endif /* GPU_NVIDIA_FALCON_H */

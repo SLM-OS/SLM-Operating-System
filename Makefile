@@ -193,7 +193,8 @@ GSP_HARNESS_SRCS := \
     kernel/gpu/nvidia/nvidia_vbios.c \
     kernel/gpu/nvidia/falcon.c \
     kernel/gpu/nvidia/nvfw.c \
-    kernel/gpu/nvidia/bringup.c
+    kernel/gpu/nvidia/bringup.c \
+    kernel/gpu/nvidia/rpc.c
 
 # Native CFLAGS — these differ substantially from the bare-metal
 # kernel build. The shared GSP core uses `uart_puts`, `uart_printf`
@@ -263,6 +264,7 @@ test-bringup:
 	    host-tools/gsp-harness/test_bringup.c \
 	    kernel/gpu/nvidia/bringup.c \
 	    kernel/gpu/nvidia/falcon.c \
+	    kernel/gpu/nvidia/nvfw.c \
 	    kernel/gpu/nvidia/nvidia_vbios.c \
 	    kernel/gpu/nvidia/gsp.c
 	@./build/host-tools/test_bringup
@@ -282,6 +284,22 @@ test-falcon:
 	    kernel/gpu/nvidia/falcon.c \
 	    kernel/gpu/nvidia/gsp.c
 	@./build/host-tools/test_falcon
+
+# GSP-RM RPC ring helper tests — pure ring-pointer arithmetic plus
+# a mock-vtable channel init. Hardware integration runs once GSP-RM
+# is alive (post-E3.4.e).
+.PHONY: test-rpc
+test-rpc:
+	@mkdir -p build/host-tools
+	@echo "Building + running RPC ring tests..."
+	$(CC) -std=c11 -Wall -Wextra -O2 -g \
+	    -Ihost-tools/gsp-harness -Ikernel/gpu/nvidia \
+	    -DSLM_HOST_HARNESS=1 \
+	    -o build/host-tools/test_rpc \
+	    host-tools/gsp-harness/test_rpc.c \
+	    kernel/gpu/nvidia/rpc.c \
+	    kernel/gpu/nvidia/gsp.c
+	@./build/host-tools/test_rpc
 
 # ============================================================================
 # Runtime (Rust) targets
