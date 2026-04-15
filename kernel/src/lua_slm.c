@@ -503,6 +503,54 @@ static int l_sched_policy(lua_State *L) {
     return 1;
 }
 
+/* ============================================================================
+ * Shell Integration Bindings
+ * ============================================================================ */
+
+/**
+ * slm.read_line() - Read one line from the shell's UART input.
+ *
+ * Blocks until the user presses Enter (or Ctrl+C, which yields an empty line).
+ * Returns the line as a string with the trailing newline stripped.
+ *
+ * Used by interactive Lua scripts (menus, prompts) so they can read user
+ * input without each script reimplementing line editing.
+ */
+static int l_read_line(lua_State *L) {
+    if (!L) return 0;
+    char buf[SHELL_MAX_LINE];
+    int n = shell_read_line(buf, (int)sizeof(buf));
+    if (n < 0) {
+        lua_pushnil(L);
+    } else {
+        lua_pushlstring(L, buf, (size_t)n);
+    }
+    return 1;
+}
+
+/**
+ * slm.shell_exec(cmd) - Run a shell command string and return its exit code.
+ *
+ * Dispatches `cmd` through the same parser the shell REPL uses, so anything
+ * the user could type (e.g. "bench smp", "tasks", "run test") works from
+ * Lua. Output goes to UART as it normally would. Returns the command's
+ * integer return value, or -1 if the command was not found / line too long.
+ *
+ * Validates the command length at the binding boundary so a too-long input
+ * raises a clean Lua error (with arg position) instead of falling through
+ * to shell_execute's UART warning.
+ */
+static int l_shell_exec(lua_State *L) {
+    if (!L) return 0;
+    size_t len;
+    const char *cmd = luaL_checklstring(L, 1, &len);
+    luaL_argcheck(L, len < SHELL_MAX_LINE, 1,
+                  "command exceeds SHELL_MAX_LINE");
+    int rc = shell_execute(cmd);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
 /* SLM library functions */
 static const luaL_Reg slm_lib[] = {
     {"print", l_print},
@@ -533,6 +581,9 @@ static const luaL_Reg slm_lib[] = {
     {"msg_publish_priority", l_msg_publish_priority},
     /* Scheduler */
     {"sched_policy", l_sched_policy},
+    /* Shell integration */
+    {"read_line", l_read_line},
+    {"shell_exec", l_shell_exec},
     {NULL, NULL}
 };
 

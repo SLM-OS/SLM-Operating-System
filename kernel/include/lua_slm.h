@@ -83,6 +83,10 @@ void lua_shell_init(void);
  *
  * Model memory:
  *   slm.model_stats()                 - Pool stats {weights={...}, workspace={...}}
+ *
+ * Shell integration:
+ *   slm.read_line()                   - Read one line from UART (blocks)
+ *   slm.shell_exec(cmd)               - Run a shell command, return exit code
  */
 
 #endif /* LUA_SLM_H */

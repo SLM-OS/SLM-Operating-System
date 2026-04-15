@@ -732,6 +732,87 @@ static void test_slm_sched_policy(void)
 }
 
 /*
+ * Test: slm.shell_exec runs a known-good command and returns 0.
+ */
+static void test_slm_shell_exec_success(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "rc = slm.shell_exec('uptime')\n"
+        "assert(type(rc) == 'number', 'shell_exec should return number')\n"
+        "assert(rc == 0, 'uptime should return 0')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.shell_exec on an unknown command returns non-zero.
+ */
+static void test_slm_shell_exec_unknown(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "rc = slm.shell_exec('definitely_not_a_command_xyz')\n"
+        "assert(type(rc) == 'number', 'shell_exec should return number')\n"
+        "assert(rc ~= 0, 'unknown command should return non-zero')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.shell_exec rejects a command longer than SHELL_MAX_LINE
+ * with a Lua-level argument error (caught via pcall).
+ */
+static void test_slm_shell_exec_too_long(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local long = string.rep('a', 4096)\n"
+        "local ok, err = pcall(slm.shell_exec, long)\n"
+        "assert(ok == false, 'should error on too-long command')\n"
+        "assert(type(err) == 'string', 'error should be a string')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.read_line is callable and returns a string.
+ *
+ * Cannot exercise the blocking read in QEMU automation without injecting
+ * UART input, so this only verifies the binding is wired up and produces
+ * a string-valued result. Behavioral coverage lives on real hardware.
+ */
+static void test_slm_read_line_callable(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(type(slm.read_line) == 'function',\n"
+        "       'slm.read_line should be a function')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
  * Test: demo.lua file exists on the filesystem after boot.
  * Verifies demo_init() successfully wrote the embedded script.
  */
@@ -1593,6 +1674,10 @@ int test_suite_lua(void)
     /* Message router and scheduler bindings (Phase 6) */
     RUN_TEST(test_slm_msg_publish);
     RUN_TEST(test_slm_sched_policy);
+    RUN_TEST(test_slm_shell_exec_success);
+    RUN_TEST(test_slm_shell_exec_unknown);
+    RUN_TEST(test_slm_shell_exec_too_long);
+    RUN_TEST(test_slm_read_line_callable);
     RUN_TEST(test_slm_model_load_find_infer);
     RUN_TEST(test_slm_model_pin_unpin);
     RUN_TEST(test_digit_classifier_preloads_model);
