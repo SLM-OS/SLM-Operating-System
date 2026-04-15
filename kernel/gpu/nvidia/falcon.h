@@ -101,8 +101,14 @@
 /* ---- HWCFG / HWCFG2 bits ---- */
 
 #define FALCON_HWCFG_IMEM_SIZE_MASK   0x1ffu    /* bits 8:0 — IMEM in blocks of 256 */
-#define FALCON_HWCFG_DMEM_SIZE_MASK   0x1ff0000u /* bits 24:16 — in blocks of 256 */
-#define FALCON_HWCFG_DMEM_SIZE_SHIFT  16u
+#define FALCON_HWCFG_DMEM_SIZE_MASK   0x3fe00u  /* bits 17:9 — DMEM in blocks of 256.
+                                                 * Matches nouveau nvkm_falcon_oneinit in
+                                                 * drivers/gpu/drm/nouveau/nvkm/falcon/base.c.
+                                                 * (Earlier 0x1ff0000 at bits 24:16 was wrong —
+                                                 * under-reported SEC2 DMEM as 16896 bytes
+                                                 * when it's actually 65536 on GA107, breaking
+                                                 * Booter Load at the PIO upload check.) */
+#define FALCON_HWCFG_DMEM_SIZE_SHIFT  9u
 #define FALCON_HWCFG2_RISCV_ENABLE    (1u << 10)
 #define FALCON_HWCFG2_MEM_SCRUBBING   (1u << 12)  /* 0 = scrub done */
 
@@ -283,6 +289,22 @@ int falcon_hs_kick(struct falcon *f,
                    uint32_t engine_id,
                    uint32_t ucode_id,
                    uint32_t boot_vec);
+
+/*
+ * True when the Falcon's control registers read back as NVIDIA's
+ * PRI-arbiter "priv-locked" poison pattern (0xbadfXXXX). This
+ * happens when the register's priv-level mask (PLM) is set higher
+ * than the bus master's access level — writes and reads are silently
+ * rejected and the arbiter returns a well-known poison value on
+ * reads so callers can detect the condition instead of hanging.
+ *
+ * Use to decide whether to skip `falcon_reset` etc. On VFIO hosts
+ * after vfio-pci's FLR + BSI DEVINIT on Ampere, SEC2 CPUCTL / DMACTL
+ * / DMATRFCMD come up priv-locked even though HWCFG2 is readable.
+ * FLR already reset the engine, so the reset is both redundant and
+ * likely to hang the PRI bus when it tries to write FALCON_ENGINE.RESET.
+ */
+bool falcon_is_priv_locked(const struct falcon *f);
 
 /*
  * On dual-mode engines (GSP Falcon), force Falcon (non-RISC-V)

@@ -201,14 +201,83 @@ DEVINIT as done on test-pc post-BSI.
    overwrites — not a hang indicator. Confirms the earlier
    interpretation was wrong to treat `0xda55` as a "stuck" marker.
 
-### 0.6 Next milestone — Booter Load
+### 0.6 Next milestone — Booter Load (BLOCKED: SEC2 priv-locked on VFIO)
 
-`--booter-load` currently hangs after FWSEC-FRTS completes,
-probably at SEC2's own `falcon_reset`. The same
-"`falcon_is_idle()`-gate" treatment needs to be applied to
-`gsp_bringup_booter_load`. After that, either Booter halts with a
-readable `MAILBOX0` error (expected — WprMeta is zero-init) or
-completes cleanly, and we proceed to `--riscv-start`.
+Continuing past FWSEC-FRTS, `--booter-load` now gets past SEC2's
+`falcon_reset` (same `falcon_is_idle()`-gate treatment applied) and
+past PIO upload (after also fixing a latent DMEM-size mask bug,
+below), but stalls in `falcon_wait_halted` because **SEC2's control
+registers are priv-locked on this GA107 under VFIO**.
+
+#### Observation
+
+`--falcons` now reports, with no prior FWSEC-FRTS run, immediately
+after BSI DEVINIT recovery:
+
+```
+[GSP-HARNESS] SEC2 Falcon @0x00840000  IMEM=64 KB  DMEM=64 KB  RISC-V=no
+              idle=no  priv-locked=yes
+                CPUCTL=0xbadf5620  HWCFG2=0x000067f7
+```
+
+`CPUCTL=0xbadf5620` is NVIDIA's PRI-arbiter poison pattern: reads
+to this register are denied by its priv-level mask. `HWCFG2` and
+`HWCFG` are still readable (lower-PLM tier). This isn't a
+side-effect of FWSEC-FRTS — SEC2 is priv-locked from the moment
+BSI finishes re-running DEVINIT. Under nouveau (no FLR, no BSI
+re-run) SEC2 likely stays at boot-time PLM, which is accessible;
+under vfio-pci+FLR the BSI re-apply raises its PLM.
+
+Because CPUCTL is priv-locked, the STARTCPU write is likely silently
+dropped and `wait_halted` can't observe `HALTED`. `falcon_wait_halted`
+now returns early on the poison pattern instead of spinning, so the
+symptom is a clean `GSP_ERR_TIMEOUT` rather than a hang.
+
+#### Added this session to make the blocker observable
+
+- `falcon_is_priv_locked()` — detects the `0xbadfXXXX` poison
+  pattern in CPUCTL. Used by `gsp_bringup_booter_load` to skip
+  `falcon_reset` on priv-locked SEC2 (the write would be ignored
+  anyway) and to surface the blocker via `--falcons` output.
+- `falcon_wait_halted` bails on `0xbadfXXXX` within one poll
+  iteration instead of running its full timeout budget.
+
+#### DMEM size mask was wrong on the Falcon HWCFG parse
+
+A latent bug surfaced while chasing this hang: `FALCON_HWCFG_DMEM_SIZE_MASK`
+was `0x1ff0000` (bits 24:16). Nouveau's `nvkm_falcon_oneinit`
+(`drivers/gpu/drm/nouveau/nvkm/falcon/base.c:273-275`) reads DMEM
+size from **bits 17:9** with mask `0x3fe00`. Our mask under-reported
+every Ampere Falcon's DMEM by ~4x. On SEC2/GA107 we were seeing
+16896 bytes when the real value is 65536. Booter Load failed the
+DMEM bounds check (25088 > 16896) at PIO upload, which looked like
+a completely different bug until we dumped HWCFG. Fixed in falcon.h
+with a citation.
+
+#### Fix options for the priv-lock, in order of cost
+
+1. **Investigate PLM writes before running booter.** Some GA10x
+   PLM registers can be written from lower priv levels to relax
+   the mask (particularly the `SOURCE_ENABLE` bits). Read the
+   SEC2 `FALCON_CPUCTL_PRIV_LEVEL_MASK` (offset unknown —
+   search nouveau `ga10x` code and NVIDIA `dev_sec_pri.h`). If
+   writable from our level, relax to PL0.
+
+2. **Skip Booter Load entirely and use PF_WPR2 to check FRTS
+   correctness.** The WPR2 registers already read back non-zero
+   post-FWSEC-FRTS; that alone is the E3.4 success gate.
+   E3.4.d/E3.4.e (Booter Load + RISC-V start) are E-phase work
+   that can be re-scoped once the priv-lock is understood.
+
+3. **Implement a VBIOS-based SEC2 unlock.** nouveau has no
+   direct parallel (because nouveau never has SEC2 locked) but
+   nova-core might have relevant code for VFIO-bound devices.
+
+The strongest immediate move is (2): record FWSEC-FRTS success
+as the E3.4 sign-off, file the priv-lock as a separate issue
+scoped to the Booter Load / RISC-V startup milestones, and
+continue with E4 RPC work on the assumption that Booter Load can
+be solved independently.
 
 
 ### 0.7 Harness additions landed this session

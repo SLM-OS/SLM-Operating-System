@@ -323,12 +323,17 @@ int main(int argc, char **argv)
         if (falcon_probe(&sec2_flcn, NV_PSEC2_BASE) < 0) {
             printf("[GSP-HARNESS] SEC2 Falcon probe failed\n");
         } else {
-            printf("[GSP-HARNESS] SEC2 Falcon @0x%08x  IMEM=%u KB  DMEM=%u KB  RISC-V=%s  idle=%s\n",
+            uint32_t sec2_cpuctl = gsp_platform->read32(NV_PSEC2_BASE + FALCON_CPUCTL);
+            uint32_t sec2_hwcfg2 = gsp_platform->read32(NV_PSEC2_BASE + FALCON_HWCFG2);
+            printf("[GSP-HARNESS] SEC2 Falcon @0x%08x  IMEM=%u KB  DMEM=%u KB  RISC-V=%s  idle=%s  priv-locked=%s\n",
                    sec2_flcn.base,
                    sec2_flcn.imem_size / 1024,
                    sec2_flcn.dmem_size / 1024,
                    sec2_flcn.has_riscv ? "yes" : "no",
-                   falcon_is_idle(&sec2_flcn) ? "yes" : "no");
+                   falcon_is_idle(&sec2_flcn) ? "yes" : "no",
+                   falcon_is_priv_locked(&sec2_flcn) ? "yes" : "no");
+            printf("                CPUCTL=0x%08x  HWCFG2=0x%08x\n",
+                   sec2_cpuctl, sec2_hwcfg2);
         }
         return 0;
     }
@@ -589,6 +594,18 @@ int main(int argc, char **argv)
             return 1;
         }
         printf("[GSP-HARNESS] FWSEC-FRTS ok (WPR2 set), running Booter Load…\n");
+        /* Print SEC2 pre-state for the hang diagnosis. */
+        {
+            uint32_t cpuctl = gsp_platform->read32(NV_PSEC2_BASE + FALCON_CPUCTL);
+            uint32_t hwcfg  = gsp_platform->read32(NV_PSEC2_BASE + FALCON_HWCFG);
+            uint32_t hwcfg2 = gsp_platform->read32(NV_PSEC2_BASE + FALCON_HWCFG2);
+            uint32_t dmactl = gsp_platform->read32(NV_PSEC2_BASE + FALCON_DMACTL);
+            uint32_t trfcmd = gsp_platform->read32(NV_PSEC2_BASE + FALCON_DMATRFCMD);
+            fprintf(stderr, "[GSP-HARNESS] SEC2 pre-booter: CPUCTL=0x%08x "
+                    "(halted=%d) HWCFG=0x%08x HWCFG2=0x%08x DMACTL=0x%08x DMATRFCMD=0x%08x\n",
+                    cpuctl, !!(cpuctl & FALCON_CPUCTL_HALTED),
+                    hwcfg, hwcfg2, dmactl, trfcmd);
+        }
         int rc = gsp_bringup_booter_load(&b);
         if (rc < 0) {
             printf("[GSP-HARNESS] Booter Load FAILED at phase %u (rc=%d)\n",
