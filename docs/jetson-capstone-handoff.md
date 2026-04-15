@@ -1,0 +1,266 @@
+# Jetson Capstone — Session Handoff
+
+Snapshot for a new agent picking up this work after the S4 default-flip
+landed (PR #167, merge commit `3d416e8`, 2026-04-15).
+
+**Read this first; it has the context that the long-form plan docs
+assume.** When this doc and the long-form docs disagree, the long-form
+docs are authoritative — file an update to this one.
+
+---
+
+## 1. Where the project is right now
+
+The minimum capstone path (G1 → G6) is **complete**. Track S is through
+**S4**. Track P is parked at **P1** (cooperative preemption).
+
+| Track | Status | Notes |
+|---|---|---|
+| Prereqs #1-#4 | ✅ DONE | Shared infrastructure for the cross-platform plans |
+| P1 (cooperative preemption) | ✅ DONE | `COOP_PREEMPT` synthesizes ticks at yield points; hardware-verified on Jetson |
+| P2-P6 (true preemption) | 🚫 deferred | Hard-blocked on TF-A GIC Group-config (EL3-owned). Not in capstone scope |
+| G1-G6 | ✅ DONE | NEON MatMul / Conv / LN/RMSN/GELU / FP16+INT8 / cross-platform bench / thesis framing |
+| S1 | ✅ DONE | NC-memory steal deque placement |
+| S2 | ✅ DONE | Steal counters (closed #105) |
+| S3 | ✅ DONE | `bench stealing` + Phase C QEMU+Pi 5 numbers |
+| S4 | ✅ DONE | Default flip ON for x86-64 + Pi 5; OFF for Jetson + QEMU. PR #167 |
+| S5 (load-balancing) | 💤 stretch | Explicitly optional in the plan |
+
+**Capstone defense readiness:** the engineering work is delivered. What
+remains is non-engineering polish (demo, thesis writeup, integration
+sweep) plus a small bug backlog (below).
+
+---
+
+## 2. Recent merge history (most recent first)
+
+Pull `git log --oneline main` for the live view. As of handoff time:
+
+| Commit | Subject | What landed |
+|---|---|---|
+| `3d416e8` | Merge PR #167 | S4: work-stealing default ON for x86-64 + Pi 5 |
+| `ec82de2` | S4 docs + test stabilization | Shape-A retry test, doc audit, QEMU scoped to OFF |
+| `f8d66bc` | S4 default flip | `CMakeLists.txt` per-platform option block |
+| `1495398` | Fix #158 (and prep S4) | External `steal_deque_lock[MAX_CPUS]` (cacheable) |
+| `c978a76` | Merge PR #145 | Fix #139: per-slot generation counter (ABA) |
+| `7c5d7b2` | Merge PR #144 | G2-G6 + S2-S3 |
+
+If a fresh agent loads `main` and runs `make test` and `make test
+WORK_STEALING=ON`, both should be green on QEMU ARM64 (with the
+caveats in §6).
+
+---
+
+## 3. Open items, in priority order
+
+### 3a. Bugs from this work
+
+| # | Title | Priority | Notes |
+|---|---|---|---|
+| #166 | Jetson page fault during `bench stealing` with WORK_STEALING=ON | P2-medium | After PR #167's lock fix the bench completes 16/16 and prints results, but a CPU faults mid-run. Likely dual-cluster MPIDR or A78AE cacheable-spinlock contention. Reproduces deterministically with `bench stealing 8` on Jetson hardware after `slmos-kexec` |
+| #141 | x86-64 build broken after G3 inference kernels (libm f16 + fat LTO) | P1-high | rustc 1.94.1 doesn't fix it. Cleanest path: replace `libm::sqrtf` / `libm::tanhf` calls in G3 kernels with hand-rolled approximations |
+| #174 | `steal_deque.h` doc clarity | P3-low | Docs-only, ~10 min |
+| #175 | Push-failure counter for `steal_deque` | P3-low | ~20 LOC, observability-only |
+| #158 | Pi 5 boot hang | ✅ closed | Fixed by external lock in PR #167 |
+| #139 | Work-stealing ABA race | ✅ closed | Fixed by per-slot generation counter in PR #145 |
+| #142 | GSP bare-metal loader (future work) | descoped | Filed for the day someone wants to tackle GPU compute on Ampere |
+
+### 3b. Capstone deliverables outside the engineering plan
+
+These are explicit in the plan's week-by-week calendar (weeks 11-12):
+
+- Demo prep + rehearsal.
+- Integration testing sweep.
+- Final report writeup using `docs/capstone-thesis-framing.md` as the
+  spine.
+
+### 3c. Recommended ordering
+
+If picking what to do next, the honest order is:
+
+1. **#166** — Jetson is the project's headline platform. Work-stealing
+   on Jetson being broken is the only new platform capability still
+   crashing. Worth a focused investigation session.
+2. **Thesis writeup + demo prep** — time-boxed project management,
+   no engineering blockers.
+3. **#141** — x86-64 row in `docs/cross-platform-inference-bench.md`
+   stays "blocked" until this is fixed. Not a defense blocker.
+4. **#174 / #175 / S5** — genuinely optional polish.
+
+---
+
+## 4. Document map (what to read for what)
+
+The plan family is layered. Read them in this order on a fresh start:
+
+| File | What it tells a new reader |
+|---|---|
+| **This file** | Where things are right now and what's open |
+| `docs/jetson-capstone-execution-plan.md` | The authoritative plan. Phase definitions, prerequisites, calendar, exit criteria. **Look here first** for "what does S5 mean, exactly?" or "what are P3's prerequisites?" |
+| `docs/jetson-capstone-gap-analysis.md` | Historical: the gap between what existed pre-capstone and what was needed. Snapshot, not current-state |
+| `docs/capstone-thesis-framing.md` | The narrative for the capstone report. Read this before talking about the project — it has the "delivered vs. proposed" framing |
+| `docs/cross-platform-inference-bench.md` | The G5 deliverable. Live measurement table |
+| `docs/work-stealing-bench.md` | The S3+S4 deliverable. Pi 5 hardware numbers, S4 flip rationale |
+| `docs/scheduler.md` §Work stealing | The current locking model + per-platform default table |
+| `kernel/CLAUDE.md` | Kernel-specific gotchas. NC memory, spinlocks, MPIDR encoding |
+| `runtime/CLAUDE.md` | Rust runtime gotchas. `no_std`, FFI, NEON dispatch |
+| `CLAUDE.md` (project root) | Build commands, lab access, formatting conventions |
+
+The cross-platform sister plans for context (read only as needed):
+
+- `docs/x86-64-capstone-gap-closure-plan.md` — x86-64's parallel work
+- `docs/pi5-preemption-plan.md` — Pi 5's parallel work
+
+---
+
+## 5. Hardware lab + tooling notes
+
+The lab is managed by `labctl` (MCP server). Two SBCs matter for this
+work:
+
+- **pi-5-1** (192.168.4.97): SDWire-flashed deploys via
+  `mcp__labctl__sdwire_update`. Boot is fast (~5 s to shell). Use this
+  for any work-stealing hardware iteration.
+- **jetson-nano-2** (192.168.4.93): kexec-from-Linux deploys via
+  `slmos-kexec` (script at `/usr/local/bin/slmos-kexec`). Linux first,
+  then SCP, then `sudo -n /usr/local/bin/slmos-kexec /tmp/slmos.elf`.
+  After kexec, Linux is gone — power-cycle + wait for Linux to come
+  back before the next deploy.
+
+**Critical setup:** passwordless sudo for `slmos-kexec` is configured
+on jetson-nano-2 via `/etc/sudoers.d/slmos-kexec`. This was added
+during the S4 capture session — don't break it. A fresh agent can
+verify with `ssh 192.168.4.93 sudo -n -l /usr/local/bin/slmos-kexec`
+which should print the binary path with no password prompt.
+
+**Avoid pi-5-2** (status: unknown, power: on) — it likely belongs to
+another project.
+
+**Don't use `cd` between MCP serial commands** — `mcp__labctl__serial_send`
+and `mcp__labctl__serial_capture` are stateless and operate on the SBC
+name directly.
+
+---
+
+## 6. Known gotchas / footguns
+
+These bit me in the S4 session and will bite the next agent if they
+don't know them up front.
+
+### Build / toolchain
+
+- **rustc must be exactly the toolchain on disk**. We're on 1.94.1.
+  `rustup update` doesn't fix #141. The G3 kernels use `libm::sqrtf` /
+  `libm::tanhf` which trip a soft-float legalization bug on
+  `x86_64-unknown-none` under fat LTO. Aarch64 is unaffected.
+- **`make kernel-clean` and `cargo clean` separately**. CMake caches
+  `ENABLE_WORK_STEALING` per build directory; if a previous run set it
+  ON or OFF, a re-configure with a different default won't change the
+  cache. After flipping defaults, blow away `build/kernel` and
+  `build/kernel-test`.
+- **Jetson build presently has a `nvidia_vbios_platform_load`
+  link error from recent x86-64 GSP merges.** Pre-existing, not
+  related to S4. If you need a Jetson kernel built, expect to chase
+  that first.
+
+### Scheduler / SMP
+
+- **`SPINLOCK_SKIP_LOCKING` is a no-op on Jetson** — any spinlock
+  embedded in NC-memory data structures is barrier-only. Use the
+  cacheable `rq_lock[MAX_CPUS]` / `steal_deque_lock[MAX_CPUS]` pattern
+  instead. The S4 fix moved the steal-deque lock for exactly this
+  reason.
+- **Atomic operations on NC memory may fault.** Per ARM ARM and
+  documented in `kernel/CLAUDE.md`. The S3 bench driver hits this on
+  Pi 5 if it uses `__atomic_fetch_add` against an NC-memory counter.
+  Use per-slot single-writer u32 stores instead — already documented
+  in the bench driver source.
+- **Jetson has dual-cluster MPIDR encoding** (Aff2.Aff1: 0x000, 0x100,
+  0x200, 0x300, 0x10200, 0x10300). Any code that does
+  `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` to extract a CPU index will
+  collide on CPUs 4/5. Use the logical-CPU map in `nc_cpu_logical_map`.
+
+### Tests
+
+- **The QEMU integration suite has pre-existing flakes**. `main` itself
+  passes ~50% under `make test` over multiple runs. Test failures from
+  `test_benchmark_queue_operations`, `test_rapid_task_exit_no_panic`,
+  `test_multicore_basic` are usually pre-existing, not from your
+  change. Verify by stashing and testing on `main`.
+- **Priority-ordering tests must be pinned to CPU 0** when
+  WORK_STEALING is on. `test_priority_ordering_multiple_levels` and
+  friends were updated in PR #167; if you add a new
+  priority-ordering test, do the same.
+- **`test_work_stealing_distributes_load` is structured as
+  retry-then-assert** (Shape A). It runs the scenario 8 times and
+  passes if ≥2 distribute. The threshold is intentionally low to
+  catch "stealing never works" without being timing-flaky.
+
+### Hardware iteration
+
+- **kexec from a non-TTY ssh** needs `sudo -n` to bypass the password
+  prompt. The sudoers file is set up on jetson-nano-2; verify before
+  each first-time use.
+- **Long bench output overruns `mcp__labctl__serial_send`'s response
+  size.** When this happens the MCP server saves the raw text to a
+  file under `~/.claude/projects/.../tool-results/` and returns the
+  path. `grep` it directly; don't try to read 200 kB into context.
+- **Background kexec ssh process** doesn't return — the SSH session
+  dies when Linux dies. Kick it off with `ssh ... &` and then start
+  the serial capture; don't wait on the ssh PID.
+
+---
+
+## 7. Verification recipes
+
+If the next agent wants to confirm the project is in the state this
+doc claims:
+
+```bash
+# Default QEMU build green (will fail flakily ~20%; that's pre-existing)
+make test
+
+# WORK_STEALING=ON green on QEMU
+make test WORK_STEALING=ON
+
+# Pi 5 hardware: bench stealing 16 should print 12-13 ms total,
+# 4/4/4/4 distribution
+make kernel PLATFORM=RASPI5
+# (then deploy via mcp__labctl__sdwire_update + serial_send)
+
+# Jetson hardware: bench stealing 16 in OFF mode should be clean
+# (~20 ms), in ON mode will currently page-fault per #166
+```
+
+Live numbers are in `docs/cross-platform-inference-bench.md` and
+`docs/work-stealing-bench.md`.
+
+---
+
+## 8. What "done" looks like for the capstone
+
+The defense criteria the project is targeting:
+
+1. **A small language model OS that boots on multiple platforms.**
+   ✅ — QEMU ARM64, Raspberry Pi 5, Jetson Orin Nano, x86-64 (modulo
+   #141).
+2. **NEON-accelerated CPU inference with FP32 / FP16 / INT8 paths.**
+   ✅ — G1-G4 land the kernels; `bench matmul` and `bench quant`
+   demonstrate.
+3. **Cross-platform performance numbers showing portability.**
+   ✅ — `docs/cross-platform-inference-bench.md`.
+4. **An honest narrative about GPU support.**
+   ✅ — `docs/capstone-thesis-framing.md` §"GPU Support and the GSP
+   Blocker" explains why CPU is the delivered path.
+5. **A scheduler that demonstrates SMP + work-stealing measurably.**
+   ✅ — Pi 5 hardware shows 3.12× speedup; default ON for hardware
+   platforms.
+
+The non-engineering remainder is the capstone report draft + demo,
+plus optional bug cleanup.
+
+---
+
+*Created: 2026-04-15. Update this file whenever a session ends with a
+non-trivial change to the open-items list or the verification
+recipes.*
