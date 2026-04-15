@@ -94,11 +94,10 @@ static void test_shell_unknown_command(void)
  */
 static void test_shell_cmd_too_long(void)
 {
-    /* Build a string longer than SHELL_MAX_LINE (128) */
-    char long_cmd[256];
+    char long_cmd[SHELL_MAX_LINE + 64];
     extern void *memset(void *s, int c, size_t n);
-    memset(long_cmd, 'a', 200);
-    long_cmd[200] = '\0';
+    memset(long_cmd, 'a', SHELL_MAX_LINE + 32);
+    long_cmd[SHELL_MAX_LINE + 32] = '\0';
 
     int ret = shell_execute(long_cmd);
     TEST_ASSERT_EQUAL_INT(-1, ret);
@@ -1516,6 +1515,70 @@ static void test_shell_cmd_write_no_args(void)
 }
 
 /*
+ * Test: write translates \n / \t / \\ escapes into real bytes.
+ */
+static void test_shell_cmd_write_escapes(void)
+{
+    const char *path = "/mnt/files/write_esc.tmp";
+    int ret = shell_execute("write /mnt/files/write_esc.tmp line1\\nline2\\there\\\\done");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    char buf[64];
+    int n = read_file_content(path, buf, sizeof(buf) - 1);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    buf[n] = '\0';
+    TEST_ASSERT_EQUAL_STRING("line1\nline2\there\\done", buf);
+
+    shell_execute("rm /mnt/files/write_esc.tmp");
+}
+
+/*
+ * Test: write \xNN translates to a single byte.
+ */
+static void test_shell_cmd_write_hex_escape(void)
+{
+    const char *path = "/mnt/files/write_hex.tmp";
+    /* \x41 = 'A', \x42 = 'B' */
+    int ret = shell_execute("write /mnt/files/write_hex.tmp \\x41\\x42C");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    char buf[16];
+    int n = read_file_content(path, buf, sizeof(buf) - 1);
+    TEST_ASSERT_EQUAL_INT(3, n);
+    buf[n] = '\0';
+    TEST_ASSERT_EQUAL_STRING("ABC", buf);
+
+    shell_execute("rm /mnt/files/write_hex.tmp");
+}
+
+/*
+ * Test: write accepts content larger than the old 512-byte limit.
+ */
+static void test_shell_cmd_write_large_content(void)
+{
+    const char *path = "/mnt/files/write_big.tmp";
+    /* Build a command line that is below SHELL_MAX_LINE but above 512 bytes
+     * of content (the previous internal cap). */
+    char cmd[SHELL_MAX_LINE];
+    extern void *memset(void *s, int c, size_t n);
+    int prefix = 0;
+    const char *header = "write /mnt/files/write_big.tmp ";
+    while (header[prefix]) { cmd[prefix] = header[prefix]; prefix++; }
+    int payload_len = SHELL_MAX_LINE - prefix - 1;
+    if (payload_len > 800) payload_len = 800;  /* well above old 512 cap */
+    memset(cmd + prefix, 'a', payload_len);
+    cmd[prefix + payload_len] = '\0';
+
+    int ret = shell_execute(cmd);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    int sz = get_file_size(path);
+    TEST_ASSERT_EQUAL_INT(payload_len, sz);
+
+    shell_execute("rm /mnt/files/write_big.tmp");
+}
+
+/*
  * Test: mkdir creates a directory.
  */
 static void test_shell_cmd_mkdir(void)
@@ -2094,6 +2157,9 @@ int test_suite_shell(void)
     /* Write/modify command tests */
     RUN_TEST(test_shell_cmd_write);
     RUN_TEST(test_shell_cmd_write_no_args);
+    RUN_TEST(test_shell_cmd_write_escapes);
+    RUN_TEST(test_shell_cmd_write_hex_escape);
+    RUN_TEST(test_shell_cmd_write_large_content);
     RUN_TEST(test_shell_cmd_mkdir);
     RUN_TEST(test_shell_cmd_mkdir_no_args);
     RUN_TEST(test_shell_cmd_rm);

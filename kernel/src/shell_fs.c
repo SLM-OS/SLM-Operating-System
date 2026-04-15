@@ -13,6 +13,72 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/*
+ * Build file content from argv[2..argc-1], joining with spaces and translating
+ * C-style escapes (\n, \t, \r, \\, \", \0, \xNN). Returns bytes written into
+ * `out` (excluding the terminating NUL), or -1 if `out_size` is exhausted.
+ *
+ * Used by `write` and `append` so a Lua/script source line can carry newlines
+ * and tabs through the shell's whitespace-tokenized argv.
+ */
+static int shell_build_content(int argc, char *argv[], int first_arg,
+                               char *out, int out_size)
+{
+    int pos = 0;
+    for (int i = first_arg; i < argc; i++) {
+        if (i > first_arg) {
+            if (pos >= out_size - 1) return -1;
+            out[pos++] = ' ';
+        }
+        const char *p = argv[i];
+        while (*p) {
+            if (pos >= out_size - 1) return -1;
+            if (*p != '\\' || p[1] == '\0') {
+                out[pos++] = *p++;
+                continue;
+            }
+            /* Escape sequence */
+            char esc = p[1];
+            switch (esc) {
+                case 'n':  out[pos++] = '\n'; p += 2; break;
+                case 't':  out[pos++] = '\t'; p += 2; break;
+                case 'r':  out[pos++] = '\r'; p += 2; break;
+                case '\\': out[pos++] = '\\'; p += 2; break;
+                case '"':  out[pos++] = '"';  p += 2; break;
+                case '\'': out[pos++] = '\''; p += 2; break;
+                case '0':  out[pos++] = '\0'; p += 2; break;
+                case 'x': {
+                    /* \xNN — two hex digits */
+                    int hi = -1, lo = -1;
+                    char c1 = p[2], c2 = c1 ? p[3] : 0;
+                    if (c1 >= '0' && c1 <= '9') hi = c1 - '0';
+                    else if (c1 >= 'a' && c1 <= 'f') hi = 10 + (c1 - 'a');
+                    else if (c1 >= 'A' && c1 <= 'F') hi = 10 + (c1 - 'A');
+                    if (c2 >= '0' && c2 <= '9') lo = c2 - '0';
+                    else if (c2 >= 'a' && c2 <= 'f') lo = 10 + (c2 - 'a');
+                    else if (c2 >= 'A' && c2 <= 'F') lo = 10 + (c2 - 'A');
+                    if (hi < 0 || lo < 0) {
+                        /* Malformed — emit literally so the user sees it */
+                        out[pos++] = '\\';
+                        p++;
+                    } else {
+                        out[pos++] = (char)((hi << 4) | lo);
+                        p += 4;
+                    }
+                    break;
+                }
+                default:
+                    /* Unknown escape — keep the backslash literal */
+                    out[pos++] = '\\';
+                    p++;
+                    break;
+            }
+        }
+    }
+    out[pos] = '\0';
+    return pos;
+}
+
 /* ============================================================================
  * VFS Commands (pwd, cd, ls, cat)
  * ============================================================================ */
@@ -292,7 +358,9 @@ int cmd_write(int argc, char *argv[])
         uart_puts("Usage: write <path> <content>\r\n");
         uart_puts("  Write content to a file (creates or overwrites).\r\n");
         uart_puts("  Path must be in a mounted filesystem.\r\n");
+        uart_puts("  Escapes: \\n \\t \\r \\\\ \\\" \\' \\0 \\xNN\r\n");
         uart_puts("  Example: write test.txt Hello  (relative to cwd)\r\n");
+        uart_puts("  Example: write demo.lua \"P('hi')\\nP('bye')\\n\"\r\n");
         return -1;
     }
 
@@ -311,21 +379,14 @@ int cmd_write(int argc, char *argv[])
         return -1;
     }
 
-    /* Build content from remaining arguments */
-    char content[512];
-    int pos = 0;
-    for (int i = 2; i < argc && pos < (int)sizeof(content) - 1; i++) {
-        /* Add space between arguments */
-        if (i > 2 && pos < (int)sizeof(content) - 1) {
-            content[pos++] = ' ';
-        }
-        /* Copy argument */
-        const char *p = argv[i];
-        while (*p && pos < (int)sizeof(content) - 1) {
-            content[pos++] = *p++;
-        }
+    /* Build content from remaining arguments (with escape translation) */
+    static char content[4096];
+    int pos = shell_build_content(argc, argv, 2, content, (int)sizeof(content));
+    if (pos < 0) {
+        uart_printf("write: content too long (max %d bytes)\r\n",
+                    (int)sizeof(content) - 1);
+        return -1;
     }
-    content[pos] = '\0';
 
     /* Open file for writing (create + truncate) */
     int fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
@@ -623,6 +684,8 @@ int cmd_append(int argc, char *argv[])
     if (argc < 3) {
         uart_puts("Usage: append <path> <content>\r\n");
         uart_puts("  Append content to file (creates if needed).\r\n");
+        uart_puts("  A trailing newline is added automatically.\r\n");
+        uart_puts("  Escapes: \\n \\t \\r \\\\ \\\" \\' \\0 \\xNN\r\n");
         uart_puts("  Example: append log.txt Entry 1  (relative to cwd)\r\n");
         return -1;
     }
@@ -641,19 +704,14 @@ int cmd_append(int argc, char *argv[])
         return -1;
     }
 
-    /* Build content from remaining arguments */
-    char content[512];
-    int pos = 0;
-    for (int i = 2; i < argc && pos < (int)sizeof(content) - 2; i++) {
-        /* Add space between arguments */
-        if (i > 2 && pos < (int)sizeof(content) - 2) {
-            content[pos++] = ' ';
-        }
-        /* Copy argument */
-        const char *p = argv[i];
-        while (*p && pos < (int)sizeof(content) - 2) {
-            content[pos++] = *p++;
-        }
+    /* Build content from remaining arguments (with escape translation).
+     * Reserve one byte at the end for the trailing newline. */
+    static char content[4096];
+    int pos = shell_build_content(argc, argv, 2, content, (int)sizeof(content) - 1);
+    if (pos < 0) {
+        uart_printf("append: content too long (max %d bytes)\r\n",
+                    (int)sizeof(content) - 2);
+        return -1;
     }
     /* Add newline for log entries */
     content[pos++] = '\n';

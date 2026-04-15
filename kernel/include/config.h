@@ -61,7 +61,7 @@
  * Shell Configuration
  * ============================================================================ */
 
-#define SHELL_MAX_LINE      128             /* Maximum command line length */
+#define SHELL_MAX_LINE      1024            /* Maximum command line length */
 #define SHELL_MAX_ARGS      16              /* Maximum arguments per command */
 
 #endif /* CONFIG_H */
