@@ -50,6 +50,8 @@ static void usage(const char *argv0)
 "                   entries and FWSEC presence (Turing+) without touching GSP.\n"
 "  --falcons        Probe GSP + SEC2 Falcon engines: IMEM/DMEM sizes, halt\n"
 "                   state, RISC-V capability. Hardware smoke test for E3.\n"
+"  --dma-test       Allocate + IOMMU-map + free a DMA buffer via VFIO.\n"
+"                   Confirms E3.2 DMA plumbing works end-to-end.\n"
 "  --phase N        Attempt GSP bringup phase N only (0..7).\n"
 "  --bringup        Run full gsp_init() — phases 0 through 7.\n"
 "\n"
@@ -71,7 +73,7 @@ int main(int argc, char **argv)
     const char *pci_path = "/sys/bus/pci/devices/0000:01:00.0";
     const char *chip     = "ga107";
     bool trace           = false;
-    enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_FALCONS, ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
+    enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_FALCONS, ACT_DMA_TEST, ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
     int phase = -1;
 
     for (int i = 1; i < argc; i++) {
@@ -80,6 +82,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--probe") == 0) { action = ACT_PROBE; }
         else if (strcmp(a, "--vbios") == 0) { action = ACT_VBIOS; }
         else if (strcmp(a, "--falcons") == 0) { action = ACT_FALCONS; }
+        else if (strcmp(a, "--dma-test") == 0) { action = ACT_DMA_TEST; }
         else if (strcmp(a, "--bringup") == 0) { action = ACT_BRINGUP; }
         else if (strcmp(a, "--trace") == 0) { trace = true; }
         else if (strcmp(a, "--phase") == 0 && i + 1 < argc) {
@@ -207,6 +210,64 @@ int main(int argc, char **argv)
                    sec2_flcn.has_riscv ? "yes" : "no",
                    falcon_is_idle(&sec2_flcn) ? "yes" : "no");
         }
+        return 0;
+    }
+    case ACT_DMA_TEST: {
+        /* E3.2 DMA plumbing smoke test: allocate + IOMMU-map + free
+         * three buffers of different sizes, write a recognizable
+         * pattern into each, and confirm the DMA address we get is
+         * reasonable (IOMMU-space, not a raw VA).
+         *
+         * We can't directly confirm the GPU can read our buffer
+         * without actually programming Falcon DMA (that's E3.4 work).
+         * What this test CAN confirm: the VFIO session opens, the
+         * Type1 IOMMU accepts our maps, and the IOVAs come back in
+         * the expected 0x10000000+ range. */
+        struct {
+            size_t size;
+            size_t align;
+        } cases[] = {
+            { 4096,       0 },
+            { 64 * 1024,  256 },
+            { 1024 * 1024, 4096 },
+        };
+        int ncases = (int)(sizeof(cases) / sizeof(cases[0]));
+
+        int failed = 0;
+        for (int i = 0; i < ncases; i++) {
+            uint64_t iova = 0;
+            void *va = gsp_platform->dma_alloc(cases[i].size, cases[i].align, &iova);
+            if (!va) {
+                printf("[GSP-HARNESS] dma_alloc(%zu) FAILED\n", cases[i].size);
+                failed++;
+                continue;
+            }
+            if (iova < 0x10000000ull) {
+                printf("[GSP-HARNESS] dma_alloc(%zu): iova 0x%lx looks like a raw VA\n"
+                       "                             (VFIO probably unavailable — "
+                       "see earlier init line)\n",
+                       cases[i].size, (unsigned long)iova);
+                failed++;
+            } else {
+                printf("[GSP-HARNESS] dma_alloc(%zu, align=%zu): va=%p iova=0x%lx\n",
+                       cases[i].size, cases[i].align, va, (unsigned long)iova);
+            }
+            /* Light write+read check that the buffer is writable. */
+            uint8_t *bytes = (uint8_t *)va;
+            bytes[0] = 0xA5;
+            bytes[cases[i].size - 1] = 0x5A;
+            if (bytes[0] != 0xA5 || bytes[cases[i].size - 1] != 0x5A) {
+                printf("[GSP-HARNESS] buffer not host-writable!\n");
+                failed++;
+            }
+            gsp_platform->dma_free(va, cases[i].size);
+        }
+
+        if (failed) {
+            printf("[GSP-HARNESS] --dma-test: %d/%d FAILED\n", failed, ncases);
+            return 1;
+        }
+        printf("[GSP-HARNESS] --dma-test: all %d cases PASS\n", ncases);
         return 0;
     }
     case ACT_PHASE: {

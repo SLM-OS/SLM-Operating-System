@@ -188,6 +188,7 @@ GSP_HARNESS_OUT := build/host-tools/gsp-harness
 GSP_HARNESS_SRCS := \
     host-tools/gsp-harness/main.c \
     host-tools/gsp-harness/linux_platform.c \
+    host-tools/gsp-harness/vfio.c \
     kernel/gpu/nvidia/gsp.c \
     kernel/gpu/nvidia/nvidia_vbios.c \
     kernel/gpu/nvidia/falcon.c
