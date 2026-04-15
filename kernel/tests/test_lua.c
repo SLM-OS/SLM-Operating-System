@@ -844,6 +844,25 @@ static void test_demo_file_exists(void)
 }
 
 /*
+ * Test: demo_menu.lua file exists on the filesystem after boot.
+ *
+ * Verified via VFS directly because (a) Lua's loadfile/dofile route
+ * through stubbed fopen and don't actually open files in this kernel,
+ * and (b) demo_menu.lua's main loop calls slm.read_line(), which would
+ * block forever on UART input under QEMU automation.
+ */
+extern int vfs_read_path(const char *path, char *buf, size_t size, size_t offset);
+static void test_demo_menu_file_exists(void)
+{
+    static char buf[64];
+    int n = vfs_read_path("/mnt/files/demo_menu.lua", buf, sizeof(buf) - 1, 0);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    /* First line of the script begins with "-- SLM-OS Phase 5 Demo" */
+    buf[22] = '\0';
+    TEST_ASSERT_EQUAL_STRING("-- SLM-OS Phase 5 Demo", buf);
+}
+
+/*
  * Test: slm.model_load_mnist loads the embedded MNIST model.
  * Returns a non-negative index on success.
  */
@@ -1697,6 +1716,7 @@ int test_suite_lua(void)
     RUN_TEST(test_wildcard_matching_edge_cases);
 
     RUN_TEST(test_demo_file_exists);
+    RUN_TEST(test_demo_menu_file_exists);
 
     /* Dofile (script loading from filesystem) */
     RUN_TEST(test_slm_dofile_nonexistent);

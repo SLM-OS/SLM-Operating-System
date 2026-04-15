@@ -672,10 +672,16 @@ int lua_slm_dofile(lua_State *L, const char *filename) {
     if (!L || !filename) return -1;
     int saved_top = lua_gettop(L);
 
-    char buf[4096];
+    /* Sized to fit the largest embedded demo (~7 KB demo_menu.lua) plus
+     * headroom. Lives on the shell task's 64 KB stack; cheap. */
+    char buf[16384];
     int len = vfs_read_path(filename, buf, sizeof(buf) - 1, 0);
     if (len < 0) {
         uart_printf("lua: cannot open %s\n", filename);
+        return -1;
+    }
+    if (len >= (int)sizeof(buf) - 1) {
+        uart_printf("lua: %s exceeds %d bytes\n", filename, (int)sizeof(buf) - 1);
         return -1;
     }
     buf[len] = '\0';
