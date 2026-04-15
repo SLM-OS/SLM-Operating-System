@@ -94,6 +94,10 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
+    /* Disable stdout buffering — when run via SSH, the pipe makes
+     * stdout block-buffered and progress prints disappear until
+     * buffer flush, which hides hang locations in diagnostics. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     const char *pci_path = "/sys/bus/pci/devices/0000:01:00.0";
     const char *chip     = "ga107";
     bool trace           = false;
@@ -144,6 +148,47 @@ int main(int argc, char **argv)
 
     extern const struct gsp_platform_ops *gsp_platform;
 
+    /* vfio-pci does an FLR when userspace opens /dev/vfio/GROUP.
+     * FLR resets the GPU and clears DEVINIT state. The on-chip BSI
+     * (Bootstrap Sequencer Instruction) re-runs DEVINIT from the
+     * VBIOS after FLR, but takes ~500 ms to complete. Poll the
+     * NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0] byte-0 == 0xff "DEVINIT
+     * done" marker (nouveau's tu102_devinit_wait) before letting any
+     * action proceed. Actions that don't touch bringup (--probe,
+     * --vbios, --falcons, --dma-test, --check-devinit) are exempt. */
+    bool needs_devinit = (action == ACT_FALCONS ||
+                          action == ACT_FWSEC_FRTS ||
+                          action == ACT_FWSEC_SB ||
+                          action == ACT_FWSEC_TRACE ||
+                          action == ACT_BOOTER_LOAD ||
+                          action == ACT_RISCV_START ||
+                          action == ACT_BRINGUP ||
+                          action == ACT_PHASE);
+    if (needs_devinit) {
+        /* Poll NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0] byte 0 for
+         * 0xff (nouveau tu102_devinit_wait). BSI recovery after FLR
+         * takes ~500 ms on GA107 test-pc; 2 s cap is generous. */
+        const uint32_t budget_ms = 2000;
+        uint32_t waited_ms = 0;
+        uint32_t s = 0;
+        while (waited_ms <= budget_ms) {
+            s = gsp_platform->read32(0x00118234);
+            if ((s & 0xffu) == 0xffu) break;
+            struct timespec st = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000L };
+            nanosleep(&st, NULL);
+            waited_ms += 50;
+        }
+        if ((s & 0xffu) == 0xffu) {
+            fprintf(stderr,
+                    "[GSP-HARNESS] BSI DEVINIT recovered in %u ms\n", waited_ms);
+        } else {
+            fprintf(stderr,
+                    "[GSP-HARNESS] WARNING: BSI DEVINIT not complete in %u ms "
+                    "(scratch=0x%08x); continuing anyway\n",
+                    budget_ms, s);
+        }
+    }
+
     switch (action) {
     case ACT_PROBE: {
         uint32_t boot42 = gsp_platform->read32(NV_PMC_BOOT_42);
@@ -157,27 +202,34 @@ int main(int argc, char **argv)
         return 0;
     }
     case ACT_CHECK_DEVINIT: {
-        /* Matches nouveau tu102_devinit_wait:
-         *
-         *   if (rd32(0x118128) & 0x1)             // GR5 PLM allows read
-         *     if ((rd32(0x118234) & 0xff) == 0xff) // DEVINIT done
-         *       OK
-         *
-         * On GA10x, 0x118128 is
+        /* Matches nouveau tu102_devinit_wait (drivers/gpu/drm/nouveau/
+         * nvkm/subdev/devinit/tu102.c). On GA10x, 0x118128 is
          * NV_PGC6_AON_SECURE_SCRATCH_GROUP_05_PRIV_LEVEL_MASK and
-         * 0x118234 is NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0]. The
-         * byte-0 = 0xff convention is written by the VBIOS init-script
-         * engine at the end of POST/DEVINIT on Turing+.
+         * 0x118234 is NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0]. Byte-0
+         * is written to 0xff by the VBIOS init-script engine at the
+         * end of POST/DEVINIT on Turing+.
          *
-         * Reference: nouveau drivers/gpu/drm/nouveau/nvkm/subdev/
-         *            devinit/tu102.c:tu102_devinit_wait. */
-        uint32_t plm  = gsp_platform->read32(0x00118128);
-        uint32_t scr0 = gsp_platform->read32(0x00118234);
+         * vfio-pci does a PCI FLR when /dev/vfio/GROUP is opened,
+         * which clears this scratch. GA107's on-chip BSI (Bootstrap
+         * Sequencer Instruction) re-runs DEVINIT from VBIOS after
+         * FLR but takes ~500 ms. Poll for up to 2 s to accommodate
+         * that recovery. */
+        uint32_t plm = 0, scr0 = 0;
+        uint32_t waited_ms = 0;
+        const uint32_t budget_ms = 2000;
+        while (waited_ms <= budget_ms) {
+            plm  = gsp_platform->read32(0x00118128);
+            scr0 = gsp_platform->read32(0x00118234);
+            if ((plm & 0x1u) && (scr0 & 0xffu) == 0xffu) break;
+            struct timespec st = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000L };
+            nanosleep(&st, NULL);
+            waited_ms += 50;
+        }
         bool plm_ok   = (plm & 0x1u) != 0;
         bool scr0_ok  = (scr0 & 0xffu) == 0xffu;
-        printf("[GSP-HARNESS] DEVINIT check:\n");
+        printf("[GSP-HARNESS] DEVINIT check (after waiting %u ms for BSI):\n", waited_ms);
         printf("                0x118128 (GR5 PLM)           = 0x%08x  (bit 0 %s)\n",
-               plm,  plm_ok  ? "SET  — scratch readable" : "CLR  — readable from priv?");
+               plm,  plm_ok  ? "SET  — scratch readable" : "CLR  — blocked by priv-level");
         printf("                0x118234 (GR5_SCRATCH[0])    = 0x%08x  (byte 0 = 0x%02x %s)\n",
                scr0, scr0 & 0xffu,
                scr0_ok ? "— DEVINIT done" : "— DEVINIT NOT done / not run");
@@ -185,9 +237,10 @@ int main(int argc, char **argv)
             printf("[GSP-HARNESS] Verdict: VBIOS DEVINIT has completed on this GPU.\n");
             return 0;
         }
-        printf("[GSP-HARNESS] Verdict: VBIOS DEVINIT has NOT completed.\n"
-               "                This matches the hypothesis that FWSEC-FRTS fails\n"
-               "                because uninitialized hardware state is missing.\n");
+        printf("[GSP-HARNESS] Verdict: VBIOS DEVINIT has NOT completed within %u ms.\n"
+               "                Either UEFI never ran DEVINIT (GPU isn't the primary\n"
+               "                display) or the BSI re-run after FLR didn't finish.\n",
+               budget_ms);
         return 2;
     }
     case ACT_VBIOS: {
@@ -442,11 +495,18 @@ int main(int argc, char **argv)
                    label, mbox0, os_reg, dbginfo);
             return 0;
         }
-        printf("[GSP-HARNESS] %s ok — WPR2 registers:\n", label);
-        uint32_t wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
-        uint32_t wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
-        printf("                WPR2_LO = 0x%08x\n                WPR2_HI = 0x%08x\n",
-               wpr_lo, wpr_hi);
+        printf("[GSP-HARNESS] %s ok — Falcon halted cleanly\n", label);
+        uint32_t wpr_lo  = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
+        uint32_t wpr_hi  = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
+        uint32_t err_reg = gsp_platform->read32(NV_FWSEC_FRTS_ERR_REG);
+        uint32_t mbox0   = gsp_platform->read32(NV_PGSP_BASE + FALCON_MAILBOX0);
+        uint32_t os_reg  = gsp_platform->read32(NV_PGSP_BASE + FALCON_OS);
+        uint32_t dbginfo = gsp_platform->read32(NV_PGSP_BASE + FALCON_DEBUGINFO);
+        printf("                WPR2_LO   = 0x%08x\n", wpr_lo);
+        printf("                WPR2_HI   = 0x%08x\n", wpr_hi);
+        printf("                ERR_REG   = 0x%08x  (code=%u)\n", err_reg, err_reg >> 16);
+        printf("                MAILBOX0  = 0x%08x  OS = 0x%08x  DEBUGINFO = 0x%08x\n",
+               mbox0, os_reg, dbginfo);
         return 0;
     }
     case ACT_FWSEC_TRACE: {

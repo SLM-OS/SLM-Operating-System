@@ -405,8 +405,19 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     /* Reset GSP Falcon — kills whatever was running pre-bringup
      * (usually nothing — but SEC2/GSP state from the prior OS is
      * possible, and reset also clears IMEM/DMEM). */
+    /* Reset the Falcon — but only if it isn't already idle. On VFIO
+     * hosts, the PCI FLR triggered when userspace opens /dev/vfio/GROUP
+     * has already reset the Falcon, and the on-chip BSI (Bootstrap
+     * Sequencer) has re-run VBIOS DEVINIT. Writing FALCON_ENGINE.RESET
+     * on a post-BSI Falcon causes a PRI bus hang on GA107 (observed
+     * 2026-04-15 on test-pc: subsequent BAR0 reads never return). Skip
+     * the reset when falcon_is_idle() already reports clean state —
+     * bare-metal / non-VFIO callers without an FLR path will still
+     * exercise falcon_reset below. */
     b->last_error_phase = 3;
-    if (falcon_reset(&b->gsp_flcn) < 0) goto fail_free;
+    if (!falcon_is_idle(&b->gsp_flcn)) {
+        if (falcon_reset(&b->gsp_flcn) < 0) goto fail_free;
+    }
 
     /* On dual-mode GSP Falcon, force Falcon (non-RISC-V) core
      * select. FWSEC is a Falcon ucode — if the engine was last
