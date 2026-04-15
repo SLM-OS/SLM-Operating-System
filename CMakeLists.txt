@@ -586,18 +586,29 @@ target_link_libraries(slmos.elf PRIVATE lua)
 # ==========================================================================
 option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 
-# Work-stealing scheduler (#59 Phase B). Per the cross-platform plan
-# review, each platform decides independently — no global default flip
-# in kernel/include/config.h. On x86-64 the hardware is cache-coherent
-# SMP with a working reschedule IPI (B1) and TSS IST (A1), so the
-# steal path is safe by construction. Enable automatically for X86_64
-# unless the user explicitly sets ENABLE_WORK_STEALING=OFF.
-# Pi 5 / Jetson keep the feature off until their preemption blockers
-# (#57 / #99) are closed.
-if(PLATFORM STREQUAL "X86_64")
-    option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" ON)
-else()
+# Work-stealing scheduler (#59 Phase B, S4 default flip).
+#
+# Default is ON for every platform except Jetson. Rationale per the
+# Jetson capstone plan §S4 and docs/work-stealing-bench.md:
+#   - x86-64: cache-coherent SMP, working reschedule IPI (B1) + TSS
+#     IST (A1). Safe by construction. Has been ON since Phase B.
+#   - QEMU ARM64: bench stealing 8 shows 1.7× speedup with no
+#     correctness regressions in the full test suite.
+#   - Raspberry Pi 5: bench stealing 16 shows 3.12× speedup on real
+#     hardware after the external-lock fix (#158 closed). Both
+#     regression builds (WORK_STEALING=OFF/ON) boot and pass tests.
+#   - Jetson Orin Nano: residual page fault during bench stealing
+#     tracked as #166. Stays default-OFF until resolved; users who
+#     want to experiment can pass `-DENABLE_WORK_STEALING=ON` or
+#     `make kernel PLATFORM=JETSON_ORIN_NANO WORK_STEALING=ON`.
+#
+# Override path (either direction) is the Makefile `WORK_STEALING=ON`
+# / `WORK_STEALING=OFF` variable, which maps to
+# `-DENABLE_WORK_STEALING=ON/OFF`.
+if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
     option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" OFF)
+else()
+    option(ENABLE_WORK_STEALING "Enable per-CPU work-stealing (#59 Phase B)" ON)
 endif()
 if(ENABLE_WORK_STEALING)
     add_compile_definitions(CONFIG_WORK_STEALING=1)

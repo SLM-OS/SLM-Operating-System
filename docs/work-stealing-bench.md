@@ -68,47 +68,53 @@ itself before its deque drains.
 imbalanced workloads. The 1.7× speedup is enough to justify
 enabling by default once the other platforms agree.
 
-## Raspberry Pi 5 — pending hardware capture
+## Raspberry Pi 5 — captured 2026-04-14
 
-```
-make kernel PLATFORM=RASPI5                      # OFF baseline
-labctl sdwire_update kernel build/kernel/slmos.bin
-labctl power_cycle pi5-1
-labctl serial_send pi5-1 "bench stealing 16"
-# Capture result, then rebuild with WORK_STEALING=ON:
-make kernel PLATFORM=RASPI5 WORK_STEALING=ON
-labctl sdwire_update kernel build/kernel/slmos.bin
-labctl power_cycle pi5-1
-labctl serial_send pi5-1 "bench stealing 16"
-```
+BCM2712 Cortex-A76, 4 cores @ 2.4 GHz, 4 GB RAM. Deployed via
+`labctl sdwire_update` + `power_cycle`, `bench stealing 16` at the
+shell.
 
-| Build | Wall-clock (ms) | Per-CPU distribution | Speedup |
+| Build | Wall-clock (ms) | Per-task avg (µs) | Per-CPU distribution (0/1/2/3) | Steal successes | Speedup |
+|---|---|---|---|---|---|
+| `WORK_STEALING=OFF` | 39.6 | 2476 | 0 / 16 / 0 / 0 | n/a | — |
+| `WORK_STEALING=ON`  | 12.7 |  792 | 4 /  4 / 4 / 4 | 3 (CPU 0) + 4 (CPU 2) + 4 (CPU 3) | **3.12×** |
+
+**Observations:** perfect 4/4/4/4 distribution on ON — idle CPUs
+0/2/3 each pulled 4 of the 16 tasks off CPU 1's deque. CPU 0 (shell
+driver) caught 3 steals while spinning in its poll loop; CPU 2 and
+CPU 3 each caught 4, with CPU 1 retaining 4 for itself.
+
+**Correctness note:** Pi 5's WORK_STEALING=ON path previously hung
+on boot (#158) because the deque's embedded spinlock was neutered
+by SPINLOCK_SKIP_LOCKING / NC-memory cross-CPU incoherency. Fixed by
+moving the lock into a cacheable `steal_deque_lock[MAX_CPUS]` array
+(same pattern as `rq_lock[]`). The bench driver's completion
+detection also switched from an NC-memory `__atomic_fetch_add` to a
+per-slot single-writer flag — atomics on NC memory are
+implementation-defined per ARM ARM.
+
+## Jetson Orin Nano — partial
+
+Cortex-A78AE, 6 cores @ 1.5 GHz (dual-cluster: Aff2.Aff1), 8 GB RAM.
+Deployed via `sudo slmos-kexec` from L4T.
+
+| Build | Wall-clock (ms) | Per-CPU distribution (0/1/2/3/4/5) | Status |
 |---|---|---|---|
-| OFF | TBD | TBD | — |
-| ON  | TBD | TBD | TBD |
+| `WORK_STEALING=OFF` | 19.8 | 5 / 11 / 0 / 0 / 0 / 0 | ✅ clean |
+| `WORK_STEALING=ON`  | ~27  (bench completes, kernel faults mid-run) | 3 / 11 / 1 / 0 / 1 / 0 | ⚠️ **#166** — page fault during run |
 
-## Jetson Orin Nano — pending hardware capture
+**Known issue (#166):** after the #158 lock fix, the bench now
+completes 16/16 on Jetson and prints results, but a CPU takes a
+kernel page fault during the run and halts. The fault is suspected
+to be dual-cluster MPIDR encoding biting a per-CPU index in the
+steal path, or A78AE cacheable-spinlock contention interacting with
+the external lock. Investigation tracked in #166.
 
-```
-make kernel PLATFORM=JETSON_ORIN_NANO
-scp build/kernel/slmos.elf jetson-nano-2:/tmp/
-ssh jetson-nano-2 sudo slmos-kexec /tmp/slmos.elf
-labctl serial_send jetson-nano-2 "bench stealing 24"  # 6 cores
-# Repeat with WORK_STEALING=ON build.
-```
-
-| Build | Wall-clock (ms) | Per-CPU distribution (0/1/2/3/4/5) | Speedup |
-|---|---|---|---|
-| OFF | TBD | TBD | — |
-| ON  | TBD | TBD | TBD |
-
-**Jetson-specific caveat (resolved 2026-04-14):** the previously-known
-ABA race in the work-stealing deque (#139) is closed by the per-slot
-generation counter in `struct task` — `steal_deque_push` captures
-`task->generation`, `sched_try_steal` re-checks under the victim's
-`rq_lock`, and `task_destroy` bumps the counter on slot recycle so a
-stale captured entry with a matching pointer fails the validator.
-The benchmark no longer carries a "might hang on Jetson" caveat.
+**S4 consequence:** Jetson stays default-OFF for `ENABLE_WORK_STEALING`
+in `CMakeLists.txt` until #166 is resolved. The other hardware
+platform (Pi 5) is green, and combined with x86-64 (ON since Phase
+B) and QEMU (1.7× speedup, unchanged) that's enough evidence to
+flip the default for everyone except Jetson.
 
 ## x86-64 — pending unblock
 
@@ -139,27 +145,33 @@ expected under contention — the ABA mitigation in
 `scheduler_terminate_task` removes the terminating task from all
 deques but can race with in-flight steals.
 
-## Recommendation for S4 (default flip)
+## S4 status — default flipped (2026-04-14)
 
-Based on QEMU ARM64 alone:
+After hardware capture, `ENABLE_WORK_STEALING` now defaults **ON** in
+`CMakeLists.txt` for every platform except Jetson. Rationale:
 
-- ✅ 1.7× speedup on a clean load-imbalance test.
-- ✅ No observed correctness regressions under the regression
-  suite (`make test` passes in both configurations).
-- ⏳ Pi 5 / Jetson / x86-64 data still pending.
+| Platform | ON default? | Evidence |
+|---|---|---|
+| QEMU ARM64 | ✅ | 1.7× speedup (S3 capture), all tests green in both configs |
+| Raspberry Pi 5 | ✅ | 3.12× speedup on bench stealing 16, boots cleanly (#158 closed) |
+| x86-64 | ✅ | ON since Phase B; cache-coherent SMP + LAPIC IPI make the path safe |
+| Jetson Orin Nano | ❌ | Blocks on #166 (page fault during bench stealing); can be opted in with `WORK_STEALING=ON` for experiments |
 
-**Blocker for flipping the default:** #139 (ABA race) is closed
-(2026-04-14, generation-counter fix). The S4 plan requires at least
-two platforms' data to be green before flipping; once Pi 5 and Jetson
-hardware numbers land in the tables above and confirm speedup,
-`CONFIG_WORK_STEALING` should move from default-OFF to default-ON.
+Opt-out path: `make kernel PLATFORM=<platform> WORK_STEALING=OFF` passes `-DENABLE_WORK_STEALING=OFF` to CMake, overriding the per-platform default.
+
+#139 (ABA race) closed 2026-04-14 via per-slot generation counter.
+#158 (Pi 5 boot hang) closed 2026-04-14 via external cacheable lock
+for the steal deque. The two fixes together unblocked S4 for Pi 5.
 
 ## Related
 
 - `kernel/sched/steal_deque.c`, `kernel/sched/sched.c` —
   implementation.
 - `kernel/src/shell_sys.c` (`bench stealing`) — benchmark driver.
+- `CMakeLists.txt` — `ENABLE_WORK_STEALING` per-platform defaults.
 - GitHub #105 — observability counters (Phase S2).
-- GitHub #139 — ABA race, closed 2026-04-14 via per-slot
-  generation counter.
-- `docs/jetson-capstone-execution-plan.md` §S3 — phase description.
+- GitHub #139 — ABA race, closed via per-slot generation counter.
+- GitHub #158 — Pi 5 boot hang, closed via external cacheable
+  steal-deque lock.
+- GitHub #166 — Jetson page fault during bench stealing (open).
+- `docs/jetson-capstone-execution-plan.md` §S3, §S4.

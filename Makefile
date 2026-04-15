@@ -14,8 +14,14 @@ PLATFORM ?= QEMU_VIRT
 # AI Scheduler: OFF by default, ON to include trained ML models
 AI_SCHED ?= OFF
 
-# Work-stealing scheduler (#59 Phase B): OFF by default.
-WORK_STEALING ?= OFF
+# Work-stealing scheduler (#59 Phase B).
+#
+# Empty default: let CMakeLists.txt pick the per-platform default
+# (ON for x86-64 / QEMU ARM64 / Pi 5; OFF for Jetson — see the
+# ENABLE_WORK_STEALING block in CMakeLists.txt). Override explicitly
+# with `make kernel ... WORK_STEALING=ON` or `WORK_STEALING=OFF`;
+# anything else leaves the platform default in place.
+WORK_STEALING ?=
 
 # Secondary-CPU preemption via ELR trampoline: OFF by default. Required
 # for Jetson / Pi 5 to get timer-driven preemption on CPUs 1..N. Replaces
@@ -143,6 +149,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		-DPLATFORM=$(PLATFORM) \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
 		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
 		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
@@ -435,6 +442,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		-DENABLE_BOOT_TESTS=ON \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
 		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
 		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
