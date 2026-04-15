@@ -234,6 +234,11 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/bringup.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/rpc.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/rpc.c>
+    # Jetson: VBIOS platform stub — satisfies nvidia_vbios_platform_load
+    # referenced by bringup.c. Returns -1 (VBIOS unavailable) because the
+    # CBB firewall blocks GPU MMIO and GSP bringup is never invoked on
+    # this platform. Tracked by GitHub issue (see commit history).
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/arch/arm64/nvidia_gsp_platform_stub.c>
 
     # ==========================================================================
     # Memory Management

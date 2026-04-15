@@ -57,8 +57,8 @@ caveats in §6).
 
 | # | Title | Priority | Notes |
 |---|---|---|---|
-| #166 | Jetson page fault during `bench stealing` with WORK_STEALING=ON | P2-medium | After PR #167's lock fix the bench completes 16/16 and prints results, but a CPU faults mid-run. Likely dual-cluster MPIDR or A78AE cacheable-spinlock contention. Reproduces deterministically with `bench stealing 8` on Jetson hardware after `slmos-kexec` |
-| #141 | x86-64 build broken after G3 inference kernels (libm f16 + fat LTO) | P1-high | rustc 1.94.1 doesn't fix it. Cleanest path: replace `libm::sqrtf` / `libm::tanhf` calls in G3 kernels with hand-rolled approximations |
+| #166 | Jetson page fault during `bench stealing` with WORK_STEALING=ON | ✅ closed | Root cause: Jetson hard-defined `SPINLOCK_SKIP_LOCKING` in `platform.h`, making every cacheable spinlock (PMM, task-table, rq_lock, steal_deque_lock) a no-op under SMP. Concurrent `pmm_free_pages` calls corrupted the buddy free list, faulting inside `free_list_add`. Fix (2026-04-15): switched Jetson to Pi 5's runtime `spinlock_hw_enabled` model — barrier-only pre-MMU, real LDAXR/STXR post-MMU. Verified 3 consecutive clean `bench stealing 16` runs (20.9 ms, 2/4/4/4/1/1 distribution across all 6 CPUs). Also bundled the `nvidia_vbios_platform_load` link-error fix (the Jetson build hazard called out in §6). |
+| #141 | x86-64 build broken after G3 inference kernels (libm f16 + fat LTO) | ✅ closed | Resolved in PR #173 (merge commit `f389e84`) by replacing `libm::sqrtf` / `libm::tanhf` with scalar `runtime::mathf` approximations. |
 | #174 | `steal_deque.h` doc clarity | P3-low | Docs-only, ~10 min |
 | #175 | Push-failure counter for `steal_deque` | P3-low | ~20 LOC, observability-only |
 | #158 | Pi 5 boot hang | ✅ closed | Fixed by external lock in PR #167 |
@@ -78,14 +78,14 @@ These are explicit in the plan's week-by-week calendar (weeks 11-12):
 
 If picking what to do next, the honest order is:
 
-1. **#166** — Jetson is the project's headline platform. Work-stealing
-   on Jetson being broken is the only new platform capability still
-   crashing. Worth a focused investigation session.
-2. **Thesis writeup + demo prep** — time-boxed project management,
+1. **Thesis writeup + demo prep** — time-boxed project management,
    no engineering blockers.
-3. **#141** — x86-64 row in `docs/cross-platform-inference-bench.md`
-   stays "blocked" until this is fixed. Not a defense blocker.
-4. **#174 / #175 / S5** — genuinely optional polish.
+2. **S4 scope decision** — Jetson now runs clean with
+   `WORK_STEALING=ON` (see §3a row for #166). Flipping
+   `ENABLE_WORK_STEALING` default ON for Jetson in `CMakeLists.txt`
+   is a one-line change plus a test pass; it was deliberately left
+   out of the #166 fix to keep scope small.
+3. **#174 / #175 / S5** — genuinely optional polish.
 
 ---
 
@@ -149,27 +149,31 @@ don't know them up front.
 
 ### Build / toolchain
 
-- **rustc must be exactly the toolchain on disk**. We're on 1.94.1.
-  `rustup update` doesn't fix #141. The G3 kernels use `libm::sqrtf` /
-  `libm::tanhf` which trip a soft-float legalization bug on
-  `x86_64-unknown-none` under fat LTO. Aarch64 is unaffected.
+- **rustc toolchain note (#141 historical).** Before PR #173 (commit
+  `f389e84`), `libm::sqrtf` / `libm::tanhf` tripped a soft-float
+  legalization bug on `x86_64-unknown-none` under fat LTO. The G3
+  kernels now use `runtime::mathf` scalar approximations and the
+  problem is gone.
 - **`make kernel-clean` and `cargo clean` separately**. CMake caches
   `ENABLE_WORK_STEALING` per build directory; if a previous run set it
   ON or OFF, a re-configure with a different default won't change the
   cache. After flipping defaults, blow away `build/kernel` and
   `build/kernel-test`.
-- **Jetson build presently has a `nvidia_vbios_platform_load`
-  link error from recent x86-64 GSP merges.** Pre-existing, not
-  related to S4. If you need a Jetson kernel built, expect to chase
-  that first.
+- **Jetson `nvidia_vbios_platform_load` link error (Fixed).** A stub
+  at `kernel/arch/arm64/nvidia_gsp_platform_stub.c` returns -1 so the
+  GSP bringup code compiled for Jetson links cleanly. The stub is
+  never invoked at boot (Jetson uses the CBB-blocked GPU as a stub
+  driver). Bundled with the #166 fix.
 
 ### Scheduler / SMP
 
-- **`SPINLOCK_SKIP_LOCKING` is a no-op on Jetson** — any spinlock
-  embedded in NC-memory data structures is barrier-only. Use the
-  cacheable `rq_lock[MAX_CPUS]` / `steal_deque_lock[MAX_CPUS]` pattern
-  instead. The S4 fix moved the steal-deque lock for exactly this
-  reason.
+- **`SPINLOCK_SKIP_LOCKING` retired on Jetson (2026-04-15).** Jetson
+  now shares Pi 5's runtime `spinlock_hw_enabled` model. Pre-MMU it
+  stays 0 (barrier-only); `vmm_init` flips it to 1 and post-MMU
+  spinlocks use real LDAXR/STXR. NC-memory-embedded spinlocks still
+  cannot use exclusive monitors (LDAXR/STXR on NC memory does not
+  work) — the cacheable `rq_lock[MAX_CPUS]` / `steal_deque_lock[MAX_CPUS]`
+  pattern is still required for anything guarding NC data. See #166.
 - **Atomic operations on NC memory may fault.** Per ARM ARM and
   documented in `kernel/CLAUDE.md`. The S3 bench driver hits this on
   Pi 5 if it uses `__atomic_fetch_add` against an NC-memory counter.
@@ -229,7 +233,9 @@ make kernel PLATFORM=RASPI5
 # (then deploy via mcp__labctl__sdwire_update + serial_send)
 
 # Jetson hardware: bench stealing 16 in OFF mode should be clean
-# (~20 ms), in ON mode will currently page-fault per #166
+# (~20 ms). ON mode is also clean (20.9 ms, 2/4/4/4/1/1 distribution)
+# since #166 was fixed 2026-04-15.
+make kernel PLATFORM=JETSON_ORIN_NANO WORK_STEALING=ON
 ```
 
 Live numbers are in `docs/cross-platform-inference-bench.md` and
@@ -242,8 +248,8 @@ Live numbers are in `docs/cross-platform-inference-bench.md` and
 The defense criteria the project is targeting:
 
 1. **A small language model OS that boots on multiple platforms.**
-   ✅ — QEMU ARM64, Raspberry Pi 5, Jetson Orin Nano, x86-64 (modulo
-   #141).
+   ✅ — QEMU ARM64, Raspberry Pi 5, Jetson Orin Nano, x86-64
+   (#141 closed via PR #173).
 2. **NEON-accelerated CPU inference with FP32 / FP16 / INT8 paths.**
    ✅ — G1-G4 land the kernels; `bench matmul` and `bench quant`
    demonstrate.

@@ -17,12 +17,9 @@
  * VMM lock — protects page-table modifications in the public mapping
  * API (vmm_map_block / vmm_unmap_block / vmm_map_region).
  *
- * On Pi 5 this is a real cross-CPU spinlock after MMU enable (see
- * spinlock_hw_enabled in vmm_init). Before MMU enable only CPU 0 runs,
- * so the lock is barrier-only and effectively a no-op. On Jetson the
- * kernel keeps SPINLOCK_SKIP_LOCKING for the reasons documented in
- * platform.h, so this lock is also a barrier — Jetson avoids concurrent
- * mapping API callers by policy.
+ * On Pi 5 and Jetson this is a real cross-CPU spinlock after MMU enable
+ * (see spinlock_hw_enabled, set below). Before MMU enable only CPU 0
+ * runs, so the lock is barrier-only and effectively a no-op.
  */
 static spinlock_t vmm_lock = SPINLOCK_INIT;
 

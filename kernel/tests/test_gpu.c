@@ -650,15 +650,14 @@ static void test_nv_architecture_constants(void)
  * ============================================================================ */
 
 /*
- * Compile-time assertion: Jetson must use SPINLOCK_SKIP_LOCKING.
- * Without this, LSE atomics (SWPALB) in spinlock code cause Synchronous
- * External Abort on Cortex-A78AE before MMU enable. This killed boot
- * at the first uart_puts() call.
+ * Historical note: before issue #166, Jetson defined SPINLOCK_SKIP_LOCKING=1
+ * unconditionally to avoid LSE atomics (SWPALB) faulting on pre-MMU,
+ * non-cacheable memory. That made every cacheable spinlock a no-op post-MMU
+ * too, which produced a free-list page fault once SMP + work-stealing were
+ * live. Jetson now shares Pi 5's model: barrier-only pre-MMU via the runtime
+ * `spinlock_hw_enabled` flag (set to 1 at the end of `vmm_init`). The flag
+ * is verified in `test_spinlock_hw_enabled_after_boot` (test_scheduler.c).
  */
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-static_assert(SPINLOCK_SKIP_LOCKING == 1,
-    "Jetson requires SPINLOCK_SKIP_LOCKING — LSE atomics fault before MMU enable");
-#endif
 
 /*
  * Test: GPU stub driver is used on Jetson (not nvidia MMIO probe).
@@ -683,23 +682,19 @@ static void test_gpu_jetson_uses_stub_driver(void)
 }
 
 /*
- * Test: Spinlock is barrier-only on Jetson (no exclusive ops).
+ * Test: Spinlock acquire/release works on Jetson.
  *
- * Regression for: Phase 5 Jetson kexec crash.
- * Verifies that spin_lock/spin_unlock don't use LDAXR/STXR
- * (which are compiled away by SPINLOCK_SKIP_LOCKING).
+ * Regression for: Phase 5 Jetson kexec crash (originally used barrier-only
+ * spinlocks) and issue #166 (hardware spinlocks needed post-MMU for SMP).
+ * Post-MMU Jetson now uses real LDAXR/STXR via `spinlock_hw_enabled`.
  */
 static void test_spinlock_safe_on_jetson(void)
 {
     spinlock_t test_lock = SPINLOCK_INIT;
 
-    /* spin_lock_irqsave / spin_unlock_irqrestore must not crash.
-     * On Jetson with SPINLOCK_SKIP_LOCKING, these are barrier-only.
-     * On other platforms, they use the runtime spinlock_hw_enabled check. */
     irq_flags_t flags = spin_lock_irqsave(&test_lock);
     spin_unlock_irqrestore(&test_lock, flags);
 
-    /* Verify the lock is not held after unlock */
     TEST_ASSERT_FALSE(spin_is_locked(&test_lock));
 }
 

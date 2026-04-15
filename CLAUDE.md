@@ -170,7 +170,7 @@ make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
 
 ### Known Issues
 
-**Spinlock / LSE Atomics:** On Cortex-A78AE, ARM LSE atomics (SWPALB) and exclusive operations (LDAXR/STXR) cause Synchronous External Abort before MMU enable (non-cacheable memory). `SPINLOCK_SKIP_LOCKING` is defined in `platform.h` to use barrier-only spinlocks. This is safe for early single-CPU boot; SMP data uses NC memory.
+**Spinlock / LSE Atomics (Solved):** On Cortex-A78AE, ARM LSE atomics (SWPALB) and exclusive operations (LDAXR/STXR) cause a Synchronous External Abort on pre-MMU, non-cacheable memory. Jetson originally defined `SPINLOCK_SKIP_LOCKING` unconditionally in `platform.h`, making every cacheable spinlock a no-op even after SMP + MMU were live — this surfaced as issue #166 (a `pmm_free_pages` free-list page fault during `bench stealing` with WORK_STEALING=ON). Jetson now shares Pi 5's runtime model: the `spinlock_hw_enabled` flag stays 0 until `vmm_init` finishes, keeping spinlocks barrier-only pre-MMU, then flips to 1 so real LDAXR/STXR run post-MMU and provide cross-CPU mutual exclusion on cacheable memory.
 
 **GPU CBB Firewall:** GPU registers at 0x17000000 are behind the CBB firewall. Reading NV_PMC_BOOT_0 triggers an external abort. The stub GPU driver is used on Jetson instead of the NVIDIA probe driver.
 
