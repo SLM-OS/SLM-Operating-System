@@ -284,7 +284,7 @@ static int parse_line(char *line, char *argv[], int max_args)
  * Supports: backspace, enter
  * Returns line length (excluding null terminator).
  */
-static int read_line(char *buf, int max_len)
+int shell_read_line(char *buf, int max_len)
 {
     int pos = 0;
     char c;
@@ -416,7 +416,7 @@ void shell_run(void)
         uart_puts(SHELL_PROMPT);
 
         /* Read line */
-        int len = read_line(line_buffer, SHELL_MAX_LINE);
+        int len = shell_read_line(line_buffer, SHELL_MAX_LINE);
 
         if (len == 0) {
             continue;  /* Empty line */

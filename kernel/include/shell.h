@@ -63,4 +63,15 @@ int shell_register_command(const shell_cmd_t *cmd);
  */
 int shell_execute(const char *cmdline);
 
+/*
+ * Read one line from the UART with basic line editing (backspace, Ctrl+C).
+ * Echoes input as it arrives and terminates on CR/LF. Output is NUL-terminated.
+ * Returns the number of characters read (excluding the terminator).
+ *
+ * This is the line reader that the shell REPL uses internally; exposed so Lua
+ * scripting (slm.read_line) and other callers can prompt the user without
+ * duplicating the implementation.
+ */
+int shell_read_line(char *buf, int max_len);
+
 #endif /* SHELL_H */
