@@ -12,8 +12,12 @@
 //! against in `lib.rs`:
 //!   - `sqrtf`: ≤ 1e-6 relative error, sufficient for variance/std
 //!     calculations whose downstream tolerance is 1e-4.
-//!   - `tanhf`: ≤ 1e-6 absolute error in [-5, 5], saturates at ±1
-//!     outside; tighter than the GELU test's 1e-5 tolerance.
+//!   - `tanhf`: Padé(7,7) is ≤ 1e-6 absolute error in [-3, 3] and
+//!     grows to ~1.5e-5 at ±4; we saturate at ±4 since the Padé
+//!     returns values > 1.0 past that. GELU's inputs land well
+//!     inside [-3, 3] in practice (tanh arg = 0.798·(x + 0.045·x³),
+//!     so x = ±2 → arg ≈ ±1.9), so the approximation stays tight
+//!     for the actual caller even at the tail-saturation points.
 
 /// Single-precision square root via bit-magic init + 3 Newton iterations.
 ///
@@ -45,15 +49,18 @@ pub fn sqrtf(x: f32) -> f32 {
 ///   tanh(x) ≈ x · (135135 + x²·(17325 + x²·(378 + x²)))
 ///            ÷ (135135 + x²·(62370 + x²·(3150 + 28·x²)))
 ///
-/// Saturates at ±1 outside [-5, 5] (where Padé(7,7) starts to lose
-/// precision and the saturation is correct to better than 1e-4
-/// anyway). No branches in the hot path beyond the saturation guard.
+/// Saturates at ±1 outside [-4, 4]. Past ±4 the Padé numerator
+/// outgrows the denominator and the rational returns values > 1.0
+/// — mathematically wrong (|tanh| < 1 everywhere), so we clamp.
+/// Inside [-3, 3] the approximation is < 1e-6 off; the GELU caller
+/// hands us arguments well inside that range in practice.
+/// No branches in the hot path beyond the saturation guard.
 #[inline]
 pub fn tanhf(x: f32) -> f32 {
-    if x > 5.0 {
+    if x > 4.0 {
         return 1.0;
     }
-    if x < -5.0 {
+    if x < -4.0 {
         return -1.0;
     }
     let x2 = x * x;
@@ -86,5 +93,7 @@ mod tests {
         assert!(approx(tanhf(-2.0), -0.9640276, 1.0e-6));
         assert_eq!(tanhf(10.0), 1.0);
         assert_eq!(tanhf(-10.0), -1.0);
+        assert_eq!(tanhf(4.0001), 1.0);
+        assert_eq!(tanhf(-4.0001), -1.0);
     }
 }

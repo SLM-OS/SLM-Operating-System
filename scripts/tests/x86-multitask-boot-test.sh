@@ -72,7 +72,8 @@ echo
 echo "=== Step 2: boot_test --runs $RUNS ==="
 BOOT_OUT="$(mktemp)"
 trap 'rm -f "$BOOT_OUT"' EXIT
-labctl boot-test "$SBC" --expect "$PROMPT" --runs "$RUNS" --timeout "$BOOT_TIMEOUT" \
+labctl boot-test "$SBC" --no-deploy --expect "$PROMPT" --runs "$RUNS" \
+    --timeout "$BOOT_TIMEOUT" \
     | tee "$BOOT_OUT"
 
 # Extract the final "Result: X/Y boots successful" line.

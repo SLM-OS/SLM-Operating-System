@@ -3784,6 +3784,65 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test 8g: mathf::sqrtf accuracy (replaces libm::sqrtf on x86-64 to
+    // work around issue #141). Run on every platform so any regression
+    // in the Newton-Raphson sqrt shows up in both ARM64 QEMU `make test`
+    // and the x86-64 disk boot output.
+    {
+        // (input, expected) pairs — expected values match Python's
+        // math.sqrt to 7+ decimals, well inside our 1e-6 target.
+        let cases: [(f32, f32); 7] = [
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (2.0, 1.4142135),
+            (4.0, 2.0),
+            (100.0, 10.0),
+            (1.0e-5, 0.00316228),
+            (9.8696045, 3.1415927),   // π² → π
+        ];
+        let mut vals_ok = true;
+        for (x, expected) in cases.iter() {
+            let got = inference::mathf::sqrtf(*x);
+            let tol = if *expected > 1.0 { expected * 1.0e-6 } else { 1.0e-6 };
+            if (got - expected).abs() > tol { vals_ok = false; break; }
+        }
+        // Negative input contract: return 0 rather than NaN so
+        // layer_norm / rms_norm don't propagate NaN on near-constant rows.
+        let neg_ok = inference::mathf::sqrtf(-1.0) == 0.0;
+        let passed = vals_ok && neg_ok;
+        print_test_result(b"simd: mathf sqrtf 7 known values + neg guard\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 8h: mathf::tanhf accuracy. Padé(7,7) inside the fit window,
+    // saturation to exactly ±1 past ±4. GELU's downstream tolerance
+    // is 1e-5; Padé stays under that through [-3, 3], which covers
+    // the actual GELU input range.
+    {
+        let cases: [(f32, f32); 6] = [
+            (0.0, 0.0),
+            (0.5, 0.46211717),
+            (1.0, 0.76159418),
+            (-1.0, -0.76159418),
+            (2.0, 0.96402758),
+            (-3.0, -0.99505478),
+        ];
+        let mut vals_ok = true;
+        for (x, expected) in cases.iter() {
+            let got = inference::mathf::tanhf(*x);
+            if (got - expected).abs() > 1.0e-5 { vals_ok = false; break; }
+        }
+        // Saturation past ±4 — branch returns exactly ±1.
+        let sat_ok = inference::mathf::tanhf(10.0) == 1.0
+                  && inference::mathf::tanhf(-10.0) == -1.0
+                  && inference::mathf::tanhf(100.0) == 1.0
+                  && inference::mathf::tanhf(4.0001) == 1.0
+                  && inference::mathf::tanhf(-4.0001) == -1.0;
+        let passed = vals_ok && sat_ok;
+        print_test_result(b"simd: mathf tanhf 6 known values + saturation\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Test 9: MaxPool2D unit test
     // 1x1x4x4 input with values 1..16, 2x2 pool stride 2
     // output 1x1x2x2 = [6, 8, 14, 16]

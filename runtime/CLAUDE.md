@@ -20,11 +20,19 @@ runtime/
     │   ├── mod.rs       # Memory management module
     │   ├── model_mem.rs # Model memory allocator (weight/workspace pools)
     │   └── model_loader.rs  # Model loader skeleton (Phase 5)
-    └── sched/
-        ├── mod.rs       # Scheduler policy module
-        ├── deadline.rs  # Deadline-aware scheduling
-        ├── inference.rs # Inference scheduler skeleton (Phase 5)
-        └── heterogeneous.rs  # big.LITTLE CPU topology awareness
+    ├── sched/
+    │   ├── mod.rs       # Scheduler policy module
+    │   ├── deadline.rs  # Deadline-aware scheduling
+    │   ├── inference.rs # Inference scheduler skeleton (Phase 5)
+    │   └── heterogeneous.rs  # big.LITTLE CPU topology awareness
+    └── inference/       # Inference engine + ops kernels
+        ├── mod.rs
+        ├── tensor.rs    # Tensor view (data ptr + shape)
+        ├── workspace.rs # Bump allocator for activations
+        ├── mathf.rs     # No-libm scalar math (#141 workaround)
+        ├── ops.rs       # Conv2D, MatMul, LayerNorm, GELU, ...
+        ├── engine.rs    # Top-level Engine::run dispatch
+        └── gpu.rs       # GPU offload stubs (Phase E)
 ```
 
 ### Module Overview
@@ -39,6 +47,10 @@ runtime/
 | `sched::deadline` | Deadline-aware task scheduling hints | Complete |
 | `sched::inference` | Inference request queue management | Skeleton (Phase 5) |
 | `sched::heterogeneous` | CPU topology and core selection | Complete |
+| `inference::mathf` | Scalar `sqrtf` / `tanhf` (no-libm, #141 workaround) | Complete |
+| `inference::ops` | NEON/SSE inference kernels — matmul, conv2d, layernorm, GELU, ... | Complete |
+| `inference::engine` | Top-level `Engine::run` op dispatch | Complete |
+| `inference::gpu` | GPU offload via `gsp_compute_*` FFI | Skeleton (Phase E) |
 
 ## `no_std` Conventions
 
@@ -245,6 +257,34 @@ unsafe fn foo_simd(ptr: *mut f32, n: usize) {
 function callable (via the scalar branch) on x86_64 test builds. NEON
 is mandated by ARMv8-A, so the attribute mostly documents intent and
 matches the explicit `+neon` in `.cargo/config.toml`.
+
+### `mathf` — scalar libm replacements (issue #141 workaround)
+
+`runtime/src/inference/mathf.rs` provides no-libm scalar
+implementations of the two libm functions whose code paths trigger
+the rustc-LLVM f16 soften-operand crash on `x86_64-unknown-none`:
+
+- `mathf::sqrtf` — bit-magic init + 3 Newton-Raphson iterations,
+  ≤ 1e-6 relative error. Used by LayerNorm and RMSNorm.
+- `mathf::tanhf` — Padé(7,7) rational approximation with hard
+  saturation past `±4` (where the Padé numerator outgrows the
+  denominator). Used by GELU. Tight to ~1e-6 inside `[-3, 3]`,
+  growing to ~1.5e-5 toward the saturation boundary — well inside
+  GELU's actual input range.
+
+**`libm::roundf` and `libm::expf` are still allowed** — empirically
+those don't trigger the f16 soften crash. If they ever do, the
+same `mathf` pattern applies: write a scalar replacement and swap
+the call sites in `ops.rs` and the matching reference in `lib.rs`
+test code so bit-equality stays preserved.
+
+The kernel-boot test suite (`rust_run_tests` in `lib.rs`) covers
+`mathf::sqrtf` and `mathf::tanhf` against known values on every
+platform, so a regression shows up in both ARM64 QEMU `make test`
+and the x86-64 disk boot output.
+
+Tracking issue: **#141** — workaround can be removed once the
+upstream LLVM legalizer fix lands or libm 0.2 splits its f16 paths.
 
 ---
 

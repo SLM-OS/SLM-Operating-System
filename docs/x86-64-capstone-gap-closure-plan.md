@@ -120,38 +120,40 @@ bulletproof under real-hardware, adversarial workloads.
 
 ---
 
-### A2. Real-hardware multi-task preemption validation (P1-2)
+### A2. Real-hardware multi-task preemption validation (P1-2) — **DONE 2026-04-15**
 
-**Deliverables.**
-- New script: `scripts/tests/x86-multitask-boot-test.sh` — uses
-  `labctl` to flash `slmos-x86.img` to test-pc, power-cycle, capture
-  30 seconds of serial output, and assert:
-  - `sleep 2000` while `component run echo` is active returns within
-    [2000, 2200] ms (5 consecutive runs).
-  - `bench smp` dispatches work to all 8 CPUs.
-- Run 10 back-to-back boot tests via `labctl boot_test --count 10`
-  and require ≥9/10 PASS.
-- Results logged to `docs/testing/x86-hw-validation-<date>.md` as a
-  dated snapshot.
+**Shipped (PR #173):**
+- `scripts/tests/x86-multitask-boot-test.sh` — orchestrates
+  `labctl sdwire flash` → `labctl boot-test --no-deploy` → a Python
+  ser2net driver that times `sleep 2000` under `component run echo`
+  load → `bench smp` dispatch capture. Exits non-zero on any gate
+  failure; supports `--no-flash` / `--runs` overrides for iteration.
+- `make x86-hw-validate PLATFORM=X86_64 SLMOS_LABCTL=1` — Makefile
+  target wrapping the script, gated on the `SLMOS_LABCTL` env var
+  so CI without lab access skips cleanly.
 
-**Design.**
-- The script runs **after** A1 lands so any TSS issue surfaces on
-  real hardware.
-- Serial output is parsed for the literal strings `slmos>`, `[echo]`,
-  `sleep 2000 completed`, and any `*** EXCEPTION` marker.
+**Observed on test-pc (Gigabyte H610M, i7-6700, 8 logical CPUs):**
+- `boot_test --count 10` → **10/10 PASS** (avg 18.5 s).
+- `sleep 2000` × 5 under `component run echo` → 2007, 2008, 2007,
+  2008, 2007 ms (5/5 inside [2000, 2200], all within 0.4 % of
+  target — well below the 10 % acceptance window).
+- `bench smp` → 7/7 secondary CPUs dispatched (CPU 1-7).
 
-**Tests.** The script itself is the test — it is wired into
-`make x86-hw-validate PLATFORM=X86_64` as a Makefile target gated on
-the `SLMOS_LABCTL=1` env var (so CI without lab access doesn't run
-it).
+Full dated results: `docs/testing/x86-hw-validation-2026-04-15.md`.
 
-**Acceptance criteria.**
-- 5/5 `sleep 2000` + `component run echo` runs return within 10% of
-  target.
-- `boot_test --count 10` = ≥9/10 PASS (matches Pi 5 baseline).
-- Dated results document committed to `docs/testing/`.
+**Findings opened during validation (non-blocking):**
+- **#171** — `slm_get_time_ns()` multiply-overflow on x86-64 after
+  ~5 s uptime makes the `sleep` command's *displayed* elapsed value
+  garbage. Wall-clock behavior (what P1-2 measures) is correct. P2-medium.
+- **#172** — `bench smp`'s per-CPU completion wait is gated on
+  `PLATFORM_HAS_NC_MEMORY` and skipped on x86-64 — would benefit
+  from a cacheable-BSS path. Dispatch side (P1-2's bar) passes. P3-low.
 
-**Est.** 1 day.
+**Prerequisite:** the `mathf::{sqrtf,tanhf}` workaround for #141
+landed on the same PR — without it the x86-64 build fails at
+`slm-runtime` codegen. Tracked separately as #141.
+
+**Est.** 1 day; **actual:** ~1 day including the #141 unblock.
 
 ---
 
