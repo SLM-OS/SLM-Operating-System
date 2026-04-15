@@ -218,7 +218,12 @@ abandoned exception frame on real ARM64 hardware).
   `resched_trampoline` in `vectors.S:377-380` uses
   `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` to compute the CPU index,
   which collides on dual-cluster CPU 4/5. Jetson plan P3 step 2 owns
-  the fix.
+  the fix. **Enforced at boot (#137):** `preempt_check_cpu_mpidr`
+  (kernel/sched/preempt.c) panics from `scheduler_init` /
+  `secondary_init` if the fold disagrees with the caller's logical
+  CPU id, so the soft documentation warning can no longer be
+  bypassed silently — a Jetson build with `SECONDARY_PREEMPT=ON`
+  halts loudly on the first secondary bring-up.
 - **QEMU:** works today but rarely needed — QEMU's timer IRQ from an
   ISR doesn't crash the kernel; the default cooperative path is fine.
 

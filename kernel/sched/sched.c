@@ -642,6 +642,10 @@ void scheduler_init(void)
 
     /* Secondary-CPU preemption state (Pi 5 only). No-op on other platforms. */
     preempt_init();
+    /* #137: sanity-check CPU 0's MPIDR against the trampoline formula
+     * before any secondary comes up. No-op when SECONDARY_PREEMPT is
+     * undefined. */
+    preempt_check_cpu_mpidr(0);
 
 #if CONFIG_WORK_STEALING && defined(PLATFORM_HAS_NC_MEMORY)
     /* Allocate the per-CPU steal deque array from NC memory so cross-CPU
