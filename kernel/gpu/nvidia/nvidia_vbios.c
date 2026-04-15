@@ -509,7 +509,14 @@ int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
     if (t_version != 1 || t_hdr_size != FALCON_TABLE_HDR_SIZE ||
         t_entry_sz != FALCON_TABLE_ENTRY_SIZE) return -1;
     if (t_count == 0 || t_count > 32) return -1;       /* sanity cap */
-    if (t_desc_ver != 2 && t_desc_ver != 3) return -1;
+    /* DescVersion / DescSize in the TABLE header are informational —
+     * they hint at the most common descriptor format used by entries
+     * but the authoritative version for each descriptor lives in the
+     * per-entry header (bits 15:8). Validated 2026-04-14 against a
+     * real RTX 3050: TABLE header reports desc_ver=1 desc_sz=0x30,
+     * while FWSEC_PROD entry's actual descriptor is V3. Trust the
+     * per-descriptor header. */
+    (void)t_desc_ver;
     (void)t_desc_sz;
 
     /* Entries immediately follow the header. */
@@ -539,39 +546,56 @@ int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,
         return -1;
     if ((size_t)desc_abs + 4 > vb->image_size) return -1;
 
-    /* Descriptor header tells us which version + size we're reading. */
+    /* Descriptor header tells us which version + size we're reading.
+     *   bits  0:0  version-available flag (must be 1 — "unavailable"
+     *              marker is an openrm skip-this-entry signal)
+     *   bits 15:8  descriptor version (2 = Turing V2, 3 = Ampere V3)
+     *   bits 31:16 total descriptor + signature block size in bytes
+     *
+     * dsize can legitimately be several KB (V3 header is 44 bytes +
+     * 4 × 384-byte RSA-3K signatures = 1,580 bytes on real GA107).
+     * Do NOT cap it at a small value — openrm only checks
+     * `dsize >= version-specific-minimum`. 64 KB upper bound is
+     * defense-in-depth against corrupt input. */
     uint32_t dhdr = rd32(&vb->image[desc_abs]);
+    if ((dhdr & 1u) == 0) return -1;    /* version-available flag */
     uint32_t dver = (dhdr >> FALCON_DESC_VER_SHIFT) & FALCON_DESC_VER_MASK;
     uint32_t dsize = (dhdr >> FALCON_DESC_SIZE_SHIFT) & FALCON_DESC_SIZE_MASK;
 
-    if ((dver != 2 && dver != 3) || dsize < 16 || dsize > 256) return -1;
+    if (dver != 2 && dver != 3) return -1;
+    if (dsize < 16 || dsize > 64u * 1024u) return -1;
     if ((size_t)desc_abs + dsize > vb->image_size) return -1;
 
-    /* Compute total payload size = desc + signatures + IMEM + DMEM. */
-    uint32_t imem_load = 0, dmem_load = 0, sig_count = 0;
+    /* Compute total FWSEC payload size = descriptor (includes
+     * signatures on V3) + IMEM + DMEM. openrm does the same: see
+     * `signaturesTotalSize = descSize - FALCON_UCODE_DESC_V3_SIZE_44`
+     * and `pUcode->size = imemLoadSize + dmemLoadSize`.
+     *
+     * The ucode bytes themselves live at a separate location in the
+     * VBIOS (pointed at by a separate field in the descriptor) —
+     * openrm reads desc at desc_ptr, then ucode at imageOffset
+     * computed from fields inside the descriptor. For SLM-OS we
+     * return the descriptor payload — a future E3 step will compute
+     * the separate ucode imageOffset when we actually run FWSEC
+     * on SEC2 Falcon. */
+    uint32_t imem_load = 0, dmem_load = 0;
     if (dver == 3) {
         if (dsize < 44) return -1;
         imem_load = rd32(&vb->image[desc_abs + FALCON_DESC_V3_IMEM_LOAD_SIZE]);
         dmem_load = rd32(&vb->image[desc_abs + FALCON_DESC_V3_DMEM_LOAD_SIZE]);
-        sig_count = vb->image[desc_abs + FALCON_DESC_V3_SIG_COUNT];
     } else {
         if (dsize < 60) return -1;
         imem_load = rd32(&vb->image[desc_abs + FALCON_DESC_V2_IMEM_LOAD_SIZE]);
         dmem_load = rd32(&vb->image[desc_abs + FALCON_DESC_V2_DMEM_LOAD_SIZE]);
-        /* V2 inlines the signature block; count is implicit. */
-        sig_count = 0;
     }
 
     /* Guard against unreasonable sizes. 4 MB per segment is well
      * over anything NVIDIA ships. */
     if (imem_load > 4u * 1024u * 1024u ||
-        dmem_load > 4u * 1024u * 1024u ||
-        sig_count > 16) return -1;
+        dmem_load > 4u * 1024u * 1024u) return -1;
 
-    uint32_t payload_size = dsize
-                          + (uint32_t)sig_count * FALCON_SIGNATURE_SIZE
-                          + imem_load
-                          + dmem_load;
+    uint32_t payload_size = dsize + imem_load + dmem_load;
+    if (payload_size < dsize) return -1;   /* overflow paranoia */
 
     if ((size_t)desc_abs + payload_size > vb->image_size) return -1;
 

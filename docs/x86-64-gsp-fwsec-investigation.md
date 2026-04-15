@@ -1,11 +1,49 @@
 # FWSEC Discovery on RTX 3050 (GA107) — Investigation Notes
 
-**Status (2026-04-14 update):** Algorithm resolved; ROM-access blocker
-remains. #143 still open — #150 tracks the specific ROM-access gap
-(the PCI ROM BAR on test-pc only exposes 512 KB but the declared
-VBIOS is ~568 KB, so the pointer resolution lands past the dump).
-The algorithm-level work shipped in this session; details below are
-preserved for future sessions debugging a different card or SKU.
+**Status (2026-04-14, end-of-day):** **RESOLVED.** FWSEC extracts
+cleanly on the RTX 3050. Both #143 and #150 can close.
+
+Final session arc:
+1. First attempt failed because the cached openrm 535.113.01
+   doesn't handle NPDS-format FwSec images.
+2. Fresh references (openrm 595, nova-core mainline) gave the
+   correct algorithm: PciAt | FwSec1 | FwSec2 concatenation with
+   two-subtraction pointer math.
+3. Implementing it produced a correct pointer that landed past
+   the 512 KB PCI Expansion ROM BAR → appeared to need ACPI `_ROM`.
+4. **Actual fix:** the proprietary / open-RM driver never uses the
+   Expansion ROM BAR. It reads from **BAR0 + 0x00300000** — the
+   1 MB `NV_PROM_DATA` window that directly mirrors SPI flash.
+   Switching the harness to that path gave us all 4 sub-images
+   and the FWSEC pointer resolves to valid descriptor data.
+5. Two additional one-liners after that: relax the table-header
+   `DescVersion` check (table-level field is informational;
+   per-descriptor version is authoritative) and drop `descSize`
+   upper cap (1,580 bytes on this card is legitimate — it's 44-byte
+   V3 header + 4 × 384-byte RSA-3K signatures).
+
+On the RTX 3050 at test-pc, `gsp-harness --vbios` now reports:
+```
+[GSP-HARNESS] VBIOS image: 1048576 bytes @ ... via BAR0+0x300000 PROM
+[GSP-HARNESS] sub-images (4):
+              [0] @0x000000  code_type=0x00 (PciAt)  len=65024
+              [1] @0x00fe00  code_type=0x03 (EFI)    len=84480
+              [2] @0x024800  code_type=0xE0 (FwSec)  len=22016
+              [3] @0x029e00  code_type=0xE0 (FwSec)  len=399872
+[GSP-HARNESS] FWSEC: 62124 bytes @ 0x...
+```
+
+The 62,124 bytes break down as 44 (V3 descriptor header) + 1,536
+(4 signatures × 384) + 58,112 (IMEM) + 2,432 (DMEM). Matches what
+openrm's `kgspExtractVbiosFromRom_TU102` produces.
+
+Algorithm ships in `kernel/gpu/nvidia/nvidia_vbios.c`.
+Access path in harness is `host-tools/gsp-harness/linux_platform.c`
+(`read_vbios_via_prom_window`). The bare-metal x86-64 platform
+shim will need the same treatment — tracked as a small follow-up.
+
+Details below preserved for future sessions debugging a different
+card or SKU.
 
 **Target card:** ASUS RTX 3050 6GB (GA107), PCI vendor/device `10de:2584`,
 chip id 0x177 (Ampere), BAR0 16 MB at 0x53000000, ROM BAR 512 KB at

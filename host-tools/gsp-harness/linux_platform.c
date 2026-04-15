@@ -176,31 +176,77 @@ static void linux_gsp_firmware_get(enum gsp_firmware_kind kind,
 
 /* ---- VBIOS ----
  *
- * Three access paths, tried in order:
+ * Four access paths, tried in order:
  *
- * 1. /dev/mem at the ROM BAR physical address (preferred). Reads
- *    the raw 512 KB BAR contents — bypasses the Linux kernel's
- *    `pci_read_rom()` cap that stops at PCIR LAST. This is the only
- *    path that returns data past byte ~149 KB on a typical Ampere
- *    GA10x: both sysfs `/sys/.../rom` and VFIO ROM region use
- *    `pci_map_rom()` under the hood and return garbage (or stop)
- *    past the chain's LAST marker, even though the BAR exposes more.
+ * 1. **BAR0 PROM window (NV_PROM_DATA)**. Authoritative. This is
+ *    what openrm's `kgspExtractVbiosFromRom_TU102` uses and what
+ *    the proprietary driver uses. BAR0 + 0x300000 is a 1 MB MMIO
+ *    window that directly mirrors the GPU's SPI flash — bypassing
+ *    the PCI Expansion ROM BAR entirely. On GA10x the Expansion
+ *    ROM BAR caps at 512 KB but the VBIOS can be up to 1 MB; this
+ *    path returns all of it. Requires BAR0 to be mapped (it
+ *    already is for register access).
  *
- * 2. **VFIO ROM region**. Same content as sysfs but with the ROM
- *    BAR enable side-effect handled via VFIO config write — kept
- *    as a fallback when /dev/mem isn't available (locked-down
- *    kernel, security policy).
+ * 2. /dev/mem at the ROM BAR physical address. Legacy fallback.
+ *    Returns up to 512 KB. Rarely enough on Ampere, but kept for
+ *    systems where BAR0 PROM window isn't accessible.
  *
- * 3. **sysfs `/sys/bus/pci/devices/<BDF>/rom`**. Last resort.
+ * 3. VFIO ROM region. Uses `pci_map_rom()` under the hood —
+ *    subject to the PCIR-LAST truncation.
  *
- * Even /dev/mem doesn't get us past the BAR size, which on the
- * RTX 3050 / GA107 is 512 KB — smaller than the ~568 KB the VBIOS
- * declares. See #150 for the remaining gap (ACPI _ROM / PRAMIN /
- * etc) on cards where FWSEC lives in the missing tail.
+ * 4. sysfs `/sys/bus/pci/devices/<BDF>/rom`. Last resort; stops
+ *    at PCIR LAST, usually ~149 KB on GA10x.
  */
 
 #define PCI_CFG_COMMAND_OFF   0x04
 #define PCI_CFG_ROM_BAR_OFF   0x30
+
+/* NV_PROM_DATA — BAR0 offset that maps the GPU's SPI flash as a
+ * 1 MB MMIO window. From NVIDIA open-gpu-kernel-modules'
+ * `src/common/inc/swref/published/turing/tu102/dev_ext_devices.h`.
+ * Used on Turing+ including all Ampere (the GA10x HAL doesn't
+ * override VBIOS extraction — reuses the TU102 implementation). */
+#define NV_PROM_DATA_OFFSET   0x00300000u
+#define NV_PROM_DATA_SIZE     0x00100000u    /* 1 MB */
+
+/*
+ * Read the VBIOS from BAR0's PROM window. This is the authoritative
+ * method the open-RM and proprietary drivers use — reads the actual
+ * SPI flash contents regardless of the PCI Expansion ROM BAR size
+ * advertised in config space. Returns byte count on success (up to
+ * 1 MB), 0 if BAR0 isn't mapped, -1 on unexpected error.
+ *
+ * We use 32-bit reads because the PROM window is register-width —
+ * a `memcpy` or byte-by-byte read would go through the same MMIO
+ * path but wastes cycles. 32-bit reads match what openrm does.
+ */
+static ssize_t read_vbios_via_prom_window(uint8_t **out_buf)
+{
+    if (!g_bar0) return 0;
+    /* BAR0 mapping must be large enough to cover the PROM window. */
+    if (g_bar0_size < NV_PROM_DATA_OFFSET + NV_PROM_DATA_SIZE) {
+        if (g_trace)
+            fprintf(stderr, "[VBIOS] BAR0 too small (%zu < %u) for PROM window\n",
+                    g_bar0_size, NV_PROM_DATA_OFFSET + NV_PROM_DATA_SIZE);
+        return 0;
+    }
+
+    uint8_t *buf = malloc(NV_PROM_DATA_SIZE);
+    if (!buf) return -1;
+
+    const volatile uint32_t *prom =
+        &g_bar0[NV_PROM_DATA_OFFSET / 4];
+    uint32_t *dst = (uint32_t *)buf;
+    for (size_t i = 0; i < NV_PROM_DATA_SIZE / 4; i++)
+        dst[i] = prom[i];
+
+    if (g_trace)
+        fprintf(stderr, "[VBIOS] read 1 MB via BAR0 + 0x%x PROM window\n",
+                NV_PROM_DATA_OFFSET);
+
+    *out_buf = buf;
+    return (ssize_t)NV_PROM_DATA_SIZE;
+}
 
 /*
  * Try /dev/mem at the ROM BAR's physical address. Reads PCI config
@@ -482,13 +528,19 @@ int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
         return -1;
     }
 
-    /* Try /dev/mem first — only path that returns full BAR contents
-     * past the kernel's PCIR-LAST cap. Fall back to VFIO (which has
-     * the same cap as sysfs but doesn't need root if the device is
-     * already vfio-bound). Last resort is sysfs. */
+    /* Try the BAR0 PROM window first — this is what the open-RM and
+     * proprietary drivers use, and it's the only path that returns
+     * the full SPI-flash contents on GA10x regardless of the
+     * Expansion ROM BAR's advertised size. Fall back through the
+     * legacy paths (/dev/mem, VFIO ROM region, sysfs ROM) for systems
+     * where BAR0 PROM access isn't viable. */
     uint8_t *buf = NULL;
-    ssize_t n = read_vbios_via_devmem(g_pci_path, &buf);
-    const char *via = "devmem";
+    ssize_t n = read_vbios_via_prom_window(&buf);
+    const char *via = "BAR0+0x300000 PROM";
+    if (n <= 0) {
+        n = read_vbios_via_devmem(g_pci_path, &buf);
+        via = "devmem";
+    }
     if (n <= 0) {
         n = read_vbios_via_vfio(g_pci_path, &buf);
         via = "vfio";
@@ -498,7 +550,7 @@ int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
         via = "sysfs";
     }
     if (n <= 0) {
-        fprintf(stderr, "[VBIOS] both VFIO and sysfs failed\n");
+        fprintf(stderr, "[VBIOS] all access paths failed\n");
         return -1;
     }
     if (n < 4) {
