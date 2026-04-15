@@ -72,9 +72,9 @@ uint32_t gsp_rpc_free_pages(uint32_t wptr, uint32_t rptr, uint32_t page_count)
 
 int gsp_rpc_init(struct gsp_rpc_channel *ch)
 {
-    if (!ch) return -1;
+    if (!ch) return GSP_ERR_INVAL;
     if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free)
-        return -1;
+        return GSP_ERR_INVAL;
 
     memset(ch, 0, sizeof(*ch));
 
@@ -85,7 +85,7 @@ int gsp_rpc_init(struct gsp_rpc_channel *ch)
      * in IOVA space. */
     ch->shm_va = gsp_platform->dma_alloc(ch->shm_size, GSP_PAGE_SIZE,
                                           &ch->shm_iova);
-    if (!ch->shm_va) return -1;
+    if (!ch->shm_va) return GSP_ERR_NOMEM;
 
     memset(ch->shm_va, 0, ch->shm_size);
 
@@ -108,7 +108,7 @@ int gsp_rpc_init(struct gsp_rpc_channel *ch)
     ch->cmdq.seq = 1;
 
     ch->initialized = true;
-    return 0;
+    return GSP_OK;
 }
 
 void gsp_rpc_dtor(struct gsp_rpc_channel *ch)
@@ -123,44 +123,44 @@ void gsp_rpc_dtor(struct gsp_rpc_channel *ch)
 int gsp_rpc_send(struct gsp_rpc_channel *ch, uint32_t function,
                  const void *payload, size_t payload_len)
 {
-    if (!ch || !ch->initialized) return -1;
-    if (payload_len > 0 && !payload) return -1;
+    if (!ch || !ch->initialized) return GSP_ERR_INVAL;
+    if (payload_len > 0 && !payload) return GSP_ERR_INVAL;
 
     /* Compute pages needed; reject anything > 16 pages (GSP cap). */
-    if (payload_len > 16u * GSP_PAGE_SIZE) return -1;
+    if (payload_len > 16u * GSP_PAGE_SIZE) return GSP_ERR_INVAL;
     uint32_t pages = gsp_rpc_pages_for_payload(
         (uint32_t)(payload_len + sizeof(struct gsp_rpc_hdr)));
-    if (pages > 16) return -1;
+    if (pages > 16) return GSP_ERR_INVAL;
 
     /* Free-space check. */
     uint32_t wptr = *ch->cmdq.wptr;
     uint32_t rptr = *ch->cmdq.rptr;
     if (gsp_rpc_free_pages(wptr, rptr, ch->cmdq.page_count) < pages)
-        return -1;
+        return GSP_ERR_NOSPC;
 
     /* Until GSP-RM is alive on the RISC-V core, the consumer never
      * advances rptr — sending here would silently fill the ring.
      * Refuse to send until gsp_init_done is observed. */
-    if (!ch->gsp_init_done) return -1;
+    if (!ch->gsp_init_done) return GSP_ERR_NOSYS;
 
     /* Write element header + RPC header + payload into the cmdq
      * starting at wptr. (Implementation pending hardware-side
      * correctness review — landed alongside the GSP_INIT_DONE wait
      * once the test-pc bringup completes.) */
     (void)function; (void)payload; (void)payload_len;
-    return -1;
+    return GSP_ERR_NOSYS;
 }
 
 int gsp_rpc_wait(struct gsp_rpc_channel *ch, uint32_t function,
                  uint32_t timeout_us,
                  void *out, size_t max_out, size_t *out_len)
 {
-    if (!ch || !ch->initialized) return -1;
+    if (!ch || !ch->initialized) return GSP_ERR_INVAL;
     (void)function; (void)timeout_us; (void)out; (void)max_out;
     if (out_len) *out_len = 0;
 
     /* Same gating as gsp_rpc_send. The polling loop will live here
      * once the GSP-side queue advances. */
-    if (!ch->gsp_init_done) return -1;
-    return -1;
+    if (!ch->gsp_init_done) return GSP_ERR_NOSYS;
+    return GSP_ERR_NOSYS;
 }

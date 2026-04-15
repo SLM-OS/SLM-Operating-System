@@ -310,10 +310,10 @@ void falcon_pre_pio_setup(struct falcon *f)
 int falcon_pio_upload_imem(struct falcon *f, const uint8_t *src,
                            uint32_t len, uint32_t falcon_off, bool is_secure)
 {
-    if (!f || !f->initialized || !src) return -1;
-    if ((falcon_off & 3u) != 0 || (len & 3u) != 0) return -1;
-    if (falcon_off + len > f->imem_size) return -1;
-    if (len == 0) return 0;
+    if (!f || !f->initialized || !src) return GSP_ERR_INVAL;
+    if ((falcon_off & 3u) != 0 || (len & 3u) != 0) return GSP_ERR_INVAL;
+    if (falcon_off + len > f->imem_size) return GSP_ERR_INVAL;
+    if (len == 0) return GSP_OK;
 
     /* IMEMC port 0: AINCW=1 (auto-increment write addr), set OFFS+BLK
      * to falcon_off. SECURE bit enters secure IMEM aperture. */
@@ -339,16 +339,16 @@ int falcon_pio_upload_imem(struct falcon *f, const uint8_t *src,
         flcn_w32(f, FALCON_IMEMD(0), w);
     }
     gsp_platform->mb();
-    return 0;
+    return GSP_OK;
 }
 
 int falcon_pio_upload_dmem(struct falcon *f, const uint8_t *src,
                            uint32_t len, uint32_t falcon_off)
 {
-    if (!f || !f->initialized || !src) return -1;
-    if ((falcon_off & 3u) != 0 || (len & 3u) != 0) return -1;
-    if (falcon_off + len > f->dmem_size) return -1;
-    if (len == 0) return 0;
+    if (!f || !f->initialized || !src) return GSP_ERR_INVAL;
+    if ((falcon_off & 3u) != 0 || (len & 3u) != 0) return GSP_ERR_INVAL;
+    if (falcon_off + len > f->dmem_size) return GSP_ERR_INVAL;
+    if (len == 0) return GSP_OK;
 
     flcn_w32(f, FALCON_DMEMC(0), FALCON_DMEMC_AINCW | (falcon_off & 0x00FFFFFFu));
     gsp_platform->mb();
@@ -361,5 +361,5 @@ int falcon_pio_upload_dmem(struct falcon *f, const uint8_t *src,
         flcn_w32(f, FALCON_DMEMD(0), w);
     }
     gsp_platform->mb();
-    return 0;
+    return GSP_OK;
 }

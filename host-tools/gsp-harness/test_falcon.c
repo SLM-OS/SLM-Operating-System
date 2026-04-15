@@ -622,7 +622,10 @@ static void test_pio_imem_rejects_misaligned_offset(void)
     struct falcon f;
     REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
     uint8_t src[16] = { 0 };
-    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src), 0x123, false) < 0);
+    /* Specific INVAL code so debugging "PIO upload failed" is one
+     * register away from "bad caller-side alignment" vs other modes. */
+    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src), 0x123, false)
+            == GSP_ERR_INVAL);
 }
 
 static void test_pio_imem_rejects_misaligned_length(void)
@@ -633,7 +636,7 @@ static void test_pio_imem_rejects_misaligned_length(void)
     struct falcon f;
     REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
     uint8_t src[10] = { 0 };
-    REQUIRE(falcon_pio_upload_imem(&f, src, 10, 0, false) < 0);
+    REQUIRE(falcon_pio_upload_imem(&f, src, 10, 0, false) == GSP_ERR_INVAL);
 }
 
 static void test_pio_imem_rejects_overflow(void)
@@ -645,7 +648,8 @@ static void test_pio_imem_rejects_overflow(void)
     REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
     uint8_t src[16] = { 0 };
     /* Tail past IMEM end. */
-    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src), 0xFF8, false) < 0);
+    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src), 0xFF8, false)
+            == GSP_ERR_INVAL);
 }
 
 static void test_pio_imem_writes_words_in_order(void)
@@ -662,7 +666,7 @@ static void test_pio_imem_writes_words_in_order(void)
                          0xFF, 0x00, 0x55, 0xAA };
     REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src),
                                    /*falcon_off*/ 0x100,
-                                   /*is_secure*/ false) == 0);
+                                   /*is_secure*/ false) == GSP_OK);
     REQUIRE(e->imem_pio_count == 3);
     REQUIRE(e->imem_pio_words[0] == 0x04030201u);
     REQUIRE(e->imem_pio_words[1] == 0xDDCCBBAAu);
@@ -684,7 +688,7 @@ static void test_pio_imem_secure_sets_bit28(void)
     struct falcon f;
     REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
     uint8_t src[4] = { 0 };
-    REQUIRE(falcon_pio_upload_imem(&f, src, 4, 0x200, /*is_secure*/ true) == 0);
+    REQUIRE(falcon_pio_upload_imem(&f, src, 4, 0x200, /*is_secure*/ true) == GSP_OK);
     REQUIRE((e->imem_pio_ctrl & (1u << 28)) != 0);
 }
 
@@ -697,7 +701,7 @@ static void test_pio_dmem_writes_words_in_order(void)
     REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
     uint8_t src[8] = { 0xDE, 0xAD, 0xBE, 0xEF,
                         0xCA, 0xFE, 0xBA, 0xBE };
-    REQUIRE(falcon_pio_upload_dmem(&f, src, sizeof(src), 0x80) == 0);
+    REQUIRE(falcon_pio_upload_dmem(&f, src, sizeof(src), 0x80) == GSP_OK);
     REQUIRE(e->dmem_pio_count == 2);
     REQUIRE(e->dmem_pio_words[0] == 0xEFBEADDEu);
     REQUIRE(e->dmem_pio_words[1] == 0xBEBAFECAu);
@@ -713,8 +717,8 @@ static void test_pio_dmem_rejects_misaligned(void)
     struct falcon f;
     REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
     uint8_t src[10] = { 0 };
-    REQUIRE(falcon_pio_upload_dmem(&f, src, 10, 0) < 0);
-    REQUIRE(falcon_pio_upload_dmem(&f, src, 8, 0x123) < 0);
+    REQUIRE(falcon_pio_upload_dmem(&f, src, 10, 0) == GSP_ERR_INVAL);
+    REQUIRE(falcon_pio_upload_dmem(&f, src, 8, 0x123) == GSP_ERR_INVAL);
 }
 
 static void test_pio_zero_len_succeeds(void)
@@ -725,8 +729,8 @@ static void test_pio_zero_len_succeeds(void)
     struct falcon f;
     REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
     uint8_t src[4] = { 0 };
-    REQUIRE(falcon_pio_upload_imem(&f, src, 0, 0, false) == 0);
-    REQUIRE(falcon_pio_upload_dmem(&f, src, 0, 0) == 0);
+    REQUIRE(falcon_pio_upload_imem(&f, src, 0, 0, false) == GSP_OK);
+    REQUIRE(falcon_pio_upload_dmem(&f, src, 0, 0) == GSP_OK);
     /* No port writes for zero-length uploads. */
     REQUIRE(e->imem_pio_count == 0);
     REQUIRE(e->dmem_pio_count == 0);
@@ -737,8 +741,8 @@ static void test_pio_uninitialized_rejects(void)
     reset_mock();
     struct falcon f = { 0 };    /* not probed */
     uint8_t src[4] = { 0 };
-    REQUIRE(falcon_pio_upload_imem(&f, src, 4, 0, false) < 0);
-    REQUIRE(falcon_pio_upload_dmem(&f, src, 4, 0) < 0);
+    REQUIRE(falcon_pio_upload_imem(&f, src, 4, 0, false) == GSP_ERR_INVAL);
+    REQUIRE(falcon_pio_upload_dmem(&f, src, 4, 0) == GSP_ERR_INVAL);
     /* pre_pio_setup is void — must no-op cleanly. */
     falcon_pre_pio_setup(&f);
 }

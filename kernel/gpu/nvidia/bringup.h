@@ -35,6 +35,18 @@ enum gsp_bringup_state {
     GSP_BRINGUP_FAILED,
 };
 
+/* ---- BAR0 register offsets observed by bringup ----
+ *
+ * Exposed in the header so the harness diagnostic dumps assert on the
+ * same constants the bringup code uses — no parallel magic-number
+ * tables to drift. Ampere GA10x layout. Per-Falcon offsets
+ * (CPUCTL, MAILBOX0/1, etc.) live in falcon.h and apply to either
+ * NV_PGSP_BASE or NV_PSEC2_BASE. The constants below are whole-chip
+ * (FB / FWSEC) registers populated by FWSEC-FRTS execution. */
+#define NV_PFB_PRI_MMU_WPR2_ADDR_LO   0x001fa824u
+#define NV_PFB_PRI_MMU_WPR2_ADDR_HI   0x001fa828u
+#define NV_FWSEC_FRTS_ERR_REG         0x00001438u   /* top 16 bits = err code */
+
 struct gsp_bringup {
     struct falcon gsp_flcn;     /* NV_PGSP_BASE */
     struct falcon sec2_flcn;    /* NV_PSEC2_BASE */

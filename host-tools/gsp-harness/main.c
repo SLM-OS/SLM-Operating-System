@@ -307,29 +307,31 @@ int main(int argc, char **argv)
                    b.diag_sig_count, b.diag_sig_versions, b.diag_sig_index);
         }
         if (rc < 0) {
-            printf("[GSP-HARNESS] FWSEC-FRTS FAILED at phase %u\n",
-                   b.last_error_phase);
-            uint32_t err    = gsp_platform->read32(0x00001438);
-            uint32_t wpr_lo = gsp_platform->read32(0x001fa824);
-            uint32_t wpr_hi = gsp_platform->read32(0x001fa828);
+            printf("[GSP-HARNESS] FWSEC-FRTS FAILED at phase %u (rc=%d)\n",
+                   b.last_error_phase, rc);
+            uint32_t err    = gsp_platform->read32(NV_FWSEC_FRTS_ERR_REG);
+            uint32_t wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
+            uint32_t wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
             printf("                FWSEC err reg = 0x%08x (err_code=%u)\n",
                    err, err >> 16);
             printf("                WPR2 lo = 0x%08x  hi = 0x%08x\n", wpr_lo, wpr_hi);
 
             /* Dump GSP Falcon state to show whether BROM rejected
              * the signature, the ucode is looping, or DMA/TRFCFG
-             * didn't fire. */
-            uint32_t cpuctl  = gsp_platform->read32(0x00110100);
-            uint32_t mbox0   = gsp_platform->read32(0x00110040);
-            uint32_t mbox1   = gsp_platform->read32(0x00110044);
-            uint32_t irqstat = gsp_platform->read32(0x00110008);
-            uint32_t hwcfg2  = gsp_platform->read32(0x001100f4);
-            uint32_t bcrctl  = gsp_platform->read32(0x00111668);
-            uint32_t modsel  = gsp_platform->read32(0x00111180);
-            uint32_t paraaddr= gsp_platform->read32(0x00111210);
+             * didn't fire. All offsets resolve via the named falcon
+             * + RISC-V PRI base + register constants — no magic. */
+            uint32_t cpuctl  = gsp_platform->read32(NV_PGSP_BASE       + FALCON_CPUCTL);
+            uint32_t mbox0   = gsp_platform->read32(NV_PGSP_BASE       + FALCON_MAILBOX0);
+            uint32_t mbox1   = gsp_platform->read32(NV_PGSP_BASE       + FALCON_MAILBOX1);
+            uint32_t irqstat = gsp_platform->read32(NV_PGSP_BASE       + FALCON_IRQSTAT);
+            uint32_t hwcfg2  = gsp_platform->read32(NV_PGSP_BASE       + FALCON_HWCFG2);
+            uint32_t bcrctl  = gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_RISCV_BCR_CTRL);
+            uint32_t modsel  = gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_BROM_MOD_SEL);
+            uint32_t paraaddr= gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_BROM_PARAADDR0);
             printf("                GSP Falcon state:\n");
             printf("                  CPUCTL=0x%08x (halted=%d, started=%d)\n",
-                   cpuctl, !!(cpuctl & 0x10), !(cpuctl & 0x10));
+                   cpuctl, !!(cpuctl & FALCON_CPUCTL_HALTED),
+                   !(cpuctl & FALCON_CPUCTL_HALTED));
             printf("                  MAILBOX0=0x%08x MAILBOX1=0x%08x\n", mbox0, mbox1);
             printf("                  IRQSTAT=0x%08x (halt=%d, swgen0=%d)\n",
                    irqstat, !!(irqstat & 0x10), !!(irqstat & 0x40));
@@ -338,8 +340,8 @@ int main(int argc, char **argv)
             return 1;
         }
         printf("[GSP-HARNESS] FWSEC-FRTS ok — WPR2 registers:\n");
-        uint32_t wpr_lo = gsp_platform->read32(0x001fa824);
-        uint32_t wpr_hi = gsp_platform->read32(0x001fa828);
+        uint32_t wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
+        uint32_t wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
         printf("                WPR2_LO = 0x%08x\n                WPR2_HI = 0x%08x\n",
                wpr_lo, wpr_hi);
         return 0;
@@ -361,14 +363,14 @@ int main(int argc, char **argv)
         printf("[GSP-HARNESS] FWSEC-FRTS ok (WPR2 set), running Booter Load…\n");
         int rc = gsp_bringup_booter_load(&b);
         if (rc < 0) {
-            printf("[GSP-HARNESS] Booter Load FAILED at phase %u\n",
-                   b.last_error_phase);
-            uint32_t cpuctl = gsp_platform->read32(0x00840100);
-            uint32_t mbox0  = gsp_platform->read32(0x00840040);
-            uint32_t mbox1  = gsp_platform->read32(0x00840044);
+            printf("[GSP-HARNESS] Booter Load FAILED at phase %u (rc=%d)\n",
+                   b.last_error_phase, rc);
+            uint32_t cpuctl = gsp_platform->read32(NV_PSEC2_BASE + FALCON_CPUCTL);
+            uint32_t mbox0  = gsp_platform->read32(NV_PSEC2_BASE + FALCON_MAILBOX0);
+            uint32_t mbox1  = gsp_platform->read32(NV_PSEC2_BASE + FALCON_MAILBOX1);
             printf("                SEC2 CPUCTL=0x%08x (halted=%d) "
                    "MBOX0=0x%08x MBOX1=0x%08x\n",
-                   cpuctl, !!(cpuctl & 0x10), mbox0, mbox1);
+                   cpuctl, !!(cpuctl & FALCON_CPUCTL_HALTED), mbox0, mbox1);
             return 1;
         }
         printf("[GSP-HARNESS] Booter Load halted ok — MAILBOX0 post = 0x%08x\n",
@@ -396,10 +398,12 @@ int main(int argc, char **argv)
         }
         int rc = gsp_bringup_riscv_start(&b);
         if (rc < 0) {
-            printf("[GSP-HARNESS] RISC-V start FAILED at phase %u\n",
-                   b.last_error_phase);
-            uint32_t bcr = gsp_platform->read32(0x00111668);
-            uint32_t cc  = gsp_platform->read32(0x00111388);
+            printf("[GSP-HARNESS] RISC-V start FAILED at phase %u (rc=%d)\n",
+                   b.last_error_phase, rc);
+            uint32_t bcr = gsp_platform->read32(NV_PGSP_RISCV_BASE
+                                                + FALCON_RISCV_BCR_CTRL);
+            uint32_t cc  = gsp_platform->read32(NV_PGSP_RISCV_BASE
+                                                + FALCON_RISCV_CPUCTL);
             printf("                BCR_CTRL=0x%08x RISCV_CPUCTL=0x%08x\n",
                    bcr, cc);
             return 1;

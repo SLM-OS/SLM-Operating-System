@@ -55,15 +55,24 @@ unrelated to this work). ARM64 `make test` still PASSES cleanly.
 `make x86-disk-verify` all 9 checks PASS. End-to-end OVMF boot to
 `slmos>` shell with 4 CPUs online works.
 
-**Host-side test suites (Phase E, no GPU required):** 102 total.
+**Host-side test suites (Phase E, no GPU required):** 105 total.
 
 | Suite | Cases | Coverage |
 |---|---|---|
 | `make test-vbios` | 30 | VBIOS BIT parser, PCIR walker, FWSEC discovery |
-| `make test-falcon` | 30 | Falcon v4 register protocol — probe, reset/scrub, halt poll, DMA framing, **PIO IMEM/DMEM upload (E3.4.d)**, **CPUCTL.ALIAS_EN routing**, **pre-PIO setup**, HS-boot BROM sequence |
+| `make test-falcon` | 30 | Falcon v4 register protocol — probe, reset/scrub, halt poll, DMA framing, **PIO IMEM/DMEM upload (E3.4.d) with specific GSP_ERR_INVAL on alignment/bounds**, **CPUCTL.ALIAS_EN routing**, **pre-PIO setup**, HS-boot BROM sequence |
 | `make test-nvfw` | 14 | nvfw_bin_hdr / hs_header_v2 / hs_load_header_v2 framing |
-| `make test-bringup` | 19 | Sig-index algorithm, DMEMMAPPER patcher, **booter_load + riscv_start state-machine guards** |
-| `make test-rpc` | 15 | RPC ring math (page sizing, modular pointer advance, full/empty rule), shm region init/dtor, send-rejected-when-not-alive |
+| `make test-bringup` | 20 | Sig-index algorithm, DMEMMAPPER patcher, **booter_load + riscv_start state-machine guards (specific GSP_ERR_INVAL)**, **error-constants distinct + negative** |
+| `make test-rpc` | 17 | RPC ring math, shm region init/dtor, **send-rejected-when-not-alive (GSP_ERR_NOSYS), oversize-rejected (GSP_ERR_INVAL), null-arg-rejected (GSP_ERR_INVAL)** |
+
+**Error codes** (`kernel/gpu/nvidia/gsp.h`): the new shared core
+publishes a small set of negative constants — `GSP_ERR_INVAL`,
+`GSP_ERR_IO`, `GSP_ERR_NOMEM`, `GSP_ERR_FAULT`, `GSP_ERR_NOSPC`,
+`GSP_ERR_NOSYS`, `GSP_ERR_TIMEOUT` — used in place of generic `-1`
+returns. Values match common Linux errno mapping so `if (rc < 0)`
+callers keep working unchanged. The harness surfaces the exact
+returned code via `(rc=%d)` in failure dumps so phase + code
+together pin down the failure mode.
 
 ---
 

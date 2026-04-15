@@ -176,7 +176,7 @@ static void test_rpc_init_lays_out_rings(void)
 {
     gsp_platform = &mock_ops;
     struct gsp_rpc_channel ch;
-    REQUIRE(gsp_rpc_init(&ch) == 0);
+    REQUIRE(gsp_rpc_init(&ch) == GSP_OK);
     REQUIRE(ch.initialized);
     REQUIRE(ch.shm_va != NULL);
     REQUIRE(ch.shm_size == 4096u + 0x40000u + 0x40000u);
@@ -207,7 +207,7 @@ static void test_rpc_init_pointers_at_canonical_offsets(void)
 {
     gsp_platform = &mock_ops;
     struct gsp_rpc_channel ch;
-    REQUIRE(gsp_rpc_init(&ch) == 0);
+    REQUIRE(gsp_rpc_init(&ch) == GSP_OK);
     /* cmdq w/r at page 0 byte 0/4; msgq w/r at page 0 byte 0x100/0x104. */
     uint8_t *base = (uint8_t *)ch.shm_va;
     REQUIRE((uint8_t *)ch.cmdq.wptr - base == 0x000);
@@ -221,12 +221,33 @@ static void test_rpc_send_rejects_when_gsp_not_alive(void)
 {
     gsp_platform = &mock_ops;
     struct gsp_rpc_channel ch;
-    REQUIRE(gsp_rpc_init(&ch) == 0);
+    REQUIRE(gsp_rpc_init(&ch) == GSP_OK);
     /* Without gsp_init_done, send must refuse — otherwise it'd silently
-     * fill the ring with no consumer to drain it. */
+     * fill the ring with no consumer to drain it. Specific NOSYS code
+     * lets the caller distinguish "GSP-RM not yet alive" from other
+     * failure modes (full ring → NOSPC, bad arg → INVAL). */
     char payload[16] = {0};
     REQUIRE(gsp_rpc_send(&ch, NV_VGPU_MSG_EVENT_GSP_INIT_DONE,
-                         payload, sizeof(payload)) == -1);
+                         payload, sizeof(payload)) == GSP_ERR_NOSYS);
+    gsp_rpc_dtor(&ch);
+}
+
+static void test_rpc_init_null_arg_rejected(void)
+{
+    REQUIRE(gsp_rpc_init(NULL) == GSP_ERR_INVAL);
+}
+
+static void test_rpc_send_oversize_rejected(void)
+{
+    gsp_platform = &mock_ops;
+    struct gsp_rpc_channel ch;
+    REQUIRE(gsp_rpc_init(&ch) == GSP_OK);
+    /* Anything > 16 GSP pages is rejected at the boundary check —
+     * INVAL, not NOSYS, since the failure is caller-fault not
+     * "channel not ready". */
+    static char big[17u * GSP_PAGE_SIZE];
+    REQUIRE(gsp_rpc_send(&ch, NV_VGPU_MSG_EVENT_GSP_INIT_DONE,
+                         big, sizeof(big)) == GSP_ERR_INVAL);
     gsp_rpc_dtor(&ch);
 }
 
@@ -250,6 +271,8 @@ int main(void)
     test_rpc_init_lays_out_rings();
     test_rpc_init_pointers_at_canonical_offsets();
     test_rpc_send_rejects_when_gsp_not_alive();
+    test_rpc_init_null_arg_rejected();
+    test_rpc_send_oversize_rejected();
 
     if (failures == 0) {
         printf("test_rpc: all tests PASS\n");

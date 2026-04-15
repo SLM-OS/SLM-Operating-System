@@ -33,10 +33,8 @@ extern const struct gsp_platform_ops *gsp_platform;
 #define WPR2_FRTS_SIZE              0x100000ull      /* 1 MB */
 #define WPR2_FRTS_BASE_FROM_TOP     0x120000ull      /* offset below FB end */
 
-/* Ampere BAR0 offsets — observable results of FWSEC-FRTS. */
-#define NV_PFB_PRI_MMU_WPR2_ADDR_LO 0x001fa824u
-#define NV_PFB_PRI_MMU_WPR2_ADDR_HI 0x001fa828u
-#define NV_FWSEC_FRTS_ERR           0x00001438u      /* top 16 bits = err code */
+/* Ampere BAR0 offsets observable after FWSEC-FRTS run — definitions
+ * in bringup.h so the harness diagnostic dump uses the same names. */
 
 /* DMEMMAPPER FWSEC application interface layout (see reference:
  * docs/reference/nouveau-falcon-hs-boot.md).
@@ -409,7 +407,7 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
 
     /* Observable outcome: WPR2 registers populated, FRTS err reg clean. */
     b->last_error_phase = 7;
-    uint32_t err = gsp_platform->read32(NV_FWSEC_FRTS_ERR);
+    uint32_t err = gsp_platform->read32(NV_FWSEC_FRTS_ERR_REG);
     uint16_t err_code = (uint16_t)(err >> 16);
     if (err_code != 0) goto fail_free;
 
@@ -455,15 +453,15 @@ fail_free:
 
 int gsp_bringup_booter_load(struct gsp_bringup *b)
 {
-    if (!b) return -1;
+    if (!b) return GSP_ERR_INVAL;
     if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free
         || !gsp_platform->firmware_get)
-        return -1;
+        return GSP_ERR_INVAL;
     if (b->state != GSP_BRINGUP_FWSEC_FRTS_DONE) {
         /* Allow re-entry on a partially-failed bringup, but the WPR2
          * registers must be set — booter dereferences WprMeta to find
          * the WPR boundaries SEC2 will fill. */
-        return -1;
+        return GSP_ERR_INVAL;
     }
 
     b->last_error_phase = 100;
@@ -471,11 +469,11 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     /* ---- Phase 1: load + parse booter_load.bin ---- */
     struct gsp_firmware_blob blob;
     gsp_platform->firmware_get(GSP_FW_BOOTER_LOAD, &blob);
-    if (!blob.data || blob.size == 0) return -1;
+    if (!blob.data || blob.size == 0) return GSP_ERR_FAULT;
 
     struct nvfw_image img;
-    if (nvfw_parse(blob.data, blob.size, &img) < 0) return -1;
-    if (img.num_apps == 0) return -1;
+    if (nvfw_parse(blob.data, blob.size, &img) < 0) return GSP_ERR_FAULT;
+    if (img.num_apps == 0) return GSP_ERR_FAULT;
 
     /* On 0x10DE-magic blobs (R535 mainline) num_sig is itself a file
      * offset to the count — same indirection as patch_loc/patch_sig.
@@ -484,16 +482,16 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * dereference. */
     uint32_t sig_count = img.num_sig;
     if (img.bin_magic == NVFW_BIN_MAGIC_STD && sig_count >= 64) {
-        if (sig_count + 4 > img.size) return -1;
+        if (sig_count + 4 > img.size) return GSP_ERR_FAULT;
         sig_count = (uint32_t)img.bytes[sig_count]
                   | ((uint32_t)img.bytes[sig_count + 1] <<  8)
                   | ((uint32_t)img.bytes[sig_count + 2] << 16)
                   | ((uint32_t)img.bytes[sig_count + 3] << 24);
     }
-    if (sig_count == 0 || sig_count > 64) return -1;
-    if (img.sig_prod_size == 0) return -1;
+    if (sig_count == 0 || sig_count > 64) return GSP_ERR_FAULT;
+    if (img.sig_prod_size == 0) return GSP_ERR_FAULT;
     uint32_t sig_size = img.sig_prod_size / sig_count;
-    if (sig_size == 0 || sig_size > 4096) return -1;
+    if (sig_size == 0 || sig_size > 4096) return GSP_ERR_FAULT;
 
     /* ---- Phase 2: layout the booter image ---- */
     /* Per nouveau tu102_gsp_booter_ctor:
@@ -501,12 +499,12 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      *   imem source = data_offset + os_code_size, target IMEM = app[0].offset (sec)
      *   dmem source = data_offset + os_data_offset, target DMEM = 0
      *   dmem_sign   = patch_loc - os_data_offset (DMEM byte offset of sig) */
-    if (img.os_code_offset + img.os_code_size > img.data_size) return -1;
-    if (img.os_data_offset + img.os_data_size > img.data_size) return -1;
-    if (img.apps[0].offset + img.apps[0].size > img.data_size) return -1;
-    if (img.patch_loc < img.os_data_offset) return -1;
-    if (img.patch_loc + sig_size > img.os_data_offset + img.os_data_size) return -1;
-    if (img.sig_prod_offset + img.sig_prod_size > img.size) return -1;
+    if (img.os_code_offset + img.os_code_size > img.data_size) return GSP_ERR_FAULT;
+    if (img.os_data_offset + img.os_data_size > img.data_size) return GSP_ERR_FAULT;
+    if (img.apps[0].offset + img.apps[0].size > img.data_size) return GSP_ERR_FAULT;
+    if (img.patch_loc < img.os_data_offset) return GSP_ERR_FAULT;
+    if (img.patch_loc + sig_size > img.os_data_offset + img.os_data_size) return GSP_ERR_FAULT;
+    if (img.sig_prod_offset + img.sig_prod_size > img.size) return GSP_ERR_FAULT;
 
     b->booter_imem_ns_size  = img.os_code_size;
     b->booter_imem_sec_off  = img.apps[0].offset;
@@ -518,11 +516,16 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     b->booter_ucode_id      = img.ucode_id;
     b->booter_boot_addr     = img.os_code_offset;
 
+    /* Track the most-recent failure code through the goto-fail path
+     * so callers see _why_ booter setup gave up, not just _that_ it
+     * did. last_error_phase still narrows the location. */
+    int rc = GSP_OK;
+
     /* ---- Phase 3: allocate DMA-mapped mutable copy of data section ---- */
     b->last_error_phase = 101;
     b->dma_booter_va = gsp_platform->dma_alloc(img.data_size, 256,
                                                 &b->dma_booter_iova);
-    if (!b->dma_booter_va) return -1;
+    if (!b->dma_booter_va) return GSP_ERR_NOMEM;
     b->dma_booter_size = img.data_size;
     memcpy(b->dma_booter_va, img.bytes + img.data_offset, img.data_size);
 
@@ -532,7 +535,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * sig_prod_offset + patch_sig within the file — patch_sig is the
      * offset INTO the sig table (not the file). */
     uint32_t sig_prod_at = img.sig_prod_offset + img.patch_sig;
-    if (sig_prod_at + sig_size > img.size) goto fail;
+    if (sig_prod_at + sig_size > img.size) { rc = GSP_ERR_FAULT; goto fail; }
     /* Write signature into DMEM portion of our DMA buffer. */
     memcpy((uint8_t *)b->dma_booter_va + img.os_data_offset + b->booter_dmem_sign,
            img.bytes + sig_prod_at, sig_size);
@@ -548,13 +551,13 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     b->dma_wpr_meta_va = gsp_platform->dma_alloc(WPR_META_BUFFER_SIZE,
                                                   4096,
                                                   &b->dma_wpr_meta_iova);
-    if (!b->dma_wpr_meta_va) goto fail;
+    if (!b->dma_wpr_meta_va) { rc = GSP_ERR_NOMEM; goto fail; }
     b->dma_wpr_meta_size = WPR_META_BUFFER_SIZE;
     memset(b->dma_wpr_meta_va, 0, WPR_META_BUFFER_SIZE);
 
     /* ---- Phase 5: reset SEC2, pre-PIO setup ---- */
     b->last_error_phase = 103;
-    if (falcon_reset(&b->sec2_flcn) < 0) goto fail;
+    if (falcon_reset(&b->sec2_flcn) < 0) { rc = GSP_ERR_IO; goto fail; }
     falcon_pre_pio_setup(&b->sec2_flcn);
 
     /* ---- Phase 6: PIO upload non-secure IMEM, secure IMEM, DMEM ---- */
@@ -567,22 +570,25 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     uint32_t sec_round = (img.apps[0].size + 3u) & ~3u;
     uint32_t dmem_round = (img.os_data_size + 3u) & ~3u;
 
-    if (falcon_pio_upload_imem(&b->sec2_flcn,
-                               (uint8_t *)b->dma_booter_va + 0,
-                               ns_round,
-                               img.os_code_offset,
-                               false) < 0) goto fail;
+    rc = falcon_pio_upload_imem(&b->sec2_flcn,
+                                (uint8_t *)b->dma_booter_va + 0,
+                                ns_round,
+                                img.os_code_offset,
+                                false);
+    if (rc < 0) goto fail;
 
-    if (falcon_pio_upload_imem(&b->sec2_flcn,
-                               (uint8_t *)b->dma_booter_va + img.os_code_size,
-                               sec_round,
-                               img.apps[0].offset,
-                               true) < 0) goto fail;
+    rc = falcon_pio_upload_imem(&b->sec2_flcn,
+                                (uint8_t *)b->dma_booter_va + img.os_code_size,
+                                sec_round,
+                                img.apps[0].offset,
+                                true);
+    if (rc < 0) goto fail;
 
-    if (falcon_pio_upload_dmem(&b->sec2_flcn,
-                               (uint8_t *)b->dma_booter_va + img.os_data_offset,
-                               dmem_round,
-                               0) < 0) goto fail;
+    rc = falcon_pio_upload_dmem(&b->sec2_flcn,
+                                (uint8_t *)b->dma_booter_va + img.os_data_offset,
+                                dmem_round,
+                                0);
+    if (rc < 0) goto fail;
 
     /* ---- Phase 7: program SEC2 BROM ----
      * Order matters: PARAADDR, ENGIDMASK, UCODE_ID, then MOD_SEL last
@@ -608,14 +614,17 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     /* ---- Phase 9: STARTCPU + halt poll ---- */
     b->last_error_phase = 106;
     falcon_start(&b->sec2_flcn, b->booter_boot_addr);
-    if (falcon_wait_halted(&b->sec2_flcn, FALCON_HALT_TIMEOUT_US) < 0) goto fail;
+    if (falcon_wait_halted(&b->sec2_flcn, FALCON_HALT_TIMEOUT_US) < 0) {
+        rc = GSP_ERR_TIMEOUT;
+        goto fail;
+    }
 
     /* Booter halted. Read MAILBOX0 — caller interprets. */
     b->booter_mbox0_post = gsp_platform->read32(NV_PSEC2_BASE + FALCON_MAILBOX0);
 
     b->state = GSP_BRINGUP_BOOTER_LOAD_DONE;
     b->last_error_phase = 0;
-    return 0;
+    return GSP_OK;
 
 fail:
     if (b->dma_booter_va) {
@@ -627,7 +636,7 @@ fail:
         b->dma_wpr_meta_va = NULL;
     }
     b->state = GSP_BRINGUP_FAILED;
-    return -1;
+    return rc ? rc : GSP_ERR_IO;
 }
 
 /* ---- E3.4.e: GSP RISC-V startup ---- */
@@ -640,13 +649,14 @@ fail:
 
 int gsp_bringup_riscv_start(struct gsp_bringup *b)
 {
-    if (!b) return -1;
-    if (b->state != GSP_BRINGUP_BOOTER_LOAD_DONE) return -1;
+    if (!b) return GSP_ERR_INVAL;
+    if (b->state != GSP_BRINGUP_BOOTER_LOAD_DONE) return GSP_ERR_INVAL;
+    if (!gsp_platform) return GSP_ERR_INVAL;
 
     b->last_error_phase = 200;
 
     /* Reset GSP Falcon — clears pre-existing state and scrubs IMEM/DMEM. */
-    if (falcon_reset(&b->gsp_flcn) < 0) return -1;
+    if (falcon_reset(&b->gsp_flcn) < 0) return GSP_ERR_IO;
 
     /* Flip the boot-control register into RISC-V mode.
      * Mask: 0x111 → set VALID | CORE_SELECT(=RISC-V, bit 4) | BRFETCH (bit 8).
@@ -655,7 +665,7 @@ int gsp_bringup_riscv_start(struct gsp_bringup *b)
      * which reads register at NV_PGSP_BASE+0x1000+0x668 = 0x111668. */
     b->last_error_phase = 201;
     uint32_t bcr = gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_RISCV_BCR_CTRL);
-    if (bcr == 0xFFFFFFFFu) return -1;
+    if (bcr == 0xFFFFFFFFu) return GSP_ERR_IO;
     bcr &= ~(uint32_t)(FALCON_RISCV_BCR_VALID
                        | FALCON_RISCV_BCR_CORE_SELECT
                        | FALCON_RISCV_BCR_BRFETCH);
@@ -690,13 +700,13 @@ int gsp_bringup_riscv_start(struct gsp_bringup *b)
     uint32_t iters = (budget > (1u << 30) / 10u) ? (1u << 30) : budget * 10u;
     while (iters--) {
         uint32_t v = gsp_platform->read32(NV_PGSP_RISCV_BASE + FALCON_RISCV_CPUCTL);
-        if (v == 0xFFFFFFFFu) return -1;
+        if (v == 0xFFFFFFFFu) return GSP_ERR_IO;
         if (v & FALCON_RISCV_CPUCTL_ACTIVE) {
             b->gsp_riscv_active = true;
             b->state = GSP_BRINGUP_RISCV_RUNNING;
             b->last_error_phase = 0;
-            return 0;
+            return GSP_OK;
         }
     }
-    return -1;
+    return GSP_ERR_TIMEOUT;
 }
