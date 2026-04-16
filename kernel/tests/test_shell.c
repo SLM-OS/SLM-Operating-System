@@ -338,6 +338,62 @@ static void test_shell_cmd_dtb(void)
 }
 
 /* ============================================================================
+ * timdiag Command Tests
+ *
+ * timdiag is the timer/interrupt delivery diagnostic added to investigate
+ * hardware timer preemption on Pi 5 and Jetson. On QEMU, the GIC is a
+ * single-security-state GICv2 where these probes are harmless — the command
+ * should run to completion without crashing.
+ * ============================================================================ */
+
+#if !defined(PLATFORM_X86_64)
+/*
+ * Test: 'timdiag' with no args runs the safe diagnostic path.
+ * On QEMU this dumps timer state + WFI test skip message.
+ * Verifies that the diagnostic does not crash on the non-hardware path.
+ */
+static void test_shell_cmd_timdiag_no_args(void)
+{
+    int ret = shell_execute("timdiag");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: 'timdiag fiq' passes the explicit argument through.
+ * On QEMU GICv2, this still skips the GICv3 FIQ test path, so it
+ * should run to completion without crashing. The argument handling
+ * only matters on Jetson GICv3.
+ */
+static void test_shell_cmd_timdiag_fiq_arg(void)
+{
+    int ret = shell_execute("timdiag fiq");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: 'timdiag' called repeatedly does not accumulate state.
+ * Previous runs should not affect subsequent runs (idempotent).
+ */
+static void test_shell_cmd_timdiag_idempotent(void)
+{
+    int ret;
+    for (int i = 0; i < 3; i++) {
+        ret = shell_execute("timdiag");
+        TEST_ASSERT_EQUAL_INT(0, ret);
+    }
+}
+
+/*
+ * Test: Unknown extra argument still runs the default safe path.
+ */
+static void test_shell_cmd_timdiag_unknown_arg(void)
+{
+    int ret = shell_execute("timdiag unknown");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+#endif /* !PLATFORM_X86_64 */
+
+/* ============================================================================
  * Component Command Tests
  * ============================================================================ */
 
@@ -2038,6 +2094,14 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_ipc);
     RUN_TEST(test_shell_cmd_model);
     RUN_TEST(test_shell_cmd_dtb);
+
+    /* timdiag command (ARM64 only) - timer/IRQ delivery diagnostic */
+#if !defined(PLATFORM_X86_64)
+    RUN_TEST(test_shell_cmd_timdiag_no_args);
+    RUN_TEST(test_shell_cmd_timdiag_fiq_arg);
+    RUN_TEST(test_shell_cmd_timdiag_idempotent);
+    RUN_TEST(test_shell_cmd_timdiag_unknown_arg);
+#endif
 
     /* Component commands - core functionality */
     RUN_TEST(test_shell_cmd_component_help);

@@ -296,29 +296,21 @@ void el1_irq_handler(void)
 void el1_fiq_handler(struct trap_frame *tf)
 {
     (void)tf;
+
+    #define GIC_IAR_IRQ_MASK   0x3FFu
+    #define GIC_IAR_SPURIOUS   0x3FFu
+
 #if defined(PLATFORM_RASPI5)
-    /* GICC_AIAR: Group 0 IAR on GICv2 — reads the pending Group 0
-     * interrupt and marks it active. On this hardware timer PPI 30
-     * remains in Group 0 (non-secure IGROUPR writes are silently
-     * discarded), so timer delivers here as FIQ. See
-     * docs/pi5-irq-investigation-2026-04.md. */
+    /* GICv2: GICC_AIAR reads the pending Group 0 interrupt. */
     volatile uint32_t *aiar =
         (volatile uint32_t *)(GIC_CPU_BASE + 0x20UL);
     volatile uint32_t *aeoir =
         (volatile uint32_t *)(GIC_CPU_BASE + 0x24UL);
 
-    /* GICC IAR low bits hold the IRQ number; top bits encode CPUID
-     * for SGIs but we don't care for the diag trace. 1023 (all ones
-     * in the low 10 bits) is the spurious-IRQ marker. */
-    #define GIC_IAR_IRQ_MASK   0x3FFu
-    #define GIC_IAR_SPURIOUS   0x3FFu
-
     uint32_t irq = *aiar;
     uint32_t irq_num = irq & GIC_IAR_IRQ_MASK;
 
 #if defined(PI5_IRQ_DIAG)
-    /* Record the last FIQ source for this CPU in the diag trace slot.
-     * Format: high bits 0xD0000000 (marker), low 10 bits = IRQ number. */
     uint64_t mpidr;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     uint32_t cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
@@ -329,10 +321,6 @@ void el1_fiq_handler(struct trap_frame *tf)
 #endif
 
 #if defined(PI5_FIQ_TIMER)
-    /* Phase 2: dispatch the timer. When PPI 30 arrives, run the same
-     * handler the IRQ path uses so scheduler_tick fires and (with
-     * SECONDARY_PREEMPT on) reschedule_pending is set. EOI before
-     * the handler so GIC re-priority works if a nested FIQ is posted. */
     if (irq_num == 30) {
         *aeoir = irq;
         timer_handler();
@@ -340,16 +328,47 @@ void el1_fiq_handler(struct trap_frame *tf)
     }
 #endif
 
-    /* EOI for non-timer FIQ sources. */
     if (irq_num != GIC_IAR_SPURIOUS) {
         *aeoir = irq;
     }
 
-    #undef GIC_IAR_IRQ_MASK
-    #undef GIC_IAR_SPURIOUS
+#elif GIC_VERSION == 3
+    /* GICv3: Group 0 interrupts are acknowledged via ICC_IAR0_EL1
+     * (redirected to ICC_IAR0_EL2 under VHE) and completed via
+     * ICC_EOIR0_EL1. This path fires when timer PPI 30 (or CNTHP
+     * PPI 26) is in Group 0 and FIQ delivery reaches this EL. */
+    uint64_t irq_raw;
+    __asm__ volatile("mrs %0, ICC_IAR0_EL1" : "=r"(irq_raw));
+    uint32_t irq_num = (uint32_t)(irq_raw & GIC_IAR_IRQ_MASK);
+
+    /* timdiag diagnostic hook: record FIQ source for the test harness */
+    {
+        extern volatile uint32_t timdiag_fiq_count;
+        extern volatile uint32_t timdiag_fiq_irqnum;
+        timdiag_fiq_count++;
+        timdiag_fiq_irqnum = irq_num;
+    }
+
+    if (irq_num == 30 || irq_num == 26) {
+        /* Timer PPI (physical or hypervisor). EOI before handler so the
+         * GIC re-prioritizes if a nested FIQ arrives. */
+        __asm__ volatile("msr ICC_EOIR0_EL1, %0" :: "r"(irq_raw));
+        __asm__ volatile("isb" ::: "memory");
+        timer_handler();
+        return;
+    }
+
+    if (irq_num != GIC_IAR_SPURIOUS) {
+        __asm__ volatile("msr ICC_EOIR0_EL1, %0" :: "r"(irq_raw));
+        __asm__ volatile("isb" ::: "memory");
+    }
+
 #else
     (void)tf;
 #endif
+
+    #undef GIC_IAR_IRQ_MASK
+    #undef GIC_IAR_SPURIOUS
 }
 
 /*

@@ -65,6 +65,9 @@ int cmd_dtb(int argc, char **argv);
 int cmd_bench(int argc, char **argv);
 int cmd_sched(int argc, char **argv);
 int cmd_eviction(int argc, char **argv);
+#if !defined(PLATFORM_X86_64)
+int cmd_timdiag(int argc, char **argv);
+#endif
 
 /* Filesystem commands (shell_fs.c) */
 int cmd_ls(int argc, char **argv);

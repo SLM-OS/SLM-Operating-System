@@ -155,20 +155,36 @@ CMakeLists.txt change (commit `8de6b00`):
 
 **Hardware result on jetson-nano-2:** `timer_handler_count` advances `0 → 18 → 36` across two `bench smp` invocations. Per-CPU `Ticks` counter shows non-zero values on CPUs 1-5. `bench smp` still 5/5 COMPLETED — no SMP regression.
 
-#### P1.2 — Future: real hardware timer IRQ on Jetson (deferred)
+#### P1.2 — Future: real hardware timer IRQ on Jetson (investigated 2026-04-15)
 
-Same shape as Pi 5's #134. Would require either:
-- TF-A reconfiguration to surrender the GIC group bits to Non-secure (unlikely without NVIDIA's source).
-- A FIQ-routed timer path à la Pi 5's `PI5_FIQ_TIMER` (the el1_fiq handler from #99 Phase 1 already works; would need GICv3-aware GICC_AIAR-equivalent dispatch).
+**Status:** Investigation complete. See `docs/jetson-preemption-investigation.md` for the 8-path analysis.
+
+**Outcome:** Every path accessible from NS EL2 is blocked by TF-A policy:
+- All PPIs/SGIs/SPIs placed in Group 0 (or Group 1 Secure) — not Group 1 NS
+- NS writes to GICR_IGROUPR0 / GICD_IGROUPR[*] silently ignored
+- `ICC_IGRPEN0_EL1` read traps to EL3 (confirmed via `ESR_EL3 EC=0x18` crash dump)
+- `SCR_EL3.FIQ = 1` (from `SCR_EL3 = 0x3073d` in TF-A crash dump) — FIQ routed to EL3
+- `SCR_EL3.IRQ = 0` — IRQ would reach EL2, but no interrupts are Group 1 NS
+- WFI timer wake is also blocked (same chain: no IRQ/FIQ assertion to CPU)
+
+**Remaining paths (all out of capstone scope):**
+- Rebuild NVIDIA's TF-A (source is in the Jetson Linux BSP)
+- TF-A interrupt forwarding via virtual interrupt injection
+
+The GICv3-aware el1_fiq handler extension was added (commit pending) for
+completeness but is inert on this firmware.
 
 Neither is required for the capstone — cooperative preemption covers the workload.
 
 #### P1.x — Reference: full diagnostic sequence (if needed for future debug)
 
-1. **Add a `gicdump` shell command** in `kernel/src/shell_sys.c` that prints per-CPU GICv3 state:
-   - `GICR_CTLR`, `GICR_WAKER`, `GICR_IGROUPR0`, `GICR_IGRPMODR0`, `GICR_ISENABLER0`, `GICR_IPRIORITYR[7]` (PPI 30's priority byte).
-   - `ICC_CTLR_EL1`, `ICC_PMR_EL1`, `ICC_IGRPEN0_EL1`, `ICC_IGRPEN1_EL1`, `ICC_SRE_EL1`.
-   - `CNTFRQ_EL0`, `CNTP_CTL_EL0`, `CNTP_CVAL_EL0`, `CNTHCTL_EL2`.
+1. ~~**Add a `gicdump` shell command** in `kernel/src/shell_sys.c`~~ **Done (2026-04-15):** the `timdiag` shell command in `kernel/src/shell_sys.c` dumps per-CPU GICv3 state:
+   - `GICR_CTLR`, `GICR_WAKER`, `GICR_IGROUPR0`, `GICR_IGRPMODR0`, `GICR_ISENABLER0`, `GICR_ISPENDR0`.
+   - `ICC_CTLR_EL1`, `ICC_PMR_EL1`, `ICC_IGRPEN1_EL1`, `ICC_SRE_EL1`, `ICC_BPR1_EL1`.
+   - `CNTFRQ_EL0`, `CNTP_CTL_EL0`, `CNTP_CVAL_EL0`, `CNTP_TVAL_EL0`, `CNTHP_CTL_EL2`.
+   - `GICD_CTLR`, `GICD_IGROUPR[1..4]` (to check whether any SPIs are Group 1 NS).
+   - `DAIF` state, `timer_handler_count`, `pit_ticks`, COOP_PREEMPT flag.
+   - Note: `ICC_IGRPEN0_EL1` is deliberately NOT read — TF-A traps even the read access on Jetson.
 2. **Compare output against a reference.** Capture the same registers from Jetson Linux pre-kexec (via a small kernel module or `/dev/mem` reads with CAP_SYS_RAWIO), or from OP-TEE's GIC init trace.
 3. **Force a spurious timer IRQ**: set `CNTP_TVAL_EL0 = 0` and enable (`CNTP_CTL_EL0.ENABLE=1, IMASK=0`). If `timer_handler_count` increments, routing works; the bug is in periodic reprogramming. If not, the bug is in GIC/IRQ acceptance.
 4. **Audit `gic_percpu_init`** against the ARM GICv3 programming guide for EL2+VHE:

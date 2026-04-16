@@ -95,6 +95,10 @@ Called from the top of `schedule()`. No other code changes; the coop-preempt pat
 
 1. Restore true hardware timer IRQ delivery by debugging the armstub boot-garble / PSCI hand-off. Likely requires reverse-engineering Pi 5 firmware's armstub ABI or an upstream firmware fix.
 2. Convert `kernel/tests/test_integration.c` `delay()` helper to a yielding variant so the preemption-dependent tests pass under coop-preempt.
-3. Extend coop-preempt to Jetson if its secondary-CPU preemption turns out to have analogous issues.
+3. ~~Extend coop-preempt to Jetson if its secondary-CPU preemption turns out to have analogous issues.~~ **Done (2026-04-15).** Jetson has the same fundamental limitation expressed through GICv3 + TF-A instead of GICv2 + armstub. See `docs/jetson-preemption-investigation.md` for the 8-path investigation and empirical evidence (SCR_EL3=0x3073d with FIQ=1, all PPIs and SPIs in Group 0, ICC_IGRPEN0 reads trapped to EL3). COOP_PREEMPT is the correct mechanism on both platforms.
 
-*Last updated: 2026-04-13.*
+## Reproducing the Pi 5 diagnostic
+
+The `timdiag` shell command (added 2026-04-15) dumps the live GIC + timer state on any ARM64 platform. Run `timdiag` after boot to see the current group configuration and confirm why hardware IRQ delivery is blocked. On Pi 5 this shows GICv2 state; the same command shows GICv3 state on Jetson. See `docs/shell.md` for the command description and `docs/jetson-preemption-investigation.md` for the GICv3 interpretation.
+
+*Last updated: 2026-04-15.*

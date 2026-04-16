@@ -77,6 +77,9 @@ const shell_cmd_t builtin_commands[] = {
 #if defined(PI5_IRQ_DIAG)
     {"diag",   cmd_diag,   "Pi 5 IRQ-delivery diagnostics (diag <el2|vec|fiq|all>)"},
 #endif
+#if !defined(PLATFORM_X86_64)
+    {"timdiag", cmd_timdiag, "Timer/interrupt delivery diagnostic"},
+#endif
 };
 
 const int NUM_BUILTIN_COMMANDS = sizeof(builtin_commands) / sizeof(builtin_commands[0]);

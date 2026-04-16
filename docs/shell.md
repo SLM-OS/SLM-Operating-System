@@ -118,6 +118,8 @@ Available commands:
 | `sched policy` | List all registered scheduling policies |
 | `sched policy <name>` | Switch to a named scheduling policy |
 | `sched stats` | Show scheduler statistics and per-CPU utilization |
+| `timdiag` | Timer/interrupt delivery diagnostic — ARM64 only. Dumps timer state, GIC group configuration, CPU interface registers, and SPI group bitmap. Helps investigate whether hardware timer preemption is available on the platform. See `docs/jetson-preemption-investigation.md` for interpretation. |
+| `timdiag fiq` | Same diagnostic but also runs the FIQ delivery test (writes `ICC_IGRPEN0` and unmasks `DAIF.F`). **May crash on Jetson** if TF-A traps Group 0 register access. Use only for investigation. |
 | `lua` | Enter Lua REPL |
 | `lua -e "code"` | Execute Lua code directly |
 | `lua <file>` | Run Lua script from filesystem |

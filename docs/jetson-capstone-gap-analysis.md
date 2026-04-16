@@ -46,46 +46,40 @@ diag_tick val[0]=0x0                            ← scheduler_tick never called
 
 Observed behavior confirms `timer_handler_count == 0` across extended uptime. **Timer IRQs never reach the kernel on Jetson** — not on CPU 0, not on any secondary. The `daifclr + wfi` in CPU 0's idle is unmasking IRQs that are never pending.
 
-### 1.3 Gap — why timer IRQs don't fire
+### 1.3 Gap — why timer IRQs don't fire (RESOLVED 2026-04-15)
 
-This is the primary unresolved blocker. Candidates, in order of likelihood:
+**Status:** Investigation complete. See `docs/jetson-preemption-investigation.md`.
 
-1. **`GICR_IGROUPR0` / `GICR_IGRPMODR0` never written (most likely).** Audit of `gic_redist_init()` in `kernel/drivers/gic.c:407-448` confirms it wakes the redistributor, disables all SGIs/PPIs, sets priorities, and configures trigger types — but never writes the Group registers. On GICv3 with two security states, unwritten Group bits may leave PPI 30 in Group 0 (Secure), which is delivered as **FIQ** rather than IRQ. The exception vector at `el1_fiq` in `kernel/arch/arm64/vectors.S` falls through to `b hang` — a black hole that silently drops the interrupt. This matches the observed symptom (zero IRQs, no crash). The fix is a two-line addition inside `gic_redist_init`:
-    ```c
-    GICR_IGROUPR0(cpu)  = 0xFFFFFFFF;   /* All SGIs/PPIs Group 1 NS */
-    GICR_IGRPMODR0(cpu) = 0x00000000;
-    ```
-   The same diagnosis applies to Pi 5 (#99) via GICv2's `GICD_IGROUPR` — both platforms likely share this root cause.
-2. **EL2+VHE interrupt routing.** Jetson runs at EL2 with VHE (E2H=1, TGE=1). Under VHE, `CNTP_*_EL0` accesses from EL2 hit the **NS EL1 physical timer**, which fires INTID 30 (PPI 14). That matches the expected INTID. However, `CNTHCTL_EL2` has a **different bit layout under VHE** than without — `boot.S` on Jetson does not explicitly program `CNTHCTL_EL2` (unlike Pi 5's boot). This is not a blocker for EL2 code itself, but becomes relevant if future user-mode work runs at EL0.
-3. **TF-A residual GIC state after kexec.** Linux's kexec leaves the GIC distributor in whatever state Linux configured. SLM-OS re-initializes the distributor, but Linux's CPU-hotplug-offline path clears redistributor state for secondaries — so the code's implicit "inherit Linux's config" assumption is fragile.
+**Root cause:** NVIDIA's TF-A firmware configures the GICv3 in a fully locked-down two-security-state mode. Empirical findings from the `timdiag` shell command on live hardware:
 
-The documented secondary-CPU WFE-only workaround (`kernel/CLAUDE.md:171-172`) describes a different failure mode on Pi 5 — "secondary CPUs cause scheduler re-entrancy issues (schedule() called from timer ISR does switch_to, abandoning the exception frame)." That's IRQs firing but crashing, whereas on Jetson the IRQs do not fire at all. The scheduler-reentrance issue is downstream; the Group configuration issue is upstream and applies to both platforms.
+| Observation | Evidence |
+|-------------|----------|
+| All PPIs in Group 0/G1S | `GICR_IGROUPR0 = 0x00000000` (NS view) |
+| NS writes to Group config silently ignored | Readback unchanged after write |
+| All SPIs also Group 0/G1S | `GICD_IGROUPR[1-4] = 0x00000000` |
+| `ICC_IGRPEN0_EL1` reads trap to EL3 | Crash with `ESR_EL3 EC=0x18` (trapped MSR/MRS) |
+| FIQ routed to EL3, not EL2 | `SCR_EL3 = 0x3073d` with `FIQ=1` (from TF-A crash dump) |
+| WFI wake on timer doesn't work | Confirmed by hanging test run |
 
-### 1.4 What closes the gap
+The original hypothesis (candidate #1 in the pre-2026-04-15 version of this section) was correct in spirit — Group configuration is the problem — but the two-line "fix" does not work because NS writes are silently ignored by the EL3-owned Group register configuration. Pi 5's parallel investigation reached the same conclusion through GICv2 (`docs/pi5-preemption-resolution.md`).
 
-**Fast path (try first — potentially 2-line fix, 1 hour):**
+The documented secondary-CPU WFE-only workaround (`kernel/CLAUDE.md`) describes a different failure mode on Pi 5 — "secondary CPUs cause scheduler re-entrancy issues (schedule() called from timer ISR does switch_to, abandoning the exception frame)." That's IRQs firing but crashing, whereas on Jetson the IRQs do not fire at all because of the Group 0 routing. Both issues are now blocked upstream by firmware policy.
 
-Add `GICR_IGROUPR0(cpu) = 0xFFFFFFFF` and `GICR_IGRPMODR0(cpu) = 0` to `gic_redist_init` in `kernel/drivers/gic.c` and rebuild. If timer IRQs start firing on CPU 0, the diagnosis is confirmed and the remaining work is just downstream (secondary preemption, UART lock). This is a zero-risk attempt — existing behavior (IRQs never firing) cannot get worse.
+### 1.4 What closes the gap (2026-04-15 update)
 
-**Full diagnostic (if the fast path does not fix it):**
+The diagnostic `timdiag` shell command is now implemented (`kernel/src/shell_sys.c`) and has been used to eliminate all NS-accessible paths. The following remain as theoretical options:
 
-1. **Add a `gicdump` shell command** that prints per-CPU registers: `GICR_CTLR`, `GICR_WAKER`, `GICR_IGROUPR0`, `GICR_IGRPMODR0`, `GICR_ISENABLER0`, `GICR_IPRIORITYR[7]` (PPI 30's byte), `ICC_CTLR_EL1`, `ICC_PMR_EL1`, `ICC_IGRPEN1_EL1`, `ICC_SRE_EL1`, `CNTFRQ_EL0`, `CNTP_CTL_EL0`, `CNTP_CVAL_EL0`, `CNTHCTL_EL2`. 0.5 day.
-2. **Spuriously raise the timer via short `CNTP_TVAL_EL0 = 0`.** If that fires, timer path works; the bug is in periodic reprogramming. If not, IRQ routing is broken. 0.5 day.
-3. **Diff the dump against a known-good EL2/VHE reference** (Jetson Linux pre-kexec via `/proc/interrupts` + a kernel module, or OP-TEE's GIC init). 1 day.
-4. **Once CPU 0 IRQs fire:** verify `scheduler_tick` increments `pit_ticks`, idle unmasks correctly across preemptions, `DAIF.I=1` invariant holds on task resumption. 1 day.
-5. **Enable secondary-CPU preemption** by porting the PR #98 trampoline. Code-level issues to address during the port:
-    - Rename `PI5_SECONDARY_PREEMPT` to `SECONDARY_PREEMPT`; drop the `PLATFORM=RASPI5` gate in `CMakeLists.txt`.
-    - **Fix the MPIDR-to-logical-cpu formula in `resched_trampoline`** (`kernel/arch/arm64/vectors.S:299-316`). The current inline `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` assumes Aff0 or Aff1 alone identifies the CPU — correct for Pi 5 and QEMU, **wrong for Jetson cluster-1 CPUs**. For CPU 4 (MPIDR `0x10200`) and CPU 5 (MPIDR `0x10300`) it yields 2 and 3, collisions with the cluster-0 slots. The vectors.S comment at line 309-312 anticipates this. Replace with a lookup in `cpu_logical_map[]` (already in NC memory) or a macro that incorporates Aff2.
-    - **Fix `gic_send_sgi` for dual-cluster MPIDR** (`kernel/drivers/gic.c:697-712`). The current `(1UL << target_cpu)` target-list bit is wrong for Jetson — Aff0 is 0 for all CPUs, so the bit index must derive from the CPU's Aff0 offset within its Aff1 group (always 0 on Jetson), and the SGI value must set Aff1 (and Aff2 for cluster 1) from the target's MPIDR. Not blocking for timer PPIs (which are per-CPU), but required before any cross-CPU IPI-based scheduler notification. 2 days.
-6. **NC-memory cross-CPU UART lock** — the existing UART lock is IRQ-disable-only (safe under cooperative only). Secondary CPUs must not print until this lands. 1 day.
+1. **Rebuild NVIDIA's TF-A** with modified GIC initialization to place the timer PPI in Group 1 NS. Source is in the Jetson Linux BSP. **Out of capstone scope** — requires NVIDIA build infrastructure.
+2. **TF-A interrupt forwarding** — configure EL3 to catch the timer FIQ and inject a virtual interrupt into NS. Requires TF-A modification. **Out of capstone scope**.
+3. **Accept COOP_PREEMPT as the permanent mechanism.** This is the capstone outcome — the scheduler correctly drives all policy, deadline boosts, migration, and statistics through the CNTPCT-polled `coop_preempt_maybe_tick` path. The only limitation is that a pure-compute task with no yield points is not preempted; no capstone workload depends on that capability.
 
-**Best-case total (fast path works): 1 hour + 3 days for trampoline port.**
-**Realistic (full diagnostic): 2-3 weeks with hardware-in-the-loop debugging.**
+The GICv3-aware `el1_fiq_handler` extension (commit pending) is in place as no-cost scaffolding for any future firmware that does deliver Group 0 FIQ to NS.
 
 ### 1.5 Open tracking
 
-- No Jetson-specific preemption issue exists today. Filing one as part of this report's follow-up is recommended.
-- #57 (merged as #98) addressed the Pi 5 scheduler-reentrance side of this problem. Its trampoline code is reusable but gated off for Jetson.
+- #134 tracks hardware restoration across both platforms (Pi 5 and Jetson).
+- Investigation report: `docs/jetson-preemption-investigation.md` (2026-04-15).
+- `timdiag` shell command provides ongoing diagnostics if firmware behavior changes.
 - #99 tracks the Pi 5 timer-IRQ delivery blocker — same class of issue, different hardware. Findings from that investigation may transfer.
 
 ---
