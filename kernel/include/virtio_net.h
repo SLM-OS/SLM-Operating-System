@@ -168,13 +168,13 @@ struct virtio_net_device {
     uint8_t *rx_buffers;
     uint16_t rx_buffer_count;
 
-    /* Statistics */
-    uint64_t rx_packets;
-    uint64_t tx_packets;
-    uint64_t rx_bytes;
-    uint64_t tx_bytes;
-    uint64_t rx_errors;
-    uint64_t tx_errors;
+    /* Packet/byte/error stats are kept exclusively in lwIP's
+     * net_statistics (kernel/net/lwip_slm.c) and surfaced via
+     * net_get_stats() / netstat. The driver does not maintain a
+     * parallel set — driver-level and lwIP-level counts used to
+     * diverge rarely and confusingly, the driver-level ones were
+     * never read, and parity with the x86-64 PCI driver required
+     * one or the other to go. */
 };
 
 /* -------------------------------------------------------------------------- */
@@ -230,17 +230,6 @@ void virtio_net_get_mac(uint8_t mac[6]);
  * @return  true if link is up
  */
 bool virtio_net_link_up(void);
-
-/**
- * Get driver statistics
- *
- * @param rx_pkts   Output: received packets
- * @param tx_pkts   Output: transmitted packets
- * @param rx_bytes  Output: received bytes
- * @param tx_bytes  Output: transmitted bytes
- */
-void virtio_net_get_stats(uint64_t *rx_pkts, uint64_t *tx_pkts,
-                          uint64_t *rx_bytes, uint64_t *tx_bytes);
 
 /**
  * Register the VirtIO-Net MMIO driver with the net_driver abstraction.

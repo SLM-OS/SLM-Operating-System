@@ -192,10 +192,10 @@ static struct {
     bool link_up;
     uint64_t features;
 
-    /* Statistics */
-    uint64_t rx_packets, tx_packets;
-    uint64_t rx_bytes, tx_bytes;
-    uint64_t rx_errors, tx_errors;
+    /* Packet/byte/error stats live in lwIP's net_statistics
+     * (kernel/net/lwip_slm.c); the driver does not maintain its own
+     * parallel counters. See the matching comment on
+     * struct virtio_net_device in kernel/include/virtio_net.h. */
 
     /* Buffers */
     spinlock_t lock;
@@ -626,7 +626,6 @@ static int virtio_net_pci_send(const void *data, size_t len) {
     uint32_t total = sizeof(*hdr) + (uint32_t)len;
     int desc_idx = vq_add_buf(&pci_net.tx_vq, tx_buffer, total, false);
     if (desc_idx < 0) {
-        pci_net.tx_errors++;
         spin_unlock_irqrestore(&pci_net.lock, flags);
         return -1;
     }
@@ -650,13 +649,10 @@ static int virtio_net_pci_send(const void *data, size_t len) {
 
     if (timed_out) {
         WARN("PCI TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
-        pci_net.tx_errors++;
         spin_unlock_irqrestore(&pci_net.lock, flags);
         return -1;
     }
 
-    pci_net.tx_packets++;
-    pci_net.tx_bytes += len;
     spin_unlock_irqrestore(&pci_net.lock, flags);
     return 0;
 }
@@ -679,7 +675,6 @@ static int virtio_net_pci_recv(void *buffer, size_t max_len) {
     uint8_t *pkt_data = rx_buf + sizeof(struct virtio_net_hdr_pci);
 
     if (pkt_len > (uint32_t)max_len) {
-        pci_net.rx_errors++;
         pkt_len = (uint32_t)max_len;
     }
 
@@ -691,8 +686,6 @@ static int virtio_net_pci_recv(void *buffer, size_t max_len) {
     }
     vq_kick(&pci_net.rx_vq);
 
-    pci_net.rx_packets++;
-    pci_net.rx_bytes += pkt_len;
     spin_unlock_irqrestore(&pci_net.lock, flags);
     return pkt_len;
 }

@@ -454,7 +454,6 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
     if (desc_idx < 0) {
         spin_unlock(&net_lock);
         ERROR("TX queue full");
-        netdev.tx_errors++;
         return -1;
     }
 
@@ -491,13 +490,9 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
 
     if (timed_out) {
         WARN("TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
-        netdev.tx_errors++;
         spin_unlock(&net_lock);
         return -1;
     }
-
-    netdev.tx_packets++;
-    netdev.tx_bytes += len;
 
     spin_unlock(&net_lock);
     return 0;
@@ -530,7 +525,6 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
 
     if (packet_len > max_len) {
         WARN("RX packet too large: %u > %u", packet_len, max_len);
-        netdev.rx_errors++;
         packet_len = max_len;
     }
 
@@ -545,9 +539,6 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
         net_stats_rx_no_buffers_inc();
     }
     virtqueue_kick(&netdev.rx_vq);
-
-    netdev.rx_packets++;
-    netdev.rx_bytes += packet_len;
 
     spin_unlock(&net_lock);
     return packet_len;
@@ -588,14 +579,6 @@ void virtio_net_get_mac(uint8_t mac[6]) {
 
 bool virtio_net_link_up(void) {
     return initialized && netdev.link_up;
-}
-
-void virtio_net_get_stats(uint64_t *rx_pkts, uint64_t *tx_pkts,
-                          uint64_t *rx_bytes, uint64_t *tx_bytes) {
-    if (rx_pkts) *rx_pkts = netdev.rx_packets;
-    if (tx_pkts) *tx_pkts = netdev.tx_packets;
-    if (rx_bytes) *rx_bytes = netdev.rx_bytes;
-    if (tx_bytes) *tx_bytes = netdev.tx_bytes;
 }
 
 /* -------------------------------------------------------------------------- */
