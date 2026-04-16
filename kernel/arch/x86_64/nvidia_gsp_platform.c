@@ -200,7 +200,11 @@ static void x86_gsp_mb(void) { __asm__ volatile("mfence" ::: "memory"); }
  * boot-time heap allocation out of the path; the copy happens once
  * per boot and the image stays resident for any later GSP re-init.
  */
-#define X86_VBIOS_BUF_SIZE  (256 * 1024)
+/* Buffer sized to hold the full BAR0 PROM window (1 MB). Ampere
+ * VBIOSes can be up to 1 MB — the 256 KB sizing that predated the
+ * BAR0 PROM window path was not large enough to include FWSEC ucode
+ * on GA10x. Bare-metal has abundant memory; the BSS cost is fine. */
+#define X86_VBIOS_BUF_SIZE  (1024 * 1024)
 alignas(64) static uint8_t x86_vbios_buf[X86_VBIOS_BUF_SIZE];
 static struct nvidia_vbios x86_vbios;
 static bool x86_vbios_loaded;
@@ -317,8 +321,72 @@ static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
 }
 
 /*
+ * NV_PROM_DATA — BAR0 offset that maps the GPU's SPI flash as a
+ * 1 MB MMIO window. From NVIDIA open-gpu-kernel-modules
+ * `src/common/inc/swref/published/turing/tu102/dev_ext_devices.h`.
+ * Used on Turing+ including all Ampere. This is the authoritative
+ * method the openrm and proprietary drivers use — reads the actual
+ * SPI flash contents regardless of the PCI Expansion ROM BAR.
+ */
+#define NV_PROM_DATA_OFFSET   0x00300000u
+#define NV_PROM_DATA_SIZE     0x00100000u    /* 1 MB */
+
+/*
+ * Read the VBIOS via BAR0's PROM window (BAR0 + 0x300000).
+ * Returns byte count copied on success, -1 on failure.
+ * Uses 32-bit reads matching what openrm does.
+ */
+static int x86_read_vbios_prom_window(uint8_t *dst, size_t max)
+{
+    volatile uint32_t *bar0 = nvidia_gpu_get_bar0();
+    uint32_t bar0_size = nvidia_gpu_get_bar0_size();
+
+    if (!bar0 || bar0_size < NV_PROM_DATA_OFFSET + NV_PROM_DATA_SIZE) {
+        uart_puts("[VBIOS] BAR0 too small for PROM window\n");
+        return -1;
+    }
+
+    /* Read up to max bytes (capped by buffer and PROM window size) */
+    size_t copy_len = max;
+    if (copy_len > NV_PROM_DATA_SIZE)
+        copy_len = NV_PROM_DATA_SIZE;
+
+    const volatile uint32_t *prom = &bar0[NV_PROM_DATA_OFFSET / 4];
+
+    /* Validate PCI expansion ROM signature at the start */
+    uint32_t first_word = prom[0];
+    if ((first_word & 0xFFFF) != 0xAA55) {
+        uart_printf("[VBIOS] PROM window: no ROM signature (got 0x%04x)\n",
+                    first_word & 0xFFFF);
+        return -1;
+    }
+
+    /* 32-bit reads into the buffer */
+    uint32_t *d = (uint32_t *)dst;
+    size_t words = copy_len / 4;
+    for (size_t i = 0; i < words; i++)
+        d[i] = prom[i];
+
+    /* Handle trailing bytes if copy_len is not 4-aligned */
+    size_t tail = copy_len & 3;
+    if (tail) {
+        uint32_t last = prom[words];
+        uint8_t *bp = dst + words * 4;
+        for (size_t i = 0; i < tail; i++)
+            bp[i] = (uint8_t)(last >> (i * 8));
+    }
+
+    uart_printf("[VBIOS] read %u bytes via BAR0 PROM window\n",
+                (unsigned)copy_len);
+    return (int)copy_len;
+}
+
+/*
  * Shared-layer entry: platform-provided VBIOS loader. Called once
  * by the GSP bringup code before anything that needs FWSEC. Idempotent.
+ *
+ * Tries the BAR0 PROM window first (authoritative, always works on
+ * Turing+), falls back to the PCI Expansion ROM BAR.
  */
 int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
 {
@@ -328,14 +396,20 @@ int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
         return x86_vbios.parsed_ok ? 0 : -1;
     }
 
-    uint8_t bus, dev, func;
-    if (nvidia_gpu_get_pci_address(&bus, &dev, &func) < 0)
-        return -1;
+    /* Path 1: BAR0 PROM window (preferred — doesn't need ROM BAR) */
+    int copied = x86_read_vbios_prom_window(x86_vbios_buf, sizeof(x86_vbios_buf));
 
-    int copied = x86_read_expansion_rom(bus, dev, func,
-                                        x86_vbios_buf, sizeof(x86_vbios_buf));
+    /* Path 2: PCI Expansion ROM BAR (fallback) */
     if (copied <= 0) {
-        uart_puts("[VBIOS] expansion ROM not readable\n");
+        uint8_t bus, dev, func;
+        if (nvidia_gpu_get_pci_address(&bus, &dev, &func) < 0)
+            return -1;
+        copied = x86_read_expansion_rom(bus, dev, func,
+                                        x86_vbios_buf, sizeof(x86_vbios_buf));
+    }
+
+    if (copied <= 0) {
+        uart_puts("[VBIOS] no readable VBIOS source\n");
         return -1;
     }
 
