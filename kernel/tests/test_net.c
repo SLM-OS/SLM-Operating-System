@@ -945,11 +945,10 @@ static void test_net_driver_has_tx_reap(void)
  * The pre-#204 send() spun up to VIRTIO_NET_TX_TIMEOUT_MS (100 ms)
  * waiting for the device to ack. The async send returns as soon as
  * the descriptor is queued, which on QEMU is microseconds. Use
- * sys_now() to bound a single send: if it takes more than 10 ms
- * something is wrong (the spin-wait regression has reappeared).
- *
- * 10 ms is generous — gives QEMU room to schedule under CPU quota
- * without false-failing — but tight enough to catch a 100 ms spin.
+ * sys_now() to bound a single send: 50 ms catches the 100 ms
+ * spin-wait regression while tolerating scheduler jitter under
+ * systemd-run CPU quota (vCPU stalls of several ms are plausible
+ * when 4 vCPUs compete for 2 host cores).
  */
 static void test_net_send_returns_quickly(void)
 {
@@ -967,7 +966,7 @@ static void test_net_send_returns_quickly(void)
     uint32_t elapsed = sys_now() - start;
 
     TEST_ASSERT_MESSAGE(ret == 0, "driver send should accept the frame");
-    TEST_ASSERT_MESSAGE(elapsed < 10,
+    TEST_ASSERT_MESSAGE(elapsed < 50,
         "driver send should return promptly (async, not spin-wait) — #204");
 }
 
@@ -983,8 +982,11 @@ static void test_net_send_returns_quickly(void)
  *   - all 8 sends return 0 (no NET_E_BUSY despite back-to-back submit)
  *   - elapsed wall time well under what 8× synchronous waits would
  *     have taken (8 × 100 ms = 800 ms; we expect < 100 ms)
- *   - net_statistics.tx_packets advances by 8 (lwIP linkoutput
- *     counts only successful sends)
+ *
+ * Note: the test calls drv->send() directly rather than going
+ * through lwIP, so net_statistics.tx_packets (maintained by
+ * slm_netif_output) doesn't advance here. The pool behavior is what
+ * we're validating, not lwIP accounting.
  */
 static void test_net_burst_8_sends_async(void)
 {

@@ -526,6 +526,15 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
         return NET_E_BUSY;  /* All slots in flight; caller retries via net_poll */
     }
 
+    /* Claim the slot BEFORE the device can see the descriptor. This
+     * matters once IRQ-driven completion lands — a hard IRQ firing
+     * between virtqueue_add_buf and this assignment would reap the
+     * completion, see tx_inflight[slot] still false, and silently
+     * bail. Claiming first means the reap path always observes a
+     * consistent "claimed" state. Under polled-only operation the
+     * order is harmless either way; this is forward-compatibility. */
+    tx_inflight[slot] = true;
+
     /* Build packet in the chosen slot */
     uint8_t *buf = tx_buffer_pool[slot];
     struct virtio_net_hdr *hdr = (struct virtio_net_hdr *)buf;
@@ -539,10 +548,10 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
     int desc_idx = virtqueue_add_buf(&netdev.tx_vq, buf, total_len,
                                      false /* device reads */);
     if (desc_idx < 0) {
+        tx_inflight[slot] = false;  /* release claim on submit failure */
         spin_unlock(&tx_lock);
         return NET_E_BUSY;  /* TX virtqueue descriptor pool exhausted */
     }
-    tx_inflight[slot] = true;
 
     virtqueue_kick(&netdev.tx_vq);
     spin_unlock(&tx_lock);

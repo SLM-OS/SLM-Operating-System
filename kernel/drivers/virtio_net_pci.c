@@ -686,6 +686,12 @@ static int virtio_net_pci_send(const void *data, size_t len) {
         return NET_E_BUSY;
     }
 
+    /* Claim the slot before the device can see the descriptor —
+     * same ordering as the MMIO driver's virtio_net_send. Protects
+     * against a future IRQ-driven reap observing an intermediate
+     * "queued but not tracked" state. */
+    tx_inflight[slot] = true;
+
     /* Build packet in selected slot */
     uint8_t *buf = tx_buffers[slot];
     struct virtio_net_hdr_pci *hdr = (struct virtio_net_hdr_pci *)buf;
@@ -695,10 +701,10 @@ static int virtio_net_pci_send(const void *data, size_t len) {
     uint32_t total = sizeof(*hdr) + (uint32_t)len;
     int desc_idx = vq_add_buf(&pci_net.tx_vq, buf, total, false);
     if (desc_idx < 0) {
+        tx_inflight[slot] = false;  /* release claim on submit failure */
         spin_unlock_irqrestore(&pci_net.tx_lock, flags);
         return NET_E_BUSY;
     }
-    tx_inflight[slot] = true;
 
     vq_kick(&pci_net.tx_vq);
     spin_unlock_irqrestore(&pci_net.tx_lock, flags);
