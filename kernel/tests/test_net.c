@@ -691,6 +691,66 @@ static void test_net_dhcp_binds(void)
 }
 
 /*
+ * Test: DHCP fallback restores static IP when no server answers
+ * (issue #197, auto-DHCP fallback path).
+ *
+ * Can't force SLIRP to not answer, so this exercises the fallback
+ * logic with a different approach: call net_set_dhcp_timeout_ms(1)
+ * to shrink the timeout below the polling cadence, then re-enable
+ * DHCP. The first net_poll() after reaches the timeout check before
+ * lwIP has a chance to bind, so dhcp_status transitions to
+ * NET_DHCP_FAILED and the static 10.0.2.15 is restored.
+ *
+ * After the test, the timeout is restored to the default so
+ * subsequent tests aren't affected.
+ */
+static void test_net_dhcp_fallback(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Save the current timeout to restore at end */
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    /* Reset to static IP first — this stops any in-progress DHCP so
+     * the re-enable below has fresh state. net_set_static_ip also
+     * clears the netif's DHCP binding, so dhcp_supplied_address()
+     * returns false on the next poll. */
+    int ret = net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                net_ip4_addr(255, 255, 255, 0),
+                                net_ip4_addr(10, 0, 2, 2));
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Re-enable DHCP with a 0 ms timeout — the fallback check will
+     * fire immediately on the next call, before SLIRP has any chance
+     * to respond. Avoids the recv → OFFER → bind race that makes
+     * millisecond timeouts non-deterministic in CI. */
+    net_set_dhcp_timeout_ms(0);
+    ret = net_enable_dhcp();
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Direct call — bypasses net_poll()'s recv path so SLIRP can't
+     * bind DHCP before the timeout check runs. */
+    int fired = net_dhcp_check_timeout();
+    TEST_ASSERT_MESSAGE(fired == 1,
+        "net_dhcp_check_timeout should fire fallback with 0 ms timeout");
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_MESSAGE(info.dhcp_status == NET_DHCP_FAILED,
+        "fallback should transition dhcp_status to NET_DHCP_FAILED");
+    TEST_ASSERT_MESSAGE(!info.dhcp_enabled,
+        "dhcp_enabled should be cleared after fallback");
+    TEST_ASSERT_MESSAGE(info.ip_addr == net_ip4_addr(10, 0, 2, 15),
+        "fallback should restore the original static IP");
+
+    /* Restore default timeout for subsequent tests */
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
  * Test: a raw frame transmits through the registered driver's send path.
  *
  * Bypasses lwIP and ARP entirely — pushes a single Ethernet broadcast
@@ -778,6 +838,7 @@ int test_suite_net(void)
     RUN_TEST(test_net_poll_after_init);
     RUN_TEST(test_net_auto_dhcp_at_boot);
     RUN_TEST(test_net_dhcp_binds);
+    RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_driver_tx);
 
     return UNITY_END();

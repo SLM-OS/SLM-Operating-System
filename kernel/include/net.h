@@ -102,6 +102,34 @@ int net_set_static_ip(uint32_t ip_addr, uint32_t netmask, uint32_t gateway);
  */
 int net_enable_dhcp(void);
 
+/**
+ * Override the DHCP bind timeout at runtime.
+ *
+ * Primarily for tests that want to exercise the auto-DHCP fallback
+ * path without waiting the full default (10 s). Passing 0 restores
+ * the compile-time default (NET_DHCP_TIMEOUT_DEFAULT_MS).
+ *
+ * @param ms  New timeout in milliseconds
+ */
+void net_set_dhcp_timeout_ms(uint32_t ms);
+
+/**
+ * Query the current DHCP bind timeout.
+ *
+ * @return  Timeout in milliseconds
+ */
+uint32_t net_get_dhcp_timeout_ms(void);
+
+/**
+ * Check whether DHCP has exceeded its bind timeout, and fall back to
+ * the static IP configuration if so. net_poll() calls this once per
+ * poll; tests can call it directly to deterministically trigger
+ * fallback without racing the packet receive path.
+ *
+ * @return  1 if fallback fired, 0 if no action was taken
+ */
+int net_dhcp_check_timeout(void);
+
 /* -------------------------------------------------------------------------- */
 /* ICMP (Ping) Support                                                         */
 /* -------------------------------------------------------------------------- */

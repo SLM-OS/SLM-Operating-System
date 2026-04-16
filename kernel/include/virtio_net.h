@@ -108,6 +108,14 @@ struct virtio_net_hdr {
     uint16_t num_buffers;   /* RX only: merged buffer count (VERSION_1/MRG_RXBUF) */
 } __attribute__((packed));
 
+/* Regression guard: header must be exactly 12 bytes when VIRTIO_F_VERSION_1
+ * is negotiated. Dropping num_buffers or reordering fields breaks every
+ * TX/RX silently (QEMU reads 2 bytes of packet data as part of the
+ * header). Caught a real regression during multi-platform networking
+ * expansion — this assertion keeps it dead. */
+static_assert(sizeof(struct virtio_net_hdr) == 12,
+              "virtio_net_hdr must be 12 bytes for VIRTIO_F_VERSION_1");
+
 /* Header flags */
 #define VIRTIO_NET_HDR_F_NEEDS_CSUM     (1 << 0)    /* Checksum needed */
 #define VIRTIO_NET_HDR_F_DATA_VALID     (1 << 1)    /* Csum is valid */

@@ -146,6 +146,9 @@ struct virtio_net_hdr_pci {
     uint16_t num_buffers;
 } __attribute__((packed));
 
+static_assert(sizeof(struct virtio_net_hdr_pci) == 12,
+              "virtio_net_hdr_pci must be 12 bytes for VIRTIO_F_VERSION_1");
+
 /* -------------------------------------------------------------------------- */
 /* Driver State                                                                */
 /* -------------------------------------------------------------------------- */

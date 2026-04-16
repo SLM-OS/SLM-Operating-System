@@ -56,14 +56,58 @@ static bool dhcp_started = false;
  * NET_DHCP_FAILED so the system has a working IP even if no DHCP
  * server answered.
  */
-#ifndef NET_DHCP_TIMEOUT_MS
-#define NET_DHCP_TIMEOUT_MS  10000
+#ifndef NET_DHCP_TIMEOUT_DEFAULT_MS
+#define NET_DHCP_TIMEOUT_DEFAULT_MS  10000
 #endif
+/* Runtime-adjustable so tests can force the fallback path in seconds
+ * rather than waiting the full default. Production callers don't need
+ * to touch this. */
+static uint32_t dhcp_timeout_ms = NET_DHCP_TIMEOUT_DEFAULT_MS;
 static uint32_t dhcp_start_time;
 static bool     dhcp_fallback_done;
 static uint32_t static_ip_fallback;
 static uint32_t static_nm_fallback;
 static uint32_t static_gw_fallback;
+
+void net_set_dhcp_timeout_ms(uint32_t ms) {
+    /* Accept any value including 0 — tests use 0 to trigger fallback
+     * immediately on the next check. Production callers should use
+     * a reasonable value; 0 disables the wait entirely. */
+    dhcp_timeout_ms = ms;
+}
+
+uint32_t net_get_dhcp_timeout_ms(void) {
+    return dhcp_timeout_ms;
+}
+
+/*
+ * Check whether DHCP has exceeded its bind timeout and fall back to
+ * the static IP if so. Called from net_poll() once per poll; also
+ * callable directly from tests that want to deterministically
+ * trigger fallback without racing the recv path. Returns 1 if the
+ * fallback fired, 0 if no action was taken.
+ */
+int net_dhcp_check_timeout(void) {
+    if (!dhcp_started || dhcp_fallback_done)
+        return 0;
+    if (dhcp_supplied_address(&slm_netif))
+        return 0;
+
+    uint32_t elapsed = sys_now() - dhcp_start_time;
+    if (elapsed < dhcp_timeout_ms)
+        return 0;
+
+    WARN("DHCP timeout after %u ms; falling back to static IP", elapsed);
+    dhcp_stop(&slm_netif);
+    dhcp_started = false;
+    dhcp_fallback_done = true;
+    ip4_addr_t ip, nm, gw;
+    ip.addr = static_ip_fallback;
+    nm.addr = static_nm_fallback;
+    gw.addr = static_gw_fallback;
+    netif_set_addr(&slm_netif, &ip, &nm, &gw);
+    return 1;
+}
 
 /* Receive buffer for packet processing */
 static uint8_t rx_packet_buf[1518];
@@ -280,7 +324,7 @@ int net_init(void) {
         dhcp_started = true;
         dhcp_start_time = sys_now();
         dhcp_fallback_done = false;
-        INFO("DHCP client started at boot (timeout %u ms)", NET_DHCP_TIMEOUT_MS);
+        INFO("DHCP client started at boot (timeout %u ms)", dhcp_timeout_ms);
     } else {
         WARN("DHCP auto-start failed; using static IP");
     }
@@ -317,29 +361,8 @@ void net_poll(void) {
     /* Process lwIP timers */
     sys_check_timeouts();
 
-    /* DHCP auto-start timeout fallback (issue #197).
-     *
-     * If DHCP has been running longer than NET_DHCP_TIMEOUT_MS without
-     * binding an address, stop it and restore the static IP. This
-     * ensures the system always has a working IP even if the network
-     * has no DHCP server. Runs once — after fallback we stay on static
-     * until the user manually re-enables DHCP via `ifconfig dhcp`. */
-    if (dhcp_started && !dhcp_fallback_done &&
-        !dhcp_supplied_address(&slm_netif)) {
-        uint32_t elapsed = sys_now() - dhcp_start_time;
-        if (elapsed > NET_DHCP_TIMEOUT_MS) {
-            WARN("DHCP timeout after %u ms; falling back to static IP",
-                 elapsed);
-            dhcp_stop(&slm_netif);
-            dhcp_started = false;
-            dhcp_fallback_done = true;
-            ip4_addr_t ip, nm, gw;
-            ip.addr = static_ip_fallback;
-            nm.addr = static_nm_fallback;
-            gw.addr = static_gw_fallback;
-            netif_set_addr(&slm_netif, &ip, &nm, &gw);
-        }
-    }
+    /* DHCP auto-start timeout fallback (issue #197) */
+    net_dhcp_check_timeout();
 
     /* Check ping timeout (1 second) */
     if (ping_state.pending) {
