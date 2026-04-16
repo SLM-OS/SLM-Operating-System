@@ -83,6 +83,19 @@ or security holes here.
 - Hardware-dependent tests should be gated with `#ifdef` and
   documented as requiring specific platform
 
+### Subsystem-specific checklists
+
+Some subsystems have an additional checklist that reviewers walk
+through for every relevant PR. Pattern-match the diff against these
+when applicable:
+
+- **NIC drivers** — any new file under `kernel/drivers/*net*.c`, any
+  change to `kernel/net/lwip_slm.c`, or a new `struct net_driver`
+  registration in `kernel/src/main.c`: use
+  [`docs/net-driver-checklist.md`](net-driver-checklist.md). Covers
+  driver ops, build wiring, the 8 mandatory live integration tests,
+  platform-specific tests, docs, and the manual smoke test.
+
 ## Style (suggestions, not blockers)
 
 - Functions > 80 lines: suggest splitting

@@ -21,7 +21,16 @@
 /* -------------------------------------------------------------------------- */
 
 static struct virtio_net_device netdev;
-static spinlock_t net_lock = SPINLOCK_INIT;
+/*
+ * Separate TX and RX locks (#204 — partial fix for synchronous TX
+ * polling blocking the RX path). The TX path still spins on the
+ * used ring for completion, but that spin no longer holds the same
+ * lock the RX path (driven by net_poll) needs. Full async TX with
+ * IRQ-driven completion is the long-term goal; splitting the lock
+ * is the low-risk intermediate step that the test suite validates.
+ */
+static spinlock_t tx_lock = SPINLOCK_INIT;
+static spinlock_t rx_lock = SPINLOCK_INIT;
 static bool initialized = false;
 
 /* Receive buffer pool */
@@ -438,7 +447,7 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
         return -1;
     }
 
-    spin_lock(&net_lock);
+    spin_lock(&tx_lock);
 
     /* Prepare virtio-net header (all zeros for simple case) */
     struct virtio_net_hdr *hdr = (struct virtio_net_hdr *)tx_buffer;
@@ -452,7 +461,7 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
     int desc_idx = virtqueue_add_buf(&netdev.tx_vq, tx_buffer, total_len,
                                      false /* device reads */);
     if (desc_idx < 0) {
-        spin_unlock(&net_lock);
+        spin_unlock(&tx_lock);
         ERROR("TX queue full");
         return -1;
     }
@@ -490,11 +499,11 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
 
     if (timed_out) {
         WARN("TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
-        spin_unlock(&net_lock);
+        spin_unlock(&tx_lock);
         return -1;
     }
 
-    spin_unlock(&net_lock);
+    spin_unlock(&tx_lock);
     return 0;
 }
 
@@ -503,12 +512,12 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
         return -1;
     }
 
-    spin_lock(&net_lock);
+    spin_lock(&rx_lock);
 
     uint32_t used_len;
     int desc_idx = virtqueue_get_buf(&netdev.rx_vq, &used_len);
     if (desc_idx < 0) {
-        spin_unlock(&net_lock);
+        spin_unlock(&rx_lock);
         return 0;  /* No packet available */
     }
 
@@ -540,7 +549,7 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
     }
     virtqueue_kick(&netdev.rx_vq);
 
-    spin_unlock(&net_lock);
+    spin_unlock(&rx_lock);
     return packet_len;
 }
 

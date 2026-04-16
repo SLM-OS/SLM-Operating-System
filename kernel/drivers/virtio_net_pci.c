@@ -197,8 +197,15 @@ static struct {
      * parallel counters. See the matching comment on
      * struct virtio_net_device in kernel/include/virtio_net.h. */
 
-    /* Buffers */
-    spinlock_t lock;
+    /* Separate TX and RX locks (#204): the TX path spins on the
+     * used ring for completion; splitting from RX means net_poll's
+     * recv isn't blocked while a TX is in flight. Kept as IRQ-safe
+     * spinlocks (accessed via spin_lock_irqsave) in anticipation of
+     * IRQ-driven TX completion — once the #204 full-async refactor
+     * wires virtio-net interrupts into the IDT, both locks will need
+     * to be reachable from hard-IRQ context without re-entering. */
+    spinlock_t tx_lock;
+    spinlock_t rx_lock;
 } pci_net;
 
 static uint8_t rx_buffers[RX_BUFFER_COUNT][MAX_PACKET_SIZE]
@@ -604,7 +611,8 @@ static int virtio_net_pci_init(void) {
     /* Post RX buffers */
     post_rx_buffers();
 
-    spin_init(&pci_net.lock);
+    spin_init(&pci_net.tx_lock);
+    spin_init(&pci_net.rx_lock);
     pci_net.initialized = true;
     INFO("VirtIO-Net PCI driver initialized");
     return 0;
@@ -616,7 +624,7 @@ static int virtio_net_pci_send(const void *data, size_t len) {
     if (len > 1514)
         return -1;
 
-    irq_flags_t flags = spin_lock_irqsave(&pci_net.lock);
+    irq_flags_t flags = spin_lock_irqsave(&pci_net.tx_lock);
 
     /* Prepend virtio-net header */
     struct virtio_net_hdr_pci *hdr = (struct virtio_net_hdr_pci *)tx_buffer;
@@ -626,7 +634,7 @@ static int virtio_net_pci_send(const void *data, size_t len) {
     uint32_t total = sizeof(*hdr) + (uint32_t)len;
     int desc_idx = vq_add_buf(&pci_net.tx_vq, tx_buffer, total, false);
     if (desc_idx < 0) {
-        spin_unlock_irqrestore(&pci_net.lock, flags);
+        spin_unlock_irqrestore(&pci_net.tx_lock, flags);
         return -1;
     }
 
@@ -649,11 +657,11 @@ static int virtio_net_pci_send(const void *data, size_t len) {
 
     if (timed_out) {
         WARN("PCI TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
-        spin_unlock_irqrestore(&pci_net.lock, flags);
+        spin_unlock_irqrestore(&pci_net.tx_lock, flags);
         return -1;
     }
 
-    spin_unlock_irqrestore(&pci_net.lock, flags);
+    spin_unlock_irqrestore(&pci_net.tx_lock, flags);
     return 0;
 }
 
@@ -661,12 +669,12 @@ static int virtio_net_pci_recv(void *buffer, size_t max_len) {
     if (!pci_net.initialized)
         return -1;
 
-    irq_flags_t flags = spin_lock_irqsave(&pci_net.lock);
+    irq_flags_t flags = spin_lock_irqsave(&pci_net.rx_lock);
 
     uint32_t used_len;
     int desc_idx = vq_get_buf(&pci_net.rx_vq, &used_len);
     if (desc_idx < 0) {
-        spin_unlock_irqrestore(&pci_net.lock, flags);
+        spin_unlock_irqrestore(&pci_net.rx_lock, flags);
         return 0;
     }
 
@@ -686,7 +694,7 @@ static int virtio_net_pci_recv(void *buffer, size_t max_len) {
     }
     vq_kick(&pci_net.rx_vq);
 
-    spin_unlock_irqrestore(&pci_net.lock, flags);
+    spin_unlock_irqrestore(&pci_net.rx_lock, flags);
     return pkt_len;
 }
 

@@ -147,27 +147,28 @@ static void test_net_str_to_ip_invalid(void)
     uint32_t addr;
 
     /* NULL inputs */
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip(NULL, &addr));
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("1.2.3.4", NULL));
+    /* All parse failures return NET_E_INVAL (#213) */
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip(NULL, &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("1.2.3.4", NULL));
 
     /* Too few octets */
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("1.2.3", &addr));
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("1.2", &addr));
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("1", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("1.2.3", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("1.2", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("1", &addr));
 
     /* Empty string */
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("", &addr));
 
     /* Invalid characters */
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("1.2.3.a", &addr));
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("abc.def.ghi.jkl", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("1.2.3.a", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("abc.def.ghi.jkl", &addr));
 
     /* Value out of range (>255) */
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("256.1.2.3", &addr));
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("1.2.3.999", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("256.1.2.3", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("1.2.3.999", &addr));
 
     /* Too many digits in octet */
-    TEST_ASSERT_EQUAL_INT(-1, net_str_to_ip("1.2.3.1234", &addr));
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, net_str_to_ip("1.2.3.1234", &addr));
 }
 
 /*
@@ -199,6 +200,55 @@ static void test_net_ip_roundtrip(void)
 }
 
 /* ============================================================================
+ * Error Code Tests (#213)
+ * ============================================================================ */
+
+/*
+ * Test: net_strerror returns non-NULL descriptions for every enum value
+ * and a catch-all for unknown codes.
+ */
+static void test_net_strerror_coverage(void)
+{
+    /* Every named enum value must have a string that isn't "unknown" */
+    TEST_ASSERT_EQUAL_STRING("ok",                       net_strerror(NET_OK));
+    TEST_ASSERT_EQUAL_STRING("unspecified error",        net_strerror(NET_E_GENERIC));
+    TEST_ASSERT_EQUAL_STRING("network not initialized",  net_strerror(NET_E_NOT_INIT));
+    TEST_ASSERT_EQUAL_STRING("no driver registered",     net_strerror(NET_E_NO_DRIVER));
+    TEST_ASSERT_EQUAL_STRING("device not found",        net_strerror(NET_E_NO_DEVICE));
+    TEST_ASSERT_EQUAL_STRING("out of memory",            net_strerror(NET_E_NO_MEM));
+    TEST_ASSERT_EQUAL_STRING("busy",                     net_strerror(NET_E_BUSY));
+    TEST_ASSERT_EQUAL_STRING("timeout",                  net_strerror(NET_E_TIMEOUT));
+    TEST_ASSERT_EQUAL_STRING("invalid argument",         net_strerror(NET_E_INVAL));
+    TEST_ASSERT_EQUAL_STRING("packet too large",         net_strerror(NET_E_TOO_LARGE));
+    TEST_ASSERT_EQUAL_STRING("link down",                net_strerror(NET_E_LINK_DOWN));
+    TEST_ASSERT_EQUAL_STRING("protocol error",           net_strerror(NET_E_PROTO));
+
+    /* Unknown codes fall through to the catch-all */
+    TEST_ASSERT_EQUAL_STRING("unknown", net_strerror(-999));
+    TEST_ASSERT_EQUAL_STRING("unknown", net_strerror(42));
+}
+
+/*
+ * Test: the existing error contract — every NET_E_* is negative, NET_OK
+ * is zero — holds so that callers using `if (rc < 0)` still work.
+ */
+static void test_net_error_codes_are_negative(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, NET_OK);
+    TEST_ASSERT_TRUE(NET_E_GENERIC     < 0);
+    TEST_ASSERT_TRUE(NET_E_NOT_INIT    < 0);
+    TEST_ASSERT_TRUE(NET_E_NO_DRIVER   < 0);
+    TEST_ASSERT_TRUE(NET_E_NO_DEVICE   < 0);
+    TEST_ASSERT_TRUE(NET_E_NO_MEM      < 0);
+    TEST_ASSERT_TRUE(NET_E_BUSY        < 0);
+    TEST_ASSERT_TRUE(NET_E_TIMEOUT     < 0);
+    TEST_ASSERT_TRUE(NET_E_INVAL       < 0);
+    TEST_ASSERT_TRUE(NET_E_TOO_LARGE   < 0);
+    TEST_ASSERT_TRUE(NET_E_LINK_DOWN   < 0);
+    TEST_ASSERT_TRUE(NET_E_PROTO       < 0);
+}
+
+/* ============================================================================
  * Network State Tests
  * ============================================================================ */
 
@@ -225,12 +275,12 @@ static void test_net_get_info_not_initialized(void)
         /* Network is already up, so get_info should work */
         struct net_info info;
         int result = net_get_info(&info);
-        TEST_ASSERT_EQUAL_INT(0, result);
+        TEST_ASSERT_EQUAL_INT(NET_OK, result);
     } else {
-        /* Network not initialized - should return error */
+        /* Network not initialized - should return NET_E_NOT_INIT (#213) */
         struct net_info info;
         int result = net_get_info(&info);
-        TEST_ASSERT_EQUAL_INT(-1, result);
+        TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, result);
     }
 }
 
@@ -239,8 +289,9 @@ static void test_net_get_info_not_initialized(void)
  */
 static void test_net_get_info_null_pointer(void)
 {
+    /* NULL check runs before the init check (#213) */
     int result = net_get_info(NULL);
-    TEST_ASSERT_EQUAL_INT(-1, result);
+    TEST_ASSERT_EQUAL_INT(NET_E_INVAL, result);
 }
 
 /*
@@ -249,21 +300,19 @@ static void test_net_get_info_null_pointer(void)
 static void test_net_commands_without_init(void)
 {
     if (!net_is_up()) {
-        /* ping should fail */
+        /* All three should return NET_E_NOT_INIT (#213) */
         int result = net_ping(net_ip4_addr(10, 0, 2, 2), 1, NULL, NULL);
-        TEST_ASSERT_EQUAL_INT(-1, result);
+        TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, result);
 
-        /* set_static_ip should fail */
         result = net_set_static_ip(
             net_ip4_addr(10, 0, 2, 15),
             net_ip4_addr(255, 255, 255, 0),
             net_ip4_addr(10, 0, 2, 2)
         );
-        TEST_ASSERT_EQUAL_INT(-1, result);
+        TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, result);
 
-        /* enable_dhcp should fail */
         result = net_enable_dhcp();
-        TEST_ASSERT_EQUAL_INT(-1, result);
+        TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, result);
     } else {
         /* Network is up - skip this test */
         TEST_PASS();
@@ -579,7 +628,7 @@ static void test_net_driver_registered(void)
  * lwIP netif comes up with the default 10.0.2.15 address.
  *
  * If the device is missing (no -netdev / -device on the QEMU command
- * line) the driver init returns -1 and we skip rather than fail —
+ * line) the driver init returns -1 and the test skips rather than failing —
  * this lets the test kernel run in environments without networking.
  */
 static void test_net_init_live(void)
@@ -643,8 +692,8 @@ static void test_net_poll_after_init(void)
  * (issue #197).
  *
  * After net_init(), the dhcp_enabled flag should be true and
- * dhcp_status should be PENDING (we haven't polled enough for a bind
- * yet) or BOUND (if QEMU's SLIRP answered the DISCOVER immediately,
+ * dhcp_status should be PENDING (not enough poll iterations yet for
+ * a bind) or BOUND (if QEMU's SLIRP answered the DISCOVER immediately,
  * which it often does). If the flag is OFF at build time, status is
  * DISABLED and dhcp_enabled is false.
  */
@@ -718,6 +767,43 @@ static void test_net_dhcp_binds(void)
 }
 
 /*
+ * Test: DHCP bind status callback fires when an address is acquired
+ * (issue #201).
+ *
+ * The netif status callback installed by slm_netif_init() is supposed
+ * to log "DHCP bound: ..." on the false→true transition of
+ * dhcp_supplied_address(). We can't capture log output from Unity, so
+ * net_get_dhcp_bind_count() exposes a counter; this test asserts it
+ * advanced during the live DHCP test. Runs *after* test_net_dhcp_binds
+ * (which drives the netif to BOUND via QEMU SLIRP).
+ *
+ * Skipped if DHCP didn't actually bind (e.g. no SLIRP) — binding is
+ * the precondition, and test_net_dhcp_binds already covers the
+ * "did bind" assertion itself.
+ */
+static void test_net_dhcp_bind_notification(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    struct net_info info;
+    net_get_info(&info);
+    if (info.dhcp_status != NET_DHCP_BOUND) {
+        TEST_IGNORE_MESSAGE("DHCP not bound — precondition for notify test");
+        return;
+    }
+
+    /* At least one BOUND transition must have been recorded. If zero,
+     * the status callback didn't fire — regression in slm_netif_init's
+     * netif_set_status_callback() registration. */
+    uint32_t binds = net_get_dhcp_bind_count();
+    TEST_ASSERT_MESSAGE(binds >= 1,
+        "DHCP bind-count should be >=1 after BOUND (#201 status callback)");
+}
+
+/*
  * Test: DHCP fallback restores static IP when no server answers
  * (issue #197, auto-DHCP fallback path).
  *
@@ -787,10 +873,11 @@ static void test_net_dhcp_fallback(void)
  * A return value of 0 proves the full TX path works: net_driver.send →
  * virtqueue add_buf → device kick → used-ring completion.
  *
- * Uses a minimum-size (64-byte) Ethernet frame with broadcast dest, our
- * MAC as source, EtherType 0x9000 (Loopback test, RFC1042 §19) for the
+ * Uses a minimum-size (64-byte) Ethernet frame with broadcast dest,
+ * the driver's MAC as source, EtherType 0x9000 (Loopback test,
+ * RFC1042 §19) for the
  * payload — chosen because it doesn't depend on IP/ARP setup. The
- * actual byte content doesn't matter to the device; we only verify
+ * actual byte content doesn't matter to the device; the test only verifies
  * that the descriptor cycle completes.
  */
 static void test_net_driver_tx(void)
@@ -806,7 +893,7 @@ static void test_net_driver_tx(void)
     uint8_t frame[64] = {0};
     /* Destination MAC: broadcast */
     for (int i = 0; i < 6; i++) frame[i] = 0xFF;
-    /* Source MAC: ours */
+    /* Source MAC: the driver's */
     drv->get_mac(&frame[6]);
     /* EtherType: 0x9000 (Loopback) — recognized but unused by SLIRP */
     frame[12] = 0x90;
@@ -837,6 +924,10 @@ int test_suite_net(void)
     RUN_TEST(test_net_str_to_ip_invalid);
     RUN_TEST(test_net_ip_roundtrip);
 
+    /* Error code tests (#213) */
+    RUN_TEST(test_net_strerror_coverage);
+    RUN_TEST(test_net_error_codes_are_negative);
+
     /* Network state tests */
     RUN_TEST(test_net_is_up_before_init);
     RUN_TEST(test_net_get_info_not_initialized);
@@ -865,6 +956,7 @@ int test_suite_net(void)
     RUN_TEST(test_net_poll_after_init);
     RUN_TEST(test_net_auto_dhcp_at_boot);
     RUN_TEST(test_net_dhcp_binds);
+    RUN_TEST(test_net_dhcp_bind_notification);
     RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_driver_tx);
     RUN_TEST(test_net_rx_no_buffers_clean);
