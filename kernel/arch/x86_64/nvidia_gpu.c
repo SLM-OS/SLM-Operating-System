@@ -403,20 +403,36 @@ static int cmd_gpu(int argc, char *argv[])
         uart_printf("[GPU] Starting GSP-RM bringup on %s...\n",
                     impl_name(nvidia_gpu.architecture, nvidia_gpu.implementation));
 
-        /* Enable engine power domains in PMC_ENABLE. On nouveau/Linux
-         * we observe PMC_ENABLE = 0x56000000 with SEC2 accessible;
-         * SLM-OS post-UEFI sees 0x40000000 with SEC2 priv-locked. The
-         * extra bits (24, 26, 28) power on engines that include the
-         * SEC2 domain. Without this, SEC2 CPUCTL reads 0xbadf5620. */
-        uint32_t pmc_before = nvidia_gpu.bar0[NV_PMC_ENABLE / 4];
-        uint32_t pmc_target = pmc_before | 0x16000000u;
-        nvidia_gpu.bar0[NV_PMC_ENABLE / 4] = pmc_target;
-        __asm__ volatile("mfence" ::: "memory");
-        /* Small delay for the engine power rails to settle. */
-        for (volatile int i = 0; i < 100000; i++) { }
-        uint32_t pmc_after = nvidia_gpu.bar0[NV_PMC_ENABLE / 4];
-        uart_printf("[GPU] PMC_ENABLE: 0x%08x -> 0x%08x (target 0x%08x)\n",
-                    pmc_before, pmc_after, pmc_target);
+        /* SEC2 Falcon unlock — work-in-progress (see #185 notes).
+         *
+         * Empirical findings on test-pc (GA107):
+         *   - NV_PMC_DEVICE_ENABLE (0x600) is already 0xffffffff in
+         *     SLM-OS after UEFI POST (same as nouveau post-init). So
+         *     SEC2's device-enable bit is not what's missing.
+         *   - SEC2 CPUCTL reads 0xbadf5620 from the moment UEFI hands
+         *     off. HWCFG2 reads 0x000067f7 (bit 13 set = not-yet-reset).
+         *   - Under nouveau, CPUCTL reads 0x00000020 and HWCFG2 reads
+         *     0x000047f7 (bit 13 cleared). That bit is the "RESET_READY"
+         *     indicator per nova-core (nouveau-falcon-hal-ga102.rs).
+         *   - Brute-force toggling each DEVICE_ENABLE bit hangs the PRI
+         *     bus because bit 0 (likely HOST) being cleared kills MMIO.
+         *
+         * The missing step is likely:
+         *   1. Replay the VBIOS DEVINIT sequence that nouveau triggers
+         *      via its devinit subdev (nvkm/subdev/devinit/tu102.c), OR
+         *   2. Find the specific SEC2 device-enable bit index via a
+         *      PTOP (PRI TOP) table walk (BAR0 + 0x022400 on Ampere).
+         *
+         * For now, just report current state and proceed with Booter
+         * Load attempt — it will fail predictably, leaving SEC2 state
+         * observable via `gpu sec2` for iteration.
+         */
+        volatile uint32_t *dev_en = &nvidia_gpu.bar0[0x600 / 4];
+        volatile uint32_t *sec2_hwcfg2 = &nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x0f4) / 4];
+        volatile uint32_t *sec2_cpuctl = &nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x100) / 4];
+        uart_printf("[GPU] NV_PMC_DEVICE_ENABLE(0x600) = 0x%08x\n", *dev_en);
+        uart_printf("[GPU] SEC2 CPUCTL = 0x%08x  HWCFG2 = 0x%08x\n",
+                    *sec2_cpuctl, *sec2_hwcfg2);
 
         /* Phase 0: firmware load + sanity check */
         int rc = gsp_init();
