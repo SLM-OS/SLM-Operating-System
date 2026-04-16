@@ -129,7 +129,7 @@ uint32_t sched_trace_snapshot(struct sched_trace_record *out, uint32_t max)
 {
     if (!out || max == 0) return 0;
 
-    uint64_t head = atomic_load_explicit(&g_trace_head, memory_order_acquire);
+    uint64_t head = atomic_load_explicit(&g_trace_total_events, memory_order_acquire);
     uint64_t available = head < SCHED_TRACE_CAPACITY ? head : SCHED_TRACE_CAPACITY;
     uint64_t to_copy = available < max ? available : max;
 
