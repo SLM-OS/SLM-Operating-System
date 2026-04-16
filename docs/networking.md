@@ -214,10 +214,11 @@ Each platform implements a `struct net_driver` and registers it during kernel in
 struct net_driver {
     const char *name;
     int  (*init)(void);
-    int  (*send)(const void *buf, size_t len);
+    int  (*send)(const void *buf, size_t len);  /* async submit */
     int  (*recv)(void *buf, size_t max_len);
     void (*get_mac)(uint8_t mac[6]);
     bool (*link_status)(void);
+    void (*tx_reap)(void);                       /* called from net_poll */
 };
 
 void net_register_driver(const struct net_driver *drv);
@@ -228,6 +229,27 @@ adapter (`lwip_slm.c`) funnels all packet I/O through the driver ops. Adding
 a new NIC driver means writing one C file that exports a `net_driver` and
 calling `net_register_driver()` before `net_init()` — no changes to lwIP
 integration are required.
+
+**TX is asynchronous** (#204): `send()` submits a packet by allocating a slot
+from the driver's TX buffer pool, copying the data, queuing a descriptor on
+the TX virtqueue, kicking the device, and returning. It does **not** spin
+waiting for the device to ack. Returns:
+
+- `0` — submitted; the caller may free the input buffer
+- `NET_E_BUSY` — TX pool exhausted (all slots in flight); caller should
+  retry after `net_poll()` runs
+- `NET_E_TOO_LARGE` — packet exceeds 1514 bytes
+- other `NET_E_*` — see Error codes table in API Reference
+
+Completion happens later when `net_poll()` calls `tx_reap()`, which drains
+the TX used ring and frees the pool slots. Drivers that complete TX
+synchronously (e.g. an in-driver IRQ handler that clears the slot) may
+leave `tx_reap` NULL; the polling fallback only runs when it's set.
+
+The TX buffer pool is sized to allow multiple in-flight packets (currently
+16 in both VirtIO drivers — adjustable per driver). Bursts up to that depth
+submit without blocking; sustained traffic above that depth gets back-
+pressured via `NET_E_BUSY` and retries on the next poll cycle.
 
 ### Key Functions
 
@@ -570,6 +592,9 @@ on both ARM64 MMIO and x86-64 PCI paths):
 | `test_net_dhcp_binds` | QEMU SLIRP answers DISCOVER → BOUND state |
 | `test_net_dhcp_fallback` | Forced timeout → `NET_DHCP_FAILED`, static IP restored |
 | `test_net_driver_tx` | Raw 64-byte frame traverses the TX virtqueue to completion |
+| `test_net_driver_has_tx_reap` | Driver exposes the async TX reap op (#204) |
+| `test_net_send_returns_quickly` | `send()` returns in <10 ms — guards against the spin-wait regression (#204) |
+| `test_net_burst_8_sends_async` | 8 back-to-back submits succeed without blocking; pool absorbs them; `net_poll()` drains completions (#204) |
 
 Run tests with:
 

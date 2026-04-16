@@ -21,11 +21,16 @@ hook for that discipline. See **#214** for the tracking issue.
 - [ ] Exports a registration function (e.g. `bcm_genet_register`) that
       calls `net_register_driver(&my_driver)` — not a constructor,
       called explicitly from `kernel/src/main.c` platform init
-- [ ] `send()` blocks no longer than **100 ms** — the VirtIO drivers
-      use `VIRTIO_NET_TX_TIMEOUT_MS` in `kernel/include/virtio.h` as
-      their reference value; new drivers should either cite that
-      constant or define an equivalent local bound. The general
-      contract is "bounded by wall-clock time, not iteration count"
+- [ ] `send()` is **asynchronous** (#204): submit, kick the device,
+      return immediately. Returns 0 on submit, `NET_E_BUSY` if the
+      driver's TX pool is exhausted, or another `NET_E_*` for size /
+      protocol errors. Must **not** spin waiting for completion. New
+      regression test `test_net_send_returns_quickly` enforces a
+      10 ms upper bound on the call
+- [ ] Driver implements `tx_reap` op — drains TX used ring + frees
+      pool buffers. Called by `net_poll()` once per poll. Sized
+      pool ≥ 8 buffers so back-to-back lwIP sends don't blow through
+      it during ARP / DHCP bursts
 - [ ] `recv()` returns 0 promptly when no packet is available (polled
       from `net_poll()` — must not block)
 - [ ] `get_mac()` returns a non-zero MAC address after `init()` has

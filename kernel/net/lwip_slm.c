@@ -385,6 +385,15 @@ void net_poll(void) {
         return;
     }
 
+    /* Drain TX completions first (#204). The driver's send() submits
+     * asynchronously and returns; the actual completion arrives via
+     * the device writing to the TX used ring. tx_reap walks that ring
+     * and frees the pool buffers so subsequent sends can reuse them.
+     * Optional op — drivers that complete TX synchronously inside
+     * send() may leave it NULL. */
+    if (active_driver->tx_reap)
+        active_driver->tx_reap();
+
     /* Check for received packets */
     int len = active_driver->recv(rx_packet_buf, sizeof(rx_packet_buf));
     if (len > 0) {

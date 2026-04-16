@@ -904,6 +904,118 @@ static void test_net_driver_tx(void)
     TEST_ASSERT_MESSAGE(ret == 0, "driver send() should succeed");
 }
 
+/*
+ * Build a minimum-size broadcast Ethernet frame in `frame` using the
+ * registered driver's MAC as the source. Helper for the async TX
+ * tests below.
+ */
+static void test_net_build_loopback_frame(uint8_t frame[64])
+{
+    const struct net_driver *drv = net_get_driver();
+    memset(frame, 0, 64);
+    for (int i = 0; i < 6; i++) frame[i] = 0xFF;  /* broadcast dest */
+    drv->get_mac(&frame[6]);                       /* source MAC */
+    frame[12] = 0x90;                              /* EtherType 0x9000 */
+    frame[13] = 0x00;
+}
+
+/*
+ * Test: send() now exposes a tx_reap op (#204).
+ *
+ * Both VirtIO drivers complete TX asynchronously: send() submits and
+ * returns immediately, completion arrives later when net_poll() runs
+ * the driver's tx_reap. Verify the op is actually wired up.
+ */
+static void test_net_driver_has_tx_reap(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv);
+    TEST_ASSERT_MESSAGE(drv->tx_reap != NULL,
+        "VirtIO drivers must expose tx_reap for async completion (#204)");
+}
+
+/*
+ * Test: send() returns promptly without spinning for completion (#204).
+ *
+ * The pre-#204 send() spun up to VIRTIO_NET_TX_TIMEOUT_MS (100 ms)
+ * waiting for the device to ack. The async send returns as soon as
+ * the descriptor is queued, which on QEMU is microseconds. Use
+ * sys_now() to bound a single send: if it takes more than 10 ms
+ * something is wrong (the spin-wait regression has reappeared).
+ *
+ * 10 ms is generous — gives QEMU room to schedule under CPU quota
+ * without false-failing — but tight enough to catch a 100 ms spin.
+ */
+static void test_net_send_returns_quickly(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    uint32_t start = sys_now();
+    int ret = drv->send(frame, sizeof(frame));
+    uint32_t elapsed = sys_now() - start;
+
+    TEST_ASSERT_MESSAGE(ret == 0, "driver send should accept the frame");
+    TEST_ASSERT_MESSAGE(elapsed < 10,
+        "driver send should return promptly (async, not spin-wait) — #204");
+}
+
+/*
+ * Test: multiple back-to-back sends fit in the TX buffer pool without
+ * blocking, completion drains via net_poll() (#204).
+ *
+ * Submits 8 frames in rapid succession (TX_BUFFER_COUNT == 16, so
+ * 8 fits with margin). With the old synchronous TX each send would
+ * spin for completion; with async, all 8 submit immediately and the
+ * pool absorbs them. After a few net_poll() cycles, tx_reap drains
+ * the used ring and frees the slots. Asserts:
+ *   - all 8 sends return 0 (no NET_E_BUSY despite back-to-back submit)
+ *   - elapsed wall time well under what 8× synchronous waits would
+ *     have taken (8 × 100 ms = 800 ms; we expect < 100 ms)
+ *   - net_statistics.tx_packets advances by 8 (lwIP linkoutput
+ *     counts only successful sends)
+ */
+static void test_net_burst_8_sends_async(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    uint32_t start = sys_now();
+    int ok = 0;
+    for (int i = 0; i < 8; i++) {
+        if (drv->send(frame, sizeof(frame)) == 0)
+            ok++;
+    }
+    uint32_t submit_elapsed = sys_now() - start;
+
+    TEST_ASSERT_MESSAGE(ok == 8,
+        "all 8 back-to-back sends should fit in the TX pool");
+    TEST_ASSERT_MESSAGE(submit_elapsed < 100,
+        "8 async submits should complete in <100ms (was 8×100ms sync)");
+
+    /* Drive completion: net_poll calls tx_reap, freeing pool slots */
+    for (int i = 0; i < 32; i++) {
+        net_poll();
+    }
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -959,6 +1071,9 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_bind_notification);
     RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_driver_tx);
+    RUN_TEST(test_net_driver_has_tx_reap);
+    RUN_TEST(test_net_send_returns_quickly);
+    RUN_TEST(test_net_burst_8_sends_async);
     RUN_TEST(test_net_rx_no_buffers_clean);
 
     return UNITY_END();

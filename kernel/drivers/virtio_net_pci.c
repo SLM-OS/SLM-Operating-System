@@ -210,7 +210,14 @@ static struct {
 
 static uint8_t rx_buffers[RX_BUFFER_COUNT][MAX_PACKET_SIZE]
     __attribute__((aligned(4096)));
-static uint8_t tx_buffer[MAX_PACKET_SIZE] __attribute__((aligned(16)));
+
+/* TX buffer pool (#204): same async-completion model as the MMIO
+ * driver. send() picks a free slot, submits the descriptor, returns
+ * immediately; tx_reap() drains completions from net_poll(). */
+#define TX_BUFFER_COUNT  16
+static uint8_t tx_buffers[TX_BUFFER_COUNT][MAX_PACKET_SIZE]
+    __attribute__((aligned(16)));
+static bool    tx_inflight[TX_BUFFER_COUNT];
 
 /* -------------------------------------------------------------------------- */
 /* Memory barrier                                                              */
@@ -618,49 +625,82 @@ static int virtio_net_pci_init(void) {
     return 0;
 }
 
+/*
+ * Drain the TX used ring and free pool slots whose descriptors the
+ * device finished with. Caller must hold pci_net.tx_lock. Mirror of
+ * virtio_net_tx_reap_locked() in the MMIO driver.
+ */
+static void virtio_net_pci_tx_reap_locked(void) {
+    while (true) {
+        uint32_t used_len;
+        int desc_idx = vq_get_buf(&pci_net.tx_vq, &used_len);
+        if (desc_idx < 0)
+            break;
+
+        uintptr_t addr = (uintptr_t)pci_net.tx_vq.desc[desc_idx].addr;
+        uintptr_t pool_base = (uintptr_t)&tx_buffers[0][0];
+        if (addr < pool_base ||
+            addr >= pool_base + sizeof(tx_buffers)) {
+            WARN("PCI TX reap: descriptor addr 0x%lx outside pool",
+                 (unsigned long)addr);
+            continue;
+        }
+        unsigned slot = (unsigned)((addr - pool_base) / MAX_PACKET_SIZE);
+        if (slot >= TX_BUFFER_COUNT)
+            continue;
+        tx_inflight[slot] = false;
+    }
+}
+
+/* Public reap: called from net_poll() via the net_driver op. */
+static void virtio_net_pci_tx_reap_pub(void) {
+    if (!pci_net.initialized)
+        return;
+    irq_flags_t flags = spin_lock_irqsave(&pci_net.tx_lock);
+    virtio_net_pci_tx_reap_locked();
+    spin_unlock_irqrestore(&pci_net.tx_lock, flags);
+}
+
 static int virtio_net_pci_send(const void *data, size_t len) {
     if (!pci_net.initialized)
         return -1;
     if (len > 1514)
-        return -1;
+        return NET_E_TOO_LARGE;
 
     irq_flags_t flags = spin_lock_irqsave(&pci_net.tx_lock);
 
-    /* Prepend virtio-net header */
-    struct virtio_net_hdr_pci *hdr = (struct virtio_net_hdr_pci *)tx_buffer;
-    memset(hdr, 0, sizeof(*hdr));
-    memcpy(tx_buffer + sizeof(*hdr), data, len);
+    /* Reap completions opportunistically before searching for a free
+     * slot — see commentary in virtio_net.c::virtio_net_send. */
+    virtio_net_pci_tx_reap_locked();
 
-    uint32_t total = sizeof(*hdr) + (uint32_t)len;
-    int desc_idx = vq_add_buf(&pci_net.tx_vq, tx_buffer, total, false);
-    if (desc_idx < 0) {
-        spin_unlock_irqrestore(&pci_net.tx_lock, flags);
-        return -1;
-    }
-
-    vq_kick(&pci_net.tx_vq);
-
-    /* Synchronous TX: wait for completion, bounded by wall-clock time
-     * (VIRTIO_NET_TX_TIMEOUT_MS). Previously used a 100K-iteration
-     * magic constant — same limitation as the MMIO driver. #204 tracks
-     * moving both drivers to IRQ-driven completion. */
-    uint32_t tx_start = sys_now();
-    bool timed_out = true;
-    while ((sys_now() - tx_start) < VIRTIO_NET_TX_TIMEOUT_MS) {
-        uint32_t used_len;
-        if (vq_get_buf(&pci_net.tx_vq, &used_len) >= 0) {
-            timed_out = false;
+    /* Find a free pool slot */
+    int slot = -1;
+    for (unsigned i = 0; i < TX_BUFFER_COUNT; i++) {
+        if (!tx_inflight[i]) {
+            slot = (int)i;
             break;
         }
-        __asm__ volatile("pause" ::: "memory");
     }
-
-    if (timed_out) {
-        WARN("PCI TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
+    if (slot < 0) {
         spin_unlock_irqrestore(&pci_net.tx_lock, flags);
-        return -1;
+        return NET_E_BUSY;
     }
 
+    /* Build packet in selected slot */
+    uint8_t *buf = tx_buffers[slot];
+    struct virtio_net_hdr_pci *hdr = (struct virtio_net_hdr_pci *)buf;
+    memset(hdr, 0, sizeof(*hdr));
+    memcpy(buf + sizeof(*hdr), data, len);
+
+    uint32_t total = sizeof(*hdr) + (uint32_t)len;
+    int desc_idx = vq_add_buf(&pci_net.tx_vq, buf, total, false);
+    if (desc_idx < 0) {
+        spin_unlock_irqrestore(&pci_net.tx_lock, flags);
+        return NET_E_BUSY;
+    }
+    tx_inflight[slot] = true;
+
+    vq_kick(&pci_net.tx_vq);
     spin_unlock_irqrestore(&pci_net.tx_lock, flags);
     return 0;
 }
@@ -720,6 +760,7 @@ static const struct net_driver virtio_net_pci_driver = {
     .recv        = virtio_net_pci_recv,
     .get_mac     = virtio_net_pci_get_mac,
     .link_status = virtio_net_pci_link_status,
+    .tx_reap     = virtio_net_pci_tx_reap_pub,
 };
 
 void virtio_net_pci_register(void) {
