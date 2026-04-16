@@ -3788,10 +3788,17 @@ pub extern "C" fn rust_inference_test() -> i32 {
     // work around issue #141). Run on every platform so any regression
     // in the Newton-Raphson sqrt shows up in both ARM64 QEMU `make test`
     // and the x86-64 disk boot output.
+    //
+    // Coverage includes inputs at the boundaries of the bit-magic
+    // initializer's validity window (smallest normalized FP32 at
+    // ~1.175e-38 through ~1e37) — #177 asked for 1e-6 relative error
+    // across the full normalized range, not just the LayerNorm
+    // caller's near-unity window, so 4 Newton iterations land
+    // under that bound at every probe.
     {
         // (input, expected) pairs — expected values match Python's
         // math.sqrt to 7+ decimals, well inside our 1e-6 target.
-        let cases: [(f32, f32); 7] = [
+        let cases: [(f32, f32); 14] = [
             (0.0, 0.0),
             (1.0, 1.0),
             (2.0, 1.4142135),
@@ -3799,6 +3806,15 @@ pub extern "C" fn rust_inference_test() -> i32 {
             (100.0, 10.0),
             (1.0e-5, 0.00316228),
             (9.8696045, 3.1415927),   // π² → π
+            // #177 wide-range probes — post-4-iter relative error
+            // stays ≤ 1e-6 across the full FP32 normalized range.
+            (1.175e-38, 1.0843433e-19), // smallest normal FP32
+            (1.0e-30,   1.0e-15),
+            (1.0e-10,   1.0e-5),
+            (123.456,   11.1110755),
+            (1.0e10,    1.0e5),
+            (1.0e20,    1.0e10),
+            (1.0e30,    1.0e15),
         ];
         let mut vals_ok = true;
         for (x, expected) in cases.iter() {
@@ -3810,7 +3826,7 @@ pub extern "C" fn rust_inference_test() -> i32 {
         // layer_norm / rms_norm don't propagate NaN on near-constant rows.
         let neg_ok = inference::mathf::sqrtf(-1.0) == 0.0;
         let passed = vals_ok && neg_ok;
-        print_test_result(b"simd: mathf sqrtf 7 known values + neg guard\0", passed);
+        print_test_result(b"simd: mathf sqrtf 14 known values + neg guard\0", passed);
         if !passed { failures += 1; }
     }
 
