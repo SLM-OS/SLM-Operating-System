@@ -108,6 +108,9 @@ The `slm` module provides access to kernel functionality:
 |----------|-------------|
 | `slm.msg_publish(topic, data)` | Publish a message to a topic. Returns number of subscribers that received it. Wildcard subscribers matching the topic prefix also receive the message. |
 | `slm.msg_publish_priority(topic, data, priority)` | Publish with explicit priority (0=normal, higher=more urgent). Higher-priority messages are delivered first by `msg_router_receive`. |
+| `slm.msg_subscribe(topic, fn)` | Register a Lua callback for a topic. Pass `"/foo/*"` for wildcard prefix match. Returns a subscription handle (integer ≥ 1) on success or `nil` when the Lua subscription pool is full. Callbacks are dispatched as `fn(topic, data)` at `slm.yield` / `slm.sleep` / `slm.read_line` points — they do not run truly concurrently. Callback errors are logged and swallowed so one bad handler does not break the drain loop. |
+| `slm.msg_unsubscribe(handle)` | Remove a subscription. Returns `true` on success, `false` if the handle is unknown. |
+| `slm.msg_drain()` | Manually dispatch any pending callbacks. Usually not needed — drains happen automatically at yield points — but useful for scripts that compute without yielding. |
 
 ### Scheduler
 
@@ -118,6 +121,12 @@ The `slm` module provides access to kernel functionality:
 | `slm.sched_set_policy(name)` | Switch active scheduler policy at runtime. Returns `true` on success, `false` on unknown name. |
 | `slm.sched_policy_list()` | Array of `{name, active}` tables for every registered policy. Exactly one entry has `active=true`. |
 | `slm.ai_sched_stats()` | AI scheduler statistics: `{policy, decisions, fallbacks, avg_latency_ns, histogram}`. Returns `nil` when `CONFIG_AI_SCHEDULER` is off. |
+| `slm.ai_sched_decision(task_id)` | Last AI-scheduler decision recorded for this task: `{core, priority_adj, preempt, raw}`. `priority_adj` is `0`/`1`/`2` (none/boost/reduce); `preempt` is `0`/`1`; `raw` is the packed action index (`core*6 + priority_adj*2 + preempt`). Returns `nil` when `CONFIG_AI_SCHEDULER` is off, the task id is unknown, or the AI policy has never run on the task. |
+| `slm.task_migrate(task_id, target_cpu)` | Move a non-running task to a specific CPU. Returns `true` on success, `false` if the task is running, the affinity forbids it, or the arguments are out of range. |
+| `slm.task_create(name, fn)` | Spawn a kernel task that runs `fn` in a fresh `lua_State`. `fn` is serialized via `lua_dump` (bytecode only — no upvalues or global captures). Returns the task id (≥1) on success, `nil` on pool exhaustion / dump failure / task creation failure. Concurrency: each running Lua task keeps its own `lua_State`, but all share one Lua heap — `heap_reset` is deferred until the last state closes. Pool is capped at 4 concurrent Lua tasks. |
+| `slm.task_kill(task_id)` | Terminate a task (`scheduler_remove_task` + `task_destroy`). Refuses the idle task (id 0), the current task (use `task_exit` for self-termination), and already-terminated tasks. Returns bool. |
+| `slm.task_set_priority(task_id, priority)` | Change a task's priority. `priority` must be in `[0, 7]` (0=idle, 7=critical). Returns bool. |
+| `slm.task_pin(task_id, cpu)` | Pin a task to a specific CPU. Pass a negative `cpu` to clear affinity (task becomes CPU_AFFINITY_ANY). Returns bool. |
 
 ### CPU / Memory / IPC
 
@@ -150,6 +159,7 @@ without a compile-time guard.
 | `slm.model_find(name)` | Find a loaded model by name. Returns index or -1. |
 | `slm.model_infer(index)` | Run inference on a loaded model. Returns predicted class (0-9 for MNIST). |
 | `slm.model_bench(index, iters)` | Run inference benchmark for `iters` iterations. Results printed to UART. Returns 0 on success, -1 on error. |
+| `slm.model_load(path[, name])` | Load an ONNX model from a VFS path. Mirrors the `model load <path>` shell command: reads the file, allocates a transient PMM buffer, calls `rust_model_load`, frees the buffer. If `name` is omitted, the model name is derived from the filename (extension stripped). Returns the model index (≥0) on success, -1 on any error. |
 | `slm.model_pin(index)` | Pin a model to prevent LRU eviction. Returns 0 on success, -1 on error. |
 | `slm.model_unpin(index)` | Unpin a model (allow LRU eviction). Returns 0 on success, -1 on error. |
 | `slm.infer_stats()` | Cumulative inference statistics: `{total, total_ns, min_ns, max_ns, last_ns, errors}`. |

@@ -179,6 +179,19 @@ struct task {
     /* AI scheduler tracking (M5) */
     uint64_t arrival_time_ns;           /* When task was added to scheduler */
     uint64_t completion_time_ns;        /* When task exited (0 if still running) */
+
+    /* Last AI-scheduler action recorded for this task (#211).
+     *
+     * Encoded action index: core * AI_ACTIONS_PER_CORE +
+     * priority_adj * AI_SCHED_PREEMPT_OPTS + preempt. -1 means the
+     * AI policy has not run on this task yet (or the last decision
+     * fell back to the heuristic). ai_decode_action() in ai_types.h
+     * splits the integer back into the three decision components.
+     *
+     * Placed at the end of the struct so enabling CONFIG_AI_SCHEDULER
+     * does not shift TASK_CONTEXT_OFFSET for non-AI builds. */
+    int32_t last_ai_action;             /* -1 when unset */
+    uint32_t _ai_pad;                   /* alignment */
 #endif
 };
 

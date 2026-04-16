@@ -140,6 +140,10 @@ static int l_tasks(lua_State *L) {
     return 1;
 }
 
+/* Forward-declared: defined alongside the msg_subscribe machinery
+ * further down the file (#207). */
+static void lua_msg_drain(lua_State *L);
+
 /**
  * slm.sleep(ms) - Sleep for milliseconds (busy wait)
  */
@@ -153,6 +157,7 @@ static int l_sleep(lua_State *L) {
         uint64_t ticks = (uint64_t)ms * (freq / 1000);
         while ((timer_get_count() - start) < ticks) {
             yield();  /* Let other tasks run while waiting */
+            lua_msg_drain(L);  /* Dispatch msg_subscribe callbacks (#207) */
         }
     }
     return 0;
@@ -160,10 +165,15 @@ static int l_sleep(lua_State *L) {
 
 /**
  * slm.yield() - Yield CPU to scheduler
+ *
+ * Also drains any pending msg_subscribe callbacks (#207) so scripts that
+ * yield periodically see subscriber dispatches without calling
+ * slm.msg_drain() explicitly.
  */
 static int l_yield(lua_State *L) {
     if (!L) return 0;
     yield();
+    lua_msg_drain(L);
     return 0;
 }
 
@@ -496,6 +506,241 @@ static int l_msg_publish_priority(lua_State *L) {
 }
 
 /* ============================================================================
+ * Lua Message Subscriptions (#207)
+ * ============================================================================
+ *
+ * Lua scripts register callbacks against msg_router topics; messages are
+ * dispatched on the shell task's stack at yield / sleep / read_line. The
+ * callbacks are not truly concurrent — option (1) from the issue — but
+ * match the existing single-threaded Lua model. A single sentinel
+ * component_idx (LUA_MSG_SUB_IDX) represents the Lua mailbox at the
+ * router; the Lua side tracks which callbacks care about which topics.
+ */
+
+/* Sentinel component id for the Lua subscriber pool.
+ *
+ * Must be in [0, MAX_COMPONENTS=32) — msg_router_ack() rejects indices
+ * outside that range so we cannot use an "obviously large" sentinel
+ * like 1000. We pick the top of the range (31) so it sits above the
+ * real component slots (0..COMPONENT_MAX_COUNT-1 = 0..15) with room
+ * to spare for growth of the native component cap. */
+#define LUA_MSG_SUB_IDX  31
+
+/* Maximum concurrent Lua subscriptions across all active lua_States.
+ * Subscriptions are lightweight (one Lua registry slot + ~20 bytes) so
+ * the cap is mostly a sanity ceiling. */
+#define LUA_MSG_MAX_SUBS 16
+
+/* Topic buffer in the router — keep in sync with TOPIC_NAME_LEN in
+ * runtime/src/msg_router.rs. */
+#define LUA_MSG_TOPIC_LEN 16
+
+extern const char *msg_router_receive(int component_idx, char *topic_out);
+extern void msg_router_ack(int component_idx);
+extern void msg_router_unsubscribe_all(int component_idx);
+
+struct lua_msg_sub {
+    int handle;                         /* Caller-visible id (1, 2, ...) */
+    int ref;                            /* luaL_ref slot for the callback */
+    lua_State *L;                       /* State owning ref (for cleanup) */
+    char pattern[LUA_MSG_TOPIC_LEN];    /* Subscribed topic or wildcard */
+    uint8_t wildcard;                   /* 1 if pattern ends in '/*' */
+    uint8_t prefix_len;                 /* Pattern length excl. trailing '*' */
+    uint8_t active;
+};
+
+static struct lua_msg_sub lua_msg_subs[LUA_MSG_MAX_SUBS];
+static int lua_msg_next_handle = 1;
+static int lua_msg_router_subscribed = 0;  /* Lazy msg_router registration */
+
+/* Match a Lua subscription pattern against an actual delivered topic.
+ * Exact match OR (for patterns ending in "/*") prefix match up to the '*'. */
+static int lua_msg_topic_matches(const struct lua_msg_sub *sub, const char *topic)
+{
+    if (sub->wildcard) {
+        for (uint8_t i = 0; i < sub->prefix_len; i++) {
+            if (topic[i] == '\0' || topic[i] != sub->pattern[i]) return 0;
+        }
+        return 1;
+    }
+    /* Exact */
+    for (uint8_t i = 0; i < LUA_MSG_TOPIC_LEN; i++) {
+        if (sub->pattern[i] != topic[i]) return 0;
+        if (sub->pattern[i] == '\0') return 1;
+    }
+    return 1;
+}
+
+/* Drain pending router messages for the Lua subscriber pool and invoke
+ * matching callbacks on the given state. Safe to call at any yield point;
+ * any error raised by a callback is swallowed (logged to UART) so one
+ * bad subscriber cannot wedge the drain loop. */
+static void lua_msg_drain(lua_State *L)
+{
+    if (!L || !lua_msg_router_subscribed) return;
+
+    for (int guard = 0; guard < 64; guard++) {   /* cap per-drain work */
+        char topic_buf[LUA_MSG_TOPIC_LEN];
+        const char *data = msg_router_receive(LUA_MSG_SUB_IDX, topic_buf);
+        if (!data) break;
+
+        for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
+            struct lua_msg_sub *s = &lua_msg_subs[i];
+            if (!s->active || s->L != L) continue;
+            if (!lua_msg_topic_matches(s, topic_buf)) continue;
+
+            lua_rawgeti(L, LUA_REGISTRYINDEX, s->ref);
+            lua_pushstring(L, topic_buf);
+            lua_pushstring(L, data);
+            if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
+                const char *err = lua_tostring(L, -1);
+                uart_printf("[lua msg_subscribe] callback error: %s\n",
+                            err ? err : "(unknown)");
+                lua_pop(L, 1);
+            }
+        }
+
+        msg_router_ack(LUA_MSG_SUB_IDX);
+    }
+}
+
+/**
+ * slm.msg_subscribe(topic, fn) - Register a Lua callback for a topic.
+ *
+ * The callback is invoked as `fn(topic, data)` on the next drain point
+ * (`slm.yield`, `slm.sleep`, `slm.read_line`) with pending matching
+ * messages. Topics ending in "/*" match any topic with that prefix.
+ *
+ * Returns a subscription handle (integer >= 1) on success, nil if the
+ * Lua subscription pool is full (LUA_MSG_MAX_SUBS).
+ */
+static int l_msg_subscribe(lua_State *L) {
+    if (!L) return 0;
+    const char *topic = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    /* Copy pattern into fixed buffer, compute wildcard metadata */
+    char buf[LUA_MSG_TOPIC_LEN];
+    size_t tlen = 0;
+    while (topic[tlen] && tlen < LUA_MSG_TOPIC_LEN - 1) {
+        buf[tlen] = topic[tlen];
+        tlen++;
+    }
+    buf[tlen] = '\0';
+
+    int wildcard = 0;
+    uint8_t prefix_len = (uint8_t)tlen;
+    if (tlen >= 2 && buf[tlen - 1] == '*') {
+        wildcard = 1;
+        prefix_len = (uint8_t)(tlen - 1);  /* everything before the '*' */
+    }
+
+    /* Find a free slot */
+    int slot = -1;
+    for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
+        if (!lua_msg_subs[i].active) { slot = i; break; }
+    }
+    if (slot < 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    /* Reference the callback (arg 2 is on top after the checks) */
+    lua_pushvalue(L, 2);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    struct lua_msg_sub *s = &lua_msg_subs[slot];
+    s->handle = lua_msg_next_handle++;
+    s->ref = ref;
+    s->L = L;
+    for (size_t i = 0; i < LUA_MSG_TOPIC_LEN; i++) s->pattern[i] = buf[i];
+    s->wildcard = (uint8_t)wildcard;
+    s->prefix_len = prefix_len;
+    s->active = 1;
+
+    /* msg_router_subscribe is NOT idempotent — each call consumes a
+     * fresh subscriber slot on the topic and delivers a copy of every
+     * message into its own mailbox. Dedup at the Lua layer so a single
+     * topic only has one router subscription no matter how many Lua
+     * callbacks want it. */
+    int already_subscribed_at_router = 0;
+    for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
+        if (i == slot || !lua_msg_subs[i].active) continue;
+        int eq = 1;
+        for (int k = 0; k < LUA_MSG_TOPIC_LEN; k++) {
+            if (lua_msg_subs[i].pattern[k] != s->pattern[k]) { eq = 0; break; }
+            if (s->pattern[k] == '\0') break;
+        }
+        if (eq) { already_subscribed_at_router = 1; break; }
+    }
+    if (!already_subscribed_at_router) {
+        msg_router_subscribe((const uint8_t *)buf, LUA_MSG_SUB_IDX);
+    }
+    lua_msg_router_subscribed = 1;
+
+    lua_pushinteger(L, (lua_Integer)s->handle);
+    return 1;
+}
+
+/**
+ * slm.msg_unsubscribe(handle) - Remove a Lua subscription.
+ *
+ * Returns true on success, false if the handle is unknown. The router-side
+ * subscription is left in place — msg_router does not expose per-topic
+ * unsubscribe — but once no Lua sub matches, the drain loop stops
+ * delivering the message to Lua (and ack discards it from the mailbox).
+ */
+static int l_msg_unsubscribe(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer handle = luaL_checkinteger(L, 1);
+    for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
+        struct lua_msg_sub *s = &lua_msg_subs[i];
+        if (s->active && s->handle == (int)handle) {
+            luaL_unref(s->L, LUA_REGISTRYINDEX, s->ref);
+            s->active = 0;
+            lua_pushboolean(L, 1);
+            return 1;
+        }
+    }
+    lua_pushboolean(L, 0);
+    return 1;
+}
+
+/**
+ * slm.msg_drain() - Manually poll pending messages and invoke callbacks.
+ *
+ * Normally scripts don't need to call this — drains happen automatically
+ * at slm.yield / slm.sleep / slm.read_line. Exposed for scripts that
+ * compute without yielding and want to tick the subscriber pipeline.
+ */
+static int l_msg_drain(lua_State *L) {
+    if (!L) return 0;
+    lua_msg_drain(L);
+    return 0;
+}
+
+/* Teardown helper — release all Lua refs belonging to this state and
+ * ask the router to drop the Lua mailbox if no Lua sub remains. Called
+ * from lua_slm_close. */
+static void lua_msg_subs_cleanup(lua_State *L) {
+    int any_left = 0;
+    for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
+        struct lua_msg_sub *s = &lua_msg_subs[i];
+        if (!s->active) continue;
+        if (s->L == L) {
+            luaL_unref(L, LUA_REGISTRYINDEX, s->ref);
+            s->active = 0;
+        } else {
+            any_left = 1;
+        }
+    }
+    if (!any_left) {
+        msg_router_unsubscribe_all(LUA_MSG_SUB_IDX);
+        lua_msg_router_subscribed = 0;
+    }
+}
+
+/* ============================================================================
  * Scheduler Bindings
  * ============================================================================ */
 
@@ -624,6 +869,363 @@ static int l_ai_sched_stats(lua_State *L) {
         lua_setfield(L, -2, "histogram");
     }
 #else
+    lua_pushnil(L);
+#endif
+    return 1;
+}
+
+/* ============================================================================
+ * Lua-defined task trampoline (#208)
+ * ============================================================================
+ *
+ * slm.task_create(name, fn) dumps `fn` to Lua bytecode, stashes the blob in
+ * a PMM-backed buffer, and spawns a kernel task whose entry point creates
+ * a fresh lua_State, loads the bytecode, calls the function, and exits.
+ * Isolates per-task state (no shared upvalues) at the cost of an extra
+ * lua_State per task — the shared Lua heap tracks live-state count so
+ * heap_reset only fires when every state is closed.
+ *
+ * Context pool is static; no malloc in the binding hot path.
+ */
+
+#define LUA_TASK_MAX_CTX 4        /* bumped if demos need more concurrency */
+#define LUA_TASK_NAME_LEN 32
+
+struct lua_task_ctx {
+    uint8_t active;
+    char name[LUA_TASK_NAME_LEN];
+    uint8_t *bytecode;
+    size_t bytecode_len;
+    size_t bytecode_pages;
+};
+
+static struct lua_task_ctx lua_task_ctxs[LUA_TASK_MAX_CTX];
+
+/* Accumulator for lua_dump — writes bytecode into a PMM-backed buffer as
+ * lua_dump streams chunks. Tracks a current offset and a capacity; grows
+ * the buffer by re-allocating a bigger region when needed. */
+struct lua_dump_buf {
+    uint8_t *data;
+    size_t len;
+    size_t cap;
+    size_t pages;
+    int oom;
+};
+
+static int lua_dump_writer(lua_State *L, const void *p, size_t sz, void *ud)
+{
+    (void)L;
+    struct lua_dump_buf *b = (struct lua_dump_buf *)ud;
+    if (b->oom) return 1;
+
+    size_t need = b->len + sz;
+    if (need > b->cap) {
+        /* Double the buffer (or round up to multiple of page size). */
+        size_t new_pages = b->pages * 2;
+        if (new_pages < (need + 4095) / 4096) new_pages = (need + 4095) / 4096;
+        if (new_pages < 1) new_pages = 1;
+        uint8_t *nb = (uint8_t *)pmm_alloc_pages(new_pages);
+        if (!nb) { b->oom = 1; return 1; }
+        for (size_t i = 0; i < b->len; i++) nb[i] = b->data[i];
+        if (b->data) pmm_free_pages(b->data, b->pages);
+        b->data = nb;
+        b->cap = new_pages * 4096;
+        b->pages = new_pages;
+    }
+    const uint8_t *src = (const uint8_t *)p;
+    for (size_t i = 0; i < sz; i++) b->data[b->len + i] = src[i];
+    b->len += sz;
+    return 0;
+}
+
+static void lua_task_entry(void *arg)
+{
+    struct lua_task_ctx *ctx = (struct lua_task_ctx *)arg;
+    lua_State *L = lua_slm_newstate();
+    if (!L) {
+        uart_printf("[lua task %s] failed to create state\n", ctx->name);
+        goto cleanup;
+    }
+
+    if (luaL_loadbuffer(L, (const char *)ctx->bytecode, ctx->bytecode_len,
+                        ctx->name) != LUA_OK ||
+        lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        const char *err = lua_tostring(L, -1);
+        uart_printf("[lua task %s] error: %s\n",
+                    ctx->name, err ? err : "(unknown)");
+    }
+
+    lua_slm_close(L);
+
+cleanup:
+    if (ctx->bytecode) pmm_free_pages(ctx->bytecode, ctx->bytecode_pages);
+    ctx->active = 0;
+    task_exit();
+}
+
+/**
+ * slm.task_create(name, fn) - Spawn a new kernel task running a Lua function.
+ *
+ * `fn` is serialized to Lua bytecode via `lua_dump` and executed in a fresh
+ * lua_State on the new task's stack. Returns the task id (>=1) on success
+ * or nil on failure (full pool, allocation failure, bad arguments).
+ *
+ * The new state has no access to upvalues or globals from the caller —
+ * it starts empty with the same `slm` module and standard libs as the
+ * shell REPL. Scripts that need to pass data in must use the msg_router,
+ * shared files, or arguments encoded into `fn`'s captured upvalues before
+ * the `lua_dump` (which dumps bytecode only — upvalues are NOT captured).
+ */
+static int l_task_create(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    /* Grab a ctx slot before doing any allocation. */
+    struct lua_task_ctx *ctx = NULL;
+    for (int i = 0; i < LUA_TASK_MAX_CTX; i++) {
+        if (!lua_task_ctxs[i].active) { ctx = &lua_task_ctxs[i]; break; }
+    }
+    if (!ctx) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    /* Copy name. */
+    size_t nlen = 0;
+    while (name[nlen] && nlen < LUA_TASK_NAME_LEN - 1) {
+        ctx->name[nlen] = name[nlen];
+        nlen++;
+    }
+    ctx->name[nlen] = '\0';
+
+    /* Serialize the function via lua_dump. Start with 1 page (4 KB) which
+     * handles any realistic short function; writer will grow as needed. */
+    struct lua_dump_buf b = {0};
+    b.pages = 1;
+    b.cap = 4096;
+    b.data = (uint8_t *)pmm_alloc_pages(1);
+    if (!b.data) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_pushvalue(L, 2);
+    int rc = lua_dump(L, lua_dump_writer, &b, /*strip=*/1);
+    lua_pop(L, 1);  /* pop the function copy */
+
+    if (rc != 0 || b.oom) {
+        if (b.data) pmm_free_pages(b.data, b.pages);
+        lua_pushnil(L);
+        return 1;
+    }
+
+    ctx->bytecode = b.data;
+    ctx->bytecode_len = b.len;
+    ctx->bytecode_pages = b.pages;
+    ctx->active = 1;
+
+    struct task *t = task_create_with_priority(ctx->name, lua_task_entry,
+                                               ctx, TASK_PRIORITY_NORMAL);
+    if (!t) {
+        pmm_free_pages(ctx->bytecode, ctx->bytecode_pages);
+        ctx->active = 0;
+        lua_pushnil(L);
+        return 1;
+    }
+
+    scheduler_add_task(t);
+
+    lua_pushinteger(L, (lua_Integer)t->id);
+    return 1;
+}
+
+/**
+ * slm.task_kill(task_id) - Terminate a task.
+ *
+ * Wraps scheduler_remove_task + task_destroy. Refuses to kill the
+ * currently running task (would race with the scheduler on its own stack)
+ * and refuses the idle task id 0. Returns true on success, false on any
+ * refusal (unknown id, idle, self, terminated).
+ */
+static int l_task_kill(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer task_id = luaL_checkinteger(L, 1);
+    if (task_id <= 0) {           /* 0 is idle, negative is invalid */
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    struct task *t = task_get((uint32_t)task_id);
+    if (!t || t->state == TASK_TERMINATED) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    /* Don't kill the task that's asking — task_exit is the right path for
+     * self-termination and it doesn't return. */
+    if (t == task_current()) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    scheduler_remove_task(t);
+    task_destroy(t);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/**
+ * slm.task_set_priority(task_id, priority) - Change a task's priority.
+ *
+ * Priority must be in [0, 7] (TASK_PRIORITY_IDLE..TASK_PRIORITY_CRITICAL).
+ * Returns true on success, false on argument errors.
+ */
+static int l_task_set_priority(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer task_id = luaL_checkinteger(L, 1);
+    lua_Integer prio = luaL_checkinteger(L, 2);
+
+    if (task_id < 0 || prio < 0 || prio > 7) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    struct task *t = task_get((uint32_t)task_id);
+    if (!t || t->state == TASK_TERMINATED) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    task_set_priority(t, (uint8_t)prio);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/**
+ * slm.task_pin(task_id, cpu) - Pin a task to a specific CPU.
+ *
+ * Wraps sched_set_task_affinity. Pass -1 (or `nil`) as the second argument
+ * to clear affinity. Returns true on success, false on argument errors.
+ */
+static int l_task_pin(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer task_id = luaL_checkinteger(L, 1);
+    lua_Integer cpu = luaL_checkinteger(L, 2);
+
+    if (task_id < 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    struct task *t = task_get((uint32_t)task_id);
+    if (!t || t->state == TASK_TERMINATED) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    /* Negative -> clear affinity. Positive -> must be a valid cpu id. */
+    uint32_t target;
+    if (cpu < 0) {
+        target = CPU_AFFINITY_ANY;
+    } else if (cpu >= (lua_Integer)cpu_count) {
+        lua_pushboolean(L, 0);
+        return 1;
+    } else {
+        target = (uint32_t)cpu;
+    }
+
+    int rc = sched_set_task_affinity(t, target);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/**
+ * slm.task_migrate(task_id, target_cpu) - Move a task to a specific CPU
+ *
+ * Wraps sched_migrate_task. Returns true on success, false if the task
+ * cannot be migrated (unknown id, running, affinity conflict, target out
+ * of range). Scripts can poll slm.tasks() to see the CPU assignment
+ * change after the migrate.
+ */
+static int l_task_migrate(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer task_id = luaL_checkinteger(L, 1);
+    lua_Integer target_cpu = luaL_checkinteger(L, 2);
+
+    /* Task IDs are a monotonic uint32_t counter (see next_task_id in
+     * kernel/sched/task.c) — NOT bounded by MAX_TASKS, which only
+     * sizes the task_table array. Just reject negative values and
+     * out-of-range CPUs. task_get() returns NULL for unknown ids.
+     * Note: lua_Integer is 32-bit signed here (LUA_32BITS=1) so we
+     * cannot compare against UINT32_MAX — it would wrap to -1. */
+    if (task_id < 0 ||
+        target_cpu < 0 || target_cpu >= (lua_Integer)cpu_count) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    struct task *t = task_get((uint32_t)task_id);
+    if (!t || t->state == TASK_TERMINATED) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    int rc = sched_migrate_task(t, (uint32_t)target_cpu);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/**
+ * slm.ai_sched_decision(task_id) - Get the last AI scheduler decision for a task.
+ *
+ * Returns a table: {core, priority_adj, preempt, raw}. Returns nil when
+ *   - CONFIG_AI_SCHEDULER is off
+ *   - the task id is unknown or terminated
+ *   - the AI policy has not run on this task yet (last_ai_action == -1)
+ *
+ * priority_adj is 0/1/2 (none/boost/reduce). preempt is 0/1. raw is the
+ * packed action index used inside the AI scheduler for histogram keys.
+ */
+static int l_ai_sched_decision(lua_State *L) {
+    if (!L) return 0;
+#if defined(CONFIG_AI_SCHEDULER)
+    lua_Integer task_id = luaL_checkinteger(L, 1);
+    if (task_id < 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    struct task *t = task_get((uint32_t)task_id);
+    if (!t || t->state == TASK_TERMINATED || t->last_ai_action < 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    /* Decode inline (mirrors ai_decode_action in ai_types.h: the encoding
+     * is idx = core * 6 + priority_adj * 2 + preempt). Duplicated instead
+     * of including ai_types.h to keep the lua library free of the AI
+     * scheduler's private headers. */
+    int idx = t->last_ai_action;
+    int preempt = idx % 2;           idx /= 2;
+    int priority_adj = idx % 3;      idx /= 3;
+    int core = idx;
+
+    lua_createtable(L, 0, 4);
+
+    lua_pushinteger(L, (lua_Integer)core);
+    lua_setfield(L, -2, "core");
+
+    lua_pushinteger(L, (lua_Integer)priority_adj);
+    lua_setfield(L, -2, "priority_adj");
+
+    lua_pushinteger(L, (lua_Integer)preempt);
+    lua_setfield(L, -2, "preempt");
+
+    lua_pushinteger(L, (lua_Integer)t->last_ai_action);
+    lua_setfield(L, -2, "raw");
+#else
+    (void)luaL_checkinteger(L, 1);  /* still validate arg shape */
     lua_pushnil(L);
 #endif
     return 1;
@@ -986,6 +1588,72 @@ static int l_model_bench(lua_State *L) {
 }
 
 /**
+ * slm.model_load(path [, name]) - Load an ONNX model from the VFS.
+ *
+ * Mirrors the `model load <path>` shell command (kernel/src/shell_sys.c)
+ * so scripts can exercise the eviction demo with different models. If
+ * `name` is omitted the model name is derived from the filename
+ * (last path component, extension stripped).
+ *
+ * Returns the registry index (>=0) on success, -1 on any failure
+ * (path too long, file not found, not a file, empty, out of memory,
+ * ONNX parse error). The file buffer is freed before return regardless
+ * of success — rust_model_load copies into its own registry storage.
+ */
+static int l_model_load(lua_State *L) {
+    if (!L) return 0;
+    const char *path = luaL_checkstring(L, 1);
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0 || info.type != 0 || info.size == 0) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    size_t pages_needed = (info.size + 4095) / 4096;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        pmm_free_pages(buf, pages_needed);
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    /* Derive model name: explicit arg 2 wins; otherwise use the
+     * last path component, extension stripped (matches shell's
+     * `model load` behavior). */
+    char derived[32];
+    const char *name = luaL_optstring(L, 2, NULL);
+    if (!name) {
+        const char *base = resolved;
+        for (const char *p = resolved; *p; p++)
+            if (*p == '/') base = p + 1;
+        size_t n = 0;
+        for (const char *p = base; *p && *p != '.' && n < 31; p++)
+            derived[n++] = *p;
+        derived[n] = '\0';
+        name = derived;
+    }
+
+    int result = rust_model_load(name, buf, (size_t)bytes_read);
+    pmm_free_pages(buf, pages_needed);
+
+    lua_pushinteger(L, result);
+    return 1;
+}
+
+/**
  * slm.infer_stats() - Get inference performance statistics
  * Returns table: {total, total_ns, min_ns, max_ns, last_ns, errors}
  * Returns nil on error (e.g., stats unavailable).
@@ -1074,6 +1742,9 @@ static int l_gpu_status(lua_State *L) {
  */
 static int l_read_line(lua_State *L) {
     if (!L) return 0;
+    /* Drain pending msg_subscribe callbacks before blocking on UART (#207)
+     * so scripts that wait at a menu prompt still see their subscribers. */
+    lua_msg_drain(L);
     char buf[SHELL_MAX_LINE];
     int n = shell_read_line(buf, (int)sizeof(buf));
     if (n < 0) {
@@ -1135,12 +1806,21 @@ static const luaL_Reg slm_lib[] = {
     /* Message routing */
     {"msg_publish", l_msg_publish},
     {"msg_publish_priority", l_msg_publish_priority},
+    {"msg_subscribe", l_msg_subscribe},
+    {"msg_unsubscribe", l_msg_unsubscribe},
+    {"msg_drain", l_msg_drain},
     /* Scheduler */
     {"sched_policy", l_sched_policy},
     {"sched_stats", l_sched_stats},
     {"sched_set_policy", l_sched_set_policy},
     {"sched_policy_list", l_sched_policy_list},
     {"ai_sched_stats", l_ai_sched_stats},
+    {"ai_sched_decision", l_ai_sched_decision},
+    {"task_migrate", l_task_migrate},
+    {"task_create", l_task_create},
+    {"task_kill", l_task_kill},
+    {"task_set_priority", l_task_set_priority},
+    {"task_pin", l_task_pin},
     /* CPU info */
     {"cpu_info", l_cpu_info},
     /* Memory / VMM / IPC */
@@ -1154,6 +1834,7 @@ static const luaL_Reg slm_lib[] = {
     {"model_list", l_model_list},
     {"model_info", l_model_info},
     {"model_bench", l_model_bench},
+    {"model_load", l_model_load},
     {"infer_stats", l_infer_stats},
     {"gpu_status", l_gpu_status},
     /* Shell integration */
@@ -1176,6 +1857,12 @@ static int luaopen_slm(lua_State *L) {
 
 static int lua_initialized = 0;
 
+/* Active lua_State count. heap_reset() in lua_slm_close must wait until
+ * this drops to zero — with Lua-defined tasks (#208) more than one state
+ * can be live and resetting the shared heap would pull the rug out from
+ * under the surviving state. */
+static volatile int lua_state_count = 0;
+
 void lua_slm_init(void) {
     if (lua_initialized) return;
     lua_initialized = 1;
@@ -1193,6 +1880,7 @@ lua_State *lua_slm_newstate(void) {
         uart_printf("Failed to create Lua state\n");
         return NULL;
     }
+    lua_state_count++;
 
     /* Open safe standard libraries */
     luaL_requiref(L, "_G", luaopen_base, 1);
@@ -1220,11 +1908,18 @@ lua_State *lua_slm_newstate(void) {
 
 void lua_slm_close(lua_State *L) {
     if (L) {
+        /* Release any Lua msg_subscribe refs owned by this state (#207)
+         * before the state is closed — luaL_unref needs a live state. */
+        lua_msg_subs_cleanup(L);
         lua_close(L);
-        /* Reset the Lua heap to eliminate fragmentation between sessions.
-         * Safe because only one Lua state exists at a time. */
-        extern void heap_reset(void);
-        heap_reset();
+        /* Only reset the shared Lua heap when the last state is gone.
+         * With Lua-defined tasks (#208), multiple states can be live at
+         * once and a reset would wipe allocations belonging to survivors. */
+        if (lua_state_count > 0) lua_state_count--;
+        if (lua_state_count == 0) {
+            extern void heap_reset(void);
+            heap_reset();
+        }
     }
 }
 

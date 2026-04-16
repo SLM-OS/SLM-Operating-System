@@ -20,6 +20,7 @@
 #include "debug.h"
 #include "sched.h"
 #include "string.h"  /* Our kernel string functions */
+#include "spinlock.h"  /* heap lock for concurrent lua_States (#208) */
 
 /* === CORE-C3 regression guard ==============================================
  * Do NOT redefine these 13 canonical string/mem functions in this file.
@@ -235,6 +236,14 @@ static uint8_t lua_heap[LUA_HEAP_SIZE] __attribute__((aligned(16)));
 static struct heap_block *heap_head = NULL;
 static int heap_initialized = 0;
 
+/* Serialize malloc/free/realloc across concurrent lua_States (#208).
+ * Before Lua-defined tasks there was exactly one state and the shell
+ * task was the only mutator; now a Lua task spawned via slm.task_create
+ * runs its own state on another CPU and would otherwise race on heap
+ * metadata. IRQ-disabling so we stay safe against an IRQ handler
+ * triggering a free() via Rust's deallocator during a critical section. */
+static spinlock_t heap_lock;
+
 static void heap_init(void) {
     if (heap_initialized) return;
 
@@ -263,21 +272,16 @@ void heap_reset(void) {
     heap_initialized = 1;
 }
 
-void *malloc(size_t size) {
+/* Internal: malloc body (caller holds heap_lock). */
+static void *malloc_locked(size_t size) {
     if (!heap_initialized) heap_init();
     if (size == 0) return NULL;
 
-    /* Align size */
     size = (size + ALIGN_SIZE - 1) & ~(ALIGN_SIZE - 1);
 
-    /* First-fit search */
     struct heap_block *block = heap_head;
     while (block != NULL) {
         if (block->is_free && block->size >= size) {
-            /* Found a suitable block */
-            /* Check for split BEFORE subtraction to avoid unsigned underflow.
-             * We need room for: [allocated data] + [new header] + [new data].
-             * min_split = size + sizeof(struct heap_block) + ALIGN_SIZE */
             size_t min_split_size = size + sizeof(struct heap_block) + ALIGN_SIZE;
             if (block->size >= min_split_size) {
                 size_t remaining = block->size - size - sizeof(struct heap_block);
@@ -299,10 +303,11 @@ void *malloc(size_t size) {
         block = block->next;
     }
 
-    return NULL;  /* Out of memory */
+    return NULL;
 }
 
-void free(void *ptr) {
+/* Internal: free body (caller holds heap_lock). */
+static void free_locked(void *ptr) {
     if (ptr == NULL) return;
 
     struct heap_block *block = (struct heap_block *)
@@ -316,14 +321,12 @@ void free(void *ptr) {
 
     block->is_free = 1;
 
-    /* Coalesce with next block if free */
     if (block->next && block->next->is_free) {
         block->size += sizeof(struct heap_block) + block->next->size;
         block->next = block->next->next;
         if (block->next) block->next->prev = block;
     }
 
-    /* Coalesce with previous block if free */
     if (block->prev && block->prev->is_free) {
         block->prev->size += sizeof(struct heap_block) + block->size;
         block->prev->next = block->next;
@@ -331,32 +334,49 @@ void free(void *ptr) {
     }
 }
 
+void *malloc(size_t size) {
+    irq_flags_t flags = spin_lock_irqsave(&heap_lock);
+    void *p = malloc_locked(size);
+    spin_unlock_irqrestore(&heap_lock, flags);
+    return p;
+}
+
+void free(void *ptr) {
+    irq_flags_t flags = spin_lock_irqsave(&heap_lock);
+    free_locked(ptr);
+    spin_unlock_irqrestore(&heap_lock, flags);
+}
+
 void *realloc(void *ptr, size_t size) {
     if (ptr == NULL) return malloc(size);
-    if (size == 0) {
-        free(ptr);
-        return NULL;
-    }
+    if (size == 0) { free(ptr); return NULL; }
+
+    irq_flags_t flags = spin_lock_irqsave(&heap_lock);
 
     struct heap_block *block = (struct heap_block *)
         ((uint8_t *)ptr - sizeof(struct heap_block));
 
     if (block->magic != BLOCK_MAGIC) {
+        spin_unlock_irqrestore(&heap_lock, flags);
         extern int uart_printf(const char *fmt, ...);
         uart_printf("[HEAP] Corruption detected in realloc() at %p\n", ptr);
         return NULL;
     }
 
     if (block->size >= size) {
-        return ptr;  /* Current block is big enough */
+        spin_unlock_irqrestore(&heap_lock, flags);
+        return ptr;
     }
 
-    /* Allocate new block and copy */
-    void *new_ptr = malloc(size);
-    if (new_ptr == NULL) return NULL;
+    void *new_ptr = malloc_locked(size);
+    if (new_ptr == NULL) {
+        spin_unlock_irqrestore(&heap_lock, flags);
+        return NULL;
+    }
 
     memcpy(new_ptr, ptr, block->size);
-    free(ptr);
+    free_locked(ptr);
+    spin_unlock_irqrestore(&heap_lock, flags);
     return new_ptr;
 }
 
