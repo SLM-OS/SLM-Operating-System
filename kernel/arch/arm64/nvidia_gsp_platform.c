@@ -198,7 +198,34 @@ static void jetson_gsp_mb(void)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
-/* ---- Firmware accessor ---- */
+/* ---- Firmware accessor ----
+ *
+ * ⚠ GA10B diverges from discrete Ampere: there is no GSP-RM firmware.
+ *
+ * Discovered during hardware bringup (jetson-nano-2, 2026-04-15):
+ * `/lib/firmware/nvidia/ga10b/` on L4T R36.4.7 does NOT ship the
+ * 535.113.01 GSP-RM stack (gsp.bin / bootloader / booter_load /
+ * booter_unload) that discrete GA10x uses. Instead, GA10B uses the
+ * **nvgpu-native** firmware layout: acr-gsp.* encrypted ucode,
+ * fecs/gpccs_encrypt_prod.bin, gpmu_ucode_next_prod_image.bin,
+ * NET{A,B,C,D}_img_prod_encrypted.bin, safety-scheduler.*, etc.
+ *
+ * This is a fundamental architectural difference:
+ *   - Discrete Ampere (GA102/GA107): GSP-RM runs a full resource
+ *     manager on the RISC-V core. nouveau/open-RM driver pattern.
+ *   - Integrated Ampere (GA10B): legacy nvgpu-style bringup with
+ *     FECS/GPCCS ucode loaded via ACR (Access Controlled Region);
+ *     no GSP-RM image.
+ *
+ * Consequence: the 7-phase GSP boot sequence in kernel/gpu/nvidia/
+ * does not apply to Jetson compute. A Jetson compute path needs a
+ * separate nvgpu-style ACR loader. This file's firmware_get
+ * currently still refers to the discrete-GPU blob names because
+ * that is what `struct gsp_firmware_blob` expresses; on Jetson the
+ * build always disables ENABLE_GSP_FIRMWARE and these return
+ * {NULL, 0, NULL}, which causes gsp_init() to abort cleanly in
+ * Phase 0. This is the right behavior until an nvgpu-style
+ * bringup lands alongside the GSP path. */
 
 static void jetson_gsp_firmware_get(enum gsp_firmware_kind kind,
                                     struct gsp_firmware_blob *out)

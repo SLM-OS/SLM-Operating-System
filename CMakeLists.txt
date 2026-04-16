@@ -673,13 +673,20 @@ if(PLATFORM STREQUAL "X86_64")
     set(GSP_CHIP "ga107")
     set(_gsp_default ON)
 elseif(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+    # GA10B does NOT ship the discrete-Ampere GSP-RM firmware stack
+    # (gsp-535.113.01.bin et al.). L4T R36.4.7 /lib/firmware/nvidia/ga10b/
+    # contains only nvgpu-native blobs (acr-gsp, FECS/GPCCS, PMU). The
+    # 7-phase GSP bringup therefore does not apply on Jetson. Default OFF
+    # to keep the build quiet and make the architectural difference
+    # explicit. GSP_CHIP is still set so the shared-code paths that
+    # reference it compile, but the firmware extraction block is skipped.
     set(GSP_CHIP "ga10b")
-    set(_gsp_default ON)
+    set(_gsp_default OFF)
 else()
     set(GSP_CHIP "")
     set(_gsp_default OFF)
 endif()
-option(ENABLE_GSP_FIRMWARE "Embed NVIDIA GSP firmware blobs (Phase E)" ${_gsp_default})
+option(ENABLE_GSP_FIRMWARE "Embed NVIDIA GSP firmware blobs (discrete Ampere only)" ${_gsp_default})
 
 if(ENABLE_GSP_FIRMWARE AND GSP_CHIP)
     if(NOT EXISTS "/lib/firmware/nvidia/${GSP_CHIP}/gsp")

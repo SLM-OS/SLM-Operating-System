@@ -397,13 +397,39 @@ A new platform shim should pass all host tests before attempting hardware valida
 
 ## Why This Matters for Jetson
 
-The Jetson Orin Nano uses the same Ampere GPU architecture (GA10B, an integrated variant of GA10x). The GSP boot sequence is fundamentally the same:
-- Same RISC-V core, same firmware format
-- Same SEC2 Falcon Booter Load mechanism
-- Same WPR memory layout
-- Same RPC communication protocol
+The Jetson Orin Nano uses Ampere-family silicon (GA10B, an integrated variant of GA10x), so *architecturally* the shader cores, memory hierarchy, and Falcon/RISC-V engines are the same as discrete GA10x.
 
-The key difference is that on Jetson, the GSP firmware may be pre-loaded by the bootloader (UEFI/CBoot), whereas on discrete PCIe GPUs it must be loaded by the OS driver. If the Jetson CBB firewall can be resolved, the GSP communication patterns documented here apply directly.
+**However, the firmware stack on GA10B is NOT the GSP-RM stack used by discrete Ampere.**
+
+Verified against L4T R36.4.7 on jetson-nano-2 (2026-04-15): `/lib/firmware/nvidia/ga10b/` ships *none* of the 535.113.01 GSP-RM blobs (`gsp-535.113.01.bin`, `bootloader-535.113.01.bin`, `booter_load-535.113.01.bin`, `booter_unload-535.113.01.bin`). Instead it ships:
+
+| File | Purpose |
+|------|---------|
+| `acr-gsp.{text,data,manifest}.encrypt.bin.prod` | ACR-loaded security bootloader |
+| `fecs_encrypt_prod.bin`, `fecs_pkc_sig_encrypt.bin` | Front-end context switch (FECS) ucode |
+| `gpccs_encrypt_prod.bin`, `gpccs_pkc_sig_encrypt.bin` | GPC context switch (GPCCS) ucode |
+| `gpmu_ucode_next_prod_image.bin` + `_desc.bin` | PMU ucode |
+| `NET{A,B,C,D}_img_prod_encrypted.bin` | Runtime "NET" image set (safety-critical variants) |
+| `safety-scheduler.{text,data,manifest}.encrypt.bin.prod` | Safety scheduler ucode |
+| `pmu_pkc_prod_sig.bin` | PMU PKC signature |
+
+This is the **nvgpu-native** firmware layout used by the legacy Tegra `nvgpu` kernel driver, not the nouveau/open-RM GSP-RM model. On GA10B the engine bringup flow is:
+
+1. ACR loads the signed ACR-GSP ucode into a protected region
+2. FECS/GPCCS context-switch ucode is loaded into the GR engine
+3. PMU ucode is loaded for power/thermal management
+4. Channels are allocated and work is submitted via host/pushbuffer
+
+There is no 38 MB GSP-RM blob on the integrated GPU. There is no SEC2 Booter Load. There is no WPR2 heap managed by a RISC-V Resource Manager. The whole 7-phase sequence in this document **does not apply** to Jetson compute — it describes the *discrete-GPU* path only.
+
+**What does this mean for SLM-OS?**
+
+- The `struct gsp_platform_ops` vtable is still useful as an MMIO/DMA/cache/barrier abstraction: its shape is correct for *any* Ampere bringup, not just GSP-RM. `kernel/arch/arm64/nvidia_gsp_platform.c` implements it correctly for GA10B.
+- `gsp_init()` will always fail on Jetson Orin Nano because the GSP firmware blobs are missing (correctly: `firmware_get` returns `{NULL, 0, NULL}` and Phase 0 aborts).
+- Full GPU compute on Jetson requires an nvgpu-style bringup sibling to the GSP-RM code — a separate project. The platform shim's vtable remains the right dispatch layer for that work.
+- CMake's `ENABLE_GSP_FIRMWARE` defaults to **OFF** on `JETSON_ORIN_NANO` because the discrete-GPU firmware simply isn't on the BSP; keeping it off avoids a misleading extraction attempt.
+
+The one thing the CBB-firewall bypass (EL2+VHE) does give Jetson is MMIO access — `NV_PMC_BOOT_0 = 0xB7B000A1` reads cleanly from SLM-OS after the handoff. That's the foundation an nvgpu-style port would build on.
 
 ---
 
