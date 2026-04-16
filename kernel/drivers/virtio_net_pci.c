@@ -132,7 +132,10 @@ struct virtq_used_pci {
     struct virtq_used_elem_pci ring[];
 } __attribute__((packed));
 
-/* VirtIO-Net header prepended to every packet */
+/* VirtIO-Net header prepended to every packet.
+ * 12 bytes because we negotiate VIRTIO_F_VERSION_1 (virtio 1.1 §5.1.6.1).
+ * Omitting num_buffers causes QEMU to offset packet data by 2 bytes
+ * and drop every frame. */
 struct virtio_net_hdr_pci {
     uint8_t  flags;
     uint8_t  gso_type;
@@ -140,6 +143,7 @@ struct virtio_net_hdr_pci {
     uint16_t gso_size;
     uint16_t csum_start;
     uint16_t csum_offset;
+    uint16_t num_buffers;
 } __attribute__((packed));
 
 /* -------------------------------------------------------------------------- */

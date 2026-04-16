@@ -87,6 +87,16 @@ struct virtio_net_config {
 /*
  * Every packet sent/received has this header prepended.
  * When not using checksum offload or GSO, most fields are zero.
+ *
+ * Per virtio 1.1 spec §5.1.6.1, the header is 12 bytes when either
+ * VIRTIO_NET_F_MRG_RXBUF or VIRTIO_F_VERSION_1 is negotiated. We
+ * negotiate VERSION_1 unconditionally (it is required for modern
+ * virtio), so the 12-byte layout applies and num_buffers must be
+ * included. Using a 10-byte header with VERSION_1 causes QEMU to
+ * interpret the first 2 bytes of packet data as part of the header,
+ * silently mangling outgoing frames and producing corrupt received
+ * frames — before this fix, TX succeeded at the ring level but QEMU
+ * dropped every packet before it reached the netdev backend.
  */
 struct virtio_net_hdr {
     uint8_t  flags;         /* VIRTIO_NET_HDR_F_* */
@@ -95,7 +105,7 @@ struct virtio_net_hdr {
     uint16_t gso_size;      /* GSO segment size */
     uint16_t csum_start;    /* Checksum start offset */
     uint16_t csum_offset;   /* Checksum offset from csum_start */
-    /* If VIRTIO_NET_F_MRG_RXBUF, followed by: uint16_t num_buffers; */
+    uint16_t num_buffers;   /* RX only: merged buffer count (VERSION_1/MRG_RXBUF) */
 } __attribute__((packed));
 
 /* Header flags */
