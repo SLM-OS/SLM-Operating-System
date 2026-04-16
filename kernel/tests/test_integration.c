@@ -398,9 +398,15 @@ static void test_task_migration(void)
     int ret = sched_migrate_task(mig_task, 3);
     TEST_ASSERT_MESSAGE(ret == 0, "sched_migrate_task failed");
 
-    /* Wait for task to start and signal ready. */
+    /* Wait for task to start and signal ready.
+     *
+     * 15-second timeout on Pi 5 because the counter component from
+     * the Lua test suite keeps running for ~5 seconds into integration
+     * tests, and if it lands on target_cpu (3) the migrated task has
+     * to wait behind it. The shorter 5-second budget raced with the
+     * counter's lifetime and flaked. */
     uint64_t start = timer_get_count();
-    uint64_t limit = timer_get_frequency() * 5;
+    uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
 #if defined(PLATFORM_HAS_NC_MEMORY)
         if (NC_SYNC(NC_MIG_READY)) break;
