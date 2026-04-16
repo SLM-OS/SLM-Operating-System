@@ -98,6 +98,16 @@ make test-nvfw
 # patcher. The full FWSEC-FRTS sequence is hardware-only and
 # runs via `--fwsec-frts` above.
 make test-bringup
+
+# GA10B (Jetson integrated Ampere) nvgpu-native bringup — mock
+# BAR0 vtable + synthetic firmware blobs emitted via inline asm.
+# Covers firmware accessor, prepare guards, phase-ordering state
+# machine, and the ACR HS load sequence (reset assert/deassert,
+# PIO byte-exact transport, BCR_CTRL=0x11, STARTCPU, halt, retcode).
+# 10 test cases. The on-hardware BROM authentication is Jetson-only
+# and requires a real GPU — this test catches logic regressions in
+# the bringup state machine and PIO plumbing without a GPU.
+make test-ga10b-bringup
 ```
 
 ## Recovering from a hung GPU

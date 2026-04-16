@@ -312,6 +312,30 @@ test-falcon:
 	    kernel/gpu/nvidia/gsp.c
 	@./build/host-tools/test_falcon
 
+# GA10B (Jetson integrated Ampere) nvgpu-native bringup tests — mock
+# vtable + synthetic firmware blobs emitted via inline asm so the
+# `_start`/`_end` symbol arithmetic ga10b_bringup.c relies on works.
+# Covers: firmware accessor, prepare guards, state-machine ordering,
+# ACR sequence plumbing (assert/deassert reset, PIO byte-exact
+# transport, BCR_CTRL=0x11, STARTCPU, halt polling, BR_RETCODE).
+#
+# Note -DENABLE_GA10B_FIRMWARE=1: switches the firmware accessor's
+# compile-time guard to the "embedded" branch so it references the
+# inline-asm symbols the test TU provides.
+.PHONY: test-ga10b-bringup
+test-ga10b-bringup:
+	@mkdir -p build/host-tools
+	@echo "Building + running GA10B bringup tests..."
+	$(CC) -std=c11 -Wall -Wextra -O2 -g \
+	    -Ihost-tools/gsp-harness -Ikernel/gpu/nvidia \
+	    -DSLM_HOST_HARNESS=1 -DENABLE_GA10B_FIRMWARE=1 \
+	    -o build/host-tools/test_ga10b_bringup \
+	    host-tools/gsp-harness/test_ga10b_bringup.c \
+	    kernel/gpu/nvidia/ga10b_bringup.c \
+	    kernel/gpu/nvidia/falcon.c \
+	    kernel/gpu/nvidia/gsp.c
+	@./build/host-tools/test_ga10b_bringup
+
 # GSP-RM RPC ring helper tests — pure ring-pointer arithmetic plus
 # a mock-vtable channel init. Hardware integration runs once GSP-RM
 # is alive (post-E3.4.e).

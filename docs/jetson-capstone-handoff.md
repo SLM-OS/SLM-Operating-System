@@ -63,7 +63,8 @@ caveats in §6).
 | #175 | Push-failure counter for `steal_deque` | P3-low | ~20 LOC, observability-only |
 | #158 | Pi 5 boot hang | ✅ closed | Fixed by external lock in PR #167 |
 | #139 | Work-stealing ABA race | ✅ closed | Fixed by per-slot generation counter in PR #145 |
-| #142 | GSP bare-metal loader (future work) | descoped | Filed for the day someone wants to tackle GPU compute on Ampere |
+| #142 | GSP bare-metal loader (future work) | partially addressed | ARM64 platform shim + nvgpu-native bringup scaffold landed on the `worktree-jetson-gpu-inference` branch (2026-04-15). GPU MMIO confirmed live, all 17 ga10b firmware blobs embedded, Phase 1 (ACR HS load) plumbed with 10 host tests. Currently blocked at BROM by GSP Falcon PRI priv-lockdown (HWCFG2 bit 13) — see #190 and §GPU Bringup below. |
+| #190 | Jetson GSP Falcon priv-lockdown blocks ACR HS load | P2-medium | New finding on branch. GPU BAR0 is readable at EL2 but PIO writes to IMEM/DMEM are silently dropped (readback returns `0xbadf5620` poison). Three paths forward are scoped: SMC to TF-A, UEFI direct boot, or reuse Linux-nvgpu ACR state. |
 
 ### 3b. Capstone deliverables outside the engineering plan
 
@@ -81,6 +82,66 @@ If picking what to do next, the honest order is:
 1. **Thesis writeup + demo prep** — time-boxed project management,
    no engineering blockers.
 2. **#174 / #175 / S5** — genuinely optional polish.
+3. **GPU bringup continuation** — scoped below. Each of the three
+   unlock paths is research-heavy and has real risk of not landing in
+   the capstone window; all are valuable for the thesis appendix
+   regardless of outcome.
+
+### 3d. GPU Bringup (branch: `worktree-jetson-gpu-inference`)
+
+Extensive work landed on a side branch targeting Ampere compute. The
+platform shim, firmware pipeline, bringup skeleton, diagnostic shell
+commands, and Phase 1 ACR HS load are all in place and tested. The
+block is a hardware-level priv-lockdown on the GSP Falcon.
+
+**What landed (13 commits ahead of main):**
+- `kernel/arch/arm64/nvidia_gsp_platform.c` — full `gsp_platform_ops`
+  implementation (all 11 vtable functions) for Jetson.
+- `kernel/arch/arm64/nvidia_ga10b_firmware.S` + CMake wiring — `.incbin`
+  embedding for all 17 ga10b firmware blobs, gated behind
+  `-DGA10B_FIRMWARE_DIR=<path>`.
+- `scripts/tools/fetch-ga10b-firmware.sh` — pulls firmware from a
+  Jetson's `/lib/firmware/nvidia/ga10b/` to the build host.
+- `scripts/jetson-kexec-slmos.sh` — extended to force-enable GPU
+  clocks via BPMP debugfs before kexec, so GPU MMIO stays live
+  through the Linux → SLM-OS handoff.
+- `kernel/gpu/nvidia/ga10b_bringup.{c,h}` — nvgpu-native bringup
+  scaffold with Phase 1 (ACR HS load) implemented: GA10B-specific
+  engine reset (assert→delay→deassert), PIO IMEM/DMEM upload,
+  BCR_CTRL=0x11, STARTCPU, halt polling, BR_RETCODE decoding.
+- `kernel/mm/vmm.c` — extended GPU BAR0 mapping from 1 × 2 MB block
+  to 8 × 2 MB blocks so Falcon engine apertures past 0x17200000 are
+  reachable.
+- Shell commands: `gpu` (info + raw MMIO read), `nvgpu` (firmware
+  inventory, phase-by-phase bringup driver).
+- `host-tools/gsp-harness/test_ga10b_bringup.c` — 10 tests covering
+  firmware accessor, state machine, and the ACR sequence against a
+  mock-vtable.
+- `docs/jetson-nvgpu-bringup-research.md`, `docs/jetson-nvgpu-acr-analysis.md`,
+  58 cached L4T nvgpu reference files.
+
+**Hardware verification (jetson-nano-2):**
+- GPU MMIO live at EL2+VHE: BOOT_0=`0xB7B000A1`, BOOT_42=`0x17BA1000`
+- NVIDIA driver detects GA10B with 1024 CUDA + 32 tensor cores
+- All 17 firmware blobs reachable via `nvgpu info`
+- ACR sequence runs end-to-end but BR_RETCODE=2 (BROM FAIL) because
+  HWCFG2 bit 13 (RISCV_BR_PRIV_LOCKDOWN) is asserted, causing PIO
+  writes to silently drop
+
+**Three unlock paths (#190):**
+1. **SMC to TF-A / NVIDIA SiP service** to lower the GSP Falcon PLM.
+   Requires finding the right function ID; not in our cached refs.
+2. **UEFI direct boot** — bypass Linux kexec entirely. The
+   `kernel/arch/arm64/efi_stub.c` skeleton exists but isn't functional.
+3. **Reuse Linux-nvgpu's ACR state** — have Linux bring up GSP
+   successfully, then kexec without the runtime-PM suspend.
+
+**Merge guidance:** the branch is ready to merge in its own right as
+infrastructure and research. Even without unlocking compute, it adds:
+- A complete, tested arm64 platform shim
+- Working firmware pipeline
+- A reproducible, documented investigation of the priv-lockdown
+  boundary (valuable for the thesis)
 
 ---
 

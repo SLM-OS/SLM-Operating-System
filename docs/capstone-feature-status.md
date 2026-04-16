@@ -129,35 +129,46 @@ granularity.
 ### Summary
 
 All inference currently runs on CPU. The AI scheduler's MLP runs on CPU
-with NEON/SSE acceleration. Actual GPU compute is blocked by firmware
-requirements (GSP on NVIDIA Ampere). Jetson is the most viable path to
-GPU-accelerated inference; x86-64 has made the most progress on GSP
-bringup but is blocked by a VFIO-specific hardware-security boundary.
+with NEON/SSE acceleration. Actual GPU compute is blocked on both
+Ampere platforms by hardware security boundaries:
+
+- **x86-64 discrete GA107**: Booter Load blocked by SEC2 priv-lockdown
+  raised by VFIO's mandatory PCI FLR (#185)
+- **Jetson integrated GA10B**: ACR HS ucode load blocked by GSP Falcon
+  priv-lockdown (HWCFG2 bit 13) after kexec-from-Linux
+
+Both are structural — fixing either requires either a privilege-level
+unlock path through EL3 or a boot model that doesn't hand the GPU off
+from a prior driver (bare-metal x86-64 / UEFI-direct Jetson).
 
 ### Per-Platform Status
 
 | | QEMU | Pi 5 | Jetson | x86-64 |
 |--|------|------|--------|--------|
-| GPU hardware | None | VideoCore (inaccessible) | GA10B (MMIO accessible at EL2) | GA107/RTX 3050 (PCI, BARs mapped) |
-| GPU driver | Stub | Stub | ~60% portable GSP bringup | ~60% portable + x86 platform shim |
-| FWSEC-FRTS | N/A | N/A | Not yet attempted | 3/3 on hardware |
-| GSP firmware load | N/A | N/A | Blocked: ARM64 shim missing | Blocked: SEC2 priv-lock (#185) |
+| GPU hardware | None | VideoCore (inaccessible) | GA10B (MMIO live at EL2) | GA107/RTX 3050 (PCI, BARs mapped) |
+| GPU driver | Stub | Stub | Full NVIDIA shim + scaffolded nvgpu bringup | Full NVIDIA shim + GSP-RM bringup |
+| Platform shim (`gsp_platform_ops`) | N/A | N/A | Complete (11/11 fns, `kernel/arch/arm64/nvidia_gsp_platform.c`) | Complete (11/11 fns) |
+| Engine reset + PIO upload | N/A | N/A | Working on GSP Falcon | Working on GSP + SEC2 |
+| Signed ucode authentication | N/A | N/A | Blocked: GSP priv-lockdown | FWSEC-FRTS 3/3; Booter Load blocked |
 | Inference backend | CPU (NEON) | CPU (NEON) | CPU (NEON) | CPU (SSE inline-asm) |
 | AI scheduler MLP | CPU | CPU | CPU | CPU |
 
 ### GPU Bringup Stack (Portable)
 
-The shared GSP bringup code in `kernel/gpu/nvidia/` is portable across
-platforms via `struct gsp_platform_ops` (see `docs/nvidia-gsp.md`
-"Platform Shim Contract"):
+The shared GSP-RM bringup code in `kernel/gpu/nvidia/` is portable
+across platforms via `struct gsp_platform_ops` (see `docs/nvidia-gsp.md`
+§"Platform Shim Contract"). Jetson adds an **nvgpu-native** parallel
+path (`ga10b_bringup.c`) because GA10B ships a different firmware
+stack than discrete Ampere.
 
 | Component | File | Tests | Status |
 |-----------|------|-------|--------|
 | VBIOS BIT-table parser | `nvidia_vbios.c` (700 lines) | 30 | Complete |
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
-| FWSEC/DMEMMAPPER/sig-index | `bringup.c` (1050+ lines) | 25 | Complete |
-| RPC ring skeleton | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **Total host-side tests** | | **123** | **All passing** |
+| FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
+| RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (500 lines) | **10** | Phase 1 (ACR load) wired; BROM-blocked |
+| **Total host-side tests** | | **133** | **All passing** |
 
 ### Platform-Specific Blockers
 
@@ -165,12 +176,39 @@ platforms via `struct gsp_platform_ops` (see `docs/nvidia-gsp.md`
 documentation. Accessing it would require reverse-engineering the
 VideoCore ISA and firmware. Not feasible within capstone scope.
 
-**Jetson:** GPU MMIO at `0x17000000` is accessible from EL2+VHE (CBB
-firewall bypassed April 2026). `NV_PMC_BOOT_0` reads `0xB7B000A1`
-(GA10B, Ampere). The portable GSP code transfers verbatim. Remaining
-work: ARM64 platform shim (`kernel/arch/arm64/nvidia_gsp_platform.c`)
-implementing 11 vtable functions + GA10B firmware sourcing from L4T BSP.
-Estimated effort: 1-3 weeks.
+**Jetson (GA10B):** MMIO confirmed live at EL2 — `NV_PMC_BOOT_0` reads
+`0xB7B000A1` (GA10B, Ampere Rev 10.1), `NV_PMC_BOOT_42` reads
+`0x17BA1000` (arch=0x17, impl=0xB). The kexec helper force-enables GPU
+clocks via BPMP debugfs (`scripts/jetson-kexec-slmos.sh`) so the
+engine stays powered through the Linux → SLM-OS handoff.
+
+Architectural finding: GA10B uses the **nvgpu-native firmware stack**
+(acr-gsp.*, FECS/GPCCS, PMU, NET images), not the discrete-Ampere
+GSP-RM stack. The shim embeds all 17 firmware blobs via `.incbin` when
+`-DGA10B_FIRMWARE_DIR=...` is configured. A parallel `ga10b_bringup.c`
+implements the nvgpu-style boot sequence alongside the GSP-RM path in
+`bringup.c`. See `docs/jetson-nvgpu-bringup-research.md` and
+`docs/jetson-nvgpu-acr-analysis.md` for the full decomposition.
+
+Phase 1 (ACR HS load on GSP RISCV) is plumbed: engine reset works
+(GA10B-specific assert/deassert pattern), PIO upload loops are wired
+to the correct IMEMC/DMEMC registers, BCR_CTRL=0x11 programs
+preloaded-mode, STARTCPU kicks the BROM. On hardware the BROM returns
+`BR_RETCODE.result = 2 (FAIL)` because `HWCFG2` bit 13
+(RISCV_BR_PRIV_LOCKDOWN) is asserted — the GSP Falcon's PRI aperture
+is locked to an EL3/secure privilege level, so our EL2-NS PIO writes
+to IMEM/DMEM are silently dropped (readback confirms: returns
+`0xbadf5620` poison). BROM then authenticates against empty DMEM and
+fails cleanly.
+
+Three paths forward:
+1. **SMC to TF-A / NVIDIA SiP service** to lower the Falcon's PLM
+2. **UEFI direct boot** — bypass kexec; `kernel/arch/arm64/efi_stub.c`
+   exists but isn't functional
+3. **Reuse Linux-nvgpu's ACR bringup state** — have Linux bring up
+   GSP successfully, then kexec without the suspend
+
+None unlock compute in the capstone window, but all have been scoped.
 
 **x86-64:** FWSEC-FRTS succeeds on hardware (3/3 runs VFIO, 4/4 runs
 bare-metal SLM-OS — April 15 2026, WPR2 populated at 0x1ffffe00 on
