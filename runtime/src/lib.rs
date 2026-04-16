@@ -2566,6 +2566,23 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         };
         check!(b"extract_features_recency_rank_unique\0", ranks_distinct);
 
+        // #118: is_dirty (feature 8) must change from 0 to 1 when the
+        // block's is_dirty flag is set. This confirms the feature
+        // extractor reads the field and that set_dirty callers can
+        // influence eviction decisions.
+        {
+            let mut dirty_cand = ml_cands[0];
+            dirty_cand.is_dirty = false;
+            let clean_row = extract_features(&[dirty_cand])[0];
+            dirty_cand.is_dirty = true;
+            let dirty_row = extract_features(&[dirty_cand])[0];
+            check!(b"set_dirty_shifts_feature_8\0",
+                   clean_row[8] == 0.0 && dirty_row[8] == 1.0);
+            // eviction_cost (feature 14) should also increase when dirty.
+            check!(b"set_dirty_increases_eviction_cost\0",
+                   dirty_row[14] > clean_row[14]);
+        }
+
         // XGBoostPolicy: select a victim and produce scores.
         {
             let mut p = XGBoostPolicy::new();
