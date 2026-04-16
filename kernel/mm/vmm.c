@@ -887,11 +887,18 @@ static void vmm_setup_platform(void)
 #endif
 
 #if defined(PLATFORM_JETSON_ORIN_NANO) && defined(GPU_BASE)
-    /* GPU MMIO region (0x17000000, maps into L1[0] l2_mmio) */
-    uint64_t gpu_l2_idx = (GPU_BASE >> BLOCK_SHIFT) & 0x1FF;
-    l2_mmio[gpu_l2_idx] = make_block_desc(GPU_BASE & ~(BLOCK_SIZE - 1),
-                                           VMM_FLAGS_DEVICE);
-    vmm_state.blocks_mapped++;
+    /* GPU MMIO aperture (0x17000000 .. 0x18000000 = 16 MB = 8 × 2 MB
+     * blocks). One-block mapping was enough to read NV_PMC_BOOT_0 at
+     * 0x17000000 but insufficient for the Falcon engine blocks at
+     * higher offsets: PMU 0x1710a000, GSP 0x17110000, FECS 0x17409000,
+     * GPCCS 0x17500000. Map the whole BAR0 so any Ampere register is
+     * reachable. */
+    for (uint64_t off = 0; off < 0x01000000UL; off += BLOCK_SIZE) {
+        uint64_t pa = (GPU_BASE & ~(BLOCK_SIZE - 1)) + off;
+        uint64_t idx = (pa >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[idx] = make_block_desc(pa, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+    }
 #endif
 
 #if defined(PLATFORM_QEMU_VIRT)

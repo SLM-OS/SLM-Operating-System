@@ -104,13 +104,15 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* ---- BAR0 engine bases (GA10B layout) ----
  *
- * See docs/jetson-nvgpu-bringup-research.md §3. These are the base
- * offsets of the Falcon blocks each phase programs. Verified via `gpu
- * read` on hardware — add hardware checks as phases come online. */
-#define NV_PGSP_BASE        0x00110000u   /* GSP Falcon (runs ACR) */
-#define NV_PFECS_BASE       0x00409000u   /* FECS Falcon */
-#define NV_PGPCCS_BASE      0x00500000u   /* GPCCS Falcon (per-GPC) */
-#define NV_PPWR_BASE        0x0010a000u   /* PMU Falcon */
+ * Verified via docs/jetson-nvgpu-acr-analysis.md against OE4T nvgpu
+ * l4t-r36.5 sources. GSP Falcon block starts at 0x110000; the RISCV
+ * subblock (used for ACR) is at 0x111000.
+ *
+ * FECS, GPCCS, PMU are bootstrapped by ACR itself on GA10B (since we
+ * skip LSPMU) — we don't need to probe them from SLM-OS. Their bases
+ * will matter for later phases (GR init, method submission) but not
+ * for ACR load. */
+#define NV_PGSP_BASE        0x00110000u   /* GSP Falcon block (runs ACR) */
 
 /* ============================================================================
  * Phase entry points
@@ -144,26 +146,15 @@ int ga10b_bringup_prepare(struct ga10b_bringup *b)
     }
     uart_printf("[GA10B] ACR text: %lu bytes\n", (unsigned long)tmp.size);
 
-    /* Probe each Falcon engine. falcon_probe() reads HWCFG and verifies
-     * the Falcon v4 shape — same flow as discrete Ampere. */
-    if (falcon_probe(&b->gsp_flcn,   NV_PGSP_BASE)   < 0) {
+    /* Probe the GSP Falcon — this is the one ACR runs on. FECS,
+     * GPCCS, and PMU are bootstrapped by ACR itself (since we skip
+     * LSPMU), so SLM-OS doesn't touch their MMIO directly. */
+    if (falcon_probe(&b->gsp_flcn, NV_PGSP_BASE) < 0) {
         uart_puts("[GA10B] GSP Falcon probe failed\n");
         return -1;
     }
-    if (falcon_probe(&b->fecs_flcn,  NV_PFECS_BASE)  < 0) {
-        uart_puts("[GA10B] FECS Falcon probe failed\n");
-        return -1;
-    }
-    if (falcon_probe(&b->gpccs_flcn, NV_PGPCCS_BASE) < 0) {
-        uart_puts("[GA10B] GPCCS Falcon probe failed\n");
-        return -1;
-    }
-    if (falcon_probe(&b->pmu_flcn,   NV_PPWR_BASE)   < 0) {
-        uart_puts("[GA10B] PMU Falcon probe failed\n");
-        return -1;
-    }
 
-    uart_puts("[GA10B] prepare OK — all 4 Falcons probed\n");
+    uart_puts("[GA10B] prepare OK — GSP Falcon probed\n");
     return 0;
 }
 
