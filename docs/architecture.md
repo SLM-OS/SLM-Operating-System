@@ -217,16 +217,24 @@ This hybrid approach leverages:
 
 | Component | File(s) | Purpose |
 |-----------|---------|---------|
-| VirtIO-Net | `kernel/drivers/virtio_net.c` | Network driver (QEMU) |
-| lwIP Wrapper | `kernel/net/lwip_slm.c` | TCP/IP stack integration |
-| OS Abstraction | `kernel/net/sys_arch.c` | lwIP platform layer |
+| Driver abstraction | `kernel/include/net_driver.h` | `struct net_driver` ops, platform-registered |
+| VirtIO-Net MMIO | `kernel/drivers/virtio_net.c` | Driver for QEMU ARM64 (virtio-mmio) |
+| VirtIO-Net PCI | `kernel/drivers/virtio_net_pci.c` | Driver for x86-64 QEMU (virtio-pci) |
+| lwIP Wrapper | `kernel/net/lwip_slm.c` | TCP/IP stack integration + auto-DHCP |
+| OS Abstraction | `kernel/net/sys_arch.c` | lwIP platform layer (IRQ-safe locks) |
 | Shell Commands | `kernel/src/net_shell.c` | ping, ifconfig, netstat |
 
 **Phase 4 Implementation:**
 - lwIP TCP/IP stack for ICMP, TCP, UDP, DHCP
-- VirtIO-Net driver for QEMU virtual networking
+- `struct net_driver` abstraction so each platform plugs in its own NIC
+- VirtIO-Net MMIO (ARM64 QEMU) and VirtIO-Net PCI (x86-64 QEMU) drivers
+- `ENABLE_NETWORKING` CMake option — default ON for QEMU_VIRT and X86_64,
+  OFF for Pi 5 / Jetson until real NIC drivers land (Phase 3/4, #202, #25)
+- `NET_DHCP_AT_BOOT` default ON — lwIP starts DHCP during `net_init()`
+  with static-IP fallback on timeout (#197)
 - Shell commands: `net`, `ping`, `ifconfig`, `netstat`
 - Static IP and DHCP configuration support
+- See `docs/networking.md` for the full driver contract and test matrix
 
 ### Lua Scripting Engine
 

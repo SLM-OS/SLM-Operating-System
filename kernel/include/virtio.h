@@ -169,6 +169,19 @@ struct virtq_used {
 /* Maximum queue size (common default) */
 #define VIRTQ_MAX_SIZE              256
 
+/* Synchronous TX completion timeout (milliseconds).
+ *
+ * Both VirtIO-Net drivers (MMIO on ARM64 QEMU, PCI on x86-64 QEMU)
+ * currently use busy-wait completion in send(). QEMU's emulated device
+ * typically completes in microseconds; real hardware might take longer.
+ * 100 ms is a generous bound that still guarantees forward progress
+ * without letting the caller spin forever when the device is wedged.
+ *
+ * This magic-number style is a known limitation — #204 tracks replacing
+ * the whole sync-spin model with IRQ-driven completion. Until that
+ * lands, this constant keeps the two drivers behaving consistently. */
+#define VIRTIO_NET_TX_TIMEOUT_MS    100
+
 /* Complete virtqueue state */
 struct virtqueue {
     /* Queue index (0, 1, etc. for this device) */
@@ -215,7 +228,11 @@ static inline void virtio_write32(uintptr_t base, uint32_t offset, uint32_t valu
 
 /* Memory barrier for MMIO ordering */
 static inline void virtio_mb(void) {
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("mfence" ::: "memory");
+#else
     __asm__ volatile("dsb sy" ::: "memory");
+#endif
 }
 
 /* -------------------------------------------------------------------------- */

@@ -6,7 +6,7 @@
  */
 
 #include "net.h"
-#include "virtio_net.h"
+#include "net_driver.h"
 #include "debug.h"
 #include "timer.h"
 
@@ -26,12 +26,88 @@
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
+/* Driver Registration                                                         */
+/* -------------------------------------------------------------------------- */
+
+static const struct net_driver *active_driver;
+
+void net_register_driver(const struct net_driver *drv) {
+    active_driver = drv;
+}
+
+const struct net_driver *net_get_driver(void) {
+    return active_driver;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Network Interface State                                                     */
 /* -------------------------------------------------------------------------- */
 
 static struct netif slm_netif;
 static bool net_initialized = false;
 static bool dhcp_started = false;
+
+/* Auto-DHCP state (issue #197).
+ *
+ * Set to the sys_now() timestamp when dhcp_start() is called at boot.
+ * net_get_info() uses this to report NET_DHCP_PENDING vs BOUND.
+ * When the elapsed time exceeds NET_DHCP_TIMEOUT_MS without a bind,
+ * net_poll() stops DHCP, restores the static IP, and flips status to
+ * NET_DHCP_FAILED so the system has a working IP even if no DHCP
+ * server answered.
+ */
+#ifndef NET_DHCP_TIMEOUT_DEFAULT_MS
+#define NET_DHCP_TIMEOUT_DEFAULT_MS  10000
+#endif
+/* Runtime-adjustable so tests can force the fallback path in seconds
+ * rather than waiting the full default. Production callers don't need
+ * to touch this. */
+static uint32_t dhcp_timeout_ms = NET_DHCP_TIMEOUT_DEFAULT_MS;
+static uint32_t dhcp_start_time;
+static bool     dhcp_fallback_done;
+static uint32_t static_ip_fallback;
+static uint32_t static_nm_fallback;
+static uint32_t static_gw_fallback;
+
+void net_set_dhcp_timeout_ms(uint32_t ms) {
+    /* Accept any value including 0 — tests use 0 to trigger fallback
+     * immediately on the next check. Production callers should use
+     * a reasonable value; 0 disables the wait entirely. */
+    dhcp_timeout_ms = ms;
+}
+
+uint32_t net_get_dhcp_timeout_ms(void) {
+    return dhcp_timeout_ms;
+}
+
+/*
+ * Check whether DHCP has exceeded its bind timeout and fall back to
+ * the static IP if so. Called from net_poll() once per poll; also
+ * callable directly from tests that want to deterministically
+ * trigger fallback without racing the recv path. Returns 1 if the
+ * fallback fired, 0 if no action was taken.
+ */
+int net_dhcp_check_timeout(void) {
+    if (!dhcp_started || dhcp_fallback_done)
+        return 0;
+    if (dhcp_supplied_address(&slm_netif))
+        return 0;
+
+    uint32_t elapsed = sys_now() - dhcp_start_time;
+    if (elapsed < dhcp_timeout_ms)
+        return 0;
+
+    WARN("DHCP timeout after %u ms; falling back to static IP", elapsed);
+    dhcp_stop(&slm_netif);
+    dhcp_started = false;
+    dhcp_fallback_done = true;
+    ip4_addr_t ip, nm, gw;
+    ip.addr = static_ip_fallback;
+    nm.addr = static_nm_fallback;
+    gw.addr = static_gw_fallback;
+    netif_set_addr(&slm_netif, &ip, &nm, &gw);
+    return 1;
+}
 
 /* Receive buffer for packet processing */
 static uint8_t rx_packet_buf[1518];
@@ -76,7 +152,7 @@ static err_t slm_netif_output(struct netif *netif, struct pbuf *p) {
         len += q->len;
     }
 
-    int ret = virtio_net_send(tx_buf, len);
+    int ret = active_driver->send(tx_buf, len);
     if (ret < 0) {
         net_statistics.tx_errors++;
         return ERR_IF;
@@ -91,8 +167,8 @@ static err_t slm_netif_output(struct netif *netif, struct pbuf *p) {
  * Initialize the network interface
  */
 static err_t slm_netif_init(struct netif *netif) {
-    /* Get MAC address from VirtIO-Net driver */
-    virtio_net_get_mac(netif->hwaddr);
+    /* Get MAC address from network driver */
+    active_driver->get_mac(netif->hwaddr);
     netif->hwaddr_len = 6;
 
     /* Set interface name */
@@ -106,8 +182,8 @@ static err_t slm_netif_init(struct netif *netif) {
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
                    NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP;
 
-    /* Link is up if VirtIO-Net reports it */
-    if (virtio_net_link_up()) {
+    /* Link is up if driver reports it */
+    if (active_driver->link_status()) {
         netif->flags |= NETIF_FLAG_LINK_UP;
     }
 
@@ -184,9 +260,13 @@ int net_init(void) {
 
     INFO("Initializing network subsystem...");
 
-    /* Initialize VirtIO-Net driver */
-    if (virtio_net_init() < 0) {
-        ERROR("Failed to initialize VirtIO-Net driver");
+    /* Initialize the registered network driver */
+    if (!active_driver) {
+        ERROR("No network driver registered");
+        return -1;
+    }
+    if (active_driver->init() < 0) {
+        ERROR("Failed to initialize network driver: %s", active_driver->name);
         return -1;
     }
 
@@ -218,6 +298,11 @@ int net_init(void) {
         raw_bind(ping_pcb, IP_ADDR_ANY);
     }
 
+    /* Remember static fallback IP for DHCP timeout recovery */
+    static_ip_fallback = ipaddr.addr;
+    static_nm_fallback = netmask.addr;
+    static_gw_fallback = gateway.addr;
+
     net_initialized = true;
 
     /* Log initial configuration */
@@ -226,6 +311,24 @@ int net_init(void) {
     net_ip_to_str(gateway.addr, gw_str);
     net_ip_to_str(netmask.addr, nm_str);
     INFO("Network configured: IP=%s GW=%s Mask=%s", ip_str, gw_str, nm_str);
+
+    /* Auto-start DHCP at boot (issue #197).
+     *
+     * Gated on NET_DHCP_AT_BOOT (CMake option, default ON). Non-blocking:
+     * lwIP runs the DHCP DISCOVER/OFFER/REQUEST/ACK handshake in the
+     * background as long as net_poll() is called regularly. If no DHCP
+     * server answers within NET_DHCP_TIMEOUT_MS, net_poll() falls back
+     * to the static IP configured above. */
+#if defined(NET_DHCP_AT_BOOT)
+    if (dhcp_start(&slm_netif) == ERR_OK) {
+        dhcp_started = true;
+        dhcp_start_time = sys_now();
+        dhcp_fallback_done = false;
+        INFO("DHCP client started at boot (timeout %u ms)", dhcp_timeout_ms);
+    } else {
+        WARN("DHCP auto-start failed; using static IP");
+    }
+#endif
 
     return 0;
 }
@@ -236,7 +339,7 @@ void net_poll(void) {
     }
 
     /* Check for received packets */
-    int len = virtio_net_recv(rx_packet_buf, sizeof(rx_packet_buf));
+    int len = active_driver->recv(rx_packet_buf, sizeof(rx_packet_buf));
     if (len > 0) {
         /* Create pbuf for the received packet */
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_RAM);
@@ -258,6 +361,9 @@ void net_poll(void) {
     /* Process lwIP timers */
     sys_check_timeouts();
 
+    /* DHCP auto-start timeout fallback (issue #197) */
+    net_dhcp_check_timeout();
+
     /* Check ping timeout (1 second) */
     if (ping_state.pending) {
         uint32_t now = sys_now();
@@ -276,12 +382,23 @@ int net_get_info(struct net_info *info) {
         return -1;
     }
 
-    virtio_net_get_mac(info->mac);
+    active_driver->get_mac(info->mac);
     info->ip_addr = slm_netif.ip_addr.addr;
     info->netmask = slm_netif.netmask.addr;
     info->gateway = slm_netif.gw.addr;
     info->link_up = (slm_netif.flags & NETIF_FLAG_LINK_UP) != 0;
     info->dhcp_enabled = dhcp_started;
+
+    /* Derive detailed DHCP status from lwIP's view of the netif */
+    if (dhcp_started) {
+        info->dhcp_status = dhcp_supplied_address(&slm_netif)
+            ? NET_DHCP_BOUND
+            : NET_DHCP_PENDING;
+    } else if (dhcp_fallback_done) {
+        info->dhcp_status = NET_DHCP_FAILED;
+    } else {
+        info->dhcp_status = NET_DHCP_DISABLED;
+    }
 
     return 0;
 }
@@ -320,6 +437,8 @@ int net_enable_dhcp(void) {
     if (!dhcp_started) {
         if (dhcp_start(&slm_netif) == ERR_OK) {
             dhcp_started = true;
+            dhcp_start_time = sys_now();
+            dhcp_fallback_done = false;
             INFO("DHCP client started");
         } else {
             ERROR("Failed to start DHCP client");
@@ -399,6 +518,10 @@ void net_get_stats(struct net_stats *stats) {
     if (stats) {
         *stats = net_statistics;
     }
+}
+
+void net_stats_rx_no_buffers_inc(void) {
+    net_statistics.rx_no_buffers++;
 }
 
 char *net_ip_to_str(uint32_t addr, char *buf) {

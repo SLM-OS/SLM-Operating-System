@@ -87,6 +87,16 @@ struct virtio_net_config {
 /*
  * Every packet sent/received has this header prepended.
  * When not using checksum offload or GSO, most fields are zero.
+ *
+ * Per virtio 1.1 spec §5.1.6.1, the header is 12 bytes when either
+ * VIRTIO_NET_F_MRG_RXBUF or VIRTIO_F_VERSION_1 is negotiated. We
+ * negotiate VERSION_1 unconditionally (it is required for modern
+ * virtio), so the 12-byte layout applies and num_buffers must be
+ * included. Using a 10-byte header with VERSION_1 causes QEMU to
+ * interpret the first 2 bytes of packet data as part of the header,
+ * silently mangling outgoing frames and producing corrupt received
+ * frames — before this fix, TX succeeded at the ring level but QEMU
+ * dropped every packet before it reached the netdev backend.
  */
 struct virtio_net_hdr {
     uint8_t  flags;         /* VIRTIO_NET_HDR_F_* */
@@ -95,8 +105,16 @@ struct virtio_net_hdr {
     uint16_t gso_size;      /* GSO segment size */
     uint16_t csum_start;    /* Checksum start offset */
     uint16_t csum_offset;   /* Checksum offset from csum_start */
-    /* If VIRTIO_NET_F_MRG_RXBUF, followed by: uint16_t num_buffers; */
+    uint16_t num_buffers;   /* RX only: merged buffer count (VERSION_1/MRG_RXBUF) */
 } __attribute__((packed));
+
+/* Regression guard: header must be exactly 12 bytes when VIRTIO_F_VERSION_1
+ * is negotiated. Dropping num_buffers or reordering fields breaks every
+ * TX/RX silently (QEMU reads 2 bytes of packet data as part of the
+ * header). Caught a real regression during multi-platform networking
+ * expansion — this assertion keeps it dead. */
+static_assert(sizeof(struct virtio_net_hdr) == 12,
+              "virtio_net_hdr must be 12 bytes for VIRTIO_F_VERSION_1");
 
 /* Header flags */
 #define VIRTIO_NET_HDR_F_NEEDS_CSUM     (1 << 0)    /* Checksum needed */
@@ -150,13 +168,13 @@ struct virtio_net_device {
     uint8_t *rx_buffers;
     uint16_t rx_buffer_count;
 
-    /* Statistics */
-    uint64_t rx_packets;
-    uint64_t tx_packets;
-    uint64_t rx_bytes;
-    uint64_t tx_bytes;
-    uint64_t rx_errors;
-    uint64_t tx_errors;
+    /* Packet/byte/error stats are kept exclusively in lwIP's
+     * net_statistics (kernel/net/lwip_slm.c) and surfaced via
+     * net_get_stats() / netstat. The driver does not maintain a
+     * parallel set — driver-level and lwIP-level counts used to
+     * diverge rarely and confusingly, the driver-level ones were
+     * never read, and parity with the x86-64 PCI driver required
+     * one or the other to go. */
 };
 
 /* -------------------------------------------------------------------------- */
@@ -214,14 +232,11 @@ void virtio_net_get_mac(uint8_t mac[6]);
 bool virtio_net_link_up(void);
 
 /**
- * Get driver statistics
+ * Register the VirtIO-Net MMIO driver with the net_driver abstraction.
  *
- * @param rx_pkts   Output: received packets
- * @param tx_pkts   Output: transmitted packets
- * @param rx_bytes  Output: received bytes
- * @param tx_bytes  Output: transmitted bytes
+ * Called during platform init (before net_init) so the lwIP adapter
+ * can call through the driver ops instead of directly.
  */
-void virtio_net_get_stats(uint64_t *rx_pkts, uint64_t *tx_pkts,
-                          uint64_t *rx_bytes, uint64_t *tx_bytes);
+void virtio_net_register(void);
 
 #endif /* VIRTIO_NET_H */

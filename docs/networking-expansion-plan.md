@@ -2,16 +2,31 @@
 
 Extend networking from QEMU-only to all four supported platforms.
 
-**Current state:** Full TCP/IP networking (lwIP + VirtIO-Net) works on
-QEMU ARM64. Pi 5, Jetson, and x86-64 have zero networking support. The
-lwIP stack and network API are platform-agnostic — only the NIC driver
-is platform-specific.
+**Current state (April 2026):** Phases 1 and 2 have **landed**. Full
+TCP/IP networking (lwIP + VirtIO-Net) works on both QEMU ARM64 and
+QEMU x86-64 via the `net_driver` abstraction. Pi 5 (#202) and Jetson
+(#25) still need platform-specific NIC drivers — Phases 3 and 4
+below, blocked only on hardware access.
 
-**Last updated:** 15 April 2026
+Landed work summary (commits on branch `worktree-networking-no-hw`):
+- `struct net_driver` abstraction (`kernel/include/net_driver.h`)
+- x86-64 VirtIO-Net PCI driver (`kernel/drivers/virtio_net_pci.c`)
+- `ENABLE_NETWORKING` CMake option (default ON for QEMU_VIRT and X86_64)
+- Auto-DHCP at boot with static-IP fallback (closes #197)
+- Live integration tests covering init, TX, RX, DHCP BOUND and FAILED
+
+Follow-up tickets filed:
+- #200 — Scheduler + integration test flakiness (pre-existing, observed during this work)
+- #201 — Shell message when DHCP binds
+- #202 — Pi 5 BCM GENET driver (Phase 3 below)
+- #203 — DMA coherence verification for real-hardware NICs
+- #25 (updated) — Jetson EQOS driver (Phase 4 below)
+
+**Last updated:** 16 April 2026
 
 ---
 
-## Phase 1: Decouple Networking from QEMU (No Hardware Needed)
+## Phase 1: Decouple Networking from QEMU (No Hardware Needed) ✅ LANDED
 
 The networking stack is currently hardcoded to QEMU via build gates and
 VirtIO MMIO slot probing. This phase makes the stack platform-agnostic
@@ -83,7 +98,7 @@ implementation.
 
 ---
 
-## Phase 2: x86-64 Networking (No Hardware Needed)
+## Phase 2: x86-64 Networking (No Hardware Needed) ✅ LANDED
 
 x86-64 is the highest-value target because it can be fully developed and
 tested in QEMU with no hardware access.
@@ -143,7 +158,7 @@ All testable in QEMU:
 
 ---
 
-## Phase 3: Pi 5 Networking (Hardware Required)
+## Phase 3: Pi 5 Networking (Hardware Required — tracked in #202)
 
 The Pi 5 has a Broadcom BCM54213PE Gigabit Ethernet PHY connected
 via the BCM GENET (Gigabit Ethernet Network Interface Controller)
@@ -185,7 +200,7 @@ virtqueues but with Broadcom-specific register layouts.
 
 ---
 
-## Phase 4: Jetson Networking (Hardware Required)
+## Phase 4: Jetson Networking (Hardware Required — tracked in #25)
 
 The Jetson Orin Nano Developer Kit carrier board has an onboard Realtek
 RTL8111 PCIe Gigabit Ethernet controller. Alternatively, USB Ethernet

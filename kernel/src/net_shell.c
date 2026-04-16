@@ -150,9 +150,18 @@ static int cmd_ifconfig(int argc, char *argv[]) {
         net_ip_to_str(info.netmask, nm_str);
         net_ip_to_str(info.gateway, gw_str);
 
+        const char *dhcp_label;
+        switch (info.dhcp_status) {
+        case NET_DHCP_BOUND:    dhcp_label = "DHCP(bound)";    break;
+        case NET_DHCP_PENDING:  dhcp_label = "DHCP(pending)";  break;
+        case NET_DHCP_FAILED:   dhcp_label = "DHCP(failed)";   break;
+        case NET_DHCP_DISABLED:
+        default:                dhcp_label = "STATIC";         break;
+        }
+
         uart_printf("sl0: flags=%s%s\n",
                    info.link_up ? "UP," : "DOWN,",
-                   info.dhcp_enabled ? "DHCP" : "STATIC");
+                   dhcp_label);
         uart_printf("     ether %02x:%02x:%02x:%02x:%02x:%02x\n",
                    info.mac[0], info.mac[1], info.mac[2],
                    info.mac[3], info.mac[4], info.mac[5]);
@@ -284,9 +293,10 @@ static int cmd_netstat(int argc, char *argv[]) {
     uart_printf("  TX packets: %llu  bytes: %llu\n",
                (unsigned long long)stats.tx_packets,
                (unsigned long long)stats.tx_bytes);
-    uart_printf("  RX errors:  %llu  dropped: %llu\n",
+    uart_printf("  RX errors:  %llu  dropped: %llu  no_buffers: %llu\n",
                (unsigned long long)stats.rx_errors,
-               (unsigned long long)stats.rx_dropped);
+               (unsigned long long)stats.rx_dropped,
+               (unsigned long long)stats.rx_no_buffers);
     uart_printf("  TX errors:  %llu\n",
                (unsigned long long)stats.tx_errors);
 

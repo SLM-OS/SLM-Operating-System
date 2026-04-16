@@ -7,11 +7,13 @@
 
 #include "virtio_net.h"
 #include "virtio.h"
+#include "net.h"            /* net_stats_rx_no_buffers_inc */
+#include "net_driver.h"
 #include "pmm.h"
 #include "debug.h"
-#include "gic.h"
 #include "spinlock.h"
 #include "cache.h"
+#include "arch/sys_arch.h"  /* sys_now() for wall-clock TX timeout */
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -56,8 +58,8 @@ uintptr_t virtio_probe(unsigned int slot, uint32_t expected_type) {
     }
 
     if (device_id != expected_type) {
-        INFO("VirtIO slot %u: device type %u (expected %u)",
-             slot, device_id, expected_type);
+        /* Mismatch is normal when scanning slots — caller decides
+         * whether absence is an error. */
         return 0;
     }
 
@@ -264,6 +266,7 @@ static void post_rx_buffers(void) {
                                     RX_BUFFER_SIZE, true /* device writes */);
         if (ret < 0) {
             WARN("Failed to post RX buffer %d", i);
+            net_stats_rx_no_buffers_inc();
             break;
         }
     }
@@ -277,15 +280,40 @@ int virtio_net_init(void) {
 
     INFO("Initializing VirtIO-Net driver...");
 
-    /* Probe for network device */
-    uintptr_t base = virtio_probe(VIRTIO_NET_SLOT, VIRTIO_DEVICE_NET);
+    /* Probe for network device.
+     *
+     * QEMU's virt machine assigns virtio-mmio devices to slots in
+     * declaration order, but the slot the network device lands in
+     * depends on what other -device flags were passed. Scan all 32
+     * slots for the first one whose device_id matches VIRTIO_DEVICE_NET
+     * rather than hard-coding slot 0. */
+    uintptr_t base = 0;
+    unsigned net_slot = 0;
+    for (unsigned slot = 0; slot < 32; slot++) {
+        base = virtio_probe(slot, VIRTIO_DEVICE_NET);
+        if (base != 0) {
+            net_slot = slot;
+            break;
+        }
+    }
     if (base == 0) {
         ERROR("VirtIO-Net device not found");
         return -1;
     }
 
     netdev.base = base;
-    INFO("VirtIO-Net found at 0x%lx", (unsigned long)base);
+    uint32_t version = virtio_read32(base, VIRTIO_MMIO_VERSION);
+    INFO("VirtIO-Net found at 0x%lx (mmio version=%u)",
+         (unsigned long)base, version);
+    if (version < 2) {
+        /* Modern (v2+) MMIO uses QUEUE_DESC/AVAIL/USED + QUEUE_READY.
+         * Legacy (v1) uses QUEUE_PFN. Our driver only implements modern;
+         * fail loudly so the user sees "force-legacy=false missing"
+         * rather than a silent TX timeout later. See Makefile:QEMU_NET. */
+        ERROR("VirtIO-Net legacy (v1) MMIO not supported. "
+              "QEMU needs '-global virtio-mmio.force-legacy=false'");
+        return -1;
+    }
 
     /* Reset device */
     virtio_write32(base, VIRTIO_MMIO_STATUS, 0);
@@ -382,9 +410,18 @@ int virtio_net_init(void) {
     /* Post receive buffers */
     post_rx_buffers();
 
-    /* Register IRQ handler */
-    gic_set_priority(VIRTIO_NET_IRQ, 0x80);
-    gic_enable_irq(VIRTIO_NET_IRQ);
+    /* IRQ dispatch is not wired up yet. Enabling the IRQ at the GIC
+     * without a dispatch entry in kernel/arch/arm64/exceptions.c
+     * would cause every virtio-net config change / TX completion to
+     * log "Unhandled IRQ %u" and consume GIC resources for no benefit,
+     * because both TX and RX are driven by polling (net_poll). IRQ
+     * setup will land together with IRQ-driven TX completion — see
+     * #204. The handler itself (virtio_net_irq_handler below) is kept
+     * so the dispatch wiring is a one-line change when #204 lands.
+     *
+     * Parenthetical: computing the slot-derived IRQ is still useful
+     * commentary for future work. */
+    (void)VIRTIO_DEVICE_IRQ(net_slot);
 
     initialized = true;
     INFO("VirtIO-Net driver initialized");
@@ -417,32 +454,45 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
     if (desc_idx < 0) {
         spin_unlock(&net_lock);
         ERROR("TX queue full");
-        netdev.tx_errors++;
         return -1;
     }
 
     /* Notify device */
     virtqueue_kick(&netdev.tx_vq);
 
-    /* Wait for completion (synchronous TX) */
-    int timeout = 100000;
-    while (timeout > 0) {
+    /* Wait for completion (synchronous TX).
+     *
+     * Use a relaxed-spin loop with yields rather than tight CPU spin —
+     * under host CPU quota (e.g. systemd-run --scope CPUQuota=200%
+     * with -smp cores=4) the QEMU vcpu and IO threads share host
+     * cores, and a tight spin can starve the IO thread that processes
+     * the virtqueue kick. WFE/PAUSE lets the host scheduler interleave
+     * threads and the device responds in microseconds.
+     *
+     * Bound by wall-clock time (VIRTIO_NET_TX_TIMEOUT_MS) rather than
+     * iteration count — the previous 10M-iteration bound was magic
+     * and behaved differently under different host loads. #204 tracks
+     * moving to IRQ-driven completion which eliminates this busy wait. */
+    uint32_t tx_start = sys_now();
+    bool timed_out = true;
+    while ((sys_now() - tx_start) < VIRTIO_NET_TX_TIMEOUT_MS) {
         uint32_t used_len;
         if (virtqueue_get_buf(&netdev.tx_vq, &used_len) >= 0) {
+            timed_out = false;
             break;
         }
-        timeout--;
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        __asm__ volatile("yield" ::: "memory");
+#endif
     }
 
-    if (timeout == 0) {
-        WARN("TX timeout");
-        netdev.tx_errors++;
+    if (timed_out) {
+        WARN("TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
         spin_unlock(&net_lock);
         return -1;
     }
-
-    netdev.tx_packets++;
-    netdev.tx_bytes += len;
 
     spin_unlock(&net_lock);
     return 0;
@@ -475,18 +525,20 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
 
     if (packet_len > max_len) {
         WARN("RX packet too large: %u > %u", packet_len, max_len);
-        netdev.rx_errors++;
         packet_len = max_len;
     }
 
     memcpy(buffer, packet, packet_len);
 
     /* Re-post the buffer */
-    virtqueue_add_buf(&netdev.rx_vq, rx_buf, RX_BUFFER_SIZE, true);
+    if (virtqueue_add_buf(&netdev.rx_vq, rx_buf, RX_BUFFER_SIZE, true) < 0) {
+        /* Descriptor pool exhausted — the buffer we just received is
+         * about to be orphaned because the device has no free slot
+         * to write future packets into. Makes the drop visible in
+         * netstat. */
+        net_stats_rx_no_buffers_inc();
+    }
     virtqueue_kick(&netdev.rx_vq);
-
-    netdev.rx_packets++;
-    netdev.rx_bytes += packet_len;
 
     spin_unlock(&net_lock);
     return packet_len;
@@ -529,10 +581,27 @@ bool virtio_net_link_up(void) {
     return initialized && netdev.link_up;
 }
 
-void virtio_net_get_stats(uint64_t *rx_pkts, uint64_t *tx_pkts,
-                          uint64_t *rx_bytes, uint64_t *tx_bytes) {
-    if (rx_pkts) *rx_pkts = netdev.rx_packets;
-    if (tx_pkts) *tx_pkts = netdev.tx_packets;
-    if (rx_bytes) *rx_bytes = netdev.rx_bytes;
-    if (tx_bytes) *tx_bytes = netdev.tx_bytes;
+/* -------------------------------------------------------------------------- */
+/* net_driver Interface                                                        */
+/* -------------------------------------------------------------------------- */
+
+static int virtio_net_drv_send(const void *buf, size_t len) {
+    return virtio_net_send((const uint8_t *)buf, (uint32_t)len);
+}
+
+static int virtio_net_drv_recv(void *buf, size_t max_len) {
+    return virtio_net_recv((uint8_t *)buf, (uint32_t)max_len);
+}
+
+static const struct net_driver virtio_net_mmio_driver = {
+    .name        = "virtio-net-mmio",
+    .init        = virtio_net_init,
+    .send        = virtio_net_drv_send,
+    .recv        = virtio_net_drv_recv,
+    .get_mac     = virtio_net_get_mac,
+    .link_status = virtio_net_link_up,
+};
+
+void virtio_net_register(void) {
+    net_register_driver(&virtio_net_mmio_driver);
 }

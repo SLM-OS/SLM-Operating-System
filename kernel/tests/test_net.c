@@ -8,16 +8,22 @@
 
 #include "unity.h"
 
-#if defined(PLATFORM_QEMU_VIRT)
+#if defined(ENABLE_NETWORKING)
 #include "../include/net.h"
-#include "../include/virtio.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 
-/* Forward declarations for the virtqueue helpers under test. */
+/*
+ * Virtqueue tests use the MMIO driver's virtqueue_add_buf/get_buf
+ * implementations which are only compiled for QEMU_VIRT. The x86-64
+ * PCI driver has its own virtqueue code with the same ring format.
+ */
+#if defined(PLATFORM_QEMU_VIRT)
+#include "../include/virtio.h"
 int virtqueue_add_buf(struct virtqueue *vq, void *addr, uint32_t len, bool write);
 int virtqueue_get_buf(struct virtqueue *vq, uint32_t *len);
+#endif
 
 /* ============================================================================
  * IP Address Utility Tests
@@ -285,8 +291,35 @@ static void test_net_get_stats_safety(void)
     /* Sanity: dropped packets should never exceed received packets */
     TEST_ASSERT_TRUE(stats.rx_dropped <= stats.rx_packets);
 
+    /* rx_no_buffers should be zero in steady state. Bounded sanity
+     * check (non-negative is implicit in unsigned) + upper bound to
+     * catch runaway counters from a buggy driver re-post path. */
+    TEST_ASSERT_TRUE(stats.rx_no_buffers < 1000000);
+
     /* Should not crash with NULL (just doesn't write) */
     net_get_stats(NULL);
+}
+
+/*
+ * Test: rx_no_buffers counter is zero under normal init + idle poll.
+ *
+ * Guards against a regression where the re-post path in recv()
+ * starts silently leaking descriptors (which would eventually force
+ * net_stats_rx_no_buffers_inc() to fire when the pool is drained).
+ * Run this after the live DHCP + ping test_driver_tx so the RX path
+ * has seen real traffic.
+ */
+static void test_net_rx_no_buffers_clean(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    struct net_stats stats;
+    net_get_stats(&stats);
+    TEST_ASSERT_MESSAGE(stats.rx_no_buffers == 0,
+        "rx_no_buffers should be 0 in steady state — driver leaked descriptors?");
 }
 
 /*
@@ -314,7 +347,12 @@ static void test_net_stats_initial_values(void)
  * and the cache-maintenance calls added for DRV-H2. On QEMU ARM64 the
  * cache helpers resolve to a dmb, so these tests also verify that the
  * barrier calls do not corrupt the ring state.
+ *
+ * These tests link against the MMIO driver's virtqueue functions, so they
+ * are only compiled for PLATFORM_QEMU_VIRT.
  * ============================================================================ */
+
+#if defined(PLATFORM_QEMU_VIRT)
 
 #define TVQ_SIZE 16
 
@@ -499,7 +537,287 @@ static void test_virtqueue_add_two_distinct_buffers(void)
     TEST_ASSERT_EQUAL_UINT16(TVQ_SIZE - 2, vq.num_free);
 }
 
-#endif /* PLATFORM_QEMU_VIRT */
+#endif /* PLATFORM_QEMU_VIRT — virtqueue tests */
+
+/* ============================================================================
+ * Live Driver Integration Tests
+ *
+ * These tests exercise the full net_init() path against the live VirtIO-Net
+ * device QEMU exposes. They are the no-hardware equivalent of running
+ * `net init && ifconfig && ping 10.0.2.2` in the shell — they prove that
+ * the registered driver, the lwIP netif adapter, and the configured QEMU
+ * netdev all line up. Skipped automatically when no network device is
+ * present (e.g. someone running the test kernel in QEMU with -nic none).
+ * ============================================================================ */
+
+#include "net_driver.h"
+#include "arch/sys_arch.h"  /* sys_now() for DHCP timeout polling */
+
+/*
+ * Test: a network driver was registered during platform init.
+ *
+ * Verifies the platform-init path in main.c calls
+ * virtio_net_register() (QEMU_VIRT) or virtio_net_pci_register() (X86_64).
+ */
+static void test_net_driver_registered(void)
+{
+    const struct net_driver *drv = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv);
+    TEST_ASSERT_NOT_NULL(drv->name);
+    TEST_ASSERT_NOT_NULL(drv->init);
+    TEST_ASSERT_NOT_NULL(drv->send);
+    TEST_ASSERT_NOT_NULL(drv->recv);
+    TEST_ASSERT_NOT_NULL(drv->get_mac);
+    TEST_ASSERT_NOT_NULL(drv->link_status);
+}
+
+/*
+ * Test: net_init() brings the driver up and configures the netif.
+ *
+ * On QEMU with virtio-net attached, this should succeed: the driver
+ * probes the device, negotiates features, sets up virtqueues, and the
+ * lwIP netif comes up with the default 10.0.2.15 address.
+ *
+ * If the device is missing (no -netdev / -device on the QEMU command
+ * line) the driver init returns -1 and we skip rather than fail —
+ * this lets the test kernel run in environments without networking.
+ */
+static void test_net_init_live(void)
+{
+    if (net_is_up()) {
+        TEST_PASS();  /* Already initialized by a previous test run */
+        return;
+    }
+
+    int ret = net_init();
+    if (ret != 0) {
+        TEST_IGNORE_MESSAGE("VirtIO-Net device not present — skipping live test");
+        return;
+    }
+
+    TEST_ASSERT_TRUE(net_is_up());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+
+    /* MAC address must be non-zero (driver should have read it from
+     * the device's config space, or fallen back to a locally-administered
+     * address). */
+    bool any_nonzero = false;
+    for (int i = 0; i < 6; i++) {
+        if (info.mac[i] != 0) { any_nonzero = true; break; }
+    }
+    TEST_ASSERT_MESSAGE(any_nonzero, "MAC address should be non-zero after init");
+
+    /* Default IP should be QEMU's 10.0.2.15 (set by net_init before DHCP) */
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+
+    /* Link should be up since QEMU emulates an always-connected link */
+    TEST_ASSERT_TRUE(info.link_up);
+}
+
+/*
+ * Test: net_poll() runs without crashing after init.
+ *
+ * Polls the registered driver's recv path and lwIP timers. With no
+ * traffic on the wire there should be no packets, but the call must
+ * not fault — this catches NULL-deref bugs in the receive loop, lwIP
+ * timer callbacks, and the netif input chain.
+ */
+static void test_net_poll_after_init(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Poll a few times — exercises virtqueue empty path + lwIP timers */
+    for (int i = 0; i < 16; i++) {
+        net_poll();
+    }
+    TEST_PASS();
+}
+
+/*
+ * Test: auto-DHCP starts during net_init when NET_DHCP_AT_BOOT is set
+ * (issue #197).
+ *
+ * After net_init(), the dhcp_enabled flag should be true and
+ * dhcp_status should be PENDING (we haven't polled enough for a bind
+ * yet) or BOUND (if QEMU's SLIRP answered the DISCOVER immediately,
+ * which it often does). If the flag is OFF at build time, status is
+ * DISABLED and dhcp_enabled is false.
+ */
+static void test_net_auto_dhcp_at_boot(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+
+#if defined(NET_DHCP_AT_BOOT)
+    TEST_ASSERT_MESSAGE(info.dhcp_enabled,
+        "NET_DHCP_AT_BOOT=ON: dhcp_enabled should be true after net_init");
+    TEST_ASSERT_MESSAGE(
+        info.dhcp_status == NET_DHCP_PENDING ||
+        info.dhcp_status == NET_DHCP_BOUND,
+        "NET_DHCP_AT_BOOT=ON: dhcp_status should be PENDING or BOUND");
+#else
+    TEST_ASSERT_MESSAGE(!info.dhcp_enabled,
+        "NET_DHCP_AT_BOOT=OFF: dhcp_enabled should be false");
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_DISABLED, info.dhcp_status);
+#endif
+}
+
+/*
+ * Test: DHCP binds an address under QEMU SLIRP.
+ *
+ * QEMU user-mode networking includes a built-in DHCP server at
+ * 10.0.2.2 that hands out 10.0.2.15 by default. After enough poll
+ * iterations to complete the DISCOVER/OFFER/REQUEST/ACK handshake,
+ * dhcp_status should transition from PENDING to BOUND. We poll for
+ * up to 2 seconds (net_poll drives lwIP timers and the driver recv).
+ *
+ * Skipped if DHCP wasn't auto-started at boot.
+ */
+static void test_net_dhcp_binds(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    struct net_info info;
+    net_get_info(&info);
+    if (!info.dhcp_enabled) {
+        TEST_IGNORE_MESSAGE("DHCP not enabled (NET_DHCP_AT_BOOT=OFF)");
+        return;
+    }
+
+    /* Poll for up to 2 seconds waiting for a bind. Using elapsed time
+     * rather than absolute compare avoids uint32_t wrap issues. */
+    uint32_t start = sys_now();
+    while ((sys_now() - start) < 2000) {
+        net_poll();
+        net_get_info(&info);
+        if (info.dhcp_status == NET_DHCP_BOUND)
+            break;
+    }
+
+    if (info.dhcp_status != NET_DHCP_BOUND) {
+        TEST_IGNORE_MESSAGE("DHCP did not bind within 2s "
+                            "(QEMU SLIRP may not be active)");
+        return;
+    }
+
+    /* QEMU SLIRP default lease is 10.0.2.15 */
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+}
+
+/*
+ * Test: DHCP fallback restores static IP when no server answers
+ * (issue #197, auto-DHCP fallback path).
+ *
+ * Can't force SLIRP to not answer, so this exercises the fallback
+ * logic with a different approach: call net_set_dhcp_timeout_ms(1)
+ * to shrink the timeout below the polling cadence, then re-enable
+ * DHCP. The first net_poll() after reaches the timeout check before
+ * lwIP has a chance to bind, so dhcp_status transitions to
+ * NET_DHCP_FAILED and the static 10.0.2.15 is restored.
+ *
+ * After the test, the timeout is restored to the default so
+ * subsequent tests aren't affected.
+ */
+static void test_net_dhcp_fallback(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Save the current timeout to restore at end */
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    /* Reset to static IP first — this stops any in-progress DHCP so
+     * the re-enable below has fresh state. net_set_static_ip also
+     * clears the netif's DHCP binding, so dhcp_supplied_address()
+     * returns false on the next poll. */
+    int ret = net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                net_ip4_addr(255, 255, 255, 0),
+                                net_ip4_addr(10, 0, 2, 2));
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Re-enable DHCP with a 0 ms timeout — the fallback check will
+     * fire immediately on the next call, before SLIRP has any chance
+     * to respond. Avoids the recv → OFFER → bind race that makes
+     * millisecond timeouts non-deterministic in CI. */
+    net_set_dhcp_timeout_ms(0);
+    ret = net_enable_dhcp();
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Direct call — bypasses net_poll()'s recv path so SLIRP can't
+     * bind DHCP before the timeout check runs. */
+    int fired = net_dhcp_check_timeout();
+    TEST_ASSERT_MESSAGE(fired == 1,
+        "net_dhcp_check_timeout should fire fallback with 0 ms timeout");
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_MESSAGE(info.dhcp_status == NET_DHCP_FAILED,
+        "fallback should transition dhcp_status to NET_DHCP_FAILED");
+    TEST_ASSERT_MESSAGE(!info.dhcp_enabled,
+        "dhcp_enabled should be cleared after fallback");
+    TEST_ASSERT_MESSAGE(info.ip_addr == net_ip4_addr(10, 0, 2, 15),
+        "fallback should restore the original static IP");
+
+    /* Restore default timeout for subsequent tests */
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: a raw frame transmits through the registered driver's send path.
+ *
+ * Bypasses lwIP and ARP entirely — pushes a single Ethernet broadcast
+ * frame directly into the driver's send() ops. The ARM64 MMIO driver
+ * and x86-64 PCI driver both implement send() synchronously: push the
+ * descriptor onto the TX virtqueue, kick, wait for used-ring completion.
+ * A return value of 0 proves the full TX path works: net_driver.send →
+ * virtqueue add_buf → device kick → used-ring completion.
+ *
+ * Uses a minimum-size (64-byte) Ethernet frame with broadcast dest, our
+ * MAC as source, EtherType 0x9000 (Loopback test, RFC1042 §19) for the
+ * payload — chosen because it doesn't depend on IP/ARP setup. The
+ * actual byte content doesn't matter to the device; we only verify
+ * that the descriptor cycle completes.
+ */
+static void test_net_driver_tx(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv);
+
+    uint8_t frame[64] = {0};
+    /* Destination MAC: broadcast */
+    for (int i = 0; i < 6; i++) frame[i] = 0xFF;
+    /* Source MAC: ours */
+    drv->get_mac(&frame[6]);
+    /* EtherType: 0x9000 (Loopback) — recognized but unused by SLIRP */
+    frame[12] = 0x90;
+    frame[13] = 0x00;
+    /* Remaining 50 bytes are zero payload */
+
+    int ret = drv->send(frame, sizeof(frame));
+    TEST_ASSERT_MESSAGE(ret == 0, "driver send() should succeed");
+}
+
+#endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
  * Test Suite Entry Point
@@ -507,7 +825,7 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 
 int test_suite_net(void)
 {
-#if defined(PLATFORM_QEMU_VIRT)
+#if defined(ENABLE_NETWORKING)
     UNITY_BEGIN();
 
     /* IP address utility tests */
@@ -529,7 +847,8 @@ int test_suite_net(void)
     RUN_TEST(test_net_get_stats_safety);
     RUN_TEST(test_net_stats_initial_values);
 
-    /* Virtqueue descriptor ring tests (DRV-H2 regression coverage) */
+    /* Virtqueue descriptor ring tests (MMIO driver, QEMU_VIRT only) */
+#if defined(PLATFORM_QEMU_VIRT)
     RUN_TEST(test_virtqueue_add_buf_basic);
     RUN_TEST(test_virtqueue_add_buf_read_only);
     RUN_TEST(test_virtqueue_add_buf_exhaustion);
@@ -537,10 +856,22 @@ int test_suite_net(void)
     RUN_TEST(test_virtqueue_get_buf_empty);
     RUN_TEST(test_virtqueue_get_buf_returns_device_len);
     RUN_TEST(test_virtqueue_add_two_distinct_buffers);
+#endif
+
+    /* Live integration tests against QEMU's virtio-net device.
+     * Order: driver_registered → init_live → poll → DHCP → driver_tx. */
+    RUN_TEST(test_net_driver_registered);
+    RUN_TEST(test_net_init_live);
+    RUN_TEST(test_net_poll_after_init);
+    RUN_TEST(test_net_auto_dhcp_at_boot);
+    RUN_TEST(test_net_dhcp_binds);
+    RUN_TEST(test_net_dhcp_fallback);
+    RUN_TEST(test_net_driver_tx);
+    RUN_TEST(test_net_rx_no_buffers_clean);
 
     return UNITY_END();
 #else
-    /* Networking not available on non-QEMU platforms */
+    /* Networking not available on this platform */
     return 0;
 #endif
 }

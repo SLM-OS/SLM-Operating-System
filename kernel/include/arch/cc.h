@@ -16,7 +16,7 @@
 /* Byte Order                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/* AArch64 is little-endian by default */
+/* Both AArch64 and x86-64 are little-endian */
 #ifndef BYTE_ORDER
 #define BYTE_ORDER LITTLE_ENDIAN
 #endif
@@ -29,10 +29,17 @@
 #define LWIP_PLATFORM_DIAG(x) do { uart_printf x; } while(0)
 
 /* Platform-specific assertion - use our kernel panic */
+#if defined(PLATFORM_X86_64)
+#define LWIP_PLATFORM_ASSERT(x) do { \
+    uart_printf("lwIP ASSERT: %s at %s:%d\n", (x), __FILE__, __LINE__); \
+    while(1) { __asm__ volatile("cli; hlt"); } \
+} while(0)
+#else
 #define LWIP_PLATFORM_ASSERT(x) do { \
     uart_printf("lwIP ASSERT: %s at %s:%d\n", (x), __FILE__, __LINE__); \
     while(1) { __asm__ volatile("wfi"); } \
 } while(0)
+#endif
 
 /* -------------------------------------------------------------------------- */
 /* Standard Library Headers                                                    */

@@ -48,6 +48,21 @@ void net_poll(void);
 /* -------------------------------------------------------------------------- */
 
 /**
+ * DHCP client state.
+ *
+ * NET_DHCP_DISABLED: DHCP not running (static IP in use)
+ * NET_DHCP_PENDING:  DHCP started, no lease yet
+ * NET_DHCP_BOUND:    DHCP bound an address; ip_addr is from DHCP server
+ * NET_DHCP_FAILED:   DHCP timed out or failed; fell back to static IP
+ */
+enum net_dhcp_status {
+    NET_DHCP_DISABLED = 0,
+    NET_DHCP_PENDING  = 1,
+    NET_DHCP_BOUND    = 2,
+    NET_DHCP_FAILED   = 3,
+};
+
+/**
  * Network interface information
  */
 struct net_info {
@@ -56,7 +71,8 @@ struct net_info {
     uint32_t netmask;       /* Subnet mask (network byte order) */
     uint32_t gateway;       /* Default gateway (network byte order) */
     bool     link_up;       /* Physical link status */
-    bool     dhcp_enabled;  /* DHCP in use */
+    bool     dhcp_enabled;  /* DHCP in use (any active state) */
+    enum net_dhcp_status dhcp_status;  /* Detailed DHCP state */
 };
 
 /**
@@ -85,6 +101,34 @@ int net_set_static_ip(uint32_t ip_addr, uint32_t netmask, uint32_t gateway);
  * @return  0 on success, negative on error
  */
 int net_enable_dhcp(void);
+
+/**
+ * Override the DHCP bind timeout at runtime.
+ *
+ * Primarily for tests that want to exercise the auto-DHCP fallback
+ * path without waiting the full default (10 s). Passing 0 restores
+ * the compile-time default (NET_DHCP_TIMEOUT_DEFAULT_MS).
+ *
+ * @param ms  New timeout in milliseconds
+ */
+void net_set_dhcp_timeout_ms(uint32_t ms);
+
+/**
+ * Query the current DHCP bind timeout.
+ *
+ * @return  Timeout in milliseconds
+ */
+uint32_t net_get_dhcp_timeout_ms(void);
+
+/**
+ * Check whether DHCP has exceeded its bind timeout, and fall back to
+ * the static IP configuration if so. net_poll() calls this once per
+ * poll; tests can call it directly to deterministically trigger
+ * fallback without racing the packet receive path.
+ *
+ * @return  1 if fallback fired, 0 if no action was taken
+ */
+int net_dhcp_check_timeout(void);
 
 /* -------------------------------------------------------------------------- */
 /* ICMP (Ping) Support                                                         */
@@ -127,7 +171,8 @@ struct net_stats {
     uint64_t tx_bytes;      /* Bytes transmitted */
     uint64_t rx_errors;     /* Receive errors */
     uint64_t tx_errors;     /* Transmit errors */
-    uint64_t rx_dropped;    /* Packets dropped (no buffer) */
+    uint64_t rx_dropped;    /* Packets dropped at lwIP layer (pbuf alloc fail, input reject) */
+    uint64_t rx_no_buffers; /* Packets dropped by driver: RX virtqueue post failed (no descriptor) */
 };
 
 /**
@@ -136,6 +181,16 @@ struct net_stats {
  * @param stats  Pointer to structure to fill
  */
 void net_get_stats(struct net_stats *stats);
+
+/**
+ * Bump the rx_no_buffers counter from a driver.
+ *
+ * Called by NIC drivers when they fail to post an RX descriptor —
+ * typically during re-post after recv, if the virtqueue descriptor
+ * pool is exhausted under sustained burst traffic. Makes the
+ * underlying silent drop visible in `netstat`.
+ */
+void net_stats_rx_no_buffers_inc(void);
 
 /* -------------------------------------------------------------------------- */
 /* Utility Functions                                                           */
