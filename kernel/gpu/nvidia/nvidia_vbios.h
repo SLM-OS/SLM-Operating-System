@@ -39,6 +39,17 @@
  * a dump-side framing error. */
 #define NVIDIA_VBIOS_MAX_SIZE  (1024u * 1024u)
 
+/* Upper bound on the BIT-signature scan inside `find_bit_signature`.
+ * BIT has always been observed inside the first 8 KB of a well-formed
+ * VBIOS; 64 KB is a defensive cap to keep the linear scan bounded on
+ * pathological or truncated dumps. Exposed here so any future parser
+ * that wants to share the same cap can pick it up. (#148) */
+#define VBIOS_BIT_SCAN_MAX_OFFSET  (64u * 1024u)
+
+/* On-wire endianness: every field this parser reads is little-endian —
+ * see `kernel/gpu/nvidia/nv_endian.h` for the shared helpers and the
+ * compile-time assertion that pins us to an LE host. */
+
 /* BIT entry IDs used by this codebase. The general parser handles
  * any ID — these are the ones we care about today. */
 #define VBIOS_BIT_ID_I             0x49    /* 'I': Init scripts */

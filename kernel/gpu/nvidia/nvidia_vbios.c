@@ -74,6 +74,16 @@
 #define NPDE_OFF_SUB_IMG_LEN    0x08    /* u16 — sub-image length, 512-byte blocks */
 #define NPDE_OFF_LAST_IMAGE     0x0A    /* u8  — bit 7 = last (preferred over PCIR) */
 
+/* Sub-image header layout (the 0x55AA-prefixed or NPDS-prefixed block).
+ * PCI_SUBIMG_PCIR_PTR points at a u16 byte-offset (relative to the
+ * sub-image start) where the PCIR or NPDS record lives. The sub-image
+ * header itself is otherwise opaque — vendor-specific bytes live in
+ * the 0x03..0x17 range for legacy x86 INT 18h stubs. The header must
+ * be at least PCI_SUBIMG_HDR_MIN_SIZE bytes to fit the u16 pointer
+ * plus the 0x55AA magic. (#161) */
+#define PCI_SUBIMG_PCIR_PTR         0x18u
+#define PCI_SUBIMG_HDR_MIN_SIZE     0x1Au
+
 /* Falcon ucode descriptor table (pointed to by the BIT 'p' entry's
  * u32 FalconUcodeTablePtr, after the nova-core arithmetic).
  *
@@ -139,18 +149,13 @@
 /* BCRT30 RSA-3K signature block length (when present). */
 #define FALCON_SIGNATURE_SIZE           384
 
-static inline uint16_t rd16(const uint8_t *p)
-{
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
+/* Byte-swap helpers live in nv_endian.h; the NVIDIA on-wire formats
+ * parsed here are all little-endian (see the header for the full list
+ * and the _Static_assert that keeps BE hosts out of this build). */
+#include "nv_endian.h"
 
-static inline uint32_t rd32(const uint8_t *p)
-{
-    return (uint32_t)p[0]
-         | ((uint32_t)p[1] <<  8)
-         | ((uint32_t)p[2] << 16)
-         | ((uint32_t)p[3] << 24);
-}
+#define rd16 nv_rd16le
+#define rd32 nv_rd32le
 
 /*
  * Walk the PCIR/NPDS sub-image chain starting at offset 0 of @image.
@@ -181,7 +186,7 @@ static int walk_subimages(const uint8_t *image, size_t image_size,
          * case when the Linux kernel's `/sys/.../rom` interface
          * truncates at PCIR LAST and the rest of the chain isn't
          * served. */
-        if (off + 0x1A > image_size) {
+        if (off + PCI_SUBIMG_HDR_MIN_SIZE > image_size) {
             if (i == 0) return -1;
             break;
         }
@@ -194,9 +199,9 @@ static int walk_subimages(const uint8_t *image, size_t image_size,
                        image[off+1] != PCI_ROM_SIG_1))
             return -1;
 
-        uint16_t pcir_ptr = rd16(&image[off + 0x18]);
+        uint16_t pcir_ptr = rd16(&image[off + PCI_SUBIMG_PCIR_PTR]);
         size_t pcir = (size_t)off + pcir_ptr;
-        if (pcir + 0x18 > image_size) {
+        if (pcir + PCI_SUBIMG_PCIR_PTR > image_size) {
             if (i == 0) return -1;
             break;
         }
@@ -280,10 +285,12 @@ static int find_bit_signature(const uint8_t *image, size_t image_size,
 {
     if (image_size < 64)
         return -1;
-    /* Cap the search at 64 KB — BIT has never been observed past
-     * that, and scanning the whole ROM wastes cycles on large
-     * dumps. */
-    size_t limit = image_size > 64 * 1024 ? 64 * 1024 : image_size;
+    /* Cap the search at VBIOS_BIT_SCAN_MAX_OFFSET — BIT has never
+     * been observed past 64 KB and scanning the whole ROM wastes
+     * cycles on large dumps. (#148) */
+    size_t limit = image_size > VBIOS_BIT_SCAN_MAX_OFFSET
+                   ? VBIOS_BIT_SCAN_MAX_OFFSET
+                   : image_size;
     for (size_t i = 0; i + 8 < limit; i++) {
         if (image[i]   == BIT_SIG_0 &&
             image[i+1] == BIT_SIG_1 &&

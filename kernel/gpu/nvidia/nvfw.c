@@ -13,15 +13,11 @@
 #include <stdbool.h>
 
 #include "nvfw.h"
+#include "nv_endian.h"
 
-/* All nvfw fields are little-endian on disk. */
-static inline uint32_t rd32le(const uint8_t *p)
-{
-    return (uint32_t)p[0]
-         | ((uint32_t)p[1] <<  8)
-         | ((uint32_t)p[2] << 16)
-         | ((uint32_t)p[3] << 24);
-}
+/* Shared LE helper — every nvfw field is little-endian on disk
+ * (see nv_endian.h for the full list and the _Static_assert). */
+#define rd32le nv_rd32le
 
 /* Bounds-checked u32 read from @bytes at @off. Returns 0 on success
  * and writes *out. Returns -1 if the 4-byte read would run past end. */

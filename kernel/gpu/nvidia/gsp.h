@@ -84,6 +84,18 @@ struct gsp_platform_ops {
      * base — identical between discrete (via PCI ECAM) and
      * integrated (via MMIO 0x17000000 on Jetson).
      *
+     * **Implementations MUST use `volatile` accesses** when reading
+     * and writing the MMIO region. The GPU's side has invisible
+     * side-effects on every read (pops interrupt-source registers,
+     * advances Falcon DMA state, etc.), and the compiler is
+     * otherwise free to coalesce two reads of CPUCTL into one or
+     * to hoist writes out of a polling loop. Every in-tree backend
+     * today (`x86_gsp_bar0_read32` in `nvidia_gsp_platform.c`,
+     * `linux_gsp_bar0_read32` in the gsp-harness linux_platform.c)
+     * casts the mapped BAR0 pointer through `volatile uint32_t *`
+     * for exactly this reason. A future backend that drops the
+     * qualifier would introduce a hard-to-diagnose hang. (#163)
+     *
      * read32/write32 MUST NOT cache. Writes must be serialized
      * against subsequent reads (x86: no-op; Jetson: DMB SY between
      * successive MMIO writes to distinct registers).
@@ -145,6 +157,36 @@ struct gsp_platform_ops {
 /* Current active platform ops. Set by the platform init before
  * calling gsp_init(); treated as read-only after. */
 extern const struct gsp_platform_ops *gsp_platform;
+
+/*
+ * gsp_dma_alloc_checked — wrapper around `gsp_platform->dma_alloc`
+ * that verifies the returned IOVA satisfies the requested alignment.
+ *
+ * Ampere's Falcon DMA silently truncates DMATRFBASE when bits 7:0 are
+ * non-zero; the current Linux and PMM backends both return aligned
+ * IOVAs, but the contract is not asserted. A future backend (mmap-
+ * based test harness, hypervisor passthrough, etc.) that returns a
+ * misaligned IOVA would produce a "Falcon ucode never halts" hang
+ * with no obvious diagnostic. This helper turns that failure mode
+ * into an early return with GSP_ERR_NOMEM, which the caller already
+ * knows how to handle. (#170)
+ *
+ * Returns the virtual address on success, NULL on failure (including
+ * alignment violation). Writes *out_iova on success.
+ */
+static inline void *gsp_dma_alloc_checked(size_t size, size_t align,
+                                          uint64_t *out_iova)
+{
+    if (!gsp_platform || !gsp_platform->dma_alloc)
+        return (void *)0;
+    void *va = gsp_platform->dma_alloc(size, align, out_iova);
+    if (!va) return (void *)0;
+    if (out_iova && (*out_iova & (align - 1u))) {
+        gsp_platform->dma_free(va, size);
+        return (void *)0;
+    }
+    return va;
+}
 
 /* ---- Public boot API ---- */
 

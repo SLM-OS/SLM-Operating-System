@@ -11,6 +11,7 @@
 #include "gsp.h"
 #include "falcon.h"
 #include "nvfw.h"
+#include "nv_endian.h"
 #include "nvidia_vbios.h"
 
 #include <string.h>
@@ -145,21 +146,11 @@ int gsp_bringup_select_sig_index(uint32_t fuse_reg, uint16_t sig_versions,
     return (int)idx;
 }
 
-static inline void wr32le(uint8_t *p, uint32_t v)
-{
-    p[0] = v & 0xffu;
-    p[1] = (v >> 8) & 0xffu;
-    p[2] = (v >> 16) & 0xffu;
-    p[3] = (v >> 24) & 0xffu;
-}
-
-static inline uint32_t rd32le(const uint8_t *p)
-{
-    return (uint32_t)p[0]
-         | ((uint32_t)p[1] << 8)
-         | ((uint32_t)p[2] << 16)
-         | ((uint32_t)p[3] << 24);
-}
+/* Shared LE helpers — bringup.c writes raw ucode payloads via DMA
+ * buffers that get memcpy'd into Falcon MMIO; see nv_endian.h for the
+ * file-wide LE contract and the _Static_assert that enforces it. */
+#define wr32le nv_wr32le
+#define rd32le nv_rd32le
 
 /* Generic DMEMMAPPER patcher — takes @init_cmd so callers can probe
  * SB (0x19) or other lifecycle commands alongside the default FRTS
@@ -300,11 +291,11 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     size_t imem_aligned = round_up(b->fwsec_imem_size, FALCON_DMA_CHUNK);
     size_t dmem_aligned = round_up(b->fwsec_dmem_size, FALCON_DMA_CHUNK);
 
-    b->dma_imem_va = gsp_platform->dma_alloc(imem_aligned, 256, &b->dma_imem_iova);
+    b->dma_imem_va = gsp_dma_alloc_checked(imem_aligned, 256, &b->dma_imem_iova);
     if (!b->dma_imem_va) return -1;
     b->dma_imem_size = imem_aligned;
 
-    b->dma_dmem_va = gsp_platform->dma_alloc(dmem_aligned, 256, &b->dma_dmem_iova);
+    b->dma_dmem_va = gsp_dma_alloc_checked(dmem_aligned, 256, &b->dma_dmem_iova);
     if (!b->dma_dmem_va) {
         gsp_platform->dma_free(b->dma_imem_va, b->dma_imem_size);
         b->dma_imem_va = NULL;
@@ -614,8 +605,8 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
 
     /* ---- Phase 3: allocate DMA-mapped mutable copy of data section ---- */
     b->last_error_phase = 101;
-    b->dma_booter_va = gsp_platform->dma_alloc(img.data_size, 256,
-                                                &b->dma_booter_iova);
+    b->dma_booter_va = gsp_dma_alloc_checked(img.data_size, 256,
+                                              &b->dma_booter_iova);
     if (!b->dma_booter_va) return GSP_ERR_NOMEM;
     b->dma_booter_size = img.data_size;
     memcpy(b->dma_booter_va, img.bytes + img.data_offset, img.data_size);
@@ -649,9 +640,9 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * capture as a diagnostic). Filling WprMeta correctly requires
      * the GSP-RM ELF radix3 setup that lives in E4. */
     b->last_error_phase = 102;
-    b->dma_wpr_meta_va = gsp_platform->dma_alloc(WPR_META_BUFFER_SIZE,
-                                                  4096,
-                                                  &b->dma_wpr_meta_iova);
+    b->dma_wpr_meta_va = gsp_dma_alloc_checked(WPR_META_BUFFER_SIZE,
+                                                4096,
+                                                &b->dma_wpr_meta_iova);
     if (!b->dma_wpr_meta_va) { rc = GSP_ERR_NOMEM; goto fail; }
     b->dma_wpr_meta_size = WPR_META_BUFFER_SIZE;
     memset(b->dma_wpr_meta_va, 0, WPR_META_BUFFER_SIZE);

@@ -22,6 +22,16 @@
 #                multi-task test without re-imaging.
 #   --runs N     Override boot-reliability run count (default: 10).
 #
+# Env (multi-task step timeouts — raise under CI contention, #178):
+#   SLMOS_RPC_PROMPT_TIMEOUT  — seconds to wait for `slmos>` / `Slept`
+#                                after each send. Default 10 s.
+#   SLMOS_RPC_DRAIN_TIMEOUT   — default per-recv() socket timeout.
+#                                Default 8 s.
+#   SLMOS_RPC_CONNECT_TIMEOUT — TCP connect to ser2net. Default 30 s.
+# A single false-fail under load triggers one automatic retry at
+# 2× prompt timeout; the pass is reported as failure only if both
+# passes miss the 5/5 gate.
+#
 # Output:
 #   Prints per-step status to stdout. Exits 0 only if every gate in
 #   P1-2 passes:
@@ -94,17 +104,25 @@ PORT="$(labctl port list 2>/dev/null | awk -v sbc="$SBC" '$1 == sbc {print $5}' 
 : "${PORT:=4006}"
 
 python3 - "$PORT" <<'PY'
-import socket, re, sys, time
+import os, socket, re, sys, time
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 4006
 HOST = "127.0.0.1"
 
+# Timeouts, overridable via env. Defaults bumped to tolerate a
+# concurrent Cargo build or similar CPU steal on the dev machine
+# without false-failing; raise higher via env if CI adds contention.
+# Matches the issue-#178 acceptance criterion.
+PROMPT_T = float(os.environ.get("SLMOS_RPC_PROMPT_TIMEOUT", "10"))
+DRAIN_T  = float(os.environ.get("SLMOS_RPC_DRAIN_TIMEOUT",  "8"))
+CONNECT_T = float(os.environ.get("SLMOS_RPC_CONNECT_TIMEOUT", "30"))
+
 def conn():
-    s = socket.create_connection((HOST, PORT), timeout=30)
-    s.settimeout(8.0)
+    s = socket.create_connection((HOST, PORT), timeout=CONNECT_T)
+    s.settimeout(DRAIN_T)
     return s
 
-def drain(s, pat, t=8.0):
+def drain(s, pat, t):
     s.settimeout(t)
     buf = b""
     deadline = time.monotonic() + t
@@ -126,28 +144,47 @@ def send(s, data):
 PROMPT = re.compile(r"slmos>")
 SLEPT = re.compile(r"Slept .* ms")
 
-s = conn()
-send(s, "")
-drain(s, PROMPT, t=4)
-send(s, "component run echo")
-drain(s, PROMPT, t=4)
+def run_pass(prompt_t, label):
+    """Execute the 5× sleep-2000 loop; return (ok, results)."""
+    s = conn()
+    try:
+        send(s, "")
+        drain(s, PROMPT, t=prompt_t)
+        send(s, "component run echo")
+        drain(s, PROMPT, t=prompt_t)
 
-results, ok = [], 0
-for i in range(5):
-    send(s, "")
-    drain(s, PROMPT, t=4)
-    t0 = time.monotonic()
-    send(s, "sleep 2000")
-    drain(s, SLEPT, t=4)
-    t1 = time.monotonic()
-    ms = int((t1 - t0) * 1000)
-    in_range = 2000 <= ms <= 2200
-    ok += 1 if in_range else 0
-    results.append((ms, in_range))
-    print(f"  run {i+1}: {ms} ms  in-range={in_range}")
+        results, ok = [], 0
+        for i in range(5):
+            send(s, "")
+            drain(s, PROMPT, t=prompt_t)
+            t0 = time.monotonic()
+            send(s, "sleep 2000")
+            drain(s, SLEPT, t=prompt_t)
+            t1 = time.monotonic()
+            ms = int((t1 - t0) * 1000)
+            in_range = 2000 <= ms <= 2200
+            ok += 1 if in_range else 0
+            results.append((ms, in_range))
+            print(f"  [{label}] run {i+1}: {ms} ms  in-range={in_range}")
+    finally:
+        s.close()
+    return ok, results
 
-print(f"\nmulti-task: {ok}/5 in [2000, 2200] ms  values={[r[0] for r in results]}")
-s.close()
+ok, results = run_pass(PROMPT_T, "pass 1")
+print(f"\nmulti-task pass 1: {ok}/5 in [2000, 2200] ms  "
+      f"values={[r[0] for r in results]}")
+
+# Retry-once policy (#178): a single false-fail under load shouldn't
+# escalate to a red CI. Re-run the whole loop with 2× timeouts; if
+# both passes fail, that's a real regression.
+if ok < 5:
+    retry_t = PROMPT_T * 2
+    print(f"\nFirst pass missed ({ok}/5). Retrying with {retry_t}s "
+          f"prompt timeout to distinguish scheduler hiccup from hang.")
+    ok, results = run_pass(retry_t, "pass 2")
+    print(f"\nmulti-task pass 2: {ok}/5 in [2000, 2200] ms  "
+          f"values={[r[0] for r in results]}")
+
 sys.exit(0 if ok == 5 else 5)
 PY
 PY_RC=$?

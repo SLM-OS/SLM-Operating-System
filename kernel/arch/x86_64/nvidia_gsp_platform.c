@@ -203,6 +203,17 @@ static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
     if (copy_len == 0 || copy_len > max) copy_len = max;
     if (copy_len > PCI_ROM_SIZE_MAX)     copy_len = PCI_ROM_SIZE_MAX;
 
+    /* Invariant check (#149): the clamp chain above keeps us inside
+     * the caller's buffer AND the hard 2 MB cap. A future edit that
+     * reordered, removed, or misordered one of those clamps would
+     * let us read past `rom[]` or write past `dst[]`. Fail closed if
+     * the invariant is ever violated. */
+    if (copy_len > max || copy_len > PCI_ROM_SIZE_MAX) {
+        pci_config_write32(bus, dev, func, PCI_CFG_ROM_BAR, saved_rom);
+        pci_config_write32(bus, dev, func, PCI_CFG_COMMAND,  saved_cmd);
+        return -1;
+    }
+
     for (size_t i = 0; i < copy_len; i++)
         dst[i] = rom[i];
 
