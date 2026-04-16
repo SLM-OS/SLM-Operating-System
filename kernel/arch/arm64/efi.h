@@ -12,6 +12,7 @@
 #ifndef EFI_H
 #define EFI_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -120,6 +121,36 @@ typedef struct {
 } efi_boot_services_t;
 
 /*
+ * EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL — minimal vtable for `con_out`
+ *
+ * UEFI strings are UTF-16 (CHAR16). Only `output_string` is used by the
+ * EFI stub; the other fields are padded to preserve the vtable layout
+ * so the function-pointer offsets match what UEFI publishes.
+ *
+ * Reference: UEFI Spec v2.10 §12.4 EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.
+ */
+typedef uint16_t efi_char16_t;
+struct efi_simple_text_output_protocol;   /* forward decl for the typedef */
+
+typedef efi_status_t (*efi_text_string_fn)(
+    struct efi_simple_text_output_protocol *self,
+    efi_char16_t *string
+);
+
+typedef struct efi_simple_text_output_protocol {
+    void                 *reset;             /* +0x00 */
+    efi_text_string_fn    output_string;     /* +0x08 */
+    void                 *test_string;       /* +0x10 */
+    void                 *query_mode;        /* +0x18 */
+    void                 *set_mode;          /* +0x20 */
+    void                 *set_attribute;     /* +0x28 */
+    void                 *clear_screen;      /* +0x30 */
+    void                 *set_cursor_pos;    /* +0x38 */
+    void                 *enable_cursor;     /* +0x40 */
+    void                 *mode;              /* +0x48 */
+} efi_simple_text_output_protocol_t;
+
+/*
  * EFI_SYSTEM_TABLE — main EFI table passed at entry
  *
  * Layout verified against EDK2 UefiSpec.h and Linux efi.h for ARM64.
@@ -132,7 +163,7 @@ typedef struct {
     efi_handle_t         con_in_handle;      /* +0x28 */
     void                *con_in;             /* +0x30 */
     efi_handle_t         con_out_handle;     /* +0x38 */
-    void                *con_out;            /* +0x40 */
+    efi_simple_text_output_protocol_t *con_out; /* +0x40 */
     efi_handle_t         stderr_handle;      /* +0x48 */
     void                *std_err;            /* +0x50 */
     void                *runtime_services;   /* +0x58 */
@@ -140,6 +171,44 @@ typedef struct {
     uint64_t             nr_tables;          /* +0x68 */
     efi_config_table_t  *config_table;       /* +0x70 */
 } efi_system_table_t;
+
+/*
+ * Compile-time layout tests — run on every kernel build for every
+ * platform (including QEMU ARM64 in `make test`), so an accidental
+ * field reorder in one of these structs breaks the build rather than
+ * silently mis-indexing UEFI memory at run time. The offsets are the
+ * UEFI spec v2.10 values that EDK2 publishes; the EFI stub and boot.S
+ * rely on them. Kept here at the header level so every translation
+ * unit that includes efi.h enforces them.
+ */
+static_assert(offsetof(efi_system_table_t, con_out) == 0x40,
+              "UEFI spec: EFI_SYSTEM_TABLE.ConOut at offset 0x40");
+static_assert(offsetof(efi_system_table_t, boot_services) == 0x60,
+              "UEFI spec: EFI_SYSTEM_TABLE.BootServices at offset 0x60");
+static_assert(offsetof(efi_system_table_t, nr_tables) == 0x68,
+              "UEFI spec: EFI_SYSTEM_TABLE.NumberOfTableEntries at 0x68");
+static_assert(offsetof(efi_system_table_t, config_table) == 0x70,
+              "UEFI spec: EFI_SYSTEM_TABLE.ConfigurationTable at 0x70");
+
+static_assert(offsetof(efi_boot_services_t, get_memory_map) == 0x38,
+              "UEFI spec: GetMemoryMap at 0x38 in BootServices");
+static_assert(offsetof(efi_boot_services_t, allocate_pool) == 0x40,
+              "UEFI spec: AllocatePool at 0x40 in BootServices");
+static_assert(offsetof(efi_boot_services_t, free_pool) == 0x48,
+              "UEFI spec: FreePool at 0x48 in BootServices");
+static_assert(offsetof(efi_boot_services_t, exit_boot_services) == 0xE8,
+              "UEFI spec: ExitBootServices at 0xE8 in BootServices");
+
+static_assert(offsetof(efi_simple_text_output_protocol_t, reset) == 0x00,
+              "UEFI spec: SimpleTextOutput.Reset at 0x00");
+static_assert(offsetof(efi_simple_text_output_protocol_t, output_string)
+                  == 0x08,
+              "UEFI spec: SimpleTextOutput.OutputString at 0x08");
+static_assert(offsetof(efi_simple_text_output_protocol_t, test_string)
+                  == 0x10,
+              "UEFI spec: SimpleTextOutput.TestString at 0x10");
+static_assert(offsetof(efi_simple_text_output_protocol_t, mode) == 0x48,
+              "UEFI spec: SimpleTextOutput.Mode at 0x48");
 
 /*
  * Compare two EFI GUIDs for equality.

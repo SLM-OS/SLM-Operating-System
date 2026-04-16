@@ -21,6 +21,39 @@
 static void efi_disable_mmu(void);
 
 /*
+ * Trace helper — prints a UTF-16 literal via UEFI's ConOut protocol.
+ *
+ * Only usable before ExitBootServices (per UEFI spec §7.4.1, all Boot
+ * Services including ConOut become invalid after EBS succeeds). Compiled
+ * in unconditionally — the four or five call sites cost ~80 bytes of
+ * .rodata and a handful of indirect calls, well inside the ~1 MB image
+ * budget, and give the only viable post-deploy visibility into where the
+ * stub progresses before the machine is handed over.
+ *
+ * UEFI expects CHAR16 strings (UTF-16). String literals use `u"..."`.
+ * Each line terminates with "\r\n" since UEFI's text console treats
+ * "\n" alone as line-feed without carriage return, producing the
+ * staircase effect seen in some early bring-ups.
+ */
+static void efi_print(efi_system_table_t *sys_table, const efi_char16_t *str)
+{
+    if (sys_table == NULL || sys_table->con_out == NULL) {
+        return;
+    }
+    if (sys_table->con_out->output_string == NULL) {
+        return;
+    }
+    /*
+     * Cast away const on the string pointer: UEFI's EFI_TEXT_STRING
+     * prototype is non-const even though the call is read-only (the
+     * spec treats String as IN). Safe in practice; the C-side const
+     * discipline is preserved on the caller above.
+     */
+    sys_table->con_out->output_string(sys_table->con_out,
+                                      (efi_char16_t *)str);
+}
+
+/*
  * Find the FDT (Device Tree) in the EFI configuration table.
  */
 static void *efi_find_fdt(efi_system_table_t *sys_table)
@@ -85,6 +118,10 @@ static efi_status_t efi_exit_boot(efi_handle_t handle,
         /*
          * Map key was stale. Re-call GetMemoryMap into the SAME buffer
          * (no new allocations allowed after failed ExitBootServices).
+         *
+         * NOTE: cannot TRACE() from here — `efi_exit_boot` doesn't have
+         * sys_table in scope; the caller will observe the retry branch
+         * through the status this function returns.
          */
         status = bs->get_memory_map(&map_size, map, &map_key,
                                     &desc_size, &desc_version);
@@ -202,20 +239,74 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
     void *fdt = NULL;
     efi_status_t status;
 
+    /*
+     * Trace markers — visible on UEFI's console (and therefore on the
+     * Jetson USB-C serial via TCU) because UEFI's ConOut is still alive
+     * here. Each marker is a distinct letter so the last one observed
+     * on the wire localizes the failure without needing a debugger.
+     * See docs/jetson-uefi-direct-result.md §"Key findings" for why
+     * direct UARTC MMIO isn't a viable tracing path from this context.
+     */
+    static const efi_char16_t m_entry[]     = u"[slmos] A efi_entry\r\n";
+    static const efi_char16_t m_find_done[] = u"[slmos] B find_fdt done\r\n";
+    static const efi_char16_t m_pre_ebs[]   = u"[slmos] C calling ExitBootServices\r\n";
+    static const efi_char16_t m_ebs_fail[]  = u"[slmos] ! ExitBootServices failed\r\n";
+    static const efi_char16_t m_post_ebs[]  = u"[slmos] D ExitBootServices returned\r\n";
+    static const efi_char16_t m_pre_mmu[]   = u"[slmos] E calling disable_mmu\r\n";
+    static const efi_char16_t m_pre_ret[]   = u"[slmos] F returning fdt\r\n";
+
+    efi_print(sys_table, m_entry);
+
     /* Find DTB in configuration table (must be done before ExitBootServices) */
     fdt = efi_find_fdt(sys_table);
+    efi_print(sys_table, m_find_done);
 
-    /* Exit boot services — takes over the machine */
+    /* Exit boot services — takes over the machine.
+     *
+     * Per UEFI §7.4.1, Boot Services (including ConOut) become invalid
+     * after EBS succeeds. Still, the post-EBS markers D/E/F below test
+     * that premise: if the underlying UART driver is a plain MMIO loop
+     * rather than a protocol service, writes may keep landing on the
+     * serial wire even after EBS. Either outcome is information —
+     * markers appearing narrow the crash window; silence indicates
+     * the protocol teardown is real on this firmware.
+     */
+    efi_print(sys_table, m_pre_ebs);
     status = efi_exit_boot(handle, sys_table->boot_services);
 
     if (status != EFI_SUCCESS) {
-        /* ExitBootServices failed. Can't print (no UART yet).
-         * Return NULL to signal failure to boot.S. */
+        efi_print(sys_table, m_ebs_fail);
         return NULL;
     }
 
+    /*
+     * POST-EBS efi_print calls below are firmware-dependent.
+     *
+     * The ConOut protocol is formally invalid here (UEFI §7.4.1). On
+     * Jetson firmware v36.4.7 the protocol struct happens to still
+     * have stable vtable pointers — output_string survives the EBS
+     * teardown and D/E/F land on serial as no-ops (they also survive
+     * being called with MMU on/off). On other firmware the struct
+     * may be freed, zeroed, or left with dangling function pointers,
+     * in which case efi_print's NULL guards don't help — a non-NULL
+     * garbage `output_string` dereference would synchronously fault,
+     * go to UEFI's still-installed VBAR_EL1, and hang silently (the
+     * earlier `msr daifset, #0xF` in boot.S masks IRQ/FIQ/SError but
+     * does NOT mask synchronous exceptions).
+     *
+     * Kept as best-effort diagnostics — when they work, they pin down
+     * whether EBS succeeded and whether efi_disable_mmu ran; when they
+     * don't, the symptom is indistinguishable from the silent-hang
+     * blocker otherwise hit at BSS clear. Firmware-portable post-EBS
+     * tracing is a separate project (memory-scratch + DRAM retention
+     * across warm reset, or an SLM-OS VBAR_EL1 installed before EBS).
+     */
+    efi_print(sys_table, m_post_ebs);
+
     /* Disable MMU and clean caches for the normal boot path */
+    efi_print(sys_table, m_pre_mmu);
     efi_disable_mmu();
 
+    efi_print(sys_table, m_pre_ret);
     return fdt;
 }

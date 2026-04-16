@@ -196,75 +196,37 @@ real_start:
      *   4. Return the DTB pointer (or NULL) in x0
      */
     bl      efi_stub_entry
-    /* x0 now contains DTB pointer (or NULL). Continue with normal boot. */
+    /* x0 = DTB pointer (or NULL). Continue with normal boot.
+     *
+     * Mask ALL exceptions now. SLM-OS owns the machine after
+     * ExitBootServices, but UEFI's exception vectors are still
+     * installed (VBAR_EL2 still points at UEFI/ArmCpuDxe). If UEFI's
+     * DAIF state left interrupts unmasked and a stale timer IRQ
+     * fires during the Jetson post-EBS setup below, UEFI's handler
+     * runs into torn-down Boot Services and hangs silently. Masking
+     * here keeps the CPU quiet until `primary_cpu` installs the
+     * SLM-OS VBAR_EL1. The mask is done again at primary_cpu for
+     * the kexec path, which doesn't pass through this branch.
+     */
+    msr     daifset, #0xF
 
     /*
-     * Self-Relocating Trampoline
-     *
-     * UEFI loads the PE/COFF image at an arbitrary address, but the
-     * kernel is linked at 0x80000000. GOT entries and all absolute
-     * addresses in C code assume the link address. Copy the entire
-     * image to 0x80000000 and jump there so everything works.
-     *
-     * Preconditions (established by efi_stub_entry):
-     *   - ExitBootServices completed, we own all memory
-     *   - MMU disabled, caches cleaned and disabled
-     *   - x0 = DTB pointer (or NULL)
-     *
-     * The kexec path never reaches here (cbz x1 skips to .Lnot_efi).
+     * No self-relocation. UEFI typically does NOT hand SLM-OS the
+     * preferred `0x80000000` ImageBase on Jetson (the address is
+     * occupied by UEFI's own code/data), so the earlier trampoline
+     * both overwrote UEFI memory and `br`'d into a page that wasn't
+     * executable from the EFI-application context. Without a real
+     * `.reloc` section UEFI doesn't patch absolute references
+     * either, so physically moving the image to the link address
+     * didn't restore correctness — it just added a corruption pass.
+     * Continue at whatever address UEFI picked. The code that
+     * follows is PC-relative (ADRP+ADD, literal pools, direct
+     * B/BL) and runs correctly at any load address. Absolute
+     * references inside the wider kernel (function-pointer tables,
+     * globals) are a separate fix — approach B of the UEFI-direct
+     * plan (real `.reloc` + PIC early boot). See
+     * docs/jetson-uefi-direct-result.md.
      */
-    mov     x20, x0                /* Save DTB pointer */
-
-    adr     x5, _start             /* x5 = actual load address of _start */
-    ldr     x4, .Llink_address     /* x4 = 0x80000000 (link address) */
-    cmp     x5, x4
-    b.eq    .Lreloc_done           /* Already at link address, skip copy */
-
-    /* Copy image from UEFI load address to link address */
-    ldr     x8, .Limage_size       /* x8 = _kernel_file_size (text+rodata+data) */
-    mov     x2, x5                 /* x2 = source pointer */
-    mov     x1, x4                 /* x1 = destination pointer */
-    add     x3, x8, #15
-    and     x3, x3, #~15          /* x3 = size rounded up to 16-byte alignment */
-
-.Lreloc_copy:
-    cbz     x3, .Lreloc_copy_done
-    ldp     x6, x7, [x2], #16
-    stp     x6, x7, [x1], #16
-    sub     x3, x3, #16
-    b       .Lreloc_copy
-
-.Lreloc_copy_done:
-    /*
-     * Invalidate instruction cache. With MMU and D-cache off
-     * (SCTLR_EL2.C=0, I=0 from efi_disable_mmu), the stp writes went
-     * directly to memory. But stale I-cache lines from UEFI's previous
-     * execution at 0x80000000 must be flushed before we jump there.
-     *
-     * `ic ialluis` broadcasts to all PEs in the Inner Shareable domain.
-     * Use `dsb sy` (system-wide) rather than `dsb nsh` so the broadcast
-     * is ordered across CPUs on platforms where per-core L2 is not
-     * automatically coherent (Pi 5, Jetson). `nsh` would only order
-     * against this core's cache levels, which is insufficient here.
-     */
-    ic      ialluis
-    dsb     sy
-    isb
-
-    /*
-     * Jump to the copy at 0x80000000.
-     * Compute: target = link_address + (.Lpost_reloc - _start)
-     */
-    adr     x9, .Lpost_reloc
-    sub     x9, x9, x5            /* offset of .Lpost_reloc from _start */
-    add     x10, x4, x9           /* address in the copy */
-    br      x10                    /* absolute branch to relocated code */
-
-.Lpost_reloc:
-    /* Now running at link address. All GOT/absolute addresses are correct. */
-
-.Lreloc_done:
-    mov     x0, x20                /* Restore DTB pointer */
 
 .Lnot_efi:
 #endif /* !PLATFORM_RASPI5 */
@@ -608,7 +570,26 @@ real_start:
      *   E2H (bit 34): Enable EL1→EL2 register redirection
      *   TGE (bit 27): Trap General Exceptions to EL2
      *   RW  (bit 31): EL1 is AArch64
+     *
+     * Gated on `CurrentEL == EL2`. UEFI-direct boot on Jetson enters
+     * at EL1 (confirmed empirically: `mrs x10, hcr_el2` traps with a
+     * synchronous exception at the mrs PC post-EBS). Kexec-from-Linux
+     * enters at EL2 from TF-A and needs the VHE/timer setup here. At
+     * EL1, skip the whole block — hcr_el2, cnthp_ctl_el2, and the
+     * UARTC MMIO write are all EL2-gated; accessing them from EL1
+     * traps or silently hangs UEFI's still-active handler.
+     *
+     * CurrentEL[3:2] encodes the EL: 0b00=EL0, 0b01=EL1, 0b10=EL2,
+     * 0b11=EL3. Value 0b1000 = 8 means EL2.
+     *
+     * Re-writing HCR_EL2 at EL2 with the same bits (E2H|RW|TGE) that
+     * a VHE-aware Linux kexec left in place is architecturally a
+     * no-op store; no guard on the write is needed.
      */
+    mrs     x10, CurrentEL
+    cmp     x10, #8
+    b.ne    .Ljetson_post_setup            /* not EL2 → skip EL2 code */
+
     ldr     x10, =((1 << 34) | (1 << 31) | (1 << 27))
     msr     hcr_el2, x10
     isb
@@ -639,6 +620,8 @@ real_start:
     str     w12, [x11]
     mov     w12, #'\n'
     str     w12, [x11]
+
+.Ljetson_post_setup:
 #endif
 
     /*
@@ -783,10 +766,6 @@ secondary_spin:
     .quad   __bss_end - _start
 .Lvectors_offset:
     .quad   exception_vectors - _start
-.Llink_address:
-    .quad   0x80000000
-.Limage_size:
-    .quad   _kernel_file_size
 
 /*
  * Note: Exception vector table is now in vectors.S
