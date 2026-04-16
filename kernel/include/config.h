@@ -13,7 +13,7 @@
  * ============================================================================ */
 
 #define MAX_CPUS            8               /* Maximum supported CPU cores */
-#define MAX_TASKS           32              /* Maximum concurrent tasks */
+#define MAX_TASKS           64              /* Maximum concurrent tasks */
 
 /* ============================================================================
  * Memory Configuration
