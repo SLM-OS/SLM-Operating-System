@@ -15,13 +15,6 @@
 
 #include <string.h>
 
-#ifdef SLM_HOST_HARNESS
-#  include <stdio.h>
-#  define BRINGUP_DBG(msg) fprintf(stderr, "[BRINGUP] %s\n", msg)
-#else
-#  define BRINGUP_DBG(msg) ((void)0)
-#endif
-
 extern const struct gsp_platform_ops *gsp_platform;
 
 /* ---- WPR2 / FRTS region placement (Ampere, GA107 6 GB) ----
@@ -551,7 +544,6 @@ void gsp_bringup_free(struct gsp_bringup *b)
 
 int gsp_bringup_booter_load(struct gsp_bringup *b)
 {
-    BRINGUP_DBG("booter: entry");
     if (!b) return GSP_ERR_INVAL;
     if (!gsp_platform || !gsp_platform->dma_alloc || !gsp_platform->dma_free
         || !gsp_platform->firmware_get)
@@ -565,7 +557,6 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
 
     b->last_error_phase = 100;
 
-    BRINGUP_DBG("booter: phase 1 load+parse");
     /* ---- Phase 1: load + parse booter_load.bin ---- */
     struct gsp_firmware_blob blob;
     gsp_platform->firmware_get(GSP_FW_BOOTER_LOAD, &blob);
@@ -621,7 +612,6 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * did. last_error_phase still narrows the location. */
     int rc = GSP_OK;
 
-    BRINGUP_DBG("booter: phase 3 dma_alloc data section");
     /* ---- Phase 3: allocate DMA-mapped mutable copy of data section ---- */
     b->last_error_phase = 101;
     b->dma_booter_va = gsp_platform->dma_alloc(img.data_size, 256,
@@ -658,7 +648,6 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * booter will halt with an error code in MAILBOX0 (which we
      * capture as a diagnostic). Filling WprMeta correctly requires
      * the GSP-RM ELF radix3 setup that lives in E4. */
-    BRINGUP_DBG("booter: phase 4 dma_alloc wprmeta");
     b->last_error_phase = 102;
     b->dma_wpr_meta_va = gsp_platform->dma_alloc(WPR_META_BUFFER_SIZE,
                                                   4096,
@@ -692,7 +681,6 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     falcon_pre_pio_setup(&b->sec2_flcn);
 
     /* ---- Phase 6: PIO upload non-secure IMEM, secure IMEM, DMEM ---- */
-    BRINGUP_DBG("booter: phase 6 PIO upload");
     b->last_error_phase = 104;
     /* Round all PIO sizes up to 4-byte boundaries (the upload helper
      * requires u32 alignment). The Falcon's IMEM/DMEM is byte-addressed
@@ -722,7 +710,6 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
                                 0);
     if (rc < 0) goto fail;
 
-    BRINGUP_DBG("booter: phase 7 BROM program");
     /* ---- Phase 7: program SEC2 BROM ----
      * Order matters: PARAADDR, ENGIDMASK, UCODE_ID, then MOD_SEL last
      * (writing MOD_SEL kicks the BROM to verify everything queued). */
@@ -744,16 +731,13 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     gsp_platform->write32(NV_PSEC2_BASE + FALCON_MAILBOX1,
                           (uint32_t)(b->dma_wpr_meta_iova >> 32));
 
-    BRINGUP_DBG("booter: phase 9 STARTCPU");
     /* ---- Phase 9: STARTCPU + halt poll ---- */
     b->last_error_phase = 106;
     falcon_start(&b->sec2_flcn, b->booter_boot_addr);
-    BRINGUP_DBG("booter: phase 9 wait_halted");
     if (falcon_wait_halted(&b->sec2_flcn, FALCON_HALT_TIMEOUT_US) < 0) {
         rc = GSP_ERR_TIMEOUT;
         goto fail;
     }
-    BRINGUP_DBG("booter: phase 9 HALTED ok");
 
     /* Booter halted. Read MAILBOX0 — caller interprets. */
     b->booter_mbox0_post = gsp_platform->read32(NV_PSEC2_BASE + FALCON_MAILBOX0);

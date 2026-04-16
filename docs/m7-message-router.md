@@ -202,7 +202,7 @@ Three tasks (shell, listener, echo) round-robin on CPU 0 with IDLE priority.
 | `Makefile` | Platform-aware toolchain, QEMU, and test execution |
 | `runtime/src/msg_router.rs` | Rust implementation (replaces C version) |
 | `runtime/src/lib.rs` | Added `msg_router` module |
-| `docs/x86-64-port.md` | M7 subsection, feature matrix, test counts |
+| `docs/archive/handoff/x86-64-port.md` | M7 subsection, feature matrix, test counts |
 | `docs/components.md` | Message router integration, built-in services |
 | `TODO_-_PHASE_4X.md` | Inter-component IPC section |
 | `CLAUDE.md` | x86-64 build commands and platform selection |

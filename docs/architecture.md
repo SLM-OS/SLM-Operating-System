@@ -117,7 +117,7 @@ This hybrid approach leverages:
 | QEMU virt | Primary development | Full feature set, VirtIO-Net networking |
 | Raspberry Pi 5 | Hardware target | 4-core SMP, boots to interactive shell, UART TX/RX working, preemptive scheduling at 100 Hz. See `docs/pi5-baremetal-status.md` |
 | Jetson Orin Nano | Working | EL2+VHE boot, UARTC serial, GICv3, 6.7GB RAM, GPU probe. Single-core (SMP needs UEFI boot). See `docs/jetson-el2-bringup.md` |
-| x86-64 | Capstone-complete | 8-core SMP via INIT-SIPI-SIPI, TSS+IST for timer ISR stack isolation, reschedule IPI for cross-CPU dispatch, FXSAVE/FXRSTOR context switch, SSE2 inference kernels, periodic load rebalance, work-stealing enabled by default. GPU compute (GSP) deferred post-capstone. See `docs/x86-64-port.md` + `docs/x86-64-capstone-gap-closure-plan.md`. |
+| x86-64 | Capstone-complete | 8-core SMP via INIT-SIPI-SIPI, TSS+IST for timer ISR stack isolation, reschedule IPI for cross-CPU dispatch, FXSAVE/FXRSTOR context switch, SSE2 inference kernels, periodic load rebalance, work-stealing enabled by default. **FWSEC-FRTS succeeds on retail Ampere (RTX 3050) under VFIO.** Booter Load blocked by SEC2 priv-lock on this platform (#185). See `docs/x86-64-gpu-inference-status.md` (live handoff) + `docs/archive/handoff/x86-64-port.md` + `docs/archive/plans/x86-64-capstone-gap-closure-plan.md`. |
 
 **Phase 3 Learnings:**
 - DTB passed in x0 by bootloader (U-Boot, UEFI)

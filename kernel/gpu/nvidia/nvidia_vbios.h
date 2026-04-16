@@ -158,7 +158,7 @@ int nvidia_vbios_find_entry(const struct nvidia_vbios *vb,
  *
  * Returns 0 on success. Returns -1 for any failure: no BIT 'p',
  * out-of-range pointer (common when our ROM dump is smaller than
- * the VBIOS declares — see docs/x86-64-gsp-fwsec-investigation.md),
+ * the VBIOS declares — see docs/archive/investigations/x86-64-gsp-fwsec-investigation.md),
  * no FWSEC_PROD entry, or malformed descriptor.
  */
 int nvidia_vbios_get_fwsec(const struct nvidia_vbios *vb,

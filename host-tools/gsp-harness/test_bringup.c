@@ -387,6 +387,109 @@ static void test_error_codes_are_distinct_negative(void)
     }
 }
 
+/* ---- gsp_bringup_patch_dmemmapper (generic, init_cmd-parameterised) ---- */
+
+static void test_patch_generic_sb_writes_init_cmd(void)
+{
+    /* SB (0x19) path — caller must get init_cmd=0x19 at the same
+     * offset, and the frts_region sub-struct MUST NOT be written
+     * (matches nouveau nvkm_gsp_fwsec_patch which only writes
+     * frts_region for CMD_FRTS). */
+    uint8_t dmem[DMEM_SIZE];
+    build_synthetic_dmem(dmem);
+
+    /* Pre-fill frts_region area with a known sentinel so we can
+     * detect that the patcher didn't touch it. */
+    uint8_t *frts = dmem + CMD_BUF_OFFSET + 24;
+    for (int i = 0; i < 20; i++) frts[i] = 0xA5;
+
+    REQUIRE(gsp_bringup_patch_dmemmapper(dmem, sizeof(dmem),
+                                         INTERFACE_OFF,
+                                         /*init_cmd*/ 0x19u,
+                                         WPR2_ADDR, WPR2_SIZE) == 0);
+
+    /* init_cmd at DMEMMAPPER_BASE + 0x2c == 0x19 */
+    uint32_t init_cmd = rd32(dmem + DMEMMAPPER_BASE + 0x2c);
+    REQUIRE(init_cmd == 0x19u);
+
+    /* read_vbios sub-struct still populated (SB needs it). */
+    uint8_t *rv = dmem + CMD_BUF_OFFSET;
+    REQUIRE(rd32(rv +  0) == 1);
+    REQUIRE(rd32(rv +  4) == 24);
+    REQUIRE(rd32(rv + 20) == 2);
+
+    /* frts_region sentinel untouched: no FRTS write happened. */
+    for (int i = 0; i < 20; i++) {
+        REQUIRE(frts[i] == 0xA5);
+    }
+}
+
+static void test_patch_generic_frts_matches_legacy_wrapper(void)
+{
+    /* When init_cmd == FRTS (0x15), the generic API must produce
+     * identical bytes to the legacy _frts wrapper. Cross-check by
+     * running both on zeroed copies of the same DMEM template and
+     * memcmp'ing the command-buffer region. */
+    uint8_t a[DMEM_SIZE]; build_synthetic_dmem(a);
+    uint8_t b[DMEM_SIZE]; build_synthetic_dmem(b);
+
+    REQUIRE(gsp_bringup_patch_dmemmapper_frts(a, sizeof(a),
+                                              INTERFACE_OFF,
+                                              WPR2_ADDR, WPR2_SIZE) == 0);
+    REQUIRE(gsp_bringup_patch_dmemmapper(b, sizeof(b),
+                                         INTERFACE_OFF,
+                                         /*init_cmd*/ 0x15u,
+                                         WPR2_ADDR, WPR2_SIZE) == 0);
+
+    /* The mutations live around DMEMMAPPER_BASE and CMD_BUF_OFFSET;
+     * compare bytes 0 .. CMD_BUF_OFFSET + 44 which covers both. */
+    REQUIRE(memcmp(a, b, CMD_BUF_OFFSET + 44) == 0);
+}
+
+static void test_patch_generic_unknown_cmd_skips_frts_region(void)
+{
+    /* An unknown init_cmd (any value != FRTS) behaves like SB:
+     * writes init_cmd + read_vbios only. This is the behavior
+     * the harness relies on for the Probe B path. */
+    uint8_t dmem[DMEM_SIZE];
+    build_synthetic_dmem(dmem);
+
+    uint8_t *frts = dmem + CMD_BUF_OFFSET + 24;
+    for (int i = 0; i < 20; i++) frts[i] = 0xDE;
+
+    REQUIRE(gsp_bringup_patch_dmemmapper(dmem, sizeof(dmem),
+                                         INTERFACE_OFF,
+                                         /*init_cmd*/ 0xDEADu,
+                                         WPR2_ADDR, WPR2_SIZE) == 0);
+
+    uint32_t init_cmd = rd32(dmem + DMEMMAPPER_BASE + 0x2c);
+    REQUIRE(init_cmd == 0xDEADu);
+    for (int i = 0; i < 20; i++) REQUIRE(frts[i] == 0xDE);
+}
+
+/* ---- gsp_bringup_free — null-safety / idempotence ---- */
+
+static void test_bringup_free_null_safe(void)
+{
+    /* Must not crash on a NULL pointer. */
+    gsp_bringup_free(NULL);
+}
+
+static void test_bringup_free_idempotent_on_fresh_struct(void)
+{
+    /* A zero-initialized bringup struct has no DMA buffers; free must
+     * be safe and leave the fields clear. Calling it twice must also
+     * be safe. */
+    struct gsp_bringup b;
+    memset(&b, 0, sizeof(b));
+    gsp_bringup_free(&b);
+    REQUIRE(b.dma_imem_va == NULL);
+    REQUIRE(b.dma_dmem_va == NULL);
+    gsp_bringup_free(&b);    /* second call — still safe */
+    REQUIRE(b.dma_imem_va == NULL);
+    REQUIRE(b.dma_dmem_va == NULL);
+}
+
 int main(void)
 {
     /* Sig-index algorithm */
@@ -398,7 +501,7 @@ int main(void)
     test_sig_index_zero_count();
     test_sig_index_clamps_overflow();
 
-    /* DMEMMAPPER patcher */
+    /* DMEMMAPPER patcher (legacy FRTS wrapper) */
     test_patch_writes_init_cmd_at_2c();
     test_patch_writes_read_vbios_struct();
     test_patch_writes_frts_region();
@@ -407,6 +510,15 @@ int main(void)
     test_patch_rejects_interface_off_past_end();
     test_patch_rejects_cmd_buf_overflow();
     test_patch_skips_non_dmemmapper_entries();
+
+    /* DMEMMAPPER patcher (generic, init_cmd-parameterised) */
+    test_patch_generic_sb_writes_init_cmd();
+    test_patch_generic_frts_matches_legacy_wrapper();
+    test_patch_generic_unknown_cmd_skips_frts_region();
+
+    /* gsp_bringup_free helper */
+    test_bringup_free_null_safe();
+    test_bringup_free_idempotent_on_fresh_struct();
 
     /* State-machine guards (E3.4.d / E3.4.e) */
     test_booter_load_refuses_pre_fwsec();

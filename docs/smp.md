@@ -518,7 +518,7 @@ after pushing a task onto the target CPU's run queue. Per-platform:
 | 49 | Reschedule IPI — `smp_notify_cpu` target | 1 |
 
 Both share IST1 via the per-CPU TSS (see A1 in
-`docs/x86-64-capstone-gap-closure-plan.md`), so the ISRs cannot be
+`docs/archive/plans/x86-64-capstone-gap-closure-plan.md`), so the ISRs cannot be
 corrupted by a task-stack overflow.
 
 Both backends short-circuit when `logical_cpu == cpu_id()` (self-IPI

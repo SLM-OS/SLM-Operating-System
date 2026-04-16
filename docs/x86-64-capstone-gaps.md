@@ -1,6 +1,6 @@
 # x86-64 Capstone Gap Analysis: Preemption, SMP, and GPU Inference
 
-**Date:** 2026-04-13
+**Date:** 2026-04-13 (original) · 2026-04-16 (refresh — FWSEC-FRTS landed; Booter Load blocked)
 **Scope:** State-of-the-art audit of three capstone-critical subsystems on
 the x86-64 port — preemptive multitasking, SMP, and GPU-accelerated model
 inference. Identifies what is working, what is not, and what is needed to
@@ -9,15 +9,22 @@ close each gap.
 NVIDIA RTX 3050 / GA107 / Ampere).
 **Baseline:** commit after PR #103 merge (`c22431c` + `7c79eea`).
 
+> **Live handoff for GPU work:** See
+> `docs/x86-64-gpu-inference-status.md` for the current end-to-end
+> GPU-inference status, the SEC2 priv-lock blocker (#185), and
+> proposed next steps on Jetson / bare-metal paths. This doc is the
+> top-level capstone gap map; the handoff is where the live detail
+> lives.
+
 ---
 
 ## Executive Summary
 
 | Subsystem | Headline status | Capstone readiness |
 |---|---|---|
-| **Preemptive multitasking** | Works end-to-end post-#91; no open scheduler bugs. Hardening gaps: no ISR stack (TSS IST), no real-hardware validation under multi-task load. | **Ready for demo**, with two HIGH follow-ups. |
-| **SMP (8-core)** | Boots 8/8 CPUs. Per-CPU LAPIC timers fire. Per-CPU run queues work. **No reschedule IPI** for cross-CPU wakeup (up to 10 ms dispatch latency to an idle CPU). **Work-stealing compiled but disabled** (`CONFIG_WORK_STEALING=0`). No integration test exercises secondary-CPU preemption under load. | **Functionally works; measurement gap.** |
-| **GPU inference** | RTX 3050 identified on PCI, BAR0 registers readable, BAR1 VRAM R/W verified. **No compute.** Engine registers return `0xBADF5040` — GSP firmware never loaded. Inference runs on CPU, and on x86-64 the CPU path is **pure scalar** (NEON-only SIMD; SSE blocked by #72). | **Inference demos on CPU only.** GPU compute is out of scope for capstone unless the team accepts 4–6 weeks of GSP/VBIOS/RPC work. |
+| **Preemptive multitasking** | All six P1 gaps closed (TSS IST, FXSAVE, hardware validation, `sleep_ms` TSC routing, dead-code cleanup). | ✅ **Delivered.** |
+| **SMP (8-core)** | All five P2 gaps closed. Reschedule IPI (vector 49), AP preempt integration test, work-stealing enabled by default, periodic rebalance + S5 proactive load-balance override. | ✅ **Delivered.** |
+| **GPU inference** | SSE inference kernels landed (P3-1 closed via inline-asm bypass of #72). **FWSEC-FRTS succeeds on hardware** (3/3 runs on test-pc). **Booter Load is hard-blocked** by SEC2 priv-lock raised by BSI after vfio-pci's mandatory FLR (issue #185). Full GPU compute remains out of reach on this platform. | 🟡 **First half of GSP bringup delivered; downstream blocked on a hardware-security boundary.** See `docs/x86-64-gpu-inference-status.md`. |
 
 Concrete next actions at the bottom of the document.
 
@@ -45,7 +52,7 @@ RISC-V startup) + E4 (RPC ring skeleton) shipped on
 | P2-4 Periodic rebalance | ✅ CLOSED | `sched_rebalance_tick()` in `sched.c` wired via `sched_heuristic.c` `.tick`. Tests: `test_rebalance_respects_affinity`, `test_rebalance_symbol_exposed`. |
 | P2-5 Coupled with P2-1 | ✅ CLOSED | Same fix. |
 | P3-1 x86-64 CPU SSE | ✅ CLOSED | `kernel/arch/x86_64/sse_kernels.c` (compiled `-msse -msse2`) + extern-C FFI from `ops.rs`. Bit-exact tests `test_sse_{relu,zero,add_scalar,fma_row}_matches_scalar`. |
-| P3-2 / P3-3 / P3-4 GSP firmware | 🚧 IN PROGRESS | E1, E2, E2.5, E3.1, E3.2, E3.3, E3.4 (scaffolding + audit fixes), E3.4.d (Booter Load), E3.4.e (RISC-V startup), and E4 RPC skeleton shipped. Outstanding: hardware re-test of FWSEC after the BOOTVEC=0 + CPUCTL_ALIAS fixes; full WprMeta layout; RPC marshalling + GSP_INIT_DONE wait. Tracked in #27. |
+| P3-2 / P3-3 / P3-4 GSP firmware | 🟡 PARTIAL — see `docs/x86-64-gpu-inference-status.md` | **E3.4 (FWSEC-FRTS) succeeds on hardware, 3/3 runs** as of 2026-04-16. Root cause of earlier failure was vfio-pci's FLR clobbering UEFI DEVINIT on each `/dev/vfio/GROUP` open; fixed by polling for BSI DEVINIT recovery and gating `falcon_reset` on `falcon_is_idle()`. Latent DMEM-mask bug (HWCFG bits 17:9 not 24:16) found and fixed during the audit. **E3.4.d (Booter Load) is blocked** by SEC2 priv-lock (#185) — BSI's DEVINIT re-apply raises SEC2's PLM above our VFIO-userspace access level, confirmed by `--sec2-plm-scan` (865/1024 offsets locked). E3.4.e (RISC-V start), E4 (RPC), E5 (compute), E6 (pipeline) all transitively blocked on this platform. Code-shipped portions of all phases transfer cleanly to Jetson / bare-metal. |
 | P3-5 Capability detection | ✅ CLOSED | `GpuCapabilities::detect()` already returns `DetectedNoCompute` gracefully. |
 
 Test count grew from 94 → ~120 in `kernel/tests/test_x86_boot.c`.
@@ -55,15 +62,15 @@ unrelated to this work). ARM64 `make test` still PASSES cleanly.
 `make x86-disk-verify` all 9 checks PASS. End-to-end OVMF boot to
 `slmos>` shell with 4 CPUs online works.
 
-**Host-side test suites (Phase E, no GPU required):** 105 total.
+**Host-side test suites (Phase E, no GPU required):** 117 total as of 2026-04-16 (+12 from the FWSEC-FRTS hardening pass).
 
 | Suite | Cases | Coverage |
 |---|---|---|
 | `make test-vbios` | 30 | VBIOS BIT parser, PCIR walker, FWSEC discovery |
-| `make test-falcon` | 30 | Falcon v4 register protocol — probe, reset/scrub, halt poll, DMA framing, **PIO IMEM/DMEM upload (E3.4.d) with specific GSP_ERR_INVAL on alignment/bounds**, **CPUCTL.ALIAS_EN routing**, **pre-PIO setup**, HS-boot BROM sequence |
+| `make test-falcon` | **37** | Falcon v4 register protocol — probe, reset/scrub, halt poll, DMA framing, PIO IMEM/DMEM upload, CPUCTL.ALIAS_EN routing, pre-PIO setup, HS-boot BROM sequence, **`falcon_hs_kick` split (3 cases)**, **`falcon_is_priv_locked` 0xbadfXXXX-pattern detection (3 cases)**, **`falcon_wait_halted` priv-lock early-bail (1 case)** |
 | `make test-nvfw` | 14 | nvfw_bin_hdr / hs_header_v2 / hs_load_header_v2 framing |
-| `make test-bringup` | 20 | Sig-index algorithm, DMEMMAPPER patcher, **booter_load + riscv_start state-machine guards (specific GSP_ERR_INVAL)**, **error-constants distinct + negative** |
-| `make test-rpc` | 17 | RPC ring math, shm region init/dtor, **send-rejected-when-not-alive (GSP_ERR_NOSYS), oversize-rejected (GSP_ERR_INVAL), null-arg-rejected (GSP_ERR_INVAL)** |
+| `make test-bringup` | **25** | Sig-index algorithm, DMEMMAPPER patcher (legacy FRTS wrapper + **generic init_cmd-parameterised path, 3 cases**), **`gsp_bringup_free` null-safety + idempotence (2 cases)**, booter_load + riscv_start state-machine guards, error-constants distinct + negative |
+| `make test-rpc` | 17 | RPC ring math, shm region init/dtor, send-rejected-when-not-alive, oversize-rejected, null-arg-rejected |
 
 **Error codes** (`kernel/gpu/nvidia/gsp.h`): the new shared core
 publishes a small set of negative constants — `GSP_ERR_INVAL`,
@@ -167,7 +174,7 @@ Tests that pass: `test_smp_cpu_count`, `test_smp_all_cpus_online`,
 `test_smp_logical_map_consistent`, `test_smp_trampoline_param_offsets`,
 `test_spinlock_mutual_exclusion`.
 
-The "8/8 CPUs online (4 cores × 2 hyperthreads)" claim in `docs/x86-64-port.md`
+The "8/8 CPUs online (4 cores × 2 hyperthreads)" claim in `docs/archive/handoff/x86-64-port.md`
 is accurate and backed by these tests.
 
 ### 2.2 Gaps
@@ -210,9 +217,14 @@ is accurate and backed by these tests.
 
 ## 3. GPU Inference on x86-64
 
+> **This section is the long-form audit from 2026-04-13.** For the
+> current end-to-end status, the root cause of the Booter Load
+> blocker, the Jetson / bare-metal re-scope analysis, and proposed
+> next steps, see `docs/x86-64-gpu-inference-status.md`.
+
 ### 3.1 What works today
 
-On the RTX 3050 / GA107:
+On the RTX 3050 / GA107 (updated 2026-04-16):
 
 | Stage | File | Result |
 |---|---|---|
@@ -221,11 +233,14 @@ On the RTX 3050 / GA107:
 | `NV_PMC_BOOT_0` / `BOOT_42` decode | `nvidia_gpu.c` | Reports Ampere, chip 0x177, rev 10.1 |
 | BAR1 mapping (VRAM aperture, 256 MiB) | `nvidia_gpu.c` | 0x40000000 — R/W verified at 5 offsets with pattern tests |
 | `gpu` / `pci` shell commands | `nvidia_gpu.c`, `pci.c` | Functional |
+| **VFIO-backed gsp-harness** (userspace under Linux) | `host-tools/gsp-harness/` | VBIOS parse, FWSEC ucode extraction, Falcon DMA upload, BROM program, STARTCPU |
+| **FWSEC-FRTS** (E3.4) | `kernel/gpu/nvidia/bringup.c::gsp_bringup_fwsec_frts` | ✅ Halts cleanly on hardware (3/3 runs 2026-04-16), ERR_REG=0, WPR2 registers populated |
+| BSI DEVINIT recovery check (`--check-devinit`) | `host-tools/gsp-harness/main.c` | Polls `NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0]` byte 0 for `0xff` per nouveau `tu102_devinit_wait`. Recovers in ~300 ms post-FLR on test-pc. |
 
-**What is not there:** no DMA, no command submission, no engine init, no
-GSP firmware upload. The engine registers return `0xBADF5040` — the
-well-known "GPU fault / engine not initialised" poison pattern on
-Ampere. Without GSP-RM running, no compute can execute.
+**What is not there yet:** Booter Load (E3.4.d), GSP RISC-V startup
+(E3.4.e), RPC connection establishment (E4), compute engine init
+(E5), full inference pipeline (E6). All four are **transitively
+blocked on this platform** by the SEC2 priv-lock described below.
 
 ### 3.2 Inference path on x86-64 today
 
@@ -250,15 +265,15 @@ aarch64 and a scalar fallback. SSE is blocked upstream by GitHub issue
 intrinsics against the target spec's `+soft-float` ABI; see issue
 comment for the full investigation).
 
-### 3.3 Gaps
+### 3.3 Gaps — 2026-04-16 refresh
 
-| # | Gap | Impact | Priority |
+| # | Gap | Current status | Priority |
 |---|---|---|---|
-| P3-1 | **x86-64 CPU inference is scalar only.** SSE/AVX blocked by #72 (Rust toolchain). ARM64 Pi 5 runs 4-wide NEON matmul at 1.09 ms for MNIST; x86-64 on the same model is ~2–3× slower, pure scalar. | Capstone demo: inference "works but is slow" on x86-64. | HIGH |
-| P3-2 | **No GSP firmware loader.** GSP-RM on Ampere is a RISC-V microcontroller that must be booted with a signed proprietary firmware blob (`gsp-535.113.01.bin.zst`, ~38 MB on Linux `/lib/firmware/`). Without it, every GPU engine (graphics, compute, NVDEC, etc.) is locked out. This is the blocker Jetson issue #28 already documents. | Zero GPU compute; x86-64 demo cannot run inference on VRAM. | BLOCKED (firmware access) |
-| P3-3 | **No VBIOS parser.** GSP boot requires reading FWSEC from a VBIOS BIT table type 0x85 and parsing register 0x625F04 for the VGA workspace size. The VBIOS is stored in the GPU's SPI flash and mapped into PCI ROM. None of this is implemented. | Prerequisite for P3-2. | BLOCKED by P3-2 |
-| P3-4 | **No RPC / message-queue stack for GSP-RM.** Once GSP-RM is running, host communication is via a command-ring + status-ring RPC protocol in FB-mapped pages. Not implemented. | Prerequisite for P3-2. | BLOCKED by P3-2 |
-| P3-5 | **GPU capability detection falls through to `NotAvailable`.** `GpuCapabilities::detect()` at `gpu.rs:56` correctly reports the GPU as identified but without compute, and the engine correctly falls back to CPU. This is fine as-is, but tests don't cover the "GPU identified, no compute" branch explicitly. | Minor test coverage gap. | LOW |
+| P3-1 | x86-64 CPU inference is scalar only (#72). | ✅ **Closed** via inline-asm SSE bypass (`kernel/arch/x86_64/sse_kernels.c`). |  — |
+| P3-2 | GSP firmware loader. | 🟡 **Half delivered.** FWSEC-FRTS succeeds on hardware (3/3 runs 2026-04-16). Booter Load blocked by **SEC2 priv-lock (#185)**. Details in `docs/x86-64-gpu-inference-status.md`. | Blocked (#185) |
+| P3-3 | VBIOS parser. | ✅ **Closed.** `kernel/gpu/nvidia/nvidia_vbios.c` (690 lines, 30 unit tests) — parses BIT tables, walks PCIR, extracts FWSEC. Hardware-verified on GA107. | — |
+| P3-4 | RPC / message-queue stack. | 🟡 **Skeleton shipped** (`kernel/gpu/nvidia/rpc.c`, 216 lines, 17 unit tests). Cannot exercise against a live GSP-RM because E3.4.e (RISC-V start) is blocked by #185. | Blocked (#185) |
+| P3-5 | GPU capability detection. | ✅ **Closed.** `GpuCapabilities::detect()` returns `DetectedNoCompute`. | — |
 
 GitHub issues covering this area:
 
@@ -271,66 +286,46 @@ GitHub issues covering this area:
   issue comments; requires nightly Rust + custom target spec
   + `-Z build-std` to land.
 
-### 3.4 Realistic paths forward
+### 3.4 Realistic paths forward — 2026-04-16 refresh
 
-Ranked by effort + demo value:
+Options A, B, E from the original 2026-04-13 table all landed. C
+(port nouveau's GSP-RM loader) went further than estimated: FWSEC-FRTS,
+DMEMMAPPER patching, and the Booter-Load scaffolding all shipped
+within ~4 weeks. The remaining blocker is the one that wasn't
+anticipated: VFIO's mandatory FLR + BSI DEVINIT raising SEC2's PLM
+(#185). See `docs/x86-64-gpu-inference-status.md` §4 for the three
+remaining candidate paths (Jetson, bare-metal SLM-OS, kernel-shim).
 
-| Option | Scope | Effort | Capstone impact |
+---
+
+## 4. Prioritized Action Plan — 2026-04-16 refresh
+
+| Rank | Action | Original est | Current status |
 |---|---|---|---|
-| **A. Inline-asm SSE matmul + reLU.** Bypass #72 by using `asm!` for the hot kernels (`matmul_simd`, `relu`, `simd_fma_row`) instead of `core::arch::x86_64` intrinsics. Inline asm doesn't flow through LLVM's soft-float legalizer. | ~500 LOC in `ops.rs`, verified against ARM64 outputs. | **3–5 days.** | **HIGH** — closes P3-1, gives 2–3× matmul speedup on demo PC. |
-| **B. Accept CPU-only, add an x86-64-specific benchmark page.** Document the scalar baseline numbers in `docs/benchmarks.md` so the capstone story is honest about the x86-64 path. | Doc-only. | **0.5 day.** | Medium — no speedup but closes the "what actually happens on x86-64" story. |
-| **C. Port nouveau's GSP-RM loader.** Nouveau (Linux drm subsystem, `drivers/gpu/drm/nouveau/nvkm/subdev/gsp/`) has ~1500 LoC of Ampere GSP init. Port to bare-metal: VBIOS parse, Falcon boot, RISC-V bring-up, RPC ring. | 1500 LoC port + firmware blob handling + Falcon ucode. | **6–10 weeks.** | **HIGH but out of scope** — would land post-capstone. |
-| **D. QEMU VirtIO-GPU.** Would let inference run on a virtual GPU under QEMU only (not on the RTX 3050 dev PC). | ~800 LoC driver + inference backend. | **1–2 weeks.** | Low — demos in QEMU, not on real hardware. |
-| **E. Stub cleanup + honest capability reporting.** Keep the CPU-only path, but make `GpuCapabilities::detect()` explicitly return `DetectedNoCompute` and log it at boot. Adds a test for the branch. | ~100 LoC. | **0.5 day.** | Low. |
+| 1 | Reschedule IPI on x86-64 | 2–3 d | ✅ Delivered |
+| 2 | Secondary-CPU preemption integration test | 1 d | ✅ Delivered |
+| 3 | Real-hardware multi-task boot test on test-pc | 1 d | ✅ Delivered |
+| 4 | Inline-asm SSE matmul (Option A) | 3–5 d | ✅ Delivered |
+| 5 | Enable `CONFIG_WORK_STEALING` + benchmark | 2 d | ✅ Delivered |
+| 6 | TSS IST for timer vector | 2–3 d | ✅ Delivered |
+| 7 | Honest x86-64 benchmarks in `docs/benchmarks.md` | 0.5 d | ✅ Delivered (G5) |
+| 8 | Delete unused `lapic_timer_mask()` helpers | 15 min | ✅ Delivered |
+| 9 | Periodic policy rebalance | 3–5 d | ✅ Delivered; S5 adds proactive override |
+| 10 | Port nouveau GSP-RM (post-capstone) | 6–10 wk | 🟡 ~4-5 weeks in, ~40-60% of the portable bringup done, hard-blocked on #185 for this platform. See `docs/x86-64-gpu-inference-status.md`. |
 
-**Recommendation.** For the capstone: **A + B + E**. That gets the x86-64
-demo running matmul on SSE (meaningful speedup), documents the scalar
-baseline honestly, and makes the "no GPU compute" story explicit and
-tested. Option C is the right long-term direction but not reachable in
-capstone scope.
-
----
-
-## 4. Prioritized Action Plan
-
-One table, ranked across all three subsystems, for capstone demo delivery.
-
-| Rank | Action | Est | Unblocks | Gap IDs |
-|---|---|---|---|---|
-| 1 | **Reschedule IPI on x86-64.** | 2–3 d | Low-latency SMP dispatch; P1-3 secondary idle lag | P2-1, P2-5, P1-3 |
-| 2 | **Secondary-CPU preemption integration test.** | 1 d | Proves AP preemption actually works, not just boots | P2-2 |
-| 3 | **Real-hardware multi-task boot test on test-pc.** | 1 d | Catches any QEMU-only preemption assumptions | P1-2 |
-| 4 | **Inline-asm SSE matmul (Option A).** | 3–5 d | 2–3× x86-64 inference speedup; works around #72 | P3-1 |
-| 5 | **Enable `CONFIG_WORK_STEALING` and benchmark.** | 2 d | Load balancing on APs | P2-3 |
-| 6 | **TSS IST for timer vector.** | 2–3 d | Hardens ISR against task-stack bugs | P1-1 |
-| 7 | **Honest x86-64 benchmarks in `docs/benchmarks.md`.** | 0.5 d | Capstone story coherence | P3-1 docs, P3-5 |
-| 8 | **Delete unused `lapic_timer_mask()` helpers.** | 15 min | Cleanup | P1-5 |
-| 9 | **Periodic policy rebalance.** | 3–5 d | Fair utilization under long-running workloads | P2-4 |
-| 10 | **Port nouveau GSP-RM (post-capstone).** | 6–10 wk | True x86-64 GPU compute | P3-2, P3-3, P3-4 |
-
-**Total effort for capstone-scope items 1–8:** ~10–14 engineer-days.
-Items 9–10 are explicitly out-of-scope for capstone and should be
-tracked as post-capstone work.
+**All capstone-scope items (1–9) delivered.** Item 10's remaining
+path-forward options are documented in the handoff.
 
 ---
 
-## 5. New / Refreshed Issue Tracking
+## 5. Issue Tracking — 2026-04-16 audit
 
-The following issues should be filed to track the gaps above (if they
-don't already exist under different titles — cross-check with
-`gh issue list --label platform:x86-64`):
+All capstone-scope proposed issues from the original table turned
+into delivered work, not filed issues. The one entry still open is
+the post-capstone GSP work, which has a dedicated sub-blocker:
 
-| Proposed issue | Labels | Priority |
+| Issue | Status | Scope |
 |---|---|---|
-| x86-64: reschedule IPI for cross-CPU task dispatch (P2-1) | `platform:x86-64 sub:sched sub:smp enhancement` | P1-high |
-| x86-64: integration test for secondary-CPU timer preemption (P2-2) | `platform:x86-64 sub:sched sub:smp sub:testing` | P1-high |
-| x86-64: inline-asm SSE SIMD for inference hot kernels (P3-1) | `platform:x86-64 sub:ai-runtime enhancement` | P1-high (capstone demo) |
-| x86-64: TSS IST stack for timer vector (P1-1) | `platform:x86-64 sub:sched enhancement` | P2-medium |
-| x86-64: enable + validate `CONFIG_WORK_STEALING` (P2-3) | `platform:x86-64 sub:sched enhancement` | P2-medium |
-| x86-64: real-hardware multi-task boot test on test-pc (P1-2) | `platform:x86-64 sub:sched sub:testing` | P2-medium |
-| x86-64: periodic scheduler rebalance policy (P2-4) | `platform:x86-64 sub:sched enhancement` | P3-low |
-| x86-64: port nouveau GSP-RM for RTX 3050 compute (P3-2..4) | `platform:x86-64 sub:gpu enhancement blocked` | P3-low (post-capstone) |
-
-#72 (SSE intrinsics) is already open and correctly labelled; it should
-remain `blocked` since the inline-asm path bypasses it rather than
-fixing it.
+| **#185** — SEC2 priv-lock blocks Booter Load under VFIO+FLR on x86-64 | OPEN | The specific hardware-security boundary that gates E3.4.d / E3.4.e / E4 / E5 / E6 on this platform. See `docs/x86-64-gpu-inference-status.md`. |
+| #72 — x86-64 SSE intrinsics (Rust toolchain) | OPEN, `blocked` | Bypassed via inline-asm in `kernel/arch/x86_64/sse_kernels.c`; keep the issue open but the P3-1 path is unblocked. |
+| #142 — GSP bare-metal loader (future work) | OPEN, `P3-low` | Original 6-12 month scope estimate. What actually happened: ~60% of the portable bringup landed in ~4 weeks; the remaining gap is the #185 blocker on x86-64. |

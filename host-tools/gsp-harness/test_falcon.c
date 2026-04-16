@@ -63,6 +63,13 @@ struct mock_engine {
     uint32_t startcpu_via_cpuctl;       /* count of writes to 0x100 */
     uint32_t startcpu_via_cpuctl_alias; /* count of writes to 0x130 */
 
+    /* PRI-arbiter priv-lock simulation. When true, CPUCTL reads
+     * return NVIDIA's 0xbadfXXXX poison pattern instead of real
+     * state — exactly what the GA107 SEC2 engine does under VFIO
+     * after BSI re-applies DEVINIT. Lets tests exercise
+     * falcon_is_priv_locked() and the wait_halted early-bail. */
+    bool     priv_locked;
+
     /* PIO IMEM/DMEM upload capture — a few hundred 4-byte slots so
      * tests can read back what the driver streamed through the data
      * port. The mock auto-increments because IMEMC/DMEMC AINCW=1. */
@@ -102,6 +109,7 @@ static uint32_t mock_read32(uint32_t addr)
         uint32_t off = addr - e->base;
         switch (off) {
         case FALCON_CPUCTL: {
+            if (e->priv_locked) return 0xbadf5620u;
             if (e->cpu_running && e->halt_after > 0) {
                 e->halt_after--;
                 if (e->halt_after == 0) e->cpu_running = false;
@@ -747,6 +755,105 @@ static void test_pio_uninitialized_rejects(void)
     falcon_pre_pio_setup(&f);
 }
 
+/* ---- falcon_hs_kick tests (BROM program + STARTCPU split) ---- */
+
+static void test_hs_kick_programs_brom_and_starts(void)
+{
+    /* hs_kick is the same setup as hs_boot minus the wait_halted step;
+     * verify BROM registers and STARTCPU fire without observing halt. */
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+    e->halt_after = 0;    /* kick returns before any halt check */
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    REQUIRE(falcon_hs_kick(&f, NV_PSEC2_BROM_BASE,
+                           /*dmem_sign*/ 0x300,
+                           /*engine_id*/ 0x01,
+                           /*ucode_id*/  5,
+                           /*boot_vec*/  0x400) == 0);
+
+    REQUIRE(g_bar0[(NV_PSEC2_BROM_BASE + FALCON_BROM_PARAADDR0) / 4] == 0x300);
+    REQUIRE(g_bar0[(NV_PSEC2_BROM_BASE + FALCON_BROM_ENGIDMASK) / 4] == 0x01);
+    REQUIRE(g_bar0[(NV_PSEC2_BROM_BASE + FALCON_BROM_UCODE_ID) / 4]  == 5);
+    REQUIRE(g_bar0[(NV_PSEC2_BROM_BASE + FALCON_BROM_MOD_SEL) / 4]
+            == FALCON_BROM_MOD_SEL_RSA3K);
+    REQUIRE(e->last_bootvec == 0x400);
+    /* Unlike hs_boot, kick doesn't wait — engine is running, not halted. */
+    REQUIRE(e->cpu_running);
+}
+
+static void test_hs_kick_rejects_non_idle(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+    e->cpu_running = true;  /* not idle */
+    (void)e;
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    REQUIRE(falcon_hs_kick(&f, NV_PSEC2_BROM_BASE, 0, 0, 0, 0) < 0);
+}
+
+static void test_hs_kick_rejects_uninitialized(void)
+{
+    reset_mock();
+    struct falcon f = { 0 };    /* not probed */
+    REQUIRE(falcon_hs_kick(&f, NV_PSEC2_BROM_BASE, 0, 0, 0, 0) < 0);
+}
+
+/* ---- falcon_is_priv_locked tests ---- */
+
+static void test_priv_locked_detects_poison_pattern(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+    e->priv_locked = true;
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    REQUIRE(falcon_is_priv_locked(&f));
+    /* is_idle() must also return false — HALTED isn't set in 0xbadfXXXX. */
+    REQUIRE(!falcon_is_idle(&f));
+}
+
+static void test_priv_locked_clean_engine_not_flagged(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+    (void)e;  /* default: priv_locked = false */
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    REQUIRE(!falcon_is_priv_locked(&f));
+    REQUIRE(falcon_is_idle(&f));
+}
+
+static void test_priv_locked_rejects_uninitialized(void)
+{
+    struct falcon f = { 0 };    /* not probed */
+    REQUIRE(!falcon_is_priv_locked(&f));
+}
+
+/* ---- falcon_wait_halted priv-lock early-bail test ---- */
+
+static void test_wait_halted_bails_on_priv_lock(void)
+{
+    /* With a priv-locked CPUCTL, wait_halted cannot observe HALTED
+     * and would otherwise spin its full budget. The bail path should
+     * return -1 within one poll iteration. Pick a huge timeout so a
+     * non-bailing implementation would clearly exceed reasonable
+     * wall time. */
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+    e->priv_locked = true;
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+    /* 1 hour nominal timeout — should return almost immediately. */
+    REQUIRE(falcon_wait_halted(&f, 3600u * 1000u * 1000u) < 0);
+}
+
 int main(void)
 {
     test_probe_gsp_falcon();
@@ -780,6 +887,13 @@ int main(void)
     test_pio_dmem_rejects_misaligned();
     test_pio_zero_len_succeeds();
     test_pio_uninitialized_rejects();
+    test_hs_kick_programs_brom_and_starts();
+    test_hs_kick_rejects_non_idle();
+    test_hs_kick_rejects_uninitialized();
+    test_priv_locked_detects_poison_pattern();
+    test_priv_locked_clean_engine_not_flagged();
+    test_priv_locked_rejects_uninitialized();
+    test_wait_halted_bails_on_priv_lock();
 
     if (failures == 0) {
         printf("test_falcon: all tests PASS\n");

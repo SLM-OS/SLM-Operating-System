@@ -103,7 +103,7 @@ The plan family is layered. Read them in this order on a fresh start:
 
 The cross-platform sister plans for context (read only as needed):
 
-- `docs/x86-64-capstone-gap-closure-plan.md` — x86-64's parallel work
+- `docs/archive/plans/x86-64-capstone-gap-closure-plan.md` — x86-64's parallel work
 - `docs/pi5-preemption-plan.md` — Pi 5's parallel work
 
 ---
