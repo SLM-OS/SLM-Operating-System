@@ -10,7 +10,6 @@
 #include "net_driver.h"
 #include "pmm.h"
 #include "debug.h"
-#include "gic.h"
 #include "spinlock.h"
 #include "cache.h"
 #include "arch/sys_arch.h"  /* sys_now() for wall-clock TX timeout */
@@ -409,11 +408,18 @@ int virtio_net_init(void) {
     /* Post receive buffers */
     post_rx_buffers();
 
-    /* Register IRQ handler — IRQ depends on the slot the device landed
-     * in, not the compile-time VIRTIO_NET_SLOT default. */
-    uint32_t irq = VIRTIO_DEVICE_IRQ(net_slot);
-    gic_set_priority(irq, 0x80);
-    gic_enable_irq(irq);
+    /* IRQ dispatch is not wired up yet. Enabling the IRQ at the GIC
+     * without a dispatch entry in kernel/arch/arm64/exceptions.c
+     * would cause every virtio-net config change / TX completion to
+     * log "Unhandled IRQ %u" and consume GIC resources for no benefit,
+     * because both TX and RX are driven by polling (net_poll). IRQ
+     * setup will land together with IRQ-driven TX completion — see
+     * #204. The handler itself (virtio_net_irq_handler below) is kept
+     * so the dispatch wiring is a one-line change when #204 lands.
+     *
+     * Parenthetical: computing the slot-derived IRQ is still useful
+     * commentary for future work. */
+    (void)VIRTIO_DEVICE_IRQ(net_slot);
 
     initialized = true;
     INFO("VirtIO-Net driver initialized");
