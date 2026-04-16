@@ -425,6 +425,12 @@ void kernel_main(void *dtb)
         if (rc < 0) WARN("BPMP GPU PWR clock enable failed (rc=%d)", rc);
         /* Brief delay for clocks to stabilize (if they came up) */
         for (volatile int i = 0; i < 100000; i++);
+        /* Diagnostic: direct BOOT_0 read to bypass the probe's present
+         * check. Shows the raw register value so we can tell whether
+         * MMIO is accessible regardless of what the probe decides. */
+        uint32_t boot0_raw = *(volatile uint32_t *)(GPU_BASE + 0x0);
+        INFO("GPU raw BOOT_0 read: 0x%08lx (expect 0xB7B000A1 for GA10B)",
+             (unsigned long)boot0_raw);
     }
     nvidia_gpu_set_mmio_base(GPU_BASE);
     gpu_register_driver(&gpu_nvidia_driver);

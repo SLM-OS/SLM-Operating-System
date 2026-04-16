@@ -2,10 +2,19 @@
 #
 # jetson-kexec-slmos.sh - Cleanly boot SLM-OS via kexec on Jetson Orin Nano
 #
-# Stops the GPU cleanly before kexec to prevent stale nvgpu DMA from
-# triggering a TF-A RAS error that powers off the CPU core.
+# Two-stage GPU handoff:
+#   1. Runtime PM suspend nvgpu → drains stale DMA operations, preventing
+#      the TF-A RAS error that otherwise powers off the CPU core (#9).
+#   2. After DMA is drained, force the GPU clocks and powergate domain
+#      back ON via BPMP debugfs. SLM-OS then sees the GPU with its
+#      MMIO responsive (NV_PMC_BOOT_0 = 0xB7B000A1 on GA10B) instead
+#      of 0xFFFFFFFF from a gated-off engine.
 #
-# See GitHub issue #9 for full background.
+# The force-on step is critical: SLM-OS's own BPMP clock-enable MRQs
+# are rejected by the BPMP firmware on the L4T BSP (#190), so if the
+# GPU is left gated we never recover. Writing to /sys/kernel/debug/bpmp/
+# from Linux userspace goes through the kernel's BPMP driver, which
+# BPMP firmware DOES accept.
 #
 # Usage:
 #   sudo ./jetson-kexec-slmos.sh /path/to/slmos.elf
@@ -29,43 +38,65 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 GPU_POWER=/sys/devices/platform/bus@0/17000000.gpu/power
+BPMP=/sys/kernel/debug/bpmp/debug
 
 if [[ ! -d "$GPU_POWER" ]]; then
     echo "Warning: GPU power path not found — not a Jetson Orin, or driver not loaded" >&2
     echo "Proceeding with kexec anyway..." >&2
 else
-    echo "[1/4] Stopping GPU consumers..."
-    # Display manager holds GPU via DRM
-    systemctl stop gdm 2>/dev/null || true
+    echo "[1/5] Stopping GPU consumers..."
+    # Display manager holds GPU via DRM. `systemctl stop gdm` can hang
+    # if the compositor is mid-render, so background it with a timeout.
+    systemctl stop gdm 2>/dev/null &
+    gdm_pid=$!
+    for _ in {1..5}; do
+        sleep 1
+        kill -0 "$gdm_pid" 2>/dev/null || break
+    done
+    kill -9 "$gdm_pid" 2>/dev/null || true
     # NVIDIA camera/multimedia services
     systemctl stop nvargus-daemon 2>/dev/null || true
     systemctl stop nvs-service 2>/dev/null || true
-    sleep 2
+    sleep 1
 
     # Kill any remaining GPU file descriptor holders
     fuser -k /dev/nvhost-gpu /dev/nvmap 2>/dev/null || true
     sleep 1
 
-    echo "[2/4] Requesting GPU runtime PM suspend..."
-    # Set autosuspend delay to 0 and enable auto mode — triggers immediate
-    # suspend when refcount reaches 0. This power-gates the GPU via BPMP,
-    # stopping the PMU firmware and flushing any stale DMA operations.
+    echo "[2/5] Runtime-PM suspending GPU (drains DMA to avoid RAS)..."
     echo 0 > "$GPU_POWER/autosuspend_delay_ms"
     echo auto > "$GPU_POWER/control"
     sleep 3
 
-    # Verify GPU actually suspended
     status="$(cat "$GPU_POWER/runtime_status" 2>/dev/null || echo unknown)"
-    pg_state="$(cat /sys/kernel/debug/bpmp/debug/powergate/gpu/state 2>/dev/null || echo unknown)"
-    echo "       GPU runtime: $status, powergate: $pg_state"
+    pg_state="$(cat "$BPMP/powergate/gpu/state" 2>/dev/null || echo unknown)"
+    echo "       after suspend: runtime=$status powergate=$pg_state"
     if [[ "$status" != "suspended" ]]; then
         echo "Warning: GPU did not suspend cleanly (status=$status)" >&2
         echo "         kexec may still crash with a TF-A RAS error" >&2
     fi
+
+    echo "[3/5] Re-enabling GPU clocks + powergate for SLM-OS handoff..."
+    # Un-powergate the GPU domain (1 = ungated)
+    echo 1 > "$BPMP/powergate/gpu/state" 2>/dev/null || echo "       powergate write failed" >&2
+    # Enable the primary GPU clocks. These were turned off by nvgpu's
+    # runtime PM suspend; we re-enable via the BPMP debugfs interface
+    # (which has the required permissions, unlike SLM-OS's own BPMP MRQs).
+    for clk in gpu_pwr gpusysclk gpunvdclk nafll_gpusys; do
+        if [[ -w "$BPMP/clk/$clk/state" ]]; then
+            echo 1 > "$BPMP/clk/$clk/state" 2>/dev/null || true
+        fi
+    done
+    sleep 1
+
+    pg_final="$(cat "$BPMP/powergate/gpu/state" 2>/dev/null || echo '?')"
+    gsys="$(cat "$BPMP/clk/gpusysclk/state" 2>/dev/null || echo '?')"
+    gpwr="$(cat "$BPMP/clk/gpu_pwr/state" 2>/dev/null || echo '?')"
+    echo "       after re-enable: powergate=$pg_final gpusysclk=$gsys gpu_pwr=$gpwr"
 fi
 
-echo "[3/4] Loading kernel: $KERNEL"
+echo "[4/5] Loading kernel: $KERNEL"
 kexec -l "$KERNEL" --reuse-cmdline
 
-echo "[4/4] Executing kexec (serial console will take over)"
+echo "[5/5] Executing kexec (serial console will take over)"
 exec kexec -e
