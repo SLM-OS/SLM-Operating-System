@@ -1,0 +1,14 @@
+=== Jetson WORK_STEALING=ON reliability run, 2026-04-16T00:27:49Z ===
+Kernel: 0x80000000
+iter  1: PASS  Completed 16/16  Wall-clock 20ms  (kexec from fresh Linux)
+iter  2: PASS  Completed 16/16  Wall-clock 20ms
+iter  3: PASS  Completed 16/16  Wall-clock 20ms
+iter  4: PASS  Completed 16/16  Wall-clock 20ms
+iter  5: PASS  Completed 16/16  Wall-clock 20ms
+iter  6: PASS  Completed 16/16  Wall-clock 20ms
+iter  7: PASS  Completed 16/16  Wall-clock 20ms
+iter  8: PASS  Completed 16/16  Wall-clock 20ms
+iter  9: PASS  Completed 16/16  Wall-clock 20ms
+iter 10: PASS  Completed 16/16  Wall-clock 20ms
+
+=== Summary: 10/10 PASS (100%) ===
