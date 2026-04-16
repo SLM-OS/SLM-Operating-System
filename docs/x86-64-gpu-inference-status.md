@@ -89,7 +89,7 @@ $ ssh root@192.168.4.136 './gsp-harness --fwsec-frts'
 | `kernel/gpu/nvidia/nvidia_vbios.{h,c}` | 700+ | VBIOS BIT-table parser, FWSEC discovery, PCIR walker |
 | `kernel/gpu/nvidia/rpc.{h,c}` | 216 | GSP-RM RPC ring skeleton (ring math, pointer publishing) |
 | `kernel/gpu/nvidia/gsp.{h,c}` | 130+ | Error-code constants, platform-ops vtable |
-| `kernel/arch/x86_64/nvidia_gsp_platform.c` | 300 | x86-64 platform shim (partially stubbed — the VFIO harness bypasses it) |
+| `kernel/arch/x86_64/nvidia_gsp_platform.c` | 300 | x86-64 platform shim — all vtable ops wired (BAR0/BAR1 via nvidia_gpu.c, DMA via PMM identity-mapped) |
 | `kernel/arch/arm64/nvidia_gsp_platform_stub.c` | 19 | Jetson linker stub (returns -1 for `nvidia_vbios_platform_load`); ARM64 platform ops to be written |
 | `host-tools/gsp-harness/` | 2000+ | Linux userspace VFIO harness — the primary test driver |
 
@@ -105,6 +105,35 @@ All tests run on the dev machine, not on hardware:
 | `make test-bringup` | 25 | Sig-index algorithm, DMEMMAPPER patcher (legacy FRTS + generic init_cmd parameterised, +3 this session), `gsp_bringup_free` null-safety and idempotence (+2 this session), state-machine guards |
 | `make test-rpc` | 17 | Ring math, init/dtor, null/oversize/not-alive rejection |
 | **Total** | **123** | |
+
+### 1.5 In-kernel test coverage (x86-64 platform shim)
+
+QEMU-runnable Unity tests in `kernel/tests/test_x86_boot.c`. Exercise
+the platform shim ops vtable through `x86_gsp_get_ops_for_testing()`
+which returns the same `&x86_gsp_ops` registered with the shared GSP
+core; reads/writes are safe in QEMU because nvidia_gpu.bar0/bar1
+remain NULL when no NVIDIA GPU is discovered.
+
+| Test | What it pins down |
+|---|---|
+| `test_nvidia_gpu_bar_mmio_accessors_safe` | BAR0/BAR1 pointer + size accessors return NULL/0 when no GPU |
+| `test_gsp_platform_bar0_null_without_gpu` | BAR0 pointer is NULL precondition for sentinel behavior |
+| `test_gsp_dma_alloc_via_pmm` | PMM allocation returns page-aligned address inside the 4 GB identity-map window |
+| `test_x86_gsp_ops_complete` | All 11 vtable slots are non-NULL (catches accidental stub) |
+| `test_x86_gsp_read32_null_bar0_returns_sentinel` | read32 returns 0xBADF5040 for any offset when BAR0 NULL |
+| `test_x86_gsp_write32_null_bar0_no_crash` | write32 is silent no-op when BAR0 NULL |
+| `test_x86_gsp_bar1_null_safe` | bar1_read leaves dst untouched + bar1_write silent when BAR1 NULL |
+| `test_x86_gsp_dma_alloc_zero_size` | dma_alloc(0, ...) returns NULL and zeros out_dma |
+| `test_x86_gsp_dma_alloc_oversized_align` | align > PAGE_SIZE rejected with NULL |
+| `test_x86_gsp_dma_alloc_happy_path` | Aligned VA, VA == PA (identity), buffer zeroed, dma_free returns memory |
+| `test_x86_gsp_dma_free_null_safe` | dma_free(NULL, ...) is no-op |
+| `test_x86_gsp_cache_ops_no_crash` | cache_clean / cache_invalidate / mb don't crash, NULL-safe |
+| `test_x86_gsp_firmware_get_manifest` | All four blobs present + plausible size when ENABLE_GSP_FIRMWARE; NULL/0 otherwise |
+| `test_x86_gsp_firmware_get_invalid_kind` | Out-of-range kind returns {NULL, 0, NULL} |
+| `test_x86_gsp_vbios_get_fwsec_no_gpu` | Returns -1 with NULL out_data when no GPU |
+| `test_gpu_shell_subcommands_safe_without_gpu` | `gpu init` / `gpu sec2` / `gpu vram` / `gpu regs` don't crash without GPU |
+| `test_gsp_firmware_manifest` | Pre-existing — embedded blob sizes, structural |
+| `test_gsp_init_graceful_without_gpu` | Pre-existing — Phase 0 fails cleanly when no platform installed |
 
 ---
 
@@ -171,6 +200,87 @@ triggers BSI, which is what raises the PLM.
 | Empty `reset_method` in sysfs to disable FLR | vfio open still triggers a reset via a different path; subsequent bringup hung |
 | Find the CPUCTL PLM offset in NVIDIA's public headers | Not published (`dev_falcon_v4.h`, `dev_sec_pri.h`, `dev_falcon_v4_addendum.h` on main all checked) |
 | Look for a nouveau/openrm unlock sequence | None exists — those drivers never see the locked state |
+| **Run from bare-metal SLM-OS (no VFIO, no FLR)** | **Also locked. See §2.5 below.** |
+
+### 2.5 Bare-metal bypass attempt — blocked by UEFI POST DEVINIT (2026-04-15)
+
+The hypothesis in §2.2 was that UEFI leaves SEC2 "accessible from
+kernel-mode" after POST. Hardware testing on bare-metal SLM-OS
+(test-pc, no VFIO in the picture at all) invalidates this:
+
+```
+slmos> gpu sec2
+SEC2 Falcon state (PSEC2_BASE=0x840000):
+  CPUCTL        = 0xbadf5620  (priv-lock=yes)
+  HWCFG2        = 0x000067f7  (priv-lock=no)
+  IRQSTAT       = 0xbadf5620
+  MAILBOX0      = 0x00000000  MAILBOX1 = 0x00000000
+  OS            = 0x00000000  DEBUGINFO= 0x00000000
+  ENGCTL        = 0xbadf5620
+  BROM MOD_SEL  = 0xbadf5620
+  BROM PARAADDR = 0xbadf5620
+GSP Falcon state (PGSP_BASE=0x110000):
+  CPUCTL        = 0x00000010  (priv-lock=no)
+  HWCFG2        = 0x000047f7  (priv-lock=no)
+```
+
+Right after UEFI POST and before SLM-OS touches any Falcon register:
+- **SEC2 CPUCTL / BROM / ENGCTL / IRQSTAT** are all priv-locked
+  (0xbadf5620 poison). MAILBOX0/1 and OS/DEBUGINFO reads return 0,
+  i.e. accessible but empty.
+- **GSP Falcon is fully accessible** (CPUCTL=0x10 = HALTED bit,
+  HWCFG2 readable). This is why FWSEC-FRTS runs fine on bare-metal
+  (it targets GSP Falcon).
+
+This means UEFI POST's DEVINIT script raises SEC2's PLM exactly the
+same way VFIO's post-FLR BSI re-run does. There is no FLR on the
+bare-metal path — UEFI itself did the lock. Bare-metal reaches
+FWSEC-FRTS (primary E3.4 blocker on VFIO was already past that on
+VFIO too — milestone for retail GA107), but Booter Load hangs at
+phase 106 (STARTCPU + halt poll) because writing SEC2 CPUCTL.STARTCPU
+has no effect through a priv-locked register.
+
+```
+slmos> gpu init
+[GPU] Starting GSP-RM bringup on GA107...
+[GSP] firmware loaded (version 535.113.01)
+[GPU] Phase 1: FWSEC-FRTS — preparing bringup...
+[VBIOS] read 1048576 bytes via BAR0 PROM window
+[VBIOS] parsed 1048576 bytes, 19 BIT entries
+[GPU] FWSEC: imem=58112 dmem=2432 engine=0x400 ucode=9
+[GPU] WPR2 target: addr=0x17fe00000 size=0x100000
+[GPU] sig: fuse[0x8241e0]=0x3 count=4 ver=0xf idx=2
+[GPU] FWSEC-FRTS SUCCESS — WPR2: lo=0x1ffffe00 hi=0x00000000
+[GPU] Phase 2: Booter Load on SEC2...
+[GPU] Booter Load FAILED at phase 106
+[GPU]   SEC2 CPUCTL=0xbadf5620 (halted=0)
+[GPU]   SEC2 MBOX0=0x02d1d000 (persisted — write path reaches the register)
+```
+
+MAILBOX0 persists the WprMeta IOVA we wrote, confirming the SEC2
+MAILBOX register tier is accessible. Only CPUCTL / BROM / IRQSTAT
+(the tier needed to START the Falcon) is locked. This is the same
+symptom VFIO showed — same root cause.
+
+Conclusion: Option B (bare-metal) in §4.2 does not bypass #185 on
+this particular board (H610M S2H V2 UEFI + GA107). The BSI/DEVINIT
+hardening is baked into the VBIOS script, not the VFIO FLR path.
+Any x86-64 host will hit the same lock after POST, regardless of
+whether VFIO is in the picture.
+
+**What still works on bare-metal that VFIO couldn't do:**
+- End-to-end driver infrastructure validation (platform shim, BAR
+  access, DMA via PMM, VBIOS parse, FWSEC-FRTS)
+- Reproducible FWSEC-FRTS success on retail Ampere
+- `gpu sec2` diagnostic for any future unlock attempt to measure
+  against without the VFIO scaffolding
+
+**What this pushes back to Jetson (Option A):**
+Jetson has no DEVINIT — firmware runtime services come from QSPI
+via SoC pre-boot. SEC2's PLM on Jetson GA10B is governed by SMMU
+stream IDs + SoC-level security monitors (TF-A / BPMP), not a
+VBIOS script. It's a different lock model, and therefore still the
+pragmatic path for reaching Booter Load → GSP-RM.
 
 ---
 
@@ -322,20 +432,24 @@ way to actually reach GPU inference.
 - `kernel/arch/x86_64/nvidia_gsp_firmware.S` — firmware bundling via
   `.incbin`.
 
-**What's stubbed:**
+**What's wired (as of 2026-04-15):**
 
-- `x86_gsp_bar0_read32` / `write32` — stubs; need real ioremap-equivalent
-- `x86_gsp_dma_alloc` — returns NULL; need a physical-address DMA
-  allocator (no IOMMU under SLM-OS) or a basic IOMMU.
-- `x86_gsp_cache_clean` / `invalidate` — no-ops (x86 is cache-coherent
-  over PCIe, so likely safe as no-ops in practice).
+- `x86_gsp_bar0_read32` / `write32` — volatile access via BAR0 pointer from nvidia_gpu.c, bounds-checked
+- `x86_gsp_bar1_read` / `bar1_write` — byte-level volatile copy from BAR1 VRAM aperture
+- `x86_gsp_dma_alloc` / `dma_free` — PMM buddy allocator, identity-mapped VA == PA, zeroed
+- `x86_gsp_cache_clean` / `invalidate` — no-ops (x86 is cache-coherent over PCIe)
+- `gpu init` shell command — calls `gsp_init()` → `gsp_bringup_prepare()` → FWSEC-FRTS → Booter Load → RISC-V start
 
 **Advantages over Option A:**
 
 - Same physical hardware (RTX 3050) as existing validation target.
 - Keeps the x86-64 / Ampere / GA107 story first-class.
-- The #185 blocker goes away — no FLR, no BSI re-run, DEVINIT from
-  UEFI POST persists.
+
+**Previously assumed advantage, now FALSIFIED (2026-04-15):**
+- ~~The #185 blocker goes away — no FLR, no BSI re-run, DEVINIT from
+  UEFI POST persists.~~ → UEFI POST DEVINIT raises the SEC2 PLM
+  itself. See §2.5. Bare-metal reaches FWSEC-FRTS but still can't
+  start SEC2. Option B is no longer a path around #185.
 
 **Risks / costs:**
 
@@ -348,6 +462,16 @@ way to actually reach GPU inference.
   ever plugged into the iGPU, DEVINIT doesn't run on the dGPU and
   we'd need our own DEVINIT interpreter. Currently avoided by having
   the HDMI on the dGPU but brittle.
+- **#185 applies to bare-metal x86-64 just as it does to VFIO x86-64.**
+  Unless a SEC2 PLM unlock sequence can be found, bare-metal stops
+  at the same phase 106 (SEC2 STARTCPU) as VFIO.
+
+**What bare-metal did deliver (validation, not unblock):**
+- Reproducible FWSEC-FRTS success on retail Ampere without VFIO.
+- Confirmed the 1 MB BAR0 PROM window is the right VBIOS source
+  (bare-metal Expansion ROM BAR is unassigned on H610M UEFI).
+- `gpu init` / `gpu sec2` shell commands for future PLM research
+  without the VFIO layer.
 
 **Estimated effort:** weeks-to-months. Significantly larger than
 Option A. Not reachable inside a capstone timeline.

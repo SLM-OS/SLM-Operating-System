@@ -549,6 +549,27 @@ Network Statistics:
   TX errors:  0
 ```
 
+### NVIDIA GPU Command (x86-64 only)
+
+Registered by `nvidia_gpu_register_shell_commands()` in
+`kernel/arch/x86_64/nvidia_gpu.c` when an NVIDIA GPU is discovered
+during PCI enumeration. Available subcommands:
+
+| Subcommand | Description |
+|---|---|
+| `gpu` | Default — print GPU info (chip ID, BARs, PMC_ENABLE, PMC_INTR_HOST) |
+| `gpu init` | Run GSP-RM bringup: Phase 0 firmware load → FWSEC-FRTS → Booter Load → RISC-V start. Reports per-phase state and dumps SEC2 diagnostics on failure |
+| `gpu sec2` | Read SEC2 + GSP Falcon state directly (CPUCTL, HWCFG2, MAILBOX0/1, OS, DEBUGINFO, BROM) without running bringup. Used to diagnose the SEC2 priv-lock state at any point |
+| `gpu vram` | Test VRAM via BAR1 (write pattern, read back) at multiple offsets across the aperture |
+| `gpu regs` | Dump key BAR0 registers (PMC, PTIMER, PBUS, PSTRAPS) |
+
+**Hardware-only:** these subcommands no-op gracefully when no NVIDIA
+GPU is present (e.g., QEMU). `gpu init` requires the firmware blobs
+to be embedded at build time (`ENABLE_GSP_FIRMWARE`). See
+`docs/x86-64-gpu-inference-status.md` for the GSP-RM bringup status
+and `docs/testing/x86-gpu-bringup-2026-04-15.md` for the most recent
+hardware validation report.
+
 ---
 
 ## Implementation

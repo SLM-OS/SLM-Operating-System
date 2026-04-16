@@ -2209,6 +2209,340 @@ static void test_nvidia_gpu_boot42_decode(void)
     TEST_ASSERT_EQUAL_HEX8(0x01, minor);
 }
 
+/*
+ * Test: BAR0/BAR1 MMIO accessors return NULL/0 when no GPU is present.
+ * These are the accessors used by the GSP platform shim to reach
+ * GPU register space and VRAM.
+ */
+extern volatile uint32_t *nvidia_gpu_get_bar0(void);
+extern uint32_t           nvidia_gpu_get_bar0_size(void);
+extern volatile uint8_t  *nvidia_gpu_get_bar1(void);
+extern uint64_t           nvidia_gpu_get_bar1_size(void);
+
+static void test_nvidia_gpu_bar_mmio_accessors_safe(void)
+{
+    if (!nvidia_gpu_is_found()) {
+        TEST_ASSERT_NULL(nvidia_gpu_get_bar0());
+        TEST_ASSERT_EQUAL_UINT32(0, nvidia_gpu_get_bar0_size());
+        TEST_ASSERT_NULL(nvidia_gpu_get_bar1());
+        TEST_ASSERT_EQUAL_UINT64(0, nvidia_gpu_get_bar1_size());
+    } else {
+        TEST_ASSERT_NOT_NULL(nvidia_gpu_get_bar0());
+        TEST_ASSERT_TRUE(nvidia_gpu_get_bar0_size() > 0);
+        TEST_ASSERT_NOT_NULL(nvidia_gpu_get_bar1());
+        TEST_ASSERT_TRUE(nvidia_gpu_get_bar1_size() > 0);
+    }
+}
+
+/*
+ * Test: Platform ops read32 returns sentinel when BAR0 is NULL.
+ * On GPU-less QEMU, gsp_platform is NULL (install was skipped).
+ * Verify the accessor returns NULL as a precondition for the
+ * sentinel behavior.
+ */
+static void test_gsp_platform_bar0_null_without_gpu(void)
+{
+    if (nvidia_gpu_is_found()) {
+        /* Real GPU: BAR0 must be non-NULL */
+        TEST_ASSERT_NOT_NULL(nvidia_gpu_get_bar0());
+        return;
+    }
+    TEST_ASSERT_NULL(nvidia_gpu_get_bar0());
+}
+
+/*
+ * Test: DMA alloc via PMM returns page-aligned memory below 4 GB
+ * (identity-map window). This is the same path x86_gsp_dma_alloc uses.
+ */
+extern void *pmm_alloc_pages(size_t count);
+extern void  pmm_free_pages(void *page, size_t count);
+
+static void test_gsp_dma_alloc_via_pmm(void)
+{
+    void *p = pmm_alloc_pages(1);
+    if (!p) {
+        /* PMM may be exhausted in QEMU — skip gracefully */
+        TEST_PASS();
+        return;
+    }
+
+    /* Page aligned */
+    TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)p & 0xFFF);
+
+    /* Inside the 4 GB identity-map window */
+    TEST_ASSERT_TRUE((uint64_t)(uintptr_t)p < 0x100000000ULL);
+
+    pmm_free_pages(p, 1);
+}
+
+/* ============================================================================
+ * x86-64 GSP Platform Shim Tests
+ *
+ * These exercise the platform ops vtable returned by
+ * x86_gsp_get_ops_for_testing(). Safe to run in QEMU because the
+ * shim's BAR accessors read via the nvidia_gpu.c BAR0/BAR1 pointers,
+ * which are NULL when no NVIDIA GPU is discovered — the code paths
+ * we verify are the null-guards and boundary-case behavior that kick
+ * in before any real MMIO is issued.
+ * ============================================================================ */
+
+#include "../gpu/nvidia/gsp.h"
+#include "pmm.h"
+
+extern const struct gsp_platform_ops *x86_gsp_get_ops_for_testing(void);
+
+/*
+ * Test: vtable exposes all ops (no stub NULL pointers). A future
+ * refactor that accidentally left one slot NULL would be caught here.
+ */
+static void test_x86_gsp_ops_complete(void)
+{
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    TEST_ASSERT_NOT_NULL(ops);
+    TEST_ASSERT_NOT_NULL(ops->read32);
+    TEST_ASSERT_NOT_NULL(ops->write32);
+    TEST_ASSERT_NOT_NULL(ops->bar1_read);
+    TEST_ASSERT_NOT_NULL(ops->bar1_write);
+    TEST_ASSERT_NOT_NULL(ops->dma_alloc);
+    TEST_ASSERT_NOT_NULL(ops->dma_free);
+    TEST_ASSERT_NOT_NULL(ops->cache_clean);
+    TEST_ASSERT_NOT_NULL(ops->cache_invalidate);
+    TEST_ASSERT_NOT_NULL(ops->mb);
+    TEST_ASSERT_NOT_NULL(ops->firmware_get);
+    TEST_ASSERT_NOT_NULL(ops->vbios_get_fwsec);
+}
+
+/*
+ * Test: read32 returns the GPU "uninitialized engine" sentinel when
+ * BAR0 is NULL (QEMU / no GPU). Any offset in the BAR0 address space.
+ * This is the safety net that lets the rest of the GSP bringup code
+ * fail cleanly without de-referencing a NULL pointer.
+ */
+static void test_x86_gsp_read32_null_bar0_returns_sentinel(void)
+{
+    if (nvidia_gpu_is_found()) {
+        TEST_PASS();  /* On real hardware, reads would return real values */
+        return;
+    }
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    /* BAR0 is NULL in QEMU; every offset should return the sentinel. */
+    TEST_ASSERT_EQUAL_HEX32(0xBADF5040u, ops->read32(0x000));      /* PMC_BOOT_0 */
+    TEST_ASSERT_EQUAL_HEX32(0xBADF5040u, ops->read32(0xA00));      /* PMC_BOOT_42 */
+    TEST_ASSERT_EQUAL_HEX32(0xBADF5040u, ops->read32(0x110100));   /* GSP CPUCTL */
+    TEST_ASSERT_EQUAL_HEX32(0xBADF5040u, ops->read32(0x840100));   /* SEC2 CPUCTL */
+}
+
+/*
+ * Test: write32 is a silent no-op when BAR0 is NULL. The absence of
+ * a crash IS the check — if this test completes without faulting,
+ * the null-guard worked.
+ */
+static void test_x86_gsp_write32_null_bar0_no_crash(void)
+{
+    if (nvidia_gpu_is_found()) {
+        TEST_PASS();
+        return;
+    }
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    ops->write32(0x000, 0xdeadbeef);
+    ops->write32(0x840100, 0x00000001);
+    TEST_PASS();
+}
+
+/*
+ * Test: bar1_read / bar1_write are silent no-ops when BAR1 is NULL.
+ * Verify by: (a) no crash, (b) destination buffer unchanged.
+ */
+static void test_x86_gsp_bar1_null_safe(void)
+{
+    if (nvidia_gpu_is_found()) {
+        TEST_PASS();
+        return;
+    }
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    uint8_t dst[16];
+    for (int i = 0; i < 16; i++) dst[i] = 0xA5;
+    ops->bar1_read(0, dst, 16);
+    /* dst should be untouched (BAR1 is NULL → early return). */
+    for (int i = 0; i < 16; i++) {
+        TEST_ASSERT_EQUAL_HEX8(0xA5, dst[i]);
+    }
+    const uint8_t src[16] = {0};
+    ops->bar1_write(0, src, 16);
+    TEST_PASS();
+}
+
+/*
+ * Test: dma_alloc with size=0 returns NULL and writes 0 to out_dma.
+ * Boundary case — zero-length DMA must not allocate, and callers
+ * shouldn't see a stale out_dma.
+ */
+static void test_x86_gsp_dma_alloc_zero_size(void)
+{
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    uint64_t dma = 0xdeadbeef;
+    void *p = ops->dma_alloc(0, 4096, &dma);
+    TEST_ASSERT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT64(0, dma);
+}
+
+/*
+ * Test: dma_alloc with alignment greater than PAGE_SIZE returns NULL.
+ * PMM can't guarantee more than page alignment, so the shim must
+ * reject these rather than return a misaligned buffer.
+ */
+static void test_x86_gsp_dma_alloc_oversized_align(void)
+{
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    uint64_t dma = 0xdeadbeef;
+    void *p = ops->dma_alloc(8192, PAGE_SIZE * 2, &dma);
+    TEST_ASSERT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT64(0, dma);
+}
+
+/*
+ * Test: dma_alloc succeeds at page alignment, returns page-aligned
+ * VA, zeroes the buffer, and dma_free returns the memory. Exercises
+ * the full happy path through the PMM-backed allocator.
+ */
+static void test_x86_gsp_dma_alloc_happy_path(void)
+{
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    uint64_t dma = 0;
+    void *p = ops->dma_alloc(4096, 256, &dma);  /* Falcon DMA alignment */
+    if (!p) {
+        TEST_PASS();  /* PMM may be exhausted in QEMU */
+        return;
+    }
+    /* Page-aligned VA */
+    TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)p & 0xFFF);
+    /* VA == PA (identity map) */
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)p, dma);
+    /* Zeroed by the shim */
+    uint8_t *bp = (uint8_t *)p;
+    for (int i = 0; i < 4096; i++) {
+        TEST_ASSERT_EQUAL_HEX8(0, bp[i]);
+    }
+    ops->dma_free(p, 4096);
+    TEST_PASS();
+}
+
+/*
+ * Test: dma_free(NULL, ...) is a no-op. Exercise defensive-null path.
+ */
+static void test_x86_gsp_dma_free_null_safe(void)
+{
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    ops->dma_free(NULL, 4096);
+    TEST_PASS();
+}
+
+/*
+ * Test: cache_clean / cache_invalidate / mb do not crash. On x86-64
+ * these are no-ops (coherent DMA) or a single mfence — guard against
+ * a future port that adds real work here without null-checking.
+ */
+static void test_x86_gsp_cache_ops_no_crash(void)
+{
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    uint8_t buf[64];
+    ops->cache_clean(buf, sizeof(buf));
+    ops->cache_invalidate(buf, sizeof(buf));
+    ops->cache_clean(NULL, 0);         /* Defensive */
+    ops->cache_invalidate(NULL, 0);
+    ops->mb();
+    TEST_PASS();
+}
+
+/*
+ * Test: firmware_get returns a plausible blob manifest. On builds with
+ * ENABLE_GSP_FIRMWARE, gsp.bin must be multi-MB; the three Falcon
+ * blobs must be 1 KB — 1 MB. On builds without, all entries are
+ * {NULL, 0, NULL} and the bringup code's phase-0 check aborts.
+ */
+static void test_x86_gsp_firmware_get_manifest(void)
+{
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    struct gsp_firmware_blob b;
+    for (int k = 0; k < GSP_FW_KIND_COUNT; k++) {
+        ops->firmware_get((enum gsp_firmware_kind)k, &b);
+#if defined(ENABLE_GSP_FIRMWARE)
+        TEST_ASSERT_NOT_NULL(b.data);
+        TEST_ASSERT_TRUE(b.size > 0);
+        TEST_ASSERT_NOT_NULL(b.version);
+        if (k == GSP_FW_GSP) {
+            TEST_ASSERT_TRUE(b.size > 1024u * 1024u);
+            TEST_ASSERT_TRUE(b.size < 100u * 1024u * 1024u);
+        } else {
+            TEST_ASSERT_TRUE(b.size > 1024u);
+            TEST_ASSERT_TRUE(b.size < 1024u * 1024u);
+        }
+#else
+        TEST_ASSERT_NULL(b.data);
+        TEST_ASSERT_EQUAL_UINT(0, b.size);
+#endif
+    }
+}
+
+/*
+ * Test: firmware_get with out-of-range kind returns {NULL, 0, NULL}.
+ * Catches future enum additions that update GSP_FW_KIND_COUNT but
+ * miss the switch statement.
+ */
+static void test_x86_gsp_firmware_get_invalid_kind(void)
+{
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    struct gsp_firmware_blob b = { .data = (const uint8_t *)0x1, .size = 1, .version = "x" };
+    ops->firmware_get((enum gsp_firmware_kind)0xFFFF, &b);
+    TEST_ASSERT_NULL(b.data);
+    TEST_ASSERT_EQUAL_UINT(0, b.size);
+    TEST_ASSERT_NULL(b.version);
+}
+
+/*
+ * Test: vbios_get_fwsec returns -1 with {NULL, 0} when no GPU. The
+ * fwsec accessor tries to load VBIOS; on QEMU with no GPU it can't
+ * find a PCI address, so the whole chain fails cleanly.
+ */
+static void test_x86_gsp_vbios_get_fwsec_no_gpu(void)
+{
+    if (nvidia_gpu_is_found()) {
+        TEST_PASS();
+        return;
+    }
+    const struct gsp_platform_ops *ops = x86_gsp_get_ops_for_testing();
+    const void *data = (const void *)0x1;
+    size_t size = 1;
+    int rc = ops->vbios_get_fwsec(&data, &size);
+    TEST_ASSERT_TRUE(rc < 0);
+    TEST_ASSERT_NULL(data);
+    TEST_ASSERT_EQUAL_UINT(0, size);
+}
+
+/*
+ * Test: `gpu init` and `gpu sec2` subcommands don't crash when called
+ * on a GPU-less QEMU host. The cmd_gpu handler has an early exit when
+ * nvidia_gpu.found is false; this test verifies the early-exit guard
+ * is wired for every subcommand — including the ones added this
+ * session ("init", "sec2"). The return value of shell_execute is
+ * ignored because the shell framework has its own conventions
+ * (see test_nvidia_gpu_shell_command_registered which is a separate
+ * pre-existing check).
+ */
+static void test_gpu_shell_subcommands_safe_without_gpu(void)
+{
+    if (nvidia_gpu_is_found()) {
+        TEST_PASS();  /* Subcommands would execute the full path */
+        return;
+    }
+    extern int shell_execute(const char *cmdline);
+    (void)shell_execute("gpu init");  /* No crash is the check */
+    (void)shell_execute("gpu sec2");
+    (void)shell_execute("gpu vram");
+    (void)shell_execute("gpu regs");
+    TEST_PASS();
+}
+
 /* ============================================================================
  * PCI Tests
  * ============================================================================ */
@@ -3036,6 +3370,23 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_nvidia_gpu_vram_test_without_gpu);
     RUN_TEST(test_nvidia_gpu_accessors_safe);
     RUN_TEST(test_nvidia_gpu_boot42_decode);
+    RUN_TEST(test_nvidia_gpu_bar_mmio_accessors_safe);
+    RUN_TEST(test_gsp_platform_bar0_null_without_gpu);
+    RUN_TEST(test_gsp_dma_alloc_via_pmm);
+    /* Platform shim vtable tests (all 11 ops exercised) */
+    RUN_TEST(test_x86_gsp_ops_complete);
+    RUN_TEST(test_x86_gsp_read32_null_bar0_returns_sentinel);
+    RUN_TEST(test_x86_gsp_write32_null_bar0_no_crash);
+    RUN_TEST(test_x86_gsp_bar1_null_safe);
+    RUN_TEST(test_x86_gsp_dma_alloc_zero_size);
+    RUN_TEST(test_x86_gsp_dma_alloc_oversized_align);
+    RUN_TEST(test_x86_gsp_dma_alloc_happy_path);
+    RUN_TEST(test_x86_gsp_dma_free_null_safe);
+    RUN_TEST(test_x86_gsp_cache_ops_no_crash);
+    RUN_TEST(test_x86_gsp_firmware_get_manifest);
+    RUN_TEST(test_x86_gsp_firmware_get_invalid_kind);
+    RUN_TEST(test_x86_gsp_vbios_get_fwsec_no_gpu);
+    RUN_TEST(test_gpu_shell_subcommands_safe_without_gpu);
     RUN_TEST(test_nvidia_gpu_shell_command_registered);
     RUN_TEST(test_pci_shell_command_registered);
 

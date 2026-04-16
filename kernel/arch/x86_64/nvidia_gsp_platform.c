@@ -18,6 +18,8 @@
 #include "../../gpu/nvidia/nvidia_vbios.h"
 #include "pci.h"
 #include "uart.h"
+#include "pmm.h"
+#include "string.h"
 
 /* ---- Firmware symbols from nvidia_gsp_firmware.S ----
  *
@@ -72,21 +74,121 @@ static void x86_gsp_firmware_get(enum gsp_firmware_kind kind,
     out->version = NULL;
 }
 
-/* ---- BAR0 / BAR1 / DMA / cache / barrier ----
+/* ---- BAR0/BAR1 accessors from nvidia_gpu.c ---- */
+extern volatile uint32_t *nvidia_gpu_get_bar0(void);
+extern uint32_t           nvidia_gpu_get_bar0_size(void);
+extern volatile uint8_t  *nvidia_gpu_get_bar1(void);
+extern uint64_t           nvidia_gpu_get_bar1_size(void);
+
+/* ---- BAR0 register access ----
  *
- * Stubbed for now: E2+ fills these in. Making the vtable load
- * clean first lets the firmware accessor be tested in isolation,
- * which is what the E1 regression tests exercise.
- */
-static uint32_t x86_gsp_bar0_read32(uint32_t offset) { (void)offset; return 0xBADF5040; }
-static void     x86_gsp_bar0_write32(uint32_t offset, uint32_t v) { (void)offset; (void)v; }
-static void     x86_gsp_bar1_read(uint32_t o, void *d, size_t n) { (void)o; (void)d; (void)n; }
-static void     x86_gsp_bar1_write(uint32_t o, const void *s, size_t n) { (void)o; (void)s; (void)n; }
-static void    *x86_gsp_dma_alloc(size_t s, size_t a, uint64_t *p) { (void)s; (void)a; if (p) *p = 0; return NULL; }
-static void     x86_gsp_dma_free(void *p, size_t s) { (void)p; (void)s; }
-static void     x86_gsp_cache_clean(const void *a, size_t s) { (void)a; (void)s; }
-static void     x86_gsp_cache_invalidate(void *a, size_t s) { (void)a; (void)s; }
-static void     x86_gsp_mb(void) { __asm__ volatile("mfence" ::: "memory"); }
+ * BAR0 is the GPU's 16 MB MMIO register space. Offsets passed by the
+ * shared GSP code are relative to BAR0 base. The volatile qualifier
+ * on the pointer from nvidia_gpu.c prevents read coalescing — see
+ * docs/nvidia-gsp.md §"Platform Shim Contract" and #163. */
+static uint32_t x86_gsp_bar0_read32(uint32_t offset)
+{
+    volatile uint32_t *bar0 = nvidia_gpu_get_bar0();
+    uint32_t size = nvidia_gpu_get_bar0_size();
+    if (!bar0 || offset + 4 > size)
+        return 0xBADF5040u;
+    return bar0[offset / 4];
+}
+
+static void x86_gsp_bar0_write32(uint32_t offset, uint32_t value)
+{
+    volatile uint32_t *bar0 = nvidia_gpu_get_bar0();
+    uint32_t size = nvidia_gpu_get_bar0_size();
+    if (!bar0 || offset + 4 > size)
+        return;
+    bar0[offset / 4] = value;
+}
+
+/* ---- BAR1 (VRAM) byte access ----
+ *
+ * BAR1 is the VRAM aperture. On x86-64, MMIO reads/writes through
+ * the identity-mapped BAR1 address are strongly ordered (UC/WC
+ * depending on MTRR), so no extra fencing is needed. */
+static void x86_gsp_bar1_read(uint32_t offset, void *dst, size_t n)
+{
+    volatile uint8_t *bar1 = nvidia_gpu_get_bar1();
+    uint64_t size = nvidia_gpu_get_bar1_size();
+    if (!bar1 || (uint64_t)offset + n > size)
+        return;
+    /* Byte-by-byte from volatile MMIO — memcpy is not safe on
+     * volatile pointers (compiler may optimize to non-volatile). */
+    uint8_t *d = (uint8_t *)dst;
+    for (size_t i = 0; i < n; i++)
+        d[i] = bar1[offset + i];
+}
+
+static void x86_gsp_bar1_write(uint32_t offset, const void *src, size_t n)
+{
+    volatile uint8_t *bar1 = nvidia_gpu_get_bar1();
+    uint64_t size = nvidia_gpu_get_bar1_size();
+    if (!bar1 || (uint64_t)offset + n > size)
+        return;
+    const uint8_t *s = (const uint8_t *)src;
+    for (size_t i = 0; i < n; i++)
+        bar1[offset + i] = s[i];
+}
+
+/* ---- DMA allocation via PMM ----
+ *
+ * On x86-64 bare-metal the first 4 GB is identity-mapped
+ * (trampoline32.S), so VA == PA — no IOMMU translation needed.
+ * The GPU does direct DMA to physical addresses.
+ *
+ * PMM returns page-aligned (4 KB) memory, which satisfies every
+ * alignment the GSP boot sequence actually requests (Falcon DMA
+ * needs 256-byte alignment for DMATRFBASE). */
+static void *x86_gsp_dma_alloc(size_t size, size_t align, uint64_t *out_dma)
+{
+    if (size == 0) {
+        if (out_dma) *out_dma = 0;
+        return NULL;
+    }
+
+    /* PMM always returns page-aligned. Reject over-page alignment
+     * that the buddy allocator can't guarantee (no current caller
+     * needs > 4 KB alignment). */
+    if (align > PAGE_SIZE) {
+        uart_printf("[GSP-DMA] unsupported alignment 0x%lx > PAGE_SIZE\n",
+                    (unsigned long)align);
+        if (out_dma) *out_dma = 0;
+        return NULL;
+    }
+
+    size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    void *ptr = pmm_alloc_pages(pages);
+    if (!ptr) {
+        if (out_dma) *out_dma = 0;
+        return NULL;
+    }
+
+    /* Zero the DMA buffer — GPU expects clean memory for command
+     * rings, status pages, and ucode staging areas. */
+    memset(ptr, 0, pages * PAGE_SIZE);
+
+    /* Identity-mapped: VA == PA. */
+    if (out_dma) *out_dma = (uint64_t)(uintptr_t)ptr;
+    return ptr;
+}
+
+static void x86_gsp_dma_free(void *ptr, size_t size)
+{
+    if (!ptr) return;
+    size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    pmm_free_pages(ptr, pages);
+}
+
+/* ---- Cache / barrier ----
+ *
+ * x86-64 has coherent DMA — no cache maintenance needed.
+ * mfence serializes all loads/stores (full barrier). */
+static void x86_gsp_cache_clean(const void *a, size_t s) { (void)a; (void)s; }
+static void x86_gsp_cache_invalidate(void *a, size_t s)  { (void)a; (void)s; }
+static void x86_gsp_mb(void) { __asm__ volatile("mfence" ::: "memory"); }
 /* ---- VBIOS loader (E2 / P3-3) ----
  *
  * Read the NVIDIA VBIOS via the PCI Expansion ROM BAR on our GPU,
@@ -98,7 +200,11 @@ static void     x86_gsp_mb(void) { __asm__ volatile("mfence" ::: "memory"); }
  * boot-time heap allocation out of the path; the copy happens once
  * per boot and the image stays resident for any later GSP re-init.
  */
-#define X86_VBIOS_BUF_SIZE  (256 * 1024)
+/* Buffer sized to hold the full BAR0 PROM window (1 MB). Ampere
+ * VBIOSes can be up to 1 MB — the 256 KB sizing that predated the
+ * BAR0 PROM window path was not large enough to include FWSEC ucode
+ * on GA10x. Bare-metal has abundant memory; the BSS cost is fine. */
+#define X86_VBIOS_BUF_SIZE  (1024 * 1024)
 alignas(64) static uint8_t x86_vbios_buf[X86_VBIOS_BUF_SIZE];
 static struct nvidia_vbios x86_vbios;
 static bool x86_vbios_loaded;
@@ -215,8 +321,72 @@ static int x86_read_expansion_rom(uint8_t bus, uint8_t dev, uint8_t func,
 }
 
 /*
+ * NV_PROM_DATA — BAR0 offset that maps the GPU's SPI flash as a
+ * 1 MB MMIO window. From NVIDIA open-gpu-kernel-modules
+ * `src/common/inc/swref/published/turing/tu102/dev_ext_devices.h`.
+ * Used on Turing+ including all Ampere. This is the authoritative
+ * method the openrm and proprietary drivers use — reads the actual
+ * SPI flash contents regardless of the PCI Expansion ROM BAR.
+ */
+#define NV_PROM_DATA_OFFSET   0x00300000u
+#define NV_PROM_DATA_SIZE     0x00100000u    /* 1 MB */
+
+/*
+ * Read the VBIOS via BAR0's PROM window (BAR0 + 0x300000).
+ * Returns byte count copied on success, -1 on failure.
+ * Uses 32-bit reads matching what openrm does.
+ */
+static int x86_read_vbios_prom_window(uint8_t *dst, size_t max)
+{
+    volatile uint32_t *bar0 = nvidia_gpu_get_bar0();
+    uint32_t bar0_size = nvidia_gpu_get_bar0_size();
+
+    if (!bar0 || bar0_size < NV_PROM_DATA_OFFSET + NV_PROM_DATA_SIZE) {
+        uart_puts("[VBIOS] BAR0 too small for PROM window\n");
+        return -1;
+    }
+
+    /* Read up to max bytes (capped by buffer and PROM window size) */
+    size_t copy_len = max;
+    if (copy_len > NV_PROM_DATA_SIZE)
+        copy_len = NV_PROM_DATA_SIZE;
+
+    const volatile uint32_t *prom = &bar0[NV_PROM_DATA_OFFSET / 4];
+
+    /* Validate PCI expansion ROM signature at the start */
+    uint32_t first_word = prom[0];
+    if ((first_word & 0xFFFF) != 0xAA55) {
+        uart_printf("[VBIOS] PROM window: no ROM signature (got 0x%04x)\n",
+                    first_word & 0xFFFF);
+        return -1;
+    }
+
+    /* 32-bit reads into the buffer */
+    uint32_t *d = (uint32_t *)dst;
+    size_t words = copy_len / 4;
+    for (size_t i = 0; i < words; i++)
+        d[i] = prom[i];
+
+    /* Handle trailing bytes if copy_len is not 4-aligned */
+    size_t tail = copy_len & 3;
+    if (tail) {
+        uint32_t last = prom[words];
+        uint8_t *bp = dst + words * 4;
+        for (size_t i = 0; i < tail; i++)
+            bp[i] = (uint8_t)(last >> (i * 8));
+    }
+
+    uart_printf("[VBIOS] read %u bytes via BAR0 PROM window\n",
+                (unsigned)copy_len);
+    return (int)copy_len;
+}
+
+/*
  * Shared-layer entry: platform-provided VBIOS loader. Called once
  * by the GSP bringup code before anything that needs FWSEC. Idempotent.
+ *
+ * Tries the BAR0 PROM window first (authoritative, always works on
+ * Turing+), falls back to the PCI Expansion ROM BAR.
  */
 int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
 {
@@ -226,14 +396,20 @@ int nvidia_vbios_platform_load(const uint8_t **out_data, size_t *out_size)
         return x86_vbios.parsed_ok ? 0 : -1;
     }
 
-    uint8_t bus, dev, func;
-    if (nvidia_gpu_get_pci_address(&bus, &dev, &func) < 0)
-        return -1;
+    /* Path 1: BAR0 PROM window (preferred — doesn't need ROM BAR) */
+    int copied = x86_read_vbios_prom_window(x86_vbios_buf, sizeof(x86_vbios_buf));
 
-    int copied = x86_read_expansion_rom(bus, dev, func,
-                                        x86_vbios_buf, sizeof(x86_vbios_buf));
+    /* Path 2: PCI Expansion ROM BAR (fallback) */
     if (copied <= 0) {
-        uart_puts("[VBIOS] expansion ROM not readable\n");
+        uint8_t bus, dev, func;
+        if (nvidia_gpu_get_pci_address(&bus, &dev, &func) < 0)
+            return -1;
+        copied = x86_read_expansion_rom(bus, dev, func,
+                                        x86_vbios_buf, sizeof(x86_vbios_buf));
+    }
+
+    if (copied <= 0) {
+        uart_puts("[VBIOS] no readable VBIOS source\n");
         return -1;
     }
 
@@ -296,6 +472,21 @@ void x86_gsp_platform_install(void)
 {
     extern const struct gsp_platform_ops *gsp_platform;
     gsp_platform = &x86_gsp_ops;
+}
+
+/*
+ * Accessor for tests — returns the vtable regardless of whether a
+ * GPU was discovered. Tests exercise BAR/DMA/firmware paths through
+ * this pointer without needing a real GA10x device.
+ *
+ * The BAR accessors gracefully handle a NULL BAR0/BAR1 (which is the
+ * state in QEMU without an NVIDIA GPU), returning the GPU's own
+ * "uninitialized engine" sentinel 0xBADF5040 for reads and ignoring
+ * writes. That's what makes them safe to test.
+ */
+const struct gsp_platform_ops *x86_gsp_get_ops_for_testing(void)
+{
+    return &x86_gsp_ops;
 }
 
 #endif /* PLATFORM_X86_64 */
