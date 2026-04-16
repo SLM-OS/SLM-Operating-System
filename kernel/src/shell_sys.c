@@ -2344,7 +2344,50 @@ int cmd_eviction(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: eviction [policy [<name>] | stats]\r\n");
+    if (strcmp(argv[1], "trajectory") == 0) {
+        /* Pull the last N entries (default 16) of the CACHEUS weight
+         * trajectory. Empty if CACHEUS is not the active policy or the
+         * ring is empty. */
+        uint32_t requested = 16;
+        if (argc >= 3) {
+            uint32_t v;
+            if (shell_parse_uint(argv[2], &v) < 0 || v == 0) {
+                uart_puts("eviction trajectory: count must be a positive integer\r\n");
+                return 1;
+            }
+            if (v > 128) v = 128;
+            requested = v;
+        }
+        static RustTrajectoryEntry traj[128];
+        int32_t n = rust_eviction_get_trajectory(traj, requested);
+        if (n < 0) {
+            uart_puts("eviction trajectory: invalid request\r\n");
+            return 1;
+        }
+        uart_printf("CACHEUS trajectory: %d entries (policy: %s)\r\n\r\n",
+                    n, name_buf);
+        if (n == 0) {
+            uart_puts("(no trajectory available — CACHEUS must be installed "
+                      "and feedback received)\r\n");
+            return 0;
+        }
+        uart_puts("Time(ms)    Experts  Weights (basis points, 1 bp = 0.01%)\r\n");
+        uart_puts("----------  -------  ------------------------------------\r\n");
+        uint64_t t0 = traj[0].timestamp_ns;
+        for (int32_t i = 0; i < n; i++) {
+            uint64_t rel_ms = (traj[i].timestamp_ns - t0) / 1000000ULL;
+            uart_printf("%10lu  %7u ", (unsigned long)rel_ms, traj[i].n_experts);
+            for (uint32_t k = 0; k < traj[i].n_experts && k < 5; k++) {
+                uint32_t bp = traj[i].weights_bp[k];
+                /* Render as D.DD%% with no float arithmetic. */
+                uart_printf(" %3u.%02u%%", bp / 100, bp % 100);
+            }
+            uart_puts("\r\n");
+        }
+        return 0;
+    }
+
+    uart_puts("Usage: eviction [policy [<name>] | stats | trajectory [N]]\r\n");
     return 1;
 }
 

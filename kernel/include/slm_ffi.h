@@ -342,6 +342,22 @@ typedef struct {
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
+/* CACHEUS weight trajectory entry (#111). Weights are in integer
+ * basis points (0..10000, 1 bp = 0.01%) to keep the kernel's
+ * -mgeneral-regs-only code float-free. */
+typedef struct {
+    uint64_t timestamp_ns;
+    uint32_t n_experts;
+    uint32_t _pad;
+    uint32_t weights_bp[5];
+} RustTrajectoryEntry;
+
+/* Copy the CACHEUS weight trajectory into `out`, oldest-first.
+ * Returns the number of entries written (>=0), 0 if no CACHEUS policy
+ * is installed or the trajectory is empty, -1 on invalid arguments. */
+extern int32_t rust_eviction_get_trajectory(
+    RustTrajectoryEntry *out, uint32_t max_entries);
+
 /* Per-policy average select_victim latency in nanoseconds over
  * `iterations` calls. Returns UINT64_MAX on error (unknown policy,
  * feature off, bogus clock, zero iterations). Used by the M9 bench

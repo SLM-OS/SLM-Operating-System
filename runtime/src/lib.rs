@@ -1340,6 +1340,93 @@ pub unsafe extern "C" fn rust_eviction_get_stats(
     0
 }
 
+/// One record in the CACHEUS weight trajectory (#111).
+///
+/// Caller passes an array of `RustTrajectoryEntry` and the FFI fills
+/// oldest-first. `n_experts` indicates how many weight slots are
+/// populated; remaining slots are zero.
+///
+/// Weights are reported as integer basis points (0..10000, 1 bp = 0.01%)
+/// so the kernel's `-mgeneral-regs-only` C code can read / print them
+/// without pulling in floating-point arithmetic. This matches the
+/// convention already used for `expert_weights_bp` in `RustEvictionStats`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RustTrajectoryEntry {
+    pub timestamp_ns: u64,
+    pub n_experts: u32,
+    pub _pad: u32,
+    pub weights_bp: [u32; 5],
+}
+
+/// Copy the CACHEUS weight trajectory into `out`, oldest-first.
+///
+/// Returns the number of entries written (≤ `max_entries`). Returns
+/// 0 if tracing is off, the active policy is not an ensemble, or the
+/// ring is empty. Returns -1 on null/invalid arguments.
+///
+/// # Safety
+/// `out` must point to a `max_entries`-long array of
+/// `RustTrajectoryEntry`. Caller retains ownership.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_get_trajectory(
+    out: *mut RustTrajectoryEntry,
+    max_entries: u32,
+) -> i32 {
+    if out.is_null() || max_entries == 0 { return -1; }
+
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (out, max_entries); 0 }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        use mm::eviction::{self, TrajectoryEntry};
+        // Stage into a stack buffer to avoid borrowing the registry
+        // lock while writing caller memory. 128 entries × 32 bytes
+        // = 4 KB — matches the ring capacity and keeps the stack
+        // footprint bounded.
+        let mut staged: [TrajectoryEntry; 128] = [TrajectoryEntry {
+            timestamp_ns: 0,
+            n_experts: 0,
+            weights: [0.0; 5],
+        }; 128];
+        let copied = eviction::with_active_policy(|p| {
+            // Only CacheusSelector exposes a trajectory; others fall
+            // through to the default `None` impl.
+            let ensemble = p.ensemble_trajectory();
+            match ensemble {
+                Some(slice) => {
+                    // Fast path: the ring hasn't wrapped, so as_slices()
+                    // returned a single contiguous front half.
+                    let n = slice.len().min(staged.len());
+                    staged[..n].copy_from_slice(&slice[..n]);
+                    n
+                }
+                None => 0,
+            }
+        }).unwrap_or(0);
+
+        let to_copy = copied.min(max_entries as usize);
+        for i in 0..to_copy {
+            let src = &staged[i];
+            let mut dst = RustTrajectoryEntry {
+                timestamp_ns: src.timestamp_ns,
+                n_experts: src.n_experts,
+                _pad: 0,
+                weights_bp: [0; 5],
+            };
+            for (k, w) in src.weights.iter().take(5).enumerate() {
+                // Basis points: clamp to [0, 1] then scale with a
+                // half-ulp bias so 0.9999 rounds to 10000.
+                let bp = (w.clamp(0.0, 1.0) * 10_000.0 + 0.5) as u32;
+                dst.weights_bp[k] = bp;
+            }
+            core::ptr::write(out.add(i), dst);
+        }
+        to_copy as i32
+    }
+}
+
 /// Comprehensive Rust-internal tests for the eviction subsystem.
 ///
 /// Returns the number of failures. 0 on success. When the
@@ -1568,6 +1655,67 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         let cafter = eviction::policy_counters();
         check!(b"counters_skip_empty_select\0",
                cbefore.decisions == cafter.decisions);
+
+        puts(b"\n-- eviction: CACHEUS trajectory (#111) --\n\0");
+
+        // Install CACHEUS and drive a few decisions + feedback cycles.
+        eviction::set_eviction_policy(Box::new(mm::eviction::CacheusSelector::ml_only()));
+
+        // An atomic (non-ensemble) policy returns 0 entries via the FFI.
+        eviction::reset_to_default();
+        let mut empty_out: [RustTrajectoryEntry; 4] = [RustTrajectoryEntry {
+            timestamp_ns: 0, n_experts: 0, _pad: 0, weights_bp: [0; 5],
+        }; 4];
+        let zero_entries = unsafe {
+            rust_eviction_get_trajectory(empty_out.as_mut_ptr(), 4)
+        };
+        check!(b"trajectory_zero_for_atomic_policy\0", zero_entries == 0);
+
+        // Re-install CACHEUS, make decisions, give feedback, and
+        // expect trajectory entries to accumulate.
+        eviction::set_eviction_policy(Box::new(mm::eviction::CacheusSelector::ml_only()));
+        for _ in 0..3 {
+            let _ = eviction::select_victim(&cands);
+        }
+        eviction::update_feedback(cands[0].block_id, true);
+        eviction::update_feedback(cands[0].block_id, false);
+
+        let mut out: [RustTrajectoryEntry; 16] = [RustTrajectoryEntry {
+            timestamp_ns: 0, n_experts: 0, _pad: 0, weights_bp: [0; 5],
+        }; 16];
+        let n = unsafe {
+            rust_eviction_get_trajectory(out.as_mut_ptr(), 16)
+        };
+        check!(b"trajectory_records_feedback_events\0", n >= 1);
+
+        // Every recorded entry is well-formed: non-zero expert count
+        // and weights sum close to 10000 bp (= 1.0 before rounding).
+        let mut malformed = 0i32;
+        for i in 0..n as usize {
+            let e = &out[i];
+            if e.n_experts == 0 || e.n_experts > 5 { malformed += 1; continue; }
+            let mut sum_bp = 0u32;
+            for k in 0..e.n_experts as usize {
+                sum_bp += e.weights_bp[k];
+            }
+            // Rounding noise can leave the sum inside [9998, 10002].
+            if sum_bp < 9990 || sum_bp > 10010 { malformed += 1; }
+        }
+        check!(b"trajectory_entries_well_formed\0", malformed == 0);
+
+        // max_entries=0 is an invalid request (-1), not a noop.
+        let neg = unsafe {
+            rust_eviction_get_trajectory(out.as_mut_ptr(), 0)
+        };
+        check!(b"trajectory_zero_max_is_error\0", neg == -1);
+
+        // NULL pointer is rejected.
+        let nullrc = unsafe {
+            rust_eviction_get_trajectory(core::ptr::null_mut(), 4)
+        };
+        check!(b"trajectory_null_out_is_error\0", nullrc == -1);
+
+        eviction::reset_to_default();
 
         puts(b"\n-- eviction: classical policies --\n\0");
 

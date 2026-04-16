@@ -33,7 +33,8 @@ pub mod mlp;
 pub mod cacheus;
 pub mod tracker;
 
-pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType};
+pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType,
+    TrajectoryEntry, MAX_EXPERTS};
 pub use registry::{
     get_eviction_policy_name, policy_counters, reset_to_default, score,
     select_victim, set_eviction_policy, update_feedback, with_active_policy,
