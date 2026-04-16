@@ -211,7 +211,7 @@ static void test_net_strerror_coverage(void)
 {
     /* Every named enum value must have a string that isn't "unknown" */
     TEST_ASSERT_EQUAL_STRING("ok",                       net_strerror(NET_OK));
-    TEST_ASSERT_EQUAL_STRING("error",                    net_strerror(NET_E_GENERIC));
+    TEST_ASSERT_EQUAL_STRING("unspecified error",        net_strerror(NET_E_GENERIC));
     TEST_ASSERT_EQUAL_STRING("network not initialized",  net_strerror(NET_E_NOT_INIT));
     TEST_ASSERT_EQUAL_STRING("no driver registered",     net_strerror(NET_E_NO_DRIVER));
     TEST_ASSERT_EQUAL_STRING("device not found",        net_strerror(NET_E_NO_DEVICE));
@@ -628,7 +628,7 @@ static void test_net_driver_registered(void)
  * lwIP netif comes up with the default 10.0.2.15 address.
  *
  * If the device is missing (no -netdev / -device on the QEMU command
- * line) the driver init returns -1 and we skip rather than fail —
+ * line) the driver init returns -1 and the test skips rather than failing —
  * this lets the test kernel run in environments without networking.
  */
 static void test_net_init_live(void)
@@ -692,8 +692,8 @@ static void test_net_poll_after_init(void)
  * (issue #197).
  *
  * After net_init(), the dhcp_enabled flag should be true and
- * dhcp_status should be PENDING (we haven't polled enough for a bind
- * yet) or BOUND (if QEMU's SLIRP answered the DISCOVER immediately,
+ * dhcp_status should be PENDING (not enough poll iterations yet for
+ * a bind) or BOUND (if QEMU's SLIRP answered the DISCOVER immediately,
  * which it often does). If the flag is OFF at build time, status is
  * DISABLED and dhcp_enabled is false.
  */
@@ -773,7 +773,7 @@ static void test_net_dhcp_binds(void)
  * The netif status callback installed by slm_netif_init() is supposed
  * to log "DHCP bound: ..." on the false→true transition of
  * dhcp_supplied_address(). We can't capture log output from Unity, so
- * we expose net_get_dhcp_bind_count() as a counter and assert it
+ * net_get_dhcp_bind_count() exposes a counter; this test asserts it
  * advanced during the live DHCP test. Runs *after* test_net_dhcp_binds
  * (which drives the netif to BOUND via QEMU SLIRP).
  *
@@ -873,10 +873,11 @@ static void test_net_dhcp_fallback(void)
  * A return value of 0 proves the full TX path works: net_driver.send →
  * virtqueue add_buf → device kick → used-ring completion.
  *
- * Uses a minimum-size (64-byte) Ethernet frame with broadcast dest, our
- * MAC as source, EtherType 0x9000 (Loopback test, RFC1042 §19) for the
+ * Uses a minimum-size (64-byte) Ethernet frame with broadcast dest,
+ * the driver's MAC as source, EtherType 0x9000 (Loopback test,
+ * RFC1042 §19) for the
  * payload — chosen because it doesn't depend on IP/ARP setup. The
- * actual byte content doesn't matter to the device; we only verify
+ * actual byte content doesn't matter to the device; the test only verifies
  * that the descriptor cycle completes.
  */
 static void test_net_driver_tx(void)
@@ -892,7 +893,7 @@ static void test_net_driver_tx(void)
     uint8_t frame[64] = {0};
     /* Destination MAC: broadcast */
     for (int i = 0; i < 6; i++) frame[i] = 0xFF;
-    /* Source MAC: ours */
+    /* Source MAC: the driver's */
     drv->get_mac(&frame[6]);
     /* EtherType: 0x9000 (Loopback) — recognized but unused by SLIRP */
     frame[12] = 0x90;

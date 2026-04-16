@@ -21,8 +21,11 @@ hook for that discipline. See **#214** for the tracking issue.
 - [ ] Exports a registration function (e.g. `bcm_genet_register`) that
       calls `net_register_driver(&my_driver)` — not a constructor,
       called explicitly from `kernel/src/main.c` platform init
-- [ ] `send()` blocks no longer than `VIRTIO_NET_TX_TIMEOUT_MS`
-      (100 ms) — see `kernel/include/virtio.h` constant
+- [ ] `send()` blocks no longer than **100 ms** — the VirtIO drivers
+      use `VIRTIO_NET_TX_TIMEOUT_MS` in `kernel/include/virtio.h` as
+      their reference value; new drivers should either cite that
+      constant or define an equivalent local bound. The general
+      contract is "bounded by wall-clock time, not iteration count"
 - [ ] `recv()` returns 0 promptly when no packet is available (polled
       from `net_poll()` — must not block)
 - [ ] `get_mac()` returns a non-zero MAC address after `init()` has

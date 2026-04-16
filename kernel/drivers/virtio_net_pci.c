@@ -199,7 +199,11 @@ static struct {
 
     /* Separate TX and RX locks (#204): the TX path spins on the
      * used ring for completion; splitting from RX means net_poll's
-     * recv isn't blocked while a TX is in flight. */
+     * recv isn't blocked while a TX is in flight. Kept as IRQ-safe
+     * spinlocks (accessed via spin_lock_irqsave) in anticipation of
+     * IRQ-driven TX completion — once the #204 full-async refactor
+     * wires virtio-net interrupts into the IDT, both locks will need
+     * to be reachable from hard-IRQ context without re-entering. */
     spinlock_t tx_lock;
     spinlock_t rx_lock;
 } pci_net;

@@ -30,7 +30,7 @@
  * library). Prefer a specific code whenever possible.
  *
  * Naming aligned loosely with Linux errno where there's a match.
- * Freestanding C — no <errno.h> — so the codes are our own.
+ * Freestanding C — no <errno.h> — so the SLM-OS codes are defined locally.
  */
 enum net_error {
     NET_OK            = 0,

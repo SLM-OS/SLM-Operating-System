@@ -174,6 +174,42 @@ Device-nGnRE which has stricter ordering than Normal, so yes — but
 worth verifying against Linux's r8169 / bcmgenet drivers for
 comparison.
 
+### Q6: SMMU / IOMMU translation
+
+Both target platforms put an IOMMU between the NIC and DRAM — this
+is entirely separate from the cache-coherence questions above, and
+will break DMA before any of them become relevant if it isn't
+handled:
+
+- **Pi 5**: the RP1 I/O controller sits on a PCIe link with its own
+  address translation. Ethernet DMA reaches DRAM via BCM2712's System
+  MMU. If the SMMU isn't configured to pass the NIC's stream ID or
+  isn't in bypass mode, the NIC's DMA reads/writes fault before they
+  reach memory the CPU wrote. Linux's GENET driver expects the
+  bootloader or kernel to set up SMMU passthrough via the device
+  tree.
+- **Jetson**: Tegra's SMMU (present in all Orin SoCs) translates DMA
+  between PCIe / on-SoC peripherals and DRAM. EQOS has its own
+  DMA engine and a fixed stream ID; the SMMU must have an identity or
+  passthrough mapping for that stream before any packets move.
+
+**Open:**
+1. Does the bootloader leave the SMMU in a pass-through state after
+   handoff to SLM-OS, or will the kernel need to configure it
+   explicitly before the NIC driver touches DMA?
+2. On Jetson, the post-kexec path (Linux → SLM-OS) may leave
+   stale SMMU mappings. Similar to the nvgpu RAS-error problem that
+   drove issue #9 — the fix there was runtime-PM suspend before
+   kexec; the NIC may need a similar pre-handoff shutdown.
+3. For Pi 5's RP1, PCIe ATS (Address Translation Services) may or
+   may not be in use. Need to read the RP1 datasheet / BCM2712 SMMU
+   config and document which mode the driver should target.
+
+**Verification** (before the driver is written, not after): probe
+the SMMU state at boot. Print the stream IDs the NIC claims and
+confirm they have valid translations. Linux does this at driver probe
+time; SLM-OS should do the same.
+
 ---
 
 ## Verification plan (first real-hardware driver PR)

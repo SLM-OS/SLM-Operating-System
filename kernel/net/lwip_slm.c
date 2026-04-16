@@ -171,10 +171,14 @@ static err_t slm_netif_output(struct netif *netif, struct pbuf *p) {
  * to run ifconfig. Originally tried via netif_set_status_callback,
  * but lwIP's netif_do_set_ipaddr skips the callback when the new IP
  * equals the existing one — QEMU SLIRP typically hands out 10.0.2.15
- * which matches our static default, so the callback never fired on
+ * which matches the configured static default, so the callback never fired on
  * bind under QEMU. Polling from net_poll() is race-free regardless
  * of whether the IP actually changed.
  */
+/* Mutated only from net_poll() context (single-caller today). If a
+ * future multi-CPU RX dispatch adds a second poll caller, the
+ * false→true edge detection becomes racy — either serialise the
+ * callers or convert to _Atomic + CAS. */
 static bool     last_was_bound = false;
 static uint32_t dhcp_bind_count = 0;
 
@@ -297,9 +301,17 @@ int net_init(void) {
         ERROR("No network driver registered");
         return NET_E_NO_DRIVER;
     }
+    /* The driver's init() can fail for several reasons — device not
+     * present, feature negotiation rejected, MMIO map fault, OOM on
+     * virtqueue ring allocation. The current net_driver contract
+     * collapses all of these into `-1`, so the specific cause can't be
+     * distinguished here. Return NET_E_GENERIC rather than guessing
+     * NO_DEVICE; if
+     * the driver contract is ever extended to propagate specific
+     * codes, this site should thread them through. */
     if (active_driver->init() < 0) {
         ERROR("Failed to initialize network driver: %s", active_driver->name);
-        return NET_E_NO_DEVICE;
+        return NET_E_GENERIC;
     }
 
     /* Initialize lwIP */
@@ -312,11 +324,14 @@ int net_init(void) {
     IP4_ADDR(&netmask, 255, 255, 255, 0);
     IP4_ADDR(&gateway, 10, 0, 2, 2);     /* QEMU user-mode gateway */
 
-    /* Add network interface */
+    /* Add network interface. netif_add() returns NULL on OOM in
+     * the netif pool, but also on init-callback failure or internal
+     * lwIP state errors — same broad-failure-to-specific-code
+     * mismatch as the driver init above. */
     if (netif_add(&slm_netif, &ipaddr, &netmask, &gateway, NULL,
                   slm_netif_init, ethernet_input) == NULL) {
         ERROR("Failed to add network interface");
-        return NET_E_NO_MEM;
+        return NET_E_GENERIC;
     }
 
     /* Set as default interface */
@@ -592,7 +607,7 @@ char *net_ip_to_str(uint32_t addr, char *buf) {
 const char *net_strerror(int err) {
     switch (err) {
         case NET_OK:            return "ok";
-        case NET_E_GENERIC:     return "error";
+        case NET_E_GENERIC:     return "unspecified error";
         case NET_E_NOT_INIT:    return "network not initialized";
         case NET_E_NO_DRIVER:   return "no driver registered";
         case NET_E_NO_DEVICE:   return "device not found";
