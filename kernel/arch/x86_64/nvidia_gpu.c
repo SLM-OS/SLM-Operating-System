@@ -403,6 +403,21 @@ static int cmd_gpu(int argc, char *argv[])
         uart_printf("[GPU] Starting GSP-RM bringup on %s...\n",
                     impl_name(nvidia_gpu.architecture, nvidia_gpu.implementation));
 
+        /* Enable engine power domains in PMC_ENABLE. On nouveau/Linux
+         * we observe PMC_ENABLE = 0x56000000 with SEC2 accessible;
+         * SLM-OS post-UEFI sees 0x40000000 with SEC2 priv-locked. The
+         * extra bits (24, 26, 28) power on engines that include the
+         * SEC2 domain. Without this, SEC2 CPUCTL reads 0xbadf5620. */
+        uint32_t pmc_before = nvidia_gpu.bar0[NV_PMC_ENABLE / 4];
+        uint32_t pmc_target = pmc_before | 0x16000000u;
+        nvidia_gpu.bar0[NV_PMC_ENABLE / 4] = pmc_target;
+        __asm__ volatile("mfence" ::: "memory");
+        /* Small delay for the engine power rails to settle. */
+        for (volatile int i = 0; i < 100000; i++) { }
+        uint32_t pmc_after = nvidia_gpu.bar0[NV_PMC_ENABLE / 4];
+        uart_printf("[GPU] PMC_ENABLE: 0x%08x -> 0x%08x (target 0x%08x)\n",
+                    pmc_before, pmc_after, pmc_target);
+
         /* Phase 0: firmware load + sanity check */
         int rc = gsp_init();
         if (rc < 0 && gsp_get_state() == GSP_STATE_FAILED) {
