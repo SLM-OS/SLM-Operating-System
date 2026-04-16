@@ -38,7 +38,8 @@ pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType,
 pub use registry::{
     get_eviction_policy_name, get_eviction_policy_name_for_pool,
     policy_counters, reset_to_default, score,
-    select_victim, set_eviction_policy, set_eviction_policy_for_pool,
+    notify_eviction, select_victim, set_eviction_policy,
+    set_eviction_policy_for_pool,
     update_feedback, with_active_policy, with_active_policy_for_pool,
     FirstCandidatePolicy, PolicyCounters,
 };

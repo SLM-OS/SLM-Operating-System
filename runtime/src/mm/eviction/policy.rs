@@ -89,6 +89,11 @@ pub trait EvictionPolicy {
         None
     }
 
+    /// Notify the policy that `block_id` has been evicted from the pool.
+    /// Default no-op. ARC overrides to populate ghost lists proactively
+    /// (#114).
+    fn notify_eviction(&mut self, _block_id: u32) {}
+
     /// Time-series of ensemble weight snapshots (CACHEUS). One entry
     /// is pushed after every `update_feedback` that adjusted weights;
     /// the buffer is capped so the oldest entries are evicted. Default

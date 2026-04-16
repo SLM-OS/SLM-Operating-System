@@ -314,6 +314,13 @@ pub fn update_feedback(block_id: u32, was_fault: bool) {
     with_active_policy(|p| p.update_feedback(block_id, was_fault));
 }
 
+/// Notify the active policy that `block_id` has been evicted.
+/// Routes to `EvictionPolicy::notify_eviction` (no-op for most
+/// policies; ARC uses it to populate ghost lists proactively). #114.
+pub fn notify_eviction(block_id: u32, pool: PoolType) {
+    with_active_policy_for_pool(pool, |p| p.notify_eviction(block_id));
+}
+
 /// Collect the scores the active policy assigns to a candidate list.
 ///
 /// Returns an empty vector if no policy is installed.
