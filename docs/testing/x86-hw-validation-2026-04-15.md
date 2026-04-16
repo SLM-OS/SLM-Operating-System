@@ -103,7 +103,12 @@ is what the plan asks for, but see finding #2 below for the followup.
    bounded for any realistic uptime on supported timer frequencies.
    Pure helper `slm_time_ticks_to_ns()` extracted so the overflow
    boundary is unit-testable (`test_slm_time_ticks_to_ns_no_overflow`
-   in `test_scheduler.c`).
+   in `test_scheduler.c`). **Hardware-verified 2026-04-16** on
+   test-pc: 5/5 `sleep 2000` runs returned 2000 ms across 16 s →
+   97 s uptime (spans the 5.6 s TSC-overflow boundary of the old
+   formula); `bench context` / `bench irq` / `bench ipc` all in
+   sensible ns ranges. Full results in
+   `docs/testing/x86-hw-validation-2026-04-16-171.md`.
 
 2. **`bench smp` completion wait is ARM64-only** — the per-CPU done
    flags live in NC memory; x86-64 prints "(NC memory required)" and
