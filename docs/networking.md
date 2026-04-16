@@ -73,14 +73,23 @@ DHCP-assigned address without a manual `ifconfig dhcp` invocation.
 Behavior:
 - Non-blocking: lwIP runs DISCOVER/OFFER/REQUEST/ACK in the background
   while `net_poll()` drives the timers.
-- Timeout: if no DHCP server responds within `NET_DHCP_TIMEOUT_MS`
-  (10 s default), the system stops DHCP and falls back to the static
-  configuration that was applied at init.
+- Timeout: if no DHCP server responds within `dhcp_timeout_ms`
+  (`NET_DHCP_TIMEOUT_DEFAULT_MS` = 10 s at compile time, runtime-
+  adjustable via `net_set_dhcp_timeout_ms()`), the system stops DHCP
+  and falls back to the static configuration that was applied at init.
 - Status: `struct net_info.dhcp_status` reports DISABLED, PENDING,
   BOUND, or FAILED. `ifconfig` prints this as `DHCP(bound)` etc.
 
 Override with `-DNET_DHCP_AT_BOOT=OFF` to restore the previous
 manual-`ifconfig dhcp` behavior.
+
+**Runtime DHCP API** (primarily for tests and diagnostics):
+
+| Function | Purpose |
+|---|---|
+| `net_set_dhcp_timeout_ms(ms)` | Override the bind timeout at runtime. Accepts 0 for immediate fallback (tests). |
+| `net_get_dhcp_timeout_ms()` | Query the current timeout. |
+| `net_dhcp_check_timeout()` | Run the fallback check directly. Returns 1 if fallback fired, 0 otherwise. Used by tests to deterministically trigger `NET_DHCP_FAILED` without racing the recv path. |
 
 ---
 
@@ -227,10 +236,26 @@ integration are required.
 `kernel/drivers/virtio_net.c` uses VirtIO MMIO transport at address
 0x0A000000 on the QEMU virt machine:
 
-1. **Device Discovery**: Check magic number and device ID
-2. **Feature Negotiation**: Enable MAC address and status features
-3. **Queue Setup**: Initialize TX and RX virtqueues
-4. **Packet I/O**: DMA-based packet transmission and reception
+1. **Device Discovery**: Scan all 32 MMIO slots
+   (0x0A000000 + slot × 0x200) for the first slot with
+   device_id == VIRTIO_DEVICE_NET. QEMU assigns virtio-mmio devices
+   to the highest free slot, so the slot the NIC lands in depends
+   on what other `-device` flags were passed — hardcoding slot 0 is
+   wrong. The GIC IRQ derives from the slot the device actually
+   landed in.
+2. **Version Check**: Accept only version ≥ 2 (modern MMIO). Version 1
+   (legacy) uses the `QUEUE_PFN` register layout, which this driver
+   does not implement. Run QEMU with `-global
+   virtio-mmio.force-legacy=false` (already in `QEMU_NET` — see below)
+   to get the modern interface; otherwise `virtio_net_init()` fails
+   loudly rather than hanging on the first silent TX timeout.
+3. **Feature Negotiation**: `VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS |
+   VIRTIO_F_VERSION_1`. VERSION_1 is required by the modern transport
+   and implies a 12-byte `struct virtio_net_hdr` (see "Packet Header
+   Size" below).
+4. **Queue Setup**: Initialize RX (queue 0) and TX (queue 1) virtqueues
+5. **Packet I/O**: DMA-based packet transmission and reception, polled
+   (no IRQ-driven completion currently)
 
 ### VirtIO-Net PCI Driver (x86-64)
 
@@ -271,6 +296,25 @@ A set of synthetic-virtqueue unit tests in `kernel/tests/test_net.c`
 exercises `virtqueue_add_buf` / `virtqueue_get_buf` bookkeeping (free
 list, avail-idx wrap, descriptor reuse) independent of any device, so
 regressions in the cache-maintenance calls surface in `make test`.
+
+### Packet Header Size
+
+`struct virtio_net_hdr` must be **12 bytes** because we negotiate
+`VIRTIO_F_VERSION_1` (virtio 1.1 spec §5.1.6.1). The 12th/13th bytes
+are the `num_buffers` field — zero on TX, populated by the device on
+RX.
+
+Dropping `num_buffers` and using a 10-byte header — easy to do
+accidentally from older docs or code samples — silently corrupts
+everything: QEMU reads the first 2 bytes of packet data as part of
+the header, drops the outgoing frame before it reaches the netdev
+backend, and on RX writes packets offset by 2 bytes so they never
+decode. The ring-level TX completion still fires, so stats advance
+and nothing looks wrong — but no traffic actually goes over the wire.
+
+Guarded by `static_assert(sizeof(struct virtio_net_hdr) == 12, ...)`
+in both the MMIO header and the PCI driver source. Any future field
+addition that changes the size fails at compile time.
 
 ### lwIP Integration
 
@@ -393,23 +437,98 @@ while (!done) {
 }
 ```
 
+### DHCP Control
+
+```c
+/* Adjust the bind timeout before starting DHCP (tests, diagnostics) */
+net_set_dhcp_timeout_ms(500);  /* 500 ms */
+net_enable_dhcp();
+
+/* Poll for a bit, then check status */
+for (int i = 0; i < 100; i++) net_poll();
+
+struct net_info info;
+net_get_info(&info);
+switch (info.dhcp_status) {
+    case NET_DHCP_BOUND:    uart_puts("lease acquired"); break;
+    case NET_DHCP_PENDING:  uart_puts("still waiting");  break;
+    case NET_DHCP_FAILED:   uart_puts("timed out");      break;
+    case NET_DHCP_DISABLED: uart_puts("not running");    break;
+}
+```
+
+For tests that need deterministic fallback without racing the packet
+receive path, call `net_dhcp_check_timeout()` directly after setting
+`net_set_dhcp_timeout_ms(0)`.
+
+### net_register_driver
+
+Platform hook called during kernel init so the lwIP netif adapter can
+route packet I/O through a NIC-specific driver without a per-platform
+`#ifdef` in `lwip_slm.c`.
+
+```c
+static int my_nic_init(void)       { ...  return 0; }
+static int my_nic_send(const void *buf, size_t len)  { ... }
+static int my_nic_recv(void *buf, size_t max_len)    { ... }
+static void my_nic_get_mac(uint8_t mac[6])           { ... }
+static bool my_nic_link_status(void)                 { ... }
+
+static const struct net_driver my_nic_driver = {
+    .name        = "my-nic",
+    .init        = my_nic_init,
+    .send        = my_nic_send,
+    .recv        = my_nic_recv,
+    .get_mac     = my_nic_get_mac,
+    .link_status = my_nic_link_status,
+};
+
+/* From platform init (kernel/src/main.c), before net_init(): */
+net_register_driver(&my_nic_driver);
+```
+
 ---
 
 ## Testing
 
-Network tests are in `kernel/tests/test_net.c`:
+Network tests are in `kernel/tests/test_net.c`. They fall into three tiers:
+
+**Tier 1 — IP utility functions** (run on any platform with
+`ENABLE_NETWORKING`, no device required):
 
 | Test | Description |
 |------|-------------|
-| `test_net_ip4_addr_basic` | IP address creation |
-| `test_net_ip4_addr_edge_cases` | 0.0.0.0, 255.255.255.255 |
-| `test_net_ip_to_str_*` | Address to string conversion |
-| `test_net_str_to_ip_valid` | Valid address parsing |
-| `test_net_str_to_ip_invalid` | Invalid input handling |
-| `test_net_ip_roundtrip` | Parse and format consistency |
-| `test_net_is_up_*` | Network state queries |
-| `test_net_get_info_*` | Configuration retrieval |
-| `test_net_get_stats_*` | Statistics functions |
+| `test_net_ip4_addr_*` | Address creation + edge cases |
+| `test_net_ip_to_str_*` | Address-to-string conversion |
+| `test_net_str_to_ip_valid` / `_invalid` | Parser correctness |
+| `test_net_ip_roundtrip` | Parse/format consistency |
+| `test_net_get_info_*` | Info-query edge cases |
+| `test_net_commands_without_init` | Graceful failure pre-init |
+| `test_net_get_stats_*` | Stats-struct safety |
+
+**Tier 2 — virtqueue ring bookkeeping** (QEMU_VIRT only; exercises
+the MMIO driver's `virtqueue_add_buf` / `virtqueue_get_buf` against
+a synthetic virtqueue in BSS):
+
+| Test | Description |
+|------|-------------|
+| `test_virtqueue_add_buf_*` | Descriptor allocation, flags, exhaustion |
+| `test_virtqueue_avail_idx_beyond_size` | Avail ring wrap at TVQ_SIZE |
+| `test_virtqueue_get_buf_*` | Used ring read-back and descriptor free |
+| `test_virtqueue_add_two_distinct_buffers` | Independent slots |
+
+**Tier 3 — live integration against QEMU's virtio-net device** (runs
+on both ARM64 MMIO and x86-64 PCI paths):
+
+| Test | Description |
+|------|-------------|
+| `test_net_driver_registered` | Platform init hooked `net_register_driver()` |
+| `test_net_init_live` | Driver probes device, reads MAC, brings link UP |
+| `test_net_poll_after_init` | Recv path doesn't fault on empty ring |
+| `test_net_auto_dhcp_at_boot` | `NET_DHCP_AT_BOOT=ON` starts DHCP during init |
+| `test_net_dhcp_binds` | QEMU SLIRP answers DISCOVER → BOUND state |
+| `test_net_dhcp_fallback` | Forced timeout → `NET_DHCP_FAILED`, static IP restored |
+| `test_net_driver_tx` | Raw 64-byte frame traverses the TX virtqueue to completion |
 
 Run tests with:
 
