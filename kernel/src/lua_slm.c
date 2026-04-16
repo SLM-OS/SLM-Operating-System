@@ -22,6 +22,9 @@
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
 #endif
+#if defined(CONFIG_AI_SCHEDULER)
+#include "ai_types.h"   /* ai_sched_action, ai_decode_action — #211 review fix */
+#endif
 
 /* Lua headers - note: these may include stdio.h from newlib */
 #include "../lib/lua/src/lua.h"
@@ -522,9 +525,19 @@ static int l_msg_publish_priority(lua_State *L) {
  * Must be in [0, MAX_COMPONENTS=32) — msg_router_ack() rejects indices
  * outside that range so we cannot use an "obviously large" sentinel
  * like 1000. We pick the top of the range (31) so it sits above the
- * real component slots (0..COMPONENT_MAX_COUNT-1 = 0..15) with room
- * to spare for growth of the native component cap. */
+ * real component slots (0..COMPONENT_MAX_COUNT-1 = 0..15). If
+ * COMPONENT_MAX_COUNT ever grows to where it might collide with the
+ * sentinel, the static_assert below traps it at build time — PR #217
+ * review flagged the silent-collision risk. If that assert ever fires,
+ * bump MSG_ROUTER's MAX_COMPONENTS in runtime/src/msg_router.rs and
+ * move the sentinel into the freshly-opened range. */
 #define LUA_MSG_SUB_IDX  31
+_Static_assert(LUA_MSG_SUB_IDX > COMPONENT_MAX_COUNT,
+               "LUA_MSG_SUB_IDX must not collide with native component slots; "
+               "grow MAX_COMPONENTS in runtime/src/msg_router.rs first");
+_Static_assert(LUA_MSG_SUB_IDX < 32,
+               "LUA_MSG_SUB_IDX must be < msg_router's MAX_COMPONENTS "
+               "or msg_router_ack silently drops acks");
 
 /* Maximum concurrent Lua subscriptions across all active lua_States.
  * Subscriptions are lightweight (one Lua registry slot + ~20 bytes) so
@@ -579,7 +592,18 @@ static void lua_msg_drain(lua_State *L)
 {
     if (!L || !lua_msg_router_subscribed) return;
 
-    for (int guard = 0; guard < 64; guard++) {   /* cap per-drain work */
+    /* The drain cap bounds work done per yield/sleep/read_line so a
+     * flooded router mailbox cannot starve the main Lua thread. PR #217
+     * review raised concerns about message loss under high throughput.
+     * Messages are NOT lost — the router holds the next one until the
+     * next drain — but we do introduce latency up to one drain cycle
+     * per LUA_MSG_DRAIN_BATCH messages. 256 is tuned to be much larger
+     * than realistic demo load while still cheap enough that we return
+     * to the caller within a few milliseconds at worst. Scripts with
+     * genuinely high subscriber fan-in should call slm.msg_drain() in
+     * a tight loop themselves. */
+#define LUA_MSG_DRAIN_BATCH 256
+    for (int guard = 0; guard < LUA_MSG_DRAIN_BATCH; guard++) {
         char topic_buf[LUA_MSG_TOPIC_LEN];
         const char *data = msg_router_receive(LUA_MSG_SUB_IDX, topic_buf);
         if (!data) break;
@@ -1202,24 +1226,23 @@ static int l_ai_sched_decision(lua_State *L) {
         return 1;
     }
 
-    /* Decode inline (mirrors ai_decode_action in ai_types.h: the encoding
-     * is idx = core * 6 + priority_adj * 2 + preempt). Duplicated instead
-     * of including ai_types.h to keep the lua library free of the AI
-     * scheduler's private headers. */
-    int idx = t->last_ai_action;
-    int preempt = idx % 2;           idx /= 2;
-    int priority_adj = idx % 3;      idx /= 3;
-    int core = idx;
+    /* Decode via the canonical ai_decode_action (ai_types.h). Originally
+     * inlined here to keep the Lua library isolated from AI headers, but
+     * the PR #217 review flagged that as a silent-break hazard if the
+     * encoding ever changes — ai_types.h is plain C with no heavy deps
+     * so the include is free. */
+    struct ai_sched_action act;
+    ai_decode_action(t->last_ai_action, &act);
 
     lua_createtable(L, 0, 4);
 
-    lua_pushinteger(L, (lua_Integer)core);
+    lua_pushinteger(L, (lua_Integer)act.core_assignment);
     lua_setfield(L, -2, "core");
 
-    lua_pushinteger(L, (lua_Integer)priority_adj);
+    lua_pushinteger(L, (lua_Integer)act.priority_adj);
     lua_setfield(L, -2, "priority_adj");
 
-    lua_pushinteger(L, (lua_Integer)preempt);
+    lua_pushinteger(L, (lua_Integer)act.preempt);
     lua_setfield(L, -2, "preempt");
 
     lua_pushinteger(L, (lua_Integer)t->last_ai_action);
