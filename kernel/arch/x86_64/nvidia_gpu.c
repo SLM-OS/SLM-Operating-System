@@ -420,9 +420,9 @@ static int cmd_gpu(int argc, char *argv[])
         uart_printf("[GPU] FWSEC: imem=%u dmem=%u engine=0x%x ucode=%u\n",
                     b.fwsec_imem_size, b.fwsec_dmem_size,
                     b.fwsec_engine_id, b.fwsec_ucode_id);
-        uart_printf("[GPU] WPR2 target: addr=0x%llx size=0x%llx\n",
-                    (unsigned long long)b.wpr2_addr,
-                    (unsigned long long)b.wpr2_size);
+        uart_printf("[GPU] WPR2 target: addr=0x%lx size=0x%lx\n",
+                    (unsigned long)b.wpr2_addr,
+                    (unsigned long)b.wpr2_size);
 
         rc = gsp_bringup_fwsec_frts(&b);
         if (b.diag_sig_count) {
@@ -448,6 +448,24 @@ static int cmd_gpu(int argc, char *argv[])
         rc = gsp_bringup_booter_load(&b);
         if (rc < 0) {
             uart_printf("[GPU] Booter Load FAILED at phase %u\n", b.last_error_phase);
+            /* Dump SEC2 state for diagnosis — matches what the VFIO
+             * harness prints on FWSEC failures. */
+            uint32_t s_cpuctl  = gsp_platform->read32(NV_PSEC2_BASE + 0x100);
+            uint32_t s_mbox0   = gsp_platform->read32(NV_PSEC2_BASE + 0x040);
+            uint32_t s_mbox1   = gsp_platform->read32(NV_PSEC2_BASE + 0x044);
+            uint32_t s_irqstat = gsp_platform->read32(NV_PSEC2_BASE + 0x008);
+            uint32_t s_os      = gsp_platform->read32(NV_PSEC2_BASE + 0x080);
+            uint32_t s_dbginfo = gsp_platform->read32(NV_PSEC2_BASE + 0x094);
+            uint32_t s_modsel  = gsp_platform->read32(NV_PSEC2_BROM_BASE + 0x010);
+            uint32_t s_paraddr = gsp_platform->read32(NV_PSEC2_BROM_BASE + 0x004);
+            uart_printf("[GPU]   SEC2 CPUCTL=0x%08x (halted=%u)\n",
+                        s_cpuctl, (s_cpuctl >> 4) & 1);
+            uart_printf("[GPU]   SEC2 MBOX0=0x%08x MBOX1=0x%08x OS=0x%08x\n",
+                        s_mbox0, s_mbox1, s_os);
+            uart_printf("[GPU]   SEC2 IRQSTAT=0x%08x DEBUGINFO=0x%08x\n",
+                        s_irqstat, s_dbginfo);
+            uart_printf("[GPU]   SEC2 BROM MOD_SEL=0x%08x PARAADDR=0x%08x\n",
+                        s_modsel, s_paraddr);
             gsp_bringup_free(&b);
             return -1;
         }
@@ -465,6 +483,41 @@ static int cmd_gpu(int argc, char *argv[])
         uart_printf("[GPU] GSP RISC-V RUNNING — bringup complete\n");
 
         gsp_bringup_free(&b);
+        return 0;
+    }
+
+    /* Subcommand: "gpu sec2" dumps SEC2 Falcon state (priv-lock diagnosis) */
+    if (argc >= 2 && argv[1][0] == 's') {
+        uint32_t cpuctl  = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x100) / 4];
+        uint32_t hwcfg2  = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x0f4) / 4];
+        uint32_t mbox0   = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x040) / 4];
+        uint32_t mbox1   = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x044) / 4];
+        uint32_t irqstat = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x008) / 4];
+        uint32_t os_reg  = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x080) / 4];
+        uint32_t dbginfo = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x094) / 4];
+        uint32_t engctl  = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x0bc) / 4];
+        uint32_t modsel  = nvidia_gpu.bar0[(NV_PSEC2_BROM_BASE + 0x010) / 4];
+        uint32_t paraddr = nvidia_gpu.bar0[(NV_PSEC2_BROM_BASE + 0x004) / 4];
+        /* Also probe GSP Falcon for comparison */
+        uint32_t g_cpuctl = nvidia_gpu.bar0[(NV_PGSP_BASE + 0x100) / 4];
+        uint32_t g_hwcfg2 = nvidia_gpu.bar0[(NV_PGSP_BASE + 0x0f4) / 4];
+
+        uart_printf("SEC2 Falcon state (PSEC2_BASE=0x%x):\n", NV_PSEC2_BASE);
+        uart_printf("  CPUCTL    = 0x%08x  (priv-lock=%s)\n",
+                    cpuctl, (cpuctl & 0xffff0000) == 0xbadf0000 ? "yes" : "no");
+        uart_printf("  HWCFG2    = 0x%08x  (priv-lock=%s)\n",
+                    hwcfg2, (hwcfg2 & 0xffff0000) == 0xbadf0000 ? "yes" : "no");
+        uart_printf("  IRQSTAT   = 0x%08x\n", irqstat);
+        uart_printf("  MAILBOX0  = 0x%08x  MAILBOX1 = 0x%08x\n", mbox0, mbox1);
+        uart_printf("  OS        = 0x%08x  DEBUGINFO= 0x%08x\n", os_reg, dbginfo);
+        uart_printf("  ENGCTL    = 0x%08x\n", engctl);
+        uart_printf("  BROM MOD_SEL  = 0x%08x\n", modsel);
+        uart_printf("  BROM PARAADDR = 0x%08x\n", paraddr);
+        uart_printf("GSP Falcon state (PGSP_BASE=0x%x):\n", NV_PGSP_BASE);
+        uart_printf("  CPUCTL    = 0x%08x  (priv-lock=%s)\n",
+                    g_cpuctl, (g_cpuctl & 0xffff0000) == 0xbadf0000 ? "yes" : "no");
+        uart_printf("  HWCFG2    = 0x%08x  (priv-lock=%s)\n",
+                    g_hwcfg2, (g_hwcfg2 & 0xffff0000) == 0xbadf0000 ? "yes" : "no");
         return 0;
     }
 
@@ -515,7 +568,7 @@ static int cmd_gpu(int argc, char *argv[])
     uart_printf("  PMC_ENABLE:    0x%08x\n", pmc_enable);
     uart_printf("  PMC_INTR_HOST: 0x%08x\n", pmc_intr);
 
-    uart_printf("\nSubcommands: gpu init, gpu vram, gpu regs\n");
+    uart_printf("\nSubcommands: gpu init, gpu sec2, gpu vram, gpu regs\n");
 
     return 0;
 }
