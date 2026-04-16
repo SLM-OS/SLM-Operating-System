@@ -2,18 +2,21 @@
  * lwIP System Architecture Implementation for SLM-OS
  *
  * Provides the minimal OS abstraction layer for lwIP in NO_SYS mode.
- * The main requirement is sys_now() for timeout handling.
+ * sys_now() for timeout handling, sys_arch_protect/unprotect for
+ * critical sections, and lwip_rand_slm() for pseudo-randomness.
  */
 
 #include "arch/cc.h"
 #include "arch/sys_arch.h"
 #include "timer.h"
+#include "spinlock.h"
 
 /**
  * Get current system time in milliseconds
  *
- * This is used by lwIP for timeout management. We use the ARM
- * architectural timer counter and frequency.
+ * Used by lwIP for timeout management. Uses the platform's
+ * timer_get_count()/timer_get_frequency() which works on both
+ * ARM64 (CNTPCT_EL0) and x86-64 (RDTSC).
  *
  * @return Current time in milliseconds since boot
  */
@@ -33,11 +36,10 @@ uint32_t sys_now(void) {
  * Random number generator for lwIP
  *
  * Used for TCP initial sequence numbers, ephemeral ports, etc.
- * We use the timer count as an entropy source combined with a
+ * Uses the timer count as an entropy source combined with a
  * simple LCG for pseudo-randomness.
  *
- * NOTE: This is NOT cryptographically secure. For a production
- * system with security requirements, a proper CSPRNG should be used.
+ * NOTE: This is NOT cryptographically secure.
  *
  * @return 32-bit pseudo-random number
  */
@@ -62,17 +64,14 @@ uint32_t lwip_rand_slm(void) {
 /**
  * Enter a critical section (protect against concurrent access).
  *
- * In NO_SYS mode with a single CPU, we could disable interrupts here.
- * For simplicity, we return 0 as a placeholder since our network code
- * runs in a polling loop without concurrent access.
- *
- * For SMP, this should use a spinlock.
+ * Disables interrupts and returns the previous interrupt state.
+ * This prevents ISRs from re-entering lwIP while a network
+ * operation is in progress.
  *
  * @return Protection value to pass to sys_arch_unprotect
  */
 sys_prot_t sys_arch_protect(void) {
-    /* TODO: For SMP, implement proper spinlock */
-    return 0;
+    return (sys_prot_t)irq_save();
 }
 
 /**
@@ -81,6 +80,5 @@ sys_prot_t sys_arch_protect(void) {
  * @param pval Value returned by sys_arch_protect
  */
 void sys_arch_unprotect(sys_prot_t pval) {
-    (void)pval;
-    /* TODO: For SMP, release spinlock */
+    irq_restore((irq_flags_t)pval);
 }

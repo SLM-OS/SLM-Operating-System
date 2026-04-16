@@ -224,4 +224,12 @@ bool virtio_net_link_up(void);
 void virtio_net_get_stats(uint64_t *rx_pkts, uint64_t *tx_pkts,
                           uint64_t *rx_bytes, uint64_t *tx_bytes);
 
+/**
+ * Register the VirtIO-Net MMIO driver with the net_driver abstraction.
+ *
+ * Called during platform init (before net_init) so the lwIP adapter
+ * can call through the driver ops instead of directly.
+ */
+void virtio_net_register(void);
+
 #endif /* VIRTIO_NET_H */

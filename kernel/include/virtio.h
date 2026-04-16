@@ -215,7 +215,11 @@ static inline void virtio_write32(uintptr_t base, uint32_t offset, uint32_t valu
 
 /* Memory barrier for MMIO ordering */
 static inline void virtio_mb(void) {
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("mfence" ::: "memory");
+#else
     __asm__ volatile("dsb sy" ::: "memory");
+#endif
 }
 
 /* -------------------------------------------------------------------------- */

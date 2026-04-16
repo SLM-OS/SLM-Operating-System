@@ -7,6 +7,7 @@
 
 #include "virtio_net.h"
 #include "virtio.h"
+#include "net_driver.h"
 #include "pmm.h"
 #include "debug.h"
 #include "gic.h"
@@ -535,4 +536,29 @@ void virtio_net_get_stats(uint64_t *rx_pkts, uint64_t *tx_pkts,
     if (tx_pkts) *tx_pkts = netdev.tx_packets;
     if (rx_bytes) *rx_bytes = netdev.rx_bytes;
     if (tx_bytes) *tx_bytes = netdev.tx_bytes;
+}
+
+/* -------------------------------------------------------------------------- */
+/* net_driver Interface                                                        */
+/* -------------------------------------------------------------------------- */
+
+static int virtio_net_drv_send(const void *buf, size_t len) {
+    return virtio_net_send((const uint8_t *)buf, (uint32_t)len);
+}
+
+static int virtio_net_drv_recv(void *buf, size_t max_len) {
+    return virtio_net_recv((uint8_t *)buf, (uint32_t)max_len);
+}
+
+static const struct net_driver virtio_net_mmio_driver = {
+    .name        = "virtio-net-mmio",
+    .init        = virtio_net_init,
+    .send        = virtio_net_drv_send,
+    .recv        = virtio_net_drv_recv,
+    .get_mac     = virtio_net_get_mac,
+    .link_status = virtio_net_link_up,
+};
+
+void virtio_net_register(void) {
+    net_register_driver(&virtio_net_mmio_driver);
 }

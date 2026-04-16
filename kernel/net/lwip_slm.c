@@ -6,7 +6,7 @@
  */
 
 #include "net.h"
-#include "virtio_net.h"
+#include "net_driver.h"
 #include "debug.h"
 #include "timer.h"
 
@@ -24,6 +24,20 @@
 #include "arch/sys_arch.h"
 
 #include <string.h>
+
+/* -------------------------------------------------------------------------- */
+/* Driver Registration                                                         */
+/* -------------------------------------------------------------------------- */
+
+static const struct net_driver *active_driver;
+
+void net_register_driver(const struct net_driver *drv) {
+    active_driver = drv;
+}
+
+const struct net_driver *net_get_driver(void) {
+    return active_driver;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Network Interface State                                                     */
@@ -76,7 +90,7 @@ static err_t slm_netif_output(struct netif *netif, struct pbuf *p) {
         len += q->len;
     }
 
-    int ret = virtio_net_send(tx_buf, len);
+    int ret = active_driver->send(tx_buf, len);
     if (ret < 0) {
         net_statistics.tx_errors++;
         return ERR_IF;
@@ -91,8 +105,8 @@ static err_t slm_netif_output(struct netif *netif, struct pbuf *p) {
  * Initialize the network interface
  */
 static err_t slm_netif_init(struct netif *netif) {
-    /* Get MAC address from VirtIO-Net driver */
-    virtio_net_get_mac(netif->hwaddr);
+    /* Get MAC address from network driver */
+    active_driver->get_mac(netif->hwaddr);
     netif->hwaddr_len = 6;
 
     /* Set interface name */
@@ -106,8 +120,8 @@ static err_t slm_netif_init(struct netif *netif) {
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
                    NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP;
 
-    /* Link is up if VirtIO-Net reports it */
-    if (virtio_net_link_up()) {
+    /* Link is up if driver reports it */
+    if (active_driver->link_status()) {
         netif->flags |= NETIF_FLAG_LINK_UP;
     }
 
@@ -184,9 +198,13 @@ int net_init(void) {
 
     INFO("Initializing network subsystem...");
 
-    /* Initialize VirtIO-Net driver */
-    if (virtio_net_init() < 0) {
-        ERROR("Failed to initialize VirtIO-Net driver");
+    /* Initialize the registered network driver */
+    if (!active_driver) {
+        ERROR("No network driver registered");
+        return -1;
+    }
+    if (active_driver->init() < 0) {
+        ERROR("Failed to initialize network driver: %s", active_driver->name);
         return -1;
     }
 
@@ -236,7 +254,7 @@ void net_poll(void) {
     }
 
     /* Check for received packets */
-    int len = virtio_net_recv(rx_packet_buf, sizeof(rx_packet_buf));
+    int len = active_driver->recv(rx_packet_buf, sizeof(rx_packet_buf));
     if (len > 0) {
         /* Create pbuf for the received packet */
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_RAM);
@@ -276,7 +294,7 @@ int net_get_info(struct net_info *info) {
         return -1;
     }
 
-    virtio_net_get_mac(info->mac);
+    active_driver->get_mac(info->mac);
     info->ip_addr = slm_netif.ip_addr.addr;
     info->netmask = slm_netif.netmask.addr;
     info->gateway = slm_netif.gw.addr;

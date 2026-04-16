@@ -489,6 +489,14 @@ long strtol(const char *nptr, char **endptr, int base) {
     return negative ? -result : result;
 }
 
+/* C23 ABI alias for strtol. GCC compiling lwIP's netif.c with -std=c23
+ * on x86-64 emits calls to __isoc23_strtol (glibc-specific symbol) in
+ * netif_find/netif_name_to_index. Provide it as an alias so freestanding
+ * builds link. ARM64 bare-metal GCC still emits the plain strtol symbol,
+ * so this alias is harmless there. */
+long __isoc23_strtol(const char *nptr, char **endptr, int base)
+    __attribute__((alias("strtol")));
+
 unsigned long strtoul(const char *nptr, char **endptr, int base) {
     return (unsigned long)strtol(nptr, endptr, base);
 }
