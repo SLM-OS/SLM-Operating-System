@@ -295,11 +295,11 @@ int net_init(void) {
     /* Initialize the registered network driver */
     if (!active_driver) {
         ERROR("No network driver registered");
-        return -1;
+        return NET_E_NO_DRIVER;
     }
     if (active_driver->init() < 0) {
         ERROR("Failed to initialize network driver: %s", active_driver->name);
-        return -1;
+        return NET_E_NO_DEVICE;
     }
 
     /* Initialize lwIP */
@@ -316,7 +316,7 @@ int net_init(void) {
     if (netif_add(&slm_netif, &ipaddr, &netmask, &gateway, NULL,
                   slm_netif_init, ethernet_input) == NULL) {
         ERROR("Failed to add network interface");
-        return -1;
+        return NET_E_NO_MEM;
     }
 
     /* Set as default interface */
@@ -417,8 +417,11 @@ void net_poll(void) {
 }
 
 int net_get_info(struct net_info *info) {
-    if (!net_initialized || !info) {
-        return -1;
+    if (!info) {
+        return NET_E_INVAL;
+    }
+    if (!net_initialized) {
+        return NET_E_NOT_INIT;
     }
 
     active_driver->get_mac(info->mac);
@@ -444,7 +447,7 @@ int net_get_info(struct net_info *info) {
 
 int net_set_static_ip(uint32_t ip_addr, uint32_t netmask, uint32_t gateway) {
     if (!net_initialized) {
-        return -1;
+        return NET_E_NOT_INIT;
     }
 
     /* Stop DHCP if running */
@@ -470,7 +473,7 @@ int net_set_static_ip(uint32_t ip_addr, uint32_t netmask, uint32_t gateway) {
 
 int net_enable_dhcp(void) {
     if (!net_initialized) {
-        return -1;
+        return NET_E_NOT_INIT;
     }
 
     if (!dhcp_started) {
@@ -482,7 +485,7 @@ int net_enable_dhcp(void) {
             INFO("DHCP client started");
         } else {
             ERROR("Failed to start DHCP client");
-            return -1;
+            return NET_E_NO_MEM;
         }
     }
 
@@ -491,17 +494,17 @@ int net_enable_dhcp(void) {
 
 int net_ping(uint32_t addr, uint16_t seq, ping_callback_t callback, void *user) {
     if (!net_initialized) {
-        return -1;
+        return NET_E_NOT_INIT;
     }
 
     if (ping_state.pending) {
-        return -1;  /* Previous ping still pending */
+        return NET_E_BUSY;  /* Previous ping still pending */
     }
 
     /* Create ICMP echo request */
     struct pbuf *p = pbuf_alloc(PBUF_IP, 8 + 32, PBUF_RAM);
     if (!p) {
-        return -1;
+        return NET_E_NO_MEM;
     }
 
     /* Fill in ICMP header */
@@ -548,7 +551,7 @@ int net_ping(uint32_t addr, uint16_t seq, ping_callback_t callback, void *user) 
 
     if (err != ERR_OK) {
         ping_state.pending = false;
-        return -1;
+        return NET_E_GENERIC;
     }
 
     return 0;
@@ -586,9 +589,27 @@ char *net_ip_to_str(uint32_t addr, char *buf) {
     return buf;
 }
 
+const char *net_strerror(int err) {
+    switch (err) {
+        case NET_OK:            return "ok";
+        case NET_E_GENERIC:     return "error";
+        case NET_E_NOT_INIT:    return "network not initialized";
+        case NET_E_NO_DRIVER:   return "no driver registered";
+        case NET_E_NO_DEVICE:   return "device not found";
+        case NET_E_NO_MEM:      return "out of memory";
+        case NET_E_BUSY:        return "busy";
+        case NET_E_TIMEOUT:     return "timeout";
+        case NET_E_INVAL:       return "invalid argument";
+        case NET_E_TOO_LARGE:   return "packet too large";
+        case NET_E_LINK_DOWN:   return "link down";
+        case NET_E_PROTO:       return "protocol error";
+        default:                return "unknown";
+    }
+}
+
 int net_str_to_ip(const char *str, uint32_t *addr) {
     if (!str || !addr) {
-        return -1;
+        return NET_E_INVAL;
     }
 
     uint8_t octets[4];
@@ -601,23 +622,23 @@ int net_str_to_ip(const char *str, uint32_t *addr) {
             value = value * 10 + (*p - '0');
             digits++;
             if (value > 255 || digits > 3) {
-                return -1;
+                return NET_E_INVAL;
             }
         } else if (*p == '.' || *p == '\0') {
             if (digits == 0 || octet >= 4) {
-                return -1;
+                return NET_E_INVAL;
             }
             octets[octet++] = value;
             value = 0;
             digits = 0;
             if (*p == '\0') break;
         } else {
-            return -1;
+            return NET_E_INVAL;
         }
     }
 
     if (octet != 4) {
-        return -1;
+        return NET_E_INVAL;
     }
 
     *addr = octets[0] | (octets[1] << 8) | (octets[2] << 16) | (octets[3] << 24);

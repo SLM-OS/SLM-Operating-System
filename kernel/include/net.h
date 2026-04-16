@@ -13,6 +13,50 @@
 #include <stdbool.h>
 
 /* -------------------------------------------------------------------------- */
+/* Error codes                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Networking-specific error codes (#213).
+ *
+ * Public net_* functions return negative values from this enum on
+ * failure, 0 on success. Source-compat with the old "return -1 on
+ * any error" contract: every enum value is <=0, so existing
+ * `if (rc < 0)` checks keep working — they just see a more specific
+ * code when they care.
+ *
+ * NET_E_GENERIC (-1) is retained for sites where the failure mode
+ * isn't worth enumerating (e.g. forwarded from a third-party
+ * library). Prefer a specific code whenever possible.
+ *
+ * Naming aligned loosely with Linux errno where there's a match.
+ * Freestanding C — no <errno.h> — so the codes are our own.
+ */
+enum net_error {
+    NET_OK            = 0,
+    NET_E_GENERIC     = -1,   /* catch-all, for compatibility */
+    NET_E_NOT_INIT    = -2,   /* networking subsystem not initialized */
+    NET_E_NO_DRIVER   = -3,   /* no net_driver registered */
+    NET_E_NO_DEVICE   = -4,   /* driver could not find hardware */
+    NET_E_NO_MEM      = -5,   /* pbuf / pmm / pool allocation failed */
+    NET_E_BUSY        = -6,   /* operation in progress (ping pending, queue full) */
+    NET_E_TIMEOUT     = -7,   /* TX completion, DHCP bind, ARP resolve */
+    NET_E_INVAL       = -8,   /* bad argument (NULL, out of range) */
+    NET_E_TOO_LARGE   = -9,   /* packet exceeds MTU */
+    NET_E_LINK_DOWN   = -10,  /* physical link is down */
+    NET_E_PROTO       = -11,  /* feature negotiation / version mismatch */
+};
+
+/**
+ * Convert a net_error code to a short human-readable string.
+ *
+ * Returns a pointer to a static string; never NULL. Handles both
+ * the enum values (e.g. -7) and raw negative values that don't
+ * match any enum member (returned as "unknown").
+ */
+const char *net_strerror(int err);
+
+/* -------------------------------------------------------------------------- */
 /* Network Subsystem Initialization                                            */
 /* -------------------------------------------------------------------------- */
 

@@ -400,6 +400,30 @@ and add `-DENABLE_NETWORKING=ON` to the CMake invocation.
 
 ## API Reference
 
+### Error codes
+
+Public `net_*` functions return 0 (`NET_OK`) on success and a negative
+`enum net_error` value on failure. Enum values:
+
+| Code | Value | Meaning |
+|---|---|---|
+| `NET_OK` | 0 | Success |
+| `NET_E_GENERIC` | -1 | Catch-all (preserved for source compat) |
+| `NET_E_NOT_INIT` | -2 | Networking subsystem not initialized |
+| `NET_E_NO_DRIVER` | -3 | No `net_driver` registered |
+| `NET_E_NO_DEVICE` | -4 | Driver couldn't find hardware |
+| `NET_E_NO_MEM` | -5 | Allocation failed (pbuf / pmm / pool) |
+| `NET_E_BUSY` | -6 | Operation in progress (pending ping, queue full) |
+| `NET_E_TIMEOUT` | -7 | TX completion, DHCP bind, ARP resolve |
+| `NET_E_INVAL` | -8 | Bad argument (NULL, out of range) |
+| `NET_E_TOO_LARGE` | -9 | Packet exceeds MTU |
+| `NET_E_LINK_DOWN` | -10 | Physical link down |
+| `NET_E_PROTO` | -11 | Feature negotiation / version mismatch |
+
+All codes are ≤ 0, so existing `if (rc < 0)` checks continue to work
+when upgrading callers. `net_strerror(int)` returns a short human
+description for logging and diagnostics.
+
 ### net_ip4_addr
 
 Create IPv4 address in network byte order.
