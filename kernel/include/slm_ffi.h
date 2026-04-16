@@ -333,6 +333,10 @@ typedef struct {
     int32_t snapshot_candidates;
     uint32_t cacheus_expert_count;
     uint32_t expert_weights_bp[5];
+    /* #115: generic per-policy counters. Reset on every policy swap. */
+    uint64_t policy_decisions;
+    uint64_t policy_fallbacks;
+    uint64_t policy_avg_latency_ns;
 } RustEvictionStats;
 
 /* Populate `out` with the current eviction stats. Returns 0 on success. */

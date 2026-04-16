@@ -1279,6 +1279,11 @@ pub struct RustEvictionStats {
     /// Per-expert weights in basis points (0..10000). CACHEUS caps
     /// at 5 experts. Entries past `cacheus_expert_count` are zero.
     pub expert_weights_bp: [u32; 5],
+    // #115: generic per-policy counters. Reset on every policy swap
+    // so values reflect the currently-installed policy's lifetime.
+    pub policy_decisions: u64,
+    pub policy_fallbacks: u64,
+    pub policy_avg_latency_ns: u64,
 }
 
 /// Fill `out` with the current eviction stats. Returns 0 on success.
@@ -1324,6 +1329,11 @@ pub unsafe extern "C" fn rust_eviction_get_stats(
                 }
             }
         });
+        // #115: generic per-policy counters (decisions/fallbacks/latency).
+        let c = mm::eviction::policy_counters();
+        stats.policy_decisions = c.decisions;
+        stats.policy_fallbacks = c.fallbacks;
+        stats.policy_avg_latency_ns = c.avg_latency_ns;
     }
 
     core::ptr::write(out, stats);
@@ -1512,6 +1522,52 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             true
         });
         eviction::reset_to_default();
+
+        puts(b"\n-- eviction: per-policy counters (#115) --\n\0");
+
+        // Start from a clean slate: default swap resets counters.
+        eviction::reset_to_default();
+        let c0 = eviction::policy_counters();
+        check!(b"counters_zero_after_reset\0",
+               c0.decisions == 0 && c0.fallbacks == 0 &&
+               c0.avg_latency_ns == 0);
+
+        // Three select_victim calls → three decisions. Latency is
+        // nonzero in wall-clock terms (slm_get_time_ns sees at least
+        // one tick-granularity step, but may be 0 if the whole sample
+        // rounds down); asserting > 0 would be flaky. Count-only.
+        let _ = eviction::select_victim(&cands);
+        let _ = eviction::select_victim(&cands);
+        let _ = eviction::select_victim(&cands);
+        let c3 = eviction::policy_counters();
+        check!(b"counters_count_three_decisions\0", c3.decisions == 3);
+
+        // Fallback callback bumps FALLBACKS but not DECISIONS.
+        eviction::update_feedback(42, true);
+        eviction::update_feedback(43, false);
+        let c4 = eviction::policy_counters();
+        check!(b"counters_fallback_increments_only_on_fault\0",
+               c4.decisions == 3 && c4.fallbacks == 1);
+
+        // Swapping the policy resets counters.
+        eviction::set_eviction_policy(Box::new(eviction::FirstCandidatePolicy));
+        let c5 = eviction::policy_counters();
+        check!(b"counters_reset_on_policy_swap\0",
+               c5.decisions == 0 && c5.fallbacks == 0);
+
+        // reset_to_default() also resets counters.
+        let _ = eviction::select_victim(&cands);
+        eviction::reset_to_default();
+        let c6 = eviction::policy_counters();
+        check!(b"counters_reset_on_reset_to_default\0",
+               c6.decisions == 0 && c6.fallbacks == 0);
+
+        // select_victim on empty candidate list does NOT bump counters.
+        let cbefore = eviction::policy_counters();
+        let _ = eviction::select_victim(&empty);
+        let cafter = eviction::policy_counters();
+        check!(b"counters_skip_empty_select\0",
+               cbefore.decisions == cafter.decisions);
 
         puts(b"\n-- eviction: classical policies --\n\0");
 

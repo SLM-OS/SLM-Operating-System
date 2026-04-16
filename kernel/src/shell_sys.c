@@ -2241,6 +2241,15 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
                 (unsigned long)s->workspace_evictions);
     uart_printf("  Evictable candidates (snapshot): %d\r\n",
                 s->snapshot_candidates);
+    /* #115: per-policy decision/fallback/latency counters. Reset on
+     * every policy swap, so these reflect the currently-installed
+     * policy's lifetime only. */
+    uart_printf("  Decisions:           %lu\r\n",
+                (unsigned long)s->policy_decisions);
+    uart_printf("  Fallbacks:           %lu\r\n",
+                (unsigned long)s->policy_fallbacks);
+    uart_printf("  Avg select latency:  %lu ns\r\n",
+                (unsigned long)s->policy_avg_latency_ns);
 }
 
 static void eviction_print_policies(const char *active)
