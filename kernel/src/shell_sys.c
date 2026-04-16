@@ -1836,6 +1836,62 @@ int cmd_dtb(int argc, char *argv[])
 }
 
 /*
+ * gpu - Show GPU driver status and optionally read a BAR0 register.
+ *
+ *   gpu                     Show GPU info via the registered driver
+ *   gpu read <hex-offset>   Read 32-bit BAR0 register (Jetson-only —
+ *                           uses the fixed 0x17000000 GPU MMIO base)
+ */
+int cmd_gpu(int argc, char *argv[])
+{
+    if (argc >= 2 && strcmp(argv[1], "read") == 0) {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        if (argc < 3) {
+            uart_puts("usage: gpu read <hex-offset>\r\n");
+            return -1;
+        }
+        /* Parse hex offset. Accepts "0x1200" or "1200". */
+        const char *s = argv[2];
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+        uint32_t off = 0;
+        while (*s) {
+            uint32_t d;
+            if (*s >= '0' && *s <= '9') d = *s - '0';
+            else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
+            else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
+            else { uart_puts("bad hex offset\r\n"); return -1; }
+            off = (off << 4) | d;
+            s++;
+        }
+        volatile uint32_t *reg = (volatile uint32_t *)((uintptr_t)GPU_BASE + off);
+        uint32_t val = *reg;
+        uart_printf("GPU[0x%lx] = 0x%08lx\r\n",
+                    (unsigned long)off, (unsigned long)val);
+        return 0;
+#else
+        uart_puts("gpu read: only supported on JETSON_ORIN_NANO\r\n");
+        return -1;
+#endif
+    }
+
+    gpu_info_t info = {0};
+    int rc = gpu_get_info(&info);
+    if (rc != GPU_OK) {
+        uart_printf("GPU info unavailable (rc=%d)\r\n", rc);
+        return rc;
+    }
+    uart_puts("GPU Information:\r\n\r\n");
+    uart_printf("  Driver:         %s\r\n", info.name ? info.name : "(null)");
+    uart_printf("  Device:         %s\r\n", info.device ? info.device : "(null)");
+    uart_printf("  Capabilities:   0x%08lx\r\n", (unsigned long)info.capabilities);
+    uart_printf("  CUDA cores:     %lu\r\n", (unsigned long)info.cuda_cores);
+    uart_printf("  Tensor cores:   %lu\r\n", (unsigned long)info.tensor_cores);
+    uart_printf("  Unified mem:    %s\r\n", info.unified_memory ? "yes" : "no");
+    uart_printf("  Memory size:    %lu\r\n", (unsigned long)info.memory_size);
+    return 0;
+}
+
+/*
  * sched - Show or change scheduler policy.
  *
  *   sched              Show current policy name

@@ -62,6 +62,7 @@ int cmd_vmm(int argc, char **argv);
 int cmd_ipc(int argc, char **argv);
 int cmd_model(int argc, char **argv);
 int cmd_dtb(int argc, char **argv);
+int cmd_gpu(int argc, char **argv);
 int cmd_bench(int argc, char **argv);
 int cmd_sched(int argc, char **argv);
 int cmd_eviction(int argc, char **argv);
