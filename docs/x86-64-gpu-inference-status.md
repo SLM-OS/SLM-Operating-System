@@ -89,7 +89,7 @@ $ ssh root@192.168.4.136 './gsp-harness --fwsec-frts'
 | `kernel/gpu/nvidia/nvidia_vbios.{h,c}` | 700+ | VBIOS BIT-table parser, FWSEC discovery, PCIR walker |
 | `kernel/gpu/nvidia/rpc.{h,c}` | 216 | GSP-RM RPC ring skeleton (ring math, pointer publishing) |
 | `kernel/gpu/nvidia/gsp.{h,c}` | 130+ | Error-code constants, platform-ops vtable |
-| `kernel/arch/x86_64/nvidia_gsp_platform.c` | 300 | x86-64 platform shim (partially stubbed — the VFIO harness bypasses it) |
+| `kernel/arch/x86_64/nvidia_gsp_platform.c` | 300 | x86-64 platform shim — all vtable ops wired (BAR0/BAR1 via nvidia_gpu.c, DMA via PMM identity-mapped) |
 | `kernel/arch/arm64/nvidia_gsp_platform_stub.c` | 19 | Jetson linker stub (returns -1 for `nvidia_vbios_platform_load`); ARM64 platform ops to be written |
 | `host-tools/gsp-harness/` | 2000+ | Linux userspace VFIO harness — the primary test driver |
 
@@ -322,13 +322,13 @@ way to actually reach GPU inference.
 - `kernel/arch/x86_64/nvidia_gsp_firmware.S` — firmware bundling via
   `.incbin`.
 
-**What's stubbed:**
+**What's wired (as of 2026-04-15):**
 
-- `x86_gsp_bar0_read32` / `write32` — stubs; need real ioremap-equivalent
-- `x86_gsp_dma_alloc` — returns NULL; need a physical-address DMA
-  allocator (no IOMMU under SLM-OS) or a basic IOMMU.
-- `x86_gsp_cache_clean` / `invalidate` — no-ops (x86 is cache-coherent
-  over PCIe, so likely safe as no-ops in practice).
+- `x86_gsp_bar0_read32` / `write32` — volatile access via BAR0 pointer from nvidia_gpu.c, bounds-checked
+- `x86_gsp_bar1_read` / `bar1_write` — byte-level volatile copy from BAR1 VRAM aperture
+- `x86_gsp_dma_alloc` / `dma_free` — PMM buddy allocator, identity-mapped VA == PA, zeroed
+- `x86_gsp_cache_clean` / `invalidate` — no-ops (x86 is cache-coherent over PCIe)
+- `gpu init` shell command — calls `gsp_init()` → `gsp_bringup_prepare()` → FWSEC-FRTS → Booter Load → RISC-V start
 
 **Advantages over Option A:**
 

@@ -27,6 +27,8 @@
 #include "shell.h"
 
 #include "pci.h"
+#include "../../gpu/nvidia/gsp.h"
+#include "../../gpu/nvidia/bringup.h"
 
 /* ---- NVIDIA Register Offsets (BAR0) ---- */
 
@@ -393,6 +395,79 @@ static int cmd_gpu(int argc, char *argv[])
         return 0;
     }
 
+    /* Subcommand: "gpu init" runs the GSP-RM bringup sequence */
+    if (argc >= 2 && argv[1][0] == 'i') {
+        extern int gsp_init(void);
+        extern enum gsp_state gsp_get_state(void);
+
+        uart_printf("[GPU] Starting GSP-RM bringup on %s...\n",
+                    impl_name(nvidia_gpu.architecture, nvidia_gpu.implementation));
+
+        /* Phase 0: firmware load + sanity check */
+        int rc = gsp_init();
+        if (rc < 0 && gsp_get_state() == GSP_STATE_FAILED) {
+            uart_printf("[GPU] GSP Phase 0 (firmware load) FAILED\n");
+            return -1;
+        }
+
+        /* Phase 1: FWSEC-FRTS on GSP Falcon */
+        uart_printf("[GPU] Phase 1: FWSEC-FRTS — preparing bringup...\n");
+        struct gsp_bringup b;
+        if (gsp_bringup_prepare(&b) < 0) {
+            uart_printf("[GPU] bringup prepare FAILED\n");
+            return -1;
+        }
+        uart_printf("[GPU] FWSEC: imem=%u dmem=%u engine=0x%x ucode=%u\n",
+                    b.fwsec_imem_size, b.fwsec_dmem_size,
+                    b.fwsec_engine_id, b.fwsec_ucode_id);
+        uart_printf("[GPU] WPR2 target: addr=0x%llx size=0x%llx\n",
+                    (unsigned long long)b.wpr2_addr,
+                    (unsigned long long)b.wpr2_size);
+
+        rc = gsp_bringup_fwsec_frts(&b);
+        if (b.diag_sig_count) {
+            uart_printf("[GPU] sig: fuse[0x%x]=0x%x count=%u ver=0x%x idx=%u\n",
+                        b.diag_fuse_reg_off, b.diag_fuse_reg_val,
+                        b.diag_sig_count, b.diag_sig_versions, b.diag_sig_index);
+        }
+        if (rc < 0) {
+            uart_printf("[GPU] FWSEC-FRTS FAILED at phase %u\n", b.last_error_phase);
+            gsp_bringup_free(&b);
+            return -1;
+        }
+
+        /* Read WPR2 registers to confirm FWSEC populated them */
+        extern const struct gsp_platform_ops *gsp_platform;
+        uint32_t wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
+        uint32_t wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
+        uart_printf("[GPU] FWSEC-FRTS SUCCESS — WPR2: lo=0x%08x hi=0x%08x\n",
+                    wpr_lo, wpr_hi);
+
+        /* Phase 2: Booter Load on SEC2 */
+        uart_printf("[GPU] Phase 2: Booter Load on SEC2...\n");
+        rc = gsp_bringup_booter_load(&b);
+        if (rc < 0) {
+            uart_printf("[GPU] Booter Load FAILED at phase %u\n", b.last_error_phase);
+            gsp_bringup_free(&b);
+            return -1;
+        }
+        uart_printf("[GPU] Booter Load complete — MAILBOX0=0x%08x\n",
+                    b.booter_mbox0_post);
+
+        /* Phase 3: GSP RISC-V startup */
+        uart_printf("[GPU] Phase 3: GSP RISC-V start...\n");
+        rc = gsp_bringup_riscv_start(&b);
+        if (rc < 0) {
+            uart_printf("[GPU] RISC-V start FAILED\n");
+            gsp_bringup_free(&b);
+            return -1;
+        }
+        uart_printf("[GPU] GSP RISC-V RUNNING — bringup complete\n");
+
+        gsp_bringup_free(&b);
+        return 0;
+    }
+
     /* Subcommand: "gpu vram" runs VRAM test */
     if (argc >= 2 && argv[1][0] == 'v') {
         uart_printf("VRAM Test (BAR1 at 0x%lx, %lu MB):\n",
@@ -440,7 +515,7 @@ static int cmd_gpu(int argc, char *argv[])
     uart_printf("  PMC_ENABLE:    0x%08x\n", pmc_enable);
     uart_printf("  PMC_INTR_HOST: 0x%08x\n", pmc_intr);
 
-    uart_printf("\nSubcommands: gpu vram, gpu regs\n");
+    uart_printf("\nSubcommands: gpu init, gpu vram, gpu regs\n");
 
     return 0;
 }
@@ -448,7 +523,7 @@ static int cmd_gpu(int argc, char *argv[])
 static const shell_cmd_t gpu_nvidia_cmd = {
     .name = "gpu",
     .handler = cmd_gpu,
-    .help = "NVIDIA GPU info (gpu vram | gpu regs)"
+    .help = "NVIDIA GPU info (gpu init | gpu vram | gpu regs)"
 };
 
 void nvidia_gpu_register_shell_commands(void)
