@@ -308,6 +308,12 @@ exercises `virtqueue_add_buf` / `virtqueue_get_buf` bookkeeping (free
 list, avail-idx wrap, descriptor reuse) independent of any device, so
 regressions in the cache-maintenance calls surface in `make test`.
 
+The current model is validated on QEMU only. Real hardware (Pi 5
+GENET, Jetson EQOS) may require additional measures — see
+[`docs/net-dma-coherence.md`](net-dma-coherence.md) (#203) for the
+open questions and the verification plan for the first
+real-hardware NIC driver.
+
 ### Packet Header Size
 
 `struct virtio_net_hdr` must be **12 bytes** because we negotiate
