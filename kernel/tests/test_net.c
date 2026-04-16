@@ -610,6 +610,46 @@ static void test_net_poll_after_init(void)
     TEST_PASS();
 }
 
+/*
+ * Test: a raw frame transmits through the registered driver's send path.
+ *
+ * Bypasses lwIP and ARP entirely — pushes a single Ethernet broadcast
+ * frame directly into the driver's send() ops. The ARM64 MMIO driver
+ * and x86-64 PCI driver both implement send() synchronously: push the
+ * descriptor onto the TX virtqueue, kick, wait for used-ring completion.
+ * A return value of 0 proves the full TX path works: net_driver.send →
+ * virtqueue add_buf → device kick → used-ring completion.
+ *
+ * Uses a minimum-size (64-byte) Ethernet frame with broadcast dest, our
+ * MAC as source, EtherType 0x9000 (Loopback test, RFC1042 §19) for the
+ * payload — chosen because it doesn't depend on IP/ARP setup. The
+ * actual byte content doesn't matter to the device; we only verify
+ * that the descriptor cycle completes.
+ */
+static void test_net_driver_tx(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv);
+
+    uint8_t frame[64] = {0};
+    /* Destination MAC: broadcast */
+    for (int i = 0; i < 6; i++) frame[i] = 0xFF;
+    /* Source MAC: ours */
+    drv->get_mac(&frame[6]);
+    /* EtherType: 0x9000 (Loopback) — recognized but unused by SLIRP */
+    frame[12] = 0x90;
+    frame[13] = 0x00;
+    /* Remaining 50 bytes are zero payload */
+
+    int ret = drv->send(frame, sizeof(frame));
+    TEST_ASSERT_MESSAGE(ret == 0, "driver send() should succeed");
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -652,10 +692,11 @@ int test_suite_net(void)
 #endif
 
     /* Live integration tests against QEMU's virtio-net device.
-     * Order matters: driver_registered → init_live → poll_after_init. */
+     * Order: driver_registered → init_live → poll → driver_tx. */
     RUN_TEST(test_net_driver_registered);
     RUN_TEST(test_net_init_live);
     RUN_TEST(test_net_poll_after_init);
+    RUN_TEST(test_net_driver_tx);
 
     return UNITY_END();
 #else

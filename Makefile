@@ -403,11 +403,20 @@ KERNEL_ISO := $(KERNEL_BUILD_DIR)/slmos.iso
 # Common QEMU arguments
 QEMU_COMMON := -machine $(QEMU_MACHINE) -cpu $(QEMU_CPU) -smp cores=$(QEMU_CORES) -m $(QEMU_MEMORY) -nographic
 
-# Networking: add VirtIO-Net device for platforms with driver support
+# Networking: add VirtIO-Net device for platforms with driver support.
+#
+# QEMU virt machine defaults virtio-mmio to legacy (version=1) for
+# backwards compat, but our virtio_net driver uses the modern (version=2)
+# queue setup (QUEUE_DESC_LOW/HIGH, QUEUE_AVAIL_LOW/HIGH, QUEUE_USED_LOW/HIGH,
+# QUEUE_READY). The force-legacy=false global flips the device into modern
+# mode, which is what virtio_net.c expects. Without this flag, the device
+# accepts all our writes but never processes virtqueue kicks because
+# QUEUE_PFN was never written.
 ifeq ($(PLATFORM),X86_64)
     QEMU_NET := -device virtio-net-pci,netdev=net0 -netdev user,id=net0
 else ifeq ($(PLATFORM),QEMU_VIRT)
-    QEMU_NET := -device virtio-net-device,netdev=net0 -netdev user,id=net0
+    QEMU_NET := -global virtio-mmio.force-legacy=false \
+                -device virtio-net-device,netdev=net0 -netdev user,id=net0
 else
     QEMU_NET :=
 endif

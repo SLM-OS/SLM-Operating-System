@@ -300,7 +300,18 @@ int virtio_net_init(void) {
     }
 
     netdev.base = base;
-    INFO("VirtIO-Net found at 0x%lx", (unsigned long)base);
+    uint32_t version = virtio_read32(base, VIRTIO_MMIO_VERSION);
+    INFO("VirtIO-Net found at 0x%lx (mmio version=%u)",
+         (unsigned long)base, version);
+    if (version < 2) {
+        /* Modern (v2+) MMIO uses QUEUE_DESC/AVAIL/USED + QUEUE_READY.
+         * Legacy (v1) uses QUEUE_PFN. Our driver only implements modern;
+         * fail loudly so the user sees "force-legacy=false missing"
+         * rather than a silent TX timeout later. See Makefile:QEMU_NET. */
+        ERROR("VirtIO-Net legacy (v1) MMIO not supported. "
+              "QEMU needs '-global virtio-mmio.force-legacy=false'");
+        return -1;
+    }
 
     /* Reset device */
     virtio_write32(base, VIRTIO_MMIO_STATUS, 0);
@@ -441,13 +452,25 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
     /* Notify device */
     virtqueue_kick(&netdev.tx_vq);
 
-    /* Wait for completion (synchronous TX) */
-    int timeout = 100000;
+    /* Wait for completion (synchronous TX).
+     *
+     * Use a relaxed-spin loop with yields rather than tight CPU spin —
+     * under host CPU quota (e.g. systemd-run --scope CPUQuota=200%
+     * with -smp cores=4) the QEMU vcpu and IO threads share host
+     * cores, and a tight spin can starve the IO thread that processes
+     * the virtqueue kick. WFE/PAUSE lets the host scheduler interleave
+     * threads and the device responds in microseconds. */
+    int timeout = 10000000;
     while (timeout > 0) {
         uint32_t used_len;
         if (virtqueue_get_buf(&netdev.tx_vq, &used_len) >= 0) {
             break;
         }
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        __asm__ volatile("yield" ::: "memory");
+#endif
         timeout--;
     }
 
