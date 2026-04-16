@@ -1340,6 +1340,62 @@ pub unsafe extern "C" fn rust_eviction_get_stats(
     0
 }
 
+/// Bump the global active-inferences counter for `model_id` by `delta`.
+///
+/// Used by the kernel to inform SlmHeuristicPolicy which model is
+/// currently running an inference, so the "inactive-models first"
+/// eviction tier can avoid evicting active-model weights. Called from
+/// the inference entry/exit path (rust_infer_classify) and from any
+/// scheduler integration in the future. Clamps at zero. #113.
+///
+/// When the ai_eviction feature is disabled this is a no-op.
+#[no_mangle]
+pub extern "C" fn rust_eviction_bump_active_inferences(
+    model_id: u8,
+    delta: i32,
+) {
+    #[cfg(feature = "ai_eviction")]
+    {
+        mm::eviction::slm_heuristic::bump_active_global(model_id, delta);
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (model_id, delta);
+    }
+}
+
+/// Overwrite the active-inferences counter for `model_id`. Mainly
+/// useful from tests or initialisation. #113.
+#[no_mangle]
+pub extern "C" fn rust_eviction_set_active_inferences(
+    model_id: u8,
+    count: u32,
+) {
+    #[cfg(feature = "ai_eviction")]
+    {
+        mm::eviction::slm_heuristic::set_active(model_id, count);
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (model_id, count);
+    }
+}
+
+/// Read the active-inferences counter for `model_id`. Returns 0 if
+/// ai_eviction is disabled. #113.
+#[no_mangle]
+pub extern "C" fn rust_eviction_get_active_inferences(model_id: u8) -> u32 {
+    #[cfg(feature = "ai_eviction")]
+    {
+        mm::eviction::slm_heuristic::get_active(model_id)
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = model_id;
+        0
+    }
+}
+
 /// One record in the CACHEUS weight trajectory (#111).
 ///
 /// Caller passes an array of `RustTrajectoryEntry` and the FFI fills
@@ -1715,6 +1771,73 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         };
         check!(b"trajectory_null_out_is_error\0", nullrc == -1);
 
+        eviction::reset_to_default();
+
+        puts(b"\n-- eviction: active-inferences feed (#113) --\n\0");
+
+        // Make sure the global table starts clean before we measure.
+        mm::eviction::slm_heuristic::clear_active();
+
+        // Two weight blocks from different models — symmetric except
+        // for model_id. Without the active-inferences feed, both are
+        // "inactive" and the policy falls back to LRU (index 1, older).
+        let cands_113 = [
+            mm::eviction::BlockMeta {
+                block_id: 100, pool_type: mm::eviction::PoolType::Weight,
+                model_id: 0, layer_idx: 0, last_access_time: 500,
+                load_time: 0, access_count: 0, ref_count: 0,
+                gpu_mapped: false, is_dirty: false, model_priority: 0,
+            },
+            mm::eviction::BlockMeta {
+                block_id: 101, pool_type: mm::eviction::PoolType::Weight,
+                model_id: 1, layer_idx: 0, last_access_time: 100,
+                load_time: 0, access_count: 0, ref_count: 0,
+                gpu_mapped: false, is_dirty: false, model_priority: 0,
+            },
+        ];
+
+        eviction::set_eviction_policy(Box::new(
+            mm::eviction::SlmHeuristicPolicy::new()));
+
+        // Baseline: no active inferences → LRU fallback picks block 1
+        // (older access_time). This matches plain LRU.
+        let baseline = eviction::select_victim(&cands_113);
+        check!(b"slm_heuristic_lru_when_all_inactive\0",
+               baseline == Some(1));
+
+        // Feed: model 1 is now active. Eviction should shift to
+        // model 0 (the inactive one), even though model 1's block is
+        // older. This is the observable behaviour that distinguishes
+        // SLM-Heuristic from plain LRU.
+        rust_eviction_bump_active_inferences(1, 1);
+        let fed = eviction::select_victim(&cands_113);
+        check!(b"slm_heuristic_avoids_active_model\0",
+               fed == Some(0));
+
+        // Decrement returns us to the baseline — the guard protects
+        // against a stuck counter if the caller path panics.
+        rust_eviction_bump_active_inferences(1, -1);
+        let restored = eviction::select_victim(&cands_113);
+        check!(b"slm_heuristic_decrement_restores\0",
+               restored == Some(1));
+
+        // set/get round-trip through the FFI.
+        rust_eviction_set_active_inferences(2, 5);
+        check!(b"slm_heuristic_set_get_roundtrip\0",
+               rust_eviction_get_active_inferences(2) == 5);
+
+        // Indices >= MAX_MODELS (64) are silently ignored.
+        rust_eviction_set_active_inferences(200, 99);
+        check!(b"slm_heuristic_oob_index_clamped\0",
+               rust_eviction_get_active_inferences(200) == 0);
+
+        // Negative deltas below zero clamp at zero (no underflow).
+        mm::eviction::slm_heuristic::clear_active();
+        rust_eviction_bump_active_inferences(3, -5);
+        check!(b"slm_heuristic_underflow_clamps\0",
+               rust_eviction_get_active_inferences(3) == 0);
+
+        mm::eviction::slm_heuristic::clear_active();
         eviction::reset_to_default();
 
         puts(b"\n-- eviction: classical policies --\n\0");
@@ -3481,6 +3604,22 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
 pub extern "C" fn rust_infer_classify(model_index: u32) -> i32 {
     // Update LRU timestamp
     loader::registry::touch_model(model_index as usize);
+
+    // #113: inform SlmHeuristicPolicy that this model is actively
+    // running inference for the duration of the call. Any concurrent
+    // eviction picks between now and the matching decrement below
+    // will prefer weights from inactive models over this model's.
+    // The cast is safe: model_index > u8::MAX is out-of-range for
+    // BlockMeta::model_id anyway.
+    let active_id: u8 = (model_index & 0xFF) as u8;
+    rust_eviction_bump_active_inferences(active_id, 1);
+    struct Guard(u8);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            rust_eviction_bump_active_inferences(self.0, -1);
+        }
+    }
+    let _decrement_on_exit = Guard(active_id);
 
     static CLASSIFY_INPUT: [f32; 784] = [0.0; 784];
     static mut CLASSIFY_OUTPUT: [f32; 64] = [0.0; 64];

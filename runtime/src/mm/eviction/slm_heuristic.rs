@@ -12,12 +12,90 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::policy::{BlockMeta, EvictionPolicy, PoolType};
 
+// =============================================================================
+// Global active-inferences table (#113)
+//
+// The scheduler / inference path keeps this table up-to-date via the
+// `rust_eviction_bump_active_inferences` FFI. The SlmHeuristicPolicy's
+// "inactive-models first" tier consults this table instead of a per-
+// instance BTreeMap so the live counts survive policy swaps (install
+// CACHEUS → install SLM-Heuristic again without losing the feed).
+//
+// Storage: `[AtomicU32; MAX_MODELS]` indexed by model_id (u8). Zero-
+// lock reads/writes; no heap allocation. Atomics use relaxed ordering
+// because the counters are observational — a stale value only biases
+// eviction decisions, never breaks invariants.
+// =============================================================================
+
+/// Maximum distinct model ids tracked. BlockMeta::model_id is u8, but
+/// in practice the allocator hands out small ids from the model
+/// registry. 64 slots cover every plausible demo workload.
+pub const MAX_MODELS: usize = 64;
+
+static ACTIVE_INFERENCES: [AtomicU32; MAX_MODELS] = {
+    const Z: AtomicU32 = AtomicU32::new(0);
+    [Z; MAX_MODELS]
+};
+
+/// Set the active-inference count for `model_id` to `count`. Used by
+/// the FFI so external callers can reset / initialise the table.
+pub fn set_active(model_id: u8, count: u32) {
+    if (model_id as usize) < MAX_MODELS {
+        ACTIVE_INFERENCES[model_id as usize].store(count, Ordering::Relaxed);
+    }
+}
+
+/// Adjust the active-inference count for `model_id` by `delta`.
+/// Clamps at zero — caller doesn't need to balance decrements.
+pub fn bump_active_global(model_id: u8, delta: i32) {
+    if (model_id as usize) >= MAX_MODELS {
+        return;
+    }
+    let slot = &ACTIVE_INFERENCES[model_id as usize];
+    if delta >= 0 {
+        slot.fetch_add(delta as u32, Ordering::Relaxed);
+    } else {
+        // Subtract with underflow clamp; a racy pair of decrements can
+        // briefly show a lower value, but never below zero.
+        let mag = (-delta) as u32;
+        loop {
+            let cur = slot.load(Ordering::Relaxed);
+            let next = cur.saturating_sub(mag);
+            if slot.compare_exchange_weak(cur, next,
+                                          Ordering::Relaxed,
+                                          Ordering::Relaxed).is_ok() {
+                break;
+            }
+        }
+    }
+}
+
+/// Read the current active-inference count for `model_id`.
+pub fn get_active(model_id: u8) -> u32 {
+    if (model_id as usize) < MAX_MODELS {
+        ACTIVE_INFERENCES[model_id as usize].load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
+/// Zero every entry. Useful for test isolation.
+pub fn clear_active() {
+    for slot in ACTIVE_INFERENCES.iter() {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
+
 #[derive(Default)]
 pub struct SlmHeuristicPolicy {
-    /// `model_id` → number of active inference tasks for that model.
+    /// Per-instance override table. Populated only when a caller uses
+    /// `set_active_inferences` directly (test path). Production code
+    /// reads the global `ACTIVE_INFERENCES` array instead; see
+    /// `is_active` for the preference order.
     active_inferences: BTreeMap<u8, u32>,
 }
 
@@ -46,7 +124,13 @@ impl SlmHeuristicPolicy {
     }
 
     fn is_active(&self, model_id: u8) -> bool {
-        self.active_inferences.get(&model_id).copied().unwrap_or(0) > 0
+        // Per-instance override wins — used by direct-call tests that
+        // seed the policy's own BTreeMap. If that's empty, fall back
+        // to the global table fed by the scheduler / FFI.
+        if let Some(&n) = self.active_inferences.get(&model_id) {
+            return n > 0;
+        }
+        get_active(model_id) > 0
     }
 
     /// Return the original index of the LRU block among the supplied

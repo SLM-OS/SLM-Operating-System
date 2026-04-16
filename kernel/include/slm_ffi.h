@@ -342,6 +342,13 @@ typedef struct {
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
+/* Bump / set / read the active-inferences counter consumed by the
+ * SlmHeuristicPolicy "inactive-models first" eviction tier. #113.
+ * Bump clamps at zero; indices ≥ 64 are silently ignored. */
+extern void rust_eviction_bump_active_inferences(uint8_t model_id, int32_t delta);
+extern void rust_eviction_set_active_inferences(uint8_t model_id, uint32_t count);
+extern uint32_t rust_eviction_get_active_inferences(uint8_t model_id);
+
 /* CACHEUS weight trajectory entry (#111). Weights are in integer
  * basis points (0..10000, 1 bp = 0.01%) to keep the kernel's
  * -mgeneral-regs-only code float-free. */
