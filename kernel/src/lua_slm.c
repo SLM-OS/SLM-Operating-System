@@ -16,6 +16,12 @@
 #include "component.h"
 #include "slm_ffi.h"
 #include "sched_policy.h"
+#include "ipc.h"
+#include "smp.h"
+#include "string.h"
+#if !defined(PLATFORM_X86_64)
+#include "vmm.h"
+#endif
 
 /* Lua headers - note: these may include stdio.h from newlib */
 #include "../lib/lua/src/lua.h"
@@ -503,6 +509,556 @@ static int l_sched_policy(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.sched_stats() - Get scheduler statistics
+ * Returns table: {task_count, ready_count, context_switches, timer_ticks, policy}
+ */
+static int l_sched_stats(lua_State *L) {
+    if (!L) return 0;
+    struct sched_stats stats;
+    scheduler_get_stats(&stats);
+
+    lua_createtable(L, 0, 5);
+
+    lua_pushinteger(L, (lua_Integer)stats.task_count);
+    lua_setfield(L, -2, "task_count");
+
+    lua_pushinteger(L, (lua_Integer)stats.ready_count);
+    lua_setfield(L, -2, "ready_count");
+
+    lua_pushinteger(L, (lua_Integer)stats.context_switches);
+    lua_setfield(L, -2, "context_switches");
+
+    lua_pushinteger(L, (lua_Integer)stats.timer_ticks);
+    lua_setfield(L, -2, "timer_ticks");
+
+    lua_pushstring(L, sched_get_policy());
+    lua_setfield(L, -2, "policy");
+
+    return 1;
+}
+
+/**
+ * slm.sched_set_policy(name) - Switch scheduler policy by name
+ * Returns true on success, false on failure (unknown policy name)
+ */
+static int l_sched_set_policy(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_checkstring(L, 1);
+    const struct sched_policy_ops *p = sched_find_policy(name);
+    if (!p) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    int rc = sched_set_policy(p);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+/**
+ * slm.sched_policy_list() - List available scheduler policies
+ * Returns array of tables: {{name, active}, ...}
+ */
+static int l_sched_policy_list(lua_State *L) {
+    if (!L) return 0;
+    int count = sched_policy_count();
+    const char *current = sched_get_policy();
+
+    lua_createtable(L, count, 0);
+
+    int idx = 1;
+    for (int i = 0; i < count; i++) {
+        const struct sched_policy_ops *p = sched_policy_get(i);
+        if (!p) continue;
+
+        lua_createtable(L, 0, 2);
+        lua_pushstring(L, p->name);
+        lua_setfield(L, -2, "name");
+        lua_pushboolean(L, strcmp(p->name, current) == 0);
+        lua_setfield(L, -2, "active");
+        lua_rawseti(L, -2, idx++);
+    }
+
+    return 1;
+}
+
+/**
+ * slm.ai_sched_stats() - Get AI scheduler statistics (if CONFIG_AI_SCHEDULER enabled)
+ * Returns table: {decisions, fallbacks, avg_latency_ns, histogram={...}}
+ * Returns nil if AI scheduler is not compiled in.
+ */
+static int l_ai_sched_stats(lua_State *L) {
+    if (!L) return 0;
+#if defined(CONFIG_AI_SCHEDULER)
+    extern void sched_ai_get_stats(const char *, uint32_t *, uint32_t *,
+                                   uint64_t *, const uint32_t **, int *);
+
+    const char *policy = sched_get_policy();
+    uint32_t decisions = 0, fallbacks = 0;
+    uint64_t avg_lat = 0;
+    const uint32_t *hist = NULL;
+    int n_actions = 0;
+
+    sched_ai_get_stats(policy, &decisions, &fallbacks, &avg_lat, &hist, &n_actions);
+
+    lua_createtable(L, 0, 5);
+
+    lua_pushstring(L, policy);
+    lua_setfield(L, -2, "policy");
+
+    lua_pushinteger(L, (lua_Integer)decisions);
+    lua_setfield(L, -2, "decisions");
+
+    lua_pushinteger(L, (lua_Integer)fallbacks);
+    lua_setfield(L, -2, "fallbacks");
+
+    lua_pushinteger(L, (lua_Integer)avg_lat);
+    lua_setfield(L, -2, "avg_latency_ns");
+
+    if (hist && n_actions > 0) {
+        lua_createtable(L, n_actions, 0);
+        for (int i = 0; i < n_actions; i++) {
+            lua_pushinteger(L, (lua_Integer)hist[i]);
+            lua_rawseti(L, -2, i + 1);
+        }
+        lua_setfield(L, -2, "histogram");
+    }
+#else
+    lua_pushnil(L);
+#endif
+    return 1;
+}
+
+/* ============================================================================
+ * CPU Info Bindings
+ * ============================================================================ */
+
+/**
+ * slm.cpu_info() - Get per-CPU information
+ * Returns table: {online_count, total_count, current_cpu, cpus=[{id, isolated, ticks, schedules}, ...]}
+ */
+static int l_cpu_info(lua_State *L) {
+    if (!L) return 0;
+    /* Declared as pointer (into NC memory) on PLATFORM_HAS_NC_MEMORY
+     * platforms, as a plain BSS array elsewhere — must extern-declare
+     * in the matching shape or subscripting dereferences garbage. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    extern volatile uint32_t *sched_diag_tick;
+    extern volatile uint32_t *sched_diag_schedule;
+#else
+    extern volatile uint32_t sched_diag_tick[];
+    extern volatile uint32_t sched_diag_schedule[];
+#endif
+
+    lua_createtable(L, 0, 4);
+
+    lua_pushinteger(L, (lua_Integer)cpus_online);
+    lua_setfield(L, -2, "online_count");
+
+    lua_pushinteger(L, (lua_Integer)cpu_count);
+    lua_setfield(L, -2, "total_count");
+
+#if defined(PLATFORM_X86_64)
+    lua_pushinteger(L, 0);
+#else
+    uint64_t mpidr;
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+    lua_pushinteger(L, (lua_Integer)(mpidr & 0xFF));
+#endif
+    lua_setfield(L, -2, "current_cpu");
+
+    /* Per-CPU array */
+    uint32_t n = cpu_count;
+    if (n > MAX_CPUS) n = MAX_CPUS;
+    lua_createtable(L, (int)n, 0);
+    for (uint32_t i = 0; i < n; i++) {
+        lua_createtable(L, 0, 4);
+
+        lua_pushinteger(L, (lua_Integer)i);
+        lua_setfield(L, -2, "id");
+
+        lua_pushboolean(L, sched_is_core_isolated(i));
+        lua_setfield(L, -2, "isolated");
+
+        lua_pushinteger(L, sched_diag_tick ? (lua_Integer)sched_diag_tick[i] : 0);
+        lua_setfield(L, -2, "ticks");
+
+        lua_pushinteger(L, sched_diag_schedule ? (lua_Integer)sched_diag_schedule[i] : 0);
+        lua_setfield(L, -2, "schedules");
+
+        lua_rawseti(L, -2, (int)i + 1);
+    }
+    lua_setfield(L, -2, "cpus");
+
+    return 1;
+}
+
+/* ============================================================================
+ * VMM Stats Bindings (ARM64 only — x86-64 build omits vmm.c)
+ * ============================================================================ */
+
+/**
+ * slm.vmm_stats() - Get virtual memory statistics
+ * Returns table: {l1_tables, l2_tables, blocks_mapped, bytes_mapped}
+ * Returns nil on x86-64 (no VMM).
+ */
+static int l_vmm_stats(lua_State *L) {
+    if (!L) return 0;
+#if defined(PLATFORM_X86_64)
+    lua_pushnil(L);
+#else
+    struct vmm_stats stats;
+    vmm_get_stats(&stats);
+
+    lua_createtable(L, 0, 4);
+
+    lua_pushinteger(L, (lua_Integer)stats.l1_tables);
+    lua_setfield(L, -2, "l1_tables");
+
+    lua_pushinteger(L, (lua_Integer)stats.l2_tables);
+    lua_setfield(L, -2, "l2_tables");
+
+    lua_pushinteger(L, (lua_Integer)stats.blocks_mapped);
+    lua_setfield(L, -2, "blocks_mapped");
+
+    lua_pushinteger(L, (lua_Integer)stats.bytes_mapped);
+    lua_setfield(L, -2, "bytes_mapped");
+#endif
+    return 1;
+}
+
+/* ============================================================================
+ * IPC Stats Bindings
+ * ============================================================================ */
+
+/**
+ * slm.ipc_stats() - Get IPC statistics
+ * Returns table: {queue_count, buffer_count, msgs_sent, msgs_recv}
+ */
+static int l_ipc_stats(lua_State *L) {
+    if (!L) return 0;
+    struct ipc_stats stats;
+    ipc_get_stats(&stats);
+
+    lua_createtable(L, 0, 4);
+
+    lua_pushinteger(L, (lua_Integer)stats.queue_count);
+    lua_setfield(L, -2, "queue_count");
+
+    lua_pushinteger(L, (lua_Integer)stats.buffer_count);
+    lua_setfield(L, -2, "buffer_count");
+
+    lua_pushinteger(L, (lua_Integer)stats.total_msgs_sent);
+    lua_setfield(L, -2, "msgs_sent");
+
+    lua_pushinteger(L, (lua_Integer)stats.total_msgs_recv);
+    lua_setfield(L, -2, "msgs_recv");
+
+    return 1;
+}
+
+/* ============================================================================
+ * Eviction Policy Bindings (gated on CONFIG_AI_EVICTION)
+ * ============================================================================ */
+
+/**
+ * slm.eviction_policy() - Get current eviction policy name
+ * Returns string, or nil if eviction is disabled.
+ */
+static int l_eviction_policy(lua_State *L) {
+    if (!L) return 0;
+#if defined(CONFIG_AI_EVICTION)
+    uint8_t buf[64];
+    size_t n = rust_eviction_policy_name(buf, sizeof(buf));
+    if (n > 0)
+        lua_pushlstring(L, (const char *)buf, n);
+    else
+        lua_pushnil(L);
+#else
+    lua_pushnil(L);
+#endif
+    return 1;
+}
+
+/**
+ * slm.eviction_set_policy(name) - Switch eviction policy by name
+ * Returns true on success, false on failure (unknown name / feature off).
+ */
+static int l_eviction_set_policy(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_EVICTION)
+    int32_t rc = rust_eviction_policy_set((const uint8_t *)name);
+    lua_pushboolean(L, rc == 0);
+#else
+    (void)name;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.eviction_stats() - Get eviction statistics
+ * Returns table with {policy, enabled, weight_evictions, workspace_evictions,
+ *                     weight_allocated/total, workspace_allocated/total,
+ *                     snapshot_candidates, expert_weights_bp}
+ * Returns nil if eviction feature is disabled.
+ */
+static int l_eviction_stats(lua_State *L) {
+    if (!L) return 0;
+#if defined(CONFIG_AI_EVICTION)
+    RustEvictionStats stats;
+    int32_t rc = rust_eviction_get_stats(&stats);
+    if (rc != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_createtable(L, 0, 10);
+
+    lua_pushboolean(L, stats.feature_enabled);
+    lua_setfield(L, -2, "enabled");
+
+    /* Policy name */
+    uint8_t pbuf[64];
+    size_t pn = rust_eviction_policy_name(pbuf, sizeof(pbuf));
+    if (pn > 0)
+        lua_pushlstring(L, (const char *)pbuf, pn);
+    else
+        lua_pushstring(L, "unknown");
+    lua_setfield(L, -2, "policy");
+
+    lua_pushinteger(L, (lua_Integer)stats.weight_evictions);
+    lua_setfield(L, -2, "weight_evictions");
+
+    lua_pushinteger(L, (lua_Integer)stats.workspace_evictions);
+    lua_setfield(L, -2, "workspace_evictions");
+
+    lua_pushinteger(L, (lua_Integer)stats.weight_allocated);
+    lua_setfield(L, -2, "weight_allocated");
+
+    lua_pushinteger(L, (lua_Integer)stats.weight_total);
+    lua_setfield(L, -2, "weight_total");
+
+    lua_pushinteger(L, (lua_Integer)stats.workspace_allocated);
+    lua_setfield(L, -2, "workspace_allocated");
+
+    lua_pushinteger(L, (lua_Integer)stats.workspace_total);
+    lua_setfield(L, -2, "workspace_total");
+
+    lua_pushinteger(L, (lua_Integer)stats.snapshot_candidates);
+    lua_setfield(L, -2, "snapshot_candidates");
+
+    /* CACHEUS expert weights (basis points: 0..10000) */
+    if (stats.cacheus_expert_count > 0) {
+        uint32_t n = stats.cacheus_expert_count;
+        if (n > 5) n = 5;
+        lua_createtable(L, (int)n, 0);
+        for (uint32_t i = 0; i < n; i++) {
+            lua_pushinteger(L, (lua_Integer)stats.expert_weights_bp[i]);
+            lua_rawseti(L, -2, (int)i + 1);
+        }
+        lua_setfield(L, -2, "expert_weights_bp");
+    }
+#else
+    lua_pushnil(L);
+#endif
+    return 1;
+}
+
+/* ============================================================================
+ * Extended Model Bindings
+ * ============================================================================ */
+
+/**
+ * slm.model_list() - List all loaded models
+ * Returns array of tables: {{index, name, format, params, weight_size, nodes}, ...}
+ */
+static int l_model_list(lua_State *L) {
+    if (!L) return 0;
+    lua_newtable(L);
+
+    int idx = 1;
+    /* Registry has 8 slots; skip invalid ones. Same loop bound as the
+     * `model list` shell handler in shell_exec.c. */
+    for (uint32_t i = 0; i < 8; i++) {
+        RustModelInfo info;
+        if (rust_model_get_info(i, &info) != 0) continue;
+
+        lua_createtable(L, 0, 6);
+
+        lua_pushinteger(L, (lua_Integer)i);
+        lua_setfield(L, -2, "index");
+
+        lua_pushstring(L, (const char *)info.name);
+        lua_setfield(L, -2, "name");
+
+        const char *fmt;
+        switch (info.format) {
+            case 0: fmt = "GGUF"; break;
+            case 1: fmt = "ONNX"; break;
+            case 2: fmt = "Raw"; break;
+            default: fmt = "unknown"; break;
+        }
+        lua_pushstring(L, fmt);
+        lua_setfield(L, -2, "format");
+
+        lua_pushinteger(L, (lua_Integer)info.param_count);
+        lua_setfield(L, -2, "params");
+
+        lua_pushinteger(L, (lua_Integer)info.weight_size);
+        lua_setfield(L, -2, "weight_size");
+
+        lua_pushinteger(L, (lua_Integer)info.node_count);
+        lua_setfield(L, -2, "nodes");
+
+        lua_rawseti(L, -2, idx++);
+    }
+
+    return 1;
+}
+
+/**
+ * slm.model_info(index) - Get detailed info for one model
+ * Returns table or nil if index invalid.
+ */
+static int l_model_info(lua_State *L) {
+    if (!L) return 0;
+    int idx = (int)luaL_checkinteger(L, 1);
+
+    RustModelInfo info;
+    if (rust_model_get_info((uint32_t)idx, &info) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_createtable(L, 0, 9);
+
+    lua_pushinteger(L, (lua_Integer)idx);
+    lua_setfield(L, -2, "index");
+
+    lua_pushstring(L, (const char *)info.name);
+    lua_setfield(L, -2, "name");
+
+    const char *fmt;
+    switch (info.format) {
+        case 0: fmt = "GGUF"; break;
+        case 1: fmt = "ONNX"; break;
+        case 2: fmt = "Raw"; break;
+        default: fmt = "unknown"; break;
+    }
+    lua_pushstring(L, fmt);
+    lua_setfield(L, -2, "format");
+
+    lua_pushinteger(L, (lua_Integer)info.param_count);
+    lua_setfield(L, -2, "params");
+
+    lua_pushinteger(L, (lua_Integer)info.weight_size);
+    lua_setfield(L, -2, "weight_size");
+
+    lua_pushinteger(L, (lua_Integer)info.workspace_size);
+    lua_setfield(L, -2, "workspace_size");
+
+    lua_pushinteger(L, (lua_Integer)info.node_count);
+    lua_setfield(L, -2, "nodes");
+
+    lua_pushinteger(L, (lua_Integer)info.input_count);
+    lua_setfield(L, -2, "inputs");
+
+    lua_pushinteger(L, (lua_Integer)info.output_count);
+    lua_setfield(L, -2, "outputs");
+
+    return 1;
+}
+
+/**
+ * slm.model_bench(index, iterations) - Run inference benchmark
+ * Results are printed to UART. Returns 0 on success, -1 on error.
+ */
+static int l_model_bench(lua_State *L) {
+    if (!L) return 0;
+    int idx = (int)luaL_checkinteger(L, 1);
+    int iters = (int)luaL_optinteger(L, 2, 10);
+    if (iters < 1) iters = 1;
+    int rc = rust_infer_bench((uint32_t)idx, (uint32_t)iters);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+/**
+ * slm.infer_stats() - Get inference performance statistics
+ * Returns table: {total, total_ns, min_ns, max_ns, last_ns, errors}
+ * Returns nil on error (e.g., stats unavailable).
+ */
+static int l_infer_stats(lua_State *L) {
+    if (!L) return 0;
+    RustInferStats stats;
+    int rc = rust_infer_stats(&stats);
+    if (rc != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_createtable(L, 0, 6);
+
+    lua_pushinteger(L, (lua_Integer)stats.total_inferences);
+    lua_setfield(L, -2, "total");
+
+    lua_pushinteger(L, (lua_Integer)stats.total_time_ns);
+    lua_setfield(L, -2, "total_ns");
+
+    lua_pushinteger(L, (lua_Integer)stats.min_time_ns);
+    lua_setfield(L, -2, "min_ns");
+
+    lua_pushinteger(L, (lua_Integer)stats.max_time_ns);
+    lua_setfield(L, -2, "max_ns");
+
+    lua_pushinteger(L, (lua_Integer)stats.last_time_ns);
+    lua_setfield(L, -2, "last_ns");
+
+    lua_pushinteger(L, (lua_Integer)stats.errors);
+    lua_setfield(L, -2, "errors");
+
+    return 1;
+}
+
+/**
+ * slm.gpu_status() - Get GPU subsystem status
+ * Returns table: {available, name, device, compute_ready, unified_memory, memory_size}
+ */
+static int l_gpu_status(lua_State *L) {
+    if (!L) return 0;
+
+    int avail = slm_gpu_available();
+
+    lua_createtable(L, 0, 6);
+
+    lua_pushboolean(L, avail);
+    lua_setfield(L, -2, "available");
+
+    if (avail) {
+        RustGpuInfo info;
+        if (slm_gpu_get_info(&info) == 0) {
+            lua_pushstring(L, (const char *)info.name);
+            lua_setfield(L, -2, "name");
+
+            lua_pushstring(L, (const char *)info.device);
+            lua_setfield(L, -2, "device");
+
+            lua_pushboolean(L, info.compute_ready);
+            lua_setfield(L, -2, "compute_ready");
+
+            lua_pushboolean(L, info.unified_memory);
+            lua_setfield(L, -2, "unified_memory");
+
+            lua_pushinteger(L, (lua_Integer)info.memory_size);
+            lua_setfield(L, -2, "memory_size");
+        }
+    }
+
+    return 1;
+}
+
 /* ============================================================================
  * Shell Integration Bindings
  * ============================================================================ */
@@ -581,6 +1137,25 @@ static const luaL_Reg slm_lib[] = {
     {"msg_publish_priority", l_msg_publish_priority},
     /* Scheduler */
     {"sched_policy", l_sched_policy},
+    {"sched_stats", l_sched_stats},
+    {"sched_set_policy", l_sched_set_policy},
+    {"sched_policy_list", l_sched_policy_list},
+    {"ai_sched_stats", l_ai_sched_stats},
+    /* CPU info */
+    {"cpu_info", l_cpu_info},
+    /* Memory / VMM / IPC */
+    {"vmm_stats", l_vmm_stats},
+    {"ipc_stats", l_ipc_stats},
+    /* Eviction */
+    {"eviction_policy", l_eviction_policy},
+    {"eviction_set_policy", l_eviction_set_policy},
+    {"eviction_stats", l_eviction_stats},
+    /* Extended model bindings */
+    {"model_list", l_model_list},
+    {"model_info", l_model_info},
+    {"model_bench", l_model_bench},
+    {"infer_stats", l_infer_stats},
+    {"gpu_status", l_gpu_status},
     /* Shell integration */
     {"read_line", l_read_line},
     {"shell_exec", l_shell_exec},

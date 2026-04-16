@@ -812,12 +812,459 @@ static void test_slm_read_line_callable(void)
     lua_slm_close(L);
 }
 
+/* ============================================================================
+ * Extended Binding Tests (#152 audit)
+ * ============================================================================ */
+
+/*
+ * Test: slm.sched_stats returns a table with the documented shape.
+ */
+static void test_slm_sched_stats(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local s = slm.sched_stats()\n"
+        "assert(type(s) == 'table', 'sched_stats should return table')\n"
+        "assert(type(s.task_count) == 'number', 'task_count should be number')\n"
+        "assert(type(s.ready_count) == 'number', 'ready_count should be number')\n"
+        "assert(type(s.context_switches) == 'number', 'context_switches should be number')\n"
+        "assert(type(s.timer_ticks) == 'number', 'timer_ticks should be number')\n"
+        "assert(type(s.policy) == 'string', 'policy should be string')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.sched_policy_list enumerates registered policies and
+ * flags the active one.
+ */
+static void test_slm_sched_policy_list(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local list = slm.sched_policy_list()\n"
+        "assert(type(list) == 'table', 'list should be table')\n"
+        "assert(#list >= 1, 'at least one policy registered')\n"
+        "local active = 0\n"
+        "for _, p in ipairs(list) do\n"
+        "    assert(type(p.name) == 'string', 'entry.name should be string')\n"
+        "    assert(type(p.active) == 'boolean', 'entry.active should be boolean')\n"
+        "    if p.active then active = active + 1 end\n"
+        "end\n"
+        "assert(active == 1, 'exactly one policy should be active')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.sched_set_policy rejects unknown names and round-trips
+ * with slm.sched_policy().
+ */
+static void test_slm_sched_set_policy(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "-- Unknown policy fails\n"
+        "local ok = slm.sched_set_policy('definitely_not_a_policy')\n"
+        "assert(ok == false, 'unknown name should fail')\n"
+        "-- heuristic is always registered\n"
+        "local ok2 = slm.sched_set_policy('heuristic')\n"
+        "assert(ok2 == true, 'heuristic should succeed')\n"
+        "assert(slm.sched_policy() == 'heuristic', 'active policy round-trips')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.cpu_info returns per-CPU state with the documented shape.
+ */
+static void test_slm_cpu_info(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local info = slm.cpu_info()\n"
+        "assert(type(info) == 'table', 'cpu_info should return table')\n"
+        "assert(type(info.online_count) == 'number', 'online_count should be number')\n"
+        "assert(type(info.total_count) == 'number', 'total_count should be number')\n"
+        "assert(type(info.current_cpu) == 'number', 'current_cpu should be number')\n"
+        "assert(type(info.cpus) == 'table', 'cpus should be a table')\n"
+        "assert(#info.cpus >= 1, 'at least one CPU')\n"
+        "for _, c in ipairs(info.cpus) do\n"
+        "    assert(type(c.id) == 'number', 'c.id should be number')\n"
+        "    assert(type(c.isolated) == 'boolean', 'c.isolated should be boolean')\n"
+        "    assert(type(c.ticks) == 'number', 'c.ticks should be number')\n"
+        "    assert(type(c.schedules) == 'number', 'c.schedules should be number')\n"
+        "end";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.ipc_stats returns a table with the documented shape.
+ */
+static void test_slm_ipc_stats(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local s = slm.ipc_stats()\n"
+        "assert(type(s) == 'table', 'ipc_stats should return table')\n"
+        "assert(type(s.queue_count) == 'number', 'queue_count should be number')\n"
+        "assert(type(s.buffer_count) == 'number', 'buffer_count should be number')\n"
+        "assert(type(s.msgs_sent) == 'number', 'msgs_sent should be number')\n"
+        "assert(type(s.msgs_recv) == 'number', 'msgs_recv should be number')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.vmm_stats returns a table on ARM64, nil on x86-64.
+ */
+static void test_slm_vmm_stats(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    /* This test file is only built on ARM64 (see CMakeLists.txt), so
+     * we expect a table with numeric fields. */
+    const char *code =
+        "local s = slm.vmm_stats()\n"
+        "assert(type(s) == 'table', 'vmm_stats should return table on ARM64')\n"
+        "assert(type(s.l1_tables) == 'number', 'l1_tables should be number')\n"
+        "assert(type(s.l2_tables) == 'number', 'l2_tables should be number')\n"
+        "assert(type(s.blocks_mapped) == 'number', 'blocks_mapped should be number')\n"
+        "assert(type(s.bytes_mapped) == 'number', 'bytes_mapped should be number')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.model_list enumerates loaded models (possibly empty).
+ * Explicitly unloads MNIST afterwards so the shared registry stays
+ * clean for the model-loader tests that run later in the suite.
+ */
+static void test_slm_model_list(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "-- Ensure MNIST is loaded so the list is non-empty\n"
+        "slm.model_load_mnist()\n"
+        "local list = slm.model_list()\n"
+        "assert(type(list) == 'table', 'model_list should return table')\n"
+        "assert(#list >= 1, 'at least one model after MNIST load')\n"
+        "for _, m in ipairs(list) do\n"
+        "    assert(type(m.index) == 'number', 'm.index should be number')\n"
+        "    assert(type(m.name) == 'string', 'm.name should be string')\n"
+        "    assert(type(m.format) == 'string', 'm.format should be string')\n"
+        "end";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+    rust_model_unload(0);  /* keep the registry clean for later tests */
+}
+
+/*
+ * Test: slm.infer_stats returns a table after at least one inference.
+ * Unloads the model afterwards (see test_slm_model_list rationale).
+ */
+static void test_slm_infer_stats(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local idx = slm.model_load_mnist()\n"
+        "if idx >= 0 then slm.model_infer(idx) end\n"
+        "local s = slm.infer_stats()\n"
+        "assert(type(s) == 'table', 'infer_stats should return table')\n"
+        "assert(type(s.total) == 'number', 'total should be number')\n"
+        "assert(type(s.min_ns) == 'number', 'min_ns should be number')\n"
+        "assert(type(s.max_ns) == 'number', 'max_ns should be number')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+    rust_model_unload(0);
+}
+
+/*
+ * Test: slm.gpu_status always returns a table with .available boolean.
+ */
+static void test_slm_gpu_status(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local g = slm.gpu_status()\n"
+        "assert(type(g) == 'table', 'gpu_status should return table')\n"
+        "assert(type(g.available) == 'boolean', 'available should be boolean')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.ai_sched_stats returns a table when CONFIG_AI_SCHEDULER is on,
+ * nil otherwise.
+ */
+static void test_slm_ai_sched_stats(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    /* Binding must at least be callable in either configuration. */
+    const char *code =
+        "local result = slm.ai_sched_stats()\n"
+        "assert(result == nil or type(result) == 'table',\n"
+        "       'ai_sched_stats returns nil or table')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.eviction_policy returns nil when feature is disabled,
+ * a string when enabled. slm.eviction_stats likewise.
+ */
+static void test_slm_eviction_bindings(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local pol = slm.eviction_policy()\n"
+        "assert(pol == nil or type(pol) == 'string',\n"
+        "       'eviction_policy returns nil or string')\n"
+        "local st = slm.eviction_stats()\n"
+        "assert(st == nil or type(st) == 'table',\n"
+        "       'eviction_stats returns nil or table')\n"
+        "-- set_policy always rejects unknown\n"
+        "local ok = slm.eviction_set_policy('definitely_not_a_policy_xyz')\n"
+        "assert(ok == false, 'unknown eviction policy should fail')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.sched_stats counters are non-decreasing between calls.
+ * A simple structural test — the counters are monotonic in practice
+ * (timer ticks + context switches only ever grow) so successive calls
+ * must return values >= the previous ones.
+ */
+static void test_slm_sched_stats_monotonic(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local s1 = slm.sched_stats()\n"
+        "-- force a scheduler entry point\n"
+        "for i=1,50 do slm.yield() end\n"
+        "local s2 = slm.sched_stats()\n"
+        "assert(s2.context_switches >= s1.context_switches,\n"
+        "       'ctx switches should be monotonic')\n"
+        "assert(s2.timer_ticks >= s1.timer_ticks,\n"
+        "       'timer ticks should be monotonic')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.cpu_info values are consistent with each other.
+ * Exactly one CPU should be reported as 'current'.
+ */
+static void test_slm_cpu_info_consistency(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local info = slm.cpu_info()\n"
+        "assert(info.online_count > 0, 'at least one online CPU')\n"
+        "assert(info.online_count <= info.total_count,\n"
+        "       'online <= total')\n"
+        "assert(info.current_cpu < info.total_count,\n"
+        "       'current_cpu < total')\n"
+        "assert(#info.cpus == info.total_count,\n"
+        "       '#cpus matches total_count')\n"
+        "-- IDs should be 0..N-1 in order\n"
+        "for i, c in ipairs(info.cpus) do\n"
+        "    assert(c.id == i - 1, 'cpu id should match index')\n"
+        "end";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.sched_set_policy rejects non-string/non-coercible arguments.
+ * luaL_checkstring accepts numbers (coerced to decimal strings) so the
+ * negative cases must use table/nil/boolean — values Lua cannot convert.
+ */
+static void test_slm_sched_set_policy_bad_arg(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local ok, err = pcall(slm.sched_set_policy, {})\n"
+        "assert(ok == false, 'should error on table arg')\n"
+        "assert(type(err) == 'string', 'error should be a string')\n"
+        "local ok2 = pcall(slm.sched_set_policy, nil)\n"
+        "assert(ok2 == false, 'should error on nil arg')\n"
+        "local ok3 = pcall(slm.sched_set_policy, true)\n"
+        "assert(ok3 == false, 'should error on boolean arg')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.model_info(bad_index) returns nil (not an error).
+ */
+static void test_slm_model_info_invalid(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "-- index 99 is well beyond the 8-slot registry\n"
+        "local info = slm.model_info(99)\n"
+        "assert(info == nil, 'bad index should return nil')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.model_bench clamps iteration count and returns integer.
+ */
+static void test_slm_model_bench_contract(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local idx = slm.model_load_mnist()\n"
+        "if idx >= 0 then\n"
+        "    -- iters=0 should be clamped to 1 and still succeed\n"
+        "    local rc = slm.model_bench(idx, 0)\n"
+        "    assert(type(rc) == 'number', 'bench should return number')\n"
+        "    assert(rc == 0, 'bench should succeed')\n"
+        "end";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+    rust_model_unload(0);
+}
+
+/*
+ * Test: slm.ipc_stats counters are non-decreasing across messages.
+ * Publishing bumps msgs_sent regardless of subscriber count.
+ */
+static void test_slm_ipc_stats_after_publish(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local before = slm.ipc_stats()\n"
+        "slm.msg_publish('/test/lua', 'x')\n"
+        "slm.msg_publish('/test/lua', 'y')\n"
+        "local after = slm.ipc_stats()\n"
+        "-- IPC stats cover message queues, not the msg_router. msgs_sent\n"
+        "-- should stay >= before regardless.\n"
+        "assert(after.msgs_sent >= before.msgs_sent,\n"
+        "       'msgs_sent should be non-decreasing')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.sched_policy_list contains at least 'heuristic'.
+ */
+static void test_slm_sched_policy_list_has_heuristic(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local found = false\n"
+        "for _, p in ipairs(slm.sched_policy_list()) do\n"
+        "    if p.name == 'heuristic' then found = true end\n"
+        "end\n"
+        "assert(found, 'heuristic policy should always be registered')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
 /*
  * Test: demo.lua file exists on the filesystem after boot.
  * Verifies demo_init() successfully wrote the embedded script.
+ * Skipped when EMBED_DEMO_SCRIPTS is OFF (#14) — scripts intentionally omitted.
  */
 static void test_demo_file_exists(void)
 {
+#if !defined(EMBED_DEMO_SCRIPTS)
+    TEST_IGNORE_MESSAGE("EMBED_DEMO_SCRIPTS=OFF — demo scripts not embedded");
+#else
     lua_State *L = lua_slm_newstate();
     TEST_ASSERT_NOT_NULL(L);
 
@@ -841,6 +1288,7 @@ static void test_demo_file_exists(void)
     TEST_ASSERT_EQUAL_INT(0, result);
 
     lua_slm_close(L);
+#endif
 }
 
 /*
@@ -850,16 +1298,22 @@ static void test_demo_file_exists(void)
  * through stubbed fopen and don't actually open files in this kernel,
  * and (b) demo_menu.lua's main loop calls slm.read_line(), which would
  * block forever on UART input under QEMU automation.
+ *
+ * Skipped when EMBED_DEMO_SCRIPTS is OFF (#14).
  */
 extern int vfs_read_path(const char *path, char *buf, size_t size, size_t offset);
 static void test_demo_menu_file_exists(void)
 {
+#if !defined(EMBED_DEMO_SCRIPTS)
+    TEST_IGNORE_MESSAGE("EMBED_DEMO_SCRIPTS=OFF — demo scripts not embedded");
+#else
     static char buf[64];
     int n = vfs_read_path("/mnt/files/demo_menu.lua", buf, sizeof(buf) - 1, 0);
     TEST_ASSERT_GREATER_THAN(0, n);
-    /* First line of the script begins with "-- SLM-OS Phase 5 Demo" */
-    buf[22] = '\0';
-    TEST_ASSERT_EQUAL_STRING("-- SLM-OS Phase 5 Demo", buf);
+    /* First line of the script begins with "-- SLM-OS Demo" */
+    buf[14] = '\0';
+    TEST_ASSERT_EQUAL_STRING("-- SLM-OS Demo", buf);
+#endif
 }
 
 /*
@@ -1714,6 +2168,26 @@ int test_suite_lua(void)
     RUN_TEST(test_msg_publish_priority_api);
     RUN_TEST(test_msg_priority_ordering);
     RUN_TEST(test_wildcard_matching_edge_cases);
+
+    /* Extended slm.* bindings (#152) */
+    RUN_TEST(test_slm_sched_stats);
+    RUN_TEST(test_slm_sched_stats_monotonic);
+    RUN_TEST(test_slm_sched_policy_list);
+    RUN_TEST(test_slm_sched_policy_list_has_heuristic);
+    RUN_TEST(test_slm_sched_set_policy);
+    RUN_TEST(test_slm_sched_set_policy_bad_arg);
+    RUN_TEST(test_slm_cpu_info);
+    RUN_TEST(test_slm_cpu_info_consistency);
+    RUN_TEST(test_slm_ipc_stats);
+    RUN_TEST(test_slm_ipc_stats_after_publish);
+    RUN_TEST(test_slm_vmm_stats);
+    RUN_TEST(test_slm_model_list);
+    RUN_TEST(test_slm_model_info_invalid);
+    RUN_TEST(test_slm_model_bench_contract);
+    RUN_TEST(test_slm_infer_stats);
+    RUN_TEST(test_slm_gpu_status);
+    RUN_TEST(test_slm_ai_sched_stats);
+    RUN_TEST(test_slm_eviction_bindings);
 
     RUN_TEST(test_demo_file_exists);
     RUN_TEST(test_demo_menu_file_exists);

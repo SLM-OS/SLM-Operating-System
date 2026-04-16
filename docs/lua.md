@@ -68,8 +68,10 @@ slmos> lua /mnt/files/status.lua
 Up: 12345ms
 ```
 
-Scripts are limited to 4KB. If the file cannot be read or contains errors,
-`lua` prints a diagnostic and returns to the shell.
+Scripts are limited to ~16 KB (fits the largest embedded demo with headroom —
+the buffer lives on the shell task's 64 KB stack). If the file cannot be read,
+exceeds the size limit, or contains errors, `lua` prints a diagnostic and
+returns to the shell.
 
 ## SLM-OS Kernel Bindings
 
@@ -111,7 +113,31 @@ The `slm` module provides access to kernel functionality:
 
 | Function | Description |
 |----------|-------------|
-| `slm.sched_policy()` | Get current scheduler policy name (e.g., "heuristic"). |
+| `slm.sched_policy()` | Get current scheduler policy name (e.g., `"heuristic"`). |
+| `slm.sched_stats()` | Scheduler statistics: `{task_count, ready_count, context_switches, timer_ticks, policy}`. |
+| `slm.sched_set_policy(name)` | Switch active scheduler policy at runtime. Returns `true` on success, `false` on unknown name. |
+| `slm.sched_policy_list()` | Array of `{name, active}` tables for every registered policy. Exactly one entry has `active=true`. |
+| `slm.ai_sched_stats()` | AI scheduler statistics: `{policy, decisions, fallbacks, avg_latency_ns, histogram}`. Returns `nil` when `CONFIG_AI_SCHEDULER` is off. |
+
+### CPU / Memory / IPC
+
+| Function | Description |
+|----------|-------------|
+| `slm.cpu_info()` | Per-CPU state: `{online_count, total_count, current_cpu, cpus={{id, isolated, ticks, schedules}, ...}}`. |
+| `slm.vmm_stats()` | Virtual memory statistics: `{l1_tables, l2_tables, blocks_mapped, bytes_mapped}`. Returns `nil` on x86-64 (no VMM yet). |
+| `slm.ipc_stats()` | IPC statistics: `{queue_count, buffer_count, msgs_sent, msgs_recv}`. |
+
+### Eviction
+
+Requires `AI_EVICTION=ON` at build time. When the feature is off, every
+binding returns `nil`/`false` — scripts can branch on the return value
+without a compile-time guard.
+
+| Function | Description |
+|----------|-------------|
+| `slm.eviction_policy()` | Current policy name string (`"lru"`, `"lfu"`, `"cacheus"`, `"xgboost"`, ...) or `nil`. |
+| `slm.eviction_set_policy(name)` | Switch active eviction policy. Returns `true` on success, `false` on unknown name / feature off. |
+| `slm.eviction_stats()` | `{enabled, policy, weight_evictions, workspace_evictions, weight_allocated, weight_total, workspace_allocated, workspace_total, snapshot_candidates, expert_weights_bp}` or `nil`. CACHEUS expert weights are in basis points (0–10000). |
 
 ### Model Memory and Inference
 
@@ -119,10 +145,15 @@ The `slm` module provides access to kernel functionality:
 |----------|-------------|
 | `slm.model_stats()` | Pool statistics: `{weights={total_blocks, free_blocks, allocated_blocks, shared_blocks, peak_usage}, workspace={...}}` |
 | `slm.model_load_mnist()` | Load the built-in MNIST ONNX model (26 KB). Returns model index or -1. |
+| `slm.model_list()` | Array of loaded models: `{{index, name, format, params, weight_size, nodes}, ...}`. |
+| `slm.model_info(index)` | Detailed info: `{index, name, format, params, weight_size, workspace_size, nodes, inputs, outputs}` or `nil` if index invalid. |
 | `slm.model_find(name)` | Find a loaded model by name. Returns index or -1. |
 | `slm.model_infer(index)` | Run inference on a loaded model. Returns predicted class (0-9 for MNIST). |
+| `slm.model_bench(index, iters)` | Run inference benchmark for `iters` iterations. Results printed to UART. Returns 0 on success, -1 on error. |
 | `slm.model_pin(index)` | Pin a model to prevent LRU eviction. Returns 0 on success, -1 on error. |
 | `slm.model_unpin(index)` | Unpin a model (allow LRU eviction). Returns 0 on success, -1 on error. |
+| `slm.infer_stats()` | Cumulative inference statistics: `{total, total_ns, min_ns, max_ns, last_ns, errors}`. |
+| `slm.gpu_status()` | GPU subsystem info: `{available, name, device, compute_ready, unified_memory, memory_size}`. `.available` is always set; other fields populated when a driver is present. |
 
 ### Memory Statistics
 
@@ -214,7 +245,7 @@ The freestanding environment provides minimal implementations of:
 
 ## Limitations
 
-- **4KB script size limit**: Scripts loaded from files are limited to 4KB
+- **~16 KB script size limit**: Scripts loaded via `lua <path>` must fit in the shell task's on-stack buffer (16 KB today).
 - **No coroutines**: The coroutine library is not enabled
 - **No debug library**: The debug library is not enabled
 - **No os library**: System calls are not available
@@ -223,9 +254,22 @@ The freestanding environment provides minimal implementations of:
   are placeholder stubs that return `0.0`. The first call to each logs a
   one-time warning to the kernel console. Lua code that depends on inverse
   trig must implement the approximation locally or run on a host build.
+- **No `msg_subscribe` yet**: Scripts can publish messages via
+  `slm.msg_publish()` but cannot register a Lua callback as a subscriber.
+  A Lua-defined pure-subscriber component requires callback-queue plumbing
+  that has not landed yet (see audit in #152).
+- **No Lua-defined tasks**: Task *introspection* is available via
+  `slm.tasks()`, but `slm.task_create(fn)` / `slm.task_kill(id)` etc. have
+  not been implemented. Scripts drive work through existing native components
+  and hot-swap.
 
 ## Future Enhancements
 
-- Expose more kernel APIs (IPC, networking, GPU)
-- Script-driven test automation
-- Configuration files in Lua
+- `slm.msg_subscribe(topic, callback)` — requires callback queuing design.
+- `slm.task_*` — create/kill/pin Lua tasks; requires per-task Lua state or
+  bytecode-trampoline design.
+- `slm.model_load(path, name)` — generic ONNX loader from VFS (today only
+  the built-in MNIST model can be loaded from Lua).
+- Script-driven test automation (subset of the existing C unit tests expressed
+  as Lua scripts).
+- Configuration files in Lua.

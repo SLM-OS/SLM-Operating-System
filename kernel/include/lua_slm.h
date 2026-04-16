@@ -84,6 +84,30 @@ void lua_shell_init(void);
  * Model memory:
  *   slm.model_stats()                 - Pool stats {weights={...}, workspace={...}}
  *
+ * Extended model:
+ *   slm.model_list()                  - Array of loaded models
+ *   slm.model_info(index)             - Detailed model info or nil
+ *   slm.model_bench(index, iters)     - Run inference benchmark (prints to UART)
+ *   slm.infer_stats()                 - Inference stats (count, min/max/last ns)
+ *   slm.gpu_status()                  - GPU info {available, name, device, ...}
+ *
+ * Scheduler:
+ *   slm.sched_policy()                - Current policy name
+ *   slm.sched_stats()                 - {task_count, ready_count, ctx_switches, ticks}
+ *   slm.sched_set_policy(name)        - Switch policy, returns bool
+ *   slm.sched_policy_list()           - Array of {name, active}
+ *   slm.ai_sched_stats()              - AI scheduler stats or nil
+ *
+ * CPU / Memory:
+ *   slm.cpu_info()                    - Per-CPU state
+ *   slm.vmm_stats()                   - VMM stats (ARM64) or nil on x86-64
+ *   slm.ipc_stats()                   - IPC stats
+ *
+ * Eviction (requires CONFIG_AI_EVICTION):
+ *   slm.eviction_policy()             - Current policy name or nil
+ *   slm.eviction_set_policy(name)     - Switch policy, returns bool
+ *   slm.eviction_stats()              - Detailed stats table or nil
+ *
  * Shell integration:
  *   slm.read_line()                   - Read one line from UART (blocks)
  *   slm.shell_exec(cmd)               - Run a shell command, return exit code
