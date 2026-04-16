@@ -358,6 +358,54 @@ int ga10b_bringup_acr(struct ga10b_bringup *b)
                 manifest_off,
                 (unsigned long)manifest.size);
 
+    /* Read back the first 16 bytes of each DMEM region to verify
+     * PIO upload integrity. If these don't match the source bytes,
+     * something is wrong with our PIO path and the BROM rejection
+     * is moot until that's fixed.
+     * DMEMC bits: bit 24=AINCW (auto-inc on write), bit 25=AINCR
+     *             (auto-inc on read). Low 24 bits = byte offset. */
+    {
+#       define DMEMC_AINCR_BIT (1u << 25)
+        /* Read data@0 */
+        bar0_w32(NV_PGSP_BASE + FALCON_DMEMC(0), DMEMC_AINCR_BIT | 0u);
+        gsp_platform->mb();
+        uint32_t d0 = bar0_r32(NV_PGSP_BASE + FALCON_DMEMD(0));
+        uint32_t d1 = bar0_r32(NV_PGSP_BASE + FALCON_DMEMD(0));
+        uint32_t src_d0 = (uint32_t)data.data[0] |
+                          ((uint32_t)data.data[1] << 8) |
+                          ((uint32_t)data.data[2] << 16) |
+                          ((uint32_t)data.data[3] << 24);
+        uint32_t src_d1 = (uint32_t)data.data[4] |
+                          ((uint32_t)data.data[5] << 8) |
+                          ((uint32_t)data.data[6] << 16) |
+                          ((uint32_t)data.data[7] << 24);
+        uart_printf("[GA10B-ACR] dmem@0 readback: 0x%08lx 0x%08lx "
+                    "(src 0x%08lx 0x%08lx) %s\n",
+                    (unsigned long)d0, (unsigned long)d1,
+                    (unsigned long)src_d0, (unsigned long)src_d1,
+                    (d0 == src_d0 && d1 == src_d1) ? "OK" : "MISMATCH");
+
+        /* Read manifest@manifest_off */
+        bar0_w32(NV_PGSP_BASE + FALCON_DMEMC(0),
+                 DMEMC_AINCR_BIT | manifest_off);
+        gsp_platform->mb();
+        uint32_t m0 = bar0_r32(NV_PGSP_BASE + FALCON_DMEMD(0));
+        uint32_t m1 = bar0_r32(NV_PGSP_BASE + FALCON_DMEMD(0));
+        uint32_t src_m0 = (uint32_t)manifest.data[0] |
+                          ((uint32_t)manifest.data[1] << 8) |
+                          ((uint32_t)manifest.data[2] << 16) |
+                          ((uint32_t)manifest.data[3] << 24);
+        uint32_t src_m1 = (uint32_t)manifest.data[4] |
+                          ((uint32_t)manifest.data[5] << 8) |
+                          ((uint32_t)manifest.data[6] << 16) |
+                          ((uint32_t)manifest.data[7] << 24);
+        uart_printf("[GA10B-ACR] dmem@manifest readback: 0x%08lx 0x%08lx "
+                    "(src 0x%08lx 0x%08lx) %s\n",
+                    (unsigned long)m0, (unsigned long)m1,
+                    (unsigned long)src_m0, (unsigned long)src_m1,
+                    (m0 == src_m0 && m1 == src_m1) ? "OK" : "MISMATCH");
+    }
+
     /* Program RISCV boot: vector = 0, BCR_CTRL = CORE_RISCV|VALID. */
     bar0_w32(NV_PGSP_RISCV_BASE + RISCV_BOOT_VECTOR_LO, 0u);
     bar0_w32(NV_PGSP_RISCV_BASE + RISCV_BOOT_VECTOR_HI, 0u);
@@ -380,6 +428,8 @@ int ga10b_bringup_acr(struct ga10b_bringup *b)
     uint32_t mbox1    = bar0_r32(NV_PGSP_BASE + 0x044u);
     uint32_t cpuctl   = bar0_r32(NV_PGSP_RISCV_BASE + RISCV_CPUCTL);
     uint32_t retcode  = bar0_r32(NV_PGSP_RISCV_BASE + RISCV_BR_RETCODE);
+    uint32_t hwcfg2   = bar0_r32(NV_PGSP_BASE + FALCON_HWCFG2);
+    uint32_t bcr_ctrl = bar0_r32(NV_PGSP_RISCV_BASE + RISCV_BCR_CTRL);
 
     uart_printf("[GA10B-ACR] post-kick: CPUCTL=0x%08lx MBOX0=0x%08lx "
                 "MBOX1=0x%08lx BR_RETCODE=0x%08lx wait_rc=%d\n",
@@ -388,6 +438,11 @@ int ga10b_bringup_acr(struct ga10b_bringup *b)
                 (unsigned long)mbox1,
                 (unsigned long)retcode,
                 wait_rc);
+    uart_printf("[GA10B-ACR] hwcfg2=0x%08lx bcr_ctrl=0x%08lx "
+                "br_retcode.result=%lu (0=run 1=dunno 2=FAIL 3=PASS)\n",
+                (unsigned long)hwcfg2,
+                (unsigned long)bcr_ctrl,
+                (unsigned long)(retcode & 0x3u));
 
     if (wait_rc < 0) {
         uart_puts("[GA10B-ACR] timeout — RISCV neither halted nor stopped\n");
