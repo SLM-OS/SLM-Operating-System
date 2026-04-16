@@ -729,6 +729,37 @@ static void test_append_through_mount(void)
     littlefs_remove(mnt, "/append_test.log");
 }
 
+/*
+ * Regression for #79: a stale file handle from a closed file must not
+ * silently alias to a new file that reuses the same pool slot. The
+ * generation counter in the encoded handle detects the mismatch.
+ */
+static void test_stale_handle_rejected(void)
+{
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx("/mnt/files", &subpath);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    int fd1 = littlefs_file_open(mnt, "/stale_a.txt",
+                                 LFS_O_CREAT | LFS_O_WRONLY);
+    TEST_ASSERT_TRUE(fd1 >= 0);
+    littlefs_file_write(mnt, fd1, "AAAA", 4);
+    littlefs_file_close(mnt, fd1);
+
+    int fd2 = littlefs_file_open(mnt, "/stale_b.txt",
+                                 LFS_O_CREAT | LFS_O_WRONLY);
+    TEST_ASSERT_TRUE(fd2 >= 0);
+    littlefs_file_write(mnt, fd2, "BBBB", 4);
+
+    char buf[8] = {0};
+    int read_result = littlefs_file_read(mnt, fd1, buf, 4);
+    TEST_ASSERT_EQUAL_INT(-9 /* LFS_ERR_BADF */, read_result);
+
+    littlefs_file_close(mnt, fd2);
+    littlefs_remove(mnt, "/stale_a.txt");
+    littlefs_remove(mnt, "/stale_b.txt");
+}
+
 /* ============================================================================
  * VFS Mount Point Tests
  * ============================================================================ */
@@ -832,6 +863,7 @@ int test_suite_littlefs(void)
     RUN_TEST(test_rename_through_mount);
     RUN_TEST(test_truncate_through_mount);
     RUN_TEST(test_append_through_mount);
+    RUN_TEST(test_stale_handle_rejected);
 
     return UNITY_END();
 }
