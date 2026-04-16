@@ -11,6 +11,7 @@
 #include "gsp.h"
 #include "falcon.h"
 #include "nvfw.h"
+#include "nv_endian.h"
 #include "nvidia_vbios.h"
 
 #include <string.h>
@@ -145,21 +146,11 @@ int gsp_bringup_select_sig_index(uint32_t fuse_reg, uint16_t sig_versions,
     return (int)idx;
 }
 
-static inline void wr32le(uint8_t *p, uint32_t v)
-{
-    p[0] = v & 0xffu;
-    p[1] = (v >> 8) & 0xffu;
-    p[2] = (v >> 16) & 0xffu;
-    p[3] = (v >> 24) & 0xffu;
-}
-
-static inline uint32_t rd32le(const uint8_t *p)
-{
-    return (uint32_t)p[0]
-         | ((uint32_t)p[1] << 8)
-         | ((uint32_t)p[2] << 16)
-         | ((uint32_t)p[3] << 24);
-}
+/* Shared LE helpers — bringup.c writes raw ucode payloads via DMA
+ * buffers that get memcpy'd into Falcon MMIO; see nv_endian.h for the
+ * file-wide LE contract and the _Static_assert that enforces it. */
+#define wr32le nv_wr32le
+#define rd32le nv_rd32le
 
 /* Generic DMEMMAPPER patcher — takes @init_cmd so callers can probe
  * SB (0x19) or other lifecycle commands alongside the default FRTS
