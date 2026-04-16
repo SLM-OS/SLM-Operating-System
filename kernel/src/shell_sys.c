@@ -477,12 +477,140 @@ int cmd_sleep(int argc, char *argv[])
 #define BENCH_ITERATIONS 100
 #define SCHED_COMPARE_ITERATIONS 50
 
+/* ============================================================================
+ * Latency histogram (#196)
+ *
+ * Log-scale buckets covering 0 to >1 ms. Each bucket upper bound is
+ * 2× the previous, starting at 500 ns. Sample recording is O(1); the
+ * bar-chart renderer walks the fixed-size array.
+ * ============================================================================ */
+
+enum { HIST_N_BUCKETS = 12 };
+
+struct latency_histogram {
+    uint32_t count;
+    uint64_t sum_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+    uint32_t buckets[HIST_N_BUCKETS];
+    uint64_t samples[BENCH_ITERATIONS]; /* raw samples for percentiles */
+};
+
+static const uint64_t HIST_BOUNDS[HIST_N_BUCKETS] = {
+    /* 0 */ 500,        /*   0 -   500 ns */
+    /* 1 */ 1000,       /* 500 -  1000 ns */
+    /* 2 */ 2000,       /*  1  -   2 us   */
+    /* 3 */ 5000,       /*  2  -   5 us   */
+    /* 4 */ 10000,      /*  5  -  10 us   */
+    /* 5 */ 20000,      /* 10  -  20 us   */
+    /* 6 */ 50000,      /* 20  -  50 us   */
+    /* 7 */ 100000,     /* 50  - 100 us   */
+    /* 8 */ 200000,     /*100  - 200 us   */
+    /* 9 */ 500000,     /*200  - 500 us   */
+    /*10 */ 1000000,    /*500us-   1 ms   */
+    /*11 */ UINT64_MAX, /* >1 ms          */
+};
+
+static const char *HIST_LABELS[HIST_N_BUCKETS] = {
+    "   0-  500ns",
+    " 500- 1000ns",
+    "   1-    2us",
+    "   2-    5us",
+    "   5-   10us",
+    "  10-   20us",
+    "  20-   50us",
+    "  50-  100us",
+    " 100-  200us",
+    " 200-  500us",
+    " 500- 1000us",
+    "1000+    us ",
+};
+
+static void hist_init(struct latency_histogram *h)
+{
+    h->count = 0;
+    h->sum_ns = 0;
+    h->min_ns = UINT64_MAX;
+    h->max_ns = 0;
+    for (int i = 0; i < HIST_N_BUCKETS; i++) h->buckets[i] = 0;
+}
+
+static void hist_record(struct latency_histogram *h, uint64_t ns)
+{
+    if (ns < h->min_ns) h->min_ns = ns;
+    if (ns > h->max_ns) h->max_ns = ns;
+    h->sum_ns += ns;
+    if (h->count < BENCH_ITERATIONS) {
+        h->samples[h->count] = ns;
+    }
+    h->count++;
+    for (int i = 0; i < HIST_N_BUCKETS; i++) {
+        if (ns <= HIST_BOUNDS[i]) {
+            h->buckets[i]++;
+            return;
+        }
+    }
+    h->buckets[HIST_N_BUCKETS - 1]++;
+}
+
+static void hist_sort_samples(struct latency_histogram *h)
+{
+    uint32_t n = h->count < BENCH_ITERATIONS ? h->count : BENCH_ITERATIONS;
+    for (uint32_t i = 1; i < n; i++) {
+        uint64_t key = h->samples[i];
+        uint32_t j = i;
+        while (j > 0 && h->samples[j - 1] > key) {
+            h->samples[j] = h->samples[j - 1];
+            j--;
+        }
+        h->samples[j] = key;
+    }
+}
+
+static void hist_print(struct latency_histogram *h)
+{
+    if (h->count == 0) {
+        uart_puts("  (no samples)\r\n");
+        return;
+    }
+    /* Find max bucket for bar scaling. */
+    uint32_t peak = 0;
+    for (int i = 0; i < HIST_N_BUCKETS; i++) {
+        if (h->buckets[i] > peak) peak = h->buckets[i];
+    }
+    if (peak == 0) peak = 1;
+
+    uart_puts("  Latency distribution:\r\n");
+    for (int i = 0; i < HIST_N_BUCKETS; i++) {
+        uint32_t c = h->buckets[i];
+        /* Bar: up to 40 '#' characters, proportional to peak. */
+        uint32_t bar_len = (c * 40u + peak - 1) / peak;
+        uart_printf("    %s: %5u ", HIST_LABELS[i], c);
+        for (uint32_t b = 0; b < bar_len; b++) uart_putc('#');
+        uart_puts("\r\n");
+    }
+
+    hist_sort_samples(h);
+    uint32_t n = h->count < BENCH_ITERATIONS ? h->count : BENCH_ITERATIONS;
+    uint64_t p50 = h->samples[n * 50 / 100];
+    uint64_t p95 = h->samples[n * 95 / 100];
+    uint64_t p99 = h->samples[n * 99 / 100];
+    uint64_t mean = h->sum_ns / h->count;
+
+    uart_printf("\r\n  Min: %lu ns   Max: %lu ns   Mean: %lu ns\r\n",
+                (unsigned long)h->min_ns, (unsigned long)h->max_ns,
+                (unsigned long)mean);
+    uart_printf("  p50: %lu ns   p95: %lu ns   p99: %lu ns\r\n",
+                (unsigned long)p50, (unsigned long)p95, (unsigned long)p99);
+}
+
 /* --- Context switch benchmark --- */
 
 static volatile int bench_ctx_done;
 static volatile uint64_t bench_ctx_start;
 static volatile uint64_t bench_ctx_total;
 static volatile int bench_ctx_count;
+static struct latency_histogram bench_ctx_hist;
 
 static void bench_ctx_task(void *arg)
 {
@@ -490,7 +618,9 @@ static void bench_ctx_task(void *arg)
     while (bench_ctx_count < BENCH_ITERATIONS) {
         uint64_t now = slm_get_time_ns();
         if (bench_ctx_start > 0) {
-            bench_ctx_total += now - bench_ctx_start;
+            uint64_t dt = now - bench_ctx_start;
+            bench_ctx_total += dt;
+            hist_record(&bench_ctx_hist, dt);
         }
         bench_ctx_count++;
         bench_ctx_start = slm_get_time_ns();
@@ -510,6 +640,7 @@ static void bench_context_switch(void)
     bench_ctx_start = 0;
     bench_ctx_total = 0;
     bench_ctx_count = 0;
+    hist_init(&bench_ctx_hist);
 
     struct task *t = task_create_with_priority("bench_ctx",
         bench_ctx_task, NULL, TASK_PRIORITY_HIGH);
@@ -545,6 +676,7 @@ static void bench_context_switch(void)
             uart_puts("    Rating:  Acceptable (< 100 us)\r\n");
         else
             uart_puts("    Rating:  Needs optimization (> 100 us)\r\n");
+        hist_print(&bench_ctx_hist);
     } else {
         uart_puts("  Context switch: insufficient data\r\n");
     }
