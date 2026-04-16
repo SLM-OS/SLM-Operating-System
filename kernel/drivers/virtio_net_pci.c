@@ -26,6 +26,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include "pci.h"
+#include "net.h"            /* net_stats_rx_no_buffers_inc */
 #include "net_driver.h"
 #include "pmm.h"
 #include "spinlock.h"
@@ -408,6 +409,7 @@ static void post_rx_buffers(void) {
                              MAX_PACKET_SIZE, true);
         if (ret < 0) {
             WARN("Failed to post RX buffer %d", i);
+            net_stats_rx_no_buffers_inc();
             break;
         }
     }
@@ -684,7 +686,9 @@ static int virtio_net_pci_recv(void *buffer, size_t max_len) {
     memcpy(buffer, pkt_data, pkt_len);
 
     /* Repost buffer */
-    vq_add_buf(&pci_net.rx_vq, rx_buf, MAX_PACKET_SIZE, true);
+    if (vq_add_buf(&pci_net.rx_vq, rx_buf, MAX_PACKET_SIZE, true) < 0) {
+        net_stats_rx_no_buffers_inc();
+    }
     vq_kick(&pci_net.rx_vq);
 
     pci_net.rx_packets++;

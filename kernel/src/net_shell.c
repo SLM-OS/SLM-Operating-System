@@ -293,9 +293,10 @@ static int cmd_netstat(int argc, char *argv[]) {
     uart_printf("  TX packets: %llu  bytes: %llu\n",
                (unsigned long long)stats.tx_packets,
                (unsigned long long)stats.tx_bytes);
-    uart_printf("  RX errors:  %llu  dropped: %llu\n",
+    uart_printf("  RX errors:  %llu  dropped: %llu  no_buffers: %llu\n",
                (unsigned long long)stats.rx_errors,
-               (unsigned long long)stats.rx_dropped);
+               (unsigned long long)stats.rx_dropped,
+               (unsigned long long)stats.rx_no_buffers);
     uart_printf("  TX errors:  %llu\n",
                (unsigned long long)stats.tx_errors);
 

@@ -291,8 +291,35 @@ static void test_net_get_stats_safety(void)
     /* Sanity: dropped packets should never exceed received packets */
     TEST_ASSERT_TRUE(stats.rx_dropped <= stats.rx_packets);
 
+    /* rx_no_buffers should be zero in steady state. Bounded sanity
+     * check (non-negative is implicit in unsigned) + upper bound to
+     * catch runaway counters from a buggy driver re-post path. */
+    TEST_ASSERT_TRUE(stats.rx_no_buffers < 1000000);
+
     /* Should not crash with NULL (just doesn't write) */
     net_get_stats(NULL);
+}
+
+/*
+ * Test: rx_no_buffers counter is zero under normal init + idle poll.
+ *
+ * Guards against a regression where the re-post path in recv()
+ * starts silently leaking descriptors (which would eventually force
+ * net_stats_rx_no_buffers_inc() to fire when the pool is drained).
+ * Run this after the live DHCP + ping test_driver_tx so the RX path
+ * has seen real traffic.
+ */
+static void test_net_rx_no_buffers_clean(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    struct net_stats stats;
+    net_get_stats(&stats);
+    TEST_ASSERT_MESSAGE(stats.rx_no_buffers == 0,
+        "rx_no_buffers should be 0 in steady state — driver leaked descriptors?");
 }
 
 /*
@@ -840,6 +867,7 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_binds);
     RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_driver_tx);
+    RUN_TEST(test_net_rx_no_buffers_clean);
 
     return UNITY_END();
 #else

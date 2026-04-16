@@ -7,6 +7,7 @@
 
 #include "virtio_net.h"
 #include "virtio.h"
+#include "net.h"            /* net_stats_rx_no_buffers_inc */
 #include "net_driver.h"
 #include "pmm.h"
 #include "debug.h"
@@ -265,6 +266,7 @@ static void post_rx_buffers(void) {
                                     RX_BUFFER_SIZE, true /* device writes */);
         if (ret < 0) {
             WARN("Failed to post RX buffer %d", i);
+            net_stats_rx_no_buffers_inc();
             break;
         }
     }
@@ -535,7 +537,13 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
     memcpy(buffer, packet, packet_len);
 
     /* Re-post the buffer */
-    virtqueue_add_buf(&netdev.rx_vq, rx_buf, RX_BUFFER_SIZE, true);
+    if (virtqueue_add_buf(&netdev.rx_vq, rx_buf, RX_BUFFER_SIZE, true) < 0) {
+        /* Descriptor pool exhausted — the buffer we just received is
+         * about to be orphaned because the device has no free slot
+         * to write future packets into. Makes the drop visible in
+         * netstat. */
+        net_stats_rx_no_buffers_inc();
+    }
     virtqueue_kick(&netdev.rx_vq);
 
     netdev.rx_packets++;

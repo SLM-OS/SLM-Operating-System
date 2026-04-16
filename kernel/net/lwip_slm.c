@@ -520,6 +520,10 @@ void net_get_stats(struct net_stats *stats) {
     }
 }
 
+void net_stats_rx_no_buffers_inc(void) {
+    net_statistics.rx_no_buffers++;
+}
+
 char *net_ip_to_str(uint32_t addr, char *buf) {
     uint8_t *b = (uint8_t *)&addr;
     /* Simple integer to string conversion */

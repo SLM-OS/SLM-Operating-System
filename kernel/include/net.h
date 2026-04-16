@@ -171,7 +171,8 @@ struct net_stats {
     uint64_t tx_bytes;      /* Bytes transmitted */
     uint64_t rx_errors;     /* Receive errors */
     uint64_t tx_errors;     /* Transmit errors */
-    uint64_t rx_dropped;    /* Packets dropped (no buffer) */
+    uint64_t rx_dropped;    /* Packets dropped at lwIP layer (pbuf alloc fail, input reject) */
+    uint64_t rx_no_buffers; /* Packets dropped by driver: RX virtqueue post failed (no descriptor) */
 };
 
 /**
@@ -180,6 +181,16 @@ struct net_stats {
  * @param stats  Pointer to structure to fill
  */
 void net_get_stats(struct net_stats *stats);
+
+/**
+ * Bump the rx_no_buffers counter from a driver.
+ *
+ * Called by NIC drivers when they fail to post an RX descriptor —
+ * typically during re-post after recv, if the virtqueue descriptor
+ * pool is exhausted under sustained burst traffic. Makes the
+ * underlying silent drop visible in `netstat`.
+ */
+void net_stats_rx_no_buffers_inc(void);
 
 /* -------------------------------------------------------------------------- */
 /* Utility Functions                                                           */

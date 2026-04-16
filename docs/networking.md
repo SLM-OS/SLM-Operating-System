@@ -171,9 +171,14 @@ SLM-OS> netstat
 Network Statistics:
   RX packets: 42  bytes: 6048
   TX packets: 38  bytes: 3192
-  RX errors:  0  dropped: 0
+  RX errors:  0  dropped: 0  no_buffers: 0
   TX errors:  0
 ```
+
+Counter semantics:
+- `errors` — protocol/format errors seen by the driver during TX/RX
+- `dropped` — packets that reached lwIP but couldn't be enqueued (pbuf alloc failed, or lwIP netif input rejected the packet)
+- `no_buffers` — the NIC driver couldn't post a fresh RX descriptor after recv (virtqueue descriptor pool exhausted under burst). Nonzero here indicates sustained traffic overrunning the 16-buffer default pool.
 
 ---
 
