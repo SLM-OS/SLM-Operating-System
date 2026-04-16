@@ -75,7 +75,7 @@ Full test suite runs on Pi 5 hardware with zero failures:
 - PMM (1): `test_split_creates_buddies` — small blocks already available, no split triggered
 - Net (1): platform-specific test not applicable to Pi 5
 
-**Cross-CPU integration tests:** 14 of 15 pass every run. `test_isolated_core_latency` now cleans up stuck tasks on timeout so it no longer leaks. The remaining flake is `test_work_stealing_distributes_load`, documented as inherently timing-flaky (5 short tasks often complete on CPU 1 before stealers on CPUs 2/3 claim their share).
+**Cross-CPU integration tests:** 15 of 15 pass on any boot where all secondary CPUs wake normally. `test_work_stealing_distributes_load` now asserts "tasks ran off the owner CPU" rather than "≥ 2 distinct CPUs ran tasks" — the latter was a proxy that flaked whenever only one stealer was alive (a single awake stealer grabs all tasks before others wake, but stealing still worked). `test_isolated_core_latency` cleans up stuck tasks on timeout so it no longer leaks. On some boots (~20 % observed during the April 16 investigation) one or more secondaries stay dormant post-boot — `sched_diag_schedule[c]` never increments — which can knock out several multi-CPU tests. Tracked in issue #216.
 
 **Key bugs fixed to achieve reliable cross-CPU dispatch:**
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM

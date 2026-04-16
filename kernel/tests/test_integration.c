@@ -888,19 +888,27 @@ static void test_work_stealing_distributes_load(void)
     }
 
     /*
-     * Stealing is inherently a timing-dependent phenomenon: on a
-     * single attempt, CPU 1 can burn through its run queue before
-     * CPU 2/3 notice the deque. Rather than paper over that with a
-     * longer task workload, run the scenario multiple times and
-     * require that stealing distributes work in at least some
-     * fraction of them. The true failure mode this guards against
-     * is "stealing never works" — a regression that drops the
-     * success rate to zero. A 2-of-8 threshold catches that while
-     * tolerating the QEMU timing variability that caused flakes at
-     * 4-of-8.
+     * Success criterion: "at least one task ran on a CPU that is NOT
+     * the owner (CPU 1)". That's the semantic meaning of "work
+     * stealing distributes load" — stealing moved work off the
+     * overloaded CPU. An earlier version required `distinct >= 2`
+     * (at least two distinct CPUs ran tasks), which turned out to
+     * be a weak proxy: on Pi 5, secondary CPUs are sometimes
+     * dormant after boot (ws-diag shows sched_diag_schedule[c] == 0
+     * for one or more CPUs during the entire test window — see
+     * issue #216). When only one non-owner CPU is alive as a
+     * stealer it grabs all the tasks before the other stealers
+     * wake, giving distinct == 1 — but stealing still worked.
+     * The new criterion is the regression we actually care about:
+     * if tasks never left the owner, stealing is broken.
+     *
+     * Still run 8 attempts and require 2 successes to tolerate
+     * one-off hiccups; we still count `distinct` as a secondary
+     * diagnostic in the Pi 5 ws-diag dump.
      */
     const int ATTEMPTS = 8;
     const int REQUIRED_SUCCESSES = 2;
+    const uint32_t OWNER_CPU = 1;
     int success_count = 0;
 
     /* #175: snapshot the per-CPU push-failure counter. STEAL_TASK_COUNT (5)
@@ -912,6 +920,14 @@ static void test_work_stealing_distributes_load(void)
     extern volatile uint32_t *sched_diag_steal_push_full;
 #else
     extern volatile uint32_t sched_diag_steal_push_full[];
+#endif
+#if defined(PLATFORM_RASPI5)
+    /* Per-attempt ws-diag dump only references these on Pi 5. */
+    extern volatile uint32_t *sched_diag_steal_attempts;
+    extern volatile uint32_t *sched_diag_steal_successes;
+    extern volatile uint32_t *sched_diag_steal_stale;
+    extern volatile uint32_t *sched_diag_schedule;
+    extern volatile uint32_t *sched_diag_picked;
 #endif
     uint32_t pre_push_full[MAX_CPUS] = {0};
     for (uint32_t c = 0; c < cpu_count; c++)
@@ -926,6 +942,30 @@ static void test_work_stealing_distributes_load(void)
             NC_SYNC(NC_STEAL_CPU_BASE + i) = 0;
 #else
         cache_clean((void *)&steal_done_count);
+#endif
+
+        /* Flakiness diagnostic: per-attempt snapshot of steal
+         * attempts/successes/stale and schedule()/picked so we
+         * can tell whether stealers never tried (CPU 1 finished
+         * first), tried but rejected (stale/affinity/state race),
+         * or succeeded but the recording mis-counted distinct CPUs.
+         * Gated to PLATFORM_RASPI5 — on QEMU the cross-CPU dispatch
+         * story is well-behaved and the output would just pollute
+         * `make test` logs. */
+#if defined(PLATFORM_RASPI5)
+        uint32_t pre_attempts[MAX_CPUS] = {0};
+        uint32_t pre_successes[MAX_CPUS] = {0};
+        uint32_t pre_stale[MAX_CPUS] = {0};
+        uint32_t pre_schedule[MAX_CPUS] = {0};
+        uint32_t pre_picked[MAX_CPUS] = {0};
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            pre_attempts[c] = sched_diag_steal_attempts[c];
+            pre_successes[c] = sched_diag_steal_successes[c];
+            pre_stale[c] = sched_diag_steal_stale[c];
+            pre_schedule[c] = sched_diag_schedule[c];
+            pre_picked[c] = sched_diag_picked[c];
+        }
+        uint64_t t_queued = timer_get_count();
 #endif
 
         /* Queue all tasks onto CPU 1 with ANY affinity so they're stealable. */
@@ -950,6 +990,9 @@ static void test_work_stealing_distributes_load(void)
 #endif
             yield();
         }
+#if defined(PLATFORM_RASPI5)
+        uint64_t t_done = timer_get_count();
+#endif
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
         TEST_ASSERT_MESSAGE(NC_SYNC(NC_STEAL_DONE) == STEAL_TASK_COUNT,
@@ -960,9 +1003,15 @@ static void test_work_stealing_distributes_load(void)
             "work-steal test: not all tasks completed");
 #endif
 
-        /* Count distinct CPUs that ran tasks this attempt. */
+        /* Tally per-attempt stats: distinct CPUs (diagnostic only;
+         * kept in the Pi 5 ws-diag output) and whether any task
+         * ran off the owner (the real success criterion). */
         uint8_t cpu_seen[MAX_CPUS] = {0};
+#if defined(PLATFORM_RASPI5)
+        uint32_t recorded[STEAL_TASK_COUNT];
         int distinct = 0;
+#endif
+        int ran_off_owner = 0;
         for (int i = 0; i < STEAL_TASK_COUNT; i++) {
 #if defined(PLATFORM_HAS_NC_MEMORY)
             uint32_t r = NC_SYNC(NC_STEAL_CPU_BASE + i);
@@ -971,19 +1020,59 @@ static void test_work_stealing_distributes_load(void)
             uint32_t r = steal_cpu_recorded[i];
 #endif
             TEST_ASSERT_MESSAGE(r != 0, "task did not record a CPU");
+#if defined(PLATFORM_RASPI5)
+            recorded[i] = r;
+#endif
             uint32_t c = r - 1;
             if (c < MAX_CPUS && !cpu_seen[c]) {
                 cpu_seen[c] = 1;
+#if defined(PLATFORM_RASPI5)
                 distinct++;
+#endif
+            }
+            if (c != OWNER_CPU) {
+                ran_off_owner = 1;
             }
         }
-        if (distinct >= 2) {
+        if (ran_off_owner) {
             success_count++;
         }
+
+#if defined(PLATFORM_RASPI5)
+        /* Dump per-attempt diagnostics on Pi 5 so boot-to-boot
+         * comparisons can identify which bucket the failure falls
+         * into (no attempts / all-rejected / all-succeeded-on-owner). */
+        uint64_t elapsed_ticks = t_done - t_queued;
+        uint64_t freq = timer_get_frequency();
+        uint64_t elapsed_us = (freq > 0)
+            ? (elapsed_ticks * 1000000ULL) / freq
+            : 0;
+        uart_printf("  ws-diag attempt=%d distinct=%d elapsed_us=%lu cpus=[",
+                    attempt, distinct, (unsigned long)elapsed_us);
+        for (int i = 0; i < STEAL_TASK_COUNT; i++) {
+            uart_printf("%lu%s",
+                        (unsigned long)(recorded[i] - 1),
+                        (i + 1 < STEAL_TASK_COUNT) ? "," : "");
+        }
+        uart_printf("] per-cpu(att/succ/stale/sched/picked)=");
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            uint32_t da = sched_diag_steal_attempts[c] - pre_attempts[c];
+            uint32_t ds = sched_diag_steal_successes[c] - pre_successes[c];
+            uint32_t dst = sched_diag_steal_stale[c] - pre_stale[c];
+            uint32_t dsc = sched_diag_schedule[c] - pre_schedule[c];
+            uint32_t dp = sched_diag_picked[c] - pre_picked[c];
+            uart_printf("%s%lu/%lu/%lu/%lu/%lu",
+                        (c == 0) ? "" : ",",
+                        (unsigned long)da, (unsigned long)ds,
+                        (unsigned long)dst,
+                        (unsigned long)dsc, (unsigned long)dp);
+        }
+        uart_printf("\n");
+#endif
     }
 
     TEST_ASSERT_MESSAGE(success_count >= REQUIRED_SUCCESSES,
-        "work stealing never distributed across CPUs in 8 attempts");
+        "work stealing never moved tasks off the owner CPU in 8 attempts");
 
     /* #175: push-full counter must not advance for this workload. */
     for (uint32_t c = 0; c < cpu_count; c++) {

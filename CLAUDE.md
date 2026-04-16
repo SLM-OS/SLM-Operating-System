@@ -143,6 +143,29 @@ The Makefile automatically selects the correct toolchain, QEMU binary, and QEMU 
 
 **QEMU safeguards:** `make test` wraps QEMU in `systemd-run --user --scope` with `MemoryMax=3G` (prevents OOM crashes) and `CPUQuota=200%` (prevents runaway busy-spin tests from pegging all host cores), plus `timeout 120` for automatic termination. These are defined in the Makefile as `QEMU_GUARD` and `TEST_TIMEOUT`.
 
+**Always wrap direct QEMU invocations in `systemd-run` — `-m` alone is not sufficient to cap host memory.** On x86-64 TCG hosts the translation buffer (JIT code cache) defaults to ~1 GB and can grow further under heavy translation pressure. A CPU-bound test kernel (e.g. work-stealing benchmarks with many tasks and many iterations) has been observed to push the QEMU host process past **40 GB RSS** even with `-m 1G` — enough to OOM-kill unrelated processes and hang the machine. The `-m` flag only limits **guest** RAM; it does not limit the TCG code cache, device mappings, or QEMU's own heap.
+
+Use the same wrapper `make test` uses:
+
+```bash
+systemd-run --user --scope -q \
+    -p MemoryMax=3G -p CPUQuota=200% \
+    timeout 120 \
+    qemu-system-aarch64 -machine virt -cpu cortex-a76 \
+    -smp cores=4 -m 1G -nographic -semihosting \
+    -kernel build/kernel-test/slmos.elf
+```
+
+`MemoryMax=3G` caps total process memory (the cgroup OOM-kills on overrun, producing exit code 137). `CPUQuota=200%` stops runaway busy loops from pegging every host core. `timeout 120` provides a wall-clock ceiling. **Always prefer the Makefile targets (`make test`, `make run`, `make debug`) which already apply all three guards** — hand-crafted QEMU commands are reserved for reproducing specific scenarios the Makefile can't express.
+
+Caps to apply if you must run QEMU directly:
+
+- `-m 1G` (ARM64) / `-m 256M` (x86-64) — guest RAM. Match `QEMU_MEMORY` in the Makefile.
+- `-accel tcg,tb-size=128` — cap the TCG translation buffer at 128 MB (the second line of defense if systemd-run is unavailable for some reason).
+- The `systemd-run` wrapper above — the *only* reliable hard cap on total process memory.
+
+If `make test` fails with exit code **137** and the log contains only `Killed`, the cgroup OOM-killed QEMU. Re-run under `ps aux | grep qemu-system` if it seems stuck; any QEMU process using more than a few GB RSS should be killed immediately (`kill -TERM <pid>`; escalate to `-KILL` if needed).
+
 ### Clean Build Targets
 
 Always use the Makefile's clean targets instead of manual `rm -rf`:

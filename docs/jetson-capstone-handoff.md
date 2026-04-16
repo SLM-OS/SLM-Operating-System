@@ -253,8 +253,13 @@ don't know them up front.
   priority-ordering test, do the same.
 - **`test_work_stealing_distributes_load` is structured as
   retry-then-assert** (Shape A). It runs the scenario 8 times and
-  passes if ≥2 distribute. The threshold is intentionally low to
-  catch "stealing never works" without being timing-flaky.
+  passes if ≥ 2 attempts had at least one task land on a CPU other
+  than the owner (CPU 1). The previous "≥ 2 distinct CPUs ran tasks"
+  criterion was retired on Pi 5 in April 2026 because a single awake
+  stealer can legitimately absorb all 5 tasks before others wake
+  — see kernel/CLAUDE.md "`test_work_stealing_distributes_load`
+  success criterion" and issue #216 for the dormancy pattern that
+  surfaced it.
 
 ### Hardware iteration
 
