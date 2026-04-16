@@ -1200,10 +1200,32 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
         spin_lock(&rq_lock[old_cpu]);
     }
 
-    /* Remove from old CPU queue if task is ready */
+    /* Remove from old CPU queue if task is ready.
+     *
+     * Check the remove return value: between the outer `old_cpu =
+     * task->assigned_cpu` read and this lock-protected region, a
+     * work-stealing thief on another CPU may have pulled the task
+     * from old_cpu's queue and put it on its own. In that case
+     * remove_from_cpu_queue_locked returns 0 and we must NOT
+     * add_to_cpu_queue_locked — that would set task->next (and
+     * rq->head/tail) and link the task into target_cpu's queue
+     * while it's still on the thief's queue, producing a task that
+     * exists in two queues simultaneously. Two different CPUs would
+     * then pick it up and run it concurrently on shared stack state.
+     *
+     * If the task was stolen, just update assigned_cpu so future
+     * placements prefer target_cpu; the thief (or whoever has the
+     * task) will run it. The test still observes the task running
+     * because the body is written to NC memory from whichever CPU
+     * executes it. */
     if (task->state == TASK_READY) {
-        remove_from_cpu_queue_locked(task, old_cpu);
-        add_to_cpu_queue_locked(task, target_cpu);
+        if (remove_from_cpu_queue_locked(task, old_cpu)) {
+            add_to_cpu_queue_locked(task, target_cpu);
+        } else {
+            /* Stolen during the lock window. Record target preference
+             * without corrupting queues. */
+            task->assigned_cpu = target_cpu;
+        }
     } else {
         /* Task is blocked - just update assigned_cpu */
         task->assigned_cpu = target_cpu;
@@ -1236,6 +1258,13 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
         spin_unlock(&rq_lock[old_cpu]);
         rq_unlock_irqrestore(target_cpu, flags);
     }
+
+    /* Wake target CPU if it's parked in WFE. spin_unlock's SEV is
+     * a broadcast but gets consumed by one WFE cycle on each CPU;
+     * an explicit notify ensures target_cpu actually re-checks its
+     * run queue after the migration is committed. Cheap no-op when
+     * target_cpu == cpu_id(). */
+    smp_notify_cpu(target_cpu);
 
     return 0;
 }

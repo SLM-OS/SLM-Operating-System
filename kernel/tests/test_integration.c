@@ -373,9 +373,21 @@ static void test_task_migration(void)
     struct task *mig_task = task_create("migrate", migration_test_task, NULL);
     TEST_ASSERT_NOT_NULL_MESSAGE(mig_task, "Failed to create migration task");
 
-    /* Create blocker to occupy CPU 1 */
+    /* Create blocker to occupy CPU 1.
+     *
+     * Pin blocker to CPU 1 (affinity=1, not ANY) so work-stealing does
+     * NOT pull it to another CPU. Without this, bench-stealing-style
+     * aggressive stealing would relocate the blocker to CPU 2 or 3
+     * during the delay(50000) below, and mig_task would be picked up
+     * by CPU 1 (now free) and start running before sched_migrate_task
+     * could inspect it — sched_migrate_task would reject the migration
+     * with "task is running" and the test would fail on the ret==0
+     * assert. Pinning keeps the test scenario intact: blocker owns
+     * CPU 1, mig_task queues behind it, migration moves mig_task to
+     * CPU 3. */
     struct task *blocker = task_create("blocker", task_a_func, (void *)10);
     TEST_ASSERT_NOT_NULL_MESSAGE(blocker, "Failed to create blocker task");
+    blocker->cpu_affinity = 1;
 
     /* Add blocker first, then migration task */
     scheduler_add_task_to_cpu(blocker, 1);
@@ -831,8 +843,26 @@ static void steal_test_task(void *arg)
         cache_clean((void *)&steal_cpu_recorded[idx]);
 #endif
     }
-    /* Small work simulation so the steal window is real */
-    for (int i = 0; i < 3; i++) delay(100000);
+    /*
+     * CPU-bound arithmetic — mirrors bench stealing's workload.
+     *
+     * The previous implementation used delay(100000)*3 which yields
+     * under COOP_PREEMPT. Each yield calls schedule(), briefly
+     * re-queuing and re-picking the task on CPU 1, so the task is
+     * effectively "sticky" to whichever CPU started it and stealers
+     * pick up later tasks from the deque instead. That's fine for
+     * stealing in theory, but when the whole task only does ~0.3 ms
+     * of work it finishes before stealers on Pi 5 (whose yield path
+     * is slowed by the DC CIVAC spinlock work) can claim their share.
+     *
+     * A pure CPU-bound loop holds the task on its owner for long
+     * enough that stealers reliably claim the other deque entries.
+     */
+    volatile uint64_t x = 1;
+    for (uint64_t i = 1; i < 300000; i++) {
+        x = x * 1103515245 + 12345;
+    }
+    (void)x;
 
     irq_flags_t f = spin_lock_irqsave(&test_state.lock);
     steal_done_count++;
