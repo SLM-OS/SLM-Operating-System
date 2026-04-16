@@ -464,4 +464,11 @@ uint8_t nvidia_gpu_get_architecture(void) { return nvidia_gpu.architecture; }
 uint64_t nvidia_gpu_get_bar0_addr(void) { return nvidia_gpu.bar0_addr; }
 uint64_t nvidia_gpu_get_bar1_addr(void) { return nvidia_gpu.bar1_addr; }
 
+/* ---- Accessors for the GSP platform shim ---- */
+
+volatile uint32_t *nvidia_gpu_get_bar0(void)   { return nvidia_gpu.bar0; }
+uint32_t           nvidia_gpu_get_bar0_size(void) { return nvidia_gpu.bar0_size; }
+volatile uint8_t  *nvidia_gpu_get_bar1(void)   { return nvidia_gpu.bar1; }
+uint64_t           nvidia_gpu_get_bar1_size(void) { return nvidia_gpu.bar1_size; }
+
 #endif /* PLATFORM_X86_64 */

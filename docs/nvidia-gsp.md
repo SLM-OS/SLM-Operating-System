@@ -219,7 +219,7 @@ The shared GSP bringup code in `kernel/gpu/nvidia/` never touches hardware direc
 
 | Platform | File | Status |
 |----------|------|--------|
-| x86-64 bare-metal | `kernel/arch/x86_64/nvidia_gsp_platform.c` | Partial — `firmware_get`, `vbios_get_fwsec`, `mb` implemented; BAR0/BAR1/DMA stubbed |
+| x86-64 bare-metal | `kernel/arch/x86_64/nvidia_gsp_platform.c` | Complete — all vtable ops wired (BAR0/BAR1 via nvidia_gpu.c, DMA via PMM, identity-mapped) |
 | Linux userspace (VFIO) | `host-tools/gsp-harness/linux_platform.c` | Complete — used for hardware validation on test-pc |
 | ARM64 (Jetson) | `kernel/arch/arm64/nvidia_gsp_platform_stub.c` | Linker stub only — full implementation needed |
 

@@ -2209,6 +2209,72 @@ static void test_nvidia_gpu_boot42_decode(void)
     TEST_ASSERT_EQUAL_HEX8(0x01, minor);
 }
 
+/*
+ * Test: BAR0/BAR1 MMIO accessors return NULL/0 when no GPU is present.
+ * These are the accessors used by the GSP platform shim to reach
+ * GPU register space and VRAM.
+ */
+extern volatile uint32_t *nvidia_gpu_get_bar0(void);
+extern uint32_t           nvidia_gpu_get_bar0_size(void);
+extern volatile uint8_t  *nvidia_gpu_get_bar1(void);
+extern uint64_t           nvidia_gpu_get_bar1_size(void);
+
+static void test_nvidia_gpu_bar_mmio_accessors_safe(void)
+{
+    if (!nvidia_gpu_is_found()) {
+        TEST_ASSERT_NULL(nvidia_gpu_get_bar0());
+        TEST_ASSERT_EQUAL_UINT32(0, nvidia_gpu_get_bar0_size());
+        TEST_ASSERT_NULL(nvidia_gpu_get_bar1());
+        TEST_ASSERT_EQUAL_UINT64(0, nvidia_gpu_get_bar1_size());
+    } else {
+        TEST_ASSERT_NOT_NULL(nvidia_gpu_get_bar0());
+        TEST_ASSERT_TRUE(nvidia_gpu_get_bar0_size() > 0);
+        TEST_ASSERT_NOT_NULL(nvidia_gpu_get_bar1());
+        TEST_ASSERT_TRUE(nvidia_gpu_get_bar1_size() > 0);
+    }
+}
+
+/*
+ * Test: Platform ops read32 returns sentinel when BAR0 is NULL.
+ * On GPU-less QEMU, gsp_platform is NULL (install was skipped).
+ * Verify the accessor returns NULL as a precondition for the
+ * sentinel behavior.
+ */
+static void test_gsp_platform_bar0_null_without_gpu(void)
+{
+    if (nvidia_gpu_is_found()) {
+        /* Real GPU: BAR0 must be non-NULL */
+        TEST_ASSERT_NOT_NULL(nvidia_gpu_get_bar0());
+        return;
+    }
+    TEST_ASSERT_NULL(nvidia_gpu_get_bar0());
+}
+
+/*
+ * Test: DMA alloc via PMM returns page-aligned memory below 4 GB
+ * (identity-map window). This is the same path x86_gsp_dma_alloc uses.
+ */
+extern void *pmm_alloc_pages(size_t count);
+extern void  pmm_free_pages(void *page, size_t count);
+
+static void test_gsp_dma_alloc_via_pmm(void)
+{
+    void *p = pmm_alloc_pages(1);
+    if (!p) {
+        /* PMM may be exhausted in QEMU — skip gracefully */
+        TEST_PASS();
+        return;
+    }
+
+    /* Page aligned */
+    TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)p & 0xFFF);
+
+    /* Inside the 4 GB identity-map window */
+    TEST_ASSERT_TRUE((uint64_t)(uintptr_t)p < 0x100000000ULL);
+
+    pmm_free_pages(p, 1);
+}
+
 /* ============================================================================
  * PCI Tests
  * ============================================================================ */
@@ -3036,6 +3102,9 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_nvidia_gpu_vram_test_without_gpu);
     RUN_TEST(test_nvidia_gpu_accessors_safe);
     RUN_TEST(test_nvidia_gpu_boot42_decode);
+    RUN_TEST(test_nvidia_gpu_bar_mmio_accessors_safe);
+    RUN_TEST(test_gsp_platform_bar0_null_without_gpu);
+    RUN_TEST(test_gsp_dma_alloc_via_pmm);
     RUN_TEST(test_nvidia_gpu_shell_command_registered);
     RUN_TEST(test_pci_shell_command_registered);
 

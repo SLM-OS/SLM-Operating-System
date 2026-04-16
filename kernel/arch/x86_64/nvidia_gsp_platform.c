@@ -18,6 +18,8 @@
 #include "../../gpu/nvidia/nvidia_vbios.h"
 #include "pci.h"
 #include "uart.h"
+#include "pmm.h"
+#include "string.h"
 
 /* ---- Firmware symbols from nvidia_gsp_firmware.S ----
  *
@@ -72,21 +74,121 @@ static void x86_gsp_firmware_get(enum gsp_firmware_kind kind,
     out->version = NULL;
 }
 
-/* ---- BAR0 / BAR1 / DMA / cache / barrier ----
+/* ---- BAR0/BAR1 accessors from nvidia_gpu.c ---- */
+extern volatile uint32_t *nvidia_gpu_get_bar0(void);
+extern uint32_t           nvidia_gpu_get_bar0_size(void);
+extern volatile uint8_t  *nvidia_gpu_get_bar1(void);
+extern uint64_t           nvidia_gpu_get_bar1_size(void);
+
+/* ---- BAR0 register access ----
  *
- * Stubbed for now: E2+ fills these in. Making the vtable load
- * clean first lets the firmware accessor be tested in isolation,
- * which is what the E1 regression tests exercise.
- */
-static uint32_t x86_gsp_bar0_read32(uint32_t offset) { (void)offset; return 0xBADF5040; }
-static void     x86_gsp_bar0_write32(uint32_t offset, uint32_t v) { (void)offset; (void)v; }
-static void     x86_gsp_bar1_read(uint32_t o, void *d, size_t n) { (void)o; (void)d; (void)n; }
-static void     x86_gsp_bar1_write(uint32_t o, const void *s, size_t n) { (void)o; (void)s; (void)n; }
-static void    *x86_gsp_dma_alloc(size_t s, size_t a, uint64_t *p) { (void)s; (void)a; if (p) *p = 0; return NULL; }
-static void     x86_gsp_dma_free(void *p, size_t s) { (void)p; (void)s; }
-static void     x86_gsp_cache_clean(const void *a, size_t s) { (void)a; (void)s; }
-static void     x86_gsp_cache_invalidate(void *a, size_t s) { (void)a; (void)s; }
-static void     x86_gsp_mb(void) { __asm__ volatile("mfence" ::: "memory"); }
+ * BAR0 is the GPU's 16 MB MMIO register space. Offsets passed by the
+ * shared GSP code are relative to BAR0 base. The volatile qualifier
+ * on the pointer from nvidia_gpu.c prevents read coalescing — see
+ * docs/nvidia-gsp.md §"Platform Shim Contract" and #163. */
+static uint32_t x86_gsp_bar0_read32(uint32_t offset)
+{
+    volatile uint32_t *bar0 = nvidia_gpu_get_bar0();
+    uint32_t size = nvidia_gpu_get_bar0_size();
+    if (!bar0 || offset + 4 > size)
+        return 0xBADF5040u;
+    return bar0[offset / 4];
+}
+
+static void x86_gsp_bar0_write32(uint32_t offset, uint32_t value)
+{
+    volatile uint32_t *bar0 = nvidia_gpu_get_bar0();
+    uint32_t size = nvidia_gpu_get_bar0_size();
+    if (!bar0 || offset + 4 > size)
+        return;
+    bar0[offset / 4] = value;
+}
+
+/* ---- BAR1 (VRAM) byte access ----
+ *
+ * BAR1 is the VRAM aperture. On x86-64, MMIO reads/writes through
+ * the identity-mapped BAR1 address are strongly ordered (UC/WC
+ * depending on MTRR), so no extra fencing is needed. */
+static void x86_gsp_bar1_read(uint32_t offset, void *dst, size_t n)
+{
+    volatile uint8_t *bar1 = nvidia_gpu_get_bar1();
+    uint64_t size = nvidia_gpu_get_bar1_size();
+    if (!bar1 || (uint64_t)offset + n > size)
+        return;
+    /* Byte-by-byte from volatile MMIO — memcpy is not safe on
+     * volatile pointers (compiler may optimize to non-volatile). */
+    uint8_t *d = (uint8_t *)dst;
+    for (size_t i = 0; i < n; i++)
+        d[i] = bar1[offset + i];
+}
+
+static void x86_gsp_bar1_write(uint32_t offset, const void *src, size_t n)
+{
+    volatile uint8_t *bar1 = nvidia_gpu_get_bar1();
+    uint64_t size = nvidia_gpu_get_bar1_size();
+    if (!bar1 || (uint64_t)offset + n > size)
+        return;
+    const uint8_t *s = (const uint8_t *)src;
+    for (size_t i = 0; i < n; i++)
+        bar1[offset + i] = s[i];
+}
+
+/* ---- DMA allocation via PMM ----
+ *
+ * On x86-64 bare-metal the first 4 GB is identity-mapped
+ * (trampoline32.S), so VA == PA — no IOMMU translation needed.
+ * The GPU does direct DMA to physical addresses.
+ *
+ * PMM returns page-aligned (4 KB) memory, which satisfies every
+ * alignment the GSP boot sequence actually requests (Falcon DMA
+ * needs 256-byte alignment for DMATRFBASE). */
+static void *x86_gsp_dma_alloc(size_t size, size_t align, uint64_t *out_dma)
+{
+    if (size == 0) {
+        if (out_dma) *out_dma = 0;
+        return NULL;
+    }
+
+    /* PMM always returns page-aligned. Reject over-page alignment
+     * that the buddy allocator can't guarantee (no current caller
+     * needs > 4 KB alignment). */
+    if (align > PAGE_SIZE) {
+        uart_printf("[GSP-DMA] unsupported alignment 0x%lx > PAGE_SIZE\n",
+                    (unsigned long)align);
+        if (out_dma) *out_dma = 0;
+        return NULL;
+    }
+
+    size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    void *ptr = pmm_alloc_pages(pages);
+    if (!ptr) {
+        if (out_dma) *out_dma = 0;
+        return NULL;
+    }
+
+    /* Zero the DMA buffer — GPU expects clean memory for command
+     * rings, status pages, and ucode staging areas. */
+    memset(ptr, 0, pages * PAGE_SIZE);
+
+    /* Identity-mapped: VA == PA. */
+    if (out_dma) *out_dma = (uint64_t)(uintptr_t)ptr;
+    return ptr;
+}
+
+static void x86_gsp_dma_free(void *ptr, size_t size)
+{
+    if (!ptr) return;
+    size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    pmm_free_pages(ptr, pages);
+}
+
+/* ---- Cache / barrier ----
+ *
+ * x86-64 has coherent DMA — no cache maintenance needed.
+ * mfence serializes all loads/stores (full barrier). */
+static void x86_gsp_cache_clean(const void *a, size_t s) { (void)a; (void)s; }
+static void x86_gsp_cache_invalidate(void *a, size_t s)  { (void)a; (void)s; }
+static void x86_gsp_mb(void) { __asm__ volatile("mfence" ::: "memory"); }
 /* ---- VBIOS loader (E2 / P3-3) ----
  *
  * Read the NVIDIA VBIOS via the PCI Expansion ROM BAR on our GPU,
