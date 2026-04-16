@@ -45,6 +45,9 @@ const shell_cmd_t builtin_commands[] = {
     {"model",  cmd_model,  "Model management (load/list/info/unload/pools)"},
     {"dtb",    cmd_dtb,    "Show device tree info"},
     {"gpu",    cmd_gpu,    "Show GPU info (gpu [read <hex-offset>])"},
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"nvgpu",  cmd_nvgpu,  "Jetson nvgpu bringup (nvgpu <prepare|run|info>)"},
+#endif
     {"elftest", cmd_elftest, "Test ELF loader"},
     {"run",    cmd_run,    "Run a program (run <name>)"},
     {"kill",   cmd_kill,   "Terminate a task by ID"},

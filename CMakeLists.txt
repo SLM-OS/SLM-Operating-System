@@ -245,6 +245,9 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/bringup.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/rpc.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/rpc.c>
+    # Jetson-only: nvgpu-native bringup skeleton (parallel to bringup.c's
+    # GSP-RM path, for GA10B's ACR+FECS+GPCCS+PMU boot model).
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_bringup.c>
     # Jetson: full GSP platform shim — MMIO at GPU_BASE, unified memory
     # DMA, cache maintenance, firmware via .incbin. Replaces the old
     # nvidia_gsp_platform_stub.c now that CBB firewall is bypassed.
@@ -742,6 +745,84 @@ if(ENABLE_GSP_FIRMWARE AND GSP_CHIP)
     add_compile_definitions(ENABLE_GSP_FIRMWARE=1)
 
     message(STATUS "  GSP firmware: ${GSP_FW_DIR} (chip ${GSP_CHIP})")
+endif()
+
+# ============================================================================
+# GA10B nvgpu-native firmware (Jetson Orin Nano — integrated Ampere)
+# ============================================================================
+#
+# GA10B does NOT use the discrete-Ampere GSP-RM stack. It uses nvgpu-native
+# firmware: ACR-GSP, FECS/GPCCS, PMU, NET runtime images, safety scheduler.
+# The firmware lives on the Jetson at /lib/firmware/nvidia/ga10b/; pull it
+# to the build host with scripts/tools/fetch-ga10b-firmware.sh.
+#
+# Gate: set -DGA10B_FIRMWARE_DIR=<path> at configure time. Default off
+# (the tree builds without firmware; the bringup code will detect the
+# missing blobs and fail Phase 0 cleanly).
+set(GA10B_FIRMWARE_DIR "" CACHE PATH "Directory containing ga10b nvgpu firmware (see scripts/tools/fetch-ga10b-firmware.sh)")
+
+if(PLATFORM STREQUAL "JETSON_ORIN_NANO" AND GA10B_FIRMWARE_DIR)
+    # Verify the required files exist. If the user points us at an empty or
+    # incomplete dir, fail fast with a clear message rather than produce a
+    # build that's missing ucode.
+    set(_ga10b_required
+        "acr-gsp.text.encrypt.bin.prod"
+        "acr-gsp.data.encrypt.bin.prod"
+        "acr-gsp.manifest.encrypt.bin.out.bin.prod"
+        "fecs_encrypt_prod.bin"
+        "fecs_pkc_sig_encrypt.bin"
+        "gpccs_encrypt_prod.bin"
+        "gpccs_pkc_sig_encrypt.bin"
+        "gpmu_ucode_next_prod_image.bin"
+        "gpmu_ucode_next_prod_desc.bin"
+        "pmu_pkc_prod_sig.bin"
+        "NETA_img_prod_encrypted.bin"
+        "NETB_img_prod_encrypted.bin"
+        "NETC_img_prod_encrypted.bin"
+        "NETD_img_prod_encrypted.bin"
+        "safety-scheduler.text.encrypt.bin.prod"
+        "safety-scheduler.data.encrypt.bin.prod"
+        "safety-scheduler.manifest.encrypt.bin.out.bin.prod")
+    set(_ga10b_missing "")
+    foreach(_f ${_ga10b_required})
+        if(NOT EXISTS "${GA10B_FIRMWARE_DIR}/${_f}")
+            list(APPEND _ga10b_missing "${_f}")
+        endif()
+    endforeach()
+    if(_ga10b_missing)
+        message(WARNING
+            "GA10B_FIRMWARE_DIR=${GA10B_FIRMWARE_DIR} is set but required "
+            "files are missing: ${_ga10b_missing}. "
+            "Run scripts/tools/fetch-ga10b-firmware.sh to pull from the Jetson. "
+            "Disabling GA10B firmware embedding.")
+    else()
+        target_sources(slmos.elf PRIVATE kernel/arch/arm64/nvidia_ga10b_firmware.S)
+        set(_ga10b_defs
+            "GA10B_FW_ACR_TEXT_PATH=${GA10B_FIRMWARE_DIR}/acr-gsp.text.encrypt.bin.prod"
+            "GA10B_FW_ACR_DATA_PATH=${GA10B_FIRMWARE_DIR}/acr-gsp.data.encrypt.bin.prod"
+            "GA10B_FW_ACR_MANIFEST_PATH=${GA10B_FIRMWARE_DIR}/acr-gsp.manifest.encrypt.bin.out.bin.prod"
+            "GA10B_FW_FECS_PATH=${GA10B_FIRMWARE_DIR}/fecs_encrypt_prod.bin"
+            "GA10B_FW_FECS_SIG_PATH=${GA10B_FIRMWARE_DIR}/fecs_pkc_sig_encrypt.bin"
+            "GA10B_FW_GPCCS_PATH=${GA10B_FIRMWARE_DIR}/gpccs_encrypt_prod.bin"
+            "GA10B_FW_GPCCS_SIG_PATH=${GA10B_FIRMWARE_DIR}/gpccs_pkc_sig_encrypt.bin"
+            "GA10B_FW_PMU_IMAGE_PATH=${GA10B_FIRMWARE_DIR}/gpmu_ucode_next_prod_image.bin"
+            "GA10B_FW_PMU_DESC_PATH=${GA10B_FIRMWARE_DIR}/gpmu_ucode_next_prod_desc.bin"
+            "GA10B_FW_PMU_SIG_PATH=${GA10B_FIRMWARE_DIR}/pmu_pkc_prod_sig.bin"
+            "GA10B_FW_NET_A_PATH=${GA10B_FIRMWARE_DIR}/NETA_img_prod_encrypted.bin"
+            "GA10B_FW_NET_B_PATH=${GA10B_FIRMWARE_DIR}/NETB_img_prod_encrypted.bin"
+            "GA10B_FW_NET_C_PATH=${GA10B_FIRMWARE_DIR}/NETC_img_prod_encrypted.bin"
+            "GA10B_FW_NET_D_PATH=${GA10B_FIRMWARE_DIR}/NETD_img_prod_encrypted.bin"
+            "GA10B_FW_SAFETY_TEXT_PATH=${GA10B_FIRMWARE_DIR}/safety-scheduler.text.encrypt.bin.prod"
+            "GA10B_FW_SAFETY_DATA_PATH=${GA10B_FIRMWARE_DIR}/safety-scheduler.data.encrypt.bin.prod"
+            "GA10B_FW_SAFETY_MANIFEST_PATH=${GA10B_FIRMWARE_DIR}/safety-scheduler.manifest.encrypt.bin.out.bin.prod")
+        set_source_files_properties(
+            kernel/arch/arm64/nvidia_ga10b_firmware.S
+            PROPERTIES
+            COMPILE_DEFINITIONS "${_ga10b_defs}"
+        )
+        add_compile_definitions(ENABLE_GA10B_FIRMWARE=1)
+        message(STATUS "  GA10B firmware: ${GA10B_FIRMWARE_DIR}")
+    endif()
 endif()
 
 if(ENABLE_AI_SCHEDULER)

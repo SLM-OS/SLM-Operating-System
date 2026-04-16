@@ -63,6 +63,9 @@ int cmd_ipc(int argc, char **argv);
 int cmd_model(int argc, char **argv);
 int cmd_dtb(int argc, char **argv);
 int cmd_gpu(int argc, char **argv);
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+int cmd_nvgpu(int argc, char **argv);
+#endif
 int cmd_bench(int argc, char **argv);
 int cmd_sched(int argc, char **argv);
 int cmd_eviction(int argc, char **argv);

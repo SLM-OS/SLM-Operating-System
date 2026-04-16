@@ -1891,6 +1891,68 @@ int cmd_gpu(int argc, char *argv[])
     return 0;
 }
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "../gpu/nvidia/ga10b_bringup.h"
+
+/*
+ * nvgpu - Jetson GA10B nvgpu-native bringup driver (ACR → FECS → GPCCS
+ *        → PMU → channel → first method). Alternative to gsp_init()
+ *        for the integrated GPU.
+ *
+ *   nvgpu                Show current bringup state + firmware inventory
+ *   nvgpu prepare        Run phase 0 (Falcon probes + firmware check)
+ *   nvgpu run            Attempt all phases end-to-end
+ *   nvgpu info           Show firmware inventory only
+ */
+int cmd_nvgpu(int argc, char *argv[])
+{
+    static struct ga10b_bringup b;
+
+    if (argc < 2 || strcmp(argv[1], "info") == 0) {
+        uart_puts("GA10B firmware inventory:\r\n");
+        static const char *NAMES[GA10B_FW_KIND_COUNT] = {
+            "acr_text", "acr_data", "acr_manifest",
+            "fecs", "fecs_sig",
+            "gpccs", "gpccs_sig",
+            "pmu_image", "pmu_desc", "pmu_sig",
+            "net_a", "net_b", "net_c", "net_d",
+            "safety_text", "safety_data", "safety_manifest",
+        };
+        for (int k = 0; k < GA10B_FW_KIND_COUNT; k++) {
+            struct ga10b_firmware_blob blob;
+            int rc = ga10b_firmware_get((enum ga10b_firmware_kind)k, &blob);
+            if (rc < 0) {
+                uart_printf("  %-20s  (not embedded)\r\n", NAMES[k]);
+            } else {
+                uart_printf("  %-20s  %8lu bytes\r\n",
+                            NAMES[k], (unsigned long)blob.size);
+            }
+        }
+        if (argc < 2) {
+            uart_printf("\r\nState: %d  Last error phase: %d\r\n",
+                        (int)b.state, b.last_error_phase);
+        }
+        return 0;
+    }
+
+    if (strcmp(argv[1], "prepare") == 0) {
+        int rc = ga10b_bringup_prepare(&b);
+        uart_printf("prepare: rc=%d\r\n", rc);
+        return rc;
+    }
+
+    if (strcmp(argv[1], "run") == 0) {
+        int rc = ga10b_bringup_run(&b);
+        uart_printf("run: rc=%d, state=%d, last_err_phase=%d\r\n",
+                    rc, (int)b.state, b.last_error_phase);
+        return rc;
+    }
+
+    uart_puts("usage: nvgpu [info | prepare | run]\r\n");
+    return -1;
+}
+#endif /* PLATFORM_JETSON_ORIN_NANO */
+
 /*
  * sched - Show or change scheduler policy.
  *
