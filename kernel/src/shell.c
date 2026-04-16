@@ -23,7 +23,7 @@
 #include "component.h"
 #include "littlefs_slm.h"
 #include "help.h"
-#if defined(PLATFORM_QEMU_VIRT)
+#if defined(ENABLE_NETWORKING)
 #include "net.h"
 #endif
 #include "lua_slm.h"
@@ -338,7 +338,7 @@ void shell_init(void)
     line_pos = 0;
     num_external_commands = 0;
 
-#if defined(PLATFORM_QEMU_VIRT)
+#if defined(ENABLE_NETWORKING)
     /* Register network commands (ping, ifconfig, netstat) */
     net_shell_init();
 #endif

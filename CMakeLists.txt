@@ -172,6 +172,17 @@ if(EMBED_DEMO_SCRIPTS)
     add_compile_definitions(EMBED_DEMO_SCRIPTS=1)
 endif()
 
+# Networking: ON for platforms with drivers (QEMU_VIRT, X86_64),
+# OFF for hardware platforms until real NIC drivers exist.
+if(PLATFORM STREQUAL "QEMU_VIRT" OR PLATFORM STREQUAL "X86_64")
+    option(ENABLE_NETWORKING "Enable TCP/IP networking stack (lwIP)" ON)
+else()
+    option(ENABLE_NETWORKING "Enable TCP/IP networking stack (lwIP)" OFF)
+endif()
+if(ENABLE_NETWORKING)
+    add_compile_definitions(ENABLE_NETWORKING=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64.ld)
@@ -355,12 +366,16 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/gpu_nvidia.c>
 
     # ==========================================================================
-    # Networking (QEMU only for now)
+    # Networking (enabled on platforms with drivers: QEMU_VIRT, X86_64)
     # ==========================================================================
-    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/virtio_net.c>
-    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/net/sys_arch.c>
-    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/net/lwip_slm.c>
-    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/src/net_shell.c>
+    # VirtIO-Net MMIO driver (ARM64 QEMU only)
+    $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},QEMU_VIRT>>:kernel/drivers/virtio_net.c>
+    # VirtIO-Net PCI driver (x86-64 only)
+    $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/virtio_net_pci.c>
+    # Platform-independent networking stack
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/net_shell.c>
 
     # ==========================================================================
     # Lua Scripting - Lua library includes all FP-using code
@@ -392,7 +407,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_syscall.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_component.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_vmm.c>
-    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_net.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_lua.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>
@@ -471,11 +486,9 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src
 )
 
-# Build kernel ELF
-if(PLATFORM STREQUAL "QEMU_VIRT")
+# Build kernel ELF — include lwIP when networking is enabled
+if(ENABLE_NETWORKING)
     add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES} ${LWIP_SOURCES})
-elseif(PLATFORM STREQUAL "X86_64")
-    add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
 else()
     add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES})
 endif()
@@ -539,8 +552,8 @@ set_source_files_properties(
     PROPERTIES COMPILE_FLAGS "-Wno-unused-parameter -Wno-shadow -Wno-cast-align -DLFS_NO_MALLOC -DLFS_NO_ASSERT -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR"
 )
 
-# Configure lwIP for freestanding use (QEMU only)
-if(PLATFORM STREQUAL "QEMU_VIRT")
+# Configure lwIP for freestanding use
+if(ENABLE_NETWORKING)
     set_source_files_properties(
         ${LWIP_SOURCES}
         PROPERTIES COMPILE_FLAGS "-Wno-unused-parameter -Wno-unused-variable -Wno-type-limits -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes -Wno-redundant-decls"

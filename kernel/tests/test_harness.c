@@ -118,8 +118,11 @@ int test_harness_run_all(void)
     total_failures += test_suite_scheduler();
     total_failures += test_suite_component();
     total_failures += test_suite_vmm();
-    total_failures += test_suite_net();
     total_failures += test_suite_lua();
+#endif
+    /* Networking tests run on all platforms with ENABLE_NETWORKING */
+#if defined(ENABLE_NETWORKING)
+    total_failures += test_suite_net();
 #endif
 
 #if !defined(PLATFORM_X86_64)

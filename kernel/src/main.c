@@ -27,8 +27,12 @@
 #include "littlefs_slm.h"
 #include "littlefs_vfs.h"
 #include "help.h"
-#if defined(PLATFORM_QEMU_VIRT)
+#if defined(ENABLE_NETWORKING)
 #include "net.h"
+#include "net_driver.h"
+#if defined(PLATFORM_QEMU_VIRT)
+#include "virtio_net.h"
+#endif
 #endif
 #include <stdint.h>
 #include <stdbool.h>
@@ -455,6 +459,18 @@ void kernel_main(void *dtb)
         nvidia_gpu_init();
         /* Shell commands registered in shell_init() after shell starts */
     }
+#endif
+
+    /* Register platform-specific network driver (before net_init) */
+#if defined(ENABLE_NETWORKING)
+#if defined(PLATFORM_QEMU_VIRT)
+    virtio_net_register();
+#elif defined(PLATFORM_X86_64)
+    {
+        extern void virtio_net_pci_register(void);
+        virtio_net_pci_register();
+    }
+#endif
 #endif
 
     /* Initialize scheduler and IPC AFTER all initial PMM allocations.

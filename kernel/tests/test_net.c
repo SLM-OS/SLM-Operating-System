@@ -8,16 +8,22 @@
 
 #include "unity.h"
 
-#if defined(PLATFORM_QEMU_VIRT)
+#if defined(ENABLE_NETWORKING)
 #include "../include/net.h"
-#include "../include/virtio.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 
-/* Forward declarations for the virtqueue helpers under test. */
+/*
+ * Virtqueue tests use the MMIO driver's virtqueue_add_buf/get_buf
+ * implementations which are only compiled for QEMU_VIRT. The x86-64
+ * PCI driver has its own virtqueue code with the same ring format.
+ */
+#if defined(PLATFORM_QEMU_VIRT)
+#include "../include/virtio.h"
 int virtqueue_add_buf(struct virtqueue *vq, void *addr, uint32_t len, bool write);
 int virtqueue_get_buf(struct virtqueue *vq, uint32_t *len);
+#endif
 
 /* ============================================================================
  * IP Address Utility Tests
@@ -314,7 +320,12 @@ static void test_net_stats_initial_values(void)
  * and the cache-maintenance calls added for DRV-H2. On QEMU ARM64 the
  * cache helpers resolve to a dmb, so these tests also verify that the
  * barrier calls do not corrupt the ring state.
+ *
+ * These tests link against the MMIO driver's virtqueue functions, so they
+ * are only compiled for PLATFORM_QEMU_VIRT.
  * ============================================================================ */
+
+#if defined(PLATFORM_QEMU_VIRT)
 
 #define TVQ_SIZE 16
 
@@ -499,7 +510,9 @@ static void test_virtqueue_add_two_distinct_buffers(void)
     TEST_ASSERT_EQUAL_UINT16(TVQ_SIZE - 2, vq.num_free);
 }
 
-#endif /* PLATFORM_QEMU_VIRT */
+#endif /* PLATFORM_QEMU_VIRT — virtqueue tests */
+
+#endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
  * Test Suite Entry Point
@@ -507,7 +520,7 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 
 int test_suite_net(void)
 {
-#if defined(PLATFORM_QEMU_VIRT)
+#if defined(ENABLE_NETWORKING)
     UNITY_BEGIN();
 
     /* IP address utility tests */
@@ -529,7 +542,8 @@ int test_suite_net(void)
     RUN_TEST(test_net_get_stats_safety);
     RUN_TEST(test_net_stats_initial_values);
 
-    /* Virtqueue descriptor ring tests (DRV-H2 regression coverage) */
+    /* Virtqueue descriptor ring tests (MMIO driver, QEMU_VIRT only) */
+#if defined(PLATFORM_QEMU_VIRT)
     RUN_TEST(test_virtqueue_add_buf_basic);
     RUN_TEST(test_virtqueue_add_buf_read_only);
     RUN_TEST(test_virtqueue_add_buf_exhaustion);
@@ -537,10 +551,11 @@ int test_suite_net(void)
     RUN_TEST(test_virtqueue_get_buf_empty);
     RUN_TEST(test_virtqueue_get_buf_returns_device_len);
     RUN_TEST(test_virtqueue_add_two_distinct_buffers);
+#endif
 
     return UNITY_END();
 #else
-    /* Networking not available on non-QEMU platforms */
+    /* Networking not available on this platform */
     return 0;
 #endif
 }
