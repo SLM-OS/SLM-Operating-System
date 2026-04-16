@@ -3983,21 +3983,27 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed_empty { failures += 1; }
     }
 
-    // Test 12e: msg_router bounded str_copy (RUST-C3)
+    // Test 12e: msg_router rejects oversized topic (RUST-C3 + #69)
     // Pass a topic name buffer that is exactly TOPIC_NAME_LEN bytes of a
-    // repeating pattern with no NUL terminator. The old str_copy would
-    // over-read past the buffer; the fix bounds reads at the explicit
-    // max_src_len. We verify the subscription was created (no crash) and
-    // that the stored name is truncated to TOPIC_NAME_LEN-1 chars + NUL.
+    // repeating pattern with no NUL terminator. This exercises two
+    // guarantees at once:
+    //   (1) RUST-C3: the bounds check in cstr_len_bounded never reads
+    //       past TOPIC_NAME_LEN regardless of the input pattern.
+    //   (2) #69: oversized names must be *rejected*, not silently
+    //       truncated — two distinct long names would otherwise alias
+    //       on the same 15-byte prefix.
+    // The old code returned 0 and stored the truncated prefix; the new
+    // contract returns -1 and creates no subscription.
     {
         msg_router::msg_router_init();
-        // 32-byte buffer with two halves of distinct non-NUL bytes so we
-        // can detect over-reads via stored topic name contents.
+        // 32-byte buffer with two halves of distinct non-NUL bytes.
+        // cstr_len_bounded scans up to TOPIC_NAME_LEN (16) bytes, finds
+        // no NUL, returns None, and subscribe returns -1.
         let mut src_buf = [0u8; 32];
         for i in 0..16 { src_buf[i] = b'A'; }
         for i in 16..32 { src_buf[i] = b'B'; }
         let ret = msg_router::msg_router_subscribe(src_buf.as_ptr(), 7);
-        let subscribed = ret == 0;
+        let rejected = ret == -1;
 
         let mut topic_names = [[0u8; 16]; 1];
         let mut count: i32 = 0;
@@ -4007,12 +4013,9 @@ pub extern "C" fn rust_inference_test() -> i32 {
             &mut count,
             1,
         );
-        // Stored name must be 15 'A's + NUL, proving reads stopped at
-        // max_src_len = TOPIC_NAME_LEN and did NOT leak 'B' bytes.
-        let mut expected = [b'A'; 16];
-        expected[15] = 0;
-        let passed = subscribed && count == 1 && topic_names[0] == expected;
-        print_test_result(b"msg_router: str_copy bounded (no over-read)\0", passed);
+        // No subscription was created.
+        let passed = rejected && count == 0;
+        print_test_result(b"msg_router: oversized topic rejected (#69)\0", passed);
         if !passed { failures += 1; }
 
         // Re-init so subsequent tests start clean.

@@ -377,8 +377,35 @@ fn is_wildcard_pattern(name: *const u8, max_len: usize) -> bool {
     last == b'*'
 }
 
+/// Measured length of a C string, capped at `max_len`. Returns
+/// `Some(len)` if a NUL terminator is found within the first `max_len`
+/// bytes, `None` otherwise (string is longer than `max_len` or missing
+/// its terminator).
+///
+/// Used at the FFI boundary to reject oversized topic names before they
+/// reach `str_copy` (which would silently truncate).
+///
+/// # Safety
+/// Caller promises `src` is readable for at least `max_len` bytes.
+unsafe fn cstr_len_bounded(src: *const u8, max_len: usize) -> Option<usize> {
+    let mut i = 0;
+    while i < max_len {
+        if *src.add(i) == 0 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Check if a topic name matches a wildcard pattern.
 /// Pattern "/sensors/*" matches "/sensors/data", "/sensors/temp", etc.
+///
+/// The read of `topic` is bounded by `prefix_len`, which is itself
+/// capped at `TOPIC_NAME_LEN` by the pattern layout. The early-return
+/// on `*topic.add(i) == 0` also halts on any topic shorter than the
+/// prefix — so reading never advances past the caller's NUL or past
+/// `TOPIC_NAME_LEN`, whichever comes first.
 fn wildcard_matches(pattern: &[u8; TOPIC_NAME_LEN], topic: *const u8) -> bool {
     // Find the '*' position in pattern
     let mut prefix_len = 0;
@@ -389,10 +416,12 @@ fn wildcard_matches(pattern: &[u8; TOPIC_NAME_LEN], topic: *const u8) -> bool {
     if prefix_len >= TOPIC_NAME_LEN || pattern[prefix_len] != b'*' {
         return false;
     }
-    // Compare prefix
+    // Compare prefix. SAFETY: prefix_len < TOPIC_NAME_LEN and the
+    // NUL check guarantees we never read past the caller's string.
     unsafe {
         for i in 0..prefix_len {
-            if *topic.add(i) == 0 || *topic.add(i) != pattern[i] {
+            let c = *topic.add(i);
+            if c == 0 || c != pattern[i] {
                 return false;
             }
         }
@@ -432,6 +461,33 @@ pub extern "C" fn msg_router_init() {
 pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32) -> i32 {
     if topic_name.is_null() {
         return -1;
+    }
+
+    // Reject topic names that would silently truncate (#69). A topic
+    // longer than TOPIC_NAME_LEN - 1 bytes cannot round-trip through
+    // the storage buffer, so two distinct long names could collide on
+    // the same truncated key. Fail loudly instead.
+    // SAFETY: the caller's contract is a NUL-terminated C string; we
+    // read at most TOPIC_NAME_LEN bytes — far below any realistic
+    // caller's string length.
+    match unsafe { cstr_len_bounded(topic_name, TOPIC_NAME_LEN) } {
+        Some(_) => {}
+        None => {
+            // SAFETY: uart_printf only reads `topic_name` as a C string;
+            // it is guaranteed to be NUL-terminated within TOPIC_NAME_LEN
+            // bytes by caller contract or we would not reach here — and
+            // we enforce a bounded read below via %.*s so an oversized
+            // pointer cannot run off the page.
+            unsafe {
+                uart_printf(
+                    b"[msg] Topic name too long (max %d bytes): '%.*s...'\n\0".as_ptr(),
+                    (TOPIC_NAME_LEN - 1) as i32,
+                    (TOPIC_NAME_LEN - 1) as i32,
+                    topic_name,
+                );
+            }
+            return -1;
+        }
     }
 
     // Wildcard subscription
@@ -603,6 +659,18 @@ pub extern "C" fn msg_router_publish(topic_name: *const u8, data: *const u8) -> 
     if topic_name.is_null() || data.is_null() {
         return 0;
     }
+    // SAFETY: caller guarantees `topic_name` is a NUL-terminated C
+    // string within TOPIC_NAME_LEN bytes. cstr_len_bounded reads at
+    // most TOPIC_NAME_LEN bytes.
+    if unsafe { cstr_len_bounded(topic_name, TOPIC_NAME_LEN).is_none() } {
+        unsafe {
+            uart_printf(
+                b"[msg] publish: topic name too long (max %d bytes)\n\0".as_ptr(),
+                (TOPIC_NAME_LEN - 1) as i32,
+            );
+        }
+        return 0;
+    }
     unsafe { publish_internal(topic_name, data, MSG_PRIORITY_NORMAL) }
 }
 
@@ -616,6 +684,15 @@ pub extern "C" fn msg_router_publish_priority(
     priority: u8,
 ) -> i32 {
     if topic_name.is_null() || data.is_null() {
+        return 0;
+    }
+    if unsafe { cstr_len_bounded(topic_name, TOPIC_NAME_LEN).is_none() } {
+        unsafe {
+            uart_printf(
+                b"[msg] publish_priority: topic name too long (max %d bytes)\n\0".as_ptr(),
+                (TOPIC_NAME_LEN - 1) as i32,
+            );
+        }
         return 0;
     }
     unsafe { publish_internal(topic_name, data, priority) }
