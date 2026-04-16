@@ -48,6 +48,21 @@ void net_poll(void);
 /* -------------------------------------------------------------------------- */
 
 /**
+ * DHCP client state.
+ *
+ * NET_DHCP_DISABLED: DHCP not running (static IP in use)
+ * NET_DHCP_PENDING:  DHCP started, no lease yet
+ * NET_DHCP_BOUND:    DHCP bound an address; ip_addr is from DHCP server
+ * NET_DHCP_FAILED:   DHCP timed out or failed; fell back to static IP
+ */
+enum net_dhcp_status {
+    NET_DHCP_DISABLED = 0,
+    NET_DHCP_PENDING  = 1,
+    NET_DHCP_BOUND    = 2,
+    NET_DHCP_FAILED   = 3,
+};
+
+/**
  * Network interface information
  */
 struct net_info {
@@ -56,7 +71,8 @@ struct net_info {
     uint32_t netmask;       /* Subnet mask (network byte order) */
     uint32_t gateway;       /* Default gateway (network byte order) */
     bool     link_up;       /* Physical link status */
-    bool     dhcp_enabled;  /* DHCP in use */
+    bool     dhcp_enabled;  /* DHCP in use (any active state) */
+    enum net_dhcp_status dhcp_status;  /* Detailed DHCP state */
 };
 
 /**

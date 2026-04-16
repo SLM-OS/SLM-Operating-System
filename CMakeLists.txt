@@ -183,6 +183,18 @@ if(ENABLE_NETWORKING)
     add_compile_definitions(ENABLE_NETWORKING=1)
 endif()
 
+# Auto-start DHCP at boot (issue #197).
+#
+# When ON, net_init() calls dhcp_start() before returning; the shell
+# comes up with a DHCP-assigned IP without user intervention. If DHCP
+# doesn't answer within the compile-time timeout, lwip_slm.c falls
+# back to the static IP (10.0.2.15 in the QEMU default config). Set
+# to OFF to restore the previous manual-ifconfig-dhcp behavior.
+option(NET_DHCP_AT_BOOT "Auto-start DHCP during net_init (lwIP)" ON)
+if(ENABLE_NETWORKING AND NET_DHCP_AT_BOOT)
+    add_compile_definitions(NET_DHCP_AT_BOOT=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64.ld)

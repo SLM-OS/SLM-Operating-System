@@ -524,6 +524,7 @@ static void test_virtqueue_add_two_distinct_buffers(void)
  * ============================================================================ */
 
 #include "net_driver.h"
+#include "arch/sys_arch.h"  /* sys_now() for DHCP timeout polling */
 
 /*
  * Test: a network driver was registered during platform init.
@@ -611,6 +612,85 @@ static void test_net_poll_after_init(void)
 }
 
 /*
+ * Test: auto-DHCP starts during net_init when NET_DHCP_AT_BOOT is set
+ * (issue #197).
+ *
+ * After net_init(), the dhcp_enabled flag should be true and
+ * dhcp_status should be PENDING (we haven't polled enough for a bind
+ * yet) or BOUND (if QEMU's SLIRP answered the DISCOVER immediately,
+ * which it often does). If the flag is OFF at build time, status is
+ * DISABLED and dhcp_enabled is false.
+ */
+static void test_net_auto_dhcp_at_boot(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+
+#if defined(NET_DHCP_AT_BOOT)
+    TEST_ASSERT_MESSAGE(info.dhcp_enabled,
+        "NET_DHCP_AT_BOOT=ON: dhcp_enabled should be true after net_init");
+    TEST_ASSERT_MESSAGE(
+        info.dhcp_status == NET_DHCP_PENDING ||
+        info.dhcp_status == NET_DHCP_BOUND,
+        "NET_DHCP_AT_BOOT=ON: dhcp_status should be PENDING or BOUND");
+#else
+    TEST_ASSERT_MESSAGE(!info.dhcp_enabled,
+        "NET_DHCP_AT_BOOT=OFF: dhcp_enabled should be false");
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_DISABLED, info.dhcp_status);
+#endif
+}
+
+/*
+ * Test: DHCP binds an address under QEMU SLIRP.
+ *
+ * QEMU user-mode networking includes a built-in DHCP server at
+ * 10.0.2.2 that hands out 10.0.2.15 by default. After enough poll
+ * iterations to complete the DISCOVER/OFFER/REQUEST/ACK handshake,
+ * dhcp_status should transition from PENDING to BOUND. We poll for
+ * up to 2 seconds (net_poll drives lwIP timers and the driver recv).
+ *
+ * Skipped if DHCP wasn't auto-started at boot.
+ */
+static void test_net_dhcp_binds(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    struct net_info info;
+    net_get_info(&info);
+    if (!info.dhcp_enabled) {
+        TEST_IGNORE_MESSAGE("DHCP not enabled (NET_DHCP_AT_BOOT=OFF)");
+        return;
+    }
+
+    /* Poll for up to 2 seconds waiting for a bind. Using elapsed time
+     * rather than absolute compare avoids uint32_t wrap issues. */
+    uint32_t start = sys_now();
+    while ((sys_now() - start) < 2000) {
+        net_poll();
+        net_get_info(&info);
+        if (info.dhcp_status == NET_DHCP_BOUND)
+            break;
+    }
+
+    if (info.dhcp_status != NET_DHCP_BOUND) {
+        TEST_IGNORE_MESSAGE("DHCP did not bind within 2s "
+                            "(QEMU SLIRP may not be active)");
+        return;
+    }
+
+    /* QEMU SLIRP default lease is 10.0.2.15 */
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+}
+
+/*
  * Test: a raw frame transmits through the registered driver's send path.
  *
  * Bypasses lwIP and ARP entirely — pushes a single Ethernet broadcast
@@ -692,10 +772,12 @@ int test_suite_net(void)
 #endif
 
     /* Live integration tests against QEMU's virtio-net device.
-     * Order: driver_registered → init_live → poll → driver_tx. */
+     * Order: driver_registered → init_live → poll → DHCP → driver_tx. */
     RUN_TEST(test_net_driver_registered);
     RUN_TEST(test_net_init_live);
     RUN_TEST(test_net_poll_after_init);
+    RUN_TEST(test_net_auto_dhcp_at_boot);
+    RUN_TEST(test_net_dhcp_binds);
     RUN_TEST(test_net_driver_tx);
 
     return UNITY_END();
