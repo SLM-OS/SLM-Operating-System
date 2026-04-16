@@ -1317,18 +1317,18 @@ pub extern "C" fn rust_eviction_policy_name_pool(
     out_buf: *mut u8,
     buf_len: usize,
 ) -> usize {
-    let pool = match pool_id {
-        0 => mm::eviction::PoolType::Weight,
-        1 => mm::eviction::PoolType::Workspace,
-        _ => {
-            if !out_buf.is_null() && buf_len > 0 {
-                unsafe { *out_buf = 0; }
-            }
-            return 0;
-        }
-    };
     #[cfg(feature = "ai_eviction")]
     {
+        let pool = match pool_id {
+            0 => mm::eviction::PoolType::Weight,
+            1 => mm::eviction::PoolType::Workspace,
+            _ => {
+                if !out_buf.is_null() && buf_len > 0 {
+                    unsafe { *out_buf = 0; }
+                }
+                return 0;
+            }
+        };
         let name = mm::eviction::get_eviction_policy_name_for_pool(pool);
         if out_buf.is_null() || buf_len == 0 { return 0; }
         let n = name.len().min(buf_len - 1);
@@ -1340,7 +1340,7 @@ pub extern "C" fn rust_eviction_policy_name_pool(
     }
     #[cfg(not(feature = "ai_eviction"))]
     {
-        let _ = pool;
+        let _ = pool_id;
         if !out_buf.is_null() && buf_len > 0 {
             unsafe { *out_buf = 0; }
         }

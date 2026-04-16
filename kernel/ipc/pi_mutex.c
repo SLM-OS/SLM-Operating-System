@@ -22,6 +22,8 @@ void pi_mutex_init(pi_mutex_t *mutex)
 {
     spin_init(&mutex->guard);
     mutex->owner = NULL;
+    mutex->wait_head = NULL;
+    mutex->wait_tail = NULL;
     mutex->owner_original_pri = 0;
     mutex->locked = 0;
 }
@@ -58,6 +60,11 @@ static int try_boost_owner(pi_mutex_t *mutex, struct task *caller)
 
 /*
  * Acquire a priority-inheriting mutex.
+ *
+ * If the mutex is held, the caller is appended to a FIFO wait queue
+ * and marked TASK_BLOCKED. The scheduler removes it from the run
+ * queue; pi_mutex_unlock wakes the highest-priority waiter. This
+ * replaces the previous spin-wait loop (#93).
  */
 void pi_mutex_lock(pi_mutex_t *mutex)
 {
@@ -65,46 +72,39 @@ void pi_mutex_lock(pi_mutex_t *mutex)
 
     last_inversion_flag = 0;
 
-    while (1) {
-        /* Acquire guard to check/modify mutex state */
-        irq_flags_t flags = spin_lock_irqsave(&mutex->guard);
+    irq_flags_t flags = spin_lock_irqsave(&mutex->guard);
 
-        if (!mutex->locked) {
-            /* Mutex is free, acquire it */
-            mutex->locked = 1;
-            mutex->owner = self;
-            mutex->owner_original_pri = self->effective_priority;
-
-            spin_unlock_irqrestore(&mutex->guard, flags);
-            return;
-        }
-
-        /* Mutex is held by someone else */
-        /* Try to boost owner's priority if we have higher priority */
-        try_boost_owner(mutex, self);
-
+    if (!mutex->locked) {
+        /* Fast path: mutex is free. */
+        mutex->locked = 1;
+        mutex->owner = self;
+        mutex->owner_original_pri = self->effective_priority;
         spin_unlock_irqrestore(&mutex->guard, flags);
-
-        /*
-         * Spin-wait for the owner to release the mutex.
-         *
-         * Each iteration briefly masks IRQs around the mutex->locked read
-         * so a timer ISR (which could reach back into pi_mutex paths on
-         * another thread and deadlock on guard) can only fire when we're
-         * not mid-probe. This is the conservative, capstone-ready fix —
-         * a proper sleep queue (block on wait condition, wake on release)
-         * is tracked as a post-capstone enhancement.
-         */
-        while (mutex->locked) {
-            irq_flags_t f = irq_save();
-            if (!mutex->locked) {
-                irq_restore(f);
-                break;
-            }
-            irq_restore(f);
-            yield();
-        }
+        return;
     }
+
+    /* Mutex is held — boost owner and block. */
+    try_boost_owner(mutex, self);
+
+    /* Append to wait queue (FIFO). task->next is free because the
+     * task is about to leave the run queue (TASK_BLOCKED removes it
+     * from the scheduler's linked list). */
+    self->next = NULL;
+    if (mutex->wait_tail) {
+        mutex->wait_tail->next = self;
+    } else {
+        mutex->wait_head = self;
+    }
+    mutex->wait_tail = self;
+
+    self->state = TASK_BLOCKED;
+
+    spin_unlock_irqrestore(&mutex->guard, flags);
+
+    /* Deschedule — schedule() sees TASK_BLOCKED and won't pick us.
+     * We resume here after pi_mutex_unlock wakes us and the scheduler
+     * re-dispatches us. At that point the mutex is ours. */
+    schedule();
 }
 
 /*
@@ -131,6 +131,10 @@ int pi_mutex_trylock(pi_mutex_t *mutex)
 
 /*
  * Release the mutex and restore priority.
+ *
+ * If there are blocked waiters, the highest-priority one is woken
+ * and directly given ownership of the mutex (hand-off) so it doesn't
+ * need to re-acquire. This avoids a thundering-herd wake.
  */
 void pi_mutex_unlock(pi_mutex_t *mutex)
 {
@@ -139,14 +143,6 @@ void pi_mutex_unlock(pi_mutex_t *mutex)
     struct task *owner = mutex->owner;
 
     if (owner) {
-        /*
-         * Restore owner's priority to original value.
-         *
-         * Note: In a more sophisticated implementation, if the task
-         * holds multiple pi_mutexes, we'd need to set effective_priority
-         * to the max of original priority and all other mutex waiters.
-         * For simplicity, we just restore to original.
-         */
         if (owner->effective_priority != mutex->owner_original_pri) {
             INFO("PI: Restoring task '%s' priority %u->%u",
                  owner->name, owner->effective_priority, mutex->owner_original_pri);
@@ -154,16 +150,62 @@ void pi_mutex_unlock(pi_mutex_t *mutex)
         owner->effective_priority = mutex->owner_original_pri;
     }
 
-    mutex->owner = NULL;
-    mutex->owner_original_pri = 0;
-    mutex->locked = 0;
+    /* Pick the highest-priority waiter from the wait queue. Walk the
+     * FIFO and select the one with the largest effective_priority;
+     * unlink it. O(n) in waiter count, acceptable for the small queues
+     * expected in SLM-OS. */
+    struct task *best = NULL;
+    struct task **best_prev_next = NULL;
+    {
+        struct task **pp = &mutex->wait_head;
+        struct task *cur = mutex->wait_head;
+        while (cur) {
+            if (!best || cur->effective_priority > best->effective_priority) {
+                best = cur;
+                best_prev_next = pp;
+            }
+            pp = &cur->next;
+            cur = cur->next;
+        }
+    }
 
-    spin_unlock_irqrestore(&mutex->guard, flags);
+    if (best) {
+        /* Unlink `best` from the wait queue. */
+        *best_prev_next = best->next;
+        if (mutex->wait_tail == best) {
+            /* Recalculate tail: walk from head (short list). */
+            mutex->wait_tail = NULL;
+            struct task *t = mutex->wait_head;
+            while (t) {
+                mutex->wait_tail = t;
+                t = t->next;
+            }
+        }
+        best->next = NULL;
 
-    /* Wake any waiters */
-#if !defined(PLATFORM_X86_64)
-    __asm__ volatile("sev" ::: "memory");
-#endif
+        /* Hand off ownership directly — the woken task resumes inside
+         * pi_mutex_lock after its schedule() call and finds the mutex
+         * already acquired on its behalf. */
+        mutex->owner = best;
+        mutex->owner_original_pri = best->effective_priority;
+        /* mutex->locked stays 1. */
+
+        best->state = TASK_READY;
+
+        spin_unlock_irqrestore(&mutex->guard, flags);
+
+        /* Re-add the woken task to the run queue so the scheduler can
+         * dispatch it. scheduler_add_task_to_cpu handles NC memory
+         * visibility and cross-CPU notification. */
+        scheduler_add_task_to_cpu(best, best->assigned_cpu);
+    } else {
+        /* No waiters — just release. */
+        mutex->owner = NULL;
+        mutex->owner_original_pri = 0;
+        mutex->locked = 0;
+
+        spin_unlock_irqrestore(&mutex->guard, flags);
+    }
 }
 
 /*
