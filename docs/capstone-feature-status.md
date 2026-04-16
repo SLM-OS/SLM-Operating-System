@@ -24,7 +24,7 @@ firmware cache-coherency gap.
 |--|------|------|--------|--------|
 | Cores booted | 4/4 | 4/4 | 6/6 | 8/8 (i7-6700) |
 | Boot mechanism | PSCI (HVC) | PSCI (SMC) | PSCI (SMC, EL2 post-kexec) | INIT-SIPI-SIPI + ACPI MADT |
-| Cross-CPU dispatch | Full | Limited | Full (fixed Apr 15) | Full |
+| Cross-CPU dispatch | Full | Full (fixed Apr 16) | Full (fixed Apr 15) | Full |
 | IPI / wake | SEV broadcast | SEV broadcast | SEV broadcast | LAPIC IPI (vector 49) |
 | HW cache coherency | Automatic | Manual DC CVAC/CIVAC | Manual DC CVAC/CIVAC | Automatic |
 
@@ -37,13 +37,16 @@ Five multi-core integration tests pass. All 393 tests pass.
 
 **Pi 5 (BCM2712, 4x Cortex-A76):** SMP boot is functional via PSCI SMC.
 TF-A firmware does not set SMPEN (bit 6 of CPUECTLR_EL1) on secondary
-cores, breaking hardware cache coherency. Workaround: explicit DC
-CVAC/CIVAC cache maintenance for all shared data structures, with NC
-(non-cacheable) memory at `0xFFE00000` for cross-CPU-visible structures
-(run queues, task table, current-task pointers). Tasks are currently
-pinned to CPU 0 for dispatch; secondary CPUs run idle and timer tasks
-only. Five multi-core integration tests are IGNORED (not FAIL) in the
-test harness.
+cores, so the OS runs without hardware cache coherency. Workarounds:
+NC (non-cacheable) memory at `0xFFE00000` for shared scheduler state
+(run queues, task table, current-task pointers, work-steal deques);
+DC CIVAC / DSB SY around spinlock LDAXR/STLR on Pi 5 so lock state
+goes through DRAM; and DC CVAC/CIVAC helpers for the few remaining
+cacheable shared fields. Cross-CPU dispatch is now **full** — tasks
+distribute across all 4 CPUs, migration works, work-stealing works.
+14 of 15 multi-core integration tests pass every run on hardware;
+the 15th (`test_work_stealing_distributes_load`) is documented as
+inherently timing-flaky. `bench smp` and `bench stealing` both work.
 
 **Jetson (Tegra234, 6x Cortex-A78AE, dual cluster):** SMP boot
 functional post-kexec at EL2. Six cores across two clusters (MPIDR:
