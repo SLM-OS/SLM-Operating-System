@@ -64,6 +64,24 @@ QEMU user-mode networking provides:
 
 The gateway (10.0.2.2) is the host machine from the VM's perspective.
 
+### Auto-DHCP at Boot
+
+The `NET_DHCP_AT_BOOT` CMake option (default ON) makes `net_init()`
+call `dhcp_start()` before returning, so the system comes up with a
+DHCP-assigned address without a manual `ifconfig dhcp` invocation.
+
+Behavior:
+- Non-blocking: lwIP runs DISCOVER/OFFER/REQUEST/ACK in the background
+  while `net_poll()` drives the timers.
+- Timeout: if no DHCP server responds within `NET_DHCP_TIMEOUT_MS`
+  (10 s default), the system stops DHCP and falls back to the static
+  configuration that was applied at init.
+- Status: `struct net_info.dhcp_status` reports DISABLED, PENDING,
+  BOUND, or FAILED. `ifconfig` prints this as `DHCP(bound)` etc.
+
+Override with `-DNET_DHCP_AT_BOOT=OFF` to restore the previous
+manual-`ifconfig dhcp` behavior.
+
 ---
 
 ## Shell Commands
@@ -112,11 +130,12 @@ rtt min/avg/max = 0/0/0 ms
 
 ### ifconfig
 
-Display or configure network interface.
+Display or configure network interface. With auto-DHCP at boot, the
+default output shows the DHCP-bound state:
 
 ```
 SLM-OS> ifconfig
-sl0: flags=UP,STATIC
+sl0: flags=UP,DHCP(bound)
      ether 52:54:00:12:34:56
      inet 10.0.2.15  netmask 255.255.255.0
      gateway 10.0.2.2
@@ -127,6 +146,12 @@ DHCP enabled
 SLM-OS> ifconfig 192.168.1.100 255.255.255.0 192.168.1.1
 IP set to 192.168.1.100
 ```
+
+The DHCP status label on line one is one of:
+- `DHCP(bound)` — DHCP server answered, this IP is a lease
+- `DHCP(pending)` — DHCP started, no offer yet (normal during boot)
+- `DHCP(failed)` — DHCP timed out, fell back to static IP
+- `STATIC` — DHCP disabled or never started
 
 ### netstat
 
