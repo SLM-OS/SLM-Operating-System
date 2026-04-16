@@ -112,7 +112,39 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * skip LSPMU) — we don't need to probe them from SLM-OS. Their bases
  * will matter for later phases (GR init, method submission) but not
  * for ACR load. */
-#define NV_PGSP_BASE        0x00110000u   /* GSP Falcon block (runs ACR) */
+/* NV_PGSP_BASE and NV_PGSP_RISCV_BASE come from falcon.h. Registered
+ * here for grep-ability:
+ *   NV_PGSP_BASE        0x00110000   (GSP Falcon block)
+ *   NV_PGSP_RISCV_BASE  0x00111000   (GSP RISCV subblock)
+ */
+
+/* ---- GSP RISCV registers (offsets from NV_PGSP_RISCV_BASE) ----
+ *
+ * Used by phase 1 to start the HS ACR ucode in preloaded mode.
+ * Register meanings per docs/reference/nvgpu-hw-ga10b-hw_priscv_ga10b.h. */
+
+#define RISCV_BOOT_VECTOR_LO        0x380u
+#define RISCV_BOOT_VECTOR_HI        0x384u
+#define RISCV_CPUCTL                0x388u
+#define RISCV_CPUCTL_STARTCPU       (1u << 0)
+#define RISCV_BR_RETCODE            0x65cu
+#define RISCV_BCR_CTRL              0x668u
+#define RISCV_BCR_CTRL_VALID        (1u << 0)
+#define RISCV_BCR_CTRL_BRFETCH      (1u << 8)
+#define RISCV_BCR_CTRL_CORE_RISCV   (1u << 4)   /* 1 = select RISCV core */
+/* BCR_CTRL = 0x11 = CORE_SELECT=RISCV | VALID   (preloaded IMEM/DMEM mode) */
+#define RISCV_BCR_CTRL_PRELOADED \
+    (RISCV_BCR_CTRL_CORE_RISCV | RISCV_BCR_CTRL_VALID)
+
+/* RISCV CPUCTL status bits — need explicit masks (the aliased Falcon
+ * ones from falcon.h use HALTED=bit4 which works for both cores). */
+#define RISCV_CPUCTL_HALTED         (1u << 4)
+#define RISCV_CPUCTL_ACTIVE         (1u << 7)
+
+/* ACR HS completion marker — written to MAILBOX0 by the ucode when
+ * it runs. nvgpu's acr_sw_ga10b checks for ACR_OK. Exact constant
+ * verified in docs/reference/nvgpu-common-acr-acr_bootstrap.c. */
+#define ACR_BOOT_OK                 0x000000ffu
 
 /* ============================================================================
  * Phase entry points
@@ -158,12 +190,224 @@ int ga10b_bringup_prepare(struct ga10b_bringup *b)
     return 0;
 }
 
+/* ---- Phase 1: ACR on GSP RISCV ----
+ *
+ * Load the ACR HS ucode into the GSP Falcon's IMEM/DMEM via PIO, then
+ * kick the RISCV core in "preloaded" mode. The manifest at the tail
+ * of DMEM gets consumed by the Falcon BROM to verify the signed
+ * ucode; if verification passes, BROM jumps to the entry point in
+ * IMEM and ACR runs.
+ *
+ * This matches nvgpu_acr_bootstrap_hs_ucode_riscv in
+ *   docs/reference/nvgpu-common-acr-acr_bootstrap.c:360–419
+ * (preloaded BCR_CTRL=0x11 branch — we skip the 0x111 DMA path).
+ *
+ * On success the RISCV core runs, ACR authenticates FECS/GPCCS/(PMU),
+ * and eventually halts with MAILBOX0 = ACR_BOOT_OK and BR_RETCODE =
+ * success pattern. On failure BR_RETCODE reports the BROM error code
+ * (signature mismatch, manifest bad, etc.).
+ */
+
+/* Thin wrappers over the platform vtable — saves repeating the
+ * gsp_platform-> prefix at every register poke. */
+static inline uint32_t bar0_r32(uint32_t off)
+{
+    return gsp_platform->read32(off);
+}
+static inline void bar0_w32(uint32_t off, uint32_t val)
+{
+    gsp_platform->write32(off, val);
+}
+
+/*
+ * GA10B GSP engine reset — differs from the generic falcon_reset
+ * (which only writes the self-clearing RESET bit and polls HWCFG2).
+ * On GA10B the pattern is an explicit assert/deassert:
+ *
+ *   1. Write ENGINE.RESET = 1       (assert)
+ *   2. Wait 10+ µs
+ *   3. Write ENGINE.RESET = 0       (deassert — crucial!)
+ *
+ * Reference: docs/reference/nvgpu-hal-gsp-gsp_ga10b.c:54 ga10b_gsp_engine_reset.
+ * Without the deassert write the engine stays in reset forever, and
+ * HWCFG2/CPUCTL read back as PRI poison (0xbadfXXXX) — which is
+ * exactly what we see on jetson-nano-2 after Linux's nvgpu detach.
+ */
+static int ga10b_gsp_engine_reset(void)
+{
+    bar0_w32(NV_PGSP_BASE + FALCON_ENGINE, FALCON_ENGINE_RESET);
+    gsp_platform->mb();
+
+    /* 10 µs delay. gsp_platform doesn't expose a delay primitive,
+     * so spin a bounded loop. On Cortex-A78AE @ ~1.5 GHz, 15k NOPs
+     * is ~10 µs. Generous. */
+    for (volatile int i = 0; i < 15000; i++) { }
+
+    bar0_w32(NV_PGSP_BASE + FALCON_ENGINE, 0u);
+    gsp_platform->mb();
+
+    /* Wait for HWCFG2.MEM_SCRUBBING to clear (engine done scrubbing
+     * its own memory). Up to 500 ms. Note: for the initial boot path
+     * where the engine has never been reset, this typically completes
+     * in < 1 ms. */
+    uint32_t loops = 500u * 1000u;
+    while (loops-- > 0) {
+        uint32_t hwcfg2 = bar0_r32(NV_PGSP_BASE + FALCON_HWCFG2);
+        if (hwcfg2 == 0xFFFFFFFFu) return -1;
+        if ((hwcfg2 & 0xbadf0000u) == 0xbadf0000u) {
+            /* Still priv-locked; keep waiting. */
+        } else if ((hwcfg2 & FALCON_HWCFG2_MEM_SCRUBBING) == 0) {
+            return 0;
+        }
+        for (volatile int i = 0; i < 1500; i++) { }  /* ~1 µs */
+    }
+    return -1;
+}
+
+static int wait_for_halt_us(uint32_t timeout_us)
+{
+    /* Poll RISCV CPUCTL for HALTED=1 or ACTIVE=0. 1 µs loops use a
+     * cheap CNTPCT read — accurate enough for a coarse timeout. */
+    uint32_t loops = timeout_us;
+    while (loops-- > 0) {
+        uint32_t ctl = bar0_r32(NV_PGSP_RISCV_BASE + RISCV_CPUCTL);
+        if ((ctl & RISCV_CPUCTL_HALTED) || !(ctl & RISCV_CPUCTL_ACTIVE)) {
+            return 0;
+        }
+        /* Spin a few times to make one "loop" take ~1 µs on Cortex-A78AE
+         * at 1.5 GHz. Not exact; fine for coarse ms-scale timeouts. */
+        for (volatile int i = 0; i < 1500; i++) { }
+    }
+    return -1;
+}
+
 int ga10b_bringup_acr(struct ga10b_bringup *b)
 {
     if (!b || b->state != GA10B_BRINGUP_INIT) return -1;
-    uart_puts("[GA10B] phase 1 (ACR) not yet implemented — see #13\n");
-    b->last_error_phase = 1;
-    return -1;
+
+    struct ga10b_firmware_blob text, data, manifest;
+    if (ga10b_firmware_get(GA10B_FW_ACR_TEXT, &text) < 0 ||
+        ga10b_firmware_get(GA10B_FW_ACR_DATA, &data) < 0 ||
+        ga10b_firmware_get(GA10B_FW_ACR_MANIFEST, &manifest) < 0) {
+        uart_puts("[GA10B-ACR] firmware blobs missing\n");
+        b->last_error_phase = 1;
+        return -1;
+    }
+    uart_printf("[GA10B-ACR] text=%lu data=%lu manifest=%lu bytes\n",
+                (unsigned long)text.size,
+                (unsigned long)data.size,
+                (unsigned long)manifest.size);
+
+    /* Sanity: code must fit in IMEM, data+manifest must fit in DMEM. */
+    if (text.size > b->gsp_flcn.imem_size) {
+        uart_printf("[GA10B-ACR] text %lu > IMEM %u\n",
+                    (unsigned long)text.size, b->gsp_flcn.imem_size);
+        b->last_error_phase = 1;
+        return -1;
+    }
+    if (data.size + manifest.size > b->gsp_flcn.dmem_size) {
+        uart_printf("[GA10B-ACR] data+manifest %lu > DMEM %u\n",
+                    (unsigned long)(data.size + manifest.size),
+                    b->gsp_flcn.dmem_size);
+        b->last_error_phase = 1;
+        return -1;
+    }
+
+    /* Reset GSP Falcon via the GA10B-specific assert/deassert sequence
+     * (generic falcon_reset only asserts — sufficient for discrete
+     * Ampere where the engine comes out of BIOS in a usable state,
+     * but not for Jetson where Linux nvgpu leaves it in reset). */
+    if (ga10b_gsp_engine_reset() < 0) {
+        uart_puts("[GA10B-ACR] GSP engine reset failed\n");
+        b->last_error_phase = 1;
+        return -1;
+    }
+    uart_puts("[GA10B-ACR] GSP engine reset complete\n");
+
+    /* PIO-upload the three pieces:
+     *   - text  → IMEM offset 0    (secure=true so IMEMC.SECURE is set
+     *                                — matches nvgpu copy_to_imem path
+     *                                for HS ucodes)
+     *   - data  → DMEM offset 0
+     *   - manifest → DMEM at offset (dmem_size - manifest_size). The
+     *     Falcon BROM reads PKC parameters from the tail of DMEM.
+     */
+    if (falcon_pio_upload_imem(&b->gsp_flcn, text.data, (uint32_t)text.size,
+                               0u, true) < 0) {
+        uart_puts("[GA10B-ACR] IMEM upload failed\n");
+        b->last_error_phase = 1;
+        return -1;
+    }
+    if (falcon_pio_upload_dmem(&b->gsp_flcn, data.data, (uint32_t)data.size,
+                               0u) < 0) {
+        uart_puts("[GA10B-ACR] DMEM data upload failed\n");
+        b->last_error_phase = 1;
+        return -1;
+    }
+    uint32_t manifest_off = b->gsp_flcn.dmem_size - (uint32_t)manifest.size;
+    if (falcon_pio_upload_dmem(&b->gsp_flcn, manifest.data,
+                               (uint32_t)manifest.size, manifest_off) < 0) {
+        uart_puts("[GA10B-ACR] DMEM manifest upload failed\n");
+        b->last_error_phase = 1;
+        return -1;
+    }
+    uart_printf("[GA10B-ACR] ucode loaded "
+                "(IMEM@0+%lu, DMEM@0+%lu, manifest@%u+%lu)\n",
+                (unsigned long)text.size,
+                (unsigned long)data.size,
+                manifest_off,
+                (unsigned long)manifest.size);
+
+    /* Program RISCV boot: vector = 0, BCR_CTRL = CORE_RISCV|VALID. */
+    bar0_w32(NV_PGSP_RISCV_BASE + RISCV_BOOT_VECTOR_LO, 0u);
+    bar0_w32(NV_PGSP_RISCV_BASE + RISCV_BOOT_VECTOR_HI, 0u);
+    bar0_w32(NV_PGSP_RISCV_BASE + RISCV_BCR_CTRL, RISCV_BCR_CTRL_PRELOADED);
+
+    /* Clear MAILBOX0 so we can detect the ucode writing to it. */
+    gsp_platform->write32(NV_PGSP_BASE + 0x040u, 0u);
+    gsp_platform->mb();
+
+    /* STARTCPU — RISCV begins executing from BOOT_VECTOR (= 0, which
+     * after BROM verification means entry point in IMEM). */
+    bar0_w32(NV_PGSP_RISCV_BASE + RISCV_CPUCTL, RISCV_CPUCTL_STARTCPU);
+    gsp_platform->mb();
+    uart_puts("[GA10B-ACR] STARTCPU kicked — polling for halt\n");
+
+    /* Wait up to 2 s for ACR to either halt or report status. */
+    int wait_rc = wait_for_halt_us(2u * 1000u * 1000u);
+
+    uint32_t mbox0    = bar0_r32(NV_PGSP_BASE + 0x040u);
+    uint32_t mbox1    = bar0_r32(NV_PGSP_BASE + 0x044u);
+    uint32_t cpuctl   = bar0_r32(NV_PGSP_RISCV_BASE + RISCV_CPUCTL);
+    uint32_t retcode  = bar0_r32(NV_PGSP_RISCV_BASE + RISCV_BR_RETCODE);
+
+    uart_printf("[GA10B-ACR] post-kick: CPUCTL=0x%08lx MBOX0=0x%08lx "
+                "MBOX1=0x%08lx BR_RETCODE=0x%08lx wait_rc=%d\n",
+                (unsigned long)cpuctl,
+                (unsigned long)mbox0,
+                (unsigned long)mbox1,
+                (unsigned long)retcode,
+                wait_rc);
+
+    if (wait_rc < 0) {
+        uart_puts("[GA10B-ACR] timeout — RISCV neither halted nor stopped\n");
+        b->last_error_phase = 1;
+        return -1;
+    }
+    /* BR_RETCODE != 0 typically means BROM rejected the ucode.
+     * MAILBOX0 = ACR_BOOT_OK (0xff) means ACR ran and succeeded.
+     * Either absence of "OK" or presence of a BROM error = fail. */
+    if (mbox0 != ACR_BOOT_OK) {
+        uart_printf("[GA10B-ACR] ACR did NOT report BOOT_OK "
+                    "(expected 0x%x, got 0x%lx)\n",
+                    ACR_BOOT_OK, (unsigned long)mbox0);
+        b->last_error_phase = 1;
+        return -1;
+    }
+
+    uart_puts("[GA10B-ACR] ACR running — BOOT_OK received\n");
+    b->state = GA10B_BRINGUP_ACR_RUNNING;
+    return 0;
 }
 
 int ga10b_bringup_fecs(struct ga10b_bringup *b)

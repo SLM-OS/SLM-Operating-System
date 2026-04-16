@@ -1941,6 +1941,21 @@ int cmd_nvgpu(int argc, char *argv[])
         return rc;
     }
 
+    if (strcmp(argv[1], "acr") == 0) {
+        /* Always re-run prepare — it's cheap (memset + probe) and
+         * guarantees the Falcon context is populated (imem_size etc.).
+         * Without this, fresh shell invocations run acr against a
+         * zeroed `struct falcon` and fail size checks. */
+        int rc = ga10b_bringup_prepare(&b);
+        if (rc < 0) {
+            uart_printf("prepare failed: rc=%d\r\n", rc);
+            return rc;
+        }
+        rc = ga10b_bringup_acr(&b);
+        uart_printf("acr: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+
     if (strcmp(argv[1], "run") == 0) {
         int rc = ga10b_bringup_run(&b);
         uart_printf("run: rc=%d, state=%d, last_err_phase=%d\r\n",
