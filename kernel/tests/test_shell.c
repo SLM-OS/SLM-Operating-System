@@ -235,6 +235,18 @@ static void test_shell_cmd_sched_trace_lifecycle(void)
     TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace"));
 }
 
+/*
+ * Regression for #193: `sched compare` runs the context-switch
+ * microbenchmark under each registered policy and prints a table.
+ * We don't assert on the numbers (they vary run-to-run) — just that
+ * the command returns 0 and doesn't panic.
+ */
+static void test_shell_cmd_sched_compare(void)
+{
+    int ret = shell_execute("sched compare");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2122,6 +2134,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_top_zero_refresh);
     RUN_TEST(test_shell_cmd_top_missing_count);
     RUN_TEST(test_shell_cmd_sched_trace_lifecycle);
+    RUN_TEST(test_shell_cmd_sched_compare);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);

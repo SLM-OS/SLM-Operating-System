@@ -475,6 +475,7 @@ int cmd_sleep(int argc, char *argv[])
  * ============================================================================ */
 
 #define BENCH_ITERATIONS 100
+#define SCHED_COMPARE_ITERATIONS 50
 
 /* --- Context switch benchmark --- */
 
@@ -498,6 +499,11 @@ static void bench_ctx_task(void *arg)
     bench_ctx_done = 1;
 }
 
+/* When true, bench_context_switch suppresses its verbose per-run
+ * output (sched compare uses it for a quiet measurement pass and
+ * prints a consolidated table instead). */
+static bool bench_ctx_quiet = false;
+
 static void bench_context_switch(void)
 {
     bench_ctx_done = 0;
@@ -508,7 +514,9 @@ static void bench_context_switch(void)
     struct task *t = task_create_with_priority("bench_ctx",
         bench_ctx_task, NULL, TASK_PRIORITY_HIGH);
     if (!t) {
-        uart_puts("  Failed to create benchmark task\r\n");
+        if (!bench_ctx_quiet) {
+            uart_puts("  Failed to create benchmark task\r\n");
+        }
         return;
     }
     scheduler_add_task_to_cpu(t, 0);
@@ -518,6 +526,10 @@ static void bench_context_switch(void)
     while (!bench_ctx_done && timeout > 0) {
         yield();
         timeout--;
+    }
+
+    if (bench_ctx_quiet) {
+        return;
     }
 
     if (bench_ctx_count > 1) {
@@ -2202,7 +2214,102 @@ int cmd_sched(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: sched [policy [<name>] | stats | "
+    if (strcmp(argv[1], "compare") == 0) {
+        /* #193: run the context-switch microbenchmark under every
+         * registered policy and print a side-by-side table. The
+         * workload is the same for each policy so differences in the
+         * per-round-trip latency and context_switches count are
+         * attributable to the scheduler, not the measurement harness.
+         */
+        int n_policies = sched_policy_count();
+        if (n_policies <= 0) {
+            uart_puts("sched compare: no policies registered\r\n");
+            return 1;
+        }
+
+        /* Save the current policy so we can restore at the end. */
+        const char *saved_name = sched_get_policy();
+        const struct sched_policy_ops *saved_policy = NULL;
+        for (int i = 0; i < n_policies; i++) {
+            const struct sched_policy_ops *p = sched_policy_get(i);
+            if (p && saved_name && strcmp(p->name, saved_name) == 0) {
+                saved_policy = p;
+                break;
+            }
+        }
+
+        uart_puts("Scheduler policy comparison\r\n");
+        uart_puts("---------------------------\r\n");
+        uart_puts("Workload: bench context (" "100"
+                  " round-trips, TASK_PRIORITY_HIGH)\r\n\r\n");
+        uart_puts("Policy           Runtime(ms)   Ctx switches   Avg(us)\r\n");
+        uart_puts("---------------  ------------  -------------  -------\r\n");
+
+        uint64_t best_avg_ns = UINT64_MAX;
+        const char *best_policy = NULL;
+
+        for (int i = 0; i < n_policies; i++) {
+            const struct sched_policy_ops *p = sched_policy_get(i);
+            if (!p) continue;
+
+            /* Switch to this policy; stay on failure to avoid a
+             * scramble — caller will see the label and the row. */
+            int rc = sched_set_policy(p);
+            if (rc < 0) {
+                uart_printf("%-15s  %-12s  %-13s  %s\r\n",
+                            p->name, "—", "—", "switch failed");
+                continue;
+            }
+
+            /* Snapshot counters before the run. Silence the bench's
+             * own output so the compare table stays readable. */
+            struct sched_stats s0, s1;
+            scheduler_get_stats(&s0);
+            uint64_t t0 = slm_get_time_ns();
+
+            bench_ctx_quiet = true;
+            bench_context_switch();
+            bench_ctx_quiet = false;
+
+            uint64_t t1 = slm_get_time_ns();
+            scheduler_get_stats(&s1);
+
+            uint64_t elapsed_ns = t1 > t0 ? (t1 - t0) : 0;
+            uint64_t elapsed_ms = elapsed_ns / 1000000ULL;
+            uint64_t ctx = s1.context_switches - s0.context_switches;
+            uint64_t avg_ns = 0;
+            if (bench_ctx_count > 1) {
+                avg_ns = bench_ctx_total / (uint64_t)(bench_ctx_count - 1);
+            }
+            uint64_t avg_us = avg_ns / 1000;
+
+            uart_printf("%-15s  %12lu  %13lu  %7lu\r\n",
+                        p->name,
+                        (unsigned long)elapsed_ms,
+                        (unsigned long)ctx,
+                        (unsigned long)avg_us);
+
+            if (avg_ns > 0 && avg_ns < best_avg_ns) {
+                best_avg_ns = avg_ns;
+                best_policy = p->name;
+            }
+        }
+
+        if (best_policy) {
+            uart_printf("\r\nBest average context-switch latency: %s "
+                        "(%lu us)\r\n",
+                        best_policy, (unsigned long)(best_avg_ns / 1000));
+        }
+
+        /* Restore the caller's original policy. */
+        if (saved_policy) {
+            sched_set_policy(saved_policy);
+            uart_printf("Restored policy: %s\r\n", saved_policy->name);
+        }
+        return 0;
+    }
+
+    uart_puts("Usage: sched [policy [<name>] | stats | compare | "
               "trace [start|stop|clear|per-cpu]]\r\n");
     return 1;
 }
