@@ -176,8 +176,9 @@ stack than discrete Ampere.
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
 | FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
 | RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (500 lines) | **10** | Phase 1 (ACR load) wired; BROM-blocked |
-| **Total host-side tests** | | **133** | **All passing** |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (650 lines) | **18** | Phases 1–4 wired (ACR, FECS, GPCCS, PMU); BROM-blocked on HW |
+| **Jetson platform shim** | `nvidia_gsp_platform.c` (350 lines) | **15** | vtable dispatch + DMA align math host-tested |
+| **Total host-side tests** | | **156** | **All passing** |
 
 ### Platform-Specific Blockers
 
@@ -209,6 +210,20 @@ is locked to an EL3/secure privilege level, so our EL2-NS PIO writes
 to IMEM/DMEM are silently dropped (readback confirms: returns
 `0xbadf5620` poison). BROM then authenticates against empty DMEM and
 fails cleanly.
+
+Phases 2–4 (FECS / GPCCS / PMU) are implemented and host-tested
+(8 new cases in `test_ga10b_bringup.c`). On GA10B the ACR ucode
+itself eagerly loads FECS and GPCCS into their IMEM/DMEM
+(`is_lazy_bootstrap = false` per `nvgpu-common-acr-acr_sw_ga10b.c`),
+so SLM-OS only has to issue `STARTCPU` on each GR Falcon and poll
+`ctxsw_mailbox[0]` for the PASS sentinel (value `1`; FAIL is `2`,
+checksum-mismatch is `0x21`). PMU is a deliberate no-op for GA10B
+default (`support_ls_pmu = false`): PMU is lazy-bootstrapped and not
+required for compute method submission. These phases are gated
+behind Phase 1 on hardware — they'll exercise once priv-lockdown is
+resolved. The host tests cover the happy path, both failure
+sentinels, phase-ordering state machine, and PMU inertness, so the
+logic is regression-proof before the blocker lifts.
 
 Three paths forward:
 1. **SMC to TF-A / NVIDIA SiP service** to lower the Falcon's PLM

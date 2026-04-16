@@ -63,7 +63,7 @@ caveats in §6).
 | #175 | Push-failure counter for `steal_deque` | P3-low | ~20 LOC, observability-only |
 | #158 | Pi 5 boot hang | ✅ closed | Fixed by external lock in PR #167 |
 | #139 | Work-stealing ABA race | ✅ closed | Fixed by per-slot generation counter in PR #145 |
-| #142 | GSP bare-metal loader (future work) | partially addressed | ARM64 platform shim + nvgpu-native bringup scaffold landed on the `worktree-jetson-gpu-inference` branch (2026-04-15). GPU MMIO confirmed live, all 17 ga10b firmware blobs embedded, Phase 1 (ACR HS load) plumbed with 10 host tests. Currently blocked at BROM by GSP Falcon PRI priv-lockdown (HWCFG2 bit 13) — see #190 and §GPU Bringup below. |
+| #142 | GSP bare-metal loader (future work) | partially addressed | ARM64 platform shim + nvgpu-native bringup scaffold landed on the `worktree-jetson-gpu-inference` branch (2026-04-16). GPU MMIO confirmed live, all 17 ga10b firmware blobs embedded, Phases 1–4 (ACR / FECS / GPCCS / PMU) plumbed with 33 host tests (18 bringup + 15 platform shim). Currently blocked at BROM by GSP Falcon PRI priv-lockdown (HWCFG2 bit 13) — see #190 and §GPU Bringup below. |
 | #190 | Jetson GSP Falcon priv-lockdown blocks ACR HS load | P2-medium | New finding on branch. GPU BAR0 is readable at EL2 but PIO writes to IMEM/DMEM are silently dropped (readback returns `0xbadf5620` poison). Three paths forward are scoped: SMC to TF-A, UEFI direct boot, or reuse Linux-nvgpu ACR state. |
 
 ### 3b. Capstone deliverables outside the engineering plan
@@ -106,17 +106,32 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   clocks via BPMP debugfs before kexec, so GPU MMIO stays live
   through the Linux → SLM-OS handoff.
 - `kernel/gpu/nvidia/ga10b_bringup.{c,h}` — nvgpu-native bringup
-  scaffold with Phase 1 (ACR HS load) implemented: GA10B-specific
-  engine reset (assert→delay→deassert), PIO IMEM/DMEM upload,
-  BCR_CTRL=0x11, STARTCPU, halt polling, BR_RETCODE decoding.
+  scaffold with Phases 1–4 implemented:
+  - **Phase 1 (ACR HS load)**: GA10B-specific engine reset
+    (assert→delay→deassert), PIO IMEM/DMEM upload, BCR_CTRL=0x11,
+    STARTCPU, halt polling, BR_RETCODE decoding.
+  - **Phase 2 (FECS) / Phase 3 (GPCCS)**: STARTCPU on each GR Falcon
+    followed by `ctxsw_mailbox[0]` polling for `PASS=1` / `FAIL=2` /
+    `CSUM=0x21` sentinels. ACR pre-loads both IMEM/DMEM, so the host
+    only has to kick them.
+  - **Phase 4 (PMU)**: documented no-op for GA10B default
+    (`support_ls_pmu=false`); shell command still exposed for when
+    PMU is wired on later.
 - `kernel/mm/vmm.c` — extended GPU BAR0 mapping from 1 × 2 MB block
   to 8 × 2 MB blocks so Falcon engine apertures past 0x17200000 are
   reachable.
 - Shell commands: `gpu` (info + raw MMIO read), `nvgpu` (firmware
-  inventory, phase-by-phase bringup driver).
-- `host-tools/gsp-harness/test_ga10b_bringup.c` — 10 tests covering
-  firmware accessor, state machine, and the ACR sequence against a
-  mock-vtable.
+  inventory, per-phase driver: `prepare | acr | fecs | gpccs | pmu | run`).
+- `host-tools/gsp-harness/test_ga10b_bringup.c` — 18 tests covering
+  firmware accessor, state machine, ACR sequence, and the new
+  FECS/GPCCS/PMU phase plumbing against a mock-vtable.
+- `host-tools/gsp-harness/test_nvidia_gsp_platform.c` — 15 tests for
+  the Jetson platform shim's portable surfaces (vtable install,
+  firmware_get dispatch, DMA alignment math, BAR1 early-out).
+- `scripts/tests/jetson-gpu-lockdown-probe.sh` — reproducible probe
+  that reads `HWCFG2` from live Linux via `/dev/mem`, kexecs SLM-OS,
+  re-reads via the shell, and reports the bit-13 delta. Makes the
+  #190 measurement reproducible across sessions.
 - `docs/jetson-nvgpu-bringup-research.md`, `docs/jetson-nvgpu-acr-analysis.md`,
   58 cached L4T nvgpu reference files.
 

@@ -240,6 +240,27 @@ static struct {
 #define R_RISCV_BR_RETCODE  (GSP_RISCV_BASE + 0x65cu)
 #define R_RISCV_BCR_CTRL    (GSP_RISCV_BASE + 0x668u)
 
+/* GR Falcon registers (absolute). These match the constants in
+ * kernel/gpu/nvidia/ga10b_bringup.c; if those change, update here. */
+#define R_FECS_CPUCTL           0x00409100u
+#define R_FECS_CTXSW_MBOX(i)    (0x00409800u + (i) * 4u)
+#define R_GPCCS_CPUCTL          0x0041a100u
+#define R_GPC0_GPCCS_MBOX(i)    (0x00502800u + (i) * 4u)
+#define GR_STARTCPU             (1u << 1)
+
+/* Shadow state for FECS/GPCCS plumbing tests. */
+static struct {
+    uint32_t fecs_cpuctl_writes;
+    uint32_t gpccs_cpuctl_writes;
+    uint32_t fecs_mbox0;
+    uint32_t gpccs_mbox0;
+    /* Test-controlled: what value mailbox[0] takes after STARTCPU. */
+    uint32_t fecs_mbox0_after_start;
+    uint32_t gpccs_mbox0_after_start;
+    bool     fecs_auto_pass;
+    bool     gpccs_auto_pass;
+} g_gr;
+
 /* Fake HWCFG value: IMEM=64KB (256 blocks × 256B), DMEM=64KB. */
 #define FAKE_HWCFG          (256u | (256u << 9))
 #define FAKE_IMEM           (64u * 1024u)
@@ -255,6 +276,8 @@ static uint32_t mock_read32(uint32_t off)
     if (off == R_FLCN_CPUCTL)   return g_gsp.cpuctl;
     if (off == R_FLCN_MBOX0)    return g_gsp.mbox0;
     if (off == R_FLCN_MBOX1)    return g_gsp.mbox1;
+    if (off == R_FECS_CTXSW_MBOX(0))     return g_gr.fecs_mbox0;
+    if (off == R_GPC0_GPCCS_MBOX(0))     return g_gr.gpccs_mbox0;
     if (off == R_RISCV_CPUCTL) {
         /* If the test wants the CPU to auto-halt, flip HALTED on
          * first poll after STARTCPU. */
@@ -337,6 +360,32 @@ static void mock_write32(uint32_t off, uint32_t val)
         }
         return;
     }
+    if (off == R_FECS_CTXSW_MBOX(0)) {
+        g_gr.fecs_mbox0 = val;
+        return;
+    }
+    if (off == R_GPC0_GPCCS_MBOX(0)) {
+        g_gr.gpccs_mbox0 = val;
+        return;
+    }
+    if (off == R_FECS_CPUCTL) {
+        if ((val & GR_STARTCPU) != 0) {
+            g_gr.fecs_cpuctl_writes++;
+            if (g_gr.fecs_auto_pass) {
+                g_gr.fecs_mbox0 = g_gr.fecs_mbox0_after_start;
+            }
+        }
+        return;
+    }
+    if (off == R_GPCCS_CPUCTL) {
+        if ((val & GR_STARTCPU) != 0) {
+            g_gr.gpccs_cpuctl_writes++;
+            if (g_gr.gpccs_auto_pass) {
+                g_gr.gpccs_mbox0 = g_gr.gpccs_mbox0_after_start;
+            }
+        }
+        return;
+    }
     if (off < MOCK_BAR0_SIZE) g_bar0[off / 4] = val;
 }
 
@@ -372,11 +421,19 @@ extern const struct gsp_platform_ops *gsp_platform;
 static void mock_reset(void)
 {
     memset(&g_gsp, 0, sizeof(g_gsp));
+    memset(&g_gr,  0, sizeof(g_gr));
     memset(g_bar0, 0, sizeof(g_bar0));
     g_gsp.hwcfg2 = FAKE_HWCFG2_IDLE;
     g_gsp.ack_mbox0_on_halt = 0xFFu;           /* ACR_BOOT_OK */
     g_gsp.ack_retcode_on_halt = 0x3u;          /* PASS */
     g_gsp.startcpu_halts = true;
+    /* Default: FECS/GPCCS auto-PASS on first STARTCPU so the happy
+     * path walks straight through. Tests that need FAIL behaviour
+     * override these knobs before invoking the phase. */
+    g_gr.fecs_auto_pass = true;
+    g_gr.gpccs_auto_pass = true;
+    g_gr.fecs_mbox0_after_start  = 0x1u;       /* PASS */
+    g_gr.gpccs_mbox0_after_start = 0x1u;       /* PASS */
     gsp_platform = &mock_ops;
 }
 
@@ -577,6 +634,150 @@ static void test_acr_returns_error_on_brom_fail(void)
 }
 
 /* ======================================================================
+ * Test 5: FECS / GPCCS / PMU phases (plumbing against mock)
+ *
+ * FECS and GPCCS boot post-ACR by issuing STARTCPU on their CPUCTL
+ * and polling ctxsw_mailbox[0] for PASS (=1). The mock auto-writes
+ * the configured mailbox value when STARTCPU fires, so the happy
+ * path completes in one poll iteration. Failure variants flip the
+ * mock's ack value to exercise the error paths.
+ *
+ * PMU phase is a no-op on GA10B default (support_ls_pmu=false) —
+ * just verify it advances state without touching any MMIO.
+ * ====================================================================== */
+
+/* Drive a bringup to ACR_RUNNING so phase 2+ preconditions hold.
+ * Isolated helper because multiple tests need the same setup. */
+static void drive_to_acr_running(struct ga10b_bringup *b)
+{
+    mock_reset();
+    firmware_fill_patterns();
+    REQUIRE_EQ(ga10b_bringup_prepare(b), 0);
+    REQUIRE_EQ(ga10b_bringup_acr(b), 0);
+    REQUIRE_EQ(b->state, GA10B_BRINGUP_ACR_RUNNING);
+}
+
+static void test_fecs_happy_path(void)
+{
+    printf("== test_fecs_happy_path ==\n");
+    struct ga10b_bringup b;
+    drive_to_acr_running(&b);
+
+    REQUIRE_EQ(ga10b_bringup_fecs(&b), 0);
+    REQUIRE_EQ(b.state, GA10B_BRINGUP_FECS_UP);
+    REQUIRE_EQ(b.last_error_phase, -1);
+    /* Driver must have kicked STARTCPU exactly once. */
+    REQUIRE_EQ(g_gr.fecs_cpuctl_writes, 1);
+    /* Mailbox[0] must land on PASS (=1). */
+    REQUIRE_EQ(g_gr.fecs_mbox0, 0x1u);
+}
+
+static void test_fecs_fails_on_fail_sentinel(void)
+{
+    printf("== test_fecs_fails_on_fail_sentinel ==\n");
+    struct ga10b_bringup b;
+    drive_to_acr_running(&b);
+
+    /* Override the mock: first STARTCPU causes FAIL (=2) instead of PASS. */
+    g_gr.fecs_mbox0_after_start = 0x2u;
+    REQUIRE_EQ(ga10b_bringup_fecs(&b), -1);
+    REQUIRE_EQ(b.last_error_phase, 2);
+    REQUIRE(b.state != GA10B_BRINGUP_FECS_UP);
+}
+
+static void test_fecs_fails_on_checksum_sentinel(void)
+{
+    printf("== test_fecs_fails_on_checksum_sentinel ==\n");
+    struct ga10b_bringup b;
+    drive_to_acr_running(&b);
+
+    /* Checksum-mismatch sentinel 0x21 — secure verification failed. */
+    g_gr.fecs_mbox0_after_start = 0x21u;
+    REQUIRE_EQ(ga10b_bringup_fecs(&b), -1);
+    REQUIRE_EQ(b.last_error_phase, 2);
+}
+
+static void test_gpccs_happy_path(void)
+{
+    printf("== test_gpccs_happy_path ==\n");
+    struct ga10b_bringup b;
+    drive_to_acr_running(&b);
+
+    REQUIRE_EQ(ga10b_bringup_fecs(&b), 0);
+    REQUIRE_EQ(ga10b_bringup_gpccs(&b), 0);
+    REQUIRE_EQ(b.state, GA10B_BRINGUP_GPCCS_UP);
+    REQUIRE_EQ(g_gr.gpccs_cpuctl_writes, 1);
+    REQUIRE_EQ(g_gr.gpccs_mbox0, 0x1u);
+}
+
+static void test_gpccs_rejects_wrong_state(void)
+{
+    printf("== test_gpccs_rejects_wrong_state ==\n");
+    struct ga10b_bringup b;
+    drive_to_acr_running(&b);
+    /* Skip FECS — GPCCS must refuse to run from ACR_RUNNING. */
+    REQUIRE_EQ(ga10b_bringup_gpccs(&b), -1);
+    REQUIRE_EQ(g_gr.gpccs_cpuctl_writes, 0);
+}
+
+static void test_gpccs_fails_on_fail_sentinel(void)
+{
+    printf("== test_gpccs_fails_on_fail_sentinel ==\n");
+    struct ga10b_bringup b;
+    drive_to_acr_running(&b);
+    REQUIRE_EQ(ga10b_bringup_fecs(&b), 0);
+
+    g_gr.gpccs_mbox0_after_start = 0x2u;
+    REQUIRE_EQ(ga10b_bringup_gpccs(&b), -1);
+    REQUIRE_EQ(b.last_error_phase, 3);
+    REQUIRE(b.state != GA10B_BRINGUP_GPCCS_UP);
+}
+
+static void test_pmu_is_noop(void)
+{
+    printf("== test_pmu_is_noop ==\n");
+    struct ga10b_bringup b;
+    drive_to_acr_running(&b);
+    REQUIRE_EQ(ga10b_bringup_fecs(&b),  0);
+    REQUIRE_EQ(ga10b_bringup_gpccs(&b), 0);
+
+    /* PMU is a no-op on GA10B default; it should advance state and
+     * touch no additional MMIO state. */
+    uint32_t fecs_writes_before  = g_gr.fecs_cpuctl_writes;
+    uint32_t gpccs_writes_before = g_gr.gpccs_cpuctl_writes;
+
+    REQUIRE_EQ(ga10b_bringup_pmu(&b), 0);
+    REQUIRE_EQ(b.state, GA10B_BRINGUP_PMU_UP);
+    REQUIRE_EQ(b.last_error_phase, -1);
+
+    /* No additional STARTCPU writes — PMU phase must be inert. */
+    REQUIRE_EQ(g_gr.fecs_cpuctl_writes,  fecs_writes_before);
+    REQUIRE_EQ(g_gr.gpccs_cpuctl_writes, gpccs_writes_before);
+}
+
+/* Walk phases 1→4 in one go and verify the state machine advances
+ * cleanly. Later phases (address_space, channel, smoke_test) still
+ * return -1 since they're unimplemented — so we don't run them here. */
+static void test_phases_1_through_4_chain(void)
+{
+    printf("== test_phases_1_through_4_chain ==\n");
+    struct ga10b_bringup b;
+    drive_to_acr_running(&b);
+
+    REQUIRE_EQ(ga10b_bringup_fecs(&b),  0);
+    REQUIRE_EQ(b.state, GA10B_BRINGUP_FECS_UP);
+
+    REQUIRE_EQ(ga10b_bringup_gpccs(&b), 0);
+    REQUIRE_EQ(b.state, GA10B_BRINGUP_GPCCS_UP);
+
+    REQUIRE_EQ(ga10b_bringup_pmu(&b),   0);
+    REQUIRE_EQ(b.state, GA10B_BRINGUP_PMU_UP);
+
+    /* last_error_phase must remain -1 across all four phases. */
+    REQUIRE_EQ(b.last_error_phase, -1);
+}
+
+/* ======================================================================
  * Entry
  * ====================================================================== */
 
@@ -597,6 +798,15 @@ int main(void)
 
     test_acr_sequence_happy_path();
     test_acr_returns_error_on_brom_fail();
+
+    test_fecs_happy_path();
+    test_fecs_fails_on_fail_sentinel();
+    test_fecs_fails_on_checksum_sentinel();
+    test_gpccs_happy_path();
+    test_gpccs_rejects_wrong_state();
+    test_gpccs_fails_on_fail_sentinel();
+    test_pmu_is_noop();
+    test_phases_1_through_4_chain();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);

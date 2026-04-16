@@ -17,7 +17,17 @@
 #include "../../gpu/nvidia/nvidia_vbios.h"
 #include "../../include/uart.h"
 #include "../../include/pmm.h"
+
+/* SLM_HOST_HARNESS: pull the cache helpers from extern stubs the host
+ * test provides instead of the kernel header, whose inlines assemble
+ * down to AArch64 DC CVAC/CIVAC and won't build on an x86 host. */
+#if defined(SLM_HOST_HARNESS)
+#include <stddef.h>
+void cache_clean_range(const volatile void *addr, size_t size);
+void cache_invalidate_range(const volatile void *addr, size_t size);
+#else
 #include "../../include/cache.h"
+#endif
 
 /* ---- GPU MMIO base ----
  *
@@ -72,7 +82,11 @@ static void jetson_gsp_write32(uint32_t offset, uint32_t value)
     volatile uint32_t *reg =
         (volatile uint32_t *)(JETSON_GPU_BAR0_BASE + offset);
     *reg = value;
+#if defined(__aarch64__)
     __asm__ volatile("dsb sy" ::: "memory");
+#else
+    __asm__ volatile("" ::: "memory");
+#endif
 }
 
 /* ---- BAR1 (unified memory) byte-level access ----
@@ -195,7 +209,11 @@ static void jetson_gsp_cache_invalidate(void *addr, size_t size)
 
 static void jetson_gsp_mb(void)
 {
+#if defined(__aarch64__)
     __asm__ volatile("dsb sy" ::: "memory");
+#else
+    __asm__ volatile("" ::: "memory");
+#endif
 }
 
 /* ---- Firmware accessor ----

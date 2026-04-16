@@ -2478,7 +2478,26 @@ int cmd_nvgpu(int argc, char *argv[])
         return rc;
     }
 
-    uart_puts("usage: nvgpu [info | prepare | run]\r\n");
+    /* Per-phase invocations for step-by-step debugging. Each runs the
+     * corresponding phase against the persistent `b` — preceding phases
+     * must have completed so `b->state` satisfies the phase precondition. */
+    if (strcmp(argv[1], "fecs") == 0) {
+        int rc = ga10b_bringup_fecs(&b);
+        uart_printf("fecs: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+    if (strcmp(argv[1], "gpccs") == 0) {
+        int rc = ga10b_bringup_gpccs(&b);
+        uart_printf("gpccs: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+    if (strcmp(argv[1], "pmu") == 0) {
+        int rc = ga10b_bringup_pmu(&b);
+        uart_printf("pmu: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+
+    uart_puts("usage: nvgpu [info | prepare | acr | fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
