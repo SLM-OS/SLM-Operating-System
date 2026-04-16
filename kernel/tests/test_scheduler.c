@@ -992,6 +992,148 @@ static void test_set_affinity_invalid_cpu(void)
 }
 
 /*
+ * Regression test: sched_migrate_task must not double-queue a task
+ * that was stolen between the assigned_cpu read and the rq_lock acquire.
+ *
+ * Race (fixed April 16, 2026, commit f7cae25):
+ *   Thread A (CPU 0): reads task->assigned_cpu = 1
+ *   Thread B (stealer on CPU 2): pulls task from CPU 1's queue onto CPU 2's
+ *   Thread A: acquires rq_lock[1] and rq_lock[3]
+ *   Thread A: calls remove_from_cpu_queue_locked(task, 1) — returns 0
+ *             (task no longer on CPU 1's queue, but the old code ignored
+ *              the return value)
+ *   Thread A: calls add_to_cpu_queue_locked(task, 3) — LINKS the task into
+ *             CPU 3's queue while it is already on CPU 2's queue, setting
+ *             task->next to corrupt one of the two queues' linked lists.
+ *   Both CPUs pick the task and run its entry wrapper on shared stack state.
+ *
+ * This test simulates the stolen-task case by manually removing the task
+ * from its queue (via scheduler_remove_task) before calling sched_migrate_task.
+ * The fix returns success (ret == 0) without adding the task to the target
+ * queue, and updates task->assigned_cpu so future placement prefers the
+ * target. The task's `next` pointer and the target queue's head/tail are
+ * left untouched — there's nothing to queue because the task isn't here.
+ */
+static void test_migrate_stolen_task_no_double_queue(void)
+{
+    if (cpu_count < 4) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 4 for CPU 1 / CPU 3 migration");
+        return;
+    }
+
+    struct task *t = task_create("mig_stolen", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    /* Place on CPU 1's queue. Default affinity is ANY, which is fine for
+     * sched_migrate_task's affinity check. */
+    scheduler_add_task_to_cpu(t, 1);
+    TEST_ASSERT_EQUAL_UINT32(1, t->assigned_cpu);
+
+    /* Simulate a work-stealing thief pulling the task from CPU 1's queue.
+     * scheduler_remove_task removes from the task's current assigned CPU
+     * without changing the task state (same path a thief's
+     * remove_from_cpu_queue_locked takes during steal validation). */
+    scheduler_remove_task(t);
+
+    /* After the simulated steal, task is not in CPU 1's queue. */
+    struct cpu_runqueue *rq1 = sched_cpu_rq(1);
+    bool found_on_cpu1 = false;
+    for (struct task *cur = rq1->head; cur; cur = cur->next) {
+        if (cur == t) { found_on_cpu1 = true; break; }
+    }
+    TEST_ASSERT_MESSAGE(!found_on_cpu1,
+        "task should not appear in CPU 1's rq after remove");
+
+    /* Snapshot the target queue before migration. */
+    struct cpu_runqueue *rq3 = sched_cpu_rq(3);
+    struct task *rq3_head_before = rq3->head;
+    uint32_t rq3_ready_before = rq3->ready_count;
+
+    /* Set state to READY explicitly — scheduler_remove_task leaves state
+     * unchanged, but sched_migrate_task's READY check is what selects the
+     * branch under test. */
+    t->state = TASK_READY;
+
+    /* Preserve a sentinel in task->next so we can detect the bug: the old
+     * code would overwrite task->next in add_to_cpu_queue_locked when
+     * linking the task into CPU 3's queue. The fix leaves it alone. */
+    t->next = (struct task *)0xDEADBEEFCAFEBABEULL;
+
+    int ret = sched_migrate_task(t, 3);
+    TEST_ASSERT_MESSAGE(ret == 0, "migrate should succeed");
+
+    /* Assigned CPU is updated so future placement lands on the target. */
+    TEST_ASSERT_MESSAGE(t->assigned_cpu == 3,
+        "task->assigned_cpu should be updated to target");
+
+    /* Task must NOT be linked into CPU 3's queue — it was already "stolen"
+     * and is logically somewhere else. If the fix regresses, the task is
+     * now at rq3->head or ready_count has incremented. */
+    TEST_ASSERT_MESSAGE(rq3->head == rq3_head_before,
+        "CPU 3 rq head changed — task was double-queued");
+    TEST_ASSERT_MESSAGE(rq3->ready_count == rq3_ready_before,
+        "CPU 3 ready_count changed — task was double-queued");
+
+    /* task->next was not overwritten — sentinel intact. */
+    TEST_ASSERT_MESSAGE(
+        t->next == (struct task *)0xDEADBEEFCAFEBABEULL,
+        "task->next was clobbered — add_to_cpu_queue_locked ran unexpectedly");
+
+    t->next = NULL;
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/*
+ * Companion test: when the task IS still on the old queue, sched_migrate_task
+ * DOES move it. Provides a positive counterpart to
+ * test_migrate_stolen_task_no_double_queue.
+ */
+static void test_migrate_ready_task_moves_queues(void)
+{
+    if (cpu_count < 4) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 4 for CPU 1 / CPU 3 migration");
+        return;
+    }
+
+    struct task *t = task_create("mig_ok", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    scheduler_add_task_to_cpu(t, 1);
+    TEST_ASSERT_EQUAL_UINT32(1, t->assigned_cpu);
+
+    /* Confirm task is on CPU 1's queue. */
+    struct cpu_runqueue *rq1 = sched_cpu_rq(1);
+    bool found_on_cpu1 = false;
+    for (struct task *cur = rq1->head; cur; cur = cur->next) {
+        if (cur == t) { found_on_cpu1 = true; break; }
+    }
+    TEST_ASSERT_MESSAGE(found_on_cpu1, "task should be on CPU 1 rq");
+
+    int ret = sched_migrate_task(t, 3);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_UINT32(3, t->assigned_cpu);
+
+    /* Task is now on CPU 3's queue, not CPU 1's. */
+    bool still_on_cpu1 = false;
+    for (struct task *cur = rq1->head; cur; cur = cur->next) {
+        if (cur == t) { still_on_cpu1 = true; break; }
+    }
+    TEST_ASSERT_MESSAGE(!still_on_cpu1, "task still on CPU 1 rq after migrate");
+
+    struct cpu_runqueue *rq3 = sched_cpu_rq(3);
+    bool found_on_cpu3 = false;
+    for (struct task *cur = rq3->head; cur; cur = cur->next) {
+        if (cur == t) { found_on_cpu3 = true; break; }
+    }
+    TEST_ASSERT_MESSAGE(found_on_cpu3, "task not on CPU 3 rq after migrate");
+
+    scheduler_remove_task(t);
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/*
  * Test: Multiple cores can be isolated
  */
 static void test_multiple_cores_isolated(void)
@@ -1434,6 +1576,17 @@ static void test_isolated_core_latency(void)
             if (sample < isolated_min) isolated_min = sample;
         }
 
+        /* On Pi 5 the isolated-core task can time out waiting to run
+         * (slow schedule path under DC CIVAC contention). task_destroy
+         * silently refuses to reclaim non-TERMINATED tasks, so without
+         * forced termination these leak into CPU 1's run queue and
+         * then block later tests (notably test_multicore_basic) whose
+         * tasks queue up behind them. scheduler_terminate_task sets
+         * state=TERMINATED and dequeues atomically — safe to call on
+         * a READY task that never ran. */
+        if (t->state != TASK_TERMINATED) {
+            scheduler_terminate_task(t);
+        }
         task_destroy(t);
     }
 
@@ -1468,6 +1621,11 @@ static void test_isolated_core_latency(void)
             if (sample < normal_min) normal_min = sample;
         }
 
+        /* Force-terminate a stuck task so task_destroy can reclaim it.
+         * See comment on the isolated-phase timeout above. */
+        if (t->state != TASK_TERMINATED) {
+            scheduler_terminate_task(t);
+        }
         task_destroy(t);
     }
 
@@ -3567,6 +3725,8 @@ int test_suite_scheduler(void)
     RUN_TEST(test_pinned_task_runs_on_isolated);
     RUN_TEST(test_set_affinity_updates_field);
     RUN_TEST(test_set_affinity_invalid_cpu);
+    RUN_TEST(test_migrate_stolen_task_no_double_queue);
+    RUN_TEST(test_migrate_ready_task_moves_queues);
     RUN_TEST(test_multiple_cores_isolated);
 
     /* Integration tests: Priority ordering */

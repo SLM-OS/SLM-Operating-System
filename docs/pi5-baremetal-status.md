@@ -69,18 +69,21 @@ Full test suite runs on Pi 5 hardware with zero failures:
 | Integration (Multi-Core + NC) | 3 | 0 | 5 | 8 |
 | **Total** | **415** | **0** | **16** | **431** |
 
-**Ignored tests (16 total, expected):**
-- Scheduler (1): `test_isolated_core_latency` — requires cross-CPU dispatch (secondary CPUs don't run dispatched tasks)
+**Ignored tests (expected):**
 - VMM (5): TLB remap tests — Pi 5 uses 1GB L1 block descriptors, no L2 entries to remap
 - VMM (3): ASID/TLB broadcast smoke tests — cannot validate TLB state from test
 - PMM (1): `test_split_creates_buddies` — small blocks already available, no split triggered
 - Net (1): platform-specific test not applicable to Pi 5
-- Integration (5): ~~Cross-CPU task dispatch~~ — resolved/passed
 
-**Key bugs fixed to achieve zero failures:**
+**Cross-CPU integration tests:** 14 of 15 pass every run. `test_isolated_core_latency` now cleans up stuck tasks on timeout so it no longer leaks. The remaining flake is `test_work_stealing_distributes_load`, documented as inherently timing-flaky (5 short tasks often complete on CPU 1 before stealers on CPUs 2/3 claim their share).
+
+**Key bugs fixed to achieve reliable cross-CPU dispatch:**
 1. VMM remap tests assumed L2 table entries; Pi 5 uses L1 block descriptors for RAM
 2. DC CIVAC writeback bug: CPU 0's stale dirty cacheline for `cpu_data[]` overwrote secondary CPUs' `online=true` at PoC (fixed by `cache_clean_range` before booting secondaries)
 3. task_exit/schedule race: timer could fire between state=TERMINATED and scheduler_remove_task(), causing panic (fixed by masking IRQs in task_exit)
+4. **Spinlock cross-CPU visibility (April 16, 2026):** Without SMPEN, `STLR`-released locks stayed in the releaser's L2 and waiters' `LDAXR` read stale "locked" from their own L2 forever. Fixed in `spinlock.h` for `PLATFORM_RASPI5` with `DC CIVAC` + `DSB SY` around `LDAXR` and `STLR`, forcing lock state through DRAM.
+5. **sched_migrate_task double-queue (April 16, 2026):** Between the `task->assigned_cpu` read and the rq_lock acquire, a work-stealing thief could pull the task from old_cpu's queue. The old code then called `add_to_cpu_queue_locked(target)` unconditionally, linking the task into two queues. Fixed by checking the `remove_from_cpu_queue_locked` return value; if the task was stolen, only update `assigned_cpu` and let the thief run it.
+6. **test_isolated_core_latency task leak (April 16, 2026):** `task_destroy` silently refuses to reclaim non-TERMINATED tasks. The test's 100-iteration timeout fired before the isolated-core task completed on Pi 5, leaking 10+ HIGH-priority tasks onto CPU 1 and blocking subsequent multi-CPU tests. Fixed by calling `scheduler_terminate_task` before `task_destroy` on the timeout branch.
 
 ## Boot Reliability (April 5, 2026)
 

@@ -76,6 +76,43 @@ static struct {
     .cpu_task_count = {0}
 };
 
+/*
+ * NC test sync slots: cross-CPU signaling via non-cacheable memory.
+ *
+ * On Pi 5 (no SMPEN), cache_invalidate (DC CIVAC) doesn't propagate through
+ * per-core L2. Cacheable BSS variables written by one CPU are invisible to
+ * others. NC memory bypasses L1/L2 entirely — writes are instantly visible.
+ *
+ * 32 uint32_t slots at NC_MEM_SIZE - 768 (below bench stealing region at -512).
+ * Each test zeroes its slots before use; tasks write, CPU 0 polls.
+ */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+#define NC_SYNC_BASE    (NC_MEM_BASE + NC_MEM_SIZE - 768)
+#define NC_SYNC(n)      (*(volatile uint32_t *)(NC_SYNC_BASE + (n) * 4))
+
+/* Slot assignments */
+#define NC_TASKS_COMPLETED    0
+#define NC_CONTENTION_COUNTER 1
+#define NC_LIFECYCLE_DONE     2
+#define NC_MIG_READY          3
+#define NC_MIG_DONE           4
+#define NC_MIG_CPU_BEFORE     5
+#define NC_MIG_CPU_AFTER      6
+#define NC_MSG_RECEIVED       7
+#define NC_MSG_PUBLISHED      8
+#define NC_MSG_SUB_DONE       9
+#define NC_MSG_PUB_DONE      10
+#define NC_NOTIFY_SENTINEL   11
+#define NC_STEAL_DONE        12
+#define NC_STEAL_CPU_BASE    13  /* 13-17: steal_cpu_recorded[0-4] */
+
+static void nc_sync_clear(uint32_t start, uint32_t count)
+{
+    for (uint32_t i = start; i < start + count; i++)
+        NC_SYNC(i) = 0;
+}
+#endif
+
 static void reset_test_state(void)
 {
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
@@ -92,12 +129,8 @@ static void reset_test_state(void)
  * ============================================================================ */
 
 /* Migration test state.
- * NOTE: These are in cacheable BSS, not NC memory. On Pi 5 (incoherent L2),
- * cache_invalidate (DC CIVAC) doesn't propagate through per-core L2, so
- * cross-CPU reads of these variables are unreliable. These tests currently
- * fail on Pi 5 due to the secondary CPU preemption blocker (see
- * docs/pi5-secondary-cpu-preemption.md). Moving to NC memory would fix
- * data visibility but not the preemption issue. */
+ * On NC platforms, use NC sync slots for cross-CPU visibility.
+ * On coherent platforms, use cacheable BSS with cache_clean/invalidate. */
 static volatile bool migration_ready = false;
 static volatile bool migration_done = false;
 static volatile uint32_t migration_cpu_before = 0;
@@ -107,23 +140,35 @@ static void migration_test_task(void *arg)
 {
     (void)arg;
 
-    migration_cpu_before = cpu_id();
+    uint32_t my_cpu = cpu_id();
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MIG_CPU_BEFORE) = my_cpu;
+    NC_SYNC(NC_MIG_READY) = 1;
+#else
+    migration_cpu_before = my_cpu;
     cache_clean(&migration_cpu_before);
-
-    /* Signal ready for migration */
     migration_ready = true;
     cache_clean(&migration_ready);
+#endif
 
     /* Wait for migration to complete */
     while (1) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_MIG_DONE)) break;
+#else
         cache_invalidate(&migration_done);
         if (migration_done) break;
+#endif
         delay(10000);
         yield();
     }
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MIG_CPU_AFTER) = cpu_id();
+#else
     migration_cpu_after = cpu_id();
     cache_clean(&migration_cpu_after);
+#endif
 
     /* Do some work to prove we're running */
     for (int i = 0; i < 3; i++) {
@@ -132,7 +177,11 @@ static void migration_test_task(void *arg)
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_TASKS_COMPLETED) = test_state.tasks_completed;
+#else
     cache_clean(&test_state.tasks_completed);
+#endif
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -187,7 +236,11 @@ static void stress_task_func(void *arg)
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_TASKS_COMPLETED) = test_state.tasks_completed;
+#else
     cache_clean(&test_state.tasks_completed);
+#endif
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -202,14 +255,22 @@ static void contention_task(void *arg)
     for (int i = 0; i < increments; i++) {
         irq_flags_t flags = spin_lock_irqsave(&contention_lock);
         contention_counter++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        NC_SYNC(NC_CONTENTION_COUNTER) = contention_counter;
+#else
         cache_clean(&contention_counter);
+#endif
         spin_unlock_irqrestore(&contention_lock, flags);
         delay(1000);
     }
 
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     test_state.tasks_completed++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_TASKS_COMPLETED) = test_state.tasks_completed;
+#else
     cache_clean(&test_state.tasks_completed);
+#endif
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -223,7 +284,11 @@ static void lifecycle_task_func(void *arg)
     /* Atomic increment using spinlock for reliability */
     irq_flags_t flags = spin_lock_irqsave(&test_state.lock);
     lifecycle_completed++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_LIFECYCLE_DONE) = lifecycle_completed;
+#else
     cache_clean(&lifecycle_completed);
+#endif
     spin_unlock_irqrestore(&test_state.lock, flags);
 }
 
@@ -298,13 +363,31 @@ static void test_task_migration(void)
     migration_cpu_before = 0;
     migration_cpu_after = 0;
     reset_test_state();
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    nc_sync_clear(NC_MIG_READY, 4);  /* Clear MIG_READY through MIG_CPU_AFTER */
+    nc_sync_clear(NC_TASKS_COMPLETED, 1);
+    INTEG_NC_DONE(1) = 0;
+    INTEG_NC_DONE(3) = 0;
+#endif
 
     struct task *mig_task = task_create("migrate", migration_test_task, NULL);
     TEST_ASSERT_NOT_NULL_MESSAGE(mig_task, "Failed to create migration task");
 
-    /* Create blocker to occupy CPU 1 */
+    /* Create blocker to occupy CPU 1.
+     *
+     * Pin blocker to CPU 1 (affinity=1, not ANY) so work-stealing does
+     * NOT pull it to another CPU. Without this, bench-stealing-style
+     * aggressive stealing would relocate the blocker to CPU 2 or 3
+     * during the delay(50000) below, and mig_task would be picked up
+     * by CPU 1 (now free) and start running before sched_migrate_task
+     * could inspect it — sched_migrate_task would reject the migration
+     * with "task is running" and the test would fail on the ret==0
+     * assert. Pinning keeps the test scenario intact: blocker owns
+     * CPU 1, mig_task queues behind it, migration moves mig_task to
+     * CPU 3. */
     struct task *blocker = task_create("blocker", task_a_func, (void *)10);
     TEST_ASSERT_NOT_NULL_MESSAGE(blocker, "Failed to create blocker task");
+    blocker->cpu_affinity = 1;
 
     /* Add blocker first, then migration task */
     scheduler_add_task_to_cpu(blocker, 1);
@@ -316,22 +399,38 @@ static void test_task_migration(void)
     TEST_ASSERT_MESSAGE(ret == 0, "sched_migrate_task failed");
 
     /* Wait for task to start and signal ready.
-     * migration_ready is in cacheable BSS — use cache_invalidate on non-NC,
-     * but on NC platforms the task writes to cacheable memory visible to CPU 0. */
+     *
+     * 15-second timeout on Pi 5 because the counter component from
+     * the Lua test suite keeps running for ~5 seconds into integration
+     * tests, and if it lands on target_cpu (3) the migrated task has
+     * to wait behind it. The shorter 5-second budget raced with the
+     * counter's lifetime and flaked. */
     uint64_t start = timer_get_count();
-    uint64_t limit = timer_get_frequency() * 5;
+    uint64_t limit = timer_get_frequency() * 15;
     while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_MIG_READY)) break;
+#else
         cache_invalidate(&migration_ready);
         if (migration_ready) break;
+#endif
         yield();
     }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MIG_READY), "Timeout waiting for migration_ready");
+#else
     TEST_ASSERT_MESSAGE(migration_ready, "Timeout waiting for migration_ready");
+#endif
 
     /* Let task finish */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MIG_DONE) = 1;
+#else
     migration_done = true;
     cache_clean(&migration_done);
+#endif
 
-    /* Wait for completion */
+    /* Wait for completion — use NC task state (task_table is NC on Pi 5) */
     start = timer_get_count();
     while ((timer_get_count() - start) < limit) {
         if (mig_task->state == TASK_TERMINATED &&
@@ -341,8 +440,13 @@ static void test_task_migration(void)
 
     TEST_ASSERT_MESSAGE(mig_task->state == TASK_TERMINATED,
         "Migration task did not complete");
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MIG_CPU_BEFORE) == 3,
+        "Task should run on CPU 3 after migration");
+#else
     cache_invalidate(&migration_cpu_before);
     TEST_ASSERT_MESSAGE(migration_cpu_before == 3, "Task should run on CPU 3 after migration");
+#endif
 }
 
 /*
@@ -353,6 +457,9 @@ static void test_stress_multicpu(void)
 {
     /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     reset_test_state();
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_TASKS_COMPLETED) = 0;
+#endif
 
     struct task *tasks[6];
     static const char *names[6] = {"s0", "s1", "s2", "s3", "s4", "s5"};
@@ -374,17 +481,26 @@ static void test_stress_multicpu(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 10;  /* 10 second timeout */
     while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_TASKS_COMPLETED) >= 6) break;
+#else
         bool all_done = true;
         for (int j = 0; j < 6; j++) {
             if (tasks[j]->state != TASK_TERMINATED) { all_done = false; break; }
         }
         if (all_done) break;
+#endif
         yield();
     }
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_TASKS_COMPLETED) >= 6,
+        "Timeout waiting for stress tasks");
+#else
     cache_invalidate(&test_state.tasks_completed);
     TEST_ASSERT_MESSAGE(test_state.tasks_completed == 6,
         "Timeout waiting for stress tasks");
+#endif
 }
 
 /*
@@ -396,6 +512,10 @@ static void test_lock_contention(void)
     /* Cross-CPU dispatch now works with SEVL+WFE idle loop */
     reset_test_state();
     contention_counter = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_TASKS_COMPLETED) = 0;
+    NC_SYNC(NC_CONTENTION_COUNTER) = 0;
+#endif
 
     #define CONTENTION_TASKS 3
     #define INCREMENTS_PER_TASK 50
@@ -415,19 +535,30 @@ static void test_lock_contention(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 10;
     while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_TASKS_COMPLETED) >= CONTENTION_TASKS) break;
+#else
         cache_invalidate(&test_state.tasks_completed);
         if (test_state.tasks_completed >= CONTENTION_TASKS) break;
+#endif
         yield();
     }
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_TASKS_COMPLETED) >= CONTENTION_TASKS,
+        "Timeout waiting for contention tasks");
+    uint32_t expected = CONTENTION_TASKS * INCREMENTS_PER_TASK;
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_CONTENTION_COUNTER) == expected,
+        "Race condition detected in lock contention");
+#else
     cache_invalidate(&test_state.tasks_completed);
     TEST_ASSERT_MESSAGE(test_state.tasks_completed >= CONTENTION_TASKS,
         "Timeout waiting for contention tasks");
-
     cache_invalidate(&contention_counter);
     uint32_t expected = CONTENTION_TASKS * INCREMENTS_PER_TASK;
     TEST_ASSERT_MESSAGE(contention_counter == expected,
         "Race condition detected in lock contention");
+#endif
 }
 
 /*
@@ -441,6 +572,9 @@ static void test_task_lifecycle(void)
 
     uint64_t initial_free = pmm_get_free_pages();
     lifecycle_completed = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_LIFECYCLE_DONE) = 0;
+#endif
 
     for (int cycle = 0; cycle < LIFECYCLE_CYCLES; cycle++) {
         char name[8];
@@ -455,14 +589,23 @@ static void test_task_lifecycle(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 10;
     while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_LIFECYCLE_DONE) >= LIFECYCLE_CYCLES) break;
+#else
         cache_invalidate(&lifecycle_completed);
         if (lifecycle_completed >= LIFECYCLE_CYCLES) break;
+#endif
         yield();
     }
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_LIFECYCLE_DONE) >= LIFECYCLE_CYCLES,
+        "Timeout: not all lifecycle tasks completed");
+#else
     cache_invalidate(&lifecycle_completed);
     TEST_ASSERT_MESSAGE(lifecycle_completed >= LIFECYCLE_CYCLES,
         "Timeout: not all lifecycle tasks completed");
+#endif
 
     /*
      * Give scheduler time to clean up zombies. Under
@@ -700,14 +843,40 @@ static void steal_test_task(void *arg)
     uint32_t idx = (uint32_t)(uintptr_t)arg;
     if (idx < STEAL_TASK_COUNT) {
         steal_cpu_recorded[idx] = cpu_id() + 1;  /* +1 so 0 means "not run" */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        NC_SYNC(NC_STEAL_CPU_BASE + idx) = cpu_id() + 1;
+#else
         cache_clean((void *)&steal_cpu_recorded[idx]);
+#endif
     }
-    /* Small work simulation so the steal window is real */
-    for (int i = 0; i < 3; i++) delay(100000);
+    /*
+     * CPU-bound arithmetic — mirrors bench stealing's workload.
+     *
+     * The previous implementation used delay(100000)*3 which yields
+     * under COOP_PREEMPT. Each yield calls schedule(), briefly
+     * re-queuing and re-picking the task on CPU 1, so the task is
+     * effectively "sticky" to whichever CPU started it and stealers
+     * pick up later tasks from the deque instead. That's fine for
+     * stealing in theory, but when the whole task only does ~0.3 ms
+     * of work it finishes before stealers on Pi 5 (whose yield path
+     * is slowed by the DC CIVAC spinlock work) can claim their share.
+     *
+     * A pure CPU-bound loop holds the task on its owner for long
+     * enough that stealers reliably claim the other deque entries.
+     */
+    volatile uint64_t x = 1;
+    for (uint64_t i = 1; i < 300000; i++) {
+        x = x * 1103515245 + 12345;
+    }
+    (void)x;
 
     irq_flags_t f = spin_lock_irqsave(&test_state.lock);
     steal_done_count++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_STEAL_DONE) = steal_done_count;
+#else
     cache_clean((void *)&steal_done_count);
+#endif
     spin_unlock_irqrestore(&test_state.lock, f);
 }
 
@@ -751,7 +920,13 @@ static void test_work_stealing_distributes_load(void)
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
         for (int i = 0; i < STEAL_TASK_COUNT; i++) steal_cpu_recorded[i] = 0;
         steal_done_count = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        NC_SYNC(NC_STEAL_DONE) = 0;
+        for (int i = 0; i < STEAL_TASK_COUNT; i++)
+            NC_SYNC(NC_STEAL_CPU_BASE + i) = 0;
+#else
         cache_clean((void *)&steal_done_count);
+#endif
 
         /* Queue all tasks onto CPU 1 with ANY affinity so they're stealable. */
         for (int i = 0; i < STEAL_TASK_COUNT; i++) {
@@ -767,21 +942,34 @@ static void test_work_stealing_distributes_load(void)
         uint64_t start = timer_get_count();
         uint64_t limit = timer_get_frequency() * 4;
         while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+            if (NC_SYNC(NC_STEAL_DONE) >= STEAL_TASK_COUNT) break;
+#else
             cache_invalidate((void *)&steal_done_count);
             if (steal_done_count >= STEAL_TASK_COUNT) break;
+#endif
             yield();
         }
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        TEST_ASSERT_MESSAGE(NC_SYNC(NC_STEAL_DONE) == STEAL_TASK_COUNT,
+            "work-steal test: not all tasks completed");
+#else
         cache_invalidate((void *)&steal_done_count);
         TEST_ASSERT_MESSAGE(steal_done_count == STEAL_TASK_COUNT,
             "work-steal test: not all tasks completed");
+#endif
 
         /* Count distinct CPUs that ran tasks this attempt. */
         uint8_t cpu_seen[MAX_CPUS] = {0};
         int distinct = 0;
         for (int i = 0; i < STEAL_TASK_COUNT; i++) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+            uint32_t r = NC_SYNC(NC_STEAL_CPU_BASE + i);
+#else
             cache_invalidate((void *)&steal_cpu_recorded[i]);
             uint32_t r = steal_cpu_recorded[i];
+#endif
             TEST_ASSERT_MESSAGE(r != 0, "task did not record a CPU");
             uint32_t c = r - 1;
             if (c < MAX_CPUS && !cpu_seen[c]) {
@@ -844,7 +1032,11 @@ static void msg_x_subscriber(void *arg)
         const uint8_t *data = msg_router_receive(MSG_X_COMPONENT, topic_buf);
         if (data) {
             msg_x_received++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+            NC_SYNC(NC_MSG_RECEIVED) = msg_x_received;
+#else
             cache_clean((void *)&msg_x_received);
+#endif
             msg_router_ack(MSG_X_COMPONENT);
         } else {
             yield();
@@ -852,7 +1044,11 @@ static void msg_x_subscriber(void *arg)
     }
 
     msg_x_subscriber_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSG_SUB_DONE) = 1;
+#else
     cache_clean((void *)&msg_x_subscriber_done);
+#endif
 }
 
 static void msg_x_publisher(void *arg)
@@ -866,12 +1062,20 @@ static void msg_x_publisher(void *arg)
         int delivered = msg_router_publish(MSG_X_TOPIC, payload);
         if (delivered == 1) {
             msg_x_published++;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+            NC_SYNC(NC_MSG_PUBLISHED) = msg_x_published;
+#else
             cache_clean((void *)&msg_x_published);
+#endif
         }
     }
 
     msg_x_publisher_done = 1;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_MSG_PUB_DONE) = 1;
+#else
     cache_clean((void *)&msg_x_publisher_done);
+#endif
 }
 
 static void test_msg_router_cross_cpu(void)
@@ -887,10 +1091,14 @@ static void test_msg_router_cross_cpu(void)
     msg_x_published = 0;
     msg_x_subscriber_done = 0;
     msg_x_publisher_done = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    nc_sync_clear(NC_MSG_RECEIVED, 4);  /* Clear MSG slots */
+#else
     cache_clean((void *)&msg_x_received);
     cache_clean((void *)&msg_x_published);
     cache_clean((void *)&msg_x_subscriber_done);
     cache_clean((void *)&msg_x_publisher_done);
+#endif
 
     int ret = msg_router_subscribe(MSG_X_TOPIC, MSG_X_COMPONENT);
     TEST_ASSERT_MESSAGE(ret == 0, "subscribe failed");
@@ -906,21 +1114,31 @@ static void test_msg_router_cross_cpu(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 8;
     while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_MSG_SUB_DONE) && NC_SYNC(NC_MSG_PUB_DONE)) break;
+#else
         cache_invalidate((void *)&msg_x_subscriber_done);
         cache_invalidate((void *)&msg_x_publisher_done);
         if (msg_x_subscriber_done && msg_x_publisher_done) break;
+#endif
         yield();
     }
 
-    cache_invalidate((void *)&msg_x_received);
-    cache_invalidate((void *)&msg_x_published);
-
     msg_router_unsubscribe_all(MSG_X_COMPONENT);
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSG_PUBLISHED) == MSG_X_MESSAGES,
+        "publisher did not publish all messages");
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_MSG_RECEIVED) == MSG_X_MESSAGES,
+        "subscriber did not receive all messages");
+#else
+    cache_invalidate((void *)&msg_x_received);
+    cache_invalidate((void *)&msg_x_published);
     TEST_ASSERT_MESSAGE(msg_x_published == MSG_X_MESSAGES,
         "publisher did not publish all messages");
     TEST_ASSERT_MESSAGE(msg_x_received == MSG_X_MESSAGES,
         "subscriber did not receive all messages");
+#endif
 }
 
 /* ============================================================================
@@ -973,7 +1191,11 @@ static void smp_notify_probe_task(void *arg)
 {
     (void)arg;
     smp_notify_sentinel = NOTIFY_SENTINEL;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_NOTIFY_SENTINEL) = NOTIFY_SENTINEL;
+#else
     cache_clean((void *)&smp_notify_sentinel);
+#endif
 }
 
 static void test_smp_notify_cpu_wakes_secondary(void)
@@ -984,7 +1206,11 @@ static void test_smp_notify_cpu_wakes_secondary(void)
     }
 
     smp_notify_sentinel = 0;
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    NC_SYNC(NC_NOTIFY_SENTINEL) = 0;
+#else
     cache_clean((void *)&smp_notify_sentinel);
+#endif
 
     struct task *probe = task_create("smp_notify_probe",
                                      smp_notify_probe_task, NULL);
@@ -998,14 +1224,23 @@ static void test_smp_notify_cpu_wakes_secondary(void)
     uint64_t start = timer_get_count();
     uint64_t limit = timer_get_frequency() * 3;  /* 3 s */
     while ((timer_get_count() - start) < limit) {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (NC_SYNC(NC_NOTIFY_SENTINEL) == NOTIFY_SENTINEL) break;
+#else
         cache_invalidate((void *)&smp_notify_sentinel);
         if (smp_notify_sentinel == NOTIFY_SENTINEL) break;
+#endif
         yield();
     }
-    cache_invalidate((void *)&smp_notify_sentinel);
 
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    TEST_ASSERT_MESSAGE(NC_SYNC(NC_NOTIFY_SENTINEL) == NOTIFY_SENTINEL,
+        "smp_notify_cpu: secondary CPU did not wake and run probe task within timeout");
+#else
+    cache_invalidate((void *)&smp_notify_sentinel);
     TEST_ASSERT_MESSAGE(smp_notify_sentinel == NOTIFY_SENTINEL,
         "smp_notify_cpu: secondary CPU did not wake and run probe task within timeout");
+#endif
 }
 
 /* ============================================================================
