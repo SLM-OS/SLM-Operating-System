@@ -69,13 +69,16 @@ static uint32_t ai_assign_cpu_common(
     stats->total_latency_ns += (t1 - t0);
     stats->decisions++;
 
-    /* Record action in histogram (inverse of ai_decode_action) */
+    /* Record action in histogram (inverse of ai_decode_action) and
+     * stash on the task for slm.ai_sched_decision introspection (#211). */
     if (ret >= 0) {
         int idx = action.core_assignment * AI_ACTIONS_PER_CORE
                 + action.priority_adj * AI_SCHED_PREEMPT_OPTS
                 + action.preempt;
-        if (idx >= 0 && idx < AI_SCHED_N_ACTIONS)
+        if (idx >= 0 && idx < AI_SCHED_N_ACTIONS) {
             stats->action_hist[idx]++;
+            task->last_ai_action = idx;
+        }
     }
 
     if (ret < 0) {

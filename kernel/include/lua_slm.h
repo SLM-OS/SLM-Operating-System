@@ -84,10 +84,16 @@ void lua_shell_init(void);
  * Model memory:
  *   slm.model_stats()                 - Pool stats {weights={...}, workspace={...}}
  *
+ * Message subscriptions (#207):
+ *   slm.msg_subscribe(topic, fn)      - Register callback, returns handle or nil
+ *   slm.msg_unsubscribe(handle)       - Remove subscription, returns bool
+ *   slm.msg_drain()                   - Manually dispatch pending callbacks
+ *
  * Extended model:
  *   slm.model_list()                  - Array of loaded models
  *   slm.model_info(index)             - Detailed model info or nil
  *   slm.model_bench(index, iters)     - Run inference benchmark (prints to UART)
+ *   slm.model_load(path [, name])     - Load ONNX from VFS (#209)
  *   slm.infer_stats()                 - Inference stats (count, min/max/last ns)
  *   slm.gpu_status()                  - GPU info {available, name, device, ...}
  *
@@ -97,6 +103,12 @@ void lua_shell_init(void);
  *   slm.sched_set_policy(name)        - Switch policy, returns bool
  *   slm.sched_policy_list()           - Array of {name, active}
  *   slm.ai_sched_stats()              - AI scheduler stats or nil
+ *   slm.ai_sched_decision(task_id)    - {core, priority_adj, preempt, raw} or nil (#211)
+ *   slm.task_migrate(id, cpu)         - Move task to CPU, returns bool (#210)
+ *   slm.task_create(name, fn)         - Spawn Lua-defined task, returns id or nil (#208)
+ *   slm.task_kill(id)                 - Terminate task, returns bool (#208)
+ *   slm.task_set_priority(id, p)      - Set priority 0-7, returns bool (#208)
+ *   slm.task_pin(id, cpu)             - Pin task to CPU (-1 clears), returns bool (#208)
  *
  * CPU / Memory:
  *   slm.cpu_info()                    - Per-CPU state

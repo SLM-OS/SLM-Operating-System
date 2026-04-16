@@ -1034,6 +1034,8 @@ void scheduler_add_task(struct task *task)
 
 #ifdef CONFIG_AI_SCHEDULER
     task->arrival_time_ns = slm_get_time_ns();
+    /* -1 signals "no AI decision recorded yet" (#211). */
+    task->last_ai_action = -1;
 #endif
 
     uint32_t target_cpu;
