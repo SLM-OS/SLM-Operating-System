@@ -188,7 +188,8 @@ static void free_mount(struct lfs_mount *mnt)
 /* Encode/decode a handle as (index | generation << 16). The caller
  * sees a plain int; the generation component guards against stale
  * references after a close + reopen cycle that reuses the same pool
- * slot. */
+ * slot. The 16-bit generation wraps after 65536 close/reopen cycles
+ * on the same slot — acceptable for any realistic workload. */
 static int encode_file_handle(int idx, uint32_t gen)
 {
     return (int)((gen & 0xFFFFu) << 16 | (idx & 0xFFFF));

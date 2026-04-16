@@ -78,6 +78,11 @@ static void trace_push(struct sched_trace_record *ev)
                                               memory_order_acq_rel);
     uint32_t idx = (uint32_t)(slot % SCHED_TRACE_CAPACITY);
     g_trace_buf[idx] = *ev;
+    /* Ensure the event data is globally visible before a consumer on
+     * another CPU observes the incremented head via an acquire load.
+     * Without this fence the plain store above can be reordered past
+     * the total_events bump on weakly-ordered cores (Pi 5 / Jetson). */
+    atomic_thread_fence(memory_order_release);
     atomic_fetch_add_explicit(&g_trace_total_events, 1,
                               memory_order_relaxed);
 }

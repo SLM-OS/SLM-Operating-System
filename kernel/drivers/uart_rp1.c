@@ -268,9 +268,13 @@ char uart_getc(void)
     return (char)(*uart_dr & 0xFF);
 }
 
+/* Single-reader assumption: only the shell task calls this (and the
+ * blocking uart_getc above). The IRQ handler writes rx_head; we read
+ * rx_tail. A concurrent ISR can advance rx_head between our check and
+ * the read — worst case is a duplicate character, acceptable for
+ * interactive input. Do NOT call from multiple task contexts. */
 int uart_try_getc(void)
 {
-    /* Ring buffer first (IRQ-fed if UART IRQ is delivering). */
     if (rx_head != rx_tail) {
         uint8_t ch = rx_buf[rx_tail];
         rx_tail = (rx_tail + 1) & (UART_RX_BUF_SIZE - 1);
