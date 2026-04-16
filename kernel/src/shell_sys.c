@@ -10,6 +10,7 @@
 #include "task.h"
 #include "sched.h"
 #include "sched_policy.h"
+#include "sched_trace.h"
 #ifdef CONFIG_AI_SCHEDULER
 #include "ai_types.h"
 #endif
@@ -2016,6 +2017,132 @@ int cmd_sched(int argc, char *argv[])
         return 0;
     }
 
+    if (strcmp(argv[1], "trace") == 0) {
+        /* Subcommands:
+         *   sched trace            — dump recorded events
+         *   sched trace start      — enable recording (clears buffer)
+         *   sched trace stop       — disable recording
+         *   sched trace clear      — discard recorded events
+         *   sched trace per-cpu    — ASCII per-CPU timeline summary
+         */
+        const char *sub = (argc >= 3) ? argv[2] : "show";
+        if (strcmp(sub, "start") == 0) {
+            sched_trace_start();
+            uart_printf("Trace recording started (buffer: %u events)\r\n",
+                        SCHED_TRACE_CAPACITY);
+            return 0;
+        }
+        if (strcmp(sub, "stop") == 0) {
+            sched_trace_stop();
+            uart_puts("Trace recording stopped\r\n");
+            return 0;
+        }
+        if (strcmp(sub, "clear") == 0) {
+            sched_trace_clear();
+            uart_puts("Trace buffer cleared\r\n");
+            return 0;
+        }
+
+        /* Snapshot events. Size the stack copy at a cap so we don't
+         * blow the 8 KB shell task stack. 512 events × 16 bytes = 8 KB,
+         * which is the most the caller can see in one dump. */
+        enum { DUMP_MAX = 512 };
+        static struct sched_trace_record buf[DUMP_MAX];
+        uint32_t n = sched_trace_snapshot(buf, DUMP_MAX);
+        uint64_t total = sched_trace_total_events();
+
+        uart_printf("Trace: %s   captured %u of %lu total events%s\r\n\r\n",
+                    sched_trace_is_enabled() ? "ON" : "OFF",
+                    n, (unsigned long)total,
+                    total > SCHED_TRACE_CAPACITY ? " (older overwritten)" : "");
+
+        if (strcmp(sub, "per-cpu") == 0) {
+            /* Bucket the time range into TIMELINE_SLOTS columns. For
+             * each (cpu, slot), count events. Tasks running in that
+             * bucket render as '#', scheduling noise as '.', idle
+             * as ' '. Column count chosen to fit a 78-col terminal. */
+            enum { TIMELINE_SLOTS = 48 };
+            if (n == 0) {
+                uart_puts("(no events recorded — use `sched trace start`)\r\n");
+                return 0;
+            }
+            uint64_t t_first = buf[0].timestamp_ns;
+            uint64_t t_last  = buf[n - 1].timestamp_ns;
+            uint64_t span_ns = t_last > t_first ? (t_last - t_first) : 1u;
+            uint8_t cells[8][TIMELINE_SLOTS] = {0};
+            uint32_t hits[8] = {0};
+            uint32_t max_cpu = 0;
+
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t c = buf[i].cpu;
+                if (c >= 8) continue;
+                if (c > max_cpu) max_cpu = c;
+                uint64_t rel = buf[i].timestamp_ns - t_first;
+                uint64_t slot_u64 = (rel * TIMELINE_SLOTS) / span_ns;
+                if (slot_u64 >= TIMELINE_SLOTS) slot_u64 = TIMELINE_SLOTS - 1;
+                uint32_t slot = (uint32_t)slot_u64;
+                /* Non-idle run => '#', migrate => '>', else '.'. */
+                char mark = '.';
+                if (buf[i].event == SCHED_TRACE_SCHED &&
+                    buf[i].next_task_id != 0) {
+                    mark = '#';
+                } else if (buf[i].event == SCHED_TRACE_MIGRATE) {
+                    mark = '>';
+                }
+                /* Overwrite priority: '#' > '>' > '.'. */
+                char prev = (char)cells[c][slot];
+                if (prev == 0 || mark == '#' ||
+                    (mark == '>' && prev != '#')) {
+                    cells[c][slot] = (uint8_t)mark;
+                }
+                hits[c]++;
+            }
+
+            uint64_t span_us = span_ns / 1000u;
+            uart_printf("Window: %lu us    Legend: # = run/sched, "
+                        "> = migrate, . = tick/noise\r\n\r\n",
+                        (unsigned long)span_us);
+            for (uint32_t c = 0; c <= max_cpu; c++) {
+                uart_printf("CPU %u ", c);
+                for (uint32_t s = 0; s < TIMELINE_SLOTS; s++) {
+                    char m = (char)cells[c][s];
+                    uart_putc(m ? m : ' ');
+                }
+                uart_printf(" (%u events)\r\n", hits[c]);
+            }
+            return 0;
+        }
+
+        /* Default: tabular dump of the snapshot. */
+        uart_puts("Time(us)    CPU  Event     Task  From->To\r\n");
+        uart_puts("----------  ---  --------  ----  --------\r\n");
+        uint64_t t_first = (n > 0) ? buf[0].timestamp_ns : 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint64_t rel = (buf[i].timestamp_ns - t_first) / 1000u;
+            const char *evn = "?";
+            switch (buf[i].event) {
+            case SCHED_TRACE_SCHED:   evn = "SCHED";   break;
+            case SCHED_TRACE_MIGRATE: evn = "MIGRATE"; break;
+            case SCHED_TRACE_WAKE:    evn = "WAKE";    break;
+            case SCHED_TRACE_PREEMPT: evn = "PREEMPT"; break;
+            }
+            if (buf[i].event == SCHED_TRACE_MIGRATE) {
+                uart_printf("%10lu  %3u  %-8s  %4u  CPU%u->CPU%u\r\n",
+                            (unsigned long)rel, buf[i].cpu, evn,
+                            (unsigned)buf[i].next_task_id,
+                            (unsigned)buf[i].prev_cpu,
+                            (unsigned)buf[i].cpu);
+            } else {
+                uart_printf("%10lu  %3u  %-8s  %4u  %u->%u\r\n",
+                            (unsigned long)rel, buf[i].cpu, evn,
+                            (unsigned)buf[i].next_task_id,
+                            (unsigned)buf[i].prev_task_id,
+                            (unsigned)buf[i].next_task_id);
+            }
+        }
+        return 0;
+    }
+
     if (strcmp(argv[1], "stats") == 0) {
         struct sched_stats stats;
         scheduler_get_stats(&stats);
@@ -2075,7 +2202,8 @@ int cmd_sched(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: sched [policy [<name>] | stats]\r\n");
+    uart_puts("Usage: sched [policy [<name>] | stats | "
+              "trace [start|stop|clear|per-cpu]]\r\n");
     return 1;
 }
 

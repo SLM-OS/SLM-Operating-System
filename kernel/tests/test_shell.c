@@ -220,6 +220,21 @@ static void test_shell_cmd_top_missing_count(void)
     TEST_ASSERT_NOT_EQUAL(0, ret);
 }
 
+/*
+ * Tests for #195: `sched trace` subcommands.
+ * The trace system exists independent of recorded events — start/stop/clear
+ * and dumping must succeed even with zero captured events.
+ */
+static void test_shell_cmd_sched_trace_lifecycle(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace start"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace per-cpu"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace stop"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace clear"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace"));
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2106,6 +2121,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_top_refresh_arg);
     RUN_TEST(test_shell_cmd_top_zero_refresh);
     RUN_TEST(test_shell_cmd_top_missing_count);
+    RUN_TEST(test_shell_cmd_sched_trace_lifecycle);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);
