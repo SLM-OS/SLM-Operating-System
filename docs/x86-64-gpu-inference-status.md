@@ -106,6 +106,35 @@ All tests run on the dev machine, not on hardware:
 | `make test-rpc` | 17 | Ring math, init/dtor, null/oversize/not-alive rejection |
 | **Total** | **123** | |
 
+### 1.5 In-kernel test coverage (x86-64 platform shim)
+
+QEMU-runnable Unity tests in `kernel/tests/test_x86_boot.c`. Exercise
+the platform shim ops vtable through `x86_gsp_get_ops_for_testing()`
+which returns the same `&x86_gsp_ops` registered with the shared GSP
+core; reads/writes are safe in QEMU because nvidia_gpu.bar0/bar1
+remain NULL when no NVIDIA GPU is discovered.
+
+| Test | What it pins down |
+|---|---|
+| `test_nvidia_gpu_bar_mmio_accessors_safe` | BAR0/BAR1 pointer + size accessors return NULL/0 when no GPU |
+| `test_gsp_platform_bar0_null_without_gpu` | BAR0 pointer is NULL precondition for sentinel behavior |
+| `test_gsp_dma_alloc_via_pmm` | PMM allocation returns page-aligned address inside the 4 GB identity-map window |
+| `test_x86_gsp_ops_complete` | All 11 vtable slots are non-NULL (catches accidental stub) |
+| `test_x86_gsp_read32_null_bar0_returns_sentinel` | read32 returns 0xBADF5040 for any offset when BAR0 NULL |
+| `test_x86_gsp_write32_null_bar0_no_crash` | write32 is silent no-op when BAR0 NULL |
+| `test_x86_gsp_bar1_null_safe` | bar1_read leaves dst untouched + bar1_write silent when BAR1 NULL |
+| `test_x86_gsp_dma_alloc_zero_size` | dma_alloc(0, ...) returns NULL and zeros out_dma |
+| `test_x86_gsp_dma_alloc_oversized_align` | align > PAGE_SIZE rejected with NULL |
+| `test_x86_gsp_dma_alloc_happy_path` | Aligned VA, VA == PA (identity), buffer zeroed, dma_free returns memory |
+| `test_x86_gsp_dma_free_null_safe` | dma_free(NULL, ...) is no-op |
+| `test_x86_gsp_cache_ops_no_crash` | cache_clean / cache_invalidate / mb don't crash, NULL-safe |
+| `test_x86_gsp_firmware_get_manifest` | All four blobs present + plausible size when ENABLE_GSP_FIRMWARE; NULL/0 otherwise |
+| `test_x86_gsp_firmware_get_invalid_kind` | Out-of-range kind returns {NULL, 0, NULL} |
+| `test_x86_gsp_vbios_get_fwsec_no_gpu` | Returns -1 with NULL out_data when no GPU |
+| `test_gpu_shell_subcommands_safe_without_gpu` | `gpu init` / `gpu sec2` / `gpu vram` / `gpu regs` don't crash without GPU |
+| `test_gsp_firmware_manifest` | Pre-existing — embedded blob sizes, structural |
+| `test_gsp_init_graceful_without_gpu` | Pre-existing — Phase 0 fails cleanly when no platform installed |
+
 ---
 
 ## 2. The blocker (#185) — details

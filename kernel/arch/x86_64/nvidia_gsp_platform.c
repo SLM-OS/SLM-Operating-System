@@ -474,4 +474,19 @@ void x86_gsp_platform_install(void)
     gsp_platform = &x86_gsp_ops;
 }
 
+/*
+ * Accessor for tests — returns the vtable regardless of whether a
+ * GPU was discovered. Tests exercise BAR/DMA/firmware paths through
+ * this pointer without needing a real GA10x device.
+ *
+ * The BAR accessors gracefully handle a NULL BAR0/BAR1 (which is the
+ * state in QEMU without an NVIDIA GPU), returning the GPU's own
+ * "uninitialized engine" sentinel 0xBADF5040 for reads and ignoring
+ * writes. That's what makes them safe to test.
+ */
+const struct gsp_platform_ops *x86_gsp_get_ops_for_testing(void)
+{
+    return &x86_gsp_ops;
+}
+
 #endif /* PLATFORM_X86_64 */
