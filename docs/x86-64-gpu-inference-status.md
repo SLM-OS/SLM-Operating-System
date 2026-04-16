@@ -171,6 +171,87 @@ triggers BSI, which is what raises the PLM.
 | Empty `reset_method` in sysfs to disable FLR | vfio open still triggers a reset via a different path; subsequent bringup hung |
 | Find the CPUCTL PLM offset in NVIDIA's public headers | Not published (`dev_falcon_v4.h`, `dev_sec_pri.h`, `dev_falcon_v4_addendum.h` on main all checked) |
 | Look for a nouveau/openrm unlock sequence | None exists — those drivers never see the locked state |
+| **Run from bare-metal SLM-OS (no VFIO, no FLR)** | **Also locked. See §2.5 below.** |
+
+### 2.5 Bare-metal bypass attempt — blocked by UEFI POST DEVINIT (2026-04-15)
+
+The hypothesis in §2.2 was that UEFI leaves SEC2 "accessible from
+kernel-mode" after POST. Hardware testing on bare-metal SLM-OS
+(test-pc, no VFIO in the picture at all) invalidates this:
+
+```
+slmos> gpu sec2
+SEC2 Falcon state (PSEC2_BASE=0x840000):
+  CPUCTL        = 0xbadf5620  (priv-lock=yes)
+  HWCFG2        = 0x000067f7  (priv-lock=no)
+  IRQSTAT       = 0xbadf5620
+  MAILBOX0      = 0x00000000  MAILBOX1 = 0x00000000
+  OS            = 0x00000000  DEBUGINFO= 0x00000000
+  ENGCTL        = 0xbadf5620
+  BROM MOD_SEL  = 0xbadf5620
+  BROM PARAADDR = 0xbadf5620
+GSP Falcon state (PGSP_BASE=0x110000):
+  CPUCTL        = 0x00000010  (priv-lock=no)
+  HWCFG2        = 0x000047f7  (priv-lock=no)
+```
+
+Right after UEFI POST and before SLM-OS touches any Falcon register:
+- **SEC2 CPUCTL / BROM / ENGCTL / IRQSTAT** are all priv-locked
+  (0xbadf5620 poison). MAILBOX0/1 and OS/DEBUGINFO reads return 0,
+  i.e. accessible but empty.
+- **GSP Falcon is fully accessible** (CPUCTL=0x10 = HALTED bit,
+  HWCFG2 readable). This is why FWSEC-FRTS runs fine on bare-metal
+  (it targets GSP Falcon).
+
+This means UEFI POST's DEVINIT script raises SEC2's PLM exactly the
+same way VFIO's post-FLR BSI re-run does. There is no FLR on the
+bare-metal path — UEFI itself did the lock. Bare-metal reaches
+FWSEC-FRTS (primary E3.4 blocker on VFIO was already past that on
+VFIO too — milestone for retail GA107), but Booter Load hangs at
+phase 106 (STARTCPU + halt poll) because writing SEC2 CPUCTL.STARTCPU
+has no effect through a priv-locked register.
+
+```
+slmos> gpu init
+[GPU] Starting GSP-RM bringup on GA107...
+[GSP] firmware loaded (version 535.113.01)
+[GPU] Phase 1: FWSEC-FRTS — preparing bringup...
+[VBIOS] read 1048576 bytes via BAR0 PROM window
+[VBIOS] parsed 1048576 bytes, 19 BIT entries
+[GPU] FWSEC: imem=58112 dmem=2432 engine=0x400 ucode=9
+[GPU] WPR2 target: addr=0x17fe00000 size=0x100000
+[GPU] sig: fuse[0x8241e0]=0x3 count=4 ver=0xf idx=2
+[GPU] FWSEC-FRTS SUCCESS — WPR2: lo=0x1ffffe00 hi=0x00000000
+[GPU] Phase 2: Booter Load on SEC2...
+[GPU] Booter Load FAILED at phase 106
+[GPU]   SEC2 CPUCTL=0xbadf5620 (halted=0)
+[GPU]   SEC2 MBOX0=0x02d1d000 (persisted — write path reaches the register)
+```
+
+MAILBOX0 persists the WprMeta IOVA we wrote, confirming the SEC2
+MAILBOX register tier is accessible. Only CPUCTL / BROM / IRQSTAT
+(the tier needed to START the Falcon) is locked. This is the same
+symptom VFIO showed — same root cause.
+
+Conclusion: Option B (bare-metal) in §4.2 does not bypass #185 on
+this particular board (H610M S2H V2 UEFI + GA107). The BSI/DEVINIT
+hardening is baked into the VBIOS script, not the VFIO FLR path.
+Any x86-64 host will hit the same lock after POST, regardless of
+whether VFIO is in the picture.
+
+**What still works on bare-metal that VFIO couldn't do:**
+- End-to-end driver infrastructure validation (platform shim, BAR
+  access, DMA via PMM, VBIOS parse, FWSEC-FRTS)
+- Reproducible FWSEC-FRTS success on retail Ampere
+- `gpu sec2` diagnostic for any future unlock attempt to measure
+  against without the VFIO scaffolding
+
+**What this pushes back to Jetson (Option A):**
+Jetson has no DEVINIT — firmware runtime services come from QSPI
+via SoC pre-boot. SEC2's PLM on Jetson GA10B is governed by SMMU
+stream IDs + SoC-level security monitors (TF-A / BPMP), not a
+VBIOS script. It's a different lock model, and therefore still the
+pragmatic path for reaching Booter Load → GSP-RM.
 
 ---
 
@@ -334,8 +415,12 @@ way to actually reach GPU inference.
 
 - Same physical hardware (RTX 3050) as existing validation target.
 - Keeps the x86-64 / Ampere / GA107 story first-class.
-- The #185 blocker goes away — no FLR, no BSI re-run, DEVINIT from
-  UEFI POST persists.
+
+**Previously assumed advantage, now FALSIFIED (2026-04-15):**
+- ~~The #185 blocker goes away — no FLR, no BSI re-run, DEVINIT from
+  UEFI POST persists.~~ → UEFI POST DEVINIT raises the SEC2 PLM
+  itself. See §2.5. Bare-metal reaches FWSEC-FRTS but still can't
+  start SEC2. Option B is no longer a path around #185.
 
 **Risks / costs:**
 
@@ -348,6 +433,16 @@ way to actually reach GPU inference.
   ever plugged into the iGPU, DEVINIT doesn't run on the dGPU and
   we'd need our own DEVINIT interpreter. Currently avoided by having
   the HDMI on the dGPU but brittle.
+- **#185 applies to bare-metal x86-64 just as it does to VFIO x86-64.**
+  Unless a SEC2 PLM unlock sequence can be found, bare-metal stops
+  at the same phase 106 (SEC2 STARTCPU) as VFIO.
+
+**What bare-metal did deliver (validation, not unblock):**
+- Reproducible FWSEC-FRTS success on retail Ampere without VFIO.
+- Confirmed the 1 MB BAR0 PROM window is the right VBIOS source
+  (bare-metal Expansion ROM BAR is unassigned on H610M UEFI).
+- `gpu init` / `gpu sec2` shell commands for future PLM research
+  without the VFIO layer.
 
 **Estimated effort:** weeks-to-months. Significantly larger than
 Option A. Not reachable inside a capstone timeline.
