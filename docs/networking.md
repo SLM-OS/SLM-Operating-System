@@ -593,7 +593,9 @@ on both ARM64 MMIO and x86-64 PCI paths):
 | `test_net_dhcp_fallback` | Forced timeout → `NET_DHCP_FAILED`, static IP restored |
 | `test_net_driver_tx` | Raw 64-byte frame traverses the TX virtqueue to completion |
 | `test_net_driver_has_tx_reap` | Driver exposes the async TX reap op (#204) |
-| `test_net_send_returns_quickly` | `send()` returns in <10 ms — guards against the spin-wait regression (#204) |
+| `test_net_send_returns_quickly` | `send()` returns in <50 ms — guards against the spin-wait regression (#204) |
+| `test_net_send_oversized_rejected` | 2048-byte packet rejected with `NET_E_TOO_LARGE` (#204) |
+| `test_net_send_pool_exhaustion` | 32 submits without intervening poll never hit an unexpected error — only 0 or `NET_E_BUSY` (#204) |
 | `test_net_burst_8_sends_async` | 8 back-to-back submits succeed without blocking; pool absorbs them; `net_poll()` drains completions (#204) |
 
 Run tests with:

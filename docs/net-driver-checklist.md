@@ -54,7 +54,7 @@ hook for that discipline. See **#214** for the tracking issue.
 
 ## Live integration tests
 
-All eight tests below must pass on the target platform. For real
+All twelve tests below must pass on the target platform. For real
 hardware they run via `labctl boot_test`; for QEMU-testable drivers
 they run in `make test`. Source: `kernel/tests/test_net.c`.
 
@@ -74,6 +74,16 @@ they run in `make test`. Source: `kernel/tests/test_net.c`.
 - [ ] `test_net_driver_tx` — raw 64-byte frame traverses the TX
       virtqueue to completion (validates `send()` without going through
       lwIP)
+- [ ] `test_net_driver_has_tx_reap` — driver exposes async TX reap op
+      (#204)
+- [ ] `test_net_send_returns_quickly` — `send()` returns in <50 ms
+      (guards against spin-wait regression, #204)
+- [ ] `test_net_send_oversized_rejected` — >1514 byte packet returns
+      `NET_E_TOO_LARGE` (#204)
+- [ ] `test_net_send_pool_exhaustion` — 32 submits without poll only
+      return 0 or `NET_E_BUSY`; no unexpected errors, no spin (#204)
+- [ ] `test_net_burst_8_sends_async` — 8 back-to-back async submits
+      succeed without blocking (#204)
 
 If the driver skips a test (e.g. no DHCP infrastructure on the test
 network), the test must `TEST_IGNORE_MESSAGE` rather than `PASS`

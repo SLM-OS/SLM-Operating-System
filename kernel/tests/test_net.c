@@ -971,6 +971,87 @@ static void test_net_send_returns_quickly(void)
 }
 
 /*
+ * Test: send() rejects packets larger than MTU with NET_E_TOO_LARGE (#204).
+ *
+ * Both drivers cap at 1514 bytes (standard Ethernet MTU). An
+ * oversized submit should never be enqueued — the driver returns
+ * NET_E_TOO_LARGE and the pool slot usage does not change.
+ */
+static void test_net_send_oversized_rejected(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+
+    /* 2048-byte buffer (well above MTU). Content irrelevant — the
+     * size check happens before any pool logic runs. */
+    static uint8_t oversized[2048];
+    int ret = drv->send(oversized, sizeof(oversized));
+    TEST_ASSERT_MESSAGE(ret == NET_E_TOO_LARGE,
+        "oversized send must return NET_E_TOO_LARGE (#204)");
+}
+
+/*
+ * Test: pool exhaustion returns NET_E_BUSY without blocking (#204).
+ *
+ * The TX buffer pool is sized at 16 slots in both drivers. To
+ * exhaust it without hitting the opportunistic reap in send(), we
+ * need to submit more than 16 frames before any can complete. The
+ * existing 8-burst test above shows 8 submits all succeed; this
+ * test pushes past the pool limit and confirms the overflow path
+ * returns NET_E_BUSY instead of spinning or deadlocking.
+ *
+ * On QEMU the device completes TX so fast that the opportunistic
+ * reap inside send() keeps reclaiming slots even in a tight loop —
+ * we may never actually see NET_E_BUSY. The test is written to
+ * pass in either case:
+ *   - if the device keeps up: all 32 submits return 0 (observed
+ *     behaviour on QEMU with SLIRP)
+ *   - if the pool fills: at least one returns NET_E_BUSY and none
+ *     return other error codes
+ * In both cases the test succeeds. The point is to prove the
+ * NET_E_BUSY return is the only overflow outcome — no spin, no
+ * crash, no NET_E_GENERIC.
+ */
+static void test_net_send_pool_exhaustion(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    /* Push past pool size (16) without any intervening net_poll */
+    int ok = 0, busy = 0, other = 0;
+    uint32_t start = sys_now();
+    for (int i = 0; i < 32; i++) {
+        int ret = drv->send(frame, sizeof(frame));
+        if (ret == 0)               ok++;
+        else if (ret == NET_E_BUSY) busy++;
+        else                        other++;
+    }
+    uint32_t elapsed = sys_now() - start;
+
+    TEST_ASSERT_MESSAGE(other == 0,
+        "pool overflow must only produce NET_E_BUSY, no other error codes");
+    TEST_ASSERT_MESSAGE(ok + busy == 32,
+        "every send must return either 0 or NET_E_BUSY (#204)");
+    TEST_ASSERT_MESSAGE(elapsed < 200,
+        "32 async submits must not spin — total < 200 ms");
+
+    /* Drain completions so subsequent tests have a clean pool */
+    for (int i = 0; i < 64; i++) {
+        net_poll();
+    }
+}
+
+/*
  * Test: multiple back-to-back sends fit in the TX buffer pool without
  * blocking, completion drains via net_poll() (#204).
  *
@@ -1075,6 +1156,8 @@ int test_suite_net(void)
     RUN_TEST(test_net_driver_tx);
     RUN_TEST(test_net_driver_has_tx_reap);
     RUN_TEST(test_net_send_returns_quickly);
+    RUN_TEST(test_net_send_oversized_rejected);
+    RUN_TEST(test_net_send_pool_exhaustion);
     RUN_TEST(test_net_burst_8_sends_async);
     RUN_TEST(test_net_rx_no_buffers_clean);
 
