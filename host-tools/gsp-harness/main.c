@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../../kernel/gpu/nvidia/gsp.h"
 #include "../../kernel/gpu/nvidia/nvidia_vbios.h"
@@ -56,6 +57,25 @@ static void usage(const char *argv0)
 "                   Confirms E3.2 DMA plumbing works end-to-end.\n"
 "  --fwsec-frts     Run FWSEC-FRTS on GSP Falcon. First real GSP-RM\n"
 "                   bringup step — sets up the WPR2 region in FB.\n"
+"  --fwsec-sb       Probe variant: run FWSEC with init_cmd=SB (0x19)\n"
+"                   instead of FRTS (0x15). SB is a subsequent-boot\n"
+"                   lifecycle no-op that halts without writing WPR2.\n"
+"                   Use to bisect whether a hang is FRTS-specific or\n"
+"                   upstream of init_cmd dispatch. See handoff §4.1.\n"
+"  --fwsec-trace    Kick FWSEC-FRTS and sample DEBUGINFO / MAILBOX0 /\n"
+"                   CPUCTL / OS at 1/10/50/200/500/1000/2000 ms to\n"
+"                   disambiguate 'stuck at one instruction' from\n"
+"                   'slow progress'. See handoff §4.2.\n"
+"  --check-devinit  Read the NV_PGC6_AON_SECURE_SCRATCH_GROUP_05\n"
+"                   registers (BAR0+0x118128 / +0x118234) to decide\n"
+"                   whether the GPU's VBIOS DEVINIT has completed.\n"
+"                   Matches nouveau's tu102_devinit_wait check. If\n"
+"                   DEVINIT hasn't run, FWSEC-FRTS is expected to\n"
+"                   hang/abort without progress. See handoff §0.4.\n"
+"  --sec2-plm-scan  Scan SEC2 register space for priv-level-mask\n"
+"                   registers. Used to find CPUCTL_PRIV_LEVEL_MASK\n"
+"                   on GA107 since it's not in NVIDIA's published\n"
+"                   headers. See handoff §0.6.\n"
 "  --booter-load    Run Booter Load on SEC2 (E3.4.d). Requires that\n"
 "                   --fwsec-frts succeeded; reuses the WPR2 setup.\n"
 "  --riscv-start    Flip GSP into RISC-V mode and start the core\n"
@@ -78,11 +98,17 @@ static void usage(const char *argv0)
 
 int main(int argc, char **argv)
 {
+    /* Disable stdout buffering — when run via SSH, the pipe makes
+     * stdout block-buffered and progress prints disappear until
+     * buffer flush, which hides hang locations in diagnostics. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     const char *pci_path = "/sys/bus/pci/devices/0000:01:00.0";
     const char *chip     = "ga107";
     bool trace           = false;
     enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_FALCONS, ACT_DMA_TEST,
-           ACT_FWSEC_FRTS, ACT_BOOTER_LOAD, ACT_RISCV_START,
+           ACT_FWSEC_FRTS, ACT_FWSEC_SB, ACT_FWSEC_TRACE,
+           ACT_CHECK_DEVINIT, ACT_SEC2_PLM_SCAN,
+           ACT_BOOTER_LOAD, ACT_RISCV_START,
            ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
     int phase = -1;
 
@@ -94,6 +120,10 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--falcons") == 0) { action = ACT_FALCONS; }
         else if (strcmp(a, "--dma-test") == 0) { action = ACT_DMA_TEST; }
         else if (strcmp(a, "--fwsec-frts") == 0)  { action = ACT_FWSEC_FRTS; }
+        else if (strcmp(a, "--fwsec-sb") == 0)    { action = ACT_FWSEC_SB; }
+        else if (strcmp(a, "--fwsec-trace") == 0) { action = ACT_FWSEC_TRACE; }
+        else if (strcmp(a, "--check-devinit") == 0) { action = ACT_CHECK_DEVINIT; }
+        else if (strcmp(a, "--sec2-plm-scan") == 0) { action = ACT_SEC2_PLM_SCAN; }
         else if (strcmp(a, "--booter-load") == 0) { action = ACT_BOOTER_LOAD; }
         else if (strcmp(a, "--riscv-start") == 0) { action = ACT_RISCV_START; }
         else if (strcmp(a, "--bringup") == 0) { action = ACT_BRINGUP; }
@@ -124,6 +154,48 @@ int main(int argc, char **argv)
 
     extern const struct gsp_platform_ops *gsp_platform;
 
+    /* vfio-pci does an FLR when userspace opens /dev/vfio/GROUP.
+     * FLR resets the GPU and clears DEVINIT state. The on-chip BSI
+     * (Bootstrap Sequencer Instruction) re-runs DEVINIT from the
+     * VBIOS after FLR, but takes ~500 ms to complete. Poll the
+     * NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0] byte-0 == 0xff "DEVINIT
+     * done" marker (nouveau's tu102_devinit_wait) before letting any
+     * action proceed. Actions that don't touch bringup (--probe,
+     * --vbios, --falcons, --dma-test, --check-devinit) are exempt. */
+    bool needs_devinit = (action == ACT_FALCONS ||
+                          action == ACT_FWSEC_FRTS ||
+                          action == ACT_FWSEC_SB ||
+                          action == ACT_FWSEC_TRACE ||
+                          action == ACT_BOOTER_LOAD ||
+                          action == ACT_RISCV_START ||
+                          action == ACT_BRINGUP ||
+                          action == ACT_PHASE ||
+                          action == ACT_SEC2_PLM_SCAN);
+    if (needs_devinit) {
+        /* Poll NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0] byte 0 for
+         * 0xff (nouveau tu102_devinit_wait). BSI recovery after FLR
+         * takes ~500 ms on GA107 test-pc; 2 s cap is generous. */
+        const uint32_t budget_ms = 2000;
+        uint32_t waited_ms = 0;
+        uint32_t s = 0;
+        while (waited_ms <= budget_ms) {
+            s = gsp_platform->read32(0x00118234);
+            if ((s & 0xffu) == 0xffu) break;
+            struct timespec st = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000L };
+            nanosleep(&st, NULL);
+            waited_ms += 50;
+        }
+        if ((s & 0xffu) == 0xffu) {
+            fprintf(stderr,
+                    "[GSP-HARNESS] BSI DEVINIT recovered in %u ms\n", waited_ms);
+        } else {
+            fprintf(stderr,
+                    "[GSP-HARNESS] WARNING: BSI DEVINIT not complete in %u ms "
+                    "(scratch=0x%08x); continuing anyway\n",
+                    budget_ms, s);
+        }
+    }
+
     switch (action) {
     case ACT_PROBE: {
         uint32_t boot42 = gsp_platform->read32(NV_PMC_BOOT_42);
@@ -135,6 +207,90 @@ int main(int argc, char **argv)
                eng,
                eng == 0xBADF5040 ? " (GSP not loaded — expected)" : "");
         return 0;
+    }
+    case ACT_SEC2_PLM_SCAN: {
+        /* Scan SEC2 register space looking for priv-level-mask
+         * (PLM) registers. A PLM typically reads as a 32-bit value
+         * with bits 0:2 (read protection), 4:6 (write protection),
+         * 8:11 (source enable) non-zero, and upper bits low. We
+         * filter reads to "interesting" values: not 0, not 0xffffffff,
+         * not 0xbadfXXXX, and look roughly like a PLM pattern. */
+        printf("[GSP-HARNESS] SEC2 register scan (looking for PLM patterns):\n");
+        printf("  %-10s %-12s %s\n", "offset", "value", "note");
+        uint32_t priv_locked_count = 0;
+        for (uint32_t off = 0x000; off <= 0xfff; off += 4) {
+            uint32_t addr = NV_PSEC2_BASE + off;
+            uint32_t v = gsp_platform->read32(addr);
+            if (v == 0 || v == 0xFFFFFFFFu) continue;
+            if ((v & 0xffff0000u) == 0xbadf0000u) {
+                priv_locked_count++;
+                continue;
+            }
+            bool looks_plm =
+                ((v & 0xFFFu) != 0) &&
+                ((v >> 20) == 0 || (v >> 20) == 1);
+            printf("  0x%08x 0x%08x  %s\n", addr, v,
+                   looks_plm ? "<-- PLM candidate" : "");
+        }
+        printf("[GSP-HARNESS] %u priv-locked offsets in +0x000..+0xfff\n",
+               priv_locked_count);
+        /* Also dump priv-locked register offsets — the PLM for a
+         * locked register is often at a known +N offset from it,
+         * so seeing which regs are locked tells us which PLMs to
+         * target if we can find a writable one. */
+        printf("[GSP-HARNESS] priv-locked offsets (first 32):\n");
+        uint32_t shown = 0;
+        for (uint32_t off = 0x000; off <= 0xfff && shown < 32; off += 4) {
+            uint32_t v = gsp_platform->read32(NV_PSEC2_BASE + off);
+            if ((v & 0xffff0000u) == 0xbadf0000u) {
+                printf("  0x%08x (base+0x%03x) = 0x%08x\n",
+                       NV_PSEC2_BASE + off, off, v);
+                shown++;
+            }
+        }
+        return 0;
+    }
+    case ACT_CHECK_DEVINIT: {
+        /* Matches nouveau tu102_devinit_wait (drivers/gpu/drm/nouveau/
+         * nvkm/subdev/devinit/tu102.c). On GA10x, 0x118128 is
+         * NV_PGC6_AON_SECURE_SCRATCH_GROUP_05_PRIV_LEVEL_MASK and
+         * 0x118234 is NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0]. Byte-0
+         * is written to 0xff by the VBIOS init-script engine at the
+         * end of POST/DEVINIT on Turing+.
+         *
+         * vfio-pci does a PCI FLR when /dev/vfio/GROUP is opened,
+         * which clears this scratch. GA107's on-chip BSI (Bootstrap
+         * Sequencer Instruction) re-runs DEVINIT from VBIOS after
+         * FLR but takes ~500 ms. Poll for up to 2 s to accommodate
+         * that recovery. */
+        uint32_t plm = 0, scr0 = 0;
+        uint32_t waited_ms = 0;
+        const uint32_t budget_ms = 2000;
+        while (waited_ms <= budget_ms) {
+            plm  = gsp_platform->read32(0x00118128);
+            scr0 = gsp_platform->read32(0x00118234);
+            if ((plm & 0x1u) && (scr0 & 0xffu) == 0xffu) break;
+            struct timespec st = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000L };
+            nanosleep(&st, NULL);
+            waited_ms += 50;
+        }
+        bool plm_ok   = (plm & 0x1u) != 0;
+        bool scr0_ok  = (scr0 & 0xffu) == 0xffu;
+        printf("[GSP-HARNESS] DEVINIT check (after waiting %u ms for BSI):\n", waited_ms);
+        printf("                0x118128 (GR5 PLM)           = 0x%08x  (bit 0 %s)\n",
+               plm,  plm_ok  ? "SET  — scratch readable" : "CLR  — blocked by priv-level");
+        printf("                0x118234 (GR5_SCRATCH[0])    = 0x%08x  (byte 0 = 0x%02x %s)\n",
+               scr0, scr0 & 0xffu,
+               scr0_ok ? "— DEVINIT done" : "— DEVINIT NOT done / not run");
+        if (plm_ok && scr0_ok) {
+            printf("[GSP-HARNESS] Verdict: VBIOS DEVINIT has completed on this GPU.\n");
+            return 0;
+        }
+        printf("[GSP-HARNESS] Verdict: VBIOS DEVINIT has NOT completed within %u ms.\n"
+               "                Either UEFI never ran DEVINIT (GPU isn't the primary\n"
+               "                display) or the BSI re-run after FLR didn't finish.\n",
+               budget_ms);
+        return 2;
     }
     case ACT_VBIOS: {
         const uint8_t *raw = NULL;
@@ -216,12 +372,17 @@ int main(int argc, char **argv)
         if (falcon_probe(&sec2_flcn, NV_PSEC2_BASE) < 0) {
             printf("[GSP-HARNESS] SEC2 Falcon probe failed\n");
         } else {
-            printf("[GSP-HARNESS] SEC2 Falcon @0x%08x  IMEM=%u KB  DMEM=%u KB  RISC-V=%s  idle=%s\n",
+            uint32_t sec2_cpuctl = gsp_platform->read32(NV_PSEC2_BASE + FALCON_CPUCTL);
+            uint32_t sec2_hwcfg2 = gsp_platform->read32(NV_PSEC2_BASE + FALCON_HWCFG2);
+            printf("[GSP-HARNESS] SEC2 Falcon @0x%08x  IMEM=%u KB  DMEM=%u KB  RISC-V=%s  idle=%s  priv-locked=%s\n",
                    sec2_flcn.base,
                    sec2_flcn.imem_size / 1024,
                    sec2_flcn.dmem_size / 1024,
                    sec2_flcn.has_riscv ? "yes" : "no",
-                   falcon_is_idle(&sec2_flcn) ? "yes" : "no");
+                   falcon_is_idle(&sec2_flcn) ? "yes" : "no",
+                   falcon_is_priv_locked(&sec2_flcn) ? "yes" : "no");
+            printf("                CPUCTL=0x%08x  HWCFG2=0x%08x\n",
+                   sec2_cpuctl, sec2_hwcfg2);
         }
         return 0;
     }
@@ -283,21 +444,30 @@ int main(int argc, char **argv)
         printf("[GSP-HARNESS] --dma-test: all %d cases PASS\n", ncases);
         return 0;
     }
-    case ACT_FWSEC_FRTS: {
+    case ACT_FWSEC_FRTS:
+    case ACT_FWSEC_SB: {
+        const bool is_sb = (action == ACT_FWSEC_SB);
+        const char *label = is_sb ? "FWSEC-SB" : "FWSEC-FRTS";
         struct gsp_bringup b;
         if (gsp_bringup_prepare(&b) < 0) {
             printf("[GSP-HARNESS] bringup prepare FAILED\n");
             return 1;
         }
+        if (is_sb) b.init_cmd = GSP_DMEMMAPPER_CMD_SB;
         printf("[GSP-HARNESS] FWSEC ucode: imem=%u bytes dmem=%u bytes\n"
                "                engine_id=0x%x ucode_id=%u pkc_data_off=0x%x\n"
                "                imem_virt_base=0x%x interface_off=0x%x\n",
                b.fwsec_imem_size, b.fwsec_dmem_size,
                b.fwsec_engine_id, b.fwsec_ucode_id, b.fwsec_pkc_data_off,
                b.fwsec_imem_virt_base, b.fwsec_interface_offset);
-        printf("[GSP-HARNESS] WPR2 target: addr=0x%llx size=0x%llx\n",
-               (unsigned long long)b.wpr2_addr,
-               (unsigned long long)b.wpr2_size);
+        printf("[GSP-HARNESS] init_cmd: 0x%02x (%s)%s\n",
+               b.init_cmd, label,
+               is_sb ? "  — probe, WPR2 not expected to populate" : "");
+        if (!is_sb) {
+            printf("[GSP-HARNESS] WPR2 target: addr=0x%llx size=0x%llx\n",
+                   (unsigned long long)b.wpr2_addr,
+                   (unsigned long long)b.wpr2_size);
+        }
 
         int rc = gsp_bringup_fwsec_frts(&b);
         if (b.diag_sig_count) {
@@ -307,8 +477,8 @@ int main(int argc, char **argv)
                    b.diag_sig_count, b.diag_sig_versions, b.diag_sig_index);
         }
         if (rc < 0) {
-            printf("[GSP-HARNESS] FWSEC-FRTS FAILED at phase %u (rc=%d)\n",
-                   b.last_error_phase, rc);
+            printf("[GSP-HARNESS] %s FAILED at phase %u (rc=%d)\n",
+                   label, b.last_error_phase, rc);
             uint32_t err    = gsp_platform->read32(NV_FWSEC_FRTS_ERR_REG);
             uint32_t wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
             uint32_t wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
@@ -352,13 +522,110 @@ int main(int argc, char **argv)
                    hwcfg2, engr, dmactl, trfcmd);
             printf("                  BCR_CTRL=0x%08x MOD_SEL=0x%08x PARAADDR0=0x%08x\n",
                    bcrctl, modsel, paraaddr);
+            /* Post-timeout DEBUGINFO time series. If the value is
+             * frozen across multiple samples → FWSEC stopped
+             * executing. If it evolves → FWSEC is still making slow
+             * progress past the 2 s timeout and may just need more
+             * time. Doesn't touch Falcon state; purely reads. */
+            printf("                post-timeout samples (100 ms apart):\n");
+            for (int k = 0; k < 10; k++) {
+                struct timespec st = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000L };
+                nanosleep(&st, NULL);
+                uint32_t s_dbg = gsp_platform->read32(NV_PGSP_BASE + FALCON_DEBUGINFO);
+                uint32_t s_cpu = gsp_platform->read32(NV_PGSP_BASE + FALCON_CPUCTL);
+                uint32_t s_mbx = gsp_platform->read32(NV_PGSP_BASE + FALCON_MAILBOX0);
+                uint32_t s_os  = gsp_platform->read32(NV_PGSP_BASE + FALCON_OS);
+                printf("                  t+%dms  DEBUGINFO=0x%08x  CPUCTL=0x%08x  MBX0=0x%08x  OS=0x%08x\n",
+                       (k + 1) * 100, s_dbg, s_cpu, s_mbx, s_os);
+            }
             return 1;
         }
-        printf("[GSP-HARNESS] FWSEC-FRTS ok — WPR2 registers:\n");
-        uint32_t wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
-        uint32_t wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
-        printf("                WPR2_LO = 0x%08x\n                WPR2_HI = 0x%08x\n",
-               wpr_lo, wpr_hi);
+        if (is_sb) {
+            uint32_t mbox0   = gsp_platform->read32(NV_PGSP_BASE + FALCON_MAILBOX0);
+            uint32_t os_reg  = gsp_platform->read32(NV_PGSP_BASE + FALCON_OS);
+            uint32_t dbginfo = gsp_platform->read32(NV_PGSP_BASE + FALCON_DEBUGINFO);
+            printf("[GSP-HARNESS] %s ok — Falcon halted cleanly\n"
+                   "                MAILBOX0=0x%08x  OS=0x%08x  DEBUGINFO=0x%08x\n",
+                   label, mbox0, os_reg, dbginfo);
+            return 0;
+        }
+        printf("[GSP-HARNESS] %s ok — Falcon halted cleanly\n", label);
+        uint32_t wpr_lo  = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
+        uint32_t wpr_hi  = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
+        uint32_t err_reg = gsp_platform->read32(NV_FWSEC_FRTS_ERR_REG);
+        uint32_t mbox0   = gsp_platform->read32(NV_PGSP_BASE + FALCON_MAILBOX0);
+        uint32_t os_reg  = gsp_platform->read32(NV_PGSP_BASE + FALCON_OS);
+        uint32_t dbginfo = gsp_platform->read32(NV_PGSP_BASE + FALCON_DEBUGINFO);
+        printf("                WPR2_LO   = 0x%08x\n", wpr_lo);
+        printf("                WPR2_HI   = 0x%08x\n", wpr_hi);
+        printf("                ERR_REG   = 0x%08x  (code=%u)\n", err_reg, err_reg >> 16);
+        printf("                MAILBOX0  = 0x%08x  OS = 0x%08x  DEBUGINFO = 0x%08x\n",
+               mbox0, os_reg, dbginfo);
+        return 0;
+    }
+    case ACT_FWSEC_TRACE: {
+        /* DEBUGINFO time-series probe. Kicks FWSEC-FRTS up through
+         * STARTCPU then samples (DEBUGINFO, MAILBOX0, CPUCTL, OS) at
+         * increasing intervals. Static values across samples → FWSEC
+         * stuck at one instruction. Changing values → slow progress. */
+        struct gsp_bringup b;
+        if (gsp_bringup_prepare(&b) < 0) {
+            printf("[GSP-HARNESS] bringup prepare FAILED\n");
+            return 1;
+        }
+        b.trace_mode = true;
+        if (gsp_bringup_fwsec_frts(&b) < 0) {
+            uint32_t cpuctl  = gsp_platform->read32(NV_PGSP_BASE + FALCON_CPUCTL);
+            uint32_t hwcfg2  = gsp_platform->read32(NV_PGSP_BASE + FALCON_HWCFG2);
+            uint32_t dmactl  = gsp_platform->read32(NV_PGSP_BASE + FALCON_DMACTL);
+            uint32_t trfcmd  = gsp_platform->read32(NV_PGSP_BASE + FALCON_DMATRFCMD);
+            printf("[GSP-HARNESS] FWSEC-TRACE launch FAILED at phase %u\n"
+                   "                CPUCTL=0x%08x (halted=%d) HWCFG2=0x%08x\n"
+                   "                DMACTL=0x%08x DMATRFCMD=0x%08x\n",
+                   b.last_error_phase, cpuctl,
+                   !!(cpuctl & FALCON_CPUCTL_HALTED), hwcfg2, dmactl, trfcmd);
+            gsp_bringup_free(&b);
+            return 1;
+        }
+        printf("[GSP-HARNESS] FWSEC-TRACE: kicked STARTCPU, sampling…\n");
+        printf("                init_cmd=0x%02x  MAILBOX0 sentinel=0xCAFEBEEF\n",
+               b.init_cmd);
+        printf("  %8s  %10s  %10s  %10s  %10s  %s\n",
+               "t_ms", "DEBUGINFO", "MBOX0", "CPUCTL", "OS", "HALTED");
+        static const uint32_t samples_us[] = {
+            1000, 10000, 50000, 200000, 500000, 1000000, 2000000
+        };
+        struct timespec t0;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        uint32_t last_us = 0;
+        for (size_t i = 0; i < sizeof(samples_us)/sizeof(samples_us[0]); i++) {
+            uint32_t delta = samples_us[i] - last_us;
+            last_us = samples_us[i];
+            struct timespec d = { .tv_sec = delta / 1000000u,
+                                  .tv_nsec = (long)(delta % 1000000u) * 1000L };
+            nanosleep(&d, NULL);
+
+            uint32_t cpuctl  = gsp_platform->read32(NV_PGSP_BASE + FALCON_CPUCTL);
+            uint32_t mbox0   = gsp_platform->read32(NV_PGSP_BASE + FALCON_MAILBOX0);
+            uint32_t os_reg  = gsp_platform->read32(NV_PGSP_BASE + FALCON_OS);
+            uint32_t dbginfo = gsp_platform->read32(NV_PGSP_BASE + FALCON_DEBUGINFO);
+            bool halted = !!(cpuctl & FALCON_CPUCTL_HALTED);
+            printf("  %8.1f  0x%08x  0x%08x  0x%08x  0x%08x  %s\n",
+                   samples_us[i] / 1000.0, dbginfo, mbox0, cpuctl, os_reg,
+                   halted ? "YES" : "no");
+            if (halted) {
+                printf("[GSP-HARNESS] Falcon halted at t=%.1f ms — stopping samples\n",
+                       samples_us[i] / 1000.0);
+                break;
+            }
+        }
+        uint32_t final_err = gsp_platform->read32(NV_FWSEC_FRTS_ERR_REG);
+        uint32_t final_wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
+        uint32_t final_wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
+        printf("[GSP-HARNESS] Post-samples: ERR=0x%08x (code=%u) "
+               "WPR2_LO=0x%08x WPR2_HI=0x%08x\n",
+               final_err, final_err >> 16, final_wpr_lo, final_wpr_hi);
+        gsp_bringup_free(&b);
         return 0;
     }
     case ACT_BOOTER_LOAD: {
@@ -376,6 +643,18 @@ int main(int argc, char **argv)
             return 1;
         }
         printf("[GSP-HARNESS] FWSEC-FRTS ok (WPR2 set), running Booter Load…\n");
+        /* Print SEC2 pre-state for the hang diagnosis. */
+        {
+            uint32_t cpuctl = gsp_platform->read32(NV_PSEC2_BASE + FALCON_CPUCTL);
+            uint32_t hwcfg  = gsp_platform->read32(NV_PSEC2_BASE + FALCON_HWCFG);
+            uint32_t hwcfg2 = gsp_platform->read32(NV_PSEC2_BASE + FALCON_HWCFG2);
+            uint32_t dmactl = gsp_platform->read32(NV_PSEC2_BASE + FALCON_DMACTL);
+            uint32_t trfcmd = gsp_platform->read32(NV_PSEC2_BASE + FALCON_DMATRFCMD);
+            fprintf(stderr, "[GSP-HARNESS] SEC2 pre-booter: CPUCTL=0x%08x "
+                    "(halted=%d) HWCFG=0x%08x HWCFG2=0x%08x DMACTL=0x%08x DMATRFCMD=0x%08x\n",
+                    cpuctl, !!(cpuctl & FALCON_CPUCTL_HALTED),
+                    hwcfg, hwcfg2, dmactl, trfcmd);
+        }
         int rc = gsp_bringup_booter_load(&b);
         if (rc < 0) {
             printf("[GSP-HARNESS] Booter Load FAILED at phase %u (rc=%d)\n",

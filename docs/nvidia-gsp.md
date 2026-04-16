@@ -2,7 +2,16 @@
 
 This document captures research into the NVIDIA GPU System Processor (GSP) firmware boot sequence, based on analysis of the NVIDIA open-gpu-kernel-modules source and the nouveau Linux kernel driver. These findings were gathered during Phase 4X (x86-64 port) to understand what is required for bare-metal GPU compute on Ampere architecture.
 
-> **Phase E status (2026-04-15):** GSP bringup is in progress. Shipped: E1 (firmware embedding via `.incbin`), E2 (shared VBIOS BIT-table parser), E2.5 (FWSEC discovery on NPDS-format Ampere VBIOSes), E3.1 (Falcon v4 register driver), E3.2 (VFIO IOMMU DMA via `host-tools/gsp-harness/`), E3.3 (nvfw HS-firmware container parser), E3.4 scaffolding (FWSEC-FRTS state machine), E3.4 audit (BOOTVEC=0 + CPUCTL.ALIAS_EN routing fixes — see "Implementation notes" below), E3.4.d (Booter Load on SEC2 via PIO IMEM/DMEM), E3.4.e (GSP RISC-V startup via BCR_CTRL flip), and E4 RPC ring skeleton (`kernel/gpu/nvidia/rpc.{h,c}`). Outstanding: hardware re-test on test-pc to confirm WPR2 populates after the audit fixes; full `GspFwWprMeta` layout; RPC element-header marshalling + GSP_INIT_DONE wait. Execution plan in `docs/x86-64-capstone-gap-closure-plan.md` §E.
+> **Phase E status (2026-04-16):** **FWSEC-FRTS (E3.4) succeeds on
+> retail Ampere** (GA107 / RTX 3050 under VFIO on test-pc), 3/3
+> runs, WPR2 populated. **Booter Load (E3.4.d) is blocked** on this
+> platform by the SEC2 priv-lock raised by BSI after vfio-pci's
+> mandatory FLR (issue #185). E3.4.e, E4, E5, E6 are transitively
+> blocked. Code-shipped portions transfer cleanly to Jetson and
+> bare-metal SLM-OS. **See `docs/x86-64-gpu-inference-status.md`
+> for the live handoff, the root-cause explanation, and the
+> ranked paths forward.** Execution plan archived at
+> `docs/archive/plans/x86-64-capstone-gap-closure-plan.md` §E.
 
 ---
 
@@ -109,7 +118,7 @@ FB Top (e.g., 6 GB for RTX 3050)
    is reachable via the PMU ucode descriptor table pointed to by the
    `BIT_TOKEN_FALCON_DATA` entry (id 0x70). The NPDS sub-image format
    adds a further wrinkle not handled by openrm 535.113.01 or
-   nova-core mainline. Full write-up in `docs/x86-64-gsp-fwsec-investigation.md`
+   nova-core mainline. Full write-up in `docs/archive/investigations/x86-64-gsp-fwsec-investigation.md`
    and [issue #143](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/143).
 2. Load FWSEC into GSP Falcon's IMEM/DMEM via PIO
 3. Boot the Falcon to run FWSEC, which establishes the **Write Protected Region** (WPR2)

@@ -1,6 +1,6 @@
 # x86-64 hardware validation — 2026-04-15
 
-**Gap closed:** P1-2 in `docs/x86-64-capstone-gap-closure-plan.md`.
+**Gap closed:** P1-2 in `docs/archive/plans/x86-64-capstone-gap-closure-plan.md`.
 
 **Test-pc:** Gigabyte H610M S2H V2, i7-6700 (8 logical CPUs), 16 GB DDR4,
 RTX 3050 (GA107). UEFI boot order reconfigured to prefer the SDWire SD

@@ -165,19 +165,49 @@ A full Linux + nouveau / open-gpu-kernel-modules stack loads GSP via:
 A bare-metal OS would need its own VBIOS parser, a DMA allocator
 large enough for the WPR, a Falcon microcode execution environment,
 an RPC stack, and the firmware blob shipped in its ROM — none of
-which are incremental additions to a capstone-scoped kernel. The full
-chain is documented at `docs/nvidia-gsp.md`.
+which were incremental additions to a capstone-scoped kernel. The
+full chain is documented at `docs/nvidia-gsp.md`.
 
-### Why Jetson is the same problem
+### Progress beyond "blocker": FWSEC-FRTS landed
 
-The Jetson Orin Nano uses GA10B — an integrated variant of the same
-Ampere architecture. The GSP boot sequence is identical: same RISC-V
-core, same firmware format, same Booter Load mechanism. On Jetson the
-firmware is pre-loaded by the UEFI / CBoot chain instead of the OS,
-but once Linux has kexec'd into SLM-OS, the GSP state is either
-suspended (via `slmos-kexec`'s runtime-PM suspend) or in an
-undefined-after-kexec state. Re-initialising it without the RPC
-stack is the same problem as on discrete Ampere.
+Between the first writing of this document and the capstone writeup,
+we did go further than the "blocker" framing implied. Step 2 (VBIOS
+parse) is shipped and hardware-verified. Step 3 (WPR allocation) is
+shipped via FWSEC-FRTS — the first of the two HS-ucode stages in
+the above chain — and **succeeds on retail Ampere hardware** (RTX
+3050 under VFIO on our test PC, 3/3 runs, 2026-04-16). Step 4 (Booter
+Load) is where progress stops on x86-64 VFIO: the hardware's PRI
+access arbiter denies us access to SEC2's control registers after
+vfio-pci's mandatory PCI FLR causes the on-GPU Bootstrap Sequencer
+to re-apply a DEVINIT script that raises SEC2's priv-level mask.
+This is a platform-intrinsic property of userspace VFIO + FLR +
+BSI — it is not a code defect we can fix — and it's tracked as
+issue #185.
+
+The portable code we built (VBIOS parse, Falcon driver, DMEMMAPPER
+patch, sig-index algorithm, RPC ring skeleton, HS firmware container
+parser) transfers directly to the Jetson Orin Nano's GA10B variant,
+where the FLR+BSI chain does not exist and the remaining path is
+roughly 1–3 weeks of platform-shim work plus GA10B firmware sourcing.
+See `docs/x86-64-gpu-inference-status.md` for the live status and
+ranked paths forward.
+
+### Why Jetson is subtly the *easier* problem now
+
+Jetson Orin Nano uses GA10B — an integrated variant of the same
+Ampere architecture. The GSP boot sequence has identical structure:
+same RISC-V core, same firmware format, same Booter Load mechanism.
+But the platform *structure* differs: Jetson is SoC-integrated
+behind an SMMU, not a PCIe pass-through device, and the x86-64-VFIO
+blocker (vfio-pci FLR → BSI DEVINIT re-apply → raised SEC2 PLM)
+simply does not exist there. Once Linux has kexec'd into SLM-OS,
+the GSP state is suspended by the `slmos-kexec` helper in a
+controlled way, and re-initialising it requires the same Booter
+Load chain — **but without the hardware-security gate that blocks
+us on x86-64.** GPU MMIO at `0x17000000` is already working from
+EL2+VHE on jetson-nano-2 (BOOT_0 = `0xB7B000A1` confirms the chip).
+What remains is an ARM64 platform shim and GA10B firmware sourcing,
+both tractable in ~1–3 weeks.
 
 ### Decision and framing
 

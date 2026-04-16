@@ -71,6 +71,7 @@ extern const struct gsp_platform_ops *gsp_platform;
  */
 #define DMEMMAPPER_APP_ID              0x00000004u
 #define DMEMMAPPER_INIT_CMD_FRTS       0x15u
+#define DMEMMAPPER_INIT_CMD_SB         0x19u
 #define DMEMMAPPER_CMD_IN_BUF_OFFSET   0x08u
 #define DMEMMAPPER_INIT_CMD_OFFSET     0x2Cu
 #define READ_VBIOS_STRUCT_SIZE         24u   /* ver + hdr + u64 addr + size + flags */
@@ -160,11 +161,14 @@ static inline uint32_t rd32le(const uint8_t *p)
          | ((uint32_t)p[3] << 24);
 }
 
-/* Public entry point — declared in bringup.h. Logic body below
- * is shared with the static __ test wrapper. */
-int gsp_bringup_patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
-                                      uint32_t interface_off,
-                                      uint64_t wpr_addr, uint64_t wpr_size)
+/* Generic DMEMMAPPER patcher — takes @init_cmd so callers can probe
+ * SB (0x19) or other lifecycle commands alongside the default FRTS
+ * (0x15). Declared in bringup.h. Writes frts_region only when
+ * init_cmd == FRTS (matches nouveau nvkm_gsp_fwsec_patch). */
+int gsp_bringup_patch_dmemmapper(uint8_t *dmem, uint32_t dmem_size,
+                                 uint32_t interface_off,
+                                 uint32_t init_cmd,
+                                 uint64_t wpr_addr, uint64_t wpr_size)
 {
     if (interface_off + 4 > dmem_size) return -1;
     uint8_t *itab = dmem + interface_off;
@@ -188,18 +192,19 @@ int gsp_bringup_patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
         if (dmem_base + DMEMMAPPER_INIT_CMD_OFFSET + 4 > dmem_size) return -1;
 
         /* init_cmd first. */
-        wr32le(dmem + dmem_base + DMEMMAPPER_INIT_CMD_OFFSET,
-               DMEMMAPPER_INIT_CMD_FRTS);
+        wr32le(dmem + dmem_base + DMEMMAPPER_INIT_CMD_OFFSET, init_cmd);
 
         /* cmd_in_buffer_offset is at +0x08; FWSEC reads its entire
          * command block from there. Block layout (nouveau/openrm):
          *   [+0 .. +24)   read_vbios sub-struct — FWSEC ALWAYS
          *                 reads this first; skipping it causes the
          *                 ucode to bail silently before FRTS runs.
-         *   [+24 .. +44)  frts_region sub-struct
+         *   [+24 .. +44)  frts_region sub-struct (FRTS only)
          */
         uint32_t cmdbuf = rd32le(dmem + dmem_base + DMEMMAPPER_CMD_IN_BUF_OFFSET);
-        if (cmdbuf + READ_VBIOS_STRUCT_SIZE + 20 > dmem_size) return -1;
+        uint32_t needed = READ_VBIOS_STRUCT_SIZE;
+        if (init_cmd == DMEMMAPPER_INIT_CMD_FRTS) needed += 20;
+        if (cmdbuf + needed > dmem_size) return -1;
 
         /* read_vbios: { u32 ver=1; u32 hdr=24; u64 addr=0; u32 size=0; u32 flags=2 } */
         uint8_t *rv = dmem + cmdbuf;
@@ -210,16 +215,30 @@ int gsp_bringup_patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
         wr32le(rv + 16, 0);                          /* size */
         wr32le(rv + 20, READ_VBIOS_FLAGS_DEFAULT);
 
-        /* frts_region at cmdbuf + 24: { u32 ver, hdr, addr, size, type }. */
-        uint8_t *frts = dmem + cmdbuf + FRTS_REGION_OFFSET_FROM_CMDBUF;
-        wr32le(frts +  0, 1);                                /* ver */
-        wr32le(frts +  4, 20);                               /* hdr */
-        wr32le(frts +  8, (uint32_t)(wpr_addr >> 12));       /* addr */
-        wr32le(frts + 12, (uint32_t)(wpr_size >> 12));       /* size */
-        wr32le(frts + 16, FRTS_REGION_TYPE_FB);              /* type */
+        if (init_cmd == DMEMMAPPER_INIT_CMD_FRTS) {
+            /* frts_region at cmdbuf + 24: { u32 ver, hdr, addr, size, type }. */
+            uint8_t *frts = dmem + cmdbuf + FRTS_REGION_OFFSET_FROM_CMDBUF;
+            wr32le(frts +  0, 1);                                /* ver */
+            wr32le(frts +  4, 20);                               /* hdr */
+            wr32le(frts +  8, (uint32_t)(wpr_addr >> 12));       /* addr */
+            wr32le(frts + 12, (uint32_t)(wpr_size >> 12));       /* size */
+            wr32le(frts + 16, FRTS_REGION_TYPE_FB);              /* type */
+        }
         return 0;
     }
     return -1;    /* DMEMMAPPER entry not found */
+}
+
+/* Legacy wrapper — always requests FRTS. Kept so test_bringup.c can
+ * keep exercising the patcher without knowing about the init_cmd
+ * parameter. */
+int gsp_bringup_patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
+                                      uint32_t interface_off,
+                                      uint64_t wpr_addr, uint64_t wpr_size)
+{
+    return gsp_bringup_patch_dmemmapper(dmem, dmem_size, interface_off,
+                                        DMEMMAPPER_INIT_CMD_FRTS,
+                                        wpr_addr, wpr_size);
 }
 
 int gsp_bringup_prepare(struct gsp_bringup *b)
@@ -253,6 +272,8 @@ int gsp_bringup_prepare(struct gsp_bringup *b)
 
     b->wpr2_size = WPR2_FRTS_SIZE;
     b->wpr2_addr = GA107_FB_SIZE_BYTES - WPR2_FRTS_BASE_FROM_TOP;
+
+    b->init_cmd  = DMEMMAPPER_INIT_CMD_FRTS;
 
     b->state = GSP_BRINGUP_INIT;
     return 0;
@@ -359,11 +380,14 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
            b->fwsec_sigs + sig_index * sig_size,
            sig_size);
 
-    /* Patch DMEMMAPPER in the DMA'd DMEM with our FRTS request. */
+    /* Patch DMEMMAPPER in the DMA'd DMEM with the requested command.
+     * Defaults to FRTS (0x15). Harness can override via b->init_cmd
+     * (e.g. --fwsec-sb → 0x19) for bisecting FRTS-specific hangs. */
     b->last_error_phase = 2;
-    if (gsp_bringup_patch_dmemmapper_frts(b->dma_dmem_va, b->dma_dmem_size,
-                                          b->fwsec_interface_offset,
-                                          b->wpr2_addr, b->wpr2_size) < 0) {
+    if (gsp_bringup_patch_dmemmapper(b->dma_dmem_va, b->dma_dmem_size,
+                                     b->fwsec_interface_offset,
+                                     b->init_cmd,
+                                     b->wpr2_addr, b->wpr2_size) < 0) {
         goto fail_free;
     }
 
@@ -381,8 +405,19 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     /* Reset GSP Falcon — kills whatever was running pre-bringup
      * (usually nothing — but SEC2/GSP state from the prior OS is
      * possible, and reset also clears IMEM/DMEM). */
+    /* Reset the Falcon — but only if it isn't already idle. On VFIO
+     * hosts, the PCI FLR triggered when userspace opens /dev/vfio/GROUP
+     * has already reset the Falcon, and the on-chip BSI (Bootstrap
+     * Sequencer) has re-run VBIOS DEVINIT. Writing FALCON_ENGINE.RESET
+     * on a post-BSI Falcon causes a PRI bus hang on GA107 (observed
+     * 2026-04-15 on test-pc: subsequent BAR0 reads never return). Skip
+     * the reset when falcon_is_idle() already reports clean state —
+     * bare-metal / non-VFIO callers without an FLR path will still
+     * exercise falcon_reset below. */
     b->last_error_phase = 3;
-    if (falcon_reset(&b->gsp_flcn) < 0) goto fail_free;
+    if (!falcon_is_idle(&b->gsp_flcn)) {
+        if (falcon_reset(&b->gsp_flcn) < 0) goto fail_free;
+    }
 
     /* On dual-mode GSP Falcon, force Falcon (non-RISC-V) core
      * select. FWSEC is a Falcon ucode — if the engine was last
@@ -422,6 +457,21 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
      * IMEMVirtBase here, which started the Falcon at a non-zero PC
      * and produced "ucode runs but never halts" on real hardware. */
     b->last_error_phase = 6;
+    if (b->trace_mode) {
+        /* Harness sampling mode: kick the BROM + STARTCPU but return
+         * immediately so the caller can poll DEBUGINFO / MAILBOX over
+         * time. Caller is responsible for gsp_bringup_free(). */
+        if (falcon_hs_kick(&b->gsp_flcn,
+                           NV_PGSP_RISCV_BASE,
+                           b->fwsec_pkc_data_off,
+                           b->fwsec_engine_id,
+                           b->fwsec_ucode_id,
+                           0) < 0) {
+            goto fail_free;
+        }
+        b->last_error_phase = 0;
+        return 0;
+    }
     if (falcon_hs_boot(&b->gsp_flcn,
                        NV_PGSP_RISCV_BASE,
                        b->fwsec_pkc_data_off,
@@ -432,27 +482,41 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
         goto fail_free;
     }
 
-    /* Observable outcome: WPR2 registers populated, FRTS err reg clean. */
+    /* Observable outcome: FRTS err reg clean, and — for CMD_FRTS —
+     * WPR2 registers populated. SB (0x19) halts cleanly but never
+     * writes WPR2; skip that post-check in the SB probe. */
     b->last_error_phase = 7;
     uint32_t err = gsp_platform->read32(NV_FWSEC_FRTS_ERR_REG);
     uint16_t err_code = (uint16_t)(err >> 16);
     if (err_code != 0) goto fail_free;
 
-    uint32_t wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
-    uint32_t wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
-    if (wpr_lo == 0 && wpr_hi == 0) goto fail_free;
+    if (b->init_cmd == DMEMMAPPER_INIT_CMD_FRTS) {
+        uint32_t wpr_lo = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_LO);
+        uint32_t wpr_hi = gsp_platform->read32(NV_PFB_PRI_MMU_WPR2_ADDR_HI);
+        if (wpr_lo == 0 && wpr_hi == 0) goto fail_free;
+    }
 
     b->state = GSP_BRINGUP_FWSEC_FRTS_DONE;
     b->last_error_phase = 0;
     return 0;
 
 fail_free:
-    if (b->dma_imem_va) gsp_platform->dma_free(b->dma_imem_va, b->dma_imem_size);
-    if (b->dma_dmem_va) gsp_platform->dma_free(b->dma_dmem_va, b->dma_dmem_size);
-    b->dma_imem_va = NULL;
-    b->dma_dmem_va = NULL;
+    gsp_bringup_free(b);
     b->state = GSP_BRINGUP_FAILED;
     return -1;
+}
+
+void gsp_bringup_free(struct gsp_bringup *b)
+{
+    if (!b || !gsp_platform || !gsp_platform->dma_free) return;
+    if (b->dma_imem_va) {
+        gsp_platform->dma_free(b->dma_imem_va, b->dma_imem_size);
+        b->dma_imem_va = NULL;
+    }
+    if (b->dma_dmem_va) {
+        gsp_platform->dma_free(b->dma_dmem_va, b->dma_dmem_size);
+        b->dma_dmem_va = NULL;
+    }
 }
 
 /* ---- E3.4.d: Booter Load on SEC2 Falcon ----
@@ -596,9 +660,24 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     gsp_platform->cache_clean(b->dma_wpr_meta_va, b->dma_wpr_meta_size);
     gsp_platform->mb();
 
-    /* ---- Phase 5: reset SEC2, pre-PIO setup ---- */
+    /* ---- Phase 5: reset SEC2, pre-PIO setup ----
+     * Skip reset if already idle — same reasoning as
+     * gsp_bringup_fwsec_frts phase 3: on VFIO hosts, vfio-pci's FLR
+     * + on-chip BSI DEVINIT recovery leave the Falcon in an
+     * idle-but-live state, and writing FALCON_ENGINE.RESET on that
+     * state hangs the PRI bus. */
     b->last_error_phase = 103;
-    if (falcon_reset(&b->sec2_flcn) < 0) { rc = GSP_ERR_IO; goto fail; }
+    /* Skip falcon_reset when the Falcon is already idle (post-FLR
+     * path on VFIO) or when its control registers are priv-locked
+     * (0xbadfXXXX) — writing FALCON_ENGINE.RESET on a priv-locked
+     * engine stalls the PRI bus indefinitely on GA107 SEC2. On
+     * bare-metal / non-VFIO callers neither flag will be set and
+     * falcon_reset runs normally. */
+    bool sec2_idle   = falcon_is_idle(&b->sec2_flcn);
+    bool sec2_locked = falcon_is_priv_locked(&b->sec2_flcn);
+    if (!sec2_idle && !sec2_locked) {
+        if (falcon_reset(&b->sec2_flcn) < 0) { rc = GSP_ERR_IO; goto fail; }
+    }
     falcon_pre_pio_setup(&b->sec2_flcn);
 
     /* ---- Phase 6: PIO upload non-secure IMEM, secure IMEM, DMEM ---- */

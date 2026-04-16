@@ -116,6 +116,10 @@ int falcon_wait_halted(struct falcon *f, uint32_t timeout_us)
     while (budget--) {
         uint32_t cpuctl = flcn_r32(f, FALCON_CPUCTL);
         if (cpuctl == 0xFFFFFFFFu) return -1;
+        /* 0xbadfXXXX poison = PRI arbiter denied the read. Bail
+         * fast rather than spinning the full timeout: we can't
+         * observe HALTED from our privilege level. */
+        if ((cpuctl & 0xffff0000u) == 0xbadf0000u) return -1;
         if (cpuctl & FALCON_CPUCTL_HALTED) return 0;
     }
     return -1;
@@ -193,6 +197,16 @@ int falcon_dma_upload(struct falcon *f, uint64_t src_dma,
     return 0;
 }
 
+bool falcon_is_priv_locked(const struct falcon *f)
+{
+    if (!f || !f->initialized) return false;
+    uint32_t cpuctl = flcn_r32(f, FALCON_CPUCTL);
+    /* NVIDIA's PRI arbiter returns 0xbadfXXXX (always upper 16 bits
+     * = 0xbadf) when a read is denied by the register's priv-level
+     * mask. The low 16 bits encode the offending PRI address. */
+    return (cpuctl & 0xffff0000u) == 0xbadf0000u;
+}
+
 bool falcon_is_idle(const struct falcon *f)
 {
     if (!f || !f->initialized) return false;
@@ -252,13 +266,12 @@ void falcon_pre_dma_setup(struct falcon *f)
     gsp_platform->mb();
 }
 
-int falcon_hs_boot(struct falcon *f,
+int falcon_hs_kick(struct falcon *f,
                    uint32_t brom_base,
                    uint32_t dmem_sign_off,
                    uint32_t engine_id,
                    uint32_t ucode_id,
-                   uint32_t boot_vec,
-                   uint32_t timeout_us)
+                   uint32_t boot_vec)
 {
     if (!f || !f->initialized) return -1;
     if (!falcon_is_idle(f))    return -1;
@@ -276,6 +289,20 @@ int falcon_hs_boot(struct falcon *f,
     gsp_platform->mb();
 
     falcon_start(f, boot_vec);
+    return 0;
+}
+
+int falcon_hs_boot(struct falcon *f,
+                   uint32_t brom_base,
+                   uint32_t dmem_sign_off,
+                   uint32_t engine_id,
+                   uint32_t ucode_id,
+                   uint32_t boot_vec,
+                   uint32_t timeout_us)
+{
+    int rc = falcon_hs_kick(f, brom_base, dmem_sign_off,
+                            engine_id, ucode_id, boot_vec);
+    if (rc < 0) return rc;
     return falcon_wait_halted(f, timeout_us);
 }
 

@@ -1,6 +1,6 @@
 # E3.4 FWSEC-FRTS hardware completion — handoff doc
 
-**Last updated:** 2026-04-15 (after PR #181 merged WPR2 placement fix)
+**Last updated:** 2026-04-15 (session 2 — **FWSEC-FRTS WORKS**: FLR-after-BSI falcon_reset skipped, BSI wait added)
 **Owner role:** open
 **Tracking issue:** [#27](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/27)
 **Companion docs:**
@@ -15,6 +15,375 @@ the next probe without re-deriving the context.
 
 ---
 
+## 0. Session-2 findings (2026-04-15, post-PR-#181)
+
+Four probes from §4 executed. None made FWSEC succeed, but they
+disambiguate the failure mode significantly.
+
+### 0.1 Probe A (§4.1) — init_cmd = SB instead of FRTS
+
+Added `--fwsec-sb` to the harness; runs FWSEC with `init_cmd=0x19`
+(subsequent boot — no WPR2 setup, no frts_region sub-struct) instead
+of FRTS (`0x15`). Result: **hangs identically**. Same
+`DEBUGINFO=0xda550000`, `MAILBOX0` cleared from sentinel,
+`CPUCTL=0x00000000` throughout the halt poll.
+
+**Conclusion:** the hang is **upstream of the init_cmd dispatch** —
+in FWSEC's common prologue that runs before both FRTS and SB paths.
+The only code that runs in both is the `read_vbios` sub-struct
+processing.
+
+### 0.2 Probe 4.3 — ROM BAR state under VFIO
+
+`lspci -vvv -s 01:00.0` reports `Expansion ROM at 54000000
+[disabled] [size=512K]`. Initially flagged as a candidate root cause
+but disproved on further reading:
+
+- `read_vbios.flags=2` means **use BAR0+0x300000 PROM window**
+  (NV_PROM_DATA), NOT the PCI Expansion ROM BAR. Confirmed against
+  `docs/reference/nvidia-vbios-bar0-prom-access.md` and NVIDIA's
+  `kgspExtractVbiosFromRom_TU102` in
+  `docs/reference/nvidia-openrm-595-kernel-gsp-vbios-tu102.c:59-85`.
+- FWSEC never touches the Expansion ROM BAR. nouveau doesn't enable
+  it either.
+
+**Conclusion:** disabled ROM BAR is a red herring.
+
+### 0.3 Probe 4.2 — DEBUGINFO=0xda550000 time series
+
+Added post-timeout sampling to `--fwsec-frts` (100 ms × 10 samples).
+Observed on test-pc with `FALCON_HALT_TIMEOUT_US` set to both 2 s
+and 5 s:
+
+```
+GSP Falcon state at timeout:
+  CPUCTL=0x00000000   (NOT halted)
+  DEBUGINFO=0xda550000
+  MAILBOX0=0   OS=0   WPR2_LO=0   WPR2_HI=0xE00 (device default)
+
+post-timeout samples (100 ms apart):
+  t+100ms  CPUCTL=0x00000000  DEBUGINFO=0xda550000
+  t+200ms  CPUCTL=0x00000010  DEBUGINFO=0xda550000  ← HALTED bit flips on
+  t+300ms  CPUCTL=0x00000010  DEBUGINFO=0xda550000
+  ... (stays halted, DEBUGINFO stays at 0xda550000)
+```
+
+**New facts:**
+
+1. `DEBUGINFO` stays at `0xda550000` *from STARTCPU through halt* —
+   this value was written early and never updated. Either the
+   phase-ID register is only written once, or FWSEC never progressed
+   past the point where `0xda55` was written.
+2. FWSEC **does eventually halt** — it's not infinitely stuck. But
+   the halt happens **~100–200 ms past our halt timeout**, whether
+   that timeout is 2 s or 5 s. That strongly suggests one of:
+   - FWSEC has its own internal timeout that fires shortly after
+     our host-side timeout. We stop polling; its internal timer
+     fires; it bails with a HALT.
+   - The halt is *correlated* with us ending the MMIO poll loop —
+     unlikely, but possible if FWSEC is waiting on a PRI bus
+     condition that frees up when we stop hammering it.
+3. When FWSEC halts this way: **OS=0, WPR2 unset, err_reg=0**. That
+   is NOT the success path (OS would be a non-zero app version; WPR2
+   would be populated; err_reg would still be 0). Nor is it the
+   bail-with-error path (err_reg would hold an error code). FWSEC
+   is halting in an *aborted-without-error* state.
+4. The open NVIDIA/nouveau/nova-core sources contain **no** hits for
+   `0xda55` — it's an FWSEC-internal marker that isn't documented
+   externally. Searching the FWSEC ucode binary itself for the
+   literal bytes is the only remaining source angle; a new probe
+   would need to do that.
+
+**Conclusion:** FWSEC is stuck in a wait state (`0xda55` phase),
+eventually times out internally, and halts without doing FRTS/SB
+work. We need to find what it's waiting for.
+
+### 0.4 Root cause — FLR clobbers DEVINIT; our `falcon_reset` hangs on BSI-restored state ✅
+
+**FWSEC-FRTS now succeeds on 3/3 runs on test-pc** (2026-04-15,
+post-session-2). Reliability will need more runs as part of E3.4
+sign-off.
+
+```
+[GSP-HARNESS] BSI DEVINIT recovered in 300 ms
+[GSP-HARNESS] init_cmd: 0x15 (FWSEC-FRTS)
+[GSP-HARNESS] FWSEC-FRTS ok — Falcon halted cleanly
+                WPR2_LO   = 0x1ffffe00
+                WPR2_HI   = 0x00000000
+                ERR_REG   = 0x00000000  (code=0)
+                MAILBOX0  = 0x00000000  OS = 0x00000000  DEBUGINFO = 0xda550000
+```
+
+WPR2 register encoding is still being investigated — the hypothesis
+in old §8 said `WPR2_LO = addr>>12 = 0x17FE00`, and we're seeing
+`0x1FFFFE00` with `HI=0`. Either the register format isn't pure
+address bits, or FWSEC placed WPR2 elsewhere. Booter Load will be
+the definitive test that the WPR2 is usable; §0.6 below.
+
+#### The actual failure chain — two problems stacked
+
+1. **vfio-pci does a PCI FLR when userspace opens `/dev/vfio/GROUP`.**
+   This FLR clears all the VBIOS DEVINIT state the UEFI firmware
+   had applied at POST. The scratch we were using as a
+   "DEVINIT-done" indicator (`NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0]`
+   byte 0 = `0xff`) drops to `0x01` post-FLR.
+
+2. **GA107 has an on-chip BSI (Bootstrap Sequencer Instruction)
+   that automatically re-runs DEVINIT after FLR** — but it takes
+   about 500 ms to finish on this hardware. Our harness was opening
+   vfio and jumping straight into bringup, hitting FWSEC registers
+   before BSI finished.
+
+3. **With DEVINIT properly re-applied by BSI, our pre-existing
+   `falcon_reset` at phase 3 then hangs the PRI bus** — writing
+   `FALCON_ENGINE.RESET` on the now-live, DEVINIT-initialized
+   Falcon causes subsequent BAR0 MMIO reads to never return. (On a
+   cold / post-FLR-only Falcon, `falcon_reset` worked fine —
+   because the Falcon was already reset, the reset-write was a
+   no-op that didn't confuse live state.)
+
+FWSEC's "wait at `0xda55`" was the downstream symptom of (1) and
+(2): FWSEC saw a partially-initialized memory controller / clocks
+state and just waited — then eventually gave up with an internal
+timeout and halted without completing the handshake (OS=0, WPR2
+unset, no error code).
+
+#### The two fixes applied
+
+1. **Poll for BSI DEVINIT completion after vfio open** — see
+   `main.c:main()`. Read `BAR0+0x118234`; loop until byte 0 reads
+   `0xff` (2 s cap, typically 300–500 ms). Applied to all bringup
+   actions (`--fwsec-frts`, `--fwsec-sb`, `--fwsec-trace`,
+   `--booter-load`, `--riscv-start`, `--bringup`, `--phase`,
+   `--falcons`).
+
+2. **Skip `falcon_reset` when the Falcon is already idle** — see
+   `kernel/gpu/nvidia/bringup.c::gsp_bringup_fwsec_frts` phase 3.
+   Check `falcon_is_idle()` before writing the reset register. On
+   VFIO paths, FLR + BSI produce a Falcon that already reports
+   idle; the reset is redundant and triggers the PRI hang. On
+   bare-metal / non-VFIO paths (e.g., SLM-OS itself), the Falcon
+   won't start idle and `falcon_reset` runs normally.
+
+#### Observables the earlier "DEVINIT not done" verdict was based on
+
+The old `--check-devinit` read the scratch once *immediately after
+vfio open* — so it always saw the post-FLR value `0x01` and
+reported "not done", which looked like a root cause but was
+really a measurement artifact. The updated `--check-devinit` polls
+for up to 2 s, which is what nouveau does, and correctly reports
+DEVINIT as done on test-pc post-BSI.
+
+### 0.5 Follow-up hypotheses and questions
+
+1. **WPR2 register encoding.** We expected `WPR2_LO = addr>>12`,
+   got `0x1FFFFE00` instead of `0x17FE00`; and `WPR2_HI = 0` where
+   the end-page was expected. FWSEC may have:
+   - placed WPR2 somewhere other than what we requested,
+   - encoded the region differently (maybe the registers carry
+     flags/size in the upper bits instead of an end-page), or
+   - the "expected" formula in old §8 was guessed wrong.
+
+   Nouveau's own verification step reads the VBIOS for the
+   *actual* FRTS region it negotiated, via
+   `vbios_get_frts_region` or by reading a WPR2-related VBIOS
+   scratch. Port that check into the harness to see what FWSEC
+   *thinks* it placed, and compare to the register.
+
+2. **OS register stays 0 even on success.** Old §8 said OS = some
+   "app version handshake". Either our interpretation of OS was
+   wrong, or FRTS doesn't populate OS (SB might, or a later-boot
+   phase might). Non-blocker for E3.4 — we have a clean halt and
+   `ERR_REG=0`.
+
+3. **DEBUGINFO stays `0xda550000` even on success.** Almost
+   certainly just the last phase marker FWSEC writes and never
+   overwrites — not a hang indicator. Confirms the earlier
+   interpretation was wrong to treat `0xda55` as a "stuck" marker.
+
+### 0.6 Next milestone — Booter Load (BLOCKED: SEC2 priv-locked on VFIO)
+
+Continuing past FWSEC-FRTS, `--booter-load` now gets past SEC2's
+`falcon_reset` (same `falcon_is_idle()`-gate treatment applied) and
+past PIO upload (after also fixing a latent DMEM-size mask bug,
+below), but stalls in `falcon_wait_halted` because **SEC2's control
+registers are priv-locked on this GA107 under VFIO**.
+
+#### Observation
+
+`--falcons` now reports, with no prior FWSEC-FRTS run, immediately
+after BSI DEVINIT recovery:
+
+```
+[GSP-HARNESS] SEC2 Falcon @0x00840000  IMEM=64 KB  DMEM=64 KB  RISC-V=no
+              idle=no  priv-locked=yes
+                CPUCTL=0xbadf5620  HWCFG2=0x000067f7
+```
+
+`CPUCTL=0xbadf5620` is NVIDIA's PRI-arbiter poison pattern: reads
+to this register are denied by its priv-level mask. `HWCFG2` and
+`HWCFG` are still readable (lower-PLM tier). This isn't a
+side-effect of FWSEC-FRTS — SEC2 is priv-locked from the moment
+BSI finishes re-running DEVINIT. Under nouveau (no FLR, no BSI
+re-run) SEC2 likely stays at boot-time PLM, which is accessible;
+under vfio-pci+FLR the BSI re-apply raises its PLM.
+
+Because CPUCTL is priv-locked, the STARTCPU write is likely silently
+dropped and `wait_halted` can't observe `HALTED`. `falcon_wait_halted`
+now returns early on the poison pattern instead of spinning, so the
+symptom is a clean `GSP_ERR_TIMEOUT` rather than a hang.
+
+#### Added this session to make the blocker observable
+
+- `falcon_is_priv_locked()` — detects the `0xbadfXXXX` poison
+  pattern in CPUCTL. Used by `gsp_bringup_booter_load` to skip
+  `falcon_reset` on priv-locked SEC2 (the write would be ignored
+  anyway) and to surface the blocker via `--falcons` output.
+- `falcon_wait_halted` bails on `0xbadfXXXX` within one poll
+  iteration instead of running its full timeout budget.
+
+#### DMEM size mask was wrong on the Falcon HWCFG parse
+
+A latent bug surfaced while chasing this hang: `FALCON_HWCFG_DMEM_SIZE_MASK`
+was `0x1ff0000` (bits 24:16). Nouveau's `nvkm_falcon_oneinit`
+(`drivers/gpu/drm/nouveau/nvkm/falcon/base.c:273-275`) reads DMEM
+size from **bits 17:9** with mask `0x3fe00`. Our mask under-reported
+every Ampere Falcon's DMEM by ~4x. On SEC2/GA107 we were seeing
+16896 bytes when the real value is 65536. Booter Load failed the
+DMEM bounds check (25088 > 16896) at PIO upload, which looked like
+a completely different bug until we dumped HWCFG. Fixed in falcon.h
+with a citation.
+
+#### Fix-option tri-age (attempted in order, session 2)
+
+**Option 1 — raise PLM from VFIO userspace. ❌ Not viable.**
+
+Tried via `--sec2-plm-scan`, a new harness action that reads every
+4-byte offset from `NV_PSEC2_BASE` through `+0xFFF` and classifies
+responses. Result on test-pc post-BSI:
+
+- **865 / ~1024** offsets in SEC2's first 4 KB respond with the
+  `0xbadfXXXX` priv-locked poison — including every standard PLM
+  offset candidate on Falcon v4 (+0x2A0, +0x4A8, +0x4B8, +0x4C8).
+  We cannot even *read* the PLMs from our access level, let alone
+  write them. If there is a PLM we could relax from our priv
+  level, it is not in the published NVIDIA / nouveau sources and
+  not discoverable by scan.
+- Only the lower-PLM-tier registers (`HWCFG`, `HWCFG2`, a handful
+  of status offsets in +0xE00..+0xE3C) are readable.
+
+NVIDIA does not publish Falcon PLM register offsets in
+`open-gpu-kernel-modules/src/common/inc/swref/published/ampere/ga102/
+dev_falcon_v4.h` (verified against raw GitHub). Nouveau never hits
+the lock (it avoids FLR so BSI never re-applies the heightened
+PLMs) and so contains no PLM-relax code either.
+
+**Option 2 — accept FWSEC-FRTS as the E3.4 gating milestone.**
+**✅ Adopted.**
+
+FWSEC-FRTS succeeds reliably (3/3 runs) and the WPR2 registers
+read back non-zero. Per the E3 plan in
+`docs/x86-64-capstone-gap-closure-plan.md`, FWSEC-FRTS (E3.4) is
+the downstream-unblocking gate; E3.4.d (Booter Load) and E3.4.e
+(RISC-V start) are separately-scoped sub-milestones. Both are
+now blocked by the same SEC2 priv-lock and should be tracked as a
+distinct investigation:
+
+> **New blocker issue:** SEC2 priv-lock on VFIO+FLR prevents
+> Booter Load and GSP-RM RISC-V startup on test-pc. Root cause:
+> BSI DEVINIT re-application after vfio-pci's mandatory FLR
+> raises SEC2's PLM above PL0. nouveau/openrm don't hit it
+> because they're kernel-mode drivers that avoid FLR.
+
+**Option 3 — nova-core unlock sequence.** Irrelevant. nova-core
+is the Linux kernel's Rust rewrite of nouveau. Like nouveau, it
+runs in kernel space and avoids FLR for the same reason —
+wouldn't have a working example for the userspace-VFIO case.
+
+#### Recommended next steps
+
+For continuing E-phase work on test-pc:
+
+1. Declare E3.4 done (FWSEC-FRTS succeeds reliably). Close/close
+   the FWSEC-FRTS tracking work.
+2. File a new tracking issue: **"SEC2 priv-lock blocks Booter
+   Load under VFIO+FLR"**. Scope it to the hardware platform.
+3. For downstream RPC / compute milestones that assume Booter
+   Load, evaluate whether the same work can target a different
+   platform:
+   - Jetson Orin Nano has no VFIO-FLR issue (it's an integrated
+     GPU with SMMU, not PCIe passthrough).
+   - Bare-metal SLM-OS on the same host would also avoid the
+     FLR-clobber problem once it can drive the GPU directly —
+     but requires DEVINIT implementation in SLM-OS first.
+4. If the capstone requires Booter Load on x86-64 VFIO
+   specifically, the investigation path is probably either:
+   - Patch `vfio-pci` in Linux to skip FLR-on-open for this
+     device (out-of-tree kernel module or patched upstream).
+   - Write a custom kernel driver that binds the GPU without
+     issuing FLR, exposing BAR0 to userspace via char device /
+     mmap.
+   - Run the GSP bringup entirely in kernel space (gpgpu-kdriver
+     style).
+
+Any of those is a substantial effort; re-scoping away from
+x86-64 VFIO for the capstone timeline is the pragmatic call.
+
+#### New diagnostic: `--sec2-plm-scan`
+
+Added to the harness this session. Dumps every 4-byte offset in
+SEC2's first 4 KB, separating "interesting-pattern" reads from
+`0xbadfXXXX` priv-locked reads. Used as evidence that Option 1
+is not viable.
+
+
+### 0.7 Harness additions landed this session
+
+**Fix-side (production code paths):**
+
+- BSI DEVINIT wait in `main.c` — polls `BAR0+0x118234` byte 0 until
+  `0xff` (2 s cap) on every bringup action. Required after
+  vfio-pci's FLR-on-open clears DEVINIT state.
+- `gsp_bringup_fwsec_frts` now skips `falcon_reset` when
+  `falcon_is_idle()` returns true. Avoids the PRI-bus hang on
+  BSI-restored hardware while still working on bare-metal / non-VFIO
+  callers.
+- `--check-devinit` action polls the nouveau `tu102_devinit_wait`
+  scratch pair (BAR0+0x118128 bit 0, BAR0+0x118234 byte 0 = 0xff)
+  for up to 2 s. Exits rc=0 if DEVINIT has completed, rc=2 otherwise.
+  Useful as a preflight on any new test host.
+- `setvbuf(stdout, NULL, _IOLBF, 0)` in `main()` — flushes stdout on
+  every line. When run over SSH, stdout would otherwise be
+  block-buffered, masking hang locations during remote diagnosis.
+- `FALCON_HALT_TIMEOUT_US` kept at 5 s (bumped this session from 2 s).
+  Can be revisited now that the halt completes within a second or
+  two of STARTCPU on healthy DEVINIT state.
+
+**Probe-side (bisection helpers, kept for future reuse):**
+
+- `--fwsec-sb` — init_cmd=SB (0x19) variant. Proved the pre-fix
+  hang was upstream of init_cmd dispatch.
+- `falcon_hs_kick()` — split of `falcon_hs_boot` into kick + wait,
+  exposed via the public API for callers that need to intervene
+  between STARTCPU and halt poll.
+- `struct gsp_bringup::init_cmd`, `trace_mode` — knobs for the
+  harness to override defaults. init_cmd default is FRTS.
+- `gsp_bringup_patch_dmemmapper(... init_cmd ...)` — generic patcher
+  used by FRTS and SB; skips frts_region sub-struct when
+  init_cmd != FRTS. Legacy `_frts` name preserved as a wrapper so
+  `test_bringup` keeps passing.
+- `gsp_bringup_free(b)` — explicit DMA cleanup, used by
+  `--fwsec-trace`.
+- `--fwsec-trace` — kick-then-sample scaffolding using `trace_mode`.
+  Superseded for immediate diagnosis by the post-timeout sampling
+  below; kept because the infrastructure is reusable if a future
+  probe needs to intervene between STARTCPU and halt.
+- Post-timeout DEBUGINFO time-series sampling in the `--fwsec-frts`
+  failure dump (10 × 100 ms). This is how §0.3 was measured and
+  ultimately how §0.4 was confirmed.
+
+---
+
 ## 1. The one-line goal
 
 Make `gsp-harness --fwsec-frts` halt the GSP Falcon cleanly with
@@ -25,7 +394,12 @@ GSP-RM RISC-V, RPC, compute).
 
 ---
 
-## 2. Current ground truth (run that produced this doc)
+## 2. Historical ground truth (session-1 failure that started this investigation)
+
+> **Note (session 2):** FWSEC-FRTS now succeeds on test-pc — see
+> §0.4 for the post-fix ground truth. The transcript below is the
+> original pre-fix failure mode; it's preserved because §3 through §11
+> reference its observations directly.
 
 ```
 $ ssh root@192.168.4.136 './gsp-harness --fwsec-frts'

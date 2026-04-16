@@ -809,7 +809,7 @@ no-op.
 The x86-64 handler calls `schedule()` directly (NOT `scheduler_tick()`) so
 quantum accounting stays owned by the LAPIC timer. The reschedule IPI is
 gated through IDT entry 49 with `ist=1`, sharing IST1 with the timer —
-see A1 in `docs/x86-64-capstone-gap-closure-plan.md` for the stack rationale.
+see A1 in `docs/archive/plans/x86-64-capstone-gap-closure-plan.md` for the stack rationale.
 
 ## Periodic load rebalance (`sched_rebalance_tick`)
 

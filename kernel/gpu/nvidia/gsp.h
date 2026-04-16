@@ -1,7 +1,7 @@
 /*
  * gsp.h — NVIDIA GSP-RM bringup API (shared across Ampere platforms).
  *
- * Implements Phase E of docs/x86-64-capstone-gap-closure-plan.md
+ * Implements Phase E of docs/archive/plans/x86-64-capstone-gap-closure-plan.md
  * (and issue #28 for Jetson) — booting the RISC-V "GPU System
  * Processor" microcontroller so the GPU's compute engines become
  * usable for model inference.

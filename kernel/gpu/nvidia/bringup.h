@@ -47,6 +47,11 @@ enum gsp_bringup_state {
 #define NV_PFB_PRI_MMU_WPR2_ADDR_HI   0x001fa828u
 #define NV_FWSEC_FRTS_ERR_REG         0x00001438u   /* top 16 bits = err code */
 
+/* DMEMMAPPER init_cmd values. Matches nouveau
+ * NVFW_FALCON_APPIF_DMEMMAPPER_CMD_*. */
+#define GSP_DMEMMAPPER_CMD_FRTS       0x15u
+#define GSP_DMEMMAPPER_CMD_SB         0x19u
+
 struct gsp_bringup {
     struct falcon gsp_flcn;     /* NV_PGSP_BASE */
     struct falcon sec2_flcn;    /* NV_PSEC2_BASE */
@@ -85,6 +90,20 @@ struct gsp_bringup {
 
     enum gsp_bringup_state state;
     uint32_t last_error_phase;
+
+    /* DMEMMAPPER init_cmd. Defaults to FRTS (0x15) from
+     * gsp_bringup_prepare; the harness can override to SB (0x19) via
+     * --fwsec-sb to bisect FRTS-specific failures. When init_cmd !=
+     * FRTS, the frts_region sub-struct is skipped (matches nouveau). */
+    uint32_t init_cmd;
+
+    /* Trace mode (harness-only). When true, gsp_bringup_fwsec_frts
+     * returns 0 immediately after STARTCPU without polling HALTED and
+     * without freeing DMA buffers — caller samples DEBUGINFO / MAILBOX
+     * over time and frees via gsp_bringup_free(). Used by
+     * --fwsec-trace to disambiguate "stuck at one instruction" from
+     * "slow progress". */
+    bool     trace_mode;
 
     /* Diagnostic fields populated during fwsec_frts regardless of
      * success/failure — the harness reads these to show the sig
@@ -152,6 +171,13 @@ int gsp_bringup_prepare(struct gsp_bringup *b);
  * failure with @last_error_phase set to a step identifier.
  */
 int gsp_bringup_fwsec_frts(struct gsp_bringup *b);
+
+/*
+ * Release DMA buffers attached to @b. Idempotent (no-op if already
+ * freed). Call when @trace_mode is set after the caller is done
+ * sampling FWSEC's execution state, or on any early return path.
+ */
+void gsp_bringup_free(struct gsp_bringup *b);
 
 /*
  * Phase 2 (E3.4.d): Booter Load on SEC2.
@@ -229,6 +255,20 @@ int gsp_bringup_riscv_start(struct gsp_bringup *b);
 int gsp_bringup_patch_dmemmapper_frts(uint8_t *dmem, uint32_t dmem_size,
                                       uint32_t interface_off,
                                       uint64_t wpr_addr, uint64_t wpr_size);
+
+/*
+ * Generic DMEMMAPPER patcher. Caller supplies @init_cmd:
+ *   - 0x15 (FRTS) → writes read_vbios + frts_region (WPR2 setup).
+ *   - 0x19 (SB)   → writes only read_vbios; frts_region is skipped
+ *                   to match nouveau's behavior for subsequent-boot.
+ * Other values are treated like SB (read_vbios only) and exist for
+ * probing the init_cmd dispatch path. @wpr_addr/@wpr_size are used
+ * only when init_cmd == FRTS.
+ */
+int gsp_bringup_patch_dmemmapper(uint8_t *dmem, uint32_t dmem_size,
+                                 uint32_t interface_off,
+                                 uint32_t init_cmd,
+                                 uint64_t wpr_addr, uint64_t wpr_size);
 
 /*
  * Pick the FWSEC signature index to patch into DMEM. Wraps the
