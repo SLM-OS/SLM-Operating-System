@@ -103,4 +103,7 @@ int test_suite_steal_deque(void);
 /* Cooperative-preemption tests (issue #99 resolution) */
 int test_suite_coop_preempt(void);
 
+/* Scheduler trace buffer tests (#195) */
+int test_suite_sched_trace(void);
+
 #endif /* TEST_HARNESS_H */

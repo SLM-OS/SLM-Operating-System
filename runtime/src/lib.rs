@@ -1279,6 +1279,11 @@ pub struct RustEvictionStats {
     /// Per-expert weights in basis points (0..10000). CACHEUS caps
     /// at 5 experts. Entries past `cacheus_expert_count` are zero.
     pub expert_weights_bp: [u32; 5],
+    // #115: generic per-policy counters. Reset on every policy swap
+    // so values reflect the currently-installed policy's lifetime.
+    pub policy_decisions: u64,
+    pub policy_fallbacks: u64,
+    pub policy_avg_latency_ns: u64,
 }
 
 /// Fill `out` with the current eviction stats. Returns 0 on success.
@@ -1324,10 +1329,158 @@ pub unsafe extern "C" fn rust_eviction_get_stats(
                 }
             }
         });
+        // #115: generic per-policy counters (decisions/fallbacks/latency).
+        let c = mm::eviction::policy_counters();
+        stats.policy_decisions = c.decisions;
+        stats.policy_fallbacks = c.fallbacks;
+        stats.policy_avg_latency_ns = c.avg_latency_ns;
     }
 
     core::ptr::write(out, stats);
     0
+}
+
+/// Bump the global active-inferences counter for `model_id` by `delta`.
+///
+/// Used by the kernel to inform SlmHeuristicPolicy which model is
+/// currently running an inference, so the "inactive-models first"
+/// eviction tier can avoid evicting active-model weights. Called from
+/// the inference entry/exit path (rust_infer_classify) and from any
+/// scheduler integration in the future. Clamps at zero. #113.
+///
+/// When the ai_eviction feature is disabled this is a no-op.
+#[no_mangle]
+pub extern "C" fn rust_eviction_bump_active_inferences(
+    model_id: u8,
+    delta: i32,
+) {
+    #[cfg(feature = "ai_eviction")]
+    {
+        mm::eviction::slm_heuristic::bump_active_global(model_id, delta);
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (model_id, delta);
+    }
+}
+
+/// Overwrite the active-inferences counter for `model_id`. Mainly
+/// useful from tests or initialisation. #113.
+#[no_mangle]
+pub extern "C" fn rust_eviction_set_active_inferences(
+    model_id: u8,
+    count: u32,
+) {
+    #[cfg(feature = "ai_eviction")]
+    {
+        mm::eviction::slm_heuristic::set_active(model_id, count);
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (model_id, count);
+    }
+}
+
+/// Read the active-inferences counter for `model_id`. Returns 0 if
+/// ai_eviction is disabled. #113.
+#[no_mangle]
+pub extern "C" fn rust_eviction_get_active_inferences(model_id: u8) -> u32 {
+    #[cfg(feature = "ai_eviction")]
+    {
+        mm::eviction::slm_heuristic::get_active(model_id)
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = model_id;
+        0
+    }
+}
+
+/// One record in the CACHEUS weight trajectory (#111).
+///
+/// Caller passes an array of `RustTrajectoryEntry` and the FFI fills
+/// oldest-first. `n_experts` indicates how many weight slots are
+/// populated; remaining slots are zero.
+///
+/// Weights are reported as integer basis points (0..10000, 1 bp = 0.01%)
+/// so the kernel's `-mgeneral-regs-only` C code can read / print them
+/// without pulling in floating-point arithmetic. This matches the
+/// convention already used for `expert_weights_bp` in `RustEvictionStats`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RustTrajectoryEntry {
+    pub timestamp_ns: u64,
+    pub n_experts: u32,
+    pub _pad: u32,
+    pub weights_bp: [u32; 5],
+}
+
+/// Copy the CACHEUS weight trajectory into `out`, oldest-first.
+///
+/// Returns the number of entries written (≤ `max_entries`). Returns
+/// 0 if tracing is off, the active policy is not an ensemble, or the
+/// ring is empty. Returns -1 on null/invalid arguments.
+///
+/// # Safety
+/// `out` must point to a `max_entries`-long array of
+/// `RustTrajectoryEntry`. Caller retains ownership.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_get_trajectory(
+    out: *mut RustTrajectoryEntry,
+    max_entries: u32,
+) -> i32 {
+    if out.is_null() || max_entries == 0 { return -1; }
+
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (out, max_entries); 0 }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        use mm::eviction::{self, TrajectoryEntry};
+        // Stage into a stack buffer to avoid borrowing the registry
+        // lock while writing caller memory. 128 entries × 32 bytes
+        // = 4 KB — matches the ring capacity and keeps the stack
+        // footprint bounded.
+        let mut staged: [TrajectoryEntry; 128] = [TrajectoryEntry {
+            timestamp_ns: 0,
+            n_experts: 0,
+            weights: [0.0; 5],
+        }; 128];
+        let copied = eviction::with_active_policy(|p| {
+            // Only CacheusSelector exposes a trajectory; others fall
+            // through to the default `None` impl.
+            let ensemble = p.ensemble_trajectory();
+            match ensemble {
+                Some(slice) => {
+                    // Fast path: the ring hasn't wrapped, so as_slices()
+                    // returned a single contiguous front half.
+                    let n = slice.len().min(staged.len());
+                    staged[..n].copy_from_slice(&slice[..n]);
+                    n
+                }
+                None => 0,
+            }
+        }).unwrap_or(0);
+
+        let to_copy = copied.min(max_entries as usize);
+        for i in 0..to_copy {
+            let src = &staged[i];
+            let mut dst = RustTrajectoryEntry {
+                timestamp_ns: src.timestamp_ns,
+                n_experts: src.n_experts,
+                _pad: 0,
+                weights_bp: [0; 5],
+            };
+            for (k, w) in src.weights.iter().take(5).enumerate() {
+                // Basis points: clamp to [0, 1] then scale with a
+                // half-ulp bias so 0.9999 rounds to 10000.
+                let bp = (w.clamp(0.0, 1.0) * 10_000.0 + 0.5) as u32;
+                dst.weights_bp[k] = bp;
+            }
+            core::ptr::write(out.add(i), dst);
+        }
+        to_copy as i32
+    }
 }
 
 /// Comprehensive Rust-internal tests for the eviction subsystem.
@@ -1511,6 +1664,180 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             // this block, the swaps are consistent.
             true
         });
+        eviction::reset_to_default();
+
+        puts(b"\n-- eviction: per-policy counters (#115) --\n\0");
+
+        // Start from a clean slate: default swap resets counters.
+        eviction::reset_to_default();
+        let c0 = eviction::policy_counters();
+        check!(b"counters_zero_after_reset\0",
+               c0.decisions == 0 && c0.fallbacks == 0 &&
+               c0.avg_latency_ns == 0);
+
+        // Three select_victim calls → three decisions. Latency is
+        // nonzero in wall-clock terms (slm_get_time_ns sees at least
+        // one tick-granularity step, but may be 0 if the whole sample
+        // rounds down); asserting > 0 would be flaky. Count-only.
+        let _ = eviction::select_victim(&cands);
+        let _ = eviction::select_victim(&cands);
+        let _ = eviction::select_victim(&cands);
+        let c3 = eviction::policy_counters();
+        check!(b"counters_count_three_decisions\0", c3.decisions == 3);
+
+        // Fallback callback bumps FALLBACKS but not DECISIONS.
+        eviction::update_feedback(42, true);
+        eviction::update_feedback(43, false);
+        let c4 = eviction::policy_counters();
+        check!(b"counters_fallback_increments_only_on_fault\0",
+               c4.decisions == 3 && c4.fallbacks == 1);
+
+        // Swapping the policy resets counters.
+        eviction::set_eviction_policy(Box::new(eviction::FirstCandidatePolicy));
+        let c5 = eviction::policy_counters();
+        check!(b"counters_reset_on_policy_swap\0",
+               c5.decisions == 0 && c5.fallbacks == 0);
+
+        // reset_to_default() also resets counters.
+        let _ = eviction::select_victim(&cands);
+        eviction::reset_to_default();
+        let c6 = eviction::policy_counters();
+        check!(b"counters_reset_on_reset_to_default\0",
+               c6.decisions == 0 && c6.fallbacks == 0);
+
+        // select_victim on empty candidate list does NOT bump counters.
+        let cbefore = eviction::policy_counters();
+        let _ = eviction::select_victim(&empty);
+        let cafter = eviction::policy_counters();
+        check!(b"counters_skip_empty_select\0",
+               cbefore.decisions == cafter.decisions);
+
+        puts(b"\n-- eviction: CACHEUS trajectory (#111) --\n\0");
+
+        // Install CACHEUS and drive a few decisions + feedback cycles.
+        eviction::set_eviction_policy(Box::new(mm::eviction::CacheusSelector::ml_only()));
+
+        // An atomic (non-ensemble) policy returns 0 entries via the FFI.
+        eviction::reset_to_default();
+        let mut empty_out: [RustTrajectoryEntry; 4] = [RustTrajectoryEntry {
+            timestamp_ns: 0, n_experts: 0, _pad: 0, weights_bp: [0; 5],
+        }; 4];
+        let zero_entries = unsafe {
+            rust_eviction_get_trajectory(empty_out.as_mut_ptr(), 4)
+        };
+        check!(b"trajectory_zero_for_atomic_policy\0", zero_entries == 0);
+
+        // Re-install CACHEUS, make decisions, give feedback, and
+        // expect trajectory entries to accumulate.
+        eviction::set_eviction_policy(Box::new(mm::eviction::CacheusSelector::ml_only()));
+        for _ in 0..3 {
+            let _ = eviction::select_victim(&cands);
+        }
+        eviction::update_feedback(cands[0].block_id, true);
+        eviction::update_feedback(cands[0].block_id, false);
+
+        let mut out: [RustTrajectoryEntry; 16] = [RustTrajectoryEntry {
+            timestamp_ns: 0, n_experts: 0, _pad: 0, weights_bp: [0; 5],
+        }; 16];
+        let n = unsafe {
+            rust_eviction_get_trajectory(out.as_mut_ptr(), 16)
+        };
+        check!(b"trajectory_records_feedback_events\0", n >= 1);
+
+        // Every recorded entry is well-formed: non-zero expert count
+        // and weights sum close to 10000 bp (= 1.0 before rounding).
+        let mut malformed = 0i32;
+        for i in 0..n as usize {
+            let e = &out[i];
+            if e.n_experts == 0 || e.n_experts > 5 { malformed += 1; continue; }
+            let mut sum_bp = 0u32;
+            for k in 0..e.n_experts as usize {
+                sum_bp += e.weights_bp[k];
+            }
+            // Rounding noise can leave the sum inside [9998, 10002].
+            if sum_bp < 9990 || sum_bp > 10010 { malformed += 1; }
+        }
+        check!(b"trajectory_entries_well_formed\0", malformed == 0);
+
+        // max_entries=0 is an invalid request (-1), not a noop.
+        let neg = unsafe {
+            rust_eviction_get_trajectory(out.as_mut_ptr(), 0)
+        };
+        check!(b"trajectory_zero_max_is_error\0", neg == -1);
+
+        // NULL pointer is rejected.
+        let nullrc = unsafe {
+            rust_eviction_get_trajectory(core::ptr::null_mut(), 4)
+        };
+        check!(b"trajectory_null_out_is_error\0", nullrc == -1);
+
+        eviction::reset_to_default();
+
+        puts(b"\n-- eviction: active-inferences feed (#113) --\n\0");
+
+        // Make sure the global table starts clean before we measure.
+        mm::eviction::slm_heuristic::clear_active();
+
+        // Two weight blocks from different models — symmetric except
+        // for model_id. Without the active-inferences feed, both are
+        // "inactive" and the policy falls back to LRU (index 1, older).
+        let cands_113 = [
+            mm::eviction::BlockMeta {
+                block_id: 100, pool_type: mm::eviction::PoolType::Weight,
+                model_id: 0, layer_idx: 0, last_access_time: 500,
+                load_time: 0, access_count: 0, ref_count: 0,
+                gpu_mapped: false, is_dirty: false, model_priority: 0,
+            },
+            mm::eviction::BlockMeta {
+                block_id: 101, pool_type: mm::eviction::PoolType::Weight,
+                model_id: 1, layer_idx: 0, last_access_time: 100,
+                load_time: 0, access_count: 0, ref_count: 0,
+                gpu_mapped: false, is_dirty: false, model_priority: 0,
+            },
+        ];
+
+        eviction::set_eviction_policy(Box::new(
+            mm::eviction::SlmHeuristicPolicy::new()));
+
+        // Baseline: no active inferences → LRU fallback picks block 1
+        // (older access_time). This matches plain LRU.
+        let baseline = eviction::select_victim(&cands_113);
+        check!(b"slm_heuristic_lru_when_all_inactive\0",
+               baseline == Some(1));
+
+        // Feed: model 1 is now active. Eviction should shift to
+        // model 0 (the inactive one), even though model 1's block is
+        // older. This is the observable behaviour that distinguishes
+        // SLM-Heuristic from plain LRU.
+        rust_eviction_bump_active_inferences(1, 1);
+        let fed = eviction::select_victim(&cands_113);
+        check!(b"slm_heuristic_avoids_active_model\0",
+               fed == Some(0));
+
+        // Decrement returns us to the baseline — the guard protects
+        // against a stuck counter if the caller path panics.
+        rust_eviction_bump_active_inferences(1, -1);
+        let restored = eviction::select_victim(&cands_113);
+        check!(b"slm_heuristic_decrement_restores\0",
+               restored == Some(1));
+
+        // set/get round-trip through the FFI.
+        rust_eviction_set_active_inferences(2, 5);
+        check!(b"slm_heuristic_set_get_roundtrip\0",
+               rust_eviction_get_active_inferences(2) == 5);
+
+        // Indices >= MAX_MODELS (64) are silently ignored.
+        rust_eviction_set_active_inferences(200, 99);
+        check!(b"slm_heuristic_oob_index_clamped\0",
+               rust_eviction_get_active_inferences(200) == 0);
+
+        // Negative deltas below zero clamp at zero (no underflow).
+        mm::eviction::slm_heuristic::clear_active();
+        rust_eviction_bump_active_inferences(3, -5);
+        check!(b"slm_heuristic_underflow_clamps\0",
+               rust_eviction_get_active_inferences(3) == 0);
+
+        mm::eviction::slm_heuristic::clear_active();
         eviction::reset_to_default();
 
         puts(b"\n-- eviction: classical policies --\n\0");
@@ -3278,6 +3605,22 @@ pub extern "C" fn rust_infer_classify(model_index: u32) -> i32 {
     // Update LRU timestamp
     loader::registry::touch_model(model_index as usize);
 
+    // #113: inform SlmHeuristicPolicy that this model is actively
+    // running inference for the duration of the call. Any concurrent
+    // eviction picks between now and the matching decrement below
+    // will prefer weights from inactive models over this model's.
+    // The cast is safe: model_index > u8::MAX is out-of-range for
+    // BlockMeta::model_id anyway.
+    let active_id: u8 = (model_index & 0xFF) as u8;
+    rust_eviction_bump_active_inferences(active_id, 1);
+    struct Guard(u8);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            rust_eviction_bump_active_inferences(self.0, -1);
+        }
+    }
+    let _decrement_on_exit = Guard(active_id);
+
     static CLASSIFY_INPUT: [f32; 784] = [0.0; 784];
     static mut CLASSIFY_OUTPUT: [f32; 64] = [0.0; 64];
 
@@ -3983,21 +4326,27 @@ pub extern "C" fn rust_inference_test() -> i32 {
         if !passed_empty { failures += 1; }
     }
 
-    // Test 12e: msg_router bounded str_copy (RUST-C3)
+    // Test 12e: msg_router rejects oversized topic (RUST-C3 + #69)
     // Pass a topic name buffer that is exactly TOPIC_NAME_LEN bytes of a
-    // repeating pattern with no NUL terminator. The old str_copy would
-    // over-read past the buffer; the fix bounds reads at the explicit
-    // max_src_len. We verify the subscription was created (no crash) and
-    // that the stored name is truncated to TOPIC_NAME_LEN-1 chars + NUL.
+    // repeating pattern with no NUL terminator. This exercises two
+    // guarantees at once:
+    //   (1) RUST-C3: the bounds check in cstr_len_bounded never reads
+    //       past TOPIC_NAME_LEN regardless of the input pattern.
+    //   (2) #69: oversized names must be *rejected*, not silently
+    //       truncated — two distinct long names would otherwise alias
+    //       on the same 15-byte prefix.
+    // The old code returned 0 and stored the truncated prefix; the new
+    // contract returns -1 and creates no subscription.
     {
         msg_router::msg_router_init();
-        // 32-byte buffer with two halves of distinct non-NUL bytes so we
-        // can detect over-reads via stored topic name contents.
+        // 32-byte buffer with two halves of distinct non-NUL bytes.
+        // cstr_len_bounded scans up to TOPIC_NAME_LEN (16) bytes, finds
+        // no NUL, returns None, and subscribe returns -1.
         let mut src_buf = [0u8; 32];
         for i in 0..16 { src_buf[i] = b'A'; }
         for i in 16..32 { src_buf[i] = b'B'; }
         let ret = msg_router::msg_router_subscribe(src_buf.as_ptr(), 7);
-        let subscribed = ret == 0;
+        let rejected = ret == -1;
 
         let mut topic_names = [[0u8; 16]; 1];
         let mut count: i32 = 0;
@@ -4007,12 +4356,9 @@ pub extern "C" fn rust_inference_test() -> i32 {
             &mut count,
             1,
         );
-        // Stored name must be 15 'A's + NUL, proving reads stopped at
-        // max_src_len = TOPIC_NAME_LEN and did NOT leak 'B' bytes.
-        let mut expected = [b'A'; 16];
-        expected[15] = 0;
-        let passed = subscribed && count == 1 && topic_names[0] == expected;
-        print_test_result(b"msg_router: str_copy bounded (no over-read)\0", passed);
+        // No subscription was created.
+        let passed = rejected && count == 0;
+        print_test_result(b"msg_router: oversized topic rejected (#69)\0", passed);
         if !passed { failures += 1; }
 
         // Re-init so subsequent tests start clean.

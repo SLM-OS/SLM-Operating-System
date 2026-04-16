@@ -28,10 +28,62 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ptr::addr_of_mut;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::lru::LruPolicy;
 use super::policy::{BlockMeta, EvictionPolicy};
+
+// =============================================================================
+// Per-policy counters (#115)
+// =============================================================================
+//
+// Every `select_victim` call increments DECISIONS and accumulates the
+// wall-clock latency. `update_feedback(_, true)` increments FALLBACKS.
+// Counters are global to the installed policy — they reset on every
+// policy swap (`set_eviction_policy` / `reset_to_default`) so the
+// reading always reflects the lifetime of the *currently installed*
+// policy, not of the registry itself.
+//
+// Relaxed ordering is sufficient: counters are observational, never
+// consumed for control flow. Using relaxed avoids any extra barrier
+// on the hot select_victim path.
+
+static DECISIONS: AtomicU64 = AtomicU64::new(0);
+static FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static LATENCY_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+static LATENCY_SAMPLES: AtomicU64 = AtomicU64::new(0);
+
+fn counters_reset() {
+    DECISIONS.store(0, Ordering::Relaxed);
+    FALLBACKS.store(0, Ordering::Relaxed);
+    LATENCY_TOTAL_NS.store(0, Ordering::Relaxed);
+    LATENCY_SAMPLES.store(0, Ordering::Relaxed);
+}
+
+/// Snapshot of the per-policy counters. All values are lifetime totals
+/// for the currently-installed policy.
+#[derive(Clone, Copy, Default)]
+pub struct PolicyCounters {
+    pub decisions: u64,
+    pub fallbacks: u64,
+    pub avg_latency_ns: u64,
+}
+
+/// Read a consistent snapshot of the per-policy counters.
+pub fn policy_counters() -> PolicyCounters {
+    let decisions = DECISIONS.load(Ordering::Relaxed);
+    let fallbacks = FALLBACKS.load(Ordering::Relaxed);
+    let total_ns = LATENCY_TOTAL_NS.load(Ordering::Relaxed);
+    let samples = LATENCY_SAMPLES.load(Ordering::Relaxed);
+    let avg = if samples == 0 { 0 } else { total_ns / samples };
+    PolicyCounters { decisions, fallbacks, avg_latency_ns: avg }
+}
+
+extern "C" {
+    /// ARM generic timer / x86 TSC monotonic nanoseconds. Used to time
+    /// `select_victim` calls for the policy-latency counter.
+    fn slm_get_time_ns() -> u64;
+}
 
 /// Construct the default eviction policy.
 ///
@@ -110,6 +162,9 @@ pub fn reset_to_default() {
     unsafe {
         *addr_of_mut!(ACTIVE_POLICY) = Some(default_policy());
     }
+    // Counters are per-policy — clear after the swap so new decisions
+    // count against the freshly-installed default.
+    counters_reset();
 }
 
 /// Replace the active policy. Previous policy is dropped.
@@ -119,6 +174,7 @@ pub fn set_eviction_policy(policy: Box<dyn EvictionPolicy + Send>) {
     unsafe {
         *addr_of_mut!(ACTIVE_POLICY) = Some(policy);
     }
+    counters_reset();
 }
 
 /// Name of the currently installed policy, or `"none"` if the registry
@@ -169,16 +225,41 @@ pub fn clear_for_test() {
 ///
 /// Convenience helper for M6's allocator path. Returns `None` if no
 /// policy is installed or the candidate list is empty.
+///
+/// Per-policy counters (#115): increments DECISIONS and accumulates
+/// the select_victim wall-clock latency regardless of which concrete
+/// policy is installed. Fallbacks are observed separately via
+/// `update_feedback(_, true)`.
 pub fn select_victim(candidates: &[BlockMeta]) -> Option<usize> {
     if candidates.is_empty() {
         return None;
     }
-    with_active_policy(|p| p.select_victim(candidates))
+    // SAFETY: slm_get_time_ns is a kernel FFI — reads CNTPCT_EL0 /
+    // TSC; always safe to call from any context.
+    let t0 = unsafe { slm_get_time_ns() };
+    let out = with_active_policy(|p| p.select_victim(candidates));
+    let t1 = unsafe { slm_get_time_ns() };
+    if out.is_some() {
+        DECISIONS.fetch_add(1, Ordering::Relaxed);
+        let dt = t1.saturating_sub(t0);
+        LATENCY_TOTAL_NS.fetch_add(dt, Ordering::Relaxed);
+        LATENCY_SAMPLES.fetch_add(1, Ordering::Relaxed);
+    }
+    out
 }
 
 /// Forward feedback to the active policy. No-op if the registry is
 /// unset or the policy does not learn from feedback.
+///
+/// A `was_fault = true` callback indicates the active policy's victim
+/// choice led to a re-fault — i.e. a fallback from the policy's
+/// perspective. Bump the per-policy FALLBACKS counter here so
+/// reporting does not need to crack open each concrete policy's
+/// internal state.
 pub fn update_feedback(block_id: u32, was_fault: bool) {
+    if was_fault {
+        FALLBACKS.fetch_add(1, Ordering::Relaxed);
+    }
     with_active_policy(|p| p.update_feedback(block_id, was_fault));
 }
 

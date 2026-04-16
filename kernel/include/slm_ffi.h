@@ -333,10 +333,37 @@ typedef struct {
     int32_t snapshot_candidates;
     uint32_t cacheus_expert_count;
     uint32_t expert_weights_bp[5];
+    /* #115: generic per-policy counters. Reset on every policy swap. */
+    uint64_t policy_decisions;
+    uint64_t policy_fallbacks;
+    uint64_t policy_avg_latency_ns;
 } RustEvictionStats;
 
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
+
+/* Bump / set / read the active-inferences counter consumed by the
+ * SlmHeuristicPolicy "inactive-models first" eviction tier. #113.
+ * Bump clamps at zero; indices ≥ 64 are silently ignored. */
+extern void rust_eviction_bump_active_inferences(uint8_t model_id, int32_t delta);
+extern void rust_eviction_set_active_inferences(uint8_t model_id, uint32_t count);
+extern uint32_t rust_eviction_get_active_inferences(uint8_t model_id);
+
+/* CACHEUS weight trajectory entry (#111). Weights are in integer
+ * basis points (0..10000, 1 bp = 0.01%) to keep the kernel's
+ * -mgeneral-regs-only code float-free. */
+typedef struct {
+    uint64_t timestamp_ns;
+    uint32_t n_experts;
+    uint32_t _pad;
+    uint32_t weights_bp[5];
+} RustTrajectoryEntry;
+
+/* Copy the CACHEUS weight trajectory into `out`, oldest-first.
+ * Returns the number of entries written (>=0), 0 if no CACHEUS policy
+ * is installed or the trajectory is empty, -1 on invalid arguments. */
+extern int32_t rust_eviction_get_trajectory(
+    RustTrajectoryEntry *out, uint32_t max_entries);
 
 /* Per-policy average select_victim latency in nanoseconds over
  * `iterations` calls. Returns UINT64_MAX on error (unknown policy,

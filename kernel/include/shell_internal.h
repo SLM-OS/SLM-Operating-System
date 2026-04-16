@@ -73,6 +73,9 @@ int cmd_eviction(int argc, char **argv);
 int cmd_timdiag(int argc, char **argv);
 #endif
 
+/* Dashboard command (shell_top.c) */
+int cmd_top(int argc, char **argv);
+
 /* Filesystem commands (shell_fs.c) */
 int cmd_ls(int argc, char **argv);
 int cmd_cd(int argc, char **argv);

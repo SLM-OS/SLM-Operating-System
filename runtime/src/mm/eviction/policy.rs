@@ -88,4 +88,29 @@ pub trait EvictionPolicy {
     fn ensemble_expert_names(&self) -> Option<alloc::vec::Vec<&'static str>> {
         None
     }
+
+    /// Time-series of ensemble weight snapshots (CACHEUS). One entry
+    /// is pushed after every `update_feedback` that adjusted weights;
+    /// the buffer is capped so the oldest entries are evicted. Default
+    /// `None` — atomic policies have no weights to trace. See #111.
+    fn ensemble_trajectory(&self) -> Option<&[TrajectoryEntry]> { None }
+}
+
+/// One snapshot of ensemble weights at a point in time. Used by
+/// CacheusSelector to record how the expert mixture adapts across
+/// feedback events; surfaced by `eviction trajectory` in the shell.
+///
+/// Kept fixed-size so the snapshot structure is `Copy` and the FFI
+/// can serialise it without allocating per-entry.
+pub const MAX_EXPERTS: usize = 5;
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrajectoryEntry {
+    /// `slm_get_time_ns()` at the moment this snapshot was taken.
+    pub timestamp_ns: u64,
+    /// Number of expert weights populated in `weights`.
+    pub n_experts: u32,
+    /// Weight values, zero-padded past `n_experts`. Values are in
+    /// `[0, 1]` and sum to 1 across the first `n_experts` entries.
+    pub weights: [f32; MAX_EXPERTS],
 }

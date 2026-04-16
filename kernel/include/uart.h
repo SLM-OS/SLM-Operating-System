@@ -39,6 +39,14 @@ void uart_putc(char c);
  */
 char uart_getc(void);
 
+/*
+ * Non-blocking receive. Returns the character (0..255) if one is
+ * available, or -1 if the receive path is empty. Used by interactive
+ * shell features like `top` that need to poll for keypresses while
+ * redrawing the screen.
+ */
+int uart_try_getc(void);
+
 #if defined(PLATFORM_RASPI5)
 /*
  * Initialize UART RX interrupt handling.

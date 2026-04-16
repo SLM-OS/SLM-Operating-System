@@ -10,6 +10,7 @@
 
 #include "sched.h"
 #include "sched_policy.h"
+#include "sched_trace.h"
 #include "task.h"
 #include "uart.h"
 #include "debug.h"
@@ -1252,6 +1253,11 @@ int sched_migrate_task(struct task *task, uint32_t target_cpu)
     DEBUG_PRINT("Migrated task '%s' from CPU %u to CPU %u",
                 task->name, old_cpu, target_cpu);
 
+    /* #195: migration trace event. Recorded inside the dual-locked
+     * region to keep the event timestamp ordered with the state
+     * change. No-op when tracing is disabled. */
+    sched_trace_record_migrate(task, old_cpu, target_cpu);
+
     /* Unlock in reverse order */
     if (old_cpu < target_cpu) {
         spin_unlock(&rq_lock[target_cpu]);
@@ -1714,6 +1720,11 @@ void schedule(void)
     }
 
     task_set_current(next);
+
+    /* #195: record the context switch while the lock is still held
+     * so `current` and `next` reflect the committed state. No-op
+     * when tracing is disabled. */
+    sched_trace_record_switch(this_cpu, current, next);
 
     /* Clean run queue fields modified in this schedule() cycle.
      * Without this, the next dc civac at the start of schedule() would

@@ -86,4 +86,13 @@ char uart_getc(void)
     return (char)inb(base + UART_RBR);
 }
 
+int uart_try_getc(void)
+{
+    uint16_t base = (uint16_t)UART_BASE;
+    if ((inb(base + UART_LSR) & LSR_DR) == 0) {
+        return -1;
+    }
+    return (int)inb(base + UART_RBR);
+}
+
 #endif /* UART_TYPE_16550 */

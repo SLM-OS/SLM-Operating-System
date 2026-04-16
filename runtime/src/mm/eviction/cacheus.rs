@@ -38,8 +38,17 @@ use super::lru::LruPolicy;
 use super::lfu::LfuPolicy;
 use super::slm_heuristic::SlmHeuristicPolicy;
 use super::mlp::MlpPolicy;
-use super::policy::{BlockMeta, EvictionPolicy};
+use super::policy::{BlockMeta, EvictionPolicy, TrajectoryEntry, MAX_EXPERTS};
 use super::xgboost::XGBoostPolicy;
+
+/// Trajectory ring capacity (#111). Caps memory at
+/// ~128 * (8 + 4 + 5*4) = ~4 KB per CACHEUS instance. Wide enough
+/// for interactive demos without straining the heap.
+const TRAJECTORY_CAPACITY: usize = 128;
+
+extern "C" {
+    fn slm_get_time_ns() -> u64;
+}
 
 /// Default expert-pool tuning from the sibling Phase 5 sweep.
 pub const CACHEUS_DEFAULT_LR: f32 = 0.4;
@@ -67,6 +76,10 @@ pub struct CacheusSelector {
     history: VecDeque<EvictionRecord>,
     expert_faults: Vec<u32>,
     expert_decisions: Vec<u32>,
+    /// Ring of `(timestamp, weight_snapshot)` pushed after every
+    /// `update_weights` call. Pre-allocated to TRAJECTORY_CAPACITY so
+    /// runtime push operations never hit the heap after init.
+    trajectory: VecDeque<TrajectoryEntry>,
 }
 
 impl CacheusSelector {
@@ -90,6 +103,7 @@ impl CacheusSelector {
             history: VecDeque::with_capacity(window_size),
             expert_faults: alloc::vec![0; n],
             expert_decisions: alloc::vec![0; n],
+            trajectory: VecDeque::with_capacity(TRAJECTORY_CAPACITY),
         }
     }
 
@@ -153,6 +167,29 @@ impl CacheusSelector {
                 *w /= total;
             }
         }
+
+        self.push_trajectory_snapshot();
+    }
+
+    /// Append a weight snapshot to the trajectory ring, dropping the
+    /// oldest entry when at capacity. Called after every
+    /// `update_weights` so the trajectory covers all adaptation
+    /// events (not just the last window). #111.
+    fn push_trajectory_snapshot(&mut self) {
+        // SAFETY: kernel FFI — always safe to call.
+        let ts = unsafe { slm_get_time_ns() };
+        let mut entry = TrajectoryEntry {
+            timestamp_ns: ts,
+            n_experts: self.weights.len().min(MAX_EXPERTS) as u32,
+            weights: [0.0; MAX_EXPERTS],
+        };
+        for (i, w) in self.weights.iter().take(MAX_EXPERTS).enumerate() {
+            entry.weights[i] = *w;
+        }
+        if self.trajectory.len() == TRAJECTORY_CAPACITY {
+            self.trajectory.pop_front();
+        }
+        self.trajectory.push_back(entry);
     }
 }
 
@@ -239,6 +276,7 @@ impl EvictionPolicy for CacheusSelector {
         for v in self.expert_faults.iter_mut() { *v = 0; }
         for v in self.expert_decisions.iter_mut() { *v = 0; }
         for e in self.experts.iter_mut() { e.reset(); }
+        self.trajectory.clear();
     }
 
     fn name(&self) -> &'static str { "CACHEUS" }
@@ -250,4 +288,31 @@ impl EvictionPolicy for CacheusSelector {
     fn ensemble_expert_names(&self) -> Option<Vec<&'static str>> {
         Some(self.experts.iter().map(|e| e.name()).collect())
     }
+
+    fn ensemble_trajectory(&self) -> Option<&[TrajectoryEntry]> {
+        // VecDeque's `as_slices` can return two halves when the ring
+        // has wrapped. The FFI only iterates in oldest-first order via
+        // an indexed copy in `rust_eviction_get_trajectory`, so we
+        // return only the contiguous front slice here. Callers that
+        // want all entries should go through `trajectory_snapshot`.
+        let (front, _) = self.trajectory.as_slices();
+        Some(front)
+    }
+}
+
+impl CacheusSelector {
+    /// Copy the full trajectory ring into a caller-owned slice in
+    /// oldest-first order. Returns the number of entries written,
+    /// capped at `out.len()`. Used by the FFI shim to flatten the
+    /// ring across its two halves.
+    pub fn trajectory_snapshot(&self, out: &mut [TrajectoryEntry]) -> usize {
+        let n = self.trajectory.len().min(out.len());
+        for (i, entry) in self.trajectory.iter().take(n).enumerate() {
+            out[i] = *entry;
+        }
+        n
+    }
+
+    /// Number of entries currently retained in the trajectory ring.
+    pub fn trajectory_len(&self) -> usize { self.trajectory.len() }
 }

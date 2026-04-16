@@ -10,6 +10,7 @@
 #include "task.h"
 #include "sched.h"
 #include "sched_policy.h"
+#include "sched_trace.h"
 #ifdef CONFIG_AI_SCHEDULER
 #include "ai_types.h"
 #endif
@@ -474,6 +475,134 @@ int cmd_sleep(int argc, char *argv[])
  * ============================================================================ */
 
 #define BENCH_ITERATIONS 100
+#define SCHED_COMPARE_ITERATIONS 50
+
+/* ============================================================================
+ * Latency histogram (#196)
+ *
+ * Log-scale buckets covering 0 to >1 ms. Each bucket upper bound is
+ * 2× the previous, starting at 500 ns. Sample recording is O(1); the
+ * bar-chart renderer walks the fixed-size array.
+ * ============================================================================ */
+
+enum { HIST_N_BUCKETS = 12 };
+
+struct latency_histogram {
+    uint32_t count;
+    uint64_t sum_ns;
+    uint64_t min_ns;
+    uint64_t max_ns;
+    uint32_t buckets[HIST_N_BUCKETS];
+    uint64_t samples[BENCH_ITERATIONS]; /* raw samples for percentiles */
+};
+
+static const uint64_t HIST_BOUNDS[HIST_N_BUCKETS] = {
+    /* 0 */ 500,        /*   0 -   500 ns */
+    /* 1 */ 1000,       /* 500 -  1000 ns */
+    /* 2 */ 2000,       /*  1  -   2 us   */
+    /* 3 */ 5000,       /*  2  -   5 us   */
+    /* 4 */ 10000,      /*  5  -  10 us   */
+    /* 5 */ 20000,      /* 10  -  20 us   */
+    /* 6 */ 50000,      /* 20  -  50 us   */
+    /* 7 */ 100000,     /* 50  - 100 us   */
+    /* 8 */ 200000,     /*100  - 200 us   */
+    /* 9 */ 500000,     /*200  - 500 us   */
+    /*10 */ 1000000,    /*500us-   1 ms   */
+    /*11 */ UINT64_MAX, /* >1 ms          */
+};
+
+static const char *HIST_LABELS[HIST_N_BUCKETS] = {
+    "   0-  500ns",
+    " 500- 1000ns",
+    "   1-    2us",
+    "   2-    5us",
+    "   5-   10us",
+    "  10-   20us",
+    "  20-   50us",
+    "  50-  100us",
+    " 100-  200us",
+    " 200-  500us",
+    " 500- 1000us",
+    "1000+    us ",
+};
+
+static void hist_init(struct latency_histogram *h)
+{
+    h->count = 0;
+    h->sum_ns = 0;
+    h->min_ns = UINT64_MAX;
+    h->max_ns = 0;
+    for (int i = 0; i < HIST_N_BUCKETS; i++) h->buckets[i] = 0;
+}
+
+static void hist_record(struct latency_histogram *h, uint64_t ns)
+{
+    if (ns < h->min_ns) h->min_ns = ns;
+    if (ns > h->max_ns) h->max_ns = ns;
+    h->sum_ns += ns;
+    if (h->count < BENCH_ITERATIONS) {
+        h->samples[h->count] = ns;
+    }
+    h->count++;
+    for (int i = 0; i < HIST_N_BUCKETS; i++) {
+        if (ns <= HIST_BOUNDS[i]) {
+            h->buckets[i]++;
+            return;
+        }
+    }
+    h->buckets[HIST_N_BUCKETS - 1]++;
+}
+
+static void hist_sort_samples(struct latency_histogram *h)
+{
+    uint32_t n = h->count < BENCH_ITERATIONS ? h->count : BENCH_ITERATIONS;
+    for (uint32_t i = 1; i < n; i++) {
+        uint64_t key = h->samples[i];
+        uint32_t j = i;
+        while (j > 0 && h->samples[j - 1] > key) {
+            h->samples[j] = h->samples[j - 1];
+            j--;
+        }
+        h->samples[j] = key;
+    }
+}
+
+static void hist_print(struct latency_histogram *h)
+{
+    if (h->count == 0) {
+        uart_puts("  (no samples)\r\n");
+        return;
+    }
+    /* Find max bucket for bar scaling. */
+    uint32_t peak = 0;
+    for (int i = 0; i < HIST_N_BUCKETS; i++) {
+        if (h->buckets[i] > peak) peak = h->buckets[i];
+    }
+    if (peak == 0) peak = 1;
+
+    uart_puts("  Latency distribution:\r\n");
+    for (int i = 0; i < HIST_N_BUCKETS; i++) {
+        uint32_t c = h->buckets[i];
+        /* Bar: up to 40 '#' characters, proportional to peak. */
+        uint32_t bar_len = (c * 40u + peak - 1) / peak;
+        uart_printf("    %s: %5u ", HIST_LABELS[i], c);
+        for (uint32_t b = 0; b < bar_len; b++) uart_putc('#');
+        uart_puts("\r\n");
+    }
+
+    hist_sort_samples(h);
+    uint32_t n = h->count < BENCH_ITERATIONS ? h->count : BENCH_ITERATIONS;
+    uint64_t p50 = h->samples[n * 50 / 100];
+    uint64_t p95 = h->samples[n * 95 / 100];
+    uint64_t p99 = h->samples[n * 99 / 100];
+    uint64_t mean = h->sum_ns / h->count;
+
+    uart_printf("\r\n  Min: %lu ns   Max: %lu ns   Mean: %lu ns\r\n",
+                (unsigned long)h->min_ns, (unsigned long)h->max_ns,
+                (unsigned long)mean);
+    uart_printf("  p50: %lu ns   p95: %lu ns   p99: %lu ns\r\n",
+                (unsigned long)p50, (unsigned long)p95, (unsigned long)p99);
+}
 
 /* --- Context switch benchmark --- */
 
@@ -481,6 +610,7 @@ static volatile int bench_ctx_done;
 static volatile uint64_t bench_ctx_start;
 static volatile uint64_t bench_ctx_total;
 static volatile int bench_ctx_count;
+static struct latency_histogram bench_ctx_hist;
 
 static void bench_ctx_task(void *arg)
 {
@@ -488,7 +618,9 @@ static void bench_ctx_task(void *arg)
     while (bench_ctx_count < BENCH_ITERATIONS) {
         uint64_t now = slm_get_time_ns();
         if (bench_ctx_start > 0) {
-            bench_ctx_total += now - bench_ctx_start;
+            uint64_t dt = now - bench_ctx_start;
+            bench_ctx_total += dt;
+            hist_record(&bench_ctx_hist, dt);
         }
         bench_ctx_count++;
         bench_ctx_start = slm_get_time_ns();
@@ -497,17 +629,25 @@ static void bench_ctx_task(void *arg)
     bench_ctx_done = 1;
 }
 
+/* When true, bench_context_switch suppresses its verbose per-run
+ * output (sched compare uses it for a quiet measurement pass and
+ * prints a consolidated table instead). */
+static bool bench_ctx_quiet = false;
+
 static void bench_context_switch(void)
 {
     bench_ctx_done = 0;
     bench_ctx_start = 0;
     bench_ctx_total = 0;
     bench_ctx_count = 0;
+    hist_init(&bench_ctx_hist);
 
     struct task *t = task_create_with_priority("bench_ctx",
         bench_ctx_task, NULL, TASK_PRIORITY_HIGH);
     if (!t) {
-        uart_puts("  Failed to create benchmark task\r\n");
+        if (!bench_ctx_quiet) {
+            uart_puts("  Failed to create benchmark task\r\n");
+        }
         return;
     }
     scheduler_add_task_to_cpu(t, 0);
@@ -517,6 +657,10 @@ static void bench_context_switch(void)
     while (!bench_ctx_done && timeout > 0) {
         yield();
         timeout--;
+    }
+
+    if (bench_ctx_quiet) {
+        return;
     }
 
     if (bench_ctx_count > 1) {
@@ -532,6 +676,7 @@ static void bench_context_switch(void)
             uart_puts("    Rating:  Acceptable (< 100 us)\r\n");
         else
             uart_puts("    Rating:  Needs optimization (> 100 us)\r\n");
+        hist_print(&bench_ctx_hist);
     } else {
         uart_puts("  Context switch: insufficient data\r\n");
     }
@@ -2016,6 +2161,132 @@ int cmd_sched(int argc, char *argv[])
         return 0;
     }
 
+    if (strcmp(argv[1], "trace") == 0) {
+        /* Subcommands:
+         *   sched trace            — dump recorded events
+         *   sched trace start      — enable recording (clears buffer)
+         *   sched trace stop       — disable recording
+         *   sched trace clear      — discard recorded events
+         *   sched trace per-cpu    — ASCII per-CPU timeline summary
+         */
+        const char *sub = (argc >= 3) ? argv[2] : "show";
+        if (strcmp(sub, "start") == 0) {
+            sched_trace_start();
+            uart_printf("Trace recording started (buffer: %u events)\r\n",
+                        SCHED_TRACE_CAPACITY);
+            return 0;
+        }
+        if (strcmp(sub, "stop") == 0) {
+            sched_trace_stop();
+            uart_puts("Trace recording stopped\r\n");
+            return 0;
+        }
+        if (strcmp(sub, "clear") == 0) {
+            sched_trace_clear();
+            uart_puts("Trace buffer cleared\r\n");
+            return 0;
+        }
+
+        /* Snapshot events. Size the stack copy at a cap so we don't
+         * blow the 8 KB shell task stack. 512 events × 16 bytes = 8 KB,
+         * which is the most the caller can see in one dump. */
+        enum { DUMP_MAX = 512 };
+        static struct sched_trace_record buf[DUMP_MAX];
+        uint32_t n = sched_trace_snapshot(buf, DUMP_MAX);
+        uint64_t total = sched_trace_total_events();
+
+        uart_printf("Trace: %s   captured %u of %lu total events%s\r\n\r\n",
+                    sched_trace_is_enabled() ? "ON" : "OFF",
+                    n, (unsigned long)total,
+                    total > SCHED_TRACE_CAPACITY ? " (older overwritten)" : "");
+
+        if (strcmp(sub, "per-cpu") == 0) {
+            /* Bucket the time range into TIMELINE_SLOTS columns. For
+             * each (cpu, slot), count events. Tasks running in that
+             * bucket render as '#', scheduling noise as '.', idle
+             * as ' '. Column count chosen to fit a 78-col terminal. */
+            enum { TIMELINE_SLOTS = 48 };
+            if (n == 0) {
+                uart_puts("(no events recorded — use `sched trace start`)\r\n");
+                return 0;
+            }
+            uint64_t t_first = buf[0].timestamp_ns;
+            uint64_t t_last  = buf[n - 1].timestamp_ns;
+            uint64_t span_ns = t_last > t_first ? (t_last - t_first) : 1u;
+            uint8_t cells[8][TIMELINE_SLOTS] = {0};
+            uint32_t hits[8] = {0};
+            uint32_t max_cpu = 0;
+
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t c = buf[i].cpu;
+                if (c >= 8) continue;
+                if (c > max_cpu) max_cpu = c;
+                uint64_t rel = buf[i].timestamp_ns - t_first;
+                uint64_t slot_u64 = (rel * TIMELINE_SLOTS) / span_ns;
+                if (slot_u64 >= TIMELINE_SLOTS) slot_u64 = TIMELINE_SLOTS - 1;
+                uint32_t slot = (uint32_t)slot_u64;
+                /* Non-idle run => '#', migrate => '>', else '.'. */
+                char mark = '.';
+                if (buf[i].event == SCHED_TRACE_SCHED &&
+                    buf[i].next_task_id != 0) {
+                    mark = '#';
+                } else if (buf[i].event == SCHED_TRACE_MIGRATE) {
+                    mark = '>';
+                }
+                /* Overwrite priority: '#' > '>' > '.'. */
+                char prev = (char)cells[c][slot];
+                if (prev == 0 || mark == '#' ||
+                    (mark == '>' && prev != '#')) {
+                    cells[c][slot] = (uint8_t)mark;
+                }
+                hits[c]++;
+            }
+
+            uint64_t span_us = span_ns / 1000u;
+            uart_printf("Window: %lu us    Legend: # = run/sched, "
+                        "> = migrate, . = tick/noise\r\n\r\n",
+                        (unsigned long)span_us);
+            for (uint32_t c = 0; c <= max_cpu; c++) {
+                uart_printf("CPU %u ", c);
+                for (uint32_t s = 0; s < TIMELINE_SLOTS; s++) {
+                    char m = (char)cells[c][s];
+                    uart_putc(m ? m : ' ');
+                }
+                uart_printf(" (%u events)\r\n", hits[c]);
+            }
+            return 0;
+        }
+
+        /* Default: tabular dump of the snapshot. */
+        uart_puts("Time(us)    CPU  Event     Task  From->To\r\n");
+        uart_puts("----------  ---  --------  ----  --------\r\n");
+        uint64_t t_first = (n > 0) ? buf[0].timestamp_ns : 0;
+        for (uint32_t i = 0; i < n; i++) {
+            uint64_t rel = (buf[i].timestamp_ns - t_first) / 1000u;
+            const char *evn = "?";
+            switch (buf[i].event) {
+            case SCHED_TRACE_SCHED:   evn = "SCHED";   break;
+            case SCHED_TRACE_MIGRATE: evn = "MIGRATE"; break;
+            case SCHED_TRACE_WAKE:    evn = "WAKE";    break;
+            case SCHED_TRACE_PREEMPT: evn = "PREEMPT"; break;
+            }
+            if (buf[i].event == SCHED_TRACE_MIGRATE) {
+                uart_printf("%10lu  %3u  %-8s  %4u  CPU%u->CPU%u\r\n",
+                            (unsigned long)rel, buf[i].cpu, evn,
+                            (unsigned)buf[i].next_task_id,
+                            (unsigned)buf[i].prev_cpu,
+                            (unsigned)buf[i].cpu);
+            } else {
+                uart_printf("%10lu  %3u  %-8s  %4u  %u->%u\r\n",
+                            (unsigned long)rel, buf[i].cpu, evn,
+                            (unsigned)buf[i].next_task_id,
+                            (unsigned)buf[i].prev_task_id,
+                            (unsigned)buf[i].next_task_id);
+            }
+        }
+        return 0;
+    }
+
     if (strcmp(argv[1], "stats") == 0) {
         struct sched_stats stats;
         scheduler_get_stats(&stats);
@@ -2075,7 +2346,103 @@ int cmd_sched(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: sched [policy [<name>] | stats]\r\n");
+    if (strcmp(argv[1], "compare") == 0) {
+        /* #193: run the context-switch microbenchmark under every
+         * registered policy and print a side-by-side table. The
+         * workload is the same for each policy so differences in the
+         * per-round-trip latency and context_switches count are
+         * attributable to the scheduler, not the measurement harness.
+         */
+        int n_policies = sched_policy_count();
+        if (n_policies <= 0) {
+            uart_puts("sched compare: no policies registered\r\n");
+            return 1;
+        }
+
+        /* Save the current policy so we can restore at the end. */
+        const char *saved_name = sched_get_policy();
+        const struct sched_policy_ops *saved_policy = NULL;
+        for (int i = 0; i < n_policies; i++) {
+            const struct sched_policy_ops *p = sched_policy_get(i);
+            if (p && saved_name && strcmp(p->name, saved_name) == 0) {
+                saved_policy = p;
+                break;
+            }
+        }
+
+        uart_puts("Scheduler policy comparison\r\n");
+        uart_puts("---------------------------\r\n");
+        uart_puts("Workload: bench context (" "100"
+                  " round-trips, TASK_PRIORITY_HIGH)\r\n\r\n");
+        uart_puts("Policy           Runtime(ms)   Ctx switches   Avg(us)\r\n");
+        uart_puts("---------------  ------------  -------------  -------\r\n");
+
+        uint64_t best_avg_ns = UINT64_MAX;
+        const char *best_policy = NULL;
+
+        for (int i = 0; i < n_policies; i++) {
+            const struct sched_policy_ops *p = sched_policy_get(i);
+            if (!p) continue;
+
+            /* Switch to this policy; stay on failure to avoid a
+             * scramble — caller will see the label and the row. */
+            int rc = sched_set_policy(p);
+            if (rc < 0) {
+                uart_printf("%-15s  %-12s  %-13s  %s\r\n",
+                            p->name, "—", "—", "switch failed");
+                continue;
+            }
+
+            /* Snapshot counters before the run. Silence the bench's
+             * own output so the compare table stays readable. */
+            struct sched_stats s0, s1;
+            scheduler_get_stats(&s0);
+            uint64_t t0 = slm_get_time_ns();
+
+            bench_ctx_quiet = true;
+            bench_context_switch();
+            bench_ctx_quiet = false;
+
+            uint64_t t1 = slm_get_time_ns();
+            scheduler_get_stats(&s1);
+
+            uint64_t elapsed_ns = t1 > t0 ? (t1 - t0) : 0;
+            uint64_t elapsed_ms = elapsed_ns / 1000000ULL;
+            uint64_t ctx = s1.context_switches - s0.context_switches;
+            uint64_t avg_ns = 0;
+            if (bench_ctx_count > 1) {
+                avg_ns = bench_ctx_total / (uint64_t)(bench_ctx_count - 1);
+            }
+            uint64_t avg_us = avg_ns / 1000;
+
+            uart_printf("%-15s  %12lu  %13lu  %7lu\r\n",
+                        p->name,
+                        (unsigned long)elapsed_ms,
+                        (unsigned long)ctx,
+                        (unsigned long)avg_us);
+
+            if (avg_ns > 0 && avg_ns < best_avg_ns) {
+                best_avg_ns = avg_ns;
+                best_policy = p->name;
+            }
+        }
+
+        if (best_policy) {
+            uart_printf("\r\nBest average context-switch latency: %s "
+                        "(%lu us)\r\n",
+                        best_policy, (unsigned long)(best_avg_ns / 1000));
+        }
+
+        /* Restore the caller's original policy. */
+        if (saved_policy) {
+            sched_set_policy(saved_policy);
+            uart_printf("Restored policy: %s\r\n", saved_policy->name);
+        }
+        return 0;
+    }
+
+    uart_puts("Usage: sched [policy [<name>] | stats | compare | "
+              "trace [start|stop|clear|per-cpu]]\r\n");
     return 1;
 }
 
@@ -2113,6 +2480,15 @@ static void eviction_print_summary(const RustEvictionStats *s, const char *name)
                 (unsigned long)s->workspace_evictions);
     uart_printf("  Evictable candidates (snapshot): %d\r\n",
                 s->snapshot_candidates);
+    /* #115: per-policy decision/fallback/latency counters. Reset on
+     * every policy swap, so these reflect the currently-installed
+     * policy's lifetime only. */
+    uart_printf("  Decisions:           %lu\r\n",
+                (unsigned long)s->policy_decisions);
+    uart_printf("  Fallbacks:           %lu\r\n",
+                (unsigned long)s->policy_fallbacks);
+    uart_printf("  Avg select latency:  %lu ns\r\n",
+                (unsigned long)s->policy_avg_latency_ns);
 }
 
 static void eviction_print_policies(const char *active)
@@ -2207,7 +2583,186 @@ int cmd_eviction(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: eviction [policy [<name>] | stats]\r\n");
+    if (strcmp(argv[1], "trajectory") == 0) {
+        /* Pull the last N entries (default 16) of the CACHEUS weight
+         * trajectory. Empty if CACHEUS is not the active policy or the
+         * ring is empty. */
+        uint32_t requested = 16;
+        if (argc >= 3) {
+            uint32_t v;
+            if (shell_parse_uint(argv[2], &v) < 0 || v == 0) {
+                uart_puts("eviction trajectory: count must be a positive integer\r\n");
+                return 1;
+            }
+            if (v > 128) v = 128;
+            requested = v;
+        }
+        static RustTrajectoryEntry traj[128];
+        int32_t n = rust_eviction_get_trajectory(traj, requested);
+        if (n < 0) {
+            uart_puts("eviction trajectory: invalid request\r\n");
+            return 1;
+        }
+        uart_printf("CACHEUS trajectory: %d entries (policy: %s)\r\n\r\n",
+                    n, name_buf);
+        if (n == 0) {
+            uart_puts("(no trajectory available — CACHEUS must be installed "
+                      "and feedback received)\r\n");
+            return 0;
+        }
+        uart_puts("Time(ms)    Experts  Weights (basis points, 1 bp = 0.01%)\r\n");
+        uart_puts("----------  -------  ------------------------------------\r\n");
+        uint64_t t0 = traj[0].timestamp_ns;
+        for (int32_t i = 0; i < n; i++) {
+            uint64_t rel_ms = (traj[i].timestamp_ns - t0) / 1000000ULL;
+            uart_printf("%10lu  %7u ", (unsigned long)rel_ms, traj[i].n_experts);
+            for (uint32_t k = 0; k < traj[i].n_experts && k < 5; k++) {
+                uint32_t bp = traj[i].weights_bp[k];
+                /* Render as D.DD%% with no float arithmetic. */
+                uart_printf(" %3u.%02u%%", bp / 100, bp % 100);
+            }
+            uart_puts("\r\n");
+        }
+        return 0;
+    }
+
+    if (strcmp(argv[1], "demo") == 0 || strcmp(argv[1], "pressure") == 0) {
+        /* #194: deliberately push the weight pool to capacity and
+         * beyond so the user can watch the active eviction policy
+         * pick victims live. The demo allocates 2 MB blocks using
+         * the same FFI the model loader uses, so the decisions
+         * flowing through the registry are real eviction decisions
+         * — not a mock. Allocations are freed at the end to leave
+         * the system in a clean state.
+         */
+        extern void *rust_model_alloc_weights_raw(size_t size);
+        /* Re-declare the ModelHandle-returning API locally: matches
+         * kernel/tests/test_model_mem.c. We don't have a public
+         * header for ModelHandle, so repeat the struct here to keep
+         * the demo self-contained. */
+        typedef struct {
+            uint16_t block_index;
+            uint8_t  pool_id;
+            uint8_t  generation;
+            uint32_t _reserved;
+        } DemoHandle;
+        extern DemoHandle rust_model_alloc_weights(size_t size);
+        extern int rust_model_free(DemoHandle handle);
+
+        const size_t MODEL_BLOCK_SIZE = 2u * 1024u * 1024u;
+        /* Cap at 192 attempts so we always reach eviction even on
+         * the 256 MB / 128-block weight pool, with headroom for a
+         * few eviction rounds. Backs a static handle table so the
+         * demo doesn't heap-allocate. */
+        enum { MAX_DEMO_ALLOCS = 192 };
+        static DemoHandle handles[MAX_DEMO_ALLOCS];
+        int held = 0;
+        /* Stop after this many observed evictions to keep output short. */
+        const int TARGET_EVICTIONS = 3;
+
+        RustEvictionStats before = {0};
+        rust_eviction_get_stats(&before);
+
+        uart_printf("Eviction pressure demo (policy: %s)\r\n",
+                    name_buf[0] ? name_buf : "(none)");
+        uart_printf("Weight pool: %lu / %lu blocks used, %lu evictions so far\r\n",
+                    (unsigned long)before.weight_allocated,
+                    (unsigned long)before.weight_total,
+                    (unsigned long)before.weight_evictions);
+        uart_printf("Plan: allocate 2 MB blocks until %d evictions observed.\r\n\r\n",
+                    TARGET_EVICTIONS);
+
+        uart_puts("Event       Step    Pool (used/total)   New evictions\r\n");
+        uart_puts("----------  ----    -----------------   -------------\r\n");
+
+        uint64_t prev_evictions = before.weight_evictions;
+        int admitted_quiet = 0;
+        bool aborted = false;
+
+        for (int i = 0; i < MAX_DEMO_ALLOCS; i++) {
+            DemoHandle h = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+            bool is_null = (h.block_index == 0xFFFF && h.pool_id == 0xFF);
+            RustEvictionStats after = {0};
+            rust_eviction_get_stats(&after);
+            uint64_t new_evictions = after.weight_evictions - before.weight_evictions;
+            bool evict_step = after.weight_evictions > prev_evictions;
+            prev_evictions = after.weight_evictions;
+
+            if (!is_null && held < MAX_DEMO_ALLOCS) {
+                handles[held++] = h;
+            }
+
+            if (is_null) {
+                uart_printf("FAIL        %4d    %5lu / %5lu     %13lu\r\n",
+                            i + 1,
+                            (unsigned long)after.weight_allocated,
+                            (unsigned long)after.weight_total,
+                            (unsigned long)new_evictions);
+                uart_puts("  (allocator refused further allocation)\r\n");
+                aborted = true;
+                break;
+            }
+
+            if (evict_step) {
+                /* Flush pending quiet admits then print the eviction row. */
+                if (admitted_quiet > 0) {
+                    uart_printf("admit x %-3d %4d    %5lu / %5lu     %13lu\r\n",
+                                admitted_quiet, i,
+                                (unsigned long)after.weight_allocated,
+                                (unsigned long)after.weight_total,
+                                (unsigned long)new_evictions);
+                    admitted_quiet = 0;
+                }
+                uart_printf("EVICT       %4d    %5lu / %5lu     %13lu\r\n",
+                            i + 1,
+                            (unsigned long)after.weight_allocated,
+                            (unsigned long)after.weight_total,
+                            (unsigned long)new_evictions);
+                if ((int)new_evictions >= TARGET_EVICTIONS) {
+                    break;
+                }
+            } else {
+                admitted_quiet++;
+            }
+        }
+
+        if (admitted_quiet > 0 && !aborted) {
+            RustEvictionStats mid = {0};
+            rust_eviction_get_stats(&mid);
+            uart_printf("admit x %-3d         %5lu / %5lu\r\n",
+                        admitted_quiet,
+                        (unsigned long)mid.weight_allocated,
+                        (unsigned long)mid.weight_total);
+        }
+
+        /* Snapshot final counters. */
+        RustEvictionStats after = {0};
+        rust_eviction_get_stats(&after);
+        uart_printf("\r\nFinal: %lu / %lu blocks used; %lu total evictions; "
+                    "policy decisions: %lu (fallbacks %lu, avg %lu ns)\r\n",
+                    (unsigned long)after.weight_allocated,
+                    (unsigned long)after.weight_total,
+                    (unsigned long)after.weight_evictions,
+                    (unsigned long)after.policy_decisions,
+                    (unsigned long)after.policy_fallbacks,
+                    (unsigned long)after.policy_avg_latency_ns);
+
+        /* Clean up so the demo is idempotent. Handles for evicted
+         * blocks are now invalid and rust_model_free returns -1 on
+         * them — we ignore that and count only successful frees. */
+        int freed = 0;
+        for (int i = 0; i < held; i++) {
+            if (rust_model_free(handles[i]) == 0) {
+                freed++;
+            }
+        }
+        uart_printf("Released %d of %d demo allocations (the rest were evicted).\r\n",
+                    freed, held);
+        return 0;
+    }
+
+    uart_puts("Usage: eviction [policy [<name>] | stats | "
+              "trajectory [N] | demo | pressure]\r\n");
     return 1;
 }
 

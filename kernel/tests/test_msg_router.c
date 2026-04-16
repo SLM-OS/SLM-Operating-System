@@ -77,10 +77,84 @@ static void test_publish_no_subscribers(void)
     TEST_ASSERT_LESS_THAN(freq, elapsed);
 }
 
+/*
+ * Regression for #69: subscribe must reject topic names that exceed
+ * TOPIC_NAME_LEN - 1 (15 bytes) rather than silently truncate. Prior
+ * behavior coerced "/sensors/temperature" (20 chars) to "/sensors/temper"
+ * and would alias with any other long name that shared the 15-byte prefix.
+ */
+static void test_subscribe_rejects_long_topic(void)
+{
+    msg_router_init();
+
+    /* Exactly 15 chars (fits with NUL) — must succeed. */
+    int ok = msg_router_subscribe("/test/abcdefghi", 0);
+    TEST_ASSERT_EQUAL_INT(0, ok);
+    msg_router_unsubscribe_all(0);
+
+    /* 16 chars — would truncate; must fail. */
+    int r16 = msg_router_subscribe("/test/abcdefghij", 1);
+    TEST_ASSERT_EQUAL_INT(-1, r16);
+
+    /* 20 chars — clearly oversized; must fail. */
+    int r20 = msg_router_subscribe("/sensors/temperature", 2);
+    TEST_ASSERT_EQUAL_INT(-1, r20);
+}
+
+/*
+ * Regression for #69: publish must also reject (return 0) oversized
+ * topic names so a caller cannot sneak a silently-truncated publish
+ * past a legitimate subscribe.
+ */
+static void test_publish_rejects_long_topic(void)
+{
+    msg_router_init();
+
+    int delivered = msg_router_publish(
+        (const uint8_t *)"/sensors/temperature",
+        (const uint8_t *)"data");
+    TEST_ASSERT_EQUAL_INT(0, delivered);
+}
+
+/*
+ * Regression for #68: wildcard pattern matching must not read past the
+ * NUL terminator of a short topic name. A subscription to "/sensors/" followed by '*'
+ * against a short topic like "/s" must return "no match" without
+ * dereferencing past the NUL. Exercises is_wildcard_pattern +
+ * wildcard_matches for a bounded scan.
+ */
+static void test_wildcard_short_topic_bounds(void)
+{
+    msg_router_init();
+
+    /* Wildcard subscription for "/sensors/" followed by '*' (10 bytes, fits). */
+    int sub = msg_router_subscribe("/sensors/*", 0);
+    TEST_ASSERT_EQUAL_INT(0, sub);
+
+    /* Publish to a topic shorter than the wildcard prefix. The router
+     * must not match and must not time out on ack — no mailbox was
+     * delivered to. */
+    uint64_t start = timer_get_count();
+    int delivered = msg_router_publish((const uint8_t *)"/s",
+                                       (const uint8_t *)"data");
+    uint64_t elapsed = timer_get_count() - start;
+
+    TEST_ASSERT_EQUAL_INT(0, delivered);
+
+    /* Must complete quickly: no subscriber was actually targeted. */
+    uint64_t freq = timer_get_frequency();
+    TEST_ASSERT_LESS_THAN(freq, elapsed);
+
+    msg_router_unsubscribe_all(0);
+}
+
 int test_suite_msg_router(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_publish_no_subscribers);
+    RUN_TEST(test_subscribe_rejects_long_topic);
+    RUN_TEST(test_publish_rejects_long_topic);
+    RUN_TEST(test_wildcard_short_topic_bounds);
     RUN_TEST(test_publish_times_out_without_ack);
     return UNITY_END();
 }

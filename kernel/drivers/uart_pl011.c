@@ -111,3 +111,11 @@ char uart_getc(void)
 
     return (char)(UART_REG(PL011_DR) & 0xFF);
 }
+
+int uart_try_getc(void)
+{
+    if (UART_REG(PL011_FR) & PL011_FR_RXFE) {
+        return -1;
+    }
+    return (int)(UART_REG(PL011_DR) & 0xFF);
+}

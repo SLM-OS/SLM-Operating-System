@@ -301,3 +301,38 @@ char uart_getc(void)
     return (char)(UART_REG(NS16550_RBR) & 0xFF);
 #endif
 }
+
+int uart_try_getc(void)
+{
+    if (!g_uart_available) {
+        return -1;
+    }
+
+#ifdef TCU_RX_MBOX
+    if (tcu_rx_pos < tcu_rx_count) {
+        return (int)(unsigned char)tcu_rx_buf[tcu_rx_pos++];
+    }
+    volatile uint32_t *mbox = (volatile uint32_t *)TCU_RX_MBOX;
+    uint32_t val = *mbox;
+    if (!(val & TCU_MBOX_TAG_BIT)) {
+        return -1;
+    }
+    *mbox = 0;
+    __asm__ volatile("dsb sy" ::: "memory");
+    int count = (int)((val >> 24) & 0x3);
+    if (count == 0) count = 1;
+    tcu_rx_buf[0] = (char)(val & 0xFF);
+    tcu_rx_buf[1] = (char)((val >> 8) & 0xFF);
+    tcu_rx_buf[2] = (char)((val >> 16) & 0xFF);
+    tcu_rx_count = count;
+    tcu_rx_pos = 1;
+    return (int)(unsigned char)tcu_rx_buf[0];
+#else
+    __asm__ volatile("dsb sy" ::: "memory");
+    if ((UART_REG(NS16550_LSR) & LSR_DR) == 0) {
+        return -1;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    return (int)(UART_REG(NS16550_RBR) & 0xFF);
+#endif
+}

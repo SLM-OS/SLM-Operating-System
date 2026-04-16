@@ -26,6 +26,7 @@
  */
 struct file_handle {
     bool in_use;
+    uint32_t generation;
     lfs_file_t file;
     uint8_t cache[LFS_SLM_CACHE_SIZE];      /* Per-file cache buffer */
     struct lfs_file_config cfg;
@@ -36,6 +37,7 @@ struct file_handle {
  */
 struct dir_handle {
     bool in_use;
+    uint32_t generation;
     lfs_dir_t dir;
 };
 
@@ -183,15 +185,55 @@ static void free_mount(struct lfs_mount *mnt)
 
 /* ---- Handle Management ---- */
 
+/* Encode/decode a handle as (index | generation << 16). The caller
+ * sees a plain int; the generation component guards against stale
+ * references after a close + reopen cycle that reuses the same pool
+ * slot. The 16-bit generation wraps after 65536 close/reopen cycles
+ * on the same slot — acceptable for any realistic workload. */
+static int encode_file_handle(int idx, uint32_t gen)
+{
+    return (int)((gen & 0xFFFFu) << 16 | (idx & 0xFFFF));
+}
+
+static int decode_file_index(int handle) { return handle & 0xFFFF; }
+static uint32_t decode_file_gen(int handle) { return ((uint32_t)handle >> 16) & 0xFFFF; }
+
+static int validate_file_handle(struct lfs_mount *mnt, int handle)
+{
+    int idx = decode_file_index(handle);
+    if (idx < 0 || idx >= LFS_SLM_MAX_FILES) return -1;
+    if (!mnt->files[idx].in_use) return -1;
+    if ((mnt->files[idx].generation & 0xFFFF) != decode_file_gen(handle)) return -1;
+    return idx;
+}
+
+static int encode_dir_handle(int idx, uint32_t gen)
+{
+    return (int)((gen & 0xFFFFu) << 16 | (idx & 0xFFFF));
+}
+
+static int decode_dir_index(int handle) { return handle & 0xFFFF; }
+static uint32_t decode_dir_gen(int handle) { return ((uint32_t)handle >> 16) & 0xFFFF; }
+
+static int validate_dir_handle(struct lfs_mount *mnt, int handle)
+{
+    int idx = decode_dir_index(handle);
+    if (idx < 0 || idx >= LFS_SLM_MAX_DIRS) return -1;
+    if (!mnt->dirs[idx].in_use) return -1;
+    if ((mnt->dirs[idx].generation & 0xFFFF) != decode_dir_gen(handle)) return -1;
+    return idx;
+}
+
 static int alloc_file_handle(struct lfs_mount *mnt)
 {
     for (int i = 0; i < LFS_SLM_MAX_FILES; i++) {
         if (!mnt->files[i].in_use) {
+            uint32_t gen = mnt->files[i].generation;
             lfs_memset(&mnt->files[i], 0, sizeof(struct file_handle));
+            mnt->files[i].generation = gen;
             mnt->files[i].in_use = true;
-            /* Set up per-file config with static buffer */
             mnt->files[i].cfg.buffer = mnt->files[i].cache;
-            return i;
+            return encode_file_handle(i, gen);
         }
     }
     return LFS_ERR_NOMEM;
@@ -199,8 +241,10 @@ static int alloc_file_handle(struct lfs_mount *mnt)
 
 static void free_file_handle(struct lfs_mount *mnt, int handle)
 {
-    if (handle >= 0 && handle < LFS_SLM_MAX_FILES) {
-        mnt->files[handle].in_use = false;
+    int idx = decode_file_index(handle);
+    if (idx >= 0 && idx < LFS_SLM_MAX_FILES) {
+        mnt->files[idx].in_use = false;
+        mnt->files[idx].generation++;
     }
 }
 
@@ -208,9 +252,11 @@ static int alloc_dir_handle(struct lfs_mount *mnt)
 {
     for (int i = 0; i < LFS_SLM_MAX_DIRS; i++) {
         if (!mnt->dirs[i].in_use) {
+            uint32_t gen = mnt->dirs[i].generation;
             lfs_memset(&mnt->dirs[i], 0, sizeof(struct dir_handle));
+            mnt->dirs[i].generation = gen;
             mnt->dirs[i].in_use = true;
-            return i;
+            return encode_dir_handle(i, gen);
         }
     }
     return LFS_ERR_NOMEM;
@@ -218,8 +264,10 @@ static int alloc_dir_handle(struct lfs_mount *mnt)
 
 static void free_dir_handle(struct lfs_mount *mnt, int handle)
 {
-    if (handle >= 0 && handle < LFS_SLM_MAX_DIRS) {
-        mnt->dirs[handle].in_use = false;
+    int idx = decode_dir_index(handle);
+    if (idx >= 0 && idx < LFS_SLM_MAX_DIRS) {
+        mnt->dirs[idx].in_use = false;
+        mnt->dirs[idx].generation++;
     }
 }
 
@@ -419,10 +467,11 @@ int littlefs_file_open(struct lfs_mount *mnt, const char *path, int flags)
         spin_unlock_irqrestore(&mnt->lock, iflags);
         return handle;
     }
+    int idx = decode_file_index(handle);
 
     /* Use opencfg with static buffer (required for LFS_NO_MALLOC) */
-    int err = lfs_file_opencfg(&mnt->lfs, &mnt->files[handle].file,
-                                path, flags, &mnt->files[handle].cfg);
+    int err = lfs_file_opencfg(&mnt->lfs, &mnt->files[idx].file,
+                                path, flags, &mnt->files[idx].cfg);
     if (err < 0) {
         free_file_handle(mnt, handle);
         spin_unlock_irqrestore(&mnt->lock, iflags);
@@ -435,41 +484,38 @@ int littlefs_file_open(struct lfs_mount *mnt, const char *path, int flags)
 
 int littlefs_file_close(struct lfs_mount *mnt, int handle)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_FILES) {
-        return LFS_ERR_INVAL;
-    }
-
+    if (!mnt || !mnt->in_use) return LFS_ERR_INVAL;
     irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->files[handle].in_use) {
+    int idx = validate_file_handle(mnt, handle);
+    if (idx < 0) {
         spin_unlock_irqrestore(&mnt->lock, flags);
         return LFS_ERR_BADF;
     }
-
-    int err = lfs_file_close(&mnt->lfs, &mnt->files[handle].file);
+    int err = lfs_file_close(&mnt->lfs, &mnt->files[idx].file);
     free_file_handle(mnt, handle);
-
     spin_unlock_irqrestore(&mnt->lock, flags);
     return err;
 }
 
+/* Macro that validates a file handle, acquires the spinlock, and sets
+ * `idx` to the decoded pool index. Jumps to a local `badf:` label on
+ * validation failure. Used by every littlefs_file_* accessor below. */
+#define VALIDATE_FILE(mnt, handle, idx, flags_var)         \
+    if (!mnt || !mnt->in_use) return LFS_ERR_INVAL;       \
+    flags_var = spin_lock_irqsave(&mnt->lock);             \
+    idx = validate_file_handle(mnt, handle);               \
+    if (idx < 0) {                                         \
+        spin_unlock_irqrestore(&mnt->lock, flags_var);     \
+        return LFS_ERR_BADF;                               \
+    }
+
 int littlefs_file_read(struct lfs_mount *mnt, int handle,
                        void *buffer, size_t size)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_FILES) {
-        return LFS_ERR_INVAL;
-    }
-
-    irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->files[handle].in_use) {
-        spin_unlock_irqrestore(&mnt->lock, flags);
-        return LFS_ERR_BADF;
-    }
-
-    int result = lfs_file_read(&mnt->lfs, &mnt->files[handle].file,
+    irq_flags_t flags; int idx;
+    VALIDATE_FILE(mnt, handle, idx, flags);
+    int result = lfs_file_read(&mnt->lfs, &mnt->files[idx].file,
                                 buffer, (lfs_size_t)size);
-
     spin_unlock_irqrestore(&mnt->lock, flags);
     return result;
 }
@@ -477,20 +523,10 @@ int littlefs_file_read(struct lfs_mount *mnt, int handle,
 int littlefs_file_write(struct lfs_mount *mnt, int handle,
                         const void *buffer, size_t size)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_FILES) {
-        return LFS_ERR_INVAL;
-    }
-
-    irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->files[handle].in_use) {
-        spin_unlock_irqrestore(&mnt->lock, flags);
-        return LFS_ERR_BADF;
-    }
-
-    int result = lfs_file_write(&mnt->lfs, &mnt->files[handle].file,
+    irq_flags_t flags; int idx;
+    VALIDATE_FILE(mnt, handle, idx, flags);
+    int result = lfs_file_write(&mnt->lfs, &mnt->files[idx].file,
                                  buffer, (lfs_size_t)size);
-
     spin_unlock_irqrestore(&mnt->lock, flags);
     return result;
 }
@@ -498,80 +534,42 @@ int littlefs_file_write(struct lfs_mount *mnt, int handle,
 int littlefs_file_seek(struct lfs_mount *mnt, int handle,
                        int32_t offset, int whence)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_FILES) {
-        return LFS_ERR_INVAL;
-    }
-
-    irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->files[handle].in_use) {
-        spin_unlock_irqrestore(&mnt->lock, flags);
-        return LFS_ERR_BADF;
-    }
-
-    int result = lfs_file_seek(&mnt->lfs, &mnt->files[handle].file,
+    irq_flags_t flags; int idx;
+    VALIDATE_FILE(mnt, handle, idx, flags);
+    int result = lfs_file_seek(&mnt->lfs, &mnt->files[idx].file,
                                 offset, whence);
-
     spin_unlock_irqrestore(&mnt->lock, flags);
     return result;
 }
 
 int littlefs_file_size(struct lfs_mount *mnt, int handle)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_FILES) {
-        return LFS_ERR_INVAL;
-    }
-
-    irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->files[handle].in_use) {
-        spin_unlock_irqrestore(&mnt->lock, flags);
-        return LFS_ERR_BADF;
-    }
-
-    int result = lfs_file_size(&mnt->lfs, &mnt->files[handle].file);
-
+    irq_flags_t flags; int idx;
+    VALIDATE_FILE(mnt, handle, idx, flags);
+    int result = lfs_file_size(&mnt->lfs, &mnt->files[idx].file);
     spin_unlock_irqrestore(&mnt->lock, flags);
     return result;
 }
 
 int littlefs_file_sync(struct lfs_mount *mnt, int handle)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_FILES) {
-        return LFS_ERR_INVAL;
-    }
-
-    irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->files[handle].in_use) {
-        spin_unlock_irqrestore(&mnt->lock, flags);
-        return LFS_ERR_BADF;
-    }
-
-    int result = lfs_file_sync(&mnt->lfs, &mnt->files[handle].file);
-
+    irq_flags_t flags; int idx;
+    VALIDATE_FILE(mnt, handle, idx, flags);
+    int result = lfs_file_sync(&mnt->lfs, &mnt->files[idx].file);
     spin_unlock_irqrestore(&mnt->lock, flags);
     return result;
 }
 
 int littlefs_file_truncate(struct lfs_mount *mnt, int handle, uint32_t size)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_FILES) {
-        return LFS_ERR_INVAL;
-    }
-
-    irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->files[handle].in_use) {
-        spin_unlock_irqrestore(&mnt->lock, flags);
-        return LFS_ERR_BADF;
-    }
-
-    int result = lfs_file_truncate(&mnt->lfs, &mnt->files[handle].file, size);
-
+    irq_flags_t flags; int idx;
+    VALIDATE_FILE(mnt, handle, idx, flags);
+    int result = lfs_file_truncate(&mnt->lfs, &mnt->files[idx].file, size);
     spin_unlock_irqrestore(&mnt->lock, flags);
     return result;
 }
+
+#undef VALIDATE_FILE
 
 /* ---- Directory Operations ---- */
 
@@ -592,7 +590,8 @@ int littlefs_dir_open(struct lfs_mount *mnt, const char *path)
         return handle;
     }
 
-    int err = lfs_dir_open(&mnt->lfs, &mnt->dirs[handle].dir, dir_path);
+    int didx = decode_dir_index(handle);
+    int err = lfs_dir_open(&mnt->lfs, &mnt->dirs[didx].dir, dir_path);
     if (err < 0) {
         free_dir_handle(mnt, handle);
         spin_unlock_irqrestore(&mnt->lock, flags);
@@ -605,20 +604,15 @@ int littlefs_dir_open(struct lfs_mount *mnt, const char *path)
 
 int littlefs_dir_close(struct lfs_mount *mnt, int handle)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_DIRS) {
-        return LFS_ERR_INVAL;
-    }
-
+    if (!mnt || !mnt->in_use) return LFS_ERR_INVAL;
     irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->dirs[handle].in_use) {
+    int idx = validate_dir_handle(mnt, handle);
+    if (idx < 0) {
         spin_unlock_irqrestore(&mnt->lock, flags);
         return LFS_ERR_BADF;
     }
-
-    int err = lfs_dir_close(&mnt->lfs, &mnt->dirs[handle].dir);
+    int err = lfs_dir_close(&mnt->lfs, &mnt->dirs[idx].dir);
     free_dir_handle(mnt, handle);
-
     spin_unlock_irqrestore(&mnt->lock, flags);
     return err;
 }
@@ -626,19 +620,16 @@ int littlefs_dir_close(struct lfs_mount *mnt, int handle)
 int littlefs_dir_read(struct lfs_mount *mnt, int handle,
                       struct lfs_entry_info *info)
 {
-    if (!mnt || !mnt->in_use || handle < 0 || handle >= LFS_SLM_MAX_DIRS || !info) {
-        return LFS_ERR_INVAL;
-    }
-
+    if (!mnt || !mnt->in_use || !info) return LFS_ERR_INVAL;
     irq_flags_t flags = spin_lock_irqsave(&mnt->lock);
-
-    if (!mnt->dirs[handle].in_use) {
+    int idx = validate_dir_handle(mnt, handle);
+    if (idx < 0) {
         spin_unlock_irqrestore(&mnt->lock, flags);
         return LFS_ERR_BADF;
     }
 
     struct lfs_info lfs_info;
-    int result = lfs_dir_read(&mnt->lfs, &mnt->dirs[handle].dir, &lfs_info);
+    int result = lfs_dir_read(&mnt->lfs, &mnt->dirs[idx].dir, &lfs_info);
 
     if (result > 0) {
         info->type = lfs_info.type;

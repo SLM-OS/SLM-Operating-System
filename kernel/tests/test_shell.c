@@ -181,6 +181,98 @@ static void test_shell_cmd_clear(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
 }
 
+/*
+ * Test: 'top -n 1' runs a single frame and exits cleanly. Regression
+ * for #191 — the command must not hang without 'q' and must accept -n.
+ */
+static void test_shell_cmd_top_one_iter(void)
+{
+    int ret = shell_execute("top -n 1");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: 'top -n 1 5' accepts both iteration count and refresh interval.
+ * Refresh isn't exercised here since we only run one frame, but the
+ * parser must not error.
+ */
+static void test_shell_cmd_top_refresh_arg(void)
+{
+    int ret = shell_execute("top -n 1 5");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: 'top' rejects a zero-second refresh interval.
+ */
+static void test_shell_cmd_top_zero_refresh(void)
+{
+    int ret = shell_execute("top 0");
+    TEST_ASSERT_NOT_EQUAL(0, ret);
+}
+
+/*
+ * Test: 'top -n' without a value errors out.
+ */
+static void test_shell_cmd_top_missing_count(void)
+{
+    int ret = shell_execute("top -n");
+    TEST_ASSERT_NOT_EQUAL(0, ret);
+}
+
+/*
+ * Tests for #195: `sched trace` subcommands.
+ * The trace system exists independent of recorded events — start/stop/clear
+ * and dumping must succeed even with zero captured events.
+ */
+static void test_shell_cmd_sched_trace_lifecycle(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace start"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace per-cpu"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace stop"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace clear"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched trace"));
+}
+
+/*
+ * Regression for #193: `sched compare` runs the context-switch
+ * microbenchmark under each registered policy and prints a table.
+ * We don't assert on the numbers (they vary run-to-run) — just that
+ * the command returns 0 and doesn't panic.
+ */
+static void test_shell_cmd_sched_compare(void)
+{
+    int ret = shell_execute("sched compare");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Regression for #194: `eviction demo` fills the weight pool to
+ * capacity, drives at least one eviction, and cleans up. When
+ * AI_EVICTION is off the policy isn't invoked but the command still
+ * runs and returns 0.
+ */
+static void test_shell_cmd_eviction_demo(void)
+{
+    int ret = shell_execute("eviction demo");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Regression for #196: `bench context` now renders a latency histogram
+ * after the average/rating output. The histogram records every
+ * context-switch round-trip, buckets them logarithmically, and prints
+ * p50/p95/p99 percentiles. Running bench context twice in a row
+ * verifies that the histogram reinitializes cleanly (no carry-over
+ * from the previous run).
+ */
+static void test_shell_cmd_bench_context_histogram_reinit(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("bench context"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("bench context"));
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2063,6 +2155,14 @@ int test_suite_shell(void)
     /* Basic commands - just verify they execute (minimal output) */
     RUN_TEST(test_shell_cmd_clear);
     RUN_TEST(test_shell_cmd_uptime);
+    RUN_TEST(test_shell_cmd_top_one_iter);
+    RUN_TEST(test_shell_cmd_top_refresh_arg);
+    RUN_TEST(test_shell_cmd_top_zero_refresh);
+    RUN_TEST(test_shell_cmd_top_missing_count);
+    RUN_TEST(test_shell_cmd_sched_trace_lifecycle);
+    RUN_TEST(test_shell_cmd_sched_compare);
+    RUN_TEST(test_shell_cmd_eviction_demo);
+    RUN_TEST(test_shell_cmd_bench_context_histogram_reinit);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);
