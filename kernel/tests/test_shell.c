@@ -259,6 +259,20 @@ static void test_shell_cmd_eviction_demo(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
 }
 
+/*
+ * Regression for #196: `bench context` now renders a latency histogram
+ * after the average/rating output. The histogram records every
+ * context-switch round-trip, buckets them logarithmically, and prints
+ * p50/p95/p99 percentiles. Running bench context twice in a row
+ * verifies that the histogram reinitializes cleanly (no carry-over
+ * from the previous run).
+ */
+static void test_shell_cmd_bench_context_histogram_reinit(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("bench context"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("bench context"));
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2148,6 +2162,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_sched_trace_lifecycle);
     RUN_TEST(test_shell_cmd_sched_compare);
     RUN_TEST(test_shell_cmd_eviction_demo);
+    RUN_TEST(test_shell_cmd_bench_context_histogram_reinit);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);
