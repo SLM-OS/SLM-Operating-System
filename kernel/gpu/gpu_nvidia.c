@@ -47,17 +47,6 @@ int nv_gpu_probe(uintptr_t mmio_base, struct nv_gpu_info *info)
     info->boot42 = 0;
     info->chip_id = 0;
 
-#ifdef PLATFORM_JETSON_ORIN_NANO
-    /* Jetson's CBB firewall blocks GPU MMIO at 0x17000000; reading
-     * NV_PMC_BOOT_0 triggers a Synchronous External Abort. main.c already
-     * avoids this path by registering gpu_stub_driver on Jetson, but guard
-     * here too so a future driver-table edit can't silently re-enable the
-     * faulting read. Remove once the CBB bypass is implemented. */
-    (void)mmio_base;
-    WARN("nv_gpu_probe: refusing MMIO read on Jetson (CBB firewall)");
-    return -1;
-#endif
-
     /* Read primary identification register */
     info->boot0 = gpu_read32(mmio_base, NV_PMC_BOOT_0);
 

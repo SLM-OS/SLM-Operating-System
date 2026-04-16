@@ -166,10 +166,15 @@
 #define BPMP_RX_BASE        0x40071000UL    /* BPMP->CPU IVC channel (4KB) */
 
 /* BPMP clock IDs (from tegra234-clock.h) */
-#define TEGRA234_CLK_UARTA  155
+#define TEGRA234_CLK_UARTA    155
+#define TEGRA234_CLK_GPUSYS   304   /* GPU system clock */
+#define TEGRA234_CLK_GPU_PWR  42    /* GPU power clock */
+#define TEGRA234_CLK_GPC0CLK  41    /* GPU GPC0 engine clock */
+#define TEGRA234_CLK_GPC1CLK  236   /* GPU GPC1 engine clock */
 
 /* BPMP reset IDs (from tegra234-reset.h) */
 #define TEGRA234_RESET_UARTA  100
+#define TEGRA234_RESET_GPU    19
 
 /*
  * Watchdog Timer (WDT)

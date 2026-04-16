@@ -38,6 +38,8 @@ extern const struct gpu_driver gpu_stub_driver;
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 extern const struct gpu_driver gpu_nvidia_driver;
 extern void nvidia_gpu_set_mmio_base(uintptr_t base);
+extern void jetson_gsp_platform_install(void);
+extern int  gsp_init(void);
 #endif
 
 /* External symbols from linker script */
@@ -408,10 +410,24 @@ void kernel_main(void *dtb)
     /* Initialize GPU subsystem */
     INFO("Initializing GPU...");
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    /* Jetson: GPU registers at 0x17000000 are behind the CBB firewall.
-     * Reading NV_PMC_BOOT_0 triggers a Synchronous External Abort (bus error).
-     * Use stub driver until CBB firewall bypass for GPU is implemented. */
-    gpu_register_driver(&gpu_stub_driver);
+    /* Jetson: GPU is clock-gated after kexec from Linux (nvgpu runtime
+     * PM suspend leaves clocks off). Attempt to re-enable GPU clocks
+     * and deassert reset via BPMP. These calls currently fail on the
+     * L4T BSP — BPMP firmware rejects the requests. GPU MMIO probe
+     * will return 0xFFFFFFFF until this is resolved. Tracked in #190. */
+    {
+        int rc;
+        rc = bpmp_reset_deassert(TEGRA234_RESET_GPU);
+        if (rc < 0) WARN("BPMP GPU reset deassert failed (rc=%d)", rc);
+        rc = bpmp_clk_enable(TEGRA234_CLK_GPUSYS);
+        if (rc < 0) WARN("BPMP GPU GPUSYS clock enable failed (rc=%d)", rc);
+        rc = bpmp_clk_enable(TEGRA234_CLK_GPU_PWR);
+        if (rc < 0) WARN("BPMP GPU PWR clock enable failed (rc=%d)", rc);
+        /* Brief delay for clocks to stabilize (if they came up) */
+        for (volatile int i = 0; i < 100000; i++);
+    }
+    nvidia_gpu_set_mmio_base(GPU_BASE);
+    gpu_register_driver(&gpu_nvidia_driver);
 #else
     gpu_register_driver(&gpu_stub_driver);
 #endif
@@ -419,6 +435,15 @@ void kernel_main(void *dtb)
     if (gpu_ret != GPU_OK) {
         WARN("GPU init failed (code=%d)", gpu_ret);
     }
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    if (gpu_ret == GPU_OK) {
+        jetson_gsp_platform_install();
+        int gsp_ret = gsp_init();
+        if (gsp_ret < 0) {
+            WARN("GSP init incomplete (rc=%d) — GPU compute unavailable", gsp_ret);
+        }
+    }
+#endif
 
     /* Initialize PCI and GPU subsystems (x86-64 only) */
 #if defined(PLATFORM_X86_64)

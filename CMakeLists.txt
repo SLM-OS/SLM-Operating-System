@@ -245,11 +245,12 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/bringup.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/gpu/nvidia/rpc.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/rpc.c>
-    # Jetson: VBIOS platform stub — satisfies nvidia_vbios_platform_load
-    # referenced by bringup.c. Returns -1 (VBIOS unavailable) because the
-    # CBB firewall blocks GPU MMIO and GSP bringup is never invoked on
-    # this platform. Tracked by GitHub issue (see commit history).
-    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/arch/arm64/nvidia_gsp_platform_stub.c>
+    # Jetson: full GSP platform shim — MMIO at GPU_BASE, unified memory
+    # DMA, cache maintenance, firmware via .incbin. Replaces the old
+    # nvidia_gsp_platform_stub.c now that CBB firewall is bypassed.
+    # NOTE: nvidia_gsp_firmware.S is added via target_sources() below,
+    # gated by ENABLE_GSP_FIRMWARE, since it requires firmware blobs.
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/arch/arm64/nvidia_gsp_platform.c>
 
     # ==========================================================================
     # Memory Management
@@ -691,7 +692,7 @@ if(ENABLE_GSP_FIRMWARE AND GSP_CHIP)
     endif()
 endif()
 
-if(ENABLE_GSP_FIRMWARE AND GSP_CHIP AND PLATFORM STREQUAL "X86_64")
+if(ENABLE_GSP_FIRMWARE AND GSP_CHIP)
     set(GSP_FW_DIR "${CMAKE_BINARY_DIR}/gsp_fw")
     set(GSP_FW_STAMP "${GSP_FW_DIR}/.stamp")
 
@@ -711,12 +712,26 @@ if(ENABLE_GSP_FIRMWARE AND GSP_CHIP AND PLATFORM STREQUAL "X86_64")
     # the .S file. GAS's `.incbin` takes a string literal — we
     # can't concatenate "<dir>" "/gsp.bin" the way C does, so each
     # blob gets its own fully-qualified define.
-    set_source_files_properties(
-        kernel/arch/x86_64/nvidia_gsp_firmware.S
-        PROPERTIES
-        COMPILE_DEFINITIONS "ENABLE_GSP_FIRMWARE=1;GSP_FW_GSP_PATH=${GSP_FW_DIR}/gsp.bin;GSP_FW_BOOTLOADER_PATH=${GSP_FW_DIR}/bootloader.bin;GSP_FW_BOOTER_LOAD_PATH=${GSP_FW_DIR}/booter_load.bin;GSP_FW_BOOTER_UNLOAD_PATH=${GSP_FW_DIR}/booter_unload.bin"
-        OBJECT_DEPENDS "${GSP_FW_STAMP}"
-    )
+    set(GSP_FW_COMPILE_DEFS "ENABLE_GSP_FIRMWARE=1;GSP_FW_GSP_PATH=${GSP_FW_DIR}/gsp.bin;GSP_FW_BOOTLOADER_PATH=${GSP_FW_DIR}/bootloader.bin;GSP_FW_BOOTER_LOAD_PATH=${GSP_FW_DIR}/booter_load.bin;GSP_FW_BOOTER_UNLOAD_PATH=${GSP_FW_DIR}/booter_unload.bin")
+
+    if(PLATFORM STREQUAL "X86_64")
+        set_source_files_properties(
+            kernel/arch/x86_64/nvidia_gsp_firmware.S
+            PROPERTIES
+            COMPILE_DEFINITIONS "${GSP_FW_COMPILE_DEFS}"
+            OBJECT_DEPENDS "${GSP_FW_STAMP}"
+        )
+    elseif(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+        # Firmware .S is not in the main source list (requires firmware
+        # blobs to exist). Add it here, gated behind ENABLE_GSP_FIRMWARE.
+        target_sources(slmos.elf PRIVATE kernel/arch/arm64/nvidia_gsp_firmware.S)
+        set_source_files_properties(
+            kernel/arch/arm64/nvidia_gsp_firmware.S
+            PROPERTIES
+            COMPILE_DEFINITIONS "${GSP_FW_COMPILE_DEFS}"
+            OBJECT_DEPENDS "${GSP_FW_STAMP}"
+        )
+    endif()
     add_compile_definitions(ENABLE_GSP_FIRMWARE=1)
 
     message(STATUS "  GSP firmware: ${GSP_FW_DIR} (chip ${GSP_CHIP})")
