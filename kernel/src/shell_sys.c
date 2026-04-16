@@ -2824,7 +2824,25 @@ int cmd_eviction(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: eviction [policy [<name>] | stats | "
+    if (strcmp(argv[1], "features") == 0) {
+        uint32_t count = rust_eviction_feature_count();
+        if (count == 0) {
+            uart_puts("AI eviction disabled — no features available.\r\n");
+            return 0;
+        }
+        uart_printf("Eviction feature vector (%u features):\r\n\r\n", count);
+        uart_puts("  Index  Name\r\n");
+        uart_puts("  -----  ----------------------------\r\n");
+        for (uint32_t i = 0; i < count; i++) {
+            char fbuf[48] = {0};
+            rust_eviction_feature_name(i, (uint8_t *)fbuf, sizeof(fbuf));
+            const char *group = (i < 15) ? "per-block" : "global";
+            uart_printf("  %5u  %-28s  (%s)\r\n", i, fbuf, group);
+        }
+        return 0;
+    }
+
+    uart_puts("Usage: eviction [policy [<name>] | stats | features | "
               "trajectory [N] | demo | pressure]\r\n");
     return 1;
 }

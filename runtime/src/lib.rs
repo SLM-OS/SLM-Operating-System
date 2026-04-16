@@ -1489,6 +1489,45 @@ pub extern "C" fn rust_eviction_get_active_inferences(model_id: u8) -> u32 {
     }
 }
 
+/// Return the number of features in the eviction feature vector (27).
+#[no_mangle]
+pub extern "C" fn rust_eviction_feature_count() -> u32 {
+    #[cfg(feature = "ai_eviction")]
+    { mm::eviction::FEATURE_NAMES.len() as u32 }
+    #[cfg(not(feature = "ai_eviction"))]
+    { 0 }
+}
+
+/// Copy the name of feature `index` into `buf` (NUL-terminated).
+/// Returns bytes written (excl NUL), or 0 if index is out of range
+/// or ai_eviction is off.
+#[no_mangle]
+pub extern "C" fn rust_eviction_feature_name(
+    index: u32,
+    buf: *mut u8,
+    buf_len: usize,
+) -> usize {
+    #[cfg(feature = "ai_eviction")]
+    {
+        let names = mm::eviction::FEATURE_NAMES;
+        if (index as usize) >= names.len() || buf.is_null() || buf_len == 0 {
+            return 0;
+        }
+        let name = names[index as usize].as_bytes();
+        let n = name.len().min(buf_len - 1);
+        unsafe {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), buf, n);
+            *buf.add(n) = 0;
+        }
+        n
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (index, buf, buf_len);
+        0
+    }
+}
+
 // =============================================================================
 // Workload replay — CACHEUS vs LRU fault-rate comparison (#117)
 // =============================================================================

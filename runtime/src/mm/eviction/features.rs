@@ -40,6 +40,43 @@ use super::policy::{BlockFeatures, BlockMeta, PoolType};
 /// trained on.
 pub const AI_HORIZON_NS: u64 = 1_000_000_000;
 
+/// Canonical feature-name array matching the sibling project's
+/// `FeatureConfig.feature_names` (15 per-block + 12 global = 27).
+/// Used by `eviction features` shell command for runtime introspection
+/// (#112). Names are listed in index order so `FEATURE_NAMES[i]`
+/// documents what `BlockFeatures[i]` represents.
+pub const FEATURE_NAMES: [&str; 27] = [
+    // Per-block features (0..14)
+    "recency_rank",
+    "frequency_rank",
+    "access_count",
+    "time_since_access",
+    "time_since_load",
+    "ref_count",
+    "gpu_mapped",
+    "pool_type",
+    "is_dirty",
+    "layer_position",
+    "model_priority",
+    "model_active_inferences",
+    "access_pattern",
+    "predicted_reuse_distance",
+    "eviction_cost",
+    // Global features (15..26)
+    "weight_pool_utilization",
+    "workspace_pool_utilization",
+    "num_loaded_models",
+    "total_gpu_mapped_ratio",
+    "pending_loads",
+    "avg_model_priority",
+    "max_deadline_pressure",
+    "recent_fault_rate",
+    "hot_swap_active",
+    "req_block_pool",
+    "req_block_model_id",
+    "req_block_priority",
+];
+
 /// Maximum layer index used for normalisation (matches the sibling's
 /// approximate cap — exact normalisation happens later in the
 /// simulator's `FeatureNormalizer`). Negative layer indices map to 0.

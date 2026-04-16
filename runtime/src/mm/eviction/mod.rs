@@ -46,7 +46,7 @@ pub use lru::LruPolicy;
 pub use lfu::LfuPolicy;
 pub use slm_heuristic::SlmHeuristicPolicy;
 pub use arc::{ARCPolicy, ARC_DEFAULT_GHOST_SIZE};
-pub use features::{extract_features, AI_HORIZON_NS};
+pub use features::{extract_features, AI_HORIZON_NS, FEATURE_NAMES};
 pub use xgboost::XGBoostPolicy;
 pub use mlp::MlpPolicy;
 pub use cacheus::{CacheusSelector, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW};

@@ -342,6 +342,10 @@ typedef struct {
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
+/* Feature-name introspection (#112). */
+extern uint32_t rust_eviction_feature_count(void);
+extern size_t rust_eviction_feature_name(uint32_t index, uint8_t *buf, size_t buf_len);
+
 /* Workload replay comparison (#117). */
 typedef struct {
     uint8_t  policy_name[32];
