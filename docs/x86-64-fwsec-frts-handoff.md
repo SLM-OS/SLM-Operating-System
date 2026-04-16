@@ -254,30 +254,87 @@ DMEM bounds check (25088 > 16896) at PIO upload, which looked like
 a completely different bug until we dumped HWCFG. Fixed in falcon.h
 with a citation.
 
-#### Fix options for the priv-lock, in order of cost
+#### Fix-option tri-age (attempted in order, session 2)
 
-1. **Investigate PLM writes before running booter.** Some GA10x
-   PLM registers can be written from lower priv levels to relax
-   the mask (particularly the `SOURCE_ENABLE` bits). Read the
-   SEC2 `FALCON_CPUCTL_PRIV_LEVEL_MASK` (offset unknown —
-   search nouveau `ga10x` code and NVIDIA `dev_sec_pri.h`). If
-   writable from our level, relax to PL0.
+**Option 1 — raise PLM from VFIO userspace. ❌ Not viable.**
 
-2. **Skip Booter Load entirely and use PF_WPR2 to check FRTS
-   correctness.** The WPR2 registers already read back non-zero
-   post-FWSEC-FRTS; that alone is the E3.4 success gate.
-   E3.4.d/E3.4.e (Booter Load + RISC-V start) are E-phase work
-   that can be re-scoped once the priv-lock is understood.
+Tried via `--sec2-plm-scan`, a new harness action that reads every
+4-byte offset from `NV_PSEC2_BASE` through `+0xFFF` and classifies
+responses. Result on test-pc post-BSI:
 
-3. **Implement a VBIOS-based SEC2 unlock.** nouveau has no
-   direct parallel (because nouveau never has SEC2 locked) but
-   nova-core might have relevant code for VFIO-bound devices.
+- **865 / ~1024** offsets in SEC2's first 4 KB respond with the
+  `0xbadfXXXX` priv-locked poison — including every standard PLM
+  offset candidate on Falcon v4 (+0x2A0, +0x4A8, +0x4B8, +0x4C8).
+  We cannot even *read* the PLMs from our access level, let alone
+  write them. If there is a PLM we could relax from our priv
+  level, it is not in the published NVIDIA / nouveau sources and
+  not discoverable by scan.
+- Only the lower-PLM-tier registers (`HWCFG`, `HWCFG2`, a handful
+  of status offsets in +0xE00..+0xE3C) are readable.
 
-The strongest immediate move is (2): record FWSEC-FRTS success
-as the E3.4 sign-off, file the priv-lock as a separate issue
-scoped to the Booter Load / RISC-V startup milestones, and
-continue with E4 RPC work on the assumption that Booter Load can
-be solved independently.
+NVIDIA does not publish Falcon PLM register offsets in
+`open-gpu-kernel-modules/src/common/inc/swref/published/ampere/ga102/
+dev_falcon_v4.h` (verified against raw GitHub). Nouveau never hits
+the lock (it avoids FLR so BSI never re-applies the heightened
+PLMs) and so contains no PLM-relax code either.
+
+**Option 2 — accept FWSEC-FRTS as the E3.4 gating milestone.**
+**✅ Adopted.**
+
+FWSEC-FRTS succeeds reliably (3/3 runs) and the WPR2 registers
+read back non-zero. Per the E3 plan in
+`docs/x86-64-capstone-gap-closure-plan.md`, FWSEC-FRTS (E3.4) is
+the downstream-unblocking gate; E3.4.d (Booter Load) and E3.4.e
+(RISC-V start) are separately-scoped sub-milestones. Both are
+now blocked by the same SEC2 priv-lock and should be tracked as a
+distinct investigation:
+
+> **New blocker issue:** SEC2 priv-lock on VFIO+FLR prevents
+> Booter Load and GSP-RM RISC-V startup on test-pc. Root cause:
+> BSI DEVINIT re-application after vfio-pci's mandatory FLR
+> raises SEC2's PLM above PL0. nouveau/openrm don't hit it
+> because they're kernel-mode drivers that avoid FLR.
+
+**Option 3 — nova-core unlock sequence.** Irrelevant. nova-core
+is the Linux kernel's Rust rewrite of nouveau. Like nouveau, it
+runs in kernel space and avoids FLR for the same reason —
+wouldn't have a working example for the userspace-VFIO case.
+
+#### Recommended next steps
+
+For continuing E-phase work on test-pc:
+
+1. Declare E3.4 done (FWSEC-FRTS succeeds reliably). Close/close
+   the FWSEC-FRTS tracking work.
+2. File a new tracking issue: **"SEC2 priv-lock blocks Booter
+   Load under VFIO+FLR"**. Scope it to the hardware platform.
+3. For downstream RPC / compute milestones that assume Booter
+   Load, evaluate whether the same work can target a different
+   platform:
+   - Jetson Orin Nano has no VFIO-FLR issue (it's an integrated
+     GPU with SMMU, not PCIe passthrough).
+   - Bare-metal SLM-OS on the same host would also avoid the
+     FLR-clobber problem once it can drive the GPU directly —
+     but requires DEVINIT implementation in SLM-OS first.
+4. If the capstone requires Booter Load on x86-64 VFIO
+   specifically, the investigation path is probably either:
+   - Patch `vfio-pci` in Linux to skip FLR-on-open for this
+     device (out-of-tree kernel module or patched upstream).
+   - Write a custom kernel driver that binds the GPU without
+     issuing FLR, exposing BAR0 to userspace via char device /
+     mmap.
+   - Run the GSP bringup entirely in kernel space (gpgpu-kdriver
+     style).
+
+Any of those is a substantial effort; re-scoping away from
+x86-64 VFIO for the capstone timeline is the pragmatic call.
+
+#### New diagnostic: `--sec2-plm-scan`
+
+Added to the harness this session. Dumps every 4-byte offset in
+SEC2's first 4 KB, separating "interesting-pattern" reads from
+`0xbadfXXXX` priv-locked reads. Used as evidence that Option 1
+is not viable.
 
 
 ### 0.7 Harness additions landed this session

@@ -72,6 +72,10 @@ static void usage(const char *argv0)
 "                   Matches nouveau's tu102_devinit_wait check. If\n"
 "                   DEVINIT hasn't run, FWSEC-FRTS is expected to\n"
 "                   hang/abort without progress. See handoff §0.4.\n"
+"  --sec2-plm-scan  Scan SEC2 register space for priv-level-mask\n"
+"                   registers. Used to find CPUCTL_PRIV_LEVEL_MASK\n"
+"                   on GA107 since it's not in NVIDIA's published\n"
+"                   headers. See handoff §0.6.\n"
 "  --booter-load    Run Booter Load on SEC2 (E3.4.d). Requires that\n"
 "                   --fwsec-frts succeeded; reuses the WPR2 setup.\n"
 "  --riscv-start    Flip GSP into RISC-V mode and start the core\n"
@@ -103,7 +107,8 @@ int main(int argc, char **argv)
     bool trace           = false;
     enum { ACT_NONE, ACT_PROBE, ACT_VBIOS, ACT_FALCONS, ACT_DMA_TEST,
            ACT_FWSEC_FRTS, ACT_FWSEC_SB, ACT_FWSEC_TRACE,
-           ACT_CHECK_DEVINIT, ACT_BOOTER_LOAD, ACT_RISCV_START,
+           ACT_CHECK_DEVINIT, ACT_SEC2_PLM_SCAN,
+           ACT_BOOTER_LOAD, ACT_RISCV_START,
            ACT_PHASE, ACT_BRINGUP } action = ACT_NONE;
     int phase = -1;
 
@@ -118,6 +123,7 @@ int main(int argc, char **argv)
         else if (strcmp(a, "--fwsec-sb") == 0)    { action = ACT_FWSEC_SB; }
         else if (strcmp(a, "--fwsec-trace") == 0) { action = ACT_FWSEC_TRACE; }
         else if (strcmp(a, "--check-devinit") == 0) { action = ACT_CHECK_DEVINIT; }
+        else if (strcmp(a, "--sec2-plm-scan") == 0) { action = ACT_SEC2_PLM_SCAN; }
         else if (strcmp(a, "--booter-load") == 0) { action = ACT_BOOTER_LOAD; }
         else if (strcmp(a, "--riscv-start") == 0) { action = ACT_RISCV_START; }
         else if (strcmp(a, "--bringup") == 0) { action = ACT_BRINGUP; }
@@ -163,7 +169,8 @@ int main(int argc, char **argv)
                           action == ACT_BOOTER_LOAD ||
                           action == ACT_RISCV_START ||
                           action == ACT_BRINGUP ||
-                          action == ACT_PHASE);
+                          action == ACT_PHASE ||
+                          action == ACT_SEC2_PLM_SCAN);
     if (needs_devinit) {
         /* Poll NV_PGC6_AON_SECURE_SCRATCH_GROUP_05[0] byte 0 for
          * 0xff (nouveau tu102_devinit_wait). BSI recovery after FLR
@@ -199,6 +206,48 @@ int main(int argc, char **argv)
         printf("[GSP-HARNESS] engine register @0x400000 = 0x%08x%s\n",
                eng,
                eng == 0xBADF5040 ? " (GSP not loaded — expected)" : "");
+        return 0;
+    }
+    case ACT_SEC2_PLM_SCAN: {
+        /* Scan SEC2 register space looking for priv-level-mask
+         * (PLM) registers. A PLM typically reads as a 32-bit value
+         * with bits 0:2 (read protection), 4:6 (write protection),
+         * 8:11 (source enable) non-zero, and upper bits low. We
+         * filter reads to "interesting" values: not 0, not 0xffffffff,
+         * not 0xbadfXXXX, and look roughly like a PLM pattern. */
+        printf("[GSP-HARNESS] SEC2 register scan (looking for PLM patterns):\n");
+        printf("  %-10s %-12s %s\n", "offset", "value", "note");
+        uint32_t priv_locked_count = 0;
+        for (uint32_t off = 0x000; off <= 0xfff; off += 4) {
+            uint32_t addr = NV_PSEC2_BASE + off;
+            uint32_t v = gsp_platform->read32(addr);
+            if (v == 0 || v == 0xFFFFFFFFu) continue;
+            if ((v & 0xffff0000u) == 0xbadf0000u) {
+                priv_locked_count++;
+                continue;
+            }
+            bool looks_plm =
+                ((v & 0xFFFu) != 0) &&
+                ((v >> 20) == 0 || (v >> 20) == 1);
+            printf("  0x%08x 0x%08x  %s\n", addr, v,
+                   looks_plm ? "<-- PLM candidate" : "");
+        }
+        printf("[GSP-HARNESS] %u priv-locked offsets in +0x000..+0xfff\n",
+               priv_locked_count);
+        /* Also dump priv-locked register offsets — the PLM for a
+         * locked register is often at a known +N offset from it,
+         * so seeing which regs are locked tells us which PLMs to
+         * target if we can find a writable one. */
+        printf("[GSP-HARNESS] priv-locked offsets (first 32):\n");
+        uint32_t shown = 0;
+        for (uint32_t off = 0x000; off <= 0xfff && shown < 32; off += 4) {
+            uint32_t v = gsp_platform->read32(NV_PSEC2_BASE + off);
+            if ((v & 0xffff0000u) == 0xbadf0000u) {
+                printf("  0x%08x (base+0x%03x) = 0x%08x\n",
+                       NV_PSEC2_BASE + off, off, v);
+                shown++;
+            }
+        }
         return 0;
     }
     case ACT_CHECK_DEVINIT: {
