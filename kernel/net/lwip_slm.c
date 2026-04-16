@@ -304,11 +304,10 @@ int net_init(void) {
     /* The driver's init() can fail for several reasons — device not
      * present, feature negotiation rejected, MMIO map fault, OOM on
      * virtqueue ring allocation. The current net_driver contract
-     * collapses all of these into `-1`, so the specific cause can't be
-     * distinguished here. Return NET_E_GENERIC rather than guessing
-     * NO_DEVICE; if
-     * the driver contract is ever extended to propagate specific
-     * codes, this site should thread them through. */
+     * collapses all of these into `-1`, so the specific cause can't
+     * be distinguished here. Return NET_E_GENERIC rather than
+     * guessing NO_DEVICE; if the driver contract is ever extended to
+     * propagate specific codes, this site should thread them through. */
     if (active_driver->init() < 0) {
         ERROR("Failed to initialize network driver: %s", active_driver->name);
         return NET_E_GENERIC;
