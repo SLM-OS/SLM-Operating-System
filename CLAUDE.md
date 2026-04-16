@@ -6,6 +6,12 @@ Project-wide notes and reminders. See also:
 
 ---
 
+## Documentation
+
+Ignore files under `docs/archive/` unless specifically told to look at them. Archived documents are outdated and may contradict current state.
+
+---
+
 ## Build, Deploy, and Test
 
 Use the `/deploy-and-test` skill when building, deploying to Pi 5 hardware, and capturing boot/test output. This skill orchestrates the labctl MCP tools (sdwire_update, power_cycle, serial_capture, boot_test) for the full deploy cycle.

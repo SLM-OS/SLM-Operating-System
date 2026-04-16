@@ -1,15 +1,10 @@
 /*
- * linux_platform.c — Linux userspace implementation of
- * `struct gsp_platform_ops` (see kernel/gpu/nvidia/gsp.h).
+ * linux_platform.c — Linux/VFIO userspace implementation of
+ * `struct gsp_platform_ops`. Targets an NVIDIA Ampere GPU bound
+ * to vfio-pci — mmaps BAR0/BAR1 directly from userspace.
  *
- * This is the THIRD platform implementation alongside x86-64
- * bare-metal (kernel/arch/x86_64/nvidia_gsp_platform.c) and
- * (future) Jetson bare-metal (kernel/arch/arm64/). It targets
- * an NVIDIA Ampere GPU that has been bound to vfio-pci — the
- * kernel keeps hands off, and we mmap BAR0/BAR1 directly.
- *
- * See docs/testing/test-pc-linux-vfio-setup.md for the one-time
- * host configuration.
+ * Vtable contract: docs/nvidia-gsp.md §"Platform Shim Contract".
+ * VFIO host setup: docs/testing/test-pc-linux-vfio-setup.md.
  */
 
 /* _GNU_SOURCE is provided by the Makefile's -D flag. */

@@ -1,19 +1,9 @@
 /*
- * nvidia_gsp_platform.c — x86-64 platform shim for the shared
- * NVIDIA GSP-RM bringup code in kernel/gpu/nvidia/.
+ * nvidia_gsp_platform.c — x86-64 implementation of
+ * `struct gsp_platform_ops` for discrete PCIe GPUs.
  *
- * This file provides the `struct gsp_platform_ops` vtable that the
- * shared GSP code calls into. It hides everything about how the GPU
- * is reached on a discrete PCIe system:
- *   - BAR0 / BAR1 are ioremap'd out of ECAM (handled by nvidia_gpu.c)
- *   - DMA is direct (no IOMMU translation)
- *   - Firmware lives in the kernel binary via .incbin (see nvidia_gsp_firmware.S)
- *   - VBIOS is read via the PCI expansion ROM (E2 — NOT yet implemented)
- *
- * Jetson has a sibling file at kernel/arch/arm64/nvidia_gsp_platform.c
- * (future, when Jetson GSP bringup lands) that implements the same
- * vtable differently: direct MMIO at 0x17000000, SMMU-mapped DMA,
- * firmware from VFS, no VBIOS.
+ * See docs/nvidia-gsp.md §"Platform Shim Contract" for the full
+ * vtable specification and per-platform implementation notes.
  */
 
 #include "platform.h"

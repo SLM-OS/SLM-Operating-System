@@ -7,13 +7,12 @@ vs. the ~2-minute reflash-reboot cycle required for bare-metal
 SLM-OS — critical during E3 (Falcon/RISC-V bringup) and E4 (RPC ring
 bring-up) where silent hangs are the norm.
 
-**Architectural reuse:** the harness is a third implementation of
-`struct gsp_platform_ops` (the vtable defined in `kernel/gpu/nvidia/gsp.h`)
-— alongside the x86-64 bare-metal implementation in
-`kernel/arch/x86_64/nvidia_gsp_platform.c` and the (future) Jetson
-one. The actual bringup code in `kernel/gpu/nvidia/gsp.c` runs
-unchanged. If it works under the harness against real silicon, it
-works bare-metal too.
+**Architectural reuse:** the harness is one of several implementations of
+`struct gsp_platform_ops` — the shared bringup code in
+`kernel/gpu/nvidia/` runs unchanged across all platforms. If it works
+under the harness against real silicon, it works bare-metal too.
+See `docs/nvidia-gsp.md` §"Platform Shim Contract" for the full vtable
+specification and the list of all platform implementations.
 
 See `docs/testing/test-pc-linux-vfio-setup.md` for the one-time
 Linux + VFIO prerequisites.

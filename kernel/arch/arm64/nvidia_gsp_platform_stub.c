@@ -1,13 +1,10 @@
 /*
- * nvidia_gsp_platform_stub.c — ARM64 stub for VBIOS platform access.
+ * nvidia_gsp_platform_stub.c — ARM64 linker stub for VBIOS access.
  *
- * Jetson's GPU registers (0x17000000) are behind the CBB firewall and
- * NVIDIA_GSP_FIRMWARE is not bundled on this platform, so the GSP
- * bringup path in kernel/gpu/nvidia/bringup.c is never invoked at boot.
- * It is still linked (sharing source with the x86-64 build), so we
- * provide a non-functional stub for `nvidia_vbios_platform_load` to
- * satisfy the linker. Returns -1 so any accidental caller treats the
- * VBIOS as unavailable.
+ * Satisfies the `nvidia_vbios_platform_load` symbol so the shared
+ * GSP code links on ARM64. Returns -1 (VBIOS unavailable). Replace
+ * with a full `struct gsp_platform_ops` implementation when bringing
+ * up GSP on Jetson — see docs/nvidia-gsp.md §"Platform Shim Contract".
  */
 #include "nvidia/nvidia_vbios.h"
 

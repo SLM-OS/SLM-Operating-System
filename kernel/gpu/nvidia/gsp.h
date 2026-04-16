@@ -1,32 +1,18 @@
 /*
  * gsp.h — NVIDIA GSP-RM bringup API (shared across Ampere platforms).
  *
- * Implements Phase E of docs/archive/plans/x86-64-capstone-gap-closure-plan.md
- * (and issue #28 for Jetson) — booting the RISC-V "GPU System
- * Processor" microcontroller so the GPU's compute engines become
- * usable for model inference.
+ * Boots the RISC-V "GPU System Processor" microcontroller so the
+ * GPU's compute engines become usable for model inference.
  *
- * Architecture: a thin `struct gsp_platform_ops` vtable abstracts the
- * two things that differ between discrete PCIe (x86-64 + RTX 3050)
- * and integrated SoC (Jetson Orin Nano, GA10B):
- *
- *   - Register access — x86 reads via ioremap'd BAR0 through the PCI
- *     config space helpers; Jetson reads MMIO at a fixed physaddr.
- *   - DMA memory — x86 carves DMA-capable pages from PMM and uses
- *     the GPU's IOMMU-less direct DMA; Jetson has unified memory
- *     with cache maintenance (DC CVAC) via the existing `cache.c`
- *     helpers.
- *   - Firmware sourcing — x86 embeds the 4 firmware blobs at build
- *     time (extracted from /lib/firmware/); Jetson can load the
- *     same blobs from the rootfs at runtime.
- *   - VBIOS parsing — x86 reads the expansion ROM via PCI BAR;
- *     Jetson has no VBIOS (firmware runtime services come from QSPI
- *     via the pre-boot firmware).
- *
+ * A thin `struct gsp_platform_ops` vtable abstracts platform-specific
+ * hardware access (register I/O, DMA, firmware sourcing, VBIOS).
  * Everything else — the 7-phase boot sequence, FWSEC execution, WPR
  * setup, RISC-V bringup, RPC protocol, compute engine init — is
- * Ampere architecture and identical across platforms. That code
- * lives in the sibling .c files and calls out through this vtable.
+ * Ampere-generic and lives in the sibling .c files.
+ *
+ * Full vtable contract, per-platform implementation notes, and the
+ * Jetson implementation checklist: docs/nvidia-gsp.md §"Platform
+ * Shim Contract".
  */
 
 #ifndef GPU_NVIDIA_GSP_H
@@ -77,80 +63,29 @@ struct gsp_firmware_blob {
  *
  * Populated per-platform at GSP init. The shared boot/RPC/engine code
  * never reaches around this table.
+ *
+ * See docs/nvidia-gsp.md §"Platform Shim Contract" for the full
+ * specification: constraints, call sites, and per-platform notes.
  */
 struct gsp_platform_ops {
-    /*
-     * BAR0 register access. Offsets are relative to the GPU's BAR0
-     * base — identical between discrete (via PCI ECAM) and
-     * integrated (via MMIO 0x17000000 on Jetson).
-     *
-     * **Implementations MUST use `volatile` accesses** when reading
-     * and writing the MMIO region. The GPU's side has invisible
-     * side-effects on every read (pops interrupt-source registers,
-     * advances Falcon DMA state, etc.), and the compiler is
-     * otherwise free to coalesce two reads of CPUCTL into one or
-     * to hoist writes out of a polling loop. Every in-tree backend
-     * today (`x86_gsp_bar0_read32` in `nvidia_gsp_platform.c`,
-     * `linux_gsp_bar0_read32` in the gsp-harness linux_platform.c)
-     * casts the mapped BAR0 pointer through `volatile uint32_t *`
-     * for exactly this reason. A future backend that drops the
-     * qualifier would introduce a hard-to-diagnose hang. (#163)
-     *
-     * read32/write32 MUST NOT cache. Writes must be serialized
-     * against subsequent reads (x86: no-op; Jetson: DMB SY between
-     * successive MMIO writes to distinct registers).
-     */
+    /* Implementations MUST use volatile accesses — see #163. */
     uint32_t (*read32)(uint32_t bar0_offset);
     void     (*write32)(uint32_t bar0_offset, uint32_t value);
 
-    /*
-     * BAR1 (VRAM) byte-level access. On x86-64 this is an MMIO
-     * aperture (uncached, strongly-ordered). On Jetson this is a
-     * window into unified memory; the platform is responsible for
-     * any needed cache maintenance before returning.
-     */
     void (*bar1_read)(uint32_t offset, void *dst, size_t n);
     void (*bar1_write)(uint32_t offset, const void *src, size_t n);
 
-    /*
-     * Allocate `size` bytes of DMA-accessible memory aligned to
-     * `align`. Returns a CPU-addressable pointer; writes
-     * `*out_dma_addr` with the physical address the GPU sees.
-     *
-     * On x86-64 the DMA address == physical address (IOMMU
-     * passthrough). On Jetson the GPU uses SMMU-mapped stream IDs
-     * — the platform may need to install a mapping and return the
-     * IOVA. Shared code treats this as opaque.
-     */
     void *(*dma_alloc)(size_t size, size_t align, uint64_t *out_dma_addr);
     void  (*dma_free)(void *ptr, size_t size);
 
-    /*
-     * Cache maintenance. `dma_alloc` returns nominally-coherent
-     * memory on both platforms, but nouveau / GSP-RM occasionally
-     * requires explicit writeback. x86 no-ops (coherent MMIO);
-     * Jetson does DC CVAC on ARM64.
-     */
     void (*cache_clean)(const void *addr, size_t size);
     void (*cache_invalidate)(void *addr, size_t size);
 
-    /* Memory barrier (full). x86: `mfence`. Jetson: `dsb sy`. */
     void (*mb)(void);
 
-    /*
-     * Firmware accessor. Never NULL — on platforms that can't
-     * supply a blob, returns {NULL, 0, NULL} and the bringup
-     * aborts cleanly in Phase 0.
-     */
     void (*firmware_get)(enum gsp_firmware_kind kind,
                          struct gsp_firmware_blob *out);
 
-    /*
-     * VBIOS FWSEC access (x86-64 only). Jetson's implementation
-     * should set `*out_data = NULL` and return 0; the boot
-     * sequence has a Jetson path that sources FWSEC-equivalent
-     * setup from the bootloader instead.
-     */
     int (*vbios_get_fwsec)(const void **out_data, size_t *out_size);
 };
 

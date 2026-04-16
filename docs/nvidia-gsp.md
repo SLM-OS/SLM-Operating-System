@@ -211,6 +211,190 @@ For anyone extending SLM-OS to implement GSP boot, these are the key source file
 
 ---
 
+## Platform Shim Contract (`struct gsp_platform_ops`)
+
+The shared GSP bringup code in `kernel/gpu/nvidia/` never touches hardware directly. All platform-specific behavior is isolated behind a vtable defined in `kernel/gpu/nvidia/gsp.h`. Each platform provides an implementation of `struct gsp_platform_ops` and installs it into the global `gsp_platform` pointer before calling `gsp_init()`.
+
+### Existing Implementations
+
+| Platform | File | Status |
+|----------|------|--------|
+| x86-64 bare-metal | `kernel/arch/x86_64/nvidia_gsp_platform.c` | Partial — `firmware_get`, `vbios_get_fwsec`, `mb` implemented; BAR0/BAR1/DMA stubbed |
+| Linux userspace (VFIO) | `host-tools/gsp-harness/linux_platform.c` | Complete — used for hardware validation on test-pc |
+| ARM64 (Jetson) | `kernel/arch/arm64/nvidia_gsp_platform_stub.c` | Linker stub only — full implementation needed |
+
+### Vtable Functions
+
+#### 1. BAR0 Register Access
+
+```c
+uint32_t (*read32)(uint32_t bar0_offset);
+void     (*write32)(uint32_t bar0_offset, uint32_t value);
+```
+
+**Purpose:** 32-bit GPU register read/write. Offsets are relative to BAR0 base — identical between discrete PCIe (ECAM-mapped) and integrated SoC (fixed MMIO at `0x17000000` on Jetson).
+
+**Constraints:**
+- Reads MUST NOT be cached; each call reads fresh from hardware
+- Writes MUST be ordered against subsequent reads. On x86-64 this is automatic (strong memory model). On ARM64, a `DSB SY` between successive MMIO writes to distinct registers is required
+
+**Called from:** `falcon.c` (all register access via `flcn_r32`/`flcn_w32`), `bringup.c` (FWSEC mailboxes, WPR2 readback, Booter Load BROM registers, RISC-V BCR_CTRL)
+
+**Platform notes:**
+- x86-64: volatile dereference of ioremap'd BAR0 VA
+- Jetson: volatile dereference of identity-mapped `0x17000000 + offset`
+- VFIO: volatile dereference of mmap'd VFIO BAR0 region
+
+#### 2. BAR1 (VRAM) Byte-Level Access
+
+```c
+void (*bar1_read)(uint32_t offset, void *dst, size_t n);
+void (*bar1_write)(uint32_t offset, const void *src, size_t n);
+```
+
+**Purpose:** Read/write arbitrary-sized byte buffers into GPU VRAM (BAR1 aperture). Offsets are BAR1-relative.
+
+**Constraints:**
+- x86-64: uncached MMIO aperture; strongly ordered
+- Jetson: window into unified memory; platform is responsible for cache maintenance before returning
+- Not yet called in E1–E4 phases (needed for E5 compute submission — tensor data residency)
+
+#### 3. DMA Memory Allocation
+
+```c
+void *(*dma_alloc)(size_t size, size_t align, uint64_t *out_dma_addr);
+void  (*dma_free)(void *ptr, size_t size);
+```
+
+**Purpose:** Allocate memory accessible by both CPU and GPU. Returns a CPU-addressable pointer and writes the GPU-visible DMA address to `*out_dma_addr`.
+
+**Constraints:**
+- `align` is typically 256 (Falcon DMA) or 4096 (WprMeta)
+- If `out_dma_addr` is non-NULL, the GPU-visible address must be written
+- Shared code treats the DMA address as opaque — never assumes identity mapping
+
+**Platform notes:**
+- x86-64: DMA address == physical address (IOMMU passthrough); allocate from PMM
+- Jetson: unified memory; may need SMMU mapping and return IOVA
+- VFIO: `ioctl(VFIO_IOMMU_MAP_DMA)` to map pages into GPU address space
+
+**Called from:** `bringup.c` (FWSEC IMEM/DMEM staging, Booter Load data section copy, GspFwWprMeta), `rpc.c` (shared memory ring — E4 skeleton)
+
+#### 4. Cache Maintenance
+
+```c
+void (*cache_clean)(const void *addr, size_t size);
+void (*cache_invalidate)(void *addr, size_t size);
+```
+
+**Purpose:**
+- `cache_clean`: writeback dirty cachelines to Point of Coherency. Called BEFORE the GPU reads DMA buffers
+- `cache_invalidate`: invalidate cachelines. Called BEFORE the CPU reads data written by the GPU
+
+**Platform notes:**
+- x86-64: no-ops (PCIe DMA is cache-coherent)
+- Jetson: DC CVAC (clean) / DC IVAC (invalidate) via `cache.h` helpers; Jetson's per-core L2 is incoherent
+- VFIO: no-ops (Linux manages coherency)
+
+**Called from:** `bringup.c` (after memcpy/patching firmware buffers, before Falcon DMA reads), `rpc.c` (RPC mailbox words for cross-CPU coherency)
+
+#### 5. Memory Barrier
+
+```c
+void (*mb)(void);
+```
+
+**Purpose:** Full memory barrier. Ensures register writes are complete and visible to the GPU before subsequent operations.
+
+**Implementation:**
+- x86-64: `mfence`
+- Jetson: `dsb sy`
+- VFIO: `__sync_synchronize()` (GCC built-in)
+
+**Called from:** `falcon.c` — extensively after register write sequences (DMA transfer setup, BROM programming, BCR_CTRL writes)
+
+#### 6. Firmware Accessor
+
+```c
+void (*firmware_get)(enum gsp_firmware_kind kind, struct gsp_firmware_blob *out);
+```
+
+**Firmware kinds:** `GSP_FW_GSP` (RISC-V ELF, ~38 MB), `GSP_FW_BOOTLOADER` (~20 KB), `GSP_FW_BOOTER_LOAD` (~60 KB), `GSP_FW_BOOTER_UNLOAD` (~40 KB).
+
+**Constraints:**
+- MUST NOT return NULL function pointer — if a blob is unavailable, set `out->{data=NULL, size=0, version=NULL}` and the bringup aborts cleanly in Phase 0
+- Firmware version string (e.g. `"535.113.01"`) must accompany each blob
+
+**Platform notes:**
+- x86-64: embedded at build time via `.incbin` (in `nvidia_gsp_firmware.S`)
+- Jetson: can embed the same way, or load from rootfs at runtime
+- VFIO: loaded from `/lib/firmware/nvidia/` at harness startup
+
+#### 7. VBIOS FWSEC Access
+
+```c
+int (*vbios_get_fwsec)(const void **out_data, size_t *out_size);
+```
+
+**Purpose:** Retrieve the FWSEC (Firmware Security Boot) ucode from the NVIDIA VBIOS. Returns 0 on success, -1 if unavailable.
+
+**Platform notes:**
+- x86-64: reads PCI Expansion ROM BAR, parses BIT table via `nvidia_vbios_parse()`, extracts FWSEC from PMU descriptor table
+- Jetson: no VBIOS exists. Set `*out_data = NULL` and return 0 — the boot sequence has a Jetson-specific path that sources FWSEC-equivalent setup from the pre-boot firmware (QSPI). This path is not yet implemented; it will likely require reading FWSEC from the L4T BSP partition
+- VFIO: same as x86-64, via sysfs ROM file
+
+### Initialization Sequence
+
+```
+platform_gpu_init()
+    └── Discover GPU (PCI scan or fixed MMIO probe)
+    └── Map BAR0 / BAR1
+    └── Populate platform ops vtable
+    └── gsp_platform = &<platform>_gsp_ops;
+    └── gsp_init()          ← shared 7-phase boot sequence begins
+```
+
+On x86-64, `nvidia_gpu_init()` calls `x86_gsp_platform_install()`. On Jetson, the equivalent function must be written in `kernel/arch/arm64/nvidia_gsp_platform.c`.
+
+### Shared Code That Calls Through the Vtable
+
+| Phase | Ops Used | File |
+|-------|----------|------|
+| Phase 0: Firmware Load | `firmware_get` | `gsp.c` |
+| Phase 3: FWSEC-FRTS | `vbios_get_fwsec`, `dma_alloc`, `dma_free`, `read32`, `write32`, `cache_clean`, `mb` | `bringup.c` |
+| Phase 6: Booter Load | `firmware_get`, `dma_alloc`, `dma_free`, `cache_clean`, `mb`, `read32`, `write32` | `bringup.c` |
+| Phase 4: RISC-V Startup | `read32`, `write32`, `mb` | `bringup.c` |
+| Falcon Driver | `read32`, `write32`, `mb` | `falcon.c` |
+| RPC (E4) | `cache_clean`, `cache_invalidate`, `mb` | `rpc.c` |
+| E5 Compute (future) | `bar1_read`, `bar1_write`, `dma_alloc`, `dma_free` | — |
+
+### ARM64 (Jetson) Implementation Checklist
+
+The full Jetson platform shim (`kernel/arch/arm64/nvidia_gsp_platform.c`) must implement all 11 vtable functions. Specific considerations:
+
+| Function | Jetson Approach | Notes |
+|----------|----------------|-------|
+| `read32` / `write32` | Volatile read/write at `(0x17000000 + offset)` | GPU MMIO confirmed accessible from EL2+VHE |
+| `bar1_read` / `bar1_write` | Unified memory — may be identity or need SMMU IOVA | Determine whether GA10B BAR1 is a separate aperture or aliases system RAM |
+| `dma_alloc` / `dma_free` | PMM pages + optional SMMU mapping | If GA10B uses StreamID-based isolation, platform must install SMMU entries |
+| `cache_clean` | `cache_clean_range()` from `kernel/include/cache.h` | DC CVAC, already used by SMP code |
+| `cache_invalidate` | `cache_invalidate_range()` from `kernel/include/cache.h` | DC IVAC |
+| `mb` | `__asm__ volatile("dsb sy" ::: "memory")` | |
+| `firmware_get` | `.incbin` at build time (same as x86-64) or load from SD card | L4T BSP firmware at `/lib/firmware/nvidia/ga10b/gsp/` |
+| `vbios_get_fwsec` | Return `{NULL, 0}` with rc=0 | No VBIOS on integrated GPU; FWSEC-equivalent from QSPI boot chain |
+
+### Testing
+
+Platform shim implementations are validated by the shared test suites:
+
+- **Host tests (no GPU required):** `test-vbios` (30), `test-falcon` (37), `test-bringup` (25), `test-rpc` (17) — 123 total, all passing
+- **Hardware validation:** FWSEC-FRTS execution (3/3 on x86-64 RTX 3050), WPR2 register readback
+- **Kernel integration:** `make test` GPU subsystem tests (22 tests, stub driver)
+
+A new platform shim should pass all host tests before attempting hardware validation. The host test harness (`host-tools/gsp-harness/`) uses mock platform ops, so the tests exercise the shared GSP code paths without real GPU hardware.
+
+---
+
 ## Why This Matters for Jetson
 
 The Jetson Orin Nano uses the same Ampere GPU architecture (GA10B, an integrated variant of GA10x). The GSP boot sequence is fundamentally the same:
