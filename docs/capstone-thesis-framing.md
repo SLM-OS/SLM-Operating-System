@@ -283,7 +283,10 @@ True per-instruction preemption requires either a TF-A modification
 (which would re-route PPI 30 to Group 1 NS IRQ) or a hardware
 change, neither of which are in the capstone scope.* QEMU and
 x86-64 have real preemption; the gap is limited to the two hardware
-ARM64 targets.
+ARM64 targets. Jetson was independently investigated (2026-04-15,
+`docs/jetson-preemption-investigation.md`) and reached the same
+conclusion as Pi 5 via GICv3 mechanisms — all 8 NS-accessible paths
+are blocked by TF-A policy.
 
 ## Delivered artifacts — where to look
 

@@ -18,7 +18,7 @@ The minimum capstone path (G1 → G6) is **complete**. Track S is through
 |---|---|---|
 | Prereqs #1-#4 | ✅ DONE | Shared infrastructure for the cross-platform plans |
 | P1 (cooperative preemption) | ✅ DONE | `COOP_PREEMPT` synthesizes ticks at yield points; hardware-verified on Jetson |
-| P2-P6 (true preemption) | 🚫 deferred | Hard-blocked on TF-A GIC Group-config (EL3-owned). Not in capstone scope |
+| P2-P6 (true preemption) | 🚫 deferred | Hard-blocked on TF-A GIC Group-config (EL3-owned). Investigation complete (2026-04-15): all 8 NS-accessible paths eliminated. See `docs/jetson-preemption-investigation.md`. `timdiag` shell command added for future diagnostics. Not in capstone scope |
 | G1-G6 | ✅ DONE | NEON MatMul / Conv / LN/RMSN/GELU / FP16+INT8 / cross-platform bench / thesis framing |
 | S1 | ✅ DONE | NC-memory steal deque placement |
 | S2 | ✅ DONE | Steal counters (closed #105) |

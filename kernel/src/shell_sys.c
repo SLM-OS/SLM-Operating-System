@@ -2077,3 +2077,397 @@ int cmd_eviction(int argc, char *argv[])
     uart_puts("Usage: eviction [policy [<name>] | stats]\r\n");
     return 1;
 }
+
+/* ============================================================================
+ * timdiag — Timer/interrupt delivery diagnostic
+ *
+ * Probes GIC group state, timer registers, and tests interrupt delivery
+ * paths. Primary purpose: investigate hardware timer preemption on
+ * platforms where COOP_PREEMPT is the current workaround.
+ * ============================================================================ */
+
+#if !defined(PLATFORM_X86_64)
+
+/* Volatile counter incremented by the FIQ test handler */
+volatile uint32_t timdiag_fiq_count;
+volatile uint32_t timdiag_fiq_irqnum;
+
+static void timdiag_dump_timer_state(void)
+{
+    uint64_t cntfrq, cntpct, cntp_ctl, cntp_cval, cntp_tval;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(cntpct));
+    __asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(cntp_ctl));
+    __asm__ volatile("mrs %0, cntp_cval_el0" : "=r"(cntp_cval));
+    __asm__ volatile("mrs %0, cntp_tval_el0" : "=r"(cntp_tval));
+
+    uart_printf("  CNTFRQ_EL0:    %lu Hz\r\n", cntfrq);
+    uart_printf("  CNTPCT_EL0:    0x%lx\r\n", cntpct);
+    uart_printf("  CNTP_CTL_EL0:  0x%lx (EN=%lu IMASK=%lu ISTATUS=%lu)\r\n",
+                cntp_ctl,
+                cntp_ctl & 1, (cntp_ctl >> 1) & 1, (cntp_ctl >> 2) & 1);
+    uart_printf("  CNTP_CVAL_EL0: 0x%lx\r\n", cntp_cval);
+    uart_printf("  CNTP_TVAL_EL0: %ld\r\n", (int64_t)cntp_tval);
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* On Jetson at EL2+VHE, CNTHP registers are directly accessible */
+    uint64_t cnthp_ctl;
+    __asm__ volatile("mrs %0, cnthp_ctl_el2" : "=r"(cnthp_ctl));
+    uart_printf("  CNTHP_CTL_EL2: 0x%lx (EN=%lu IMASK=%lu ISTATUS=%lu)\r\n",
+                cnthp_ctl,
+                cnthp_ctl & 1, (cnthp_ctl >> 1) & 1, (cnthp_ctl >> 2) & 1);
+#endif
+}
+
+/* GIC_VERSION is defined in platform.h for Jetson (3) and Pi 5 (2).
+ * For QEMU virt, platform.h does not define it. Default to 2. */
+#ifndef GIC_VERSION
+#define GIC_VERSION 2
+#endif
+
+#if GIC_VERSION == 3
+static void timdiag_dump_gicv3(void)
+{
+    uint32_t cpu = cpu_id();
+    /* GICR SGI base = GICR_BASE + cpu_offset + 0x10000 */
+    /* We read the registers via the same macros gic.c uses, but need
+     * access to the gicr_sgi_base. Since that's static in gic.c,
+     * re-derive from the platform constants. For Jetson, the offsets
+     * are hardcoded in gic.c; we can read the registers directly. */
+
+    /* Read ICC system registers.
+     * NOTE: ICC_IGRPEN0_EL1 is trapped by TF-A on Jetson (even reads).
+     * TF-A configures EL3 to trap all Group 0 ICC register accesses from
+     * NS. Reading ICC_IGRPEN0 causes EC=0x18 trap → "Unhandled Exception
+     * from EL2" crash. Only read Group 1 NS registers. */
+    uint64_t icc_sre, icc_pmr, icc_bpr1, icc_ctlr, icc_igrpen1;
+    __asm__ volatile("mrs %0, ICC_SRE_EL1" : "=r"(icc_sre));
+    __asm__ volatile("mrs %0, ICC_PMR_EL1" : "=r"(icc_pmr));
+    __asm__ volatile("mrs %0, ICC_BPR1_EL1" : "=r"(icc_bpr1));
+    __asm__ volatile("mrs %0, ICC_CTLR_EL1" : "=r"(icc_ctlr));
+    /* ICC_IGRPEN0_EL1: SKIP — trapped by EL3 on two-security-state GICv3 */
+    __asm__ volatile("mrs %0, ICC_IGRPEN1_EL1" : "=r"(icc_igrpen1));
+
+    uart_printf("\r\n  GICv3 CPU Interface (CPU %u):\r\n", cpu);
+    uart_printf("    ICC_SRE_EL1:    0x%lx (SRE=%lu)\r\n",
+                icc_sre, icc_sre & 1);
+    uart_printf("    ICC_PMR_EL1:    0x%lx\r\n", icc_pmr);
+    uart_printf("    ICC_BPR1_EL1:   0x%lx\r\n", icc_bpr1);
+    uart_printf("    ICC_CTLR_EL1:   0x%lx (EOImode=%lu)\r\n",
+                icc_ctlr, (icc_ctlr >> 1) & 1);
+    uart_printf("    ICC_IGRPEN0_EL1: (trapped by EL3 — not readable from NS)\r\n");
+    uart_printf("    ICC_IGRPEN1_EL1: %lu (Group 1 %s)\r\n",
+                icc_igrpen1, icc_igrpen1 ? "ENABLED" : "disabled");
+
+    /* Read GICR registers for this CPU.
+     * We need the redistributor base. For Jetson, use the hardcoded offsets.
+     * For other GICv3 platforms, use stride. */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    static const uint32_t jetson_redist_offset[] = {
+        0x000000, 0x020000, 0x040000, 0x060000,
+        0x0C0000, 0x0E0000
+    };
+    uintptr_t gicr_rd = GIC_REDIST_BASE + (cpu < 6 ? jetson_redist_offset[cpu] : 0);
+#else
+    uintptr_t gicr_rd = GIC_REDIST_BASE + (cpu * 0x20000);
+#endif
+    uintptr_t gicr_sgi = gicr_rd + 0x10000;
+
+    uint32_t igroupr0  = *(volatile uint32_t *)(gicr_sgi + 0x080);
+    uint32_t igrpmodr0 = *(volatile uint32_t *)(gicr_sgi + 0xD00);
+    uint32_t isenabler0 = *(volatile uint32_t *)(gicr_sgi + 0x100);
+    uint32_t ispendr0  = *(volatile uint32_t *)(gicr_sgi + 0x200);
+    uint32_t waker     = *(volatile uint32_t *)(gicr_rd + 0x014);
+
+    uart_printf("\r\n  GICR (Redistributor, CPU %u at 0x%lx):\r\n",
+                cpu, (unsigned long)gicr_rd);
+    uart_printf("    GICR_WAKER:     0x%x (Sleep=%u ChildrenAsleep=%u)\r\n",
+                waker, (waker >> 1) & 1, (waker >> 2) & 1);
+    uart_printf("    GICR_IGROUPR0:  0x%08x", igroupr0);
+    if (igroupr0 == 0)
+        uart_puts(" (ALL Group 0 — NS writes blocked by EL3)\r\n");
+    else if (igroupr0 == 0xFFFFFFFF)
+        uart_puts(" (ALL Group 1 NS)\r\n");
+    else
+        uart_printf(" (mixed: PPI30=%u PPI26=%u PPI27=%u)\r\n",
+                    (igroupr0 >> 30) & 1, (igroupr0 >> 26) & 1,
+                    (igroupr0 >> 27) & 1);
+    uart_printf("    GICR_IGRPMODR0: 0x%08x", igrpmodr0);
+    if (igrpmodr0 == 0)
+        uart_puts(" (RAZ from NS — expected)\r\n");
+    else
+        uart_printf(" (unexpected non-zero!)\r\n");
+    uart_printf("    GICR_ISENABLER0: 0x%08x (PPI30=%u PPI26=%u PPI27=%u)\r\n",
+                isenabler0,
+                (isenabler0 >> 30) & 1, (isenabler0 >> 26) & 1,
+                (isenabler0 >> 27) & 1);
+    uart_printf("    GICR_ISPENDR0:  0x%08x (PPI30=%u PPI26=%u PPI27=%u)\r\n",
+                ispendr0,
+                (ispendr0 >> 30) & 1, (ispendr0 >> 26) & 1,
+                (ispendr0 >> 27) & 1);
+
+    /* GICD state */
+    uint32_t gicd_ctlr = *(volatile uint32_t *)(GIC_DIST_BASE + 0x000);
+    uart_printf("\r\n  GICD_CTLR: 0x%x (ARE_NS=%u EN_G1=%u EN_G0=%u)\r\n",
+                gicd_ctlr,
+                (gicd_ctlr >> 4) & 1, (gicd_ctlr >> 1) & 1, gicd_ctlr & 1);
+
+    /* GICD_IGROUPR for first few SPI banks (check if SPIs are Group 1 NS) */
+    uart_puts("\r\n  GICD_IGROUPR (SPI groups, NS view):\r\n");
+    for (uint32_t i = 1; i <= 4; i++) {
+        uint32_t igroupr = *(volatile uint32_t *)(GIC_DIST_BASE + 0x080 + 4 * i);
+        uart_printf("    GICD_IGROUPR[%u]: 0x%08x (IRQs %u-%u)%s\r\n",
+                    i, igroupr, i * 32, i * 32 + 31,
+                    igroupr == 0xFFFFFFFF ? " ALL G1NS" :
+                    igroupr == 0 ? " ALL G0/G1S" : "");
+    }
+
+    /* DAIF state */
+    uint64_t daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    uart_printf("\r\n  DAIF: 0x%lx (D=%lu A=%lu I=%lu F=%lu)\r\n",
+                daif,
+                (daif >> 9) & 1, (daif >> 8) & 1,
+                (daif >> 7) & 1, (daif >> 6) & 1);
+}
+
+/*
+ * Test 1: Enable Group 0 delivery + unmask FIQ, see if timer fires as FIQ.
+ *
+ * Chain of reasoning:
+ *   - Timer PPI 30 is in Group 0 (confirmed by GICR_IGROUPR0=0x0)
+ *   - Group 0 interrupts generate FIQ
+ *   - If SCR_EL3.FIQ=0, FIQ is taken at current EL (EL2 with VHE)
+ *   - If SCR_EL3.FIQ=1, FIQ is taken at EL3 (we never see it)
+ *
+ * This test enables ICC_IGRPEN0 and unmasks DAIF.F to see which case
+ * we're in. The el1_fiq handler will read ICC_IAR0 and increment
+ * timdiag_fiq_count.
+ */
+static void timdiag_test_fiq(void)
+{
+    uart_puts("\r\n--- Test: FIQ delivery (Group 0 + DAIF.F unmask) ---\r\n");
+
+    /* Save current state */
+    uint64_t saved_igrpen0;
+    __asm__ volatile("mrs %0, ICC_IGRPEN0_EL1" : "=r"(saved_igrpen0));
+    uint64_t saved_daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(saved_daif));
+
+    /* Reset FIQ test counter */
+    timdiag_fiq_count = 0;
+    timdiag_fiq_irqnum = 0xFFFFFFFF;
+    __asm__ volatile("dmb ish" ::: "memory");
+
+    /* Ensure timer is running and will fire soon */
+    uint64_t freq;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    uint64_t short_interval = freq / 1000; /* 1ms */
+    __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(short_interval));
+    __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"((uint64_t)1)); /* Enable, unmask */
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Enable Group 0 delivery */
+    __asm__ volatile("msr ICC_IGRPEN0_EL1, %0" :: "r"((uint64_t)1));
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Unmask FIQ (DAIF.F clear) — keep IRQ masked to isolate the test */
+    __asm__ volatile("msr daifclr, #1" ::: "memory"); /* #1 = FIQ */
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Spin for ~5ms checking if FIQ fires */
+    uint64_t start;
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(start));
+    uint64_t deadline = start + (freq / 200); /* 5ms */
+    uint64_t now = start;
+    while (now < deadline && timdiag_fiq_count == 0) {
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
+    }
+
+    /* Re-mask FIQ */
+    __asm__ volatile("msr daifset, #1" ::: "memory");
+
+    /* Restore Group 0 enable state */
+    __asm__ volatile("msr ICC_IGRPEN0_EL1, %0" :: "r"(saved_igrpen0));
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Restore timer to normal operation */
+    uint64_t normal_interval = freq / TIMER_HZ;
+    __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(normal_interval));
+    __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"((uint64_t)1));
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Check timer ISTATUS */
+    uint64_t cntp_ctl;
+    __asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(cntp_ctl));
+
+    uint32_t elapsed_us = (uint32_t)((now - start) * 1000000 / freq);
+
+    if (timdiag_fiq_count > 0) {
+        uart_printf("  RESULT: FIQ DELIVERED! count=%u irq=%u (elapsed=%u us)\r\n",
+                    timdiag_fiq_count, timdiag_fiq_irqnum, elapsed_us);
+        uart_puts("  >>> SCR_EL3.FIQ=0 — FIQ-based timer preemption IS viable!\r\n");
+    } else {
+        uart_printf("  RESULT: No FIQ after %u us. ISTATUS=%lu\r\n",
+                    elapsed_us, (cntp_ctl >> 2) & 1);
+        if ((cntp_ctl >> 2) & 1)
+            uart_puts("  Timer condition IS asserted but FIQ not delivered.\r\n"
+                      "  >>> SCR_EL3.FIQ=1 — FIQ trapped to EL3.\r\n");
+        else
+            uart_puts("  Timer did not fire (unexpected).\r\n");
+    }
+}
+
+/*
+ * Test 2: Hypervisor physical timer (CNTHP, PPI 26) — Jetson EL2 only.
+ *
+ * Same as Test 1 but using the EL2 hypervisor timer. PPI 26 may be in
+ * a different group than PPI 30, or TF-A may treat it differently.
+ */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+static void timdiag_test_cnthp(void)
+{
+    uart_puts("\r\n--- Test: CNTHP (hypervisor timer PPI 26) via FIQ ---\r\n");
+
+    uint32_t cpu = cpu_id();
+
+    /* Enable PPI 26 in the redistributor */
+    static const uint32_t jetson_redist_offset[] = {
+        0x000000, 0x020000, 0x040000, 0x060000,
+        0x0C0000, 0x0E0000
+    };
+    uintptr_t gicr_sgi = GIC_REDIST_BASE +
+        (cpu < 6 ? jetson_redist_offset[cpu] : 0) + 0x10000;
+    *(volatile uint32_t *)(gicr_sgi + 0x100) = (1u << 26); /* ISENABLER0: enable PPI 26 */
+    /* Set priority for PPI 26 */
+    volatile uint32_t *priptr = (volatile uint32_t *)(gicr_sgi + 0x400 + (26/4)*4);
+    uint32_t prival = *priptr;
+    prival &= ~(0xFF << ((26 % 4) * 8));
+    prival |= (0x80 << ((26 % 4) * 8));
+    *priptr = prival;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Save state */
+    uint64_t saved_igrpen0;
+    __asm__ volatile("mrs %0, ICC_IGRPEN0_EL1" : "=r"(saved_igrpen0));
+
+    timdiag_fiq_count = 0;
+    timdiag_fiq_irqnum = 0xFFFFFFFF;
+    __asm__ volatile("dmb ish" ::: "memory");
+
+    /* Program CNTHP for 1ms */
+    uint64_t freq;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    uint64_t short_interval = freq / 1000;
+    __asm__ volatile("msr cnthp_tval_el2, %0" :: "r"(short_interval));
+    __asm__ volatile("msr cnthp_ctl_el2, %0" :: "r"((uint64_t)1)); /* Enable */
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Enable Group 0 delivery + unmask FIQ */
+    __asm__ volatile("msr ICC_IGRPEN0_EL1, %0" :: "r"((uint64_t)1));
+    __asm__ volatile("isb" ::: "memory");
+    __asm__ volatile("msr daifclr, #1" ::: "memory");
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Spin for ~5ms */
+    uint64_t start;
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(start));
+    uint64_t deadline = start + (freq / 200);
+    uint64_t now = start;
+    while (now < deadline && timdiag_fiq_count == 0) {
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
+    }
+
+    /* Re-mask FIQ, restore state */
+    __asm__ volatile("msr daifset, #1" ::: "memory");
+    __asm__ volatile("msr cnthp_ctl_el2, %0" :: "r"((uint64_t)0)); /* Disable CNTHP */
+    __asm__ volatile("msr ICC_IGRPEN0_EL1, %0" :: "r"(saved_igrpen0));
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Disable PPI 26 */
+    *(volatile uint32_t *)(gicr_sgi + 0x180) = (1u << 26); /* ICENABLER0 */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    uint64_t cnthp_ctl;
+    __asm__ volatile("mrs %0, cnthp_ctl_el2" : "=r"(cnthp_ctl));
+
+    uint32_t elapsed_us = (uint32_t)((now - start) * 1000000 / freq);
+
+    /* Check pending bit for PPI 26 */
+    uint32_t ispendr0 = *(volatile uint32_t *)(gicr_sgi + 0x200);
+
+    if (timdiag_fiq_count > 0) {
+        uart_printf("  RESULT: FIQ DELIVERED via CNTHP! count=%u irq=%u (%u us)\r\n",
+                    timdiag_fiq_count, timdiag_fiq_irqnum, elapsed_us);
+        uart_puts("  >>> CNTHP (PPI 26) FIQ delivery works!\r\n");
+    } else {
+        uart_printf("  RESULT: No FIQ after %u us. CNTHP ISTATUS=%lu PPI26_PEND=%u\r\n",
+                    elapsed_us, (cnthp_ctl >> 2) & 1, (ispendr0 >> 26) & 1);
+    }
+}
+#endif /* PLATFORM_JETSON_ORIN_NANO */
+
+/*
+ * Test 3: WFI wake-up test.
+ *
+ * Even if FIQ is trapped to EL3, WFI may still wake on the pending
+ * interrupt condition. This tests whether the idle task's WFI loop
+ * can be driven by the timer without GIC-delivered interrupts.
+ */
+#endif /* GIC_VERSION == 3 */
+
+static void timdiag_test_wfi_wake(void)
+{
+    uart_puts("\r\n--- Test: WFI wake-up from timer ---\r\n");
+#if GIC_VERSION == 3
+    uart_puts("  SKIP: WFI wake-up test (would hang on this platform)\r\n");
+    uart_puts("  Reason: All PPIs/SPIs are Group 0. ICC_IGRPEN0 trapped by EL3.\r\n");
+    uart_puts("  SCR_EL3.FIQ=1 routes Group 0 FIQ to EL3. No wake source for WFI.\r\n");
+    uart_puts("  >>> WFI timer wake: NOT VIABLE.\r\n");
+#else
+    uart_puts("  SKIP: WFI wake-up test\r\n");
+    uart_puts("  >>> WFI timer wake: NOT VIABLE (see pi5-preemption-resolution.md).\r\n");
+#endif
+}
+
+int cmd_timdiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    uart_puts("\r\n=== Timer/Interrupt Delivery Diagnostic ===\r\n");
+    uart_printf("Platform: %s\r\n", PLATFORM_NAME);
+    uart_printf("timer_handler_count: %u\r\n", timer_handler_count);
+    uart_printf("pit_ticks: %lu\r\n", pit_ticks);
+#if defined(COOP_PREEMPT)
+    uart_puts("COOP_PREEMPT: ON\r\n");
+#else
+    uart_puts("COOP_PREEMPT: OFF\r\n");
+#endif
+
+    uart_puts("\r\nTimer State:\r\n");
+    timdiag_dump_timer_state();
+
+#if GIC_VERSION == 3
+    timdiag_dump_gicv3();
+
+    const char *what = (argc >= 2) ? argv[1] : "safe";
+    if (strcmp(what, "fiq") == 0) {
+        uart_puts("\r\nWARNING: FIQ test writes ICC_IGRPEN0 — may crash if TF-A traps it!\r\n");
+        timdiag_test_fiq();
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        timdiag_test_cnthp();
+#endif
+    } else {
+        uart_puts("\r\n(FIQ test skipped — run 'timdiag fiq' to test, may crash on Jetson)\r\n");
+    }
+
+    timdiag_test_wfi_wake();
+#elif GIC_VERSION == 2
+    uart_puts("\r\nGICv2 platform — FIQ test skipped (see pi5-preemption-resolution.md)\r\n");
+    timdiag_test_wfi_wake();
+#endif
+
+    uart_puts("\r\n=== End Diagnostic ===\r\n");
+    return 0;
+}
+
+#endif /* !PLATFORM_X86_64 */
