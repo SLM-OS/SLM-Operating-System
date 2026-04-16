@@ -218,7 +218,9 @@ fn build_row(
     row[8]  = if b.is_dirty { 1.0 } else { 0.0 };
     row[9]  = layer_norm;
     row[10] = b.model_priority as f32 / MAX_PRIORITY;    // [0, 1]
-    row[11] = 0.0;  // model_active_inferences — wired in M5/M6 from scheduler feed
+    // #122: wire slot 11 from the global active-inferences table (#113).
+    row[11] = log1pf(super::slm_heuristic::get_active(b.model_id) as f32)
+              / log1pf(ACTIVE_INFERENCES_CEILING);
     row[12] = 0.0;  // access_pattern — BlockMeta doesn't track it; Sequential (0) is the neutral default; /3.0 would still be 0
     row[13] = predicted_reuse_heuristic(b, time_since_access, layer_norm);
     row[14] = compute_eviction_cost(b);
@@ -226,7 +228,11 @@ fn build_row(
     // Normalised global features (12 values).
     row[15] = weight_util;                               // already [0, 1]
     row[16] = workspace_util;                            // already [0, 1]
-    row[17] = 0.0;  // num_loaded_models / MAX_MODELS — needs scheduler feed
+    // #122: wire slot 17 from the model loader registry.
+    row[17] = {
+        extern "C" { fn rust_model_count() -> u32; }
+        unsafe { rust_model_count() as f32 / MAX_MODELS }
+    };
     row[18] = total_gpu_mapped / gpu_denom;              // [0, 1]
     row[19] = 0.0;  // pending_loads — log1p-normalised when wired up
     row[20] = 0.0;  // avg_model_priority / MAX_PRIORITY
@@ -237,9 +243,7 @@ fn build_row(
     row[25] = 0.0;  // req_block_model_id
     row[26] = 0.0;  // req_block_priority
 
-    // Silence "unused constant" warnings on feature slots M5 will fill.
-    let _ = MAX_MODELS;
-    let _ = ACTIVE_INFERENCES_CEILING;
+    // MAX_MODELS and ACTIVE_INFERENCES_CEILING now consumed above (#122).
 
     row
 }
