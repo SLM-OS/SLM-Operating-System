@@ -1489,6 +1489,168 @@ pub extern "C" fn rust_eviction_get_active_inferences(model_id: u8) -> u32 {
     }
 }
 
+// =============================================================================
+// Workload replay — CACHEUS vs LRU fault-rate comparison (#117)
+// =============================================================================
+
+/// Result of running one policy through the workload.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RustEvictionCompareResult {
+    pub policy_name: [u8; 32],
+    pub faults: u32,
+    pub hits: u32,
+    pub total_accesses: u32,
+}
+
+/// Run a synthetic "single_inference" workload against every
+/// registered policy and report per-policy fault counts.
+///
+/// The workload simulates a cache of `cache_size` slots accessed by a
+/// trace of block ids. The trace has a working set larger than the
+/// cache so evictions are forced. Policies that adapt to recency /
+/// frequency patterns fault less.
+///
+/// Returns the number of policies compared (written into `out`).
+/// `out` must have room for at least 8 entries.
+///
+/// # Safety
+/// `out` must point to a writable array of `max_policies` entries.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_workload_compare(
+    out: *mut RustEvictionCompareResult,
+    max_policies: u32,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (out, max_policies); 0 }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        use alloc::boxed::Box;
+        use alloc::vec::Vec;
+        use mm::eviction::{self, EvictionPolicy, BlockMeta, PoolType};
+
+        if out.is_null() || max_policies == 0 { return -1; }
+
+        // Generate a synthetic trace: working set of 16 blocks accessed
+        // through a cache of 8 slots. Blocks 0-3 are "hot" (accessed
+        // 5x per cycle), 4-7 are "warm" (1x), 8-15 are "cold" (burst).
+        // Repeated over 10 cycles so adaptive policies have enough
+        // feedback history to learn the hot-set.
+        let mut trace_vec: Vec<u32> = Vec::with_capacity(400);
+        // Warm-up: fill the cache
+        for i in 0..8u32 { trace_vec.push(i); }
+        // 10 cycles of: hot-hot-hot-hot-hot → cold burst → hot re-access
+        for _cycle in 0..10 {
+            // Hot accesses (0-3 repeated)
+            for _ in 0..5 { for i in 0..4u32 { trace_vec.push(i); } }
+            // Warm accesses (4-7)
+            for i in 4..8u32 { trace_vec.push(i); }
+            // Cold burst (8-15 force evictions)
+            for i in 8..16u32 { trace_vec.push(i); }
+            // Hot re-access (these are faults if the policy evicted them)
+            for i in 0..4u32 { trace_vec.push(i); }
+        }
+        let trace = &trace_vec;
+        let cache_size: usize = 8;
+
+        // Policies to compare.
+        let policies: Vec<(&str, Box<dyn EvictionPolicy + Send>)> = alloc::vec![
+            ("lru", Box::new(eviction::LruPolicy::new()) as Box<dyn EvictionPolicy + Send>),
+            ("lfu", Box::new(eviction::LfuPolicy::new())),
+            ("slm", Box::new(eviction::SlmHeuristicPolicy::new())),
+            ("cacheus", Box::new(eviction::CacheusSelector::ml_only())),
+        ];
+
+        let mut written: i32 = 0;
+        for (name, mut policy) in policies {
+            if written >= max_policies as i32 { break; }
+
+            // Simulate a fixed-size cache.
+            let mut cache: Vec<Option<u32>> = alloc::vec![None; cache_size];
+            let mut access_times: Vec<u64> = alloc::vec![0; cache_size];
+            let mut faults: u32 = 0;
+            let mut hits: u32 = 0;
+
+            for (step, &block_id) in trace.iter().enumerate() {
+                let now = step as u64;
+
+                // Check if block is in cache (hit).
+                let mut found = false;
+                for slot in 0..cache_size {
+                    if cache[slot] == Some(block_id) {
+                        access_times[slot] = now;
+                        hits += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if found { continue; }
+
+                // Miss — need to evict if cache is full.
+                let mut free_slot = None;
+                for slot in 0..cache_size {
+                    if cache[slot].is_none() {
+                        free_slot = Some(slot);
+                        break;
+                    }
+                }
+
+                let target_slot = if let Some(s) = free_slot {
+                    s
+                } else {
+                    // Build candidates from current cache contents.
+                    let candidates: Vec<BlockMeta> = (0..cache_size)
+                        .map(|i| BlockMeta {
+                            block_id: cache[i].unwrap_or(0),
+                            pool_type: PoolType::Weight,
+                            model_id: 0,
+                            layer_idx: 0,
+                            last_access_time: access_times[i],
+                            load_time: 0,
+                            access_count: 0,
+                            ref_count: 0,
+                            gpu_mapped: false,
+                            is_dirty: false,
+                            model_priority: 0,
+                        })
+                        .collect();
+                    let victim = policy.select_victim(&candidates);
+                    // Feedback: the evicted block was "bad" if it
+                    // appears in the near future of the trace.
+                    let evicted_id = candidates[victim].block_id;
+                    let future_window = 8usize;
+                    let next_start = step + 1;
+                    let next_end = (next_start + future_window).min(trace.len());
+                    let will_reuse = trace[next_start..next_end]
+                        .iter()
+                        .any(|&id| id == evicted_id);
+                    policy.update_feedback(evicted_id, will_reuse);
+                    victim
+                };
+
+                cache[target_slot] = Some(block_id);
+                access_times[target_slot] = now;
+                faults += 1;
+            }
+
+            let mut result = RustEvictionCompareResult {
+                policy_name: [0; 32],
+                faults,
+                hits,
+                total_accesses: trace.len() as u32,
+            };
+            let name_bytes = name.as_bytes();
+            let n = name_bytes.len().min(31);
+            result.policy_name[..n].copy_from_slice(&name_bytes[..n]);
+
+            core::ptr::write(out.add(written as usize), result);
+            written += 1;
+        }
+        written
+    }
+}
+
 /// One record in the CACHEUS weight trajectory (#111).
 ///
 /// Caller passes an array of `RustTrajectoryEntry` and the FFI fills

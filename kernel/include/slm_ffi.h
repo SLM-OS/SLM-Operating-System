@@ -342,6 +342,16 @@ typedef struct {
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
+/* Workload replay comparison (#117). */
+typedef struct {
+    uint8_t  policy_name[32];
+    uint32_t faults;
+    uint32_t hits;
+    uint32_t total_accesses;
+} RustEvictionCompareResult;
+extern int32_t rust_eviction_workload_compare(
+    RustEvictionCompareResult *out, uint32_t max_policies);
+
 /* Per-pool eviction policy (#120). pool_id: 0 = weight, 1 = workspace. */
 extern int32_t rust_eviction_policy_set_pool(uint8_t pool_id, const uint8_t *name);
 extern size_t rust_eviction_policy_name_pool(uint8_t pool_id, uint8_t *out_buf, size_t buf_len);

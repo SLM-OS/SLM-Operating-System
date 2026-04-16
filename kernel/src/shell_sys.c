@@ -1016,7 +1016,7 @@ static void s3_steal_work_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|stealing|matmul|conv|quant|gpu|stats|all>\r\n");
+        uart_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -1034,6 +1034,35 @@ int cmd_bench(int argc, char *argv[])
         uart_puts("IPC Latency Benchmark\r\n");
         uart_puts("=====================\r\n");
         bench_ipc_latency();
+    } else if (strcmp(argv[1], "eviction") == 0) {
+        uart_puts("Eviction Policy Fault-Rate Comparison (#117)\r\n");
+        uart_puts("=============================================\r\n");
+        uart_puts("Workload: single_inference (8-slot cache, 16-block WS, 10 cycles)\r\n\r\n");
+        static RustEvictionCompareResult results[8];
+        int32_t n = rust_eviction_workload_compare(results, 8);
+        if (n <= 0) {
+            uart_puts("  (AI eviction disabled or error)\r\n");
+        } else {
+            uart_puts("Policy           Faults  Hits   Total   Fault rate\r\n");
+            uart_puts("---------------  ------  -----  ------  ----------\r\n");
+            uint32_t best_faults = UINT32_MAX;
+            const char *best_name = NULL;
+            for (int32_t i = 0; i < n; i++) {
+                uint32_t f = results[i].faults;
+                uint32_t h = results[i].hits;
+                uint32_t t = results[i].total_accesses;
+                uint32_t pct = t > 0 ? (f * 100 / t) : 0;
+                uart_printf("%-15s  %6u  %5u  %6u  %8u%%\r\n",
+                            results[i].policy_name, f, h, t, pct);
+                if (f < best_faults) {
+                    best_faults = f;
+                    best_name = (const char *)results[i].policy_name;
+                }
+            }
+            if (best_name) {
+                uart_printf("\r\nBest: %s (%u faults)\r\n", best_name, best_faults);
+            }
+        }
     } else if (strcmp(argv[1], "stats") == 0) {
         uart_puts("Scheduler Statistics\r\n");
         uart_puts("====================\r\n");
