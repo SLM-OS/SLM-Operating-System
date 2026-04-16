@@ -41,6 +41,11 @@ endif
 #                            slm-os-page-sim project. Implies AI_EVICTION=ON.
 AI_EVICTION ?= OFF
 AI_EVICTION_MODELS ?= OFF
+
+# Embed scripts/*.lua demo scripts via .incbin (#14). Default ON; pass
+# EMBED_DEMO_SCRIPTS=OFF to leave them out of the kernel image (saves ~20KB).
+# Lua interpreter + slm.* bindings remain functional when OFF.
+EMBED_DEMO_SCRIPTS ?= ON
 ifeq ($(AI_EVICTION_MODELS),ON)
     # Models imply the trait layer; callers don't have to set both.
     AI_EVICTION := ON
@@ -153,6 +158,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
 		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
 		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-clean
@@ -460,6 +466,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
 		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
 		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-test-clean

@@ -11,15 +11,30 @@ exceed a configured threshold. Mid-stream, the monitoring component is
 replaced with a new instance while preserving message subscriptions,
 demonstrating zero-downtime upgrades.
 
-Two versions of the script exist:
+Three scripts are relevant:
 
 | File | Purpose |
 |------|---------|
-| `/mnt/files/demo.lua` | Embedded at boot by `demo_init.c`. Compact version suitable for live demonstration. |
-| `scripts/industrial_demo.lua` | Full version with additional system introspection, model memory stats, and a final status report. |
+| `/mnt/files/demo.lua` | Linear walkthrough. Embedded at boot, source of truth in `scripts/demo.lua`. |
+| `/mnt/files/demo_menu.lua` | Interactive menu covering all five core features (SMP, scheduling, eviction, inference, components). Source of truth in `scripts/demo_menu.lua`. |
+| `scripts/industrial_demo.lua` | Longer scenario-driven version. Not embedded; runs from SD card. |
 
-Both scripts use the same Lua API bindings (`slm.*`) and exercise the same
+All three use the same Lua API bindings (`slm.*`) and exercise the same
 kernel subsystems.
+
+### How scripts get embedded
+
+`scripts/demo.lua` and `scripts/demo_menu.lua` are embedded into the kernel
+ELF at link time via `.incbin` in `kernel/src/demo_scripts.S`. The repo `.lua`
+files are the single source of truth — there is no C-string mirror to keep
+in sync. `demo_init.c` references the `_start`/`_end` symbols produced by
+the assembler and writes each blob to `/mnt/files` at boot.
+
+Embedding is gated on the `EMBED_DEMO_SCRIPTS` CMake option (default `ON`).
+Pass `EMBED_DEMO_SCRIPTS=OFF` to leave the scripts out of the kernel image
+(saves ~19 KB). The Lua interpreter and all `slm.*` bindings remain fully
+functional in either mode; scripts can still be written to the filesystem
+at runtime (`write /mnt/files/foo.lua ...`).
 
 ## Prerequisites
 
@@ -33,21 +48,48 @@ initialization.
 
 ## Running the Demo
 
-From the SLM-OS shell:
+### Linear walkthrough
 
 ```
 slm> lua /mnt/files/demo.lua
 ```
 
-Or, to run the full version (available only when booting from SD card with
-the scripts directory):
+Runs the embedded industrial IoT scenario end-to-end in ~6–7 seconds. Each
+section includes brief pauses (`sleep`) for readability on a serial console.
+
+### Interactive menu (recommended for live demonstrations)
+
+```
+slm> lua /mnt/files/demo_menu.lua
+```
+
+Numbered menu with twelve options — one per core feature plus an all-in-one
+"full tour" that drives every subsystem in sequence. Each menu item prints a
+short explanation then exercises the relevant `slm.*` bindings against the
+live kernel, so a reviewer can see the actual structured data (not formatted
+shell output) flowing through Lua.
+
+| Key | Option |
+|-----|--------|
+| 1 | System overview — version, memory, IPC, VMM, model pools |
+| 2 | SMP — per-core ticks / schedules / isolation + `bench smp` |
+| 3 | Scheduling — policy list, stats, AI scheduler stats |
+| 4 | Switch scheduler policy at runtime |
+| 5 | Eviction — current policy + pool stats + CACHEUS expert weights |
+| 6 | Switch eviction policy at runtime |
+| 7 | Inference — load MNIST, infer, bench, stats, GPU status |
+| 8 | List loaded models |
+| 9 | Components & hot-swap (sensor_monitor + `/sensors/data`) |
+| t | Full system tour |
+| p | Active tasks |
+| s | Drop to shell command |
+| q | Quit |
+
+### Full scenario version (from SD card)
 
 ```
 slm> lua scripts/industrial_demo.lua
 ```
-
-The embedded version completes in approximately 6--7 seconds. Each section
-includes brief pauses (`sleep`) for readability on a serial console.
 
 ## Demo Walkthrough
 
