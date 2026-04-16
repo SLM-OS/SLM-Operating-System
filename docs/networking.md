@@ -1,14 +1,14 @@
 # Networking
 
-TCP/IP networking support using lwIP and VirtIO-Net.
+TCP/IP networking support using lwIP with pluggable NIC drivers.
 
-**Status:** Implemented (QEMU only)
+**Status:** Implemented on QEMU (ARM64 + x86-64); hardware platforms pending real NIC drivers.
 
 ---
 
 ## Overview
 
-SLM-OS includes a networking subsystem that provides TCP/IP connectivity via the lwIP TCP/IP stack and a VirtIO-Net driver. This enables the system to communicate over the network for remote diagnostics, model updates, and IoT data exchange.
+SLM-OS includes a networking subsystem that provides TCP/IP connectivity via the lwIP TCP/IP stack. A lightweight `net_driver` abstraction decouples the lwIP netif adapter from any specific hardware driver, letting each platform register its own NIC at boot time.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -19,13 +19,14 @@ SLM-OS includes a networking subsystem that provides TCP/IP connectivity via the
 ├─────────────────────────────────────────────────────────────┤
 │  lwip_slm.c (SLM-OS wrapper)                                │
 │  - sys_arch.c: critical sections, timers                    │
-│  - netif adapter: bridges lwIP to driver                    │
+│  - netif adapter: bridges lwIP to struct net_driver         │
 ├─────────────────────────────────────────────────────────────┤
-│  VirtIO-Net Driver (kernel/drivers/virtio_net.c)            │
-│  - MMIO register access                                     │
-│  - TX/RX packet handling                                    │
+│  net_driver abstraction (kernel/include/net_driver.h)       │
+│  - Platform registers driver via net_register_driver()      │
 ├─────────────────────────────────────────────────────────────┤
-│  Hardware: QEMU VirtIO MMIO @ 0x0A000000                    │
+│  Drivers (one per platform)                                 │
+│  - QEMU ARM64: virtio_net.c (MMIO @ 0x0A000000)             │
+│  - x86-64:     virtio_net_pci.c (PCI, BAR-mapped regs)      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -149,14 +150,39 @@ Network Statistics:
 | File | Purpose |
 |------|---------|
 | `kernel/include/net.h` | Public network API |
+| `kernel/include/net_driver.h` | Driver abstraction (`struct net_driver`) |
 | `kernel/include/lwipopts.h` | lwIP configuration |
-| `kernel/include/virtio.h` | VirtIO definitions |
-| `kernel/include/virtio_net.h` | VirtIO-Net driver API |
-| `kernel/drivers/virtio_net.c` | VirtIO-Net MMIO driver |
-| `kernel/net/lwip_slm.c` | lwIP wrapper and netif |
-| `kernel/net/sys_arch.c` | lwIP OS abstraction |
+| `kernel/include/virtio.h` | VirtIO MMIO definitions |
+| `kernel/include/virtio_net.h` | VirtIO-Net MMIO driver API |
+| `kernel/drivers/virtio_net.c` | VirtIO-Net MMIO driver (QEMU ARM64) |
+| `kernel/drivers/virtio_net_pci.c` | VirtIO-Net PCI driver (x86-64) |
+| `kernel/net/lwip_slm.c` | lwIP wrapper, netif, driver registration |
+| `kernel/net/sys_arch.c` | lwIP OS abstraction (sys_now, IRQ-safe locks) |
 | `kernel/src/net_shell.c` | Shell commands |
 | `kernel/tests/test_net.c` | Network tests |
+
+### Driver Abstraction
+
+Each platform implements a `struct net_driver` and registers it during kernel init:
+
+```c
+struct net_driver {
+    const char *name;
+    int  (*init)(void);
+    int  (*send)(const void *buf, size_t len);
+    int  (*recv)(void *buf, size_t max_len);
+    void (*get_mac)(uint8_t mac[6]);
+    bool (*link_status)(void);
+};
+
+void net_register_driver(const struct net_driver *drv);
+```
+
+`net_init()` calls the registered driver's `init()` function; the lwIP netif
+adapter (`lwip_slm.c`) funnels all packet I/O through the driver ops. Adding
+a new NIC driver means writing one C file that exports a `net_driver` and
+calling `net_register_driver()` before `net_init()` — no changes to lwIP
+integration are required.
 
 ### Key Functions
 
@@ -171,14 +197,33 @@ Network Statistics:
 | `net_enable_dhcp()` | Enable DHCP client |
 | `net_get_stats()` | Get TX/RX statistics |
 
-### VirtIO-Net Driver
+### VirtIO-Net MMIO Driver (QEMU ARM64)
 
-The driver uses VirtIO MMIO transport at address 0x0A000000:
+`kernel/drivers/virtio_net.c` uses VirtIO MMIO transport at address
+0x0A000000 on the QEMU virt machine:
 
 1. **Device Discovery**: Check magic number and device ID
 2. **Feature Negotiation**: Enable MAC address and status features
 3. **Queue Setup**: Initialize TX and RX virtqueues
 4. **Packet I/O**: DMA-based packet transmission and reception
+
+### VirtIO-Net PCI Driver (x86-64)
+
+`kernel/drivers/virtio_net_pci.c` uses VirtIO PCI transport — the modern
+virtio-net device exposes its config, notify, ISR, and device-specific
+regions through PCI capability structures (cap_vndr=0x09). The driver:
+
+1. Scans PCI for vendor 0x1AF4 / device 0x1041 (modern) or 0x1000
+   (transitional).
+2. Walks the PCI capabilities list to locate each `cfg_type` region
+   (common, notify, ISR, device) and maps them at their BAR+offset.
+3. Negotiates features (MAC, STATUS, VIRTIO_F_VERSION_1).
+4. Sets up RX/TX virtqueues in guest RAM with the same split-ring
+   format used by the MMIO driver.
+5. Disables MSI-X (uses polling via `net_poll()`).
+
+The virtqueue ring layout (descriptor table, available ring, used ring)
+is identical between the two drivers; only the transport differs.
 
 ### Descriptor Ring Cache Maintenance
 
@@ -215,11 +260,15 @@ The integration runs in `NO_SYS` mode (single-threaded):
 
 ## QEMU Configuration
 
-The Makefile configures QEMU with VirtIO networking:
+The Makefile configures QEMU with VirtIO networking, selecting the
+transport (MMIO vs PCI) per platform:
 
 ```makefile
-QEMU_NET := -device virtio-net-device,netdev=net0 \
-            -netdev user,id=net0
+ifeq ($(PLATFORM),X86_64)
+    QEMU_NET := -device virtio-net-pci,netdev=net0 -netdev user,id=net0
+else ifeq ($(PLATFORM),QEMU_VIRT)
+    QEMU_NET := -device virtio-net-device,netdev=net0 -netdev user,id=net0
+endif
 ```
 
 This provides user-mode networking where:
@@ -242,18 +291,30 @@ This forwards host port 2222 to guest port 23 (telnet).
 
 ## Platform Support
 
-| Platform | Status | Notes |
-|----------|--------|-------|
-| QEMU virt | Implemented | VirtIO-Net driver |
-| Jetson Orin Nano | Not implemented | Requires Realtek/Intel NIC driver |
+| Platform | Status | Transport | Driver |
+|----------|--------|-----------|--------|
+| QEMU virt (ARM64) | Implemented | VirtIO MMIO | `virtio_net.c` |
+| x86-64 QEMU | Implemented | VirtIO PCI | `virtio_net_pci.c` |
+| Raspberry Pi 5 | Not implemented | — | Requires RP1 gigabit Ethernet driver |
+| Jetson Orin Nano | Not implemented | — | Requires Realtek/Intel NIC driver |
 
-The networking code is conditionally compiled for QEMU only:
+### Build-Time Configuration
+
+Networking is gated behind the `ENABLE_NETWORKING` CMake option, which
+defaults `ON` on platforms that have a driver (QEMU_VIRT, X86_64) and
+`OFF` on the others. The option controls both the lwIP library
+compilation and the `ENABLE_NETWORKING` preprocessor define used in
+`test_net.c`, `shell.c`, `main.c`, and `test_harness.c`:
 
 ```c
-#if defined(PLATFORM_QEMU_VIRT)
+#if defined(ENABLE_NETWORKING)
 // Networking code
 #endif
 ```
+
+To enable networking on a platform without a driver, write a new
+`struct net_driver` implementation, register it during platform init,
+and add `-DENABLE_NETWORKING=ON` to the CMake invocation.
 
 ---
 
@@ -335,12 +396,16 @@ make test
 
 ## Future Work
 
-- **Jetson NIC driver**: Ethernet support for hardware deployment
+- **Pi 5 NIC driver**: RP1 gigabit Ethernet driver
+- **Jetson NIC driver**: Realtek/Intel NIC for Orin Nano Devkit
 - **TCP server**: Accept incoming connections
 - **HTTP client**: Download model updates
 - **mDNS**: Zero-configuration discovery
 - **TLS**: Secure communications
 
+See `docs/networking-expansion-plan.md` for the full hardware-driver
+roadmap.
+
 ---
 
-*Last updated: December 2025*
+*Last updated: April 2026*
