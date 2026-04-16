@@ -133,6 +133,57 @@ Observations:
   already raises SEC2's PLM. Bare-metal and VFIO stop at the same
   phase on the same board.
 
+## Comparison with nouveau on the same hardware (cross-validation)
+
+After the first validation run, I unbound vfio-pci on Linux, loaded
+nouveau (`modprobe nouveau modeset=1`), and read Falcon state via
+`/dev/mem`:
+
+```
+Linux + nouveau loaded:
+  SEC2 CPUCTL = 0x00000020  (ACCESSIBLE — priv-lock cleared)
+  SEC2 HWCFG2 = 0x000047f7  (bit 13 cleared — "RESET_READY")
+  GSP  CPUCTL = 0x00000010  (HALTED)
+  PMC_ENABLE  = 0x56000000  (bits 24/26/28 set)
+  WPR2 LO     = 0x1ffffe00  (same value SLM-OS FWSEC-FRTS produces)
+```
+
+Same hardware, same firmware, same UEFI. Nouveau is able to clear
+the SEC2 priv-lock that SLM-OS sees. This means the lock is NOT
+permanently sticky after UEFI POST — something nouveau does unlocks
+it.
+
+Further register comparison:
+
+- `NV_PMC_ENABLE` (0x200): 0x40000000 in SLM-OS → 0x56000000 in
+  nouveau. Extra bits 24, 26, 28. Setting these in SLM-OS does NOT
+  unlock SEC2 — verified empirically.
+- `NV_PMC_DEVICE_ENABLE` (0x600): 0xffffffff in both SLM-OS and
+  nouveau. SEC2's device-enable bit is already set in both states.
+
+The HWCFG2 bit 13 difference is called "RESET_READY" in nova-core
+(`linux-nova-core-falcon-hal-ga102.rs`). It's a state indicator that
+clears once the Falcon has been engine-reset — confirming unlock,
+not causing it.
+
+## Updated hypothesis for the unlock mechanism
+
+Neither `NV_PMC_ENABLE` nor `NV_PMC_DEVICE_ENABLE` alone unlocks
+SEC2. The research delegate's trace through nouveau shows the
+`gm200_flcn_enable` sequence (clear DEVICE_ENABLE bit, pulse
+`0x8403c0` bit 0, set DEVICE_ENABLE bit, poll HWCFG2 scrubbing)
+— but brute-forcing this in SLM-OS hangs the PRI bus because bit 0
+is the HOST domain; clearing it kills MMIO.
+
+Working theory: nouveau's **devinit subdev**
+(`nvkm/subdev/devinit/tu102.c`) replays the VBIOS DEVINIT script.
+That script resets SEC2 through its own priv-level-safe path (BIOS
+has credentials that mere PCIe MMIO does not). Replaying DEVINIT from
+bare-metal would require a VBIOS script interpreter — feasible but
+substantial. Alternatively, `kexec`-ing from nouveau-initialized
+Linux straight to SLM-OS would preserve SEC2 state since no power
+cycle occurs; this is exactly how Jetson bringup works today.
+
 ## Next steps (ranked)
 
 1. **Option A (Jetson Orin Nano, GA10B)** — still the pragmatic path.
@@ -151,6 +202,18 @@ Observations:
    (a) signing GSP-RM ourselves (not possible) or
    (b) GSP's own HS boot ROM verifying the image without the SEC2
    intermediary step (unclear if GA10x supports this mode).
+4. **Linux-to-SLM-OS kexec handoff.** Boot Linux with nouveau, let it
+   clear the SEC2 priv-lock via its devinit + Falcon enable sequence,
+   then kexec into SLM-OS. Nouveau doesn't cycle power, so SEC2 state
+   persists across the handoff. This is the same pattern Jetson uses
+   (TF-A/Linux → SLM-OS kexec) and proven reproducible. Single largest
+   obstacle between us and Ampere compute inference on bare-metal, if
+   the VBIOS DEVINIT replay route turns out to be large.
+5. **VBIOS DEVINIT interpreter in SLM-OS.** Port nouveau's devinit
+   script executor (tu102 + shared bytecode in `nvkm/subdev/devinit/`)
+   to SLM-OS. Replay the VBIOS-scripted SEC2 reset sequence from bare
+   metal. Substantial — a bytecode VM for VBIOS ops — but would close
+   the last Ampere gap on x86-64.
 
 ## Artifacts
 
