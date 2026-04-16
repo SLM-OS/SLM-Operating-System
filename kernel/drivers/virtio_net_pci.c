@@ -30,6 +30,8 @@
 #include "pmm.h"
 #include "spinlock.h"
 #include "debug.h"
+#include "virtio.h"         /* VIRTIO_NET_TX_TIMEOUT_MS shared constant */
+#include "arch/sys_arch.h"  /* sys_now() for wall-clock TX timeout */
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -629,16 +631,23 @@ static int virtio_net_pci_send(const void *data, size_t len) {
 
     vq_kick(&pci_net.tx_vq);
 
-    /* Synchronous TX: wait for completion */
-    int timeout = 100000;
-    while (timeout > 0) {
+    /* Synchronous TX: wait for completion, bounded by wall-clock time
+     * (VIRTIO_NET_TX_TIMEOUT_MS). Previously used a 100K-iteration
+     * magic constant — same limitation as the MMIO driver. #204 tracks
+     * moving both drivers to IRQ-driven completion. */
+    uint32_t tx_start = sys_now();
+    bool timed_out = true;
+    while ((sys_now() - tx_start) < VIRTIO_NET_TX_TIMEOUT_MS) {
         uint32_t used_len;
-        if (vq_get_buf(&pci_net.tx_vq, &used_len) >= 0)
+        if (vq_get_buf(&pci_net.tx_vq, &used_len) >= 0) {
+            timed_out = false;
             break;
-        timeout--;
+        }
+        __asm__ volatile("pause" ::: "memory");
     }
 
-    if (timeout == 0) {
+    if (timed_out) {
+        WARN("PCI TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
         pci_net.tx_errors++;
         spin_unlock_irqrestore(&pci_net.lock, flags);
         return -1;

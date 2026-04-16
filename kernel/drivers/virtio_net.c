@@ -13,6 +13,7 @@
 #include "gic.h"
 #include "spinlock.h"
 #include "cache.h"
+#include "arch/sys_arch.h"  /* sys_now() for wall-clock TX timeout */
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -459,11 +460,18 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
      * with -smp cores=4) the QEMU vcpu and IO threads share host
      * cores, and a tight spin can starve the IO thread that processes
      * the virtqueue kick. WFE/PAUSE lets the host scheduler interleave
-     * threads and the device responds in microseconds. */
-    int timeout = 10000000;
-    while (timeout > 0) {
+     * threads and the device responds in microseconds.
+     *
+     * Bound by wall-clock time (VIRTIO_NET_TX_TIMEOUT_MS) rather than
+     * iteration count — the previous 10M-iteration bound was magic
+     * and behaved differently under different host loads. #204 tracks
+     * moving to IRQ-driven completion which eliminates this busy wait. */
+    uint32_t tx_start = sys_now();
+    bool timed_out = true;
+    while ((sys_now() - tx_start) < VIRTIO_NET_TX_TIMEOUT_MS) {
         uint32_t used_len;
         if (virtqueue_get_buf(&netdev.tx_vq, &used_len) >= 0) {
+            timed_out = false;
             break;
         }
 #if defined(PLATFORM_X86_64)
@@ -471,11 +479,10 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
 #else
         __asm__ volatile("yield" ::: "memory");
 #endif
-        timeout--;
     }
 
-    if (timeout == 0) {
-        WARN("TX timeout");
+    if (timed_out) {
+        WARN("TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
         netdev.tx_errors++;
         spin_unlock(&net_lock);
         return -1;
