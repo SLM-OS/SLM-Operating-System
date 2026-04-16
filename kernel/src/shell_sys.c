@@ -2494,7 +2494,143 @@ int cmd_eviction(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: eviction [policy [<name>] | stats | trajectory [N]]\r\n");
+    if (strcmp(argv[1], "demo") == 0 || strcmp(argv[1], "pressure") == 0) {
+        /* #194: deliberately push the weight pool to capacity and
+         * beyond so the user can watch the active eviction policy
+         * pick victims live. The demo allocates 2 MB blocks using
+         * the same FFI the model loader uses, so the decisions
+         * flowing through the registry are real eviction decisions
+         * — not a mock. Allocations are freed at the end to leave
+         * the system in a clean state.
+         */
+        extern void *rust_model_alloc_weights_raw(size_t size);
+        /* Re-declare the ModelHandle-returning API locally: matches
+         * kernel/tests/test_model_mem.c. We don't have a public
+         * header for ModelHandle, so repeat the struct here to keep
+         * the demo self-contained. */
+        typedef struct {
+            uint16_t block_index;
+            uint8_t  pool_id;
+            uint8_t  generation;
+            uint32_t _reserved;
+        } DemoHandle;
+        extern DemoHandle rust_model_alloc_weights(size_t size);
+        extern int rust_model_free(DemoHandle handle);
+
+        const size_t MODEL_BLOCK_SIZE = 2u * 1024u * 1024u;
+        /* Cap at 192 attempts so we always reach eviction even on
+         * the 256 MB / 128-block weight pool, with headroom for a
+         * few eviction rounds. Backs a static handle table so the
+         * demo doesn't heap-allocate. */
+        enum { MAX_DEMO_ALLOCS = 192 };
+        static DemoHandle handles[MAX_DEMO_ALLOCS];
+        int held = 0;
+        /* Stop after this many observed evictions to keep output short. */
+        const int TARGET_EVICTIONS = 3;
+
+        RustEvictionStats before = {0};
+        rust_eviction_get_stats(&before);
+
+        uart_printf("Eviction pressure demo (policy: %s)\r\n",
+                    name_buf[0] ? name_buf : "(none)");
+        uart_printf("Weight pool: %lu / %lu blocks used, %lu evictions so far\r\n",
+                    (unsigned long)before.weight_allocated,
+                    (unsigned long)before.weight_total,
+                    (unsigned long)before.weight_evictions);
+        uart_printf("Plan: allocate 2 MB blocks until %d evictions observed.\r\n\r\n",
+                    TARGET_EVICTIONS);
+
+        uart_puts("Event       Step    Pool (used/total)   New evictions\r\n");
+        uart_puts("----------  ----    -----------------   -------------\r\n");
+
+        uint64_t prev_evictions = before.weight_evictions;
+        int admitted_quiet = 0;
+        bool aborted = false;
+
+        for (int i = 0; i < MAX_DEMO_ALLOCS; i++) {
+            DemoHandle h = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
+            bool is_null = (h.block_index == 0xFFFF && h.pool_id == 0xFF);
+            RustEvictionStats after = {0};
+            rust_eviction_get_stats(&after);
+            uint64_t new_evictions = after.weight_evictions - before.weight_evictions;
+            bool evict_step = after.weight_evictions > prev_evictions;
+            prev_evictions = after.weight_evictions;
+
+            if (!is_null && held < MAX_DEMO_ALLOCS) {
+                handles[held++] = h;
+            }
+
+            if (is_null) {
+                uart_printf("FAIL        %4d    %5lu / %5lu     %13lu\r\n",
+                            i + 1,
+                            (unsigned long)after.weight_allocated,
+                            (unsigned long)after.weight_total,
+                            (unsigned long)new_evictions);
+                uart_puts("  (allocator refused further allocation)\r\n");
+                aborted = true;
+                break;
+            }
+
+            if (evict_step) {
+                /* Flush pending quiet admits then print the eviction row. */
+                if (admitted_quiet > 0) {
+                    uart_printf("admit x %-3d %4d    %5lu / %5lu     %13lu\r\n",
+                                admitted_quiet, i,
+                                (unsigned long)after.weight_allocated,
+                                (unsigned long)after.weight_total,
+                                (unsigned long)new_evictions);
+                    admitted_quiet = 0;
+                }
+                uart_printf("EVICT       %4d    %5lu / %5lu     %13lu\r\n",
+                            i + 1,
+                            (unsigned long)after.weight_allocated,
+                            (unsigned long)after.weight_total,
+                            (unsigned long)new_evictions);
+                if ((int)new_evictions >= TARGET_EVICTIONS) {
+                    break;
+                }
+            } else {
+                admitted_quiet++;
+            }
+        }
+
+        if (admitted_quiet > 0 && !aborted) {
+            RustEvictionStats mid = {0};
+            rust_eviction_get_stats(&mid);
+            uart_printf("admit x %-3d         %5lu / %5lu\r\n",
+                        admitted_quiet,
+                        (unsigned long)mid.weight_allocated,
+                        (unsigned long)mid.weight_total);
+        }
+
+        /* Snapshot final counters. */
+        RustEvictionStats after = {0};
+        rust_eviction_get_stats(&after);
+        uart_printf("\r\nFinal: %lu / %lu blocks used; %lu total evictions; "
+                    "policy decisions: %lu (fallbacks %lu, avg %lu ns)\r\n",
+                    (unsigned long)after.weight_allocated,
+                    (unsigned long)after.weight_total,
+                    (unsigned long)after.weight_evictions,
+                    (unsigned long)after.policy_decisions,
+                    (unsigned long)after.policy_fallbacks,
+                    (unsigned long)after.policy_avg_latency_ns);
+
+        /* Clean up so the demo is idempotent. Handles for evicted
+         * blocks are now invalid and rust_model_free returns -1 on
+         * them — we ignore that and count only successful frees. */
+        int freed = 0;
+        for (int i = 0; i < held; i++) {
+            if (rust_model_free(handles[i]) == 0) {
+                freed++;
+            }
+        }
+        uart_printf("Released %d of %d demo allocations (the rest were evicted).\r\n",
+                    freed, held);
+        return 0;
+    }
+
+    uart_puts("Usage: eviction [policy [<name>] | stats | "
+              "trajectory [N] | demo | pressure]\r\n");
     return 1;
 }
 

@@ -247,6 +247,18 @@ static void test_shell_cmd_sched_compare(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
 }
 
+/*
+ * Regression for #194: `eviction demo` fills the weight pool to
+ * capacity, drives at least one eviction, and cleans up. When
+ * AI_EVICTION is off the policy isn't invoked but the command still
+ * runs and returns 0.
+ */
+static void test_shell_cmd_eviction_demo(void)
+{
+    int ret = shell_execute("eviction demo");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2135,6 +2147,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_top_missing_count);
     RUN_TEST(test_shell_cmd_sched_trace_lifecycle);
     RUN_TEST(test_shell_cmd_sched_compare);
+    RUN_TEST(test_shell_cmd_eviction_demo);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);
