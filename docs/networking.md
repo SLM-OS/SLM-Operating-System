@@ -90,6 +90,12 @@ manual-`ifconfig dhcp` behavior.
 | `net_set_dhcp_timeout_ms(ms)` | Override the bind timeout at runtime. Accepts 0 for immediate fallback (tests). |
 | `net_get_dhcp_timeout_ms()` | Query the current timeout. |
 | `net_dhcp_check_timeout()` | Run the fallback check directly. Returns 1 if fallback fired, 0 otherwise. Used by tests to deterministically trigger `NET_DHCP_FAILED` without racing the recv path. |
+| `net_get_dhcp_bind_count()` | Number of distinct DHCP-bound transitions since boot. Increments on every false→true edge of `dhcp_supplied_address()`, i.e. every fresh bind after DISCOVER/OFFER/REQUEST/ACK. Used by tests (#201) to verify the bind announcement fired. |
+
+When DHCP binds successfully, `net_poll()` detects the transition and
+logs `[INFO] DHCP bound: IP=... GW=... Mask=...` once per bind. This
+saves the user from running `ifconfig` after boot just to discover the
+DHCP-assigned address.
 
 ---
 

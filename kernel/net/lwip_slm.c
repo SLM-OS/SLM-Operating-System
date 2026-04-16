@@ -163,6 +163,38 @@ static err_t slm_netif_output(struct netif *netif, struct pbuf *p) {
     return ERR_OK;
 }
 
+/*
+ * DHCP bind announcer (issue #201).
+ *
+ * Prints a one-line INFO whenever dhcp_supplied_address() transitions
+ * false → true, so the user sees the DHCP-acquired IP without having
+ * to run ifconfig. Originally tried via netif_set_status_callback,
+ * but lwIP's netif_do_set_ipaddr skips the callback when the new IP
+ * equals the existing one — QEMU SLIRP typically hands out 10.0.2.15
+ * which matches our static default, so the callback never fired on
+ * bind under QEMU. Polling from net_poll() is race-free regardless
+ * of whether the IP actually changed.
+ */
+static bool     last_was_bound = false;
+static uint32_t dhcp_bind_count = 0;
+
+static void net_check_dhcp_bind_transition(void) {
+    bool bound_now = dhcp_supplied_address(&slm_netif) != 0;
+    if (bound_now && !last_was_bound) {
+        char ip[16], gw[16], nm[16];
+        net_ip_to_str(slm_netif.ip_addr.addr, ip);
+        net_ip_to_str(slm_netif.gw.addr,      gw);
+        net_ip_to_str(slm_netif.netmask.addr, nm);
+        INFO("DHCP bound: IP=%s GW=%s Mask=%s", ip, gw, nm);
+        dhcp_bind_count++;
+    }
+    last_was_bound = bound_now;
+}
+
+uint32_t net_get_dhcp_bind_count(void) {
+    return dhcp_bind_count;
+}
+
 /**
  * Initialize the network interface
  */
@@ -324,6 +356,7 @@ int net_init(void) {
         dhcp_started = true;
         dhcp_start_time = sys_now();
         dhcp_fallback_done = false;
+        last_was_bound = false;  /* #201: announce on next BOUND */
         INFO("DHCP client started at boot (timeout %u ms)", dhcp_timeout_ms);
     } else {
         WARN("DHCP auto-start failed; using static IP");
@@ -363,6 +396,12 @@ void net_poll(void) {
 
     /* DHCP auto-start timeout fallback (issue #197) */
     net_dhcp_check_timeout();
+
+    /* Announce DHCP binds (issue #201). Polled here rather than via
+     * netif_set_status_callback because lwIP suppresses the callback
+     * when the bound IP equals the prior static IP — common under
+     * QEMU SLIRP. */
+    net_check_dhcp_bind_transition();
 
     /* Check ping timeout (1 second) */
     if (ping_state.pending) {
@@ -439,6 +478,7 @@ int net_enable_dhcp(void) {
             dhcp_started = true;
             dhcp_start_time = sys_now();
             dhcp_fallback_done = false;
+            last_was_bound = false;  /* #201: announce on next BOUND */
             INFO("DHCP client started");
         } else {
             ERROR("Failed to start DHCP client");

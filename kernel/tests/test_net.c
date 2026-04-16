@@ -718,6 +718,43 @@ static void test_net_dhcp_binds(void)
 }
 
 /*
+ * Test: DHCP bind status callback fires when an address is acquired
+ * (issue #201).
+ *
+ * The netif status callback installed by slm_netif_init() is supposed
+ * to log "DHCP bound: ..." on the false→true transition of
+ * dhcp_supplied_address(). We can't capture log output from Unity, so
+ * we expose net_get_dhcp_bind_count() as a counter and assert it
+ * advanced during the live DHCP test. Runs *after* test_net_dhcp_binds
+ * (which drives the netif to BOUND via QEMU SLIRP).
+ *
+ * Skipped if DHCP didn't actually bind (e.g. no SLIRP) — binding is
+ * the precondition, and test_net_dhcp_binds already covers the
+ * "did bind" assertion itself.
+ */
+static void test_net_dhcp_bind_notification(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    struct net_info info;
+    net_get_info(&info);
+    if (info.dhcp_status != NET_DHCP_BOUND) {
+        TEST_IGNORE_MESSAGE("DHCP not bound — precondition for notify test");
+        return;
+    }
+
+    /* At least one BOUND transition must have been recorded. If zero,
+     * the status callback didn't fire — regression in slm_netif_init's
+     * netif_set_status_callback() registration. */
+    uint32_t binds = net_get_dhcp_bind_count();
+    TEST_ASSERT_MESSAGE(binds >= 1,
+        "DHCP bind-count should be >=1 after BOUND (#201 status callback)");
+}
+
+/*
  * Test: DHCP fallback restores static IP when no server answers
  * (issue #197, auto-DHCP fallback path).
  *
@@ -865,6 +902,7 @@ int test_suite_net(void)
     RUN_TEST(test_net_poll_after_init);
     RUN_TEST(test_net_auto_dhcp_at_boot);
     RUN_TEST(test_net_dhcp_binds);
+    RUN_TEST(test_net_dhcp_bind_notification);
     RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_driver_tx);
     RUN_TEST(test_net_rx_no_buffers_clean);

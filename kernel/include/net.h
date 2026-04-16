@@ -130,6 +130,18 @@ uint32_t net_get_dhcp_timeout_ms(void);
  */
 int net_dhcp_check_timeout(void);
 
+/**
+ * Number of distinct DHCP-bound transitions since boot.
+ *
+ * Increments each time the netif transitions from not-bound to bound
+ * (covers fresh DHCP acquisition and rebind after release/renew).
+ * Used by tests (issue #201) to verify the status callback fired;
+ * also useful for diagnostics.
+ *
+ * @return  Monotonic count of BOUND transitions
+ */
+uint32_t net_get_dhcp_bind_count(void);
+
 /* -------------------------------------------------------------------------- */
 /* ICMP (Ping) Support                                                         */
 /* -------------------------------------------------------------------------- */
