@@ -289,7 +289,8 @@ static void test_syscall_numbers_contiguous(void)
     TEST_ASSERT_EQUAL_INT(4, SYS_INFER);
     TEST_ASSERT_EQUAL_INT(5, SYS_SLEEP);
     TEST_ASSERT_EQUAL_INT(6, SYS_LOG);
-    TEST_ASSERT_EQUAL_INT(7, SYS_MAX);
+    TEST_ASSERT_EQUAL_INT(7, SYS_TOUCH_BLOCK);
+    TEST_ASSERT_EQUAL_INT(8, SYS_MAX);
 }
 
 /* ============================================================================

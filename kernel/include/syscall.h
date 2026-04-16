@@ -26,7 +26,8 @@
 #define SYS_INFER       4       /* Run inference: sys_infer(model, in, in_len, out, out_len) */
 #define SYS_SLEEP       5       /* Sleep: sys_sleep(ms) */
 #define SYS_LOG         6       /* Log to UART: sys_log(str, len) */
-#define SYS_MAX         7       /* Sentinel (must be last + 1) */
+#define SYS_TOUCH_BLOCK 7       /* Touch model block: sys_touch_block(handle) (#123) */
+#define SYS_MAX         8       /* Sentinel (must be last + 1) */
 
 /* SPSR value for EL0t (EL0, SP_EL0, all interrupts enabled) */
 #define SPSR_EL0T       0x0
