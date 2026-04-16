@@ -181,6 +181,45 @@ static void test_shell_cmd_clear(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
 }
 
+/*
+ * Test: 'top -n 1' runs a single frame and exits cleanly. Regression
+ * for #191 — the command must not hang without 'q' and must accept -n.
+ */
+static void test_shell_cmd_top_one_iter(void)
+{
+    int ret = shell_execute("top -n 1");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: 'top -n 1 5' accepts both iteration count and refresh interval.
+ * Refresh isn't exercised here since we only run one frame, but the
+ * parser must not error.
+ */
+static void test_shell_cmd_top_refresh_arg(void)
+{
+    int ret = shell_execute("top -n 1 5");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: 'top' rejects a zero-second refresh interval.
+ */
+static void test_shell_cmd_top_zero_refresh(void)
+{
+    int ret = shell_execute("top 0");
+    TEST_ASSERT_NOT_EQUAL(0, ret);
+}
+
+/*
+ * Test: 'top -n' without a value errors out.
+ */
+static void test_shell_cmd_top_missing_count(void)
+{
+    int ret = shell_execute("top -n");
+    TEST_ASSERT_NOT_EQUAL(0, ret);
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2063,6 +2102,10 @@ int test_suite_shell(void)
     /* Basic commands - just verify they execute (minimal output) */
     RUN_TEST(test_shell_cmd_clear);
     RUN_TEST(test_shell_cmd_uptime);
+    RUN_TEST(test_shell_cmd_top_one_iter);
+    RUN_TEST(test_shell_cmd_top_refresh_arg);
+    RUN_TEST(test_shell_cmd_top_zero_refresh);
+    RUN_TEST(test_shell_cmd_top_missing_count);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);

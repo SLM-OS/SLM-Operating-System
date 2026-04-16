@@ -339,6 +339,7 @@ set(KERNEL_SOURCES
     kernel/src/shell_fs.c
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
+    kernel/src/shell_top.c
     kernel/src/component_runtime.c
     # msg_router: Rust implementation in runtime/src/msg_router.rs
     # (linked via --whole-archive from Rust staticlib)

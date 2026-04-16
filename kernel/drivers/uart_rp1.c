@@ -268,6 +268,22 @@ char uart_getc(void)
     return (char)(*uart_dr & 0xFF);
 }
 
+int uart_try_getc(void)
+{
+    /* Ring buffer first (IRQ-fed if UART IRQ is delivering). */
+    if (rx_head != rx_tail) {
+        uint8_t ch = rx_buf[rx_tail];
+        rx_tail = (rx_tail + 1) & (UART_RX_BUF_SIZE - 1);
+        return (int)ch;
+    }
+    volatile uint32_t *uart_dr = (volatile uint32_t *)(RP1_UART0_BASE + UART_DR);
+    volatile uint32_t *uart_fr = (volatile uint32_t *)(RP1_UART0_BASE + UART_FR);
+    if (*uart_fr & FR_RXFE) {
+        return -1;
+    }
+    return (int)(*uart_dr & 0xFF);
+}
+
 /* ============================================================================
  * Interrupt-driven RX
  * ============================================================================ */

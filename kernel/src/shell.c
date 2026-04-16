@@ -76,6 +76,7 @@ const shell_cmd_t builtin_commands[] = {
     {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)"},
     {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | stats])"},
     {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])"},
+    {"top",    cmd_top,    "Live dashboard (top [-n <iter>] [refresh_secs])"},
     {"clear",  cmd_clear,  "Clear screen"},
     {"reboot", cmd_reboot, "Restart the system"},
 #if defined(PI5_IRQ_DIAG)
