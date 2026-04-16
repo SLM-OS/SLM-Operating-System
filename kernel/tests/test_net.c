@@ -512,6 +512,104 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 
 #endif /* PLATFORM_QEMU_VIRT — virtqueue tests */
 
+/* ============================================================================
+ * Live Driver Integration Tests
+ *
+ * These tests exercise the full net_init() path against the live VirtIO-Net
+ * device QEMU exposes. They are the no-hardware equivalent of running
+ * `net init && ifconfig && ping 10.0.2.2` in the shell — they prove that
+ * the registered driver, the lwIP netif adapter, and the configured QEMU
+ * netdev all line up. Skipped automatically when no network device is
+ * present (e.g. someone running the test kernel in QEMU with -nic none).
+ * ============================================================================ */
+
+#include "net_driver.h"
+
+/*
+ * Test: a network driver was registered during platform init.
+ *
+ * Verifies the platform-init path in main.c calls
+ * virtio_net_register() (QEMU_VIRT) or virtio_net_pci_register() (X86_64).
+ */
+static void test_net_driver_registered(void)
+{
+    const struct net_driver *drv = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv);
+    TEST_ASSERT_NOT_NULL(drv->name);
+    TEST_ASSERT_NOT_NULL(drv->init);
+    TEST_ASSERT_NOT_NULL(drv->send);
+    TEST_ASSERT_NOT_NULL(drv->recv);
+    TEST_ASSERT_NOT_NULL(drv->get_mac);
+    TEST_ASSERT_NOT_NULL(drv->link_status);
+}
+
+/*
+ * Test: net_init() brings the driver up and configures the netif.
+ *
+ * On QEMU with virtio-net attached, this should succeed: the driver
+ * probes the device, negotiates features, sets up virtqueues, and the
+ * lwIP netif comes up with the default 10.0.2.15 address.
+ *
+ * If the device is missing (no -netdev / -device on the QEMU command
+ * line) the driver init returns -1 and we skip rather than fail —
+ * this lets the test kernel run in environments without networking.
+ */
+static void test_net_init_live(void)
+{
+    if (net_is_up()) {
+        TEST_PASS();  /* Already initialized by a previous test run */
+        return;
+    }
+
+    int ret = net_init();
+    if (ret != 0) {
+        TEST_IGNORE_MESSAGE("VirtIO-Net device not present — skipping live test");
+        return;
+    }
+
+    TEST_ASSERT_TRUE(net_is_up());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+
+    /* MAC address must be non-zero (driver should have read it from
+     * the device's config space, or fallen back to a locally-administered
+     * address). */
+    bool any_nonzero = false;
+    for (int i = 0; i < 6; i++) {
+        if (info.mac[i] != 0) { any_nonzero = true; break; }
+    }
+    TEST_ASSERT_MESSAGE(any_nonzero, "MAC address should be non-zero after init");
+
+    /* Default IP should be QEMU's 10.0.2.15 (set by net_init before DHCP) */
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+
+    /* Link should be up since QEMU emulates an always-connected link */
+    TEST_ASSERT_TRUE(info.link_up);
+}
+
+/*
+ * Test: net_poll() runs without crashing after init.
+ *
+ * Polls the registered driver's recv path and lwIP timers. With no
+ * traffic on the wire there should be no packets, but the call must
+ * not fault — this catches NULL-deref bugs in the receive loop, lwIP
+ * timer callbacks, and the netif input chain.
+ */
+static void test_net_poll_after_init(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Poll a few times — exercises virtqueue empty path + lwIP timers */
+    for (int i = 0; i < 16; i++) {
+        net_poll();
+    }
+    TEST_PASS();
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -552,6 +650,12 @@ int test_suite_net(void)
     RUN_TEST(test_virtqueue_get_buf_returns_device_len);
     RUN_TEST(test_virtqueue_add_two_distinct_buffers);
 #endif
+
+    /* Live integration tests against QEMU's virtio-net device.
+     * Order matters: driver_registered → init_live → poll_after_init. */
+    RUN_TEST(test_net_driver_registered);
+    RUN_TEST(test_net_init_live);
+    RUN_TEST(test_net_poll_after_init);
 
     return UNITY_END();
 #else

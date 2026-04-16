@@ -57,8 +57,8 @@ uintptr_t virtio_probe(unsigned int slot, uint32_t expected_type) {
     }
 
     if (device_id != expected_type) {
-        INFO("VirtIO slot %u: device type %u (expected %u)",
-             slot, device_id, expected_type);
+        /* Mismatch is normal when scanning slots — caller decides
+         * whether absence is an error. */
         return 0;
     }
 
@@ -278,8 +278,22 @@ int virtio_net_init(void) {
 
     INFO("Initializing VirtIO-Net driver...");
 
-    /* Probe for network device */
-    uintptr_t base = virtio_probe(VIRTIO_NET_SLOT, VIRTIO_DEVICE_NET);
+    /* Probe for network device.
+     *
+     * QEMU's virt machine assigns virtio-mmio devices to slots in
+     * declaration order, but the slot the network device lands in
+     * depends on what other -device flags were passed. Scan all 32
+     * slots for the first one whose device_id matches VIRTIO_DEVICE_NET
+     * rather than hard-coding slot 0. */
+    uintptr_t base = 0;
+    unsigned net_slot = 0;
+    for (unsigned slot = 0; slot < 32; slot++) {
+        base = virtio_probe(slot, VIRTIO_DEVICE_NET);
+        if (base != 0) {
+            net_slot = slot;
+            break;
+        }
+    }
     if (base == 0) {
         ERROR("VirtIO-Net device not found");
         return -1;
@@ -383,9 +397,11 @@ int virtio_net_init(void) {
     /* Post receive buffers */
     post_rx_buffers();
 
-    /* Register IRQ handler */
-    gic_set_priority(VIRTIO_NET_IRQ, 0x80);
-    gic_enable_irq(VIRTIO_NET_IRQ);
+    /* Register IRQ handler — IRQ depends on the slot the device landed
+     * in, not the compile-time VIRTIO_NET_SLOT default. */
+    uint32_t irq = VIRTIO_DEVICE_IRQ(net_slot);
+    gic_set_priority(irq, 0x80);
+    gic_enable_irq(irq);
 
     initialized = true;
     INFO("VirtIO-Net driver initialized");
