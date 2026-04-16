@@ -72,7 +72,16 @@ uint32_t gsp_rpc_pages_for_payload(uint32_t rpc_payload_len)
      * purposes we round generously: every page after the first holds
      * up to GSP_PAGE_SIZE bytes (the header overhead is bounded). */
     if (rpc_payload_len == 0) return 1;
-    uint32_t total = sizeof(struct gsp_msg_hdr) + rpc_payload_len;
+    /* Defensive overflow guard (#169): reject payloads so large that
+     * `sizeof(hdr) + rpc_payload_len + GSP_PAGE_SIZE - 1` would wrap
+     * u32. A wrap would silently produce an undersized page count
+     * and the caller would write past the ring. The legitimate
+     * send path already caps at 16 pages via a separate guard; this
+     * is belt-and-suspenders at the arithmetic boundary. */
+    const uint32_t hdr = (uint32_t)sizeof(struct gsp_msg_hdr);
+    if (rpc_payload_len > UINT32_MAX - hdr - (GSP_PAGE_SIZE - 1))
+        return UINT32_MAX;
+    uint32_t total = hdr + rpc_payload_len;
     return (total + GSP_PAGE_SIZE - 1) / GSP_PAGE_SIZE;
 }
 
@@ -80,6 +89,13 @@ uint32_t gsp_rpc_advance_ptr(uint32_t start_page, uint32_t advance,
                              uint32_t page_count)
 {
     if (page_count == 0) return 0;
+    /* Defensive reject (#169): an `advance` larger than the ring
+     * is a caller-side bug (corrupt size from the GSP, wrong element
+     * header, IOMMU remap that scrambled the shared page). Return
+     * `page_count` as a sentinel rather than silently wrapping into
+     * the consumer's window. Legitimate callers never advance by
+     * more than the ring size. */
+    if (advance > page_count) return page_count;
     /* Modulo-arithmetic that matches r535_gsp_msgq_recv_one_elem:
      *   rptr = (rptr + DIV_ROUND_UP(size, GSP_PAGE_SIZE)) % cnt */
     uint32_t r = (start_page % page_count) + (advance % page_count);
@@ -94,6 +110,13 @@ uint32_t gsp_rpc_free_pages(uint32_t wptr, uint32_t rptr, uint32_t page_count)
      *   if (free >= cnt) free -= cnt;
      * Subtract one to disambiguate full vs empty. */
     if (page_count == 0) return 0;
+    /* Clamp the GSP-written pointer cells to `< page_count` on entry
+     * (#169). A corrupted `wptr` or `rptr` would otherwise produce a
+     * nonsense `free` value that routes a real `gsp_rpc_send` into
+     * the wrong ring offset. This is a structural invariant — the
+     * GSP side always reduces modulo page_count before writing. */
+    wptr %= page_count;
+    rptr %= page_count;
     uint32_t free = rptr + page_count - wptr - 1u;
     if (free >= page_count) free -= page_count;
     return free;
@@ -113,8 +136,8 @@ int gsp_rpc_init(struct gsp_rpc_channel *ch)
 
     /* Allocate page-aligned. The GSP needs the full block contiguous
      * in IOVA space. */
-    ch->shm_va = gsp_platform->dma_alloc(ch->shm_size, GSP_PAGE_SIZE,
-                                          &ch->shm_iova);
+    ch->shm_va = gsp_dma_alloc_checked(ch->shm_size, GSP_PAGE_SIZE,
+                                        &ch->shm_iova);
     if (!ch->shm_va) return GSP_ERR_NOMEM;
 
     memset(ch->shm_va, 0, ch->shm_size);

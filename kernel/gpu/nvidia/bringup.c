@@ -291,11 +291,11 @@ int gsp_bringup_fwsec_frts(struct gsp_bringup *b)
     size_t imem_aligned = round_up(b->fwsec_imem_size, FALCON_DMA_CHUNK);
     size_t dmem_aligned = round_up(b->fwsec_dmem_size, FALCON_DMA_CHUNK);
 
-    b->dma_imem_va = gsp_platform->dma_alloc(imem_aligned, 256, &b->dma_imem_iova);
+    b->dma_imem_va = gsp_dma_alloc_checked(imem_aligned, 256, &b->dma_imem_iova);
     if (!b->dma_imem_va) return -1;
     b->dma_imem_size = imem_aligned;
 
-    b->dma_dmem_va = gsp_platform->dma_alloc(dmem_aligned, 256, &b->dma_dmem_iova);
+    b->dma_dmem_va = gsp_dma_alloc_checked(dmem_aligned, 256, &b->dma_dmem_iova);
     if (!b->dma_dmem_va) {
         gsp_platform->dma_free(b->dma_imem_va, b->dma_imem_size);
         b->dma_imem_va = NULL;
@@ -605,8 +605,8 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
 
     /* ---- Phase 3: allocate DMA-mapped mutable copy of data section ---- */
     b->last_error_phase = 101;
-    b->dma_booter_va = gsp_platform->dma_alloc(img.data_size, 256,
-                                                &b->dma_booter_iova);
+    b->dma_booter_va = gsp_dma_alloc_checked(img.data_size, 256,
+                                              &b->dma_booter_iova);
     if (!b->dma_booter_va) return GSP_ERR_NOMEM;
     b->dma_booter_size = img.data_size;
     memcpy(b->dma_booter_va, img.bytes + img.data_offset, img.data_size);
@@ -640,9 +640,9 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * capture as a diagnostic). Filling WprMeta correctly requires
      * the GSP-RM ELF radix3 setup that lives in E4. */
     b->last_error_phase = 102;
-    b->dma_wpr_meta_va = gsp_platform->dma_alloc(WPR_META_BUFFER_SIZE,
-                                                  4096,
-                                                  &b->dma_wpr_meta_iova);
+    b->dma_wpr_meta_va = gsp_dma_alloc_checked(WPR_META_BUFFER_SIZE,
+                                                4096,
+                                                &b->dma_wpr_meta_iova);
     if (!b->dma_wpr_meta_va) { rc = GSP_ERR_NOMEM; goto fail; }
     b->dma_wpr_meta_size = WPR_META_BUFFER_SIZE;
     memset(b->dma_wpr_meta_va, 0, WPR_META_BUFFER_SIZE);
