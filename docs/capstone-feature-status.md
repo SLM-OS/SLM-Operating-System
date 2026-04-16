@@ -172,12 +172,21 @@ work: ARM64 platform shim (`kernel/arch/arm64/nvidia_gsp_platform.c`)
 implementing 11 vtable functions + GA10B firmware sourcing from L4T BSP.
 Estimated effort: 1-3 weeks.
 
-**x86-64:** FWSEC-FRTS succeeds on hardware (3/3 runs, WPR2 populated).
-Booter Load (E3.4.d) is hard-blocked by SEC2 privilege-level mask
-(#185): VFIO's mandatory PCI FLR triggers BSI DEVINIT re-run, which
-raises SEC2 PLM. 84.5% of SEC2 registers are priv-locked. This is
-structural to the VFIO+FLR path, not a code bug. A bare-metal x86-64
-SLM-OS boot would avoid FLR entirely, but that is beyond capstone scope.
+**x86-64:** FWSEC-FRTS succeeds on hardware (3/3 runs VFIO, 4/4 runs
+bare-metal SLM-OS — April 15 2026, WPR2 populated at 0x1ffffe00 on
+both paths). Booter Load (E3.4.d) is hard-blocked by the SEC2
+privilege-level mask (#185). Originally believed to be VFIO-specific
+(FLR → BSI → DEVINIT re-runs the VBIOS DEVINIT script, which raises
+SEC2 PLM); hardware validation on bare-metal SLM-OS invalidated that
+narrow framing. The priv-lock is also present at UEFI handoff on this
+board, so bare-metal alone does NOT work around it. Cross-validation
+on the same board under Linux + nouveau shows SEC2 accessible
+(CPUCTL=0x20) post-driver-load — something nouveau does (suspected
+VBIOS DEVINIT replay via its devinit subdev) clears the lock. Candidate
+next paths: port nouveau's devinit bytecode interpreter, or Linux-to-
+SLM-OS kexec handoff that inherits the unlocked state. Both are
+beyond capstone scope. See `docs/testing/x86-gpu-bringup-2026-04-15.md`
+for the full hardware validation report.
 
 ---
 
