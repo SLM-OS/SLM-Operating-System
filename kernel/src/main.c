@@ -410,24 +410,19 @@ void kernel_main(void *dtb)
     /* Initialize GPU subsystem */
     INFO("Initializing GPU...");
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    /* Jetson: GPU is clock-gated after kexec from Linux (nvgpu runtime
-     * PM suspend leaves clocks off). Attempt to re-enable GPU clocks
-     * and deassert reset via BPMP. These calls currently fail on the
-     * L4T BSP — BPMP firmware rejects the requests. GPU MMIO probe
-     * will return 0xFFFFFFFF until this is resolved. Tracked in #190. */
+    /* Jetson: the slmos-kexec helper re-enables the GPU clocks via
+     * BPMP debugfs before kexec, so the MMIO window is already live
+     * when we get here. We do NOT call bpmp_init() in SLM-OS: the
+     * UART driver is in raw mode and never initialized BPMP, and
+     * calling bpmp_init() on top of a Linux-initialized BPMP
+     * triggers a TF-A RAS Uncorrectable Error ("IHI GIC ACE-Lite
+     * Interface Error") — presumably from the IVC channel state
+     * reset at bpmp.c:311-315 touching a coherent memory region
+     * that has a stale owner. Tracked in #190.
+     *
+     * Diagnostic BOOT_0 read still useful to confirm the kexec
+     * helper's force-on worked. */
     {
-        int rc;
-        rc = bpmp_reset_deassert(TEGRA234_RESET_GPU);
-        if (rc < 0) WARN("BPMP GPU reset deassert failed (rc=%d)", rc);
-        rc = bpmp_clk_enable(TEGRA234_CLK_GPUSYS);
-        if (rc < 0) WARN("BPMP GPU GPUSYS clock enable failed (rc=%d)", rc);
-        rc = bpmp_clk_enable(TEGRA234_CLK_GPU_PWR);
-        if (rc < 0) WARN("BPMP GPU PWR clock enable failed (rc=%d)", rc);
-        /* Brief delay for clocks to stabilize (if they came up) */
-        for (volatile int i = 0; i < 100000; i++);
-        /* Diagnostic: direct BOOT_0 read to bypass the probe's present
-         * check. Shows the raw register value so we can tell whether
-         * MMIO is accessible regardless of what the probe decides. */
         uint32_t boot0_raw = *(volatile uint32_t *)(GPU_BASE + 0x0);
         INFO("GPU raw BOOT_0 read: 0x%08lx (expect 0xB7B000A1 for GA10B)",
              (unsigned long)boot0_raw);
