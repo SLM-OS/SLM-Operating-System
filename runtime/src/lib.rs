@@ -1255,6 +1255,99 @@ pub unsafe extern "C" fn rust_eviction_policy_set(name: *const u8) -> i32 {
     }
 }
 
+/// Set a per-pool eviction policy by name. #120.
+///
+/// `pool_id` = 0 for weight, 1 for workspace. Returns 0 on success,
+/// -1 on unknown name/pool, -2 when ai_eviction is off.
+///
+/// # Safety
+/// `name` must be a valid null-terminated C string ≤ 31 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_policy_set_pool(
+    pool_id: u8,
+    name: *const u8,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (pool_id, name); -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        if name.is_null() { return -1; }
+        let pool = match pool_id {
+            0 => mm::eviction::PoolType::Weight,
+            1 => mm::eviction::PoolType::Workspace,
+            _ => return -1,
+        };
+        let mut len = 0usize;
+        while len < 32 {
+            if *name.add(len) == 0 { break; }
+            len += 1;
+        }
+        if len == 0 || len == 32 { return -1; }
+        let slice = core::slice::from_raw_parts(name, len);
+        let requested = match core::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        use alloc::boxed::Box;
+        use mm::eviction::EvictionPolicy;
+        let boxed: Box<dyn EvictionPolicy + Send> = match requested {
+            "lru" => Box::new(mm::eviction::LruPolicy::new()),
+            "lfu" => Box::new(mm::eviction::LfuPolicy::new()),
+            "arc" => Box::new(mm::eviction::ARCPolicy::new()),
+            "slm" => Box::new(mm::eviction::SlmHeuristicPolicy::new()),
+            "xgboost" => Box::new(mm::eviction::XGBoostPolicy::new()),
+            "mlp" => Box::new(mm::eviction::MlpPolicy::new()),
+            "cacheus" => Box::new(mm::eviction::CacheusSelector::ml_only()),
+            "cacheus_all5" => Box::new(mm::eviction::CacheusSelector::all_5()),
+            "first_candidate" => Box::new(mm::eviction::FirstCandidatePolicy),
+            _ => return -1,
+        };
+        mm::eviction::set_eviction_policy_for_pool(pool, boxed);
+        0
+    }
+}
+
+/// Get the policy name for a specific pool. #120.
+/// pool_id = 0 for weight, 1 for workspace.
+/// Writes into out_buf, returns bytes written (excl NUL).
+#[no_mangle]
+pub extern "C" fn rust_eviction_policy_name_pool(
+    pool_id: u8,
+    out_buf: *mut u8,
+    buf_len: usize,
+) -> usize {
+    let pool = match pool_id {
+        0 => mm::eviction::PoolType::Weight,
+        1 => mm::eviction::PoolType::Workspace,
+        _ => {
+            if !out_buf.is_null() && buf_len > 0 {
+                unsafe { *out_buf = 0; }
+            }
+            return 0;
+        }
+    };
+    #[cfg(feature = "ai_eviction")]
+    {
+        let name = mm::eviction::get_eviction_policy_name_for_pool(pool);
+        if out_buf.is_null() || buf_len == 0 { return 0; }
+        let n = name.len().min(buf_len - 1);
+        unsafe {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), out_buf, n);
+            *out_buf.add(n) = 0;
+        }
+        n
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = pool;
+        if !out_buf.is_null() && buf_len > 0 {
+            unsafe { *out_buf = 0; }
+        }
+        0
+    }
+}
+
 /// Combined eviction-subsystem stats for the `eviction` shell command.
 /// Mirrors the layout used by `eviction_shell_stats` in slm_ffi.h.
 ///
@@ -1665,6 +1758,70 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             true
         });
         eviction::reset_to_default();
+
+        puts(b"\n-- eviction: per-pool policy (#120) --\n\0");
+
+        // Default: both pools are LRU.
+        eviction::reset_to_default();
+        check!(b"per_pool_default_weight_is_lru\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Weight) == "LRU");
+        check!(b"per_pool_default_workspace_is_lru\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Workspace) == "LRU");
+
+        // Install FirstCandidate on workspace only — weight stays LRU.
+        eviction::set_eviction_policy_for_pool(
+            eviction::PoolType::Workspace,
+            Box::new(eviction::FirstCandidatePolicy));
+        check!(b"per_pool_weight_still_lru\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Weight) == "LRU");
+        check!(b"per_pool_workspace_is_first_candidate\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Workspace) == "FirstCandidate");
+
+        // select_victim with Weight candidates uses the weight policy.
+        let w_cands = [make_block(1), make_block(2)];
+        let w_pick = eviction::select_victim(&w_cands);
+        check!(b"per_pool_weight_select_works\0", w_pick.is_some());
+
+        // select_victim with Workspace candidates uses the workspace
+        // policy (FirstCandidate always picks index 0).
+        let ws_cands = [
+            eviction::BlockMeta {
+                block_id: 10, pool_type: eviction::PoolType::Workspace,
+                model_id: 0, layer_idx: 0, last_access_time: 100,
+                load_time: 0, access_count: 0, ref_count: 0,
+                gpu_mapped: false, is_dirty: false, model_priority: 0,
+            },
+            eviction::BlockMeta {
+                block_id: 11, pool_type: eviction::PoolType::Workspace,
+                model_id: 0, layer_idx: 0, last_access_time: 50,
+                load_time: 0, access_count: 0, ref_count: 0,
+                gpu_mapped: false, is_dirty: false, model_priority: 0,
+            },
+        ];
+        let ws_pick = eviction::select_victim(&ws_cands);
+        // FirstCandidate always returns 0 regardless of access time.
+        check!(b"per_pool_workspace_uses_own_policy\0",
+               ws_pick == Some(0));
+        // LRU on the same candidates would pick index 1 (older).
+        // Verify by switching workspace back to LRU and re-checking.
+        eviction::set_eviction_policy_for_pool(
+            eviction::PoolType::Workspace,
+            Box::new(eviction::LruPolicy::new()));
+        let ws_pick_lru = eviction::select_victim(&ws_cands);
+        check!(b"per_pool_workspace_lru_picks_older\0",
+               ws_pick_lru == Some(1));
+
+        // reset_to_default resets both pools.
+        eviction::reset_to_default();
+        check!(b"per_pool_reset_both_lru\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Weight) == "LRU" &&
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Workspace) == "LRU");
 
         puts(b"\n-- eviction: per-policy counters (#115) --\n\0");
 

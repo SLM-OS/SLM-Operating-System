@@ -342,6 +342,10 @@ typedef struct {
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
+/* Per-pool eviction policy (#120). pool_id: 0 = weight, 1 = workspace. */
+extern int32_t rust_eviction_policy_set_pool(uint8_t pool_id, const uint8_t *name);
+extern size_t rust_eviction_policy_name_pool(uint8_t pool_id, uint8_t *out_buf, size_t buf_len);
+
 /* Bump / set / read the active-inferences counter consumed by the
  * SlmHeuristicPolicy "inactive-models first" eviction tier. #113.
  * Bump clamps at zero; indices ≥ 64 are silently ignored. */

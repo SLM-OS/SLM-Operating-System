@@ -36,8 +36,10 @@ pub mod tracker;
 pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType,
     TrajectoryEntry, MAX_EXPERTS};
 pub use registry::{
-    get_eviction_policy_name, policy_counters, reset_to_default, score,
-    select_victim, set_eviction_policy, update_feedback, with_active_policy,
+    get_eviction_policy_name, get_eviction_policy_name_for_pool,
+    policy_counters, reset_to_default, score,
+    select_victim, set_eviction_policy, set_eviction_policy_for_pool,
+    update_feedback, with_active_policy, with_active_policy_for_pool,
     FirstCandidatePolicy, PolicyCounters,
 };
 pub use lru::LruPolicy;

@@ -2560,9 +2560,43 @@ int cmd_eviction(int argc, char *argv[])
 
     if (strcmp(argv[1], "policy") == 0) {
         if (argc < 3) {
+            /* Show per-pool policy names (#120). */
+            char wp[32] = {0}, sp[32] = {0};
+            rust_eviction_policy_name_pool(0, (uint8_t *)wp, sizeof(wp));
+            rust_eviction_policy_name_pool(1, (uint8_t *)sp, sizeof(sp));
+            uart_printf("Weight pool policy:    %s\r\n", wp[0] ? wp : "(none)");
+            uart_printf("Workspace pool policy: %s\r\n", sp[0] ? sp : "(none)");
+            uart_puts("\r\n");
             eviction_print_policies(name_buf);
+            uart_puts("\r\nUsage:\r\n");
+            uart_puts("  eviction policy <name>           — set both pools\r\n");
+            uart_puts("  eviction policy weight <name>    — set weight pool only\r\n");
+            uart_puts("  eviction policy workspace <name> — set workspace pool only\r\n");
             return 0;
         }
+
+        /* Per-pool variant: `eviction policy weight <name>` or
+         * `eviction policy workspace <name>` (#120). */
+        if (argc >= 4 &&
+            (strcmp(argv[2], "weight") == 0 || strcmp(argv[2], "workspace") == 0)) {
+            uint8_t pool_id = (strcmp(argv[2], "weight") == 0) ? 0 : 1;
+            int rc = rust_eviction_policy_set_pool(pool_id,
+                                                    (const uint8_t *)argv[3]);
+            if (rc == -2) {
+                uart_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
+                return 1;
+            }
+            if (rc != 0) {
+                uart_printf("Unknown policy: '%s'\r\n", argv[3]);
+                return 1;
+            }
+            char buf[32] = {0};
+            rust_eviction_policy_name_pool(pool_id, (uint8_t *)buf, sizeof(buf));
+            uart_printf("Set %s pool policy: %s\r\n", argv[2], buf);
+            return 0;
+        }
+
+        /* Global variant: `eviction policy <name>` (sets both pools). */
         int rc = rust_eviction_policy_set((const uint8_t *)argv[2]);
         if (rc == -2) {
             uart_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
@@ -2574,7 +2608,7 @@ int cmd_eviction(int argc, char *argv[])
             return 1;
         }
         rust_eviction_policy_name((uint8_t *)name_buf, sizeof(name_buf));
-        uart_printf("Switched to policy: %s\r\n", name_buf);
+        uart_printf("Switched to policy: %s (both pools)\r\n", name_buf);
         return 0;
     }
 
