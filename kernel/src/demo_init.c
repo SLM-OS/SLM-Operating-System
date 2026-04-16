@@ -2,346 +2,31 @@
  * demo_init.c - Write embedded demo scripts to filesystem at boot
  *
  * Writes /mnt/files/demo.lua and /mnt/files/demo_menu.lua at boot so
- * they can be run from the shell via `lua demo.lua` (linear walkthrough)
- * or `lua demo_menu.lua` (interactive menu).
+ * they can be run from the shell via `lua /mnt/files/demo.lua` or
+ * `lua /mnt/files/demo_menu.lua`.
  *
- * The .lua files in scripts/ are the source of truth; the C string
- * literals below mirror them so the kernel image carries them along.
- * Update both copies if you change a script.
+ * Content is embedded in demo_scripts.S via .incbin from the source
+ * files under scripts/; the demo_lua_* / demo_menu_lua_* symbols are
+ * provided by that assembly file (#13). Embedding is gated on the
+ * EMBED_DEMO_SCRIPTS CMake option (#14) — when off, demo_init() is a
+ * no-op and no demo content is carried in the kernel image.
  */
 
 #include "vfs.h"
 #include "littlefs_slm.h"
 #include "uart.h"
+#include <stddef.h>
 
-static const char demo_script[] =
-    "-- SLM-OS Industrial IoT Demo\n"
-    "local P = slm.print\n"
-    "local sleep = slm.sleep\n"
-    "local yield = slm.yield\n"
-    "\n"
-    "P('')\n"
-    "P('============================================================')\n"
-    "P('  SLM-OS Industrial IoT Demo')\n"
-    "P('  Small Language Model Operating System')\n"
-    "P('============================================================')\n"
-    "P('')\n"
-    "sleep(1000)\n"
-    "\n"
-    "-- System overview\n"
-    "P('--- System Overview ---')\n"
-    "P('  Version:   ' .. slm.version())\n"
-    "P('  CPUs:      ' .. slm.cpu_count() .. ' cores')\n"
-    "P('  Scheduler: ' .. slm.sched_policy())\n"
-    "local mem = slm.mem_stats()\n"
-    "P(string.format('  Memory:    %d KB free / %d KB total', mem.free_kb, mem.total_kb))\n"
-    "P('')\n"
-    "sleep(1000)\n"
-    "\n"
-    "-- Start sensor monitor\n"
-    "P('--- Starting Sensor Monitor ---')\n"
-    "local idx = slm.component_run('sensor_monitor')\n"
-    "if idx >= 0 then\n"
-    "    P('  sensor_monitor started (idx=' .. idx .. ')')\n"
-    "else\n"
-    "    P('  ERROR: Failed to start sensor_monitor')\n"
-    "end\n"
-    "yield(); yield()\n"
-    "P('  Components active: ' .. slm.component_count())\n"
-    "P('')\n"
-    "sleep(1000)\n"
-    "\n"
-    "-- Simulate normal sensor data\n"
-    "P('--- Sensor Data Stream ---')\n"
-    "P('  Publishing normal readings (below threshold 50):')\n"
-    "for _, v in ipairs({23, 31, 42}) do\n"
-    "    local n = slm.msg_publish('/sensors/data', tostring(v))\n"
-    "    P(string.format('    Reading: %d  -> %d subscriber(s)', v, n))\n"
-    "    yield(); yield(); sleep(300)\n"
-    "end\n"
-    "P('')\n"
-    "\n"
-    "-- Simulate anomalies\n"
-    "P('  Injecting anomalies (above threshold 50):')\n"
-    "for _, v in ipairs({78, 95}) do\n"
-    "    local n = slm.msg_publish('/sensors/data', tostring(v))\n"
-    "    P(string.format('    ANOMALY: %d  -> %d subscriber(s)', v, n))\n"
-    "    yield(); yield(); sleep(300)\n"
-    "end\n"
-    "P('')\n"
-    "sleep(1000)\n"
-    "\n"
-    "-- Hot-swap\n"
-    "P('--- Live Component Hot-Swap ---')\n"
-    "P('  Swapping sensor_monitor with new instance...')\n"
-    "local new_idx = slm.component_hot_swap('sensor_monitor', 'sensor_monitor')\n"
-    "if new_idx >= 0 then\n"
-    "    P('  Hot-swap OK (new idx=' .. new_idx .. ')')\n"
-    "else\n"
-    "    P('  Hot-swap failed')\n"
-    "end\n"
-    "yield(); yield()\n"
-    "\n"
-    "-- Verify new instance works\n"
-    "P('  Verifying new instance:')\n"
-    "local n = slm.msg_publish('/sensors/data', '88')\n"
-    "P(string.format('    Reading: 88  -> %d subscriber(s)', n))\n"
-    "yield(); yield()\n"
-    "P('')\n"
-    "sleep(1000)\n"
-    "\n"
-    "-- AI Model Inference\n"
-    "P('--- AI Model Inference ---')\n"
-    "P('  Loading MNIST model (26 KB ONNX)...')\n"
-    "local mnist = slm.model_load_mnist()\n"
-    "if mnist >= 0 then\n"
-    "    P('  Model loaded (index=' .. mnist .. ')')\n"
-    "    P('  Running inference (zero input -> class prediction)...')\n"
-    "    local cls = slm.model_infer(mnist)\n"
-    "    P('  Predicted class: ' .. cls)\n"
-    "else\n"
-    "    P('  Model load failed')\n"
-    "end\n"
-    "P('')\n"
-    "sleep(1000)\n"
-    "\n"
-    "-- AI Scheduler\n"
-    "P('--- AI Scheduler ---')\n"
-    "P('  Current policy: ' .. slm.sched_policy())\n"
-    "P('')\n"
-    "sleep(500)\n"
-    "\n"
-    "-- Summary\n"
-    "P('============================================================')\n"
-    "P('  Demo Complete')\n"
-    "P('')\n"
-    "P('  Demonstrated:')\n"
-    "P('    - Component lifecycle (start, hot-swap)')\n"
-    "P('    - Publish/subscribe message routing')\n"
-    "P('    - Threshold-based anomaly detection')\n"
-    "P('    - Zero-downtime component replacement')\n"
-    "P('    - ONNX model loading and inference')\n"
-    "P('    - AI-driven scheduling (' .. slm.sched_policy() .. ' policy)')\n"
-    "P('    - ' .. slm.cpu_count() .. '-core scheduling')\n"
-    "P('============================================================')\n"
-    "P('')\n";
+#if defined(EMBED_DEMO_SCRIPTS)
 
-static const char demo_menu_script_part1[] =
-    "-- SLM-OS Phase 5 Demo (interactive menu)\n"
-    "--\n"
-    "-- Walks through the AI-first operating system features one scenario at\n"
-    "-- a time. Picks scenarios from a numbered menu and can dispatch any\n"
-    "-- shell command directly. Built on the slm.read_line() and\n"
-    "-- slm.shell_exec() bindings (#151).\n"
-    "--\n"
-    "-- Usage:  lua /scripts/demo_menu.lua\n"
-    "\n"
-    "local P = slm.print\n"
-    "\n"
-    "local function header(title)\n"
-    "    P(\"\")\n"
-    "    P(\"============================================================\")\n"
-    "    P(\"  \" .. title)\n"
-    "    P(\"============================================================\")\n"
-    "end\n"
-    "\n"
-    "local function note(s) P(\"  \" .. s) end\n"
-    "\n"
-    "-- --- Scenarios ---------------------------------------------------------------\n"
-    "\n"
-    "local function show_overview()\n"
-    "    header(\"System Overview\")\n"
-    "    note(\"Version:    \" .. slm.version())\n"
-    "    note(\"CPUs:       \" .. slm.cpu_count() .. \" cores\")\n"
-    "    note(\"This CPU:   \" .. slm.cpu_id())\n"
-    "    note(\"Scheduler:  \" .. slm.sched_policy())\n"
-    "    local mem = slm.mem_stats()\n"
-    "    note(string.format(\"RAM:        %d KB free / %d KB total\",\n"
-    "        mem.free_kb, mem.total_kb))\n"
-    "    local model = slm.model_stats()\n"
-    "    note(string.format(\"Weight Pool: %d / %d blocks allocated\",\n"
-    "        model.weights.allocated_blocks, model.weights.total_blocks))\n"
-    "    note(string.format(\"Work Pool:   %d / %d blocks allocated\",\n"
-    "        model.workspace.allocated_blocks, model.workspace.total_blocks))\n"
-    "    note(string.format(\"Uptime:     %d ms\", slm.uptime()))\n"
-    "end\n"
-    "\n"
-    "local function show_components()\n"
-    "    header(\"Registered Components\")\n"
-    "    local list = slm.component_list()\n"
-    "    if #list == 0 then\n"
-    "        note(\"(none registered)\")\n"
-    "        return\n"
-    "    end\n"
-    "    P(string.format(\"    %-4s %-20s %-12s %-10s %-8s\",\n"
-    "        \"IDX\", \"NAME\", \"TYPE\", \"STATE\", \"TASK\"))\n"
-    "    P(\"    --------------------------------------------------------\")\n"
-    "    for _, c in ipairs(list) do\n"
-    "        P(string.format(\"    %-4d %-20s %-12s %-10s %-8d\",\n"
-    "            c.index, c.name, c.type, c.state, c.task_id))\n"
-    "    end\n"
-    "end\n"
-    "\n"
-    "local function start_sensor_monitor()\n"
-    "    header(\"Start sensor_monitor\")\n"
-    "    local idx = slm.component_run(\"sensor_monitor\")\n"
-    "    if idx and idx >= 0 then\n"
-    "        note(\"sensor_monitor started (component index \" .. idx .. \")\")\n"
-    "    else\n"
-    "        note(\"ERROR: failed to start sensor_monitor\")\n"
-    "        return\n"
-    "    end\n"
-    "    slm.yield(); slm.yield()\n"
-    "    note(\"\")\n"
-    "    note(\"Driving sensor data (>50 trips threshold):\")\n"
-    "    for _, v in ipairs({23, 31, 78, 95, 19, 62}) do\n"
-    "        local n = slm.msg_publish(\"/sensors/data\", tostring(v))\n"
-    "        local tag = v > 50 and \" ANOMALY\" or \"\"\n"
-    "        note(string.format(\"  /sensors/data <- %-3d  (delivered to %d)%s\",\n"
-    "            v, n, tag))\n"
-    "        slm.yield()\n"
-    "        slm.sleep(200)\n"
-    "    end\n"
-    "end\n"
-    "\n"
-    "local function start_digit_classifier()\n"
-    "    header(\"Start digit_classifier\")\n"
-    "    local idx = slm.component_run(\"digit_classifier\")\n"
-    "    if idx and idx >= 0 then\n"
-    "        note(\"digit_classifier started (component index \" .. idx .. \")\")\n"
-    "        note(\"Watches /input/digits for inference requests.\")\n"
-    "    else\n"
-    "        note(\"ERROR: failed to start digit_classifier\")\n"
-    "    end\n"
-    "end\n"
-    "\n"
-    "local function hot_swap_demo()\n"
-    "    header(\"Hot-Swap sensor_monitor\")\n"
-    "    local existing = slm.component_find(\"sensor_monitor\")\n"
-    "    if existing == nil then\n"
-    "        note(\"sensor_monitor not running — starting one first\")\n"
-    "        slm.component_run(\"sensor_monitor\")\n"
-    "        slm.yield(); slm.yield()\n"
-    "    end\n"
-    "    local new_idx = slm.component_hot_swap(\"sensor_monitor\", \"sensor_monitor\")\n"
-    "    if new_idx and new_idx >= 0 then\n"
-    "        note(\"hot-swap succeeded (new index \" .. new_idx .. \")\")\n"
-    "    else\n"
-    "        note(\"hot-swap failed (code \" .. tostring(new_idx) .. \")\")\n"
-    "        return\n"
-    "    end\n"
-    "    slm.yield(); slm.yield()\n"
-    "    local n = slm.msg_publish(\"/sensors/data\", \"88\")\n"
-    "    note(string.format(\"  /sensors/data <- 88  (delivered to %d)\", n))\n"
-    ;
-
-static const char demo_menu_script_part2[] =
-    "end\n"
-    "\n"
-    "local function load_and_infer()\n"
-    "    header(\"MNIST Model Inference\")\n"
-    "    local idx = slm.model_find(\"mnist\")\n"
-    "    if idx == nil or idx < 0 then\n"
-    "        note(\"Loading built-in MNIST model...\")\n"
-    "        idx = slm.model_load_mnist()\n"
-    "        if idx == nil or idx < 0 then\n"
-    "            note(\"ERROR: failed to load MNIST model\")\n"
-    "            return\n"
-    "        end\n"
-    "    end\n"
-    "    note(\"Model loaded at index \" .. idx)\n"
-    "    note(\"\")\n"
-    "    note(\"Running inference on built-in test image:\")\n"
-    "    local pred = slm.model_infer(idx)\n"
-    "    if pred ~= nil and pred >= 0 then\n"
-    "        note(\"Predicted class: \" .. pred)\n"
-    "    else\n"
-    "        note(\"Inference failed (code \" .. tostring(pred) .. \")\")\n"
-    "    end\n"
-    "end\n"
-    "\n"
-    "local function show_tasks()\n"
-    "    header(\"Active Tasks\")\n"
-    "    P(string.format(\"    %-4s %-20s %-10s %-4s %-4s\",\n"
-    "        \"ID\", \"NAME\", \"STATE\", \"CPU\", \"PRI\"))\n"
-    "    P(\"    -------------------------------------------------\")\n"
-    "    for _, t in ipairs(slm.tasks()) do\n"
-    "        P(string.format(\"    %-4d %-20s %-10s %-4d %-4d\",\n"
-    "            t.id, t.name, t.state, t.cpu, t.priority))\n"
-    "    end\n"
-    "end\n"
-    "\n"
-    "local function run_shell_command()\n"
-    "    P(\"\")\n"
-    "    note(\"Enter a shell command (e.g. 'tasks', 'cpu', 'help'):\")\n"
-    "    note(\"> \")\n"
-    "    local cmd = slm.read_line()\n"
-    "    if cmd == nil or cmd == \"\" then\n"
-    "        note(\"(no command entered)\")\n"
-    "        return\n"
-    "    end\n"
-    "    local rc = slm.shell_exec(cmd)\n"
-    "    note(string.format(\"[exit %d]\", rc))\n"
-    "end\n"
-    "\n"
-    "-- --- Menu --------------------------------------------------------------------\n"
-    "\n"
-    "local menu = {\n"
-    "    {key = \"1\", label = \"System overview\",                action = show_overview},\n"
-    "    {key = \"2\", label = \"Show registered components\",     action = show_components},\n"
-    "    {key = \"3\", label = \"Start sensor_monitor + drive\",   action = start_sensor_monitor},\n"
-    "    {key = \"4\", label = \"Start digit_classifier\",         action = start_digit_classifier},\n"
-    "    {key = \"5\", label = \"Hot-swap sensor_monitor\",        action = hot_swap_demo},\n"
-    "    {key = \"6\", label = \"Load MNIST + run inference\",     action = load_and_infer},\n"
-    "    {key = \"7\", label = \"Show running tasks\",             action = show_tasks},\n"
-    "    {key = \"8\", label = \"Run an arbitrary shell command\", action = run_shell_command},\n"
-    "    {key = \"q\", label = \"Quit\",                           action = nil},\n"
-    "}\n"
-    "\n"
-    "local function show_menu()\n"
-    "    P(\"\")\n"
-    "    P(\"------------------------------------------------------------\")\n"
-    "    P(\"  SLM-OS Phase 5 Demo\")\n"
-    "    P(\"------------------------------------------------------------\")\n"
-    "    for _, item in ipairs(menu) do\n"
-    "        P(string.format(\"    %s) %s\", item.key, item.label))\n"
-    "    end\n"
-    "    P(\"\")\n"
-    "    P(\"  Choose: \")\n"
-    "end\n"
-    "\n"
-    "local function find_action(key)\n"
-    "    for _, item in ipairs(menu) do\n"
-    "        if item.key == key then return item end\n"
-    "    end\n"
-    "    return nil\n"
-    "end\n"
-    "\n"
-    "P(\"\")\n"
-    "P(\"############################################################\")\n"
-    "P(\"#  SLM-OS Phase 5 Demo\")\n"
-    "P(\"#  AI-First Operating System — interactive menu\")\n"
-    "P(\"############################################################\")\n"
-    "\n"
-    "while true do\n"
-    "    show_menu()\n"
-    "    local choice = slm.read_line()\n"
-    "    if choice == nil then\n"
-    "        P(\"  (input closed, exiting)\")\n"
-    "        break\n"
-    "    end\n"
-    "    local item = find_action(choice)\n"
-    "    if item == nil then\n"
-    "        P(\"  Unknown choice: '\" .. choice .. \"'\")\n"
-    "    elseif item.key == \"q\" then\n"
-    "        P(\"  Goodbye.\")\n"
-    "        break\n"
-    "    else\n"
-    "        item.action()\n"
-    "    end\n"
-    "end\n"
-    ;
-
+/*
+ * Provided by demo_scripts.S via .incbin on scripts/demo.lua and
+ * scripts/demo_menu.lua. Length of each blob is (_end - _start).
+ */
+extern const unsigned char demo_lua_start[];
+extern const unsigned char demo_lua_end[];
+extern const unsigned char demo_menu_lua_start[];
+extern const unsigned char demo_menu_lua_end[];
 
 int demo_init(void)
 {
@@ -352,30 +37,40 @@ int demo_init(void)
         return -1;
     }
 
-    int f = littlefs_file_open(mnt, "/demo.lua", LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    int f = littlefs_file_open(mnt, "/demo.lua",
+                               LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
     if (f < 0) {
         uart_puts("[WARN] demo_init: failed to create /mnt/files/demo.lua\r\n");
         return -1;
     }
-
-    /* sizeof includes the null terminator, subtract 1 for file content */
-    littlefs_file_write(mnt, f, demo_script, sizeof(demo_script) - 1);
+    littlefs_file_write(mnt, f, demo_lua_start,
+                        (size_t)(demo_lua_end - demo_lua_start));
     littlefs_file_close(mnt, f);
 
     int fm = littlefs_file_open(mnt, "/demo_menu.lua",
                                 LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
     if (fm < 0) {
         uart_puts("[WARN] demo_init: failed to create /mnt/files/demo_menu.lua\r\n");
-        /* demo.lua succeeded, so don't fail the whole init */
+        /* demo.lua succeeded, so don't fail the whole init. */
         return 0;
     }
-    /* Script is split into two C strings to stay under the ISO C99
-     * 4095-char string-literal limit. Concatenated on disk via two writes. */
-    littlefs_file_write(mnt, fm, demo_menu_script_part1,
-                        sizeof(demo_menu_script_part1) - 1);
-    littlefs_file_write(mnt, fm, demo_menu_script_part2,
-                        sizeof(demo_menu_script_part2) - 1);
+    littlefs_file_write(mnt, fm, demo_menu_lua_start,
+                        (size_t)(demo_menu_lua_end - demo_menu_lua_start));
     littlefs_file_close(mnt, fm);
 
     return 0;
 }
+
+#else  /* !EMBED_DEMO_SCRIPTS */
+
+/*
+ * Demo scripts omitted from this build. The Lua interpreter and the
+ * slm.* bindings remain fully functional; users can `lua <inline>` or
+ * load scripts written to the filesystem at runtime.
+ */
+int demo_init(void)
+{
+    return 0;
+}
+
+#endif /* EMBED_DEMO_SCRIPTS */

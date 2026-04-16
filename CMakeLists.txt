@@ -161,6 +161,17 @@ if(ENABLE_BOOT_TESTS)
     add_compile_definitions(ENABLE_BOOT_TESTS=1)
 endif()
 
+# Embed Lua demo scripts (scripts/demo.lua, scripts/demo_menu.lua) into the
+# kernel image via .incbin (#13, #14). When ON (the default), the scripts
+# are written to /mnt/files at boot so users can `lua /mnt/files/demo.lua`.
+# When OFF, demo_init() becomes a no-op and no demo content is embedded,
+# saving kernel binary size. The Lua interpreter and slm.* bindings remain
+# fully functional in either case.
+option(EMBED_DEMO_SCRIPTS "Embed scripts/*.lua demo scripts in the kernel image" ON)
+if(EMBED_DEMO_SCRIPTS)
+    add_compile_definitions(EMBED_DEMO_SCRIPTS=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64.ld)
@@ -306,6 +317,8 @@ set(KERNEL_SOURCES
     # (linked via --whole-archive from Rust staticlib)
     kernel/src/help.c
     kernel/src/demo_init.c
+    # .incbin'ed Lua demo scripts (gated on EMBED_DEMO_SCRIPTS)
+    $<$<BOOL:${EMBED_DEMO_SCRIPTS}>:kernel/src/demo_scripts.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     kernel/src/elf.c
     kernel/src/vfs.c
@@ -497,6 +510,19 @@ else()
     # PIE causes GOT-relative symbol lookups that fail after kexec on
     # Jetson because the GOT page may not be cache-coherent.
     target_compile_options(slmos.elf PRIVATE -mgeneral-regs-only -fno-pie)
+endif()
+
+# Feed absolute paths of the demo Lua scripts to demo_scripts.S so GAS's
+# .incbin can resolve them regardless of the assembler's working directory.
+# OBJECT_DEPENDS makes the .S file rebuild when the scripts change so the
+# embedded blob stays in sync with the repo source of truth.
+if(EMBED_DEMO_SCRIPTS)
+    set_source_files_properties(
+        kernel/src/demo_scripts.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "DEMO_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo.lua;DEMO_MENU_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo_menu.lua"
+        OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/scripts/demo.lua;${CMAKE_SOURCE_DIR}/scripts/demo_menu.lua"
+    )
 endif()
 
 # Configure LittleFS for freestanding use (no libc)
