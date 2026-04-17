@@ -85,4 +85,20 @@ struct ga10b_channel_handoff {
     uint32_t initial_gp_get;    /* GP_GET value (should equal GP_PUT) */
 };
 
+/*
+ * Validate a candidate handoff block. Returns 0 iff magic, version,
+ * addresses (all non-null), and gpfifo_entries (non-zero power of two)
+ * are all correct. Pure-logic — no MMIO, host-testable.
+ */
+int ga10b_validate_handoff(const struct ga10b_channel_handoff *h);
+
+/*
+ * Scan a physical-memory range for the handoff magic at the given
+ * stride. Returns the address of the first match, or 0 if not found.
+ * Production callers use the IOVMM heap range; host tests pass their
+ * own range over a mocked buffer.
+ */
+uint64_t ga10b_find_handoff_in_range(uint64_t start, uint64_t end,
+                                     uint64_t stride);
+
 #endif /* GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H */

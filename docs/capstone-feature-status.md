@@ -176,9 +176,9 @@ stack than discrete Ampere.
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
 | FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
 | RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (800 lines) | **26** | Phases 1–5 wired; **Phase 5 FECS method gateway verified on HW** |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (950 lines) | **37** | Phases 1–7 wired; **Phases 5–6 HW-verified**; Phase 7 GP_PUT write lands, PBDMA doorbell blocked |
 | **Jetson platform shim** | `nvidia_gsp_platform.c` (350 lines) | **15** | vtable dispatch + DMA align math host-tested |
-| **Total host-side tests** | | **164** | **All passing** |
+| **Total host-side tests** | | **175** | **All passing** |
 
 ### Platform-Specific Blockers
 
@@ -235,17 +235,42 @@ FECS method push (0x409500/504), runlist submit status
 (0x4080/88), FIFO_USER doorbell (0x200000+, first 5 channels),
 all DRAM (USERD, GPFIFO, pushbuffer memory).
 
-**Path forward — "inherit channel" approach:** Have Linux's nvgpu
-create a channel before kexec, keep it alive through the
-no-suspend transition. SLM-OS writes to USERD GP_PUT in DRAM to
-submit pushbuffer entries. PBDMA reads GP_PUT from DRAM, not from
-a blocked register. This crosses the Linux/SLM-OS boundary but is
-architecturally sound — the same "inherit" strategy that resolved
-#190 for the Falcon state.
+**Phase 6 implemented — channel inherit VERIFIED on hardware
+(April 17):** Linux-side helper (`scripts/gpu-channel-helper.c`)
+creates an nvgpu channel via all 10 ioctls (TSG open, channel open,
+AS alloc+bind, nvmap buffer allocs, SETUP_BIND with
+DETERMINISTIC|USERMODE_SUPPORT, WDT disable, MAP_BUFFER_EX). Ioctl
+parameters reverse-engineered from CUDA via LD_PRELOAD snooping
+(e.g., `va_range_start=0x4000000, va_range_end=0x2000000000` for
+ALLOC_AS; `heap_mask=0x40000000, flags=0x8000003` for NVMAP_ALLOC).
+
+Helper writes a handoff block with magic `GPUH` (0x47505548) to an
+nvmap dmabuf, prints its physical address, then sleeps. The
+modified `slmos-kexec --no-gpu-suspend` keeps the helper alive
+through the kexec transition (skips `fuser -k`). SLM-OS scans
+0x100000000–0x180000000 for the magic on `nvgpu channel`,
+validates the handoff (magic, version, non-null addresses,
+power-of-2 GPFIFO entries), and advances to `CHANNEL_OPEN` state.
+
+**Phase 7 partial — GP_PUT write lands, doorbell blocked:**
+`nvgpu submit` writes a NOP pushbuffer, builds a correctly-encoded
+Ampere GPFIFO entry (entry0[31:2] = va, entry1[7:0] = va[39:32],
+entry1[30:10] = length_dwords), and increments GP_PUT in USERD.
+Verified via `peek USERD[0x8c] = 1` — our write reaches the
+correct DRAM offset. BUT PBDMA does not advance GP_GET because
+the usermode doorbell (NV_USERMODE at 0x800000) is CBB-blocked
+from EL2; Linux's helper can ring the doorbell via an mmap of
+the ctrl fd, but that mapping is per-process and doesn't survive
+kexec. DETERMINISTIC kickless-submit only applies when the
+channel is already PBDMA's "current" channel.
 
 **Remaining path to GPU inference:**
-- Phase 6: Channel inherit from Linux (Linux-side helper + SLM-OS USERD write)
-- Phase 7: Pushbuffer method submission (NOP + SEMAPHORE_RELEASE)
+- Phase 7 completion: get PBDMA to consume pushbuffer entries.
+  Options: (a) pre-submit a kernel-mode GPFIFO from Linux to
+  "warm up" PBDMA before kexec, (b) arrange for the channel to
+  be the runlist's current-active channel at kexec time,
+  (c) find a way to ring the doorbell from EL2 (unlikely given
+  the CBB firewall).
 - Compute class binding + QMD dispatch
 - Compute kernel (SASS binary for `sm_87`)
 - Inference loop (GEMM → activation per layer)

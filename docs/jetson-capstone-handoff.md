@@ -148,16 +148,27 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
 - **CBB firewall mapped (April 17):** PFIFO, CHRAM, NV_USERMODE
   are permanently blocked from EL2. Channel setup requires
   Linux-side pre-creation ("inherit channel" path).
+- **Phase 6 channel inherit VERIFIED (April 17):** Linux helper
+  creates channel + writes handoff block; SLM-OS scans DRAM,
+  finds magic, parses all addresses. End-to-end E2E verified via
+  `nvgpu inherit` → `nvgpu channel`.
+- **Phase 7 partial (April 17):** `nvgpu submit` writes a NOP
+  pushbuffer GPFIFO entry and GP_PUT in USERD. `peek` confirms
+  the write landed. PBDMA does not consume — the doorbell is
+  CBB-blocked from EL2 and kexec breaks the Linux-side mmap that
+  would ring it. Next step: warm up PBDMA from Linux before kexec.
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)
-- Phases 1–5 of nvgpu bringup (26 host tests)
+- Phases 1–7 of nvgpu bringup (37 host tests)
 - #190 priv-lockdown root-caused and resolved
 - FECS method gateway — hardware-verified GPU controllability
+- Phase 6 channel inherit — full Linux/SLM-OS handoff working
 - CBB firewall accessibility map — architectural knowledge for
   future channel work
 - `peek` shell command for DRAM inspection
-- 72+ cached L4T nvgpu reference files
+- Linux-side `gpu-channel-helper.c` with CUDA-derived ioctl params
+- 78+ cached L4T nvgpu reference files
 
 ---
 

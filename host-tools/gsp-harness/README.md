@@ -103,7 +103,9 @@ make test-bringup
 # BAR0 vtable + synthetic firmware blobs emitted via inline asm.
 # Covers firmware accessor, prepare guards, phase-ordering state
 # machine, ACR HS load sequence, FECS/GPCCS/PMU phases, inherit
-# (Path 3), and the FECS method gateway (Phase 5). 26 test cases.
+# (Path 3), the FECS method gateway (Phase 5), and the channel
+# handoff reader/validator (Phase 6 — magic scan + validation of the
+# handoff block written by scripts/gpu-channel-helper.c). 37 test cases.
 make test-ga10b-bringup
 
 # Jetson GA10B platform shim — portable surfaces of

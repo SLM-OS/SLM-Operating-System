@@ -834,22 +834,44 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
 /* Cached handoff data for use by phase 7. */
 static struct ga10b_channel_handoff g_handoff;
 
-/* Scan IOVMM heap range for the handoff magic — the Linux helper
- * allocates the handoff buffer from nvmap which places it somewhere
- * in the 0x100000000 - 0x180000000 range. Scanning at 4 KB boundaries
- * on the Jetson takes ~200 ms. Returns the physical address or 0
- * if not found. */
-static uint64_t find_handoff_scan(void)
+/* Scan a physical-memory range for the handoff magic, at the given
+ * stride. Returns the address of the first match, or 0 if not found.
+ * The stride and range are parameters so the host tests can drive this
+ * against a mocked buffer; production callers use
+ * GA10B_HANDOFF_SCAN_START/END from the handoff header. */
+uint64_t ga10b_find_handoff_in_range(uint64_t start, uint64_t end,
+                                     uint64_t stride)
 {
-    const uint64_t scan_start = 0x100000000ULL;
-    const uint64_t scan_end   = 0x180000000ULL;
-    for (uint64_t p = scan_start; p < scan_end; p += 4096) {
+    for (uint64_t p = start; p < end; p += stride) {
         volatile uint32_t *w = (volatile uint32_t *)(uintptr_t)p;
         if (*w == GA10B_CHANNEL_HANDOFF_MAGIC) {
             return p;
         }
     }
     return 0;
+}
+
+/* Validate a candidate handoff block. Returns 0 on success, -1 if
+ * the magic, version, addresses, or GPFIFO entry count are invalid.
+ * Pure-logic function — no MMIO, no globals. Host-testable. */
+int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
+{
+    if (!h) return -1;
+    if (h->magic != GA10B_CHANNEL_HANDOFF_MAGIC) return -1;
+    if (h->version != 1) return -1;
+    if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
+        h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
+    /* gpfifo_entries must be a non-zero power of two. */
+    if (h->gpfifo_entries == 0 ||
+        (h->gpfifo_entries & (h->gpfifo_entries - 1)) != 0) return -1;
+    return 0;
+}
+
+/* Production scan — uses the IOVMM heap range where nvmap allocates
+ * on GA10B (0x100000000 - 0x180000000). Takes ~200 ms on hardware. */
+static uint64_t find_handoff_scan(void)
+{
+    return ga10b_find_handoff_in_range(0x100000000ULL, 0x180000000ULL, 4096);
 }
 
 int ga10b_bringup_channel(struct ga10b_bringup *b)
@@ -895,19 +917,20 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.initial_gp_put     = hoff->initial_gp_put;
     g_handoff.initial_gp_get     = hoff->initial_gp_get;
 
-    /* Validate magic. */
-    if (g_handoff.magic != GA10B_CHANNEL_HANDOFF_MAGIC) {
-        uart_printf("[GA10B-P6] handoff magic mismatch: got 0x%08lx, "
-                    "expected 0x%08lx\n",
+    /* Validate the handoff block (pure-logic, host-testable). */
+    if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
+                                &g_handoff) < 0) {
+        uart_printf("[GA10B-P6] handoff validation FAILED: "
+                    "magic=0x%08lx version=%lu entries=%lu "
+                    "userd=0x%lx gpfifo=0x%lx pb=0x%lx sem=0x%lx\n",
                     (unsigned long)g_handoff.magic,
-                    (unsigned long)GA10B_CHANNEL_HANDOFF_MAGIC);
+                    (unsigned long)g_handoff.version,
+                    (unsigned long)g_handoff.gpfifo_entries,
+                    (unsigned long)g_handoff.userd_phys,
+                    (unsigned long)g_handoff.gpfifo_phys,
+                    (unsigned long)g_handoff.pushbuf_phys,
+                    (unsigned long)g_handoff.semaphore_phys);
         uart_puts("[GA10B-P6] Did the Linux helper run before kexec?\n");
-        b->last_error_phase = 6;
-        return -1;
-    }
-    if (g_handoff.version != 1) {
-        uart_printf("[GA10B-P6] handoff version %lu unsupported\n",
-                    (unsigned long)g_handoff.version);
         b->last_error_phase = 6;
         return -1;
     }
@@ -933,21 +956,6 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     uart_printf("[GA10B-P6] initial gp_put=%lu gp_get=%lu\n",
                 (unsigned long)g_handoff.initial_gp_put,
                 (unsigned long)g_handoff.initial_gp_get);
-
-    /* Sanity checks on addresses. */
-    if (g_handoff.userd_phys == 0 || g_handoff.gpfifo_phys == 0 ||
-        g_handoff.pushbuf_phys == 0 || g_handoff.semaphore_phys == 0) {
-        uart_puts("[GA10B-P6] one or more handoff addresses are NULL\n");
-        b->last_error_phase = 6;
-        return -1;
-    }
-    if (g_handoff.gpfifo_entries == 0 ||
-        (g_handoff.gpfifo_entries & (g_handoff.gpfifo_entries - 1)) != 0) {
-        uart_printf("[GA10B-P6] gpfifo_entries=%lu must be power of 2\n",
-                    (unsigned long)g_handoff.gpfifo_entries);
-        b->last_error_phase = 6;
-        return -1;
-    }
 
     uart_puts("[GA10B-P6] channel handoff valid — inherited from Linux\n");
     b->state = GA10B_BRINGUP_CHANNEL_OPEN;
