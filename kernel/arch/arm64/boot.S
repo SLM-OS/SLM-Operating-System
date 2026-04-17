@@ -598,20 +598,36 @@ real_start:
      * CurrentEL[3:2] encodes the EL: 0b00=EL0, 0b01=EL1, 0b10=EL2,
      * 0b11=EL3. Value 0b1000 = 8 means EL2.
      *
-     * KNOWN BLOCKER on the UEFI-direct path: `msr hcr_el2, x10` below
-     * hangs silently under UEFI context. The unconditional write of
-     * (E2H|RW|TGE) clobbers every other bit UEFI had set (API, APK,
-     * AMO, IMO, FMO, HCD, VM), leaving the CPU in a state UEFI can't
-     * continue from. Kexec path is unaffected because Linux's host
-     * VHE state closely matches SLM-OS's target. Proper fix is
-     * read-modify-write to preserve UEFI's bits; tracked in
-     * docs/jetson-uefi-direct-result.md §5c.
+     * HCR_EL2 sequence (Path-2 P3 fix, 2026-04-17):
+     * Read-modify-write instead of unconditional overwrite.
+     *
+     *   Why not overwrite: UEFI at this point has TGE|RW set and
+     *   potentially other bits (HCD, TRVM, firmware-specific
+     *   virtualization traps). Clobbering those mid-flight while
+     *   UEFI's MMU is still configured for the prior regime is
+     *   what hung PR #219 / #226 / #239's UEFI-direct probes
+     *   (docs/jetson-uefi-direct-result.md §5c).
+     *
+     *   Why this is safe here: efi_disable_mmu ran just before the
+     *   return to boot.S and now actually disables the active EL2
+     *   MMU (it's E2H-aware since P3; pre-P3 it wrote the dormant
+     *   SCTLR_EL1 when E2H=0 and left the real EL2 MMU running —
+     *   that was the silent latent bug). With MMU off, flipping
+     *   HCR_EL2.E2H 0→1 no longer tears down an active translation
+     *   regime.
+     *
+     *   What the ORR targets: OR in (E2H|RW|TGE) to guarantee VHE
+     *   is on, EL1 is AArch64, and general exceptions route to
+     *   EL2. Pre-existing bits (API, APK, AMO, IMO, FMO, HCD, VM,
+     *   firmware-specific) are preserved.
      */
     mrs     x10, CurrentEL
     cmp     x10, #8
     b.ne    .Ljetson_post_setup            /* not EL2 → skip EL2 code */
 
-    ldr     x10, =((1 << 34) | (1 << 31) | (1 << 27))
+    mrs     x10, hcr_el2
+    ldr     x11, =((1 << 34) | (1 << 31) | (1 << 27))
+    orr     x10, x10, x11
     msr     hcr_el2, x10
     isb
 

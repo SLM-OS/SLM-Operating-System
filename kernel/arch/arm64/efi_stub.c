@@ -233,46 +233,73 @@ static void efi_disable_mmu(void)
 
     /* Disable MMU (read SCTLR, clear M/C/I bits, write back).
      *
-     * HISTORICAL comment (kept as-is; see below): "Use sctlr_el1
-     * (not sctlr_el2): when UEFI's VHE is active (E2H=1, TGE=1),
-     * sctlr_el1 is aliased to SCTLR_EL2."
+     * SCTLR to write depends on the EL + VHE state we're running
+     * under. Three regimes matter:
      *
-     * That premise is FALSE on Jetson firmware v36.4.7 as of
-     * 2026-04-17. A pre-EBS `mrs x10, hcr_el2` dump shows
-     * HCR_EL2 = 0x0000000088000000, i.e. TGE=1, RW=1, but
-     * **E2H = 0**. UEFI is NOT in VHE host mode. Writing sctlr_el1
-     * here therefore writes the REAL EL1 SCTLR (a separate
-     * register), not the active EL2 SCTLR, so the MMU DOES NOT
-     * actually get disabled. This is a latent bug that hasn't bitten
-     * yet because subsequent code either (a) hangs before caring
-     * about MMU state (the HCR_EL2 re-write in boot.S's Jetson
-     * block), or (b) happens to work by luck through UEFI's
-     * translation tables.
+     *   (a) EL1 (no EL2 involvement):
+     *         active MMU control = SCTLR_EL1.
+     *         TLB  = tlbi vmalle1.
+     *   (b) EL2 with VHE on (HCR_EL2.E2H=1, e.g. kexec-from-Linux
+     *       where Linux already configured VHE):
+     *         SCTLR_EL1 is architecturally aliased to SCTLR_EL2.
+     *         tlbi vmalle1 invalidates EL2 TLB entries.
+     *   (c) EL2 with VHE off (HCR_EL2.E2H=0, e.g. UEFI-direct on
+     *       Jetson firmware v36.4.7 — see
+     *       docs/jetson-uefi-direct-result.md §5c and P1 dump):
+     *         SCTLR_EL1 is a SEPARATE, dormant register. Writing
+     *         it here does NOT touch the active EL2 MMU — the
+     *         MMU stays ON. That is the latent bug that made the
+     *         subsequent `msr hcr_el2` in boot.S hang (flipping
+     *         E2H mid-flight with UEFI's translation active).
+     *         Correct target = SCTLR_EL2, TLB = tlbi alle2.
      *
-     * Proper fix (tracked for a follow-up): read CurrentEL and
-     * HCR_EL2.E2H, branch on (E2H==1 ? sctlr_el1 : sctlr_el2).
-     * Kexec-from-Linux typically enters with E2H=1 (Linux uses VHE
-     * on ARMv8.1+), so the kexec path would keep the sctlr_el1
-     * write; UEFI-direct needs sctlr_el2. */
-    __asm__ volatile(
-        "mrs    x0, sctlr_el1\n"
-        "bic    x0, x0, #(1 << 0)\n"   /* M: MMU enable */
-        "bic    x0, x0, #(1 << 2)\n"   /* C: Data cache enable */
-        "bic    x0, x0, #(1 << 12)\n"  /* I: Instruction cache enable */
-        "msr    sctlr_el1, x0\n"
-        "isb\n"
-        ::: "x0", "memory"
-    );
+     * Runtime branch on CurrentEL + HCR_EL2.E2H picks the right
+     * target. The inline asm uses a fall-through/branch idiom so
+     * each arm runs with its own SCTLR + TLBI sequence. */
+    {
+        uint64_t cur_el_raw;
+        uint64_t cur_el;
+        __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur_el_raw));
+        cur_el = (cur_el_raw >> 2) & 3;   /* 1=EL1, 2=EL2, 3=EL3 */
 
-    /* Invalidate TLBs.
-     * tlbi vmalle1 is the VHE-compatible form: with VHE it invalidates
-     * all EL2 TLB entries; without VHE it invalidates EL1 entries. */
-    __asm__ volatile(
-        "tlbi   vmalle1\n"
-        "dsb    nsh\n"
-        "isb\n"
-        ::: "memory"
-    );
+        int use_el2 = 0;
+        if (cur_el == 2) {
+            uint64_t hcr;
+            __asm__ volatile("mrs %0, hcr_el2" : "=r"(hcr));
+            /* Treat E2H=0 as "EL2 non-VHE, must target SCTLR_EL2".
+             * E2H=1 means VHE is already on and SCTLR_EL1 aliases
+             * SCTLR_EL2, so the EL1-path sequence is correct. */
+            use_el2 = ((hcr >> 34) & 1) == 0;
+        }
+
+        if (use_el2) {
+            __asm__ volatile(
+                "mrs    x0, sctlr_el2\n"
+                "bic    x0, x0, #(1 << 0)\n"   /* M  */
+                "bic    x0, x0, #(1 << 2)\n"   /* C  */
+                "bic    x0, x0, #(1 << 12)\n"  /* I  */
+                "msr    sctlr_el2, x0\n"
+                "isb\n"
+                "tlbi   alle2\n"
+                "dsb    nsh\n"
+                "isb\n"
+                ::: "x0", "memory"
+            );
+        } else {
+            __asm__ volatile(
+                "mrs    x0, sctlr_el1\n"
+                "bic    x0, x0, #(1 << 0)\n"   /* M  */
+                "bic    x0, x0, #(1 << 2)\n"   /* C  */
+                "bic    x0, x0, #(1 << 12)\n"  /* I  */
+                "msr    sctlr_el1, x0\n"
+                "isb\n"
+                "tlbi   vmalle1\n"
+                "dsb    nsh\n"
+                "isb\n"
+                ::: "x0", "memory"
+            );
+        }
+    }
 }
 
 /*

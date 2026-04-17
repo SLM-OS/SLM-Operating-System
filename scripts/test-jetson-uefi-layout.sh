@@ -201,6 +201,51 @@ else
     err "exception_vectors symbol missing"
 fi
 
+printf '\n== P3: E2H-aware efi_disable_mmu ==\n'
+
+# 6. efi_disable_mmu must contain BOTH the EL2-path TLBI (`tlbi
+#    alle2`) and the EL1-path TLBI (`tlbi vmalle1`). If either is
+#    missing, the runtime branch is only half-implemented and one
+#    of the two entry modes (UEFI-direct with E2H=0 vs
+#    kexec/EL1/VHE-on) will silently leave the MMU running or hit
+#    the wrong register. The tlbi instruction is a unique marker
+#    for each branch since the mrs/bic/msr surrounding sequences
+#    are identical.
+#
+# NOTE: uses `grep -c` + count-check rather than `grep -q` because
+# with `set -o pipefail` a SIGPIPE-driven early-exit from `grep -q`
+# makes `echo "$huge_string" | grep -q ...` spuriously fail when
+# echo can't complete writing before grep closes its stdin.
+alle2_count=$("$OBJDUMP" -d "$ELF" 2>/dev/null \
+    | grep -cE 'tlbi[[:space:]]+alle2' || true)
+if [ "$alle2_count" -ge 1 ]; then
+    pass "image contains 'tlbi alle2' (EL2-path MMU disable)"
+else
+    err "no 'tlbi alle2' — E2H=0 branch of efi_disable_mmu missing?"
+fi
+
+# tlbi vmalle1 (not vmalle1is) specifically — the `is` variant is
+# used elsewhere in the kernel for IS-scoped shootdown and would
+# match a too-broad regex.
+vmalle1_count=$("$OBJDUMP" -d "$ELF" 2>/dev/null \
+    | grep -cE 'tlbi[[:space:]]+vmalle1($|[^i])' || true)
+if [ "$vmalle1_count" -ge 1 ]; then
+    pass "image contains 'tlbi vmalle1' (EL1/VHE-path MMU disable)"
+else
+    err "no 'tlbi vmalle1' — E2H=1 / EL1 branch of efi_disable_mmu missing?"
+fi
+
+# 7. boot.S's Jetson HCR_EL2 write must be RMW: a `mrs XN, hcr_el2`
+#    before the `msr hcr_el2, ...`. Pre-P3 the write was an
+#    unconditional move with no preceding mrs.
+mrs_hcr_count=$("$OBJDUMP" -d "$ELF" 2>/dev/null \
+    | grep -cE 'mrs[[:space:]]+x[0-9]+,[[:space:]]*hcr_el2' || true)
+if [ "$mrs_hcr_count" -ge 1 ]; then
+    pass "kernel reads HCR_EL2 before writing it ($mrs_hcr_count sites — RMW pattern)"
+else
+    err "no 'mrs XN, hcr_el2' found — P3 RMW pattern missing?"
+fi
+
 printf '\n== Summary ==\n'
 if [ "$fail" -eq 0 ]; then
     printf '  \033[32mAll checks passed.\033[0m\n'

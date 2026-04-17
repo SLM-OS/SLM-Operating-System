@@ -264,6 +264,33 @@ So the right fix is not RMW — it's one of:
 
 (b) or (c) is the operative next step.
 
+**2026-04-17 — (b) landed as Path-2 P3.** Implementation lives in:
+
+- `kernel/arch/arm64/efi_stub.c`: `efi_disable_mmu` is now
+  E2H-aware. At runtime it reads `CurrentEL` + `HCR_EL2.E2H` and
+  branches:
+  - EL2 with `E2H=0` (UEFI-direct on Jetson v36.4.7) →
+    `msr sctlr_el2` + `tlbi alle2`. This is the arm that was
+    missing pre-P3; with E2H=0, `SCTLR_EL1` is a separate
+    (dormant) register and the old code was writing it instead
+    of the active EL2 MMU control.
+  - EL2 with `E2H=1` (kexec-from-Linux) or EL1 → `msr sctlr_el1`
+    + `tlbi vmalle1`. Under VHE, `SCTLR_EL1` is aliased to
+    `SCTLR_EL2`, so the EL1-style write reaches the right
+    register. Kexec path is unchanged in behavior.
+- `kernel/arch/arm64/boot.S`: the Jetson EL2 block's
+  `msr hcr_el2, x10` is now RMW — `mrs` / `orr with (E2H|RW|TGE)`
+  / `msr`. Preserves whatever UEFI had set (API, APK, HCD, etc.)
+  and only flips bits we depend on. This is safe now because
+  `efi_disable_mmu` has actually turned off the MMU by the time
+  this runs (pre-P3, MMU stayed on because of the dormant-EL1
+  write), so flipping E2H 0→1 doesn't tear down an active
+  translation regime.
+
+This resolves the §5c silent hang. §5d (UARTC MMIO) becomes
+testable independently now that the MMU is genuinely off before
+the UARTC writes.
+
 ### 5d2. Early EL2 vector table (2026-04-17, Path-2 P2)
 
 The primary reason the HCR_EL2 write (and every subsequent
