@@ -62,14 +62,14 @@ regression tests in the kernel test suite.
 | ✅ #118 | set_dirty wire-up | Tests verify feature vector shift; pathway ready |
 | ✅ #122 | Extended feature vector | Slots 11 + 17 wired from live data + design doc |
 
-## Remaining
+### Model Inference (all resolved)
 
-### Model Inference Enhancements
+| # | Title | Status |
+|---|-------|--------|
+| ✅ #37 | Multi-Model Management | pin/unpin shell, extended model list, built-in load shortcut |
+| ✅ #64 | Async model preloading | Background task via `model preload`, Lua `slm.model_preload` |
 
-| # | Title | Priority | What it enables |
-|---|-------|----------|-----------------|
-| #37 | Multi-Model Management | P3-low | Multiple models to make eviction visible |
-| #64 | Async model preloading | P3-low | Faster demo startup |
+## All demo-readiness tickets complete.
 
 ---
 
