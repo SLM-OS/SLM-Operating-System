@@ -40,6 +40,7 @@ void shell_session_init(void)
     console_session.cwd[1]     = '\0';
     console_session.owner_task = NULL;
     console_session.in_use     = true;
+    console_session.lua        = NULL;
 
     console_session_ready = true;
 }
@@ -87,10 +88,11 @@ struct shell_session *shell_session_current(void)
             return s;
         }
     }
-    /* No binding — fall back to console. Background tasks that never
-     * call shell_* functions never reach here. */
+    /* No binding — fall back to the console session. Lazily initialize
+     * it if needed so test harnesses that call shell_execute without
+     * a preceding shell_init() still get a valid session. */
     if (!console_session_ready) {
-        return NULL;
+        shell_session_init();
     }
     return &console_session;
 }

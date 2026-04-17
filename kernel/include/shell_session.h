@@ -24,12 +24,25 @@
 
 struct task;
 
+/* Forward-declare without pulling in <lua.h>. The field is void * so
+ * this header stays lua-agnostic; lua_shell.c casts when it assigns. */
+struct lua_State;
+
 struct shell_session {
     uint32_t         id;                  /* 0 = console; 1..N = TCP */
     struct shell_io *io;                  /* input/output backend */
     char             cwd[VFS_MAX_PATH];   /* current working directory */
     struct task     *owner_task;          /* task running this session (NULL if unbound) */
     bool             in_use;              /* pool slot occupancy */
+
+    /* Per-session Lua interpreter slot. Unused today — the `lua`
+     * command still creates and tears down a fresh state per
+     * invocation (see kernel/src/lua_shell.c). When Lua starts being
+     * driven from a long-running remote session, the `lua` command
+     * will lazily allocate this on first use and tear it down when
+     * the session closes. Access via void * to avoid pulling <lua.h>
+     * into this header. */
+    void            *lua;
 };
 
 /* Get the singleton console session (UART-backed). Always non-NULL
@@ -49,9 +62,10 @@ void shell_session_bind(struct task *t, struct shell_session *s);
 void shell_session_unbind(struct task *t);
 
 /* Return the session bound to the currently running task, or the
- * console session if no binding exists. Never returns NULL once
- * shell_session_init() has run. Before that (early boot) it may
- * return NULL. */
+ * console session if no binding exists. Lazily initializes the
+ * console session so test harnesses that call into shell command
+ * dispatch without first calling shell_init() still get a valid
+ * session. Never returns NULL. */
 struct shell_session *shell_session_current(void);
 
 #endif /* SHELL_SESSION_H */

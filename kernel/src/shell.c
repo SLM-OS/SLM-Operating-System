@@ -107,8 +107,9 @@ int num_external_commands = 0;
 static char line_buffer[SHELL_MAX_LINE];
 static int line_pos = 0;
 
-/* Current working directory */
-char shell_cwd[VFS_MAX_PATH] = "/";
+/* The current working directory lives on the shell_session now — see
+ * shell_session_current()->cwd. shell_resolve_path and cwd-reading /
+ * cwd-mutating commands route through it. */
 
 /* ============================================================================
  * Helper functions
@@ -149,11 +150,17 @@ int shell_resolve_path(const char *path, char *out, size_t max_len)
         return -1;
     }
 
+    /* Resolve relative paths against the current session's cwd. Falls
+     * back to "/" if there is no session bound (e.g. early boot /
+     * unit-test init before shell_session_init). */
+    struct shell_session *sess = shell_session_current();
+    const char *cwd = (sess && sess->cwd[0]) ? sess->cwd : "/";
+
     /* Empty path means current directory */
     if (*path == '\0') {
-        size_t cwd_len = strlen(shell_cwd);
+        size_t cwd_len = strlen(cwd);
         if (cwd_len >= max_len) return -1;
-        strcpy(out, shell_cwd);
+        strcpy(out, cwd);
         return 0;
     }
 
@@ -163,9 +170,9 @@ int shell_resolve_path(const char *path, char *out, size_t max_len)
          * the component-append loop below inserts one as needed. Previously
          * this branch appended '/' eagerly, which combined with the loop's
          * own separator produced "/foo//bar" for cwd=/foo, path=bar. */
-        size_t cwd_len = strlen(shell_cwd);
+        size_t cwd_len = strlen(cwd);
         if (cwd_len >= sizeof(work)) return -1;
-        strcpy(work, shell_cwd);
+        strcpy(work, cwd);
         work_len = cwd_len;
     } else {
         /* Absolute path */

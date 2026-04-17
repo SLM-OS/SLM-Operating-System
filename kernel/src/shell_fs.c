@@ -7,6 +7,7 @@
 
 #include "shell.h"
 #include "shell_internal.h"
+#include "shell_session.h"
 #include "uart.h"
 #include "vfs.h"
 #include "littlefs_slm.h"
@@ -91,7 +92,9 @@ int cmd_pwd(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    shell_printf("%s\r\n", shell_cwd);
+    struct shell_session *sess = shell_session_current();
+    const char *cwd = (sess && sess->cwd[0]) ? sess->cwd : "/";
+    shell_printf("%s\r\n", cwd);
     return 0;
 }
 
@@ -142,8 +145,13 @@ int cmd_cd(int argc, char *argv[])
         }
     }
 
-    /* Update cwd */
-    strcpy(shell_cwd, resolved);
+    /* Update cwd on the current session. Each session has its own
+     * cwd — changing it here affects only this session. */
+    struct shell_session *sess = shell_session_current();
+    if (sess) {
+        strncpy(sess->cwd, resolved, sizeof(sess->cwd) - 1);
+        sess->cwd[sizeof(sess->cwd) - 1] = '\0';
+    }
     return 0;
 }
 
