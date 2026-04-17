@@ -73,6 +73,10 @@ int cmd_eviction(int argc, char **argv);
 int cmd_timdiag(int argc, char **argv);
 #endif
 
+#if defined(PLATFORM_RASPI5) && defined(ENABLE_NETWORKING)
+int cmd_macbdiag(int argc, char **argv);
+#endif
+
 /* Dashboard command (shell_top.c) */
 int cmd_top(int argc, char **argv);
 

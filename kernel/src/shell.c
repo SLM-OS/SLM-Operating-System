@@ -85,6 +85,9 @@ const shell_cmd_t builtin_commands[] = {
 #if !defined(PLATFORM_X86_64)
     {"timdiag", cmd_timdiag, "Timer/interrupt delivery diagnostic"},
 #endif
+#if defined(PLATFORM_RASPI5) && defined(ENABLE_NETWORKING)
+    {"macbdiag", cmd_macbdiag, "MACB IRQ delivery diagnostic"},
+#endif
 };
 
 const int NUM_BUILTIN_COMMANDS = sizeof(builtin_commands) / sizeof(builtin_commands[0]);

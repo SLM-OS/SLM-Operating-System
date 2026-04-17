@@ -41,6 +41,7 @@
 #include "debug.h"
 #include "timer.h"          /* sleep_ms / sleep_us */
 #include "cache.h"          /* cache_clean_range for DMA coherency */
+#include "gic.h"            /* gic_register_handler / gic_enable_irq */
 #include "macb.h"
 
 /* -------------------------------------------------------------------------- */
@@ -177,6 +178,16 @@
 #define MACB_TSR_RLE            (1u << 2)   /* Retry limit exceeded */
 #define MACB_TSR_TGO            (1u << 3)   /* TX go — set while transmitting */
 #define MACB_TSR_COMP           (1u << 5)   /* TX complete (write-1-to-clear) */
+
+/* MACB ISR / IER / IDR / IMR — interrupt status and masks. ISR bits
+ * are write-1-to-clear. We only enable the handful we actually care
+ * about; the stats-counter interrupts are left off to avoid noise. */
+#define MACB_INT_RCOMP          (1u << 1)   /* Receive complete */
+#define MACB_INT_RXUBR          (1u << 2)   /* RX used-bit read (no buffers) */
+#define MACB_INT_TXUBR          (1u << 3)   /* TX used-bit read */
+#define MACB_INT_TXERR          (1u << 6)   /* TX frame corrupt */
+#define MACB_INT_TCOMP          (1u << 7)   /* Transmit complete */
+#define MACB_INT_HRESP          (1u << 11)  /* AHB error */
 
 /* MACB DMA descriptor */
 struct macb_dma_desc {
@@ -321,6 +332,9 @@ static struct {
     unsigned tx_head;           /* Next slot we'll fill */
     unsigned tx_tail;           /* Next slot to reap for completion */
     unsigned rx_head;           /* Next slot to inspect for incoming frames */
+    bool     irq_registered;    /* GIC handler installed; false = polled-only */
+    volatile uint32_t irq_count;    /* Bumped every time macb_irq_handler runs */
+    volatile uint32_t isr_last;     /* Last MACB_ISR read, for diagnostics */
 } macb_state;
 
 /* TX ring + buffer pool. 4 KB alignment is overkill for the descriptor
@@ -645,6 +659,104 @@ static void macb_enable_rx(void)
     macb_writel(MACB_NCR, ncr);
 }
 
+/* -------------------------------------------------------------------------- */
+/* IRQ path — MACB SPI via RP1 MIP0 → GIC                                      */
+/*                                                                             */
+/* Pi 5 routes all RP1 peripheral IRQs through MIP0 (MSI-X Interrupt           */
+/* Peripheral). The RP1 MSI-X table was already programmed by                  */
+/* uart_irq_init for all 61 vectors; we just need to enable MIP0               */
+/* vector 6 (ETH), register a GIC handler for SPI 134 (= GIC IRQ 166),         */
+/* and unmask the MACB interrupts we care about.                               */
+/*                                                                             */
+/* Caveat per kernel/drivers/uart_rp1.c comments: the MSIX_CFG engine          */
+/* has been observed NOT to fire TLPs on PL011 IRQ assertion despite           */
+/* the path being correctly configured (the IRQ storm test proves TLP          */
+/* delivery works). MACB's assertion behavior may or may not hit the           */
+/* same issue. Either way, the polled TX completion path still works —         */
+/* if IRQs fire, we get cheaper tx_reap; if not, macb_state.irq_count          */
+/* stays 0 and the diagnostic is visible.                                      */
+/* -------------------------------------------------------------------------- */
+
+static void macb_irq_handler(void)
+{
+    /* Read + clear ISR. Bits are write-1-to-clear; a single read
+     * without write doesn't clear them, so write back what we saw. */
+    uint32_t isr = macb_readl(MACB_ISR);
+    macb_writel(MACB_ISR, isr);
+    macb_state.isr_last = isr;
+    macb_state.irq_count++;
+
+    if (isr & MACB_INT_HRESP) {
+        WARN("MACB HRESP error (ISR=0x%08x)", isr);
+    }
+    if (isr & MACB_INT_TXERR) {
+        WARN("MACB TX error (ISR=0x%08x, TSR=0x%08x)", isr,
+             macb_readl(MACB_TSR));
+    }
+
+    /* TCOMP/TXUBR: TX activity. The synchronous send path polls
+     * USED itself, so this handler has no outstanding work to do
+     * on TX for the current MVP. Once an async tx_reap op exists,
+     * it would run here. Acknowledging the bits (already done by
+     * the ISR write-back above) is enough to quiet the line. */
+
+    /* RCOMP/RXUBR: frames arrived or the RX ring ran out. The
+     * polled recv path picks up frames via net_poll, so again
+     * no work to do here beyond acking. Worth logging RX
+     * underruns because they'd show up as dropped packets at
+     * lwIP. */
+    if (isr & MACB_INT_RXUBR) {
+        /* Single warn per episode would be nice but an MVP counter
+         * suffices — diagnostic via macb_get_irq_count + isr_last. */
+    }
+
+    /* IACK the MIP0 vector so the engine re-arms for the next
+     * peripheral assertion. Level-triggered semantics. */
+    volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE +
+                                                        RP1_INTC_SET +
+                                                        RP1_MSIX_CFG(RP1_INT_ETH));
+    *msix_set = MSIX_CFG_IACK;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* Enable IRQ delivery for the MACB: register handler, enable GIC
+ * line, unmask interrupts in MACB_IER, enable MIP0 vector 6. If any
+ * step fails we fall back to polling (macb_state.irq_registered
+ * stays false) and the driver still works. */
+static void macb_enable_irq(void)
+{
+    if (gic_register_handler(MACB_IRQ, macb_irq_handler) < 0) {
+        WARN("gic_register_handler(%u) full — MACB stays polled-only",
+             (unsigned)MACB_IRQ);
+        return;
+    }
+
+    /* MACB IER: unmask the completion + error bits we care about */
+    macb_writel(MACB_IER, MACB_INT_RCOMP | MACB_INT_RXUBR |
+                          MACB_INT_TCOMP | MACB_INT_TXERR |
+                          MACB_INT_HRESP);
+
+    /* GIC: priority 0x40 matches UART's; enable SPI 134. */
+    gic_set_priority(MACB_IRQ, 0x40);
+    gic_enable_irq(MACB_IRQ);
+
+    /* MIP0 vector 6: enable, then set IACK_EN for level-triggered
+     * re-arm on every peripheral assertion. Two-write pattern
+     * mirrors Linux rp1_irqchip + uart_rp1.c. */
+    volatile uint32_t *msix_set = (volatile uint32_t *)(RP1_INTC_BASE +
+                                                        RP1_INTC_SET +
+                                                        RP1_MSIX_CFG(RP1_INT_ETH));
+    *msix_set = MSIX_CFG_ENABLE;
+    __asm__ volatile("dsb sy" ::: "memory");
+    *msix_set = MSIX_CFG_IACK_EN;
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    macb_state.irq_registered = true;
+    INFO("  MACB IRQ %u armed via MIP0 vec %u (SPI %u)",
+         (unsigned)MACB_IRQ, (unsigned)RP1_INT_ETH,
+         (unsigned)(MIP0_BASE_SPI + RP1_INT_ETH));
+}
+
 /* Attempt to pull one frame out of the RX ring. Returns bytes copied,
  * 0 if no frame ready, or a negative NET_E_* on error. Scans from the
  * current head forward, skipping over partial frames — MACB will
@@ -841,8 +953,15 @@ int macb_init(void)
     macb_enable_rx();
     macb_enable_tx();
 
+    /* Optional IRQ path — GIC SPI 134 via RP1 MIP0 vec 6. Best-effort:
+     * if the MSIX_CFG engine doesn't fire (same issue UART RX hit),
+     * the driver continues polled. macb_state.irq_count surfaces
+     * whether IRQs actually delivered during traffic. */
+    macb_enable_irq();
+
     macb_state.initialized = true;
-    INFO("MACB driver: Stage 4 TX + RX up — network operational");
+    INFO("MACB driver: network operational (%s)",
+         macb_state.irq_registered ? "polled + IRQ" : "polled-only");
     return 0;
 }
 
@@ -889,6 +1008,29 @@ static const struct net_driver macb_driver = {
 void macb_register(void)
 {
     net_register_driver(&macb_driver);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Observability accessors                                                     */
+/*                                                                             */
+/* Surfaces the MACB IRQ state to the shell / test harness. Primary use         */
+/* is confirming whether the MIP0 MSI-X engine actually fires on MACB          */
+/* peripheral assertion — the same question that's open for UART RX. */
+/* -------------------------------------------------------------------------- */
+
+uint32_t macb_get_irq_count(void)
+{
+    return macb_state.irq_count;
+}
+
+uint32_t macb_get_last_isr(void)
+{
+    return macb_state.isr_last;
+}
+
+bool macb_irq_is_registered(void)
+{
+    return macb_state.irq_registered;
 }
 
 #endif /* PLATFORM_RASPI5 && ENABLE_NETWORKING */
