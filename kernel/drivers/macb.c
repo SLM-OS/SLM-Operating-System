@@ -40,6 +40,7 @@
 #include "net_driver.h"
 #include "debug.h"
 #include "timer.h"          /* sleep_ms / sleep_us */
+#include "cache.h"          /* cache_clean_range for DMA coherency */
 #include "macb.h"
 
 /* -------------------------------------------------------------------------- */
@@ -94,11 +95,16 @@
 #define MACB_NCR_CLRSTAT        (1u << 5)   /* Clear statistics */
 #define MACB_NCR_TSTART         (1u << 9)   /* Start transmission */
 
-/* MACB_NCFGR (Network Config Register) fields */
-#define MACB_NCFGR_CLK_SHIFT    10          /* MDIO clock divider, bits [12:10] */
-#define MACB_NCFGR_CLK_MASK     0x7
+/* NCFGR layout differs between MACB-class (10/100) and GEM-class (1G).
+ * Pi 5 is GEM (idnum 0x0007 Cadence GEM per MACB_MID probe):
+ *   - bit 10:    GBE (Gigabit mode enable)
+ *   - bits [20:18]: MDC clock divider
+ * In MACB-class IPs these would be CLK at [12:10] and no GBE bit. */
+#define GEM_NCFGR_GBE           (1u << 10)  /* Gigabit mode enable */
+#define GEM_NCFGR_CLK_SHIFT     18          /* MDC divider, bits [20:18] */
+#define GEM_NCFGR_CLK_MASK      0x7
 /* MDC divider values: 0=÷8, 1=÷16, 2=÷32, 3=÷48, 4=÷64, 5=÷96, 6=÷128, 7=÷224 */
-#define MACB_NCFGR_CLK_DIV64    0x4
+#define GEM_NCFGR_CLK_DIV96     0x5         /* Safe default for pclk around 100 MHz */
 
 /* MACB_NSR (Network Status Register) bits */
 #define MACB_NSR_IDLE           (1u << 2)   /* MDIO idle */
@@ -144,6 +150,35 @@
 /* Broadcom OUI — top 22 bits of PHY_ID encode the OUI; Broadcom is 0x001F */
 #define BCM_PHY_OUI_MSB         0x0040      /* PHYID1 for BCM phys */
 #define BCM54213PE_PHYID_LOW    0x600D      /* PHYID2 for BCM54213PE */
+
+/* MACB_NCFGR speed/duplex bits */
+#define MACB_NCFGR_SPD          (1u << 0)   /* 100 Mbps */
+#define MACB_NCFGR_FD           (1u << 1)   /* Full duplex */
+#define MACB_NCFGR_GIGE         (1u << 10)  /* Ugh actually GIGE is in NCR */
+
+/* MACB_NSR / TSR — TSR bits used by the TX poll path */
+#define MACB_TSR_UBR            (1u << 0)   /* Used bit read */
+#define MACB_TSR_COL            (1u << 1)   /* Collision */
+#define MACB_TSR_RLE            (1u << 2)   /* Retry limit exceeded */
+#define MACB_TSR_TGO            (1u << 3)   /* TX go — set while transmitting */
+#define MACB_TSR_COMP           (1u << 5)   /* TX complete (write-1-to-clear) */
+
+/* MACB DMA descriptor */
+struct macb_dma_desc {
+    uint32_t addr;
+    uint32_t ctrl;
+};
+
+/* TX descriptor ctrl-word bit fields */
+#define MACB_TX_FRMLEN_MASK     0x3FFF      /* [13:0] — GEM uses 14 bits */
+#define MACB_TX_LAST            (1u << 15)
+#define MACB_TX_ERROR           (1u << 29)
+#define MACB_TX_WRAP            (1u << 30)
+#define MACB_TX_USED            (1u << 31)  /* Set by MAC when TX done */
+
+/* Ring sizes (power of 2 for cheap masking) */
+#define MACB_TX_RING_SIZE       16
+#define MACB_TX_BUF_SIZE        2048        /* Headroom above Ethernet MTU */
 
 /* -------------------------------------------------------------------------- */
 /* MMIO helpers                                                                */
@@ -241,7 +276,18 @@ static struct {
     uint16_t phy_id2;           /* MII_PHYID2 — OUI low + model + rev */
     uint32_t link_speed_mbps;   /* 10 / 100 / 1000 after auto-neg */
     bool     link_full_duplex;
+    unsigned tx_head;           /* Next slot we'll fill */
+    unsigned tx_tail;           /* Next slot to reap for completion */
 } macb_state;
+
+/* TX ring + buffer pool. 4 KB alignment is overkill for the descriptor
+ * ring (needs 8-byte alignment) but matches the cacheline-pair alignment
+ * the Pi 5 cache maintenance helpers assume and keeps TBQP setup
+ * trivial. Buffers get 16-byte alignment, same as the virtio drivers. */
+static struct macb_dma_desc
+    tx_ring[MACB_TX_RING_SIZE] __attribute__((aligned(4096)));
+static uint8_t
+    tx_buffers[MACB_TX_RING_SIZE][MACB_TX_BUF_SIZE] __attribute__((aligned(16)));
 
 /* -------------------------------------------------------------------------- */
 /* Stage 2 helpers — clock enable, MACB bring-up, PHY bring-up                 */
@@ -266,13 +312,14 @@ static void macb_enable_clocks(void)
 }
 
 /* Bring up just enough of the MACB to talk to the PHY over MDIO.
- * Clears MDC divider, sets MPE to enable management. Data-path
- * enables (RE/TE) stay off until the rings are built in Stages 3/4. */
+ * Sets a conservative MDC divider and enables the management port.
+ * Data-path enables (RE/TE) stay off until the rings are built in
+ * Stages 3/4. */
 static void macb_mdio_bringup(void)
 {
     uint32_t ncfgr = macb_readl(MACB_NCFGR);
-    ncfgr &= ~(MACB_NCFGR_CLK_MASK << MACB_NCFGR_CLK_SHIFT);
-    ncfgr |= (MACB_NCFGR_CLK_DIV64 << MACB_NCFGR_CLK_SHIFT);
+    ncfgr &= ~(GEM_NCFGR_CLK_MASK << GEM_NCFGR_CLK_SHIFT);
+    ncfgr |= (GEM_NCFGR_CLK_DIV96 << GEM_NCFGR_CLK_SHIFT);
     macb_writel(MACB_NCFGR, ncfgr);
 
     uint32_t ncr = macb_readl(MACB_NCR);
@@ -400,6 +447,176 @@ static int macb_phy_bringup(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Stage 3 — TX descriptor ring + polled send                                  */
+/* -------------------------------------------------------------------------- */
+
+/* Initialize the TX ring. Every descriptor starts owned by the MAC
+ * (USED=1) so it won't spontaneously try to transmit stale state.
+ * Last entry carries the WRAP bit so the hardware re-loads from
+ * descriptor 0 after it. */
+static void macb_tx_ring_init(void)
+{
+    for (unsigned i = 0; i < MACB_TX_RING_SIZE; i++) {
+        tx_ring[i].addr = 0;
+        tx_ring[i].ctrl = MACB_TX_USED |
+                          ((i == MACB_TX_RING_SIZE - 1) ? MACB_TX_WRAP : 0);
+    }
+    macb_state.tx_head = 0;
+    macb_state.tx_tail = 0;
+
+    /* Flush descriptors to DRAM so the MAC sees the initial state */
+    cache_clean_range(tx_ring, sizeof(tx_ring));
+
+    /* Point the hardware at the ring */
+    macb_writel(MACB_TBQP, (uint32_t)(uintptr_t)tx_ring);
+
+    /* Clear any stale TSR bits */
+    macb_writel(MACB_TSR, 0xFFFFFFFF);
+}
+
+/* Configure speed/duplex in MACB NCFGR to match what the PHY
+ * negotiated. GEM uses NCFGR bit 10 for Gigabit-mode enable. */
+static void macb_apply_link_config(void)
+{
+    uint32_t ncfgr = macb_readl(MACB_NCFGR);
+
+    /* Clear the bits we manage — speed, duplex, gigabit */
+    ncfgr &= ~(MACB_NCFGR_SPD | MACB_NCFGR_FD | GEM_NCFGR_GBE);
+
+    /* SPD bit = 100 Mbps; leaves 10 Mbps when cleared. GBE overrides
+     * both for 1000 Mbps. */
+    if (macb_state.link_speed_mbps == 100) {
+        ncfgr |= MACB_NCFGR_SPD;
+    } else if (macb_state.link_speed_mbps == 1000) {
+        ncfgr |= GEM_NCFGR_GBE;
+    }
+    if (macb_state.link_full_duplex) {
+        ncfgr |= MACB_NCFGR_FD;
+    }
+    macb_writel(MACB_NCFGR, ncfgr);
+}
+
+/* Program a locally-administered MAC address into the specific-address
+ * 1 registers (SA1B/SA1T). Without a valid source address, switches
+ * and end-hosts drop our frames at the MAC layer. For production we'd
+ * read a board-unique ID from EEPROM; the OUI 02:00:00 is the safe
+ * locally-administered unicast prefix per IEEE 802. */
+static void macb_program_mac_address(void)
+{
+    /* Fixed MVP MAC — fine for a single-board lab. Replace with a
+     * board-unique derivation (board serial, MPIDR, etc.) if more
+     * than one Pi 5 ever shares a subnet. */
+    macb_state.mac[0] = 0x02;
+    macb_state.mac[1] = 0x00;
+    macb_state.mac[2] = 0x00;
+    macb_state.mac[3] = 0x5A;   /* "Z" for SLM-OS */
+    macb_state.mac[4] = 0x00;
+    macb_state.mac[5] = 0x01;
+
+    /* SA1B is bytes [3..0] of the MAC, SA1T is bytes [5..4]. */
+    uint32_t bottom = (uint32_t)macb_state.mac[0]
+                    | ((uint32_t)macb_state.mac[1] << 8)
+                    | ((uint32_t)macb_state.mac[2] << 16)
+                    | ((uint32_t)macb_state.mac[3] << 24);
+    uint32_t top    = (uint32_t)macb_state.mac[4]
+                    | ((uint32_t)macb_state.mac[5] << 8);
+    macb_writel(MACB_SA1B, bottom);
+    macb_writel(MACB_SA1T, top);
+}
+
+/* Enable TX and receive. Called after rings are populated. */
+static void macb_enable_tx(void)
+{
+    uint32_t ncr = macb_readl(MACB_NCR);
+    ncr |= MACB_NCR_TE;
+    macb_writel(MACB_NCR, ncr);
+}
+
+/* Reap any completed TX descriptors by scanning from tail forward.
+ * A descriptor is "reapable" when MACB has set USED=1, meaning the
+ * frame is transmitted. We don't free buffers here because the TX
+ * buffer pool is re-used in-place; the caller (send path) just picks
+ * the next free slot. */
+static void macb_tx_reap_locked(void)
+{
+    /* Invalidate the ring before reading so we see updates from DMA */
+    cache_invalidate_range(tx_ring, sizeof(tx_ring));
+
+    while (macb_state.tx_tail != macb_state.tx_head) {
+        uint32_t ctrl = tx_ring[macb_state.tx_tail].ctrl;
+        if (!(ctrl & MACB_TX_USED)) {
+            /* Not yet transmitted — stop, preserve FIFO order */
+            break;
+        }
+        if (ctrl & MACB_TX_ERROR) {
+            WARN("TX descriptor %u reports error (ctrl=0x%08x)",
+                 macb_state.tx_tail, ctrl);
+        }
+        macb_state.tx_tail = (macb_state.tx_tail + 1) & (MACB_TX_RING_SIZE - 1);
+    }
+}
+
+/* Polled TX: copy the frame into a pool buffer, mark the descriptor
+ * ready, kick TSTART, wait for completion. Used as a Stage 3 proof —
+ * later we'll hand this to the lwIP adapter so it can batch. */
+static int macb_tx_one(const void *buf, size_t len)
+{
+    if (len > MACB_TX_BUF_SIZE || len < 14) {
+        return NET_E_TOO_LARGE;
+    }
+
+    /* Reap any completed TX before picking a slot */
+    macb_tx_reap_locked();
+
+    unsigned next_head = (macb_state.tx_head + 1) & (MACB_TX_RING_SIZE - 1);
+    if (next_head == macb_state.tx_tail) {
+        return NET_E_BUSY;   /* Ring full — caller retries via tx_reap */
+    }
+
+    unsigned slot = macb_state.tx_head;
+
+    /* Copy the frame into the pool buffer */
+    memcpy(tx_buffers[slot], buf, len);
+    cache_clean_range(tx_buffers[slot], len);
+
+    /* Populate the descriptor. WRAP stays on the last slot — we
+     * preserve it here because we don't re-initialize. Note: USED
+     * bit is CLEARED by this write, which is what hands the slot
+     * over to the MAC. */
+    tx_ring[slot].addr = (uint32_t)(uintptr_t)tx_buffers[slot];
+    tx_ring[slot].ctrl = ((uint32_t)len & MACB_TX_FRMLEN_MASK) |
+                         MACB_TX_LAST |
+                         ((slot == MACB_TX_RING_SIZE - 1) ? MACB_TX_WRAP : 0);
+    cache_clean_range(&tx_ring[slot], sizeof(tx_ring[slot]));
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Kick the MAC — NCR |= TSTART */
+    uint32_t ncr = macb_readl(MACB_NCR);
+    macb_writel(MACB_NCR, ncr | MACB_NCR_TSTART);
+
+    macb_state.tx_head = next_head;
+
+    /* Polled wait: USED bit goes high when MAC finishes. Budget
+     * ~100 ms which is far more than any Ethernet frame time. */
+    for (int i = 0; i < 10000; i++) {
+        cache_invalidate_range(&tx_ring[slot], sizeof(tx_ring[slot]));
+        if (tx_ring[slot].ctrl & MACB_TX_USED) {
+            if (tx_ring[slot].ctrl & MACB_TX_ERROR) {
+                WARN("TX error after completion (slot %u, ctrl=0x%08x)",
+                     slot, tx_ring[slot].ctrl);
+                return NET_E_GENERIC;
+            }
+            return 0;
+        }
+        sleep_us(10);
+    }
+
+    ERROR("TX timed out after 100 ms (slot %u, TSR=0x%08x)",
+          slot, macb_readl(MACB_TSR));
+    return NET_E_TIMEOUT;
+}
+
+/* -------------------------------------------------------------------------- */
 /* net_driver ops                                                              */
 /* -------------------------------------------------------------------------- */
 
@@ -437,17 +654,34 @@ int macb_init(void)
         return -1;
     }
 
-    INFO("MACB driver: Stage 2 PHY up — TX/RX rings pending (Stages 3/4)");
-    /* Stages 3+ land the data path. Until then return -1 so net_init()
-     * reports no network (PHY being up with no rings means we can't
-     * actually move frames yet). */
-    return -1;
+    /* Stage 3: bring up the TX ring. RX ring lands in Stage 4; until
+     * then the net_driver.recv op returns 0 so lwIP sees "no packets".
+     * lwIP-driven sends (ARP / DHCP solicit) will still work end-to-
+     * end only when Stage 4 lands, but net_init() can succeed now. */
+    macb_apply_link_config();
+    macb_program_mac_address();
+    macb_tx_ring_init();
+    macb_enable_tx();
+
+    INFO("  MAC address: %02x:%02x:%02x:%02x:%02x:%02x",
+         macb_state.mac[0], macb_state.mac[1], macb_state.mac[2],
+         macb_state.mac[3], macb_state.mac[4], macb_state.mac[5]);
+
+    macb_state.initialized = true;
+    INFO("MACB driver: Stage 3 TX ring up — RX pending (Stage 4)");
+    /* Return 0 so net_init succeeds and lwIP brings up the netif.
+     * Without RX, ARP/DHCP won't complete, but sends (including the
+     * initial ARP probe that goes out on the wire) exercise the TX
+     * path end-to-end — easy to observe via tcpdump on the gateway. */
+    return 0;
 }
 
 static int macb_send(const void *buf, size_t len)
 {
-    (void)buf; (void)len;
-    return NET_E_NOT_INIT;
+    if (!macb_state.initialized) {
+        return NET_E_NOT_INIT;
+    }
+    return macb_tx_one(buf, len);
 }
 
 static int macb_recv(void *buf, size_t max_len)
