@@ -1,0 +1,17 @@
+[   91.069196] vfio-pci 0000:01:00.0: vgaarb: VGA decodes changed: olddecodes=io+mem,decodes=io+mem:owns=none
+[   96.239256] nouveau 0000:01:00.0: NVIDIA GA107 (b77000a1)
+[   96.337064] nouveau 0000:01:00.0: bios: version 94.07.a0.00.4c
+[   96.855060] nouveau 0000:01:00.0: vgaarb: deactivate vga console
+[   96.855153] nouveau 0000:01:00.0: fb: 6144 MiB GDDR6
+[   96.904185] nouveau 0000:01:00.0: drm: VRAM: 6144 MiB
+[   96.904189] nouveau 0000:01:00.0: drm: GART: 536870912 MiB
+[   96.904191] nouveau 0000:01:00.0: drm: BIT table 'A' not found
+[   96.904192] nouveau 0000:01:00.0: drm: BIT table 'L' not found
+[   96.904192] nouveau 0000:01:00.0: drm: TMDS table version 2.0
+[   96.904760] nouveau 0000:01:00.0: drm: MM: using COPY for buffer copies
+[   96.907367] nouveau 0000:01:00.0: [drm] Registered 4 planes with drm panic
+[   96.907370] [drm] Initialized nouveau 1.4.0 for 0000:01:00.0 on minor 0
+[   96.972582] fbcon: nouveaudrmfb (fb0) is primary device
+[   96.972650] Console: switching to colour frame buffer device 240x67
+[   96.972655] nouveau 0000:01:00.0: [drm] fb0: nouveaudrmfb frame buffer device
+[   97.167659] NOTICE: Automounting of tracing to debugfs is deprecated and will be removed in 2030
