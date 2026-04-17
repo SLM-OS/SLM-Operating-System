@@ -3740,22 +3740,45 @@ int cmd_macbdiag(int argc, char *argv[])
 
 #if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
 #include "eth_rtl8169.h"
+
 /*
- * rtldiag — RTL8168 PCIe probe diagnostic. Prints what the driver
- * discovered during rtl8169_register(): vendor/device/revision from
- * PCIe config space, BAR2 address, and (once Stage 2 lands) the MAC
- * address read from IDR0..IDR5.
+ * rtldiag — Tegra PCIe C8 / RTL8168 probe diagnostic. Reports in
+ * increasing depth:
+ *   1. APPL controller wrapper state (CTRL, DEBUG/LTSSM) — tells us
+ *      whether the RC block is clocked + reset-deasserted.
+ *   2. DBI bus-0 config-space readout — the RC bridge ID (NVIDIA
+ *      0x10DE:0x229c if the RC survived kexec).
+ *   3. RTL8168 endpoint state (bus 1 — requires iATU programming,
+ *      not yet implemented so marked pending).
  */
 int cmd_rtldiag(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
-    uart_puts("\r\n=== RTL8168 PCIe Diagnostic ===\r\n");
+    uart_puts("\r\n=== Tegra PCIe C8 / RTL8168 Diagnostic ===\r\n");
+    uart_puts("  [Reading live APPL + DBI registers — may abort if RC cold]\r\n");
+
+    rtl8169_refresh_rc_state();
+
+    /* Layer 1: APPL wrapper — if clocks are gated or resets asserted,
+     * these reads will external-abort before we get here. */
+    uart_printf("  APPL_CTRL:   0x%08x  (LTSSM_EN=%s)\r\n",
+                (unsigned)rtl8169_get_appl_ctrl(),
+                (rtl8169_get_appl_ctrl() & (1u << 7)) ? "1" : "0");
+    uart_printf("  APPL_DEBUG:  0x%08x  (LTSSM state [8:3] = 0x%02x)\r\n",
+                (unsigned)rtl8169_get_appl_debug(),
+                (unsigned)((rtl8169_get_appl_debug() >> 3) & 0x3F));
+
+    /* Layer 2: bus-0 RC bridge via DBI. */
+    uart_printf("  DBI bus0:    vendor=0x%04x  device=0x%04x  "
+                "(expect 0x10DE:0x229c)\r\n",
+                (unsigned)rtl8169_get_rc_bridge_vendor(),
+                (unsigned)rtl8169_get_rc_bridge_device());
+    uart_printf("  RC alive:    %s\r\n",
+                rtl8169_get_rc_alive() ? "YES" : "NO (cold — see kexec note)");
 
     if (!rtl8169_is_probed()) {
-        uart_puts("  Device not probed — PCIe C8 link or ECAM not ready.\r\n");
-        uart_printf("  Last vendor seen: 0x%04x\r\n",
-                    (unsigned)rtl8169_get_pci_vendor());
+        uart_puts("  Endpoint:    NOT PROBED — bus-1 iATU setup pending\r\n");
         uart_puts("=== End Diagnostic ===\r\n");
         return 0;
     }

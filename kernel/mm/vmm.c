@@ -79,10 +79,10 @@ static uint64_t l2_mmio[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 /* L2 table for 0xC0000000-0xFFFFFFFF: maps RAM around OP-TEE carveout */
 static uint64_t l2_ram_c0[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
-/* L2 tables for PCIe C8 device regions (RTL8168 NIC + ECAM):
- *   l2_pcie_ecam : L1[168] → 0x2A_0000_0000 (ECAM, 64 MB)
- *   l2_pcie_bar  : L1[212] → 0x35_0000_0000 (1 GB window covers BAR2/BAR4) */
-static uint64_t l2_pcie_ecam[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+/* L2 table for PCIe C8 BAR window (CPU-side): L1[212] covers 1 GB
+ * starting at 0x35_0000_0000; BAR2/BAR4 of the RTL8168 land inside
+ * the 2 MB block at 0x3528000000. APPL/CFG/DBI regs live in L1[0]
+ * (addresses 0x140A0000 and 0x2A000000 region) and reuse l2_mmio. */
 static uint64_t l2_pcie_bar[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #endif
 #if defined(PLATFORM_RASPI5)
@@ -947,23 +947,24 @@ static void vmm_setup_platform(void)
 #endif
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    /* PCIe C8 ECAM at 0x2A_0000_0000 (L1[168]). Map the first 2 MB of
-     * the ECAM window — enough for bus 0 (bridge) + bus 1 (RTL8168
-     * endpoint). Each bus consumes 1 MB of config space, so 2 MB covers
-     * both. */
+    /* PCIe C8 APPL/CFG/DBI all live in the first 1 GB (L1[0] = l2_mmio).
+     * APPL at 0x140A0000 is in the 2 MB block at 0x14000000 (L2 idx 160);
+     * CFG/ATU/DBI all sit in the 2 MB block at 0x2A000000 (L2 idx 336). */
     {
-        uint64_t ecam_l1 = (uint64_t)(TEGRA_PCIE_C8_ECAM_BASE >> 30);
-        l1_table[ecam_l1] = make_table_desc((uint64_t)l2_pcie_ecam);
-        vmm_state.l2_tables_used++;
-
-        uint64_t ecam_l2_idx = (TEGRA_PCIE_C8_ECAM_BASE >> BLOCK_SHIFT) & 0x1FF;
-        l2_pcie_ecam[ecam_l2_idx] =
-            make_block_desc(TEGRA_PCIE_C8_ECAM_BASE, VMM_FLAGS_DEVICE);
+        uint64_t appl_l2 = (TEGRA_PCIE_C8_APPL_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[appl_l2] =
+            make_block_desc(TEGRA_PCIE_C8_APPL_BASE & ~(BLOCK_SIZE - 1),
+                             VMM_FLAGS_DEVICE);
         vmm_state.blocks_mapped++;
-        DEBUG_PRINT("  PCIe C8 ECAM mapped: L1[%lu] L2[%lu] -> 0x%lx",
-                    (unsigned long)ecam_l1,
-                    (unsigned long)ecam_l2_idx,
-                    (unsigned long)TEGRA_PCIE_C8_ECAM_BASE);
+
+        uint64_t cfg_l2 = (TEGRA_PCIE_C8_CFG_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[cfg_l2] =
+            make_block_desc(TEGRA_PCIE_C8_CFG_BASE & ~(BLOCK_SIZE - 1),
+                             VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  PCIe C8 APPL L2[%lu] + CFG/ATU/DBI L2[%lu] mapped",
+                    (unsigned long)appl_l2,
+                    (unsigned long)cfg_l2);
     }
 
     /* RTL8168 BAR window at 0x35_2800_0000 (L1[212]). One 2 MB block

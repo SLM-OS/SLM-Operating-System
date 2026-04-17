@@ -222,12 +222,32 @@
  * status="disabled" in the carrier-board DT, so the RJ45 traffic goes
  * out through this PCIe slot instead.
  *
- * Linux initializes the PCIe RC + link during boot. After kexec, SLM-OS
- * inherits the configured state — no RC bring-up required for MMIO
- * access to the device's BARs via ECAM-programmed config space.
+ * Register layout per NVIDIA Tegra 234 TRM and Linux's pcie-tegra194.c:
+ *   0x140a0000 (128 KB) — APPL (controller wrapper registers)
+ *   0x2A000000 (256 KB) — "config" window (iATU-retargeted, NOT flat
+ *                         ECAM; bus 1+ accesses go through this after
+ *                         the RC driver reprograms iATU)
+ *   0x2A040000 (256 KB) — iATU / eDMA registers
+ *   0x2A080000 (256 KB) — DBI (DesignWare native register file; bus
+ *                         0 dev 0 fn 0 config space maps here directly)
+ *
+ * Note: after a Linux kexec the tegra194-pcie driver's .shutdown hook
+ * has torn down the RC (LTSSM off, PHY powered down, REFCLK gated,
+ * clocks+resets asserted, BPMP told to disable the controller). MMIO
+ * reads to DBI/APPL will abort or return 0xFFFFFFFF until either:
+ *   (a) slmos-kexec is modified to unbind tegra194-pcie before kexec,
+ *       preserving the running RC state through the transition, or
+ *   (b) SLM-OS ports the controller bring-up sequence (blocked on #190,
+ *       BPMP MRQ permissions at EL2).
  */
-#define TEGRA_PCIE_C8_ECAM_BASE  0x2A00000000UL  /* ECAM (bus 0-255 × 1 MB) */
-#define TEGRA_PCIE_C8_ECAM_SIZE  0x04000000UL    /* 64 MB per bus range */
+#define TEGRA_PCIE_C8_APPL_BASE  0x140A0000UL    /* Controller wrapper regs */
+#define TEGRA_PCIE_C8_APPL_SIZE  0x00020000UL    /* 128 KB */
+#define TEGRA_PCIE_C8_CFG_BASE   0x2A000000UL    /* iATU-retargeted config */
+#define TEGRA_PCIE_C8_CFG_SIZE   0x00040000UL    /* 256 KB */
+#define TEGRA_PCIE_C8_ATU_BASE   0x2A040000UL    /* iATU + eDMA */
+#define TEGRA_PCIE_C8_ATU_SIZE   0x00040000UL    /* 256 KB */
+#define TEGRA_PCIE_C8_DBI_BASE   0x2A080000UL    /* DesignWare DBI regs */
+#define TEGRA_PCIE_C8_DBI_SIZE   0x00040000UL    /* 256 KB */
 
 /* RTL8168 BAR window — Linux-assigned. Covers both BAR2 (regs, 4 KB at
  * +0x4000) and BAR4 (ext regs, 16 KB at +0x0000) in a single 2 MB block. */

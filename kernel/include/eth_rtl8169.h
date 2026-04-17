@@ -30,8 +30,19 @@
  * (driver stays unregistered). */
 void rtl8169_register(void);
 
+/* Re-read APPL / DBI state from the Tegra PCIe RC. Warning: may
+ * external-abort if the RC has been torn down (post-kexec state is
+ * uncertain until slmos-kexec is updated to skip .shutdown). Called
+ * from `rtldiag` shell command, not from boot. */
+void rtl8169_refresh_rc_state(void);
+
 /* Diagnostic accessors used by the `rtldiag` shell command. */
 bool     rtl8169_is_probed(void);
+bool     rtl8169_get_rc_alive(void);
+uint16_t rtl8169_get_rc_bridge_vendor(void);
+uint16_t rtl8169_get_rc_bridge_device(void);
+uint32_t rtl8169_get_appl_ctrl(void);
+uint32_t rtl8169_get_appl_debug(void);
 uint16_t rtl8169_get_pci_vendor(void);
 uint16_t rtl8169_get_pci_device(void);
 uint8_t  rtl8169_get_pci_revision(void);

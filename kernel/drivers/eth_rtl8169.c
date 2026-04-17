@@ -34,40 +34,37 @@
 #include "eth_rtl8169.h"
 
 /* -------------------------------------------------------------------------- */
-/* Tegra PCIe ECAM accessors                                                   */
+/* Tegra PCIe config-space accessors                                           */
 /*                                                                             */
-/* ECAM layout per PCIe spec: base + (bus << 20) | (dev << 15) | (func << 12)  */
-/* + reg. Tegra C8 RC maps bus 0 (bridge) and bus 1 (endpoint).                */
+/* Tegra's PCIe RC is DesignWare-based and does NOT expose a flat ECAM:       */
+/*   - Bus 0 (RC itself, PCI bridge) config space is at DBI (0x2A080000).      */
+/*   - Bus 1+ (downstream) config space goes through the "config" window      */
+/*     at 0x2A000000, which is only 256 KB and iATU-retargeted — the RC       */
+/*     driver has to reprogram iATU per-bus access.                           */
+/*                                                                             */
+/* For Stage 1 we only probe bus 0 via DBI. Bus 1 (RTL8168) access requires   */
+/* iATU programming (Stage 2+) AND the RC being alive (tegra194-pcie's        */
+/* shutdown hook on kexec may have torn it down — see platform.h comment).    */
 /* -------------------------------------------------------------------------- */
 
-static volatile uint8_t *pcie_ecam_base(void)
+/* Bus 0 device 0 function 0 — the RC bridge, read via DBI. */
+static uint32_t dbi_read32(uint16_t reg)
 {
-    return (volatile uint8_t *)TEGRA_PCIE_C8_ECAM_BASE;
+    return *(volatile uint32_t *)(TEGRA_PCIE_C8_DBI_BASE + (reg & 0xFFC));
 }
 
-static uint32_t pcie_config_read32(uint8_t bus, uint8_t dev, uint8_t func,
-                                    uint16_t reg)
+/* APPL controller wrapper register. LTSSM state and link debug live here. */
+static uint32_t appl_read32(uint32_t reg)
 {
-    uintptr_t offset = ((uintptr_t)bus  << 20) |
-                       ((uintptr_t)dev  << 15) |
-                       ((uintptr_t)func << 12) |
-                       (reg & 0xFFC);
-    return *(volatile uint32_t *)(pcie_ecam_base() + offset);
+    return *(volatile uint32_t *)(TEGRA_PCIE_C8_APPL_BASE + reg);
 }
 
-static uint16_t pcie_config_read16(uint8_t bus, uint8_t dev, uint8_t func,
-                                    uint16_t reg)
-{
-    uint32_t w = pcie_config_read32(bus, dev, func, reg & ~0x3u);
-    return (uint16_t)(w >> ((reg & 0x2u) * 8));
-}
-
-static uint8_t pcie_config_read8(uint8_t bus, uint8_t dev, uint8_t func,
-                                  uint16_t reg)
-{
-    uint32_t w = pcie_config_read32(bus, dev, func, reg & ~0x3u);
-    return (uint8_t)(w >> ((reg & 0x3u) * 8));
-}
+/* APPL register offsets (from Linux pcie-tegra194.c). */
+#define APPL_CTRL                  0x04
+#define APPL_CTRL_LTSSM_EN         (1u << 7)
+#define APPL_DEBUG                 0xD0
+#define APPL_DEBUG_LTSSM_STATE_MSK 0x1F8    /* bits [8:3] */
+#define APPL_DEBUG_LTSSM_STATE_L0  0x11     /* bit value for L0 */
 
 /* -------------------------------------------------------------------------- */
 /* Driver state                                                                */
@@ -76,6 +73,13 @@ static uint8_t pcie_config_read8(uint8_t bus, uint8_t dev, uint8_t func,
 struct rtl8169_state {
     bool     probed;
     bool     registered;
+
+    /* Tegra RC state (populated early by rtl8169_probe_rc_alive) */
+    bool     rc_alive;
+    uint16_t rc_bridge_vendor;    /* Expected 0x10DE (NVIDIA) */
+    uint16_t rc_bridge_device;    /* Expected 0x229c */
+    uint32_t appl_ctrl;           /* APPL_CTRL at probe time */
+    uint32_t appl_debug;          /* APPL_DEBUG (LTSSM state) at probe time */
 
     /* PCI identity (cached from config space) */
     uint16_t pci_vendor;
@@ -152,66 +156,33 @@ static const struct net_driver rtl8169_driver = {
 /* Probe                                                                       */
 /* -------------------------------------------------------------------------- */
 
-/* Read the 64-bit BAR at the given offset. Returns 0 if the BAR is
- * unmapped or not memory-type. RTL8168 uses 64-bit BARs for BAR2/BAR4
- * (each pair of 32-bit BARs combines). */
-static uint64_t rtl8169_probe_bar64(uint8_t bus, uint8_t dev, uint8_t func,
-                                     uint16_t reg_low)
+/* Lazy probe — called from the `rtldiag` shell command, NOT from
+ * rtl8169_register() at boot. Reading APPL/DBI before knowing whether
+ * the RC survived kexec risks an external abort that panics boot;
+ * deferring until a user runs rtldiag keeps boot safe. */
+void rtl8169_refresh_rc_state(void)
 {
-    uint32_t lo = pcie_config_read32(bus, dev, func, reg_low);
-    uint32_t hi = pcie_config_read32(bus, dev, func, reg_low + 4);
+    /* APPL controller wrapper — if clocks are gated or resets
+     * asserted, this read may abort. The diagnostic is worth the
+     * risk; if it does abort, the next iteration will wrap these
+     * reads in a fault-tolerant helper. */
+    g_rtl.appl_ctrl  = appl_read32(APPL_CTRL);
+    g_rtl.appl_debug = appl_read32(APPL_DEBUG);
 
-    /* Bit 0 = 0 → memory BAR; bits [2:1] encode 32- vs 64-bit. */
-    if (lo & 0x1) return 0;             /* I/O BAR, skip */
-    if (((lo >> 1) & 0x3) != 0x2) {
-        /* 32-bit memory BAR — treat hi as zero */
-        return (uint64_t)(lo & ~0xFu);
-    }
-    return ((uint64_t)hi << 32) | (uint64_t)(lo & ~0xFu);
+    uint32_t dev_vendor = dbi_read32(0x00);
+    g_rtl.rc_bridge_vendor = (uint16_t)(dev_vendor & 0xFFFF);
+    g_rtl.rc_bridge_device = (uint16_t)(dev_vendor >> 16);
+    g_rtl.rc_alive = (g_rtl.rc_bridge_vendor != 0xFFFF &&
+                      g_rtl.rc_bridge_vendor != 0x0000);
 }
 
 static bool rtl8169_probe(void)
 {
-    /* Read vendor/device at fixed BDF. If the RC hasn't initialized the
-     * link or the device is absent, vendor comes back 0xFFFF. */
-    uint16_t vendor = pcie_config_read16(RTL8169_PCI_BUS, RTL8169_PCI_DEV,
-                                          RTL8169_PCI_FUNC, 0x00);
-    uint16_t device = pcie_config_read16(RTL8169_PCI_BUS, RTL8169_PCI_DEV,
-                                          RTL8169_PCI_FUNC, 0x02);
-
-    if (vendor == 0xFFFF || vendor == 0x0000) {
-        DEBUG_PRINT("rtl8169: PCIe config read returned 0x%04x — device absent "
-                    "or RC link not trained", vendor);
-        return false;
-    }
-    if (vendor != RTL8169_PCI_VENDOR || device != RTL8169_PCI_DEVICE) {
-        DEBUG_PRINT("rtl8169: unexpected device %04x:%04x at 0008:01:00.0",
-                    vendor, device);
-        g_rtl.pci_vendor = vendor;
-        g_rtl.pci_device = device;
-        return false;
-    }
-
-    g_rtl.pci_vendor   = vendor;
-    g_rtl.pci_device   = device;
-    g_rtl.pci_revision = pcie_config_read8(RTL8169_PCI_BUS, RTL8169_PCI_DEV,
-                                            RTL8169_PCI_FUNC, 0x08);
-
-    /* BAR2 (offset 0x18) — main register bank.
-     * BAR4 (offset 0x20) — extended registers. Both 64-bit. */
-    g_rtl.bar2_phys = rtl8169_probe_bar64(RTL8169_PCI_BUS, RTL8169_PCI_DEV,
-                                           RTL8169_PCI_FUNC, 0x18);
-    g_rtl.bar4_phys = rtl8169_probe_bar64(RTL8169_PCI_BUS, RTL8169_PCI_DEV,
-                                           RTL8169_PCI_FUNC, 0x20);
-
-    if (g_rtl.bar2_phys == 0) {
-        DEBUG_PRINT("rtl8169: BAR2 not assigned — Linux should have "
-                    "configured this. Did the PCIe RC survive kexec?");
-        return false;
-    }
-
-    g_rtl.probed = true;
-    return true;
+    /* Stage 1: boot-time probe is intentionally a no-op. Post-kexec
+     * RC state is uncertain (tegra194-pcie .shutdown may have torn
+     * the controller down); touching MMIO at boot could abort.
+     * Run `rtldiag` to read live state after boot. */
+    return false;
 }
 
 void rtl8169_register(void)
@@ -232,6 +203,11 @@ void rtl8169_register(void)
 /* -------------------------------------------------------------------------- */
 
 bool rtl8169_is_probed(void) { return g_rtl.probed; }
+bool rtl8169_get_rc_alive(void) { return g_rtl.rc_alive; }
+uint16_t rtl8169_get_rc_bridge_vendor(void) { return g_rtl.rc_bridge_vendor; }
+uint16_t rtl8169_get_rc_bridge_device(void) { return g_rtl.rc_bridge_device; }
+uint32_t rtl8169_get_appl_ctrl(void) { return g_rtl.appl_ctrl; }
+uint32_t rtl8169_get_appl_debug(void) { return g_rtl.appl_debug; }
 uint16_t rtl8169_get_pci_vendor(void) { return g_rtl.pci_vendor; }
 uint16_t rtl8169_get_pci_device(void) { return g_rtl.pci_device; }
 uint8_t  rtl8169_get_pci_revision(void) { return g_rtl.pci_revision; }
