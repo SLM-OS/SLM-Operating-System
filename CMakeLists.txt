@@ -422,6 +422,9 @@ set(KERNEL_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/net_shell.c>
+    # TCP shell (multi-session) — requires lwIP; Plan §1.3
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/shell_io_tcp.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/tcp_shell_server.c>
 
     # ==========================================================================
     # Lua Scripting - Lua library includes all FP-using code

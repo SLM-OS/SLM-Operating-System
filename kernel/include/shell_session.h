@@ -22,6 +22,12 @@
 #include "vfs.h"
 #include "shell_io.h"
 
+/* Maximum number of non-console sessions (e.g. TCP). Chosen small to
+ * keep per-session state (stack + Lua interpreter slot + ring buffers)
+ * bounded. Bump with care: each slot costs roughly 64 KB task stack +
+ * 8 KB ring buffers = ~72 KB. */
+#define MAX_TCP_SHELL_SESSIONS 2
+
 struct task;
 
 /* Forward-declare without pulling in <lua.h>. The field is void * so
@@ -48,6 +54,17 @@ struct shell_session {
 /* Get the singleton console session (UART-backed). Always non-NULL
  * once the shell subsystem has been initialized. */
 struct shell_session *shell_session_console(void);
+
+/* Allocate a session from the TCP pool. Returns NULL if the pool is
+ * exhausted. The returned session has id > 0, cwd set to "/", and
+ * io/owner_task left NULL for the caller to populate. */
+struct shell_session *shell_session_alloc(void);
+
+/* Return a session previously obtained from shell_session_alloc to
+ * the pool. Safe to call with NULL or the console session (no-op in
+ * both cases). The caller is responsible for closing the shell_io
+ * before freeing. */
+void shell_session_free(struct shell_session *s);
 
 /* Initialize the console session. Must be called once before any
  * shell_session_current() call. Safe to call multiple times — only

@@ -16,6 +16,7 @@
 #include "shell_io.h"
 #include "task.h"
 #include "config.h"
+#include "spinlock.h"
 #include "string.h"
 
 #include <stddef.h>
@@ -27,6 +28,14 @@ static struct shell_session *sessions_by_task[MAX_TASKS];
 /* Singleton console session (UART-backed). */
 static struct shell_session console_session;
 static bool                  console_session_ready;
+
+/* Pool for non-console (currently TCP) sessions. id field is the slot
+ * index + 1 so 0 stays reserved for the console. Alloc walks the pool
+ * looking for !in_use slots; a spinlock serializes alloc/free so the
+ * accept callback (net_pump ctx) and a session-teardown path on the
+ * shell task can't race. */
+static struct shell_session tcp_session_pool[MAX_TCP_SHELL_SESSIONS];
+static spinlock_t            pool_lock = SPINLOCK_INIT;
 
 void shell_session_init(void)
 {
@@ -95,4 +104,38 @@ struct shell_session *shell_session_current(void)
         shell_session_init();
     }
     return &console_session;
+}
+
+struct shell_session *shell_session_alloc(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&pool_lock);
+    for (uint32_t i = 0; i < MAX_TCP_SHELL_SESSIONS; i++) {
+        struct shell_session *s = &tcp_session_pool[i];
+        if (!s->in_use) {
+            s->in_use     = true;
+            s->id         = i + 1;   /* 0 reserved for console */
+            s->io         = NULL;
+            s->owner_task = NULL;
+            s->lua        = NULL;
+            s->cwd[0]     = '/';
+            s->cwd[1]     = '\0';
+            spin_unlock_irqrestore(&pool_lock, flags);
+            return s;
+        }
+    }
+    spin_unlock_irqrestore(&pool_lock, flags);
+    return NULL;
+}
+
+void shell_session_free(struct shell_session *s)
+{
+    if (!s || s == &console_session) {
+        return;
+    }
+    irq_flags_t flags = spin_lock_irqsave(&pool_lock);
+    s->in_use     = false;
+    s->io         = NULL;
+    s->owner_task = NULL;
+    s->lua        = NULL;
+    spin_unlock_irqrestore(&pool_lock, flags);
 }

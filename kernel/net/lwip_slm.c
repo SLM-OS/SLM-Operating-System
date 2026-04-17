@@ -20,6 +20,8 @@
 #include "lwip/ip4.h"
 #include "lwip/raw.h"
 #include "lwip/stats.h"
+
+#include "shell_io_tcp.h"
 #include "netif/ethernet.h"
 #include "arch/sys_arch.h"
 
@@ -437,6 +439,9 @@ void net_poll(void) {
             ping_state.pending = false;
         }
     }
+
+    /* Drain TX + complete teardown for any TCP shell sessions. */
+    shell_io_tcp_poll();
 }
 
 /*
