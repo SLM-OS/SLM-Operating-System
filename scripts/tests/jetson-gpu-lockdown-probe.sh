@@ -10,9 +10,15 @@
 # running, so the lockdown is software-induced during the kexec
 # transition. This script makes that measurement reproducible.
 #
+# NOTE: This script uses the DEFAULT kexec path (with GPU suspend),
+# which is known to assert bit 13. It exists to diagnose/reproduce
+# the #190 blocker and verify the root cause. To test the FIXED path
+# (--no-gpu-suspend), modify Phase B to pass the flag to slmos-kexec.
+#
 # Flow:
 #   Phase A: From live Linux (via SSH), read HWCFG2 via /dev/mem
 #   Phase B: kexec into SLM-OS via the standard slmos-kexec helper
+#            (default path — includes GPU suspend, expected to show lockdown)
 #   Phase C: From the SLM-OS shell (via labctl serial), `gpu read 1100f4`
 #   Phase D: Decode bit 13 on both sides and report the delta
 #

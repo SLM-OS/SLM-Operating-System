@@ -135,7 +135,10 @@ int ga10b_bringup_gpccs(struct ga10b_bringup *b);
 /* Phase 4: PMU boot — power/thermal management. */
 int ga10b_bringup_pmu(struct ga10b_bringup *b);
 
-/* Phase 5: Address-space setup — inst block, GMMU skeleton. */
+/* Phase 5: FECS method gateway — submit DISCOVER_IMAGE_SIZE via the
+ * FECS push registers to verify the GR engine is alive post-inherit.
+ * No channel, GMMU, or page tables needed. Advances state to
+ * ENGINES_READY on success. */
 int ga10b_bringup_address_space(struct ga10b_bringup *b);
 
 /* Phase 6: Channel + pushbuffer allocation. */

@@ -540,19 +540,19 @@ int ga10b_bringup_acr(struct ga10b_bringup *b)
  * load-bearing since each engine boots independently, but for phase
  * sequencing we do FECS first because it's the GR front-end. */
 
-/* Poll a GR Falcon ctxsw mailbox[0] for PASS/FAIL/CSUM_FAIL, up to
+/* Poll a GR Falcon ctxsw mailbox[0] for any non-zero value, up to
  * `timeout_us`. Returns the mailbox value observed, or 0xFFFFFFFF on
- * timeout. The 1-µs loop body is approximate (same as wait_for_halt_us —
- * 1500 NOPs at ~1.5 GHz), which is fine for coarse 2 s timeouts. */
+ * timeout. The caller interprets the value (PASS=1, FAIL=2,
+ * CSUM_FAIL=0x21, or any unexpected non-zero). The 1-µs loop body is
+ * approximate (same as wait_for_halt_us — 1500 NOPs at ~1.5 GHz),
+ * which is fine for coarse 2 s timeouts. */
 static uint32_t wait_ctxsw_mailbox0_us(uint32_t mailbox0_reg,
                                        uint32_t timeout_us)
 {
     uint32_t loops = timeout_us;
     while (loops-- > 0) {
         uint32_t v = bar0_r32(mailbox0_reg);
-        if (v == GR_FECS_MAILBOX_PASS)      return v;
-        if (v == GR_FECS_MAILBOX_FAIL)      return v;
-        if (v == GR_FECS_MAILBOX_CSUM_FAIL) return v;
+        if (v != 0u) return v;
         for (volatile int i = 0; i < 1500; i++) { }
     }
     return 0xFFFFFFFFu;
@@ -748,12 +748,11 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
 static int fecs_submit_method(uint32_t method_addr, uint32_t method_data,
                               uint32_t *out_result, uint32_t timeout_us)
 {
-    /* Step 1: Clear ctxsw_mailbox[0].
-     * GA10B overrides gm20b's write-to-clear with a read-modify-write
-     * (ga10b_gr_falcon_fecs_ctxsw_clear_mailbox). */
-    uint32_t mbox = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
-    mbox &= 0u;  /* clear all bits */
-    bar0_w32(GR_FECS_CTXSW_MAILBOX(0), mbox);
+    /* Step 1: Clear ctxsw_mailbox[0] so the poll sees FECS's first
+     * write rather than a stale value. GA10B's mailbox is a plain
+     * read/write register (no write-to-clear hardware), so writing 0
+     * directly is sufficient. */
+    bar0_w32(GR_FECS_CTXSW_MAILBOX(0), 0u);
     gsp_platform->mb();
 
     /* Step 2: Write method data. */
