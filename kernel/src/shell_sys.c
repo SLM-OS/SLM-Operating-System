@@ -2504,8 +2504,15 @@ int cmd_nvgpu(int argc, char *argv[])
         uart_printf("pmu: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
+    if (strcmp(argv[1], "test") == 0) {
+        /* Phase 5: FECS method gateway smoke test. */
+        int rc = ga10b_bringup_address_space(&b);
+        uart_printf("test: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
 
-    uart_puts("usage: nvgpu [info | prepare | inherit | acr | fecs | gpccs | pmu | run]\r\n");
+    uart_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
+              "fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */

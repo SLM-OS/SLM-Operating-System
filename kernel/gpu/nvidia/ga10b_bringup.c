@@ -179,6 +179,30 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define GR_FECS_MAILBOX_FAIL        0x00000002u
 #define GR_FECS_MAILBOX_CSUM_FAIL   0x00000021u
 
+/* ---- FECS method gateway ----
+ *
+ * FECS exposes a direct host-to-ucode method interface via two push
+ * registers. The host writes method data, then method address; FECS
+ * processes the method and writes the result to ctxsw_mailbox[0].
+ * No channel, GMMU, or page tables required.
+ *
+ * Reference: nvgpu gm20b_gr_falcon_submit_fecs_method_op
+ *   docs/reference/nvgpu-gr-falcon-gm20b-fusa.c
+ */
+#define GR_FECS_METHOD_DATA         0x00409500u
+#define GR_FECS_METHOD_PUSH         0x00409504u
+
+/* Method addresses — low 12 bits of the push register value. */
+#define FECS_METHOD_HALT_PIPELINE             0x04u
+#define FECS_METHOD_DISCOVER_IMAGE_SIZE       0x10u
+#define FECS_METHOD_DISCOVER_ZCULL_IMAGE_SIZE 0x18u
+#define FECS_METHOD_STOP_CTXSW               0x38u
+#define FECS_METHOD_START_CTXSW              0x39u
+
+/* GA10B null method data sentinel — used when the method doesn't take
+ * meaningful input. The returned mailbox value is the output. */
+#define FECS_METHOD_NULL_DATA       0xDEADCA11u
+
 /* ============================================================================
  * Phase entry points
  * ============================================================================
@@ -704,12 +728,92 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
     return 0;
 }
 
+/* ---- Phase 5: FECS method gateway smoke test ----
+ *
+ * Submit DISCOVER_IMAGE_SIZE to FECS via the method push registers.
+ * No channel, GMMU, or page tables needed. This is the minimal proof
+ * that the GPU's GR engine is alive and responsive to SLM-OS commands
+ * after the inherit path.
+ *
+ * Protocol (per nvgpu gm20b_gr_falcon_submit_fecs_method_op):
+ *   1. Clear ctxsw_mailbox[0] (GA10B: read-modify-write to zero)
+ *   2. Write method data to GR_FECS_METHOD_DATA (0x409500)
+ *   3. Write method address to GR_FECS_METHOD_PUSH (0x409504)
+ *   4. Poll ctxsw_mailbox[0] for non-zero response
+ *
+ * DISCOVER_IMAGE_SIZE returns the GR context image size in bytes.
+ * Any non-zero value proves FECS processed the method. A zero after
+ * timeout means FECS is unresponsive.
+ */
+static int fecs_submit_method(uint32_t method_addr, uint32_t method_data,
+                              uint32_t *out_result, uint32_t timeout_us)
+{
+    /* Step 1: Clear ctxsw_mailbox[0].
+     * GA10B overrides gm20b's write-to-clear with a read-modify-write
+     * (ga10b_gr_falcon_fecs_ctxsw_clear_mailbox). */
+    uint32_t mbox = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
+    mbox &= 0u;  /* clear all bits */
+    bar0_w32(GR_FECS_CTXSW_MAILBOX(0), mbox);
+    gsp_platform->mb();
+
+    /* Step 2: Write method data. */
+    bar0_w32(GR_FECS_METHOD_DATA, method_data);
+
+    /* Step 3: Write method address — triggers FECS processing. */
+    bar0_w32(GR_FECS_METHOD_PUSH, method_addr);
+    gsp_platform->mb();
+
+    /* Step 4: Poll mailbox[0] for non-zero response. */
+    uint32_t loops = timeout_us;
+    while (loops-- > 0) {
+        uint32_t v = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
+        if (v != 0u) {
+            if (out_result) *out_result = v;
+            return 0;
+        }
+        for (volatile int i = 0; i < 1500; i++) { }
+    }
+    return -1;  /* timeout */
+}
+
 int ga10b_bringup_address_space(struct ga10b_bringup *b)
 {
     if (!b || b->state != GA10B_BRINGUP_PMU_UP) return -1;
-    uart_puts("[GA10B] phase 5 (GMMU/inst block) not yet implemented\n");
-    b->last_error_phase = 5;
-    return -1;
+
+    uart_puts("[GA10B-P5] FECS method gateway smoke test\n");
+
+    /* Submit DISCOVER_IMAGE_SIZE — the simplest no-channel method.
+     * Returns the GR context image size in mailbox[0]. */
+    uint32_t image_size = 0;
+    int rc = fecs_submit_method(FECS_METHOD_DISCOVER_IMAGE_SIZE,
+                                FECS_METHOD_NULL_DATA,
+                                &image_size, 2u * 1000u * 1000u);
+
+    if (rc < 0) {
+        uart_puts("[GA10B-P5] FECS method TIMEOUT — ucode unresponsive\n");
+        /* Dump some diagnostic state. */
+        uint32_t mbox0 = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
+        uint32_t cpuctl = bar0_r32(GR_FECS_CPUCTL);
+        uart_printf("[GA10B-P5]   FECS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                    (unsigned long)cpuctl, (unsigned long)mbox0);
+        b->last_error_phase = 5;
+        return -1;
+    }
+
+    uart_printf("[GA10B-P5] FECS DISCOVER_IMAGE_SIZE = %lu bytes (0x%lx)\n",
+                (unsigned long)image_size, (unsigned long)image_size);
+
+    if (image_size == 0 || image_size == 0xDEADCA11u) {
+        uart_puts("[GA10B-P5] suspicious result — FECS may have echoed "
+                  "the null sentinel\n");
+        b->last_error_phase = 5;
+        return -1;
+    }
+
+    uart_puts("[GA10B-P5] GPU GR engine is alive — FECS responded to "
+              "SLM-OS method\n");
+    b->state = GA10B_BRINGUP_ENGINES_READY;
+    return 0;
 }
 
 int ga10b_bringup_channel(struct ga10b_bringup *b)
