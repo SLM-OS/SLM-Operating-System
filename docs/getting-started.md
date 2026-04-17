@@ -21,7 +21,7 @@ Supported platforms:
 
 ## Prerequisites
 
-The following tools must be installed before building:
+Step-by-step installation instructions for Ubuntu are in `docs/setup.md`. The following tools must be installed before building:
 
 - **ARM GNU Toolchain** -- `aarch64-none-elf-gcc` (cross-compiler for ARM64 platforms)
 - **GCC for x86-64** -- `x86_64-linux-gnu-gcc` (required only for the x86-64 platform)
