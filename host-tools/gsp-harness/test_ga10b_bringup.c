@@ -42,6 +42,7 @@
 
 #include "../../kernel/gpu/nvidia/falcon.h"
 #include "../../kernel/gpu/nvidia/ga10b_bringup.h"
+#include "../../kernel/gpu/nvidia/ga10b_channel_handoff.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
 
 /* nvidia_vbios_platform_load is referenced by the shared gsp bringup
@@ -953,6 +954,213 @@ static void test_phases_1_through_4_chain(void)
 }
 
 /* ======================================================================
+ * Test 8: channel handoff validation (pure-logic, no MMIO)
+ *
+ * Phase 6 parses a channel handoff block written by the Linux-side
+ * helper. Validation is a pure function of the struct's contents —
+ * magic, version, non-null addresses, power-of-2 GPFIFO entries.
+ * These tests don't need any hardware or mock BAR0.
+ * ====================================================================== */
+
+/* Build a "valid" reference handoff struct that passes all checks.
+ * Individual tests mutate one field to exercise each rejection. */
+static void fill_valid_handoff(struct ga10b_channel_handoff *h)
+{
+    memset(h, 0, sizeof(*h));
+    h->magic          = GA10B_CHANNEL_HANDOFF_MAGIC;
+    h->version        = 1;
+    h->channel_id     = 0;
+    h->tsg_id         = 0;
+    h->userd_phys     = 0x140000000ULL;
+    h->userd_gp_put_offset = 35 * 4;
+    h->userd_gp_get_offset = 34 * 4;
+    h->gpfifo_phys    = 0x140001000ULL;
+    h->gpfifo_gpu_va  = 0x1ffc000000ULL;
+    h->gpfifo_entries = 1024;         /* power of 2 */
+    h->gpfifo_entry_size = 8;
+    h->pushbuf_phys   = 0x140010000ULL;
+    h->pushbuf_gpu_va = 0x1ffc100000ULL;
+    h->pushbuf_size   = 65536;
+    h->semaphore_phys = 0x140020000ULL;
+    h->semaphore_gpu_va = 0x1ffc200000ULL;
+    h->inst_block_phys = 0x140030000ULL;
+    h->initial_gp_put = 0;
+    h->initial_gp_get = 0;
+}
+
+static void test_handoff_validate_happy_path(void)
+{
+    printf("== test_handoff_validate_happy_path ==\n");
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+}
+
+static void test_handoff_validate_null_rejected(void)
+{
+    printf("== test_handoff_validate_null_rejected ==\n");
+    REQUIRE_EQ(ga10b_validate_handoff(NULL), -1);
+}
+
+static void test_handoff_validate_bad_magic(void)
+{
+    printf("== test_handoff_validate_bad_magic ==\n");
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.magic = 0xDEADBEEF;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+    h.magic = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+}
+
+static void test_handoff_validate_bad_version(void)
+{
+    printf("== test_handoff_validate_bad_version ==\n");
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+    h.version = 2;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+    h.version = 0xFFFFFFFF;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+}
+
+static void test_handoff_validate_null_addresses(void)
+{
+    printf("== test_handoff_validate_null_addresses ==\n");
+    struct ga10b_channel_handoff h;
+
+    /* Each of the 4 physical addresses must be non-zero. */
+    fill_valid_handoff(&h); h.userd_phys = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+
+    fill_valid_handoff(&h); h.gpfifo_phys = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+
+    fill_valid_handoff(&h); h.pushbuf_phys = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+
+    fill_valid_handoff(&h); h.semaphore_phys = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+}
+
+static void test_handoff_validate_gpfifo_entries(void)
+{
+    printf("== test_handoff_validate_gpfifo_entries ==\n");
+    struct ga10b_channel_handoff h;
+
+    /* Zero entries rejected. */
+    fill_valid_handoff(&h); h.gpfifo_entries = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+
+    /* Non-power-of-2 rejected (3, 5, 6, 7, 1000). */
+    fill_valid_handoff(&h); h.gpfifo_entries = 3;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+    h.gpfifo_entries = 5;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+    h.gpfifo_entries = 7;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+    h.gpfifo_entries = 1000;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+
+    /* Small powers of 2 accepted. */
+    h.gpfifo_entries = 1;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.gpfifo_entries = 2;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.gpfifo_entries = 16;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.gpfifo_entries = 2048;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+}
+
+/* ======================================================================
+ * Test 9: handoff scanner (finds magic in a memory buffer)
+ * ====================================================================== */
+
+static void test_scanner_finds_magic_at_start(void)
+{
+    printf("== test_scanner_finds_magic_at_start ==\n");
+    /* Host-side buffer, 64 KB, page-aligned. */
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    buf[0] = GA10B_CHANNEL_HANDOFF_MAGIC;
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t end   = start + 65536;
+    uint64_t found = ga10b_find_handoff_in_range(start, end, 4096);
+    REQUIRE_EQ(found, start);
+    free(buf);
+}
+
+static void test_scanner_finds_magic_midrange(void)
+{
+    printf("== test_scanner_finds_magic_midrange ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    /* Place magic at page 8 (offset 32 KB). */
+    buf[8 * 1024] = GA10B_CHANNEL_HANDOFF_MAGIC;
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t expected = start + 8 * 4096;
+    uint64_t found = ga10b_find_handoff_in_range(start, start + 65536, 4096);
+    REQUIRE_EQ(found, expected);
+    free(buf);
+}
+
+static void test_scanner_returns_zero_on_miss(void)
+{
+    printf("== test_scanner_returns_zero_on_miss ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    /* No magic anywhere — scan should return 0. */
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t found = ga10b_find_handoff_in_range(start, start + 65536, 4096);
+    REQUIRE_EQ(found, 0);
+    free(buf);
+}
+
+static void test_scanner_skips_between_pages(void)
+{
+    printf("== test_scanner_skips_between_pages ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    /* Put magic at offset 4 (inside first page, not at the top). With
+     * stride 4096 the scanner reads only page-top words, so it misses. */
+    buf[1] = GA10B_CHANNEL_HANDOFF_MAGIC;
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t found = ga10b_find_handoff_in_range(start, start + 65536, 4096);
+    REQUIRE_EQ(found, 0);
+    free(buf);
+}
+
+static void test_scanner_empty_range(void)
+{
+    printf("== test_scanner_empty_range ==\n");
+    /* start == end → no iterations → returns 0. */
+    uint64_t found = ga10b_find_handoff_in_range(0x1000, 0x1000, 4096);
+    REQUIRE_EQ(found, 0);
+}
+
+/* ======================================================================
  * Entry
  * ====================================================================== */
 
@@ -992,6 +1200,19 @@ int main(void)
     test_fecs_method_gateway_timeout();
     test_fecs_method_gateway_rejects_null_sentinel();
     test_phase5_rejects_wrong_state();
+
+    test_handoff_validate_happy_path();
+    test_handoff_validate_null_rejected();
+    test_handoff_validate_bad_magic();
+    test_handoff_validate_bad_version();
+    test_handoff_validate_null_addresses();
+    test_handoff_validate_gpfifo_entries();
+
+    test_scanner_finds_magic_at_start();
+    test_scanner_finds_magic_midrange();
+    test_scanner_returns_zero_on_miss();
+    test_scanner_skips_between_pages();
+    test_scanner_empty_range();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);

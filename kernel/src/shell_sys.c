@@ -2571,8 +2571,21 @@ int cmd_nvgpu(int argc, char *argv[])
         return rc;
     }
 
+    if (strcmp(argv[1], "channel") == 0) {
+        /* Phase 6: inherit channel from Linux handoff block. */
+        int rc = ga10b_bringup_channel(&b);
+        uart_printf("channel: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+    if (strcmp(argv[1], "submit") == 0) {
+        /* Phase 7: pushbuffer smoke test. */
+        int rc = ga10b_bringup_smoke_test(&b);
+        uart_printf("submit: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+
     uart_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
-              "fecs | gpccs | pmu | run]\r\n");
+              "channel | submit | fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
