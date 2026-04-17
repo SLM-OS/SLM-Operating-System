@@ -364,6 +364,59 @@ int main(void)
            (unsigned long long)handoff_phys);
     printf("[gpu-helper] Magic at offset 0: 0x%08x\n", h[0]);
 
+    /* Prime PBDMA: submit a NOP pushbuffer from userspace by writing
+     * GP_PUT in USERD and ringing the doorbell on the channel fd's
+     * mmap. This "activates" the channel so PBDMA is polling it when
+     * SLM-OS later writes GP_PUT after kexec. */
+    printf("[gpu-helper] Priming PBDMA with a NOP pushbuffer...\n");
+
+    /* Write a NOP method to the pushbuffer at offset 0 */
+    *(uint32_t *)pb_va = 0x00000000u;  /* NOP: subch 0, method 0, count 0 */
+    msync(pb_va, 4096, MS_SYNC);
+
+    /* Build the GPFIFO entry (Ampere format):
+     *   entry0[31:2] = gpu_va & 0xFFFFFFFC
+     *   entry1[7:0]  = gpu_va[39:32]
+     *   entry1[30:10] = length in 4-byte dwords */
+    uint64_t pb_gva = pb_map.offset;  /* pb GPU VA */
+    uint32_t gp_e0 = (uint32_t)(pb_gva & 0xFFFFFFFCu);
+    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (1u << 10);
+    ((uint32_t *)gpfifo_va)[0] = gp_e0;
+    ((uint32_t *)gpfifo_va)[1] = gp_e1;
+    msync(gpfifo_va, 8, MS_SYNC);
+    printf("[gpu-helper] GPFIFO[0] = 0x%08x_%08x (pb_va=0x%llx)\n",
+           gp_e1, gp_e0, (unsigned long long)pb_gva);
+
+    /* Advance GP_PUT in USERD (word 35) */
+    ((uint32_t *)userd_va)[35] = 1;
+    msync(userd_va, 4096, MS_SYNC);
+
+    /* Ring the doorbell: mmap the CTRL fd which provides the shared
+     * usermode doorbell region (captured from CUDA's mmap pattern —
+     * CUDA mmaps /dev/nvgpu/igpu0/ctrl, not per-channel fds). Write
+     * the work_submit_token at offset 0. */
+    void *doorbell = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, ctrl_fd, 0);
+    if (doorbell == MAP_FAILED) {
+        perror("mmap doorbell page on ctrl fd");
+    } else {
+        printf("[gpu-helper] Doorbell mapped at %p; writing token 0x%x\n",
+               doorbell, sb.work_submit_token);
+        *(volatile uint32_t *)doorbell = sb.work_submit_token;
+        /* Do not msync — it's MMIO, no dirty flush needed */
+
+        /* Wait briefly for PBDMA to consume. */
+        usleep(50000);  /* 50 ms */
+        uint32_t gp_get_after = ((volatile uint32_t *)userd_va)[34];
+        printf("[gpu-helper] After doorbell: GP_GET = %u (should be 1 if consumed)\n",
+               gp_get_after);
+    }
+
+    /* Re-read + update handoff with the new GP_PUT/GP_GET values. */
+    h[26] = 1;  /* initial_gp_put */
+    h[27] = ((volatile uint32_t *)userd_va)[34];  /* initial_gp_get */
+    msync(handoff, 4096, MS_SYNC);
+
     printf("[gpu-helper] Channel ready. Sleeping — run kexec now.\n");
     printf("[gpu-helper] To kexec: sudo slmos-kexec --no-gpu-suspend\n");
 
