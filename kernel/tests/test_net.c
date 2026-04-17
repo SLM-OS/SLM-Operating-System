@@ -880,6 +880,21 @@ static void test_net_dhcp_fallback(void)
  * actual byte content doesn't matter to the device; the test only verifies
  * that the descriptor cycle completes.
  */
+/*
+ * Build a minimum-size broadcast Ethernet frame in `frame` using the
+ * registered driver's MAC as the source. Shared between the raw-TX
+ * tests below (send path exercises that don't go through lwIP).
+ */
+static void test_net_build_loopback_frame(uint8_t frame[64])
+{
+    const struct net_driver *drv = net_get_driver();
+    memset(frame, 0, 64);
+    for (int i = 0; i < 6; i++) frame[i] = 0xFF;  /* broadcast dest */
+    drv->get_mac(&frame[6]);                       /* source MAC */
+    frame[12] = 0x90;                              /* EtherType 0x9000 */
+    frame[13] = 0x00;
+}
+
 static void test_net_driver_tx(void)
 {
     if (!net_is_up()) {
@@ -890,18 +905,195 @@ static void test_net_driver_tx(void)
     const struct net_driver *drv = net_get_driver();
     TEST_ASSERT_NOT_NULL(drv);
 
-    uint8_t frame[64] = {0};
-    /* Destination MAC: broadcast */
-    for (int i = 0; i < 6; i++) frame[i] = 0xFF;
-    /* Source MAC: the driver's */
-    drv->get_mac(&frame[6]);
-    /* EtherType: 0x9000 (Loopback) — recognized but unused by SLIRP */
-    frame[12] = 0x90;
-    frame[13] = 0x00;
-    /* Remaining 50 bytes are zero payload */
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
 
     int ret = drv->send(frame, sizeof(frame));
     TEST_ASSERT_MESSAGE(ret == 0, "driver send() should succeed");
+}
+
+/*
+ * Test: send() now exposes a tx_reap op (#204).
+ *
+ * Both VirtIO drivers complete TX asynchronously: send() submits and
+ * returns immediately, completion arrives later when net_poll() runs
+ * the driver's tx_reap. Verify the op is actually wired up.
+ */
+static void test_net_driver_has_tx_reap(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv);
+    TEST_ASSERT_MESSAGE(drv->tx_reap != NULL,
+        "VirtIO drivers must expose tx_reap for async completion (#204)");
+}
+
+/*
+ * Test: send() returns promptly without spinning for completion (#204).
+ *
+ * The pre-#204 send() spun up to VIRTIO_NET_TX_TIMEOUT_MS (100 ms)
+ * waiting for the device to ack. The async send returns as soon as
+ * the descriptor is queued, which on QEMU is microseconds. Use
+ * sys_now() to bound a single send: 50 ms catches the 100 ms
+ * spin-wait regression while tolerating scheduler jitter under
+ * systemd-run CPU quota (vCPU stalls of several ms are plausible
+ * when 4 vCPUs compete for 2 host cores).
+ */
+static void test_net_send_returns_quickly(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    uint32_t start = sys_now();
+    int ret = drv->send(frame, sizeof(frame));
+    uint32_t elapsed = sys_now() - start;
+
+    TEST_ASSERT_MESSAGE(ret == 0, "driver send should accept the frame");
+    TEST_ASSERT_MESSAGE(elapsed < 50,
+        "driver send should return promptly (async, not spin-wait) — #204");
+}
+
+/*
+ * Test: send() rejects packets larger than MTU with NET_E_TOO_LARGE (#204).
+ *
+ * Both drivers cap at 1514 bytes (standard Ethernet MTU). An
+ * oversized submit should never be enqueued — the driver returns
+ * NET_E_TOO_LARGE and the pool slot usage does not change.
+ */
+static void test_net_send_oversized_rejected(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+
+    /* 2048-byte buffer (well above MTU). Content irrelevant — the
+     * size check happens before any pool logic runs. */
+    static uint8_t oversized[2048];
+    int ret = drv->send(oversized, sizeof(oversized));
+    TEST_ASSERT_MESSAGE(ret == NET_E_TOO_LARGE,
+        "oversized send must return NET_E_TOO_LARGE (#204)");
+}
+
+/*
+ * Test: pool exhaustion returns NET_E_BUSY without blocking (#204).
+ *
+ * The TX buffer pool is sized at 16 slots in both drivers. To
+ * exhaust it without hitting the opportunistic reap in send(), we
+ * need to submit more than 16 frames before any can complete. The
+ * existing 8-burst test above shows 8 submits all succeed; this
+ * test pushes past the pool limit and confirms the overflow path
+ * returns NET_E_BUSY instead of spinning or deadlocking.
+ *
+ * On QEMU the device completes TX so fast that the opportunistic
+ * reap inside send() keeps reclaiming slots even in a tight loop —
+ * we may never actually see NET_E_BUSY. The test is written to
+ * pass in either case:
+ *   - if the device keeps up: all 32 submits return 0 (observed
+ *     behaviour on QEMU with SLIRP)
+ *   - if the pool fills: at least one returns NET_E_BUSY and none
+ *     return other error codes
+ * In both cases the test succeeds. The point is to prove the
+ * NET_E_BUSY return is the only overflow outcome — no spin, no
+ * crash, no NET_E_GENERIC.
+ */
+static void test_net_send_pool_exhaustion(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    /* Push past pool size (16) without any intervening net_poll */
+    int ok = 0, busy = 0, other = 0;
+    uint32_t start = sys_now();
+    for (int i = 0; i < 32; i++) {
+        int ret = drv->send(frame, sizeof(frame));
+        if (ret == 0)               ok++;
+        else if (ret == NET_E_BUSY) busy++;
+        else                        other++;
+    }
+    uint32_t elapsed = sys_now() - start;
+
+    TEST_ASSERT_MESSAGE(other == 0,
+        "pool overflow must only produce NET_E_BUSY, no other error codes");
+    TEST_ASSERT_MESSAGE(ok + busy == 32,
+        "every send must return either 0 or NET_E_BUSY (#204)");
+    /* 500ms ceiling matches the 50ms single-send bound × 32 × margin;
+     * under systemd-run CPUQuota=200% with 4 vCPUs on 2 host cores,
+     * pooled scheduler jitter can accumulate. The point is catching
+     * a reintroduced spin (100 ms × 32 = 3.2 s), not tight timing. */
+    TEST_ASSERT_MESSAGE(elapsed < 500,
+        "32 async submits must not spin — total < 500 ms");
+
+    /* Drain completions so subsequent tests have a clean pool */
+    for (int i = 0; i < 64; i++) {
+        net_poll();
+    }
+}
+
+/*
+ * Test: multiple back-to-back sends fit in the TX buffer pool without
+ * blocking, completion drains via net_poll() (#204).
+ *
+ * Submits 8 frames in rapid succession (TX_BUFFER_COUNT == 16, so
+ * 8 fits with margin). With the old synchronous TX each send would
+ * spin for completion; with async, all 8 submit immediately and the
+ * pool absorbs them. After a few net_poll() cycles, tx_reap drains
+ * the used ring and frees the slots. Asserts:
+ *   - all 8 sends return 0 (no NET_E_BUSY despite back-to-back submit)
+ *   - elapsed wall time well under what 8× synchronous waits would
+ *     have taken (8 × 100 ms = 800 ms; we expect < 100 ms)
+ *
+ * Note: the test calls drv->send() directly rather than going
+ * through lwIP, so net_statistics.tx_packets (maintained by
+ * slm_netif_output) doesn't advance here. The pool behavior is what
+ * we're validating, not lwIP accounting.
+ */
+static void test_net_burst_8_sends_async(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    uint32_t start = sys_now();
+    int ok = 0;
+    for (int i = 0; i < 8; i++) {
+        if (drv->send(frame, sizeof(frame)) == 0)
+            ok++;
+    }
+    uint32_t submit_elapsed = sys_now() - start;
+
+    TEST_ASSERT_MESSAGE(ok == 8,
+        "all 8 back-to-back sends should fit in the TX pool");
+    TEST_ASSERT_MESSAGE(submit_elapsed < 100,
+        "8 async submits should complete in <100ms (was 8×100ms sync)");
+
+    /* Drive completion: net_poll calls tx_reap, freeing pool slots */
+    for (int i = 0; i < 32; i++) {
+        net_poll();
+    }
 }
 
 #endif /* ENABLE_NETWORKING */
@@ -959,6 +1151,11 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_bind_notification);
     RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_driver_tx);
+    RUN_TEST(test_net_driver_has_tx_reap);
+    RUN_TEST(test_net_send_returns_quickly);
+    RUN_TEST(test_net_send_oversized_rejected);
+    RUN_TEST(test_net_send_pool_exhaustion);
+    RUN_TEST(test_net_burst_8_sends_async);
     RUN_TEST(test_net_rx_no_buffers_clean);
 
     return UNITY_END();

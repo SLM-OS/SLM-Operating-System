@@ -40,8 +40,32 @@ static bool initialized = false;
 static uint8_t rx_buffer_pool[RX_BUFFER_COUNT][RX_BUFFER_SIZE]
     __attribute__((aligned(4096)));
 
-/* Transmit buffer (single, synchronous TX for simplicity) */
-static uint8_t tx_buffer[VIRTIO_NET_MAX_PACKET] __attribute__((aligned(16)));
+/* Transmit buffer pool (#204).
+ *
+ * Replaces the single static tx_buffer that backed the old synchronous
+ * TX. send() now allocates one slot from this pool, submits the
+ * descriptor, and returns immediately — completion happens later when
+ * tx_reap() drains the TX used ring (called from net_poll()). The pool
+ * lets multiple TX requests be in flight at once, bounded by the slot
+ * count.
+ *
+ * Slot ↔ buffer mapping is implicit: a buffer's address is stored in
+ * its descriptor's `addr` field. On reap, we look at the completed
+ * descriptor's addr and pointer-arithmetic our way back to the slot
+ * index. tx_inflight tracks which slots are currently submitted so
+ * send() can find a free one in O(N) — N is small (16). */
+#define TX_BUFFER_COUNT     16
+#define TX_BUFFER_SIZE      VIRTIO_NET_MAX_PACKET
+
+static uint8_t tx_buffer_pool[TX_BUFFER_COUNT][TX_BUFFER_SIZE]
+    __attribute__((aligned(16)));
+static bool    tx_inflight[TX_BUFFER_COUNT];
+
+/* Invariant that lets virtio_net_tx_reap_locked skip a redundant
+ * bounds check — if the descriptor's addr is within the pool, then
+ * (addr - pool_base) / TX_BUFFER_SIZE is guaranteed < TX_BUFFER_COUNT. */
+static_assert(sizeof(tx_buffer_pool) == TX_BUFFER_COUNT * TX_BUFFER_SIZE,
+              "tx_buffer_pool layout assumption broken");
 
 /* -------------------------------------------------------------------------- */
 /* VirtIO Common Functions                                                     */
@@ -437,72 +461,105 @@ int virtio_net_init(void) {
     return 0;
 }
 
-int virtio_net_send(const uint8_t *data, uint32_t len) {
-    if (!initialized) {
-        return -1;
+/*
+ * Drain the TX used ring and free any pool slots whose descriptors
+ * the device has finished with. Caller must hold tx_lock.
+ *
+ * The pool slot for each completed descriptor is recovered by
+ * inspecting the descriptor's `addr` field (set by virtqueue_add_buf
+ * to the buffer pointer at submit time) and pointer-arithmeticking
+ * back to the slot index. Linear in TX_BUFFER_COUNT but bounded —
+ * the loop also stops when the used ring is empty.
+ */
+static void virtio_net_tx_reap_locked(void) {
+    while (true) {
+        uint32_t used_len;
+        int desc_idx = virtqueue_get_buf(&netdev.tx_vq, &used_len);
+        if (desc_idx < 0)
+            break;
+
+        uintptr_t addr = (uintptr_t)netdev.tx_vq.desc[desc_idx].addr;
+        uintptr_t pool_base = (uintptr_t)&tx_buffer_pool[0][0];
+        if (addr < pool_base ||
+            addr >= pool_base + sizeof(tx_buffer_pool)) {
+            WARN("TX reap: descriptor addr 0x%lx outside pool",
+                 (unsigned long)addr);
+            continue;
+        }
+        /* slot < TX_BUFFER_COUNT by the static_assert above. */
+        unsigned slot = (unsigned)((addr - pool_base) / TX_BUFFER_SIZE);
+        tx_inflight[slot] = false;
     }
+}
+
+/* Entry point called from net_poll() via the net_driver op — wraps
+ * the locked helper with tx_lock acquisition. */
+static void virtio_net_tx_reap(void) {
+    if (!initialized)
+        return;
+    spin_lock(&tx_lock);
+    virtio_net_tx_reap_locked();
+    spin_unlock(&tx_lock);
+}
+
+int virtio_net_send(const uint8_t *data, uint32_t len) {
+    if (!initialized)
+        return -1;
 
     if (len > 1514) {  /* Max Ethernet frame size */
         ERROR("Packet too large: %u bytes", len);
-        return -1;
+        return NET_E_TOO_LARGE;
     }
 
     spin_lock(&tx_lock);
 
-    /* Prepare virtio-net header (all zeros for simple case) */
-    struct virtio_net_hdr *hdr = (struct virtio_net_hdr *)tx_buffer;
-    memset(hdr, 0, sizeof(*hdr));
+    /* Reap completions opportunistically — frees pool slots so the
+     * search below has a fresh view. Without this, two back-to-back
+     * sends after a quiet period would see the pool full from the
+     * prior round even though the device has long since finished. */
+    virtio_net_tx_reap_locked();
 
-    /* Copy packet data after header */
-    memcpy(tx_buffer + sizeof(*hdr), data, len);
-
-    /* Add to TX queue */
-    uint32_t total_len = sizeof(*hdr) + len;
-    int desc_idx = virtqueue_add_buf(&netdev.tx_vq, tx_buffer, total_len,
-                                     false /* device reads */);
-    if (desc_idx < 0) {
-        spin_unlock(&tx_lock);
-        ERROR("TX queue full");
-        return -1;
-    }
-
-    /* Notify device */
-    virtqueue_kick(&netdev.tx_vq);
-
-    /* Wait for completion (synchronous TX).
-     *
-     * Use a relaxed-spin loop with yields rather than tight CPU spin —
-     * under host CPU quota (e.g. systemd-run --scope CPUQuota=200%
-     * with -smp cores=4) the QEMU vcpu and IO threads share host
-     * cores, and a tight spin can starve the IO thread that processes
-     * the virtqueue kick. WFE/PAUSE lets the host scheduler interleave
-     * threads and the device responds in microseconds.
-     *
-     * Bound by wall-clock time (VIRTIO_NET_TX_TIMEOUT_MS) rather than
-     * iteration count — the previous 10M-iteration bound was magic
-     * and behaved differently under different host loads. #204 tracks
-     * moving to IRQ-driven completion which eliminates this busy wait. */
-    uint32_t tx_start = sys_now();
-    bool timed_out = true;
-    while ((sys_now() - tx_start) < VIRTIO_NET_TX_TIMEOUT_MS) {
-        uint32_t used_len;
-        if (virtqueue_get_buf(&netdev.tx_vq, &used_len) >= 0) {
-            timed_out = false;
+    /* Find a free pool slot */
+    int slot = -1;
+    for (unsigned i = 0; i < TX_BUFFER_COUNT; i++) {
+        if (!tx_inflight[i]) {
+            slot = (int)i;
             break;
         }
-#if defined(PLATFORM_X86_64)
-        __asm__ volatile("pause" ::: "memory");
-#else
-        __asm__ volatile("yield" ::: "memory");
-#endif
     }
-
-    if (timed_out) {
-        WARN("TX timeout (> %u ms)", (unsigned)VIRTIO_NET_TX_TIMEOUT_MS);
+    if (slot < 0) {
         spin_unlock(&tx_lock);
-        return -1;
+        return NET_E_BUSY;  /* All slots in flight; caller retries via net_poll */
     }
 
+    /* Claim the slot BEFORE the device can see the descriptor. This
+     * matters once IRQ-driven completion lands — a hard IRQ firing
+     * between virtqueue_add_buf and this assignment would reap the
+     * completion, see tx_inflight[slot] still false, and silently
+     * bail. Claiming first means the reap path always observes a
+     * consistent "claimed" state. Under polled-only operation the
+     * order is harmless either way; this is forward-compatibility. */
+    tx_inflight[slot] = true;
+
+    /* Build packet in the chosen slot */
+    uint8_t *buf = tx_buffer_pool[slot];
+    struct virtio_net_hdr *hdr = (struct virtio_net_hdr *)buf;
+    memset(hdr, 0, sizeof(*hdr));
+    memcpy(buf + sizeof(*hdr), data, len);
+
+    /* Submit and kick — device DMA-reads from the slot, then writes
+     * back to the used ring at its own pace. send() returns
+     * immediately; tx_reap() drains completions later. */
+    uint32_t total_len = sizeof(*hdr) + len;
+    int desc_idx = virtqueue_add_buf(&netdev.tx_vq, buf, total_len,
+                                     false /* device reads */);
+    if (desc_idx < 0) {
+        tx_inflight[slot] = false;  /* release claim on submit failure */
+        spin_unlock(&tx_lock);
+        return NET_E_BUSY;  /* TX virtqueue descriptor pool exhausted */
+    }
+
+    virtqueue_kick(&netdev.tx_vq);
     spin_unlock(&tx_lock);
     return 0;
 }
@@ -609,6 +666,7 @@ static const struct net_driver virtio_net_mmio_driver = {
     .recv        = virtio_net_drv_recv,
     .get_mac     = virtio_net_get_mac,
     .link_status = virtio_net_link_up,
+    .tx_reap     = virtio_net_tx_reap,
 };
 
 void virtio_net_register(void) {
