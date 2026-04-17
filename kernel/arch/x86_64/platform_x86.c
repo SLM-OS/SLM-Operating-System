@@ -590,6 +590,11 @@ const fdt_info_t *dtb_get_info(void)
     return &dummy_fdt_info;
 }
 
+const void *dtb_get_blob(void)
+{
+    return NULL;    /* No DTB on x86-64 */
+}
+
 /* ---- Rust FFI stubs (weak — overridden by real Rust library when linked) ---- */
 
 __attribute__((weak)) void rust_heap_init(void *heap_start, size_t heap_size)

@@ -351,6 +351,10 @@ set(KERNEL_SOURCES
     # .incbin'ed Lua demo scripts (gated on EMBED_DEMO_SCRIPTS)
     $<$<BOOL:${EMBED_DEMO_SCRIPTS}>:kernel/src/demo_scripts.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
+    # General-purpose FDT reader — path + property lookup for any
+    # driver. Built on every ARM64 target; x86-64 builds skip it
+    # because there's no DTB there.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/lib/fdt/fdt.c>
     kernel/src/elf.c
     kernel/src/vfs.c
 

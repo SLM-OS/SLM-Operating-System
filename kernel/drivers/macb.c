@@ -45,6 +45,8 @@
 #include "gic.h"            /* gic_register_handler / gic_enable_irq */
 #include "spinlock.h"       /* tx_lock — IRQ-safe serialization */
 #include "bcm_mailbox.h"    /* board MAC via VC firmware (#250) */
+#include "dtb.h"            /* dtb_get_blob — raw DTB pointer (#255) */
+#include "fdt.h"            /* fdt_get_property_by_path — DT lookup (#255) */
 #include "macb.h"
 
 /* -------------------------------------------------------------------------- */
@@ -694,19 +696,76 @@ static void macb_apply_link_config(void)
     macb_writel(MACB_NCFGR, ncfgr);
 }
 
+/* Pi 5 MACB-node path in the bootloader-supplied DTB. The Pi 5
+ * firmware patches `local-mac-address` here before handing the
+ * kernel off, so reading this property yields the factory MAC
+ * regardless of EEPROM revision — primary fallback when the VC
+ * mailbox path is unavailable.
+ *
+ * Path is taken from the Pi 5 DTS (raspberrypi/linux
+ * `arch/arm64/boot/dts/broadcom/rp1.dtsi` — `rp1_eth: ethernet@100000`
+ * inside `rp1: rp1 { ... }` inside `pcie@1000120000` inside `axi`).
+ * If a future firmware rev renames these nodes, this string needs
+ * updating; a compat-string-based walker would be a more robust
+ * upgrade (tracked informally — not in scope for #255). */
+#define MACB_DT_PATH "/axi/pcie@1000120000/rp1/ethernet@100000"
+
+/* Try to read the factory MAC from the bootloader-supplied DTB.
+ * Returns 0 on success with `mac` populated; negative on any
+ * failure (no DTB, bad FDT, missing node, wrong property size).
+ * Separate from the mailbox helper because the DTB path answers a
+ * different question (pre-May-2025 EEPROM case, #255). */
+static int macb_mac_from_dtb(uint8_t mac[6])
+{
+    const void *blob = dtb_get_blob();
+    if (!blob) {
+        return -1;
+    }
+
+    struct fdt_handle h;
+    if (fdt_init(&h, blob) != FDT_LIB_OK) {
+        return -1;
+    }
+
+    const void *data;
+    uint32_t len;
+    int rc = fdt_get_property_by_path(&h, MACB_DT_PATH,
+                                      "local-mac-address", &data, &len);
+    if (rc != FDT_LIB_OK) {
+        return -1;
+    }
+    if (len != 6) {
+        return -1;
+    }
+
+    const uint8_t *src = data;
+    bool all_zero = true, all_ff = true;
+    for (int i = 0; i < 6; i++) {
+        mac[i] = src[i];
+        if (src[i] != 0x00) all_zero = false;
+        if (src[i] != 0xFF) all_ff   = false;
+    }
+    /* A zero placeholder is what the DTS ships with — the bootloader
+     * overwrites it pre-handoff. If we still see zeros here the
+     * bootloader didn't patch, which is a diagnosable firmware bug
+     * rather than a usable address. */
+    if (all_zero || all_ff) {
+        return -1;
+    }
+    return 0;
+}
+
 /* Program the MAC address into the specific-address 1 registers
  * (SA1B/SA1T). Without a valid source address, switches and end-hosts
  * drop our frames at the MAC layer.
  *
- * Source of truth (#250): VideoCore firmware via mailbox tag
- * 0x00010003 (GET_BOARD_MAC_ADDRESS). This returns the factory MAC
- * burned into the board's OTP — the same address printed on the
- * sticker, the same address Linux sees via the bootloader's DT
- * `local-mac-address` property. If the mailbox call fails (protocol
- * error, VC wedged, non-Pi 5 build), we fall back to a locally-
- * administered fixed address (02:00:00:5A:00:01) with a loud WARN so
- * it's obvious in the log. The fixed fallback is still safe for a
- * single-board lab, just collision-prone if two Pi 5s share a subnet. */
+ * Source priority (#250, #255):
+ *   1. VideoCore mailbox tag 0x00010003 (board OTP) — only Pi 5
+ *      EEPROM >= 2025-05-08.
+ *   2. DTB `/axi/pcie@1000120000/rp1/ethernet@100000/local-mac-address`
+ *      — every Pi 5 EEPROM; bootloader patches the address pre-handoff.
+ *   3. Fixed `02:00:00:5A:00:01` with WARN — absolute fallback, safe
+ *      for a single-board lab, collision-prone on a shared subnet. */
 static void macb_program_mac_address(void)
 {
     int rc = bcm_mailbox_get_board_mac(macb_state.mac);
@@ -714,18 +773,26 @@ static void macb_program_mac_address(void)
         INFO("  MAC from VC mailbox: %02x:%02x:%02x:%02x:%02x:%02x (board OTP)",
              macb_state.mac[0], macb_state.mac[1], macb_state.mac[2],
              macb_state.mac[3], macb_state.mac[4], macb_state.mac[5]);
+    } else if (macb_mac_from_dtb(macb_state.mac) == 0) {
+        const char *reason = (rc == MBOX_E_TAG_UNSUPPORTED)
+            ? "EEPROM predates 2025-05-08 mailbox-tag support"
+            : "VC mailbox unavailable";
+        INFO("  MAC from DTB: %02x:%02x:%02x:%02x:%02x:%02x "
+             "(bootloader-patched local-mac-address; %s)",
+             macb_state.mac[0], macb_state.mac[1], macb_state.mac[2],
+             macb_state.mac[3], macb_state.mac[4], macb_state.mac[5],
+             reason);
     } else {
         if (rc == MBOX_E_TAG_UNSUPPORTED) {
             WARN("VC mailbox doesn't implement GET_BOARD_MAC on this Pi 5 "
-                 "EEPROM revision — tag was added 2025-05-08 (rpi-eeprom "
-                 "#698). Update EEPROM (`rpi-eeprom-update -a` under "
-                 "Linux) or wait on the DTB fallback follow-up.");
+                 "EEPROM revision (tag added 2025-05-08, rpi-eeprom #698), "
+                 "and DTB lookup at %s also failed.", MACB_DT_PATH);
         } else {
-            WARN("VC mailbox GET_BOARD_MAC failed (rc=%d) — transport or "
-                 "protocol error.", rc);
+            WARN("VC mailbox GET_BOARD_MAC failed (rc=%d) and DTB lookup "
+                 "at %s also failed.", rc, MACB_DT_PATH);
         }
         WARN("Falling back to fixed 02:00:00:5A:00:01 — single-board safe, "
-             "collision-prone on a shared subnet (see #250).");
+             "collision-prone on a shared subnet (see #250/#255).");
         macb_state.mac[0] = 0x02;
         macb_state.mac[1] = 0x00;
         macb_state.mac[2] = 0x00;

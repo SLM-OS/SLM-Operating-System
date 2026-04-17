@@ -124,6 +124,20 @@ void dtb_print_info(const fdt_info_t *info);
 const fdt_info_t *dtb_get_info(void);
 
 /*
+ * Get the raw (firmware-supplied) DTB blob pointer.
+ *
+ * This is the pointer that was passed to `dtb_parse` at boot — the
+ * beginning of the flattened tree, ready to hand to `fdt_init` for
+ * path-based lookup. Returns NULL if dtb_parse was never called
+ * successfully (e.g. x86-64 with no DTB, or bad-magic failure).
+ *
+ * Backed by a file-static set by `dtb_parse`. The firmware places
+ * the DTB at a fixed physical address that stays valid for the
+ * lifetime of the kernel, so the returned pointer is stable.
+ */
+const void *dtb_get_blob(void);
+
+/*
  * Validate DTB header only (quick check).
  *
  * @param dtb  Pointer to DTB in memory

@@ -16,6 +16,12 @@
  * Global State
  * ============================================================================ */
 
+/* Raw DTB blob pointer saved at `dtb_parse` time, exposed via
+ * `dtb_get_blob()` for drivers that want ad-hoc FDT lookups using
+ * the general-purpose reader in `kernel/lib/fdt/`. Stays NULL if
+ * parsing fails or no DTB was supplied (e.g. x86-64). */
+static const void *g_dtb_blob = NULL;
+
 /* Parsed DTB info, initialized with platform.h defaults */
 static fdt_info_t g_fdt_info = {
     .ram_base = RAM_BASE,
@@ -423,8 +429,14 @@ int dtb_parse(const void *dtb, fdt_info_t *info)
 
     /* Update global state */
     g_fdt_info = *info;
+    g_dtb_blob = dtb;
 
     return FDT_OK;
+}
+
+const void *dtb_get_blob(void)
+{
+    return g_dtb_blob;
 }
 
 void dtb_print_info(const fdt_info_t *info)
