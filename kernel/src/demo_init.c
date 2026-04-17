@@ -144,6 +144,33 @@ int demo_init(void)
         littlefs_file_close(mnt, fa);
     }
 
+    /* #64: boot-time model preload config. One model name per line.
+     * "mnist" is the default; edit the file to change. Lines starting
+     * with '#' are comments. Empty file disables boot preloading.
+     * Read by model_boot_preload() in shell_init after the scheduler
+     * is running. */
+    int fp = littlefs_file_open(mnt, "/preload.conf",
+                                LFS_O_RDONLY);
+    if (fp < 0) {
+        /* File doesn't exist — create with default. */
+        fp = littlefs_file_open(mnt, "/preload.conf",
+                                LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+        if (fp >= 0) {
+            static const char default_conf[] =
+                "# Model preload config — one name per line.\n"
+                "# Models listed here are loaded in background tasks\n"
+                "# at boot, before the shell prompt appears.\n"
+                "# Edit this file to change what gets preloaded.\n"
+                "mnist\n";
+            littlefs_file_write(mnt, fp, default_conf,
+                                sizeof(default_conf) - 1);
+            littlefs_file_close(mnt, fp);
+        }
+    } else {
+        /* File exists — leave it alone (user may have edited it). */
+        littlefs_file_close(mnt, fp);
+    }
+
     return 0;
 }
 

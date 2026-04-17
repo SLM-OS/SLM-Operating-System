@@ -374,6 +374,23 @@ static void test_shell_cmd_model_preload_wait_not_inflight(void)
     TEST_ASSERT_NOT_EQUAL(0, ret);
 }
 
+/*
+ * Test that /mnt/files/preload.conf exists at boot and contains
+ * "mnist" (written by demo_init). This validates the config file
+ * creation path. The actual boot preload is gated on !ENABLE_BOOT_TESTS
+ * so it doesn't run during testing, but the file must be present.
+ */
+static void test_boot_preload_conf_exists(void)
+{
+    char buf[256] = {0};
+    int bytes = vfs_read_path("/mnt/files/preload.conf", buf, sizeof(buf) - 1, 0);
+    TEST_ASSERT_TRUE(bytes > 0);
+    buf[bytes] = '\0';
+    /* Should contain "mnist" somewhere. */
+    extern char *strstr(const char *haystack, const char *needle);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "mnist"));
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2270,6 +2287,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_model_preload);
     RUN_TEST(test_shell_cmd_model_preload_wait);
     RUN_TEST(test_shell_cmd_model_preload_wait_not_inflight);
+    RUN_TEST(test_boot_preload_conf_exists);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);
