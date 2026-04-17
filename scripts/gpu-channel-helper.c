@@ -3,44 +3,32 @@
  * the handoff metadata for SLM-OS to inherit after kexec.
  *
  * ============================================================
- *   STATUS: BLOCKED (2026-04-17)
+ *   STATUS: WORKING end-to-end (Phase 6) on L4T r36.4.7, 2026-04-17
  * ============================================================
  *
- * This helper compiles but cannot complete on L4T r36.4.7. The
- * first ioctl (NVGPU_GPU_IOCTL_ALLOC_AS) fails with EINVAL on
- * both /dev/nvhost-ctrl-gpu and /dev/nvgpu/igpu0/ctrl, with both
- * big_page_size=0 and big_page_size=0x10000. /dev/nvhost-as-gpu
- * also returns EINVAL on open().
+ * All 10 ioctls succeed; handoff block is written to an nvmap
+ * dmabuf; the magic value survives kexec and is found by SLM-OS's
+ * Phase 6 DRAM scan. Ioctl parameters were reverse-engineered from
+ * CUDA via an LD_PRELOAD ioctl-snoop (see commit history).
  *
- * CUDA successfully creates channels (see ftrace output with
- * `echo 1 > /sys/kernel/debug/tracing/events/gk20a/enable`), so
- * the ioctl path IS functional — our invocation is missing
- * something nvgpu requires. Diagnosis requires either:
+ * Phase 7 (pushbuffer submission) is partial: the helper primes
+ * PBDMA by writing GP_PUT + ringing the doorbell via mmap of the
+ * CTRL fd, but after kexec the doorbell mmap is gone and PBDMA
+ * doesn't auto-poll the detached channel. SLM-OS's GP_PUT write
+ * does land in USERD (verified via peek) — just no consumer.
  *
- *   1. The L4T nvgpu source code (only headers are on the Jetson;
- *      the actual ioctl handlers are in the out-of-tree kernel
- *      module which Jetson ships only as binary).
- *   2. strace on a CUDA program to capture the exact ioctl
- *      sequence and flags CUDA uses. strace isn't on the Jetson
- *      by default and installing it may require apt access.
- *   3. L4T documentation or NVIDIA developer forums for the
- *      exact sequence (nvgpu UAPI isn't publicly documented).
- *
- * The SLM-OS side (handoff reader in ga10b_bringup.c Phase 6+7,
- * `peek` shell command, --no-gpu-suspend kexec) is complete and
- * ready. This helper is committed as documented future work.
- *
- * ============================================================
- *
- * Usage: sudo ./gpu-channel-helper
+ * Usage: sudo ./gpu-channel-helper [--timeout-secs N]
  *
  * This program:
  *   1. Opens a TSG + channel + address space via nvgpu ioctls
  *   2. Allocates GPFIFO, USERD, pushbuffer, and semaphore buffers
  *   3. Sets up the channel (SETUP_BIND with USERMODE_SUPPORT)
  *   4. Maps pushbuffer + semaphore into the GPU address space
- *   5. Writes the channel handoff block to GA10B_CHANNEL_HANDOFF_PHYS
- *   6. Sleeps indefinitely — the kexec helper runs while this sleeps
+ *   5. Writes the channel handoff block to a dmabuf, prints its
+ *      physical address, and writes the struct contents via the
+ *      shared handoff header so field offsets cannot drift
+ *   6. Sleeps for --timeout-secs (default 300) — the kexec helper
+ *      runs while this sleeps. SIGTERM cleans up the channel.
  *
  * The channel stays alive in the GPU's CHRAM because we don't close
  * the file descriptors. After kexec with --no-gpu-suspend, PBDMA
@@ -69,13 +57,15 @@
 #include "/usr/src/nvidia/nvgpu/include/uapi/linux/nvgpu-ctrl.h"
 #include "/usr/src/nvidia/nvidia-oot/include/uapi/linux/nvmap.h"
 
-/* Handoff address — must match ga10b_channel_handoff.h in SLM-OS. */
-#define HANDOFF_PHYS    0xBDFFF000ULL
-#define HANDOFF_MAGIC   0x47505548U  /* "GPUH" */
+/* Shared handoff-block layout + magic. Using the kernel header here
+ * ensures the struct field offsets match what SLM-OS expects; if the
+ * layout changes, both sides rebuild together. */
+#include "../kernel/gpu/nvidia/ga10b_channel_handoff.h"
+#include <signal.h>
 
-/* nvmap heap flags */
-#define NVMAP_HEAP_SYSMEM  (1 << 31)
-#define NVMAP_HANDLE_UNCACHEABLE  0x0
+/* Default time to keep the channel alive waiting for kexec. Override
+ * with --timeout-secs. */
+#define DEFAULT_TIMEOUT_SECS  300
 
 /* Helper: open a device, die on failure. */
 static int xopen(const char *path, int flags)
@@ -141,10 +131,31 @@ static uint64_t virt_to_phys(void *vaddr)
     return pfn * 4096 + ((uint64_t)vaddr & 0xFFF);
 }
 
-int main(void)
+/* SIGTERM handler — on clean shutdown, let the kernel reap us (which
+ * releases all nvgpu fds and frees the channel). No explicit cleanup
+ * needed because nvgpu's release paths run on fd close. */
+static volatile sig_atomic_t g_shutdown;
+static void on_term(int sig) { (void)sig; g_shutdown = 1; }
+
+int main(int argc, char **argv)
 {
     setbuf(stdout, NULL);  /* unbuffered output for kexec debugging */
-    printf("[gpu-helper] Starting channel creation...\n");
+
+    /* Parse --timeout-secs. */
+    int timeout_secs = DEFAULT_TIMEOUT_SECS;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--timeout-secs") == 0 && i + 1 < argc) {
+            timeout_secs = atoi(argv[++i]);
+            if (timeout_secs <= 0) timeout_secs = DEFAULT_TIMEOUT_SECS;
+        }
+    }
+
+    struct sigaction sa = { .sa_handler = on_term };
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+
+    printf("[gpu-helper] Starting channel creation (timeout=%ds)...\n",
+           timeout_secs);
 
     /* Open nvmap for buffer allocation. */
     int nvmap_fd = xopen("/dev/nvmap", O_RDWR);
@@ -324,45 +335,39 @@ int main(void)
     printf("[gpu-helper] Handoff dmabuf phys = 0x%llx\n",
            (unsigned long long)handoff_phys);
 
-    /* ram_userd_gp_put_w = 35, ram_userd_gp_get_w = 34 (from hw_ram_ga10b.h) */
-    uint32_t *h = (uint32_t *)handoff;
-    h[0] = HANDOFF_MAGIC;           /* magic */
-    h[1] = 1;                       /* version */
-    h[2] = 0;                       /* channel_id (TODO: get from nvgpu) */
-    h[3] = 0;                       /* tsg_id */
-
-    /* USERD */
-    *(uint64_t *)&h[4] = userd_phys;
-    h[6] = 35 * 4;                  /* gp_put offset = word 35 * 4 bytes */
-    h[7] = 34 * 4;                  /* gp_get offset = word 34 * 4 bytes */
-
-    /* GPFIFO */
-    *(uint64_t *)&h[8] = gpfifo_phys;
-    *(uint64_t *)&h[10] = sb.gpfifo_gpu_va;
-    h[12] = 1024;                   /* entries */
-    h[13] = 8;                      /* entry size */
-
-    /* Pushbuffer */
-    *(uint64_t *)&h[14] = pb_phys;
-    *(uint64_t *)&h[16] = pb_map.offset;  /* GPU VA */
-    h[18] = 65536;                  /* size */
-    h[19] = 0;                      /* pad */
-
-    /* Semaphore */
-    *(uint64_t *)&h[20] = sem_phys;
-    *(uint64_t *)&h[22] = sem_map.offset; /* GPU VA */
-
-    /* Instance block (for diagnostics — read from FECS_CURRENT_CTX later) */
-    *(uint64_t *)&h[24] = 0;       /* will be filled if needed */
-
-    /* GP_PUT / GP_GET initial values */
-    h[26] = 0;                      /* initial gp_put */
-    h[27] = 0;                      /* initial gp_get */
-
+    /* Populate the handoff block using the shared struct definition.
+     * Using named fields (not hand-indexed words) means SLM-OS and
+     * this helper can never drift out of sync silently — any struct
+     * reorder is a compile error on rebuild. */
+    struct ga10b_channel_handoff hoff = {
+        .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
+        .version            = 1,
+        .channel_id         = 0,  /* TODO: nvgpu doesn't expose this cheaply */
+        .tsg_id             = 0,
+        .userd_phys         = userd_phys,
+        /* ram_userd_gp_put_w = 35, ram_userd_gp_get_w = 34 from
+         * hw_ram_ga10b.h: USERD entry layout on Ampere. */
+        .userd_gp_put_offset = 35 * 4,
+        .userd_gp_get_offset = 34 * 4,
+        .gpfifo_phys        = gpfifo_phys,
+        .gpfifo_gpu_va      = sb.gpfifo_gpu_va,
+        .gpfifo_entries     = 1024,
+        .gpfifo_entry_size  = 8,
+        .pushbuf_phys       = pb_phys,
+        .pushbuf_gpu_va     = pb_map.offset,
+        .pushbuf_size       = 65536,
+        .semaphore_phys     = sem_phys,
+        .semaphore_gpu_va   = sem_map.offset,
+        .inst_block_phys    = 0,  /* filled in from FECS_CURRENT_CTX if needed */
+        .initial_gp_put     = 0,
+        .initial_gp_get     = 0,
+    };
+    memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);
     printf("[gpu-helper] Handoff block written to dmabuf phys 0x%llx\n",
            (unsigned long long)handoff_phys);
-    printf("[gpu-helper] Magic at offset 0: 0x%08x\n", h[0]);
+    printf("[gpu-helper] Magic at offset 0: 0x%08x\n",
+           ((uint32_t *)handoff)[0]);
 
     /* Prime PBDMA: submit a NOP pushbuffer from userspace by writing
      * GP_PUT in USERD and ringing the doorbell on the channel fd's
@@ -412,16 +417,27 @@ int main(void)
                gp_get_after);
     }
 
-    /* Re-read + update handoff with the new GP_PUT/GP_GET values. */
-    h[26] = 1;  /* initial_gp_put */
-    h[27] = ((volatile uint32_t *)userd_va)[34];  /* initial_gp_get */
+    /* Re-read + update handoff with the new GP_PUT/GP_GET values.
+     * Rewrite the whole struct to keep all fields coherent; the
+     * initial_gp_* fields live at fixed positions in the struct. */
+    hoff.initial_gp_put = 1;
+    hoff.initial_gp_get = ((volatile uint32_t *)userd_va)[34];
+    memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);
 
-    printf("[gpu-helper] Channel ready. Sleeping — run kexec now.\n");
+    printf("[gpu-helper] Channel ready. Sleeping up to %d s — "
+           "run kexec now.\n", timeout_secs);
     printf("[gpu-helper] To kexec: sudo slmos-kexec --no-gpu-suspend\n");
 
-    /* Sleep forever — keep fds open so channel stays alive. */
-    while (1) sleep(3600);
-
+    /* Sleep bounded — keep fds open (channel stays alive) while
+     * waiting for kexec. SIGTERM/SIGINT or timeout both cleanly exit,
+     * releasing the channel. */
+    for (int remaining = timeout_secs; remaining > 0 && !g_shutdown; ) {
+        int slice = remaining > 60 ? 60 : remaining;
+        sleep(slice);
+        remaining -= slice;
+    }
+    printf("[gpu-helper] Exiting (%s) — channel will be released.\n",
+           g_shutdown ? "signal" : "timeout");
     return 0;
 }

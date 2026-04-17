@@ -1133,9 +1133,9 @@ static void test_scanner_returns_zero_on_miss(void)
     free(buf);
 }
 
-static void test_scanner_skips_non_aligned_magic(void)
+static void test_scanner_skips_between_pages(void)
 {
-    printf("== test_scanner_skips_non_aligned_magic ==\n");
+    printf("== test_scanner_skips_between_pages ==\n");
     uint32_t *buf;
     if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
         REQUIRE(0 && "posix_memalign");
@@ -1211,7 +1211,7 @@ int main(void)
     test_scanner_finds_magic_at_start();
     test_scanner_finds_magic_midrange();
     test_scanner_returns_zero_on_miss();
-    test_scanner_skips_non_aligned_magic();
+    test_scanner_skips_between_pages();
     test_scanner_empty_range();
 
     if (failures) {

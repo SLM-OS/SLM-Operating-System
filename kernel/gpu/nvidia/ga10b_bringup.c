@@ -831,7 +831,13 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
 
 #include "ga10b_channel_handoff.h"
 
-/* Cached handoff data for use by phase 7. */
+/* Cached handoff data for use by phase 7.
+ *
+ * Single-channel only: each invocation of `nvgpu channel` overwrites
+ * this. The shell-driven flow is inherently sequential (prepare →
+ * inherit → channel → submit), so this is fine. If a future caller
+ * needs multiple inherited channels, promote this to a per-channel
+ * struct passed through b->. */
 static struct ga10b_channel_handoff g_handoff;
 
 /* Scan a physical-memory range for the handoff magic, at the given
@@ -868,7 +874,13 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
 }
 
 /* Production scan — uses the IOVMM heap range where nvmap allocates
- * on GA10B (0x100000000 - 0x180000000). Takes ~200 ms on hardware. */
+ * on GA10B (0x100000000 - 0x180000000). Takes ~200 ms on hardware.
+ *
+ * PRECONDITION: the Jetson VMM must identity-map DRAM through at
+ * least 0x180000000 as cacheable Normal memory. Today this is true
+ * (Jetson's PMM/VMM maps the full 6.7 GB of non-ECC DRAM). If a
+ * future VMM change skips any 4 KB page in the scan range, this
+ * function will take a synchronous data abort with no recovery. */
 static uint64_t find_handoff_scan(void)
 {
     return ga10b_find_handoff_in_range(0x100000000ULL, 0x180000000ULL, 4096);
@@ -1040,8 +1052,13 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
                 (unsigned long)pb_gpu_va,
                 (unsigned long)pb_bytes);
 
-    /* Advance GP_PUT in USERD. This is the doorbell — PBDMA will
-     * read the new GP_PUT and start processing. */
+    /* Advance GP_PUT in USERD. PBDMA reads GP_PUT from this DRAM
+     * location (not a register). The `mb()` is a DSB SY barrier —
+     * on GA10B (integrated Ampere) the GPU shares the SoC memory
+     * controller with the CPU, so DSB SY pushes the write through
+     * to the coherency point that PBDMA observes. If a future
+     * regression shows PBDMA reading stale GP_PUT despite the
+     * barrier, switch to explicit cache_clean_range() before mb(). */
     uint32_t new_gp_put = gp_put + 1;
     volatile uint32_t *userd = (volatile uint32_t *)(uintptr_t)
         g_handoff.userd_phys;

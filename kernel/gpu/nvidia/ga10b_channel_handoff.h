@@ -20,21 +20,13 @@
 
 #include <stdint.h>
 
-/*
- * Handoff location: 4 KB at the END of Jetson's NC memory region.
- * NC memory base = 0xBDE00000, size = 2 MB.
- * Handoff at 0xBDFFF000 (last 4 KB page).
+/* Magic value to detect a valid handoff block.
  *
- * This address is:
- *   - Within SLM-OS's identity-mapped DRAM range
- *   - In the NC memory region (no cache coherency issues)
- *   - Above SLM-OS's NC allocator (bump allocator starts at base,
- *     grows up — 4 KB at the top is safe from collision)
- *   - Not in OP-TEE's carveout (0xBE000000+)
- */
-#define GA10B_CHANNEL_HANDOFF_PHYS  0xBDFFF000ULL
-
-/* Magic value to detect a valid handoff block. */
+ * Production handoff discovery: SLM-OS scans a physical-memory range
+ * for this magic value (the Linux helper allocates the handoff block
+ * via nvmap which places it somewhere unpredictable in the IOVMM
+ * heap). See ga10b_find_handoff_in_range() for the scanner and
+ * kernel/gpu/nvidia/ga10b_bringup.c phase 6 for the range used. */
 #define GA10B_CHANNEL_HANDOFF_MAGIC 0x47505548U  /* "GPUH" */
 
 /*
@@ -84,6 +76,14 @@ struct ga10b_channel_handoff {
     uint32_t initial_gp_put;    /* GP_PUT value when helper wrote this */
     uint32_t initial_gp_get;    /* GP_GET value (should equal GP_PUT) */
 };
+
+/* Wire-format size is locked: both the Linux helper and SLM-OS
+ * depend on this exact layout. Any struct reorder or field addition
+ * breaks the handoff silently — the static_assert catches it at
+ * compile time on both sides. */
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 112,
+               "ga10b_channel_handoff layout changed — update Linux "
+               "helper (scripts/gpu-channel-helper.c) and bump version");
 
 /*
  * Validate a candidate handoff block. Returns 0 iff magic, version,
