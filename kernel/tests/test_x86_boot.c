@@ -914,7 +914,7 @@ static void test_new_task_runs_and_yields(void)
  * Test: two cooperatively-yielding tasks both make progress (#91).
  *
  * This is the exact multi-task reproducer from
- * docs/x86-64-scheduler-investigation.md — before the fix, two tasks
+ * docs/archive/investigations/x86-64-scheduler-investigation.md — before the fix, two tasks
  * bouncing yields off each other would both stall because neither
  * outgoing schedule() frame ever got to clear preempt_disabled on the
  * CPU. Each worker records its own iteration count into a shared

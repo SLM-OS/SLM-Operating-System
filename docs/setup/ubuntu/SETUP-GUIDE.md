@@ -54,7 +54,7 @@ Installs:
 
 ### 5. Claude Code Git Integration (Optional)
 
-**File:** [../setup-claude-code-git.md](../setup-claude-code-git.md)
+**File:** [../../archive/setup/setup-claude-code-git.md](../../archive/setup/setup-claude-code-git.md)
 
 Configures:
 - Claude Code permissions for Git operations
@@ -160,16 +160,12 @@ CS-496-SLM-Operating-System/
 │   └── toolchain-aarch64-none-elf.cmake
 ├── docs/
 │   └── setup/
-│       ├── setup-claude-code-git.md  # Shared (platform-independent)
-│       ├── ubuntu/                    # Ubuntu/Linux guides
-│       │   ├── SETUP-GUIDE.md
-│       │   ├── setup-build-tools.md
-│       │   ├── setup-arm64-toolchain.md
-│       │   ├── setup-rust-toolchain.md
-│       │   └── setup-qemu-arm64.md
-│       └── windows/                   # Windows guides
+│       └── ubuntu/                    # Ubuntu/Linux guides
 │           ├── SETUP-GUIDE.md
-│           └── ...
+│           ├── setup-build-tools.md
+│           ├── setup-arm64-toolchain.md
+│           ├── setup-rust-toolchain.md
+│           └── setup-qemu-arm64.md
 ├── runtime/
 │   ├── Cargo.toml
 │   ├── .cargo/

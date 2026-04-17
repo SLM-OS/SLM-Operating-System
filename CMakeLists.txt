@@ -59,7 +59,7 @@ add_compile_definitions(PLATFORM_${PLATFORM}=1)
 # Calling switch_to() directly from an exception handler hangs on real
 # ARM64 hardware (abandoned exception frame); the trampoline runs
 # schedule() in task context after eret. See issue #57 and
-# docs/pi5-secondary-cpu-preemption.md.
+# docs/archive/investigations/pi5-secondary-cpu-preemption.md.
 #
 # Capability-neutral name — works on any ARM64 platform that has this
 # problem. Pi 5 historically used `PI5_SECONDARY_PREEMPT`; that spelling

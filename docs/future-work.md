@@ -134,7 +134,7 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 ## 7. Scheduler Enhancements
 
 ### Secondary CPU Timer Preemption (1-2 weeks)
-- Deferred scheduling via ELR_EL1 trampoline (design documented in `docs/pi5-secondary-cpu-preemption.md`)
+- Deferred scheduling via ELR_EL1 trampoline (design documented in `docs/archive/investigations/pi5-secondary-cpu-preemption.md`)
 - Enables true preemptive multi-core scheduling on Pi 5
 - Requires preemption-safe test suite updates
 

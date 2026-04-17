@@ -2,7 +2,7 @@
  * ga10b_bringup.c — GA10B (Jetson integrated Ampere) nvgpu-native bringup.
  *
  * Skeleton with phase stubs. See ga10b_bringup.h for the public API and
- * docs/jetson-nvgpu-bringup-research.md for the architectural overview.
+ * docs/archive/investigations/jetson-nvgpu-bringup-research.md for the architectural overview.
  *
  * Each phase is a separate function so the shell can invoke them
  * independently while we iterate against hardware — same pattern
@@ -104,7 +104,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* ---- BAR0 engine bases (GA10B layout) ----
  *
- * Verified via docs/jetson-nvgpu-acr-analysis.md against OE4T nvgpu
+ * Verified via docs/archive/investigations/jetson-nvgpu-acr-analysis.md against OE4T nvgpu
  * l4t-r36.5 sources. GSP Falcon block starts at 0x110000; the RISCV
  * subblock (used for ACR) is at 0x111000.
  *

@@ -53,7 +53,7 @@ for-bit). The 20 ms wall-clock is the same number
 
 - One `power_cycle` MCP call hit a Kasa `AuthenticationError` on
   iteration 2; documented flake (see
-  `docs/testing/x86-hw-validation-2026-04-15.md` finding #3). A
+  `docs/archive/test-runs/x86-hw-validation-2026-04-15.md` finding #3). A
   single retry succeeded — no bearing on the kernel under test.
 - `slmos-kexec` worked cleanly on all 10 boots. No RAS errors, no
   stale-interrupt faults, no garbled UART output — the three

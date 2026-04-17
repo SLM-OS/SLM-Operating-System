@@ -843,7 +843,7 @@ See `docs/ffi.md` for complete FFI documentation.
 - INT8 quantization (FP16 loading implemented; INT8 deferred)
 - Per-component address spaces (TTBR0_EL1)
 - Dynamic batching
-- Pi 5 secondary CPU timer preemption (see `docs/pi5-secondary-cpu-preemption.md`)
+- Pi 5 secondary CPU timer preemption (see `docs/archive/investigations/pi5-secondary-cpu-preemption.md`)
 - Jetson kexec RAS error (nvgpu GPU fabric reset needed)
 
 ---

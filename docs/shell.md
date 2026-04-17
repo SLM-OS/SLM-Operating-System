@@ -567,7 +567,7 @@ during PCI enumeration. Available subcommands:
 GPU is present (e.g., QEMU). `gpu init` requires the firmware blobs
 to be embedded at build time (`ENABLE_GSP_FIRMWARE`). See
 `docs/x86-64-gpu-inference-status.md` for the GSP-RM bringup status
-and `docs/testing/x86-gpu-bringup-2026-04-15.md` for the most recent
+and `docs/archive/test-runs/x86-gpu-bringup-2026-04-15.md` for the most recent
 hardware validation report.
 
 ---

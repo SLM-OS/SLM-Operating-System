@@ -3,7 +3,7 @@
  *
  * Implements maybe_arm_resched_trampoline(): the C-side of the ELR
  * trampoline scheme used to defer schedule() calls from timer IRQs to
- * task context. See docs/pi5-secondary-cpu-preemption.md (issue #57)
+ * task context. See docs/archive/investigations/pi5-secondary-cpu-preemption.md (issue #57)
  * for the design rationale.
  *
  * The assembly side (resched_trampoline) lives in vectors.S.

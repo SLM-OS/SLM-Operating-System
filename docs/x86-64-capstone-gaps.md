@@ -41,10 +41,10 @@ RISC-V startup) + E4 (RPC ring skeleton) shipped on
 | Gap | Status | Shipped as |
 |---|---|---|
 | P1-1 TSS IST for timer vector | ✅ CLOSED | `kernel/arch/x86_64/tss.c` + `idt[48].ist=1` in `idt.c`. Tests: `test_tss_loaded`, `test_idt48_uses_ist1`, `test_tss_per_cpu_distinct`. |
-| P1-2 Real-hardware validation | ✅ CLOSED (2026-04-15) | `scripts/tests/x86-multitask-boot-test.sh` + `make x86-hw-validate PLATFORM=X86_64 SLMOS_LABCTL=1`. Observed: 10/10 boot_test (avg 18.5 s), 5/5 sleep-2000 in [2007, 2008] ms under `component run echo` load, 7/7 secondary CPUs dispatched by `bench smp`. Results: `docs/testing/x86-hw-validation-2026-04-15.md`. |
+| P1-2 Real-hardware validation | ✅ CLOSED (2026-04-15) | `scripts/tests/x86-multitask-boot-test.sh` + `make x86-hw-validate PLATFORM=X86_64 SLMOS_LABCTL=1`. Observed: 10/10 boot_test (avg 18.5 s), 5/5 sleep-2000 in [2007, 2008] ms under `component run echo` load, 7/7 secondary CPUs dispatched by `bench smp`. Results: `docs/archive/test-runs/x86-hw-validation-2026-04-15.md`. |
 | P1-3 Idle `hlt` masks AP timers | ✅ CLOSED | Subsumed by P2-1 (reschedule IPI wakes halted APs). |
 | P1-4 `sleep_ms` BSP-only ticks | ✅ CLOSED | `timer_x86.c:sleep_ms` now uses `timer_get_count()` (TSC). Tests: `test_sleep_ms_on_bsp`, `test_sleep_ms_on_ap`. |
-| P1-5 Dead `lapic_timer_mask` | ✅ CLOSED | Removed from `lapic.c`; `docs/x86-64-scheduler-investigation.md` Phase 8 tagged reverted. |
+| P1-5 Dead `lapic_timer_mask` | ✅ CLOSED | Removed from `lapic.c`; `docs/archive/investigations/x86-64-scheduler-investigation.md` Phase 8 tagged reverted. |
 | P1-6 No FXSAVE in `switch_to` | ✅ CLOSED | `cpu_context.fxsave[512]` + `fxsave/fxrstor` in `context.S`. Tests: `test_context_has_fxsave`, `test_fxsave_preserves_xmm_across_preemption`. |
 | P2-1 Reschedule IPI | ✅ CLOSED | Vector 49, `smp_notify_cpu()` API (Pre-1 + B1). Tests: `test_resched_ipi_delivers`, `test_resched_ipi_self_is_noop`. |
 | P2-2 AP preempt integration test | ✅ CLOSED | `test_all_cpus_timer_preempt_under_load`. |
@@ -110,7 +110,7 @@ machinery:
   running task.
 - `test_new_task_runs_and_yields` — single-task `yield()` × 4.
 - `test_two_tasks_yield_both_advance` — two tasks bouncing yields; the
-  multi-task reproducer from `docs/x86-64-scheduler-investigation.md`.
+  multi-task reproducer from `docs/archive/investigations/x86-64-scheduler-investigation.md`.
 - `test_new_task_preemptible_on_first_timeslice` — directly proves
   `task_entry_trampoline` ran.
 - `test_lapic_timer_running` — `pit_ticks` advances.

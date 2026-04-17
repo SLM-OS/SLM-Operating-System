@@ -18,7 +18,7 @@
  * and the gpu_platform MMIO helpers unchanged. The phases themselves
  * are net-new.
  *
- * See docs/jetson-nvgpu-bringup-research.md for the architectural
+ * See docs/archive/investigations/jetson-nvgpu-bringup-research.md for the architectural
  * motivation and per-phase details.
  */
 

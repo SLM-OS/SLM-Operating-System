@@ -132,7 +132,7 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   that reads `HWCFG2` from live Linux via `/dev/mem`, kexecs SLM-OS,
   re-reads via the shell, and reports the bit-13 delta. Makes the
   #190 measurement reproducible across sessions.
-- `docs/jetson-nvgpu-bringup-research.md`, `docs/jetson-nvgpu-acr-analysis.md`,
+- `docs/archive/investigations/jetson-nvgpu-bringup-research.md`, `docs/archive/investigations/jetson-nvgpu-acr-analysis.md`,
   58 cached L4T nvgpu reference files.
 
 **Hardware verification (jetson-nano-2):**
@@ -169,7 +169,7 @@ The plan family is layered. Read them in this order on a fresh start:
 |---|---|
 | **This file** | Where things are right now and what's open |
 | `docs/jetson-capstone-execution-plan.md` | The authoritative plan. Phase definitions, prerequisites, calendar, exit criteria. **Look here first** for "what does S5 mean, exactly?" or "what are P3's prerequisites?" |
-| `docs/jetson-capstone-gap-analysis.md` | Historical: the gap between what existed pre-capstone and what was needed. Snapshot, not current-state |
+| `docs/archive/plans/jetson-capstone-gap-analysis.md` | Historical: the gap between what existed pre-capstone and what was needed. Snapshot, not current-state |
 | `docs/capstone-thesis-framing.md` | The narrative for the capstone report. Read this before talking about the project — it has the "delivered vs. proposed" framing |
 | `docs/cross-platform-inference-bench.md` | The G5 deliverable. Live measurement table |
 | `docs/work-stealing-bench.md` | The S3+S4 deliverable. Pi 5 hardware numbers, S4 flip rationale |

@@ -197,8 +197,8 @@ Architectural finding: GA10B uses the **nvgpu-native firmware stack**
 GSP-RM stack. The shim embeds all 17 firmware blobs via `.incbin` when
 `-DGA10B_FIRMWARE_DIR=...` is configured. A parallel `ga10b_bringup.c`
 implements the nvgpu-style boot sequence alongside the GSP-RM path in
-`bringup.c`. See `docs/jetson-nvgpu-bringup-research.md` and
-`docs/jetson-nvgpu-acr-analysis.md` for the full decomposition.
+`bringup.c`. See `docs/archive/investigations/jetson-nvgpu-bringup-research.md` and
+`docs/archive/investigations/jetson-nvgpu-acr-analysis.md` for the full decomposition.
 
 **Priv-lockdown resolved (Path 3, April 17 2026):** The GSP Falcon
 priv-lockdown (#190) was caused by the kexec helper's runtime-PM
@@ -263,7 +263,7 @@ on the same board under Linux + nouveau shows SEC2 accessible
 VBIOS DEVINIT replay via its devinit subdev) clears the lock. Candidate
 next paths: port nouveau's devinit bytecode interpreter, or Linux-to-
 SLM-OS kexec handoff that inherits the unlocked state. Both are
-beyond capstone scope. See `docs/testing/x86-gpu-bringup-2026-04-15.md`
+beyond capstone scope. See `docs/archive/test-runs/x86-gpu-bringup-2026-04-15.md`
 for the full hardware validation report.
 
 ---

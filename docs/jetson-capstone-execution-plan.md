@@ -1,6 +1,6 @@
 # Jetson Orin Nano — Capstone Execution Plan
 
-**Companion to:** `docs/jetson-capstone-gap-analysis.md`.
+**Companion to:** `docs/archive/plans/jetson-capstone-gap-analysis.md`.
 **Purpose:** turn the gaps identified in the analysis into an ordered, testable sequence of engineering phases. Each phase below is self-contained: prerequisites, concrete steps, exit criteria, and effort.
 
 **Three parallel tracks:**
