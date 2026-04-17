@@ -510,6 +510,45 @@ void kernel_main(void *dtb)
 #endif
     scheduler_add_task(main_task);
 
+#if defined(ENABLE_NETWORKING) && !defined(ENABLE_BOOT_TESTS)
+    /* Background network-pump task — drives net_poll() at ~100 Hz so
+     * RX + lwIP timers run even when the shell is idle. Without this,
+     * SLM-OS only processes inbound traffic while a foreground command
+     * explicitly polls (ping's wait loop, net_init's DHCP wait), so
+     * the system wouldn't respond to an inbound ping sitting at a
+     * prompt. Low priority so shell, tests, and workloads preempt
+     * trivially. Safe to spawn before net_init — net_poll returns
+     * early until net_initialized is true.
+     *
+     * Pinned to CPU 0 because:
+     *  1. Peripheral IRQs (virtio-mmio SPI, MACB SPI) are affined to
+     *     CPU 0, so RX completion lands there anyway.
+     *  2. Prevents work-stealing from migrating the pump off CPU 0
+     *     during scheduler-migration tests, which rely on task
+     *     placement being stable.
+     *
+     * Priority IDLE so it doesn't compete with any test fixture or
+     * workload. net_poll is latency-insensitive at ~10 ms cadence —
+     * running only when nothing else is runnable is fine.
+     *
+     * Guarded on !ENABLE_BOOT_TESTS: the test kernel's scheduler tests
+     * check exact assigned_cpu values and task counts; an extra
+     * background task pinned to CPU 0 shifts those counts and makes
+     * policy tests fail. Live network tests in test_net.c drive
+     * net_poll() inline within their wait loops, so they don't need
+     * the pump to be running. */
+    {
+        struct task *net_pump =
+            task_create_with_priority("net_pump", net_pump_task_entry, NULL,
+                                      TASK_PRIORITY_IDLE);
+        if (!net_pump) {
+            panic("Failed to create net_pump task");
+        }
+        net_pump->cpu_affinity = 0;
+        scheduler_add_task(net_pump);
+    }
+#endif
+
     /* Start shell task (interactive debug console) */
     shell_start();
 

@@ -439,6 +439,30 @@ void net_poll(void) {
     }
 }
 
+/*
+ * Background task body that drives net_poll() at ~100 Hz so RX and
+ * lwIP timers keep running when the shell is idle. Without this, the
+ * only RX drain was inside the `ping` command's wait loops and
+ * net_init's DHCP wait — meaning SLM-OS wouldn't respond to an
+ * inbound ping while sitting at the prompt. Runs at
+ * TASK_PRIORITY_LOW so shell, tests, and workloads preempt it
+ * trivially; sleep_ms(10) yields cooperatively between polls.
+ *
+ * Entry function lives here (next to net_poll) rather than in
+ * main.c so platform init only needs to task_create it, not know
+ * the body. Safe to call before net_init runs — net_poll returns
+ * early when net_initialized is false, so this task spins at
+ * near-zero cost until the shell brings up networking.
+ */
+void net_pump_task_entry(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        net_poll();
+        sleep_ms(10);
+    }
+}
+
 int net_get_info(struct net_info *info) {
     if (!info) {
         return NET_E_INVAL;

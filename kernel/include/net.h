@@ -87,6 +87,15 @@ int net_init(void);
  */
 void net_poll(void);
 
+/*
+ * Background task entry that loops net_poll() + sleep_ms(10). Spawned
+ * once at boot (from main.c) so the RX path keeps draining when no
+ * foreground command is explicitly polling — otherwise SLM-OS only
+ * responds to inbound traffic while the shell is inside `ping` or
+ * net_init's DHCP wait.
+ */
+void net_pump_task_entry(void *arg);
+
 /* -------------------------------------------------------------------------- */
 /* Network Interface Configuration                                             */
 /* -------------------------------------------------------------------------- */
