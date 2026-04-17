@@ -90,7 +90,7 @@ int fdt_init(struct fdt_handle *h, const void *blob);
  * FDT_LIB_E_INVALID.
  */
 int fdt_find_node_by_path(const struct fdt_handle *h, const char *path,
-                          int *out_offset);
+                          uint32_t *out_offset);
 
 /*
  * Read a property from a specific node.
@@ -104,7 +104,7 @@ int fdt_find_node_by_path(const struct fdt_handle *h, const char *path,
  * Returns FDT_LIB_OK / FDT_LIB_E_NOTFOUND / FDT_LIB_E_BADSTRUCT /
  * FDT_LIB_E_INVALID.
  */
-int fdt_get_property(const struct fdt_handle *h, int node_offset,
+int fdt_get_property(const struct fdt_handle *h, uint32_t node_offset,
                      const char *prop_name,
                      const void **out_data, uint32_t *out_len);
 

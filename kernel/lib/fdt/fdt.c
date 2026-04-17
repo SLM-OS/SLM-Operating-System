@@ -35,6 +35,43 @@ static inline uint32_t align4(uint32_t v)
     return (v + 3u) & ~3u;
 }
 
+/*
+ * Find the null terminator of a C string strictly within [s, end).
+ * Returns the length on success (excluding the null), or -1 if no
+ * null byte appears before `end`. Used everywhere the walker
+ * touches a string inside the DTB — `strlen` on untrusted bytes
+ * could run off a truncated or malformed blob.
+ */
+static long bounded_strlen(const char *s, const char *end)
+{
+    const char *p = s;
+    while (p < end && *p) p++;
+    if (p == end) {
+        return -1;
+    }
+    return (long)(p - s);
+}
+
+/*
+ * After validating that `s` is null-terminated within [s, end) via
+ * `bounded_strlen`, a plain `strcmp` is safe — the null-terminator
+ * guards the read. This helper composes both steps so the caller
+ * can treat the lookup as atomic without conflating the "no null
+ * terminator" failure with an ordinary negative-mismatch return.
+ *
+ * Writes true/false to *out_match on success. Returns 0 on
+ * success, -1 if `s` has no null within bounds.
+ */
+static int bounded_str_match(const char *s, const char *end,
+                             const char *pattern, bool *out_match)
+{
+    if (bounded_strlen(s, end) < 0) {
+        return -1;
+    }
+    *out_match = (strcmp(s, pattern) == 0);
+    return 0;
+}
+
 int fdt_init(struct fdt_handle *h, const void *blob)
 {
     if (!h || !blob) {
@@ -91,7 +128,7 @@ static int name_matches(const char *name, const char *comp, size_t comp_len)
 }
 
 int fdt_find_node_by_path(const struct fdt_handle *h, const char *path,
-                          int *out_offset)
+                          uint32_t *out_offset)
 {
     if (!h || !path || !out_offset || path[0] != '/') {
         return FDT_LIB_E_INVALID;
@@ -110,11 +147,20 @@ int fdt_find_node_by_path(const struct fdt_handle *h, const char *path,
     if (read_be32(p) != FDT_BEGIN_NODE) {
         return FDT_LIB_E_BADSTRUCT;
     }
-    int root_offset = 0;
+    uint32_t root_offset = 0;
     p += 4;
-    /* Skip root name (null-terminated, padded to u32). */
-    size_t rlen = strlen((const char *)p);
-    p += align4((uint32_t)(rlen + 1));
+    /* Skip root name (null-terminated, padded to u32). Bounded: if
+     * the name is not null-terminated within the struct block the
+     * blob is malformed and we reject. */
+    long rlen = bounded_strlen((const char *)p, (const char *)end);
+    if (rlen < 0) {
+        return FDT_LIB_E_BADSTRUCT;
+    }
+    uint32_t rskip = align4((uint32_t)(rlen + 1));
+    if (rskip < (uint32_t)(rlen + 1) || (size_t)(end - p) < rskip) {
+        return FDT_LIB_E_BADSTRUCT;
+    }
+    p += rskip;
 
     /* Root-only lookup. */
     if (path[1] == '\0') {
@@ -138,9 +184,17 @@ int fdt_find_node_by_path(const struct fdt_handle *h, const char *path,
         switch (tok) {
         case FDT_BEGIN_NODE: {
             const char *nname = (const char *)p;
-            size_t nlen = strlen(nname);
-            int node_offset = (int)(p - 4 - struct_base);
-            p += align4((uint32_t)(nlen + 1));
+            long nlen = bounded_strlen(nname, (const char *)end);
+            if (nlen < 0) {
+                return FDT_LIB_E_BADSTRUCT;
+            }
+            uint32_t node_offset = (uint32_t)(p - 4 - struct_base);
+            uint32_t nskip = align4((uint32_t)(nlen + 1));
+            if (nskip < (uint32_t)(nlen + 1) ||
+                (size_t)(end - p) < nskip) {
+                return FDT_LIB_E_BADSTRUCT;
+            }
+            p += nskip;
             depth++;
 
             /* Only inspect siblings at the level we're still
@@ -181,13 +235,19 @@ int fdt_find_node_by_path(const struct fdt_handle *h, const char *path,
 
         case FDT_PROP: {
             /* Skip over property: 4-byte len, 4-byte nameoff, len
-             * bytes of value, align to 4. */
+             * bytes of value, align to 4. Guard both the post-header
+             * bounds and the align4() overflow so a crafted `len`
+             * can't wrap `p` past `end`. */
             if (p + 8 > end) {
                 return FDT_LIB_E_BADSTRUCT;
             }
             uint32_t len = read_be32(p);
             p += 8;
-            p += align4(len);
+            uint32_t skip = align4(len);
+            if (skip < len || (size_t)(end - p) < skip) {
+                return FDT_LIB_E_BADSTRUCT;
+            }
+            p += skip;
             break;
         }
 
@@ -205,26 +265,38 @@ int fdt_find_node_by_path(const struct fdt_handle *h, const char *path,
     return FDT_LIB_E_BADSTRUCT;
 }
 
-int fdt_get_property(const struct fdt_handle *h, int node_offset,
+int fdt_get_property(const struct fdt_handle *h, uint32_t node_offset,
                      const char *prop_name,
                      const void **out_data, uint32_t *out_len)
 {
-    if (!h || !prop_name || !out_data || !out_len || node_offset < 0) {
+    if (!h || !prop_name || !out_data || !out_len) {
         return FDT_LIB_E_INVALID;
     }
 
     const uint8_t *struct_base = h->blob + h->off_struct;
     const uint8_t *end = struct_base + h->size_struct;
-    const char *strings = (const char *)(h->blob + h->off_strings);
+    const char *strings     = (const char *)(h->blob + h->off_strings);
+    const char *strings_end = strings + h->size_strings;
+
+    if (node_offset > h->size_struct) {
+        return FDT_LIB_E_INVALID;
+    }
     const uint8_t *p = struct_base + node_offset;
 
     if (p + 4 > end || read_be32(p) != FDT_BEGIN_NODE) {
         return FDT_LIB_E_BADSTRUCT;
     }
     p += 4;
-    /* Skip node name. */
-    size_t nlen = strlen((const char *)p);
-    p += align4((uint32_t)(nlen + 1));
+    /* Skip node name — bounded against the struct block. */
+    long nlen = bounded_strlen((const char *)p, (const char *)end);
+    if (nlen < 0) {
+        return FDT_LIB_E_BADSTRUCT;
+    }
+    uint32_t nskip = align4((uint32_t)(nlen + 1));
+    if (nskip < (uint32_t)(nlen + 1) || (size_t)(end - p) < nskip) {
+        return FDT_LIB_E_BADSTRUCT;
+    }
+    p += nskip;
 
     /* Scan properties + NOPs until we hit a child BEGIN_NODE or our
      * own END_NODE. We deliberately do NOT recurse into children —
@@ -241,17 +313,35 @@ int fdt_get_property(const struct fdt_handle *h, int node_offset,
             uint32_t len     = read_be32(p);
             uint32_t nameoff = read_be32(p + 4);
             p += 8;
-            const char *pname = strings + nameoff;
-            /* Bound-check the strings offset. */
-            if (pname + 1 > (const char *)(h->blob + h->off_strings + h->size_strings)) {
+
+            /* Bound-check nameoff into strings block before any
+             * string read. `pname` must sit strictly inside the
+             * strings block so `bounded_strcmp_with_end` has room
+             * to find a null. */
+            if (nameoff >= h->size_strings) {
                 return FDT_LIB_E_BADSTRUCT;
             }
-            if (strcmp(pname, prop_name) == 0) {
+            const char *pname = strings + nameoff;
+            bool match = false;
+            if (bounded_str_match(pname, strings_end, prop_name,
+                                  &match) < 0) {
+                return FDT_LIB_E_BADSTRUCT;      /* strings block unterminated */
+            }
+
+            /* Validate the value-advance even on non-match, so a
+             * later iteration's token read doesn't walk off the
+             * struct block after we skip this property. */
+            uint32_t skip = align4(len);
+            if (skip < len || (size_t)(end - p) < skip) {
+                return FDT_LIB_E_BADSTRUCT;
+            }
+
+            if (match) {
                 *out_data = p;
                 *out_len  = len;
                 return FDT_LIB_OK;
             }
-            p += align4(len);
+            p += skip;
             break;
         }
 
@@ -277,7 +367,7 @@ int fdt_get_property_by_path(const struct fdt_handle *h,
                              const char *prop_name,
                              const void **out_data, uint32_t *out_len)
 {
-    int node_off;
+    uint32_t node_off;
     int rc = fdt_find_node_by_path(h, node_path, &node_off);
     if (rc != FDT_LIB_OK) {
         return rc;

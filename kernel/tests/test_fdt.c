@@ -247,7 +247,7 @@ static void test_find_rejects_relative_path(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off;
+    uint32_t off;
     TEST_ASSERT_EQUAL_INT(FDT_LIB_E_INVALID,
                           fdt_find_node_by_path(&g_h, "axi", &off));
 }
@@ -256,7 +256,7 @@ static void test_find_returns_root_for_slash(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = -1;
+    uint32_t off = 0;
     TEST_ASSERT_EQUAL_INT(FDT_LIB_OK,
                           fdt_find_node_by_path(&g_h, "/", &off));
     TEST_ASSERT_EQUAL_INT(0, off);
@@ -266,7 +266,7 @@ static void test_find_nested_node(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = -1;
+    uint32_t off = 0;
     TEST_ASSERT_EQUAL_INT(FDT_LIB_OK,
                           fdt_find_node_by_path(&g_h,
                                                 "/axi/eth@100000", &off));
@@ -277,7 +277,7 @@ static void test_find_missing_leaf(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = 0;
+    uint32_t off = 0;
     TEST_ASSERT_EQUAL_INT(FDT_LIB_E_NOTFOUND,
                           fdt_find_node_by_path(&g_h,
                                                 "/axi/does-not-exist", &off));
@@ -290,7 +290,7 @@ static void test_find_partial_name_rejected(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = 0;
+    uint32_t off = 0;
     TEST_ASSERT_EQUAL_INT(FDT_LIB_E_NOTFOUND,
                           fdt_find_node_by_path(&g_h, "/cpu", &off));
     TEST_ASSERT_EQUAL_INT(FDT_LIB_OK,
@@ -303,7 +303,7 @@ static void test_find_requires_unit_address(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = 0;
+    uint32_t off = 0;
     TEST_ASSERT_EQUAL_INT(FDT_LIB_E_NOTFOUND,
                           fdt_find_node_by_path(&g_h, "/axi/eth", &off));
     TEST_ASSERT_EQUAL_INT(FDT_LIB_OK,
@@ -319,7 +319,7 @@ static void test_get_property_root_string(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = 0;
+    uint32_t off = 0;
     TEST_ASSERT_EQUAL_INT(FDT_LIB_OK,
                           fdt_find_node_by_path(&g_h, "/", &off));
 
@@ -336,7 +336,7 @@ static void test_get_property_on_nested_node(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = 0;
+    uint32_t off = 0;
     fdt_find_node_by_path(&g_h, "/axi/eth@100000", &off);
 
     const void *data = NULL;
@@ -358,7 +358,7 @@ static void test_get_property_missing(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = 0;
+    uint32_t off = 0;
     fdt_find_node_by_path(&g_h, "/axi/eth@100000", &off);
 
     const void *data = NULL;
@@ -376,7 +376,7 @@ static void test_get_property_after_sibling_property(void)
 {
     make_test_fdt(g_buf);
     fdt_init(&g_h, g_buf);
-    int off = 0;
+    uint32_t off = 0;
     fdt_find_node_by_path(&g_h, "/axi/eth@100000", &off);
 
     const void *data = NULL;
@@ -453,6 +453,113 @@ static void test_get_u32_rejects_wrong_size(void)
 }
 
 /* ============================================================================
+ * Bounds hardening (review Warnings 1 & 2)
+ *
+ * These tests intentionally craft malformed DTBs where a node name or
+ * property-value length would cause an unbounded walker to read past
+ * the struct block. The library must reject them with BADSTRUCT
+ * rather than walking off the end of the buffer.
+ * ============================================================================ */
+
+/* Build a DTB whose root BEGIN_NODE is followed by a name that has
+ * no null terminator before the struct block ends. An unbounded
+ * strlen would read past size_dt_struct. */
+static void test_find_rejects_unterminated_node_name(void)
+{
+    /* Minimal header + struct block with a dangling name. */
+    memset(g_buf, 0, 512);
+    /* Strings block empty but present so fdt_init bounds-checks pass. */
+    struct fdt_header *hdr = (struct fdt_header *)g_buf;
+    const uint32_t struct_off = 64;
+    const uint8_t  struct_bytes[8] = {
+        0, 0, 0, 1,                 /* FDT_BEGIN_NODE           */
+        'a', 'a', 'a', 'a',         /* name — no null terminator */
+    };
+    memcpy(g_buf + struct_off, struct_bytes, sizeof struct_bytes);
+
+    hdr->magic             = cpu_to_be32(FDT_MAGIC);
+    hdr->totalsize         = cpu_to_be32(struct_off + sizeof struct_bytes + 4);
+    hdr->off_dt_struct     = cpu_to_be32(struct_off);
+    hdr->size_dt_struct    = cpu_to_be32((uint32_t)sizeof struct_bytes);
+    hdr->off_dt_strings    = cpu_to_be32(struct_off + sizeof struct_bytes);
+    hdr->size_dt_strings   = cpu_to_be32(4);
+    hdr->version           = cpu_to_be32(FDT_VERSION);
+    hdr->last_comp_version = cpu_to_be32(FDT_VERSION);
+
+    TEST_ASSERT_EQUAL_INT(FDT_LIB_OK, fdt_init(&g_h, g_buf));
+    uint32_t off = 0;
+    TEST_ASSERT_EQUAL_INT(FDT_LIB_E_BADSTRUCT,
+                          fdt_find_node_by_path(&g_h, "/a", &off));
+}
+
+/* Build a DTB whose FDT_PROP declares a length so large that
+ * align4(len) would either overflow to 0 or push the walker past
+ * size_dt_struct. Without the length guard this would cause an
+ * unbounded walk. */
+static void test_find_rejects_huge_prop_length(void)
+{
+    memset(g_buf, 0, 512);
+    struct fdt_header *hdr = (struct fdt_header *)g_buf;
+    const uint32_t struct_off = 64;
+    uint8_t *s = g_buf + struct_off;
+    uint32_t o = 0;
+
+    /* BEGIN_NODE root ("") */
+    uint32_t tok = cpu_to_be32(FDT_BEGIN_NODE); memcpy(s + o, &tok, 4); o += 4;
+    s[o++] = 0; o += 3;                        /* empty name + pad */
+
+    /* FDT_PROP with huge len that would overflow align4. */
+    tok = cpu_to_be32(FDT_PROP); memcpy(s + o, &tok, 4); o += 4;
+    uint32_t huge = cpu_to_be32(0xFFFFFFFDu);  /* align4(0xFFFFFFFD)=0 */
+    memcpy(s + o, &huge, 4); o += 4;
+    uint32_t zero = 0;
+    memcpy(s + o, &zero, 4); o += 4;           /* nameoff = 0 */
+
+    hdr->magic             = cpu_to_be32(FDT_MAGIC);
+    hdr->totalsize         = cpu_to_be32(struct_off + o + 4);
+    hdr->off_dt_struct     = cpu_to_be32(struct_off);
+    hdr->size_dt_struct    = cpu_to_be32(o);
+    hdr->off_dt_strings    = cpu_to_be32(struct_off + o);
+    hdr->size_dt_strings   = cpu_to_be32(4);
+    hdr->version           = cpu_to_be32(FDT_VERSION);
+    hdr->last_comp_version = cpu_to_be32(FDT_VERSION);
+
+    TEST_ASSERT_EQUAL_INT(FDT_LIB_OK, fdt_init(&g_h, g_buf));
+    uint32_t off = 0;
+    TEST_ASSERT_EQUAL_INT(FDT_LIB_E_BADSTRUCT,
+                          fdt_find_node_by_path(&g_h, "/any", &off));
+}
+
+/* fdt_get_property: a property's nameoff pointing outside the strings
+ * block must be rejected rather than producing an unbounded strcmp. */
+static void test_get_property_rejects_bad_nameoff(void)
+{
+    make_test_fdt(g_buf);
+
+    /* Corrupt the nameoff of the first property (prop_at_root) to
+     * point beyond the strings block. The strings block is declared
+     * at STRINGS_SIZE = 128; setting nameoff to 0x10000 makes it
+     * certainly out of range. */
+    struct fdt_header *hdr = (struct fdt_header *)g_buf;
+    uint32_t off_struct = STRUCT_OFFSET;
+    /* BEGIN_NODE (4) + empty name padded to 4 + FDT_PROP (4) + len (4)
+     * = 16 bytes in, then nameoff. */
+    uint32_t nameoff_pos = off_struct + 16;
+    uint32_t bad_nameoff = cpu_to_be32(0x10000u);
+    memcpy(g_buf + nameoff_pos, &bad_nameoff, 4);
+    (void)hdr;
+
+    TEST_ASSERT_EQUAL_INT(FDT_LIB_OK, fdt_init(&g_h, g_buf));
+    uint32_t off = 0;
+    fdt_find_node_by_path(&g_h, "/", &off);
+    const void *data = NULL;
+    uint32_t len = 0;
+    TEST_ASSERT_EQUAL_INT(FDT_LIB_E_BADSTRUCT,
+                          fdt_get_property(&g_h, off, "prop_at_root",
+                                           &data, &len));
+}
+
+/* ============================================================================
  * Suite
  * ============================================================================ */
 
@@ -487,6 +594,11 @@ int test_suite_fdt(void)
     RUN_TEST(test_get_property_by_path_missing_node);
     RUN_TEST(test_get_u32);
     RUN_TEST(test_get_u32_rejects_wrong_size);
+
+    /* Bounds hardening */
+    RUN_TEST(test_find_rejects_unterminated_node_name);
+    RUN_TEST(test_find_rejects_huge_prop_length);
+    RUN_TEST(test_get_property_rejects_bad_nameoff);
 
     return UnityEnd();
 }

@@ -1198,16 +1198,19 @@ static int macb_tx_one(const void *buf, size_t len)
              slot, tx_ring[slot].ctrl);
     }
 
-    /* ---- Phase 3: advance tx_tail if still pointing at our slot ----
-     * A concurrent send that happened to poll an earlier slot to
-     * completion first may already have pushed tx_tail past us; we
-     * only update if it's still at `slot`, otherwise the next
-     * macb_tx_reap_locked will catch up. */
+    /* ---- Phase 3: sweep the reap pointer forward ----
+     * `macb_tx_reap_locked` walks from `tx_tail` and advances past
+     * every slot whose USED bit is set. Using it here (rather than a
+     * single-slot `if (tx_tail == slot) advance` check) means
+     * out-of-order wake-ups from concurrent senders still leave
+     * `tx_tail` fully up-to-date — the ring-full check in Phase 1 of
+     * the next call stays precise. Slot `slot` is guaranteed USED=1
+     * at this point (we just observed it in Phase 2), and the MAC
+     * drains ring-order so every earlier slot is USED=1 too. */
     flags = spin_lock_irqsave(&tx_lock);
-    if (macb_state.tx_tail == slot) {
-        macb_state.tx_tail = (slot + 1) & (MACB_TX_RING_SIZE - 1);
-    }
+    macb_tx_reap_locked();
     spin_unlock_irqrestore(&tx_lock, flags);
+    (void)slot;                  /* used only by diagnostic WARNs */
 
     return tx_err ? NET_E_GENERIC : 0;
 }

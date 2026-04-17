@@ -103,6 +103,13 @@ static inline void mbox_writel(uint32_t reg, uint32_t val)
     *(volatile uint32_t *)(BCM_MAILBOX_BASE + reg) = val;
 }
 
+/* 100 ms wall-clock budget for any single mailbox operation (status
+ * wait, full round-trip response). Centralised here so status waits
+ * and the response loop can't drift apart. Chosen as "obviously
+ * longer than any real VC response" — real round-trips are sub-
+ * millisecond. */
+#define MBOX_OP_BUDGET_US   (100 * 1000)
+
 /* Spin until the status bit clears, with a wall-clock deadline so a
  * hung VC can't wedge the caller. Returns 0 on success, -1 on
  * timeout. Uses timer_busy_wait_us (CNTPCT + ARM `yield` hint — NOT
@@ -111,10 +118,9 @@ static inline void mbox_writel(uint32_t reg, uint32_t val)
 static int mbox_wait_status(uint32_t status_reg, uint32_t mask,
                             uint32_t desired)
 {
-    const uint64_t budget_us = 100 * 1000;   /* 100 ms */
-    const uint64_t freq      = timer_get_frequency();
-    const uint64_t deadline  = timer_get_count() +
-                               (budget_us * freq + 999999ULL) / 1000000ULL;
+    const uint64_t freq     = timer_get_frequency();
+    const uint64_t deadline = timer_get_count() +
+                              (MBOX_OP_BUDGET_US * freq + 999999ULL) / 1000000ULL;
 
     while (timer_get_count() < deadline) {
         __asm__ volatile("dsb sy" ::: "memory");
@@ -150,9 +156,10 @@ static int mbox_property_call(void)
 
     uint32_t bus = (uint32_t)BCM_BUS_ADDRESS(phys);
 
-    /* Clean the buffer to DRAM so VC DMA sees the request. */
+    /* Clean the buffer to DRAM so VC DMA sees the request. The
+     * helper already emits `dsb sy` internally (see cache.h), so no
+     * additional barrier is needed here. */
     cache_clean_range(prop_buf, PROP_BUF_BYTES);
-    __asm__ volatile("dsb sy" ::: "memory");
 
     if (mbox_wait_status(MBOX1_STATUS, MBOX_STATUS_FULL, 0) < 0) {
         ERROR("mailbox: write path stayed FULL (VC wedged?)");
@@ -160,6 +167,8 @@ static int mbox_property_call(void)
     }
 
     mbox_writel(MBOX1_WRITE, bus | MBOX_CHANNEL_PROPERTY);
+    /* Explicit barrier here is meaningful: order the MMIO write
+     * ahead of the status poll that follows. */
     __asm__ volatile("dsb sy" ::: "memory");
 
     /* Wait for a response on channel 8. The mailbox is shared with
@@ -167,10 +176,9 @@ static int mbox_property_call(void)
      * discard it and keep waiting. In practice SLM-OS has no other
      * mailbox user so this rarely matters — but it's the correct
      * thing to do per the property-channel protocol. */
-    const uint64_t budget_us = 100 * 1000;
-    const uint64_t freq      = timer_get_frequency();
-    const uint64_t deadline  = timer_get_count() +
-                               (budget_us * freq + 999999ULL) / 1000000ULL;
+    const uint64_t freq     = timer_get_frequency();
+    const uint64_t deadline = timer_get_count() +
+                              (MBOX_OP_BUDGET_US * freq + 999999ULL) / 1000000ULL;
     uint32_t response = 0;
     bool got = false;
     while (!got && timer_get_count() < deadline) {
@@ -178,7 +186,6 @@ static int mbox_property_call(void)
             ERROR("mailbox: no response (status EMPTY throughout budget)");
             return -1;
         }
-        __asm__ volatile("dsb sy" ::: "memory");
         uint32_t word = mbox_readl(MBOX0_READ);
         if ((word & MBOX_CHANNEL_MASK) == MBOX_CHANNEL_PROPERTY) {
             response = word;
@@ -200,9 +207,8 @@ static int mbox_property_call(void)
     }
 
     /* Invalidate cache so we see VC's writes to the buffer, not our
-     * stale cached copy. */
+     * stale cached copy. (helper emits its own dsb sy) */
     cache_invalidate_range(prop_buf, PROP_BUF_BYTES);
-    __asm__ volatile("dsb sy" ::: "memory");
 
     if (prop_buf[1] == 0x80000001) {
         /* Buffer-level parse error on a structurally-correct request
@@ -210,18 +216,18 @@ static int mbox_property_call(void)
          * "this tag isn't implemented on this firmware" (rpi-eeprom
          * issue #698: GET_BOARD_MAC_ADDRESS was added to the Pi 5
          * mailbox subset on 2025-05-08; prior EEPROM revisions don't
-         * recognise the tag and fail at the buffer level). We
-         * confirmed the transport works by pre-flighting
-         * GET_FIRMWARE_REVISION during bring-up; `net info` exposes
-         * the same info via macbdiag for live debugging. */
+         * recognise the tag and fail at the buffer level). */
         return MBOX_E_TAG_UNSUPPORTED;
     }
     if (prop_buf[1] != PROP_RESPONSE_SUCCESS) {
-        ERROR("mailbox: request_code in response = 0x%08x (expected 0x80000000)",
-              prop_buf[1]);
-        for (int i = 0; i < PROP_BUF_WORDS; i++) {
-            ERROR("mailbox:   buf[%d] = 0x%08x", i, prop_buf[i]);
-        }
+        /* One bounded line — batching into a single ERROR keeps the
+         * UART TX FIFO from overflowing on the error path (observed
+         * during hardware testing). */
+        ERROR("mailbox: unexpected response code 0x%08x; "
+              "buf=[%08x %08x %08x %08x %08x %08x %08x %08x]",
+              prop_buf[1],
+              prop_buf[0], prop_buf[1], prop_buf[2], prop_buf[3],
+              prop_buf[4], prop_buf[5], prop_buf[6], prop_buf[7]);
         return -1;
     }
 
