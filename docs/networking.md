@@ -330,10 +330,42 @@ regions through PCI capability structures (cap_vndr=0x09). The driver:
 3. Negotiates features (MAC, STATUS, VIRTIO_F_VERSION_1).
 4. Sets up RX/TX virtqueues in guest RAM with the same split-ring
    format used by the MMIO driver.
-5. Disables MSI-X (uses polling via `net_poll()`).
+5. Probes the PCI MSI-X capability (cap id 0x11) and, if present,
+   programs table entry 0 to route both queue and config-change
+   interrupts to IDT vector 50 on the boot CPU's LAPIC. Both queues'
+   `queue_msix_vector` registers and `msix_config` are bound to
+   that entry; the capability's Enable bit is set last so no
+   interrupt can fire against a half-programmed table. If MSI-X is
+   absent (e.g. `-device virtio-net-pci,msix=off`) the driver falls
+   back cleanly to polling via `net_poll()` — `tx_reap` on the
+   net_driver hook still drains completions.
+6. Registers `virtio_net_pci_irq_handler` against the IDT via
+   `irq_register(VIRTIO_NET_MSIX_IRQ, ...)`. The handler drains the
+   TX used ring and picks up link-status changes; RX remains
+   polled (moving RX to IRQ context would need `pbuf_alloc` +
+   lwIP input from IRQ, same trade-off as the MMIO driver).
+
+Accessor APIs for tests and diagnostics:
+`virtio_net_pci_msix_enabled()`, `virtio_net_pci_get_msix_vector()`,
+`virtio_net_pci_get_irq_count()`. The first two surface whether the
+hot path is IRQ-driven vs polled; the third lets tests verify the
+dispatch is alive during traffic.
 
 The virtqueue ring layout (descriptor table, available ring, used ring)
 is identical between the two drivers; only the transport differs.
+
+### Stuck-descriptor watchdog (#204 item 4)
+
+Both drivers track a wall-clock timestamp of the last successful TX
+reap. When `tx_reap_locked` runs with a non-empty in-flight pool
+and has not made progress for `TX_STALL_THRESHOLD_MS` (5000 ms), it
+logs a single `WARN("TX descriptors stuck: no completion for %u ms
+(virtio-mmio|virtio-pci)", elapsed)` line. The latch resets on the
+next successful reap, so a transient stall that resolves does not
+log — but a truly stuck link logs exactly once per stall episode.
+Non-fatal: the driver stays usable (polling still works) and the
+warning surfaces the problem to the shell / serial log for
+operator action rather than failing the whole transport.
 
 ### Descriptor Ring Cache Maintenance
 
@@ -626,6 +658,8 @@ on both ARM64 MMIO and x86-64 PCI paths):
 | `test_net_burst_8_sends_async` | 8 back-to-back submits succeed without blocking; pool absorbs them; `net_poll()` drains completions (#204) |
 | `test_net_irq_handler_registered` | MMIO driver called `gic_register_handler` — dispatch table points to `virtio_net_irq_handler` for the runtime IRQ (#204) |
 | `test_net_irq_handler_drains_tx` | Direct handler invocation bumps `virtio_net_get_irq_count()` and drains the TX used ring (#204) |
+| `test_net_msix_enabled` | PCI driver enabled MSI-X during init (#204 item 3) |
+| `test_net_msix_vector_is_in_range` | MSI-X vector is in the 50-63 reserved range (#204 item 3) |
 
 Run tests with:
 

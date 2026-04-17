@@ -51,6 +51,30 @@
 #define VIRTIO_PCI_CAP_DEVICE   4
 #define VIRTIO_PCI_CAP_PCI_CFG  5
 
+/* PCI MSI-X capability (#204 item 3). cap_id 0x11 per PCI spec. */
+#define PCI_CAP_ID_MSIX              0x11
+#define MSIX_MSG_CTRL_OFFSET         0x02  /* In MSI-X capability */
+#define MSIX_TABLE_OFFSET_BIR        0x04
+#define MSIX_PBA_OFFSET_BIR          0x08
+#define MSIX_MSG_CTRL_ENABLE         (1u << 15)
+#define MSIX_MSG_CTRL_FUNC_MASK      (1u << 14)
+#define MSIX_MSG_CTRL_TABLE_SIZE     0x7FF
+
+#define MSIX_VCTRL_MASK              (1u << 0)
+
+/* x86 MSI message address/data format (Intel SDM Vol 3 §11.11.1) */
+#define MSIX_ADDR_BASE               0xFEE00000u
+/* Message data: bits[7:0] vector, bits[10:8] delivery mode (0=fixed),
+ * bit 14 trigger level, bit 15 trigger mode (0=edge). Edge-triggered
+ * fixed delivery is the standard MSI-X choice on x86. */
+
+/* IDT vector we allocate for virtio-net TX/RX completion. Falls in
+ * the 50–63 "user MSI-X" range left open by lapic/timer/RESCHED_VECTOR.
+ * Revisit the allocation strategy when a second MSI-X-capable driver
+ * lands (item 3 follow-up); a tiny bitmap in lapic.c would do. */
+#define VIRTIO_NET_MSIX_VECTOR       50
+#define VIRTIO_NET_MSIX_IRQ          (VIRTIO_NET_MSIX_VECTOR - 32)
+
 /* Device status bits (same as MMIO) */
 #define VIRTIO_STATUS_ACKNOWLEDGE   (1 << 0)
 #define VIRTIO_STATUS_DRIVER        (1 << 1)
@@ -225,6 +249,16 @@ static uint8_t tx_buffers[TX_BUFFER_COUNT][MAX_PACKET_SIZE]
     __attribute__((aligned(16)));
 static bool    tx_inflight[TX_BUFFER_COUNT];
 
+/* Stuck-descriptor watchdog (#204 item 4). Same pattern as the MMIO
+ * driver — see virtio_net.c for the full rationale. Under MSI-X the
+ * threshold should rarely be reached (completions drain from the
+ * IRQ handler within microseconds), so hitting this is a real signal
+ * that either the device dropped a notification or the host side
+ * stopped accepting packets. */
+#define TX_STALL_THRESHOLD_MS 5000
+static uint32_t tx_last_progress_ms;
+static bool     tx_stall_warned;
+
 static_assert(sizeof(tx_buffers) == TX_BUFFER_COUNT * MAX_PACKET_SIZE,
               "tx_buffers layout assumption broken");
 
@@ -235,6 +269,29 @@ static_assert(sizeof(tx_buffers) == TX_BUFFER_COUNT * MAX_PACKET_SIZE,
 static inline void vio_mb(void) {
     __asm__ volatile("mfence" ::: "memory");
 }
+
+/* -------------------------------------------------------------------------- */
+/* MSI-X state (#204 item 3)                                                    */
+/* -------------------------------------------------------------------------- */
+
+struct msix_entry {
+    uint32_t addr_low;
+    uint32_t addr_high;
+    uint32_t data;
+    uint32_t vector_control;
+} __attribute__((packed));
+
+static struct {
+    bool     enabled;
+    uint8_t  cap_ptr;    /* PCI config offset of the MSI-X capability */
+    uint16_t table_size; /* number of MSI-X vectors the device exposes */
+    volatile struct msix_entry *table;
+    volatile uint32_t irq_count;  /* bumped by virtio_net_pci_irq_handler */
+} pci_msix;
+
+/* Forward decls so init can register the handler before the body is
+ * defined. */
+static void virtio_net_pci_irq_handler(uint8_t irq);
 
 /* -------------------------------------------------------------------------- */
 /* PCI Capability Parsing                                                      */
@@ -282,6 +339,91 @@ static bool find_virtio_cap(uint8_t bus, uint8_t dev, uint8_t func,
     }
 
     return false;
+}
+
+/*
+ * Locate the PCI MSI-X capability. Walks the standard capabilities
+ * list (not the virtio vendor-specific list). On success, populates
+ * pci_msix.{cap_ptr, table_size, table} and returns true.
+ *
+ * Table address comes from the BAR+offset fields in the capability.
+ * On x86-64 with identity-mapped BARs, the BAR value is the virtual
+ * address; matches how find_virtio_cap's callers map common/notify/isr.
+ */
+static bool find_msix_cap(const struct pci_device *pdev)
+{
+    uint16_t status = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x06);
+    if (!(status & (1 << 4)))
+        return false;
+
+    uint8_t cap_ptr = pci_config_read8(pdev->bus, pdev->dev, pdev->func, 0x34) & 0xFC;
+    while (cap_ptr != 0) {
+        uint8_t cap_id   = pci_config_read8(pdev->bus, pdev->dev, pdev->func, cap_ptr);
+        uint8_t cap_next = pci_config_read8(pdev->bus, pdev->dev, pdev->func, cap_ptr + 1);
+
+        if (cap_id == PCI_CAP_ID_MSIX) {
+            uint16_t msg_ctrl = pci_config_read16(pdev->bus, pdev->dev, pdev->func,
+                                                  cap_ptr + MSIX_MSG_CTRL_OFFSET);
+            uint32_t table_off_bir = pci_config_read32(pdev->bus, pdev->dev, pdev->func,
+                                                       cap_ptr + MSIX_TABLE_OFFSET_BIR);
+            uint8_t  table_bar   = table_off_bir & 0x7;
+            uint32_t table_off   = table_off_bir & ~0x7u;
+
+            uint64_t bar_addr = pdev->bar[table_bar] & ~0xFUL;
+            /* 64-bit BAR: high half in bar[n+1]. 0x6 mask = type bits. */
+            if ((pdev->bar[table_bar] & 0x6) == 0x4 && table_bar < 5)
+                bar_addr |= (uint64_t)pdev->bar[table_bar + 1] << 32;
+
+            pci_msix.cap_ptr    = cap_ptr;
+            pci_msix.table_size = (uint16_t)((msg_ctrl & MSIX_MSG_CTRL_TABLE_SIZE) + 1);
+            pci_msix.table      = (volatile struct msix_entry *)(uintptr_t)(bar_addr + table_off);
+            return true;
+        }
+
+        cap_ptr = cap_next & 0xFC;
+    }
+
+    return false;
+}
+
+/*
+ * Program MSI-X table entry 0 and enable the capability.
+ *
+ * The table is written first (entry 0 = addr+data for our vector,
+ * vector_control cleared), then MSI-X is enabled via the capability's
+ * message_control register. Ordering matters: the device will not
+ * generate MSI-X messages until the Enable bit is set, so writing
+ * the table first and enabling last means no interrupt can fire
+ * against a half-programmed entry. No function_mask dance needed.
+ *
+ * @vector: IDT vector (32-255). Currently the fixed value
+ *          VIRTIO_NET_MSIX_VECTOR (50); dynamic allocation can wait
+ *          until a second MSI-X-capable driver needs a vector.
+ * @apic_id: LAPIC id of the CPU that should receive the IRQ. Pass
+ *           the boot CPU's id for now — SMP redirection is a
+ *           separate change tracked alongside gic_set_affinity.
+ */
+static void msix_program_entry0(uint8_t vector, uint32_t apic_id)
+{
+    /* Fill the table entry. Bits of data: [7:0] vector, [10:8]=0
+     * fixed delivery, [14]=0 edge, [15]=0 edge. Physical destination
+     * (bit 2 of addr) is implied by leaving bits [11:2] of address
+     * at 0. */
+    pci_msix.table[0].addr_low       = MSIX_ADDR_BASE | (apic_id << 12);
+    pci_msix.table[0].addr_high      = 0;
+    pci_msix.table[0].data           = vector;
+    pci_msix.table[0].vector_control = 0;  /* unmask this vector */
+
+    /* Enable MSI-X. Cap layout at [cap_ptr..cap_ptr+3]:
+     *   [0] cap_id, [1] cap_next, [2-3] message_control (16b).
+     * Write the full dword via RMW to preserve the stable cap_id /
+     * cap_next bytes in the low half. */
+    uint32_t ctrl_dword = pci_config_read32(pci_net.bus, pci_net.dev, pci_net.func,
+                                            pci_msix.cap_ptr);
+    ctrl_dword &= 0x0000FFFFu;  /* keep cap_id, cap_next */
+    ctrl_dword |= ((uint32_t)MSIX_MSG_CTRL_ENABLE) << 16;
+    pci_config_write32(pci_net.bus, pci_net.dev, pci_net.func,
+                       pci_msix.cap_ptr, ctrl_dword);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -347,8 +489,21 @@ static int vq_init(struct pci_virtqueue *vq, uint16_t index) {
     /* Read notify offset for this queue */
     vq->notify_off = common->queue_notify_off;
 
-    /* Disable MSI-X for this queue (use polling) */
-    common->queue_msix_vector = 0xFFFF;
+    /* Bind the queue to MSI-X vector 0 (our only entry) when MSI-X
+     * is available; fall back to 0xFFFF (no MSI-X) otherwise. The
+     * device echoes the write, and a read-back of 0xFFFF after a
+     * binding attempt means the device rejected the association —
+     * if that happens we leave the queue polled (net_poll still
+     * works as a fallback). */
+    if (pci_msix.enabled) {
+        common->queue_msix_vector = 0;
+        vio_mb();
+        if (common->queue_msix_vector == 0xFFFF) {
+            WARN("Queue %u rejected MSI-X binding — staying polled", index);
+        }
+    } else {
+        common->queue_msix_vector = 0xFFFF;
+    }
 
     /* Enable the queue */
     common->queue_enable = 1;
@@ -584,8 +739,40 @@ static int virtio_net_pci_init(void) {
         return -1;
     }
 
-    /* Disable MSI-X for config changes (use polling) */
-    pci_net.common->msix_config = 0xFFFF;
+    /* MSI-X bring-up (#204 item 3). Previously this driver disabled
+     * MSI-X entirely and relied on net_poll for TX completion
+     * drain. Now we probe the MSI-X capability, install a single
+     * entry (vector 50 on this CPU's LAPIC), and bind both queues
+     * plus the config-change slot to that vector. Graceful fallback:
+     * if MSI-X is absent (qemu `-device ...,msix=off`) or the
+     * capability walk fails, we leave `pci_msix.enabled` false and
+     * everything keeps working through polling. */
+    if (find_msix_cap(pdev)) {
+        /* Register the handler BEFORE enabling so the first
+         * delivered IRQ lands on a real handler rather than a
+         * NULL slot in irq_handlers[]. irq_register takes the
+         * (vector - 32) index matching idt.c's dispatch path. */
+        extern void irq_register(uint8_t irq, void (*h)(uint8_t));
+        extern uint32_t lapic_get_id(void);
+        irq_register(VIRTIO_NET_MSIX_IRQ, virtio_net_pci_irq_handler);
+
+        msix_program_entry0(VIRTIO_NET_MSIX_VECTOR, lapic_get_id());
+        pci_msix.enabled = true;
+
+        /* Route config-change events to MSI-X vector 0 as well. If
+         * this fails, leave at 0xFFFF and config changes stay
+         * silent (polling would notice link status on next recv). */
+        pci_net.common->msix_config = 0;
+        vio_mb();
+        if (pci_net.common->msix_config == 0xFFFF) {
+            WARN("Config MSI-X binding rejected — link changes polled");
+        }
+        INFO("MSI-X enabled: vector %u, table_size=%u",
+             VIRTIO_NET_MSIX_VECTOR, pci_msix.table_size);
+    } else {
+        pci_net.common->msix_config = 0xFFFF;
+        INFO("MSI-X not available — TX completion stays polled");
+    }
 
     /* Initialize virtqueues (0=RX, 1=TX) */
     if (vq_init(&pci_net.rx_vq, 0) < 0) {
@@ -629,17 +816,31 @@ static int virtio_net_pci_init(void) {
 
     spin_init(&pci_net.tx_lock);
     spin_init(&pci_net.rx_lock);
+    /* Seed the TX watchdog so the first reap doesn't immediately
+     * log "stuck for N ms" based on the initial zero value. */
+    tx_last_progress_ms = sys_now();
     pci_net.initialized = true;
     INFO("VirtIO-Net PCI driver initialized");
     return 0;
 }
 
+/* Linear scan of tx_inflight[] — cheap (16 entries). Caller holds
+ * pci_net.tx_lock, so no extra synchronization. */
+static bool tx_has_inflight(void) {
+    for (unsigned i = 0; i < TX_BUFFER_COUNT; i++) {
+        if (tx_inflight[i]) return true;
+    }
+    return false;
+}
+
 /*
  * Drain the TX used ring and free pool slots whose descriptors the
  * device finished with. Caller must hold pci_net.tx_lock. Mirror of
- * virtio_net_tx_reap_locked() in the MMIO driver.
+ * virtio_net_tx_reap_locked() in the MMIO driver, including the
+ * stuck-descriptor watchdog (#204 item 4).
  */
 static void virtio_net_pci_tx_reap_locked(void) {
+    bool progressed = false;
     while (true) {
         uint32_t used_len;
         int desc_idx = vq_get_buf(&pci_net.tx_vq, &used_len);
@@ -657,6 +858,19 @@ static void virtio_net_pci_tx_reap_locked(void) {
         /* slot < TX_BUFFER_COUNT by the static_assert above. */
         unsigned slot = (unsigned)((addr - pool_base) / MAX_PACKET_SIZE);
         tx_inflight[slot] = false;
+        progressed = true;
+    }
+
+    if (progressed) {
+        tx_last_progress_ms = sys_now();
+        tx_stall_warned = false;
+    } else if (!tx_stall_warned && tx_has_inflight()) {
+        uint32_t elapsed = sys_now() - tx_last_progress_ms;
+        if (elapsed >= TX_STALL_THRESHOLD_MS) {
+            WARN("TX descriptors stuck: no completion for %u ms (virtio-pci)",
+                 elapsed);
+            tx_stall_warned = true;
+        }
     }
 }
 
@@ -762,6 +976,61 @@ static void virtio_net_pci_get_mac(uint8_t mac[6]) {
 
 static bool virtio_net_pci_link_status(void) {
     return pci_net.initialized && pci_net.link_up;
+}
+
+/*
+ * MSI-X interrupt handler (#204 item 3).
+ *
+ * Delivered via the IDT dispatch in kernel/arch/x86_64/idt.c on the
+ * vector bound to queue_msix_vector (= VIRTIO_NET_MSIX_VECTOR).
+ * With MSI-X enabled the ISR register is NOT used (per virtio 1.1
+ * §4.1.5.4) — the device signals completion by raising the MSI
+ * message directly. We just drain the TX used ring so pool slots
+ * free promptly, and re-check link status on config change. RX
+ * stays polled for the same reason as the MMIO driver: lwIP input
+ * from hard-IRQ context would require pbuf_alloc in the handler,
+ * which is a bigger change than warranted today.
+ *
+ * Runs with IRQs disabled (CPU masks IF on exception entry). The
+ * spin_lock_irqsave in tx_reap_locked sees IRQs already masked,
+ * so its irq_save is a no-op — but the primitive is still correct
+ * for task-context acquirers that share the lock.
+ */
+static void virtio_net_pci_irq_handler(uint8_t irq)
+{
+    (void)irq;  /* single-vector handler; irq index unused */
+    if (!pci_net.initialized)
+        return;
+
+    pci_msix.irq_count++;
+
+    /* Pick up link-status changes opportunistically; cheap and
+     * covers the rare "link went down during traffic" case. */
+    if ((pci_net.features & VIRTIO_NET_F_STATUS) && pci_net.dev_cfg) {
+        bool was_up = pci_net.link_up;
+        pci_net.link_up = (pci_net.dev_cfg->status & VIRTIO_NET_S_LINK_UP) != 0;
+        if (was_up != pci_net.link_up) {
+            INFO("PCI link status: %s", pci_net.link_up ? "UP" : "DOWN");
+        }
+    }
+
+    irq_flags_t flags = spin_lock_irqsave(&pci_net.tx_lock);
+    virtio_net_pci_tx_reap_locked();
+    spin_unlock_irqrestore(&pci_net.tx_lock, flags);
+}
+
+/* Observability accessors — symmetric with the MMIO driver's
+ * virtio_net_get_irq / _get_irq_count. */
+uint32_t virtio_net_pci_get_irq_count(void) {
+    return pci_msix.irq_count;
+}
+
+uint32_t virtio_net_pci_get_msix_vector(void) {
+    return pci_msix.enabled ? VIRTIO_NET_MSIX_VECTOR : 0;
+}
+
+bool virtio_net_pci_msix_enabled(void) {
+    return pci_msix.enabled;
 }
 
 /* -------------------------------------------------------------------------- */
