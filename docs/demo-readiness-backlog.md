@@ -42,15 +42,27 @@ regression tests in the kernel test suite.
 
 ---
 
-## Remaining (Phases 5-7)
+### Phase 5: Capability & Polish (all resolved)
 
-### Eviction Visibility & Integration
+| # | Title | Status |
+|---|-------|--------|
+| ✅ #94 | timer-driven busy-wait | `timer_busy_wait_us()` inline; smp.c loops replaced |
+| ✅ #120 | Per-pool eviction policy | Registry split; `eviction policy weight/workspace <name>` |
+| ✅ #93 | pi_mutex sleep queue | TASK_BLOCKED waiter queue; direct hand-off on unlock |
+| ✅ #117 | CACHEUS vs LRU comparison | `bench eviction` — CACHEUS 26% vs LRU 44% fault rate |
+| ✅ #119 | Online retraining design | 4-phase architecture doc |
 
-| # | Title | Priority | What it enables |
-|---|-------|----------|-----------------|
-| #120 | Per-pool eviction policy | P3-low | Weight pool uses CACHEUS, workspace pool uses LRU |
-| #119 | Online retraining loop | P3-low | "It learns from mistakes" — prove it live |
-| #117 | CACHEUS vs LRU fault-rate comparison | P2-medium | Primary empirical evidence AI eviction beats classical |
+### Phase 6: Eviction Internals (all resolved)
+
+| # | Title | Status |
+|---|-------|--------|
+| ✅ #112 | Feature-name introspection | FEATURE_NAMES[27] + `eviction features` shell |
+| ✅ #114 | ARC notify_eviction | Trait method + allocator caller; ghost lists populate proactively |
+| ✅ #123 | mm_touch_block syscall | SYS_TOUCH_BLOCK (7) in syscall table |
+| ✅ #118 | set_dirty wire-up | Tests verify feature vector shift; pathway ready |
+| ✅ #122 | Extended feature vector | Slots 11 + 17 wired from live data + design doc |
+
+## Remaining
 
 ### Model Inference Enhancements
 
@@ -58,23 +70,6 @@ regression tests in the kernel test suite.
 |---|-------|----------|-----------------|
 | #37 | Multi-Model Management | P3-low | Multiple models to make eviction visible |
 | #64 | Async model preloading | P3-low | Faster demo startup |
-
-### Scheduler/SMP Polish
-
-| # | Title | Priority | What it enables |
-|---|-------|----------|-----------------|
-| #93 | pi_mutex sleep queue | P2-medium | Visible busy-waits look crude |
-| #94 | sched/smp timer-driven delay | P3-low | `bench smp` spin-waits |
-
-### Eviction Internals
-
-| # | Title | Priority |
-|---|-------|----------|
-| #123 | `mm_touch_block` syscall wrapper | P3-low |
-| #122 | Extend feature vector with kernel-side signals | P3-low |
-| #118 | `set_dirty` caller wire-up | P3-low |
-| #114 | ARC direct `notify_eviction` wiring | P3-low |
-| #112 | `eviction_features.rs` runtime introspection | P3-low |
 
 ---
 

@@ -2583,6 +2583,35 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                    dirty_row[14] > clean_row[14]);
         }
 
+        // #112: FEATURE_NAMES must have exactly 27 entries and the
+        // first/last names must match the documented layout.
+        {
+            check!(b"feature_names_count_is_27\0",
+                   mm::eviction::FEATURE_NAMES.len() == 27);
+            check!(b"feature_names_first_is_recency_rank\0",
+                   mm::eviction::FEATURE_NAMES[0] == "recency_rank");
+            check!(b"feature_names_last_is_req_block_priority\0",
+                   mm::eviction::FEATURE_NAMES[26] == "req_block_priority");
+        }
+
+        // #122: feature slot 11 (model_active_inferences) must be
+        // non-zero when the global table has entries. Slot 17
+        // (num_loaded_models) should reflect the model count.
+        {
+            mm::eviction::slm_heuristic::clear_active();
+            // With no active inferences, slot 11 should be 0.
+            let row0 = extract_features(&ml_cands)[0];
+            check!(b"feature_11_zero_when_no_active\0",
+                   row0[11] == 0.0);
+            // Bump model 0 active, re-extract. Slot 11 should change.
+            mm::eviction::slm_heuristic::set_active(
+                ml_cands[0].model_id, 3);
+            let row1 = extract_features(&ml_cands)[0];
+            check!(b"feature_11_nonzero_when_active\0",
+                   row1[11] > 0.0);
+            mm::eviction::slm_heuristic::clear_active();
+        }
+
         // XGBoostPolicy: select a victim and produce scores.
         {
             let mut p = XGBoostPolicy::new();

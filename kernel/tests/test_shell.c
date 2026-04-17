@@ -273,6 +273,27 @@ static void test_shell_cmd_bench_context_histogram_reinit(void)
     TEST_ASSERT_EQUAL_INT(0, shell_execute("bench context"));
 }
 
+/*
+ * Regression for #117: `bench eviction` runs the workload replay
+ * comparison and returns 0 without panicking. The numbers vary
+ * run-to-run so we pin only the return code.
+ */
+static void test_shell_cmd_bench_eviction(void)
+{
+    int ret = shell_execute("bench eviction");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Regression for #112: `eviction features` lists the 27-element
+ * feature vector. Returns 0 whether AI_EVICTION is on or off.
+ */
+static void test_shell_cmd_eviction_features(void)
+{
+    int ret = shell_execute("eviction features");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2163,6 +2184,8 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_sched_compare);
     RUN_TEST(test_shell_cmd_eviction_demo);
     RUN_TEST(test_shell_cmd_bench_context_histogram_reinit);
+    RUN_TEST(test_shell_cmd_bench_eviction);
+    RUN_TEST(test_shell_cmd_eviction_features);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);
