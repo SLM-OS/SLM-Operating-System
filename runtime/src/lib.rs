@@ -1255,6 +1255,99 @@ pub unsafe extern "C" fn rust_eviction_policy_set(name: *const u8) -> i32 {
     }
 }
 
+/// Set a per-pool eviction policy by name. #120.
+///
+/// `pool_id` = 0 for weight, 1 for workspace. Returns 0 on success,
+/// -1 on unknown name/pool, -2 when ai_eviction is off.
+///
+/// # Safety
+/// `name` must be a valid null-terminated C string ≤ 31 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_policy_set_pool(
+    pool_id: u8,
+    name: *const u8,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (pool_id, name); -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        if name.is_null() { return -1; }
+        let pool = match pool_id {
+            0 => mm::eviction::PoolType::Weight,
+            1 => mm::eviction::PoolType::Workspace,
+            _ => return -1,
+        };
+        let mut len = 0usize;
+        while len < 32 {
+            if *name.add(len) == 0 { break; }
+            len += 1;
+        }
+        if len == 0 || len == 32 { return -1; }
+        let slice = core::slice::from_raw_parts(name, len);
+        let requested = match core::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+
+        use alloc::boxed::Box;
+        use mm::eviction::EvictionPolicy;
+        let boxed: Box<dyn EvictionPolicy + Send> = match requested {
+            "lru" => Box::new(mm::eviction::LruPolicy::new()),
+            "lfu" => Box::new(mm::eviction::LfuPolicy::new()),
+            "arc" => Box::new(mm::eviction::ARCPolicy::new()),
+            "slm" => Box::new(mm::eviction::SlmHeuristicPolicy::new()),
+            "xgboost" => Box::new(mm::eviction::XGBoostPolicy::new()),
+            "mlp" => Box::new(mm::eviction::MlpPolicy::new()),
+            "cacheus" => Box::new(mm::eviction::CacheusSelector::ml_only()),
+            "cacheus_all5" => Box::new(mm::eviction::CacheusSelector::all_5()),
+            "first_candidate" => Box::new(mm::eviction::FirstCandidatePolicy),
+            _ => return -1,
+        };
+        mm::eviction::set_eviction_policy_for_pool(pool, boxed);
+        0
+    }
+}
+
+/// Get the policy name for a specific pool. #120.
+/// pool_id = 0 for weight, 1 for workspace.
+/// Writes into out_buf, returns bytes written (excl NUL).
+#[no_mangle]
+pub extern "C" fn rust_eviction_policy_name_pool(
+    pool_id: u8,
+    out_buf: *mut u8,
+    buf_len: usize,
+) -> usize {
+    #[cfg(feature = "ai_eviction")]
+    {
+        let pool = match pool_id {
+            0 => mm::eviction::PoolType::Weight,
+            1 => mm::eviction::PoolType::Workspace,
+            _ => {
+                if !out_buf.is_null() && buf_len > 0 {
+                    unsafe { *out_buf = 0; }
+                }
+                return 0;
+            }
+        };
+        let name = mm::eviction::get_eviction_policy_name_for_pool(pool);
+        if out_buf.is_null() || buf_len == 0 { return 0; }
+        let n = name.len().min(buf_len - 1);
+        unsafe {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), out_buf, n);
+            *out_buf.add(n) = 0;
+        }
+        n
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = pool_id;
+        if !out_buf.is_null() && buf_len > 0 {
+            unsafe { *out_buf = 0; }
+        }
+        0
+    }
+}
+
 /// Combined eviction-subsystem stats for the `eviction` shell command.
 /// Mirrors the layout used by `eviction_shell_stats` in slm_ffi.h.
 ///
@@ -1393,6 +1486,210 @@ pub extern "C" fn rust_eviction_get_active_inferences(model_id: u8) -> u32 {
     {
         let _ = model_id;
         0
+    }
+}
+
+/// Return the number of features in the eviction feature vector (27).
+#[no_mangle]
+pub extern "C" fn rust_eviction_feature_count() -> u32 {
+    #[cfg(feature = "ai_eviction")]
+    { mm::eviction::FEATURE_NAMES.len() as u32 }
+    #[cfg(not(feature = "ai_eviction"))]
+    { 0 }
+}
+
+/// Copy the name of feature `index` into `buf` (NUL-terminated).
+/// Returns bytes written (excl NUL), or 0 if index is out of range
+/// or ai_eviction is off.
+#[no_mangle]
+pub extern "C" fn rust_eviction_feature_name(
+    index: u32,
+    buf: *mut u8,
+    buf_len: usize,
+) -> usize {
+    #[cfg(feature = "ai_eviction")]
+    {
+        let names = mm::eviction::FEATURE_NAMES;
+        if (index as usize) >= names.len() || buf.is_null() || buf_len == 0 {
+            return 0;
+        }
+        let name = names[index as usize].as_bytes();
+        let n = name.len().min(buf_len - 1);
+        unsafe {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), buf, n);
+            *buf.add(n) = 0;
+        }
+        n
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    {
+        let _ = (index, buf, buf_len);
+        0
+    }
+}
+
+// =============================================================================
+// Workload replay — CACHEUS vs LRU fault-rate comparison (#117)
+// =============================================================================
+
+/// Result of running one policy through the workload.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RustEvictionCompareResult {
+    pub policy_name: [u8; 32],
+    pub faults: u32,
+    pub hits: u32,
+    pub total_accesses: u32,
+}
+
+/// Run a synthetic "single_inference" workload against every
+/// registered policy and report per-policy fault counts.
+///
+/// The workload simulates a cache of `cache_size` slots accessed by a
+/// trace of block ids. The trace has a working set larger than the
+/// cache so evictions are forced. Policies that adapt to recency /
+/// frequency patterns fault less.
+///
+/// Returns the number of policies compared (written into `out`).
+/// `out` must have room for at least 8 entries.
+///
+/// # Safety
+/// `out` must point to a writable array of `max_policies` entries.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_workload_compare(
+    out: *mut RustEvictionCompareResult,
+    max_policies: u32,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (out, max_policies); 0 }
+
+    #[cfg(feature = "ai_eviction")]
+    {
+        use alloc::boxed::Box;
+        use alloc::vec::Vec;
+        use mm::eviction::{self, EvictionPolicy, BlockMeta, PoolType};
+
+        if out.is_null() || max_policies == 0 { return -1; }
+
+        // Generate a synthetic trace: working set of 16 blocks accessed
+        // through a cache of 8 slots. Blocks 0-3 are "hot" (accessed
+        // 5x per cycle), 4-7 are "warm" (1x), 8-15 are "cold" (burst).
+        // Repeated over 10 cycles so adaptive policies have enough
+        // feedback history to learn the hot-set.
+        let mut trace_vec: Vec<u32> = Vec::with_capacity(400);
+        // Warm-up: fill the cache
+        for i in 0..8u32 { trace_vec.push(i); }
+        // 10 cycles of: hot-hot-hot-hot-hot → cold burst → hot re-access
+        for _cycle in 0..10 {
+            // Hot accesses (0-3 repeated)
+            for _ in 0..5 { for i in 0..4u32 { trace_vec.push(i); } }
+            // Warm accesses (4-7)
+            for i in 4..8u32 { trace_vec.push(i); }
+            // Cold burst (8-15 force evictions)
+            for i in 8..16u32 { trace_vec.push(i); }
+            // Hot re-access (these are faults if the policy evicted them)
+            for i in 0..4u32 { trace_vec.push(i); }
+        }
+        let trace = &trace_vec;
+        let cache_size: usize = 8;
+
+        // Policies to compare.
+        let policies: Vec<(&str, Box<dyn EvictionPolicy + Send>)> = alloc::vec![
+            ("lru", Box::new(eviction::LruPolicy::new()) as Box<dyn EvictionPolicy + Send>),
+            ("lfu", Box::new(eviction::LfuPolicy::new())),
+            ("slm", Box::new(eviction::SlmHeuristicPolicy::new())),
+            ("cacheus", Box::new(eviction::CacheusSelector::ml_only())),
+        ];
+
+        let mut written: i32 = 0;
+        for (name, mut policy) in policies {
+            if written >= max_policies as i32 { break; }
+
+            // Simulate a fixed-size cache.
+            let mut cache: Vec<Option<u32>> = alloc::vec![None; cache_size];
+            let mut access_times: Vec<u64> = alloc::vec![0; cache_size];
+            let mut access_counts: Vec<u32> = alloc::vec![0; cache_size];
+            let mut faults: u32 = 0;
+            let mut hits: u32 = 0;
+
+            for (step, &block_id) in trace.iter().enumerate() {
+                let now = step as u64;
+
+                // Check if block is in cache (hit).
+                let mut found = false;
+                for slot in 0..cache_size {
+                    if cache[slot] == Some(block_id) {
+                        access_times[slot] = now;
+                        access_counts[slot] += 1;
+                        hits += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if found { continue; }
+
+                // Miss — need to evict if cache is full.
+                let mut free_slot = None;
+                for slot in 0..cache_size {
+                    if cache[slot].is_none() {
+                        free_slot = Some(slot);
+                        break;
+                    }
+                }
+
+                let target_slot = if let Some(s) = free_slot {
+                    s
+                } else {
+                    // Build candidates from current cache contents.
+                    let candidates: Vec<BlockMeta> = (0..cache_size)
+                        .map(|i| BlockMeta {
+                            block_id: cache[i].unwrap_or(0),
+                            pool_type: PoolType::Weight,
+                            model_id: 0,
+                            layer_idx: 0,
+                            last_access_time: access_times[i],
+                            load_time: 0,
+                            access_count: access_counts[i],
+                            ref_count: 0,
+                            gpu_mapped: false,
+                            is_dirty: false,
+                            model_priority: 0,
+                        })
+                        .collect();
+                    let victim = policy.select_victim(&candidates);
+                    // Feedback: the evicted block was "bad" if it
+                    // appears in the near future of the trace.
+                    let evicted_id = candidates[victim].block_id;
+                    let future_window = 8usize;
+                    let next_start = step + 1;
+                    let next_end = (next_start + future_window).min(trace.len());
+                    let will_reuse = trace[next_start..next_end]
+                        .iter()
+                        .any(|&id| id == evicted_id);
+                    policy.update_feedback(evicted_id, will_reuse);
+                    victim
+                };
+
+                cache[target_slot] = Some(block_id);
+                access_times[target_slot] = now;
+                access_counts[target_slot] = 1;
+                faults += 1;
+            }
+
+            let mut result = RustEvictionCompareResult {
+                policy_name: [0; 32],
+                faults,
+                hits,
+                total_accesses: trace.len() as u32,
+            };
+            let name_bytes = name.as_bytes();
+            let n = name_bytes.len().min(31);
+            result.policy_name[..n].copy_from_slice(&name_bytes[..n]);
+
+            core::ptr::write(out.add(written as usize), result);
+            written += 1;
+        }
+        written
     }
 }
 
@@ -1665,6 +1962,70 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             true
         });
         eviction::reset_to_default();
+
+        puts(b"\n-- eviction: per-pool policy (#120) --\n\0");
+
+        // Default: both pools are LRU.
+        eviction::reset_to_default();
+        check!(b"per_pool_default_weight_is_lru\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Weight) == "LRU");
+        check!(b"per_pool_default_workspace_is_lru\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Workspace) == "LRU");
+
+        // Install FirstCandidate on workspace only — weight stays LRU.
+        eviction::set_eviction_policy_for_pool(
+            eviction::PoolType::Workspace,
+            Box::new(eviction::FirstCandidatePolicy));
+        check!(b"per_pool_weight_still_lru\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Weight) == "LRU");
+        check!(b"per_pool_workspace_is_first_candidate\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Workspace) == "FirstCandidate");
+
+        // select_victim with Weight candidates uses the weight policy.
+        let w_cands = [make_block(1), make_block(2)];
+        let w_pick = eviction::select_victim(&w_cands);
+        check!(b"per_pool_weight_select_works\0", w_pick.is_some());
+
+        // select_victim with Workspace candidates uses the workspace
+        // policy (FirstCandidate always picks index 0).
+        let ws_cands = [
+            eviction::BlockMeta {
+                block_id: 10, pool_type: eviction::PoolType::Workspace,
+                model_id: 0, layer_idx: 0, last_access_time: 100,
+                load_time: 0, access_count: 0, ref_count: 0,
+                gpu_mapped: false, is_dirty: false, model_priority: 0,
+            },
+            eviction::BlockMeta {
+                block_id: 11, pool_type: eviction::PoolType::Workspace,
+                model_id: 0, layer_idx: 0, last_access_time: 50,
+                load_time: 0, access_count: 0, ref_count: 0,
+                gpu_mapped: false, is_dirty: false, model_priority: 0,
+            },
+        ];
+        let ws_pick = eviction::select_victim(&ws_cands);
+        // FirstCandidate always returns 0 regardless of access time.
+        check!(b"per_pool_workspace_uses_own_policy\0",
+               ws_pick == Some(0));
+        // LRU on the same candidates would pick index 1 (older).
+        // Verify by switching workspace back to LRU and re-checking.
+        eviction::set_eviction_policy_for_pool(
+            eviction::PoolType::Workspace,
+            Box::new(eviction::LruPolicy::new()));
+        let ws_pick_lru = eviction::select_victim(&ws_cands);
+        check!(b"per_pool_workspace_lru_picks_older\0",
+               ws_pick_lru == Some(1));
+
+        // reset_to_default resets both pools.
+        eviction::reset_to_default();
+        check!(b"per_pool_reset_both_lru\0",
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Weight) == "LRU" &&
+               eviction::get_eviction_policy_name_for_pool(
+                   eviction::PoolType::Workspace) == "LRU");
 
         puts(b"\n-- eviction: per-policy counters (#115) --\n\0");
 
@@ -2207,6 +2568,52 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             ok
         };
         check!(b"extract_features_recency_rank_unique\0", ranks_distinct);
+
+        // #118: is_dirty (feature 8) must change from 0 to 1 when the
+        // block's is_dirty flag is set. This confirms the feature
+        // extractor reads the field and that set_dirty callers can
+        // influence eviction decisions.
+        {
+            let mut dirty_cand = ml_cands[0];
+            dirty_cand.is_dirty = false;
+            let clean_row = extract_features(&[dirty_cand])[0];
+            dirty_cand.is_dirty = true;
+            let dirty_row = extract_features(&[dirty_cand])[0];
+            check!(b"set_dirty_shifts_feature_8\0",
+                   clean_row[8] == 0.0 && dirty_row[8] == 1.0);
+            // eviction_cost (feature 14) should also increase when dirty.
+            check!(b"set_dirty_increases_eviction_cost\0",
+                   dirty_row[14] > clean_row[14]);
+        }
+
+        // #112: FEATURE_NAMES must have exactly 27 entries and the
+        // first/last names must match the documented layout.
+        {
+            check!(b"feature_names_count_is_27\0",
+                   mm::eviction::FEATURE_NAMES.len() == 27);
+            check!(b"feature_names_first_is_recency_rank\0",
+                   mm::eviction::FEATURE_NAMES[0] == "recency_rank");
+            check!(b"feature_names_last_is_req_block_priority\0",
+                   mm::eviction::FEATURE_NAMES[26] == "req_block_priority");
+        }
+
+        // #122: feature slot 11 (model_active_inferences) must be
+        // non-zero when the global table has entries. Slot 17
+        // (num_loaded_models) should reflect the model count.
+        {
+            mm::eviction::slm_heuristic::clear_active();
+            // With no active inferences, slot 11 should be 0.
+            let row0 = extract_features(&ml_cands)[0];
+            check!(b"feature_11_zero_when_no_active\0",
+                   row0[11] == 0.0);
+            // Bump model 0 active, re-extract. Slot 11 should change.
+            mm::eviction::slm_heuristic::set_active(
+                ml_cands[0].model_id, 3);
+            let row1 = extract_features(&ml_cands)[0];
+            check!(b"feature_11_nonzero_when_active\0",
+                   row1[11] > 0.0);
+            mm::eviction::slm_heuristic::clear_active();
+        }
 
         // XGBoostPolicy: select a victim and produce scores.
         {

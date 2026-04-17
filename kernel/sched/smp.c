@@ -370,16 +370,15 @@ void secondary_init(uint32_t logical_cpu_id)
     }
 #endif
 
-    /* SCHED-L2 follow-up: replace the inner volatile delay with a
-     * timer-driven wait (e.g. CNTPCT_EL0-based busy_wait_us) once such
-     * a helper exists and is confirmed safe to call before scheduler
-     * start on all platforms. Tracked as a GitHub enhancement issue. */
+    /* Poll scheduler_is_initialized with a timer-driven delay between
+     * retries (#94). timer_busy_wait_us uses CNTPCT_EL0, which is
+     * readable at any EL after timer_init() has run. */
     {
         int retry;
         for (retry = 0; retry < SCHED_INIT_MAX_RETRIES; retry++) {
             if (scheduler_is_initialized())
                 break;
-            for (volatile int d = 0; d < 100000; d++) {}
+            timer_busy_wait_us(100);
         }
         if (!scheduler_is_initialized()) {
 #if defined(PLATFORM_HAS_NC_MEMORY)
@@ -461,10 +460,8 @@ static int boot_secondary(uint32_t cpu)
         if (cpu_boot_flag[cpu]) {
             return PSCI_SUCCESS;
         }
-        /* Brief delay between checks (~1ms).
-         * SCHED-L2 follow-up: replace with timer-driven busy_wait_us once
-         * a portable helper exists. Tracked as a GitHub enhancement issue. */
-        for (volatile int d = 0; d < 100000; d++);
+        /* Brief delay between checks (~100us). #94. */
+        timer_busy_wait_us(100);
     }
 
     /* Boot flag may not be visible due to cache incoherency (Pi 5, Jetson).

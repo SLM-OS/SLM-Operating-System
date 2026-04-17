@@ -265,6 +265,10 @@ impl EvictionPolicy for ARCPolicy {
         }
     }
 
+    fn notify_eviction(&mut self, block_id: u32) {
+        ARCPolicy::notify_eviction(self, block_id);
+    }
+
     fn reset(&mut self) {
         self.t1.clear();
         self.t2.clear();

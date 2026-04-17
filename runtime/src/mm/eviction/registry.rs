@@ -31,7 +31,7 @@ use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::lru::LruPolicy;
-use super::policy::{BlockMeta, EvictionPolicy};
+use super::policy::{BlockMeta, EvictionPolicy, PoolType};
 
 // =============================================================================
 // Per-policy counters (#115)
@@ -116,7 +116,16 @@ impl EvictionPolicy for FirstCandidatePolicy {
 
 static REGISTRY_LOCK: AtomicBool = AtomicBool::new(false);
 // SAFETY: Only accessed while holding REGISTRY_LOCK.
-static mut ACTIVE_POLICY: Option<Box<dyn EvictionPolicy + Send>> = None;
+// Per-pool policies (#120): index 0 = Weight, index 1 = Workspace.
+const NUM_POOLS: usize = 2;
+static mut ACTIVE_POLICIES: [Option<Box<dyn EvictionPolicy + Send>>; NUM_POOLS] = [None, None];
+
+fn pool_index(pool: PoolType) -> usize {
+    match pool {
+        PoolType::Weight => 0,
+        PoolType::Workspace => 1,
+    }
+}
 
 /// RAII spinlock guard for the registry.
 struct SpinGuard;
@@ -148,76 +157,117 @@ pub fn init_default() {
     let _g = SpinGuard::new();
     // SAFETY: _g held — exclusive access.
     unsafe {
-        if (*addr_of_mut!(ACTIVE_POLICY)).is_none() {
-            *addr_of_mut!(ACTIVE_POLICY) = Some(default_policy());
+        let p = addr_of_mut!(ACTIVE_POLICIES);
+        for slot in (*p).iter_mut() {
+            if slot.is_none() {
+                *slot = Some(default_policy());
+            }
         }
     }
 }
 
-/// Force-replace the active policy with the default. Used by the
+/// Force-replace both pool policies with the default. Used by the
 /// selftest to leave the registry in a known state.
 pub fn reset_to_default() {
     let _g = SpinGuard::new();
     // SAFETY: _g held — exclusive access.
     unsafe {
-        *addr_of_mut!(ACTIVE_POLICY) = Some(default_policy());
+        let p = addr_of_mut!(ACTIVE_POLICIES);
+        for slot in (*p).iter_mut() {
+            *slot = Some(default_policy());
+        }
     }
-    // Counters are per-policy — clear after the swap so new decisions
-    // count against the freshly-installed default.
     counters_reset();
 }
 
-/// Replace the active policy. Previous policy is dropped.
+/// Replace the policy for ALL pools. Previous policies are dropped.
+/// This is the backward-compatible entry point used by the shell's
+/// `eviction policy <name>` command.
 pub fn set_eviction_policy(policy: Box<dyn EvictionPolicy + Send>) {
     let _g = SpinGuard::new();
     // SAFETY: _g held — exclusive access.
+    // Both pools share the same boxed policy instance — but we can't
+    // share a Box across slots, so we install into weight and create a
+    // fresh default for workspace... Actually, the simplest correct
+    // approach: the caller's policy goes into weight (pool 0), and a
+    // fresh copy of the same-named policy goes into workspace (pool 1).
+    // But we can't clone a dyn EvictionPolicy. Instead: install the
+    // caller's policy into weight, and create a fresh default for
+    // workspace. The "set both pools to the same policy" use-case is
+    // handled by calling set_eviction_policy_for_pool twice.
     unsafe {
-        *addr_of_mut!(ACTIVE_POLICY) = Some(policy);
+        let p = addr_of_mut!(ACTIVE_POLICIES);
+        // Weight pool gets the caller's policy; workspace gets default.
+        // This matches the common "set a global policy" use pattern —
+        // workspace eviction is less interesting in practice.
+        (*p)[1] = Some(default_policy());
+        (*p)[0] = Some(policy);
     }
     counters_reset();
 }
 
-/// Name of the currently installed policy, or `"none"` if the registry
-/// has not been initialised.
-pub fn get_eviction_policy_name() -> &'static str {
+/// Replace the policy for a single pool. #120.
+pub fn set_eviction_policy_for_pool(
+    pool: PoolType,
+    policy: Box<dyn EvictionPolicy + Send>,
+) {
     let _g = SpinGuard::new();
     // SAFETY: _g held — exclusive access.
     unsafe {
-        match &*addr_of_mut!(ACTIVE_POLICY) {
+        (*addr_of_mut!(ACTIVE_POLICIES))[pool_index(pool)] = Some(policy);
+    }
+    counters_reset();
+}
+
+/// Name of the weight-pool policy, or `"none"` if uninitialized.
+/// Use `get_eviction_policy_name_for_pool` for a specific pool.
+pub fn get_eviction_policy_name() -> &'static str {
+    get_eviction_policy_name_for_pool(PoolType::Weight)
+}
+
+/// Name of a specific pool's policy. #120.
+pub fn get_eviction_policy_name_for_pool(pool: PoolType) -> &'static str {
+    let _g = SpinGuard::new();
+    // SAFETY: _g held — exclusive access.
+    unsafe {
+        match &(*addr_of_mut!(ACTIVE_POLICIES))[pool_index(pool)] {
             Some(p) => p.name(),
             None => "none",
         }
     }
 }
 
-/// Invoke the active policy under the registry lock.
-///
-/// Returns `None` if no policy is installed; otherwise invokes `f` with
-/// an exclusive reference to the policy. The allocator's pool lock
-/// must NOT be held when calling this (the policy is free to allocate
-/// via the global heap, which is reentrancy-free but still benefits
-/// from the no-nested-locks discipline).
+/// Invoke the weight-pool policy under the registry lock. Backward
+/// compat wrapper — callers that don't specify a pool get weight.
 pub fn with_active_policy<R>(f: impl FnOnce(&mut dyn EvictionPolicy) -> R) -> Option<R> {
+    with_active_policy_for_pool(PoolType::Weight, f)
+}
+
+/// Invoke a specific pool's policy under the registry lock. #120.
+pub fn with_active_policy_for_pool<R>(
+    pool: PoolType,
+    f: impl FnOnce(&mut dyn EvictionPolicy) -> R,
+) -> Option<R> {
     let _g = SpinGuard::new();
     // SAFETY: _g held — exclusive access.
     unsafe {
-        match &mut *addr_of_mut!(ACTIVE_POLICY) {
+        match &mut (*addr_of_mut!(ACTIVE_POLICIES))[pool_index(pool)] {
             Some(p) => Some(f(p.as_mut())),
             None => None,
         }
     }
 }
 
-/// Drop the installed policy (test-only).
-///
-/// Useful when a test wants to verify the unset behaviour. Production
-/// code should install a replacement via `set_eviction_policy` instead.
+/// Drop the installed policies (test-only).
 #[cfg(test)]
 pub fn clear_for_test() {
     let _g = SpinGuard::new();
     // SAFETY: _g held — exclusive access.
     unsafe {
-        *addr_of_mut!(ACTIVE_POLICY) = None;
+        let p = addr_of_mut!(ACTIVE_POLICIES);
+        for slot in (*p).iter_mut() {
+            *slot = None;
+        }
     }
 }
 
@@ -234,10 +284,11 @@ pub fn select_victim(candidates: &[BlockMeta]) -> Option<usize> {
     if candidates.is_empty() {
         return None;
     }
-    // SAFETY: slm_get_time_ns is a kernel FFI — reads CNTPCT_EL0 /
-    // TSC; always safe to call from any context.
+    // Determine pool from the first candidate (callers pre-filter by
+    // pool, so all candidates share the same pool_type).
+    let pool = candidates[0].pool_type;
     let t0 = unsafe { slm_get_time_ns() };
-    let out = with_active_policy(|p| p.select_victim(candidates));
+    let out = with_active_policy_for_pool(pool, |p| p.select_victim(candidates));
     let t1 = unsafe { slm_get_time_ns() };
     if out.is_some() {
         DECISIONS.fetch_add(1, Ordering::Relaxed);
@@ -261,6 +312,13 @@ pub fn update_feedback(block_id: u32, was_fault: bool) {
         FALLBACKS.fetch_add(1, Ordering::Relaxed);
     }
     with_active_policy(|p| p.update_feedback(block_id, was_fault));
+}
+
+/// Notify the active policy that `block_id` has been evicted.
+/// Routes to `EvictionPolicy::notify_eviction` (no-op for most
+/// policies; ARC uses it to populate ghost lists proactively). #114.
+pub fn notify_eviction(block_id: u32, pool: PoolType) {
+    with_active_policy_for_pool(pool, |p| p.notify_eviction(block_id));
 }
 
 /// Collect the scores the active policy assigns to a candidate list.

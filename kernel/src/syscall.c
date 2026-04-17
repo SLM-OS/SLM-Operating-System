@@ -200,6 +200,28 @@ static int64_t sys_log_handler(struct trap_frame *frame)
     return 0;
 }
 
+/* SYS_TOUCH_BLOCK: Touch a model memory block (update LRU timestamp).
+ * x0 = block_index (uint16), x1 = pool_id (uint8), x2 = generation (uint8).
+ * Packed into a ModelHandle and forwarded to rust_model_touch.
+ * Returns 0 on success, -1 on invalid handle. #123. */
+static int64_t sys_touch_block_handler(struct trap_frame *frame)
+{
+    /* Reconstruct ModelHandle from individual fields passed in
+     * registers. User code cannot fabricate a valid handle without
+     * the generation — stale or forged handles are caught by the
+     * Rust side's generation check. */
+    typedef struct { uint16_t block_index; uint8_t pool_id;
+                     uint8_t generation; uint32_t _reserved; } Handle;
+    Handle h;
+    h.block_index = (uint16_t)frame->x0;
+    h.pool_id     = (uint8_t)frame->x1;
+    h.generation  = (uint8_t)frame->x2;
+    h._reserved   = 0;
+
+    extern int rust_model_touch(Handle handle);
+    return rust_model_touch(h);
+}
+
 /* ============================================================================
  * Dispatch Table
  * ============================================================================ */
@@ -213,7 +235,8 @@ static syscall_handler_t syscall_table[SYS_MAX] = {
     [SYS_RECV]  = sys_recv_handler,
     [SYS_INFER] = sys_infer_handler,
     [SYS_SLEEP] = sys_sleep_handler,
-    [SYS_LOG]   = sys_log_handler,
+    [SYS_LOG]         = sys_log_handler,
+    [SYS_TOUCH_BLOCK] = sys_touch_block_handler,
 };
 
 void syscall_dispatch(struct trap_frame *frame)

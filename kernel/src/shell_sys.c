@@ -1016,7 +1016,7 @@ static void s3_steal_work_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|deadline|isolate|shared|smp|stealing|matmul|conv|quant|gpu|stats|all>\r\n");
+        uart_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -1034,6 +1034,35 @@ int cmd_bench(int argc, char *argv[])
         uart_puts("IPC Latency Benchmark\r\n");
         uart_puts("=====================\r\n");
         bench_ipc_latency();
+    } else if (strcmp(argv[1], "eviction") == 0) {
+        uart_puts("Eviction Policy Fault-Rate Comparison (#117)\r\n");
+        uart_puts("=============================================\r\n");
+        uart_puts("Workload: single_inference (8-slot cache, 16-block WS, 10 cycles)\r\n\r\n");
+        static RustEvictionCompareResult results[8];
+        int32_t n = rust_eviction_workload_compare(results, 8);
+        if (n <= 0) {
+            uart_puts("  (AI eviction disabled or error)\r\n");
+        } else {
+            uart_puts("Policy           Faults  Hits   Total   Fault rate\r\n");
+            uart_puts("---------------  ------  -----  ------  ----------\r\n");
+            uint32_t best_faults = UINT32_MAX;
+            const char *best_name = NULL;
+            for (int32_t i = 0; i < n; i++) {
+                uint32_t f = results[i].faults;
+                uint32_t h = results[i].hits;
+                uint32_t t = results[i].total_accesses;
+                uint32_t pct = t > 0 ? (f * 100 / t) : 0;
+                uart_printf("%-15s  %6u  %5u  %6u  %8u%%\r\n",
+                            results[i].policy_name, f, h, t, pct);
+                if (f < best_faults) {
+                    best_faults = f;
+                    best_name = (const char *)results[i].policy_name;
+                }
+            }
+            if (best_name) {
+                uart_printf("\r\nBest: %s (%u faults)\r\n", best_name, best_faults);
+            }
+        }
     } else if (strcmp(argv[1], "stats") == 0) {
         uart_puts("Scheduler Statistics\r\n");
         uart_puts("====================\r\n");
@@ -2560,9 +2589,43 @@ int cmd_eviction(int argc, char *argv[])
 
     if (strcmp(argv[1], "policy") == 0) {
         if (argc < 3) {
+            /* Show per-pool policy names (#120). */
+            char wp[32] = {0}, sp[32] = {0};
+            rust_eviction_policy_name_pool(0, (uint8_t *)wp, sizeof(wp));
+            rust_eviction_policy_name_pool(1, (uint8_t *)sp, sizeof(sp));
+            uart_printf("Weight pool policy:    %s\r\n", wp[0] ? wp : "(none)");
+            uart_printf("Workspace pool policy: %s\r\n", sp[0] ? sp : "(none)");
+            uart_puts("\r\n");
             eviction_print_policies(name_buf);
+            uart_puts("\r\nUsage:\r\n");
+            uart_puts("  eviction policy <name>           — set both pools\r\n");
+            uart_puts("  eviction policy weight <name>    — set weight pool only\r\n");
+            uart_puts("  eviction policy workspace <name> — set workspace pool only\r\n");
             return 0;
         }
+
+        /* Per-pool variant: `eviction policy weight <name>` or
+         * `eviction policy workspace <name>` (#120). */
+        if (argc >= 4 &&
+            (strcmp(argv[2], "weight") == 0 || strcmp(argv[2], "workspace") == 0)) {
+            uint8_t pool_id = (strcmp(argv[2], "weight") == 0) ? 0 : 1;
+            int rc = rust_eviction_policy_set_pool(pool_id,
+                                                    (const uint8_t *)argv[3]);
+            if (rc == -2) {
+                uart_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
+                return 1;
+            }
+            if (rc != 0) {
+                uart_printf("Unknown policy: '%s'\r\n", argv[3]);
+                return 1;
+            }
+            char buf[32] = {0};
+            rust_eviction_policy_name_pool(pool_id, (uint8_t *)buf, sizeof(buf));
+            uart_printf("Set %s pool policy: %s\r\n", argv[2], buf);
+            return 0;
+        }
+
+        /* Global variant: `eviction policy <name>` (sets both pools). */
         int rc = rust_eviction_policy_set((const uint8_t *)argv[2]);
         if (rc == -2) {
             uart_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
@@ -2574,7 +2637,7 @@ int cmd_eviction(int argc, char *argv[])
             return 1;
         }
         rust_eviction_policy_name((uint8_t *)name_buf, sizeof(name_buf));
-        uart_printf("Switched to policy: %s\r\n", name_buf);
+        uart_printf("Switched weight pool to: %s (workspace reset to LRU)\r\n", name_buf);
         return 0;
     }
 
@@ -2761,7 +2824,25 @@ int cmd_eviction(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: eviction [policy [<name>] | stats | "
+    if (strcmp(argv[1], "features") == 0) {
+        uint32_t count = rust_eviction_feature_count();
+        if (count == 0) {
+            uart_puts("AI eviction disabled — no features available.\r\n");
+            return 0;
+        }
+        uart_printf("Eviction feature vector (%u features):\r\n\r\n", count);
+        uart_puts("  Index  Name\r\n");
+        uart_puts("  -----  ----------------------------\r\n");
+        for (uint32_t i = 0; i < count; i++) {
+            char fbuf[48] = {0};
+            rust_eviction_feature_name(i, (uint8_t *)fbuf, sizeof(fbuf));
+            const char *group = (i < 15) ? "per-block" : "global";
+            uart_printf("  %5u  %-28s  (%s)\r\n", i, fbuf, group);
+        }
+        return 0;
+    }
+
+    uart_puts("Usage: eviction [policy [<name>] | stats | features | "
               "trajectory [N] | demo | pressure]\r\n");
     return 1;
 }

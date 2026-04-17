@@ -100,4 +100,33 @@ void sleep_us(uint64_t us);
  */
 void timer_wake_sleepers(void);
 
+/*
+ * Busy-wait for a given number of microseconds using the hardware
+ * counter (CNTPCT_EL0 on ARM64, TSC/PIT on x86-64).
+ *
+ * Safe to call before the scheduler starts — requires only that
+ * timer_init() has run (so the counter is accessible and the
+ * frequency is known). Does NOT yield; the calling CPU spins.
+ *
+ * Use for short pre-scheduler delays (e.g. boot-flag polling) where
+ * sleep_us / sleep_ms are unavailable because the scheduler hasn't
+ * been started yet.
+ *
+ * @us: Duration in microseconds (0 returns immediately)
+ */
+static inline void timer_busy_wait_us(uint64_t us)
+{
+    if (us == 0) return;
+    uint64_t freq = timer_get_frequency();
+    if (freq == 0) return;
+    uint64_t target = timer_get_count() + (us * freq + 999999ULL) / 1000000ULL;
+    while (timer_get_count() < target) {
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("pause");
+#else
+        __asm__ volatile("yield");
+#endif
+    }
+}
+
 #endif /* TIMER_H */

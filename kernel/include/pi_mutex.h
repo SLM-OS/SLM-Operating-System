@@ -28,6 +28,8 @@ struct task;
 typedef struct {
     spinlock_t guard;           /* Protects mutex state */
     struct task *owner;         /* Current owner (NULL if unlocked) */
+    struct task *wait_head;     /* Head of blocked-waiter FIFO (#93) */
+    struct task *wait_tail;     /* Tail of blocked-waiter FIFO */
     uint8_t owner_original_pri; /* Owner's priority before inheritance */
     volatile uint8_t locked;    /* 1 if locked, 0 if unlocked */
 } pi_mutex_t;
@@ -35,6 +37,8 @@ typedef struct {
 #define PI_MUTEX_INIT { \
     .guard = SPINLOCK_INIT, \
     .owner = NULL, \
+    .wait_head = NULL, \
+    .wait_tail = NULL, \
     .owner_original_pri = 0, \
     .locked = 0 \
 }

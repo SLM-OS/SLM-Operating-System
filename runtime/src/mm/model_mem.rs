@@ -774,6 +774,20 @@ fn evict_and_retry(pool_id: u8) -> Result<ModelHandle, AllocError> {
         }
     }
 
+    // #114: inform the active policy that this block was evicted so
+    // ARC can populate its ghost lists proactively. Called outside the
+    // pool lock — the registry lock is independent. The pool type is
+    // known from pool_id; map it here so the registry dispatches to
+    // the correct per-pool policy.
+    {
+        let pool_type = match pool_id {
+            POOL_WEIGHT => eviction::PoolType::Weight,
+            POOL_WORKSPACE => eviction::PoolType::Workspace,
+            _ => eviction::PoolType::Weight,
+        };
+        eviction::notify_eviction(victim.block_id, pool_type);
+    }
+
     // Retry allocation. If this still fails, the pool is genuinely
     // broken — return whatever error the retry produces.
     let _g = SpinGuard::new();

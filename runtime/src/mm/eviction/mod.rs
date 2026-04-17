@@ -36,15 +36,18 @@ pub mod tracker;
 pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType,
     TrajectoryEntry, MAX_EXPERTS};
 pub use registry::{
-    get_eviction_policy_name, policy_counters, reset_to_default, score,
-    select_victim, set_eviction_policy, update_feedback, with_active_policy,
+    get_eviction_policy_name, get_eviction_policy_name_for_pool,
+    policy_counters, reset_to_default, score,
+    notify_eviction, select_victim, set_eviction_policy,
+    set_eviction_policy_for_pool,
+    update_feedback, with_active_policy, with_active_policy_for_pool,
     FirstCandidatePolicy, PolicyCounters,
 };
 pub use lru::LruPolicy;
 pub use lfu::LfuPolicy;
 pub use slm_heuristic::SlmHeuristicPolicy;
 pub use arc::{ARCPolicy, ARC_DEFAULT_GHOST_SIZE};
-pub use features::{extract_features, AI_HORIZON_NS};
+pub use features::{extract_features, AI_HORIZON_NS, FEATURE_NAMES};
 pub use xgboost::XGBoostPolicy;
 pub use mlp::MlpPolicy;
 pub use cacheus::{CacheusSelector, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW};

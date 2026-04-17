@@ -289,7 +289,32 @@ static void test_syscall_numbers_contiguous(void)
     TEST_ASSERT_EQUAL_INT(4, SYS_INFER);
     TEST_ASSERT_EQUAL_INT(5, SYS_SLEEP);
     TEST_ASSERT_EQUAL_INT(6, SYS_LOG);
-    TEST_ASSERT_EQUAL_INT(7, SYS_MAX);
+    TEST_ASSERT_EQUAL_INT(7, SYS_TOUCH_BLOCK);
+    TEST_ASSERT_EQUAL_INT(8, SYS_MAX);
+}
+
+/* ============================================================================
+ * SYS_TOUCH_BLOCK Tests (#123)
+ * ============================================================================ */
+
+/*
+ * Test: SYS_TOUCH_BLOCK with an invalid handle returns -1.
+ * Uses a fabricated trap_frame with block_index=0xFFFF (the null
+ * sentinel) to verify the handler rejects bad handles.
+ */
+static void test_syscall_touch_block_invalid_handle(void)
+{
+    struct trap_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.x8 = SYS_TOUCH_BLOCK;
+    frame.x0 = 0xFFFF;  /* null block_index sentinel */
+    frame.x1 = 0xFF;    /* null pool_id sentinel */
+    frame.x2 = 0;       /* generation */
+
+    syscall_dispatch(&frame);
+
+    /* rust_model_touch rejects the null handle → -1 */
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)frame.x0);
 }
 
 /* ============================================================================
@@ -339,6 +364,9 @@ int test_suite_syscall(void)
     RUN_TEST(test_syscall_send_zero_len);
     RUN_TEST(test_syscall_send_topic_no_nul);
     RUN_TEST(test_syscall_recv_no_message);
+
+    /* SYS_TOUCH_BLOCK (#123) */
+    RUN_TEST(test_syscall_touch_block_invalid_handle);
 
     /* Syscall number constants */
     RUN_TEST(test_syscall_numbers_contiguous);

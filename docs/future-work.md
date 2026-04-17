@@ -164,10 +164,10 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 - Also eliminates the need for `DAIF`-aware timer preemption to make progress on contended mutexes
 - Blocked by timer-driven wakeup on secondary CPUs on Pi 5 (see "Secondary CPU Timer Preemption" above); once that lands, the sleep queue is a straightforward addition
 
-### Timer-Driven Busy-Wait Helper (small)
-- Add `timer_busy_wait_us(us)` using `CNTPCT_EL0` (always advances regardless of IRQ state)
-- Replace the hand-rolled `for (volatile int d = 0; d < N; d++)` delay loops in `kernel/sched/smp.c` (secondary-CPU scheduler-init poll, boot-flag poll)
-- Portable across QEMU / Pi 5 / Jetson; required for SCHED-L2 cleanup from the 2026-04-12 code review
+### ✅ Timer-Driven Busy-Wait Helper (small) — Done (#94)
+- `timer_busy_wait_us(us)` added as inline in `kernel/include/timer.h` — uses CNTPCT_EL0 (ARM64) / TSC (x86-64)
+- Both volatile delay loops in `kernel/sched/smp.c` replaced; `git grep "for (volatile int d" kernel/sched/` returns no hits
+- Portable across QEMU / Pi 5 / Jetson / x86-64
 
 ---
 
