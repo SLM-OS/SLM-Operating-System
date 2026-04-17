@@ -3615,3 +3615,52 @@ int cmd_timdiag(int argc, char *argv[])
 }
 
 #endif /* !PLATFORM_X86_64 */
+
+#if defined(PLATFORM_RASPI5) && defined(ENABLE_NETWORKING)
+
+#include "macb.h"
+
+/*
+ * MACB IRQ delivery diagnostic — answers "does RP1 MSIX_CFG fire on
+ * Cadence MACB peripheral assertion, or does it hit the same blocker
+ * that UART RX ran into?" Prints irq_count (bumped by macb_irq_handler),
+ * the last MACB_ISR, GIC registration state, and live MIP0 MSIX_CFG
+ * for vector 6 (ETH).
+ */
+int cmd_macbdiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== MACB IRQ Diagnostic ===\r\n");
+
+    uart_printf("  GIC handler registered: %s\r\n",
+                macb_irq_is_registered() ? "YES" : "NO");
+    uart_printf("  IRQ count:              %u\r\n",
+                macb_get_irq_count());
+    uart_printf("  Last MACB_ISR observed: 0x%08x\r\n",
+                macb_get_last_isr());
+
+    /* Live MIP0 state for RP1 vector 6 (ETH) */
+    volatile uint32_t *msix_cfg =
+        (volatile uint32_t *)(RP1_INTC_BASE + RP1_MSIX_CFG(RP1_INT_ETH));
+    uint32_t cfg = *msix_cfg;
+    uart_printf("  MIP0 MSIX_CFG[vec %u]:   0x%08x",
+                (unsigned)RP1_INT_ETH, cfg);
+    if (cfg & MSIX_CFG_ENABLE)   uart_puts(" ENABLE");
+    if (cfg & MSIX_CFG_IACK_EN)  uart_puts(" IACK_EN");
+    if (cfg & MSIX_CFG_IACK)     uart_puts(" IACK");
+    uart_puts("\r\n");
+
+    volatile uint32_t *intstatl =
+        (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_INTSTATL);
+    uint32_t stat = *intstatl;
+    uart_printf("  MIP0 INTSTATL (0-31):   0x%08x\r\n", stat);
+    uart_printf("    ETH vec %u asserted:    %s\r\n",
+                (unsigned)RP1_INT_ETH,
+                (stat & (1u << RP1_INT_ETH)) ? "YES" : "no");
+
+    uart_puts("\r\n=== End Diagnostic ===\r\n");
+    return 0;
+}
+
+#endif /* PLATFORM_RASPI5 && ENABLE_NETWORKING */
