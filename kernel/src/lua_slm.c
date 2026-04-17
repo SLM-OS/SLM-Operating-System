@@ -473,6 +473,26 @@ static int l_model_unpin(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.model_preload(name) - Preload a model in a background task (#64)
+ * Currently only "mnist" is supported for async preload.
+ * Returns 0 on success (preload started), -1 on error.
+ */
+static int l_model_preload(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_checkstring(L, 1);
+
+    /* Delegate to shell_execute which drives the preload_task_entry
+     * background task. This reuses the shell's preload infrastructure
+     * without duplicating the task-spawn logic. */
+    char cmd[64];
+    extern int uart_snprintf(char *buf, size_t size, const char *fmt, ...);
+    uart_snprintf(cmd, sizeof(cmd), "model preload %s", name);
+    int rc = shell_execute(cmd);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
 /* ============================================================================
  * Message Router Bindings
  * ============================================================================ */
@@ -1825,6 +1845,7 @@ static const luaL_Reg slm_lib[] = {
     {"model_infer", l_model_infer},
     {"model_load_mnist", l_model_load_mnist},
     {"model_pin", l_model_pin},
+    {"model_preload", l_model_preload},
     {"model_unpin", l_model_unpin},
     /* Message routing */
     {"msg_publish", l_msg_publish},
