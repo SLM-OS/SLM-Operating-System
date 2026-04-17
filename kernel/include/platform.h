@@ -371,9 +371,13 @@
 #define RP1_ETH_CFG_BASE    0x1F00104000UL
 
 /* RP1 clock controller, at RP1_BAR + 0x18000 per rp1.dtsi. Stage 2
- * of the MACB driver will write CLK_ETH_CTRL / CLK_ETH_TSU_CTRL
- * here to enable the Ethernet clocks. */
-#define RP1_CLOCKS_BASE     0x1F00018000UL
+ * of the MACB driver writes CLK_ETH_CTRL / CLK_ETH_TSU_CTRL here to
+ * enable the Ethernet clocks. Offsets from Linux drivers/clk/clk-rp1.c
+ * (cached at docs/reference/linux-rpi-clk-rp1.c). */
+#define RP1_CLOCKS_BASE         0x1F00018000UL
+#define RP1_CLK_ETH_CTRL        0x00064     /* 125 MHz TX clock */
+#define RP1_CLK_ETH_TSU_CTRL    0x00134     /*  50 MHz timestamp unit clock */
+#define RP1_CLK_CTRL_ENABLE     (1u << 11)
 
 /* MACB interrupt — GIC IRQ 166 via MIP0 vector 6 → GIC SPI 134 */
 #define MACB_IRQ            (32 + MIP0_BASE_SPI + RP1_INT_ETH)
