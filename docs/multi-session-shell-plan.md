@@ -1,11 +1,12 @@
-# Multi-Session Shell Plan (Phases 1 + 2)
+# Multi-Session Shell Plan (Phases 1 + 2 + 3)
 
 Plan for bringing remote shell access to SLM-OS via TCP, with telnet
-as the initial protocol layer. This is foundational work for future
-SSH support (Phase 3, tracked in #199) and for multi-user operation.
+as the initial protocol layer and a proper daemon control surface
+(`telnetd`) on top. This is foundational work for future SSH support
+(Phase 4, tracked in #199) and for multi-user operation.
 
 **Status:** Planning
-**Last updated:** 15 April 2026
+**Last updated:** 17 April 2026
 
 ---
 
@@ -13,6 +14,8 @@ SSH support (Phase 3, tracked in #199) and for multi-user operation.
 
 - Allow users to open a shell session over TCP from a host machine
 - Support multiple concurrent shell sessions on a single SLM-OS instance
+- Ship as a long-running task (`telnetd`) that can be started, stopped,
+  and configured at runtime, and optionally auto-started at boot
 - Build an architecture that accommodates future SSH (#199) and
   multi-user work without rewrites
 - No hardware dependencies — fully testable in QEMU
@@ -426,6 +429,124 @@ telnet localhost 2323
 
 ---
 
+## Phase 3: Startup & Runtime Control
+
+Goal: the telnet server behaves like a proper daemon — `telnetd` can be
+started and stopped from the shell, configured via a VFS file, and
+optionally auto-started at boot.
+
+This work is small (~2 days) and can be interleaved with Phase 1 or
+Phase 2 rather than sequenced strictly after. It is separated here
+because the scope is "making the server operator-controllable" rather
+than "making it work."
+
+### 3.1 Compile-Time Gating
+
+Supersedes the `NET_TCP_SHELL` flag from §1.8 once Phase 2 lands:
+
+- `NET_TELNETD=ON` — builds the telnetd sources into the kernel.
+  Default ON for QEMU and x86-64; OFF for Pi 5 / Jetson until SSH
+  (#199) lands, since those run on untrusted networks.
+- `NET_TELNETD=OFF` — sources not compiled in; runtime control
+  commands print "telnetd not built in" and return an error.
+
+Separate flag `NET_TELNETD_AUTOSTART` (default OFF) controls whether
+the boot path starts the daemon by default. This lets a build include
+the feature without silently opening a port.
+
+### 3.2 Boot-Time Auto-Start
+
+Hook point: the boot startup path that spawns the UART shell task
+(currently in `kernel/src/demo_init.c` / `kernel/src/main.c`). After
+lwIP + DHCP (#197) come up, the boot path consults the auto-start
+configuration and spawns `tcp_shell_listener_task` if enabled.
+
+Auto-start config hierarchy (first match wins):
+
+1. **`/etc/telnetd.conf` in VFS** — if present, parse it (§3.5). A
+   missing file is not an error.
+2. **Lua init script** — if `/boot/init.lua` exists and calls
+   `slm.telnetd.start(...)`, that wins.
+3. **Compile-time default** — `NET_TELNETD_AUTOSTART`.
+
+### 3.3 Runtime Control (Shell)
+
+New shell commands in `kernel/src/shell_telnetd.c`:
+
+| Command | Effect |
+|---|---|
+| `telnetd start [port] [bind]` | Launch listener task; default port 2323, bind 127.0.0.1 |
+| `telnetd stop` | Set shutdown flag, close listen socket, drain sessions |
+| `telnetd status` | Print daemon state, port, bind, session count, uptime |
+| `telnetd sessions` | List active sessions (id, peer, connected_at, current command) |
+| `telnetd kick <id>` | Force-disconnect a session (cleans up per §1.4) |
+
+All mutating subcommands annotated `.mutates = true` so the shell
+dispatcher serializes them (§1.6).
+
+### 3.4 Runtime Control (Lua)
+
+Lua bindings (new, in `kernel/src/lua_slm.c`):
+
+- `slm.telnetd.start(port, bind) -> bool, err`
+- `slm.telnetd.stop() -> bool`
+- `slm.telnetd.status() -> { port, bind, session_count, uptime }`
+- `slm.telnetd.sessions() -> array of session tables`
+- `slm.telnetd.kick(session_id) -> bool`
+
+This is what makes `/boot/init.lua`-driven startup work without
+forcing the init path through the shell parser.
+
+### 3.5 Config File Format
+
+`/etc/telnetd.conf` — flat `key=value` per line. Keep the parser under
+~100 lines of C. Intentionally not TOML/JSON: the project has no
+parser for those and doesn't need one for five keys.
+
+```
+enabled=true
+port=2323
+bind=0.0.0.0
+max_sessions=4
+idle_timeout_sec=600
+```
+
+Unknown keys: log a warning and ignore. Malformed lines: log and
+continue. Parser is called once during boot — no hot-reload initially.
+
+### 3.6 Observability
+
+Register the daemon with the component runtime so `top`, `ps`, and
+`component list` see it:
+
+- `name=telnetd`
+- `state=running | stopped | starting | draining`
+- `stats=port, bind, sessions_active, sessions_total, bytes_rx, bytes_tx, start_time`
+
+This aligns with the demo-readiness observability work (#191, #194).
+
+### 3.7 Phase 3 Deliverable
+
+- `telnetd start` / `telnetd stop` / `telnetd status` work from the shell
+- `/etc/telnetd.conf` controls boot-time behavior
+- Daemon visible in `component list` and (when #191 lands) `top`
+- Lua scripts can start/stop the daemon and enumerate sessions
+- All of Phase 1 + 2 regression tests continue to pass
+
+### Effort Summary
+
+| Piece | Effort |
+|---|---|
+| Shell commands (`telnetd start/stop/status/...`) | 0.5 day |
+| Config file parser | 0.5 day |
+| Boot hook + auto-start plumbing | 0.5 day |
+| Lua bindings | 0.5 day |
+| **Phase 3 total** | **~2 days** |
+
+**Phases 1 + 2 + 3 combined: ~10-13 days.**
+
+---
+
 ## Key Files
 
 ### Existing (to be modified)
@@ -446,7 +567,10 @@ telnet localhost 2323
 - `kernel/src/shell_session.c` — Session pool + lifecycle
 - `kernel/src/tcp_shell_server.c` — Listener task
 - `kernel/src/telnet.c` (Phase 2) — IAC state machine
+- `kernel/src/shell_telnetd.c` (Phase 3) — `telnetd` shell commands
+- `kernel/src/telnetd_config.c` (Phase 3) — `/etc/telnetd.conf` parser + boot hook
 - `kernel/tests/test_shell_session.c` — Session unit tests
+- `kernel/tests/test_telnetd_config.c` (Phase 3) — Config parser tests
 
 ---
 
@@ -457,10 +581,12 @@ telnet localhost 2323
 | Before Phase 1 | UART console only |
 | Phase 1 complete (raw TCP) | "Connect from my laptop" demo works with `nc` — crude but impressive |
 | Phase 2 complete (telnet) | Polished: `telnet` client works cleanly, supports `top` with proper sizing |
-| Phase 3 complete (SSH, #199) | Production-quality: `ssh` from any laptop, encrypted, authenticated |
+| Phase 3 complete (daemon control) | `telnetd start/stop`, `/etc/telnetd.conf`, auto-start at boot |
+| Phase 4 complete (SSH, #199) | Production-quality: `ssh` from any laptop, encrypted, authenticated |
 
-Each phase is independently demo-able. Stopping after Phase 2 yields a
-real, working multi-session shell suitable for lab use.
+Each phase is independently demo-able. Stopping after Phase 3 yields a
+real, working multi-session shell suitable for lab use, configurable
+and controllable like a proper service.
 
 ---
 
