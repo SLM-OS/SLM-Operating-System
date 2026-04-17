@@ -2,6 +2,36 @@
  * gpu-channel-helper.c — Create an nvgpu channel on Jetson and write
  * the handoff metadata for SLM-OS to inherit after kexec.
  *
+ * ============================================================
+ *   STATUS: BLOCKED (2026-04-17)
+ * ============================================================
+ *
+ * This helper compiles but cannot complete on L4T r36.4.7. The
+ * first ioctl (NVGPU_GPU_IOCTL_ALLOC_AS) fails with EINVAL on
+ * both /dev/nvhost-ctrl-gpu and /dev/nvgpu/igpu0/ctrl, with both
+ * big_page_size=0 and big_page_size=0x10000. /dev/nvhost-as-gpu
+ * also returns EINVAL on open().
+ *
+ * CUDA successfully creates channels (see ftrace output with
+ * `echo 1 > /sys/kernel/debug/tracing/events/gk20a/enable`), so
+ * the ioctl path IS functional — our invocation is missing
+ * something nvgpu requires. Diagnosis requires either:
+ *
+ *   1. The L4T nvgpu source code (only headers are on the Jetson;
+ *      the actual ioctl handlers are in the out-of-tree kernel
+ *      module which Jetson ships only as binary).
+ *   2. strace on a CUDA program to capture the exact ioctl
+ *      sequence and flags CUDA uses. strace isn't on the Jetson
+ *      by default and installing it may require apt access.
+ *   3. L4T documentation or NVIDIA developer forums for the
+ *      exact sequence (nvgpu UAPI isn't publicly documented).
+ *
+ * The SLM-OS side (handoff reader in ga10b_bringup.c Phase 6+7,
+ * `peek` shell command, --no-gpu-suspend kexec) is complete and
+ * ready. This helper is committed as documented future work.
+ *
+ * ============================================================
+ *
  * Usage: sudo ./gpu-channel-helper
  *
  * This program:
@@ -59,7 +89,8 @@ static int xopen(const char *path, int flags)
 static void xioctl(int fd, unsigned long req, void *arg, const char *name)
 {
     if (ioctl(fd, req, arg) < 0) {
-        fprintf(stderr, "%s: %s\n", name, strerror(errno));
+        fprintf(stderr, "%s: %s (errno=%d, ioctl=0x%lx, fd=%d)\n",
+                name, strerror(errno), errno, req, fd);
         exit(1);
     }
 }
@@ -110,35 +141,41 @@ static uint64_t virt_to_phys(void *vaddr)
 
 int main(void)
 {
+    setbuf(stdout, NULL);  /* unbuffered output for kexec debugging */
     printf("[gpu-helper] Starting channel creation...\n");
 
     /* Open nvmap for buffer allocation. */
     int nvmap_fd = xopen("/dev/nvmap", O_RDWR);
 
-    /* Open GPU ctrl device. */
-    int ctrl_fd = xopen("/dev/nvhost-ctrl-gpu", O_RDWR);
+    /* Open GPU ctrl device. Try new path first, fall back to legacy. */
+    int ctrl_fd = open("/dev/nvgpu/igpu0/ctrl", O_RDWR);
+    if (ctrl_fd < 0)
+        ctrl_fd = xopen("/dev/nvhost-ctrl-gpu", O_RDWR);
+    printf("[gpu-helper] ctrl_fd=%d\n", ctrl_fd);
 
-    /* Allocate address space. */
-    struct nvgpu_alloc_as_args as_args = {
-        .big_page_size = 0x10000,  /* 64 KB big pages */
-    };
+    /* Allocate address space. Must zero-init — reserved and padding
+     * fields must be zero per the ioctl contract. */
+    struct nvgpu_alloc_as_args as_args;
+    memset(&as_args, 0, sizeof(as_args));
+    as_args.big_page_size = 0;  /* 0 = use default page size */
     xioctl(ctrl_fd, NVGPU_GPU_IOCTL_ALLOC_AS, &as_args, "ALLOC_AS");
     int as_fd = as_args.as_fd;
     printf("[gpu-helper] AS fd=%d\n", as_fd);
 
     /* Open TSG. */
-    struct nvgpu_gpu_open_tsg_args tsg_args = { 0 };
+    struct nvgpu_gpu_open_tsg_args tsg_args;
+    memset(&tsg_args, 0, sizeof(tsg_args));
     xioctl(ctrl_fd, NVGPU_GPU_IOCTL_OPEN_TSG, &tsg_args, "OPEN_TSG");
     int tsg_fd = tsg_args.tsg_fd;
     printf("[gpu-helper] TSG fd=%d\n", tsg_fd);
 
-    /* Open channel. */
-    struct nvgpu_gpu_open_channel_args ch_args = {
-        .runlist_id = -1,  /* default: GR runlist */
-    };
+    /* Open channel. runlist_id is in the .in sub-struct. */
+    struct nvgpu_gpu_open_channel_args ch_args;
+    memset(&ch_args, 0, sizeof(ch_args));
+    ch_args.in.runlist_id = -1;  /* default: GR runlist */
     xioctl(ctrl_fd, NVGPU_GPU_IOCTL_OPEN_CHANNEL, &ch_args,
            "OPEN_CHANNEL");
-    int ch_fd = ch_args.channel_fd;
+    int ch_fd = ch_args.out.channel_fd;
     printf("[gpu-helper] Channel fd=%d\n", ch_fd);
 
     /* Bind channel to AS. */
