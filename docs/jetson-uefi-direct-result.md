@@ -264,6 +264,100 @@ So the right fix is not RMW — it's one of:
 
 (b) or (c) is the operative next step.
 
+**2026-04-17 — (b) landed as Path-2 P3.** Implementation lives in:
+
+- `kernel/arch/arm64/efi_stub.c`: `efi_disable_mmu` is now
+  E2H-aware. At runtime it reads `CurrentEL` + `HCR_EL2.E2H` and
+  branches:
+  - EL2 with `E2H=0` (UEFI-direct on Jetson v36.4.7) →
+    `msr sctlr_el2` + `tlbi alle2`. This is the arm that was
+    missing pre-P3; with E2H=0, `SCTLR_EL1` is a separate
+    (dormant) register and the old code was writing it instead
+    of the active EL2 MMU control.
+  - EL2 with `E2H=1` (kexec-from-Linux) or EL1 → `msr sctlr_el1`
+    + `tlbi vmalle1`. Under VHE, `SCTLR_EL1` is aliased to
+    `SCTLR_EL2`, so the EL1-style write reaches the right
+    register. Kexec path is unchanged in behavior.
+- `kernel/arch/arm64/boot.S`: the Jetson EL2 block's
+  `msr hcr_el2, x10` is now RMW — `mrs` / `orr with (E2H|RW|TGE)`
+  / `msr`. Preserves whatever UEFI had set (API, APK, HCD, etc.)
+  and only flips bits we depend on. This is safe now because
+  `efi_disable_mmu` has actually turned off the MMU by the time
+  this runs (pre-P3, MMU stayed on because of the dormant-EL1
+  write), so flipping E2H 0→1 doesn't tear down an active
+  translation regime.
+
+This resolves the §5c silent hang. §5d (UARTC MMIO) becomes
+testable independently now that the MMU is genuinely off before
+the UARTC writes.
+
+**2026-04-17 P3 hardware verification result:** P3 was deployed to
+jetson-nano-2 and exercised via boot entry 0009 (\"SLM-OS Direct\").
+Three new findings surfaced that all together justify a pivot to
+Path 3:
+
+1. **§5c is fixed** — boot reaches past the HCR_EL2 RMW without
+   hanging. The §5d2 handler no longer catches a faulting
+   HCR_EL2 transition.
+
+2. **Post-EBS ConOut is unsafe on firmware v36.4.7.** The first
+   post-EBS `efi_print` (marker D `[slmos] D ExitBootServices
+   returned\r\n`) faulted with `ESR=0x02000000` (EC=0 "Unknown")
+   at an ELR inside UEFI's memory range (e.g.
+   `0x000000025DCC308C`, varies per boot based on UEFI's load
+   placement). Prior sessions had concluded "D/E/F markers land
+   as no-ops" — that was an artifact of UEFI's still-installed
+   handler silently absorbing the fault and returning; the §5d2
+   handler catches it honestly. Fix: removed all post-EBS
+   `efi_print` calls from `efi_stub_entry`. Firmware-portable
+   post-EBS tracing is out of scope; use UARTC directly from
+   boot.S after the return.
+
+3. **New blocker: Device-nGnRnE DRAM access raises CBB
+   Interface Error.** Once post-EBS prints are removed, boot
+   proceeds through `efi_disable_mmu` and returns to boot.S.
+   The subsequent `primary_cpu` BSS-clear loop
+   (`str xzr, [x1], #8` over `__bss_start..__bss_end`) takes a
+   RAS Uncorrectable Error at TF-A (EL3):
+
+   ```
+   ERROR: RAS Uncorrectable Error in IOB, base=0xe010000:
+   ERROR:   Status = 0xe4000612
+   ERROR:   SERR = Error response from slave: 0x12
+   ERROR:   IERR = CBB Interface Error: 0x6
+   ERROR:   ADDR = 0x8000000000157000   # == jetson_early_fault_slot
+   ERROR: sdei_dispatch_event returned -1
+   ERROR: Powering off core
+   ```
+
+   Root cause: with ARM64 MMU disabled (`SCTLR_EL2.M=0`), all data
+   accesses are architecturally Device-nGnRnE. Tegra's memory
+   controller rejects Device-nGnRnE writes to DRAM as "Error
+   response from slave" + CBB Interface Error. The kexec path
+   never hit this because Linux's MMU stays on through to
+   `vmm_init`, so BSS clear runs as Normal Cacheable.
+
+   The blocker is **not P3-specific** — it is revealed by P3's
+   real MMU disable, not caused by it. Pre-P3, the latent
+   SCTLR_EL1-to-dormant-register bug kept UEFI's MMU live, so
+   BSS clear ran as Normal memory. That was "working by
+   accident".
+
+   **Fixing it properly** requires SLM-OS to establish its own
+   minimal identity-mapped page tables (Normal Cacheable
+   attributes) BEFORE `primary_cpu`'s BSS clear — a
+   boot.S/vmm_init restructuring rather than a small patch.
+
+   Given that a substantial rewrite is now on the UEFI-direct
+   critical path AND the capstone clock, the recommendation is
+   to **pivot to Path 3** (preserve nvgpu's ACR state through
+   the kexec transition) per issue #190 plan §5 pivot trigger.
+   Landing P1+P2+P3 is still net-positive: the §5c hang is
+   fixed (a real bug under any future MMU strategy), the §5d2
+   handler gives UEFI-direct work a fault-visible baseline, and
+   the Device-nGnRnE finding is documented so a future
+   UEFI-direct session doesn't rediscover it.
+
 ### 5d2. Early EL2 vector table (2026-04-17, Path-2 P2)
 
 The primary reason the HCR_EL2 write (and every subsequent
@@ -285,11 +379,22 @@ symbol `jetson_early_vbar_el2`):
    prefixed with magic `"__EL2FAT"` so a memory dump (e.g. via
    kexec-from-Linux recovery or watchdog warm reset) can
    distinguish "handler fired" from "BSS zeroed".
-3. Emits `"!FAULT\r\n"` over UARTC (0x0C280000) as a real-time
-   visible signal. Single-shot writes, SError masked (automatic on
-   EL2 exception entry) so a CBB firewall block or translation
-   failure on the UARTC write itself doesn't recurse.
+3. Emits `"!FAULT\r\n"` over UARTC (0x0C280000) followed by a
+   labelled dump of ESR/ELR/FAR/HCR/SPR in hex as a real-time
+   visible signal. Each byte goes through `.Ljetson_early_putc`
+   which polls `UARTC_LSR.THRE` (bit 5 at offset 0x14) with a
+   preceding `dsb sy` before each read — required on Tegra per
+   the same barrier pattern used by `uart_tegra.c`. SError stays
+   masked (automatic on EL2 exception entry) so a CBB firewall
+   block or translation failure on the UARTC write itself
+   doesn't recurse.
 4. WFE-loops forever.
+
+An earlier revision streamed bytes straight to UARTC THR
+without pacing; the NS16550 TX FIFO filled faster than the TCU
+could drain it and everything past the first ~36 bytes was
+dropped. The paced-putc rewrite is what made the P3 probe's
+register dump actually legible on the wire.
 
 Gated on `PLATFORM_JETSON_ORIN_NANO` and `CurrentEL == 8` (EL2).
 Pre-EBS and kexec-from-Linux paths are unaffected.

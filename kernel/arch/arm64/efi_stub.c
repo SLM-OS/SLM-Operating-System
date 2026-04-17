@@ -233,46 +233,73 @@ static void efi_disable_mmu(void)
 
     /* Disable MMU (read SCTLR, clear M/C/I bits, write back).
      *
-     * HISTORICAL comment (kept as-is; see below): "Use sctlr_el1
-     * (not sctlr_el2): when UEFI's VHE is active (E2H=1, TGE=1),
-     * sctlr_el1 is aliased to SCTLR_EL2."
+     * SCTLR to write depends on the EL + VHE state we're running
+     * under. Three regimes matter:
      *
-     * That premise is FALSE on Jetson firmware v36.4.7 as of
-     * 2026-04-17. A pre-EBS `mrs x10, hcr_el2` dump shows
-     * HCR_EL2 = 0x0000000088000000, i.e. TGE=1, RW=1, but
-     * **E2H = 0**. UEFI is NOT in VHE host mode. Writing sctlr_el1
-     * here therefore writes the REAL EL1 SCTLR (a separate
-     * register), not the active EL2 SCTLR, so the MMU DOES NOT
-     * actually get disabled. This is a latent bug that hasn't bitten
-     * yet because subsequent code either (a) hangs before caring
-     * about MMU state (the HCR_EL2 re-write in boot.S's Jetson
-     * block), or (b) happens to work by luck through UEFI's
-     * translation tables.
+     *   (a) EL1 (no EL2 involvement):
+     *         active MMU control = SCTLR_EL1.
+     *         TLB  = tlbi vmalle1.
+     *   (b) EL2 with VHE on (HCR_EL2.E2H=1, e.g. kexec-from-Linux
+     *       where Linux already configured VHE):
+     *         SCTLR_EL1 is architecturally aliased to SCTLR_EL2.
+     *         tlbi vmalle1 invalidates EL2 TLB entries.
+     *   (c) EL2 with VHE off (HCR_EL2.E2H=0, e.g. UEFI-direct on
+     *       Jetson firmware v36.4.7 — see
+     *       docs/jetson-uefi-direct-result.md §5c and P1 dump):
+     *         SCTLR_EL1 is a SEPARATE, dormant register. Writing
+     *         it here does NOT touch the active EL2 MMU — the
+     *         MMU stays ON. That is the latent bug that made the
+     *         subsequent `msr hcr_el2` in boot.S hang (flipping
+     *         E2H mid-flight with UEFI's translation active).
+     *         Correct target = SCTLR_EL2, TLB = tlbi alle2.
      *
-     * Proper fix (tracked for a follow-up): read CurrentEL and
-     * HCR_EL2.E2H, branch on (E2H==1 ? sctlr_el1 : sctlr_el2).
-     * Kexec-from-Linux typically enters with E2H=1 (Linux uses VHE
-     * on ARMv8.1+), so the kexec path would keep the sctlr_el1
-     * write; UEFI-direct needs sctlr_el2. */
-    __asm__ volatile(
-        "mrs    x0, sctlr_el1\n"
-        "bic    x0, x0, #(1 << 0)\n"   /* M: MMU enable */
-        "bic    x0, x0, #(1 << 2)\n"   /* C: Data cache enable */
-        "bic    x0, x0, #(1 << 12)\n"  /* I: Instruction cache enable */
-        "msr    sctlr_el1, x0\n"
-        "isb\n"
-        ::: "x0", "memory"
-    );
+     * Runtime branch on CurrentEL + HCR_EL2.E2H picks the right
+     * target. The inline asm uses a fall-through/branch idiom so
+     * each arm runs with its own SCTLR + TLBI sequence. */
+    {
+        uint64_t cur_el_raw;
+        uint64_t cur_el;
+        __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur_el_raw));
+        cur_el = (cur_el_raw >> 2) & 3;   /* 1=EL1, 2=EL2, 3=EL3 */
 
-    /* Invalidate TLBs.
-     * tlbi vmalle1 is the VHE-compatible form: with VHE it invalidates
-     * all EL2 TLB entries; without VHE it invalidates EL1 entries. */
-    __asm__ volatile(
-        "tlbi   vmalle1\n"
-        "dsb    nsh\n"
-        "isb\n"
-        ::: "memory"
-    );
+        int use_el2 = 0;
+        if (cur_el == 2) {
+            uint64_t hcr;
+            __asm__ volatile("mrs %0, hcr_el2" : "=r"(hcr));
+            /* Treat E2H=0 as "EL2 non-VHE, must target SCTLR_EL2".
+             * E2H=1 means VHE is already on and SCTLR_EL1 aliases
+             * SCTLR_EL2, so the EL1-path sequence is correct. */
+            use_el2 = ((hcr >> 34) & 1) == 0;
+        }
+
+        if (use_el2) {
+            __asm__ volatile(
+                "mrs    x0, sctlr_el2\n"
+                "bic    x0, x0, #(1 << 0)\n"   /* M  */
+                "bic    x0, x0, #(1 << 2)\n"   /* C  */
+                "bic    x0, x0, #(1 << 12)\n"  /* I  */
+                "msr    sctlr_el2, x0\n"
+                "isb\n"
+                "tlbi   alle2\n"
+                "dsb    nsh\n"
+                "isb\n"
+                ::: "x0", "memory"
+            );
+        } else {
+            __asm__ volatile(
+                "mrs    x0, sctlr_el1\n"
+                "bic    x0, x0, #(1 << 0)\n"   /* M  */
+                "bic    x0, x0, #(1 << 2)\n"   /* C  */
+                "bic    x0, x0, #(1 << 12)\n"  /* I  */
+                "msr    sctlr_el1, x0\n"
+                "isb\n"
+                "tlbi   vmalle1\n"
+                "dsb    nsh\n"
+                "isb\n"
+                ::: "x0", "memory"
+            );
+        }
+    }
 }
 
 /*
@@ -299,9 +326,6 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
     static const efi_char16_t m_find_done[] = u"[slmos] B find_fdt done\r\n";
     static const efi_char16_t m_pre_ebs[]   = u"[slmos] C calling ExitBootServices\r\n";
     static const efi_char16_t m_ebs_fail[]  = u"[slmos] ! ExitBootServices failed\r\n";
-    static const efi_char16_t m_post_ebs[]  = u"[slmos] D ExitBootServices returned\r\n";
-    static const efi_char16_t m_pre_mmu[]   = u"[slmos] E calling disable_mmu\r\n";
-    static const efi_char16_t m_pre_ret[]   = u"[slmos] F returning fdt\r\n";
 
     efi_print(sys_table, m_entry);
 
@@ -339,18 +363,34 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
 
     /* Exit boot services — takes over the machine.
      *
-     * Per UEFI §7.4.1, Boot Services (including ConOut) become invalid
-     * after EBS succeeds. Still, the post-EBS markers D/E/F below test
-     * that premise: if the underlying UART driver is a plain MMIO loop
-     * rather than a protocol service, writes may keep landing on the
-     * serial wire even after EBS. Either outcome is information —
-     * markers appearing narrow the crash window; silence indicates
-     * the protocol teardown is real on this firmware.
-     */
+     * Per UEFI §7.4.1, Boot Services (including ConOut) become
+     * invalid after EBS succeeds. Past revisions of this stub still
+     * issued post-EBS efi_print calls as "best-effort" markers
+     * (D/E/F) based on the observation that v36.4.7's protocol
+     * struct survived EBS with stable vtable pointers. The
+     * 2026-04-17 Path-2 P3 hardware probe invalidated that
+     * observation: once the SLM-OS VBAR_EL2 is installed
+     * post-EBS, the first post-EBS ConOut dereference faults
+     * immediately (EC=0x00 "Unknown", ELR inside UEFI's still-
+     * live memory range). The prior "markers land as no-ops"
+     * interpretation was an artifact of UEFI's vectors silently
+     * absorbing the fault and returning; our handler catches it
+     * honestly.
+     *
+     * Post-EBS ConOut calls removed from this function. Any
+     * further diagnostic output between here and `primary_cpu`
+     * must go through UARTC directly — the Jetson EL2 block in
+     * boot.S already has a working UARTC path for that. */
     efi_print(sys_table, m_pre_ebs);
     status = efi_exit_boot(handle, sys_table->boot_services);
 
     if (status != EFI_SUCCESS) {
+        /* Still safe to use ConOut here: per UEFI §7.4.1 Boot
+         * Services remain valid when ExitBootServices itself
+         * fails. The post-EBS ConOut restriction (and the
+         * removal of post-success markers above) applies only
+         * AFTER a successful EBS. Do NOT collapse this call
+         * into the post-EBS cleanup. */
         efi_print(sys_table, m_ebs_fail);
         return NULL;
     }
@@ -409,27 +449,12 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
     }
 #endif
 
-    /*
-     * POST-EBS efi_print calls below are firmware-dependent.
+    /* Disable MMU and clean caches for the normal boot path.
      *
-     * The ConOut protocol is formally invalid here (UEFI §7.4.1). On
-     * Jetson firmware v36.4.7 the protocol struct happens to still
-     * have stable vtable pointers — output_string survives the EBS
-     * teardown and D/E/F land on serial as no-ops (they also survive
-     * being called with MMU on/off). On other firmware the struct
-     * may be freed, zeroed, or left with dangling function pointers,
-     * in which case efi_print's NULL guards don't help — a non-NULL
-     * garbage `output_string` dereference would synchronously fault.
-     * On Jetson, the VBAR_EL2 swap above catches that fault; on
-     * other ARM64 UEFI targets without the swap, the fault would
-     * still go to UEFI's torn-down vector.
-     */
-    efi_print(sys_table, m_post_ebs);
-
-    /* Disable MMU and clean caches for the normal boot path */
-    efi_print(sys_table, m_pre_mmu);
+     * No ConOut calls past this point — see the comment block
+     * above efi_pre_ebs for why. Any post-EBS tracing needs to
+     * go through UARTC directly. */
     efi_disable_mmu();
 
-    efi_print(sys_table, m_pre_ret);
     return fdt;
 }
