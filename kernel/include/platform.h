@@ -349,13 +349,18 @@
 
 /* RP1 peripheral interrupt vector numbers (from rp1-peripherals.pdf) */
 #define RP1_INT_UART0       25
-#define RP1_INT_ETH         6       /* BCM GENET Ethernet — #202 */
+#define RP1_INT_ETH         6       /* Cadence MACB/GEM Ethernet — #202 */
 
-/* BCM GENET Ethernet controller base addresses — #202.
+/* RP1 Ethernet controller base addresses — #202.
  *
- * GENET v5 on Pi 5 is integrated into the RP1 southbridge, reached
- * through the same PCIe BAR1 window that UART/GPIO use. Linux's RP1
- * bindings header (linux-rpi-dt-bindings-mfd-rp1.h) defines:
+ * Despite the "BCM" SoC name, the Ethernet MAC on Pi 5 is a Cadence
+ * MACB/GEM IP, NOT Broadcom GENET (GENET was used on Pi 4). The
+ * Linux device tree identifies it as `raspberrypi,rp1-gem` with
+ * `cdns,macb` as the fallback compat string.
+ *
+ * The IP lives inside the RP1 southbridge, reached through the same
+ * PCIe BAR1 window UART/GPIO use. Linux's RP1 bindings header
+ * (linux-rpi-dt-bindings-mfd-rp1.h) defines:
  *   RP1_ETH_IP_BASE  = RP1_BAR + 0x100000 = 0x1F00100000
  *   RP1_ETH_CFG_BASE = RP1_BAR + 0x104000 = 0x1F00104000
  *
@@ -365,8 +370,13 @@
 #define RP1_ETH_IP_BASE     0x1F00100000UL
 #define RP1_ETH_CFG_BASE    0x1F00104000UL
 
-/* GENET interrupt — GIC IRQ 166 via MIP0 vector 6 → GIC SPI 134 */
-#define GENET_IRQ           (32 + MIP0_BASE_SPI + RP1_INT_ETH)
+/* RP1 clock controller, at RP1_BAR + 0x18000 per rp1.dtsi. Stage 2
+ * of the MACB driver will write CLK_ETH_CTRL / CLK_ETH_TSU_CTRL
+ * here to enable the Ethernet clocks. */
+#define RP1_CLOCKS_BASE     0x1F00018000UL
+
+/* MACB interrupt — GIC IRQ 166 via MIP0 vector 6 → GIC SPI 134 */
+#define MACB_IRQ            (32 + MIP0_BASE_SPI + RP1_INT_ETH)
 
 /* BCM2712 PCIe RC (Root Complex) for pcie2 (RP1's link) */
 #define PCIE_RC_BASE        0x1000120000UL
