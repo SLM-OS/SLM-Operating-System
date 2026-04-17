@@ -194,10 +194,17 @@ config flags — no Pi-5-specific code path). Cached locally at
 8. Cache clean/invalidate at every DMA sync point (mandatory on
    Pi 5 — no SMPEN)
 
-**Polling-only by design** — Pi 5 NS-EL1 IRQ delivery is blocked by
-TF-A per #134. If/when that issue is resolved, the driver can opt
-in to IRQ-driven completion via the `gic_register_handler` mechanism
-already wired on ARM64.
+**Polling is the operational path**, but not for the reason originally
+assumed. The timer PPI-30 blocker (#134) is a separate policy issue;
+peripheral IRQs via RP1 MSI-X → MIP0 → GIC SPI should work through
+a different mechanism. The MACB driver wires up that path in full —
+`gic_register_handler(166)` + `MACB_IER` unmask + `RP1_MSIX_CFG[vec 6]`
+programmed — and hardware testing confirms MIP0 sees the MAC
+asserting, but RP1's MSIX_CFG engine doesn't fire TLPs on peripheral
+IRQ assertion. Same blocker as UART RX; shared tracker at **#247**.
+The IRQ code is dormant but correct — it becomes live the day the
+MSIX_CFG issue is solved. The `macbdiag` shell command surfaces the
+live state.
 
 ### 3.2 Hardware-verified (pi-5-1)
 

@@ -234,7 +234,10 @@ This hybrid approach leverages:
   - ARM64: `gic_register_handler` dispatch table, SPI from slot probe
   - x86-64: PCI MSI-X capability, IDT vector 50 routed to LAPIC
   - Stuck-descriptor watchdog logs one `WARN` per 5 s stall episode
-  - Pi 5 MACB is polled-only today (blocked by #134 NS-EL1 IRQ path)
+  - Pi 5 MACB is polled-only today: IRQ wiring installed but RP1
+    MSIX_CFG engine doesn't fire TLPs on peripheral assertion —
+    shared blocker with UART RX, tracked in #247. #134 (timer PPI)
+    is a separate, closed issue resolved via COOP_PREEMPT.
 - `ENABLE_NETWORKING` CMake option — default ON for QEMU_VIRT, X86_64,
   and RASPI5; OFF for Jetson until real NIC driver lands (#25)
 - `NET_DHCP_AT_BOOT` default ON — lwIP starts DHCP during `net_init()`
