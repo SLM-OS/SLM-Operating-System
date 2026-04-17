@@ -1608,6 +1608,7 @@ pub unsafe extern "C" fn rust_eviction_workload_compare(
             // Simulate a fixed-size cache.
             let mut cache: Vec<Option<u32>> = alloc::vec![None; cache_size];
             let mut access_times: Vec<u64> = alloc::vec![0; cache_size];
+            let mut access_counts: Vec<u32> = alloc::vec![0; cache_size];
             let mut faults: u32 = 0;
             let mut hits: u32 = 0;
 
@@ -1619,6 +1620,7 @@ pub unsafe extern "C" fn rust_eviction_workload_compare(
                 for slot in 0..cache_size {
                     if cache[slot] == Some(block_id) {
                         access_times[slot] = now;
+                        access_counts[slot] += 1;
                         hits += 1;
                         found = true;
                         break;
@@ -1647,7 +1649,7 @@ pub unsafe extern "C" fn rust_eviction_workload_compare(
                             layer_idx: 0,
                             last_access_time: access_times[i],
                             load_time: 0,
-                            access_count: 0,
+                            access_count: access_counts[i],
                             ref_count: 0,
                             gpu_mapped: false,
                             is_dirty: false,
@@ -1670,6 +1672,7 @@ pub unsafe extern "C" fn rust_eviction_workload_compare(
 
                 cache[target_slot] = Some(block_id);
                 access_times[target_slot] = now;
+                access_counts[target_slot] = 1;
                 faults += 1;
             }
 
