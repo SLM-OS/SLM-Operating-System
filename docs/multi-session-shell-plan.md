@@ -5,8 +5,12 @@ as the initial protocol layer and a proper daemon control surface
 (`telnetd`) on top. This is foundational work for future SSH support
 (Phase 4, tracked in #199) and for multi-user operation.
 
-**Status:** Phase 1 §1.1 landed (shell_io abstraction + UART backend
-+ per-task session routing); §1.2–§1.9 pending
+**Status:** Phase 1 complete — `nc localhost 2323` into a QEMU guest
+gets a shell; UART console coexists; two concurrent TCP sessions
+supported (bump `MAX_TCP_SHELL_SESSIONS` in `shell_session.h` to raise
+the cap). Phase 2 (telnet IAC) and Phase 3 (telnetd daemon control /
+config file / auto-start) remain planned; Phase 4 (SSH, #199) is
+out-of-scope here.
 **Last updated:** 17 April 2026
 
 ---
@@ -598,17 +602,19 @@ This aligns with the demo-readiness observability work (#191, #194).
 
 - ✅ `kernel/include/shell_io.h` — I/O abstraction interface
 - ✅ `kernel/include/shell_session.h` — Session struct + pool API
+- ✅ `kernel/include/shell_io_tcp.h` — TCP backend entry points
+- ✅ `kernel/include/tcp_shell_server.h` — Listener entry points
 - ✅ `kernel/src/shell_io.c` — backend-independent helpers
   (`shell_io_puts`, `shell_io_printf`, `shell_io_vprintf`)
 - ✅ `kernel/src/shell_io_uart.c` — UART backend
-- ☐ `kernel/src/shell_io_tcp.c` — lwIP raw-callback TCP backend
+- ✅ `kernel/src/shell_io_tcp.c` — lwIP raw-callback TCP backend
 - ✅ `kernel/src/shell_session.c` — Session pool + lifecycle
-  (currently console-only; TCP slots added in §1.3)
-- ☐ `kernel/src/tcp_shell_server.c` — Listener (accept callback)
+  (console singleton + TCP pool of size `MAX_TCP_SHELL_SESSIONS`)
+- ✅ `kernel/src/tcp_shell_server.c` — Listener (accept callback) + `tcpsh` command glue
 - ☐ `kernel/src/telnet.c` (Phase 2) — IAC state machine
 - ☐ `kernel/src/shell_telnetd.c` (Phase 3) — `telnetd` shell commands
 - ☐ `kernel/src/telnetd_config.c` (Phase 3) — `/etc/telnetd.conf` parser + boot hook
-- ☐ `kernel/tests/test_shell_session.c` — Session unit tests
+- ✅ `kernel/tests/test_shell_session.c` — Session + shell_io unit tests (22 tests)
 - ☐ `kernel/tests/test_telnetd_config.c` (Phase 3) — Config parser tests
 
 ---

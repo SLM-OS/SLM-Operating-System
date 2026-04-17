@@ -186,6 +186,28 @@ Counter semantics:
 - `dropped` — packets that reached lwIP but couldn't be enqueued (pbuf alloc failed, or lwIP netif input rejected the packet)
 - `no_buffers` — the NIC driver couldn't post a fresh RX descriptor after recv (virtqueue descriptor pool exhausted under burst). Nonzero here indicates sustained traffic overrunning the 16-buffer default pool.
 
+### tcpsh
+
+Multi-session TCP shell — start the listener, then connect with
+`nc localhost 2323` from the host:
+
+```
+SLM-OS> tcpsh start
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+tcpsh: listening on port 2323
+
+SLM-OS> tcpsh status
+tcpsh: running on port 2323 — accepted=0 active=0 max=2
+
+SLM-OS> tcpsh stop
+tcpsh: stopped
+```
+
+The TCP shell uses the lwIP raw callback API (required because the
+port builds with `NO_SYS=1` / `LWIP_SOCKET=0`). See
+`docs/shell.md` § Multi-Session Shell and
+`docs/multi-session-shell-plan.md` for the architecture.
+
 ---
 
 ## Implementation
@@ -611,27 +633,33 @@ transport (MMIO vs PCI) per platform:
 
 ```makefile
 ifeq ($(PLATFORM),X86_64)
-    QEMU_NET := -device virtio-net-pci,netdev=net0 -netdev user,id=net0
+    QEMU_NET := -device virtio-net-pci,netdev=net0 \
+                -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2323-:2323
 else ifeq ($(PLATFORM),QEMU_VIRT)
-    QEMU_NET := -device virtio-net-device,netdev=net0 -netdev user,id=net0
+    QEMU_NET := -global virtio-mmio.force-legacy=false \
+                -device virtio-net-device,netdev=net0 \
+                -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2323-:2323
 endif
 ```
 
 This provides user-mode networking where:
 - The guest can access the host and internet via NAT
-- Host cannot initiate connections to guest (use port forwarding)
+- The host's loopback reaches the guest's port 2323 (TCP shell —
+  see `docs/shell.md`). Bound to `127.0.0.1` so the guest's
+  unauthenticated shell doesn't accidentally become visible on the
+  host's LAN.
 - No root/admin privileges required
 
 ### Port Forwarding
 
-To expose a guest port to the host:
+To expose additional guest ports to the host, extend the `hostfwd=`
+list — each entry forwards a single host:port to a guest port:
 
 ```makefile
+# Additional forward: host 2222 → guest 22 (for a future SSH server).
 QEMU_NET := -device virtio-net-device,netdev=net0 \
-            -netdev user,id=net0,hostfwd=tcp::2222-:23
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2323-:2323,hostfwd=tcp::2222-:22
 ```
-
-This forwards host port 2222 to guest port 23 (telnet).
 
 ---
 
