@@ -607,6 +607,15 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 #include "../include/gic.h"         /* gic_lookup_handler */
 #endif
 
+#if defined(PLATFORM_X86_64)
+/* Accessors exposed by the PCI driver for test observability. Kept
+ * as externs (rather than a public header) because the PCI driver
+ * has no public header today — all callers use extern declarations. */
+uint32_t virtio_net_pci_get_irq_count(void);
+uint32_t virtio_net_pci_get_msix_vector(void);
+bool     virtio_net_pci_msix_enabled(void);
+#endif
+
 /*
  * Test: a network driver was registered during platform init.
  *
@@ -1176,6 +1185,46 @@ static void test_net_irq_handler_drains_tx(void)
 }
 #endif /* PLATFORM_QEMU_VIRT */
 
+#if defined(PLATFORM_X86_64)
+/*
+ * Test: MSI-X was enabled during virtio_net_pci_init (#204 item 3).
+ *
+ * QEMU's virtio-net-pci exposes the MSI-X capability by default.
+ * If this fails, either the capability walk missed it, the programming
+ * write sequence was rejected, or someone disabled MSI-X with
+ * `-device virtio-net-pci,msix=off` — the last of which would make
+ * TX completion fall back to polling, defeating the #204 point.
+ */
+static void test_net_msix_enabled(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+    TEST_ASSERT_MESSAGE(virtio_net_pci_msix_enabled(),
+        "MSI-X not enabled — TX completion silently fell back to polling");
+}
+
+/*
+ * Test: the allocated MSI-X vector is in the x86-64 free-vector range
+ * (50-63). Below 50 collides with timer/RESCHED/PIC; above 63 collides
+ * with nothing yet but isn't in our convention. A value of 0 means
+ * msix_enabled() returned false, which the prior test already
+ * catches — assert a plausible positive number too to guard against
+ * a silent drift of VIRTIO_NET_MSIX_VECTOR.
+ */
+static void test_net_msix_vector_is_in_range(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+    uint32_t v = virtio_net_pci_get_msix_vector();
+    TEST_ASSERT_MESSAGE(v >= 50 && v <= 63,
+        "MSI-X vector outside the 50-63 range reserved for virtio drivers");
+}
+#endif /* PLATFORM_X86_64 */
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -1239,6 +1288,10 @@ int test_suite_net(void)
 #if defined(PLATFORM_QEMU_VIRT)
     RUN_TEST(test_net_irq_handler_registered);
     RUN_TEST(test_net_irq_handler_drains_tx);
+#endif
+#if defined(PLATFORM_X86_64)
+    RUN_TEST(test_net_msix_enabled);
+    RUN_TEST(test_net_msix_vector_is_in_range);
 #endif
     RUN_TEST(test_net_rx_no_buffers_clean);
 

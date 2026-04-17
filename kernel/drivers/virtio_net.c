@@ -37,6 +37,21 @@ static volatile uint32_t irq_count;
  * re-derive the SPI from the slot probe. Zero until init completes. */
 static uint32_t net_irq_number;
 
+/* Stuck-descriptor watchdog (#204 item 4). If tx_reap finds nothing
+ * to reap while tx_inflight[] has entries, and it has been at least
+ * TX_STALL_THRESHOLD_MS since we last successfully reaped a slot,
+ * log a single warning. The warn-once latch (tx_stall_warned) resets
+ * the moment a slot is freed, so a genuinely stuck link logs once
+ * but transient congestion (which resolves on the next reap) stays
+ * quiet. Not fatal: polling-only fallback still works if the IRQ
+ * path misses a completion, and lwIP will surface transport errors
+ * above the driver. Spurious tx_reap calls — invoked on an empty
+ * pool — do not trigger the watchdog because tx_has_inflight() also
+ * returns false. */
+#define TX_STALL_THRESHOLD_MS 5000
+static uint32_t tx_last_progress_ms;
+static bool     tx_stall_warned;
+
 /*
  * Separate TX and RX locks. Both are IRQ-safe (accessed via
  * spin_lock_irqsave) because virtio_net_irq_handler acquires tx_lock
@@ -462,6 +477,10 @@ int virtio_net_init(void) {
     /* Post receive buffers */
     post_rx_buffers();
 
+    /* Seed the TX watchdog so the first reap doesn't immediately
+     * log "stuck for N ms" based on the initial zero value. */
+    tx_last_progress_ms = sys_now();
+
     /* Register IRQ handler. The slot-derived IRQ number is looked up
      * by the EL1 IRQ dispatch in exceptions.c (via
      * gic_lookup_handler) and routed to virtio_net_irq_handler when
@@ -510,7 +529,17 @@ int virtio_net_init(void) {
  * back to the slot index. Linear in TX_BUFFER_COUNT but bounded —
  * the loop also stops when the used ring is empty.
  */
+/* Linear scan of tx_inflight[] — cheap (16 entries) and callers
+ * already hold tx_lock, so no additional synchronization needed. */
+static bool tx_has_inflight(void) {
+    for (unsigned i = 0; i < TX_BUFFER_COUNT; i++) {
+        if (tx_inflight[i]) return true;
+    }
+    return false;
+}
+
 static void virtio_net_tx_reap_locked(void) {
+    bool progressed = false;
     while (true) {
         uint32_t used_len;
         int desc_idx = virtqueue_get_buf(&netdev.tx_vq, &used_len);
@@ -528,6 +557,22 @@ static void virtio_net_tx_reap_locked(void) {
         /* slot < TX_BUFFER_COUNT by the static_assert above. */
         unsigned slot = (unsigned)((addr - pool_base) / TX_BUFFER_SIZE);
         tx_inflight[slot] = false;
+        progressed = true;
+    }
+
+    /* Watchdog: update "last progress" on any successful reap, or
+     * log once if the pool has been stuck for too long. sys_now()
+     * returns milliseconds, which is fine for a 5-second threshold. */
+    if (progressed) {
+        tx_last_progress_ms = sys_now();
+        tx_stall_warned = false;
+    } else if (!tx_stall_warned && tx_has_inflight()) {
+        uint32_t elapsed = sys_now() - tx_last_progress_ms;
+        if (elapsed >= TX_STALL_THRESHOLD_MS) {
+            WARN("TX descriptors stuck: no completion for %u ms (virtio-mmio)",
+                 elapsed);
+            tx_stall_warned = true;
+        }
     }
 }
 
