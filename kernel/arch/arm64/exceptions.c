@@ -270,10 +270,21 @@ void el1_irq_handler(void)
         return;
 #endif
 
-    default:
-        /* Unknown interrupt */
+    default: {
+        /* Check the driver-registered handler table for SPIs whose
+         * IRQ number isn't known at compile time (virtio-mmio
+         * devices, etc.). EOI first so the handler doesn't have to
+         * know it's running in IRQ context — matches the timer-case
+         * pattern above. */
+        gic_handler_fn h = gic_lookup_handler(irq);
+        if (h) {
+            gic_end_interrupt(irq);
+            h();
+            return;
+        }
         uart_printf("[IRQ] Unhandled IRQ %u\n", irq);
         break;
+    }
     }
 
     /* Signal end of interrupt */

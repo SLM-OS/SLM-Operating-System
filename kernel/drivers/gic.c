@@ -957,3 +957,53 @@ void gic_include_cpu_in_spis(uint32_t cpu)
 }
 
 #endif /* GIC_VERSION */
+
+/* ============================================================================
+ * IRQ handler registration table (GIC-version-agnostic)
+ *
+ * Small static table of (irq, handler) pairs looked up by the EL1 IRQ
+ * dispatch in kernel/arch/arm64/exceptions.c when none of the
+ * compile-time cases match. Lets drivers whose IRQ number isn't known
+ * at compile time (e.g. virtio-mmio devices, where the IRQ follows
+ * the slot the device lands in) bind a handler at init time.
+ *
+ * Scan is linear — 16 entries is plenty for the current driver set,
+ * and the lookup runs in IRQ context where the cache line will be hot
+ * anyway. Adding a hash table would be premature.
+ *
+ * Deliberately outside the GIC_VERSION conditionals — the table
+ * layout doesn't depend on v2 vs v3, only on having an IRQ dispatch
+ * that can consult it.
+ * ============================================================================ */
+
+#define GIC_MAX_REGISTERED_HANDLERS 16
+
+struct gic_handler_entry {
+    uint32_t       irq;      /* GIC interrupt ID */
+    gic_handler_fn fn;       /* NULL means "free slot" */
+};
+
+static struct gic_handler_entry gic_handlers[GIC_MAX_REGISTERED_HANDLERS];
+
+int gic_register_handler(uint32_t irq, gic_handler_fn handler)
+{
+    if (!handler)
+        return -1;
+    for (unsigned i = 0; i < GIC_MAX_REGISTERED_HANDLERS; i++) {
+        if (gic_handlers[i].fn == NULL) {
+            gic_handlers[i].irq = irq;
+            gic_handlers[i].fn = handler;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+gic_handler_fn gic_lookup_handler(uint32_t irq)
+{
+    for (unsigned i = 0; i < GIC_MAX_REGISTERED_HANDLERS; i++) {
+        if (gic_handlers[i].fn != NULL && gic_handlers[i].irq == irq)
+            return gic_handlers[i].fn;
+    }
+    return NULL;
+}

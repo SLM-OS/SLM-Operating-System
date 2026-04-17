@@ -122,6 +122,36 @@ int gic_set_affinity(uint32_t irq, uint32_t cpu_mask);
 uint32_t gic_get_affinity(uint32_t irq);
 
 /*
+ * IRQ handler function type for gic_register_handler.
+ * Called from the EL1 IRQ dispatch in kernel/arch/arm64/exceptions.c
+ * after gic_end_interrupt() has already been signalled, so the handler
+ * must not re-EOI. Runs with IRQ disabled.
+ */
+typedef void (*gic_handler_fn)(void);
+
+/*
+ * Register a driver-level handler for a specific IRQ number.
+ *
+ * The dispatch in exceptions.c looks up the table and invokes the
+ * registered function when the IRQ fires. Intended for SPIs whose
+ * ownership is not fixed at compile time — e.g. virtio-mmio devices
+ * whose IRQ depends on the slot they landed in.
+ *
+ * @irq:     Interrupt number (32+ for SPIs)
+ * @handler: Function to call when the IRQ fires. Must not block,
+ *           must not call schedule(). Runs with IRQ disabled.
+ *
+ * Returns 0 on success, -1 if the table is full.
+ */
+int gic_register_handler(uint32_t irq, gic_handler_fn handler);
+
+/*
+ * Look up the handler registered for a given IRQ number.
+ * Used by the dispatch path; returns NULL if nothing is registered.
+ */
+gic_handler_fn gic_lookup_handler(uint32_t irq);
+
+/*
  * Route all SPIs away from a CPU.
  *
  * Used for core isolation to minimize interrupt interference.

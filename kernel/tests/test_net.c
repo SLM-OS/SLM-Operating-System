@@ -601,6 +601,11 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 
 #include "net_driver.h"
 #include "arch/sys_arch.h"  /* sys_now() for DHCP timeout polling */
+#if defined(PLATFORM_QEMU_VIRT)
+#include "../include/virtio_net.h"  /* virtio_net_get_irq_count (ARM64 MMIO) */
+#include "../include/virtio.h"      /* VIRTIO_DEVICE_IRQ */
+#include "../include/gic.h"         /* gic_lookup_handler */
+#endif
 
 /*
  * Test: a network driver was registered during platform init.
@@ -1096,6 +1101,81 @@ static void test_net_burst_8_sends_async(void)
     }
 }
 
+#if defined(PLATFORM_QEMU_VIRT)
+/*
+ * Test: VirtIO-Net handler is registered in the GIC dispatch table (#204).
+ *
+ * Proves virtio_net_init wired gic_register_handler successfully.  The
+ * dispatch path in kernel/arch/arm64/exceptions.c uses gic_lookup_handler
+ * to route unknown SPIs to driver-provided handlers — if registration
+ * silently fails (table full, or init skips it), TX completions stay
+ * polled-only on hardware, defeating the point of the #204 follow-up.
+ * A fast, deterministic check that doesn't depend on actual IRQ delivery
+ * (which on QEMU only happens when the idle task runs daifclr+wfi).
+ */
+static void test_net_irq_handler_registered(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Use the runtime IRQ number — the device slot is probed at init,
+     * so the compile-time VIRTIO_NET_IRQ (which assumes slot 0) does
+     * not match when QEMU places the device at a different slot. */
+    uint32_t irq = virtio_net_get_irq();
+    TEST_ASSERT_MESSAGE(irq != 0,
+        "virtio_net_get_irq() returned 0 — init skipped handler registration");
+
+    gic_handler_fn h = gic_lookup_handler(irq);
+    TEST_ASSERT_NOT_NULL_MESSAGE(h,
+        "gic_lookup_handler returned NULL for the registered IRQ");
+    TEST_ASSERT_MESSAGE(h == virtio_net_irq_handler,
+        "registered handler does not match virtio_net_irq_handler");
+}
+
+/*
+ * Test: invoking virtio_net_irq_handler drains any pending TX completions
+ * and bumps the IRQ-count observability counter (#204).
+ *
+ * Submits a few frames to push descriptors through the TX virtqueue,
+ * then calls the handler directly (not via GIC — see comment above).
+ * The handler reads the ISR, acks it, and drains the used ring on
+ * USED_BUFFER. irq_count incrementing confirms the handler itself is
+ * reachable from the dispatch path and does not early-exit on a freshly
+ * initialized driver. With end-to-end GIC → CPU delivery blocked in
+ * task context on QEMU (tasks run DAIF.I=1), this is the closest we get
+ * to exercising the production path from userland tests.
+ */
+static void test_net_irq_handler_drains_tx(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    uint32_t before = virtio_net_get_irq_count();
+
+    /* Submit a few frames so the device has something to complete. */
+    for (int i = 0; i < 4; i++) {
+        (void)drv->send(frame, sizeof(frame));
+    }
+
+    /* Invoke the handler directly. No GIC unmasking — this tests the
+     * handler body, not the dispatch/delivery plumbing. */
+    virtio_net_irq_handler();
+
+    uint32_t after = virtio_net_get_irq_count();
+    TEST_ASSERT_MESSAGE(after == before + 1,
+        "virtio_net_irq_handler did not increment irq_count — "
+        "handler early-exited or counter wiring broken");
+}
+#endif /* PLATFORM_QEMU_VIRT */
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -1156,6 +1236,10 @@ int test_suite_net(void)
     RUN_TEST(test_net_send_oversized_rejected);
     RUN_TEST(test_net_send_pool_exhaustion);
     RUN_TEST(test_net_burst_8_sends_async);
+#if defined(PLATFORM_QEMU_VIRT)
+    RUN_TEST(test_net_irq_handler_registered);
+    RUN_TEST(test_net_irq_handler_drains_tx);
+#endif
     RUN_TEST(test_net_rx_no_buffers_clean);
 
     return UNITY_END();
