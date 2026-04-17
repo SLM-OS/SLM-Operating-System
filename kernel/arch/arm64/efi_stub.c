@@ -326,9 +326,6 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
     static const efi_char16_t m_find_done[] = u"[slmos] B find_fdt done\r\n";
     static const efi_char16_t m_pre_ebs[]   = u"[slmos] C calling ExitBootServices\r\n";
     static const efi_char16_t m_ebs_fail[]  = u"[slmos] ! ExitBootServices failed\r\n";
-    static const efi_char16_t m_post_ebs[]  = u"[slmos] D ExitBootServices returned\r\n";
-    static const efi_char16_t m_pre_mmu[]   = u"[slmos] E calling disable_mmu\r\n";
-    static const efi_char16_t m_pre_ret[]   = u"[slmos] F returning fdt\r\n";
 
     efi_print(sys_table, m_entry);
 
@@ -366,14 +363,24 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
 
     /* Exit boot services — takes over the machine.
      *
-     * Per UEFI §7.4.1, Boot Services (including ConOut) become invalid
-     * after EBS succeeds. Still, the post-EBS markers D/E/F below test
-     * that premise: if the underlying UART driver is a plain MMIO loop
-     * rather than a protocol service, writes may keep landing on the
-     * serial wire even after EBS. Either outcome is information —
-     * markers appearing narrow the crash window; silence indicates
-     * the protocol teardown is real on this firmware.
-     */
+     * Per UEFI §7.4.1, Boot Services (including ConOut) become
+     * invalid after EBS succeeds. Past revisions of this stub still
+     * issued post-EBS efi_print calls as "best-effort" markers
+     * (D/E/F) based on the observation that v36.4.7's protocol
+     * struct survived EBS with stable vtable pointers. The
+     * 2026-04-17 Path-2 P3 hardware probe invalidated that
+     * observation: once the SLM-OS VBAR_EL2 is installed
+     * post-EBS, the first post-EBS ConOut dereference faults
+     * immediately (EC=0x00 "Unknown", ELR inside UEFI's still-
+     * live memory range). The prior "markers land as no-ops"
+     * interpretation was an artifact of UEFI's vectors silently
+     * absorbing the fault and returning; our handler catches it
+     * honestly.
+     *
+     * Post-EBS ConOut calls removed from this function. Any
+     * further diagnostic output between here and `primary_cpu`
+     * must go through UARTC directly — the Jetson EL2 block in
+     * boot.S already has a working UARTC path for that. */
     efi_print(sys_table, m_pre_ebs);
     status = efi_exit_boot(handle, sys_table->boot_services);
 
@@ -436,27 +443,12 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
     }
 #endif
 
-    /*
-     * POST-EBS efi_print calls below are firmware-dependent.
+    /* Disable MMU and clean caches for the normal boot path.
      *
-     * The ConOut protocol is formally invalid here (UEFI §7.4.1). On
-     * Jetson firmware v36.4.7 the protocol struct happens to still
-     * have stable vtable pointers — output_string survives the EBS
-     * teardown and D/E/F land on serial as no-ops (they also survive
-     * being called with MMU on/off). On other firmware the struct
-     * may be freed, zeroed, or left with dangling function pointers,
-     * in which case efi_print's NULL guards don't help — a non-NULL
-     * garbage `output_string` dereference would synchronously fault.
-     * On Jetson, the VBAR_EL2 swap above catches that fault; on
-     * other ARM64 UEFI targets without the swap, the fault would
-     * still go to UEFI's torn-down vector.
-     */
-    efi_print(sys_table, m_post_ebs);
-
-    /* Disable MMU and clean caches for the normal boot path */
-    efi_print(sys_table, m_pre_mmu);
+     * No ConOut calls past this point — see the comment block
+     * above efi_pre_ebs for why. Any post-EBS tracing needs to
+     * go through UARTC directly. */
     efi_disable_mmu();
 
-    efi_print(sys_table, m_pre_ret);
     return fdt;
 }

@@ -4,19 +4,26 @@
 > When this doc and the long-form docs disagree, the long-form docs are
 > authoritative — file an update here.
 >
-> **2026-04-17 update:** two investigation deltas landed since this
-> doc was written — both in `docs/jetson-uefi-direct-result.md`:
-> - §5b / §5c / §5d (PR #239, #240, this PR): UEFI is at EL2 with
->   `HCR_EL2 = 0x88000000` (**E2H=0**, no VHE). The EL2 block's
->   `msr hcr_el2, x10` unconditional write flips E2H 0→1 mid-flight
->   and hangs. Use RMW + MMU-off-before-HCR pattern.
-> - §5d2 (this PR): SLM-OS now installs its own VBAR_EL2 table
->   (`jetson_early_vbar_el2`) immediately post-EBS, so future
->   UEFI-direct faults are visible (`!FAULT\r\n` on UARTC + scratch
->   slot dump) instead of silent.
+> **2026-04-17 update (post-P1/P2/P3 merged):** five investigation
+> deltas captured in `docs/jetson-uefi-direct-result.md`:
+> - §5b: UEFI enters at EL2 (not EL1 as PR #226 thought).
+> - §5c: `HCR_EL2 = 0x88000000` (E2H=0, no VHE). P3 fixes the
+>   resulting hang via an E2H-aware `efi_disable_mmu` + a RMW
+>   of HCR_EL2 in boot.S.
+> - §5d2: SLM-OS installs its own VBAR_EL2 post-EBS;
+>   `!FAULT\r\n` + register hex dump over UARTC.
+> - §5c (hardware verification): post-EBS `efi_print` calls fault
+>   on v36.4.7 — were "working by accident" pre-P2 because UEFI
+>   silently absorbed the faults. Removed from `efi_stub_entry`.
+> - §5c (new blocker): `primary_cpu` BSS clear raises "CBB
+>   Interface Error" because MMU-disabled ARM64 forces
+>   Device-nGnRnE and Tegra rejects that for DRAM. **Path 2
+>   pivot recommended** per #190 plan §5. Fixing this requires
+>   setting up SLM-OS page tables pre-BSS-clear — substantial
+>   boot.S rework.
 >
 > The three-approach `.reloc` scoping in §4 below is still
-> orthogonal to those findings.
+> orthogonal to those findings, but may be moot if Path 3 wins.
 
 ---
 

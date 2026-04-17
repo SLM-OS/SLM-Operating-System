@@ -951,32 +951,161 @@ jetson_early_vbar_el2:
      * duration of the WFE loop rather than recursing through this
      * handler. */
 
-    /* Emit "!FAULT\r\n" over UARTC. NS16550 THR at offset 0,
-     * 32-bit stride. Single-shot writes — if the wire eats them
-     * we get nothing; if the wire accepts them we get a
-     * human-visible marker on the serial console. */
+    /* Emit "!FAULT\r\n" over UARTC followed by a dump of the key
+     * EL2 exception registers. Without the dump, the reporter sees
+     * only that a fault occurred — with it, we get ESR_EL2 (EC and
+     * ISS, the single most useful value), ELR_EL2 (the faulting
+     * PC), FAR_EL2 (the faulting VA), HCR_EL2 (to cross-check P3's
+     * changes held), and SPSR_EL2 (PSTATE at fault time). Scratch
+     * slot x10 still points at `jetson_early_fault_slot`; values
+     * are at offsets 0x08/0x10/0x18/0x28/0x20 respectively.
+     *
+     * Every character goes through `.Ljetson_early_putc` which
+     * polls UARTC LSR.THRE (bit 5 at offset 0x14) before writing.
+     * An earlier revision of this handler streamed bytes directly
+     * to the THR register and silently dropped everything past
+     * the first ~36 bytes (the NS16550 TX FIFO filled faster than
+     * the TCU/USB-C redirector could drain it; field-observed by
+     * the P3 hardware probe that got truncated at "ELR=0x02B000"
+     * despite the handler looping through all 16 hex digits).
+     * w14 holds the character to emit throughout; x11 is the
+     * UARTC base. BL clobbers x30 but the top-level handler never
+     * `ret`s (ends in WFE), so that's fine here; `.Ljetson_early_
+     * emit_hex64` saves/restores x30 around its own loop. */
     ldr     x11, =0x0C280000
-    mov     w12, #'!'
-    str     w12, [x11]
-    mov     w12, #'F'
-    str     w12, [x11]
-    mov     w12, #'A'
-    str     w12, [x11]
-    mov     w12, #'U'
-    str     w12, [x11]
-    mov     w12, #'L'
-    str     w12, [x11]
-    mov     w12, #'T'
-    str     w12, [x11]
-    mov     w12, #'\r'
-    str     w12, [x11]
-    mov     w12, #'\n'
-    str     w12, [x11]
+    mov     w14, #'!';  bl .Ljetson_early_putc
+    mov     w14, #'F';  bl .Ljetson_early_putc
+    mov     w14, #'A';  bl .Ljetson_early_putc
+    mov     w14, #'U';  bl .Ljetson_early_putc
+    mov     w14, #'L';  bl .Ljetson_early_putc
+    mov     w14, #'T';  bl .Ljetson_early_putc
+    mov     w14, #'\r'; bl .Ljetson_early_putc
+    mov     w14, #'\n'; bl .Ljetson_early_putc
+
+    /* ESR=0xVVVVVVVVVVVVVVVV\r\n */
+    mov     w14, #'E';  bl .Ljetson_early_putc
+    mov     w14, #'S';  bl .Ljetson_early_putc
+    mov     w14, #'R';  bl .Ljetson_early_putc
+    mov     w14, #'=';  bl .Ljetson_early_putc
+    mov     w14, #'0';  bl .Ljetson_early_putc
+    mov     w14, #'x';  bl .Ljetson_early_putc
+    ldr     x12, [x10, #0x08]
+    bl      .Ljetson_early_emit_hex64
+    mov     w14, #'\r'; bl .Ljetson_early_putc
+    mov     w14, #'\n'; bl .Ljetson_early_putc
+
+    /* ELR=0xVVVVVVVVVVVVVVVV\r\n (the faulting PC — raw MRS
+     * value; ArmCpuDxe's -0x10000 display quirk does NOT apply
+     * here, this is ELR_EL2 as our handler read it). */
+    mov     w14, #'E';  bl .Ljetson_early_putc
+    mov     w14, #'L';  bl .Ljetson_early_putc
+    mov     w14, #'R';  bl .Ljetson_early_putc
+    mov     w14, #'=';  bl .Ljetson_early_putc
+    mov     w14, #'0';  bl .Ljetson_early_putc
+    mov     w14, #'x';  bl .Ljetson_early_putc
+    ldr     x12, [x10, #0x10]
+    bl      .Ljetson_early_emit_hex64
+    mov     w14, #'\r'; bl .Ljetson_early_putc
+    mov     w14, #'\n'; bl .Ljetson_early_putc
+
+    /* FAR=0xVVVVVVVVVVVVVVVV\r\n */
+    mov     w14, #'F';  bl .Ljetson_early_putc
+    mov     w14, #'A';  bl .Ljetson_early_putc
+    mov     w14, #'R';  bl .Ljetson_early_putc
+    mov     w14, #'=';  bl .Ljetson_early_putc
+    mov     w14, #'0';  bl .Ljetson_early_putc
+    mov     w14, #'x';  bl .Ljetson_early_putc
+    ldr     x12, [x10, #0x18]
+    bl      .Ljetson_early_emit_hex64
+    mov     w14, #'\r'; bl .Ljetson_early_putc
+    mov     w14, #'\n'; bl .Ljetson_early_putc
+
+    /* HCR=0xVVVVVVVVVVVVVVVV\r\n */
+    mov     w14, #'H';  bl .Ljetson_early_putc
+    mov     w14, #'C';  bl .Ljetson_early_putc
+    mov     w14, #'R';  bl .Ljetson_early_putc
+    mov     w14, #'=';  bl .Ljetson_early_putc
+    mov     w14, #'0';  bl .Ljetson_early_putc
+    mov     w14, #'x';  bl .Ljetson_early_putc
+    ldr     x12, [x10, #0x28]
+    bl      .Ljetson_early_emit_hex64
+    mov     w14, #'\r'; bl .Ljetson_early_putc
+    mov     w14, #'\n'; bl .Ljetson_early_putc
+
+    /* SPR=0xVVVVVVVVVVVVVVVV\r\n (SPSR_EL2) */
+    mov     w14, #'S';  bl .Ljetson_early_putc
+    mov     w14, #'P';  bl .Ljetson_early_putc
+    mov     w14, #'R';  bl .Ljetson_early_putc
+    mov     w14, #'=';  bl .Ljetson_early_putc
+    mov     w14, #'0';  bl .Ljetson_early_putc
+    mov     w14, #'x';  bl .Ljetson_early_putc
+    ldr     x12, [x10, #0x20]
+    bl      .Ljetson_early_emit_hex64
+    mov     w14, #'\r'; bl .Ljetson_early_putc
+    mov     w14, #'\n'; bl .Ljetson_early_putc
+
     dsb     sy
 
 .Ljetson_early_fault_hang:
     wfe
     b       .Ljetson_early_fault_hang
+
+/*
+ * Wait for UARTC TX FIFO to drain, then write one byte.
+ *
+ * Inputs:
+ *   x11 = UARTC base (0x0C280000)
+ *   w14 = byte to write
+ * Clobbers: x15
+ * Preserves: x30 (this routine does not use bl internally)
+ *
+ * Every LSR read is preceded by `dsb sy` — documented in
+ * kernel/drivers/uart_tegra.c as required on Tegra: without it,
+ * speculative / out-of-order reads return stale LSR data
+ * (THRE=0 even when the FIFO has drained) and the loop spins
+ * indefinitely. This is the same failure mode that made the
+ * first P3-with-hex-dump probe emit only marker C and nothing
+ * afterwards (the LSR-wait loop never exited).
+ */
+.Ljetson_early_putc:
+1:
+    dsb     sy
+    ldr     w15, [x11, #0x14]              /* LSR (offset 5, shift-2) */
+    tst     w15, #0x20                     /* THRE = bit 5 */
+    b.eq    1b
+    str     w14, [x11]                     /* THR */
+    ret
+
+/*
+ * Emit x12 as 16 hex digits (MSB first) over UARTC.
+ *
+ * Inputs:
+ *   x11 = UARTC base (0x0C280000)
+ *   x12 = value to emit
+ * Clobbers: x13, x14, x15, x16
+ * Preserves: x30 via save/restore through x16
+ * Stack:     none required.
+ *
+ * Uses `.Ljetson_early_putc` for each digit, which preserves x30
+ * itself but WE call it with bl, which clobbers OUR x30 — hence
+ * the save/restore pattern via x16 (scratch-safe, AAPCS IP0).
+ */
+.Ljetson_early_emit_hex64:
+    mov     x16, x30                       /* save caller's LR */
+    mov     x13, #60                       /* bit shift: 60, 56, ..., 0 */
+.Ljetson_ehu_loop:
+    lsr     x14, x12, x13
+    and     x14, x14, #0xf
+    cmp     x14, #10
+    b.lt    1f
+    add     x14, x14, #('A' - '0' - 10)
+1:
+    add     x14, x14, #'0'
+    bl      .Ljetson_early_putc
+    subs    x13, x13, #4
+    b.ge    .Ljetson_ehu_loop
+    mov     x30, x16                       /* restore caller's LR */
+    ret
 
 .section .bss
 .balign 64
