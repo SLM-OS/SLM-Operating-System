@@ -381,6 +381,11 @@ static struct {
  * _locked suffix on macb_tx_reap_locked stops being aspirational. */
 static spinlock_t tx_lock = SPINLOCK_INIT;
 
+/* Warn-once latch for RX partial-frame drops. Keeps the log quiet
+ * when a degraded MAC streams partial frames. Reset on any
+ * fully-formed frame to arm the next warning. */
+static bool rx_partial_warned = false;
+
 /* TX ring + buffer pool. 64-byte alignment matches the BCM2712
  * cacheline size — ensures cache_clean_range / cache_invalidate_range
  * on the ring doesn't touch unrelated data. Buffers get 16-byte
@@ -854,11 +859,22 @@ static int macb_rx_one(void *out_buf, size_t max_len)
     /* SOF+EOF both set = single-descriptor frame (the common case
      * with RXBS=1536). Partial frames (SOF without EOF or vice versa)
      * are rare but can happen; for the MVP, drop them — re-assembly
-     * adds complexity we don't need for DHCP/ping-class traffic. */
+     * adds complexity we don't need for DHCP/ping-class traffic.
+     * WARN-once latch (rx_partial_warned at file scope, same pattern
+     * as the stuck-descriptor watchdog's tx_stall_warned): a
+     * genuinely broken MAC could stream partial frames and flood the
+     * log. First occurrence per stall episode logs; the latch clears
+     * on the next fully-formed frame. */
     if (!((ctrl & MACB_RX_SOF) && (ctrl & MACB_RX_EOF))) {
-        WARN("RX: slot %u has partial frame (ctrl=0x%08x) — dropping",
-             slot, ctrl);
+        if (!rx_partial_warned) {
+            WARN("RX: slot %u has partial frame (ctrl=0x%08x) — dropping "
+                 "(further warnings suppressed until a full frame arrives)",
+                 slot, ctrl);
+            rx_partial_warned = true;
+        }
         frmlen = 0;
+    } else {
+        rx_partial_warned = false;
     }
 
     int ret;
@@ -913,12 +929,25 @@ static void macb_tx_reap_locked(void)
  * ready, kick TSTART, wait for completion. Holds tx_lock across
  * the whole submit-to-completion sequence so the future IRQ-driven
  * reap (once #247 unblocks MSIX_CFG) can't race with in-flight send.
- * spin_lock_irqsave + sleep_us inside the poll loop is unusual —
- * normally sleep-in-critical-section is a red flag — but here the
- * sleep_us yields only to other TASKS and tx_lock is specifically
- * IRQ-safe so the handler is just deferred until release, matching
- * virtio_net.c's spin_lock_irqsave over virtqueue_kick + poll
- * pattern. */
+ *
+ * **Known limitation: bounded priority inversion.** The lock is held
+ * across a 100 ms poll loop whose inner body calls sleep_us(10) →
+ * yield(). A high-priority task calling macb_send while a
+ * low-priority task holds the lock in its poll will block for up to
+ * 100 ms. This is acceptable for the MVP because:
+ *   - Real Ethernet completion is microseconds on gigabit; the 100 ms
+ *     budget is an "impossible stall" safety net that should never
+ *     actually run to completion.
+ *   - Pi 5 has no timer-IRQ preemption today (COOP_PREEMPT), so the
+ *     inversion window is bounded by the TX completion time of the
+ *     in-flight frame — not by an unrelated scheduler event.
+ *   - #247 resolution would eliminate the poll loop entirely —
+ *     tx_reap would drain completions from the IRQ handler and
+ *     send() would return as soon as the descriptor is queued.
+ * Not comparable to virtio_net.c's lock-across-kick-and-poll pattern
+ * because virtio completion is sub-millisecond; MACB's polled path
+ * can genuinely burn up to the 100 ms budget under pathological
+ * stalls. */
 static int macb_tx_one(const void *buf, size_t len)
 {
     if (len > MACB_TX_BUF_SIZE || len < 14) {
@@ -970,6 +999,12 @@ static int macb_tx_one(const void *buf, size_t len)
                      slot, tx_ring[slot].ctrl);
                 ret = NET_E_GENERIC;
             }
+            /* Advance tx_tail since we just confirmed this slot is
+             * done. Keeps the ring-full check at the top of the next
+             * send precise instead of lagging by one slot (worst-case
+             * previous behaviour: a premature NET_E_BUSY when 15/16
+             * were actually completed). */
+            macb_state.tx_tail = (slot + 1) & (MACB_TX_RING_SIZE - 1);
             spin_unlock_irqrestore(&tx_lock, flags);
             return ret;
         }
