@@ -3737,3 +3737,52 @@ int cmd_macbdiag(int argc, char *argv[])
 }
 
 #endif /* PLATFORM_RASPI5 && ENABLE_NETWORKING */
+
+#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
+#include "eth_rtl8169.h"
+/*
+ * rtldiag — RTL8168 PCIe probe diagnostic. Prints what the driver
+ * discovered during rtl8169_register(): vendor/device/revision from
+ * PCIe config space, BAR2 address, and (once Stage 2 lands) the MAC
+ * address read from IDR0..IDR5.
+ */
+int cmd_rtldiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== RTL8168 PCIe Diagnostic ===\r\n");
+
+    if (!rtl8169_is_probed()) {
+        uart_puts("  Device not probed — PCIe C8 link or ECAM not ready.\r\n");
+        uart_printf("  Last vendor seen: 0x%04x\r\n",
+                    (unsigned)rtl8169_get_pci_vendor());
+        uart_puts("=== End Diagnostic ===\r\n");
+        return 0;
+    }
+
+    uart_printf("  PCI vendor:   0x%04x  (expected 0x10EC)\r\n",
+                (unsigned)rtl8169_get_pci_vendor());
+    uart_printf("  PCI device:   0x%04x  (expected 0x8168)\r\n",
+                (unsigned)rtl8169_get_pci_device());
+    uart_printf("  PCI revision: 0x%02x\r\n",
+                (unsigned)rtl8169_get_pci_revision());
+    uart_printf("  BAR2 phys:    0x%lx\r\n",
+                (unsigned long)rtl8169_get_bar2());
+
+    const uint8_t *mac = rtl8169_get_mac_address();
+    if (mac) {
+        uart_printf("  MAC addr:     %02x:%02x:%02x:%02x:%02x:%02x\r\n",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        uart_puts("  MAC addr:     (not yet read — Stage 2 pending)\r\n");
+    }
+
+    uart_printf("  MAC_VER raw:  0x%x  (0 = not yet read)\r\n",
+                (unsigned)rtl8169_get_mac_ver_raw());
+    uart_printf("  Link up:      %s\r\n",
+                rtl8169_get_link_up() ? "YES" : "no");
+
+    uart_puts("=== End Diagnostic ===\r\n");
+    return 0;
+}
+#endif /* PLATFORM_JETSON_ORIN_NANO && ENABLE_NETWORKING */

@@ -173,10 +173,11 @@ if(EMBED_DEMO_SCRIPTS)
 endif()
 
 # Networking: ON for platforms with drivers (QEMU_VIRT virtio-mmio,
-# X86_64 virtio-pci, RASPI5 BCM GENET via RP1). OFF for platforms
-# still awaiting a native NIC driver (JETSON_ORIN_NANO — #25).
+# X86_64 virtio-pci, RASPI5 Cadence MACB via RP1, JETSON_ORIN_NANO
+# RTL8168 via PCIe C8). Default OFF for platforms still awaiting a
+# native NIC driver.
 if(PLATFORM STREQUAL "QEMU_VIRT" OR PLATFORM STREQUAL "X86_64"
-   OR PLATFORM STREQUAL "RASPI5")
+   OR PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
     option(ENABLE_NETWORKING "Enable TCP/IP networking stack (lwIP)" ON)
 else()
     option(ENABLE_NETWORKING "Enable TCP/IP networking stack (lwIP)" OFF)
@@ -418,6 +419,8 @@ set(KERNEL_SOURCES
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/macb.c>
     # BCM2712 VideoCore mailbox — supplies the board MAC to macb.c (#250)
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/bcm_mailbox.c>
+    # Realtek RTL8169/RTL8168 driver (Jetson Orin Nano, via Tegra PCIe C8) — #25
+    $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/drivers/eth_rtl8169.c>
     # Platform-independent networking stack
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>

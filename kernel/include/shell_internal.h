@@ -80,6 +80,10 @@ int cmd_timdiag(int argc, char **argv);
 int cmd_macbdiag(int argc, char **argv);
 #endif
 
+#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
+int cmd_rtldiag(int argc, char **argv);
+#endif
+
 /* Dashboard command (shell_top.c) */
 int cmd_top(int argc, char **argv);
 

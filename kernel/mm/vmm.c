@@ -79,6 +79,11 @@ static uint64_t l2_mmio[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 /* L2 table for 0xC0000000-0xFFFFFFFF: maps RAM around OP-TEE carveout */
 static uint64_t l2_ram_c0[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+/* L2 tables for PCIe C8 device regions (RTL8168 NIC + ECAM):
+ *   l2_pcie_ecam : L1[168] → 0x2A_0000_0000 (ECAM, 64 MB)
+ *   l2_pcie_bar  : L1[212] → 0x35_0000_0000 (1 GB window covers BAR2/BAR4) */
+static uint64_t l2_pcie_ecam[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+static uint64_t l2_pcie_bar[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #endif
 #if defined(PLATFORM_RASPI5)
 static uint64_t l2_mmio_pcie[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
@@ -938,6 +943,45 @@ static void vmm_setup_platform(void)
                                                    VMM_FLAG_WRITE |
                                                    VMM_FLAG_DEVICE);
         vmm_state.blocks_mapped += 512;
+    }
+#endif
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* PCIe C8 ECAM at 0x2A_0000_0000 (L1[168]). Map the first 2 MB of
+     * the ECAM window — enough for bus 0 (bridge) + bus 1 (RTL8168
+     * endpoint). Each bus consumes 1 MB of config space, so 2 MB covers
+     * both. */
+    {
+        uint64_t ecam_l1 = (uint64_t)(TEGRA_PCIE_C8_ECAM_BASE >> 30);
+        l1_table[ecam_l1] = make_table_desc((uint64_t)l2_pcie_ecam);
+        vmm_state.l2_tables_used++;
+
+        uint64_t ecam_l2_idx = (TEGRA_PCIE_C8_ECAM_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_pcie_ecam[ecam_l2_idx] =
+            make_block_desc(TEGRA_PCIE_C8_ECAM_BASE, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  PCIe C8 ECAM mapped: L1[%lu] L2[%lu] -> 0x%lx",
+                    (unsigned long)ecam_l1,
+                    (unsigned long)ecam_l2_idx,
+                    (unsigned long)TEGRA_PCIE_C8_ECAM_BASE);
+    }
+
+    /* RTL8168 BAR window at 0x35_2800_0000 (L1[212]). One 2 MB block
+     * covers BAR2 (0x3528004000, 4 KB) and BAR4 (0x3528000000, 16 KB)
+     * both — they land in the same 2 MB-aligned region. */
+    {
+        uint64_t bar_l1 = (uint64_t)(RTL8169_BAR_WINDOW_BASE >> 30);
+        l1_table[bar_l1] = make_table_desc((uint64_t)l2_pcie_bar);
+        vmm_state.l2_tables_used++;
+
+        uint64_t bar_l2_idx = (RTL8169_BAR_WINDOW_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_pcie_bar[bar_l2_idx] =
+            make_block_desc(RTL8169_BAR_WINDOW_BASE, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  RTL8168 BAR window mapped: L1[%lu] L2[%lu] -> 0x%lx",
+                    (unsigned long)bar_l1,
+                    (unsigned long)bar_l2_idx,
+                    (unsigned long)RTL8169_BAR_WINDOW_BASE);
     }
 #endif
 }

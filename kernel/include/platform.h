@@ -216,6 +216,35 @@
  */
 
 /*
+ * PCIe Root Complex C8 (pcie@140a0000) — hosts the RTL8168 NIC on the
+ * Jetson Orin Nano Super Developer Kit. Integrated Tegra Ethernet
+ * controllers (nveqos@2310000 + 4× mgbe@68[0-3]00000) are all marked
+ * status="disabled" in the carrier-board DT, so the RJ45 traffic goes
+ * out through this PCIe slot instead.
+ *
+ * Linux initializes the PCIe RC + link during boot. After kexec, SLM-OS
+ * inherits the configured state — no RC bring-up required for MMIO
+ * access to the device's BARs via ECAM-programmed config space.
+ */
+#define TEGRA_PCIE_C8_ECAM_BASE  0x2A00000000UL  /* ECAM (bus 0-255 × 1 MB) */
+#define TEGRA_PCIE_C8_ECAM_SIZE  0x04000000UL    /* 64 MB per bus range */
+
+/* RTL8168 BAR window — Linux-assigned. Covers both BAR2 (regs, 4 KB at
+ * +0x4000) and BAR4 (ext regs, 16 KB at +0x0000) in a single 2 MB block. */
+#define RTL8169_BAR_WINDOW_BASE  0x3528000000UL
+#define RTL8169_BAR2_BASE        0x3528004000UL  /* Main MMIO register bank */
+#define RTL8169_BAR2_SIZE        0x00001000UL    /* 4 KB */
+#define RTL8169_BAR4_BASE        0x3528000000UL  /* Extended registers */
+#define RTL8169_BAR4_SIZE        0x00004000UL    /* 16 KB */
+
+/* PCI address of the RTL8168 on PCIe C8: bus 0x01, dev 0x00, fn 0x00 */
+#define RTL8169_PCI_BUS          0x01
+#define RTL8169_PCI_DEV          0x00
+#define RTL8169_PCI_FUNC         0x00
+#define RTL8169_PCI_VENDOR       0x10ECU
+#define RTL8169_PCI_DEVICE       0x8168U
+
+/*
  * Spinlock policy: use the runtime `spinlock_hw_enabled` flag, same as Pi 5.
  *
  * Before MMU enable, memory is non-cacheable and LSE atomics (SWPALB) cause
