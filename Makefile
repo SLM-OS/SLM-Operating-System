@@ -245,6 +245,16 @@ gsp-harness:
 gsp-harness-clean:
 	rm -f $(GSP_HARNESS_OUT)
 
+# Jetson UEFI-direct boot layout regression test. Structural checks
+# on the built Jetson kernel ELF that can't be expressed as linker
+# ASSERTs — e.g. "efi_stub_entry contains an `msr vbar_el2`
+# instruction that loads `jetson_early_vbar_el2`". Catches
+# regressions that would only manifest as a silent hang on Jetson
+# hardware. No hardware needed — runs on the host.
+.PHONY: test-jetson-uefi-layout
+test-jetson-uefi-layout:
+	@bash scripts/test-jetson-uefi-layout.sh
+
 # VBIOS parser unit tests — runs on the host, no GPU required.
 # Synthetic VBIOS image built in the test, no proprietary binaries.
 .PHONY: test-vbios

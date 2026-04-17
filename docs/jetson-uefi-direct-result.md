@@ -230,6 +230,46 @@ state; UEFI's state is different.
 unconditional overwrite. Read HCR_EL2, ensure `E2H | RW | TGE` are
 set (OR them in), write back. Preserves UEFI's other bits.
 
+### 5d2. Early EL2 vector table (2026-04-17, Path-2 P2)
+
+The primary reason the HCR_EL2 write (and every subsequent
+UEFI-direct blocker) is *silent* is that post-EBS, VBAR_EL2 still
+points at ArmCpuDxe's handler, which depends on Boot Services state
+that EBS just freed. Any synchronous fault bounces to code that
+can't coherently report itself.
+
+**Fix (landed):** `efi_stub_entry()` now installs an
+SLM-OS-owned VBAR_EL2 table immediately after a successful
+`ExitBootServices`. The handler (in `kernel/arch/arm64/boot.S`,
+symbol `jetson_early_vbar_el2`):
+
+1. Disables EL2 MMU + caches so subsequent MMIO/DRAM accesses
+   don't recurse through the (potentially broken) translation that
+   caused the fault.
+2. Saves `ESR_EL2`, `ELR_EL2`, `FAR_EL2`, `SPSR_EL2`, `HCR_EL2`,
+   and `CurrentEL` to `jetson_early_fault_slot` (BSS, 64 bytes),
+   prefixed with magic `"__EL2FAT"` so a memory dump (e.g. via
+   kexec-from-Linux recovery or watchdog warm reset) can
+   distinguish "handler fired" from "BSS zeroed".
+3. Emits `"!FAULT\r\n"` over UARTC (0x0C280000) as a real-time
+   visible signal. Single-shot writes, SError masked so a CBB
+   firewall block or translation failure on the UARTC write itself
+   doesn't recurse.
+4. WFE-loops forever.
+
+Gated on `PLATFORM_JETSON_ORIN_NANO` and `CurrentEL == 8` (EL2).
+Pre-EBS and kexec-from-Linux paths are unaffected.
+
+**What this enables:**
+- §5c's HCR_EL2 hang becomes observable: if the write faults, we
+  either see `!FAULT` on UARTC, or we see nothing but can still
+  detect handler-ran via post-recovery DRAM dump.
+- §5d's UARTC MMIO fault hypothesis can be re-tested: with the
+  handler in place, a faulting UARTC store at EL2 now goes to the
+  handler instead of hanging silently.
+- All future UEFI-direct probes (§5c alternatives a/b/c) have a
+  fault-visible baseline.
+
 ### 5d. UARTC MMIO at 0x0C280000 still faults at EL2 under UEFI-direct
 
 Skipping the HCR_EL2 write lets execution continue into the timer
