@@ -103,10 +103,15 @@ SECTIONS
 
     /* PE .data section: initialized data.
      * VA = file offset of .data (relative to image base).
-     * Size = .data content rounded up to FileAlignment (512 bytes). */
+     * Raw size = .data content rounded up to FileAlignment (512 bytes).
+     * Virtual size covers through __kernel_end so UEFI zero-fills the
+     * BSS + stack portion when mapping .data into memory. This is what
+     * lets the W^X-enforcing UEFI firmware map the whole region as
+     * writable + non-executable, unblocking boot.S's BSS clear. */
     _kernel_data_va = __data_start - _start;
     _kernel_data_size = __data_end - __data_start;
     _kernel_data_file = __data_start - _start;
+    _kernel_data_virtual_size = __kernel_end - __data_start;
 
     /* Discard unwanted sections */
     /DISCARD/ : {
@@ -119,11 +124,51 @@ SECTIONS
 /* Sanity checks */
 ASSERT(__kernel_end < 0x81000000, "Kernel image too large!")
 
-/* PE/COFF alignment constraints (SectionAlignment=0x10000, FileAlignment=0x200).
- * These must hold for UEFI to accept the PE/COFF image on Jetson. */
+/* PE/COFF invariants (SectionAlignment=0x10000, FileAlignment=0x200).
+ * These must hold for UEFI to accept the PE/COFF image built from
+ * this layout. Each assert would catch a specific regression in the
+ * PE header or in the linker-emitted section boundaries. */
+
+/* .data's VirtualAddress must be SectionAlignment-aligned. */
 ASSERT((__data_start - _start) % 0x10000 == 0,
     "PE error: .data VA not aligned to SectionAlignment (64KB)")
+
+/* .data's SizeOfRawData must be FileAlignment-aligned. */
 ASSERT((__data_end - __data_start) % 0x200 == 0,
     "PE error: .data SizeOfRawData not aligned to FileAlignment (512)")
-ASSERT((_kernel_size + 0x10000) % 0x10000 == 0,
+
+/* .text's SizeOfRawData must be FileAlignment-aligned. Holds today
+ * because _kernel_code_size = __data_start - _start - 0x10000 and
+ * __data_start is SectionAlignment-aligned (0x10000 ≫ 0x200), but
+ * assert explicitly so a future linker change that moves .data onto
+ * a smaller alignment breaks the build instead of producing an
+ * invalid PE. */
+ASSERT(_kernel_code_size % 0x200 == 0,
+    "PE error: .text SizeOfRawData not aligned to FileAlignment (512)")
+
+/* .data's PointerToRawData must be FileAlignment-aligned — same
+ * reasoning as SizeOfRawData. `_kernel_data_file` is defined above
+ * as `__data_start - _start`, so this tracks the section's file
+ * placement. */
+ASSERT(_kernel_data_file % 0x200 == 0,
+    "PE error: .data PointerToRawData not aligned to FileAlignment (512)")
+
+/* SizeOfImage must be SectionAlignment-aligned. `_kernel_size` is
+ * already `__kernel_end - _start` where __kernel_end is forced
+ * 0x10000-aligned above, so this is a belt-and-braces check in case
+ * someone moves the ALIGN. */
+ASSERT(_kernel_size % 0x10000 == 0,
     "PE error: SizeOfImage not aligned to SectionAlignment (64KB)")
+
+/* .text and .data must not overlap. .text ends at VA 0x10000 +
+ * _kernel_code_size; .data starts at VA _kernel_data_va. Would
+ * catch the QEMU-linker bug where _kernel_code_size incorrectly
+ * included the .data range. */
+ASSERT(_kernel_data_va >= 0x10000 + _kernel_code_size,
+    "PE error: .text and .data sections overlap")
+
+/* .data's end VA (VirtualAddress + VirtualSize) must equal
+ * SizeOfImage, i.e. no gap between .data and the end of the mapped
+ * image. Would catch a _kernel_data_virtual_size miscalculation. */
+ASSERT(_kernel_data_va + _kernel_data_virtual_size == _kernel_size,
+    "PE error: .data end VA != SizeOfImage (layout inconsistency)")
