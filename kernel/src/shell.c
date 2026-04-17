@@ -45,6 +45,7 @@ const shell_cmd_t builtin_commands[] = {
     {"model",  cmd_model,  "Model management (load/list/info/unload/pools)"},
     {"dtb",    cmd_dtb,    "Show device tree info"},
     {"gpu",    cmd_gpu,    "Show GPU info (gpu [read <hex-offset>])"},
+    {"peek",   cmd_peek,   "Read physical memory (peek <phys-hex> [count])"},
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     {"nvgpu",  cmd_nvgpu,  "Jetson nvgpu bringup (nvgpu <prepare|run|info>)"},
 #endif
