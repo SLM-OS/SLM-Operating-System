@@ -792,3 +792,190 @@ secondary_spin:
  * Note: Exception vector table is now in vectors.S
  */
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+/*
+ * =========================================================================
+ * Early EL2 exception vector table — UEFI-direct diagnostic
+ * =========================================================================
+ *
+ * Installed by efi_stub_entry() immediately after a successful
+ * ExitBootServices so any synchronous fault during the UEFI→SLM-OS
+ * transition (post-EBS efi_prints, efi_disable_mmu, the return to
+ * boot.S, the Jetson EL2 block's HCR_EL2 write, UARTC probe,
+ * timer disables) lands in this handler instead of bouncing to
+ * UEFI's VBAR_EL2 — which on post-EBS firmware points into
+ * ArmCpuDxe memory that may have been freed or may depend on Boot
+ * Services state that no longer exists. A fault into that handler
+ * is the current silent-hang failure mode on the UEFI-direct path
+ * (docs/jetson-uefi-direct-result.md §5c).
+ *
+ * At fault time the handler:
+ *   1. Disables EL2 MMU so subsequent MMIO/DRAM accesses don't
+ *      recurse through the (potentially broken) translation that
+ *      faulted in the first place.
+ *   2. Records ESR_EL2, ELR_EL2, FAR_EL2, SPSR_EL2, HCR_EL2,
+ *      CurrentEL and a magic signature to `jetson_early_fault_slot`
+ *      (BSS, PC-reachable via adrp+add) so a future debugger /
+ *      warm-reset recovery path can identify what happened.
+ *   3. Emits "!FAULT\r\n" over UARTC (0x0C280000) as a real-time
+ *      signal that the handler fired. One attempt per register;
+ *      if UARTC MMIO itself faults, SError stays masked by the
+ *      automatic PSTATE.DAIF set on exception entry so the async
+ *      abort doesn't recurse.
+ *   4. WFE-loops forever.
+ *
+ * Design notes:
+ *   - Uses only x10-x12. No stack required — safe even if SP is
+ *     corrupted or unmapped.
+ *   - VBAR_EL2 requires 0x800 (2KB) alignment; each of the 16
+ *     vectors is 0x80 (128) bytes. Total table size: 2048 bytes.
+ *   - All 16 vectors funnel to the same handler — we don't care
+ *     which class of exception fired, only that one did.
+ *   - The scratch slot is in BSS so UEFI's VirtualSize zero-fill
+ *     guarantees it starts at zero; the magic signature lets a
+ *     reader distinguish "handler fired" from "slot untouched".
+ *   - No explicit cache maintenance on the slot writes: the
+ *     handler disables EL2 MMU + caches (SCTLR_EL2.M/C/I clear)
+ *     BEFORE storing, so writes go through Device-nGnRnE and land
+ *     in DRAM directly. A follow-up reader (kexec-from-Linux,
+ *     warm-reset dump) sees them without dc civac. If the
+ *     MMU-disable step is ever moved AFTER the slot writes, add
+ *     `dc civac` + `dsb sy` per store.
+ */
+.balign 0x800
+.global jetson_early_vbar_el2
+jetson_early_vbar_el2:
+    /* Current EL with SP0 (EL2t) */
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    /* Current EL with SPx (EL2h) — normal case */
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    /* Lower EL using AArch64 */
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    /* Lower EL using AArch32 — not supported */
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+    .balign 0x80
+    b       .Ljetson_early_fault
+
+    .balign 0x80
+.Ljetson_early_fault:
+    /* Disable EL2 MMU + caches so subsequent accesses bypass
+     * translation. Clearing M prevents nested translation faults
+     * from the handler's own MMIO/DRAM accesses. Clearing I+C
+     * avoids pulling stale cache state. */
+    mrs     x10, sctlr_el2
+    bic     x10, x10, #(1 << 0)           /* M  */
+    bic     x10, x10, #(1 << 2)           /* C  */
+    bic     x10, x10, #(1 << 12)          /* I  */
+    msr     sctlr_el2, x10
+    dsb     sy
+    isb
+
+    /* Scratch slot base: adrp+add gives a full 32-bit PC-relative
+     * address, reaching BSS regardless of .data/.text distance. */
+    adrp    x10, jetson_early_fault_slot
+    add     x10, x10, :lo12:jetson_early_fault_slot
+
+    /* Magic "__EL2FAT" — stored so a hexdump / strings(1) on the
+     * slot produces the readable string "__EL2FAT" starting at
+     * offset 0. Memory layout: addr+0..7 = {'_','_','E','L','2',
+     * 'F','A','T'}. For a little-endian STR of a uint64, each
+     * halfword in x11 becomes two bytes at addr+(N/8) and
+     * addr+(N/8)+1, where N is the low bit of the halfword. The
+     * low byte of each halfword lands at the lower address. */
+    movz    x11, #0x5F5F                  /* addr+0..1: "__" */
+    movk    x11, #0x4C45, lsl #16         /* addr+2..3: "EL" */
+    movk    x11, #0x4632, lsl #32         /* addr+4..5: "2F" */
+    movk    x11, #0x5441, lsl #48         /* addr+6..7: "AT" */
+    str     x11, [x10, #0x00]
+
+    mrs     x11, esr_el2
+    str     x11, [x10, #0x08]
+    mrs     x11, elr_el2
+    str     x11, [x10, #0x10]
+    mrs     x11, far_el2
+    str     x11, [x10, #0x18]
+    mrs     x11, spsr_el2
+    str     x11, [x10, #0x20]
+    mrs     x11, hcr_el2
+    str     x11, [x10, #0x28]
+    mrs     x11, CurrentEL
+    str     x11, [x10, #0x30]
+    dsb     sy
+
+    /* No explicit daifset here: on EL2 exception entry, ARMv8
+     * hardware sets PSTATE.DAIF (D, A, I, F all masked). SError is
+     * already held, so if the UARTC writes below raise an async
+     * abort (CBB firewall, translation), it stays pending for the
+     * duration of the WFE loop rather than recursing through this
+     * handler. */
+
+    /* Emit "!FAULT\r\n" over UARTC. NS16550 THR at offset 0,
+     * 32-bit stride. Single-shot writes — if the wire eats them
+     * we get nothing; if the wire accepts them we get a
+     * human-visible marker on the serial console. */
+    ldr     x11, =0x0C280000
+    mov     w12, #'!'
+    str     w12, [x11]
+    mov     w12, #'F'
+    str     w12, [x11]
+    mov     w12, #'A'
+    str     w12, [x11]
+    mov     w12, #'U'
+    str     w12, [x11]
+    mov     w12, #'L'
+    str     w12, [x11]
+    mov     w12, #'T'
+    str     w12, [x11]
+    mov     w12, #'\r'
+    str     w12, [x11]
+    mov     w12, #'\n'
+    str     w12, [x11]
+    dsb     sy
+
+.Ljetson_early_fault_hang:
+    wfe
+    b       .Ljetson_early_fault_hang
+
+.section .bss
+.balign 64
+.global jetson_early_fault_slot
+jetson_early_fault_slot:
+    .skip 64                              /* 8 × uint64_t */
+.global jetson_early_fault_slot_end
+jetson_early_fault_slot_end:
+
+/* Restore the original section the file opened in (`.text.boot`)
+ * so any code added below this block lands in the boot text
+ * section rather than plain `.text`. Without this, a future edit
+ * that appends routines after `#endif` would silently land in the
+ * wrong section and potentially outside the kernel's first
+ * segment. */
+.section .text.boot
+#endif /* PLATFORM_JETSON_ORIN_NANO */
+

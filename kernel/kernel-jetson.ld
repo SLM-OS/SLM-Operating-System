@@ -172,3 +172,27 @@ ASSERT(_kernel_data_va >= 0x10000 + _kernel_code_size,
  * image. Would catch a _kernel_data_virtual_size miscalculation. */
 ASSERT(_kernel_data_va + _kernel_data_virtual_size == _kernel_size,
     "PE error: .data end VA != SizeOfImage (layout inconsistency)")
+
+/* Early EL2 VBAR (UEFI-direct diagnostic) invariants.
+ *
+ * The `jetson_early_vbar_el2` table in boot.S is loaded into
+ * VBAR_EL2 by efi_stub_entry post-EBS. ARM64 requires VBAR to be
+ * 0x800 (2048-byte) aligned — an unaligned table silently
+ * misroutes every exception to garbage. The `.balign 0x800`
+ * directive should take care of this, but assert explicitly so a
+ * future edit (moving the table, wrapping it in an extra section,
+ * inserting code before it) breaks the build instead of producing
+ * a quietly-broken binary. */
+ASSERT((jetson_early_vbar_el2 & 0x7FF) == 0,
+    "Jetson early VBAR_EL2 table is not 2KB-aligned (ARM64 VBAR requirement)")
+
+/* The handler writes 56 bytes (7 × uint64_t: magic, ESR, ELR, FAR,
+ * SPSR, HCR, CurrentEL) into `jetson_early_fault_slot`. BSS gives
+ * us 64 bytes; if someone shrinks the `.skip` the handler will run
+ * off the end of the slot and stomp whatever BSS variable follows.
+ * Pin the size via the next-symbol check. The first declared BSS
+ * symbol after the slot is `__bss_end` if the slot is last in BSS,
+ * but boot.S places the slot early in BSS so we can't rely on
+ * that; instead use a paired marker symbol, defined below. */
+ASSERT(jetson_early_fault_slot_end - jetson_early_fault_slot >= 64,
+    "jetson_early_fault_slot too small (handler writes 56 bytes, need ≥ 64)")

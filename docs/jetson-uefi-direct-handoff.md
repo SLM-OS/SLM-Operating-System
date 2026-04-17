@@ -3,6 +3,20 @@
 > Session handoff written 2026-04-16. Read this before touching code.
 > When this doc and the long-form docs disagree, the long-form docs are
 > authoritative — file an update here.
+>
+> **2026-04-17 update:** two investigation deltas landed since this
+> doc was written — both in `docs/jetson-uefi-direct-result.md`:
+> - §5b / §5c / §5d (PR #239, #240, this PR): UEFI is at EL2 with
+>   `HCR_EL2 = 0x88000000` (**E2H=0**, no VHE). The EL2 block's
+>   `msr hcr_el2, x10` unconditional write flips E2H 0→1 mid-flight
+>   and hangs. Use RMW + MMU-off-before-HCR pattern.
+> - §5d2 (this PR): SLM-OS now installs its own VBAR_EL2 table
+>   (`jetson_early_vbar_el2`) immediately post-EBS, so future
+>   UEFI-direct faults are visible (`!FAULT\r\n` on UARTC + scratch
+>   slot dump) instead of silent.
+>
+> The three-approach `.reloc` scoping in §4 below is still
+> orthogonal to those findings.
 
 ---
 
@@ -282,6 +296,12 @@ make test
 
 # Existing host test suites (should always pass):
 make test-ga10b-bringup test-falcon test-bringup test-nvfw test-rpc
+
+# Jetson UEFI-direct boot-image layout regression test.
+# Verifies jetson_early_vbar_el2 alignment, fault-slot location,
+# install-site reachability, VBAR_EL1 install preservation. Run
+# this after any change to boot.S, efi_stub.c, or kernel-jetson.ld.
+make test-jetson-uefi-layout
 ```
 
 The resulting `build/kernel/slmos.elf` is the PE candidate. Rename to

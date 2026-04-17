@@ -279,6 +279,60 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
         return NULL;
     }
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /*
+     * Take ownership of the EL2 exception vectors IMMEDIATELY after
+     * ExitBootServices returns, before any other post-EBS work runs.
+     *
+     * Until this runs, VBAR_EL2 still points at ArmCpuDxe's vector
+     * table, which depends on Boot Services state that the EBS just
+     * tore down. Any synchronous fault in the code that follows
+     * (post-EBS efi_prints, efi_disable_mmu, the return to boot.S,
+     * the Jetson EL2 block's HCR_EL2 write, UARTC probe) would
+     * bounce to that now-invalid handler and hang silently — the
+     * historical failure mode tracked in
+     * docs/jetson-uefi-direct-result.md §5c.
+     *
+     * `jetson_early_vbar_el2` is the SLM-OS-owned diagnostic table
+     * defined at the end of boot.S. It saves ESR/ELR/FAR/SPSR/HCR to
+     * `jetson_early_fault_slot` in BSS and emits "!FAULT\r\n" over
+     * UARTC. The declared size [2048] matches the 16 × 0x80 ARM64
+     * vector-table layout so the compiler can catch a stray
+     * out-of-range indexing in any future C caller.
+     *
+     * Only runs from EL2 — CurrentEL-gated because reading or
+     * writing VBAR_EL2 from EL1 would trap. If firmware drops us to
+     * EL1 (unexpected on Jetson but possible elsewhere), print a
+     * warning so the silent-skip doesn't look like a successful
+     * install.
+     *
+     * Kexec path doesn't pass through here (it jumps straight to
+     * real_start with x1 = 0), so this change is UEFI-direct only.
+     */
+    {
+        extern uint8_t jetson_early_vbar_el2[2048];
+        static const efi_char16_t m_vbar_not_el2[] =
+            u"[slmos] W not at EL2, VBAR_EL2 not installed\r\n";
+        uint64_t cur_el;
+        __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur_el));
+        if (cur_el == 8) {
+            __asm__ volatile(
+                "msr vbar_el2, %0\n"
+                "isb\n"
+                :
+                : "r"(jetson_early_vbar_el2)
+                : "memory");
+        } else {
+            /* ConOut may be torn down post-EBS (see comment block
+             * below), but if it still works on this firmware the
+             * warning reaches the serial console; if not, the
+             * absence of a subsequent `!FAULT` from the handler is
+             * itself a signal. */
+            efi_print(sys_table, m_vbar_not_el2);
+        }
+    }
+#endif
+
     /*
      * POST-EBS efi_print calls below are firmware-dependent.
      *
@@ -289,19 +343,10 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * being called with MMU on/off). On other firmware the struct
      * may be freed, zeroed, or left with dangling function pointers,
      * in which case efi_print's NULL guards don't help — a non-NULL
-     * garbage `output_string` dereference would synchronously fault,
-     * go to UEFI's still-installed VBAR_EL1, and hang silently (the
-     * earlier `msr daifset, #0xF` in boot.S masks IRQ/FIQ/SError but
-     * does NOT mask synchronous exceptions).
-     *
-     * Kept as best-effort diagnostics — when they work, they pin down
-     * whether EBS succeeded and whether efi_disable_mmu ran; when they
-     * don't, the symptom is indistinguishable from the silent-hang
-     * blocker in boot.S's `msr hcr_el2` (see
-     * docs/jetson-uefi-direct-result.md §5c). Firmware-portable
-     * post-EBS tracing is a separate project (memory-scratch + DRAM
-     * retention across warm reset, or an SLM-OS VBAR_EL1 installed
-     * before EBS).
+     * garbage `output_string` dereference would synchronously fault.
+     * On Jetson, the VBAR_EL2 swap above catches that fault; on
+     * other ARM64 UEFI targets without the swap, the fault would
+     * still go to UEFI's torn-down vector.
      */
     efi_print(sys_table, m_post_ebs);
 
