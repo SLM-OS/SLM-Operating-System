@@ -1848,6 +1848,8 @@ static int model_preload_start(const char *name)
  */
 void model_boot_preload(void)
 {
+    /* 512 bytes holds ~15 model paths at ~30 chars each; increase if
+     * MAX_MODELS grows past 8. */
     static char conf_buf[512];
     int bytes = vfs_read_path("/mnt/files/preload.conf", conf_buf,
                               sizeof(conf_buf) - 1, 0);
