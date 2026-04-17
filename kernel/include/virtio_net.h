@@ -253,6 +253,28 @@ uint32_t virtio_net_get_irq_count(void);
 uint32_t virtio_net_get_irq(void);
 
 /**
+ * Get the number of times the stuck-descriptor watchdog has fired.
+ *
+ * Incremented once per stall episode (latch resets on the next
+ * successful reap). Exposed so tests can assert the watchdog stays
+ * quiet on healthy traffic and fires exactly when a stall is
+ * simulated via virtio_net_test_rewind_last_progress().
+ */
+uint32_t virtio_net_get_tx_stall_count(void);
+
+/**
+ * TEST-ONLY: run the stuck-descriptor watchdog check with synthetic
+ * inputs (no-progress + in-flight pool + elapsed > threshold).
+ *
+ * Exercises exactly the branch tx_reap_locked takes when a real
+ * stall happens, so the regression suite can assert that the
+ * stall counter advances and the WARN path is not broken —
+ * without needing a way to force QEMU to stop completing TX or
+ * to burn 5 real seconds per test. Not for driver code.
+ */
+void virtio_net_test_trigger_watchdog(void);
+
+/**
  * Register the VirtIO-Net MMIO driver with the net_driver abstraction.
  *
  * Called during platform init (before net_init) so the lwIP adapter

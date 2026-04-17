@@ -660,6 +660,9 @@ on both ARM64 MMIO and x86-64 PCI paths):
 | `test_net_irq_handler_drains_tx` | Direct handler invocation bumps `virtio_net_get_irq_count()` and drains the TX used ring (#204) |
 | `test_net_msix_enabled` | PCI driver enabled MSI-X during init (#204 item 3) |
 | `test_net_msix_vector_is_in_range` | MSI-X vector is in the 50-63 reserved range (#204 item 3) |
+| `test_net_msix_handler_drains_tx` | Direct handler invocation bumps `virtio_net_pci_get_irq_count()` and drains the TX used ring (#204 item 3) |
+| `test_net_mmio_watchdog_quiet` / `test_net_pci_watchdog_quiet` | Watchdog stays silent on normal TX burst + drain (#204 item 4) |
+| `test_net_mmio_watchdog_fires_on_stall` / `test_net_pci_watchdog_fires_on_stall` | Synthetic trigger bumps the stall counter exactly once (#204 item 4) |
 
 Run tests with:
 
