@@ -102,7 +102,8 @@ This hybrid approach leverages:
 
 | Component | File(s) | Purpose |
 |-----------|---------|---------|
-| DTB Parser | `kernel/src/dtb.c` | Device Tree parsing for hardware discovery |
+| DTB Parser (boot-time extraction) | `kernel/src/dtb.c` | One-shot walk that populates `fdt_info_t` with RAM / UART / GIC / timer / CPU count before drivers start. Also exposes `dtb_get_blob()` — the raw firmware pointer for ad-hoc lookups. |
+| FDT Reader (general-purpose) | `kernel/include/fdt.h`, `kernel/lib/fdt/fdt.c` | Path-based node + property lookup over the same flattened tree, for any driver needing a DT-sourced value at init time. No allocation, no recursion. First consumer: MACB `local-mac-address` (#255). |
 | Platform Info | `kernel/include/platform.h` | Compile-time fallback values |
 | RP1 UART Driver | `kernel/drivers/uart_rp1_bitbang.c` | Pi 5 UART via RP1 southbridge |
 | x86-64 Boot | `kernel/arch/x86_64/trampoline32.S`, `entry64.S` | Multiboot2 header, 32-bit trampoline to long mode, CR4.OSFXSR/OSXMMEXCPT + CR0.MP for SSE at CPL=0 |

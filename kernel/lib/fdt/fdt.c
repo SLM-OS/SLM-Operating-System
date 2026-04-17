@@ -167,8 +167,11 @@ int fdt_find_node_by_path(const struct fdt_handle *h, const char *path,
 
         case FDT_END_NODE:
             if (depth == 0) {
-                /* Unbalanced END_NODE — walked past the root. */
-                return FDT_LIB_E_BADSTRUCT;
+                /* We've walked the full root-level child list without
+                 * matching a component, so the requested path does
+                 * not exist in this tree. Not a structural error —
+                 * the caller's path just isn't here. */
+                return FDT_LIB_E_NOTFOUND;
             }
             if (depth == matched_depth) {
                 matched_depth--;

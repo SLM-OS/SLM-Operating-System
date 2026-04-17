@@ -424,6 +424,9 @@ set(TEST_SOURCES
     kernel/tests/test_elf.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
+    # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for
+    # the same reason as test_dtb.c above
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_fdt.c>
     # ARM64-specific test files (use inline asm not available on x86-64)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_scheduler.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_mem.c>

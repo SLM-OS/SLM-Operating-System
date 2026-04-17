@@ -399,17 +399,64 @@ entry is required.
    `MACB_NCFGR_DRFCS` (strip FCS from RX). Without these two, the
    MAC either drops all normal frames (no BIG) or hands lwIP
    garbage (+4 bytes of FCS trailing).
-8. **MAC address program.** `SA1B`/`SA1T` with a locally-
-   administered unicast MAC (`02:00:00:5A:00:01`). Board-unique
-   derivation is a nice-to-have; a fixed MAC works for a single-
-   board lab.
-9. **TX ring + RX ring init.** 16 × 2048-byte TX buffers, 16 ×
-   1536-byte RX buffers, all cacheable DRAM with
-   `cache_clean_range` / `cache_invalidate_range` at DMA sync
-   points (mandatory on Pi 5 — no SMPEN). `DMACFG` set via RMW:
+8. **MAC address program.** `SA1B`/`SA1T` with the factory MAC
+   obtained through a 3-tier lookup (see "MAC source priority"
+   below). Pi 5 boards in the lab now boot with the address printed
+   on the sticker and the DHCP reservation key Linux uses.
+9. **TX ring + RX ring init.** 16 × 2048-byte TX buffers in
+   cacheable DRAM (per-buffer cache maintenance at DMA sync
+   points), 16 × 1536-byte RX buffers the same way. **The rings
+   themselves live in non-cacheable (NC) memory** — eight 8-byte
+   MACB descriptors share one 64-byte cacheline, so a CPU write to
+   descriptor N would dirty the whole line and a later clean would
+   write the CPU's stale view of descriptors N±1..N±7 back to
+   DRAM, overwriting concurrent MAC DMA. NC memory side-steps the
+   false-sharing window entirely. Allocated from the 2 MB
+   `ncmem` pool (`ncmem_alloc`); falls back to cacheable BSS with
+   a loud WARN if the pool is exhausted. `DMACFG` set via RMW:
    FBL=16, RXBS=24 (1536/64), RXBMS=3, TXPBMS=1, DDRP=1.
 10. **Enable RE + TE in NCR.** MAC starts consuming RX descriptors
     and accepting TX kicks.
+
+**MAC source priority (#250, #255).** `macb_program_mac_address`
+walks a three-tier lookup, stopping at the first source that
+yields a usable address:
+
+1. **VideoCore mailbox, property tag `0x00010003`
+   (`GET_BOARD_MAC_ADDRESS`).** BCM2712 mailbox MMIO at
+   `0x107C013880`, mapped in `vmm_setup_platform`. Buffer is a
+   16-byte-aligned cacheable BSS (low < 1 GB, required for the
+   legacy VC bus-address encoding `phys | 0xC0000000`), with
+   `cache_clean_range` + `cache_invalidate_range` around the
+   round-trip. Pi 5 EEPROM implements this tag from **2025-05-08
+   onward** (rpi-eeprom #698); older EEPROM returns buffer-level
+   parse error `0x80000001`, which the driver treats as
+   "tag unsupported on this revision" rather than a generic failure.
+   Code lives in `kernel/drivers/bcm_mailbox.c`.
+2. **DTB `local-mac-address`** at
+   `/axi/pcie@1000120000/rp1/ethernet@100000`. The Pi 5
+   bootloader patches the factory MAC into this property before
+   handing the kernel off, so this tier works on **every** EEPROM
+   revision — the fallback that closes the "old firmware" gap left
+   by tier 1. Uses the general-purpose FDT reader at
+   `kernel/lib/fdt/fdt.c` via `dtb_get_blob()`
+   (`kernel/src/dtb.c`). Rejects an all-zero / all-0xFF MAC as a
+   sign the bootloader didn't patch.
+3. **Fixed locally-administered MAC** `02:00:00:5A:00:01` with a
+   loud WARN. Last-resort safety net — single-board lab safe,
+   collision-prone on a shared subnet.
+
+Hardware result on pi-5-1 (EEPROM firmware `0x66f16700`, late 2024):
+tier 1 fails with parse error, tier 2 returns `2c:cf:67:ca:a0:b5`
+(Raspberry Pi Trading OUI — matches the sticker and the DHCP
+reservation key Linux uses). DHCP now binds the same IP Linux
+would get on the same board.
+
+The **FDT reader** (`kernel/include/fdt.h`, `kernel/lib/fdt/fdt.c`)
+is general-purpose — not MACB-specific. Any driver needing a DT-
+sourced value at init time can call `fdt_init` +
+`fdt_get_property_by_path` (or `fdt_get_u32` for single-cell
+numerics). Tests live in `kernel/tests/test_fdt.c`.
 
 **Polling model.** Polling is the operational path, for a different
 reason than #134 (timer PPI-30 policy). The peripheral-IRQ path via
