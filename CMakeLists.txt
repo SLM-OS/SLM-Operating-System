@@ -390,6 +390,8 @@ set(KERNEL_SOURCES
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/virtio_net_pci.c>
     # Cadence MACB/GEM driver (Pi 5 only, via RP1 southbridge) — #202
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/macb.c>
+    # BCM2712 VideoCore mailbox — supplies the board MAC to macb.c (#250)
+    $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/bcm_mailbox.c>
     # Platform-independent networking stack
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>
