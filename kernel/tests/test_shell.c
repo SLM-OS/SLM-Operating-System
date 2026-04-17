@@ -340,6 +340,40 @@ static void test_shell_cmd_model_preload(void)
     shell_execute("model unload mnist");
 }
 
+/*
+ * Test the preload-wait path: start a preload, then immediately call
+ * `model preload-wait mnist` which should block until the background
+ * task completes and return the model index.
+ */
+static void test_shell_cmd_model_preload_wait(void)
+{
+    int existing = rust_model_find("mnist");
+    if (existing >= 0) {
+        shell_execute("model unload mnist");
+    }
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model preload mnist"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model preload-wait mnist 5000"));
+
+    int idx = rust_model_find("mnist");
+    TEST_ASSERT_TRUE(idx >= 0);
+
+    shell_execute("model unload mnist");
+}
+
+/*
+ * Test preload-wait when no preload is in-flight — should return
+ * "not found" error without hanging.
+ */
+static void test_shell_cmd_model_preload_wait_not_inflight(void)
+{
+    int existing = rust_model_find("nonexistent");
+    TEST_ASSERT_TRUE(existing < 0);
+    /* preload-wait for a model that was never preloaded should fail. */
+    int ret = shell_execute("model preload-wait nonexistent 100");
+    TEST_ASSERT_NOT_EQUAL(0, ret);
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2234,6 +2268,8 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_eviction_features);
     RUN_TEST(test_shell_cmd_model_pin_lifecycle);
     RUN_TEST(test_shell_cmd_model_preload);
+    RUN_TEST(test_shell_cmd_model_preload_wait);
+    RUN_TEST(test_shell_cmd_model_preload_wait_not_inflight);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);

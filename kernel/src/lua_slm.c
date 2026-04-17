@@ -493,6 +493,23 @@ static int l_model_preload(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.model_preload_wait(name [, timeout_ms]) - Wait for async preload (#64)
+ * Returns model index (>=0) on success, negative on error/timeout.
+ */
+static int l_model_preload_wait(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_checkstring(L, 1);
+    uint32_t timeout = 5000;
+    if (lua_gettop(L) >= 2) {
+        timeout = (uint32_t)luaL_checkinteger(L, 2);
+    }
+    extern int model_preload_wait(const char *name, uint32_t timeout_ms);
+    int rc = model_preload_wait(name, timeout);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
 /* ============================================================================
  * Message Router Bindings
  * ============================================================================ */
@@ -1846,6 +1863,7 @@ static const luaL_Reg slm_lib[] = {
     {"model_load_mnist", l_model_load_mnist},
     {"model_pin", l_model_pin},
     {"model_preload", l_model_preload},
+    {"model_preload_wait", l_model_preload_wait},
     {"model_unpin", l_model_unpin},
     /* Message routing */
     {"msg_publish", l_msg_publish},

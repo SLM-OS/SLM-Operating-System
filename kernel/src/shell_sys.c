@@ -1679,19 +1679,92 @@ static void model_show_pools(void)
  * ============================================================================ */
 
 enum { MODEL_PRELOAD_MAX = 4 };
+enum { PRELOAD_NAME_LEN = 32 };
 
+/* Per-slot state for the async preload infrastructure. */
 static volatile int preload_status[MODEL_PRELOAD_MAX]; /* 0=free, 1=loading, 2=done, -1=fail */
 static volatile int preload_result[MODEL_PRELOAD_MAX]; /* model index or -1 */
+static char preload_name[MODEL_PRELOAD_MAX][PRELOAD_NAME_LEN]; /* model name being loaded */
+/* VFS path (empty for built-in models). When non-empty the preload
+ * task reads the file into a PMM buffer and passes it to
+ * rust_model_load. */
+static char preload_path[MODEL_PRELOAD_MAX][VFS_MAX_PATH];
 
 static void preload_task_entry(void *arg)
 {
     int slot = (int)(uintptr_t)arg;
-    /* Only supports built-in MNIST for now; general VFS-backed async
-     * load requires a file-read buffer whose lifetime exceeds the
-     * synchronous load call — deferred to when large models arrive. */
-    int idx = rust_model_load_builtin_mnist();
+
+    int idx;
+    if (preload_path[slot][0] == '\0') {
+        /* Built-in model (currently MNIST only). */
+        idx = rust_model_load_builtin_mnist();
+    } else {
+        /* VFS-backed model: read file into PMM buffer, load, free. */
+        struct vfs_entry_info finfo;
+        if (vfs_stat_path(preload_path[slot], &finfo) != 0 || finfo.size == 0) {
+            preload_result[slot] = -1;
+            preload_status[slot] = -1;
+            return;
+        }
+        size_t pages = (finfo.size + 4095) / 4096;
+        uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+        if (!buf) {
+            preload_result[slot] = -1;
+            preload_status[slot] = -1;
+            return;
+        }
+        int bytes = vfs_read_path(preload_path[slot], (char *)buf, finfo.size, 0);
+        if (bytes <= 0) {
+            pmm_free_pages(buf, pages);
+            preload_result[slot] = -1;
+            preload_status[slot] = -1;
+            return;
+        }
+        /* Use the slot's name if non-empty, else filename. */
+        const char *mname = preload_name[slot][0] ? preload_name[slot] : "model";
+        idx = rust_model_load(mname, buf, (size_t)bytes);
+        pmm_free_pages(buf, pages);
+    }
+
     preload_result[slot] = idx;
     preload_status[slot] = (idx >= 0) ? 2 : -1;
+}
+
+/*
+ * Wait for an in-progress preload of `name` to complete. Returns the
+ * model index (>=0) on success, -1 if no preload is in-flight for that
+ * name, -2 on timeout, -3 on preload failure.
+ *
+ * Yields while waiting so other tasks can run. Timeout is in ms.
+ */
+int model_preload_wait(const char *name, uint32_t timeout_ms)
+{
+    /* Find the slot loading this name. */
+    int slot = -1;
+    for (int i = 0; i < MODEL_PRELOAD_MAX; i++) {
+        if (preload_status[i] == 1 &&
+            strcmp(preload_name[i], name) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        /* Not in-flight — check if already loaded. */
+        int idx = rust_model_find(name);
+        return idx >= 0 ? idx : -1;
+    }
+
+    uint64_t deadline = slm_get_time_ns() + (uint64_t)timeout_ms * 1000000ULL;
+    while (preload_status[slot] == 1) {
+        if (slm_get_time_ns() >= deadline) {
+            return -2;
+        }
+        yield();
+    }
+    if (preload_status[slot] == 2) {
+        return preload_result[slot];
+    }
+    return -3;
 }
 
 static int model_preload_start(const char *name)
@@ -1710,20 +1783,40 @@ static int model_preload_start(const char *name)
         return -1;
     }
 
-    /* Currently only MNIST is supported as a built-in async load.
-     * Other models would need VFS + buffer management. */
-    bool is_mnist = (name[0]=='m' && name[1]=='n' && name[2]=='i' &&
-                     name[3]=='s' && name[4]=='t' && name[5]=='\0');
-    if (!is_mnist) {
-        uart_printf("model preload: '%s' not supported for async load "
-                    "(only 'mnist' built-in)\r\n", name);
-        return -1;
-    }
-
     /* Check if already loaded. */
     if (rust_model_find(name) >= 0) {
         uart_printf("model preload: '%s' already loaded\r\n", name);
         return 0;
+    }
+
+    /* Store the model name for wait/status queries. */
+    size_t nlen = 0;
+    while (name[nlen] && nlen < PRELOAD_NAME_LEN - 1) nlen++;
+    for (size_t i = 0; i < nlen; i++) preload_name[slot][i] = name[i];
+    preload_name[slot][nlen] = '\0';
+    preload_path[slot][0] = '\0';
+
+    /* Determine load method: built-in shortcut or VFS path. */
+    bool is_mnist = (name[0]=='m' && name[1]=='n' && name[2]=='i' &&
+                     name[3]=='s' && name[4]=='t' && name[5]=='\0');
+    if (!is_mnist) {
+        /* Treat the name as a VFS path for general model preloading. */
+        char resolved[VFS_MAX_PATH];
+        if (shell_resolve_path(name, resolved, sizeof(resolved)) < 0) {
+            uart_printf("model preload: path too long: '%s'\r\n", name);
+            return -1;
+        }
+        struct vfs_entry_info finfo;
+        if (vfs_stat_path(resolved, &finfo) != 0) {
+            uart_printf("model preload: '%s' not found (not a built-in "
+                        "or VFS path)\r\n", name);
+            return -1;
+        }
+        /* Copy resolved path for the background task. */
+        size_t plen = 0;
+        while (resolved[plen] && plen < VFS_MAX_PATH - 1) plen++;
+        for (size_t i = 0; i < plen; i++) preload_path[slot][i] = resolved[i];
+        preload_path[slot][plen] = '\0';
     }
 
     preload_status[slot] = 1;
@@ -1740,7 +1833,7 @@ static int model_preload_start(const char *name)
     }
     scheduler_add_task(t);
     uart_printf("Preloading '%s' in background (slot %d, task '%s')\r\n",
-                name, slot, task_name);
+                preload_name[slot], slot, task_name);
     return 0;
 }
 
@@ -2108,6 +2201,30 @@ int cmd_model(int argc, char *argv[])
             return -1;
         }
         return model_preload_start(argv[2]);
+    }
+    if (strcmp(subcmd, "preload-wait") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: model preload-wait <name> [timeout_ms]\r\n");
+            return -1;
+        }
+        uint32_t timeout = 5000;
+        if (argc >= 4) {
+            uint32_t parsed;
+            if (shell_parse_uint(argv[3], &parsed) == 0 && parsed > 0) {
+                timeout = parsed;
+            }
+        }
+        int rc = model_preload_wait(argv[2], timeout);
+        if (rc >= 0) {
+            uart_printf("Model '%s' ready (slot %d)\r\n", argv[2], rc);
+        } else if (rc == -1) {
+            uart_printf("No preload in-flight for '%s'\r\n", argv[2]);
+        } else if (rc == -2) {
+            uart_printf("Timeout waiting for '%s'\r\n", argv[2]);
+        } else {
+            uart_printf("Preload of '%s' failed\r\n", argv[2]);
+        }
+        return (rc >= 0) ? 0 : -1;
     }
     if (strcmp(subcmd, "preload-status") == 0) {
         uart_puts("Preload slots:\r\n");
