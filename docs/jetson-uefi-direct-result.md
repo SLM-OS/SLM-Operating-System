@@ -230,6 +230,40 @@ state; UEFI's state is different.
 unconditional overwrite. Read HCR_EL2, ensure `E2H | RW | TGE` are
 set (OR them in), write back. Preserves UEFI's other bits.
 
+**2026-04-17 update — reviewer's "dump HCR_EL2 first" approach
+was followed, here's the data:** a pre-EBS ConOut print of
+`CurrentEL` and `HCR_EL2` at entry to `efi_stub_entry` produced:
+
+```
+[slmos] CurrentEL=0x0000000000000008   # EL2 (bits [3:2] = 0b10)
+[slmos] HCR_EL2 =0x0000000088000000   # bit 31 RW=1, bit 27 TGE=1, **bit 34 E2H=0**
+```
+
+The RMW hypothesis was based on thinking UEFI had `E2H|RW|TGE|...`
+set and the write clobbered extras. **That was wrong.** UEFI has
+only `TGE|RW`; **E2H is clear**. The write isn't a "no-op
+overwrite" — it flips `E2H` from 0 to 1, transitioning INTO VHE
+host mode mid-execution while UEFI's MMU + translation tables (set
+up for the non-VHE `EL2` regime) are still active. Translation
+semantics change, subsequent instruction fetch goes through tables
+that no longer describe the same regime, hang.
+
+So the right fix is not RMW — it's one of:
+- **(a) Don't turn on VHE.** Run the SLM-OS EL2 path without VHE,
+  using `SCTLR_EL2`/`VBAR_EL2`/etc. directly instead of the EL1
+  aliases. Invasive — all current kernel code uses `_el1` names
+  assuming VHE.
+- **(b) Disable MMU BEFORE changing E2H.** Write SCTLR_EL2 to clear
+  M, THEN write HCR_EL2 with E2H=1, THEN optionally re-enable MMU
+  with SLM-OS's own translation tables. Requires fixing
+  `efi_disable_mmu` to target `SCTLR_EL2` (not `SCTLR_EL1`) under
+  UEFI-direct since E2H=0 means `sctlr_el1` isn't aliased.
+- **(c) Detect the pre-existing E2H state and switch behavior.**
+  On kexec (where Linux typically has E2H=1), the current code
+  works. On UEFI-direct (E2H=0), either bail or follow path (b).
+
+(b) or (c) is the operative next step.
+
 ### 5d2. Early EL2 vector table (2026-04-17, Path-2 P2)
 
 The primary reason the HCR_EL2 write (and every subsequent
@@ -252,9 +286,9 @@ symbol `jetson_early_vbar_el2`):
    kexec-from-Linux recovery or watchdog warm reset) can
    distinguish "handler fired" from "BSS zeroed".
 3. Emits `"!FAULT\r\n"` over UARTC (0x0C280000) as a real-time
-   visible signal. Single-shot writes, SError masked so a CBB
-   firewall block or translation failure on the UARTC write itself
-   doesn't recurse.
+   visible signal. Single-shot writes, SError masked (automatic on
+   EL2 exception entry) so a CBB firewall block or translation
+   failure on the UARTC write itself doesn't recurse.
 4. WFE-loops forever.
 
 Gated on `PLATFORM_JETSON_ORIN_NANO` and `CurrentEL == 8` (EL2).
@@ -271,6 +305,20 @@ Pre-EBS and kexec-from-Linux paths are unaffected.
   fault-visible baseline.
 
 ### 5d. UARTC MMIO at 0x0C280000 still faults at EL2 under UEFI-direct
+### (caveat: may not actually be UARTC's fault — see note below)
+
+Until finding #5e (above) landed, the interpretation of the UARTC
+str fault assumed MMU was already off. It isn't: `efi_disable_mmu`
+writes `sctlr_el1`, but with E2H=0 that's a separate register from
+the active EL2 MMU control. So the UARTC write happens with UEFI's
+MMU still on, going through UEFI's page tables. **The fault may be
+a translation fault, not a CBB firewall block.** The CBB-blocked
+interpretation was plausible given the prior EL1 confusion but
+needs re-testing after the MMU-disable path is fixed.
+
+---
+
+### 5d (legacy, pre-E2H-discovery):
 
 Skipping the HCR_EL2 write lets execution continue into the timer
 disables (which all run — CNT*_CTL writes succeed at EL2) and into
