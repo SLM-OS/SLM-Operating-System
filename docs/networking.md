@@ -354,6 +354,80 @@ dispatch is alive during traffic.
 The virtqueue ring layout (descriptor table, available ring, used ring)
 is identical between the two drivers; only the transport differs.
 
+### Cadence MACB/GEM Driver (Pi 5, #202)
+
+`kernel/drivers/macb.c` drives the Gigabit Ethernet controller on the
+Raspberry Pi 5. Despite the Broadcom SoC (BCM2712), the MAC itself is
+**Cadence MACB/GEM** IP inside the RP1 southbridge — Linux identifies
+it as `compatible = "raspberrypi,rp1-gem", "cdns,macb"`. BCM GENET
+was used on Pi 4 and earlier; Pi 5 chose a different IP.
+
+**Memory map** (within RP1's PCIe BAR1 window):
+
+| Symbol | Address | Purpose |
+|--------|---------|---------|
+| `RP1_ETH_IP_BASE` | `0x1F00100000` | MACB/GEM register block (MMIO) |
+| `RP1_ETH_CFG_BASE` | `0x1F00104000` | Additional CFG registers |
+| `RP1_CLOCKS_BASE + 0x64` | `0x1F0001_8064` | `CLK_ETH_CTRL` — 125 MHz TX clock gate |
+| `RP1_CLOCKS_BASE + 0x134` | `0x1F00018134` | `CLK_ETH_TSU_CTRL` — 50 MHz TSU clock |
+| `RP1_IO_BANK1_BASE` | `0x1F000D4000` | GPIO control (GPIO 32 = PHY reset) |
+| `GENET_IRQ` | `MACB_IRQ = 166` | GIC IRQ via MIP0 vector 6 → SPI 134 |
+
+The IP + CFG bases fall in the same 2 MB page already mapped by
+`vmm_setup_platform` for UART/GPIO, so no additional page-table
+entry is required.
+
+**Bring-up sequence** (`macb_init` in the driver):
+
+1. **Clock enable.** `RP1_CLK_ETH_CTRL` and `RP1_CLK_ETH_TSU_CTRL`
+   both get their `CLK_CTRL_ENABLE` bit (bit 11) set. Idempotent —
+   firmware may already have them running.
+2. **MID probe.** `MACB_MID` (offset 0xFC) must be non-zero; we
+   confirm idnum 0x0007 (Cadence GEM).
+3. **MDIO bring-up.** `NCFGR[20:18]` = MDC divider ÷96, `NCR.MPE`
+   set to enable the management port.
+4. **PHY reset release.** Drive RP1 GPIO 32 low then high — the
+   BCM54213PE's reset line is active-low active per the Pi 5 DTS.
+5. **PHY probe.** MDIO-read `PHYID1`/`PHYID2` from address 1.
+   BCM54213PE reports `0x600d / 0x84a2`.
+6. **Auto-negotiate.** `BMCR.ANENABLE | BMCR.ANRESTART`, then
+   poll `BMSR.LSTATUS + ANEGCOMPLETE` with a 5-second budget.
+   MVP assumes 1000 Mbps full-duplex post-ANEG without a
+   vendor-specific AUX read.
+7. **Link config.** `NCFGR` gets speed/duplex, `GEM_NCFGR_GBE` for
+   1000 Mbps, plus `MACB_NCFGR_BIG` (accept 1536-byte frames) and
+   `MACB_NCFGR_DRFCS` (strip FCS from RX). Without these two, the
+   MAC either drops all normal frames (no BIG) or hands lwIP
+   garbage (+4 bytes of FCS trailing).
+8. **MAC address program.** `SA1B`/`SA1T` with a locally-
+   administered unicast MAC (`02:00:00:5A:00:01`). Board-unique
+   derivation is a nice-to-have; a fixed MAC works for a single-
+   board lab.
+9. **TX ring + RX ring init.** 16 × 2048-byte TX buffers, 16 ×
+   1536-byte RX buffers, all cacheable DRAM with
+   `cache_clean_range` / `cache_invalidate_range` at DMA sync
+   points (mandatory on Pi 5 — no SMPEN). `DMACFG` set via RMW:
+   FBL=16, RXBS=24 (1536/64), RXBMS=3, TXPBMS=1, DDRP=1.
+10. **Enable RE + TE in NCR.** MAC starts consuming RX descriptors
+    and accepting TX kicks.
+
+**Polling model.** Pi 5's NS-EL1 IRQ delivery is unreliable (#134),
+so this driver is polling-only — `net_poll()` drives recv on the RX
+ring; `macb_tx_one` polls the `USED` bit on the TX descriptor. No
+`tx_reap` is exposed yet because each send is synchronous; #134
+resolution would unlock IRQ-driven TX completion and the driver has
+space in `net_driver` for it.
+
+**Hardware verified on pi-5-1 2026-04-17:**
+
+```
+[INFO] DHCP bound: IP=192.168.4.215 GW=192.168.4.1 Mask=255.255.255.0
+Reply from 192.168.4.1: seq=2 time=3 ms
+Reply from 192.168.4.1: seq=3 time=2 ms
+Reply from 192.168.4.1: seq=4 time=2 ms
+rtt min/avg/max = 2/2/3 ms
+```
+
 ### Stuck-descriptor watchdog (#204 item 4)
 
 Both drivers track a wall-clock timestamp of the last successful TX
