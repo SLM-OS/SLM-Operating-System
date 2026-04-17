@@ -651,6 +651,16 @@ reading to root-cause.
 - `scripts/x86-kexec-slmos.sh` — test-pc helper; preflights nouveau
   + SEC2 state + GPU runpm, then does `kexec -l && kexec -e`.
 - `scripts/x86-kexec-deploy.sh` — dev-host wrapper; scp + invoke.
+- `scripts/tests/verify-kexec-build.sh` + `make kexec-verify
+  PLATFORM=X86_64` — 16-check structural validator. Confirms both the
+  bare-metal ELF (0x100000) and the kexec ELF (0x20000000) link at the
+  expected addresses, both carry MB1 (0x1BADB002) and MB2 (0xE85250D6)
+  magic within the first 8 KiB, both include a `MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS`
+  tag pointing at `_start`, and the trampoline's 16550 UART reinit +
+  "KEX\r\n" diagnostic is in the compiled entry code. Also runs
+  `shellcheck -S warning` against the two Linux-side helper scripts.
+  Runs in under a second; suitable for CI once the X86_64 job calls
+  `make kernel` + `make kernel-kexec`.
 
 **What's left to unblock:**
 

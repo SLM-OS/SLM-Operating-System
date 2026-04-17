@@ -190,6 +190,7 @@ $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
 		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
 		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-kexec-clean
@@ -231,6 +232,18 @@ x86-disk-verify: x86-disk
 # path when SEC2 needs to inherit its nouveau-unlocked state (issue
 # #185 / the 2026-04-17 investigation). Set KEXEC_HOST to override the
 # default test-pc SSH target; set KEXEC_NO_EXEC=1 to stage only.
+# Verify the kexec-build scaffolding is structurally intact. Checks the
+# kexec ELF is linked at 0x20000000, both MB1 and MB2 headers are
+# present, the MB2 ENTRY_ADDRESS tag points at _start, and the
+# trampoline32.S UART diag ("KEX\r\n") is in the compiled entry. Also
+# shellchecks the Linux-side helper scripts.
+.PHONY: kexec-verify
+kexec-verify:
+ifneq ($(PLATFORM),X86_64)
+	@echo "kexec-verify requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@scripts/tests/verify-kexec-build.sh
+
 .PHONY: kexec-deploy
 kexec-deploy: kernel-kexec
 ifneq ($(PLATFORM),X86_64)
