@@ -106,6 +106,21 @@
 /* MDC divider values: 0=÷8, 1=÷16, 2=÷32, 3=÷48, 4=÷64, 5=÷96, 6=÷128, 7=÷224 */
 #define GEM_NCFGR_CLK_DIV96     0x5         /* Safe default for pclk around 100 MHz */
 
+/* NCFGR bits the RX path needs — without DRFCS the 4-byte FCS hangs
+ * off every received frame and confuses lwIP; without BIG the MAC
+ * silently drops any frame > 1518 bytes. RBOF = 2 offsets the start
+ * of data in each RX buffer so the IP header lands at a 4-byte
+ * boundary (helps unaligned-access-sensitive code paths). NBC cleared
+ * = accept broadcast. */
+#define MACB_NCFGR_CAF          (1u << 4)   /* Copy all frames (promisc) */
+#define MACB_NCFGR_NBC          (1u << 5)   /* No broadcast */
+#define MACB_NCFGR_BIG          (1u << 8)   /* Receive 1536-byte frames */
+#define MACB_NCFGR_PAE          (1u << 13)  /* Pause enable */
+#define MACB_NCFGR_RBOF_SHIFT   14          /* RX buffer offset [15:14] */
+#define MACB_NCFGR_RBOF_MASK    0x3
+#define MACB_NCFGR_RBOF_2       0x2         /* 2-byte offset — IP align */
+#define MACB_NCFGR_DRFCS        (1u << 17)  /* Discard RX FCS */
+
 /* MACB_NSR (Network Status Register) bits */
 #define MACB_NSR_IDLE           (1u << 2)   /* MDIO idle */
 #define MACB_NSR_MDIO           (1u << 1)   /* MDIO input state (hardware only) */
@@ -176,9 +191,36 @@ struct macb_dma_desc {
 #define MACB_TX_WRAP            (1u << 30)
 #define MACB_TX_USED            (1u << 31)  /* Set by MAC when TX done */
 
-/* Ring sizes (power of 2 for cheap masking) */
+/* RX descriptor addr-word bit fields (different from TX — on RX the
+ * USED/WRAP bits live in the ADDR field, buffer address is bits [31:2]
+ * which implies a 4-byte alignment requirement for RX buffers). */
+#define MACB_RX_USED            (1u << 0)   /* Set by MAC when frame written */
+#define MACB_RX_WRAP            (1u << 1)
+#define MACB_RX_ADDR_MASK       0xFFFFFFFC  /* Buffer address (4-byte aligned) */
+
+/* RX descriptor ctrl-word bit fields */
+#define MACB_RX_FRMLEN_MASK     0x1FFF      /* [12:0] — jumbo support wider */
+#define MACB_RX_SOF             (1u << 14)
+#define MACB_RX_EOF             (1u << 15)
+
+/* DMACFG (GEM DMA configuration) field definitions we use */
+#define GEM_DMACFG_FBL_SHIFT    0           /* Fixed burst length [4:0] */
+#define GEM_DMACFG_FBL_MASK     0x1F
+#define GEM_DMACFG_FBL_16       16          /* Matches raspberrypi_rp1_config */
+#define GEM_DMACFG_ENDIA_PKT    (1u << 7)
+#define GEM_DMACFG_RXBMS_SHIFT  8           /* RX packet buffer size select [9:8] */
+#define GEM_DMACFG_RXBMS_MASK   0x3
+#define GEM_DMACFG_TXPBMS       (1u << 10)  /* TX packet buffer size = full */
+#define GEM_DMACFG_RXBS_SHIFT   16          /* DMA receive buffer size units of 64B */
+#define GEM_DMACFG_RXBS_MASK    0xFF
+#define GEM_DMACFG_DDRP         (1u << 24)  /* Discard-when-no-AHB */
+
+/* Ring sizes (powers of 2 for cheap masking) */
 #define MACB_TX_RING_SIZE       16
 #define MACB_TX_BUF_SIZE        2048        /* Headroom above Ethernet MTU */
+#define MACB_RX_RING_SIZE       16
+#define MACB_RX_BUF_SIZE        1536        /* Exactly one Ethernet frame */
+#define MACB_RX_BUF_UNITS_64    (MACB_RX_BUF_SIZE / 64)  /* 1536/64 = 24 */
 
 /* -------------------------------------------------------------------------- */
 /* MMIO helpers                                                                */
@@ -278,6 +320,7 @@ static struct {
     bool     link_full_duplex;
     unsigned tx_head;           /* Next slot we'll fill */
     unsigned tx_tail;           /* Next slot to reap for completion */
+    unsigned rx_head;           /* Next slot to inspect for incoming frames */
 } macb_state;
 
 /* TX ring + buffer pool. 4 KB alignment is overkill for the descriptor
@@ -288,6 +331,14 @@ static struct macb_dma_desc
     tx_ring[MACB_TX_RING_SIZE] __attribute__((aligned(4096)));
 static uint8_t
     tx_buffers[MACB_TX_RING_SIZE][MACB_TX_BUF_SIZE] __attribute__((aligned(16)));
+
+/* RX ring + buffer pool. Buffers are 4-byte aligned at minimum (addr
+ * field's low 2 bits are USED/WRAP). We use 64-byte alignment to match
+ * RXBS granularity and keep cacheline semantics clean. */
+static struct macb_dma_desc
+    rx_ring[MACB_RX_RING_SIZE] __attribute__((aligned(4096)));
+static uint8_t
+    rx_buffers[MACB_RX_RING_SIZE][MACB_RX_BUF_SIZE] __attribute__((aligned(64)));
 
 /* -------------------------------------------------------------------------- */
 /* Stage 2 helpers — clock enable, MACB bring-up, PHY bring-up                 */
@@ -474,17 +525,20 @@ static void macb_tx_ring_init(void)
     macb_writel(MACB_TSR, 0xFFFFFFFF);
 }
 
-/* Configure speed/duplex in MACB NCFGR to match what the PHY
- * negotiated. GEM uses NCFGR bit 10 for Gigabit-mode enable. */
+/* Configure speed/duplex in MACB NCFGR + enable receive-path bits
+ * the MAC needs to actually accept real-world frames. Must run after
+ * macb_mdio_bringup (MDC divider) and before macb_enable_rx. */
 static void macb_apply_link_config(void)
 {
     uint32_t ncfgr = macb_readl(MACB_NCFGR);
 
-    /* Clear the bits we manage — speed, duplex, gigabit */
-    ncfgr &= ~(MACB_NCFGR_SPD | MACB_NCFGR_FD | GEM_NCFGR_GBE);
+    /* Clear bits we manage: speed, duplex, gigabit, BIG/DRFCS to
+     * start from a known state. NBC stays cleared = accept broadcast. */
+    ncfgr &= ~(MACB_NCFGR_SPD | MACB_NCFGR_FD | GEM_NCFGR_GBE |
+               MACB_NCFGR_BIG | MACB_NCFGR_DRFCS | MACB_NCFGR_NBC |
+               MACB_NCFGR_CAF);
 
-    /* SPD bit = 100 Mbps; leaves 10 Mbps when cleared. GBE overrides
-     * both for 1000 Mbps. */
+    /* Speed / duplex from auto-neg */
     if (macb_state.link_speed_mbps == 100) {
         ncfgr |= MACB_NCFGR_SPD;
     } else if (macb_state.link_speed_mbps == 1000) {
@@ -493,6 +547,11 @@ static void macb_apply_link_config(void)
     if (macb_state.link_full_duplex) {
         ncfgr |= MACB_NCFGR_FD;
     }
+
+    /* RX behaviour */
+    ncfgr |= MACB_NCFGR_BIG;     /* Accept 1500+ byte frames */
+    ncfgr |= MACB_NCFGR_DRFCS;   /* Strip FCS before DMA */
+
     macb_writel(MACB_NCFGR, ncfgr);
 }
 
@@ -524,12 +583,121 @@ static void macb_program_mac_address(void)
     macb_writel(MACB_SA1T, top);
 }
 
-/* Enable TX and receive. Called after rings are populated. */
+/* Enable TX. Called after the TX ring is populated and after
+ * macb_rx_ring_init has set RBQP. RX is enabled by macb_enable_rx. */
 static void macb_enable_tx(void)
 {
     uint32_t ncr = macb_readl(MACB_NCR);
     ncr |= MACB_NCR_TE;
     macb_writel(MACB_NCR, ncr);
+}
+
+/* Initialize the RX ring. Every descriptor gets a buffer address in
+ * its addr field, USED bit CLEAR (so the MAC owns it), WRAP on last.
+ * ctrl starts at 0 — the MAC will populate it when a frame arrives. */
+static void macb_rx_ring_init(void)
+{
+    for (unsigned i = 0; i < MACB_RX_RING_SIZE; i++) {
+        uint32_t buf_addr = (uint32_t)(uintptr_t)rx_buffers[i];
+        /* Buffer must be 4-byte aligned (bits 0-1 are USED/WRAP). */
+        rx_ring[i].addr = (buf_addr & MACB_RX_ADDR_MASK) |
+                          ((i == MACB_RX_RING_SIZE - 1) ? MACB_RX_WRAP : 0);
+        rx_ring[i].ctrl = 0;
+    }
+    macb_state.rx_head = 0;
+
+    cache_clean_range(rx_ring, sizeof(rx_ring));
+
+    /* Program DMA configuration via RMW to preserve any firmware-set
+     * bits we don't explicitly manage (endianness, AXI pipeline hints,
+     * etc.). Fields we touch:
+     *   FBL   = 16         (burst length, matches Linux rp1-gem config)
+     *   RXBMS = 3          (maximum RX pbuf memory — 2 bits, -1 pattern)
+     *   TXPBMS= 1          (full TX pbuf memory)
+     *   RXBS  = 24         (1536-byte RX buffers, matches our buffer size)
+     *   DDRP  = 1          (discard frames when no AHB bandwidth — safer
+     *                       than hanging the MAC on backpressure)
+     *   ENDIA_PKT = 0      (little-endian packet data, ARM native) */
+    uint32_t dmacfg = macb_readl(GEM_DMACFG);
+    dmacfg &= ~(GEM_DMACFG_FBL_MASK  << GEM_DMACFG_FBL_SHIFT);
+    dmacfg &= ~(GEM_DMACFG_RXBS_MASK << GEM_DMACFG_RXBS_SHIFT);
+    dmacfg &= ~(GEM_DMACFG_RXBMS_MASK << GEM_DMACFG_RXBMS_SHIFT);
+    dmacfg &= ~GEM_DMACFG_ENDIA_PKT;
+    dmacfg |= (GEM_DMACFG_FBL_16 << GEM_DMACFG_FBL_SHIFT);
+    dmacfg |= ((uint32_t)MACB_RX_BUF_UNITS_64 << GEM_DMACFG_RXBS_SHIFT);
+    dmacfg |= (0x3u << GEM_DMACFG_RXBMS_SHIFT);
+    dmacfg |= GEM_DMACFG_TXPBMS;
+    dmacfg |= GEM_DMACFG_DDRP;
+    macb_writel(GEM_DMACFG, dmacfg);
+
+    /* Point the hardware at the ring */
+    macb_writel(MACB_RBQP, (uint32_t)(uintptr_t)rx_ring);
+
+    /* Clear any stale RSR bits */
+    macb_writel(MACB_RSR, 0xFFFFFFFF);
+}
+
+/* Flip NCR.RE to start accepting frames. */
+static void macb_enable_rx(void)
+{
+    uint32_t ncr = macb_readl(MACB_NCR);
+    ncr |= MACB_NCR_RE;
+    macb_writel(MACB_NCR, ncr);
+}
+
+/* Attempt to pull one frame out of the RX ring. Returns bytes copied,
+ * 0 if no frame ready, or a negative NET_E_* on error. Scans from the
+ * current head forward, skipping over partial frames — MACB will
+ * split oversized packets but with our RXBS=1536 each frame fits in
+ * one descriptor, so the common case is a single owner-returned entry. */
+static int macb_rx_one(void *out_buf, size_t max_len)
+{
+    /* Invalidate descriptor ring so we see fresh USED/ctrl bits */
+    cache_invalidate_range(rx_ring, sizeof(rx_ring));
+
+    unsigned slot = macb_state.rx_head;
+    uint32_t addr_word = rx_ring[slot].addr;
+
+    if (!(addr_word & MACB_RX_USED)) {
+        return 0;   /* No frame in this slot */
+    }
+
+    /* USED=1 — MAC wrote a frame. ctrl has frmlen + SOF/EOF flags. */
+    uint32_t ctrl = rx_ring[slot].ctrl;
+    uint32_t frmlen = ctrl & MACB_RX_FRMLEN_MASK;
+
+    /* SOF+EOF both set = single-descriptor frame (the common case
+     * with RXBS=1536). Partial frames (SOF without EOF or vice versa)
+     * are rare but can happen; for the MVP, drop them — re-assembly
+     * adds complexity we don't need for DHCP/ping-class traffic. */
+    if (!((ctrl & MACB_RX_SOF) && (ctrl & MACB_RX_EOF))) {
+        WARN("RX: slot %u has partial frame (ctrl=0x%08x) — dropping",
+             slot, ctrl);
+        frmlen = 0;
+    }
+
+    int ret;
+    if (frmlen == 0 || frmlen > max_len) {
+        ret = 0;
+    } else {
+        /* Invalidate the buffer cacheline before the copy so the CPU
+         * sees what the MAC DMA'd in. */
+        cache_invalidate_range(rx_buffers[slot], frmlen);
+        memcpy(out_buf, rx_buffers[slot], frmlen);
+        ret = (int)frmlen;
+    }
+
+    /* Return the descriptor to the MAC: clear USED, preserve WRAP,
+     * restore buffer address. Then push back to DRAM. */
+    uint32_t new_addr = ((uint32_t)(uintptr_t)rx_buffers[slot] & MACB_RX_ADDR_MASK) |
+                        ((slot == MACB_RX_RING_SIZE - 1) ? MACB_RX_WRAP : 0);
+    rx_ring[slot].addr = new_addr;
+    rx_ring[slot].ctrl = 0;
+    cache_clean_range(&rx_ring[slot], sizeof(rx_ring[slot]));
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    macb_state.rx_head = (slot + 1) & (MACB_RX_RING_SIZE - 1);
+    return ret;
 }
 
 /* Reap any completed TX descriptors by scanning from tail forward.
@@ -661,18 +829,20 @@ int macb_init(void)
     macb_apply_link_config();
     macb_program_mac_address();
     macb_tx_ring_init();
-    macb_enable_tx();
+    macb_rx_ring_init();
 
     INFO("  MAC address: %02x:%02x:%02x:%02x:%02x:%02x",
          macb_state.mac[0], macb_state.mac[1], macb_state.mac[2],
          macb_state.mac[3], macb_state.mac[4], macb_state.mac[5]);
 
+    /* Enable both directions. Order matters: RX first so we don't
+     * lose inbound frames while still enabling TX — trivial on a
+     * fresh boot but matters after a re-init. */
+    macb_enable_rx();
+    macb_enable_tx();
+
     macb_state.initialized = true;
-    INFO("MACB driver: Stage 3 TX ring up — RX pending (Stage 4)");
-    /* Return 0 so net_init succeeds and lwIP brings up the netif.
-     * Without RX, ARP/DHCP won't complete, but sends (including the
-     * initial ARP probe that goes out on the wire) exercise the TX
-     * path end-to-end — easy to observe via tcpdump on the gateway. */
+    INFO("MACB driver: Stage 4 TX + RX up — network operational");
     return 0;
 }
 
@@ -686,8 +856,10 @@ static int macb_send(const void *buf, size_t len)
 
 static int macb_recv(void *buf, size_t max_len)
 {
-    (void)buf; (void)max_len;
-    return 0;
+    if (!macb_state.initialized) {
+        return 0;
+    }
+    return macb_rx_one(buf, max_len);
 }
 
 static void macb_get_mac(uint8_t mac[6])
