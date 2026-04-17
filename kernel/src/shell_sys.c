@@ -1673,8 +1673,20 @@ static void model_show_pools(void)
 static int model_load(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: model load <path>\r\n");
+        uart_puts("Usage: model load <path|mnist>\r\n");
         return -1;
+    }
+
+    /* Built-in model shortcut: `model load mnist` loads the embedded
+     * MNIST without needing a file path. */
+    if (strcmp(argv[2], "mnist") == 0) {
+        int idx = rust_model_load_builtin_mnist();
+        if (idx < 0) {
+            uart_puts("model load: built-in MNIST not available\r\n");
+            return -1;
+        }
+        uart_printf("Loaded built-in MNIST (slot %d)\r\n", idx);
+        return 0;
     }
 
     char resolved[VFS_MAX_PATH];
@@ -1762,18 +1774,19 @@ static int model_list(void)
     }
 
     uart_printf("Loaded models (%lu):\r\n", (unsigned long)count);
-    uart_puts("  Idx  Name                     Params     Weights   Nodes\r\n");
-    uart_puts("  ---  ----                     ------     -------   -----\r\n");
+    uart_puts("  Idx  Name                     Weights   Uses  Pin  Last(ms)\r\n");
+    uart_puts("  ---  ----                     -------   ----  ---  --------\r\n");
 
     for (uint32_t i = 0; i < 8; i++) {
         RustModelInfo info;
         if (rust_model_get_info(i, &info) == 0) {
-            uart_printf("  %lu    %-24s %-10lu %-9lu %lu\r\n",
+            uart_printf("  %lu    %-24s %-9lu %-5lu %-3s  %lu\r\n",
                         (unsigned long)i,
                         (const char *)info.name,
-                        (unsigned long)info.param_count,
                         (unsigned long)info.weight_size,
-                        (unsigned long)info.node_count);
+                        (unsigned long)info.use_count,
+                        info.pinned ? "yes" : "no",
+                        (unsigned long)info.last_used_ms);
         }
     }
     return 0;
@@ -1964,7 +1977,56 @@ int cmd_model(int argc, char *argv[])
         return rust_infer_bench((uint32_t)idx, iters);
     }
 
-    uart_puts("Usage: model [load|list|info|unload|infer|bench|stats|pools|gpu]\r\n");
+    if (strcmp(subcmd, "pin") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: model pin <name|idx>\r\n");
+            return -1;
+        }
+        int idx = -1;
+        uint32_t parsed_idx;
+        if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+            idx = (int)parsed_idx;
+        } else {
+            idx = rust_model_find(argv[2]);
+        }
+        if (idx < 0) {
+            uart_printf("model pin: '%s' not found\r\n", argv[2]);
+            return -1;
+        }
+        int rc = rust_model_pin((uint32_t)idx);
+        if (rc < 0) {
+            uart_printf("model pin: failed (slot %d)\r\n", idx);
+            return -1;
+        }
+        uart_printf("Pinned model at slot %d (protected from LRU eviction)\r\n", idx);
+        return 0;
+    }
+    if (strcmp(subcmd, "unpin") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: model unpin <name|idx>\r\n");
+            return -1;
+        }
+        int idx = -1;
+        uint32_t parsed_idx;
+        if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+            idx = (int)parsed_idx;
+        } else {
+            idx = rust_model_find(argv[2]);
+        }
+        if (idx < 0) {
+            uart_printf("model unpin: '%s' not found\r\n", argv[2]);
+            return -1;
+        }
+        int rc = rust_model_unpin((uint32_t)idx);
+        if (rc < 0) {
+            uart_printf("model unpin: failed (slot %d)\r\n", idx);
+            return -1;
+        }
+        uart_printf("Unpinned model at slot %d (eligible for LRU eviction)\r\n", idx);
+        return 0;
+    }
+
+    uart_puts("Usage: model [load|list|info|unload|pin|unpin|infer|bench|stats|pools|gpu]\r\n");
     return -1;
 }
 

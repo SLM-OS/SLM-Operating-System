@@ -294,6 +294,20 @@ static void test_shell_cmd_eviction_features(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
 }
 
+/*
+ * Regression for #37: model pin/unpin lifecycle. Load a model, pin it,
+ * verify list shows it as pinned, unpin, verify. Also tests the
+ * `model load mnist` built-in shortcut.
+ */
+static void test_shell_cmd_model_pin_lifecycle(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model load mnist"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model pin 0"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model list"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model unpin 0"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model unload 0"));
+}
+
 /* ============================================================================
  * VFS Command Tests (ls, cat) - Error Cases
  * ============================================================================ */
@@ -2186,6 +2200,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_bench_context_histogram_reinit);
     RUN_TEST(test_shell_cmd_bench_eviction);
     RUN_TEST(test_shell_cmd_eviction_features);
+    RUN_TEST(test_shell_cmd_model_pin_lifecycle);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);

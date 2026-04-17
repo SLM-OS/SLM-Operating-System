@@ -71,7 +71,10 @@ pub struct ModelInfoC {
     pub node_count: u32,
     pub input_count: u32,
     pub output_count: u32,
-    pub _reserved: u32,
+    pub pinned: u8,       // 1 if pinned, 0 if evictable (#37)
+    pub _pad2: [u8; 3],
+    pub use_count: u32,   // Number of inference calls (#37)
+    pub last_used_ms: u32, // ms since boot of last access (#37)
 }
 
 impl ModelInfoC {
@@ -85,7 +88,10 @@ impl ModelInfoC {
         node_count: 0,
         input_count: 0,
         output_count: 0,
-        _reserved: 0,
+        pinned: 0,
+        _pad2: [0; 3],
+        use_count: 0,
+        last_used_ms: 0,
     };
 }
 
@@ -511,7 +517,15 @@ pub fn get_info(index: usize) -> Option<ModelInfoC> {
         if index >= MAX_MODELS || !reg.entries[index].active {
             None
         } else {
-            Some(reg.entries[index].info)
+            let e = &reg.entries[index];
+            let mut info = e.info;
+            // #37: populate dynamic fields from the live entry.
+            info.pinned = if e.pinned { 1 } else { 0 };
+            info.use_count = e.use_count;
+            // Convert ns to ms for the C side (avoids 64-bit division
+            // in kernel -mgeneral-regs-only code).
+            info.last_used_ms = (e.last_used / 1_000_000) as u32;
+            Some(info)
         }
     }
 }

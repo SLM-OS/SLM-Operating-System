@@ -409,7 +409,10 @@ typedef struct {
     uint32_t node_count;
     uint32_t input_count;
     uint32_t output_count;
-    uint32_t _reserved;
+    uint8_t  pinned;       /* 1 if pinned, 0 if evictable (#37) */
+    uint8_t  _pad2[3];
+    uint32_t use_count;    /* Number of inference calls (#37) */
+    uint32_t last_used_ms; /* ms since boot of last access (#37) */
 } RustModelInfo;
 
 /*
