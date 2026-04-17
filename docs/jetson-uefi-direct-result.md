@@ -115,7 +115,61 @@ New linker symbol `_kernel_data_virtual_size` added to
 `kernel-jetson.ld` and `kernel.ld` (both used by non-RASPI5 ARM64
 builds that include the PE header).
 
-### 5. Remaining downstream blocker — NOT BSS clear as previously hypothesized
+### 5. ArmCpuDxe reports exception PC off by 0x10000 — discovered 2026-04-16 probe session
+
+The 2026-04-16 probe following PR #229 planted `brk` instructions
+at two known offsets and measured where ArmCpuDxe's "Synchronous
+Exception at X" message reported them:
+
+| brk location                              | reported X           | delta     |
+| ----------------------------------------- | -------------------- | --------- |
+| `image_base + 0x10000` (real_start entry) | `image_base + 0`     | -0x10000  |
+| `image_base + 0x10018` (post-bl)          | `image_base + 0x18`  | -0x10000  |
+
+Both off by exactly `SizeOfHeaders` (0x10000). The quirk is
+consistent and repeatable. Mechanism hypothesized: ArmCpuDxe
+computes display PC against its own notion of `image_base` that
+differs from UEFI's LoadedImage.ImageBase by one SectionAlignment.
+Not confirmed against source: upstream ArmPkg's
+`DefaultExceptionHandler.c` publishes the baseline (tianocore/edk2
+is public), and NVIDIA may carry local diffs on top, but neither
+has been inspected for this finding.
+
+**Sample size is two.** Both data points fit the "off by 0x10000"
+interpretation, but also fit other models (e.g. "reports PC
+relative to BaseOfCode + ImageBase"). Before relying on the
+re-interpretation below, the next session should add a third data
+point — a `brk` at, say, `image_base + 0x10100` (0x100 bytes past
+real_start) — to rule out alternative linear relationships.
+
+**Implication for past findings:** the "silent hang after marker C"
+in PR #226 and PR #229 may not have been silent at all. The brks
+were firing, but the reported PCs pointed to the PE header region
+(offset 0–0x10000) which contains mostly zeros (AArch64 UDF),
+producing output that looked like "UDF at header" when in fact the
+brk fired in `.text` exactly where it was planted.
+
+Re-interpreting past data (all claims pending the third-probe
+confirmation above):
+- PR #219's "0x80010070" → actual PC ≈ 0x80020070. That's 64KB
+  further into the image than the previous interpretation; the
+  specific claim that it's "not `.Lreloc_done`" needs a PR #219
+  binary disassembly at offset 0x20070 to verify.
+- PR #226's diagnostic brk sequence → the brks likely fired as
+  expected; the conclusion "execution doesn't reach past X" needs
+  re-verification with the corrected offset.
+- The BSS-clear hypothesis collapsing (PR #229) and the probe-brk
+  hangs this session both look different under this lens.
+
+**Next-session pickup:** re-run the bisection brks from PR #226
+with the corrected interpretation. Several "silent hangs" may turn
+out to be the brk firing, reported to look like "UDF at header."
+The actual hang may be much later in the boot path — possibly
+kernel_main itself, which means the bigger remaining work is
+approach B (real `.reloc` / PIC), not the intermediate steps
+listed below.
+
+### 6. Remaining downstream blocker — NOT BSS clear as previously hypothesized
 
 The pre-fix session assumed the silent hang after marker C was
 BSS-clear faulting. With the `.data` section split in place, BSS is
