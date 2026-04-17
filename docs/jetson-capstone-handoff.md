@@ -63,8 +63,8 @@ caveats in §6).
 | #175 | Push-failure counter for `steal_deque` | P3-low | ~20 LOC, observability-only |
 | #158 | Pi 5 boot hang | ✅ closed | Fixed by external lock in PR #167 |
 | #139 | Work-stealing ABA race | ✅ closed | Fixed by per-slot generation counter in PR #145 |
-| #142 | GSP bare-metal loader (future work) | partially addressed | ARM64 platform shim + nvgpu-native bringup scaffold landed on the `worktree-jetson-gpu-inference` branch (2026-04-16). GPU MMIO confirmed live, all 17 ga10b firmware blobs embedded, Phases 1–4 (ACR / FECS / GPCCS / PMU) plumbed with 33 host tests (18 bringup + 15 platform shim). Currently blocked at BROM by GSP Falcon PRI priv-lockdown (HWCFG2 bit 13) — see #190 and §GPU Bringup below. |
-| #190 | Jetson GSP Falcon priv-lockdown blocks ACR HS load | P2-medium | New finding on branch. GPU BAR0 is readable at EL2 but PIO writes to IMEM/DMEM are silently dropped (readback returns `0xbadf5620` poison). Three paths forward are scoped: SMC to TF-A, UEFI direct boot, or reuse Linux-nvgpu ACR state. |
+| #142 | GSP bare-metal loader (future work) | partially addressed | ARM64 platform shim + nvgpu-native bringup scaffold + FECS method gateway. Phases 1–5 plumbed with 41 host tests (26 bringup + 15 platform shim). **Phase 5 hardware-verified on jetson-nano-2**: FECS responds to method submission from SLM-OS (DISCOVER_IMAGE_SIZE = 513,280 bytes). Priv-lockdown (#190) resolved via Path 3. Channel/pushbuffer (phases 6–7) needed for compute dispatch. |
+| #190 | Jetson GSP Falcon priv-lockdown blocks ACR HS load | ✅ resolved | Root cause: kexec helper's runtime-PM suspend power-gated the GPU; Falcon BROM reasserts bit 13 on re-enable. Fix: `--no-gpu-suspend` flag skips the suspend; `ga10b_bringup_inherit()` detects Linux's post-boot FECS/GPCCS PASS state and skips phases 1–4. Hardware-verified 2026-04-17. |
 
 ### 3b. Capstone deliverables outside the engineering plan
 

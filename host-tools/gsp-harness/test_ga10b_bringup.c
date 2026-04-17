@@ -244,6 +244,8 @@ static struct {
  * kernel/gpu/nvidia/ga10b_bringup.c; if those change, update here. */
 #define R_FECS_CPUCTL           0x00409100u
 #define R_FECS_CTXSW_MBOX(i)    (0x00409800u + (i) * 4u)
+#define R_FECS_METHOD_DATA      0x00409500u
+#define R_FECS_METHOD_PUSH      0x00409504u
 #define R_GPCCS_CPUCTL          0x0041a100u
 #define R_GPC0_GPCCS_MBOX(i)    (0x00502800u + (i) * 4u)
 #define GR_STARTCPU             (1u << 1)
@@ -259,6 +261,14 @@ static struct {
     uint32_t gpccs_mbox0_after_start;
     bool     fecs_auto_pass;
     bool     gpccs_auto_pass;
+    /* FECS method gateway shadow state. */
+    uint32_t method_data_writes;
+    uint32_t method_push_writes;
+    uint32_t last_method_data;
+    uint32_t last_method_addr;
+    /* Test-controlled: what mailbox[0] gets set to on method push. */
+    uint32_t method_result;
+    bool     method_auto_respond;
 } g_gr;
 
 /* Fake HWCFG value: IMEM=64KB (256 blocks × 256B), DMEM=64KB. */
@@ -386,6 +396,20 @@ static void mock_write32(uint32_t off, uint32_t val)
         }
         return;
     }
+    if (off == R_FECS_METHOD_DATA) {
+        g_gr.last_method_data = val;
+        g_gr.method_data_writes++;
+        return;
+    }
+    if (off == R_FECS_METHOD_PUSH) {
+        g_gr.last_method_addr = val;
+        g_gr.method_push_writes++;
+        /* Simulate FECS processing the method: write result to mbox[0]. */
+        if (g_gr.method_auto_respond) {
+            g_gr.fecs_mbox0 = g_gr.method_result;
+        }
+        return;
+    }
     if (off < MOCK_BAR0_SIZE) g_bar0[off / 4] = val;
 }
 
@@ -434,6 +458,8 @@ static void mock_reset(void)
     g_gr.gpccs_auto_pass = true;
     g_gr.fecs_mbox0_after_start  = 0x1u;       /* PASS */
     g_gr.gpccs_mbox0_after_start = 0x1u;       /* PASS */
+    g_gr.method_auto_respond = true;
+    g_gr.method_result = 0x7d500u;  /* 513280 — realistic context image size */
     gsp_platform = &mock_ops;
 }
 
@@ -826,6 +852,84 @@ static void test_inherit_rejects_gpccs_not_ready(void)
     REQUIRE_EQ(rc, -1);
 }
 
+/* ======================================================================
+ * Test 7: FECS method gateway (Phase 5 smoke test)
+ *
+ * Phase 5 submits DISCOVER_IMAGE_SIZE via the FECS method push
+ * registers. The mock writes method_result to mailbox[0] when the
+ * method addr register is written. Tests cover: happy path (method
+ * returns a realistic context size), timeout (mock doesn't respond),
+ * null-sentinel rejection (FECS echoed 0xDEADCA11 back), and
+ * wrong-state rejection.
+ * ====================================================================== */
+
+/* Drive to PMU_UP via inherit so phase 5 precondition holds. */
+static void drive_to_pmu_up_via_inherit(struct ga10b_bringup *b)
+{
+    mock_reset();
+    /* Simulate Linux's post-boot state for inherit. */
+    g_gsp.hwcfg2 = FAKE_HWCFG2_IDLE;  /* bit 13 = 0 */
+    g_gr.fecs_mbox0  = 0x1u;
+    g_gr.gpccs_mbox0 = 0x1u;
+    REQUIRE_EQ(ga10b_bringup_inherit(b), 0);
+    REQUIRE_EQ(b->state, GA10B_BRINGUP_PMU_UP);
+}
+
+static void test_fecs_method_gateway_happy_path(void)
+{
+    printf("== test_fecs_method_gateway_happy_path ==\n");
+    struct ga10b_bringup b;
+    drive_to_pmu_up_via_inherit(&b);
+
+    /* method_auto_respond=true, method_result=0x7d500 from mock_reset */
+    int rc = ga10b_bringup_address_space(&b);
+    REQUIRE_EQ(rc, 0);
+    REQUIRE_EQ(b.state, GA10B_BRINGUP_ENGINES_READY);
+    REQUIRE_EQ(b.last_error_phase, -1);
+    /* Verify the mock saw the method submission. */
+    REQUIRE_EQ(g_gr.method_data_writes, 1);
+    REQUIRE_EQ(g_gr.method_push_writes, 1);
+    REQUIRE_EQ(g_gr.last_method_addr, 0x10u);  /* DISCOVER_IMAGE_SIZE */
+    REQUIRE_EQ(g_gr.last_method_data, 0xDEADCA11u);
+}
+
+static void test_fecs_method_gateway_timeout(void)
+{
+    printf("== test_fecs_method_gateway_timeout ==\n");
+    struct ga10b_bringup b;
+    drive_to_pmu_up_via_inherit(&b);
+
+    /* Disable auto-respond so mailbox stays 0 → timeout. */
+    g_gr.method_auto_respond = false;
+    int rc = ga10b_bringup_address_space(&b);
+    REQUIRE_EQ(rc, -1);
+    REQUIRE_EQ(b.last_error_phase, 5);
+}
+
+static void test_fecs_method_gateway_rejects_null_sentinel(void)
+{
+    printf("== test_fecs_method_gateway_rejects_null_sentinel ==\n");
+    struct ga10b_bringup b;
+    drive_to_pmu_up_via_inherit(&b);
+
+    /* FECS echoes back the null sentinel instead of a real size. */
+    g_gr.method_result = 0xDEADCA11u;
+    int rc = ga10b_bringup_address_space(&b);
+    REQUIRE_EQ(rc, -1);
+    REQUIRE_EQ(b.last_error_phase, 5);
+}
+
+static void test_phase5_rejects_wrong_state(void)
+{
+    printf("== test_phase5_rejects_wrong_state ==\n");
+    mock_reset();
+    struct ga10b_bringup b;
+    memset(&b, 0, sizeof(b));
+    b.state = GA10B_BRINGUP_INIT;  /* wrong state — needs PMU_UP */
+    int rc = ga10b_bringup_address_space(&b);
+    REQUIRE_EQ(rc, -1);
+}
+
 /* Walk phases 1→4 in one go and verify the state machine advances
  * cleanly. Later phases (address_space, channel, smoke_test) still
  * return -1 since they're unimplemented — so we don't run them here. */
@@ -883,6 +987,11 @@ int main(void)
     test_inherit_rejects_priv_lockdown();
     test_inherit_rejects_fecs_not_ready();
     test_inherit_rejects_gpccs_not_ready();
+
+    test_fecs_method_gateway_happy_path();
+    test_fecs_method_gateway_timeout();
+    test_fecs_method_gateway_rejects_null_sentinel();
+    test_phase5_rejects_wrong_state();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);
