@@ -385,6 +385,12 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
     status = efi_exit_boot(handle, sys_table->boot_services);
 
     if (status != EFI_SUCCESS) {
+        /* Still safe to use ConOut here: per UEFI §7.4.1 Boot
+         * Services remain valid when ExitBootServices itself
+         * fails. The post-EBS ConOut restriction (and the
+         * removal of post-success markers above) applies only
+         * AFTER a successful EBS. Do NOT collapse this call
+         * into the post-EBS cleanup. */
         efi_print(sys_table, m_ebs_fail);
         return NULL;
     }

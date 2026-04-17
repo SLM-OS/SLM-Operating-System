@@ -1068,11 +1068,11 @@ jetson_early_vbar_el2:
  * afterwards (the LSR-wait loop never exited).
  */
 .Ljetson_early_putc:
-1:
+.Ljetson_early_putc_wait:
     dsb     sy
     ldr     w15, [x11, #0x14]              /* LSR (offset 5, shift-2) */
     tst     w15, #0x20                     /* THRE = bit 5 */
-    b.eq    1b
+    b.eq    .Ljetson_early_putc_wait
     str     w14, [x11]                     /* THR */
     ret
 
@@ -1093,17 +1093,17 @@ jetson_early_vbar_el2:
 .Ljetson_early_emit_hex64:
     mov     x16, x30                       /* save caller's LR */
     mov     x13, #60                       /* bit shift: 60, 56, ..., 0 */
-.Ljetson_ehu_loop:
+.Ljetson_early_emit_hex64_loop:
     lsr     x14, x12, x13
     and     x14, x14, #0xf
     cmp     x14, #10
-    b.lt    1f
+    b.lt    .Ljetson_early_emit_hex64_add_zero
     add     x14, x14, #('A' - '0' - 10)
-1:
+.Ljetson_early_emit_hex64_add_zero:
     add     x14, x14, #'0'
     bl      .Ljetson_early_putc
     subs    x13, x13, #4
-    b.ge    .Ljetson_ehu_loop
+    b.ge    .Ljetson_early_emit_hex64_loop
     mov     x30, x16                       /* restore caller's LR */
     ret
 
