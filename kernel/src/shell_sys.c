@@ -2351,6 +2351,66 @@ int cmd_dtb(int argc, char *argv[])
 }
 
 /*
+ * peek - Read 32-bit words from arbitrary physical memory addresses.
+ *
+ *   peek <phys-hex>           Read one 32-bit word
+ *   peek <phys-hex> <count>   Read count consecutive 32-bit words
+ *
+ * WARNING: reading from unmapped or device-memory regions may cause a
+ * synchronous exception. Only use for addresses known to be in DRAM
+ * or memory-mapped I/O that the VMM has identity-mapped.
+ */
+int cmd_peek(int argc, char *argv[])
+{
+    if (argc < 2) {
+        uart_puts("usage: peek <phys-hex> [count]\r\n");
+        return -1;
+    }
+
+    /* Parse hex address */
+    const char *s = argv[1];
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    uint64_t addr = 0;
+    while (*s) {
+        uint64_t d;
+        if (*s >= '0' && *s <= '9') d = *s - '0';
+        else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
+        else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
+        else { uart_puts("bad hex address\r\n"); return -1; }
+        addr = (addr << 4) | d;
+        s++;
+    }
+
+    uint32_t count = 1;
+    if (argc >= 3) {
+        count = 0;
+        for (const char *p = argv[2]; *p; p++) {
+            if (*p < '0' || *p > '9') { uart_puts("bad count\r\n"); return -1; }
+            count = count * 10 + (*p - '0');
+        }
+        if (count == 0 || count > 256) {
+            uart_puts("count must be 1-256\r\n");
+            return -1;
+        }
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t a = addr + i * 4;
+        volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)a;
+        uint32_t val = *p;
+        if (count == 1) {
+            uart_printf("[0x%lx] = 0x%08lx\r\n",
+                        (unsigned long)a, (unsigned long)val);
+        } else {
+            if (i % 4 == 0) uart_printf("[0x%lx]", (unsigned long)a);
+            uart_printf(" %08lx", (unsigned long)val);
+            if (i % 4 == 3 || i == count - 1) uart_puts("\r\n");
+        }
+    }
+    return 0;
+}
+
+/*
  * gpu - Show GPU driver status and optionally read a BAR0 register.
  *
  *   gpu                     Show GPU info via the registered driver
