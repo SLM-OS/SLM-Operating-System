@@ -470,6 +470,11 @@ void kernel_main(void *dtb)
         extern void virtio_net_pci_register(void);
         virtio_net_pci_register();
     }
+#elif defined(PLATFORM_RASPI5)
+    {
+        extern void genet_register(void);
+        genet_register();
+    }
 #endif
 #endif
 
