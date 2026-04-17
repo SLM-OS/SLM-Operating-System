@@ -296,14 +296,23 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * `jetson_early_vbar_el2` is the SLM-OS-owned diagnostic table
      * defined at the end of boot.S. It saves ESR/ELR/FAR/SPSR/HCR to
      * `jetson_early_fault_slot` in BSS and emits "!FAULT\r\n" over
-     * UARTC. Only runs from EL2 — CurrentEL-gated because reading
-     * or writing VBAR_EL2 from EL1 would trap.
+     * UARTC. The declared size [2048] matches the 16 × 0x80 ARM64
+     * vector-table layout so the compiler can catch a stray
+     * out-of-range indexing in any future C caller.
+     *
+     * Only runs from EL2 — CurrentEL-gated because reading or
+     * writing VBAR_EL2 from EL1 would trap. If firmware drops us to
+     * EL1 (unexpected on Jetson but possible elsewhere), print a
+     * warning so the silent-skip doesn't look like a successful
+     * install.
      *
      * Kexec path doesn't pass through here (it jumps straight to
      * real_start with x1 = 0), so this change is UEFI-direct only.
      */
     {
-        extern uint8_t jetson_early_vbar_el2[];
+        extern uint8_t jetson_early_vbar_el2[2048];
+        static const efi_char16_t m_vbar_not_el2[] =
+            u"[slmos] W not at EL2, VBAR_EL2 not installed\r\n";
         uint64_t cur_el;
         __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur_el));
         if (cur_el == 8) {
@@ -313,6 +322,13 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
                 :
                 : "r"(jetson_early_vbar_el2)
                 : "memory");
+        } else {
+            /* ConOut may be torn down post-EBS (see comment block
+             * below), but if it still works on this firmware the
+             * warning reaches the serial console; if not, the
+             * absence of a subsequent `!FAULT` from the handler is
+             * itself a signal. */
+            efi_print(sys_table, m_vbar_not_el2);
         }
     }
 #endif

@@ -819,12 +819,13 @@ secondary_spin:
  *      warm-reset recovery path can identify what happened.
  *   3. Emits "!FAULT\r\n" over UARTC (0x0C280000) as a real-time
  *      signal that the handler fired. One attempt per register;
- *      if UARTC MMIO itself faults, SError is masked so the
- *      secondary fault doesn't derail the scratch save.
+ *      if UARTC MMIO itself faults, SError stays masked by the
+ *      automatic PSTATE.DAIF set on exception entry so the async
+ *      abort doesn't recurse.
  *   4. WFE-loops forever.
  *
  * Design notes:
- *   - Uses only x10-x13. No stack required — safe even if SP is
+ *   - Uses only x10-x12. No stack required — safe even if SP is
  *     corrupted or unmapped.
  *   - VBAR_EL2 requires 0x800 (2KB) alignment; each of the 16
  *     vectors is 0x80 (128) bytes. Total table size: 2048 bytes.
@@ -833,6 +834,13 @@ secondary_spin:
  *   - The scratch slot is in BSS so UEFI's VirtualSize zero-fill
  *     guarantees it starts at zero; the magic signature lets a
  *     reader distinguish "handler fired" from "slot untouched".
+ *   - No explicit cache maintenance on the slot writes: the
+ *     handler disables EL2 MMU + caches (SCTLR_EL2.M/C/I clear)
+ *     BEFORE storing, so writes go through Device-nGnRnE and land
+ *     in DRAM directly. A follow-up reader (kexec-from-Linux,
+ *     warm-reset dump) sees them without dc civac. If the
+ *     MMU-disable step is ever moved AFTER the slot writes, add
+ *     `dc civac` + `dsb sy` per store.
  */
 .balign 0x800
 .global jetson_early_vbar_el2
@@ -893,12 +901,17 @@ jetson_early_vbar_el2:
     adrp    x10, jetson_early_fault_slot
     add     x10, x10, :lo12:jetson_early_fault_slot
 
-    /* Magic = "__EL2FAT" (little-endian) at [+0]. Lets a memory
-     * dump identify the slot vs zeroed BSS. */
-    movz    x11, #0x4154                  /* 'TA' */
-    movk    x11, #0x3246, lsl #16         /* 'F2' */
-    movk    x11, #0x454C, lsl #32         /* 'LE' */
-    movk    x11, #0x5F5F, lsl #48         /* '__' */
+    /* Magic "__EL2FAT" — stored so a hexdump / strings(1) on the
+     * slot produces the readable string "__EL2FAT" starting at
+     * offset 0. Memory layout: addr+0..7 = {'_','_','E','L','2',
+     * 'F','A','T'}. For a little-endian STR of a uint64, each
+     * halfword in x11 becomes two bytes at addr+(N/8) and
+     * addr+(N/8)+1, where N is the low bit of the halfword. The
+     * low byte of each halfword lands at the lower address. */
+    movz    x11, #0x5F5F                  /* addr+0..1: "__" */
+    movk    x11, #0x4C45, lsl #16         /* addr+2..3: "EL" */
+    movk    x11, #0x4632, lsl #32         /* addr+4..5: "2F" */
+    movk    x11, #0x5441, lsl #48         /* addr+6..7: "AT" */
     str     x11, [x10, #0x00]
 
     mrs     x11, esr_el2
@@ -915,9 +928,12 @@ jetson_early_vbar_el2:
     str     x11, [x10, #0x30]
     dsb     sy
 
-    /* Mask SError: if the UARTC write asynchronously faults
-     * (CBB firewall, translation), we don't want to recurse. */
-    msr     daifset, #0x4
+    /* No explicit daifset here: on EL2 exception entry, ARMv8
+     * hardware sets PSTATE.DAIF (D, A, I, F all masked). SError is
+     * already held, so if the UARTC writes below raise an async
+     * abort (CBB firewall, translation), it stays pending for the
+     * duration of the WFE loop rather than recursing through this
+     * handler. */
 
     /* Emit "!FAULT\r\n" over UARTC. NS16550 THR at offset 0,
      * 32-bit stride. Single-shot writes — if the wire eats them
@@ -953,6 +969,13 @@ jetson_early_fault_slot:
     .skip 64                              /* 8 × uint64_t */
 .global jetson_early_fault_slot_end
 jetson_early_fault_slot_end:
-.section .text
+
+/* Restore the original section the file opened in (`.text.boot`)
+ * so any code added below this block lands in the boot text
+ * section rather than plain `.text`. Without this, a future edit
+ * that appends routines after `#endif` would silently land in the
+ * wrong section and potentially outside the kernel's first
+ * segment. */
+.section .text.boot
 #endif /* PLATFORM_JETSON_ORIN_NANO */
 
