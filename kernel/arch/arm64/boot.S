@@ -762,6 +762,17 @@ bss_done:
     msr     vbar_el1, x1
     isb
 
+#ifdef JETSON_EL1_SMOKE
+    /*
+     * Jetson EL1 smoke test (one-shot). Never returns. Drops to EL1,
+     * reads PCIe APPL + XHCI MMIO, prints via UARTC, halts. Used to
+     * determine whether CBB firewall gates by EL or by kernel
+     * signature — see kernel/tests/jetson_el1_smoke.S.
+     */
+    bl      jetson_el1_smoke
+    b       halt
+#endif
+
     /*
      * Jump to C code.
      * Pass DTB address as first argument (x0).

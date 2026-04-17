@@ -4,11 +4,13 @@ Bare-metal access to the Tegra T234 PCIe root complex C8 from SLM-OS
 at EL2, needed to drive the RTL8168 NIC on the Super Developer Kit.
 
 **Status (17 April 2026):** Blocked at the CBB-firewall level. The
-restriction is not specific to PCIe — USB 3.0 (XHCI) is blocked the
-same way, confirming that CBB rejects all DMA-capable peripherals
-from EL2 on this board. Both of the plan's Jetson networking paths
-(PCIe RTL8168 §4.1 and USB CDC-ECM §4.2) are infeasible under the
-current EL2+VHE boot model.
+restriction is NOT Exception-Level-dependent — an EL1 smoke test
+confirmed that SLM-OS running at EL1 reads the same 0xFFFFFFFF for
+APPL/XHCI as SLM-OS at EL2, while Linux (also EL1) reads the real
+values. The firewall gates by boot trust chain, not by EL. Both
+plan §4.1 (PCIe RTL8168) and §4.2 (USB CDC-ECM) are infeasible
+regardless of boot model. Only a BCT firewall override (custom L4T
+flash) would change this.
 
 ---
 
@@ -106,18 +108,39 @@ blocks UARTA and the GPU register bank applies here.
 
 ## What remains on the table
 
-### Path A — Drop SLM-OS to EL1
+### Path A — Drop SLM-OS to EL1 — **RULED OUT (17 April 2026)**
 
-Linux at EL1 reads these registers fine. Running SLM-OS at EL1
-instead of EL2+VHE would likely lift the PCIe CBB restriction. But:
-- UARTA at EL1 is CBB-blocked on this board (the reason for the
-  earlier EL2 move). A different console would be needed (UARTC?
-  TCU?).
-- Giving up VHE means all the VHE-transparent EL1-register redirect
-  tricks that make SLM-OS's existing ARM64 code work have to be
-  undone. Large refactor.
-- Secondary CPU bring-up at EL1 through PSCI may differ; needs
-  re-verification.
+Ran a one-shot smoke test (`kernel/tests/jetson_el1_smoke.S`, gated
+on `JETSON_EL1_SMOKE=ON`) that at boot:
+
+1. Reads APPL[4] + XHCI[0] from EL2+VHE (for reference).
+2. Exits VHE (clears HCR_EL2.E2H + TGE).
+3. `ERET`s to EL1.
+4. Writes 'ABCD' via raw UARTC MMIO (tests write-at-EL1).
+5. Reads UARTC LSR (tests read-at-EL1 on an unfirewalled peripheral).
+6. Reads APPL[4] and prints as 8 hex digits.
+
+Captured output on jetson-nano-1:
+
+```
+EL2:APPL=0xffffffff
+EL2:XHCI=0xffffffff
+EL2:PRE-ERET
+ABCD                     (EL1 writes work)
+LSR=0                    (EL1 LSR read works — returns expected value)
+P=ffffffff               (EL1 APPL[4] read — still firewalled)
+```
+
+Same APPL address from Linux via `/dev/mem` returns `0x009490e0`.
+Linux and SLM-OS are both running at EL1 when they make that read
+(Linux normally, SLM-OS via the smoke test). Same EL, same address,
+different result → the firewall is **not** EL-gated; it's
+trust-chain-gated.
+
+The `jetson-nvidia-support.md` doc already phrased this correctly —
+"blocks all peripheral access from unsigned/unauthenticated code" —
+it was EL2-specific only by coincidence because SLM-OS happens to
+run at EL2. Rephrasing the boot model would have no effect.
 
 ### Path B — USB CDC-ECM — **RULED OUT (17 April 2026)**
 
@@ -159,17 +182,18 @@ widened, and stop.
 
 ## Immediate next steps
 
-Two options remain for bare-metal Jetson networking; the
-peripheral-level paths are both out:
+Only one technical option remains: **OEM BCT firewall override**
+(custom L4T flash). See the risk analysis in the team discussion.
+All other approaches (EL refactor, PCIe driver port, USB fallback,
+slmos-kexec hacks) have been empirically ruled out.
 
-- **Path A** — drop SLM-OS to EL1 (big refactor, ripples into UART,
-  VHE, and secondary CPU bring-up).
-- **Path C** — OEM BCT firewall override (custom L4T flash).
-
-Or close #25 and document that bare-metal networking on Jetson Orin
-Nano Super Developer Kit is infeasible under the EL2+VHE boot model.
-The `rtldiag` / `xhcidiag` shell commands stay in the tree as
-diagnostic scaffolding if the CBB situation ever changes.
+Alternative: close #25 and document bare-metal networking on the
+Jetson Orin Nano Super Developer Kit as infeasible without custom
+BCT. The `rtldiag` / `xhcidiag` / `JETSON_EL1_SMOKE` scaffolding
+stays in the tree as diagnostic infrastructure — anyone revisiting
+the problem (or working on it on a board with a different firewall
+posture) can re-run the same tests and skip the investigation
+cost.
 
 ---
 

@@ -186,6 +186,15 @@ if(ENABLE_NETWORKING)
     add_compile_definitions(ENABLE_NETWORKING=1)
 endif()
 
+# Jetson EL1 smoke test — one-shot diagnostic that drops to EL1 at boot
+# and reads PCIe APPL + XHCI MMIO. Used to answer whether CBB firewall
+# gates by EL (Path 1 viable) or kernel signature (Path 1 dead). See
+# docs/jetson-pcie-investigation.md.
+option(JETSON_EL1_SMOKE "Run Jetson EL1-drop smoke test at boot (one-shot)" OFF)
+if(JETSON_EL1_SMOKE)
+    add_compile_definitions(JETSON_EL1_SMOKE=1)
+endif()
+
 # Auto-start DHCP at boot (issue #197).
 #
 # When ON, net_init() calls dhcp_start() before returning; the shell
@@ -421,6 +430,8 @@ set(KERNEL_SOURCES
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/bcm_mailbox.c>
     # Realtek RTL8169/RTL8168 driver (Jetson Orin Nano, via Tegra PCIe C8) — #25
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/drivers/eth_rtl8169.c>
+    # Jetson EL1 smoke test (one-shot diagnostic) — JETSON_EL1_SMOKE
+    $<$<AND:$<BOOL:${JETSON_EL1_SMOKE}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/tests/jetson_el1_smoke.S>
     # Platform-independent networking stack
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>
