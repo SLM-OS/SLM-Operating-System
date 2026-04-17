@@ -125,6 +125,7 @@ Exception at X" message reported them:
 | ----------------------------------------- | -------------------- | --------- |
 | `image_base + 0x10000` (real_start entry) | `image_base + 0`     | -0x10000  |
 | `image_base + 0x10018` (post-bl)          | `image_base + 0x18`  | -0x10000  |
+| `image_base + 0x10100` (0x100 into .text) | `image_base + 0x100` | -0x10000  |
 
 Both off by exactly `SizeOfHeaders` (0x10000). The quirk is
 consistent and repeatable. Mechanism hypothesized: ArmCpuDxe
@@ -135,12 +136,11 @@ Not confirmed against source: upstream ArmPkg's
 is public), and NVIDIA may carry local diffs on top, but neither
 has been inspected for this finding.
 
-**Sample size is two.** Both data points fit the "off by 0x10000"
-interpretation, but also fit other models (e.g. "reports PC
-relative to BaseOfCode + ImageBase"). Before relying on the
-re-interpretation below, the next session should add a third data
-point — a `brk` at, say, `image_base + 0x10100` (0x100 bytes past
-real_start) — to rule out alternative linear relationships.
+**Hypothesis confirmed** (2026-04-17 probe added a third data
+point): `brk` at `image_base + 0x10100` was reported at
+`image_base + 0x100`. The -0x10000 subtraction is constant across
+three points in `.text`, ruling out the competing "relative to
+BaseOfCode" model.
 
 **Implication for past findings:** the "silent hang after marker C"
 in PR #226 and PR #229 may not have been silent at all. The brks
@@ -168,6 +168,85 @@ The actual hang may be much later in the boot path — possibly
 kernel_main itself, which means the bigger remaining work is
 approach B (real `.reloc` / PIC), not the intermediate steps
 listed below.
+
+### 5a. Secondary finding — DAIF.D masks BRK exceptions
+
+Discovered when diagnostic brks stopped firing midway through
+`boot.S`'s post-bl path. Per ARM ARM D1.10.4/5, "BRK instruction
+exception" is classified as a debug exception, and `PSTATE.D = 1`
+masks all debug exceptions targeted at the current EL. The brk
+fires but the exception is deferred indefinitely; the CPU
+continues past the brk as if it were a NOP.
+
+This means `msr daifset, #0xF` (which sets D among A, I, F) at
+post-`bl efi_stub_entry` silently disabled every subsequent brk in
+the boot path. Using `#0x7` (AIF only) plus an explicit
+`msr daifclr, #0x8` unmasks D while keeping interrupt masking.
+
+Past `brk` probes placed after the daifset — i.e. every attempt to
+bisect inside the Jetson block or primary_cpu in PR #226, #229, or
+the first half of this session — silently no-opped for this reason.
+This compounds finding #5's effect on past conclusions.
+
+### 5b. Primary finding — UEFI on Jetson runs at EL2, not EL1
+
+PR #226 concluded UEFI hands SLM-OS EL1 based on `mrs hcr_el2`
+trapping at offset `0x10024` (reported via ArmCpuDxe). Under
+finding #5's corrected -0x10000 offset and finding #5a's DAIF.D
+story, that evidence is re-readable two different ways — and when
+a fresh probe placed a brk in the EL2 fall-through branch of
+`boot.S`'s CurrentEL gate, **the brk fired**. CurrentEL returned
+EL2; b.ne was NOT taken; execution fell into the EL2-only code.
+
+So:
+- UEFI-direct boot on Jetson firmware v36.4.7 enters at EL2+VHE,
+  same as kexec-from-Linux.
+- The `CurrentEL == EL2` gate added in PR #226 evaluates TRUE
+  under UEFI-direct too, not just under kexec. Both paths enter
+  the EL2 block.
+- The original PR #226 "mrs hcr_el2 traps" evidence had another
+  explanation: the instruction at that offset wasn't `mrs hcr_el2`
+  in the old layout once the -0x10000 offset is applied, or the
+  apparent trap was a brk firing elsewhere that rendered weirdly.
+  Not precisely re-verified, but the EL-2-fall-through brk firing
+  is strong evidence the kernel runs at EL2 end-to-end.
+
+### 5c. `msr hcr_el2` re-write hangs silently at EL2 under UEFI
+
+Bisecting inside the EL2 block: a brk placed **after** `msr
+hcr_el2, x10` never fires, but a brk placed **before** the same
+msr fires reliably. The instruction itself either traps in a
+UEFI-specific way or produces a nested exception UEFI's handler
+can't cleanly print.
+
+Likely cause: the unconditional write of `(E2H | RW | TGE)` clobbers
+every other HCR_EL2 bit UEFI had set — e.g. `API`, `APK`, `AMO`,
+`IMO`, `FMO`, `HCD`, `VM` — and UEFI's ongoing reliance on some of
+those makes the CPU state inconsistent. Kexec from Linux is fine
+because Linux's VHE host state closely matches SLM-OS's target
+state; UEFI's state is different.
+
+**Proposed fix (next session):** read-modify-write instead of
+unconditional overwrite. Read HCR_EL2, ensure `E2H | RW | TGE` are
+set (OR them in), write back. Preserves UEFI's other bits.
+
+### 5d. UARTC MMIO at 0x0C280000 still faults at EL2 under UEFI-direct
+
+Skipping the HCR_EL2 write lets execution continue into the timer
+disables (which all run — CNT*_CTL writes succeed at EL2) and into
+the UARTC probe. The first `str w12, [0x0C280000]` faults at its
+exact PC (file offset 0x10044 + image_base), reported via
+ArmCpuDxe per the -0x10000 offset.
+
+So at EL2 under UEFI-direct, direct MMIO to UARTC is blocked —
+consistent with the earlier observation (PR #226) that UARTC
+writes from the EFI-application context fault. The prior
+interpretation "UEFI runs SLM-OS at EL1 so CBB firewall blocks
+UARTC" was wrong about EL (SLM-OS is at EL2), but the CBB blocking
+itself is
+real. UEFI's EFI-app context appears to sit behind a different
+CBB permission profile than kexec-from-Linux despite both being
+at EL2.
 
 ### 6. Remaining downstream blocker — NOT BSS clear as previously hypothesized
 
