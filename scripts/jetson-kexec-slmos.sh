@@ -18,13 +18,33 @@
 #
 # Usage:
 #   sudo ./jetson-kexec-slmos.sh /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --no-gpu-suspend /path/to/slmos.elf
 #
 # Or install to Jetson and run:
 #   sudo slmos-kexec /root/slmos.elf
 #
+# Options:
+#   --no-gpu-suspend    Skip the GPU runtime-PM suspend and BPMP
+#                       clock re-enable steps. Preserves the GPU's
+#                       ACR/Falcon security state through the kexec
+#                       transition (HWCFG2 bit 13 stays clear).
+#                       Required for Path 3 (#190) — SLM-OS inherits
+#                       Linux's already-running FECS/GPCCS/PMU state.
+#                       Risk: stale nvgpu DMA may trigger a TF-A RAS
+#                       error. In practice this hasn't fired in testing
+#                       when GPU consumers are stopped before kexec.
+#
 set -euo pipefail
 
-KERNEL="${1:-/root/slmos.elf}"
+NO_GPU_SUSPEND=0
+KERNEL=""
+for arg in "$@"; do
+    case "$arg" in
+        --no-gpu-suspend) NO_GPU_SUSPEND=1 ;;
+        *) KERNEL="$arg" ;;
+    esac
+done
+KERNEL="${KERNEL:-/root/slmos.elf}"
 
 if [[ ! -f "$KERNEL" ]]; then
     echo "Error: kernel file not found: $KERNEL" >&2
@@ -63,36 +83,42 @@ else
     fuser -k /dev/nvhost-gpu /dev/nvmap 2>/dev/null || true
     sleep 1
 
-    echo "[2/5] Runtime-PM suspending GPU (drains DMA to avoid RAS)..."
-    echo 0 > "$GPU_POWER/autosuspend_delay_ms"
-    echo auto > "$GPU_POWER/control"
-    sleep 3
+    if [[ "$NO_GPU_SUSPEND" == "1" ]]; then
+        echo "[2/5] SKIPPING runtime-PM suspend (--no-gpu-suspend)"
+        echo "       GPU stays powered — preserving Falcon ACR state for Path 3"
+        echo "[3/5] SKIPPING BPMP clock re-enable (GPU already running)"
+    else
+        echo "[2/5] Runtime-PM suspending GPU (drains DMA to avoid RAS)..."
+        echo 0 > "$GPU_POWER/autosuspend_delay_ms"
+        echo auto > "$GPU_POWER/control"
+        sleep 3
 
-    status="$(cat "$GPU_POWER/runtime_status" 2>/dev/null || echo unknown)"
-    pg_state="$(cat "$BPMP/powergate/gpu/state" 2>/dev/null || echo unknown)"
-    echo "       after suspend: runtime=$status powergate=$pg_state"
-    if [[ "$status" != "suspended" ]]; then
-        echo "Warning: GPU did not suspend cleanly (status=$status)" >&2
-        echo "         kexec may still crash with a TF-A RAS error" >&2
-    fi
-
-    echo "[3/5] Re-enabling GPU clocks + powergate for SLM-OS handoff..."
-    # Un-powergate the GPU domain (1 = ungated)
-    echo 1 > "$BPMP/powergate/gpu/state" 2>/dev/null || echo "       powergate write failed" >&2
-    # Enable the primary GPU clocks. These were turned off by nvgpu's
-    # runtime PM suspend; we re-enable via the BPMP debugfs interface
-    # (which has the required permissions, unlike SLM-OS's own BPMP MRQs).
-    for clk in gpu_pwr gpusysclk gpunvdclk nafll_gpusys; do
-        if [[ -w "$BPMP/clk/$clk/state" ]]; then
-            echo 1 > "$BPMP/clk/$clk/state" 2>/dev/null || true
+        status="$(cat "$GPU_POWER/runtime_status" 2>/dev/null || echo unknown)"
+        pg_state="$(cat "$BPMP/powergate/gpu/state" 2>/dev/null || echo unknown)"
+        echo "       after suspend: runtime=$status powergate=$pg_state"
+        if [[ "$status" != "suspended" ]]; then
+            echo "Warning: GPU did not suspend cleanly (status=$status)" >&2
+            echo "         kexec may still crash with a TF-A RAS error" >&2
         fi
-    done
-    sleep 1
 
-    pg_final="$(cat "$BPMP/powergate/gpu/state" 2>/dev/null || echo '?')"
-    gsys="$(cat "$BPMP/clk/gpusysclk/state" 2>/dev/null || echo '?')"
-    gpwr="$(cat "$BPMP/clk/gpu_pwr/state" 2>/dev/null || echo '?')"
-    echo "       after re-enable: powergate=$pg_final gpusysclk=$gsys gpu_pwr=$gpwr"
+        echo "[3/5] Re-enabling GPU clocks + powergate for SLM-OS handoff..."
+        # Un-powergate the GPU domain (1 = ungated)
+        echo 1 > "$BPMP/powergate/gpu/state" 2>/dev/null || echo "       powergate write failed" >&2
+        # Enable the primary GPU clocks. These were turned off by nvgpu's
+        # runtime PM suspend; we re-enable via the BPMP debugfs interface
+        # (which has the required permissions, unlike SLM-OS's own BPMP MRQs).
+        for clk in gpu_pwr gpusysclk gpunvdclk nafll_gpusys; do
+            if [[ -w "$BPMP/clk/$clk/state" ]]; then
+                echo 1 > "$BPMP/clk/$clk/state" 2>/dev/null || true
+            fi
+        done
+        sleep 1
+
+        pg_final="$(cat "$BPMP/powergate/gpu/state" 2>/dev/null || echo '?')"
+        gsys="$(cat "$BPMP/clk/gpusysclk/state" 2>/dev/null || echo '?')"
+        gpwr="$(cat "$BPMP/clk/gpu_pwr/state" 2>/dev/null || echo '?')"
+        echo "       after re-enable: powergate=$pg_final gpusysclk=$gsys gpu_pwr=$gpwr"
+    fi
 fi
 
 echo "[4/5] Loading kernel: $KERNEL"

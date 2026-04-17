@@ -755,6 +755,77 @@ static void test_pmu_is_noop(void)
     REQUIRE_EQ(g_gr.gpccs_cpuctl_writes, gpccs_writes_before);
 }
 
+/* ======================================================================
+ * Test 6: inherit (Path 3 — detect Linux's bootstrapped state)
+ *
+ * The inherit function reads HWCFG2 (bit 13), FECS mailbox[0], and
+ * GPCCS mailbox[0]. If all show the "already booted" pattern, it
+ * jumps the state machine directly to PMU_UP.
+ * ====================================================================== */
+
+static void test_inherit_happy_path(void)
+{
+    printf("== test_inherit_happy_path ==\n");
+    mock_reset();
+
+    /* Pre-set the mock BAR0 to simulate Linux's post-boot state:
+     *   HWCFG2 bit 13 = 0 (unlocked)
+     *   FECS mailbox[0] = 1 (PASS)
+     *   GPCCS mailbox[0] = 1 (PASS) */
+    g_gsp.hwcfg2 = FAKE_HWCFG2_IDLE;  /* bit 13 = 0 */
+    g_gr.fecs_mbox0  = 0x1u;           /* PASS */
+    g_gr.gpccs_mbox0 = 0x1u;           /* PASS */
+
+    struct ga10b_bringup b;
+    int rc = ga10b_bringup_inherit(&b);
+    REQUIRE_EQ(rc, 0);
+    REQUIRE_EQ(b.state, GA10B_BRINGUP_PMU_UP);
+    REQUIRE_EQ(b.last_error_phase, -1);
+}
+
+static void test_inherit_rejects_priv_lockdown(void)
+{
+    printf("== test_inherit_rejects_priv_lockdown ==\n");
+    mock_reset();
+
+    /* Set bit 13 (priv-lockdown) in HWCFG2 */
+    g_gsp.hwcfg2 = FAKE_HWCFG2_IDLE | (1u << 13);
+    g_gr.fecs_mbox0  = 0x1u;
+    g_gr.gpccs_mbox0 = 0x1u;
+
+    struct ga10b_bringup b;
+    int rc = ga10b_bringup_inherit(&b);
+    REQUIRE_EQ(rc, -1);
+}
+
+static void test_inherit_rejects_fecs_not_ready(void)
+{
+    printf("== test_inherit_rejects_fecs_not_ready ==\n");
+    mock_reset();
+
+    g_gsp.hwcfg2 = FAKE_HWCFG2_IDLE;
+    g_gr.fecs_mbox0  = 0x0u;  /* NOT ready */
+    g_gr.gpccs_mbox0 = 0x1u;
+
+    struct ga10b_bringup b;
+    int rc = ga10b_bringup_inherit(&b);
+    REQUIRE_EQ(rc, -1);
+}
+
+static void test_inherit_rejects_gpccs_not_ready(void)
+{
+    printf("== test_inherit_rejects_gpccs_not_ready ==\n");
+    mock_reset();
+
+    g_gsp.hwcfg2 = FAKE_HWCFG2_IDLE;
+    g_gr.fecs_mbox0  = 0x1u;
+    g_gr.gpccs_mbox0 = 0x2u;  /* FAIL sentinel */
+
+    struct ga10b_bringup b;
+    int rc = ga10b_bringup_inherit(&b);
+    REQUIRE_EQ(rc, -1);
+}
+
 /* Walk phases 1→4 in one go and verify the state machine advances
  * cleanly. Later phases (address_space, channel, smoke_test) still
  * return -1 since they're unimplemented — so we don't run them here. */
@@ -807,6 +878,11 @@ int main(void)
     test_gpccs_fails_on_fail_sentinel();
     test_pmu_is_noop();
     test_phases_1_through_4_chain();
+
+    test_inherit_happy_path();
+    test_inherit_rejects_priv_lockdown();
+    test_inherit_rejects_fecs_not_ready();
+    test_inherit_rejects_gpccs_not_ready();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);

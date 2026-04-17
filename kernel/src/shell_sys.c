@@ -2471,6 +2471,14 @@ int cmd_nvgpu(int argc, char *argv[])
         return rc;
     }
 
+    if (strcmp(argv[1], "inherit") == 0) {
+        /* Path 3 (#190): detect Linux's already-bootstrapped Falcon
+         * state after a --no-gpu-suspend kexec. Skips phases 1-4. */
+        int rc = ga10b_bringup_inherit(&b);
+        uart_printf("inherit: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+
     if (strcmp(argv[1], "run") == 0) {
         int rc = ga10b_bringup_run(&b);
         uart_printf("run: rc=%d, state=%d, last_err_phase=%d\r\n",
@@ -2497,7 +2505,7 @@ int cmd_nvgpu(int argc, char *argv[])
         return rc;
     }
 
-    uart_puts("usage: nvgpu [info | prepare | acr | fecs | gpccs | pmu | run]\r\n");
+    uart_puts("usage: nvgpu [info | prepare | inherit | acr | fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */

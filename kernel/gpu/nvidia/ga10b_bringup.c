@@ -628,6 +628,82 @@ int ga10b_bringup_pmu(struct ga10b_bringup *b)
     return 0;
 }
 
+/* ---- Inherit: detect Linux's bootstrapped state ----
+ *
+ * Path 3 of #190: after a no-suspend kexec from Linux, the GPU stays
+ * powered and the Falcon security state is preserved. Linux's nvgpu
+ * driver has already run ACR, FECS, and GPCCS to completion. Instead
+ * of resetting the engines (which re-asserts HWCFG2 bit 13 priv-
+ * lockdown), SLM-OS reads the Falcon state registers and verifies
+ * that all three engines are halted-with-PASS:
+ *
+ *   - HWCFG2 bit 13 = 0  (PRI aperture unlocked)
+ *   - FECS ctxsw_mailbox[0] = 1 (PASS)
+ *   - GPCCS ctxsw_mailbox[0] = 1 (PASS)
+ *
+ * On success, the state machine jumps directly to PMU_UP, skipping
+ * phases 1–4. This is the fast path after `slmos-kexec --no-gpu-suspend`.
+ *
+ * Requires: no runtime-PM suspend in the kexec helper (GPU must NOT
+ * have been power-gated). If HWCFG2 shows lockdown, returns -1 and
+ * the caller should fall back to the from-scratch ACR path (which
+ * will also fail on locked hardware, but with better diagnostics).
+ */
+int ga10b_bringup_inherit(struct ga10b_bringup *b)
+{
+    if (!b) return -1;
+    memset(b, 0, sizeof(*b));
+    b->state = GA10B_BRINGUP_INIT;
+    b->last_error_phase = -1;
+
+    if (!gsp_platform) {
+        uart_puts("[GA10B-INHERIT] no platform ops installed\n");
+        return -1;
+    }
+
+    /* Check HWCFG2 bit 13 — the priv-lockdown gate. */
+    uint32_t hwcfg2 = bar0_r32(NV_PGSP_BASE + FALCON_HWCFG2);
+    uint32_t bit13 = (hwcfg2 >> 13) & 1u;
+    uart_printf("[GA10B-INHERIT] HWCFG2=0x%08lx bit13=%lu\n",
+                (unsigned long)hwcfg2, (unsigned long)bit13);
+
+    if (bit13 != 0) {
+        uart_puts("[GA10B-INHERIT] FAIL — priv-lockdown is asserted. "
+                  "Was --no-gpu-suspend used?\n");
+        return -1;
+    }
+
+    /* Read FECS and GPCCS ctxsw mailboxes. */
+    uint32_t fecs_mbox0  = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
+    uint32_t gpccs_mbox0 = bar0_r32(GR_GPC0_GPCCS_CTXSW_MAILBOX(0));
+    uint32_t fecs_cpuctl  = bar0_r32(GR_FECS_CPUCTL);
+    uint32_t gpccs_cpuctl = bar0_r32(GR_GPCCS_CPUCTL);
+    uint32_t gsp_cpuctl   = bar0_r32(NV_PGSP_BASE + 0x100u);
+
+    uart_printf("[GA10B-INHERIT] GSP  CPUCTL=0x%08lx\n",
+                (unsigned long)gsp_cpuctl);
+    uart_printf("[GA10B-INHERIT] FECS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                (unsigned long)fecs_cpuctl, (unsigned long)fecs_mbox0);
+    uart_printf("[GA10B-INHERIT] GPCCS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                (unsigned long)gpccs_cpuctl, (unsigned long)gpccs_mbox0);
+
+    if (fecs_mbox0 != GR_FECS_MAILBOX_PASS) {
+        uart_printf("[GA10B-INHERIT] FECS not ready (expected 1, got 0x%lx)\n",
+                    (unsigned long)fecs_mbox0);
+        return -1;
+    }
+    if (gpccs_mbox0 != GR_FECS_MAILBOX_PASS) {
+        uart_printf("[GA10B-INHERIT] GPCCS not ready (expected 1, got 0x%lx)\n",
+                    (unsigned long)gpccs_mbox0);
+        return -1;
+    }
+
+    uart_puts("[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — "
+              "skipping phases 1-4\n");
+    b->state = GA10B_BRINGUP_PMU_UP;
+    return 0;
+}
+
 int ga10b_bringup_address_space(struct ga10b_bringup *b)
 {
     if (!b || b->state != GA10B_BRINGUP_PMU_UP) return -1;

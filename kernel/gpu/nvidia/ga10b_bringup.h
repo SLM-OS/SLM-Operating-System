@@ -116,6 +116,13 @@ struct ga10b_bringup {
 
 int ga10b_bringup_prepare(struct ga10b_bringup *b);
 
+/* Inherit: detect Linux's already-bootstrapped Falcon state (Path 3
+ * of #190). After a --no-gpu-suspend kexec, the GPU stays powered and
+ * ACR/FECS/GPCCS are already in PASS state. This function verifies
+ * that and jumps the state machine directly to PMU_UP, skipping
+ * phases 1–4. Returns 0 on success, -1 if the state isn't clean. */
+int ga10b_bringup_inherit(struct ga10b_bringup *b);
+
 /* Phase 1: ACR on GSP Falcon — establishes WPR, loads LS ucodes. */
 int ga10b_bringup_acr(struct ga10b_bringup *b);
 
