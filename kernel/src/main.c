@@ -472,8 +472,8 @@ void kernel_main(void *dtb)
     }
 #elif defined(PLATFORM_RASPI5)
     {
-        extern void genet_register(void);
-        genet_register();
+        extern void macb_register(void);
+        macb_register();
     }
 #endif
 #endif
