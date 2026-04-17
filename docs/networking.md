@@ -248,8 +248,20 @@ leave `tx_reap` NULL; the polling fallback only runs when it's set.
 
 The TX buffer pool is sized to allow multiple in-flight packets (currently
 16 in both VirtIO drivers — adjustable per driver). Bursts up to that depth
-submit without blocking; sustained traffic above that depth gets back-
-pressured via `NET_E_BUSY` and retries on the next poll cycle.
+submit without blocking; sustained traffic above that depth surfaces as
+`NET_E_BUSY` from `send()`. The retry behaviour depends on the caller:
+
+- **TCP** (via lwIP) — the packet sits in the TCP retransmit queue and
+  `tcp_slowtmr()` re-invokes `linkoutput` after the retransmit interval.
+- **ARP** (via lwIP) — pending packets are queued in the ARP layer and
+  retried when ARP resolves.
+- **UDP, ICMP, raw** — lwIP returns `ERR_IF` from `linkoutput` and the
+  packet is dropped at the netif. One-shot; the application sees the
+  drop (UDP is best-effort, ICMP likewise).
+
+`net_poll()` itself does not re-submit dropped packets — its role is
+only to drain `tx_reap` so the pool has free slots by the time the
+next `send()` runs.
 
 ### Key Functions
 

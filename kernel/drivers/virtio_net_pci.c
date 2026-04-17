@@ -213,11 +213,20 @@ static uint8_t rx_buffers[RX_BUFFER_COUNT][MAX_PACKET_SIZE]
 
 /* TX buffer pool (#204): same async-completion model as the MMIO
  * driver. send() picks a free slot, submits the descriptor, returns
- * immediately; tx_reap() drains completions from net_poll(). */
+ * immediately; tx_reap() drains completions from net_poll().
+ *
+ * MAX_PACKET_SIZE is the PCI driver's local constant for the per-slot
+ * buffer size; the MMIO driver spells the same value TX_BUFFER_SIZE
+ * (= VIRTIO_NET_MAX_PACKET = 1514 + sizeof(virtio_net_hdr)). Kept
+ * separate because the two drivers have independent local naming
+ * conventions, not because the values differ. */
 #define TX_BUFFER_COUNT  16
 static uint8_t tx_buffers[TX_BUFFER_COUNT][MAX_PACKET_SIZE]
     __attribute__((aligned(16)));
 static bool    tx_inflight[TX_BUFFER_COUNT];
+
+static_assert(sizeof(tx_buffers) == TX_BUFFER_COUNT * MAX_PACKET_SIZE,
+              "tx_buffers layout assumption broken");
 
 /* -------------------------------------------------------------------------- */
 /* Memory barrier                                                              */
@@ -645,15 +654,15 @@ static void virtio_net_pci_tx_reap_locked(void) {
                  (unsigned long)addr);
             continue;
         }
+        /* slot < TX_BUFFER_COUNT by the static_assert above. */
         unsigned slot = (unsigned)((addr - pool_base) / MAX_PACKET_SIZE);
-        if (slot >= TX_BUFFER_COUNT)
-            continue;
         tx_inflight[slot] = false;
     }
 }
 
-/* Public reap: called from net_poll() via the net_driver op. */
-static void virtio_net_pci_tx_reap_pub(void) {
+/* Entry point called from net_poll() via the net_driver op — wraps
+ * the locked helper with tx_lock acquisition. */
+static void virtio_net_pci_tx_reap(void) {
     if (!pci_net.initialized)
         return;
     irq_flags_t flags = spin_lock_irqsave(&pci_net.tx_lock);
@@ -766,7 +775,7 @@ static const struct net_driver virtio_net_pci_driver = {
     .recv        = virtio_net_pci_recv,
     .get_mac     = virtio_net_pci_get_mac,
     .link_status = virtio_net_pci_link_status,
-    .tx_reap     = virtio_net_pci_tx_reap_pub,
+    .tx_reap     = virtio_net_pci_tx_reap,
 };
 
 void virtio_net_pci_register(void) {

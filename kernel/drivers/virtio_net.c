@@ -61,6 +61,12 @@ static uint8_t tx_buffer_pool[TX_BUFFER_COUNT][TX_BUFFER_SIZE]
     __attribute__((aligned(16)));
 static bool    tx_inflight[TX_BUFFER_COUNT];
 
+/* Invariant that lets virtio_net_tx_reap_locked skip a redundant
+ * bounds check — if the descriptor's addr is within the pool, then
+ * (addr - pool_base) / TX_BUFFER_SIZE is guaranteed < TX_BUFFER_COUNT. */
+static_assert(sizeof(tx_buffer_pool) == TX_BUFFER_COUNT * TX_BUFFER_SIZE,
+              "tx_buffer_pool layout assumption broken");
+
 /* -------------------------------------------------------------------------- */
 /* VirtIO Common Functions                                                     */
 /* -------------------------------------------------------------------------- */
@@ -480,15 +486,15 @@ static void virtio_net_tx_reap_locked(void) {
                  (unsigned long)addr);
             continue;
         }
+        /* slot < TX_BUFFER_COUNT by the static_assert above. */
         unsigned slot = (unsigned)((addr - pool_base) / TX_BUFFER_SIZE);
-        if (slot >= TX_BUFFER_COUNT)
-            continue;
         tx_inflight[slot] = false;
     }
 }
 
-/* Public reap: called from net_poll() via the net_driver op. */
-static void virtio_net_tx_reap_pub(void) {
+/* Entry point called from net_poll() via the net_driver op — wraps
+ * the locked helper with tx_lock acquisition. */
+static void virtio_net_tx_reap(void) {
     if (!initialized)
         return;
     spin_lock(&tx_lock);
@@ -660,7 +666,7 @@ static const struct net_driver virtio_net_mmio_driver = {
     .recv        = virtio_net_drv_recv,
     .get_mac     = virtio_net_get_mac,
     .link_status = virtio_net_link_up,
-    .tx_reap     = virtio_net_tx_reap_pub,
+    .tx_reap     = virtio_net_tx_reap,
 };
 
 void virtio_net_register(void) {

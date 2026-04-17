@@ -880,6 +880,21 @@ static void test_net_dhcp_fallback(void)
  * actual byte content doesn't matter to the device; the test only verifies
  * that the descriptor cycle completes.
  */
+/*
+ * Build a minimum-size broadcast Ethernet frame in `frame` using the
+ * registered driver's MAC as the source. Shared between the raw-TX
+ * tests below (send path exercises that don't go through lwIP).
+ */
+static void test_net_build_loopback_frame(uint8_t frame[64])
+{
+    const struct net_driver *drv = net_get_driver();
+    memset(frame, 0, 64);
+    for (int i = 0; i < 6; i++) frame[i] = 0xFF;  /* broadcast dest */
+    drv->get_mac(&frame[6]);                       /* source MAC */
+    frame[12] = 0x90;                              /* EtherType 0x9000 */
+    frame[13] = 0x00;
+}
+
 static void test_net_driver_tx(void)
 {
     if (!net_is_up()) {
@@ -890,33 +905,11 @@ static void test_net_driver_tx(void)
     const struct net_driver *drv = net_get_driver();
     TEST_ASSERT_NOT_NULL(drv);
 
-    uint8_t frame[64] = {0};
-    /* Destination MAC: broadcast */
-    for (int i = 0; i < 6; i++) frame[i] = 0xFF;
-    /* Source MAC: the driver's */
-    drv->get_mac(&frame[6]);
-    /* EtherType: 0x9000 (Loopback) — recognized but unused by SLIRP */
-    frame[12] = 0x90;
-    frame[13] = 0x00;
-    /* Remaining 50 bytes are zero payload */
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
 
     int ret = drv->send(frame, sizeof(frame));
     TEST_ASSERT_MESSAGE(ret == 0, "driver send() should succeed");
-}
-
-/*
- * Build a minimum-size broadcast Ethernet frame in `frame` using the
- * registered driver's MAC as the source. Helper for the async TX
- * tests below.
- */
-static void test_net_build_loopback_frame(uint8_t frame[64])
-{
-    const struct net_driver *drv = net_get_driver();
-    memset(frame, 0, 64);
-    for (int i = 0; i < 6; i++) frame[i] = 0xFF;  /* broadcast dest */
-    drv->get_mac(&frame[6]);                       /* source MAC */
-    frame[12] = 0x90;                              /* EtherType 0x9000 */
-    frame[13] = 0x00;
 }
 
 /*
@@ -1042,8 +1035,12 @@ static void test_net_send_pool_exhaustion(void)
         "pool overflow must only produce NET_E_BUSY, no other error codes");
     TEST_ASSERT_MESSAGE(ok + busy == 32,
         "every send must return either 0 or NET_E_BUSY (#204)");
-    TEST_ASSERT_MESSAGE(elapsed < 200,
-        "32 async submits must not spin — total < 200 ms");
+    /* 500ms ceiling matches the 50ms single-send bound × 32 × margin;
+     * under systemd-run CPUQuota=200% with 4 vCPUs on 2 host cores,
+     * pooled scheduler jitter can accumulate. The point is catching
+     * a reintroduced spin (100 ms × 32 = 3.2 s), not tight timing. */
+    TEST_ASSERT_MESSAGE(elapsed < 500,
+        "32 async submits must not spin — total < 500 ms");
 
     /* Drain completions so subsequent tests have a clean pool */
     for (int i = 0; i < 64; i++) {
