@@ -176,8 +176,9 @@ stack than discrete Ampere.
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
 | FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
 | RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (500 lines) | **10** | Phase 1 (ACR load) wired; BROM-blocked |
-| **Total host-side tests** | | **133** | **All passing** |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (800 lines) | **26** | Phases 1–5 wired; **Phase 5 FECS method gateway verified on HW** |
+| **Jetson platform shim** | `nvidia_gsp_platform.c` (350 lines) | **15** | vtable dispatch + DMA align math host-tested |
+| **Total host-side tests** | | **164** | **All passing** |
 
 ### Platform-Specific Blockers
 
@@ -199,25 +200,33 @@ implements the nvgpu-style boot sequence alongside the GSP-RM path in
 `bringup.c`. See `docs/jetson-nvgpu-bringup-research.md` and
 `docs/jetson-nvgpu-acr-analysis.md` for the full decomposition.
 
-Phase 1 (ACR HS load on GSP RISCV) is plumbed: engine reset works
-(GA10B-specific assert/deassert pattern), PIO upload loops are wired
-to the correct IMEMC/DMEMC registers, BCR_CTRL=0x11 programs
-preloaded-mode, STARTCPU kicks the BROM. On hardware the BROM returns
-`BR_RETCODE.result = 2 (FAIL)` because `HWCFG2` bit 13
-(RISCV_BR_PRIV_LOCKDOWN) is asserted — the GSP Falcon's PRI aperture
-is locked to an EL3/secure privilege level, so our EL2-NS PIO writes
-to IMEM/DMEM are silently dropped (readback confirms: returns
-`0xbadf5620` poison). BROM then authenticates against empty DMEM and
-fails cleanly.
+**Priv-lockdown resolved (Path 3, April 17 2026):** The GSP Falcon
+priv-lockdown (#190) was caused by the kexec helper's runtime-PM
+suspend, which power-gates the GPU. On re-enable, the Falcon BROM
+reasserts `HWCFG2` bit 13 as a hardware default. Fix:
+`--no-gpu-suspend` flag on the kexec helper skips the power-gate
+cycle entirely. Linux's nvgpu has already run ACR/FECS/GPCCS to
+completion; `ga10b_bringup_inherit()` detects this state (HWCFG2
+bit 13 = 0, FECS/GPCCS mailbox[0] = PASS) and skips phases 1–4.
 
-Three paths forward:
-1. **SMC to TF-A / NVIDIA SiP service** to lower the Falcon's PLM
-2. **UEFI direct boot** — bypass kexec; `kernel/arch/arm64/efi_stub.c`
-   exists but isn't functional
-3. **Reuse Linux-nvgpu's ACR bringup state** — have Linux bring up
-   GSP successfully, then kexec without the suspend
+**FECS method gateway verified on hardware (Phase 5):** After
+inherit, SLM-OS submits `DISCOVER_IMAGE_SIZE` (method 0x10) via the
+FECS push registers (data at 0x409500, addr at 0x409504) and polls
+`ctxsw_mailbox[0]` for the response. FECS returns **513,280 bytes**
+(0x7d500) — the GR context image size for GA10B. This is the first
+successful GPU method submission from bare-metal SLM-OS.
 
-None unlock compute in the capstone window, but all have been scoped.
+Phases 1–4 (ACR HS load, FECS/GPCCS STARTCPU, PMU skip) remain
+implemented and host-tested as a fallback / standalone path. The
+inherit path bypasses them when Linux's firmware state is available.
+
+**Remaining path to GPU inference:**
+- Phase 6: Channel + GPFIFO pushbuffer (data-plane plumbing)
+- Phase 7: Compute class binding + QMD dispatch
+- Compute kernel (SASS binary for `sm_87`)
+- Inference loop (GEMM → activation per layer)
+
+Phases 6+ are substantial but no longer blocked by security.
 
 **x86-64:** FWSEC-FRTS succeeds on hardware (3/3 runs VFIO, 4/4 runs
 bare-metal SLM-OS — April 15 2026, WPR2 populated at 0x1ffffe00 on

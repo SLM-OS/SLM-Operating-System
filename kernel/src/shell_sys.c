@@ -2471,6 +2471,14 @@ int cmd_nvgpu(int argc, char *argv[])
         return rc;
     }
 
+    if (strcmp(argv[1], "inherit") == 0) {
+        /* Path 3 (#190): detect Linux's already-bootstrapped Falcon
+         * state after a --no-gpu-suspend kexec. Skips phases 1-4. */
+        int rc = ga10b_bringup_inherit(&b);
+        uart_printf("inherit: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+
     if (strcmp(argv[1], "run") == 0) {
         int rc = ga10b_bringup_run(&b);
         uart_printf("run: rc=%d, state=%d, last_err_phase=%d\r\n",
@@ -2478,7 +2486,33 @@ int cmd_nvgpu(int argc, char *argv[])
         return rc;
     }
 
-    uart_puts("usage: nvgpu [info | prepare | run]\r\n");
+    /* Per-phase invocations for step-by-step debugging. Each runs the
+     * corresponding phase against the persistent `b` — preceding phases
+     * must have completed so `b->state` satisfies the phase precondition. */
+    if (strcmp(argv[1], "fecs") == 0) {
+        int rc = ga10b_bringup_fecs(&b);
+        uart_printf("fecs: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+    if (strcmp(argv[1], "gpccs") == 0) {
+        int rc = ga10b_bringup_gpccs(&b);
+        uart_printf("gpccs: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+    if (strcmp(argv[1], "pmu") == 0) {
+        int rc = ga10b_bringup_pmu(&b);
+        uart_printf("pmu: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+    if (strcmp(argv[1], "test") == 0) {
+        /* Phase 5: FECS method gateway smoke test. */
+        int rc = ga10b_bringup_address_space(&b);
+        uart_printf("test: rc=%d, state=%d\r\n", rc, (int)b.state);
+        return rc;
+    }
+
+    uart_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
+              "fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */

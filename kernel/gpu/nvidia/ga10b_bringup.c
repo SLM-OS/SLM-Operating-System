@@ -146,6 +146,63 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * verified in docs/reference/nvgpu-common-acr-acr_bootstrap.c. */
 #define ACR_BOOT_OK                 0x000000ffu
 
+/* ---- FECS / GPCCS (GR Falcon) register offsets ----
+ *
+ * Offsets from docs/reference/nvgpu-hw-ga10b-hw_gr_ga10b.h (OE4T l4t-r36.5).
+ * FECS is the GR front-end context-switch Falcon; GPCCS is per-GPC. On
+ * GA10B cold boot (SEC_SECUREGPCCS path) ACR pre-loads both IMEM/DMEM
+ * from WPR — SLM-OS only needs to issue STARTCPU and wait for the
+ * ucode to advertise readiness via ctxsw_mailbox[0].
+ *
+ * Mailbox sentinels (gr_fecs_ctxsw_mailbox_value_pass_v / _fail_v):
+ *   1 = PASS      (bootstrap complete, ready for methods)
+ *   2 = FAIL      (ucode refused to come up)
+ *   0x21 = checksum mismatch (secure boot verification failed)
+ *
+ * CPUCTL.STARTCPU is bit 1 on the GR Falcons (different from GSP
+ * RISCV's bit 0 — Falcon v4 vs Falcon3 layout). */
+#define GR_FECS_CPUCTL              0x00409100u
+#define GR_FECS_BOOTVEC             0x00409104u
+#define GR_FECS_DMACTL              0x0040910cu
+#define GR_FECS_CPUCTL_ALIAS        0x00409130u
+#define GR_FECS_CTXSW_MAILBOX(i)    (0x00409800u + (i) * 4u)
+#define GR_FECS_CTXSW_MAILBOX_COUNT 18u
+
+#define GR_GPCCS_CPUCTL             0x0041a100u
+#define GR_GPCCS_DMACTL             0x0041a10cu
+#define GR_GPC0_GPCCS_CTXSW_MAILBOX(i) (0x00502800u + (i) * 4u)
+
+#define GR_CPUCTL_STARTCPU          (1u << 1)
+#define GR_CPUCTL_HALTED            (1u << 4)
+
+#define GR_FECS_MAILBOX_PASS        0x00000001u
+#define GR_FECS_MAILBOX_FAIL        0x00000002u
+#define GR_FECS_MAILBOX_CSUM_FAIL   0x00000021u
+
+/* ---- FECS method gateway ----
+ *
+ * FECS exposes a direct host-to-ucode method interface via two push
+ * registers. The host writes method data, then method address; FECS
+ * processes the method and writes the result to ctxsw_mailbox[0].
+ * No channel, GMMU, or page tables required.
+ *
+ * Reference: nvgpu gm20b_gr_falcon_submit_fecs_method_op
+ *   docs/reference/nvgpu-gr-falcon-gm20b-fusa.c
+ */
+#define GR_FECS_METHOD_DATA         0x00409500u
+#define GR_FECS_METHOD_PUSH         0x00409504u
+
+/* Method addresses — low 12 bits of the push register value. */
+#define FECS_METHOD_HALT_PIPELINE             0x04u
+#define FECS_METHOD_DISCOVER_IMAGE_SIZE       0x10u
+#define FECS_METHOD_DISCOVER_ZCULL_IMAGE_SIZE 0x18u
+#define FECS_METHOD_STOP_CTXSW               0x38u
+#define FECS_METHOD_START_CTXSW              0x39u
+
+/* GA10B null method data sentinel — used when the method doesn't take
+ * meaningful input. The returned mailbox value is the output. */
+#define FECS_METHOD_NULL_DATA       0xDEADCA11u
+
 /* ============================================================================
  * Phase entry points
  * ============================================================================
@@ -465,36 +522,297 @@ int ga10b_bringup_acr(struct ga10b_bringup *b)
     return 0;
 }
 
+/* ---- Phase 2/3: FECS and GPCCS bootstrap ----
+ *
+ * ACR (phase 1) eagerly loads FECS and GPCCS ucode into their IMEM/DMEM
+ * on GA10B — is_lazy_bootstrap = false for both in acr_sw_ga10b.c. After
+ * ACR reports BOOT_OK, the GR Falcons are pre-loaded but halted. SLM-OS
+ * issues STARTCPU on each and polls ctxsw_mailbox[0] for the PASS (=1)
+ * sentinel that the ucode writes as its first readiness signal.
+ *
+ * Reference:
+ *   docs/reference/nvgpu-common-gr-gr_falcon.c:737-738  — start_gpccs/start_fecs
+ *   docs/reference/nvgpu-hal-gr-falcon-gr_falcon_ga10b_fusa.c — mailbox plumbing
+ *
+ * We split FECS and GPCCS into separate phases so the shell can invoke
+ * them independently while iterating. The nvgpu driver issues them
+ * back-to-back (start_gpccs, start_fecs, wait_ctxsw_ready); order isn't
+ * load-bearing since each engine boots independently, but for phase
+ * sequencing we do FECS first because it's the GR front-end. */
+
+/* Poll a GR Falcon ctxsw mailbox[0] for any non-zero value, up to
+ * `timeout_us`. Returns the mailbox value observed, or 0xFFFFFFFF on
+ * timeout. The caller interprets the value (PASS=1, FAIL=2,
+ * CSUM_FAIL=0x21, or any unexpected non-zero). The 1-µs loop body is
+ * approximate (same as wait_for_halt_us — 1500 NOPs at ~1.5 GHz),
+ * which is fine for coarse 2 s timeouts. */
+static uint32_t wait_ctxsw_mailbox0_us(uint32_t mailbox0_reg,
+                                       uint32_t timeout_us)
+{
+    uint32_t loops = timeout_us;
+    while (loops-- > 0) {
+        uint32_t v = bar0_r32(mailbox0_reg);
+        if (v != 0u) return v;
+        for (volatile int i = 0; i < 1500; i++) { }
+    }
+    return 0xFFFFFFFFu;
+}
+
+/* Dump the first 8 ctxsw mailboxes of a GR Falcon for diagnosis on
+ * failure. Most debug info the ucode reports lives in mailboxes 1–7
+ * (error code, line number, stall point). */
+static void dump_gr_mailboxes(const char *tag, uint32_t base)
+{
+    for (uint32_t i = 0; i < 8u; i++) {
+        uint32_t v = bar0_r32(base + i * 4u);
+        uart_printf("[%s]   mailbox[%u]=0x%08lx\n",
+                    tag, (unsigned)i, (unsigned long)v);
+    }
+}
+
 int ga10b_bringup_fecs(struct ga10b_bringup *b)
 {
     if (!b || b->state != GA10B_BRINGUP_ACR_RUNNING) return -1;
-    uart_puts("[GA10B] phase 2 (FECS) not yet implemented — see #14\n");
-    b->last_error_phase = 2;
-    return -1;
+
+    /* Clear mailbox[0] so the PASS/FAIL poll sees the ucode's first
+     * write rather than whatever stale value lingered across resets. */
+    bar0_w32(GR_FECS_CTXSW_MAILBOX(0), 0u);
+    gsp_platform->mb();
+
+    /* Kick the FECS Falcon. CPUCTL.STARTCPU = bit 1 on GR Falcons. */
+    bar0_w32(GR_FECS_CPUCTL, GR_CPUCTL_STARTCPU);
+    gsp_platform->mb();
+    uart_puts("[GA10B-FECS] STARTCPU kicked — polling ctxsw mailbox[0]\n");
+
+    uint32_t result = wait_ctxsw_mailbox0_us(GR_FECS_CTXSW_MAILBOX(0),
+                                             2u * 1000u * 1000u);
+    if (result != GR_FECS_MAILBOX_PASS) {
+        uart_printf("[GA10B-FECS] bootstrap did NOT reach PASS "
+                    "(mailbox[0]=0x%08lx)\n", (unsigned long)result);
+        dump_gr_mailboxes("GA10B-FECS", GR_FECS_CTXSW_MAILBOX(0));
+        b->last_error_phase = 2;
+        return -1;
+    }
+
+    uart_puts("[GA10B-FECS] bootstrap PASS\n");
+    b->state = GA10B_BRINGUP_FECS_UP;
+    return 0;
 }
 
 int ga10b_bringup_gpccs(struct ga10b_bringup *b)
 {
     if (!b || b->state != GA10B_BRINGUP_FECS_UP) return -1;
-    uart_puts("[GA10B] phase 3 (GPCCS) not yet implemented — see #14\n");
-    b->last_error_phase = 3;
-    return -1;
+
+    bar0_w32(GR_GPC0_GPCCS_CTXSW_MAILBOX(0), 0u);
+    gsp_platform->mb();
+
+    bar0_w32(GR_GPCCS_CPUCTL, GR_CPUCTL_STARTCPU);
+    gsp_platform->mb();
+    uart_puts("[GA10B-GPCCS] STARTCPU kicked — polling ctxsw mailbox[0]\n");
+
+    uint32_t result = wait_ctxsw_mailbox0_us(GR_GPC0_GPCCS_CTXSW_MAILBOX(0),
+                                             2u * 1000u * 1000u);
+    if (result != GR_FECS_MAILBOX_PASS) {
+        uart_printf("[GA10B-GPCCS] bootstrap did NOT reach PASS "
+                    "(mailbox[0]=0x%08lx)\n", (unsigned long)result);
+        dump_gr_mailboxes("GA10B-GPCCS", GR_GPC0_GPCCS_CTXSW_MAILBOX(0));
+        b->last_error_phase = 3;
+        return -1;
+    }
+
+    uart_puts("[GA10B-GPCCS] bootstrap PASS\n");
+    b->state = GA10B_BRINGUP_GPCCS_UP;
+    return 0;
 }
 
+/* ---- Phase 4: PMU bootstrap ----
+ *
+ * GA10B's PMU is optional for compute. nvgpu gates eager load on
+ * `support_ls_pmu` — acr_sw_ga10b.c sets lazy_bootstrap=true when
+ * support_ls_pmu is on, meaning ACR does NOT load PMU; something
+ * else (lsfm) triggers it lazily. When support_ls_pmu is off
+ * (GA10B default for Jetson L4T-r36.5), PMU is not loaded at all
+ * and this phase is a no-op that just advances the state machine.
+ *
+ * If/when we wire PMU loading on (power management, thermal, PG),
+ * this function grows to mirror the FECS pattern: STARTCPU on
+ * PMU CPUCTL at NV_PPMU_BASE + 0x100, poll a ready sentinel. For
+ * now we don't need PMU to submit a single NOP+SEMAPHORE method,
+ * so skipping here is the pragmatic path.
+ *
+ * Reference: docs/reference/nvgpu-common-acr-acr_sw_ga10b.c:417
+ *   (lsf->is_lazy_bootstrap = g->support_ls_pmu ? true : false) */
 int ga10b_bringup_pmu(struct ga10b_bringup *b)
 {
     if (!b || b->state != GA10B_BRINGUP_GPCCS_UP) return -1;
-    uart_puts("[GA10B] phase 4 (PMU) not yet implemented — see #14\n");
-    b->last_error_phase = 4;
-    return -1;
+
+    uart_puts("[GA10B-PMU] skipped — support_ls_pmu=false on GA10B; "
+              "PMU not required for compute submission\n");
+    b->state = GA10B_BRINGUP_PMU_UP;
+    return 0;
+}
+
+/* ---- Inherit: detect Linux's bootstrapped state ----
+ *
+ * Path 3 of #190: after a no-suspend kexec from Linux, the GPU stays
+ * powered and the Falcon security state is preserved. Linux's nvgpu
+ * driver has already run ACR, FECS, and GPCCS to completion. Instead
+ * of resetting the engines (which re-asserts HWCFG2 bit 13 priv-
+ * lockdown), SLM-OS reads the Falcon state registers and verifies
+ * that all three engines are halted-with-PASS:
+ *
+ *   - HWCFG2 bit 13 = 0  (PRI aperture unlocked)
+ *   - FECS ctxsw_mailbox[0] = 1 (PASS)
+ *   - GPCCS ctxsw_mailbox[0] = 1 (PASS)
+ *
+ * On success, the state machine jumps directly to PMU_UP, skipping
+ * phases 1–4. This is the fast path after `slmos-kexec --no-gpu-suspend`.
+ *
+ * Requires: no runtime-PM suspend in the kexec helper (GPU must NOT
+ * have been power-gated). If HWCFG2 shows lockdown, returns -1 and
+ * the caller should fall back to the from-scratch ACR path (which
+ * will also fail on locked hardware, but with better diagnostics).
+ */
+int ga10b_bringup_inherit(struct ga10b_bringup *b)
+{
+    if (!b) return -1;
+    memset(b, 0, sizeof(*b));
+    b->state = GA10B_BRINGUP_INIT;
+    b->last_error_phase = -1;
+
+    if (!gsp_platform) {
+        uart_puts("[GA10B-INHERIT] no platform ops installed\n");
+        return -1;
+    }
+
+    /* Check HWCFG2 bit 13 — the priv-lockdown gate. */
+    uint32_t hwcfg2 = bar0_r32(NV_PGSP_BASE + FALCON_HWCFG2);
+    uint32_t bit13 = (hwcfg2 >> 13) & 1u;
+    uart_printf("[GA10B-INHERIT] HWCFG2=0x%08lx bit13=%lu\n",
+                (unsigned long)hwcfg2, (unsigned long)bit13);
+
+    if (bit13 != 0) {
+        uart_puts("[GA10B-INHERIT] FAIL — priv-lockdown is asserted. "
+                  "Was --no-gpu-suspend used?\n");
+        return -1;
+    }
+
+    /* Read FECS and GPCCS ctxsw mailboxes. */
+    uint32_t fecs_mbox0  = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
+    uint32_t gpccs_mbox0 = bar0_r32(GR_GPC0_GPCCS_CTXSW_MAILBOX(0));
+    uint32_t fecs_cpuctl  = bar0_r32(GR_FECS_CPUCTL);
+    uint32_t gpccs_cpuctl = bar0_r32(GR_GPCCS_CPUCTL);
+    uint32_t gsp_cpuctl   = bar0_r32(NV_PGSP_BASE + 0x100u);
+
+    uart_printf("[GA10B-INHERIT] GSP  CPUCTL=0x%08lx\n",
+                (unsigned long)gsp_cpuctl);
+    uart_printf("[GA10B-INHERIT] FECS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                (unsigned long)fecs_cpuctl, (unsigned long)fecs_mbox0);
+    uart_printf("[GA10B-INHERIT] GPCCS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                (unsigned long)gpccs_cpuctl, (unsigned long)gpccs_mbox0);
+
+    if (fecs_mbox0 != GR_FECS_MAILBOX_PASS) {
+        uart_printf("[GA10B-INHERIT] FECS not ready (expected 1, got 0x%lx)\n",
+                    (unsigned long)fecs_mbox0);
+        return -1;
+    }
+    if (gpccs_mbox0 != GR_FECS_MAILBOX_PASS) {
+        uart_printf("[GA10B-INHERIT] GPCCS not ready (expected 1, got 0x%lx)\n",
+                    (unsigned long)gpccs_mbox0);
+        return -1;
+    }
+
+    uart_puts("[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — "
+              "skipping phases 1-4\n");
+    b->state = GA10B_BRINGUP_PMU_UP;
+    return 0;
+}
+
+/* ---- Phase 5: FECS method gateway smoke test ----
+ *
+ * Submit DISCOVER_IMAGE_SIZE to FECS via the method push registers.
+ * No channel, GMMU, or page tables needed. This is the minimal proof
+ * that the GPU's GR engine is alive and responsive to SLM-OS commands
+ * after the inherit path.
+ *
+ * Protocol (per nvgpu gm20b_gr_falcon_submit_fecs_method_op):
+ *   1. Clear ctxsw_mailbox[0] (GA10B: read-modify-write to zero)
+ *   2. Write method data to GR_FECS_METHOD_DATA (0x409500)
+ *   3. Write method address to GR_FECS_METHOD_PUSH (0x409504)
+ *   4. Poll ctxsw_mailbox[0] for non-zero response
+ *
+ * DISCOVER_IMAGE_SIZE returns the GR context image size in bytes.
+ * Any non-zero value proves FECS processed the method. A zero after
+ * timeout means FECS is unresponsive.
+ */
+static int fecs_submit_method(uint32_t method_addr, uint32_t method_data,
+                              uint32_t *out_result, uint32_t timeout_us)
+{
+    /* Step 1: Clear ctxsw_mailbox[0] so the poll sees FECS's first
+     * write rather than a stale value. GA10B's mailbox is a plain
+     * read/write register (no write-to-clear hardware), so writing 0
+     * directly is sufficient. */
+    bar0_w32(GR_FECS_CTXSW_MAILBOX(0), 0u);
+    gsp_platform->mb();
+
+    /* Step 2: Write method data. */
+    bar0_w32(GR_FECS_METHOD_DATA, method_data);
+
+    /* Step 3: Write method address — triggers FECS processing. */
+    bar0_w32(GR_FECS_METHOD_PUSH, method_addr);
+    gsp_platform->mb();
+
+    /* Step 4: Poll mailbox[0] for non-zero response. */
+    uint32_t loops = timeout_us;
+    while (loops-- > 0) {
+        uint32_t v = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
+        if (v != 0u) {
+            if (out_result) *out_result = v;
+            return 0;
+        }
+        for (volatile int i = 0; i < 1500; i++) { }
+    }
+    return -1;  /* timeout */
 }
 
 int ga10b_bringup_address_space(struct ga10b_bringup *b)
 {
     if (!b || b->state != GA10B_BRINGUP_PMU_UP) return -1;
-    uart_puts("[GA10B] phase 5 (GMMU/inst block) not yet implemented\n");
-    b->last_error_phase = 5;
-    return -1;
+
+    uart_puts("[GA10B-P5] FECS method gateway smoke test\n");
+
+    /* Submit DISCOVER_IMAGE_SIZE — the simplest no-channel method.
+     * Returns the GR context image size in mailbox[0]. */
+    uint32_t image_size = 0;
+    int rc = fecs_submit_method(FECS_METHOD_DISCOVER_IMAGE_SIZE,
+                                FECS_METHOD_NULL_DATA,
+                                &image_size, 2u * 1000u * 1000u);
+
+    if (rc < 0) {
+        uart_puts("[GA10B-P5] FECS method TIMEOUT — ucode unresponsive\n");
+        /* Dump some diagnostic state. */
+        uint32_t mbox0 = bar0_r32(GR_FECS_CTXSW_MAILBOX(0));
+        uint32_t cpuctl = bar0_r32(GR_FECS_CPUCTL);
+        uart_printf("[GA10B-P5]   FECS CPUCTL=0x%08lx mailbox[0]=0x%08lx\n",
+                    (unsigned long)cpuctl, (unsigned long)mbox0);
+        b->last_error_phase = 5;
+        return -1;
+    }
+
+    uart_printf("[GA10B-P5] FECS DISCOVER_IMAGE_SIZE = %lu bytes (0x%lx)\n",
+                (unsigned long)image_size, (unsigned long)image_size);
+
+    if (image_size == 0 || image_size == 0xDEADCA11u) {
+        uart_puts("[GA10B-P5] suspicious result — FECS may have echoed "
+                  "the null sentinel\n");
+        b->last_error_phase = 5;
+        return -1;
+    }
+
+    uart_puts("[GA10B-P5] GPU GR engine is alive — FECS responded to "
+              "SLM-OS method\n");
+    b->state = GA10B_BRINGUP_ENGINES_READY;
+    return 0;
 }
 
 int ga10b_bringup_channel(struct ga10b_bringup *b)

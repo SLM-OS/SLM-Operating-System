@@ -346,6 +346,31 @@ test-ga10b-bringup:
 	    kernel/gpu/nvidia/gsp.c
 	@./build/host-tools/test_ga10b_bringup
 
+# Jetson GA10B platform shim (nvidia_gsp_platform.c) — portable surfaces.
+#
+# The shim is under kernel/arch/arm64/ and normally compiled for Jetson
+# only. For host testing we define PLATFORM_JETSON_ORIN_NANO explicitly
+# and stub the kernel-side dependencies (pmm, cache, uart). AArch64
+# inline asm in the shim is guarded by __aarch64__ so the shim itself
+# compiles clean on x86 host; cache.h is bypassed under SLM_HOST_HARNESS.
+#
+# Covers: firmware_get enum dispatch, VBIOS accessors, dma_alloc/free
+# alignment math, bar1 early-out when base unset, vtable installation,
+# cache/mb dispatch through vtable. Does NOT cover: MMIO read/write
+# paths (require real BAR0) or ARM-specific cache maintenance ops
+# (no host equivalent).
+.PHONY: test-gsp-platform
+test-gsp-platform:
+	@mkdir -p build/host-tools
+	@echo "Building + running Jetson GSP platform shim tests..."
+	$(CC) -std=c11 -Wall -Wextra -O2 -g \
+	    -Ihost-tools/gsp-harness -Ikernel/gpu/nvidia -Ikernel/include \
+	    -DSLM_HOST_HARNESS=1 -DPLATFORM_JETSON_ORIN_NANO=1 \
+	    -o build/host-tools/test_nvidia_gsp_platform \
+	    host-tools/gsp-harness/test_nvidia_gsp_platform.c \
+	    kernel/arch/arm64/nvidia_gsp_platform.c
+	@./build/host-tools/test_nvidia_gsp_platform
+
 # GSP-RM RPC ring helper tests — pure ring-pointer arithmetic plus
 # a mock-vtable channel init. Hardware integration runs once GSP-RM
 # is alive (post-E3.4.e).
