@@ -91,6 +91,9 @@ int test_suite_components_m5(void);
 /* DTB parser tests (BOOT-H1 bounds checks) */
 int test_suite_dtb(void);
 
+/* General-purpose FDT reader tests (kernel/lib/fdt) */
+int test_suite_fdt(void);
+
 /* ELF loader tests (BOOT-H2 bounds checks) */
 int test_suite_elf(void);
 

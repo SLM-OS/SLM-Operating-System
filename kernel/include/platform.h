@@ -362,13 +362,14 @@
  * PCIe BAR1 window UART/GPIO use. Linux's RP1 bindings header
  * (linux-rpi-dt-bindings-mfd-rp1.h) defines:
  *   RP1_ETH_IP_BASE  = RP1_BAR + 0x100000 = 0x1F00100000
- *   RP1_ETH_CFG_BASE = RP1_BAR + 0x104000 = 0x1F00104000
+ *   RP1_ETH_CFG_BASE = RP1_BAR + 0x104000 = 0x1F00104000   (not used yet)
  *
  * Both land in the same 2MB block as UART/GPIO (already mapped by
  * vmm_setup_platform for RASPI5), so no additional page-table entry
- * is required. */
+ * is required. The driver doesn't touch the CFG block today — the
+ * define is omitted here to avoid the impression that it's wired up;
+ * reintroduce it alongside the first consumer. */
 #define RP1_ETH_IP_BASE     0x1F00100000UL
-#define RP1_ETH_CFG_BASE    0x1F00104000UL
 
 /* RP1 clock controller, at RP1_BAR + 0x18000 per rp1.dtsi. Stage 2
  * of the MACB driver writes CLK_ETH_CTRL / CLK_ETH_TSU_CTRL here to
@@ -381,6 +382,23 @@
 
 /* MACB interrupt — GIC IRQ 166 via MIP0 vector 6 → GIC SPI 134 */
 #define MACB_IRQ            (32 + MIP0_BASE_SPI + RP1_INT_ETH)
+
+/* BCM2712 VideoCore mailbox (property channel at 8). Live at the
+ * same SoC peripheral window as earlier Pi SoCs, just remapped to a
+ * 40-bit CPU physical. DTS `mailbox@7c013880` + the soc bridge
+ * `ranges = <0x7c000000 0x10 0x7c000000 0x04000000>` resolve to
+ * CPU phys 0x107C013880. Reachable directly from EL1 — no RP1 or
+ * firmware indirection. 0x40 of MMIO; we only touch 4 registers.
+ * The 2MB block containing this address is mapped explicitly in
+ * vmm_setup_platform for RASPI5. */
+#define BCM_MAILBOX_BASE    0x107C013880UL
+
+/* GPU bus-address encoding on Pi 5 matches the legacy VideoCore
+ * convention — the VideoCore sees ARM DRAM via a 1 GB alias at
+ * 0xC0000000. Used when passing a property buffer to the mailbox.
+ * See Circle's circle-bcm2835.h `GPU_MEM_BASE` which is
+ * `GPU_UNCACHED_BASE (= 0xC0000000)` on RASPPI >= 5. */
+#define BCM_BUS_ADDRESS(addr)   ((((uintptr_t)(addr)) & ~0xC0000000UL) | 0xC0000000UL)
 
 /* BCM2712 PCIe RC (Root Complex) for pcie2 (RP1's link) */
 #define PCIE_RC_BASE        0x1000120000UL

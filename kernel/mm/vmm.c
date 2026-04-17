@@ -1019,6 +1019,16 @@ static void vmm_setup_platform(void)
         vmm_state.blocks_mapped++;
     }
 
+    /* VideoCore mailbox at 0x107C013880 — same L1[65] entry as GIC,
+     * different 2MB block. Used by bcm_mailbox.c to read the board
+     * MAC from VC firmware. */
+    uint64_t mbox_l2_idx = (BCM_MAILBOX_BASE >> BLOCK_SHIFT) & 0x1FF;
+    if (mbox_l2_idx != gic_l2_idx && mbox_l2_idx != gpio2_l2_idx) {
+        l2_mmio_gic[mbox_l2_idx] = make_block_desc(
+            BCM_MAILBOX_BASE & ~(BLOCK_SIZE - 1), VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+    }
+
     /*
      * Map RP1 peripherals: L1[124] covers 0x1F00000000-0x1F3FFFFFFF
      *

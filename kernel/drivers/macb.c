@@ -39,10 +39,14 @@
 #include "net.h"            /* net_stats_rx_no_buffers_inc */
 #include "net_driver.h"
 #include "debug.h"
-#include "timer.h"          /* sleep_ms / sleep_us */
-#include "cache.h"          /* cache_clean_range for DMA coherency */
+#include "timer.h"          /* sleep_ms / sleep_us / timer_busy_wait_us */
+#include "cache.h"          /* cache_clean_range for buffer DMA coherency */
+#include "ncmem.h"          /* ncmem_alloc — rings live in NC memory */
 #include "gic.h"            /* gic_register_handler / gic_enable_irq */
 #include "spinlock.h"       /* tx_lock — IRQ-safe serialization */
+#include "bcm_mailbox.h"    /* board MAC via VC firmware (#250) */
+#include "dtb.h"            /* dtb_get_blob — raw DTB pointer (#255) */
+#include "fdt.h"            /* fdt_get_property_by_path — DT lookup (#255) */
 #include "macb.h"
 
 /* -------------------------------------------------------------------------- */
@@ -178,10 +182,12 @@
 #define BCM_PHY_OUI_MSB         0x0040      /* PHYID1 for BCM phys */
 #define BCM54213PE_PHYID_LOW    0x600D      /* PHYID2 for BCM54213PE */
 
-/* MACB_NCFGR speed/duplex bits */
+/* MACB_NCFGR speed/duplex bits. GEM gigabit enable is GEM_NCFGR_GBE
+ * (bit 10) defined above; there's no separate NCR bit — older revs of
+ * this file had a confused `MACB_NCFGR_GIGE` alias that has been
+ * removed to prevent accidental double-setting. */
 #define MACB_NCFGR_SPD          (1u << 0)   /* 100 Mbps */
 #define MACB_NCFGR_FD           (1u << 1)   /* Full duplex */
-#define MACB_NCFGR_GIGE         (1u << 10)  /* Ugh actually GIGE is in NCR */
 
 /* MACB_NSR / TSR — TSR bits used by the TX poll path */
 #define MACB_TSR_UBR            (1u << 0)   /* Used bit read */
@@ -386,26 +392,52 @@ static spinlock_t tx_lock = SPINLOCK_INIT;
  * fully-formed frame to arm the next warning. */
 static bool rx_partial_warned = false;
 
-/* TX ring + buffer pool. 64-byte alignment matches the BCM2712
- * cacheline size — ensures cache_clean_range / cache_invalidate_range
- * on the ring doesn't touch unrelated data. Buffers get 16-byte
- * alignment, matching the virtio drivers.
- *
- * MACB spec only requires 8-byte alignment for the ring base (TBQP
- * bottom 3 bits are reserved), but cacheline alignment is a
- * correctness thing on Pi 5 where DMA coherency is explicit. */
+/* TX + RX descriptor rings live in **non-cacheable** memory (allocated
+ * from the ncmem pool at init). Each descriptor is 8 bytes; a 64-byte
+ * cacheline holds 8 descriptors, so storing them in cacheable memory
+ * would create a false-sharing race — a CPU write to descriptor N
+ * dirties the line, and a later cache_clean_range would write back
+ * the CPU's stale view of descriptors N±1..N±7, overwriting any fresh
+ * MAC DMA writes to those slots. NC memory bypasses L1/L2 entirely,
+ * so CPU reads/writes go straight to DRAM and agree with MAC DMA
+ * without explicit maintenance. `rings_nc` records whether the NC
+ * allocation succeeded so we can fall back to the static cacheable
+ * arrays if ncmem is exhausted (unlikely — the rings are 256 B total). */
+static struct macb_dma_desc *tx_ring;
+static struct macb_dma_desc *rx_ring;
+static bool rings_nc;
+
+/* Cacheable fallback rings (used only if ncmem_alloc fails). 64-byte
+ * alignment so at least each ring spans whole cachelines even in the
+ * degraded path; the false-sharing risk the NC path eliminates is
+ * still present here, so macb_init WARNs on fallback. */
 static struct macb_dma_desc
-    tx_ring[MACB_TX_RING_SIZE] __attribute__((aligned(64)));
+    tx_ring_fallback[MACB_TX_RING_SIZE] __attribute__((aligned(64)));
+static struct macb_dma_desc
+    rx_ring_fallback[MACB_RX_RING_SIZE] __attribute__((aligned(64)));
+
+/* TX buffer pool: 16-byte aligned, 2 KB per slot. Each buffer is far
+ * larger than a cacheline, so neighboring buffers don't share lines —
+ * ordinary cacheable storage with explicit cache_clean before DMA is
+ * correct. */
 static uint8_t
     tx_buffers[MACB_TX_RING_SIZE][MACB_TX_BUF_SIZE] __attribute__((aligned(16)));
 
-/* RX ring + buffer pool. 64-byte alignment on the ring for the same
- * cacheline reason. RX buffers use 64-byte alignment to match the
- * RXBS (DMA buffer size in units of 64 bytes) granularity. */
-static struct macb_dma_desc
-    rx_ring[MACB_RX_RING_SIZE] __attribute__((aligned(64)));
+/* RX buffer pool: 64-byte aligned to match the RXBS granularity
+ * (buffer size expressed in 64 B units). Same per-buffer cacheline
+ * isolation as TX. */
 static uint8_t
     rx_buffers[MACB_RX_RING_SIZE][MACB_RX_BUF_SIZE] __attribute__((aligned(64)));
+
+/* MACB's TBQP / RBQP are 32-bit; TBQPH / RBQPH carry the upper 32
+ * bits for >4 GB setups. This driver writes zero to the H halves and
+ * assumes every ring / buffer address fits in 32 bits. Validated at
+ * init — the NC pool (Pi 5: 0xFFE00000) and all of BSS sit below 4 GB
+ * in every build we ship. */
+static inline bool macb_dma_addr_fits_32(const void *p)
+{
+    return (uintptr_t)p < 0x100000000ULL;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Stage 2 helpers — clock enable, MACB bring-up, PHY bring-up                 */
@@ -532,10 +564,18 @@ static int macb_phy_bringup(void)
     macb_mdio_write(PHY_ADDR, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
 
     /* Poll BMSR for link up. Cable connected to a lab switch typically
-     * negotiates in <1 s; give it 5 s before giving up. */
+     * negotiates in <1 s; give it 5 s before giving up.
+     *
+     * BMSR.LSTATUS (bit 2) is latched-low per IEEE 802.3-22.2.4.2 —
+     * the first read after a transient link drop returns the sticky
+     * "down" state and clears the latch; only the *second* read
+     * reflects the current link state. Without the double-read a
+     * momentary disconnect would strand us in the polling loop
+     * after the cable comes back. Linux phylib does the same. */
     INFO("  Waiting for PHY auto-negotiate / link up...");
     for (int i = 0; i < 50; i++) {
-        uint16_t bmsr = macb_mdio_read(PHY_ADDR, MII_BMSR);
+        (void)macb_mdio_read(PHY_ADDR, MII_BMSR);           /* Clear latch */
+        uint16_t bmsr = macb_mdio_read(PHY_ADDR, MII_BMSR); /* Current state */
         if ((bmsr & BMSR_LSTATUS) && (bmsr & BMSR_ANEGCOMPLETE)) {
             INFO("  PHY link up (BMSR=0x%04x after %d×100 ms)", bmsr, i);
             macb_state.link_up = true;
@@ -607,11 +647,20 @@ static void macb_tx_ring_init(void)
     macb_state.tx_head = 0;
     macb_state.tx_tail = 0;
 
-    /* Flush descriptors to DRAM so the MAC sees the initial state */
-    cache_clean_range(tx_ring, sizeof(tx_ring));
+    /* NC rings: plain dsb orders the writes with the MMIO TBQP store
+     * below. Fallback cacheable rings: clean to DRAM first. */
+    if (rings_nc) {
+        __asm__ volatile("dsb sy" ::: "memory");
+    } else {
+        cache_clean_range(tx_ring,
+                          sizeof(struct macb_dma_desc) * MACB_TX_RING_SIZE);
+    }
 
-    /* Point the hardware at the ring */
+    /* Point the hardware at the ring. TBQPH is zeroed explicitly so
+     * any stale upper-32-bit state left over from firmware / kexec
+     * cannot push the DMA base above 4 GB. */
     macb_writel(MACB_TBQP, (uint32_t)(uintptr_t)tx_ring);
+    macb_writel(MACB_TBQPH, 0);
 
     /* Clear any stale TSR bits */
     macb_writel(MACB_TSR, 0xFFFFFFFF);
@@ -647,22 +696,110 @@ static void macb_apply_link_config(void)
     macb_writel(MACB_NCFGR, ncfgr);
 }
 
-/* Program a locally-administered MAC address into the specific-address
- * 1 registers (SA1B/SA1T). Without a valid source address, switches
- * and end-hosts drop our frames at the MAC layer. For production we'd
- * read a board-unique ID from EEPROM; the OUI 02:00:00 is the safe
- * locally-administered unicast prefix per IEEE 802. */
+/* Pi 5 MACB-node path in the bootloader-supplied DTB. The Pi 5
+ * firmware patches `local-mac-address` here before handing the
+ * kernel off, so reading this property yields the factory MAC
+ * regardless of EEPROM revision — primary fallback when the VC
+ * mailbox path is unavailable.
+ *
+ * Path is taken from the Pi 5 DTS (raspberrypi/linux
+ * `arch/arm64/boot/dts/broadcom/rp1.dtsi` — `rp1_eth: ethernet@100000`
+ * inside `rp1: rp1 { ... }` inside `pcie@1000120000` inside `axi`).
+ * If a future firmware rev renames these nodes, this string needs
+ * updating; a compat-string-based walker would be a more robust
+ * upgrade (tracked informally — not in scope for #255). */
+#define MACB_DT_PATH "/axi/pcie@1000120000/rp1/ethernet@100000"
+
+/* Try to read the factory MAC from the bootloader-supplied DTB.
+ * Returns 0 on success with `mac` populated; negative on any
+ * failure (no DTB, bad FDT, missing node, wrong property size).
+ * Separate from the mailbox helper because the DTB path answers a
+ * different question (pre-May-2025 EEPROM case, #255). */
+static int macb_mac_from_dtb(uint8_t mac[6])
+{
+    const void *blob = dtb_get_blob();
+    if (!blob) {
+        return -1;
+    }
+
+    struct fdt_handle h;
+    if (fdt_init(&h, blob) != FDT_LIB_OK) {
+        return -1;
+    }
+
+    const void *data;
+    uint32_t len;
+    int rc = fdt_get_property_by_path(&h, MACB_DT_PATH,
+                                      "local-mac-address", &data, &len);
+    if (rc != FDT_LIB_OK) {
+        return -1;
+    }
+    if (len != 6) {
+        return -1;
+    }
+
+    const uint8_t *src = data;
+    bool all_zero = true, all_ff = true;
+    for (int i = 0; i < 6; i++) {
+        mac[i] = src[i];
+        if (src[i] != 0x00) all_zero = false;
+        if (src[i] != 0xFF) all_ff   = false;
+    }
+    /* A zero placeholder is what the DTS ships with — the bootloader
+     * overwrites it pre-handoff. If we still see zeros here the
+     * bootloader didn't patch, which is a diagnosable firmware bug
+     * rather than a usable address. */
+    if (all_zero || all_ff) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Program the MAC address into the specific-address 1 registers
+ * (SA1B/SA1T). Without a valid source address, switches and end-hosts
+ * drop our frames at the MAC layer.
+ *
+ * Source priority (#250, #255):
+ *   1. VideoCore mailbox tag 0x00010003 (board OTP) — only Pi 5
+ *      EEPROM >= 2025-05-08.
+ *   2. DTB `/axi/pcie@1000120000/rp1/ethernet@100000/local-mac-address`
+ *      — every Pi 5 EEPROM; bootloader patches the address pre-handoff.
+ *   3. Fixed `02:00:00:5A:00:01` with WARN — absolute fallback, safe
+ *      for a single-board lab, collision-prone on a shared subnet. */
 static void macb_program_mac_address(void)
 {
-    /* Fixed MVP MAC — fine for a single-board lab. Replace with a
-     * board-unique derivation (board serial, MPIDR, etc.) if more
-     * than one Pi 5 ever shares a subnet. */
-    macb_state.mac[0] = 0x02;
-    macb_state.mac[1] = 0x00;
-    macb_state.mac[2] = 0x00;
-    macb_state.mac[3] = 0x5A;   /* "Z" for SLM-OS */
-    macb_state.mac[4] = 0x00;
-    macb_state.mac[5] = 0x01;
+    int rc = bcm_mailbox_get_board_mac(macb_state.mac);
+    if (rc == 0) {
+        INFO("  MAC from VC mailbox: %02x:%02x:%02x:%02x:%02x:%02x (board OTP)",
+             macb_state.mac[0], macb_state.mac[1], macb_state.mac[2],
+             macb_state.mac[3], macb_state.mac[4], macb_state.mac[5]);
+    } else if (macb_mac_from_dtb(macb_state.mac) == 0) {
+        const char *reason = (rc == MBOX_E_TAG_UNSUPPORTED)
+            ? "EEPROM predates 2025-05-08 mailbox-tag support"
+            : "VC mailbox unavailable";
+        INFO("  MAC from DTB: %02x:%02x:%02x:%02x:%02x:%02x "
+             "(bootloader-patched local-mac-address; %s)",
+             macb_state.mac[0], macb_state.mac[1], macb_state.mac[2],
+             macb_state.mac[3], macb_state.mac[4], macb_state.mac[5],
+             reason);
+    } else {
+        if (rc == MBOX_E_TAG_UNSUPPORTED) {
+            WARN("VC mailbox doesn't implement GET_BOARD_MAC on this Pi 5 "
+                 "EEPROM revision (tag added 2025-05-08, rpi-eeprom #698), "
+                 "and DTB lookup at %s also failed.", MACB_DT_PATH);
+        } else {
+            WARN("VC mailbox GET_BOARD_MAC failed (rc=%d) and DTB lookup "
+                 "at %s also failed.", rc, MACB_DT_PATH);
+        }
+        WARN("Falling back to fixed 02:00:00:5A:00:01 — single-board safe, "
+             "collision-prone on a shared subnet (see #250/#255).");
+        macb_state.mac[0] = 0x02;
+        macb_state.mac[1] = 0x00;
+        macb_state.mac[2] = 0x00;
+        macb_state.mac[3] = 0x5A;   /* "Z" for SLM-OS */
+        macb_state.mac[4] = 0x00;
+        macb_state.mac[5] = 0x01;
+    }
 
     /* SA1B is bytes [3..0] of the MAC, SA1T is bytes [5..4]. */
     uint32_t bottom = (uint32_t)macb_state.mac[0]
@@ -698,7 +835,12 @@ static void macb_rx_ring_init(void)
     }
     macb_state.rx_head = 0;
 
-    cache_clean_range(rx_ring, sizeof(rx_ring));
+    if (rings_nc) {
+        __asm__ volatile("dsb sy" ::: "memory");
+    } else {
+        cache_clean_range(rx_ring,
+                          sizeof(struct macb_dma_desc) * MACB_RX_RING_SIZE);
+    }
 
     /* Program DMA configuration via RMW to preserve any firmware-set
      * bits we don't explicitly manage (endianness, AXI pipeline hints,
@@ -722,8 +864,11 @@ static void macb_rx_ring_init(void)
     dmacfg |= GEM_DMACFG_DDRP;
     macb_writel(GEM_DMACFG, dmacfg);
 
-    /* Point the hardware at the ring */
+    /* Point the hardware at the ring. RBQPH is zeroed explicitly so
+     * any stale upper-32-bit state left over from firmware / kexec
+     * cannot push the DMA base above 4 GB. */
     macb_writel(MACB_RBQP, (uint32_t)(uintptr_t)rx_ring);
+    macb_writel(MACB_RBQPH, 0);
 
     /* Clear any stale RSR bits */
     macb_writel(MACB_RSR, 0xFFFFFFFF);
@@ -772,20 +917,23 @@ static void macb_irq_handler(void)
              macb_readl(MACB_TSR));
     }
 
-    /* TCOMP/TXUBR: TX activity. The synchronous send path polls
-     * USED itself, so this handler has no outstanding work to do
-     * on TX for the current MVP. Once an async tx_reap op exists,
-     * it would run here. Acknowledging the bits (already done by
-     * the ISR write-back above) is enough to quiet the line. */
-
-    /* RCOMP/RXUBR: frames arrived or the RX ring ran out. The
-     * polled recv path picks up frames via net_poll, so again
-     * no work to do here beyond acking. Worth logging RX
-     * underruns because they'd show up as dropped packets at
-     * lwIP. */
+    /* TCOMP/TXUBR and RCOMP: the polled send + recv paths drain the
+     * rings, so ACKing the ISR write-back above is enough. Once an
+     * async tx_reap or RX-completion path exists, it would run here.
+     *
+     * RXUBR (ring ran dry) is worth a one-shot WARN because it
+     * correlates with dropped frames at lwIP. Latched at file scope
+     * so a stuck-underrun MAC can't flood the log; the latch stays
+     * set — a bus-off MAC is a correctness problem someone needs to
+     * see in the first line of output, not the hundredth. */
     if (isr & MACB_INT_RXUBR) {
-        /* Single warn per episode would be nice but an MVP counter
-         * suffices — diagnostic via macb_get_irq_count + isr_last. */
+        static bool rxubr_warned = false;
+        if (!rxubr_warned) {
+            WARN("MACB RX used-bit underrun (ISR=0x%08x) — frames dropped "
+                 "because the RX ring has no available descriptors",
+                 isr);
+            rxubr_warned = true;
+        }
     }
 
     /* IACK the MIP0 vector so the engine re-arms for the next
@@ -842,8 +990,15 @@ static void macb_enable_irq(void)
  * one descriptor, so the common case is a single owner-returned entry. */
 static int macb_rx_one(void *out_buf, size_t max_len)
 {
-    /* Invalidate descriptor ring so we see fresh USED/ctrl bits */
-    cache_invalidate_range(rx_ring, sizeof(rx_ring));
+    /* NC rings: dsb orders this read after any prior MAC-DMA writes
+     * that were posted through the memory controller. Fallback
+     * cacheable rings: explicit CIVAC to see fresh USED/ctrl bits. */
+    if (rings_nc) {
+        __asm__ volatile("dsb sy" ::: "memory");
+    } else {
+        cache_invalidate_range(rx_ring,
+                               sizeof(struct macb_dma_desc) * MACB_RX_RING_SIZE);
+    }
 
     unsigned slot = macb_state.rx_head;
     uint32_t addr_word = rx_ring[slot].addr;
@@ -889,12 +1044,16 @@ static int macb_rx_one(void *out_buf, size_t max_len)
     }
 
     /* Return the descriptor to the MAC: clear USED, preserve WRAP,
-     * restore buffer address. Then push back to DRAM. */
+     * restore buffer address. dsb orders the writes ahead of any
+     * subsequent MAC fetch. NC rings don't need cache maintenance;
+     * the cacheable fallback still does. */
     uint32_t new_addr = ((uint32_t)(uintptr_t)rx_buffers[slot] & MACB_RX_ADDR_MASK) |
                         ((slot == MACB_RX_RING_SIZE - 1) ? MACB_RX_WRAP : 0);
     rx_ring[slot].addr = new_addr;
     rx_ring[slot].ctrl = 0;
-    cache_clean_range(&rx_ring[slot], sizeof(rx_ring[slot]));
+    if (!rings_nc) {
+        cache_clean_range(&rx_ring[slot], sizeof(rx_ring[slot]));
+    }
     __asm__ volatile("dsb sy" ::: "memory");
 
     macb_state.rx_head = (slot + 1) & (MACB_RX_RING_SIZE - 1);
@@ -908,8 +1067,14 @@ static int macb_rx_one(void *out_buf, size_t max_len)
  * the next free slot. */
 static void macb_tx_reap_locked(void)
 {
-    /* Invalidate the ring before reading so we see updates from DMA */
-    cache_invalidate_range(tx_ring, sizeof(tx_ring));
+    /* NC rings: dsb orders the read after prior MAC DMA. Fallback
+     * cacheable rings: explicit invalidate to see DMA updates. */
+    if (rings_nc) {
+        __asm__ volatile("dsb sy" ::: "memory");
+    } else {
+        cache_invalidate_range(tx_ring,
+                               sizeof(struct macb_dma_desc) * MACB_TX_RING_SIZE);
+    }
 
     while (macb_state.tx_tail != macb_state.tx_head) {
         uint32_t ctrl = tx_ring[macb_state.tx_tail].ctrl;
@@ -925,38 +1090,41 @@ static void macb_tx_reap_locked(void)
     }
 }
 
-/* Polled TX: copy the frame into a pool buffer, mark the descriptor
- * ready, kick TSTART, wait for completion. Holds tx_lock across
- * the whole submit-to-completion sequence so the future IRQ-driven
- * reap (once #247 unblocks MSIX_CFG) can't race with in-flight send.
+/* Polled TX — two-phase locking:
  *
- * **Known limitation: bounded priority inversion.** The lock is held
- * across a 100 ms poll loop whose inner body calls sleep_us(10) →
- * yield(). A high-priority task calling macb_send while a
- * low-priority task holds the lock in its poll will block for up to
- * 100 ms. This is acceptable for the MVP because:
- *   - Real Ethernet completion is microseconds on gigabit; the 100 ms
- *     budget is an "impossible stall" safety net that should never
- *     actually run to completion.
- *   - Pi 5 has no timer-IRQ preemption today (COOP_PREEMPT), so the
- *     inversion window is bounded by the TX completion time of the
- *     in-flight frame — not by an unrelated scheduler event.
- *   - #247 resolution would eliminate the poll loop entirely —
- *     tx_reap would drain completions from the IRQ handler and
- *     send() would return as soon as the descriptor is queued.
- * Not comparable to virtio_net.c's lock-across-kick-and-poll pattern
- * because virtio completion is sub-millisecond; MACB's polled path
- * can genuinely burn up to the 100 ms budget under pathological
- * stalls. */
+ *   Phase 1 (lock held): reap completions, claim a free slot, populate
+ *                        its descriptor + buffer, kick TSTART, advance
+ *                        tx_head. Unlock.
+ *   Phase 2 (unlocked):  busy-wait on the USED bit of our *own* slot
+ *                        using timer_busy_wait_us (a CNTPCT spin with
+ *                        the ARM "yield" hint — NOT scheduler yield).
+ *   Phase 3 (lock held): advance tx_tail past the just-completed slot
+ *                        (best-effort — only if tx_tail still points
+ *                        at us; otherwise an earlier concurrent send
+ *                        already moved it forward for us).
+ *
+ * Why not hold the lock across the poll? `spin_lock_irqsave` disables
+ * IRQs, and the previous implementation's `sleep_us(10)` inside the
+ * poll loop calls `yield()` — i.e. the scheduler runs another task
+ * with IRQs disabled, and any second caller entering macb_tx_one on
+ * the same CPU would spin forever in `spin_lock_irqsave`. That is a
+ * classic Critical-severity concurrency bug per the kernel review
+ * criteria ("yield() or sleep() called with interrupts disabled").
+ *
+ * Each slot is uniquely owned by one caller from the moment we
+ * advance tx_head until the MAC sets USED=1; the poll in phase 2
+ * is reading *our* slot, so it's safe without the ring lock. TSTART
+ * is self-clearing and the MAC walks descriptors in order, so a
+ * second kick while the first transmit is in flight is a no-op. */
 static int macb_tx_one(const void *buf, size_t len)
 {
     if (len > MACB_TX_BUF_SIZE || len < 14) {
         return NET_E_TOO_LARGE;
     }
 
+    /* ---- Phase 1 ---- */
     irq_flags_t flags = spin_lock_irqsave(&tx_lock);
 
-    /* Reap any completed TX before picking a slot */
     macb_tx_reap_locked();
 
     unsigned next_head = (macb_state.tx_head + 1) & (MACB_TX_RING_SIZE - 1);
@@ -967,54 +1135,84 @@ static int macb_tx_one(const void *buf, size_t len)
 
     unsigned slot = macb_state.tx_head;
 
-    /* Copy the frame into the pool buffer */
+    /* Copy the frame into the pool buffer and push it to DRAM so the
+     * MAC sees the fresh data (buffers stay cacheable because each
+     * buffer is far larger than a cacheline — no false-sharing risk). */
     memcpy(tx_buffers[slot], buf, len);
     cache_clean_range(tx_buffers[slot], len);
 
-    /* Populate the descriptor. WRAP stays on the last slot — we
-     * preserve it here because we don't re-initialize. Note: USED
-     * bit is CLEARED by this write, which is what hands the slot
-     * over to the MAC. */
+    /* Populate the descriptor. Clearing USED hands the slot to the
+     * MAC. NC rings need only a dsb to order with the TSTART store;
+     * cacheable fallback additionally cleans to DRAM. */
     tx_ring[slot].addr = (uint32_t)(uintptr_t)tx_buffers[slot];
     tx_ring[slot].ctrl = ((uint32_t)len & MACB_TX_FRMLEN_MASK) |
                          MACB_TX_LAST |
                          ((slot == MACB_TX_RING_SIZE - 1) ? MACB_TX_WRAP : 0);
-    cache_clean_range(&tx_ring[slot], sizeof(tx_ring[slot]));
+    if (!rings_nc) {
+        cache_clean_range(&tx_ring[slot], sizeof(tx_ring[slot]));
+    }
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Kick the MAC — NCR |= TSTART */
+    /* Kick the MAC — NCR |= TSTART. */
     uint32_t ncr = macb_readl(MACB_NCR);
     macb_writel(MACB_NCR, ncr | MACB_NCR_TSTART);
 
     macb_state.tx_head = next_head;
 
-    /* Polled wait: USED bit goes high when MAC finishes. Budget
-     * ~100 ms which is far more than any Ethernet frame time. */
-    for (int i = 0; i < 10000; i++) {
-        cache_invalidate_range(&tx_ring[slot], sizeof(tx_ring[slot]));
-        if (tx_ring[slot].ctrl & MACB_TX_USED) {
-            int ret = 0;
-            if (tx_ring[slot].ctrl & MACB_TX_ERROR) {
-                WARN("TX error after completion (slot %u, ctrl=0x%08x)",
-                     slot, tx_ring[slot].ctrl);
-                ret = NET_E_GENERIC;
-            }
-            /* Advance tx_tail since we just confirmed this slot is
-             * done. Keeps the ring-full check at the top of the next
-             * send precise instead of lagging by one slot (worst-case
-             * previous behaviour: a premature NET_E_BUSY when 15/16
-             * were actually completed). */
-            macb_state.tx_tail = (slot + 1) & (MACB_TX_RING_SIZE - 1);
-            spin_unlock_irqrestore(&tx_lock, flags);
-            return ret;
+    spin_unlock_irqrestore(&tx_lock, flags);
+
+    /* ---- Phase 2: unlocked poll on our slot ----
+     * timer_busy_wait_us uses CNTPCT + the ARM "yield" hint (a CPU
+     * power-saving hint, NOT a scheduler yield). 100 ms budget is
+     * the same impossible-stall cap as before — real gigabit frames
+     * complete in tens of microseconds. */
+    const uint64_t poll_budget_us = 100 * 1000;
+    const uint64_t freq           = timer_get_frequency();
+    const uint64_t deadline       = timer_get_count() +
+                                    (poll_budget_us * freq + 999999ULL) / 1000000ULL;
+
+    bool done = false;
+    bool tx_err = false;
+    while (timer_get_count() < deadline) {
+        if (rings_nc) {
+            __asm__ volatile("dsb sy" ::: "memory");
+        } else {
+            cache_invalidate_range(&tx_ring[slot], sizeof(tx_ring[slot]));
         }
-        sleep_us(10);
+        uint32_t ctrl = tx_ring[slot].ctrl;
+        if (ctrl & MACB_TX_USED) {
+            tx_err = (ctrl & MACB_TX_ERROR) != 0;
+            done = true;
+            break;
+        }
+        timer_busy_wait_us(10);
     }
 
-    ERROR("TX timed out after 100 ms (slot %u, TSR=0x%08x)",
-          slot, macb_readl(MACB_TSR));
+    if (!done) {
+        ERROR("TX timed out after 100 ms (slot %u, TSR=0x%08x)",
+              slot, macb_readl(MACB_TSR));
+        return NET_E_TIMEOUT;
+    }
+    if (tx_err) {
+        WARN("TX error after completion (slot %u, ctrl=0x%08x)",
+             slot, tx_ring[slot].ctrl);
+    }
+
+    /* ---- Phase 3: sweep the reap pointer forward ----
+     * `macb_tx_reap_locked` walks from `tx_tail` and advances past
+     * every slot whose USED bit is set. Using it here (rather than a
+     * single-slot `if (tx_tail == slot) advance` check) means
+     * out-of-order wake-ups from concurrent senders still leave
+     * `tx_tail` fully up-to-date — the ring-full check in Phase 1 of
+     * the next call stays precise. Slot `slot` is guaranteed USED=1
+     * at this point (we just observed it in Phase 2), and the MAC
+     * drains ring-order so every earlier slot is USED=1 too. */
+    flags = spin_lock_irqsave(&tx_lock);
+    macb_tx_reap_locked();
     spin_unlock_irqrestore(&tx_lock, flags);
-    return NET_E_TIMEOUT;
+    (void)slot;                  /* used only by diagnostic WARNs */
+
+    return tx_err ? NET_E_GENERIC : 0;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1025,10 +1223,46 @@ int macb_init(void)
 {
     INFO("Initializing Cadence MACB/GEM driver (Pi 5 RP1)...");
     INFO("  ETH IP base:  0x%lx", (unsigned long)RP1_ETH_IP_BASE);
-    INFO("  ETH CFG base: 0x%lx", (unsigned long)RP1_ETH_CFG_BASE);
     INFO("  MACB IRQ:     %u (MIP0 vec %u → SPI %u)",
          (unsigned)MACB_IRQ, (unsigned)RP1_INT_ETH,
          (unsigned)(MIP0_BASE_SPI + RP1_INT_ETH));
+
+    /* Allocate descriptor rings from NC memory so CPU and MAC DMA
+     * touch the same physical bytes without cache maintenance. Falls
+     * back to the cacheable BSS rings on NC exhaustion with a WARN —
+     * the driver still works in that mode but carries the latent
+     * false-sharing risk documented in the ring declarations. */
+    tx_ring = ncmem_alloc(sizeof(struct macb_dma_desc) * MACB_TX_RING_SIZE, 64);
+    rx_ring = ncmem_alloc(sizeof(struct macb_dma_desc) * MACB_RX_RING_SIZE, 64);
+    if (tx_ring && rx_ring) {
+        rings_nc = true;
+        INFO("  Descriptor rings:  NC memory (tx=%p rx=%p)",
+             (void *)tx_ring, (void *)rx_ring);
+    } else {
+        WARN("ncmem_alloc failed; falling back to cacheable rings — "
+             "descriptors share cachelines with their neighbours, "
+             "false-sharing window is latent under sustained traffic");
+        tx_ring = tx_ring_fallback;
+        rx_ring = rx_ring_fallback;
+        rings_nc = false;
+    }
+
+    /* Guard the 32-bit DMA addressing assumption. TBQP / RBQP are
+     * programmed with the low 32 bits of the ring address and we
+     * explicitly zero TBQPH / RBQPH; any ring (or buffer) above 4 GB
+     * would silently truncate. All current Pi 5 builds place these
+     * below 4 GB, but a future link-script change could break that
+     * without noise — this runtime check turns silent corruption
+     * into a loud init failure. */
+    if (!macb_dma_addr_fits_32(tx_ring) ||
+        !macb_dma_addr_fits_32(rx_ring) ||
+        !macb_dma_addr_fits_32(tx_buffers) ||
+        !macb_dma_addr_fits_32(rx_buffers) ||
+        !macb_dma_addr_fits_32(&tx_buffers[MACB_TX_RING_SIZE - 1][MACB_TX_BUF_SIZE - 1]) ||
+        !macb_dma_addr_fits_32(&rx_buffers[MACB_RX_RING_SIZE - 1][MACB_RX_BUF_SIZE - 1])) {
+        ERROR("MACB ring or buffer above 4 GB — driver needs 64-bit DMA support");
+        return -1;
+    }
 
     /* Stage 2: enable RP1 Ethernet clocks. Idempotent — firmware
      * may have already turned them on. */

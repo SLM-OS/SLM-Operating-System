@@ -351,6 +351,10 @@ set(KERNEL_SOURCES
     # .incbin'ed Lua demo scripts (gated on EMBED_DEMO_SCRIPTS)
     $<$<BOOL:${EMBED_DEMO_SCRIPTS}>:kernel/src/demo_scripts.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
+    # General-purpose FDT reader — path + property lookup for any
+    # driver. Built on every ARM64 target; x86-64 builds skip it
+    # because there's no DTB there.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/lib/fdt/fdt.c>
     kernel/src/elf.c
     kernel/src/vfs.c
 
@@ -390,6 +394,8 @@ set(KERNEL_SOURCES
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/virtio_net_pci.c>
     # Cadence MACB/GEM driver (Pi 5 only, via RP1 southbridge) — #202
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/macb.c>
+    # BCM2712 VideoCore mailbox — supplies the board MAC to macb.c (#250)
+    $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/bcm_mailbox.c>
     # Platform-independent networking stack
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>
@@ -418,6 +424,9 @@ set(TEST_SOURCES
     kernel/tests/test_elf.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
+    # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for
+    # the same reason as test_dtb.c above
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_fdt.c>
     # ARM64-specific test files (use inline asm not available on x86-64)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_scheduler.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_mem.c>

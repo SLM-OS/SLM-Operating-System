@@ -181,18 +181,29 @@ vmm mapping needed — same 2 MB block as UART.
 config flags — no Pi-5-specific code path). Cached locally at
 `docs/reference/linux-cadence-macb.h` and `linux-cadence-macb-main.c`.
 
-**Landed driver:** `kernel/drivers/macb.c` (~700 lines) implements:
+**Landed driver:** `kernel/drivers/macb.c` (~1200 lines) implements:
 1. RP1 clock enable (`CLK_ETH_CTRL`, `CLK_ETH_TSU_CTRL`)
 2. MACB MID probe + MDIO bring-up (NCFGR CLK div, NCR.MPE)
 3. BCM54213PE PHY reset release via RP1 GPIO 32
-4. PHY auto-negotiate, link-up detection (BMSR)
-5. Speed/duplex application + NCFGR.BIG + NCFGR.DRFCS for real-
-   world frame acceptance
-6. Locally-administered MAC address (02:00:00:5A:00:01) programmed
-   into SA1B/SA1T
-7. 16-slot TX + RX descriptor rings, polled completion
-8. Cache clean/invalidate at every DMA sync point (mandatory on
-   Pi 5 — no SMPEN)
+4. PHY auto-negotiate, link-up detection (BMSR, double-read to
+   clear the IEEE 802.3 latched-low LSTATUS)
+5. Speed/duplex application (real ANEG decode over MII_STAT1000
+   and MII_LPA — 10/100/1000 all supported) + NCFGR.BIG +
+   NCFGR.DRFCS for real-world frame acceptance
+6. MAC address via 3-tier source (#250, #255): VC mailbox
+   (tag 0x00010003, needs EEPROM >= 2025-05-08) → DTB
+   `local-mac-address` (works on every EEPROM) → fixed
+   `02:00:00:5A:00:01` with WARN. Programmed into SA1B/SA1T.
+7. 16-slot TX + RX descriptor rings **in NC memory** (avoids
+   8-descriptors-per-cacheline false sharing), with polled
+   completion and 2-phase locking around `macb_tx_one` (claim
+   slot under `tx_lock`, unlock before the busy-wait, reacquire
+   to advance `tx_tail` — closes the yield-with-interrupts-
+   disabled bug that would have deadlocked a second `macb_send`
+   caller on CPU 0)
+8. Cache clean/invalidate at every DMA sync point for buffers
+   (mandatory on Pi 5 — no SMPEN); ring accesses are plain dsb
+   because NC memory is non-cacheable
 
 **Polling is the operational path**, but not for the reason originally
 assumed. The timer PPI-30 blocker (#134) is a separate policy issue;
