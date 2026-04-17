@@ -357,6 +357,16 @@ void shell_init(void)
     }
 #endif
 
+    /* #64: boot-time model preloading from /mnt/files/preload.conf.
+     * Must run after the scheduler is up (we're in the shell task).
+     * Skip during boot-tests — tests expect an empty model registry. */
+#if !defined(ENABLE_BOOT_TESTS)
+    {
+        extern void model_boot_preload(void);
+        model_boot_preload();
+    }
+#endif
+
     uart_puts("\r\n");
     uart_puts("SLM-OS Debug Shell\r\n");
     uart_puts("Type 'help' for available commands.\r\n");

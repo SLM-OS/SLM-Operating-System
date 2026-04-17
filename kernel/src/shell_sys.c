@@ -1837,6 +1837,68 @@ static int model_preload_start(const char *name)
     return 0;
 }
 
+/*
+ * Boot-time model preloading (#64). Reads /mnt/files/preload.conf and
+ * spawns a background preload task for each non-comment, non-empty
+ * line. Called from shell_init after the scheduler is running.
+ *
+ * Config format: one model name per line. Lines starting with '#' are
+ * comments. Blank lines are ignored. "mnist" triggers the built-in
+ * shortcut; anything else is treated as a VFS path.
+ */
+void model_boot_preload(void)
+{
+    static char conf_buf[512];
+    int bytes = vfs_read_path("/mnt/files/preload.conf", conf_buf,
+                              sizeof(conf_buf) - 1, 0);
+    if (bytes <= 0) {
+        return;  /* No config file or empty — skip. */
+    }
+    conf_buf[bytes] = '\0';
+
+    /* Parse line by line. */
+    int started = 0;
+    char *p = conf_buf;
+    while (*p) {
+        /* Skip leading whitespace. */
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0') break;
+
+        /* Find end of line. */
+        char *eol = p;
+        while (*eol && *eol != '\n' && *eol != '\r') eol++;
+
+        /* NUL-terminate this line. */
+        char saved = *eol;
+        *eol = '\0';
+
+        /* Skip comments and empty lines. */
+        if (*p != '#' && *p != '\0') {
+            /* Trim trailing whitespace. */
+            char *end = eol - 1;
+            while (end > p && (*end == ' ' || *end == '\t')) {
+                *end = '\0';
+                end--;
+            }
+            if (*p != '\0') {
+                model_preload_start(p);
+                started++;
+            }
+        }
+
+        /* Advance past the line terminator. */
+        *eol = saved;
+        if (*eol == '\r') eol++;
+        if (*eol == '\n') eol++;
+        p = eol;
+    }
+
+    if (started > 0) {
+        uart_printf("[boot] Started %d model preload(s) from /mnt/files/preload.conf\r\n",
+                    started);
+    }
+}
+
 static int model_load(int argc, char *argv[])
 {
     if (argc < 3) {
