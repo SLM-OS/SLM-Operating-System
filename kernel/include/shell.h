@@ -24,11 +24,22 @@ typedef int (*shell_handler_t)(int argc, char *argv[]);
 
 /*
  * Command definition.
+ *
+ * A command is `mutates = true` if any of its subcommands modify
+ * global kernel state that lacks its own lock (task lifecycle,
+ * active scheduler / eviction policy, component registry, network
+ * config). Such commands are serialized by the dispatcher so that
+ * two concurrent shell sessions cannot race each other's mutations.
+ *
+ * Read-only commands and commands that mutate through an already-
+ * locked subsystem (VFS, PMM, etc.) are `mutates = false` so they
+ * pass through without contention.
  */
 typedef struct {
     const char *name;           /* Command name */
     shell_handler_t handler;    /* Handler function */
     const char *help;           /* Short help text */
+    bool mutates;               /* True if serialization is required */
 } shell_cmd_t;
 
 /*

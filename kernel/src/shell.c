@@ -10,6 +10,7 @@
 #include "shell_internal.h"
 #include "shell_io.h"
 #include "shell_session.h"
+#include "pi_mutex.h"
 #include "uart.h"
 #include "task.h"
 #include "sched.h"
@@ -37,59 +38,59 @@
  * ============================================================================ */
 
 const shell_cmd_t builtin_commands[] = {
-    {"help",   cmd_help,   "List available commands"},
-    {"mem",    cmd_mem,    "Show memory statistics"},
-    {"tasks",  cmd_tasks,  "List all tasks"},
-    {"cpu",    cmd_cpu,    "Show CPU status"},
-    {"uptime", cmd_uptime, "Show system uptime"},
-    {"vmm",    cmd_vmm,    "Show virtual memory info"},
-    {"ipc",    cmd_ipc,    "Show IPC statistics"},
-    {"model",  cmd_model,  "Model management (load/list/info/unload/pools)"},
-    {"dtb",    cmd_dtb,    "Show device tree info"},
-    {"gpu",    cmd_gpu,    "Show GPU info (gpu [read <hex-offset>])"},
-    {"peek",   cmd_peek,   "Read physical memory (peek <phys-hex> [count])"},
+    {"help",   cmd_help,   "List available commands", false},
+    {"mem",    cmd_mem,    "Show memory statistics", false},
+    {"tasks",  cmd_tasks,  "List all tasks", false},
+    {"cpu",    cmd_cpu,    "Show CPU status", false},
+    {"uptime", cmd_uptime, "Show system uptime", false},
+    {"vmm",    cmd_vmm,    "Show virtual memory info", false},
+    {"ipc",    cmd_ipc,    "Show IPC statistics", false},
+    {"model",  cmd_model,  "Model management (load/list/info/unload/pools)", true},
+    {"dtb",    cmd_dtb,    "Show device tree info", false},
+    {"gpu",    cmd_gpu,    "Show GPU info (gpu [read <hex-offset>])", false},
+    {"peek",   cmd_peek,   "Read physical memory (peek <phys-hex> [count])", false},
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    {"nvgpu",  cmd_nvgpu,  "Jetson nvgpu bringup (nvgpu <prepare|run|info>)"},
+    {"nvgpu",  cmd_nvgpu,  "Jetson nvgpu bringup (nvgpu <prepare|run|info>)", true},
 #endif
-    {"elftest", cmd_elftest, "Test ELF loader"},
-    {"run",    cmd_run,    "Run a program (run <name>)"},
-    {"kill",   cmd_kill,   "Terminate a task by ID"},
-    {"ls",     cmd_ls,     "List directory (ls [path])"},
-    {"cd",     cmd_cd,     "Change directory (cd [path])"},
-    {"pwd",    cmd_pwd,    "Print working directory"},
-    {"cat",    cmd_cat,    "Show file contents (cat <path>)"},
-    {"write",  cmd_write,  "Write to file (write <path> <content>)"},
-    {"mkdir",  cmd_mkdir,  "Create directory (mkdir <path>)"},
-    {"rm",     cmd_rm,     "Remove file/dir (rm <path>)"},
-    {"mv",     cmd_mv,     "Move/rename (mv <src> <dst>)"},
-    {"df",     cmd_df,     "Filesystem stats (df [path])"},
-    {"truncate", cmd_truncate, "Truncate file (truncate <path> <size>)"},
-    {"append", cmd_append, "Append to file (append <path> <content>)"},
-    {"cp",     cmd_cp,     "Copy file (cp <src> <dst>)"},
-    {"touch",  cmd_touch,  "Create empty file (touch <path>)"},
-    {"stat",   cmd_stat,   "Show file info (stat <path>)"},
-    {"tree",   cmd_tree,   "Recursive directory listing (tree [path])"},
-    {"wc",     cmd_wc,     "Count lines/words/bytes (wc <path>)"},
-    {"hexdump", cmd_hexdump, "Hex dump file (hexdump <path> [offset] [len])"},
-    {"grep",   cmd_grep,   "Search in file (grep <pattern> <path>)"},
-    {"find",   cmd_find,   "Find files (find <path> <pattern>)"},
-    {"component", cmd_component, "Component system (list/register/status)"},
-    {"msg",       cmd_msg,       "Message router (send/list/subscribe)"},
-    {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)"},
-    {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)"},
-    {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | stats])"},
-    {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])"},
-    {"top",    cmd_top,    "Live dashboard (top [-n <iter>] [refresh_secs])"},
-    {"clear",  cmd_clear,  "Clear screen"},
-    {"reboot", cmd_reboot, "Restart the system"},
+    {"elftest", cmd_elftest, "Test ELF loader", true},
+    {"run",    cmd_run,    "Run a program (run <name>)", true},
+    {"kill",   cmd_kill,   "Terminate a task by ID", true},
+    {"ls",     cmd_ls,     "List directory (ls [path])", false},
+    {"cd",     cmd_cd,     "Change directory (cd [path])", false},  /* per-session cwd only */
+    {"pwd",    cmd_pwd,    "Print working directory", false},
+    {"cat",    cmd_cat,    "Show file contents (cat <path>)", false},
+    {"write",  cmd_write,  "Write to file (write <path> <content>)", false},  /* VFS locks internally */
+    {"mkdir",  cmd_mkdir,  "Create directory (mkdir <path>)", false},
+    {"rm",     cmd_rm,     "Remove file/dir (rm <path>)", false},
+    {"mv",     cmd_mv,     "Move/rename (mv <src> <dst>)", false},
+    {"df",     cmd_df,     "Filesystem stats (df [path])", false},
+    {"truncate", cmd_truncate, "Truncate file (truncate <path> <size>)", false},
+    {"append", cmd_append, "Append to file (append <path> <content>)", false},
+    {"cp",     cmd_cp,     "Copy file (cp <src> <dst>)", false},
+    {"touch",  cmd_touch,  "Create empty file (touch <path>)", false},
+    {"stat",   cmd_stat,   "Show file info (stat <path>)", false},
+    {"tree",   cmd_tree,   "Recursive directory listing (tree [path])", false},
+    {"wc",     cmd_wc,     "Count lines/words/bytes (wc <path>)", false},
+    {"hexdump", cmd_hexdump, "Hex dump file (hexdump <path> [offset] [len])", false},
+    {"grep",   cmd_grep,   "Search in file (grep <pattern> <path>)", false},
+    {"find",   cmd_find,   "Find files (find <path> <pattern>)", false},
+    {"component", cmd_component, "Component system (list/register/status)", true},
+    {"msg",       cmd_msg,       "Message router (send/list/subscribe)", true},
+    {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)", false},
+    {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)", true},
+    {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | stats])", true},
+    {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])", true},
+    {"top",    cmd_top,    "Live dashboard (top [-n <iter>] [refresh_secs])", false},
+    {"clear",  cmd_clear,  "Clear screen", false},
+    {"reboot", cmd_reboot, "Restart the system", true},
 #if defined(PI5_IRQ_DIAG)
-    {"diag",   cmd_diag,   "Pi 5 IRQ-delivery diagnostics (diag <el2|vec|fiq|all>)"},
+    {"diag",   cmd_diag,   "Pi 5 IRQ-delivery diagnostics (diag <el2|vec|fiq|all>)", false},
 #endif
 #if !defined(PLATFORM_X86_64)
-    {"timdiag", cmd_timdiag, "Timer/interrupt delivery diagnostic"},
+    {"timdiag", cmd_timdiag, "Timer/interrupt delivery diagnostic", false},
 #endif
 #if defined(PLATFORM_RASPI5) && defined(ENABLE_NETWORKING)
-    {"macbdiag", cmd_macbdiag, "MACB IRQ delivery diagnostic"},
+    {"macbdiag", cmd_macbdiag, "MACB IRQ delivery diagnostic", false},
 #endif
 };
 
@@ -99,6 +100,14 @@ const int NUM_BUILTIN_COMMANDS = sizeof(builtin_commands) / sizeof(builtin_comma
 #define MAX_EXTERNAL_COMMANDS 16
 shell_cmd_t external_commands[MAX_EXTERNAL_COMMANDS];
 int num_external_commands = 0;
+
+/* Serializes mutating commands across concurrent shell sessions. A
+ * priority-inheriting mutex is correct here because (a) a slow mutating
+ * command should not block preemption on the whole system, and (b) when
+ * a high-priority shell task waits on a command from a lower-priority
+ * task, we want PI to avoid deadline inversion. Commands marked
+ * `.mutates = false` bypass the lock entirely. */
+static pi_mutex_t shell_mutex = PI_MUTEX_INIT;
 
 /* ============================================================================
  * Line editing state
@@ -245,6 +254,21 @@ int shell_resolve_path(const char *path, char *out, size_t max_len)
     if (work_len >= max_len) return -1;
     strcpy(out, work);
     return 0;
+}
+
+/*
+ * Dispatch a command, acquiring the shell mutex around mutating
+ * ones. Returns whatever the handler returns.
+ */
+static int dispatch_cmd(const shell_cmd_t *cmd, int argc, char *argv[])
+{
+    if (!cmd->mutates) {
+        return cmd->handler(argc, argv);
+    }
+    pi_mutex_lock(&shell_mutex);
+    int ret = cmd->handler(argc, argv);
+    pi_mutex_unlock(&shell_mutex);
+    return ret;
 }
 
 /*
@@ -513,7 +537,7 @@ int shell_execute(const char *cmdline)
         return -1;
     }
 
-    return cmd->handler(argc, argv);
+    return dispatch_cmd(cmd, argc, argv);
 }
 
 /*
@@ -554,8 +578,8 @@ void shell_run(void)
             continue;
         }
 
-        /* Execute command */
-        int ret = cmd->handler(argc, argv);
+        /* Execute command (serialized if .mutates) */
+        int ret = dispatch_cmd(cmd, argc, argv);
         if (ret != 0) {
             shell_printf("Command returned error: %d\r\n", ret);
         }

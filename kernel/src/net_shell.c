@@ -309,10 +309,10 @@ static int cmd_netstat(int argc, char *argv[]) {
 
 /* Command definitions */
 static const shell_cmd_t net_commands[] = {
-    {"net", cmd_net, "Network control (init/status)"},
-    {"ping", cmd_ping, "Send ICMP echo request"},
-    {"ifconfig", cmd_ifconfig, "Network interface config"},
-    {"netstat", cmd_netstat, "Network statistics"},
+    {"net",      cmd_net,      "Network control (init/status)",        true},
+    {"ping",     cmd_ping,     "Send ICMP echo request",               true},
+    {"ifconfig", cmd_ifconfig, "Network interface config",             true},
+    {"netstat",  cmd_netstat,  "Network statistics",                   false},
 };
 
 /**
