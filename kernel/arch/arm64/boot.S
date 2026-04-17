@@ -588,20 +588,24 @@ real_start:
      *   TGE (bit 27): Trap General Exceptions to EL2
      *   RW  (bit 31): EL1 is AArch64
      *
-     * Gated on `CurrentEL == EL2`. UEFI-direct boot on Jetson enters
-     * at EL1 (confirmed empirically: `mrs x10, hcr_el2` traps with a
-     * synchronous exception at the mrs PC post-EBS). Kexec-from-Linux
-     * enters at EL2 from TF-A and needs the VHE/timer setup here. At
-     * EL1, skip the whole block — hcr_el2, cnthp_ctl_el2, and the
-     * UARTC MMIO write are all EL2-gated; accessing them from EL1
-     * traps or silently hangs UEFI's still-active handler.
+     * Gated on `CurrentEL == EL2`. Kexec-from-Linux enters at EL2 from
+     * TF-A, and UEFI-direct boot on Jetson also enters at EL2+VHE
+     * (contrary to PR #226's EL1 conclusion — that was misled by an
+     * ArmCpuDxe PC-reporting quirk and DAIF.D masking brk probes; see
+     * docs/jetson-uefi-direct-result.md §§5/5a/5b). Both paths take
+     * the fall-through branch here.
      *
      * CurrentEL[3:2] encodes the EL: 0b00=EL0, 0b01=EL1, 0b10=EL2,
      * 0b11=EL3. Value 0b1000 = 8 means EL2.
      *
-     * Re-writing HCR_EL2 at EL2 with the same bits (E2H|RW|TGE) that
-     * a VHE-aware Linux kexec left in place is architecturally a
-     * no-op store; no guard on the write is needed.
+     * KNOWN BLOCKER on the UEFI-direct path: `msr hcr_el2, x10` below
+     * hangs silently under UEFI context. The unconditional write of
+     * (E2H|RW|TGE) clobbers every other bit UEFI had set (API, APK,
+     * AMO, IMO, FMO, HCD, VM), leaving the CPU in a state UEFI can't
+     * continue from. Kexec path is unaffected because Linux's host
+     * VHE state closely matches SLM-OS's target. Proper fix is
+     * read-modify-write to preserve UEFI's bits; tracked in
+     * docs/jetson-uefi-direct-result.md §5c.
      */
     mrs     x10, CurrentEL
     cmp     x10, #8

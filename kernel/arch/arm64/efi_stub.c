@@ -297,9 +297,11 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * Kept as best-effort diagnostics — when they work, they pin down
      * whether EBS succeeded and whether efi_disable_mmu ran; when they
      * don't, the symptom is indistinguishable from the silent-hang
-     * blocker otherwise hit at BSS clear. Firmware-portable post-EBS
-     * tracing is a separate project (memory-scratch + DRAM retention
-     * across warm reset, or an SLM-OS VBAR_EL1 installed before EBS).
+     * blocker in boot.S's `msr hcr_el2` (see
+     * docs/jetson-uefi-direct-result.md §5c). Firmware-portable
+     * post-EBS tracing is a separate project (memory-scratch + DRAM
+     * retention across warm reset, or an SLM-OS VBAR_EL1 installed
+     * before EBS).
      */
     efi_print(sys_table, m_post_ebs);
 
