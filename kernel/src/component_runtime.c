@@ -519,21 +519,37 @@ int component_run(const char *name)
     if (bc->model_name) {
         int model_idx = rust_model_find(bc->model_name);
         if (model_idx < 0) {
-            const char *mn = bc->model_name;
-            bool is_mnist = (mn[0]=='m' && mn[1]=='n' && mn[2]=='i' &&
-                             mn[3]=='s' && mn[4]=='t' && mn[5]=='\0');
-            if (is_mnist) {
-                model_idx = rust_model_load_builtin_mnist();
-            }
-            if (model_idx >= 0) {
-                uart_printf("[component] Preloaded model '%s' (idx %d) for %s\n",
+            /* #64: check if an async preload is in-flight for this
+             * model before falling back to synchronous loading. If a
+             * Lua script or shell command already kicked off `model
+             * preload <name>`, waiting is cheaper than re-loading. */
+            extern int model_preload_wait(const char *name, uint32_t timeout_ms);
+            int wait_idx = model_preload_wait(bc->model_name, 2000);
+            if (wait_idx >= 0) {
+                model_idx = wait_idx;
+                uart_printf("[component] Model '%s' ready via async preload "
+                            "(idx %d) for %s\n",
                             bc->model_name, model_idx, bc->name);
             } else {
-                uart_printf("[WARN] Failed to preload model '%s' for %s\n",
-                            bc->model_name, bc->name);
+                /* Not in-flight — fall back to synchronous load. */
+                const char *mn = bc->model_name;
+                bool is_mnist = (mn[0]=='m' && mn[1]=='n' && mn[2]=='i' &&
+                                 mn[3]=='s' && mn[4]=='t' && mn[5]=='\0');
+                if (is_mnist) {
+                    model_idx = rust_model_load_builtin_mnist();
+                }
+                if (model_idx >= 0) {
+                    uart_printf("[component] Preloaded model '%s' (idx %d) "
+                                "for %s\n",
+                                bc->model_name, model_idx, bc->name);
+                } else {
+                    uart_printf("[WARN] Failed to preload model '%s' for %s\n",
+                                bc->model_name, bc->name);
+                }
             }
         } else {
-            uart_printf("[component] Model '%s' already loaded (idx %d) for %s\n",
+            uart_printf("[component] Model '%s' already loaded (idx %d) "
+                        "for %s\n",
                         bc->model_name, model_idx, bc->name);
         }
     }
