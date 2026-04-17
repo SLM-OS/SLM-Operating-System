@@ -357,6 +357,9 @@ set(KERNEL_SOURCES
 
     # Shell (core + command modules)
     kernel/src/shell.c
+    kernel/src/shell_io.c
+    kernel/src/shell_io_uart.c
+    kernel/src/shell_session.c
     kernel/src/shell_sys.c
     kernel/src/shell_fs.c
     kernel/src/shell_exec.c

@@ -5,7 +5,8 @@ as the initial protocol layer and a proper daemon control surface
 (`telnetd`) on top. This is foundational work for future SSH support
 (Phase 4, tracked in #199) and for multi-user operation.
 
-**Status:** Planning
+**Status:** Phase 1 §1.1 landed (shell_io abstraction + UART backend
++ per-task session routing); §1.2–§1.9 pending
 **Last updated:** 17 April 2026
 
 ---
@@ -36,11 +37,26 @@ Hard:
 - Networking expansion Phases 1-2 complete (driver abstraction,
   x86-64 VirtIO-Net PCI, lwIP available on target platforms)
 - Auto-DHCP at boot (#197) so the OS has an IP address without manual
-  configuration
+  configuration — **closed 2026-04-16**, implemented in
+  `kernel/net/lwip_slm.c` behind `NET_DHCP_AT_BOOT` (default ON)
 
 Soft:
 - Lua audit (#152) — scripting over TCP is more useful if the Lua
   surface is complete, but not required
+
+### lwIP API constraint (important)
+
+SLM-OS configures lwIP with `NO_SYS=1` and `LWIP_SOCKET=0` /
+`LWIP_NETCONN=0` (see `kernel/include/lwipopts.h`). The BSD sockets API
+(`lwip_socket`, `lwip_bind`, `lwip_accept`, etc.) is **not available**
+— enabling it would require a `sys_arch.c` port with threading
+primitives (mutexes, mailboxes, semaphores backed by SLM-OS tasks), a
+substantial rewrite we do not need.
+
+Instead, the TCP listener (§1.3) and the `shell_io_tcp` backend
+(§1.1) use the lwIP **raw callback API** driven by the existing
+`net_poll()` task. Existing reference: `kernel/net/lwip_slm.c` (DHCP /
+ICMP integration) follows this exact pattern.
 
 ---
 
@@ -73,8 +89,10 @@ struct shell_io {
 Provide two implementations:
 - `shell_io_uart` — calls into existing UART functions (behavior
   preserved for the primary console)
-- `shell_io_tcp` — writes to a lwIP socket, reads from an incoming
-  data buffer
+- `shell_io_tcp` — writes via `tcp_write()` on a lwIP raw TCP pcb;
+  reads from a per-session ring buffer that is filled by the pcb's
+  `tcp_recv` callback. The `read_char` op blocks by calling
+  `task_yield()` until the ring buffer has data or the pcb is closed.
 
 Refactor all shell code to take `struct shell_io *` instead of calling
 UART directly. The most-invasive edits are in:
@@ -118,36 +136,54 @@ Migration strategy:
 
 **Effort:** ~300 lines of refactoring plus the new types.
 
-### 1.3 TCP Listener Task
+### 1.3 TCP Listener (raw callback API)
 
-A long-running task that accepts new TCP connections and spawns shell
-sessions.
+Because lwIP is compiled `NO_SYS=1` / `LWIP_SOCKET=0`, the listener is
+not a blocking `accept()` loop but a one-time setup that registers an
+`accept` callback against a listening pcb. lwIP invokes the callback
+from the `net_poll()` context whenever a SYN handshake completes.
 
 ```c
-void tcp_shell_listener_task(void *arg) {
-    int listen_sock = lwip_socket(AF_INET, SOCK_STREAM, 0);
-    bind(listen_sock, ..., TCP_SHELL_PORT);
-    listen(listen_sock, MAX_SHELL_SESSIONS);
+static struct tcp_pcb *shell_listen_pcb;
 
-    while (1) {
-        int client = lwip_accept(listen_sock, ...);
-        if (client < 0) continue;
-
-        struct shell_session *s = session_alloc();
-        if (!s) {
-            const char *msg = "Too many sessions\r\n";
-            lwip_send(client, msg, strlen(msg), 0);
-            lwip_close(client);
-            continue;
-        }
-
-        s->io = shell_io_tcp_create(client);
-        s->task_id = task_create("shell-tcp",
-                                 shell_session_main, s,
-                                 SHELL_STACK_SIZE, SHELL_PRIORITY);
+static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
+    (void)arg;
+    if (err != ERR_OK || newpcb == NULL) {
+        return ERR_VAL;
     }
+
+    struct shell_session *s = session_alloc();
+    if (!s) {
+        /* Politely send "too many sessions" then close. */
+        tcp_write(newpcb, "Too many sessions\r\n", 19, TCP_WRITE_FLAG_COPY);
+        tcp_output(newpcb);
+        tcp_close(newpcb);
+        return ERR_MEM;
+    }
+
+    s->io = shell_io_tcp_create(newpcb);        /* wires recv/err/sent callbacks */
+    struct task *t = task_create_with_priority("shell-tcp",
+                                               shell_session_main, s,
+                                               SHELL_PRIORITY);
+    shell_session_bind(t, s);
+    scheduler_add_task(t);
+    return ERR_OK;
+}
+
+void tcp_shell_listener_init(uint16_t port, ip_addr_t bind_addr) {
+    struct tcp_pcb *pcb = tcp_new();
+    tcp_bind(pcb, &bind_addr, port);
+    shell_listen_pcb = tcp_listen(pcb);
+    tcp_accept(shell_listen_pcb, on_accept);
 }
 ```
+
+The session task (`shell_session_main`) runs the normal REPL via
+`shell_run()`. Its `read_char` path yields (e.g. `task_yield()` or a
+short `task_sleep_ms()`) while the per-session ring buffer is empty;
+the `tcp_recv` callback fills that buffer and wakes the session. See
+`kernel/net/lwip_slm.c` for the callback-wiring pattern already used
+for DHCP / ICMP ping.
 
 Design choices:
 - Port: `2323` (avoids privileged 1-1023; easy to remember; not 23
@@ -560,17 +596,20 @@ This aligns with the demo-readiness observability work (#191, #194).
 
 ### New
 
-- `kernel/include/shell_io.h` — I/O abstraction interface
-- `kernel/include/shell_session.h` — Session struct + pool API
-- `kernel/src/shell_io_uart.c` — UART backend
-- `kernel/src/shell_io_tcp.c` — lwIP socket backend
-- `kernel/src/shell_session.c` — Session pool + lifecycle
-- `kernel/src/tcp_shell_server.c` — Listener task
-- `kernel/src/telnet.c` (Phase 2) — IAC state machine
-- `kernel/src/shell_telnetd.c` (Phase 3) — `telnetd` shell commands
-- `kernel/src/telnetd_config.c` (Phase 3) — `/etc/telnetd.conf` parser + boot hook
-- `kernel/tests/test_shell_session.c` — Session unit tests
-- `kernel/tests/test_telnetd_config.c` (Phase 3) — Config parser tests
+- ✅ `kernel/include/shell_io.h` — I/O abstraction interface
+- ✅ `kernel/include/shell_session.h` — Session struct + pool API
+- ✅ `kernel/src/shell_io.c` — backend-independent helpers
+  (`shell_io_puts`, `shell_io_printf`, `shell_io_vprintf`)
+- ✅ `kernel/src/shell_io_uart.c` — UART backend
+- ☐ `kernel/src/shell_io_tcp.c` — lwIP raw-callback TCP backend
+- ✅ `kernel/src/shell_session.c` — Session pool + lifecycle
+  (currently console-only; TCP slots added in §1.3)
+- ☐ `kernel/src/tcp_shell_server.c` — Listener (accept callback)
+- ☐ `kernel/src/telnet.c` (Phase 2) — IAC state machine
+- ☐ `kernel/src/shell_telnetd.c` (Phase 3) — `telnetd` shell commands
+- ☐ `kernel/src/telnetd_config.c` (Phase 3) — `/etc/telnetd.conf` parser + boot hook
+- ☐ `kernel/tests/test_shell_session.c` — Session unit tests
+- ☐ `kernel/tests/test_telnetd_config.c` (Phase 3) — Config parser tests
 
 ---
 

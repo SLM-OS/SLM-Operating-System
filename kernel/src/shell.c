@@ -8,6 +8,8 @@
 
 #include "shell.h"
 #include "shell_internal.h"
+#include "shell_io.h"
+#include "shell_session.h"
 #include "uart.h"
 #include "task.h"
 #include "sched.h"
@@ -292,43 +294,116 @@ static int parse_line(char *line, char *argv[], int max_args)
 }
 
 /*
- * Read a line from UART with basic line editing.
- * Supports: backspace, enter
- * Returns line length (excluding null terminator).
+ * Read a line from the current session's I/O with basic line editing.
+ * Supports: backspace, enter, Ctrl+C
+ * Returns line length (excluding null terminator), or -1 if the
+ * session has closed (peer disconnected).
  */
 int shell_read_line(char *buf, int max_len)
 {
-    int pos = 0;
-    char c;
+    struct shell_session *s = shell_session_current();
+    if (!s || !s->io) {
+        buf[0] = '\0';
+        return -1;
+    }
+    struct shell_io *io = s->io;
 
-    while (pos < max_len - 1) {
-        c = uart_getc();
+    int pos = 0;
+    for (;;) {
+        if (pos >= max_len - 1) {
+            break;
+        }
+        int ch = io->read_char(io);
+        if (ch < 0) {
+            /* EOF / closed */
+            buf[pos] = '\0';
+            return -1;
+        }
+        char c = (char)ch;
 
         if (c == '\r' || c == '\n') {
             /* Enter pressed */
-            uart_puts("\r\n");
+            io->write(io, "\r\n", 2);
             break;
         } else if (c == '\b' || c == 0x7F) {
             /* Backspace or DEL */
             if (pos > 0) {
                 pos--;
-                uart_puts("\b \b");  /* Erase character on terminal */
+                io->write(io, "\b \b", 3);
             }
         } else if (c == 0x03) {
             /* Ctrl+C - cancel line */
-            uart_puts("^C\r\n");
+            io->write(io, "^C\r\n", 4);
             pos = 0;
             break;
         } else if (c >= 0x20 && c < 0x7F) {
             /* Printable character */
             buf[pos++] = c;
-            uart_putc(c);  /* Echo */
+            io->write(io, &c, 1);  /* Echo */
         }
         /* Ignore other control characters */
     }
 
     buf[pos] = '\0';
     return pos;
+}
+
+/* ============================================================================
+ * Per-session I/O wrappers
+ * ============================================================================ */
+
+void shell_puts(const char *s)
+{
+    struct shell_session *sess = shell_session_current();
+    if (sess && sess->io) {
+        shell_io_puts(sess->io, s);
+    } else {
+        /* Early boot or unbound task — fall back to UART. */
+        uart_puts(s);
+    }
+}
+
+void shell_putc(char c)
+{
+    struct shell_session *sess = shell_session_current();
+    if (sess && sess->io) {
+        sess->io->write(sess->io, &c, 1);
+    } else {
+        uart_putc(c);
+    }
+}
+
+int shell_printf(const char *fmt, ...)
+{
+    struct shell_session *sess = shell_session_current();
+    va_list args;
+    va_start(args, fmt);
+    int n;
+    if (sess && sess->io) {
+        n = shell_io_vprintf(sess->io, fmt, args);
+    } else {
+        n = uart_vprintf(fmt, args);
+    }
+    va_end(args);
+    return n;
+}
+
+int shell_getc(void)
+{
+    struct shell_session *sess = shell_session_current();
+    if (sess && sess->io) {
+        return sess->io->read_char(sess->io);
+    }
+    return (int)(unsigned char)uart_getc();
+}
+
+int shell_try_getc(void)
+{
+    struct shell_session *sess = shell_session_current();
+    if (sess && sess->io) {
+        return sess->io->try_read_char(sess->io);
+    }
+    return uart_try_getc();
 }
 
 /* ============================================================================
@@ -342,6 +417,10 @@ void shell_init(void)
 {
     line_pos = 0;
     num_external_commands = 0;
+
+    /* Ensure the console session exists before any shell_* wrapper
+     * is called by command registration or banner output. */
+    shell_session_init();
 
 #if defined(ENABLE_NETWORKING)
     /* Register network commands (ping, ifconfig, netstat) */
@@ -376,10 +455,10 @@ void shell_init(void)
     }
 #endif
 
-    uart_puts("\r\n");
-    uart_puts("SLM-OS Debug Shell\r\n");
-    uart_puts("Type 'help' for available commands.\r\n");
-    uart_puts("\r\n");
+    shell_puts("\r\n");
+    shell_puts("SLM-OS Debug Shell\r\n");
+    shell_puts("Type 'help' for available commands.\r\n");
+    shell_puts("\r\n");
 }
 
 /*
@@ -407,8 +486,8 @@ int shell_execute(const char *cmdline)
     /* Copy to modifiable buffer (bounded to prevent stack overflow) */
     size_t len = strlen(cmdline);
     if (len >= SHELL_MAX_LINE) {
-        uart_printf("Command too long (%u chars, max %d)\r\n",
-                    (unsigned)len, SHELL_MAX_LINE - 1);
+        shell_printf("Command too long (%u chars, max %d)\r\n",
+                     (unsigned)len, SHELL_MAX_LINE - 1);
         return -1;
     }
     strcpy(buf, cmdline);
@@ -423,7 +502,7 @@ int shell_execute(const char *cmdline)
     /* Find and execute command */
     const shell_cmd_t *cmd = find_command(argv[0]);
     if (cmd == NULL) {
-        uart_printf("Unknown command: %s\r\n", argv[0]);
+        shell_printf("Unknown command: %s\r\n", argv[0]);
         return -1;
     }
 
@@ -440,11 +519,15 @@ void shell_run(void)
 
     while (1) {
         /* Print prompt */
-        uart_puts(SHELL_PROMPT);
+        shell_puts(SHELL_PROMPT);
 
         /* Read line */
         int len = shell_read_line(line_buffer, SHELL_MAX_LINE);
 
+        if (len < 0) {
+            /* Session closed (peer disconnect). End the REPL. */
+            break;
+        }
         if (len == 0) {
             continue;  /* Empty line */
         }
@@ -459,15 +542,15 @@ void shell_run(void)
         /* Find command */
         const shell_cmd_t *cmd = find_command(argv[0]);
         if (cmd == NULL) {
-            uart_printf("Unknown command: %s\r\n", argv[0]);
-            uart_puts("Type 'help' for available commands.\r\n");
+            shell_printf("Unknown command: %s\r\n", argv[0]);
+            shell_puts("Type 'help' for available commands.\r\n");
             continue;
         }
 
         /* Execute command */
         int ret = cmd->handler(argc, argv);
         if (ret != 0) {
-            uart_printf("Command returned error: %d\r\n", ret);
+            shell_printf("Command returned error: %d\r\n", ret);
         }
     }
 }
@@ -479,10 +562,18 @@ static void shell_task_entry(void *arg)
 {
     (void)arg;
 
+    /* Bind this task to the console session so shell_puts / shell_printf
+     * route through shell_io_uart for the duration of the REPL.
+     * shell_session_console() lazily initializes the session on first
+     * call; shell_init() below ensures explicit init too. */
+    shell_session_bind(task_current(), shell_session_console());
+
     shell_init();
     shell_run();
 
-    /* Should never reach here */
+    /* If shell_run() returns, the session closed — normally unreachable
+     * for the console session. */
+    shell_session_unbind(task_current());
     task_exit();
 }
 
@@ -506,5 +597,6 @@ void shell_start(void)
     /* Add to scheduler */
     scheduler_add_task(t);
 
+    /* Kernel log — always goes to the physical console. */
     uart_puts("[SHELL] Shell task started\r\n");
 }

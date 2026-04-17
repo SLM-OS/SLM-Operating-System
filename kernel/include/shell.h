@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "config.h"
 
 /* Shell prompt */
@@ -64,14 +65,42 @@ int shell_register_command(const shell_cmd_t *cmd);
 int shell_execute(const char *cmdline);
 
 /*
- * Read one line from the UART with basic line editing (backspace, Ctrl+C).
- * Echoes input as it arrives and terminates on CR/LF. Output is NUL-terminated.
- * Returns the number of characters read (excluding the terminator).
+ * Read one line from the current session's I/O with basic line editing
+ * (backspace, Ctrl+C). Echoes input as it arrives and terminates on
+ * CR/LF. Output is NUL-terminated. Returns the number of characters
+ * read (excluding the terminator).
  *
- * This is the line reader that the shell REPL uses internally; exposed so Lua
- * scripting (slm.read_line) and other callers can prompt the user without
- * duplicating the implementation.
+ * This is the line reader that the shell REPL uses internally; exposed
+ * so Lua scripting (slm.read_line) and other callers can prompt the
+ * user without duplicating the implementation.
  */
 int shell_read_line(char *buf, int max_len);
+
+/* ============================================================================
+ * Per-session I/O wrappers
+ *
+ * These route through shell_session_current()->io. Use them inside
+ * command handlers and anywhere shell output is produced. Kernel logs
+ * (driver INFO/WARN, panic handlers, background tasks) should continue
+ * to use uart_* directly so they always reach the physical console.
+ * ============================================================================ */
+
+/* Write a null-terminated string to the current session's I/O. */
+void shell_puts(const char *s);
+
+/* Write a single character to the current session's I/O. */
+void shell_putc(char c);
+
+/* printf-style formatted write to the current session's I/O.
+ * Same format specifiers as uart_printf. */
+int  shell_printf(const char *fmt, ...);
+
+/* Blocking read of one byte (0..255) from the current session's I/O.
+ * Returns -1 if the session has closed. */
+int  shell_getc(void);
+
+/* Non-blocking read. Returns a byte (0..255) or -1 if no data is
+ * available right now (or the session has closed). */
+int  shell_try_getc(void);
 
 #endif /* SHELL_H */

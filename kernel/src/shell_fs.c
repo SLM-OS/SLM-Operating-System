@@ -5,6 +5,7 @@
  *           append, cp, touch, stat, tree, wc, hexdump, grep, find
  */
 
+#include "shell.h"
 #include "shell_internal.h"
 #include "uart.h"
 #include "vfs.h"
@@ -90,7 +91,7 @@ int cmd_pwd(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    uart_printf("%s\r\n", shell_cwd);
+    shell_printf("%s\r\n", shell_cwd);
     return 0;
 }
 
@@ -108,7 +109,7 @@ int cmd_cd(int argc, char *argv[])
 
     /* Resolve the path */
     if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
-        uart_puts("cd: path too long\r\n");
+        shell_puts("cd: path too long\r\n");
         return -1;
     }
 
@@ -116,13 +117,13 @@ int cmd_cd(int argc, char *argv[])
     const char *subpath = NULL;
     struct vfs_node *node = vfs_lookup_mount(resolved, &subpath);
     if (!node) {
-        uart_printf("cd: %s: No such file or directory\r\n", resolved);
+        shell_printf("cd: %s: No such file or directory\r\n", resolved);
         return -1;
     }
 
     /* Check if it's a directory or mount point */
     if (node->type != VFS_NODE_DIR && node->type != VFS_NODE_MOUNT) {
-        uart_printf("cd: %s: Not a directory\r\n", resolved);
+        shell_printf("cd: %s: Not a directory\r\n", resolved);
         return -1;
     }
 
@@ -132,11 +133,11 @@ int cmd_cd(int argc, char *argv[])
         /* There's a subpath within the mount - verify it's a directory */
         struct vfs_entry_info info;
         if (vfs_stat_path(resolved, &info) < 0) {
-            uart_printf("cd: %s: No such file or directory\r\n", resolved);
+            shell_printf("cd: %s: No such file or directory\r\n", resolved);
             return -1;
         }
         if (info.type != 1) {  /* 1 = directory */
-            uart_printf("cd: %s: Not a directory\r\n", resolved);
+            shell_printf("cd: %s: Not a directory\r\n", resolved);
             return -1;
         }
     }
@@ -153,9 +154,9 @@ static void ls_print_entry(struct vfs_node *node, void *ctx)
 {
     (void)ctx;
     if (node->type == VFS_NODE_DIR || node->type == VFS_NODE_MOUNT) {
-        uart_printf("  %s/\r\n", node->name);
+        shell_printf("  %s/\r\n", node->name);
     } else {
-        uart_printf("  %s\r\n", node->name);
+        shell_printf("  %s\r\n", node->name);
     }
 }
 
@@ -166,9 +167,9 @@ static void ls_print_mount_entry(const struct vfs_entry_info *info, void *ctx)
 {
     (void)ctx;
     if (info->type == 1) {  /* Directory */
-        uart_printf("  %s/\r\n", info->name);
+        shell_printf("  %s/\r\n", info->name);
     } else {
-        uart_printf("  %s  (%lu bytes)\r\n", info->name, (unsigned long)info->size);
+        shell_printf("  %s  (%lu bytes)\r\n", info->name, (unsigned long)info->size);
     }
 }
 
@@ -187,7 +188,7 @@ int cmd_ls(int argc, char *argv[])
 
     /* Resolve path (handles relative paths) */
     if (shell_resolve_path(input_path, resolved, sizeof(resolved)) < 0) {
-        uart_puts("ls: path too long\r\n");
+        shell_puts("ls: path too long\r\n");
         return -1;
     }
 
@@ -195,16 +196,16 @@ int cmd_ls(int argc, char *argv[])
     const char *subpath = NULL;
     struct vfs_node *node = vfs_lookup_mount(resolved, &subpath);
     if (!node) {
-        uart_printf("ls: %s: No such file or directory\r\n", resolved);
+        shell_printf("ls: %s: No such file or directory\r\n", resolved);
         return -1;
     }
 
     /* If it's a mount point, use the path-based listing */
     if (node->type == VFS_NODE_MOUNT) {
-        uart_printf("%s:\r\n", resolved);
+        shell_printf("%s:\r\n", resolved);
         int err = vfs_list_path(resolved, ls_print_mount_entry, NULL);
         if (err < 0) {
-            uart_printf("ls: %s: Failed to read directory\r\n", resolved);
+            shell_printf("ls: %s: Failed to read directory\r\n", resolved);
             return -1;
         }
         return 0;
@@ -212,12 +213,12 @@ int cmd_ls(int argc, char *argv[])
 
     if (node->type == VFS_NODE_FILE) {
         /* It's a file, just show its name */
-        uart_printf("%s\r\n", node->name);
+        shell_printf("%s\r\n", node->name);
         return 0;
     }
 
     /* Regular directory */
-    uart_printf("%s:\r\n", resolved);
+    shell_printf("%s:\r\n", resolved);
     vfs_list(node, ls_print_entry, NULL);
 
     return 0;
@@ -232,18 +233,18 @@ int cmd_ls(int argc, char *argv[])
 int cmd_cat(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: cat <path> [offset] [length]\r\n");
-        uart_puts("  Show contents of a file (virtual or from mount).\r\n");
-        uart_puts("  Optional offset and length for large files.\r\n");
-        uart_puts("  Example: cat /sys/memory\r\n");
-        uart_puts("  Example: cat hello.txt  (relative to cwd)\r\n");
-        uart_puts("  Example: cat /mnt/files/large.bin 0 1024\r\n");
+        shell_puts("Usage: cat <path> [offset] [length]\r\n");
+        shell_puts("  Show contents of a file (virtual or from mount).\r\n");
+        shell_puts("  Optional offset and length for large files.\r\n");
+        shell_puts("  Example: cat /sys/memory\r\n");
+        shell_puts("  Example: cat hello.txt  (relative to cwd)\r\n");
+        shell_puts("  Example: cat /mnt/files/large.bin 0 1024\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("cat: path too long\r\n");
+        shell_puts("cat: path too long\r\n");
         return -1;
     }
 
@@ -271,7 +272,7 @@ int cmd_cat(int argc, char *argv[])
     const char *subpath = NULL;
     struct vfs_node *node = vfs_lookup_mount(resolved, &subpath);
     if (!node) {
-        uart_printf("cat: %s: No such file or directory\r\n", resolved);
+        shell_printf("cat: %s: No such file or directory\r\n", resolved);
         return -1;
     }
 
@@ -283,7 +284,7 @@ int cmd_cat(int argc, char *argv[])
 
         int len = vfs_read_path(resolved, buf, read_size, offset);
         if (len < 0) {
-            uart_printf("cat: %s: Read error or is a directory\r\n", resolved);
+            shell_printf("cat: %s: Read error or is a directory\r\n", resolved);
             return -1;
         }
 
@@ -291,28 +292,28 @@ int cmd_cat(int argc, char *argv[])
 
         /* Show offset info if using streaming */
         if (offset > 0 || argc >= 4) {
-            uart_printf("[offset=%lu, read=%d bytes]\r\n",
+            shell_printf("[offset=%lu, read=%d bytes]\r\n",
                         (unsigned long)offset, len);
         }
 
         /* Print contents, converting \n to \r\n */
         for (int i = 0; i < len; i++) {
             if (buf[i] == '\n') {
-                uart_putc('\r');
+                shell_putc('\r');
             }
-            uart_putc(buf[i]);
+            shell_putc(buf[i]);
         }
 
         /* Ensure newline at end */
         if (len > 0 && buf[len - 1] != '\n') {
-            uart_puts("\r\n");
+            shell_puts("\r\n");
         }
 
         return 0;
     }
 
     if (node->type == VFS_NODE_DIR) {
-        uart_printf("cat: %s: Is a directory\r\n", resolved);
+        shell_printf("cat: %s: Is a directory\r\n", resolved);
         return -1;
     }
 
@@ -320,7 +321,7 @@ int cmd_cat(int argc, char *argv[])
     char buf[1024];
     int len = vfs_read(node, buf, sizeof(buf) - 1);
     if (len < 0) {
-        uart_printf("cat: %s: Read error\r\n", resolved);
+        shell_printf("cat: %s: Read error\r\n", resolved);
         return -1;
     }
 
@@ -329,14 +330,14 @@ int cmd_cat(int argc, char *argv[])
     /* Print contents, converting \n to \r\n */
     for (int i = 0; i < len; i++) {
         if (buf[i] == '\n') {
-            uart_putc('\r');
+            shell_putc('\r');
         }
-        uart_putc(buf[i]);
+        shell_putc(buf[i]);
     }
 
     /* Ensure newline at end */
     if (len > 0 && buf[len - 1] != '\n') {
-        uart_puts("\r\n");
+        shell_puts("\r\n");
     }
 
     return 0;
@@ -355,18 +356,18 @@ int cmd_cat(int argc, char *argv[])
 int cmd_write(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: write <path> <content>\r\n");
-        uart_puts("  Write content to a file (creates or overwrites).\r\n");
-        uart_puts("  Path must be in a mounted filesystem.\r\n");
-        uart_puts("  Escapes: \\n \\t \\r \\\\ \\\" \\' \\0 \\xNN\r\n");
-        uart_puts("  Example: write test.txt Hello  (relative to cwd)\r\n");
-        uart_puts("  Example: write demo.lua \"P('hi')\\nP('bye')\\n\"\r\n");
+        shell_puts("Usage: write <path> <content>\r\n");
+        shell_puts("  Write content to a file (creates or overwrites).\r\n");
+        shell_puts("  Path must be in a mounted filesystem.\r\n");
+        shell_puts("  Escapes: \\n \\t \\r \\\\ \\\" \\' \\0 \\xNN\r\n");
+        shell_puts("  Example: write test.txt Hello  (relative to cwd)\r\n");
+        shell_puts("  Example: write demo.lua \"P('hi')\\nP('bye')\\n\"\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("write: path too long\r\n");
+        shell_puts("write: path too long\r\n");
         return -1;
     }
 
@@ -374,8 +375,8 @@ int cmd_write(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("write: %s: Not a mounted filesystem\r\n", resolved);
-        uart_puts("  (Only mounted filesystems support writing)\r\n");
+        shell_printf("write: %s: Not a mounted filesystem\r\n", resolved);
+        shell_puts("  (Only mounted filesystems support writing)\r\n");
         return -1;
     }
 
@@ -383,7 +384,7 @@ int cmd_write(int argc, char *argv[])
     static char content[4096];
     int pos = shell_build_content(argc, argv, 2, content, (int)sizeof(content));
     if (pos < 0) {
-        uart_printf("write: content too long (max %d bytes)\r\n",
+        shell_printf("write: content too long (max %d bytes)\r\n",
                     (int)sizeof(content) - 1);
         return -1;
     }
@@ -391,7 +392,7 @@ int cmd_write(int argc, char *argv[])
     /* Open file for writing (create + truncate) */
     int fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
     if (fd < 0) {
-        uart_printf("write: %s: Failed to open file\r\n", resolved);
+        shell_printf("write: %s: Failed to open file\r\n", resolved);
         return -1;
     }
 
@@ -400,11 +401,11 @@ int cmd_write(int argc, char *argv[])
     littlefs_file_close(mnt, fd);
 
     if (written < 0) {
-        uart_printf("write: %s: Write failed\r\n", resolved);
+        shell_printf("write: %s: Write failed\r\n", resolved);
         return -1;
     }
 
-    uart_printf("Wrote %d bytes to %s\r\n", written, resolved);
+    shell_printf("Wrote %d bytes to %s\r\n", written, resolved);
     return 0;
 }
 
@@ -415,15 +416,15 @@ int cmd_write(int argc, char *argv[])
 int cmd_mkdir(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: mkdir <path>\r\n");
-        uart_puts("  Create a directory in a mounted filesystem.\r\n");
-        uart_puts("  Example: mkdir subdir  (relative to cwd)\r\n");
+        shell_puts("Usage: mkdir <path>\r\n");
+        shell_puts("  Create a directory in a mounted filesystem.\r\n");
+        shell_puts("  Example: mkdir subdir  (relative to cwd)\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("mkdir: path too long\r\n");
+        shell_puts("mkdir: path too long\r\n");
         return -1;
     }
 
@@ -431,21 +432,21 @@ int cmd_mkdir(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("mkdir: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("mkdir: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
     int err = littlefs_mkdir(mnt, subpath);
     if (err < 0) {
         if (err == LFS_ERR_EXIST) {
-            uart_printf("mkdir: %s: Already exists\r\n", resolved);
+            shell_printf("mkdir: %s: Already exists\r\n", resolved);
         } else {
-            uart_printf("mkdir: %s: Failed (error %d)\r\n", resolved, err);
+            shell_printf("mkdir: %s: Failed (error %d)\r\n", resolved, err);
         }
         return -1;
     }
 
-    uart_printf("Created directory %s\r\n", resolved);
+    shell_printf("Created directory %s\r\n", resolved);
     return 0;
 }
 
@@ -456,15 +457,15 @@ int cmd_mkdir(int argc, char *argv[])
 int cmd_rm(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: rm <path>\r\n");
-        uart_puts("  Remove a file or empty directory.\r\n");
-        uart_puts("  Example: rm test.txt  (relative to cwd)\r\n");
+        shell_puts("Usage: rm <path>\r\n");
+        shell_puts("  Remove a file or empty directory.\r\n");
+        shell_puts("  Example: rm test.txt  (relative to cwd)\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("rm: path too long\r\n");
+        shell_puts("rm: path too long\r\n");
         return -1;
     }
 
@@ -472,23 +473,23 @@ int cmd_rm(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("rm: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("rm: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
     int err = littlefs_remove(mnt, subpath);
     if (err < 0) {
         if (err == LFS_ERR_NOENT) {
-            uart_printf("rm: %s: No such file or directory\r\n", resolved);
+            shell_printf("rm: %s: No such file or directory\r\n", resolved);
         } else if (err == LFS_ERR_NOTEMPTY) {
-            uart_printf("rm: %s: Directory not empty\r\n", resolved);
+            shell_printf("rm: %s: Directory not empty\r\n", resolved);
         } else {
-            uart_printf("rm: %s: Failed (error %d)\r\n", resolved, err);
+            shell_printf("rm: %s: Failed (error %d)\r\n", resolved, err);
         }
         return -1;
     }
 
-    uart_printf("Removed %s\r\n", resolved);
+    shell_printf("Removed %s\r\n", resolved);
     return 0;
 }
 
@@ -499,10 +500,10 @@ int cmd_rm(int argc, char *argv[])
 int cmd_mv(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: mv <source> <dest>\r\n");
-        uart_puts("  Move or rename a file/directory.\r\n");
-        uart_puts("  Both paths must be in the same filesystem.\r\n");
-        uart_puts("  Example: mv old.txt new.txt  (relative to cwd)\r\n");
+        shell_puts("Usage: mv <source> <dest>\r\n");
+        shell_puts("  Move or rename a file/directory.\r\n");
+        shell_puts("  Both paths must be in the same filesystem.\r\n");
+        shell_puts("  Example: mv old.txt new.txt  (relative to cwd)\r\n");
         return -1;
     }
 
@@ -510,11 +511,11 @@ int cmd_mv(int argc, char *argv[])
     char dst_resolved[VFS_MAX_PATH];
 
     if (shell_resolve_path(argv[1], src_resolved, sizeof(src_resolved)) < 0) {
-        uart_puts("mv: source path too long\r\n");
+        shell_puts("mv: source path too long\r\n");
         return -1;
     }
     if (shell_resolve_path(argv[2], dst_resolved, sizeof(dst_resolved)) < 0) {
-        uart_puts("mv: destination path too long\r\n");
+        shell_puts("mv: destination path too long\r\n");
         return -1;
     }
 
@@ -525,31 +526,31 @@ int cmd_mv(int argc, char *argv[])
     struct lfs_mount *dst_mnt = vfs_get_mount_ctx(dst_resolved, &dst_subpath);
 
     if (!src_mnt) {
-        uart_printf("mv: %s: Not a mounted filesystem\r\n", src_resolved);
+        shell_printf("mv: %s: Not a mounted filesystem\r\n", src_resolved);
         return -1;
     }
 
     if (!dst_mnt) {
-        uart_printf("mv: %s: Not a mounted filesystem\r\n", dst_resolved);
+        shell_printf("mv: %s: Not a mounted filesystem\r\n", dst_resolved);
         return -1;
     }
 
     if (src_mnt != dst_mnt) {
-        uart_puts("mv: Source and destination must be in the same filesystem\r\n");
+        shell_puts("mv: Source and destination must be in the same filesystem\r\n");
         return -1;
     }
 
     int err = littlefs_rename(src_mnt, src_subpath, dst_subpath);
     if (err < 0) {
         if (err == LFS_ERR_NOENT) {
-            uart_printf("mv: %s: No such file or directory\r\n", src_resolved);
+            shell_printf("mv: %s: No such file or directory\r\n", src_resolved);
         } else {
-            uart_printf("mv: Failed (error %d)\r\n", err);
+            shell_printf("mv: Failed (error %d)\r\n", err);
         }
         return -1;
     }
 
-    uart_printf("Moved %s -> %s\r\n", src_resolved, dst_resolved);
+    shell_printf("Moved %s -> %s\r\n", src_resolved, dst_resolved);
     return 0;
 }
 
@@ -569,7 +570,7 @@ int cmd_df(int argc, char *argv[])
 
     /* Resolve path */
     if (shell_resolve_path(input_path, resolved, sizeof(resolved)) < 0) {
-        uart_puts("df: path too long\r\n");
+        shell_puts("df: path too long\r\n");
         return -1;
     }
 
@@ -585,7 +586,7 @@ int cmd_df(int argc, char *argv[])
             }
         }
         if (!mnt) {
-            uart_printf("df: %s: Not a mounted filesystem\r\n", resolved);
+            shell_printf("df: %s: Not a mounted filesystem\r\n", resolved);
             return -1;
         }
     }
@@ -593,7 +594,7 @@ int cmd_df(int argc, char *argv[])
     uint32_t total_blocks, used_blocks;
     int err = littlefs_stat(mnt, &total_blocks, &used_blocks);
     if (err < 0) {
-        uart_printf("df: Failed to get stats (error %d)\r\n", err);
+        shell_printf("df: Failed to get stats (error %d)\r\n", err);
         return -1;
     }
 
@@ -607,12 +608,12 @@ int cmd_df(int argc, char *argv[])
     uint32_t free_kb = (free_blocks * block_size) / 1024;
     uint32_t pct_used = total_blocks > 0 ? (used_blocks * 100) / total_blocks : 0;
 
-    uart_puts("Filesystem      Blocks     Used     Free   Use%\r\n");
-    uart_printf("%-14s  %6lu   %6lu   %6lu   %3lu%%\r\n",
+    shell_puts("Filesystem      Blocks     Used     Free   Use%\r\n");
+    shell_printf("%-14s  %6lu   %6lu   %6lu   %3lu%%\r\n",
                 resolved, (unsigned long)total_blocks,
                 (unsigned long)used_blocks, (unsigned long)free_blocks,
                 (unsigned long)pct_used);
-    uart_printf("                %5luK   %5luK   %5luK\r\n",
+    shell_printf("                %5luK   %5luK   %5luK\r\n",
                 (unsigned long)total_kb, (unsigned long)used_kb,
                 (unsigned long)free_kb);
 
@@ -626,22 +627,22 @@ int cmd_df(int argc, char *argv[])
 int cmd_truncate(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: truncate <path> <size>\r\n");
-        uart_puts("  Truncate or extend file to specified size (in bytes).\r\n");
-        uart_puts("  Example: truncate log.txt 0  (relative to cwd)\r\n");
+        shell_puts("Usage: truncate <path> <size>\r\n");
+        shell_puts("  Truncate or extend file to specified size (in bytes).\r\n");
+        shell_puts("  Example: truncate log.txt 0  (relative to cwd)\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("truncate: path too long\r\n");
+        shell_puts("truncate: path too long\r\n");
         return -1;
     }
 
     /* Parse size */
     uint32_t size;
     if (shell_parse_uint(argv[2], &size) != 0) {
-        uart_printf("truncate: Invalid size: %s\r\n", argv[2]);
+        shell_printf("truncate: Invalid size: %s\r\n", argv[2]);
         return -1;
     }
 
@@ -649,14 +650,14 @@ int cmd_truncate(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("truncate: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("truncate: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
     /* Open file for writing */
     int fd = littlefs_file_open(mnt, subpath, LFS_O_RDWR);
     if (fd < 0) {
-        uart_printf("truncate: %s: Failed to open file\r\n", resolved);
+        shell_printf("truncate: %s: Failed to open file\r\n", resolved);
         return -1;
     }
 
@@ -665,11 +666,11 @@ int cmd_truncate(int argc, char *argv[])
     littlefs_file_close(mnt, fd);
 
     if (err < 0) {
-        uart_printf("truncate: %s: Failed (error %d)\r\n", resolved, err);
+        shell_printf("truncate: %s: Failed (error %d)\r\n", resolved, err);
         return -1;
     }
 
-    uart_printf("Truncated %s to %lu bytes\r\n", resolved, (unsigned long)size);
+    shell_printf("Truncated %s to %lu bytes\r\n", resolved, (unsigned long)size);
     return 0;
 }
 
@@ -682,17 +683,17 @@ int cmd_truncate(int argc, char *argv[])
 int cmd_append(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: append <path> <content>\r\n");
-        uart_puts("  Append content to file (creates if needed).\r\n");
-        uart_puts("  A trailing newline is added automatically.\r\n");
-        uart_puts("  Escapes: \\n \\t \\r \\\\ \\\" \\' \\0 \\xNN\r\n");
-        uart_puts("  Example: append log.txt Entry 1  (relative to cwd)\r\n");
+        shell_puts("Usage: append <path> <content>\r\n");
+        shell_puts("  Append content to file (creates if needed).\r\n");
+        shell_puts("  A trailing newline is added automatically.\r\n");
+        shell_puts("  Escapes: \\n \\t \\r \\\\ \\\" \\' \\0 \\xNN\r\n");
+        shell_puts("  Example: append log.txt Entry 1  (relative to cwd)\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("append: path too long\r\n");
+        shell_puts("append: path too long\r\n");
         return -1;
     }
 
@@ -700,7 +701,7 @@ int cmd_append(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("append: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("append: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
@@ -709,7 +710,7 @@ int cmd_append(int argc, char *argv[])
     static char content[4096];
     int pos = shell_build_content(argc, argv, 2, content, (int)sizeof(content) - 1);
     if (pos < 0) {
-        uart_printf("append: content too long (max %d bytes)\r\n",
+        shell_printf("append: content too long (max %d bytes)\r\n",
                     (int)sizeof(content) - 2);
         return -1;
     }
@@ -720,7 +721,7 @@ int cmd_append(int argc, char *argv[])
     /* Open file for appending (create if needed) */
     int fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_APPEND);
     if (fd < 0) {
-        uart_printf("append: %s: Failed to open file\r\n", resolved);
+        shell_printf("append: %s: Failed to open file\r\n", resolved);
         return -1;
     }
 
@@ -729,11 +730,11 @@ int cmd_append(int argc, char *argv[])
     littlefs_file_close(mnt, fd);
 
     if (written < 0) {
-        uart_printf("append: %s: Write failed\r\n", resolved);
+        shell_printf("append: %s: Write failed\r\n", resolved);
         return -1;
     }
 
-    uart_printf("Appended %d bytes to %s\r\n", written, resolved);
+    shell_printf("Appended %d bytes to %s\r\n", written, resolved);
     return 0;
 }
 
@@ -744,9 +745,9 @@ int cmd_append(int argc, char *argv[])
 int cmd_cp(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: cp <source> <dest>\r\n");
-        uart_puts("  Copy a file. Cross-mount copy is supported.\r\n");
-        uart_puts("  Example: cp hello.txt backup.txt\r\n");
+        shell_puts("Usage: cp <source> <dest>\r\n");
+        shell_puts("  Copy a file. Cross-mount copy is supported.\r\n");
+        shell_puts("  Example: cp hello.txt backup.txt\r\n");
         return -1;
     }
 
@@ -754,11 +755,11 @@ int cmd_cp(int argc, char *argv[])
     char dst_resolved[VFS_MAX_PATH];
 
     if (shell_resolve_path(argv[1], src_resolved, sizeof(src_resolved)) < 0) {
-        uart_puts("cp: source path too long\r\n");
+        shell_puts("cp: source path too long\r\n");
         return -1;
     }
     if (shell_resolve_path(argv[2], dst_resolved, sizeof(dst_resolved)) < 0) {
-        uart_puts("cp: destination path too long\r\n");
+        shell_puts("cp: destination path too long\r\n");
         return -1;
     }
 
@@ -769,19 +770,19 @@ int cmd_cp(int argc, char *argv[])
     struct lfs_mount *dst_mnt = vfs_get_mount_ctx(dst_resolved, &dst_subpath);
 
     if (!src_mnt) {
-        uart_printf("cp: %s: Not a mounted filesystem\r\n", src_resolved);
+        shell_printf("cp: %s: Not a mounted filesystem\r\n", src_resolved);
         return -1;
     }
 
     if (!dst_mnt) {
-        uart_printf("cp: %s: Not a mounted filesystem\r\n", dst_resolved);
+        shell_printf("cp: %s: Not a mounted filesystem\r\n", dst_resolved);
         return -1;
     }
 
     /* Open source for reading */
     int src_fd = littlefs_file_open(src_mnt, src_subpath, LFS_O_RDONLY);
     if (src_fd < 0) {
-        uart_printf("cp: %s: Cannot open source file\r\n", src_resolved);
+        shell_printf("cp: %s: Cannot open source file\r\n", src_resolved);
         return -1;
     }
 
@@ -789,7 +790,7 @@ int cmd_cp(int argc, char *argv[])
     int src_size = littlefs_file_size(src_mnt, src_fd);
     if (src_size < 0) {
         littlefs_file_close(src_mnt, src_fd);
-        uart_printf("cp: %s: Cannot get file size\r\n", src_resolved);
+        shell_printf("cp: %s: Cannot get file size\r\n", src_resolved);
         return -1;
     }
 
@@ -798,7 +799,7 @@ int cmd_cp(int argc, char *argv[])
                                      LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
     if (dst_fd < 0) {
         littlefs_file_close(src_mnt, src_fd);
-        uart_printf("cp: %s: Cannot create destination file\r\n", dst_resolved);
+        shell_printf("cp: %s: Cannot create destination file\r\n", dst_resolved);
         return -1;
     }
 
@@ -812,7 +813,7 @@ int cmd_cp(int argc, char *argv[])
         if (written != bytes_read) {
             littlefs_file_close(src_mnt, src_fd);
             littlefs_file_close(dst_mnt, dst_fd);
-            uart_printf("cp: Write error after %d bytes\r\n", total_copied);
+            shell_printf("cp: Write error after %d bytes\r\n", total_copied);
             return -1;
         }
         total_copied += written;
@@ -821,7 +822,7 @@ int cmd_cp(int argc, char *argv[])
     littlefs_file_close(src_mnt, src_fd);
     littlefs_file_close(dst_mnt, dst_fd);
 
-    uart_printf("Copied %d bytes: %s -> %s\r\n", total_copied, src_resolved, dst_resolved);
+    shell_printf("Copied %d bytes: %s -> %s\r\n", total_copied, src_resolved, dst_resolved);
     return 0;
 }
 
@@ -833,15 +834,15 @@ int cmd_cp(int argc, char *argv[])
 int cmd_touch(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: touch <path>\r\n");
-        uart_puts("  Create an empty file if it doesn't exist.\r\n");
-        uart_puts("  Example: touch newfile.txt\r\n");
+        shell_puts("Usage: touch <path>\r\n");
+        shell_puts("  Create an empty file if it doesn't exist.\r\n");
+        shell_puts("  Example: touch newfile.txt\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("touch: path too long\r\n");
+        shell_puts("touch: path too long\r\n");
         return -1;
     }
 
@@ -849,19 +850,19 @@ int cmd_touch(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("touch: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("touch: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
     /* Try to open existing file, or create new one */
     int fd = littlefs_file_open(mnt, subpath, LFS_O_RDWR | LFS_O_CREAT);
     if (fd < 0) {
-        uart_printf("touch: %s: Failed to create file\r\n", resolved);
+        shell_printf("touch: %s: Failed to create file\r\n", resolved);
         return -1;
     }
 
     littlefs_file_close(mnt, fd);
-    uart_printf("Touched %s\r\n", resolved);
+    shell_printf("Touched %s\r\n", resolved);
     return 0;
 }
 
@@ -872,24 +873,24 @@ int cmd_touch(int argc, char *argv[])
 int cmd_stat(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: stat <path>\r\n");
-        uart_puts("  Show file or directory information.\r\n");
-        uart_puts("  Example: stat hello.txt\r\n");
+        shell_puts("Usage: stat <path>\r\n");
+        shell_puts("  Show file or directory information.\r\n");
+        shell_puts("  Example: stat hello.txt\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("stat: path too long\r\n");
+        shell_puts("stat: path too long\r\n");
         return -1;
     }
 
     /* Try VFS stat first */
     struct vfs_entry_info info;
     if (vfs_stat_path(resolved, &info) == 0) {
-        uart_printf("  File: %s\r\n", resolved);
-        uart_printf("  Type: %s\r\n", info.type == 1 ? "directory" : "regular file");
-        uart_printf("  Size: %lu bytes\r\n", (unsigned long)info.size);
+        shell_printf("  File: %s\r\n", resolved);
+        shell_printf("  Type: %s\r\n", info.type == 1 ? "directory" : "regular file");
+        shell_printf("  Size: %lu bytes\r\n", (unsigned long)info.size);
         return 0;
     }
 
@@ -901,11 +902,11 @@ int cmd_stat(int argc, char *argv[])
         if (node->type == VFS_NODE_MOUNT && subpath && subpath[0] != '\0' &&
             !(subpath[0] == '/' && subpath[1] == '\0')) {
             /* Path within mount but file doesn't exist */
-            uart_printf("stat: %s: No such file or directory\r\n", resolved);
+            shell_printf("stat: %s: No such file or directory\r\n", resolved);
             return -1;
         }
 
-        uart_printf("  File: %s\r\n", resolved);
+        shell_printf("  File: %s\r\n", resolved);
         const char *type_str;
         switch (node->type) {
             case VFS_NODE_DIR:   type_str = "directory"; break;
@@ -913,19 +914,19 @@ int cmd_stat(int argc, char *argv[])
             case VFS_NODE_MOUNT: type_str = "mount point"; break;
             default:             type_str = "unknown"; break;
         }
-        uart_printf("  Type: %s\r\n", type_str);
+        shell_printf("  Type: %s\r\n", type_str);
         if (node->type == VFS_NODE_FILE) {
             /* Try to get size by reading */
             char buf[1024];
             int len = vfs_read(node, buf, sizeof(buf));
             if (len >= 0) {
-                uart_printf("  Size: %d bytes\r\n", len);
+                shell_printf("  Size: %d bytes\r\n", len);
             }
         }
         return 0;
     }
 
-    uart_printf("stat: %s: No such file or directory\r\n", resolved);
+    shell_printf("stat: %s: No such file or directory\r\n", resolved);
     return -1;
 }
 
@@ -957,9 +958,9 @@ static void tree_recurse(struct lfs_mount *mnt, const char *path, int depth, int
             continue;
         }
 
-        uart_printf("%s", indent);
+        shell_printf("%s", indent);
         if (entry.type == 1) {
-            uart_printf("%s/\r\n", entry.name);
+            shell_printf("%s/\r\n", entry.name);
 
             /* Recurse into subdirectory */
             char subpath[VFS_MAX_PATH];
@@ -977,7 +978,7 @@ static void tree_recurse(struct lfs_mount *mnt, const char *path, int depth, int
                 tree_recurse(mnt, subpath, depth + 1, max_depth);
             }
         } else {
-            uart_printf("%s  (%lu bytes)\r\n", entry.name, (unsigned long)entry.size);
+            shell_printf("%s  (%lu bytes)\r\n", entry.name, (unsigned long)entry.size);
         }
     }
 
@@ -1005,7 +1006,7 @@ int cmd_tree(int argc, char *argv[])
     }
 
     if (shell_resolve_path(input_path, resolved, sizeof(resolved)) < 0) {
-        uart_puts("tree: path too long\r\n");
+        shell_puts("tree: path too long\r\n");
         return -1;
     }
 
@@ -1016,11 +1017,11 @@ int cmd_tree(int argc, char *argv[])
         /* Try VFS listing for virtual directories */
         struct vfs_node *node = vfs_lookup_mount(resolved, &subpath);
         if (!node) {
-            uart_printf("tree: %s: No such directory\r\n", resolved);
+            shell_printf("tree: %s: No such directory\r\n", resolved);
             return -1;
         }
 
-        uart_printf("%s\r\n", resolved);
+        shell_printf("%s\r\n", resolved);
         if (node->type == VFS_NODE_DIR) {
             /* Simple VFS listing (non-recursive for virtual dirs) */
             vfs_list(node, ls_print_entry, NULL);
@@ -1028,7 +1029,7 @@ int cmd_tree(int argc, char *argv[])
         return 0;
     }
 
-    uart_printf("%s\r\n", resolved);
+    shell_printf("%s\r\n", resolved);
     tree_recurse(mnt, subpath, 1, max_depth);
 
     return 0;
@@ -1041,15 +1042,15 @@ int cmd_tree(int argc, char *argv[])
 int cmd_wc(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: wc <path>\r\n");
-        uart_puts("  Count lines, words, and bytes in a file.\r\n");
-        uart_puts("  Example: wc readme.txt\r\n");
+        shell_puts("Usage: wc <path>\r\n");
+        shell_puts("  Count lines, words, and bytes in a file.\r\n");
+        shell_puts("  Example: wc readme.txt\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("wc: path too long\r\n");
+        shell_puts("wc: path too long\r\n");
         return -1;
     }
 
@@ -1057,13 +1058,13 @@ int cmd_wc(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("wc: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("wc: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
     int fd = littlefs_file_open(mnt, subpath, LFS_O_RDONLY);
     if (fd < 0) {
-        uart_printf("wc: %s: Cannot open file\r\n", resolved);
+        shell_printf("wc: %s: Cannot open file\r\n", resolved);
         return -1;
     }
 
@@ -1095,7 +1096,7 @@ int cmd_wc(int argc, char *argv[])
 
     littlefs_file_close(mnt, fd);
 
-    uart_printf("  %7lu  %7lu  %7lu  %s\r\n", lines, words, bytes, resolved);
+    shell_printf("  %7lu  %7lu  %7lu  %s\r\n", lines, words, bytes, resolved);
     return 0;
 }
 
@@ -1106,16 +1107,16 @@ int cmd_wc(int argc, char *argv[])
 int cmd_hexdump(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: hexdump <path> [offset] [length]\r\n");
-        uart_puts("  Display file contents in hexadecimal.\r\n");
-        uart_puts("  Default: first 256 bytes.\r\n");
-        uart_puts("  Example: hexdump model.bin 0 64\r\n");
+        shell_puts("Usage: hexdump <path> [offset] [length]\r\n");
+        shell_puts("  Display file contents in hexadecimal.\r\n");
+        shell_puts("  Default: first 256 bytes.\r\n");
+        shell_puts("  Example: hexdump model.bin 0 64\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("hexdump: path too long\r\n");
+        shell_puts("hexdump: path too long\r\n");
         return -1;
     }
 
@@ -1140,13 +1141,13 @@ int cmd_hexdump(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("hexdump: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("hexdump: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
     int fd = littlefs_file_open(mnt, subpath, LFS_O_RDONLY);
     if (fd < 0) {
-        uart_printf("hexdump: %s: Cannot open file\r\n", resolved);
+        shell_printf("hexdump: %s: Cannot open file\r\n", resolved);
         return -1;
     }
 
@@ -1169,37 +1170,37 @@ int cmd_hexdump(int argc, char *argv[])
         if (bytes_read <= 0) break;
 
         /* Print offset */
-        uart_printf("%08lx  ", (unsigned long)(offset + total_read));
+        shell_printf("%08lx  ", (unsigned long)(offset + total_read));
 
         /* Print hex bytes */
         for (int i = 0; i < 16; i++) {
             if (i < bytes_read) {
-                uart_printf("%02x ", buf[i]);
+                shell_printf("%02x ", buf[i]);
             } else {
-                uart_puts("   ");
+                shell_puts("   ");
             }
-            if (i == 7) uart_putc(' ');
+            if (i == 7) shell_putc(' ');
         }
 
-        uart_puts(" |");
+        shell_puts(" |");
 
         /* Print ASCII */
         for (int i = 0; i < bytes_read; i++) {
             char c = buf[i];
             if (c >= 0x20 && c < 0x7F) {
-                uart_putc(c);
+                shell_putc(c);
             } else {
-                uart_putc('.');
+                shell_putc('.');
             }
         }
 
-        uart_puts("|\r\n");
+        shell_puts("|\r\n");
         total_read += bytes_read;
     }
 
     littlefs_file_close(mnt, fd);
 
-    uart_printf("%08lx\r\n", (unsigned long)(offset + total_read));
+    shell_printf("%08lx\r\n", (unsigned long)(offset + total_read));
     return 0;
 }
 
@@ -1239,9 +1240,9 @@ static int pattern_match(const char *pattern, const char *str)
 int cmd_grep(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: grep <pattern> <path>\r\n");
-        uart_puts("  Search for pattern in file (case-sensitive substring).\r\n");
-        uart_puts("  Example: grep error log.txt\r\n");
+        shell_puts("Usage: grep <pattern> <path>\r\n");
+        shell_puts("  Search for pattern in file (case-sensitive substring).\r\n");
+        shell_puts("  Example: grep error log.txt\r\n");
         return -1;
     }
 
@@ -1250,7 +1251,7 @@ int cmd_grep(int argc, char *argv[])
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[2], resolved, sizeof(resolved)) < 0) {
-        uart_puts("grep: path too long\r\n");
+        shell_puts("grep: path too long\r\n");
         return -1;
     }
 
@@ -1258,13 +1259,13 @@ int cmd_grep(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("grep: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("grep: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
     int fd = littlefs_file_open(mnt, subpath, LFS_O_RDONLY);
     if (fd < 0) {
-        uart_printf("grep: %s: Cannot open file\r\n", resolved);
+        shell_printf("grep: %s: Cannot open file\r\n", resolved);
         return -1;
     }
 
@@ -1300,7 +1301,7 @@ int cmd_grep(int argc, char *argv[])
                 }
 
                 if (found) {
-                    uart_printf("%d: %s\r\n", line_num, line);
+                    shell_printf("%d: %s\r\n", line_num, line);
                     matches++;
                 }
 
@@ -1330,7 +1331,7 @@ int cmd_grep(int argc, char *argv[])
             }
         }
         if (found) {
-            uart_printf("%d: %s\r\n", line_num, line);
+            shell_printf("%d: %s\r\n", line_num, line);
             matches++;
         }
     }
@@ -1338,9 +1339,9 @@ int cmd_grep(int argc, char *argv[])
     littlefs_file_close(mnt, fd);
 
     if (matches == 0) {
-        uart_puts("(no matches)\r\n");
+        shell_puts("(no matches)\r\n");
     } else {
-        uart_printf("(%d matches)\r\n", matches);
+        shell_printf("(%d matches)\r\n", matches);
     }
 
     return 0;
@@ -1382,7 +1383,7 @@ static void find_recurse(struct lfs_mount *mnt, const char *base_path,
 
             /* Check if name matches pattern */
             if (pattern_match(pattern, entry.name)) {
-                uart_printf("%s%s%s\r\n", base_path, full_path,
+                shell_printf("%s%s%s\r\n", base_path, full_path,
                             entry.type == 1 ? "/" : "");
                 (*count)++;
             }
@@ -1405,17 +1406,17 @@ static void find_recurse(struct lfs_mount *mnt, const char *base_path,
 int cmd_find(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: find <path> <pattern>\r\n");
-        uart_puts("  Find files matching pattern (recursive).\r\n");
-        uart_puts("  Wildcards: * (any chars), ? (single char)\r\n");
-        uart_puts("  Example: find /mnt/files *.txt\r\n");
-        uart_puts("  Example: find . log*\r\n");
+        shell_puts("Usage: find <path> <pattern>\r\n");
+        shell_puts("  Find files matching pattern (recursive).\r\n");
+        shell_puts("  Wildcards: * (any chars), ? (single char)\r\n");
+        shell_puts("  Example: find /mnt/files *.txt\r\n");
+        shell_puts("  Example: find . log*\r\n");
         return -1;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
-        uart_puts("find: path too long\r\n");
+        shell_puts("find: path too long\r\n");
         return -1;
     }
 
@@ -1425,7 +1426,7 @@ int cmd_find(int argc, char *argv[])
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
-        uart_printf("find: %s: Not a mounted filesystem\r\n", resolved);
+        shell_printf("find: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
 
@@ -1449,9 +1450,9 @@ int cmd_find(int argc, char *argv[])
     find_recurse(mnt, base_path, subpath, pattern, &count);
 
     if (count == 0) {
-        uart_puts("(no files found)\r\n");
+        shell_puts("(no files found)\r\n");
     } else {
-        uart_printf("(%d files found)\r\n", count);
+        shell_printf("(%d files found)\r\n", count);
     }
 
     return 0;

@@ -49,25 +49,25 @@ int cmd_help(int argc, char *argv[])
     }
 
     /* Otherwise, list all commands with brief descriptions */
-    uart_puts("Available commands:\r\n");
-    uart_puts("\r\n");
+    shell_puts("Available commands:\r\n");
+    shell_puts("\r\n");
 
     /* Built-in commands */
     for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
-        uart_printf("  %-10s %s\r\n",
+        shell_printf("  %-10s %s\r\n",
                     builtin_commands[i].name,
                     builtin_commands[i].help);
     }
 
     /* External commands */
     for (int i = 0; i < num_external_commands; i++) {
-        uart_printf("  %-10s %s\r\n",
+        shell_printf("  %-10s %s\r\n",
                     external_commands[i].name,
                     external_commands[i].help);
     }
 
-    uart_puts("\r\n");
-    uart_puts("Use 'help <cmd>' for detailed help on a command.\r\n");
+    shell_puts("\r\n");
+    shell_puts("Use 'help <cmd>' for detailed help on a command.\r\n");
     return 0;
 }
 
@@ -88,12 +88,12 @@ int cmd_mem(int argc, char *argv[])
     size_t free_kb = (free_pages * page_size) / 1024;
     size_t used_kb = (used_pages * page_size) / 1024;
 
-    uart_puts("Memory Statistics:\r\n");
-    uart_puts("\r\n");
-    uart_printf("  Total:     %lu KB (%lu pages)\r\n", total_kb, total_pages);
-    uart_printf("  Used:      %lu KB (%lu pages)\r\n", used_kb, used_pages);
-    uart_printf("  Free:      %lu KB (%lu pages)\r\n", free_kb, free_pages);
-    uart_puts("\r\n");
+    shell_puts("Memory Statistics:\r\n");
+    shell_puts("\r\n");
+    shell_printf("  Total:     %lu KB (%lu pages)\r\n", total_kb, total_pages);
+    shell_printf("  Used:      %lu KB (%lu pages)\r\n", used_kb, used_pages);
+    shell_printf("  Free:      %lu KB (%lu pages)\r\n", free_kb, free_pages);
+    shell_puts("\r\n");
 
     return 0;
 }
@@ -120,16 +120,16 @@ int cmd_tasks(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    uart_puts("Task List:\r\n");
-    uart_puts("\r\n");
-    uart_puts("  ID  Name             State       Pri  CPU  Switches\r\n");
-    uart_puts("  --  ---------------  ----------  ---  ---  --------\r\n");
+    shell_puts("Task List:\r\n");
+    shell_puts("\r\n");
+    shell_puts("  ID  Name             State       Pri  CPU  Switches\r\n");
+    shell_puts("  --  ---------------  ----------  ---  ---  --------\r\n");
 
     /* Iterate through possible task IDs */
     for (uint32_t id = 0; id < MAX_TASKS; id++) {
         struct task *t = task_get(id);
         if (t != NULL) {
-            uart_printf("  %2lu  %-15s  %-10s  %3u  %3lu  %lu\r\n",
+            shell_printf("  %2lu  %-15s  %-10s  %3u  %3lu  %lu\r\n",
                         t->id,
                         t->name,
                         state_name(t->state),
@@ -139,7 +139,7 @@ int cmd_tasks(int argc, char *argv[])
         }
     }
 
-    uart_puts("\r\n");
+    shell_puts("\r\n");
     return 0;
 }
 
@@ -151,14 +151,14 @@ int cmd_cpu(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    uart_puts("CPU Status:\r\n");
-    uart_puts("\r\n");
-    uart_printf("  Platform:    %s\r\n", PLATFORM_NAME);
-    uart_printf("  CPUs:        %lu online / %lu total\r\n", cpus_online, cpu_count);
-    uart_puts("\r\n");
+    shell_puts("CPU Status:\r\n");
+    shell_puts("\r\n");
+    shell_printf("  Platform:    %s\r\n", PLATFORM_NAME);
+    shell_printf("  CPUs:        %lu online / %lu total\r\n", cpus_online, cpu_count);
+    shell_puts("\r\n");
 
-    uart_puts("  CPU  Status   Isolated  Current Task\r\n");
-    uart_puts("  ---  ------   --------  ------------\r\n");
+    shell_puts("  CPU  Status   Isolated  Current Task\r\n");
+    shell_puts("  ---  ------   --------  ------------\r\n");
 
     for (uint32_t i = 0; i < cpu_count; i++) {
         bool online = (i < cpus_online);
@@ -171,7 +171,7 @@ int cmd_cpu(int argc, char *argv[])
             current = task_current();
         }
 
-        uart_printf("  %3lu  %-6s   %-8s  %s\r\n",
+        shell_printf("  %3lu  %-6s   %-8s  %s\r\n",
                     i,
                     online ? "online" : "offline",
                     isolated ? "yes" : "no",
@@ -190,15 +190,15 @@ int cmd_cpu(int argc, char *argv[])
         extern volatile uint32_t sched_diag_picked[];
 #endif
         extern volatile uint32_t timer_handler_count;
-        uart_printf("\r\n  Per-CPU scheduler diagnostics:\r\n");
-        uart_printf("  CPU  Ticks     Schedule  Picked    IdleLoops\r\n");
-        uart_printf("  ---  --------  --------  ------    ---------\r\n");
+        shell_printf("\r\n  Per-CPU scheduler diagnostics:\r\n");
+        shell_printf("  CPU  Ticks     Schedule  Picked    IdleLoops\r\n");
+        shell_printf("  ---  --------  --------  ------    ---------\r\n");
 #if defined(PLATFORM_HAS_NC_MEMORY)
         extern volatile uint32_t *sched_diag_idle_loops;
 #else
         extern volatile uint32_t sched_diag_idle_loops[];
 #endif
-        uart_printf("  diag_tick ptr=0x%lx val[0]=0x%x\r\n",
+        shell_printf("  diag_tick ptr=0x%lx val[0]=0x%x\r\n",
                     (unsigned long)(uintptr_t)sched_diag_tick,
                     *(volatile uint32_t *)sched_diag_tick);
         for (uint32_t i = 0; i < cpu_count; i++) {
@@ -206,9 +206,9 @@ int cmd_cpu(int argc, char *argv[])
             uint32_t s = sched_diag_schedule[i];
             uint32_t p = sched_diag_picked[i];
             uint32_t il = sched_diag_idle_loops[i];
-            uart_printf("  %3lu  %8u  %8u  %6u    %9u\r\n", i, t, s, p, il);
+            shell_printf("  %3lu  %8u  %8u  %6u    %9u\r\n", i, t, s, p, il);
         }
-        uart_printf("  timer_handler_count: %u\r\n", timer_handler_count);
+        shell_printf("  timer_handler_count: %u\r\n", timer_handler_count);
 
 #if CONFIG_WORK_STEALING
         /* Work-stealing per-CPU counters (#105). Written by the
@@ -228,11 +228,11 @@ int cmd_cpu(int argc, char *argv[])
         extern volatile uint32_t sched_diag_steal_empty_victim[];
         extern volatile uint32_t sched_diag_steal_push_full[];
 #endif
-        uart_printf("\r\n  Per-CPU work-stealing counters:\r\n");
-        uart_printf("  CPU  Attempts  Success   Stale     EmptyVic  PushFull\r\n");
-        uart_printf("  ---  --------  --------  --------  --------  --------\r\n");
+        shell_printf("\r\n  Per-CPU work-stealing counters:\r\n");
+        shell_printf("  CPU  Attempts  Success   Stale     EmptyVic  PushFull\r\n");
+        shell_printf("  ---  --------  --------  --------  --------  --------\r\n");
         for (uint32_t i = 0; i < cpu_count; i++) {
-            uart_printf("  %3lu  %8u  %8u  %8u  %8u  %8u\r\n",
+            shell_printf("  %3lu  %8u  %8u  %8u  %8u  %8u\r\n",
                         i,
                         sched_diag_steal_attempts[i],
                         sched_diag_steal_successes[i],
@@ -248,17 +248,17 @@ int cmd_cpu(int argc, char *argv[])
             extern volatile uint32_t cpu_boot_flag[];
             uint64_t my_ttbr0;
             __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(my_ttbr0));
-            uart_printf("  CPU 0 TTBR0: 0x%lx\r\n", (unsigned long)my_ttbr0);
+            shell_printf("  CPU 0 TTBR0: 0x%lx\r\n", (unsigned long)my_ttbr0);
             for (uint32_t i = 1; i < cpu_count; i++) {
                 uint32_t val = __atomic_load_n(&cpu_boot_flag[i], __ATOMIC_ACQUIRE);
 #if defined(PLATFORM_HAS_NC_MEMORY)
                 volatile uint32_t *nc_dbg_addr = (volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + i * 4);
                 uint32_t nc_dbg = *nc_dbg_addr;
                 uint32_t nc_flag_read = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 192 + i * 4);
-                uart_printf("  CPU %u boot: 0x%x  NC_DBG@%lx: 0x%x  NC_FLAG_READ: 0x%x\r\n",
+                shell_printf("  CPU %u boot: 0x%x  NC_DBG@%lx: 0x%x  NC_FLAG_READ: 0x%x\r\n",
                             i, val, (unsigned long)nc_dbg_addr, nc_dbg, nc_flag_read);
 #else
-                uart_printf("  CPU %u boot: 0x%x\r\n", i, val);
+                shell_printf("  CPU %u boot: 0x%x\r\n", i, val);
 #endif
             }
 #if defined(PLATFORM_HAS_NC_MEMORY)
@@ -271,7 +271,7 @@ int cmd_cpu(int argc, char *argv[])
                 *test_addr = before;  /* restore */
                 /* Also read nc_flag directly */
                 uint32_t nc_flag_val = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 64);
-                uart_printf("  NC test@%lx: before=0x%x wrote=0xDEAD read=0x%x nc_flag=%u\r\n",
+                shell_printf("  NC test@%lx: before=0x%x wrote=0xDEAD read=0x%x nc_flag=%u\r\n",
                             (unsigned long)test_addr, before, after, nc_flag_val);
             }
 #endif
@@ -283,7 +283,7 @@ int cmd_cpu(int argc, char *argv[])
     {
         extern int uart_is_irq_mode(void);
         extern volatile uint32_t uart_irq_count;
-        uart_printf("\r\n  UART RX:     %s (irq_count=%u)\r\n",
+        shell_printf("\r\n  UART RX:     %s (irq_count=%u)\r\n",
                     uart_is_irq_mode() ? "interrupt-driven" : "polling",
                     uart_irq_count);
 
@@ -305,22 +305,22 @@ int cmd_cpu(int argc, char *argv[])
         volatile uint32_t *ris = (volatile uint32_t *)(UART_BASE + 0x3C);
         volatile uint32_t *mis = (volatile uint32_t *)(UART_BASE + 0x40);
 
-        uart_printf("  GIC pend:    %d  MIP status: 0x%x  RP1 INTSTAT: 0x%x\r\n",
+        shell_printf("  GIC pend:    %d  MIP status: 0x%x  RP1 INTSTAT: 0x%x\r\n",
                     pending, mip_st, rp1_st);
-        uart_printf("  PL011 RIS:   0x%x  MIS: 0x%x\r\n", *ris, *mis);
+        shell_printf("  PL011 RIS:   0x%x  MIS: 0x%x\r\n", *ris, *mis);
 
         /* MSIX_CFG register for UART0 vector */
         volatile uint32_t *msix_cfg = (volatile uint32_t *)(RP1_INTC_BASE + RP1_MSIX_CFG(RP1_INT_UART0));
-        uart_printf("  MSIX_CFG[25]:0x%x\r\n", *msix_cfg);
+        shell_printf("  MSIX_CFG[25]:0x%x\r\n", *msix_cfg);
 
         /* Read MSI-X capability from config space (at 0x8000+0xB0) */
         volatile uint32_t *msix_cap = (volatile uint32_t *)(PCIE_RC_BASE + 0x8000 + 0xB0);
-        uart_printf("  MSI-X cap:   0x%x (Enable=%d FuncMask=%d)\r\n",
+        shell_printf("  MSI-X cap:   0x%x (Enable=%d FuncMask=%d)\r\n",
                     *msix_cap, (*msix_cap >> 31) & 1, (*msix_cap >> 30) & 1);
 
         /* Read MSI-X table entry 25 */
         volatile uint32_t *e25 = (volatile uint32_t *)(RP1_MSIX_TABLE_BASE + 25 * 16);
-        uart_printf("  MSIX tbl[25]:addr=0x%x_%08x data=0x%x ctrl=0x%x\r\n",
+        shell_printf("  MSIX tbl[25]:addr=0x%x_%08x data=0x%x ctrl=0x%x\r\n",
                     e25[1], e25[0], e25[2], e25[3]);
 
         /* GIC target and priority for UART IRQ */
@@ -341,7 +341,7 @@ int cmd_cpu(int argc, char *argv[])
         volatile uint32_t *isenabler = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x100 + 4 * act_reg);
         int enabled = (*isenabler >> act_bit) & 1;
 
-        uart_printf("  GIC IRQ %d: target=0x%x pri=0x%x active=%d enabled=%d\r\n",
+        shell_printf("  GIC IRQ %d: target=0x%x pri=0x%x active=%d enabled=%d\r\n",
                     UART_IRQ, target, priority, active, enabled);
 
         /* GICC state from EL1 */
@@ -351,7 +351,7 @@ int cmd_cpu(int argc, char *argv[])
         volatile uint32_t *gicc_rpr = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x14);
         volatile uint32_t *gicc_hppir = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x18);
         volatile uint32_t *gicc_ahppir = (volatile uint32_t *)((uint64_t)GIC_CPU_BASE + 0x28);
-        uart_printf("  GICC: CTLR=0x%x PMR=0x%x BPR=0x%x RPR=0x%x HPPIR=%u AHPPIR=%u\r\n",
+        shell_printf("  GICC: CTLR=0x%x PMR=0x%x BPR=0x%x RPR=0x%x HPPIR=%u AHPPIR=%u\r\n",
                     *gicc_ctlr, *gicc_pmr, *gicc_bpr, *gicc_rpr, *gicc_hppir, *gicc_ahppir);
 
         /* IGROUPR for our SPI */
@@ -361,12 +361,12 @@ int cmd_cpu(int argc, char *argv[])
         int grp1 = (*igroupr >> grp_bit) & 1;
         /* Also check GICD_CTLR */
         volatile uint32_t *gicd_ctlr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE);
-        uart_printf("  GICD: CTLR=0x%x IGROUPR[%d] bit %d=%d\r\n",
+        shell_printf("  GICD: CTLR=0x%x IGROUPR[%d] bit %d=%d\r\n",
                     *gicd_ctlr, grp_reg, grp_bit, grp1);
         /* Dump all IGROUPR registers to see which are Group 0 vs Group 1 */
         for (uint32_t g = 0; g < 10; g++) {
             volatile uint32_t *igr = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x080 + 4 * g);
-            uart_printf("  IGROUPR[%u]=0x%08x\r\n", g, *igr);
+            shell_printf("  IGROUPR[%u]=0x%08x\r\n", g, *igr);
         }
 
         /* Check SPI priority at various IRQ numbers to find the boundary */
@@ -376,7 +376,7 @@ int cmd_cpu(int argc, char *argv[])
                 uint32_t irq = test_irqs[t];
                 volatile uint32_t *preg = (volatile uint32_t *)((uint64_t)GIC_DIST_BASE + 0x400 + (irq & ~3));
                 uint8_t pri = (*preg >> ((irq & 3) * 8)) & 0xFF;
-                uart_printf("  IRQ%u pri=0x%x%s", irq, pri, (t < 7) ? "  " : "\r\n");
+                shell_printf("  IRQ%u pri=0x%x%s", irq, pri, (t < 7) ? "  " : "\r\n");
             }
         }
 
@@ -386,12 +386,12 @@ int cmd_cpu(int argc, char *argv[])
             volatile uint32_t *b3hi = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + PCIE_RC_BAR3_CONFIG_HI);
             volatile uint32_t *rlo  = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + PCIE_RC_UBUS_BAR3_REMAP);
             volatile uint32_t *rhi  = (volatile uint32_t *)((uint64_t)PCIE_RC_BASE + PCIE_RC_UBUS_BAR3_REMAP_HI);
-            uart_printf("  BAR3: %x_%08x remap=%x_%08x\r\n", *b3hi, *b3lo, *rhi, *rlo);
+            shell_printf("  BAR3: %x_%08x remap=%x_%08x\r\n", *b3hi, *b3lo, *rhi, *rlo);
         }
     }
 #endif
 
-    uart_puts("\r\n");
+    shell_puts("\r\n");
     return 0;
 }
 
@@ -417,7 +417,7 @@ int cmd_uptime(int argc, char *argv[])
     uint64_t minutes = (total_seconds % 3600) / 60;
     uint64_t seconds = total_seconds % 60;
 
-    uart_printf("Uptime: %lu:%02lu:%02lu\r\n", hours, minutes, seconds);
+    shell_printf("Uptime: %lu:%02lu:%02lu\r\n", hours, minutes, seconds);
 
     return 0;
 }
@@ -431,7 +431,7 @@ int cmd_clear(int argc, char *argv[])
     (void)argv;
 
     /* ANSI escape: clear screen and move cursor to home */
-    uart_puts("\033[2J\033[H");
+    shell_puts("\033[2J\033[H");
 
     return 0;
 }
@@ -445,13 +445,13 @@ int cmd_clear(int argc, char *argv[])
 int cmd_sleep(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: sleep <ms>\r\n");
+        shell_puts("Usage: sleep <ms>\r\n");
         return 1;
     }
 
     uint32_t ms;
     if (shell_parse_uint(argv[1], &ms) < 0 || ms == 0) {
-        uart_puts("sleep: duration must be a positive integer\r\n");
+        shell_puts("sleep: duration must be a positive integer\r\n");
         return 1;
     }
 
@@ -460,7 +460,7 @@ int cmd_sleep(int argc, char *argv[])
     uint64_t after = slm_get_time_ns();
     uint64_t elapsed_ms = (after - before) / 1000000;
 
-    uart_printf("Slept %lu ms (requested %u ms)\r\n", elapsed_ms, ms);
+    shell_printf("Slept %lu ms (requested %u ms)\r\n", elapsed_ms, ms);
     return 0;
 }
 
@@ -570,7 +570,7 @@ static void hist_sort_samples(struct latency_histogram *h)
 static void hist_print(struct latency_histogram *h)
 {
     if (h->count == 0) {
-        uart_puts("  (no samples)\r\n");
+        shell_puts("  (no samples)\r\n");
         return;
     }
     /* Find max bucket for bar scaling. */
@@ -580,14 +580,14 @@ static void hist_print(struct latency_histogram *h)
     }
     if (peak == 0) peak = 1;
 
-    uart_puts("  Latency distribution:\r\n");
+    shell_puts("  Latency distribution:\r\n");
     for (int i = 0; i < HIST_N_BUCKETS; i++) {
         uint32_t c = h->buckets[i];
         /* Bar: up to 40 '#' characters, proportional to peak. */
         uint32_t bar_len = (c * 40u + peak - 1) / peak;
-        uart_printf("    %s: %5u ", HIST_LABELS[i], c);
-        for (uint32_t b = 0; b < bar_len; b++) uart_putc('#');
-        uart_puts("\r\n");
+        shell_printf("    %s: %5u ", HIST_LABELS[i], c);
+        for (uint32_t b = 0; b < bar_len; b++) shell_putc('#');
+        shell_puts("\r\n");
     }
 
     hist_sort_samples(h);
@@ -597,10 +597,10 @@ static void hist_print(struct latency_histogram *h)
     uint64_t p99 = h->samples[n * 99 / 100];
     uint64_t mean = h->sum_ns / h->count;
 
-    uart_printf("\r\n  Min: %lu ns   Max: %lu ns   Mean: %lu ns\r\n",
+    shell_printf("\r\n  Min: %lu ns   Max: %lu ns   Mean: %lu ns\r\n",
                 (unsigned long)h->min_ns, (unsigned long)h->max_ns,
                 (unsigned long)mean);
-    uart_printf("  p50: %lu ns   p95: %lu ns   p99: %lu ns\r\n",
+    shell_printf("  p50: %lu ns   p95: %lu ns   p99: %lu ns\r\n",
                 (unsigned long)p50, (unsigned long)p95, (unsigned long)p99);
 }
 
@@ -646,7 +646,7 @@ static void bench_context_switch(void)
         bench_ctx_task, NULL, TASK_PRIORITY_HIGH);
     if (!t) {
         if (!bench_ctx_quiet) {
-            uart_puts("  Failed to create benchmark task\r\n");
+            shell_puts("  Failed to create benchmark task\r\n");
         }
         return;
     }
@@ -665,20 +665,20 @@ static void bench_context_switch(void)
 
     if (bench_ctx_count > 1) {
         uint64_t avg_ns = bench_ctx_total / (uint64_t)(bench_ctx_count - 1);
-        uart_printf("  Context switch: %d round-trips\r\n", bench_ctx_count - 1);
-        uart_printf("    Average: %lu ns (%lu us)\r\n",
+        shell_printf("  Context switch: %d round-trips\r\n", bench_ctx_count - 1);
+        shell_printf("    Average: %lu ns (%lu us)\r\n",
                     (unsigned long)avg_ns, (unsigned long)(avg_ns / 1000));
         if (avg_ns < 10000)
-            uart_puts("    Rating:  Excellent (< 10 us)\r\n");
+            shell_puts("    Rating:  Excellent (< 10 us)\r\n");
         else if (avg_ns < 50000)
-            uart_puts("    Rating:  Good (< 50 us)\r\n");
+            shell_puts("    Rating:  Good (< 50 us)\r\n");
         else if (avg_ns < 100000)
-            uart_puts("    Rating:  Acceptable (< 100 us)\r\n");
+            shell_puts("    Rating:  Acceptable (< 100 us)\r\n");
         else
-            uart_puts("    Rating:  Needs optimization (> 100 us)\r\n");
+            shell_puts("    Rating:  Needs optimization (> 100 us)\r\n");
         hist_print(&bench_ctx_hist);
     } else {
-        uart_puts("  Context switch: insufficient data\r\n");
+        shell_puts("  Context switch: insufficient data\r\n");
     }
 }
 
@@ -691,7 +691,7 @@ static void bench_irq_latency(void)
     uint64_t samples[20];
     int count = 0;
 
-    uart_printf("  Timer frequency: %lu Hz (expected 10 ms ticks)\r\n",
+    shell_printf("  Timer frequency: %lu Hz (expected 10 ms ticks)\r\n",
                 (unsigned long)freq);
 
     /* Measure actual tick intervals by reading counter across yields */
@@ -713,17 +713,17 @@ static void bench_irq_latency(void)
     }
     uint64_t avg_ns = sum_ns / (uint64_t)count;
 
-    uart_printf("  Timer tick jitter (%d samples):\r\n", count);
-    uart_printf("    Min: %lu ns (%lu us)\r\n",
+    shell_printf("  Timer tick jitter (%d samples):\r\n", count);
+    shell_printf("    Min: %lu ns (%lu us)\r\n",
                 (unsigned long)min_ns, (unsigned long)(min_ns / 1000));
-    uart_printf("    Avg: %lu ns (%lu us)\r\n",
+    shell_printf("    Avg: %lu ns (%lu us)\r\n",
                 (unsigned long)avg_ns, (unsigned long)(avg_ns / 1000));
-    uart_printf("    Max: %lu ns (%lu us)\r\n",
+    shell_printf("    Max: %lu ns (%lu us)\r\n",
                 (unsigned long)max_ns, (unsigned long)(max_ns / 1000));
 
     /* Jitter = max deviation from expected interval */
     int64_t jitter = (int64_t)max_ns - (int64_t)min_ns;
-    uart_printf("    Jitter (max-min): %lu us\r\n",
+    shell_printf("    Jitter (max-min): %lu us\r\n",
                 (unsigned long)(jitter > 0 ? (uint64_t)jitter / 1000 : 0));
     (void)expected_interval_ns;
 }
@@ -734,7 +734,7 @@ static void bench_ipc_latency(void)
 {
     struct msg_queue *q = msg_queue_create(16, 8);
     if (!q) {
-        uart_puts("  Failed to create message queue\r\n");
+        shell_puts("  Failed to create message queue\r\n");
         return;
     }
 
@@ -755,9 +755,9 @@ static void bench_ipc_latency(void)
     irq_restore(flags);
 
     uint64_t avg_ns = total_ns / (uint64_t)ipc_iters;
-    uart_printf("  IPC send+recv round-trip (%d iterations):\r\n", ipc_iters);
-    uart_printf("    Total: %lu ns\r\n", (unsigned long)total_ns);
-    uart_printf("    Average: %lu ns (%lu us)\r\n",
+    shell_printf("  IPC send+recv round-trip (%d iterations):\r\n", ipc_iters);
+    shell_printf("    Total: %lu ns\r\n", (unsigned long)total_ns);
+    shell_printf("    Average: %lu ns (%lu us)\r\n",
                 (unsigned long)avg_ns, (unsigned long)(avg_ns / 1000));
 
     msg_queue_destroy(q);
@@ -773,12 +773,12 @@ static void bench_sched_stats(void)
     uint64_t uptime_ns = slm_get_time_ns();
     uint64_t uptime_s = uptime_ns / 1000000000ULL;
 
-    uart_printf("  Scheduler stats (uptime %lu s):\r\n", (unsigned long)uptime_s);
-    uart_printf("    Tasks:            %lu\r\n", (unsigned long)stats.task_count);
-    uart_printf("    Context switches: %lu\r\n", (unsigned long)stats.context_switches);
-    uart_printf("    Timer ticks:      %lu\r\n", (unsigned long)stats.timer_ticks);
+    shell_printf("  Scheduler stats (uptime %lu s):\r\n", (unsigned long)uptime_s);
+    shell_printf("    Tasks:            %lu\r\n", (unsigned long)stats.task_count);
+    shell_printf("    Context switches: %lu\r\n", (unsigned long)stats.context_switches);
+    shell_printf("    Timer ticks:      %lu\r\n", (unsigned long)stats.timer_ticks);
     if (uptime_s > 0) {
-        uart_printf("    Switches/sec:     %lu\r\n",
+        shell_printf("    Switches/sec:     %lu\r\n",
                     (unsigned long)(stats.context_switches / uptime_s));
     }
 }
@@ -803,7 +803,7 @@ static void bench_deadline_accuracy(void)
     uint64_t deadlines_ms[] = {100, 50, 20, 10};
     int num_deadlines = 4;
 
-    uart_puts("  Testing deadline-boosted task dispatch latency:\r\n");
+    shell_puts("  Testing deadline-boosted task dispatch latency:\r\n");
 
     for (int d = 0; d < num_deadlines; d++) {
 #if defined(PLATFORM_HAS_NC_MEMORY)
@@ -811,7 +811,7 @@ static void bench_deadline_accuracy(void)
         uint64_t start_ns = slm_get_time_ns();
 
         struct task *t = task_create("dl_bench", deadline_bench_task, NULL);
-        if (!t) { uart_puts("    Failed to create task\r\n"); continue; }
+        if (!t) { shell_puts("    Failed to create task\r\n"); continue; }
 
         task_set_deadline(t, slm_get_time_ns() + deadlines_ms[d] * 1000000ULL);
         scheduler_add_task(t);
@@ -826,14 +826,14 @@ static void bench_deadline_accuracy(void)
             uint64_t latency_us = (end_ns - start_ns) / 1000;
             uint64_t deadline_us = deadlines_ms[d] * 1000;
             const char *met = (latency_us < deadline_us) ? "MET" : "MISSED";
-            uart_printf("    Deadline %3lu ms: dispatched in %lu us — %s\r\n",
+            shell_printf("    Deadline %3lu ms: dispatched in %lu us — %s\r\n",
                         (unsigned long)deadlines_ms[d], (unsigned long)latency_us, met);
         } else {
-            uart_printf("    Deadline %3lu ms: TIMEOUT\r\n",
+            shell_printf("    Deadline %3lu ms: TIMEOUT\r\n",
                         (unsigned long)deadlines_ms[d]);
         }
 #else
-        uart_printf("    Deadline %3lu ms: (NC memory required for cross-CPU)\r\n",
+        shell_printf("    Deadline %3lu ms: (NC memory required for cross-CPU)\r\n",
                     (unsigned long)deadlines_ms[d]);
 #endif
     }
@@ -858,11 +858,11 @@ static void bench_core_isolation(void)
 {
     extern uint32_t cpu_count;
     if (cpu_count < 3) {
-        uart_puts("  Need 3+ CPUs for isolation test\r\n");
+        shell_puts("  Need 3+ CPUs for isolation test\r\n");
         return;
     }
 
-    uart_puts("  Isolating CPU 2, dispatching 8 tasks:\r\n");
+    shell_puts("  Isolating CPU 2, dispatching 8 tasks:\r\n");
     sched_isolate_core(2);
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
@@ -883,16 +883,16 @@ static void bench_core_isolation(void)
         }
     }
 
-    uart_printf("    CPU 0: %d tasks  CPU 1: %d tasks  CPU 2: %d tasks  CPU 3: %d tasks\r\n",
+    shell_printf("    CPU 0: %d tasks  CPU 1: %d tasks  CPU 2: %d tasks  CPU 3: %d tasks\r\n",
                 cpu_hits[0], cpu_hits[1], cpu_hits[2], cpu_hits[3]);
-    uart_printf("    CPU 2 (isolated): %s\r\n",
+    shell_printf("    CPU 2 (isolated): %s\r\n",
                 cpu_hits[2] == 0 ? "PASS — no tasks dispatched" : "FAIL — tasks reached isolated core");
 #else
-    uart_puts("    (NC memory required for cross-CPU isolation test)\r\n");
+    shell_puts("    (NC memory required for cross-CPU isolation test)\r\n");
 #endif
 
     sched_unisolate_core(2);
-    uart_puts("  CPU 2 un-isolated.\r\n");
+    shell_puts("  CPU 2 un-isolated.\r\n");
 }
 
 /* --- Shared buffer throughput benchmark --- */
@@ -902,13 +902,13 @@ static void bench_shared_buffer(void)
     /* Create a shared buffer and measure write+read throughput */
     struct shared_buffer *buf = shared_buffer_create(4096, 0);
     if (!buf) {
-        uart_puts("  Failed to create shared buffer\r\n");
+        shell_puts("  Failed to create shared buffer\r\n");
         return;
     }
 
     void *ptr = shared_buffer_map(buf, task_current(), 0x3); /* RW */
     if (!ptr) {
-        uart_puts("  Failed to map shared buffer\r\n");
+        shell_puts("  Failed to map shared buffer\r\n");
         shared_buffer_destroy(buf);
         return;
     }
@@ -936,10 +936,10 @@ static void bench_shared_buffer(void)
     uint64_t write_mbps = (4096ULL * 1000 * 1000000000ULL) / (write_ns * 1024 * 1024);
     uint64_t read_mbps = (4096ULL * 1000 * 1000000000ULL) / (read_ns * 1024 * 1024);
 
-    uart_printf("  Shared buffer (4 KB, 1000 iterations, 64B stride):\r\n");
-    uart_printf("    Write: %lu MB/s (%lu ns total)\r\n",
+    shell_printf("  Shared buffer (4 KB, 1000 iterations, 64B stride):\r\n");
+    shell_printf("    Write: %lu MB/s (%lu ns total)\r\n",
                 (unsigned long)write_mbps, (unsigned long)write_ns);
-    uart_printf("    Read:  %lu MB/s (%lu ns total)\r\n",
+    shell_printf("    Read:  %lu MB/s (%lu ns total)\r\n",
                 (unsigned long)read_mbps, (unsigned long)read_ns);
 
     shared_buffer_unmap(buf, task_current());
@@ -1016,35 +1016,35 @@ static void s3_steal_work_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|gpu|stats|all>\r\n");
+        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|gpu|stats|all>\r\n");
         return 1;
     }
 
-    uart_puts("\r\n");
+    shell_puts("\r\n");
 
     if (strcmp(argv[1], "context") == 0) {
-        uart_puts("Context Switch Benchmark\r\n");
-        uart_puts("========================\r\n");
+        shell_puts("Context Switch Benchmark\r\n");
+        shell_puts("========================\r\n");
         bench_context_switch();
     } else if (strcmp(argv[1], "irq") == 0) {
-        uart_puts("Interrupt Latency Benchmark\r\n");
-        uart_puts("===========================\r\n");
+        shell_puts("Interrupt Latency Benchmark\r\n");
+        shell_puts("===========================\r\n");
         bench_irq_latency();
     } else if (strcmp(argv[1], "ipc") == 0) {
-        uart_puts("IPC Latency Benchmark\r\n");
-        uart_puts("=====================\r\n");
+        shell_puts("IPC Latency Benchmark\r\n");
+        shell_puts("=====================\r\n");
         bench_ipc_latency();
     } else if (strcmp(argv[1], "eviction") == 0) {
-        uart_puts("Eviction Policy Fault-Rate Comparison (#117)\r\n");
-        uart_puts("=============================================\r\n");
-        uart_puts("Workload: single_inference (8-slot cache, 16-block WS, 10 cycles)\r\n\r\n");
+        shell_puts("Eviction Policy Fault-Rate Comparison (#117)\r\n");
+        shell_puts("=============================================\r\n");
+        shell_puts("Workload: single_inference (8-slot cache, 16-block WS, 10 cycles)\r\n\r\n");
         static RustEvictionCompareResult results[8];
         int32_t n = rust_eviction_workload_compare(results, 8);
         if (n <= 0) {
-            uart_puts("  (AI eviction disabled or error)\r\n");
+            shell_puts("  (AI eviction disabled or error)\r\n");
         } else {
-            uart_puts("Policy           Faults  Hits   Total   Fault rate\r\n");
-            uart_puts("---------------  ------  -----  ------  ----------\r\n");
+            shell_puts("Policy           Faults  Hits   Total   Fault rate\r\n");
+            shell_puts("---------------  ------  -----  ------  ----------\r\n");
             uint32_t best_faults = UINT32_MAX;
             const char *best_name = NULL;
             for (int32_t i = 0; i < n; i++) {
@@ -1052,7 +1052,7 @@ int cmd_bench(int argc, char *argv[])
                 uint32_t h = results[i].hits;
                 uint32_t t = results[i].total_accesses;
                 uint32_t pct = t > 0 ? (f * 100 / t) : 0;
-                uart_printf("%-15s  %6u  %5u  %6u  %8u%%\r\n",
+                shell_printf("%-15s  %6u  %5u  %6u  %8u%%\r\n",
                             results[i].policy_name, f, h, t, pct);
                 if (f < best_faults) {
                     best_faults = f;
@@ -1060,16 +1060,16 @@ int cmd_bench(int argc, char *argv[])
                 }
             }
             if (best_name) {
-                uart_printf("\r\nBest: %s (%u faults)\r\n", best_name, best_faults);
+                shell_printf("\r\nBest: %s (%u faults)\r\n", best_name, best_faults);
             }
         }
     } else if (strcmp(argv[1], "stats") == 0) {
-        uart_puts("Scheduler Statistics\r\n");
-        uart_puts("====================\r\n");
+        shell_puts("Scheduler Statistics\r\n");
+        shell_puts("====================\r\n");
         bench_sched_stats();
     } else if (strcmp(argv[1], "smp") == 0) {
-        uart_puts("SMP Cross-CPU Dispatch Test\r\n");
-        uart_puts("===========================\r\n");
+        shell_puts("SMP Cross-CPU Dispatch Test\r\n");
+        shell_puts("===========================\r\n");
         /* Dispatch a task to each secondary CPU and verify it completes.
          * Uses NC memory for done flags — instantly visible cross-CPU. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
@@ -1085,7 +1085,7 @@ int cmd_bench(int argc, char *argv[])
             struct task *t = task_create(name, smp_test_task, (void *)(uintptr_t)cpu);
             if (t) {
                 scheduler_add_task_to_cpu(t, cpu);
-                uart_printf("  Dispatched '%s' to CPU %u\r\n", name, cpu);
+                shell_printf("  Dispatched '%s' to CPU %u\r\n", name, cpu);
             }
         }
         /* Wait for all to complete (NC read — no CIVAC needed) */
@@ -1103,27 +1103,27 @@ int cmd_bench(int argc, char *argv[])
         for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
 #if defined(PLATFORM_HAS_NC_MEMORY)
             uint32_t result = *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 320 + cpu * 4);
-            uart_printf("  CPU %u: %s (ran on CPU %u)\r\n", cpu,
+            shell_printf("  CPU %u: %s (ran on CPU %u)\r\n", cpu,
                         result ? "COMPLETED" : "TIMEOUT", result ? result - 1 : 0);
 #else
-            uart_printf("  CPU %u: (NC memory required)\r\n", cpu);
+            shell_printf("  CPU %u: (NC memory required)\r\n", cpu);
 #endif
         }
     } else if (strcmp(argv[1], "deadline") == 0) {
-        uart_puts("Deadline Accuracy Benchmark\r\n");
-        uart_puts("===========================\r\n");
+        shell_puts("Deadline Accuracy Benchmark\r\n");
+        shell_puts("===========================\r\n");
         bench_deadline_accuracy();
     } else if (strcmp(argv[1], "isolate") == 0) {
-        uart_puts("Core Isolation Benchmark\r\n");
-        uart_puts("========================\r\n");
+        shell_puts("Core Isolation Benchmark\r\n");
+        shell_puts("========================\r\n");
         bench_core_isolation();
     } else if (strcmp(argv[1], "shared") == 0) {
-        uart_puts("Shared Buffer Throughput Benchmark\r\n");
-        uart_puts("==================================\r\n");
+        shell_puts("Shared Buffer Throughput Benchmark\r\n");
+        shell_puts("==================================\r\n");
         bench_shared_buffer();
     } else if (strcmp(argv[1], "matmul") == 0) {
-        uart_puts("NEON FP32 MatMul Benchmark\r\n");
-        uart_puts("==========================\r\n");
+        shell_puts("NEON FP32 MatMul Benchmark\r\n");
+        shell_puts("==========================\r\n");
         /* Default 20 iterations — enough for a stable min/avg/max
          * without dominating the shell session. User can override by
          * passing a count: `bench matmul 100`. */
@@ -1136,8 +1136,8 @@ int cmd_bench(int argc, char *argv[])
         }
         rust_matmul_bench_fp32(iters);
     } else if (strcmp(argv[1], "conv") == 0) {
-        uart_puts("NEON FP32 Conv2D Benchmark\r\n");
-        uart_puts("==========================\r\n");
+        shell_puts("NEON FP32 Conv2D Benchmark\r\n");
+        shell_puts("==========================\r\n");
         uint32_t iters = 50;
         if (argc >= 3) {
             uint32_t n;
@@ -1171,18 +1171,18 @@ int cmd_bench(int argc, char *argv[])
             }
         }
         if (cpu_count < 2) {
-            uart_puts("  Need at least 2 CPUs for load-imbalance test\r\n");
+            shell_puts("  Need at least 2 CPUs for load-imbalance test\r\n");
             return 0;
         }
-        uart_puts("Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)\r\n");
-        uart_puts("=====================================================\r\n");
-        uart_printf("  Tasks dispatched:  %lu (all to CPU 1)\r\n",
+        shell_puts("Work-Stealing Load-Imbalance Benchmark (S3 / Phase C)\r\n");
+        shell_puts("=====================================================\r\n");
+        shell_printf("  Tasks dispatched:  %lu (all to CPU 1)\r\n",
                     (unsigned long)n_tasks);
-        uart_printf("  Online CPUs:       %lu\r\n", (unsigned long)cpu_count);
+        shell_printf("  Online CPUs:       %lu\r\n", (unsigned long)cpu_count);
 #if CONFIG_WORK_STEALING
-        uart_puts("  CONFIG_WORK_STEALING: ON  (expect parallel completion)\r\n");
+        shell_puts("  CONFIG_WORK_STEALING: ON  (expect parallel completion)\r\n");
 #else
-        uart_puts("  CONFIG_WORK_STEALING: OFF (expect sequential completion)\r\n");
+        shell_puts("  CONFIG_WORK_STEALING: OFF (expect sequential completion)\r\n");
 #endif
 
         /* Zero slot array. Each task writes its slot when done; the
@@ -1247,7 +1247,7 @@ int cmd_bench(int argc, char *argv[])
             if (done >= n_tasks) { done_now = done; break; }
             if (timer_get_count() > deadline) {
                 done_now = done;
-                uart_printf("  TIMEOUT after 30s — %u / %u tasks done\r\n",
+                shell_printf("  TIMEOUT after 30s — %u / %u tasks done\r\n",
                             done_now, n_tasks);
                 break;
             }
@@ -1266,30 +1266,30 @@ int cmd_bench(int argc, char *argv[])
             }
         }
 
-        uart_printf("\r\n  Results:\r\n");
-        uart_printf("    Completed:    %u / %u\r\n", done_now, n_tasks);
-        uart_printf("    Wall-clock:   %lu ms (%lu us)\r\n",
+        shell_printf("\r\n  Results:\r\n");
+        shell_printf("    Completed:    %u / %u\r\n", done_now, n_tasks);
+        shell_printf("    Wall-clock:   %lu ms (%lu us)\r\n",
                     (unsigned long)(elapsed_ns / 1000000),
                     (unsigned long)(elapsed_ns / 1000));
         if (done_now > 0) {
-            uart_printf("    Per-task avg: %lu us\r\n",
+            shell_printf("    Per-task avg: %lu us\r\n",
                         (unsigned long)(elapsed_ns / 1000 / done_now));
         }
-        uart_puts("\r\n    Per-CPU execution distribution:\r\n");
+        shell_puts("\r\n    Per-CPU execution distribution:\r\n");
         for (uint32_t c = 0; c < cpu_count; c++) {
-            uart_printf("      CPU %lu: %u task%s\r\n",
+            shell_printf("      CPU %lu: %u task%s\r\n",
                         (unsigned long)c, cpu_count_exec[c],
                         cpu_count_exec[c] == 1 ? "" : "s");
         }
 #if CONFIG_WORK_STEALING
-        uart_puts("\r\n    Steal counter deltas this run:\r\n");
-        uart_puts("    CPU  Attempts  Successes  PushFull\r\n");
-        uart_puts("    ---  --------  ---------  --------\r\n");
+        shell_puts("\r\n    Steal counter deltas this run:\r\n");
+        shell_puts("    CPU  Attempts  Successes  PushFull\r\n");
+        shell_puts("    ---  --------  ---------  --------\r\n");
         for (uint32_t c = 0; c < cpu_count; c++) {
             uint32_t da = sched_diag_steal_attempts[c] - pre_attempts[c];
             uint32_t ds = sched_diag_steal_successes[c] - pre_successes[c];
             uint32_t dpf = sched_diag_steal_push_full[c] - pre_push_full[c];
-            uart_printf("    %3lu  %8u  %9u  %8u\r\n",
+            shell_printf("    %3lu  %8u  %9u  %8u\r\n",
                         (unsigned long)c, da, ds, dpf);
         }
 #endif
@@ -1303,19 +1303,19 @@ int cmd_bench(int argc, char *argv[])
                 iters = n;
             }
         }
-        uart_puts("Quantization MatMul Benchmark (FP32 / FP16 / INT8)\r\n");
-        uart_puts("==================================================\r\n");
-        uart_puts("--- FP32 baseline ---\r\n");
+        shell_puts("Quantization MatMul Benchmark (FP32 / FP16 / INT8)\r\n");
+        shell_puts("==================================================\r\n");
+        shell_puts("--- FP32 baseline ---\r\n");
         rust_matmul_bench_fp32(iters);
-        uart_puts("--- FP16 (B matrix half-precision) ---\r\n");
+        shell_puts("--- FP16 (B matrix half-precision) ---\r\n");
         rust_matmul_bench_fp16(iters);
-        uart_puts("--- INT8 (A and B quantized, FP32 output) ---\r\n");
+        shell_puts("--- INT8 (A and B quantized, FP32 output) ---\r\n");
         rust_matmul_bench_int8(iters);
     } else if (strcmp(argv[1], "gpu") == 0) {
-        uart_puts("GPU Cache Sync Benchmark\r\n");
-        uart_puts("========================\r\n");
+        shell_puts("GPU Cache Sync Benchmark\r\n");
+        shell_puts("========================\r\n");
         if (!gpu_available()) {
-            uart_puts("  GPU not available\r\n");
+            shell_puts("  GPU not available\r\n");
         } else {
             gpu_buffer_t buf;
             uint64_t t0, t1;
@@ -1325,7 +1325,7 @@ int cmd_bench(int argc, char *argv[])
             int ret = gpu_alloc(4096, GPU_MEM_READWRITE, &buf);
             t1 = timer_get_count();
             if (ret != GPU_OK) {
-                uart_puts("  gpu_alloc failed\r\n");
+                shell_puts("  gpu_alloc failed\r\n");
             } else {
                 uint64_t freq = timer_get_frequency();
                 uint64_t alloc_ns = (t1 - t0) * 1000000000ULL / freq;
@@ -1355,37 +1355,37 @@ int cmd_bench(int argc, char *argv[])
                 t1 = timer_get_count();
                 uint64_t free_ns = (t1 - t0) * 1000000000ULL / freq;
 
-                uart_printf("  4KB buffer (1024 uint32):\r\n");
-                uart_printf("    Alloc:         %lu ns\r\n", (unsigned long)alloc_ns);
-                uart_printf("    sync_for_gpu:  %lu ns (DC CVAC clean)\r\n", (unsigned long)clean_ns);
-                uart_printf("    sync_for_cpu:  %lu ns (DC IVAC invalidate)\r\n", (unsigned long)inv_ns);
-                uart_printf("    Free:          %lu ns\r\n", (unsigned long)free_ns);
-                uart_printf("    Data integrity: %s\r\n", ok ? "PASS" : "FAIL");
+                shell_printf("  4KB buffer (1024 uint32):\r\n");
+                shell_printf("    Alloc:         %lu ns\r\n", (unsigned long)alloc_ns);
+                shell_printf("    sync_for_gpu:  %lu ns (DC CVAC clean)\r\n", (unsigned long)clean_ns);
+                shell_printf("    sync_for_cpu:  %lu ns (DC IVAC invalidate)\r\n", (unsigned long)inv_ns);
+                shell_printf("    Free:          %lu ns\r\n", (unsigned long)free_ns);
+                shell_printf("    Data integrity: %s\r\n", ok ? "PASS" : "FAIL");
             }
         }
     } else if (strcmp(argv[1], "all") == 0) {
-        uart_puts("SLM-OS Performance Benchmarks\r\n");
-        uart_puts("=============================\r\n\r\n");
+        shell_puts("SLM-OS Performance Benchmarks\r\n");
+        shell_puts("=============================\r\n\r\n");
         bench_context_switch();
-        uart_puts("\r\n");
+        shell_puts("\r\n");
         bench_irq_latency();
-        uart_puts("\r\n");
+        shell_puts("\r\n");
         bench_ipc_latency();
-        uart_puts("\r\n");
+        shell_puts("\r\n");
         bench_deadline_accuracy();
-        uart_puts("\r\n");
+        shell_puts("\r\n");
         bench_core_isolation();
-        uart_puts("\r\n");
+        shell_puts("\r\n");
         bench_shared_buffer();
-        uart_puts("\r\n");
+        shell_puts("\r\n");
         bench_sched_stats();
     } else {
-        uart_printf("Unknown benchmark: %s\r\n", argv[1]);
-        uart_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, stats, all\r\n");
+        shell_printf("Unknown benchmark: %s\r\n", argv[1]);
+        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, stats, all\r\n");
         return 1;
     }
 
-    uart_puts("\r\n");
+    shell_puts("\r\n");
     return 0;
 }
 
@@ -1404,38 +1404,38 @@ int cmd_bench(int argc, char *argv[])
 static void diag_print_el2(void)
 {
     struct diag_el2_snapshot *s = diag_el2_snap();
-    uart_puts("\r\nEL2 register snapshot (boot.S, issue #99):\r\n");
+    shell_puts("\r\nEL2 register snapshot (boot.S, issue #99):\r\n");
     if (s->magic != DIAG_EL2_MAGIC) {
-        uart_printf("  magic=0x%lx  INVALID — EL2 block did not run "
+        shell_printf("  magic=0x%lx  INVALID — EL2 block did not run "
                     "(firmware entered at EL%lu?)\r\n",
                     (unsigned long)s->magic,
                     (unsigned long)((s->current_el_entry >> 2) & 3));
         return;
     }
-    uart_printf("  CurrentEL at entry:     0x%lx (EL%lu)\r\n",
+    shell_printf("  CurrentEL at entry:     0x%lx (EL%lu)\r\n",
                 (unsigned long)s->current_el_entry,
                 (unsigned long)((s->current_el_entry >> 2) & 3));
-    uart_printf("  MIDR_EL1:               0x%lx\r\n",
+    shell_printf("  MIDR_EL1:               0x%lx\r\n",
                 (unsigned long)s->midr_el1);
-    uart_printf("  ID_AA64PFR0_EL1:        0x%lx\r\n",
+    shell_printf("  ID_AA64PFR0_EL1:        0x%lx\r\n",
                 (unsigned long)s->id_aa64pfr0_el1);
-    uart_printf("  HCR_EL2 pre:            0x%lx\r\n",
+    shell_printf("  HCR_EL2 pre:            0x%lx\r\n",
                 (unsigned long)s->hcr_el2_pre);
-    uart_printf("  HCR_EL2 post (written): 0x%lx  (IMO=%lu FMO=%lu AMO=%lu RW=%lu)\r\n",
+    shell_printf("  HCR_EL2 post (written): 0x%lx  (IMO=%lu FMO=%lu AMO=%lu RW=%lu)\r\n",
                 (unsigned long)s->hcr_el2_post,
                 (unsigned long)((s->hcr_el2_post >> 4) & 1),
                 (unsigned long)((s->hcr_el2_post >> 3) & 1),
                 (unsigned long)((s->hcr_el2_post >> 5) & 1),
                 (unsigned long)((s->hcr_el2_post >> 31) & 1));
-    uart_printf("  CNTHCTL_EL2:            0x%lx\r\n",
+    shell_printf("  CNTHCTL_EL2:            0x%lx\r\n",
                 (unsigned long)s->cnthctl_el2);
-    uart_printf("  GICD_CTLR pre:          0x%lx\r\n",
+    shell_printf("  GICD_CTLR pre:          0x%lx\r\n",
                 (unsigned long)s->gicd_ctlr_pre);
-    uart_printf("  GICC_CTLR pre:          0x%lx\r\n",
+    shell_printf("  GICC_CTLR pre:          0x%lx\r\n",
                 (unsigned long)s->gicc_ctlr_pre);
-    uart_printf("  GICD_IGROUPR[0] pre:    0x%lx\r\n",
+    shell_printf("  GICD_IGROUPR[0] pre:    0x%lx\r\n",
                 (unsigned long)s->gicd_igroupr0_pre);
-    uart_printf("  GICD_IGROUPR[0] post:   0x%lx  %s\r\n",
+    shell_printf("  GICD_IGROUPR[0] post:   0x%lx  %s\r\n",
                 (unsigned long)s->gicd_igroupr0_post,
                 (s->gicd_igroupr0_post == 0xFFFFFFFFul)
                     ? "(writes held)"
@@ -1447,12 +1447,12 @@ static void diag_print_el2(void)
 static void diag_print_vec(void)
 {
     extern uint32_t cpu_count;
-    uart_puts("\r\nPer-CPU exception counters (Phase 1b):\r\n");
-    uart_puts("  CPU   Sync       IRQ        FIQ        SError\r\n");
-    uart_puts("  ---   --------   --------   --------   --------\r\n");
+    shell_puts("\r\nPer-CPU exception counters (Phase 1b):\r\n");
+    shell_puts("  CPU   Sync       IRQ        FIQ        SError\r\n");
+    shell_puts("  ---   --------   --------   --------   --------\r\n");
     for (uint32_t c = 0; c < cpu_count && c < 4; c++) {
         struct diag_vec_counts *v = diag_vec_counts_cpu(c);
-        uart_printf("  %3lu   %8lu   %8lu   %8lu   %8lu\r\n",
+        shell_printf("  %3lu   %8lu   %8lu   %8lu   %8lu\r\n",
                     (unsigned long)c,
                     (unsigned long)v->sync,
                     (unsigned long)v->irq,
@@ -1488,18 +1488,18 @@ static void diag_print_gic_runtime(void)
     uint64_t sre_post = 0;
     (void)sre_pre; (void)sre_post;
 
-    uart_puts("\r\nGIC runtime state (read from shell task):\r\n");
-    uart_printf("  GICC_CTLR = 0x%x  (bit0=EnGrp1 bit4=FIQByp!disG1 "
+    shell_puts("\r\nGIC runtime state (read from shell task):\r\n");
+    shell_printf("  GICC_CTLR = 0x%x  (bit0=EnGrp1 bit4=FIQByp!disG1 "
                 "bit5=IRQByp!disG1 bit9=EOImodeNS)\r\n",
                 *gicc_ctlr);
-    uart_printf("  GICC_PMR  = 0x%x\r\n", *gicc_pmr);
-    uart_printf("  GICD_ISENABLER0 = 0x%x  (bit 30 [timer PPI] = %u)\r\n",
+    shell_printf("  GICC_PMR  = 0x%x\r\n", *gicc_pmr);
+    shell_printf("  GICD_ISENABLER0 = 0x%x  (bit 30 [timer PPI] = %u)\r\n",
                 iser, (iser >> 30) & 1);
-    uart_printf("  GICD_ISPENDR0   = 0x%x  (bit 30 [timer pending] = %u)\r\n",
+    shell_printf("  GICD_ISPENDR0   = 0x%x  (bit 30 [timer pending] = %u)\r\n",
                 ispr, (ispr >> 30) & 1);
-    uart_printf("  GICD_IACTIVER0  = 0x%x  (bit 30 [timer active] = %u)\r\n",
+    shell_printf("  GICD_IACTIVER0  = 0x%x  (bit 30 [timer active] = %u)\r\n",
                 iacr, (iacr >> 30) & 1);
-    uart_puts("  ICC_SRE_EL2     = (not probed — access from EL2 "
+    shell_puts("  ICC_SRE_EL2     = (not probed — access from EL2 "
               "traps to EL3 on this platform)\r\n");
 #endif
 }
@@ -1507,15 +1507,15 @@ static void diag_print_gic_runtime(void)
 static void diag_print_fiq(void)
 {
     extern uint32_t cpu_count;
-    uart_puts("\r\nLast FIQ source per CPU (el1_fiq_handler GICC_AIAR):\r\n");
+    shell_puts("\r\nLast FIQ source per CPU (el1_fiq_handler GICC_AIAR):\r\n");
     for (uint32_t c = 0; c < cpu_count && c < 4; c++) {
         uint32_t v = diag_fiq_last(c);
         if ((v & 0xF0000000u) == 0xD0000000u) {
-            uart_printf("  CPU %lu  IRQ=%lu\r\n",
+            shell_printf("  CPU %lu  IRQ=%lu\r\n",
                         (unsigned long)c,
                         (unsigned long)(v & 0x3FFu));
         } else {
-            uart_printf("  CPU %lu  (no FIQ observed)\r\n",
+            shell_printf("  CPU %lu  (no FIQ observed)\r\n",
                         (unsigned long)c);
         }
     }
@@ -1539,7 +1539,7 @@ int cmd_diag(int argc, char *argv[])
         diag_print_fiq();
         diag_print_gic_runtime();
     } else {
-        uart_puts("Usage: diag <el2|vec|fiq|all>\r\n");
+        shell_puts("Usage: diag <el2|vec|fiq|all>\r\n");
         return 1;
     }
     return 0;
@@ -1551,12 +1551,12 @@ int cmd_reboot(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    uart_puts("Rebooting...\r\n");
+    shell_puts("Rebooting...\r\n");
 
     psci_system_reset();
 
     /* If reset fails, spin */
-    uart_puts("Reboot failed!\r\n");
+    shell_puts("Reboot failed!\r\n");
     while (1) {
 #if defined(PLATFORM_X86_64)
         __asm__ volatile("hlt");
@@ -1579,27 +1579,27 @@ int cmd_vmm(int argc, char *argv[])
     struct vmm_stats stats;
     vmm_get_stats(&stats);
 
-    uart_puts("Virtual Memory Statistics:\r\n");
-    uart_puts("\r\n");
-    uart_printf("  L1 tables:       %lu\r\n", (unsigned long)stats.l1_tables);
-    uart_printf("  L2 tables:       %lu\r\n", (unsigned long)stats.l2_tables);
-    uart_printf("  Blocks mapped:   %lu (2MB each)\r\n", (unsigned long)stats.blocks_mapped);
-    uart_printf("  Bytes mapped:    %lu MB\r\n", (unsigned long)(stats.bytes_mapped / (1024 * 1024)));
-    uart_puts("\r\n");
+    shell_puts("Virtual Memory Statistics:\r\n");
+    shell_puts("\r\n");
+    shell_printf("  L1 tables:       %lu\r\n", (unsigned long)stats.l1_tables);
+    shell_printf("  L2 tables:       %lu\r\n", (unsigned long)stats.l2_tables);
+    shell_printf("  Blocks mapped:   %lu (2MB each)\r\n", (unsigned long)stats.blocks_mapped);
+    shell_printf("  Bytes mapped:    %lu MB\r\n", (unsigned long)(stats.bytes_mapped / (1024 * 1024)));
+    shell_puts("\r\n");
 
-    uart_puts("Memory Regions:\r\n");
-    uart_puts("  Region           Start            End              Flags\r\n");
-    uart_puts("  ---------------  ---------------  ---------------  -----\r\n");
+    shell_puts("Memory Regions:\r\n");
+    shell_puts("  Region           Start            End              Flags\r\n");
+    shell_puts("  ---------------  ---------------  ---------------  -----\r\n");
 
     /* Kernel code/data region */
-    uart_printf("  Kernel           0x%08lx       0x%08lx       RWX\r\n",
+    shell_printf("  Kernel           0x%08lx       0x%08lx       RWX\r\n",
                 (unsigned long)0x40000000, (unsigned long)0x40200000);
 
     /* Device MMIO region */
-    uart_printf("  MMIO (Devices)   0x%08lx       0x%08lx       RW-\r\n",
+    shell_printf("  MMIO (Devices)   0x%08lx       0x%08lx       RW-\r\n",
                 (unsigned long)0x08000000, (unsigned long)0x10000000);
 
-    uart_puts("\r\n");
+    shell_puts("\r\n");
     return 0;
 }
 
@@ -1614,18 +1614,18 @@ int cmd_ipc(int argc, char *argv[])
     struct ipc_stats stats;
     ipc_get_stats(&stats);
 
-    uart_puts("IPC Statistics:\r\n");
-    uart_puts("\r\n");
+    shell_puts("IPC Statistics:\r\n");
+    shell_puts("\r\n");
 
-    uart_puts("  Message Queues:\r\n");
-    uart_printf("    Active queues:     %lu\r\n", (unsigned long)stats.queue_count);
-    uart_printf("    Total msgs sent:   %lu\r\n", (unsigned long)stats.total_msgs_sent);
-    uart_printf("    Total msgs recv:   %lu\r\n", (unsigned long)stats.total_msgs_recv);
-    uart_puts("\r\n");
+    shell_puts("  Message Queues:\r\n");
+    shell_printf("    Active queues:     %lu\r\n", (unsigned long)stats.queue_count);
+    shell_printf("    Total msgs sent:   %lu\r\n", (unsigned long)stats.total_msgs_sent);
+    shell_printf("    Total msgs recv:   %lu\r\n", (unsigned long)stats.total_msgs_recv);
+    shell_puts("\r\n");
 
-    uart_puts("  Shared Buffers:\r\n");
-    uart_printf("    Active buffers:    %lu\r\n", (unsigned long)stats.buffer_count);
-    uart_puts("\r\n");
+    shell_puts("  Shared Buffers:\r\n");
+    shell_printf("    Active buffers:    %lu\r\n", (unsigned long)stats.buffer_count);
+    shell_puts("\r\n");
 
     return 0;
 }
@@ -1639,33 +1639,33 @@ static void model_show_pools(void)
     RustPoolStats weight_stats = rust_weight_pool_stats();
     RustPoolStats workspace_stats = rust_workspace_pool_stats();
 
-    uart_puts("Model Memory Pools:\r\n");
-    uart_puts("\r\n");
+    shell_puts("Model Memory Pools:\r\n");
+    shell_puts("\r\n");
 
-    uart_puts("  Weight Pool (read-only model parameters):\r\n");
-    uart_printf("    Block size:      %lu KB\r\n", (unsigned long)block_size_kb);
-    uart_printf("    Total blocks:    %lu\r\n", (unsigned long)weight_stats.total_blocks);
-    uart_printf("    Free blocks:     %lu\r\n", (unsigned long)weight_stats.free_blocks);
-    uart_printf("    Allocated:       %lu\r\n", (unsigned long)weight_stats.allocated_blocks);
-    uart_printf("    Shared:          %lu\r\n", (unsigned long)weight_stats.shared_blocks);
-    uart_printf("    Peak usage:      %lu\r\n", (unsigned long)weight_stats.peak_usage);
-    uart_puts("\r\n");
+    shell_puts("  Weight Pool (read-only model parameters):\r\n");
+    shell_printf("    Block size:      %lu KB\r\n", (unsigned long)block_size_kb);
+    shell_printf("    Total blocks:    %lu\r\n", (unsigned long)weight_stats.total_blocks);
+    shell_printf("    Free blocks:     %lu\r\n", (unsigned long)weight_stats.free_blocks);
+    shell_printf("    Allocated:       %lu\r\n", (unsigned long)weight_stats.allocated_blocks);
+    shell_printf("    Shared:          %lu\r\n", (unsigned long)weight_stats.shared_blocks);
+    shell_printf("    Peak usage:      %lu\r\n", (unsigned long)weight_stats.peak_usage);
+    shell_puts("\r\n");
 
-    uart_puts("  Workspace Pool (inference scratch space):\r\n");
-    uart_printf("    Block size:      %lu KB\r\n", (unsigned long)block_size_kb);
-    uart_printf("    Total blocks:    %lu\r\n", (unsigned long)workspace_stats.total_blocks);
-    uart_printf("    Free blocks:     %lu\r\n", (unsigned long)workspace_stats.free_blocks);
-    uart_printf("    Allocated:       %lu\r\n", (unsigned long)workspace_stats.allocated_blocks);
-    uart_printf("    Shared:          %lu\r\n", (unsigned long)workspace_stats.shared_blocks);
-    uart_printf("    Peak usage:      %lu\r\n", (unsigned long)workspace_stats.peak_usage);
-    uart_puts("\r\n");
+    shell_puts("  Workspace Pool (inference scratch space):\r\n");
+    shell_printf("    Block size:      %lu KB\r\n", (unsigned long)block_size_kb);
+    shell_printf("    Total blocks:    %lu\r\n", (unsigned long)workspace_stats.total_blocks);
+    shell_printf("    Free blocks:     %lu\r\n", (unsigned long)workspace_stats.free_blocks);
+    shell_printf("    Allocated:       %lu\r\n", (unsigned long)workspace_stats.allocated_blocks);
+    shell_printf("    Shared:          %lu\r\n", (unsigned long)workspace_stats.shared_blocks);
+    shell_printf("    Peak usage:      %lu\r\n", (unsigned long)workspace_stats.peak_usage);
+    shell_puts("\r\n");
 
     size_t total_blocks = weight_stats.total_blocks + workspace_stats.total_blocks;
     size_t total_mb = total_blocks * block_size_kb / 1024;
     size_t free_blocks = weight_stats.free_blocks + workspace_stats.free_blocks;
     size_t free_mb = free_blocks * block_size_kb / 1024;
 
-    uart_printf("  Total: %lu blocks (%lu MB), %lu free (%lu MB)\r\n",
+    shell_printf("  Total: %lu blocks (%lu MB), %lu free (%lu MB)\r\n",
                 (unsigned long)total_blocks, (unsigned long)total_mb,
                 (unsigned long)free_blocks, (unsigned long)free_mb);
 }
@@ -1779,13 +1779,13 @@ static int model_preload_start(const char *name)
         }
     }
     if (slot < 0) {
-        uart_puts("model preload: all preload slots busy\r\n");
+        shell_puts("model preload: all preload slots busy\r\n");
         return -1;
     }
 
     /* Check if already loaded. */
     if (rust_model_find(name) >= 0) {
-        uart_printf("model preload: '%s' already loaded\r\n", name);
+        shell_printf("model preload: '%s' already loaded\r\n", name);
         return 0;
     }
 
@@ -1803,12 +1803,12 @@ static int model_preload_start(const char *name)
         /* Treat the name as a VFS path for general model preloading. */
         char resolved[VFS_MAX_PATH];
         if (shell_resolve_path(name, resolved, sizeof(resolved)) < 0) {
-            uart_printf("model preload: path too long: '%s'\r\n", name);
+            shell_printf("model preload: path too long: '%s'\r\n", name);
             return -1;
         }
         struct vfs_entry_info finfo;
         if (vfs_stat_path(resolved, &finfo) != 0) {
-            uart_printf("model preload: '%s' not found (not a built-in "
+            shell_printf("model preload: '%s' not found (not a built-in "
                         "or VFS path)\r\n", name);
             return -1;
         }
@@ -1828,11 +1828,11 @@ static int model_preload_start(const char *name)
                                  (void *)(uintptr_t)slot);
     if (!t) {
         preload_status[slot] = -1;
-        uart_puts("model preload: failed to create background task\r\n");
+        shell_puts("model preload: failed to create background task\r\n");
         return -1;
     }
     scheduler_add_task(t);
-    uart_printf("Preloading '%s' in background (slot %d, task '%s')\r\n",
+    shell_printf("Preloading '%s' in background (slot %d, task '%s')\r\n",
                 preload_name[slot], slot, task_name);
     return 0;
 }
@@ -1896,7 +1896,7 @@ void model_boot_preload(void)
     }
 
     if (started > 0) {
-        uart_printf("[boot] Started %d model preload(s) from /mnt/files/preload.conf\r\n",
+        shell_printf("[boot] Started %d model preload(s) from /mnt/files/preload.conf\r\n",
                     started);
     }
 }
@@ -1904,7 +1904,7 @@ void model_boot_preload(void)
 static int model_load(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: model load <path|mnist>\r\n");
+        shell_puts("Usage: model load <path|mnist>\r\n");
         return -1;
     }
 
@@ -1913,31 +1913,31 @@ static int model_load(int argc, char *argv[])
     if (strcmp(argv[2], "mnist") == 0) {
         int idx = rust_model_load_builtin_mnist();
         if (idx < 0) {
-            uart_puts("model load: built-in MNIST not available\r\n");
+            shell_puts("model load: built-in MNIST not available\r\n");
             return -1;
         }
-        uart_printf("Loaded built-in MNIST (slot %d)\r\n", idx);
+        shell_printf("Loaded built-in MNIST (slot %d)\r\n", idx);
         return 0;
     }
 
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[2], resolved, sizeof(resolved)) < 0) {
-        uart_puts("model load: path too long\r\n");
+        shell_puts("model load: path too long\r\n");
         return -1;
     }
 
     /* Get file size */
     struct vfs_entry_info info;
     if (vfs_stat_path(resolved, &info) != 0) {
-        uart_printf("model load: %s: file not found\r\n", resolved);
+        shell_printf("model load: %s: file not found\r\n", resolved);
         return -1;
     }
     if (info.type != 0) {
-        uart_printf("model load: %s: not a file\r\n", resolved);
+        shell_printf("model load: %s: not a file\r\n", resolved);
         return -1;
     }
     if (info.size == 0) {
-        uart_puts("model load: file is empty\r\n");
+        shell_puts("model load: file is empty\r\n");
         return -1;
     }
 
@@ -1945,14 +1945,14 @@ static int model_load(int argc, char *argv[])
     size_t pages_needed = (info.size + 4095) / 4096;
     uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
     if (!buf) {
-        uart_puts("model load: out of memory for read buffer\r\n");
+        shell_puts("model load: out of memory for read buffer\r\n");
         return -1;
     }
 
     /* Read the file */
     int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
     if (bytes_read <= 0) {
-        uart_printf("model load: failed to read %s\r\n", resolved);
+        shell_printf("model load: failed to read %s\r\n", resolved);
         pmm_free_pages(buf, pages_needed);
         return -1;
     }
@@ -1975,22 +1975,22 @@ static int model_load(int argc, char *argv[])
     pmm_free_pages(buf, pages_needed);
 
     if (result < 0) {
-        uart_printf("model load: failed to load %s (parse error)\r\n", model_name);
+        shell_printf("model load: failed to load %s (parse error)\r\n", model_name);
         return -1;
     }
 
     /* Show result */
     RustModelInfo minfo;
     if (rust_model_get_info((uint32_t)result, &minfo) == 0) {
-        uart_printf("Loaded model '%s' (slot %d)\r\n", model_name, result);
-        uart_printf("  Format:     ONNX\r\n");
-        uart_printf("  Parameters: %lu\r\n", (unsigned long)minfo.param_count);
-        uart_printf("  Weights:    %lu bytes\r\n", (unsigned long)minfo.weight_size);
-        uart_printf("  Nodes:      %lu\r\n", (unsigned long)minfo.node_count);
-        uart_printf("  Inputs:     %lu\r\n", (unsigned long)minfo.input_count);
-        uart_printf("  Outputs:    %lu\r\n", (unsigned long)minfo.output_count);
+        shell_printf("Loaded model '%s' (slot %d)\r\n", model_name, result);
+        shell_printf("  Format:     ONNX\r\n");
+        shell_printf("  Parameters: %lu\r\n", (unsigned long)minfo.param_count);
+        shell_printf("  Weights:    %lu bytes\r\n", (unsigned long)minfo.weight_size);
+        shell_printf("  Nodes:      %lu\r\n", (unsigned long)minfo.node_count);
+        shell_printf("  Inputs:     %lu\r\n", (unsigned long)minfo.input_count);
+        shell_printf("  Outputs:    %lu\r\n", (unsigned long)minfo.output_count);
     } else {
-        uart_printf("Loaded model '%s' (slot %d)\r\n", model_name, result);
+        shell_printf("Loaded model '%s' (slot %d)\r\n", model_name, result);
     }
 
     return 0;
@@ -2000,18 +2000,18 @@ static int model_list(void)
 {
     uint32_t count = rust_model_count();
     if (count == 0) {
-        uart_puts("No models loaded.\r\n");
+        shell_puts("No models loaded.\r\n");
         return 0;
     }
 
-    uart_printf("Loaded models (%lu):\r\n", (unsigned long)count);
-    uart_puts("  Idx  Name                     Weights   Uses  Pin  Last(ms)\r\n");
-    uart_puts("  ---  ----                     -------   ----  ---  --------\r\n");
+    shell_printf("Loaded models (%lu):\r\n", (unsigned long)count);
+    shell_puts("  Idx  Name                     Weights   Uses  Pin  Last(ms)\r\n");
+    shell_puts("  ---  ----                     -------   ----  ---  --------\r\n");
 
     for (uint32_t i = 0; i < 8; i++) {
         RustModelInfo info;
         if (rust_model_get_info(i, &info) == 0) {
-            uart_printf("  %lu    %-24s %-9lu %-5lu %-3s  %lu\r\n",
+            shell_printf("  %lu    %-24s %-9lu %-5lu %-3s  %lu\r\n",
                         (unsigned long)i,
                         (const char *)info.name,
                         (unsigned long)info.weight_size,
@@ -2026,7 +2026,7 @@ static int model_list(void)
 static int model_info(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: model info <name|idx>\r\n");
+        shell_puts("Usage: model info <name|idx>\r\n");
         return -1;
     }
 
@@ -2040,26 +2040,26 @@ static int model_info(int argc, char *argv[])
     }
 
     if (idx < 0) {
-        uart_printf("model info: '%s' not found\r\n", argv[2]);
+        shell_printf("model info: '%s' not found\r\n", argv[2]);
         return -1;
     }
 
     RustModelInfo info;
     if (rust_model_get_info((uint32_t)idx, &info) != 0) {
-        uart_printf("model info: slot %d is empty\r\n", idx);
+        shell_printf("model info: slot %d is empty\r\n", idx);
         return -1;
     }
 
-    uart_printf("Model: %s (slot %d)\r\n", (const char *)info.name, idx);
-    uart_printf("  Format:      %s\r\n",
+    shell_printf("Model: %s (slot %d)\r\n", (const char *)info.name, idx);
+    shell_printf("  Format:      %s\r\n",
                 info.format == 1 ? "ONNX" :
                 info.format == 0 ? "GGUF" : "Raw");
-    uart_printf("  Parameters:  %lu\r\n", (unsigned long)info.param_count);
-    uart_printf("  Weight size: %lu bytes\r\n", (unsigned long)info.weight_size);
-    uart_printf("  Workspace:   %lu bytes\r\n", (unsigned long)info.workspace_size);
-    uart_printf("  Nodes:       %lu\r\n", (unsigned long)info.node_count);
-    uart_printf("  Inputs:      %lu\r\n", (unsigned long)info.input_count);
-    uart_printf("  Outputs:     %lu\r\n", (unsigned long)info.output_count);
+    shell_printf("  Parameters:  %lu\r\n", (unsigned long)info.param_count);
+    shell_printf("  Weight size: %lu bytes\r\n", (unsigned long)info.weight_size);
+    shell_printf("  Workspace:   %lu bytes\r\n", (unsigned long)info.workspace_size);
+    shell_printf("  Nodes:       %lu\r\n", (unsigned long)info.node_count);
+    shell_printf("  Inputs:      %lu\r\n", (unsigned long)info.input_count);
+    shell_printf("  Outputs:     %lu\r\n", (unsigned long)info.output_count);
 
     return 0;
 }
@@ -2067,7 +2067,7 @@ static int model_info(int argc, char *argv[])
 static int model_unload(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: model unload <name|idx>\r\n");
+        shell_puts("Usage: model unload <name|idx>\r\n");
         return -1;
     }
 
@@ -2080,15 +2080,15 @@ static int model_unload(int argc, char *argv[])
     }
 
     if (idx < 0) {
-        uart_printf("model unload: '%s' not found\r\n", argv[2]);
+        shell_printf("model unload: '%s' not found\r\n", argv[2]);
         return -1;
     }
 
     if (rust_model_unload((uint32_t)idx) == 0) {
-        uart_printf("Unloaded model from slot %d\r\n", idx);
+        shell_printf("Unloaded model from slot %d\r\n", idx);
         return 0;
     } else {
-        uart_printf("model unload: failed for slot %d\r\n", idx);
+        shell_printf("model unload: failed for slot %d\r\n", idx);
         return -1;
     }
 }
@@ -2102,7 +2102,7 @@ extern int rust_infer_and_print(uint32_t model_index);
 static int model_infer(int argc, char *argv[])
 {
     if (argc < 3) {
-        uart_puts("Usage: model infer <name|idx>\r\n");
+        shell_puts("Usage: model infer <name|idx>\r\n");
         return -1;
     }
 
@@ -2116,13 +2116,13 @@ static int model_infer(int argc, char *argv[])
     }
 
     if (idx < 0) {
-        uart_printf("model infer: '%s' not found\r\n", argv[2]);
+        shell_printf("model infer: '%s' not found\r\n", argv[2]);
         return -1;
     }
 
     int result = rust_infer_and_print((uint32_t)idx);
     if (result < 0) {
-        uart_printf("model infer: failed (error %d)\r\n", result);
+        shell_printf("model infer: failed (error %d)\r\n", result);
         return -1;
     }
 
@@ -2134,7 +2134,7 @@ int cmd_model(int argc, char *argv[])
     if (argc < 2) {
         /* No subcommand — show pools + loaded model summary */
         model_show_pools();
-        uart_puts("\r\n");
+        shell_puts("\r\n");
         model_list();
         return 0;
     }
@@ -2167,22 +2167,22 @@ int cmd_model(int argc, char *argv[])
     if (strcmp(subcmd, "stats") == 0) {
         RustInferStats stats;
         if (rust_infer_stats(&stats) == 0) {
-            uart_puts("Inference Statistics:\r\n");
-            uart_printf("  Total inferences: %lu\r\n", (unsigned long)stats.total_inferences);
+            shell_puts("Inference Statistics:\r\n");
+            shell_printf("  Total inferences: %lu\r\n", (unsigned long)stats.total_inferences);
             if (stats.total_inferences > 0) {
                 unsigned long avg_us = (unsigned long)(stats.total_time_ns / stats.total_inferences / 1000);
-                uart_printf("  Avg latency:      %lu us\r\n", avg_us);
-                uart_printf("  Min latency:      %lu us\r\n", (unsigned long)(stats.min_time_ns / 1000));
-                uart_printf("  Max latency:      %lu us\r\n", (unsigned long)(stats.max_time_ns / 1000));
-                uart_printf("  Last latency:     %lu us\r\n", (unsigned long)(stats.last_time_ns / 1000));
+                shell_printf("  Avg latency:      %lu us\r\n", avg_us);
+                shell_printf("  Min latency:      %lu us\r\n", (unsigned long)(stats.min_time_ns / 1000));
+                shell_printf("  Max latency:      %lu us\r\n", (unsigned long)(stats.max_time_ns / 1000));
+                shell_printf("  Last latency:     %lu us\r\n", (unsigned long)(stats.last_time_ns / 1000));
             }
-            uart_printf("  Errors:           %lu\r\n", (unsigned long)stats.errors);
+            shell_printf("  Errors:           %lu\r\n", (unsigned long)stats.errors);
         }
         return 0;
     }
     if (strcmp(subcmd, "bench") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: model bench <name|idx> [iterations]\r\n");
+            shell_puts("Usage: model bench <name|idx> [iterations]\r\n");
             return -1;
         }
         int idx = -1;
@@ -2193,7 +2193,7 @@ int cmd_model(int argc, char *argv[])
             idx = rust_model_find(argv[2]);
         }
         if (idx < 0) {
-            uart_printf("model bench: '%s' not found\r\n", argv[2]);
+            shell_printf("model bench: '%s' not found\r\n", argv[2]);
             return -1;
         }
         uint32_t iters = 10;  /* Default 10 iterations */
@@ -2203,14 +2203,14 @@ int cmd_model(int argc, char *argv[])
                 iters = parsed_iters;
             }
         }
-        uart_printf("Benchmarking model '%s' (%lu iterations)...\r\n",
+        shell_printf("Benchmarking model '%s' (%lu iterations)...\r\n",
                     argv[2], (unsigned long)iters);
         return rust_infer_bench((uint32_t)idx, iters);
     }
 
     if (strcmp(subcmd, "pin") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: model pin <name|idx>\r\n");
+            shell_puts("Usage: model pin <name|idx>\r\n");
             return -1;
         }
         int idx = -1;
@@ -2221,20 +2221,20 @@ int cmd_model(int argc, char *argv[])
             idx = rust_model_find(argv[2]);
         }
         if (idx < 0) {
-            uart_printf("model pin: '%s' not found\r\n", argv[2]);
+            shell_printf("model pin: '%s' not found\r\n", argv[2]);
             return -1;
         }
         int rc = rust_model_pin((uint32_t)idx);
         if (rc < 0) {
-            uart_printf("model pin: failed (slot %d)\r\n", idx);
+            shell_printf("model pin: failed (slot %d)\r\n", idx);
             return -1;
         }
-        uart_printf("Pinned model at slot %d (protected from LRU eviction)\r\n", idx);
+        shell_printf("Pinned model at slot %d (protected from LRU eviction)\r\n", idx);
         return 0;
     }
     if (strcmp(subcmd, "unpin") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: model unpin <name|idx>\r\n");
+            shell_puts("Usage: model unpin <name|idx>\r\n");
             return -1;
         }
         int idx = -1;
@@ -2245,30 +2245,30 @@ int cmd_model(int argc, char *argv[])
             idx = rust_model_find(argv[2]);
         }
         if (idx < 0) {
-            uart_printf("model unpin: '%s' not found\r\n", argv[2]);
+            shell_printf("model unpin: '%s' not found\r\n", argv[2]);
             return -1;
         }
         int rc = rust_model_unpin((uint32_t)idx);
         if (rc < 0) {
-            uart_printf("model unpin: failed (slot %d)\r\n", idx);
+            shell_printf("model unpin: failed (slot %d)\r\n", idx);
             return -1;
         }
-        uart_printf("Unpinned model at slot %d (eligible for LRU eviction)\r\n", idx);
+        shell_printf("Unpinned model at slot %d (eligible for LRU eviction)\r\n", idx);
         return 0;
     }
 
     if (strcmp(subcmd, "preload") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: model preload <name>\r\n");
-            uart_puts("  Loads a model in a background task. Currently only 'mnist' supported.\r\n");
-            uart_puts("  Check progress with 'model preload-status'.\r\n");
+            shell_puts("Usage: model preload <name>\r\n");
+            shell_puts("  Loads a model in a background task. Currently only 'mnist' supported.\r\n");
+            shell_puts("  Check progress with 'model preload-status'.\r\n");
             return -1;
         }
         return model_preload_start(argv[2]);
     }
     if (strcmp(subcmd, "preload-wait") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: model preload-wait <name> [timeout_ms]\r\n");
+            shell_puts("Usage: model preload-wait <name> [timeout_ms]\r\n");
             return -1;
         }
         uint32_t timeout = 5000;
@@ -2280,31 +2280,31 @@ int cmd_model(int argc, char *argv[])
         }
         int rc = model_preload_wait(argv[2], timeout);
         if (rc >= 0) {
-            uart_printf("Model '%s' ready (slot %d)\r\n", argv[2], rc);
+            shell_printf("Model '%s' ready (slot %d)\r\n", argv[2], rc);
         } else if (rc == -1) {
-            uart_printf("No preload in-flight for '%s'\r\n", argv[2]);
+            shell_printf("No preload in-flight for '%s'\r\n", argv[2]);
         } else if (rc == -2) {
-            uart_printf("Timeout waiting for '%s'\r\n", argv[2]);
+            shell_printf("Timeout waiting for '%s'\r\n", argv[2]);
         } else {
-            uart_printf("Preload of '%s' failed\r\n", argv[2]);
+            shell_printf("Preload of '%s' failed\r\n", argv[2]);
         }
         return (rc >= 0) ? 0 : -1;
     }
     if (strcmp(subcmd, "preload-status") == 0) {
-        uart_puts("Preload slots:\r\n");
-        uart_puts("  Slot  Status    Result\r\n");
-        uart_puts("  ----  --------  ------\r\n");
+        shell_puts("Preload slots:\r\n");
+        shell_puts("  Slot  Status    Result\r\n");
+        shell_puts("  ----  --------  ------\r\n");
         for (int i = 0; i < MODEL_PRELOAD_MAX; i++) {
             int st = preload_status[i];
             const char *label = st == 0 ? "free" :
                                 st == 1 ? "loading" :
                                 st == 2 ? "done" : "failed";
-            uart_printf("  %4d  %-8s  %d\r\n", i, label, preload_result[i]);
+            shell_printf("  %4d  %-8s  %d\r\n", i, label, preload_result[i]);
         }
         return 0;
     }
 
-    uart_puts("Usage: model [load|list|info|unload|pin|unpin|preload|preload-status|"
+    shell_puts("Usage: model [load|list|info|unload|pin|unpin|preload|preload-status|"
               "infer|bench|stats|pools|gpu]\r\n");
     return -1;
 }
@@ -2319,33 +2319,33 @@ int cmd_dtb(int argc, char *argv[])
 
     const fdt_info_t *info = dtb_get_info();
 
-    uart_puts("Device Tree Information:\r\n");
-    uart_puts("\r\n");
-    uart_printf("  Status:       %s\r\n", info->valid ? "parsed from DTB" : "using defaults");
-    uart_puts("\r\n");
+    shell_puts("Device Tree Information:\r\n");
+    shell_puts("\r\n");
+    shell_printf("  Status:       %s\r\n", info->valid ? "parsed from DTB" : "using defaults");
+    shell_puts("\r\n");
 
-    uart_puts("  Memory:\r\n");
-    uart_printf("    Base:       0x%lx\r\n", (unsigned long)info->ram_base);
-    uart_printf("    Size:       %lu MB\r\n", (unsigned long)(info->ram_size / (1024 * 1024)));
-    uart_puts("\r\n");
+    shell_puts("  Memory:\r\n");
+    shell_printf("    Base:       0x%lx\r\n", (unsigned long)info->ram_base);
+    shell_printf("    Size:       %lu MB\r\n", (unsigned long)(info->ram_size / (1024 * 1024)));
+    shell_puts("\r\n");
 
-    uart_puts("  UART:\r\n");
-    uart_printf("    Base:       0x%lx\r\n", (unsigned long)info->uart_base);
-    uart_printf("    IRQ:        %lu\r\n", (unsigned long)info->uart_irq);
-    uart_puts("\r\n");
+    shell_puts("  UART:\r\n");
+    shell_printf("    Base:       0x%lx\r\n", (unsigned long)info->uart_base);
+    shell_printf("    IRQ:        %lu\r\n", (unsigned long)info->uart_irq);
+    shell_puts("\r\n");
 
-    uart_puts("  GIC:\r\n");
-    uart_printf("    Dist base:  0x%lx\r\n", (unsigned long)info->gic_dist_base);
-    uart_printf("    CPU base:   0x%lx\r\n", (unsigned long)info->gic_cpu_base);
-    uart_puts("\r\n");
+    shell_puts("  GIC:\r\n");
+    shell_printf("    Dist base:  0x%lx\r\n", (unsigned long)info->gic_dist_base);
+    shell_printf("    CPU base:   0x%lx\r\n", (unsigned long)info->gic_cpu_base);
+    shell_puts("\r\n");
 
-    uart_puts("  CPUs:\r\n");
-    uart_printf("    Count:      %lu\r\n", (unsigned long)info->cpu_count);
-    uart_puts("\r\n");
+    shell_puts("  CPUs:\r\n");
+    shell_printf("    Count:      %lu\r\n", (unsigned long)info->cpu_count);
+    shell_puts("\r\n");
 
-    uart_puts("  Timer:\r\n");
-    uart_printf("    IRQ:        %lu\r\n", (unsigned long)info->timer_irq);
-    uart_puts("\r\n");
+    shell_puts("  Timer:\r\n");
+    shell_printf("    IRQ:        %lu\r\n", (unsigned long)info->timer_irq);
+    shell_puts("\r\n");
 
     return 0;
 }
@@ -2363,7 +2363,7 @@ int cmd_dtb(int argc, char *argv[])
 int cmd_peek(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("usage: peek <phys-hex> [count]\r\n");
+        shell_puts("usage: peek <phys-hex> [count]\r\n");
         return -1;
     }
 
@@ -2376,7 +2376,7 @@ int cmd_peek(int argc, char *argv[])
         if (*s >= '0' && *s <= '9') d = *s - '0';
         else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
         else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
-        else { uart_puts("bad hex address\r\n"); return -1; }
+        else { shell_puts("bad hex address\r\n"); return -1; }
         addr = (addr << 4) | d;
         s++;
     }
@@ -2385,11 +2385,11 @@ int cmd_peek(int argc, char *argv[])
     if (argc >= 3) {
         count = 0;
         for (const char *p = argv[2]; *p; p++) {
-            if (*p < '0' || *p > '9') { uart_puts("bad count\r\n"); return -1; }
+            if (*p < '0' || *p > '9') { shell_puts("bad count\r\n"); return -1; }
             count = count * 10 + (*p - '0');
         }
         if (count == 0 || count > 256) {
-            uart_puts("count must be 1-256\r\n");
+            shell_puts("count must be 1-256\r\n");
             return -1;
         }
     }
@@ -2399,12 +2399,12 @@ int cmd_peek(int argc, char *argv[])
         volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)a;
         uint32_t val = *p;
         if (count == 1) {
-            uart_printf("[0x%lx] = 0x%08lx\r\n",
+            shell_printf("[0x%lx] = 0x%08lx\r\n",
                         (unsigned long)a, (unsigned long)val);
         } else {
-            if (i % 4 == 0) uart_printf("[0x%lx]", (unsigned long)a);
-            uart_printf(" %08lx", (unsigned long)val);
-            if (i % 4 == 3 || i == count - 1) uart_puts("\r\n");
+            if (i % 4 == 0) shell_printf("[0x%lx]", (unsigned long)a);
+            shell_printf(" %08lx", (unsigned long)val);
+            if (i % 4 == 3 || i == count - 1) shell_puts("\r\n");
         }
     }
     return 0;
@@ -2422,7 +2422,7 @@ int cmd_gpu(int argc, char *argv[])
     if (argc >= 2 && strcmp(argv[1], "read") == 0) {
 #if defined(PLATFORM_JETSON_ORIN_NANO)
         if (argc < 3) {
-            uart_puts("usage: gpu read <hex-offset>\r\n");
+            shell_puts("usage: gpu read <hex-offset>\r\n");
             return -1;
         }
         /* Parse hex offset. Accepts "0x1200" or "1200". */
@@ -2434,17 +2434,17 @@ int cmd_gpu(int argc, char *argv[])
             if (*s >= '0' && *s <= '9') d = *s - '0';
             else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
             else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
-            else { uart_puts("bad hex offset\r\n"); return -1; }
+            else { shell_puts("bad hex offset\r\n"); return -1; }
             off = (off << 4) | d;
             s++;
         }
         volatile uint32_t *reg = (volatile uint32_t *)((uintptr_t)GPU_BASE + off);
         uint32_t val = *reg;
-        uart_printf("GPU[0x%lx] = 0x%08lx\r\n",
+        shell_printf("GPU[0x%lx] = 0x%08lx\r\n",
                     (unsigned long)off, (unsigned long)val);
         return 0;
 #else
-        uart_puts("gpu read: only supported on JETSON_ORIN_NANO\r\n");
+        shell_puts("gpu read: only supported on JETSON_ORIN_NANO\r\n");
         return -1;
 #endif
     }
@@ -2452,17 +2452,17 @@ int cmd_gpu(int argc, char *argv[])
     gpu_info_t info = {0};
     int rc = gpu_get_info(&info);
     if (rc != GPU_OK) {
-        uart_printf("GPU info unavailable (rc=%d)\r\n", rc);
+        shell_printf("GPU info unavailable (rc=%d)\r\n", rc);
         return rc;
     }
-    uart_puts("GPU Information:\r\n\r\n");
-    uart_printf("  Driver:         %s\r\n", info.name ? info.name : "(null)");
-    uart_printf("  Device:         %s\r\n", info.device ? info.device : "(null)");
-    uart_printf("  Capabilities:   0x%08lx\r\n", (unsigned long)info.capabilities);
-    uart_printf("  CUDA cores:     %lu\r\n", (unsigned long)info.cuda_cores);
-    uart_printf("  Tensor cores:   %lu\r\n", (unsigned long)info.tensor_cores);
-    uart_printf("  Unified mem:    %s\r\n", info.unified_memory ? "yes" : "no");
-    uart_printf("  Memory size:    %lu\r\n", (unsigned long)info.memory_size);
+    shell_puts("GPU Information:\r\n\r\n");
+    shell_printf("  Driver:         %s\r\n", info.name ? info.name : "(null)");
+    shell_printf("  Device:         %s\r\n", info.device ? info.device : "(null)");
+    shell_printf("  Capabilities:   0x%08lx\r\n", (unsigned long)info.capabilities);
+    shell_printf("  CUDA cores:     %lu\r\n", (unsigned long)info.cuda_cores);
+    shell_printf("  Tensor cores:   %lu\r\n", (unsigned long)info.tensor_cores);
+    shell_printf("  Unified mem:    %s\r\n", info.unified_memory ? "yes" : "no");
+    shell_printf("  Memory size:    %lu\r\n", (unsigned long)info.memory_size);
     return 0;
 }
 
@@ -2484,7 +2484,7 @@ int cmd_nvgpu(int argc, char *argv[])
     static struct ga10b_bringup b;
 
     if (argc < 2 || strcmp(argv[1], "info") == 0) {
-        uart_puts("GA10B firmware inventory:\r\n");
+        shell_puts("GA10B firmware inventory:\r\n");
         static const char *NAMES[GA10B_FW_KIND_COUNT] = {
             "acr_text", "acr_data", "acr_manifest",
             "fecs", "fecs_sig",
@@ -2497,14 +2497,14 @@ int cmd_nvgpu(int argc, char *argv[])
             struct ga10b_firmware_blob blob;
             int rc = ga10b_firmware_get((enum ga10b_firmware_kind)k, &blob);
             if (rc < 0) {
-                uart_printf("  %-20s  (not embedded)\r\n", NAMES[k]);
+                shell_printf("  %-20s  (not embedded)\r\n", NAMES[k]);
             } else {
-                uart_printf("  %-20s  %8lu bytes\r\n",
+                shell_printf("  %-20s  %8lu bytes\r\n",
                             NAMES[k], (unsigned long)blob.size);
             }
         }
         if (argc < 2) {
-            uart_printf("\r\nState: %d  Last error phase: %d\r\n",
+            shell_printf("\r\nState: %d  Last error phase: %d\r\n",
                         (int)b.state, b.last_error_phase);
         }
         return 0;
@@ -2512,7 +2512,7 @@ int cmd_nvgpu(int argc, char *argv[])
 
     if (strcmp(argv[1], "prepare") == 0) {
         int rc = ga10b_bringup_prepare(&b);
-        uart_printf("prepare: rc=%d\r\n", rc);
+        shell_printf("prepare: rc=%d\r\n", rc);
         return rc;
     }
 
@@ -2523,11 +2523,11 @@ int cmd_nvgpu(int argc, char *argv[])
          * zeroed `struct falcon` and fail size checks. */
         int rc = ga10b_bringup_prepare(&b);
         if (rc < 0) {
-            uart_printf("prepare failed: rc=%d\r\n", rc);
+            shell_printf("prepare failed: rc=%d\r\n", rc);
             return rc;
         }
         rc = ga10b_bringup_acr(&b);
-        uart_printf("acr: rc=%d, state=%d\r\n", rc, (int)b.state);
+        shell_printf("acr: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
 
@@ -2535,13 +2535,13 @@ int cmd_nvgpu(int argc, char *argv[])
         /* Path 3 (#190): detect Linux's already-bootstrapped Falcon
          * state after a --no-gpu-suspend kexec. Skips phases 1-4. */
         int rc = ga10b_bringup_inherit(&b);
-        uart_printf("inherit: rc=%d, state=%d\r\n", rc, (int)b.state);
+        shell_printf("inherit: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
 
     if (strcmp(argv[1], "run") == 0) {
         int rc = ga10b_bringup_run(&b);
-        uart_printf("run: rc=%d, state=%d, last_err_phase=%d\r\n",
+        shell_printf("run: rc=%d, state=%d, last_err_phase=%d\r\n",
                     rc, (int)b.state, b.last_error_phase);
         return rc;
     }
@@ -2551,40 +2551,40 @@ int cmd_nvgpu(int argc, char *argv[])
      * must have completed so `b->state` satisfies the phase precondition. */
     if (strcmp(argv[1], "fecs") == 0) {
         int rc = ga10b_bringup_fecs(&b);
-        uart_printf("fecs: rc=%d, state=%d\r\n", rc, (int)b.state);
+        shell_printf("fecs: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
     if (strcmp(argv[1], "gpccs") == 0) {
         int rc = ga10b_bringup_gpccs(&b);
-        uart_printf("gpccs: rc=%d, state=%d\r\n", rc, (int)b.state);
+        shell_printf("gpccs: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
     if (strcmp(argv[1], "pmu") == 0) {
         int rc = ga10b_bringup_pmu(&b);
-        uart_printf("pmu: rc=%d, state=%d\r\n", rc, (int)b.state);
+        shell_printf("pmu: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
     if (strcmp(argv[1], "test") == 0) {
         /* Phase 5: FECS method gateway smoke test. */
         int rc = ga10b_bringup_address_space(&b);
-        uart_printf("test: rc=%d, state=%d\r\n", rc, (int)b.state);
+        shell_printf("test: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
 
     if (strcmp(argv[1], "channel") == 0) {
         /* Phase 6: inherit channel from Linux handoff block. */
         int rc = ga10b_bringup_channel(&b);
-        uart_printf("channel: rc=%d, state=%d\r\n", rc, (int)b.state);
+        shell_printf("channel: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
     if (strcmp(argv[1], "submit") == 0) {
         /* Phase 7: pushbuffer smoke test. */
         int rc = ga10b_bringup_smoke_test(&b);
-        uart_printf("submit: rc=%d, state=%d\r\n", rc, (int)b.state);
+        shell_printf("submit: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
 
-    uart_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
+    shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | submit | fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
@@ -2600,7 +2600,7 @@ int cmd_nvgpu(int argc, char *argv[])
 int cmd_sched(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_printf("Scheduler policy: %s\r\n", sched_get_policy());
+        shell_printf("Scheduler policy: %s\r\n", sched_get_policy());
         return 0;
     }
 
@@ -2609,11 +2609,11 @@ int cmd_sched(int argc, char *argv[])
             /* List available policies */
             int count = sched_policy_count();
             const char *current = sched_get_policy();
-            uart_printf("Available policies (%d):\r\n", count);
+            shell_printf("Available policies (%d):\r\n", count);
             for (int i = 0; i < count; i++) {
                 const struct sched_policy_ops *p = sched_policy_get(i);
                 if (p) {
-                    uart_printf("  %s%s\r\n", p->name,
+                    shell_printf("  %s%s\r\n", p->name,
                                 strcmp(p->name, current) == 0 ? " (active)" : "");
                 }
             }
@@ -2623,18 +2623,18 @@ int cmd_sched(int argc, char *argv[])
         /* Switch to named policy */
         const struct sched_policy_ops *policy = sched_find_policy(argv[2]);
         if (!policy) {
-            uart_printf("Unknown policy: '%s'\r\n", argv[2]);
-            uart_puts("Use 'sched policy' to list available policies.\r\n");
+            shell_printf("Unknown policy: '%s'\r\n", argv[2]);
+            shell_puts("Use 'sched policy' to list available policies.\r\n");
             return 1;
         }
 
         int ret = sched_set_policy(policy);
         if (ret < 0) {
-            uart_printf("Failed to switch to policy '%s'\r\n", argv[2]);
+            shell_printf("Failed to switch to policy '%s'\r\n", argv[2]);
             return 1;
         }
 
-        uart_printf("Switched to policy: %s\r\n", policy->name);
+        shell_printf("Switched to policy: %s\r\n", policy->name);
         return 0;
     }
 
@@ -2649,18 +2649,18 @@ int cmd_sched(int argc, char *argv[])
         const char *sub = (argc >= 3) ? argv[2] : "show";
         if (strcmp(sub, "start") == 0) {
             sched_trace_start();
-            uart_printf("Trace recording started (buffer: %u events)\r\n",
+            shell_printf("Trace recording started (buffer: %u events)\r\n",
                         SCHED_TRACE_CAPACITY);
             return 0;
         }
         if (strcmp(sub, "stop") == 0) {
             sched_trace_stop();
-            uart_puts("Trace recording stopped\r\n");
+            shell_puts("Trace recording stopped\r\n");
             return 0;
         }
         if (strcmp(sub, "clear") == 0) {
             sched_trace_clear();
-            uart_puts("Trace buffer cleared\r\n");
+            shell_puts("Trace buffer cleared\r\n");
             return 0;
         }
 
@@ -2672,7 +2672,7 @@ int cmd_sched(int argc, char *argv[])
         uint32_t n = sched_trace_snapshot(buf, DUMP_MAX);
         uint64_t total = sched_trace_total_events();
 
-        uart_printf("Trace: %s   captured %u of %lu total events%s\r\n\r\n",
+        shell_printf("Trace: %s   captured %u of %lu total events%s\r\n\r\n",
                     sched_trace_is_enabled() ? "ON" : "OFF",
                     n, (unsigned long)total,
                     total > SCHED_TRACE_CAPACITY ? " (older overwritten)" : "");
@@ -2684,7 +2684,7 @@ int cmd_sched(int argc, char *argv[])
              * as ' '. Column count chosen to fit a 78-col terminal. */
             enum { TIMELINE_SLOTS = 48 };
             if (n == 0) {
-                uart_puts("(no events recorded — use `sched trace start`)\r\n");
+                shell_puts("(no events recorded — use `sched trace start`)\r\n");
                 return 0;
             }
             uint64_t t_first = buf[0].timestamp_ns;
@@ -2720,23 +2720,23 @@ int cmd_sched(int argc, char *argv[])
             }
 
             uint64_t span_us = span_ns / 1000u;
-            uart_printf("Window: %lu us    Legend: # = run/sched, "
+            shell_printf("Window: %lu us    Legend: # = run/sched, "
                         "> = migrate, . = tick/noise\r\n\r\n",
                         (unsigned long)span_us);
             for (uint32_t c = 0; c <= max_cpu; c++) {
-                uart_printf("CPU %u ", c);
+                shell_printf("CPU %u ", c);
                 for (uint32_t s = 0; s < TIMELINE_SLOTS; s++) {
                     char m = (char)cells[c][s];
-                    uart_putc(m ? m : ' ');
+                    shell_putc(m ? m : ' ');
                 }
-                uart_printf(" (%u events)\r\n", hits[c]);
+                shell_printf(" (%u events)\r\n", hits[c]);
             }
             return 0;
         }
 
         /* Default: tabular dump of the snapshot. */
-        uart_puts("Time(us)    CPU  Event     Task  From->To\r\n");
-        uart_puts("----------  ---  --------  ----  --------\r\n");
+        shell_puts("Time(us)    CPU  Event     Task  From->To\r\n");
+        shell_puts("----------  ---  --------  ----  --------\r\n");
         uint64_t t_first = (n > 0) ? buf[0].timestamp_ns : 0;
         for (uint32_t i = 0; i < n; i++) {
             uint64_t rel = (buf[i].timestamp_ns - t_first) / 1000u;
@@ -2748,13 +2748,13 @@ int cmd_sched(int argc, char *argv[])
             case SCHED_TRACE_PREEMPT: evn = "PREEMPT"; break;
             }
             if (buf[i].event == SCHED_TRACE_MIGRATE) {
-                uart_printf("%10lu  %3u  %-8s  %4u  CPU%u->CPU%u\r\n",
+                shell_printf("%10lu  %3u  %-8s  %4u  CPU%u->CPU%u\r\n",
                             (unsigned long)rel, buf[i].cpu, evn,
                             (unsigned)buf[i].next_task_id,
                             (unsigned)buf[i].prev_cpu,
                             (unsigned)buf[i].cpu);
             } else {
-                uart_printf("%10lu  %3u  %-8s  %4u  %u->%u\r\n",
+                shell_printf("%10lu  %3u  %-8s  %4u  %u->%u\r\n",
                             (unsigned long)rel, buf[i].cpu, evn,
                             (unsigned)buf[i].next_task_id,
                             (unsigned)buf[i].prev_task_id,
@@ -2768,22 +2768,22 @@ int cmd_sched(int argc, char *argv[])
         struct sched_stats stats;
         scheduler_get_stats(&stats);
 
-        uart_puts("Scheduler Statistics:\r\n");
-        uart_printf("  Policy:           %s\r\n", sched_get_policy());
-        uart_printf("  Tasks:            %u\r\n", stats.task_count);
-        uart_printf("  Ready:            %u\r\n", stats.ready_count);
-        uart_printf("  Context switches: %lu\r\n", (unsigned long)stats.context_switches);
-        uart_printf("  Timer ticks:      %lu\r\n", (unsigned long)stats.timer_ticks);
+        shell_puts("Scheduler Statistics:\r\n");
+        shell_printf("  Policy:           %s\r\n", sched_get_policy());
+        shell_printf("  Tasks:            %u\r\n", stats.task_count);
+        shell_printf("  Ready:            %u\r\n", stats.ready_count);
+        shell_printf("  Context switches: %lu\r\n", (unsigned long)stats.context_switches);
+        shell_printf("  Timer ticks:      %lu\r\n", (unsigned long)stats.timer_ticks);
 
 #ifdef CONFIG_AI_SCHEDULER
-        uart_puts("\r\nPer-CPU Utilization:\r\n");
+        shell_puts("\r\nPer-CPU Utilization:\r\n");
         for (uint32_t c = 0; c < cpu_count; c++) {
             struct cpu_runqueue *rq = sched_cpu_rq(c);
             uint32_t pct = 0;
             if (rq->total_ticks > 0) {
                 pct = (uint32_t)(rq->running_ticks * 100 / rq->total_ticks);
             }
-            uart_printf("  CPU %u: %u%% (%lu / %lu ticks)\r\n",
+            shell_printf("  CPU %u: %u%% (%lu / %lu ticks)\r\n",
                         c, pct,
                         (unsigned long)rq->running_ticks,
                         (unsigned long)rq->total_ticks);
@@ -2800,17 +2800,17 @@ int cmd_sched(int argc, char *argv[])
             int n_act;
             sched_ai_get_stats(policy, &ai_dec, &ai_fb, &ai_lat, &hist, &n_act);
             if (ai_dec > 0) {
-                uart_printf("\r\nAI Policy (%s):\r\n", policy);
-                uart_printf("  Decisions:    %u\r\n", ai_dec);
-                uart_printf("  Fallbacks:    %u\r\n", ai_fb);
-                uart_printf("  Avg latency:  %lu ns\r\n", (unsigned long)ai_lat);
+                shell_printf("\r\nAI Policy (%s):\r\n", policy);
+                shell_printf("  Decisions:    %u\r\n", ai_dec);
+                shell_printf("  Fallbacks:    %u\r\n", ai_fb);
+                shell_printf("  Avg latency:  %lu ns\r\n", (unsigned long)ai_lat);
                 if (hist && n_act > 0) {
-                    uart_puts("  Action distribution:\r\n");
+                    shell_puts("  Action distribution:\r\n");
                     for (int a = 0; a < n_act; a++) {
                         if (hist[a] == 0) continue;
                         struct ai_sched_action act;
                         ai_decode_action(a, &act);
-                        uart_printf("    [%d] core=%u pri=%u pre=%u: %u (%u%%)\r\n",
+                        shell_printf("    [%d] core=%u pri=%u pre=%u: %u (%u%%)\r\n",
                                     a, act.core_assignment, act.priority_adj,
                                     act.preempt, hist[a],
                                     (uint32_t)(hist[a] * 100 / ai_dec));
@@ -2832,7 +2832,7 @@ int cmd_sched(int argc, char *argv[])
          */
         int n_policies = sched_policy_count();
         if (n_policies <= 0) {
-            uart_puts("sched compare: no policies registered\r\n");
+            shell_puts("sched compare: no policies registered\r\n");
             return 1;
         }
 
@@ -2847,12 +2847,12 @@ int cmd_sched(int argc, char *argv[])
             }
         }
 
-        uart_puts("Scheduler policy comparison\r\n");
-        uart_puts("---------------------------\r\n");
-        uart_puts("Workload: bench context (" "100"
+        shell_puts("Scheduler policy comparison\r\n");
+        shell_puts("---------------------------\r\n");
+        shell_puts("Workload: bench context (" "100"
                   " round-trips, TASK_PRIORITY_HIGH)\r\n\r\n");
-        uart_puts("Policy           Runtime(ms)   Ctx switches   Avg(us)\r\n");
-        uart_puts("---------------  ------------  -------------  -------\r\n");
+        shell_puts("Policy           Runtime(ms)   Ctx switches   Avg(us)\r\n");
+        shell_puts("---------------  ------------  -------------  -------\r\n");
 
         uint64_t best_avg_ns = UINT64_MAX;
         const char *best_policy = NULL;
@@ -2865,7 +2865,7 @@ int cmd_sched(int argc, char *argv[])
              * scramble — caller will see the label and the row. */
             int rc = sched_set_policy(p);
             if (rc < 0) {
-                uart_printf("%-15s  %-12s  %-13s  %s\r\n",
+                shell_printf("%-15s  %-12s  %-13s  %s\r\n",
                             p->name, "—", "—", "switch failed");
                 continue;
             }
@@ -2892,7 +2892,7 @@ int cmd_sched(int argc, char *argv[])
             }
             uint64_t avg_us = avg_ns / 1000;
 
-            uart_printf("%-15s  %12lu  %13lu  %7lu\r\n",
+            shell_printf("%-15s  %12lu  %13lu  %7lu\r\n",
                         p->name,
                         (unsigned long)elapsed_ms,
                         (unsigned long)ctx,
@@ -2905,7 +2905,7 @@ int cmd_sched(int argc, char *argv[])
         }
 
         if (best_policy) {
-            uart_printf("\r\nBest average context-switch latency: %s "
+            shell_printf("\r\nBest average context-switch latency: %s "
                         "(%lu us)\r\n",
                         best_policy, (unsigned long)(best_avg_ns / 1000));
         }
@@ -2913,12 +2913,12 @@ int cmd_sched(int argc, char *argv[])
         /* Restore the caller's original policy. */
         if (saved_policy) {
             sched_set_policy(saved_policy);
-            uart_printf("Restored policy: %s\r\n", saved_policy->name);
+            shell_printf("Restored policy: %s\r\n", saved_policy->name);
         }
         return 0;
     }
 
-    uart_puts("Usage: sched [policy [<name>] | stats | compare | "
+    shell_puts("Usage: sched [policy [<name>] | stats | compare | "
               "trace [start|stop|clear|per-cpu]]\r\n");
     return 1;
 }
@@ -2940,38 +2940,38 @@ int cmd_sched(int argc, char *argv[])
 static void eviction_print_summary(const RustEvictionStats *s, const char *name)
 {
     if (!s->feature_enabled) {
-        uart_puts("AI eviction: disabled (build with AI_EVICTION=ON)\r\n");
+        shell_puts("AI eviction: disabled (build with AI_EVICTION=ON)\r\n");
         return;
     }
-    uart_puts("AI eviction:\r\n");
-    uart_printf("  Policy:              %s\r\n", name);
-    uart_printf("  Models:              %s\r\n",
+    shell_puts("AI eviction:\r\n");
+    shell_printf("  Policy:              %s\r\n", name);
+    shell_printf("  Models:              %s\r\n",
                 s->models_available ? "trained (xgb + mlp)" : "stubs");
-    uart_printf("  Weight pool:         %zu / %zu blocks allocated\r\n",
+    shell_printf("  Weight pool:         %zu / %zu blocks allocated\r\n",
                 s->weight_allocated, s->weight_total);
-    uart_printf("  Workspace pool:      %zu / %zu blocks allocated\r\n",
+    shell_printf("  Workspace pool:      %zu / %zu blocks allocated\r\n",
                 s->workspace_allocated, s->workspace_total);
-    uart_printf("  Evictions (weight):  %lu\r\n",
+    shell_printf("  Evictions (weight):  %lu\r\n",
                 (unsigned long)s->weight_evictions);
-    uart_printf("  Evictions (ws):      %lu\r\n",
+    shell_printf("  Evictions (ws):      %lu\r\n",
                 (unsigned long)s->workspace_evictions);
-    uart_printf("  Evictable candidates (snapshot): %d\r\n",
+    shell_printf("  Evictable candidates (snapshot): %d\r\n",
                 s->snapshot_candidates);
     /* #115: per-policy decision/fallback/latency counters. Reset on
      * every policy swap, so these reflect the currently-installed
      * policy's lifetime only. */
-    uart_printf("  Decisions:           %lu\r\n",
+    shell_printf("  Decisions:           %lu\r\n",
                 (unsigned long)s->policy_decisions);
-    uart_printf("  Fallbacks:           %lu\r\n",
+    shell_printf("  Fallbacks:           %lu\r\n",
                 (unsigned long)s->policy_fallbacks);
-    uart_printf("  Avg select latency:  %lu ns\r\n",
+    shell_printf("  Avg select latency:  %lu ns\r\n",
                 (unsigned long)s->policy_avg_latency_ns);
 }
 
 static void eviction_print_policies(const char *active)
 {
     const uint8_t *list = rust_eviction_policy_list();
-    uart_puts("Available eviction policies:\r\n");
+    shell_puts("Available eviction policies:\r\n");
     /* `list` is a single space-separated string terminated by NUL. */
     const char *cursor = (const char *)list;
     while (*cursor) {
@@ -2990,12 +2990,12 @@ static void eviction_print_policies(const char *active)
                 is_active = true;
             }
         }
-        uart_puts("  ");
+        shell_puts("  ");
         for (size_t i = 0; i < len; i++) {
-            uart_putc(cursor[i]);
+            shell_putc(cursor[i]);
         }
-        if (is_active) uart_puts(" (active)");
-        uart_puts("\r\n");
+        if (is_active) shell_puts(" (active)");
+        shell_puts("\r\n");
         cursor = end;
     }
 }
@@ -3004,7 +3004,7 @@ static void eviction_print_stats(const RustEvictionStats *s, const char *name)
 {
     eviction_print_summary(s, name);
     if (s->cacheus_expert_count > 0) {
-        uart_printf("\r\nCACHEUS expert weights (%u experts):\r\n",
+        shell_printf("\r\nCACHEUS expert weights (%u experts):\r\n",
                     s->cacheus_expert_count);
         const char *expert_labels[5] = {"expert0","expert1","expert2","expert3","expert4"};
         /* Weights are supplied in basis points (0..10000) so this
@@ -3015,7 +3015,7 @@ static void eviction_print_stats(const RustEvictionStats *s, const char *name)
         for (uint32_t i = 0; i < s->cacheus_expert_count && i < 5; i++) {
             uint32_t bp = s->expert_weights_bp[i];
             /* Render as D.DD% from basis points. */
-            uart_printf("  %s: %3u.%02u%%\r\n",
+            shell_printf("  %s: %3u.%02u%%\r\n",
                         expert_labels[i], bp / 100, bp % 100);
         }
     }
@@ -3041,14 +3041,14 @@ int cmd_eviction(int argc, char *argv[])
             char wp[32] = {0}, sp[32] = {0};
             rust_eviction_policy_name_pool(0, (uint8_t *)wp, sizeof(wp));
             rust_eviction_policy_name_pool(1, (uint8_t *)sp, sizeof(sp));
-            uart_printf("Weight pool policy:    %s\r\n", wp[0] ? wp : "(none)");
-            uart_printf("Workspace pool policy: %s\r\n", sp[0] ? sp : "(none)");
-            uart_puts("\r\n");
+            shell_printf("Weight pool policy:    %s\r\n", wp[0] ? wp : "(none)");
+            shell_printf("Workspace pool policy: %s\r\n", sp[0] ? sp : "(none)");
+            shell_puts("\r\n");
             eviction_print_policies(name_buf);
-            uart_puts("\r\nUsage:\r\n");
-            uart_puts("  eviction policy <name>           — set both pools\r\n");
-            uart_puts("  eviction policy weight <name>    — set weight pool only\r\n");
-            uart_puts("  eviction policy workspace <name> — set workspace pool only\r\n");
+            shell_puts("\r\nUsage:\r\n");
+            shell_puts("  eviction policy <name>           — set both pools\r\n");
+            shell_puts("  eviction policy weight <name>    — set weight pool only\r\n");
+            shell_puts("  eviction policy workspace <name> — set workspace pool only\r\n");
             return 0;
         }
 
@@ -3060,32 +3060,32 @@ int cmd_eviction(int argc, char *argv[])
             int rc = rust_eviction_policy_set_pool(pool_id,
                                                     (const uint8_t *)argv[3]);
             if (rc == -2) {
-                uart_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
+                shell_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
                 return 1;
             }
             if (rc != 0) {
-                uart_printf("Unknown policy: '%s'\r\n", argv[3]);
+                shell_printf("Unknown policy: '%s'\r\n", argv[3]);
                 return 1;
             }
             char buf[32] = {0};
             rust_eviction_policy_name_pool(pool_id, (uint8_t *)buf, sizeof(buf));
-            uart_printf("Set %s pool policy: %s\r\n", argv[2], buf);
+            shell_printf("Set %s pool policy: %s\r\n", argv[2], buf);
             return 0;
         }
 
         /* Global variant: `eviction policy <name>` (sets both pools). */
         int rc = rust_eviction_policy_set((const uint8_t *)argv[2]);
         if (rc == -2) {
-            uart_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
+            shell_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
             return 1;
         }
         if (rc != 0) {
-            uart_printf("Unknown policy: '%s'\r\n", argv[2]);
-            uart_puts("Use 'eviction policy' to list available policies.\r\n");
+            shell_printf("Unknown policy: '%s'\r\n", argv[2]);
+            shell_puts("Use 'eviction policy' to list available policies.\r\n");
             return 1;
         }
         rust_eviction_policy_name((uint8_t *)name_buf, sizeof(name_buf));
-        uart_printf("Switched weight pool to: %s (workspace reset to LRU)\r\n", name_buf);
+        shell_printf("Switched weight pool to: %s (workspace reset to LRU)\r\n", name_buf);
         return 0;
     }
 
@@ -3102,7 +3102,7 @@ int cmd_eviction(int argc, char *argv[])
         if (argc >= 3) {
             uint32_t v;
             if (shell_parse_uint(argv[2], &v) < 0 || v == 0) {
-                uart_puts("eviction trajectory: count must be a positive integer\r\n");
+                shell_puts("eviction trajectory: count must be a positive integer\r\n");
                 return 1;
             }
             if (v > 128) v = 128;
@@ -3111,28 +3111,28 @@ int cmd_eviction(int argc, char *argv[])
         static RustTrajectoryEntry traj[128];
         int32_t n = rust_eviction_get_trajectory(traj, requested);
         if (n < 0) {
-            uart_puts("eviction trajectory: invalid request\r\n");
+            shell_puts("eviction trajectory: invalid request\r\n");
             return 1;
         }
-        uart_printf("CACHEUS trajectory: %d entries (policy: %s)\r\n\r\n",
+        shell_printf("CACHEUS trajectory: %d entries (policy: %s)\r\n\r\n",
                     n, name_buf);
         if (n == 0) {
-            uart_puts("(no trajectory available — CACHEUS must be installed "
+            shell_puts("(no trajectory available — CACHEUS must be installed "
                       "and feedback received)\r\n");
             return 0;
         }
-        uart_puts("Time(ms)    Experts  Weights (basis points, 1 bp = 0.01%)\r\n");
-        uart_puts("----------  -------  ------------------------------------\r\n");
+        shell_puts("Time(ms)    Experts  Weights (basis points, 1 bp = 0.01%)\r\n");
+        shell_puts("----------  -------  ------------------------------------\r\n");
         uint64_t t0 = traj[0].timestamp_ns;
         for (int32_t i = 0; i < n; i++) {
             uint64_t rel_ms = (traj[i].timestamp_ns - t0) / 1000000ULL;
-            uart_printf("%10lu  %7u ", (unsigned long)rel_ms, traj[i].n_experts);
+            shell_printf("%10lu  %7u ", (unsigned long)rel_ms, traj[i].n_experts);
             for (uint32_t k = 0; k < traj[i].n_experts && k < 5; k++) {
                 uint32_t bp = traj[i].weights_bp[k];
                 /* Render as D.DD%% with no float arithmetic. */
-                uart_printf(" %3u.%02u%%", bp / 100, bp % 100);
+                shell_printf(" %3u.%02u%%", bp / 100, bp % 100);
             }
-            uart_puts("\r\n");
+            shell_puts("\r\n");
         }
         return 0;
     }
@@ -3174,17 +3174,17 @@ int cmd_eviction(int argc, char *argv[])
         RustEvictionStats before = {0};
         rust_eviction_get_stats(&before);
 
-        uart_printf("Eviction pressure demo (policy: %s)\r\n",
+        shell_printf("Eviction pressure demo (policy: %s)\r\n",
                     name_buf[0] ? name_buf : "(none)");
-        uart_printf("Weight pool: %lu / %lu blocks used, %lu evictions so far\r\n",
+        shell_printf("Weight pool: %lu / %lu blocks used, %lu evictions so far\r\n",
                     (unsigned long)before.weight_allocated,
                     (unsigned long)before.weight_total,
                     (unsigned long)before.weight_evictions);
-        uart_printf("Plan: allocate 2 MB blocks until %d evictions observed.\r\n\r\n",
+        shell_printf("Plan: allocate 2 MB blocks until %d evictions observed.\r\n\r\n",
                     TARGET_EVICTIONS);
 
-        uart_puts("Event       Step    Pool (used/total)   New evictions\r\n");
-        uart_puts("----------  ----    -----------------   -------------\r\n");
+        shell_puts("Event       Step    Pool (used/total)   New evictions\r\n");
+        shell_puts("----------  ----    -----------------   -------------\r\n");
 
         uint64_t prev_evictions = before.weight_evictions;
         int admitted_quiet = 0;
@@ -3204,12 +3204,12 @@ int cmd_eviction(int argc, char *argv[])
             }
 
             if (is_null) {
-                uart_printf("FAIL        %4d    %5lu / %5lu     %13lu\r\n",
+                shell_printf("FAIL        %4d    %5lu / %5lu     %13lu\r\n",
                             i + 1,
                             (unsigned long)after.weight_allocated,
                             (unsigned long)after.weight_total,
                             (unsigned long)new_evictions);
-                uart_puts("  (allocator refused further allocation)\r\n");
+                shell_puts("  (allocator refused further allocation)\r\n");
                 aborted = true;
                 break;
             }
@@ -3217,14 +3217,14 @@ int cmd_eviction(int argc, char *argv[])
             if (evict_step) {
                 /* Flush pending quiet admits then print the eviction row. */
                 if (admitted_quiet > 0) {
-                    uart_printf("admit x %-3d %4d    %5lu / %5lu     %13lu\r\n",
+                    shell_printf("admit x %-3d %4d    %5lu / %5lu     %13lu\r\n",
                                 admitted_quiet, i,
                                 (unsigned long)after.weight_allocated,
                                 (unsigned long)after.weight_total,
                                 (unsigned long)new_evictions);
                     admitted_quiet = 0;
                 }
-                uart_printf("EVICT       %4d    %5lu / %5lu     %13lu\r\n",
+                shell_printf("EVICT       %4d    %5lu / %5lu     %13lu\r\n",
                             i + 1,
                             (unsigned long)after.weight_allocated,
                             (unsigned long)after.weight_total,
@@ -3240,7 +3240,7 @@ int cmd_eviction(int argc, char *argv[])
         if (admitted_quiet > 0 && !aborted) {
             RustEvictionStats mid = {0};
             rust_eviction_get_stats(&mid);
-            uart_printf("admit x %-3d         %5lu / %5lu\r\n",
+            shell_printf("admit x %-3d         %5lu / %5lu\r\n",
                         admitted_quiet,
                         (unsigned long)mid.weight_allocated,
                         (unsigned long)mid.weight_total);
@@ -3249,7 +3249,7 @@ int cmd_eviction(int argc, char *argv[])
         /* Snapshot final counters. */
         RustEvictionStats after = {0};
         rust_eviction_get_stats(&after);
-        uart_printf("\r\nFinal: %lu / %lu blocks used; %lu total evictions; "
+        shell_printf("\r\nFinal: %lu / %lu blocks used; %lu total evictions; "
                     "policy decisions: %lu (fallbacks %lu, avg %lu ns)\r\n",
                     (unsigned long)after.weight_allocated,
                     (unsigned long)after.weight_total,
@@ -3267,7 +3267,7 @@ int cmd_eviction(int argc, char *argv[])
                 freed++;
             }
         }
-        uart_printf("Released %d of %d demo allocations (the rest were evicted).\r\n",
+        shell_printf("Released %d of %d demo allocations (the rest were evicted).\r\n",
                     freed, held);
         return 0;
     }
@@ -3275,22 +3275,22 @@ int cmd_eviction(int argc, char *argv[])
     if (strcmp(argv[1], "features") == 0) {
         uint32_t count = rust_eviction_feature_count();
         if (count == 0) {
-            uart_puts("AI eviction disabled — no features available.\r\n");
+            shell_puts("AI eviction disabled — no features available.\r\n");
             return 0;
         }
-        uart_printf("Eviction feature vector (%u features):\r\n\r\n", count);
-        uart_puts("  Index  Name\r\n");
-        uart_puts("  -----  ----------------------------\r\n");
+        shell_printf("Eviction feature vector (%u features):\r\n\r\n", count);
+        shell_puts("  Index  Name\r\n");
+        shell_puts("  -----  ----------------------------\r\n");
         for (uint32_t i = 0; i < count; i++) {
             char fbuf[48] = {0};
             rust_eviction_feature_name(i, (uint8_t *)fbuf, sizeof(fbuf));
             const char *group = (i < 15) ? "per-block" : "global";
-            uart_printf("  %5u  %-28s  (%s)\r\n", i, fbuf, group);
+            shell_printf("  %5u  %-28s  (%s)\r\n", i, fbuf, group);
         }
         return 0;
     }
 
-    uart_puts("Usage: eviction [policy [<name>] | stats | features | "
+    shell_puts("Usage: eviction [policy [<name>] | stats | features | "
               "trajectory [N] | demo | pressure]\r\n");
     return 1;
 }
@@ -3318,19 +3318,19 @@ static void timdiag_dump_timer_state(void)
     __asm__ volatile("mrs %0, cntp_cval_el0" : "=r"(cntp_cval));
     __asm__ volatile("mrs %0, cntp_tval_el0" : "=r"(cntp_tval));
 
-    uart_printf("  CNTFRQ_EL0:    %lu Hz\r\n", cntfrq);
-    uart_printf("  CNTPCT_EL0:    0x%lx\r\n", cntpct);
-    uart_printf("  CNTP_CTL_EL0:  0x%lx (EN=%lu IMASK=%lu ISTATUS=%lu)\r\n",
+    shell_printf("  CNTFRQ_EL0:    %lu Hz\r\n", cntfrq);
+    shell_printf("  CNTPCT_EL0:    0x%lx\r\n", cntpct);
+    shell_printf("  CNTP_CTL_EL0:  0x%lx (EN=%lu IMASK=%lu ISTATUS=%lu)\r\n",
                 cntp_ctl,
                 cntp_ctl & 1, (cntp_ctl >> 1) & 1, (cntp_ctl >> 2) & 1);
-    uart_printf("  CNTP_CVAL_EL0: 0x%lx\r\n", cntp_cval);
-    uart_printf("  CNTP_TVAL_EL0: %ld\r\n", (int64_t)cntp_tval);
+    shell_printf("  CNTP_CVAL_EL0: 0x%lx\r\n", cntp_cval);
+    shell_printf("  CNTP_TVAL_EL0: %ld\r\n", (int64_t)cntp_tval);
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /* On Jetson at EL2+VHE, CNTHP registers are directly accessible */
     uint64_t cnthp_ctl;
     __asm__ volatile("mrs %0, cnthp_ctl_el2" : "=r"(cnthp_ctl));
-    uart_printf("  CNTHP_CTL_EL2: 0x%lx (EN=%lu IMASK=%lu ISTATUS=%lu)\r\n",
+    shell_printf("  CNTHP_CTL_EL2: 0x%lx (EN=%lu IMASK=%lu ISTATUS=%lu)\r\n",
                 cnthp_ctl,
                 cnthp_ctl & 1, (cnthp_ctl >> 1) & 1, (cnthp_ctl >> 2) & 1);
 #endif
@@ -3365,15 +3365,15 @@ static void timdiag_dump_gicv3(void)
     /* ICC_IGRPEN0_EL1: SKIP — trapped by EL3 on two-security-state GICv3 */
     __asm__ volatile("mrs %0, ICC_IGRPEN1_EL1" : "=r"(icc_igrpen1));
 
-    uart_printf("\r\n  GICv3 CPU Interface (CPU %u):\r\n", cpu);
-    uart_printf("    ICC_SRE_EL1:    0x%lx (SRE=%lu)\r\n",
+    shell_printf("\r\n  GICv3 CPU Interface (CPU %u):\r\n", cpu);
+    shell_printf("    ICC_SRE_EL1:    0x%lx (SRE=%lu)\r\n",
                 icc_sre, icc_sre & 1);
-    uart_printf("    ICC_PMR_EL1:    0x%lx\r\n", icc_pmr);
-    uart_printf("    ICC_BPR1_EL1:   0x%lx\r\n", icc_bpr1);
-    uart_printf("    ICC_CTLR_EL1:   0x%lx (EOImode=%lu)\r\n",
+    shell_printf("    ICC_PMR_EL1:    0x%lx\r\n", icc_pmr);
+    shell_printf("    ICC_BPR1_EL1:   0x%lx\r\n", icc_bpr1);
+    shell_printf("    ICC_CTLR_EL1:   0x%lx (EOImode=%lu)\r\n",
                 icc_ctlr, (icc_ctlr >> 1) & 1);
-    uart_printf("    ICC_IGRPEN0_EL1: (trapped by EL3 — not readable from NS)\r\n");
-    uart_printf("    ICC_IGRPEN1_EL1: %lu (Group 1 %s)\r\n",
+    shell_printf("    ICC_IGRPEN0_EL1: (trapped by EL3 — not readable from NS)\r\n");
+    shell_printf("    ICC_IGRPEN1_EL1: %lu (Group 1 %s)\r\n",
                 icc_igrpen1, icc_igrpen1 ? "ENABLED" : "disabled");
 
     /* Read GICR registers for this CPU.
@@ -3396,44 +3396,44 @@ static void timdiag_dump_gicv3(void)
     uint32_t ispendr0  = *(volatile uint32_t *)(gicr_sgi + 0x200);
     uint32_t waker     = *(volatile uint32_t *)(gicr_rd + 0x014);
 
-    uart_printf("\r\n  GICR (Redistributor, CPU %u at 0x%lx):\r\n",
+    shell_printf("\r\n  GICR (Redistributor, CPU %u at 0x%lx):\r\n",
                 cpu, (unsigned long)gicr_rd);
-    uart_printf("    GICR_WAKER:     0x%x (Sleep=%u ChildrenAsleep=%u)\r\n",
+    shell_printf("    GICR_WAKER:     0x%x (Sleep=%u ChildrenAsleep=%u)\r\n",
                 waker, (waker >> 1) & 1, (waker >> 2) & 1);
-    uart_printf("    GICR_IGROUPR0:  0x%08x", igroupr0);
+    shell_printf("    GICR_IGROUPR0:  0x%08x", igroupr0);
     if (igroupr0 == 0)
-        uart_puts(" (ALL Group 0 — NS writes blocked by EL3)\r\n");
+        shell_puts(" (ALL Group 0 — NS writes blocked by EL3)\r\n");
     else if (igroupr0 == 0xFFFFFFFF)
-        uart_puts(" (ALL Group 1 NS)\r\n");
+        shell_puts(" (ALL Group 1 NS)\r\n");
     else
-        uart_printf(" (mixed: PPI30=%u PPI26=%u PPI27=%u)\r\n",
+        shell_printf(" (mixed: PPI30=%u PPI26=%u PPI27=%u)\r\n",
                     (igroupr0 >> 30) & 1, (igroupr0 >> 26) & 1,
                     (igroupr0 >> 27) & 1);
-    uart_printf("    GICR_IGRPMODR0: 0x%08x", igrpmodr0);
+    shell_printf("    GICR_IGRPMODR0: 0x%08x", igrpmodr0);
     if (igrpmodr0 == 0)
-        uart_puts(" (RAZ from NS — expected)\r\n");
+        shell_puts(" (RAZ from NS — expected)\r\n");
     else
-        uart_printf(" (unexpected non-zero!)\r\n");
-    uart_printf("    GICR_ISENABLER0: 0x%08x (PPI30=%u PPI26=%u PPI27=%u)\r\n",
+        shell_printf(" (unexpected non-zero!)\r\n");
+    shell_printf("    GICR_ISENABLER0: 0x%08x (PPI30=%u PPI26=%u PPI27=%u)\r\n",
                 isenabler0,
                 (isenabler0 >> 30) & 1, (isenabler0 >> 26) & 1,
                 (isenabler0 >> 27) & 1);
-    uart_printf("    GICR_ISPENDR0:  0x%08x (PPI30=%u PPI26=%u PPI27=%u)\r\n",
+    shell_printf("    GICR_ISPENDR0:  0x%08x (PPI30=%u PPI26=%u PPI27=%u)\r\n",
                 ispendr0,
                 (ispendr0 >> 30) & 1, (ispendr0 >> 26) & 1,
                 (ispendr0 >> 27) & 1);
 
     /* GICD state */
     uint32_t gicd_ctlr = *(volatile uint32_t *)(GIC_DIST_BASE + 0x000);
-    uart_printf("\r\n  GICD_CTLR: 0x%x (ARE_NS=%u EN_G1=%u EN_G0=%u)\r\n",
+    shell_printf("\r\n  GICD_CTLR: 0x%x (ARE_NS=%u EN_G1=%u EN_G0=%u)\r\n",
                 gicd_ctlr,
                 (gicd_ctlr >> 4) & 1, (gicd_ctlr >> 1) & 1, gicd_ctlr & 1);
 
     /* GICD_IGROUPR for first few SPI banks (check if SPIs are Group 1 NS) */
-    uart_puts("\r\n  GICD_IGROUPR (SPI groups, NS view):\r\n");
+    shell_puts("\r\n  GICD_IGROUPR (SPI groups, NS view):\r\n");
     for (uint32_t i = 1; i <= 4; i++) {
         uint32_t igroupr = *(volatile uint32_t *)(GIC_DIST_BASE + 0x080 + 4 * i);
-        uart_printf("    GICD_IGROUPR[%u]: 0x%08x (IRQs %u-%u)%s\r\n",
+        shell_printf("    GICD_IGROUPR[%u]: 0x%08x (IRQs %u-%u)%s\r\n",
                     i, igroupr, i * 32, i * 32 + 31,
                     igroupr == 0xFFFFFFFF ? " ALL G1NS" :
                     igroupr == 0 ? " ALL G0/G1S" : "");
@@ -3442,7 +3442,7 @@ static void timdiag_dump_gicv3(void)
     /* DAIF state */
     uint64_t daif;
     __asm__ volatile("mrs %0, daif" : "=r"(daif));
-    uart_printf("\r\n  DAIF: 0x%lx (D=%lu A=%lu I=%lu F=%lu)\r\n",
+    shell_printf("\r\n  DAIF: 0x%lx (D=%lu A=%lu I=%lu F=%lu)\r\n",
                 daif,
                 (daif >> 9) & 1, (daif >> 8) & 1,
                 (daif >> 7) & 1, (daif >> 6) & 1);
@@ -3463,7 +3463,7 @@ static void timdiag_dump_gicv3(void)
  */
 static void timdiag_test_fiq(void)
 {
-    uart_puts("\r\n--- Test: FIQ delivery (Group 0 + DAIF.F unmask) ---\r\n");
+    shell_puts("\r\n--- Test: FIQ delivery (Group 0 + DAIF.F unmask) ---\r\n");
 
     /* Save current state */
     uint64_t saved_igrpen0;
@@ -3521,17 +3521,17 @@ static void timdiag_test_fiq(void)
     uint32_t elapsed_us = (uint32_t)((now - start) * 1000000 / freq);
 
     if (timdiag_fiq_count > 0) {
-        uart_printf("  RESULT: FIQ DELIVERED! count=%u irq=%u (elapsed=%u us)\r\n",
+        shell_printf("  RESULT: FIQ DELIVERED! count=%u irq=%u (elapsed=%u us)\r\n",
                     timdiag_fiq_count, timdiag_fiq_irqnum, elapsed_us);
-        uart_puts("  >>> SCR_EL3.FIQ=0 — FIQ-based timer preemption IS viable!\r\n");
+        shell_puts("  >>> SCR_EL3.FIQ=0 — FIQ-based timer preemption IS viable!\r\n");
     } else {
-        uart_printf("  RESULT: No FIQ after %u us. ISTATUS=%lu\r\n",
+        shell_printf("  RESULT: No FIQ after %u us. ISTATUS=%lu\r\n",
                     elapsed_us, (cntp_ctl >> 2) & 1);
         if ((cntp_ctl >> 2) & 1)
-            uart_puts("  Timer condition IS asserted but FIQ not delivered.\r\n"
+            shell_puts("  Timer condition IS asserted but FIQ not delivered.\r\n"
                       "  >>> SCR_EL3.FIQ=1 — FIQ trapped to EL3.\r\n");
         else
-            uart_puts("  Timer did not fire (unexpected).\r\n");
+            shell_puts("  Timer did not fire (unexpected).\r\n");
     }
 }
 
@@ -3544,7 +3544,7 @@ static void timdiag_test_fiq(void)
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 static void timdiag_test_cnthp(void)
 {
-    uart_puts("\r\n--- Test: CNTHP (hypervisor timer PPI 26) via FIQ ---\r\n");
+    shell_puts("\r\n--- Test: CNTHP (hypervisor timer PPI 26) via FIQ ---\r\n");
 
     uint32_t cpu = cpu_id();
 
@@ -3614,11 +3614,11 @@ static void timdiag_test_cnthp(void)
     uint32_t ispendr0 = *(volatile uint32_t *)(gicr_sgi + 0x200);
 
     if (timdiag_fiq_count > 0) {
-        uart_printf("  RESULT: FIQ DELIVERED via CNTHP! count=%u irq=%u (%u us)\r\n",
+        shell_printf("  RESULT: FIQ DELIVERED via CNTHP! count=%u irq=%u (%u us)\r\n",
                     timdiag_fiq_count, timdiag_fiq_irqnum, elapsed_us);
-        uart_puts("  >>> CNTHP (PPI 26) FIQ delivery works!\r\n");
+        shell_puts("  >>> CNTHP (PPI 26) FIQ delivery works!\r\n");
     } else {
-        uart_printf("  RESULT: No FIQ after %u us. CNTHP ISTATUS=%lu PPI26_PEND=%u\r\n",
+        shell_printf("  RESULT: No FIQ after %u us. CNTHP ISTATUS=%lu PPI26_PEND=%u\r\n",
                     elapsed_us, (cnthp_ctl >> 2) & 1, (ispendr0 >> 26) & 1);
     }
 }
@@ -3635,32 +3635,32 @@ static void timdiag_test_cnthp(void)
 
 static void timdiag_test_wfi_wake(void)
 {
-    uart_puts("\r\n--- Test: WFI wake-up from timer ---\r\n");
+    shell_puts("\r\n--- Test: WFI wake-up from timer ---\r\n");
 #if GIC_VERSION == 3
-    uart_puts("  SKIP: WFI wake-up test (would hang on this platform)\r\n");
-    uart_puts("  Reason: All PPIs/SPIs are Group 0. ICC_IGRPEN0 trapped by EL3.\r\n");
-    uart_puts("  SCR_EL3.FIQ=1 routes Group 0 FIQ to EL3. No wake source for WFI.\r\n");
-    uart_puts("  >>> WFI timer wake: NOT VIABLE.\r\n");
+    shell_puts("  SKIP: WFI wake-up test (would hang on this platform)\r\n");
+    shell_puts("  Reason: All PPIs/SPIs are Group 0. ICC_IGRPEN0 trapped by EL3.\r\n");
+    shell_puts("  SCR_EL3.FIQ=1 routes Group 0 FIQ to EL3. No wake source for WFI.\r\n");
+    shell_puts("  >>> WFI timer wake: NOT VIABLE.\r\n");
 #else
-    uart_puts("  SKIP: WFI wake-up test\r\n");
-    uart_puts("  >>> WFI timer wake: NOT VIABLE (see pi5-preemption-resolution.md).\r\n");
+    shell_puts("  SKIP: WFI wake-up test\r\n");
+    shell_puts("  >>> WFI timer wake: NOT VIABLE (see pi5-preemption-resolution.md).\r\n");
 #endif
 }
 
 int cmd_timdiag(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    uart_puts("\r\n=== Timer/Interrupt Delivery Diagnostic ===\r\n");
-    uart_printf("Platform: %s\r\n", PLATFORM_NAME);
-    uart_printf("timer_handler_count: %u\r\n", timer_handler_count);
-    uart_printf("pit_ticks: %lu\r\n", pit_ticks);
+    shell_puts("\r\n=== Timer/Interrupt Delivery Diagnostic ===\r\n");
+    shell_printf("Platform: %s\r\n", PLATFORM_NAME);
+    shell_printf("timer_handler_count: %u\r\n", timer_handler_count);
+    shell_printf("pit_ticks: %lu\r\n", pit_ticks);
 #if defined(COOP_PREEMPT)
-    uart_puts("COOP_PREEMPT: ON\r\n");
+    shell_puts("COOP_PREEMPT: ON\r\n");
 #else
-    uart_puts("COOP_PREEMPT: OFF\r\n");
+    shell_puts("COOP_PREEMPT: OFF\r\n");
 #endif
 
-    uart_puts("\r\nTimer State:\r\n");
+    shell_puts("\r\nTimer State:\r\n");
     timdiag_dump_timer_state();
 
 #if GIC_VERSION == 3
@@ -3668,22 +3668,22 @@ int cmd_timdiag(int argc, char *argv[])
 
     const char *what = (argc >= 2) ? argv[1] : "safe";
     if (strcmp(what, "fiq") == 0) {
-        uart_puts("\r\nWARNING: FIQ test writes ICC_IGRPEN0 — may crash if TF-A traps it!\r\n");
+        shell_puts("\r\nWARNING: FIQ test writes ICC_IGRPEN0 — may crash if TF-A traps it!\r\n");
         timdiag_test_fiq();
 #if defined(PLATFORM_JETSON_ORIN_NANO)
         timdiag_test_cnthp();
 #endif
     } else {
-        uart_puts("\r\n(FIQ test skipped — run 'timdiag fiq' to test, may crash on Jetson)\r\n");
+        shell_puts("\r\n(FIQ test skipped — run 'timdiag fiq' to test, may crash on Jetson)\r\n");
     }
 
     timdiag_test_wfi_wake();
 #elif GIC_VERSION == 2
-    uart_puts("\r\nGICv2 platform — FIQ test skipped (see pi5-preemption-resolution.md)\r\n");
+    shell_puts("\r\nGICv2 platform — FIQ test skipped (see pi5-preemption-resolution.md)\r\n");
     timdiag_test_wfi_wake();
 #endif
 
-    uart_puts("\r\n=== End Diagnostic ===\r\n");
+    shell_puts("\r\n=== End Diagnostic ===\r\n");
     return 0;
 }
 
@@ -3704,35 +3704,35 @@ int cmd_macbdiag(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
-    uart_puts("\r\n=== MACB IRQ Diagnostic ===\r\n");
+    shell_puts("\r\n=== MACB IRQ Diagnostic ===\r\n");
 
-    uart_printf("  GIC handler registered: %s\r\n",
+    shell_printf("  GIC handler registered: %s\r\n",
                 macb_irq_is_registered() ? "YES" : "NO");
-    uart_printf("  IRQ count:              %u\r\n",
+    shell_printf("  IRQ count:              %u\r\n",
                 macb_get_irq_count());
-    uart_printf("  Last MACB_ISR observed: 0x%08x\r\n",
+    shell_printf("  Last MACB_ISR observed: 0x%08x\r\n",
                 macb_get_last_isr());
 
     /* Live MIP0 state for RP1 vector 6 (ETH) */
     volatile uint32_t *msix_cfg =
         (volatile uint32_t *)(RP1_INTC_BASE + RP1_MSIX_CFG(RP1_INT_ETH));
     uint32_t cfg = *msix_cfg;
-    uart_printf("  MIP0 MSIX_CFG[vec %u]:   0x%08x",
+    shell_printf("  MIP0 MSIX_CFG[vec %u]:   0x%08x",
                 (unsigned)RP1_INT_ETH, cfg);
-    if (cfg & MSIX_CFG_ENABLE)   uart_puts(" ENABLE");
-    if (cfg & MSIX_CFG_IACK_EN)  uart_puts(" IACK_EN");
-    if (cfg & MSIX_CFG_IACK)     uart_puts(" IACK");
-    uart_puts("\r\n");
+    if (cfg & MSIX_CFG_ENABLE)   shell_puts(" ENABLE");
+    if (cfg & MSIX_CFG_IACK_EN)  shell_puts(" IACK_EN");
+    if (cfg & MSIX_CFG_IACK)     shell_puts(" IACK");
+    shell_puts("\r\n");
 
     volatile uint32_t *intstatl =
         (volatile uint32_t *)(RP1_INTC_BASE + RP1_INTC_INTSTATL);
     uint32_t stat = *intstatl;
-    uart_printf("  MIP0 INTSTATL (0-31):   0x%08x\r\n", stat);
-    uart_printf("    ETH vec %u asserted:    %s\r\n",
+    shell_printf("  MIP0 INTSTATL (0-31):   0x%08x\r\n", stat);
+    shell_printf("    ETH vec %u asserted:    %s\r\n",
                 (unsigned)RP1_INT_ETH,
                 (stat & (1u << RP1_INT_ETH)) ? "YES" : "no");
 
-    uart_puts("\r\n=== End Diagnostic ===\r\n");
+    shell_puts("\r\n=== End Diagnostic ===\r\n");
     return 0;
 }
 

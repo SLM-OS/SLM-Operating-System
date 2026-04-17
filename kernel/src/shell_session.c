@@ -1,0 +1,96 @@
+/*
+ * shell_session.c - Session pool and per-task session lookup
+ *
+ * Provides the console session (always present, UART-backed) and a
+ * fixed pool for future TCP sessions. The bind-to-task mapping lets
+ * shell_puts/shell_printf discover which session is running without
+ * threading a shell_session* through every command handler.
+ *
+ * The task_id -> session pointer map is write-sparingly (only on
+ * session create/destroy) and read hot (every shell_printf). Pointer
+ * writes/reads are atomic on our 64-bit targets, so no lock is needed
+ * to serialize map reads against writes.
+ */
+
+#include "shell_session.h"
+#include "shell_io.h"
+#include "task.h"
+#include "config.h"
+#include "string.h"
+
+#include <stddef.h>
+
+/* Map from task id to the session bound to that task. Indexed directly
+ * by task->id; slots for non-shell tasks stay NULL. */
+static struct shell_session *sessions_by_task[MAX_TASKS];
+
+/* Singleton console session (UART-backed). */
+static struct shell_session console_session;
+static bool                  console_session_ready;
+
+void shell_session_init(void)
+{
+    if (console_session_ready) {
+        return;
+    }
+
+    console_session.id         = 0;
+    console_session.io         = shell_io_uart();
+    console_session.cwd[0]     = '/';
+    console_session.cwd[1]     = '\0';
+    console_session.owner_task = NULL;
+    console_session.in_use     = true;
+
+    console_session_ready = true;
+}
+
+struct shell_session *shell_session_console(void)
+{
+    if (!console_session_ready) {
+        shell_session_init();
+    }
+    return &console_session;
+}
+
+void shell_session_bind(struct task *t, struct shell_session *s)
+{
+    if (!t) {
+        return;
+    }
+    if (t->id >= MAX_TASKS) {
+        return;
+    }
+    sessions_by_task[t->id] = s;
+    if (s) {
+        s->owner_task = t;
+    }
+}
+
+void shell_session_unbind(struct task *t)
+{
+    if (!t || t->id >= MAX_TASKS) {
+        return;
+    }
+    struct shell_session *s = sessions_by_task[t->id];
+    sessions_by_task[t->id] = NULL;
+    if (s && s->owner_task == t) {
+        s->owner_task = NULL;
+    }
+}
+
+struct shell_session *shell_session_current(void)
+{
+    struct task *t = task_current();
+    if (t && t->id < MAX_TASKS) {
+        struct shell_session *s = sessions_by_task[t->id];
+        if (s) {
+            return s;
+        }
+    }
+    /* No binding — fall back to console. Background tasks that never
+     * call shell_* functions never reach here. */
+    if (!console_session_ready) {
+        return NULL;
+    }
+    return &console_session;
+}

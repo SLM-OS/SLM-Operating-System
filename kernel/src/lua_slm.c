@@ -45,21 +45,21 @@ static int l_print(lua_State *L) {
     if (!L) return 0;
     int nargs = lua_gettop(L);
     for (int i = 1; i <= nargs; i++) {
-        if (i > 1) uart_printf("\t");
+        if (i > 1) shell_printf("\t");
         if (lua_isstring(L, i)) {
-            uart_printf("%s", lua_tostring(L, i));
+            shell_printf("%s", lua_tostring(L, i));
         } else if (lua_isnil(L, i)) {
-            uart_printf("nil");
+            shell_printf("nil");
         } else if (lua_isboolean(L, i)) {
-            uart_printf("%s", lua_toboolean(L, i) ? "true" : "false");
+            shell_printf("%s", lua_toboolean(L, i) ? "true" : "false");
         } else if (lua_isnumber(L, i)) {
             lua_Number n = lua_tonumber(L, i);
-            uart_printf("%d", (int)n);
+            shell_printf("%d", (int)n);
         } else {
-            uart_printf("%s: %p", luaL_typename(L, i), lua_topointer(L, i));
+            shell_printf("%s: %p", luaL_typename(L, i), lua_topointer(L, i));
         }
     }
-    uart_printf("\n");
+    shell_printf("\n");
     return 0;
 }
 
@@ -655,7 +655,7 @@ static void lua_msg_drain(lua_State *L)
             lua_pushstring(L, data);
             if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
                 const char *err = lua_tostring(L, -1);
-                uart_printf("[lua msg_subscribe] callback error: %s\n",
+                shell_printf("[lua msg_subscribe] callback error: %s\n",
                             err ? err : "(unknown)");
                 lua_pop(L, 1);
             }
@@ -1004,7 +1004,7 @@ static void lua_task_entry(void *arg)
     struct lua_task_ctx *ctx = (struct lua_task_ctx *)arg;
     lua_State *L = lua_slm_newstate();
     if (!L) {
-        uart_printf("[lua task %s] failed to create state\n", ctx->name);
+        shell_printf("[lua task %s] failed to create state\n", ctx->name);
         goto cleanup;
     }
 
@@ -1012,7 +1012,7 @@ static void lua_task_entry(void *arg)
                         ctx->name) != LUA_OK ||
         lua_pcall(L, 0, 0, 0) != LUA_OK) {
         const char *err = lua_tostring(L, -1);
-        uart_printf("[lua task %s] error: %s\n",
+        shell_printf("[lua task %s] error: %s\n",
                     ctx->name, err ? err : "(unknown)");
     }
 
@@ -1928,7 +1928,7 @@ static volatile int lua_state_count = 0;
 void lua_slm_init(void) {
     if (lua_initialized) return;
     lua_initialized = 1;
-    uart_printf("Lua 5.4 scripting initialized\n");
+    shell_printf("Lua 5.4 scripting initialized\n");
 }
 
 lua_State *lua_slm_newstate(void) {
@@ -1939,7 +1939,7 @@ lua_State *lua_slm_newstate(void) {
     /* Create Lua state with default allocator (uses our malloc) */
     lua_State *L = luaL_newstate();
     if (L == NULL) {
-        uart_printf("Failed to create Lua state\n");
+        shell_printf("Failed to create Lua state\n");
         return NULL;
     }
     lua_state_count++;
@@ -1991,7 +1991,7 @@ int lua_slm_dostring(lua_State *L, const char *script) {
     int status = luaL_dostring(L, script);
     if (status != LUA_OK) {
         const char *msg = lua_tostring(L, -1);
-        uart_printf("Lua error: %s\n", msg ? msg : "(unknown)");
+        shell_printf("Lua error: %s\n", msg ? msg : "(unknown)");
     }
     /* Restore stack to caller's view regardless of outcome: luaL_dostring
      * leaves either the results of the chunk or the error message, and
@@ -2009,11 +2009,11 @@ int lua_slm_dofile(lua_State *L, const char *filename) {
     char buf[16384];
     int len = vfs_read_path(filename, buf, sizeof(buf) - 1, 0);
     if (len < 0) {
-        uart_printf("lua: cannot open %s\n", filename);
+        shell_printf("lua: cannot open %s\n", filename);
         return -1;
     }
     if (len >= (int)sizeof(buf) - 1) {
-        uart_printf("lua: %s exceeds %d bytes\n", filename, (int)sizeof(buf) - 1);
+        shell_printf("lua: %s exceeds %d bytes\n", filename, (int)sizeof(buf) - 1);
         return -1;
     }
     buf[len] = '\0';
@@ -2023,7 +2023,7 @@ int lua_slm_dofile(lua_State *L, const char *filename) {
         status = lua_pcall(L, 0, LUA_MULTRET, 0);
     if (status != LUA_OK) {
         const char *msg = lua_tostring(L, -1);
-        uart_printf("Lua error: %s\n", msg ? msg : "(unknown)");
+        shell_printf("Lua error: %s\n", msg ? msg : "(unknown)");
     }
     lua_settop(L, saved_top);
     return status;
@@ -2046,28 +2046,28 @@ void lua_slm_repl(lua_State *L) {
     static char buffer[REPL_BUFFER_SIZE];
     int pos = 0;
 
-    uart_printf("Lua 5.4 REPL - type 'exit' to quit\n");
-    uart_printf(">>> ");
+    shell_printf("Lua 5.4 REPL - type 'exit' to quit\n");
+    shell_printf(">>> ");
 
     while (1) {
-        int c = uart_getc();
+        int c = shell_getc();
         if (c < 0) continue;
 
         if (c == '\r' || c == '\n') {
-            uart_printf("\n");
+            shell_printf("\n");
             buffer[pos] = '\0';
 
             /* Check for exit command */
             if (pos == 4 && buffer[0] == 'e' && buffer[1] == 'x' &&
                 buffer[2] == 'i' && buffer[3] == 't') {
-                uart_printf("Exiting Lua REPL\n");
+                shell_printf("Exiting Lua REPL\n");
                 break;
             }
 
             /* Check for Ctrl+D (EOF) */
             if (pos == 0) {
                 /* Empty line - just show prompt again */
-                uart_printf(">>> ");
+                shell_printf(">>> ");
                 continue;
             }
 
@@ -2076,25 +2076,25 @@ void lua_slm_repl(lua_State *L) {
 
             /* Reset for next line */
             pos = 0;
-            uart_printf(">>> ");
+            shell_printf(">>> ");
         } else if (c == 0x03) {
             /* Ctrl+C - cancel current line */
-            uart_printf("^C\n>>> ");
+            shell_printf("^C\n>>> ");
             pos = 0;
         } else if (c == 0x04) {
             /* Ctrl+D - exit */
-            uart_printf("^D\nExiting Lua REPL\n");
+            shell_printf("^D\nExiting Lua REPL\n");
             break;
         } else if (c == 0x7f || c == 0x08) {
             /* Backspace */
             if (pos > 0) {
                 pos--;
-                uart_printf("\b \b");
+                shell_printf("\b \b");
             }
         } else if (c >= 32 && c < 127 && pos < REPL_BUFFER_SIZE - 1) {
             /* Printable character */
             buffer[pos++] = (char)c;
-            uart_putc((char)c);
+            shell_putc((char)c);
         }
     }
 }

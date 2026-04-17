@@ -48,7 +48,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
     uint64_t seconds = total_seconds % 60;
 
     const char *policy = sched_get_policy();
-    uart_printf("SLM-OS top  —  uptime %lu:%02lu:%02lu  "
+    shell_printf("SLM-OS top  —  uptime %lu:%02lu:%02lu  "
                 "policy %s  refresh %us  frame %u  "
                 "(q to quit)\r\n\r\n",
                 (unsigned long)hours, (unsigned long)minutes,
@@ -61,8 +61,8 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
      * Util comes from cpu_runqueue.running_ticks / total_ticks when
      * AI_SCHEDULER is compiled in; otherwise printed as "-".
      */
-    uart_puts("CPU  Util   Ready  Current Task\r\n");
-    uart_puts("---  -----  -----  --------------------\r\n");
+    shell_puts("CPU  Util   Ready  Current Task\r\n");
+    shell_puts("---  -----  -----  --------------------\r\n");
     for (uint32_t c = 0; c < cpu_count; c++) {
         struct cpu_runqueue *rq = sched_cpu_rq(c);
         const char *cur_name = "-";
@@ -79,12 +79,12 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
         if (rq && rq->total_ticks > 0) {
             pct = (uint32_t)(rq->running_ticks * 100u / rq->total_ticks);
         }
-        uart_printf("%3u  %4u%%  %5u  %s\r\n",
+        shell_printf("%3u  %4u%%  %5u  %s\r\n",
                     c, pct,
                     rq ? rq->ready_count : 0,
                     cur_name);
 #else
-        uart_printf("%3u    -    %5u  %s\r\n",
+        shell_printf("%3u    -    %5u  %s\r\n",
                     c,
                     rq ? rq->ready_count : 0,
                     cur_name);
@@ -108,7 +108,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
         }
     }
 
-    uart_printf("\r\nTasks: %u total (%u running, %u ready, %u blocked)\r\n",
+    shell_printf("\r\nTasks: %u total (%u running, %u ready, %u blocked)\r\n",
                 stats.task_count, running_tasks, ready_tasks, blocked_tasks);
 
     /* Memory */
@@ -118,7 +118,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
     size_t total_kb = (total_pages * 4096) / 1024;
     size_t used_kb  = (used_pages  * 4096) / 1024;
     uint32_t used_pct = total_pages ? (uint32_t)(used_pages * 100 / total_pages) : 0;
-    uart_printf("Memory: %lu / %lu KB used (%u%%)\r\n",
+    shell_printf("Memory: %lu / %lu KB used (%u%%)\r\n",
                 (unsigned long)used_kb, (unsigned long)total_kb, used_pct);
 
     /* AI eviction — pool utilisation + eviction counts when available. */
@@ -131,7 +131,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
             (uint32_t)(ev.workspace_allocated * 100 / ev.workspace_total) : 0;
         char policy_buf[32]; policy_buf[0] = 0;
         rust_eviction_policy_name((uint8_t *)policy_buf, sizeof(policy_buf));
-        uart_printf("Eviction (%s): weight %zu/%zu blk (%u%%) ev=%lu  "
+        shell_printf("Eviction (%s): weight %zu/%zu blk (%u%%) ev=%lu  "
                     "workspace %zu/%zu blk (%u%%) ev=%lu\r\n",
                     policy_buf,
                     ev.weight_allocated, ev.weight_total, wpct,
@@ -140,7 +140,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
                     (unsigned long)ev.workspace_evictions);
     }
 
-    uart_printf("Context switches: %lu   Timer ticks: %lu\r\n",
+    shell_printf("Context switches: %lu   Timer ticks: %lu\r\n",
                 (unsigned long)stats.context_switches,
                 (unsigned long)stats.timer_ticks);
 }
@@ -153,7 +153,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
 static bool top_poll_quit(void)
 {
     int c;
-    while ((c = uart_try_getc()) >= 0) {
+    while ((c = shell_try_getc()) >= 0) {
         if (c == 'q' || c == 'Q' || c == 0x03 /* Ctrl-C */ || c == 0x1B /* ESC */) {
             return true;
         }
@@ -187,18 +187,18 @@ int cmd_top(int argc, char *argv[])
     while (i < argc) {
         if (strcmp(argv[i], "-n") == 0) {
             if (i + 1 >= argc) {
-                uart_puts("top: -n requires a count\r\n");
+                shell_puts("top: -n requires a count\r\n");
                 return 1;
             }
             if (shell_parse_uint(argv[i + 1], &max_iter) < 0) {
-                uart_puts("top: invalid count\r\n");
+                shell_puts("top: invalid count\r\n");
                 return 1;
             }
             i += 2;
         } else {
             uint32_t v;
             if (shell_parse_uint(argv[i], &v) < 0 || v == 0 || v > TOP_MAX_REFRESH_SECS) {
-                uart_printf("top: refresh must be 1..%u seconds\r\n",
+                shell_printf("top: refresh must be 1..%u seconds\r\n",
                             TOP_MAX_REFRESH_SECS);
                 return 1;
             }
@@ -210,7 +210,7 @@ int cmd_top(int argc, char *argv[])
     uint32_t iter = 0;
     for (;;) {
         /* ANSI: cursor home + clear-below so the screen stays anchored. */
-        uart_puts("\033[H\033[2J");
+        shell_puts("\033[H\033[2J");
         top_render_frame(refresh_secs, iter);
         iter++;
 
@@ -221,6 +221,6 @@ int cmd_top(int argc, char *argv[])
             break;
         }
     }
-    uart_puts("\r\n");
+    shell_puts("\r\n");
     return 0;
 }
