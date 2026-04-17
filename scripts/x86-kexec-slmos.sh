@@ -35,8 +35,12 @@ if ! kexec --help 2>&1 | grep -q multiboot2-x86; then
 fi
 
 # 4. nouveau loaded (unless forced)?
+# Note: avoid `lsmod | grep -q` under `set -o pipefail` — grep -q closes
+# stdin on first match, lsmod takes SIGPIPE, pipefail propagates that
+# non-zero exit even when the match succeeded. Read /proc/modules
+# directly instead.
 if [[ "$FORCE" != "1" ]]; then
-    if ! lsmod | grep -q '^nouveau '; then
+    if ! grep -q '^nouveau ' /proc/modules; then
         fail "nouveau not loaded — modprobe nouveau modeset=1 first (or FORCE=1 to skip)"
     fi
 fi
@@ -82,11 +86,20 @@ if [[ -x /root/sec2_peek ]]; then
 fi
 
 # 7. kexec --load the SLM-OS ELF as a multiboot2 binary.
+#
+# Use -c to force the older kexec_load syscall. The default (kexec_file_load,
+# Linux 3.17+) validates segments against a memory_ranges list that, in
+# kexec-tools 2.0.28 on Ubuntu 24.04, comes back empty for the multiboot2
+# loader and rejects every load address with "Invalid memory segment".
+# -c uses the classic kexec_load which skips that validator path. Verified
+# 2026-04-17 that -c returns rc=0 and /sys/kernel/kexec_loaded = 1 where
+# the default returns "Invalid memory segment 0x20000000 - 0x22c01fff".
+#
 # No initrd, no cmdline tags — SLM-OS's multiboot2 entry doesn't consume
 # them today; only the info pointer is used. If a cmdline becomes needed
 # later, add "--command-line=..." to this invocation.
-log "kexec --load --type=multiboot2-x86 $SLMOS_ELF"
-kexec --load --type=multiboot2-x86 "$SLMOS_ELF" \
+log "kexec -c --load --type=multiboot2-x86 $SLMOS_ELF"
+kexec -c --load --type=multiboot2-x86 "$SLMOS_ELF" \
     || fail "kexec --load failed" 2
 
 # 8. Fire. If the syscall succeeds the machine is now SLM-OS —

@@ -525,8 +525,62 @@ unlocked.
   §4.4) that will surface once SEC2 is unlocked. Those are separate
   fixes tracked independently.
 
-**Current blocker (2026-04-17):** `kexec --load --type=multiboot2-x86`
-(and `--type=elf-x86_64`) rejects the image with *"Invalid memory
+**Status (2026-04-17, second iteration):**
+
+1. ✅ **"Invalid memory segment" rejection resolved.** Root cause was
+   kexec-tools' default `kexec_file_load` / auto-detect syscall
+   refusing the image. The older `kexec_load` syscall (`-c` flag)
+   accepts it cleanly: `kexec -c --load --type=multiboot2-x86
+   /root/slmos.elf` returns rc=0 and sets
+   `/sys/kernel/kexec_loaded=1`. Fix committed in
+   `scripts/x86-kexec-slmos.sh`. Also fixed a `set -o pipefail` +
+   `lsmod | grep -q` SIGPIPE bug that was failing the nouveau
+   preflight.
+
+2. ❌ **New blocker — silent handoff.** `kexec -c --exec` fires
+   (Linux dies: SSH drops, ping fails, ping drops), but **SLM-OS
+   never emits serial output**, not even the single `'K'` byte
+   written as the very first action of `_start` (trampoline32.S
+   lines 60-62). Verified the byte IS in the compiled ELF at
+   `0x20001000` after a clean rebuild.
+
+   CPU is reaching some state (Linux is gone, so kexec executed),
+   but not SLM-OS's entry — or UART output is suppressed. The `K`
+   write uses a 3-instruction sequence (`mov $0x3F8,%dx`, `mov
+   $0x4B,%al`, `out %al,%dx`) that is valid in both 32-bit
+   protected mode and 64-bit long mode — so the handoff CPU mode
+   isn't the culprit.
+
+   Most likely causes, in order:
+   - kexec-tools multiboot2-x86 loader is jumping to the wrong
+     address (ELF `e_entry` is 0x20001000 but segments may have
+     been relocated by kexec despite `-c`/non-PIE). Purgatory
+     handoff could be jumping to 0x0 or similar.
+   - UART state reset across handoff (Linux may gate the UART
+     during its shutdown phase; SLM-OS doesn't re-init the UART
+     before the `'K'` write).
+   - Multiboot2 handoff requires a specific header tag (entry
+     address tag, address tag) that our minimal header lacks.
+
+**Investigation paths for the next session:**
+
+- Build a **bzImage wrapper** around `slmos-kexec.elf`. kexec's
+  `--type=bzImage` is the most thoroughly-tested x86 loader and
+  documents its handoff state precisely (32-bit protected mode,
+  specific register values). ~100 lines of stub code.
+- Read kexec-tools source for `mb2-x86` purgatory and confirm
+  whether the entry address it jumps to is actually `e_entry`.
+- Try adding `MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS` (type 3) with
+  entry=0x20001000 explicitly to our Multiboot2 header, in case
+  kexec's loader ignores `e_entry` without the explicit tag.
+- Add a UART re-init call at the very start of `_start` (16550
+  init sequence: DLL/DLM/LCR/FCR) before the `'K'` write, in case
+  UART state was cleared.
+
+**Original "Invalid memory segment" investigation notes:**
+
+Initial `kexec --load --type=multiboot2-x86` (and
+`--type=elf-x86_64`) rejected the image with *"Invalid memory
 segment 0x<addr> - 0x<end>"*. Investigated in this order:
 
 1. First tried the default 1 MiB load (`KERNEL_PHYS = 0x100000`) —

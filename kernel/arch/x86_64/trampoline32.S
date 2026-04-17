@@ -56,6 +56,18 @@ multiboot_header_end:
 _start:
     cli
 
+    /* Early-entry diagnostic: write one byte to COM1 (0x3F8) before
+     * touching any other state. Confirms we reached _start at all —
+     * useful for diagnosing boot-loader handoff issues (kexec, non-
+     * GRUB boot). On bare-metal UEFI this just prepends one extra
+     * byte to the boot log, no harm. Linux kexec and GRUB both leave
+     * COM1 configured at 115200 so an 8-bit write is visible.
+     *
+     * K = "kernel entry reached". */
+    mov $0x3F8, %dx
+    mov $0x4B, %al       /* 'K' */
+    out %al, %dx
+
     /* Save multiboot info pointer for later */
     mov %ebx, multiboot_ptr
 
