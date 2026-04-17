@@ -106,14 +106,35 @@ Include one test per identified risk area for the new hardware:
 - [ ] Link-down / link-up toggle — `link_status()` reflects it,
       pending TX fails with the correct error
 - [ ] If the driver implements IRQ-driven TX completion (#204):
-      a test that fills the TX ring, verifies completion via IRQ,
-      and confirms no stall when completion is delayed. The ARM64
-      MMIO driver registers via `gic_register_handler` and exposes
-      `virtio_net_get_irq()` + `virtio_net_get_irq_count()` so the
-      test can assert on the runtime IRQ number and the handler
-      counter rather than the delivery path (which on QEMU only
-      fires when the idle task runs `daifclr+wfi`). New drivers
-      should expose equivalent accessors.
+      - Register against the platform's dispatch table:
+        `gic_register_handler` on ARM64, `irq_register` (vector-32)
+        on x86-64. Both paths drain the TX used ring from the
+        handler so pool slots free without waiting for `net_poll`.
+      - Expose four accessors for tests and diagnostics:
+        `<driver>_get_irq` (runtime IRQ/vector number),
+        `<driver>_get_irq_count` (bumped on every handler entry),
+        `<driver>_<bus>_enabled` (IRQ path is live vs polled
+        fallback — e.g. `virtio_net_pci_msix_enabled`), and
+        `<driver>_get_tx_stall_count` (watchdog fire count).
+      - Mirror of the ARM64 MMIO tests on x86-64:
+        `test_net_msix_enabled`, `test_net_msix_vector_is_in_range`,
+        `test_net_msix_handler_drains_tx`. End-to-end hardware IRQ
+        delivery is verified on real hardware; QEMU tests exercise
+        the registration + handler-body paths directly.
+- [ ] If the driver implements the stuck-descriptor watchdog
+      (#204 item 4):
+      - `tx_reap_locked` calls a separate `tx_watchdog_warn_if_stuck`
+        helper that logs **exactly once** per stall episode (latch
+        resets on the next successful reap). Threshold is
+        `TX_STALL_THRESHOLD_MS = 5000`.
+      - Expose `<driver>_get_tx_stall_count()` and a test-only
+        `<driver>_test_trigger_watchdog()` that invokes the
+        watchdog check with synthetic inputs (no-progress +
+        in-flight + elapsed > threshold).
+      - Two regression tests per driver: `_watchdog_quiet`
+        (stays silent on healthy traffic) and
+        `_watchdog_fires_on_stall` (counter advances by exactly 1
+        when the trigger fires).
 
 ## Docs
 

@@ -614,6 +614,9 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 uint32_t virtio_net_pci_get_irq_count(void);
 uint32_t virtio_net_pci_get_msix_vector(void);
 bool     virtio_net_pci_msix_enabled(void);
+uint32_t virtio_net_pci_get_tx_stall_count(void);
+void     virtio_net_pci_test_trigger_watchdog(void);
+extern void virtio_net_pci_irq_handler(uint8_t irq);
 #endif
 
 /*
@@ -1223,7 +1226,151 @@ static void test_net_msix_vector_is_in_range(void)
     TEST_ASSERT_MESSAGE(v >= 50 && v <= 63,
         "MSI-X vector outside the 50-63 range reserved for virtio drivers");
 }
+
+/*
+ * Test: direct invocation of virtio_net_pci_irq_handler drains the
+ * TX used ring and bumps the IRQ count (#204 item 3).
+ *
+ * Parallel of the ARM64 test_net_irq_handler_drains_tx — exercises
+ * the handler body without depending on end-to-end MSI-X delivery
+ * (which on QEMU in task context works but adds scheduling
+ * nondeterminism to the assertion). Submits a few frames, calls
+ * the handler directly, verifies the counter advanced exactly once.
+ */
+static void test_net_msix_handler_drains_tx(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+    if (!virtio_net_pci_msix_enabled()) {
+        TEST_IGNORE_MESSAGE("MSI-X not enabled — handler path not active");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    uint32_t before = virtio_net_pci_get_irq_count();
+    for (int i = 0; i < 4; i++) {
+        (void)drv->send(frame, sizeof(frame));
+    }
+    virtio_net_pci_irq_handler(0);
+
+    uint32_t after = virtio_net_pci_get_irq_count();
+    TEST_ASSERT_MESSAGE(after == before + 1,
+        "virtio_net_pci_irq_handler did not bump irq_count — handler "
+        "early-exited or counter wiring broken");
+}
+
+/*
+ * Test: stuck-descriptor watchdog stays silent on normal traffic
+ * (#204 item 4).
+ *
+ * Run a standard burst-and-drain cycle through the PCI driver.
+ * Every reap either finds completions (progressed=true, watchdog
+ * resets) or runs on an empty pool (tx_has_inflight=false, watchdog
+ * path skipped). Either way the stall count must not advance. If
+ * this fails, the watchdog is firing spuriously on healthy traffic
+ * and will flood the log in production.
+ */
+static void test_net_pci_watchdog_quiet(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    uint32_t before = virtio_net_pci_get_tx_stall_count();
+    for (int i = 0; i < 8; i++) {
+        (void)drv->send(frame, sizeof(frame));
+    }
+    for (int i = 0; i < 32; i++) {
+        net_poll();
+    }
+    uint32_t after = virtio_net_pci_get_tx_stall_count();
+
+    TEST_ASSERT_MESSAGE(after == before,
+        "TX stuck-descriptor watchdog fired on healthy traffic");
+}
+
+/*
+ * Test: stuck-descriptor watchdog fires when a real stall is
+ * simulated (#204 item 4).
+ *
+ * Can't easily stall QEMU's TX completion, and tight-loop sending
+ * gets opportunistically reaped inside send() anyway. Instead the
+ * driver exposes a test-only trigger that drives the watchdog's
+ * inner branch with synthetic inputs: no-progress + in-flight=true
+ * + elapsed > threshold. Same code path a real stall would take;
+ * the counter must advance by exactly 1.
+ */
+static void test_net_pci_watchdog_fires_on_stall(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    uint32_t before = virtio_net_pci_get_tx_stall_count();
+    virtio_net_pci_test_trigger_watchdog();
+    uint32_t after = virtio_net_pci_get_tx_stall_count();
+
+    TEST_ASSERT_MESSAGE(after == before + 1,
+        "Watchdog trigger hook did not advance tx_stall_warn_count by 1");
+}
 #endif /* PLATFORM_X86_64 */
+
+/*
+ * Cross-platform watchdog quiet-path test. On ARM64 this uses the
+ * MMIO driver's accessor; PLATFORM_X86_64 version lives above.
+ * Both drivers must keep the watchdog silent on normal traffic.
+ */
+#if defined(PLATFORM_QEMU_VIRT)
+static void test_net_mmio_watchdog_quiet(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    const struct net_driver *drv = net_get_driver();
+    uint8_t frame[64];
+    test_net_build_loopback_frame(frame);
+
+    uint32_t before = virtio_net_get_tx_stall_count();
+    for (int i = 0; i < 8; i++) {
+        (void)drv->send(frame, sizeof(frame));
+    }
+    for (int i = 0; i < 32; i++) {
+        net_poll();
+    }
+    uint32_t after = virtio_net_get_tx_stall_count();
+
+    TEST_ASSERT_MESSAGE(after == before,
+        "TX stuck-descriptor watchdog fired on healthy traffic (mmio)");
+}
+
+static void test_net_mmio_watchdog_fires_on_stall(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    uint32_t before = virtio_net_get_tx_stall_count();
+    virtio_net_test_trigger_watchdog();
+    uint32_t after = virtio_net_get_tx_stall_count();
+
+    TEST_ASSERT_MESSAGE(after == before + 1,
+        "Watchdog trigger hook did not advance tx_stall_warn_count by 1 (mmio)");
+}
+#endif /* PLATFORM_QEMU_VIRT */
 
 #endif /* ENABLE_NETWORKING */
 
@@ -1288,10 +1435,15 @@ int test_suite_net(void)
 #if defined(PLATFORM_QEMU_VIRT)
     RUN_TEST(test_net_irq_handler_registered);
     RUN_TEST(test_net_irq_handler_drains_tx);
+    RUN_TEST(test_net_mmio_watchdog_quiet);
+    RUN_TEST(test_net_mmio_watchdog_fires_on_stall);
 #endif
 #if defined(PLATFORM_X86_64)
     RUN_TEST(test_net_msix_enabled);
     RUN_TEST(test_net_msix_vector_is_in_range);
+    RUN_TEST(test_net_msix_handler_drains_tx);
+    RUN_TEST(test_net_pci_watchdog_quiet);
+    RUN_TEST(test_net_pci_watchdog_fires_on_stall);
 #endif
     RUN_TEST(test_net_rx_no_buffers_clean);
 

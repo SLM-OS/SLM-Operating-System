@@ -51,6 +51,11 @@ static uint32_t net_irq_number;
 #define TX_STALL_THRESHOLD_MS 5000
 static uint32_t tx_last_progress_ms;
 static bool     tx_stall_warned;
+/* Bumped every time the watchdog's WARN fires. Exposed via
+ * virtio_net_get_tx_stall_count() so tests can verify the watchdog
+ * stays quiet on healthy traffic and fires exactly when a stall is
+ * simulated. */
+static volatile uint32_t tx_stall_warn_count;
 
 /*
  * Separate TX and RX locks. Both are IRQ-safe (accessed via
@@ -538,6 +543,21 @@ static bool tx_has_inflight(void) {
     return false;
 }
 
+/* Watchdog check extracted so the regression suite can exercise it
+ * with synthetic inputs via virtio_net_test_trigger_watchdog().
+ * Callers must hold tx_lock (same invariant as tx_reap_locked). */
+static void tx_watchdog_warn_if_stuck(bool any_inflight) {
+    if (tx_stall_warned || !any_inflight)
+        return;
+    uint32_t elapsed = sys_now() - tx_last_progress_ms;
+    if (elapsed >= TX_STALL_THRESHOLD_MS) {
+        WARN("TX descriptors stuck: no completion for %u ms (virtio-mmio)",
+             elapsed);
+        tx_stall_warned = true;
+        tx_stall_warn_count++;
+    }
+}
+
 static void virtio_net_tx_reap_locked(void) {
     bool progressed = false;
     while (true) {
@@ -560,19 +580,15 @@ static void virtio_net_tx_reap_locked(void) {
         progressed = true;
     }
 
-    /* Watchdog: update "last progress" on any successful reap, or
-     * log once if the pool has been stuck for too long. sys_now()
-     * returns milliseconds, which is fine for a 5-second threshold. */
+    /* On any successful reap, reset the watchdog latch. Otherwise
+     * (a no-op reap) fall through to the stall check — which is a
+     * no-op unless an in-flight pool has been idle past the
+     * threshold. */
     if (progressed) {
         tx_last_progress_ms = sys_now();
         tx_stall_warned = false;
-    } else if (!tx_stall_warned && tx_has_inflight()) {
-        uint32_t elapsed = sys_now() - tx_last_progress_ms;
-        if (elapsed >= TX_STALL_THRESHOLD_MS) {
-            WARN("TX descriptors stuck: no completion for %u ms (virtio-mmio)",
-                 elapsed);
-            tx_stall_warned = true;
-        }
+    } else {
+        tx_watchdog_warn_if_stuck(tx_has_inflight());
     }
 }
 
@@ -758,6 +774,28 @@ uint32_t virtio_net_get_irq_count(void) {
 
 uint32_t virtio_net_get_irq(void) {
     return net_irq_number;
+}
+
+uint32_t virtio_net_get_tx_stall_count(void) {
+    return tx_stall_warn_count;
+}
+
+/*
+ * Test hook: run the watchdog check as if we'd just observed
+ * no-progress + in-flight=true, with the last-progress timestamp
+ * rewound past the threshold. Exercises exactly the code path
+ * tx_reap_locked takes when a real stall happens, without
+ * requiring 5 real seconds or a way to freeze QEMU's TX completion.
+ *
+ * After this runs, tx_stall_warn_count advances by 1 and the
+ * warn-once latch is set (matching production behaviour). A
+ * subsequent real reap that finds completions will reset the
+ * latch naturally.
+ */
+void virtio_net_test_trigger_watchdog(void) {
+    tx_last_progress_ms = sys_now() - (TX_STALL_THRESHOLD_MS + 100);
+    tx_stall_warned = false;
+    tx_watchdog_warn_if_stuck(true);  /* synthetic: pretend pool is busy */
 }
 
 /* -------------------------------------------------------------------------- */

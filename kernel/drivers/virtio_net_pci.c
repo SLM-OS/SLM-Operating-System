@@ -258,6 +258,9 @@ static bool    tx_inflight[TX_BUFFER_COUNT];
 #define TX_STALL_THRESHOLD_MS 5000
 static uint32_t tx_last_progress_ms;
 static bool     tx_stall_warned;
+/* Bumped every time the watchdog WARN fires. See the matching
+ * comment in virtio_net.c. */
+static volatile uint32_t tx_stall_warn_count;
 
 static_assert(sizeof(tx_buffers) == TX_BUFFER_COUNT * MAX_PACKET_SIZE,
               "tx_buffers layout assumption broken");
@@ -290,8 +293,10 @@ static struct {
 } pci_msix;
 
 /* Forward decls so init can register the handler before the body is
- * defined. */
-static void virtio_net_pci_irq_handler(uint8_t irq);
+ * defined. Non-static so tests can invoke it directly without an
+ * indirect accessor; the function signature matches the IDT dispatch
+ * convention in kernel/arch/x86_64/idt.c. */
+void virtio_net_pci_irq_handler(uint8_t irq);
 
 /* -------------------------------------------------------------------------- */
 /* PCI Capability Parsing                                                      */
@@ -833,6 +838,20 @@ static bool tx_has_inflight(void) {
     return false;
 }
 
+/* Watchdog check extracted so tests can drive it with synthetic
+ * inputs. Caller holds pci_net.tx_lock. */
+static void tx_watchdog_warn_if_stuck(bool any_inflight) {
+    if (tx_stall_warned || !any_inflight)
+        return;
+    uint32_t elapsed = sys_now() - tx_last_progress_ms;
+    if (elapsed >= TX_STALL_THRESHOLD_MS) {
+        WARN("TX descriptors stuck: no completion for %u ms (virtio-pci)",
+             elapsed);
+        tx_stall_warned = true;
+        tx_stall_warn_count++;
+    }
+}
+
 /*
  * Drain the TX used ring and free pool slots whose descriptors the
  * device finished with. Caller must hold pci_net.tx_lock. Mirror of
@@ -864,13 +883,8 @@ static void virtio_net_pci_tx_reap_locked(void) {
     if (progressed) {
         tx_last_progress_ms = sys_now();
         tx_stall_warned = false;
-    } else if (!tx_stall_warned && tx_has_inflight()) {
-        uint32_t elapsed = sys_now() - tx_last_progress_ms;
-        if (elapsed >= TX_STALL_THRESHOLD_MS) {
-            WARN("TX descriptors stuck: no completion for %u ms (virtio-pci)",
-                 elapsed);
-            tx_stall_warned = true;
-        }
+    } else {
+        tx_watchdog_warn_if_stuck(tx_has_inflight());
     }
 }
 
@@ -996,7 +1010,7 @@ static bool virtio_net_pci_link_status(void) {
  * so its irq_save is a no-op — but the primitive is still correct
  * for task-context acquirers that share the lock.
  */
-static void virtio_net_pci_irq_handler(uint8_t irq)
+void virtio_net_pci_irq_handler(uint8_t irq)
 {
     (void)irq;  /* single-vector handler; irq index unused */
     if (!pci_net.initialized)
@@ -1031,6 +1045,21 @@ uint32_t virtio_net_pci_get_msix_vector(void) {
 
 bool virtio_net_pci_msix_enabled(void) {
     return pci_msix.enabled;
+}
+
+uint32_t virtio_net_pci_get_tx_stall_count(void) {
+    return tx_stall_warn_count;
+}
+
+/*
+ * TEST-ONLY: run the watchdog check with synthetic inputs. See the
+ * matching comment on virtio_net_test_trigger_watchdog in
+ * virtio_net.c — same semantics.
+ */
+void virtio_net_pci_test_trigger_watchdog(void) {
+    tx_last_progress_ms = sys_now() - (TX_STALL_THRESHOLD_MS + 100);
+    tx_stall_warned = false;
+    tx_watchdog_warn_if_stuck(true);
 }
 
 /* -------------------------------------------------------------------------- */
