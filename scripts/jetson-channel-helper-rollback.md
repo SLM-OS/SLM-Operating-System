@@ -31,6 +31,11 @@ is ready to test, but the current deployed version stays unchanged.
 ssh root@192.168.4.93 'ls /root/gpu-channel-helper* 2>/dev/null && echo "NOT CLEAN" || echo "CLEAN"'
 ```
 
+## Packages installed for diagnostics (2026-04-17)
+
+- `strace` (v5.16-0ubuntu3) — installed to trace CUDA's ioctl calls.
+  Rollback: `ssh root@192.168.4.93 'apt-get remove -y strace'`
+
 ## What we learned (blocker notes)
 
 The first ioctl `NVGPU_GPU_IOCTL_ALLOC_AS` returns EINVAL on L4T

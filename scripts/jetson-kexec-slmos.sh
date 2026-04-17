@@ -79,9 +79,17 @@ else
     systemctl stop nvs-service 2>/dev/null || true
     sleep 1
 
-    # Kill any remaining GPU file descriptor holders
-    fuser -k /dev/nvhost-gpu /dev/nvmap 2>/dev/null || true
-    sleep 1
+    if [[ "$NO_GPU_SUSPEND" == "1" ]]; then
+        # In preserve-channel mode, deliberately DO NOT kill GPU fd
+        # holders — the channel-helper process must stay alive to keep
+        # its nvgpu channel in the runlist across kexec.
+        echo "       preserving GPU consumers (--no-gpu-suspend implies"
+        echo "       channel-helper must stay alive through kexec)"
+    else
+        # Kill any remaining GPU file descriptor holders
+        fuser -k /dev/nvhost-gpu /dev/nvmap 2>/dev/null || true
+        sleep 1
+    fi
 
     if [[ "$NO_GPU_SUSPEND" == "1" ]]; then
         echo "[2/5] SKIPPING runtime-PM suspend (--no-gpu-suspend)"

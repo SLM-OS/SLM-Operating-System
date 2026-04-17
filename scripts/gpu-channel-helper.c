@@ -103,12 +103,14 @@ static int nvmap_alloc_dmabuf(int nvmap_fd, uint32_t size, uint32_t align)
     xioctl(nvmap_fd, NVMAP_IOC_CREATE_64, &cr, "NVMAP_CREATE");
     uint32_t handle = cr.handle64;
 
-    /* Allocate backing memory */
+    /* Allocate backing memory. Values captured from CUDA's own
+     * invocation via LD_PRELOAD ioctl snoop on L4T r36.4.7. */
     struct nvmap_alloc_handle al = {
         .handle = handle,
-        .heap_mask = NVMAP_HEAP_SYSMEM,
-        .flags = NVMAP_HANDLE_UNCACHEABLE,
-        .align = align,
+        .heap_mask = 0x40000000,  /* IOVMM heap */
+        .flags = 0x8000003,       /* cacheable + some nvmap-specific bits */
+        .align = (align < 0x1000) ? 0x1000 : align,
+        .numa_nid = -1,
     };
     xioctl(nvmap_fd, NVMAP_IOC_ALLOC, &al, "NVMAP_ALLOC");
 
@@ -153,11 +155,16 @@ int main(void)
         ctrl_fd = xopen("/dev/nvhost-ctrl-gpu", O_RDWR);
     printf("[gpu-helper] ctrl_fd=%d\n", ctrl_fd);
 
-    /* Allocate address space. Must zero-init — reserved and padding
-     * fields must be zero per the ioctl contract. */
+    /* Allocate address space. va_range_start/end must be non-zero —
+     * captured from CUDA's invocation on L4T r36.4.7 via LD_PRELOAD
+     * ioctl snoop. The validation requires va_end > va_start. */
     struct nvgpu_alloc_as_args as_args;
     memset(&as_args, 0, sizeof(as_args));
-    as_args.big_page_size = 0;  /* 0 = use default page size */
+    as_args.big_page_size = 0;             /* let kernel pick default */
+    as_args.flags = 0;
+    as_args.va_range_start = 0x4000000ULL; /* skip the low 64 MB */
+    as_args.va_range_end = 0x2000000000ULL; /* 128 GB VA range */
+    as_args.va_range_split = 0;
     xioctl(ctrl_fd, NVGPU_GPU_IOCTL_ALLOC_AS, &as_args, "ALLOC_AS");
     int as_fd = as_args.as_fd;
     printf("[gpu-helper] AS fd=%d\n", as_fd);
@@ -191,20 +198,31 @@ int main(void)
     struct nvgpu_set_nvmap_fd_args nvm = { .fd = nvmap_fd };
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_SET_NVMAP_FD, &nvm, "SET_NVMAP");
 
+    /* Disable the watchdog — required when using DETERMINISTIC flag
+     * in SETUP_BIND (nvgpu rejects the combination otherwise). */
+    struct nvgpu_channel_wdt_args wdt = {
+        .wdt_status = NVGPU_IOCTL_CHANNEL_DISABLE_WDT,
+        .timeout_ms = 0,
+    };
+    xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_WDT, &wdt, "WDT_DISABLE");
+
     /* Allocate buffers via nvmap: USERD (4KB), GPFIFO (8KB = 1024 entries). */
     int userd_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
     int gpfifo_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 8192, 4096);
     printf("[gpu-helper] USERD dmabuf=%d, GPFIFO dmabuf=%d\n",
            userd_dmabuf, gpfifo_dmabuf);
 
-    /* SETUP_BIND — creates GPFIFO ring + binds channel. */
-    struct nvgpu_channel_setup_bind_args sb = {
-        .num_gpfifo_entries = 1024,
-        .num_inflight_jobs = 0,
-        .flags = NVGPU_CHANNEL_SETUP_BIND_FLAGS_USERMODE_SUPPORT,
-        .userd_dmabuf_fd = userd_dmabuf,
-        .gpfifo_dmabuf_fd = gpfifo_dmabuf,
-    };
+    /* SETUP_BIND — creates GPFIFO ring + binds channel.
+     * flags=0xa (DETERMINISTIC | USERMODE_SUPPORT) captured from CUDA
+     * via LD_PRELOAD on L4T r36.4.7. */
+    struct nvgpu_channel_setup_bind_args sb;
+    memset(&sb, 0, sizeof(sb));
+    sb.num_gpfifo_entries = 1024;
+    sb.num_inflight_jobs = 0;
+    sb.flags = NVGPU_CHANNEL_SETUP_BIND_FLAGS_DETERMINISTIC |
+               NVGPU_CHANNEL_SETUP_BIND_FLAGS_USERMODE_SUPPORT;
+    sb.userd_dmabuf_fd = userd_dmabuf;
+    sb.gpfifo_dmabuf_fd = gpfifo_dmabuf;
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_SETUP_BIND, &sb, "SETUP_BIND");
     printf("[gpu-helper] SETUP_BIND OK:\n");
     printf("  work_submit_token = 0x%x\n", sb.work_submit_token);
@@ -219,22 +237,29 @@ int main(void)
     int pb_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 65536, 4096);  /* 64 KB */
     int sem_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
 
-    /* Map pushbuffer into GPU AS. */
-    struct nvgpu_as_map_buffer_ex_args pb_map = {
-        .dmabuf_fd = pb_dmabuf,
-        .mapping_size = 65536,
-        .page_size = 4096,
-    };
+    /* Map pushbuffer into GPU AS. compr_kind=-1 (invalid), incompr_kind=0
+     * means "no compression, use default PTE kind". Per nvgpu docs,
+     * at least one of compr_kind/incompr_kind must be != NV_KIND_INVALID. */
+    struct nvgpu_as_map_buffer_ex_args pb_map;
+    memset(&pb_map, 0, sizeof(pb_map));
+    pb_map.compr_kind = -1;       /* NV_KIND_INVALID */
+    pb_map.incompr_kind = 0;      /* generic PITCH kind */
+    pb_map.dmabuf_fd = pb_dmabuf;
+    /* mapping_size=0 when not FIXED_OFFSET (kernel uses dmabuf size). */
+    pb_map.mapping_size = 0;
+    pb_map.page_size = 4096;
     xioctl(as_fd, NVGPU_AS_IOCTL_MAP_BUFFER_EX, &pb_map, "MAP_PB");
     printf("[gpu-helper] Pushbuffer GPU VA = 0x%llx\n",
            (unsigned long long)pb_map.offset);
 
     /* Map semaphore into GPU AS. */
-    struct nvgpu_as_map_buffer_ex_args sem_map = {
-        .dmabuf_fd = sem_dmabuf,
-        .mapping_size = 4096,
-        .page_size = 4096,
-    };
+    struct nvgpu_as_map_buffer_ex_args sem_map;
+    memset(&sem_map, 0, sizeof(sem_map));
+    sem_map.compr_kind = -1;
+    sem_map.incompr_kind = 0;
+    sem_map.dmabuf_fd = sem_dmabuf;
+    sem_map.mapping_size = 0;
+    sem_map.page_size = 4096;
     xioctl(as_fd, NVGPU_AS_IOCTL_MAP_BUFFER_EX, &sem_map, "MAP_SEM");
     printf("[gpu-helper] Semaphore GPU VA = 0x%llx\n",
            (unsigned long long)sem_map.offset);
@@ -283,16 +308,21 @@ int main(void)
         return 1;
     }
 
-    /* Write the handoff block to the fixed DRAM address. */
-    int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (mem_fd < 0) { perror("/dev/mem"); return 1; }
-
+    /* Allocate a dedicated dmabuf for the handoff block. Writing via
+     * /dev/mem is blocked by CONFIG_STRICT_DEVMEM for System RAM, but
+     * we can write to dmabuf memory via its own mmap. SLM-OS scans
+     * a range of physical memory for the magic value to find this. */
+    int handoff_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
     void *handoff = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                         MAP_SHARED, mem_fd, HANDOFF_PHYS);
+                         MAP_SHARED, handoff_dmabuf, 0);
     if (handoff == MAP_FAILED) {
-        perror("mmap handoff");
+        perror("mmap handoff dmabuf");
         return 1;
     }
+    memset(handoff, 0, 4096);
+    uint64_t handoff_phys = virt_to_phys(handoff);
+    printf("[gpu-helper] Handoff dmabuf phys = 0x%llx\n",
+           (unsigned long long)handoff_phys);
 
     /* ram_userd_gp_put_w = 35, ram_userd_gp_get_w = 34 (from hw_ram_ga10b.h) */
     uint32_t *h = (uint32_t *)handoff;
@@ -330,8 +360,9 @@ int main(void)
     h[27] = 0;                      /* initial gp_get */
 
     msync(handoff, 4096, MS_SYNC);
-    printf("[gpu-helper] Handoff block written to 0x%llx\n",
-           (unsigned long long)HANDOFF_PHYS);
+    printf("[gpu-helper] Handoff block written to dmabuf phys 0x%llx\n",
+           (unsigned long long)handoff_phys);
+    printf("[gpu-helper] Magic at offset 0: 0x%08x\n", h[0]);
 
     printf("[gpu-helper] Channel ready. Sleeping — run kexec now.\n");
     printf("[gpu-helper] To kexec: sudo slmos-kexec --no-gpu-suspend\n");
