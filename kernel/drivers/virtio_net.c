@@ -11,6 +11,7 @@
 #include "net_driver.h"
 #include "pmm.h"
 #include "debug.h"
+#include "gic.h"            /* gic_register_handler / gic_enable_irq */
 #include "spinlock.h"
 #include "cache.h"
 #include "arch/sys_arch.h"  /* sys_now() for wall-clock TX timeout */
@@ -21,13 +22,27 @@
 /* -------------------------------------------------------------------------- */
 
 static struct virtio_net_device netdev;
+
 /*
- * Separate TX and RX locks (#204 — partial fix for synchronous TX
- * polling blocking the RX path). The TX path still spins on the
- * used ring for completion, but that spin no longer holds the same
- * lock the RX path (driven by net_poll) needs. Full async TX with
- * IRQ-driven completion is the long-term goal; splitting the lock
- * is the low-risk intermediate step that the test suite validates.
+ * Diagnostic counter — incremented by virtio_net_irq_handler on every
+ * invocation. Exposed via virtio_net_get_irq_count() so tests can
+ * verify the IRQ path is actually firing (and didn't fall through to
+ * the polled net_poll fallback). Not part of net_stats because it's a
+ * driver-internal observable, not a netif metric.
+ */
+static volatile uint32_t irq_count;
+
+/* Runtime IRQ number, captured in virtio_net_init after slot probing.
+ * Exposed via virtio_net_get_irq() so tests + diag don't have to
+ * re-derive the SPI from the slot probe. Zero until init completes. */
+static uint32_t net_irq_number;
+
+/*
+ * Separate TX and RX locks. Both are IRQ-safe (accessed via
+ * spin_lock_irqsave) because virtio_net_irq_handler acquires tx_lock
+ * to drain TX completions — a plain spin_lock held by task context
+ * would deadlock with a hard IRQ that tried to re-acquire it on the
+ * same CPU.
  */
 static spinlock_t tx_lock = SPINLOCK_INIT;
 static spinlock_t rx_lock = SPINLOCK_INIT;
@@ -443,18 +458,23 @@ int virtio_net_init(void) {
     /* Post receive buffers */
     post_rx_buffers();
 
-    /* IRQ dispatch is not wired up yet. Enabling the IRQ at the GIC
-     * without a dispatch entry in kernel/arch/arm64/exceptions.c
-     * would cause every virtio-net config change / TX completion to
-     * log "Unhandled IRQ %u" and consume GIC resources for no benefit,
-     * because both TX and RX are driven by polling (net_poll). IRQ
-     * setup will land together with IRQ-driven TX completion — see
-     * #204. The handler itself (virtio_net_irq_handler below) is kept
-     * so the dispatch wiring is a one-line change when #204 lands.
-     *
-     * Parenthetical: computing the slot-derived IRQ is still useful
-     * commentary for future work. */
-    (void)VIRTIO_DEVICE_IRQ(net_slot);
+    /* Register IRQ handler. The slot-derived IRQ number is looked up
+     * by the EL1 IRQ dispatch in exceptions.c (via
+     * gic_lookup_handler) and routed to virtio_net_irq_handler when
+     * the device fires. Primary duty: drain TX completions so pool
+     * slots free promptly without waiting for net_poll(). RX is
+     * still polled (moving it to IRQ would require pbuf_alloc and
+     * lwIP input from IRQ context — bigger scaffolding than
+     * warranted today). */
+    uint32_t irq = VIRTIO_DEVICE_IRQ(net_slot);
+    if (gic_register_handler(irq, virtio_net_irq_handler) < 0) {
+        WARN("gic_register_handler full — TX completion stays polled-only");
+    } else {
+        gic_set_priority(irq, 0x80);
+        gic_enable_irq(irq);
+        net_irq_number = irq;
+        INFO("VirtIO-Net IRQ %u registered", irq);
+    }
 
     initialized = true;
     INFO("VirtIO-Net driver initialized");
@@ -493,13 +513,14 @@ static void virtio_net_tx_reap_locked(void) {
 }
 
 /* Entry point called from net_poll() via the net_driver op — wraps
- * the locked helper with tx_lock acquisition. */
+ * the locked helper with tx_lock acquisition. Must be IRQ-safe
+ * because tx_lock is also acquired from virtio_net_irq_handler. */
 static void virtio_net_tx_reap(void) {
     if (!initialized)
         return;
-    spin_lock(&tx_lock);
+    irq_flags_t flags = spin_lock_irqsave(&tx_lock);
     virtio_net_tx_reap_locked();
-    spin_unlock(&tx_lock);
+    spin_unlock_irqrestore(&tx_lock, flags);
 }
 
 int virtio_net_send(const uint8_t *data, uint32_t len) {
@@ -511,7 +532,7 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
         return NET_E_TOO_LARGE;
     }
 
-    spin_lock(&tx_lock);
+    irq_flags_t flags = spin_lock_irqsave(&tx_lock);
 
     /* Reap completions opportunistically — frees pool slots so the
      * search below has a fresh view. Without this, two back-to-back
@@ -528,17 +549,18 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
         }
     }
     if (slot < 0) {
-        spin_unlock(&tx_lock);
+        spin_unlock_irqrestore(&tx_lock, flags);
         return NET_E_BUSY;  /* All slots in flight; caller retries via net_poll */
     }
 
-    /* Claim the slot BEFORE the device can see the descriptor. This
-     * matters once IRQ-driven completion lands — a hard IRQ firing
-     * between virtqueue_add_buf and this assignment would reap the
-     * completion, see tx_inflight[slot] still false, and silently
-     * bail. Claiming first means the reap path always observes a
-     * consistent "claimed" state. Under polled-only operation the
-     * order is harmless either way; this is forward-compatibility. */
+    /* Claim the slot BEFORE the device can see the descriptor. A
+     * hard IRQ firing between virtqueue_add_buf and this assignment
+     * would reap the completion, see tx_inflight[slot] still false,
+     * and silently bail. Claiming first means the reap path always
+     * observes a consistent "claimed" state. The IRQ is masked while
+     * we hold tx_lock (_irqsave), so no such reentry can happen —
+     * the pre-claim is belt-and-braces in case the lock flavor is
+     * ever downgraded. */
     tx_inflight[slot] = true;
 
     /* Build packet in the chosen slot */
@@ -555,12 +577,12 @@ int virtio_net_send(const uint8_t *data, uint32_t len) {
                                      false /* device reads */);
     if (desc_idx < 0) {
         tx_inflight[slot] = false;  /* release claim on submit failure */
-        spin_unlock(&tx_lock);
+        spin_unlock_irqrestore(&tx_lock, flags);
         return NET_E_BUSY;  /* TX virtqueue descriptor pool exhausted */
     }
 
     virtqueue_kick(&netdev.tx_vq);
-    spin_unlock(&tx_lock);
+    spin_unlock_irqrestore(&tx_lock, flags);
     return 0;
 }
 
@@ -569,12 +591,15 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
         return -1;
     }
 
-    spin_lock(&rx_lock);
+    /* rx_lock is IRQ-safe for symmetry with tx_lock, in case a
+     * future IRQ handler gains RX-drain responsibilities. Not
+     * strictly required today (the handler only touches TX). */
+    irq_flags_t flags = spin_lock_irqsave(&rx_lock);
 
     uint32_t used_len;
     int desc_idx = virtqueue_get_buf(&netdev.rx_vq, &used_len);
     if (desc_idx < 0) {
-        spin_unlock(&rx_lock);
+        spin_unlock_irqrestore(&rx_lock, flags);
         return 0;  /* No packet available */
     }
 
@@ -606,7 +631,7 @@ int virtio_net_recv(uint8_t *buffer, uint32_t max_len) {
     }
     virtqueue_kick(&netdev.rx_vq);
 
-    spin_unlock(&rx_lock);
+    spin_unlock_irqrestore(&rx_lock, flags);
     return packet_len;
 }
 
@@ -614,6 +639,8 @@ void virtio_net_irq_handler(void) {
     if (!initialized) {
         return;
     }
+
+    irq_count++;
 
     /* Read and acknowledge interrupt */
     uint32_t isr = virtio_read32(netdev.base, VIRTIO_MMIO_INTERRUPT_STATUS);
@@ -632,7 +659,21 @@ void virtio_net_irq_handler(void) {
         }
     }
 
-    /* Used buffer notifications are handled in recv/send functions */
+    if (isr & VIRTIO_IRQ_USED_BUFFER) {
+        /* Drain TX completions immediately so pool slots free up
+         * without waiting for the next net_poll(). RX is still
+         * drained from net_poll() — moving RX to IRQ context would
+         * need pbuf_alloc + lwIP input from IRQ, which is a much
+         * bigger scaffolding change.
+         *
+         * Already in IRQ context (EL1 IRQ vector entered with IRQ
+         * masked), so spin_lock_irqsave's irq_save is a no-op but
+         * still the correct primitive to pair with task-context
+         * acquirers. */
+        irq_flags_t flags = spin_lock_irqsave(&tx_lock);
+        virtio_net_tx_reap_locked();
+        spin_unlock_irqrestore(&tx_lock, flags);
+    }
 }
 
 void virtio_net_get_mac(uint8_t mac[6]) {
@@ -645,6 +686,14 @@ void virtio_net_get_mac(uint8_t mac[6]) {
 
 bool virtio_net_link_up(void) {
     return initialized && netdev.link_up;
+}
+
+uint32_t virtio_net_get_irq_count(void) {
+    return irq_count;
+}
+
+uint32_t virtio_net_get_irq(void) {
+    return net_irq_number;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -299,8 +299,23 @@ next `send()` runs.
    and implies a 12-byte `struct virtio_net_hdr` (see "Packet Header
    Size" below).
 4. **Queue Setup**: Initialize RX (queue 0) and TX (queue 1) virtqueues
-5. **Packet I/O**: DMA-based packet transmission and reception, polled
-   (no IRQ-driven completion currently)
+5. **Packet I/O**: DMA-based packet transmission. TX completions are
+   reaped both by `net_poll()` (opportunistic, keeps pool slots free
+   under heavy load without waiting for the IRQ to land) and by the
+   registered IRQ handler — see "IRQ Dispatch" below. RX is still
+   drained from `net_poll()` (moving RX to IRQ context would require
+   `pbuf_alloc` and lwIP input from IRQ, a much bigger change).
+6. **IRQ Dispatch**: After queue setup the driver calls
+   `gic_register_handler(irq, virtio_net_irq_handler)` and
+   `gic_enable_irq(irq)`. The IRQ number is slot-derived
+   (`VIRTIO_DEVICE_IRQ(slot) = 48 + slot`) and exposed via
+   `virtio_net_get_irq()`. The EL1 IRQ dispatcher in
+   `kernel/arch/arm64/exceptions.c` looks up the registered handler
+   for any IRQ not matched by a compile-time case (timer, UART) and
+   invokes it after EOI. On real hardware this drains TX pool slots
+   without waiting for `net_poll()` — the on-QEMU latency
+   improvement is modest because the opportunistic reap in `send()`
+   already keeps the pool clear.
 
 ### VirtIO-Net PCI Driver (x86-64)
 
@@ -609,6 +624,8 @@ on both ARM64 MMIO and x86-64 PCI paths):
 | `test_net_send_oversized_rejected` | 2048-byte packet rejected with `NET_E_TOO_LARGE` (#204) |
 | `test_net_send_pool_exhaustion` | 32 submits without intervening poll never hit an unexpected error — only 0 or `NET_E_BUSY` (#204) |
 | `test_net_burst_8_sends_async` | 8 back-to-back submits succeed without blocking; pool absorbs them; `net_poll()` drains completions (#204) |
+| `test_net_irq_handler_registered` | MMIO driver called `gic_register_handler` — dispatch table points to `virtio_net_irq_handler` for the runtime IRQ (#204) |
+| `test_net_irq_handler_drains_tx` | Direct handler invocation bumps `virtio_net_get_irq_count()` and drains the TX used ring (#204) |
 
 Run tests with:
 

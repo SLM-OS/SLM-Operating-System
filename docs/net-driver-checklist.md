@@ -107,7 +107,13 @@ Include one test per identified risk area for the new hardware:
       pending TX fails with the correct error
 - [ ] If the driver implements IRQ-driven TX completion (#204):
       a test that fills the TX ring, verifies completion via IRQ,
-      and confirms no stall when completion is delayed
+      and confirms no stall when completion is delayed. The ARM64
+      MMIO driver registers via `gic_register_handler` and exposes
+      `virtio_net_get_irq()` + `virtio_net_get_irq_count()` so the
+      test can assert on the runtime IRQ number and the handler
+      counter rather than the delivery path (which on QEMU only
+      fires when the idle task runs `daifclr+wfi`). New drivers
+      should expose equivalent accessors.
 
 ## Docs
 

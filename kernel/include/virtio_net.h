@@ -232,6 +232,27 @@ void virtio_net_get_mac(uint8_t mac[6]);
 bool virtio_net_link_up(void);
 
 /**
+ * Get the count of IRQs the driver has observed.
+ *
+ * Incremented by virtio_net_irq_handler on every invocation (after the
+ * !initialized early-exit). Exposed so integration tests can verify
+ * that the interrupt dispatch path is actually firing during traffic —
+ * a ring-level success with zero IRQs means we silently fell back to
+ * polling.
+ */
+uint32_t virtio_net_get_irq_count(void);
+
+/**
+ * Get the runtime IRQ number the driver registered against.
+ *
+ * Returns 0 before init or when no handler was registered. Useful
+ * because the slot — and therefore the SPI number — is discovered by
+ * probing MMIO, so callers can't derive it from VIRTIO_NET_SLOT at
+ * compile time when the device lands somewhere other than slot 0.
+ */
+uint32_t virtio_net_get_irq(void);
+
+/**
  * Register the VirtIO-Net MMIO driver with the net_driver abstraction.
  *
  * Called during platform init (before net_init) so the lwIP adapter
