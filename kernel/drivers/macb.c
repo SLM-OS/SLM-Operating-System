@@ -42,6 +42,7 @@
 #include "timer.h"          /* sleep_ms / sleep_us */
 #include "cache.h"          /* cache_clean_range for DMA coherency */
 #include "gic.h"            /* gic_register_handler / gic_enable_irq */
+#include "spinlock.h"       /* tx_lock — IRQ-safe serialization */
 #include "macb.h"
 
 /* -------------------------------------------------------------------------- */
@@ -163,6 +164,16 @@
 #define BMSR_ANEGCAPABLE        (1u << 3)
 #define BMSR_ANEGCOMPLETE       (1u << 5)
 
+/* MII_LPA (reg 5) — Link Partner Ability */
+#define LPA_10HALF              (1u << 5)
+#define LPA_10FULL              (1u << 6)
+#define LPA_100HALF             (1u << 7)
+#define LPA_100FULL             (1u << 8)
+
+/* MII_STAT1000 (reg 10) — 1000BASE-T link partner status */
+#define STAT1000_LPA_1000HALF   (1u << 10)
+#define STAT1000_LPA_1000FULL   (1u << 11)
+
 /* Broadcom OUI — top 22 bits of PHY_ID encode the OUI; Broadcom is 0x001F */
 #define BCM_PHY_OUI_MSB         0x0040      /* PHYID1 for BCM phys */
 #define BCM54213PE_PHYID_LOW    0x600D      /* PHYID2 for BCM54213PE */
@@ -234,6 +245,24 @@ struct macb_dma_desc {
 #define MACB_RX_BUF_UNITS_64    (MACB_RX_BUF_SIZE / 64)  /* 1536/64 = 24 */
 
 /* -------------------------------------------------------------------------- */
+/* RP1 GPIO bank 1 — used only for driving PHY reset (GPIO 32)                 */
+/*                                                                             */
+/* GPIO 32 lives in RP1 IO_BANK1. We don't have a GPIO framework in           */
+/* SLM-OS yet, so the driver pokes the RIO/PADS registers directly.           */
+/* Kept file-scope and MACB-prefixed to avoid preprocessor leakage and        */
+/* to stop anyone confusing these with UART's private FUNCSEL_SYS_RIO.         */
+/* -------------------------------------------------------------------------- */
+#define MACB_RP1_IO_BANK1_BASE   0x1F000D4000UL
+#define MACB_RP1_RIO_BANK1_BASE  0x1F000E4000UL
+#define MACB_RP1_PADS_BANK1_BASE 0x1F000F4000UL
+#define MACB_BANK1_PIN(gpio)     ((gpio) - 28)   /* GPIO 28-33 → 0-5 */
+#define MACB_RIO_FUNCSEL_SYS_RIO 5               /* Function select: SYS_RIO */
+#define MACB_RIO_SET_OFFSET      0x2000          /* Atomic set alias */
+#define MACB_RIO_CLR_OFFSET      0x3000          /* Atomic clear alias */
+#define MACB_PADS_INPUT_EN       (1u << 6)
+#define MACB_PADS_OUTPUT_DIS     (1u << 7)
+
+/* -------------------------------------------------------------------------- */
 /* MMIO helpers                                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -296,7 +325,6 @@ static uint16_t macb_mdio_read(uint8_t phy, uint8_t reg)
     return (uint16_t)(macb_readl(MACB_MAN) & MACB_MAN_DATA_MASK);
 }
 
-__attribute__((unused))
 static int macb_mdio_write(uint8_t phy, uint8_t reg, uint16_t val)
 {
     if (macb_mdio_wait_idle() < 0)
@@ -329,28 +357,48 @@ static struct {
     uint16_t phy_id2;           /* MII_PHYID2 — OUI low + model + rev */
     uint32_t link_speed_mbps;   /* 10 / 100 / 1000 after auto-neg */
     bool     link_full_duplex;
-    unsigned tx_head;           /* Next slot we'll fill */
-    unsigned tx_tail;           /* Next slot to reap for completion */
+    unsigned tx_head;           /* Next slot we'll fill — mutated under tx_lock */
+    unsigned tx_tail;           /* Next slot to reap — mutated under tx_lock */
     unsigned rx_head;           /* Next slot to inspect for incoming frames */
     bool     irq_registered;    /* GIC handler installed; false = polled-only */
-    volatile uint32_t irq_count;    /* Bumped every time macb_irq_handler runs */
-    volatile uint32_t isr_last;     /* Last MACB_ISR read, for diagnostics */
+    /* Diagnostic counters written by macb_irq_handler, read by
+     * accessors from task context. `volatile` prevents compiler
+     * reordering for torn-read resistance; actual cross-CPU
+     * atomicity relies on ARM64 32-bit aligned loads being atomic,
+     * which is true in practice. If these ever become part of a
+     * correctness contract (rather than diagnostics), switch to
+     * __atomic_load_n / __atomic_store_n. */
+    volatile uint32_t irq_count;
+    volatile uint32_t isr_last;
 } macb_state;
 
-/* TX ring + buffer pool. 4 KB alignment is overkill for the descriptor
- * ring (needs 8-byte alignment) but matches the cacheline-pair alignment
- * the Pi 5 cache maintenance helpers assume and keeps TBQP setup
- * trivial. Buffers get 16-byte alignment, same as the virtio drivers. */
+/* Serializes tx_head / tx_tail / tx_ring mutation across the
+ * send path and (if MSIX_CFG ever starts firing — see #247) the
+ * IRQ handler. IRQ-safe because macb_irq_handler is the other
+ * acquirer once the IRQ path goes live; spin_lock_irqsave is the
+ * only primitive that pairs with both task-context and hard-IRQ
+ * context safely. Polled today, but the lock is real so the
+ * _locked suffix on macb_tx_reap_locked stops being aspirational. */
+static spinlock_t tx_lock = SPINLOCK_INIT;
+
+/* TX ring + buffer pool. 64-byte alignment matches the BCM2712
+ * cacheline size — ensures cache_clean_range / cache_invalidate_range
+ * on the ring doesn't touch unrelated data. Buffers get 16-byte
+ * alignment, matching the virtio drivers.
+ *
+ * MACB spec only requires 8-byte alignment for the ring base (TBQP
+ * bottom 3 bits are reserved), but cacheline alignment is a
+ * correctness thing on Pi 5 where DMA coherency is explicit. */
 static struct macb_dma_desc
-    tx_ring[MACB_TX_RING_SIZE] __attribute__((aligned(4096)));
+    tx_ring[MACB_TX_RING_SIZE] __attribute__((aligned(64)));
 static uint8_t
     tx_buffers[MACB_TX_RING_SIZE][MACB_TX_BUF_SIZE] __attribute__((aligned(16)));
 
-/* RX ring + buffer pool. Buffers are 4-byte aligned at minimum (addr
- * field's low 2 bits are USED/WRAP). We use 64-byte alignment to match
- * RXBS granularity and keep cacheline semantics clean. */
+/* RX ring + buffer pool. 64-byte alignment on the ring for the same
+ * cacheline reason. RX buffers use 64-byte alignment to match the
+ * RXBS (DMA buffer size in units of 64 bytes) granularity. */
 static struct macb_dma_desc
-    rx_ring[MACB_RX_RING_SIZE] __attribute__((aligned(4096)));
+    rx_ring[MACB_RX_RING_SIZE] __attribute__((aligned(64)));
 static uint8_t
     rx_buffers[MACB_RX_RING_SIZE][MACB_RX_BUF_SIZE] __attribute__((aligned(64)));
 
@@ -395,43 +443,37 @@ static void macb_mdio_bringup(void)
 /* Drive RP1 GPIO 32 high to release BCM54213PE's reset line.
  *
  * Per Pi 5 DTS the PHY reset-gpio is GPIO 32, active low, 5 ms.
- * GPIO 32 sits in RP1 IO_BANK1 (at RP1+0x0D4000), RIO_BANK1 (at
- * +0x0E4000), PADS_BANK1 (at +0x0F4000). Bank 1 indexing offsets
- * the pin number by -28 internally (GPIO 28-33 occupy bank 1).
+ * GPIO 32 lives in RP1 IO_BANK1 (see MACB_RP1_* constants above).
  *
  * MVP: blindly configure the pin as SYS_RIO output-driving-high.
- * Kept compact — a full GPIO framework would be a separate
- * refactor. If this stage fails on later boards, look here first. */
+ * A real GPIO framework would be a separate refactor. If this
+ * stage fails on later boards, look here first. */
 static void macb_release_phy_reset(void)
 {
-    #define RP1_IO_BANK1_BASE    0x1F000D4000UL
-    #define RP1_RIO_BANK1_BASE   0x1F000E4000UL
-    #define RP1_PADS_BANK1_BASE  0x1F000F4000UL
-    #define BANK1_PIN(gpio)      ((gpio) - 28)   /* GPIO 28-33 → 0-5 */
-    #define FUNCSEL_SYS_RIO      5
-    #define RIO_SET_OFFSET       0x2000          /* Atomic set alias */
-    #define PADS_INPUT_EN        (1u << 6)
-    #define PADS_OUTPUT_DIS      (1u << 7)
-
     const uint32_t phy_reset_gpio = 32;
-    const uint32_t bank_pin = BANK1_PIN(phy_reset_gpio);
+    const uint32_t bank_pin = MACB_BANK1_PIN(phy_reset_gpio);
 
-    volatile uint32_t *ctrl = (volatile uint32_t *)(RP1_IO_BANK1_BASE + bank_pin * 8 + 4);
-    volatile uint32_t *pads = (volatile uint32_t *)(RP1_PADS_BANK1_BASE + 4 + bank_pin * 4);
-    volatile uint32_t *rio_oe_set  = (volatile uint32_t *)(RP1_RIO_BANK1_BASE + 0x04 + RIO_SET_OFFSET);
-    volatile uint32_t *rio_out_set = (volatile uint32_t *)(RP1_RIO_BANK1_BASE + 0x00 + RIO_SET_OFFSET);
+    volatile uint32_t *ctrl =
+        (volatile uint32_t *)(MACB_RP1_IO_BANK1_BASE + bank_pin * 8 + 4);
+    volatile uint32_t *pads =
+        (volatile uint32_t *)(MACB_RP1_PADS_BANK1_BASE + 4 + bank_pin * 4);
+    volatile uint32_t *rio_oe_set =
+        (volatile uint32_t *)(MACB_RP1_RIO_BANK1_BASE + 0x04 + MACB_RIO_SET_OFFSET);
+    volatile uint32_t *rio_out_set =
+        (volatile uint32_t *)(MACB_RP1_RIO_BANK1_BASE + 0x00 + MACB_RIO_SET_OFFSET);
+    volatile uint32_t *rio_out_clr =
+        (volatile uint32_t *)(MACB_RP1_RIO_BANK1_BASE + 0x00 + MACB_RIO_CLR_OFFSET);
 
     /* Pad: enable output (clear OUTPUT_DIS), disable input */
     uint32_t p = *pads;
-    p &= ~PADS_OUTPUT_DIS;
-    p &= ~PADS_INPUT_EN;
+    p &= ~MACB_PADS_OUTPUT_DIS;
+    p &= ~MACB_PADS_INPUT_EN;
     *pads = p;
 
     /* Function select: SYS_RIO so we drive the pin directly */
-    *ctrl = FUNCSEL_SYS_RIO;
+    *ctrl = MACB_RIO_FUNCSEL_SYS_RIO;
 
     /* Drive pin low (assert reset), pulse, then high (release) */
-    volatile uint32_t *rio_out_clr = (volatile uint32_t *)(RP1_RIO_BANK1_BASE + 0x00 + 0x3000);
     *rio_out_clr = (1u << bank_pin);
     *rio_oe_set  = (1u << bank_pin);
     sleep_ms(10);
@@ -485,8 +527,7 @@ static int macb_phy_bringup(void)
     macb_mdio_write(PHY_ADDR, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
 
     /* Poll BMSR for link up. Cable connected to a lab switch typically
-     * negotiates in <1 s; give it 5 s before giving up (stage 5 will
-     * revisit this budget once real DHCP exchange runs the clock). */
+     * negotiates in <1 s; give it 5 s before giving up. */
     INFO("  Waiting for PHY auto-negotiate / link up...");
     for (int i = 0; i < 50; i++) {
         uint16_t bmsr = macb_mdio_read(PHY_ADDR, MII_BMSR);
@@ -494,14 +535,46 @@ static int macb_phy_bringup(void)
             INFO("  PHY link up (BMSR=0x%04x after %d×100 ms)", bmsr, i);
             macb_state.link_up = true;
 
-            /* Decode speed + duplex from BCM54213's Auxiliary Status
-             * would require a vendor-specific read. For an MVP we
-             * default to 1000/full when ANEG completes and let the
-             * MAC run at that rate; real hardware on a Gb switch is
-             * overwhelmingly likely to negotiate to 1000/full. */
-            macb_state.link_speed_mbps = 1000;
-            macb_state.link_full_duplex = true;
-            INFO("  Assumed 1000 Mbps full-duplex (MVP — no vendor AUX read)");
+            /* Decode negotiated speed + duplex from the standard MII
+             * registers. Priority order (fastest full-duplex first):
+             *   STAT1000 bit 11 (LPA_1000FULL)
+             *   STAT1000 bit 10 (LPA_1000HALF)
+             *   LPA bit 8 (100FULL) / bit 7 (100HALF)
+             *   LPA bit 6 (10FULL)  / bit 5 (10HALF)
+             * This covers 10/100/1000 Mbps on any IEEE-compliant PHY
+             * without reaching for vendor AUX registers. */
+            uint16_t stat1000 = macb_mdio_read(PHY_ADDR, MII_STAT1000);
+            uint16_t lpa      = macb_mdio_read(PHY_ADDR, MII_LPA);
+
+            if (stat1000 & STAT1000_LPA_1000FULL) {
+                macb_state.link_speed_mbps  = 1000;
+                macb_state.link_full_duplex = true;
+            } else if (stat1000 & STAT1000_LPA_1000HALF) {
+                macb_state.link_speed_mbps  = 1000;
+                macb_state.link_full_duplex = false;
+            } else if (lpa & LPA_100FULL) {
+                macb_state.link_speed_mbps  = 100;
+                macb_state.link_full_duplex = true;
+            } else if (lpa & LPA_100HALF) {
+                macb_state.link_speed_mbps  = 100;
+                macb_state.link_full_duplex = false;
+            } else if (lpa & LPA_10FULL) {
+                macb_state.link_speed_mbps  = 10;
+                macb_state.link_full_duplex = true;
+            } else if (lpa & LPA_10HALF) {
+                macb_state.link_speed_mbps  = 10;
+                macb_state.link_full_duplex = false;
+            } else {
+                WARN("ANEG complete but LPA=0x%04x STAT1000=0x%04x advertises "
+                     "no standard speed — defaulting to 100 half and risking "
+                     "MAC misbehavior", lpa, stat1000);
+                macb_state.link_speed_mbps  = 100;
+                macb_state.link_full_duplex = false;
+            }
+            INFO("  Negotiated: %u Mbps %s-duplex (LPA=0x%04x STAT1000=0x%04x)",
+                 macb_state.link_speed_mbps,
+                 macb_state.link_full_duplex ? "full" : "half",
+                 lpa, stat1000);
             return 0;
         }
         sleep_ms(100);
@@ -837,19 +910,29 @@ static void macb_tx_reap_locked(void)
 }
 
 /* Polled TX: copy the frame into a pool buffer, mark the descriptor
- * ready, kick TSTART, wait for completion. Used as a Stage 3 proof —
- * later we'll hand this to the lwIP adapter so it can batch. */
+ * ready, kick TSTART, wait for completion. Holds tx_lock across
+ * the whole submit-to-completion sequence so the future IRQ-driven
+ * reap (once #247 unblocks MSIX_CFG) can't race with in-flight send.
+ * spin_lock_irqsave + sleep_us inside the poll loop is unusual —
+ * normally sleep-in-critical-section is a red flag — but here the
+ * sleep_us yields only to other TASKS and tx_lock is specifically
+ * IRQ-safe so the handler is just deferred until release, matching
+ * virtio_net.c's spin_lock_irqsave over virtqueue_kick + poll
+ * pattern. */
 static int macb_tx_one(const void *buf, size_t len)
 {
     if (len > MACB_TX_BUF_SIZE || len < 14) {
         return NET_E_TOO_LARGE;
     }
 
+    irq_flags_t flags = spin_lock_irqsave(&tx_lock);
+
     /* Reap any completed TX before picking a slot */
     macb_tx_reap_locked();
 
     unsigned next_head = (macb_state.tx_head + 1) & (MACB_TX_RING_SIZE - 1);
     if (next_head == macb_state.tx_tail) {
+        spin_unlock_irqrestore(&tx_lock, flags);
         return NET_E_BUSY;   /* Ring full — caller retries via tx_reap */
     }
 
@@ -881,18 +964,21 @@ static int macb_tx_one(const void *buf, size_t len)
     for (int i = 0; i < 10000; i++) {
         cache_invalidate_range(&tx_ring[slot], sizeof(tx_ring[slot]));
         if (tx_ring[slot].ctrl & MACB_TX_USED) {
+            int ret = 0;
             if (tx_ring[slot].ctrl & MACB_TX_ERROR) {
                 WARN("TX error after completion (slot %u, ctrl=0x%08x)",
                      slot, tx_ring[slot].ctrl);
-                return NET_E_GENERIC;
+                ret = NET_E_GENERIC;
             }
-            return 0;
+            spin_unlock_irqrestore(&tx_lock, flags);
+            return ret;
         }
         sleep_us(10);
     }
 
     ERROR("TX timed out after 100 ms (slot %u, TSR=0x%08x)",
           slot, macb_readl(MACB_TSR));
+    spin_unlock_irqrestore(&tx_lock, flags);
     return NET_E_TIMEOUT;
 }
 
