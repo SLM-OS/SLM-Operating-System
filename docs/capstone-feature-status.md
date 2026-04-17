@@ -220,13 +220,35 @@ Phases 1–4 (ACR HS load, FECS/GPCCS STARTCPU, PMU skip) remain
 implemented and host-tested as a fallback / standalone path. The
 inherit path bypasses them when Linux's firmware state is available.
 
+**CBB firewall constrains channel setup (Phase 6 blocker, April 17):**
+The Tegra234 CBB (Control Backbone) firewall permanently blocks
+non-secure (EL2) access to the GPU register apertures needed for
+channel creation: PFIFO (0x002000), CHRAM (channel enable/disable),
+NV_USERMODE (0x800000 doorbell), and several per-runlist PRI
+config registers. Tested with both idle GPU and active CUDA
+channel — same result; not a clock-gating issue. These are
+hardware-level access controls that cannot be changed without
+firmware-level CBB reconfiguration.
+
+Accessible from EL2 (sufficient for the inherit + method path):
+FECS method push (0x409500/504), runlist submit status
+(0x4080/88), FIFO_USER doorbell (0x200000+, first 5 channels),
+all DRAM (USERD, GPFIFO, pushbuffer memory).
+
+**Path forward — "inherit channel" approach:** Have Linux's nvgpu
+create a channel before kexec, keep it alive through the
+no-suspend transition. SLM-OS writes to USERD GP_PUT in DRAM to
+submit pushbuffer entries. PBDMA reads GP_PUT from DRAM, not from
+a blocked register. This crosses the Linux/SLM-OS boundary but is
+architecturally sound — the same "inherit" strategy that resolved
+#190 for the Falcon state.
+
 **Remaining path to GPU inference:**
-- Phase 6: Channel + GPFIFO pushbuffer (data-plane plumbing)
-- Phase 7: Compute class binding + QMD dispatch
+- Phase 6: Channel inherit from Linux (Linux-side helper + SLM-OS USERD write)
+- Phase 7: Pushbuffer method submission (NOP + SEMAPHORE_RELEASE)
+- Compute class binding + QMD dispatch
 - Compute kernel (SASS binary for `sm_87`)
 - Inference loop (GEMM → activation per layer)
-
-Phases 6+ are substantial but no longer blocked by security.
 
 **x86-64:** FWSEC-FRTS succeeds on hardware (3/3 runs VFIO, 4/4 runs
 bare-metal SLM-OS — April 15 2026, WPR2 populated at 0x1ffffe00 on

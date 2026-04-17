@@ -139,24 +139,25 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
 - GPU MMIO live at EL2+VHE: BOOT_0=`0xB7B000A1`, BOOT_42=`0x17BA1000`
 - NVIDIA driver detects GA10B with 1024 CUDA + 32 tensor cores
 - All 17 firmware blobs reachable via `nvgpu info`
-- ACR sequence runs end-to-end but BR_RETCODE=2 (BROM FAIL) because
-  HWCFG2 bit 13 (RISCV_BR_PRIV_LOCKDOWN) is asserted, causing PIO
-  writes to silently drop
+- **#190 RESOLVED (Path 3, April 17):** `--no-gpu-suspend` kexec
+  preserves Linux's Falcon state. `nvgpu inherit` detects HWCFG2
+  bit 13 = 0 + FECS/GPCCS PASS → skips phases 1–4.
+- **FECS method gateway verified:** `nvgpu test` submits
+  DISCOVER_IMAGE_SIZE → FECS returns 513,280 bytes (context size).
+  First bare-metal GPU method submission from SLM-OS.
+- **CBB firewall mapped (April 17):** PFIFO, CHRAM, NV_USERMODE
+  are permanently blocked from EL2. Channel setup requires
+  Linux-side pre-creation ("inherit channel" path).
 
-**Three unlock paths (#190):**
-1. **SMC to TF-A / NVIDIA SiP service** to lower the GSP Falcon PLM.
-   Requires finding the right function ID; not in our cached refs.
-2. **UEFI direct boot** — bypass Linux kexec entirely. The
-   `kernel/arch/arm64/efi_stub.c` skeleton exists but isn't functional.
-3. **Reuse Linux-nvgpu's ACR state** — have Linux bring up GSP
-   successfully, then kexec without the runtime-PM suspend.
-
-**Merge guidance:** the branch is ready to merge in its own right as
-infrastructure and research. Even without unlocking compute, it adds:
-- A complete, tested arm64 platform shim
-- Working firmware pipeline
-- A reproducible, documented investigation of the priv-lockdown
-  boundary (valuable for the thesis)
+**Merge guidance:** the branch delivers:
+- Complete arm64 platform shim (11/11 vtable fns, 15 host tests)
+- Phases 1–5 of nvgpu bringup (26 host tests)
+- #190 priv-lockdown root-caused and resolved
+- FECS method gateway — hardware-verified GPU controllability
+- CBB firewall accessibility map — architectural knowledge for
+  future channel work
+- `peek` shell command for DRAM inspection
+- 72+ cached L4T nvgpu reference files
 
 ---
 
