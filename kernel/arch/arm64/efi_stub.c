@@ -54,6 +54,38 @@ static void efi_print(efi_system_table_t *sys_table, const efi_char16_t *str)
 }
 
 /*
+ * Format a uint64_t as 16-hex-digit UTF-16 ("0x0123456789ABCDEF\r\n")
+ * and print it via ConOut. Used pre-EBS to dump system-register values
+ * for diagnostic purposes — the console is still alive here and this
+ * is the only portable way to get register contents off the machine
+ * without a working post-EBS output path.
+ *
+ * `label` is a UTF-16 literal printed before the hex value. Total
+ * output: "<label>0x................\r\n".
+ */
+static void efi_print_hex(efi_system_table_t *sys_table,
+                          const efi_char16_t *label,
+                          uint64_t value)
+{
+    efi_char16_t buf[22];   /* "0x" + 16 hex digits + "\r\n" + NUL */
+    static const efi_char16_t hex_digits[] = u"0123456789ABCDEF";
+
+    efi_print(sys_table, label);
+
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 16; i++) {
+        unsigned nibble = (value >> (60 - 4 * i)) & 0xF;
+        buf[2 + i] = hex_digits[nibble];
+    }
+    buf[18] = '\r';
+    buf[19] = '\n';
+    buf[20] = 0;
+
+    efi_print(sys_table, buf);
+}
+
+/*
  * Find the FDT (Device Tree) in the EFI configuration table.
  */
 static void *efi_find_fdt(efi_system_table_t *sys_table)
@@ -201,11 +233,27 @@ static void efi_disable_mmu(void)
 
     /* Disable MMU (read SCTLR, clear M/C/I bits, write back).
      *
-     * Use sctlr_el1 (not sctlr_el2): when UEFI's VHE is active
-     * (E2H=1, TGE=1), sctlr_el1 is aliased to SCTLR_EL2. Using the
-     * _el1 form works correctly both with and without VHE.
-     * Direct sctlr_el2 access faults when VHE is active because
-     * UEFI's exception vectors trap it. */
+     * HISTORICAL comment (kept as-is; see below): "Use sctlr_el1
+     * (not sctlr_el2): when UEFI's VHE is active (E2H=1, TGE=1),
+     * sctlr_el1 is aliased to SCTLR_EL2."
+     *
+     * That premise is FALSE on Jetson firmware v36.4.7 as of
+     * 2026-04-17. A pre-EBS `mrs x10, hcr_el2` dump shows
+     * HCR_EL2 = 0x0000000088000000, i.e. TGE=1, RW=1, but
+     * **E2H = 0**. UEFI is NOT in VHE host mode. Writing sctlr_el1
+     * here therefore writes the REAL EL1 SCTLR (a separate
+     * register), not the active EL2 SCTLR, so the MMU DOES NOT
+     * actually get disabled. This is a latent bug that hasn't bitten
+     * yet because subsequent code either (a) hangs before caring
+     * about MMU state (the HCR_EL2 re-write in boot.S's Jetson
+     * block), or (b) happens to work by luck through UEFI's
+     * translation tables.
+     *
+     * Proper fix (tracked for a follow-up): read CurrentEL and
+     * HCR_EL2.E2H, branch on (E2H==1 ? sctlr_el1 : sctlr_el2).
+     * Kexec-from-Linux typically enters with E2H=1 (Linux uses VHE
+     * on ARMv8.1+), so the kexec path would keep the sctlr_el1
+     * write; UEFI-direct needs sctlr_el2. */
     __asm__ volatile(
         "mrs    x0, sctlr_el1\n"
         "bic    x0, x0, #(1 << 0)\n"   /* M: MMU enable */
@@ -256,6 +304,34 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
     static const efi_char16_t m_pre_ret[]   = u"[slmos] F returning fdt\r\n";
 
     efi_print(sys_table, m_entry);
+
+    /*
+     * DIAGNOSTIC: dump CurrentEL and HCR_EL2 so the next session
+     * knows exactly what UEFI has configured before deciding how to
+     * patch the EL2 block's HCR_EL2 write (skip/ORR/RMW).
+     *
+     * Reading hcr_el2 requires EL2. At EL1 the mrs traps; handle
+     * that by reading CurrentEL first and only mrs'ing hcr_el2 if
+     * we're at EL2. PR #226 thought we were at EL1 on Jetson; this
+     * session's probes (see docs/jetson-uefi-direct-result.md §5b)
+     * showed EL2. The dump here prints both values so a reader can
+     * confirm without re-running brk probes.
+     */
+    {
+        uint64_t cur_el;
+        __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur_el));
+        efi_print_hex(sys_table, u"[slmos] CurrentEL=", cur_el);
+
+        /* CurrentEL[3:2] encodes EL: 0=EL0, 4=EL1, 8=EL2, 12=EL3. */
+        if (cur_el == 8) {
+            uint64_t hcr_el2;
+            __asm__ volatile("mrs %0, hcr_el2" : "=r"(hcr_el2));
+            efi_print_hex(sys_table, u"[slmos] HCR_EL2 =", hcr_el2);
+        } else {
+            efi_print(sys_table,
+                      u"[slmos] not at EL2, skipping hcr_el2 read\r\n");
+        }
+    }
 
     /* Find DTB in configuration table (must be done before ExitBootServices) */
     fdt = efi_find_fdt(sys_table);
