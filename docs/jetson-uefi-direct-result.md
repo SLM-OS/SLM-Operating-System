@@ -54,6 +54,15 @@ absolute references inside `kernel_main` and beyond.
 
 ### 2. UEFI enters SLM-OS at **EL1**, not EL2 as previously documented
 
+> **⚠️ SUPERSEDED by §5b (2026-04-17).** A brk-probe revealed this
+> conclusion was wrong. UEFI enters at EL2. The EL1 conclusion came
+> from misreading an ArmCpuDxe exception PC that is off by
+> `-0x10000` (see §5). Read §5b for the corrected analysis. The
+> `CurrentEL == 2` gate this section introduced is still in the
+> code — it was a correct defensive check regardless, and the
+> kexec-from-Linux path (which does enter at EL2) takes the same
+> branch.
+
 The second baseline crash, once the trampoline was gone, was at
 offset `0x24` — `mrs x10, hcr_el2`. Reading an EL2 register from
 EL1 traps; that matched the observed fault. The prior assumption
@@ -66,6 +75,14 @@ block on `CurrentEL == 2`. Kexec keeps its existing path; UEFI-
 direct skips a block it cannot execute.
 
 ### 3. Pending exceptions were hanging UEFI's handler
+
+> **⚠️ PARTIALLY SUPERSEDED (2026-04-17).** The IRQ-hang concern
+> was real, and the `msr daifset, #0xF` mask added here is still in
+> the code. But the framing "`VBAR_EL1` not yet installed" missed
+> the actual structural fix, which landed as P2: SLM-OS now
+> installs its own `VBAR_EL2` (not `VBAR_EL1` — UEFI runs at EL2
+> without VHE per §5b/§5c) immediately after ExitBootServices.
+> See §5d2 for the handler + §5c for why EL2 is the correct target.
 
 After EBS and `efi_disable_mmu`, DAIF was still inherited from
 UEFI. If any stale IRQ (timer in particular) fires before the
@@ -443,6 +460,19 @@ at EL2.
 
 ### 6. Remaining downstream blocker — NOT BSS clear as previously hypothesized
 
+> **⚠️ SUPERSEDED (2026-04-17).** At time of writing this section,
+> the hang was still silent ("brks don't fire") and the `image_base
+> + 0x1C` PC looked like stack corruption or broken translations.
+> Both interpretations were wrong, and the §5 finding explains
+> why: ArmCpuDxe's reported PC is off by `-0x10000`, so "crash at
+> `image_base + 0x1C`" was actually "brk at `image_base + 0x1001C`"
+> — the brks WERE firing, just reported at the wrong address. Read
+> §5 for the -0x10000 quirk and §5b / §5c / §5d2 for the corrected
+> downstream analysis. BSS clear itself now has a separate, real
+> blocker documented in §5c's P3 hardware verification block —
+> Device-nGnRnE CBB error — which is **exposed by** (not caused
+> by) P3's correct MMU disable.
+
 The pre-fix session assumed the silent hang after marker C was
 BSS-clear faulting. With the `.data` section split in place, BSS is
 now mapped RW-NX by UEFI and writes to it don't fault — but the
@@ -462,154 +492,239 @@ through broken translations. Not yet root-caused.
 
 ---
 
-## Current baseline behavior (UEFI-direct, after this commit)
+## Current baseline behavior (UEFI-direct, after P1+P2+P3)
 
-Running `fs4:\EFI\BOOT\SLMOS.efi` from the UEFI Shell still produces:
+Booting SLMOS.efi via `efibootmgr --bootnext 0009 && reboot` (boot
+entry `0009: SLM-OS Direct` preinstalled in UEFI NVRAM, pointing
+at `\EFI\BOOT\SLMOS.efi` on the ESP) takes SLM-OS through markers
+A-C, then into the `primary_cpu` BSS-clear loop where it hits the
+Tegra CBB firewall and TF-A powers off the core:
 
 ```
 [slmos] A efi_entry
+[slmos] CurrentEL=0x0000000000000008       # EL2 (P1 dump)
+[slmos] HCR_EL2 =0x0000000088000000        # TGE=1, RW=1, E2H=0 (no VHE)
 [slmos] B find_fdt done
 [slmos] C calling ExitBootServices
-<silent hang — no reset, no exception message, no further output>
+ERROR: RAS Uncorrectable Error in IOB, base=0xe010000:
+ERROR:   Status = 0xe4000612
+ERROR:   SERR = Error response from slave: 0x12
+ERROR:   IERR = CBB Interface Error: 0x6
+ERROR:   ADDR = 0x8000000000157000         # == jetson_early_fault_slot
+ERROR: Powering off core
 ```
 
-Externally the observable behavior is unchanged from before the `.data`
-section fix. Internally two real improvements landed (BSS now RW-NX
-instead of RO+X, initialized data actually loaded from file), but
-the remaining blocker is upstream of where those improvements kick in.
+No `!FAULT` line — the RAS error is caught by TF-A at EL3 before
+SLM-OS's VBAR_EL2 handler (installed post-EBS by P2) can run. If
+the fault were a regular synchronous exception at EL2, the
+handler would emit `!FAULT\r\n` followed by `ESR=...`, `ELR=...`,
+`FAR=...`, `HCR=...`, `SPR=...` over UARTC.
 
-The Jetson hangs in a state that requires `labctl power_cycle`
-to recover; Linux does not come back on its own.
+The Jetson hangs in a state that requires `labctl power_cycle` to
+recover; Linux does not come back on its own.
+
+**What each of P1/P2/P3 contributed to getting here:**
+
+- **P1 (PR #240)** added the pre-EBS `CurrentEL` and `HCR_EL2`
+  ConOut dumps. They're what told us UEFI is at EL2 with E2H=0,
+  which reframed every downstream analysis.
+- **P2 (PR #244)** installed the SLM-OS-owned VBAR_EL2 immediately
+  after `ExitBootServices` returns. This catches post-EBS
+  synchronous faults that would previously have gone to UEFI's
+  ArmCpuDxe and hung silently. The handler emits `!FAULT` + a
+  register dump on UARTC and WFE-loops.
+- **P3 (PR #245)** made `efi_disable_mmu` E2H-aware (writes
+  `SCTLR_EL2` instead of the dormant `SCTLR_EL1` when E2H=0) and
+  switched the `HCR_EL2` configuration to RMW. Together these
+  fixed the §5c hang — boot now progresses past EBS, through the
+  VBAR install, through `efi_disable_mmu`, through the Jetson EL2
+  block, and into `primary_cpu`.
+- **P3 hardware-verification follow-up (b692cb8 in PR #245)**
+  removed the post-EBS `efi_print` calls — on v36.4.7 the ConOut
+  protocol faults on first deref after EBS (prior "D/E/F markers
+  work" observations were UEFI's torn-down handler silently
+  absorbing the fault) — and added the hex-register dump with
+  LSR-paced UARTC output.
 
 ---
 
 ## What's left
 
-In rough order of how much each unblocks:
+P1/P2/P3 resolved the §5c silent hang. Three problems remain
+between the current baseline and "SLM-OS shell running from UEFI":
 
-1. **Diagnose why post-EBS execution doesn't reach any of the
-   diagnostic brks.** ~3 points to investigate: (a) does
-   `efi_disable_mmu` actually complete and disable the MMU on this
-   firmware? (b) is the stack SP inherited from UEFI post-EBS
-   actually valid, or does something in primary_cpu's stack setup
-   land on a bad page? (c) does the `ret` from efi_stub_entry
-   actually land on the post-`bl` instruction or somewhere else?
-   A useful next probe is a `brk` placed at the *very first*
-   instruction after `bl efi_stub_entry` (before the DAIF mask),
-   to confirm `ret` landed where expected.
-2. **Install the SLM-OS `VBAR_EL1` before `bl efi_stub_entry`.**
-   Currently VBAR_EL1 is set deep inside primary_cpu. If anything
-   faults between `bl efi_stub_entry` and that point, UEFI's still-
-   installed vectors handle it with Boot Services gone and hang
-   silently. Installing the SLM-OS vectors first — even with just a
-   minimal handler that prints an EL + ESR + ELR tuple to some
-   memory scratch region — turns silent hangs into structured
-   diagnostic output.
-3. **Approach B: real `.reloc` section + PIC early boot.** Without
-   this, `kernel_main` and everything downstream still sees
-   absolute addresses pointing at the link address
+1. **🔴 Device-nGnRnE DRAM access raises Tegra CBB firewall error
+   (#246).** Current baseline blocker. With ARM64 MMU disabled
+   (`SCTLR.M=0`), data accesses are architecturally
+   Device-nGnRnE. Tegra's memory controller rejects that for DRAM
+   with a RAS UE → EL3 → "Powering off core". The kexec path
+   doesn't hit this because Linux's MMU stays on through to
+   `vmm_init`, so BSS clear runs as Normal Cacheable. The fix is
+   setting up an identity-mapped page table with Normal Cacheable
+   attributes BEFORE `primary_cpu`'s BSS clear — substantial
+   boot.S / early-vmm rework. See §5c P3 hardware verification
+   block for the full analysis and tracking issue.
+2. **🟡 Approach B: real `.reloc` section + PIC early boot.**
+   Without this, `kernel_main` and everything downstream still
+   sees absolute addresses pointing at the link address
    (`0x80000000`), not the actual load address. Shape of the fix
-   is well-understood (Linux `arch/arm64/kernel/efi-header.S` + a
-   self-relocation pass in the stub), but the work is ~1–2 weeks.
-4. **Decide on EL1 vs EL2.** Even with (1)–(3), the kernel currently
-   assumes EL2+VHE on Jetson (e.g. `kexec_boot_jetson.c`, various
-   EL2-specific timer/GIC/GPU paths). UEFI-direct puts SLM-OS at
-   EL1. Options: (a) accept the Jetson kernel path runs at EL1
-   post-UEFI-direct and audit every EL2-only sequence for a
-   CurrentEL guard, (b) SMC back to TF-A to request a transition
-   to EL2. (a) is more mechanical; (b) is cleaner but needs a
-   Jetson-specific SMC handler that may not exist.
-
-Any one of (1)/(2) is a reasonable next checkpoint; together they'd
-let the kernel start running absolute-address-broken C code, which
-fails loudly where `.reloc`/PIC is needed — a big step toward
-scoping (3).
+   is well-understood (Linux `arch/arm64/kernel/efi-header.S` +
+   a self-relocation pass in the stub). Work estimate: 1–2 weeks.
+   Only reachable once (1) is solved.
+3. **🟢 Firmware-portable post-EBS diagnostic output.** Currently
+   the only way to print after `ExitBootServices` is direct UARTC
+   MMIO (what the §5d2 handler uses). A reusable putc — `dsb sy`
+   + LSR poll + THR write — is already present in the §5d2
+   handler (`.Ljetson_early_putc`) and could be promoted to a
+   callable helper for boot.S's main path, so that Jetson-block
+   diagnostics aren't restricted to fault handlers. Small (few
+   hours) but nice-to-have, not load-bearing.
 
 ### Recommendation
 
-The one-week budget in the handoff is spent. (1) + (2) together
-are a ~2-day follow-up that takes the probe from "silent hang
-after C" to "SLM-OS runs its own code until it hits an absolute-
-address reference" — a concrete, testable exit point. Beyond
-that, approach B is a real project and should be scoped explicitly
-before commitment — or punted in favor of Path 3 (preserve nvgpu's
-ACR state through kexec).
+**Pivot to Path 3** (preserve nvgpu's ACR state through the kexec
+transition) per #190 plan §5 pivot trigger. Item (1) above is a
+genuine blocker that can't be worked around cheaply, and the
+capstone clock has run out. Landing P1+P2+P3 is still
+net-positive:
+
+- §5c's silent HCR_EL2 hang is a real bug under any future MMU
+  strategy, so the fix pays forward whichever direction the
+  project takes.
+- §5d2's VBAR_EL2 handler with register dump gives any future
+  UEFI-direct session a fault-visible baseline, cutting the
+  debug cost of the next iteration.
+- #246 is filed with a concrete fix path — a future session
+  doesn't start from scratch.
 
 ---
 
-## Changes landed in this commit
+## Changes landed across the UEFI-direct investigation
 
-- `kernel/arch/arm64/boot.S` — replace the zero-sized `.data`
-  section placeholder with a real one. `.text` is now RX only
-  (`0x60000020`), covers `_kernel_code_size` (code + rodata); `.data`
-  is RW-NX (`0xc0000040`), covers `_kernel_data_virtual_size` in
-  memory (= initialized data + BSS + stack) with
-  `SizeOfRawData = _kernel_data_size` (initialized portion only —
-  UEFI zero-fills the BSS/stack delta). Also fixes `SizeOfCode`,
-  `SizeOfInitializedData`, and `SizeOfImage` values in the optional
-  header to match the split layout.
+Cumulative log. Each heading is a merged PR.
+
+### #229 — PE split (`.text` RX / `.data` RW-NX) + ArmCpuDxe -0x10000 quirk
+- `kernel/arch/arm64/boot.S` — PE section table split so `.text` is
+  RX only (`0x60000020`) and `.data` is RW-NX (`0xc0000040`), with
+  `VirtualSize = _kernel_data_virtual_size` (covers initialized
+  data + BSS + stack, UEFI zero-fills the delta). Fixes `SizeOfCode`,
+  `SizeOfInitializedData`, and `SizeOfImage`.
 - `kernel/kernel-jetson.ld`, `kernel/kernel.ld` — add
-  `_kernel_data_virtual_size = __kernel_end - __data_start` so the
-  PE `.data` section's `VirtualSize` can extend through the full
-  BSS + stack region. Fixes the QEMU linker's `_kernel_code_size`
-  formula (was `__data_end - _start - 0x10000`, now
-  `__data_start - _start - 0x10000` — matches Jetson and doesn't
-  produce a PE section overlap). Both scripts because the PE
-  header is assembled for all non-RASPI5 ARM64 builds (QEMU too,
-  where the PE header is inert but still has to link).
+  `_kernel_data_virtual_size = __kernel_end - __data_start`; fix the
+  QEMU linker's `_kernel_code_size` formula so both scripts produce
+  non-overlapping PE sections.
+- Finding: ArmCpuDxe reports exception PCs off by exactly `-0x10000`
+  (one `SizeOfHeaders`). Documented in §5 so prior-session "brks
+  don't fire" conclusions could be reinterpreted.
 
-### Regression defenses landed alongside
+### #239 — EL2 not EL1 (PR #226 was wrong) + two concrete blockers
+- Reinterpreted prior brk-probe data with the -0x10000 correction.
+  UEFI enters at EL2, not EL1 — superseded §2 of this doc. See §5b.
+- Identified the two downstream UEFI-direct blockers (HCR_EL2 hang
+  + UARTC MMIO fault) now covered in §5c and §5d.
 
-Bare-metal boot glue is hard to unit-test at runtime, so the PR
-leans on build-time assertions and hardware smoke tests. Full
-matrix:
+### #240 — P1: pre-EBS CurrentEL + HCR_EL2 dump
+- `kernel/arch/arm64/efi_stub.c` — `efi_print_hex` helper + ConOut
+  dump of `CurrentEL` and `HCR_EL2` at entry to `efi_stub_entry`.
+- Revealed UEFI has `HCR_EL2 = 0x88000000` (TGE=1, RW=1, **E2H=0**).
+  Invalidated the assumption that SLM-OS runs in VHE host mode on
+  UEFI-direct, which had baked into `efi_disable_mmu` and §5c's
+  original RMW hypothesis.
 
-- **Compile-time (every build, every platform):** 13 `static_assert`s
-  in `kernel/arch/arm64/efi.h` pin the UEFI protocol struct offsets
-  to spec values (ConOut=0x40, BootServices=0x60, ExitBootServices
-  =0xE8, OutputString=0x08, …). Introduced in #226, still apply.
+### #244 — P2: SLM-OS-owned VBAR_EL2 post-EBS (§5d2)
+- `kernel/arch/arm64/boot.S` — `jetson_early_vbar_el2` table
+  (16 × 0x80 entries, 2KB-aligned) + `.Ljetson_early_fault`
+  handler. Handler disables EL2 MMU, saves ESR/ELR/FAR/SPSR/HCR/
+  CurrentEL + `"__EL2FAT"` magic to `jetson_early_fault_slot` in
+  BSS, emits `"!FAULT\r\n"` over UARTC, WFE-loops.
+- `kernel/arch/arm64/efi_stub.c` — installs VBAR_EL2 immediately
+  after successful `ExitBootServices` (CurrentEL==EL2 gated).
+- `kernel/kernel-jetson.ld` — two new ASSERTs: 2KB alignment on
+  `jetson_early_vbar_el2`, ≥64-byte size on `jetson_early_fault_slot`.
+- `scripts/test-jetson-uefi-layout.sh` — host-side structural
+  regression test, wired into `make test-jetson-uefi-layout`.
+
+### #245 — P3: E2H-aware MMU disable + HCR_EL2 RMW (§5c fix)
+- `kernel/arch/arm64/efi_stub.c` — `efi_disable_mmu` is now
+  E2H-aware. Runtime branch on `CurrentEL` + `HCR_EL2.E2H`:
+  - EL2 with E2H=0 (UEFI-direct) → `msr sctlr_el2` + `tlbi alle2`
+  - EL2 with E2H=1 (kexec+VHE) or EL1 → `msr sctlr_el1` +
+    `tlbi vmalle1` (unchanged — SCTLR_EL1 aliases SCTLR_EL2 under
+    VHE)
+- `kernel/arch/arm64/boot.S` — Jetson EL2 block's `msr hcr_el2`
+  is now RMW (`mrs`/`orr (E2H|RW|TGE)`/`msr`). Preserves UEFI's
+  other bits (API, APK, HCD, firmware-specific traps). Safe
+  because efi_disable_mmu has actually turned off the MMU by the
+  time this runs.
+- `scripts/test-jetson-uefi-layout.sh` — three new checks: image
+  contains `tlbi alle2` (EL2-path), `tlbi vmalle1` (EL1/VHE-path),
+  `mrs XN, hcr_el2` (RMW pattern).
+- Post-P3 hardware verification (commit b692cb8 in the same PR):
+  - Register hex dump in the §5d2 handler (ESR/ELR/FAR/HCR/SPR).
+  - `.Ljetson_early_putc` — LSR.THRE polling with `dsb sy` barrier
+    per Tegra UART precedent, fixes FIFO-overrun drops past ~36
+    bytes.
+  - Removed post-EBS `efi_print` calls — on v36.4.7 the ConOut
+    protocol faults on first deref after EBS (prior "D/E/F
+    markers work" was UEFI silently absorbing the fault).
+
+### Regression defenses
+
+Cumulative across all UEFI-direct PRs:
+
+- **Compile-time (every build, every platform):** 13
+  `static_assert`s in `kernel/arch/arm64/efi.h` pin UEFI protocol
+  struct offsets. (#226.)
 - **Link-time Jetson (`kernel-jetson.ld`):** seven `ASSERT`s on PE
-  invariants — kernel-fits-in-16MB, `.data` VA and SizeOfRawData
-  alignment, `.text` SizeOfRawData + `.data` PointerToRawData
-  FileAlignment, SizeOfImage alignment, `.text`/`.data`
-  non-overlap, SizeOfImage matches `.data` end VA. Each caught a
-  specific scenario of symbol or characteristic drift.
+  invariants (#229) plus two ASSERTs on the VBAR/fault-slot layout
+  (#244).
 - **Link-time QEMU (`kernel.ld`):** one `ASSERT` (non-overlap).
-  The other invariants don't apply under QEMU's 4KB `.data`
-  alignment, and the PE header is inert there anyway.
-- **Assertion triggerability verified:** the `.text`/`.data`
-  non-overlap, SizeOfImage-mismatch, and `.text` SizeOfRawData
-  FileAlignment asserts were each exercised by perturbing the
-  relevant symbol and observing the link failure with the
-  expected message.
-- **QEMU ARM64 runtime:** `make test` green.
+- **`make test`:** QEMU integration suite, green on every PR.
+- **`make test-jetson-uefi-layout`:** new structural regression
+  test (#244 introduced, #245 extended to 12 checks).
 - **Jetson kexec-from-Linux runtime:** verified post-commit via
-  `slmos-kexec` — shell up, 6/6 CPUs, scheduler ticking, work-
-  stealing healthy, shell responsive to `cpu` / `help`.
-- **Jetson UEFI-direct runtime:** verified end-to-end behavior —
-  A/B/C markers still land on serial, then silent hang per the
-  documented remaining downstream blocker.
-- **Pi 5, x86-64:** untouched by the diff, builds verified green.
-
-All of these together exercise the compile-time, link-time, and
-runtime surfaces that these changes touch. Adding a host-side
-PE-parsing test is feasible (~100-line Python script) but was not
-pursued — the link-time asserts cover the structural invariants,
-and the static characteristic bytes (`0x60000020` / `0xc0000040`)
-are single-line constants in assembly that appear in every code-
-review diff.
+  `slmos-kexec` on jetson-nano-2 for every UEFI-direct change
+  (shell up, 6/6 CPUs, scheduler ticking, work-stealing healthy).
+- **Jetson UEFI-direct runtime:** verified end-to-end on
+  jetson-nano-2 via boot entry 0009 for #240/#244/#245. Current
+  state documented under "Current baseline behavior" above.
+- **Pi 5, x86-64:** untouched by any UEFI-direct PR; builds green.
 
 ---
 
 ## Reproducing
 
-```sh
-make kernel PLATFORM=JETSON_ORIN_NANO
-scp build/kernel/slmos.bin root@192.168.4.93:/boot/efi/EFI/BOOT/SLMOS.efi
-ssh root@192.168.4.93 'efibootmgr --bootnext 0007 && reboot'
+Prerequisites: jetson-nano-2 with UEFI boot entry `0009: SLM-OS
+Direct` preinstalled in NVRAM, pointing at `\EFI\BOOT\SLMOS.efi`
+on the ESP.
 
-# Wait ~30s for Jetson UEFI Shell prompt, then over labctl serial:
-#   Shell> fs4:\EFI\BOOT\SLMOS.efi
-# Expect A/B/C markers then silent hang until power cycle.
+```sh
+# Build
+make kernel PLATFORM=JETSON_ORIN_NANO
+
+# Deploy to the ESP on the Jetson (running Linux)
+scp build/kernel/slmos.bin root@192.168.4.93:/boot/efi/EFI/BOOT/SLMOS.efi
+
+# Queue UEFI-direct boot for next reboot
+ssh root@192.168.4.93 'efibootmgr --bootnext 0009; nohup reboot &'
+
+# Watch serial via labctl (blocks until pattern or timeout):
+#   labctl serial_capture --port jetson-console \
+#     --until-pattern 'Powering off core|slmos>|primary_cpu' \
+#     --timeout 90
+
+# Expected output (current baseline, post-P3):
+#   [slmos] A efi_entry
+#   [slmos] CurrentEL=0x0000000000000008
+#   [slmos] HCR_EL2 =0x0000000088000000
+#   [slmos] B find_fdt done
+#   [slmos] C calling ExitBootServices
+#   ERROR: RAS Uncorrectable Error in IOB ...
+#   ERROR: Powering off core
+#
 # `labctl power_cycle jetson-nano-2` recovers to Linux.
+
+# Alternative: boot into UEFI Shell interactively (entry 0007),
+# then manually `fs4:\EFI\BOOT\SLMOS.efi` — same execution path,
+# useful for debugging UEFI-side issues before SLM-OS runs.
 ```
