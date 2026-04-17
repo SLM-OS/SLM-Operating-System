@@ -171,7 +171,7 @@ access can overtake.
 address) after `dsb sy` guarantee that the preceding ring updates
 reach the device before the kick? The ARM ARM says MMIO stores are
 Device-nGnRE which has stricter ordering than Normal, so yes — but
-worth verifying against Linux's r8169 / bcmgenet drivers for
+worth verifying against Linux's stmmac (EQOS) / bcmgenet drivers for
 comparison.
 
 ### Q6: SMMU / IOMMU translation

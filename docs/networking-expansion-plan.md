@@ -22,7 +22,7 @@ Follow-up tickets filed:
 - #203 — DMA coherence verification for real-hardware NICs
 - #25 (updated) — Jetson EQOS driver (Phase 4 below)
 
-**Last updated:** 16 April 2026
+**Last updated:** 17 April 2026
 
 ---
 
@@ -219,57 +219,77 @@ the full driver walkthrough and register addresses.
 
 ## Phase 4: Jetson Networking (Hardware Required — tracked in #25)
 
-The Jetson Orin Nano Developer Kit carrier board has an onboard Realtek
-RTL8111 PCIe Gigabit Ethernet controller. Alternatively, USB Ethernet
-adapters are available via the USB-C or USB-A ports.
+The Jetson Orin Nano Developer Kit carrier board wires its RJ45 directly
+to the Tegra T234 SoC via MDI differential pairs — there is **no PCIe
+NIC** on the Ethernet path. The data path is:
 
-### 4.1 Option A: Realtek RTL8111 PCIe Driver
+```
+RJ45 ↔ MDI ↔ RTL8211F PHY (RGMII + MDIO) ↔ Tegra EQOS MAC (MMIO)
+```
 
-**Controller:** Realtek RTL8111/8168 (PCIe GbE)
-**Discovery:** PCI enumeration (vendor `0x10EC`, device `0x8168`)
-**Reference driver:** Linux `drivers/net/ethernet/realtek/r8169.c`
-(~5000 lines)
+Authoritative source: *Jetson Orin Nano Developer Kit Carrier Board
+Specification* SP-11324-001, Table 2-4 ("Ethernet RJ45 Connector Pin
+Description") — RJ45 pins wire to module pins `GPE_MDI0_P/N` through
+`GPE_MDI3_P/N`. No PCIe TX/RX pairs reach the RJ45.
 
-**Challenge:** Jetson runs at EL2 post-kexec. PCI enumeration for
-network devices on Jetson requires:
-1. Discovering the PCIe ECAM base address for the Orin SoC (different
-   from x86-64 ECAM)
-2. Enabling PCIe link training if not already done by the bootloader
-3. Mapping BAR0 of the RTL8111
+An earlier draft of this plan mistakenly identified the external PHY
+(RTL8211F) as a PCIe NIC (RTL8111) and targeted Linux's `r8169` driver.
+That framing is wrong and has been removed. The correct target is the
+Synopsys DWC-EQOS IP block, as tracked in #25.
 
-This is significantly more complex than x86-64 PCI because ARM64
-PCIe requires explicit controller initialization (Tegra PCIE controller
-at `0x14160000` or similar).
+### 4.1 Target: Synopsys DWC-EQOS MAC + RTL8211F PHY
 
-**Minimum viable driver (~800-1000 lines):**
-1. PCI BAR0 mapping for RTL8111 register access
-2. TX/RX descriptor ring setup in DMA-capable memory
-3. PHY configuration (integrated, auto-negotiation)
-4. Polling TX/RX
+**Controller (MAC):** Synopsys DesignWare Cores Ethernet QoS (DWC-EQOS)
+**Discovery:** Memory-mapped at a fixed SoC address — NOT enumerated via
+PCI. Orin's EQOS base is in the `0x023_0_0000` region (confirm exact
+offset from the Orin TRM / NVIDIA device tree
+`tegra234-p3768-0000+p3767-0003.dts` before writing the driver).
+**PHY:** Realtek RTL8211F, 1000BASE-T, accessed via MDIO from the MAC.
+**Reference drivers:** Linux `drivers/net/ethernet/stmicro/stmmac/`
+(specifically `dwmac4_core.c`, `dwmac4_descs.c`, `dwmac4_dma.c`) and
+NVIDIA's `nvethernet` downstream fork in L4T.
 
-### 4.2 Option B: USB Ethernet (Simpler, Lower Performance)
+**Minimum viable driver (~1200-1800 lines):**
+1. Clock / reset gating for the EQOS block (CAR register writes — Orin
+   TRM) — may already be set up by the Linux bootloader pre-kexec.
+2. MMIO mapping of EQOS register bank into kernel virtual space.
+3. Small MDIO helper for PHY access (Clause 22 frames over the EQOS
+   MAC's MDIO controller).
+4. PHY bring-up: RTL8211F reset, auto-negotiation, link-up poll,
+   speed/duplex read-back.
+5. RGMII interface config on the MAC side matched to the PHY link
+   state (speed, duplex, TX/RX delay — RTL8211F needs specific
+   internal-delay programming).
+6. TX/RX descriptor rings in DMA-coherent memory — use NC memory on
+   Jetson to match the `net-dma-coherence.md` guidance.
+7. IRQ wiring to GIC SPI (confirm EQOS IRQ numbers from DT).
+8. Integrate as lwIP netif (analogous to `virtio_net.c`).
 
-If PCIe initialization proves too complex, a USB CDC-ECM Ethernet
-adapter connected to the Jetson's USB-A port is an alternative. This
-requires:
-1. XHCI (USB 3.0) host controller driver
-2. USB enumeration and device configuration
-3. CDC-ECM class driver
+**Not required:**
+- PCIe root complex enumeration on Jetson (was the scariest item in the
+  earlier draft — it's moot because EQOS is not on PCIe).
+- Any Tegra PCIe controller init for Ethernet purposes (PCIe on Orin is
+  still relevant for future M.2 NVMe / AI-accel boards, but that's a
+  separate workstream).
 
-This is likely **more** total work than Option A (XHCI alone is
-~2000 lines) but avoids the Tegra PCIe controller complexity.
+### 4.2 Fallback: USB Ethernet
 
-**Recommendation:** Option A (RTL8111 via PCIe) if the Tegra PCIe
-controller is already initialized by the Linux bootloader before kexec.
-Verify by reading PCIe config space after kexec — if devices are
-visible, the link is already trained and only the NIC driver is needed.
+If EQOS bring-up stalls (e.g., clock/reset init needs firmware sequences
+that aren't accessible from EL2), a USB CDC-ECM Ethernet adapter on the
+dev kit's USB-A port is a viable fallback.
+
+Total USB stack effort (~2000 lines XHCI + ~500 lines CDC-ECM + USB core)
+is larger than EQOS but avoids any SoC-level clock gymnastics. Only
+revisit this path after a concrete EQOS blocker is identified.
 
 ### 4.3 Testing (Hardware Only)
 
 - Deploy via `labctl sdwire_update`, test via `labctl serial_send`
 - Connect Jetson Ethernet to lab network
 - `ping`, `ifconfig`, `dhcp` from SLM-OS shell
-- Verify PCIe device visibility after kexec before writing the driver
+- Early smoke test before ring setup: MDIO probe — read PHY ID registers
+  from the RTL8211F (expect `0x001C.C916` or similar). Confirms MMIO
+  mapping, clock, and MDIO pathway in a few dozen lines of code.
 
 ---
 
@@ -287,7 +307,7 @@ Phase 1 (no HW)          Phase 2 (no HW)
          ▼                                      ▼
 Phase 3 (Pi 5 HW)                   Phase 4 (Jetson HW)
 ┌──────────────────┐                ┌──────────────────┐
-│ 3.1 BCM GENET    │                │ 4.1 RTL8111 PCIe │
+│ 3.1 BCM GENET    │                │ 4.1 EQOS+RTL8211F│
 │ 3.2 HW testing   │                │ 4.2 (alt: USB)   │
 └──────────────────┘                │ 4.3 HW testing   │
                                     └──────────────────┘
@@ -311,7 +331,7 @@ and require their respective hardware.
 | 2.3 | x86-64 | `ping`, `ifconfig`, `netstat` working in x86-64 QEMU | No |
 | 3.1 | Pi 5 | BCM GENET driver, networking on real Pi 5 | Yes |
 | 3.2 | Pi 5 | Hardware-validated ping, DHCP, link status | Yes |
-| 4.1 | Jetson | RTL8111 PCIe driver (or USB fallback) | Yes |
+| 4.1 | Jetson | DWC-EQOS MAC + RTL8211F PHY driver (USB CDC-ECM as fallback) | Yes |
 | 4.3 | Jetson | Hardware-validated ping, DHCP, link status | Yes |
 
 ---
