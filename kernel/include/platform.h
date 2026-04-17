@@ -265,6 +265,16 @@
 #define RTL8169_PCI_DEVICE       0x8168U
 
 /*
+ * Tegra XHCI USB 3.0 host controller (tegra-xusb). Candidate for USB
+ * CDC-ECM-based networking if the PCIe RC stays CBB-firewalled at EL2
+ * (see docs/jetson-pcie-investigation.md). All three register banks
+ * fit inside the 2 MB block at 0x03600000.
+ */
+#define TEGRA_XHCI_FPCI_BASE     0x03600000UL    /* Function-PCI regs (64 KB) */
+#define TEGRA_XHCI_HCD_BASE      0x03610000UL    /* xHCI operational regs (~256 KB) */
+#define TEGRA_XHCI_BAR2_BASE     0x03650000UL    /* xHCI BAR2 regs (64 KB) */
+
+/*
  * Spinlock policy: use the runtime `spinlock_hw_enabled` flag, same as Pi 5.
  *
  * Before MMU enable, memory is non-cacheable and LSE atomics (SWPALB) cause

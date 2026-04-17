@@ -3782,6 +3782,59 @@ int cmd_rtldiag(int argc, char *argv[])
         uart_puts("=== End Diagnostic ===\r\n");
         return 0;
     }
+    return 0;
+}
+
+/*
+ * xhcidiag — reads Tegra XHCI host controller registers from SLM-OS
+ * at EL2. Diagnostic probe for the USB CDC-ECM fallback path — tests
+ * whether the CBB firewall behaves the same way here as it did for
+ * PCIe (see docs/jetson-pcie-investigation.md). If the reads return
+ * meaningful values, USB-based networking is a viable pivot. If they
+ * return 0xFFFFFFFF like the PCIe RC, CBB blocks DMA-capable
+ * peripherals at EL2 across the board and we need a different
+ * strategy entirely.
+ *
+ * Expected-good values (verified from Linux /dev/mem):
+ *   HCD[0x00] CAPLENGTH|HCIVERSION = 0x01200020
+ *   HCD[0x04] HCSPARAMS1           = 0x08000524
+ *   FPCI[0x00] device/vendor       = 0x229810de  (NVIDIA Tegra xHCI)
+ */
+int cmd_xhcidiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== Tegra XHCI CBB-at-EL2 Probe ===\r\n");
+    uart_puts("  [Reading live XHCI registers — may abort if CBB-blocked]\r\n");
+
+    volatile uint32_t *hcd  = (volatile uint32_t *)TEGRA_XHCI_HCD_BASE;
+    volatile uint32_t *fpci = (volatile uint32_t *)TEGRA_XHCI_FPCI_BASE;
+
+    uint32_t caplen_hciver = hcd[0];
+    uint32_t hcsparams1    = hcd[1];
+    uint32_t hcsparams2    = hcd[2];
+    uint32_t hcsparams3    = hcd[3];
+    uint32_t hccparams1    = hcd[4];
+    uint32_t fpci_devven   = fpci[0];
+
+    uart_printf("  HCD CAPLENGTH|HCIVER: 0x%08x  (expect 0x01200020)\r\n",
+                (unsigned)caplen_hciver);
+    uart_printf("  HCD HCSPARAMS1:       0x%08x  (expect 0x08000524)\r\n",
+                (unsigned)hcsparams1);
+    uart_printf("  HCD HCSPARAMS2:       0x%08x\r\n", (unsigned)hcsparams2);
+    uart_printf("  HCD HCSPARAMS3:       0x%08x\r\n", (unsigned)hcsparams3);
+    uart_printf("  HCD HCCPARAMS1:       0x%08x  (expect 0x0180ff05)\r\n",
+                (unsigned)hccparams1);
+    uart_printf("  FPCI dev/vendor:      0x%08x  (expect 0x229810de)\r\n",
+                (unsigned)fpci_devven);
+
+    bool cbb_blocked = (caplen_hciver == 0xFFFFFFFF &&
+                        fpci_devven   == 0xFFFFFFFF);
+    uart_printf("  Verdict:              %s\r\n",
+                cbb_blocked ? "CBB FIREWALL BLOCKS XHCI AT EL2"
+                            : "XHCI ACCESSIBLE AT EL2");
+
+    uart_puts("=== End XHCI Probe ===\r\n");
 
     uart_printf("  PCI vendor:   0x%04x  (expected 0x10EC)\r\n",
                 (unsigned)rtl8169_get_pci_vendor());

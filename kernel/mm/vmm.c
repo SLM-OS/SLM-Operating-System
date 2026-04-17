@@ -967,6 +967,20 @@ static void vmm_setup_platform(void)
                     (unsigned long)cfg_l2);
     }
 
+    /* Tegra XHCI (tegra-xusb) at 0x03600000..0x0365FFFF — FPCI regs,
+     * xHCI operational regs, and BAR2 all fit in the single 2 MB
+     * block at 0x03600000 (L2 idx 27). Added for the CBB-at-EL2
+     * survey in docs/jetson-pcie-investigation.md; drives the USB
+     * CDC-ECM path if PCIe stays firewalled. */
+    {
+        uint64_t xhci_l2 = (TEGRA_XHCI_HCD_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[xhci_l2] =
+            make_block_desc(TEGRA_XHCI_HCD_BASE & ~(BLOCK_SIZE - 1),
+                             VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  XHCI (tegra-xusb) L2[%lu] mapped", (unsigned long)xhci_l2);
+    }
+
     /* RTL8168 BAR window at 0x35_2800_0000 (L1[212]). One 2 MB block
      * covers BAR2 (0x3528004000, 4 KB) and BAR4 (0x3528000000, 16 KB)
      * both — they land in the same 2 MB-aligned region. */

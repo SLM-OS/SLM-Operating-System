@@ -1,1 +1,1 @@
-scripts/slmos-pcie-keepalive/*.ko*
+*.ko*

@@ -82,6 +82,7 @@ int cmd_macbdiag(int argc, char **argv);
 
 #if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
 int cmd_rtldiag(int argc, char **argv);
+int cmd_xhcidiag(int argc, char **argv);
 #endif
 
 /* Dashboard command (shell_top.c) */

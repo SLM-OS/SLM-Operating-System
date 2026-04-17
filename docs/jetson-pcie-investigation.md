@@ -3,8 +3,12 @@
 Bare-metal access to the Tegra T234 PCIe root complex C8 from SLM-OS
 at EL2, needed to drive the RTL8168 NIC on the Super Developer Kit.
 
-**Status (17 April 2026):** Blocked. Evidence strongly points to the
-CBB firewall rejecting PCIe MMIO at EL2, independent of kexec state.
+**Status (17 April 2026):** Blocked at the CBB-firewall level. The
+restriction is not specific to PCIe — USB 3.0 (XHCI) is blocked the
+same way, confirming that CBB rejects all DMA-capable peripherals
+from EL2 on this board. Both of the plan's Jetson networking paths
+(PCIe RTL8168 §4.1 and USB CDC-ECM §4.2) are infeasible under the
+current EL2+VHE boot model.
 
 ---
 
@@ -115,13 +119,29 @@ instead of EL2+VHE would likely lift the PCIe CBB restriction. But:
 - Secondary CPU bring-up at EL1 through PSCI may differ; needs
   re-verification.
 
-### Path B — USB CDC-ECM
+### Path B — USB CDC-ECM — **RULED OUT (17 April 2026)**
 
-Plan §4.2. Relies on XHCI at `0x3610000`. No evidence yet whether
-XHCI is similarly CBB-blocked at EL2 — needs the same peek test from
-Linux then SLM-OS. Likely problem is the same: Tegra XHCI is a
-DMA-capable peripheral that NVIDIA would firewall in the same tier as
-PCIe and GPU.
+Plan §4.2. Relied on Tegra XHCI at `0x03610000`. Empirically tested
+via the `xhcidiag` shell command:
+
+Linux at EL1 (via `/dev/mem`):
+```
+HCD CAPLENGTH|HCIVER: 0x01200020   (xHCI 1.20, caplen 0x20)
+HCD HCSPARAMS1:       0x08000524
+FPCI dev/vendor:      0x229810de   (NVIDIA Tegra xHCI)
+```
+
+SLM-OS at EL2 post-kexec (same MMIO addresses):
+```
+HCD CAPLENGTH|HCIVER: 0xffffffff
+HCD HCSPARAMS1:       0xffffffff
+FPCI dev/vendor:      0xffffffff
+```
+
+Every XHCI register returns the CBB all-ones signature, exactly like
+PCIe. The firewall rejects DMA-capable peripherals *as a class* at
+EL2 — not peripheral-by-peripheral. Path B is off the table for the
+same reason as the full r8169 port.
 
 ### Path C — OEM BCT firewall override
 
@@ -139,11 +159,23 @@ widened, and stop.
 
 ## Immediate next steps
 
-Need user direction — this pivoted from "port r8169" to "choose a
-platform-level strategy." The four paths differ in scope by 10×.
+Two options remain for bare-metal Jetson networking; the
+peripheral-level paths are both out:
+
+- **Path A** — drop SLM-OS to EL1 (big refactor, ripples into UART,
+  VHE, and secondary CPU bring-up).
+- **Path C** — OEM BCT firewall override (custom L4T flash).
+
+Or close #25 and document that bare-metal networking on Jetson Orin
+Nano Super Developer Kit is infeasible under the EL2+VHE boot model.
+The `rtldiag` / `xhcidiag` shell commands stay in the tree as
+diagnostic scaffolding if the CBB situation ever changes.
 
 ---
 
-*Investigation: 17 April 2026. Branch `jetson-rtl8169-driver`,
- commits 856d6d2 + ec979df. Cached Linux reference driver at
- `docs/reference/linux-pcie-tegra194.c`.*
+*Investigation: 17 April 2026. Branch `jetson-rtl8169-driver`.
+ Cached Linux references: `docs/reference/linux-pcie-tegra194.c`,
+ `docs/reference/linux-r8169-main.c`. See commits 856d6d2
+ (scaffolding), ec979df (correct addressing + RC-cold evidence),
+ 1e02b78 (investigation doc + shutdown-is-NULL finding), plus this
+ update adding the XHCI test.*
