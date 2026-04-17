@@ -562,20 +562,53 @@ unlocked.
    - Multiboot2 handoff requires a specific header tag (entry
      address tag, address tag) that our minimal header lacks.
 
-**Investigation paths for the next session:**
+**Experiments tried (2026-04-17, third iteration) — all still silent:**
+
+| Experiment | Result |
+|---|---|
+| Full 16550 UART reinit at `_start` + emit "KEX\r\n" | No output |
+| `MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS` (type=3, entry=_start) | No output |
+| Multiboot v1 header alongside MB2 + `kexec --type=multiboot-x86` | kexec rejects: *"Wrong file type multiboot-x86, file matches type multiboot2-x86"* — it auto-detects MB2 and refuses MB1 on the same file |
+| `kexec -c --load --type=elf-x86_64` (different loader) | Loads successfully (rc=0, kexec_loaded=1), but same silent handoff |
+| Unload KVM + retry multiboot2-x86 | No change — KVM/VMX state isn't the cause |
+
+All experiments leave the machine with network down, no serial
+output, no `'K'`/`'E'`/`'X'` bytes — even though the UART init is
+hardware-level (8250/16550 port writes, no Linux state needed) and
+the ELF entry address is unambiguous.
+
+**Conclusion:** kexec-tools 2.0.28 on Ubuntu 24.04 appears to load
+our non-standard kernel via both `multiboot2-x86` and `elf-x86_64`
+loaders (rc=0, kexec_loaded=1) but its purgatory never reaches our
+entry — the CPU is executing *something* (Linux dies, net drops)
+but emits no observable I/O. Either purgatory is spinning on an
+internal error path or jumping to an unmapped address.
+
+**Remaining next-session path:**
 
 - Build a **bzImage wrapper** around `slmos-kexec.elf`. kexec's
-  `--type=bzImage` is the most thoroughly-tested x86 loader and
-  documents its handoff state precisely (32-bit protected mode,
-  specific register values). ~100 lines of stub code.
-- Read kexec-tools source for `mb2-x86` purgatory and confirm
-  whether the entry address it jumps to is actually `e_entry`.
-- Try adding `MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS` (type 3) with
-  entry=0x20001000 explicitly to our Multiboot2 header, in case
-  kexec's loader ignores `e_entry` without the explicit tag.
-- Add a UART re-init call at the very start of `_start` (16550
-  init sequence: DLL/DLM/LCR/FCR) before the `'K'` write, in case
-  UART state was cleared.
+  `--type=bzImage` is x86's most thoroughly-tested kexec loader,
+  with a precisely documented handoff state (32-bit protected
+  mode, specific register values, boot_params at EBX). The
+  wrapper is a ~200-line 32-bit stub linked as a bzImage: it
+  reads the bzImage `setup_header.cmd_line_ptr` (or a fixed
+  offset) to find the appended slmos.elf, copies PT_LOAD
+  segments to their `p_paddr`, then jumps to `e_entry`. Everything
+  else in-tree (linker script, deploy scripts, Makefile target)
+  stays usable.
+
+- **Optional diagnostics if bzImage also stays silent** — tells us
+  the blocker is upstream of kexec-tools' loader choice (hardware,
+  purgatory, BIOS runtime services):
+  - `kexec --console-serial` to get the purgatory itself to emit
+    over COM1 as it runs.
+  - Attach a physical POST card to the LPC bus (or use a
+    motherboard with one built-in) to see port 0x80 writes during
+    handoff.
+  - Try the same kexec path under QEMU with `-d int -monitor
+    stdio`; any triple-fault dumps registers. Rules in/out
+    "test-pc UEFI firmware state" as the blocker vs. "kexec
+    itself is broken on this build."
 
 **Original "Invalid memory segment" investigation notes:**
 

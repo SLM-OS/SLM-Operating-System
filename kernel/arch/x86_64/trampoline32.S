@@ -13,6 +13,13 @@
 .set MULTIBOOT2_CHECKSUM,  -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH + MULTIBOOT2_HEADER_LENGTH)
 .set MULTIBOOT2_BOOTLOADER_MAGIC, 0x36D76289
 
+/* Multiboot v1 (the older format) — added for kexec-tools which has
+ * had stable multiboot-x86 loader support much longer than
+ * multiboot2-x86. GRUB still prefers multiboot2 (both are present). */
+.set MULTIBOOT1_MAGIC,     0x1BADB002
+.set MULTIBOOT1_FLAGS,     0              /* no address or video requests */
+.set MULTIBOOT1_CHECKSUM,  -(MULTIBOOT1_MAGIC + MULTIBOOT1_FLAGS)
+
 /* Page tables and stack - defined in entry64.S */
 .extern pml4
 .extern pdpt
@@ -27,14 +34,39 @@
  *
  * No framebuffer tag — GRUB EFI cannot always set a video mode.
  * The kernel uses COM1 serial for console output.
+ *
+ * Explicit MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS (type=3) points kexec
+ * at _start. Without it, kexec-tools' multiboot2-x86 loader falls
+ * back to ELF e_entry — which is the same value — but some code
+ * paths (purgatory, older kexec-tools builds) reportedly ignore
+ * e_entry without the tag. Belt-and-suspenders: include both.
  */
 .section .multiboot, "a"
+.align 8
+/* Multiboot v1 header comes first so kexec's multiboot-x86 loader
+ * finds it in the early scan (spec requires magic within first 8
+ * KiB). GRUB and kexec --type=multiboot2-x86 continue to find the
+ * multiboot2 magic immediately after. */
+multiboot1_header:
+    .long MULTIBOOT1_MAGIC
+    .long MULTIBOOT1_FLAGS
+    .long MULTIBOOT1_CHECKSUM
+
 .align 8
 multiboot_header:
     .long MULTIBOOT2_MAGIC
     .long MULTIBOOT2_ARCH
     .long MULTIBOOT2_HEADER_LENGTH
     .long MULTIBOOT2_CHECKSUM
+
+    /* Entry address tag: type=3, flags=0, size=12, entry_addr=_start */
+    .align 8
+entry_tag:
+    .short 3                    /* MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS */
+    .short 0                    /* flags */
+    .long  entry_tag_end - entry_tag
+    .long  _start               /* entry_addr */
+entry_tag_end:
 
     /* End tag */
     .align 8
@@ -56,16 +88,53 @@ multiboot_header_end:
 _start:
     cli
 
-    /* Early-entry diagnostic: write one byte to COM1 (0x3F8) before
-     * touching any other state. Confirms we reached _start at all —
-     * useful for diagnosing boot-loader handoff issues (kexec, non-
-     * GRUB boot). On bare-metal UEFI this just prepends one extra
-     * byte to the boot log, no harm. Linux kexec and GRUB both leave
-     * COM1 configured at 115200 so an 8-bit write is visible.
+    /* Early-entry diagnostic: full 16550 UART reinit, then emit a
+     * distinctive burst "KEX\r\n". We don't assume the UART was left
+     * in a usable state by the previous boot loader (kexec may leave
+     * the UART gated; GRUB EFI may have disabled it during
+     * ExitBootServices); we re-configure from scratch.
      *
-     * K = "kernel entry reached". */
+     * Register offsets (from COM1 base 0x3F8):
+     *   +0 THR/DLL, +1 IER/DLM, +2 FCR, +3 LCR, +4 MCR, +5 LSR
+     *
+     * Sequence: disable IRQs, set DLAB, DLL=1 / DLM=0 (→115200 @
+     * 1.8432 MHz), clear DLAB + set 8N1, enable+clear FIFO, assert
+     * DTR/RTS, then spin-drain-write each byte. No busy-wait on TX
+     * ready — we're fine losing early bytes if the FIFO overflows,
+     * the burst is short. */
+    mov $0x3F9, %dx         /* IER */
+    mov $0x00, %al
+    out %al, %dx
+    mov $0x3FB, %dx         /* LCR — set DLAB */
+    mov $0x80, %al
+    out %al, %dx
+    mov $0x3F8, %dx         /* DLL */
+    mov $0x01, %al
+    out %al, %dx
+    mov $0x3F9, %dx         /* DLM */
+    mov $0x00, %al
+    out %al, %dx
+    mov $0x3FB, %dx         /* LCR — 8N1, DLAB=0 */
+    mov $0x03, %al
+    out %al, %dx
+    mov $0x3FA, %dx         /* FCR — enable+clear FIFO, 14-byte trg */
+    mov $0xC7, %al
+    out %al, %dx
+    mov $0x3FC, %dx         /* MCR — DTR+RTS+OUT2 */
+    mov $0x0B, %al
+    out %al, %dx
+    /* Emit "KEX\r\n" to COM1 (0x3F8). No busy-wait; the FIFO
+     * absorbs short bursts. */
     mov $0x3F8, %dx
-    mov $0x4B, %al       /* 'K' */
+    mov $0x4B, %al          /* 'K' */
+    out %al, %dx
+    mov $0x45, %al          /* 'E' */
+    out %al, %dx
+    mov $0x58, %al          /* 'X' */
+    out %al, %dx
+    mov $0x0D, %al          /* '\r' */
+    out %al, %dx
+    mov $0x0A, %al          /* '\n' */
     out %al, %dx
 
     /* Save multiboot info pointer for later */
