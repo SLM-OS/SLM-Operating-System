@@ -411,12 +411,42 @@ entry is required.
 10. **Enable RE + TE in NCR.** MAC starts consuming RX descriptors
     and accepting TX kicks.
 
-**Polling model.** Pi 5's NS-EL1 IRQ delivery is unreliable (#134),
-so this driver is polling-only — `net_poll()` drives recv on the RX
-ring; `macb_tx_one` polls the `USED` bit on the TX descriptor. No
-`tx_reap` is exposed yet because each send is synchronous; #134
-resolution would unlock IRQ-driven TX completion and the driver has
-space in `net_driver` for it.
+**Polling model.** Polling is the operational path, for a different
+reason than #134 (timer PPI-30 policy). The peripheral-IRQ path via
+RP1 MSIX_CFG was wired up (see "IRQ infrastructure" below) and is
+confirmed inert: MIP0 sees the MAC asserting but MSIX_CFG never
+fires a TLP. `net_poll()` drives recv on the RX ring; `macb_tx_one`
+polls the `USED` bit on the TX descriptor.
+
+**IRQ infrastructure (dormant).** The driver registers
+`macb_irq_handler` against GIC IRQ 166 via `gic_register_handler`,
+unmasks MACB_IER, and configures `RP1_MSIX_CFG[vec 6]` with
+`ENABLE | IACK_EN`. All correctly set up — shown by the `polled + IRQ`
+status line — but no TLP ever crosses BAR3 → MIP0 → GIC. The handler
+is ready to take over TX/RX drain the day the MSIX_CFG blocker is
+solved (see **#247** for the shared tracker — same issue UART RX
+hit). Three accessors surface the live state for investigators:
+
+| Accessor | Purpose |
+|----------|---------|
+| `macb_get_irq_count()` | Bumped on every handler invocation. Stays 0 while MSIX_CFG is blocked. |
+| `macb_get_last_isr()` | Last `MACB_ISR` value the handler saw. |
+| `macb_irq_is_registered()` | Whether `gic_register_handler` succeeded. |
+
+The `macbdiag` shell command (`PLATFORM_RASPI5 + ENABLE_NETWORKING`)
+dumps all three alongside live MIP0 `MSIX_CFG[6]` / `INTSTATL` state.
+Sample output after DHCP + ping on pi-5-1:
+
+```
+=== MACB IRQ Diagnostic ===
+  GIC handler registered: YES
+  IRQ count:              0            <- MSIX_CFG never fired a TLP
+  Last MACB_ISR observed: 0x00000000
+  MIP0 MSIX_CFG[vec 6]:   0x00000009 ENABLE IACK_EN
+  MIP0 INTSTATL (0-31):   0x02000040
+    ETH vec 6 asserted:    YES         <- MAC IS asserting, just not forwarded
+=== End Diagnostic ===
+```
 
 **Hardware verified on pi-5-1 2026-04-17:**
 
