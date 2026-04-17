@@ -443,6 +443,7 @@ set(TEST_SOURCES
     kernel/tests/test_gpu.c
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
+    kernel/tests/test_shell_session.c
     kernel/tests/test_pmm.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>
