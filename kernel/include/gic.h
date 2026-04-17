@@ -146,6 +146,19 @@ typedef void (*gic_handler_fn)(void);
 int gic_register_handler(uint32_t irq, gic_handler_fn handler);
 
 /*
+ * Remove a previously registered handler.
+ *
+ * Caller must disable the IRQ at the GIC first (gic_disable_irq) to
+ * avoid a window where the handler is gone but the line is still
+ * deliverable — an IRQ arriving between unregister and disable would
+ * log "Unhandled IRQ" and potentially cause a storm for level-
+ * triggered sources that keep asserting.
+ *
+ * Returns 0 on success, -1 if no registration matched.
+ */
+int gic_unregister_handler(uint32_t irq);
+
+/*
  * Look up the handler registered for a given IRQ number.
  * Used by the dispatch path; returns NULL if nothing is registered.
  */
