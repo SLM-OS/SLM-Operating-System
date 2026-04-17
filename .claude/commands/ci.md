@@ -6,13 +6,13 @@ Run the following steps in order. Stop and report on first failure.
 
 ### 1. Build — ARM64 QEMU target
 ```
-make clean && make PLATFORM=qemu
+make kernel-clean && make kernel PLATFORM=QEMU_VIRT
 ```
 Report: pass/fail, any warnings.
 
 ### 2. Build — x86-64 QEMU target
 ```
-make clean && make PLATFORM=x86_64
+make kernel-clean && make kernel PLATFORM=X86_64
 ```
 Report: pass/fail, any warnings.
 
@@ -20,12 +20,15 @@ Report: pass/fail, any warnings.
 ```
 make test
 ```
-Parse the output for `[PASS]`, `[FAIL]`, `PAGE FAULT`, and `KERNEL PANIC`.
-Report: total tests, passed, failed, any crashes.
+The Makefile's `test` target runs QEMU under `systemd-run` with semihosting
+and reports pass/fail via the QEMU exit code only — per-test `[PASS]`/`[FAIL]`
+lines are not printed to stdout. Treat "PASSED - All tests passed (exit code 0)"
+as success. On failure, also grep the build/run output for `PAGE FAULT` and
+`KERNEL PANIC` to characterize the crash.
 
 ### 4. Diff check
 Run `git diff main...HEAD --stat` and confirm no untracked build artifacts
-are being committed (`.o`, `.bin`, `.elf`, `.iso` files).
+are being committed (`.o`, `.obj`, `.bin`, `.elf`, `.iso`, `.a` files).
 
 ## Output
 
