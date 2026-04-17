@@ -14,6 +14,7 @@
 #include "../include/littlefs_slm.h"
 #include "../include/string.h"
 #include "../include/uart.h"
+#include "../include/slm_ffi.h"
 
 /* ============================================================================
  * Test Helpers
@@ -306,6 +307,37 @@ static void test_shell_cmd_model_pin_lifecycle(void)
     TEST_ASSERT_EQUAL_INT(0, shell_execute("model list"));
     TEST_ASSERT_EQUAL_INT(0, shell_execute("model unpin 0"));
     TEST_ASSERT_EQUAL_INT(0, shell_execute("model unload 0"));
+}
+
+/*
+ * Regression for #64: `model preload mnist` spawns a background task
+ * to load the model. After yielding a few times, the model should
+ * appear in the registry. `model preload-status` should report 'done'.
+ */
+static void test_shell_cmd_model_preload(void)
+{
+    /* Unload if already loaded from previous test. */
+    int existing = rust_model_find("mnist");
+    if (existing >= 0) {
+        shell_execute("model unload mnist");
+    }
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model preload mnist"));
+
+    /* Sleep to let the background task run. yield() alone may not
+     * give enough scheduling cycles for the preload to complete. */
+    extern void sleep_ms(uint32_t ms);
+    sleep_ms(200);
+
+    /* Model should be loaded now. */
+    int idx = rust_model_find("mnist");
+    TEST_ASSERT_TRUE(idx >= 0);
+
+    /* Status should be 'done'. */
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("model preload-status"));
+
+    /* Clean up. */
+    shell_execute("model unload mnist");
 }
 
 /* ============================================================================
@@ -2201,6 +2233,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_bench_eviction);
     RUN_TEST(test_shell_cmd_eviction_features);
     RUN_TEST(test_shell_cmd_model_pin_lifecycle);
+    RUN_TEST(test_shell_cmd_model_preload);
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);

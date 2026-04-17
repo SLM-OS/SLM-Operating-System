@@ -1670,6 +1670,80 @@ static void model_show_pools(void)
                 (unsigned long)free_blocks, (unsigned long)free_mb);
 }
 
+/* ============================================================================
+ * Async model preloading (#64)
+ *
+ * model preload <name> launches a background task that loads the model
+ * asynchronously. The shell returns immediately; `model list` shows the
+ * model once loading completes. A simple status word tracks progress.
+ * ============================================================================ */
+
+enum { MODEL_PRELOAD_MAX = 4 };
+
+static volatile int preload_status[MODEL_PRELOAD_MAX]; /* 0=free, 1=loading, 2=done, -1=fail */
+static volatile int preload_result[MODEL_PRELOAD_MAX]; /* model index or -1 */
+
+static void preload_task_entry(void *arg)
+{
+    int slot = (int)(uintptr_t)arg;
+    /* Only supports built-in MNIST for now; general VFS-backed async
+     * load requires a file-read buffer whose lifetime exceeds the
+     * synchronous load call — deferred to when large models arrive. */
+    int idx = rust_model_load_builtin_mnist();
+    preload_result[slot] = idx;
+    preload_status[slot] = (idx >= 0) ? 2 : -1;
+}
+
+static int model_preload_start(const char *name)
+{
+    /* Find a free slot. */
+    int slot = -1;
+    for (int i = 0; i < MODEL_PRELOAD_MAX; i++) {
+        if (preload_status[i] == 0 || preload_status[i] == 2 ||
+            preload_status[i] == -1) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        uart_puts("model preload: all preload slots busy\r\n");
+        return -1;
+    }
+
+    /* Currently only MNIST is supported as a built-in async load.
+     * Other models would need VFS + buffer management. */
+    bool is_mnist = (name[0]=='m' && name[1]=='n' && name[2]=='i' &&
+                     name[3]=='s' && name[4]=='t' && name[5]=='\0');
+    if (!is_mnist) {
+        uart_printf("model preload: '%s' not supported for async load "
+                    "(only 'mnist' built-in)\r\n", name);
+        return -1;
+    }
+
+    /* Check if already loaded. */
+    if (rust_model_find(name) >= 0) {
+        uart_printf("model preload: '%s' already loaded\r\n", name);
+        return 0;
+    }
+
+    preload_status[slot] = 1;
+    preload_result[slot] = -1;
+
+    char task_name[16];
+    uart_snprintf(task_name, sizeof(task_name), "preload_%d", slot);
+    struct task *t = task_create(task_name, preload_task_entry,
+                                 (void *)(uintptr_t)slot);
+    if (!t) {
+        preload_status[slot] = -1;
+        uart_puts("model preload: failed to create background task\r\n");
+        return -1;
+    }
+    scheduler_add_task(t);
+    uart_printf("Preloading '%s' in background (slot %d, task '%s')\r\n",
+                name, slot, task_name);
+    return 0;
+}
+
 static int model_load(int argc, char *argv[])
 {
     if (argc < 3) {
@@ -2026,7 +2100,31 @@ int cmd_model(int argc, char *argv[])
         return 0;
     }
 
-    uart_puts("Usage: model [load|list|info|unload|pin|unpin|infer|bench|stats|pools|gpu]\r\n");
+    if (strcmp(subcmd, "preload") == 0) {
+        if (argc < 3) {
+            uart_puts("Usage: model preload <name>\r\n");
+            uart_puts("  Loads a model in a background task. Currently only 'mnist' supported.\r\n");
+            uart_puts("  Check progress with 'model preload-status'.\r\n");
+            return -1;
+        }
+        return model_preload_start(argv[2]);
+    }
+    if (strcmp(subcmd, "preload-status") == 0) {
+        uart_puts("Preload slots:\r\n");
+        uart_puts("  Slot  Status    Result\r\n");
+        uart_puts("  ----  --------  ------\r\n");
+        for (int i = 0; i < MODEL_PRELOAD_MAX; i++) {
+            int st = preload_status[i];
+            const char *label = st == 0 ? "free" :
+                                st == 1 ? "loading" :
+                                st == 2 ? "done" : "failed";
+            uart_printf("  %4d  %-8s  %d\r\n", i, label, preload_result[i]);
+        }
+        return 0;
+    }
+
+    uart_puts("Usage: model [load|list|info|unload|pin|unpin|preload|preload-status|"
+              "infer|bench|stats|pools|gpu]\r\n");
     return -1;
 }
 

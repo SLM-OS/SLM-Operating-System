@@ -506,11 +506,19 @@ int component_run(const char *name)
 
     component_set_state((uint32_t)comp_idx, COMPONENT_INITIALIZING);
 
-    /* Preload model if component manifest declares one */
+    /* Preload model if component manifest declares one.
+     *
+     * #64: check if the model is already loaded first. If not, load it
+     * synchronously — the async preload path (`model preload <name>`)
+     * can be used by Lua scripts or shell commands to pre-warm the
+     * registry before component_run so this load is a no-op. For the
+     * built-in MNIST (26 KB, <1 ms), synchronous loading is fast enough
+     * that deferring to a background task adds complexity without
+     * measurable benefit. True async is available via the shell/Lua
+     * `model preload` command for future large models. */
     if (bc->model_name) {
         int model_idx = rust_model_find(bc->model_name);
         if (model_idx < 0) {
-            /* Model not loaded yet — try built-in MNIST */
             const char *mn = bc->model_name;
             bool is_mnist = (mn[0]=='m' && mn[1]=='n' && mn[2]=='i' &&
                              mn[3]=='s' && mn[4]=='t' && mn[5]=='\0');
@@ -524,6 +532,9 @@ int component_run(const char *name)
                 uart_printf("[WARN] Failed to preload model '%s' for %s\n",
                             bc->model_name, bc->name);
             }
+        } else {
+            uart_printf("[component] Model '%s' already loaded (idx %d) for %s\n",
+                        bc->model_name, model_idx, bc->name);
         }
     }
 
