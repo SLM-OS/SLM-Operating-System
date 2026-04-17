@@ -258,7 +258,7 @@ uint32_t virtio_net_get_irq(void);
  * Incremented once per stall episode (latch resets on the next
  * successful reap). Exposed so tests can assert the watchdog stays
  * quiet on healthy traffic and fires exactly when a stall is
- * simulated via virtio_net_test_rewind_last_progress().
+ * simulated via virtio_net_test_trigger_watchdog().
  */
 uint32_t virtio_net_get_tx_stall_count(void);
 

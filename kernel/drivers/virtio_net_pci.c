@@ -31,9 +31,17 @@
 #include "pmm.h"
 #include "spinlock.h"
 #include "debug.h"
-#include "virtio.h"         /* VIRTIO_NET_TX_TIMEOUT_MS shared constant */
+#include "virtio.h"         /* VIRTIO_NET_TX_TIMEOUT_MS + STALL_THRESHOLD */
+#include "virtio_net_pci.h" /* public accessors + handler decl */
 #include "arch/sys_arch.h"  /* sys_now() for wall-clock TX timeout */
 #include <string.h>
+
+/* Arch glue — declared here at file scope rather than inside init so
+ * other driver functions can reach them if needed (currently only
+ * init uses them). The matching definitions live in
+ * kernel/arch/x86_64/{idt.c,lapic.c}. */
+extern void     irq_register(uint8_t irq, void (*handler)(uint8_t));
+extern uint32_t lapic_get_id(void);
 
 /* -------------------------------------------------------------------------- */
 /* VirtIO PCI Constants                                                        */
@@ -60,13 +68,18 @@
 #define MSIX_MSG_CTRL_FUNC_MASK      (1u << 14)
 #define MSIX_MSG_CTRL_TABLE_SIZE     0x7FF
 
-#define MSIX_VCTRL_MASK              (1u << 0)
-
-/* x86 MSI message address/data format (Intel SDM Vol 3 §11.11.1) */
-#define MSIX_ADDR_BASE               0xFEE00000u
-/* Message data: bits[7:0] vector, bits[10:8] delivery mode (0=fixed),
+/* x86 MSI message address/data format (Intel SDM Vol 3 §11.11.1).
+ *
+ * Address layout (xAPIC): bits[31:20]=0xFEE, bits[19:12]=destination
+ * APIC ID, bits[11:0]=flags. We only use the 8-bit APIC ID field;
+ * x2APIC support would require a separate addressing scheme (32-bit
+ * ID in bits[63:12] of the 64-bit message) and is out of scope until
+ * any platform here enables x2APIC.
+ *
+ * Message data: bits[7:0] vector, bits[10:8] delivery mode (0=fixed),
  * bit 14 trigger level, bit 15 trigger mode (0=edge). Edge-triggered
  * fixed delivery is the standard MSI-X choice on x86. */
+#define MSIX_ADDR_BASE               0xFEE00000u
 
 /* IDT vector we allocate for virtio-net TX/RX completion. Falls in
  * the 50–63 "user MSI-X" range left open by lapic/timer/RESCHED_VECTOR.
@@ -250,12 +263,12 @@ static uint8_t tx_buffers[TX_BUFFER_COUNT][MAX_PACKET_SIZE]
 static bool    tx_inflight[TX_BUFFER_COUNT];
 
 /* Stuck-descriptor watchdog (#204 item 4). Same pattern as the MMIO
- * driver — see virtio_net.c for the full rationale. Under MSI-X the
- * threshold should rarely be reached (completions drain from the
- * IRQ handler within microseconds), so hitting this is a real signal
- * that either the device dropped a notification or the host side
- * stopped accepting packets. */
-#define TX_STALL_THRESHOLD_MS 5000
+ * driver — see virtio_net.c for the full rationale and
+ * VIRTIO_NET_TX_STALL_THRESHOLD_MS (shared in virtio.h) for the
+ * threshold. Under MSI-X the threshold should rarely be reached
+ * (completions drain from the IRQ handler within microseconds), so
+ * hitting this is a real signal that either the device dropped a
+ * notification or the host side stopped accepting packets. */
 static uint32_t tx_last_progress_ms;
 static bool     tx_stall_warned;
 /* Bumped every time the watchdog WARN fires. See the matching
@@ -292,11 +305,8 @@ static struct {
     volatile uint32_t irq_count;  /* bumped by virtio_net_pci_irq_handler */
 } pci_msix;
 
-/* Forward decls so init can register the handler before the body is
- * defined. Non-static so tests can invoke it directly without an
- * indirect accessor; the function signature matches the IDT dispatch
- * convention in kernel/arch/x86_64/idt.c. */
-void virtio_net_pci_irq_handler(uint8_t irq);
+/* virtio_net_pci_irq_handler is declared in virtio_net_pci.h so init
+ * can register it before the definition below. */
 
 /* -------------------------------------------------------------------------- */
 /* PCI Capability Parsing                                                      */
@@ -358,11 +368,15 @@ static bool find_virtio_cap(uint8_t bus, uint8_t dev, uint8_t func,
 static bool find_msix_cap(const struct pci_device *pdev)
 {
     uint16_t status = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x06);
-    if (!(status & (1 << 4)))
+    if (!(status & PCI_STATUS_CAP_LIST))
         return false;
 
     uint8_t cap_ptr = pci_config_read8(pdev->bus, pdev->dev, pdev->func, 0x34) & 0xFC;
-    while (cap_ptr != 0) {
+
+    /* Bounded iteration: a malformed device whose capability list
+     * loops back on itself would otherwise hang the kernel here.
+     * 48 is a generous upper bound — PCIe typically has <10 caps. */
+    for (int iter = 0; iter < 48 && cap_ptr != 0; iter++) {
         uint8_t cap_id   = pci_config_read8(pdev->bus, pdev->dev, pdev->func, cap_ptr);
         uint8_t cap_next = pci_config_read8(pdev->bus, pdev->dev, pdev->func, cap_ptr + 1);
 
@@ -373,6 +387,14 @@ static bool find_msix_cap(const struct pci_device *pdev)
                                                        cap_ptr + MSIX_TABLE_OFFSET_BIR);
             uint8_t  table_bar   = table_off_bir & 0x7;
             uint32_t table_off   = table_off_bir & ~0x7u;
+
+            /* BAR index is a 3-bit field so 0-7 is possible, but
+             * pci_device.bar[] is a 6-element array (BAR0-BAR5 per
+             * PCI spec). A corrupt / non-compliant device reporting
+             * BAR 6 or 7 would read out-of-bounds below; refuse the
+             * capability rather than walk off the array. */
+            if (table_bar >= 6)
+                return false;
 
             uint64_t bar_addr = pdev->bar[table_bar] & ~0xFUL;
             /* 64-bit BAR: high half in bar[n+1]. 0x6 mask = type bits. */
@@ -757,8 +779,6 @@ static int virtio_net_pci_init(void) {
          * delivered IRQ lands on a real handler rather than a
          * NULL slot in irq_handlers[]. irq_register takes the
          * (vector - 32) index matching idt.c's dispatch path. */
-        extern void irq_register(uint8_t irq, void (*h)(uint8_t));
-        extern uint32_t lapic_get_id(void);
         irq_register(VIRTIO_NET_MSIX_IRQ, virtio_net_pci_irq_handler);
 
         msix_program_entry0(VIRTIO_NET_MSIX_VECTOR, lapic_get_id());
@@ -844,7 +864,7 @@ static void tx_watchdog_warn_if_stuck(bool any_inflight) {
     if (tx_stall_warned || !any_inflight)
         return;
     uint32_t elapsed = sys_now() - tx_last_progress_ms;
-    if (elapsed >= TX_STALL_THRESHOLD_MS) {
+    if (elapsed >= VIRTIO_NET_TX_STALL_THRESHOLD_MS) {
         WARN("TX descriptors stuck: no completion for %u ms (virtio-pci)",
              elapsed);
         tx_stall_warned = true;
@@ -1057,7 +1077,7 @@ uint32_t virtio_net_pci_get_tx_stall_count(void) {
  * virtio_net.c — same semantics.
  */
 void virtio_net_pci_test_trigger_watchdog(void) {
-    tx_last_progress_ms = sys_now() - (TX_STALL_THRESHOLD_MS + 100);
+    tx_last_progress_ms = sys_now() - (VIRTIO_NET_TX_STALL_THRESHOLD_MS + 100);
     tx_stall_warned = false;
     tx_watchdog_warn_if_stuck(true);
 }

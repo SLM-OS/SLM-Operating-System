@@ -182,6 +182,14 @@ struct virtq_used {
  * lands, this constant keeps the two drivers behaving consistently. */
 #define VIRTIO_NET_TX_TIMEOUT_MS    100
 
+/* Stuck-descriptor watchdog threshold (#204 item 4). Shared so the
+ * MMIO (virtio_net.c) and PCI (virtio_net_pci.c) drivers can't drift
+ * out of sync. 5 seconds is an order of magnitude above any
+ * reasonable TX latency (microseconds on QEMU, sub-millisecond on
+ * real hardware). Crossing it signals a genuine stall, not
+ * congestion. */
+#define VIRTIO_NET_TX_STALL_THRESHOLD_MS   5000
+
 /* Complete virtqueue state */
 struct virtqueue {
     /* Queue index (0, 1, etc. for this device) */
