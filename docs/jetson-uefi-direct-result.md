@@ -77,31 +77,68 @@ instruction after `bl efi_stub_entry`. The existing DAIF mask in
 `primary_cpu:` is retained for the kexec path; the UEFI-direct
 path needs the mask earlier, before the Jetson block even runs.
 
-### 4. BSS clear in `primary_cpu` faults against UEFI's W^X
+### 4. PE had no real `.data` section — fixed in this commit
 
-This is the currently-unfixed blocker. `primary_cpu:`'s zero-fill
-loop writes to `__bss_start..__bss_end`, which lives inside the
-SLM-OS PE's `.text` section (the only section declared with real
-content — the `.data` section in `pe_header.S` is a zero-sized
-placeholder). Modern UEFI enforces W^X and maps any page marked
-as code as read-only regardless of the PE characteristics word
-saying otherwise. Writes to BSS therefore take a permission fault,
-which on this firmware manifests as a silent hang (the SLM-OS
-`VBAR_EL1` isn't set yet, UEFI's handler runs with Boot Services
-gone).
+Before: the PE header declared `.text` (CNT_CODE+MEM_READ+MEM_WRITE+
+MEM_EXECUTE) covering everything and a zero-sized `.data` placeholder.
+Two problems with that layout:
 
-**Not fixed in this commit.** The clean fix is a proper `.data`
-section in `pe_header.S`: non-executable, writable, covering the
-region from `__data_start` to `__bss_end` (or `__stack_top` if
-the stack is in scope too). The linker script already aligns
-`.data` to `SectionAlignment = 0x10000` for this purpose, so the
-PE-side declaration is the remaining piece.
+- Modern UEFI enforces W^X: any section marked MEM_EXECUTE is mapped
+  RO+X regardless of the MEM_WRITE bit. Writes to BSS therefore took
+  a permission fault.
+- The `.data` section being zero-sized meant UEFI never read the
+  initialized-data file bytes at runtime — UEFI zero-filled the .data
+  range instead, silently wiping the initial values of every `.data`
+  global. A latent bug that would have broken many subsystems if
+  `kernel_main` had been reached. Only the UEFI-direct path was
+  affected; QEMU and kexec load the raw ELF and initialize `.data`
+  from the ELF PT_LOAD segments, not from the PE header.
+
+Fixed by splitting the section table into:
+
+- `.text`: RX only (`0x60000020`, no MEM_WRITE), `VirtualSize =
+  _kernel_code_size`, covers code + rodata only.
+- `.data`: RW, NX (`0xc0000040`, no MEM_EXECUTE), `VirtualAddress =
+  _kernel_data_va`, `VirtualSize = _kernel_data_virtual_size` (covers
+  through `__kernel_end`, so UEFI zero-fills the BSS + stack portion),
+  `SizeOfRawData = _kernel_data_size`, `PointerToRawData =
+  _kernel_data_file`.
+
+Also fixed `SizeOfCode` (`_kernel_code_size` instead of `_kernel_size`,
+which included BSS), added `SizeOfInitializedData` (`_kernel_data_size`
+instead of 0), and corrected `SizeOfImage` from `_kernel_size + 0x10000`
+to just `_kernel_size` (the `+ 0x10000` was right for the old
+single-section layout where `.text` started at VA 0x10000 and covered
+everything, but is off by one header under the split).
+
+New linker symbol `_kernel_data_virtual_size` added to
+`kernel-jetson.ld` and `kernel.ld` (both used by non-RASPI5 ARM64
+builds that include the PE header).
+
+### 5. Remaining downstream blocker — NOT BSS clear as previously hypothesized
+
+The pre-fix session assumed the silent hang after marker C was
+BSS-clear faulting. With the `.data` section split in place, BSS is
+now mapped RW-NX by UEFI and writes to it don't fault — but the
+silent hang still occurs. So BSS clear wasn't actually where the
+previous session's execution stopped; the bisection up to that
+point was over-confident.
+
+During this session, diagnostic `brk` instructions at
+`.Ljetson_post_setup` (the UEFI-direct landing point), at the top of
+the Jetson block, and right after BSS clear all failed to fire —
+meaning execution doesn't reach any of them. In one test run the
+crash PC landed at `image_base + 0x1C` (inside the PE header region,
+where the 4-byte word is zero → AArch64 UDF), which suggests either
+stack corruption redirecting a `ret`, or the `efi_disable_mmu`
+sequence failing subtly and subsequent instruction fetches going
+through broken translations. Not yet root-caused.
 
 ---
 
 ## Current baseline behavior (UEFI-direct, after this commit)
 
-Running `fs4:\EFI\BOOT\SLMOS.efi` from the UEFI Shell produces:
+Running `fs4:\EFI\BOOT\SLMOS.efi` from the UEFI Shell still produces:
 
 ```
 [slmos] A efi_entry
@@ -110,9 +147,10 @@ Running `fs4:\EFI\BOOT\SLMOS.efi` from the UEFI Shell produces:
 <silent hang — no reset, no exception message, no further output>
 ```
 
-A/B/C are the pre-EBS con_out markers. The silence after C is
-**BSS clear faulting** (finding #4 above), confirmed by bisecting
-`brk` instructions up to the point right before the BSS loop.
+Externally the observable behavior is unchanged from before the `.data`
+section fix. Internally two real improvements landed (BSS now RW-NX
+instead of RO+X, initialized data actually loaded from file), but
+the remaining blocker is upstream of where those improvements kick in.
 
 The Jetson hangs in a state that requires `labctl power_cycle`
 to recover; Linux does not come back on its own.
@@ -123,19 +161,24 @@ to recover; Linux does not come back on its own.
 
 In rough order of how much each unblocks:
 
-1. **Add a real `.data` section to `pe_header.S`.** RW, NX, covering
-   `__data_start..__bss_end`. This unblocks the BSS clear and lets
-   `primary_cpu` complete. ~1 day, including verifying UEFI actually
-   honors the characteristics (some firmwares are still conservative
-   — a fallback is to mark the region as `EfiLoaderData` via
-   `AllocatePages` inside `efi_stub_entry` and copy/zero-init
-   ourselves). Low-risk: the kexec path is unaffected.
-2. **Install the SLM-OS `VBAR_EL1` before any post-EBS operation
-   that might fault.** Move the `vbar_el1` write from `primary_cpu`
-   to right after `bl efi_stub_entry`. This turns silent hangs into
-   structured faults through the SLM-OS handlers, which can log via
-   UARTC (once UARTC is mapped in the SLM-OS page tables — still
-   EL2-gated) or via a DRAM scratch region.
+1. **Diagnose why post-EBS execution doesn't reach any of the
+   diagnostic brks.** ~3 points to investigate: (a) does
+   `efi_disable_mmu` actually complete and disable the MMU on this
+   firmware? (b) is the stack SP inherited from UEFI post-EBS
+   actually valid, or does something in primary_cpu's stack setup
+   land on a bad page? (c) does the `ret` from efi_stub_entry
+   actually land on the post-`bl` instruction or somewhere else?
+   A useful next probe is a `brk` placed at the *very first*
+   instruction after `bl efi_stub_entry` (before the DAIF mask),
+   to confirm `ret` landed where expected.
+2. **Install the SLM-OS `VBAR_EL1` before `bl efi_stub_entry`.**
+   Currently VBAR_EL1 is set deep inside primary_cpu. If anything
+   faults between `bl efi_stub_entry` and that point, UEFI's still-
+   installed vectors handle it with Boot Services gone and hang
+   silently. Installing the SLM-OS vectors first — even with just a
+   minimal handler that prints an EL + ESR + ELR tuple to some
+   memory scratch region — turns silent hangs into structured
+   diagnostic output.
 3. **Approach B: real `.reloc` section + PIC early boot.** Without
    this, `kernel_main` and everything downstream still sees
    absolute addresses pointing at the link address
@@ -170,35 +213,65 @@ ACR state through kexec).
 
 ## Changes landed in this commit
 
-- `kernel/arch/arm64/efi.h` — adds `efi_simple_text_output_protocol_t`
-  and the `efi_char16_t` typedef; tightens `con_out`'s type in
-  `efi_system_table_t`. Also adds `static_assert` compile-time checks
-  on every relevant field offset (ConOut=0x40, BootServices=0x60,
-  ExitBootServices=0xE8, etc.) so a future reorder of the struct
-  can't silently mis-index UEFI memory — the build fails loudly
-  instead. Nothing here breaks the kexec path.
-- `kernel/arch/arm64/efi_stub.c` — adds `efi_print()` helper plus
-  trace markers at: entry, after FDT lookup, before EBS, on EBS
-  failure, after EBS, before `efi_disable_mmu`, before return. The
-  post-EBS markers (D/E/F) are retained even though ConOut is
-  torn down by EBS on this firmware — they're harmless no-ops if
-  ConOut's vtable is zeroed, and they cost ~40 bytes of .rodata.
-- `kernel/arch/arm64/boot.S`:
-  - `msr daifset, #0xF` immediately after `bl efi_stub_entry` to
-    mask stale UEFI IRQs before UEFI's vectors teardown manifests.
-  - Remove the self-relocating trampoline and its `.Llink_address`
-    / `.Limage_size` literals — see finding #1.
-  - Gate the Jetson EL2 block (HCR_EL2 write, CNT*_CTL writes,
-    UARTC `"EL2\r\n"` probe) on `CurrentEL == 2` via a new
-    `.Ljetson_post_setup` skip label — see finding #2. Re-writing
-    HCR_EL2 at EL2 with the same `(E2H|RW|TGE)` bits a VHE-aware
-    Linux kexec left in place is architecturally a no-op store,
-    so no guard on the write is needed.
+- `kernel/arch/arm64/boot.S` — replace the zero-sized `.data`
+  section placeholder with a real one. `.text` is now RX only
+  (`0x60000020`), covers `_kernel_code_size` (code + rodata); `.data`
+  is RW-NX (`0xc0000040`), covers `_kernel_data_virtual_size` in
+  memory (= initialized data + BSS + stack) with
+  `SizeOfRawData = _kernel_data_size` (initialized portion only —
+  UEFI zero-fills the BSS/stack delta). Also fixes `SizeOfCode`,
+  `SizeOfInitializedData`, and `SizeOfImage` values in the optional
+  header to match the split layout.
+- `kernel/kernel-jetson.ld`, `kernel/kernel.ld` — add
+  `_kernel_data_virtual_size = __kernel_end - __data_start` so the
+  PE `.data` section's `VirtualSize` can extend through the full
+  BSS + stack region. Fixes the QEMU linker's `_kernel_code_size`
+  formula (was `__data_end - _start - 0x10000`, now
+  `__data_start - _start - 0x10000` — matches Jetson and doesn't
+  produce a PE section overlap). Both scripts because the PE
+  header is assembled for all non-RASPI5 ARM64 builds (QEMU too,
+  where the PE header is inert but still has to link).
 
-QEMU `make test` is green. Kexec path on Jetson is untouched —
-the kexec entry runs at EL2, takes the same Jetson block, and the
-new `CurrentEL == 2` gate evaluates true. Any kexec regressions
-will surface on the next hardware deploy.
+### Regression defenses landed alongside
+
+Bare-metal boot glue is hard to unit-test at runtime, so the PR
+leans on build-time assertions and hardware smoke tests. Full
+matrix:
+
+- **Compile-time (every build, every platform):** 13 `static_assert`s
+  in `kernel/arch/arm64/efi.h` pin the UEFI protocol struct offsets
+  to spec values (ConOut=0x40, BootServices=0x60, ExitBootServices
+  =0xE8, OutputString=0x08, …). Introduced in #226, still apply.
+- **Link-time Jetson (`kernel-jetson.ld`):** seven `ASSERT`s on PE
+  invariants — kernel-fits-in-16MB, `.data` VA and SizeOfRawData
+  alignment, `.text` SizeOfRawData + `.data` PointerToRawData
+  FileAlignment, SizeOfImage alignment, `.text`/`.data`
+  non-overlap, SizeOfImage matches `.data` end VA. Each caught a
+  specific scenario of symbol or characteristic drift.
+- **Link-time QEMU (`kernel.ld`):** one `ASSERT` (non-overlap).
+  The other invariants don't apply under QEMU's 4KB `.data`
+  alignment, and the PE header is inert there anyway.
+- **Assertion triggerability verified:** the `.text`/`.data`
+  non-overlap, SizeOfImage-mismatch, and `.text` SizeOfRawData
+  FileAlignment asserts were each exercised by perturbing the
+  relevant symbol and observing the link failure with the
+  expected message.
+- **QEMU ARM64 runtime:** `make test` green.
+- **Jetson kexec-from-Linux runtime:** verified post-commit via
+  `slmos-kexec` — shell up, 6/6 CPUs, scheduler ticking, work-
+  stealing healthy, shell responsive to `cpu` / `help`.
+- **Jetson UEFI-direct runtime:** verified end-to-end behavior —
+  A/B/C markers still land on serial, then silent hang per the
+  documented remaining downstream blocker.
+- **Pi 5, x86-64:** untouched by the diff, builds verified green.
+
+All of these together exercise the compile-time, link-time, and
+runtime surfaces that these changes touch. Adding a host-side
+PE-parsing test is feasible (~100-line Python script) but was not
+pursued — the link-time asserts cover the structural invariants,
+and the static characteristic bytes (`0x60000020` / `0xc0000040`)
+are single-line constants in assembly that appear in every code-
+review diff.
 
 ---
 

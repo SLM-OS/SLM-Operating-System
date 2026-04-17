@@ -71,9 +71,9 @@ optional_header:
     .short  0x20b               /* PE32+ magic */
     .byte   0x02                /* MajorLinkerVersion */
     .byte   0x14                /* MinorLinkerVersion */
-    .long   _kernel_size        /* SizeOfCode */
-    .long   0                   /* SizeOfInitializedData */
-    .long   0                   /* SizeOfUninitializedData */
+    .long   _kernel_code_size   /* SizeOfCode — code + rodata only */
+    .long   _kernel_data_size   /* SizeOfInitializedData — initialized .data */
+    .long   0                   /* SizeOfUninitializedData — .bss handled via .data VirtualSize delta */
     .long   0x10000             /* AddressOfEntryPoint (64KB, where real_start will be) */
     .long   0x10000             /* BaseOfCode (64KB) */
 
@@ -87,7 +87,9 @@ optional_header:
     .short  0                   /* MajorSubsystemVersion */
     .short  0                   /* MinorSubsystemVersion */
     .long   0                   /* Win32VersionValue */
-    .long   _kernel_size + 0x10000  /* SizeOfImage (64KB header + full virtual size) */
+    .long   _kernel_size        /* SizeOfImage — highest VA = _kernel_size
+                                 * (headers VA 0..0x10000, .text 0x10000..data_va,
+                                 *  .data data_va..data_va+data_vsz = _kernel_size). */
     .long   0x10000             /* SizeOfHeaders (64KB, like Linux) */
     .long   0                   /* CheckSum */
     .short  0xa                 /* Subsystem: EFI_APPLICATION */
@@ -108,24 +110,39 @@ optional_header:
     .quad   0                   /* Base Relocation Table */
 
 section_table:
-    /* .text section — all code and data */
+    /*
+     * .text — code + rodata. RX only (no MEM_WRITE). Modern UEFI
+     * enforces W^X, so anything marked executable is mapped
+     * read-only regardless of MEM_WRITE; splitting .text from .data
+     * lets .data actually get RW without losing execute on .text.
+     */
     .ascii  ".text\0\0\0"       /* Name (8 bytes) */
-    .long   _kernel_size        /* VirtualSize */
+    .long   _kernel_code_size   /* VirtualSize */
     .long   0x10000             /* VirtualAddress (64KB) */
-    .long   _kernel_code_size   /* SizeOfRawData (file size, excludes 64KB header) */
+    .long   _kernel_code_size   /* SizeOfRawData */
     .long   0x10000             /* PointerToRawData (64KB) */
     .long   0                   /* PointerToRelocations */
     .long   0                   /* PointerToLineNumbers */
     .short  0                   /* NumberOfRelocations */
     .short  0                   /* NumberOfLineNumbers */
-    .long   0xe0000020          /* Characteristics: CNT_CODE | MEM_READ | MEM_WRITE | MEM_EXECUTE */
+    .long   0x60000020          /* Characteristics: CNT_CODE | MEM_READ | MEM_EXECUTE */
 
-    /* .data section (dummy, required by PE/COFF but not actually used) */
+    /*
+     * .data — initialized data + BSS + stack. RW, no execute.
+     *
+     * SizeOfRawData covers only the initialized portion
+     * (__data_start..__data_end). VirtualSize extends through
+     * __kernel_end so UEFI zero-fills the BSS and stack range when
+     * mapping .data into memory — which both (a) preserves the
+     * initial values of globals without requiring an explicit copy
+     * pass, and (b) maps the BSS range as RW-NX so primary_cpu's
+     * zero-fill loop doesn't fault against UEFI's W^X policy.
+     */
     .ascii  ".data\0\0\0"       /* Name (8 bytes) */
-    .long   0                   /* VirtualSize */
-    .long   0                   /* VirtualAddress */
-    .long   0                   /* SizeOfRawData */
-    .long   0                   /* PointerToRawData */
+    .long   _kernel_data_virtual_size  /* VirtualSize — includes BSS + stack */
+    .long   _kernel_data_va     /* VirtualAddress */
+    .long   _kernel_data_size   /* SizeOfRawData — initialized portion only */
+    .long   _kernel_data_file   /* PointerToRawData */
     .long   0                   /* PointerToRelocations */
     .long   0                   /* PointerToLineNumbers */
     .short  0                   /* NumberOfRelocations */

@@ -102,13 +102,27 @@ SECTIONS
     /* Kernel file size (excludes BSS) for ARM64 image_size */
     _kernel_file_size = __data_end - _start;
 
-    /* Code section size in file (file size minus 64KB PE header) */
-    _kernel_code_size = __data_end - _start - 0x10000;
+    /* Code section size in file (file size minus 64KB PE header).
+     * Stops at __data_start — the PE .text and .data sections are
+     * distinct under the split-section layout, and `_kernel_code_size`
+     * sizes `.text` only. Previously used `__data_end` here, which
+     * silently overlapped `.text` and `.data` ranges; inert for QEMU
+     * (QEMU loads the raw ELF and ignores the PE header) but invalid
+     * PE per UEFI's loader. Kept consistent with kernel-jetson.ld. */
+    _kernel_code_size = __data_start - _start - 0x10000;
 
-    /* PE .data section symbols (used by PE/COFF header in boot.S) */
+    /* PE .data section symbols (used by PE/COFF header in boot.S).
+     * `_kernel_data_virtual_size` covers through __kernel_end so UEFI
+     * zero-fills the BSS region when mapping .data, which in turn
+     * makes UEFI map that range RW-NX — boot.S's BSS clear then
+     * doesn't fault against UEFI's W^X policy. The PE header in
+     * boot.S is inert under QEMU (QEMU loads the raw ELF directly
+     * and doesn't parse the MZ/PE stub), but the symbol still has
+     * to resolve at link time. */
     _kernel_data_va = __data_start - _start;
     _kernel_data_size = __data_end - __data_start;
     _kernel_data_file = __data_start - _start;
+    _kernel_data_virtual_size = __kernel_end - __data_start;
 
     /* Discard unwanted sections */
     /DISCARD/ : {
@@ -117,6 +131,20 @@ SECTIONS
         *(.eh_frame*)
     }
 }
+
+/* PE/COFF section non-overlap invariant.
+ *
+ * The PE header boot.S emits is inert under QEMU (QEMU loads the raw
+ * ELF and ignores the MZ/PE stub), so the PE alignment invariants
+ * Jetson cares about (SectionAlignment, FileAlignment, SizeOfImage)
+ * don't need to hold here — QEMU's linker aligns .data to 4KB, not
+ * 64KB, and the PE header just absorbs that. But .text and .data
+ * must not describe overlapping VA ranges regardless of whether the
+ * header is consumed, otherwise `_kernel_code_size` is wrong in a
+ * structural way. Would catch a regression of the `__data_end` vs.
+ * `__data_start` bug that this file used to have. */
+ASSERT(_kernel_data_va >= 0x10000 + _kernel_code_size,
+    "PE error: .text and .data sections overlap")
 
 /* Sanity check: ensure kernel fits in first 16 MB */
 ASSERT(__kernel_end < 0x41000000, "Kernel image too large!")
