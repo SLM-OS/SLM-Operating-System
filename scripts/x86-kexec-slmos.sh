@@ -4,8 +4,18 @@
 # Loads SLM-OS as a kexec target and triggers the jump while keeping the
 # GPU powered and SEC2 in its nouveau-unlocked state.
 #
+# Two loader paths, selected via env var KEXEC_MODE:
+#   mb2       — multiboot2-x86 (default). Reads $SLMOS_ELF
+#               (build/kernel-kexec/slmos.elf). Handoff is currently
+#               silent post-exec — see x86-64-gpu-inference-status
+#               §4.2.k for the investigation.
+#   bzimage   — Linux bzImage wrapper. Reads $SLMOS_BZIMAGE
+#               (build/kernel-bzimage/slmos.bzimage). kexec's most
+#               thoroughly-tested x86 loader; added in this session
+#               as the next-step path after mb2 stayed silent.
+#
 # Prerequisites (checked below):
-#   - kexec-tools 2.0.28+ (multiboot2-x86 loader)
+#   - kexec-tools 2.0.28+ (has both multiboot2-x86 and bzImage loaders)
 #   - nouveau driver loaded on the GPU
 #   - runtime PM disabled on the GPU (prevents autosuspend across kexec)
 #   - SEC2 CPUCTL != 0xbadf5620 (lock cleared — the whole point)
@@ -16,22 +26,42 @@
 #   2  kexec --load or --exec failed
 set -euo pipefail
 
+KEXEC_MODE=${KEXEC_MODE:-mb2}              # mb2 | bzimage
 SLMOS_ELF=${SLMOS_ELF:-/root/slmos.elf}
+SLMOS_BZIMAGE=${SLMOS_BZIMAGE:-/root/slmos.bzimage}
 GPU_PCI=${GPU_PCI:-0000:01:00.0}
 FORCE=${FORCE:-0}
+
+# Resolve mode → kexec image path + --type argument.
+case "$KEXEC_MODE" in
+    mb2)
+        KEXEC_IMAGE="$SLMOS_ELF"
+        KEXEC_TYPE="multiboot2-x86"
+        ;;
+    bzimage)
+        KEXEC_IMAGE="$SLMOS_BZIMAGE"
+        KEXEC_TYPE="bzImage"
+        ;;
+    *)
+        echo "[kexec-slmos] ERROR: unknown KEXEC_MODE='$KEXEC_MODE' (expected mb2 or bzimage)" >&2
+        exit 1
+        ;;
+esac
 
 log() { printf '[kexec-slmos] %s\n' "$*"; }
 fail() { log "ERROR: $*"; exit "${2:-1}"; }
 
+log "mode=$KEXEC_MODE  image=$KEXEC_IMAGE  kexec type=$KEXEC_TYPE"
+
 # 1. kexec-tools installed?
 command -v kexec >/dev/null || fail "kexec not on PATH — apt install kexec-tools"
 
-# 2. ELF present and readable?
-[[ -r "$SLMOS_ELF" ]] || fail "$SLMOS_ELF not found or not readable"
+# 2. Image present and readable?
+[[ -r "$KEXEC_IMAGE" ]] || fail "$KEXEC_IMAGE not found or not readable"
 
-# 3. multiboot2-x86 loader supported?
-if ! kexec --help 2>&1 | grep -q multiboot2-x86; then
-    fail "kexec-tools does not support multiboot2-x86"
+# 3. Loader supported?
+if ! kexec --help 2>&1 | grep -q -- "$KEXEC_TYPE"; then
+    fail "kexec-tools does not support $KEXEC_TYPE"
 fi
 
 # 4. nouveau loaded (unless forced)?
@@ -85,21 +115,18 @@ if [[ -x /root/sec2_peek ]]; then
     fi
 fi
 
-# 7. kexec --load the SLM-OS ELF as a multiboot2 binary.
+# 7. kexec --load the SLM-OS image.
 #
-# Use -c to force the older kexec_load syscall. The default (kexec_file_load,
-# Linux 3.17+) validates segments against a memory_ranges list that, in
-# kexec-tools 2.0.28 on Ubuntu 24.04, comes back empty for the multiboot2
-# loader and rejects every load address with "Invalid memory segment".
-# -c uses the classic kexec_load which skips that validator path. Verified
-# 2026-04-17 that -c returns rc=0 and /sys/kernel/kexec_loaded = 1 where
-# the default returns "Invalid memory segment 0x20000000 - 0x22c01fff".
+# For the MB2 path we must use `-c` (the older kexec_load syscall) —
+# default kexec_file_load rejects every address with "Invalid memory
+# segment" (see x86-64-gpu-inference-status §4.2.k). The bzImage
+# loader has no such restriction; kexec-file-syscall works there too.
+# We stay on -c for both paths so the flag is one less moving part.
 #
-# No initrd, no cmdline tags — SLM-OS's multiboot2 entry doesn't consume
-# them today; only the info pointer is used. If a cmdline becomes needed
-# later, add "--command-line=..." to this invocation.
-log "kexec -c --load --type=multiboot2-x86 $SLMOS_ELF"
-kexec -c --load --type=multiboot2-x86 "$SLMOS_ELF" \
+# No initrd, no cmdline tags — SLM-OS's entry doesn't consume them
+# today. Add "--command-line=..." here if that changes.
+log "kexec -c --load --type=$KEXEC_TYPE $KEXEC_IMAGE"
+kexec -c --load --type="$KEXEC_TYPE" "$KEXEC_IMAGE" \
     || fail "kexec --load failed" 2
 
 # 8. Fire. If the syscall succeeds the machine is now SLM-OS —

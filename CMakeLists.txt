@@ -233,12 +233,22 @@ endif()
 
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
-    # KEXEC_BUILD=1 selects the kexec-compatible linker script that
-    # places the kernel at 0x20000000 instead of 0x100000. Needed
-    # because kexec-tools refuses to load an ELF that overlaps the
-    # running Linux kernel's own memory (which lives around 0x100000).
-    # Bare-metal UEFI/GRUB boot still uses the 1 MB load address.
-    if(KEXEC_BUILD)
+    # Three x86-64 layouts — precedence BZIMAGE_BUILD > KEXEC_BUILD > default:
+    #
+    # * BZIMAGE_BUILD=1 — link at 0x20000000 AND place a Linux-bzImage
+    #   entry stub at file offset 0x200 (where kexec's bzImage64
+    #   loader jumps). Produces an ELF suitable for wrapping into a
+    #   bzImage via scripts/make-bzimage.py. Implies the kexec load
+    #   address.
+    # * KEXEC_BUILD=1 — link at 0x20000000 for Multiboot2 kexec
+    #   handoff (old kexec_load syscall). No bzImage stub.
+    # * neither — link at 0x100000 for bare-metal UEFI/GRUB
+    #   Multiboot2 boot (the default build).
+    if(BZIMAGE_BUILD)
+        set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64-bzimage.ld)
+        message(STATUS "X86_64 BZIMAGE_BUILD=1: linking at 0x20000000 "
+                       "with bzImage entry stub at offset 0x200")
+    elseif(KEXEC_BUILD)
         set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64-kexec.ld)
         message(STATUS "X86_64 KEXEC_BUILD=1: linking at 0x20000000 for kexec")
     else()
@@ -628,6 +638,19 @@ if(PLATFORM STREQUAL "X86_64")
     add_custom_target(trampoline32 DEPENDS ${TRAMPOLINE_OBJ})
     add_dependencies(slmos.elf trampoline32)
     target_link_options(slmos.elf PRIVATE ${TRAMPOLINE_OBJ})
+
+    # BZIMAGE_BUILD: include the 64-bit bzImage entry stub. The linker
+    # script (kernel-x86_64-bzimage.ld) places its .bzimage_entry
+    # section at exactly KERNEL_PHYS + 0x200 — where kexec's bzImage64
+    # loader jumps after copying the payload. The section is empty in
+    # non-bzImage builds so leaving it out of the source list would
+    # produce an "empty section" at 0x200 followed by .text drifting
+    # down; we include it only when BZIMAGE_BUILD so the other two
+    # x86-64 builds stay byte-identical to before.
+    if(BZIMAGE_BUILD)
+        target_sources(slmos.elf PRIVATE
+            kernel/arch/x86_64/bzimage_entry.S)
+    endif()
 
     # Disable PIE (bare-metal kernel loaded at fixed address)
     # -Wl,-n (--nmagic): don't page-align sections — keeps all sections in a

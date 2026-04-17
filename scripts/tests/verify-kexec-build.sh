@@ -36,6 +36,8 @@ set -euo pipefail
 
 BARE_METAL_ELF="${BARE_METAL_ELF:-build/kernel/slmos.elf}"
 KEXEC_ELF="${KEXEC_ELF:-build/kernel-kexec/slmos.elf}"
+BZIMAGE_ELF="${BZIMAGE_ELF:-build/kernel-bzimage/slmos.elf}"
+BZIMAGE="${BZIMAGE:-build/kernel-bzimage/slmos.bzimage}"
 FAIL=0
 CHECKS=0
 
@@ -226,6 +228,103 @@ check_elf() {
 
 check_elf "bare-metal" "$BARE_METAL_ELF" 0x101000   0x100000
 check_elf "kexec"      "$KEXEC_ELF"      0x20001000 0x20000000
+
+# --- bzImage-specific checks ---------------------------------------------
+
+# The bzImage ELF entry is _start_bzimage @ 0x20000200. That's the
+# 64-bit stub; it loads our GDT and falls through to entry64.
+# Skip MB2 ENTRY_ADDRESS tag check (our entry is not inside .multiboot
+# for this build — the entry is the bzImage stub), and swap the UART
+# signature check for a bzImage-flavoured one ("BZ\r\n" vs "KEX\r\n").
+
+check_bzimage_elf_entry() {
+    local label=$1 elf=$2 want_entry=0x20000200 want_paddr=0x20000000
+    check_elf_entry "$label" "$elf" "$want_entry" "$want_paddr"
+    check_magic_in_8k "$label" "$elf" MB1 0x1BADB002
+    check_magic_in_8k "$label" "$elf" MB2 0xE85250D6
+    # UART signature: stub emits "BZ\r\n" (0x42, 0x5A, 0x0D, 0x0A)
+    python3 - "$elf" "$want_entry" "$label" <<'PY'
+import sys, struct
+path, entry_hex, label = sys.argv[1:]
+entry = int(entry_hex, 16)
+blob = open(path, "rb").read()
+e_phoff  = struct.unpack_from("<Q", blob, 32)[0]
+e_phsize = struct.unpack_from("<H", blob, 54)[0]
+e_phnum  = struct.unpack_from("<H", blob, 56)[0]
+file_off = None
+for i in range(e_phnum):
+    ph = e_phoff + i * e_phsize
+    (p_type, _pf, p_offset, _pv, p_paddr, p_filesz, _pm, _a) = \
+        struct.unpack_from("<IIQQQQQQ", blob, ph)
+    if p_type == 1 and p_paddr <= entry < p_paddr + p_filesz:
+        file_off = p_offset + (entry - p_paddr); break
+if file_off is None:
+    print(f"  [FAIL] {label}: entry 0x{entry:x} not in any PT_LOAD", file=sys.stderr); sys.exit(1)
+window = blob[file_off:file_off + 256]
+if window[0] != 0xfa:
+    print(f"  [FAIL] {label}: _start_bzimage[0] = 0x{window[0]:02x}, expected 0xfa (cli)", file=sys.stderr); sys.exit(1)
+missing = [m for m, b in [("B",0x42),("Z",0x5A),("\\r",0x0D),("\\n",0x0A)]
+           if b"\xb0" + bytes([b]) not in window]
+if missing:
+    print(f"  [FAIL] {label}: bzImage diag bytes missing: {missing}", file=sys.stderr); sys.exit(1)
+print(f"  [PASS] {label}: _start_bzimage begins with cli + emits B,Z,\\r,\\n via MOV imm8+OUT")
+PY
+    case $? in 0) CHECKS=$((CHECKS+1));; *) FAIL=1; CHECKS=$((CHECKS+1));; esac
+}
+
+check_bzimage_wrapper() {
+    local label=$1 path=$2
+    info "$label: $path"
+    if [[ ! -f "$path" ]]; then
+        warn "skipped — $path does not exist (run 'make kernel-bzimage' first)"
+        return
+    fi
+    # Setup area is 1024 bytes. Validate the five fields kexec's
+    # bzImage64 probe() actually reads:
+    python3 - "$path" "$label" <<'PY'
+import sys, struct
+path, label = sys.argv[1:]
+blob = open(path, "rb").read()
+
+checks = [
+    ("setup_sects @ 0x1F1 == 1",
+        blob[0x1F1] == 1),
+    ("boot_flag   @ 0x1FE == 0xAA55",
+        struct.unpack_from("<H", blob, 0x1FE)[0] == 0xAA55),
+    ('header_magic @ 0x202 == "HdrS"',
+        blob[0x202:0x206] == b"HdrS"),
+    ("protocol     @ 0x206 >= 0x020C",
+        struct.unpack_from("<H", blob, 0x206)[0] >= 0x020C),
+    ("loadflags    @ 0x211 bit 0 (LOADED_HIGH)",
+        (blob[0x211] & 0x01) == 0x01),
+    ("xloadflags   @ 0x236 bits 0+1 (KERNEL_64|CAN_BE_LOADED_ABOVE_4G)",
+        (struct.unpack_from("<H", blob, 0x236)[0] & 0x03) == 0x03),
+    ("pref_address @ 0x258 == 0x20000000",
+        struct.unpack_from("<Q", blob, 0x258)[0] == 0x20000000),
+    ("kernel entry payload[0x200] == 0xfa (cli) — stub at load_addr+0x200",
+        blob[0x400 + 0x200] == 0xfa),
+]
+ok = True
+for name, cond in checks:
+    if cond:
+        print(f"  [PASS] {label}: {name}")
+    else:
+        print(f"  [FAIL] {label}: {name}", file=sys.stderr); ok = False
+sys.exit(0 if ok else 1)
+PY
+    case $? in 0) CHECKS=$((CHECKS+8));; *) FAIL=1; CHECKS=$((CHECKS+8));; esac
+}
+
+# bzImage-build ELF: links at 0x20000000 with entry at 0x20000200
+info "bzImage-ELF: $BZIMAGE_ELF"
+if [[ -f "$BZIMAGE_ELF" ]]; then
+    check_bzimage_elf_entry "bzImage-ELF" "$BZIMAGE_ELF"
+else
+    warn "skipped — $BZIMAGE_ELF does not exist (run 'make kernel-bzimage' first)"
+fi
+
+# bzImage wrapper file: 1024-byte setup + payload
+check_bzimage_wrapper "bzImage-file" "$BZIMAGE"
 
 # --- Linux-side helper scripts -------------------------------------------
 

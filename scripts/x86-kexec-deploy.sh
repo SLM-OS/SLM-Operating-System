@@ -1,58 +1,90 @@
 #!/usr/bin/env bash
 # x86-kexec-deploy.sh — run on the DEV HOST (this machine).
 #
-# Copies a freshly-built slmos.elf (and the sec2_peek helper) to test-pc,
-# then — unless --no-exec is passed — triggers the kexec via SSH.
+# Copies a freshly-built SLM-OS kexec artefact (and the sec2_peek
+# helper) to test-pc, then — unless --no-exec is passed — triggers
+# the kexec via SSH.
+#
+# Two kexec paths, selected via --mode:
+#   mb2       (default) — copies slmos.elf to /root/slmos.elf, runs
+#              the helper in KEXEC_MODE=mb2 (kexec --type=multiboot2-x86)
+#   bzimage            — copies slmos.bzimage to /root/slmos.bzimage,
+#              runs the helper in KEXEC_MODE=bzimage (kexec --type=bzImage)
 #
 # The bare-metal UEFI+SDWire deploy path is unchanged; this is an
 # additional option for sessions where we want SEC2 to be
 # nouveau-unlocked before SLM-OS boots.
 #
 # Usage:
-#   scripts/x86-kexec-deploy.sh [--no-exec] [--host <ip>] [--elf <path>]
+#   scripts/x86-kexec-deploy.sh [--no-exec] [--host <ip>]
+#                               [--mode {mb2|bzimage}]
+#                               [--elf <path> | --bzimage <path>]
 #
 # Defaults:
+#   mode = mb2
 #   host = root@192.168.4.136
-#   elf  = $CMAKE_BUILD_DIR/kernel/slmos.elf (from $KERNEL_BUILD_DIR env
-#          or discovered via build/kernel/ / build-x86/ / build/)
+#   image = auto-discovered from build/kernel-kexec/slmos.elf (mb2)
+#           or build/kernel-bzimage/slmos.bzimage (bzimage)
 set -euo pipefail
 
 HOST=root@192.168.4.136
 ELF=""
+BZIMAGE=""
+MODE="mb2"
 DO_EXEC=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-exec) DO_EXEC=0; shift ;;
-        --host) HOST="$2"; shift 2 ;;
-        --elf)  ELF="$2"; shift 2 ;;
-        -h|--help)
-            sed -n '2,14p' "$0"; exit 0 ;;
+        --host)    HOST="$2"; shift 2 ;;
+        --elf)     ELF="$2"; shift 2 ;;
+        --bzimage) BZIMAGE="$2"; MODE="bzimage"; shift 2 ;;
+        --mode)    MODE="$2"; shift 2 ;;
+        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
 
-# Locate the ELF.
-if [[ -z "$ELF" ]]; then
-    for candidate in \
-        "${KERNEL_BUILD_DIR:-}/slmos.elf" \
-        build/kernel/slmos.elf \
-        build-x86/kernel/slmos.elf \
-        build/kernel-x86_64/slmos.elf; do
-        if [[ -n "$candidate" && -r "$candidate" ]]; then
-            ELF="$candidate"; break
-        fi
-    done
+case "$MODE" in
+    mb2|bzimage) ;;
+    *) echo "invalid --mode '$MODE' (expected mb2|bzimage)" >&2; exit 2 ;;
+esac
+
+# Locate the image.
+if [[ "$MODE" == "mb2" ]]; then
+    if [[ -z "$ELF" ]]; then
+        for candidate in \
+            "${KERNEL_BUILD_DIR:-}/slmos.elf" \
+            build/kernel-kexec/slmos.elf \
+            build/kernel/slmos.elf \
+            build-x86/kernel/slmos.elf; do
+            if [[ -n "$candidate" && -r "$candidate" ]]; then
+                ELF="$candidate"; break
+            fi
+        done
+    fi
+    [[ -n "$ELF" && -r "$ELF" ]] \
+        || { echo "ELF not found — build first: make kernel-kexec PLATFORM=X86_64" >&2; exit 1; }
+    IMAGE_LOCAL="$ELF"
+    IMAGE_REMOTE="/root/slmos.elf"
+else
+    if [[ -z "$BZIMAGE" ]]; then
+        DEFAULT_BZIMAGE=build/kernel-bzimage/slmos.bzimage
+        [[ -r "$DEFAULT_BZIMAGE" ]] && BZIMAGE="$DEFAULT_BZIMAGE"
+    fi
+    [[ -n "$BZIMAGE" && -r "$BZIMAGE" ]] \
+        || { echo "bzImage not found — build first: make kernel-bzimage PLATFORM=X86_64" >&2; exit 1; }
+    IMAGE_LOCAL="$BZIMAGE"
+    IMAGE_REMOTE="/root/slmos.bzimage"
 fi
-[[ -n "$ELF" && -r "$ELF" ]] \
-    || { echo "ELF not found — build first: make kernel PLATFORM=X86_64" >&2; exit 1; }
 
-SIZE=$(stat -c '%s' "$ELF")
-echo "[deploy] ELF: $ELF ($SIZE bytes)"
-echo "[deploy] host: $HOST"
+SIZE=$(stat -c '%s' "$IMAGE_LOCAL")
+echo "[deploy] mode:  $MODE"
+echo "[deploy] image: $IMAGE_LOCAL ($SIZE bytes)"
+echo "[deploy] host:  $HOST"
 
-# Copy the ELF + helper scripts.
-scp -o ConnectTimeout=5 "$ELF" "$HOST:/root/slmos.elf"
+# Copy the image + helper script.
+scp -o ConnectTimeout=5 "$IMAGE_LOCAL" "$HOST:$IMAGE_REMOTE"
 scp -o ConnectTimeout=5 \
     "$(dirname "$0")/x86-kexec-slmos.sh" \
     "$HOST:/root/x86-kexec-slmos.sh"
@@ -69,12 +101,12 @@ if ! ssh -o ConnectTimeout=5 "$HOST" 'test -x /root/sec2_peek' 2>/dev/null; then
 fi
 
 ssh -o ConnectTimeout=5 "$HOST" \
-    'chmod +x /root/x86-kexec-slmos.sh; ls -lh /root/slmos.elf /root/x86-kexec-slmos.sh /root/sec2_peek'
+    "chmod +x /root/x86-kexec-slmos.sh; ls -lh $IMAGE_REMOTE /root/x86-kexec-slmos.sh /root/sec2_peek"
 
 if [[ "$DO_EXEC" != "1" ]]; then
     echo ""
     echo "[deploy] --no-exec: staged only. To fire:"
-    echo "    ssh $HOST /root/x86-kexec-slmos.sh"
+    echo "    ssh $HOST KEXEC_MODE=$MODE /root/x86-kexec-slmos.sh"
     exit 0
 fi
 
@@ -86,7 +118,7 @@ echo ""
 # an error; catch the specific exit codes.
 set +e
 ssh -o ConnectTimeout=5 -o ServerAliveInterval=2 "$HOST" \
-    '/root/x86-kexec-slmos.sh'
+    "KEXEC_MODE=$MODE /root/x86-kexec-slmos.sh"
 RC=$?
 set -e
 

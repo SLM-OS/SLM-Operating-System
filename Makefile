@@ -244,6 +244,49 @@ ifneq ($(PLATFORM),X86_64)
 endif
 	@scripts/tests/verify-kexec-build.sh
 
+# kernel-bzimage: X86_64-only parallel build of a Linux-bzImage wrapper
+# around the kernel. Used as the third kexec loader path alongside
+# Multiboot2 (unblocked from "Invalid memory segment" but silent after
+# --exec, see x86-64-gpu-inference-status §4.2.k). bzImage is
+# kexec-tools' most thoroughly-tested x86 loader; this target is the
+# next experiment for reaching SLM-OS's _start post-handoff.
+KERNEL_BZIMAGE_BUILD_DIR := $(BUILD_DIR)/kernel-bzimage
+KERNEL_BZIMAGE_ELF       := $(KERNEL_BZIMAGE_BUILD_DIR)/slmos.elf
+KERNEL_BZIMAGE           := $(KERNEL_BZIMAGE_BUILD_DIR)/slmos.bzimage
+
+.PHONY: kernel-bzimage
+kernel-bzimage: runtime $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
+ifneq ($(PLATFORM),X86_64)
+	@echo "kernel-bzimage requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@echo "Building kernel (bzImage variant)..."
+	$(CMAKE) --build $(KERNEL_BZIMAGE_BUILD_DIR)
+	@echo "Wrapping ELF as Linux bzImage..."
+	python3 scripts/make-bzimage.py \
+		$(KERNEL_BZIMAGE_ELF) $(KERNEL_BZIMAGE)
+	@echo "bzImage: $(KERNEL_BZIMAGE)"
+
+$(KERNEL_BZIMAGE_BUILD_DIR)/Makefile:
+	@echo "Configuring bzImage kernel build..."
+	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_BZIMAGE_BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DPLATFORM=$(PLATFORM) \
+		-DBZIMAGE_BUILD=1 \
+		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
+		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
+		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
+		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
+		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(MAKE_PROGRAM_ARG)
+
+.PHONY: kernel-bzimage-clean
+kernel-bzimage-clean:
+	@echo "Cleaning bzImage kernel build..."
+	rm -rf $(KERNEL_BZIMAGE_BUILD_DIR)
+
 .PHONY: kexec-deploy
 kexec-deploy: kernel-kexec
 ifneq ($(PLATFORM),X86_64)
