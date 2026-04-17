@@ -834,16 +834,45 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
 /* Cached handoff data for use by phase 7. */
 static struct ga10b_channel_handoff g_handoff;
 
+/* Scan IOVMM heap range for the handoff magic — the Linux helper
+ * allocates the handoff buffer from nvmap which places it somewhere
+ * in the 0x100000000 - 0x180000000 range. Scanning at 4 KB boundaries
+ * on the Jetson takes ~200 ms. Returns the physical address or 0
+ * if not found. */
+static uint64_t find_handoff_scan(void)
+{
+    const uint64_t scan_start = 0x100000000ULL;
+    const uint64_t scan_end   = 0x180000000ULL;
+    for (uint64_t p = scan_start; p < scan_end; p += 4096) {
+        volatile uint32_t *w = (volatile uint32_t *)(uintptr_t)p;
+        if (*w == GA10B_CHANNEL_HANDOFF_MAGIC) {
+            return p;
+        }
+    }
+    return 0;
+}
+
 int ga10b_bringup_channel(struct ga10b_bringup *b)
 {
-    if (!b || b->state != GA10B_BRINGUP_ENGINES_READY) return -1;
+    if (!b) return -1;
+    /* Accept either PMU_UP (after inherit, skip Phase 5) or
+     * ENGINES_READY (after Phase 5 FECS method test). */
+    if (b->state != GA10B_BRINGUP_ENGINES_READY &&
+        b->state != GA10B_BRINGUP_PMU_UP) return -1;
 
-    uart_puts("[GA10B-P6] Reading channel handoff block...\n");
+    uart_puts("[GA10B-P6] Scanning DRAM for handoff magic...\n");
+    uint64_t handoff_phys = find_handoff_scan();
+    if (handoff_phys == 0) {
+        uart_puts("[GA10B-P6] Handoff not found. Was the Linux helper run?\n");
+        b->last_error_phase = 6;
+        return -1;
+    }
+    uart_printf("[GA10B-P6] Found handoff at phys 0x%lx\n",
+                (unsigned long)handoff_phys);
 
-    /* Read the handoff structure from the fixed DRAM location. */
+    /* Read the handoff structure from the discovered location. */
     volatile struct ga10b_channel_handoff *hoff =
-        (volatile struct ga10b_channel_handoff *)(uintptr_t)
-            GA10B_CHANNEL_HANDOFF_PHYS;
+        (volatile struct ga10b_channel_handoff *)(uintptr_t)handoff_phys;
 
     /* Copy to a local (non-volatile) struct for easier access. */
     g_handoff.magic              = hoff->magic;
@@ -974,11 +1003,18 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
     gsp_platform->mb();
 
     uint32_t pb_bytes = 4;  /* 1 word = 4 bytes */
+    uint32_t pb_dwords = pb_bytes / 4;
 
-    /* Build the GPFIFO entry. */
+    /* Build the GPFIFO entry (Ampere format, 8 bytes):
+     *   entry0[31:2] = gpu_va[31:2] (low 32 bits, bottom 2 clear)
+     *   entry0[1:0]  = flags (0 = pushbuffer)
+     *   entry1[7:0]  = gpu_va[39:32] (high address bits)
+     *   entry1[30:10] = length in u32 words (NOT bytes)
+     *   entry1[31]   = sync bit (1 = wait for idle) */
     uint64_t pb_gpu_va = g_handoff.pushbuf_gpu_va;
-    uint32_t gp_entry0 = (uint32_t)((pb_gpu_va >> 2) << 2);  /* bits [31:2] = va >> 2 */
-    uint32_t gp_entry1 = pb_bytes;  /* length in bytes, no sync bit */
+    uint32_t gp_entry0 = (uint32_t)(pb_gpu_va & 0xFFFFFFFCu);
+    uint32_t gp_entry1 = (uint32_t)((pb_gpu_va >> 32) & 0xFFu) |
+                         (pb_dwords << 10);
 
     /* Write the GPFIFO entry at the current GP_PUT index. */
     uint32_t gp_put = g_handoff.initial_gp_put;
