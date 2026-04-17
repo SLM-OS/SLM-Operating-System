@@ -444,9 +444,10 @@ void net_poll(void) {
  * lwIP timers keep running when the shell is idle. Without this, the
  * only RX drain was inside the `ping` command's wait loops and
  * net_init's DHCP wait — meaning SLM-OS wouldn't respond to an
- * inbound ping while sitting at the prompt. Runs at
- * TASK_PRIORITY_LOW so shell, tests, and workloads preempt it
- * trivially; sleep_ms(10) yields cooperatively between polls.
+ * inbound ping while sitting at the prompt. Spawned at
+ * TASK_PRIORITY_IDLE (see kernel/src/main.c) so shell, tests, and
+ * workloads preempt it trivially; sleep_ms(10) yields cooperatively
+ * between polls.
  *
  * Entry function lives here (next to net_poll) rather than in
  * main.c so platform init only needs to task_create it, not know
