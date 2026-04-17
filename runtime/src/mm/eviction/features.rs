@@ -35,6 +35,12 @@ use crate::mm::{weight_pool_stats, workspace_pool_stats};
 
 use super::policy::{BlockFeatures, BlockMeta, PoolType};
 
+extern "C" {
+    /// Number of loaded models in the model-loader registry.
+    /// Used to populate feature slot 17 (num_loaded_models).
+    fn rust_model_count() -> u32;
+}
+
 /// 1 second, in nanoseconds. Used to normalise `time_since_access`
 /// and `time_since_load` into the [0, 1]-ish range the simulator
 /// trained on.
@@ -229,10 +235,7 @@ fn build_row(
     row[15] = weight_util;                               // already [0, 1]
     row[16] = workspace_util;                            // already [0, 1]
     // #122: wire slot 17 from the model loader registry.
-    row[17] = {
-        extern "C" { fn rust_model_count() -> u32; }
-        unsafe { rust_model_count() as f32 / MAX_MODELS }
-    };
+    row[17] = unsafe { rust_model_count() as f32 / MAX_MODELS };
     row[18] = total_gpu_mapped / gpu_denom;              // [0, 1]
     row[19] = 0.0;  // pending_loads — log1p-normalised when wired up
     row[20] = 0.0;  // avg_model_priority / MAX_PRIORITY

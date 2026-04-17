@@ -2637,7 +2637,7 @@ int cmd_eviction(int argc, char *argv[])
             return 1;
         }
         rust_eviction_policy_name((uint8_t *)name_buf, sizeof(name_buf));
-        uart_printf("Switched to policy: %s (both pools)\r\n", name_buf);
+        uart_printf("Switched weight pool to: %s (workspace reset to LRU)\r\n", name_buf);
         return 0;
     }
 

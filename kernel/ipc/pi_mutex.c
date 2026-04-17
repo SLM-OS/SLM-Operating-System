@@ -103,7 +103,13 @@ void pi_mutex_lock(pi_mutex_t *mutex)
 
     /* Deschedule — schedule() sees TASK_BLOCKED and won't pick us.
      * We resume here after pi_mutex_unlock wakes us and the scheduler
-     * re-dispatches us. At that point the mutex is ours. */
+     * re-dispatches us. At that point the mutex is ours.
+     *
+     * Between the state flip above and schedule() below, a timer tick
+     * could fire (IRQs re-enabled by spin_unlock_irqrestore). This is
+     * safe: on Pi 5 / Jetson tasks run with DAIF.I=1 so the tick
+     * cannot deliver. On QEMU the tick fires but schedule() simply
+     * skips the BLOCKED task — a harmless no-op. */
     schedule();
 }
 
