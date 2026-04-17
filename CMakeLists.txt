@@ -233,7 +233,17 @@ endif()
 
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
-    set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64.ld)
+    # KEXEC_BUILD=1 selects the kexec-compatible linker script that
+    # places the kernel at 0x20000000 instead of 0x100000. Needed
+    # because kexec-tools refuses to load an ELF that overlaps the
+    # running Linux kernel's own memory (which lives around 0x100000).
+    # Bare-metal UEFI/GRUB boot still uses the 1 MB load address.
+    if(KEXEC_BUILD)
+        set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64-kexec.ld)
+        message(STATUS "X86_64 KEXEC_BUILD=1: linking at 0x20000000 for kexec")
+    else()
+        set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64.ld)
+    endif()
 elseif(PLATFORM STREQUAL "JETSON_ORIN_NANO")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-jetson.ld)
 elseif(PLATFORM STREQUAL "RASPI5")

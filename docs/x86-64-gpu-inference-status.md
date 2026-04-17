@@ -476,6 +476,117 @@ way to actually reach GPU inference.
 **Estimated effort:** weeks-to-months. Significantly larger than
 Option A. Not reachable inside a capstone timeline.
 
+### 4.2.k Option B-kexec — **Linux→SLM-OS kexec handoff** (NEW 2026-04-17)
+
+**Approach:** boot Ubuntu normally on test-pc, let nouveau probe the GPU
+(which unlocks SEC2 some ~3 s after modprobe — mechanism not yet
+pinpointed but reproducibly observed, see
+`docs/testing/x86-gpu-sec2-unlock-trace-2026-04-17.md`), then kexec into
+SLM-OS *without power-gating the GPU across the transition*. SEC2 stays
+in its `CPUCTL=0x20` (halted, unlocked) state when SLM-OS starts.
+
+**Consistent with Jetson's `--no-gpu-suspend` fix** — same principle:
+preserve live GPU state across the kernel swap.
+
+**Why this is additive, not a replacement for §4.2:** the bare-metal
+UEFI+SDWire disk-image path (`make x86-disk` → `labctl sdwire flash`)
+remains first-class. kexec is a second route specifically for the
+downstream work (E3.4.d Booter Load) that needs SEC2 already
+unlocked.
+
+**What's in the tree (2026-04-17):**
+
+- `scripts/x86-kexec-slmos.sh` — runs on test-pc; preflights nouveau
+  + SEC2 state + GPU runtime-PM, then `kexec -l --type=multiboot2-x86`
+  and `kexec -e`. kexec-tools ≥ 2.0.28 is on Ubuntu 24.04 and supports
+  `multiboot2-x86` natively, so no kernel boot-code changes are
+  required — the existing Multiboot2 entry in
+  `kernel/arch/x86_64/trampoline32.S` handles the handoff.
+- `scripts/x86-kexec-deploy.sh` — runs on the dev host; scp's
+  `slmos.elf` + helpers to test-pc and optionally triggers the jump.
+- `make kexec-deploy PLATFORM=X86_64` — build + deploy + exec. Set
+  `KEXEC_NO_EXEC=1` to stage only. Set `KEXEC_HOST=user@ip` to
+  override the default test-pc target.
+
+**Prerequisites checked by the helper:**
+- kexec-tools installed with multiboot2-x86 support
+- nouveau loaded (`modprobe nouveau modeset=1`) — the unlock happens
+  during nouveau init
+- GPU `power/control = on` — runtime PM off prevents autosuspend from
+  clobbering SEC2 across the kexec
+- `/dev/mem` read of SEC2 CPUCTL confirms it's not `0xbadf5620` before
+  firing kexec
+
+**Known limits:**
+- test-pc can't also run under VFIO when using this path; the GPU
+  must be nouveau-bound. Switch back to VFIO with `modprobe vfio-pci`
+  after reboot.
+- Booter Load has two GA10x-specific bugs (see 2026-04-17 report
+  §4.4) that will surface once SEC2 is unlocked. Those are separate
+  fixes tracked independently.
+
+**Current blocker (2026-04-17):** `kexec --load --type=multiboot2-x86`
+(and `--type=elf-x86_64`) rejects the image with *"Invalid memory
+segment 0x<addr> - 0x<end>"*. Investigated in this order:
+
+1. First tried the default 1 MiB load (`KERNEL_PHYS = 0x100000`) —
+   rejected because the running Ubuntu kernel is assumed to occupy
+   low memory.
+2. Added a parallel linker script `kernel-x86_64-kexec.ld` that links
+   at `0x20000000` (512 MiB) — rejected too, even with Ubuntu's
+   actual kernel code/rodata/data/bss at `0x48dc00000-0x490ffffff`
+   (above 4 GiB, well clear of 0x20000000).
+3. Debug run confirms `/proc/iomem` reports one contiguous `System
+   RAM` span at `0x100000-0x35fa0fff` (830 MiB) that would easily
+   contain 44 MiB at 0x20000000. `--mem-min`, `elf-x86_64` loader,
+   and auto-detect all give the same rejection.
+
+The rejection is from kexec-tools' internal `valid_memory_segment`
+check, which requires the segment to fit within a single memory
+range reported by the loader's builder. The multiboot2-x86 loader
+(`kexec-tools 2.0.28`) in particular appears to not honour the
+full `System RAM` span — possibly because it expects a relocatable
+(PIE) ELF and ours is linked `-no-pie`, possibly because of a
+loader-specific address limit. Needs further kexec-tools source
+reading to root-cause.
+
+**Infrastructure in tree and working (2026-04-17):**
+
+- `kernel/kernel-x86_64-kexec.ld` — alternate linker script.
+- CMake option `KEXEC_BUILD=1` that swaps in the alt script.
+- `make kernel-kexec PLATFORM=X86_64` — produces
+  `build/kernel-kexec/slmos.elf` linked at 0x20000000. Verified: the
+  ELF is well-formed (`readelf -l` shows entry 0x20001000, LOAD
+  segment at paddr 0x20000000, 44 MiB MemSiz).
+- `make kexec-deploy PLATFORM=X86_64` — scp's the ELF + helper to
+  test-pc and (would) fire kexec. Currently fires but is rejected at
+  `kexec --load`.
+- `scripts/x86-kexec-slmos.sh` — test-pc helper; preflights nouveau
+  + SEC2 state + GPU runpm, then does `kexec -l && kexec -e`.
+- `scripts/x86-kexec-deploy.sh` — dev-host wrapper; scp + invoke.
+
+**What's left to unblock:**
+
+1. Root-cause the kexec-tools rejection. Build kexec-tools from
+   source locally, add instrumentation around `valid_memory_segment`
+   and `get_memory_ranges`. Expected outcome: a specific constraint
+   (PIE requirement / loader address limit / e820 subdivision logic)
+   that either we can work around via a different loader
+   (`--type=bzImage` with a wrapper) or a linker change.
+2. If the block is "multiboot2 loader wants a relocatable kernel",
+   the cleanest workaround is a **bzImage wrapper**: a tiny stub
+   linked as a Linux-compatible bzImage (well-tested kexec path)
+   that decompresses/copies `slmos.elf` to its final address and
+   jumps to its entry. ~100 lines of Rust or C.
+3. Alternative: use `kexec -p` (panic kernel) with a
+   `crashkernel=64M@0x10000000` reservation on the Ubuntu cmdline.
+   Panic-kernel loads may relax the range check.
+
+**Estimated effort to unblock:** half a day to a day, depending on
+which of the three paths pans out first. All the hard parts (SEC2
+unlock understanding, scripts, build system integration, bare-metal
+preservation) are in tree.
+
 ### 4.3 Option C — **Kernel-shim / patched vfio-pci**
 
 **Approach:** modify Linux to skip FLR on vfio-pci open for this

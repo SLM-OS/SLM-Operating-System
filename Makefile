@@ -162,6 +162,41 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(JETSON_EL1_SMOKE)),-DJETSON_EL1_SMOKE=ON) \
 		$(MAKE_PROGRAM_ARG)
 
+# kernel-kexec: X86_64-only parallel build of slmos.elf linked at
+# 0x20000000 (for Linux→SLM-OS kexec). Uses a separate build directory
+# so it never clashes with the default 1 MB bare-metal build.
+KERNEL_KEXEC_BUILD_DIR := $(BUILD_DIR)/kernel-kexec
+KERNEL_KEXEC_ELF := $(KERNEL_KEXEC_BUILD_DIR)/slmos.elf
+
+.PHONY: kernel-kexec
+kernel-kexec: runtime $(KERNEL_KEXEC_BUILD_DIR)/Makefile
+ifneq ($(PLATFORM),X86_64)
+	@echo "kernel-kexec requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@echo "Building kernel (kexec variant, link address 0x20000000)..."
+	$(CMAKE) --build $(KERNEL_KEXEC_BUILD_DIR)
+	@echo "kexec ELF: $(KERNEL_KEXEC_ELF)"
+
+$(KERNEL_KEXEC_BUILD_DIR)/Makefile:
+	@echo "Configuring kexec kernel build..."
+	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_KEXEC_BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DPLATFORM=$(PLATFORM) \
+		-DKEXEC_BUILD=1 \
+		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
+		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
+		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
+		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
+		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(MAKE_PROGRAM_ARG)
+
+.PHONY: kernel-kexec-clean
+kernel-kexec-clean:
+	@echo "Cleaning kexec kernel build..."
+	rm -rf $(KERNEL_KEXEC_BUILD_DIR)
+
 .PHONY: kernel-clean
 kernel-clean:
 	@echo "Cleaning kernel build..."
@@ -189,6 +224,23 @@ endif
 .PHONY: x86-disk-verify
 x86-disk-verify: x86-disk
 	@scripts/tests/verify-x86-disk.sh $(KERNEL_BUILD_DIR)/slmos-x86.img
+
+# Deploy + kexec SLM-OS onto a running Linux on test-pc. This is an
+# ALTERNATIVE to the UEFI+SDWire path — the bare-metal disk-image flow
+# (x86-disk → labctl sdwire flash → power_cycle) is unchanged. Use this
+# path when SEC2 needs to inherit its nouveau-unlocked state (issue
+# #185 / the 2026-04-17 investigation). Set KEXEC_HOST to override the
+# default test-pc SSH target; set KEXEC_NO_EXEC=1 to stage only.
+.PHONY: kexec-deploy
+kexec-deploy: kernel-kexec
+ifneq ($(PLATFORM),X86_64)
+	@echo "kexec-deploy requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@KERNEL_BUILD_DIR=$(KERNEL_KEXEC_BUILD_DIR) \
+	 scripts/x86-kexec-deploy.sh \
+	    --elf $(KERNEL_KEXEC_ELF) \
+	    $(if $(KEXEC_HOST),--host $(KEXEC_HOST),) \
+	    $(if $(KEXEC_NO_EXEC),--no-exec,)
 
 # P1-2 real-hardware validation: flash slmos-x86.img to test-pc via
 # labctl, run boot_test --count 10, run the 5× sleep-while-echo
