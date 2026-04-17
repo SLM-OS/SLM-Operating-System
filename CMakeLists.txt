@@ -172,9 +172,11 @@ if(EMBED_DEMO_SCRIPTS)
     add_compile_definitions(EMBED_DEMO_SCRIPTS=1)
 endif()
 
-# Networking: ON for platforms with drivers (QEMU_VIRT, X86_64),
-# OFF for hardware platforms until real NIC drivers exist.
-if(PLATFORM STREQUAL "QEMU_VIRT" OR PLATFORM STREQUAL "X86_64")
+# Networking: ON for platforms with drivers (QEMU_VIRT virtio-mmio,
+# X86_64 virtio-pci, RASPI5 BCM GENET via RP1). OFF for platforms
+# still awaiting a native NIC driver (JETSON_ORIN_NANO — #25).
+if(PLATFORM STREQUAL "QEMU_VIRT" OR PLATFORM STREQUAL "X86_64"
+   OR PLATFORM STREQUAL "RASPI5")
     option(ENABLE_NETWORKING "Enable TCP/IP networking stack (lwIP)" ON)
 else()
     option(ENABLE_NETWORKING "Enable TCP/IP networking stack (lwIP)" OFF)
@@ -380,12 +382,14 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/gpu_nvidia.c>
 
     # ==========================================================================
-    # Networking (enabled on platforms with drivers: QEMU_VIRT, X86_64)
+    # Networking (enabled on platforms with drivers)
     # ==========================================================================
     # VirtIO-Net MMIO driver (ARM64 QEMU only)
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},QEMU_VIRT>>:kernel/drivers/virtio_net.c>
     # VirtIO-Net PCI driver (x86-64 only)
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/virtio_net_pci.c>
+    # BCM GENET driver (Pi 5 only) — #202
+    $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/genet.c>
     # Platform-independent networking stack
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>

@@ -349,6 +349,24 @@
 
 /* RP1 peripheral interrupt vector numbers (from rp1-peripherals.pdf) */
 #define RP1_INT_UART0       25
+#define RP1_INT_ETH         6       /* BCM GENET Ethernet — #202 */
+
+/* BCM GENET Ethernet controller base addresses — #202.
+ *
+ * GENET v5 on Pi 5 is integrated into the RP1 southbridge, reached
+ * through the same PCIe BAR1 window that UART/GPIO use. Linux's RP1
+ * bindings header (linux-rpi-dt-bindings-mfd-rp1.h) defines:
+ *   RP1_ETH_IP_BASE  = RP1_BAR + 0x100000 = 0x1F00100000
+ *   RP1_ETH_CFG_BASE = RP1_BAR + 0x104000 = 0x1F00104000
+ *
+ * Both land in the same 2MB block as UART/GPIO (already mapped by
+ * vmm_setup_platform for RASPI5), so no additional page-table entry
+ * is required. */
+#define RP1_ETH_IP_BASE     0x1F00100000UL
+#define RP1_ETH_CFG_BASE    0x1F00104000UL
+
+/* GENET interrupt — GIC IRQ 166 via MIP0 vector 6 → GIC SPI 134 */
+#define GENET_IRQ           (32 + MIP0_BASE_SPI + RP1_INT_ETH)
 
 /* BCM2712 PCIe RC (Root Complex) for pcie2 (RP1's link) */
 #define PCIE_RC_BASE        0x1000120000UL
