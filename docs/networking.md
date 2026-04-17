@@ -458,6 +458,34 @@ Reply from 192.168.4.1: seq=4 time=2 ms
 rtt min/avg/max = 2/2/3 ms
 ```
 
+### Background net_pump task
+
+`net_poll()` is the drain point for RX + lwIP timers — it picks up
+incoming frames, runs DHCP/ARP/ICMP state machines, and fires the
+ping-reply path. Foreground commands (the `ping` wait loop, the
+DHCP bind wait in `net_init`) call it inline, but the shell sitting
+at its prompt doesn't. Without a background driver, SLM-OS would
+only respond to inbound traffic while actively sending.
+
+`net_pump_task_entry` in `kernel/net/lwip_slm.c` loops
+`net_poll()` + `sleep_ms(10)`. The task is spawned from `main.c`
+at boot (guarded on `ENABLE_NETWORKING` + `!ENABLE_BOOT_TESTS`) at
+`TASK_PRIORITY_IDLE` pinned to CPU 0. Pinning matches where
+peripheral IRQs land today (virtio-mmio SPI, MACB SPI), and
+`PRIORITY_IDLE` means the pump yields to anything else that's
+runnable — `net_poll` is latency-insensitive at 10 ms cadence.
+
+The `!ENABLE_BOOT_TESTS` guard is because the test kernel's
+scheduler policy tests check exact `assigned_cpu` values and task
+counts; an extra background task pinned to CPU 0 shifts those
+counts. Live network tests in `test_net.c` drive `net_poll()`
+inline from their wait loops, so they don't need the pump running.
+
+Verified: with net_pump active and SLM-OS sitting at the shell
+prompt on pi-5-1, an external host gets **10/10 ICMP echo replies**
+at 3-15 ms RTT. Before this task, inbound pings got 0/4 unless
+the Pi 5 was itself running an outbound `ping` at the time.
+
 ### Stuck-descriptor watchdog (#204 item 4)
 
 Both drivers track a wall-clock timestamp of the last successful TX
