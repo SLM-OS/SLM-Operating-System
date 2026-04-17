@@ -227,14 +227,16 @@ This hybrid approach leverages:
 **Phase 4 Implementation:**
 - lwIP TCP/IP stack for ICMP, TCP, UDP, DHCP
 - `struct net_driver` abstraction so each platform plugs in its own NIC
-- VirtIO-Net MMIO (ARM64 QEMU) and VirtIO-Net PCI (x86-64 QEMU) drivers
-- Async TX with buffer pool + IRQ-driven completion on both drivers
+- VirtIO-Net MMIO (ARM64 QEMU), VirtIO-Net PCI (x86-64 QEMU), and
+  Cadence MACB/GEM (Pi 5 hardware, via RP1 southbridge) drivers
+- Async TX with buffer pool + IRQ-driven completion on virtio drivers
   (#204):
   - ARM64: `gic_register_handler` dispatch table, SPI from slot probe
   - x86-64: PCI MSI-X capability, IDT vector 50 routed to LAPIC
   - Stuck-descriptor watchdog logs one `WARN` per 5 s stall episode
-- `ENABLE_NETWORKING` CMake option — default ON for QEMU_VIRT and X86_64,
-  OFF for Pi 5 / Jetson until real NIC drivers land (Phase 3/4, #202, #25)
+  - Pi 5 MACB is polled-only today (blocked by #134 NS-EL1 IRQ path)
+- `ENABLE_NETWORKING` CMake option — default ON for QEMU_VIRT, X86_64,
+  and RASPI5; OFF for Jetson until real NIC driver lands (#25)
 - `NET_DHCP_AT_BOOT` default ON — lwIP starts DHCP during `net_init()`
   with static-IP fallback on timeout (#197)
 - Shell commands: `net`, `ping`, `ifconfig`, `netstat`

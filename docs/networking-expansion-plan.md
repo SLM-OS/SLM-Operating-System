@@ -158,45 +158,55 @@ All testable in QEMU:
 
 ---
 
-## Phase 3: Pi 5 Networking (Hardware Required — tracked in #202)
+## Phase 3: Pi 5 Networking — LANDED (#202)
 
-The Pi 5 has a Broadcom BCM54213PE Gigabit Ethernet PHY connected
-via the BCM GENET (Gigabit Ethernet Network Interface Controller)
-integrated into the BCM2712 SoC. There is no QEMU emulation for this
-hardware.
+**Status:** ✅ Landed on `pi5-genet-driver` branch, tracked in #202.
 
-### 3.1 BCM GENET Driver
+**Key hardware correction during bring-up:** the Pi 5's MAC is
+**Cadence MACB/GEM** inside the RP1 southbridge, NOT Broadcom GENET
+(that was Pi 4). Linux identifies it as
+`compatible = "raspberrypi,rp1-gem", "cdns,macb"`. The driver file
+and register layout reflect this; the initial `genet.c` scaffolding
+was renamed to `kernel/drivers/macb.c`.
 
-**Controller:** BCM GENET v5 (integrated in BCM2712)
-**Base address:** Determined by device tree (typically `0x107D580000` on
-BCM2712, but verify against Pi 5 DTB or Linux `dmesg`)
-**Reference driver:** Linux `drivers/net/ethernet/broadcom/genet/`
-(~5000 lines across multiple files)
+### 3.1 Cadence MACB/GEM Driver
 
-**Minimum viable driver:**
-1. Reset and initialize GENET UMAC (UniMAC) core
-2. Configure DMA rings (TX and RX descriptor rings in system RAM)
-3. MDIO/PHY initialization — autonegotiate link speed with BCM54213PE
-4. TX: write packet into TX descriptor ring, kick DMA
-5. RX: poll RX descriptor ring for completed packets
-6. Wire into `struct net_driver` from Phase 1
+**Controller:** Cadence GEM (idnum 0x0007 per MACB_MID) in the RP1
+southbridge.
+**MMIO base:** `0x1F00100000` (RP1 BAR1 offset 0x100000). No extra
+vmm mapping needed — same 2 MB block as UART.
+**PHY:** BCM54213PE on MDIO address 1, reset gated by RP1 GPIO 32.
+**Reference driver:** Linux `drivers/net/ethernet/cadence/macb*.c`
+(~5000 lines; the `raspberrypi_rp1_config` entry is stock MACB plus
+config flags — no Pi-5-specific code path). Cached locally at
+`docs/reference/linux-cadence-macb.h` and `linux-cadence-macb-main.c`.
 
-**Complexity estimate:** ~800-1200 lines. The GENET is well-documented
-in the Linux driver. The DMA ring pattern is similar to VirtIO
-virtqueues but with Broadcom-specific register layouts.
+**Landed driver:** `kernel/drivers/macb.c` (~700 lines) implements:
+1. RP1 clock enable (`CLK_ETH_CTRL`, `CLK_ETH_TSU_CTRL`)
+2. MACB MID probe + MDIO bring-up (NCFGR CLK div, NCR.MPE)
+3. BCM54213PE PHY reset release via RP1 GPIO 32
+4. PHY auto-negotiate, link-up detection (BMSR)
+5. Speed/duplex application + NCFGR.BIG + NCFGR.DRFCS for real-
+   world frame acceptance
+6. Locally-administered MAC address (02:00:00:5A:00:01) programmed
+   into SA1B/SA1T
+7. 16-slot TX + RX descriptor rings, polled completion
+8. Cache clean/invalidate at every DMA sync point (mandatory on
+   Pi 5 — no SMPEN)
 
-**Dependencies:**
-- MMIO access to GENET registers (requires MMU mapping of the GENET
-  base address in `vmm.c`)
-- Cache maintenance for DMA buffers (already available via `cache.h`)
-- PHY management via MDIO bus (bit-banged through GENET MDIO registers)
+**Polling-only by design** — Pi 5 NS-EL1 IRQ delivery is blocked by
+TF-A per #134. If/when that issue is resolved, the driver can opt
+in to IRQ-driven completion via the `gic_register_handler` mechanism
+already wired on ARM64.
 
-### 3.2 Testing (Hardware Only)
+### 3.2 Hardware-verified (pi-5-1)
 
-- Deploy via `labctl sdwire_update`, test via `labctl serial_send`
-- Connect Pi 5 Ethernet to lab network
-- `ping` the gateway from SLM-OS shell
-- `ifconfig` to verify IP assignment via DHCP
+End-to-end: boot clean, `net init`, DHCP bound `192.168.4.215`,
+ICMP echo 3/4 (first timeout = ARP resolve) at 2-3 ms RTT against
+the lab gateway. Five consecutive boots clean at 8.4 s each.
+
+See `docs/networking.md` §"Cadence MACB/GEM Driver (Pi 5)" for
+the full driver walkthrough and register addresses.
 
 ---
 

@@ -105,6 +105,13 @@ Include one test per identified risk area for the new hardware:
       increment (validates the re-post path)
 - [ ] Link-down / link-up toggle — `link_status()` reflects it,
       pending TX fails with the correct error
+- [ ] **Polling-only is acceptable** when the platform's IRQ path
+      is blocked (e.g. Pi 5 — tracked in #134). The Cadence MACB
+      driver for Pi 5 demonstrates the polled MVP: `net_driver.tx_reap`
+      is NULL, `send()` does synchronous polled completion on the
+      `USED` bit, `recv()` is driven by `net_poll`. If IRQ delivery
+      is ever unblocked, the driver can add a handler without
+      reshaping anything above the MAC layer.
 - [ ] If the driver implements IRQ-driven TX completion (#204):
       - Register against the platform's dispatch table:
         `gic_register_handler` on ARM64, `irq_register` (vector-32)
