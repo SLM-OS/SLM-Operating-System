@@ -39,16 +39,15 @@ static uint32_t net_irq_number;
 
 /* Stuck-descriptor watchdog (#204 item 4). If tx_reap finds nothing
  * to reap while tx_inflight[] has entries, and it has been at least
- * TX_STALL_THRESHOLD_MS since we last successfully reaped a slot,
- * log a single warning. The warn-once latch (tx_stall_warned) resets
- * the moment a slot is freed, so a genuinely stuck link logs once
- * but transient congestion (which resolves on the next reap) stays
- * quiet. Not fatal: polling-only fallback still works if the IRQ
- * path misses a completion, and lwIP will surface transport errors
- * above the driver. Spurious tx_reap calls — invoked on an empty
- * pool — do not trigger the watchdog because tx_has_inflight() also
- * returns false. */
-#define TX_STALL_THRESHOLD_MS 5000
+ * VIRTIO_NET_TX_STALL_THRESHOLD_MS since we last successfully reaped
+ * a slot, log a single warning. The warn-once latch (tx_stall_warned)
+ * resets the moment a slot is freed, so a genuinely stuck link logs
+ * once but transient congestion (which resolves on the next reap)
+ * stays quiet. Not fatal: polling-only fallback still works if the
+ * IRQ path misses a completion, and lwIP will surface transport
+ * errors above the driver. Spurious tx_reap calls — invoked on an
+ * empty pool — do not trigger the watchdog because tx_has_inflight()
+ * also returns false. */
 static uint32_t tx_last_progress_ms;
 static bool     tx_stall_warned;
 /* Bumped every time the watchdog's WARN fires. Exposed via
@@ -550,7 +549,7 @@ static void tx_watchdog_warn_if_stuck(bool any_inflight) {
     if (tx_stall_warned || !any_inflight)
         return;
     uint32_t elapsed = sys_now() - tx_last_progress_ms;
-    if (elapsed >= TX_STALL_THRESHOLD_MS) {
+    if (elapsed >= VIRTIO_NET_TX_STALL_THRESHOLD_MS) {
         WARN("TX descriptors stuck: no completion for %u ms (virtio-mmio)",
              elapsed);
         tx_stall_warned = true;
@@ -793,7 +792,7 @@ uint32_t virtio_net_get_tx_stall_count(void) {
  * latch naturally.
  */
 void virtio_net_test_trigger_watchdog(void) {
-    tx_last_progress_ms = sys_now() - (TX_STALL_THRESHOLD_MS + 100);
+    tx_last_progress_ms = sys_now() - (VIRTIO_NET_TX_STALL_THRESHOLD_MS + 100);
     tx_stall_warned = false;
     tx_watchdog_warn_if_stuck(true);  /* synthetic: pretend pool is busy */
 }

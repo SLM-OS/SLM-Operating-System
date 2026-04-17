@@ -29,6 +29,11 @@ struct pci_device {
     uint32_t bar[6];
 };
 
+/* Config space register offsets and bits */
+#define PCI_STATUS_REG            0x06
+#define PCI_STATUS_CAP_LIST       (1u << 4)  /* Bit 4 of Status: Capabilities List present */
+#define PCI_CAP_PTR_REG           0x34       /* Capabilities pointer in type 0 header */
+
 /* Config space access */
 uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
 uint16_t pci_config_read16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);

@@ -608,15 +608,7 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 #endif
 
 #if defined(PLATFORM_X86_64)
-/* Accessors exposed by the PCI driver for test observability. Kept
- * as externs (rather than a public header) because the PCI driver
- * has no public header today — all callers use extern declarations. */
-uint32_t virtio_net_pci_get_irq_count(void);
-uint32_t virtio_net_pci_get_msix_vector(void);
-bool     virtio_net_pci_msix_enabled(void);
-uint32_t virtio_net_pci_get_tx_stall_count(void);
-void     virtio_net_pci_test_trigger_watchdog(void);
-extern void virtio_net_pci_irq_handler(uint8_t irq);
+#include "../include/virtio_net_pci.h"  /* accessors + handler */
 #endif
 
 /*
@@ -1258,8 +1250,14 @@ static void test_net_msix_handler_drains_tx(void)
     }
     virtio_net_pci_irq_handler(0);
 
+    /* >= rather than == because x86-64 runs tasks with IF=1, so a
+     * real MSI-X delivery can slip in between the sends and the
+     * direct handler call and bump the counter ahead of ours. The
+     * ARM64 equivalent uses exact-match because DAIF.I=1 blocks
+     * in-task IRQ delivery. Either way the handler was reached
+     * at least once, which is what this test verifies. */
     uint32_t after = virtio_net_pci_get_irq_count();
-    TEST_ASSERT_MESSAGE(after == before + 1,
+    TEST_ASSERT_MESSAGE(after >= before + 1,
         "virtio_net_pci_irq_handler did not bump irq_count — handler "
         "early-exited or counter wiring broken");
 }
