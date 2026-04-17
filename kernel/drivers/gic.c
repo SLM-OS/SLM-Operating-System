@@ -967,9 +967,24 @@ void gic_include_cpu_in_spis(uint32_t cpu)
  * at compile time (e.g. virtio-mmio devices, where the IRQ follows
  * the slot the device lands in) bind a handler at init time.
  *
- * Scan is linear — 16 entries is plenty for the current driver set,
- * and the lookup runs in IRQ context where the cache line will be hot
- * anyway. Adding a hash table would be premature.
+ * Sizing (16 slots): current driver set uses one slot (virtio-net on
+ * QEMU_VIRT). Headroom budgeted for x86-64 MSI-X (item 3 of #204
+ * follow-up), a future stuck-descriptor watchdog slot, and the
+ * pending RP1/Jetson NIC drivers — still leaves ~10 spare. Linear
+ * scan is fine at this size; the lookup runs in IRQ context where
+ * the cache line is hot anyway. Revisit if the table ever exceeds
+ * ~32 entries.
+ *
+ * Concurrency model: registrations happen during single-threaded
+ * driver init, lookups run from IRQ context on any CPU the SPI is
+ * affine to. Uses release/acquire atomics on `.fn` so a concurrent
+ * lookup sees `.irq` before `.fn`. Without that ordering, a reader
+ * on another CPU could observe a non-NULL `.fn` while `.irq` is
+ * still stale and dispatch to the wrong handler. Today the
+ * `gic_enable_irq` that follows `gic_register_handler` provides an
+ * MMIO barrier on the registering CPU, but relying on that is
+ * fragile — the API advertises itself as generic, so the atomics
+ * make the contract explicit.
  *
  * Deliberately outside the GIC_VERSION conditionals — the table
  * layout doesn't depend on v2 vs v3, only on having an IRQ dispatch
@@ -990,9 +1005,28 @@ int gic_register_handler(uint32_t irq, gic_handler_fn handler)
     if (!handler)
         return -1;
     for (unsigned i = 0; i < GIC_MAX_REGISTERED_HANDLERS; i++) {
-        if (gic_handlers[i].fn == NULL) {
+        gic_handler_fn existing = __atomic_load_n(&gic_handlers[i].fn,
+                                                  __ATOMIC_ACQUIRE);
+        if (existing == NULL) {
             gic_handlers[i].irq = irq;
-            gic_handlers[i].fn = handler;
+            /* Release-store publishes .irq + .fn together to any
+             * lookup on another CPU. */
+            __atomic_store_n(&gic_handlers[i].fn, handler,
+                             __ATOMIC_RELEASE);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int gic_unregister_handler(uint32_t irq)
+{
+    for (unsigned i = 0; i < GIC_MAX_REGISTERED_HANDLERS; i++) {
+        gic_handler_fn existing = __atomic_load_n(&gic_handlers[i].fn,
+                                                  __ATOMIC_ACQUIRE);
+        if (existing != NULL && gic_handlers[i].irq == irq) {
+            __atomic_store_n(&gic_handlers[i].fn, NULL,
+                             __ATOMIC_RELEASE);
             return 0;
         }
     }
@@ -1002,8 +1036,12 @@ int gic_register_handler(uint32_t irq, gic_handler_fn handler)
 gic_handler_fn gic_lookup_handler(uint32_t irq)
 {
     for (unsigned i = 0; i < GIC_MAX_REGISTERED_HANDLERS; i++) {
-        if (gic_handlers[i].fn != NULL && gic_handlers[i].irq == irq)
-            return gic_handlers[i].fn;
+        /* Acquire-load pairs with the release-store in register. If
+         * we observe .fn != NULL, .irq is guaranteed visible. */
+        gic_handler_fn fn = __atomic_load_n(&gic_handlers[i].fn,
+                                            __ATOMIC_ACQUIRE);
+        if (fn != NULL && gic_handlers[i].irq == irq)
+            return fn;
     }
     return NULL;
 }

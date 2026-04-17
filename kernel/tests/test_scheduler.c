@@ -1915,6 +1915,88 @@ static void test_preempt_trampoline_cpu_fold(void)
     TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x10300));
 }
 
+#if !defined(PLATFORM_X86_64)
+#include "gic.h"
+
+/*
+ * Unit tests for the GIC handler registration table (#204 follow-up).
+ *
+ * The table is shared state — the virtio-net driver has already
+ * registered a handler during platform init. These tests use IRQ
+ * numbers outside the normal SPI range that drivers would pick
+ * (0x300+) so they can't collide with any real registration.
+ */
+
+static void test_gic_noop_handler(void) { /* never invoked */ }
+static void test_gic_noop_handler_2(void) { /* never invoked */ }
+
+/*
+ * Test: register + lookup round-trips the exact handler pointer.
+ *
+ * TEST_ASSERT_EQUAL_PTR is avoided throughout because Unity casts
+ * through (void *), and C23 -Wpedantic (used in this codebase) treats
+ * function-pointer-to-object-pointer conversion as an error. Compare
+ * the function pointers directly with TEST_ASSERT_TRUE instead.
+ */
+static void test_gic_register_lookup_roundtrip(void)
+{
+    const uint32_t irq = 0x300;
+    TEST_ASSERT_EQUAL_INT(0, gic_register_handler(irq, test_gic_noop_handler));
+    TEST_ASSERT_TRUE(gic_lookup_handler(irq) == test_gic_noop_handler);
+
+    /* Clean up so later tests in this suite start from a known state. */
+    TEST_ASSERT_EQUAL_INT(0, gic_unregister_handler(irq));
+}
+
+/*
+ * Test: lookup for an unregistered IRQ returns NULL.
+ */
+static void test_gic_lookup_miss_returns_null(void)
+{
+    TEST_ASSERT_TRUE(gic_lookup_handler(0x3FE) == NULL);
+}
+
+/*
+ * Test: registering with a NULL handler is rejected.
+ * The table treats NULL entries as free slots, so accepting NULL
+ * would corrupt the free-slot invariant.
+ */
+static void test_gic_register_null_rejected(void)
+{
+    TEST_ASSERT_EQUAL_INT(-1, gic_register_handler(0x301, NULL));
+    TEST_ASSERT_TRUE(gic_lookup_handler(0x301) == NULL);
+}
+
+/*
+ * Test: unregister then re-register reuses the same slot cleanly.
+ * Guards against a "slot not freed" leak on teardown that would
+ * eventually exhaust the 16-entry table.
+ */
+static void test_gic_unregister_frees_slot(void)
+{
+    const uint32_t irq = 0x302;
+    TEST_ASSERT_EQUAL_INT(0, gic_register_handler(irq, test_gic_noop_handler));
+    TEST_ASSERT_EQUAL_INT(0, gic_unregister_handler(irq));
+    TEST_ASSERT_TRUE(gic_lookup_handler(irq) == NULL);
+
+    /* Second registration with a different handler should succeed —
+     * proves the first registration's slot was actually freed. */
+    TEST_ASSERT_EQUAL_INT(0, gic_register_handler(irq, test_gic_noop_handler_2));
+    TEST_ASSERT_TRUE(gic_lookup_handler(irq) == test_gic_noop_handler_2);
+
+    TEST_ASSERT_EQUAL_INT(0, gic_unregister_handler(irq));
+}
+
+/*
+ * Test: unregister on a never-registered IRQ returns -1 without
+ * disturbing the table.
+ */
+static void test_gic_unregister_miss(void)
+{
+    TEST_ASSERT_EQUAL_INT(-1, gic_unregister_handler(0x3FD));
+}
+#endif /* !PLATFORM_X86_64 */
+
 /*
  * #171: slm_time_ticks_to_ns must not overflow for realistic uptimes
  * on any supported timer frequency. The naive `ticks * 1e9 / freq`
@@ -3753,6 +3835,15 @@ int test_suite_scheduler(void)
     RUN_TEST(test_timer_irq_is_physical);
     RUN_TEST(test_slm_time_ticks_to_ns_no_overflow);
     RUN_TEST(test_preempt_trampoline_cpu_fold);
+
+#if !defined(PLATFORM_X86_64)
+    /* GIC handler registration table (#204 follow-up) */
+    RUN_TEST(test_gic_register_lookup_roundtrip);
+    RUN_TEST(test_gic_lookup_miss_returns_null);
+    RUN_TEST(test_gic_register_null_rejected);
+    RUN_TEST(test_gic_unregister_frees_slot);
+    RUN_TEST(test_gic_unregister_miss);
+#endif
 
     /* Spinlock hardware mode tests (post-MMU) */
     RUN_TEST(test_spinlock_hw_enabled_after_boot);

@@ -46,7 +46,11 @@ static uint32_t net_irq_number;
  */
 static spinlock_t tx_lock = SPINLOCK_INIT;
 static spinlock_t rx_lock = SPINLOCK_INIT;
-static bool initialized = false;
+/* Volatile because the IRQ handler reads this to decide whether to
+ * do any work. If the SPI ever retargets to a CPU other than the one
+ * running init, the release-store at the end of virtio_net_init must
+ * be observable there without a separate barrier. */
+static volatile bool initialized = false;
 
 /* Receive buffer pool */
 #define RX_BUFFER_COUNT     16
@@ -471,13 +475,28 @@ int virtio_net_init(void) {
         WARN("gic_register_handler full — TX completion stays polled-only");
     } else {
         gic_set_priority(irq, 0x80);
-        gic_enable_irq(irq);
+        /* Populate observables BEFORE enabling the IRQ at the GIC.
+         * A stale pending IRQ can fire the moment gic_enable_irq
+         * lands; the handler's early-exit on !initialized is the
+         * safety net, but any observer (diagnostic accessor,
+         * future self-check) should see the runtime IRQ number
+         * the instant deliveries are possible. */
         net_irq_number = irq;
+        /* Publish initialized before enabling delivery. The
+         * __atomic_store_n with release semantics pairs with the
+         * acquire-load the handler would do if this ever retargets
+         * to another CPU. Today the SPI targets CPU 0 only, so this
+         * is defensive — but the cost is one barrier at init. */
+        __atomic_store_n(&initialized, true, __ATOMIC_RELEASE);
+        gic_enable_irq(irq);
         INFO("VirtIO-Net IRQ %u registered", irq);
+        INFO("VirtIO-Net driver initialized");
+        return 0;
     }
 
-    initialized = true;
-    INFO("VirtIO-Net driver initialized");
+    /* Registration failed: device is still usable in polled-only mode. */
+    __atomic_store_n(&initialized, true, __ATOMIC_RELEASE);
+    INFO("VirtIO-Net driver initialized (polled-only)");
     return 0;
 }
 
