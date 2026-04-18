@@ -413,9 +413,10 @@ static void test_state_str_labels_known_values(void)
  * cert header + dummy key/content). Returns total size written. All
  * sizes are 4-aligned. */
 /*
- * Default core_code_size used by build_fw_blob when the caller
- * passes 0 — kept small so short tests don't need large buffers.
- * Tests that exercise the multi-chunk core path override this.
+ * Value that build_fw_blob (the no-core-size wrapper) passes to
+ * build_fw_blob_full. Small enough that short tests don't need
+ * large buffers. Tests that exercise the multi-chunk core path call
+ * build_fw_blob_full directly with a larger size.
  */
 #define BUILD_FW_BLOB_DEFAULT_CORE_CODE  4u
 
