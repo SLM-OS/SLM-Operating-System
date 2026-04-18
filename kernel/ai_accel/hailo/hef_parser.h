@@ -15,10 +15,16 @@
  *   - SDK version string: informational, surfaced by `hailo load`.
  *   - Network group count + first name: proves the proto tree walks
  *     cleanly and gives the shell command something to print.
+ *   - First network group's op count.
+ *   - First network group's I/O pads with their tensor shapes
+ *     (height, width, features + padded variants). Captured up to
+ *     HEF_PARSER_MAX_PADS; the loader needs these to size DMA
+ *     buffers before submitting an inference.
  *
- * Deeper fields (ops, layers, weights ranges) are decoded in later
- * phases when the loader needs them. Extending the decode is a
- * matter of attaching more pb_callback_t handlers in hef_parser.c.
+ * Deeper fields (per-context actions, weight ranges) are decoded
+ * in later phases when the loader needs them. Extending the decode
+ * is a matter of attaching more pb_callback_t handlers in
+ * hef_parser.c.
  */
 
 #ifndef AI_ACCEL_HEF_PARSER_H
@@ -44,7 +50,38 @@
 #define HEF_HW_ARCH_HAILO15M       3
 #define HEF_HW_ARCH_HAILO10H       4
 
-#define HEF_PARSER_MAX_STR   64      /* longest string we capture */
+#define HEF_PARSER_MAX_STR       64   /* longest string we capture */
+#define HEF_PARSER_MAX_PAD_NAME  32   /* longest pad-name we capture */
+#define HEF_PARSER_MAX_PADS      16   /* cap on pads we record for NG 0 */
+
+/*
+ * One I/O pad of an op inside the first network group.
+ *
+ * Pads are how Hailo describes the interfaces between compute ops.
+ * For the loader's purposes, pads on the "boundary" of the network
+ * group are the model's external input/output tensors — they're
+ * what determines DMA buffer sizes before we can submit an
+ * inference. The kernel doesn't walk pad_edges to pick out
+ * boundaries today; it captures every pad of every op in NG 0 (up
+ * to HEF_PARSER_MAX_PADS) and defers the boundary-classification
+ * work to the future loader.
+ *
+ * `has_tensor_shape` distinguishes the `ProtoHEFTensorShape` branch
+ * of the `shape_info` oneof from the `ProtoHEFNmsShape` branch or
+ * an absent shape. When false, the H/W/C dims are all zero.
+ */
+struct hef_pad_info {
+    uint32_t index;                                /* pad index inside op */
+    bool     is_input;                             /* true = op's input_pads[] */
+    bool     has_tensor_shape;                     /* false = NMS pad or absent */
+    char     name[HEF_PARSER_MAX_PAD_NAME];
+    uint32_t height;
+    uint32_t padded_height;
+    uint32_t width;
+    uint32_t padded_width;
+    uint32_t features;
+    uint32_t padded_features;
+};
 
 /*
  * Distilled metadata from a parsed `.hef` proto body. Owns no
@@ -52,6 +89,11 @@
  * to HEF_PARSER_MAX_STR-1 bytes with a trailing NUL. If a field
  * exceeds the buffer, the parser sets the truncated flag (low-bit
  * information loss but not a decode error).
+ *
+ * op_count / pad_count / pads[] describe the FIRST network group
+ * only. Subsequent network groups are counted (network_group_count)
+ * but their op/pad structure is not captured — the loader runs one
+ * network group at a time.
  */
 struct hef_info {
     uint32_t hw_arch;                 /* HEF_HW_ARCH_* */
@@ -60,6 +102,10 @@ struct hef_info {
     char     first_network_group[HEF_PARSER_MAX_STR];
     uint32_t network_group_count;
     bool     string_truncated;        /* any str exceeded MAX_STR */
+    uint32_t op_count;                /* ops in first network group */
+    uint32_t pad_count;               /* valid entries in pads[] */
+    bool     pads_truncated;          /* first NG had > MAX_PADS pads */
+    struct hef_pad_info pads[HEF_PARSER_MAX_PADS];
 };
 
 /*

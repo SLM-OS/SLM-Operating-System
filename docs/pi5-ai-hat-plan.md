@@ -257,9 +257,23 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 
 ### Phase 5: Single-Model Inference (2 weeks)
 
-**Deliverables:**
+**Phase 5 is split into three sub-tracks; 5.1 lands without hardware, 5.2/5.3 are gated on control-channel reverse engineering + a lab unit.**
+
+#### Phase 5.1: HEF tensor metadata ✅ (2026-04-18, software-only)
+
+- `struct hef_info` extended with `op_count`, `pad_count`, and a bounded `pads[HEF_PARSER_MAX_PADS]` array recording each I/O pad's `index`, `name`, `is_input` flag, and tensor dims (`height`, `width`, `features` + padded variants). Captured for the first network group only — the loader runs one NG at a time.
+- Callback chain extended to `ProtoHEFHef → NetworkGroup → Op → Pad → TensorShape`. Oneof awareness: the `shape_info` oneof shares a callback slot between `tensor_shape` (tag 6) and `nms_shape` (tag 7); the callback filters by `field->tag` so an NMS pad doesn't get mis-decoded as tensor dims.
+- `hailo load <path>` now prints per-pad lines like `in pad[0] "input_layer1" shape=224x224x3 (padded 224x224x4)`.
+- Seven new `test_hef_parser.c` tests cover: pad-with-shape decode, multi-pad ordering, truncation, no-shape pad, NMS-branch skip, second-NG pad isolation, pad-name truncation.
+
+#### Phase 5.2: `hailo_load` with weight DMA ☐🔗 hardware + RPC-reverse-engineering
+
 - Tensor buffer API: allocate input/output tensors in NC DMA memory with platform cache sync handled by the driver.
-- Inference submit: post descriptors, ring doorbell, wait on MSI-X completion (or polled CNTPCT timeout fallback — see #247 for why polling is a valid long-term fallback on Pi 5).
+- Configure-channel RPC: the `.hef`'s CCW (config-channel-words) blob is uploaded to the device via a control-channel command — the command codes live in HailoRT userspace, not the kernel driver, and need reverse engineering.
+
+#### Phase 5.3: `hailo infer` ☐🔗 hardware
+
+- Inference submit: post descriptors, ring doorbell, wait on MSI completion (or polled CNTPCT timeout fallback — see #247 for why polling is a valid long-term fallback on Pi 5).
 - `hailo infer <model> <input-tensor>` shell command; output tensor dumped as hex or post-processed per a known model's output layout.
 - Latency histogram integration (#196) — add `hailo_infer` as a first-class bench histogram source.
 - Cross-platform inference bench doc (`docs/cross-platform-inference-bench.md`) updated with a "Hailo-8L on Pi 5" row.

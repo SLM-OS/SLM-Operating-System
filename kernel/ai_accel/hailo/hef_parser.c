@@ -17,9 +17,10 @@
  *   - header.hw_arch (uint32 / ProtoHEFHwArch enum)
  *   - header.sdk_version_str (string, truncated to HEF_PARSER_MAX_STR)
  *   - count of network_groups + name of the first one
+ *   - first network group's op count and I/O pad shapes
  *
- * Deeper fields (ops, layers, weight ranges) will be added by
- * attaching more callbacks here. The pattern is stable: one
+ * Deeper fields (per-context actions, weight ranges) will be added
+ * by attaching more callbacks here. The pattern is stable: one
  * callback per field of interest, state passed through
  * pb_callback_t::arg.
  */
@@ -146,6 +147,173 @@ static bool decode_header_cb(pb_istream_t *stream,
 }
 
 /* -------------------------------------------------------------------------- */
+/* ProtoHEFTensorShape → ProtoHEFPad → ProtoHEFOp callback chain.              */
+/*                                                                             */
+/* Runs only inside the FIRST network group (gated by a flag in pad_ctx /      */
+/* op_ctx — the caller sets it once). Each pad decoded into hef_info.pads[]    */
+/* consumes one slot; once the array fills, pads_truncated is set and later    */
+/* pads are skipped but still advanced past (nanopb still needs to read        */
+/* their bytes to step past a length-delimited sub-message).                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * ProtoHEFTensorShape decode. Called once per pad that carries the
+ * tensor_shape branch of the shape_info oneof. The callback fills
+ * the six uint32 dims into the parent pad slot.
+ */
+struct tshape_ctx {
+    struct hef_pad_info *pad;  /* destination slot (must be non-NULL) */
+};
+
+static bool decode_tensor_shape_cb(pb_istream_t *stream,
+                                   const pb_field_t *field,
+                                   void **arg)
+{
+    struct tshape_ctx *tctx = (struct tshape_ctx *)*arg;
+
+    /* ProtoHEFPad.shape_info is a proto oneof (tensor_shape|nms_shape).
+     * With FT_CALLBACK, both branches share the same union slot, so
+     * THIS callback gets invoked for BOTH tags. We only populate the
+     * tensor-shape dims when the tag actually is tensor_shape (6);
+     * for nms_shape (7) or any future branch we just advance past
+     * the sub-message and return OK. field->tag reflects the
+     * specific oneof branch being decoded. */
+    if (field->tag != ProtoHEFPad_tensor_shape_tag) {
+        return pb_read(stream, NULL, stream->bytes_left);
+    }
+
+    /* pb_istream_t parsing runs per-field. We handle each expected
+     * uint32 tag ourselves rather than declaring a nested struct,
+     * because the parent ProtoHEFPad already consumed the length-
+     * prefix — nanopb hands us `stream` already bounded to this
+     * sub-message's body. Walking tags here keeps the call depth
+     * one level shallower than a nested pb_decode. */
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no  = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7u);
+        if (wire_type != 0) {
+            /* Unknown / future field type — skip the remainder. */
+            if (!pb_read(stream, NULL, stream->bytes_left)) return false;
+            break;
+        }
+        uint64_t v = 0;
+        if (!pb_decode_varint(stream, &v)) return false;
+        if (v > UINT32_MAX) return false;
+        uint32_t u = (uint32_t)v;
+        switch (field_no) {
+        case 1: tctx->pad->height          = u; break;
+        case 2: tctx->pad->padded_height   = u; break;
+        case 3: tctx->pad->width           = u; break;
+        case 4: tctx->pad->padded_width    = u; break;
+        case 5: tctx->pad->features        = u; break;
+        case 6: tctx->pad->padded_features = u; break;
+        default: break;   /* ignore unknown fields */
+        }
+    }
+    tctx->pad->has_tensor_shape = true;
+    return true;
+}
+
+/*
+ * ProtoHEFPad decode. Invoked once per repeated input_pads[] /
+ * output_pads[] entry inside a ProtoHEFOp. The caller's pad_ctx
+ * carries the is_input flag so we don't need two callback bodies.
+ *
+ * If the pads[] slot array is already full, this still has to run
+ * (so nanopb's stream pointer advances past the sub-message), but
+ * writes nothing — pads_truncated gets set the first time a pad is
+ * dropped.
+ */
+struct pad_ctx {
+    struct hef_info *info;
+    bool             is_input;
+};
+
+static bool decode_pad_cb(pb_istream_t *stream,
+                          const pb_field_t *field,
+                          void **arg)
+{
+    (void)field;
+    struct pad_ctx *pctx = (struct pad_ctx *)*arg;
+    struct hef_info *info = pctx->info;
+
+    struct hef_pad_info  discard = { 0 };  /* throwaway slot for overflow */
+    struct hef_pad_info *slot;
+    bool capture;
+
+    if (info->pad_count < HEF_PARSER_MAX_PADS) {
+        slot = &info->pads[info->pad_count];
+        memset(slot, 0, sizeof(*slot));
+        slot->is_input = pctx->is_input;
+        capture = true;
+    } else {
+        slot = &discard;
+        info->pads_truncated = true;
+        capture = false;
+    }
+
+    struct u32_ctx index_ctx = {
+        .dst = &slot->index, .present = &(bool){ false },
+    };
+    struct string_ctx name_ctx = {
+        .dst = slot->name, .cap = HEF_PARSER_MAX_PAD_NAME,
+        .truncated = &info->string_truncated,
+    };
+    struct tshape_ctx shape_ctx = { .pad = slot };
+
+    ProtoHEFPad pad = ProtoHEFPad_init_default;
+    pad.index.funcs.decode = read_u32_cb;
+    pad.index.arg          = &index_ctx;
+    pad.name.funcs.decode  = read_string_cb;
+    pad.name.arg           = &name_ctx;
+    /* Oneof access: tensor_shape lives inside the shape_info union
+     * alongside nms_shape. Nanopb shares the callback slot between
+     * oneof members — decode_tensor_shape_cb filters by field->tag. */
+    pad.shape_info.tensor_shape.funcs.decode = decode_tensor_shape_cb;
+    pad.shape_info.tensor_shape.arg          = &shape_ctx;
+
+    if (!pb_decode(stream, ProtoHEFPad_fields, &pad)) return false;
+
+    if (capture) info->pad_count++;
+    return true;
+}
+
+/*
+ * ProtoHEFOp decode. Bumps op_count and wires pad callbacks for
+ * both input_pads and output_pads. The two pad_ctx structs are
+ * stack-local to this frame — nanopb has already returned from
+ * pb_decode before the frame unwinds, so the pointers stay live
+ * for the full sub-decode.
+ */
+struct op_ctx {
+    struct hef_info *info;
+};
+
+static bool decode_op_cb(pb_istream_t *stream,
+                         const pb_field_t *field,
+                         void **arg)
+{
+    (void)field;
+    struct op_ctx *octx = (struct op_ctx *)*arg;
+
+    struct pad_ctx input_ctx  = { .info = octx->info, .is_input = true  };
+    struct pad_ctx output_ctx = { .info = octx->info, .is_input = false };
+
+    ProtoHEFOp op = ProtoHEFOp_init_default;
+    op.input_pads.funcs.decode  = decode_pad_cb;
+    op.input_pads.arg           = &input_ctx;
+    op.output_pads.funcs.decode = decode_pad_cb;
+    op.output_pads.arg          = &output_ctx;
+
+    if (!pb_decode(stream, ProtoHEFOp_fields, &op)) return false;
+
+    octx->info->op_count++;
+    return true;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Repeated network_groups counter + first-name capture                        */
 /* -------------------------------------------------------------------------- */
 
@@ -164,7 +332,7 @@ static bool decode_network_group_cb(pb_istream_t *stream,
 {
     (void)field;
     struct ng_ctx *ng = (struct ng_ctx *)*arg;
-    bool capture_name = (ng->info->network_group_count == 0);
+    bool first_ng = (ng->info->network_group_count == 0);
 
     ProtoHEFNetworkGroup grp = ProtoHEFNetworkGroup_init_default;
     struct string_ctx name_ctx = {
@@ -172,9 +340,12 @@ static bool decode_network_group_cb(pb_istream_t *stream,
         .cap = HEF_PARSER_MAX_STR,
         .truncated = &ng->info->string_truncated,
     };
-    if (capture_name) {
+    struct op_ctx op_ctx = { .info = ng->info };
+    if (first_ng) {
         grp.network_group_name.funcs.decode = read_string_cb;
         grp.network_group_name.arg          = &name_ctx;
+        grp.ops.funcs.decode                = decode_op_cb;
+        grp.ops.arg                         = &op_ctx;
     }
     if (!pb_decode(stream, ProtoHEFNetworkGroup_fields, &grp)) return false;
 
@@ -192,11 +363,12 @@ static bool decode_network_group_cb(pb_istream_t *stream,
  * NOT treated as untrusted input. Nanopb's default-skip recursion
  * into nested length-delimited sub-messages consumes one kernel-stack
  * frame per level, so an adversarially-nested proto could overflow
- * the 16 KB kernel stack. Well-formed Hailo-compiled HEFs have a
- * fixed structural depth (~5-6 levels), well within safe limits.
- * Any future path that loads HEF blobs from a network source must
- * either parse into a bounded-depth staging buffer first or grow the
- * stack for the decode call.
+ * the 16 KB kernel stack. This parser's own callback chain adds 5
+ * levels (Hef → NetworkGroup → Op → Pad → TensorShape); well-formed
+ * Hailo-compiled HEFs have fixed structural depth in that range,
+ * well within safe limits. Any future path that loads HEF blobs
+ * from a network source must either parse into a bounded-depth
+ * staging buffer first or grow the stack for the decode call.
  */
 int hef_parse_body(const void *blob, size_t size, struct hef_info *out)
 {

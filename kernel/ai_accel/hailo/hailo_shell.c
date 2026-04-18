@@ -204,6 +204,28 @@ static int cmd_hailo(int argc, char *argv[])
             shell_printf("  first network group = %s\n",
                          meta.first_network_group);
         }
+        if (meta.op_count > 0) {
+            shell_printf("  first NG ops = %u, pads captured = %u%s\n",
+                         meta.op_count, meta.pad_count,
+                         meta.pads_truncated ? " (truncated)" : "");
+            for (uint32_t i = 0; i < meta.pad_count; i++) {
+                const struct hef_pad_info *p = &meta.pads[i];
+                if (p->has_tensor_shape) {
+                    shell_printf("    %s pad[%u] \"%s\" shape=%ux%ux%u"
+                                 " (padded %ux%ux%u)\n",
+                                 p->is_input ? "in" : "out",
+                                 p->index,
+                                 p->name,
+                                 p->height, p->width, p->features,
+                                 p->padded_height, p->padded_width,
+                                 p->padded_features);
+                } else {
+                    shell_printf("    %s pad[%u] \"%s\" (no tensor_shape)\n",
+                                 p->is_input ? "in" : "out",
+                                 p->index, p->name);
+                }
+            }
+        }
         if (meta.string_truncated) {
             shell_printf("  (note: at least one string was truncated "
                          "at %u bytes)\n", (unsigned)HEF_PARSER_MAX_STR);
