@@ -42,6 +42,7 @@
 #include "xhci_regs.h"
 #include "xhci_ring.h"
 #include "xhci_trb.h"
+#include "xhci_tegra.h"
 #include "ncmem.h"
 #include "debug.h"
 #include "timer.h"
@@ -56,14 +57,36 @@
 /* -------------------------------------------------------------------------- */
 
 /*
+ * Intel-spec xHCI aperture base pointers.
+ *
  * TEGRA_XHCI_HCD_BASE is the start of the standard xHCI aperture
  * (Intel-spec). The VMM already maps a 2 MB block at 0x03600000
- * covering both the Tegra FPCI prefix and this standard block.
+ * covering the Tegra FPCI prefix, the standard xHCI block, and the
+ * BAR2 wrapper aperture.
  */
 static volatile uint8_t *xhci_cap_base;
 static volatile uint8_t *xhci_op_base;
 static volatile uint8_t *xhci_rt_base;
 static volatile uint8_t *xhci_db_base;
+
+/*
+ * Tegra-specific wrapper aperture base pointers. Populated in
+ * xhci_init after the FPCI dev/vendor sanity check passes.
+ *
+ * FPCI: PCI-style config window + ARU mailbox + CSB paging window.
+ *       Must be programmed (XUSB_CFG_4 BAR0, XUSB_CFG_7 BAR2,
+ *       XUSB_CFG_1 bus-master) before the xHCI op registers will
+ *       respond to RUN=1 — see tegra_xusb_config in
+ *       docs/reference/linux-xhci-tegra.c:786-830.
+ *
+ * BAR2: Tegra234-unique wrapper aperture carrying the mailbox
+ *       (MBOX_CMD/DATA_IN/DATA_OUT/OWNER), IFR DMA config, CSB
+ *       paging (ARU_C11_CSBRANGE at 0x09c, CSB_BASE_ADDR at 0x2000),
+ *       and the firmware-scratch window used by the IFR boot path
+ *       to expose its timestamp/header.
+ */
+static volatile uint8_t *xhci_fpci_base;
+static volatile uint8_t *xhci_bar2_base;
 
 static struct xhci_caps      xhci_caps_cached;
 static bool                  xhci_live;
@@ -129,6 +152,26 @@ static void w32(volatile uint8_t *base, uint32_t off, uint32_t v)
 {
     *(volatile uint32_t *)(base + off) = v;
 }
+
+/*
+ * Thin named wrappers for the Tegra wrapper apertures. They just
+ * forward to r32/w32 with the right base pointer, but having a
+ * named accessor per aperture makes call sites read the same way
+ * Linux's fpci_readl/bar2_readl do — which matters when porting
+ * from the reference driver under docs/reference/.
+ */
+static uint32_t fpci_r32(uint32_t off) { return r32(xhci_fpci_base, off); }
+static uint32_t bar2_r32(uint32_t off) { return r32(xhci_bar2_base, off); }
+/*
+ * Writers wired up here so later Phase 3A.2 tasks (BAR programming,
+ * CSB paging, IFR mailbox handshake) can drop in call sites without
+ * touching the accessor layer. Marked unused to keep the compiler
+ * quiet until those tasks land.
+ */
+__attribute__((unused))
+static void     fpci_w32(uint32_t off, uint32_t v) { w32(xhci_fpci_base, off, v); }
+__attribute__((unused))
+static void     bar2_w32(uint32_t off, uint32_t v) { w32(xhci_bar2_base, off, v); }
 
 /* -------------------------------------------------------------------------- */
 /* Halt + reset                                                                */
@@ -566,10 +609,15 @@ int xhci_init(void)
 {
     xhci_live = false;
 
-    /* VMM mapping for XHCI MMIO was landed in #266 Phase 0 (commit
-     * fb12937). Grab the virtual pointer — identity-mapped on
-     * Jetson so the physical address doubles as a VA. */
-    xhci_cap_base = (volatile uint8_t *)(uintptr_t)TEGRA_XHCI_HCD_BASE;
+    /*
+     * Grab the virtual pointers for all three apertures. The VMM's
+     * 2 MB mapping at 0x03600000 covers FPCI (at base), the Intel-
+     * spec xHCI block at +0x10000, and the BAR2 wrapper at +0x50000.
+     * Identity-mapped on Jetson so physical == virtual at EL2.
+     */
+    xhci_cap_base  = (volatile uint8_t *)(uintptr_t)TEGRA_XHCI_HCD_BASE;
+    xhci_fpci_base = (volatile uint8_t *)(uintptr_t)TEGRA_XHCI_FPCI_BASE;
+    xhci_bar2_base = (volatile uint8_t *)(uintptr_t)TEGRA_XHCI_BAR2_BASE;
 
     /* Sanity check: if the clocks aren't held, CAPLENGTH reads as
      * 0xFF (low byte of 0xFFFFFFFF). Bail early with a clear
@@ -578,6 +626,40 @@ int xhci_init(void)
     if (first == 0xFFFFFFFFu) {
         WARN("xhci: aperture reads 0xffffffff — clocks gated "
              "(did slmos-kexec run without --no-usb-hold?)");
+        return -1;
+    }
+
+    /*
+     * FPCI + BAR2 reachability probe. FPCI config space at offset 0
+     * is a PCI-header dev/vendor word with a known value (Linux
+     * reports 0x229810de for Tegra XHCI). BAR2 at offset 0 has no
+     * published expected value, but 0xFFFFFFFF indicates a dead
+     * aperture (same failure mode as the xHCI sanity check above).
+     *
+     * These reads don't change any state — they just confirm we can
+     * reach the Tegra wrapper apertures before Phase 3A.2.2 starts
+     * programming XUSB_CFG_1/4/7.
+     */
+    uint32_t fpci_id = fpci_r32(XUSB_FPCI_DEV_VENDOR_ID);
+    uint32_t bar2_hd = bar2_r32(0);
+    INFO("xhci: FPCI dev/vendor=0x%08x (expect 0x%08x), BAR2[0]=0x%08x",
+         (unsigned)fpci_id, (unsigned)XUSB_FPCI_DEV_VENDOR_EXPECTED,
+         (unsigned)bar2_hd);
+    if (fpci_id == 0xFFFFFFFFu) {
+        WARN("xhci: FPCI aperture reads 0xffffffff — wrapper clock/"
+             "powergate down?");
+        return -1;
+    }
+    if (fpci_id != XUSB_FPCI_DEV_VENDOR_EXPECTED) {
+        /* Non-fatal: log and continue. NVIDIA could ship a SKU with a
+         * different dev/vendor ID, and Phase 3A.2.2 onward doesn't
+         * depend on this exact value — it's informational. */
+        WARN("xhci: FPCI dev/vendor 0x%08x unexpected (not fatal)",
+             (unsigned)fpci_id);
+    }
+    if (bar2_hd == 0xFFFFFFFFu) {
+        WARN("xhci: BAR2 aperture reads 0xffffffff — wrapper clock/"
+             "powergate down?");
         return -1;
     }
 
@@ -666,6 +748,16 @@ bool xhci_dump_info(void)
                 (unsigned)r32(xhci_op_base, XHCI_OP_USBCMD),
                 (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS),
                 (unsigned)r32(xhci_op_base, XHCI_OP_PAGESIZE));
+    uart_printf("  FPCI @ %p dev/vendor=0x%08x CFG_1=0x%08x CFG_4=0x%08x CFG_7=0x%08x\r\n",
+                xhci_fpci_base,
+                (unsigned)fpci_r32(XUSB_FPCI_DEV_VENDOR_ID),
+                (unsigned)fpci_r32(XUSB_CFG_1),
+                (unsigned)fpci_r32(XUSB_CFG_4),
+                (unsigned)fpci_r32(XUSB_CFG_7));
+    uart_printf("  BAR2 @ %p [0]=0x%08x FW_SCRATCH_DATA0=0x%08x\r\n",
+                xhci_bar2_base,
+                (unsigned)bar2_r32(0),
+                (unsigned)bar2_r32(XUSB_BAR2_ARU_SMI_ARU_FW_SCRATCH_DATA0));
     return true;
 }
 
