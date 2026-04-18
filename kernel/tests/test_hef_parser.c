@@ -820,6 +820,324 @@ static void test_decode_pad_name_truncation(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 5.3: WriteDataCcw action extraction                                   */
+/* -------------------------------------------------------------------------- */
+
+/* Build a ProtoHEFActionWriteDataCcw body: bytes data (field 1) +
+ * cfg_channel_index (field 2). Returns body length. */
+static size_t emit_write_data_ccw(uint8_t *buf,
+                                  const uint8_t *data, size_t data_len,
+                                  uint32_t cfg_channel_index,
+                                  bool emit_cfg)
+{
+    size_t off = 0;
+    emit_lenprefix(buf, &off, /*1=data*/ 1, data, data_len);
+    if (emit_cfg) {
+        emit_varint_field(buf, &off, /*2=cfg_channel_index*/ 2,
+                          cfg_channel_index);
+    }
+    return off;
+}
+
+/* Wrap a WriteDataCcw body into ProtoHEFAction (field 3 in the
+ * `action` oneof). Returns action-body length. */
+static size_t emit_action_with_ccw(uint8_t *buf,
+                                   const uint8_t *ccw_data, size_t data_len,
+                                   uint32_t cfg_channel_index,
+                                   bool emit_cfg)
+{
+    uint8_t ccw[256];
+    size_t  ccw_len = emit_write_data_ccw(ccw, ccw_data, data_len,
+                                          cfg_channel_index, emit_cfg);
+    size_t off = 0;
+    emit_lenprefix(buf, &off, /*3=write_data_ccw*/ 3, ccw, ccw_len);
+    return off;
+}
+
+/* Wrap an Action body into ProtoHEFOperation (field 2=actions, repeated). */
+static size_t emit_operation_with_action(uint8_t *buf,
+                                         const uint8_t *act_body,
+                                         size_t act_len)
+{
+    size_t off = 0;
+    emit_lenprefix(buf, &off, /*2=actions*/ 2, act_body, act_len);
+    return off;
+}
+
+/* Wrap an Operation body into ProtoHEFPreliminaryConfig (field 1=operation). */
+static size_t emit_preliminary_config(uint8_t *buf,
+                                      const uint8_t *op_body, size_t op_len)
+{
+    size_t off = 0;
+    emit_lenprefix(buf, &off, /*1=operation*/ 1, op_body, op_len);
+    return off;
+}
+
+/* Smallest happy path: one NG with a preliminary_config containing a
+ * single Operation → single Action → WriteDataCcw(data, cfg_ch=3). */
+static void test_decode_ccw_single_action(void)
+{
+    const uint8_t payload[] = {
+        0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04,
+    };
+
+    uint8_t act[64];
+    size_t  act_len = emit_action_with_ccw(act, payload, sizeof(payload),
+                                           /*cfg_ch=*/3, /*emit_cfg=*/true);
+    uint8_t op[128];
+    size_t  op_len = emit_operation_with_action(op, act, act_len);
+    uint8_t pre[128];
+    size_t  pre_len = emit_preliminary_config(pre, op, op_len);
+
+    uint8_t ng[256];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*2=preliminary_config*/ 2, pre, pre_len);
+
+    uint8_t blob[512];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, /*2=network_groups*/ 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.ccw_action_count);
+    TEST_ASSERT_FALSE(info.ccw_actions_truncated);
+    TEST_ASSERT_EQUAL_UINT64(sizeof(payload), info.ccw_total_bytes);
+
+    const struct hef_ccw_action *a = &info.ccw_actions[0];
+    TEST_ASSERT_EQUAL_UINT32(sizeof(payload), a->data_size);
+    TEST_ASSERT_TRUE(a->cfg_channel_index_known);
+    TEST_ASSERT_EQUAL_UINT32(3, a->cfg_channel_index);
+    /* data_offset_in_blob should point at the raw payload bytes in
+     * the outer blob. Verify by memcmp. */
+    TEST_ASSERT_EQUAL_MEMORY(payload,
+                             (const uint8_t *)blob + a->data_offset_in_blob,
+                             sizeof(payload));
+}
+
+/* Multiple actions; verify count, offsets are distinct and each
+ * points at the right payload. */
+static void test_decode_ccw_multiple_actions(void)
+{
+    const uint8_t p0[] = { 0x11, 0x22, 0x33, 0x44 };
+    const uint8_t p1[] = { 0xAA, 0xBB, 0xCC };
+    const uint8_t p2[] = { 0x55, 0x66, 0x77, 0x88, 0x99 };
+
+    uint8_t ops[512];
+    size_t  ops_len = 0;
+    const uint8_t *payloads[] = { p0, p1, p2 };
+    size_t sizes[] = { sizeof(p0), sizeof(p1), sizeof(p2) };
+    for (int i = 0; i < 3; i++) {
+        uint8_t act[64];
+        size_t  act_len = emit_action_with_ccw(act, payloads[i], sizes[i],
+                                               (uint32_t)(i + 1), true);
+        uint8_t op[128];
+        size_t  op_len = emit_operation_with_action(op, act, act_len);
+        /* Each Operation goes as a repeated field inside preliminary_config.
+         * Stack them contiguously so emit_preliminary_config sees 3 entries. */
+        emit_lenprefix(ops, &ops_len, /*1=operation*/ 1, op, op_len);
+    }
+    /* ops[] now contains 3 back-to-back len-prefixed Operation entries,
+     * which IS the preliminary_config body. Wrap it as such. */
+    uint8_t ng[512];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*2=preliminary_config*/ 2, ops, ops_len);
+
+    uint8_t blob[1024];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, /*2=network_groups*/ 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(3, info.ccw_action_count);
+    TEST_ASSERT_EQUAL_UINT64(
+        sizeof(p0) + sizeof(p1) + sizeof(p2), info.ccw_total_bytes);
+
+    /* Each recorded action's data_offset should round-trip to the
+     * original payload bytes. */
+    TEST_ASSERT_EQUAL_UINT32(sizeof(p0), info.ccw_actions[0].data_size);
+    TEST_ASSERT_EQUAL_MEMORY(p0,
+        (const uint8_t *)blob + info.ccw_actions[0].data_offset_in_blob,
+        sizeof(p0));
+    TEST_ASSERT_EQUAL_UINT32(sizeof(p1), info.ccw_actions[1].data_size);
+    TEST_ASSERT_EQUAL_MEMORY(p1,
+        (const uint8_t *)blob + info.ccw_actions[1].data_offset_in_blob,
+        sizeof(p1));
+    TEST_ASSERT_EQUAL_UINT32(sizeof(p2), info.ccw_actions[2].data_size);
+    TEST_ASSERT_EQUAL_MEMORY(p2,
+        (const uint8_t *)blob + info.ccw_actions[2].data_offset_in_blob,
+        sizeof(p2));
+    /* Offsets are distinct and monotonically increasing. */
+    TEST_ASSERT_TRUE(info.ccw_actions[0].data_offset_in_blob
+                     < info.ccw_actions[1].data_offset_in_blob);
+    TEST_ASSERT_TRUE(info.ccw_actions[1].data_offset_in_blob
+                     < info.ccw_actions[2].data_offset_in_blob);
+    /* cfg_channel_index round-tripped per action. */
+    TEST_ASSERT_EQUAL_UINT32(1, info.ccw_actions[0].cfg_channel_index);
+    TEST_ASSERT_EQUAL_UINT32(2, info.ccw_actions[1].cfg_channel_index);
+    TEST_ASSERT_EQUAL_UINT32(3, info.ccw_actions[2].cfg_channel_index);
+}
+
+/* Action with data but missing cfg_channel_index: data still recorded,
+ * cfg_channel_index_known=false and the field defaults to 0. */
+static void test_decode_ccw_missing_cfg_channel(void)
+{
+    const uint8_t data[] = { 0x01, 0x02, 0x03 };
+
+    uint8_t act[64];
+    size_t  act_len = emit_action_with_ccw(act, data, sizeof(data),
+                                           /*cfg_ch=*/0, /*emit_cfg=*/false);
+    uint8_t op[128];
+    size_t  op_len = emit_operation_with_action(op, act, act_len);
+    uint8_t pre[128];
+    size_t  pre_len = emit_preliminary_config(pre, op, op_len);
+    uint8_t ng[256];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 2, pre, pre_len);
+    uint8_t blob[512];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.ccw_action_count);
+    TEST_ASSERT_FALSE(info.ccw_actions[0].cfg_channel_index_known);
+    TEST_ASSERT_EQUAL_UINT32(0, info.ccw_actions[0].cfg_channel_index);
+}
+
+/* Only the FIRST network group's CCW actions count; second NG's
+ * preliminary_config is ignored (same policy as pads). */
+static void test_decode_ccw_second_ng_ignored(void)
+{
+    const uint8_t p0[] = { 0xAA };
+    const uint8_t p1[] = { 0xBB, 0xCC };
+
+    /* Helper: build a full NG body containing one CCW action. */
+    uint8_t ng0[128], ng1[128];
+    size_t  ng0_len = 0, ng1_len = 0;
+
+    uint8_t act0[32];
+    size_t  act0_len = emit_action_with_ccw(act0, p0, sizeof(p0), 7, true);
+    uint8_t op0[64];
+    size_t  op0_len = emit_operation_with_action(op0, act0, act0_len);
+    uint8_t pre0[64];
+    size_t  pre0_len = emit_preliminary_config(pre0, op0, op0_len);
+    emit_lenprefix(ng0, &ng0_len, 2, pre0, pre0_len);
+
+    uint8_t act1[32];
+    size_t  act1_len = emit_action_with_ccw(act1, p1, sizeof(p1), 9, true);
+    uint8_t op1[64];
+    size_t  op1_len = emit_operation_with_action(op1, act1, act1_len);
+    uint8_t pre1[64];
+    size_t  pre1_len = emit_preliminary_config(pre1, op1, op1_len);
+    emit_lenprefix(ng1, &ng1_len, 2, pre1, pre1_len);
+
+    uint8_t blob[512];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, 2, ng0, ng0_len);
+    emit_lenprefix(blob, &blen, 2, ng1, ng1_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(2, info.network_group_count);
+    /* Only NG 0's single action was recorded; NG 1's was dropped. */
+    TEST_ASSERT_EQUAL_UINT32(1, info.ccw_action_count);
+    TEST_ASSERT_EQUAL_UINT64(sizeof(p0), info.ccw_total_bytes);
+    TEST_ASSERT_EQUAL_UINT32(7, info.ccw_actions[0].cfg_channel_index);
+}
+
+/* Truncation: overflow HEF_PARSER_MAX_CCW_ACTIONS and expect the
+ * flag to be set, count reflects actual total, stored slots are
+ * capped at MAX. */
+static void test_decode_ccw_truncation(void)
+{
+    /* Emit MAX+3 tiny CCW actions all into the first NG. Use a
+     * 1-byte payload to keep the total blob small. */
+    const uint8_t one_byte = 0x42;
+    const uint32_t overrun = HEF_PARSER_MAX_CCW_ACTIONS + 3;
+
+    /* Allocate a heap-ish buffer on the stack — 256 * ~12 B per
+     * Operation entry ≈ 3 KB; comfortable. */
+    static uint8_t ops_buf[4 * 1024];
+    size_t ops_len = 0;
+    for (uint32_t i = 0; i < overrun; i++) {
+        uint8_t act[16];
+        size_t  act_len = emit_action_with_ccw(act, &one_byte, 1, i, true);
+        uint8_t op[32];
+        size_t  op_len = emit_operation_with_action(op, act, act_len);
+        emit_lenprefix(ops_buf, &ops_len, 1, op, op_len);
+    }
+
+    static uint8_t ng_buf[8 * 1024];
+    size_t ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 2, ops_buf, ops_len);
+
+    static uint8_t blob[16 * 1024];
+    size_t blen = 0;
+    emit_lenprefix(blob, &blen, 2, ng_buf, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(overrun, info.ccw_action_count);
+    TEST_ASSERT_TRUE(info.ccw_actions_truncated);
+    /* Total bytes counts every action, not just the stored ones. */
+    TEST_ASSERT_EQUAL_UINT64(overrun, info.ccw_total_bytes);
+}
+
+/* Action carrying write_data_ccw_ptr (tag 16) instead of write_data_ccw
+ * (tag 3): today we don't extract ptr variants; should count zero and
+ * parse cleanly. */
+static void test_decode_ccw_ptr_variant_skipped(void)
+{
+    /* ProtoHEFActionWriteDataCcwPtr body: offset(1)=128, size(2)=64,
+     * cfg_channel_index(3)=5. */
+    uint8_t ptr[32];
+    size_t  plen = 0;
+    emit_varint_field(ptr, &plen, 1, 128);
+    emit_varint_field(ptr, &plen, 2, 64);
+    emit_varint_field(ptr, &plen, 3, 5);
+
+    uint8_t act[64];
+    size_t  act_len = 0;
+    emit_lenprefix(act, &act_len, /*16=write_data_ccw_ptr*/ 16, ptr, plen);
+
+    uint8_t op[128];
+    size_t  op_len = emit_operation_with_action(op, act, act_len);
+    uint8_t pre[128];
+    size_t  pre_len = emit_preliminary_config(pre, op, op_len);
+    uint8_t ng[256];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 2, pre, pre_len);
+    uint8_t blob[512];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    /* write_data_ccw_ptr is not yet extracted — expect zero count. */
+    TEST_ASSERT_EQUAL_UINT32(0, info.ccw_action_count);
+    TEST_ASSERT_EQUAL_UINT64(0, info.ccw_total_bytes);
+}
+
+/* A blob with no preliminary_config leaves ccw_action_count==0. */
+static void test_decode_ccw_no_preliminary_config(void)
+{
+    /* NG with just a name, no preliminary_config. */
+    uint8_t ng[64];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 10, (const uint8_t *)"noccw", 5);
+
+    uint8_t blob[128];
+    size_t  blen = 0;
+    emit_lenprefix(blob, &blen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(0, info.ccw_action_count);
+    TEST_ASSERT_FALSE(info.ccw_actions_truncated);
+    TEST_ASSERT_EQUAL_UINT64(0, info.ccw_total_bytes);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -852,6 +1170,15 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_tensor_shape_skips_fixed32_unknown_field);
     RUN_TEST(test_decode_tensor_shape_rejects_group_wire_type);
     RUN_TEST(test_decode_pad_name_truncation);
+
+    /* Phase 5.3: WriteDataCcw extraction from preliminary_config */
+    RUN_TEST(test_decode_ccw_single_action);
+    RUN_TEST(test_decode_ccw_multiple_actions);
+    RUN_TEST(test_decode_ccw_missing_cfg_channel);
+    RUN_TEST(test_decode_ccw_second_ng_ignored);
+    RUN_TEST(test_decode_ccw_truncation);
+    RUN_TEST(test_decode_ccw_ptr_variant_skipped);
+    RUN_TEST(test_decode_ccw_no_preliminary_config);
 
     return UnityEnd();
 }
