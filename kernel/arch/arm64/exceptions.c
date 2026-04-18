@@ -180,9 +180,13 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
                   "(PSCI-offing the boot CPU means no supervisor "
                   "can resurrect it).\n");
     } else {
+        /* Cast to unsigned long for %lu — current_cpu is uint32_t
+         * but our uart_printf is variadic; passing a 32-bit value
+         * to %lu reads extra bytes from the arg register on
+         * strict implementations. */
         uart_printf("\nCPU %lu offlining via PSCI — remaining CPUs "
                     "continue (see #216 for auto-resurrection plan).\n",
-                    current_cpu);
+                    (unsigned long)current_cpu);
     }
     psci_cpu_off();
 #endif

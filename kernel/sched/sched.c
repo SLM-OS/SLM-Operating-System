@@ -463,15 +463,18 @@ static void idle_task_func(void *arg)
          * from "secondary is idling but SEV is not reaching it"
          * (counter frozen after initial iterations).
          *
-         * NULL guard: on PLATFORM_HAS_NC_MEMORY the array is
-         * pointer-backed and scheduler_init's ncmem_alloc could in
-         * principle return NULL if the 2 MB NC arena is exhausted.
-         * scheduler_init would panic long before we reach this
-         * idle task, but the check is cheap and makes the idle
-         * loop obviously safe. */
-        if (sched_diag_idle_loops) {
+         * NULL guard applies only on PLATFORM_HAS_NC_MEMORY where
+         * the symbol is pointer-backed (scheduler_init allocates
+         * via ncmem_alloc, which could in principle return NULL if
+         * the 2 MB NC arena is exhausted; scheduler_init panics
+         * first in practice). On other platforms the symbol is a
+         * BSS array whose address is always non-NULL — GCC's
+         * -Werror=address would flag an unconditional `if (arr)`
+         * there, so the check is gated. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (sched_diag_idle_loops)
+#endif
             sched_diag_idle_loops[cpu_id()]++;
-        }
 #if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
         /* Belt-and-braces trace slot at a fixed NC address so early-
          * boot analysis can confirm the counter is wired up even
