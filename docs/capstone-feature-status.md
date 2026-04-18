@@ -159,8 +159,8 @@ from a prior driver (bare-metal x86-64 / UEFI-direct Jetson).
 | Platform shim (`gsp_platform_ops`) | N/A | N/A | Complete (11/11 fns, `kernel/arch/arm64/nvidia_gsp_platform.c`) | Complete (11/11 fns) |
 | Engine reset + PIO upload | N/A | N/A | Working on GSP Falcon | Working on GSP + SEC2 |
 | Signed ucode authentication | N/A | N/A | Blocked: GSP priv-lockdown | FWSEC-FRTS 3/3; Booter Load blocked |
-| Inference backend | CPU (NEON) | CPU (NEON) | CPU (NEON) | CPU (SSE inline-asm) |
-| AI scheduler MLP | CPU | CPU | CPU | CPU |
+| Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU scaffolded** (AI HAT+ via pcie1) | CPU (NEON) | CPU (SSE inline-asm) |
+| AI scheduler MLP | CPU | CPU (routed through `inference_device` abstraction) | CPU | CPU |
 
 ### GPU Bringup Stack (Portable)
 
@@ -185,6 +185,17 @@ stack than discrete Ampere.
 **Pi 5:** VideoCore GPU on BCM2712 has no public bare-metal compute
 documentation. Accessing it would require reverse-engineering the
 VideoCore ISA and firmware. Not feasible within capstone scope.
+
+**Pi 5 Hailo-8 NPU (AI HAT+) — software-complete Phase 0–4:** A full
+alternative inference path via the Pi 5's external PCIe connector.
+Phase 0 research, Phase 1 ARM64 PCIe host controller (`kernel/drivers/pcie/`),
+Phase 2 `inference_device` abstraction, Phase 3 Hailo driver scaffolding
+(`kernel/ai_accel/hailo/`), and Phase 4 nanopb + `.hef` outer-header
+validator all landed without hardware. The probe / firmware upload
+state machine compiles on RASPI5 builds and waits only for a Pi 5 lab
+unit with the HAT+ mounted. See `docs/pi5-ai-hat-plan.md` for the
+full phase breakdown and `docs/pi5-pcie1-registers.md` for the
+`pcie1` + MIP1 register reference.
 
 **Jetson (GA10B):** MMIO confirmed live at EL2 — `NV_PMC_BOOT_0` reads
 `0xB7B000A1` (GA10B, Ampere Rev 10.1), `NV_PMC_BOOT_42` reads
