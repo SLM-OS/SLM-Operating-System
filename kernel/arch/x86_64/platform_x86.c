@@ -123,19 +123,17 @@ void kernel_main_x86(uint32_t mb_addr)
      * back as a zero-size MB2 info struct — detect_ram_end and other
      * callers that walk the info tags will see an empty structure
      * and fall back to their defaults instead of NULL-dereffing. */
-    uint32_t total_size = 0;
     if (mb_addr != 0) {
         /* Read the size from the live structure FIRST — before
          * anything else runs that could alter the page it lives on.
          * Then clamp to the snapshot buffer and memcpy in. */
         const uint8_t *src = (const uint8_t *)(uintptr_t)mb_addr;
-        total_size = *(const uint32_t *)src;
+        uint32_t total_size = *(const uint32_t *)src;
         if (total_size > MB2_SNAPSHOT_MAX)
             total_size = MB2_SNAPSHOT_MAX;
         for (uint32_t i = 0; i < total_size; i++)
             mb2_snapshot[i] = src[i];
     }
-    (void)total_size;
 
     /* Point the rest of the kernel at the snapshot (zero-filled if
      * mb_addr was 0). Both the assembly symbol (multiboot_ptr, read
