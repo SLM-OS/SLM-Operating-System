@@ -76,7 +76,7 @@
  * the same payload, so a divergence would cause the helper's pre-kexec
  * check and SLM-OS's post-kexec check to disagree on "did the method
  * fire?" for no reason. */
-#define HELPER_SMOKETEST_SEM_PAYLOAD  HELPER_SMOKETEST_SEM_PAYLOAD
+#define HELPER_SMOKETEST_SEM_PAYLOAD  0x0000CAFEu
 
 /* Helper: open a device, die on failure. */
 static int xopen(const char *path, int flags)
