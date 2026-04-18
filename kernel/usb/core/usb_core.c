@@ -38,9 +38,13 @@ static bool                  root_device_present;
 
 void usb_core_register_hcd(const struct usb_hcd *hcd)
 {
-    if (active_hcd != NULL) {
+    /* Re-registering the same HCD is a no-op (test suites do this on
+     * every fixture reset) — skip the warning to keep the log clean.
+     * Registering NULL is the documented way to clear the slot, also
+     * silent. Only a genuine two-HCD fight earns the warning. */
+    if (active_hcd != NULL && hcd != NULL && hcd != active_hcd) {
         WARN("usb_core: HCD '%s' replaces '%s' — only one HCD allowed",
-             hcd ? hcd->name : "<null>", active_hcd->name);
+             hcd->name, active_hcd->name);
     }
     active_hcd = hcd;
 }
@@ -86,9 +90,13 @@ int usb_submit_urb(struct usb_urb *urb)
     int rc = active_hcd->submit_urb(urb);
     /* Normalise: a misbehaving HCD that returns a positive status-enum
      * value is remapped to -USB_URB_IO_ERROR so every caller can do a
-     * simple "if (rc < 0)" check. */
-    if (rc > 0)
+     * simple "if (rc < 0)" check. The URB's status is also pulled out
+     * of PENDING so a caller who polls urb->status instead of the
+     * return value isn't left waiting on a dead transfer. */
+    if (rc > 0) {
+        urb->status = USB_URB_IO_ERROR;
         return -USB_URB_IO_ERROR;
+    }
     return rc;
 }
 
@@ -195,6 +203,12 @@ int usb_get_descriptor(struct usb_device *dev,
 int usb_parse_configuration(struct usb_device *dev)
 {
     if (dev == NULL || dev->raw_config_len < sizeof(struct usb_config_descriptor))
+        return -1;
+    /* Defensive cap: usb_core_enumerate already truncates to this size
+     * before writing raw_config_len, but a direct caller (tests, future
+     * class-driver probing) could set a larger value. Reject rather
+     * than walk `end` past the buffer into adjacent struct fields. */
+    if (dev->raw_config_len > sizeof(dev->raw_config))
         return -1;
 
     const uint8_t *p   = dev->raw_config;

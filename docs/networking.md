@@ -703,7 +703,7 @@ host + CDC-ECM USB-A dongle) is viable.
   root-port enumeration state machine (port reset → GET_DESCRIPTOR
   stub → SET_ADDRESS → full descriptor → config tree → parse →
   SET_CONFIGURATION → endpoint_configure).
-- `kernel/tests/test_usb_core.c` — 34 unit tests against a mock HCD:
+- `kernel/tests/test_usb_core.c` — 37 unit tests against a mock HCD:
   URB lifecycle, URB cancel on a pending transfer, URB submit-wait
   timeout (deferred control + cancel-on-expiry), descriptor parse
   (valid, too-short input, invalid header, bad-bLength config
@@ -948,6 +948,9 @@ no hardware dependency):
 | `test_descriptor_parse_invalid_header` | Non-CONFIGURATION top-level descriptor rejected |
 | `test_descriptor_parse_too_short` | Undersized blob rejected without crashing |
 | `test_descriptor_parse_bad_config_blength` | Config header with `bLength != 9` rejected before `p` advances |
+| `test_descriptor_parse_oversized_rejected` | `raw_config_len > sizeof(raw_config)` rejected (prevents OOB walker read) |
+| `test_descriptor_parse_exact_cap_accepted` | `raw_config_len == sizeof(raw_config)` accepted (off-by-one guard on the cap) |
+| `test_hcd_reregister_same_is_silent` | Re-registering the same HCD pointer and clearing via NULL both stay silent — only a genuine two-HCD fight warns |
 | `test_descriptor_parse_interface_overflow` | More than `USB_MAX_INTERFACES_PER_DEV` interfaces: first N accepted, rest dropped without smearing their endpoints onto earlier interfaces |
 | `test_descriptor_parse_endpoint_overflow` | More than `USB_MAX_ENDPOINTS_PER_DEV` endpoints: first N accepted, rest dropped |
 | `test_descriptor_parse_orphan_endpoint` | Endpoint before any interface is skipped |

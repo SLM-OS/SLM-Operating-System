@@ -189,7 +189,7 @@ Applies to both Option A and Option B.
 |---|---|---|
 | `kernel/include/usb.h` | ~260 | Public API: device model, URB, HCD ops, std request/descriptor constants |
 | `kernel/usb/core/usb_core.c` | ~330 | HCD registration, URB submit/wait/cancel, descriptor parser, 10-step root-port enumeration |
-| `kernel/tests/test_usb_core.c` | ~1000 | 34 unit tests against a mock HCD — URB lifecycle, descriptor parse (alt-setting skip, orphan EP, invalid header, undersized input, bad-bLength header, interface + endpoint table overflow), full enumeration, every error-injection branch of enumerate, device_close symmetry on every error path, control-msg return semantics + timeout cancel, return-code normalisation, cancel of a pending URB |
+| `kernel/tests/test_usb_core.c` | ~1100 | 37 unit tests against a mock HCD — URB lifecycle, descriptor parse (alt-setting skip, orphan EP, invalid header, undersized input, bad-bLength header, oversized length rejection, interface + endpoint table overflow), full enumeration, every error-injection branch of enumerate, device_close symmetry on every error path, control-msg return semantics + timeout cancel, return-code normalisation, cancel of a pending URB, silent same-HCD re-registration |
 
 Architecture notes:
 - **No dynamic memory in Phase 1 core.** `struct usb_device root_device`
@@ -231,6 +231,19 @@ Architecture notes:
   deadlines (same pattern as `hw_timeout_start` /
   `hw_timeout_expired` in `component_runtime.c`) before relying on
   real-time bounds on hardware.
+- **Stack-allocated URB lifetime is a Phase-3A contract.**
+  `usb_control_msg` builds its URB on the caller's stack and blocks
+  in `usb_wait_urb` until completion or timeout. Today this is safe
+  because the mock HCD completes synchronously inside `submit_urb`,
+  and on timeout `usb_wait_urb` calls `usb_cancel_urb` before
+  returning. Phase 3A XHCI will deliver completions from IRQ context
+  — its `cancel_urb` implementation MUST block until no in-flight
+  completion can still write to the URB (either the URB has left
+  the hardware ring, or a pending completion IRQ has already fired)
+  before returning, otherwise the stack-dead URB becomes a
+  use-after-return dereference. A per-CPU static URB pool is an
+  alternative if that invariant is hard to guarantee in the XHCI
+  driver.
 
 **Reference material:**
 - FreeBSD's `usb4bsd` is a cleaner reference than Linux's monolithic

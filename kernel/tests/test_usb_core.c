@@ -683,12 +683,15 @@ static void test_cancel_pending_urb(void)
     /* Switch the mock to the deferred path so a bulk URB stays pending. */
     mock.defer_non_control = true;
 
+    /* Real stack buffer — defensive against a future mock change that
+     * might actually dereference urb->buffer. */
+    uint8_t scratch[128] = {0};
     struct usb_urb urb = {0};
     urb.dev           = dev;
     urb.endpoint      = 0x82;
     urb.transfer_type = USB_XFER_BULK;
-    urb.buffer        = (void *)0x1000;   /* not dereferenced */
-    urb.length        = 128;
+    urb.buffer        = scratch;
+    urb.length        = (uint32_t)sizeof(scratch);
 
     int sub = usb_submit_urb(&urb);
     TEST_ASSERT_EQUAL_INT(0, sub);
@@ -769,6 +772,10 @@ static void test_submit_urb_hcd_positive_normalized(void)
     int rc = usb_submit_urb(&urb);
     TEST_ASSERT_TRUE(rc < 0);
     TEST_ASSERT_EQUAL_INT(-USB_URB_IO_ERROR, rc);
+    /* Regression guard: a caller who polls urb->status instead of the
+     * return value must not be left observing PENDING on a transfer
+     * the HCD already rejected. */
+    TEST_ASSERT_EQUAL_INT(USB_URB_IO_ERROR, urb.status);
 }
 
 static void test_poll_no_hcd_is_safe(void)
@@ -870,6 +877,66 @@ static void test_enumerate_no_close_on_device_open_failure(void)
     TEST_ASSERT_EQUAL_INT(0, mock.device_close_count);
 }
 
+static void test_descriptor_parse_oversized_rejected(void)
+{
+    /*
+     * Defensive cap: raw_config_len > sizeof(raw_config) means the
+     * walker would read past the buffer into adjacent struct fields.
+     * Parser must refuse this up front.
+     */
+    struct usb_device dev = {0};
+    /* Well-formed config header; the lie is the length. */
+    dev.raw_config[0] = 0x09;
+    dev.raw_config[1] = USB_DT_CONFIG;
+    dev.raw_config[2] = 0x09;
+    dev.raw_config[3] = 0x00;
+    dev.raw_config_len = sizeof(dev.raw_config) + 1;
+    TEST_ASSERT_NOT_EQUAL(0, usb_parse_configuration(&dev));
+}
+
+static void test_descriptor_parse_exact_cap_accepted(void)
+{
+    /*
+     * Mirror of the oversized test: at exactly sizeof(raw_config) the
+     * parser must still accept. Guards the off-by-one direction of
+     * the defensive cap.
+     */
+    struct usb_device dev = {0};
+    dev.raw_config[0] = 0x09;
+    dev.raw_config[1] = USB_DT_CONFIG;
+    dev.raw_config[2] = 0x09;
+    dev.raw_config[3] = 0x00;
+    dev.raw_config[4] = 0x00;   /* 0 interfaces — nothing to walk */
+    dev.raw_config[5] = 0x01;
+    dev.raw_config[6] = 0x00;
+    dev.raw_config[7] = 0xC0;
+    dev.raw_config[8] = 0x32;
+    dev.raw_config_len = sizeof(dev.raw_config);
+    TEST_ASSERT_EQUAL_INT(0, usb_parse_configuration(&dev));
+}
+
+static void test_hcd_reregister_same_is_silent(void)
+{
+    /*
+     * The test harness re-registers the mock HCD on every fixture
+     * reset; the core must treat same-pointer re-registration as a
+     * no-op rather than logging a warning on every test. This test
+     * doesn't assert log output (the harness doesn't capture it), but
+     * exercises the code path so any future regression that adds
+     * observable side-effects will show up in adjacent state (submit
+     * counts, etc.).
+     */
+    reset_mock_and_core();
+    const struct usb_hcd *first = usb_core_get_hcd();
+    TEST_ASSERT_NOT_NULL(first);
+    /* Re-register the same pointer — must be a no-op. */
+    usb_core_register_hcd(first);
+    TEST_ASSERT_EQUAL_PTR(first, usb_core_get_hcd());
+    /* Clear via NULL — also silent per the new contract. */
+    usb_core_register_hcd(NULL);
+    TEST_ASSERT_NULL(usb_core_get_hcd());
+}
+
 static void test_descriptor_parse_bad_config_blength(void)
 {
     /*
@@ -960,6 +1027,9 @@ int test_suite_usb_core(void)
     RUN_TEST(test_enumerate_no_close_on_port_reset_failure);
     RUN_TEST(test_enumerate_no_close_on_device_open_failure);
     RUN_TEST(test_descriptor_parse_bad_config_blength);
+    RUN_TEST(test_descriptor_parse_oversized_rejected);
+    RUN_TEST(test_descriptor_parse_exact_cap_accepted);
+    RUN_TEST(test_hcd_reregister_same_is_silent);
     RUN_TEST(test_control_msg_returns_actual_length);
     RUN_TEST(test_control_msg_unknown_request_returns_error);
 
