@@ -1053,6 +1053,28 @@ harness builds for with `ENABLE_NETWORKING=ON`):
 | `test_probe_without_functional_descriptor` | Absent Ethernet functional descriptor → probe still succeeds with synthesised MAC + default MTU |
 | `test_rx_completion_error_drops_slot` | Bulk-IN URB completing with `USB_URB_STALL` bumps the RX counter but leaves no payload for `recv()` (driver never forwards errored frames) |
 
+**Tier 6 — XHCI ring primitives** (`kernel/tests/test_xhci_ring.c`,
+runs on every platform; Phase 3A mothballed code kept for regression
+coverage per `docs/jetson-usb-networking-plan.md` §8):
+
+| Test | Description |
+|------|-------------|
+| `test_ring_init_rejects_null` | `xhci_ring_init` rejects NULL ring + NULL TRB buffer |
+| `test_ring_init_rejects_tiny` | `num_trbs < 4` rejected (need room for Link TRB + producer slots) |
+| `test_ring_init_zeroes_and_writes_link` | Init zeroes the buffer and writes a Link TRB with `TYPE=Link`, `TC=1`, cycle=0 |
+| `test_enqueue_rejects_null` | `xhci_ring_enqueue` rejects NULL ring / NULL TRB |
+| `test_enqueue_sets_cycle_to_pcs` | Enqueued TRB's cycle bit always matches ring PCS regardless of what the caller's TRB carried |
+| `test_enqueue_preserves_non_cycle_bits` | IOC / IDT / chain flags pass through unchanged — only the cycle bit is rewritten |
+| `test_enqueue_copies_payload` | All four dwords of the caller's TRB are copied into the ring slot |
+| `test_enqueue_wraps_at_link_trb` | 8-TRB ring → 7 usable slots; the 8th enqueue wraps to slot 0, toggles PCS, flips the Link TRB's cycle bit so the HC follows it |
+| `test_enqueue_double_wrap_toggles_pcs_back` | Two full wraps bring PCS back to the starting value (1 → 0 → 1) |
+| `test_event_ring_init` | `xhci_event_ring_init` zeroes the buffer and sets dequeue=0, ECS=1 |
+| `test_event_ring_peek_empty` | Empty ring (all cycle=0, ECS=1): peek returns false; dequeue doesn't advance |
+| `test_event_ring_peek_consumes_matching_cycle` | Synthetic event with cycle=ECS: peek returns it, advances dequeue, second peek sees mismatch |
+| `test_event_ring_peek_wraps_and_toggles_ecs` | 4 events consumed in a 4-TRB ring: dequeue wraps to 0, ECS toggles 1→0, subsequent peek against stale cycle=1 slots returns false |
+| `test_event_ring_dequeue_phys` | `xhci_event_ring_dequeue_phys` = base + dequeue × 16 (for ERDP programming) |
+| `test_event_ring_peek_null_args` | NULL ring / NULL out-param rejected without dereference |
+
 Run tests with:
 
 ```bash

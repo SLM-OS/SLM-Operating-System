@@ -41,16 +41,32 @@ struct xhci_event_ring {
 };
 
 /*
- * Allocate a producer ring in NC memory, zero it, write the Link
- * TRB at the end pointing back at the first TRB. On success returns
- * 0 and populates *r; on OOM returns -1 and leaves *r zero.
+ * Initialise a producer ring on a caller-supplied buffer. Zero it,
+ * write the Link TRB at the end pointing back at the first TRB.
+ * `trbs_phys` is the physical / DMA-visible address; on Jetson with
+ * NC memory that equals the virtual pointer.
+ *
+ * Returns 0 on success, -1 on bad args.
+ */
+int  xhci_ring_init(struct xhci_ring *r, struct xhci_trb *trbs,
+                    uintptr_t trbs_phys, uint32_t num_trbs);
+
+/*
+ * Allocate NC memory via ncmem_alloc + call xhci_ring_init on it.
+ * On OOM returns -1 and leaves *r zero. Jetson-only path; non-Jetson
+ * platforms should drive xhci_ring_init directly with their own
+ * allocator (e.g. unit tests use a stack-allocated TRB array).
  */
 int  xhci_ring_alloc(struct xhci_ring *r, uint32_t num_trbs);
 
 /*
- * Allocate an event ring segment in NC memory, zero it, and populate
- * the dequeue / cycle state.
+ * Initialise an event ring on a caller-supplied buffer. Zero it,
+ * set dequeue to 0 and cycle state to 1.
  */
+int  xhci_event_ring_init(struct xhci_event_ring *r, struct xhci_trb *trbs,
+                          uintptr_t trbs_phys, uint32_t num_trbs);
+
+/* ncmem-backed variant for Jetson runtime. */
 int  xhci_event_ring_alloc(struct xhci_event_ring *r, uint32_t num_trbs);
 
 /*

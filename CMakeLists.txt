@@ -558,6 +558,10 @@ set(TEST_SOURCES
     # CDC-ECM class driver tests (Phase 2 of #266). Gated on networking
     # because the class driver itself is.
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_cdc_ecm.c>
+    # XHCI ring primitive tests (Phase 3A of #266, mothballed). The
+    # init-with-buffer ring variants don't pull ncmem, so tests drive
+    # them with stack-allocated TRB arrays on every target.
+    kernel/tests/test_xhci_ring.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_lua.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>

@@ -16,7 +16,7 @@ writeup. Tracked in
 | 0 — CBB probe | ✅ done (2026-04-17) | Option A viable; xHCI clock-gated, not firewalled. See §3 Phase 0. |
 | 1 — USB core (`kernel/usb/core/`) | ✅ merged | PR #272. URB / descriptor / enumeration; 37 unit tests against a mock HCD. |
 | 2 — CDC-ECM class driver | ✅ merged | PR #276. Probe + MAC parse + bulk IN/OUT data path + net_driver glue; 25 unit tests. |
-| 3A — XHCI host driver | ⛔ mothballed (2026-04-18) | Scaffolding + caps parse + rings + NO_OP code landed on `feature/usb-networking-phase2`. Blocked at USBCMD.RUN=1 by the SMMU disable in Linux's kexec path. Root cause + mothball analysis in §8. |
+| 3A — XHCI host driver | ⛔ mothballed (2026-04-18) | Scaffolding + caps parse + rings + NO_OP code landed on `feature/usb-networking-phase2`; ring primitives have 15 unit tests (`test_xhci_ring.c`). Blocked at USBCMD.RUN=1 by the SMMU disable in Linux's kexec path. Root cause + mothball analysis in §8. |
 | 4 — lwIP netif integration | ☐🔗 pending | Requires a working Phase 3A, which is blocked. |
 | 5 — testing, reliability, docs | ☐🔗 pending | Requires Phases 3A + 4. |
 
@@ -344,7 +344,7 @@ this section.
 | 1 — kexec xusb clock hold (`scripts/jetson-kexec-slmos.sh`) | ✅ done (`66b7ad9`) | `peek 0x03610000` reads HCIVERSION=0x0120, HCCPARAMS1=0x0180ff05 from SLM-OS post-kexec. |
 | 2 — driver scaffolding (`kernel/drivers/usb/xhci/`) | ✅ done (`47664e4`) | Compiles clean on all four targets. |
 | 3 — capability probe + halt | ✅ done (`47664e4`) | `slmos> xhci` shows 36 slots, 8 ports, 5 interrupters, 64-bit addr, 64-byte ctx. Linux's halt state honoured (USBCMD=0, HCH=1). HCRST on Tegra is lethal (writes brick the aperture) so it's skipped. |
-| 4 — DCBAA + command ring + event ring + NO_OP | ⛔ blocked (`57bdeb8`) | All pre-RUN register writes land cleanly (USBSTS stable at 0x1). USBCMD.RUN=1 wedges the aperture (reads return 0xffffffff). Root cause: SMMU disable — see §8. |
+| 4 — DCBAA + command ring + event ring + NO_OP | ⛔ blocked (`57bdeb8`) | All pre-RUN register writes land cleanly (USBSTS stable at 0x1). USBCMD.RUN=1 wedges the aperture (reads return 0xffffffff). Root cause: SMMU disable — see §8. Ring primitives (cycle-bit handling, Link TRB wrap, event-ring dequeue) have 15 unit tests in `kernel/tests/test_xhci_ring.c` that run on every target. |
 | 5 — port status + ENABLE_SLOT / ADDRESS_DEVICE | not started | Blocked on Step 4. |
 | 6 — control-transfer TRB builder | not started | |
 | 7 — CONFIGURE_ENDPOINT + bulk transfers | not started | |
