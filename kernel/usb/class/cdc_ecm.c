@@ -100,6 +100,17 @@ struct cdc_tx_slot {
 /* -------------------------------------------------------------------------- */
 
 static struct {
+    /*
+     * `probed` is read by every data-path op (init / send / recv /
+     * poll / link_status / get_mac) and written by
+     * probe_and_register. Phase-2 call paths are all single-threaded
+     * init context, but Phase 3A / 4 may drive these ops from
+     * different CPUs, so reads use __ATOMIC_ACQUIRE and writes use
+     * __ATOMIC_RELEASE. ACQUIRE pairs with the RELEASE-store at the
+     * end of probe_and_register so any post-probe observer sees the
+     * fully populated `dev`, `bulk_in`, `bulk_out`, `mac`, and
+     * `max_segment` that precede the final `probed = true` store.
+     */
     bool              probed;
     struct usb_device *dev;
     uint8_t           mac[6];
@@ -279,7 +290,7 @@ static int cdc_ecm_net_init(void)
      * drivers and lets the shell register the driver without
      * surrendering URBs to the HCD prematurely.
      */
-    if (!cdc.probed)
+    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
         return NET_E_NOT_INIT;
     for (unsigned i = 0; i < CDC_ECM_RX_SLOTS; i++) {
         int rc = cdc_rx_submit(&cdc.rx[i]);
@@ -293,7 +304,7 @@ static int cdc_ecm_net_init(void)
 
 static int cdc_ecm_net_send(const void *buf, size_t len)
 {
-    if (!cdc.probed)
+    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
         return NET_E_NOT_INIT;
     if (buf == NULL || len == 0)
         return NET_E_INVAL;
@@ -306,14 +317,20 @@ static int cdc_ecm_net_send(const void *buf, size_t len)
          * Atomic compare-exchange reserves the slot. If two callers
          * race on the same `send()` (future multi-writer path), only
          * one wins the CAS; the other moves to the next slot or
-         * returns NET_E_BUSY. RELAXED on both branches is enough
-         * because no payload has been published yet — all stores to
-         * `slot->buf` / `slot->urb` happen AFTER the reservation wins.
+         * returns NET_E_BUSY.
+         *
+         * Success uses ACQUIRE so the CAS pairs with the RELEASE
+         * store on `in_use = false` in tx_reap and the fail-path
+         * undo below. This makes the ordering explicit at the
+         * class-driver layer rather than relying on an
+         * HCD-provided DSB later in the submit path. The failure
+         * memory order stays RELAXED — a failed CAS observed no
+         * published data and needs no synchronisation.
          */
         bool expected = false;
         if (!__atomic_compare_exchange_n(&slot->in_use, &expected, true,
                                          false /* strong */,
-                                         __ATOMIC_RELAXED,
+                                         __ATOMIC_ACQUIRE,
                                          __ATOMIC_RELAXED))
             continue;
 
@@ -346,7 +363,7 @@ static int cdc_ecm_net_send(const void *buf, size_t len)
 
 static int cdc_ecm_net_recv(void *buf, size_t max_len)
 {
-    if (!cdc.probed)
+    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
         return NET_E_NOT_INIT;
     if (buf == NULL)
         return NET_E_INVAL;
@@ -405,7 +422,7 @@ static bool cdc_ecm_net_link_status(void)
     /* Phase 2 assumes the link is up once the device is probed. The
      * interrupt-IN notification endpoint will drive a real status bit
      * once it's wired in a later phase (#266 out-of-scope for now). */
-    return cdc.probed;
+    return __atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE);
 }
 
 static const struct net_driver cdc_ecm_driver = {
@@ -426,8 +443,11 @@ int cdc_ecm_probe_and_register(void)
 {
     /* Every probe starts from a clean slate so a subsequent call that
      * finds no device (or a non-CDC device) can't leave stale state
-     * visible via cdc_ecm_get_mac() / cdc_ecm_net_link_status(). */
-    cdc.probed = false;
+     * visible via cdc_ecm_get_mac() / cdc_ecm_net_link_status().
+     * RELAXED is fine here because no data has been published yet —
+     * the matching ACQUIRE in readers synchronises against the final
+     * RELEASE store at the end of probe. */
+    __atomic_store_n(&cdc.probed, false, __ATOMIC_RELAXED);
 
     struct usb_device *dev = usb_core_first_device();
     if (dev == NULL) {
@@ -524,7 +544,11 @@ int cdc_ecm_probe_and_register(void)
         cdc.tx[i].in_use = false;
         cdc.tx[i].completed = false;
     }
-    cdc.probed = true;
+    /* RELEASE: publish cdc.dev / bulk_in / bulk_out / mac / max_segment
+     * + the freshly-zeroed slot state before any data-path op sees
+     * `probed == true` and dereferences them. Every reader in this
+     * file pairs an ACQUIRE load. */
+    __atomic_store_n(&cdc.probed, true, __ATOMIC_RELEASE);
 
     INFO("cdc_ecm: probed — mac=%02x:%02x:%02x:%02x:%02x:%02x mtu=%u "
          "bulk_in=0x%02x bulk_out=0x%02x",
@@ -538,13 +562,13 @@ int cdc_ecm_probe_and_register(void)
 
 void cdc_ecm_poll(void)
 {
-    if (cdc.probed)
+    if (__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
         usb_core_poll();
 }
 
 const uint8_t *cdc_ecm_get_mac(void)
 {
-    return cdc.probed ? cdc.mac : NULL;
+    return __atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE) ? cdc.mac : NULL;
 }
 
 uint16_t cdc_ecm_get_max_segment(void)
