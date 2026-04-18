@@ -55,18 +55,40 @@ The BCM2712 exposes two PCIe root complexes relevant here:
 
 **Key consequence:** The AI HAT+ is on `pcie1`, which has zero existing code. The RP1-specific MSIX_CFG bug tracked in #247 does **not** apply — `pcie1` endpoints use a MIP (Message-Signaled Interrupt Peripheral) address programmed into the endpoint's MSI table. Phase 0 research discovered Hailo's driver uses **plain MSI (not MSI-X)** via `pci_enable_msi()` — one vector per device. Plan calls throughout for `pcie_alloc_msix`; the Phase 1 PCIe API must also expose `pcie_alloc_msi()`.
 
-**Config-space gotcha:** `pcie1` is **disabled** in the stock Pi 5 DTS. It only enables when `dtparam=pciex1` (or the AI HAT+ HAT overlay) is in `config.txt`. Phase 0 smoke test must confirm the HAT+ is visible under stock Linux before SLM-OS attempts probe — otherwise SLM-OS sees a dead RC. See `docs/reference/rpi-linux-pciex1-compat-pi5-overlay.dts`.
+**Config-space gotcha (superseded 2026-04-17):** An earlier revision said `dtparam=pciex1` in `config.txt` enables pcie1. **It does not.** Testing on pi-5-1 (Sep 2024 EEPROM) confirmed `dtparam=pciex1` is not a recognized firmware parameter — `vcgencmd get_config pciex1` returns "pciex1 is unknown". Under stock Raspberry Pi OS the HAT+ enumerates as `0001:01:00.0 [1e60:2864]` with NO pcie-related setting in `config.txt`; the bring-up is done by Linux's `brcm-pcie` kernel driver at probe time. See §2.3 for what this means for SLM-OS.
 
-### 2.3 Pi 5 firmware constraints
+### 2.3 Pi 5 firmware constraints — REVISED 2026-04-17
 
-The Pi 5 VideoCore firmware brings up `pcie1` and trains the link during early boot if `dtparam=pciex1` is set (the default on Pi 5 HAT+ builds). SLM-OS inherits a live, trained link — it does not need to own the PCIe controller reset or retraining sequence. This matches how `pcie2`/RP1 is inherited today.
+**Earlier (wrong) version of this section said:** *"The Pi 5 VideoCore firmware brings up pcie1 and trains the link during early boot. SLM-OS inherits a live, trained link."*
 
-What SLM-OS **does** need to do:
-- Read the device's BARs via config space.
-- Map BARs into SLM-OS's MMU.
-- Enable bus master on the device.
-- Allocate MSI(-X) vectors and program the device's MSI-X table.
-- Route MSI-X writes through MIP1 (the external-PCIe counterpart to MIP0) into GIC SPIs.
+**What actually happens** (confirmed on pi-5-1 with AI HAT+ mounted and Sep 2024 EEPROM):
+
+- **`pcie2`/RP1** — firmware DOES train at boot. Status register `0x10_00124068` reads `0x3e0b0` (PHY + DL both set) before any OS runs. SLM-OS inherits the trained link and just needs to access RP1 peripherals at `0x1F00000000+`.
+- **`pcie1`/external** — firmware leaves in reset. Status register `0x10_00114068` reads `0x1e08f` (PHY + DL both clear) and CTRL `0x10_00114064` reads `0x00000000` (PERSTB=0 → endpoint held in reset) until a Linux kernel driver brings it up. Under Pi OS, `brcm-pcie`'s `brcm_pcie_setup()` does the work at `~1.9s` into kernel boot (visible in dmesg). SLM-OS has no equivalent driver today.
+- **EEPROM constraint** — the Sep 2024 EEPROM is required for SLM-OS's RP1 UART to survive the firmware → kernel handoff (see `pi5_eeprom_findings.md`: firmware ≥ v2025.01.22 silently breaks writes to `0x1F00030000`). So "upgrade the EEPROM and hope firmware auto-trains pcie1" is not an option — we need to do the training ourselves.
+- **`dtparam=pciex1`** is not a valid firmware option on this EEPROM. Setting it in `config.txt` has no effect.
+
+**Consequence:** SLM-OS must implement its own PCIe link-training path for pcie1 — porting `brcm_pcie_setup()` from `drivers/pci/controller/pcie-brcmstb.c` (full reference cached at `docs/reference/rpi-linux-pcie-brcmstb.c`). This is **Phase 1.5** below, inserted between the existing Phase 1 (enumerator) and Phase 3 (Hailo driver).
+
+What SLM-OS needs to do (now that the assumption about firmware training is gone):
+
+1. **Reset/train pcie1** at boot (Phase 1.5 new work):
+   - Take RC out of reset (platform reset domains 7, 43 per `bcm2712.dtsi`).
+   - Run the rescal PHY calibration.
+   - Program MPS/MRRS, CLKREQ, HARD_DEBUG.
+   - Deassert PERST# to the endpoint.
+   - Wait for `PCIE_MISC_PCIE_STATUS.{PHY_LINKUP, DL_ACTIVE}` both set, with a ~100 ms timeout.
+2. Read the endpoint's BARs via config space (Phase 1 existing).
+3. Map BARs into SLM-OS's MMU (Phase 1 existing).
+4. Enable bus master (Phase 1 existing).
+5. Allocate MSI vectors via MIP1 and program the endpoint's MSI capability (Phase 1 existing).
+
+**Phase 0 hardware smoke test result (2026-04-17):** AI HAT+ physically works. Under Raspberry Pi OS on the same pi-5-1:
+```
+0001:01:00.0 Co-processor [0b40]: Hailo Technologies Ltd. Hailo-8 AI Processor [1e60:2864] (rev 01)
+[    1.983256] brcm-pcie 1000110000.pcie: link up, 5.0 GT/s PCIe x1 (!SSC)
+```
+No hardware or seating problems — the gap is purely the missing link-training code in SLM-OS.
 
 ### 2.4 MIP1 (external-PCIe MSI)
 
@@ -117,6 +139,29 @@ Each phase is self-contained and deliverable. Later phases assume earlier ones l
 - Live BCM2712 enumeration (QEMU tests don't cover `pcie_bcm2712.c` — mocked-ops test possible but was deferred).
 - Real MIP1 MSI delivery into GIC SPI 247..254.
 - Pi 5 BAR resource programming (currently inherited from VideoCore firmware).
+
+### Phase 1.5: brcm-pcie link training for pcie1 (NEW, 2026-04-17)
+
+**Why this phase exists** — see §2.3 above for the full story. Short version: firmware does NOT train pcie1; Linux's `brcm-pcie` driver does, at kernel boot. SLM-OS has to do the same if it wants `hailo probe` to succeed.
+
+**Deliverables:**
+
+- Port of `brcm_pcie_setup()` from `drivers/pci/controller/pcie-brcmstb.c` (cached at `docs/reference/rpi-linux-pcie-brcmstb.c`) into `kernel/drivers/pcie/pcie_bcm2712.c`. The Linux function does ~400 lines of work — SLM-OS only needs the subset for the `brcm,bcm2712-pcie` compatible string (2712-specific paths).
+- Reset-domain access: `pcie_rescal` + reset IDs 7 and 43 from `bcm2712.dtsi:1048`. Needs either a minimal reset-controller driver or a direct-register implementation for the CPR / BCM reset block at `0x10_00000000+`.
+- PHY / rescal programming: MDIO-style access via `PCIE_RC_DL_MDIO_{ADDR,WR_DATA,RD_DATA}` at RC offsets 0x1100/0x1104/0x1108 (`pcie-brcmstb.c:61-63`).
+- Outbound window programming: `PCIE_MISC_CPU_2_PCIE_MEM_WIN*` — tell the RC which PCIe-side addresses map to which CPU phys addresses. Today's code assumes firmware set these; with pcie1 reset, we have to program them ourselves.
+- Inbound window programming: `PCIE_MISC_UBUS_BAR1_CONFIG_REMAP_*` for MSI routing through MIP1.
+- Link-training wait: poll `PCIE_MISC_PCIE_STATUS` at offset `0x4068` for `PHY_LINKUP | DL_ACTIVE`, 100 ms budget with 1 ms poll interval.
+
+**Test plan:**
+- No unit tests possible for this — register sequences are platform-specific and depend on real HW responses. Validated by `hailo probe` on pi-5-1: `vendor=0x1E60 device=0x2864` → link trained, Phase 3 unblocked.
+- Boot-reliability check via `labctl boot_test --count 10`: full boot including link train, no hangs, no aborts.
+
+**Risks:**
+- Reset controller registers at `0x10_00000000+` are not documented in any datasheet available to the project. The Pi kernel's `drivers/reset/reset-brcmstb-rescal.c` is the only reference. Likely 1–2 days of register-poking.
+- Some brcm-pcie code paths in Linux depend on a fully-initialised clock tree. SLM-OS bypasses most clocks (firmware leaves them in a stable state). If any required clock is gated at SLM-OS boot, link training will hang — and the failure mode is silent (same `status=0x1e08f` as now).
+
+**Scope boundary:** Phase 1.5 does NOT require Linux-compatible DT parsing or a generic reset-controller framework. Direct MMIO pokes with the constants from `pcie-brcmstb.c` are enough, on the assumption that Pi 5 firmware leaves clocks in a usable state (which it does — pcie2/RP1 proves this).
 
 ### Phase 2: Inference Device Abstraction ✅ complete (2026-04-17)
 
