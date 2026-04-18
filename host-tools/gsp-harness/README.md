@@ -106,8 +106,10 @@ make test-bringup
 # (Path 3), the FECS method gateway (Phase 5), and the channel
 # handoff reader/validator (Phase 6 — magic scan + validation of the
 # handoff block written by scripts/gpu-channel-helper.c, including
-# the v2 work_submit_token field used by the Phase 7 doorbell).
-# 38 test cases.
+# the v2 work_submit_token field used by the Phase 7 doorbell), and
+# the Phase 7 SEMAPHORE_RELEASE pushbuffer builder (dword-by-dword
+# encoding regression — catches method-family, bit-position, and
+# VA-truncation bugs). 41 test cases.
 make test-ga10b-bringup
 
 # Jetson GA10B platform shim — portable surfaces of
