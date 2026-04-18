@@ -509,6 +509,21 @@ fail_free:
     return -1;
 }
 
+/* DELIBERATE asymmetry: this only frees the FWSEC-FRTS Phase 1
+ * buffers (`dma_imem_va`, `dma_dmem_va`). The booter image, the
+ * WprMeta DMA buffer, and the Stage A radix3 chain pages are
+ * freed ONLY in `gsp_bringup_booter_load`'s fail-path on the
+ * `goto fail` cleanup path. On the success path they stay live
+ * because SEC2 keeps DMA-reading them after the booter halts and
+ * the GSP RISC-V startup uses the same WprMeta address.
+ *
+ * This means harness `--trace`-mode callers that exit early (after
+ * Phase 4b but before booter halt) leak those buffers. PR #296
+ * review flagged the asymmetry — the consolidation is tracked as
+ * a focused follow-up rather than bundled here, because changing
+ * the contract requires auditing every caller (the harness, the
+ * x86 shell `gpu init`) and adding state that distinguishes
+ * "freed by booter_load fail-path" from "still live for SEC2". */
 void gsp_bringup_free(struct gsp_bringup *b)
 {
     if (!b || !gsp_platform || !gsp_platform->dma_free) return;
@@ -780,7 +795,13 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * HS booter walks `sysmemAddrOfRadix3Elf` as soon as it passes
      * magic/revision validation; without a non-NULL chain it
      * NULL-derefs and hangs forever. The four pages stay around
-     * until bringup completes (or fails); fail-path frees them. */
+     * until bringup completes (or fails); fail-path frees them.
+     *
+     * Four explicit allocs rather than a loop / table — at this
+     * count the explicit form is shorter and clearer. Worth
+     * factoring into a `for (i; i < N; i++)` only if Stage B/C
+     * grows the page count past ~6 OR if the alignment / size
+     * arguments start varying per-page. (Reviewed PR #296.) */
     b->last_error_phase = 103;
     b->dma_radix3_l0_va = gsp_dma_alloc_checked(RADIX3_PAGE_SIZE,
                                                  RADIX3_PAGE_SIZE,
