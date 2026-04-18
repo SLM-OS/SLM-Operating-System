@@ -5,6 +5,7 @@
  */
 
 #include "test_harness.h"
+#include "../include/platform.h"
 #include "../include/uart.h"
 #include "../include/semihosting.h"
 #include "../include/slm_ffi.h"
@@ -85,6 +86,24 @@ void test_harness_init(void)
     uart_puts("#    SLM-OS Test Suite (Unity)        #\n");
     uart_puts("########################################\n");
     uart_puts("\n");
+
+#if defined(PLATFORM_X86_64)
+    /* Production builds wire `pci` and `gpu` shell commands from
+     * shell_init() inside shell_task_entry. The test build never
+     * spawns the shell task — it runs the harness from main_task and
+     * exits via semihosting — so any test that asserts on these
+     * commands' presence (e.g. test_nvidia_gpu_shell_command_registered,
+     * test_x86_gpu_cmd_in_externals) needs the registrations to fire
+     * here. Replicating the shell_init platform block is the smallest
+     * change that lets both code paths share the same registration
+     * function. */
+    {
+        extern void pci_register_shell_commands(void);
+        extern void nvidia_gpu_register_shell_commands(void);
+        pci_register_shell_commands();
+        nvidia_gpu_register_shell_commands();
+    }
+#endif
 }
 
 int test_harness_run_all(void)

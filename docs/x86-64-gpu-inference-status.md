@@ -1,6 +1,6 @@
 # x86-64 GPU Inference — Live Status & Handoff
 
-**Last updated:** 2026-04-16
+**Last updated:** 2026-04-18
 **Owner role:** open
 **Companion docs:**
 - `docs/x86-64-capstone-gaps.md` — top-level capstone gap map (this handoff is the live detail for its §3).
@@ -23,14 +23,17 @@ forward are realistic.
   The first secure Falcon ucode in NVIDIA's GSP bringup chain halts
   cleanly on test-pc, 3 consecutive runs, ERR_REG=0, WPR2 populated.
   This is the gating E3.4 capstone milestone — delivered.
-- **Booter Load (E3.4.d) and everything downstream is hard-blocked**
-  on this platform. Root cause: the BSI (Bootstrap Sequencer
-  Instruction) re-runs VBIOS DEVINIT after every vfio-pci FLR, and
-  the DEVINIT script raises SEC2's Priv-Level-Mask above our
-  userspace-VFIO access level. We verified this by scanning SEC2's
-  first 4 KB of register space: 865 / 1024 offsets priv-locked,
-  including every standard Falcon-v4 PLM candidate offset. Tracked
-  as **issue #185**.
+- **Booter Load (E3.4.d) is partially unblocked via Linux→SLM-OS
+  kexec inheritance** (§4.2.k, §4.2.l). Boot Ubuntu, `modprobe
+  nouveau modeset=1`, wait ~3 s for nouveau's deferred unlock, then
+  kexec to SLM-OS. SEC2 CPUCTL is inherited at `0x00000020`
+  (unlocked), `gpu init` runs the full bringup state machine,
+  FWSEC-FRTS Phase 1 succeeds against the inherited state with WPR2
+  populated. Phase 2 (Booter Load on SEC2 itself) still fails — but
+  for a newly-identified reason (BROM-PLM independence), not the
+  original "SEC2 CPUCTL locked" issue. The original bare-metal
+  blocker (§2.5: 865/1024 offsets priv-locked from UEFI POST onward)
+  remains for any non-kexec boot path. Tracked as **issue #185**.
 - **The portable half of the GSP bringup code transfers cleanly to
   Jetson and bare-metal SLM-OS.** ~60% of the nouveau GSP-loader
   port is done, all of it platform-agnostic (VBIOS parse, Falcon
@@ -827,6 +830,102 @@ reading to root-cause.
 which of the three paths pans out first. All the hard parts (SEC2
 unlock understanding, scripts, build system integration, bare-metal
 preservation) are in tree.
+
+### 4.2.l Option B-kexec — **`gpu init` end-to-end via kexec** (NEW 2026-04-18)
+
+Direct continuation of §4.2.k. With kexec inheritance proven to
+shell-prompt level, the next experiment ran `gpu init` from the
+SLM-OS shell post-handoff to drive the full GSP-RM bringup state
+machine against the inherited-unlocked SEC2.
+
+**Two pre-existing bugs surfaced and were fixed before the
+experiment could complete usefully:**
+
+1. **`falcon_pio_upload_imem` wrote IMEMT once, not per page.** The
+   Falcon's IMEMC AINCW bit auto-increments the write *address*
+   within a 256-byte page, but the page-tag register IMEMT must be
+   re-written for each new page. nvgpu's
+   `gk20a_falcon_copy_to_imem` writes IMEMT every 64 u32 with an
+   incrementing tag (three independent reference sites in
+   `docs/reference/nvgpu-hal-falcon-falcon_gk20a_fusa.c`); SLM-OS
+   was tagging every page as page 0, which silently corrupts the
+   HS-bootrom signature for any multi-page upload (e.g. the ~18
+   KB Booter ucode). Fix in `kernel/gpu/nvidia/falcon.c` + 3
+   regression tests in `host-tools/gsp-harness/test_falcon.c`
+   (multi-page, sub-page, exact-page boundary cases).
+
+2. **Built-in `gpu` shell command shadowed the NVIDIA dispatcher
+   on x86-64.** `kernel/src/shell.c` carried a cross-platform
+   `gpu` cmd that only handled `read` (Jetson) or default-info.
+   `find_command()` checks built-ins before externals, so the
+   NVIDIA driver's external registration with
+   `init/sec2/vram/regs` subcommands was unreachable from the
+   shell — `gpu init` returned the stub info display. Fix:
+   guard the built-in entry behind `#if !defined(PLATFORM_X86_64)`
+   so on Jetson it still carries `gpu read <hex-offset>` for the
+   integrated GA10B aperture, but on x86-64 the NVIDIA dispatcher
+   wins. Tests in `kernel/tests/test_x86_boot.c` (x86 negative)
+   and `kernel/tests/test_shell.c` (cross-platform mirror).
+
+**Hardware experiment outcome on test-pc (combined branch):**
+
+```
+[GPU] Starting GSP-RM bringup on GA107...
+[GPU] SEC2 CPUCTL = 0x00000000  HWCFG2 = 0x000047f7   ← inherited unlocked
+[GSP] firmware loaded (version 535.113.01): all 4 blobs OK
+[GPU] Phase 1: FWSEC-FRTS — preparing bringup...
+[GPU] FWSEC-FRTS SUCCESS — WPR2: lo=0x1ffffe00 hi=0x00000000
+[GPU] Phase 2: Booter Load on SEC2...
+[GPU] Booter Load FAILED at phase 106
+[GPU]   SEC2 CPUCTL=0x00000020 (halted=0)              ← STOPPED, not HALTED
+[GPU]   SEC2 BROM MOD_SEL=0xbadf5720                   ← BROM still PRI-locked
+```
+
+**New finding — BROM aperture stays priv-locked even under
+nouveau.** Cross-checked from Linux+nouveau directly:
+`peek SEC2+0x842200/210/220` returns `0xbadf5040` PRI poison both
+on a healthy nouveau host AND inside SLM-OS post-kexec. Yet
+nouveau drives Booter Load successfully. Conclusion:
+
+- Nouveau's deferred ~3.4 s unlock trigger covers SEC2's CPUCTL
+  PLM but **not** the BROM PLM.
+- Nouveau therefore does NOT write to
+  `NV_PSEC2_BROM_BASE + FALCON_BROM_{ENGIDMASK,UCODE_ID,MOD_SEL}`
+  from the CPU side.
+- SLM-OS's `bringup.c:710-716` writes to that aperture, those
+  writes are silently dropped by the PRI arbiter, and the
+  HS-bootrom computes a signature against zero selectors → STOPs
+  at the first instruction.
+- The right path is almost certainly **DMEM-patching the Booter
+  ucode itself** with the engine-id/ucode-id/RSA-mode-select
+  values at known offsets — the same DMEMMAPPER pattern already
+  used for FWSEC-FRTS in `gsp_dmemmapper_patch`.
+
+**Subsidiary observation — inherited scrub state:** SEC2 HWCFG2 =
+`0x47f7` under both nouveau-direct and SLM-OS-post-kexec. The
+`SCRUBBING` bit (0x2000) is cleared, matching the post-init state.
+Inheritance preserves scrub completion in addition to CPUCTL.
+
+**What's confirmed working end-to-end:**
+
+| Capability | State |
+|---|---|
+| Linux→SLM-OS kexec inheritance | ✅ proven on hardware (twice in 2026-04-18 session) |
+| LAPIC post-kexec | ✅ working (PR #268) |
+| SEC2 CPUCTL inherited unlock | ✅ confirmed `0x00000020` |
+| `gpu init` reaches NVIDIA dispatcher | ✅ proven (PR #283) |
+| FWSEC-FRTS Phase 1 post-kexec | ✅ WPR2 populated, identical to bare-metal |
+| Booter Load Phase 2 post-kexec | ❌ blocked on BROM-PLM / DMEM-patch path mismatch |
+
+**Next investigation handoff:** diff against nouveau's
+`r535_booter_load` (Linux 6.7+ source, `drivers/gpu/drm/nouveau/
+nvkm/subdev/gsp/r535.c`) to find where it deposits the booter's
+engine-id/ucode-id/sig-mode selectors. The mechanism is almost
+certainly DMEM-patching at booter-internal offsets, not CPU-side
+BROM writes. Once located, the equivalent path needs to land in
+SLM-OS's `gsp_bringup_booter_load` between FWSEC-FRTS completion
+and the Phase 9 STARTCPU. Estimated effort: 1-2 days for diff +
+implementation + test, plus another hardware iteration to verify.
 
 ### 4.3 Option C — **Kernel-shim / patched vfio-pci**
 
