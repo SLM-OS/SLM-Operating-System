@@ -19,6 +19,7 @@
 #include "ai_inference.h"
 #include "ai_state.h"
 #include "ai_types.h"
+#include "inference_device.h"
 #include "sched.h"
 #include "smp.h"
 #include "slm_ffi.h"
@@ -164,9 +165,76 @@ static void ai_mlp_shutdown(void)
     }
 }
 
+/*
+ * MLP inference routed through the inference_device abstraction.
+ *
+ * Same signature as ai_schedule_mlp so it drops into the existing
+ * ai_assign_cpu_common dispatcher unchanged. The underlying device
+ * is whichever backend registered as "cpu-mlp" at boot — by default
+ * the NEON/SSE wrapper in inference_cpu.c. When the Hailo backend
+ * lands (Phase 3/5) it will register as a separate device and the
+ * MLP policy switches to it via inference_device_set_default()
+ * rather than any edit here.
+ *
+ * The FP context save/restore still happens in the enclosing
+ * ai_assign_cpu_common call — this wrapper does not add its own.
+ *
+ * The cpu-mlp device pointer is cached after the first lookup to
+ * keep assign_cpu off the registry's linear-scan + string-compare
+ * path. Safe because the backend is registered once at boot and
+ * never removed; concurrent first-touch stores write the same
+ * pointer, so the non-atomic access is benign.
+ */
+static struct inference_device *cached_cpu_mlp_dev;
+
+static int ai_schedule_mlp_via_device(const float *state,
+                                      struct ai_sched_action *action)
+{
+    struct inference_device *dev = cached_cpu_mlp_dev;
+    if (!dev) {
+        dev = inference_device_find("cpu-mlp");
+        if (!dev) {
+            /* Backend not registered (AI_SCHED=OFF leaves the
+             * registry empty). Fall back to the direct call. */
+            return ai_schedule_mlp(state, action);
+        }
+        cached_cpu_mlp_dev = dev;
+    }
+
+    float logits[AI_SCHED_N_ACTIONS];
+    inference_tensor_t in = {
+        .data    = (void *)state,
+        .n_elems = AI_STATE_DIM,
+        .dtype   = INF_DTYPE_FP32,
+        .rank    = 1,
+        .shape   = { AI_STATE_DIM, 0, 0, 0 },
+    };
+    inference_tensor_t out = {
+        .data    = logits,
+        .n_elems = AI_SCHED_N_ACTIONS,
+        .dtype   = INF_DTYPE_FP32,
+        .rank    = 1,
+        .shape   = { AI_SCHED_N_ACTIONS, 0, 0, 0 },
+    };
+
+    int rc = inference_run(dev, INF_BUILTIN_HANDLE, &in, &out);
+    if (rc != INF_OK) return -1;
+
+    /* argmax inline — ai_argmax is static in ai_inference.c. Three
+     * lines of code; not worth exposing the helper. */
+    int best = 0;
+    float best_val = logits[0];
+    for (int i = 1; i < AI_SCHED_N_ACTIONS; i++) {
+        if (logits[i] > best_val) { best_val = logits[i]; best = i; }
+    }
+    ai_decode_action(best, action);
+    return 0;
+}
+
 static uint32_t ai_mlp_assign_cpu(struct task *task)
 {
-    return ai_assign_cpu_common(task, ai_schedule_mlp, &ai_mlp_stats);
+    return ai_assign_cpu_common(task, ai_schedule_mlp_via_device,
+                                &ai_mlp_stats);
 }
 
 const struct sched_policy_ops sched_policy_ai_mlp = {

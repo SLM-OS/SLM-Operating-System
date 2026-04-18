@@ -176,26 +176,28 @@ int ai_validate_action(const struct ai_sched_action *action, uint32_t num_cores)
 /*
  * 4-layer forward pass: input → hidden0 → hidden1 → hidden2 → logits
  *
- * Uses two stack-allocated scratch buffers that alternate as input/output
- * across layers. Maximum dimension is AI_MLP_MAX_DIM (256).
+ * Writes the raw logits vector (length AI_SCHED_N_ACTIONS) to
+ * *logits_out. Callers do argmax + decode themselves, so the same
+ * forward path is usable by both the direct policy entry point
+ * (ai_schedule_mlp below) and the inference_device abstraction in
+ * kernel/inference/inference_cpu.c — the latter needs raw logits
+ * so the scheduler-specific decode logic stays out of the generic
+ * tensor run path.
  *
  * Layer 0: [108] → W0[256×108] → ReLU → [256]
  * Layer 1: [256] → W1[256×256] → ReLU → [256]
  * Layer 2: [256] → W2[128×256] → ReLU → [128]
  * Layer 3: [128] → W3[N×128]   →        [N]    (logits, no activation)
  */
-static int forward_pass(const float state[AI_STATE_DIM],
-                        const float *w0, const float *b0,
-                        const float *w1, const float *b1,
-                        const float *w2, const float *b2,
-                        const float *w3, const float *b3,
-                        struct ai_sched_action *action)
+static void forward_logits(const float state[AI_STATE_DIM],
+                           const float *w0, const float *b0,
+                           const float *w1, const float *b1,
+                           const float *w2, const float *b2,
+                           const float *w3, const float *b3,
+                           float *logits_out)
 {
-    /* Stack-allocated scratch buffers — thread safe, no locking needed.
-     * Two buffers alternate: one is input, the other is output. */
     float buf_a[AI_MLP_MAX_DIM];  /* 256 floats = 1 KB */
     float buf_b[AI_MLP_MAX_DIM];  /* 256 floats = 1 KB */
-    float logits[AI_SCHED_N_ACTIONS];
 
     /* Layer 0: state[108] → buf_a[256] */
     ai_matvec(w0, b0, state, buf_a, AI_MLP_LAYER0_OUT, AI_MLP_LAYER0_IN);
@@ -209,15 +211,46 @@ static int forward_pass(const float state[AI_STATE_DIM],
     ai_matvec(w2, b2, buf_b, buf_a, AI_MLP_LAYER2_OUT, AI_MLP_LAYER2_IN);
     ai_relu(buf_a, AI_MLP_LAYER2_OUT);
 
-    /* Layer 3: buf_a[128] → logits[N_ACTIONS] (no activation) */
-    ai_matvec(w3, b3, buf_a, logits, AI_MLP_LAYER3_OUT, AI_MLP_LAYER3_IN);
+    /* Layer 3: buf_a[128] → logits_out[N_ACTIONS] (no activation) */
+    ai_matvec(w3, b3, buf_a, logits_out,
+              AI_MLP_LAYER3_OUT, AI_MLP_LAYER3_IN);
+}
 
-    /* Select action with highest logit */
+static int forward_pass(const float state[AI_STATE_DIM],
+                        const float *w0, const float *b0,
+                        const float *w1, const float *b1,
+                        const float *w2, const float *b2,
+                        const float *w3, const float *b3,
+                        struct ai_sched_action *action)
+{
+    float logits[AI_SCHED_N_ACTIONS];
+
+    forward_logits(state, w0, b0, w1, b1, w2, b2, w3, b3, logits);
+
     int best = ai_argmax(logits, AI_SCHED_N_ACTIONS);
     if (best < 0) return -1;
 
     ai_decode_action(best, action);
     return 0;
+}
+
+/*
+ * Public entry point for the inference_device CPU backend. Runs
+ * the MLP on `state` and writes logits to `out` (length
+ * AI_SCHED_N_ACTIONS). No argmax / no decode — the caller does
+ * those so the same forward path can feed either the scheduler
+ * or (future) a generic tensor consumer.
+ */
+void ai_mlp_forward_logits(const float state[AI_STATE_DIM],
+                           float out[AI_SCHED_N_ACTIONS])
+{
+    if (!state || !out) return;
+    forward_logits(state,
+                   ai_mlp_w0, ai_mlp_b0,
+                   ai_mlp_w1, ai_mlp_b1,
+                   ai_mlp_w2, ai_mlp_b2,
+                   ai_mlp_w3, ai_mlp_b3,
+                   out);
 }
 
 /* ============================================================================

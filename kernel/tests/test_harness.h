@@ -58,6 +58,19 @@ int test_suite_vmm(void);
 /* PMM buddy allocator tests */
 int test_suite_pmm(void);
 
+/* PCIe host-controller tests (ARM64 only — QEMU virt GPEX for now) */
+int test_suite_pcie(void);
+
+/* Inference-device abstraction tests (registry + fake backend;
+ * cpu-mlp-specific cases gated on CONFIG_AI_SCHEDULER) */
+int test_suite_inference_device(void);
+
+/* Hailo-8 driver core tests (mocked platform ops) */
+int test_suite_hailo(void);
+
+/* HEF outer-header validator + nanopb freestanding smoke test */
+int test_suite_hef(void);
+
 /* LittleFS integration tests */
 int test_suite_littlefs(void);
 

@@ -165,13 +165,17 @@ static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
     return desc;
 }
 
-#if defined(PLATFORM_RASPI5)
 /*
  * Build an L1 block descriptor (1GB block, used for large RAM regions).
  *
  * At L1 with 4KB granule, block descriptors map 1GB regions.
  * Output address bits are [47:30] (1GB-aligned).
+ *
+ * Marked `unused` because the Jetson build doesn't call it; keeping
+ * the function itself unconditional lets the QEMU_VIRT and RASPI5
+ * branches share the same helper.
  */
+__attribute__((unused))
 static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
 {
     uint64_t desc = PTE_TYPE_BLOCK;
@@ -219,7 +223,6 @@ static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
 
     return desc;
 }
-#endif /* PLATFORM_RASPI5 */
 
 /*
  * Build a table descriptor (L1 entry pointing to L2 table).
@@ -906,6 +909,36 @@ static void vmm_setup_platform(void)
     uint64_t virtio_l2_idx = (0x0a000000 >> BLOCK_SHIFT) & 0x1FF;
     l2_mmio[virtio_l2_idx] = make_block_desc(0x0a000000, VMM_FLAGS_DEVICE);
     vmm_state.blocks_mapped++;
+
+    /*
+     * GPEX PCIe MMIO/ECAM for the virt machine's GPEX root complex:
+     *   - Low MMIO:   0x10000000..0x3effffff (~750 MB; BARs of
+     *     endpoints added via `-device ...,bus=pcie.0`). Covered by
+     *     2 MB block descriptors in the existing `l2_mmio` table
+     *     (L1[0]). 375 blocks.
+     *   - ECAM:       0x40_10000000..0x40_1fffffff (256 MB of high
+     *     config space). Covered by a 1 GB L1 block descriptor at
+     *     L1[256] mapping 0x40_00000000..0x40_3fffffff as Device
+     *     memory. This is wasteful (only 256 MB is used) but lets
+     *     the PCIe backend read ECAM using the raw PA as a VA
+     *     without needing a dedicated L2 table.
+     * Source: `qemu-system-aarch64 -machine virt,dumpdtb=...`
+     * (pcie-ecam `reg = <0x40 0x10000000 0x00 0x10000000>`).
+     */
+    for (uint64_t pa = 0x10000000UL; pa < 0x3F000000UL; pa += BLOCK_SIZE) {
+        uint64_t idx = (pa >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[idx] = make_block_desc(pa, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+    }
+    {
+        /* 1 GB L1 block covering 0x40_00000000..0x40_3fffffff. */
+        uint64_t ecam_l1_idx = 0x4010000000UL >> 30;  /* = 256 */
+        l1_table[ecam_l1_idx] = make_l1_block_desc(0x4000000000UL,
+                                                   VMM_FLAG_READ |
+                                                   VMM_FLAG_WRITE |
+                                                   VMM_FLAG_DEVICE);
+        vmm_state.blocks_mapped += 512;
+    }
 #endif
 }
 #endif /* QEMU || JETSON */
