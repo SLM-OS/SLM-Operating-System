@@ -1059,10 +1059,18 @@ static void test_handoff_validate_missing_doorbell_token(void)
  *      new offsets; any revert to legacy would be caught here.
  * ====================================================================== */
 
+/* Expected method-header builder for test-side clarity. Decomposes
+ * the Fermi+ header into its fields so the test intent ("INC, count=1,
+ * subch=0, byte=X at bits [12:2]") is self-evident and catches both
+ * the bit-position bug AND any future bit-layout refactor. */
+#define EXPECT_INC_HDR(count, subch, byte_off)                         \
+    ((1u << 29) | ((uint32_t)(count) << 16) |                          \
+     ((uint32_t)(subch) << 13) | ((uint32_t)(byte_off) & 0xFFFu))
+
 static void test_sema_release_pb_layout(void)
 {
     printf("== test_sema_release_pb_layout ==\n");
-    uint32_t pb[10];
+    uint32_t pb[GA10B_SEMA_RELEASE_PB_DWORDS];
     memset(pb, 0xAB, sizeof(pb));   /* poison non-written dwords */
 
     /* Real GA10B semaphore VA from a bringup on jetson-nano-2 — high
@@ -1072,20 +1080,22 @@ static void test_sema_release_pb_layout(void)
     uint32_t payload = 0x0000CAFEu;
 
     uint32_t dwords = ga10b_build_sema_release_pushbuffer(pb, sem_va, payload);
-    REQUIRE_EQ(dwords, 10u);
+    REQUIRE_EQ(dwords, GA10B_SEMA_RELEASE_PB_DWORDS);
 
-    /* Method headers: INC (SEC_OP=1 → 0x2000_0000), count=1 → bit 16,
-     * subch=0, method byte_offset at bits [12:2] = the offset itself
-     * (low 2 bits are already zero). */
-    REQUIRE_EQ(pb[0], 0x2001005Cu);   /* SEM_ADDR_LO header */
-    REQUIRE_EQ(pb[1], 0xFC010000u);   /* VA[31:0] */
-    REQUIRE_EQ(pb[2], 0x20010060u);   /* SEM_ADDR_HI header */
-    REQUIRE_EQ(pb[3], 0x0000001Fu);   /* VA[39:32] masked to 8 bits */
-    REQUIRE_EQ(pb[4], 0x20010064u);   /* SEM_PAYLOAD_LO header */
+    /* Headers use INC (SEC_OP=1), count=1, subch=0, byte offset at
+     * bits [12:2]. Expressing expected values via EXPECT_INC_HDR
+     * ensures this test catches a bit-position regression even if
+     * someone swaps the underlying NVC56F_METHOD_HEADER_INC macro
+     * for an algebraically-different but wrongly-placed version. */
+    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x5Cu));  /* SEM_ADDR_LO */
+    REQUIRE_EQ(pb[1], 0xFC010000u);                  /* VA[31:0] */
+    REQUIRE_EQ(pb[2], EXPECT_INC_HDR(1, 0, 0x60u));  /* SEM_ADDR_HI */
+    REQUIRE_EQ(pb[3], 0x0000001Fu);                  /* VA[39:32] masked to 8 */
+    REQUIRE_EQ(pb[4], EXPECT_INC_HDR(1, 0, 0x64u));  /* SEM_PAYLOAD_LO */
     REQUIRE_EQ(pb[5], 0x0000CAFEu);
-    REQUIRE_EQ(pb[6], 0x20010068u);   /* SEM_PAYLOAD_HI header */
-    REQUIRE_EQ(pb[7], 0u);            /* hi word unused for 32-bit release */
-    REQUIRE_EQ(pb[8], 0x2001006Cu);   /* SEM_EXECUTE header */
+    REQUIRE_EQ(pb[6], EXPECT_INC_HDR(1, 0, 0x68u));  /* SEM_PAYLOAD_HI */
+    REQUIRE_EQ(pb[7], 0u);                           /* hi word unused */
+    REQUIRE_EQ(pb[8], EXPECT_INC_HDR(1, 0, 0x6Cu));  /* SEM_EXECUTE */
     /* SEM_EXECUTE = OP_RELEASE(1) | PAYLOAD_32BIT(0) | RELEASE_WFI_EN(0) */
     REQUIRE_EQ(pb[9], 0x00000001u);
 }
@@ -1093,7 +1103,7 @@ static void test_sema_release_pb_layout(void)
 static void test_sema_release_pb_truncates_va_upper(void)
 {
     printf("== test_sema_release_pb_truncates_va_upper ==\n");
-    uint32_t pb[10];
+    uint32_t pb[GA10B_SEMA_RELEASE_PB_DWORDS];
 
     /* VA with upper bits beyond the 8-bit field: 0x1234567890000000.
      * SEM_ADDR_HI must store only bits [39:32] = 0x78 (the byte just
@@ -1108,17 +1118,17 @@ static void test_sema_release_pb_truncates_va_upper(void)
 static void test_sema_release_pb_zero_payload(void)
 {
     printf("== test_sema_release_pb_zero_payload ==\n");
-    uint32_t pb[10];
+    uint32_t pb[GA10B_SEMA_RELEASE_PB_DWORDS];
     memset(pb, 0xAB, sizeof(pb));
 
     /* Zero payload still produces valid pushbuffer; only the payload
      * data word and address words vary per call. */
     ga10b_build_sema_release_pushbuffer(pb, 0x2000000000ULL, 0u);
-    REQUIRE_EQ(pb[0], 0x2001005Cu);          /* header unchanged */
-    REQUIRE_EQ(pb[1], 0x00000000u);          /* VA low 32 */
-    REQUIRE_EQ(pb[3], 0x00000020u);          /* VA[39:32] = 0x20 */
+    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x5Cu));  /* header unchanged */
+    REQUIRE_EQ(pb[1], 0x00000000u);                  /* VA low 32 */
+    REQUIRE_EQ(pb[3], 0x00000020u);                  /* VA[39:32] = 0x20 */
     REQUIRE_EQ(pb[5], 0u);
-    REQUIRE_EQ(pb[9], 0x00000001u);          /* SEM_EXECUTE same */
+    REQUIRE_EQ(pb[9], 0x00000001u);                  /* SEM_EXECUTE same */
 }
 
 static void test_handoff_validate_null_addresses(void)

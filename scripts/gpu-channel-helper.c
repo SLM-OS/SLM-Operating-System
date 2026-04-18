@@ -70,6 +70,14 @@
  * with --timeout-secs. */
 #define DEFAULT_TIMEOUT_SECS  300
 
+/* Semaphore payload for the pre-kexec isolation test. MUST stay in
+ * lockstep with GA10B_SMOKETEST_SEM_PAYLOAD in
+ * kernel/gpu/nvidia/ga10b_bringup.c — the SLM-OS-side smoke test uses
+ * the same payload, so a divergence would cause the helper's pre-kexec
+ * check and SLM-OS's post-kexec check to disagree on "did the method
+ * fire?" for no reason. */
+#define HELPER_SMOKETEST_SEM_PAYLOAD  HELPER_SMOKETEST_SEM_PAYLOAD
+
 /* Helper: open a device, die on failure. */
 static int xopen(const char *path, int flags)
 {
@@ -208,7 +216,13 @@ int main(int argc, char **argv)
      * simpler BIND_CHANNEL (op 1). Plain BIND_CHANNEL puts the channel
      * on the TSG's default SYNC subcontext — compute channels need
      * ASYNC, otherwise the GR engine accepts pushbuffers but silently
-     * no-ops the methods. */
+     * no-ops the methods.
+     *
+     * **Kernel requirement:** `CREATE_SUBCONTEXT` (TSG ioctl op 18)
+     * and `BIND_CHANNEL_EX` (op 11) require L4T r36 or newer. On
+     * older kernels these ops don't exist and xioctl will abort
+     * the helper. The cached UAPI headers under docs/reference/ are
+     * from L4T r36.4.7 (the Jetson Orin Nano dev kit default). */
     struct nvgpu_tsg_create_subcontext_args subctx;
     memset(&subctx, 0, sizeof(subctx));
     subctx.type  = NVGPU_TSG_SUBCONTEXT_TYPE_ASYNC;
@@ -498,7 +512,7 @@ int main(int argc, char **argv)
     pb32[2] = 0x20010060u;                /* SEM_ADDR_HI header */
     pb32[3] = (uint32_t)((sem_gva >> 32) & 0xFFu);
     pb32[4] = 0x20010064u;                /* SEM_PAYLOAD_LO header */
-    pb32[5] = 0x0000CAFEu;
+    pb32[5] = HELPER_SMOKETEST_SEM_PAYLOAD;
     pb32[6] = 0x20010068u;                /* SEM_PAYLOAD_HI header */
     pb32[7] = 0;
     pb32[8] = 0x2001006Cu;                /* SEM_EXECUTE header */
@@ -543,14 +557,14 @@ int main(int argc, char **argv)
         uint32_t sem_val = 0;
         for (int i = 0; i < 100; i++) {
             sem_val = *(volatile uint32_t *)sem_va;
-            if (sem_val == 0xCAFEu) break;
+            if (sem_val == HELPER_SMOKETEST_SEM_PAYLOAD) break;
             usleep(10000);
         }
         uint32_t gp_get_after = ((volatile uint32_t *)userd_va)[34];
         printf("[gpu-helper] After doorbell: GP_GET=%u (want 1), "
-               "sem=0x%08x (want 0xCAFE)\n",
-               gp_get_after, sem_val);
-        if (sem_val == 0xCAFEu) {
+               "sem=0x%08x (want 0x%x)\n",
+               gp_get_after, sem_val, HELPER_SMOKETEST_SEM_PAYLOAD);
+        if (sem_val == HELPER_SMOKETEST_SEM_PAYLOAD) {
             printf("[gpu-helper] >>> ISOLATION: sema fires Linux-side — "
                    "channel capable, kexec breaks state\n");
         } else if (gp_get_after == 1) {

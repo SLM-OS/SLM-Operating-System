@@ -14,6 +14,7 @@
 #include "falcon.h"
 #include "../../include/uart.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -1090,7 +1091,7 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
     pb[9] = NVC56F_SEM_EXECUTE_OP_RELEASE |
             NVC56F_SEM_EXECUTE_PAYLOAD_32BIT |
             NVC56F_SEM_EXECUTE_RELEASE_WFI_EN;
-    return 10;
+    return GA10B_SEMA_RELEASE_PB_DWORDS;
 }
 
 int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
@@ -1120,7 +1121,7 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
      * ga10b_build_sema_release_pushbuffer() above for encoding details;
      * exposing the builder as a pure function lets the host harness
      * regression-test the byte layout without needing GPU hardware. */
-    uint32_t pb_buf[10];
+    uint32_t pb_buf[GA10B_SEMA_RELEASE_PB_DWORDS];
     uint32_t pb_dwords = ga10b_build_sema_release_pushbuffer(
         pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
     uint32_t pb_bytes = pb_dwords * 4u;
