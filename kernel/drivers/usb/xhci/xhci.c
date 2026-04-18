@@ -161,17 +161,111 @@ static void w32(volatile uint8_t *base, uint32_t off, uint32_t v)
  * from the reference driver under docs/reference/.
  */
 static uint32_t fpci_r32(uint32_t off) { return r32(xhci_fpci_base, off); }
+static void     fpci_w32(uint32_t off, uint32_t v) { w32(xhci_fpci_base, off, v); }
 static uint32_t bar2_r32(uint32_t off) { return r32(xhci_bar2_base, off); }
 /*
- * Writers wired up here so later Phase 3A.2 tasks (BAR programming,
- * CSB paging, IFR mailbox handshake) can drop in call sites without
- * touching the accessor layer. Marked unused to keep the compiler
- * quiet until those tasks land.
+ * BAR2 writer wired up here so Phase 3A.2.3 (CSB paging) and 3A.2.5
+ * (IFR mailbox handshake) can drop in call sites without touching
+ * the accessor layer. Marked unused until those tasks land.
  */
 __attribute__((unused))
-static void     fpci_w32(uint32_t off, uint32_t v) { w32(xhci_fpci_base, off, v); }
-__attribute__((unused))
 static void     bar2_w32(uint32_t off, uint32_t v) { w32(xhci_bar2_base, off, v); }
+
+/* -------------------------------------------------------------------------- */
+/* Tegra234 FPCI wrapper programming (tegra_xusb_config equivalent)            */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Port of Linux's tegra_xusb_config (linux-xhci-tegra.c:786-830) for
+ * Tegra234 (has_ipfs = false, has_bar2 = true). Three register writes:
+ *
+ *   XUSB_CFG_4  — BAR0 address (points the Falcon at the XUSB MMIO
+ *                 aperture). Bits [31:15] latch the base; the low
+ *                 15 bits are reserved (32 KB alignment).
+ *   XUSB_CFG_7  — BAR2 address (Tegra234-only — earlier Tegras skip
+ *                 this). Bits [31:16] latch the base; low 16 bits
+ *                 reserved (64 KB alignment).
+ *   XUSB_CFG_1  — OR in IO_SPACE_EN | MEM_SPACE_EN | BUS_MASTER_EN so
+ *                 the Falcon can issue DMA.
+ *
+ * Linux's flow runs this once during probe, after clocks/PHYs/power
+ * domains are up. Post-kexec, first-hardware testing (jetson-nano-1,
+ * feature/xhci-ifr-bringup) showed Linux leaves ALL THREE of these
+ * registers correctly programmed — CFG_1 already has BUS_MASTER_EN,
+ * CFG_4 points at the XUSB aperture, CFG_7 points at BAR2. The
+ * original hypothesis that RUN=1 wedged because BUS_MASTER was
+ * cleared turned out to be wrong.
+ *
+ * This function is kept as a defensive no-op: read-modify-write
+ * preserves any existing bits and re-asserts the required ones. If
+ * a future Jetson variant or kernel version DOES clear one of these
+ * bits on kexec teardown, we'll set it here before RUN=1 runs. The
+ * real #285 blocker is elsewhere (Falcon liveness / IFR state /
+ * SMMU — investigated by Phase 3A.2.4 onward).
+ *
+ * Returns 0 always — the writes have no observable completion code
+ * beyond "subsequent HCD reads are valid", which is verified by the
+ * CAPLENGTH read at the top of xhci_init.
+ */
+static int tegra_xusb_config(void)
+{
+    INFO("xhci: pre-config CFG_1=0x%08x CFG_4=0x%08x CFG_7=0x%08x",
+         (unsigned)fpci_r32(XUSB_CFG_1),
+         (unsigned)fpci_r32(XUSB_CFG_4),
+         (unsigned)fpci_r32(XUSB_CFG_7));
+
+    /*
+     * BAR0 — point the Falcon at the XUSB MMIO aperture base. Linux's
+     * tegra_xusb_config uses `tegra->hcd->rsrc_start`, which for
+     * Tegra234 comes from the DT `reg` property and starts at
+     * 0x03600000 (the FPCI wrapper base) NOT 0x03610000 (the xHCI
+     * CAPLENGTH offset inside the aperture). First-hardware test of
+     * this function confirmed that attempting to program CFG_4 with
+     * 0x03610000 is silently rejected — bit 16 is hardwired in the
+     * BAR decoder on this SoC. Use FPCI_BASE to match what Linux
+     * actually writes.
+     */
+    uint32_t cfg4 = fpci_r32(XUSB_CFG_4);
+    cfg4 &= ~(XUSB_BASE_ADDR_MASK << XUSB_BASE_ADDR_SHIFT);
+    cfg4 |= (uint32_t)TEGRA_XHCI_FPCI_BASE
+            & (XUSB_BASE_ADDR_MASK << XUSB_BASE_ADDR_SHIFT);
+    fpci_w32(XUSB_CFG_4, cfg4);
+
+    /* BAR2 — Tegra234-specific wrapper aperture. */
+    uint32_t cfg7 = fpci_r32(XUSB_CFG_7);
+    cfg7 &= ~(XUSB_BASE2_ADDR_MASK << XUSB_BASE2_ADDR_SHIFT);
+    cfg7 |= (uint32_t)TEGRA_XHCI_BAR2_BASE
+            & (XUSB_BASE2_ADDR_MASK << XUSB_BASE2_ADDR_SHIFT);
+    fpci_w32(XUSB_CFG_7, cfg7);
+
+    /* Linux sleeps 100-200us between BAR programming and the bus-
+     * master enable. The hardware needs time to latch the new BARs
+     * before the next wrapper access uses them. timer_busy_wait_us
+     * is CNTPCT-backed and safe pre-scheduler. */
+    timer_busy_wait_us(200);
+
+    /* Enable IO space, memory space, and bus master. The last one is
+     * the bit we most expect to have been cleared by Linux's kexec
+     * teardown — it's what lets the Falcon initiate DMA reads of
+     * DCBAA / scratchpad / command-ring state. */
+    uint32_t cfg1 = fpci_r32(XUSB_CFG_1);
+    cfg1 |= XUSB_IO_SPACE_EN | XUSB_MEM_SPACE_EN | XUSB_BUS_MASTER_EN;
+    fpci_w32(XUSB_CFG_1, cfg1);
+
+    /*
+     * Ensure the FPCI writes have drained before any subsequent HCD
+     * access (e.g. CAPLENGTH read) that depends on BAR0 being
+     * programmed. FPCI is Device-nGnRE, HCD is also Device, but
+     * they're separate apertures — a DSB pins down the ordering.
+     */
+    dsb(sy);
+
+    INFO("xhci: post-config CFG_1=0x%08x CFG_4=0x%08x CFG_7=0x%08x",
+         (unsigned)fpci_r32(XUSB_CFG_1),
+         (unsigned)fpci_r32(XUSB_CFG_4),
+         (unsigned)fpci_r32(XUSB_CFG_7));
+    return 0;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Halt + reset                                                                */
@@ -662,6 +756,15 @@ int xhci_init(void)
              "powergate down?");
         return -1;
     }
+
+    /*
+     * Program the FPCI wrapper BEFORE any further HCD access. Linux's
+     * tegra_xusb_config runs at this point in its own probe, and
+     * post-kexec we can't assume Linux's final state preserved the
+     * BUS_MASTER bit — in fact, the #285 RUN=1 wedge is the expected
+     * symptom of BUS_MASTER being clear. See tegra_xusb_config above.
+     */
+    (void)tegra_xusb_config();
 
     uint8_t caplen = (uint8_t)(first & 0xFF);
     if (caplen < 0x20 || caplen > 0x80) {
