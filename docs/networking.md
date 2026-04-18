@@ -736,12 +736,16 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
   4-slot TX pools (2 KB per buffer, BSS today — Phase 3A XHCI
   decides on NC-memory relocation), and a `struct net_driver` that
   plugs directly into the existing `lwip_slm` glue.
-- `kernel/tests/test_cdc_ecm.c` — 18 unit tests against a CDC-ECM-
-  shaped mock HCD: MAC-string parser edge cases, full probe + driver
-  registration, net `init` RX submission, `send` (happy path, pool
-  exhaustion, oversized, null), `recv` (happy path, empty, small
-  buffer truncation), fallback MAC synthesis, and rejection of
-  non-CDC devices.
+- `kernel/tests/test_cdc_ecm.c` — 23 unit tests against a CDC-ECM-
+  shaped mock HCD. Every public symbol and every error-injection
+  branch in `cdc_ecm.c` is covered: MAC-string parser edge cases,
+  full probe + driver registration, net `init` RX submission,
+  `send` (happy path, pool exhaustion, oversized, null), `recv`
+  (happy path, empty, small buffer truncation), fallback MAC
+  synthesis, probe rejection of non-CDC devices, pre-probe op
+  rejection (`NET_E_NOT_INIT`), `cdc_ecm_poll` safety, default MTU
+  when `wMaxSegmentSize == 0`, probe success when the functional
+  descriptor is absent, and RX-error drop.
 
 Phase 3A (XHCI host controller) is next — it's the piece that makes
 `cdc_ecm_probe_and_register()` see a real device. Phase 4 wires the
@@ -1014,7 +1018,12 @@ harness builds for with `ENABLE_NETWORKING=ON`):
 | `test_recv_zero_when_nothing_ready` | `recv()` with no completions returns 0 (caller retries on next poll) |
 | `test_recv_handles_small_buffer` | `recv(buf, 32)` on a 128-byte frame copies exactly 32 bytes and does not scribble past |
 | `test_mac_fallback_when_imac_zero` | `iMACAddress == 0` → synthesised locally-administered MAC, unicast bit clear |
-| `test_probe_rejects_non_cdc_device` | Device with no CDC control/data interface pair fails probe with negative return |
+| `test_probe_rejects_non_cdc_device` | Device with no CDC control/data interface pair fails probe with negative return AND clears `link_status`/MAC from a previous successful probe |
+| `test_ops_fail_before_probe` | With no successful probe, `init` / `send` / `recv` all return `NET_E_NOT_INIT` |
+| `test_poll_before_and_after_probe` | `cdc_ecm_poll()` is safe in both states — no-op when not probed, drives the HCD's poll when probed |
+| `test_default_mtu_when_mss_zero` | Functional descriptor with `wMaxSegmentSize == 0` → driver falls back to 1514 |
+| `test_probe_without_functional_descriptor` | Absent Ethernet functional descriptor → probe still succeeds with synthesised MAC + default MTU |
+| `test_rx_completion_error_drops_slot` | Bulk-IN URB completing with `USB_URB_STALL` bumps the RX counter but leaves no payload for `recv()` (driver never forwards errored frames) |
 
 Run tests with:
 

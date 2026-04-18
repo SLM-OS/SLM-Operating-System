@@ -274,7 +274,7 @@ Applies to both Option A and Option B.
 |---|---|---|
 | `kernel/include/cdc_ecm.h` | ~70 | Public API: `cdc_ecm_probe_and_register`, `cdc_ecm_poll`, plus test-visible MAC parser and counters |
 | `kernel/usb/class/cdc_ecm.c` | ~340 | Probe (iface scan + functional descriptor walk + MAC string decode), static RX/TX slot pools, `struct net_driver` ops, fallback MAC synthesis when `iMACAddress == 0` |
-| `kernel/tests/test_cdc_ecm.c` | ~510 | 18 tests against a CDC-ECM-shaped mock HCD — MAC parser edge cases (too short, wrong type, non-ASCII, non-hex, null args), full probe + registration + MTU extraction, `net_init` RX queuing, `send` happy path + pool exhaustion + oversized + null, `recv` happy path + empty + small-buffer truncation, `iMACAddress==0` fallback, rejection of non-CDC devices |
+| `kernel/tests/test_cdc_ecm.c` | ~790 | 23 tests against a CDC-ECM-shaped mock HCD — MAC parser edge cases (too short, wrong type, non-ASCII, non-hex, null args), full probe + registration + MTU extraction, `net_init` RX queuing, `send` happy path + pool exhaustion + oversized + null, `recv` happy path + empty + small-buffer truncation, `iMACAddress==0` fallback, rejection of non-CDC devices, pre-probe op rejection, poll safety in both states, default MTU when `wMaxSegmentSize==0`, probe success without functional descriptor, RX-error drop |
 
 Architecture notes:
 - **Static slot pools, no heap.** 4 RX + 4 TX slots × 2 KB each = 16 KB BSS. Keeps Phase 2 free of dynamic allocation; Phase 3A XHCI decides whether these get relocated to NC memory for DMA coherence.

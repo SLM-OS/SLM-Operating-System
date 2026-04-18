@@ -408,6 +408,7 @@ static void test_send_goes_to_bulk_out(void)
     TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
     TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
 
+    uint32_t tx_before = cdc_ecm_get_tx_count();
     const uint8_t payload[] = {
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,   /* dst MAC (broadcast) */
         0x02, 0x11, 0x22, 0x33, 0x44, 0x55,   /* src MAC */
@@ -418,10 +419,11 @@ static void test_send_goes_to_bulk_out(void)
     TEST_ASSERT_EQUAL_INT(0, rc);
     TEST_ASSERT_EQUAL_UINT32(sizeof(payload), mock.last_tx_len);
     TEST_ASSERT_EQUAL_MEMORY(payload, mock.last_tx_buf, sizeof(payload));
-    /* Mock completes TX synchronously — tx_reap must see the slot
-     * and clear it so subsequent sends reuse it. */
+    /* Mock completes TX synchronously inside submit — the counter
+     * delta is exactly 1 per send(). tx_reap clears the slot but
+     * doesn't change the completion counter. */
     net_get_driver()->tx_reap();
-    TEST_ASSERT_EQUAL_UINT32(1, cdc_ecm_get_tx_count());
+    TEST_ASSERT_EQUAL_UINT32(tx_before + 1, cdc_ecm_get_tx_count());
 }
 
 static void test_send_busy_when_pool_full(void)
@@ -481,6 +483,7 @@ static void test_recv_returns_frame_and_resubmits(void)
     TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
     TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
     int submits_before = mock.bulk_in_submits;
+    uint32_t rx_before = cdc_ecm_get_rx_count();
 
     /* A 60-byte synthetic frame — minimum Ethernet runt. */
     uint8_t frame[60];
@@ -495,7 +498,7 @@ static void test_recv_returns_frame_and_resubmits(void)
     /* recv() must re-submit that slot's URB so the RX pool stays
      * full. Exactly one extra bulk-IN submit relative to "before". */
     TEST_ASSERT_EQUAL_INT(submits_before + 1, mock.bulk_in_submits);
-    TEST_ASSERT_EQUAL_UINT32(1, cdc_ecm_get_rx_count());
+    TEST_ASSERT_EQUAL_UINT32(rx_before + 1, cdc_ecm_get_rx_count());
 }
 
 static void test_recv_zero_when_nothing_ready(void)
@@ -561,7 +564,37 @@ static void test_mac_fallback_when_imac_zero(void)
 static void test_probe_rejects_non_cdc_device(void)
 {
     /* Mutate the enumerated device so its interfaces claim a
-     * non-CDC class. Probe must refuse. */
+     * non-CDC class. Probe must refuse AND clear any prior probe
+     * state so link_status falls back to false. */
+    reset_all();
+    struct usb_device *dev = usb_core_first_device();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    /* First prime the module with a successful probe so we can verify
+     * a subsequent failure clears link_status. */
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+
+    for (unsigned i = 0; i < 4; i++) {
+        dev->ifaces[i].class_code = 0xFF;
+        dev->ifaces[i].subclass   = 0x00;
+    }
+    int rc = cdc_ecm_probe_and_register();
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    /* Probe cleared the probed flag at entry; link must be down now
+     * even though net_register_driver left the earlier registration
+     * in place. */
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
+    TEST_ASSERT_NULL(cdc_ecm_get_mac());
+}
+
+static void test_ops_fail_before_probe(void)
+{
+    /*
+     * With no successful probe, every data-path op must return
+     * NET_E_NOT_INIT — not crash and not silently no-op. Drive this
+     * by rejecting the device up front so cdc.probed stays false.
+     */
     reset_all();
     struct usb_device *dev = usb_core_first_device();
     TEST_ASSERT_NOT_NULL(dev);
@@ -569,8 +602,156 @@ static void test_probe_rejects_non_cdc_device(void)
         dev->ifaces[i].class_code = 0xFF;
         dev->ifaces[i].subclass   = 0x00;
     }
-    int rc = cdc_ecm_probe_and_register();
-    TEST_ASSERT_NOT_EQUAL(0, rc);
+    TEST_ASSERT_NOT_EQUAL(0, cdc_ecm_probe_and_register());
+
+    /* net_register_driver was never called from this probe attempt,
+     * but an earlier test in the suite could have — call the driver
+     * ops directly via the cdc_ecm static dispatch through the
+     * module's exported ops. The cleanest way is to register the
+     * driver manually via the previous probe's artefacts. Instead,
+     * verify the public-API counterparts: get_mac returns NULL and
+     * get_max_segment stays at its default / last-known. */
+    TEST_ASSERT_NULL(cdc_ecm_get_mac());
+    /*
+     * The driver ops themselves are guarded inside the class driver.
+     * Re-register the class driver by running a good probe first,
+     * then re-trigger a failure to confirm the ops flip back to
+     * NET_E_NOT_INIT.
+     */
+    /* Rebuild a live device. */
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    const struct net_driver *drv = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv);
+
+    /* Now crash the probe state. */
+    dev = usb_core_first_device();
+    for (unsigned i = 0; i < 4; i++) {
+        dev->ifaces[i].class_code = 0xFF;
+        dev->ifaces[i].subclass   = 0x00;
+    }
+    TEST_ASSERT_NOT_EQUAL(0, cdc_ecm_probe_and_register());
+
+    /* With cdc.probed = false, every op refuses. */
+    uint8_t buf[64] = {0};
+    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->init());
+    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->send(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->recv(buf, sizeof(buf)));
+}
+
+static void test_poll_before_and_after_probe(void)
+{
+    /*
+     * cdc_ecm_poll must be a no-op when not probed (no HCD poll call)
+     * and dispatch into usb_core_poll when probed. We don't have a
+     * direct observable for "usb_core_poll was called" — but we do
+     * observe that the function doesn't crash in either state and
+     * the driver state is untouched.
+     */
+    reset_all();
+    /* Crash probed state by rejecting interfaces. */
+    struct usb_device *dev = usb_core_first_device();
+    for (unsigned i = 0; i < 4; i++) {
+        dev->ifaces[i].class_code = 0xFF;
+        dev->ifaces[i].subclass   = 0x00;
+    }
+    TEST_ASSERT_NOT_EQUAL(0, cdc_ecm_probe_and_register());
+    cdc_ecm_poll();   /* must not crash */
+
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    uint32_t rx_before = cdc_ecm_get_rx_count();
+    cdc_ecm_poll();   /* must not crash; no RX pending so no delta */
+    TEST_ASSERT_EQUAL_UINT32(rx_before, cdc_ecm_get_rx_count());
+}
+
+static void test_default_mtu_when_mss_zero(void)
+{
+    /*
+     * If the functional descriptor reports wMaxSegmentSize == 0, the
+     * class driver falls back to CDC_ECM_DEFAULT_MTU (1514) rather
+     * than honouring a zero. Edit raw_config in place to exercise
+     * the fallback without standing up a second mock.
+     */
+    reset_all();
+    struct usb_device *dev = usb_core_first_device();
+    TEST_ASSERT_NOT_NULL(dev);
+    /* wMaxSegmentSize is at offset 31-32 within raw_config (see the
+     * layout table in the mock blob). Zero both bytes. */
+    dev->raw_config[31] = 0x00;
+    dev->raw_config[32] = 0x00;
+
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_UINT16(1514, cdc_ecm_get_max_segment());
+}
+
+static void test_probe_without_functional_descriptor(void)
+{
+    /*
+     * Some dongles omit the Ethernet Networking functional descriptor
+     * entirely. Probe must still succeed, synthesise a MAC, and use
+     * the default MTU. Simulate this by overwriting the CS_INTERFACE
+     * blocks with padding the parser skips (class-specific types the
+     * parser does not recognise).
+     */
+    reset_all();
+    struct usb_device *dev = usb_core_first_device();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    /* The CS_INTERFACE header sits at offset 18 (length 5) and the
+     * Ethernet functional descriptor at offset 23 (length 13).
+     * Turn the functional descriptor into a bland CS_INTERFACE with
+     * an unknown subtype so find_cdc_ecm_functional returns NULL. */
+    dev->raw_config[23 + 2] = 0xAA;   /* unknown subtype */
+
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_UINT16(1514, cdc_ecm_get_max_segment());
+    const uint8_t *mac = cdc_ecm_get_mac();
+    TEST_ASSERT_NOT_NULL(mac);
+    /* Fallback MAC byte 0 = 0x02 (locally administered, unicast). */
+    TEST_ASSERT_EQUAL_UINT8(0x02, mac[0]);
+}
+
+static void test_rx_completion_error_drops_slot(void)
+{
+    /*
+     * A bulk-IN URB that completes with a non-OK status (STALL,
+     * IO_ERROR) must leave the slot un-ready and unconsumed so recv()
+     * returns 0, not a frame. Guarantees the class driver never
+     * forwards an errored payload to lwIP.
+     */
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
+
+    /* rx_completions is module-level static; snapshot before driving
+     * the error path so we can check the delta rather than an
+     * absolute value that carries state from earlier tests. */
+    uint32_t rx_before = cdc_ecm_get_rx_count();
+
+    /* Find a pending bulk-IN URB and complete it with STALL. */
+    bool completed_one = false;
+    for (int i = 0; i < MOCK_MAX_INFLIGHT; i++) {
+        struct usb_urb *urb = mock.in_flight[i];
+        if (urb == NULL) continue;
+        if (urb->transfer_type != USB_XFER_BULK) continue;
+        if (!(urb->endpoint & USB_DIR_IN)) continue;
+        urb->status = USB_URB_STALL;
+        urb->actual_length = 0;
+        mock.in_flight[i] = NULL;
+        urb->complete(urb);
+        completed_one = true;
+        break;
+    }
+    TEST_ASSERT_TRUE(completed_one);
+
+    /* Error completion still bumps the counter (driver saw it) but
+     * leaves no payload for recv. */
+    TEST_ASSERT_EQUAL_UINT32(rx_before + 1, cdc_ecm_get_rx_count());
+
+    uint8_t out[2048];
+    int n = net_get_driver()->recv(out, sizeof(out));
+    TEST_ASSERT_EQUAL_INT(0, n);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -601,6 +782,11 @@ int test_suite_cdc_ecm(void)
     RUN_TEST(test_recv_handles_small_buffer);
     RUN_TEST(test_mac_fallback_when_imac_zero);
     RUN_TEST(test_probe_rejects_non_cdc_device);
+    RUN_TEST(test_ops_fail_before_probe);
+    RUN_TEST(test_poll_before_and_after_probe);
+    RUN_TEST(test_default_mtu_when_mss_zero);
+    RUN_TEST(test_probe_without_functional_descriptor);
+    RUN_TEST(test_rx_completion_error_drops_slot);
 
     return UnityEnd();
 }
