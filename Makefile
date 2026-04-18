@@ -298,19 +298,24 @@ kernel-bzimage-clean:
 #   KEXEC_NO_EXEC=1         — scp the artefact but don't fire kexec.
 #
 # kexec-deploy depends on the kernel target matching KEXEC_MODE so the
-# right artefact is always built before the deploy script runs.
+# right artefact is always built before the deploy script runs. The
+# per-mode variables are populated lazily via MAKECMDGOALS — bogus
+# KEXEC_MODE in the environment shouldn't break unrelated targets
+# like `make kernel`.
 KEXEC_MODE ?= mb2
 
-ifeq ($(KEXEC_MODE),bzimage)
-  KEXEC_DEPLOY_DEP := kernel-bzimage
-  KEXEC_DEPLOY_ARGS := --mode bzimage --bzimage $(KERNEL_BZIMAGE)
-  KEXEC_DEPLOY_BUILD_DIR := $(KERNEL_BZIMAGE_BUILD_DIR)
-else ifeq ($(KEXEC_MODE),mb2)
-  KEXEC_DEPLOY_DEP := kernel-kexec
-  KEXEC_DEPLOY_ARGS := --mode mb2 --elf $(KERNEL_KEXEC_ELF)
-  KEXEC_DEPLOY_BUILD_DIR := $(KERNEL_KEXEC_BUILD_DIR)
-else
-  $(error KEXEC_MODE must be 'mb2' or 'bzimage' (got '$(KEXEC_MODE)'))
+ifneq (,$(filter kexec-deploy,$(MAKECMDGOALS)))
+  ifeq ($(KEXEC_MODE),bzimage)
+    KEXEC_DEPLOY_DEP := kernel-bzimage
+    KEXEC_DEPLOY_ARGS := --mode bzimage --bzimage $(KERNEL_BZIMAGE)
+    KEXEC_DEPLOY_BUILD_DIR := $(KERNEL_BZIMAGE_BUILD_DIR)
+  else ifeq ($(KEXEC_MODE),mb2)
+    KEXEC_DEPLOY_DEP := kernel-kexec
+    KEXEC_DEPLOY_ARGS := --mode mb2 --elf $(KERNEL_KEXEC_ELF)
+    KEXEC_DEPLOY_BUILD_DIR := $(KERNEL_KEXEC_BUILD_DIR)
+  else
+    $(error KEXEC_MODE must be 'mb2' or 'bzimage' (got '$(KEXEC_MODE)'))
+  endif
 endif
 
 .PHONY: kexec-deploy
