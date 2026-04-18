@@ -47,6 +47,13 @@
  * per char total, but only queued chars need to drain). */
 #define FIFO_DRAIN_DELAY     0x000FF424
 
+/* Per-hex-digit delay used while emitting the 8-digit APPL hex
+ * readout. Shorter than CHAR_DELAY because the FIFO was already
+ * fully drained by FIFO_DRAIN_DELAY just before this loop — we
+ * only need enough spacing that the FIFO doesn't backfill
+ * mid-digit. ~5k cycles ≈ 3.3 µs at 1.5 GHz. */
+#define HEX_CHAR_DELAY       5000
+
 .section ".text"
 
 /* =========================================================================
@@ -237,7 +244,7 @@ el1_entry:
     add     w2, w2, #'0'
 .Lappl_emit:
     str     w2, [x4]
-    mov     w3, #5000
+    ldr     w3, =HEX_CHAR_DELAY
 3:  subs    w3, w3, #1
     b.ne    3b
     subs    w6, w6, #4
