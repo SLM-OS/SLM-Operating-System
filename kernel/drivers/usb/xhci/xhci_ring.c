@@ -139,6 +139,27 @@ bool xhci_event_ring_peek(struct xhci_event_ring *r, struct xhci_trb *out)
     if ((slot->control & XHCI_TRB_CYCLE) != (r->cycle_state & 1))
         return false;   /* no event yet */
 
+    /*
+     * DMA read barrier between the cycle-bit check and the payload
+     * reads. The HC writes payload fields (param_lo/hi, status) FIRST
+     * and then writes the control dword with the producer cycle bit;
+     * that's the order the xHCI spec defines, and it's the order the
+     * HC puts on the bus. But ARM ARM B2.7.2 permits the CPU to
+     * speculatively read Normal memory (including NC) and to reorder
+     * those speculative loads across the cycle-check branch. Without
+     * an explicit load-barrier, a successful cycle check can still
+     * return stale or torn payload: the speculative loads may have
+     * fired before the HC's payload writes became globally visible.
+     *
+     * dmb(oshld) = Outer Shareable load-load barrier — matches the
+     * producer-side dmb(oshst) in xhci_ring_enqueue. Outer Shareable
+     * covers DMA masters outside the Inner Shareable domain (the
+     * Tegra xHCI controller's DMA path is one of those). This is the
+     * direct equivalent of Linux's `dma_rmb()` after the cycle check
+     * in `xhci_handle_event()` (drivers/usb/host/xhci-ring.c).
+     */
+    dmb(oshld);
+
     /* Copy out, then advance. Reading all four dwords here is fine;
      * the HC won't touch them again until we lap it. */
     out->param_lo = slot->param_lo;
