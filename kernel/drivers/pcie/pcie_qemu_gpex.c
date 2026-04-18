@@ -44,9 +44,14 @@
  * outside this range aren't reachable — return NULL from map_bar
  * rather than hand back an unmapped pointer that would fault on
  * first access. (High MMIO at 0x80_00000000+ is not mapped; would
- * require vmm_map_region on demand.) */
+ * require vmm_map_region on demand.)
+ *
+ * Upper bound is 0x3EFF0000, not 0x3F000000, because the 64 KB
+ * range 0x3EFF0000..0x3F000000 is QEMU virt's PIO window — we
+ * don't use PIO BARs and mapping into that range would route
+ * accesses to the PIO handler rather than memory. */
 #define QEMU_GPEX_LOW_MMIO_BASE   0x10000000UL
-#define QEMU_GPEX_LOW_MMIO_END    0x3F000000UL
+#define QEMU_GPEX_LOW_MMIO_END    0x3EFF0000UL
 
 /* ECAM config-space addressing: (bus << 20) | (dev << 15) | (func << 12) | off */
 static inline volatile uint8_t *cfg_addr(uint8_t bus, uint8_t dev, uint8_t func,
@@ -116,9 +121,21 @@ static void *gpex_map_bar(uint64_t pcie_addr, uint64_t size)
      * back a pointer that would fault on first access — callers
      * learn immediately that high-MMIO BAR assignment is unsupported
      * in this backend today. */
-    if (pcie_addr == 0 || size == 0) return NULL;
+    if (size == 0) return NULL;
     uint64_t end = pcie_addr + size;
     if (end < pcie_addr) return NULL;  /* overflow */
+
+    /* pcie_addr == 0 is the common "BAR unprogrammed" state on
+     * QEMU virt without UEFI firmware. Not an error, not even
+     * unexpected — log at INFO so boot output stays quiet during
+     * unit tests. A BAR actually programmed outside the mapped
+     * window IS a misconfiguration; keep the WARN for that. */
+    if (pcie_addr == 0) {
+        INFO("qemu-gpex: BAR unprogrammed (addr=0, size=0x%lx) — "
+             "no UEFI firmware assigning BARs",
+             (unsigned long)size);
+        return NULL;
+    }
     if (pcie_addr < QEMU_GPEX_LOW_MMIO_BASE
      || end > QEMU_GPEX_LOW_MMIO_END) {
         WARN("qemu-gpex: BAR 0x%lx+0x%lx outside mapped low-MMIO window",

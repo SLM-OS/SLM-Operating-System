@@ -402,10 +402,22 @@ static int bcm2712_alloc_msi(const struct pcie_device *dev, uint8_t cap_ptr,
         return PCIE_ERR_INVAL;
     }
 
+    /*
+     * Hold msi_lock across the whole allocate-then-validate
+     * sequence. Earlier revision released the lock between the
+     * bitmap reservation and the MMC validation; the brief window
+     * wasn't exploitable (reserved vectors can't be re-allocated
+     * while their bit is set), but holding the lock across the
+     * whole decision is simpler to reason about. Safe against
+     * cfg_lock recursion because bcm2712_config_read16 acquires
+     * cfg_lock and nothing under cfg_lock touches msi_lock.
+     */
     irq_flags_t msi_flags = spin_lock_irqsave(&msi_lock);
     int base_vec = mip1_alloc_block_locked(count);
-    spin_unlock_irqrestore(&msi_lock, msi_flags);
-    if (base_vec < 0) return PCIE_ERR_NOVEC;
+    if (base_vec < 0) {
+        spin_unlock_irqrestore(&msi_lock, msi_flags);
+        return PCIE_ERR_NOVEC;
+    }
 
     /* Check the endpoint's MSI_CTRL — it advertises how many
      * messages the device is capable of via MMC[3:1]. A device with
@@ -416,12 +428,12 @@ static int bcm2712_alloc_msi(const struct pcie_device *dev, uint8_t cap_ptr,
     uint32_t max_msgs = 1u << mmc;
     if ((uint32_t)count > max_msgs) {
         /* Give back what we reserved. */
-        msi_flags = spin_lock_irqsave(&msi_lock);
         uint8_t mask = (uint8_t)(((1u << count) - 1u) << base_vec);
         mip1_vec_inuse &= ~mask;
         spin_unlock_irqrestore(&msi_lock, msi_flags);
         return PCIE_ERR_NOVEC;
     }
+    spin_unlock_irqrestore(&msi_lock, msi_flags);
 
     /* Program the endpoint's MSI capability to target MIP1. */
     bool is_64 = (ctrl & MSI_CTRL_ADDR_64) != 0;
@@ -474,12 +486,27 @@ static int bcm2712_bind_irq_handler(const struct pcie_msi_handle *h,
         return PCIE_ERR_INVAL;
     }
 
-    /* Publish the handler + ctx under msi_lock, and DSB SY after
-     * so the trampoline (which may run on another CPU) sees a
-     * fully-initialised slot before we enable the GIC line. */
+    /*
+     * Bind-once contract: reject a second bind to an already-bound
+     * vector. `mip1_slots[]` is read by the IRQ trampoline outside
+     * any lock — the DSB SY below publishes the write before
+     * gic_enable_irq, which works for the first delivery but does
+     * not handle a cross-CPU rebind cleanly (the trampoline could
+     * read a half-updated slot). Enforcing bind-once eliminates
+     * that race entirely. A consumer that needs rebinding must
+     * first unregister the vector.
+     */
     irq_flags_t msi_flags = spin_lock_irqsave(&msi_lock);
+    if (mip1_slots[vec].handler) {
+        spin_unlock_irqrestore(&msi_lock, msi_flags);
+        WARN("pcie1: MSI vector %d already bound — rejecting rebind", vec);
+        return PCIE_ERR_INVAL;
+    }
     mip1_slots[vec].handler = handler;
     mip1_slots[vec].ctx = ctx;
+    /* DSB SY publishes the slot to DRAM before we enable the GIC
+     * line. Required on Pi 5 (BCM2712 has no SMPEN, per-core L2
+     * caches are incoherent — see kernel/CLAUDE.md). */
     __asm__ volatile("dsb sy" ::: "memory");
     spin_unlock_irqrestore(&msi_lock, msi_flags);
 

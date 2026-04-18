@@ -185,8 +185,10 @@ static void test_bus_master_toggle(void)
  * incomplete op tables and assert PCIE_ERR_INVAL. The already-
  * registered GPEX backend is not disturbed because the validation
  * fails before host_ops is replaced.
+ *
+ * pcie_core_register_host is declared in pcie.h under a
+ * "backend-only" comment — device drivers never call it.
  */
-extern int pcie_core_register_host(const struct pcie_host_ops *ops);
 
 static int      dummy_init(void) { return 0; }
 static bool     dummy_link_up(void) { return true; }

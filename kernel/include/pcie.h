@@ -179,8 +179,14 @@ struct pcie_host_ops {
                             int vec_idx, void (*handler)(void *), void *ctx);
 };
 
-/* Install the active backend. Called once from pcie_init(). Not
- * exposed to end users of the API. */
+/*
+ * Install the active backend. Called once from pcie_init() via the
+ * platform's pcie_backend_register(). NOT a public API for device
+ * drivers — published here only so backend files
+ * (kernel/drivers/pcie/pcie_*.c) and unit tests can link to it
+ * without an ad-hoc extern in every caller. Device drivers using
+ * this subsystem should call the `pcie_*` functions below instead.
+ */
 int pcie_core_register_host(const struct pcie_host_ops *ops);
 
 /* -------------------------------------------------------------------------- */

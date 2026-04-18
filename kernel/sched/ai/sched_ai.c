@@ -178,14 +178,12 @@ static void ai_mlp_shutdown(void)
  *
  * The FP context save/restore still happens in the enclosing
  * ai_assign_cpu_common call — this wrapper does not add its own.
- */
-/*
- * Cached lookup — assign_cpu runs on every new task, so the
- * string compare through the inference-device registry was a
- * measurable hot-path cost. Resolved once lazily; the "cpu-mlp"
- * backend is registered at boot and never removed. An atomic
- * compare here would be safer against a hypothetical late
- * registration, but no such path exists.
+ *
+ * The cpu-mlp device pointer is cached after the first lookup to
+ * keep assign_cpu off the registry's linear-scan + string-compare
+ * path. Safe because the backend is registered once at boot and
+ * never removed; concurrent first-touch stores write the same
+ * pointer, so the non-atomic access is benign.
  */
 static struct inference_device *cached_cpu_mlp_dev;
 
