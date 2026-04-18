@@ -29,11 +29,14 @@ forward are realistic.
   kexec to SLM-OS. SEC2 CPUCTL is inherited at `0x00000020`
   (unlocked), `gpu init` runs the full bringup state machine,
   FWSEC-FRTS Phase 1 succeeds against the inherited state with WPR2
-  populated. Phase 2 (Booter Load on SEC2 itself) still fails — but
-  for a newly-identified reason (BROM-PLM independence), not the
-  original "SEC2 CPUCTL locked" issue. The original bare-metal
-  blocker (§2.5: 865/1024 offsets priv-locked from UEFI POST onward)
-  remains for any non-kexec boot path. Tracked as **issue #185**.
+  populated. Phase 2 (Booter Load on SEC2 itself) still fails with
+  CPUCTL=`0x20` (STOPPED, not HALTED) and the root cause is open —
+  the initial "BROM aperture priv-locked" hypothesis was retracted
+  after a source-read of nouveau showed it writes BROM selectors via
+  the same MMIO addresses SLM-OS already uses (see §4.2.l for the
+  retraction trail). The original bare-metal blocker (§2.5:
+  865/1024 offsets priv-locked from UEFI POST onward) remains for
+  any non-kexec boot path. Tracked as **issue #185**.
 - **The portable half of the GSP bringup code transfers cleanly to
   Jetson and bare-metal SLM-OS.** ~60% of the nouveau GSP-loader
   port is done, all of it platform-agnostic (VBIOS parse, Falcon
@@ -880,30 +883,36 @@ experiment could complete usefully:**
 [GPU]   SEC2 BROM MOD_SEL=0xbadf5720                   ← BROM still PRI-locked
 ```
 
-**New finding — BROM aperture stays priv-locked even under
-nouveau.** Cross-checked from Linux+nouveau directly:
-`peek SEC2+0x842200/210/220` returns `0xbadf5040` PRI poison both
-on a healthy nouveau host AND inside SLM-OS post-kexec. Yet
-nouveau drives Booter Load successfully. Conclusion:
+**Initial finding — RETRACTED 2026-04-18.** The first write-up of
+this experiment claimed the BROM aperture stays priv-locked even
+under nouveau, citing `peek SEC2+0x842200/210/220` returning
+`0xbadf5040` PRI poison. **That conclusion was based on reading the
+wrong offsets** — see kernel/CLAUDE.md "x86-64 GA10x — SEC2 BROM
+aperture state (corrected)" for the full retraction.
 
-- Nouveau's deferred ~3.4 s unlock trigger covers SEC2's CPUCTL
-  PLM but **not** the BROM PLM.
-- Nouveau therefore does NOT write to
-  `NV_PSEC2_BROM_BASE + FALCON_BROM_{ENGIDMASK,UCODE_ID,MOD_SEL}`
-  from the CPU side.
-- SLM-OS's `bringup.c:710-716` writes to that aperture, those
-  writes are silently dropped by the PRI arbiter, and the
-  HS-bootrom computes a signature against zero selectors → STOPs
-  at the first instruction.
-- The right path is almost certainly **DMEM-patching the Booter
-  ucode itself** with the engine-id/ucode-id/RSA-mode-select
-  values at known offsets — the same DMEMMAPPER pattern already
-  used for FWSEC-FRTS in `gsp_dmemmapper_patch`.
+`NV_PSEC2_BROM_BASE = 0x00841000`. The real Falcon-v4 BROM registers
+are at `+0x180/198/19c/210` (`falcon.h:168-171`), absolute
+`0x841180/198/19c/210`. The peek-poll above hit `BAR0+0x842200..220`
+which is `BROM_BASE + 0x1200..1220` — **0x1000 above the real
+register window**, in unmapped space that always returns PRI
+poison. The post-fail diagnostic in `nvidia_gpu.c:490-491` had the
+same bug (peeked `BROM_BASE+0x010/0x004`, also unmapped) and printed
+the unmapped readings labelled "SEC2 BROM MOD_SEL".
+
+**Source-read of nouveau confirms the real story.** `ga102_flcn_fw_boot`
+(`docs/reference/nouveau-falcon-ga102.c:113-123`) writes the BROM
+selectors via plain BAR0 MMIO at the same `0x841180/198/19c/210`
+addresses SLM-OS uses in `kernel/gpu/nvidia/bringup.c:710-716`. There
+is no DMEMMAPPER fixup; the booter HS blob carries only the
+`(fuse_ver, engine_id, ucode_id)` triple in its meta_data block
+(`docs/reference/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
+**The "DMEM-patch the Booter selectors" hypothesis is also refuted.**
 
 **Subsidiary observation — inherited scrub state:** SEC2 HWCFG2 =
 `0x47f7` under both nouveau-direct and SLM-OS-post-kexec. The
 `SCRUBBING` bit (0x2000) is cleared, matching the post-init state.
-Inheritance preserves scrub completion in addition to CPUCTL.
+Inheritance preserves scrub completion in addition to CPUCTL — this
+half of the original write-up is unaffected by the retraction.
 
 **What's confirmed working end-to-end:**
 
@@ -914,17 +923,28 @@ Inheritance preserves scrub completion in addition to CPUCTL.
 | SEC2 CPUCTL inherited unlock | ✅ confirmed `0x00000020` |
 | `gpu init` reaches NVIDIA dispatcher | ✅ proven (PR #283) |
 | FWSEC-FRTS Phase 1 post-kexec | ✅ WPR2 populated, identical to bare-metal |
-| Booter Load Phase 2 post-kexec | ❌ blocked on BROM-PLM / DMEM-patch path mismatch |
+| Booter Load Phase 2 post-kexec | ❌ STOPs at first instruction; root cause unknown post-retraction |
 
-**Next investigation handoff:** diff against nouveau's
-`r535_booter_load` (Linux 6.7+ source, `drivers/gpu/drm/nouveau/
-nvkm/subdev/gsp/r535.c`) to find where it deposits the booter's
-engine-id/ucode-id/sig-mode selectors. The mechanism is almost
-certainly DMEM-patching at booter-internal offsets, not CPU-side
-BROM writes. Once located, the equivalent path needs to land in
-SLM-OS's `gsp_bringup_booter_load` between FWSEC-FRTS completion
-and the Phase 9 STARTCPU. Estimated effort: 1-2 days for diff +
-implementation + test, plus another hardware iteration to verify.
+**Next investigation handoff (revised):** with the BROM-PLM
+hypothesis dead, the actual cause of Phase 2's `CPUCTL=0x20`
+(STOPPED) is open. The diagnostic fix in this PR makes the next
+hardware iteration meaningful — re-run `gpu init` post-kexec and the
+SEC2 BROM register dump will now report the real `MOD_SEL/PARAADDR/
+UCODE_ID/ENGIDMASK` values instead of unmapped poison. Three
+candidates worth ranking by likelihood after that data lands:
+
+1. **Falcon2 select PLM** at `addr2+0x668` blocks the writes —
+   `ga102_flcn_select` (nouveau-falcon-ga102.c:97-110) clears bit 4
+   before PIO. SLM-OS may be missing this dance.
+2. **Booter blob `engine_id`/`ucode_id` mismatch** with what the
+   HS-bootrom expects. Verify against a hexdump of `meta_data_offset`
+   in the actual blob SLM-OS uses.
+3. **Reset sequencing gap** between FWSEC-FRTS completion and SEC2
+   STARTCPU — diff against `tu102_gsp_init` flow.
+
+Effort: 1 day for the next hardware iteration + the corrected
+diagnostic dump; from there, one of the three candidates above
+will be obviously the next thing to chase.
 
 ### 4.3 Option C — **Kernel-shim / patched vfio-pci**
 

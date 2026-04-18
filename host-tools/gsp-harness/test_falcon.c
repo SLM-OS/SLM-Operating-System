@@ -969,6 +969,12 @@ static void test_wait_halted_bails_on_priv_lock(void)
     REQUIRE(falcon_wait_halted(&f, 3600u * 1000u * 1000u) < 0);
 }
 
+/* Note: FALCON_BROM_* constant-vs-spec pinning lives in falcon.h
+ * itself as `_Static_assert` declarations — strictly stronger than
+ * a runtime test (fires at every compile, not just when test_falcon
+ * runs) and visible to every consumer of the header. Don't add a
+ * duplicate runtime check here. */
+
 int main(void)
 {
     test_probe_gsp_falcon();

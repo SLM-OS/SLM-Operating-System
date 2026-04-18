@@ -171,6 +171,27 @@
 #define FALCON_BROM_MOD_SEL           0x180u      /* signing algo; triggers verify */
 #define FALCON_BROM_MOD_SEL_RSA3K     1u
 
+/* Compile-time pin against accidental drift. Source of truth:
+ * nouveau's `ga102_flcn_fw_boot` (`docs/reference/nouveau-falcon-ga102.c
+ * :113-123`) writes these exact offsets, and NVIDIA's open-gpu-kernel-
+ * modules `dev_falcon_v4.h` lists them under FALCON_PARAADDR0 /
+ * FALCON_BROM_CURR_UCODE_ID / FALCON_BROM_ENGIDMASK / FALCON_MOD_SEL.
+ *
+ * PR #287 documented a false "BROM aperture priv-locked" finding
+ * caused by a diagnostic that read +0x010 / +0x004 (unmapped) instead
+ * of these constants; PR #288 fixed the diagnostic and added these
+ * static asserts so a future drift in the constants themselves can't
+ * silently re-introduce the bug.
+ *
+ * Spelt `_Static_assert` rather than `static_assert` so this header
+ * compiles cleanly under both the kernel's `-std=c23` build and the
+ * host-tools `-std=c11` build (test_falcon.c). */
+_Static_assert(FALCON_BROM_PARAADDR0    == 0x210u, "FALCON_BROM_PARAADDR0 drifted from spec");
+_Static_assert(FALCON_BROM_UCODE_ID     == 0x198u, "FALCON_BROM_UCODE_ID drifted from spec");
+_Static_assert(FALCON_BROM_ENGIDMASK    == 0x19Cu, "FALCON_BROM_ENGIDMASK drifted from spec");
+_Static_assert(FALCON_BROM_MOD_SEL      == 0x180u, "FALCON_BROM_MOD_SEL drifted from spec");
+_Static_assert(FALCON_BROM_MOD_SEL_RSA3K == 1u,    "FALCON_BROM_MOD_SEL_RSA3K drifted from spec");
+
 
 /* ---- Public API ----
  *

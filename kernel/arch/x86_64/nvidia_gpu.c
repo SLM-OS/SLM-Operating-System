@@ -29,6 +29,7 @@
 #include "pci.h"
 #include "../../gpu/nvidia/gsp.h"
 #include "../../gpu/nvidia/bringup.h"
+#include "../../gpu/nvidia/falcon.h"   /* FALCON_BROM_* offsets for diags */
 
 /* ---- NVIDIA Register Offsets (BAR0) ---- */
 
@@ -487,8 +488,20 @@ static int cmd_gpu(int argc, char *argv[])
             uint32_t s_irqstat = gsp_platform->read32(NV_PSEC2_BASE + 0x008);
             uint32_t s_os      = gsp_platform->read32(NV_PSEC2_BASE + 0x080);
             uint32_t s_dbginfo = gsp_platform->read32(NV_PSEC2_BASE + 0x094);
-            uint32_t s_modsel  = gsp_platform->read32(NV_PSEC2_BROM_BASE + 0x010);
-            uint32_t s_paraddr = gsp_platform->read32(NV_PSEC2_BROM_BASE + 0x004);
+            /* BROM selector readback — uses the real Falcon-v4 BROM
+             * offsets from falcon.h (PARAADDR0=0x210, MOD_SEL=0x180,
+             * UCODE_ID=0x198, ENGIDMASK=0x19C). The earlier diagnostic
+             * read +0x010 and +0x004, which are unmapped and always
+             * returned PRI poison — leading to a false "BROM is
+             * priv-locked" reading captured in PR #287's docs. */
+            uint32_t s_modsel  = gsp_platform->read32(NV_PSEC2_BROM_BASE
+                                                     + FALCON_BROM_MOD_SEL);
+            uint32_t s_paraddr = gsp_platform->read32(NV_PSEC2_BROM_BASE
+                                                     + FALCON_BROM_PARAADDR0);
+            uint32_t s_ucid    = gsp_platform->read32(NV_PSEC2_BROM_BASE
+                                                     + FALCON_BROM_UCODE_ID);
+            uint32_t s_engmask = gsp_platform->read32(NV_PSEC2_BROM_BASE
+                                                     + FALCON_BROM_ENGIDMASK);
             uart_printf("[GPU]   SEC2 CPUCTL=0x%08x (halted=%u)\n",
                         s_cpuctl, (s_cpuctl >> 4) & 1);
             uart_printf("[GPU]   SEC2 MBOX0=0x%08x MBOX1=0x%08x OS=0x%08x\n",
@@ -497,6 +510,8 @@ static int cmd_gpu(int argc, char *argv[])
                         s_irqstat, s_dbginfo);
             uart_printf("[GPU]   SEC2 BROM MOD_SEL=0x%08x PARAADDR=0x%08x\n",
                         s_modsel, s_paraddr);
+            uart_printf("[GPU]   SEC2 BROM UCODE_ID=0x%08x ENGIDMASK=0x%08x\n",
+                        s_ucid, s_engmask);
             gsp_bringup_free(&b);
             return -1;
         }
@@ -527,8 +542,14 @@ static int cmd_gpu(int argc, char *argv[])
         uint32_t os_reg  = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x080) / 4];
         uint32_t dbginfo = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x094) / 4];
         uint32_t engctl  = nvidia_gpu.bar0[(NV_PSEC2_BASE + 0x0bc) / 4];
-        uint32_t modsel  = nvidia_gpu.bar0[(NV_PSEC2_BROM_BASE + 0x010) / 4];
-        uint32_t paraddr = nvidia_gpu.bar0[(NV_PSEC2_BROM_BASE + 0x004) / 4];
+        /* Real Falcon-v4 BROM offsets — see falcon.h. The prior
+         * +0x010 / +0x004 readings were unmapped and always returned
+         * PRI poison, leading to a false "BROM is priv-locked"
+         * conclusion documented in PR #287. */
+        uint32_t modsel  = nvidia_gpu.bar0[(NV_PSEC2_BROM_BASE
+                                            + FALCON_BROM_MOD_SEL) / 4];
+        uint32_t paraddr = nvidia_gpu.bar0[(NV_PSEC2_BROM_BASE
+                                            + FALCON_BROM_PARAADDR0) / 4];
         /* Also probe GSP Falcon for comparison */
         uint32_t g_cpuctl = nvidia_gpu.bar0[(NV_PGSP_BASE + 0x100) / 4];
         uint32_t g_hwcfg2 = nvidia_gpu.bar0[(NV_PGSP_BASE + 0x0f4) / 4];
