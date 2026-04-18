@@ -189,7 +189,7 @@ Applies to both Option A and Option B.
 |---|---|---|
 | `kernel/include/usb.h` | ~260 | Public API: device model, URB, HCD ops, std request/descriptor constants |
 | `kernel/usb/core/usb_core.c` | ~330 | HCD registration, URB submit/wait/cancel, descriptor parser, 10-step root-port enumeration |
-| `kernel/tests/test_usb_core.c` | ~500 | 25 unit tests against a mock HCD — URB lifecycle, descriptor parse (incl. alt-setting skip, orphan EP, invalid header, undersized input), full enumeration, every error-injection branch of enumerate, control-msg return semantics, cancel of a pending URB |
+| `kernel/tests/test_usb_core.c` | ~800 | 27 unit tests against a mock HCD — URB lifecycle, descriptor parse (incl. alt-setting skip, orphan EP, invalid header, undersized input, interface + endpoint table overflow), full enumeration, every error-injection branch of enumerate, control-msg return semantics, cancel of a pending URB |
 
 Architecture notes:
 - **No dynamic memory in Phase 1 core.** `struct usb_device root_device`

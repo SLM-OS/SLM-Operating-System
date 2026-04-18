@@ -526,6 +526,121 @@ static void test_descriptor_parse_too_short(void)
     TEST_ASSERT_NOT_EQUAL(0, usb_parse_configuration(&dev));
 }
 
+static void test_descriptor_parse_interface_overflow(void)
+{
+    /*
+     * USB_MAX_INTERFACES_PER_DEV interfaces fit; the one after that
+     * is dropped with a warning. Endpoints that belong to the dropped
+     * interface must NOT smear onto the last accepted interface —
+     * cur_iface_slot is reset to -1 so they fall through.
+     */
+    uint8_t blob[USB_MAX_CONFIG_DESC_BYTES];
+    unsigned off = 0;
+    blob[off++] = 0x09;
+    blob[off++] = USB_DT_CONFIG;
+    blob[off++] = 0x00;  /* wTotalLength low, filled in below */
+    blob[off++] = 0x00;
+    blob[off++] = USB_MAX_INTERFACES_PER_DEV + 1;
+    blob[off++] = 0x01;
+    blob[off++] = 0x00;
+    blob[off++] = 0xC0;
+    blob[off++] = 0x32;
+    for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV + 1; i++) {
+        blob[off++] = 0x09;
+        blob[off++] = USB_DT_INTERFACE;
+        blob[off++] = (uint8_t)i;   /* bInterfaceNumber */
+        blob[off++] = 0x00;         /* alt 0 */
+        blob[off++] = 0x00;         /* 0 endpoints */
+        blob[off++] = 0x0A;
+        blob[off++] = 0x00;
+        blob[off++] = 0x00;
+        blob[off++] = 0x00;
+    }
+    /* Append one EP that would hang off the overflowed iface — must be skipped. */
+    blob[off++] = 0x07;
+    blob[off++] = USB_DT_ENDPOINT;
+    blob[off++] = 0x88;
+    blob[off++] = USB_XFER_BULK;
+    blob[off++] = 0x00;
+    blob[off++] = 0x02;
+    blob[off++] = 0x00;
+    blob[2] = (uint8_t)(off & 0xFF);
+    blob[3] = (uint8_t)(off >> 8);
+
+    struct usb_device dev = {0};
+    memcpy(dev.raw_config, blob, off);
+    dev.raw_config_len = (uint16_t)off;
+    TEST_ASSERT_EQUAL_INT(0, usb_parse_configuration(&dev));
+
+    /* All USB_MAX_INTERFACES_PER_DEV slots filled. */
+    unsigned accepted = 0;
+    for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV; i++) {
+        if (dev.ifaces[i].valid) accepted++;
+    }
+    TEST_ASSERT_EQUAL_UINT(USB_MAX_INTERFACES_PER_DEV, accepted);
+
+    /* Overflowed iface's endpoint must not have been attached anywhere. */
+    for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV; i++) {
+        TEST_ASSERT_NULL(usb_find_endpoint(&dev,
+                                           dev.ifaces[i].number,
+                                           USB_DIR_IN,
+                                           USB_XFER_BULK));
+    }
+}
+
+static void test_descriptor_parse_endpoint_overflow(void)
+{
+    /*
+     * Pile USB_MAX_ENDPOINTS_PER_DEV + 2 endpoints onto a single
+     * interface. First USB_MAX_ENDPOINTS_PER_DEV are accepted; the
+     * rest are dropped with a warning. The interface's num_endpoints
+     * field still reports the original claim (parse copies from the
+     * descriptor), but ep_index[] saturates.
+     */
+    uint8_t blob[USB_MAX_CONFIG_DESC_BYTES];
+    unsigned off = 0;
+    /* CONFIGURATION */
+    blob[off++] = 0x09; blob[off++] = USB_DT_CONFIG;
+    blob[off++] = 0x00; blob[off++] = 0x00;
+    blob[off++] = 1;    blob[off++] = 1;
+    blob[off++] = 0;    blob[off++] = 0xC0; blob[off++] = 0x32;
+    /* INTERFACE */
+    const uint8_t total_eps = USB_MAX_ENDPOINTS_PER_DEV + 2;
+    blob[off++] = 0x09; blob[off++] = USB_DT_INTERFACE;
+    blob[off++] = 7;    blob[off++] = 0;
+    blob[off++] = total_eps;
+    blob[off++] = 0x0A; blob[off++] = 0; blob[off++] = 0; blob[off++] = 0;
+    /* Endpoints — alternate IN/OUT bulk. */
+    for (uint8_t e = 0; e < total_eps; e++) {
+        blob[off++] = 0x07;
+        blob[off++] = USB_DT_ENDPOINT;
+        blob[off++] = (uint8_t)((e & 1 ? USB_DIR_IN : 0) | (e + 1));
+        blob[off++] = USB_XFER_BULK;
+        blob[off++] = 0x00; blob[off++] = 0x02; blob[off++] = 0x00;
+    }
+    blob[2] = (uint8_t)(off & 0xFF);
+    blob[3] = (uint8_t)(off >> 8);
+
+    struct usb_device dev = {0};
+    memcpy(dev.raw_config, blob, off);
+    dev.raw_config_len = (uint16_t)off;
+    TEST_ASSERT_EQUAL_INT(0, usb_parse_configuration(&dev));
+
+    unsigned valid = 0;
+    for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++) {
+        if (dev.endpoints[e].valid) valid++;
+    }
+    TEST_ASSERT_EQUAL_UINT(USB_MAX_ENDPOINTS_PER_DEV, valid);
+
+    /* The interface's ep_index[] should have entries for the first
+     * USB_MAX_ENDPOINTS_PER_DEV endpoints only (all slots filled). */
+    unsigned attached = 0;
+    for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++) {
+        if (dev.ifaces[0].ep_index[e] >= 0) attached++;
+    }
+    TEST_ASSERT_EQUAL_UINT(USB_MAX_ENDPOINTS_PER_DEV, attached);
+}
+
 static void test_descriptor_parse_orphan_endpoint(void)
 {
     /* Endpoint descriptor before any interface — must be skipped, not crash. */
@@ -680,6 +795,8 @@ int test_suite_usb_core(void)
     RUN_TEST(test_find_endpoint_mismatch);
     RUN_TEST(test_descriptor_parse_invalid_header);
     RUN_TEST(test_descriptor_parse_too_short);
+    RUN_TEST(test_descriptor_parse_interface_overflow);
+    RUN_TEST(test_descriptor_parse_endpoint_overflow);
     RUN_TEST(test_descriptor_parse_orphan_endpoint);
     RUN_TEST(test_cancel_pending_urb);
     RUN_TEST(test_cancel_with_no_hcd);

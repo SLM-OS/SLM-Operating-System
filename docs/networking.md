@@ -703,11 +703,12 @@ host + CDC-ECM USB-A dongle) is viable.
   root-port enumeration state machine (port reset → GET_DESCRIPTOR
   stub → SET_ADDRESS → full descriptor → config tree → parse →
   SET_CONFIGURATION → endpoint_configure).
-- `kernel/tests/test_usb_core.c` — 25 unit tests against a mock HCD:
+- `kernel/tests/test_usb_core.c` — 27 unit tests against a mock HCD:
   URB lifecycle, URB cancel on a pending transfer, descriptor parse
   (valid, too-short input, invalid header, orphan endpoint,
-  alt-setting skip), full enumeration plus every error-injection
-  branch (port reset failure, device open failure, SET_CONFIGURATION
+  alt-setting skip, interface-table overflow, endpoint-table
+  overflow), full enumeration plus every error-injection branch
+  (port reset failure, device open failure, SET_CONFIGURATION
   failure, endpoint_configure failure, generic control-msg failure),
   speed propagation, and the null-HCD / null-URB guards.
 
@@ -941,6 +942,8 @@ no hardware dependency):
 | `test_find_endpoint_mismatch` | Missing ep / unknown iface / NULL dev return NULL |
 | `test_descriptor_parse_invalid_header` | Non-CONFIGURATION top-level descriptor rejected |
 | `test_descriptor_parse_too_short` | Undersized blob rejected without crashing |
+| `test_descriptor_parse_interface_overflow` | More than `USB_MAX_INTERFACES_PER_DEV` interfaces: first N accepted, rest dropped without smearing their endpoints onto earlier interfaces |
+| `test_descriptor_parse_endpoint_overflow` | More than `USB_MAX_ENDPOINTS_PER_DEV` endpoints: first N accepted, rest dropped |
 | `test_descriptor_parse_orphan_endpoint` | Endpoint before any interface is skipped |
 | `test_cancel_pending_urb` | Deferred URB → `usb_cancel_urb` → status CANCELLED |
 | `test_cancel_with_no_hcd` | `usb_cancel_urb` handles missing HCD and NULL URB |
