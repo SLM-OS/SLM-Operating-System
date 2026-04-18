@@ -306,6 +306,73 @@ returns the numbers directly and PIT is never touched.
 
 ---
 
+## x86-64 GA10x Falcon — Per-page IMEMT in PIO IMEM upload (April 2026)
+
+`kernel/gpu/nvidia/falcon.c:falcon_pio_upload_imem` writes the
+page-tag register `IMEMT` once at the start of the upload **and**
+re-arms it whenever the byte index crosses a 256-byte boundary.
+
+**Why both writes are needed.** The `IMEMC` AINCW bit auto-
+increments the write *address* within a 256-byte page, but the
+page tag is a separate register. Without per-page IMEMT updates:
+
+- Non-secure ucode happens to keep working — the running firmware
+  never re-validates the tag.
+- HS-secure code (Booter Load on SEC2 is the immediate consumer;
+  any future >256 byte secure FWSEC path too) silently fails: the
+  HS-bootrom recomputes a signature over `(tag, code)` per page
+  with the on-disk signature pinned to monotonic tags 0,1,2,...
+  When every page reads back as page 0, the signature mismatches
+  and the bootrom STOPs at the first instruction. CPUCTL ends up
+  at `0x20` (STOPPED), MAILBOX0 still carries the input WPR meta
+  (no booter-side response), and `falcon_wait_halted` times out.
+
+Reference: nvgpu's `gk20a_falcon_copy_to_imem` mirrors this in
+three sites in
+`docs/reference/nvgpu-hal-falcon-falcon_gk20a_fusa.c`. SLM-OS
+matches the pattern. Regression coverage in
+`host-tools/gsp-harness/test_falcon.c`:
+`test_pio_imem_multi_page_writes_tag_per_page` (4-page upload,
+asserts 4 tag writes), `test_pio_imem_sub_page_writes_one_tag`
+(252-byte upload, asserts 1), `test_pio_imem_exact_page_writes_one_tag`
+(256-byte upload, asserts 1 — the boundary check fires AT the
+crossing, not at the final word of the page being filled).
+
+`falcon_pio_upload_dmem` does NOT need this — DMEM has no page
+tag.
+
+---
+
+## x86-64 GA10x — SEC2 BROM aperture stays priv-locked (April 2026)
+
+When SLM-OS boots via the Linux→SLM-OS kexec path (`docs/x86-64-gpu-inference-status.md` §4.2.k/l) it inherits a partially-unlocked
+SEC2 from nouveau:
+
+- `SEC2 CPUCTL` (`BAR0+0x840100`) reads `0x00000020` — unlocked
+- `SEC2 HWCFG2` (`BAR0+0x8400f4`) reads `0x000047f7` — scrub-clear
+- `SEC2 BROM_*` (`BAR0+0x842200..220`) reads `0xbadf5040` — **still
+  priv-locked**
+
+Cross-checked from Linux+nouveau directly (host `peek` via
+`/root/sec2_peek` against the live mapping): the BROM offsets are
+PRI-poisoned even on a healthy nouveau host that successfully
+drives Booter Load. Conclusion: nouveau does NOT write to BROM
+ENGIDMASK/UCODE_ID/MOD_SEL from the CPU side, and any code that
+does (e.g. `kernel/gpu/nvidia/bringup.c:710-716`) has its writes
+silently dropped by the PRI arbiter — the HS-bootrom then sees
+zero selectors, the signature mismatches, and SEC2 STOPs at the
+first instruction.
+
+Implication for `gsp_bringup_booter_load`: the engine-id /
+ucode-id / RSA-mode-select values almost certainly need to be
+DMEM-patched into the Booter ucode itself (the same pattern
+`gsp_dmemmapper_patch` uses for FWSEC-FRTS), not written to the
+BROM aperture. Reference: nouveau's `r535_booter_load` in
+`drivers/gpu/drm/nouveau/nvkm/subdev/gsp/r535.c` (Linux 6.7+) is
+the source diff to chase next time this work resumes.
+
+---
+
 ## UART Lock on Pi 5 / Jetson
 
 On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).

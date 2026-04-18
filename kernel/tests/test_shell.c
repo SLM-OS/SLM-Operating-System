@@ -2485,12 +2485,71 @@ static void test_shell_cmd_hailo_load_too_small(void)
 #endif /* !X86_64 */
 
 /* ============================================================================
+ * `gpu` shell command — platform-correctness regression
+ *
+ * On x86-64, the cross-platform built-in `gpu` cmd in shell.c is
+ * intentionally guarded out so the NVIDIA driver's external
+ * registration (with init/sec2/vram/regs subcommands) wins
+ * find_command's lookup. On every other platform (Jetson, QEMU
+ * ARM64, Pi 5) the built-in MUST be present — Jetson uses its
+ * `gpu read <hex-offset>` subcommand for the integrated GA10B
+ * MMIO aperture, and the other ARM64 targets get the generic
+ * info display.
+ *
+ * test_x86_boot.c has the x86-side assertion
+ * (`test_x86_gpu_cmd_not_in_builtins`); this is the cross-
+ * platform mirror that fires loudly if the platform guard in
+ * shell.c is widened, narrowed, or removed.
+ * ============================================================================ */
+
+extern const struct {
+    const char *name;
+    int (*handler)(int, char **);
+    const char *help;
+    bool mutates;
+} builtin_commands[];
+extern const int NUM_BUILTIN_COMMANDS;
+
+static bool builtin_has_cmd(const char *name)
+{
+    for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
+        if (strcmp(name, builtin_commands[i].name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void test_shell_gpu_cmd_platform_correctness(void)
+{
+    bool present = builtin_has_cmd("gpu");
+#if defined(PLATFORM_X86_64)
+    /* x86-64: NVIDIA driver registers a richer `gpu` externally;
+     * the built-in is guarded out so it doesn't shadow the
+     * dispatcher (find_command checks built-ins before externals).
+     * If this fails, the platform guard around builtin_commands[]
+     * was removed/widened — the NVIDIA `gpu init/sec2/vram/regs`
+     * dispatcher will be unreachable from the shell. */
+    TEST_ASSERT_FALSE(present);
+#else
+    /* Every other platform keeps the built-in: Jetson needs
+     * `gpu read <hex-offset>` for the integrated GA10B MMIO
+     * aperture, ARM64-QEMU/Pi 5 use the info display. Removing
+     * the built-in here would break Jetson's GPU debug surface. */
+    TEST_ASSERT_TRUE(present);
+#endif
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
 int test_suite_shell(void)
 {
     UNITY_BEGIN();
+
+    /* Cross-platform `gpu` builtin shape (x86-64 strips it; everyone
+     * else keeps it for Jetson `gpu read`). */
+    RUN_TEST(test_shell_gpu_cmd_platform_correctness);
 
     /* Command dispatch tests - essential */
     RUN_TEST(test_shell_empty_command);
