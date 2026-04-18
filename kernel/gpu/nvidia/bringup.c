@@ -528,6 +528,52 @@ void gsp_bringup_free(struct gsp_bringup *b)
  * E4 RPC step without re-allocating. */
 #define WPR_META_BUFFER_SIZE   4096u
 
+/* Field-copy from parsed nvfw_image into the booter_* fields of
+ * struct gsp_bringup. Extracted so host-side regression tests
+ * (test_bringup.c) can pin the assignment logic — particularly the
+ * BOOTVEC = apps[0].offset rule, which used to be wrongly set to
+ * os_code_offset and was the root cause of the Phase 2 STOPPED
+ * failure observed in PR #287's hardware experiment.
+ *
+ * Caller must have validated that:
+ *   - img.os_code_offset + os_code_size  <= img.data_size
+ *   - img.os_data_offset + os_data_size  <= img.data_size
+ *   - img.apps[0].offset + apps[0].size  <= img.data_size
+ *   - img.patch_loc lies inside [os_data_offset, os_data_offset+os_data_size]
+ *
+ * Field semantics — see falcon.h + the Phase 2 layout comment in
+ * gsp_bringup_booter_load for the full v2-vs-v1 layout discussion. */
+void gsp_bringup_set_booter_layout(struct gsp_bringup *b,
+                                   const struct nvfw_image *img)
+{
+    /* Defensive — the one in-tree caller
+     * (`gsp_bringup_booter_load`) always passes valid pointers, but
+     * the helper is extern-visible for tests so guard against a
+     * future caller forgetting. */
+    if (!b || !img) return;
+    b->booter_imem_ns_off   = img->os_code_offset;
+    b->booter_imem_ns_size  = img->os_code_size;
+    b->booter_imem_sec_off  = img->apps[0].offset;
+    b->booter_imem_sec_size = img->apps[0].size;
+    b->booter_dmem_offset   = img->os_data_offset;
+    b->booter_dmem_size     = img->os_data_size;
+    b->booter_dmem_sign     = img->patch_loc - img->os_data_offset;
+    b->booter_engine_id     = img->engine_id;
+    b->booter_ucode_id      = img->ucode_id;
+    /* BOOTVEC is the secure entry point — where the HS-bootrom jumps
+     * AFTER signature verification succeeds. For HS-only booter that
+     * means apps[0].offset, NOT os_code_offset. The earlier value
+     * (os_code_offset = 0 on R535 booter_load) sent the Falcon to
+     * IMEM[0] which is the non-secure preamble, not the actual booter
+     * entry. Reference: OGKM `kflcnRegWrite(NV_PFALCON_FALCON_BOOTVEC,
+     * pUcode->imemVa)` where `imemVa = header.appCodeOffset`
+     * (`docs/reference/ogkm-kernel_gsp_falcon_ga102.c:278`,
+     * `docs/reference/ogkm-kernel_gsp_booter.c:322`). Same in nouveau
+     * v2 `nvkm_falcon_fw_ctor_hs_v2:351`: `fw->boot_addr =
+     * lhdr->app[0].offset`. */
+    b->booter_boot_addr     = img->apps[0].offset;
+}
+
 /* Booter expects MAILBOX0 == 0 on completion in nominal flow. With
  * an incomplete WprMeta (E3.4 milestone), the booter may halt with a
  * non-zero status. We accept "halt within timeout" as the success
@@ -575,12 +621,39 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     uint32_t sig_size = img.sig_prod_size / sig_count;
     if (sig_size == 0 || sig_size > 4096) return GSP_ERR_FAULT;
 
-    /* ---- Phase 2: layout the booter image ---- */
-    /* Per nouveau tu102_gsp_booter_ctor:
-     *   nmem source = data_offset + 0,           target IMEM = os_code_offset
-     *   imem source = data_offset + os_code_size, target IMEM = app[0].offset (sec)
-     *   dmem source = data_offset + os_data_offset, target DMEM = 0
-     *   dmem_sign   = patch_loc - os_data_offset (DMEM byte offset of sig) */
+    /* ---- Phase 2: layout the booter image ----
+     *
+     * R535 booter blobs are HS v2 — each section identifies its own
+     * source byte offset within the data section explicitly:
+     *
+     *   non-secure IMEM source = data_offset + os_code_offset (typically 0;
+     *                                                   for HS-only booter
+     *                                                   os_code_size == 0
+     *                                                   and the upload is
+     *                                                   a no-op)
+     *   secure IMEM source     = data_offset + apps[0].offset
+     *                            (the secure app's source AND target IMEM
+     *                            offset — both are app[0].offset by spec)
+     *   DMEM source            = data_offset + os_data_offset
+     *                            (target DMEM offset = 0)
+     *   dmem_sign              = patch_loc - os_data_offset (DMEM byte
+     *                            offset where signature gets patched in)
+     *
+     * Reference: OGKM `kgspExecuteHsFalcon_GA102` (
+     * `docs/reference/ogkm-kernel_gsp_falcon_ga102.c:213-275`) and
+     * nouveau v2 `nvkm_falcon_fw_ctor_hs_v2` (
+     * `docs/reference/nouveau-falcon-fw.c:340-356`).
+     *
+     * The previous SLM-OS code mirrored the v1 nouveau layout
+     * (`fw->nmem_base_img = 0; fw->imem_base_img = lhdr->apps[0]`) which
+     * assumes secure code lives immediately after non-secure in the data
+     * section. R535 v2 doesn't make that assumption — secure code is
+     * wherever apps[0].offset says it is, often NOT contiguous with the
+     * non-secure section. Reading from `+ os_code_size` instead of
+     * `+ apps[0].offset` loaded HEADER BYTES into IMEM, the HS-bootrom
+     * signature check rejected silently, and SEC2 STOPPED at first
+     * instruction (CPUCTL=0x20, no MAILBOX0 response — the symptom
+     * captured in PR #287's hardware experiment). */
     if (img.os_code_offset + img.os_code_size > img.data_size) return GSP_ERR_FAULT;
     if (img.os_data_offset + img.os_data_size > img.data_size) return GSP_ERR_FAULT;
     if (img.apps[0].offset + img.apps[0].size > img.data_size) return GSP_ERR_FAULT;
@@ -588,15 +661,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     if (img.patch_loc + sig_size > img.os_data_offset + img.os_data_size) return GSP_ERR_FAULT;
     if (img.sig_prod_offset + img.sig_prod_size > img.size) return GSP_ERR_FAULT;
 
-    b->booter_imem_ns_size  = img.os_code_size;
-    b->booter_imem_sec_off  = img.apps[0].offset;
-    b->booter_imem_sec_size = img.apps[0].size;
-    b->booter_dmem_offset   = img.os_data_offset;
-    b->booter_dmem_size     = img.os_data_size;
-    b->booter_dmem_sign     = img.patch_loc - img.os_data_offset;
-    b->booter_engine_id     = img.engine_id;
-    b->booter_ucode_id      = img.ucode_id;
-    b->booter_boot_addr     = img.os_code_offset;
+    gsp_bringup_set_booter_layout(b, &img);
 
     /* Track the most-recent failure code through the goto-fail path
      * so callers see _why_ booter setup gave up, not just _that_ it
@@ -681,15 +746,23 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     uint32_t sec_round = (img.apps[0].size + 3u) & ~3u;
     uint32_t dmem_round = (img.os_data_size + 3u) & ~3u;
 
+    /* Source pointer for each section uses the EXPLICIT field offset
+     * from the v2 load header, not an assumed contiguous v1 layout.
+     * For HS-only booter, ns_round will be 0 (no non-secure section)
+     * and the first call is a no-op; the secure call is the load-bearing
+     * one. See the §"Phase 2: layout the booter image" comment above
+     * for why this matters. */
     rc = falcon_pio_upload_imem(&b->sec2_flcn,
-                                (uint8_t *)b->dma_booter_va + 0,
+                                (uint8_t *)b->dma_booter_va
+                                    + img.os_code_offset,
                                 ns_round,
                                 img.os_code_offset,
                                 false);
     if (rc < 0) goto fail;
 
     rc = falcon_pio_upload_imem(&b->sec2_flcn,
-                                (uint8_t *)b->dma_booter_va + img.os_code_size,
+                                (uint8_t *)b->dma_booter_va
+                                    + img.apps[0].offset,
                                 sec_round,
                                 img.apps[0].offset,
                                 true);

@@ -27,6 +27,7 @@
 
 #include "../../kernel/gpu/nvidia/bringup.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
+#include "../../kernel/gpu/nvidia/nvfw.h"
 
 /* nvidia_vbios_platform_load is platform-specific (linux_platform.c
  * for the harness, nvidia_gsp_platform.c on bare-metal). The
@@ -490,6 +491,146 @@ static void test_bringup_free_idempotent_on_fresh_struct(void)
     REQUIRE(b.dma_dmem_va == NULL);
 }
 
+/* ============================================================================
+ * gsp_bringup_set_booter_layout — pins the v2 booter-blob → bringup
+ * field-copy logic. Existed inline in gsp_bringup_booter_load until
+ * PR #289 extracted it after a hardware experiment surfaced a wrong
+ * assignment for `booter_boot_addr` (was os_code_offset → 0 → Falcon
+ * jumped to non-secure preamble; now apps[0].offset → secure entry).
+ * ============================================================================ */
+
+/* Dummy bytes buffer for the test fixture — if a future change to
+ * `gsp_bringup_set_booter_layout` starts reading `img->bytes`, we
+ * want it to read from a known allocation instead of NULL-deref'ing.
+ * The helper under test today doesn't touch this, so the buffer's
+ * contents are irrelevant. */
+static uint8_t test_image_dummy_bytes[0x10000];
+
+/* Construct a minimal nvfw_image with v2-layout values that exercise
+ * every field the helper copies. The exact numbers here are chosen so
+ * each assertion in the tests below distinguishes the field —
+ * apps[0].offset != os_code_offset so a regression that revives the
+ * old `booter_boot_addr = os_code_offset` line fires immediately. */
+static void make_v2_booter_image(struct nvfw_image *img)
+{
+    memset(img, 0, sizeof(*img));
+    /* Point bytes/size at a real allocation so a future helper
+     * change that dereferences them fails in a controlled way, not
+     * with a segfault that confuses the test framework. */
+    img->bytes          = test_image_dummy_bytes;
+    img->size           = sizeof(test_image_dummy_bytes);
+    img->os_code_offset = 0x100;       /* non-secure preamble */
+    img->os_code_size   = 0x100;
+    img->os_data_offset = 0x8400;      /* DMEM section */
+    img->os_data_size   = 0x6200;
+    img->num_apps       = 1;
+    img->apps[0].offset = 0x200;       /* secure entry — distinct from os_code_offset */
+    img->apps[0].size   = 0x8200;
+    img->patch_loc      = 0x8410;      /* signature 16 bytes into DMEM */
+    img->engine_id      = 0x1;         /* SEC2 */
+    img->ucode_id       = 0x3;
+    img->fuse_ver       = 0xF;
+    img->has_meta       = true;
+}
+
+/* Regression: BOOTVEC = apps[0].offset (the entry point HS-bootrom
+ * jumps to after signature verify), NOT os_code_offset (which is the
+ * non-secure preamble's IMEM location). Phase 2 used to STOP at first
+ * instruction on R535 booter_load because os_code_offset == 0 sent
+ * the Falcon to IMEM[0]. */
+static void test_booter_layout_bootvec_uses_apps0_offset(void)
+{
+    struct nvfw_image img;
+    struct gsp_bringup b = { 0 };
+    make_v2_booter_image(&img);
+
+    gsp_bringup_set_booter_layout(&b, &img);
+
+    REQUIRE(b.booter_boot_addr == 0x200);   /* apps[0].offset */
+    REQUIRE(b.booter_boot_addr != img.os_code_offset);
+    REQUIRE(b.booter_boot_addr == img.apps[0].offset);
+}
+
+/* Companion: every other booter_* field also copied correctly. */
+static void test_booter_layout_all_fields_set(void)
+{
+    struct nvfw_image img;
+    struct gsp_bringup b = { 0 };
+    make_v2_booter_image(&img);
+
+    gsp_bringup_set_booter_layout(&b, &img);
+
+    REQUIRE(b.booter_imem_ns_off   == 0x100);
+    REQUIRE(b.booter_imem_ns_size  == 0x100);
+    REQUIRE(b.booter_imem_sec_off  == 0x200);
+    REQUIRE(b.booter_imem_sec_size == 0x8200);
+    REQUIRE(b.booter_dmem_offset   == 0x8400);
+    REQUIRE(b.booter_dmem_size     == 0x6200);
+    /* dmem_sign = patch_loc - os_data_offset = 0x10 (signature
+     * lands at byte 16 of DMEM, after a small DMEM header). */
+    REQUIRE(b.booter_dmem_sign     == 0x10);
+    REQUIRE(b.booter_engine_id     == 0x1);
+    REQUIRE(b.booter_ucode_id      == 0x3);
+}
+
+/* Layout where apps[0].offset == os_code_offset: BOOTVEC must still
+ * pick apps[0].offset (the field-of-record), not os_code_offset.
+ * Tests the precondition the old buggy code relied on (contiguous
+ * non-secure-then-secure layout) is no longer special-cased. */
+static void test_booter_layout_bootvec_consistent_when_offsets_match(void)
+{
+    struct nvfw_image img;
+    struct gsp_bringup b = { 0 };
+    make_v2_booter_image(&img);
+    img.os_code_offset = 0x200;        /* matches apps[0].offset now */
+
+    gsp_bringup_set_booter_layout(&b, &img);
+
+    REQUIRE(b.booter_boot_addr == 0x200);
+    REQUIRE(b.booter_boot_addr == img.apps[0].offset);
+}
+
+/* NULL args must be no-ops (no crash). The helper is extern-visible
+ * for tests, so a future caller that forgets to validate shouldn't
+ * segfault. */
+static void test_booter_layout_null_args_no_crash(void)
+{
+    struct nvfw_image img;
+    struct gsp_bringup b = { 0 };
+    make_v2_booter_image(&img);
+
+    /* NULL b: the assignments would crash on dereference — verify
+     * the early-return works. */
+    gsp_bringup_set_booter_layout(NULL, &img);
+    /* NULL img: same check from the other side. */
+    gsp_bringup_set_booter_layout(&b, NULL);
+    /* Both NULL. */
+    gsp_bringup_set_booter_layout(NULL, NULL);
+
+    /* If we're still running, the helper returned cleanly. Also
+     * verify the b struct is untouched in the NULL-img case. */
+    REQUIRE(b.booter_boot_addr == 0);
+    REQUIRE(b.booter_imem_sec_off == 0);
+}
+
+/* Zero-size non-secure section (the actual R535 booter_load layout
+ * if the producer chose to omit the preamble): helper still copies
+ * the 0 size correctly and BOOTVEC still uses apps[0].offset. */
+static void test_booter_layout_zero_ns_size(void)
+{
+    struct nvfw_image img;
+    struct gsp_bringup b = { 0 };
+    make_v2_booter_image(&img);
+    img.os_code_size = 0;
+    img.apps[0].offset = 0;            /* secure starts at byte 0 */
+
+    gsp_bringup_set_booter_layout(&b, &img);
+
+    REQUIRE(b.booter_imem_ns_size == 0);
+    REQUIRE(b.booter_boot_addr == 0);
+    REQUIRE(b.booter_imem_sec_off == 0);
+}
+
 int main(void)
 {
     /* Sig-index algorithm */
@@ -519,6 +660,14 @@ int main(void)
     /* gsp_bringup_free helper */
     test_bringup_free_null_safe();
     test_bringup_free_idempotent_on_fresh_struct();
+
+    /* gsp_bringup_set_booter_layout — pins the BOOTVEC=apps[0].offset
+     * rule and the full v2 booter-blob field-copy. */
+    test_booter_layout_bootvec_uses_apps0_offset();
+    test_booter_layout_all_fields_set();
+    test_booter_layout_bootvec_consistent_when_offsets_match();
+    test_booter_layout_null_args_no_crash();
+    test_booter_layout_zero_ns_size();
 
     /* State-machine guards (E3.4.d / E3.4.e) */
     test_booter_load_refuses_pre_fwsec();
