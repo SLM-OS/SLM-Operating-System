@@ -51,6 +51,17 @@ extern const struct gsp_platform_ops *gsp_platform;
 #define VGA_WORKSPACE_SIZE          0x100000ull      /* 1 MB, no-display fallback */
 #define WPR2_FRTS_BASE_FROM_TOP     (VGA_WORKSPACE_SIZE + WPR2_FRTS_SIZE) /* 0x200000 */
 
+/* Pin the GA107 FB+WPR2 layout as overflow-free. The Stage A
+ * `gspFwWprEnd = wpr2_addr + wpr2_size` arithmetic in
+ * `gsp_wpr_meta_populate_minimum` would wrap on a contrived input
+ * but is fine here — fail the build instead of silently relying on
+ * the bound when somebody adjusts the constants for a future GPU. */
+_Static_assert(GA107_FB_SIZE_BYTES > WPR2_FRTS_BASE_FROM_TOP,
+               "GA107_FB_SIZE_BYTES must accommodate WPR2 placement");
+_Static_assert((GA107_FB_SIZE_BYTES - WPR2_FRTS_BASE_FROM_TOP) +
+               WPR2_FRTS_SIZE > (GA107_FB_SIZE_BYTES - WPR2_FRTS_BASE_FROM_TOP),
+               "WPR2 addr + size must not overflow uint64_t");
+
 /* Ampere BAR0 offsets observable after FWSEC-FRTS run — definitions
  * in bringup.h so the harness diagnostic dump uses the same names. */
 
@@ -770,7 +781,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * magic/revision validation; without a non-NULL chain it
      * NULL-derefs and hangs forever. The four pages stay around
      * until bringup completes (or fails); fail-path frees them. */
-    b->last_error_phase = 105;
+    b->last_error_phase = 103;
     b->dma_radix3_l0_va = gsp_dma_alloc_checked(RADIX3_PAGE_SIZE,
                                                  RADIX3_PAGE_SIZE,
                                                  &b->dma_radix3_l0_iova);
@@ -789,25 +800,30 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     if (!b->dma_radix3_elf_va) { rc = GSP_ERR_NOMEM; goto fail; }
     b->dma_radix3_elf_size = RADIX3_DUMMY_ELF_SIZE;
 
-    /* Zero each page first so the unused entries don't carry stale
-     * heap content into SEC2's view. Then write the single L0→L1,
-     * L1→L2, L2→ELF entries via the pure helper. */
+    /* Zero each DMA-mapped page first so unused entries don't carry
+     * stale heap content into SEC2's view. The WprMeta buffer also
+     * gets the full-page zero (not just the 256-byte struct's worth
+     * inside `gsp_wpr_meta_populate_minimum`) — booter reads exactly
+     * the struct today, but a defense-in-depth zero of the rest of
+     * the DMA page costs nothing and prevents heap leakage to the
+     * GPU's view if a future booter or Stage B change reads more. */
+    memset(b->dma_wpr_meta_va,   0, b->dma_wpr_meta_size);
     memset(b->dma_radix3_l0_va,  0, RADIX3_PAGE_SIZE);
     memset(b->dma_radix3_l1_va,  0, RADIX3_PAGE_SIZE);
     memset(b->dma_radix3_l2_va,  0, RADIX3_PAGE_SIZE);
     memset(b->dma_radix3_elf_va, 0, RADIX3_DUMMY_ELF_SIZE);
-    gsp_radix3_fill_dummy_chain((uint64_t *)b->dma_radix3_l0_va,
+    gsp_radix3_fill_dummy_chain(b->dma_radix3_l0_va,
                                 b->dma_radix3_l1_iova,
-                                (uint64_t *)b->dma_radix3_l1_va,
+                                b->dma_radix3_l1_va,
                                 b->dma_radix3_l2_iova,
-                                (uint64_t *)b->dma_radix3_l2_va,
+                                b->dma_radix3_l2_va,
                                 b->dma_radix3_elf_iova);
 
     /* Populate WprMeta with the bare-minimum fields. Booter will
      * accept magic/revision, walk a non-NULL radix3 chain, and
      * (expected) reject the missing bootloader / signature with a
      * specific MAILBOX0 status — the Stage A diagnostic goal. */
-    gsp_wpr_meta_populate_minimum((GspFwWprMeta *)b->dma_wpr_meta_va,
+    gsp_wpr_meta_populate_minimum(b->dma_wpr_meta_va,
                                   b->dma_radix3_l0_iova,
                                   b->dma_radix3_elf_size,
                                   b->wpr2_addr,
@@ -832,8 +848,14 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * gsp_bringup_fwsec_frts phase 3: on VFIO hosts, vfio-pci's FLR
      * + on-chip BSI DEVINIT recovery leave the Falcon in an
      * idle-but-live state, and writing FALCON_ENGINE.RESET on that
-     * state hangs the PRI bus. */
-    b->last_error_phase = 103;
+     * state hangs the PRI bus.
+     *
+     * `last_error_phase` IDs renumbered when Phase 4b was inserted
+     * (Stage A): pre-Stage-A used 100..106 sequentially for Phases
+     * 1..9; post-Stage-A uses 100..107 with Phase 4b at 103 and
+     * everything from Phase 5 onward shifted by +1 to stay
+     * monotonic with execution order. */
+    b->last_error_phase = 104;
     /* Skip falcon_reset when the Falcon is already idle (post-FLR
      * path on VFIO) or when its control registers are priv-locked
      * (0xbadfXXXX) — writing FALCON_ENGINE.RESET on a priv-locked
@@ -848,7 +870,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     falcon_pre_pio_setup(&b->sec2_flcn);
 
     /* ---- Phase 6: PIO upload non-secure IMEM, secure IMEM, DMEM ---- */
-    b->last_error_phase = 104;
+    b->last_error_phase = 105;
     /* Round all PIO sizes up to 4-byte boundaries (the upload helper
      * requires u32 alignment). The Falcon's IMEM/DMEM is byte-addressed
      * but PIO writes through u32 ports. Trailing bytes past the actual
@@ -888,7 +910,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     /* ---- Phase 7: program SEC2 BROM ----
      * Order matters: PARAADDR, ENGIDMASK, UCODE_ID, then MOD_SEL last
      * (writing MOD_SEL kicks the BROM to verify everything queued). */
-    b->last_error_phase = 105;
+    b->last_error_phase = 106;
     gsp_platform->write32(NV_PSEC2_BROM_BASE + FALCON_BROM_PARAADDR0,
                           b->booter_dmem_sign);
     gsp_platform->write32(NV_PSEC2_BROM_BASE + FALCON_BROM_ENGIDMASK,
@@ -907,7 +929,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
                           (uint32_t)(b->dma_wpr_meta_iova >> 32));
 
     /* ---- Phase 9: STARTCPU + halt poll ---- */
-    b->last_error_phase = 106;
+    b->last_error_phase = 107;
     falcon_start(&b->sec2_flcn, b->booter_boot_addr);
     if (falcon_wait_halted(&b->sec2_flcn, FALCON_HALT_TIMEOUT_US) < 0) {
         rc = GSP_ERR_TIMEOUT;

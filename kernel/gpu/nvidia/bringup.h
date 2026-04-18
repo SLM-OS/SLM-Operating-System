@@ -26,6 +26,12 @@
 
 #include "falcon.h"
 
+/* Forward declaration so `struct gsp_bringup` can carry a typed
+ * `GspFwWprMeta *` without forcing every consumer of bringup.h
+ * to pull in gsp_wpr_meta.h. The full struct definition (and the
+ * Stage A field-write helpers) live there. */
+typedef struct GspFwWprMeta_s GspFwWprMeta;
+
 enum gsp_bringup_state {
     GSP_BRINGUP_INIT,
     GSP_BRINGUP_FWSEC_FRTS_DONE,
@@ -140,8 +146,9 @@ struct gsp_bringup {
      * the booter can validate without NULL-deref'ing — the rest
      * stays zero and booter halts with a debuggable MAILBOX0
      * status code. Full population (real GSP-RM ELF + bootloader)
-     * is the E4 RPC milestone. */
-    void          *dma_wpr_meta_va;
+     * is the E4 RPC milestone. Typed as `GspFwWprMeta *` (forward-
+     * declared above) so callers don't need to cast at every use. */
+    GspFwWprMeta  *dma_wpr_meta_va;
     uint64_t       dma_wpr_meta_iova;
     size_t         dma_wpr_meta_size;
 
@@ -150,12 +157,16 @@ struct gsp_bringup {
      * holds nothing booter actually consumes. The chain exists to
      * satisfy `sysmemAddrOfRadix3Elf` so the booter's page walk
      * doesn't fault. Sized for the single-entry-per-level case
-     * (real GSP-RM ELF needs many L2 entries — that's E4's job). */
-    void          *dma_radix3_l0_va;
+     * (real GSP-RM ELF needs many L2 entries — that's E4's job).
+     *
+     * L0/L1/L2 are typed as `uint64_t *` since each page is a
+     * flat array of physical-address entries; the ELF page is
+     * `void *` because its contents are opaque to SLM-OS. */
+    uint64_t      *dma_radix3_l0_va;
     uint64_t       dma_radix3_l0_iova;
-    void          *dma_radix3_l1_va;
+    uint64_t      *dma_radix3_l1_va;
     uint64_t       dma_radix3_l1_iova;
-    void          *dma_radix3_l2_va;
+    uint64_t      *dma_radix3_l2_va;
     uint64_t       dma_radix3_l2_iova;
     void          *dma_radix3_elf_va;
     uint64_t       dma_radix3_elf_iova;

@@ -41,8 +41,11 @@
  * `_Pragma`-pack is NOT used — every field is naturally aligned
  * (all u64s on 8-byte boundaries, the inner u16/u32 union packs
  * to 8). Compile-time offset asserts below catch any layout drift.
+ *
+ * Tagged so `struct GspFwWprMeta_s` is forward-declarable from
+ * other headers without pulling in the full definition.
  */
-typedef struct {
+typedef struct GspFwWprMeta_s {
     /* Magic. BL writes this; booter validates against
      * GSP_FW_WPR_META_MAGIC before doing anything else. */
     uint64_t magic;

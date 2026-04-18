@@ -741,7 +741,19 @@ static void test_wpr_meta_populate_leaves_other_fields_zero(void)
     REQUIRE(meta.vgaWorkspaceOffset       == 0);
     REQUIRE(meta.vgaWorkspaceSize         == 0);
     REQUIRE(meta.bootCount                == 0);
+    /* Second-union (partitionRpc + crashReport) and the trailing
+     * scalars. These are the fields a future Stage B/C might start
+     * populating; pinning them zero today means the test will fail
+     * on first such change and the author will deliberately update
+     * the contract here. */
     REQUIRE(meta.partitionRpcAddr         == 0);
+    REQUIRE(meta.partitionRpcRequestOffset == 0);
+    REQUIRE(meta.partitionRpcReplyOffset  == 0);
+    REQUIRE(meta.elfCodeOffset            == 0);
+    REQUIRE(meta.elfDataOffset            == 0);
+    REQUIRE(meta.elfCodeSize              == 0);
+    REQUIRE(meta.elfDataSize              == 0);
+    REQUIRE(meta.lsUcodeVersion           == 0);
     REQUIRE(meta.gspFwHeapVfPartitionCount == 0);
     REQUIRE(meta.verified                 == 0);
 }
@@ -770,11 +782,22 @@ static void test_wpr_meta_populate_computes_wpr_end(void)
  * is extern-visible for tests, and the in-tree caller does
  * pre-validate, but defense-in-depth matters because NULL gets
  * fed in if the WprMeta DMA alloc itself fails and the caller
- * forgets to bail. */
+ * forgets to bail.
+ *
+ * Allocate a sentinel-filled meta on the stack alongside the NULL
+ * call so a positive REQUIRE confirms the helper actually returned
+ * (vs. exited via undefined behavior the harness happens to swallow). */
 static void test_wpr_meta_populate_null_safe(void)
 {
-    /* No REQUIRE — the test passes by not crashing. */
+    GspFwWprMeta sentinel;
+    memset(&sentinel, 0xee, sizeof(sentinel));
+
     gsp_wpr_meta_populate_minimum(NULL, 1, 1, 1, 1, 1);
+
+    /* If we're still running, the helper returned. Sentinel meta
+     * must not have been touched (it was never passed in). */
+    REQUIRE(sentinel.magic == 0xeeeeeeeeeeeeeeeeULL);
+    REQUIRE(sentinel.verified == 0xeeeeeeeeeeeeeeeeULL);
 }
 
 /* The radix3 chain helper writes one entry per page. Verify L0[0]
@@ -865,16 +888,29 @@ static void test_radix3_fill_null_pages_no_op(void)
  * (the in-tree caller's `gsp_dma_alloc_checked` returns NULL on
  * alloc failure, which the caller catches before reaching us).
  * Pin the contract so a future hardening change in the helper
- * forces a deliberate test update. */
+ * forces a deliberate test update.
+ *
+ * Pages are pre-filled with 0xa5 so an asserted `[0] == 0` proves
+ * the helper actually wrote zero — not just that the page was
+ * already zero. */
 static void test_radix3_fill_accepts_zero_iovas(void)
 {
-    uint64_t l0[512] = { 0 }, l1[512] = { 0 }, l2[512] = { 0 };
+    uint64_t l0[512], l1[512], l2[512];
+    memset(l0, 0xa5, sizeof(l0));
+    memset(l1, 0xa5, sizeof(l1));
+    memset(l2, 0xa5, sizeof(l2));
 
     gsp_radix3_fill_dummy_chain(l0, 0, l1, 0, l2, 0);
 
+    /* Helper wrote 0 (the IOVA argument), overwriting the 0xa5
+     * pre-fill. Subsequent entries must remain 0xa5 — the helper
+     * still touches only entry [0] regardless of value written. */
     REQUIRE(l0[0] == 0);
     REQUIRE(l1[0] == 0);
     REQUIRE(l2[0] == 0);
+    REQUIRE(l0[1] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l1[1] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l2[1] == 0xa5a5a5a5a5a5a5a5ULL);
 }
 
 int main(void)
