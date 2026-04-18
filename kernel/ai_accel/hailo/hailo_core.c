@@ -26,6 +26,7 @@
  */
 
 #include "hailo.h"
+#include "hailo_internal.h"
 #include "debug.h"
 #include "spinlock.h"
 #include <string.h>
@@ -230,7 +231,7 @@ static int dev_write32(uint32_t dev_addr, uint32_t val)
  *      (head_off != 0 && remain < head_room): head branch skipped,
  *      while loop's single iteration handles the sub-page write
  *      (dev_write's internal bounds check accepts it because
- *      head_off + remain < head_room ≤ ATR_TABLE_SIZE).
+ *      head_off + remain < head_room <= ATR_TABLE_SIZE).
  */
 static int dev_write_chunked(uint32_t dev_addr, const void *src, size_t n)
 {
@@ -446,6 +447,102 @@ static bool atr1_shows_fw_loaded(void)
 }
 
 /*
+ * hailo_decode_cert — see hailo_internal.h for the full contract.
+ *
+ * Extracted from hailo_boot so negative-path unit tests can drive
+ * the decode without stubbing the whole boot state machine.
+ */
+int hailo_decode_cert(const uint8_t *blob, size_t fw_size,
+                      size_t cert_off,
+                      struct hailo_fw_cert_header *out_cert,
+                      const uint8_t **out_key,
+                      const uint8_t **out_content,
+                      size_t *out_cert_end)
+{
+    if (!blob || !out_cert || !out_key || !out_content || !out_cert_end) {
+        return HAILO_ERR_INVAL;
+    }
+    if (cert_off + sizeof(*out_cert) > fw_size) {
+        INFO("hailo: firmware missing secure-boot certificate");
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    memcpy(out_cert, blob + cert_off, sizeof(*out_cert));
+
+    if (out_cert->key_size == 0
+     || out_cert->key_size > HAILO_FW_MAX_CERT_KEY
+     || out_cert->content_size == 0
+     || out_cert->content_size > HAILO_FW_MAX_CERT_CONTENT
+     || (out_cert->key_size & 3u) != 0
+     || (out_cert->content_size & 3u) != 0) {
+        INFO("hailo: bad cert sizes key=0x%x content=0x%x",
+             out_cert->key_size, out_cert->content_size);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+
+    size_t cert_end = cert_off + sizeof(*out_cert)
+                    + out_cert->key_size + out_cert->content_size;
+    if (cert_end > fw_size) {
+        INFO("hailo: firmware truncated (cert needs 0x%lx, have 0x%lx)",
+             (unsigned long)cert_end, (unsigned long)fw_size);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+
+    *out_key      = blob + cert_off + sizeof(*out_cert);
+    *out_content  = *out_key + out_cert->key_size;
+    *out_cert_end = cert_end;
+    return HAILO_OK;
+}
+
+/*
+ * hailo_decode_core_fw — see hailo_internal.h for the full contract.
+ *
+ * Hailo-8 production firmware always carries a core section after
+ * the cert; refusing a blob without one is intentional — the boot
+ * ROM would otherwise sit at boot_status=1 forever waiting for
+ * core code.
+ */
+int hailo_decode_core_fw(const uint8_t *blob, size_t fw_size,
+                         size_t core_hdr_off,
+                         struct hailo_firmware_header *out_core_hdr,
+                         const uint8_t **out_core_code)
+{
+    if (!blob || !out_core_hdr || !out_core_code) {
+        return HAILO_ERR_INVAL;
+    }
+    if (core_hdr_off + sizeof(*out_core_hdr) > fw_size) {
+        INFO("hailo: firmware missing core-firmware section");
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    memcpy(out_core_hdr, blob + core_hdr_off, sizeof(*out_core_hdr));
+
+    if (out_core_hdr->magic != HAILO_FW_MAGIC_HAILO8) {
+        INFO("hailo: core-firmware bad magic 0x%x", out_core_hdr->magic);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    if (out_core_hdr->header_version != HAILO_FW_HEADER_VERSION_V0) {
+        INFO("hailo: core-firmware unsupported header_version %u",
+             out_core_hdr->header_version);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    if (out_core_hdr->code_size == 0
+     || out_core_hdr->code_size > HAILO_FW_MAX_CORE_CODE_SIZE) {
+        INFO("hailo: core-firmware code_size 0x%x out of range",
+             out_core_hdr->code_size);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    size_t core_end = core_hdr_off + sizeof(*out_core_hdr)
+                    + out_core_hdr->code_size;
+    if (core_end > fw_size) {
+        INFO("hailo: core-firmware truncated (needs 0x%lx, have 0x%lx)",
+             (unsigned long)core_end, (unsigned long)fw_size);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+
+    *out_core_code = blob + core_hdr_off + sizeof(*out_core_hdr);
+    return HAILO_OK;
+}
+
+/*
  * Bring the Hailo device to RUNNING state by uploading firmware and
  * triggering the boot ROM. Protocol distilled from
  * docs/reference/hailo-pcie-common.c hailo_pcie_write_firmware_batch
@@ -516,90 +613,29 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
     }
 
     /* Decode the blob. hailo_validate_firmware already bounds-checked
-     * [header+code] ⊆ fw_size; we extend those checks for the cert. */
+     * [header+code] ⊆ fw_size; the helpers below check cert + core. */
     const uint8_t *blob = (const uint8_t *)fw_bytes;
     struct hailo_firmware_header hdr;
     memcpy(&hdr, blob, sizeof(hdr));
     const uint8_t *code = blob + sizeof(hdr);
 
-    size_t cert_off = sizeof(hdr) + hdr.code_size;
-    if (cert_off + sizeof(struct hailo_fw_cert_header) > fw_size) {
-        INFO("hailo: firmware missing secure-boot certificate");
-        state = HAILO_STATE_FAILED;
-        return HAILO_ERR_BAD_FIRMWARE;
-    }
     struct hailo_fw_cert_header cert_hdr;
-    memcpy(&cert_hdr, blob + cert_off, sizeof(cert_hdr));
+    const uint8_t *key_data, *content_data;
+    size_t cert_end;
+    rc = hailo_decode_cert(blob, fw_size, sizeof(hdr) + hdr.code_size,
+                           &cert_hdr, &key_data, &content_data, &cert_end);
+    if (rc != HAILO_OK) {
+        state = HAILO_STATE_FAILED;
+        return rc;
+    }
 
-    /* key_size / content_size must be 4-byte-aligned: bar4_write in
-     * the platform shim only accepts dword-sized writes (see e.g.
-     * pi5_bar4_write's alignment check). A certificate with a
-     * non-multiple-of-4 size would trip that check silently via the
-     * ATR[0] write path. */
-    if (cert_hdr.key_size == 0
-     || cert_hdr.key_size > HAILO_FW_MAX_CERT_KEY
-     || cert_hdr.content_size == 0
-     || cert_hdr.content_size > HAILO_FW_MAX_CERT_CONTENT
-     || (cert_hdr.key_size & 3u) != 0
-     || (cert_hdr.content_size & 3u) != 0) {
-        INFO("hailo: bad cert sizes key=0x%x content=0x%x",
-             cert_hdr.key_size, cert_hdr.content_size);
-        state = HAILO_STATE_FAILED;
-        return HAILO_ERR_BAD_FIRMWARE;
-    }
-    size_t cert_end = cert_off + sizeof(cert_hdr)
-                    + cert_hdr.key_size + cert_hdr.content_size;
-    if (cert_end > fw_size) {
-        INFO("hailo: firmware truncated (cert needs 0x%lx, have 0x%lx)",
-             (unsigned long)cert_end, (unsigned long)fw_size);
-        state = HAILO_STATE_FAILED;
-        return HAILO_ERR_BAD_FIRMWARE;
-    }
-    const uint8_t *key_data     = blob + cert_off + sizeof(cert_hdr);
-    const uint8_t *content_data = key_data + cert_hdr.key_size;
-
-    /*
-     * Hailo-8 firmware bundles a second [header + code] pair after
-     * the cert — the "core firmware". Linux's
-     * FW_VALIDATION__validate_fw_headers validates both, and
-     * hailo_write_core_firmware uploads the core section to
-     * core_fw_header (0xA0000) + core_code_ram_base (0xC0000).
-     * Without this the boot ROM sits at UNINIT after the trigger.
-     */
-    size_t core_hdr_off = cert_end;
-    if (core_hdr_off + sizeof(struct hailo_firmware_header) > fw_size) {
-        INFO("hailo: firmware missing core-firmware section");
-        state = HAILO_STATE_FAILED;
-        return HAILO_ERR_BAD_FIRMWARE;
-    }
     struct hailo_firmware_header core_hdr;
-    memcpy(&core_hdr, blob + core_hdr_off, sizeof(core_hdr));
-    if (core_hdr.magic != HAILO_FW_MAGIC_HAILO8) {
-        INFO("hailo: core-firmware bad magic 0x%x", core_hdr.magic);
+    const uint8_t *core_code;
+    rc = hailo_decode_core_fw(blob, fw_size, cert_end, &core_hdr, &core_code);
+    if (rc != HAILO_OK) {
         state = HAILO_STATE_FAILED;
-        return HAILO_ERR_BAD_FIRMWARE;
+        return rc;
     }
-    if (core_hdr.header_version != HAILO_FW_HEADER_VERSION_V0) {
-        INFO("hailo: core-firmware unsupported header_version %u",
-             core_hdr.header_version);
-        state = HAILO_STATE_FAILED;
-        return HAILO_ERR_BAD_FIRMWARE;
-    }
-    if (core_hdr.code_size == 0
-     || core_hdr.code_size > HAILO_FW_MAX_CORE_CODE_SIZE) {
-        INFO("hailo: core-firmware code_size 0x%x out of range",
-             core_hdr.code_size);
-        state = HAILO_STATE_FAILED;
-        return HAILO_ERR_BAD_FIRMWARE;
-    }
-    size_t core_end = core_hdr_off + sizeof(core_hdr) + core_hdr.code_size;
-    if (core_end > fw_size) {
-        INFO("hailo: core-firmware truncated (needs 0x%lx, have 0x%lx)",
-             (unsigned long)core_end, (unsigned long)fw_size);
-        state = HAILO_STATE_FAILED;
-        return HAILO_ERR_BAD_FIRMWARE;
-    }
-    const uint8_t *core_code = blob + core_hdr_off + sizeof(core_hdr);
 
     state = HAILO_STATE_FIRMWARE_ARMED;
 

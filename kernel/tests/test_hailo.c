@@ -15,6 +15,7 @@
 
 #include "unity.h"
 #include "../ai_accel/hailo/hailo.h"
+#include "../ai_accel/hailo/hailo_internal.h"
 #include "../include/uart.h"
 #include "test_harness.h"
 #include <stdbool.h>
@@ -770,6 +771,413 @@ static void test_boot_core_chunks_large_code(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Direct tests for the extracted decode helpers.                              */
+/*                                                                             */
+/* These bypass hailo_boot and the mock platform entirely, so they isolate     */
+/* regressions in the pure bounds / format logic from state-machine bugs.      */
+/* Helpers are declared in hailo_internal.h (not the public hailo.h).          */
+/* -------------------------------------------------------------------------- */
+
+/* Build a cert-only fragment starting at the given offset inside `out`:
+ *   [cert_header(key_size, content_size)][key bytes...][content bytes...]
+ * Returns total bytes written starting from cert_off (i.e. fragment size).
+ * Key/content are filled with deterministic sentinels so tests can spot-
+ * check the returned *out_key / *out_content pointers land on real data. */
+static size_t emit_cert_fragment(uint8_t *out, size_t cert_off,
+                                 uint32_t key_size, uint32_t content_size)
+{
+    struct hailo_fw_cert_header cert = {
+        .key_size = key_size, .content_size = content_size,
+    };
+    size_t off = cert_off;
+    memcpy(out + off, &cert, sizeof(cert)); off += sizeof(cert);
+    for (uint32_t i = 0; i < key_size; i++)     out[off++] = (uint8_t)(0x40 + i);
+    for (uint32_t i = 0; i < content_size; i++) out[off++] = (uint8_t)(0x80 + i);
+    return off - cert_off;
+}
+
+static void test_decode_cert_rejects_null_blob(void)
+{
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key = NULL, *content = NULL;
+    size_t cert_end = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_decode_cert(NULL, 128, 0, &cert, &key, &content, &cert_end));
+}
+
+/* Four per-slot NULL-out-param tests — split from one bundled test so
+ * a regression on any one slot names the specific slot in the failure
+ * report instead of masking inside a shared test. */
+static void test_decode_cert_rejects_null_cert_out(void)
+{
+    uint8_t blob[64] = { 0 };
+    const uint8_t *key = NULL, *content = NULL;
+    size_t cert_end = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_decode_cert(blob, sizeof(blob), 0, NULL, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_null_key_out(void)
+{
+    uint8_t blob[64] = { 0 };
+    struct hailo_fw_cert_header cert;
+    const uint8_t *content = NULL;
+    size_t cert_end = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, NULL, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_null_content_out(void)
+{
+    uint8_t blob[64] = { 0 };
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key = NULL;
+    size_t cert_end = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, NULL, &cert_end));
+}
+
+static void test_decode_cert_rejects_null_cert_end_out(void)
+{
+    uint8_t blob[64] = { 0 };
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key = NULL, *content = NULL;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, NULL));
+}
+
+static void test_decode_cert_rejects_header_past_end(void)
+{
+    /* fw_size must be STRICTLY less than sizeof(cert_header) to fire
+     * the "header runs past end" branch. `sizeof(struct
+     * hailo_fw_cert_header) == 8`, so fw_size=4 (= sizeof(blob))
+     * forces the cert_off + sizeof > fw_size check to fail before
+     * the zeroed cert header is even read — otherwise the all-zero
+     * header would land on the zero-key/zero-content rejection and
+     * pass the assertion for the wrong reason. */
+    uint8_t blob[4] = { 0 };
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_zero_key(void)
+{
+    uint8_t blob[128] = { 0 };
+    (void)emit_cert_fragment(blob, 0, 0, 4);  /* key_size=0 */
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_zero_content(void)
+{
+    uint8_t blob[128] = { 0 };
+    (void)emit_cert_fragment(blob, 0, 4, 0);
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_oversize_key(void)
+{
+    uint8_t blob[128] = { 0 };
+    struct hailo_fw_cert_header bogus = {
+        .key_size = HAILO_FW_MAX_CERT_KEY + 4u, .content_size = 4u,
+    };
+    memcpy(blob, &bogus, sizeof(bogus));
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_oversize_content(void)
+{
+    uint8_t blob[128] = { 0 };
+    struct hailo_fw_cert_header bogus = {
+        .key_size = 4u, .content_size = HAILO_FW_MAX_CERT_CONTENT + 4u,
+    };
+    memcpy(blob, &bogus, sizeof(bogus));
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_misaligned_key(void)
+{
+    uint8_t blob[128] = { 0 };
+    struct hailo_fw_cert_header misaligned = {
+        .key_size = 5u, .content_size = 4u,
+    };
+    memcpy(blob, &misaligned, sizeof(misaligned));
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_misaligned_content(void)
+{
+    uint8_t blob[128] = { 0 };
+    struct hailo_fw_cert_header misaligned = {
+        .key_size = 4u, .content_size = 7u,
+    };
+    memcpy(blob, &misaligned, sizeof(misaligned));
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_rejects_truncated_payload(void)
+{
+    /* Buffer just barely holds the cert header; the declared
+     * key_size + content_size trailer runs off the end. Using an
+     * explicit fw_size smaller than blob[] isolates the cert-
+     * truncation check from blob-sizing tricks. */
+    uint8_t blob[64] = { 0 };
+    struct hailo_fw_cert_header cert_hdr = {
+        .key_size = 16u, .content_size = 16u,   /* needs 40 B total */
+    };
+    memcpy(blob, &cert_hdr, sizeof(cert_hdr));
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    /* fw_size = sizeof(cert_hdr) + 16: enough for key but not content. */
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, sizeof(cert_hdr) + 16u, 0,
+                          &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_cert_success_populates_outputs(void)
+{
+    uint8_t blob[128] = { 0 };
+    const uint32_t pre_pad = 16;  /* simulate cert_off non-zero */
+    size_t frag_len = emit_cert_fragment(blob, pre_pad, 8, 12);
+
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key = NULL, *content = NULL;
+    size_t cert_end = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_decode_cert(blob, sizeof(blob), pre_pad,
+                          &cert, &key, &content, &cert_end));
+
+    TEST_ASSERT_EQUAL_UINT32(8u,  cert.key_size);
+    TEST_ASSERT_EQUAL_UINT32(12u, cert.content_size);
+    TEST_ASSERT_EQUAL_PTR(blob + pre_pad + sizeof(cert), key);
+    TEST_ASSERT_EQUAL_PTR(key + 8, content);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(pre_pad + frag_len), (uint64_t)cert_end);
+
+    /* Sanity-check the sentinel data shows through the returned
+     * pointers — proves out_key / out_content actually index the
+     * caller's blob rather than some internal scratch. */
+    TEST_ASSERT_EQUAL_HEX8(0x40, key[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x80, content[0]);
+}
+
+/* Build a core-fw fragment (header + code) starting at `core_off`.
+ * Caller picks magic / header_version / code_size so tests can poison
+ * individual fields. */
+static size_t emit_core_fragment(uint8_t *out, size_t core_off,
+                                 uint32_t magic, uint32_t header_version,
+                                 uint32_t code_size, uint32_t code_bytes_present)
+{
+    struct hailo_firmware_header core = {
+        .magic = magic, .header_version = header_version,
+        .code_size = code_size,
+    };
+    size_t off = core_off;
+    memcpy(out + off, &core, sizeof(core)); off += sizeof(core);
+    for (uint32_t i = 0; i < code_bytes_present; i++)
+        out[off++] = (uint8_t)(0xC0 + i);
+    return off - core_off;
+}
+
+static void test_decode_core_fw_rejects_null_blob(void)
+{
+    struct hailo_firmware_header core;
+    const uint8_t *code = NULL;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_decode_core_fw(NULL, 128, 0, &core, &code));
+}
+
+static void test_decode_core_fw_rejects_null_core_hdr_out(void)
+{
+    uint8_t blob[64] = { 0 };
+    const uint8_t *code = NULL;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_decode_core_fw(blob, sizeof(blob), 0, NULL, &code));
+}
+
+static void test_decode_core_fw_rejects_null_core_code_out(void)
+{
+    uint8_t blob[64] = { 0 };
+    struct hailo_firmware_header core;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_decode_core_fw(blob, sizeof(blob), 0, &core, NULL));
+}
+
+static void test_decode_core_fw_rejects_header_past_end(void)
+{
+    uint8_t blob[8] = { 0 };
+    struct hailo_firmware_header core;
+    const uint8_t *code;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_core_fw(blob, sizeof(blob), 0, &core, &code));
+}
+
+static void test_decode_core_fw_rejects_bad_magic(void)
+{
+    uint8_t blob[128] = { 0 };
+    (void)emit_core_fragment(blob, 0, 0xDEADBEEFu, HAILO_FW_HEADER_VERSION_V0,
+                             4u, 4u);
+    struct hailo_firmware_header core;
+    const uint8_t *code;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_core_fw(blob, sizeof(blob), 0, &core, &code));
+}
+
+static void test_decode_core_fw_rejects_unsupported_header_version(void)
+{
+    uint8_t blob[128] = { 0 };
+    (void)emit_core_fragment(blob, 0, HAILO_FW_MAGIC_HAILO8,
+                             HAILO_FW_HEADER_VERSION_V0 + 1u, 4u, 4u);
+    struct hailo_firmware_header core;
+    const uint8_t *code;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_core_fw(blob, sizeof(blob), 0, &core, &code));
+}
+
+static void test_decode_core_fw_rejects_zero_code_size(void)
+{
+    uint8_t blob[128] = { 0 };
+    (void)emit_core_fragment(blob, 0, HAILO_FW_MAGIC_HAILO8,
+                             HAILO_FW_HEADER_VERSION_V0, 0u, 0u);
+    struct hailo_firmware_header core;
+    const uint8_t *code;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_core_fw(blob, sizeof(blob), 0, &core, &code));
+}
+
+static void test_decode_core_fw_rejects_oversize_code(void)
+{
+    uint8_t blob[128] = { 0 };
+    (void)emit_core_fragment(blob, 0, HAILO_FW_MAGIC_HAILO8,
+                             HAILO_FW_HEADER_VERSION_V0,
+                             HAILO_FW_MAX_CORE_CODE_SIZE + 4u, 4u);
+    struct hailo_firmware_header core;
+    const uint8_t *code;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_core_fw(blob, sizeof(blob), 0, &core, &code));
+}
+
+static void test_decode_core_fw_rejects_truncated_code(void)
+{
+    uint8_t blob[32] = { 0 };
+    /* Declares 64 B of code but the blob only has room for 8. */
+    (void)emit_core_fragment(blob, 0, HAILO_FW_MAGIC_HAILO8,
+                             HAILO_FW_HEADER_VERSION_V0, 64u, 8u);
+    struct hailo_firmware_header core;
+    const uint8_t *code;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_core_fw(blob, sizeof(blob), 0, &core, &code));
+}
+
+/* Tight-fit aliasing tests: pass fw_size == exact required byte count.
+ * These guard the `> fw_size` vs `>= fw_size` boundary on both decoders
+ * — a future off-by-one that flips the inequality would make the
+ * helpers either reject valid tight-packed blobs or accept blobs with
+ * one byte missing. */
+static void test_decode_cert_accepts_tight_fit(void)
+{
+    uint8_t blob[64] = { 0 };
+    const uint32_t key_size = 8, content_size = 12;
+    size_t frag_len = emit_cert_fragment(blob, 0, key_size, content_size);
+    /* frag_len is exactly sizeof(cert_header) + key_size + content_size. */
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_decode_cert(blob, frag_len, 0, &cert, &key, &content, &cert_end));
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)frag_len, (uint64_t)cert_end);
+}
+
+static void test_decode_cert_rejects_one_byte_short(void)
+{
+    uint8_t blob[64] = { 0 };
+    const uint32_t key_size = 8, content_size = 12;
+    size_t frag_len = emit_cert_fragment(blob, 0, key_size, content_size);
+    struct hailo_fw_cert_header cert;
+    const uint8_t *key, *content;
+    size_t cert_end;
+    /* fw_size one byte shy — cert_end > fw_size must fire. */
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_cert(blob, frag_len - 1, 0,
+                          &cert, &key, &content, &cert_end));
+}
+
+static void test_decode_core_fw_accepts_tight_fit(void)
+{
+    uint8_t blob[128] = { 0 };
+    const uint32_t code_size = 16;
+    size_t frag_len = emit_core_fragment(blob, 0, HAILO_FW_MAGIC_HAILO8,
+                                         HAILO_FW_HEADER_VERSION_V0,
+                                         code_size, code_size);
+    /* frag_len is exactly sizeof(firmware_header) + code_size. */
+    struct hailo_firmware_header core;
+    const uint8_t *code = NULL;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_decode_core_fw(blob, frag_len, 0, &core, &code));
+    TEST_ASSERT_EQUAL_UINT32(code_size, core.code_size);
+    /* Verify out_core_code lands past the header, not at the header. */
+    TEST_ASSERT_EQUAL_PTR(blob + sizeof(core), code);
+}
+
+static void test_decode_core_fw_rejects_one_byte_short(void)
+{
+    uint8_t blob[128] = { 0 };
+    const uint32_t code_size = 16;
+    size_t frag_len = emit_core_fragment(blob, 0, HAILO_FW_MAGIC_HAILO8,
+                                         HAILO_FW_HEADER_VERSION_V0,
+                                         code_size, code_size);
+    struct hailo_firmware_header core;
+    const uint8_t *code;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_decode_core_fw(blob, frag_len - 1, 0, &core, &code));
+}
+
+static void test_decode_core_fw_success_populates_outputs(void)
+{
+    uint8_t blob[128] = { 0 };
+    const uint32_t pre_pad = 24;
+    (void)emit_core_fragment(blob, pre_pad, HAILO_FW_MAGIC_HAILO8,
+                             HAILO_FW_HEADER_VERSION_V0, 8u, 8u);
+
+    struct hailo_firmware_header core;
+    const uint8_t *code = NULL;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_decode_core_fw(blob, sizeof(blob), pre_pad, &core, &code));
+    TEST_ASSERT_EQUAL_UINT32(HAILO_FW_MAGIC_HAILO8, core.magic);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_FW_HEADER_VERSION_V0, core.header_version);
+    TEST_ASSERT_EQUAL_UINT32(8u, core.code_size);
+    TEST_ASSERT_EQUAL_PTR(blob + pre_pad + sizeof(core), code);
+    TEST_ASSERT_EQUAL_HEX8(0xC0, code[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xC7, code[7]);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -807,6 +1215,37 @@ int test_suite_hailo(void)
     RUN_TEST(test_boot_fails_when_fw_never_signals_loaded);
     RUN_TEST(test_boot_chunks_large_code);
     RUN_TEST(test_boot_core_chunks_large_code);
+
+    /* Direct decode-helper tests (PR #275) — bypass hailo_boot so the
+     * pure format/bounds logic is exercised in isolation. */
+    RUN_TEST(test_decode_cert_rejects_null_blob);
+    RUN_TEST(test_decode_cert_rejects_null_cert_out);
+    RUN_TEST(test_decode_cert_rejects_null_key_out);
+    RUN_TEST(test_decode_cert_rejects_null_content_out);
+    RUN_TEST(test_decode_cert_rejects_null_cert_end_out);
+    RUN_TEST(test_decode_cert_rejects_header_past_end);
+    RUN_TEST(test_decode_cert_rejects_zero_key);
+    RUN_TEST(test_decode_cert_rejects_zero_content);
+    RUN_TEST(test_decode_cert_rejects_oversize_key);
+    RUN_TEST(test_decode_cert_rejects_oversize_content);
+    RUN_TEST(test_decode_cert_rejects_misaligned_key);
+    RUN_TEST(test_decode_cert_rejects_misaligned_content);
+    RUN_TEST(test_decode_cert_rejects_truncated_payload);
+    RUN_TEST(test_decode_cert_accepts_tight_fit);
+    RUN_TEST(test_decode_cert_rejects_one_byte_short);
+    RUN_TEST(test_decode_cert_success_populates_outputs);
+    RUN_TEST(test_decode_core_fw_rejects_null_blob);
+    RUN_TEST(test_decode_core_fw_rejects_null_core_hdr_out);
+    RUN_TEST(test_decode_core_fw_rejects_null_core_code_out);
+    RUN_TEST(test_decode_core_fw_rejects_header_past_end);
+    RUN_TEST(test_decode_core_fw_rejects_bad_magic);
+    RUN_TEST(test_decode_core_fw_rejects_unsupported_header_version);
+    RUN_TEST(test_decode_core_fw_rejects_zero_code_size);
+    RUN_TEST(test_decode_core_fw_rejects_oversize_code);
+    RUN_TEST(test_decode_core_fw_rejects_truncated_code);
+    RUN_TEST(test_decode_core_fw_accepts_tight_fit);
+    RUN_TEST(test_decode_core_fw_rejects_one_byte_short);
+    RUN_TEST(test_decode_core_fw_success_populates_outputs);
 
     return UnityEnd();
 }
