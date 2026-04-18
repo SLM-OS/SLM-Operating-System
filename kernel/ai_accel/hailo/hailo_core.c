@@ -178,6 +178,86 @@ static int dev_read32(uint32_t dev_addr, uint32_t *out)
     return dev_read(dev_addr, out, sizeof(uint32_t));
 }
 
+/*
+ * Write `n` bytes to a device-side address through ATR[0]. Same
+ * save/retarget/write/restore dance as dev_read — see that function
+ * for the lock rationale. `n` must be a multiple of 4 (BAR4 supports
+ * only dword-aligned writes; see pi5_bar4_write's alignment check)
+ * and fit within a 4 KB ATR window.
+ */
+static int dev_write(uint32_t dev_addr, const void *src, size_t n)
+{
+    if (!src || (n & 3u) != 0) return HAILO_ERR_INVAL;
+    if (n > HAILO_ATR_TABLE_SIZE) return HAILO_ERR_INVAL;
+
+    uint32_t page = dev_addr & ~(HAILO_ATR_TABLE_SIZE - 1u);
+    uint32_t off  = dev_addr &  (HAILO_ATR_TABLE_SIZE - 1u);
+    if (off + n > HAILO_ATR_TABLE_SIZE) return HAILO_ERR_INVAL;
+
+    irq_flags_t flags = spin_lock_irqsave(&atr0_lock);
+    uint32_t saved_lo, saved_hi;
+    atr0_save(&saved_lo, &saved_hi);
+    atr0_set_target(page);
+    hailo_platform->bar4_write(off, src, n);
+    atr0_restore(saved_lo, saved_hi);
+    spin_unlock_irqrestore(&atr0_lock, flags);
+    return HAILO_OK;
+}
+
+/* Write a single 32-bit device register via the ATR[0] window. */
+static int dev_write32(uint32_t dev_addr, uint32_t val)
+{
+    return dev_write(dev_addr, &val, sizeof(val));
+}
+
+/*
+ * Write `n` bytes to `dev_addr`, chunking into ATR-window-sized
+ * pieces. `n` can exceed HAILO_ATR_TABLE_SIZE; dev_write handles one
+ * page at a time. First chunk handles head-misalignment so that
+ * subsequent chunks are page-aligned. All writes must be dword-sized;
+ * caller's payload length must be a multiple of 4.
+ *
+ * Three entry conditions:
+ *   1. dev_addr page-aligned (head_off == 0): head branch is a
+ *      no-op; while loop writes full pages then a final short tail.
+ *   2. Misaligned dev_addr with `n` spanning a page boundary
+ *      (head_off != 0 && remain >= head_room): head branch writes
+ *      the first partial page so the while-loop cursor is aligned.
+ *   3. Misaligned dev_addr with `n` fitting inside a single page
+ *      (head_off != 0 && remain < head_room): head branch skipped,
+ *      while loop's single iteration handles the sub-page write
+ *      (dev_write's internal bounds check accepts it because
+ *      head_off + remain < head_room ≤ ATR_TABLE_SIZE).
+ */
+static int dev_write_chunked(uint32_t dev_addr, const void *src, size_t n)
+{
+    if ((n & 3u) != 0) return HAILO_ERR_INVAL;
+    const uint8_t *p = (const uint8_t *)src;
+    uint32_t cursor  = dev_addr;
+    size_t   remain  = n;
+
+    /* First (possibly partial) page. */
+    uint32_t head_off = cursor & (HAILO_ATR_TABLE_SIZE - 1u);
+    size_t head_room  = HAILO_ATR_TABLE_SIZE - head_off;
+    if (head_off != 0 && remain >= head_room) {
+        int rc = dev_write(cursor, p, head_room);
+        if (rc != HAILO_OK) return rc;
+        cursor += head_room;
+        p      += head_room;
+        remain -= head_room;
+    }
+
+    while (remain > 0) {
+        size_t chunk = remain > HAILO_ATR_TABLE_SIZE ? HAILO_ATR_TABLE_SIZE : remain;
+        int rc = dev_write(cursor, p, chunk);
+        if (rc != HAILO_OK) return rc;
+        cursor += chunk;
+        p      += chunk;
+        remain -= chunk;
+    }
+    return HAILO_OK;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Init + probe                                                                */
 /* -------------------------------------------------------------------------- */
@@ -199,6 +279,16 @@ int hailo_init(void)
     if (!ops_valid(hailo_platform)) {
         return HAILO_ERR_INVAL;
     }
+    /* Fresh start: clear any lingering state from a previous failed
+     * session (e.g. a boot that timed out). Post-init the driver is
+     * conceptually a blank slate waiting for hailo_probe.
+     *
+     * Why explicit: hailo_probe refuses when state == FAILED, and
+     * hailo_boot requires state == PROBED. Without this reset, a
+     * caller that re-runs init after a transient failure would find
+     * probe still refusing — "init the device fresh" is the
+     * expected semantic, so the state machine is reset here. */
+    state = HAILO_STATE_UNINIT;
     if (hailo_platform->init) {
         int rc = hailo_platform->init();
         if (rc != HAILO_OK) {
@@ -306,28 +396,220 @@ int hailo_validate_firmware(const void *fw_bytes, size_t fw_size)
 }
 
 /* -------------------------------------------------------------------------- */
-/* Phase 4 stubs                                                               */
+/* Boot                                                                        */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * Read ATR[1]'s trsl_addr_lo. Post-boot, firmware writes
+ * HAILO_ATR1_FW_LOADED_MAGIC (0x00200000) here as the "FW loaded"
+ * handshake. The register lives in BAR0 at the start of ATR[1],
+ * hence HAILO_ATR_BASE + HAILO_ATR_STRIDE.
+ */
+static uint32_t atr1_read_trsl_lo(void)
+{
+    uint32_t atr1 = HAILO_ATR_BASE + HAILO_ATR_STRIDE;
+    return hailo_platform->read32(HAILO_BAR_CONFIG,
+                                  atr1 + HAILO_ATR_OFF_TRSL_ADDR_LO);
+}
+
+/*
+ * Poll a predicate via a shared udelay/retry loop. Returns HAILO_OK
+ * if the predicate turned true within `total_us`, HAILO_ERR_TIMEOUT
+ * otherwise. The platform's udelay is used (CNTPCT-backed on Pi 5),
+ * so this is safe before the scheduler is running.
+ */
+static int hailo_poll(bool (*pred)(void), uint32_t interval_us, uint32_t total_us)
+{
+    uint32_t elapsed = 0;
+    while (elapsed < total_us) {
+        if (pred()) return HAILO_OK;
+        hailo_platform->udelay(interval_us);
+        elapsed += interval_us;
+    }
+    return pred() ? HAILO_OK : HAILO_ERR_TIMEOUT;
+}
+
+/* Poll predicates — captured state lives in module-globals during
+ * the short window of a single boot call (which is single-threaded
+ * by construction; see the state-variable comment at the top). */
+static bool boot_status_entered_bootloader(void)
+{
+    uint32_t s = 0;
+    if (dev_read32(hailo_fw_addrs_hailo8.boot_status, &s) != HAILO_OK)
+        return false;
+    /* Firmware flips boot_status from UNINIT (0x1) to a non-UNINIT
+     * value (typically 0x2 = IN_BOOTLOADER) once our trigger write
+     * is observed. We accept any transition off UNINIT as "boot
+     * started", then follow up with the ATR[1] check for
+     * "boot completed". */
+    return s != HAILO_BOOT_STATUS_UNINIT;
+}
+
+static bool atr1_shows_fw_loaded(void)
+{
+    return atr1_read_trsl_lo() == HAILO_ATR1_FW_LOADED_MAGIC;
+}
+
+/*
+ * Bring the Hailo device to RUNNING state by uploading firmware and
+ * triggering the boot ROM. Protocol distilled from
+ * docs/reference/hailo-pcie-common.c hailo_pcie_write_firmware_batch
+ * + hailo_trigger_firmware_boot + hailo_pcie_wait_for_firmware:
+ *
+ *   1. Validate the flat firmware blob (header magic, code_size).
+ *   2. Require boot_status == UNINIT (device in ROM, ready to accept FW).
+ *   3. Upload the app firmware header to boot_fw_header (0xE0030).
+ *   4. Upload the app firmware code to app_fw_code_ram_base (0x60000),
+ *      chunked by the 4 KB ATR window.
+ *   5. If a secure-boot cert trails the code, upload key+content to
+ *      boot_key_cert / boot_cont_cert. Hailo-8 ships a cert in every
+ *      production firmware image; refuse to boot without one.
+ *   6. Write HAILO_FW_TRIGGER_VALUE to trigger_address (0xE0980).
+ *   7. Poll boot_status for the UNINIT→non-UNINIT transition
+ *      (10 ms budget, 1 ms interval).
+ *   8. Poll ATR[1].trsl_addr_lo for HAILO_ATR1_FW_LOADED_MAGIC
+ *      (5 s budget, 50 ms interval — firmware decompress + init
+ *      takes up to ~3 s in practice).
+ *   9. State → RUNNING.
+ *
+ * On any failure the state flips to FAILED so subsequent probe/boot
+ * calls short-circuit cleanly.
+ *
+ * The blob layout (after validate):
+ *     [firmware_header] [code ...] [cert_header] [key ...] [content ...]
+ *
+ * Concurrency: each dev_write* call in this function takes and
+ * releases atr0_lock independently — there's no single atomic lock
+ * held across the whole upload. This is safe because during the
+ * PROBED→RUNNING window nothing else touches ATR[0]: boot ROM owns
+ * the device side, the control channel isn't open yet, and no MSI
+ * handlers are wired. Post-boot firmware begins using ATR[0] for
+ * its own traffic — at that point the per-call lock (plus save/
+ * retarget/access/restore inside dev_read and dev_write) correctly
+ * serializes with firmware use. If a future parallel boot path is
+ * introduced (e.g. one driver instance per device on a multi-HAT
+ * platform), the scope of atr0_lock would need to widen or become
+ * per-device.
+ */
 int hailo_boot(const void *fw_bytes, size_t fw_size)
 {
-    (void)fw_bytes; (void)fw_size;
-    /* Implementation lands in Phase 4 once the firmware upload
-     * path (ATR[0] window) + boot-status poll + ATR[1] "loaded"
-     * flag poll are wired up. State machine:
-     *
-     *   validate header
-     *     -> atr0_set_target(app_fw_code_ram_base)
-     *        BAR4 write payload
-     *        restore ATR[0]
-     *     -> for each firmware section (header, key cert, cont cert)
-     *     -> trigger: dev_write32(trigger_address, HAILO_FW_TRIGGER_VALUE)
-     *     -> poll boot_status until not UNINITIALIZED (10 ms budget)
-     *     -> poll ATR[1].trsl_addr_lo == HAILO_ATR1_FW_LOADED_MAGIC
-     *        (5 s budget, 50 ms sleep)
-     *     -> state = HAILO_STATE_RUNNING
-     */
-    return HAILO_ERR_UNSUPPORTED;
+    if (!hailo_platform || state == HAILO_STATE_FAILED) return HAILO_ERR_NODEV;
+    if (state != HAILO_STATE_PROBED) {
+        INFO("hailo: boot rejected — state must be PROBED (got %s)",
+             hailo_state_str(state));
+        return HAILO_ERR_INVAL;
+    }
+
+    int rc = hailo_validate_firmware(fw_bytes, fw_size);
+    if (rc != HAILO_OK) {
+        state = HAILO_STATE_FAILED;
+        return rc;
+    }
+
+    /* Sanity: device must be sitting in its boot ROM, waiting. */
+    uint32_t boot_status = 0;
+    rc = dev_read32(hailo_fw_addrs_hailo8.boot_status, &boot_status);
+    if (rc != HAILO_OK) {
+        state = HAILO_STATE_FAILED;
+        return rc;
+    }
+    if (boot_status != HAILO_BOOT_STATUS_UNINIT) {
+        INFO("hailo: boot_status=0x%x (expected UNINIT=0x1) — device not ready",
+             boot_status);
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_IO;
+    }
+
+    /* Decode the blob. hailo_validate_firmware already bounds-checked
+     * [header+code] ⊆ fw_size; we extend those checks for the cert. */
+    const uint8_t *blob = (const uint8_t *)fw_bytes;
+    struct hailo_firmware_header hdr;
+    memcpy(&hdr, blob, sizeof(hdr));
+    const uint8_t *code = blob + sizeof(hdr);
+
+    size_t cert_off = sizeof(hdr) + hdr.code_size;
+    if (cert_off + sizeof(struct hailo_fw_cert_header) > fw_size) {
+        INFO("hailo: firmware missing secure-boot certificate");
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    struct hailo_fw_cert_header cert_hdr;
+    memcpy(&cert_hdr, blob + cert_off, sizeof(cert_hdr));
+
+    /* key_size / content_size must be 4-byte-aligned: bar4_write in
+     * the platform shim only accepts dword-sized writes (see e.g.
+     * pi5_bar4_write's alignment check). A certificate with a
+     * non-multiple-of-4 size would trip that check silently via the
+     * ATR[0] write path. */
+    if (cert_hdr.key_size == 0
+     || cert_hdr.key_size > HAILO_FW_MAX_CERT_KEY
+     || cert_hdr.content_size == 0
+     || cert_hdr.content_size > HAILO_FW_MAX_CERT_CONTENT
+     || (cert_hdr.key_size & 3u) != 0
+     || (cert_hdr.content_size & 3u) != 0) {
+        INFO("hailo: bad cert sizes key=0x%x content=0x%x",
+             cert_hdr.key_size, cert_hdr.content_size);
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    size_t cert_end = cert_off + sizeof(cert_hdr)
+                    + cert_hdr.key_size + cert_hdr.content_size;
+    if (cert_end > fw_size) {
+        INFO("hailo: firmware truncated (cert needs 0x%lx, have 0x%lx)",
+             (unsigned long)cert_end, (unsigned long)fw_size);
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    const uint8_t *key_data     = blob + cert_off + sizeof(cert_hdr);
+    const uint8_t *content_data = key_data + cert_hdr.key_size;
+
+    state = HAILO_STATE_FIRMWARE_ARMED;
+
+    /* Upload. Order matches Linux's hailo_write_app_firmware. */
+    rc = dev_write(hailo_fw_addrs_hailo8.boot_fw_header, &hdr, sizeof(hdr));
+    if (rc != HAILO_OK) goto fail;
+
+    rc = dev_write_chunked(hailo_fw_addrs_hailo8.app_fw_code_ram_base,
+                           code, hdr.code_size);
+    if (rc != HAILO_OK) goto fail;
+
+    rc = dev_write_chunked(hailo_fw_addrs_hailo8.boot_key_cert,
+                           key_data, cert_hdr.key_size);
+    if (rc != HAILO_OK) goto fail;
+
+    rc = dev_write_chunked(hailo_fw_addrs_hailo8.boot_cont_cert,
+                           content_data, cert_hdr.content_size);
+    if (rc != HAILO_OK) goto fail;
+
+    state = HAILO_STATE_BOOTING;
+
+    /* Trigger: write 1 to trigger_address (doorbell). */
+    rc = dev_write32(hailo_fw_addrs_hailo8.trigger_address,
+                     HAILO_FW_TRIGGER_VALUE);
+    if (rc != HAILO_OK) goto fail;
+
+    /* Stage 1: bootloader entered. 10 ms budget, 1 ms interval. */
+    rc = hailo_poll(boot_status_entered_bootloader, 1000u, 10000u);
+    if (rc != HAILO_OK) {
+        INFO("hailo: boot_status stayed UNINIT after trigger (boot ROM hung?)");
+        goto fail;
+    }
+
+    /* Stage 2: firmware loaded. 5 s budget, 50 ms interval. */
+    rc = hailo_poll(atr1_shows_fw_loaded, 50000u, 5000000u);
+    if (rc != HAILO_OK) {
+        INFO("hailo: ATR[1] never reached FW_LOADED magic (fw image bad?)");
+        goto fail;
+    }
+
+    state = HAILO_STATE_RUNNING;
+    INFO("hailo: firmware %u.%u.%u booted",
+         hdr.firmware_major, hdr.firmware_minor, hdr.firmware_revision);
+    return HAILO_OK;
+
+fail:
+    state = HAILO_STATE_FAILED;
+    return rc;
 }
 
 int hailo_get_firmware_version(uint32_t *out_major, uint32_t *out_minor,
@@ -335,7 +617,7 @@ int hailo_get_firmware_version(uint32_t *out_major, uint32_t *out_minor,
 {
     (void)out_major; (void)out_minor; (void)out_revision;
     if (state != HAILO_STATE_RUNNING) return HAILO_ERR_NODEV;
-    /* Phase 4: read back via a control-channel message after the
+    /* Phase 5: read back via a control-channel message after the
      * firmware has booted. */
     return HAILO_ERR_UNSUPPORTED;
 }

@@ -55,7 +55,19 @@
 #define   STATUS_DL_ACTIVE      (1u << 5)
 
 #define PCIE1_EXT_CFG_INDEX     0x9000u
-#define PCIE1_EXT_CFG_DATA      0x9004u         /* BCM2712 variant, not 0x8000 */
+/*
+ * EXT_CFG_DATA at 0x8000, NOT 0x9004. The BCM2712 variant table in
+ * Linux's pcie-brcmstb.c puts 0x9004 in `reg_offsets[EXT_CFG_DATA]`
+ * but that value is vestigial — only the brcm7425 variant's map_bus
+ * consults reg_offsets. `brcm_pcie_map_bus` (used for 2712) uses the
+ * compile-time constant `PCIE_EXT_CFG_DATA = 0x8000` (pcie-brcmstb.c
+ * line 219) unconditionally. Our earlier 0x9004 picked up the
+ * vestigial value; reads at 0x9004+0..7 happened to work because the
+ * 2712 RC aliases vendor/device/command/status through a fast-path
+ * mirror, but reads at 0x9004+8+ returned 0xFFFFFFFF. See the plan
+ * doc's Phase 1.5 blocker writeup for the diagnostic trail.
+ */
+#define PCIE1_EXT_CFG_DATA      0x8000u
 
 /* -------------------------------------------------------------------------- */
 /* Link-training registers (Phase 1.5 — firmware doesn't train pcie1).        */
@@ -544,12 +556,19 @@ static int bcm2712_phy_bringup(void)
  * config-space reads past offset 0x07 return 0xFFFFFFFF. The
  * TIMING_FIX bit is Reserved-0 on 2712C1 — detect readback and fall
  * back to throttling the AXI master's outstanding-request count.
+ *
+ * CFG_READ_UR_MODE is SET here to match Linux's brcm_pcie_setup
+ * (pcie-brcmstb.c:1223). This tells the RC to convert an endpoint
+ * UR (Unsupported Request) into the standard 0xFFFFFFFF read-back,
+ * rather than propagating the UR upstream as an AXI abort. The
+ * RC_CONFIG_RETRY_TIMEOUT (~240 ms, set below) still governs how
+ * long the RC waits on CRS completions before giving up.
  */
 static void bcm2712_misc_and_axi_qos(void)
 {
     uint32_t tmp = pcie1_r32(PCIE1_MISC_CTRL);
     tmp |= MISC_CTRL_SCB_ACCESS_EN_MASK;
-    tmp &= ~MISC_CTRL_CFG_READ_UR_MODE_MASK;
+    tmp |= MISC_CTRL_CFG_READ_UR_MODE_MASK;
     tmp &= ~MISC_CTRL_MAX_BURST_SIZE_MASK;
     tmp |=  MISC_CTRL_MAX_BURST_SIZE_128;
     pcie1_w32(PCIE1_MISC_CTRL, tmp);
@@ -945,22 +964,37 @@ static void *bcm2712_map_bar(uint64_t pcie_addr, uint64_t size)
         return NULL;
     }
 
-    /* Round the region to a 2 MB boundary for vmm_map_region. */
+    /* Round the region to a 2 MB boundary for vmm_map_region. Map
+     * 2 MB blocks one at a time and tolerate already-mapped blocks
+     * (a second BAR sharing the first BAR's 2 MB block — common on
+     * Hailo-8 where BAR0/2/4 are all inside the first ~32 KB of the
+     * outbound window). Blocks pre-installed by vmm_setup_platform
+     * or by earlier pcie_map_bar calls are accepted as-is.
+     *
+     * Invariant this relies on: every PA inside the pcie1 outbound
+     * window is identity-mapped (CPU VA == PA). Both the prefetchable
+     * (0x18_0000_0000..0x1b_7FFF_FFFF) and non-prefetchable
+     * (0x1b_8000_0000..0x1b_FFFF_FFFF) regions follow this rule —
+     * pcie_map_bar's only caller is the device enumeration path,
+     * which always asks for the CPU-side outbound-translated
+     * address. If a future caller ever installs a non-identity
+     * mapping in these L1 entries, the vmm_is_mapped skip would
+     * silently return a mis-mapped region; add a PA readback or a
+     * vmm_lookup_phys() check if that becomes possible. */
     uint64_t phys_aligned = cpu_phys & ~(BLOCK_SIZE - 1ull);
     uint64_t region_end   = cpu_phys + size;
     uint64_t size_aligned = ((region_end + BLOCK_SIZE - 1ull)
                             & ~(BLOCK_SIZE - 1ull)) - phys_aligned;
 
-    /* Identity-map the region as Device memory. pcie1 endpoints'
-     * BARs live in the 0x18-0x1b_xxxxxxxx range; these physical
-     * addresses are not pre-mapped by vmm_setup_platform. */
-    int rc = vmm_map_region(phys_aligned, phys_aligned, size_aligned,
-                            VMM_FLAGS_DEVICE);
-    if (rc != 0) {
-        ERROR("pcie1: vmm_map_region(0x%llx, 0x%llx) failed",
-              (unsigned long long)phys_aligned,
-              (unsigned long long)size_aligned);
-        return NULL;
+    for (uint64_t off = 0; off < size_aligned; off += BLOCK_SIZE) {
+        uint64_t block_pa = phys_aligned + off;
+        if (vmm_is_mapped(block_pa)) continue;
+        int rc = vmm_map_block(block_pa, block_pa, VMM_FLAGS_DEVICE);
+        if (rc != 0) {
+            ERROR("pcie1: vmm_map_block(0x%llx) failed",
+                  (unsigned long long)block_pa);
+            return NULL;
+        }
     }
 
     return (void *)(uintptr_t)cpu_phys;

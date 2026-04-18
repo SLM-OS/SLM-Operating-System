@@ -91,6 +91,11 @@ static uint64_t l2_mmio_gic[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)
 static uint64_t l2_mmio_rp1[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 /* L2 table for 4th GB: splits L1[3] so last 2MB can be non-cacheable */
 static uint64_t l2_ram_gb3[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+/* L2 table for pcie1's non-prefetchable outbound window. CPU addresses
+ * 0x1b_8000_0000..0x1b_bfff_ffff (1 GB at L1[110]) map through pcie1's
+ * outbound translation to PCIe 0x80000000+. Pre-allocated empty so
+ * pcie_map_bar can add Device-nGnRnE 2 MB blocks on demand. */
+static uint64_t l2_pcie_bar_win[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #endif
 
 /* VMM state */
@@ -1091,6 +1096,20 @@ static void vmm_setup_platform(void)
     l2_mmio_pcie[(bcm_reset_base >> BLOCK_SHIFT) & 0x1FF] =
         make_block_desc(bcm_reset_base, VMM_FLAGS_DEVICE);
     vmm_state.blocks_mapped++;
+
+    /*
+     * pcie1 non-prefetchable outbound window at CPU 0x1b_80000000
+     * (L1[110]), 1 GB. Install an empty L2 table here so
+     * pcie_map_bar → vmm_map_region can lazily add 2 MB Device
+     * blocks as endpoints get their BARs mapped. Kept separate from
+     * the prefetchable 64-bit window (0x18_00000000..0x1b_80000000,
+     * 14 GB) which isn't populated until a device actually needs
+     * prefetchable space.
+     */
+    for (int i = 0; i < ENTRIES_PER_TABLE; i++)
+        l2_pcie_bar_win[i] = 0;
+    l1_table[0x1b80000000UL >> 30] = make_table_desc((uint64_t)l2_pcie_bar_win);
+    vmm_state.l2_tables_used++;
 
     /*
      * Map GIC and GPIO2 region: L1[65] covers 0x1040000000-0x107FFFFFFF
