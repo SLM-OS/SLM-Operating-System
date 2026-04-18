@@ -21,7 +21,7 @@
 static int cmd_lua(int argc, char *argv[]) {
     lua_State *L = lua_slm_newstate();
     if (L == NULL) {
-        uart_printf("Failed to initialize Lua\n");
+        shell_printf("Failed to initialize Lua\n");
         return -1;
     }
 
@@ -38,10 +38,10 @@ static int cmd_lua(int argc, char *argv[]) {
             lua_slm_dostring(L, argv[1]);
         }
     } else {
-        uart_printf("Usage:\n");
-        uart_printf("  lua              - Enter interactive REPL\n");
-        uart_printf("  lua -e \"code\"    - Execute code directly\n");
-        uart_printf("  lua <filename>   - Run script from file\n");
+        shell_printf("Usage:\n");
+        shell_printf("  lua              - Enter interactive REPL\n");
+        shell_printf("  lua -e \"code\"    - Execute code directly\n");
+        shell_printf("  lua <filename>   - Run script from file\n");
     }
 
     lua_slm_close(L);
@@ -50,7 +50,7 @@ static int cmd_lua(int argc, char *argv[]) {
 
 /* Command registration */
 static const shell_cmd_t lua_commands[] = {
-    {"lua", cmd_lua, "Lua scripting (REPL or script)"},
+    {"lua", cmd_lua, "Lua scripting (REPL or script)", true},
 };
 
 void lua_shell_init(void) {

@@ -1,8 +1,13 @@
 # Debug Monitor (Shell)
 
-A minimal serial debug monitor for hardware bring-up and demos.
+A minimal debug shell for hardware bring-up and demos. Runs on the
+UART console by default and — with networking enabled — also accepts
+connections over TCP so multiple users (or a user + a script) can
+share the same instance.
 
-**Status:** Implemented
+**Status:** Implemented. Multi-session (TCP) support: Plan §1 complete
+(see `docs/multi-session-shell-plan.md`); telnet protocol handling
+and SSH are deferred (§2 / Phase 4).
 
 ---
 
@@ -114,6 +119,9 @@ Available commands:
 | `ifconfig dhcp` | Enable DHCP |
 | `ifconfig <ip> <mask> <gw>` | Set static IP configuration |
 | `netstat` | Show network TX/RX statistics |
+| `tcpsh start [port]` | Start the TCP shell listener (default port 2323) |
+| `tcpsh stop` | Stop the listener (existing sessions keep running) |
+| `tcpsh status` | Show listener state, port, and session counts |
 | `sched` | Show current scheduler policy name |
 | `sched policy` | List all registered scheduling policies |
 | `sched policy <name>` | Switch to a named scheduling policy |
@@ -572,48 +580,137 @@ hardware validation report.
 
 ---
 
+## Multi-Session Shell
+
+The same REPL serves the physical UART and TCP clients. Plan §1 of
+`docs/multi-session-shell-plan.md` covers the architecture; Phase 1
+(raw TCP, line-mode, no auth) is landed. Phase 2 (telnet IAC + NAWS)
+and Phase 4 (SSH, #199) are deferred.
+
+### Bringing up TCP sessions
+
+```
+slmos> net init           # enable lwIP + DHCP
+slmos> tcpsh start         # listen on 0.0.0.0:2323
+[TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
+tcpsh: listening on port 2323
+
+# From the host:
+$ nc 127.0.0.1 2323
+SLM-OS Debug Shell (tcp)
+Type 'help' for available commands.
+
+slmos> pwd
+/
+slmos> tcpsh status
+tcpsh: running on port 2323 — accepted=1 active=1 max=2
+```
+
+The QEMU Makefile binds `hostfwd=tcp:127.0.0.1:2323-:2323` so the
+guest's listener is reachable on the host's loopback only. Real
+hardware platforms (Pi 5, Jetson) have no hostfwd — if TCP shell
+starts there, it's reachable on the board's LAN IP with no
+authentication, so gate carefully.
+
+### Session model
+
+- The console session (UART) is a singleton; each TCP connection
+  allocates a slot from a pool of size `MAX_TCP_SHELL_SESSIONS = 2`
+  (see `kernel/include/shell_session.h`). When the pool is full the
+  listener politely sends "Too many sessions\r\n" and drops.
+- Every session carries its own cwd and Lua interpreter slot — `cd`
+  in one session does not affect another.
+- Kernel logs (`[INFO]`, `[WARN]`, panic output, driver messages)
+  stay on UART and do **not** broadcast to TCP sessions. Only command
+  output written via `shell_puts` / `shell_printf` reaches the session
+  that ran the command.
+- Commands that mutate global state (`run`, `kill`, `sched policy`,
+  `model load`, etc.) serialize on a priority-inheriting mutex so two
+  concurrent sessions can't race each other. Read-only commands
+  (`ls`, `mem`, `tasks`) skip the lock. See `.mutates` in each
+  command-table entry.
+
+### Security
+
+Raw TCP has **no authentication** and **no encryption**. The QEMU
+hostfwd binds to `127.0.0.1` only, and `tcpsh` never auto-starts —
+the operator must invoke it explicitly. Do not expose the port on
+untrusted networks until Phase 4 SSH (#199) lands.
+
+---
+
 ## Implementation
 
-Located in `kernel/src/shell.c`.
+Located in `kernel/src/shell.c` (core) with a thin I/O abstraction
+in `kernel/src/shell_io*.c` and session state in
+`kernel/src/shell_session.c`. TCP session support lives in
+`kernel/src/shell_io_tcp.c` and `kernel/src/tcp_shell_server.c`.
 
 ### Key Functions
 
 | Function | Description |
 |----------|-------------|
-| `shell_init()` | Initialize shell and register built-in commands |
-| `shell_start()` | Spawn shell task on CPU 0 |
-| `shell_process_char()` | Handle incoming UART character (called from UART IRQ) |
-| `shell_register_command()` | Register external command at runtime |
+| `shell_init()` | Initialize shell, create the console session, register built-in commands |
+| `shell_start()` | Spawn the console shell task on CPU 0 |
+| `shell_run()` | REPL loop — reads from `shell_session_current()->io`, dispatches commands |
+| `shell_register_command()` | Register an external command at runtime |
+| `shell_session_current()` | Return the session bound to the running task (falls back to console) |
+| `shell_session_alloc()` / `_free()` | TCP pool slot management |
+| `shell_io_tcp_create()` | Wire a new pcb to a TCP shell_io and its ring buffers (accept callback) |
+| `tcp_shell_server_start(port)` | tcp_new/bind/listen on `port`, register accept callback |
 
 ### Architecture
 
-The shell uses interrupt-driven input via the UART driver:
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                 shell_run  (REPL — task-agnostic)                    │
+│            reads/writes via shell_session_current()->io              │
+└────────────┬─────────────────────────────────────┬───────────────────┘
+             │                                     │
+   ┌─────────▼──────────┐                ┌─────────▼─────────┐
+   │ console shell task │                │ shell-tcp<N> task │
+   │    (UART session)  │                │  (TCP session)    │
+   └─────────┬──────────┘                └─────────┬─────────┘
+             │                                     │
+   ┌─────────▼──────────┐                ┌─────────▼─────────┐
+   │  shell_io_uart     │                │   shell_io_tcp    │
+   │ (uart_getc/puts)   │                │  rings + lwIP pcb │
+   └────────────────────┘                └─────────┬─────────┘
+                                                   │
+                                   ┌───────────────▼──────────────┐
+                                   │ net_pump task: net_poll() →  │
+                                   │ tcp_recv cb fills RX ring,   │
+                                   │ shell_io_tcp_poll drains TX  │
+                                   └──────────────────────────────┘
+```
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  UART IRQ Handler                                       │
-│  └── shell_process_char(c)                              │
-│      ├── Echo character                                 │
-│      ├── Buffer until newline                           │
-│      └── On newline: parse and dispatch                 │
-└─────────────────────────────────────────────────────────┘
-```
+The `shell_io` vtable (read_char, try_read_char, write, flush,
+close, is_open) is the only API command handlers need. `shell_*`
+wrappers (`shell_puts`, `shell_printf`, `shell_putc`, `shell_getc`)
+look up the current session's io and route through it.
+
+Kernel logs and driver output continue to call `uart_*` directly so
+they always reach the physical console.
 
 ### Command Dispatch
 
-Table-driven dispatch with support for external command registration:
+Table-driven dispatch with a `.mutates` flag. Mutating commands are
+serialized with a priority-inheriting mutex so TCP clients can't race
+each other's global-state changes:
 
 ```c
-static const struct shell_command builtin_commands[] = {
-    {"help",   cmd_help,   "List available commands"},
-    {"mem",    cmd_mem,    "Show memory statistics"},
-    {"tasks",  cmd_tasks,  "List all tasks"},
-    // ...
+static const shell_cmd_t builtin_commands[] = {
+    {"help",   cmd_help,   "List available commands", false},  /* read-only */
+    {"mem",    cmd_mem,    "Show memory statistics",  false},
+    {"run",    cmd_run,    "Run a program (run <name>)", true},  /* mutates task set */
+    {"sched",  cmd_sched,  "Scheduler (...)",           true},  /* mutates active policy */
+    ...
 };
-
-// Runtime registration for test commands, etc.
-shell_register_command("test", cmd_test, "Run tests");
 ```
+
+`shell_register_command()` is still supported for runtime
+registration (net, pci, gpu, lua); the caller sets `.mutates`
+appropriately.
 
 ---
 
@@ -631,4 +728,4 @@ Backspace and basic line editing are supported.
 
 ---
 
-*Last updated: April 2026*
+*Last updated: April 2026 (multi-session Phase 1).*

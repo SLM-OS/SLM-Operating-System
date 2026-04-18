@@ -135,6 +135,15 @@ int pi_mutex_trylock(pi_mutex_t *mutex)
     return 0;
 }
 
+bool pi_mutex_held_by_self(pi_mutex_t *mutex)
+{
+    struct task *self = task_current();
+    irq_flags_t flags = spin_lock_irqsave(&mutex->guard);
+    bool held = (mutex->locked && mutex->owner == self);
+    spin_unlock_irqrestore(&mutex->guard, flags);
+    return held;
+}
+
 /*
  * Release the mutex and restore priority.
  *

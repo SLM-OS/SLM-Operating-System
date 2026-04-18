@@ -108,6 +108,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_gpu();
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();
+    total_failures += test_suite_shell_session();
     total_failures += test_suite_pmm();
 #if !defined(PLATFORM_X86_64)
     total_failures += test_suite_pcie();

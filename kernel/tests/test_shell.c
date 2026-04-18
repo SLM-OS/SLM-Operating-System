@@ -8,6 +8,7 @@
 #include "unity.h"
 #include "../include/shell.h"
 #include "../include/shell_internal.h"
+#include "../include/shell_session.h"
 #include "../include/component.h"
 #include "../include/vfs.h"
 #include "../include/task.h"
@@ -2004,16 +2005,18 @@ static void test_shell_cmd_sleep_missing_args(void)
  * ".", empty strings, double slashes, trailing slashes, and overflow.
  * ============================================================================ */
 
-/* Restore shell_cwd after each test in this group. */
+/* Restore the console session's cwd after each test in this group. */
 static void resolve_path_setup(char *saved_cwd)
 {
-    strcpy(saved_cwd, shell_cwd);
-    strcpy(shell_cwd, "/");
+    struct shell_session *sess = shell_session_console();
+    strcpy(saved_cwd, sess->cwd);
+    strcpy(sess->cwd, "/");
 }
 
 static void resolve_path_teardown(const char *saved_cwd)
 {
-    strcpy(shell_cwd, saved_cwd);
+    struct shell_session *sess = shell_session_console();
+    strcpy(sess->cwd, saved_cwd);
 }
 
 static void test_shell_resolve_path_absolute_simple(void)
@@ -2093,7 +2096,7 @@ static void test_shell_resolve_path_empty(void)
 {
     char saved_cwd[VFS_MAX_PATH];
     resolve_path_setup(saved_cwd);
-    strcpy(shell_cwd, "/sys");
+    strcpy(shell_session_console()->cwd, "/sys");
 
     /* Empty path resolves to current working directory. */
     char out[VFS_MAX_PATH];
@@ -2107,7 +2110,7 @@ static void test_shell_resolve_path_relative(void)
 {
     char saved_cwd[VFS_MAX_PATH];
     resolve_path_setup(saved_cwd);
-    strcpy(shell_cwd, "/foo");
+    strcpy(shell_session_console()->cwd, "/foo");
 
     char out[VFS_MAX_PATH];
     TEST_ASSERT_EQUAL_INT(0, shell_resolve_path("bar", out, sizeof(out)));

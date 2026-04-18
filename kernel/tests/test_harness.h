@@ -52,6 +52,9 @@ int test_suite_vfs(void);
 /* Shell command tests */
 int test_suite_shell(void);
 
+/* Shell session pool / per-task binding tests */
+int test_suite_shell_session(void);
+
 /* VMM/TLB tests */
 int test_suite_vmm(void);
 

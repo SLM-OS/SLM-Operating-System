@@ -12,6 +12,7 @@
 #ifndef PI_MUTEX_H
 #define PI_MUTEX_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "spinlock.h"
 
@@ -73,6 +74,16 @@ int pi_mutex_trylock(pi_mutex_t *mutex);
  * a proper wait queue in the future).
  */
 void pi_mutex_unlock(pi_mutex_t *mutex);
+
+/*
+ * True iff the mutex is currently held by the calling task.
+ *
+ * Intended for non-recursive callers that want to skip a nested
+ * acquire without changing the lock discipline. Safe to call from
+ * any context; reads the owner field under the guard spinlock to
+ * avoid tearing against concurrent lock/unlock.
+ */
+bool pi_mutex_held_by_self(pi_mutex_t *mutex);
 
 /*
  * Check if a priority inversion was detected.

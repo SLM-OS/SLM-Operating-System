@@ -5,6 +5,7 @@
  * Includes embedded test ELF binary and program registry.
  */
 
+#include "shell.h"
 #include "shell_internal.h"
 #include "uart.h"
 #include "elf.h"
@@ -103,30 +104,30 @@ int cmd_elftest(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    uart_puts("ELF Loader Test:\r\n\r\n");
+    shell_puts("ELF Loader Test:\r\n\r\n");
 
     /* Test 1: Invalid data (not an ELF) */
-    uart_puts("  Test 1: Invalid data... ");
+    shell_puts("  Test 1: Invalid data... ");
     uint8_t not_elf[] = "This is not an ELF file";
     int ret = elf_validate(not_elf, sizeof(not_elf));
     if (ret == ELF_ERR_INVALID) {
-        uart_puts("PASS (correctly rejected)\r\n");
+        shell_puts("PASS (correctly rejected)\r\n");
     } else {
-        uart_printf("FAIL (expected ELF_ERR_INVALID, got %d)\r\n", ret);
+        shell_printf("FAIL (expected ELF_ERR_INVALID, got %d)\r\n", ret);
     }
 
     /* Test 2: Truncated file */
-    uart_puts("  Test 2: Truncated file... ");
+    shell_puts("  Test 2: Truncated file... ");
     uint8_t truncated[] = {0x7f, 'E', 'L', 'F'};
     ret = elf_validate(truncated, sizeof(truncated));
     if (ret == ELF_ERR_TRUNCATED) {
-        uart_puts("PASS (correctly rejected)\r\n");
+        shell_puts("PASS (correctly rejected)\r\n");
     } else {
-        uart_printf("FAIL (expected ELF_ERR_TRUNCATED, got %d)\r\n", ret);
+        shell_printf("FAIL (expected ELF_ERR_TRUNCATED, got %d)\r\n", ret);
     }
 
     /* Test 3: Minimal valid ELF64 header (wrong arch) */
-    uart_puts("  Test 3: Wrong architecture... ");
+    shell_puts("  Test 3: Wrong architecture... ");
     uint8_t wrong_arch[64] = {0};
     wrong_arch[0] = 0x7f; wrong_arch[1] = 'E'; wrong_arch[2] = 'L'; wrong_arch[3] = 'F';
     wrong_arch[4] = 2;    /* ELFCLASS64 */
@@ -138,13 +139,13 @@ int cmd_elftest(int argc, char *argv[])
     wrong_arch[18] = 0x3E;
     ret = elf_validate(wrong_arch, sizeof(wrong_arch));
     if (ret == ELF_ERR_ARCH) {
-        uart_puts("PASS (correctly rejected)\r\n");
+        shell_puts("PASS (correctly rejected)\r\n");
     } else {
-        uart_printf("FAIL (expected ELF_ERR_ARCH, got %d)\r\n", ret);
+        shell_printf("FAIL (expected ELF_ERR_ARCH, got %d)\r\n", ret);
     }
 
     /* Test 4: Minimal valid ARM64 ELF header */
-    uart_puts("  Test 4: Valid ARM64 header... ");
+    shell_puts("  Test 4: Valid ARM64 header... ");
     uint8_t valid_header[64] = {0};
     valid_header[0] = 0x7f; valid_header[1] = 'E'; valid_header[2] = 'L'; valid_header[3] = 'F';
     valid_header[4] = 2;    /* ELFCLASS64 */
@@ -159,13 +160,13 @@ int cmd_elftest(int argc, char *argv[])
     /* e_phnum at offset 56 = 0, so no segments to validate */
     ret = elf_validate(valid_header, sizeof(valid_header));
     if (ret == ELF_OK) {
-        uart_puts("PASS (accepted)\r\n");
+        shell_puts("PASS (accepted)\r\n");
     } else {
-        uart_printf("FAIL (expected ELF_OK, got %d: %s)\r\n", ret, elf_strerror(ret));
+        shell_printf("FAIL (expected ELF_OK, got %d: %s)\r\n", ret, elf_strerror(ret));
     }
 
-    uart_puts("\r\nELF loader validation tests complete.\r\n");
-    uart_puts("Note: Full load tests require an actual ELF binary.\r\n");
+    shell_puts("\r\nELF loader validation tests complete.\r\n");
+    shell_puts("Note: Full load tests require an actual ELF binary.\r\n");
 
     return 0;
 }
@@ -174,35 +175,35 @@ int cmd_run(int argc, char *argv[])
 {
     /* No arguments: list available programs */
     if (argc < 2) {
-        uart_puts("Available programs:\r\n\r\n");
+        shell_puts("Available programs:\r\n\r\n");
         for (size_t i = 0; i < NUM_ELF_PROGRAMS; i++) {
-            uart_printf("  %-12s %s\r\n",
+            shell_printf("  %-12s %s\r\n",
                         elf_programs[i].name,
                         elf_programs[i].description);
         }
-        uart_puts("\r\nUsage: run <name>\r\n");
+        shell_puts("\r\nUsage: run <name>\r\n");
         return 0;
     }
 
     /* Find the program by name */
     const elf_program_t *prog = find_elf_program(argv[1]);
     if (!prog) {
-        uart_printf("Unknown program: %s\r\n", argv[1]);
-        uart_puts("Use 'run' to list available programs.\r\n");
+        shell_printf("Unknown program: %s\r\n", argv[1]);
+        shell_puts("Use 'run' to list available programs.\r\n");
         return -1;
     }
 
-    uart_printf("Loading '%s'...\r\n", prog->name);
+    shell_printf("Loading '%s'...\r\n", prog->name);
 
     /* Load the ELF */
     struct elf_info info;
     int ret = elf_load(prog->data, prog->size, &info);
     if (ret != ELF_OK) {
-        uart_printf("  Failed to load ELF: %s\r\n", elf_strerror(ret));
+        shell_printf("  Failed to load ELF: %s\r\n", elf_strerror(ret));
         return -1;
     }
 
-    uart_printf("  Loaded %zu segment(s), entry=0x%lx\r\n",
+    shell_printf("  Loaded %zu segment(s), entry=0x%lx\r\n",
                 info.num_segments, info.entry);
 
     /*
@@ -217,17 +218,17 @@ int cmd_run(int argc, char *argv[])
     struct task *task = elf_create_task_with_args(&info, prog->name,
                                                    elf_argc, elf_argv);
     if (!task) {
-        uart_puts("  Failed to create task\r\n");
+        shell_puts("  Failed to create task\r\n");
         elf_unload(&info);
         return -1;
     }
 
-    uart_printf("  Created task '%s' (id=%u) with %d arg(s)\r\n",
+    shell_printf("  Created task '%s' (id=%u) with %d arg(s)\r\n",
                 prog->name, task->id, elf_argc);
 
     /* Add to scheduler */
     scheduler_add_task(task);
-    uart_puts("  Task added to scheduler\r\n");
+    shell_puts("  Task added to scheduler\r\n");
 
     /*
      * Note: ELF segment memory is now automatically freed when the task
@@ -244,29 +245,29 @@ int cmd_run(int argc, char *argv[])
 int cmd_kill(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Usage: kill <pid>\r\n");
-        uart_puts("  Terminates a task by its process ID.\r\n");
-        uart_puts("  Use 'tasks' to see running task IDs.\r\n");
+        shell_puts("Usage: kill <pid>\r\n");
+        shell_puts("  Terminates a task by its process ID.\r\n");
+        shell_puts("  Use 'tasks' to see running task IDs.\r\n");
         return -1;
     }
 
     uint32_t pid;
     if (shell_parse_uint(argv[1], &pid) != 0) {
-        uart_printf("Invalid PID: %s\r\n", argv[1]);
+        shell_printf("Invalid PID: %s\r\n", argv[1]);
         return -1;
     }
 
     /* Find the task */
     struct task *target = task_get(pid);
     if (!target) {
-        uart_printf("No task with PID %lu\r\n", (unsigned long)pid);
+        shell_printf("No task with PID %lu\r\n", (unsigned long)pid);
         return -1;
     }
 
     /* Don't allow killing the current task (shell) */
     struct task *current = task_current();
     if (target == current) {
-        uart_puts("Cannot kill the current task (shell)\r\n");
+        shell_puts("Cannot kill the current task (shell)\r\n");
         return -1;
     }
 
@@ -275,17 +276,17 @@ int cmd_kill(int argc, char *argv[])
         (target->name[0] == 'i' && target->name[1] == 'd' &&
          target->name[2] == 'l' && target->name[3] == 'e' &&
          target->name[4] == '_')) {
-        uart_puts("Cannot kill idle tasks\r\n");
+        shell_puts("Cannot kill idle tasks\r\n");
         return -1;
     }
 
     /* Check if already terminated */
     if (target->state == TASK_TERMINATED) {
-        uart_printf("Task %lu is already terminated\r\n", (unsigned long)pid);
+        shell_printf("Task %lu is already terminated\r\n", (unsigned long)pid);
         return 0;
     }
 
-    uart_printf("Killing task '%s' (pid=%lu)...\r\n", target->name, (unsigned long)pid);
+    shell_printf("Killing task '%s' (pid=%lu)...\r\n", target->name, (unsigned long)pid);
 
     /* Mark as terminated and remove from scheduler */
     target->state = TASK_TERMINATED;
@@ -294,6 +295,6 @@ int cmd_kill(int argc, char *argv[])
     /* Destroy the task (frees stack) */
     task_destroy(target);
 
-    uart_puts("Task terminated.\r\n");
+    shell_puts("Task terminated.\r\n");
     return 0;
 }

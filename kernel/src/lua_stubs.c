@@ -21,6 +21,7 @@
 #include "sched.h"
 #include "string.h"  /* Our kernel string functions */
 #include "spinlock.h"  /* heap lock for concurrent lua_States (#208) */
+#include "shell.h"     /* shell_printf / shell_putc / shell_getc — libc stdout path routes to current session */
 
 /* === CORE-C3 regression guard ==============================================
  * Do NOT redefine these 13 canonical string/mem functions in this file.
@@ -865,7 +866,7 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
         const char *s = (const char *)ptr;
         size_t total = size * nmemb;
         for (size_t i = 0; i < total; i++) {
-            uart_putc(s[i]);
+            shell_putc(s[i]);
         }
         return nmemb;
     }
@@ -917,7 +918,7 @@ char *fgets(char *s, int size, FILE *stream) {
 
 int fputc(int c, FILE *stream) {
     if (stream == stdout || stream == stderr) {
-        uart_putc((char)c);
+        shell_putc((char)c);
         return c;
     }
     return EOF;
@@ -925,7 +926,7 @@ int fputc(int c, FILE *stream) {
 
 int fputs(const char *s, FILE *stream) {
     if (stream == stdout || stream == stderr) {
-        while (*s) uart_putc(*s++);
+        while (*s) shell_putc(*s++);
         return 0;
     }
     return EOF;
@@ -945,7 +946,7 @@ int fprintf(FILE *stream, const char *format, ...) {
         int len = vsnprintf(buf, sizeof(buf), format, args);
         va_end(args);
         for (int i = 0; i < len && buf[i]; i++) {
-            uart_putc(buf[i]);
+            shell_putc(buf[i]);
         }
         return len;
     }
@@ -959,7 +960,7 @@ int printf(const char *format, ...) {
     int len = vsnprintf(buf, sizeof(buf), format, args);
     va_end(args);
     for (int i = 0; i < len && buf[i]; i++) {
-        uart_putc(buf[i]);
+        shell_putc(buf[i]);
     }
     return len;
 }
@@ -969,7 +970,7 @@ int vfprintf(FILE *stream, const char *format, va_list ap) {
         char buf[256];
         int len = vsnprintf(buf, sizeof(buf), format, ap);
         for (int i = 0; i < len && buf[i]; i++) {
-            uart_putc(buf[i]);
+            shell_putc(buf[i]);
         }
         return len;
     }
@@ -995,17 +996,17 @@ int putc(int c, FILE *stream) {
 }
 
 int puts(const char *s) {
-    while (*s) uart_putc(*s++);
-    uart_putc('\n');
+    while (*s) shell_putc(*s++);
+    shell_putc('\n');
     return 0;
 }
 
 int getchar(void) {
-    return uart_getc();
+    return shell_getc();
 }
 
 int putchar(int c) {
-    uart_putc((char)c);
+    shell_putc((char)c);
     return c;
 }
 
@@ -1039,9 +1040,9 @@ int rename(const char *oldpath, const char *newpath) {
 
 void perror(const char *s) {
     if (s && *s) {
-        uart_printf("%s: ", s);
+        shell_printf("%s: ", s);
     }
-    uart_printf("error\n");
+    shell_printf("error\n");
 }
 
 /* ============================================================================
@@ -1060,7 +1061,7 @@ int system(const char *command) {
 
 void exit(int status) {
     (void)status;
-    uart_printf("Lua exit called\n");
+    shell_printf("Lua exit called\n");
     task_exit();
 #if defined(PLATFORM_X86_64)
     for (;;) __asm__ volatile("hlt");
@@ -1079,7 +1080,7 @@ int atexit(void (*function)(void)) {
 }
 
 void abort(void) {
-    uart_printf("Lua abort called\n");
+    shell_printf("Lua abort called\n");
     task_exit();
 #if defined(PLATFORM_X86_64)
     for (;;) __asm__ volatile("hlt");
@@ -1108,16 +1109,16 @@ int raise(int sig) {
 
 void slm_lua_writestring(const char *s, size_t l) {
     for (size_t i = 0; i < l; i++) {
-        uart_putc(s[i]);
+        shell_putc(s[i]);
     }
 }
 
 void slm_lua_writeline(void) {
-    uart_putc('\n');
+    shell_putc('\n');
 }
 
 void slm_lua_writeerror(const char *s, const char *p) {
-    uart_printf(s, p);
+    shell_printf(s, p);
 }
 
 /* errno already defined via __errno() at top of file */

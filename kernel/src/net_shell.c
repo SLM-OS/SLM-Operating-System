@@ -6,6 +6,9 @@
 
 #include "net.h"
 #include "shell.h"
+#include "shell_session.h"   /* MAX_TCP_SHELL_SESSIONS */
+#include "tcp_shell_server.h"
+#include "shell_io_tcp.h"
 #include "debug.h"
 #include "timer.h"
 #include "arch/sys_arch.h"
@@ -37,19 +40,19 @@ static void ping_callback(uint16_t seq, uint32_t addr, uint32_t rtt_ms,
  */
 static int cmd_ping(int argc, char *argv[]) {
     if (argc < 2) {
-        uart_printf("Usage: ping <ip_address> [count]\n");
-        uart_printf("  Example: ping 10.0.2.2\n");
+        shell_printf("Usage: ping <ip_address> [count]\n");
+        shell_printf("  Example: ping 10.0.2.2\n");
         return -1;
     }
 
     if (!net_is_up()) {
-        uart_printf("Network not initialized\n");
+        shell_printf("Network not initialized\n");
         return -1;
     }
 
     uint32_t ip_addr;
     if (net_str_to_ip(argv[1], &ip_addr) < 0) {
-        uart_printf("Invalid IP address: %s\n", argv[1]);
+        shell_printf("Invalid IP address: %s\n", argv[1]);
         return -1;
     }
 
@@ -66,7 +69,7 @@ static int cmd_ping(int argc, char *argv[]) {
 
     char ip_str[16];
     net_ip_to_str(ip_addr, ip_str);
-    uart_printf("PING %s: %d packets\n", ip_str, count);
+    shell_printf("PING %s: %d packets\n", ip_str, count);
 
     int sent = 0;
     int received = 0;
@@ -80,7 +83,7 @@ static int cmd_ping(int argc, char *argv[]) {
         ping_rtt = 0;
 
         if (net_ping(ip_addr, i + 1, ping_callback, NULL) < 0) {
-            uart_printf("Failed to send ping\n");
+            shell_printf("Failed to send ping\n");
             continue;
         }
         sent++;
@@ -92,14 +95,14 @@ static int cmd_ping(int argc, char *argv[]) {
         }
 
         if (ping_success) {
-            uart_printf("Reply from %s: seq=%d time=%u ms\n",
+            shell_printf("Reply from %s: seq=%d time=%u ms\n",
                        ip_str, i + 1, ping_rtt);
             received++;
             total_rtt += ping_rtt;
             if (ping_rtt < min_rtt) min_rtt = ping_rtt;
             if (ping_rtt > max_rtt) max_rtt = ping_rtt;
         } else {
-            uart_printf("Request timeout for seq=%d\n", i + 1);
+            shell_printf("Request timeout for seq=%d\n", i + 1);
         }
 
         /* Wait 1 second between pings */
@@ -112,12 +115,12 @@ static int cmd_ping(int argc, char *argv[]) {
     }
 
     /* Print summary */
-    uart_printf("\n--- %s ping statistics ---\n", ip_str);
-    uart_printf("%d packets transmitted, %d received, %d%% packet loss\n",
+    shell_printf("\n--- %s ping statistics ---\n", ip_str);
+    shell_printf("%d packets transmitted, %d received, %d%% packet loss\n",
                sent, received, sent > 0 ? ((sent - received) * 100 / sent) : 0);
 
     if (received > 0) {
-        uart_printf("rtt min/avg/max = %u/%u/%u ms\n",
+        shell_printf("rtt min/avg/max = %u/%u/%u ms\n",
                    min_rtt, total_rtt / received, max_rtt);
     }
 
@@ -133,13 +136,13 @@ static int cmd_ping(int argc, char *argv[]) {
  */
 static int cmd_ifconfig(int argc, char *argv[]) {
     if (!net_is_up()) {
-        uart_printf("Network not initialized\n");
+        shell_printf("Network not initialized\n");
         return -1;
     }
 
     struct net_info info;
     if (net_get_info(&info) < 0) {
-        uart_printf("Failed to get network info\n");
+        shell_printf("Failed to get network info\n");
         return -1;
     }
 
@@ -159,24 +162,24 @@ static int cmd_ifconfig(int argc, char *argv[]) {
         default:                dhcp_label = "STATIC";         break;
         }
 
-        uart_printf("sl0: flags=%s%s\n",
+        shell_printf("sl0: flags=%s%s\n",
                    info.link_up ? "UP," : "DOWN,",
                    dhcp_label);
-        uart_printf("     ether %02x:%02x:%02x:%02x:%02x:%02x\n",
+        shell_printf("     ether %02x:%02x:%02x:%02x:%02x:%02x\n",
                    info.mac[0], info.mac[1], info.mac[2],
                    info.mac[3], info.mac[4], info.mac[5]);
-        uart_printf("     inet %s  netmask %s\n", ip_str, nm_str);
-        uart_printf("     gateway %s\n", gw_str);
+        shell_printf("     inet %s  netmask %s\n", ip_str, nm_str);
+        shell_printf("     gateway %s\n", gw_str);
         return 0;
     }
 
     /* Check for configuration commands */
     if (argc >= 2 && strcmp(argv[1], "dhcp") == 0) {
         if (net_enable_dhcp() < 0) {
-            uart_printf("Failed to enable DHCP\n");
+            shell_printf("Failed to enable DHCP\n");
             return -1;
         }
-        uart_printf("DHCP enabled\n");
+        shell_printf("DHCP enabled\n");
         return 0;
     }
 
@@ -184,33 +187,33 @@ static int cmd_ifconfig(int argc, char *argv[]) {
         /* ifconfig <ip> <netmask> <gateway> */
         uint32_t ip, nm, gw;
         if (net_str_to_ip(argv[1], &ip) < 0) {
-            uart_printf("Invalid IP address: %s\n", argv[1]);
+            shell_printf("Invalid IP address: %s\n", argv[1]);
             return -1;
         }
         if (net_str_to_ip(argv[2], &nm) < 0) {
-            uart_printf("Invalid netmask: %s\n", argv[2]);
+            shell_printf("Invalid netmask: %s\n", argv[2]);
             return -1;
         }
         if (net_str_to_ip(argv[3], &gw) < 0) {
-            uart_printf("Invalid gateway: %s\n", argv[3]);
+            shell_printf("Invalid gateway: %s\n", argv[3]);
             return -1;
         }
 
         if (net_set_static_ip(ip, nm, gw) < 0) {
-            uart_printf("Failed to set IP configuration\n");
+            shell_printf("Failed to set IP configuration\n");
             return -1;
         }
 
         char ip_str[16];
         net_ip_to_str(ip, ip_str);
-        uart_printf("IP set to %s\n", ip_str);
+        shell_printf("IP set to %s\n", ip_str);
         return 0;
     }
 
-    uart_printf("Usage:\n");
-    uart_printf("  ifconfig              - Show configuration\n");
-    uart_printf("  ifconfig dhcp         - Enable DHCP\n");
-    uart_printf("  ifconfig <ip> <mask> <gw> - Set static IP\n");
+    shell_printf("Usage:\n");
+    shell_printf("  ifconfig              - Show configuration\n");
+    shell_printf("  ifconfig dhcp         - Enable DHCP\n");
+    shell_printf("  ifconfig <ip> <mask> <gw> - Set static IP\n");
     return -1;
 }
 
@@ -223,30 +226,30 @@ static int cmd_ifconfig(int argc, char *argv[]) {
  */
 static int cmd_net(int argc, char *argv[]) {
     if (argc < 2) {
-        uart_printf("Usage: net <init|status>\n");
-        uart_printf("  net init   - Initialize network subsystem\n");
-        uart_printf("  net status - Show network status\n");
+        shell_printf("Usage: net <init|status>\n");
+        shell_printf("  net init   - Initialize network subsystem\n");
+        shell_printf("  net status - Show network status\n");
         return -1;
     }
 
     if (strcmp(argv[1], "init") == 0) {
         if (net_is_up()) {
-            uart_printf("Network already initialized\n");
+            shell_printf("Network already initialized\n");
             return 0;
         }
-        uart_printf("Initializing network...\n");
+        shell_printf("Initializing network...\n");
         if (net_init() < 0) {
-            uart_printf("Network initialization failed\n");
+            shell_printf("Network initialization failed\n");
             return -1;
         }
-        uart_printf("Network initialized successfully\n");
+        shell_printf("Network initialized successfully\n");
         return 0;
     }
 
     if (strcmp(argv[1], "status") == 0) {
         if (!net_is_up()) {
-            uart_printf("Network: DOWN (not initialized)\n");
-            uart_printf("  Use 'net init' to initialize\n");
+            shell_printf("Network: DOWN (not initialized)\n");
+            shell_printf("  Use 'net init' to initialize\n");
             return 0;
         }
 
@@ -256,14 +259,14 @@ static int cmd_net(int argc, char *argv[]) {
         char ip_str[16];
         net_ip_to_str(info.ip_addr, ip_str);
 
-        uart_printf("Network: UP\n");
-        uart_printf("  Interface: sl0\n");
-        uart_printf("  IP Address: %s\n", ip_str);
-        uart_printf("  Link: %s\n", info.link_up ? "connected" : "disconnected");
+        shell_printf("Network: UP\n");
+        shell_printf("  Interface: sl0\n");
+        shell_printf("  IP Address: %s\n", ip_str);
+        shell_printf("  Link: %s\n", info.link_up ? "connected" : "disconnected");
         return 0;
     }
 
-    uart_printf("Unknown subcommand: %s\n", argv[1]);
+    shell_printf("Unknown subcommand: %s\n", argv[1]);
     return -1;
 }
 
@@ -279,28 +282,101 @@ static int cmd_netstat(int argc, char *argv[]) {
     (void)argv;
 
     if (!net_is_up()) {
-        uart_printf("Network not initialized\n");
+        shell_printf("Network not initialized\n");
         return -1;
     }
 
     struct net_stats stats;
     net_get_stats(&stats);
 
-    uart_printf("Network Statistics:\n");
-    uart_printf("  RX packets: %llu  bytes: %llu\n",
+    shell_printf("Network Statistics:\n");
+    shell_printf("  RX packets: %llu  bytes: %llu\n",
                (unsigned long long)stats.rx_packets,
                (unsigned long long)stats.rx_bytes);
-    uart_printf("  TX packets: %llu  bytes: %llu\n",
+    shell_printf("  TX packets: %llu  bytes: %llu\n",
                (unsigned long long)stats.tx_packets,
                (unsigned long long)stats.tx_bytes);
-    uart_printf("  RX errors:  %llu  dropped: %llu  no_buffers: %llu\n",
+    shell_printf("  RX errors:  %llu  dropped: %llu  no_buffers: %llu\n",
                (unsigned long long)stats.rx_errors,
                (unsigned long long)stats.rx_dropped,
                (unsigned long long)stats.rx_no_buffers);
-    uart_printf("  TX errors:  %llu\n",
+    shell_printf("  TX errors:  %llu\n",
                (unsigned long long)stats.tx_errors);
 
     return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* TCP Shell Server Command                                                    */
+/* -------------------------------------------------------------------------- */
+
+/* Parse an unsigned decimal in [0, 65535]. Returns -1 on error. */
+static int parse_port(const char *s, uint16_t *out)
+{
+    if (!s || !*s) return -1;
+    uint32_t v = 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (uint32_t)(*s - '0');
+        if (v > 65535) return -1;
+    }
+    *out = (uint16_t)v;
+    return 0;
+}
+
+static int cmd_tcpsh(int argc, char *argv[])
+{
+    if (argc < 2) {
+        shell_printf("Usage: tcpsh <start [port] | stop | status>\n");
+        return -1;
+    }
+
+    if (strcmp(argv[1], "start") == 0) {
+        if (!net_is_up()) {
+            shell_printf("tcpsh: network not initialized (run `net init` first)\n");
+            return -1;
+        }
+        uint16_t port = 2323;
+        if (argc >= 3) {
+            if (parse_port(argv[2], &port) != 0) {
+                shell_printf("tcpsh: invalid port\n");
+                return -1;
+            }
+        }
+        int rc = tcp_shell_server_start(port);
+        if (rc == 0) {
+            shell_printf("tcpsh: listening on port %u\n", (unsigned)port);
+            return 0;
+        }
+        shell_printf("tcpsh: start failed (%d)\n", rc);
+        return rc;
+    }
+
+    if (strcmp(argv[1], "stop") == 0) {
+        if (!tcp_shell_server_running()) {
+            shell_printf("tcpsh: not running\n");
+            return 0;
+        }
+        tcp_shell_server_stop();
+        shell_printf("tcpsh: stopped\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "status") == 0) {
+        if (tcp_shell_server_running()) {
+            shell_printf("tcpsh: running on port %u — accepted=%u active=%u max=%u\n",
+                         (unsigned)tcp_shell_server_port(),
+                         (unsigned)tcp_shell_server_accepted(),
+                         (unsigned)shell_io_tcp_active_count(),
+                         (unsigned)MAX_TCP_SHELL_SESSIONS);
+        } else {
+            shell_printf("tcpsh: stopped\n");
+        }
+        return 0;
+    }
+
+    shell_printf("tcpsh: unknown subcommand '%s'\n", argv[1]);
+    return -1;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -309,10 +385,11 @@ static int cmd_netstat(int argc, char *argv[]) {
 
 /* Command definitions */
 static const shell_cmd_t net_commands[] = {
-    {"net", cmd_net, "Network control (init/status)"},
-    {"ping", cmd_ping, "Send ICMP echo request"},
-    {"ifconfig", cmd_ifconfig, "Network interface config"},
-    {"netstat", cmd_netstat, "Network statistics"},
+    {"net",      cmd_net,      "Network control (init/status)",        true},
+    {"ping",     cmd_ping,     "Send ICMP echo request",               true},
+    {"ifconfig", cmd_ifconfig, "Network interface config",             true},
+    {"netstat",  cmd_netstat,  "Network statistics",                   false},
+    {"tcpsh",    cmd_tcpsh,    "TCP shell server (start|stop|status)", true},
 };
 
 /**

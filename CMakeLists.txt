@@ -357,6 +357,9 @@ set(KERNEL_SOURCES
 
     # Shell (core + command modules)
     kernel/src/shell.c
+    kernel/src/shell_io.c
+    kernel/src/shell_io_uart.c
+    kernel/src/shell_session.c
     kernel/src/shell_sys.c
     kernel/src/shell_fs.c
     kernel/src/shell_exec.c
@@ -419,6 +422,9 @@ set(KERNEL_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/net_shell.c>
+    # TCP shell (multi-session) — requires lwIP; Plan §1.3
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/shell_io_tcp.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/tcp_shell_server.c>
 
     # ==========================================================================
     # Lua Scripting - Lua library includes all FP-using code
@@ -437,6 +443,7 @@ set(TEST_SOURCES
     kernel/tests/test_gpu.c
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
+    kernel/tests/test_shell_session.c
     kernel/tests/test_pmm.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>

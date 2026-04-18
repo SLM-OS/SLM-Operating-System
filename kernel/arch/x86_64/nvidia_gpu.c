@@ -607,7 +607,8 @@ static int cmd_gpu(int argc, char *argv[])
 static const shell_cmd_t gpu_nvidia_cmd = {
     .name = "gpu",
     .handler = cmd_gpu,
-    .help = "NVIDIA GPU info (gpu init | gpu vram | gpu regs)"
+    .help = "NVIDIA GPU info (gpu init | gpu vram | gpu regs)",
+    .mutates = true,   /* gpu init / gpu sec2 touch device state */
 };
 
 void nvidia_gpu_register_shell_commands(void)

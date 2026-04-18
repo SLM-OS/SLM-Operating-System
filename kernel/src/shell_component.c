@@ -5,6 +5,7 @@
  *           msg (send, list, subscribe)
  */
 
+#include "shell.h"
 #include "shell_internal.h"
 #include "uart.h"
 #include "component.h"
@@ -30,15 +31,15 @@ int cmd_component(int argc, char *argv[])
 {
     if (argc < 2) {
         /* Show help */
-        uart_puts("Component System Commands:\r\n");
-        uart_puts("  component list            - List registered components\r\n");
-        uart_puts("  component builtins        - List available built-in components\r\n");
-        uart_puts("  component run <name>      - Run a built-in component\r\n");
-        uart_puts("  component swap <old> <new> - Hot-swap: replace old with new\r\n");
-        uart_puts("  component send <msg>      - Send message to echo service\r\n");
-        uart_puts("  component register <name> <version> <type> [priority]\r\n");
-        uart_puts("  component unregister <idx>\r\n");
-        uart_puts("  component status <name|idx>\r\n");
+        shell_puts("Component System Commands:\r\n");
+        shell_puts("  component list            - List registered components\r\n");
+        shell_puts("  component builtins        - List available built-in components\r\n");
+        shell_puts("  component run <name>      - Run a built-in component\r\n");
+        shell_puts("  component swap <old> <new> - Hot-swap: replace old with new\r\n");
+        shell_puts("  component send <msg>      - Send message to echo service\r\n");
+        shell_puts("  component register <name> <version> <type> [priority]\r\n");
+        shell_puts("  component unregister <idx>\r\n");
+        shell_puts("  component status <name|idx>\r\n");
         return 0;
     }
 
@@ -47,20 +48,20 @@ int cmd_component(int argc, char *argv[])
     /* component list */
     if (strcmp(subcmd, "list") == 0) {
         uint32_t count = component_count();
-        uart_printf("Registered Components: %u\r\n", count);
+        shell_printf("Registered Components: %u\r\n", count);
 
         if (count == 0) {
-            uart_puts("  (none)\r\n");
+            shell_puts("  (none)\r\n");
             return 0;
         }
 
-        uart_puts("  Idx  Name                 Version   Type        State       Pri\r\n");
-        uart_puts("  ---  ----                 -------   ----        -----       ---\r\n");
+        shell_puts("  Idx  Name                 Version   Type        State       Pri\r\n");
+        shell_puts("  ---  ----                 -------   ----        -----       ---\r\n");
 
         for (uint32_t i = 0; i < COMPONENT_MAX_COUNT; i++) {
             component_info_t info;
             if (component_get_info(i, &info) == 0) {
-                uart_printf("  %3u  %-20s %-9s %-11s %-11s %s\r\n",
+                shell_printf("  %3u  %-20s %-9s %-11s %-11s %s\r\n",
                     i,
                     (const char *)info.name,
                     (const char *)info.version,
@@ -84,7 +85,7 @@ int cmd_component(int argc, char *argv[])
     /* component run <name> */
     if (strcmp(subcmd, "run") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: component run <name>\r\n");
+            shell_puts("Usage: component run <name>\r\n");
             component_list_builtins();
             return -1;
         }
@@ -95,7 +96,7 @@ int cmd_component(int argc, char *argv[])
     /* component swap <old_name> <new_name> */
     if (strcmp(subcmd, "swap") == 0) {
         if (argc < 4) {
-            uart_puts("Usage: component swap <old_name> <new_name>\r\n");
+            shell_puts("Usage: component swap <old_name> <new_name>\r\n");
             return -1;
         }
         int idx = component_hot_swap(argv[2], argv[3]);
@@ -105,7 +106,7 @@ int cmd_component(int argc, char *argv[])
     /* component send <message> */
     if (strcmp(subcmd, "send") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: component send <message>\r\n");
+            shell_puts("Usage: component send <message>\r\n");
             return -1;
         }
         /* Join remaining args into a single message */
@@ -123,7 +124,7 @@ int cmd_component(int argc, char *argv[])
     /* component register <name> <version> <type> [priority] */
     if (strcmp(subcmd, "register") == 0) {
         if (argc < 5) {
-            uart_puts("Usage: component register <name> <version> <type> [priority]\r\n");
+            shell_puts("Usage: component register <name> <version> <type> [priority]\r\n");
             return -1;
         }
 
@@ -141,7 +142,7 @@ int cmd_component(int argc, char *argv[])
         } else if (strcmp(type_str, "application") == 0) {
             type = COMPONENT_TYPE_APPLICATION;
         } else {
-            uart_printf("Unknown type: %s\r\n", type_str);
+            shell_printf("Unknown type: %s\r\n", type_str);
             return -1;
         }
 
@@ -161,39 +162,39 @@ int cmd_component(int argc, char *argv[])
 
         int idx = component_register(name, version, type, priority);
         if (idx < 0) {
-            uart_puts("Failed to register component\r\n");
+            shell_puts("Failed to register component\r\n");
             return -1;
         }
 
-        uart_printf("Registered component '%s' at index %d\r\n", name, idx);
+        shell_printf("Registered component '%s' at index %d\r\n", name, idx);
         return 0;
     }
 
     /* component unregister <idx> */
     if (strcmp(subcmd, "unregister") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: component unregister <idx>\r\n");
+            shell_puts("Usage: component unregister <idx>\r\n");
             return -1;
         }
 
         uint32_t idx;
         if (shell_parse_uint(argv[2], &idx) != 0) {
-            uart_puts("Invalid index\r\n");
+            shell_puts("Invalid index\r\n");
             return -1;
         }
         if (component_unregister(idx) != 0) {
-            uart_printf("Failed to unregister component %u\r\n", idx);
+            shell_printf("Failed to unregister component %u\r\n", idx);
             return -1;
         }
 
-        uart_printf("Unregistered component %u\r\n", idx);
+        shell_printf("Unregistered component %u\r\n", idx);
         return 0;
     }
 
     /* component status <name|idx> */
     if (strcmp(subcmd, "status") == 0) {
         if (argc < 3) {
-            uart_puts("Usage: component status <name|idx>\r\n");
+            shell_puts("Usage: component status <name|idx>\r\n");
             return -1;
         }
 
@@ -204,38 +205,38 @@ int cmd_component(int argc, char *argv[])
         if (arg[0] >= '0' && arg[0] <= '9') {
             uint32_t parsed;
             if (shell_parse_uint(arg, &parsed) != 0) {
-                uart_puts("Invalid index\r\n");
+                shell_puts("Invalid index\r\n");
                 return -1;
             }
             idx = (int)parsed;
         } else {
             idx = component_find(arg);
             if (idx < 0) {
-                uart_printf("Component '%s' not found\r\n", arg);
+                shell_printf("Component '%s' not found\r\n", arg);
                 return -1;
             }
         }
 
         component_info_t info;
         if (component_get_info((uint32_t)idx, &info) != 0) {
-            uart_printf("Failed to get info for component %d\r\n", idx);
+            shell_printf("Failed to get info for component %d\r\n", idx);
             return -1;
         }
 
-        uart_printf("Component %d:\r\n", idx);
-        uart_printf("  Name:        %s\r\n", (const char *)info.name);
-        uart_printf("  Version:     %s\r\n", (const char *)info.version);
-        uart_printf("  Type:        %s\r\n", component_type_name(info.component_type));
-        uart_printf("  State:       %s\r\n", component_state_name(info.state));
-        uart_printf("  Priority:    %u\r\n", info.priority);
-        uart_printf("  Task ID:     %u\r\n", info.task_id);
-        uart_printf("  Memory:      %u KB\r\n", info.memory_kb);
-        uart_printf("  Switches:    %llu\r\n", (unsigned long long)info.switches);
+        shell_printf("Component %d:\r\n", idx);
+        shell_printf("  Name:        %s\r\n", (const char *)info.name);
+        shell_printf("  Version:     %s\r\n", (const char *)info.version);
+        shell_printf("  Type:        %s\r\n", component_type_name(info.component_type));
+        shell_printf("  State:       %s\r\n", component_state_name(info.state));
+        shell_printf("  Priority:    %u\r\n", info.priority);
+        shell_printf("  Task ID:     %u\r\n", info.task_id);
+        shell_printf("  Memory:      %u KB\r\n", info.memory_kb);
+        shell_printf("  Switches:    %llu\r\n", (unsigned long long)info.switches);
         return 0;
     }
 
-    uart_printf("Unknown subcommand: %s\r\n", subcmd);
-    uart_puts("Use 'component' for help.\r\n");
+    shell_printf("Unknown subcommand: %s\r\n", subcmd);
+    shell_puts("Use 'component' for help.\r\n");
     return -1;
 }
 
@@ -250,10 +251,10 @@ int cmd_component(int argc, char *argv[])
 int cmd_msg(int argc, char *argv[])
 {
     if (argc < 2) {
-        uart_puts("Message Router Commands:\r\n");
-        uart_puts("  msg send <topic> <data>     - Publish message to topic\r\n");
-        uart_puts("  msg list                    - List topics and subscribers\r\n");
-        uart_puts("  msg subscribe <topic> <idx> - Subscribe component to topic\r\n");
+        shell_puts("Message Router Commands:\r\n");
+        shell_puts("  msg send <topic> <data>     - Publish message to topic\r\n");
+        shell_puts("  msg list                    - List topics and subscribers\r\n");
+        shell_puts("  msg subscribe <topic> <idx> - Subscribe component to topic\r\n");
         return 0;
     }
 
@@ -268,17 +269,17 @@ int cmd_msg(int argc, char *argv[])
     /* msg subscribe <topic> <component_idx> */
     if (strcmp(subcmd, "subscribe") == 0) {
         if (argc < 4) {
-            uart_puts("Usage: msg subscribe <topic> <component_idx>\r\n");
+            shell_puts("Usage: msg subscribe <topic> <component_idx>\r\n");
             return -1;
         }
         uint32_t idx;
         if (shell_parse_uint(argv[3], &idx) != 0) {
-            uart_puts("Invalid component index\r\n");
+            shell_puts("Invalid component index\r\n");
             return -1;
         }
         int ret = msg_router_subscribe(argv[2], (int)idx);
         if (ret == 0) {
-            uart_printf("Subscribed component %u to topic '%s'\r\n", idx, argv[2]);
+            shell_printf("Subscribed component %u to topic '%s'\r\n", idx, argv[2]);
         }
         return ret;
     }
@@ -286,7 +287,7 @@ int cmd_msg(int argc, char *argv[])
     /* msg send <topic> <data...> */
     if (strcmp(subcmd, "send") == 0) {
         if (argc < 4) {
-            uart_puts("Usage: msg send <topic> <data...>\r\n");
+            shell_puts("Usage: msg send <topic> <data...>\r\n");
             return -1;
         }
         const char *topic = argv[2];
@@ -302,11 +303,11 @@ int cmd_msg(int argc, char *argv[])
         msg[pos] = '\0';
 
         int delivered = msg_router_publish((const uint8_t *)topic, (const uint8_t *)msg);
-        uart_printf("Message delivered to %d subscriber(s)\r\n", delivered);
+        shell_printf("Message delivered to %d subscriber(s)\r\n", delivered);
         return (delivered > 0) ? 0 : -1;
     }
 
-    uart_printf("Unknown subcommand: %s\r\n", subcmd);
-    uart_puts("Use 'msg' for help.\r\n");
+    shell_printf("Unknown subcommand: %s\r\n", subcmd);
+    shell_puts("Use 'msg' for help.\r\n");
     return -1;
 }

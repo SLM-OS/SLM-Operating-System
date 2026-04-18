@@ -476,7 +476,8 @@ static int cmd_pci(int argc, char *argv[])
 static const shell_cmd_t pci_cmd = {
     .name = "pci",
     .handler = cmd_pci,
-    .help = "List PCI/PCIe devices"
+    .help = "List PCI/PCIe devices",
+    .mutates = false,
 };
 
 void pci_register_shell_commands(void)

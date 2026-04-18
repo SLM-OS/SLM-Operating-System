@@ -18,8 +18,10 @@
  * Shared State
  * ============================================================================ */
 
-/* Current working directory (set by cmd_cd, read by resolve_path) */
-extern char shell_cwd[VFS_MAX_PATH];
+/* The current working directory lives on the per-session struct
+ * (shell_session.h). Read it via shell_session_current()->cwd and
+ * mutate it only from command handlers that run on the session's
+ * shell task (cd). */
 
 /* ============================================================================
  * Shared Helper Functions (defined in shell.c)

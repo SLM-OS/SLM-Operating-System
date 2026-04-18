@@ -448,10 +448,12 @@ QEMU_COMMON := -machine $(QEMU_MACHINE) -cpu $(QEMU_CPU) -smp cores=$(QEMU_CORES
 # accepts all our writes but never processes virtqueue kicks because
 # QUEUE_PFN was never written.
 ifeq ($(PLATFORM),X86_64)
-    QEMU_NET := -device virtio-net-pci,netdev=net0 -netdev user,id=net0
+    QEMU_NET := -device virtio-net-pci,netdev=net0 \
+                -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2323-:2323
 else ifeq ($(PLATFORM),QEMU_VIRT)
     QEMU_NET := -global virtio-mmio.force-legacy=false \
-                -device virtio-net-device,netdev=net0 -netdev user,id=net0
+                -device virtio-net-device,netdev=net0 \
+                -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2323-:2323
 else
     QEMU_NET :=
 endif
