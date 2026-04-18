@@ -148,6 +148,9 @@ int ga10b_bringup_channel(struct ga10b_bringup *b);
  * iff the semaphore is observed at its target VA within timeout. */
 int ga10b_bringup_smoke_test(struct ga10b_bringup *b);
 
+/* Size of the Phase 7 SEMAPHORE_RELEASE pushbuffer in dwords. */
+#define GA10B_SEMA_RELEASE_PB_DWORDS  10u
+
 /* Phase 7 pushbuffer builder (pure logic — no MMIO, no globals).
  *
  * Writes GA10B_SEMA_RELEASE_PB_DWORDS dwords to `pb`, encoding a host
@@ -166,8 +169,6 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b);
  * count written (always GA10B_SEMA_RELEASE_PB_DWORDS). Exposed in the
  * public header so host tests can verify the encoding without running
  * on hardware. */
-#define GA10B_SEMA_RELEASE_PB_DWORDS  10u
-
 uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
                                              uint64_t sem_gpu_va,
                                              uint32_t payload);
