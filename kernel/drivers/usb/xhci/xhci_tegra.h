@@ -95,4 +95,16 @@ static inline uint32_t xusb_csb_page_offset(uint32_t addr)
 #define XUSB_FW_IOCTL_TYPE_SHIFT        24
 #define XUSB_FW_IOCTL_CFGTBL_READ       17
 
+/*
+ * Byte offset of the IFR's firmware-image creation time (UTC, seconds
+ * since epoch) within the Tegra XUSB firmware header. Linux computes
+ * this as offsetof(struct tegra_xusb_fw_header, fwimg_created_time),
+ * which lands at 44 for the current header layout (see the struct
+ * definition at linux-xhci-tegra.c:160-192). Used as the canonical
+ * "is the Falcon mailbox alive?" probe because the expected value is
+ * recognisable as a plausible Unix timestamp (roughly 0x64000000 ..
+ * 0x68000000 for firmware built 2023-2025).
+ */
+#define XUSB_FW_HDR_FWIMG_CREATED_TIME_OFF  44U
+
 #endif /* XHCI_TEGRA_H */

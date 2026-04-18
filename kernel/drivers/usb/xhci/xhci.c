@@ -163,12 +163,6 @@ static void w32(volatile uint8_t *base, uint32_t off, uint32_t v)
 static uint32_t fpci_r32(uint32_t off) { return r32(xhci_fpci_base, off); }
 static void     fpci_w32(uint32_t off, uint32_t v) { w32(xhci_fpci_base, off, v); }
 static uint32_t bar2_r32(uint32_t off) { return r32(xhci_bar2_base, off); }
-/*
- * BAR2 writer wired up here so Phase 3A.2.3 (CSB paging) and 3A.2.5
- * (IFR mailbox handshake) can drop in call sites without touching
- * the accessor layer. Marked unused until those tasks land.
- */
-__attribute__((unused))
 static void     bar2_w32(uint32_t off, uint32_t v) { w32(xhci_bar2_base, off, v); }
 
 /* -------------------------------------------------------------------------- */
@@ -265,6 +259,100 @@ static int tegra_xusb_config(void)
          (unsigned)fpci_r32(XUSB_CFG_4),
          (unsigned)fpci_r32(XUSB_CFG_7));
     return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Tegra234 IFR bringup — Falcon liveness probes                               */
+/* -------------------------------------------------------------------------- */
+
+/* Forward declaration — poll_reg32 is defined in the Halt + reset section
+ * below; tegra_xusb_wait_for_falcon uses it. */
+static int poll_reg32(volatile uint8_t *base, uint32_t off,
+                      uint32_t mask, uint32_t expected,
+                      uint32_t timeout_ms);
+
+/*
+ * Port of Linux's tegra_xusb_wait_for_falcon (linux-xhci-tegra.c:986-
+ * 1003). Poll USBSTS for STS_CNR (Controller Not Ready) to clear,
+ * 1 ms interval, 200 ms timeout. Linux uses this as the "Falcon is
+ * alive and ready to accept further config" handshake.
+ *
+ * On Tegra234, the IFR boots the Falcon automatically when clocks +
+ * power domains come up. Linux's probe waits for CNR to go clear
+ * before trusting any xHCI-level state — same thing applies to SLM-
+ * OS post-kexec.
+ *
+ * Returns 0 if CNR clears within 200 ms, -1 on timeout. Timeout here
+ * is strong evidence the Falcon didn't survive the kexec handoff.
+ *
+ * Currently unused — kept for reference; see the big CAUTION comment
+ * in xhci_init where the call site was disabled after the BAR2
+ * mailbox probe triggered a TF-A RAS uncorrectable.
+ */
+__attribute__((unused))
+static int tegra_xusb_wait_for_falcon(void)
+{
+    INFO("xhci: waiting for Falcon (USBSTS.CNR clear)...");
+    if (poll_reg32(xhci_op_base, XHCI_OP_USBSTS,
+                   XHCI_STS_CNR, 0, 200) != 0) {
+        uint32_t sts = r32(xhci_op_base, XHCI_OP_USBSTS);
+        WARN("xhci: Falcon wait timeout — USBSTS=0x%08x "
+             "(CNR=%u, HCE=%u)",
+             (unsigned)sts,
+             (sts & XHCI_STS_CNR) ? 1 : 0,
+             (sts & XHCI_STS_HCE) ? 1 : 0);
+        return -1;
+    }
+    INFO("xhci: Falcon ready (USBSTS.CNR clear)");
+    return 0;
+}
+
+/*
+ * Port of Linux's tegra_xusb_read_firmware_header (linux-xhci-tegra.c:
+ * 1098-1110). The IFR exposes its firmware image header through a
+ * debug-scratch IOCTL window on BAR2:
+ *
+ *   1. Write a command word to XUSB_BAR2_ARU_FW_SCRATCH (BAR2 +
+ *      0x1000) encoding the IOCTL type (FW_IOCTL_CFGTBL_READ = 17)
+ *      in bits [31:24] and the byte offset into the header in bits
+ *      [23:0].
+ *   2. Read the response from XUSB_BAR2_ARU_SMI_ARU_FW_SCRATCH_DATA0
+ *      (BAR2 + 0x01c).
+ *
+ * The wrapper handles this synchronously — Linux doesn't poll for a
+ * ready bit — so it's the cheapest possible "Falcon mailbox alive?"
+ * probe. A plausible response (e.g. a Unix timestamp in the 2023-
+ * 2025 range when offset = fwimg_created_time) means the Falcon is
+ * fully alive at the mailbox layer. An unchanged 0 / 0xFFFFFFFF /
+ * zero value means the mailbox is dead or unplumbed.
+ *
+ * The caller is responsible for checking `tegra_xusb_wait_for_falcon`
+ * returned 0 first — without that, the mailbox behaviour is undefined.
+ *
+ * DANGEROUS ON SLM-OS AT NS EL2 POST-KEXEC: the BAR2+0x1000 write
+ * triggers a SNOC Write Error that TF-A traps as RAS Uncorrectable
+ * and responds by powering off the core. Do not call this from
+ * anywhere the board can't tolerate a crash. Kept as reference so
+ * a future investigator with a way to whitelist this stream-ID (or
+ * bypass the SNOC firewall) has the exact sequence ready to re-try.
+ */
+__attribute__((unused))
+static uint32_t tegra_xusb_read_firmware_header(uint32_t byte_offset)
+{
+    uint32_t cmd = (uint32_t)XUSB_FW_IOCTL_CFGTBL_READ
+                   << XUSB_FW_IOCTL_TYPE_SHIFT;
+    cmd |= byte_offset;
+    bar2_w32(XUSB_BAR2_ARU_FW_SCRATCH, cmd);
+    /*
+     * DSB so the BAR2 write has been issued before we read the
+     * response register. Both apertures are Device-nGnRE so they're
+     * ordered by the architecture for accesses to the same window,
+     * but they're different windows here (write to 0x1000, read from
+     * 0x01c) and the wrapper routes the IOCTL across them — belt-
+     * and-suspenders.
+     */
+    dsb(sy);
+    return bar2_r32(XUSB_BAR2_ARU_SMI_ARU_FW_SCRATCH_DATA0);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -759,12 +847,52 @@ int xhci_init(void)
 
     /*
      * Program the FPCI wrapper BEFORE any further HCD access. Linux's
-     * tegra_xusb_config runs at this point in its own probe, and
-     * post-kexec we can't assume Linux's final state preserved the
-     * BUS_MASTER bit — in fact, the #285 RUN=1 wedge is the expected
-     * symptom of BUS_MASTER being clear. See tegra_xusb_config above.
+     * tegra_xusb_config runs at this point in its own probe. First-
+     * hardware testing showed Linux leaves the wrapper correctly
+     * programmed post-kexec, so this is a defensive no-op — but we
+     * re-assert the required bits in case a future kernel version
+     * or SKU changes that. See tegra_xusb_config's header comment.
      */
     (void)tegra_xusb_config();
+
+    /*
+     * Falcon liveness probes DISABLED at init-time — see CAUTION.
+     *
+     * The Linux tegra_xusb_init_ifr_firmware pattern (linux-xhci-
+     * tegra.c:1112-1126) calls `tegra_xusb_wait_for_falcon` (poll
+     * USBSTS.CNR) then `tegra_xusb_read_firmware_header` (write to
+     * XUSB_BAR2_ARU_FW_SCRATCH at BAR2+0x1000, read back from
+     * BAR2+0x01c). The functions are defined above for reference,
+     * but calling them from SLM-OS at NS EL2 post-kexec is UNSAFE:
+     *
+     *   CAUTION: on jetson-nano-1 with feature/xhci-ifr-bringup
+     *   task 3A.2.5, writing to BAR2+0x1000 triggered a SNOC Write
+     *   Error (Tegra interconnect RAS Uncorrectable):
+     *
+     *     ERROR: RAS Uncorrectable Error in IOB, base=0xe010000
+     *     ERROR:   SERR = Error response from slave: 0x12
+     *     ERROR:   IERR = IHI (GIC ACE-Lite) Interface Error: 0x3
+     *     ERROR: RAS Uncorrectable Error in ACI, base=0xe01a000
+     *     ERROR:   IERR = SNOC Write Error: 0xd
+     *
+     *   TF-A at EL3 traps the error and powers off the CPU core —
+     *   same failure class as the nvgpu post-kexec RAS error that
+     *   the slmos-kexec helper works around with runtime_pm_suspend.
+     *   No equivalent pre-kexec path exists for xusb yet.
+     *
+     *   Root cause (hypothesis): BAR2's ARU mailbox region is
+     *   access-controlled at the interconnect level; Linux
+     *   reaches it only after padctl/PHY/IFR setup Linux already
+     *   finished before our kexec-inherited code runs. From NS EL2
+     *   post-kexec the aperture appears readable at offset 0 but
+     *   writes to the mailbox IOCTL register fault the interconnect.
+     *
+     * For now: skip the calls so we don't crash the board on every
+     * kexec cycle. USBSTS.CNR is observed to be 0 on hardware already,
+     * so Falcon liveness is evidenced indirectly. Future work: probe
+     * Falcon state via BAR2 CSB (task 3A.2.3) instead — that paging
+     * window may have different access control than FW_SCRATCH.
+     */
 
     uint8_t caplen = (uint8_t)(first & 0xFF);
     if (caplen < 0x20 || caplen > 0x80) {
