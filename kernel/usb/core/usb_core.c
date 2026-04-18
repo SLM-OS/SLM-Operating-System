@@ -18,6 +18,14 @@
 
 /* -------------------------------------------------------------------------- */
 /* Module state                                                                */
+/*                                                                             */
+/* Phase 1 is single-HCD, single-root-device, single-writer. Concurrency       */
+/* assumption: usb_core_register_hcd() is called from the primary CPU before   */
+/* any secondary CPU comes up (platform init ordering on Jetson and Pi 5),     */
+/* and only once per boot. After that, `active_hcd` is effectively read-only,  */
+/* so submit / cancel / poll can read it without a lock. enumerate() runs in   */
+/* the same init context — nobody races it. Phase 3A XHCI will add a           */
+/* spinlock if any post-boot mutation becomes legal (e.g. hot-plug).           */
 /* -------------------------------------------------------------------------- */
 
 static const struct usb_hcd *active_hcd;
@@ -60,24 +68,34 @@ const char *usb_urb_status_str(enum usb_urb_status s)
     return "UNKNOWN";
 }
 
+/*
+ * Contract: 0 on accept, negative on sync error. Never returns a
+ * usb_urb_status enum value as a positive number.
+ */
 int usb_submit_urb(struct usb_urb *urb)
 {
     if (urb == NULL || urb->dev == NULL)
-        return USB_URB_IO_ERROR;
+        return -USB_URB_IO_ERROR;
     if (active_hcd == NULL || active_hcd->submit_urb == NULL) {
         urb->status = USB_URB_IO_ERROR;
-        return USB_URB_IO_ERROR;
+        return -USB_URB_IO_ERROR;
     }
 
     urb->status = USB_URB_PENDING;
     urb->actual_length = 0;
-    return active_hcd->submit_urb(urb);
+    int rc = active_hcd->submit_urb(urb);
+    /* Normalise: a misbehaving HCD that returns a positive status-enum
+     * value is remapped to -USB_URB_IO_ERROR so every caller can do a
+     * simple "if (rc < 0)" check. */
+    if (rc > 0)
+        return -USB_URB_IO_ERROR;
+    return rc;
 }
 
 int usb_cancel_urb(struct usb_urb *urb)
 {
     if (urb == NULL || active_hcd == NULL || active_hcd->cancel_urb == NULL)
-        return USB_URB_IO_ERROR;
+        return -USB_URB_IO_ERROR;
     return active_hcd->cancel_urb(urb);
 }
 
@@ -96,18 +114,18 @@ void usb_core_poll(void)
 /* -------------------------------------------------------------------------- */
 
 /*
- * Simple spin-wait on urb->status. Phase 1 is platform-neutral and can
- * run inside QEMU tests, so the timeout is expressed in "poll rounds"
- * rather than a wall-clock; callers that need real-time bounds can
- * wrap this and check CNTPCT themselves. Each round calls into the
- * HCD's poll op so completions are observed even on IRQ-less paths.
+ * Spin-wait on urb->status. PLACEHOLDER implementation for Phase 1:
+ * the caller's timeout_ms is converted to a fixed iteration cap, not
+ * a wall-clock deadline. Good enough for the mock HCD (completes in
+ * iteration 0) and for the synchronous control paths exercised by
+ * the test suite. Phase 3A XHCI must replace this with a CNTPCT-based
+ * deadline before relying on timeout_ms on real hardware — the
+ * iteration count on a 2 GHz CPU completes in microseconds, not ms.
+ * Each round calls hcd->poll so polled completions are observed even
+ * when IRQs are not online.
  */
 static int usb_wait_urb(struct usb_urb *urb, uint32_t timeout_ms)
 {
-    /* Budget: ~1 poll round per millisecond, but since we don't know
-     * the platform's timer here, just run a generous cap driven by
-     * the poll function. The mock HCD and real XHCI both complete
-     * synchronously under this call or via poll(). */
     const uint32_t max_rounds = (timeout_ms ? timeout_ms : 1) * 1000u;
     for (uint32_t i = 0; i < max_rounds; i++) {
         usb_core_poll();
@@ -144,8 +162,8 @@ int usb_control_msg(struct usb_device *dev,
     urb.length = wLength;
 
     int sub = usb_submit_urb(&urb);
-    if (sub != 0 && sub != USB_URB_PENDING)
-        return -sub;
+    if (sub != 0)
+        return sub;
 
     int status = usb_wait_urb(&urb, timeout_ms);
     if (status == USB_URB_OK || status == USB_URB_SHORT)
@@ -194,6 +212,11 @@ int usb_parse_configuration(struct usb_device *dev)
     /* The CONFIGURATION descriptor is first. */
     const struct usb_config_descriptor *cfg = (const void *)p;
     if (cfg->bDescriptorType != USB_DT_CONFIG)
+        return -1;
+    /* USB 2.0 §9.6.3 fixes the config-descriptor header length at 9. A
+     * device that reports something else is malformed; bailing here
+     * avoids advancing `p` into garbage. */
+    if (cfg->bLength != sizeof(struct usb_config_descriptor))
         return -1;
 
     /* Walk class/standard descriptors after the CONFIGURATION header. */
@@ -335,6 +358,11 @@ struct usb_device *usb_core_first_device(void)
  *   8. usb_parse_configuration — populate ifaces/endpoints
  *   9. SET_CONFIGURATION      — activate the default config
  *  10. endpoint_configure     — HCD commits non-EP0 endpoint contexts
+ *
+ * Errors after device_open() fall through to an err_close label that
+ * invokes hcd->device_close(). Without this, a Phase-3A XHCI driver
+ * that allocates a slot context in device_open would leak it on every
+ * failed enumeration.
  */
 int usb_core_enumerate(void)
 {
@@ -364,14 +392,21 @@ int usb_core_enumerate(void)
 
     if (active_hcd->port_reset && active_hcd->port_reset(0) != 0) {
         WARN("usb_core: port_reset failed");
-        return -1;
+        return -1;   /* device_open has not run yet — no state to undo. */
     }
     root_device.state = USB_STATE_DEFAULT;
 
-    if (active_hcd->device_open && active_hcd->device_open(&root_device) != 0) {
-        WARN("usb_core: device_open failed");
-        return -1;
+    bool device_opened = false;
+    if (active_hcd->device_open) {
+        if (active_hcd->device_open(&root_device) != 0) {
+            WARN("usb_core: device_open failed");
+            return -1;
+        }
+        device_opened = true;
     }
+
+    int n;
+    int rc;
 
     /*
      * Step 3: read the first 8 bytes of the device descriptor. Some
@@ -379,23 +414,23 @@ int usb_core_enumerate(void)
      * IN — Linux does this same two-step for the same reason.
      */
     uint8_t dd_stub[8];
-    int n = usb_get_descriptor(&root_device, USB_DT_DEVICE, 0, dd_stub, 8);
+    n = usb_get_descriptor(&root_device, USB_DT_DEVICE, 0, dd_stub, 8);
     if (n < 8) {
         WARN("usb_core: short GET_DESCRIPTOR(device, 8) n=%d", n);
-        return -1;
+        goto err_close;
     }
     /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
     root_device.dev_desc.bMaxPacketSize0 = dd_stub[7];
 
     /* Step 4: assign address 1 (single-device policy). */
-    int rc = usb_control_msg(&root_device,
-                             USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-                             USB_REQ_SET_ADDRESS,
-                             1 /* wValue = address */, 0, NULL, 0, 500);
+    rc = usb_control_msg(&root_device,
+                         USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                         USB_REQ_SET_ADDRESS,
+                         1 /* wValue = address */, 0, NULL, 0, 500);
     if (rc < 0) {
         WARN("usb_core: SET_ADDRESS failed: %s",
              usb_urb_status_str((enum usb_urb_status)(-rc)));
-        return -1;
+        goto err_close;
     }
     root_device.address = 1;
     root_device.state   = USB_STATE_ADDRESS;
@@ -406,7 +441,7 @@ int usb_core_enumerate(void)
                            sizeof(root_device.dev_desc));
     if (n < (int)sizeof(root_device.dev_desc)) {
         WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
-        return -1;
+        goto err_close;
     }
 
     /* Step 6: 9-byte config header to learn wTotalLength. */
@@ -415,7 +450,7 @@ int usb_core_enumerate(void)
                            &cfg_head, sizeof(cfg_head));
     if (n < (int)sizeof(cfg_head)) {
         WARN("usb_core: short GET_DESCRIPTOR(config, 9) n=%d", n);
-        return -1;
+        goto err_close;
     }
     uint16_t total = cfg_head.wTotalLength;
     if (total > USB_MAX_CONFIG_DESC_BYTES) {
@@ -429,14 +464,14 @@ int usb_core_enumerate(void)
                            root_device.raw_config, total);
     if (n < (int)total) {
         WARN("usb_core: short GET_DESCRIPTOR(config, %u) n=%d", total, n);
-        return -1;
+        goto err_close;
     }
     root_device.raw_config_len = total;
 
     /* Step 8: parse. */
     if (usb_parse_configuration(&root_device) != 0) {
         WARN("usb_core: parse_configuration failed");
-        return -1;
+        goto err_close;
     }
 
     /* Step 9: activate the default configuration. */
@@ -448,7 +483,7 @@ int usb_core_enumerate(void)
     if (rc < 0) {
         WARN("usb_core: SET_CONFIGURATION failed: %s",
              usb_urb_status_str((enum usb_urb_status)(-rc)));
-        return -1;
+        goto err_close;
     }
     root_device.current_config = cfg_val;
     root_device.state = USB_STATE_CONFIGURED;
@@ -462,7 +497,7 @@ int usb_core_enumerate(void)
             if (ec != 0) {
                 WARN("usb_core: endpoint_configure(ep 0x%02x) failed: %d",
                      root_device.endpoints[e].address, ec);
-                return -1;
+                goto err_close;
             }
         }
     }
@@ -473,6 +508,11 @@ int usb_core_enumerate(void)
          root_device.dev_desc.idProduct,
          root_device.dev_desc.bDeviceClass);
     return 0;
+
+err_close:
+    if (device_opened && active_hcd->device_close)
+        active_hcd->device_close(&root_device);
+    return -1;
 }
 
 int usb_core_start(void)

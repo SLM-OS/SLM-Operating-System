@@ -85,7 +85,7 @@ struct mock_hcd_state {
     int              submit_count;
     int              cancel_count;
     int              poll_count;
-    bool             device_closed;
+    int              device_close_count;   /* # of times device_close fired */
 
     /* Error-injection hooks. Negative value = short-circuit that op. */
     int              port_reset_rc;
@@ -100,6 +100,9 @@ struct mock_hcd_state {
      * than completing synchronously. Lets cancel tests exercise the
      * pending→cancelled transition. */
     bool             defer_non_control;
+    /* Same, but for control URBs — exercises the usb_wait_urb
+     * timeout branch. Decremented per deferred control URB. */
+    int              defer_next_control;
     struct usb_urb  *deferred[MOCK_DEFERRED_URB_SLOTS];
 };
 
@@ -134,7 +137,7 @@ static int mock_device_open(struct usb_device *dev)
 static void mock_device_close(struct usb_device *dev)
 {
     (void)dev;
-    mock.device_closed = true;
+    mock.device_close_count++;
 }
 
 static int mock_endpoint_configure(struct usb_device *dev,
@@ -195,6 +198,16 @@ static int mock_submit_urb(struct usb_urb *urb)
         urb->status = USB_URB_OK;
         urb->actual_length = urb->length;
         if (urb->complete) urb->complete(urb);
+        return 0;
+    }
+
+    if (mock.defer_next_control > 0) {
+        mock.defer_next_control--;
+        if (mock_defer(urb) != 0) {
+            urb->status = USB_URB_IO_ERROR;
+            if (urb->complete) urb->complete(urb);
+        }
+        /* Leave status PENDING so usb_wait_urb has to time out. */
         return 0;
     }
 
@@ -689,14 +702,19 @@ static void test_cancel_pending_urb(void)
 
 static void test_cancel_with_no_hcd(void)
 {
+    /*
+     * Error contract: negative return so `if (rc < 0)` catches it
+     * uniformly with HCD-reported errors. Status-enum values are
+     * never returned as positive.
+     */
     usb_core_register_hcd(NULL);
     struct usb_device dev = {0};
     struct usb_urb urb = {0};
     urb.dev = &dev;
     int rc = usb_cancel_urb(&urb);
-    TEST_ASSERT_EQUAL_INT(USB_URB_IO_ERROR, rc);
+    TEST_ASSERT_EQUAL_INT(-USB_URB_IO_ERROR, rc);
     rc = usb_cancel_urb(NULL);
-    TEST_ASSERT_EQUAL_INT(USB_URB_IO_ERROR, rc);
+    TEST_ASSERT_EQUAL_INT(-USB_URB_IO_ERROR, rc);
 }
 
 static void test_submit_urb_no_hcd(void)
@@ -708,17 +726,49 @@ static void test_submit_urb_no_hcd(void)
     struct usb_urb urb = {0};
     urb.dev = &dev;
     int rc = usb_submit_urb(&urb);
-    TEST_ASSERT_EQUAL_INT(USB_URB_IO_ERROR, rc);
+    TEST_ASSERT_EQUAL_INT(-USB_URB_IO_ERROR, rc);
+    /* urb->status is still the pre-submit sentinel (IO_ERROR the core
+     * wrote before returning). This is informational — callers key on
+     * the return value, not on the pre-completion status. */
     TEST_ASSERT_EQUAL_INT(USB_URB_IO_ERROR, urb.status);
 }
 
 static void test_submit_urb_null_args(void)
 {
     reset_mock_and_core();
-    TEST_ASSERT_EQUAL_INT(USB_URB_IO_ERROR, usb_submit_urb(NULL));
+    TEST_ASSERT_EQUAL_INT(-USB_URB_IO_ERROR, usb_submit_urb(NULL));
 
     struct usb_urb urb = {0};  /* urb.dev == NULL */
-    TEST_ASSERT_EQUAL_INT(USB_URB_IO_ERROR, usb_submit_urb(&urb));
+    TEST_ASSERT_EQUAL_INT(-USB_URB_IO_ERROR, usb_submit_urb(&urb));
+}
+
+/*
+ * A deliberately-misbehaving HCD whose submit_urb returns a positive
+ * usb_urb_status enum value (contract violation — HCDs must return 0
+ * or a negative errno). Used by test_submit_urb_hcd_positive_normalized
+ * to confirm usb_submit_urb coerces the garbage to -USB_URB_IO_ERROR
+ * so downstream callers' "if (rc < 0)" checks still work.
+ */
+static int positive_return_submit_urb(struct usb_urb *urb)
+{
+    (void)urb;
+    return (int)USB_URB_IO_ERROR;   /* 6 — positive, violates contract */
+}
+
+static const struct usb_hcd positive_return_hcd = {
+    .name       = "positive-return-hcd",
+    .submit_urb = positive_return_submit_urb,
+};
+
+static void test_submit_urb_hcd_positive_normalized(void)
+{
+    usb_core_register_hcd(&positive_return_hcd);
+    struct usb_device dev = {0};
+    struct usb_urb urb = {0};
+    urb.dev = &dev;
+    int rc = usb_submit_urb(&urb);
+    TEST_ASSERT_TRUE(rc < 0);
+    TEST_ASSERT_EQUAL_INT(-USB_URB_IO_ERROR, rc);
 }
 
 static void test_poll_no_hcd_is_safe(void)
@@ -735,6 +785,105 @@ static void test_poll_calls_hcd(void)
     usb_core_poll();
     usb_core_poll();
     TEST_ASSERT_EQUAL_INT(2, mock.poll_count);
+}
+
+static void test_control_msg_timeout(void)
+{
+    /*
+     * Force a control URB to stay pending forever; usb_wait_urb must
+     * eventually cancel and report TIMEOUT. Covers the one usb_urb_status
+     * value that no other test produces, and the cancel-on-timeout path.
+     */
+    reset_mock_and_core();
+    TEST_ASSERT_EQUAL_INT(0, usb_core_start());
+    struct usb_device *dev = usb_core_first_device();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    /* Defer the very next control transfer so it stays pending. */
+    mock.defer_next_control = 1;
+
+    /* Use a tiny timeout so the test finishes in a few poll rounds. */
+    int n = usb_control_msg(dev,
+                            USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                            USB_REQ_GET_DESCRIPTOR,
+                            (uint16_t)(USB_DT_DEVICE << 8), 0,
+                            NULL, 0, 1 /* ms */);
+    TEST_ASSERT_EQUAL_INT(-USB_URB_TIMEOUT, n);
+    /* usb_wait_urb must have called cancel once. */
+    TEST_ASSERT_TRUE(mock.cancel_count > 0);
+}
+
+static void test_enumerate_closes_device_on_control_failure(void)
+{
+    /*
+     * Once device_open has run, any later failure must fall through to
+     * the cleanup path so the HCD doesn't leak the opened slot.
+     */
+    reset_mock_and_core();
+    mock.fail_next_control = 1;   /* fail the 8-byte GET_DESCRIPTOR */
+
+    int rc = usb_core_start();
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    TEST_ASSERT_NULL(usb_core_first_device());
+    /* device_close must have fired exactly once. */
+    TEST_ASSERT_EQUAL_INT(1, mock.device_close_count);
+}
+
+static void test_enumerate_closes_device_on_set_config_failure(void)
+{
+    /* Same guarantee, deeper in the enumeration pipeline. */
+    reset_mock_and_core();
+    mock.fail_next_set_config = 1;
+
+    int rc = usb_core_start();
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    TEST_ASSERT_NULL(usb_core_first_device());
+    TEST_ASSERT_EQUAL_INT(1, mock.device_close_count);
+}
+
+static void test_enumerate_no_close_on_port_reset_failure(void)
+{
+    /*
+     * device_close must NOT fire when device_open hasn't run yet —
+     * port_reset failure is the one path that bails before opening.
+     */
+    reset_mock_and_core();
+    mock.port_reset_rc = -1;
+
+    int rc = usb_core_start();
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    TEST_ASSERT_EQUAL_INT(0, mock.device_close_count);
+}
+
+static void test_enumerate_no_close_on_device_open_failure(void)
+{
+    /*
+     * If device_open itself failed, the HCD is expected to own the
+     * cleanup of any partial state it created. The core must NOT call
+     * device_close on a slot that was never successfully opened.
+     */
+    reset_mock_and_core();
+    mock.device_open_rc = -1;
+
+    int rc = usb_core_start();
+    TEST_ASSERT_NOT_EQUAL(0, rc);
+    TEST_ASSERT_EQUAL_INT(0, mock.device_close_count);
+}
+
+static void test_descriptor_parse_bad_config_blength(void)
+{
+    /*
+     * A device that returns a 7-byte "config" header is malformed. The
+     * parser must reject rather than advancing p into whatever garbage
+     * follows.
+     */
+    struct usb_device dev = {0};
+    dev.raw_config[0] = 0x07;   /* bLength — wrong */
+    dev.raw_config[1] = USB_DT_CONFIG;
+    dev.raw_config[2] = 0x09;   /* wTotalLength */
+    dev.raw_config[3] = 0x00;
+    dev.raw_config_len = 9;
+    TEST_ASSERT_NOT_EQUAL(0, usb_parse_configuration(&dev));
 }
 
 static void test_control_msg_returns_actual_length(void)
@@ -802,8 +951,15 @@ int test_suite_usb_core(void)
     RUN_TEST(test_cancel_with_no_hcd);
     RUN_TEST(test_submit_urb_no_hcd);
     RUN_TEST(test_submit_urb_null_args);
+    RUN_TEST(test_submit_urb_hcd_positive_normalized);
     RUN_TEST(test_poll_no_hcd_is_safe);
     RUN_TEST(test_poll_calls_hcd);
+    RUN_TEST(test_control_msg_timeout);
+    RUN_TEST(test_enumerate_closes_device_on_control_failure);
+    RUN_TEST(test_enumerate_closes_device_on_set_config_failure);
+    RUN_TEST(test_enumerate_no_close_on_port_reset_failure);
+    RUN_TEST(test_enumerate_no_close_on_device_open_failure);
+    RUN_TEST(test_descriptor_parse_bad_config_blength);
     RUN_TEST(test_control_msg_returns_actual_length);
     RUN_TEST(test_control_msg_unknown_request_returns_error);
 

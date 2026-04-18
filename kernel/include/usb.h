@@ -175,7 +175,14 @@ _Static_assert(sizeof(struct usb_setup_packet)         ==  8, "setup packet size
 /* Endpoint + device model                                                     */
 /* -------------------------------------------------------------------------- */
 
-/* Phase-1 caps — grow only if the CDC-ECM use case needs it. */
+/*
+ * Phase-1 caps — grow only if the CDC-ECM use case needs it.
+ *
+ * USB_MAX_CONFIG_DESC_BYTES is sized for the Phase-3A target dongles
+ * (Realtek RTL8153 ~100 bytes, ASIX AX88179 ~60 bytes). A full
+ * composite-device tree can exceed this; usb_core_enumerate truncates
+ * with a warning in that case (caller sees the parsed subset).
+ */
 #define USB_MAX_ENDPOINTS_PER_DEV   8
 #define USB_MAX_INTERFACES_PER_DEV  4
 #define USB_MAX_CONFIG_DESC_BYTES   256
@@ -298,12 +305,22 @@ struct usb_hcd {
                                const struct usb_endpoint *ep);
 
     /*
-     * Submit a URB. Non-blocking: returns 0 on success and calls
-     * urb->complete asynchronously (possibly from IRQ context).
+     * Submit a URB. Non-blocking. Contract:
+     *   - On accept:  return 0. `urb->status` stays USB_URB_PENDING
+     *                 until the HCD calls urb->complete (possibly from
+     *                 IRQ context).
+     *   - On synchronous error (queue full, bad endpoint): return a
+     *                 negative errno-style value. Do NOT return a
+     *                 usb_urb_status enum value as a positive number.
      */
     int  (*submit_urb)(struct usb_urb *urb);
 
-    /* Best-effort cancellation. Completion still fires with CANCELLED. */
+    /*
+     * Best-effort cancellation. Returns 0 if a pending URB was found
+     * and its completion was arranged, negative on error. A completed
+     * URB's state is not rolled back; the cancel op simply reports it
+     * as already done via urb->status.
+     */
     int  (*cancel_urb)(struct usb_urb *urb);
 
     /*
@@ -346,10 +363,10 @@ struct usb_device *usb_core_first_device(void);
 /* -------------------------------------------------------------------------- */
 
 /*
- * Submit a URB and, if complete is NULL, spin-poll until it finishes or
- * the timeout expires. Uses CNTPCT-based timeouts on ARM64. Returns
- * the URB's final status. Safe to call from task context; do NOT call
- * from IRQ context when complete is NULL (blocking).
+ * Submit a URB. Non-blocking: returns 0 on accept (urb->complete fires
+ * asynchronously once the HCD has the transfer done), negative on a
+ * synchronous submission error. `usb_control_msg()` below is the
+ * blocking wrapper for standard control transfers.
  */
 int usb_submit_urb(struct usb_urb *urb);
 int usb_cancel_urb(struct usb_urb *urb);
@@ -358,6 +375,15 @@ int usb_cancel_urb(struct usb_urb *urb);
  * Blocking control transfer helper — mirrors Linux's usb_control_msg().
  * Builds a SETUP packet, submits, and waits. Returns bytes transferred
  * on success or a negative usb_urb_status code on error.
+ *
+ * Timeout accounting note: the current Phase-1 implementation uses a
+ * fixed-iteration poll loop (roughly timeout_ms × 1000 iterations)
+ * rather than a wall-clock deadline. This is a placeholder — it works
+ * for the mock HCD (which completes synchronously under the first
+ * poll) and is safe for the host QEMU test suite, but Phase 3A XHCI
+ * must switch to CNTPCT_EL0-based deadlines before relying on the
+ * timeout for real hardware (see timer_get_count() pattern in
+ * component_runtime.c). Must not be called from IRQ context.
  */
 int usb_control_msg(struct usb_device *dev,
                     uint8_t  bmRequestType,

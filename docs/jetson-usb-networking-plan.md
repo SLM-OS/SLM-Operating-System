@@ -189,7 +189,7 @@ Applies to both Option A and Option B.
 |---|---|---|
 | `kernel/include/usb.h` | ~260 | Public API: device model, URB, HCD ops, std request/descriptor constants |
 | `kernel/usb/core/usb_core.c` | ~330 | HCD registration, URB submit/wait/cancel, descriptor parser, 10-step root-port enumeration |
-| `kernel/tests/test_usb_core.c` | ~800 | 27 unit tests against a mock HCD — URB lifecycle, descriptor parse (incl. alt-setting skip, orphan EP, invalid header, undersized input, interface + endpoint table overflow), full enumeration, every error-injection branch of enumerate, control-msg return semantics, cancel of a pending URB |
+| `kernel/tests/test_usb_core.c` | ~1000 | 34 unit tests against a mock HCD — URB lifecycle, descriptor parse (alt-setting skip, orphan EP, invalid header, undersized input, bad-bLength header, interface + endpoint table overflow), full enumeration, every error-injection branch of enumerate, device_close symmetry on every error path, control-msg return semantics + timeout cancel, return-code normalisation, cancel of a pending URB |
 
 Architecture notes:
 - **No dynamic memory in Phase 1 core.** `struct usb_device root_device`
@@ -206,6 +206,31 @@ Architecture notes:
 - **URB completion is HCD-driven.** `usb_wait_urb` polls `hcd->poll()`
   between status checks, which lets the mock HCD and the real XHCI
   driver share the same control-msg path without requiring IRQs.
+- **Return-code contract is uniformly negative.** `usb_submit_urb` /
+  `usb_cancel_urb` / `usb_control_msg` all return 0 on accept and a
+  negative errno-style value on error. If an HCD accidentally returns
+  a positive `usb_urb_status` enum value, the core normalises it to
+  `-USB_URB_IO_ERROR` so callers can rely on `if (rc < 0)`.
+- **Device-close symmetry.** Once `hcd->device_open` has succeeded,
+  every error path in `usb_core_enumerate` routes through the
+  `err_close` label which invokes `hcd->device_close`. This matters
+  for Phase 3A XHCI, which allocates a slot context in `device_open`
+  and must release it on failed enumeration to avoid leaking slots.
+  The core does **not** call `device_close` on pre-open bail-outs
+  (`port_reset` failure or `device_open` itself failing) — the HCD
+  owns its own partial-state cleanup in those cases.
+- **Concurrency model.** `usb_core_register_hcd` is expected to run
+  from the primary CPU before any secondary is brought up; after that
+  `active_hcd` is effectively read-only and the submit / cancel /
+  poll paths read it without locking. Phase 3A adds synchronisation
+  when (and if) any post-boot mutation becomes legal.
+- **Timeouts are a Phase-1 placeholder.** `usb_wait_urb` runs a
+  fixed iteration cap (`timeout_ms × 1000`), not a wall-clock
+  deadline. Good enough for the mock HCD (synchronous) and host
+  QEMU tests; Phase 3A XHCI must switch to `CNTPCT_EL0`-based
+  deadlines (same pattern as `hw_timeout_start` /
+  `hw_timeout_expired` in `component_runtime.c`) before relying on
+  real-time bounds on hardware.
 
 **Reference material:**
 - FreeBSD's `usb4bsd` is a cleaner reference than Linux's monolithic
