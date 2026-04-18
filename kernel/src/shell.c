@@ -110,15 +110,14 @@ int num_external_commands = 0;
 static pi_mutex_t shell_mutex = PI_MUTEX_INIT;
 
 /* ============================================================================
- * Line editing state
+ * Per-session state notes
  * ============================================================================ */
-
-static char line_buffer[SHELL_MAX_LINE];
-static int line_pos = 0;
 
 /* The current working directory lives on the shell_session now — see
  * shell_session_current()->cwd. shell_resolve_path and cwd-reading /
- * cwd-mutating commands route through it. */
+ * cwd-mutating commands route through it. The REPL's line buffer is a
+ * stack local inside shell_run() so two concurrent sessions can read
+ * input independently — it must not be a file-level static. */
 
 /* ============================================================================
  * Helper functions
@@ -259,10 +258,17 @@ int shell_resolve_path(const char *path, char *out, size_t max_len)
 /*
  * Dispatch a command, acquiring the shell mutex around mutating
  * ones. Returns whatever the handler returns.
+ *
+ * Non-recursive: if the calling task already holds shell_mutex (this
+ * happens when a mutating handler like `lua` dispatches another
+ * command via shell_execute — e.g. slm.exec / slm.model_preload),
+ * skip the acquire. Serialization is still preserved because the
+ * outer lock is held for the whole duration; a recursive lock would
+ * deadlock since pi_mutex_lock is not re-entrant.
  */
 static int dispatch_cmd(const shell_cmd_t *cmd, int argc, char *argv[])
 {
-    if (!cmd->mutates) {
+    if (!cmd->mutates || pi_mutex_held_by_self(&shell_mutex)) {
         return cmd->handler(argc, argv);
     }
     pi_mutex_lock(&shell_mutex);
@@ -446,7 +452,6 @@ int shell_try_getc(void)
  */
 void shell_init(void)
 {
-    line_pos = 0;
     num_external_commands = 0;
 
     /* Ensure the console session exists before any shell_* wrapper
@@ -545,6 +550,10 @@ int shell_execute(const char *cmdline)
  */
 void shell_run(void)
 {
+    /* Stack-local line buffer so two concurrent sessions (console +
+     * TCP) don't corrupt each other's in-progress input. 1024 bytes
+     * + argv is well within the 64 KB task stack. */
+    char line_buffer[SHELL_MAX_LINE];
     char *argv[SHELL_MAX_ARGS];
     int argc;
 

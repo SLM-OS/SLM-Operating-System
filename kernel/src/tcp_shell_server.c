@@ -38,6 +38,7 @@ static void session_task_entry(void *arg)
     struct shell_session *sess = (struct shell_session *)arg;
     if (!sess) {
         task_exit();
+        return;   /* task_exit isn't marked noreturn; make control flow explicit */
     }
 
     shell_session_bind(task_current(), sess);
@@ -130,6 +131,17 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 /* Public API                                                                 */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * NOTE: lwIP raw API calls here (tcp_new, tcp_bind, tcp_listen_with_backlog,
+ * tcp_accept, tcp_close) run on the shell task, not on net_pump.
+ * This follows the existing pattern used by net_init() from cmd_net:
+ * the shell and net_pump are both pinned to CPU 0 and both priority
+ * IDLE, so under SLM-OS's mostly-cooperative scheduling they do not
+ * reach true concurrency on this CPU. A timer preemption mid-call is
+ * theoretically possible (and is a known pre-existing risk with
+ * net_init too) — Phase 3's `NET_TELNETD_AUTOSTART` path should
+ * migrate this onto a net_pump-driven init hook.
+ */
 int tcp_shell_server_start(uint16_t port)
 {
     if (listen_pcb) {

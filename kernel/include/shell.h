@@ -58,7 +58,11 @@ void shell_start(void);
 /*
  * Shell main loop (runs in shell task).
  * Reads input, parses commands, dispatches to handlers.
- * Does not return.
+ *
+ * Returns when the current session's I/O reports EOF (shell_read_line
+ * returning -1) — used by TCP session tasks to exit cleanly on peer
+ * disconnect. The console session never hits EOF, so for the UART
+ * shell task this is effectively a no-return loop.
  */
 void shell_run(void);
 
@@ -78,8 +82,12 @@ int shell_execute(const char *cmdline);
 /*
  * Read one line from the current session's I/O with basic line editing
  * (backspace, Ctrl+C). Echoes input as it arrives and terminates on
- * CR/LF. Output is NUL-terminated. Returns the number of characters
- * read (excluding the terminator).
+ * CR/LF. Output is NUL-terminated.
+ *
+ * Returns the number of characters read (excluding the terminator)
+ * on success, 0 if the user pressed Ctrl+C to cancel, or -1 if the
+ * session closed (peer disconnect on a TCP session). Callers that
+ * loop should break out on -1.
  *
  * This is the line reader that the shell REPL uses internally; exposed
  * so Lua scripting (slm.read_line) and other callers can prompt the

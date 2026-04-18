@@ -43,6 +43,11 @@
 
 _Static_assert((TCP_SHELL_RING_SIZE & TCP_SHELL_RING_MASK) == 0,
                "TCP_SHELL_RING_SIZE must be a power of two");
+/* The drain path passes `chunk` (clamped to ring size) into tcp_write
+ * which takes a uint16_t length — guard against a future bump above
+ * 64 K silently truncating. */
+_Static_assert(TCP_SHELL_RING_SIZE <= 0xFFFF,
+               "TCP_SHELL_RING_SIZE must fit in uint16_t for tcp_write()");
 
 /* How long read_char sleeps between empty-ring checks. 10 ms matches
  * the net_pump cadence so we don't sleep longer than one pump cycle. */
@@ -159,9 +164,8 @@ static int tcp_try_read_char(struct shell_io *io)
 
     irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
     if (ctx->rx_head == ctx->rx_tail) {
-        bool closed = ctx->closed;
         spin_unlock_irqrestore(&ctx->rx_lock, flags);
-        return closed ? -1 : -1;    /* no data == -1 in both cases */
+        return -1;    /* no data, regardless of whether closed */
     }
     uint8_t c = ctx->rx_buf[ctx->rx_tail & TCP_SHELL_RING_MASK];
     ctx->rx_tail = (ctx->rx_tail + 1) & TCP_SHELL_RING_MASK;
@@ -175,19 +179,16 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
 
     size_t written = 0;
     while (written < len) {
-        irq_flags_t flags = spin_lock_irqsave(&ctx->tx_lock);
-        uint32_t avail = ring_free(ctx->tx_head, ctx->tx_tail);
-        bool closed;
-        {
-            irq_flags_t f2 = spin_lock_irqsave(&ctx->rx_lock);
-            closed = ctx->closed;
-            spin_unlock_irqrestore(&ctx->rx_lock, f2);
+        /* Fast unlocked check — `closed` is volatile bool, so single-
+         * byte reads are atomic on both targets. If it's true, the
+         * session is gone and any bytes we'd queue will be dropped
+         * on the next drain anyway. */
+        if (ctx->closed) {
+            return;
         }
 
-        if (closed) {
-            spin_unlock_irqrestore(&ctx->tx_lock, flags);
-            return;   /* silently drop — peer is gone */
-        }
+        irq_flags_t flags = spin_lock_irqsave(&ctx->tx_lock);
+        uint32_t avail = ring_free(ctx->tx_head, ctx->tx_tail);
 
         if (avail == 0) {
             spin_unlock_irqrestore(&ctx->tx_lock, flags);
@@ -224,10 +225,8 @@ static void tcp_close_io(struct shell_io *io)
 static bool tcp_is_open(struct shell_io *io)
 {
     struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
-    irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
-    bool closed = ctx->closed;
-    spin_unlock_irqrestore(&ctx->rx_lock, flags);
-    return !closed;
+    /* `closed` is volatile bool — single-byte atomic load. */
+    return !ctx->closed;
 }
 
 /* -------------------------------------------------------------------------- */

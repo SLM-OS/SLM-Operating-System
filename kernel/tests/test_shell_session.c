@@ -430,6 +430,70 @@ static void test_shell_getc_reads_from_bound_session(void)
 }
 
 /* ============================================================================
+ * Nested dispatch — regression for the pi_mutex self-deadlock
+ *
+ * Background: `dispatch_cmd` acquires shell_mutex (a non-recursive
+ * pi_mutex) around mutating commands. Before the fix, a mutating
+ * handler that reached into shell_execute() for another mutating
+ * command would try to acquire a mutex it already held — deadlock.
+ * After the fix, pi_mutex_held_by_self() lets the dispatcher skip
+ * the nested acquire while preserving the outer lock.
+ *
+ * This test registers two external commands, has the outer one call
+ * shell_execute() on the inner, and asserts the inner handler ran.
+ * If the deadlock regressed, the test task would block here and the
+ * whole make-test timeout would fire.
+ * ============================================================================ */
+
+static volatile bool nested_inner_ran;
+static volatile int  nested_depth_on_inner;
+
+static int nested_inner_cmd(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    /* Both outer and inner are mutating; if dispatch_cmd didn't skip
+     * the nested acquire we would never reach this line. Count and
+     * set the flag so the test can assert both. */
+    nested_depth_on_inner++;
+    nested_inner_ran = true;
+    return 0;
+}
+
+static int nested_outer_cmd(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    return shell_execute("t_nested_inner");
+}
+
+static void test_nested_mutating_dispatch_no_deadlock(void)
+{
+    shell_cmd_t inner = {
+        .name = "t_nested_inner",
+        .handler = nested_inner_cmd,
+        .help = "regression: inner mutating command",
+        .mutates = true,
+    };
+    shell_cmd_t outer = {
+        .name = "t_nested_outer",
+        .handler = nested_outer_cmd,
+        .help = "regression: outer mutating command",
+        .mutates = true,
+    };
+    TEST_ASSERT_EQUAL_INT(0, shell_register_command(&inner));
+    TEST_ASSERT_EQUAL_INT(0, shell_register_command(&outer));
+
+    nested_inner_ran       = false;
+    nested_depth_on_inner  = 0;
+
+    int rc = shell_execute("t_nested_outer");
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_TRUE(nested_inner_ran);
+    TEST_ASSERT_EQUAL_INT(1, nested_depth_on_inner);
+}
+
+/* ============================================================================
  * Entry point
  * ============================================================================ */
 
@@ -464,6 +528,8 @@ int test_suite_shell_session(void)
     RUN_TEST(test_shell_puts_routes_to_bound_session);
     RUN_TEST(test_shell_putc_routes_to_bound_session);
     RUN_TEST(test_shell_getc_reads_from_bound_session);
+
+    RUN_TEST(test_nested_mutating_dispatch_no_deadlock);
 
     return UNITY_END();
 }

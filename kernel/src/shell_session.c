@@ -2,14 +2,24 @@
  * shell_session.c - Session pool and per-task session lookup
  *
  * Provides the console session (always present, UART-backed) and a
- * fixed pool for future TCP sessions. The bind-to-task mapping lets
+ * fixed pool for TCP sessions. The bind-to-task mapping lets
  * shell_puts/shell_printf discover which session is running without
  * threading a shell_session* through every command handler.
  *
- * The task_id -> session pointer map is write-sparingly (only on
- * session create/destroy) and read hot (every shell_printf). Pointer
- * writes/reads are atomic on our 64-bit targets, so no lock is needed
- * to serialize map reads against writes.
+ * Concurrency model for sessions_by_task[]:
+ *   - Each task only writes its own slot (via shell_session_bind or
+ *     shell_session_unbind from the task that will own / has owned
+ *     the binding).
+ *   - Each task's shell_* wrappers read only its own slot (via
+ *     task_current() -> id).
+ *   - Aligned pointer reads/writes are atomic on both targets (ARM64
+ *     and x86-64 guarantee single-machine-word accesses tear-free).
+ *   - Therefore no lock is required between a read and a write of
+ *     the same slot, and cross-slot accesses never collide.
+ *
+ *   The TCP pool (tcp_session_pool) is serialized with pool_lock
+ *   because its allocation/free path runs on net_pump while the
+ *   teardown path runs on the shell task.
  */
 
 #include "shell_session.h"

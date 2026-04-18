@@ -257,6 +257,32 @@ static void test_inversion_count(void)
     TEST_ASSERT_EQUAL_INT(0, pi_mutex_inversion_detected());
 }
 
+/*
+ * pi_mutex_held_by_self: reports true only while the calling task
+ * owns the mutex. Used by shell dispatch to avoid a self-deadlock
+ * on nested mutating commands.
+ */
+static void test_pi_mutex_held_by_self_states(void)
+{
+    pi_mutex_t m;
+    pi_mutex_init(&m);
+
+    /* Unlocked: never held by anyone. */
+    TEST_ASSERT_FALSE(pi_mutex_held_by_self(&m));
+
+    pi_mutex_lock(&m);
+    TEST_ASSERT_TRUE(pi_mutex_held_by_self(&m));
+
+    pi_mutex_unlock(&m);
+    TEST_ASSERT_FALSE(pi_mutex_held_by_self(&m));
+
+    /* trylock path behaves the same. */
+    TEST_ASSERT_EQUAL_INT(1, pi_mutex_trylock(&m));
+    TEST_ASSERT_TRUE(pi_mutex_held_by_self(&m));
+    pi_mutex_unlock(&m);
+    TEST_ASSERT_FALSE(pi_mutex_held_by_self(&m));
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -271,6 +297,7 @@ int test_suite_pi_mutex(void)
     RUN_TEST(test_pi_mutex_trylock_success);
     RUN_TEST(test_pi_mutex_trylock_fail);
     RUN_TEST(test_pi_mutex_priority_preserved);
+    RUN_TEST(test_pi_mutex_held_by_self_states);
 
     /* Integration tests */
     RUN_TEST(test_priority_inheritance_basic);
