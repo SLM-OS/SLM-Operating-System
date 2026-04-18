@@ -14,6 +14,7 @@
 
 #include "xhci_ring.h"
 #include "debug.h"
+#include "spinlock.h"   /* dmb()/dsb() cross-platform barrier macros */
 
 #include <string.h>
 #include <stddef.h>
@@ -28,6 +29,9 @@ int xhci_ring_init(struct xhci_ring *r, struct xhci_trb *trbs,
     if (r == NULL || trbs == NULL || num_trbs < 4)
         return -1;
 
+    /* Always zeroes the caller's buffer — callers can rely on every
+     * TRB's cycle bit being 0 after init (the HC uses cycle=0 as
+     * "not yet produced"). */
     memset(trbs, 0, (size_t)num_trbs * sizeof(struct xhci_trb));
 
     r->trbs        = trbs;
@@ -50,6 +54,14 @@ int xhci_ring_init(struct xhci_ring *r, struct xhci_trb *trbs,
     link->param_lo = (uint32_t)(trbs_phys & 0xFFFFFFFFu);
     link->param_hi = (uint32_t)(trbs_phys >> 32);
     link->status   = 0;
+    /*
+     * DMB so the param_lo/hi stores drain before the control store
+     * that carries the Link-TRB type. Belt-and-suspenders here —
+     * the caller is expected to issue a DSB before the first
+     * doorbell anyway, but the barrier makes the invariant local
+     * to this function and survives future call-site changes.
+     */
+    dmb(oshst);
     link->control  = XHCI_TRB_TYPE(XHCI_TRB_LINK) | XHCI_TRB_TC;
 
     return 0;
@@ -92,13 +104,24 @@ struct xhci_trb *xhci_ring_enqueue(struct xhci_ring *r,
     }
 
     struct xhci_trb *slot = &r->trbs[r->enqueue];
-    /* Write the payload first, then the control dword with the
+    /*
+     * Write the payload first, then the control dword with the
      * cycle bit matching PCS. The HC uses the cycle bit to decide
-     * the TRB is "ready", so this store order must hold all the
-     * way through to DRAM — NC memory makes that free. */
+     * the TRB is "ready"; if the control store reaches memory
+     * before the payload stores, the HC sees a TRB with a live
+     * cycle bit but garbage payload. Two-store-sequence ordering
+     * is NOT automatic on ARM64 even in Normal-Non-Cacheable
+     * memory (ARM ARM B2.7.2 — two writes to Normal memory can
+     * be reordered by the memory system), so a dmb(oshst) between
+     * the payload group and the control store is required.
+     * Outer Shareable covers DMA masters that live outside the
+     * Inner Shareable domain, which includes the Tegra xHCI
+     * controller's DMA path.
+     */
     slot->param_lo = t->param_lo;
     slot->param_hi = t->param_hi;
     slot->status   = t->status;
+    dmb(oshst);
     uint32_t ctrl  = t->control & ~XHCI_TRB_CYCLE;
     ctrl |= (r->cycle_state & 1);
     slot->control  = ctrl;
@@ -115,6 +138,27 @@ bool xhci_event_ring_peek(struct xhci_event_ring *r, struct xhci_trb *out)
     struct xhci_trb *slot = &r->trbs[r->dequeue];
     if ((slot->control & XHCI_TRB_CYCLE) != (r->cycle_state & 1))
         return false;   /* no event yet */
+
+    /*
+     * DMA read barrier between the cycle-bit check and the payload
+     * reads. The HC writes payload fields (param_lo/hi, status) FIRST
+     * and then writes the control dword with the producer cycle bit;
+     * that's the order the xHCI spec defines, and it's the order the
+     * HC puts on the bus. But ARM ARM B2.7.2 permits the CPU to
+     * speculatively read Normal memory (including NC) and to reorder
+     * those speculative loads across the cycle-check branch. Without
+     * an explicit load-barrier, a successful cycle check can still
+     * return stale or torn payload: the speculative loads may have
+     * fired before the HC's payload writes became globally visible.
+     *
+     * dmb(oshld) = Outer Shareable load-load barrier — matches the
+     * producer-side dmb(oshst) in xhci_ring_enqueue. Outer Shareable
+     * covers DMA masters outside the Inner Shareable domain (the
+     * Tegra xHCI controller's DMA path is one of those). This is the
+     * direct equivalent of Linux's `dma_rmb()` after the cycle check
+     * in `xhci_handle_event()` (drivers/usb/host/xhci-ring.c).
+     */
+    dmb(oshld);
 
     /* Copy out, then advance. Reading all four dwords here is fine;
      * the HC won't touch them again until we lap it. */

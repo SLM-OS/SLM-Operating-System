@@ -7,6 +7,31 @@
  *
  * Only built on Jetson; every other platform sees this file compiled
  * out by the #if at the top (no usb_hcd registration happens).
+ *
+ * File structure (~620 lines in the Jetson-gated body):
+ *   1. Base pointers + static state
+ *   2. Register access helpers (r8/r16/r32/w32)
+ *   3. Halt + reset sequence
+ *   4. Capability parse
+ *   5. Scratchpad + DCBAA + ERST allocation (NC memory)
+ *   6. MMIO register programming (xhci_program_registers)
+ *   7. Controller start + NO_OP round-trip
+ *   8. Public API (xhci_init, xhci_dump_info, xhci_get_caps)
+ *
+ * Natural split points if this grows past ~1000 lines (Steps 5-7
+ * add port scan + ENABLE_SLOT/ADDRESS_DEVICE + transfer TRBs):
+ *   - xhci_mem.c: sections 5
+ *   - xhci_regs.c: sections 2, 3, 6
+ *   - xhci_cmd.c: section 7 + future transfer path
+ *   - xhci.c: sections 1, 4, 8
+ *
+ * Split is deliberately DEFERRED while Phase 3A remains mothballed
+ * (#285). Splitting ~620 lines of unchanging code for no behaviour
+ * change is churn; the structure is small enough to navigate with
+ * section banners; and if #266 is revived via #286, the seams above
+ * are already visible for whoever picks it up. Linux, U-Boot, and
+ * Haiku all keep their xHCI core driver as a single TU at similar
+ * size, so the "single file" shape is also the idiomatic one.
  */
 
 #include "platform.h"
@@ -20,6 +45,7 @@
 #include "ncmem.h"
 #include "debug.h"
 #include "timer.h"
+#include "spinlock.h"   /* dsb()/dmb() cross-platform barrier macros */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -57,18 +83,31 @@ static struct xhci_event_ring xhci_evt_ring;
 
 /*
  * Event Ring Segment Table entry layout per xHCI 1.2 §6.5. One entry
- * is enough — Phase 3A uses a single event-ring segment. The table
- * base must be 64-byte aligned; the one-entry array satisfies that.
+ * is enough — Phase 3A uses a single event-ring segment.
+ *
+ * ERST is DMA-read by the host controller, so the backing storage
+ * MUST be either NC memory or clean-to-PoC before we program ERSTBA.
+ * We allocate from ncmem to match DCBAA / scratchpads / rings — every
+ * other HC-visible buffer in this driver goes through ncmem_alloc, so
+ * ERST is kept consistent. A cacheable static would need an explicit
+ * cache_clean_range before every ERSTBA write.
  */
 struct xhci_erst_entry {
     uint32_t base_lo;
     uint32_t base_hi;
     uint32_t size;          /* low 16 bits = segment TRB count */
     uint32_t reserved;
-} __attribute__((packed));
+};
 _Static_assert(sizeof(struct xhci_erst_entry) == 16, "ERST entry 16B");
+/*
+ * If this layout ever changes (new fields, reordering, explicit
+ * alignment), update the offset mirror in
+ * `kernel/tests/test_xhci_ring.c::test_erst_entry_layout` to match.
+ * The static_assert above catches size drift; the test catches
+ * field-offset drift because it re-declares a local copy.
+ */
 
-static struct xhci_erst_entry xhci_erst[1] __attribute__((aligned(64)));
+static struct xhci_erst_entry *xhci_erst;
 
 /* -------------------------------------------------------------------------- */
 /* Register access helpers                                                     */
@@ -289,6 +328,24 @@ static int xhci_alloc_scratchpads(uint32_t count)
 }
 
 /*
+ * Allocate the single-entry Event Ring Segment Table from NC memory.
+ * The HC DMA-reads ERST to locate the event ring, so it has to be
+ * either NC or clean-to-PoC; NC matches the rest of the HC-visible
+ * allocations in this driver and avoids needing per-update cache
+ * maintenance before each ERSTBA write.
+ */
+static int xhci_alloc_erst(void)
+{
+    xhci_erst = ncmem_alloc(sizeof(*xhci_erst), 64);
+    if (xhci_erst == NULL) {
+        WARN("xhci: ERST alloc failed (%zu bytes)", sizeof(*xhci_erst));
+        return -1;
+    }
+    memset(xhci_erst, 0, sizeof(*xhci_erst));
+    return 0;
+}
+
+/*
  * Allocate the Device Context Base Address Array. Slot 0 holds the
  * pointer to the scratchpad buffer array (when MaxScratchpads > 0).
  * Slots 1..MaxSlots hold Device Context pointers once ENABLE_SLOT
@@ -311,80 +368,83 @@ static int xhci_alloc_dcbaa(uint8_t max_slots)
     return 0;
 }
 
-/*
- * Debug helper while we pin down what's killing the aperture. Reads
- * USBSTS; logs 0xffffffff warnings but otherwise quietly returns.
- */
-static uint32_t xhci_log_sts(const char *tag)
-{
-    uint32_t sts = r32(xhci_op_base, XHCI_OP_USBSTS);
-    INFO("xhci: %s USBSTS=0x%08x", tag, (unsigned)sts);
-    return sts;
-}
-
 /* Write the controller registers that point at our rings + DCBAA. */
 static void xhci_program_registers(uint8_t max_slots)
 {
     /*
-     * Before writing anything, record what Linux left in the
-     * registers. If the original DCBAAP / CRCR / ERSTBA were valid
-     * SMMU-mapped addresses, replacing them with our NC-memory
-     * addresses may produce an SMMU fault that wedges the controller
-     * — this dump pins down exactly what state we're trampling.
-     */
-    /*
-     * Record Linux's leftover pointers. SLM-OS's uart_printf doesn't
-     * speak `%llx` so dump each dword separately.
+     * Record Linux's leftover pointers so the serial log captures
+     * what state we're trampling. If Linux's original DCBAAP / CRCR /
+     * ERSTBA were valid SMMU-mapped addresses, replacing them with
+     * our NC-memory addresses may produce an SMMU fault that wedges
+     * the controller — this dump pins down exactly where that
+     * happens. SLM-OS's uart_printf doesn't speak `%llx` so dump
+     * each dword separately.
      */
     uint32_t orig_dcbaap_lo = r32(xhci_op_base, XHCI_OP_DCBAAP);
     uint32_t orig_dcbaap_hi = r32(xhci_op_base, XHCI_OP_DCBAAP + 4);
     uint32_t orig_crcr_lo   = r32(xhci_op_base, XHCI_OP_CRCR);
     uint32_t orig_crcr_hi   = r32(xhci_op_base, XHCI_OP_CRCR + 4);
-    INFO("xhci: pre-program DCBAAP=%08x%08x CRCR=%08x%08x CONFIG=0x%08x",
+    INFO("xhci: pre-program DCBAAP=%08x%08x CRCR=%08x%08x CONFIG=0x%08x USBSTS=0x%08x",
          (unsigned)orig_dcbaap_hi, (unsigned)orig_dcbaap_lo,
          (unsigned)orig_crcr_hi, (unsigned)orig_crcr_lo,
-         (unsigned)r32(xhci_op_base, XHCI_OP_CONFIG));
-    xhci_log_sts("pre-program");
+         (unsigned)r32(xhci_op_base, XHCI_OP_CONFIG),
+         (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+
+    /*
+     * ARM64 requires an explicit DSB between Normal-Non-Cacheable
+     * stores and Device-nGnRE stores (ARM ARM B2.7.2). Everything
+     * the HC will DMA-read is already populated at this point
+     * (DCBAA via xhci_alloc_dcbaa, scratchpad pointers via
+     * xhci_alloc_scratchpads, ERST below, command/event ring TRBs
+     * via the ring_alloc calls) — those stores went to NC memory
+     * and may still be sitting in the write-combining buffer. The
+     * DSB drains all prior stores to the Point of System before
+     * the MMIO writes below tell the HC to go read them. Without
+     * this, the HC can read stale zeros and fail to start.
+     */
+    dsb(sy);
 
     /* DCBAAP (64-bit). Write low first, then high per spec ordering
      * advice — HC latches on the high-dword write. */
     uint64_t dcbaap = (uint64_t)(uintptr_t)xhci_dcbaa;
     w32(xhci_op_base, XHCI_OP_DCBAAP,     (uint32_t)(dcbaap & 0xFFFFFFFFu));
     w32(xhci_op_base, XHCI_OP_DCBAAP + 4, (uint32_t)(dcbaap >> 32));
-    xhci_log_sts("after DCBAAP");
 
     /* CRCR: ring base (64-bit) + Ring Cycle State (bit 0). Must be
      * written as two 32-bit stores with high last. */
     uint64_t cmd_ring_ptr = xhci_cmd_ring.phys | 1 /* RCS = initial PCS */;
     w32(xhci_op_base, XHCI_OP_CRCR,     (uint32_t)(cmd_ring_ptr & 0xFFFFFFFFu));
     w32(xhci_op_base, XHCI_OP_CRCR + 4, (uint32_t)(cmd_ring_ptr >> 32));
-    xhci_log_sts("after CRCR");
 
     /* CONFIG: MaxSlotsEnabled in low byte. Enable all reported slots
      * — we'll allocate device contexts on demand. */
     w32(xhci_op_base, XHCI_OP_CONFIG, max_slots);
-    xhci_log_sts("after CONFIG");
 
     /* Interrupter 0 setup. */
     volatile uint8_t *ir0 = xhci_rt_base + XHCI_IR0_OFFSET;
-    xhci_erst[0].base_lo  = (uint32_t)(xhci_evt_ring.phys & 0xFFFFFFFFu);
-    xhci_erst[0].base_hi  = (uint32_t)(xhci_evt_ring.phys >> 32);
-    xhci_erst[0].size     = xhci_evt_ring.num_trbs;
-    xhci_erst[0].reserved = 0;
+    xhci_erst->base_lo  = (uint32_t)(xhci_evt_ring.phys & 0xFFFFFFFFu);
+    xhci_erst->base_hi  = (uint32_t)(xhci_evt_ring.phys >> 32);
+    xhci_erst->size     = xhci_evt_ring.num_trbs;
+    xhci_erst->reserved = 0;
+
+    /*
+     * Drain the ERST field stores (Normal NC) before any MMIO write
+     * to the interrupter. The ERSTBA write below tells the HC to
+     * DMA-read ERST; without this DSB the MMIO can reach the HC
+     * before the NC stores have drained through the write buffer.
+     */
+    dsb(sy);
 
     /* ERSTSZ = 1 (one segment). */
     w32(ir0, XHCI_IR_ERSTSZ, 1);
-    xhci_log_sts("after ERSTSZ");
     /* ERDP must be programmed BEFORE ERSTBA per xHCI 1.2 §5.5.2.3.2 —
      * writing ERSTBA enables the event ring. */
     uint64_t erdp = xhci_event_ring_dequeue_phys(&xhci_evt_ring);
     w32(ir0, XHCI_IR_ERDP,     (uint32_t)(erdp & 0xFFFFFFFFu));
     w32(ir0, XHCI_IR_ERDP + 4, (uint32_t)(erdp >> 32));
-    xhci_log_sts("after ERDP");
-    uint64_t erstba = (uint64_t)(uintptr_t)&xhci_erst[0];
+    uint64_t erstba = (uint64_t)(uintptr_t)xhci_erst;
     w32(ir0, XHCI_IR_ERSTBA,     (uint32_t)(erstba & 0xFFFFFFFFu));
     w32(ir0, XHCI_IR_ERSTBA + 4, (uint32_t)(erstba >> 32));
-    xhci_log_sts("after ERSTBA");
 
     /* Leave IMAN.IE = 0 (polling, no IRQs in Phase 3A). IMOD stays
      * at its reset value. */
@@ -423,54 +483,79 @@ static int xhci_send_noop(void)
     }
     uintptr_t cmd_phys = (uintptr_t)slot;
 
-    /* Ring the command-ring doorbell. DB[0] is the command ring on
-     * xHCI 1.x; target = 0 ("host command"). */
-    *(volatile uint32_t *)(xhci_db_base + 4 * XHCI_DB_COMMAND) = 0;
+    /*
+     * Two barriers around the doorbell:
+     *  - The DSB before the doorbell guarantees the TRB writes in NC
+     *    memory (xhci_ring_enqueue) have drained to the Point of
+     *    System, so the HC's DMA read after the doorbell sees a
+     *    fully-written TRB rather than partially-written or stale
+     *    zeros.
+     *  - The DSB after the doorbell guarantees the posted MMIO write
+     *    has been issued before the event-ring poll begins reading
+     *    the NC memory the HC writes into.
+     */
+    dsb(sy);
+    w32(xhci_db_base, 4 * XHCI_DB_COMMAND, 0);
+    dsb(sy);
 
-    /* Poll the event ring for up to 500 ms for a matching completion. */
+    /* Poll the event ring for up to 500 ms for a matching completion.
+     * Every consumed event advances the ring's dequeue pointer; we
+     * update ERDP each time so the HC's view of "next-to-consume"
+     * stays in sync with ours even when we skip unrelated events. */
+    volatile uint8_t *ir0 = xhci_rt_base + XHCI_IR0_OFFSET;
     uint64_t start = timer_get_count();
     uint64_t freq  = timer_get_frequency();
     uint64_t ticks = freq / 2;   /* 500 ms */
 
     struct xhci_trb evt;
-    while (timer_get_count() - start < ticks) {
+    int ret = -1;
+    bool done = false;
+    while (!done && timer_get_count() - start < ticks) {
         if (!xhci_event_ring_peek(&xhci_evt_ring, &evt))
             continue;
 
         uint32_t type = XHCI_TRB_TYPE_GET(evt.control);
+        bool matched = false;
         if (type != XHCI_TRB_EVT_CMD_COMPLETION) {
             INFO("xhci: skipping non-command event type %u", type);
-            continue;
+        } else {
+            uint64_t evt_ptr = (uint64_t)evt.param_lo |
+                               ((uint64_t)evt.param_hi << 32);
+            if (evt_ptr != cmd_phys) {
+                INFO("xhci: skipping stale completion @0x%lx (ours 0x%lx)",
+                     (unsigned long)evt_ptr, (unsigned long)cmd_phys);
+            } else {
+                uint32_t cc = XHCI_CC_GET(evt.status);
+                if (cc != XHCI_CC_SUCCESS) {
+                    WARN("xhci: NO_OP completed with cc=%u", cc);
+                    ret = -1;
+                } else {
+                    INFO("xhci: NO_OP round-trip OK (cc=SUCCESS, cmd_trb @0x%lx)",
+                         (unsigned long)cmd_phys);
+                    ret = 0;
+                }
+                matched = true;
+            }
         }
-        uint64_t evt_ptr = (uint64_t)evt.param_lo |
-                           ((uint64_t)evt.param_hi << 32);
-        if (evt_ptr != cmd_phys) {
-            INFO("xhci: skipping stale completion @0x%lx (ours 0x%lx)",
-                 (unsigned long)evt_ptr, (unsigned long)cmd_phys);
-            continue;
-        }
-        uint32_t cc = XHCI_CC_GET(evt.status);
 
-        /* Update ERDP. Setting bit 3 (EHB) acknowledges the interrupt
-         * state — also harmless in polled mode. */
-        volatile uint8_t *ir0 = xhci_rt_base + XHCI_IR0_OFFSET;
+        /* Update ERDP on every consumed event. Bit 3 (EHB) is the
+         * Event Handler Busy bit — write-1-to-clear in polled mode,
+         * harmless either way. */
         uint64_t erdp = xhci_event_ring_dequeue_phys(&xhci_evt_ring) | (1u << 3);
         w32(ir0, XHCI_IR_ERDP,     (uint32_t)(erdp & 0xFFFFFFFFu));
         w32(ir0, XHCI_IR_ERDP + 4, (uint32_t)(erdp >> 32));
 
-        if (cc != XHCI_CC_SUCCESS) {
-            WARN("xhci: NO_OP completed with cc=%u", cc);
-            return -1;
-        }
-        INFO("xhci: NO_OP round-trip OK (cc=SUCCESS, cmd_trb @0x%lx)",
-             (unsigned long)cmd_phys);
-        return 0;
+        if (matched)
+            done = true;
     }
 
-    WARN("xhci: NO_OP timed out — no completion event within 500 ms "
-         "(USBSTS=0x%08x)",
-         (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
-    return -1;
+    if (!done) {
+        WARN("xhci: NO_OP timed out — no completion event within 500 ms "
+             "(USBSTS=0x%08x)",
+             (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+        return -1;
+    }
+    return ret;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -530,6 +615,8 @@ int xhci_init(void)
     if (xhci_alloc_scratchpads(xhci_num_scratchpads) != 0)
         return -1;
     if (xhci_alloc_dcbaa(xhci_caps_cached.max_slots) != 0)
+        return -1;
+    if (xhci_alloc_erst() != 0)
         return -1;
     if (xhci_ring_alloc(&xhci_cmd_ring, XHCI_CMD_RING_TRBS) != 0)
         return -1;

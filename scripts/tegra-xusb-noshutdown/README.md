@@ -50,3 +50,10 @@ sudo rmmod tegra_xusb_noshutdown
 
 Unloading does NOT restore the original `.shutdown` pointer — see
 the file-level comment in `tegra_xusb_noshutdown.c` for rationale.
+
+## Related
+
+- `scripts/arm-smmu-noshutdown/` — A.5 successor (targets the actual
+  `.shutdown` callback that was dropping SMMU translations on kexec).
+- `docs/jetson-usb-networking-plan.md` §8 — full investigation trail.
+- GitHub issues #266, #285, #286.

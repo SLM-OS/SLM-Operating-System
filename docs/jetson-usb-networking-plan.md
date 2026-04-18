@@ -16,7 +16,7 @@ writeup. Tracked in
 | 0 — CBB probe | ✅ done (2026-04-17) | Option A viable; xHCI clock-gated, not firewalled. See §3 Phase 0. |
 | 1 — USB core (`kernel/usb/core/`) | ✅ merged | PR #272. URB / descriptor / enumeration; 37 unit tests against a mock HCD. |
 | 2 — CDC-ECM class driver | ✅ merged | PR #276. Probe + MAC parse + bulk IN/OUT data path + net_driver glue; 25 unit tests. |
-| 3A — XHCI host driver | ⛔ mothballed (2026-04-18) | Scaffolding + caps parse + rings + NO_OP code landed on `feature/usb-networking-phase2`; ring primitives have 15 unit tests (`test_xhci_ring.c`). Blocked at USBCMD.RUN=1 by the SMMU disable in Linux's kexec path. Root cause + mothball analysis in §8. |
+| 3A — XHCI host driver | ⛔ mothballed (2026-04-18) | Scaffolding + caps parse + rings + NO_OP code landed on `feature/usb-networking-phase2`; ring primitives have 19 unit tests (`test_xhci_ring.c` — includes ERDP-tracking and ERST-layout regression coverage added in the post-merge review round). Blocked at USBCMD.RUN=1 by the SMMU disable in Linux's kexec path. Root cause + mothball analysis in §8. |
 | 4 — lwIP netif integration | ☐🔗 pending | Requires a working Phase 3A, which is blocked. |
 | 5 — testing, reliability, docs | ☐🔗 pending | Requires Phases 3A + 4. |
 
@@ -344,7 +344,7 @@ this section.
 | 1 — kexec xusb clock hold (`scripts/jetson-kexec-slmos.sh`) | ✅ done (`66b7ad9`) | `peek 0x03610000` reads HCIVERSION=0x0120, HCCPARAMS1=0x0180ff05 from SLM-OS post-kexec. |
 | 2 — driver scaffolding (`kernel/drivers/usb/xhci/`) | ✅ done (`47664e4`) | Compiles clean on all four targets. |
 | 3 — capability probe + halt | ✅ done (`47664e4`) | `slmos> xhci` shows 36 slots, 8 ports, 5 interrupters, 64-bit addr, 64-byte ctx. Linux's halt state honoured (USBCMD=0, HCH=1). HCRST on Tegra is lethal (writes brick the aperture) so it's skipped. |
-| 4 — DCBAA + command ring + event ring + NO_OP | ⛔ blocked (`57bdeb8`) | All pre-RUN register writes land cleanly (USBSTS stable at 0x1). USBCMD.RUN=1 wedges the aperture (reads return 0xffffffff). Root cause: SMMU disable — see §8. Ring primitives (cycle-bit handling, Link TRB wrap, event-ring dequeue) have 15 unit tests in `kernel/tests/test_xhci_ring.c` that run on every target. |
+| 4 — DCBAA + command ring + event ring + NO_OP | ⛔ blocked (`57bdeb8`) | All pre-RUN register writes land cleanly (USBSTS stable at 0x1). USBCMD.RUN=1 wedges the aperture (reads return 0xffffffff). Root cause: SMMU disable — see §8. Ring primitives (cycle-bit handling, Link TRB wrap, event-ring dequeue) have 19 unit tests in `kernel/tests/test_xhci_ring.c` that run on every target. Post-merge review round added ERDP-tracking coverage + ERST-layout regression test after ERST storage moved to `ncmem_alloc` for DMA coherency (#289 follow-up). |
 | 5 — port status + ENABLE_SLOT / ADDRESS_DEVICE | not started | Blocked on Step 4. |
 | 6 — control-transfer TRB builder | not started | |
 | 7 — CONFIGURE_ENDPOINT + bulk transfers | not started | |
@@ -612,6 +612,49 @@ long-term direction if Jetson USB networking re-enters scope.
    §3 covers what the firewall permits; but the SMMU adds a
    separate, orthogonal DMA-path blocker that kicks in during
    the Linux→SLM-OS handoff regardless of CBB state.
+4. **Audit every HC-visible allocation for cacheability.** Post-merge
+   review of PR #289 found the Event Ring Segment Table sitting in
+   cacheable BSS (`static struct xhci_erst_entry xhci_erst[1]`) while
+   every other HC-DMA-read structure (DCBAA, scratchpads, rings) was
+   `ncmem_alloc`-backed. The HC would have read stale zeros from
+   DRAM if the SMMU blocker were ever removed. Fix: move ERST to NC
+   memory via a new `xhci_alloc_erst()` helper. Rule for next time:
+   grep every `ncmem_alloc` call site for consistency before
+   declaring a DMA-heavy driver "code-complete", because one
+   cacheable-BSS outlier is very easy to miss.
+5. **Doorbell + poll pairs need an explicit `dsb sy` on ARM64.**
+   Same review round. The bare-cast doorbell store could be visible
+   to the compiler as ordered with the polling read, but the
+   HC doesn't see it until the posted write drains — without a
+   barrier, a polled event-ring read can sample the cacheline
+   before the HC has had a chance to respond. Mitigation: use the
+   `w32` helper + explicit `dsb sy` before every poll loop that
+   depends on the doorbell reaching the device.
+6. **Event-ring polling must update ERDP on every consumed slot.**
+   The NO_OP loop originally wrote ERDP only on a matching
+   completion, so any skipped stale event left the HC's ERDP view
+   frozen while ours advanced. On a mothballed path that never
+   produces more than one event this is invisible; on any transfer
+   path it would wedge the ring after a few laps. Fix updates ERDP
+   on every consumed event (match or skip); regression coverage in
+   `test_event_ring_peek_skip_then_match_advances_through_all` +
+   `test_event_ring_peek_then_dequeue_phys_tracks_advance`.
+7. **Audit memory ordering between NC stores and MMIO writes.**
+   Same review round surfaced the flip side of lesson 4: once
+   HC-visible data lives in Normal-Non-Cacheable memory, the path
+   `CPU stores → write-combine buffer → DRAM → HC DMA read` still
+   needs explicit ordering against any MMIO write that tells the
+   HC to consume it. ARM ARM B2.7.2 permits Normal-NC stores to be
+   reordered relative to Device-nGnRE stores; without a `dsb sy`
+   between "fill NC buffer" and "program MMIO that points at it",
+   the HC can DMA-read stale contents. Same story for two Normal-NC
+   stores that must be visible in program order to a DMA observer
+   (the classic TRB payload → cycle-bit pattern): a `dmb oshst`
+   between the groups is required. The `ncmem_alloc` move from
+   lesson 4 doesn't replace these barriers — it only removes the
+   cache-flush half of the problem. Rule for next time: anywhere
+   the code reads like "CPU writes X, then CPU tells DMA to read
+   X", verify there's a barrier between the two.
 
 ---
 
