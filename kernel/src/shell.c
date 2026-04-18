@@ -92,6 +92,10 @@ const shell_cmd_t builtin_commands[] = {
 #if defined(PLATFORM_RASPI5) && defined(ENABLE_NETWORKING)
     {"macbdiag", cmd_macbdiag, "MACB IRQ delivery diagnostic", false},
 #endif
+#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
+    {"rtldiag",  cmd_rtldiag,  "RTL8168 PCIe probe diagnostic", false},
+    {"xhcidiag", cmd_xhcidiag, "Tegra XHCI CBB-at-EL2 probe", false},
+#endif
 };
 
 const int NUM_BUILTIN_COMMANDS = sizeof(builtin_commands) / sizeof(builtin_commands[0]);

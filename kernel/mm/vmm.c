@@ -79,6 +79,11 @@ static uint64_t l2_mmio[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 /* L2 table for 0xC0000000-0xFFFFFFFF: maps RAM around OP-TEE carveout */
 static uint64_t l2_ram_c0[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+/* L2 table for PCIe C8 BAR window (CPU-side): L1[212] covers 1 GB
+ * starting at 0x35_0000_0000; BAR2/BAR4 of the RTL8168 land inside
+ * the 2 MB block at 0x3528000000. APPL/CFG/DBI regs live in L1[0]
+ * (addresses 0x140A0000 and 0x2A000000 region) and reuse l2_mmio. */
+static uint64_t l2_pcie_bar[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #endif
 #if defined(PLATFORM_RASPI5)
 static uint64_t l2_mmio_pcie[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
@@ -938,6 +943,60 @@ static void vmm_setup_platform(void)
                                                    VMM_FLAG_WRITE |
                                                    VMM_FLAG_DEVICE);
         vmm_state.blocks_mapped += 512;
+    }
+#endif
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* PCIe C8 APPL/CFG/DBI all live in the first 1 GB (L1[0] = l2_mmio).
+     * APPL at 0x140A0000 is in the 2 MB block at 0x14000000 (L2 idx 160);
+     * CFG/ATU/DBI all sit in the 2 MB block at 0x2A000000 (L2 idx 336). */
+    {
+        uint64_t appl_l2 = (TEGRA_PCIE_C8_APPL_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[appl_l2] =
+            make_block_desc(TEGRA_PCIE_C8_APPL_BASE & ~(BLOCK_SIZE - 1),
+                             VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+
+        uint64_t cfg_l2 = (TEGRA_PCIE_C8_CFG_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[cfg_l2] =
+            make_block_desc(TEGRA_PCIE_C8_CFG_BASE & ~(BLOCK_SIZE - 1),
+                             VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  PCIe C8 APPL L2[%lu] + CFG/ATU/DBI L2[%lu] mapped",
+                    (unsigned long)appl_l2,
+                    (unsigned long)cfg_l2);
+    }
+
+    /* Tegra XHCI (tegra-xusb) at 0x03600000..0x0365FFFF — FPCI regs,
+     * xHCI operational regs, and BAR2 all fit in the single 2 MB
+     * block at 0x03600000 (L2 idx 27). Added for the CBB-at-EL2
+     * survey in docs/jetson-pcie-investigation.md; drives the USB
+     * CDC-ECM path if PCIe stays firewalled. */
+    {
+        uint64_t xhci_l2 = (TEGRA_XHCI_HCD_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[xhci_l2] =
+            make_block_desc(TEGRA_XHCI_HCD_BASE & ~(BLOCK_SIZE - 1),
+                             VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  XHCI (tegra-xusb) L2[%lu] mapped", (unsigned long)xhci_l2);
+    }
+
+    /* RTL8168 BAR window at 0x35_2800_0000 (L1[212]). One 2 MB block
+     * covers BAR2 (0x3528004000, 4 KB) and BAR4 (0x3528000000, 16 KB)
+     * both — they land in the same 2 MB-aligned region. */
+    {
+        uint64_t bar_l1 = (uint64_t)(RTL8169_BAR_WINDOW_BASE >> 30);
+        l1_table[bar_l1] = make_table_desc((uint64_t)l2_pcie_bar);
+        vmm_state.l2_tables_used++;
+
+        uint64_t bar_l2_idx = (RTL8169_BAR_WINDOW_BASE >> BLOCK_SHIFT) & 0x1FF;
+        l2_pcie_bar[bar_l2_idx] =
+            make_block_desc(RTL8169_BAR_WINDOW_BASE, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  RTL8168 BAR window mapped: L1[%lu] L2[%lu] -> 0x%lx",
+                    (unsigned long)bar_l1,
+                    (unsigned long)bar_l2_idx,
+                    (unsigned long)RTL8169_BAR_WINDOW_BASE);
     }
 #endif
 }

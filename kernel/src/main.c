@@ -497,6 +497,11 @@ void kernel_main(void *dtb)
         extern void macb_register(void);
         macb_register();
     }
+#elif defined(PLATFORM_JETSON_ORIN_NANO)
+    {
+        extern void rtl8169_register(void);
+        rtl8169_register();
+    }
 #endif
 #endif
 

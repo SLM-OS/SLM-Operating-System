@@ -3737,3 +3737,132 @@ int cmd_macbdiag(int argc, char *argv[])
 }
 
 #endif /* PLATFORM_RASPI5 && ENABLE_NETWORKING */
+
+#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
+#include "eth_rtl8169.h"
+
+/*
+ * rtldiag — Tegra PCIe C8 / RTL8168 probe diagnostic. Reports in
+ * increasing depth:
+ *   1. APPL controller wrapper state (CTRL, DEBUG/LTSSM) — tells us
+ *      whether the RC block is clocked + reset-deasserted.
+ *   2. DBI bus-0 config-space readout — the RC bridge ID (NVIDIA
+ *      0x10DE:0x229c if the RC survived kexec).
+ *   3. RTL8168 endpoint state (bus 1 — requires iATU programming,
+ *      not yet implemented so marked pending).
+ */
+int cmd_rtldiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== Tegra PCIe C8 / RTL8168 Diagnostic ===\r\n");
+    uart_puts("  [Reading live APPL + DBI registers — may abort if RC cold]\r\n");
+
+    rtl8169_refresh_rc_state();
+
+    /* Layer 1: APPL wrapper — if clocks are gated or resets asserted,
+     * these reads will external-abort before we get here. */
+    uart_printf("  APPL_CTRL:   0x%08x  (LTSSM_EN=%s)\r\n",
+                (unsigned)rtl8169_get_appl_ctrl(),
+                (rtl8169_get_appl_ctrl() & (1u << 7)) ? "1" : "0");
+    uart_printf("  APPL_DEBUG:  0x%08x  (LTSSM state [8:3] = 0x%02x)\r\n",
+                (unsigned)rtl8169_get_appl_debug(),
+                (unsigned)((rtl8169_get_appl_debug() >> 3) & 0x3F));
+
+    /* Layer 2: bus-0 RC bridge via DBI. */
+    uart_printf("  DBI bus0:    vendor=0x%04x  device=0x%04x  "
+                "(expect 0x10DE:0x229c)\r\n",
+                (unsigned)rtl8169_get_rc_bridge_vendor(),
+                (unsigned)rtl8169_get_rc_bridge_device());
+    uart_printf("  RC alive:    %s\r\n",
+                rtl8169_get_rc_alive() ? "YES" : "NO (cold — see kexec note)");
+
+    if (!rtl8169_is_probed()) {
+        uart_puts("  Endpoint:    NOT PROBED — bus-1 iATU setup pending\r\n");
+        uart_puts("=== End Diagnostic ===\r\n");
+        return 0;
+    }
+
+    /* Probed path — Stage 2+ fills these fields in. Today the driver
+     * returns false from probe() unconditionally, so this block is
+     * unreachable at runtime but stays as the shape the shell output
+     * takes once the Stage-2 MAC/chip-version read lands. */
+    uart_printf("  PCI vendor:   0x%04x  (expected 0x10EC)\r\n",
+                (unsigned)rtl8169_get_pci_vendor());
+    uart_printf("  PCI device:   0x%04x  (expected 0x8168)\r\n",
+                (unsigned)rtl8169_get_pci_device());
+    uart_printf("  PCI revision: 0x%02x\r\n",
+                (unsigned)rtl8169_get_pci_revision());
+    uart_printf("  BAR2 phys:    0x%lx\r\n",
+                (unsigned long)rtl8169_get_bar2());
+
+    const uint8_t *mac = rtl8169_get_mac_address();
+    if (mac) {
+        uart_printf("  MAC addr:     %02x:%02x:%02x:%02x:%02x:%02x\r\n",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        uart_puts("  MAC addr:     (not yet read — Stage 2 pending)\r\n");
+    }
+
+    uart_printf("  MAC_VER raw:  0x%x  (0 = not yet read)\r\n",
+                (unsigned)rtl8169_get_mac_ver_raw());
+    uart_printf("  Link up:      %s\r\n",
+                rtl8169_get_link_up() ? "YES" : "no");
+
+    uart_puts("=== End Diagnostic ===\r\n");
+    return 0;
+}
+
+/*
+ * xhcidiag — reads Tegra XHCI host controller registers from SLM-OS
+ * at EL2. Diagnostic probe for the USB CDC-ECM fallback path — tests
+ * whether the CBB firewall behaves the same way here as it did for
+ * PCIe (see docs/jetson-pcie-investigation.md). If the reads return
+ * meaningful values, USB-based networking is a viable pivot. If they
+ * return 0xFFFFFFFF like the PCIe RC, CBB blocks DMA-capable
+ * peripherals at EL2 across the board and we need a different
+ * strategy entirely.
+ *
+ * Expected-good values (verified from Linux /dev/mem):
+ *   HCD[0x00] CAPLENGTH|HCIVERSION = 0x01200020
+ *   HCD[0x04] HCSPARAMS1           = 0x08000524
+ *   FPCI[0x00] device/vendor       = 0x229810de  (NVIDIA Tegra xHCI)
+ */
+int cmd_xhcidiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== Tegra XHCI CBB-at-EL2 Probe ===\r\n");
+    uart_puts("  [Reading live XHCI registers — may abort if CBB-blocked]\r\n");
+
+    volatile uint32_t *hcd  = (volatile uint32_t *)TEGRA_XHCI_HCD_BASE;
+    volatile uint32_t *fpci = (volatile uint32_t *)TEGRA_XHCI_FPCI_BASE;
+
+    uint32_t caplen_hciver = hcd[0];
+    uint32_t hcsparams1    = hcd[1];
+    uint32_t hcsparams2    = hcd[2];
+    uint32_t hcsparams3    = hcd[3];
+    uint32_t hccparams1    = hcd[4];
+    uint32_t fpci_devven   = fpci[0];
+
+    uart_printf("  HCD CAPLENGTH|HCIVER: 0x%08x  (expect 0x01200020)\r\n",
+                (unsigned)caplen_hciver);
+    uart_printf("  HCD HCSPARAMS1:       0x%08x  (expect 0x08000524)\r\n",
+                (unsigned)hcsparams1);
+    uart_printf("  HCD HCSPARAMS2:       0x%08x\r\n", (unsigned)hcsparams2);
+    uart_printf("  HCD HCSPARAMS3:       0x%08x\r\n", (unsigned)hcsparams3);
+    uart_printf("  HCD HCCPARAMS1:       0x%08x  (expect 0x0180ff05)\r\n",
+                (unsigned)hccparams1);
+    uart_printf("  FPCI dev/vendor:      0x%08x  (expect 0x229810de)\r\n",
+                (unsigned)fpci_devven);
+
+    bool cbb_blocked = (caplen_hciver == 0xFFFFFFFF &&
+                        fpci_devven   == 0xFFFFFFFF);
+    uart_printf("  Verdict:              %s\r\n",
+                cbb_blocked ? "CBB FIREWALL BLOCKS XHCI AT EL2"
+                            : "XHCI ACCESSIBLE AT EL2");
+
+    uart_puts("=== End XHCI Probe ===\r\n");
+    return 0;
+}
+#endif /* PLATFORM_JETSON_ORIN_NANO && ENABLE_NETWORKING */

@@ -216,6 +216,65 @@
  */
 
 /*
+ * PCIe Root Complex C8 (pcie@140a0000) — hosts the RTL8168 NIC on the
+ * Jetson Orin Nano Super Developer Kit. Integrated Tegra Ethernet
+ * controllers (nveqos@2310000 + 4× mgbe@68[0-3]00000) are all marked
+ * status="disabled" in the carrier-board DT, so the RJ45 traffic goes
+ * out through this PCIe slot instead.
+ *
+ * Register layout per NVIDIA Tegra 234 TRM and Linux's pcie-tegra194.c:
+ *   0x140a0000 (128 KB) — APPL (controller wrapper registers)
+ *   0x2A000000 (256 KB) — "config" window (iATU-retargeted, NOT flat
+ *                         ECAM; bus 1+ accesses go through this after
+ *                         the RC driver reprograms iATU)
+ *   0x2A040000 (256 KB) — iATU / eDMA registers
+ *   0x2A080000 (256 KB) — DBI (DesignWare native register file; bus
+ *                         0 dev 0 fn 0 config space maps here directly)
+ *
+ * Note: after a Linux kexec the tegra194-pcie driver's .shutdown hook
+ * has torn down the RC (LTSSM off, PHY powered down, REFCLK gated,
+ * clocks+resets asserted, BPMP told to disable the controller). MMIO
+ * reads to DBI/APPL will abort or return 0xFFFFFFFF until either:
+ *   (a) slmos-kexec is modified to unbind tegra194-pcie before kexec,
+ *       preserving the running RC state through the transition, or
+ *   (b) SLM-OS ports the controller bring-up sequence (blocked on #190,
+ *       BPMP MRQ permissions at EL2).
+ */
+#define TEGRA_PCIE_C8_APPL_BASE  0x140A0000UL    /* Controller wrapper regs */
+#define TEGRA_PCIE_C8_APPL_SIZE  0x00020000UL    /* 128 KB */
+#define TEGRA_PCIE_C8_CFG_BASE   0x2A000000UL    /* iATU-retargeted config */
+#define TEGRA_PCIE_C8_CFG_SIZE   0x00040000UL    /* 256 KB */
+#define TEGRA_PCIE_C8_ATU_BASE   0x2A040000UL    /* iATU + eDMA */
+#define TEGRA_PCIE_C8_ATU_SIZE   0x00040000UL    /* 256 KB */
+#define TEGRA_PCIE_C8_DBI_BASE   0x2A080000UL    /* DesignWare DBI regs */
+#define TEGRA_PCIE_C8_DBI_SIZE   0x00040000UL    /* 256 KB */
+
+/* RTL8168 BAR window — Linux-assigned. Covers both BAR2 (regs, 4 KB at
+ * +0x4000) and BAR4 (ext regs, 16 KB at +0x0000) in a single 2 MB block. */
+#define RTL8169_BAR_WINDOW_BASE  0x3528000000UL
+#define RTL8169_BAR2_BASE        0x3528004000UL  /* Main MMIO register bank */
+#define RTL8169_BAR2_SIZE        0x00001000UL    /* 4 KB */
+#define RTL8169_BAR4_BASE        0x3528000000UL  /* Extended registers */
+#define RTL8169_BAR4_SIZE        0x00004000UL    /* 16 KB */
+
+/* PCI address of the RTL8168 on PCIe C8: bus 0x01, dev 0x00, fn 0x00 */
+#define RTL8169_PCI_BUS          0x01
+#define RTL8169_PCI_DEV          0x00
+#define RTL8169_PCI_FUNC         0x00
+#define RTL8169_PCI_VENDOR       0x10ECU
+#define RTL8169_PCI_DEVICE       0x8168U
+
+/*
+ * Tegra XHCI USB 3.0 host controller (tegra-xusb). Candidate for USB
+ * CDC-ECM-based networking if the PCIe RC stays CBB-firewalled at EL2
+ * (see docs/jetson-pcie-investigation.md). All three register banks
+ * fit inside the 2 MB block at 0x03600000.
+ */
+#define TEGRA_XHCI_FPCI_BASE     0x03600000UL    /* Function-PCI regs (64 KB) */
+#define TEGRA_XHCI_HCD_BASE      0x03610000UL    /* xHCI operational regs (~256 KB) */
+#define TEGRA_XHCI_BAR2_BASE     0x03650000UL    /* xHCI BAR2 regs (64 KB) */
+
+/*
  * Spinlock policy: use the runtime `spinlock_hw_enabled` flag, same as Pi 5.
  *
  * Before MMU enable, memory is non-cacheable and LSE atomics (SWPALB) cause
