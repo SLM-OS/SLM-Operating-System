@@ -159,10 +159,13 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b);
  *
  * The encoding uses the Volta+ new-style host-semaphore methods at
  * byte offsets 0x5C–0x6C (legacy SEMAPHOREA/B/C/D at 0x10–0x1C aren't
- * routed on AMPERE_CHANNEL_GPFIFO_A on GA10B). Method headers follow
- * the Fermi-family [12:2] METHOD_ADDRESS layout — common prior bug is
- * shifting method-index values right by 2, which lands them at the
- * wrong bit position and PBDMA decodes them as different methods.
+ * routed on AMPERE_CHANNEL_GPFIFO_A on GA10B). Method headers carry
+ * `method_id = byte_off / 4` at bits [12:0] (NVC56F_METHOD_HEADER_INC
+ * macro in ga10b_bringup.c). A prior iteration placed byte_off at
+ * [11:0] instead — PBDMA advanced GP_GET on the malformed header but
+ * silently discarded the method, so the sema never fired. Validated
+ * live on jetson-nano-2 (2026-04-18) against nvgpu's own gv11b sema
+ * cmdbuf literal encoding.
  *
  * **Buffer contract:** `pb` must point to at least
  * GA10B_SEMA_RELEASE_PB_DWORDS uint32_t slots. Returns the dword
@@ -192,23 +195,19 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
  * encoding:
  *
  *   1. SET_OBJECT (method 0) binding AMPERE_COMPUTE_B (class 0xC7C0)
- *      to subchannel 0. Without this, the GR engine raises
- *      CLASS_SUBCH_MISMATCH on the first real compute method.
+ *      to subchannel 1. NVK's nv_push.h pins compute classes
+ *      (0x90C0..0xC7C0) to subch 1 and graphics classes
+ *      (0x9097..0xC797) to subch 0; nvgpu enforces this via
+ *      validate_class_veid_pbdma and rejects the (COMPUTE_B, subch 0,
+ *      veid>=1) tuple as CLASS_SUBCH_MISMATCH. This was the root
+ *      cause of #273.
  *   2. AMPERE_COMPUTE_B's own REPORT_SEMAPHORE_* methods at byte
- *      offsets 0x158..0x168 (from clc7c0.h). These differ from the
- *      host-channel semaphore family at 0x5C..0x6C both in byte
- *      offset and in the EXECUTE encoding — COMPUTE_B uses
- *      OPERATION_RELEASE=0 (not 1), plus STRUCTURE_SIZE bits [4:3]
- *      that must be SEMAPHORE_ONE_WORD (1<<3) for a 32-bit payload.
- *
- * **State needed at dispatch time for this to succeed:** the
- * channel's GR context must be loaded and the subchannel must be
- * able to accept a class bind. As of 2026-04-18 this fails with
- * GR FE CLASS_SUBCH_MISMATCH on channels set up via the Linux
- * helper — the bind itself is rejected before the semaphore methods
- * are processed. Tracked in issue #273. This builder is committed
- * so whoever resolves #273 can call it directly without re-deriving
- * the COMPUTE_B encoding.
+ *      offsets 0x158..0x168 (from clc7c0.h), all on subch 1. These
+ *      differ from the host-channel semaphore family at 0x5C..0x6C
+ *      both in byte offset and in the EXECUTE encoding — COMPUTE_B
+ *      uses OPERATION_RELEASE=0 (not 1), plus STRUCTURE_SIZE bits
+ *      [4:3] that must be SEMAPHORE_ONE_WORD (1<<3) for a 32-bit
+ *      payload.
  *
  * **Buffer contract:** `pb` must point to at least
  * GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS uint32_t slots. Returns the

@@ -185,9 +185,9 @@ stack than discrete Ampere.
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
 | FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
 | RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (1050 lines) | **44** | Phases 1–7 wired; **Phases 5–7 HW-verified** — SLM-OS rings the USERMODE doorbell at BAR0+0xBB0090 from EL2, PBDMA consumes GPFIFO entries. SEMAPHORE_RELEASE encoded correctly for both host-family and COMPUTE_B method variants; GR FE class-subch-mismatch blocker tracked in #273 |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (1050 lines) | **45** | Phases 1–7 wired; **Phase 7 host-family path fires sema on Jetson** — helper's pre-kexec isolation test writes 0xCAFE to the target VA after USERMODE doorbell. SEMAPHORE_RELEASE encoded correctly (method_id at [12:0] per nvgpu gv11b), class/subch/veid tuple correct (COMPUTE_B on subch 1 per NVK). COMPUTE_B method path still blocked on MME_FE1 (issue #291, needs MME program load); #273 resolved |
 | **Jetson platform shim** | `nvidia_gsp_platform.c` (350 lines) | **15** | vtable dispatch + DMA align math host-tested |
-| **Total host-side tests** | | **181** | **All passing** |
+| **Total host-side tests** | | **182** | **All passing** |
 
 ### Platform-Specific Blockers
 
@@ -284,14 +284,12 @@ through the kexec transition (skips `fuser -k`). SLM-OS scans
 validates the handoff (magic, version, non-null addresses,
 power-of-2 GPFIFO entries), and advances to `CHANNEL_OPEN` state.
 
-**Phase 7 HW-verified (April 17):** `nvgpu submit` writes a NOP
+**Phase 7 pushbuffer path (April 17):** `nvgpu submit` writes a NOP
 pushbuffer, builds an Ampere GPFIFO entry (entry0[31:2] = va,
 entry1[7:0] = va[39:32], entry1[30:10] = length_dwords),
 increments GP_PUT in USERD, then rings the USERMODE doorbell at
 physical 0x17BB0090 with the `work_submit_token` from the handoff
-block. PBDMA consumes the entry and GP_GET advances. Bringup
-reaches `METHOD_ACCEPTED` (state=7). Reproduced with multiple
-submissions in the same shell session. Source: OE4T/linux-nvgpu
+block. Source: OE4T/linux-nvgpu
 `drivers/gpu/nvgpu/hal/fifo/usermode_tu104.c:58-75`, confirmed via
 strace of CUDA and `/dev/mem` readback of 0x17BB0000 matching
 CUDA's userspace mmap.
@@ -303,54 +301,59 @@ it from `channel_id` alone is wrong on Linux's allocation path,
 which is how PR #254's `nvgpu submit` doorbell kicked the wrong
 channel).
 
-**Phase 7 SEMAPHORE_RELEASE encoding (April 18):** The pushbuffer
-builder for a real host-semaphore release is implemented and host-
-tested (`ga10b_build_sema_release_pushbuffer` in
-`kernel/gpu/nvidia/ga10b_bringup.c`, 3 regression tests in
-`host-tools/gsp-harness/test_ga10b_bringup.c`). Encoding uses the
-Volta+ new-style methods at byte offsets 0x5C–0x6C — GA10B's
-`AMPERE_CHANNEL_GPFIFO_A` doesn't route the legacy SEMAPHOREA/B/C/D
-at 0x10–0x1C. Method headers place METHOD_ADDRESS at bits [12:2],
-not [12:0] (a prior version shifted the index right by 2 and landed
-at the wrong bit position).
+**Phase 7 host-family sema VERIFIED (April 18):** The host-family
+pushbuffer builder (`ga10b_build_sema_release_pushbuffer` in
+`kernel/gpu/nvidia/ga10b_bringup.c`) emits the Volta+ new-style
+methods at byte offsets 0x5C–0x6C (GA10B's AMPERE_CHANNEL_GPFIFO_A
+doesn't route the legacy SEMAPHOREA/B/C/D at 0x10–0x1C). The helper's
+pre-kexec isolation test on jetson-nano-2 writes `0x0000CAFE` to the
+target semaphore VA after the USERMODE doorbell, confirming the
+full submit→dispatch→writeback path works end-to-end on hardware.
 
-On hardware, the encoding is correct (pushbuffer peek matches the
-host-test expectations byte-for-byte) and PBDMA consumes the entry
-(GP_GET advances). The semaphore DRAM slot, however, still reads
-zero — the compute context isn't executing methods despite matching
-CUDA's ioctl setup sequence (channel class 0xC7C0, SET_PREEMPT_MODE
-with CILP, SET_ERROR_NOTIFIER, CREATE_SUBCONTEXT + BIND_CHANNEL_EX,
-REGISTER_BUFFER for each dmabuf). Tracked in **issue #273** with
-the LD_PRELOAD ioctl interposer (`scripts/nvgpu_ioctl_trace.c`) and
-cached L4T r36.4.7 UAPI headers for continued investigation.
+**Encoding investigation (April 18):** Two overlapping bugs in the
+pushbuffer builder hid each other for weeks:
 
-**Phase 7 blocker traced to GR FE (April 18):** Enabled verbose
-nvgpu kernel logging and diffed dmesg between CUDA (silent, works)
-and the helper (every submit triggers
-`gm20b_gr_intr_check_gr_fe_exception`: `esr 0x80000002, info
-0x0108c7c0`). Decoded: `esr` bit 1 = **CLASS_SUBCH_MISMATCH** on
-`NV_PGRAPH_PRI_FE_HWW_ESR`; `info[15:0]` = 0xC7C0 = the class in the
-mismatch. This is the correct AMPERE_COMPUTE_B class per nvgpu's
-own `gr_compute_class_v()`, so GR FE is rejecting the SET_OBJECT
-bind itself (not a downstream method). Also confirmed the
-host-family methods at 0x5C-0x6C and the COMPUTE_B methods at
-0x158-0x168 (clc7c0.h, OPERATION_RELEASE=0, STRUCTURE_SIZE_ONE_WORD)
-both fail with the same exception — the issue is *below* the
-pushbuffer encoding layer, in GR engine context-switch state.
+1. **Method-header bit layout.** The `NVC56F_METHOD_HEADER_INC`
+   macro placed byte_off directly at bits [11:0] (`byte_off & 0xFFFu`).
+   The hardware actually decodes bits [12:0] as `method_id = byte_off / 4`
+   — nvgpu's own gv11b sema cmdbuf emits `0x20010017` for SEM_ADDR_LO
+   (byte 0x5C → method_id 0x17), not `0x2001005C`. PBDMA advanced
+   GP_GET on the malformed header (it consumed the dword pair) but
+   silently discarded the method. The false positive ("PBDMA consumes
+   the entry, GP_GET advances") masked a complete non-execution.
+   Fixed: `((byte_off >> 2) & 0x1FFFu)`.
 
-Added `ga10b_build_compute_sema_release_pushbuffer` as a parallel
-pure-function builder (12 dwords: SET_OBJECT + 5 COMPUTE_B method
-pairs) so the next session resolving #273 can call it directly
-instead of re-deriving the encoding. 3 new host regression tests
-guard the COMPUTE_B layout against the same class of bit-position
-and method-family regressions that bit the host-family builder.
+2. **AMPERE_COMPUTE_B subchannel.** Our earlier SET_OBJECT emitted
+   class 0xC7C0 on subchannel 0; NVK's `src/nouveau/headers/nv_push.h`
+   pins compute classes (0x90C0..0xC7C0) to subchannel 1, graphics
+   classes (0x9097..0xC797) to subchannel 0. nvgpu's
+   `validate_class_veid_pbdma` rejected the (COMPUTE_B, subch 0,
+   veid>=1) tuple as `CLASS_SUBCH_MISMATCH` (esr 0x80000002). Fixed:
+   both builders now emit COMPUTE_B methods on subchannel 1.
+
+Both fixes landed together since #273's symptoms were attributable
+to the subchannel bug only after the encoding fix unmasked method
+execution. Host regression tests added:
+
+- `test_method_header_encoding` — direct encoding coverage including
+  a >0xFFF offset (INVALIDATE_SAMPLER_CACHE_NO_WFI at byte 0x1424)
+  that would truncate under the prior encoding.
+- Literal-dword guards (`pb[N] == 0x20010017` etc.) in the host-family
+  and COMPUTE_B layout tests — catch co-regression of
+  `NVC56F_METHOD_HEADER_INC` and `EXPECT_INC_HDR` drifting together.
 
 **Remaining path to GPU inference:**
-- Resolve #273: root-cause the GR FE CLASS_SUBCH_MISMATCH. Most
-  promising leads are RAMFC engine-id state and whether the GR
-  golden context is loaded for channels created via the
-  ioctl-only (no SUBMIT_GPFIFO) path CUDA takes.
-- Compute class binding + QMD dispatch
+- #291 (MME_FE1 exception on COMPUTE_B path): the
+  `ga10b_build_compute_sema_release_pushbuffer` builder has correct
+  encoding and subch, but executing it needs an MME program load
+  (NVK-style: 3D engine context on subch 0 + inline MME ucode via
+  `LOAD_MME_INSTRUCTION_RAM_POINTER`). Host-family path is
+  unaffected.
+- Post-kexec validation: the SLM-OS-side Phase 7 smoke test reads
+  the same handoff and submits the same encoded pushbuffer; needs
+  a fresh hardware run now that encoding is correct (prior "works
+  end-to-end" signal was based on GP_GET advance only).
+- Compute class binding + QMD dispatch (blocked on #291)
 - Compute kernel (SASS binary for `sm_87`)
 - Inference loop (GEMM → activation per layer)
 

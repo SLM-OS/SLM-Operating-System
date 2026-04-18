@@ -3,7 +3,7 @@
  * the handoff metadata for SLM-OS to inherit after kexec.
  *
  * ============================================================
- *   STATUS: WORKING end-to-end (Phases 6+7) on L4T r36.4.7, 2026-04-17
+ *   STATUS: pre-kexec isolation test fires sema on Jetson, 2026-04-18
  * ============================================================
  *
  * All 10 ioctls succeed; handoff block (wire v2, carrying
@@ -12,13 +12,17 @@
  * parameters were reverse-engineered from CUDA via an LD_PRELOAD
  * ioctl-snoop (see commit history).
  *
- * Phase 7 (pushbuffer submission) works end-to-end: SLM-OS reads
- * the work_submit_token out of the handoff block and writes it to
- * BAR0+0xBB0090 (physical 0x17BB0090) from EL2. PBDMA consumes
- * the GPFIFO entry and GP_GET advances. The helper's pre-kexec
- * doorbell below is kept as a defensive prime — it's a no-op when
- * PBDMA is already scheduled on this channel but ensures CHRAM
- * has observed at least one update before kexec.
+ * Phase 7 pre-kexec isolation: helper writes a PBDMA host-family
+ * SEMAPHORE_RELEASE pushbuffer, rings the USERMODE doorbell at
+ * offset 0x90 within the CTRL mmap (BAR0+0xBB0090), and observes
+ * the GPU write `0x0000CAFE` at the target VA. Method encoding
+ * matches nvgpu's gv11b sema cmdbuf (method_id at [12:0], not
+ * byte_off at [11:0] — see kernel/gpu/nvidia/ga10b_bringup.c for
+ * the same fix on the SLM-OS side). The SLM-OS-side post-kexec
+ * submit using the same encoding is tracked for re-validation in
+ * issue #297; PBDMA's GP_GET advance alone is no longer treated
+ * as proof of method dispatch after the 2026-04-18 encoding
+ * investigation.
  *
  * Usage: sudo ./gpu-channel-helper [--timeout-secs N]
  *
@@ -502,56 +506,51 @@ int main(int argc, char **argv)
      * (the mmap covers BAR0+0xBB0000..+0xBB0FFF). Fixed below. */
     printf("[gpu-helper] === ISOLATION TEST: userspace mmap+doorbell ===\n");
 
-    /* SEMAPHORE_RELEASE via AMPERE_COMPUTE_B methods.
+    /* SEMAPHORE_RELEASE via PBDMA-decoded host-family methods.
      *
-     * The kernel-internal gv11b_sema_add_incr_cmd uses host-family
-     * methods at 0x5C..0x6C, but those only decode on a channel
-     * WITHOUT any class bound to the target subchannel. Once
-     * SET_OBJECT binds AMPERE_COMPUTE_B (0xC7C0) to subch 0, the GR
-     * engine expects COMPUTE_B methods — method 0x5C then triggers
-     * CLASS_SUBCH_MISMATCH (esr 0x80000002).
+     * Encoding matches nvgpu's gv11b_sema_add_incr_cmd verbatim
+     * (docs/reference/nvgpu-hal-sync-sema_cmdbuf_gv11b.c:45-101).
+     * Method headers carry method_id = byte_off / 4 at bits [12:0]
+     * (NOT byte_off at [11:0]) — the hardware decodes bits [12:0]
+     * as method_id, so misplacing the value causes PBDMA to silently
+     * discard the method while still advancing GP_GET. Verified
+     * sema-fires live on jetson-nano-2 2026-04-18.
      *
-     * Correct path: SET_OBJECT first, then COMPUTE_B's own
-     * REPORT_SEMAPHORE_* methods at 0x158..0x168
-     * (from docs/reference/nvgpu-include-class-clc7c0.h). OPERATION
-     * on this family is RELEASE=0 (not 1), STRUCTURE_SIZE needs
-     * SEMAPHORE_ONE_WORD (1<<3) for a 32-bit payload.
+     * Host family at byte 0x5C-0x6C is PBDMA-decoded and bypasses
+     * GR/MME entirely — no SET_OBJECT needed, no class bind. The
+     * COMPUTE_B path via AMPERE_COMPUTE_B (class 0xC7C0) on subch 1
+     * is mothballed pending MME program-load support (issue #291);
+     * until then, the helper's isolation test uses the host family.
      *
-     * **AUTHORITATIVE SOURCE:** the same dword stream is built by
-     * kernel/gpu/nvidia/ga10b_bringup.c's pure function
-     * ga10b_build_compute_sema_release_pushbuffer(). Host tests in
-     * host-tools/gsp-harness/test_ga10b_bringup.c lock the encoding.
-     * If you change the layout, change it there too — otherwise this
-     * helper's pre-kexec isolation test will diverge from the
-     * SLM-OS-side post-kexec submit and debugging will be confusing.
-     * The helper uses hardcoded literals here (not a shared header)
-     * because the kernel builder lives in a C file, not a header, and
-     * refactoring for sharing is out of scope for a diagnostic tool. */
+     * **LAYOUT LOCKED BY TESTS:** host-tools/gsp-harness/test_ga10b_bringup.c
+     * pins the dword stream of ga10b_build_sema_release_pushbuffer
+     * (the kernel-side mirror) against literal values. If this
+     * helper diverges from that encoding, the pre-kexec isolation
+     * test and SLM-OS's post-kexec submit won't agree. Helper uses
+     * hardcoded literals rather than importing the kernel macro
+     * because the builder lives in a C file, not a header. */
     uint32_t *pb32 = (uint32_t *)pb_va;
     uint64_t sem_gva = sem_map.offset;
-    pb32[0]  = 0x20010000u;                /* SET_OBJECT header (method 0) */
-    pb32[1]  = 0x0000C7C0u;                /* AMPERE_COMPUTE_B */
-    pb32[2]  = 0x20010158u;                /* SET_REPORT_SEMAPHORE_PAYLOAD_LOWER */
-    pb32[3]  = HELPER_SMOKETEST_SEM_PAYLOAD;
-    pb32[4]  = 0x2001015Cu;                /* SET_REPORT_SEMAPHORE_PAYLOAD_UPPER */
-    pb32[5]  = 0u;                         /* 32-bit release */
-    pb32[6]  = 0x20010160u;                /* SET_REPORT_SEMAPHORE_ADDRESS_LOWER */
-    pb32[7]  = (uint32_t)(sem_gva & 0xFFFFFFFFu);
-    pb32[8]  = 0x20010164u;                /* SET_REPORT_SEMAPHORE_ADDRESS_UPPER */
-    pb32[9]  = (uint32_t)((sem_gva >> 32) & 0xFFu);
-    pb32[10] = 0x20010168u;                /* REPORT_SEMAPHORE_EXECUTE */
-    pb32[11] = 0x00000008u;                /* OP=RELEASE(0) | STRUCTURE_SIZE=ONE_WORD(1<<3) */
+    pb32[0] = 0x20010017u;                 /* SEM_ADDR_LO  (method_id 0x17 = byte 0x5C) */
+    pb32[1] = (uint32_t)(sem_gva & 0xFFFFFFFFu);
+    pb32[2] = 0x20010018u;                 /* SEM_ADDR_HI  (method_id 0x18 = byte 0x60) */
+    pb32[3] = (uint32_t)((sem_gva >> 32) & 0xFFu);
+    pb32[4] = 0x20010019u;                 /* SEM_PAYLOAD_LO (method_id 0x19 = byte 0x64) */
+    pb32[5] = HELPER_SMOKETEST_SEM_PAYLOAD;
+    pb32[6] = 0x2001001au;                 /* SEM_PAYLOAD_HI (method_id 0x1a = byte 0x68) — ignored for 32-bit */
+    pb32[7] = 0u;
+    pb32[8] = 0x2001001bu;                 /* SEM_EXECUTE  (method_id 0x1b = byte 0x6C) */
+    pb32[9] = 0x00000001u;                 /* OPERATION_RELEASE (bit 0) | no wfi */
     msync(pb_va, 4096, MS_SYNC);
 
     /* Pre-clear the semaphore so we can detect the GPU write. */
     *(volatile uint32_t *)sem_va = 0;
     msync(sem_va, 4096, MS_SYNC);
 
-    /* Build GPFIFO entry in Ampere HW format, length=12 dwords
-     * (SET_OBJECT header+data + 5 sema method header+data pairs). */
+    /* Build GPFIFO entry — 10 dwords (5 method pairs, no SET_OBJECT). */
     uint64_t pb_gva = pb_map.offset;
     uint32_t gp_e0 = (uint32_t)(pb_gva & 0xFFFFFFFCu);
-    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (12u << 10);
+    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (10u << 10);
     ((uint32_t *)gpfifo_va)[0] = gp_e0;
     ((uint32_t *)gpfifo_va)[1] = gp_e1;
     msync(gpfifo_va, 8, MS_SYNC);
