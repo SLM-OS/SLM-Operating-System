@@ -1825,8 +1825,10 @@ static void test_acpi_ioapic_address(void)
  * ============================================================================ */
 
 extern uint32_t lapic_read(uint32_t offset);
+extern void lapic_write(uint32_t offset, uint32_t value);
 extern uint32_t lapic_get_id(void);
 extern void lapic_eoi(void);
+extern void lapic_force_xapic_mode(void);
 
 /*
  * Test: LAPIC is initialized (SVR has APIC enable bit set).
@@ -1896,6 +1898,356 @@ static void test_lapic_timer_running(void)
  * ASSERTs inside fb_scroll provide in-line checks if/when the code
  * becomes active.
  */
+
+/* ============================================================================
+ * LAPIC x2APIC-inheritance + CPUID-based calibration tests
+ *
+ * Regression tests for the kexec post-handoff fixes:
+ *   - lapic_force_xapic_mode() must leave the APIC in xAPIC mode with
+ *     the MMIO window live at 0xFEE00000, regardless of starting
+ *     state (fresh boot in xAPIC, kexec-inherited x2APIC, or fully
+ *     disabled).
+ *   - lapic_timer_calibrate() + timer_init() prefer CPUID leaf 0x15
+ *     / 0x16 over PIT, so a chipset that disables PIT channel 2
+ *     post-kexec can't hang the boot.
+ *
+ * These tests run under QEMU-max, which exposes CPUID 0x15 / 0x16
+ * via the host CPU. They assert invariants after lapic_init() +
+ * timer_init() have run, so a regression that strips the x2APIC
+ * transition or the CPUID path out fails immediately.
+ * ============================================================================ */
+
+/* Internal MSR helpers (duplicated from lapic.c so the test code can
+ * verify post-init MSR state without exposing a production API). */
+static inline uint64_t test_rdmsr(uint32_t msr)
+{
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void test_wrmsr(uint32_t msr, uint64_t val)
+{
+    uint32_t lo = (uint32_t)val;
+    uint32_t hi = (uint32_t)(val >> 32);
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
+static inline void test_cpuid(uint32_t leaf,
+                              uint32_t *eax, uint32_t *ebx,
+                              uint32_t *ecx, uint32_t *edx)
+{
+    __asm__ volatile("cpuid"
+                     : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
+                     : "a"(leaf), "c"(0));
+}
+
+/*
+ * Test: IA32_APIC_BASE reports xAPIC mode after lapic_init.
+ *   EN=1 (bit 11)  — LAPIC globally enabled.
+ *   EXTD=0 (bit 10) — NOT in x2APIC mode.
+ * A regression that drops the two-step x2APIC → xAPIC transition
+ * fails here on any kexec from an x2APIC-enabled Linux. Fresh QEMU
+ * boot is already xAPIC, but this test still asserts the invariant
+ * so any code change that flips EXTD on will be caught.
+ */
+static void test_apic_base_msr_xapic_mode(void)
+{
+    uint64_t base = test_rdmsr(0x1B);
+    /* EN must be set. For diagnostic purposes, lapic_init prints
+     * the APIC_BASE MSR value to the boot log on entry — consult
+     * that if this assertion fires. */
+    TEST_ASSERT_TRUE((base & (1ULL << 11)) != 0);
+    /* EXTD must be clear — we're in xAPIC, not x2APIC. */
+    TEST_ASSERT_TRUE((base & (1ULL << 10)) == 0);
+}
+
+/*
+ * Test: LAPIC_ID readback is not the "MMIO returns all-ones" pattern.
+ * 0xFF (after the >>24 & 0xFF extraction in lapic_get_id) is what we
+ * would see if MMIO at 0xFEE00000 were inactive — i.e., if the APIC
+ * were still in x2APIC mode. A sane read returns the APIC ID in
+ * 0..cpu_count-1.
+ */
+static void test_lapic_id_not_stuck_all_ones(void)
+{
+    uint32_t id = lapic_get_id();
+    TEST_ASSERT_NOT_EQUAL(0xFF, id);
+    TEST_ASSERT_TRUE(id < 256);   /* xAPIC: 8-bit ID field */
+}
+
+/*
+ * Test: LAPIC_VERSION readback reports a plausible Intel LAPIC
+ * version. Real silicon returns values in the 0x10..0x1F range
+ * (integrated LAPIC). All-ones (0xFF) signals the "stuck in
+ * x2APIC, MMIO dead" failure mode that motivated
+ * lapic_force_xapic_mode().
+ */
+static void test_lapic_version_not_stuck_all_ones(void)
+{
+    uint32_t ver = lapic_read(0x030) & 0xFF;    /* LAPIC_VERSION */
+    TEST_ASSERT_NOT_EQUAL(0xFF, ver);
+    TEST_ASSERT_TRUE(ver >= 0x10 && ver <= 0x1F);
+}
+
+/*
+ * Test: LAPIC Spurious Vector Register has APIC software enable (bit
+ * 8) set after init. Already covered by test_lapic_initialized above;
+ * included here as a direct companion to the MSR / MMIO tests so the
+ * three enable dimensions (APIC_BASE.EN, SVR.APIC_ENABLE, MMIO live)
+ * are all verified in one cluster.
+ */
+static void test_lapic_svr_enabled_bit(void)
+{
+    uint32_t svr = lapic_read(0x0F0);
+    TEST_ASSERT_TRUE((svr & (1 << 8)) != 0);
+}
+
+/*
+ * Test: LAPIC Timer LVT has a real vector installed (timer_init
+ * registered vector 48 via lapic_timer_setup). If lapic_init
+ * over-aggressively masked LVT_TIMER without letting timer_init
+ * unmask it, this catches the regression.
+ */
+static void test_lapic_lvt_timer_has_vector(void)
+{
+    uint32_t lvt = lapic_read(0x320);  /* LAPIC_LVT_TIMER */
+    uint8_t vector = lvt & 0xFF;
+    /* Vector 48 = LAPIC_TIMER_VECTOR in timer_x86.c */
+    TEST_ASSERT_EQUAL_UINT8(48, vector);
+    /* Mask bit (16) must NOT be set — timer should be running */
+    TEST_ASSERT_TRUE((lvt & (1 << 16)) == 0);
+}
+
+/*
+ * Test: CPUID leaf 0x15 (TSC/crystal ratio + crystal Hz) returns
+ * structurally valid data. Per Intel SDM Vol 2A "CPUID — TSC and
+ * Nominal Core Crystal Clock Information":
+ *
+ *   EAX = denominator of TSC/crystal ratio (must be non-zero when
+ *         leaf is supported — division by zero otherwise)
+ *   EBX = numerator of TSC/crystal ratio (zero → leaf unsupported)
+ *   ECX = core crystal frequency in Hz (zero → unknown)
+ *   EDX = reserved, must be zero
+ *
+ * If max leaf < 0x15, the test passes trivially (the CPU is too
+ * old to expose this leaf; lapic_timer_freq_cpuid handles that and
+ * falls back to PIT). If the leaf IS exposed and EBX is non-zero
+ * (ratio reported), then EAX must also be non-zero — a regression
+ * that lets through a degenerate ratio would divide-by-zero in
+ * tsc_freq_from_cpuid.
+ */
+static void test_cpuid_leaf_15_accessible(void)
+{
+    uint32_t eax, ebx, ecx, edx;
+    test_cpuid(0, &eax, &ebx, &ecx, &edx);
+    if (eax < 0x15) {
+        TEST_PASS();   /* leaf not exposed on this CPU model */
+        return;
+    }
+    test_cpuid(0x15, &eax, &ebx, &ecx, &edx);
+    /* EDX is reserved for future use; SDM guarantees zero. */
+    TEST_ASSERT_EQUAL_UINT32(0, edx);
+    /* If EBX (numerator) is non-zero, EAX (denominator) must also
+     * be non-zero — otherwise the TSC/crystal ratio computation
+     * crashes. */
+    if (ebx != 0)
+        TEST_ASSERT_TRUE(eax != 0);
+    /* If ECX (crystal Hz) is reported, it must be in a sane MHz
+     * range. Common values are 24/25/38.4 MHz. The upper bound is
+     * 1 GHz — Intel core crystals have always been low-MHz parts
+     * (TSC is the high-frequency derivative); a reading above that
+     * is a CPUID-emulation bug. */
+    if (ecx != 0) {
+        TEST_ASSERT_TRUE(ecx >= 1000000U);
+        TEST_ASSERT_TRUE(ecx < 1000000000U);
+    }
+}
+
+/*
+ * Test: CPUID leaf 0x16 (if supported) reports a plausible base
+ * frequency. Skylake host via QEMU-max exposes this at ~3.x GHz;
+ * older hosts may report lower. A value >= 100 MHz is enough to
+ * call the TSC calibration usable.
+ */
+static void test_cpuid_leaf_16_base_mhz(void)
+{
+    uint32_t eax, ebx, ecx, edx;
+    test_cpuid(0, &eax, &ebx, &ecx, &edx);
+    if (eax < 0x16) {
+        TEST_PASS();  /* leaf not exposed — acceptable */
+        return;
+    }
+    test_cpuid(0x16, &eax, &ebx, &ecx, &edx);
+    /* EAX = base MHz. 0 means the field isn't populated — we
+     * accept that (timer_init's CPUID path then falls back). A
+     * non-zero value must be in a plausible range: 100 MHz floor
+     * (any modern CPU), strictly under 10 GHz ceiling. The 10 GHz
+     * bound is far above any shipped Intel base frequency; a value
+     * at or above it is a CPUID-emulation bug. */
+    if (eax != 0) {
+        TEST_ASSERT_TRUE(eax >= 100);
+        TEST_ASSERT_TRUE(eax < 10000);
+    }
+}
+
+/*
+ * Test: timer_get_frequency() returns a plausible Hz after
+ * timer_init. If calibration ran to completion via CPUID (preferred
+ * on QEMU-max), this is the TSC frequency (hundreds of MHz to
+ * several GHz). If calibration fell back with tsc_freq==0, we get
+ * TIMER_HZ (100). Either is OK as long as the value isn't garbage.
+ * A regression that drops the bounded-PIT timeout and hangs the
+ * boot would never reach this test — so its mere execution is
+ * also a signal that the timer init completed without hanging.
+ */
+static void test_timer_frequency_plausible(void)
+{
+    uint64_t freq = timer_get_frequency();
+    /* Must be non-zero. */
+    TEST_ASSERT_TRUE(freq > 0);
+    /* Either TIMER_HZ (100 fallback) or actual TSC (MHz-to-GHz). */
+    TEST_ASSERT_TRUE(freq == 100 || freq >= 100000000ULL);
+    TEST_ASSERT_TRUE(freq < 100ULL * 1000000000ULL);  /* < 100 GHz */
+}
+
+/*
+ * Test: lapic_force_xapic_mode() is a no-op on a healthy xAPIC. The
+ * helper has a load-bearing early-return that skips the EN=0 → EN=1
+ * toggle when the LAPIC is already in xAPIC mode — without it, QEMU
+ * TCG silently rejects the re-enable and bricks the APIC until
+ * RESET. This test asserts the early return is still in place by
+ * confirming APIC_BASE is byte-for-byte unchanged after the call,
+ * and that MMIO is still live.
+ *
+ * If a regression strips the early-return (e.g. "always run the
+ * two-step toggle, it's idempotent on healthy xAPIC"), this test
+ * fires — and importantly, it fires BEFORE the bricking would
+ * cascade into the rest of the suite, since the assertion runs the
+ * helper exactly once.
+ */
+static void test_lapic_force_xapic_mode_idempotent(void)
+{
+    uint64_t base = test_rdmsr(0x1B);
+    TEST_ASSERT_TRUE((base & (1ULL << 11)) != 0);   /* EN */
+    TEST_ASSERT_TRUE((base & (1ULL << 10)) == 0);   /* !EXTD */
+
+    lapic_force_xapic_mode();
+
+    uint64_t after = test_rdmsr(0x1B);
+    TEST_ASSERT_EQUAL_UINT64(base, after);
+    /* MMIO must still be live — a regression that wrote to
+     * APIC_BASE.EN under the early-return condition would here
+     * read 0xFFFFFFFF from the LAPIC_ID register. */
+    uint32_t id = lapic_get_id();
+    TEST_ASSERT_NOT_EQUAL(0xFF, id);
+}
+
+/*
+ * Test: lapic_force_xapic_mode() drives the LAPIC back to xAPIC
+ * after a synthetic x2APIC enable, exercising the kexec-recovery
+ * branch that the production fix exists for. Sequence:
+ *
+ *   1. Confirm we're in xAPIC (EN=1, EXTD=0).
+ *   2. wrmsr APIC_BASE with EXTD=1 → CPU enters x2APIC mode (this
+ *      transition direction is legal per Intel SDM Vol 3A §10.12.5
+ *      Table 10-6 without going through DISABLED).
+ *   3. Confirm the MMIO window at 0xFEE00000 is now dead (lapic_read
+ *      of LAPIC_ID returns 0xFFFFFFFF — the failure mode that
+ *      motivated the helper).
+ *   4. Call lapic_force_xapic_mode() — must walk x2APIC → DISABLED →
+ *      xAPIC.
+ *   5. Confirm EN=1, EXTD=0 in APIC_BASE and MMIO is live again.
+ *   6. Re-arm the LVT timer + SVR so the rest of the test suite
+ *      still has a working APIC.
+ *
+ * Skip the destructive transit unless the CPU actually advertises
+ * x2APIC (CPUID.01h:ECX[21]). QEMU `-cpu max` exposes the bit, but
+ * some baseline TCG profiles do not — and on a CPU without x2APIC
+ * support the EXTD wrmsr is silently dropped, which would never
+ * happen in real kexec. The idempotency case is the meaningful
+ * test on those hosts (covered separately).
+ */
+static void test_lapic_force_xapic_mode_x2apic_recovery(void)
+{
+    uint32_t cpuid_eax, cpuid_ebx, cpuid_ecx, cpuid_edx;
+    test_cpuid(1, &cpuid_eax, &cpuid_ebx, &cpuid_ecx, &cpuid_edx);
+    if ((cpuid_ecx & (1u << 21)) == 0) {
+        TEST_PASS();    /* x2APIC not exposed — destructive case N/A */
+        return;
+    }
+
+    /* Step 1 — starting state must be xAPIC. */
+    uint64_t base = test_rdmsr(0x1B);
+    TEST_ASSERT_TRUE((base & (1ULL << 11)) != 0);   /* EN */
+    TEST_ASSERT_TRUE((base & (1ULL << 10)) == 0);   /* !EXTD */
+
+    /* Save every MMIO-side register the rest of the suite (or
+     * production code that runs after) might depend on. On QEMU
+     * TCG these survive the x2APIC enter/exit, but on real silicon
+     * Intel SDM §10.12.5 allows the LAPIC to reset MMIO registers
+     * across mode transitions — treat them all as volatile across
+     * the call so the test never silently leaks default-reset
+     * values into a downstream test that reads, say, the LINT0
+     * vector. */
+    uint32_t saved_svr        = lapic_read(0x0F0);
+    uint32_t saved_lvt_cmci   = lapic_read(0x2F0);
+    uint32_t saved_lvt_timer  = lapic_read(0x320);
+    uint32_t saved_lvt_thrm   = lapic_read(0x330);
+    uint32_t saved_lvt_pmi    = lapic_read(0x340);
+    uint32_t saved_lvt_lint0  = lapic_read(0x350);
+    uint32_t saved_lvt_lint1  = lapic_read(0x360);
+    uint32_t saved_lvt_error  = lapic_read(0x370);
+    uint32_t saved_timer_init = lapic_read(0x380);
+    uint32_t saved_timer_div  = lapic_read(0x3E0);
+
+    /* Step 2 — flip into x2APIC. EN=1 stays set; EXTD goes high.
+     * If the readback doesn't show EXTD set, the host isn't actually
+     * honoring the transition (QEMU TCG quirk on some versions);
+     * skip the destructive part rather than fail. */
+    test_wrmsr(0x1B, base | (1ULL << 10));
+    uint64_t x2 = test_rdmsr(0x1B);
+    if ((x2 & (1ULL << 10)) == 0) {
+        TEST_PASS();   /* host quietly rejected x2APIC entry */
+        return;
+    }
+    TEST_ASSERT_TRUE((x2 & (1ULL << 11)) != 0);     /* still EN */
+
+    /* Step 3 — MMIO at 0xFEE00000 should now read all-ones. This is
+     * the exact "ID=255, version=0xff" symptom Linux's kexec-shutdown
+     * leaves behind. */
+    uint32_t dead_id = lapic_read(0x020);
+    TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFF, dead_id);
+
+    /* Step 4 — recover via the helper under test. */
+    lapic_force_xapic_mode();
+
+    /* Step 5 — APIC_BASE back to xAPIC and MMIO live again. */
+    uint64_t after = test_rdmsr(0x1B);
+    TEST_ASSERT_TRUE((after & (1ULL << 11)) != 0);  /* EN */
+    TEST_ASSERT_TRUE((after & (1ULL << 10)) == 0);  /* !EXTD */
+    uint32_t live_id = lapic_get_id();
+    TEST_ASSERT_NOT_EQUAL(0xFF, live_id);
+    TEST_ASSERT_TRUE(live_id < 256);
+
+    /* Step 6 — restore every register we saved in step 1 so the
+     * rest of the suite sees exactly the LAPIC state lapic_init +
+     * timer_init left behind. Order: LVTs first (so a stale
+     * register-reset vector can't fire when SVR enables), then
+     * timer, then SVR + TPR + EOI. */
+    lapic_write(0x2F0, saved_lvt_cmci);
+    lapic_write(0x320, saved_lvt_timer);
+    lapic_write(0x330, saved_lvt_thrm);
+    lapic_write(0x340, saved_lvt_pmi);
+    lapic_write(0x350, saved_lvt_lint0);
+    lapic_write(0x360, saved_lvt_lint1);
+    lapic_write(0x370, saved_lvt_error);
+    lapic_write(0x3E0, saved_timer_div);
+    lapic_write(0x380, saved_timer_init);
+    lapic_write(0x0F0, saved_svr);
+    lapic_write(0x080, 0);                          /* TPR = 0 */
+    lapic_write(0x0B0, 0);                          /* EOI */
+}
 
 /* ============================================================================
  * SMP Tests
@@ -3348,6 +3700,17 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_lapic_eoi_safe);
     RUN_TEST(test_lapic_eoi_fence_many);
     RUN_TEST(test_lapic_timer_running);
+    /* kexec x2APIC / CPUID calibration regression tests (PR #268) */
+    RUN_TEST(test_apic_base_msr_xapic_mode);
+    RUN_TEST(test_lapic_id_not_stuck_all_ones);
+    RUN_TEST(test_lapic_version_not_stuck_all_ones);
+    RUN_TEST(test_lapic_svr_enabled_bit);
+    RUN_TEST(test_lapic_lvt_timer_has_vector);
+    RUN_TEST(test_cpuid_leaf_15_accessible);
+    RUN_TEST(test_cpuid_leaf_16_base_mhz);
+    RUN_TEST(test_timer_frequency_plausible);
+    RUN_TEST(test_lapic_force_xapic_mode_idempotent);
+    RUN_TEST(test_lapic_force_xapic_mode_x2apic_recovery);
 
     /* SMP tests */
     RUN_TEST(test_smp_cpu_count);

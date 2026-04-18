@@ -24,6 +24,11 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 
-# x86-64 specific flags
-set(CMAKE_C_FLAGS_INIT "-m64 -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fno-stack-protector")
+# x86-64 specific flags. Ubuntu/Debian host GCC enables
+# -D_FORTIFY_SOURCE=2 by default at -O1+, which rewrites
+# snprintf/memcpy/etc. into __snprintf_chk/__memcpy_chk calls. Those
+# symbols live in glibc, which we don't link against
+# (-ffreestanding -nostdlib). Force fortify off so the freestanding
+# build doesn't accidentally pull in host libc shims.
+set(CMAKE_C_FLAGS_INIT "-m64 -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -fno-stack-protector -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0")
 set(CMAKE_ASM_FLAGS_INIT "-m64")

@@ -19,6 +19,7 @@
 #include "sched.h"
 #include "smp.h"
 #include "uart.h"
+#include "cpuid.h"
 
 /* LAPIC timer interface (lapic.c) */
 extern uint32_t lapic_timer_calibrate(void);
@@ -34,6 +35,13 @@ extern void irq_register(uint8_t irq, void (*handler)(uint8_t));
 
 /* Tick counter (global, incremented on BSP only for uptime tracking) */
 volatile uint64_t pit_ticks;
+
+/* Bounded busy-wait budget for the PIT calibration fallback path.
+ * Mirrors TSC_PIT_TIMEOUT_CYCLES in lapic.c — both paths poll the
+ * same PIT-channel-2 OUT line and need the same 200 ms ceiling so a
+ * kexec-disabled PIT can't hang boot. Keep these in sync if either
+ * is changed. */
+#define TSC_PIT_TIMEOUT_CYCLES   600000000ULL
 
 /*
  * Read the Time Stamp Counter (RDTSC) — cycle-accurate, ~GHz resolution.
@@ -62,16 +70,59 @@ static void lapic_timer_irq(uint8_t irq)
     scheduler_tick();
 }
 
+/* Read TSC frequency from CPUID leaves 0x15 and 0x16.
+ *
+ * Leaf 0x15 (Skylake+): TSC/crystal ratio + core crystal in Hz.
+ *   TSC freq = crystal * EBX / EAX (all returned in that leaf)
+ *
+ * Some CPUs report the ratio but not the crystal frequency; in that
+ * case, fall through to leaf 0x16 which gives the processor base
+ * frequency in MHz directly (close enough for TSC under
+ * constant_tsc, which all Intel chips from Nehalem onward
+ * guarantee).
+ *
+ * Returns 0 if neither leaf yields a usable number — caller then
+ * falls back to PIT calibration. */
+static uint64_t tsc_freq_from_cpuid(void)
+{
+    uint32_t eax, ebx, ecx, edx;
+    x86_cpuid(0, &eax, &ebx, &ecx, &edx);
+    uint32_t max_leaf = eax;
+
+    if (max_leaf >= 0x15) {
+        x86_cpuid(0x15, &eax, &ebx, &ecx, &edx);
+        if (ebx != 0 && ecx != 0 && eax != 0) {
+            return ((uint64_t)ecx * (uint64_t)ebx) / (uint64_t)eax;
+        }
+    }
+
+    if (max_leaf >= 0x16) {
+        x86_cpuid(0x16, &eax, &ebx, &ecx, &edx);
+        /* EAX = processor base frequency in MHz */
+        if (eax != 0)
+            return (uint64_t)eax * 1000000ULL;
+    }
+
+    return 0;
+}
+
 void timer_init(void)
 {
-    /* Calibrate LAPIC timer against PIT */
+    /* Calibrate LAPIC timer (CPUID first, PIT fallback). */
     lapic_ticks_per_sec = lapic_timer_calibrate();
 
-    /* Calibrate TSC: measure cycles during the same ~10ms window */
-    {
+    /* TSC frequency — prefer CPUID (deterministic, works across
+     * kexec handoffs); fall back to PIT with a bounded timeout
+     * only when CPUID reports nothing. */
+    tsc_freq = tsc_freq_from_cpuid();
+    if (tsc_freq != 0) {
+        uart_printf("[TIMER] TSC frequency from CPUID: %lu Hz (%lu MHz)\n",
+                    (unsigned long)tsc_freq,
+                    (unsigned long)(tsc_freq / 1000000));
+    } else {
         extern void outb(uint16_t port, uint8_t val);
         extern uint8_t inb(uint16_t port);
-        uint16_t pit_count = 11932;  /* ~10ms */
+        uint16_t pit_count = 11932;  /* ~10 ms */
         outb(0x61, (inb(0x61) & 0xFD) | 0x01);
         outb(0x43, 0xB0);
         outb(0x42, pit_count & 0xFF);
@@ -80,12 +131,27 @@ void timer_init(void)
         outb(0x61, tmp);
         outb(0x61, tmp | 0x01);
         uint64_t tsc_start = rdtsc();
-        while (!(inb(0x61) & 0x20))
-            ;
-        uint64_t tsc_elapsed = rdtsc() - tsc_start;
-        tsc_freq = tsc_elapsed * 100;  /* 10ms × 100 = 1 second */
-        uart_printf("[TIMER] TSC calibration: %lu cycles/10ms, %lu MHz\n",
-                    (unsigned long)tsc_elapsed, (unsigned long)(tsc_freq / 1000000));
+        /* Bounded wait — bail after ~200 ms of TSC time if PIT
+         * ch2 never fires (kexec-inherited disabled PIT). */
+        int pit_ok = 0;
+        while (1) {
+            if (inb(0x61) & 0x20) { pit_ok = 1; break; }
+            if (rdtsc() - tsc_start > TSC_PIT_TIMEOUT_CYCLES) break;
+        }
+        if (pit_ok) {
+            uint64_t tsc_elapsed = rdtsc() - tsc_start;
+            tsc_freq = tsc_elapsed * 100;  /* 10ms × 100 = 1 sec */
+            uart_printf("[TIMER] TSC calibration (PIT): %lu cycles/10ms, %lu MHz\n",
+                        (unsigned long)tsc_elapsed,
+                        (unsigned long)(tsc_freq / 1000000));
+        } else {
+            uart_printf("[TIMER] TSC calibration skipped — no PIT and no "
+                        "CPUID frequency. Timing will use pit_ticks/TIMER_HZ.\n");
+            /* Leaving tsc_freq = 0 forces timer_get_count() to use
+             * pit_ticks (from the LAPIC timer ISR once it's live).
+             * sleep_ms on secondary CPUs will have BSP-IRQ jitter
+             * but the boot will complete. */
+        }
     }
 
     if (lapic_ticks_per_sec == 0) {

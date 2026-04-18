@@ -2456,8 +2456,15 @@ int cmd_poke(int argc, char *argv[])
 
     volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)addr;
     *p = val;
-    /* DSB so the write commits to the interconnect before we print. */
+    /* Full barrier so the MMIO write commits to the interconnect
+     * before we print: dsb sy on ARM64, mfence on x86-64. mfence is
+     * a full fence on x86; the trailing uart_printf can't observe a
+     * stale store buffer. */
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("mfence" ::: "memory");
+#else
     __asm__ volatile("dsb sy" ::: "memory");
+#endif
     uart_printf("[0x%lx] <- 0x%08lx\r\n",
                 (unsigned long)addr, (unsigned long)val);
     return 0;

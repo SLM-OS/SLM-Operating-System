@@ -270,6 +270,42 @@ Cross-CPU Notification".
 
 ---
 
+## x86-64 LAPIC post-kexec gotcha (April 2026)
+
+`kernel/arch/x86_64/lapic.c`'s `lapic_force_xapic_mode()` runs at
+the top of `lapic_init` and `lapic_percpu_init` to make the LAPIC
+is in xAPIC (MMIO at `0xFEE00000`) mode no matter what the prior
+boot environment left behind. Two relevant cases:
+
+- **Fresh UEFI/GRUB boot:** APIC_BASE already has `EN=1`, `EXTD=0`.
+  `lapic_force_xapic_mode` is a no-op (it early-returns).
+- **Kexec from Linux with x2APIC enabled:** Linux's
+  `lapic_shutdown()` disables the APIC via SVR but leaves
+  `IA32_APIC_BASE.EXTD=1`. MMIO at `0xFEE00000` then returns
+  `0xFFFFFFFF` (the window is inactive in x2APIC mode) and every
+  downstream LAPIC read is garbage (typical symptom:
+  `[LAPIC] Initialized ... ID=255, version=0xff` followed by a
+  hang when `lapic_timer_setup` writes to dead MMIO).
+
+The transition `x2APIC → xAPIC` has to go through the DISABLED
+state per Intel SDM Vol 3A §10.12.5 Table 10-6. **Do NOT do the
+`EN=0 → EN=1` toggle unconditionally** — some implementations
+(verified on QEMU TCG) silently reject the re-enable, locking the
+APIC out until RESET. The helper checks `EXTD` first and only
+takes the toggle path when it's actually set; a healthy xAPIC
+APIC is left alone.
+
+Similar rule for timer calibration: `lapic.c` and `timer_x86.c`
+prefer **CPUID leaf 0x15** (core crystal Hz) with **leaf 0x16**
+fallback (base MHz) before touching PIT channel 2, because the
+PCH on recent Intel boards disables PIT channel 2 post-kexec and
+the busy-wait in the PIT path would otherwise hang forever. The
+PIT fallback still exists but has a TSC-based ~200 ms timeout so
+it can never hang. On any Skylake-or-newer host, CPUID 0x15
+returns the numbers directly and PIT is never touched.
+
+---
+
 ## UART Lock on Pi 5 / Jetson
 
 On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).

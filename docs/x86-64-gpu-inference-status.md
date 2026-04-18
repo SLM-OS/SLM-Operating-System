@@ -135,6 +135,23 @@ remain NULL when no NVIDIA GPU is discovered.
 | `test_gsp_firmware_manifest` | Pre-existing — embedded blob sizes, structural |
 | `test_gsp_init_graceful_without_gpu` | Pre-existing — Phase 0 fails cleanly when no platform installed |
 
+Post-kexec LAPIC / CPUID calibration regression tests — verify the
+`lapic_force_xapic_mode` + CPUID-first timer calibration fixes
+don't break the fresh-QEMU happy path:
+
+| Test | What it pins down |
+|---|---|
+| `test_apic_base_msr_xapic_mode` | Post-`lapic_init` reads `IA32_APIC_BASE` and asserts `EN=1, EXTD=0` — catches a regression that would toggle the APIC into x2APIC or disabled state on boot |
+| `test_lapic_id_not_stuck_all_ones` | `lapic_get_id()` returns a real APIC ID, not `0xFF` (= "MMIO returns 0xFFFFFFFF" = stuck-in-x2APIC symptom) |
+| `test_lapic_version_not_stuck_all_ones` | `LAPIC_VERSION` is in the Intel-documented 0x10..0x1F range, not `0xFF` |
+| `test_lapic_svr_enabled_bit` | Spurious Vector Register bit 8 (APIC software enable) is set |
+| `test_lapic_lvt_timer_has_vector` | LVT Timer register has vector 48 and is unmasked (timer init completed) |
+| `test_cpuid_leaf_15_accessible` | CPUID leaf 0x15 doesn't fault under QEMU-max; values are acceptable (zero or non-zero) since lapic_timer_freq_cpuid handles both |
+| `test_cpuid_leaf_16_base_mhz` | CPUID leaf 0x16 base frequency, if reported, is in a plausible 100 MHz–10 GHz range |
+| `test_timer_frequency_plausible` | `timer_get_frequency()` returns a non-zero Hz value after init — either `TIMER_HZ` (PIT fallback) or a TSC frequency (100 MHz–100 GHz). Mere execution of this test also proves timer_init completed without the unbounded PIT hang |
+| `test_lapic_force_xapic_mode_idempotent` | Calls `lapic_force_xapic_mode()` on a healthy xAPIC and asserts APIC_BASE is byte-for-byte unchanged plus MMIO is still live. Catches a regression that strips the load-bearing early-return and would brick the LAPIC on QEMU TCG via an unwanted EN=0→EN=1 toggle |
+| `test_lapic_force_xapic_mode_x2apic_recovery` | When CPUID advertises x2APIC: drives the helper through a synthetic x2APIC enter, confirms MMIO at 0xFEE00000 goes dead, calls the helper, and verifies the LAPIC is back in xAPIC with live MMIO afterwards. Restores SVR + LVT timer state so subsequent tests still have a working APIC. Skipped (passes trivially) on hosts without x2APIC |
+
 ### 1.6 Build-infrastructure test coverage (kexec scaffolding)
 
 Not in-kernel — runs on the dev host, in under a second, no hardware
@@ -664,52 +681,78 @@ same without `-c` for bzImage. See `scripts/x86-kexec-slmos.sh`.
 **What works today (2026-04-17):**
 
 - mb2 kexec path: `make kexec-deploy PLATFORM=X86_64` boots SLM-OS
-  via kexec → reaches VMM/PMM/LAPIC/IOAPIC/timer init.
-- bzImage path: `make kexec-deploy PLATFORM=X86_64 KEXEC_HOST=...`
-  with `--mode bzimage` also boots, same init depth.
+  via kexec → **reaches `slmos>` shell prompt**. Verified by
+  running `peek 0x53840100` → `0x00000020` (SEC2 CPUCTL inherited
+  from nouveau; the priv-lock is gone).
+- bzImage path: `make kexec-deploy PLATFORM=X86_64 --mode bzimage`
+  builds + deploys the bzImage variant; boots to the bzImage entry
+  stub ("BZ\\r\\n" breadcrumb). Full boot-to-shell not retested
+  end-to-end since the LAPIC + timer fixes, but the fixes apply
+  identically once the stub falls through to `entry64`.
 
-**What's blocking shell/GPU access:**
+**Post-handoff blockers resolved (2026-04-17 evening):**
 
-- SLM-OS's timer / APIC init doesn't complete cleanly when the
-  LAPIC state is whatever kexec's Linux-shutdown path leaves it
-  in. Fix candidates: explicitly reset LAPIC MSR before reading;
-  re-init APIC_BASE MSR; mask LINT0/LINT1 first. This is the
-  next blocker on the kexec path.
+Two bugs were in the way between kexec handoff and the shell
+prompt:
 
-**Remaining next-session paths:**
+1. **LAPIC stuck in x2APIC mode**. Linux's `lapic_shutdown()`
+   disables the APIC via SVR but does NOT clear
+   `IA32_APIC_BASE.EXTD`, so when SLM-OS tried MMIO at
+   `0xFEE00000` the reads all returned `0xFFFFFFFF` ("all ones"
+   = MMIO window inactive in x2APIC mode). Symptom was
+   `[LAPIC] Initialized ... ID=255, version=0xff`.
 
-The kexec-tools handoff is not tractable within capstone scope.
-Recommendations:
+   Fix: `lapic_force_xapic_mode()` in
+   `kernel/arch/x86_64/lapic.c` checks current APIC_BASE state
+   and only performs the disable→xAPIC transition (Intel SDM
+   §10.12.5 Table 10-6) when actually in x2APIC mode. A healthy
+   xAPIC state is left alone — toggling `EN=0` → `EN=1` on
+   already-enabled xAPIC can silently lock the APIC out on some
+   implementations (observed under QEMU TCG), and we don't need
+   the toggle there anyway. Applied to both BSP (`lapic_init`)
+   and AP (`lapic_percpu_init`) paths — AP INIT-IPI doesn't
+   reset APIC_BASE per §10.12.1, so x2APIC-inherited APs would
+   have the same problem.
 
-- **Drop the kexec route for capstone**, keep the code paths we've
-  built as documented dead-ends. Refocus on the Jetson port (§4.1 —
-  Option A) where the same GPU work has an unobstructed path to
-  completion.
-- **Linux-side workaround — userspace nouveau→VFIO state transfer.**
-  Skip kexec entirely. Boot Linux, load nouveau, let it unlock
-  SEC2, then `rmmod vfio-pci` → `rmmod nouveau` without power-gating
-  the GPU (runtime PM off) → run a userspace tool that reopens
-  the GPU via VFIO and continues the GSP bringup from the
-  inherited unlocked state. Higher risk (nouveau cleanup may
-  re-lock SEC2), but sidesteps kexec entirely.
-- **Firmware/BIOS investigation** — try kexec on a different x86-64
-  board (another Gigabyte, an Intel NUC, a Dell OptiPlex) to
-  localise the handoff failure to test-pc's UEFI vs. a general
-  Ubuntu 24.04 issue. Doesn't advance the capstone but would tell
-  us whether the kexec path is a permanent dead-end or a
-  this-hardware issue.
-- **`kexec --console-serial`** to get kexec-tools' purgatory to
-  print progress over COM1 as it runs (may reveal *where* in
-  purgatory the silence starts). We haven't tried this yet; it's
-  genuinely the next low-effort diagnostic.
-- **Build kexec-tools from source with DEBUG=1** (also untried),
-  stepping through `dbgprintf` calls, to confirm whether purgatory
-  entry is reached at all.
+   After the fix on test-pc post-kexec:
+   `[LAPIC] Initialized at 0xfee00000 (ID=0, version=0x15)`.
+2. **PIT channel 2 calibration hang**. H610M's PCH leaves PIT
+   channel 2 disabled after Linux's kexec; our busy-wait
+   `while (!(inb(0x61) & 0x20))` looped forever. Fix: switch
+   `lapic_timer_calibrate()` + `timer_init()`'s TSC calibration
+   to CPUID leaf 0x15 (core crystal Hz) with leaf 0x16 fallback
+   (base MHz), and put a TSC-based ~200 ms timeout on the PIT
+   busy-wait so the fallback path can't hang either. On test-pc
+   (i7-6700, Skylake), CPUID 0x15 returns the numbers directly:
+   LAPIC timer 38.4 MHz, TSC 3302 MHz.
 
-Even if kexec never pans out on test-pc, the infrastructure built
-(three parallel x86-64 build variants, structural verifier, deploy
-scripts, bzImage wrapper) is reusable the moment a host with a
-working kexec handoff is available.
+The kexec path is now **fully unblocked** for the capstone
+GSP-bringup work. `gpu init` on test-pc post-kexec can now
+attempt FWSEC-FRTS + Booter Load against the nouveau-unlocked
+SEC2 Falcon.
+
+**Next session:**
+
+Kexec path is live. Candidate follow-ups, in order of expected
+value:
+
+- Run `gpu init` on a kexec'd SLM-OS on test-pc and observe
+  whether FWSEC-FRTS + Booter Load now succeed against the
+  nouveau-unlocked SEC2. This is the payoff of the whole kexec
+  investigation.
+- Address the two already-documented GA10x-specific bugs
+  surfaced during the SEC2 investigation (see §2.5 /
+  `docs/testing/x86-gpu-sec2-unlock-trace-2026-04-17.md`):
+  `falcon_reset` missing the SEC2 reset_pmc/select/reset_prep
+  steps nouveau runs, and `falcon_pio_upload_imem` missing
+  per-256-byte-block IMEMT writes. Both would otherwise surface
+  the moment SEC2 is actually asked to run a HS ucode.
+- ACPI tables are not propagated across kexec handoff (see
+  `[ACPI] RSDP not found` + `[SMP] 1 CPUs detected` in the boot
+  log). SMP is currently limited to BSP on the kexec path.
+  Parse the multiboot2 / kexec-provided ACPI RSDP pointer if
+  needed, or accept single-CPU post-kexec as a known limitation
+  for the GPU bringup.
 
 **Original "Invalid memory segment" investigation notes:**
 
