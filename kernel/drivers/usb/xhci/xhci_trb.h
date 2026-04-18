@@ -34,6 +34,12 @@ _Static_assert(sizeof(struct xhci_trb) == 16, "TRB must be 16 bytes");
 #define XHCI_TRB_CH                 (1u << 4)   /* chain bit */
 #define XHCI_TRB_IOC                (1u << 5)   /* interrupt on completion */
 #define XHCI_TRB_IDT                (1u << 6)   /* immediate data */
+/*
+ * NB: TC and ENT share bit 1. They're mutually exclusive per xHCI 1.2:
+ * ENT applies to transfer TRBs (Normal / Data / Status), TC applies
+ * only to Link TRBs. The TRB type field (bits 15:10) disambiguates
+ * which meaning the bit carries.
+ */
 #define XHCI_TRB_TC                 (1u << 1)   /* Toggle Cycle (Link TRB only) */
 #define XHCI_TRB_TYPE_SHIFT         10
 #define XHCI_TRB_TYPE_MASK          (0x3Fu << XHCI_TRB_TYPE_SHIFT)

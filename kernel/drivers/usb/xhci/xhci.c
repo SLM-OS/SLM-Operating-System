@@ -163,9 +163,9 @@ static int xhci_halt(void)
  */
 static int xhci_reset(void)
 {
-    uint32_t cmd = r32(xhci_op_base, XHCI_OP_USBCMD);
     uint32_t sts = r32(xhci_op_base, XHCI_OP_USBSTS);
-    INFO("xhci: pre-reset USBCMD=0x%08x USBSTS=0x%08x", (unsigned)cmd, (unsigned)sts);
+    INFO("xhci: pre-reset USBCMD=0x%08x USBSTS=0x%08x",
+         (unsigned)r32(xhci_op_base, XHCI_OP_USBCMD), (unsigned)sts);
 
     if (!(sts & XHCI_STS_HCH)) {
         WARN("xhci: controller not halted (USBSTS=0x%08x) — "
