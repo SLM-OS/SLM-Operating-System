@@ -968,7 +968,7 @@ static void fill_valid_handoff(struct ga10b_channel_handoff *h)
 {
     memset(h, 0, sizeof(*h));
     h->magic          = GA10B_CHANNEL_HANDOFF_MAGIC;
-    h->version        = 1;
+    h->version        = 2;
     h->channel_id     = 0;
     h->tsg_id         = 0;
     h->userd_phys     = 0x140000000ULL;
@@ -986,6 +986,7 @@ static void fill_valid_handoff(struct ga10b_channel_handoff *h)
     h->inst_block_phys = 0x140030000ULL;
     h->initial_gp_put = 0;
     h->initial_gp_get = 0;
+    h->work_submit_token = 0x1fc;     /* real GA10B token observed in bringup */
 }
 
 static void test_handoff_validate_happy_path(void)
@@ -1020,9 +1021,20 @@ static void test_handoff_validate_bad_version(void)
     fill_valid_handoff(&h);
     h.version = 0;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
-    h.version = 2;
+    h.version = 1;                  /* v1 lacked work_submit_token */
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+    h.version = 3;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+}
+
+static void test_handoff_validate_missing_doorbell_token(void)
+{
+    printf("== test_handoff_validate_missing_doorbell_token ==\n");
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.work_submit_token = 0;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
 }
 
@@ -1207,6 +1219,7 @@ int main(void)
     test_handoff_validate_bad_version();
     test_handoff_validate_null_addresses();
     test_handoff_validate_gpfifo_entries();
+    test_handoff_validate_missing_doorbell_token();
 
     test_scanner_finds_magic_at_start();
     test_scanner_finds_magic_midrange();

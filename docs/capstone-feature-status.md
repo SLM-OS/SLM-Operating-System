@@ -185,7 +185,7 @@ stack than discrete Ampere.
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
 | FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
 | RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (950 lines) | **37** | Phases 1–7 wired; **Phases 5–6 HW-verified**; Phase 7 GP_PUT write lands, PBDMA doorbell blocked |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (950 lines) | **38** | Phases 1–7 wired; **Phases 5–7 HW-verified** — SLM-OS rings the USERMODE doorbell at BAR0+0xBB0090 from EL2, PBDMA consumes GPFIFO entries |
 | **Jetson platform shim** | `nvidia_gsp_platform.c` (350 lines) | **15** | vtable dispatch + DMA align math host-tested |
 | **Total host-side tests** | | **175** | **All passing** |
 
@@ -240,20 +240,17 @@ Phases 1–4 (ACR HS load, FECS/GPCCS STARTCPU, PMU skip) remain
 implemented and host-tested as a fallback / standalone path. The
 inherit path bypasses them when Linux's firmware state is available.
 
-**CBB firewall constrains channel setup (Phase 6 blocker, April 17):**
-The Tegra234 CBB (Control Backbone) firewall permanently blocks
-non-secure (EL2) access to the GPU register apertures needed for
-channel creation: PFIFO (0x002000), CHRAM (channel enable/disable),
-NV_USERMODE (0x800000 doorbell), and several per-runlist PRI
-config registers. Tested with both idle GPU and active CUDA
-channel — same result; not a clock-gating issue. These are
-hardware-level access controls that cannot be changed without
-firmware-level CBB reconfiguration.
-
-Accessible from EL2 (sufficient for the inherit + method path):
-FECS method push (0x409500/504), runlist submit status
-(0x4080/88), FIFO_USER doorbell (0x200000+, first 5 channels),
-all DRAM (USERD, GPFIFO, pushbuffer memory).
+**CBB firewall reassessment (April 17, corrects prior note):**
+The April 17 "CBB blocks USERMODE" conclusion in PR #254 was based
+on reading the wrong offset. GA10B inherits the TU104 usermode
+layout, so the doorbell is at BAR0+0xBB0090, not 0x800000. The
+earlier probes of 0x17800000/0x17002000/0x17004004 returned the
+GPU's `0xbadf1100`-family "no register at this offset" response
+pattern — those are valid bus responses, not aborts. BAR0 is
+fully readable AND writable from EL2 (verified both at
+0x17BB0000 via SLM-OS `peek`/`poke` and at 0x17000000
+NV_PMC_BOOT_0 via the existing driver). The firewall map in PR
+#254 should be treated as outdated.
 
 **Phase 6 implemented — channel inherit VERIFIED on hardware
 (April 17):** Linux-side helper (`scripts/gpu-channel-helper.c`)
@@ -272,25 +269,28 @@ through the kexec transition (skips `fuser -k`). SLM-OS scans
 validates the handoff (magic, version, non-null addresses,
 power-of-2 GPFIFO entries), and advances to `CHANNEL_OPEN` state.
 
-**Phase 7 partial — GP_PUT write lands, doorbell blocked:**
-`nvgpu submit` writes a NOP pushbuffer, builds a correctly-encoded
-Ampere GPFIFO entry (entry0[31:2] = va, entry1[7:0] = va[39:32],
-entry1[30:10] = length_dwords), and increments GP_PUT in USERD.
-Verified via `peek USERD[0x8c] = 1` — our write reaches the
-correct DRAM offset. BUT PBDMA does not advance GP_GET because
-the usermode doorbell (NV_USERMODE at 0x800000) is CBB-blocked
-from EL2; Linux's helper can ring the doorbell via an mmap of
-the ctrl fd, but that mapping is per-process and doesn't survive
-kexec. DETERMINISTIC kickless-submit only applies when the
-channel is already PBDMA's "current" channel.
+**Phase 7 HW-verified (April 17):** `nvgpu submit` writes a NOP
+pushbuffer, builds an Ampere GPFIFO entry (entry0[31:2] = va,
+entry1[7:0] = va[39:32], entry1[30:10] = length_dwords),
+increments GP_PUT in USERD, then rings the USERMODE doorbell at
+physical 0x17BB0090 with the `work_submit_token` from the handoff
+block. PBDMA consumes the entry and GP_GET advances. Bringup
+reaches `METHOD_ACCEPTED` (state=7). Reproduced with multiple
+submissions in the same shell session. Source: OE4T/linux-nvgpu
+`drivers/gpu/nvgpu/hal/fifo/usermode_tu104.c:58-75`, confirmed via
+strace of CUDA and `/dev/mem` readback of 0x17BB0000 matching
+CUDA's userspace mmap.
+
+Handoff wire format bumped to version 2 to carry the opaque
+`work_submit_token` (encodes `chid | runlist_id<<16` with any
+vGPU channel_base adjustment the kernel applies — reconstructing
+it from `channel_id` alone is wrong on Linux's allocation path,
+which is how PR #254's `nvgpu submit` doorbell kicked the wrong
+channel).
 
 **Remaining path to GPU inference:**
-- Phase 7 completion: get PBDMA to consume pushbuffer entries.
-  Options: (a) pre-submit a kernel-mode GPFIFO from Linux to
-  "warm up" PBDMA before kexec, (b) arrange for the channel to
-  be the runlist's current-active channel at kexec time,
-  (c) find a way to ring the doorbell from EL2 (unlikely given
-  the CBB firewall).
+- Encode a real method program (SEMAPHORE_RELEASE) so the
+  semaphore fires — NOPs don't release it
 - Compute class binding + QMD dispatch
 - Compute kernel (SASS binary for `sm_87`)
 - Inference loop (GEMM → activation per layer)

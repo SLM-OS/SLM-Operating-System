@@ -179,6 +179,20 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define GR_FECS_MAILBOX_FAIL        0x00000002u
 #define GR_FECS_MAILBOX_CSUM_FAIL   0x00000021u
 
+/* ---- USERMODE doorbell (Phase 7 PBDMA kick) ----
+ *
+ * GA10B inherits the TU104 usermode register layout, so the doorbell
+ * is at BAR0 + func_cfg0 + func_full_phys + func_doorbell
+ *       = 0x17000000 + 0x30000 + 0xB80000 + 0x90 = 0x17BB0090.
+ * A 32-bit write of `work_submit_token` (captured from
+ * NVGPU_IOCTL_CHANNEL_SETUP_BIND) tells PBDMA to re-read GP_PUT and
+ * fetch any new GPFIFO entries.
+ *
+ * Reference: OE4T/linux-nvgpu
+ *   drivers/gpu/nvgpu/hal/fifo/usermode_tu104.c:58-75
+ *   drivers/gpu/nvgpu/include/nvgpu/hw/tu104/hw_func_tu104.h:62-64 */
+#define GA10B_USERMODE_DOORBELL_PHYS  0x17BB0090u
+
 /* ---- FECS method gateway ----
  *
  * FECS exposes a direct host-to-ucode method interface via two push
@@ -817,13 +831,18 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
 
 /* ---- Phase 6: Inherit channel from Linux ----
  *
- * The CBB firewall blocks PFIFO, CHRAM, and NV_USERMODE registers
- * from EL2 (see commit 70d2a94). Channel creation from scratch is
- * not possible. Instead, a Linux-side helper creates a channel via
- * nvgpu ioctls and writes the channel metadata (USERD address,
- * GPFIFO ring, pushbuffer, semaphore) to a fixed DRAM location
- * (GA10B_CHANNEL_HANDOFF_PHYS). SLM-OS reads the handoff after
- * a --no-gpu-suspend kexec.
+ * Channel creation from scratch at EL2 would require reimplementing
+ * the nvgpu kernel driver (TSG open, channel bind, ALLOC_AS,
+ * SETUP_BIND, nvmap, runlist programming). Rather than port that,
+ * a Linux-side helper creates the channel via nvgpu ioctls and
+ * writes the channel metadata (USERD, GPFIFO, pushbuffer, semaphore,
+ * doorbell token) to a dmabuf in DRAM. SLM-OS scans DRAM for the
+ * handoff magic after a --no-gpu-suspend kexec and uses the values
+ * verbatim. Note: BAR0 itself is accessible at EL2 — the blocker is
+ * the kernel-side ioctl surface, not a hardware firewall. An early
+ * read of the commit 70d2a94 firewall map reported NV_USERMODE
+ * blocked; that was a misinterpretation (wrong offset + misread of
+ * the GPU's "no register here" 0xbadf response).
  *
  * This function validates the handoff block and stores the channel
  * addresses in the bringup struct for Phase 7 (method submission).
@@ -864,9 +883,10 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
 {
     if (!h) return -1;
     if (h->magic != GA10B_CHANNEL_HANDOFF_MAGIC) return -1;
-    if (h->version != 1) return -1;
+    if (h->version != 2) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
+    if (h->work_submit_token == 0) return -1;
     /* gpfifo_entries must be a non-zero power of two. */
     if (h->gpfifo_entries == 0 ||
         (h->gpfifo_entries & (h->gpfifo_entries - 1)) != 0) return -1;
@@ -928,6 +948,7 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.inst_block_phys    = hoff->inst_block_phys;
     g_handoff.initial_gp_put     = hoff->initial_gp_put;
     g_handoff.initial_gp_get     = hoff->initial_gp_get;
+    g_handoff.work_submit_token  = hoff->work_submit_token;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
@@ -1071,11 +1092,18 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
                 (unsigned long)new_gp_put,
                 (unsigned long)gp_put_word);
 
-    /* TODO: Ring the doorbell at FIFO_USER (0x200000 + chid * stride).
-     * The doorbell register tells PBDMA to re-read GP_PUT. On some
-     * Ampere configs PBDMA polls USERD automatically; on others the
-     * doorbell is required. We'll try without first and add the
-     * doorbell write if PBDMA doesn't pick up the entry. */
+    /* Ring the USERMODE doorbell so PBDMA re-reads GP_PUT. Token is
+     * captured verbatim from NVGPU_IOCTL_CHANNEL_SETUP_BIND (opaque
+     * encoding of chid | runlist<<16, possibly adjusted for vGPU
+     * channel_base — treat as opaque). See
+     * GA10B_USERMODE_DOORBELL_PHYS above for the address derivation. */
+    volatile uint32_t *doorbell =
+        (volatile uint32_t *)(uintptr_t)GA10B_USERMODE_DOORBELL_PHYS;
+    *doorbell = g_handoff.work_submit_token;
+    gsp_platform->mb();
+    uart_printf("[GA10B-P7] doorbell 0x%lx <- 0x%08lx\n",
+                (unsigned long)GA10B_USERMODE_DOORBELL_PHYS,
+                (unsigned long)g_handoff.work_submit_token);
 
     /* Poll the semaphore for a non-zero value (indicating the GPU
      * processed our pushbuffer and executed SEMAPHORE_RELEASE).

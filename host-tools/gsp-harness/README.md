@@ -105,7 +105,9 @@ make test-bringup
 # machine, ACR HS load sequence, FECS/GPCCS/PMU phases, inherit
 # (Path 3), the FECS method gateway (Phase 5), and the channel
 # handoff reader/validator (Phase 6 — magic scan + validation of the
-# handoff block written by scripts/gpu-channel-helper.c). 37 test cases.
+# handoff block written by scripts/gpu-channel-helper.c, including
+# the v2 work_submit_token field used by the Phase 7 doorbell).
+# 38 test cases.
 make test-ga10b-bringup
 
 # Jetson GA10B platform shim — portable surfaces of

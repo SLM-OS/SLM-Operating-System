@@ -17,6 +17,11 @@
 #include "../include/uart.h"
 #include "../include/slm_ffi.h"
 
+/* snprintf is part of the test kernel's runtime (kernel/lib) but isn't
+ * pulled in by the headers above. Declare it once for all tests that
+ * build command strings for shell_execute. */
+extern int snprintf(char *, size_t, const char *, ...);
+
 /* ============================================================================
  * Test Helpers
  * ============================================================================ */
@@ -546,6 +551,124 @@ static void test_shell_cmd_dtb(void)
 {
     int ret = shell_execute("dtb");
     TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/* ============================================================================
+ * peek/poke Command Tests
+ *
+ * peek is read-only, poke writes a 32-bit word. Both accept a raw
+ * physical address so they can probe identity-mapped MMIO. We use a
+ * stack-allocated buffer as the test target — its address is a valid
+ * C pointer that both commands dereference identically to MMIO. The
+ * tests exercise argument parsing (missing / malformed / uppercase /
+ * 0x-prefix) and round-trip write→read through the shell dispatcher.
+ * ============================================================================ */
+
+/* Build a stack-free hex string rendering of a pointer for shell_execute. */
+static void hex_ptr(char *buf, size_t bufsz, const void *p)
+{
+    snprintf(buf, bufsz, "0x%lx", (unsigned long)(uintptr_t)p);
+}
+
+static void test_shell_cmd_peek_missing_args(void)
+{
+    int ret = shell_execute("peek");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+static void test_shell_cmd_peek_bad_hex(void)
+{
+    int ret = shell_execute("peek 0xZZZZ");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+static void test_shell_cmd_poke_missing_args(void)
+{
+    int r1 = shell_execute("poke");
+    TEST_ASSERT_EQUAL_INT(-1, r1);
+    int r2 = shell_execute("poke 0x1000");
+    TEST_ASSERT_EQUAL_INT(-1, r2);
+}
+
+static void test_shell_cmd_poke_bad_hex_addr(void)
+{
+    int ret = shell_execute("poke notahex 0x1234");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+static void test_shell_cmd_poke_bad_hex_value(void)
+{
+    int ret = shell_execute("poke 0x1000 xyz");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+static void test_shell_cmd_poke_writes_word(void)
+{
+    /* Target: a dword-aligned heap-ish slot. Static so the storage
+     * outlives this call frame even if the shell defers work. */
+    static volatile uint32_t target;
+    target = 0xDEADBEEFu;
+
+    char cmd[96];
+    char addr[32];
+    hex_ptr(addr, sizeof(addr), (const void *)&target);
+    snprintf(cmd, sizeof(cmd), "poke %s 0xCAFEBABE", addr);
+
+    int ret = shell_execute(cmd);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_UINT32(0xCAFEBABEu, target);
+}
+
+static void test_shell_cmd_peek_reads_back_after_poke(void)
+{
+    static volatile uint32_t target;
+    target = 0;
+
+    char cmd[96];
+    char addr[32];
+    hex_ptr(addr, sizeof(addr), (const void *)&target);
+
+    /* First poke, then peek (which only reports to UART; we assert
+     * the memory state directly as a proxy for the read path). */
+    snprintf(cmd, sizeof(cmd), "poke %s 0x11223344", addr);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(cmd));
+    TEST_ASSERT_EQUAL_UINT32(0x11223344u, target);
+
+    snprintf(cmd, sizeof(cmd), "peek %s", addr);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute(cmd));
+    /* Memory unchanged by the read */
+    TEST_ASSERT_EQUAL_UINT32(0x11223344u, target);
+}
+
+static void test_shell_cmd_poke_rejects_unaligned_addr(void)
+{
+    /* 0x1001 is not 4-byte aligned. Must be rejected before the write. */
+    int ret = shell_execute("poke 0x1001 0xDEADBEEF");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+static void test_shell_cmd_poke_rejects_hex_too_long(void)
+{
+    /* 17 hex digits exceeds the uint64_t accumulator capacity —
+     * the parser must reject rather than silently truncate. */
+    int ret = shell_execute("poke 0x11111111111111111 0x1");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+static void test_shell_cmd_poke_accepts_uppercase_and_no_prefix(void)
+{
+    static volatile uint32_t target;
+    target = 0;
+
+    char cmd[96];
+    char addr[32];
+    /* Bare hex (no 0x prefix) with uppercase digits */
+    snprintf(addr, sizeof(addr), "%lX", (unsigned long)(uintptr_t)&target);
+    snprintf(cmd, sizeof(cmd), "poke %s ABCDEF01", addr);
+
+    int ret = shell_execute(cmd);
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    TEST_ASSERT_EQUAL_UINT32(0xABCDEF01u, target);
 }
 
 /* ============================================================================
@@ -2322,6 +2445,18 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_ipc);
     RUN_TEST(test_shell_cmd_model);
     RUN_TEST(test_shell_cmd_dtb);
+
+    /* peek / poke — argument parsing + round-trip */
+    RUN_TEST(test_shell_cmd_peek_missing_args);
+    RUN_TEST(test_shell_cmd_peek_bad_hex);
+    RUN_TEST(test_shell_cmd_poke_missing_args);
+    RUN_TEST(test_shell_cmd_poke_bad_hex_addr);
+    RUN_TEST(test_shell_cmd_poke_bad_hex_value);
+    RUN_TEST(test_shell_cmd_poke_writes_word);
+    RUN_TEST(test_shell_cmd_peek_reads_back_after_poke);
+    RUN_TEST(test_shell_cmd_poke_rejects_unaligned_addr);
+    RUN_TEST(test_shell_cmd_poke_rejects_hex_too_long);
+    RUN_TEST(test_shell_cmd_poke_accepts_uppercase_and_no_prefix);
 
     /* timdiag command (ARM64 only) - timer/IRQ delivery diagnostic */
 #if !defined(PLATFORM_X86_64)

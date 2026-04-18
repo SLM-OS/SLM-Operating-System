@@ -2411,6 +2411,59 @@ int cmd_peek(int argc, char *argv[])
 }
 
 /*
+ * poke - Write a 32-bit word to an arbitrary physical memory address.
+ *
+ *   poke <phys-hex> <val-hex>
+ *
+ * WARNING: writes to device memory can have side effects (doorbell
+ * kicks, resets, etc.). Used for diagnosing MMIO firewall behavior.
+ */
+int cmd_poke(int argc, char *argv[])
+{
+    if (argc < 3) {
+        uart_puts("usage: poke <phys-hex> <val-hex>\r\n");
+        return -1;
+    }
+
+    uint64_t fields[2] = {0, 0};
+    for (int f = 0; f < 2; f++) {
+        const char *s = argv[1 + f];
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+        if (!*s) { uart_puts("bad hex\r\n"); return -1; }
+        /* Bound digit count: a uint64_t accumulator silently drops bits
+         * past 16 hex digits. Reject explicitly so typos surface. */
+        int ndigits = 0;
+        while (*s) {
+            uint64_t d;
+            if (*s >= '0' && *s <= '9') d = *s - '0';
+            else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
+            else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
+            else { uart_puts("bad hex\r\n"); return -1; }
+            if (++ndigits > 16) { uart_puts("hex too long\r\n"); return -1; }
+            fields[f] = (fields[f] << 4) | d;
+            s++;
+        }
+    }
+    uint64_t addr = fields[0];
+    uint32_t val = (uint32_t)fields[1];
+
+    /* Unaligned MMIO writes take a synchronous data abort on ARM64.
+     * Reject with a readable message instead of crashing the shell. */
+    if (addr & 0x3) {
+        uart_puts("addr not 4-byte aligned\r\n");
+        return -1;
+    }
+
+    volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)addr;
+    *p = val;
+    /* DSB so the write commits to the interconnect before we print. */
+    __asm__ volatile("dsb sy" ::: "memory");
+    uart_printf("[0x%lx] <- 0x%08lx\r\n",
+                (unsigned long)addr, (unsigned long)val);
+    return 0;
+}
+
+/*
  * gpu - Show GPU driver status and optionally read a BAR0 register.
  *
  *   gpu                     Show GPU info via the registered driver
