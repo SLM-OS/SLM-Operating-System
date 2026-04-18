@@ -16,6 +16,7 @@
 | 5.1 — HEF tensor metadata | ✅ done | I/O pad shapes captured from the first NG |
 | 5.2 — Control-channel RPC transport | ✅ tier-1 + tier-2 (2026-04-18) | IDENTIFY + WRITE_MEMORY + READ_MEMORY round-tripped on pi-5-1; `hailo peek/poke` wired; only CONFIG_STREAM opcode remains |
 | 5.3 — hailo_load + weight DMA | ✅ software (2026-04-18) | HEF CCW parser, DMA tensor allocator, WRITE_MEMORY-based upload loop all landed; awaits compiled `.hef` + CONFIG_STREAM-with-context for end-to-end hardware test |
+| 5.4 — Inference submit + `hailo infer` | ✅ software (2026-04-18) | VDMA descriptor list + programming + channel start/stop/submit + hailo_infer orchestrator + `hailo infer` shell; pi-5-1 runs the full pipeline and times out at output submit (no firmware context yet) — expected |
 | 5.4 — Inference submit + `hailo infer` | ☐🔗 hardware-gated | requires Phase 5.3 |
 | 6 — AI scheduler Hailo policy | ☐🔗 hardware-gated | requires Phase 5.3/5.4 |
 | 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe/boot/fw/peek/poke` wired; `hailo load <path>` prints HEF metadata |
@@ -289,12 +290,16 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - **Tests:** 27 new QEMU cases — 7 in `test_hef_parser.c` (synthetic-HEF extraction), 12 in `test_hailo.c` (tensor), 8 in `test_hailo.c` (CCW upload via smart-memory backing store with WRITE→READ round-trips).
 - **Hardware gate:** end-to-end verification awaits a compiled `mobilenet_v1.hef` + a successful `CONFIG_STREAM` (which needs real HEF-derived nn_stream_config params) to establish the CFG channel the upload targets. Code is structured so the first HEF arrival exercises the full path without scaffolding changes.
 
-#### Phase 5.4: `hailo infer` ☐🔗 hardware
+#### Phase 5.4: `hailo infer` ✅ software-complete (2026-04-18)
 
-- Inference submit: post descriptors, ring doorbell, wait on MSI completion (or polled CNTPCT timeout fallback — see #247 for why polling is a valid long-term fallback on Pi 5).
-- `hailo infer <model> <input-tensor>` shell command; output tensor dumped as hex or post-processed per a known model's output layout.
-- Latency histogram integration (#196) — add `hailo_infer` as a first-class bench histogram source.
-- Cross-platform inference bench doc (`docs/cross-platform-inference-bench.md`) updated with a "Hailo-8L on Pi 5" row.
+- **VDMA descriptor list allocator** (`hailo_vdma.{c,h}`) — power-of-2-sized lists in [2, 65536], 64 KB-aligned via platform `dma_alloc`, zero-init so unprogrammed entries are inert.
+- **Descriptor programming** — `hailo_vdma_program_descriptor` packs the 16-byte wire layout (page_size << 8 | 0x02 | addr_l & 0xFFFFFFC0 | data_id | addr_h). `hailo_vdma_program_buffer` slices a contiguous DMA buffer across the list with a residue-sized last descriptor, handling circular wrap.
+- **Channel start/stop/submit** — `hailo_vdma_channel_start` writes DEPTH_ID / ADDR_L / ADDR_H / CONTROL(=START) to BAR2 register blocks at `channel_index << 5`. `hailo_vdma_channel_stop` issues ABORT_PAUSE with an "already stopped" short-circuit. `hailo_vdma_submit_and_wait` publishes `num_avail` to the base dword bits [31:16] and polls `num_proc` (BAR2 offset 0x04) on 100 µs intervals until match or timeout.
+- **Orchestrator** (`hailo_infer.{c,h}`) — `hailo_infer_run(cfg, input, output, *elapsed_us)` allocates tensor buffers, allocates + programs two descriptor lists, starts both channels, submits input-first, waits on output, cache-maintains both directions, and cleans up via a single goto-label. Latency measured via CNTPCT.
+- **Shell** — `hailo infer <hex-bytes>` runs the pipeline with channels 0/1 and data_id 0 against a zeroed synthetic tensor (cap 64 KB).
+- **Tests** — 36 new QEMU cases in this step (11 allocator + 9 programming + 9 channel/submit + 7 infer orchestrator). Mock grows a `mock_bar2[4096]` backing + `mock_vdma_auto_advance` flag that mirrors `num_avail` writes into `num_proc` so end-to-end tests complete.
+- **Hardware**: pi-5-1 smoke-tested. `hailo infer 0x400` runs the full pipeline, returns `HAILO_ERR_TIMEOUT (-4)` at output-submit — expected, since firmware has no active stream context; a real CONFIG_STREAM from a compiled `.hef` will supply data_id + start the inference engine.
+- **Hardware gate** (shared with Phase 5.3): end-to-end verification awaits a compiled `.hef` + CONFIG_STREAM success. Latency histogram (#196) and the "Hailo-8L on Pi 5" bench-doc row can only land once real inference produces real numbers.
 
 ### Phase 6: AI Scheduler Integration (1–2 weeks)
 
