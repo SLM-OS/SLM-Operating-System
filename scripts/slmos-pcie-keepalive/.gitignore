@@ -1,1 +1,12 @@
-*.ko*
+# Kernel-module build artifacts
+*.ko
+*.o
+*.cmd
+*.mod
+*.mod.c
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+# Vendor .ko (fetched from target for binary analysis, not ours)
+pcie-tegra194.ko*

@@ -206,15 +206,49 @@ Something in the kexec shutdown path (BPMP firmware or TF-A SMC
 handler) forcibly gates `pex2_c8_core` regardless of the Linux
 clock framework's refcount. User-space mitigations don't reach it.
 
+## Kernel-module clock-hold experiment (17 April 2026)
+
+**Result: NEGATIVE.** Added `scripts/slmos-pcie-keepalive/`
+containing a minimal Linux kernel module
+(`pcie_clk_keepalive.ko`) that does `clk_get("core")` +
+`clk_prepare_enable()` on the PCIe C8 platform device at init and
+deliberately skips the release on `exit`. Tested on the target
+(nvidia-l4t-kernel-headers installed, module built on-board and
+insmod'd). Module successfully grabs the clock — `dmesg` shows
+"holding core clock at 62500000 Hz".
+
+Post-kexec, SLM-OS's `rtldiag` still shows APPL = `0xffffffff`,
+DBI = `0xffffffff`. Combinations also tested, all negative:
+
+- Module + sysfs refcount bump (100+).
+- Module + `echo on > power/control` (runtime-PM override).
+- Module + `mrq_rate_locked = 1`.
+- Module + `echo 1 > powergate/pciex8a/state` (and pciex8b).
+- All of the above combined.
+
+**Interpretation:** BPMP firmware, not Linux's clock framework, is
+what gates the clock during the kexec transition. No Linux-side
+intervention — sysfs, kernel module, runtime PM, or per-domain
+powergate override — reaches the point where BPMP makes its
+decision.
+
+The module source, Makefile, and a README with the negative result
+are kept in `scripts/slmos-pcie-keepalive/` as documented
+infrastructure for anyone revisiting this problem.
+
 ## Immediate next steps
 
 BCT firewall override is no longer the clear option — the problem
-isn't firewall policy. The remaining mitigations are all non-trivial:
+isn't firewall policy. Kernel-module clock-hold has been tried and
+doesn't help. The remaining mitigations are all non-trivial:
 
 - **Kernel module with `clk_force_enable`** — may prevent the
   teardown by using kernel-level clock-flag semantics beyond
   refcount. Needs on-board cross-compilation (kernel headers not
-  installed).
+  installed). [RULED OUT — see experiment above. Standard
+  `clk_prepare_enable` doesn't help; `clk_force_enable` isn't
+  exported in the L4T 5.15 kernel, and even if it were, the
+  teardown is in BPMP firmware, not in the Linux clock framework.]
 - **Crash-kernel path (`kexec -p` + sysrq-c)** — skips
   `device_shutdown()` entirely. Needs `crashkernel=` on kernel
   cmdline (requires editing `/boot/extlinux.conf` + reboot + SLM-OS
