@@ -681,7 +681,7 @@ QEMU_NET := -device virtio-net-device,netdev=net0 \
 | QEMU virt (ARM64) | Implemented | VirtIO MMIO | `virtio_net.c` |
 | x86-64 QEMU | Implemented | VirtIO PCI | `virtio_net_pci.c` |
 | Raspberry Pi 5 | Not implemented | — | Requires RP1 gigabit Ethernet driver |
-| Jetson Orin Nano | Not implemented | — | Requires Realtek/Intel NIC driver |
+| Jetson Orin Nano | Not implemented | — | EQOS (#25) or RTL8168 on Tegra PCIe C8 (#25) untried; USB networking (#266) mothballed 2026-04-18 — see §USB networking below. |
 
 ### USB networking (Jetson, work in progress)
 
@@ -747,10 +747,36 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
   when `wMaxSegmentSize == 0`, probe success when the functional
   descriptor is absent, and RX-error drop.
 
-Phase 3A (XHCI host controller) is next — it's the piece that makes
-`cdc_ecm_probe_and_register()` see a real device. Phase 4 wires the
-class driver's net_driver into platform init; Phase 5 is the
-hardware reliability sweep.
+**Phase 3A** (XHCI host controller) reached capability probe and
+ring allocation but is **mothballed as of 2026-04-18** — blocked
+at `USBCMD.RUN = 1` by Linux's kexec path disabling `arm-smmu`
+translations for the xusb stream. The controller's first DMA
+attempt after RUN=1 faults internally and bricks the MMIO
+aperture. Four Linux-cooperative workarounds were tried
+(#285, closed wontfix); none of them address the actual mechanism.
+Full investigation writeup is in
+[`docs/jetson-usb-networking-plan.md`](jetson-usb-networking-plan.md) §8.
+
+What remains on `feature/usb-networking-phase2` as reference for
+any future revival:
+
+- `kernel/drivers/usb/xhci/` — scaffolding, capability parse, halt
+  verification, ring allocation, NO_OP command code. The `xhci`
+  shell command on Jetson still works and prints the parsed
+  capability registers (HCI v1.20, 36 slots, 8 ports, 5
+  interrupters) so the code is observably functional up to the
+  blocker.
+- `scripts/jetson-kexec-slmos.sh` — the `xusb_*` clock hold
+  (committed on `main`) is independently useful and is kept.
+- `scripts/tegra-xusb-noshutdown/` — the Option-A.4 kernel module
+  source, kept as reference for anyone re-examining this path.
+
+Jetson-specific USB networking won't work until either the SMMU
+disable during kexec is worked around (Linux-side change, not
+SLM-OS) or SLM-OS gains the ability to load the Tegra XUSB Falcon
+firmware cold (issue #286, high risk due to HS-mode signing). On
+other platforms networking continues to work via
+virtio-net (QEMU + x86-64) and MACB (Pi 5).
 
 ### Build-Time Configuration
 
