@@ -928,6 +928,7 @@ static void test_work_stealing_distributes_load(void)
     extern volatile uint32_t *sched_diag_steal_stale;
     extern volatile uint32_t *sched_diag_schedule;
     extern volatile uint32_t *sched_diag_picked;
+    extern volatile uint32_t *sched_diag_idle_loops;
 #endif
     uint32_t pre_push_full[MAX_CPUS] = {0};
     for (uint32_t c = 0; c < cpu_count; c++)
@@ -958,12 +959,14 @@ static void test_work_stealing_distributes_load(void)
         uint32_t pre_stale[MAX_CPUS] = {0};
         uint32_t pre_schedule[MAX_CPUS] = {0};
         uint32_t pre_picked[MAX_CPUS] = {0};
+        uint32_t pre_idle[MAX_CPUS] = {0};
         for (uint32_t c = 0; c < cpu_count; c++) {
             pre_attempts[c] = sched_diag_steal_attempts[c];
             pre_successes[c] = sched_diag_steal_successes[c];
             pre_stale[c] = sched_diag_steal_stale[c];
             pre_schedule[c] = sched_diag_schedule[c];
             pre_picked[c] = sched_diag_picked[c];
+            pre_idle[c] = sched_diag_idle_loops[c];
         }
         uint64_t t_queued = timer_get_count();
 #endif
@@ -1054,20 +1057,32 @@ static void test_work_stealing_distributes_load(void)
                         (unsigned long)(recorded[i] - 1),
                         (i + 1 < STEAL_TASK_COUNT) ? "," : "");
         }
-        uart_printf("] per-cpu(att/succ/stale/sched/picked)=");
+        uart_printf("] per-cpu(att/succ/stale/sched/picked/idle)=");
         for (uint32_t c = 0; c < cpu_count; c++) {
             uint32_t da = sched_diag_steal_attempts[c] - pre_attempts[c];
             uint32_t ds = sched_diag_steal_successes[c] - pre_successes[c];
             uint32_t dst = sched_diag_steal_stale[c] - pre_stale[c];
             uint32_t dsc = sched_diag_schedule[c] - pre_schedule[c];
             uint32_t dp = sched_diag_picked[c] - pre_picked[c];
-            uart_printf("%s%lu/%lu/%lu/%lu/%lu",
+            uint32_t di = sched_diag_idle_loops[c] - pre_idle[c];
+            uart_printf("%s%lu/%lu/%lu/%lu/%lu/%lu",
                         (c == 0) ? "" : ",",
                         (unsigned long)da, (unsigned long)ds,
                         (unsigned long)dst,
-                        (unsigned long)dsc, (unsigned long)dp);
+                        (unsigned long)dsc, (unsigned long)dp,
+                        (unsigned long)di);
         }
         uart_printf("\n");
+        /* Absolute idle_loops snapshot separates "CPU never woke
+         * since boot" from "CPU was alive earlier but is dormant
+         * now". Zero here = CPU never executed its idle task. */
+        uart_printf("  ws-diag idle_abs=[");
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            uart_printf("%s%lu",
+                        (c == 0) ? "" : ",",
+                        (unsigned long)sched_diag_idle_loops[c]);
+        }
+        uart_printf("]\n");
 #endif
     }
 

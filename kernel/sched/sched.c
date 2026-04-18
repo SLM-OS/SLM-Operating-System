@@ -454,18 +454,26 @@ static void idle_task_func(void *arg)
     (void)arg;
 
     while (1) {
+        /* Idle-loop heartbeat. The sched_diag_idle_loops array is
+         * NC-backed on PLATFORM_HAS_NC_MEMORY (see scheduler_init)
+         * and plain BSS elsewhere — both paths produce a counter
+         * that CPU 0 can read without cache maintenance. Used by
+         * `ws-diag` (integration tests) and `cpu` (shell) to
+         * distinguish "secondary never reached idle" (counter==0)
+         * from "secondary is idling but SEV is not reaching it"
+         * (counter frozen after initial iterations). */
+        sched_diag_idle_loops[cpu_id()]++;
 #if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
-        /* Use fixed NC address — sched_diag_idle_loops pointer is in
-         * cacheable BSS and may not be visible to secondary CPUs.
-         * Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
+        /* Belt-and-braces trace slot at a fixed NC address so early-
+         * boot analysis can confirm the counter is wired up even
+         * before scheduler_init finishes. Pi 5: CPU index in Aff1
+         * (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
         {
             uint64_t mpidr;
             __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
             uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
             (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
         }
-#elif !defined(PLATFORM_HAS_NC_MEMORY)
-        sched_diag_idle_loops[cpu_id()]++;
 #endif
 
         /* Unmask IRQ so timer interrupts can fire.
