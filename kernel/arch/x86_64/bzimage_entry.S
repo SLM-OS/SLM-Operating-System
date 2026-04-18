@@ -34,6 +34,8 @@
  * possible point.
  */
 
+#include "com1_uart_init.inc"
+
 .section .bzimage_entry, "ax", @progbits
 .code64
 .global _start_bzimage
@@ -46,31 +48,12 @@
 _start_bzimage:
     cli
 
-    /* ------ 16550 UART reinit (mirrors trampoline32.S) ----------- */
-    mov $0x3F9, %dx          /* IER: no interrupts */
-    mov $0x00, %al
-    out %al, %dx
-    mov $0x3FB, %dx          /* LCR: DLAB=1 */
-    mov $0x80, %al
-    out %al, %dx
-    mov $0x3F8, %dx          /* DLL: 1 → 115200 baud */
-    mov $0x01, %al
-    out %al, %dx
-    mov $0x3F9, %dx          /* DLM: 0 */
-    mov $0x00, %al
-    out %al, %dx
-    mov $0x3FB, %dx          /* LCR: 8N1, DLAB=0 */
-    mov $0x03, %al
-    out %al, %dx
-    mov $0x3FA, %dx          /* FCR: enable+clear FIFO */
-    mov $0xC7, %al
-    out %al, %dx
-    mov $0x3FC, %dx          /* MCR: DTR+RTS+OUT2 */
-    mov $0x0B, %al
-    out %al, %dx
+    /* 16550 UART reinit — shared with trampoline32.S via
+     * com1_uart_init.inc. Leaves %dx = 0x3F8 (THR). */
+    COM1_UART_REINIT
 
-    /* ------ Emit "BZ\r\n" — bzImage entry breadcrumb ------------- */
-    mov $0x3F8, %dx          /* THR */
+    /* Emit "BZ\r\n" — distinguishable from trampoline32's "KEX\r\n"
+     * so serial logs show which entry path got control. */
     mov $0x42, %al           /* 'B' */
     out %al, %dx
     mov $0x5A, %al           /* 'Z' */

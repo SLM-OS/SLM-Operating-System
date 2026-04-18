@@ -7,6 +7,8 @@
  * Compile with: gcc -m32 -c trampoline32.S -o trampoline32.o
  */
 
+#include "com1_uart_init.inc"
+
 .set MULTIBOOT2_MAGIC,     0xE85250D6
 .set MULTIBOOT2_ARCH,      0
 .set MULTIBOOT2_HEADER_LENGTH, multiboot_header_end - multiboot_header
@@ -88,44 +90,15 @@ multiboot_header_end:
 _start:
     cli
 
-    /* Early-entry diagnostic: full 16550 UART reinit, then emit a
-     * distinctive burst "KEX\r\n". We don't assume the UART was left
-     * in a usable state by the previous boot loader (kexec may leave
-     * the UART gated; GRUB EFI may have disabled it during
-     * ExitBootServices); we re-configure from scratch.
-     *
-     * Register offsets (from COM1 base 0x3F8):
-     *   +0 THR/DLL, +1 IER/DLM, +2 FCR, +3 LCR, +4 MCR, +5 LSR
-     *
-     * Sequence: disable IRQs, set DLAB, DLL=1 / DLM=0 (→115200 @
-     * 1.8432 MHz), clear DLAB + set 8N1, enable+clear FIFO, assert
-     * DTR/RTS, then spin-drain-write each byte. No busy-wait on TX
-     * ready — we're fine losing early bytes if the FIFO overflows,
-     * the burst is short. */
-    mov $0x3F9, %dx         /* IER */
-    mov $0x00, %al
-    out %al, %dx
-    mov $0x3FB, %dx         /* LCR — set DLAB */
-    mov $0x80, %al
-    out %al, %dx
-    mov $0x3F8, %dx         /* DLL */
-    mov $0x01, %al
-    out %al, %dx
-    mov $0x3F9, %dx         /* DLM */
-    mov $0x00, %al
-    out %al, %dx
-    mov $0x3FB, %dx         /* LCR — 8N1, DLAB=0 */
-    mov $0x03, %al
-    out %al, %dx
-    mov $0x3FA, %dx         /* FCR — enable+clear FIFO, 14-byte trg */
-    mov $0xC7, %al
-    out %al, %dx
-    mov $0x3FC, %dx         /* MCR — DTR+RTS+OUT2 */
-    mov $0x0B, %al
-    out %al, %dx
-    /* Emit "KEX\r\n" to COM1 (0x3F8). No busy-wait; the FIFO
-     * absorbs short bursts. */
-    mov $0x3F8, %dx
+    /* Early-entry diagnostic: reinit COM1 and emit "KEX\r\n" as a
+     * boot-loader handoff breadcrumb. We don't assume the UART was
+     * left in a usable state by the previous bootloader (kexec may
+     * leave it gated; GRUB EFI may have disabled it during
+     * ExitBootServices). The reinit macro is shared with
+     * bzimage_entry.S via com1_uart_init.inc. */
+    COM1_UART_REINIT
+    /* Macro leaves %dx = 0x3F8 (THR). Emit the burst. No busy-wait
+     * on TX-ready — the 16-byte FIFO absorbs short bursts. */
     mov $0x4B, %al          /* 'K' */
     out %al, %dx
     mov $0x45, %al          /* 'E' */

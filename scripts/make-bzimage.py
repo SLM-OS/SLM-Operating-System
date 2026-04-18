@@ -100,6 +100,17 @@ def load_elf_payload(elf_path: Path) -> bytes:
         if p_paddr < KERNEL_PHYS:
             die(f"{elf_path}: PT_LOAD at p_paddr=0x{p_paddr:x} below "
                 f"KERNEL_PHYS=0x{KERNEL_PHYS:x} — wrong linker script?")
+        # Bounds-check p_offset + p_filesz against the actual file
+        # size. Python's bytearray slice would silently truncate,
+        # producing a corrupt payload if the ELF is malformed or
+        # truncated in transit. Fail loudly instead.
+        if p_filesz > 0 and p_offset + p_filesz > len(blob):
+            die(f"{elf_path}: PT_LOAD[{i}] references bytes "
+                f"{p_offset}..{p_offset + p_filesz} but ELF is only "
+                f"{len(blob)} bytes — truncated?")
+        if p_memsz < p_filesz:
+            die(f"{elf_path}: PT_LOAD[{i}] has p_memsz={p_memsz} < "
+                f"p_filesz={p_filesz} — malformed phdr")
         end = p_paddr + p_memsz
         if end > max_end:
             max_end = end

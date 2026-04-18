@@ -6,13 +6,17 @@
 #
 # Two loader paths, selected via env var KEXEC_MODE:
 #   mb2       — multiboot2-x86 (default). Reads $SLMOS_ELF
-#               (build/kernel-kexec/slmos.elf). Handoff is currently
-#               silent post-exec — see x86-64-gpu-inference-status
-#               §4.2.k for the investigation.
+#               (build/kernel-kexec/slmos.elf). Uses the old
+#               kexec_load syscall (-c) to bypass the "Invalid memory
+#               segment" validator.
 #   bzimage   — Linux bzImage wrapper. Reads $SLMOS_BZIMAGE
-#               (build/kernel-bzimage/slmos.bzimage). kexec's most
-#               thoroughly-tested x86 loader; added in this session
-#               as the next-step path after mb2 stayed silent.
+#               (build/kernel-bzimage/slmos.bzimage). kexec-tools'
+#               most thoroughly-tested x86 loader path.
+#
+# Both paths require --console-serial (added unconditionally below) —
+# without it, kexec's purgatory leaves the UART in a state where our
+# post-handoff kernel can't emit anything. See
+# docs/x86-64-gpu-inference-status.md §4.2.k for the full investigation.
 #
 # Prerequisites (checked below):
 #   - kexec-tools 2.0.28+ (has both multiboot2-x86 and bzImage loaders)

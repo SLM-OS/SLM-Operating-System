@@ -226,17 +226,13 @@ endif
 x86-disk-verify: x86-disk
 	@scripts/tests/verify-x86-disk.sh $(KERNEL_BUILD_DIR)/slmos-x86.img
 
-# Deploy + kexec SLM-OS onto a running Linux on test-pc. This is an
-# ALTERNATIVE to the UEFI+SDWire path — the bare-metal disk-image flow
-# (x86-disk → labctl sdwire flash → power_cycle) is unchanged. Use this
-# path when SEC2 needs to inherit its nouveau-unlocked state (issue
-# #185 / the 2026-04-17 investigation). Set KEXEC_HOST to override the
-# default test-pc SSH target; set KEXEC_NO_EXEC=1 to stage only.
 # Verify the kexec-build scaffolding is structurally intact. Checks the
 # kexec ELF is linked at 0x20000000, both MB1 and MB2 headers are
 # present, the MB2 ENTRY_ADDRESS tag points at _start, and the
 # trampoline32.S UART diag ("KEX\r\n") is in the compiled entry. Also
-# shellchecks the Linux-side helper scripts.
+# validates the bzImage wrapper (setup_header fields kexec-tools'
+# bzImage64 probe reads) and shellchecks the Linux-side helper
+# scripts.
 .PHONY: kexec-verify
 kexec-verify:
 ifneq ($(PLATFORM),X86_64)
@@ -287,14 +283,44 @@ kernel-bzimage-clean:
 	@echo "Cleaning bzImage kernel build..."
 	rm -rf $(KERNEL_BZIMAGE_BUILD_DIR)
 
+# Deploy + kexec SLM-OS onto a running Linux on test-pc. Alternative
+# to the UEFI+SDWire bare-metal path (x86-disk → labctl sdwire flash
+# → power_cycle), used when SEC2 needs to inherit its nouveau-unlocked
+# state (issue #185 / the 2026-04-17 investigation).
+#
+# Flags (override at make invocation):
+#   KEXEC_MODE=mb2|bzimage  — loader flavour (default mb2 = multiboot2).
+#                             bzimage uses make-bzimage.py to wrap the
+#                             kexec-linked ELF into a Linux bzImage so
+#                             kexec-tools' --type=bzImage loader accepts
+#                             it.
+#   KEXEC_HOST=user@ip      — override default test-pc SSH target.
+#   KEXEC_NO_EXEC=1         — scp the artefact but don't fire kexec.
+#
+# kexec-deploy depends on the kernel target matching KEXEC_MODE so the
+# right artefact is always built before the deploy script runs.
+KEXEC_MODE ?= mb2
+
+ifeq ($(KEXEC_MODE),bzimage)
+  KEXEC_DEPLOY_DEP := kernel-bzimage
+  KEXEC_DEPLOY_ARGS := --mode bzimage --bzimage $(KERNEL_BZIMAGE)
+  KEXEC_DEPLOY_BUILD_DIR := $(KERNEL_BZIMAGE_BUILD_DIR)
+else ifeq ($(KEXEC_MODE),mb2)
+  KEXEC_DEPLOY_DEP := kernel-kexec
+  KEXEC_DEPLOY_ARGS := --mode mb2 --elf $(KERNEL_KEXEC_ELF)
+  KEXEC_DEPLOY_BUILD_DIR := $(KERNEL_KEXEC_BUILD_DIR)
+else
+  $(error KEXEC_MODE must be 'mb2' or 'bzimage' (got '$(KEXEC_MODE)'))
+endif
+
 .PHONY: kexec-deploy
-kexec-deploy: kernel-kexec
+kexec-deploy: $(KEXEC_DEPLOY_DEP)
 ifneq ($(PLATFORM),X86_64)
 	@echo "kexec-deploy requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
 endif
-	@KERNEL_BUILD_DIR=$(KERNEL_KEXEC_BUILD_DIR) \
+	@KERNEL_BUILD_DIR=$(KEXEC_DEPLOY_BUILD_DIR) \
 	 scripts/x86-kexec-deploy.sh \
-	    --elf $(KERNEL_KEXEC_ELF) \
+	    $(KEXEC_DEPLOY_ARGS) \
 	    $(if $(KEXEC_HOST),--host $(KEXEC_HOST),) \
 	    $(if $(KEXEC_NO_EXEC),--no-exec,)
 

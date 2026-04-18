@@ -33,11 +33,11 @@ SECTIONS
     {
         KEEP(*(.multiboot))
     }
+    __multiboot_end = .;
 
     /* Force the bzImage entry stub to exactly KERNEL_PHYS + 0x200.
-     * If .multiboot extends past 0x200 this linker invocation will
-     * fail loudly, catching any regression where MB headers grow
-     * large enough to collide with the bzImage entry. */
+     * The top-level ASSERT below checks that .multiboot didn't
+     * overrun this offset. */
     . = KERNEL_PHYS + 0x200;
     .bzimage_entry :
     {
@@ -97,3 +97,11 @@ SECTIONS
         *(.note*)
     }
 }
+
+/* Hard constraint: the Multiboot headers must fit entirely inside
+ * the first 0x200 bytes of the image, because kexec-tools'
+ * bzImage64 loader jumps to exactly KERNEL_PHYS + 0x200 and any
+ * overrun would push .bzimage_entry past that address silently.
+ * Fail at link time instead of silently producing a broken bzImage. */
+ASSERT(__multiboot_end <= KERNEL_PHYS + 0x200,
+    "error: .multiboot section overran 0x200 bytes — bzImage entry stub misplaced")
