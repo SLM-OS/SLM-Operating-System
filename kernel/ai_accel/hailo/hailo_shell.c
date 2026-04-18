@@ -36,21 +36,17 @@ static int cmd_hailo(int argc, char *argv[])
 
     if (argc >= 2 && strcmp(argv[1], "cfgdump") == 0) {
 #if defined(PLATFORM_RASPI5)
-        /* PCIe1 EXT_CFG_INDEX/DATA are hardwired to BCM2712's pcie1 RC;
-         * the addresses are only valid on Pi 5. */
+        /* PCIe1 EXT_CFG_INDEX at RC_base + 0x9000, EXT_CFG_DATA at
+         * RC_base + 0x8000 (NOT 0x9004 — see pcie_bcm2712.c comment
+         * on PCIE1_EXT_CFG_DATA for why the variant table's 0x9004
+         * is vestigial and only 0x8000 returns real data past
+         * config offset 0x07). */
         volatile uint32_t *idx  = (volatile uint32_t *)0x1000119000UL;
-        volatile uint8_t  *data = (volatile uint8_t  *)0x1000119004UL;
-        uart_puts("Re-program INDEX between EACH read (bus 1 dev 0 func 0):\n");
-        for (uint32_t off = 0; off < 0x40; off += 4) {
-            *idx = 0x00100000u;
-            __asm__ volatile("dsb sy" ::: "memory");
-            uint32_t v = *(volatile uint32_t *)(data + off);
-            uart_printf("  [0x%02x]=0x%08lx\n", off, (unsigned long)v);
-        }
-        uart_puts("\nRead first 4 dwords WITHOUT re-programming INDEX (INDEX kept at 0x100000):\n");
+        volatile uint8_t  *data = (volatile uint8_t  *)0x1000118000UL;
+        uart_puts("Dumping bus 1 dev 0 func 0 config (INDEX pinned):\n");
         *idx = 0x00100000u;
         __asm__ volatile("dsb sy" ::: "memory");
-        for (uint32_t off = 0; off < 0x20; off += 4) {
+        for (uint32_t off = 0; off < 0x40; off += 4) {
             uint32_t v = *(volatile uint32_t *)(data + off);
             uart_printf("  [0x%02x]=0x%08lx\n", off, (unsigned long)v);
         }
