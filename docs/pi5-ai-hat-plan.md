@@ -13,8 +13,10 @@
 | 2 — Inference-device abstraction | ✅ done | `kernel/include/inference_device.h` + CPU-MLP backend, `ai_mlp_assign_cpu` routes through it |
 | 3 — Hailo driver scaffolding | ✅ done (software) | `kernel/ai_accel/hailo/` + mocked-ops tests; probe/boot/FW-upload need hardware |
 | 4 — nanopb + `.hef` parser | ✅ partial | nanopb vendored (0.4.9.1) + `.hef` outer-header validator + smoke tests; full `ProtoHEFHef` decode deferred until a real `.hef` is available |
-| 5 — Single-model inference | ☐🔗 hardware-gated | requires Phase 4 full parse + real HAT+ |
-| 6 — AI scheduler Hailo policy | ☐🔗 hardware-gated | requires Phase 5 |
+| 5.1 — HEF tensor metadata | ✅ done | I/O pad shapes captured from the first NG |
+| 5.2 — hailo_load + weight DMA | ☐🔗 hardware-gated | blocked on control-channel RPC RE |
+| 5.3 — Inference submit + `hailo infer` | ☐🔗 hardware-gated | requires Phase 5.2 |
+| 6 — AI scheduler Hailo policy | ☐🔗 hardware-gated | requires Phase 5.2/5.3 |
 | 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe` / `hailo fw` shell commands already wired |
 
 ---

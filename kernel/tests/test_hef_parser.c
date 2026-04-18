@@ -460,6 +460,177 @@ static void test_decode_second_network_group_pads_ignored(void)
     TEST_ASSERT_EQUAL_UINT32(2, info.pad_count);     /* only NG 0 pads */
 }
 
+static void test_decode_partial_tensor_shape(void)
+{
+    /* Only height + width set; features and all padded variants
+     * default to zero. has_tensor_shape must be true because the
+     * tensor_shape sub-message was present on the wire. */
+    uint8_t pad[32];
+    size_t  pad_len = emit_pad(pad, 2, "p", /*h*/ 32, /*ph*/ 0,
+                               /*w*/ 32, /*pw*/ 0, /*f*/ 0, /*pf*/ 0);
+
+    uint8_t op[64];
+    size_t  op_len = 0;
+    emit_lenprefix(op, &op_len, 2, pad, pad_len);
+
+    uint8_t ng[128];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 8, op, op_len);
+
+    uint8_t blob[256];
+    size_t  olen = 0;
+    emit_lenprefix(blob, &olen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(32, info.pads[0].height);
+    TEST_ASSERT_EQUAL_UINT32(32, info.pads[0].width);
+    TEST_ASSERT_EQUAL_UINT32(0,  info.pads[0].features);
+    TEST_ASSERT_EQUAL_UINT32(0,  info.pads[0].padded_height);
+    TEST_ASSERT_EQUAL_UINT32(0,  info.pads[0].padded_width);
+    TEST_ASSERT_EQUAL_UINT32(0,  info.pads[0].padded_features);
+}
+
+static void test_decode_empty_tensor_shape(void)
+{
+    /* Pad carries an empty tensor_shape sub-message (zero body bytes).
+     * Wire: pad { index=3; tensor_shape: <empty length-prefix> }. */
+    uint8_t pad[16];
+    size_t  pad_len = 0;
+    emit_varint_field(pad, &pad_len, 1, 3);
+    emit_lenprefix(pad, &pad_len, /*6=tensor_shape*/ 6, NULL, 0);
+
+    uint8_t op[32];
+    size_t  op_len = 0;
+    emit_lenprefix(op, &op_len, 3, pad, pad_len);  /* output_pads */
+
+    uint8_t ng[64];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 8, op, op_len);
+
+    uint8_t blob[128];
+    size_t  olen = 0;
+    emit_lenprefix(blob, &olen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    /* has_tensor_shape flips true the moment the sub-message is seen,
+     * regardless of whether it carries any dims. All dims stay zero. */
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(0, info.pads[0].height);
+    TEST_ASSERT_EQUAL_UINT32(0, info.pads[0].width);
+    TEST_ASSERT_EQUAL_UINT32(0, info.pads[0].features);
+}
+
+static void test_decode_op_without_pads(void)
+{
+    /* Op with no input_pads and no output_pads — op_count bumps to 1
+     * but pad_count stays 0. Guards against a regression where the
+     * op walker mistakenly initialized a pad slot from a field it
+     * wasn't actually given. */
+    uint8_t op[32];
+    size_t  op_len = 0;
+    emit_lenprefix(op, &op_len, 1, (const uint8_t *)"bare", 4);
+
+    uint8_t ng[64];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 8, op, op_len);
+
+    uint8_t blob[128];
+    size_t  olen = 0;
+    emit_lenprefix(blob, &olen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.op_count);
+    TEST_ASSERT_EQUAL_UINT32(0, info.pad_count);
+    TEST_ASSERT_FALSE(info.pads_truncated);
+}
+
+static void test_decode_tensor_shape_rejects_oversize_dim(void)
+{
+    /* A shape dim > UINT32_MAX must fail the decode (decode_tensor_
+     * shape_cb's v > UINT32_MAX guard). Emit height as a 10-byte
+     * varint with the high bit set so it exceeds 32-bit range. */
+    uint8_t shape[16];
+    size_t  slen = 0;
+    /* Tag for field 1, wire-type 0 = 0x08 */
+    shape[slen++] = 0x08;
+    /* Varint encoding of 0x1_0000_0000 (2^32): needs 5 bytes:
+     *   byte0 = (bits 0..6)  | 0x80 = 0x80
+     *   byte1 = (bits 7..13) | 0x80 = 0x80
+     *   byte2 = (bits 14..20)| 0x80 = 0x80
+     *   byte3 = (bits 21..27)| 0x80 = 0x80
+     *   byte4 = (bits 28..34)         = 0x10
+     * 0x10 = decimal 16 = bit 32 set = 2^32. */
+    shape[slen++] = 0x80;
+    shape[slen++] = 0x80;
+    shape[slen++] = 0x80;
+    shape[slen++] = 0x80;
+    shape[slen++] = 0x10;
+
+    uint8_t pad[32];
+    size_t  pad_len = 0;
+    emit_varint_field(pad, &pad_len, 1, 0);
+    emit_lenprefix(pad, &pad_len, 6, shape, slen);
+
+    uint8_t op[64];
+    size_t  op_len = 0;
+    emit_lenprefix(op, &op_len, 2, pad, pad_len);
+
+    uint8_t ng[128];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 8, op, op_len);
+
+    uint8_t blob[256];
+    size_t  olen = 0;
+    emit_lenprefix(blob, &olen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE,
+                          hef_parse_body(blob, olen, &info));
+}
+
+static void test_decode_tensor_shape_ignores_unknown_field(void)
+{
+    /* A future Hailo schema could add field 7 (or higher) to
+     * ProtoHEFTensorShape. Our decoder must skip it gracefully so
+     * older SLM-OS kernels parse future HEFs. Field 7 as varint, any
+     * value, followed by a known field (height) proves the walker
+     * resumed correctly after the unknown. */
+    uint8_t shape[16];
+    size_t  slen = 0;
+    emit_varint_field(shape, &slen, 7, 0xABCD);   /* unknown future field */
+    emit_varint_field(shape, &slen, 1, 128);      /* height */
+
+    uint8_t pad[32];
+    size_t  pad_len = 0;
+    emit_varint_field(pad, &pad_len, 1, 42);
+    emit_lenprefix(pad, &pad_len, 6, shape, slen);
+
+    uint8_t op[64];
+    size_t  op_len = 0;
+    emit_lenprefix(op, &op_len, 2, pad, pad_len);
+
+    uint8_t ng[128];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 8, op, op_len);
+
+    uint8_t blob[256];
+    size_t  olen = 0;
+    emit_lenprefix(blob, &olen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(128, info.pads[0].height);
+    TEST_ASSERT_EQUAL_UINT32(42, info.pads[0].index);
+}
+
 static void test_decode_pad_name_truncation(void)
 {
     /* A pad name longer than HEF_PARSER_MAX_PAD_NAME-1 bytes must
@@ -517,6 +688,11 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_pad_without_tensor_shape);
     RUN_TEST(test_decode_pad_with_nms_shape_leaves_tensor_fields_empty);
     RUN_TEST(test_decode_second_network_group_pads_ignored);
+    RUN_TEST(test_decode_partial_tensor_shape);
+    RUN_TEST(test_decode_empty_tensor_shape);
+    RUN_TEST(test_decode_op_without_pads);
+    RUN_TEST(test_decode_tensor_shape_rejects_oversize_dim);
+    RUN_TEST(test_decode_tensor_shape_ignores_unknown_field);
     RUN_TEST(test_decode_pad_name_truncation);
 
     return UnityEnd();

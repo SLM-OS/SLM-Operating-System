@@ -195,19 +195,23 @@ stack than discrete Ampere.
 documentation. Accessing it would require reverse-engineering the
 VideoCore ISA and firmware. Not feasible within capstone scope.
 
-**Pi 5 Hailo-8 NPU (AI HAT+) — Phase 0–4 complete, firmware booted
+**Pi 5 Hailo-8 NPU (AI HAT+) — Phase 0–5.1 complete, firmware booted
 on real hardware (2026-04-18):** A full alternative inference path
 via the Pi 5's external PCIe connector. Phase 0 research, Phase 1
 ARM64 PCIe host controller (`kernel/drivers/pcie/`) with BCM2712
 link training (`pcie_bcm2712.c`), Phase 2 `inference_device`
 abstraction, Phase 3 Hailo driver + full boot state machine
-(`kernel/ai_accel/hailo/`), and Phase 4 nanopb-driven `.hef`
-protobuf parser + `hailo load` shell command all landed. On
-pi-5-1 with the HAT+ mounted: `hailo probe` succeeds
+(`kernel/ai_accel/hailo/`), Phase 4 nanopb-driven `.hef` protobuf
+parser + `hailo load` shell command, and Phase 5.1 I/O tensor-
+shape extraction (input/output pad dims from the first network
+group — the loader needs these to size DMA buffers) all landed.
+On pi-5-1 with the HAT+ mounted: `hailo probe` succeeds
 (vendor=0x1e60 device=0x2864), `hailo boot` uploads the full
 164 KB Hailo-8 firmware blob (app + cert + core sections) via
-the ATR[0]+BAR4 window and reaches `state=running`. Phase 5
-(control-channel RPC + inference submission) remains. See
+the ATR[0]+BAR4 window and reaches `state=running`. Phase 5.2
+(control-channel RPC for weight DMA) and 5.3 (inference submit
+via VDMA rings) remain — both blocked on reverse-engineering
+Hailo's userspace-library command codes. See
 `docs/pi5-ai-hat-plan.md` for the full phase breakdown and
 `docs/pi5-pcie1-registers.md` for the `pcie1` + MIP1 register
 reference.
