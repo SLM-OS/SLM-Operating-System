@@ -11,6 +11,9 @@
  *                            device-side address A; hex-dump.
  *   hailo poke A V         — WRITE_MEMORY a single 32-bit value V at
  *                            device-side address A (little-endian).
+ *   hailo cfgstream D C    — CONFIG_STREAM probe (D in {in, out};
+ *                            C = pcie channel hex u4); prints
+ *                            assigned dataflow_manager_id.
  *   hailo cfgdump          — (Pi 5 only) raw 64-byte bus 1 config dump.
  *
  * Safe to run on any platform. On non-RASPI5 builds the driver is
@@ -347,6 +350,55 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    if (argc >= 2 && strcmp(argv[1], "cfgstream") == 0) {
+        /* `hailo cfgstream <dir> <channel>` — issue a minimal PCIe
+         * CONFIG_STREAM (opcode 0x03) to pi-5-1 firmware. Most
+         * nn_stream_config fields are left zero because this
+         * command is primarily a transport-liveness probe for
+         * Phase 5.3 — a real caller would pull these values from
+         * the .hef. <dir> is "in" or "out"; <channel> is a small
+         * hex u8 (0..F). */
+        if (argc < 4) {
+            shell_puts("usage: hailo cfgstream <in|out> <channel-hex>\n");
+            return 0;
+        }
+        bool is_input;
+        if (strcmp(argv[2], "in") == 0)       is_input = true;
+        else if (strcmp(argv[2], "out") == 0) is_input = false;
+        else {
+            shell_printf("hailo: cfgstream: direction '%s' not in "
+                         "{in, out}\n", argv[2]);
+            return 0;
+        }
+        uint32_t ch = 0;
+        if (parse_hex_u32(argv[3], &ch) != 0 || ch >= 16) {
+            shell_printf("hailo: cfgstream: channel '%s' not a hex u4\n",
+                         argv[3]);
+            return 0;
+        }
+
+        struct hailo_stream_pcie_config cfg = {0};
+        cfg.stream_index          = 0;
+        cfg.is_input              = is_input;
+        cfg.skip_nn_stream_config = true;   /* minimal probe */
+        cfg.pcie_channel_index    = (uint8_t)ch;
+        if (is_input) {
+            cfg.pcie_dataflow_type = (uint8_t)HAILO_PCIE_DATAFLOW_TYPE_CONTINUOUS;
+        } else {
+            cfg.desc_page_size = 512;
+        }
+
+        uint8_t dmid = 0;
+        int rc = hailo_control_config_stream_pcie(&cfg, &dmid);
+        if (rc != HAILO_OK) {
+            shell_printf("hailo: cfgstream failed (%d)\n", rc);
+            return 0;
+        }
+        shell_printf("hailo: cfgstream %s ch=%u -> dataflow_manager_id=0x%02x\n",
+                     is_input ? "in" : "out", (unsigned)ch, dmid);
+        return 0;
+    }
+
     /* Default: one-line status. */
     shell_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
     return 0;
@@ -355,7 +407,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name    = "hailo",
     .handler = cmd_hailo,
-    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek <addr> [len], poke <addr> <u32>, cfgdump)",
+    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump)",
     .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
 };
 

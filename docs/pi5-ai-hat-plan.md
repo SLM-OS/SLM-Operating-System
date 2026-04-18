@@ -14,11 +14,11 @@
 | 3 — Hailo driver scaffolding | ✅ done (software) | `kernel/ai_accel/hailo/` + mocked-ops tests; probe/boot/FW-upload need hardware |
 | 4 — nanopb + `.hef` parser | ✅ partial | nanopb vendored (0.4.9.1) + `.hef` outer-header validator + smoke tests; full `ProtoHEFHef` decode deferred until a real `.hef` is available |
 | 5.1 — HEF tensor metadata | ✅ done | I/O pad shapes captured from the first NG |
-| 5.2 — Control-channel RPC transport | ✅ tier-1 + tier-2 (2026-04-18) | IDENTIFY + WRITE_MEMORY + READ_MEMORY round-tripped on pi-5-1; `hailo peek/poke` wired; only CONFIG_STREAM opcode remains |
-| 5.3 — hailo_load + weight DMA | ☐🔗 hardware-gated | adds CONFIG_STREAM + tensor-buffer allocator |
+| 5.2 — Control-channel RPC transport | ✅ tier-1 + tier-2 + tier-3 (2026-04-18) | IDENTIFY + WRITE_MEMORY + READ_MEMORY + CONFIG_STREAM all round-tripped on pi-5-1; shell bindings `peek/poke/cfgstream` |
+| 5.3 — hailo_load + weight DMA | ☐🔗 hardware-gated | CCW upload driven by HEF context-switch data + tensor-buffer allocator (all control opcodes already landed) |
 | 5.4 — Inference submit + `hailo infer` | ☐🔗 hardware-gated | requires Phase 5.3 |
 | 6 — AI scheduler Hailo policy | ☐🔗 hardware-gated | requires Phase 5.3/5.4 |
-| 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe/boot/fw/peek/poke` wired; `hailo load <path>` prints HEF metadata |
+| 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe/boot/fw/peek/poke/cfgstream` wired; `hailo load <path>` prints HEF metadata |
 
 ---
 
@@ -269,21 +269,23 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - `hailo load <path>` now prints per-pad lines like `in pad[0] "input_layer1" shape=224x224x3 (padded 224x224x4)`.
 - Seven new `test_hef_parser.c` tests cover: pad-with-shape decode, multi-pad ordering, truncation, no-shape pad, NMS-branch skip, second-NG pad isolation, pad-name truncation.
 
-#### Phase 5.2: Control-channel RPC transport ✅ tier-1 + tier-2 (2026-04-18, hardware-verified)
+#### Phase 5.2: Control-channel RPC transport ✅ tier-1 + tier-2 + tier-3 (2026-04-18, hardware-verified)
 
 - `kernel/ai_accel/hailo/hailo_control.{c,h}` implements the HailoRT control-channel wire protocol — MD5-stamped request/response over BAR4 with a BCS_ISTATUS_HOST SW_IRQ completion.
 - **Tier-1 (IDENTIFY)**: empty-payload request, response carries firmware version + board metadata. Proved every piece of the transport.
 - **Tier-2 (WRITE_MEMORY + READ_MEMORY)**: parameterized address/length opcodes with 1 KB chunking that matches HailoRT's `CONTROL__MAX_WRITE_MEMORY_CHUNK_SIZE`. Shell bindings `hailo peek <addr> [len]` and `hailo poke <addr> <u32>` exercise both.
-- Hardware proof:
-  - IDENTIFY — `hailo fw` on pi-5-1 returns `firmware 4.23.536870912` (0x20000000), matching the boot-log fingerprint across three consecutive runs.
-  - WRITE/READ_MEMORY — both opcodes round-trip against pi-5-1 firmware with correct BE wire format and response parsing; firmware returns `major_status=0x40000058` for arbitrary-address access without an active stream context (expected HailoRT behavior — these opcodes are only used from within context-switch / CCW-upload flows).
+- **Tier-3 (CONFIG_STREAM)**: PCIe input and output variants (the only communication_type relevant for the AI HAT+; UDP / MIPI / INTER_CPU are for other SKUs). `hailo cfgstream <in|out> <ch>` shell binding fires a minimal probe; response carries the firmware-assigned `dataflow_manager_id`.
+- Hardware proof on pi-5-1:
+  - IDENTIFY — `hailo fw` returns `firmware 4.23.536870912` (0x20000000), matching the boot-log fingerprint across three consecutive runs.
+  - WRITE/READ_MEMORY — both opcodes round-trip against firmware with correct BE wire format and response parsing; firmware returns `major_status=0x40000058` for arbitrary-address access without an active stream context (expected HailoRT behavior).
+  - CONFIG_STREAM — both input and output variants round-trip, firmware returns `major_status=0x40030050, minor_status=0x40030005` for our minimal skip_nn_stream_config probe (requires a real `.hef`'s context-switch state to accept). Observed firmware convention: on rejection it returns `opcode_echo=0xFFFFFFFF` rather than mirroring the request opcode; the driver checks `major_status` first so this surfaces as `HAILO_ERR_IO` with diagnostic codes, not `HAILO_ERR_BAD_FIRMWARE`.
 - Four non-obvious wire-format gotchas surfaced during bring-up and are recorded in `docs/reference/hailo-driver-notes.md` §4.5 and the `hailo_control_wire_gotchas` auto-memory: big-endian header scalars, IMASK-before-ISTATUS unmask, FW_CONTROL-bit-specific polling, and the 4-byte `parameter_count` gap between response header and body (plus `__packed` on the body struct).
-- 15 QEMU-mocked tests in `test_hailo.c` cover the transport — 7 IDENTIFY cases (`test_control_identify_*`) plus 8 WRITE/READ_MEMORY cases (`test_control_{write,read}_memory_*`, `test_control_memory_{round_trip,chunks_large_transfer}`). The mock has a 4 KB smart backing store that simulates firmware memory so WRITE pattern → READ back round-trips can be asserted locally.
+- 36 QEMU-mocked tests in `test_hailo.c` cover the transport — 7 IDENTIFY cases (`test_control_identify_*`) + 22 WRITE/READ_MEMORY cases (`test_control_{write,read}_memory_*`) + 7 CONFIG_STREAM cases (`test_control_config_stream_*`). The mock has a 4 KB smart backing store that simulates firmware memory so WRITE pattern → READ back round-trips can be asserted locally.
 
 #### Phase 5.3: `hailo_load` with weight DMA ☐🔗 hardware
 
 - Tensor buffer API: allocate input/output tensors in NC DMA memory with platform cache sync handled by the driver.
-- Configure-channel RPC: the `.hef`'s CCW (config-channel-words) blob is uploaded to the device via `WRITE_MEMORY` + `CONFIG_STREAM` control opcodes. Uses the Phase 5.2 transport directly; adding these is a pack-request / parse-response exercise, not another round of wire-protocol RE.
+- CCW upload: walk the `.hef`'s context-switch structures, issue the corresponding `CONFIG_STREAM` (with real stream params from the HEF) + `WRITE_MEMORY` calls against the Phase 5.2 transport. Parameters come from the HEF — the control opcodes are already implemented.
 
 #### Phase 5.4: `hailo infer` ☐🔗 hardware
 

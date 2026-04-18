@@ -365,7 +365,70 @@ but the firmware rejects arbitrary memory access until an active stream
 context exists. HailoRT's own usage is consistent with this: `write_memory`
 and `read_memory` are only called from within context-switch / CCW-upload
 flows, never standalone. Address-permissive access will land when
-Phase 5.3 adds CONFIG_STREAM and sets up a context.
+Phase 5.3 drives CONFIG_STREAM with real HEF context and sets up a stream.
+
+### 4.7. CONFIG_STREAM opcode (tier-3, 2026-04-18)
+
+Opcode `0x03`. The big one for stream setup: tells firmware to
+allocate a dataflow manager for an input or output stream and return
+its id, which subsequent `OPEN_STREAM` / `CLOSE_STREAM` calls (Phase
+5.4) will reference.
+
+Request layout (parameter_count = 7, shared across all transport
+variants per `control_protocol__pack_config_stream_base_request`):
+
+```
+ [common_header(16)]
+ [parameter_count=7(4)]
+ [stream_index_length=1(4)]       [stream_index(1)]
+ [is_input_length=1(4)]           [is_input(1)]
+ [communication_type_length=4(4)] [communication_type(4)]
+ [skip_nn_stream_config_length=1(4)] [skip_nn_stream_config(1)]
+ [nn_stream_config_length(4)]     [nn_stream_config(19 B packed)]
+ [communication_params_length(4)] [communication_params(variant)]
+```
+
+`communication_type` = `HAILO_COMMUNICATION_TYPE_PCIE = 2` for the
+AI HAT+. Every scalar length is big-endian. `nn_stream_config`'s
+u16 fields are `htons`-swapped; interestingly, HailoRT also calls
+`htons` on its two u32 fields (`periph_buffers_per_frame`,
+`buffer_padding_payload`), which truncates to the low 16 bits and
+zero-extends on reassembly — we replicate that quirk exactly, since
+firmware is authoritative.
+
+PCIe variant payloads (under `communication_params`):
+
+- `pcie_input`: `[pcie_channel_index(1)][pcie_dataflow_type(1)]`
+  (2 bytes). `pcie_dataflow_type` is `CONTINUOUS (0)` or
+  `BURST (2)` — type `1` is reserved for firmware's CFG flow
+  channel.
+- `pcie_output`: `[pcie_channel_index(1)][desc_page_size(2)]`
+  (3 bytes packed). `desc_page_size` is NOT byte-swapped — the
+  HailoRT packer passes it through raw, so it rides the wire in
+  native LE. (Contrast with every other multi-byte scalar in the
+  request, which gets htons'd.)
+
+Response:
+
+```
+ [response_header(24)]
+ [parameter_count(4)]
+ [dataflow_manager_id_length=1(4)] [dataflow_manager_id(1)]
+```
+
+Total on success: 33 bytes.
+
+**Firmware rejection convention (pi-5-1 observation).** When
+firmware rejects CONFIG_STREAM — e.g. because `skip_nn_stream_config`
+is set but no prior `.hef` context-switch has populated the stream
+configuration tables — it returns a 28-byte response:
+header(24) + parameter_count=0(4), with the *echoed opcode set to
+`0xFFFFFFFF` rather than mirroring the request opcode*. The real
+error code is in `major_status` / `minor_status` (observed pair:
+`0x40030050 / 0x40030005`). Drivers should check `major_status`
+before validating the opcode echo so this surfaces as a firmware
+error, not as a transport-protocol violation. SLM-OS's
+`control_check_response_header` does exactly that.
 
 ---
 

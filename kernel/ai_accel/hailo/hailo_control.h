@@ -89,8 +89,29 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_IDENTIFY       = 0x00,
     HAILO_CONTROL_OPCODE_WRITE_MEMORY   = 0x01,
     HAILO_CONTROL_OPCODE_READ_MEMORY    = 0x02,
-    /* HAILO_CONTROL_OPCODE_CONFIG_STREAM = 0x03, (Phase 5.3+)     */
-    /* Full table in docs/reference/hailort-control-protocol.h.   */
+    HAILO_CONTROL_OPCODE_CONFIG_STREAM  = 0x03,
+    /* Full table in docs/reference/hailort-control-protocol.h. */
+};
+
+/* CONTROL_PROTOCOL__communication_type_t values.
+ * Mirrored from hailort-control-protocol.h:1522. We only use PCIE
+ * today (the AI HAT+ is a PCIe endpoint); the others are defined
+ * here only so the field has a named value in traces. */
+enum hailo_communication_type {
+    HAILO_COMMUNICATION_TYPE_UDP       = 0,
+    HAILO_COMMUNICATION_TYPE_MIPI      = 1,
+    HAILO_COMMUNICATION_TYPE_PCIE      = 2,
+    HAILO_COMMUNICATION_TYPE_INTER_CPU = 3,
+};
+
+/* CONTROL_PROTOCOL__pcie_dataflow_type_t values for input streams
+ * (hailort-control-protocol.h:528). Output streams don't use this
+ * enum — their variant carries `desc_page_size` instead. Type 1
+ * (CFG flow channel) is reserved for firmware's own CCW upload
+ * path and is not a valid user-facing option. */
+enum hailo_pcie_dataflow_type {
+    HAILO_PCIE_DATAFLOW_TYPE_CONTINUOUS = 0,
+    HAILO_PCIE_DATAFLOW_TYPE_BURST      = 2,
 };
 
 /*
@@ -274,6 +295,67 @@ int hailo_control_write_memory(uint32_t address,
 int hailo_control_read_memory(uint32_t address,
                               void *data,
                               uint32_t data_length);
+
+/*
+ * nn_stream_config carries per-stream buffering parameters that
+ * firmware's NN engine needs to size its descriptor rings. All
+ * values come from the `.hef` — the kernel doesn't invent them.
+ * Mirrors CONTROL_PROTOCOL__nn_stream_config_t
+ * (hailort-control-protocol.h:451); see also the comment at the
+ * HailoRT packer on the odd
+ * `htons(params->periph_buffers_per_frame)` on what is declared
+ * as a u32 field. We replicate that exactly — the HailoRT
+ * truncation-via-htons is part of the firmware-facing contract.
+ */
+struct hailo_nn_stream_config {
+    uint16_t core_bytes_per_buffer;
+    uint16_t core_buffers_per_frame;
+    uint16_t periph_bytes_per_buffer;
+    uint32_t periph_buffers_per_frame;   /* upstream htons'es this u32 */
+    uint16_t feature_padding_payload;
+    uint32_t buffer_padding_payload;     /* upstream htons'es this u32 */
+    uint16_t buffer_padding;
+    bool     is_core_hw_padding_config_in_dfc;
+};
+
+/*
+ * CONFIG_STREAM (opcode 0x03, PCIe variants) params. We only
+ * expose the PCIe variants of CONFIG_STREAM on SLM-OS because the
+ * Hailo-8 on AI HAT+ is a PCIe endpoint; UDP / MIPI / INTER_CPU
+ * are for other SKUs. `is_input` selects between:
+ *   - true  → pcie_input:  `pcie_dataflow_type` (enum
+ *     hailo_pcie_dataflow_type).
+ *   - false → pcie_output: `desc_page_size` (u16, passed as-is to
+ *     firmware per the HailoRT convention — NOT byte-swapped).
+ */
+struct hailo_stream_pcie_config {
+    uint8_t                           stream_index;
+    bool                              is_input;
+    bool                              skip_nn_stream_config;
+    struct hailo_nn_stream_config     nn_stream_config;
+    uint8_t                           pcie_channel_index;
+    union {
+        uint8_t  pcie_dataflow_type;   /* input  — enum hailo_pcie_dataflow_type */
+        uint16_t desc_page_size;       /* output */
+    };
+};
+
+/*
+ * Configure a PCIe stream and obtain the dataflow_manager_id the
+ * firmware assigns. The manager id is required by subsequent
+ * OPEN_STREAM / CLOSE_STREAM calls (Phase 5.4). Either direction
+ * is valid; pick via `cfg->is_input`.
+ *
+ * Returns HAILO_OK (out_dataflow_manager_id populated),
+ * HAILO_ERR_INVAL (null / bad args), HAILO_ERR_NODEV (device not
+ * RUNNING), HAILO_ERR_TIMEOUT (firmware didn't respond),
+ * HAILO_ERR_BAD_FIRMWARE (short / malformed response), or
+ * HAILO_ERR_IO (firmware returned a non-zero status — caller
+ * should check kernel log for major/minor codes).
+ */
+int hailo_control_config_stream_pcie(
+    const struct hailo_stream_pcie_config *cfg,
+    uint8_t *out_dataflow_manager_id);
 
 /*
  * Reset internal control-channel state (sequence counter and the
