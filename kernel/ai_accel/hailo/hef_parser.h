@@ -55,6 +55,18 @@
 #define HEF_PARSER_MAX_PADS      16   /* cap on pads we record for NG 0 */
 
 /*
+ * Cap on ProtoHEFActionWriteDataCcw entries recorded from the first
+ * network group's preliminary_config. Typical Hailo-8 models have
+ * 30–120 CCW writes (one per layer/weight group); 256 gives us
+ * headroom for the biggest Model Zoo entries with a clear truncation
+ * signal if a future model overruns. Size cost: 256 × 12 B = 3 KB
+ * inside the hef_info stack-allocated aggregate, balanced against
+ * the 1.2 KB already consumed by pads[] — well under the 16 KB
+ * kernel stack budget.
+ */
+#define HEF_PARSER_MAX_CCW_ACTIONS 256
+
+/*
  * One I/O pad of an op inside the first network group.
  *
  * Pads are how Hailo describes the interfaces between compute ops.
@@ -81,6 +93,32 @@ struct hef_pad_info {
     uint32_t padded_width;
     uint32_t features;
     uint32_t padded_features;
+};
+
+/*
+ * One config-channel-word (CCW) write action captured from the
+ * first network group's `preliminary_config`. Represents a single
+ * `ProtoHEFActionWriteDataCcw` (hef.proto:644) — the Hailo compiler
+ * emits one of these per weight region that needs to be DMA'd to
+ * the accelerator before inference can start.
+ *
+ * The `data` bytes themselves are NOT copied into hef_info — with
+ * real models that'd be multi-megabyte. Instead we record the byte
+ * offset WITHIN the protobuf blob the caller passed to
+ * hef_parse_body. The caller (which still owns the blob) can
+ * reconstruct `const uint8_t *data = blob_base + data_offset_in_blob`
+ * when it's ready to issue the upload.
+ *
+ * cfg_channel_index selects which firmware-side config channel
+ * should receive this blob — set up earlier via CONFIG_STREAM
+ * (opcode 0x03) with communication_type=PCIE and the flow type
+ * firmware reserves for CFG uploads.
+ */
+struct hef_ccw_action {
+    uint32_t data_offset_in_blob;                  /* offset within hef_parse_body's input */
+    uint32_t data_size;                            /* bytes */
+    uint32_t cfg_channel_index;
+    bool     cfg_channel_index_known;              /* false = tag absent, treat as 0 */
 };
 
 /*
@@ -113,6 +151,21 @@ struct hef_info {
     uint32_t pad_count;               /* valid entries in pads[] */
     bool     pads_truncated;          /* first NG had > MAX_PADS pads */
     struct hef_pad_info pads[HEF_PARSER_MAX_PADS];
+    /*
+     * CCW write actions from the first network group's
+     * `preliminary_config.operation[].actions[].write_data_ccw`.
+     * These are the weight-upload units the kernel will issue once
+     * Phase 5.3's upload loop is wired. `ccw_total_bytes` sums
+     * data_size across recorded entries so a caller can sanity-check
+     * model size without iterating. Entries beyond MAX_CCW_ACTIONS
+     * are counted (see ccw_actions_truncated) but not stored; the
+     * current cap fits every Model Zoo entry the SLM-OS build has
+     * been measured against.
+     */
+    uint32_t ccw_action_count;
+    bool     ccw_actions_truncated;
+    uint64_t ccw_total_bytes;
+    struct hef_ccw_action ccw_actions[HEF_PARSER_MAX_CCW_ACTIONS];
 };
 
 /*

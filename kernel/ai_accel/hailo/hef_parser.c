@@ -346,6 +346,143 @@ static bool decode_op_cb(pb_istream_t *stream,
 }
 
 /* -------------------------------------------------------------------------- */
+/* ProtoHEFActionWriteDataCcw → Action → Operation → PreliminaryConfig chain.  */
+/*                                                                             */
+/* Captures each WriteDataCcw action's (offset-in-blob, size,                  */
+/* cfg_channel_index) triple into info->ccw_actions[]. Offset is measured      */
+/* from the base of the HEF blob the caller passed to hef_parse_body —         */
+/* derived from nanopb's pb_istream_t::state, which for pb_istream_from_buffer */
+/* is an advancing pointer into the source buffer (see                         */
+/* kernel/lib/nanopb/pb_decode.c:buf_read). The ccw_ctx chain threads          */
+/* `blob_base` down from the top-level pb_decode call.                         */
+/* -------------------------------------------------------------------------- */
+
+struct ccw_ctx {
+    struct hef_info     *info;
+    const uint8_t       *blob_base;
+    /* One running slot; the bytes callback fills data_offset_in_blob
+     * and data_size, the varint callback fills cfg_channel_index, and
+     * after both fire the action callback commits the slot. */
+    struct hef_ccw_action pending;
+    bool                  pending_has_data;   /* data field seen */
+};
+
+static bool ccw_data_cb(pb_istream_t *stream,
+                        const pb_field_t *field,
+                        void **arg)
+{
+    (void)field;
+    struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
+
+    /* nanopb has already read the length-delimited header; `stream`
+     * now points at the first byte of the data blob and `bytes_left`
+     * is the length of the blob. The underlying source is the HEF
+     * blob passed in through hef_parse_body — `stream->state` is the
+     * advancing pointer into it (see buf_read). */
+    const uint8_t *data_ptr = (const uint8_t *)stream->state;
+    size_t         data_len = stream->bytes_left;
+
+    cctx->pending.data_offset_in_blob = (uint32_t)(data_ptr - cctx->blob_base);
+    cctx->pending.data_size           = (uint32_t)data_len;
+    cctx->pending_has_data            = true;
+
+    /* Advance past the bytes without copying. pb_read with NULL buf
+     * on a buf-backed stream just bumps state + decrements
+     * bytes_left (pb_decode.c:90+). */
+    return pb_read(stream, NULL, data_len);
+}
+
+static bool decode_write_data_ccw_cb(pb_istream_t *stream,
+                                     const pb_field_t *field,
+                                     void **arg)
+{
+    /* Nanopb shares the callback slot across every branch of
+     * ProtoHEFAction's `action` oneof. Only the write_data_ccw
+     * branch carries the fields we care about; others (write_data,
+     * enable_lcu, debug, …) just get skipped. */
+    if (field->tag != ProtoHEFAction_write_data_ccw_tag) {
+        return pb_read(stream, NULL, stream->bytes_left);
+    }
+
+    struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
+
+    /* Reset the pending slot before the sub-decode populates it. */
+    memset(&cctx->pending, 0, sizeof(cctx->pending));
+    cctx->pending_has_data = false;
+
+    ProtoHEFActionWriteDataCcw act = ProtoHEFActionWriteDataCcw_init_default;
+    bool cfg_present = false;
+    struct u32_ctx cfg_ctx = {
+        .dst     = &cctx->pending.cfg_channel_index,
+        .present = &cfg_present,
+    };
+    act.data.funcs.decode              = ccw_data_cb;
+    act.data.arg                       = cctx;
+    act.cfg_channel_index.funcs.decode = read_u32_cb;
+    act.cfg_channel_index.arg          = &cfg_ctx;
+
+    if (!pb_decode(stream, ProtoHEFActionWriteDataCcw_fields, &act)) {
+        return false;
+    }
+    cctx->pending.cfg_channel_index_known = cfg_present;
+
+    /* Commit the pending slot. Only actions with data bytes count —
+     * an action carrying just cfg_channel_index without data is
+     * malformed (but nanopb already parsed it; we ignore quietly). */
+    if (!cctx->pending_has_data) return true;
+
+    if (cctx->info->ccw_action_count < HEF_PARSER_MAX_CCW_ACTIONS) {
+        cctx->info->ccw_actions[cctx->info->ccw_action_count] = cctx->pending;
+    } else {
+        cctx->info->ccw_actions_truncated = true;
+    }
+    cctx->info->ccw_action_count++;
+    cctx->info->ccw_total_bytes += cctx->pending.data_size;
+    return true;
+}
+
+static bool decode_action_cb(pb_istream_t *stream,
+                             const pb_field_t *field,
+                             void **arg)
+{
+    (void)field;
+    struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
+
+    ProtoHEFAction act = ProtoHEFAction_init_default;
+    /* Wire the oneof callback shared across every action branch —
+     * decode_write_data_ccw_cb filters by field->tag. */
+    act.action.write_data_ccw.funcs.decode = decode_write_data_ccw_cb;
+    act.action.write_data_ccw.arg          = cctx;
+    return pb_decode(stream, ProtoHEFAction_fields, &act);
+}
+
+static bool decode_operation_cb(pb_istream_t *stream,
+                                const pb_field_t *field,
+                                void **arg)
+{
+    (void)field;
+    struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
+
+    ProtoHEFOperation op = ProtoHEFOperation_init_default;
+    op.actions.funcs.decode = decode_action_cb;
+    op.actions.arg          = cctx;
+    return pb_decode(stream, ProtoHEFOperation_fields, &op);
+}
+
+static bool decode_preliminary_config_cb(pb_istream_t *stream,
+                                         const pb_field_t *field,
+                                         void **arg)
+{
+    (void)field;
+    struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
+
+    ProtoHEFPreliminaryConfig cfg = ProtoHEFPreliminaryConfig_init_default;
+    cfg.operation.funcs.decode = decode_operation_cb;
+    cfg.operation.arg          = cctx;
+    return pb_decode(stream, ProtoHEFPreliminaryConfig_fields, &cfg);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Repeated network_groups counter + first-name capture                        */
 /* -------------------------------------------------------------------------- */
 
@@ -356,6 +493,7 @@ static bool decode_op_cb(pb_istream_t *stream,
  */
 struct ng_ctx {
     struct hef_info *info;
+    const uint8_t   *blob_base;
 };
 
 static bool decode_network_group_cb(pb_istream_t *stream,
@@ -373,11 +511,17 @@ static bool decode_network_group_cb(pb_istream_t *stream,
         .truncated = &ng->info->string_truncated,
     };
     struct op_ctx op_ctx = { .info = ng->info };
+    struct ccw_ctx ccw_ctx = {
+        .info = ng->info,
+        .blob_base = ng->blob_base,
+    };
     if (first_ng) {
         grp.network_group_name.funcs.decode = read_string_cb;
         grp.network_group_name.arg          = &name_ctx;
         grp.ops.funcs.decode                = decode_op_cb;
         grp.ops.arg                         = &op_ctx;
+        grp.preliminary_config.funcs.decode = decode_preliminary_config_cb;
+        grp.preliminary_config.arg          = &ccw_ctx;
     }
     if (!pb_decode(stream, ProtoHEFNetworkGroup_fields, &grp)) return false;
 
@@ -411,7 +555,10 @@ int hef_parse_body(const void *blob, size_t size, struct hef_info *out)
     memset(out, 0, sizeof(*out));
 
     struct header_ctx hctx = { .info = out };
-    struct ng_ctx     ng   = { .info = out };
+    struct ng_ctx     ng   = {
+        .info      = out,
+        .blob_base = (const uint8_t *)blob,
+    };
 
     ProtoHEFHef root = ProtoHEFHef_init_default;
     root.header.funcs.decode = decode_header_cb;
