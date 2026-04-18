@@ -23,13 +23,13 @@ static int cmd_hailo(int argc, char *argv[])
         uint16_t v = 0, d = 0;
         int rc = hailo_probe(&v, &d);
         if (rc == HAILO_OK) {
-            uart_printf("hailo: probe OK, vendor=0x%04x device=0x%04x, "
+            shell_printf("hailo: probe OK, vendor=0x%04x device=0x%04x, "
                         "state=%s\n", v, d,
                         hailo_state_str(hailo_get_state()));
         } else if (rc == HAILO_ERR_NODEV) {
-            uart_puts("hailo: no device (probe returned NODEV)\n");
+            shell_puts("hailo: no device (probe returned NODEV)\n");
         } else {
-            uart_printf("hailo: probe failed (%d)\n", rc);
+            shell_printf("hailo: probe failed (%d)\n", rc);
         }
         return 0;
     }
@@ -38,16 +38,16 @@ static int cmd_hailo(int argc, char *argv[])
         uint32_t maj = 0, min = 0, rev = 0;
         int rc = hailo_get_firmware_version(&maj, &min, &rev);
         if (rc == HAILO_OK) {
-            uart_printf("hailo: firmware %u.%u.%u\n", maj, min, rev);
+            shell_printf("hailo: firmware %u.%u.%u\n", maj, min, rev);
         } else {
-            uart_printf("hailo: firmware version unavailable (%d — "
+            shell_printf("hailo: firmware version unavailable (%d — "
                         "device must be booted first)\n", rc);
         }
         return 0;
     }
 
     /* Default: one-line status. */
-    uart_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
+    shell_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
     return 0;
 }
 
@@ -55,6 +55,7 @@ static const shell_cmd_t hailo_cmd = {
     .name    = "hailo",
     .handler = cmd_hailo,
     .help    = "Hailo NPU status (hailo, hailo probe, hailo fw)",
+    .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
 };
 
 void hailo_register_shell_commands(void)
