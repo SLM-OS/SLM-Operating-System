@@ -72,9 +72,17 @@ struct mock_engine {
 
     /* PIO IMEM/DMEM upload capture — a few hundred 4-byte slots so
      * tests can read back what the driver streamed through the data
-     * port. The mock auto-increments because IMEMC/DMEMC AINCW=1. */
+     * port. The mock auto-increments because IMEMC/DMEMC AINCW=1.
+     *
+     * IMEMT writes are recorded as a sequence (not just the last
+     * value) so multi-page upload tests can verify the per-256-byte
+     * tag-update invariant. `imem_pio_tag` is preserved as a
+     * convenience alias for the last write, matching the original
+     * single-tag tests. */
     uint32_t imem_pio_ctrl;
     uint32_t imem_pio_tag;
+    uint32_t imem_pio_tags[64];     /* 64 tags = 16 KB of secure IMEM */
+    uint32_t imem_pio_tag_count;
     uint32_t imem_pio_words[1024];
     uint32_t imem_pio_count;
     uint32_t dmem_pio_ctrl;
@@ -193,7 +201,10 @@ static void mock_write32(uint32_t addr, uint32_t v)
             e->imem_pio_ctrl = v;
             break;
         case FALCON_IMEMT(0):
-            e->imem_pio_tag = v;
+            e->imem_pio_tag = v;     /* last-tag alias */
+            if (e->imem_pio_tag_count <
+                sizeof(e->imem_pio_tags) / sizeof(e->imem_pio_tags[0]))
+                e->imem_pio_tags[e->imem_pio_tag_count++] = v;
             break;
         case FALCON_IMEMD(0):
             if (e->imem_pio_count <
@@ -686,6 +697,104 @@ static void test_pio_imem_writes_words_in_order(void)
     REQUIRE((e->imem_pio_ctrl & (1u << 28)) == 0);
     /* IMEMT == falcon_off >> 8 (page tag). */
     REQUIRE(e->imem_pio_tag == (0x100u >> 8));
+    /* Single-page upload (12 bytes < 256), so exactly one tag write. */
+    REQUIRE(e->imem_pio_tag_count == 1);
+}
+
+/*
+ * Regression: HS-secure Booter ucode crosses 256-byte page boundaries
+ * (~18 KB non-secure half + secure-app half on GA10x). The Falcon's
+ * IMEMC AINCW bit only auto-increments the write *address* within a
+ * page; the page tag (IMEMT) is a separate register that must be re-
+ * written for each new page or the HS-bootrom rejects the load with
+ * a signature mismatch.
+ *
+ * This test uploads a 4-page (1024 byte) blob starting at offset 0
+ * and asserts:
+ *   - Exactly 4 IMEMT writes happened (one per page)
+ *   - The tag sequence is monotonic from `falcon_off >> 8`
+ *
+ * Without the per-page IMEMT update in falcon_pio_upload_imem,
+ * `imem_pio_tag_count` is 1 and only the starting tag is observed —
+ * which silently corrupts the Booter signature on real silicon.
+ */
+static void test_pio_imem_multi_page_writes_tag_per_page(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+
+    /* 1024 bytes = 4 pages (256 B each). */
+    uint8_t src[1024];
+    for (uint32_t i = 0; i < sizeof(src); i++)
+        src[i] = (uint8_t)(i & 0xFF);
+
+    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src),
+                                   /*falcon_off=*/0x800,
+                                   /*is_secure=*/true) == GSP_OK);
+
+    /* All 256 u32 words landed. */
+    REQUIRE(e->imem_pio_count == 256);
+    /* Exactly 4 tag writes — one per 256-byte page. */
+    REQUIRE(e->imem_pio_tag_count == 4);
+    /* Tags are monotonic from (0x800 >> 8) = 0x8. */
+    REQUIRE(e->imem_pio_tags[0] == 0x8);
+    REQUIRE(e->imem_pio_tags[1] == 0x9);
+    REQUIRE(e->imem_pio_tags[2] == 0xA);
+    REQUIRE(e->imem_pio_tags[3] == 0xB);
+    /* Last-tag alias matches final write. */
+    REQUIRE(e->imem_pio_tag == 0xB);
+    /* SECURE bit propagated into IMEMC. */
+    REQUIRE((e->imem_pio_ctrl & (1u << 28)) != 0);
+}
+
+/*
+ * Adjacent regression: a sub-page upload (less than 256 bytes) must
+ * NOT trigger any extra IMEMT writes beyond the initial one. Catches
+ * an off-by-one where the page-boundary check fires at i=0 or wraps
+ * past the end of the input.
+ */
+static void test_pio_imem_sub_page_writes_one_tag(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+
+    /* 252 bytes (63 u32s) — strictly less than one page. */
+    uint8_t src[252] = { 0 };
+    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src), 0x100, false)
+            == GSP_OK);
+
+    REQUIRE(e->imem_pio_count == 63);
+    REQUIRE(e->imem_pio_tag_count == 1);
+    REQUIRE(e->imem_pio_tags[0] == 0x1);
+}
+
+/*
+ * Adjacent regression: an upload that lands exactly at a page boundary
+ * (e.g. 256 bytes) writes exactly one tag — the boundary check fires
+ * AT the crossing, not at the final word of the previous page.
+ */
+static void test_pio_imem_exact_page_writes_one_tag(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PSEC2_BASE, 0x10000, 0x10000, false);
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PSEC2_BASE) == 0);
+
+    /* Exactly 256 bytes (64 u32s) — fills page 0, doesn't touch page 1. */
+    uint8_t src[256] = { 0 };
+    REQUIRE(falcon_pio_upload_imem(&f, src, sizeof(src), 0x100, false)
+            == GSP_OK);
+
+    REQUIRE(e->imem_pio_count == 64);
+    REQUIRE(e->imem_pio_tag_count == 1);
+    REQUIRE(e->imem_pio_tags[0] == 0x1);
 }
 
 static void test_pio_imem_secure_sets_bit28(void)
@@ -882,6 +991,9 @@ int main(void)
     test_pio_imem_rejects_misaligned_length();
     test_pio_imem_rejects_overflow();
     test_pio_imem_writes_words_in_order();
+    test_pio_imem_multi_page_writes_tag_per_page();
+    test_pio_imem_sub_page_writes_one_tag();
+    test_pio_imem_exact_page_writes_one_tag();
     test_pio_imem_secure_sets_bit28();
     test_pio_dmem_writes_words_in_order();
     test_pio_dmem_rejects_misaligned();
