@@ -343,33 +343,50 @@ tag.
 
 ---
 
-## x86-64 GA10x — SEC2 BROM aperture stays priv-locked (April 2026)
+## x86-64 GA10x — SEC2 BROM aperture state (corrected April 2026)
 
-When SLM-OS boots via the Linux→SLM-OS kexec path (`docs/x86-64-gpu-inference-status.md` §4.2.k/l) it inherits a partially-unlocked
-SEC2 from nouveau:
+**Retraction notice:** A prior version of this section claimed the
+SEC2 BROM aperture stays priv-locked even under nouveau, citing
+`peek BAR0+0x842200..220` returning `0xbadf5040` from both Linux
+and SLM-OS post-kexec. That conclusion was based on **reading the
+wrong offsets**.
 
-- `SEC2 CPUCTL` (`BAR0+0x840100`) reads `0x00000020` — unlocked
-- `SEC2 HWCFG2` (`BAR0+0x8400f4`) reads `0x000047f7` — scrub-clear
-- `SEC2 BROM_*` (`BAR0+0x842200..220`) reads `0xbadf5040` — **still
-  priv-locked**
+`NV_PSEC2_BROM_BASE = 0x00841000` (`falcon.h:39`). The real Falcon-v4
+BROM registers per `falcon.h:168-171` are:
 
-Cross-checked from Linux+nouveau directly (host `peek` via
-`/root/sec2_peek` against the live mapping): the BROM offsets are
-PRI-poisoned even on a healthy nouveau host that successfully
-drives Booter Load. Conclusion: nouveau does NOT write to BROM
-ENGIDMASK/UCODE_ID/MOD_SEL from the CPU side, and any code that
-does (e.g. `kernel/gpu/nvidia/bringup.c:710-716`) has its writes
-silently dropped by the PRI arbiter — the HS-bootrom then sees
-zero selectors, the signature mismatches, and SEC2 STOPs at the
-first instruction.
+- `FALCON_BROM_PARAADDR0 = 0x210` → absolute `0x841210`
+- `FALCON_BROM_UCODE_ID  = 0x198` → absolute `0x841198`
+- `FALCON_BROM_ENGIDMASK = 0x19C` → absolute `0x84119C`
+- `FALCON_BROM_MOD_SEL   = 0x180` → absolute `0x841180`
 
-Implication for `gsp_bringup_booter_load`: the engine-id /
-ucode-id / RSA-mode-select values almost certainly need to be
-DMEM-patched into the Booter ucode itself (the same pattern
-`gsp_dmemmapper_patch` uses for FWSEC-FRTS), not written to the
-BROM aperture. Reference: nouveau's `r535_booter_load` in
-`drivers/gpu/drm/nouveau/nvkm/subdev/gsp/r535.c` (Linux 6.7+) is
-the source diff to chase next time this work resumes.
+`peek 0x53842200/210/220` (BAR0=0x53000000) hit BAR0+0x842200..220 =
+`NV_PSEC2_BROM_BASE + 0x1200..1220` — **0x1000 above the real BROM
+register window**, in unmapped space that always returns PRI poison.
+The post-fail diagnostic in `nvidia_gpu.c` originally peeked
+`BROM_BASE + 0x010 / 0x004` (also unmapped) and labelled the result
+"SEC2 BROM MOD_SEL = 0xbadf5720" — same bug, same wrong conclusion.
+
+**Source-read of nouveau confirms the real story.** `ga102_flcn_fw_boot`
+(`docs/reference/nouveau-falcon-ga102.c:113-123`) writes the BROM
+selectors via plain BAR0 MMIO at exactly the same `0x841180/198/19c/210`
+addresses SLM-OS uses in `kernel/gpu/nvidia/bringup.c:710-716`. There
+is no DMEMMAPPER fixup; the booter HS blob carries only the
+`(fuse_ver, engine_id, ucode_id)` triple in its meta_data block
+(`docs/reference/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
+
+**What this means for the Phase 2 STOPPED failure (still unresolved):**
+the BROM-PLM hypothesis is no longer supported. The diagnostic in
+`nvidia_gpu.c` now reads the correct offsets so the next hardware
+iteration will produce a real BROM-state reading. Likely actual
+causes worth checking:
+
+- A different PLM (e.g. `+0x668` Falcon2 BCR / RESET_PLM) blocking
+  the writes — not the BROM register PLMs themselves.
+- Missing SEC2-select dance (`ga102_flcn_select` in
+  `docs/reference/nouveau-falcon-ga102.c:97-110` — clears `addr2+0x668`
+  bit 4 before PIO).
+- Booter blob's `engine_id` / `ucode_id` mismatch with what the
+  HS-bootrom expects (verify against a hexdump of `meta_data_offset`).
 
 ---
 
