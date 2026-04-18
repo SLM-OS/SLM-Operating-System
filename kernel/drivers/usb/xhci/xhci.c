@@ -272,6 +272,50 @@ static int poll_reg32(volatile uint8_t *base, uint32_t off,
                       uint32_t timeout_ms);
 
 /*
+ * CSB paging window (Tegra234, via BAR2). Port of Linux's
+ * bar2_csb_readl / bar2_csb_writel (linux-xhci-tegra.c:393-411).
+ *
+ * Falcon internal registers ("Control Status Bus") are not mapped
+ * directly; they're accessed through a windowed paging scheme:
+ *
+ *   1. Compute the 23-bit page number and 9-bit offset-within-page
+ *      from the 32-bit CSB address.
+ *   2. Write the page number to XUSB_BAR2_ARU_C11_CSBRANGE at
+ *      BAR2 + 0x9c.
+ *   3. Read/write the 32-bit data at BAR2 + 0x2000 + offset.
+ *
+ * On Tegra234, this replaces the FPCI-based `fpci_csb_*` path that
+ * earlier Tegras (T210/T186/T194) use — .has_bar2 = true in
+ * tegra234_soc.
+ *
+ * CAUTION: BAR2 writes were observed to trigger a SNOC Write Error
+ * in task 3A.2.5 when poking BAR2+0x1000 (the mailbox IOCTL
+ * register). The CSB paging window lives at BAR2+0x9c (control) and
+ * BAR2+0x2000+ofs (data) — different offsets, possibly under
+ * different access control. Deployed as READ-ONLY probe only; the
+ * writer is provided but __attribute__((unused)) until a known-safe
+ * use case emerges.
+ */
+static uint32_t bar2_csb_r32(uint32_t csb_off)
+{
+    uint32_t page = xusb_csb_page_select(csb_off);
+    uint32_t ofs  = xusb_csb_page_offset(csb_off);
+    bar2_w32(XUSB_BAR2_ARU_C11_CSBRANGE, page);
+    dsb(sy);
+    return bar2_r32(XUSB_BAR2_CSB_BASE_ADDR + ofs);
+}
+
+__attribute__((unused))
+static void bar2_csb_w32(uint32_t csb_off, uint32_t value)
+{
+    uint32_t page = xusb_csb_page_select(csb_off);
+    uint32_t ofs  = xusb_csb_page_offset(csb_off);
+    bar2_w32(XUSB_BAR2_ARU_C11_CSBRANGE, page);
+    dsb(sy);
+    bar2_w32(XUSB_BAR2_CSB_BASE_ADDR + ofs, value);
+}
+
+/*
  * Port of Linux's tegra_xusb_wait_for_falcon (linux-xhci-tegra.c:986-
  * 1003). Poll USBSTS for STS_CNR (Controller Not Ready) to clear,
  * 1 ms interval, 200 ms timeout. Linux uses this as the "Falcon is
@@ -887,12 +931,48 @@ int xhci_init(void)
      *   post-kexec the aperture appears readable at offset 0 but
      *   writes to the mailbox IOCTL register fault the interconnect.
      *
-     * For now: skip the calls so we don't crash the board on every
-     * kexec cycle. USBSTS.CNR is observed to be 0 on hardware already,
-     * so Falcon liveness is evidenced indirectly. Future work: probe
-     * Falcon state via BAR2 CSB (task 3A.2.3) instead — that paging
-     * window may have different access control than FW_SCRATCH.
+     * For now: skip the mailbox IOCTL calls. USBSTS.CNR observed =
+     * 0 on hardware so Falcon liveness is evidenced indirectly.
      */
+
+    /*
+     * CSB paging probe (task 3A.2.3). Different BAR2 offsets
+     * (0x9c + 0x2000+ofs) than the mailbox region that triggered
+     * RAS, so worth trying read-only. Reading XUSB_FALC_CPUCTL
+     * reveals Falcon internal state:
+     *   bit 1 = STARTCPU (software-set to start the CPU)
+     *   bit 4 = STATE_HALTED (Falcon hit a HALT instruction)
+     *   bit 5 = STATE_STOPPED (Falcon is in STOPPED state)
+     * Plausible values on a live IFR-booted Falcon: 0x00000020
+     * (STATE_STOPPED) or 0x00000002 (STARTCPU) depending on where
+     * in the IFR boot sequence Linux left the controller.
+     *
+     * If this read triggers the same RAS uncorrectable that the
+     * mailbox write did, we've hit a hard wall via BAR2 entirely
+     * and Phase 3A pivots fully to the SMMU/padctl direction.
+     */
+    uint32_t cpuctl = bar2_csb_r32(XUSB_FALC_CPUCTL);
+    INFO("xhci: CSB probe FALC_CPUCTL=0x%08x "
+         "(STARTCPU=%u HALTED=%u STOPPED=%u)",
+         (unsigned)cpuctl,
+         (cpuctl & XUSB_FALC_CPUCTL_STARTCPU) ? 1 : 0,
+         (cpuctl & XUSB_FALC_CPUCTL_STATE_HALTED) ? 1 : 0,
+         (cpuctl & XUSB_FALC_CPUCTL_STATE_STOPPED) ? 1 : 0);
+    uint32_t apmap = bar2_csb_r32(XUSB_CSB_MP_APMAP);
+    INFO("xhci: CSB probe MP_APMAP=0x%08x (BOOTPATH=%u)",
+         (unsigned)apmap,
+         (apmap & XUSB_CSB_MP_APMAP_BOOTPATH) ? 1 : 0);
+    /*
+     * Disambiguate: is CSB paging control actually writable, or is
+     * BAR2 silently swallowing writes to 0x9c the same way the
+     * mailbox region at 0x1000 noisily rejects them? The APMAP read
+     * above left page=0x80c in the CSBRANGE register (by design).
+     * Reading it back tells us whether the write stuck.
+     */
+    uint32_t csbrange = bar2_r32(XUSB_BAR2_ARU_C11_CSBRANGE);
+    INFO("xhci: CSB probe CSBRANGE readback=0x%08x "
+         "(expected 0x0000080c — MP_APMAP's page)",
+         (unsigned)csbrange);
 
     uint8_t caplen = (uint8_t)(first & 0xFF);
     if (caplen < 0x20 || caplen > 0x80) {

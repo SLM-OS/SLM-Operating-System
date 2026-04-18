@@ -88,6 +88,28 @@ static inline uint32_t xusb_csb_page_offset(uint32_t addr)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Falcon CSB registers (accessed via CSB paging window, NOT directly)         */
+/* linux-xhci-tegra.c:118-151                                                  */
+/* -------------------------------------------------------------------------- */
+
+/* Falcon processor control */
+#define XUSB_FALC_CPUCTL                0x100U
+#define  XUSB_FALC_CPUCTL_STARTCPU          (1u << 1)
+#define  XUSB_FALC_CPUCTL_STATE_HALTED      (1u << 4)
+#define  XUSB_FALC_CPUCTL_STATE_STOPPED     (1u << 5)
+#define XUSB_FALC_BOOTVEC               0x104U
+#define XUSB_FALC_DMACTL                0x10cU
+
+/* CSB ARU scratch (general purpose; safe test target) */
+#define XUSB_CSB_ARU_SCRATCH0           0x100100U
+
+/* CSB memory-pool: firmware load state (populated by IFR at boot) */
+#define XUSB_CSB_MP_ILOAD_BASE_LO       0x101a04U
+#define XUSB_CSB_MP_ILOAD_BASE_HI       0x101a08U
+#define XUSB_CSB_MP_APMAP               0x10181cU
+#define  XUSB_CSB_MP_APMAP_BOOTPATH         (1u << 31)
+
+/* -------------------------------------------------------------------------- */
 /* Firmware header IOCTL — used to read the IFR's creation-timestamp header    */
 /* linux-xhci-tegra.c:153-156                                                  */
 /* -------------------------------------------------------------------------- */
