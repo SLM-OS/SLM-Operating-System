@@ -478,6 +478,21 @@ static int cmd_gpu(int argc, char *argv[])
         /* Phase 2: Booter Load on SEC2 */
         uart_printf("[GPU] Phase 2: Booter Load on SEC2...\n");
         rc = gsp_bringup_booter_load(&b);
+        /* Print parsed booter blob layout (success or failure) so the
+         * IMEM source-offset calculation can be verified against the
+         * actual values in the blob. Source offsets that match the
+         * target IMEM offsets (sec_off / ns_off) confirm the v2 layout
+         * fix from PR #289 took effect. */
+        uart_printf("[GPU]   Booter layout: ns_off=0x%08x ns_size=0x%08x "
+                    "sec_off=0x%08x sec_size=0x%08x\n",
+                    b.booter_imem_ns_off, b.booter_imem_ns_size,
+                    b.booter_imem_sec_off, b.booter_imem_sec_size);
+        uart_printf("[GPU]   Booter layout: dmem_off=0x%08x dmem_size=0x%08x "
+                    "dmem_sign=0x%08x boot_addr=0x%08x\n",
+                    b.booter_dmem_offset, b.booter_dmem_size,
+                    b.booter_dmem_sign, b.booter_boot_addr);
+        uart_printf("[GPU]   Booter selectors: engine_id=0x%08x ucode_id=0x%08x\n",
+                    b.booter_engine_id, b.booter_ucode_id);
         if (rc < 0) {
             uart_printf("[GPU] Booter Load FAILED at phase %u\n", b.last_error_phase);
             /* Dump SEC2 state for diagnosis — matches what the VFIO

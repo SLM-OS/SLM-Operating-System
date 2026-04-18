@@ -23,20 +23,21 @@ forward are realistic.
   The first secure Falcon ucode in NVIDIA's GSP bringup chain halts
   cleanly on test-pc, 3 consecutive runs, ERR_REG=0, WPR2 populated.
   This is the gating E3.4 capstone milestone — delivered.
-- **Booter Load (E3.4.d) is partially unblocked via Linux→SLM-OS
-  kexec inheritance** (§4.2.k, §4.2.l). Boot Ubuntu, `modprobe
-  nouveau modeset=1`, wait ~3 s for nouveau's deferred unlock, then
-  kexec to SLM-OS. SEC2 CPUCTL is inherited at `0x00000020`
-  (unlocked), `gpu init` runs the full bringup state machine,
-  FWSEC-FRTS Phase 1 succeeds against the inherited state with WPR2
-  populated. Phase 2 (Booter Load on SEC2 itself) still fails with
-  CPUCTL=`0x20` (STOPPED, not HALTED) and the root cause is open —
-  the initial "BROM aperture priv-locked" hypothesis was retracted
-  after a source-read of nouveau showed it writes BROM selectors via
-  the same MMIO addresses SLM-OS already uses (see §4.2.l for the
-  retraction trail). The original bare-metal blocker (§2.5:
-  865/1024 offsets priv-locked from UEFI POST onward) remains for
-  any non-kexec boot path. Tracked as **issue #185**.
+- **Booter Load (E3.4.d) Phase 2 root cause located + fixed
+  (PR #289, 2026-04-18).** Linux→SLM-OS kexec inheritance brings
+  SEC2 CPUCTL to `0x00000020` (unlocked) and `gpu init` runs the
+  full bringup state machine; FWSEC-FRTS Phase 1 succeeds with WPR2
+  populated. Phase 2 (Booter Load on SEC2 itself) was failing with
+  CPUCTL=`0x20` (STOPPED, not HALTED) — root cause was **BOOTVEC
+  set to `os_code_offset` (= 0, the non-secure preamble) instead
+  of `apps[0].offset` (= 0x100, the secure entry the HS-bootrom
+  jumps to after signature verify)**. After the fix, Falcon
+  executes booter code (CPUCTL=`0x00`); booter then hangs waiting
+  for valid `GspFwWprMeta` (intentionally zeroed today; populating
+  it correctly is the documented E4 boundary, not a bringup bug).
+  The original bare-metal blocker (§2.5: 865/1024 offsets
+  priv-locked from UEFI POST onward) remains for any non-kexec
+  boot path. Tracked as **issue #185**.
 - **The portable half of the GSP bringup code transfers cleanly to
   Jetson and bare-metal SLM-OS.** ~60% of the nouveau GSP-loader
   port is done, all of it platform-agnostic (VBIOS parse, Falcon
@@ -923,28 +924,63 @@ half of the original write-up is unaffected by the retraction.
 | SEC2 CPUCTL inherited unlock | ✅ confirmed `0x00000020` |
 | `gpu init` reaches NVIDIA dispatcher | ✅ proven (PR #283) |
 | FWSEC-FRTS Phase 1 post-kexec | ✅ WPR2 populated, identical to bare-metal |
-| Booter Load Phase 2 post-kexec | ❌ STOPs at first instruction; root cause unknown post-retraction |
+| Booter Load Phase 2 post-kexec | ⚠ Partially unblocked — Falcon now executes booter (CPUCTL=0x00 instead of 0x20), but hangs waiting for valid `GspFwWprMeta` (intentionally zeroed today; populating it is the E4 boundary) |
 
-**Next investigation handoff (revised):** with the BROM-PLM
-hypothesis dead, the actual cause of Phase 2's `CPUCTL=0x20`
-(STOPPED) is open. The diagnostic fix in this PR makes the next
-hardware iteration meaningful — re-run `gpu init` post-kexec and the
-SEC2 BROM register dump will now report the real `MOD_SEL/PARAADDR/
-UCODE_ID/ENGIDMASK` values instead of unmapped poison. Three
-candidates worth ranking by likelihood after that data lands:
+**Phase 2 root cause located + fixed (PR #289, 2026-04-18):**
+After three converging-but-wrong investigations (Jetson code reuse,
+nouveau end-to-end, NVIDIA OGKM cross-source — each suggesting
+different "missing step" candidates), the diagnostic print added in
+PR #288 surfaced the actual bug on the very next hardware iteration:
 
-1. **Falcon2 select PLM** at `addr2+0x668` blocks the writes —
-   `ga102_flcn_select` (nouveau-falcon-ga102.c:97-110) clears bit 4
-   before PIO. SLM-OS may be missing this dance.
-2. **Booter blob `engine_id`/`ucode_id` mismatch** with what the
-   HS-bootrom expects. Verify against a hexdump of `meta_data_offset`
-   in the actual blob SLM-OS uses.
-3. **Reset sequencing gap** between FWSEC-FRTS completion and SEC2
-   STARTCPU — diff against `tu102_gsp_init` flow.
+The booter blob's parsed layout was
+`ns_off=0x0 ns_size=0x100 sec_off=0x100 sec_size=0x8300 dmem_off=0x8400
+dmem_size=0x6200 dmem_sign=0x10 boot_addr=0x0`. The `boot_addr=0x0`
+was the bug — SLM-OS set `b->booter_boot_addr = img.os_code_offset`
+(= 0 = the non-secure preamble at IMEM[0]) when it should have been
+`apps[0].offset` (= 0x100 = the secure entry point the HS-bootrom
+jumps to after signature verify). With BOOTVEC=0, the bootrom verified
+the signature successfully but then jumped to the non-secure preamble
+and immediately STOPPED.
 
-Effort: 1 day for the next hardware iteration + the corrected
-diagnostic dump; from there, one of the three candidates above
-will be obviously the next thing to chase.
+Both reference implementations confirm `apps[0].offset` is the right
+value:
+- OGKM `kgspExecuteHsFalcon_GA102` (`docs/reference/ogkm-kernel_gsp_falcon_ga102.c:278`): `kflcnRegWrite(NV_PFALCON_FALCON_BOOTVEC, pUcode->imemVa)` where `imemVa = header.appCodeOffset` (`ogkm-kernel_gsp_booter.c:322`)
+- Nouveau v2 `nvkm_falcon_fw_ctor_hs_v2` (`docs/reference/nouveau-falcon-fw.c:351`): `fw->boot_addr = lhdr->app[0].offset`
+
+After the fix, hardware `gpu init` shows CPUCTL=0x00 on first
+post-kexec attempt — Falcon is executing booter code, no longer
+stuck at first instruction. The boot_addr in the diagnostic print
+now shows `0x100` (= apps[0].offset) instead of `0`.
+
+PR #289 also includes a defensive v2-style hardening of the IMEM
+upload source offsets (`apps[0].offset` / `os_code_offset` instead
+of `0` / `os_code_size` — functionally equivalent on the current
+contiguous booter blob, but robust against any future blob with
+non-contiguous sections).
+
+**The retracted candidates and their actual status:**
+
+1. **Falcon2 select PLM** at `addr2+0x668` — refuted in
+   nouveau/OGKM source-read (only applies to engines with RISC-V
+   cores; SEC2 doesn't have one). False candidate.
+2. **`engine_id`/`ucode_id` mismatch** — confirmed correct in the
+   diagnostic print (engine_id=0x1, ucode_id=0x3, matching nouveau
+   + OGKM expectations). False candidate.
+3. **Reset sequencing gap (OGKM PreResetWait)** — false candidate;
+   the symptom was BOOTVEC, not reset state. PreResetWait may still
+   be worth porting as defensive correctness but isn't the unblock.
+
+The genuine root cause was a one-line wrong field assignment that
+none of the reference-source readings spotted — only the runtime
+diagnostic, by exposing the parsed values directly, made it
+obvious.
+
+**E4 next step:** populate `GspFwWprMeta` correctly so the booter
+has valid GSP-RM ELF / radix3 / BCR pointers. Booter currently
+hangs in a wait loop after starting because the WprMeta buffer is
+intentionally zeroed (per `kernel/gpu/nvidia/bringup.c:638-641`).
+This is documented work for the GSP-RM RPC milestone, not a
+bringup bug.
 
 ### 4.3 Option C — **Kernel-shim / patched vfio-pci**
 

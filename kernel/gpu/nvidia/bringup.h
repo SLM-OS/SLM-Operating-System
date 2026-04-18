@@ -124,12 +124,13 @@ struct gsp_bringup {
     uint32_t       booter_dmem_sign;     /* DMEM byte offset for sig patch */
     uint32_t       booter_engine_id;     /* SEC2 == 0x1 */
     uint32_t       booter_ucode_id;      /* per-engine fuse-locked id */
-    uint32_t       booter_imem_sec_off;  /* IMEM offset where sec section lands */
+    uint32_t       booter_imem_sec_off;  /* file byte offset AND target IMEM offset for secure code */
     uint32_t       booter_imem_sec_size;
-    uint32_t       booter_imem_ns_size;  /* non-secure section comes first */
+    uint32_t       booter_imem_ns_off;   /* file byte offset of NS IMEM in data section */
+    uint32_t       booter_imem_ns_size;  /* 0 for HS-only booter (R535) */
     uint32_t       booter_dmem_offset;   /* file byte offset of DMEM portion */
     uint32_t       booter_dmem_size;
-    uint32_t       booter_boot_addr;     /* BOOTVEC = NS code start */
+    uint32_t       booter_boot_addr;     /* BOOTVEC = apps[0].offset (secure entry) */
     uint32_t       booter_mbox0_post;    /* MAILBOX0 read after halt — diagnostics */
 
     /* WprMeta DMA buffer (E3.4.d input). Booter reads this struct
@@ -235,6 +236,27 @@ int gsp_bringup_riscv_start(struct gsp_bringup *b);
  * These are called from inside the FWSEC-FRTS state machine but
  * have no GPU dependency — they're plain byte-shuffling and
  * arithmetic that's worth testing in isolation. */
+
+/* Forward-declare nvfw_image so the next prototype can take a pointer
+ * to it without forcing every consumer of bringup.h to include nvfw.h.
+ * The full struct definition is in `kernel/gpu/nvidia/nvfw.h`. */
+struct nvfw_image;
+
+/*
+ * Field-copy from a parsed nvfw_image into the booter_* fields of
+ * struct gsp_bringup. Pure function — no platform vtable, no GPU.
+ *
+ * Specifically pins the BOOTVEC = apps[0].offset rule (the bug
+ * resolved in PR #289 that made Phase 2 STOP at first instruction
+ * on R535 booter_load) and the v2 layout assumptions for ns/sec/dmem
+ * source offsets. Tested in `host-tools/gsp-harness/test_bringup.c`.
+ *
+ * Caller (`gsp_bringup_booter_load`) is responsible for validating
+ * that all referenced offsets fit inside the data section before
+ * calling — this helper does no bounds checking.
+ */
+void gsp_bringup_set_booter_layout(struct gsp_bringup *b,
+                                   const struct nvfw_image *img);
 
 /*
  * Patch the DMEMMAPPER application interface in @dmem to request

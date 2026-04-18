@@ -374,19 +374,43 @@ is no DMEMMAPPER fixup; the booter HS blob carries only the
 `(fuse_ver, engine_id, ucode_id)` triple in its meta_data block
 (`docs/reference/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
 
-**What this means for the Phase 2 STOPPED failure (still unresolved):**
-the BROM-PLM hypothesis is no longer supported. The diagnostic in
-`nvidia_gpu.c` now reads the correct offsets so the next hardware
-iteration will produce a real BROM-state reading. Likely actual
-causes worth checking:
+**Phase 2 STOPPED root cause located + fixed (PR #289, 2026-04-18).**
+The diagnostic added in PR #288 surfaced the actual bug on the next
+hardware iteration: BOOTVEC was set to `os_code_offset` (= 0 = the
+non-secure preamble at IMEM[0]) when it should be `apps[0].offset`
+(= 0x100 = the secure entry point the HS-bootrom jumps to after
+signature verify). With BOOTVEC=0, the bootrom verified the
+signature successfully but jumped to the non-secure preamble and
+immediately STOPPED (CPUCTL=0x20). All three pre-iteration
+candidates (Falcon2 select PLM, engine_id mismatch, reset
+sequencing) turned out to be false trails — the wrong one-line
+field assignment is what only the runtime diagnostic could catch.
 
-- A different PLM (e.g. `+0x668` Falcon2 BCR / RESET_PLM) blocking
-  the writes — not the BROM register PLMs themselves.
-- Missing SEC2-select dance (`ga102_flcn_select` in
-  `docs/reference/nouveau-falcon-ga102.c:97-110` — clears `addr2+0x668`
-  bit 4 before PIO).
-- Booter blob's `engine_id` / `ucode_id` mismatch with what the
-  HS-bootrom expects (verify against a hexdump of `meta_data_offset`).
+After the fix (`b->booter_boot_addr = img.apps[0].offset` in
+`gsp_bringup_set_booter_layout`), Falcon executes booter code on
+the next post-kexec attempt — CPUCTL drops from 0x20 to 0x00. The
+booter then hangs waiting for valid `GspFwWprMeta` data, which
+SLM-OS intentionally zeros (per `bringup.c:638-641`); populating
+WprMeta correctly is the documented E4 boundary.
+
+**Lessons for future GA10x bringup work:**
+
+- The Falcon-select PLM dance only applies to engines with
+  RISC-V cores (GSP). SEC2 has no RISC-V core so the no-op skip
+  in `falcon_select_falcon_mode` is correct.
+- BROM register reads/writes go to `BROM_BASE + 0x180/198/19C/210`,
+  not the `+0x010/004` or `+0x1200..1220` offsets the original
+  diagnostic was peeking. PR #288 has the corrected offsets.
+- For HS booter blobs (R535 booter_load), BOOTVEC must be
+  `apps[0].offset`, not `os_code_offset` — see OGKM
+  `docs/reference/ogkm-kernel_gsp_falcon_ga102.c:278` and nouveau
+  v2 `docs/reference/nouveau-falcon-fw.c:351`. Pinned in
+  `host-tools/gsp-harness/test_bringup.c:test_booter_layout_*`.
+- When source-reading converging-but-wrong candidates from
+  multiple references (Jetson code, nouveau, OGKM), add a runtime
+  diagnostic that exposes the parsed values FIRST. Three independent
+  reference investigations agreed on a wrong answer here; the
+  printed values were what made the actual bug obvious.
 
 ---
 
