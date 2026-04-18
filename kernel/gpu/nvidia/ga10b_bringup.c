@@ -179,6 +179,20 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define GR_FECS_MAILBOX_FAIL        0x00000002u
 #define GR_FECS_MAILBOX_CSUM_FAIL   0x00000021u
 
+/* ---- USERMODE doorbell (Phase 7 PBDMA kick) ----
+ *
+ * GA10B inherits the TU104 usermode register layout, so the doorbell
+ * is at BAR0 + func_cfg0 + func_full_phys + func_doorbell
+ *       = 0x17000000 + 0x30000 + 0xB80000 + 0x90 = 0x17BB0090.
+ * A 32-bit write of `work_submit_token` (captured from
+ * NVGPU_IOCTL_CHANNEL_SETUP_BIND) tells PBDMA to re-read GP_PUT and
+ * fetch any new GPFIFO entries.
+ *
+ * Reference: OE4T/linux-nvgpu
+ *   drivers/gpu/nvgpu/hal/fifo/usermode_tu104.c:58-75
+ *   drivers/gpu/nvgpu/include/nvgpu/hw/tu104/hw_func_tu104.h:62-64 */
+#define GA10B_USERMODE_DOORBELL_PHYS  0x17BB0090u
+
 /* ---- FECS method gateway ----
  *
  * FECS exposes a direct host-to-ucode method interface via two push
@@ -1078,19 +1092,17 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
                 (unsigned long)new_gp_put,
                 (unsigned long)gp_put_word);
 
-    /* Ring the USERMODE doorbell so PBDMA re-reads GP_PUT.
-     *
-     * GA10B inherits the TU104 usermode layout: the doorbell lives at
-     *   BAR0 + func_cfg0 + func_doorbell = 0x30000 + 0xB80000 + 0x90 = 0xBB0090
-     * Token is captured verbatim from NVGPU_IOCTL_CHANNEL_SETUP_BIND
-     * (opaque encoding of chid | runlist<<16, possibly adjusted for
-     * vGPU channel_base). Source: OE4T/linux-nvgpu
-     * drivers/gpu/nvgpu/hal/fifo/usermode_tu104.c:58-75. */
+    /* Ring the USERMODE doorbell so PBDMA re-reads GP_PUT. Token is
+     * captured verbatim from NVGPU_IOCTL_CHANNEL_SETUP_BIND (opaque
+     * encoding of chid | runlist<<16, possibly adjusted for vGPU
+     * channel_base — treat as opaque). See
+     * GA10B_USERMODE_DOORBELL_PHYS above for the address derivation. */
     volatile uint32_t *doorbell =
-        (volatile uint32_t *)(uintptr_t)0x17BB0090u;
+        (volatile uint32_t *)(uintptr_t)GA10B_USERMODE_DOORBELL_PHYS;
     *doorbell = g_handoff.work_submit_token;
     gsp_platform->mb();
-    uart_printf("[GA10B-P7] doorbell 0x17BB0090 <- 0x%08lx\n",
+    uart_printf("[GA10B-P7] doorbell 0x%lx <- 0x%08lx\n",
+                (unsigned long)GA10B_USERMODE_DOORBELL_PHYS,
                 (unsigned long)g_handoff.work_submit_token);
 
     /* Poll the semaphore for a non-zero value (indicating the GPU

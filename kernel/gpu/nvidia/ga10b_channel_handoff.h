@@ -39,7 +39,11 @@
 struct ga10b_channel_handoff {
     uint32_t magic;             /* GA10B_CHANNEL_HANDOFF_MAGIC */
     uint32_t version;           /* 2 for this layout */
-    uint32_t channel_id;        /* nvgpu channel ID (informational) */
+    uint32_t channel_id;        /* Diagnostic only; never used as the
+                                 * doorbell token. See work_submit_token
+                                 * below — the kernel's allocation path
+                                 * may map channel_id to a different
+                                 * token value (vGPU channel_base). */
     uint32_t tsg_id;            /* TSG ID the channel belongs to */
 
     /* USERD (User Submit Data) — where GP_PUT lives.
