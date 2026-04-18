@@ -198,8 +198,12 @@ _Static_assert(sizeof(struct hailo_control_identify_response) == 162,
  * Returns HAILO_OK, HAILO_ERR_TIMEOUT (no response), or
  * HAILO_ERR_BAD_FIRMWARE (MD5 mismatch / impossible buffer_len).
  *
- * Single-threaded by contract — hailo_boot's ATR[0] invariant
- * still applies: only one CPU at a time drives the control channel.
+ * Internally serialized by control_lock (see hailo_control.c), and
+ * the sequence counter is incremented atomically, so concurrent
+ * callers across CPUs are safe. Callers must still respect the
+ * boot-vs-control ATR[0] contract: never issue hailo_control_*
+ * while hailo_boot is mid-flight, because hailo_core.c's atr0_lock
+ * and control_lock are separate locks and do not interlock.
  */
 int hailo_control_send_recv(const void *req_payload,
                             uint32_t    req_len,

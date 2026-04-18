@@ -74,8 +74,18 @@ static inline uint32_t hailo_be32_to_cpu(uint32_t v)
 
 /* Sequence counter. Firmware echoes this back in the response header
  * so a response can be correlated with a request; we check it against
- * what we sent. Incremented per send. Guarded by control_lock. */
+ * what we sent. Incremented atomically per send so hailo_control_*
+ * callers that race in the request-build phase (before taking
+ * control_lock inside send_recv) can't produce colliding sequence
+ * numbers — otherwise two CPUs could read the same pre-increment
+ * value, send distinct requests with identical seq, and each mistake
+ * the other's echoed-back response for their own. */
 static uint32_t control_sequence = 0;
+
+static inline uint32_t control_next_sequence(void)
+{
+    return __atomic_fetch_add(&control_sequence, 1, __ATOMIC_RELAXED);
+}
 
 /*
  * Serializes the whole transport: sequence counter, IRQ-armed flag,
@@ -337,7 +347,7 @@ out:
 
 void hailo_control_reset_state_for_tests(void)
 {
-    control_sequence  = 0;
+    __atomic_store_n(&control_sequence, 0, __ATOMIC_RELAXED);
     control_irq_armed = false;
 }
 
@@ -345,7 +355,7 @@ int hailo_control_identify(struct hailo_control_identify_response *out)
 {
     if (!out) return HAILO_ERR_INVAL;
 
-    uint32_t sequence = control_sequence++;
+    uint32_t sequence = control_next_sequence();
 
     /* IDENTIFY has an empty payload body (parameter_count = 0).
      * The request is: [common_header][parameter_count=0]. All fields
