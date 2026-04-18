@@ -301,6 +301,64 @@ static void test_will_ttype_triggers_do_plus_send_request(void)
     TEST_ASSERT_EQUAL_MEMORY(expected, s.sent, sizeof(expected));
 }
 
+static void test_wont_without_prior_do_is_silent(void)
+{
+    /* Q-method (RFC 1143): a WONT for an option we never DO'd should
+     * elicit no reply. Prevents infinite negotiation loops with
+     * pedantic peers. */
+    struct telnet_parser tp;
+    struct stub s;
+    stub_init(&s, &tp);
+
+    /* We never sent DO NAWS; peer sends WONT NAWS out of the blue. */
+    const uint8_t in[] = { 0xFF, TELNET_WONT, TELNET_OPT_NAWS };
+    telnet_rx(&tp, in, sizeof(in));
+
+    TEST_ASSERT_EQUAL_UINT32(0, s.sent_len);
+}
+
+static void test_dont_without_prior_will_is_silent(void)
+{
+    /* Symmetric case for DONT when we never WILL'd. */
+    struct telnet_parser tp;
+    struct stub s;
+    stub_init(&s, &tp);
+
+    const uint8_t in[] = { 0xFF, TELNET_DONT, TELNET_OPT_ECHO };
+    telnet_rx(&tp, in, sizeof(in));
+
+    TEST_ASSERT_EQUAL_UINT32(0, s.sent_len);
+}
+
+static void test_wont_after_will_replies_dont(void)
+{
+    /* Q-method forward path: we DO NAWS (peer WILL'd), peer then
+     * WONT's — we should acknowledge with DONT and clear the flag. */
+    struct telnet_parser tp;
+    struct stub s;
+    stub_init(&s, &tp);
+
+    /* First: peer WILL NAWS → we reply DO NAWS. */
+    const uint8_t in1[] = { 0xFF, TELNET_WILL, TELNET_OPT_NAWS };
+    telnet_rx(&tp, in1, sizeof(in1));
+    /* Drop the DO reply from the recorder before checking the next step. */
+    s.sent_len = 0;
+
+    /* Then: peer WONT NAWS → we reply DONT NAWS. */
+    const uint8_t in2[] = { 0xFF, TELNET_WONT, TELNET_OPT_NAWS };
+    telnet_rx(&tp, in2, sizeof(in2));
+
+    const uint8_t expected[] = { 0xFF, TELNET_DONT, TELNET_OPT_NAWS };
+    TEST_ASSERT_EQUAL_UINT32(sizeof(expected), s.sent_len);
+    TEST_ASSERT_EQUAL_MEMORY(expected, s.sent, sizeof(expected));
+
+    /* A second WONT should now be silent (we already DONT'd — state
+     * flipped, no further replies). */
+    s.sent_len = 0;
+    telnet_rx(&tp, in2, sizeof(in2));
+    TEST_ASSERT_EQUAL_UINT32(0, s.sent_len);
+}
+
 static void test_duplicate_do_echo_no_repeat(void)
 {
     /* Two identical DO ECHO arrivals: first one replies, second is a no-op. */
@@ -430,6 +488,9 @@ int test_suite_telnet(void)
     RUN_TEST(test_do_unknown_option_refused);
     RUN_TEST(test_will_naws_triggers_do_naws);
     RUN_TEST(test_will_ttype_triggers_do_plus_send_request);
+    RUN_TEST(test_wont_without_prior_do_is_silent);
+    RUN_TEST(test_dont_without_prior_will_is_silent);
+    RUN_TEST(test_wont_after_will_replies_dont);
     RUN_TEST(test_duplicate_do_echo_no_repeat);
 
     RUN_TEST(test_naws_subneg_parses_cols_rows);

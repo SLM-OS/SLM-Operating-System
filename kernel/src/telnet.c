@@ -66,7 +66,8 @@ static void handle_opt_do(struct telnet_parser *tp, uint8_t opt)
 
 static void handle_opt_dont(struct telnet_parser *tp, uint8_t opt)
 {
-    /* Peer asks us to turn option OFF */
+    /* Peer asks us to turn option OFF. RFC 1143 Q-method: only reply
+     * when state actually changes, to avoid negotiation loops. */
     switch (opt) {
     case TELNET_OPT_ECHO:
         if (tp->negotiated_flags & TELNET_F_WILL_ECHO) {
@@ -81,8 +82,7 @@ static void handle_opt_dont(struct telnet_parser *tp, uint8_t opt)
         }
         break;
     default:
-        /* Already off — no response needed; but be safe and confirm. */
-        send_iac3(tp, TELNET_WONT, opt);
+        /* Option we never had on; stay silent (Q-method). */
         break;
     }
 }
@@ -114,19 +114,24 @@ static void handle_opt_will(struct telnet_parser *tp, uint8_t opt)
 
 static void handle_opt_wont(struct telnet_parser *tp, uint8_t opt)
 {
-    /* Peer refuses / stops option on their side */
+    /* Peer refuses / stops option on their side. RFC 1143 Q-method:
+     * only reply DONT when we had previously sent DO — otherwise
+     * ping-pong with a pedantic peer. */
     switch (opt) {
     case TELNET_OPT_NAWS:
-    case TELNET_OPT_TTYPE:
-        /* fall through */
-    default:
-        /* Always confirm DONT. */
-        send_iac3(tp, TELNET_DONT, opt);
-        /* Clear any tracked flags. */
-        if (opt == TELNET_OPT_NAWS)
+        if (tp->negotiated_flags & TELNET_F_DO_NAWS) {
             tp->negotiated_flags &= ~TELNET_F_DO_NAWS;
-        if (opt == TELNET_OPT_TTYPE)
+            send_iac3(tp, TELNET_DONT, TELNET_OPT_NAWS);
+        }
+        break;
+    case TELNET_OPT_TTYPE:
+        if (tp->negotiated_flags & TELNET_F_DO_TTYPE) {
             tp->negotiated_flags &= ~TELNET_F_DO_TTYPE;
+            send_iac3(tp, TELNET_DONT, TELNET_OPT_TTYPE);
+        }
+        break;
+    default:
+        /* Option we never requested; stay silent. */
         break;
     }
 }
@@ -134,6 +139,26 @@ static void handle_opt_wont(struct telnet_parser *tp, uint8_t opt)
 /* ============================================================================
  * Subnegotiation dispatch
  * ============================================================================ */
+
+/* NAWS subneg payload layout (RFC 1073):
+ *   [0] option = NAWS (31)
+ *   [1] width-high  [2] width-low    big-endian cols
+ *   [3] height-high [4] height-low   big-endian rows
+ * Total = 5 bytes, with cols/rows split across fixed offsets. */
+#define NAWS_SUBNEG_LEN          5
+#define NAWS_OFFSET_COLS_HIGH    1
+#define NAWS_OFFSET_COLS_LOW     2
+#define NAWS_OFFSET_ROWS_HIGH    3
+#define NAWS_OFFSET_ROWS_LOW     4
+
+/* TERMINAL-TYPE subneg payload (RFC 1091):
+ *   [0] option = TTYPE (24)
+ *   [1] sub-command (SEND=1, IS=0)
+ *   [2..] characters (when IS)
+ * Minimum meaningful length is 2 (opt + sub-command). */
+#define TTYPE_SUBNEG_MIN_LEN     2
+#define TTYPE_OFFSET_SUBCMD      1
+#define TTYPE_OFFSET_STRING      2
 
 static void handle_subneg(struct telnet_parser *tp)
 {
@@ -144,10 +169,11 @@ static void handle_subneg(struct telnet_parser *tp)
 
     switch (opt) {
     case TELNET_OPT_NAWS: {
-        /* NAWS: [opt=31] [width-high] [width-low] [height-high] [height-low] */
-        if (tp->subneg_len >= 5) {
-            uint16_t cols = ((uint16_t)tp->subneg[1] << 8) | tp->subneg[2];
-            uint16_t rows = ((uint16_t)tp->subneg[3] << 8) | tp->subneg[4];
+        if (tp->subneg_len >= NAWS_SUBNEG_LEN) {
+            uint16_t cols = ((uint16_t)tp->subneg[NAWS_OFFSET_COLS_HIGH] << 8)
+                          |  tp->subneg[NAWS_OFFSET_COLS_LOW];
+            uint16_t rows = ((uint16_t)tp->subneg[NAWS_OFFSET_ROWS_HIGH] << 8)
+                          |  tp->subneg[NAWS_OFFSET_ROWS_LOW];
             if (tp->ops.on_naws) {
                 tp->ops.on_naws(tp->ops.ctx, cols, rows);
             }
@@ -155,13 +181,13 @@ static void handle_subneg(struct telnet_parser *tp)
         break;
     }
     case TELNET_OPT_TTYPE: {
-        /* TERMINAL-TYPE reply: [opt=24] [IS=0] [chars...] */
-        if (tp->subneg_len >= 2 && tp->subneg[1] == TELNET_TTYPE_IS) {
+        if (tp->subneg_len >= TTYPE_SUBNEG_MIN_LEN
+         && tp->subneg[TTYPE_OFFSET_SUBCMD] == TELNET_TTYPE_IS) {
             char term[TELNET_TTYPE_MAX];
-            size_t n = tp->subneg_len - 2;
+            size_t n = tp->subneg_len - TTYPE_OFFSET_STRING;
             if (n >= sizeof(term)) n = sizeof(term) - 1;
             for (size_t i = 0; i < n; i++) {
-                term[i] = (char)tp->subneg[2 + i];
+                term[i] = (char)tp->subneg[TTYPE_OFFSET_STRING + i];
             }
             term[n] = '\0';
             if (tp->ops.on_term_type) {

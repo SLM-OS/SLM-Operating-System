@@ -67,7 +67,17 @@ struct shell_session {
      * Commands like `top` use these dimensions to lay out output;
      * term_type lets commands decide whether to emit ANSI colours.
      * Updated from net_pump context on subneg, read by the shell
-     * task — volatile so the reader doesn't need a barrier. */
+     * task — volatile on the 16-bit fields so the reader doesn't
+     * need a barrier.
+     *
+     * term_type is a multi-byte buffer without a lock. In practice
+     * clients send a single TERMINAL-TYPE IS early in the session
+     * and never update it, so readers observe a stable string. A
+     * pathological client that re-sends TTYPE mid-session could
+     * cause a torn read on one iteration; the next read sees a
+     * consistent string. Callers that care (e.g. `top` checking
+     * "xterm*") may want a `strncpy` into a local buffer before
+     * acting on the contents. */
     volatile uint16_t window_cols;
     volatile uint16_t window_rows;
     char              term_type[SHELL_TERM_TYPE_MAX];

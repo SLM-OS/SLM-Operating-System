@@ -485,6 +485,17 @@ void shell_io_tcp_destroy(struct shell_io *io)
 {
     if (!io) return;
     struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
+    /* Drop the session pointer before the shell task returns from
+     * this call and then releases `sess` via shell_session_free. A
+     * late on_recv on net_pump (e.g. peer sent data+FIN together,
+     * data portion delivered after the shell task exited its REPL)
+     * would otherwise dereference this stale pointer — worse, the
+     * pool could have re-allocated the slot to a new connection by
+     * then, so telnet_on_naws / on_term_type / on_interrupt would
+     * corrupt the new connection's session state. Both sides run on
+     * CPU 0, so the scheduler switch orders this NULL store ahead of
+     * any subsequent net_pump read — no barrier needed. */
+    ctx->session = NULL;
     mark_closed(ctx);
     ctx->shell_done = true;
     /* After this returns, the caller MUST NOT touch the io again —
