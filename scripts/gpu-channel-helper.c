@@ -203,20 +203,40 @@ int main(int argc, char **argv)
     struct nvgpu_as_bind_channel_args bind_as = { .channel_fd = ch_fd };
     xioctl(as_fd, NVGPU_AS_IOCTL_BIND_CHANNEL, &bind_as, "AS_BIND");
 
-    /* Bind channel to TSG. */
-    int ch_fd_for_tsg = ch_fd;
-    xioctl(tsg_fd, NVGPU_TSG_IOCTL_BIND_CHANNEL, &ch_fd_for_tsg,
-           "TSG_BIND");
+    /* Create an async subcontext on the TSG and bind the channel to it
+     * via BIND_CHANNEL_EX. CUDA's trace shows this path instead of the
+     * simpler BIND_CHANNEL (op 1). Plain BIND_CHANNEL puts the channel
+     * on the TSG's default SYNC subcontext — compute channels need
+     * ASYNC, otherwise the GR engine accepts pushbuffers but silently
+     * no-ops the methods. */
+    struct nvgpu_tsg_create_subcontext_args subctx;
+    memset(&subctx, 0, sizeof(subctx));
+    subctx.type  = NVGPU_TSG_SUBCONTEXT_TYPE_ASYNC;
+    subctx.as_fd = as_fd;
+    xioctl(tsg_fd, NVGPU_TSG_IOCTL_CREATE_SUBCONTEXT, &subctx,
+           "TSG_CREATE_SUBCONTEXT");
+    printf("[gpu-helper] CREATE_SUBCONTEXT OK (type=ASYNC, veid=%u)\n",
+           subctx.veid);
+
+    struct nvgpu_tsg_bind_channel_ex_args bce;
+    memset(&bce, 0, sizeof(bce));
+    bce.channel_fd    = ch_fd;
+    bce.subcontext_id = subctx.veid;
+    xioctl(tsg_fd, NVGPU_TSG_IOCTL_BIND_CHANNEL_EX, &bce,
+           "TSG_BIND_CHANNEL_EX");
+    printf("[gpu-helper] BIND_CHANNEL_EX OK (veid=%u)\n", bce.subcontext_id);
 
     /* Set nvmap fd on channel. */
     struct nvgpu_set_nvmap_fd_args nvm = { .fd = nvmap_fd };
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_SET_NVMAP_FD, &nvm, "SET_NVMAP");
 
-    /* Disable the watchdog — required when using DETERMINISTIC flag
-     * in SETUP_BIND (nvgpu rejects the combination otherwise). */
+    /* Match CUDA's WDT settings: DISABLE | SET_TIMEOUT with
+     * timeout_ms = UINT_MAX. Required for DETERMINISTIC channels
+     * (nvgpu rejects the combination otherwise). */
     struct nvgpu_channel_wdt_args wdt = {
-        .wdt_status = NVGPU_IOCTL_CHANNEL_DISABLE_WDT,
-        .timeout_ms = 0,
+        .wdt_status = NVGPU_IOCTL_CHANNEL_DISABLE_WDT |
+                      NVGPU_IOCTL_CHANNEL_WDT_FLAG_SET_TIMEOUT,
+        .timeout_ms = 0xFFFFFFFFu,
     };
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_WDT, &wdt, "WDT_DISABLE");
 
