@@ -482,6 +482,9 @@ set(KERNEL_SOURCES
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},RASPI5>>:kernel/drivers/bcm_mailbox.c>
     # Realtek RTL8169/RTL8168 driver (Jetson Orin Nano, via Tegra PCIe C8) — #25
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/drivers/eth_rtl8169.c>
+    # USB core (Phase 1 of #266). Platform-neutral; HCD drivers
+    # (Phase 3A XHCI) register against it and are gated separately.
+    kernel/usb/core/usb_core.c
     # Jetson EL1 smoke test (one-shot diagnostic) — JETSON_EL1_SMOKE
     $<$<AND:$<BOOL:${JETSON_EL1_SMOKE}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/tests/jetson_el1_smoke.S>
     # Platform-independent networking stack
@@ -538,6 +541,9 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_component.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_vmm.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net.c>
+    # USB core tests (Phase 1 of #266). Platform-neutral — the mock
+    # HCD has no real hardware dependency.
+    kernel/tests/test_usb_core.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_lua.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>
