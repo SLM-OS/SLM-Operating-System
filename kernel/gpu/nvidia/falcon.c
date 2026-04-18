@@ -371,10 +371,11 @@ int falcon_pio_upload_imem(struct falcon *f, const uint8_t *src,
      * blob's IMEM section is u32-aligned in practice but we don't
      * want to assume that on every platform). */
     for (uint32_t i = 0; i < len; i += 4) {
-        /* Cross a 256-byte page boundary? Re-arm IMEMT for the new
-         * page before the next IMEMD store. The first page's tag
-         * was already written above, so this fires at i=256 onward. */
-        if (i != 0 && (i & 0xFFu) == 0) {
+        /* Cross a FALCON_IMEM_PAGE_BYTES (256) boundary? Re-arm
+         * IMEMT for the new page before the next IMEMD store. The
+         * first page's tag was already written above, so this
+         * fires at i=256 onward. */
+        if (i != 0 && (i & (FALCON_IMEM_PAGE_BYTES - 1u)) == 0) {
             flcn_w32(f, FALCON_IMEMT(0), tag);
             tag++;
         }

@@ -29,6 +29,8 @@
 #include "gic.h"
 #include "timer.h"
 #include "smp.h"
+#include "shell.h"      /* shell_cmd_t for shell-table tests */
+#include "string.h"     /* strcmp for shell-table scanners */
 
 /* ============================================================================
  * External Symbols from Boot Code
@@ -2895,6 +2897,19 @@ static void test_gpu_shell_subcommands_safe_without_gpu(void)
     TEST_PASS();
 }
 
+/* Shell command tables from kernel/src/shell.c. Read-only built-in
+ * table is `const`, the registration-array external table isn't —
+ * the shared scanner takes `const shell_cmd_t *` so it accepts both. */
+extern const shell_cmd_t builtin_commands[];
+extern const int NUM_BUILTIN_COMMANDS;
+extern shell_cmd_t external_commands[];
+extern int num_external_commands;
+
+/* Defined in test_shell.c; both test TUs link into the same kernel
+ * image so a shared header isn't needed. */
+extern bool cmd_table_has(const shell_cmd_t *table, int count,
+                          const char *name);
+
 /*
  * Test: on x86-64, the cross-platform built-in `gpu` cmd in
  * kernel/src/shell.c MUST be excluded so the NVIDIA driver's
@@ -2911,27 +2926,11 @@ static void test_gpu_shell_subcommands_safe_without_gpu(void)
  */
 static void test_x86_gpu_cmd_not_in_builtins(void)
 {
-    extern const struct {
-        const char *name;
-        int (*handler)(int, char **);
-        const char *help;
-        bool mutates;
-    } builtin_commands[];
-    extern const int NUM_BUILTIN_COMMANDS;
-
-    for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
-        /* String-compare without depending on string.h: the table
-         * is fixed at compile time so a manual char loop is fine
-         * and doesn't pull in the freestanding string-routine
-         * shim. */
-        const char *name = builtin_commands[i].name;
-        if (name[0] == 'g' && name[1] == 'p' && name[2] == 'u'
-            && name[3] == '\0') {
-            TEST_FAIL_MESSAGE("built-in `gpu` is shadowing NVIDIA "
-                              "driver on x86-64 — guard the entry "
-                              "in shell.c with #if !defined("
-                              "PLATFORM_X86_64)");
-        }
+    if (cmd_table_has(builtin_commands, NUM_BUILTIN_COMMANDS, "gpu")) {
+        TEST_FAIL_MESSAGE("built-in `gpu` is shadowing NVIDIA "
+                          "driver on x86-64 — guard the entry "
+                          "in shell.c with "
+                          "#if !defined(PLATFORM_X86_64)");
     }
     TEST_PASS();
 }
@@ -2945,25 +2944,13 @@ static void test_x86_gpu_cmd_not_in_builtins(void)
  */
 static void test_x86_gpu_cmd_in_externals(void)
 {
-    extern struct {
-        const char *name;
-        int (*handler)(int, char **);
-        const char *help;
-        bool mutates;
-    } external_commands[];
-    extern int num_external_commands;
-
-    for (int i = 0; i < num_external_commands; i++) {
-        const char *name = external_commands[i].name;
-        if (name[0] == 'g' && name[1] == 'p' && name[2] == 'u'
-            && name[3] == '\0') {
-            TEST_PASS();
-            return;
-        }
+    if (!cmd_table_has(external_commands, num_external_commands, "gpu")) {
+        TEST_FAIL_MESSAGE("NVIDIA `gpu` cmd missing from "
+                          "external_commands — check that "
+                          "nvidia_gpu_register_shell_commands is "
+                          "being called from shell init on x86-64");
     }
-    TEST_FAIL_MESSAGE("NVIDIA `gpu` cmd missing from external_commands "
-                      "— check that nvidia_gpu_register_shell_commands "
-                      "is being called from shell init on x86-64");
+    TEST_PASS();
 }
 
 /* ============================================================================

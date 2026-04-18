@@ -34,6 +34,12 @@
 #define MOCK_BAR0_SIZE  (16u * 1024u * 1024u)
 static uint32_t g_bar0[MOCK_BAR0_SIZE / 4];
 
+/* Tag-write capacity for IMEM PIO upload capture: 64 slots covers a
+ * 16 KB upload (64 * 256-byte pages), well above the largest secure
+ * ucode any current test exercises. Bound-checked at the recording
+ * site (mock_write32) so an over-budget upload doesn't OOB. */
+#define MOCK_MAX_IMEM_TAGS 64
+
 /* Per-engine mock state. Indexed by engine base so one global
  * BAR0 can host multiple Falcons simultaneously. */
 struct mock_engine {
@@ -81,7 +87,7 @@ struct mock_engine {
      * single-tag tests. */
     uint32_t imem_pio_ctrl;
     uint32_t imem_pio_tag;
-    uint32_t imem_pio_tags[64];     /* 64 tags = 16 KB of secure IMEM */
+    uint32_t imem_pio_tags[MOCK_MAX_IMEM_TAGS];
     uint32_t imem_pio_tag_count;
     uint32_t imem_pio_words[1024];
     uint32_t imem_pio_count;

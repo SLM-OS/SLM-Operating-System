@@ -98,6 +98,15 @@
 #define FALCON_DMATRFCMD_SIZE_256B    6u   /* 2^(6+2) = 256 */
 #define FALCON_DMA_CHUNK              256u
 
+/* IMEM page size for the IMEMT tag register: each 256-byte IMEM
+ * block has its own page tag. AINCW auto-increments the address
+ * within a page; software must re-arm IMEMT for each new page (see
+ * falcon_pio_upload_imem). Numerically the same as FALCON_DMA_CHUNK
+ * by hardware design — both reflect the same 256-byte structuring of
+ * IMEM — but kept as a separate name so the per-page-tag logic
+ * doesn't read like a DMA transfer constraint. */
+#define FALCON_IMEM_PAGE_BYTES        256u
+
 /* ---- HWCFG / HWCFG2 bits ---- */
 
 #define FALCON_HWCFG_IMEM_SIZE_MASK   0x1ffu    /* bits 8:0 — IMEM in blocks of 256 */

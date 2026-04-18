@@ -2502,18 +2502,22 @@ static void test_shell_cmd_hailo_load_too_small(void)
  * shell.c is widened, narrowed, or removed.
  * ============================================================================ */
 
-extern const struct {
-    const char *name;
-    int (*handler)(int, char **);
-    const char *help;
-    bool mutates;
-} builtin_commands[];
+/* Reference the real shell_cmd_t (from shell.h, included above) so a
+ * future field-shape change doesn't compile cleanly with stale
+ * offsets — the way an inline `extern const struct { ... }` re-decl
+ * silently would. */
+extern const shell_cmd_t builtin_commands[];
 extern const int NUM_BUILTIN_COMMANDS;
 
-static bool builtin_has_cmd(const char *name)
+/* Generic table scanner — non-static so test_x86_boot.c can reuse it
+ * via an extern declaration. Takes a `const shell_cmd_t *` so it
+ * accepts both the const builtin table and the non-const external
+ * table (which converts implicitly). The two test TUs link into the
+ * same kernel image, so a shared private header isn't needed. */
+bool cmd_table_has(const shell_cmd_t *table, int count, const char *name)
 {
-    for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
-        if (strcmp(name, builtin_commands[i].name) == 0)
+    for (int i = 0; i < count; i++) {
+        if (strcmp(name, table[i].name) == 0)
             return true;
     }
     return false;
@@ -2521,7 +2525,8 @@ static bool builtin_has_cmd(const char *name)
 
 static void test_shell_gpu_cmd_platform_correctness(void)
 {
-    bool present = builtin_has_cmd("gpu");
+    bool present = cmd_table_has(builtin_commands, NUM_BUILTIN_COMMANDS,
+                                 "gpu");
 #if defined(PLATFORM_X86_64)
     /* x86-64: NVIDIA driver registers a richer `gpu` externally;
      * the built-in is guarded out so it doesn't shadow the
