@@ -770,7 +770,8 @@ bss_done:
      * signature — see kernel/tests/jetson_el1_smoke.S.
      */
     bl      jetson_el1_smoke
-    b       halt
+    b       halt            /* unreachable — smoke test halts itself;
+                             * kept as belt-and-braces if that changes. */
 #endif
 
     /*

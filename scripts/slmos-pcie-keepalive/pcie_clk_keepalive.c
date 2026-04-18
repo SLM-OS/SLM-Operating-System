@@ -27,7 +27,6 @@
 
 static struct clk *g_clk_core;
 static struct clk *g_clk_core_m;
-static bool       g_held;
 
 static int __init pcie_clk_keepalive_init(void)
 {
@@ -72,7 +71,6 @@ static int __init pcie_clk_keepalive_init(void)
 		g_clk_core_m = NULL;
 	}
 
-	g_held = true;
 	pr_info("pcie-clk-keepalive: holding core clock at %lu Hz (refcount pinned)\n",
 	        clk_get_rate(g_clk_core));
 	return 0;

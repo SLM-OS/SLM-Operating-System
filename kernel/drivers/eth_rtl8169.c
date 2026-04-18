@@ -59,12 +59,15 @@ static uint32_t appl_read32(uint32_t reg)
     return *(volatile uint32_t *)(TEGRA_PCIE_C8_APPL_BASE + reg);
 }
 
-/* APPL register offsets (from Linux pcie-tegra194.c). */
+/* APPL register offsets (from Linux pcie-tegra194.c). The _EN /
+ * _STATE_* bit decodes are consumed by the Stage 2 APPL link-up
+ * check; kept here so the Stage 2 patch adds against the Stage 1
+ * shape without re-introducing defines. */
 #define APPL_CTRL                  0x04
-#define APPL_CTRL_LTSSM_EN         (1u << 7)
+#define APPL_CTRL_LTSSM_EN         (1u << 7)   /* Stage 2 */
 #define APPL_DEBUG                 0xD0
-#define APPL_DEBUG_LTSSM_STATE_MSK 0x1F8    /* bits [8:3] */
-#define APPL_DEBUG_LTSSM_STATE_L0  0x11     /* bit value for L0 */
+#define APPL_DEBUG_LTSSM_STATE_MSK 0x1F8       /* Stage 2 — bits [8:3] */
+#define APPL_DEBUG_LTSSM_STATE_L0  0x11        /* Stage 2 — L0 link state */
 
 /* -------------------------------------------------------------------------- */
 /* Driver state                                                                */
@@ -178,10 +181,10 @@ void rtl8169_refresh_rc_state(void)
 
 static bool rtl8169_probe(void)
 {
-    /* Stage 1: boot-time probe is intentionally a no-op. Post-kexec
-     * RC state is uncertain (tegra194-pcie .shutdown may have torn
-     * the controller down); touching MMIO at boot could abort.
-     * Run `rtldiag` to read live state after boot. */
+    /* Stage 1: boot-time probe is a no-op. The Stage 1 driver never
+     * touches MMIO, so this returns false unconditionally and the
+     * driver stays unregistered. Run `rtldiag` from the shell to
+     * read live RC state. Stage 2 replaces this with a real probe. */
     return false;
 }
 

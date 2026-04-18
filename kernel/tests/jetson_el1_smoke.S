@@ -35,6 +35,11 @@
 #define APPL_CTRL    0x140A0004    /* Tegra PCIe C8 APPL_CTRL */
 #define XHCI_HCD     0x03610000    /* Tegra XHCI CAPLENGTH|HCIVER */
 
+/* Delay constants for the FIFO-drain busy-loops below. ~1.04 M cycles
+ * at ~1.5 GHz ≈ 0.7 ms, long enough to drain 16-byte FIFO at 115200
+ * baud (~1.4 ms/char — we need about one char's worth between writes). */
+#define FIFO_DRAIN_DELAY     0x000FF424
+
 .section ".text"
 
 /* =========================================================================
@@ -125,8 +130,15 @@ jetson_el1_smoke:
  *   State: EL1h, MMU off, DAIF masked
  */
 el1_entry:
-    /* Write 8 distinct chars with busy-loop spacing to avoid FIFO
-     * overrun. No LSR read (in case that's what crashes at EL1). */
+    /*
+     * Write 8 distinct chars with busy-loop spacing to avoid FIFO
+     * overrun. Kept inline instead of using `puts_raw` because the
+     * investigation needed to distinguish "EL1 can write UARTC" from
+     * "EL1 can read UARTC_LSR" — the helper does both, which would
+     * have confounded the signal if LSR had turned out to be
+     * unreadable at EL1. EL1 reads ended up working too, so this
+     * block reads redundantly now but stays as the historical proof.
+     */
     mov     x4, x4                   /* placeholder */
     ldr     x4, =UARTC_THR
     mov     w5, #20000              /* delay count between chars */
@@ -195,8 +207,7 @@ el1_entry:
     str     w2, [x4]
 
     /* Long delay to let FIFO drain */
-    mov     w3, #0xF424         /* 62500 */
-    movk    w3, #0xF, lsl #16   /* | 0xF0000 -> ~1.04M */
+    ldr     w3, =FIFO_DRAIN_DELAY
 2:  subs    w3, w3, #1
     b.ne    2b
 

@@ -176,6 +176,14 @@ endif()
 # X86_64 virtio-pci, RASPI5 Cadence MACB via RP1, JETSON_ORIN_NANO
 # RTL8168 via PCIe C8). Default OFF for platforms still awaiting a
 # native NIC driver.
+#
+# JETSON_ORIN_NANO caveat (#25): the RTL8168 driver is Stage-1
+# scaffolding — probe() is a no-op and no driver registers with lwIP.
+# Networking=ON on Jetson pulls the lwIP stack into the image
+# (~50 KB) without providing working networking. Kept ON so the
+# Stage-2+ work lands as additive changes; pass ENABLE_NETWORKING=OFF
+# explicitly to opt out of the stack weight. Blocker is documented
+# in docs/jetson-pcie-investigation.md.
 if(PLATFORM STREQUAL "QEMU_VIRT" OR PLATFORM STREQUAL "X86_64"
    OR PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
     option(ENABLE_NETWORKING "Enable TCP/IP networking stack (lwIP)" ON)
