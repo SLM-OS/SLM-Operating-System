@@ -7,9 +7,8 @@ together material previously scattered across `docs/jetson-el2-bringup.md`,
 `docs/jetson-nvidia-support.md`, `docs/capstone-feature-status.md`,
 `docs/jetson-capstone-handoff.md`, and issues #9 / #24 / #25 / #31 / #258.
 
-**Audience:** Future SLM-OS developers, capstone reviewers, and anyone
-evaluating how much Jetson hardware is addressable from a bare-metal
-kernel at NS EL2.
+**Audience:** Future SLM-OS developers and anyone evaluating how much
+Jetson hardware is addressable from a bare-metal kernel at NS EL2.
 
 **Last updated:** 17 April 2026
 
@@ -26,9 +25,9 @@ that EL3 firmware handles by powering off the offending CPU core.
 
 SLM-OS landed on Jetson Orin Nano via a **partial bypass**: running at
 NS EL2 with VHE (rather than the EL1 the CBB table was built for) gives
-access to a useful subset of peripherals — enough for the capstone to
-boot, run SMP, drive serial, use the GIC and timer, talk to DRAM, and
-inspect the GPU via non-engine register space. The **hard blockers that
+access to a useful subset of peripherals — enough to boot, run SMP,
+drive serial, use the GIC and timer, talk to DRAM, and inspect the GPU
+via non-engine register space. The **hard blockers that
 remain** are all either:
 
 - **Peripheral apertures the EL2-NS table has never been programmed to
@@ -161,7 +160,7 @@ at the same EL as Linux was running at when kexec handed off.
 | GPU NV_USERMODE | BAR0 + `0x800000` | GPU channel doorbell | Notifying PBDMA of GPFIFO submissions |
 | Per-runlist PRI cfg | scattered | GPU runlist control | Full runlist reconfiguration |
 | OP-TEE carveout | `0xBE000000`–`0xC2000000` | OP-TEE secure world | 64 MB of DRAM (unusable; we skip it) |
-| INA3221 telemetry | I²C behind CBB | Power/energy measurement | Capstone energy rows have to be captured pre-kexec from Linux |
+| INA3221 telemetry | I²C behind CBB | Power/energy measurement | Energy/power readings have to be captured pre-kexec from Linux |
 | BPMP IVC | `0x0C168000` | Clock, power domain control | Cannot reconfigure any clock post-kexec |
 | Fuse controller | varies | Secure boot identity | Cannot inspect platform fuses |
 | QSPI flash | behind firewall | Firmware storage | Cannot update boot chain from SLM-OS |
@@ -185,7 +184,7 @@ configuration has to arrange it on the Linux side first.
 
 ## 4. Feature-Level Impact
 
-Cross-walked to the five tracked capstone features (see
+Cross-walked to the five tracked features (see
 `docs/capstone-feature-status.md`):
 
 | Feature | Status on Jetson | CBB impact |
@@ -198,9 +197,9 @@ Cross-walked to the five tracked capstone features (see
 | **Networking** | ❌ Not wired yet (#25) | Tentative impact. EQOS MAC is at `0x02310000`; need to verify EL2 reachability (§6.A first experiment). If blocked, Jetson networking is a hard no-go without one of the permanent fixes in §6. |
 | **USB** | ❌ Not wired (#24) | Unknown. Tegra XUSB MMIO base needs to be CBB-probed. |
 
-The CBB is the *root blocker* for two capstone features (GPU inference
-full pipeline, and possibly networking) and several smaller items
-(UARTA, energy telemetry, USB).
+The CBB is the *root blocker* for two features (GPU inference full
+pipeline, and possibly networking) and several smaller items (UARTA,
+energy telemetry, USB).
 
 ---
 
@@ -327,7 +326,7 @@ need (A) to update the BCT permissions for the apertures SLM-OS wants
 — secure boot is an identity mechanism, not an authorization one.
 
 **Effort:** Weeks of flash-tooling integration; fuse-burning is a
-one-line operation with forever consequences. Not capstone-feasible.
+one-line operation with forever consequences.
 
 ### C. Linux Hypervisor + Device Passthrough
 
@@ -348,11 +347,10 @@ permissions are inherited by the guest.
   GPU / NIC.
 - Measurably higher latency than bare-metal.
 
-**Issue:** It's no longer "bare-metal." The capstone thesis framing
-would have to be adjusted.
+**Issue:** It's no longer "bare-metal." The project's framing would
+have to change accordingly.
 
-**Effort:** 4–8 weeks. Feasible post-capstone; heavy for the capstone
-itself.
+**Effort:** 4–8 weeks.
 
 ### D. EL3 SMC Service via a Custom TF-A
 
@@ -388,17 +386,8 @@ is fine for GPU submission but not for hot MMIO paths.
 
 ## 7. Recommended Next Steps
 
-For SLM-OS specifically, the path that buys the most for the least
-effort and is achievable post-capstone:
-
-### Capstone-scope (already reached — no more CBB work needed)
-
-Ship what's there: NS EL2 + VHE gets the shell, SMP, timer, GICv3,
-DRAM, GPU detection, and FECS method gateway. Document the CBB
-boundary as the platform's hardware reality — this is legitimate
-capstone-scope scope definition, not a gap.
-
-### Post-capstone (if CBB bypass becomes worth pursuing)
+For SLM-OS specifically, the paths that buy the most for the least
+effort, in rough priority order:
 
 1. **First experiment (1 day):** probe EQOS at `0x02310000` from NS
    EL2. If it's CBB-blocked, Jetson networking is gated on path A/B/C.
@@ -463,8 +452,8 @@ lost if it is repeated.
   forum citations, signing toolchain notes.
 - `docs/capstone-feature-status.md` §"GPU-Based Inference" —
   per-aperture EL2 reachability for the GPU specifically.
-- `docs/jetson-capstone-handoff.md` — Session-level capstone-delivery
-  state including the April 17 channel-inherit work.
+- `docs/jetson-capstone-handoff.md` — Session-level handoff state
+  including the April 17 channel-inherit work.
 - `docs/archive/investigations/jetson-nvgpu-bringup-research.md` —
   `nvgpu.ko` reference trace (blob 17 of 17 cached).
 - `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs" — GIC Group-config
