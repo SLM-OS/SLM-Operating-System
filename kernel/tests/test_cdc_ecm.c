@@ -131,6 +131,7 @@ static struct {
     struct usb_urb  *in_flight[MOCK_MAX_INFLIGHT];
     int              bulk_in_submits;
     int              bulk_out_submits;
+    int              poll_count;
     /* Per-submission payload for the next bulk-IN to return. */
     const uint8_t   *next_rx_payload;
     uint32_t         next_rx_len;
@@ -234,7 +235,7 @@ static int mock_submit_urb(struct usb_urb *urb)
     }
 }
 
-static void mock_poll(void) {}
+static void mock_poll(void) { mock.poll_count++; }
 
 static const struct usb_hcd mock_hcd_ops = {
     .name               = "cdc-ecm-test-hcd",
@@ -588,12 +589,12 @@ static void test_probe_rejects_non_cdc_device(void)
     TEST_ASSERT_NULL(cdc_ecm_get_mac());
 }
 
-static void test_ops_fail_before_probe(void)
+static void test_probe_failure_clears_public_mac(void)
 {
     /*
-     * With no successful probe, every data-path op must return
-     * NET_E_NOT_INIT — not crash and not silently no-op. Drive this
-     * by rejecting the device up front so cdc.probed stays false.
+     * After a failed probe, cdc_ecm_get_mac() must return NULL even
+     * if an earlier probe succeeded — the probed flag is the source
+     * of truth. Guards the "probe resets state at entry" invariant.
      */
     reset_all();
     struct usb_device *dev = usb_core_first_device();
@@ -603,66 +604,69 @@ static void test_ops_fail_before_probe(void)
         dev->ifaces[i].subclass   = 0x00;
     }
     TEST_ASSERT_NOT_EQUAL(0, cdc_ecm_probe_and_register());
-
-    /* net_register_driver was never called from this probe attempt,
-     * but an earlier test in the suite could have — call the driver
-     * ops directly via the cdc_ecm static dispatch through the
-     * module's exported ops. The cleanest way is to register the
-     * driver manually via the previous probe's artefacts. Instead,
-     * verify the public-API counterparts: get_mac returns NULL and
-     * get_max_segment stays at its default / last-known. */
     TEST_ASSERT_NULL(cdc_ecm_get_mac());
+}
+
+static void test_net_driver_ops_fail_when_unprobed(void)
+{
     /*
-     * The driver ops themselves are guarded inside the class driver.
-     * Re-register the class driver by running a good probe first,
-     * then re-trigger a failure to confirm the ops flip back to
-     * NET_E_NOT_INIT.
+     * Register the class driver via a successful probe, THEN break
+     * the probe state by re-probing a non-CDC device. The net_driver
+     * ops must now refuse every call with NET_E_NOT_INIT — the
+     * prior registration doesn't paper over a dead device.
      */
-    /* Rebuild a live device. */
     reset_all();
     TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
     const struct net_driver *drv = net_get_driver();
     TEST_ASSERT_NOT_NULL(drv);
 
-    /* Now crash the probe state. */
-    dev = usb_core_first_device();
-    for (unsigned i = 0; i < 4; i++) {
-        dev->ifaces[i].class_code = 0xFF;
-        dev->ifaces[i].subclass   = 0x00;
-    }
-    TEST_ASSERT_NOT_EQUAL(0, cdc_ecm_probe_and_register());
-
-    /* With cdc.probed = false, every op refuses. */
-    uint8_t buf[64] = {0};
-    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->init());
-    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->send(buf, sizeof(buf)));
-    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->recv(buf, sizeof(buf)));
-}
-
-static void test_poll_before_and_after_probe(void)
-{
-    /*
-     * cdc_ecm_poll must be a no-op when not probed (no HCD poll call)
-     * and dispatch into usb_core_poll when probed. We don't have a
-     * direct observable for "usb_core_poll was called" — but we do
-     * observe that the function doesn't crash in either state and
-     * the driver state is untouched.
-     */
-    reset_all();
-    /* Crash probed state by rejecting interfaces. */
     struct usb_device *dev = usb_core_first_device();
     for (unsigned i = 0; i < 4; i++) {
         dev->ifaces[i].class_code = 0xFF;
         dev->ifaces[i].subclass   = 0x00;
     }
     TEST_ASSERT_NOT_EQUAL(0, cdc_ecm_probe_and_register());
-    cdc_ecm_poll();   /* must not crash */
 
+    uint8_t buf[64] = {0};
+    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->init());
+    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->send(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_INT(NET_E_NOT_INIT, drv->recv(buf, sizeof(buf)));
+}
+
+static void test_poll_before_probe_is_noop(void)
+{
+    /*
+     * cdc_ecm_poll when not probed must NOT dispatch to the HCD —
+     * there's no device to drive. Guards the `if (cdc.probed)` gate.
+     */
+    reset_all();
+    struct usb_device *dev = usb_core_first_device();
+    for (unsigned i = 0; i < 4; i++) {
+        dev->ifaces[i].class_code = 0xFF;
+        dev->ifaces[i].subclass   = 0x00;
+    }
+    TEST_ASSERT_NOT_EQUAL(0, cdc_ecm_probe_and_register());
+
+    int poll_before = mock.poll_count;
+    cdc_ecm_poll();
+    TEST_ASSERT_EQUAL_INT(poll_before, mock.poll_count);
+}
+
+static void test_poll_after_probe_dispatches_to_hcd(void)
+{
+    /*
+     * After a successful probe, cdc_ecm_poll must dispatch to the
+     * HCD's poll op exactly once per call. Phase-4 net_poll wires
+     * this into the lwIP mainloop; the test confirms the
+     * bookkeeping so that integration doesn't find a regression.
+     */
     reset_all();
     TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
-    uint32_t rx_before = cdc_ecm_get_rx_count();
-    cdc_ecm_poll();   /* must not crash; no RX pending so no delta */
-    TEST_ASSERT_EQUAL_UINT32(rx_before, cdc_ecm_get_rx_count());
+
+    int poll_before = mock.poll_count;
+    cdc_ecm_poll();
+    cdc_ecm_poll();
+    TEST_ASSERT_EQUAL_INT(poll_before + 2, mock.poll_count);
 }
 
 static void test_default_mtu_when_mss_zero(void)
@@ -782,8 +786,10 @@ int test_suite_cdc_ecm(void)
     RUN_TEST(test_recv_handles_small_buffer);
     RUN_TEST(test_mac_fallback_when_imac_zero);
     RUN_TEST(test_probe_rejects_non_cdc_device);
-    RUN_TEST(test_ops_fail_before_probe);
-    RUN_TEST(test_poll_before_and_after_probe);
+    RUN_TEST(test_probe_failure_clears_public_mac);
+    RUN_TEST(test_net_driver_ops_fail_when_unprobed);
+    RUN_TEST(test_poll_before_probe_is_noop);
+    RUN_TEST(test_poll_after_probe_dispatches_to_hcd);
     RUN_TEST(test_default_mtu_when_mss_zero);
     RUN_TEST(test_probe_without_functional_descriptor);
     RUN_TEST(test_rx_completion_error_drops_slot);

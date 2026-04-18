@@ -26,10 +26,11 @@
 int cdc_ecm_probe_and_register(void);
 
 /*
- * Called from net_poll() to drive the USB core's poll path so bulk IN
- * completions can be observed on IRQ-less HCDs (the mock and any
- * polled-only XHCI variant). Invoked by the networking glue; no
- * other callers.
+ * Drives the USB core's poll path so bulk IN completions can be
+ * observed on IRQ-less HCDs (the mock and any polled-only XHCI
+ * variant). Unwired in Phase 2 — Phase 4 (lwIP netif integration)
+ * will call it from net_poll(); exposed here so that hookup is a
+ * one-line change.
  */
 void cdc_ecm_poll(void);
 

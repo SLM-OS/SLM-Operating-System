@@ -33,9 +33,10 @@
 /* Constants                                                                   */
 /* -------------------------------------------------------------------------- */
 
-/* CDC subclass / descriptor identifiers. */
-#define CDC_SUBCLASS_ECM                0x06
+/* CDC class / subclass / descriptor identifiers (USB CDC 1.2 spec). */
+#define CDC_CONTROL_INTERFACE_CLASS     0x02
 #define CDC_DATA_INTERFACE_CLASS        0x0A
+#define CDC_SUBCLASS_ECM                0x06
 #define CDC_FUNCTIONAL_ETHERNET         0x0F    /* bDescriptorSubtype */
 
 /*
@@ -64,22 +65,34 @@
 struct cdc_rx_slot {
     uint8_t         buf[CDC_ECM_BUF_SIZE];
     struct usb_urb  urb;
-    /* Set true by the completion callback once data is in `buf`; set
-     * false once recv() has consumed it and re-submitted the URB. */
-    volatile bool   ready;
+    /*
+     * `ready` is the producer / consumer synchronisation flag.
+     * Published with __ATOMIC_RELEASE by cdc_rx_complete after `len`
+     * and `buf` are written; observed with __ATOMIC_ACQUIRE by recv
+     * before it reads `len` and `buf`. On ARM64 this emits DMB ISH
+     * barriers so the flag and the data it advertises can't be seen
+     * out of order. Plain `volatile` would not be sufficient.
+     */
+    bool            ready;
     uint32_t        len;
 };
 
 struct cdc_tx_slot {
     uint8_t         buf[CDC_ECM_BUF_SIZE];
     struct usb_urb  urb;
-    /* in_use == true  → slot holds a submitted URB or one waiting to
-     *                   be reaped.
+    /*
+     * `in_use`  — reservation flag. send() CAS-claims an idle slot
+     *             (`in_use` 0→1); tx_reap flips 1→0 once `completed`
+     *             is observed. The CAS protects against concurrent
+     *             senders racing to claim the same slot.
      *
-     * completed == true ⇒ completion has fired; tx_reap() must clear
-     *                     both flags so send() can re-use it. */
-    volatile bool   in_use;
-    volatile bool   completed;
+     * `completed` — set by the IRQ-context completion callback.
+     *               tx_reap observes it with ACQUIRE semantics so the
+     *               HCD's prior writes (actual_length, status) are
+     *               visible before the slot returns to the free pool.
+     */
+    bool            in_use;
+    bool            completed;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -88,7 +101,6 @@ struct cdc_tx_slot {
 
 static struct {
     bool              probed;
-    bool              registered;
     struct usb_device *dev;
     uint8_t           mac[6];
     uint16_t          max_segment;
@@ -98,9 +110,12 @@ static struct {
     struct cdc_rx_slot rx[CDC_ECM_RX_SLOTS];
     struct cdc_tx_slot tx[CDC_ECM_TX_SLOTS];
 
-    volatile uint32_t rx_completions;
-    volatile uint32_t tx_completions;
-    volatile uint32_t rx_drops;   /* completion found no free slot */
+    /* Diagnostic counters — bumped with __atomic_fetch_add RELAXED so
+     * concurrent completions on different CPUs can't lose bumps. Not
+     * on the control path; values are only observed by tests and the
+     * shell's get_rx_count / get_tx_count accessors. */
+    uint32_t          rx_completions;
+    uint32_t          tx_completions;
 } cdc;
 
 /* -------------------------------------------------------------------------- */
@@ -205,27 +220,32 @@ static void cdc_rx_complete(struct usb_urb *urb)
 {
     struct cdc_rx_slot *slot = (struct cdc_rx_slot *)urb->context;
 
-    cdc.rx_completions++;
+    __atomic_fetch_add(&cdc.rx_completions, 1, __ATOMIC_RELAXED);
 
     if (urb->status == USB_URB_OK || urb->status == USB_URB_SHORT) {
+        /* Write the payload metadata first, THEN publish `ready` with
+         * RELEASE semantics. A consumer on another CPU that observes
+         * `ready == true` via ACQUIRE is then guaranteed to see the
+         * matching `len` (and the HCD's writes to `buf`, which
+         * happened-before this completion fired). */
         slot->len = urb->actual_length;
-        slot->ready = true;
+        __atomic_store_n(&slot->ready, true, __ATOMIC_RELEASE);
     } else {
         /* Error / cancel: leave the slot unready and re-submit later
-         * in cdc_ecm_poll(). For Phase 2 cancel only fires at
-         * shutdown, so we simply drop the frame. */
-        slot->ready = false;
+         * in cdc_ecm_poll(). Relaxed is fine — no data to publish. */
         slot->len = 0;
+        __atomic_store_n(&slot->ready, false, __ATOMIC_RELAXED);
     }
 }
 
 static void cdc_tx_complete(struct usb_urb *urb)
 {
     struct cdc_tx_slot *slot = (struct cdc_tx_slot *)urb->context;
-    cdc.tx_completions++;
-    slot->completed = true;
-    /* tx_reap (called from net_poll) clears in_use + completed
-     * together so send() doesn't race it half-cleared. */
+    __atomic_fetch_add(&cdc.tx_completions, 1, __ATOMIC_RELAXED);
+    /* RELEASE pairs with the ACQUIRE in tx_reap: any prior HCD write
+     * to the URB (actual_length, status) is visible to the reaper
+     * before the slot returns to the free pool. */
+    __atomic_store_n(&slot->completed, true, __ATOMIC_RELEASE);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -282,8 +302,21 @@ static int cdc_ecm_net_send(const void *buf, size_t len)
 
     for (unsigned i = 0; i < CDC_ECM_TX_SLOTS; i++) {
         struct cdc_tx_slot *slot = &cdc.tx[i];
-        if (slot->in_use)
+        /*
+         * Atomic compare-exchange reserves the slot. If two callers
+         * race on the same `send()` (future multi-writer path), only
+         * one wins the CAS; the other moves to the next slot or
+         * returns NET_E_BUSY. RELAXED on both branches is enough
+         * because no payload has been published yet — all stores to
+         * `slot->buf` / `slot->urb` happen AFTER the reservation wins.
+         */
+        bool expected = false;
+        if (!__atomic_compare_exchange_n(&slot->in_use, &expected, true,
+                                         false /* strong */,
+                                         __ATOMIC_RELAXED,
+                                         __ATOMIC_RELAXED))
             continue;
+
         memcpy(slot->buf, buf, len);
         slot->urb.dev           = cdc.dev;
         slot->urb.endpoint      = cdc.bulk_out->address;
@@ -294,13 +327,16 @@ static int cdc_ecm_net_send(const void *buf, size_t len)
         slot->urb.complete      = cdc_tx_complete;
         slot->urb.context       = slot;
         slot->urb.status        = USB_URB_PENDING;
-        slot->completed         = false;
-        slot->in_use            = true;
+        /* Clear completed BEFORE the URB is visible to the HCD so a
+         * fast completion can't be observed as "reaped already". */
+        __atomic_store_n(&slot->completed, false, __ATOMIC_RELAXED);
 
         int rc = usb_submit_urb(&slot->urb);
         if (rc != 0) {
-            /* Undo reservation if submit rejected us. */
-            slot->in_use = false;
+            /* Undo reservation if submit rejected us. RELEASE because
+             * the slot's buffer was written; a later claimant using
+             * RELAXED CAS must see those writes done. */
+            __atomic_store_n(&slot->in_use, false, __ATOMIC_RELEASE);
             return NET_E_GENERIC;
         }
         return NET_OK;
@@ -317,7 +353,11 @@ static int cdc_ecm_net_recv(void *buf, size_t max_len)
 
     for (unsigned i = 0; i < CDC_ECM_RX_SLOTS; i++) {
         struct cdc_rx_slot *slot = &cdc.rx[i];
-        if (!slot->ready)
+        /* ACQUIRE pairs with the RELEASE store in cdc_rx_complete —
+         * if we observe `ready == true`, `slot->len` and
+         * `slot->buf` are guaranteed to reflect the latest
+         * completion. */
+        if (!__atomic_load_n(&slot->ready, __ATOMIC_ACQUIRE))
             continue;
         uint32_t len = slot->len;
         if (len > max_len)
@@ -326,8 +366,9 @@ static int cdc_ecm_net_recv(void *buf, size_t max_len)
             memcpy(buf, slot->buf, len);
         /* Release the slot before re-submitting so a fast completion
          * after re-submit doesn't race us into a double-processed
-         * frame. */
-        slot->ready = false;
+         * frame. RELAXED is fine — `ready = false` doesn't publish
+         * any data; the next completion's RELEASE is what pairs. */
+        __atomic_store_n(&slot->ready, false, __ATOMIC_RELAXED);
         slot->len   = 0;
         (void)cdc_rx_submit(slot);
         return (int)len;
@@ -339,10 +380,16 @@ static void cdc_ecm_net_tx_reap(void)
 {
     for (unsigned i = 0; i < CDC_ECM_TX_SLOTS; i++) {
         struct cdc_tx_slot *slot = &cdc.tx[i];
-        if (slot->in_use && slot->completed) {
-            slot->completed = false;
-            slot->in_use    = false;
-        }
+        /* ACQUIRE pairs with the RELEASE in cdc_tx_complete: once we
+         * see `completed == true`, all HCD writes to the URB before
+         * the completion callback ran are visible here. */
+        if (!__atomic_load_n(&slot->completed, __ATOMIC_ACQUIRE))
+            continue;
+        /* Clear completed first, then in_use. RELEASE on in_use
+         * ensures a fresh send() that CAS-wins the slot sees the
+         * cleared `completed` flag set by this thread. */
+        __atomic_store_n(&slot->completed, false, __ATOMIC_RELAXED);
+        __atomic_store_n(&slot->in_use,    false, __ATOMIC_RELEASE);
     }
     /* Drive the HCD so completions are visible on poll-only paths. */
     usb_core_poll();
@@ -466,7 +513,9 @@ int cdc_ecm_probe_and_register(void)
     cdc.dev      = dev;
     cdc.bulk_in  = in;
     cdc.bulk_out = out;
-    /* Zero slot state — fresh arrays on every probe. */
+    /* Zero slot state — fresh arrays on every probe. Probe runs from
+     * single-threaded init context so plain stores are sufficient;
+     * the atomic ops kick in once net_init queues the first URBs. */
     for (unsigned i = 0; i < CDC_ECM_RX_SLOTS; i++) {
         cdc.rx[i].ready = false;
         cdc.rx[i].len = 0;
@@ -484,7 +533,6 @@ int cdc_ecm_probe_and_register(void)
          cdc.max_segment, in->address, out->address);
 
     net_register_driver(&cdc_ecm_driver);
-    cdc.registered = true;
     return NET_OK;
 }
 
