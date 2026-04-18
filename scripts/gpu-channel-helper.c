@@ -395,54 +395,94 @@ int main(int argc, char **argv)
      * GP_PUT in USERD and ringing the doorbell on the channel fd's
      * mmap. This "activates" the channel so PBDMA is polling it when
      * SLM-OS later writes GP_PUT after kexec. */
-    printf("[gpu-helper] Priming PBDMA with a NOP pushbuffer...\n");
+    /* Isolation test (issue #273): submit a real SEMAPHORE_RELEASE from
+     * Linux userspace via mmap+doorbell (same path SLM-OS uses post-
+     * kexec). If the semaphore fires Linux-side, the channel is fully
+     * capable and Phase 7's issue is post-kexec state loss. If it
+     * doesn't, the channel setup itself is still incomplete.
+     *
+     * Previous helper versions wrote the doorbell at mmap offset 0 —
+     * that hits the wrong register. The actual USERMODE doorbell is at
+     * BAR0+0xBB0090, which is offset 0x90 *within* the CTRL mmap
+     * (the mmap covers BAR0+0xBB0000..+0xBB0FFF). Fixed below. */
+    printf("[gpu-helper] === ISOLATION TEST: userspace mmap+doorbell ===\n");
 
-    /* Write a NOP method to the pushbuffer at offset 0 */
-    *(uint32_t *)pb_va = 0x00000000u;  /* NOP: subch 0, method 0, count 0 */
+    /* Write SEMAPHORE_RELEASE pushbuffer (10 dwords). Same encoding as
+     * SLM-OS Phase 7 smoke test: new host-semaphore methods 0x5C..0x6C,
+     * OPERATION=RELEASE(1), 32-bit, WFI enabled. */
+    uint32_t *pb32 = (uint32_t *)pb_va;
+    uint64_t sem_gva = sem_map.offset;
+    pb32[0] = 0x2001005Cu;                /* SEM_ADDR_LO header */
+    pb32[1] = (uint32_t)(sem_gva & 0xFFFFFFFFu);
+    pb32[2] = 0x20010060u;                /* SEM_ADDR_HI header */
+    pb32[3] = (uint32_t)((sem_gva >> 32) & 0xFFu);
+    pb32[4] = 0x20010064u;                /* SEM_PAYLOAD_LO header */
+    pb32[5] = 0x0000CAFEu;
+    pb32[6] = 0x20010068u;                /* SEM_PAYLOAD_HI header */
+    pb32[7] = 0;
+    pb32[8] = 0x2001006Cu;                /* SEM_EXECUTE header */
+    pb32[9] = 0x00000001u;                /* RELEASE | 32-bit | WFI_EN */
     msync(pb_va, 4096, MS_SYNC);
 
-    /* Build the GPFIFO entry (Ampere format):
-     *   entry0[31:2] = gpu_va & 0xFFFFFFFC
-     *   entry1[7:0]  = gpu_va[39:32]
-     *   entry1[30:10] = length in 4-byte dwords */
-    uint64_t pb_gva = pb_map.offset;  /* pb GPU VA */
+    /* Pre-clear the semaphore so we can detect the GPU write. */
+    *(volatile uint32_t *)sem_va = 0;
+    msync(sem_va, 4096, MS_SYNC);
+
+    /* Build GPFIFO entry in Ampere HW format, length=10 dwords. */
+    uint64_t pb_gva = pb_map.offset;
     uint32_t gp_e0 = (uint32_t)(pb_gva & 0xFFFFFFFCu);
-    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (1u << 10);
+    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (10u << 10);
     ((uint32_t *)gpfifo_va)[0] = gp_e0;
     ((uint32_t *)gpfifo_va)[1] = gp_e1;
     msync(gpfifo_va, 8, MS_SYNC);
-    printf("[gpu-helper] GPFIFO[0] = 0x%08x_%08x (pb_va=0x%llx)\n",
+    printf("[gpu-helper] GPFIFO[0] = 0x%08x_%08x (pb_va=0x%llx, 10 dwords)\n",
            gp_e1, gp_e0, (unsigned long long)pb_gva);
 
-    /* Advance GP_PUT in USERD (word 35) */
+    /* Advance GP_PUT in USERD (word 35). */
     ((uint32_t *)userd_va)[35] = 1;
     msync(userd_va, 4096, MS_SYNC);
 
-    /* Ring the doorbell: mmap the CTRL fd which provides the shared
-     * usermode doorbell region (captured from CUDA's mmap pattern —
-     * CUDA mmaps /dev/nvgpu/igpu0/ctrl, not per-channel fds). Write
-     * the work_submit_token at offset 0. */
-    void *doorbell = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                          MAP_SHARED, ctrl_fd, 0);
-    if (doorbell == MAP_FAILED) {
+    /* mmap the USERMODE doorbell page from the CTRL fd. The mmap covers
+     * the 4KB page starting at BAR0+0xBB0000; the actual doorbell is at
+     * offset 0x90 (BAR0+0xBB0090). Writing at offset 0 hits a control
+     * register that isn't the doorbell. */
+    void *doorbell_page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                               MAP_SHARED, ctrl_fd, 0);
+    if (doorbell_page == MAP_FAILED) {
         perror("mmap doorbell page on ctrl fd");
     } else {
-        printf("[gpu-helper] Doorbell mapped at %p; writing token 0x%x\n",
-               doorbell, sb.work_submit_token);
-        *(volatile uint32_t *)doorbell = sb.work_submit_token;
-        /* Do not msync — it's MMIO, no dirty flush needed */
+        volatile uint32_t *doorbell =
+            (volatile uint32_t *)((char *)doorbell_page + 0x90);
+        printf("[gpu-helper] Doorbell page %p + 0x90; writing token 0x%x\n",
+               doorbell_page, sb.work_submit_token);
+        *doorbell = sb.work_submit_token;
+        __asm__ volatile("dsb sy" ::: "memory");
 
-        /* Wait briefly for PBDMA to consume. */
-        usleep(50000);  /* 50 ms */
+        /* Poll semaphore for up to 1s. */
+        uint32_t sem_val = 0;
+        for (int i = 0; i < 100; i++) {
+            sem_val = *(volatile uint32_t *)sem_va;
+            if (sem_val == 0xCAFEu) break;
+            usleep(10000);
+        }
         uint32_t gp_get_after = ((volatile uint32_t *)userd_va)[34];
-        printf("[gpu-helper] After doorbell: GP_GET = %u (should be 1 if consumed)\n",
-               gp_get_after);
+        printf("[gpu-helper] After doorbell: GP_GET=%u (want 1), "
+               "sem=0x%08x (want 0xCAFE)\n",
+               gp_get_after, sem_val);
+        if (sem_val == 0xCAFEu) {
+            printf("[gpu-helper] >>> ISOLATION: sema fires Linux-side — "
+                   "channel capable, kexec breaks state\n");
+        } else if (gp_get_after == 1) {
+            printf("[gpu-helper] >>> ISOLATION: PBDMA consumed entry but "
+                   "method didn't fire — channel setup incomplete\n");
+        } else {
+            printf("[gpu-helper] >>> ISOLATION: PBDMA didn't even walk "
+                   "the entry — channel not scheduled\n");
+        }
     }
 
-    /* Re-read + update handoff with the new GP_PUT/GP_GET values.
-     * Rewrite the whole struct to keep all fields coherent; the
-     * initial_gp_* fields live at fixed positions in the struct. */
-    hoff.initial_gp_put = 1;
+    /* Re-read + update handoff with the current GP_PUT/GP_GET values. */
+    hoff.initial_gp_put = ((volatile uint32_t *)userd_va)[35];
     hoff.initial_gp_get = ((volatile uint32_t *)userd_va)[34];
     memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);
