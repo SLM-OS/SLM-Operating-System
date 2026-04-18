@@ -15,7 +15,7 @@
 | 4 — nanopb + `.hef` parser | ✅ partial | nanopb vendored (0.4.9.1) + `.hef` outer-header validator + smoke tests; full `ProtoHEFHef` decode deferred until a real `.hef` is available |
 | 5.1 — HEF tensor metadata | ✅ done | I/O pad shapes captured from the first NG |
 | 5.2 — Control-channel RPC transport | ✅ tier-1 + tier-2 (2026-04-18) | IDENTIFY + WRITE_MEMORY + READ_MEMORY round-tripped on pi-5-1; `hailo peek/poke` wired; only CONFIG_STREAM opcode remains |
-| 5.3 — hailo_load + weight DMA | ☐🔗 hardware-gated (parser done) | HEF CCW action extraction ✅; upload loop needs real HEF + CONFIG_STREAM-with-context for addressing |
+| 5.3 — hailo_load + weight DMA | ✅ software (2026-04-18) | HEF CCW parser, DMA tensor allocator, WRITE_MEMORY-based upload loop all landed; awaits compiled `.hef` + CONFIG_STREAM-with-context for end-to-end hardware test |
 | 5.4 — Inference submit + `hailo infer` | ☐🔗 hardware-gated | requires Phase 5.3 |
 | 6 — AI scheduler Hailo policy | ☐🔗 hardware-gated | requires Phase 5.3/5.4 |
 | 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe/boot/fw/peek/poke` wired; `hailo load <path>` prints HEF metadata |
@@ -280,11 +280,14 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - Four non-obvious wire-format gotchas surfaced during bring-up and are recorded in `docs/reference/hailo-driver-notes.md` §4.5 and the `hailo_control_wire_gotchas` auto-memory: big-endian header scalars, IMASK-before-ISTATUS unmask, FW_CONTROL-bit-specific polling, and the 4-byte `parameter_count` gap between response header and body (plus `__packed` on the body struct).
 - 15 QEMU-mocked tests in `test_hailo.c` cover the transport — 7 IDENTIFY cases (`test_control_identify_*`) plus 8 WRITE/READ_MEMORY cases (`test_control_{write,read}_memory_*`, `test_control_memory_{round_trip,chunks_large_transfer}`). The mock has a 4 KB smart backing store that simulates firmware memory so WRITE pattern → READ back round-trips can be asserted locally.
 
-#### Phase 5.3: `hailo_load` with weight DMA ☐🔗 hardware (parser landed 2026-04-18)
+#### Phase 5.3: `hailo_load` with weight DMA ✅ software-complete (2026-04-18)
 
-- **CCW action extraction (done):** `hef_parser.c` now walks `network_group[0].preliminary_config.operation[].actions[].write_data_ccw` and records each action's `(data_offset_in_blob, data_size, cfg_channel_index)` into `struct hef_info`. Data bytes are NOT copied — the offset points into the caller-owned HEF blob so multi-megabyte weight sections don't balloon hef_info. Cap at HEF_PARSER_MAX_CCW_ACTIONS=256 with a truncation flag; `ccw_total_bytes` sums across all actions. `hailo load <path>` prints `ccw: N action(s), total X bytes`. Seven synthetic-HEF tests in `test_hef_parser.c`.
-- **Tensor buffer API (remaining):** allocate input/output tensors in NC DMA memory with platform cache sync handled by the driver.
-- **Upload loop (remaining, hardware-gated):** walk the parsed actions and issue WRITE_MEMORY against the firmware-published CCW target addresses. Blocked on: (a) a real compiled `.hef` to test against — synthetic blobs can only validate parser, not firmware acceptance; (b) CONFIG_STREAM with real HEF-derived parameters to set up the CFG channel the writes target. Both get resolved when a `.hef` arrives in the lab.
+- **CCW action extraction (done):** `hef_parser.c` walks `network_group[0].preliminary_config.operation[].actions[].write_data_ccw` and records each action's `(data_offset_in_blob, data_size, cfg_channel_index)` into `struct hef_info`. Data bytes are NOT copied — the offset points into the caller-owned HEF blob so multi-megabyte weight sections don't balloon hef_info. Cap at `HEF_PARSER_MAX_CCW_ACTIONS=256` with a truncation flag; `ccw_total_bytes` sums across all actions.
+- **DMA tensor buffer API (done):** `hailo_tensor.{c,h}` wraps platform `dma_alloc` / `dma_free` / `cache_clean` / `cache_invalidate` into `struct hailo_tensor`. Page-aligned (4 KB), zero-init, size-from-shape with overflow guard. `prepare_for_device` / `prepare_for_host` fire the host↔device cache-maintenance hooks (no-ops on NC memory today).
+- **CCW upload loop (done):** `hailo_control_upload_ccw(info, blob_base, device_base_addr, &uploaded)` walks `info->ccw_actions[]` and issues `WRITE_MEMORY` for each, appending at `device_base_addr + cumulative_bytes`. Rejects null args, truncated info, and address wrap before touching the transport. Per-action failure bubbles up the first non-OK rc (caller handles all-or-nothing if needed).
+- **Shell:** `hailo load <path>` now prints `ccw: N action(s), total X bytes`. Adding `upload <hex-base>` kicks off the CCW upload right after the parse — useful once a real `.hef` is in the lab.
+- **Tests:** 27 new QEMU cases — 7 in `test_hef_parser.c` (synthetic-HEF extraction), 12 in `test_hailo.c` (tensor), 8 in `test_hailo.c` (CCW upload via smart-memory backing store with WRITE→READ round-trips).
+- **Hardware gate:** end-to-end verification awaits a compiled `mobilenet_v1.hef` + a successful `CONFIG_STREAM` (which needs real HEF-derived nn_stream_config params) to establish the CFG channel the upload targets. Code is structured so the first HEF arrival exercises the full path without scaffolding changes.
 
 #### Phase 5.4: `hailo infer` ☐🔗 hardware
 

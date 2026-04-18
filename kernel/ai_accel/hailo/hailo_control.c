@@ -49,6 +49,7 @@
 #include "hailo.h"
 #include "hailo_control.h"
 #include "hailo_internal.h"
+#include "hef_parser.h"
 #include "debug.h"
 #include "md5.h"
 #include "spinlock.h"
@@ -718,5 +719,53 @@ int hailo_control_read_memory(uint32_t address,
         cur_addr  += chunk;
         remaining -= chunk;
     }
+    return HAILO_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 5.3: CCW upload from parsed hef_info                                  */
+/* -------------------------------------------------------------------------- */
+
+int hailo_control_upload_ccw(const struct hef_info *info,
+                             const void *blob_base,
+                             uint32_t device_base_addr,
+                             uint64_t *out_bytes_uploaded)
+{
+    if (out_bytes_uploaded) *out_bytes_uploaded = 0;
+    if (!info || !blob_base) return HAILO_ERR_INVAL;
+    /* Truncated info means the parser hit HEF_PARSER_MAX_CCW_ACTIONS
+     * and stopped storing — we can't upload the full model from a
+     * partial list. Raising the cap and re-parsing is the fix. */
+    if (info->ccw_actions_truncated) return HAILO_ERR_INVAL;
+
+    /* Overflow guard on the running target address. Prevents a
+     * malformed HEF (or a caller passing a device_base_addr close
+     * to UINT32_MAX) from wrapping mid-upload and landing later
+     * actions at low device addresses. */
+    if ((uint64_t)device_base_addr + info->ccw_total_bytes
+        > (uint64_t)UINT32_MAX) {
+        return HAILO_ERR_INVAL;
+    }
+
+    const uint8_t *base = (const uint8_t *)blob_base;
+    uint32_t cur_addr   = device_base_addr;
+    uint64_t total      = 0;
+
+    for (uint32_t i = 0; i < info->ccw_action_count; i++) {
+        const struct hef_ccw_action *a = &info->ccw_actions[i];
+        if (a->data_size == 0) continue;   /* nothing to write */
+        int rc = hailo_control_write_memory(cur_addr,
+                                            base + a->data_offset_in_blob,
+                                            a->data_size);
+        if (rc != HAILO_OK) {
+            WARN("hailo: CCW upload failed at action %u (rc=%d, "
+                 "address=0x%x, size=%u)", i, rc, cur_addr, a->data_size);
+            return rc;
+        }
+        cur_addr += a->data_size;   /* already checked not to wrap */
+        total    += a->data_size;
+    }
+
+    if (out_bytes_uploaded) *out_bytes_uploaded = total;
     return HAILO_OK;
 }

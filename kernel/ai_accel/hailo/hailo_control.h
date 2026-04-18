@@ -275,6 +275,44 @@ int hailo_control_read_memory(uint32_t address,
                               void *data,
                               uint32_t data_length);
 
+/* Forward declaration — hef_parser.h pulls in hef.pb.h which is
+ * large; callers that need the full struct should include
+ * hef_parser.h themselves. */
+struct hef_info;
+
+/*
+ * Upload every WriteDataCcw action recorded in `info->ccw_actions`
+ * to the device via chained WRITE_MEMORY calls.
+ *
+ * `blob_base` points at the original `.hef` protobuf blob the
+ * parser was given; each action's data is found at
+ * `blob_base + action.data_offset_in_blob`. `device_base_addr` is
+ * the starting target address on the device; each action writes
+ * at `device_base_addr + cumulative_bytes_so_far`. The caller
+ * sources this address from an earlier CONFIG_STREAM response
+ * (Phase 5.3+: the CFG channel firmware publishes when a stream
+ * is opened; the CCW upload is then a fire-and-forget sequence
+ * of appends).
+ *
+ * Actions beyond HEF_PARSER_MAX_CCW_ACTIONS were not stored by
+ * the parser (see `ccw_actions_truncated`); this function
+ * therefore refuses to run against a truncated info — a truncated
+ * model can't be correctly uploaded from the captured subset.
+ *
+ * Returns HAILO_OK on full success (all recorded actions written),
+ * HAILO_ERR_INVAL on null args or truncated info, or the first
+ * non-OK rc from WRITE_MEMORY — in which case earlier actions
+ * have ALREADY been committed on the device (the caller must
+ * reset the stream / re-upload from scratch if they need
+ * all-or-nothing semantics). On success, `*out_bytes_uploaded`
+ * (if non-NULL) carries the total byte count — a sanity check
+ * against info->ccw_total_bytes.
+ */
+int hailo_control_upload_ccw(const struct hef_info *info,
+                             const void *blob_base,
+                             uint32_t device_base_addr,
+                             uint64_t *out_bytes_uploaded);
+
 /*
  * Reset internal control-channel state (sequence counter and the
  * "IMASK already armed" flag). Only used by unit tests to isolate

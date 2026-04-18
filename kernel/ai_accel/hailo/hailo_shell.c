@@ -5,8 +5,10 @@
  *   hailo                  — dump driver state, IDs, BAR map.
  *   hailo probe            — re-run hailo_probe and print the result.
  *   hailo boot             — upload embedded firmware and bring NPU to RUNNING.
- *   hailo load P           — read a `.hef` at VFS path P, dump header, pad
- *                            shapes, and CCW write-action summary.
+ *   hailo load P [upload B]— read a `.hef` at VFS path P, dump header,
+ *                            pad shapes, and CCW summary. If `upload B`
+ *                            is given, also issue the CCW upload via
+ *                            WRITE_MEMORY against device base addr B.
  *   hailo fw               — report firmware version (post-boot only).
  *   hailo peek A [N]       — READ_MEMORY N bytes (default 16, max 64) at
  *                            device-side address A; hex-dump.
@@ -151,10 +153,28 @@ static int cmd_hailo(int argc, char *argv[])
 
     if (argc >= 2 && strcmp(argv[1], "load") == 0) {
         if (argc < 3) {
-            shell_puts("usage: hailo load <vfs-path>\n");
+            shell_puts("usage: hailo load <vfs-path> "
+                       "[upload <hex-device-base>]\n");
             return 0;
         }
         const char *path = argv[2];
+
+        /* Optional: `hailo load <path> upload <base>` kicks off the
+         * CCW upload right after the parse, targeting `base` as the
+         * device-side starting address for the first action. Each
+         * subsequent action is appended at base + cumulative bytes.
+         * Without a real CONFIG_STREAM response feeding the right
+         * base, callers pick one manually for bring-up. */
+        bool     do_upload = false;
+        uint32_t upload_base = 0;
+        if (argc >= 5 && strcmp(argv[3], "upload") == 0) {
+            if (parse_hex_u32(argv[4], &upload_base) != 0) {
+                shell_printf("hailo: load upload: bad hex base '%s'\n",
+                             argv[4]);
+                return 0;
+            }
+            do_upload = true;
+        }
 
         struct vfs_entry_info info = {0};
         if (vfs_stat_path(path, &info) != 0) {
@@ -219,12 +239,15 @@ static int cmd_hailo(int argc, char *argv[])
 
         struct hef_info meta;
         rc = hef_parse_body(body, outer.proto_size, &meta);
-        pmm_free_pages(body, body_pages);
-
         if (rc != HEF_PARSER_OK) {
             shell_printf("hailo: proto decode failed (%d)\n", rc);
+            pmm_free_pages(body, body_pages);
             return 0;
         }
+        /* NOTE: body is NOT freed yet — meta.ccw_actions[i].
+         * data_offset_in_blob references into it and the optional
+         * upload path below needs the blob live. Freed at the end
+         * of this handler. */
 
         shell_printf("  hw_arch = %s (%u)\n",
                      meta.hw_arch_known ?
@@ -279,6 +302,20 @@ static int cmd_hailo(int argc, char *argv[])
                          meta.ccw_actions_truncated
                              ? " (truncated)" : "");
         }
+
+        if (do_upload) {
+            uint64_t uploaded = 0;
+            int urc = hailo_control_upload_ccw(&meta, body, upload_base,
+                                               &uploaded);
+            if (urc == HAILO_OK) {
+                shell_printf("  ccw: uploaded %lu bytes starting at 0x%08x\n",
+                             (unsigned long)uploaded, upload_base);
+            } else {
+                shell_printf("  ccw: upload failed (%d)\n", urc);
+            }
+        }
+
+        pmm_free_pages(body, body_pages);
         return 0;
     }
 

@@ -18,6 +18,7 @@
 #include "../ai_accel/hailo/hailo_control.h"
 #include "../ai_accel/hailo/hailo_internal.h"
 #include "../ai_accel/hailo/hailo_tensor.h"
+#include "../ai_accel/hailo/hef_parser.h"
 #include "../include/md5.h"
 #include "../include/uart.h"
 #include "test_harness.h"
@@ -2308,6 +2309,169 @@ static void test_tensor_multi_alloc_distinct_buffers(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 5.3: CCW upload from hef_info                                          */
+/* -------------------------------------------------------------------------- */
+
+/* Build a minimal hef_info with N synthetic CCW actions sourced from
+ * a contiguous pattern embedded in a caller-owned blob. The test
+ * fills one deterministic pattern into the blob and records
+ * (offset, size) triples that slice it into N pieces — matching
+ * what the real parser produces from a preliminary_config proto. */
+static void build_ccw_info(struct hef_info *info,
+                           uint8_t *blob, uint32_t blob_size,
+                           const uint32_t *sizes, uint32_t count)
+{
+    memset(info, 0, sizeof(*info));
+    for (uint32_t i = 0; i < blob_size; i++) {
+        blob[i] = (uint8_t)(i ^ 0x5A);
+    }
+    uint32_t off = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        TEST_ASSERT_TRUE(off + sizes[i] <= blob_size);
+        info->ccw_actions[i].data_offset_in_blob = off;
+        info->ccw_actions[i].data_size           = sizes[i];
+        info->ccw_actions[i].cfg_channel_index   = 0;
+        info->ccw_actions[i].cfg_channel_index_known = true;
+        off += sizes[i];
+        info->ccw_total_bytes += sizes[i];
+    }
+    info->ccw_action_count = count;
+    info->ccw_actions_truncated = false;
+}
+
+static void test_ccw_upload_rejects_null(void)
+{
+    control_setup_running();
+    struct hef_info info = {0};
+    uint8_t blob[4] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(NULL, blob, 0x10000, NULL));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, NULL, 0x10000, NULL));
+}
+
+static void test_ccw_upload_rejects_truncated(void)
+{
+    control_setup_running();
+    struct hef_info info = {0};
+    uint8_t blob[4] = {0};
+    info.ccw_actions_truncated = true;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, blob, 0x10000, NULL));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_rejects_address_wrap(void)
+{
+    control_setup_running();
+    struct hef_info info = {0};
+    uint8_t blob[16];
+    uint32_t sizes[] = { 8 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, blob, 0xFFFFFFFC, NULL));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_empty_info_is_noop(void)
+{
+    control_setup_running();
+    struct hef_info info = {0};
+    uint8_t blob[4] = {0};
+    uint64_t uploaded = 0xDEADBEEF;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x10000, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(0, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_single_action(void)
+{
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t blob[256];
+    struct hef_info info;
+    uint32_t sizes[] = { 32 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x100, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(32, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+
+    /* Round-trip via READ_MEMORY to confirm the bytes landed at
+     * device_base_addr = 0x100. */
+    uint8_t readback[32];
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_read_memory(0x100, readback, sizeof(readback)));
+    TEST_ASSERT_EQUAL_MEMORY(&blob[info.ccw_actions[0].data_offset_in_blob],
+                             readback, sizeof(readback));
+}
+
+static void test_ccw_upload_multiple_actions_contiguous(void)
+{
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t blob[256];
+    struct hef_info info;
+    uint32_t sizes[] = { 16, 20, 12 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 3);
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x200, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(16u + 20u + 12u, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
+
+    /* All three actions appended contiguously, so the 48 bytes at
+     * [0x200, 0x200+48) should match the first 48 bytes of the
+     * blob (because build_ccw_info filled the blob with a single
+     * deterministic pattern and sliced it sequentially). */
+    uint8_t readback[48];
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_read_memory(0x200, readback, sizeof(readback)));
+    TEST_ASSERT_EQUAL_MEMORY(blob, readback, sizeof(readback));
+}
+
+static void test_ccw_upload_chunks_large_action(void)
+{
+    /* 2500 B single action → hailo_control_write_memory's internal
+     * 1 KB chunking fires 3 WRITE_MEMORY doorbells. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    static uint8_t blob[4096];
+    struct hef_info info;
+    uint32_t sizes[] = { 2500 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x400, NULL));
+    TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
+}
+
+static void test_ccw_upload_skips_zero_size_action(void)
+{
+    /* A zero-size action is silently skipped — no doorbell, no
+     * accounting. Defensive handling keeps callers from tripping
+     * WRITE_MEMORY's zero-length INVAL guard. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t blob[64];
+    struct hef_info info;
+    uint32_t sizes[] = { 8, 0, 8 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 3);
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x300, NULL));
+    TEST_ASSERT_EQUAL_UINT32(2, mock_control_doorbells);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -2419,6 +2583,16 @@ int test_suite_hailo(void)
     RUN_TEST(test_tensor_prepare_for_host_fires_cache_invalidate);
     RUN_TEST(test_tensor_free_zero_handle_is_noop);
     RUN_TEST(test_tensor_multi_alloc_distinct_buffers);
+
+    /* Phase 5.3 CCW upload */
+    RUN_TEST(test_ccw_upload_rejects_null);
+    RUN_TEST(test_ccw_upload_rejects_truncated);
+    RUN_TEST(test_ccw_upload_rejects_address_wrap);
+    RUN_TEST(test_ccw_upload_empty_info_is_noop);
+    RUN_TEST(test_ccw_upload_single_action);
+    RUN_TEST(test_ccw_upload_multiple_actions_contiguous);
+    RUN_TEST(test_ccw_upload_chunks_large_action);
+    RUN_TEST(test_ccw_upload_skips_zero_size_action);
 
     return UnityEnd();
 }
