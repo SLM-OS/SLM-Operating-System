@@ -110,8 +110,10 @@ make test-bringup
 # the Phase 7 SEMAPHORE_RELEASE pushbuffer builders — both the
 # host-family variant at byte offsets 0x5C-0x6C and the COMPUTE_B
 # variant at 0x158-0x168 (dword-by-dword encoding regression —
-# catches method-family, bit-position, and VA-truncation bugs).
-# 44 test cases.
+# catches method-family, bit-position, and VA-truncation bugs),
+# plus test_method_header_encoding which pins the macro against
+# nvgpu's own literal dwords including a >0xFFF offset.
+# 45 test cases.
 make test-ga10b-bringup
 
 # Jetson GA10B platform shim — portable surfaces of

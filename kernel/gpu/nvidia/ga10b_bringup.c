@@ -246,13 +246,34 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  *   drivers/gpu/nvgpu/hal/sync/sema_cmdbuf_gv11b.c:41-101 (method encoding)
  *
  * Host methods don't need a prior SET_OBJECT / class bind — PBDMA
- * decodes them directly, so subchannel=0 is safe. */
+ * decodes them directly, so subchannel=0 is safe.
+ *
+ * Encoding (validated on jetson-nano-2, 2026-04-18): the hardware
+ * decodes bits [12:0] of the header as method_id, where
+ * method_id = byte_off / 4. nvgpu's own gv11b sema cmdbuf writes
+ * 0x20010017 for SEM_ADDR_LO (byte 0x5C → method_id 0x17 placed at
+ * [12:0]) and that encoding fires the sema post-doorbell. A prior
+ * iteration of this macro used `byte_off & 0xFFFu` at bits [11:0]
+ * — PBDMA advanced GP_GET anyway (it consumes the dword pair) but
+ * silently discarded the method, so the sema never wrote. The fix
+ * is to shift byte_off right by 2 before masking.
+ *
+ * Mask width (0x1FFFu, 13 bits): the original NV906F (Kepler+) spec
+ * placed METHOD_ADDRESS at bits [12:2] — an 11-bit field, max
+ * method_id 0x7FF. That would have been enough for classes with
+ * byte offsets up to 0x1FFC. AMPERE_COMPUTE_B (class 0xC7C0) defines
+ * methods up to byte 0x33EC (method_id 0xCFB = 12 bits), so the
+ * field must have been widened on Volta+. A 13-bit mask is the
+ * strictest we can apply without truncating known-valid method_ids
+ * and still covers any plausible future expansion within a 3-bit
+ * subchannel-boundary margin at bit 13. */
 #define NVC56F_METHOD_HEADER_INC(count, subch, byte_off)                 \
     ((1u << 29) | ((uint32_t)(count) << 16) |                            \
-     ((uint32_t)(subch) << 13) | ((uint32_t)(byte_off) & 0xFFFu))
+     ((uint32_t)(subch) << 13) | (((uint32_t)(byte_off) >> 2) & 0x1FFFu))
 
 /* New HOST semaphore interface (Volta+). Byte offsets in the method
- * space; the macro above drops them at bits [12:2] of the header. */
+ * space; the macro above places method_id = byte_off / 4 at bits
+ * [12:0] of the header. */
 #define NVC56F_SEM_ADDR_LO                0x5Cu   /* method index 0x17 */
 #define NVC56F_SEM_ADDR_HI                0x60u   /* method index 0x18 */
 #define NVC56F_SEM_PAYLOAD_LO             0x64u   /* method index 0x19 */
@@ -263,8 +284,11 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * RELEASE is 1 on the new interface (legacy SEMAPHORED.RELEASE=2 —
  * different register, different value). */
 #define NVC56F_SEM_EXECUTE_OP_RELEASE     0x1u
-#define NVC56F_SEM_EXECUTE_PAYLOAD_32BIT  (0u << 24)  /* 0 = 32-bit release */
-#define NVC56F_SEM_EXECUTE_RELEASE_WFI_EN (0u << 20)  /* 0 = wait-for-idle */
+/* PAYLOAD_SIZE at bit 24 and RELEASE_WFI at bit 20 are both left at
+ * their default value of 0 (32-bit payload, no wait-for-idle) to
+ * match nvgpu's gv11b literal `0x1` on incr_cmd without wfi. If the
+ * defaults ever need to change, set bit 24 = 1 for 64-bit payload
+ * and bit 20 = 1 to enable RELEASE_WFI. */
 
 /* Known payload the GPU writes to the semaphore. Chosen to be non-zero,
  * visually distinct from stale bus values (0xbadf...), and small enough
@@ -1113,9 +1137,10 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
     pb[6] = NVC56F_METHOD_HEADER_INC(1, 0, NVC56F_SEM_PAYLOAD_HI);
     pb[7] = 0u;                  /* 32-bit release: hi word ignored */
     pb[8] = NVC56F_METHOD_HEADER_INC(1, 0, NVC56F_SEM_EXECUTE);
-    pb[9] = NVC56F_SEM_EXECUTE_OP_RELEASE |
-            NVC56F_SEM_EXECUTE_PAYLOAD_32BIT |
-            NVC56F_SEM_EXECUTE_RELEASE_WFI_EN;
+    /* OPERATION=RELEASE; PAYLOAD_SIZE (bit 24) and RELEASE_WFI (bit
+     * 20) left at default 0 — matches nvgpu's literal `0x1` on a
+     * non-wfi incr_cmd. See NVC56F_SEM_EXECUTE_* defines above. */
+    pb[9] = NVC56F_SEM_EXECUTE_OP_RELEASE;
     return GA10B_SEMA_RELEASE_PB_DWORDS;
 }
 
@@ -1123,24 +1148,34 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
                                                      uint64_t sem_gpu_va,
                                                      uint32_t payload)
 {
-    /* First pair: SET_OBJECT binding AMPERE_COMPUTE_B to subch 0. */
-    pb[0]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC56F_SET_OBJECT);
+    /* First pair: SET_OBJECT binding AMPERE_COMPUTE_B to subch 1.
+     *
+     * NVK pins per-class subchannel assignments in nv_push.h: graphics
+     * classes (0x9097 … 0xC797) bind to subch 0; compute classes
+     * (0x90C0 … 0xC7C0 AMPERE_COMPUTE_B) bind to subch 1. Issue #273
+     * root-caused to binding 0xC7C0 on subch 0 here: nvgpu's
+     * validate_class_veid_pbdma saw an invalid (class=COMPUTE_B,
+     * subch=0, veid>=1 from ASYNC subcontext) tuple and raised GR FE
+     * CLASS_SUBCH_MISMATCH before any semaphore method reached the
+     * engine. Subch 1 matches what NVK / CUDA emit. */
+    pb[0]  = NVC56F_METHOD_HEADER_INC(1, 1, NVC56F_SET_OBJECT);
     pb[1]  = GA10B_AMPERE_COMPUTE_B_CLASS_ID;
 
     /* Payload first (lower then upper), then address, then execute —
      * matches the order the REPORT_SEMAPHORE_* methods are offset in
      * clc7c0.h. Structure-size ONE_WORD means the GPU writes only the
      * 32-bit payload at the target address (no timestamp/16-byte
-     * struct). OP=RELEASE fires the write once execute is dispatched. */
-    pb[2]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER);
+     * struct). OP=RELEASE fires the write once execute is dispatched.
+     * All methods on subch 1 to match the SET_OBJECT binding above. */
+    pb[2]  = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER);
     pb[3]  = payload;
-    pb[4]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER);
+    pb[4]  = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER);
     pb[5]  = 0u;     /* 32-bit release: hi payload ignored */
-    pb[6]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER);
+    pb[6]  = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER);
     pb[7]  = (uint32_t)(sem_gpu_va & 0xFFFFFFFFu);
-    pb[8]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_UPPER);
+    pb[8]  = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_UPPER);
     pb[9]  = (uint32_t)((sem_gpu_va >> 32) & 0xFFu);
-    pb[10] = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_REPORT_SEMAPHORE_EXECUTE);
+    pb[10] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_REPORT_SEMAPHORE_EXECUTE);
     pb[11] = NVC7C0_SEM_EXECUTE_OP_RELEASE |
              NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD;
     return GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS;

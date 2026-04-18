@@ -157,13 +157,19 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   creates channel + writes handoff block (v2 wire format, carries
   `work_submit_token`); SLM-OS scans DRAM, finds magic, parses
   all addresses. E2E verified via `nvgpu inherit` → `nvgpu channel`.
-- **Phase 7 HW-verified (April 17):** `nvgpu submit` writes a
-  NOP pushbuffer, advances GP_PUT, and rings the USERMODE
-  doorbell at physical 0x17BB0090 from EL2 with the
-  `work_submit_token` captured from Linux's SETUP_BIND ioctl.
-  PBDMA consumes the entry; GP_GET advances. Bringup reaches
-  METHOD_ACCEPTED. Semaphore stays 0 because a NOP doesn't
-  release it — next step is a real SEMAPHORE_RELEASE method.
+- **Phase 7 host-family sema VERIFIED (April 18):** Linux-side
+  helper writes a PBDMA-decoded SEMAPHORE_RELEASE pushbuffer,
+  advances GP_PUT, rings the USERMODE doorbell at physical
+  0x17BB0090, and observes `0x0000CAFE` at the target sem VA.
+  SLM-OS-side kernel builder (`ga10b_build_sema_release_pushbuffer`)
+  emits the same encoding. Two prior bugs fixed: (1) method-header
+  encoding — `method_id = byte_off / 4` at bits [12:0], not
+  byte_off at [11:0]; PBDMA advanced GP_GET on the malformed
+  header but silently discarded the method so the sema never
+  fired, (2) AMPERE_COMPUTE_B on subch 1 (not 0) per NVK
+  nv_push.h. See capstone-feature-status.md §Phase 7 for the
+  full investigation trail. COMPUTE_B path still blocked on
+  MME_FE1 exception (issue #291).
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)

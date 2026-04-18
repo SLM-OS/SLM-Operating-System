@@ -1042,30 +1042,114 @@ static void test_handoff_validate_missing_doorbell_token(void)
  * Phase 7 SEMAPHORE_RELEASE pushbuffer builder
  *
  * Verifies ga10b_build_sema_release_pushbuffer() emits the exact dword
- * stream PBDMA expects. Guards against two specific regressions:
+ * stream PBDMA expects. Guards against three specific regressions:
  *
- *   1. Method-address bit position. Fermi-family method headers store
- *      METHOD_ADDRESS at bits [12:2] of the dword (value = byte offset
- *      with low 2 bits zero). A prior version of this code shifted the
- *      method index right by 2 before OR-ing into the header, placing
- *      it at bits [12:0] instead of [12:2] and causing PBDMA to decode
- *      byte 0x5C as byte 0x14 (an unrouted legacy method slot). The
- *      expected dword[0] = 0x2001005C (INC, count=1, subch=0, method
- *      byte 0x5C at bits [12:2]).
+ *   1. Method-address encoding. The hardware decodes bits [12:0] of
+ *      the header as method_id, where method_id = byte_off / 4. A
+ *      prior version of this code placed byte_off directly at bits
+ *      [11:0] (`byte_off & 0xFFFu`), producing 0x2001005C for SEM_ADDR_LO
+ *      instead of the correct 0x20010017. PBDMA advanced GP_GET anyway
+ *      (it consumes the dword pair), but silently discarded the method
+ *      because 0x5C placed at [11:0] decodes to a different method_id
+ *      than intended. The sema never actually fired post-doorbell.
+ *      Tests assert literal dword values (0x20010017 .. 0x2001001B)
+ *      matching nvgpu's own gv11b sema cmdbuf.
  *
  *   2. Method family. GA10B's AMPERE_CHANNEL_GPFIFO_A (0xC56F) routes
  *      the new host-semaphore methods at byte offsets 0x5C-0x6C, NOT
  *      the legacy SEMAPHOREA/B/C/D at 0x10-0x1C. The test expects the
  *      new offsets; any revert to legacy would be caught here.
+ *
+ *   3. Subchannel assignment. AMPERE_COMPUTE_B (class 0xC7C0) must bind
+ *      to subchannel 1, not 0; nvgpu's validate_class_veid_pbdma
+ *      rejects the (COMPUTE_B, subch 0, veid>=1) tuple as
+ *      CLASS_SUBCH_MISMATCH. Host-family methods at 0x5C-0x6C stay on
+ *      subch 0 since they are PBDMA-decoded, not GR-decoded.
  * ====================================================================== */
 
-/* Expected method-header builder for test-side clarity. Decomposes
- * the Fermi+ header into its fields so the test intent ("INC, count=1,
- * subch=0, byte=X at bits [12:2]") is self-evident and catches both
- * the bit-position bug AND any future bit-layout refactor. */
+/* Expected method-header builder for test-side clarity. Mirrors the
+ * kernel's NVC56F_METHOD_HEADER_INC macro: INC opcode (001<<29), count
+ * [28:16], subch [15:13], method_id = byte_off / 4 at [12:0]. The
+ * byte_off-is-shifted encoding was validated live on jetson-nano-2
+ * (2026-04-18) — nvgpu's own gv11b sema cmdbuf writes 0x20010017 for
+ * SEM_ADDR_LO (byte 0x5C → method_id 0x17 at [12:0]), and changing
+ * the helper to match fired the sema post-doorbell. A prior iteration
+ * placed byte_off at [11:0] instead; PBDMA advanced GP_GET anyway but
+ * silently discarded the method. Tests below also pin several headers
+ * to their literal dword value as a second line of defense — if
+ * this macro and the kernel macro ever drift together, the literal
+ * asserts still catch it. */
 #define EXPECT_INC_HDR(count, subch, byte_off)                         \
     ((1u << 29) | ((uint32_t)(count) << 16) |                          \
-     ((uint32_t)(subch) << 13) | ((uint32_t)(byte_off) & 0xFFFu))
+     ((uint32_t)(subch) << 13) | (((uint32_t)(byte_off) >> 2) & 0x1FFFu))
+
+/* Direct encoding test — covers both EXPECT_INC_HDR (test side) and
+ * NVC56F_METHOD_HEADER_INC (kernel side) against nvgpu's reference
+ * bit patterns. The EXPECT_INC_HDR asserts exercise test-side
+ * encoding at byte offsets across the full method space, including
+ * values that would have been truncated by the prior `byte_off &
+ * 0xFFFu` encoding. The pushbuffer-builder call at the bottom pins
+ * the kernel macro's output to the same nvgpu literals, so a
+ * co-regression where both macros drift together still fails this
+ * standalone test (layout tests below also guard via literal-dword
+ * checks, but this test is self-sufficient).
+ *
+ * The highest byte offset we exercise is 0x33E8 — near the top of
+ * AMPERE_COMPUTE_B's method space (max method in clc7c0.h is
+ * 0x33EC). The 11-bit NV906F ADDRESS spec would truncate any
+ * method_id ≥ 0x800 (byte ≥ 0x2000) — AMPERE_COMPUTE_B has many
+ * such methods, which is why the kernel macro uses a 13-bit mask. */
+static void test_method_header_encoding(void)
+{
+    printf("== test_method_header_encoding ==\n");
+
+    /* --- Test-side EXPECT_INC_HDR coverage --- */
+
+    /* Host-family (subch 0, byte 0x5C-0x6C): nvgpu's exact literals
+     * from docs/reference/nvgpu-hal-sync-sema_cmdbuf_gv11b.c. */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x5Cu), 0x20010017u);  /* SEM_ADDR_LO */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x60u), 0x20010018u);  /* SEM_ADDR_HI */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x64u), 0x20010019u);  /* SEM_PAYLOAD_LO */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x68u), 0x2001001Au);  /* SEM_PAYLOAD_HI */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x6Cu), 0x2001001Bu);  /* SEM_EXECUTE */
+
+    /* COMPUTE_B family (subch 1, byte 0x158-0x168): method_id range
+     * 0x56-0x5A, + 0x2000 subchannel bit. */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 1, 0x00u),  0x20012000u);  /* SET_OBJECT */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 1, 0x158u), 0x20012056u);
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 1, 0x168u), 0x2001205Au);
+
+    /* High-offset guard (byte 0x1424 = INVALIDATE_SAMPLER_CACHE_NO_WFI
+     * on AMPERE_COMPUTE_B, used by NVK in nvk_cmd_buffer_begin_compute).
+     * method_id = 0x1424 / 4 = 0x509. This test would fail under the
+     * prior `byte_off & 0xFFFu` encoding — 0x1424 would truncate to
+     * 0x424, yielding the wrong dword. Subch 1, count 1:
+     *   (1<<29) | (1<<16) | (1<<13) | 0x509 = 0x20012509. */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 1, 0x1424u), 0x20012509u);
+
+    /* Highest COMPUTE_B method offset in clc7c0.h (0x33EC, method_id
+     * 0xCFB = 12-bit). Would truncate under the hypothetical 11-bit
+     * mask (0x7FFu) that matches the original NV906F spec. Pins the
+     * 13-bit mask in place as a load-bearing choice, not an accident. */
+    REQUIRE_EQ(EXPECT_INC_HDR(1, 1, 0x33ECu), 0x20012CFBu);
+
+    /* Count > 1 — header count field at [28:16], not affected by the
+     * address-bit fix but worth pinning against accidental overlap. */
+    REQUIRE_EQ(EXPECT_INC_HDR(4, 0, 0x5Cu), 0x20040017u);
+    REQUIRE_EQ(EXPECT_INC_HDR(7, 2, 0x100u), 0x20074040u);  /* subch 2 = 0x4000 */
+
+    /* --- Kernel-side macro coverage via the builder --- */
+
+    /* Calling ga10b_build_sema_release_pushbuffer exercises
+     * NVC56F_METHOD_HEADER_INC directly. Asserting the first header
+     * against nvgpu's literal `0x20010017` catches any drift in the
+     * kernel macro independently of EXPECT_INC_HDR — if both macros
+     * regressed to `byte_off & 0xFFFu`, EXPECT_INC_HDR tests above
+     * would pass but this one would fail. */
+    uint32_t kpb[GA10B_SEMA_RELEASE_PB_DWORDS];
+    ga10b_build_sema_release_pushbuffer(kpb, 0x1000ULL, 0x11u);
+    REQUIRE_EQ(kpb[0], 0x20010017u);
+}
 
 static void test_sema_release_pb_layout(void)
 {
@@ -1082,20 +1166,29 @@ static void test_sema_release_pb_layout(void)
     uint32_t dwords = ga10b_build_sema_release_pushbuffer(pb, sem_va, payload);
     REQUIRE_EQ(dwords, GA10B_SEMA_RELEASE_PB_DWORDS);
 
-    /* Headers use INC (SEC_OP=1), count=1, subch=0, byte offset at
-     * bits [12:2]. Expressing expected values via EXPECT_INC_HDR
+    /* Headers use INC (SEC_OP=1), count=1, subch=0, method_id at
+     * bits [12:0]. Expressing expected values via EXPECT_INC_HDR
      * ensures this test catches a bit-position regression even if
      * someone swaps the underlying NVC56F_METHOD_HEADER_INC macro
-     * for an algebraically-different but wrongly-placed version. */
+     * for an algebraically-different but wrongly-placed version.
+     * The literal-dword guards below (0x20010017 etc.) are a second
+     * line of defense — they match nvgpu's own gv11b sema cmdbuf
+     * byte-for-byte, so a co-regression of both macros is still
+     * detected. */
     REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x5Cu));  /* SEM_ADDR_LO */
+    REQUIRE_EQ(pb[0], 0x20010017u);                  /* literal guard */
     REQUIRE_EQ(pb[1], 0xFC010000u);                  /* VA[31:0] */
     REQUIRE_EQ(pb[2], EXPECT_INC_HDR(1, 0, 0x60u));  /* SEM_ADDR_HI */
+    REQUIRE_EQ(pb[2], 0x20010018u);                  /* literal guard */
     REQUIRE_EQ(pb[3], 0x0000001Fu);                  /* VA[39:32] masked to 8 */
     REQUIRE_EQ(pb[4], EXPECT_INC_HDR(1, 0, 0x64u));  /* SEM_PAYLOAD_LO */
+    REQUIRE_EQ(pb[4], 0x20010019u);                  /* literal guard */
     REQUIRE_EQ(pb[5], 0x0000CAFEu);
     REQUIRE_EQ(pb[6], EXPECT_INC_HDR(1, 0, 0x68u));  /* SEM_PAYLOAD_HI */
+    REQUIRE_EQ(pb[6], 0x2001001Au);                  /* literal guard */
     REQUIRE_EQ(pb[7], 0u);                           /* hi word unused */
     REQUIRE_EQ(pb[8], EXPECT_INC_HDR(1, 0, 0x6Cu));  /* SEM_EXECUTE */
+    REQUIRE_EQ(pb[8], 0x2001001Bu);                  /* literal guard */
     /* SEM_EXECUTE = OP_RELEASE(1) | PAYLOAD_32BIT(0) | RELEASE_WFI_EN(0) */
     REQUIRE_EQ(pb[9], 0x00000001u);
 }
@@ -1160,20 +1253,34 @@ static void test_compute_sema_release_pb_layout(void)
         pb, sem_va, payload);
     REQUIRE_EQ(dwords, GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS);
 
-    /* First pair: SET_OBJECT on subch 0 binding AMPERE_COMPUTE_B. */
-    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x00u));         /* SET_OBJECT */
+    /* First pair: SET_OBJECT on subch 1 binding AMPERE_COMPUTE_B.
+     * NVK pins compute classes to subch 1 in nv_push.h (graphics uses
+     * subch 0); nvgpu's validate_class_veid_pbdma rejects the
+     * (COMPUTE_B, subch 0, veid>=1) tuple — that was the #273 failure.
+     * Literal-dword guards below duplicate the EXPECT_INC_HDR checks
+     * so a co-regression of both macros is still caught. Method_id =
+     * byte_off/4: 0x00→0x000, 0x158→0x056, 0x15C→0x057, 0x160→0x058,
+     * 0x164→0x059, 0x168→0x05A. Subch 1 adds 0x2000 to each. */
+    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 1, 0x00u));         /* SET_OBJECT */
+    REQUIRE_EQ(pb[0], 0x20012000u);                         /* literal guard */
     REQUIRE_EQ(pb[1], GA10B_AMPERE_COMPUTE_B_CLASS_ID);     /* AMPERE_COMPUTE_B */
 
-    /* Payload, then address, then execute — offsets from clc7c0.h. */
-    REQUIRE_EQ(pb[2],  EXPECT_INC_HDR(1, 0, 0x158u)); /* SET_REPORT_SEMAPHORE_PAYLOAD_LOWER */
+    /* Payload, then address, then execute — offsets from clc7c0.h.
+     * All on subch 1 to match the SET_OBJECT above. */
+    REQUIRE_EQ(pb[2],  EXPECT_INC_HDR(1, 1, 0x158u)); /* SET_REPORT_SEMAPHORE_PAYLOAD_LOWER */
+    REQUIRE_EQ(pb[2],  0x20012056u);                  /* literal guard */
     REQUIRE_EQ(pb[3],  0x0000CAFEu);
-    REQUIRE_EQ(pb[4],  EXPECT_INC_HDR(1, 0, 0x15Cu)); /* SET_REPORT_SEMAPHORE_PAYLOAD_UPPER */
+    REQUIRE_EQ(pb[4],  EXPECT_INC_HDR(1, 1, 0x15Cu)); /* SET_REPORT_SEMAPHORE_PAYLOAD_UPPER */
+    REQUIRE_EQ(pb[4],  0x20012057u);                  /* literal guard */
     REQUIRE_EQ(pb[5],  0u);                           /* 32-bit release */
-    REQUIRE_EQ(pb[6],  EXPECT_INC_HDR(1, 0, 0x160u)); /* SET_REPORT_SEMAPHORE_ADDRESS_LOWER */
+    REQUIRE_EQ(pb[6],  EXPECT_INC_HDR(1, 1, 0x160u)); /* SET_REPORT_SEMAPHORE_ADDRESS_LOWER */
+    REQUIRE_EQ(pb[6],  0x20012058u);                  /* literal guard */
     REQUIRE_EQ(pb[7],  0xFC010000u);                  /* VA[31:0] */
-    REQUIRE_EQ(pb[8],  EXPECT_INC_HDR(1, 0, 0x164u)); /* SET_REPORT_SEMAPHORE_ADDRESS_UPPER */
+    REQUIRE_EQ(pb[8],  EXPECT_INC_HDR(1, 1, 0x164u)); /* SET_REPORT_SEMAPHORE_ADDRESS_UPPER */
+    REQUIRE_EQ(pb[8],  0x20012059u);                  /* literal guard */
     REQUIRE_EQ(pb[9],  0x0000001Fu);                  /* VA[39:32] masked to 8 bits */
-    REQUIRE_EQ(pb[10], EXPECT_INC_HDR(1, 0, 0x168u)); /* REPORT_SEMAPHORE_EXECUTE */
+    REQUIRE_EQ(pb[10], EXPECT_INC_HDR(1, 1, 0x168u)); /* REPORT_SEMAPHORE_EXECUTE */
+    REQUIRE_EQ(pb[10], 0x2001205Au);                  /* literal guard */
     /* OPERATION=RELEASE(0) | STRUCTURE_SIZE=ONE_WORD(1<<3). */
     REQUIRE_EQ(pb[11], 0x00000008u);
 }
@@ -1201,7 +1308,7 @@ static void test_compute_sema_release_pb_zero_payload(void)
     memset(pb, 0xAB, sizeof(pb));
 
     ga10b_build_compute_sema_release_pushbuffer(pb, 0x2000000000ULL, 0u);
-    REQUIRE_EQ(pb[0],  EXPECT_INC_HDR(1, 0, 0x00u));    /* SET_OBJECT unchanged */
+    REQUIRE_EQ(pb[0],  EXPECT_INC_HDR(1, 1, 0x00u));    /* SET_OBJECT (subch 1) unchanged */
     REQUIRE_EQ(pb[1],  GA10B_AMPERE_COMPUTE_B_CLASS_ID); /* class unchanged */
     REQUIRE_EQ(pb[3],  0u);                             /* zero payload */
     REQUIRE_EQ(pb[7],  0x00000000u);                    /* VA[31:0] */
@@ -1391,6 +1498,8 @@ int main(void)
     test_handoff_validate_null_addresses();
     test_handoff_validate_gpfifo_entries();
     test_handoff_validate_missing_doorbell_token();
+
+    test_method_header_encoding();
 
     test_sema_release_pb_layout();
     test_sema_release_pb_truncates_va_upper();

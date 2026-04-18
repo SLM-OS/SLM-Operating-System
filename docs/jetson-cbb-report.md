@@ -202,7 +202,7 @@ Cross-walked to the five tracked features (see
 |---|---|---|
 | **SMP / cross-CPU dispatch** | ✅ 6 cores online, `bench smp` passes | No impact — GIC and CPU power are reachable. |
 | **Preemptive multitasking** | 🟡 Cooperative (`COOP_PREEMPT`) | Separate blocker: GIC Group config is locked by TF-A, not CBB. Timer IRQs don't deliver to NS EL2 regardless of CBB. See `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs." |
-| **GPU inference** | 🟢 Detection + FECS gateway + Phase 7 NOP dispatch working | No CBB wall in the submit path. Channel *creation* still requires the Linux-side helper (kernel-mode nvgpu ioctl surface), but once the channel exists, SLM-OS writes GP_PUT in DRAM and rings the USERMODE doorbell at BAR0+0xBB0090 directly from EL2. #258 closed 2026-04-17. |
+| **GPU inference** | 🟢 Detection + FECS gateway + Phase 7 host-family SEMAPHORE_RELEASE firing | No CBB wall in the submit path. Channel *creation* still requires the Linux-side helper (kernel-mode nvgpu ioctl surface), but once the channel exists, SLM-OS writes GP_PUT in DRAM and rings the USERMODE doorbell at BAR0+0xBB0090 directly from EL2. Pre-kexec isolation test on jetson-nano-2 writes 0xCAFE to target sem VA post-doorbell (2026-04-18). #258 and #273 closed; COMPUTE_B path blocked on #291 (MME program load). |
 | **AI scheduler** | ✅ Running | No CBB dependency — pure CPU/NEON path. |
 | **AI page eviction** | ✅ Running | No CBB dependency. |
 | **Networking** | ❌ Not wired yet (#25) | Tentative impact. EQOS MAC is at `0x02310000`; need to verify EL2 reachability (§6.A first experiment). If blocked, Jetson networking is a hard no-go without one of the permanent fixes in §6. |
@@ -262,10 +262,21 @@ On April 17, `peek 0x17BB0000` from SLM-OS at EL2 returned
 `0x0000C561` — identical to what Linux `/dev/mem` and CUDA's USERMODE
 mmap see. `poke 0x17BB0090 <work_submit_token>` advanced GP_GET on a
 Linux-primed channel from the SLM-OS shell. The updated
-`ga10b_bringup_smoke_test` then completed the full submit path
-end-to-end (GP_PUT → doorbell → PBDMA consume → GP_GET advance),
-reaching `METHOD_ACCEPTED` state. Issue #258 was closed as the result
-of this retest.
+`ga10b_bringup_smoke_test` completed the submit path with PBDMA
+consuming the GPFIFO entry and GP_GET advancing, reaching
+`METHOD_ACCEPTED` state. Issue #258 was closed as the result of this
+retest.
+
+**Update (April 18):** PBDMA's GP_GET advance alone was later found
+to be insufficient proof of method dispatch — the pre-fix method-header
+encoding (byte_off at [11:0] instead of method_id at [12:0]) produced
+malformed dwords that PBDMA consumed without executing, silently
+dropping the method. After fixing the encoding to match nvgpu's own
+gv11b sema cmdbuf (method_id = byte_off / 4 at [12:0]) plus the
+AMPERE_COMPUTE_B subch 1 fix from NVK, the helper's pre-kexec
+isolation test writes `0x0000CAFE` to the target sem VA post-doorbell
+on jetson-nano-2, confirming actual method dispatch on the host-family
+path. The COMPUTE_B path is separately blocked on MME_FE1 (issue #291).
 
 ### Why the inherit approach is still needed
 
