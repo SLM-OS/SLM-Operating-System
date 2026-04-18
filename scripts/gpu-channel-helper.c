@@ -515,7 +515,18 @@ int main(int argc, char **argv)
      * REPORT_SEMAPHORE_* methods at 0x158..0x168
      * (from docs/reference/nvgpu-include-class-clc7c0.h). OPERATION
      * on this family is RELEASE=0 (not 1), STRUCTURE_SIZE needs
-     * SEMAPHORE_ONE_WORD (1<<3) for a 32-bit payload. */
+     * SEMAPHORE_ONE_WORD (1<<3) for a 32-bit payload.
+     *
+     * **AUTHORITATIVE SOURCE:** the same dword stream is built by
+     * kernel/gpu/nvidia/ga10b_bringup.c's pure function
+     * ga10b_build_compute_sema_release_pushbuffer(). Host tests in
+     * host-tools/gsp-harness/test_ga10b_bringup.c lock the encoding.
+     * If you change the layout, change it there too — otherwise this
+     * helper's pre-kexec isolation test will diverge from the
+     * SLM-OS-side post-kexec submit and debugging will be confusing.
+     * The helper uses hardcoded literals here (not a shared header)
+     * because the kernel builder lives in a C file, not a header, and
+     * refactoring for sharing is out of scope for a diagnostic tool. */
     uint32_t *pb32 = (uint32_t *)pb_va;
     uint64_t sem_gva = sem_map.offset;
     pb32[0]  = 0x20010000u;                /* SET_OBJECT header (method 0) */

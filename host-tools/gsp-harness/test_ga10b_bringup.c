@@ -1161,8 +1161,8 @@ static void test_compute_sema_release_pb_layout(void)
     REQUIRE_EQ(dwords, GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS);
 
     /* First pair: SET_OBJECT on subch 0 binding AMPERE_COMPUTE_B. */
-    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x00u));  /* SET_OBJECT */
-    REQUIRE_EQ(pb[1], 0x0000C7C0u);                  /* AMPERE_COMPUTE_B */
+    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x00u));         /* SET_OBJECT */
+    REQUIRE_EQ(pb[1], GA10B_AMPERE_COMPUTE_B_CLASS_ID);     /* AMPERE_COMPUTE_B */
 
     /* Payload, then address, then execute — offsets from clc7c0.h. */
     REQUIRE_EQ(pb[2],  EXPECT_INC_HDR(1, 0, 0x158u)); /* SET_REPORT_SEMAPHORE_PAYLOAD_LOWER */
@@ -1202,7 +1202,7 @@ static void test_compute_sema_release_pb_zero_payload(void)
 
     ga10b_build_compute_sema_release_pushbuffer(pb, 0x2000000000ULL, 0u);
     REQUIRE_EQ(pb[0],  EXPECT_INC_HDR(1, 0, 0x00u));    /* SET_OBJECT unchanged */
-    REQUIRE_EQ(pb[1],  0x0000C7C0u);                    /* class unchanged */
+    REQUIRE_EQ(pb[1],  GA10B_AMPERE_COMPUTE_B_CLASS_ID); /* class unchanged */
     REQUIRE_EQ(pb[3],  0u);                             /* zero payload */
     REQUIRE_EQ(pb[7],  0x00000000u);                    /* VA[31:0] */
     REQUIRE_EQ(pb[9],  0x00000020u);                    /* VA[39:32] = 0x20 */

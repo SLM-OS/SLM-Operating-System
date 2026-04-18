@@ -200,13 +200,9 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define NVC7C0_SEM_EXECUTE_OP_RELEASE               0x0u   /* bits [1:0] */
 #define NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD  (1u << 3)  /* bits [4:3] */
 
-/* Compute-class channel binding — used by SET_OBJECT in the pushbuffer
- * to tell GR "for this subchannel, method decoding is AMPERE_COMPUTE_B".
- * Source: docs/reference/nvgpu-include-class-clc7c0.h:32 and
- * docs/reference/nvgpu-include-nvgpu-hw-ga10b-hw_gr_ga10b.h:1283. */
-#define AMPERE_COMPUTE_B_CLASS_ID    0xC7C0u
-
-/* NVC56F_SET_OBJECT is at method byte offset 0 on every channel class. */
+/* NVC56F_SET_OBJECT is at method byte offset 0 on every channel class.
+ * (GA10B_AMPERE_COMPUTE_B_CLASS_ID is declared in ga10b_bringup.h so
+ * host tests can reference it.) */
 #define NVC56F_SET_OBJECT            0x00u
 
 /* ---- USERMODE doorbell (Phase 7 PBDMA kick) ----
@@ -1129,7 +1125,7 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
 {
     /* First pair: SET_OBJECT binding AMPERE_COMPUTE_B to subch 0. */
     pb[0]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC56F_SET_OBJECT);
-    pb[1]  = AMPERE_COMPUTE_B_CLASS_ID;
+    pb[1]  = GA10B_AMPERE_COMPUTE_B_CLASS_ID;
 
     /* Payload first (lower then upper), then address, then execute —
      * matches the order the REPORT_SEMAPHORE_* methods are offset in

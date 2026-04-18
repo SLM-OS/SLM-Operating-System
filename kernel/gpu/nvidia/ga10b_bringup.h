@@ -179,6 +179,13 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
  * pairs = 12 dwords. */
 #define GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS  12u
 
+/* AMPERE_COMPUTE_B class ID — what SET_OBJECT binds to a subchannel
+ * in the compute-class pushbuffer path. Authoritative per NVIDIA
+ * clc7c0.h and nvgpu's gr_compute_class_v() in hw_gr_ga10b.h.
+ * Exposed in the header so host tests assert against the symbolic
+ * name rather than a bare literal. */
+#define GA10B_AMPERE_COMPUTE_B_CLASS_ID  0xC7C0u
+
 /* Phase 7 pushbuffer builder — compute-class variant (pure logic).
  *
  * Writes GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS dwords to `pb`,
