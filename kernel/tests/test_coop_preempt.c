@@ -64,7 +64,7 @@ static void test_pit_ticks_advances_over_time(void)
      * cpu_count × 5 ticks / 50 ms. Bound scales with cpu_count
      * with a 2× safety margin for yield-loop bursts and the
      * occasional boundary overshoot at the 10 ms period edge. */
-    uint64_t upper = (uint64_t)cpu_count * 10;
+    uint32_t upper = cpu_count * 10;
     if (upper < 20) upper = 20;
     TEST_ASSERT_MESSAGE(delta <= upper,
         "pit_ticks advanced too fast — period math may be wrong");

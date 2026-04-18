@@ -159,7 +159,8 @@ static uint32_t stall_streak[MAX_CPUS];
 static bool     dormancy_reported[MAX_CPUS];
 #endif
 
-void setUp(void) { /* no-op; tearDown does all the sampling */ }
+/* Unity's weak default setUp is fine — all sampling happens in
+ * tearDown, so we don't need to override the entry hook. */
 
 void tearDown(void)
 {

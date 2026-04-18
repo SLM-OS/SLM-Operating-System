@@ -175,7 +175,15 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
      *
      * Not extended to Jetson / QEMU yet — their recovery stories
      * differ and need their own validation. */
-    uart_puts("\nCPU offlining via PSCI...\n");
+    if (current_cpu == 0) {
+        uart_puts("\nCPU 0 faulted — system unable to continue "
+                  "(PSCI-offing the boot CPU means no supervisor "
+                  "can resurrect it).\n");
+    } else {
+        uart_printf("\nCPU %lu offlining via PSCI — remaining CPUs "
+                    "continue (see #216 for auto-resurrection plan).\n",
+                    current_cpu);
+    }
     psci_cpu_off();
 #endif
 

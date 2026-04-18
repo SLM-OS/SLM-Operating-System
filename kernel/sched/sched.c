@@ -461,8 +461,17 @@ static void idle_task_func(void *arg)
          * `ws-diag` (integration tests) and `cpu` (shell) to
          * distinguish "secondary never reached idle" (counter==0)
          * from "secondary is idling but SEV is not reaching it"
-         * (counter frozen after initial iterations). */
-        sched_diag_idle_loops[cpu_id()]++;
+         * (counter frozen after initial iterations).
+         *
+         * NULL guard: on PLATFORM_HAS_NC_MEMORY the array is
+         * pointer-backed and scheduler_init's ncmem_alloc could in
+         * principle return NULL if the 2 MB NC arena is exhausted.
+         * scheduler_init would panic long before we reach this
+         * idle task, but the check is cheap and makes the idle
+         * loop obviously safe. */
+        if (sched_diag_idle_loops) {
+            sched_diag_idle_loops[cpu_id()]++;
+        }
 #if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
         /* Belt-and-braces trace slot at a fixed NC address so early-
          * boot analysis can confirm the counter is wired up even
@@ -1316,6 +1325,15 @@ static struct task *pick_next_task(uint32_t cpu)
  */
 static struct task *sched_try_steal(uint32_t this_cpu)
 {
+    /* #105: per-CPU observability counters. `sched_diag_steal_*` are
+     * incremented on the THIEF's CPU (this_cpu) so a `cpu` shell
+     * dump reports the per-core balance of attempts/hits/stale
+     * discards/empty-victim scans. Count the isolated-CPU early-
+     * out below as an attempt so the shell diag reads honestly —
+     * an isolated CPU that entered sched_try_steal DID attempt,
+     * we just choose not to probe victims. */
+    sched_diag_steal_attempts[this_cpu]++;
+
     /* Isolated cores must never pull work from other CPUs — that's
      * the whole point of isolation. The S5 placement override
      * already refuses to *target* an isolated CPU; this closes the
@@ -1327,12 +1345,6 @@ static struct task *sched_try_steal(uint32_t this_cpu)
     if (sched.isolated_cores & (1U << this_cpu)) {
         return NULL;
     }
-
-    /* #105: per-CPU observability counters. `sched_diag_steal_*` are
-     * incremented on the THIEF's CPU (this_cpu) so a `cpu` shell
-     * dump reports the per-core balance of attempts/hits/stale
-     * discards/empty-victim scans. */
-    sched_diag_steal_attempts[this_cpu]++;
 
     for (uint32_t i = 1; i < cpu_count; i++) {
         uint32_t victim = (this_cpu + i) % cpu_count;

@@ -1085,11 +1085,16 @@ static void test_migrate_stolen_task_no_double_queue(void)
 }
 
 /*
- * Companion test: when the task IS still on the old queue, sched_migrate_task
- * DOES move it. Provides a positive counterpart to
- * test_migrate_stolen_task_no_double_queue.
+ * Companion test to test_migrate_stolen_task_no_double_queue: when
+ * migration succeeds on a still-queued task, task->assigned_cpu
+ * reflects the new target. Physical queue-move is NOT asserted here
+ * — that observation is inherently racy on Pi 5 under cooperative
+ * preemption (CPU 3 wakes, runs nop_entry → task_exit → task leaves
+ * the queue before our walk) and the "stolen" branch test already
+ * covers the queue-state invariant for its specific scenario. This
+ * test's name is deliberately scoped to the assigned_cpu semantic.
  */
-static void test_migrate_ready_task_moves_queues(void)
+static void test_migrate_ready_task_updates_assigned_cpu(void)
 {
     if (cpu_count < 4) {
         TEST_IGNORE_MESSAGE("Requires cpu_count >= 4 for CPU 1 / CPU 3 migration");
@@ -3140,12 +3145,19 @@ static void test_policy_heuristic_distributes_tasks(void)
      * picked CPU 0 — "distribution" collapsed to a single CPU every
      * time. The heuristic's job is to spread work across LOADED
      * queues, so keep all 8 tasks live in the queues while we
-     * record placements and clean up at the end. */
+     * record placements and clean up at the end.
+     *
+     * We record assigned_cpu into cpu_hits[] *inside* the add-loop,
+     * right after scheduler_add_task returns. That read captures
+     * the policy's placement decision directly; a subsequent steal
+     * that moves the task to a different CPU doesn't affect our
+     * observation. No irq_save is needed — it wouldn't help
+     * anyway, since IRQ disable on the running CPU doesn't prevent
+     * other CPUs from stealing. */
     const int N = 8;
     struct task *tasks[8];
     uint32_t cpu_hits[8] = {0};
 
-    irq_flags_t flags = irq_save();
     for (int i = 0; i < N; i++) {
         tasks[i] = task_create("dist", nop_entry, NULL);
         TEST_ASSERT_NOT_NULL(tasks[i]);
@@ -3154,14 +3166,12 @@ static void test_policy_heuristic_distributes_tasks(void)
         if (assigned < 8) cpu_hits[assigned]++;
     }
 
-    /* Tear down — do this under the same IRQ-disabled section so
-     * a work-stealing thief can't pull a task between our read of
-     * assigned_cpu above and the cleanup below. */
+    /* Clean up all tasks before the assertion so a partial test
+     * failure doesn't leak live tasks into run queues. */
     for (int i = 0; i < N; i++) {
         scheduler_remove_task(tasks[i]);
         tasks[i]->id = 0;
     }
-    irq_restore(flags);
 
     int cpus_used = 0;
     for (uint32_t i = 0; i < cpu_count && i < 8; i++) {
@@ -3820,7 +3830,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_set_affinity_updates_field);
     RUN_TEST(test_set_affinity_invalid_cpu);
     RUN_TEST(test_migrate_stolen_task_no_double_queue);
-    RUN_TEST(test_migrate_ready_task_moves_queues);
+    RUN_TEST(test_migrate_ready_task_updates_assigned_cpu);
     RUN_TEST(test_multiple_cores_isolated);
 
     /* Integration tests: Priority ordering */
