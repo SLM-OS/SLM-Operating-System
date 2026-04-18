@@ -17,6 +17,7 @@
 #include "../ai_accel/hailo/hailo.h"
 #include "../ai_accel/hailo/hailo_control.h"
 #include "../ai_accel/hailo/hailo_internal.h"
+#include "../ai_accel/hailo/hailo_infer.h"
 #include "../ai_accel/hailo/hailo_tensor.h"
 #include "../ai_accel/hailo/hailo_vdma.h"
 #include "../ai_accel/hailo/hef_parser.h"
@@ -2787,6 +2788,143 @@ static void test_vdma_submit_rejects_bad_channel(void)
         hailo_vdma_submit_and_wait(HAILO_VDMA_MAX_CHANNELS, 1, 1000));
 }
 
+/* -------------------------------------------------------------------------- */
+/* Phase 5.4: hailo_infer orchestration                                        */
+/* -------------------------------------------------------------------------- */
+
+/* Helper — bring hailo into RUNNING state so hailo_infer_run's
+ * state-guard passes. Reuses control_setup_running from the control
+ * tests above. */
+static void infer_setup_running(void)
+{
+    control_setup_running();
+    /* Ensure mock's auto-advance is on so the channel submits
+     * inside hailo_infer_run complete immediately. */
+    mock_vdma_auto_advance = true;
+}
+
+static void test_infer_rejects_null_args(void)
+{
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(NULL, buf, buf, NULL));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, NULL, buf, NULL));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, NULL, NULL));
+}
+
+static void test_infer_rejects_same_channels(void)
+{
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 3, .output_channel = 3,   /* same = reject */
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_rejects_bad_channel(void)
+{
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = HAILO_VDMA_MAX_CHANNELS,
+        .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_rejects_zero_sizes(void)
+{
+    infer_setup_running();
+    uint8_t buf[512] = {0};
+    struct hailo_infer_config cfg = {
+        .input_bytes = 0,   .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+    cfg.input_bytes = 512;
+    cfg.output_bytes = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_rejects_nodev_when_not_running(void)
+{
+    boot_setup_probed();   /* state=PROBED, not RUNNING */
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_end_to_end_via_auto_advance(void)
+{
+    /* Full pipeline with the mock's auto-advance flag: input and
+     * output submits complete immediately. Returns HAILO_OK with a
+     * measured elapsed time (though very small under QEMU). */
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 1024, .output_bytes = 2048,
+        .input_channel = 0, .output_channel = 1,
+        .input_data_id = 0x01, .output_data_id = 0x02,
+        .input_page_size = 512, .output_page_size = 1024,
+        .timeout_us = 100000,
+    };
+    uint8_t in[1024];
+    uint8_t out[2048];
+    for (size_t i = 0; i < sizeof(in); i++) in[i] = (uint8_t)i;
+    memset(out, 0, sizeof(out));
+
+    uint64_t elapsed = 0xDEADBEEF;
+    int rc = hailo_infer_run(&cfg, in, out, &elapsed);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, rc);
+    /* elapsed is a non-negative duration; under QEMU/auto-advance
+     * it can be 0 since both reads happen in the same tick. */
+    TEST_ASSERT_NOT_EQUAL(0xDEADBEEF, elapsed);
+}
+
+static void test_infer_timeout_without_auto_advance(void)
+{
+    /* Without auto-advance the first submit-and-wait times out. */
+    control_setup_running();
+    mock_vdma_auto_advance = false;
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 500,   /* very short so the test finishes fast */
+    };
+    uint8_t in[512] = {0};
+    uint8_t out[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_infer_run(&cfg, in, out, NULL));
+}
+
 static void test_vdma_alloc_accepts_max_count(void)
 {
     /* Largest legal list: 65536 descriptors = 1 MB, which matches
@@ -3118,6 +3256,16 @@ int test_suite_hailo(void)
     RUN_TEST(test_vdma_submit_and_wait_completes_fast);
     RUN_TEST(test_vdma_submit_and_wait_times_out);
     RUN_TEST(test_vdma_submit_rejects_bad_channel);
+
+    /* Phase 5.4 hailo_infer orchestration */
+    RUN_TEST(test_infer_rejects_null_args);
+    RUN_TEST(test_infer_rejects_same_channels);
+    RUN_TEST(test_infer_rejects_bad_channel);
+    RUN_TEST(test_infer_rejects_zero_sizes);
+    RUN_TEST(test_infer_rejects_nodev_when_not_running);
+    RUN_TEST(test_infer_end_to_end_via_auto_advance);
+    RUN_TEST(test_infer_timeout_without_auto_advance);
+
     RUN_TEST(test_vdma_alloc_accepts_max_count);
 
     return UnityEnd();
