@@ -26,6 +26,7 @@
  */
 
 #include "hailo.h"
+#include "hailo_control.h"
 #include "hailo_internal.h"
 #include "debug.h"
 #include "spinlock.h"
@@ -711,9 +712,19 @@ fail:
 int hailo_get_firmware_version(uint32_t *out_major, uint32_t *out_minor,
                                uint32_t *out_revision)
 {
-    (void)out_major; (void)out_minor; (void)out_revision;
     if (state != HAILO_STATE_RUNNING) return HAILO_ERR_NODEV;
-    /* Phase 5: read back via a control-channel message after the
-     * firmware has booted. */
-    return HAILO_ERR_UNSUPPORTED;
+
+    /* Phase 5.2 tier 1: ask the running firmware via the IDENTIFY
+     * control-channel RPC. HailoRT does exactly the same thing
+     * (hailort/libhailort/src/device_common/control.cpp —
+     * Control::identify). The opcode + wire format are in
+     * hailo_control.h. */
+    struct hailo_control_identify_response resp;
+    int rc = hailo_control_identify(&resp);
+    if (rc != HAILO_OK) return rc;
+
+    if (out_major)    *out_major    = resp.fw_version.major;
+    if (out_minor)    *out_minor    = resp.fw_version.minor;
+    if (out_revision) *out_revision = resp.fw_version.revision;
+    return HAILO_OK;
 }

@@ -404,6 +404,7 @@ set(KERNEL_SOURCES
     # compiled on ARM64; Pi 5 platform shim only on RASPI5; stub
     # elsewhere so `hailo_platform_install` always links)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_core.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_control.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_shell.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_header.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_parser.c>
@@ -442,6 +443,14 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/lib/fdt/fdt.c>
     kernel/src/elf.c
     kernel/src/vfs.c
+
+    # ==========================================================================
+    # Utility libraries
+    # ==========================================================================
+    # MD5 (public domain, Solar Designer). Used by the Hailo firmware
+    # control channel for request/response stamping. NOT a security
+    # primitive.
+    kernel/lib/md5.c
 
     # ==========================================================================
     # Filesystem

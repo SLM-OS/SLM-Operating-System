@@ -4,7 +4,7 @@
 
 **Status:** Phase 0–4 landed in software (no-hardware work). The probe/boot path is compiled in but unexercised against a real HAT+ until the lab unit is available. Tracked in [#253](https://github.com/SLM-OS/SLM-Operating-System/issues/253).
 
-**Phase summary (2026-04-17):**
+**Phase summary (2026-04-18):**
 
 | Phase | State | Notes |
 |---|---|---|
@@ -14,10 +14,11 @@
 | 3 — Hailo driver scaffolding | ✅ done (software) | `kernel/ai_accel/hailo/` + mocked-ops tests; probe/boot/FW-upload need hardware |
 | 4 — nanopb + `.hef` parser | ✅ partial | nanopb vendored (0.4.9.1) + `.hef` outer-header validator + smoke tests; full `ProtoHEFHef` decode deferred until a real `.hef` is available |
 | 5.1 — HEF tensor metadata | ✅ done | I/O pad shapes captured from the first NG |
-| 5.2 — hailo_load + weight DMA | ☐🔗 hardware-gated | blocked on control-channel RPC RE |
-| 5.3 — Inference submit + `hailo infer` | ☐🔗 hardware-gated | requires Phase 5.2 |
-| 6 — AI scheduler Hailo policy | ☐🔗 hardware-gated | requires Phase 5.2/5.3 |
-| 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe` / `hailo fw` shell commands already wired |
+| 5.2 — Control-channel RPC transport | ✅ tier-1 (2026-04-18) | IDENTIFY round-trip verified on pi-5-1 (`firmware 4.23.536870912`); remaining opcodes (WRITE/READ_MEMORY, CONFIG_STREAM) use the same transport |
+| 5.3 — hailo_load + weight DMA | ☐🔗 hardware-gated | builds on Phase 5.2 transport; adds WRITE_MEMORY + CONFIG_STREAM opcodes |
+| 5.4 — Inference submit + `hailo infer` | ☐🔗 hardware-gated | requires Phase 5.3 |
+| 6 — AI scheduler Hailo policy | ☐🔗 hardware-gated | requires Phase 5.3/5.4 |
+| 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe` / `hailo boot` / `hailo fw` shell commands wired, last now returns real firmware version |
 
 ---
 
@@ -259,7 +260,7 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 
 ### Phase 5: Single-Model Inference (2 weeks)
 
-**Phase 5 is split into three sub-tracks; 5.1 lands without hardware, 5.2/5.3 are gated on control-channel reverse engineering + a lab unit.**
+**Phase 5 is split into four sub-tracks; 5.1 lands without hardware, 5.2 completes the control-channel transport on real silicon (IDENTIFY round-trip), and 5.3/5.4 add the remaining opcodes needed for weight upload and inference.**
 
 #### Phase 5.1: HEF tensor metadata ✅ (2026-04-18, software-only)
 
@@ -268,12 +269,19 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - `hailo load <path>` now prints per-pad lines like `in pad[0] "input_layer1" shape=224x224x3 (padded 224x224x4)`.
 - Seven new `test_hef_parser.c` tests cover: pad-with-shape decode, multi-pad ordering, truncation, no-shape pad, NMS-branch skip, second-NG pad isolation, pad-name truncation.
 
-#### Phase 5.2: `hailo_load` with weight DMA ☐🔗 hardware + RPC-reverse-engineering
+#### Phase 5.2: Control-channel RPC transport ✅ tier-1 (2026-04-18, hardware-verified)
+
+- `kernel/ai_accel/hailo/hailo_control.{c,h}` implements the HailoRT control-channel wire protocol — MD5-stamped request/response over BAR4 with a BCS_ISTATUS_HOST SW_IRQ completion. First opcode wired is `IDENTIFY` (empty payload, response carries firmware version + board metadata), enough to prove every piece of the transport is correct.
+- Hardware proof: `hailo fw` on pi-5-1 returns `firmware 4.23.536870912` (0x20000000), matching the boot-log fingerprint across three consecutive runs.
+- Four non-obvious wire-format gotchas surfaced during bring-up and are recorded in `docs/reference/hailo-driver-notes.md` and the `hailo_control_wire_gotchas` auto-memory: big-endian header scalars, IMASK-before-ISTATUS unmask, FW_CONTROL-bit-specific polling, and the 4-byte `parameter_count` gap between response header and body (plus `__packed` on the body struct).
+- Seven QEMU-mocked tests in `test_hailo.c` cover the transport (`test_control_identify_*`) — happy path, null arg, wrong state, timeout-no-response, full BE request wire format, IMASK-once arming, ignore-non-FW_CONTROL-IRQ.
+
+#### Phase 5.3: `hailo_load` with weight DMA ☐🔗 hardware
 
 - Tensor buffer API: allocate input/output tensors in NC DMA memory with platform cache sync handled by the driver.
-- Configure-channel RPC: the `.hef`'s CCW (config-channel-words) blob is uploaded to the device via a control-channel command — the command codes live in HailoRT userspace, not the kernel driver, and need reverse engineering.
+- Configure-channel RPC: the `.hef`'s CCW (config-channel-words) blob is uploaded to the device via `WRITE_MEMORY` + `CONFIG_STREAM` control opcodes. Uses the Phase 5.2 transport directly; adding these is a pack-request / parse-response exercise, not another round of wire-protocol RE.
 
-#### Phase 5.3: `hailo infer` ☐🔗 hardware
+#### Phase 5.4: `hailo infer` ☐🔗 hardware
 
 - Inference submit: post descriptors, ring doorbell, wait on MSI completion (or polled CNTPCT timeout fallback — see #247 for why polling is a valid long-term fallback on Pi 5).
 - `hailo infer <model> <input-tensor>` shell command; output tensor dumped as hex or post-processed per a known model's output layout.
