@@ -6,6 +6,10 @@
 # PEP 668-protected, so a user-wide `pip install` is blocked). The
 # venv lives under build/ and is gitignored.
 #
+# Prerequisite: `protoc` on PATH. Install with:
+#     sudo apt-get install protobuf-compiler
+# (nanopb_generator shells out to protoc to parse the .proto).
+#
 # Usage: ./scripts/tools/regen-hef-proto.sh
 #
 # Commits the regenerated hef.pb.c and hef.pb.h — those files are
@@ -24,6 +28,12 @@ VENV="build/nanopb-venv"
 
 if [[ ! -f "$PROTO" ]]; then
     echo "error: $PROTO not found (run from repo root?)" >&2
+    exit 1
+fi
+
+if ! command -v protoc >/dev/null 2>&1; then
+    echo "error: protoc not on PATH. Install with:" >&2
+    echo "    sudo apt-get install protobuf-compiler" >&2
     exit 1
 fi
 
