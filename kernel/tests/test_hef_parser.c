@@ -634,9 +634,11 @@ static void test_decode_tensor_shape_ignores_unknown_field(void)
 /*
  * Build a ProtoHEFHef blob whose single tensor_shape sub-message has
  * `shape_bytes` as its body, wrapped in the NG/Op/Pad chain. Shared
- * harness for the three unknown-wire-type skip tests below.
+ * harness for the three unknown-wire-type skip tests below. Callers
+ * pass a buffer sized >= 256 B — the intermediate `ng[256]` bound
+ * is the effective ceiling on the blob we emit.
  */
-static size_t wrap_tensor_shape_body(uint8_t *out, size_t cap,
+static size_t wrap_tensor_shape_body(uint8_t *out,
                                      const uint8_t *shape_bytes,
                                      size_t shape_len)
 {
@@ -654,7 +656,6 @@ static size_t wrap_tensor_shape_body(uint8_t *out, size_t cap,
     emit_lenprefix(ng, &ng_len, 8, op, op_len);    /* ops */
 
     size_t olen = 0;
-    (void)cap;
     emit_lenprefix(out, &olen, 2, ng, ng_len);     /* network_groups */
     return olen;
 }
@@ -663,17 +664,17 @@ static void test_decode_tensor_shape_skips_fixed64_unknown_field(void)
 {
     /* Future tag=7 field with wire_type=1 (fixed64, 8 B payload)
      * sandwiched between known height and features. Both knowns
-     * must survive the skip. */
+     * must survive the skip. Payload bytes are all 0xAA so a casual
+     * reader doesn't mistake any one of them for a valid proto tag. */
     uint8_t shape[32];
     size_t  slen = 0;
     emit_varint_field(shape, &slen, 1, 64);            /* height */
     emit_tag(shape, &slen, /*field*/ 7, /*wire_type*/ 1);
-    /* 8 bytes of arbitrary payload. */
-    for (int i = 0; i < 8; i++) shape[slen++] = (uint8_t)(0x11 * i);
+    for (int i = 0; i < 8; i++) shape[slen++] = 0xAA;
     emit_varint_field(shape, &slen, 5, 3);             /* features */
 
     uint8_t blob[256];
-    size_t  olen = wrap_tensor_shape_body(blob, sizeof(blob), shape, slen);
+    size_t  olen = wrap_tensor_shape_body(blob, shape, slen);
 
     struct hef_info info;
     TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
@@ -699,7 +700,7 @@ static void test_decode_tensor_shape_skips_fixed32_unknown_field(void)
     emit_varint_field(shape, &slen, 6, 8);             /* padded_features */
 
     uint8_t blob[256];
-    size_t  olen = wrap_tensor_shape_body(blob, sizeof(blob), shape, slen);
+    size_t  olen = wrap_tensor_shape_body(blob, shape, slen);
 
     struct hef_info info;
     TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
@@ -711,22 +712,35 @@ static void test_decode_tensor_shape_skips_fixed32_unknown_field(void)
 
 static void test_decode_tensor_shape_rejects_group_wire_type(void)
 {
-    /* Wire type 3 is the deprecated proto2 "start group" marker. No
-     * modern Hailo HEF should use it; the decoder must reject the
-     * message rather than try to interpret groups. */
-    uint8_t shape[16];
-    size_t  slen = 0;
-    emit_varint_field(shape, &slen, 1, 42);            /* height */
-    emit_tag(shape, &slen, /*field*/ 7, /*wire_type*/ 3);
-    /* No payload needed — the decoder rejects as soon as it sees
-     * the wire type. */
-
-    uint8_t blob[256];
-    size_t  olen = wrap_tensor_shape_body(blob, sizeof(blob), shape, slen);
-
+    /* Wire types 3 and 4 are the deprecated proto2 "start group" /
+     * "end group" markers. No modern Hailo HEF should use either;
+     * the decoder must reject the message rather than try to
+     * interpret groups. Test BOTH to guard the whole reject arm. */
     struct hef_info info;
-    TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE,
-                          hef_parse_body(blob, olen, &info));
+
+    /* Wire type 3 (start group). */
+    {
+        uint8_t shape[16];
+        size_t  slen = 0;
+        emit_varint_field(shape, &slen, 1, 42);        /* height */
+        emit_tag(shape, &slen, /*field*/ 7, /*wire_type*/ 3);
+        uint8_t blob[256];
+        size_t  olen = wrap_tensor_shape_body(blob, shape, slen);
+        TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE,
+                              hef_parse_body(blob, olen, &info));
+    }
+
+    /* Wire type 4 (end group). */
+    {
+        uint8_t shape[16];
+        size_t  slen = 0;
+        emit_varint_field(shape, &slen, 1, 42);
+        emit_tag(shape, &slen, 7, 4);
+        uint8_t blob[256];
+        size_t  olen = wrap_tensor_shape_body(blob, shape, slen);
+        TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE,
+                              hef_parse_body(blob, olen, &info));
+    }
 }
 
 static void test_decode_tensor_shape_skips_non_varint_unknown_field(void)
