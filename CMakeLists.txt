@@ -494,6 +494,7 @@ set(KERNEL_SOURCES
     # is #if'd behind PLATFORM_JETSON_ORIN_NANO so non-Jetson
     # platforms link a harmless stub.
     kernel/drivers/usb/xhci/xhci.c
+    kernel/drivers/usb/xhci/xhci_ring.c
     # Jetson EL1 smoke test (one-shot diagnostic) — JETSON_EL1_SMOKE
     $<$<AND:$<BOOL:${JETSON_EL1_SMOKE}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/tests/jetson_el1_smoke.S>
     # Platform-independent networking stack
