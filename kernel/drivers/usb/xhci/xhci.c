@@ -166,6 +166,33 @@ static uint32_t bar2_r32(uint32_t off) { return r32(xhci_bar2_base, off); }
 static void     bar2_w32(uint32_t off, uint32_t v) { w32(xhci_bar2_base, off, v); }
 
 /* -------------------------------------------------------------------------- */
+/* Polling utility (used by Tegra-section Falcon probes + halt/reset below)    */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Spin-poll a register bit until (val & mask) == expected or the
+ * timeout expires. Uses CNTPCT-based wall-clock so a locked-up
+ * controller cannot wedge the boot path.
+ *
+ * Returns 0 on success, -1 on timeout.
+ */
+static int poll_reg32(volatile uint8_t *base, uint32_t off,
+                      uint32_t mask, uint32_t expected,
+                      uint32_t timeout_ms)
+{
+    uint64_t start = timer_get_count();
+    uint64_t freq  = timer_get_frequency();
+    uint64_t ticks = (freq * timeout_ms) / 1000;
+
+    for (;;) {
+        if ((r32(base, off) & mask) == expected)
+            return 0;
+        if (timer_get_count() - start > ticks)
+            return -1;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Tegra234 FPCI wrapper programming (tegra_xusb_config equivalent)            */
 /* -------------------------------------------------------------------------- */
 
@@ -264,12 +291,6 @@ static int tegra_xusb_config(void)
 /* -------------------------------------------------------------------------- */
 /* Tegra234 IFR bringup — Falcon liveness probes                               */
 /* -------------------------------------------------------------------------- */
-
-/* Forward declaration — poll_reg32 is defined in the Halt + reset section
- * below; tegra_xusb_wait_for_falcon uses it. */
-static int poll_reg32(volatile uint8_t *base, uint32_t off,
-                      uint32_t mask, uint32_t expected,
-                      uint32_t timeout_ms);
 
 /*
  * CSB paging window (Tegra234, via BAR2). Port of Linux's
@@ -383,6 +404,17 @@ static int tegra_xusb_wait_for_falcon(void)
 __attribute__((unused))
 static uint32_t tegra_xusb_read_firmware_header(uint32_t byte_offset)
 {
+    /*
+     * Bounds check mirroring linux-xhci-tegra.c:1104 — the IOCTL
+     * window only decodes header offsets within the known struct,
+     * and Linux returns 0 for OOB requests rather than issuing the
+     * read. Match that contract so the unused-function hazard
+     * doesn't silently turn into an unbounded-offset hazard when
+     * someone re-enables this path for Path 1 / Path 3 of §10.
+     */
+    if (byte_offset >= XUSB_FW_HDR_SIZE)
+        return 0;
+
     uint32_t cmd = (uint32_t)XUSB_FW_IOCTL_CFGTBL_READ
                    << XUSB_FW_IOCTL_TYPE_SHIFT;
     cmd |= byte_offset;
@@ -402,29 +434,6 @@ static uint32_t tegra_xusb_read_firmware_header(uint32_t byte_offset)
 /* -------------------------------------------------------------------------- */
 /* Halt + reset                                                                */
 /* -------------------------------------------------------------------------- */
-
-/*
- * Spin-poll a register bit until (val & mask) == expected or the
- * timeout expires. Uses CNTPCT-based wall-clock so a locked-up
- * controller cannot wedge the boot path.
- *
- * Returns 0 on success, -1 on timeout.
- */
-static int poll_reg32(volatile uint8_t *base, uint32_t off,
-                      uint32_t mask, uint32_t expected,
-                      uint32_t timeout_ms)
-{
-    uint64_t start = timer_get_count();
-    uint64_t freq  = timer_get_frequency();
-    uint64_t ticks = (freq * timeout_ms) / 1000;
-
-    for (;;) {
-        if ((r32(base, off) & mask) == expected)
-            return 0;
-        if (timer_get_count() - start > ticks)
-            return -1;
-    }
-}
 
 static int xhci_halt(void)
 {
@@ -1065,6 +1074,13 @@ bool xhci_dump_info(void)
                 (unsigned)fpci_r32(XUSB_CFG_1),
                 (unsigned)fpci_r32(XUSB_CFG_4),
                 (unsigned)fpci_r32(XUSB_CFG_7));
+    /*
+     * BAR2 reads below are safe — the RAS hazard documented in the
+     * big CAUTION block in xhci_init is on *writes* to BAR2+0x1000
+     * (XUSB_BAR2_ARU_FW_SCRATCH), not reads from the response
+     * register at BAR2+0x01c or from BAR2[0]. Three post-kexec
+     * deploys on jetson-nano-1 confirmed these reads are non-RAS.
+     */
     uart_printf("  BAR2 @ %p [0]=0x%08x FW_SCRATCH_DATA0=0x%08x\r\n",
                 xhci_bar2_base,
                 (unsigned)bar2_r32(0),

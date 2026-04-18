@@ -838,10 +838,12 @@ xusb-stream DMA.
 # Candidates — what could call a platform-driver function outside .shutdown
 ssh root@192.168.4.20 'grep -E "(reboot_notifier|syscore|pm_power_off|sdei)" /proc/kallsyms | grep -i smmu'
 
-# Find static registrations via source — L4T 5.15-tegra kernel
-# source is in /usr/src/linux-headers-5.15.148-tegra-ubuntu22.04_aarch64/
-# on the Jetson; run against that tree:
-ssh root@192.168.4.20 'find /usr/src/linux-headers-5.15.148-tegra-ubuntu22.04_aarch64 -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null | xargs grep -l "arm_smmu_device_shutdown\|\"disabling translation\"" 2>/dev/null'
+# Find static registrations via source — L4T kernel headers live
+# somewhere under /usr/src/. The exact directory name is version-
+# dependent, so look it up first:
+ssh root@192.168.4.20 'ls /usr/src/ | grep linux-headers'
+# Then (substitute the actual path from the ls output):
+ssh root@192.168.4.20 'KDIR=$(ls -d /usr/src/linux-headers-*tegra*/ | head -1); find "$KDIR" -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null | xargs grep -l "arm_smmu_device_shutdown\|\"disabling translation\"" 2>/dev/null'
 
 # Binary scan fallback: find addresses that contain the shutdown function
 # pointer somewhere OTHER than the driver struct

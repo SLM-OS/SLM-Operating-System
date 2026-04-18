@@ -129,4 +129,12 @@ static inline uint32_t xusb_csb_page_offset(uint32_t addr)
  */
 #define XUSB_FW_HDR_FWIMG_CREATED_TIME_OFF  44U
 
+/*
+ * Total size of struct tegra_xusb_fw_header. Used as the upper bound
+ * for the FW_SCRATCH IOCTL byte offset — Linux rejects offsets ≥ this
+ * value at linux-xhci-tegra.c:1104. The struct's explicit `padding[139]`
+ * field makes this exactly 256 bytes.
+ */
+#define XUSB_FW_HDR_SIZE                    256U
+
 #endif /* XHCI_TEGRA_H */

@@ -90,7 +90,7 @@ static void test_csb_page_math_roundtrip_boundaries(void)
      *                offset=0x1ff (mask). Used to verify the mask
      *                constants are right.
      */
-    uint32_t test_vals[] = {0x1ff, 0x200, 0x400, 0x100000, 0x10181c, 0xffffffff};
+    uint32_t test_vals[] = {0x1ff, 0x200, 0x400, 0x100000, 0x101a04, 0x10181c, 0xffffffff};
     for (unsigned i = 0; i < sizeof(test_vals) / sizeof(test_vals[0]); i++) {
         uint32_t addr = test_vals[i];
         uint32_t page = xusb_csb_page_select(addr);
@@ -219,10 +219,14 @@ static void test_falcon_csb_offsets_match_linux(void)
 static void test_falcon_cpuctl_bits(void)
 {
     /*
-     * FALC_CPUCTL bit positions. STARTCPU (bit 1) is the one Path-3
-     * in §10.5 might want to write via CSB if the SMMU direction
-     * doesn't pan out. Pin the bit positions so a CSB write doesn't
-     * land on a reserved bit.
+     * FALC_CPUCTL bit positions per xHCI Falcon ISA: STARTCPU
+     * (bit 1) is the software-asserted "begin execution" bit;
+     * STATE_HALTED (bit 4) means the Falcon hit a HALT instruction;
+     * STATE_STOPPED (bit 5) means the Falcon is in the STOPPED
+     * state. Pinned because any future experiment that writes
+     * CPUCTL via CSB (e.g. if SMMU work in §10 doesn't pan out
+     * and Falcon re-kick becomes interesting) must not land on a
+     * reserved bit.
      */
     TEST_ASSERT_EQUAL_UINT32(1u << 1, XUSB_FALC_CPUCTL_STARTCPU);
     TEST_ASSERT_EQUAL_UINT32(1u << 4, XUSB_FALC_CPUCTL_STATE_HALTED);
