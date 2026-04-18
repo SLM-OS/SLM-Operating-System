@@ -2382,6 +2382,109 @@ static void test_kprintf_mixed(void)
 }
 
 /* ============================================================================
+ * Hailo shell command tests (PLATFORM_X86_64 omits the Hailo driver,
+ * so these are gated off that build).
+ *
+ * The Hailo command set is registered at boot via
+ * hailo_register_shell_commands(), called from shell_init(). The
+ * test harness doesn't spin up shell_init, so the tests below call
+ * the registrar directly — once per test-suite run. Duplicate
+ * registration is a soft append; shell_execute's find_command
+ * returns the first match either way.
+ *
+ * All tests assert return code 0 (command handled, didn't fall
+ * through to "unknown command"). Command output goes to UART and
+ * is not captured here — the corresponding hailo_core paths have
+ * their own unit tests in test_hailo.c / test_hef_parser.c that
+ * verify correctness at the function level.
+ */
+#if !defined(PLATFORM_X86_64)
+
+static bool hailo_cmds_registered;
+
+static void ensure_hailo_registered(void)
+{
+    if (hailo_cmds_registered) return;
+    extern void hailo_register_shell_commands(void);
+    hailo_register_shell_commands();
+    hailo_cmds_registered = true;
+}
+
+static void test_shell_cmd_hailo_status(void)
+{
+    ensure_hailo_registered();
+    int ret = shell_execute("hailo");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_hailo_probe(void)
+{
+    ensure_hailo_registered();
+    /* In the test kernel hailo_platform is never installed, so
+     * hailo_probe returns HAILO_ERR_NODEV and the shell reports
+     * "no device". The command handler still returns 0 — the dispatch
+     * worked, the device just isn't there. */
+    int ret = shell_execute("hailo probe");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_hailo_boot_no_fw(void)
+{
+    ensure_hailo_registered();
+    /* No HAILO_FW_BLOB means the weak hailo_fw_* externs are NULL
+     * and the handler prints "firmware not embedded", returning 0. */
+    int ret = shell_execute("hailo boot");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_hailo_load_no_args(void)
+{
+    ensure_hailo_registered();
+    /* Missing <vfs-path> → usage printed; still returns 0. */
+    int ret = shell_execute("hailo load");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_hailo_load_nonexistent(void)
+{
+    ensure_hailo_registered();
+    /* VFS stat fails; shell prints "stat failed"; command returns 0. */
+    int ret = shell_execute("hailo load /mnt/files/nosuch.hef");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_hailo_load_too_small(void)
+{
+    ensure_hailo_registered();
+    /* Create a controlled 4-byte file — smaller than the 12-byte HEF
+     * outer-header minimum. Using a known-size fixture rather than
+     * relying on whatever /mnt/files/preload.conf happens to be
+     * guards against a future preload.conf ≥ 12 bytes silently
+     * changing this test's meaning. */
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(
+        "/mnt/files", &subpath);
+    TEST_ASSERT_NOT_NULL(mnt);
+    int f = littlefs_file_open(mnt, "/hailo_too_small.bin",
+                               LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(f >= 0);
+    const uint8_t tiny[4] = { 0, 0, 0, 0 };
+    TEST_ASSERT_TRUE(littlefs_file_write(mnt, f, tiny, sizeof(tiny)) >= 0);
+    littlefs_file_close(mnt, f);
+
+    int ret = shell_execute("hailo load /mnt/files/hailo_too_small.bin");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Clean up so repeated runs of the harness don't accumulate the
+     * fixture (LittleFS is RAM-backed and cleared on boot, so the
+     * leak is bounded to one test-kernel run, but tightening the
+     * cleanup keeps boot-test loops clean). */
+    littlefs_remove(mnt, "/hailo_too_small.bin");
+}
+
+#endif /* !X86_64 */
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -2414,6 +2517,16 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_model_preload_wait);
     RUN_TEST(test_shell_cmd_model_preload_wait_not_inflight);
     RUN_TEST(test_boot_preload_conf_exists);
+
+#if !defined(PLATFORM_X86_64)
+    /* Hailo driver shell surface (dispatch + error paths) */
+    RUN_TEST(test_shell_cmd_hailo_status);
+    RUN_TEST(test_shell_cmd_hailo_probe);
+    RUN_TEST(test_shell_cmd_hailo_boot_no_fw);
+    RUN_TEST(test_shell_cmd_hailo_load_no_args);
+    RUN_TEST(test_shell_cmd_hailo_load_nonexistent);
+    RUN_TEST(test_shell_cmd_hailo_load_too_small);
+#endif
 
     /* Benchmark command */
     RUN_TEST(test_shell_cmd_bench_no_args);

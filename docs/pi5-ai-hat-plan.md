@@ -117,7 +117,7 @@ Each phase is self-contained and deliverable. Later phases assume earlier ones l
 - ☐🔗 Confirm AI HAT+ link trains under stock Linux — hardware-gated, deferred to when the Pi 5 + HAT+ lab unit is available.
 
 **Key findings that reshape later phases:**
-1. **`.hef` body is a protobuf blob** (`hef_proto_size` bytes after the header), not a flat binary. Follow-up research (2026-04-17) confirmed `hef.proto` is published under MIT license in `hailo-ai/hailort` as a single self-contained file (proto3, 1059 LOC, 87 messages, no imports, no `map`/`Any`/extensions). Saved to `docs/reference/hailo-hef.proto`. **Parse in-kernel with [nanopb](https://github.com/nanopb/nanopb)** (zlib license, ~1500 LOC portable C, used in Zephyr RTOS). The large weight payloads are in the CCWS block that follows the proto body, not in the proto itself — so nanopb only parses metadata (layer shapes, I/O directions, ops config), keeping memory pressure low. ~45 `repeated`/`bytes` fields need `pb_callback_t` glue backed by PMM. Sidecar pre-parse has been ruled out. If nanopb's generated output trips `-std=c23 -Wpedantic`, consider an upstream contribution.
+1. **`.hef` body is a protobuf blob** (`hef_proto_size` bytes after the header), not a flat binary. Follow-up research (2026-04-17) confirmed `hef.proto` is published under MIT license in `hailo-ai/hailort` as a single self-contained file (proto3, 1059 LOC, 87 messages, no imports, no `map`/`Any`/extensions). Originally cached at `docs/reference/hailo-hef.proto`; moved to `kernel/ai_accel/hailo/hef.proto` as part of Phase 4 since it's now a first-class build input (not a cached external reference). **Parse in-kernel with [nanopb](https://github.com/nanopb/nanopb)** (zlib license, ~1500 LOC portable C, used in Zephyr RTOS). The large weight payloads are in the CCWS block that follows the proto body, not in the proto itself — so nanopb only parses metadata (layer shapes, I/O directions, ops config), keeping memory pressure low. ~45 `repeated`/`bytes` fields need `pb_callback_t` glue backed by PMM. Sidecar pre-parse has been ruled out. If nanopb's generated output trips `-std=c23 -Wpedantic`, consider an upstream contribution.
 2. **Device IDs:** vendor `0x1E60`, Hailo-8 / Hailo-8L both enumerate as `0x2864` (SKU differentiation happens in firmware config, not PCI).
 3. **Firmware upload is not VDMA on Hailo-8.** It uses the ATR[0] address translation window plus direct MMIO writes to BAR4. `hailo-driver-notes.md` §4 documents the ~5 s boot-status + ATR[1] poll sequence.
 4. **Plain MSI, not MSI-X.** Driver calls `pci_enable_msi(pdev)` with one vector. Phase 1 API must expose `pcie_alloc_msi()` in addition to the originally planned `pcie_alloc_msix()`.
@@ -213,21 +213,28 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - Control-channel RPC (`hailo_get_firmware_version` etc.).
 - MSI routing validation end-to-end.
 
-### Phase 4: Firmware Load & Model Load ✅ partial (2026-04-17)
+### Phase 4: Firmware Load & Model Load ✅ (2026-04-18)
 
 **Revised 2026-04-17 from Phase 0 findings.** The kernel parses `.hef` directly using nanopb; no workstation sidecar.
 
 **Delivered (software):**
 - `kernel/lib/nanopb/` — vendored nanopb 0.4.9.1 (zlib license, ~4500 LOC). `pb_syshdr.h` provides freestanding glue (memcpy/memset/strlen from `kernel/src/string.c`; INT_MAX/CHAR_BIT constants). Builds as a separate static CMake library with `-DPB_SYSTEM_HEADER="pb_syshdr.h"`. **Clean compile under `-std=c23 -Wpedantic -Werror` on the first try** — no upstream PR needed.
 - `kernel/ai_accel/hailo/hef_header.{c,h}` — flat `.hef` outer-header validator. Parses magic (`0x01484546`), version (v0..v3), proto_size, and the per-version trailer (MD5 for v0, CRC + CCWS for v1/v2/v3). All fields big-endian; explicit byte-shuffle avoids host-byte-order dependency. Returns `hef_outer_header` with proto and CCWS offsets.
-- `kernel/tests/test_hef.c` — 10 tests (8 HEF-header cases + 2 nanopb smoke tests proving the runtime links against our freestanding glue).
+- `kernel/ai_accel/hailo/hef.proto` + `hef.options` + `hef.pb.{c,h}` — the upstream Hailo protobuf schema (87 messages, 69 repeated/bytes/string fields) generated via nanopb into the kernel. `* type:FT_CALLBACK` in the options file routes every variable-length field through pb_callback_t so the kernel image doesn't carry 6 MB of never-used bss per repeated field. Regenerated on schema change via `scripts/tools/regen-hef-proto.sh` (sets up a throwaway venv at `build/nanopb-venv/`).
+- `kernel/ai_accel/hailo/hef_parser.{c,h}` — `hef_parse_body(blob, size, out)` drives nanopb's `pb_decode` with callbacks wired only on the fields the loader consumes today: `header.hw_arch`, `header.sdk_version_str`, and `network_groups` (count + first name). Unused fields fall through to nanopb's default skip. Extracts into a 128-byte `struct hef_info` — no dynamic allocations inside the parser.
+- `kernel/ai_accel/hailo/hailo_shell.c` — `hailo load <vfs-path>` subcommand. Two-pass read from LittleFS: stage 1 pulls the outer header into a 64-byte stack buffer, stage 2 PMM-allocates a page-aligned buffer for the proto body (typical size 1-3 MB for a compiled yolov5s), runs the parser, prints extracted metadata, frees the buffer.
+- `kernel/tests/test_hef_parser.c` — 7 tests against synthetic protobuf wire-format blobs: header-field decode, empty proto, proto without a header, multi-network-group counting, string truncation, malformed-varint rejection, null-arg rejection.
+- `scripts/tools/fetch-hef-fixtures.sh` — downloads `yolov5s.hef` (and optionally others) from the Hailo Model Zoo's public S3 bucket (`hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v2.18.0/hailo8/`). MIT-licensed per Hailo's repo. Fixtures land in `kernel/tests/fixtures/` which `.gitignore`s `*.hef` so the repo stays small.
 
-**Hardware-gated / deferred follow-ups:**
-- Generating `hef.pb.c/h` from `hef.proto` via the nanopb Python generator (deferred until a real `.hef` is available to validate the generated types against).
-- Full `ProtoHEFHef` decode with `pb_callback_t` glue backed by PMM for the ~45 variable-size fields.
-- Firmware `.incbin` for `hailo8_fw.bin` (blob not yet in the repo; trivial to add as a CMake option).
-- `hailo_boot()` implementation (the protocol is commented in `hailo_core.c`'s Phase-4 stub).
-- `hailo load <vfs-path>` shell command.
+**Verified:**
+- QEMU tests pass (all 7 hef_parser tests + existing 10 hef_header tests).
+- Pi 5 boot: `hailo load /mnt/files/nosuch.hef` reports "stat failed"; `hailo load` (no args) prints usage. Confirms VFS + PMM + parser plumbing are wired end-to-end on hardware.
+- All four platforms build clean (QEMU ARM64, RASPI5, JETSON_ORIN_NANO, X86_64).
+
+**Hardware-gated / deferred follow-ups (Phase 5):**
+- Full end-to-end test: fetch `yolov5s.hef`, upload to the Pi 5 FAT32 boot partition or grow the LittleFS ramdisk, run `hailo load` against the real file, compare extracted metadata against Hailo's published model card.
+- Deeper field extraction as the inference path needs it (ops, layers, weight ranges) — attach more pb_callback_t handlers in `hef_parser.c`.
+- Firmware `.incbin` for `hailo8_fw.bin` — wired via CMake `HAILO_FW_BLOB=path` option (Phase 3); still waiting for the blob itself.
 
 **Deliverables:**
 - **nanopb integration** under `kernel/lib/nanopb/`:

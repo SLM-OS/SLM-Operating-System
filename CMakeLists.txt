@@ -406,6 +406,7 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_core.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_shell.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_header.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_parser.c>
     $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/ai_accel/hailo/hailo_pi5.c>
     $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},X86_64>>,$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>>:kernel/ai_accel/hailo/hailo_stub.c>
 
@@ -521,6 +522,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hailo.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hef.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hef_parser.c>
     kernel/tests/test_littlefs.c
     kernel/tests/test_x86_boot.c
     kernel/tests/test_elf.c
@@ -808,12 +810,19 @@ target_link_libraries(slmos.elf PRIVATE lua)
 # ARM64 only for now: x86-64 has its own GPU driver path and doesn't
 # need .hef parsing. Enable when a consumer appears.
 if(NOT PLATFORM STREQUAL "X86_64")
+    # hef.pb.c is the nanopb-generated schema for hef.proto; it links
+    # into the same static library as the runtime so it picks up the
+    # relaxed-warnings compile options (generated code uses patterns
+    # SLM-OS's -Werror would otherwise reject).
     add_library(nanopb STATIC
         kernel/lib/nanopb/pb_common.c
         kernel/lib/nanopb/pb_decode.c
         kernel/lib/nanopb/pb_encode.c
+        kernel/ai_accel/hailo/hef.pb.c
     )
-    target_include_directories(nanopb PUBLIC kernel/lib/nanopb)
+    target_include_directories(nanopb PUBLIC
+        kernel/lib/nanopb
+        kernel/ai_accel/hailo)
     target_compile_options(nanopb PRIVATE
         -ffreestanding
         -nostdlib
@@ -830,7 +839,9 @@ if(NOT PLATFORM STREQUAL "X86_64")
         $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:PLATFORM_JETSON_ORIN_NANO=1>
     )
     target_link_libraries(slmos.elf PRIVATE nanopb)
-    target_include_directories(slmos.elf PRIVATE kernel/lib/nanopb)
+    target_include_directories(slmos.elf PRIVATE
+        kernel/lib/nanopb
+        kernel/ai_accel/hailo)
     target_compile_definitions(slmos.elf PRIVATE
         "PB_SYSTEM_HEADER=\"pb_syshdr.h\""
     )

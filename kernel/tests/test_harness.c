@@ -120,6 +120,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_inference_device();
     total_failures += test_suite_hailo();
     total_failures += test_suite_hef();
+    total_failures += test_suite_hef_parser();
 #endif
     total_failures += test_suite_littlefs();
     total_failures += test_suite_x86_boot();
