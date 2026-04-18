@@ -7,6 +7,31 @@
  *
  * Only built on Jetson; every other platform sees this file compiled
  * out by the #if at the top (no usb_hcd registration happens).
+ *
+ * File structure (~620 lines in the Jetson-gated body):
+ *   1. Base pointers + static state
+ *   2. Register access helpers (r8/r16/r32/w32)
+ *   3. Halt + reset sequence
+ *   4. Capability parse
+ *   5. Scratchpad + DCBAA + ERST allocation (NC memory)
+ *   6. MMIO register programming (xhci_program_registers)
+ *   7. Controller start + NO_OP round-trip
+ *   8. Public API (xhci_init, xhci_dump_info, xhci_get_caps)
+ *
+ * Natural split points if this grows past ~1000 lines (Steps 5-7
+ * add port scan + ENABLE_SLOT/ADDRESS_DEVICE + transfer TRBs):
+ *   - xhci_mem.c: sections 5
+ *   - xhci_regs.c: sections 2, 3, 6
+ *   - xhci_cmd.c: section 7 + future transfer path
+ *   - xhci.c: sections 1, 4, 8
+ *
+ * Split is deliberately DEFERRED while Phase 3A remains mothballed
+ * (#285). Splitting ~620 lines of unchanging code for no behaviour
+ * change is churn; the structure is small enough to navigate with
+ * section banners; and if #266 is revived via #286, the seams above
+ * are already visible for whoever picks it up. Linux, U-Boot, and
+ * Haiku all keep their xHCI core driver as a single TU at similar
+ * size, so the "single file" shape is also the idiomatic one.
  */
 
 #include "platform.h"
