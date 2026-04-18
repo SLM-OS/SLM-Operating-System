@@ -598,6 +598,67 @@ shutdown sequence itself leaving the CPU in a state that can't run
 our code. Not a problem we can fix from userspace without
 debugging kexec-tools/kernel source with instrumentation.
 
+**2026-04-17 late-evening update — SILENCE BROKEN.**
+
+Adding `--console-serial --serial=0x3f8 --serial-baud=115200` to the
+`kexec --load` command was the missing piece. With it, kexec
+purgatory prints `"I'm in purgatory"` over COM1, then **control
+reaches our kernel**:
+
+```
+I'm in purgatory
+KEX
+========================================
+  SLM-OS v0.1.0
+  Small Language Model Operating System
+========================================
+[INFO] Boot successful
+[INFO] Running in Ring 0 on x86-64
+...
+[VMM] Extended identity mapping: 20 GB (20 PD pages)
+[INFO] PMM initialized (buddy allocator)
+[INFO] Initializing GIC...
+[LAPIC] Initialized at 0xfee00000 (ID=255, version=0xff)
+[IOAPIC] Initialized at 0xfec00000 (ID=2, 120 entries)
+[INFO] Initializing timer...
+```
+
+then hangs (no shell prompt, no response to keystroke). That's a
+*separate* post-handoff bug — the LAPIC readback of `ID=255,
+version=0xff` is the telltale sign that the APIC MSR / MMIO state
+inherited from Linux doesn't match what SLM-OS's `lapic.c`
+expects. Timer init hangs on a follow-on poll. Debuggable in a
+future session; independent of the kexec path itself.
+
+**Root cause of the earlier silence:** `--console-serial` is the
+kexec-tools flag that selects a purgatory build with UART setup
+code linked in. Without it, purgatory skips UART initialization,
+and on this host the UART ends up in a state where our
+post-handoff kernel's `out %al, %dx` to the THR never transmits —
+either because the FIFO isn't enabled, the MCR hasn't asserted
+OUT2, or an LPC-level gate is closed. Our kernel's UART reinit
+writes the right values but on an unusable controller.
+
+**Helper script now enables the flag by default.** `kexec -l` is
+invoked as `kexec -c --load --console-serial --serial=0x3f8
+--serial-baud=115200 --type=multiboot2-x86 ...` for mb2, and the
+same without `-c` for bzImage. See `scripts/x86-kexec-slmos.sh`.
+
+**What works today (2026-04-17):**
+
+- mb2 kexec path: `make kexec-deploy PLATFORM=X86_64` boots SLM-OS
+  via kexec → reaches VMM/PMM/LAPIC/IOAPIC/timer init.
+- bzImage path: `make kexec-deploy PLATFORM=X86_64 KEXEC_HOST=...`
+  with `--mode bzimage` also boots, same init depth.
+
+**What's blocking shell/GPU access:**
+
+- SLM-OS's timer / APIC init doesn't complete cleanly when the
+  LAPIC state is whatever kexec's Linux-shutdown path leaves it
+  in. Fix candidates: explicitly reset LAPIC MSR before reading;
+  re-init APIC_BASE MSR; mask LINT0/LINT1 first. This is the
+  next blocker on the kexec path.
+
 **Remaining next-session paths:**
 
 The kexec-tools handoff is not tractable within capstone scope.
