@@ -174,6 +174,16 @@ struct hailo_control_identify_response {
     uint32_t product_number_length;
     uint8_t  product_number[HAILO_CONTROL_MAX_PRODUCT_NAME_LENGTH];
 } __attribute__((packed));
+/*
+ * 162 bytes is the wire size firmware actually sends. Without
+ * __packed, trailing padding after product_number[42] grows the
+ * struct to 164 and the length check in hailo_control_identify
+ * rejects a valid response as truncated. This static_assert makes
+ * removing the __packed attribute a compile-time error.
+ */
+_Static_assert(sizeof(struct hailo_control_identify_response) == 162,
+               "identify_response must be 162 bytes on the wire "
+               "(did someone drop __attribute__((packed))?)");
 
 /*
  * Low-level transport.

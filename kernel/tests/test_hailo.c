@@ -69,13 +69,17 @@ static uint8_t  mock_last_control_request[512];
 static uint32_t mock_last_control_request_len;
 /* IRQ arming observability: the transport must unmask interrupts in
  * BSC_IMASK_HOST exactly once per lifetime, and clear any stale bits
- * out of BCS_ISTATUS_HOST before the first send. Also let tests
- * preload a non-FW_CONTROL bit into ISTATUS to verify the poll loop
- * ignores unrelated sources. */
+ * out of BCS_ISTATUS_HOST before the first send.
+ *
+ * mock_istatus_one_shot_preload lets tests inject a single non-
+ * FW_CONTROL bit into the NEXT BCS_ISTATUS_HOST read to verify the
+ * poll loop ignores unrelated sources. It is cleared by mock_read32
+ * after being returned once (single-shot semantics) so subsequent
+ * reads fall through to the normal mock_bar0-backed path. */
 static uint32_t mock_imask_writes;
 static uint32_t mock_imask_last_value;
 static uint32_t mock_istatus_clears_all;
-static uint32_t mock_istatus_preloaded_value;
+static uint32_t mock_istatus_one_shot_preload;
 
 static void mock_reset(void)
 {
@@ -95,7 +99,7 @@ static void mock_reset(void)
     mock_imask_writes   = 0;
     mock_imask_last_value = 0;
     mock_istatus_clears_all = 0;
-    mock_istatus_preloaded_value = 0;
+    mock_istatus_one_shot_preload = 0;
     hailo_control_reset_state_for_tests();
 }
 
@@ -108,15 +112,15 @@ static int mock_init(void)
 static uint32_t mock_read32(uint8_t bar, uint32_t offset)
 {
     /* Tests that want to verify the poll loop ignores non-FW_CONTROL
-     * SW interrupts set mock_istatus_preloaded_value to a non-zero
+     * SW interrupts set mock_istatus_one_shot_preload to a non-zero
      * pattern; return it on the first read of BCS_ISTATUS_HOST, then
      * clear it so subsequent reads fall through to the normal path
      * (zero, unless the control simulator wrote FW_CONTROL_IRQ). */
     if (bar == HAILO_BAR_CONFIG
      && offset == HAILO_BCS_ISTATUS_HOST
-     && mock_istatus_preloaded_value != 0) {
-        uint32_t v = mock_istatus_preloaded_value;
-        mock_istatus_preloaded_value = 0;
+     && mock_istatus_one_shot_preload != 0) {
+        uint32_t v = mock_istatus_one_shot_preload;
+        mock_istatus_one_shot_preload = 0;
         return v;
     }
     if (bar == HAILO_BAR_CONFIG && offset + 4 <= MOCK_BAR0_SIZE) {
@@ -1541,7 +1545,7 @@ static void test_control_identify_ignores_non_fw_control_irq(void)
      * the FW_CONTROL bit. If the transport were still matching on
      * "any non-zero", it would consume this as the completion and
      * read a zeroed response area. */
-    mock_istatus_preloaded_value = (0x02u << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT);
+    mock_istatus_one_shot_preload = (0x02u << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT);
 
     /* Leave the control simulator disabled — the real FW_CONTROL
      * bit never fires, so the transport must time out even after
@@ -1554,7 +1558,7 @@ static void test_control_identify_ignores_non_fw_control_irq(void)
     TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
     /* The stale bit must have been cleared (write-1-to-clear)
      * so it doesn't wedge the next request. */
-    TEST_ASSERT_EQUAL_UINT32(0u, mock_istatus_preloaded_value);
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_istatus_one_shot_preload);
 }
 
 /* -------------------------------------------------------------------------- */

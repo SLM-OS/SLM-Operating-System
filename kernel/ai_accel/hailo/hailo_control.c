@@ -25,11 +25,25 @@
  *   common_header each field u32).
  *
  * - Polling the response: we don't rely on MSI yet. Read
- *   BCS_ISTATUS_HOST on BAR0; the read auto-clears the register, so
- *   any non-zero SW_IRQ bits mean "something is ready". Hailo's
- *   firmware sets distinct SW_IRQ bits per source; we treat any
- *   non-zero as "control response ready" because the only request
- *   in flight at a time is ours. A future MSI path can differentiate.
+ *   BCS_ISTATUS_HOST on BAR0; the register is write-1-to-clear
+ *   (matching hailo_pcie_common.c:read_and_clear_reg on the Linux
+ *   side), not read-and-clear, so after observing any firing bits
+ *   we write them back to clear. Multiple sources multiplex on
+ *   this register — FW_CONTROL_IRQ (0x04<<24), FW notification
+ *   (0x02<<24), VDMA channel IRQs in the low 16 bits. We wait
+ *   specifically for the FW_CONTROL bit and clear+ignore the
+ *   rest; waiting on "any non-zero" races ahead of the response
+ *   on a quiet device. A future MSI path can route each source
+ *   separately.
+ *
+ * - Concurrency: the transport is protected by a spinlock. Today
+ *   all callers live on CPU 0 (shell command `hailo fw`), but
+ *   future inference submit from an AI scheduler policy could
+ *   call from any CPU, and the three statics below (sequence
+ *   counter, IRQ-armed flag, on-stack-too-large req/resp buffers)
+ *   are shared. Taking the lock also sequences request/response
+ *   round-trips against the firmware, which only services one
+ *   control-channel command at a time.
  */
 
 #include "hailo.h"
@@ -37,6 +51,7 @@
 #include "hailo_internal.h"
 #include "debug.h"
 #include "md5.h"
+#include "spinlock.h"
 #include <string.h>
 
 /*
@@ -59,8 +74,19 @@ static inline uint32_t hailo_be32_to_cpu(uint32_t v)
 
 /* Sequence counter. Firmware echoes this back in the response header
  * so a response can be correlated with a request; we check it against
- * what we sent. Incremented per send. */
+ * what we sent. Incremented per send. Guarded by control_lock. */
 static uint32_t control_sequence = 0;
+
+/*
+ * Serializes the whole transport: sequence counter, IRQ-armed flag,
+ * the static req/resp wire buffers, and the round-trip against
+ * firmware (which services one control command at a time). Plain
+ * `spin_lock` — NOT `spin_lock_irqsave` — because wait_for_response
+ * polls for up to `timeout_us` and holding IRQs off that long would
+ * starve the timer tick. No IRQ handler takes this lock, so the
+ * non-irqsave form is safe.
+ */
+static spinlock_t control_lock = SPINLOCK_INIT;
 
 /*
  * Build the on-wire request bytes: [md5(16)][buffer_len(4)][payload].
@@ -178,6 +204,19 @@ static void control_arm_interrupts(void)
     control_irq_armed = true;
 }
 
+/*
+ * BSS footprint: two large static wire buffers (req ~1520 B + resp
+ * 1500 B ≈ 3 KB total). Chosen over stack allocation because the
+ * 16 KB kernel stack can't comfortably carry 3 KB of transient
+ * scratch on every control call — boot-path callers already use a
+ * big chunk of it. Chosen over heap allocation because this file
+ * runs on Pi 5 only and the simpler static layout is easier to
+ * audit. Only reachable post-boot once firmware is running.
+ */
+static uint8_t control_req_wire[sizeof(struct hailo_control_wire_hdr)
+                              + HAILO_CONTROL_MAX_BUFFER_LENGTH];
+static uint8_t control_resp_wire[HAILO_CONTROL_MAX_BUFFER_LENGTH];
+
 int hailo_control_send_recv(const void *req_payload,
                             uint32_t    req_len,
                             void       *resp_payload,
@@ -185,6 +224,12 @@ int hailo_control_send_recv(const void *req_payload,
                             uint32_t   *resp_len,
                             uint32_t    timeout_us)
 {
+    /* Write zero into *resp_len on every error return so callers
+     * who check rc=HAILO_OK-only get a defined value if they also
+     * look at *resp_len. Done before the NULL check because if
+     * resp_len is NULL there's nothing to zero. */
+    if (resp_len) *resp_len = 0;
+
     if (!hailo_platform || hailo_get_state() != HAILO_STATE_RUNNING) {
         return HAILO_ERR_NODEV;
     }
@@ -197,27 +242,30 @@ int hailo_control_send_recv(const void *req_payload,
         return HAILO_ERR_INVAL;
     }
 
+    /*
+     * Everything past this point touches the shared static buffers,
+     * the sequence counter, and the firmware's single in-flight
+     * slot — all of which must be serialized. See the file header
+     * for the concurrency model. No IRQ handler takes this lock,
+     * so the non-irqsave form is safe; irqsave is deliberately
+     * avoided so wait_for_response can poll for up to a second
+     * without starving the timer tick.
+     */
+    spin_lock(&control_lock);
+
     /* Unmask interrupts (once) and ensure ATR[0] routes BAR4[0..]
      * and BAR4[0x640..] to the firmware's request / response
      * buffers. */
     control_arm_interrupts();
     control_retarget_atr0();
 
-    /*
-     * Assemble the wire bytes on the stack. The largest Hailo-8
-     * control request the kernel will ever send is ~128 B (CONFIG
-     * CONTEXT SWITCH), so the MAX_BUFFER_LENGTH-sized buffer below
-     * is generous but not remotely close to the 16 KB stack cap.
-     */
-    static uint8_t req_wire[sizeof(struct hailo_control_wire_hdr)
-                          + HAILO_CONTROL_MAX_BUFFER_LENGTH];
-    size_t wire_len = build_request_wire(req_wire, req_payload, req_len);
+    size_t wire_len = build_request_wire(control_req_wire, req_payload, req_len);
 
     /* Write request to BAR4 at offset 0. Firmware has ATR[0]
      * configured to land this in its request buffer. dword-
      * aligned length required by the platform shim's bar4_write. */
     size_t aligned_len = (wire_len + 3u) & ~(size_t)3u;
-    hailo_platform->bar4_write(0, req_wire, aligned_len);
+    hailo_platform->bar4_write(0, control_req_wire, aligned_len);
     hailo_platform->mb();
 
     /* Ring the doorbell: APP CPU control. raise_ready_offset
@@ -230,8 +278,14 @@ int hailo_control_send_recv(const void *req_payload,
                                &doorbell_val, sizeof(doorbell_val));
     hailo_platform->mb();
 
+    /* TODO: wait_for_response is a udelay-polled busy wait. For
+     * #281 tier-1 (shell-driven IDENTIFY) this is fine — the lone
+     * caller on CPU 0 just waits. For Phase 5.3+ inference submit,
+     * this should either yield() between polls or route through
+     * the future MSI path so CPU 0 isn't burned for up to a full
+     * timeout_us. */
     int rc = wait_for_response(timeout_us);
-    if (rc != HAILO_OK) return rc;
+    if (rc != HAILO_OK) goto out;
 
     /* Read response header (md5 + buffer_len) from BAR4+0x640. */
     struct {
@@ -249,32 +303,36 @@ int hailo_control_send_recv(const void *req_payload,
      || resp_hdr.buffer_len > HAILO_CONTROL_MAX_BUFFER_LENGTH) {
         WARN("hailo: control response has bad buffer_len=%u",
              resp_hdr.buffer_len);
-        return HAILO_ERR_BAD_FIRMWARE;
+        rc = HAILO_ERR_BAD_FIRMWARE;
+        goto out;
     }
 
-    /* Read the response payload. */
-    static uint8_t resp_wire[HAILO_CONTROL_MAX_BUFFER_LENGTH];
     uint32_t read_len = resp_hdr.buffer_len;
     size_t aligned_read = (read_len + 3u) & ~(size_t)3u;
     hailo_platform->bar4_read(
         HAILO_CONTROL_REQUEST_RESPONSE_OFFSET + sizeof(resp_hdr),
-        resp_wire, aligned_read);
+        control_resp_wire, aligned_read);
 
     /* Verify response MD5 is computed over the payload bytes only
      * (same pattern as the request side; HailoRT's check in
      * VdmaDevice::fw_interact_impl hashes response_buffer alone). */
     uint8_t check[MD5_DIGEST_LENGTH];
-    md5_compute(resp_wire, read_len, check);
+    md5_compute(control_resp_wire, read_len, check);
     if (memcmp(check, resp_hdr.md5, MD5_DIGEST_LENGTH) != 0) {
         WARN("hailo: control response MD5 mismatch");
-        return HAILO_ERR_BAD_FIRMWARE;
+        rc = HAILO_ERR_BAD_FIRMWARE;
+        goto out;
     }
 
     /* Copy into caller's buffer (capped at resp_capacity). */
     uint32_t copy_len = read_len < resp_capacity ? read_len : resp_capacity;
-    memcpy(resp_payload, resp_wire, copy_len);
+    memcpy(resp_payload, control_resp_wire, copy_len);
     *resp_len = copy_len;
-    return HAILO_OK;
+    rc = HAILO_OK;
+
+out:
+    spin_unlock(&control_lock);
+    return rc;
 }
 
 void hailo_control_reset_state_for_tests(void)
