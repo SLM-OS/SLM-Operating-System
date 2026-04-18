@@ -26,6 +26,7 @@
  */
 
 #include "hailo.h"
+#include "hailo_internal.h"
 #include "debug.h"
 #include "spinlock.h"
 #include <string.h>
@@ -446,30 +447,21 @@ static bool atr1_shows_fw_loaded(void)
 }
 
 /*
- * Parse the secure-boot certificate trailer at `cert_off` within a
- * validated firmware blob. Populates *out_cert with the decoded
- * cert_header, sets *out_key / *out_content to the start of each
- * payload, and *out_cert_end to the byte-past-content offset (used
- * by hailo_decode_core_fw as the start of the core section).
+ * hailo_decode_cert — see hailo_internal.h for the full contract.
  *
- * Returns HAILO_ERR_BAD_FIRMWARE on any bounds / format failure;
- * caller is responsible for state transitions. Extracted from
- * hailo_boot so negative-path unit tests can drive the decode
- * without stubbing the whole boot state machine.
- *
- * key_size / content_size must be 4-byte-aligned: bar4_write in
- * the platform shim only accepts dword-sized writes (see e.g.
- * pi5_bar4_write's alignment check). A certificate with a
- * non-multiple-of-4 size would trip that check silently via the
- * ATR[0] write path.
+ * Extracted from hailo_boot so negative-path unit tests can drive
+ * the decode without stubbing the whole boot state machine.
  */
-static int hailo_decode_cert(const uint8_t *blob, size_t fw_size,
-                             size_t cert_off,
-                             struct hailo_fw_cert_header *out_cert,
-                             const uint8_t **out_key,
-                             const uint8_t **out_content,
-                             size_t *out_cert_end)
+int hailo_decode_cert(const uint8_t *blob, size_t fw_size,
+                      size_t cert_off,
+                      struct hailo_fw_cert_header *out_cert,
+                      const uint8_t **out_key,
+                      const uint8_t **out_content,
+                      size_t *out_cert_end)
 {
+    if (!blob || !out_cert || !out_key || !out_content || !out_cert_end) {
+        return HAILO_ERR_INVAL;
+    }
     if (cert_off + sizeof(*out_cert) > fw_size) {
         INFO("hailo: firmware missing secure-boot certificate");
         return HAILO_ERR_BAD_FIRMWARE;
@@ -502,21 +494,21 @@ static int hailo_decode_cert(const uint8_t *blob, size_t fw_size,
 }
 
 /*
- * Parse the core-firmware header + code section at `core_hdr_off`
- * (typically cert_end from hailo_decode_cert). Hailo-8 production
- * firmware always carries a core section after the cert; refusing
- * a blob without one is intentional — the boot ROM would otherwise
- * sit at boot_status=1 forever waiting for core code.
+ * hailo_decode_core_fw — see hailo_internal.h for the full contract.
  *
- * Populates *out_core_hdr and *out_core_code. Returns
- * HAILO_ERR_BAD_FIRMWARE on any bounds / format failure; caller
- * owns the state transition.
+ * Hailo-8 production firmware always carries a core section after
+ * the cert; refusing a blob without one is intentional — the boot
+ * ROM would otherwise sit at boot_status=1 forever waiting for
+ * core code.
  */
-static int hailo_decode_core_fw(const uint8_t *blob, size_t fw_size,
-                                size_t core_hdr_off,
-                                struct hailo_firmware_header *out_core_hdr,
-                                const uint8_t **out_core_code)
+int hailo_decode_core_fw(const uint8_t *blob, size_t fw_size,
+                         size_t core_hdr_off,
+                         struct hailo_firmware_header *out_core_hdr,
+                         const uint8_t **out_core_code)
 {
+    if (!blob || !out_core_hdr || !out_core_code) {
+        return HAILO_ERR_INVAL;
+    }
     if (core_hdr_off + sizeof(*out_core_hdr) > fw_size) {
         INFO("hailo: firmware missing core-firmware section");
         return HAILO_ERR_BAD_FIRMWARE;
