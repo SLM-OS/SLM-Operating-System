@@ -47,7 +47,17 @@ const shell_cmd_t builtin_commands[] = {
     {"ipc",    cmd_ipc,    "Show IPC statistics", false},
     {"model",  cmd_model,  "Model management (load/list/info/unload/pools)", true},
     {"dtb",    cmd_dtb,    "Show device tree info", false},
+#if !defined(PLATFORM_X86_64)
+    /* x86-64 registers a richer `gpu` command via
+     * nvidia_gpu_register_shell_commands() with init/sec2/vram/regs
+     * subcommands. find_command() checks built-ins before externals,
+     * so registering this generic info-only built-in on x86-64 would
+     * permanently shadow the NVIDIA dispatcher (the bug that hid
+     * `gpu init` from PR #268's kexec-inheritance experiment until
+     * this entry was guarded). On Jetson the built-in still carries
+     * `gpu read <hex-offset>` for the integrated GA10B aperture. */
     {"gpu",    cmd_gpu,    "Show GPU info (gpu [read <hex-offset>])", false},
+#endif
     {"peek",   cmd_peek,   "Read physical memory (peek <phys-hex> [count])", false},
     {"poke",   cmd_poke,   "Write 32-bit word (poke <phys-hex> <val-hex>)", true},
 #if defined(PLATFORM_JETSON_ORIN_NANO)

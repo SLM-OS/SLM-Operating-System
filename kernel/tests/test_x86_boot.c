@@ -2895,6 +2895,77 @@ static void test_gpu_shell_subcommands_safe_without_gpu(void)
     TEST_PASS();
 }
 
+/*
+ * Test: on x86-64, the cross-platform built-in `gpu` cmd in
+ * kernel/src/shell.c MUST be excluded so the NVIDIA driver's
+ * registration via nvidia_gpu_register_shell_commands() (with
+ * init/sec2/vram/regs subcommands) takes effect.
+ *
+ * Background: find_command checks built-ins before externals. The
+ * built-in `gpu` cmd only knows `read` (Jetson) or default-info, so
+ * if it's present on x86 it permanently shadows the NVIDIA dispatcher
+ * — hiding `gpu init` etc. from the shell. This was discovered during
+ * PR #268's post-kexec hardware experiment when `gpu init` returned
+ * the stub info display instead of starting GSP-RM bringup. This
+ * test pins the fix so a future un-guarding regression fires loudly.
+ */
+static void test_x86_gpu_cmd_not_in_builtins(void)
+{
+    extern const struct {
+        const char *name;
+        int (*handler)(int, char **);
+        const char *help;
+        bool mutates;
+    } builtin_commands[];
+    extern const int NUM_BUILTIN_COMMANDS;
+
+    for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
+        /* String-compare without depending on string.h: the table
+         * is fixed at compile time so a manual char loop is fine
+         * and doesn't pull in the freestanding string-routine
+         * shim. */
+        const char *name = builtin_commands[i].name;
+        if (name[0] == 'g' && name[1] == 'p' && name[2] == 'u'
+            && name[3] == '\0') {
+            TEST_FAIL_MESSAGE("built-in `gpu` is shadowing NVIDIA "
+                              "driver on x86-64 — guard the entry "
+                              "in shell.c with #if !defined("
+                              "PLATFORM_X86_64)");
+        }
+    }
+    TEST_PASS();
+}
+
+/*
+ * Companion test: on x86-64, the NVIDIA driver MUST register a `gpu`
+ * cmd via nvidia_gpu_register_shell_commands(). Without it, the
+ * shell has no way to drive `gpu init` and the kexec experiment
+ * can never run. Catches an accidental removal of the registration
+ * call from kernel/src/shell.c's platform-init block.
+ */
+static void test_x86_gpu_cmd_in_externals(void)
+{
+    extern struct {
+        const char *name;
+        int (*handler)(int, char **);
+        const char *help;
+        bool mutates;
+    } external_commands[];
+    extern int num_external_commands;
+
+    for (int i = 0; i < num_external_commands; i++) {
+        const char *name = external_commands[i].name;
+        if (name[0] == 'g' && name[1] == 'p' && name[2] == 'u'
+            && name[3] == '\0') {
+            TEST_PASS();
+            return;
+        }
+    }
+    TEST_FAIL_MESSAGE("NVIDIA `gpu` cmd missing from external_commands "
+                      "— check that nvidia_gpu_register_shell_commands "
+                      "is being called from shell init on x86-64");
+}
+
 /* ============================================================================
  * PCI Tests
  * ============================================================================ */
@@ -3750,6 +3821,8 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_x86_gsp_firmware_get_invalid_kind);
     RUN_TEST(test_x86_gsp_vbios_get_fwsec_no_gpu);
     RUN_TEST(test_gpu_shell_subcommands_safe_without_gpu);
+    RUN_TEST(test_x86_gpu_cmd_not_in_builtins);
+    RUN_TEST(test_x86_gpu_cmd_in_externals);
     RUN_TEST(test_nvidia_gpu_shell_command_registered);
     RUN_TEST(test_pci_shell_command_registered);
 
