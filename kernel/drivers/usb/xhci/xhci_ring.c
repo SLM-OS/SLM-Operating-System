@@ -14,6 +14,7 @@
 
 #include "xhci_ring.h"
 #include "debug.h"
+#include "spinlock.h"   /* dmb()/dsb() cross-platform barrier macros */
 
 #include <string.h>
 #include <stddef.h>
@@ -53,6 +54,14 @@ int xhci_ring_init(struct xhci_ring *r, struct xhci_trb *trbs,
     link->param_lo = (uint32_t)(trbs_phys & 0xFFFFFFFFu);
     link->param_hi = (uint32_t)(trbs_phys >> 32);
     link->status   = 0;
+    /*
+     * DMB so the param_lo/hi stores drain before the control store
+     * that carries the Link-TRB type. Belt-and-suspenders here —
+     * the caller is expected to issue a DSB before the first
+     * doorbell anyway, but the barrier makes the invariant local
+     * to this function and survives future call-site changes.
+     */
+    dmb(oshst);
     link->control  = XHCI_TRB_TYPE(XHCI_TRB_LINK) | XHCI_TRB_TC;
 
     return 0;
@@ -95,13 +104,24 @@ struct xhci_trb *xhci_ring_enqueue(struct xhci_ring *r,
     }
 
     struct xhci_trb *slot = &r->trbs[r->enqueue];
-    /* Write the payload first, then the control dword with the
+    /*
+     * Write the payload first, then the control dword with the
      * cycle bit matching PCS. The HC uses the cycle bit to decide
-     * the TRB is "ready", so this store order must hold all the
-     * way through to DRAM — NC memory makes that free. */
+     * the TRB is "ready"; if the control store reaches memory
+     * before the payload stores, the HC sees a TRB with a live
+     * cycle bit but garbage payload. Two-store-sequence ordering
+     * is NOT automatic on ARM64 even in Normal-Non-Cacheable
+     * memory (ARM ARM B2.7.2 — two writes to Normal memory can
+     * be reordered by the memory system), so a dmb(oshst) between
+     * the payload group and the control store is required.
+     * Outer Shareable covers DMA masters that live outside the
+     * Inner Shareable domain, which includes the Tegra xHCI
+     * controller's DMA path.
+     */
     slot->param_lo = t->param_lo;
     slot->param_hi = t->param_hi;
     slot->status   = t->status;
+    dmb(oshst);
     uint32_t ctrl  = t->control & ~XHCI_TRB_CYCLE;
     ctrl |= (r->cycle_state & 1);
     slot->control  = ctrl;

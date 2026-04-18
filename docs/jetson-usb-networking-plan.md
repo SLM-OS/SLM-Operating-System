@@ -639,6 +639,22 @@ long-term direction if Jetson USB networking re-enters scope.
    on every consumed event (match or skip); regression coverage in
    `test_event_ring_peek_skip_then_match_advances_through_all` +
    `test_event_ring_peek_then_dequeue_phys_tracks_advance`.
+7. **Audit memory ordering between NC stores and MMIO writes.**
+   Same review round surfaced the flip side of lesson 4: once
+   HC-visible data lives in Normal-Non-Cacheable memory, the path
+   `CPU stores → write-combine buffer → DRAM → HC DMA read` still
+   needs explicit ordering against any MMIO write that tells the
+   HC to consume it. ARM ARM B2.7.2 permits Normal-NC stores to be
+   reordered relative to Device-nGnRE stores; without a `dsb sy`
+   between "fill NC buffer" and "program MMIO that points at it",
+   the HC can DMA-read stale contents. Same story for two Normal-NC
+   stores that must be visible in program order to a DMA observer
+   (the classic TRB payload → cycle-bit pattern): a `dmb oshst`
+   between the groups is required. The `ncmem_alloc` move from
+   lesson 4 doesn't replace these barriers — it only removes the
+   cache-flush half of the problem. Rule for next time: anywhere
+   the code reads like "CPU writes X, then CPU tells DMA to read
+   X", verify there's a barrier between the two.
 
 ---
 

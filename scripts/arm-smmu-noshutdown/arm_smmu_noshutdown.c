@@ -47,6 +47,17 @@ static int __init arm_smmu_noshutdown_init(void)
     }
 
     if (drv->shutdown) {
+        /*
+         * No lock / WRITE_ONCE / barrier around this store. It's
+         * safe because `drv->shutdown` is only ever invoked from
+         * `device_shutdown()` on the kernel's reboot / kexec /
+         * poweroff path, which runs single-threaded after all
+         * userspace is torn down. At module-load time no reboot
+         * is in flight, so no concurrent reader exists. The
+         * kexec-path `device_shutdown()` walks drv->shutdown
+         * once, and by the time it does this module has long
+         * since finished loading.
+         */
         drv->shutdown = NULL;
         pr_info("arm-smmu-noshutdown: NULLed arm-smmu driver->shutdown "
                 "(#266 Phase 3A A.5) — SMMU translations will survive kexec\n");

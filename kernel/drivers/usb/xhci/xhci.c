@@ -20,6 +20,7 @@
 #include "ncmem.h"
 #include "debug.h"
 #include "timer.h"
+#include "spinlock.h"   /* dsb()/dmb() cross-platform barrier macros */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -73,6 +74,13 @@ struct xhci_erst_entry {
     uint32_t reserved;
 };
 _Static_assert(sizeof(struct xhci_erst_entry) == 16, "ERST entry 16B");
+/*
+ * If this layout ever changes (new fields, reordering, explicit
+ * alignment), update the offset mirror in
+ * `kernel/tests/test_xhci_ring.c::test_erst_entry_layout` to match.
+ * The static_assert above catches size drift; the test catches
+ * field-offset drift because it re-declares a local copy.
+ */
 
 static struct xhci_erst_entry *xhci_erst;
 
@@ -339,15 +347,13 @@ static int xhci_alloc_dcbaa(uint8_t max_slots)
 static void xhci_program_registers(uint8_t max_slots)
 {
     /*
-     * Before writing anything, record what Linux left in the
-     * registers. If the original DCBAAP / CRCR / ERSTBA were valid
-     * SMMU-mapped addresses, replacing them with our NC-memory
-     * addresses may produce an SMMU fault that wedges the controller
-     * — this dump pins down exactly what state we're trampling.
-     */
-    /*
-     * Record Linux's leftover pointers. SLM-OS's uart_printf doesn't
-     * speak `%llx` so dump each dword separately.
+     * Record Linux's leftover pointers so the serial log captures
+     * what state we're trampling. If Linux's original DCBAAP / CRCR /
+     * ERSTBA were valid SMMU-mapped addresses, replacing them with
+     * our NC-memory addresses may produce an SMMU fault that wedges
+     * the controller — this dump pins down exactly where that
+     * happens. SLM-OS's uart_printf doesn't speak `%llx` so dump
+     * each dword separately.
      */
     uint32_t orig_dcbaap_lo = r32(xhci_op_base, XHCI_OP_DCBAAP);
     uint32_t orig_dcbaap_hi = r32(xhci_op_base, XHCI_OP_DCBAAP + 4);
@@ -358,6 +364,20 @@ static void xhci_program_registers(uint8_t max_slots)
          (unsigned)orig_crcr_hi, (unsigned)orig_crcr_lo,
          (unsigned)r32(xhci_op_base, XHCI_OP_CONFIG),
          (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+
+    /*
+     * ARM64 requires an explicit DSB between Normal-Non-Cacheable
+     * stores and Device-nGnRE stores (ARM ARM B2.7.2). Everything
+     * the HC will DMA-read is already populated at this point
+     * (DCBAA via xhci_alloc_dcbaa, scratchpad pointers via
+     * xhci_alloc_scratchpads, ERST below, command/event ring TRBs
+     * via the ring_alloc calls) — those stores went to NC memory
+     * and may still be sitting in the write-combining buffer. The
+     * DSB drains all prior stores to the Point of System before
+     * the MMIO writes below tell the HC to go read them. Without
+     * this, the HC can read stale zeros and fail to start.
+     */
+    dsb(sy);
 
     /* DCBAAP (64-bit). Write low first, then high per spec ordering
      * advice — HC latches on the high-dword write. */
@@ -381,6 +401,14 @@ static void xhci_program_registers(uint8_t max_slots)
     xhci_erst->base_hi  = (uint32_t)(xhci_evt_ring.phys >> 32);
     xhci_erst->size     = xhci_evt_ring.num_trbs;
     xhci_erst->reserved = 0;
+
+    /*
+     * Drain the ERST field stores (Normal NC) before any MMIO write
+     * to the interrupter. The ERSTBA write below tells the HC to
+     * DMA-read ERST; without this DSB the MMIO can reach the HC
+     * before the NC stores have drained through the write buffer.
+     */
+    dsb(sy);
 
     /* ERSTSZ = 1 (one segment). */
     w32(ir0, XHCI_IR_ERSTSZ, 1);
@@ -430,12 +458,20 @@ static int xhci_send_noop(void)
     }
     uintptr_t cmd_phys = (uintptr_t)slot;
 
-    /* Ring the command-ring doorbell. DB[0] is the command ring on
-     * xHCI 1.x; target = 0 ("host command"). The dsb ensures the
-     * posted MMIO write has been issued before the event-ring poll
-     * begins reading NC memory the HC writes into. */
+    /*
+     * Two barriers around the doorbell:
+     *  - The DSB before the doorbell guarantees the TRB writes in NC
+     *    memory (xhci_ring_enqueue) have drained to the Point of
+     *    System, so the HC's DMA read after the doorbell sees a
+     *    fully-written TRB rather than partially-written or stale
+     *    zeros.
+     *  - The DSB after the doorbell guarantees the posted MMIO write
+     *    has been issued before the event-ring poll begins reading
+     *    the NC memory the HC writes into.
+     */
+    dsb(sy);
     w32(xhci_db_base, 4 * XHCI_DB_COMMAND, 0);
-    __asm__ volatile("dsb sy" ::: "memory");
+    dsb(sy);
 
     /* Poll the event ring for up to 500 ms for a matching completion.
      * Every consumed event advances the ring's dequeue pointer; we
