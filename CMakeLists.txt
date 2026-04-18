@@ -685,6 +685,32 @@ if(EMBED_DEMO_SCRIPTS)
     )
 endif()
 
+# ============================================================================
+# Hailo-8 boot firmware (optional .incbin)
+# ============================================================================
+#
+# Set -DHAILO_FW_BLOB=path/to/hailo8_fw.bin to embed the Hailo boot
+# firmware into the kernel image. Without the option, hailo_shell.c's
+# weak externs resolve to NULL and `hailo boot` reports "firmware not
+# embedded". The blob is distributed with the Linux HailoRT driver
+# (open redistribution) and lives at `hailo8_fw.bin` in that tree.
+set(HAILO_FW_BLOB "" CACHE FILEPATH "Path to hailo8_fw.bin to embed via .incbin")
+if(HAILO_FW_BLOB)
+    if(NOT EXISTS "${HAILO_FW_BLOB}")
+        message(FATAL_ERROR
+            "HAILO_FW_BLOB=${HAILO_FW_BLOB} does not exist. "
+            "Point it at a valid hailo8_fw.bin or leave it unset.")
+    endif()
+    target_sources(slmos.elf PRIVATE kernel/ai_accel/hailo/hailo_fw.S)
+    set_source_files_properties(
+        kernel/ai_accel/hailo/hailo_fw.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "HAILO_FW_BLOB_PATH=${HAILO_FW_BLOB}"
+        OBJECT_DEPENDS "${HAILO_FW_BLOB}"
+    )
+    message(STATUS "  Hailo firmware blob: ${HAILO_FW_BLOB}")
+endif()
+
 # Configure LittleFS for freestanding use (no libc)
 # - LFS_NO_MALLOC: We use static buffers
 # - LFS_NO_ASSERT: No __assert_func in freestanding

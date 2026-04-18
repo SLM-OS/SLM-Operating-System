@@ -192,19 +192,24 @@ Each phase is self-contained and deliverable. Later phases assume earlier ones l
 
 When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one `inference_device_set_default()` call — no edit to `sched_ai.c`.
 
-### Phase 3: Hailo Device Probe & Control Plane ✅ partial (2026-04-17)
+### Phase 3: Hailo Device Probe & Control Plane ✅ (2026-04-18)
 
 **Delivered (software):**
 - `kernel/ai_accel/hailo/hailo.h` — API + `hailo_platform_ops` vtable (register I/O, BAR4 bulk R/W, DMA alloc, cache clean/invalidate, MSI registration, memory barrier, udelay). PCIe IDs (`0x1E60:0x2864`), BAR indices, BAR0 register offsets (ISTATUS, IMASK, ATR[0..3]), firmware header struct, Hailo-8 device-side load addresses, state machine.
-- `kernel/ai_accel/hailo/hailo_core.c` — `hailo_init` (vtable validation), `hailo_probe` (vendor/device ID read + boot_status liveness via ATR[0]), `hailo_validate_firmware` (magic + size bounds), ATR[0] save/set_target/restore helpers, `dev_read`/`dev_read32` through BAR4. `hailo_boot` + `hailo_get_firmware_version` are hardware-gated stubs returning `HAILO_ERR_UNSUPPORTED`.
+- `kernel/ai_accel/hailo/hailo_core.c` — `hailo_init` (vtable validation + state reset), `hailo_probe` (vendor/device ID read + boot_status liveness via ATR[0]), `hailo_validate_firmware` (magic + size bounds), ATR[0] save/set_target/restore helpers, `dev_read`/`dev_read32`/`dev_write`/`dev_write32`/`dev_write_chunked` through BAR4, `hailo_boot` full state machine (header + code + cert upload → trigger → boot_status poll → ATR[1] FW-loaded poll). `hailo_get_firmware_version` remains a Phase 5 stub pending the control-channel RPC.
 - `kernel/ai_accel/hailo/hailo_pi5.c` — Pi 5 platform shim: `pcie_find_device` + `pcie_map_bar` (BAR0/2/4), `pcie_enable_bus_master`, PMM-backed DMA with `+0x10_00000000` inbound offset, `cache_clean/invalidate_range`, CNTPCT `udelay`, `pcie_alloc_msi` + handler trampoline.
 - `kernel/ai_accel/hailo/hailo_stub.c` — `hailo_platform_install` returns `HAILO_ERR_NODEV` on non-Pi5 platforms.
-- `kernel/ai_accel/hailo/hailo_shell.c` — `hailo` / `hailo probe` / `hailo fw` shell commands.
-- `kernel/tests/test_hailo.c` — 12 tests against a mocked `hailo_platform_ops` (init validation, probe paths, firmware-header validator).
+- `kernel/ai_accel/hailo/hailo_shell.c` — `hailo` / `hailo probe` / `hailo boot` / `hailo fw` / `hailo cfgdump` shell commands. `hailo boot` references weakly-linked `hailo_fw_start`/`hailo_fw_end` symbols; the blob is embedded only when CMake `HAILO_FW_BLOB=path/to/hailo8_fw.bin` is set.
+- `kernel/ai_accel/hailo/hailo_fw.S` — `.incbin` shim, compiled only when `HAILO_FW_BLOB` is set.
+- `kernel/tests/test_hailo.c` — 20+ tests against a mocked `hailo_platform_ops`: init validation, probe paths, firmware-header validator, and **nine new boot-state-machine tests** covering wrong-state rejection, bad magic, missing cert, cert oversize, unexpected boot_status, happy path (verifies each upload section lands at the right device address), stuck-boot-ROM timeout, stuck-FW-loaded timeout, and multi-chunk code uploads through the 4 KB ATR window.
 
-**Hardware-gated follow-ups:**
-- Real probe on Pi 5 (vendor ID readback, boot_status).
-- `hailo_boot` full state machine (ATR[0] FW upload → boot_status poll → ATR[1] FW-loaded poll).
+**Hardware-validated on pi-5-1 (2026-04-18):**
+- Link trains, BARs mapped, endpoint found at 01:00.0 vendor=0x1E60 device=0x2864.
+- `hailo probe` returns OK with `boot_status=0x1` read through the ATR[0] window — proves BAR4 mapping and ATR programming are live end-to-end, not just config space.
+- `hailo boot` reports "firmware not embedded" cleanly when built without `HAILO_FW_BLOB` (the blob is not yet checked in).
+
+**Hardware-gated follow-ups (Phase 5):**
+- Supply `HAILO_FW_BLOB=hailo8_fw.bin` and run `hailo boot` on real hardware.
 - Control-channel RPC (`hailo_get_firmware_version` etc.).
 - MSI routing validation end-to-end.
 
