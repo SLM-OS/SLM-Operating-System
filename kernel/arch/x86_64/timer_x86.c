@@ -20,6 +20,7 @@
 #include "smp.h"
 #include "uart.h"
 #include "cpuid.h"
+#include "x86_lapic_consts.h"
 
 /* LAPIC timer interface (lapic.c) */
 extern uint32_t lapic_timer_calibrate(void);
@@ -30,18 +31,11 @@ extern void lapic_eoi(void);
 /* IDT handler registration (idt.c) */
 extern void irq_register(uint8_t irq, void (*handler)(uint8_t));
 
-/* LAPIC timer vector — must not conflict with IOAPIC vectors (32-47) */
-#define LAPIC_TIMER_VECTOR  48
+/* LAPIC_TIMER_VECTOR + TSC_PIT_TIMEOUT_CYCLES come from
+ * x86_lapic_consts.h (shared with lapic.c and the test suite). */
 
 /* Tick counter (global, incremented on BSP only for uptime tracking) */
 volatile uint64_t pit_ticks;
-
-/* Bounded busy-wait budget for the PIT calibration fallback path.
- * Mirrors TSC_PIT_TIMEOUT_CYCLES in lapic.c — both paths poll the
- * same PIT-channel-2 OUT line and need the same 200 ms ceiling so a
- * kexec-disabled PIT can't hang boot. Keep these in sync if either
- * is changed. */
-#define TSC_PIT_TIMEOUT_CYCLES   600000000ULL
 
 /*
  * Read the Time Stamp Counter (RDTSC) — cycle-accurate, ~GHz resolution.
