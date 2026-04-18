@@ -465,6 +465,7 @@ set(TEST_SOURCES
     kernel/tests/test_shell_session.c
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnet.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_config.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
     kernel/tests/test_pmm.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>

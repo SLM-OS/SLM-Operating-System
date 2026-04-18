@@ -223,13 +223,74 @@ static void test_slm_module_exists(void)
         "assert(type(slm.component_run) == 'function', 'slm.component_run should be function')\n"
         "assert(type(slm.component_hot_swap) == 'function', 'slm.component_hot_swap should be function')\n"
         /* Model memory bindings */
-        "assert(type(slm.model_stats) == 'function', 'slm.model_stats should be function')";
+        "assert(type(slm.model_stats) == 'function', 'slm.model_stats should be function')\n"
+#if defined(ENABLE_NETWORKING)
+        /* telnetd bindings (Phase 3) */
+        "assert(type(slm.telnetd_start)    == 'function', 'slm.telnetd_start should be function')\n"
+        "assert(type(slm.telnetd_stop)     == 'function', 'slm.telnetd_stop should be function')\n"
+        "assert(type(slm.telnetd_status)   == 'function', 'slm.telnetd_status should be function')\n"
+        "assert(type(slm.telnetd_sessions) == 'function', 'slm.telnetd_sessions should be function')\n"
+        "assert(type(slm.telnetd_kick)     == 'function', 'slm.telnetd_kick should be function')\n"
+#endif
+        "";
 
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);
 
     lua_slm_close(L);
 }
+
+#if defined(ENABLE_NETWORKING)
+/*
+ * Test: slm.telnetd_status returns a table with the documented
+ * fields. With no listener running, `running` should be false and
+ * counters should be 0. Exercises the C-side table construction.
+ */
+static void test_slm_telnetd_status_shape(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "s = slm.telnetd_status()\n"
+        "assert(type(s) == 'table', 'telnetd_status should return table')\n"
+        "assert(type(s.running) == 'boolean', 'status.running should be bool')\n"
+        "assert(type(s.port)    == 'number',  'status.port should be number')\n"
+        "assert(type(s.accepted) == 'number', 'status.accepted should be number')\n"
+        "assert(type(s.active)  == 'number',  'status.active should be number')\n"
+        "assert(type(s.max)     == 'number',  'status.max should be number')\n"
+        "assert(s.running == false, 'listener should be stopped at test time')\n"
+        "assert(s.active == 0, 'no active sessions expected')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.telnetd_sessions returns an array (empty when no
+ * listener). Also verifies slm.telnetd_kick on a no-match id is
+ * safe and returns false.
+ */
+static void test_slm_telnetd_sessions_empty_and_kick_nomatch(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "arr = slm.telnetd_sessions()\n"
+        "assert(type(arr) == 'table', 'sessions should return table')\n"
+        "assert(#arr == 0, 'no sessions expected')\n"
+        "ok = slm.telnetd_kick(999)\n"
+        "assert(ok == false, 'kick on missing session should return false')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+#endif /* ENABLE_NETWORKING */
 
 /*
  * Test: slm.uptime returns positive value
@@ -2563,6 +2624,10 @@ int test_suite_lua(void)
 
     /* SLM-OS bindings */
     RUN_TEST(test_slm_module_exists);
+#if defined(ENABLE_NETWORKING)
+    RUN_TEST(test_slm_telnetd_status_shape);
+    RUN_TEST(test_slm_telnetd_sessions_empty_and_kick_nomatch);
+#endif
     RUN_TEST(test_slm_uptime);
     RUN_TEST(test_slm_mem_stats);
     RUN_TEST(test_slm_tasks);
