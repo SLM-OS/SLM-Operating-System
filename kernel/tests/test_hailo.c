@@ -17,6 +17,7 @@
 #include "../ai_accel/hailo/hailo.h"
 #include "../ai_accel/hailo/hailo_control.h"
 #include "../ai_accel/hailo/hailo_internal.h"
+#include "../ai_accel/hailo/hailo_tensor.h"
 #include "../include/md5.h"
 #include "../include/uart.h"
 #include "test_harness.h"
@@ -101,6 +102,21 @@ static uint32_t mock_istatus_one_shot_preload;
 static bool     mock_fw_sim_smart_memory_enabled;
 static uint8_t  mock_fw_sim_device_memory[MOCK_MEMORY_SIZE];
 
+/* DMA-mock state used by both mock_reset and the dma_alloc /
+ * dma_free / cache_* hooks. Kept at file scope (rather than
+ * grouped with mock_ops further down) so mock_reset can touch
+ * the counters without needing forward declarations. */
+#define MOCK_DMA_POOL_SIZE (256u * 1024u)
+static alignas(HAILO_TENSOR_DMA_ALIGN) uint8_t mock_dma_pool[MOCK_DMA_POOL_SIZE];
+static size_t   mock_dma_next_off;
+static bool     mock_dma_force_null;
+static uint32_t mock_dma_alloc_calls;
+static uint32_t mock_dma_free_calls;
+static uint32_t mock_cache_clean_calls;
+static uint32_t mock_cache_invalidate_calls;
+static size_t   mock_last_cache_clean_size;
+static size_t   mock_last_cache_invalidate_size;
+
 static void mock_reset(void)
 {
     memset(mock_bar0, 0, sizeof(mock_bar0));
@@ -122,6 +138,17 @@ static void mock_reset(void)
     mock_istatus_one_shot_preload = 0;
     mock_fw_sim_smart_memory_enabled = false;
     memset(mock_fw_sim_device_memory, 0, sizeof(mock_fw_sim_device_memory));
+    /* DMA-allocator + cache-hook observability — reset pool and
+     * counters so per-test assertions start from zero. */
+    memset(mock_dma_pool, 0, sizeof(mock_dma_pool));
+    mock_dma_next_off = 0;
+    mock_dma_force_null = false;
+    mock_dma_alloc_calls = 0;
+    mock_dma_free_calls = 0;
+    mock_cache_clean_calls = 0;
+    mock_cache_invalidate_calls = 0;
+    mock_last_cache_clean_size = 0;
+    mock_last_cache_invalidate_size = 0;
     hailo_control_reset_state_for_tests();
 }
 
@@ -460,16 +487,51 @@ static void mock_bar4_write(uint32_t offset, const void *src, size_t n)
     }
 }
 
+/*
+ * Simple bump allocator backing the mock DMA pool. The pool and
+ * counters are declared up near mock_reset; the allocator body
+ * lives here with the other platform hooks. Reset between tests
+ * via mock_reset.
+ */
 static void *mock_dma_alloc(size_t size, size_t align, uint64_t *iova_out)
 {
-    (void)size; (void)align;
-    if (iova_out) *iova_out = 0;
-    return NULL;        /* not needed for these tests */
+    mock_dma_alloc_calls++;
+    if (mock_dma_force_null) {
+        if (iova_out) *iova_out = 0;
+        return NULL;
+    }
+    /* Round the current offset up to the requested alignment. */
+    size_t aligned_off = (mock_dma_next_off + align - 1u) & ~(align - 1u);
+    if (aligned_off + size > sizeof(mock_dma_pool)) {
+        if (iova_out) *iova_out = 0;
+        return NULL;
+    }
+    void *p = &mock_dma_pool[aligned_off];
+    mock_dma_next_off = aligned_off + size;
+    /* IOVA is the same as the host virtual address in the mock —
+     * identity mapping, matching what the Pi 5 NC allocator does. */
+    if (iova_out) *iova_out = (uint64_t)(uintptr_t)p;
+    return p;
 }
 static void  mock_dma_free(void *ptr, size_t size, size_t align)
-{ (void)ptr; (void)size; (void)align; }
-static void  mock_cache_clean(const void *a, size_t n) { (void)a; (void)n; }
-static void  mock_cache_invalidate(void *a, size_t n)  { (void)a; (void)n; }
+{
+    (void)ptr; (void)size; (void)align;
+    mock_dma_free_calls++;
+    /* Bump allocator never shrinks. Tests that care about resource
+     * accounting assert on the free-count instead. */
+}
+static void  mock_cache_clean(const void *a, size_t n)
+{
+    (void)a;
+    mock_cache_clean_calls++;
+    mock_last_cache_clean_size = n;
+}
+static void  mock_cache_invalidate(void *a, size_t n)
+{
+    (void)a;
+    mock_cache_invalidate_calls++;
+    mock_last_cache_invalidate_size = n;
+}
 static void  mock_mb(void)                             {}
 static void  mock_udelay(uint32_t u)                   { (void)u; }
 
@@ -2090,6 +2152,162 @@ static void test_control_read_memory_sends_correct_wire(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 5.3: DMA tensor buffers                                               */
+/* -------------------------------------------------------------------------- */
+
+/* All tensor tests assume the mock platform is installed. Pull that
+ * setup into a helper since tensor tests don't need the probed /
+ * running state machine — just a live hailo_platform pointer. */
+static void tensor_setup(void)
+{
+    mock_reset();
+    hailo_platform = &mock_ops;
+}
+
+static void test_tensor_size_from_shape_small(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(224 * 224 * 3,
+        hailo_tensor_size_from_shape(224, 224, 3, 1));
+    TEST_ASSERT_EQUAL_UINT32(56 * 56 * 256 * 2,
+        hailo_tensor_size_from_shape(56, 56, 256, 2));
+}
+
+static void test_tensor_size_from_shape_rejects_zero(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_tensor_size_from_shape(0, 10, 10, 1));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_tensor_size_from_shape(10, 0, 10, 1));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_tensor_size_from_shape(10, 10, 0, 1));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_tensor_size_from_shape(10, 10, 10, 0));
+}
+
+static void test_tensor_size_from_shape_rejects_overflow(void)
+{
+    /* 65536 * 65536 = 4 G > UINT32_MAX → reject at step 1. */
+    TEST_ASSERT_EQUAL_UINT32(0,
+        hailo_tensor_size_from_shape(65536, 65536, 1, 1));
+    /* 1024 * 1024 * 4096 * 1 = 4 G → overflow at step 2. */
+    TEST_ASSERT_EQUAL_UINT32(0,
+        hailo_tensor_size_from_shape(1024, 1024, 4096, 1));
+}
+
+static void test_tensor_alloc_happy_path(void)
+{
+    tensor_setup();
+    struct hailo_tensor t = {0};
+
+    int rc = hailo_tensor_alloc(224 * 224 * 3, &t);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, rc);
+    TEST_ASSERT_NOT_NULL(t.cpu_addr);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)t.cpu_addr, t.iova);
+    TEST_ASSERT_EQUAL_UINT32(224 * 224 * 3, t.tensor_bytes);
+    /* alloc_size rounded up to 4 KB boundary. */
+    TEST_ASSERT_EQUAL_UINT32(
+        (224 * 224 * 3 + 4095) & ~4095u,
+        t.alloc_size);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_TENSOR_DMA_ALIGN, t.align);
+    /* Buffer is page-aligned. */
+    TEST_ASSERT_EQUAL_UINT64(0,
+        (uintptr_t)t.cpu_addr & (HAILO_TENSOR_DMA_ALIGN - 1));
+    /* Buffer is zero-initialized. */
+    for (uint32_t i = 0; i < t.tensor_bytes; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, ((uint8_t *)t.cpu_addr)[i]);
+    }
+    /* dma_alloc fired exactly once. */
+    TEST_ASSERT_EQUAL_UINT32(1, mock_dma_alloc_calls);
+
+    hailo_tensor_free(&t);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_dma_free_calls);
+    /* Handle is zeroed post-free. */
+    TEST_ASSERT_NULL(t.cpu_addr);
+    TEST_ASSERT_EQUAL_UINT32(0, t.tensor_bytes);
+}
+
+static void test_tensor_alloc_rejects_null_out(void)
+{
+    tensor_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, hailo_tensor_alloc(1024, NULL));
+}
+
+static void test_tensor_alloc_rejects_zero_size(void)
+{
+    tensor_setup();
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, hailo_tensor_alloc(0, &t));
+}
+
+static void test_tensor_alloc_nodev_without_platform(void)
+{
+    const struct hailo_platform_ops *saved = hailo_platform;
+    hailo_platform = NULL;
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV, hailo_tensor_alloc(1024, &t));
+    hailo_platform = saved;
+}
+
+static void test_tensor_alloc_propagates_nomem(void)
+{
+    tensor_setup();
+    mock_dma_force_null = true;
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM, hailo_tensor_alloc(4096, &t));
+    /* alloc_calls bumped but handle stays zeroed. */
+    TEST_ASSERT_EQUAL_UINT32(1, mock_dma_alloc_calls);
+    TEST_ASSERT_NULL(t.cpu_addr);
+}
+
+static void test_tensor_prepare_for_device_fires_cache_clean(void)
+{
+    tensor_setup();
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_tensor_alloc(8192, &t));
+
+    hailo_tensor_prepare_for_device(&t);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_cache_clean_calls);
+    /* Clean is scoped to the logical tensor bytes, not the rounded
+     * alloc_size — device only reads what the caller wrote. */
+    TEST_ASSERT_EQUAL_UINT64(8192, mock_last_cache_clean_size);
+
+    hailo_tensor_free(&t);
+}
+
+static void test_tensor_prepare_for_host_fires_cache_invalidate(void)
+{
+    tensor_setup();
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_tensor_alloc(8192, &t));
+
+    hailo_tensor_prepare_for_host(&t);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_cache_invalidate_calls);
+    TEST_ASSERT_EQUAL_UINT64(8192, mock_last_cache_invalidate_size);
+
+    hailo_tensor_free(&t);
+}
+
+static void test_tensor_free_zero_handle_is_noop(void)
+{
+    tensor_setup();
+    struct hailo_tensor t = {0};
+    hailo_tensor_free(&t);   /* must not crash */
+    TEST_ASSERT_EQUAL_UINT32(0, mock_dma_free_calls);
+}
+
+static void test_tensor_multi_alloc_distinct_buffers(void)
+{
+    tensor_setup();
+    struct hailo_tensor a = {0}, b = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_tensor_alloc(4096, &a));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_tensor_alloc(4096, &b));
+    TEST_ASSERT_NOT_NULL(a.cpu_addr);
+    TEST_ASSERT_NOT_NULL(b.cpu_addr);
+    TEST_ASSERT_NOT_EQUAL(a.cpu_addr, b.cpu_addr);
+    /* Bump-allocator grows monotonically. */
+    TEST_ASSERT_TRUE((uintptr_t)b.cpu_addr > (uintptr_t)a.cpu_addr);
+
+    hailo_tensor_free(&a);
+    hailo_tensor_free(&b);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -2187,6 +2405,20 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_write_memory_propagates_fw_error);
     RUN_TEST(test_control_read_memory_propagates_fw_error);
     RUN_TEST(test_control_write_memory_rejects_wrong_opcode_echo);
+
+    /* Phase 5.3 tensor-buffer tests */
+    RUN_TEST(test_tensor_size_from_shape_small);
+    RUN_TEST(test_tensor_size_from_shape_rejects_zero);
+    RUN_TEST(test_tensor_size_from_shape_rejects_overflow);
+    RUN_TEST(test_tensor_alloc_happy_path);
+    RUN_TEST(test_tensor_alloc_rejects_null_out);
+    RUN_TEST(test_tensor_alloc_rejects_zero_size);
+    RUN_TEST(test_tensor_alloc_nodev_without_platform);
+    RUN_TEST(test_tensor_alloc_propagates_nomem);
+    RUN_TEST(test_tensor_prepare_for_device_fires_cache_clean);
+    RUN_TEST(test_tensor_prepare_for_host_fires_cache_invalidate);
+    RUN_TEST(test_tensor_free_zero_handle_is_noop);
+    RUN_TEST(test_tensor_multi_alloc_distinct_buffers);
 
     return UnityEnd();
 }

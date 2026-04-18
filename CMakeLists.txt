@@ -405,6 +405,7 @@ set(KERNEL_SOURCES
     # elsewhere so `hailo_platform_install` always links)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_core.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_control.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_tensor.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_shell.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_header.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_parser.c>
