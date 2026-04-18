@@ -28,6 +28,9 @@ int xhci_ring_init(struct xhci_ring *r, struct xhci_trb *trbs,
     if (r == NULL || trbs == NULL || num_trbs < 4)
         return -1;
 
+    /* Always zeroes the caller's buffer — callers can rely on every
+     * TRB's cycle bit being 0 after init (the HC uses cycle=0 as
+     * "not yet produced"). */
     memset(trbs, 0, (size_t)num_trbs * sizeof(struct xhci_trb));
 
     r->trbs        = trbs;

@@ -14,13 +14,16 @@
 /*
  * Every TRB is 16 bytes / 4 dwords. Fields are little-endian as stored
  * in memory and read by the controller; we never byte-swap on ARM64.
+ * No packed attribute needed — four uint32_t fields are naturally
+ * aligned at 4-byte boundaries, so the struct layout is already the
+ * spec-mandated 16 bytes with no padding.
  */
 struct xhci_trb {
     uint32_t param_lo;   /* offset 0:  TRB-type-specific parameter */
     uint32_t param_hi;   /* offset 4 */
     uint32_t status;     /* offset 8:  completion code / xfer length */
     uint32_t control;    /* offset 12: type, cycle, flags */
-} __attribute__((packed));
+};
 _Static_assert(sizeof(struct xhci_trb) == 16, "TRB must be 16 bytes");
 
 /* -------------------------------------------------------------------------- */

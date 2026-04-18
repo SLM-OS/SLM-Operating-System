@@ -81,6 +81,10 @@ int  xhci_event_ring_alloc(struct xhci_event_ring *r, uint32_t num_trbs);
  * correlation on NC memory). NULL if the ring is full — we don't
  * track a consumer pointer yet in Phase 3A, so "full" just means
  * wrapping back to the link TRB, which is always permitted here.
+ *
+ * TODO(#286): when the transfer-ring path comes online, track a
+ * consumer pointer (updated from Command Completion / Transfer
+ * events) so this can reject enqueue when the ring is actually full.
  */
 struct xhci_trb *xhci_ring_enqueue(struct xhci_ring *r,
                                    const struct xhci_trb *t);

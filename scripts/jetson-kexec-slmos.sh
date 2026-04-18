@@ -79,7 +79,7 @@ if [[ ! -d "$GPU_POWER" ]]; then
     echo "Warning: GPU power path not found — not a Jetson Orin, or driver not loaded" >&2
     echo "Proceeding with kexec anyway..." >&2
 else
-    echo "[1/5] Stopping GPU consumers..."
+    echo "[1/7] Stopping GPU consumers..."
     # Display manager holds GPU via DRM. `systemctl stop gdm` can hang
     # if the compositor is mid-render, so background it with a timeout.
     systemctl stop gdm 2>/dev/null &
@@ -107,11 +107,11 @@ else
     fi
 
     if [[ "$NO_GPU_SUSPEND" == "1" ]]; then
-        echo "[2/5] SKIPPING runtime-PM suspend (--no-gpu-suspend)"
+        echo "[2/7] SKIPPING runtime-PM suspend (--no-gpu-suspend)"
         echo "       GPU stays powered — preserving Falcon ACR state for Path 3"
-        echo "[3/5] SKIPPING BPMP clock re-enable (GPU already running)"
+        echo "[3/7] SKIPPING BPMP clock re-enable (GPU already running)"
     else
-        echo "[2/5] Runtime-PM suspending GPU (drains DMA to avoid RAS)..."
+        echo "[2/7] Runtime-PM suspending GPU (drains DMA to avoid RAS)..."
         echo 0 > "$GPU_POWER/autosuspend_delay_ms"
         echo auto > "$GPU_POWER/control"
         sleep 3
@@ -124,7 +124,7 @@ else
             echo "         kexec may still crash with a TF-A RAS error" >&2
         fi
 
-        echo "[3/5] Re-enabling GPU clocks + powergate for SLM-OS handoff..."
+        echo "[3/7] Re-enabling GPU clocks + powergate for SLM-OS handoff..."
         # Un-powergate the GPU domain (1 = ungated)
         echo 1 > "$BPMP/powergate/gpu/state" 2>/dev/null || echo "       powergate write failed" >&2
         # Enable the primary GPU clocks. These were turned off by nvgpu's
@@ -145,7 +145,7 @@ else
 fi
 
 if [[ "$NO_USB_HOLD" == "0" ]]; then
-    echo "[3.5] Holding xusb clocks + powergates on for SLM-OS XHCI..."
+    echo "[4/7] Holding xusb clocks + powergates on for SLM-OS XHCI..."
     # Clocks the tegra-xusb host controller actually runs on. Verified
     # in the #266 Phase 0 probe (commit fb12937) as the set that
     # corresponds to a live MMIO aperture at 0x03610000. xusb_core_dev
@@ -176,11 +176,11 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
     pg_c="$(cat "$BPMP/powergate/xusbc/state" 2>/dev/null || echo '?')"
     echo "       after hold: xusb_core_host=$core_host xusb_falcon=$falcon xusba=$pg_a xusbc=$pg_c"
 else
-    echo "[3.5] SKIPPING xusb clock hold (--no-usb-hold)"
+    echo "[4/7] SKIPPING xusb clock hold (--no-usb-hold)"
 fi
 
 if [[ "$NO_USB_HOLD" == "0" ]]; then
-    echo "[3.6] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
+    echo "[5/7] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
     XUSB_DEV=/sys/devices/platform/bus@0/3610000.usb
     if [[ -d "$XUSB_DEV/power" ]]; then
         # 'on' disables runtime PM; low-cost pin that doesn't itself
@@ -212,8 +212,8 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
     # controller — USBCMD.RUN=1 wedges the Falcon-stopped MMIO.
 fi
 
-echo "[4/5] Loading kernel: $KERNEL"
+echo "[6/7] Loading kernel: $KERNEL"
 kexec -l "$KERNEL" --reuse-cmdline
 
-echo "[5/5] Executing kexec (serial console will take over)"
+echo "[7/7] Executing kexec (serial console will take over)"
 exec kexec -e
