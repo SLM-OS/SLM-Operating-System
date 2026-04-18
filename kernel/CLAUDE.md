@@ -414,6 +414,48 @@ WprMeta correctly is the documented E4 boundary.
 
 ---
 
+## x86-64 GA10x — GspFwWprMeta Stage A (April 2026)
+
+After PR #289 unblocked Phase 2 (Falcon executes booter, CPUCTL=0x00),
+the next observed failure mode was an infinite hang inside SEC2.
+Booter validates `magic`/`revision`, then immediately walks
+`sysmemAddrOfRadix3Elf` to find the GSP-RM ELF — and SLM-OS at that
+point left the entire 256-byte WprMeta buffer zeroed, so the walk
+NULL-deref'd silently (no MAILBOX0 update, no halt, just frozen
+Falcon). Stage A populates the bare-minimum fields needed for
+booter to walk the chain without faulting, then advance to a
+*different* failure that reports a discrete MAILBOX0 status code.
+
+**Layout pinning is load-bearing.** `kernel/gpu/nvidia/gsp_wpr_meta.h`
+copies the struct definition verbatim from
+`docs/reference/nouveau-r535-nvrm-gsp.h:417-555` and adds 11
+`_Static_assert`s pinning sizeof + every field offset booter or
+SEC2 reads directly. If a future maintainer reorders fields or
+forgets a `uint64_t` somewhere, the build breaks instead of SEC2
+quietly trashing GSP-RM state. Field offsets to remember:
+`magic=0x00`, `revision=0x08`, `sysmemAddrOfRadix3Elf=0x10`,
+`gspFwWprStart=0x70`, `gspFwWprEnd=0xa8`, `fbSize=0xb0`,
+`verified=0xf8`. Total size **must** be exactly 256 bytes.
+
+**Radix3 chain shape** (`gsp_radix3_fill_dummy_chain`): three 4 KB
+DMA pages plus one dummy ELF page. L0[0] = L1 IOVA, L1[0] = L2
+IOVA, L2[0] = ELF IOVA, every other entry zeroed. Single-entry
+shape is the Stage A simplification — production GSP-RM ELF spans
+many L2 pages and `sizeOfRadix3Elf` would be the actual ELF byte
+length, not 4096. Reference: nouveau `nvkm_gsp_radix3_sg`
+(`docs/reference/nouveau-gsp-r535.c:1656-1713`).
+
+**What Stage A deliberately leaves zero.** Bootloader address +
+size + offsets, signature address + size, heap fields, partition
+RPC, ELF code/data sections. Booter is *expected* to halt with a
+MAILBOX0 status code when it tries to use one of these — that's
+the signal Stage A produces. If the post-iteration MAILBOX value
+indicates "magic invalid" or "WPR2 mismatch" instead, the bug is
+in Stage A's struct/constant values (FB size, WPR2 boundaries are
+GA107-specific in `bringup.c`).
+
+---
+
 ## UART Lock on Pi 5 / Jetson
 
 On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).

@@ -9,6 +9,7 @@
 
 #include "bringup.h"
 #include "gsp.h"
+#include "gsp_wpr_meta.h"
 #include "falcon.h"
 #include "nvfw.h"
 #include "nv_endian.h"
@@ -49,6 +50,21 @@ extern const struct gsp_platform_ops *gsp_platform;
 #define WPR2_FRTS_SIZE              0x100000ull      /* 1 MB */
 #define VGA_WORKSPACE_SIZE          0x100000ull      /* 1 MB, no-display fallback */
 #define WPR2_FRTS_BASE_FROM_TOP     (VGA_WORKSPACE_SIZE + WPR2_FRTS_SIZE) /* 0x200000 */
+
+/* Pin the GA107 FB+WPR2 layout as overflow-free. The Stage A
+ * `gspFwWprEnd = wpr2_addr + wpr2_size` arithmetic in
+ * `gsp_wpr_meta_populate_minimum` would wrap on a contrived input
+ * but is fine here — fail the build instead of silently relying on
+ * the bound when somebody adjusts the constants for a future GPU.
+ *
+ * The second assert states the bound directly: WPR2's size must
+ * fit in the gap between wpr2_addr (= FB_SIZE - WPR2_BASE_FROM_TOP)
+ * and UINT64_MAX. */
+_Static_assert(GA107_FB_SIZE_BYTES > WPR2_FRTS_BASE_FROM_TOP,
+               "GA107_FB_SIZE_BYTES must accommodate WPR2 placement");
+_Static_assert(WPR2_FRTS_SIZE <=
+               UINT64_MAX - (GA107_FB_SIZE_BYTES - WPR2_FRTS_BASE_FROM_TOP),
+               "WPR2 addr + size must not overflow uint64_t");
 
 /* Ampere BAR0 offsets observable after FWSEC-FRTS run — definitions
  * in bringup.h so the harness diagnostic dump uses the same names. */
@@ -497,6 +513,21 @@ fail_free:
     return -1;
 }
 
+/* Note: this only frees the FWSEC-FRTS Phase 1 buffers
+ * (`dma_imem_va`, `dma_dmem_va`). The booter image, the WprMeta
+ * DMA buffer, and the Stage A radix3 chain pages are freed only
+ * in `gsp_bringup_booter_load`'s fail-path on the `goto fail`
+ * cleanup path. On the success path they stay live because SEC2
+ * keeps DMA-reading them after the booter halts and the GSP
+ * RISC-V startup uses the same WprMeta address.
+ *
+ * This means harness `--trace`-mode callers that exit early (after
+ * Phase 4b but before booter halt) leak those buffers. PR #296
+ * review flagged the asymmetry — the consolidation is tracked as
+ * a focused follow-up rather than bundled here, because changing
+ * the contract requires auditing every caller (the harness, the
+ * x86 shell `gpu init`) and adding state that distinguishes
+ * "freed by booter_load fail-path" from "still live for SEC2". */
 void gsp_bringup_free(struct gsp_bringup *b)
 {
     if (!b || !gsp_platform || !gsp_platform->dma_free) return;
@@ -527,6 +558,68 @@ void gsp_bringup_free(struct gsp_bringup *b)
  * address is well-aligned and we have room to populate fields in the
  * E4 RPC step without re-allocating. */
 #define WPR_META_BUFFER_SIZE   4096u
+
+/* ---- Stage A radix3 chain constants ----
+ *
+ * GSP-RM's bootloader uses a 3-level radix tree to map sysmem ELF
+ * pages — every level is exactly one 4 KB page of u64 entries. For
+ * Stage A we use the single-entry-per-level shape: L0[0] points at
+ * L1, L1[0] points at L2, L2[0] points at a dummy 4 KB ELF page.
+ * That's enough for booter to walk without faulting; the actual ELF
+ * content doesn't matter until E4 plumbs in real GSP-RM. */
+#define RADIX3_PAGE_SIZE              4096u
+#define RADIX3_DUMMY_ELF_SIZE         4096u
+
+/* The 4 KB constants above are GPU-side ABI, not just a "page size
+ * somewhere": they match the GSP-RM MMU's page granule. Changing
+ * either requires updating `gsp_wpr_meta_populate_minimum`'s
+ * `sizeOfRadix3Elf` semantics (currently == one ELF page) and the
+ * single-entry-per-level chain shape. */
+_Static_assert(RADIX3_PAGE_SIZE == 4096u,
+               "GSP-RM radix3 entry size assumes 4 KB pages");
+_Static_assert(RADIX3_DUMMY_ELF_SIZE == 4096u,
+               "Stage A dummy ELF assumes a single 4 KB page");
+
+/* Pure fill: write the single L0→L1, L1→L2, L2→ELF entries each
+ * page needs. Other entries are left untouched (caller zeros pages
+ * before calling). NULL in any page argument is a no-op for the
+ * entire call — the chain is only useful end-to-end.
+ *
+ * Pinned in tests so a future "skip the L2 step" optimization can't
+ * break the SEC2 booter handshake silently. */
+void gsp_radix3_fill_dummy_chain(uint64_t *l0_page, uint64_t l1_iova,
+                                 uint64_t *l1_page, uint64_t l2_iova,
+                                 uint64_t *l2_page, uint64_t elf_iova)
+{
+    if (!l0_page || !l1_page || !l2_page) return;
+    l0_page[0] = l1_iova;
+    l1_page[0] = l2_iova;
+    l2_page[0] = elf_iova;
+}
+
+/* Pure fill: populate the bare-minimum WprMeta fields needed for
+ * SEC2 booter to perform validation without NULL-deref'ing. Caller
+ * provides the radix3 L0 IOVA + WPR2 boundaries from prior bringup
+ * state. Other fields are deliberately left zero — Stage A's goal
+ * is to surface a *different* failure mode (debuggable MAILBOX0
+ * status code) than the current "infinite hang" baseline. */
+void gsp_wpr_meta_populate_minimum(GspFwWprMeta *meta,
+                                   uint64_t radix3_l0_iova,
+                                   uint64_t radix3_elf_size,
+                                   uint64_t wpr2_addr,
+                                   uint64_t wpr2_size,
+                                   uint64_t fb_size)
+{
+    if (!meta) return;
+    memset(meta, 0, sizeof(*meta));
+    meta->magic                  = GSP_FW_WPR_META_MAGIC;
+    meta->revision               = GSP_FW_WPR_META_REVISION;
+    meta->sysmemAddrOfRadix3Elf  = radix3_l0_iova;
+    meta->sizeOfRadix3Elf        = radix3_elf_size;
+    meta->gspFwWprStart          = wpr2_addr;
+    meta->gspFwWprEnd            = wpr2_addr + wpr2_size;
+    meta->fbSize                 = fb_size;
+}
 
 /* Field-copy from parsed nvfw_image into the booter_* fields of
  * struct gsp_bringup. Extracted so host-side regression tests
@@ -699,21 +792,90 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
 
     /* ---- Phase 4: allocate WprMeta DMA buffer ----
      *
-     * Booter reads MAILBOX0/1 as a phys addr to GspFwWprMeta. For the
-     * E3.4 milestone we allocate the buffer but leave it zero — the
-     * booter will halt with an error code in MAILBOX0 (which we
-     * capture as a diagnostic). Filling WprMeta correctly requires
-     * the GSP-RM ELF radix3 setup that lives in E4. */
+     * Booter reads MAILBOX0/1 as a phys addr to GspFwWprMeta. The
+     * struct is populated in Phase 4b below — this phase only owns
+     * the allocation so a NOMEM failure here is reported separately
+     * from a NOMEM in the radix3 alloc. */
     b->last_error_phase = 102;
     b->dma_wpr_meta_va = gsp_dma_alloc_checked(WPR_META_BUFFER_SIZE,
                                                 4096,
                                                 &b->dma_wpr_meta_iova);
     if (!b->dma_wpr_meta_va) { rc = GSP_ERR_NOMEM; goto fail; }
     b->dma_wpr_meta_size = WPR_META_BUFFER_SIZE;
-    memset(b->dma_wpr_meta_va, 0, WPR_META_BUFFER_SIZE);
-    /* Same cross-domain flush as the booter image — SEC2 will read
-     * the WprMeta as soon as it sees its address in MAILBOX0/1. */
-    gsp_platform->cache_clean(b->dma_wpr_meta_va, b->dma_wpr_meta_size);
+
+    /* ---- Phase 4b (Stage A): allocate dummy radix3 chain ----
+     *
+     * Four DMA-mapped 4 KB pages: L0 → L1 → L2 → dummy ELF. SEC2's
+     * HS booter walks `sysmemAddrOfRadix3Elf` as soon as it passes
+     * magic/revision validation; without a non-NULL chain it
+     * NULL-derefs and hangs forever. The four pages stay around
+     * until bringup completes (or fails); fail-path frees them.
+     *
+     * Four explicit allocs rather than a loop / table — at this
+     * count the explicit form is shorter and clearer. Worth
+     * factoring into a `for (i; i < N; i++)` only if Stage B/C
+     * grows the page count past ~6 OR if the alignment / size
+     * arguments start varying per-page. (Reviewed PR #296.) */
+    b->last_error_phase = 103;
+    b->dma_radix3_l0_va = gsp_dma_alloc_checked(RADIX3_PAGE_SIZE,
+                                                 RADIX3_PAGE_SIZE,
+                                                 &b->dma_radix3_l0_iova);
+    if (!b->dma_radix3_l0_va) { rc = GSP_ERR_NOMEM; goto fail; }
+    b->dma_radix3_l1_va = gsp_dma_alloc_checked(RADIX3_PAGE_SIZE,
+                                                 RADIX3_PAGE_SIZE,
+                                                 &b->dma_radix3_l1_iova);
+    if (!b->dma_radix3_l1_va) { rc = GSP_ERR_NOMEM; goto fail; }
+    b->dma_radix3_l2_va = gsp_dma_alloc_checked(RADIX3_PAGE_SIZE,
+                                                 RADIX3_PAGE_SIZE,
+                                                 &b->dma_radix3_l2_iova);
+    if (!b->dma_radix3_l2_va) { rc = GSP_ERR_NOMEM; goto fail; }
+    b->dma_radix3_elf_va = gsp_dma_alloc_checked(RADIX3_DUMMY_ELF_SIZE,
+                                                  RADIX3_PAGE_SIZE,
+                                                  &b->dma_radix3_elf_iova);
+    if (!b->dma_radix3_elf_va) { rc = GSP_ERR_NOMEM; goto fail; }
+    b->dma_radix3_elf_size = RADIX3_DUMMY_ELF_SIZE;
+
+    /* Zero each DMA-mapped page first so unused entries don't carry
+     * stale heap content into SEC2's view. The WprMeta buffer also
+     * gets the full-page zero (not just the 256-byte struct's worth
+     * inside `gsp_wpr_meta_populate_minimum`) — booter reads exactly
+     * the struct today, but a defense-in-depth zero of the rest of
+     * the DMA page costs nothing and prevents heap leakage to the
+     * GPU's view if a future booter or Stage B change reads more. */
+    memset(b->dma_wpr_meta_va,   0, b->dma_wpr_meta_size);
+    memset(b->dma_radix3_l0_va,  0, RADIX3_PAGE_SIZE);
+    memset(b->dma_radix3_l1_va,  0, RADIX3_PAGE_SIZE);
+    memset(b->dma_radix3_l2_va,  0, RADIX3_PAGE_SIZE);
+    memset(b->dma_radix3_elf_va, 0, RADIX3_DUMMY_ELF_SIZE);
+    gsp_radix3_fill_dummy_chain(b->dma_radix3_l0_va,
+                                b->dma_radix3_l1_iova,
+                                b->dma_radix3_l1_va,
+                                b->dma_radix3_l2_iova,
+                                b->dma_radix3_l2_va,
+                                b->dma_radix3_elf_iova);
+
+    /* Populate WprMeta with the bare-minimum fields. Booter will
+     * accept magic/revision, walk a non-NULL radix3 chain, and
+     * (expected) reject the missing bootloader / signature with a
+     * specific MAILBOX0 status — the Stage A diagnostic goal. */
+    gsp_wpr_meta_populate_minimum(b->dma_wpr_meta_va,
+                                  b->dma_radix3_l0_iova,
+                                  b->dma_radix3_elf_size,
+                                  b->wpr2_addr,
+                                  b->wpr2_size,
+                                  GA107_FB_SIZE_BYTES);
+
+    /* Cross-domain flush: SEC2 reads all five buffers via DMA. The
+     * memcpy/memset/populate above only touched CPU caches; flush
+     * everything to PoC before MAILBOX0/1 is set (which kicks SEC2
+     * to start consuming). The mb() pairs the flushes with a
+     * `dsb sy` so the BAR0 write ordering is preserved. No-op
+     * cache_clean on x86-64; mb() is mfence. */
+    gsp_platform->cache_clean(b->dma_wpr_meta_va,   b->dma_wpr_meta_size);
+    gsp_platform->cache_clean(b->dma_radix3_l0_va,  RADIX3_PAGE_SIZE);
+    gsp_platform->cache_clean(b->dma_radix3_l1_va,  RADIX3_PAGE_SIZE);
+    gsp_platform->cache_clean(b->dma_radix3_l2_va,  RADIX3_PAGE_SIZE);
+    gsp_platform->cache_clean(b->dma_radix3_elf_va, b->dma_radix3_elf_size);
     gsp_platform->mb();
 
     /* ---- Phase 5: reset SEC2, pre-PIO setup ----
@@ -721,8 +883,14 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      * gsp_bringup_fwsec_frts phase 3: on VFIO hosts, vfio-pci's FLR
      * + on-chip BSI DEVINIT recovery leave the Falcon in an
      * idle-but-live state, and writing FALCON_ENGINE.RESET on that
-     * state hangs the PRI bus. */
-    b->last_error_phase = 103;
+     * state hangs the PRI bus.
+     *
+     * `last_error_phase` IDs renumbered when Phase 4b was inserted
+     * (Stage A): pre-Stage-A used 100..106 sequentially for Phases
+     * 1..9; post-Stage-A uses 100..107 with Phase 4b at 103 and
+     * everything from Phase 5 onward shifted by +1 to stay
+     * monotonic with execution order. */
+    b->last_error_phase = 104;
     /* Skip falcon_reset when the Falcon is already idle (post-FLR
      * path on VFIO) or when its control registers are priv-locked
      * (0xbadfXXXX) — writing FALCON_ENGINE.RESET on a priv-locked
@@ -737,7 +905,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     falcon_pre_pio_setup(&b->sec2_flcn);
 
     /* ---- Phase 6: PIO upload non-secure IMEM, secure IMEM, DMEM ---- */
-    b->last_error_phase = 104;
+    b->last_error_phase = 105;
     /* Round all PIO sizes up to 4-byte boundaries (the upload helper
      * requires u32 alignment). The Falcon's IMEM/DMEM is byte-addressed
      * but PIO writes through u32 ports. Trailing bytes past the actual
@@ -777,7 +945,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
     /* ---- Phase 7: program SEC2 BROM ----
      * Order matters: PARAADDR, ENGIDMASK, UCODE_ID, then MOD_SEL last
      * (writing MOD_SEL kicks the BROM to verify everything queued). */
-    b->last_error_phase = 105;
+    b->last_error_phase = 106;
     gsp_platform->write32(NV_PSEC2_BROM_BASE + FALCON_BROM_PARAADDR0,
                           b->booter_dmem_sign);
     gsp_platform->write32(NV_PSEC2_BROM_BASE + FALCON_BROM_ENGIDMASK,
@@ -796,7 +964,7 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
                           (uint32_t)(b->dma_wpr_meta_iova >> 32));
 
     /* ---- Phase 9: STARTCPU + halt poll ---- */
-    b->last_error_phase = 106;
+    b->last_error_phase = 107;
     falcon_start(&b->sec2_flcn, b->booter_boot_addr);
     if (falcon_wait_halted(&b->sec2_flcn, FALCON_HALT_TIMEOUT_US) < 0) {
         rc = GSP_ERR_TIMEOUT;
@@ -818,6 +986,25 @@ fail:
     if (b->dma_wpr_meta_va) {
         gsp_platform->dma_free(b->dma_wpr_meta_va, b->dma_wpr_meta_size);
         b->dma_wpr_meta_va = NULL;
+    }
+    /* Stage A radix3 chain — same fail-path-only free pattern as
+     * the booter image and WprMeta buffer. On success path the
+     * chain stays live for SEC2 to keep walking. */
+    if (b->dma_radix3_l0_va) {
+        gsp_platform->dma_free(b->dma_radix3_l0_va, RADIX3_PAGE_SIZE);
+        b->dma_radix3_l0_va = NULL;
+    }
+    if (b->dma_radix3_l1_va) {
+        gsp_platform->dma_free(b->dma_radix3_l1_va, RADIX3_PAGE_SIZE);
+        b->dma_radix3_l1_va = NULL;
+    }
+    if (b->dma_radix3_l2_va) {
+        gsp_platform->dma_free(b->dma_radix3_l2_va, RADIX3_PAGE_SIZE);
+        b->dma_radix3_l2_va = NULL;
+    }
+    if (b->dma_radix3_elf_va) {
+        gsp_platform->dma_free(b->dma_radix3_elf_va, b->dma_radix3_elf_size);
+        b->dma_radix3_elf_va = NULL;
     }
     b->state = GSP_BRINGUP_FAILED;
     return rc ? rc : GSP_ERR_IO;

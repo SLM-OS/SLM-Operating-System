@@ -27,6 +27,7 @@
 
 #include "../../kernel/gpu/nvidia/bringup.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
+#include "../../kernel/gpu/nvidia/gsp_wpr_meta.h"
 #include "../../kernel/gpu/nvidia/nvfw.h"
 
 /* nvidia_vbios_platform_load is platform-specific (linux_platform.c
@@ -631,6 +632,287 @@ static void test_booter_layout_zero_ns_size(void)
     REQUIRE(b.booter_imem_sec_off == 0);
 }
 
+/* ============================================================================
+ * Stage A: GspFwWprMeta + radix3 chain helpers.
+ *
+ * These pin the field-write logic the SEC2 HS booter consumes via DMA
+ * before it'll start executing the GSP-RM bootloader. A regression in
+ * field assignment OR struct layout would make the booter either
+ * NULL-deref the radix3 walk (current baseline behavior — infinite
+ * hang) or quietly accept wrong values and corrupt GSP-RM state.
+ * ============================================================================ */
+
+/* The header's `_Static_assert`s already pin sizeof + 11 field
+ * offsets at compile time; this runtime test makes the same
+ * guarantees visible in the test report so a successful test run
+ * also documents that the layout matched. */
+static void test_wpr_meta_struct_size_runtime(void)
+{
+    REQUIRE(sizeof(GspFwWprMeta) == 256);
+    REQUIRE(offsetof(GspFwWprMeta, magic) == 0x00);
+    REQUIRE(offsetof(GspFwWprMeta, revision) == 0x08);
+    REQUIRE(offsetof(GspFwWprMeta, sysmemAddrOfRadix3Elf) == 0x10);
+    REQUIRE(offsetof(GspFwWprMeta, gspFwWprStart) == 0x70);
+    REQUIRE(offsetof(GspFwWprMeta, gspFwWprEnd) == 0xa8);
+    REQUIRE(offsetof(GspFwWprMeta, fbSize) == 0xb0);
+    REQUIRE(offsetof(GspFwWprMeta, verified) == 0xf8);
+}
+
+/* The MAGIC + REVISION constants are what booter validates first.
+ * Pin the literal values against the upstream nouveau reference;
+ * a typo here would silently make every populate_minimum() call
+ * fail booter validation. */
+static void test_wpr_meta_constants_match_upstream(void)
+{
+    /* Reference: docs/reference/nouveau-r535-nvrm-gsp.h:557-559. */
+    REQUIRE(GSP_FW_WPR_META_MAGIC == 0xdc3aae21371a60b3ULL);
+    REQUIRE(GSP_FW_WPR_META_REVISION == 1ULL);
+    REQUIRE(GSP_FW_WPR_META_VERIFIED == 0xa0a0a0a0a0a0a0a0ULL);
+}
+
+/* Picked numbers that exercise every field independently — a
+ * mixed-up assignment in `populate_minimum` (e.g. swapping
+ * wpr2_addr and wpr2_size) shows up because no two fields share
+ * a value. */
+#define TEST_RADIX3_L0_IOVA   0x1234500000ULL
+#define TEST_RADIX3_ELF_SIZE  0x4567ULL
+#define TEST_WPR2_ADDR        0x17FE00000ULL    /* matches GA107 6 GB */
+#define TEST_WPR2_SIZE        0x100000ULL       /* 1 MB */
+#define TEST_FB_SIZE          0x180000000ULL    /* 6 GB */
+
+static void test_wpr_meta_populate_sets_required_fields(void)
+{
+    GspFwWprMeta meta;
+    /* Pre-fill with 0xee so the populate's memset(0) is exercised
+     * — a bug that skipped the memset would leave 0xee in the
+     * "should be zero" fields and the next test catches it. */
+    memset(&meta, 0xee, sizeof(meta));
+
+    gsp_wpr_meta_populate_minimum(&meta,
+                                  TEST_RADIX3_L0_IOVA,
+                                  TEST_RADIX3_ELF_SIZE,
+                                  TEST_WPR2_ADDR,
+                                  TEST_WPR2_SIZE,
+                                  TEST_FB_SIZE);
+
+    REQUIRE(meta.magic                 == GSP_FW_WPR_META_MAGIC);
+    REQUIRE(meta.revision              == GSP_FW_WPR_META_REVISION);
+    REQUIRE(meta.sysmemAddrOfRadix3Elf == TEST_RADIX3_L0_IOVA);
+    REQUIRE(meta.sizeOfRadix3Elf       == TEST_RADIX3_ELF_SIZE);
+    REQUIRE(meta.gspFwWprStart         == TEST_WPR2_ADDR);
+    REQUIRE(meta.gspFwWprEnd           == TEST_WPR2_ADDR + TEST_WPR2_SIZE);
+    REQUIRE(meta.fbSize                == TEST_FB_SIZE);
+}
+
+/* Deliberately NOT populated by Stage A: bootloader, signature,
+ * heap, partition-RPC. They MUST stay zero — booter rejects the
+ * missing bootloader with a specific status code, and that's the
+ * Stage A diagnostic signal. If a future change starts populating
+ * one of these fields, this test should be updated to assert the
+ * new contract, not deleted. */
+static void test_wpr_meta_populate_leaves_other_fields_zero(void)
+{
+    GspFwWprMeta meta;
+    memset(&meta, 0xee, sizeof(meta));    /* same pre-fill trick */
+
+    gsp_wpr_meta_populate_minimum(&meta,
+                                  TEST_RADIX3_L0_IOVA,
+                                  TEST_RADIX3_ELF_SIZE,
+                                  TEST_WPR2_ADDR,
+                                  TEST_WPR2_SIZE,
+                                  TEST_FB_SIZE);
+
+    REQUIRE(meta.sysmemAddrOfBootloader   == 0);
+    REQUIRE(meta.sizeOfBootloader         == 0);
+    REQUIRE(meta.bootloaderCodeOffset     == 0);
+    REQUIRE(meta.bootloaderDataOffset     == 0);
+    REQUIRE(meta.bootloaderManifestOffset == 0);
+    REQUIRE(meta.sysmemAddrOfSignature    == 0);
+    REQUIRE(meta.sizeOfSignature          == 0);
+    REQUIRE(meta.gspFwRsvdStart           == 0);
+    REQUIRE(meta.nonWprHeapOffset         == 0);
+    REQUIRE(meta.nonWprHeapSize           == 0);
+    REQUIRE(meta.gspFwHeapOffset          == 0);
+    REQUIRE(meta.gspFwHeapSize            == 0);
+    REQUIRE(meta.gspFwOffset              == 0);
+    REQUIRE(meta.bootBinOffset            == 0);
+    REQUIRE(meta.frtsOffset               == 0);
+    REQUIRE(meta.frtsSize                 == 0);
+    REQUIRE(meta.vgaWorkspaceOffset       == 0);
+    REQUIRE(meta.vgaWorkspaceSize         == 0);
+    REQUIRE(meta.bootCount                == 0);
+    /* Second-union (partitionRpc + crashReport) and the trailing
+     * scalars. These are the fields a future Stage B/C might start
+     * populating; pinning them zero today means the test will fail
+     * on first such change and the author will deliberately update
+     * the contract here. */
+    REQUIRE(meta.partitionRpcAddr         == 0);
+    REQUIRE(meta.partitionRpcRequestOffset == 0);
+    REQUIRE(meta.partitionRpcReplyOffset  == 0);
+    REQUIRE(meta.elfCodeOffset            == 0);
+    REQUIRE(meta.elfDataOffset            == 0);
+    REQUIRE(meta.elfCodeSize              == 0);
+    REQUIRE(meta.elfDataSize              == 0);
+    REQUIRE(meta.lsUcodeVersion           == 0);
+    REQUIRE(meta.gspFwHeapVfPartitionCount == 0);
+    REQUIRE(meta.verified                 == 0);
+}
+
+/* gspFwWprEnd is computed (wpr2_addr + wpr2_size). Verify the
+ * arithmetic with a pair where no overflow risk exists and the
+ * sum has a distinct high-byte from either operand. */
+static void test_wpr_meta_populate_computes_wpr_end(void)
+{
+    GspFwWprMeta meta = { 0 };
+
+    /* Distinctive values: addr=0x1000_0000 + size=0x0080_0000 =
+     * 0x1080_0000. None of the three values share a byte. */
+    gsp_wpr_meta_populate_minimum(&meta,
+                                  /*l0=*/   0x4000ULL,
+                                  /*elfsz=*/ 0x4000ULL,
+                                  /*wpr_a=*/ 0x10000000ULL,
+                                  /*wpr_s=*/ 0x00800000ULL,
+                                  /*fbsz=*/  0x40000000ULL);
+
+    REQUIRE(meta.gspFwWprStart == 0x10000000ULL);
+    REQUIRE(meta.gspFwWprEnd   == 0x10800000ULL);
+}
+
+/* NULL @meta must be a clean no-op (not a segfault). The helper
+ * is extern-visible for tests, and the in-tree caller does
+ * pre-validate, but defense-in-depth matters because NULL gets
+ * fed in if the WprMeta DMA alloc itself fails and the caller
+ * forgets to bail.
+ *
+ * Allocate a sentinel-filled meta on the stack alongside the NULL
+ * call so a positive REQUIRE confirms the helper actually returned
+ * (vs. exited via undefined behavior the harness happens to swallow). */
+static void test_wpr_meta_populate_null_safe(void)
+{
+    GspFwWprMeta sentinel;
+    memset(&sentinel, 0xee, sizeof(sentinel));
+
+    gsp_wpr_meta_populate_minimum(NULL, 1, 1, 1, 1, 1);
+
+    /* If we're still running, the helper returned. Sentinel meta
+     * must not have been touched (it was never passed in). */
+    REQUIRE(sentinel.magic == 0xeeeeeeeeeeeeeeeeULL);
+    REQUIRE(sentinel.verified == 0xeeeeeeeeeeeeeeeeULL);
+}
+
+/* The radix3 chain helper writes one entry per page. Verify L0[0]
+ * lands at byte 0 of the L0 page and the rest stays untouched.
+ * Each test pre-fills the page with a distinctive byte pattern;
+ * the assertion at offset 8 onward catches a regression that
+ * accidentally writes more than the first u64. */
+static void test_radix3_fill_writes_l0_entry_only(void)
+{
+    uint64_t l0[512], l1[512], l2[512];
+    /* 512 u64 = 4096 bytes = one DMA page, matching the runtime. */
+    memset(l0, 0xa5, sizeof(l0));
+    memset(l1, 0xa5, sizeof(l1));
+    memset(l2, 0xa5, sizeof(l2));
+
+    gsp_radix3_fill_dummy_chain(l0, /*l1_iova=*/ 0x1000,
+                                l1, /*l2_iova=*/ 0x2000,
+                                l2, /*elf_iova=*/ 0x3000);
+
+    REQUIRE(l0[0] == 0x1000);
+    /* Remaining entries: helper must not touch — still 0xa5a5...
+     * (the per-byte fill makes a u64 entry equal 0xa5a5a5a5a5a5a5a5). */
+    REQUIRE(l0[1] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l0[511] == 0xa5a5a5a5a5a5a5a5ULL);
+}
+
+static void test_radix3_fill_writes_l1_entry_only(void)
+{
+    uint64_t l0[512], l1[512], l2[512];
+    memset(l0, 0xa5, sizeof(l0));
+    memset(l1, 0xa5, sizeof(l1));
+    memset(l2, 0xa5, sizeof(l2));
+
+    gsp_radix3_fill_dummy_chain(l0, 0x1000, l1, 0x2000, l2, 0x3000);
+
+    REQUIRE(l1[0] == 0x2000);
+    REQUIRE(l1[1] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l1[511] == 0xa5a5a5a5a5a5a5a5ULL);
+}
+
+static void test_radix3_fill_writes_l2_entry_only(void)
+{
+    uint64_t l0[512], l1[512], l2[512];
+    memset(l0, 0xa5, sizeof(l0));
+    memset(l1, 0xa5, sizeof(l1));
+    memset(l2, 0xa5, sizeof(l2));
+
+    gsp_radix3_fill_dummy_chain(l0, 0x1000, l1, 0x2000, l2, 0x3000);
+
+    REQUIRE(l2[0] == 0x3000);
+    REQUIRE(l2[1] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l2[511] == 0xa5a5a5a5a5a5a5a5ULL);
+}
+
+/* NULL in any of the three page args = no-op for the entire chain.
+ * Verify by checking every page stays untouched. The helper
+ * deliberately treats partial-NULL as "caller is in some error
+ * state, don't write a half-chain". */
+static void test_radix3_fill_null_pages_no_op(void)
+{
+    uint64_t l0[512], l1[512], l2[512];
+    memset(l0, 0xa5, sizeof(l0));
+    memset(l1, 0xa5, sizeof(l1));
+    memset(l2, 0xa5, sizeof(l2));
+
+    /* NULL l0. */
+    gsp_radix3_fill_dummy_chain(NULL, 0x1000, l1, 0x2000, l2, 0x3000);
+    REQUIRE(l1[0] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l2[0] == 0xa5a5a5a5a5a5a5a5ULL);
+
+    /* NULL l1. */
+    gsp_radix3_fill_dummy_chain(l0, 0x1000, NULL, 0x2000, l2, 0x3000);
+    REQUIRE(l0[0] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l2[0] == 0xa5a5a5a5a5a5a5a5ULL);
+
+    /* NULL l2. */
+    gsp_radix3_fill_dummy_chain(l0, 0x1000, l1, 0x2000, NULL, 0x3000);
+    REQUIRE(l0[0] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l1[0] == 0xa5a5a5a5a5a5a5a5ULL);
+
+    /* All NULL. */
+    gsp_radix3_fill_dummy_chain(NULL, 0, NULL, 0, NULL, 0);
+}
+
+/* Zero IOVAs are a legal-but-noteworthy input: the chain still
+ * gets written, and booter would later NULL-deref on the walk.
+ * The helper itself doesn't reject this — that's the caller's job
+ * (the in-tree caller's `gsp_dma_alloc_checked` returns NULL on
+ * alloc failure, which the caller catches before reaching us).
+ * Pin the contract so a future hardening change in the helper
+ * forces a deliberate test update.
+ *
+ * Pages are pre-filled with 0xa5 so an asserted `[0] == 0` proves
+ * the helper actually wrote zero — not just that the page was
+ * already zero. */
+static void test_radix3_fill_accepts_zero_iovas(void)
+{
+    uint64_t l0[512], l1[512], l2[512];
+    memset(l0, 0xa5, sizeof(l0));
+    memset(l1, 0xa5, sizeof(l1));
+    memset(l2, 0xa5, sizeof(l2));
+
+    gsp_radix3_fill_dummy_chain(l0, 0, l1, 0, l2, 0);
+
+    /* Helper wrote 0 (the IOVA argument), overwriting the 0xa5
+     * pre-fill. Subsequent entries must remain 0xa5 — the helper
+     * still touches only entry [0] regardless of value written. */
+    REQUIRE(l0[0] == 0);
+    REQUIRE(l1[0] == 0);
+    REQUIRE(l2[0] == 0);
+    REQUIRE(l0[1] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l1[1] == 0xa5a5a5a5a5a5a5a5ULL);
+    REQUIRE(l2[1] == 0xa5a5a5a5a5a5a5a5ULL);
+}
+
 int main(void)
 {
     /* Sig-index algorithm */
@@ -668,6 +950,19 @@ int main(void)
     test_booter_layout_bootvec_consistent_when_offsets_match();
     test_booter_layout_null_args_no_crash();
     test_booter_layout_zero_ns_size();
+
+    /* Stage A: GspFwWprMeta + radix3 chain helpers. */
+    test_wpr_meta_struct_size_runtime();
+    test_wpr_meta_constants_match_upstream();
+    test_wpr_meta_populate_sets_required_fields();
+    test_wpr_meta_populate_leaves_other_fields_zero();
+    test_wpr_meta_populate_computes_wpr_end();
+    test_wpr_meta_populate_null_safe();
+    test_radix3_fill_writes_l0_entry_only();
+    test_radix3_fill_writes_l1_entry_only();
+    test_radix3_fill_writes_l2_entry_only();
+    test_radix3_fill_null_pages_no_op();
+    test_radix3_fill_accepts_zero_iovas();
 
     /* State-machine guards (E3.4.d / E3.4.e) */
     test_booter_load_refuses_pre_fwsec();
