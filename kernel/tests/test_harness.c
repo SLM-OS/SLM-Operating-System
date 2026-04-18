@@ -109,6 +109,12 @@ int test_harness_run_all(void)
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();
     total_failures += test_suite_pmm();
+#if !defined(PLATFORM_X86_64)
+    total_failures += test_suite_pcie();
+    total_failures += test_suite_inference_device();
+    total_failures += test_suite_hailo();
+    total_failures += test_suite_hef();
+#endif
     total_failures += test_suite_littlefs();
     total_failures += test_suite_x86_boot();
     total_failures += test_suite_elf();

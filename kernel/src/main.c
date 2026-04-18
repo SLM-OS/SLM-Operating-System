@@ -461,6 +461,28 @@ void kernel_main(void *dtb)
     }
 #endif
 
+    /* Initialize the ARM64 PCIe host-controller subsystem. Platforms
+     * without a backend (Jetson today) return PCIE_ERR_UNSUPPORTED
+     * and the call is harmless. Deliberately after GPU init so the
+     * GPU subsystem can later register itself on a PCIe GPU once we
+     * have one. */
+#if !defined(PLATFORM_X86_64)
+    {
+        extern int pcie_init(void);
+        int pcie_rc = pcie_init();
+        (void)pcie_rc;  /* logged by pcie_init itself */
+    }
+
+    /* Install the Hailo-8 platform shim. On RASPI5 this finds the
+     * AI HAT+ via pcie_find_device and maps its BARs; on other
+     * ARM64 platforms the stub returns HAILO_ERR_NODEV and we move
+     * on. Either way, the `hailo` shell command reports state. */
+    {
+        extern int hailo_platform_install(void);
+        (void)hailo_platform_install();
+    }
+#endif
+
     /* Register platform-specific network driver (before net_init) */
 #if defined(ENABLE_NETWORKING)
 #if defined(PLATFORM_QEMU_VIRT)
@@ -487,9 +509,17 @@ void kernel_main(void *dtb)
     scheduler_init();
 
 #ifdef CONFIG_AI_SCHEDULER
-    /* Register AI scheduling policies (MLP, PPO) */
+    /* Register the CPU-MLP inference-device backend BEFORE the AI
+     * scheduling policies, so sched_ai.c can route MLP inference
+     * through the device abstraction (Phase 2 of the AI HAT+ plan).
+     * Ordering matters: the MLP policy's self-test in its init()
+     * runs via the direct ai_schedule_mlp path and doesn't depend
+     * on the registry, but any live assign_cpu() call afterwards
+     * will look for the "cpu-mlp" device. */
     {
+        extern int inference_cpu_register(void);
         extern void sched_ai_init(void);
+        inference_cpu_register();
         sched_ai_init();
     }
 #endif

@@ -456,6 +456,15 @@ else
     QEMU_NET :=
 endif
 
+# PCIe test device for ARM64 virt — lets pcie_init() discover a
+# virtio endpoint on the GPEX root complex without depending on the
+# networking stack. virtio-rng is cheap and always available.
+ifeq ($(PLATFORM),QEMU_VIRT)
+    QEMU_PCIE_TEST := -device virtio-rng-pci,bus=pcie.0
+else
+    QEMU_PCIE_TEST :=
+endif
+
 # x86-64 uses GRUB ISO (-cdrom); ARM64 uses direct kernel load (-kernel)
 ifeq ($(PLATFORM),X86_64)
     QEMU_BOOT_ARG = -cdrom $(KERNEL_ISO)
@@ -614,6 +623,7 @@ else
 		-m $(QEMU_TEST_MEMORY) \
 		-nographic \
 		$(QEMU_NET) \
+		$(QEMU_PCIE_TEST) \
 		-semihosting \
 		-kernel $(KERNEL_TEST_ELF) \
 		> $(TEST_OUTPUT) 2>&1; \

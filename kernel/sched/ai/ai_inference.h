@@ -53,4 +53,18 @@ int  ai_test_argmax(const float *x, int n);
  */
 int ai_validate_action(const struct ai_sched_action *action, uint32_t num_cores);
 
+/*
+ * Run only the MLP forward pass and write raw logits.
+ *
+ * Unlike ai_schedule_mlp() (which also does argmax + decode), this
+ * function returns the raw N_ACTIONS-dim output vector. Used by the
+ * inference_device CPU backend so the generic tensor-in/tensor-out
+ * surface stays decoupled from the scheduler's action encoding.
+ *
+ * @state: Input state vector (AI_STATE_DIM floats)
+ * @out:   Output logits (AI_SCHED_N_ACTIONS floats)
+ */
+void ai_mlp_forward_logits(const float state[AI_STATE_DIM],
+                           float out[AI_SCHED_N_ACTIONS]);
+
 #endif /* AI_INFERENCE_H */

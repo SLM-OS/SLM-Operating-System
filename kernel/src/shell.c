@@ -359,6 +359,11 @@ void shell_init(void)
         pci_register_shell_commands();
         nvidia_gpu_register_shell_commands();
     }
+#else
+    {
+        extern void hailo_register_shell_commands(void);
+        hailo_register_shell_commands();
+    }
 #endif
 
     /* #64: boot-time model preloading from /mnt/files/preload.conf.

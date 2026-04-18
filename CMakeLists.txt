@@ -328,6 +328,25 @@ set(KERNEL_SOURCES
     kernel/drivers/blkdev.c
     kernel/drivers/ramdisk.c
 
+    # PCIe host-controller subsystem (ARM64 only — x86-64 has its own pci.c)
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/pcie/pcie_core.c>
+    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/pcie/pcie_qemu_gpex.c>
+    $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/pcie/pcie_bcm2712.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/pcie/pcie_stub.c>
+
+    # Inference-device abstraction (dispatcher always compiled;
+    # CPU-MLP backend added under the ai_sched library when AI_SCHED=ON)
+    kernel/inference/inference_device.c
+
+    # Hailo NPU driver (platform-independent core + shell cmd always
+    # compiled on ARM64; Pi 5 platform shim only on RASPI5; stub
+    # elsewhere so `hailo_platform_install` always links)
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_core.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_shell.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_header.c>
+    $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/ai_accel/hailo/hailo_pi5.c>
+    $<$<AND:$<NOT:$<STREQUAL:${PLATFORM},X86_64>>,$<NOT:$<STREQUAL:${PLATFORM},RASPI5>>>:kernel/ai_accel/hailo/hailo_stub.c>
+
     # ==========================================================================
     # Core Kernel
     # ==========================================================================
@@ -419,6 +438,10 @@ set(TEST_SOURCES
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
     kernel/tests/test_pmm.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hailo.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hef.c>
     kernel/tests/test_littlefs.c
     kernel/tests/test_x86_boot.c
     kernel/tests/test_elf.c
@@ -656,6 +679,46 @@ target_compile_definitions(lua PRIVATE
 target_link_libraries(slmos.elf PRIVATE lua)
 
 # ==========================================================================
+# nanopb — freestanding protobuf runtime (for .hef parsing)
+# ==========================================================================
+# Built as a separate static library so it can take its own compile
+# flags: relaxed warnings (nanopb is upstream code, SLM-OS treats
+# warnings as errors) and `-DPB_SYSTEM_HEADER="pb_syshdr.h"` so nanopb
+# skips <string.h> / <stdlib.h> / <limits.h> and uses the freestanding
+# glue in kernel/lib/nanopb/pb_syshdr.h.
+#
+# ARM64 only for now: x86-64 has its own GPU driver path and doesn't
+# need .hef parsing. Enable when a consumer appears.
+if(NOT PLATFORM STREQUAL "X86_64")
+    add_library(nanopb STATIC
+        kernel/lib/nanopb/pb_common.c
+        kernel/lib/nanopb/pb_decode.c
+        kernel/lib/nanopb/pb_encode.c
+    )
+    target_include_directories(nanopb PUBLIC kernel/lib/nanopb)
+    target_compile_options(nanopb PRIVATE
+        -ffreestanding
+        -nostdlib
+        -mcpu=${TARGET_CPU}
+        -mgeneral-regs-only
+        -fno-pie
+        -Wno-unused-parameter -Wno-unused-variable
+        -Wno-redundant-decls -Wno-error
+    )
+    target_compile_definitions(nanopb PRIVATE
+        "PB_SYSTEM_HEADER=\"pb_syshdr.h\""
+        $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:PLATFORM_QEMU_VIRT=1>
+        $<$<STREQUAL:${PLATFORM},RASPI5>:PLATFORM_RASPI5=1>
+        $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:PLATFORM_JETSON_ORIN_NANO=1>
+    )
+    target_link_libraries(slmos.elf PRIVATE nanopb)
+    target_include_directories(slmos.elf PRIVATE kernel/lib/nanopb)
+    target_compile_definitions(slmos.elf PRIVATE
+        "PB_SYSTEM_HEADER=\"pb_syshdr.h\""
+    )
+endif()
+
+# ==========================================================================
 # AI Scheduler Library (optional)
 # Uses floating-point/NEON — compiled WITHOUT -mgeneral-regs-only.
 # Same pattern as Lua library.
@@ -873,6 +936,7 @@ if(ENABLE_AI_SCHEDULER)
         kernel/sched/ai/ai_inference.c
         kernel/sched/ai/ai_state.c
         kernel/sched/ai/sched_ai.c
+        kernel/sched/ai/inference_cpu.c
         kernel/sched/ai/ai_weights_mlp.c
         kernel/sched/ai/ai_weights_ppo.c
         kernel/sched/ai/ai_test_helpers.c
