@@ -46,10 +46,13 @@ static void put_be_u64(uint8_t *p, uint64_t v)
 }
 
 /* Build a v0 header into `buf`. Returns total bytes written
- * (header + fake proto body). Caller ensures `buf` is large enough. */
-static size_t build_v0_blob(uint8_t *buf, uint32_t proto_size)
+ * (header + fake proto body), or 0 if the blob would exceed
+ * `buf_size`. */
+static size_t build_v0_blob(uint8_t *buf, size_t buf_size, uint32_t proto_size)
 {
     /* 12-byte common header + 20-byte v0 trailer = 32 bytes header. */
+    size_t total = 32 + proto_size;
+    if (total > buf_size) return 0;
     put_be_u32(buf + 0,  HEF_MAGIC);
     put_be_u32(buf + 4,  HEF_VERSION_V0);
     put_be_u32(buf + 8,  proto_size);
@@ -57,13 +60,15 @@ static size_t build_v0_blob(uint8_t *buf, uint32_t proto_size)
     memset(buf + 12, 0, 20);
     /* Proto body — zeros are fine for header-validator tests. */
     memset(buf + 32, 0, proto_size);
-    return 32 + proto_size;
+    return total;
 }
 
-static size_t build_v1_blob(uint8_t *buf, uint32_t proto_size,
+static size_t build_v1_blob(uint8_t *buf, size_t buf_size, uint32_t proto_size,
                             uint64_t ccws_size)
 {
     /* 12-byte common + 16-byte v1 trailer = 28 bytes header. */
+    size_t total = 28 + proto_size + ccws_size;
+    if (total > buf_size) return 0;
     put_be_u32(buf + 0,  HEF_MAGIC);
     put_be_u32(buf + 4,  HEF_VERSION_V1);
     put_be_u32(buf + 8,  proto_size);
@@ -71,9 +76,8 @@ static size_t build_v1_blob(uint8_t *buf, uint32_t proto_size,
     put_be_u64(buf + 16, ccws_size);
     put_be_u32(buf + 24, 0);                   /* reserved */
     /* Proto body + CCWS — zeros. */
-    size_t n = 28 + proto_size + ccws_size;
     memset(buf + 28, 0, proto_size + ccws_size);
-    return n;
+    return total;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -91,7 +95,7 @@ static void test_hef_rejects_short_blob(void)
 static void test_hef_rejects_bad_magic(void)
 {
     uint8_t buf[64] = {0};
-    build_v0_blob(buf, 16);
+    TEST_ASSERT_TRUE(build_v0_blob(buf, sizeof(buf), 16) != 0);
     put_be_u32(buf, 0xCAFEBABEu);   /* clobber magic */
     struct hef_outer_header hdr;
     TEST_ASSERT_EQUAL_INT(HEF_ERR_BAD_MAGIC,
@@ -101,7 +105,7 @@ static void test_hef_rejects_bad_magic(void)
 static void test_hef_rejects_bad_version(void)
 {
     uint8_t buf[64] = {0};
-    build_v0_blob(buf, 16);
+    TEST_ASSERT_TRUE(build_v0_blob(buf, sizeof(buf), 16) != 0);
     put_be_u32(buf + 4, 99);     /* unknown version */
     struct hef_outer_header hdr;
     TEST_ASSERT_EQUAL_INT(HEF_ERR_BAD_VERSION,
@@ -111,7 +115,7 @@ static void test_hef_rejects_bad_version(void)
 static void test_hef_rejects_zero_proto_size(void)
 {
     uint8_t buf[64] = {0};
-    build_v0_blob(buf, 0);
+    TEST_ASSERT_TRUE(build_v0_blob(buf, sizeof(buf), 0) != 0);
     struct hef_outer_header hdr;
     TEST_ASSERT_EQUAL_INT(HEF_ERR_BAD_SIZE,
                           hef_parse_outer_header(buf, sizeof(buf), &hdr));
@@ -119,10 +123,12 @@ static void test_hef_rejects_zero_proto_size(void)
 
 static void test_hef_rejects_truncated_proto(void)
 {
-    uint8_t buf[64] = {0};
-    build_v0_blob(buf, 200);     /* declare 200 bytes of proto... */
+    /* Declare 200 bytes of proto but pass only 64 bytes of blob to
+     * the parser. The builder needs room for the full 200-byte body
+     * it zero-fills, but the parser input view is truncated. */
+    uint8_t buf[256] = {0};
+    TEST_ASSERT_TRUE(build_v0_blob(buf, sizeof(buf), 200) != 0);
     struct hef_outer_header hdr;
-    /* ...but pass only 64 bytes — body doesn't fit. */
     TEST_ASSERT_EQUAL_INT(HEF_ERR_TRUNCATED,
                           hef_parse_outer_header(buf, 64, &hdr));
 }
@@ -130,7 +136,8 @@ static void test_hef_rejects_truncated_proto(void)
 static void test_hef_accepts_v0(void)
 {
     uint8_t buf[128] = {0};
-    size_t total = build_v0_blob(buf, 64);
+    size_t total = build_v0_blob(buf, sizeof(buf), 64);
+    TEST_ASSERT_TRUE(total != 0);
     struct hef_outer_header hdr;
     int rc = hef_parse_outer_header(buf, total, &hdr);
     TEST_ASSERT_EQUAL_INT(HEF_OK, rc);
@@ -143,7 +150,8 @@ static void test_hef_accepts_v0(void)
 static void test_hef_accepts_v1_with_ccws(void)
 {
     uint8_t buf[256] = {0};
-    size_t total = build_v1_blob(buf, 64, 128);
+    size_t total = build_v1_blob(buf, sizeof(buf), 64, 128);
+    TEST_ASSERT_TRUE(total != 0);
     struct hef_outer_header hdr;
     int rc = hef_parse_outer_header(buf, total, &hdr);
     TEST_ASSERT_EQUAL_INT(HEF_OK, rc);
@@ -159,7 +167,8 @@ static void test_hef_rejects_truncated_ccws(void)
 {
     uint8_t buf[256] = {0};
     /* Declare 128 bytes of CCWS but keep only 64 bytes past the proto. */
-    size_t total = build_v1_blob(buf, 64, 128);
+    size_t total = build_v1_blob(buf, sizeof(buf), 64, 128);
+    TEST_ASSERT_TRUE(total != 0);
     struct hef_outer_header hdr;
     int rc = hef_parse_outer_header(buf, total - 64, &hdr);
     TEST_ASSERT_EQUAL_INT(HEF_ERR_TRUNCATED, rc);
@@ -188,7 +197,7 @@ static void test_hef_rejects_oversize_proto(void)
 static void test_hef_accepts_v0_with_md5(void)
 {
     uint8_t buf[128] = {0};
-    build_v0_blob(buf, 32);
+    TEST_ASSERT_TRUE(build_v0_blob(buf, sizeof(buf), 32) != 0);
     /* Seed MD5 bytes in the v0 trailer (after the 12-byte common
      * header + 4-byte reserved). Round-trip through the parser. */
     for (int i = 0; i < 16; i++) buf[16 + i] = (uint8_t)(0xA0 + i);
@@ -232,7 +241,8 @@ static void test_hef_v1_ccws_exact_fit_accepted(void)
 {
     uint8_t buf[256] = {0};
     /* header (28) + proto (64) + ccws (164) = 256 bytes exactly. */
-    size_t total = build_v1_blob(buf, 64, 164);
+    size_t total = build_v1_blob(buf, sizeof(buf), 64, 164);
+    TEST_ASSERT_TRUE(total != 0);
     TEST_ASSERT_EQUAL_UINT64(256, total);
     struct hef_outer_header hdr;
     int rc = hef_parse_outer_header(buf, total, &hdr);

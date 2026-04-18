@@ -107,7 +107,8 @@ static void *mock_dma_alloc(size_t size, size_t align, uint64_t *iova_out)
     if (iova_out) *iova_out = 0;
     return NULL;        /* not needed for these tests */
 }
-static void  mock_dma_free(void *ptr, size_t size) { (void)ptr; (void)size; }
+static void  mock_dma_free(void *ptr, size_t size, size_t align)
+{ (void)ptr; (void)size; (void)align; }
 static void  mock_cache_clean(const void *a, size_t n) { (void)a; (void)n; }
 static void  mock_cache_invalidate(void *a, size_t n)  { (void)a; (void)n; }
 static void  mock_mb(void)                             {}
@@ -145,20 +146,30 @@ static void seed_ids(uint16_t vendor, uint16_t device)
 /* Tests                                                                       */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * Negative tests below point `hailo_platform` at stack-local structs
+ * to exercise validation failures. Each test must restore the
+ * original pointer on exit — otherwise the next test sees a dangling
+ * pointer to this function's (now-dead) stack frame and derefs it.
+ */
 static void test_init_rejects_null_ops(void)
 {
+    const struct hailo_platform_ops *saved = hailo_platform;
     hailo_platform = NULL;
     int rc = hailo_init();
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+    hailo_platform = saved;
 }
 
 static void test_init_rejects_incomplete_ops(void)
 {
+    const struct hailo_platform_ops *saved = hailo_platform;
     struct hailo_platform_ops bad = mock_ops;
     bad.read32 = NULL;
     hailo_platform = &bad;
     int rc = hailo_init();
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+    hailo_platform = saved;
 }
 
 /* Regression: mb() is required (was optional; used by ATR retarget).
@@ -166,11 +177,13 @@ static void test_init_rejects_incomplete_ops(void)
  * corrupt the access ordering on strongly-ordered hardware. */
 static void test_init_rejects_missing_mb(void)
 {
+    const struct hailo_platform_ops *saved = hailo_platform;
     struct hailo_platform_ops bad = mock_ops;
     bad.mb = NULL;
     hailo_platform = &bad;
     int rc = hailo_init();
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+    hailo_platform = saved;
 }
 
 static void test_init_accepts_complete_ops(void)
@@ -323,6 +336,7 @@ static int mock_init_fail(void) { return HAILO_ERR_IO; }
 
 static void test_init_propagates_platform_init_failure(void)
 {
+    const struct hailo_platform_ops *saved = hailo_platform;
     mock_reset();
     struct hailo_platform_ops failing = mock_ops;
     failing.init = mock_init_fail;
@@ -337,6 +351,7 @@ static void test_init_propagates_platform_init_failure(void)
     uint16_t v = 0, d = 0;
     rc = hailo_probe(&v, &d);
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV, rc);
+    hailo_platform = saved;
 }
 
 static void test_state_str_labels_known_values(void)

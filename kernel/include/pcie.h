@@ -50,6 +50,25 @@
 #define PCIE_ERR_NOMEM         (-5)  /* mapping / allocation failed */
 #define PCIE_ERR_NOCAP         (-6)  /* capability not present */
 #define PCIE_ERR_NOVEC         (-7)  /* no free MSI/MSI-X vectors */
+#define PCIE_ERR_IO            (-8)  /* hardware responded with garbage */
+#define PCIE_ERR_TIMEOUT       (-9)  /* poll loop exceeded budget */
+
+/* -------------------------------------------------------------------------- */
+/* Resource placement helper                                                  */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Align `size` bytes up to its natural boundary inside [*next, end).
+ * On success sets *out_addr and advances *next. Returns false if
+ * the BAR can't fit (including 64-bit wrap conditions). On failure
+ * neither output is modified.
+ *
+ * Used by pcie_init's BAR-assignment pass. Public (rather than
+ * static to pcie_core.c) so test_pcie.c can unit-test the bump-
+ * allocator math directly without re-running enumeration.
+ */
+bool pcie_place_bar(uint64_t *next, uint64_t end,
+                    uint64_t size, uint64_t *out_addr);
 
 /* -------------------------------------------------------------------------- */
 /* Device descriptor                                                          */
@@ -149,6 +168,20 @@ struct pcie_host_ops {
      * Returns NULL on mapping failure.
      */
     void *(*map_bar)(uint64_t pcie_addr, uint64_t size);
+
+    /*
+     * Return the PCIe-side non-prefetchable MMIO window this backend
+     * manages. `*base_out` is the low end (PCIe address), `*size_out`
+     * is the window size. pcie_core uses this to assign BAR
+     * addresses to endpoints whose BARs came up unprogrammed
+     * (the "no UEFI resource allocator" case on bare-metal Pi 5).
+     *
+     * Optional — backends that inherit programmed BARs from firmware
+     * (x86 with SeaBIOS) or that run enumeration-only tests (QEMU
+     * GPEX without a device) can leave this NULL, in which case
+     * pcie_core skips BAR assignment.
+     */
+    int (*get_mmio_window)(uint64_t *base_out, uint64_t *size_out);
 
     /*
      * Allocate `count` consecutive MSI (or MSI-X) vectors from the

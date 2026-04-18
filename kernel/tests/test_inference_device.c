@@ -78,13 +78,23 @@ static const struct inference_device_ops fake_ops = {
 };
 static struct inference_device fake_dev = { .ops = &fake_ops };
 
+/* Reset fake-backend counters to a known state. Called at the top
+ * of every test that reads them so the suite is order-independent
+ * — a new test that happens to exercise the fake backend ahead of
+ * an existing one must not perturb its assertions. */
+static void fake_reset_counters(void)
+{
+    fake_init_calls = 0;
+    fake_run_calls  = 0;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Tests                                                                       */
 /* -------------------------------------------------------------------------- */
 
 static void test_fake_backend_register(void)
 {
-    fake_init_calls = 0;
+    fake_reset_counters();
     int rc = inference_device_register(&fake_dev);
     TEST_ASSERT_EQUAL_INT(INF_OK, rc);
     TEST_ASSERT_EQUAL_INT(1, fake_init_calls);
@@ -95,6 +105,7 @@ static void test_fake_backend_register(void)
 
 static void test_fake_backend_run(void)
 {
+    fake_reset_counters();
     inference_model_handle_t h = INF_INVALID_HANDLE;
     int rc = inference_load_model(&fake_dev, NULL, 0, &h);
     TEST_ASSERT_EQUAL_INT(INF_OK, rc);
@@ -109,7 +120,6 @@ static void test_fake_backend_run(void)
                                .dtype = INF_DTYPE_INT32, .rank = 1,
                                .shape = {4, 0, 0, 0} };
 
-    fake_run_calls = 0;
     rc = inference_run(&fake_dev, h, &in, &out);
     TEST_ASSERT_EQUAL_INT(INF_OK, rc);
     TEST_ASSERT_EQUAL_INT(1, fake_run_calls);

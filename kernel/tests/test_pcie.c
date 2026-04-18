@@ -138,8 +138,20 @@ static void test_map_bar_returns_va(void)
     } else {
         TEST_ASSERT_NOT_NULL(va);
         TEST_ASSERT_TRUE(size >= d->bar_size[bar]);
-        volatile uint32_t probe = *(volatile uint32_t *)va;
-        TEST_ASSERT_TRUE(probe != 0xFFFFFFFFu);
+        /* Probe the first dword and, if the BAR is larger than one
+         * dword, the last aligned dword too. A single read at VA+0
+         * proves the head of the mapping is reachable but wouldn't
+         * catch a backend that truncates the mapping to less than
+         * the BAR's advertised size. 0xFFFFFFFFu signals an
+         * unmapped / unresponsive region. */
+        volatile uint32_t probe_head = *(volatile uint32_t *)va;
+        TEST_ASSERT_TRUE(probe_head != 0xFFFFFFFFu);
+        if (size >= sizeof(uint32_t) * 2) {
+            uintptr_t tail_off = (uintptr_t)(size - sizeof(uint32_t));
+            volatile uint32_t probe_tail =
+                *(volatile uint32_t *)((uint8_t *)va + tail_off);
+            TEST_ASSERT_TRUE(probe_tail != 0xFFFFFFFFu);
+        }
     }
 }
 
@@ -237,6 +249,85 @@ static void test_register_host_rejects_missing_map_bar(void)
 
 #endif /* PLATFORM_QEMU_VIRT */
 
+/* -------------------------------------------------------------------------- */
+/* pcie_place_bar — bump-allocator math used by pcie_init's BAR-assignment   */
+/* pass. These tests exercise the pure function directly; they're platform- */
+/* agnostic and don't depend on a live backend, so they run everywhere.    */
+/* -------------------------------------------------------------------------- */
+
+static void test_place_bar_first_fit(void)
+{
+    /* Typical: window starts aligned, size divides evenly, no padding. */
+    uint64_t next = 0x1b80000000ULL;
+    uint64_t end  = next + 0x80000000ULL;
+    uint64_t addr = 0;
+    TEST_ASSERT_TRUE(pcie_place_bar(&next, end, 0x10000ULL, &addr));
+    TEST_ASSERT_EQUAL_HEX64(0x1b80000000ULL, addr);
+    TEST_ASSERT_EQUAL_HEX64(0x1b80010000ULL, next);
+}
+
+static void test_place_bar_aligns_up(void)
+{
+    /* next is misaligned for the requested BAR size — the helper must
+     * round up. 64 KB BAR placed after a 4 KB bump needs to start
+     * at 0x...10000, not 0x...01000. */
+    uint64_t next = 0x1b80001000ULL;
+    uint64_t end  = 0x1b80100000ULL;
+    uint64_t addr = 0;
+    TEST_ASSERT_TRUE(pcie_place_bar(&next, end, 0x10000ULL, &addr));
+    TEST_ASSERT_EQUAL_HEX64(0x1b80010000ULL, addr);  /* aligned up */
+    TEST_ASSERT_EQUAL_HEX64(0x1b80020000ULL, next);
+}
+
+static void test_place_bar_rejects_overflow(void)
+{
+    /* Window only has 0x4000 bytes left but we ask for 0x10000. */
+    uint64_t next = 0x1bffffc000ULL;
+    uint64_t end  = 0x1c00000000ULL;
+    uint64_t addr = 0xdeadbeefULL;
+    TEST_ASSERT_FALSE(pcie_place_bar(&next, end, 0x10000ULL, &addr));
+    /* On failure, *next and *out_addr must not be clobbered with a
+     * partially-committed state. Pin both. */
+    TEST_ASSERT_EQUAL_HEX64(0x1bffffc000ULL, next);
+    TEST_ASSERT_EQUAL_HEX64(0xdeadbeefULL,   addr);
+}
+
+static void test_place_bar_zero_size_rejected(void)
+{
+    uint64_t next = 0x1000ULL;
+    uint64_t end  = 0x10000ULL;
+    uint64_t addr = 0;
+    TEST_ASSERT_FALSE(pcie_place_bar(&next, end, 0, &addr));
+}
+
+static void test_place_bar_rejects_high_address_wrap(void)
+{
+    /* Pathological: window ends at UINT64_MAX and requested BAR size
+     * would overflow `aligned + size`. Must not silently succeed with
+     * a wrapped address. */
+    uint64_t next = 0xFFFFFFFFFFFF0000ULL;
+    uint64_t end  = 0xFFFFFFFFFFFFFFFFULL;
+    uint64_t addr = 0;
+    TEST_ASSERT_FALSE(pcie_place_bar(&next, end, 0x100000ULL, &addr));
+}
+
+static void test_place_bar_sequential_packing(void)
+{
+    /* Three BARs of different sizes packed into a window. Each one
+     * should end up naturally aligned to its own size. */
+    uint64_t next = 0x1b80000000ULL;
+    uint64_t end  = 0x1b80100000ULL;
+    uint64_t a0 = 0, a1 = 0, a2 = 0;
+
+    TEST_ASSERT_TRUE(pcie_place_bar(&next, end, 0x1000ULL,  &a0));
+    TEST_ASSERT_TRUE(pcie_place_bar(&next, end, 0x10000ULL, &a1));
+    TEST_ASSERT_TRUE(pcie_place_bar(&next, end, 0x4000ULL,  &a2));
+
+    TEST_ASSERT_EQUAL_HEX64(0x1b80000000ULL, a0);
+    TEST_ASSERT_EQUAL_HEX64(0x1b80010000ULL, a1);   /* 64 KB aligned */
+    TEST_ASSERT_EQUAL_HEX64(0x1b80020000ULL, a2);   /* 16 KB aligned */
+}
+
 int test_suite_pcie(void)
 {
     UnityBegin("PCIe host controller");
@@ -259,6 +350,14 @@ int test_suite_pcie(void)
      * backend is still exercised by pcie_init() at boot; dedicated
      * coverage on Pi 5 / Jetson lands with Phase 3 (Hailo driver). */
 #endif
+
+    /* pcie_place_bar is a pure function — runs on every platform. */
+    RUN_TEST(test_place_bar_first_fit);
+    RUN_TEST(test_place_bar_aligns_up);
+    RUN_TEST(test_place_bar_rejects_overflow);
+    RUN_TEST(test_place_bar_zero_size_rejected);
+    RUN_TEST(test_place_bar_rejects_high_address_wrap);
+    RUN_TEST(test_place_bar_sequential_packing);
 
     return UnityEnd();
 }

@@ -21,6 +21,7 @@
 #include "pmm.h"
 #include "gpu.h"          /* cache_clean_range / cache_invalidate_range */
 #include "debug.h"
+#include "spinlock.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -174,26 +175,51 @@ static void pi5_bar4_read(uint32_t offset, void *dst, size_t n)
  */
 #define PCIE1_DMA_OFFSET   0x0000001000000000ULL
 
+/*
+ * PMM is a buddy allocator: pmm_alloc_pages(N) rounds N up to the
+ * next power of 2 and returns a block aligned to that size (pmm.c
+ * enforces this via is_aligned_to_order on free). So asking for
+ * max(size, align) pages gives us a block whose natural alignment
+ * meets `align` without any manual within-block alignment — a
+ * mid-block pointer would fail pmm_free_pages's alignment check
+ * anyway (pmm.c:560).
+ *
+ * alloc and free must therefore agree on the "effective size"
+ * max(size, align). The vtable passes both values to free so the
+ * order computation matches.
+ */
+static inline size_t pi5_dma_pages(size_t size, size_t align)
+{
+    if (align < PAGE_SIZE) align = PAGE_SIZE;
+    size_t request = size > align ? size : align;
+    return (request + PAGE_SIZE - 1) / PAGE_SIZE;
+}
+
 static void *pi5_dma_alloc(size_t size, size_t align, uint64_t *iova_out)
 {
-    /* PMM only does page-size alignment; callers that need 64 KB
-     * alignment (VDMA descriptor lists) must over-allocate. */
-    size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    (void)align;   /* TODO: honor align by over-allocating when > PAGE_SIZE */
-
+    if (size == 0) return NULL;
+    size_t pages = pi5_dma_pages(size, align);
     void *va = pmm_alloc_pages(pages);
     if (!va) return NULL;
+
+    /* Defensive: pmm buddy alignment should already satisfy `align`.
+     * A mismatch would be a PMM bug or a non-power-of-2 `align`. */
+    if (align > PAGE_SIZE && ((uintptr_t)va & (align - 1)) != 0) {
+        WARN("hailo: pi5_dma_alloc got misaligned VA %p (align=%lu)",
+             va, (unsigned long)align);
+        pmm_free_pages(va, pages);
+        return NULL;
+    }
     if (iova_out) {
         *iova_out = (uint64_t)(uintptr_t)va + PCIE1_DMA_OFFSET;
     }
     return va;
 }
 
-static void pi5_dma_free(void *ptr, size_t size)
+static void pi5_dma_free(void *ptr, size_t size, size_t align)
 {
     if (!ptr) return;
-    size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
-    pmm_free_pages(ptr, pages);
+    pmm_free_pages(ptr, pi5_dma_pages(size, align));
 }
 
 static void pi5_cache_clean(const void *addr, size_t size)
@@ -233,7 +259,20 @@ static void pi5_udelay(uint32_t usec)
  * must not register twice — the second call is rejected to make
  * the limit loud rather than silently clobbering state the IRQ
  * trampoline still sees.
+ *
+ * Synchronization: `irq_lock` serializes pi5_register_irq against
+ * concurrent callers and, more importantly, closes the window where
+ * two CPUs could both observe `user_irq_handler == NULL` in the
+ * bind-once check and both proceed to register. The trampoline
+ * itself reads the globals unlocked (spinlocks aren't safe from
+ * ISR context on this platform — see `UART Lock on Pi 5 / Jetson`
+ * note in kernel/CLAUDE.md). The ordering that makes the unlocked
+ * read safe is: (1) writers hold irq_lock; (2) writers DSB SY
+ * before pcie_bind_irq_handler enables the GIC line; (3) GIC enable
+ * is the edge that lets the IRQ fire. The trampoline therefore only
+ * runs *after* the publish has been observed.
  */
+static spinlock_t irq_lock = SPINLOCK_INIT;
 static void (*user_irq_handler)(void *);
 static void  *user_irq_ctx;
 
@@ -248,7 +287,10 @@ static void hailo_msi_trampoline(void *ctx)
 static int pi5_register_irq(void (*handler)(void *), void *ctx)
 {
     if (!handler || !hailo_pcidev) return HAILO_ERR_INVAL;
+
+    irq_flags_t flags = spin_lock_irqsave(&irq_lock);
     if (user_irq_handler) {
+        spin_unlock_irqrestore(&irq_lock, flags);
         WARN("hailo: MSI handler already registered — rejecting second call");
         return HAILO_ERR_INVAL;
     }
@@ -256,14 +298,14 @@ static int pi5_register_irq(void (*handler)(void *), void *ctx)
     struct pcie_msi_handle msi;
     int rc = pcie_alloc_msi(hailo_pcidev, 1, &msi);
     if (rc != PCIE_OK) {
+        spin_unlock_irqrestore(&irq_lock, flags);
         WARN("hailo: pcie_alloc_msi failed (%d)", rc);
         return HAILO_ERR_IO;
     }
 
-    /* Publish handler + ctx before binding: the IRQ can fire on any
-     * CPU once pcie_bind_irq_handler enables the GIC line, and
-     * without the DSB SY the trampoline could see a NULL handler
-     * on a CPU that hasn't observed our write yet. */
+    /* Publish handler + ctx before binding. DSB SY pushes the writes
+     * to the point of coherence so the trampoline (which may run on
+     * any CPU) observes them by the time the GIC line is enabled. */
     user_irq_handler = handler;
     user_irq_ctx     = ctx;
     __asm__ volatile("dsb sy" ::: "memory");
@@ -273,8 +315,10 @@ static int pi5_register_irq(void (*handler)(void *), void *ctx)
         user_irq_handler = NULL;
         user_irq_ctx     = NULL;
         __asm__ volatile("dsb sy" ::: "memory");
+        spin_unlock_irqrestore(&irq_lock, flags);
         return HAILO_ERR_IO;
     }
+    spin_unlock_irqrestore(&irq_lock, flags);
     INFO("hailo: MSI vector %u bound", msi.first_irq);
     return HAILO_OK;
 }
