@@ -57,6 +57,88 @@
 #define PCIE1_EXT_CFG_INDEX     0x9000u
 #define PCIE1_EXT_CFG_DATA      0x9004u         /* BCM2712 variant, not 0x8000 */
 
+/* -------------------------------------------------------------------------- */
+/* Link-training registers (Phase 1.5 — firmware doesn't train pcie1).        */
+/* All offsets from docs/reference/rpi-linux-pcie-brcmstb.c unless noted.     */
+/* -------------------------------------------------------------------------- */
+
+#define PCIE1_RC_CFG_VENDOR_SPECIFIC_REG1  0x0188u
+#define   RC_CFG_VENDOR_ENDIAN_MODE_BAR2_MASK  0xCu
+#define PCIE1_RC_CFG_PRIV1_ID_VAL3         0x043Cu
+#define   ID_VAL3_CLASS_CODE_MASK              0xFFFFFFu
+
+#define PCIE1_MDIO_ADDR          0x1100u
+#define PCIE1_MDIO_WR_DATA       0x1104u
+#define PCIE1_MDIO_RD_DATA       0x1108u
+#define   MDIO_PORT0_MASK        (0u << 16)     /* port = 0 */
+#define   MDIO_CMD_READ          (1u << 20)
+#define   MDIO_CMD_WRITE         (0u << 20)
+#define   MDIO_DATA_DONE_MASK    0x80000000u
+#define   MDIO_SET_ADDR_REGAD    0x1Fu
+#define   MDIO_ADDR_BLOCK_PLL    0x1600u
+
+#define PCIE1_RC_PL_PHY_CTL_15   0x184Cu
+#define   PHY_CTL_15_PM_CLK_PERIOD_MASK  0xFFu
+
+#define PCIE1_MISC_CTRL          0x4008u
+#define   MISC_CTRL_SCB_ACCESS_EN_MASK       (1u << 12)
+#define   MISC_CTRL_CFG_READ_UR_MODE_MASK    (1u << 13)
+#define   MISC_CTRL_MAX_BURST_SIZE_MASK      (3u << 20)
+#define   MISC_CTRL_MAX_BURST_SIZE_128       (1u << 20)  /* 128B on 2712 */
+#define   MISC_CTRL_SCB0_SIZE_MASK           0xF8000000u
+
+#define PCIE1_RC_BAR1_CONFIG_LO  0x402Cu
+#define PCIE1_RC_BAR2_CONFIG_LO  0x4034u
+#define PCIE1_RC_BAR2_CONFIG_HI  0x4038u
+#define PCIE1_RC_BAR3_CONFIG_LO  0x403Cu
+#define   RC_BAR_CONFIG_LO_SIZE_MASK  0x1Fu
+
+#define PCIE1_RC_CONFIG_RETRY_TIMEOUT  0x405Cu
+#define PCIE1_MISC_CTRL_REG            0x4064u  /* holds PERSTB at bit 2 */
+#define   PCIE_CTRL_PERSTB_MASK        (1u << 2)
+#define PCIE1_UBUS_CTRL                0x40A4u
+#define   UBUS_CTRL_REPLY_ERR_DIS      (1u << 13)
+#define   UBUS_CTRL_REPLY_DECERR_DIS   (1u << 19)
+#define PCIE1_UBUS_TIMEOUT             0x40A8u
+#define PCIE1_UBUS_BAR2_CONFIG_REMAP   0x40B4u
+#define   UBUS_BAR_REMAP_ACCESS_EN     (1u << 0)
+#define PCIE1_AXI_READ_ERROR_DATA      0x4170u
+
+/* HARD_DEBUG offset is variant-specific. For 2712 it's 0x4304 (generic
+ * 0x4204). See pcie_offsets_bcm2712[] in the reference driver. */
+#define PCIE1_HARD_DEBUG                 0x4304u
+#define   HARD_DEBUG_SERDES_IDDQ_MASK    (1u << 27)
+
+/* MDIO PLL programming for 54 MHz xosc refclk (brcm_pcie_munge_pll).
+ * Values lifted verbatim from the reference driver — these are
+ * empirically-determined SerDes PHY settings for the 2712 variant. */
+#define MDIO_PLL_TUNE_COUNT 7
+static const struct { uint8_t regad; uint16_t val; } mdio_pll_tune[] = {
+    { 0x16, 0x50b9 }, { 0x17, 0xbda1 }, { 0x18, 0x0094 },
+    { 0x19, 0x97b4 }, { 0x1b, 0x5030 }, { 0x1c, 0x5030 },
+    { 0x1e, 0x0007 },
+};
+
+/* BCM reset controller — shared across the SoC.
+ * ID 7 and ID 43 are the two reset lines for pcie1 (bcm2712.dtsi:1048).
+ * For 2712, bridge_sw_init uses ID 43 (the "bridge reset"). ID 7 is the
+ * higher-level PCIe block reset; firmware already deasserts it at boot
+ * (pcie2/RP1 works), so we leave it alone and only toggle ID 43. */
+#define BCM_RESET_BASE          0x1001504318UL
+#define BCM_RESET_BANK_SIZE     0x18u
+#define   RESET_SW_INIT_SET     0x00u
+#define   RESET_SW_INIT_CLEAR   0x04u
+#define BCM_RESET_ID_BRIDGE     43u        /* bank 1, bit 11 */
+
+/* Rescal — shared SATA/PCIe PHY calibration block.
+ * Firmware may have already run this (pcie2 works), but running it again
+ * is idempotent. */
+#define RESCAL_BASE             0x1000119500UL
+#define   RESCAL_START          0x00u
+#define   RESCAL_START_BIT      (1u << 0)
+#define   RESCAL_STATUS         0x08u
+#define   RESCAL_STATUS_BIT     (1u << 0)
+
 /*
  * Outbound window — firmware-programmed translation from PCIe-side
  * addresses to CPU physical addresses. These constants come from
@@ -172,6 +254,9 @@ static int resolve_mmio_regions(void)
 {
     pcie1_regs = (volatile uint8_t *)(uintptr_t)PCIE1_BASE;
     mip1_regs  = (volatile uint8_t *)(uintptr_t)MIP1_BASE;
+    /* Reset controller + rescal live in the same 2 MB block already
+     * mapped by vmm_setup_platform for pcie1 RC + MIP0/1. Direct
+     * access works because the block is Device-nGnRnE identity-mapped. */
 
     /*
      * Endpoint BAR windows at 0x1b_80000000+ (non-pref) and
@@ -179,6 +264,329 @@ static int resolve_mmio_regions(void)
      * vmm_map_region installs Device mappings lazily when map_bar
      * is called on a specific BAR — see bcm2712_map_bar below.
      */
+    return PCIE_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Link training — port of brcm_pcie_setup() for the 2712 variant.             */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Busy-wait delay on CNTPCT. Safe pre-scheduler. `us` typical range is
+ * 1..1000; larger values are fine, smaller values may round up due to
+ * counter granularity (54 MHz on Pi 5 = ~18.5 ns tick).
+ */
+static void bcm2712_udelay(uint32_t us)
+{
+    uint64_t freq, ticks, deadline;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(ticks));
+    deadline = ticks + (freq * us + 999999u) / 1000000u;
+    for (;;) {
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(ticks));
+        if (ticks >= deadline) break;
+    }
+}
+
+static inline uint32_t reset_r32(uint32_t off)
+{
+    return *(volatile uint32_t *)(uintptr_t)(BCM_RESET_BASE + off);
+}
+static inline void reset_w32(uint32_t off, uint32_t val)
+{
+    *(volatile uint32_t *)(uintptr_t)(BCM_RESET_BASE + off) = val;
+}
+static inline uint32_t rescal_r32(uint32_t off)
+{
+    return *(volatile uint32_t *)(uintptr_t)(RESCAL_BASE + off);
+}
+static inline void rescal_w32(uint32_t off, uint32_t val)
+{
+    *(volatile uint32_t *)(uintptr_t)(RESCAL_BASE + off) = val;
+}
+
+/*
+ * Toggle a reset line managed by the brcmstb-reset controller.
+ * Each bank is 0x18 bytes; bit = ID & 0x1F.
+ * See docs/reference/rpi-linux-reset-brcmstb.c for the reference logic.
+ */
+static void bcm_reset_assert(uint32_t id)
+{
+    uint32_t bank = id >> 5;
+    uint32_t bit  = 1u << (id & 0x1Fu);
+    reset_w32(bank * BCM_RESET_BANK_SIZE + RESET_SW_INIT_SET, bit);
+}
+static void bcm_reset_deassert(uint32_t id)
+{
+    uint32_t bank = id >> 5;
+    uint32_t bit  = 1u << (id & 0x1Fu);
+    reset_w32(bank * BCM_RESET_BANK_SIZE + RESET_SW_INIT_CLEAR, bit);
+    bcm2712_udelay(200);
+}
+
+/*
+ * Run the shared PCIe/SATA rescal. Idempotent — if firmware already
+ * ran it for pcie2, running again doesn't break anything. Per
+ * docs/reference/rpi-linux-reset-brcmstb-rescal.c.
+ */
+static int rescal_bring_up(void)
+{
+    uint32_t reg = rescal_r32(RESCAL_START);
+    rescal_w32(RESCAL_START, reg | RESCAL_START_BIT);
+    if ((rescal_r32(RESCAL_START) & RESCAL_START_BIT) == 0) {
+        ERROR("pcie1: rescal did not start");
+        return PCIE_ERR_IO;
+    }
+    /* Poll STATUS, 100 us interval, 1 ms total. */
+    for (int i = 0; i < 10; i++) {
+        if (rescal_r32(RESCAL_STATUS) & RESCAL_STATUS_BIT) {
+            reg = rescal_r32(RESCAL_START);
+            rescal_w32(RESCAL_START, reg & ~RESCAL_START_BIT);
+            return PCIE_OK;
+        }
+        bcm2712_udelay(100);
+    }
+    ERROR("pcie1: rescal timeout waiting for STATUS bit");
+    return PCIE_ERR_TIMEOUT;
+}
+
+/*
+ * MDIO write over the RC's internal PCIe PHY bus. Ports 0, used for
+ * the PLL block on this SoC. Poll for DONE bit, 10 us interval, 100 us
+ * total. Port / cmd encoding matches brcm_pcie_mdio_form_pkt().
+ */
+static int mdio_wait_done(uint32_t off, bool want_done_low)
+{
+    for (int i = 0; i < 10; i++) {
+        uint32_t v = pcie1_r32(off);
+        bool done_set = (v & MDIO_DATA_DONE_MASK) != 0;
+        if (want_done_low ? !done_set : done_set) return PCIE_OK;
+        bcm2712_udelay(10);
+    }
+    (void)off;
+    return PCIE_ERR_TIMEOUT;
+}
+
+static int pcie1_mdio_write(uint8_t regad, uint16_t val)
+{
+    uint32_t pkt = MDIO_PORT0_MASK
+                 | ((uint32_t)regad & 0xFFFFu)
+                 | MDIO_CMD_WRITE;
+    pcie1_w32(PCIE1_MDIO_ADDR, pkt);
+    (void)pcie1_r32(PCIE1_MDIO_ADDR);          /* read-back fence */
+    pcie1_w32(PCIE1_MDIO_WR_DATA, MDIO_DATA_DONE_MASK | val);
+    /* brcm_pcie_mdio_write waits for DONE bit LOW (cleared by HW). */
+    return mdio_wait_done(PCIE1_MDIO_WR_DATA, /*want_done_low=*/true);
+}
+
+static void munge_pll_54mhz(void)
+{
+    /* Set block-address register so subsequent writes land at 0x1600. */
+    pcie1_mdio_write(MDIO_SET_ADDR_REGAD, MDIO_ADDR_BLOCK_PLL);
+    for (int i = 0; i < MDIO_PLL_TUNE_COUNT; i++) {
+        pcie1_mdio_write(mdio_pll_tune[i].regad, mdio_pll_tune[i].val);
+    }
+    bcm2712_udelay(200);
+}
+
+/*
+ * Program a single outbound window (CPU MMIO → PCIe memory-space
+ * address). Reference: brcm_pcie_set_outbound_win().
+ */
+static void set_outbound_win(unsigned win,
+                             uint64_t cpu_addr, uint64_t pcie_addr, uint64_t size)
+{
+    /* Window base/hi registers — PCIe-side low/high 32. */
+    pcie1_w32(0x400Cu + win * 8, (uint32_t)(pcie_addr & 0xFFFFFFFFu));
+    pcie1_w32(0x4010u + win * 8, (uint32_t)(pcie_addr >> 32));
+
+    uint64_t cpu_mb   = cpu_addr / (1024ull * 1024ull);
+    uint64_t limit_mb = (cpu_addr + size - 1ull) / (1024ull * 1024ull);
+
+    /* BASE_LIMIT packs low 12 bits each: base in bits[15:4], limit in
+     * bits[31:20]. High bits go in separate BASE_HI / LIMIT_HI regs. */
+    uint32_t bl = ((uint32_t)(cpu_mb   & 0xFFFu) << 4)
+                | ((uint32_t)(limit_mb & 0xFFFu) << 20);
+    pcie1_w32(0x4070u + win * 4, bl);
+    /* High 8 bits of each address (4096..1M GB worth). */
+    pcie1_w32(0x4080u + win * 8, (uint32_t)(cpu_mb   >> 12) & 0xFFu);
+    pcie1_w32(0x4084u + win * 8, (uint32_t)(limit_mb >> 12) & 0xFFu);
+}
+
+/*
+ * Wait for link training to complete. 100 ms budget at 5 ms poll
+ * intervals — same timing as the Linux brcm_pcie_start_link path.
+ */
+static int wait_link_up(void)
+{
+    for (int i = 0; i < 20; i++) {
+        uint32_t status = pcie1_r32(PCIE1_MISC_STATUS);
+        if ((status & (STATUS_PHY_LINKUP | STATUS_DL_ACTIVE))
+            == (STATUS_PHY_LINKUP | STATUS_DL_ACTIVE)) {
+            INFO("pcie1: link up (status=0x%x) after %d ms",
+                 status, i * 5);
+            return PCIE_OK;
+        }
+        bcm2712_udelay(5000);
+    }
+    uint32_t status = pcie1_r32(PCIE1_MISC_STATUS);
+    ERROR("pcie1: link training timeout after 100 ms (status=0x%x)", status);
+    return PCIE_ERR_NOLINK;
+}
+
+/*
+ * Full link-training sequence for pcie1. Called from bcm2712_init
+ * before host_ops signals link_up. See plan §2.3 / Phase 1.5 for
+ * context on why SLM-OS has to do this.
+ *
+ * Idempotent once link is up: if the link is already trained, return
+ * PCIE_OK without touching resets.
+ */
+static int bcm2712_train_link(void)
+{
+    /* If firmware (or a prior SLM-OS boot) already trained the link,
+     * don't re-reset — that'd disconnect the HAT. */
+    uint32_t status = pcie1_r32(PCIE1_MISC_STATUS);
+    if ((status & (STATUS_PHY_LINKUP | STATUS_DL_ACTIVE))
+        == (STATUS_PHY_LINKUP | STATUS_DL_ACTIVE)) {
+        INFO("pcie1: link already up (status=0x%x) — skipping training",
+             status);
+        return PCIE_OK;
+    }
+
+    INFO("pcie1: training link (status=0x%x before reset)", status);
+
+    /* 1. Run rescal (idempotent). */
+    int rc = rescal_bring_up();
+    if (rc != PCIE_OK) return rc;
+
+    /* 2. Reset the bridge, deassert, settle. */
+    bcm_reset_assert(BCM_RESET_ID_BRIDGE);
+    bcm2712_udelay(200);
+    bcm_reset_deassert(BCM_RESET_ID_BRIDGE);
+
+    /* 3. Clear SERDES_IDDQ — power on the PHY. */
+    uint32_t tmp = pcie1_r32(PCIE1_HARD_DEBUG);
+    tmp &= ~HARD_DEBUG_SERDES_IDDQ_MASK;
+    pcie1_w32(PCIE1_HARD_DEBUG, tmp);
+    bcm2712_udelay(200);
+
+    /* 4. MDIO PLL tuning for 54 MHz xosc refclk (2712-specific). */
+    munge_pll_54mhz();
+
+    /* 5. L1SS errata — PM clock period = 18.52 ns (encoded 0x12). */
+    tmp = pcie1_r32(PCIE1_RC_PL_PHY_CTL_15);
+    tmp &= ~PHY_CTL_15_PM_CLK_PERIOD_MASK;
+    tmp |= 0x12;
+    pcie1_w32(PCIE1_RC_PL_PHY_CTL_15, tmp);
+
+    /* 6. MISC_CTRL: enable SCB access, UR mode on config reads,
+     *    128B max burst (2712 uses encoded value 1). */
+    tmp = pcie1_r32(PCIE1_MISC_CTRL);
+    tmp |= MISC_CTRL_SCB_ACCESS_EN_MASK
+         | MISC_CTRL_CFG_READ_UR_MODE_MASK;
+    tmp &= ~MISC_CTRL_MAX_BURST_SIZE_MASK;
+    tmp |=  MISC_CTRL_MAX_BURST_SIZE_128;
+    pcie1_w32(PCIE1_MISC_CTRL, tmp);
+
+    /*
+     * 7. Inbound window (RC_BAR2). DT says
+     *    dma-ranges = 0x10_00000000 PCIe → 0x0 CPU, 64 GB.
+     *    Encoded-size = log2(64GB) - 15 = 36 - 15 = 21 (0x15).
+     */
+    pcie1_w32(PCIE1_RC_BAR2_CONFIG_LO,
+              (0u /* cpu_phys low */ & 0xFFFFFFE0u) | 0x15u);
+    pcie1_w32(PCIE1_RC_BAR2_CONFIG_HI, 0x10u /* high 32 of 0x10_00000000 */);
+
+    tmp = pcie1_r32(PCIE1_UBUS_BAR2_CONFIG_REMAP);
+    tmp |= UBUS_BAR_REMAP_ACCESS_EN;
+    pcie1_w32(PCIE1_UBUS_BAR2_CONFIG_REMAP, tmp);
+
+    /* SCB0 size: on Pi 5 with 4 GB RAM, log2(4GB) - 15 = 17 (0x11).
+     * Bits 27-31 of MISC_CTRL. */
+    tmp = pcie1_r32(PCIE1_MISC_CTRL);
+    tmp = (tmp & ~MISC_CTRL_SCB0_SIZE_MASK) | ((17u & 0x1Fu) << 27);
+    pcie1_w32(PCIE1_MISC_CTRL, tmp);
+
+    /* 8. Suppress AXI error responses on unreachable endpoints
+     *    (2712-specific — prevents AER aborts during enumeration). */
+    tmp = pcie1_r32(PCIE1_UBUS_CTRL);
+    tmp |= UBUS_CTRL_REPLY_ERR_DIS | UBUS_CTRL_REPLY_DECERR_DIS;
+    pcie1_w32(PCIE1_UBUS_CTRL, tmp);
+    pcie1_w32(PCIE1_AXI_READ_ERROR_DATA, 0xFFFFFFFFu);
+
+    /* 9. Timeouts (2712-specific; values from reference driver). */
+    pcie1_w32(PCIE1_UBUS_TIMEOUT, 0x0B2D0000u);
+    pcie1_w32(PCIE1_RC_CONFIG_RETRY_TIMEOUT, 0x0ABA0000u);
+
+    /* 10. Disable RC_BAR1 and RC_BAR3 (clear size field). */
+    tmp = pcie1_r32(PCIE1_RC_BAR1_CONFIG_LO);
+    tmp &= ~RC_BAR_CONFIG_LO_SIZE_MASK;
+    pcie1_w32(PCIE1_RC_BAR1_CONFIG_LO, tmp);
+    tmp = pcie1_r32(PCIE1_RC_BAR3_CONFIG_LO);
+    tmp &= ~RC_BAR_CONFIG_LO_SIZE_MASK;
+    pcie1_w32(PCIE1_RC_BAR3_CONFIG_LO, tmp);
+
+    /* 11. Set class code to PCI-PCI bridge (0x060400). */
+    tmp = pcie1_r32(PCIE1_RC_CFG_PRIV1_ID_VAL3);
+    tmp = (tmp & ~ID_VAL3_CLASS_CODE_MASK) | 0x060400u;
+    pcie1_w32(PCIE1_RC_CFG_PRIV1_ID_VAL3, tmp);
+
+    /* 12. Outbound windows — match dma-ranges from bcm2712.dtsi:
+     *     win 0: PCIe 0x00_80000000 → CPU 0x1b_80000000, 2 GB
+     *     win 1: PCIe 0x04_00000000 → CPU 0x18_00000000, 14 GB */
+    set_outbound_win(0, PCIE1_NONPREF_CPU_BASE, PCIE1_NONPREF_PCIE_BASE,
+                     PCIE1_NONPREF_SIZE);
+    set_outbound_win(1, PCIE1_PREF64_CPU_BASE, PCIE1_PREF64_PCIE_BASE,
+                     PCIE1_PREF64_SIZE);
+
+    /* 13. Endian mode = little-endian for BAR2 (bits 2-3 = 0). */
+    tmp = pcie1_r32(PCIE1_RC_CFG_VENDOR_SPECIFIC_REG1);
+    tmp &= ~RC_CFG_VENDOR_ENDIAN_MODE_BAR2_MASK;
+    pcie1_w32(PCIE1_RC_CFG_VENDOR_SPECIFIC_REG1, tmp);
+
+    /* 14. Deassert PERST# — allow the endpoint to leave reset.
+     *     2712 uses bit 2 of PCIE_CTRL @ 0x4064 (inverted: set = deassert). */
+    tmp = pcie1_r32(PCIE1_MISC_CTRL_REG);
+    tmp |= PCIE_CTRL_PERSTB_MASK;
+    pcie1_w32(PCIE1_MISC_CTRL_REG, tmp);
+
+    /* 15. PCIe CEM §6.6.1 requires ≥100 ms from PERST# deassertion
+     *     to first config-space access. */
+    bcm2712_udelay(100000);
+
+    /* 16. Wait for link-up (PHY + DL bits). */
+    rc = wait_link_up();
+    if (rc != PCIE_OK) return rc;
+
+    /*
+     * 17. Program the RC bridge's bus numbers so downstream config
+     *     cycles (bus 1) are forwarded. Linux's PCI core does this
+     *     after enumeration; SLM-OS has to do it before scan_bus(1)
+     *     can find anything.
+     *
+     *     Bridge config @ bus 0 devfn 0 offset 0x18:
+     *       byte 0x18 = primary bus    = 0
+     *       byte 0x19 = secondary bus  = 1
+     *       byte 0x1A = subordinate bus= 1
+     *       byte 0x1B = latency timer  = 0
+     */
+    pcie1_w32(PCIE1_EXT_CFG_INDEX, 0);  /* select RC/self */
+    *(volatile uint32_t *)(pcie1_regs + 0x18u) = 0x00010100u;
+
+    /*
+     * 18. Give the endpoint time to fully enumerate its config space.
+     *     With DL_ACTIVE high, reads at config[0..7] (vendor+command)
+     *     work immediately, but reads at config[0x8+] (class/rev,
+     *     header type, BARs) return 0xFFFFFFFF for ~500 ms while the
+     *     Hailo boot ROM populates them. Linux's PCI core uses CRS
+     *     retries to hide this; SLM-OS doesn't have a CRS loop yet,
+     *     so just wait. 500 ms is generous; empirical tests on the
+     *     Pi OS dmesg show the endpoint is ready by ~200 ms post-
+     *     link-up.
+     */
+    bcm2712_udelay(500000);
+
     return PCIE_OK;
 }
 
@@ -192,6 +600,17 @@ static int bcm2712_init(void)
 
     int rc = resolve_mmio_regions();
     if (rc != PCIE_OK) return rc;
+
+    /* Train pcie1 link before the rest of the PCIe core tries to scan.
+     * Link-down is non-fatal — the core will log and skip enumeration,
+     * which is the same behaviour as "no HAT+ plugged in". */
+    rc = bcm2712_train_link();
+    if (rc != PCIE_OK) {
+        INFO("pcie1: link training failed (%d) — pcie1 will stay down", rc);
+        /* Don't return the error: an AI-HAT-less boot should still
+         * succeed, and pcie_core's own link_up() check will gate
+         * enumeration. */
+    }
 
     /* Per docs/pi5-pcie1-registers.md §4.5: unmask all 8 host
      * vectors on MIP1 and mask the VPU-side bits so VideoCore
@@ -231,6 +650,14 @@ static uint32_t cfg_read32_locked(uint8_t bus, uint8_t dev, uint8_t func,
         return *(volatile uint32_t *)(pcie1_regs + (offset & 0xFFCu));
     }
     pcie1_w32(PCIE1_EXT_CFG_INDEX, ecam_idx(bus, dev, func));
+    /*
+     * Read-back of INDEX after the write acts as a barrier and gives
+     * the bridge time to set up the TLP. Without this, back-to-back
+     * accesses on the 2712 bridge sometimes return stale data for
+     * offsets past the first dword. Matches the pattern Linux uses
+     * (readl after write).
+     */
+    (void)pcie1_r32(PCIE1_EXT_CFG_INDEX);
     return *(volatile uint32_t *)(pcie1_regs + PCIE1_EXT_CFG_DATA
                                   + (offset & 0xFFCu));
 }
@@ -298,6 +725,18 @@ static void bcm2712_config_write16(uint8_t bus, uint8_t dev, uint8_t func,
 /* -------------------------------------------------------------------------- */
 /* BAR mapping                                                                 */
 /* -------------------------------------------------------------------------- */
+
+/*
+ * Report the non-prefetchable outbound window so pcie_core's BAR
+ * allocator can assign endpoint BAR addresses. pcie1's 2 GB
+ * PCIe-side range starts at 0x80000000 (maps to CPU 0x1b_80000000).
+ */
+static int bcm2712_get_mmio_window(uint64_t *base_out, uint64_t *size_out)
+{
+    *base_out = PCIE1_NONPREF_PCIE_BASE;
+    *size_out = PCIE1_NONPREF_SIZE;
+    return PCIE_OK;
+}
 
 static void *bcm2712_map_bar(uint64_t pcie_addr, uint64_t size)
 {
@@ -546,6 +985,7 @@ static const struct pcie_host_ops bcm2712_ops = {
     .config_read32    = bcm2712_config_read32,
     .config_write32   = bcm2712_config_write32,
     .map_bar          = bcm2712_map_bar,
+    .get_mmio_window  = bcm2712_get_mmio_window,
     .alloc_msi        = bcm2712_alloc_msi,
     .bind_irq_handler = bcm2712_bind_irq_handler,
 };

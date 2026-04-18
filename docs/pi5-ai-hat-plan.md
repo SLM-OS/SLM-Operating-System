@@ -144,6 +144,23 @@ Each phase is self-contained and deliverable. Later phases assume earlier ones l
 
 **Why this phase exists** — see §2.3 above for the full story. Short version: firmware does NOT train pcie1; Linux's `brcm-pcie` driver does, at kernel boot. SLM-OS has to do the same if it wants `hailo probe` to succeed.
 
+**Implementation landed (2026-04-17, partial):** `kernel/drivers/pcie/pcie_bcm2712.c` now ports the core of `brcm_pcie_setup()`:
+- `bcm_reset_assert/deassert` for reset ID 43 (bridge reset) — toggles `0x10_01504318 + bank*0x18`.
+- `rescal_bring_up` at `0x10_00119500` — START + poll STATUS + clear START.
+- `munge_pll_54mhz` — 7 MDIO writes to PLL block 0x1600 via `PCIE_RC_DL_MDIO_{ADDR,WR_DATA}`.
+- MISC_CTRL (SCB_ACCESS_EN / CFG_READ_UR_MODE / max_burst=128B), RC_BAR2 inbound window, SCB0_SIZE, UBUS error suppression, timeouts, RC_BAR1/3 disable, class code, two outbound windows, PERST# deassert, 100 ms link-up wait.
+- Bridge bus numbers (primary/secondary/subordinate) programmed at RC config offset 0x18.
+- New `pcie_host_ops::get_mmio_window` hook lets `pcie_core` bump-allocate BARs for endpoints with firmware-unprogrammed BAR addresses (required because the standalone boot flow has no UEFI or equivalent resource manager).
+
+**Result on pi-5-1 with AI HAT+ mounted:** Link trains successfully. Status register transitions from `0x1e08f` (PHY + DL clear) to `0x3e0bf` (both set). Endpoint enumerates at `01:00.0` with vendor `0x1e60` / device `0x2864` — `pcie_find_device` finds it.
+
+**New blocker encountered (2026-04-17):** Config-space reads past offset `0x07` return `0xFFFFFFFF`, while offsets `0x00`–`0x07` (vendor/device/command/status) read correctly. Specifically `config[0x08]` (class/revision) and all BAR offsets `0x10..0x24` all read as all-ones. Linux on the same hardware reads these offsets correctly (visible in dmesg as `type 00 class 0x0b4000`), so the endpoint IS responding there — something in the SLM-OS-initialized bridge path is truncating TLP completions at the dword boundary. BAR probing can't proceed until this is fixed. Candidates to investigate next session:
+- CRS timeout/retry interaction (RC_CONFIG_RETRY_TIMEOUT = `0x0ABA0000` matches the reference, but maybe the hardware needs CRSVis=1 for the Hailo specifically).
+- MISC_CTRL bits — `MAX_BURST_SIZE` = 1 (128B) is what the reference driver picks for 2712, but a wrong encoding could cause TLP fragmentation issues.
+- Missing initialisation of RC's own PCIe capability registers before the first downstream config cycle (Linux's `pci_host_probe` sets a lot of state SLM-OS skips).
+- Bridge Memory-Base / Memory-Limit at config offsets `0x20`/`0x22` — not programmed today, might be required before the bridge forwards memory-space config reads.
+- The MDIO PLL values from the Linux reference driver are literally "settings Danny wrote down" (the comment in `pcie-brcmstb.c:473` is verbatim). Maybe one of those seven values differs from what the live Pi 5 firmware uses, and the mismatch causes flaky config-space reads.
+
 **Deliverables:**
 
 - Port of `brcm_pcie_setup()` from `drivers/pci/controller/pcie-brcmstb.c` (cached at `docs/reference/rpi-linux-pcie-brcmstb.c`) into `kernel/drivers/pcie/pcie_bcm2712.c`. The Linux function does ~400 lines of work — SLM-OS only needs the subset for the `brcm,bcm2712-pcie` compatible string (2712-specific paths).
