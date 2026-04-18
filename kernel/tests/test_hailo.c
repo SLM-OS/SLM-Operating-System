@@ -47,13 +47,11 @@ static uint64_t mock_atr0_target;
 static int      mock_init_calls;
 
 /* Simulated firmware state. hailo_boot writes a 1 to trigger_address;
- * the mock then flips these fields to the values the real device
- * would produce so the boot poll loops converge. Tests that want to
- * force a stuck-trigger or stuck-load failure set these explicitly
- * before calling hailo_boot. */
+ * the mock then sets ATR[1]'s loaded magic so the post-trigger poll
+ * converges. Tests that want to simulate a stuck-load failure clear
+ * mock_fw_sim_set_atr1_magic before calling hailo_boot. */
 static bool     mock_fw_sim_enabled;
-static uint32_t mock_fw_sim_boot_status_post_trigger;  /* default 0x2 */
-static bool     mock_fw_sim_set_atr1_magic;            /* default true */
+static bool     mock_fw_sim_set_atr1_magic;   /* default true */
 static uint32_t mock_trigger_writes;
 
 static void mock_reset(void)
@@ -63,7 +61,6 @@ static void mock_reset(void)
     mock_atr0_target = 0;
     mock_init_calls  = 0;
     mock_fw_sim_enabled = true;
-    mock_fw_sim_boot_status_post_trigger = 0x2u;
     mock_fw_sim_set_atr1_magic = true;
     mock_trigger_writes = 0;
 }
@@ -110,19 +107,15 @@ static void mock_bar4_read(uint32_t offset, void *dst, size_t n)
     memcpy(dst, &mock_sram[sram_off], n);
 }
 
-/* Simulated firmware reaction to a trigger-address write. Mirrors the
- * real chip: on the trigger doorbell, boot ROM starts, boot_status
- * transitions off UNINIT, and after "boot completes" ATR[1]'s
- * trsl_addr_lo gets set to the FW_LOADED magic. Tests can disable the
- * sim to reproduce timeout conditions. */
+/* Simulated firmware reaction to a trigger-address write. On real
+ * hardware, the boot ROM loads our uploaded FW and firmware then
+ * writes HAILO_ATR1_FW_LOADED_MAGIC into ATR[1].trsl_addr_lo to
+ * signal "running" back to the driver. Tests can disable the sim
+ * (mock_fw_sim_set_atr1_magic = false) to reproduce the load-never-
+ * completed timeout path. */
 static void mock_simulate_fw_after_trigger(void)
 {
     if (!mock_fw_sim_enabled) return;
-    uint64_t bs = hailo_fw_addrs_hailo8.boot_status - MOCK_SRAM_BASE;
-    if (bs + 4 <= MOCK_SRAM_SIZE) {
-        memcpy(&mock_sram[bs], &mock_fw_sim_boot_status_post_trigger,
-               sizeof(uint32_t));
-    }
     if (mock_fw_sim_set_atr1_magic) {
         uint32_t atr1_lo_off = HAILO_ATR_BASE + HAILO_ATR_STRIDE
                              + HAILO_ATR_OFF_TRSL_ADDR_LO;
@@ -425,8 +418,13 @@ static size_t build_fw_blob(uint8_t *out, size_t out_cap,
                             uint32_t content_size,
                             uint32_t fw_major, uint32_t fw_minor, uint32_t fw_rev)
 {
+    /* Hailo-8 production firmware carries BOTH app and core sections.
+     * The core has its own header + code appended after the cert
+     * content. Tests use a small core (4 bytes) to keep blobs short. */
+    const uint32_t core_code_size = 4u;
     size_t need = sizeof(struct hailo_firmware_header) + code_size
-                + sizeof(struct hailo_fw_cert_header) + key_size + content_size;
+                + sizeof(struct hailo_fw_cert_header) + key_size + content_size
+                + sizeof(struct hailo_firmware_header) + core_code_size;
     if (need > out_cap) return 0;
 
     struct hailo_firmware_header hdr = {
@@ -437,6 +435,11 @@ static size_t build_fw_blob(uint8_t *out, size_t out_cap,
     struct hailo_fw_cert_header cert = {
         .key_size = key_size, .content_size = content_size,
     };
+    struct hailo_firmware_header core_hdr = {
+        .magic = HAILO_FW_MAGIC_HAILO8, .header_version = 0,
+        .firmware_major = fw_major, .firmware_minor = fw_minor,
+        .firmware_revision = fw_rev, .code_size = core_code_size,
+    };
 
     size_t off = 0;
     memcpy(out + off, &hdr, sizeof(hdr));               off += sizeof(hdr);
@@ -444,6 +447,8 @@ static size_t build_fw_blob(uint8_t *out, size_t out_cap,
     memcpy(out + off, &cert, sizeof(cert));             off += sizeof(cert);
     for (uint32_t i = 0; i < key_size;     i++) out[off++] = (uint8_t)(0x40 + i);
     for (uint32_t i = 0; i < content_size; i++) out[off++] = (uint8_t)(0x80 + i);
+    memcpy(out + off, &core_hdr, sizeof(core_hdr));     off += sizeof(core_hdr);
+    for (uint32_t i = 0; i < core_code_size; i++) out[off++] = (uint8_t)(0xC0 + i);
     return off;
 }
 
@@ -470,7 +475,7 @@ static void test_boot_rejects_wrong_state(void)
     hailo_platform = &mock_ops;
     TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_init());
     /* state stays UNINIT after init */
-    uint8_t blob[64];
+    uint8_t blob[128];
     size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
     TEST_ASSERT_TRUE(n != 0);
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, hailo_boot(blob, n));
@@ -479,7 +484,7 @@ static void test_boot_rejects_wrong_state(void)
 static void test_boot_rejects_bad_magic(void)
 {
     boot_setup_probed();
-    uint8_t blob[64];
+    uint8_t blob[128];
     size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
     TEST_ASSERT_TRUE(n != 0);
     ((struct hailo_firmware_header *)blob)->magic = 0xDEADBEEFu;
@@ -526,7 +531,7 @@ static void test_boot_rejects_unexpected_boot_status(void)
     uint32_t running = 0x5u;
     memcpy(&mock_sram[hailo_fw_addrs_hailo8.boot_status - MOCK_SRAM_BASE],
            &running, sizeof(running));
-    uint8_t blob[64];
+    uint8_t blob[128];
     size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
     TEST_ASSERT_TRUE(n != 0);
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_IO, hailo_boot(blob, n));
@@ -567,30 +572,54 @@ static void test_boot_succeeds_and_uploads_sections(void)
         content_src, 12));
 }
 
-static void test_boot_fails_when_bootloader_never_enters(void)
+static void test_boot_rejects_missing_core_fw(void)
 {
     boot_setup_probed();
-    /* Simulate stuck boot ROM: trigger write doesn't flip boot_status
-     * off UNINIT. Keep boot_status at UNINIT even after trigger. */
-    mock_fw_sim_boot_status_post_trigger = HAILO_BOOT_STATUS_UNINIT;
-    mock_fw_sim_set_atr1_magic = false;
+    /* Build app + cert only — no core firmware trailer. Hailo-8
+     * production FW always carries a core section; hailo_boot must
+     * reject a truncated blob. Manually build the blob since
+     * build_fw_blob always appends a core section. */
+    uint8_t blob[128];
+    struct hailo_firmware_header app_hdr = {
+        .magic = HAILO_FW_MAGIC_HAILO8, .code_size = 4,
+    };
+    struct hailo_fw_cert_header cert = { .key_size = 4, .content_size = 4 };
+    size_t off = 0;
+    memcpy(blob + off, &app_hdr, sizeof(app_hdr)); off += sizeof(app_hdr);
+    for (int i = 0; i < 4; i++) blob[off++] = 0x10 + i;  /* code */
+    memcpy(blob + off, &cert, sizeof(cert));       off += sizeof(cert);
+    for (int i = 0; i < 4; i++) blob[off++] = 0x40 + i;  /* key */
+    for (int i = 0; i < 4; i++) blob[off++] = 0x80 + i;  /* content */
+    /* NO core header or code. */
 
-    uint8_t blob[64];
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE, hailo_boot(blob, off));
+    TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_FAILED, (int)hailo_get_state());
+}
+
+static void test_boot_rejects_bad_core_magic(void)
+{
+    boot_setup_probed();
+    uint8_t blob[128];
     size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
     TEST_ASSERT_TRUE(n != 0);
-    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT, hailo_boot(blob, n));
+    /* Poison core header magic — located at cert_end. */
+    size_t core_off = sizeof(struct hailo_firmware_header) + 4
+                    + sizeof(struct hailo_fw_cert_header) + 4 + 4;
+    struct hailo_firmware_header *core =
+        (struct hailo_firmware_header *)(blob + core_off);
+    core->magic = 0xCAFEBABEu;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE, hailo_boot(blob, n));
     TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_FAILED, (int)hailo_get_state());
 }
 
 static void test_boot_fails_when_fw_never_signals_loaded(void)
 {
     boot_setup_probed();
-    /* Bootloader enters (boot_status flips off UNINIT) but ATR[1]
-     * never gets the loaded magic. Exercises the second poll stage. */
-    mock_fw_sim_boot_status_post_trigger = 0x2u;
+    /* Upload succeeds but FW never sets ATR[1]'s loaded magic.
+     * Exercises the post-trigger poll-timeout path. */
     mock_fw_sim_set_atr1_magic = false;
 
-    uint8_t blob[64];
+    uint8_t blob[128];
     size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
     TEST_ASSERT_TRUE(n != 0);
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT, hailo_boot(blob, n));
@@ -656,7 +685,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_boot_rejects_cert_oversize);
     RUN_TEST(test_boot_rejects_unexpected_boot_status);
     RUN_TEST(test_boot_succeeds_and_uploads_sections);
-    RUN_TEST(test_boot_fails_when_bootloader_never_enters);
+    RUN_TEST(test_boot_rejects_missing_core_fw);
+    RUN_TEST(test_boot_rejects_bad_core_magic);
     RUN_TEST(test_boot_fails_when_fw_never_signals_loaded);
     RUN_TEST(test_boot_chunks_large_code);
 

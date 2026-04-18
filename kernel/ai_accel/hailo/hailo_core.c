@@ -429,22 +429,9 @@ static int hailo_poll(bool (*pred)(void), uint32_t interval_us, uint32_t total_u
     return pred() ? HAILO_OK : HAILO_ERR_TIMEOUT;
 }
 
-/* Poll predicates — captured state lives in module-globals during
+/* Poll predicate — captured state lives in module-globals during
  * the short window of a single boot call (which is single-threaded
  * by construction; see the state-variable comment at the top). */
-static bool boot_status_entered_bootloader(void)
-{
-    uint32_t s = 0;
-    if (dev_read32(hailo_fw_addrs_hailo8.boot_status, &s) != HAILO_OK)
-        return false;
-    /* Firmware flips boot_status from UNINIT (0x1) to a non-UNINIT
-     * value (typically 0x2 = IN_BOOTLOADER) once our trigger write
-     * is observed. We accept any transition off UNINIT as "boot
-     * started", then follow up with the ATR[1] check for
-     * "boot completed". */
-    return s != HAILO_BOOT_STATUS_UNINIT;
-}
-
 static bool atr1_shows_fw_loaded(void)
 {
     return atr1_read_trsl_lo() == HAILO_ATR1_FW_LOADED_MAGIC;
@@ -563,9 +550,47 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
     const uint8_t *key_data     = blob + cert_off + sizeof(cert_hdr);
     const uint8_t *content_data = key_data + cert_hdr.key_size;
 
+    /*
+     * Hailo-8 firmware bundles a second [header + code] pair after
+     * the cert — the "core firmware". Linux's
+     * FW_VALIDATION__validate_fw_headers validates both, and
+     * hailo_write_core_firmware uploads the core section to
+     * core_fw_header (0xA0000) + core_code_ram_base (0xC0000).
+     * Without this the boot ROM sits at UNINIT after the trigger.
+     */
+    size_t core_hdr_off = cert_end;
+    if (core_hdr_off + sizeof(struct hailo_firmware_header) > fw_size) {
+        INFO("hailo: firmware missing core-firmware section");
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    struct hailo_firmware_header core_hdr;
+    memcpy(&core_hdr, blob + core_hdr_off, sizeof(core_hdr));
+    if (core_hdr.magic != HAILO_FW_MAGIC_HAILO8) {
+        INFO("hailo: core-firmware bad magic 0x%x", core_hdr.magic);
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    if (core_hdr.code_size == 0
+     || core_hdr.code_size > HAILO_FW_MAX_CODE_SIZE) {
+        INFO("hailo: core-firmware code_size 0x%x out of range",
+             core_hdr.code_size);
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    size_t core_end = core_hdr_off + sizeof(core_hdr) + core_hdr.code_size;
+    if (core_end > fw_size) {
+        INFO("hailo: core-firmware truncated (needs 0x%lx, have 0x%lx)",
+             (unsigned long)core_end, (unsigned long)fw_size);
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    const uint8_t *core_code = blob + core_hdr_off + sizeof(core_hdr);
+
     state = HAILO_STATE_FIRMWARE_ARMED;
 
-    /* Upload. Order matches Linux's hailo_write_app_firmware. */
+    /* Upload. Order matches Linux's hailo_write_app_firmware
+     * followed by hailo_write_core_firmware. */
     rc = dev_write(hailo_fw_addrs_hailo8.boot_fw_header, &hdr, sizeof(hdr));
     if (rc != HAILO_OK) goto fail;
 
@@ -581,6 +606,20 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
                            content_data, cert_hdr.content_size);
     if (rc != HAILO_OK) goto fail;
 
+    /* Core firmware: upload code FIRST, then header. Linux does it
+     * in this order (hailo_write_core_firmware at pcie-common.c:654)
+     * presumably because the boot ROM polls the core header and
+     * starts fetching code from core_code_ram_base the moment it
+     * sees a valid header — writing header last avoids a race where
+     * the ROM reads partially-written code. */
+    rc = dev_write_chunked(hailo_fw_addrs_hailo8.core_code_ram_base,
+                           core_code, core_hdr.code_size);
+    if (rc != HAILO_OK) goto fail;
+
+    rc = dev_write(hailo_fw_addrs_hailo8.core_fw_header,
+                   &core_hdr, sizeof(core_hdr));
+    if (rc != HAILO_OK) goto fail;
+
     state = HAILO_STATE_BOOTING;
 
     /* Trigger: write 1 to trigger_address (doorbell). */
@@ -588,14 +627,17 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
                      HAILO_FW_TRIGGER_VALUE);
     if (rc != HAILO_OK) goto fail;
 
-    /* Stage 1: bootloader entered. 10 ms budget, 1 ms interval. */
-    rc = hailo_poll(boot_status_entered_bootloader, 1000u, 10000u);
-    if (rc != HAILO_OK) {
-        INFO("hailo: boot_status stayed UNINIT after trigger (boot ROM hung?)");
-        goto fail;
-    }
-
-    /* Stage 2: firmware loaded. 5 s budget, 50 ms interval. */
+    /*
+     * Wait for firmware-loaded handshake: the on-device bootloader
+     * finishes loading our FW and writes HAILO_ATR1_FW_LOADED_MAGIC
+     * into ATR[1].trsl_addr_lo. This is the only post-trigger poll
+     * Linux runs (see hailo_pcie_wait_for_firmware in
+     * pcie-common.c:832). boot_status may stay at 1 during the load
+     * because "UNINITIALIZED" in the Hailo enum actually means
+     * "boot ROM in ready state", not "device dead" — polling it to
+     * transition off 1 was the wrong invariant and caused a
+     * spurious timeout on real hardware. 5 s budget, 50 ms interval.
+     */
     rc = hailo_poll(atr1_shows_fw_loaded, 50000u, 5000000u);
     if (rc != HAILO_OK) {
         INFO("hailo: ATR[1] never reached FW_LOADED magic (fw image bad?)");
