@@ -577,38 +577,61 @@ output, no `'K'`/`'E'`/`'X'` bytes — even though the UART init is
 hardware-level (8250/16550 port writes, no Linux state needed) and
 the ELF entry address is unambiguous.
 
-**Conclusion:** kexec-tools 2.0.28 on Ubuntu 24.04 appears to load
-our non-standard kernel via both `multiboot2-x86` and `elf-x86_64`
-loaders (rc=0, kexec_loaded=1) but its purgatory never reaches our
-entry — the CPU is executing *something* (Linux dies, net drops)
-but emits no observable I/O. Either purgatory is spinning on an
-internal error path or jumping to an unmapped address.
+**2026-04-17 evening update — bzImage wrapper built and tested, same
+silent failure:**
 
-**Remaining next-session path:**
+The bzImage wrapper landed (commits above; `make kernel-bzimage
+PLATFORM=X86_64`, `scripts/make-bzimage.py`,
+`kernel/arch/x86_64/bzimage_entry.S`). Setup header passes kexec's
+bzImage64 probe, and `kexec --load --type=bzImage` succeeds via the
+default kexec_file_load syscall in <2 seconds. But `kexec --exec`
+still leaves the machine silent — **no "BZ\r\n" on COM1**, same as
+multiboot2 and elf-x86_64. The 64-bit entry stub's first
+instruction (16550 UART reinit) would emit visible bytes regardless
+of any subsequent state, so CPU is not reaching the stub.
 
-- Build a **bzImage wrapper** around `slmos-kexec.elf`. kexec's
-  `--type=bzImage` is x86's most thoroughly-tested kexec loader,
-  with a precisely documented handoff state (32-bit protected
-  mode, specific register values, boot_params at EBX). The
-  wrapper is a ~200-line 32-bit stub linked as a bzImage: it
-  reads the bzImage `setup_header.cmd_line_ptr` (or a fixed
-  offset) to find the appended slmos.elf, copies PT_LOAD
-  segments to their `p_paddr`, then jumps to `e_entry`. Everything
-  else in-tree (linker script, deploy scripts, Makefile target)
-  stays usable.
+Three kexec loaders, three silent handoffs. The blocker is now
+definitively **upstream of kexec-tools' loader choice** — either in
+kexec purgatory's 64-bit setup on this specific (Ubuntu 24.04 +
+kexec-tools 2.0.28 + H610M UEFI) combination, or in Linux's kexec
+shutdown sequence itself leaving the CPU in a state that can't run
+our code. Not a problem we can fix from userspace without
+debugging kexec-tools/kernel source with instrumentation.
 
-- **Optional diagnostics if bzImage also stays silent** — tells us
-  the blocker is upstream of kexec-tools' loader choice (hardware,
-  purgatory, BIOS runtime services):
-  - `kexec --console-serial` to get the purgatory itself to emit
-    over COM1 as it runs.
-  - Attach a physical POST card to the LPC bus (or use a
-    motherboard with one built-in) to see port 0x80 writes during
-    handoff.
-  - Try the same kexec path under QEMU with `-d int -monitor
-    stdio`; any triple-fault dumps registers. Rules in/out
-    "test-pc UEFI firmware state" as the blocker vs. "kexec
-    itself is broken on this build."
+**Remaining next-session paths:**
+
+The kexec-tools handoff is not tractable within capstone scope.
+Recommendations:
+
+- **Drop the kexec route for capstone**, keep the code paths we've
+  built as documented dead-ends. Refocus on the Jetson port (§4.1 —
+  Option A) where the same GPU work has an unobstructed path to
+  completion.
+- **Linux-side workaround — userspace nouveau→VFIO state transfer.**
+  Skip kexec entirely. Boot Linux, load nouveau, let it unlock
+  SEC2, then `rmmod vfio-pci` → `rmmod nouveau` without power-gating
+  the GPU (runtime PM off) → run a userspace tool that reopens
+  the GPU via VFIO and continues the GSP bringup from the
+  inherited unlocked state. Higher risk (nouveau cleanup may
+  re-lock SEC2), but sidesteps kexec entirely.
+- **Firmware/BIOS investigation** — try kexec on a different x86-64
+  board (another Gigabyte, an Intel NUC, a Dell OptiPlex) to
+  localise the handoff failure to test-pc's UEFI vs. a general
+  Ubuntu 24.04 issue. Doesn't advance the capstone but would tell
+  us whether the kexec path is a permanent dead-end or a
+  this-hardware issue.
+- **`kexec --console-serial`** to get kexec-tools' purgatory to
+  print progress over COM1 as it runs (may reveal *where* in
+  purgatory the silence starts). We haven't tried this yet; it's
+  genuinely the next low-effort diagnostic.
+- **Build kexec-tools from source with DEBUG=1** (also untried),
+  stepping through `dbgprintf` calls, to confirm whether purgatory
+  entry is reached at all.
+
+Even if kexec never pans out on test-pc, the infrastructure built
+(three parallel x86-64 build variants, structural verifier, deploy
+scripts, bzImage wrapper) is reusable the moment a host with a
+working kexec handoff is available.
 
 **Original "Invalid memory segment" investigation notes:**
 

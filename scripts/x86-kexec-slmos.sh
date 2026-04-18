@@ -115,18 +115,25 @@ if [[ -x /root/sec2_peek ]]; then
     fi
 fi
 
-# 7. kexec --load the SLM-OS image.
+# 7. kexec --load the SLM-OS image. Two different syscall paths are
+# needed depending on the loader:
 #
-# For the MB2 path we must use `-c` (the older kexec_load syscall) —
-# default kexec_file_load rejects every address with "Invalid memory
-# segment" (see x86-64-gpu-inference-status §4.2.k). The bzImage
-# loader has no such restriction; kexec-file-syscall works there too.
-# We stay on -c for both paths so the flag is one less moving part.
+#   mb2     — must use -c (old kexec_load). Default kexec_file_load
+#             rejects every address with "Invalid memory segment".
+#             Verified 2026-04-17 (§4.2.k).
+#   bzimage — must NOT use -c. The old syscall's `locate_hole`
+#             allocator can't find 47 MiB contiguous free pages on
+#             this host; returns "Could not find a free area of
+#             memory". Default kexec_file_load succeeds in <2s.
 #
-# No initrd, no cmdline tags — SLM-OS's entry doesn't consume them
-# today. Add "--command-line=..." here if that changes.
-log "kexec -c --load --type=$KEXEC_TYPE $KEXEC_IMAGE"
-kexec -c --load --type="$KEXEC_TYPE" "$KEXEC_IMAGE" \
+# Neither path adds an initrd or cmdline — SLM-OS's entry doesn't
+# consume them.
+case "$KEXEC_MODE" in
+    mb2)     LOAD_ARGS=(-c) ;;
+    bzimage) LOAD_ARGS=() ;;
+esac
+log "kexec ${LOAD_ARGS[*]:-} --load --type=$KEXEC_TYPE $KEXEC_IMAGE"
+kexec "${LOAD_ARGS[@]}" --load --type="$KEXEC_TYPE" "$KEXEC_IMAGE" \
     || fail "kexec --load failed" 2
 
 # 8. Fire. If the syscall succeeds the machine is now SLM-OS —
