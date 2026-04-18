@@ -1746,6 +1746,52 @@ static void test_control_read_memory_rejects_null(void)
                           hailo_control_read_memory(0x100, buf, 0));
 }
 
+static void test_control_write_memory_rejects_oversize(void)
+{
+    /* data_length above HAILO_CONTROL_MAX_MEMORY_TRANSFER must be
+     * rejected before any doorbell fires — the cap exists so a
+     * UINT32_MAX-ish accidental call can't sit in the chunk loop
+     * for minutes burning CPU 0. */
+    control_setup_running();
+    static uint8_t buf[4] = { 0 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_write_memory(0x100, buf,
+                                   HAILO_CONTROL_MAX_MEMORY_TRANSFER + 1));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_control_read_memory_rejects_oversize(void)
+{
+    control_setup_running();
+    static uint8_t buf[4];
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_read_memory(0x100, buf,
+                                  HAILO_CONTROL_MAX_MEMORY_TRANSFER + 1));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_control_write_memory_rejects_address_wrap(void)
+{
+    /* address + data_length must not wrap past UINT32_MAX. The
+     * classic pattern — address near the top of the 32-bit space
+     * with a long length — would silently advance past zero into
+     * low device addresses partway through the chunk loop. */
+    control_setup_running();
+    static uint8_t buf[4] = { 0 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_write_memory(0xFFFFFFFE, buf, 4));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_control_read_memory_rejects_address_wrap(void)
+{
+    control_setup_running();
+    static uint8_t buf[4];
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_read_memory(0xFFFFFFFE, buf, 4));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
 static void test_control_write_memory_sends_correct_wire(void)
 {
     control_setup_running();
@@ -2125,6 +2171,10 @@ int test_suite_hailo(void)
     /* WRITE_MEMORY / READ_MEMORY (Phase 5.3 tier-2, #281) */
     RUN_TEST(test_control_write_memory_rejects_null);
     RUN_TEST(test_control_read_memory_rejects_null);
+    RUN_TEST(test_control_write_memory_rejects_oversize);
+    RUN_TEST(test_control_read_memory_rejects_oversize);
+    RUN_TEST(test_control_write_memory_rejects_address_wrap);
+    RUN_TEST(test_control_read_memory_rejects_address_wrap);
     RUN_TEST(test_control_write_memory_rejects_when_not_running);
     RUN_TEST(test_control_read_memory_rejects_when_not_running);
     RUN_TEST(test_control_write_memory_sends_correct_wire);

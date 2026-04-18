@@ -29,6 +29,12 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Maximum bytes `hailo peek` will fetch in a single call. The
+ * peek handler's stack buffer is sized to this, and the len
+ * argument is rejected if it exceeds it — keeping the constant
+ * and the buffer tied together so they can't drift. */
+#define HAILO_PEEK_MAX_BYTES 64u
+
 /* Tiny hex parser for the peek/poke shell commands. Accepts an
  * optional "0x" / "0X" prefix, returns 0 on success and the parsed
  * value in *out. Returns -1 if the string is empty, a digit is
@@ -45,7 +51,11 @@ static int parse_hex_u32(const char *s, uint32_t *out)
         else if (*s >= 'a' && *s <= 'f') d = (uint32_t)(*s - 'a' + 10);
         else if (*s >= 'A' && *s <= 'F') d = (uint32_t)(*s - 'A' + 10);
         else return -1;
-        if (v > 0x0FFFFFFFu) return -1;   /* would shift MSB out */
+        /* Caps the input at 8 hex digits (0xFFFFFFFF). Once the
+         * accumulator has bit 28 set, the next left-shift-by-4
+         * would push the MSB out and silently truncate. Reject
+         * rather than wrap. */
+        if (v > 0x0FFFFFFFu) return -1;
         v = (v << 4) | d;
     }
     *out = v;
@@ -288,11 +298,12 @@ static int cmd_hailo(int argc, char *argv[])
             shell_printf("hailo: peek: invalid length '%s'\n", argv[3]);
             return 0;
         }
-        if (len == 0 || len > 64) {
-            shell_printf("hailo: peek: length %u out of range (1..64)\n", len);
+        if (len == 0 || len > HAILO_PEEK_MAX_BYTES) {
+            shell_printf("hailo: peek: length %u out of range (1..%u)\n",
+                         len, (unsigned)HAILO_PEEK_MAX_BYTES);
             return 0;
         }
-        uint8_t buf[64];
+        uint8_t buf[HAILO_PEEK_MAX_BYTES];
         int rc = hailo_control_read_memory(addr, buf, len);
         if (rc != HAILO_OK) {
             shell_printf("hailo: peek failed (%d)\n", rc);

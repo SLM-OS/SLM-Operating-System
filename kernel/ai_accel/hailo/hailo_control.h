@@ -103,6 +103,18 @@ enum hailo_control_opcode {
 #define HAILO_CONTROL_MAX_MEMORY_CHUNK 1024u
 
 /*
+ * Sanity cap on a single hailo_control_{write,read}_memory call.
+ * Chosen generously relative to realistic callers (CCW uploads
+ * for Hailo-8 models are typically under 16 MB; the largest
+ * compiled Hailo Model Zoo entry is yolov5m at ~17 MB total HEF,
+ * of which the weight section is smaller). The cap exists to
+ * stop pathological UINT32_MAX-ish inputs reaching the transport
+ * and issuing millions of doorbells at ~100 µs each — not to
+ * constrain real callers. Raise if a future model needs more.
+ */
+#define HAILO_CONTROL_MAX_MEMORY_TRANSFER (32u * 1024u * 1024u)
+
+/*
  * Common header shared by request and response. Byte-level layout
  * is fixed by the firmware (HailoRT uses #pragma pack(push, 1));
  * we use explicit uint32_ts and static_assert the total size.
@@ -232,11 +244,15 @@ int hailo_control_identify(struct hailo_control_identify_response *out);
  * HAILO_CONTROL_MAX_MEMORY_CHUNK are split internally into 1 KB
  * chunks matching HailoRT's write_memory_chunk loop.
  *
- * Returns HAILO_OK on full success, HAILO_ERR_INVAL on null/zero
- * args, or the first propagated error from the transport if a
- * chunk fails mid-flight (earlier chunks may have already been
- * committed on the device — callers who need all-or-nothing
- * semantics must implement that on top).
+ * Rejects with HAILO_ERR_INVAL if `data` is NULL, `data_length`
+ * is zero, `data_length` exceeds HAILO_CONTROL_MAX_MEMORY_TRANSFER,
+ * or `address + data_length` wraps past UINT32_MAX.
+ *
+ * Returns HAILO_OK on full success, HAILO_ERR_INVAL on arg
+ * rejection, or the first propagated error from the transport if
+ * a chunk fails mid-flight. On partial failure earlier chunks may
+ * have already been committed on the device — callers who need
+ * all-or-nothing semantics must implement that on top.
  */
 int hailo_control_write_memory(uint32_t address,
                                const void *data,
@@ -244,10 +260,16 @@ int hailo_control_write_memory(uint32_t address,
 
 /*
  * Read `data_length` bytes from firmware memory at device-side
- * `address` into `data`. Same chunking rules as write_memory.
+ * `address` into `data`. Same chunking / validation rules as
+ * write_memory.
  *
  * Returns HAILO_OK, HAILO_ERR_INVAL, HAILO_ERR_TIMEOUT (firmware
  * did not respond), or HAILO_ERR_BAD_FIRMWARE (short response).
+ * On partial failure the destination buffer has been populated
+ * through the last-successful chunk; bytes past that point are
+ * untouched. Callers who need defined-on-failure output should
+ * pre-zero the buffer or treat any rc != HAILO_OK as the whole
+ * read being invalid.
  */
 int hailo_control_read_memory(uint32_t address,
                               void *data,
