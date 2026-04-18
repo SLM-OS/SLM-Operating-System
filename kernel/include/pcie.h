@@ -54,17 +54,18 @@
 #define PCIE_ERR_TIMEOUT       (-9)  /* poll loop exceeded budget */
 
 /* -------------------------------------------------------------------------- */
-/* Resource placement helper (exposed for testing).                           */
+/* Resource placement helper                                                  */
 /* -------------------------------------------------------------------------- */
 
 /*
  * Align `size` bytes up to its natural boundary inside [*next, end).
  * On success sets *out_addr and advances *next. Returns false if
- * the BAR can't fit (including 64-bit wrap conditions).
+ * the BAR can't fit (including 64-bit wrap conditions). On failure
+ * neither output is modified.
  *
- * Used by pcie_init's BAR-assignment pass; exposed here only so
- * test_pcie.c can unit-test the bump-allocator math without running
- * pcie_init on a fresh backend.
+ * Used by pcie_init's BAR-assignment pass. Public (rather than
+ * static to pcie_core.c) so test_pcie.c can unit-test the bump-
+ * allocator math directly without re-running enumeration.
  */
 bool pcie_place_bar(uint64_t *next, uint64_t end,
                     uint64_t size, uint64_t *out_addr);

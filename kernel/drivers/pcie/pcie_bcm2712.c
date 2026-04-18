@@ -152,10 +152,12 @@ static const struct { uint8_t regad; uint16_t val; } mdio_pll_tune[] = {
 #define MDIO_PLL_TUNE_COUNT \
     (sizeof(mdio_pll_tune) / sizeof(mdio_pll_tune[0]))
 
-/* Link-up polling budget — same timing as brcm_pcie_start_link in Linux. */
+/* Link-up polling budget — same timing as brcm_pcie_start_link in Linux.
+ * Set TIMEOUT_US + POLL_INTERVAL_US; the attempt count derives. */
+#define LINK_UP_TIMEOUT_US        100000u
 #define LINK_UP_POLL_INTERVAL_US  5000u
-#define LINK_UP_POLL_ATTEMPTS     20u
-#define LINK_UP_TIMEOUT_MS        (LINK_UP_POLL_INTERVAL_US * LINK_UP_POLL_ATTEMPTS / 1000u)
+#define LINK_UP_POLL_ATTEMPTS     (LINK_UP_TIMEOUT_US / LINK_UP_POLL_INTERVAL_US)
+#define LINK_UP_TIMEOUT_MS        (LINK_UP_TIMEOUT_US / 1000u)
 
 /* Post-link-up settling delay. 1 ms is plenty on well-behaved hardware;
  * the pi-5-1 + AI HAT+ config-space truncation blocker (tracked in the
@@ -424,14 +426,24 @@ static int pcie1_mdio_write(uint8_t regad, uint16_t val)
     return mdio_wait_done(PCIE1_MDIO_WR_DATA, /*want_done_low=*/true);
 }
 
-static void munge_pll_54mhz(void)
+static int munge_pll_54mhz(void)
 {
     /* Set block-address register so subsequent writes land at 0x1600. */
-    pcie1_mdio_write(MDIO_SET_ADDR_REGAD, MDIO_ADDR_BLOCK_PLL);
+    int rc = pcie1_mdio_write(MDIO_SET_ADDR_REGAD, MDIO_ADDR_BLOCK_PLL);
+    if (rc != PCIE_OK) {
+        ERROR("pcie1: MDIO block-address write failed (%d)", rc);
+        return rc;
+    }
     for (size_t i = 0; i < MDIO_PLL_TUNE_COUNT; i++) {
-        pcie1_mdio_write(mdio_pll_tune[i].regad, mdio_pll_tune[i].val);
+        rc = pcie1_mdio_write(mdio_pll_tune[i].regad, mdio_pll_tune[i].val);
+        if (rc != PCIE_OK) {
+            ERROR("pcie1: MDIO PLL write [%u] regad=0x%x failed (%d)",
+                  (unsigned)i, mdio_pll_tune[i].regad, rc);
+            return rc;
+        }
     }
     bcm2712_udelay(200);
+    return PCIE_OK;
 }
 
 /*
@@ -509,7 +521,8 @@ static int bcm2712_phy_bringup(void)
     bcm2712_udelay(200);
 
     /* MDIO PLL tuning for 54 MHz xosc refclk (2712-specific). */
-    munge_pll_54mhz();
+    rc = munge_pll_54mhz();
+    if (rc != PCIE_OK) return rc;
 
     /* L1SS errata — PM clock period = 18.52 ns (encoded 0x12). */
     tmp = pcie1_r32(PCIE1_RC_PL_PHY_CTL_15);
@@ -620,6 +633,15 @@ static void bcm2712_perst_tperst_clk_ms(void)
 #define BCM2712_RC_CFG_BUS_NUMBERS     0x18u  /* primary/sec/subord */
 #define BCM2712_RC_CFG_MEM_BASE_LIMIT  0x20u  /* nonstandard 40-bit encoding */
 
+/* bcm2712_program_rc_bridge indexes pcie1_regs as uint32_t[], so each
+ * offset must be a multiple of 4. RC_CFG_IDX reads as "index into the
+ * uint32_t view" at call sites; _Static_assert catches typos like
+ * 0x05 at compile time rather than silently writing to (offset/4)*4. */
+#define RC_CFG_IDX(off) ((off) / 4u)
+_Static_assert(BCM2712_RC_CFG_COMMAND        % 4 == 0, "RC CMD offset must be 4-aligned");
+_Static_assert(BCM2712_RC_CFG_BUS_NUMBERS    % 4 == 0, "RC BUS offset must be 4-aligned");
+_Static_assert(BCM2712_RC_CFG_MEM_BASE_LIMIT % 4 == 0, "RC MEM_BASE_LIMIT offset must be 4-aligned");
+
 #define BCM2712_RC_CMD_BITS            0x0007u   /* IO + MEM + BUS_MASTER */
 #define BCM2712_RC_BUS_LAYOUT          0x00010100u /* primary=0, secondary=1, subordinate=1 */
 
@@ -627,21 +649,21 @@ static void bcm2712_program_rc_bridge(void)
 {
     volatile uint32_t *rc_cfg = (volatile uint32_t *)pcie1_regs;
 
-    rc_cfg[BCM2712_RC_CFG_BUS_NUMBERS / 4] = BCM2712_RC_BUS_LAYOUT;
+    rc_cfg[RC_CFG_IDX(BCM2712_RC_CFG_BUS_NUMBERS)] = BCM2712_RC_BUS_LAYOUT;
 
-    uint32_t rc_cmd = rc_cfg[BCM2712_RC_CFG_COMMAND / 4];
+    uint32_t rc_cmd = rc_cfg[RC_CFG_IDX(BCM2712_RC_CFG_COMMAND)];
     /* Preserve STATUS (bits 16..31) and set IO+MEM+BUS_MASTER in the
      * COMMAND half. STATUS is RW1C, so writing back what was read is
      * semantically equivalent to not touching it for zero bits. */
     rc_cmd = (rc_cmd & 0xFFFF0000u) | BCM2712_RC_CMD_BITS;
-    rc_cfg[BCM2712_RC_CFG_COMMAND / 4] = rc_cmd;
+    rc_cfg[RC_CFG_IDX(BCM2712_RC_CFG_COMMAND)] = rc_cmd;
 
     /* MEM_BASE / MEM_LIMIT derived from the outbound window constants.
      * See comment above this function for the encoding. */
     uint32_t base_field  = (uint32_t)(PCIE1_NONPREF_CPU_BASE >> 24) & 0xFFFFu;
     uint32_t limit_field = (uint32_t)(
         (PCIE1_NONPREF_CPU_BASE + PCIE1_NONPREF_SIZE - 1ULL) >> 24) & 0xFFFFu;
-    rc_cfg[BCM2712_RC_CFG_MEM_BASE_LIMIT / 4] =
+    rc_cfg[RC_CFG_IDX(BCM2712_RC_CFG_MEM_BASE_LIMIT)] =
         (limit_field << 16) | base_field;
 }
 
@@ -649,6 +671,13 @@ static void bcm2712_program_rc_bridge(void)
  * Full link-training sequence for pcie1. Called from bcm2712_init
  * before host_ops signals link_up. See plan §2.3 / Phase 1.5 for
  * context on why SLM-OS has to do this.
+ *
+ * Step numbering below is 1-18, matching brcm_pcie_setup() in the
+ * upstream Linux driver so the reference doc reads 1:1 against this
+ * function. Steps 1-5 moved into bcm2712_phy_bringup(); 6+6b into
+ * bcm2712_misc_and_axi_qos(); 13b+14+15 into
+ * bcm2712_perst_tperst_clk_ms(); 17+17b into bcm2712_program_rc_bridge().
+ * The remaining in-line steps (7-13, 16, 18) live here.
  *
  * Idempotent once link is up: if the link is already trained, return
  * PCIE_OK without touching resets.
@@ -675,7 +704,6 @@ static int bcm2712_train_link(void)
      *         leaves CFG_READ_UR_MODE cleared so the RC retries on
      *         CRS rather than folding it into 0xFFFFFFFF reads. */
     bcm2712_misc_and_axi_qos();
-    uint32_t tmp;
 
     /*
      * 7. Inbound window (RC_BAR2). DT says
@@ -686,7 +714,7 @@ static int bcm2712_train_link(void)
               (0u /* cpu_phys low */ & 0xFFFFFFE0u) | 0x15u);
     pcie1_w32(PCIE1_RC_BAR2_CONFIG_HI, 0x10u /* high 32 of 0x10_00000000 */);
 
-    tmp = pcie1_r32(PCIE1_UBUS_BAR2_CONFIG_REMAP);
+    uint32_t tmp = pcie1_r32(PCIE1_UBUS_BAR2_CONFIG_REMAP);
     tmp |= UBUS_BAR_REMAP_ACCESS_EN;
     pcie1_w32(PCIE1_UBUS_BAR2_CONFIG_REMAP, tmp);
 

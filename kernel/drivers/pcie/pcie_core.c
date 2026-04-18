@@ -140,14 +140,21 @@ bool pcie_place_bar(uint64_t *next, uint64_t end,
  * descriptor. Keeps COMMAND writes (bits 0-15 at offset 0x04) from
  * accidentally clobbering STATUS (bits 16-31). STATUS is RW1C so
  * writing zeros is harmless in practice, but matching the hardware
- * register width avoids a category of future bug. */
+ * register width avoids a category of future bug.
+ *
+ * Odd offsets are always a caller bug (no 16-bit config register is
+ * odd-aligned). Warn loudly and bail rather than silently rounding
+ * down. */
 static void cfg_w16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t off,
                     uint16_t val)
 {
-    uint16_t aligned   = (uint16_t)(off & ~1u);
-    uint16_t dword_off = (uint16_t)(aligned & ~2u);
+    if (off & 1u) {
+        WARN("pcie: cfg_w16 with odd offset 0x%x ignored", off);
+        return;
+    }
+    uint16_t dword_off = (uint16_t)(off & ~2u);
     uint32_t dword     = host_ops->config_read32(bus, dev, func, dword_off);
-    unsigned shift     = (aligned & 2u) * 8u;
+    unsigned shift     = (off & 2u) * 8u;
     dword = (dword & ~(0xFFFFu << shift)) | (((uint32_t)val) << shift);
     host_ops->config_write32(bus, dev, func, dword_off, dword);
 }
@@ -179,17 +186,23 @@ void pcie_config_write32(const struct pcie_device *d, uint16_t off,
 
 /* 8/16-bit writes via read-modify-write on the enclosing dword.
  * PCIe config space is dword-accessible on every controller we care
- * about; byte-granularity writes are a convenience. */
+ * about; byte-granularity writes are a convenience.
+ *
+ * Odd offsets to pcie_config_write16 are always a caller bug — the
+ * only 16-bit config registers (COMMAND, STATUS, MSI ctrl, etc.)
+ * all live at even offsets. Mirror cfg_w16's WARN-and-bail guard. */
 void pcie_config_write16(const struct pcie_device *d, uint16_t off, uint16_t val)
 {
     if (!d || !host_ops) return;
-    uint16_t aligned = (uint16_t)(off & ~1u);
-    uint32_t dword = host_ops->config_read32(d->bus, d->dev, d->func,
-                                             (uint16_t)(aligned & ~2u));
-    unsigned shift = (aligned & 2u) * 8u;
+    if (off & 1u) {
+        WARN("pcie: pcie_config_write16 with odd offset 0x%x ignored", off);
+        return;
+    }
+    uint16_t dword_off = (uint16_t)(off & ~2u);
+    uint32_t dword = host_ops->config_read32(d->bus, d->dev, d->func, dword_off);
+    unsigned shift = (off & 2u) * 8u;
     dword = (dword & ~(0xFFFFu << shift)) | (((uint32_t)val) << shift);
-    host_ops->config_write32(d->bus, d->dev, d->func,
-                             (uint16_t)(aligned & ~2u), dword);
+    host_ops->config_write32(d->bus, d->dev, d->func, dword_off, dword);
 }
 
 void pcie_config_write8(const struct pcie_device *d, uint16_t off, uint8_t val)

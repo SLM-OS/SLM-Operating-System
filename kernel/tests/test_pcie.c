@@ -287,8 +287,9 @@ static void test_place_bar_rejects_overflow(void)
     uint64_t addr = 0xdeadbeefULL;
     TEST_ASSERT_FALSE(pcie_place_bar(&next, end, 0x10000ULL, &addr));
     /* On failure, *next and *out_addr must not be clobbered with a
-     * partially-committed state. */
+     * partially-committed state. Pin both. */
     TEST_ASSERT_EQUAL_HEX64(0x1bffffc000ULL, next);
+    TEST_ASSERT_EQUAL_HEX64(0xdeadbeefULL,   addr);
 }
 
 static void test_place_bar_zero_size_rejected(void)
