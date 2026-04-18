@@ -341,8 +341,11 @@ int main(int argc, char **argv)
      * reorder is a compile error on rebuild. */
     struct ga10b_channel_handoff hoff = {
         .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
-        .version            = 1,
-        .channel_id         = 0,  /* TODO: nvgpu doesn't expose this cheaply */
+        .version            = 2,
+        .channel_id         = 0,  /* nvgpu doesn't expose this cheaply;
+                                   * work_submit_token below is the
+                                   * authoritative field for the
+                                   * doorbell write. */
         .tsg_id             = 0,
         .userd_phys         = userd_phys,
         /* ram_userd_gp_put_w = 35, ram_userd_gp_get_w = 34 from
@@ -361,6 +364,7 @@ int main(int argc, char **argv)
         .inst_block_phys    = 0,  /* filled in from FECS_CURRENT_CTX if needed */
         .initial_gp_put     = 0,
         .initial_gp_get     = 0,
+        .work_submit_token  = sb.work_submit_token,
     };
     memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);

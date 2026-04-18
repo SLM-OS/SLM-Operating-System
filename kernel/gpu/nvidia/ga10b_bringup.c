@@ -864,9 +864,10 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
 {
     if (!h) return -1;
     if (h->magic != GA10B_CHANNEL_HANDOFF_MAGIC) return -1;
-    if (h->version != 1) return -1;
+    if (h->version != 2) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
+    if (h->work_submit_token == 0) return -1;
     /* gpfifo_entries must be a non-zero power of two. */
     if (h->gpfifo_entries == 0 ||
         (h->gpfifo_entries & (h->gpfifo_entries - 1)) != 0) return -1;
@@ -928,6 +929,7 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.inst_block_phys    = hoff->inst_block_phys;
     g_handoff.initial_gp_put     = hoff->initial_gp_put;
     g_handoff.initial_gp_get     = hoff->initial_gp_get;
+    g_handoff.work_submit_token  = hoff->work_submit_token;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
@@ -1075,20 +1077,16 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
      *
      * GA10B inherits the TU104 usermode layout: the doorbell lives at
      *   BAR0 + func_cfg0 + func_doorbell = 0x30000 + 0xB80000 + 0x90 = 0xBB0090
-     * and the token encodes (chid | runlist_id<<16). We assume
-     * runlist_id=0 (the GR/compute runlist on single-GPU GA10B — nvgpu
-     * auto-places compute channels there). Source: OE4T/linux-nvgpu
+     * Token is captured verbatim from NVGPU_IOCTL_CHANNEL_SETUP_BIND
+     * (opaque encoding of chid | runlist<<16, possibly adjusted for
+     * vGPU channel_base). Source: OE4T/linux-nvgpu
      * drivers/gpu/nvgpu/hal/fifo/usermode_tu104.c:58-75. */
-    uint32_t runlist_id = 0;
-    uint32_t doorbell_token = (g_handoff.channel_id & 0xFFFu) |
-                              ((runlist_id & 0x7Fu) << 16);
     volatile uint32_t *doorbell =
         (volatile uint32_t *)(uintptr_t)0x17BB0090u;
-    *doorbell = doorbell_token;
+    *doorbell = g_handoff.work_submit_token;
     gsp_platform->mb();
-    uart_printf("[GA10B-P7] doorbell 0x17BB0090 <- 0x%08lx (chid=%lu)\n",
-                (unsigned long)doorbell_token,
-                (unsigned long)g_handoff.channel_id);
+    uart_printf("[GA10B-P7] doorbell 0x17BB0090 <- 0x%08lx\n",
+                (unsigned long)g_handoff.work_submit_token);
 
     /* Poll the semaphore for a non-zero value (indicating the GPU
      * processed our pushbuffer and executed SEMAPHORE_RELEASE).

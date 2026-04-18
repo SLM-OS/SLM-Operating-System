@@ -38,8 +38,8 @@
  */
 struct ga10b_channel_handoff {
     uint32_t magic;             /* GA10B_CHANNEL_HANDOFF_MAGIC */
-    uint32_t version;           /* 1 for this layout */
-    uint32_t channel_id;        /* nvgpu channel ID (0-511) */
+    uint32_t version;           /* 2 for this layout */
+    uint32_t channel_id;        /* nvgpu channel ID (informational) */
     uint32_t tsg_id;            /* TSG ID the channel belongs to */
 
     /* USERD (User Submit Data) — where GP_PUT lives.
@@ -75,13 +75,22 @@ struct ga10b_channel_handoff {
     /* GP_PUT/GP_GET current values at handoff time. */
     uint32_t initial_gp_put;    /* GP_PUT value when helper wrote this */
     uint32_t initial_gp_get;    /* GP_GET value (should equal GP_PUT) */
+
+    /* USERMODE doorbell token — what SLM-OS writes to BAR0+0xBB0090
+     * to kick PBDMA. Captured from NVGPU_IOCTL_CHANNEL_SETUP_BIND's
+     * work_submit_token field. Encodes (chid | runlist_id<<16) but
+     * the kernel may adjust for vGPU channel_base, so treat it as
+     * opaque and use verbatim. Nvgpu exposes no cheap path to
+     * reconstruct it from channel_id alone. */
+    uint32_t work_submit_token;
+    uint32_t _pad1;             /* align struct size to 8 bytes */
 };
 
 /* Wire-format size is locked: both the Linux helper and SLM-OS
  * depend on this exact layout. Any struct reorder or field addition
  * breaks the handoff silently — the static_assert catches it at
  * compile time on both sides. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 112,
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 120,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c) and bump version");
 
