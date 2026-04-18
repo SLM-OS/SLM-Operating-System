@@ -55,11 +55,15 @@ extern const struct gsp_platform_ops *gsp_platform;
  * `gspFwWprEnd = wpr2_addr + wpr2_size` arithmetic in
  * `gsp_wpr_meta_populate_minimum` would wrap on a contrived input
  * but is fine here — fail the build instead of silently relying on
- * the bound when somebody adjusts the constants for a future GPU. */
+ * the bound when somebody adjusts the constants for a future GPU.
+ *
+ * The second assert states the bound directly: WPR2's size must
+ * fit in the gap between wpr2_addr (= FB_SIZE - WPR2_BASE_FROM_TOP)
+ * and UINT64_MAX. */
 _Static_assert(GA107_FB_SIZE_BYTES > WPR2_FRTS_BASE_FROM_TOP,
                "GA107_FB_SIZE_BYTES must accommodate WPR2 placement");
-_Static_assert((GA107_FB_SIZE_BYTES - WPR2_FRTS_BASE_FROM_TOP) +
-               WPR2_FRTS_SIZE > (GA107_FB_SIZE_BYTES - WPR2_FRTS_BASE_FROM_TOP),
+_Static_assert(WPR2_FRTS_SIZE <=
+               UINT64_MAX - (GA107_FB_SIZE_BYTES - WPR2_FRTS_BASE_FROM_TOP),
                "WPR2 addr + size must not overflow uint64_t");
 
 /* Ampere BAR0 offsets observable after FWSEC-FRTS run — definitions
@@ -509,13 +513,13 @@ fail_free:
     return -1;
 }
 
-/* DELIBERATE asymmetry: this only frees the FWSEC-FRTS Phase 1
- * buffers (`dma_imem_va`, `dma_dmem_va`). The booter image, the
- * WprMeta DMA buffer, and the Stage A radix3 chain pages are
- * freed ONLY in `gsp_bringup_booter_load`'s fail-path on the
- * `goto fail` cleanup path. On the success path they stay live
- * because SEC2 keeps DMA-reading them after the booter halts and
- * the GSP RISC-V startup uses the same WprMeta address.
+/* Note: this only frees the FWSEC-FRTS Phase 1 buffers
+ * (`dma_imem_va`, `dma_dmem_va`). The booter image, the WprMeta
+ * DMA buffer, and the Stage A radix3 chain pages are freed only
+ * in `gsp_bringup_booter_load`'s fail-path on the `goto fail`
+ * cleanup path. On the success path they stay live because SEC2
+ * keeps DMA-reading them after the booter halts and the GSP
+ * RISC-V startup uses the same WprMeta address.
  *
  * This means harness `--trace`-mode callers that exit early (after
  * Phase 4b but before booter halt) leak those buffers. PR #296
@@ -565,6 +569,16 @@ void gsp_bringup_free(struct gsp_bringup *b)
  * content doesn't matter until E4 plumbs in real GSP-RM. */
 #define RADIX3_PAGE_SIZE              4096u
 #define RADIX3_DUMMY_ELF_SIZE         4096u
+
+/* The 4 KB constants above are GPU-side ABI, not just a "page size
+ * somewhere": they match the GSP-RM MMU's page granule. Changing
+ * either requires updating `gsp_wpr_meta_populate_minimum`'s
+ * `sizeOfRadix3Elf` semantics (currently == one ELF page) and the
+ * single-entry-per-level chain shape. */
+_Static_assert(RADIX3_PAGE_SIZE == 4096u,
+               "GSP-RM radix3 entry size assumes 4 KB pages");
+_Static_assert(RADIX3_DUMMY_ELF_SIZE == 4096u,
+               "Stage A dummy ELF assumes a single 4 KB page");
 
 /* Pure fill: write the single L0→L1, L1→L2, L2→ELF entries each
  * page needs. Other entries are left untouched (caller zeros pages
