@@ -10,6 +10,14 @@ This document consolidates all findings related to running SLM-OS on the Jetson 
 > memory are all accessible from EL2. SLM-OS boots to an interactive shell.
 > This document is preserved as a historical record of the investigation that led to
 > the EL2 solution. For current implementation details, see `docs/jetson-el2-bringup.md`.
+>
+> **17 April 2026 Update:** When investigating bare-metal PCIe access for the #25
+> NIC driver, the "CBB firewall blocks peripheral X" framing was **misapplied** —
+> the 0xFFFFFFFF reads on PCIe are actually caused by `pex2_c8_core` clock gating
+> during kexec, not by firewall policy. See `docs/jetson-pcie-investigation.md` for
+> the full evidence chain. Future investigations should **verify clock state first**
+> (disable the clock from Linux via BPMP debugfs; does the access symptom reproduce?)
+> before assuming the CBB firewall is the culprit.
 
 ---
 

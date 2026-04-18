@@ -230,77 +230,79 @@ the full driver walkthrough and register addresses.
 
 ## Phase 4: Jetson Networking (Hardware Required — tracked in #25)
 
-The Jetson Orin Nano Developer Kit carrier board wires its RJ45 directly
-to the Tegra T234 SoC via MDI differential pairs — there is **no PCIe
-NIC** on the Ethernet path. The data path is:
+**Status: blocked** (see `docs/jetson-pcie-investigation.md`). The
+plan below reflects what was **attempted** and what was **learned**
+in April 2026; the phase did not land. A hardware update captured
+during investigation is that the integrated Tegra Ethernet
+controllers (`nveqos@2310000` + 4× `mgbe@68[0-3]00000`) are all
+marked `status = "disabled"` in the **Super** Developer Kit carrier
+board device tree — the RJ45 actually routes through a **PCIe
+RTL8168** at `0008:01:00.0` (Tegra PCIe root complex C8). An earlier
+revision of this plan targeted EQOS+RTL8211F based on the Orin Nano
+Developer Kit spec; that target doesn't apply to the Super Dev Kit
+carrier in the lab.
 
-```
-RJ45 ↔ MDI ↔ RTL8211F PHY (RGMII + MDIO) ↔ Tegra EQOS MAC (MMIO)
-```
+### 4.1 Planned target — RTL8168 PCIe NIC
 
-Authoritative source: *Jetson Orin Nano Developer Kit Carrier Board
-Specification* SP-11324-001, Table 2-4 ("Ethernet RJ45 Connector Pin
-Description") — RJ45 pins wire to module pins `GPE_MDI0_P/N` through
-`GPE_MDI3_P/N`. No PCIe TX/RX pairs reach the RJ45.
+Driver scaffolding landed on branch `jetson-rtl8169-driver` as
+`kernel/drivers/eth_rtl8169.c` + `kernel/include/eth_rtl8169.h`,
+with MMU mappings for Tegra PCIe C8 (APPL/CFG/DBI regions + BAR
+window), a `rtldiag` shell command, and cached Linux references
+(`linux-r8169-main.c`, `linux-r8169-phy-config.c`,
+`linux-pcie-tegra194.c` in `docs/reference/`).
 
-An earlier draft of this plan mistakenly identified the external PHY
-(RTL8211F) as a PCIe NIC (RTL8111) and targeted Linux's `r8169` driver.
-That framing is wrong and has been removed. The correct target is the
-Synopsys DWC-EQOS IP block, as tracked in #25.
+**What the scaffolding is ready to do** if the blocker lifts:
+1. PCIe ECAM/DBI bus-0 config read to find the RC bridge.
+2. iATU-retargeted bus-1 config read for the RTL8168 endpoint.
+3. Standard r8169 register programming (~800-1200 LOC) with NC
+   memory for descriptor rings.
 
-### 4.1 Target: Synopsys DWC-EQOS MAC + RTL8211F PHY
+### 4.2 Fallback — USB CDC-ECM (also blocked)
 
-**Controller (MAC):** Synopsys DesignWare Cores Ethernet QoS (DWC-EQOS)
-**Discovery:** Memory-mapped at a fixed SoC address — NOT enumerated via
-PCI. Orin's EQOS base is in the `0x023_0_0000` region (confirm exact
-offset from the Orin TRM / NVIDIA device tree
-`tegra234-p3768-0000+p3767-0003.dts` before writing the driver).
-**PHY:** Realtek RTL8211F, 1000BASE-T, accessed via MDIO from the MAC.
-**Reference drivers:** Linux `drivers/net/ethernet/stmicro/stmmac/`
-(specifically `dwmac4_core.c`, `dwmac4_descs.c`, `dwmac4_dma.c`) and
-NVIDIA's `nvethernet` downstream fork in L4T.
+`xhcidiag` shell command verified that Tegra XHCI at `0x3610000`
+reads 0xFFFFFFFF from SLM-OS at EL2 post-kexec. Same symptom as
+PCIe. USB CDC-ECM is not a cheaper escape route on this platform.
 
-**Minimum viable driver (~1200-1800 lines):**
-1. Clock / reset gating for the EQOS block (CAR register writes — Orin
-   TRM) — may already be set up by the Linux bootloader pre-kexec.
-2. MMIO mapping of EQOS register bank into kernel virtual space.
-3. Small MDIO helper for PHY access (Clause 22 frames over the EQOS
-   MAC's MDIO controller).
-4. PHY bring-up: RTL8211F reset, auto-negotiation, link-up poll,
-   speed/duplex read-back.
-5. RGMII interface config on the MAC side matched to the PHY link
-   state (speed, duplex, TX/RX delay — RTL8211F needs specific
-   internal-delay programming).
-6. TX/RX descriptor rings in DMA-coherent memory — use NC memory on
-   Jetson to match the `net-dma-coherence.md` guidance.
-7. IRQ wiring to GIC SPI (confirm EQOS IRQ numbers from DT).
-8. Integrate as lwIP netif (analogous to `virtio_net.c`).
+### 4.3 Root cause of the blocker
 
-**Not required:**
-- PCIe root complex enumeration on Jetson (was the scariest item in the
-  earlier draft — it's moot because EQOS is not on PCIe).
-- Any Tegra PCIe controller init for Ethernet purposes (PCIe on Orin is
-  still relevant for future M.2 NVMe / AI-accel boards, but that's a
-  separate workstream).
+Not the CBB firewall (initial hypothesis, incorrect). **Linux's
+`pex2_c8_core` clock — managed by BPMP firmware — is gated during
+the kexec transition and cannot be preserved via any user-space
+mechanism tried** (refcount bumps via `/sys/kernel/debug/bpmp/...`,
+`power/control = on` runtime-PM override, `mrq_rate_locked = 1`).
+SLM-OS then sees the block as unresponsive, the same way Linux
+would see it if the clock were disabled deliberately.
 
-### 4.2 Fallback: USB Ethernet
+Full evidence chain in `docs/jetson-pcie-investigation.md`.
 
-If EQOS bring-up stalls (e.g., clock/reset init needs firmware sequences
-that aren't accessible from EL2), a USB CDC-ECM Ethernet adapter on the
-dev kit's USB-A port is a viable fallback.
+### 4.4 Remaining paths (all non-trivial)
 
-Total USB stack effort (~2000 lines XHCI + ~500 lines CDC-ECM + USB core)
-is larger than EQOS but avoids any SoC-level clock gymnastics. Only
-revisit this path after a concrete EQOS blocker is identified.
+- **Kernel module grabbing `clk_prepare_enable` / CLK_IS_CRITICAL
+  / `clk_force_enable`** — hypothesis: kernel-level clock flags may
+  outrank the user-space refcount-bump path and survive kexec.
+  Requires L4T kernel source or headers on the build host.
+- **Crash-kernel path (`kexec -p` + `sysrq-c`)** — skips
+  `device_shutdown()` entirely. Needs `crashkernel=N` on the
+  L4T cmdline and SLM-OS relocation into the reserved region.
+- **Port the Tegra PCIe RC bring-up sequence to SLM-OS** — depends
+  on fixing BPMP MRQs from SLM-OS (#190) or replacing the MRQ
+  steps with direct MMIO where that works.
 
-### 4.3 Testing (Hardware Only)
+None of these reuses work done for Pi 5 or x86-64. The diagnostic
+shell commands (`rtldiag`, `xhcidiag`) and the `JETSON_EL1_SMOKE`
+test stay in the tree as infrastructure for whichever path gets
+picked up.
 
-- Deploy via `labctl sdwire_update`, test via `labctl serial_send`
-- Connect Jetson Ethernet to lab network
-- `ping`, `ifconfig`, `dhcp` from SLM-OS shell
-- Early smoke test before ring setup: MDIO probe — read PHY ID registers
-  from the RTL8211F (expect `0x001C.C916` or similar). Confirms MMIO
-  mapping, clock, and MDIO pathway in a few dozen lines of code.
+### 4.5 Closed hypotheses (for future reference)
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| tegra194-pcie `.shutdown` tears down RC during kexec | Binary-analyzed L4T `.ko`; `.rela.data` shows `.shutdown = NULL` | Ruled out |
+| CBB firewall blocks PCIe at EL2 only | `JETSON_EL1_SMOKE` test drops to EL1 before reading APPL | Ruled out — same 0xFFFFFFFF at EL1 |
+| CBB firewall blocks by EL regardless of kernel | Linux at EL1 reads real values; SLM-OS at EL1 sees 0xFFFFFFFF | Narrowed to "not EL-based" |
+| CBB firewall blocks by signed kernel | Clock-gate reproduction test | **Ruled out** — symptom reproduces with clock disabled, not firewall |
+| Tegra PCIe RC needs full re-init post-kexec | Linux pre-kexec reads RC fine; `.shutdown = NULL` | Ruled out for the RC itself; clocks do need re-init |
+| Clock refcount hold from userspace prevents teardown | Bumped to 108 via sysfs, kexec'd | Ruled out — doesn't survive kexec |
 
 ---
 
@@ -342,9 +344,11 @@ and require their respective hardware.
 | 2.3 | x86-64 | `ping`, `ifconfig`, `netstat` working in x86-64 QEMU | No |
 | 3.1 | Pi 5 | BCM GENET driver, networking on real Pi 5 | Yes |
 | 3.2 | Pi 5 | Hardware-validated ping, DHCP, link status | Yes |
-| 4.1 | Jetson | DWC-EQOS MAC + RTL8211F PHY driver (USB CDC-ECM as fallback) | Yes |
-| 4.3 | Jetson | Hardware-validated ping, DHCP, link status | Yes |
+| 4.1 | Jetson | RTL8168 PCIe driver scaffolding, blocked on clock preservation through kexec | Yes |
+| 4.3 | Jetson | Diagnostic infrastructure (`rtldiag`, `xhcidiag`, `JETSON_EL1_SMOKE`) stays in tree | Yes |
 
 ---
 
-*Created: 15 April 2026*
+*Created: 15 April 2026. Phase 4 updated 17 April 2026 after
+ empirical investigation: clock teardown during kexec, not CBB
+ firewall, is the active blocker.*
