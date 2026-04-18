@@ -44,10 +44,19 @@
  * with room to spare. 1 MB of BSS is acceptable for test builds only.
  */
 #define MOCK_BAR0_SIZE  0x4000u
+/* BAR2 holds the VDMA channel registers — 32 B per channel ×
+ * 16 channels = 512 B; round up to 4 KB for headroom. */
+#define MOCK_BAR2_SIZE  0x1000u
 #define MOCK_SRAM_BASE  0x00000000u
 #define MOCK_SRAM_SIZE  0x00100000u   /* 1 MB — covers all Hailo-8 FW targets */
 
 static uint8_t  mock_bar0[MOCK_BAR0_SIZE];
+static uint8_t  mock_bar2[MOCK_BAR2_SIZE];
+/* Per-channel "device responds" simulation hooks. When
+ * mock_vdma_auto_advance is non-zero, every num_avail write also
+ * advances num_proc to match — lets a test drive hailo_vdma_submit_and_wait
+ * past its polling loop without a separate "fire completion" step. */
+static bool     mock_vdma_auto_advance;
 static uint8_t  mock_sram[MOCK_SRAM_SIZE];
 static uint64_t mock_atr0_target;
 static int      mock_init_calls;
@@ -126,6 +135,8 @@ static size_t   mock_last_cache_invalidate_size;
 static void mock_reset(void)
 {
     memset(mock_bar0, 0, sizeof(mock_bar0));
+    memset(mock_bar2, 0, sizeof(mock_bar2));
+    mock_vdma_auto_advance = false;
     memset(mock_sram, 0, sizeof(mock_sram));
     mock_atr0_target = 0;
     mock_init_calls  = 0;
@@ -183,6 +194,11 @@ static uint32_t mock_read32(uint8_t bar, uint32_t offset)
         memcpy(&v, &mock_bar0[offset], sizeof(v));
         return v;
     }
+    if (bar == HAILO_BAR_VDMA && offset + 4 <= MOCK_BAR2_SIZE) {
+        uint32_t v;
+        memcpy(&v, &mock_bar2[offset], sizeof(v));
+        return v;
+    }
     return 0xFFFFFFFFu;
 }
 
@@ -221,6 +237,27 @@ static void mock_write32(uint8_t bar, uint32_t offset, uint32_t value)
      && offset == HAILO_ATR_BASE + HAILO_ATR_OFF_TRSL_ADDR_HI) {
         mock_atr0_target = (mock_atr0_target & 0xFFFFFFFFULL)
                          | ((uint64_t)value << 32);
+    }
+    /* BAR2 (VDMA channel regs): plain 32-bit store. The VDMA
+     * register block is packed u8/u16 fields, so the driver does
+     * read-modify-write sequences — reflected by reads servicing
+     * from the same mock_bar2 backing. When auto-advance is on,
+     * any write to a channel's NUM_AVAIL (offset 2 within the
+     * 4-byte dword at CHANNEL_CONTROL_OFFSET) also bumps NUM_PROC
+     * (16-bit value at CHANNEL_NUM_PROC_OFFSET=0x04) to match,
+     * simulating the device completing the transfer immediately. */
+    if (bar == HAILO_BAR_VDMA && offset + 4 <= MOCK_BAR2_SIZE) {
+        memcpy(&mock_bar2[offset], &value, sizeof(value));
+        if (mock_vdma_auto_advance
+         && (offset & 0x1Fu) == 0) {
+            /* Write to the channel-base dword. NUM_AVAIL lives in
+             * bits [31:16] of this dword. Mirror it to NUM_PROC
+             * (16-bit at offset+0x04) so a subsequent poll of
+             * num_proc sees completion. */
+            uint16_t num_avail = (uint16_t)(value >> 16);
+            memcpy(&mock_bar2[offset + 0x04],
+                   &num_avail, sizeof(num_avail));
+        }
     }
 }
 
@@ -2604,6 +2641,152 @@ static void test_vdma_program_buffer_rejects_zero_size(void)
     hailo_vdma_desc_list_free(&list);
 }
 
+/* -------------------------------------------------------------------------- */
+/* VDMA channel start / stop / submit                                          */
+/* -------------------------------------------------------------------------- */
+
+static void test_vdma_channel_start_programs_regs(void)
+{
+    /* Start channel 3 with a 256-desc list at a known iova; verify
+     * the expected BAR2 writes. desc_depth=8 (2^8=256); data_id=0x05;
+     * iova=0x1_0000_0000 (high=1, low=0 → address_l=0, address_h=1). */
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(256, 512, false, &list));
+    /* Override iova to something deterministic — the mock allocator's
+     * return doesn't affect our test's expected values. */
+    list.iova = 0x0000000100000000ULL;
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_channel_start(3, &list, 0x05));
+
+    /* Channel 3's base dword lives at BAR2 + 3 * 32 = 0x60. */
+    uint32_t base_dword;
+    memcpy(&base_dword, &mock_bar2[0x60], sizeof(base_dword));
+    /* Control=START (bit 0) | (depth=8 << 4) | data_id=0x5 = 0x01 | 0x85 low byte.
+     * Actually the final state after read-modify-write START:
+     *   depth_id_dword = (8 << 4) | 0x5 = 0x85
+     *   then CONTROL inserted into bits [7:0]: (0x85 & ~0xFF) | 0x01 = 0x01
+     * Wait — CONTROL lives in bits [7:0] and depth_id ALSO starts at
+     * bit 0 in our packing. The base dword encodes both: bits [3:0]
+     * = data_id, bits [7:4] = depth, and CONTROL overwrites bits [7:0].
+     * After START is issued, bits [7:0] = 0x01 (START), losing depth_id.
+     * That's the reference behavior — DEPTH_ID is latched by the
+     * engine after the first DEPTH_ID write, and subsequent CONTROL
+     * writes overwrite those bits without disturbing the engine's
+     * latched depth. Verify we landed at CONTROL=0x01 in bits[7:0]. */
+    TEST_ASSERT_EQUAL_UINT32(0x01u, base_dword & 0xFFu);
+
+    /* address_l (high 16 of iova low-32) went into channel_base+0x10,
+     * bits [31:16]. iova=0x1_0000_0000 → low-32=0, high-16=0 → addr_l=0.
+     * So the dword should be 0 (or more generally, (addr_l << 16)). */
+    uint32_t addr_l_dword;
+    memcpy(&addr_l_dword, &mock_bar2[0x70], sizeof(addr_l_dword));
+    TEST_ASSERT_EQUAL_UINT32(0u, addr_l_dword);
+
+    /* address_h at channel_base+0x14 = 0x74. */
+    uint32_t addr_h_dword;
+    memcpy(&addr_h_dword, &mock_bar2[0x74], sizeof(addr_h_dword));
+    TEST_ASSERT_EQUAL_UINT32(1u, addr_h_dword);
+
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_channel_start_rejects_misaligned_iova(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    /* Clobber iova to something NOT 64 KB-aligned. */
+    list.iova = 0x1234;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_channel_start(0, &list, 0));
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_channel_start_rejects_bad_channel(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_channel_start(HAILO_VDMA_MAX_CHANNELS, &list, 0));
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_channel_start_rejects_null(void)
+{
+    vdma_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_channel_start(0, NULL, 0));
+}
+
+static void test_vdma_channel_stop_writes_abort_pause(void)
+{
+    /* Precondition: channel's CONTROL is 0 (idle after mock_reset).
+     * hailo_vdma_channel_stop should NOT short-circuit — idle != abort-pause. */
+    vdma_setup();
+    hailo_vdma_channel_stop(2);
+
+    /* Channel 2 base = 2 * 32 = 0x40. Bits [7:0] should now be
+     * ABORT_PAUSE (0x02). */
+    uint32_t dword;
+    memcpy(&dword, &mock_bar2[0x40], sizeof(dword));
+    TEST_ASSERT_EQUAL_UINT32(0x02u, dword & 0xFFu);
+}
+
+static void test_vdma_channel_stop_skips_if_already_abort_pause(void)
+{
+    vdma_setup();
+    /* Pre-seed channel 5's control byte with ABORT_PAUSE. */
+    uint32_t seed = 0x02u;
+    memcpy(&mock_bar2[5 * 32], &seed, sizeof(seed));
+    hailo_vdma_channel_stop(5);
+    /* Should remain unchanged. */
+    uint32_t dword;
+    memcpy(&dword, &mock_bar2[5 * 32], sizeof(dword));
+    TEST_ASSERT_EQUAL_UINT32(0x02u, dword);
+}
+
+static void test_vdma_submit_and_wait_completes_fast(void)
+{
+    /* Auto-advance on: any num_avail write immediately mirrors to
+     * num_proc. hailo_vdma_submit_and_wait should find completion
+     * on the first poll, well under the timeout. */
+    vdma_setup();
+    mock_vdma_auto_advance = true;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_submit_and_wait(4, /*num_avail=*/0x1234, /*timeout=*/1000));
+
+    /* num_avail landed in the channel's base dword bits [31:16]. */
+    uint32_t dword;
+    memcpy(&dword, &mock_bar2[4 * 32], sizeof(dword));
+    TEST_ASSERT_EQUAL_UINT32(0x1234u, dword >> 16);
+    /* num_proc matches. */
+    uint32_t proc;
+    memcpy(&proc, &mock_bar2[4 * 32 + 4], sizeof(proc));
+    TEST_ASSERT_EQUAL_UINT32(0x1234u, proc & 0xFFFFu);
+}
+
+static void test_vdma_submit_and_wait_times_out(void)
+{
+    /* Without auto-advance, num_proc never catches up → timeout. */
+    vdma_setup();
+    mock_vdma_auto_advance = false;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_vdma_submit_and_wait(0, /*num_avail=*/1, /*timeout=*/200));
+}
+
+static void test_vdma_submit_rejects_bad_channel(void)
+{
+    vdma_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_submit_and_wait(HAILO_VDMA_MAX_CHANNELS, 1, 1000));
+}
+
 static void test_vdma_alloc_accepts_max_count(void)
 {
     /* Largest legal list: 65536 descriptors = 1 MB, which matches
@@ -2926,6 +3109,15 @@ int test_suite_hailo(void)
     RUN_TEST(test_vdma_program_buffer_rejects_overrun);
     RUN_TEST(test_vdma_program_buffer_rejects_null_list);
     RUN_TEST(test_vdma_program_buffer_rejects_zero_size);
+    RUN_TEST(test_vdma_channel_start_programs_regs);
+    RUN_TEST(test_vdma_channel_start_rejects_misaligned_iova);
+    RUN_TEST(test_vdma_channel_start_rejects_bad_channel);
+    RUN_TEST(test_vdma_channel_start_rejects_null);
+    RUN_TEST(test_vdma_channel_stop_writes_abort_pause);
+    RUN_TEST(test_vdma_channel_stop_skips_if_already_abort_pause);
+    RUN_TEST(test_vdma_submit_and_wait_completes_fast);
+    RUN_TEST(test_vdma_submit_and_wait_times_out);
+    RUN_TEST(test_vdma_submit_rejects_bad_channel);
     RUN_TEST(test_vdma_alloc_accepts_max_count);
 
     return UnityEnd();

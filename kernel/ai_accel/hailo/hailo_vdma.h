@@ -167,4 +167,62 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
                               uint32_t buffer_size,
                               uint8_t  data_id);
 
+/* -------------------------------------------------------------------------- */
+/* Channel start / stop / submit                                               */
+/* -------------------------------------------------------------------------- */
+
+/* Per-channel register-block size within BAR2. Each channel owns
+ * 32 contiguous bytes (reference CHANNEL_BASE_OFFSET macro). */
+#define HAILO_VDMA_CHANNEL_STRIDE   32u
+
+/* Max VDMA channels per engine on Hailo-8 (MAX_VDMA_CHANNELS_PER_ENGINE
+ * in hailo-vdma-common.h). */
+#define HAILO_VDMA_MAX_CHANNELS     16u
+
+/* Sub-offsets within a channel's register block. Shared with the
+ * reference driver (`hailo-vdma-common.h:21-26`). The channel's
+ * base register (at offset 0) packs CONTROL (u8) + DEPTH_ID (u8) +
+ * NUM_AVAIL (u16) into a single 32-bit dword; our platform's
+ * read32/write32 go through that dword and the VDMA helpers
+ * bit-field-insert the specific field. */
+#define HAILO_VDMA_CHANNEL_BASE_DWORD        0x00u  /* ctl+depth+num_avail */
+#define HAILO_VDMA_CHANNEL_NUM_PROC_DWORD    0x04u  /* num_proc (u16 low) */
+#define HAILO_VDMA_CHANNEL_ERROR_DWORD       0x08u
+
+/*
+ * Start a VDMA channel on a previously-programmed descriptor list.
+ * Writes the list's IOVA (low 16 + high 32 bits), depth (log2 of
+ * desc_count), data_id, then the CONTROL "start" bit.
+ *
+ * `channel_index` must be in [0, HAILO_VDMA_MAX_CHANNELS). `list`
+ * must be a fully-populated list whose IOVA is 64 KB-aligned.
+ * `data_id` is the per-channel identifier that CONFIG_STREAM
+ * assigned.
+ *
+ * Returns HAILO_OK / HAILO_ERR_INVAL / HAILO_ERR_NODEV.
+ */
+int hailo_vdma_channel_start(uint8_t channel_index,
+                             const struct hailo_vdma_desc_list *list,
+                             uint8_t data_id);
+
+/*
+ * Stop a VDMA channel. Issues the pause-then-abort sequence from
+ * the reference driver (hailo-vdma-common.c:932). Safe to call
+ * even if the channel was never started — the stop sequence
+ * tolerates an idle channel.
+ */
+void hailo_vdma_channel_stop(uint8_t channel_index);
+
+/*
+ * Publish `new_num_avail` to the VDMA engine and wait for
+ * `num_proc` to reach it (completion) or `timeout_us` to elapse.
+ * Polls via the platform's udelay between reads.
+ *
+ * Returns HAILO_OK on completion, HAILO_ERR_TIMEOUT if num_proc
+ * didn't catch up, or HAILO_ERR_INVAL on bad args.
+ */
+int hailo_vdma_submit_and_wait(uint8_t channel_index,
+                               uint16_t new_num_avail,
+                               uint32_t timeout_us);
+
 #endif /* AI_ACCEL_HAILO_VDMA_H */

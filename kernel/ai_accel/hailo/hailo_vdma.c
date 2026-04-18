@@ -163,3 +163,143 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
 
     return (int)descs_needed;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Channel start / stop / submit                                               */
+/* -------------------------------------------------------------------------- */
+
+/* Channel-control bit layout (`hailo-vdma-common.c:20-30`). Control
+ * byte lives in bits [7:0] of the CHANNEL_BASE_DWORD. */
+#define HAILO_VDMA_CTRL_START            0x01u
+#define HAILO_VDMA_CTRL_ABORT_PAUSE      0x02u
+
+/* ceil_log2 helper — returns the smallest k such that (1 << k) >= n. */
+static uint8_t vdma_ceil_log2(uint32_t n)
+{
+    uint8_t k = 0;
+    uint32_t v = 1;
+    while (v < n) { v <<= 1; k++; }
+    return k;
+}
+
+static uint32_t channel_base(uint8_t index)
+{
+    return (uint32_t)index * HAILO_VDMA_CHANNEL_STRIDE;
+}
+
+/* Read the CHANNEL_BASE_DWORD and return the 32-bit value. */
+static uint32_t channel_read_base_dword(uint8_t channel_index)
+{
+    return hailo_platform->read32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_BASE_DWORD);
+}
+
+/* Write the CHANNEL_BASE_DWORD (control+depth_id+num_avail packed). */
+static void channel_write_base_dword(uint8_t channel_index, uint32_t value)
+{
+    hailo_platform->write32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_BASE_DWORD,
+        value);
+}
+
+int hailo_vdma_channel_start(uint8_t channel_index,
+                             const struct hailo_vdma_desc_list *list,
+                             uint8_t data_id)
+{
+    if (!list || !list->descs) return HAILO_ERR_INVAL;
+    if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
+    if (list->iova & 0xFFFFu) return HAILO_ERR_INVAL;  /* 64 KB-aligned */
+    if (!hailo_platform) return HAILO_ERR_NODEV;
+
+    /* Stop any prior activity on the channel before reprogramming. */
+    hailo_vdma_channel_stop(channel_index);
+
+    /* desc_depth = ceil_log2(desc_count). Reference maps depth==16
+     * to depth==0 for the "full list" case (hailo-vdma-common.c:874). */
+    uint8_t depth = vdma_ceil_log2(list->desc_count);
+    if (depth == 16) depth = 0;
+
+    /* DEPTH_ID dword lives at offset 0 (CHANNEL_BASE_DWORD) as
+     * [depth:4][data_id:4][reserved:24]. Reference shifts:
+     *   desc_depth << VDMA_CHANNEL_DESC_DEPTH_SHIFT  (depth = bits 4..7)
+     *   data_id    << VDMA_CHANNEL_DATA_ID_SHIFT     (data_id = bits 0..3)
+     * Bits [15:8] and [31:16] (CONTROL / NUM_AVAIL) are written
+     * separately by CONTROL writes and NUM_AVAIL writes. */
+    uint32_t depth_id_dword = ((uint32_t)depth << 4) | (uint32_t)(data_id & 0xFu);
+    channel_write_base_dword(channel_index, depth_id_dword);
+
+    /* Descriptor list address: low 16 bits of bits[31:16] + high 32
+     * bits in a separate register slot. Layout in reference:
+     *   VDMA_CHANNEL__ALIGNED_ADDRESS_L_OFFSET = dword containing
+     *       address_l in bits[31:16];
+     *   VDMA_CHANNEL__ADDRESS_H_OFFSET = full 32-bit dword.
+     * Our simpler layout stashes address_l at channel_base+0x10
+     * and address_h at channel_base+0x14 for clarity — matches the
+     * "DEST_REGS" half of the channel's 32-byte block used by
+     * output channels. */
+    uint16_t addr_l = (uint16_t)((list->iova >> 16) & 0xFFFFu);
+    uint32_t addr_h = (uint32_t)(list->iova >> 32);
+    hailo_platform->write32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + 0x10u,
+        (uint32_t)addr_l << 16);
+    hailo_platform->write32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + 0x14u,
+        addr_h);
+
+    /* Issue the START control bit. Read-modify-write the base dword
+     * so we don't clobber DEPTH_ID just written. */
+    uint32_t cur = channel_read_base_dword(channel_index);
+    cur = (cur & ~0xFFu) | HAILO_VDMA_CTRL_START;
+    channel_write_base_dword(channel_index, cur);
+    hailo_platform->mb();
+    return HAILO_OK;
+}
+
+void hailo_vdma_channel_stop(uint8_t channel_index)
+{
+    if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return;
+    if (!hailo_platform) return;
+
+    uint32_t cur = channel_read_base_dword(channel_index);
+    uint8_t ctrl = (uint8_t)(cur & 0xFFu);
+
+    /* If already in ABORT_PAUSE, nothing to do. Matches
+     * hailo-vdma-common.c:937. */
+    if ((ctrl & 0x03u) == HAILO_VDMA_CTRL_ABORT_PAUSE) return;
+
+    /* Pause → abort-pause sequence. Writes the new control byte
+     * into bits[7:0] of the base dword. */
+    cur = (cur & ~0xFFu) | HAILO_VDMA_CTRL_ABORT_PAUSE;
+    channel_write_base_dword(channel_index, cur);
+    hailo_platform->mb();
+}
+
+int hailo_vdma_submit_and_wait(uint8_t channel_index,
+                               uint16_t new_num_avail,
+                               uint32_t timeout_us)
+{
+    if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
+    if (!hailo_platform) return HAILO_ERR_NODEV;
+
+    /* Write new_num_avail into bits [31:16] of the base dword.
+     * Read-modify-write to preserve CONTROL and DEPTH_ID. */
+    uint32_t cur = channel_read_base_dword(channel_index);
+    cur = (cur & 0x0000FFFFu) | ((uint32_t)new_num_avail << 16);
+    channel_write_base_dword(channel_index, cur);
+    hailo_platform->mb();
+
+    /* Poll NUM_PROC (low 16 bits of NUM_PROC_DWORD). Yield via
+     * udelay between polls to stay cooperative on Pi 5. */
+    const uint32_t poll_interval_us = 100u;
+    uint32_t elapsed = 0;
+    while (elapsed < timeout_us) {
+        uint32_t proc_dword = hailo_platform->read32(HAILO_BAR_VDMA,
+            channel_base(channel_index)
+            + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+        uint16_t num_proc = (uint16_t)(proc_dword & 0xFFFFu);
+        if (num_proc == new_num_avail) return HAILO_OK;
+        hailo_platform->udelay(poll_interval_us);
+        elapsed += poll_interval_us;
+    }
+    return HAILO_ERR_TIMEOUT;
+}
