@@ -21,6 +21,7 @@
 #include "unity.h"
 #include "../include/timer.h"
 #include "../include/sched.h"
+#include "../include/smp.h"
 #include <stdint.h>
 
 extern void yield(void);
@@ -56,10 +57,16 @@ static void test_pit_ticks_advances_over_time(void)
         "pit_ticks did not advance across yield loop — "
         "coop preempt / timer ISR may be broken");
 
-    /* Upper bound: should not have advanced wildly faster than real
-     * time. More than 20 ticks in 50 ms would mean the period math is
-     * wrong. */
-    TEST_ASSERT_MESSAGE(delta <= 20,
+    /* Upper bound: pit_ticks is a GLOBAL counter that every CPU
+     * increments. On QEMU with a hardware timer IRQ, only CPU 0
+     * ticks → ~5 ticks / 50 ms. On COOP_PREEMPT platforms (Pi 5,
+     * Jetson) every CPU runs its own coop tick off yield() → up to
+     * cpu_count × 5 ticks / 50 ms. Bound scales with cpu_count
+     * with a 2× safety margin for yield-loop bursts and the
+     * occasional boundary overshoot at the 10 ms period edge. */
+    uint64_t upper = (uint64_t)cpu_count * 10;
+    if (upper < 20) upper = 20;
+    TEST_ASSERT_MESSAGE(delta <= upper,
         "pit_ticks advanced too fast — period math may be wrong");
 }
 
@@ -83,7 +90,10 @@ static void test_timer_handler_count_advances(void)
     uint32_t delta = timer_handler_count - start_count;
     TEST_ASSERT_MESSAGE(delta >= 4,
         "timer_handler_count did not advance across yield loop");
-    TEST_ASSERT_MESSAGE(delta <= 20,
+    /* Same multi-CPU rationale as test_pit_ticks_advances_over_time. */
+    uint32_t upper = cpu_count * 10;
+    if (upper < 20) upper = 20;
+    TEST_ASSERT_MESSAGE(delta <= upper,
         "timer_handler_count advanced too fast");
 }
 

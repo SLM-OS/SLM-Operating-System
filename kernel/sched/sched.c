@@ -1316,6 +1316,18 @@ static struct task *pick_next_task(uint32_t cpu)
  */
 static struct task *sched_try_steal(uint32_t this_cpu)
 {
+    /* Isolated cores must never pull work from other CPUs — that's
+     * the whole point of isolation. The S5 placement override
+     * already refuses to *target* an isolated CPU; this closes the
+     * symmetric hole where an isolated CPU would steal from a
+     * non-isolated neighbour and then run its idle loop while
+     * holding a general-purpose task that was explicitly routed
+     * away from it (test_proactive_load_balance_respects_isolation
+     * would otherwise flake when CPU 2 or 3 acted as a thief). */
+    if (sched.isolated_cores & (1U << this_cpu)) {
+        return NULL;
+    }
+
     /* #105: per-CPU observability counters. `sched_diag_steal_*` are
      * incremented on the THIEF's CPU (this_cpu) so a `cpu` shell
      * dump reports the per-core balance of attempts/hits/stale
