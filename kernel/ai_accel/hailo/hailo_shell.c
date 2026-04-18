@@ -5,7 +5,8 @@
  *   hailo                  — dump driver state, IDs, BAR map.
  *   hailo probe            — re-run hailo_probe and print the result.
  *   hailo boot             — upload embedded firmware and bring NPU to RUNNING.
- *   hailo load P           — read a `.hef` model at VFS path P, dump metadata.
+ *   hailo load P           — read a `.hef` at VFS path P, dump header, pad
+ *                            shapes, and CCW write-action summary.
  *   hailo fw               — report firmware version (post-boot only).
  *   hailo peek A [N]       — READ_MEMORY N bytes (default 16, max 64) at
  *                            device-side address A; hex-dump.
@@ -267,6 +268,16 @@ static int cmd_hailo(int argc, char *argv[])
         if (meta.string_truncated) {
             shell_printf("  (note: at least one string was truncated "
                          "at %u bytes)\n", (unsigned)HEF_PARSER_MAX_STR);
+        }
+        /* CCW write-action summary (Phase 5.3). Shows how much weight
+         * data the first network group's preliminary_config would push
+         * through WRITE_MEMORY during a future upload. */
+        if (meta.ccw_action_count > 0) {
+            shell_printf("  ccw: %u action(s), total %lu bytes%s\n",
+                         meta.ccw_action_count,
+                         (unsigned long)meta.ccw_total_bytes,
+                         meta.ccw_actions_truncated
+                             ? " (truncated)" : "");
         }
         return 0;
     }
