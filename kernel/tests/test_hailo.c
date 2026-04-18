@@ -15,7 +15,9 @@
 
 #include "unity.h"
 #include "../ai_accel/hailo/hailo.h"
+#include "../ai_accel/hailo/hailo_control.h"
 #include "../ai_accel/hailo/hailo_internal.h"
+#include "../include/md5.h"
 #include "../include/uart.h"
 #include "test_harness.h"
 #include <stdbool.h>
@@ -55,6 +57,26 @@ static bool     mock_fw_sim_enabled;
 static bool     mock_fw_sim_set_atr1_magic;   /* default true */
 static uint32_t mock_trigger_writes;
 
+/* Simulated control-channel state (Phase 5.2 / #281). Tests that
+ * exercise hailo_control_identify and friends set a canned response
+ * body here; the mock's bar4_write doorbell-handler picks it up. */
+#define MOCK_CONTROL_RESP_MAX 512
+static bool     mock_fw_sim_control_enabled;
+static uint8_t  mock_fw_sim_control_resp[MOCK_CONTROL_RESP_MAX];
+static uint32_t mock_fw_sim_control_resp_len;
+static uint32_t mock_control_doorbells;
+static uint8_t  mock_last_control_request[512];
+static uint32_t mock_last_control_request_len;
+/* IRQ arming observability: the transport must unmask interrupts in
+ * BSC_IMASK_HOST exactly once per lifetime, and clear any stale bits
+ * out of BCS_ISTATUS_HOST before the first send. Also let tests
+ * preload a non-FW_CONTROL bit into ISTATUS to verify the poll loop
+ * ignores unrelated sources. */
+static uint32_t mock_imask_writes;
+static uint32_t mock_imask_last_value;
+static uint32_t mock_istatus_clears_all;
+static uint32_t mock_istatus_preloaded_value;
+
 static void mock_reset(void)
 {
     memset(mock_bar0, 0, sizeof(mock_bar0));
@@ -64,6 +86,17 @@ static void mock_reset(void)
     mock_fw_sim_enabled = true;
     mock_fw_sim_set_atr1_magic = true;
     mock_trigger_writes = 0;
+    mock_fw_sim_control_enabled = false;
+    memset(mock_fw_sim_control_resp, 0, sizeof(mock_fw_sim_control_resp));
+    mock_fw_sim_control_resp_len = 0;
+    mock_control_doorbells = 0;
+    memset(mock_last_control_request, 0, sizeof(mock_last_control_request));
+    mock_last_control_request_len = 0;
+    mock_imask_writes   = 0;
+    mock_imask_last_value = 0;
+    mock_istatus_clears_all = 0;
+    mock_istatus_preloaded_value = 0;
+    hailo_control_reset_state_for_tests();
 }
 
 static int mock_init(void)
@@ -74,6 +107,18 @@ static int mock_init(void)
 
 static uint32_t mock_read32(uint8_t bar, uint32_t offset)
 {
+    /* Tests that want to verify the poll loop ignores non-FW_CONTROL
+     * SW interrupts set mock_istatus_preloaded_value to a non-zero
+     * pattern; return it on the first read of BCS_ISTATUS_HOST, then
+     * clear it so subsequent reads fall through to the normal path
+     * (zero, unless the control simulator wrote FW_CONTROL_IRQ). */
+    if (bar == HAILO_BAR_CONFIG
+     && offset == HAILO_BCS_ISTATUS_HOST
+     && mock_istatus_preloaded_value != 0) {
+        uint32_t v = mock_istatus_preloaded_value;
+        mock_istatus_preloaded_value = 0;
+        return v;
+    }
     if (bar == HAILO_BAR_CONFIG && offset + 4 <= MOCK_BAR0_SIZE) {
         uint32_t v;
         memcpy(&v, &mock_bar0[offset], sizeof(v));
@@ -84,8 +129,28 @@ static uint32_t mock_read32(uint8_t bar, uint32_t offset)
 
 static void mock_write32(uint8_t bar, uint32_t offset, uint32_t value)
 {
-    if (bar == HAILO_BAR_CONFIG && offset + 4 <= MOCK_BAR0_SIZE) {
+    /* BCS_ISTATUS_HOST is write-1-to-clear on real hardware
+     * (see hailo-pcie-common.c:read_and_clear_reg). Stored
+     * value becomes stored & ~value. Simulating plain store
+     * here would make a 0xFFFFFFFF write-to-clear look like
+     * "every bit set" on the next read and the poll loop would
+     * immediately succeed with a zeroed response area. */
+    if (bar == HAILO_BAR_CONFIG && offset == HAILO_BCS_ISTATUS_HOST) {
+        uint32_t cur;
+        memcpy(&cur, &mock_bar0[offset], sizeof(cur));
+        cur &= ~value;
+        memcpy(&mock_bar0[offset], &cur, sizeof(cur));
+        if (value == 0xFFFFFFFFu) {
+            mock_istatus_clears_all++;
+        }
+    } else if (bar == HAILO_BAR_CONFIG && offset + 4 <= MOCK_BAR0_SIZE) {
         memcpy(&mock_bar0[offset], &value, sizeof(value));
+    }
+    /* Observability for the IRQ-arming contract. IMASK must be
+     * OR'd with BSC_ISTATUS_HOST_MASK exactly once per lifetime. */
+    if (bar == HAILO_BAR_CONFIG && offset == HAILO_BSC_IMASK_HOST) {
+        mock_imask_writes++;
+        mock_imask_last_value = value;
     }
     /* Track ATR[0].trsl_addr_lo writes for the atr0 translation. */
     if (bar == HAILO_BAR_CONFIG
@@ -103,7 +168,7 @@ static void mock_write32(uint8_t bar, uint32_t offset, uint32_t value)
 static void mock_bar4_read(uint32_t offset, void *dst, size_t n)
 {
     uint64_t dev_addr = mock_atr0_target + offset;
-    uint64_t sram_off = dev_addr - MOCK_SRAM_BASE;
+    uint64_t sram_off = (dev_addr - MOCK_SRAM_BASE) % MOCK_SRAM_SIZE;
     if (sram_off + n > MOCK_SRAM_SIZE) return;
     memcpy(dst, &mock_sram[sram_off], n);
 }
@@ -125,14 +190,84 @@ static void mock_simulate_fw_after_trigger(void)
     }
 }
 
+/* Simulated firmware reaction to a control-channel doorbell (post-
+ * boot). The driver writes the request bytes to BAR4[0..] and then
+ * pokes raise_ready_offset on BAR4 with APP_CPU_CONTROL_MASK; real
+ * firmware would pick up the request, process it, and write the
+ * response to BAR4[0x640..]. Here we:
+ *  1. Capture the request (for test inspection).
+ *  2. Write the test's canned response body to BAR4[0x640] with a
+ *     freshly-computed MD5.
+ *  3. Set BCS_ISTATUS_HOST on BAR0 so the driver's poll terminates. */
+static void mock_simulate_fw_control_response(void)
+{
+    if (!mock_fw_sim_control_enabled) return;
+    if (mock_fw_sim_control_resp_len == 0) return;
+
+    /* Capture request from BAR4[0..]: the driver writes
+     * [md5][len][payload] at BAR4 offset 0, which — via ATR[0]
+     * pointed at HAILO_CONTROL_SECTION_ADDR_H8 (0x60000000) and
+     * our modular SRAM mapping — lands at mock_sram[0..]. */
+    uint64_t req_sram_off = (mock_atr0_target - MOCK_SRAM_BASE) % MOCK_SRAM_SIZE;
+    uint32_t req_hdr_size = MD5_DIGEST_LENGTH + sizeof(uint32_t);
+    if (req_sram_off + req_hdr_size <= MOCK_SRAM_SIZE) {
+        uint32_t payload_len = 0;
+        memcpy(&payload_len, &mock_sram[req_sram_off + MD5_DIGEST_LENGTH],
+               sizeof(uint32_t));
+        if (payload_len > sizeof(mock_last_control_request)) {
+            payload_len = sizeof(mock_last_control_request);
+        }
+        memcpy(mock_last_control_request,
+               &mock_sram[req_sram_off + MD5_DIGEST_LENGTH + sizeof(uint32_t)],
+               payload_len);
+        mock_last_control_request_len = payload_len;
+    }
+
+    /* Build the response wire bytes: [md5 over body][len][body].
+     * MD5 covers the payload only; see hailo_control.c for the
+     * HailoRT reference. */
+    uint32_t body_len = mock_fw_sim_control_resp_len;
+    uint8_t md5[MD5_DIGEST_LENGTH];
+    md5_compute(mock_fw_sim_control_resp, body_len, md5);
+
+    uint64_t resp_sram_off = ((mock_atr0_target - MOCK_SRAM_BASE)
+                              + HAILO_CONTROL_REQUEST_RESPONSE_OFFSET)
+                             % MOCK_SRAM_SIZE;
+    if (resp_sram_off + MD5_DIGEST_LENGTH + sizeof(uint32_t) + body_len
+        > MOCK_SRAM_SIZE) {
+        return;
+    }
+    memcpy(&mock_sram[resp_sram_off], md5, MD5_DIGEST_LENGTH);
+    memcpy(&mock_sram[resp_sram_off + MD5_DIGEST_LENGTH],
+           &body_len, sizeof(uint32_t));
+    memcpy(&mock_sram[resp_sram_off + MD5_DIGEST_LENGTH + sizeof(uint32_t)],
+           mock_fw_sim_control_resp, body_len);
+
+    /* Signal "control response ready" by setting the specific
+     * FW_CONTROL_IRQ bit in the SW_IRQ field of BCS_ISTATUS_HOST.
+     * The driver's poll distinguishes this from notifications,
+     * VDMA transfers, etc., so raising any other bit would hang
+     * the test (or worse, let it consume the wrong event). */
+    uint32_t istatus = HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;
+    memcpy(&mock_bar0[HAILO_BCS_ISTATUS_HOST], &istatus, sizeof(istatus));
+}
+
 static void mock_bar4_write(uint32_t offset, const void *src, size_t n)
 {
     uint64_t dev_addr = mock_atr0_target + offset;
-    uint64_t sram_off = dev_addr - MOCK_SRAM_BASE;
-    if (sram_off + n > MOCK_SRAM_SIZE) return;
-    memcpy(&mock_sram[sram_off], src, n);
+    uint64_t sram_off = (dev_addr - MOCK_SRAM_BASE) % MOCK_SRAM_SIZE;
+    /* Wrap-mod SRAM: a real Hailo control request-response address
+     * (0x60000000 + small_offset) collides with 0 + small_offset,
+     * which is fine for tests because each test wipes the SRAM
+     * region it cares about. Boot-path device addresses (app_fw_code
+     * at 0x60000, core_fw_header at 0xA0000, boot_status at 0xE0000)
+     * are all within MOCK_SRAM_SIZE (1 MB) so modular collapse on
+     * them is a no-op. */
+    if (sram_off + n <= MOCK_SRAM_SIZE) {
+        memcpy(&mock_sram[sram_off], src, n);
+    }
 
-    /* Watch for the trigger-address doorbell. */
+    /* Watch for the trigger-address doorbell (hailo_boot path). */
     if (dev_addr == hailo_fw_addrs_hailo8.trigger_address
      && n >= sizeof(uint32_t)) {
         uint32_t v;
@@ -140,6 +275,22 @@ static void mock_bar4_write(uint32_t offset, const void *src, size_t n)
         if (v == HAILO_FW_TRIGGER_VALUE) {
             mock_trigger_writes++;
             mock_simulate_fw_after_trigger();
+        }
+    }
+
+    /* Watch for the control-channel doorbell (post-boot, #281).
+     * Check on the raw BAR4 offset rather than the ATR-translated
+     * device address — control_retarget_atr0 re-points ATR[0] at
+     * 0x60000000 (Hailo-8 control section), so dev_addr for this
+     * write is 0x60000000 + raise_ready_offset, not just
+     * raise_ready_offset alone. */
+    if (offset == hailo_fw_addrs_hailo8.raise_ready_offset
+     && n >= sizeof(uint32_t)) {
+        uint32_t v;
+        memcpy(&v, src, sizeof(v));
+        if (v == HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK) {
+            mock_control_doorbells++;
+            mock_simulate_fw_control_response();
         }
     }
 }
@@ -1178,6 +1329,235 @@ static void test_decode_core_fw_success_populates_outputs(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Control-channel tests (Phase 5.2 tier 1, #281)                              */
+/* -------------------------------------------------------------------------- */
+
+/* Boot the device to state=RUNNING and reset ATR[0] so the control-
+ * channel offsets on BAR4 map cleanly onto the mock SRAM
+ * (0 → SRAM[0], 0x640 → SRAM[0x640], 0x1684 → SRAM[0x1684]). */
+static void control_setup_running(void)
+{
+    boot_setup_probed();
+    static uint8_t blob[256];
+    size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 4, 23, 0);
+    TEST_ASSERT_TRUE(n != 0);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_boot(blob, n));
+    TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_RUNNING, (int)hailo_get_state());
+    /* Post-boot ATR[0] may point anywhere from the firmware upload
+     * path; clear it so the control-channel offsets map cleanly. */
+    mock_atr0_target = 0;
+}
+
+static void test_control_identify_rejects_when_not_running(void)
+{
+    boot_setup_probed();   /* state=PROBED, not RUNNING */
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV,
+                          hailo_control_identify(&resp));
+}
+
+static void test_control_identify_rejects_null_out(void)
+{
+    control_setup_running();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, hailo_control_identify(NULL));
+}
+
+static void test_control_identify_happy_path(void)
+{
+    control_setup_running();
+
+    /* Seed a canned IDENTIFY response: [response_header][identify_body].
+     * We fill the fw_version fields and leave the rest zero. */
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    /* Common-header scalars and status fields cross the wire in
+     * big-endian — the mock must seed them the same way firmware
+     * would. fw_version is memcpy'd raw, so it stays native LE.
+     * parameter_count sits between header and body in the wire
+     * layout (CONTROL_PROTOCOL__payload_t in HailoRT). */
+    fake.header.common.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.sequence = 0;  /* bswap of zero is zero */
+    fake.header.common.opcode   = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    fake.header.status.major_status = 0;
+    fake.header.status.minor_status = 0;
+    fake.parameter_count          = 0;
+    fake.body.fw_version.major    = 4;
+    fake.body.fw_version.minor    = 23;
+    fake.body.fw_version.revision = 0x20000000;
+
+    TEST_ASSERT_TRUE(sizeof(fake) <= MOCK_CONTROL_RESP_MAX);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+
+    TEST_ASSERT_EQUAL_UINT32(4,          resp.fw_version.major);
+    TEST_ASSERT_EQUAL_UINT32(23,         resp.fw_version.minor);
+    TEST_ASSERT_EQUAL_UINT32(0x20000000, resp.fw_version.revision);
+
+    /* The mock captured the request; sanity-check its opcode field. */
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+    struct hailo_control_common_header captured_hdr;
+    TEST_ASSERT_TRUE(mock_last_control_request_len
+                     >= sizeof(captured_hdr));
+    memcpy(&captured_hdr, mock_last_control_request, sizeof(captured_hdr));
+    /* Wire values are big-endian — compare against the swapped form. */
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY),
+                             captured_hdr.opcode);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION),
+                             captured_hdr.version);
+}
+
+static void test_control_identify_timeout_no_response(void)
+{
+    control_setup_running();
+
+    /* Leave the control simulator disabled — doorbell fires but
+     * the mock never writes a response and never sets ISTATUS.
+     * hailo_control_send_recv should time out.
+     *
+     * Use a very small response body to pass the preamble and
+     * land in the poll loop quickly; leaving mock_fw_sim_control_
+     * enabled == false means mock_simulate_fw_control_response
+     * returns early without writing anything. */
+    mock_fw_sim_control_enabled = false;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+                          hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+}
+
+/*
+ * Exercises the request wire format in full: every field in the
+ * common header plus parameter_count. HailoRT's firmware expects
+ * big-endian for every scalar; a single missed byteswap breaks
+ * the entire RPC. The response path is already covered by
+ * test_control_identify_happy_path; this test guards the send
+ * side of the same contract.
+ */
+static void test_control_identify_request_wire_format_is_be(void)
+{
+    control_setup_running();
+    /* Seed a minimal valid response so the send path completes and
+     * we can inspect the captured request. */
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+
+    /* Every scalar in the request payload must be the bswap32'd
+     * form of its native value, including parameter_count=0 (which
+     * happens to bswap to 0 — still worth asserting as a guard
+     * against someone sneaking a native-endian write into the
+     * send path). */
+    struct {
+        struct hailo_control_common_header common;
+        uint32_t                           parameter_count;
+    } __attribute__((packed)) captured;
+    TEST_ASSERT_TRUE(mock_last_control_request_len >= sizeof(captured));
+    memcpy(&captured, mock_last_control_request, sizeof(captured));
+
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION),
+                             captured.common.version);
+    TEST_ASSERT_EQUAL_UINT32(0u, captured.common.flags);
+    /* First send since reset → sequence == 0 on the wire. */
+    TEST_ASSERT_EQUAL_UINT32(0u, captured.common.sequence);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY),
+                             captured.common.opcode);
+    TEST_ASSERT_EQUAL_UINT32(0u, captured.parameter_count);
+}
+
+/*
+ * Hailo firmware won't latch bits into BCS_ISTATUS_HOST until the
+ * matching BSC_IMASK_HOST bits are unmasked — that's what the
+ * Linux driver's hailo_pcie_enable_interrupts does. The transport
+ * must do the same, once, and clear ISTATUS of any stale bits
+ * before the first send. Subsequent sends must be idempotent.
+ */
+static void test_control_identify_arms_imask_once(void)
+{
+    control_setup_running();
+
+    /* Canned response so each send_recv completes. */
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_imask_writes);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_istatus_clears_all);
+    /* Enablement must include the whole ISTATUS mask so every
+     * source we care about gets unmasked. */
+    TEST_ASSERT_TRUE(
+        (mock_imask_last_value & HAILO_BSC_ISTATUS_HOST_MASK)
+        == HAILO_BSC_ISTATUS_HOST_MASK);
+
+    /* Second send with the same process state: IMASK was already
+     * armed, so no further writes. */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_imask_writes);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_istatus_clears_all);
+}
+
+/*
+ * BCS_ISTATUS_HOST is a shared-line interrupt register: SW_IRQ,
+ * VDMA_SRC, and VDMA_DEST bits can fire independently. The
+ * transport must wait for the specific FW_CONTROL bit, not any
+ * non-zero value, or an unrelated notification will be mistaken
+ * for a response and the real response is missed.
+ */
+static void test_control_identify_ignores_non_fw_control_irq(void)
+{
+    control_setup_running();
+
+    /* Preload the NOTIFICATION_IRQ bit (0x02 << 24) into ISTATUS
+     * so the first poll read sees a non-zero value that is NOT
+     * the FW_CONTROL bit. If the transport were still matching on
+     * "any non-zero", it would consume this as the completion and
+     * read a zeroed response area. */
+    mock_istatus_preloaded_value = (0x02u << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT);
+
+    /* Leave the control simulator disabled — the real FW_CONTROL
+     * bit never fires, so the transport must time out even after
+     * observing the notification. */
+    mock_fw_sim_control_enabled = false;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+                          hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+    /* The stale bit must have been cleared (write-1-to-clear)
+     * so it doesn't wedge the next request. */
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_istatus_preloaded_value);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -1246,6 +1626,15 @@ int test_suite_hailo(void)
     RUN_TEST(test_decode_core_fw_accepts_tight_fit);
     RUN_TEST(test_decode_core_fw_rejects_one_byte_short);
     RUN_TEST(test_decode_core_fw_success_populates_outputs);
+
+    /* Control-channel IDENTIFY (Phase 5.2 tier 1, #281) */
+    RUN_TEST(test_control_identify_rejects_when_not_running);
+    RUN_TEST(test_control_identify_rejects_null_out);
+    RUN_TEST(test_control_identify_happy_path);
+    RUN_TEST(test_control_identify_timeout_no_response);
+    RUN_TEST(test_control_identify_request_wire_format_is_be);
+    RUN_TEST(test_control_identify_arms_imask_once);
+    RUN_TEST(test_control_identify_ignores_non_fw_control_irq);
 
     return UnityEnd();
 }

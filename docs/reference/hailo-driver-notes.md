@@ -279,6 +279,56 @@ The response arrives in BAR4 at `PCIE_REQUEST_SIZE_OFFSET = 0x640`, same
 format. A `HAILO_PCIE_NNC_FW_CONTROL_IRQ (0x04)` interrupt fires when it is
 ready. `hailo-pcie-common.c:490-508` reads the response header + payload.
 
+### 4.5. Control-channel wire-format gotchas (SLM-OS bring-up, 2026-04-18)
+
+SLM-OS hit four separate, independently-debuggable bugs during the Phase 5.2
+IDENTIFY bring-up on pi-5-1. Each produced a "response looks wrong" symptom
+that was easy to confuse with earlier layers (MD5, ATR, timing). Recording
+here so the next opcode port doesn't rediscover them.
+
+1. **Header scalars are big-endian on the wire.**
+   `common_header.{version, flags, sequence, opcode}` plus
+   `parameter_count` go through `BYTE_ORDER__htonl` on the host and
+   `ntohl` on parse (see `control_protocol__pack_request_header` in
+   `hailort-control_protocol.cpp:199`). `firmware_version.{major, minor,
+   revision}` is the exception — HailoRT memcpys it raw, so it stays
+   native LE. Same rule for response `status.{major_status,
+   minor_status}`: big-endian on the wire, unswap before checking.
+
+2. **ISTATUS only latches bits after IMASK is set.**
+   `BSC_IMASK_HOST` (BAR0 `0x0188`) must be OR'd with
+   `BSC_ISTATUS_HOST_MASK` (`0xFF00_FFFF`) at least once, and
+   `BCS_ISTATUS_HOST` should be cleared via a `0xFFFFFFFF`
+   write-1-to-clear. Without it, `BCS_ISTATUS_HOST` reads zero forever
+   even though firmware IS processing requests — looks like firmware is
+   ignoring the doorbell. See `hailo_pcie_enable_interrupts` in
+   `hailo-pcie-common.c:867`.
+
+3. **Wait for the specific FW-control bit, not any non-zero.**
+   `BCS_ISTATUS_HOST` multiplexes VDMA channel interrupts (bits `0-15`),
+   notification IRQ (`0x02<<24`), FW-control IRQ (`0x04<<24`), and
+   driver-down IRQ (`0x08<<24`). Polling for "non-zero" races ahead of
+   the actual response on a quiet device and returns stale bytes. Mask
+   to `0x04 << 24` specifically. See `hailo_pcie_nnc_sw_interrupt_masks`
+   in `hailo-pcie-common.h:71`.
+
+4. **Response has a `parameter_count` gap between status and body.**
+   Wire layout is `[common_header(16)][status(8)][parameter_count(4)][body]`.
+   HailoRT's parse walks past a `CONTROL_PROTOCOL__payload_t` (whose first
+   field is `parameter_count`) before pointing its response body at
+   `payload->parameters`. Miss the 4-byte gap and every scalar in the
+   body shifts — on IDENTIFY, `fw_version.major` picks up
+   `fw_version_length` (`0x0C00_0000`). Also: mark the body struct
+   `__attribute__((packed))`. `product_number[42]` is not 4-aligned, so
+   without packing the compiler tacks on 2 bytes of trailing padding,
+   `sizeof(struct hailo_control_identify_response)` grows from the 162
+   bytes firmware sends to 164, and the response-length check rejects a
+   perfectly good response as truncated.
+
+All four are implemented in `kernel/ai_accel/hailo/hailo_control.{c,h}`
+and covered by the `test_control_identify_*` suite in
+`kernel/tests/test_hailo.c`.
+
 ---
 
 ## 5. VDMA control channel
