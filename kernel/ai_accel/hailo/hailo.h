@@ -128,9 +128,19 @@
 
 #define HAILO_FW_MAGIC_HAILO8         0x1DD89DE0u
 #define HAILO_FW_CODE_ALIGN           4u
-#define HAILO_FW_MAX_CODE_SIZE        0x40000u   /* 256 KB */
+#define HAILO_FW_MAX_CODE_SIZE        0x40000u   /* 256 KB — app firmware */
+/* Core firmware max. Same value today, but Linux distinguishes
+ * MAXIMUM_APP_FIRMWARE_CODE_SIZE and MAXIMUM_CORE_FIRMWARE_CODE_SIZE
+ * — keeping them separate here makes future bump-one-not-the-other
+ * changes safe. */
+#define HAILO_FW_MAX_CORE_CODE_SIZE   0x40000u   /* 256 KB — core firmware */
 #define HAILO_FW_MAX_CERT_KEY         0x1000u
 #define HAILO_FW_MAX_CERT_CONTENT     0x1000u
+
+/* Firmware header layout version the driver knows how to parse. A
+ * future Hailo FW with header_version != 0 would have additional
+ * or reordered fields; refuse to boot one rather than misinterpret. */
+#define HAILO_FW_HEADER_VERSION_V0    0u
 
 struct hailo_firmware_header {
     uint32_t magic;            /* HAILO_FW_MAGIC_HAILO8 */

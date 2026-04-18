@@ -378,6 +378,11 @@ int hailo_validate_firmware(const void *fw_bytes, size_t fw_size)
              hdr.magic, HAILO_FW_MAGIC_HAILO8);
         return HAILO_ERR_BAD_FIRMWARE;
     }
+    if (hdr.header_version != HAILO_FW_HEADER_VERSION_V0) {
+        INFO("hailo: unsupported firmware header_version %u "
+             "(driver only understands v0)", hdr.header_version);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
     if (hdr.code_size == 0 || hdr.code_size > HAILO_FW_MAX_CODE_SIZE) {
         INFO("hailo: firmware code_size 0x%x out of range", hdr.code_size);
         return HAILO_ERR_BAD_FIRMWARE;
@@ -574,8 +579,14 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
         state = HAILO_STATE_FAILED;
         return HAILO_ERR_BAD_FIRMWARE;
     }
+    if (core_hdr.header_version != HAILO_FW_HEADER_VERSION_V0) {
+        INFO("hailo: core-firmware unsupported header_version %u",
+             core_hdr.header_version);
+        state = HAILO_STATE_FAILED;
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
     if (core_hdr.code_size == 0
-     || core_hdr.code_size > HAILO_FW_MAX_CODE_SIZE) {
+     || core_hdr.code_size > HAILO_FW_MAX_CORE_CODE_SIZE) {
         INFO("hailo: core-firmware code_size 0x%x out of range",
              core_hdr.code_size);
         state = HAILO_STATE_FAILED;
@@ -648,7 +659,11 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
     }
 
     state = HAILO_STATE_RUNNING;
-    INFO("hailo: firmware %u.%u.%u booted",
+    /* firmware_revision is a build/tag ID (real FW 4.23.0 ships with
+     * revision=0x20000000), not a semver digit — print it in hex so
+     * the value reads as intentional. major/minor are conventional
+     * decimals. */
+    INFO("hailo: firmware %u.%u rev=0x%08x booted",
          hdr.firmware_major, hdr.firmware_minor, hdr.firmware_revision);
     return HAILO_OK;
 

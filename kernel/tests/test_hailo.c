@@ -412,16 +412,21 @@ static void test_state_str_labels_known_values(void)
 /* Build a minimal-but-well-formed firmware blob (header + dummy code +
  * cert header + dummy key/content). Returns total size written. All
  * sizes are 4-aligned. */
-static size_t build_fw_blob(uint8_t *out, size_t out_cap,
-                            uint32_t code_size,
-                            uint32_t key_size,
-                            uint32_t content_size,
-                            uint32_t fw_major, uint32_t fw_minor, uint32_t fw_rev)
+/*
+ * Default core_code_size used by build_fw_blob when the caller
+ * passes 0 — kept small so short tests don't need large buffers.
+ * Tests that exercise the multi-chunk core path override this.
+ */
+#define BUILD_FW_BLOB_DEFAULT_CORE_CODE  4u
+
+static size_t build_fw_blob_full(uint8_t *out, size_t out_cap,
+                                 uint32_t code_size,
+                                 uint32_t key_size,
+                                 uint32_t content_size,
+                                 uint32_t core_code_size,
+                                 uint32_t fw_major, uint32_t fw_minor,
+                                 uint32_t fw_rev)
 {
-    /* Hailo-8 production firmware carries BOTH app and core sections.
-     * The core has its own header + code appended after the cert
-     * content. Tests use a small core (4 bytes) to keep blobs short. */
-    const uint32_t core_code_size = 4u;
     size_t need = sizeof(struct hailo_firmware_header) + code_size
                 + sizeof(struct hailo_fw_cert_header) + key_size + content_size
                 + sizeof(struct hailo_firmware_header) + core_code_size;
@@ -450,6 +455,23 @@ static size_t build_fw_blob(uint8_t *out, size_t out_cap,
     memcpy(out + off, &core_hdr, sizeof(core_hdr));     off += sizeof(core_hdr);
     for (uint32_t i = 0; i < core_code_size; i++) out[off++] = (uint8_t)(0xC0 + i);
     return off;
+}
+
+/*
+ * Common-case wrapper: Hailo-8 production firmware carries BOTH app
+ * and core sections. This builds both with a small (4 B) core code
+ * for tests that don't care about the core payload. Tests that do
+ * care use build_fw_blob_full with an explicit core_code_size.
+ */
+static size_t build_fw_blob(uint8_t *out, size_t out_cap,
+                            uint32_t code_size,
+                            uint32_t key_size,
+                            uint32_t content_size,
+                            uint32_t fw_major, uint32_t fw_minor, uint32_t fw_rev)
+{
+    return build_fw_blob_full(out, out_cap, code_size, key_size, content_size,
+                              BUILD_FW_BLOB_DEFAULT_CORE_CODE,
+                              fw_major, fw_minor, fw_rev);
 }
 
 /* Common setup: ops installed, device probed, mock SRAM seeded with
@@ -715,6 +737,37 @@ static void test_boot_chunks_large_code(void)
     TEST_ASSERT_EQUAL_HEX8(code_src[big_code - 1],  code_dst[big_code - 1]);
 }
 
+static void test_boot_core_chunks_large_code(void)
+{
+    /* Exercise dev_write_chunked on the CORE code path. Real Hailo-8
+     * firmware has a ~58 KB core section (14+ ATR windows); without
+     * this test the multi-chunk core upload has zero mock coverage
+     * and only the real-hardware boot verifies the path. */
+    boot_setup_probed();
+    const uint32_t app_code  = 16u;
+    const uint32_t key       = 16u;
+    const uint32_t content   = 16u;
+    const uint32_t big_core  = HAILO_ATR_TABLE_SIZE + 32u;  /* 4 KB + 32 B */
+    static uint8_t boot_blob[HAILO_ATR_TABLE_SIZE * 2];
+    size_t n = build_fw_blob_full(boot_blob, sizeof(boot_blob),
+                                  app_code, key, content, big_core,
+                                  1, 0, 0);
+    TEST_ASSERT_TRUE(n != 0);
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_boot(boot_blob, n));
+    TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_RUNNING, (int)hailo_get_state());
+
+    /* Spot-check first and last byte of the core code landed. */
+    size_t core_off = sizeof(struct hailo_firmware_header) + app_code
+                    + sizeof(struct hailo_fw_cert_header) + key + content
+                    + sizeof(struct hailo_firmware_header);
+    uint8_t *core_code_src = boot_blob + core_off;
+    uint8_t *core_code_dst = &mock_sram[
+        hailo_fw_addrs_hailo8.core_code_ram_base - MOCK_SRAM_BASE];
+    TEST_ASSERT_EQUAL_HEX8(core_code_src[0],             core_code_dst[0]);
+    TEST_ASSERT_EQUAL_HEX8(core_code_src[big_core - 1],  core_code_dst[big_core - 1]);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -752,6 +805,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_boot_rejects_core_code_truncated);
     RUN_TEST(test_boot_fails_when_fw_never_signals_loaded);
     RUN_TEST(test_boot_chunks_large_code);
+    RUN_TEST(test_boot_core_chunks_large_code);
 
     return UnityEnd();
 }
