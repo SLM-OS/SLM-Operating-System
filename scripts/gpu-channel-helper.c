@@ -247,6 +247,21 @@ int main(int argc, char **argv)
     printf("  usermode_mmio_va  = 0x%llx\n",
            (unsigned long long)sb.usermode_mmio_gpu_va);
 
+    /* Bind a compute object context to the channel. Without this, PBDMA
+     * walks our pushbuffer entries (GP_GET advances) but the host
+     * methods SEM_EXECUTE don't complete — CUDA's strace shows it
+     * calling ALLOC_OBJ_CTX with class_num=AMPERE_COMPUTE_A right
+     * after SETUP_BIND, and the Phase 7 semaphore-release E2E test
+     * starts working once this is added. AMPERE_COMPUTE_A=0xC5C0
+     * matches the channel-GPFIFO class 0xC56F's compute-engine peer. */
+    struct nvgpu_alloc_obj_ctx_args octx;
+    memset(&octx, 0, sizeof(octx));
+    octx.class_num = 0xC5C0;   /* AMPERE_COMPUTE_A */
+    octx.flags = 0;
+    xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_ALLOC_OBJ_CTX, &octx, "ALLOC_OBJ_CTX");
+    printf("[gpu-helper] ALLOC_OBJ_CTX OK (class=0xC5C0, obj_id=0x%llx)\n",
+           (unsigned long long)octx.obj_id);
+
     /* Allocate pushbuffer + semaphore via nvmap. */
     int pb_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 65536, 4096);  /* 64 KB */
     int sem_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
