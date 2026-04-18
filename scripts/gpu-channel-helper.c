@@ -502,31 +502,56 @@ int main(int argc, char **argv)
      * (the mmap covers BAR0+0xBB0000..+0xBB0FFF). Fixed below. */
     printf("[gpu-helper] === ISOLATION TEST: userspace mmap+doorbell ===\n");
 
-    /* Write SEMAPHORE_RELEASE pushbuffer (10 dwords). Same encoding as
-     * SLM-OS Phase 7 smoke test: new host-semaphore methods 0x5C..0x6C,
-     * OPERATION=RELEASE(1), 32-bit, WFI enabled. */
+    /* SEMAPHORE_RELEASE via AMPERE_COMPUTE_B methods.
+     *
+     * The kernel-internal gv11b_sema_add_incr_cmd uses host-family
+     * methods at 0x5C..0x6C, but those only decode on a channel
+     * WITHOUT any class bound to the target subchannel. Once
+     * SET_OBJECT binds AMPERE_COMPUTE_B (0xC7C0) to subch 0, the GR
+     * engine expects COMPUTE_B methods — method 0x5C then triggers
+     * CLASS_SUBCH_MISMATCH (esr 0x80000002).
+     *
+     * Correct path: SET_OBJECT first, then COMPUTE_B's own
+     * REPORT_SEMAPHORE_* methods at 0x158..0x168
+     * (from docs/reference/nvgpu-include-class-clc7c0.h). OPERATION
+     * on this family is RELEASE=0 (not 1), STRUCTURE_SIZE needs
+     * SEMAPHORE_ONE_WORD (1<<3) for a 32-bit payload.
+     *
+     * **AUTHORITATIVE SOURCE:** the same dword stream is built by
+     * kernel/gpu/nvidia/ga10b_bringup.c's pure function
+     * ga10b_build_compute_sema_release_pushbuffer(). Host tests in
+     * host-tools/gsp-harness/test_ga10b_bringup.c lock the encoding.
+     * If you change the layout, change it there too — otherwise this
+     * helper's pre-kexec isolation test will diverge from the
+     * SLM-OS-side post-kexec submit and debugging will be confusing.
+     * The helper uses hardcoded literals here (not a shared header)
+     * because the kernel builder lives in a C file, not a header, and
+     * refactoring for sharing is out of scope for a diagnostic tool. */
     uint32_t *pb32 = (uint32_t *)pb_va;
     uint64_t sem_gva = sem_map.offset;
-    pb32[0] = 0x2001005Cu;                /* SEM_ADDR_LO header */
-    pb32[1] = (uint32_t)(sem_gva & 0xFFFFFFFFu);
-    pb32[2] = 0x20010060u;                /* SEM_ADDR_HI header */
-    pb32[3] = (uint32_t)((sem_gva >> 32) & 0xFFu);
-    pb32[4] = 0x20010064u;                /* SEM_PAYLOAD_LO header */
-    pb32[5] = HELPER_SMOKETEST_SEM_PAYLOAD;
-    pb32[6] = 0x20010068u;                /* SEM_PAYLOAD_HI header */
-    pb32[7] = 0;
-    pb32[8] = 0x2001006Cu;                /* SEM_EXECUTE header */
-    pb32[9] = 0x00000001u;                /* RELEASE | 32-bit | WFI_EN */
+    pb32[0]  = 0x20010000u;                /* SET_OBJECT header (method 0) */
+    pb32[1]  = 0x0000C7C0u;                /* AMPERE_COMPUTE_B */
+    pb32[2]  = 0x20010158u;                /* SET_REPORT_SEMAPHORE_PAYLOAD_LOWER */
+    pb32[3]  = HELPER_SMOKETEST_SEM_PAYLOAD;
+    pb32[4]  = 0x2001015Cu;                /* SET_REPORT_SEMAPHORE_PAYLOAD_UPPER */
+    pb32[5]  = 0u;                         /* 32-bit release */
+    pb32[6]  = 0x20010160u;                /* SET_REPORT_SEMAPHORE_ADDRESS_LOWER */
+    pb32[7]  = (uint32_t)(sem_gva & 0xFFFFFFFFu);
+    pb32[8]  = 0x20010164u;                /* SET_REPORT_SEMAPHORE_ADDRESS_UPPER */
+    pb32[9]  = (uint32_t)((sem_gva >> 32) & 0xFFu);
+    pb32[10] = 0x20010168u;                /* REPORT_SEMAPHORE_EXECUTE */
+    pb32[11] = 0x00000008u;                /* OP=RELEASE(0) | STRUCTURE_SIZE=ONE_WORD(1<<3) */
     msync(pb_va, 4096, MS_SYNC);
 
     /* Pre-clear the semaphore so we can detect the GPU write. */
     *(volatile uint32_t *)sem_va = 0;
     msync(sem_va, 4096, MS_SYNC);
 
-    /* Build GPFIFO entry in Ampere HW format, length=10 dwords. */
+    /* Build GPFIFO entry in Ampere HW format, length=12 dwords
+     * (SET_OBJECT header+data + 5 sema method header+data pairs). */
     uint64_t pb_gva = pb_map.offset;
     uint32_t gp_e0 = (uint32_t)(pb_gva & 0xFFFFFFFCu);
-    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (10u << 10);
+    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (12u << 10);
     ((uint32_t *)gpfifo_va)[0] = gp_e0;
     ((uint32_t *)gpfifo_va)[1] = gp_e1;
     msync(gpfifo_va, 8, MS_SYNC);

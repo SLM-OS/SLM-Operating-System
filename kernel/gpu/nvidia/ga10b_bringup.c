@@ -180,6 +180,31 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define GR_FECS_MAILBOX_FAIL        0x00000002u
 #define GR_FECS_MAILBOX_CSUM_FAIL   0x00000021u
 
+/* ---- COMPUTE_B semaphore methods (AMPERE_COMPUTE_B = 0xC7C0) ----
+ *
+ * These methods decode against the GR/compute engine, not PBDMA, and
+ * require SET_OBJECT(0xC7C0) to have bound AMPERE_COMPUTE_B to the
+ * subchannel first. Byte offsets are from clc7c0.h. OPERATION on this
+ * family differs from the host family at 0x5C..0x6C: RELEASE is 0
+ * here (not 1), and STRUCTURE_SIZE must be SEMAPHORE_ONE_WORD for
+ * 32-bit payloads.
+ *
+ * Source: docs/reference/nvgpu-include-class-clc7c0.h:109-142 */
+#define NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER   0x0158u
+#define NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER   0x015Cu
+#define NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER   0x0160u
+#define NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_UPPER   0x0164u
+#define NVC7C0_REPORT_SEMAPHORE_EXECUTE             0x0168u
+
+/* REPORT_SEMAPHORE_EXECUTE fields */
+#define NVC7C0_SEM_EXECUTE_OP_RELEASE               0x0u   /* bits [1:0] */
+#define NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD  (1u << 3)  /* bits [4:3] */
+
+/* NVC56F_SET_OBJECT is at method byte offset 0 on every channel class.
+ * (GA10B_AMPERE_COMPUTE_B_CLASS_ID is declared in ga10b_bringup.h so
+ * host tests can reference it.) */
+#define NVC56F_SET_OBJECT            0x00u
+
 /* ---- USERMODE doorbell (Phase 7 PBDMA kick) ----
  *
  * GA10B inherits the TU104 usermode register layout, so the doorbell
@@ -1092,6 +1117,33 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
             NVC56F_SEM_EXECUTE_PAYLOAD_32BIT |
             NVC56F_SEM_EXECUTE_RELEASE_WFI_EN;
     return GA10B_SEMA_RELEASE_PB_DWORDS;
+}
+
+uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
+                                                     uint64_t sem_gpu_va,
+                                                     uint32_t payload)
+{
+    /* First pair: SET_OBJECT binding AMPERE_COMPUTE_B to subch 0. */
+    pb[0]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC56F_SET_OBJECT);
+    pb[1]  = GA10B_AMPERE_COMPUTE_B_CLASS_ID;
+
+    /* Payload first (lower then upper), then address, then execute —
+     * matches the order the REPORT_SEMAPHORE_* methods are offset in
+     * clc7c0.h. Structure-size ONE_WORD means the GPU writes only the
+     * 32-bit payload at the target address (no timestamp/16-byte
+     * struct). OP=RELEASE fires the write once execute is dispatched. */
+    pb[2]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER);
+    pb[3]  = payload;
+    pb[4]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER);
+    pb[5]  = 0u;     /* 32-bit release: hi payload ignored */
+    pb[6]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER);
+    pb[7]  = (uint32_t)(sem_gpu_va & 0xFFFFFFFFu);
+    pb[8]  = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_UPPER);
+    pb[9]  = (uint32_t)((sem_gpu_va >> 32) & 0xFFu);
+    pb[10] = NVC56F_METHOD_HEADER_INC(1, 0, NVC7C0_REPORT_SEMAPHORE_EXECUTE);
+    pb[11] = NVC7C0_SEM_EXECUTE_OP_RELEASE |
+             NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD;
+    return GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS;
 }
 
 int ga10b_bringup_smoke_test(struct ga10b_bringup *b)

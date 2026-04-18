@@ -1131,6 +1131,84 @@ static void test_sema_release_pb_zero_payload(void)
     REQUIRE_EQ(pb[9], 0x00000001u);                  /* SEM_EXECUTE same */
 }
 
+/* ======================================================================
+ * Phase 7 COMPUTE_B SEMAPHORE_RELEASE pushbuffer builder
+ *
+ * Guards the parallel pushbuffer-builder that targets
+ * AMPERE_COMPUTE_B's REPORT_SEMAPHORE_* methods at byte offsets
+ * 0x158-0x168 (after SET_OBJECT 0xC7C0). Differs from the host
+ * builder in:
+ *   - Byte offsets (0x158-0x168 vs 0x5C-0x6C)
+ *   - OPERATION encoding (RELEASE = 0 here vs 1 on host family)
+ *   - STRUCTURE_SIZE field (required, not present on host family)
+ *
+ * Catches regressions of those three deltas independently via layout,
+ * VA-truncation, and zero-payload checks — same scheme as the host
+ * builder tests above.
+ * ====================================================================== */
+
+static void test_compute_sema_release_pb_layout(void)
+{
+    printf("== test_compute_sema_release_pb_layout ==\n");
+    uint32_t pb[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
+    memset(pb, 0xAB, sizeof(pb));
+
+    uint64_t sem_va  = 0x1ffc010000ULL;
+    uint32_t payload = 0x0000CAFEu;
+
+    uint32_t dwords = ga10b_build_compute_sema_release_pushbuffer(
+        pb, sem_va, payload);
+    REQUIRE_EQ(dwords, GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS);
+
+    /* First pair: SET_OBJECT on subch 0 binding AMPERE_COMPUTE_B. */
+    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x00u));         /* SET_OBJECT */
+    REQUIRE_EQ(pb[1], GA10B_AMPERE_COMPUTE_B_CLASS_ID);     /* AMPERE_COMPUTE_B */
+
+    /* Payload, then address, then execute — offsets from clc7c0.h. */
+    REQUIRE_EQ(pb[2],  EXPECT_INC_HDR(1, 0, 0x158u)); /* SET_REPORT_SEMAPHORE_PAYLOAD_LOWER */
+    REQUIRE_EQ(pb[3],  0x0000CAFEu);
+    REQUIRE_EQ(pb[4],  EXPECT_INC_HDR(1, 0, 0x15Cu)); /* SET_REPORT_SEMAPHORE_PAYLOAD_UPPER */
+    REQUIRE_EQ(pb[5],  0u);                           /* 32-bit release */
+    REQUIRE_EQ(pb[6],  EXPECT_INC_HDR(1, 0, 0x160u)); /* SET_REPORT_SEMAPHORE_ADDRESS_LOWER */
+    REQUIRE_EQ(pb[7],  0xFC010000u);                  /* VA[31:0] */
+    REQUIRE_EQ(pb[8],  EXPECT_INC_HDR(1, 0, 0x164u)); /* SET_REPORT_SEMAPHORE_ADDRESS_UPPER */
+    REQUIRE_EQ(pb[9],  0x0000001Fu);                  /* VA[39:32] masked to 8 bits */
+    REQUIRE_EQ(pb[10], EXPECT_INC_HDR(1, 0, 0x168u)); /* REPORT_SEMAPHORE_EXECUTE */
+    /* OPERATION=RELEASE(0) | STRUCTURE_SIZE=ONE_WORD(1<<3). */
+    REQUIRE_EQ(pb[11], 0x00000008u);
+}
+
+static void test_compute_sema_release_pb_truncates_va_upper(void)
+{
+    printf("== test_compute_sema_release_pb_truncates_va_upper ==\n");
+    uint32_t pb[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
+
+    /* Same VA-upper-byte mask semantics as the host builder: only
+     * VA[39:32] survive. Upper bits of the VA must be masked off by
+     * the builder — else a 64-bit pointer with live upper bits would
+     * get smuggled into the address register. */
+    uint64_t sem_va = 0x1234567890000000ULL;
+    ga10b_build_compute_sema_release_pushbuffer(pb, sem_va, 0x11u);
+
+    REQUIRE_EQ(pb[7], 0x90000000u);   /* ADDRESS_LOWER = VA[31:0] */
+    REQUIRE_EQ(pb[9], 0x00000078u);   /* ADDRESS_UPPER = VA[39:32] only */
+}
+
+static void test_compute_sema_release_pb_zero_payload(void)
+{
+    printf("== test_compute_sema_release_pb_zero_payload ==\n");
+    uint32_t pb[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
+    memset(pb, 0xAB, sizeof(pb));
+
+    ga10b_build_compute_sema_release_pushbuffer(pb, 0x2000000000ULL, 0u);
+    REQUIRE_EQ(pb[0],  EXPECT_INC_HDR(1, 0, 0x00u));    /* SET_OBJECT unchanged */
+    REQUIRE_EQ(pb[1],  GA10B_AMPERE_COMPUTE_B_CLASS_ID); /* class unchanged */
+    REQUIRE_EQ(pb[3],  0u);                             /* zero payload */
+    REQUIRE_EQ(pb[7],  0x00000000u);                    /* VA[31:0] */
+    REQUIRE_EQ(pb[9],  0x00000020u);                    /* VA[39:32] = 0x20 */
+    REQUIRE_EQ(pb[11], 0x00000008u);                    /* EXECUTE unchanged */
+}
+
 static void test_handoff_validate_null_addresses(void)
 {
     printf("== test_handoff_validate_null_addresses ==\n");
@@ -1317,6 +1395,10 @@ int main(void)
     test_sema_release_pb_layout();
     test_sema_release_pb_truncates_va_upper();
     test_sema_release_pb_zero_payload();
+
+    test_compute_sema_release_pb_layout();
+    test_compute_sema_release_pb_truncates_va_upper();
+    test_compute_sema_release_pb_zero_payload();
 
     test_scanner_finds_magic_at_start();
     test_scanner_finds_magic_midrange();
