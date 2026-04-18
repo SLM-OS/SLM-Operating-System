@@ -486,6 +486,9 @@ set(KERNEL_SOURCES
     # USB core (Phase 1 of #266). Platform-neutral; HCD drivers
     # (Phase 3A XHCI) register against it and are gated separately.
     kernel/usb/core/usb_core.c
+    # CDC-ECM class driver (Phase 2 of #266). Gated on networking so
+    # it stays linked out on platforms that don't build lwIP.
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/usb/class/cdc_ecm.c>
     # Jetson EL1 smoke test (one-shot diagnostic) — JETSON_EL1_SMOKE
     $<$<AND:$<BOOL:${JETSON_EL1_SMOKE}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/tests/jetson_el1_smoke.S>
     # Platform-independent networking stack
@@ -546,6 +549,9 @@ set(TEST_SOURCES
     # USB core tests (Phase 1 of #266). Platform-neutral — the mock
     # HCD has no real hardware dependency.
     kernel/tests/test_usb_core.c
+    # CDC-ECM class driver tests (Phase 2 of #266). Gated on networking
+    # because the class driver itself is.
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_cdc_ecm.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_lua.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>

@@ -13,8 +13,8 @@ status lives in §7; outcomes from the Phase 0 decision gate are in §3.
 | Phase | Status | Notes |
 |---|---|---|
 | 0 — CBB probe | ✅ done (2026-04-17) | Option A viable; clock-gated, not firewalled. See §3 Phase 0. |
-| 1 — USB core (`kernel/usb/core/`) | ✅ scaffolded | URB / descriptor / enumeration with 25 unit tests against a mock HCD. |
-| 2 — CDC-ECM class driver | ☐ pending | |
+| 1 — USB core (`kernel/usb/core/`) | ✅ scaffolded | URB / descriptor / enumeration with 37 unit tests against a mock HCD. |
+| 2 — CDC-ECM class driver | ✅ scaffolded | Probe + MAC parse + bulk IN/OUT data path + net_driver glue; 18 unit tests. |
 | 3A — XHCI host driver | ☐🔗 pending | Requires Phase 2 + kexec clock-hold extension. |
 | 4 — lwIP netif integration | ☐🔗 pending | Requires Phase 2. |
 | 5 — testing, reliability, docs | ☐🔗 pending | Requires Phases 3A + 4. |
@@ -251,7 +251,7 @@ Architecture notes:
 - TinyUSB's core is simpler still but device-mode-biased.
 - Linux `drivers/usb/core/` — authoritative but big.
 
-### Phase 2 — CDC-ECM Class Driver (3-4 days)
+### Phase 2 — CDC-ECM Class Driver (3-4 days) — ✅ scaffolded
 
 Applies to both Option A and Option B.
 
@@ -267,6 +267,21 @@ Applies to both Option A and Option B.
 - `struct net_driver` implementation that plugs the ECM device into
   the existing networking abstraction (`kernel/include/net_driver.h`
   from the landed networking work).
+
+**What landed (feature/usb-networking-phase2):**
+
+| File | Lines | Purpose |
+|---|---|---|
+| `kernel/include/cdc_ecm.h` | ~70 | Public API: `cdc_ecm_probe_and_register`, `cdc_ecm_poll`, plus test-visible MAC parser and counters |
+| `kernel/usb/class/cdc_ecm.c` | ~340 | Probe (iface scan + functional descriptor walk + MAC string decode), static RX/TX slot pools, `struct net_driver` ops, fallback MAC synthesis when `iMACAddress == 0` |
+| `kernel/tests/test_cdc_ecm.c` | ~800 | 25 tests against a CDC-ECM-shaped mock HCD — MAC parser edge cases (too short, wrong type, non-ASCII, non-hex, null args), full probe + registration + MTU extraction, `net_init` RX queuing, `send` happy path + pool exhaustion + oversized + null, `recv` happy path + empty + small-buffer truncation, `iMACAddress==0` fallback, rejection of non-CDC devices, probe-failure clears public MAC, net_driver ops refuse post-probe-failure, `cdc_ecm_poll` no-op when unprobed + dispatches to `hcd->poll` when probed, default MTU when `wMaxSegmentSize==0`, probe success without functional descriptor, RX-error drop |
+
+Architecture notes:
+- **Static slot pools, no heap.** 4 RX + 4 TX slots × 2 KB each = 16 KB BSS. Keeps Phase 2 free of dynamic allocation; Phase 3A XHCI decides whether these get relocated to NC memory for DMA coherence.
+- **Completion callbacks tolerate IRQ context.** RX/TX completion paths touch only release-published slot flags and relaxed-atomic counters, not the net_driver dispatch — good for the Phase 3A XHCI IRQ path. All cross-context slot fields use `__atomic_*` GCC builtins with explicit ACQUIRE / RELEASE semantics: the RX completion publishes `len` + `buf` with a RELEASE store on `ready`, the consumer pairs an ACQUIRE load on `ready` before reading them; TX completion publishes `completed` RELEASE, tx_reap ACQUIREs before clearing `in_use`. TX-slot reservation uses `__atomic_compare_exchange_n` so concurrent `send()` callers can't claim the same slot. Diagnostic counters use RELAXED because they never gate another load.
+- **Probe is self-resetting.** Each call clears `cdc.probed` at entry so a retry that finds no device (or a non-CDC device) doesn't leave a stale MAC visible via `cdc_ecm_get_mac()`.
+- **MAC fallback is non-zero.** If `iMACAddress == 0` (or parsing fails), the driver synthesises `02:53:4C:4D:xx:xx` — locally administered, unicast, with "SLM" in the high bytes.
+- **DMA discipline deferred to Phase 3A.** Slot buffers are cacheable BSS today. The XHCI driver will either issue DC CVAC/CIVAC around submit/complete or relocate these to `ncmem_alloc`; the class driver stays agnostic.
 
 **Reference material:**
 - CDC-ECM spec is public (CDC 1.2 ECM subclass spec).

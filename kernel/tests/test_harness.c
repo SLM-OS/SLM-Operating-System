@@ -143,6 +143,11 @@ int test_harness_run_all(void)
     /* USB core tests (platform-neutral; mock HCD only). */
     total_failures += test_suite_usb_core();
 
+    /* CDC-ECM class driver tests (depend on net_driver, so ENABLE_NETWORKING gated). */
+#if defined(ENABLE_NETWORKING)
+    total_failures += test_suite_cdc_ecm();
+#endif
+
 #if !defined(PLATFORM_X86_64)
     /* Phase 5 test suites (ARM64 only — use Rust runtime + ARM assembly) */
 
