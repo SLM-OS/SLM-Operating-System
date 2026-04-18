@@ -24,7 +24,12 @@
 
     .global hailo_fw_start
     .global hailo_fw_end
-    .align 4
+    /* .align 6 = 64 B = one ARM64 cache line. Keeps the blob's
+     * start at a cache-line boundary so any future code path that
+     * DMAs directly from the embedded image (instead of copying
+     * first) doesn't straddle a line. Today's path goes through
+     * BAR4 MMIO writes where alignment is only required at 4 B. */
+    .align 6
 hailo_fw_start:
     .incbin xstr(HAILO_FW_BLOB_PATH)
 hailo_fw_end:

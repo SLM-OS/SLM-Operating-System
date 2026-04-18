@@ -216,6 +216,18 @@ static int dev_write32(uint32_t dev_addr, uint32_t val)
  * page at a time. First chunk handles head-misalignment so that
  * subsequent chunks are page-aligned. All writes must be dword-sized;
  * caller's payload length must be a multiple of 4.
+ *
+ * Three entry conditions:
+ *   1. dev_addr page-aligned (head_off == 0): head branch is a
+ *      no-op; while loop writes full pages then a final short tail.
+ *   2. Misaligned dev_addr with `n` spanning a page boundary
+ *      (head_off != 0 && remain >= head_room): head branch writes
+ *      the first partial page so the while-loop cursor is aligned.
+ *   3. Misaligned dev_addr with `n` fitting inside a single page
+ *      (head_off != 0 && remain < head_room): head branch skipped,
+ *      while loop's single iteration handles the sub-page write
+ *      (dev_write's internal bounds check accepts it because
+ *      head_off + remain < head_room ≤ ATR_TABLE_SIZE).
  */
 static int dev_write_chunked(uint32_t dev_addr, const void *src, size_t n)
 {
@@ -269,7 +281,13 @@ int hailo_init(void)
     }
     /* Fresh start: clear any lingering state from a previous failed
      * session (e.g. a boot that timed out). Post-init the driver is
-     * conceptually a blank slate waiting for hailo_probe. */
+     * conceptually a blank slate waiting for hailo_probe.
+     *
+     * Why explicit: hailo_probe refuses when state == FAILED, and
+     * hailo_boot requires state == PROBED. Without this reset, a
+     * caller that re-runs init after a transient failure would find
+     * probe still refusing — "init the device fresh" is the
+     * expected semantic, so the state machine is reset here. */
     state = HAILO_STATE_UNINIT;
     if (hailo_platform->init) {
         int rc = hailo_platform->init();
@@ -400,8 +418,7 @@ static uint32_t atr1_read_trsl_lo(void)
  * otherwise. The platform's udelay is used (CNTPCT-backed on Pi 5),
  * so this is safe before the scheduler is running.
  */
-typedef bool (*hailo_predicate)(void);
-static int hailo_poll(hailo_predicate pred, uint32_t interval_us, uint32_t total_us)
+static int hailo_poll(bool (*pred)(void), uint32_t interval_us, uint32_t total_us)
 {
     uint32_t elapsed = 0;
     while (elapsed < total_us) {
@@ -460,6 +477,19 @@ static bool atr1_shows_fw_loaded(void)
  *
  * The blob layout (after validate):
  *     [firmware_header] [code ...] [cert_header] [key ...] [content ...]
+ *
+ * Concurrency: each dev_write* call in this function takes and
+ * releases atr0_lock independently — there's no single atomic lock
+ * held across the whole upload. This is safe because during the
+ * PROBED→RUNNING window nothing else touches ATR[0]: boot ROM owns
+ * the device side, the control channel isn't open yet, and no MSI
+ * handlers are wired. Post-boot firmware begins using ATR[0] for
+ * its own traffic — at that point the per-call lock (plus save/
+ * retarget/access/restore inside dev_read and dev_write) correctly
+ * serializes with firmware use. If a future parallel boot path is
+ * introduced (e.g. one driver instance per device on a multi-HAT
+ * platform), the scope of atr0_lock would need to widen or become
+ * per-device.
  */
 int hailo_boot(const void *fw_bytes, size_t fw_size)
 {
@@ -506,6 +536,11 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
     struct hailo_fw_cert_header cert_hdr;
     memcpy(&cert_hdr, blob + cert_off, sizeof(cert_hdr));
 
+    /* key_size / content_size must be 4-byte-aligned: bar4_write in
+     * the platform shim only accepts dword-sized writes (see e.g.
+     * pi5_bar4_write's alignment check). A certificate with a
+     * non-multiple-of-4 size would trip that check silently via the
+     * ATR[0] write path. */
     if (cert_hdr.key_size == 0
      || cert_hdr.key_size > HAILO_FW_MAX_CERT_KEY
      || cert_hdr.content_size == 0

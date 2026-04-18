@@ -969,7 +969,18 @@ static void *bcm2712_map_bar(uint64_t pcie_addr, uint64_t size)
      * (a second BAR sharing the first BAR's 2 MB block — common on
      * Hailo-8 where BAR0/2/4 are all inside the first ~32 KB of the
      * outbound window). Blocks pre-installed by vmm_setup_platform
-     * or by earlier pcie_map_bar calls are accepted as-is. */
+     * or by earlier pcie_map_bar calls are accepted as-is.
+     *
+     * Invariant this relies on: every PA inside the pcie1 outbound
+     * window is identity-mapped (CPU VA == PA). Both the prefetchable
+     * (0x18_0000_0000..0x1b_7FFF_FFFF) and non-prefetchable
+     * (0x1b_8000_0000..0x1b_FFFF_FFFF) regions follow this rule —
+     * pcie_map_bar's only caller is the device enumeration path,
+     * which always asks for the CPU-side outbound-translated
+     * address. If a future caller ever installs a non-identity
+     * mapping in these L1 entries, the vmm_is_mapped skip would
+     * silently return a mis-mapped region; add a PA readback or a
+     * vmm_lookup_phys() check if that becomes possible. */
     uint64_t phys_aligned = cpu_phys & ~(BLOCK_SIZE - 1ull);
     uint64_t region_end   = cpu_phys + size;
     uint64_t size_aligned = ((region_end + BLOCK_SIZE - 1ull)

@@ -75,7 +75,7 @@ static int cmd_hailo(int argc, char *argv[])
         const void *fw_lo = (const void *)hailo_fw_start;
         const void *fw_hi = (const void *)hailo_fw_end;
         if (!fw_lo || !fw_hi || fw_hi <= fw_lo) {
-            shell_puts("hailo: firmware not embedded — rebuild with "
+            shell_puts("hailo: firmware not embedded -- rebuild with "
                        "-DHAILO_FW_BLOB=path/to/hailo8_fw.bin\n");
             return 0;
         }

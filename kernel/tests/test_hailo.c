@@ -601,20 +601,16 @@ static void test_boot_chunks_large_code(void)
 {
     /* Exercise dev_write_chunked: code larger than one ATR window
      * (4 KB) must be uploaded correctly. Use a just-past-one-page
-     * code_size so the second chunk is small. */
+     * code_size so the second chunk is small. A static buffer keeps
+     * the 8 KB blob off the test's 16 KB kernel stack. */
     boot_setup_probed();
-    /* Our MOCK_SRAM only covers 1 MB; pick a code size large enough
-     * to trigger multi-chunk but safely within the mock window. */
     const uint32_t big_code = HAILO_ATR_TABLE_SIZE + 32u;  /* 4 KB + 32 B */
+    static uint8_t boot_blob[HAILO_ATR_TABLE_SIZE * 2];
     size_t blob_cap = sizeof(struct hailo_firmware_header)
                     + big_code
                     + sizeof(struct hailo_fw_cert_header)
                     + 16u + 16u;
-    uint8_t *blob = (uint8_t *)mock_bar0;  /* unused buffer this test */
-    /* Fall back: small stack — use a static buffer. */
-    static uint8_t boot_blob[HAILO_ATR_TABLE_SIZE * 2];
     TEST_ASSERT_TRUE(blob_cap <= sizeof(boot_blob));
-    (void)blob;
     size_t n = build_fw_blob(boot_blob, sizeof(boot_blob),
                              big_code, 16, 16, 1, 0, 0);
     TEST_ASSERT_TRUE(n != 0);
