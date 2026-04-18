@@ -196,7 +196,7 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 
 **Delivered (software):**
 - `kernel/ai_accel/hailo/hailo.h` — API + `hailo_platform_ops` vtable (register I/O, BAR4 bulk R/W, DMA alloc, cache clean/invalidate, MSI registration, memory barrier, udelay). PCIe IDs (`0x1E60:0x2864`), BAR indices, BAR0 register offsets (ISTATUS, IMASK, ATR[0..3]), firmware header struct, Hailo-8 device-side load addresses, state machine.
-- `kernel/ai_accel/hailo/hailo_core.c` — `hailo_init` (vtable validation + state reset), `hailo_probe` (vendor/device ID read + boot_status liveness via ATR[0]), `hailo_validate_firmware` (magic + size bounds), ATR[0] save/set_target/restore helpers, `dev_read`/`dev_read32`/`dev_write`/`dev_write32`/`dev_write_chunked` through BAR4, `hailo_boot` full state machine (header + code + cert upload → trigger → boot_status poll → ATR[1] FW-loaded poll). `hailo_get_firmware_version` remains a Phase 5 stub pending the control-channel RPC.
+- `kernel/ai_accel/hailo/hailo_core.c` — `hailo_init` (vtable validation + state reset), `hailo_probe` (vendor/device ID read + boot_status liveness via ATR[0]), `hailo_validate_firmware` (magic + size bounds), ATR[0] save/set_target/restore helpers, `dev_read`/`dev_read32`/`dev_write`/`dev_write32`/`dev_write_chunked` through BAR4, `hailo_boot` full state machine (app + core FW upload → trigger doorbell → ATR[1] FW-loaded poll, 5 s budget). `hailo_get_firmware_version` remains a Phase 5 stub pending the control-channel RPC.
 - `kernel/ai_accel/hailo/hailo_pi5.c` — Pi 5 platform shim: `pcie_find_device` + `pcie_map_bar` (BAR0/2/4), `pcie_enable_bus_master`, PMM-backed DMA with `+0x10_00000000` inbound offset, `cache_clean/invalidate_range`, CNTPCT `udelay`, `pcie_alloc_msi` + handler trampoline.
 - `kernel/ai_accel/hailo/hailo_stub.c` — `hailo_platform_install` returns `HAILO_ERR_NODEV` on non-Pi5 platforms.
 - `kernel/ai_accel/hailo/hailo_shell.c` — `hailo` / `hailo probe` / `hailo boot` / `hailo fw` / `hailo cfgdump` shell commands. `hailo boot` references weakly-linked `hailo_fw_start`/`hailo_fw_end` symbols; the blob is embedded only when CMake `HAILO_FW_BLOB=path/to/hailo8_fw.bin` is set.
@@ -208,8 +208,12 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - `hailo probe` returns OK with `boot_status=0x1` read through the ATR[0] window — proves BAR4 mapping and ATR programming are live end-to-end, not just config space.
 - `hailo boot` reports "firmware not embedded" cleanly when built without `HAILO_FW_BLOB` (the blob is not yet checked in).
 
+**Hardware-validated on pi-5-1 (2026-04-18):**
+- `hailo boot` with the 164 KB `hailo8_fw.bin` (HailoRT 4.23.0 .deb) uploads the full [app hdr, code, cert, core hdr, core code] sequence to the device via ATR[0]+BAR4, triggers the boot doorbell, and reaches `state=running`. Two bugs fixed along the way:
+  - Blob layout: Hailo-8 production firmware bundles BOTH app AND core-firmware sections. Linux's `FW_VALIDATION__validate_fw_headers` enforces a second `[header+code]` pair after the cert for NNC accelerators. The initial `hailo_boot` implementation only uploaded the app section; the endpoint sat at boot_status=1 forever because the boot ROM couldn't find core FW. Fixed by parsing + uploading the trailing `[core_fw_header, core_code]` to `core_fw_header` (0xA0000) + `core_code_ram_base` (0xC0000), in code-then-header order to avoid the boot ROM's polling race.
+  - Post-trigger poll: Hailo's `BOOT_STATUS_UNINITIALIZED = 0x1` is a misleading name — it actually means "boot ROM in ready state", not "device uninitialized". Linux's `hailo_pcie_wait_for_boot` waits FOR this value; `hailo_pcie_wait_for_firmware` polls ATR[1] for the FW-loaded magic. Our initial sequence waited for `boot_status != 1` which never happens during a healthy boot. Fixed by dropping that poll stage entirely and going straight to the ATR[1] handshake (5 s budget, 50 ms interval).
+
 **Hardware-gated follow-ups (Phase 5):**
-- Supply `HAILO_FW_BLOB=hailo8_fw.bin` and run `hailo boot` on real hardware.
 - Control-channel RPC (`hailo_get_firmware_version` etc.).
 - MSI routing validation end-to-end.
 

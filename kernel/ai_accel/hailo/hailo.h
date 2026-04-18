@@ -128,9 +128,19 @@
 
 #define HAILO_FW_MAGIC_HAILO8         0x1DD89DE0u
 #define HAILO_FW_CODE_ALIGN           4u
-#define HAILO_FW_MAX_CODE_SIZE        0x40000u   /* 256 KB */
+#define HAILO_FW_MAX_CODE_SIZE        0x40000u   /* 256 KB — app firmware */
+/* Core firmware max. Same value today, but Linux distinguishes
+ * MAXIMUM_APP_FIRMWARE_CODE_SIZE and MAXIMUM_CORE_FIRMWARE_CODE_SIZE
+ * — keeping them separate here makes future bump-one-not-the-other
+ * changes safe. */
+#define HAILO_FW_MAX_CORE_CODE_SIZE   0x40000u   /* 256 KB — core firmware */
 #define HAILO_FW_MAX_CERT_KEY         0x1000u
 #define HAILO_FW_MAX_CERT_CONTENT     0x1000u
+
+/* Firmware header layout version the driver knows how to parse. A
+ * future Hailo FW with header_version != 0 would have additional
+ * or reordered fields; refuse to boot one rather than misinterpret. */
+#define HAILO_FW_HEADER_VERSION_V0    0u
 
 struct hailo_firmware_header {
     uint32_t magic;            /* HAILO_FW_MAGIC_HAILO8 */
@@ -278,8 +288,8 @@ const char      *hailo_state_str(enum hailo_state s);
  *
  * Returns HAILO_ERR_NODEV if called before hailo_boot() succeeds.
  *
- * Implemented in Phase 4 once the control channel is live;
- * currently returns HAILO_ERR_UNSUPPORTED as a placeholder.
+ * Lands in Phase 5 once the control channel is live; currently
+ * returns HAILO_ERR_UNSUPPORTED as a placeholder.
  */
 int hailo_get_firmware_version(uint32_t *out_major, uint32_t *out_minor,
                                uint32_t *out_revision);
@@ -287,13 +297,12 @@ int hailo_get_firmware_version(uint32_t *out_major, uint32_t *out_minor,
 /*
  * Write the boot firmware image and trigger boot.
  *
- * @fw_bytes, @fw_size: the concatenated app-FW header + code + cert
- *                      headers + cert blobs (the raw `hailo8_fw.bin`
- *                      file as shipped by Hailo).
+ * @fw_bytes, @fw_size: the raw `hailo8_fw.bin` file as shipped by
+ *                      Hailo. Layout: [app_header, app_code,
+ *                      cert_header, cert_key, cert_content,
+ *                      core_header, core_code].
  * Returns HAILO_OK once the FW-loaded ATR[1] flag is observed, or
  * a negative error on timeout / validation failure.
- *
- * Implemented in Phase 4 — currently returns HAILO_ERR_UNSUPPORTED.
  */
 int hailo_boot(const void *fw_bytes, size_t fw_size);
 
