@@ -5,12 +5,14 @@ as the initial protocol layer and a proper daemon control surface
 (`telnetd`) on top. This is foundational work for future SSH support
 (Phase 4, tracked in #199) and for multi-user operation.
 
-**Status:** Phase 1 complete — `nc localhost 2323` into a QEMU guest
-gets a shell; UART console coexists; two concurrent TCP sessions
-supported (bump `MAX_TCP_SHELL_SESSIONS` in `shell_session.h` to raise
-the cap). Phase 2 (telnet IAC) and Phase 3 (telnetd daemon control /
-config file / auto-start) remain planned; Phase 4 (SSH, #199) is
-out-of-scope here.
+**Status:** Phases 1 + 2 complete. `nc localhost 2323` and
+`telnet localhost 2323` both get a shell; telnet clients transition
+into character-at-a-time server-echoed mode, raw clients see a
+12-byte negotiation burst at the top of the stream and otherwise
+behave identically to before. UART console coexists; up to
+`MAX_TCP_SHELL_SESSIONS` concurrent remote sessions (currently 2).
+Phase 3 (telnetd daemon control / config file / auto-start) remains
+planned; Phase 4 (SSH, #199) is out-of-scope here.
 **Last updated:** 17 April 2026
 
 ---
@@ -467,6 +469,36 @@ telnet localhost 2323
 
 **Phases 1 + 2 combined: ~8-11 days.**
 
+### Phase 2 implementation notes
+
+Deviations from the plan that landed in the final implementation:
+
+- **Parser lives as a separate module**, not inlined into shell_io_tcp.
+  `kernel/src/telnet.c` is pure (no lwIP, no shell_session) with a
+  `struct telnet_ops` vtable supplying the caller's inject/send/NAWS/
+  TTYPE/interrupt callbacks. Makes the state machine unit-testable
+  without a real TCP stack.
+- **Telnet responses go direct, not via the TX ring.** From on_recv
+  (net_pump context), the parser calls tcp_write for negotiation
+  replies. Keeps negotiation bytes ahead of any session output
+  queued by the shell task and avoids contending with the shell
+  task's TX ring.
+- **CR/LF normalization done at the parser, not the shell.** The
+  T_CR state in telnet.c swallows a trailing LF or NUL after CR so
+  `shell_read_line` sees exactly one submit per keypress whether
+  the client sends CR LF (telnet default) or bare LF (raw nc).
+- **IAC IP sets a session flag AND injects 0x03.** Both the
+  `session->interrupt_requested` flag (for long-running commands
+  that poll) and the `^C` byte (for `shell_read_line`'s existing
+  cancel path) are triggered, so shell commands need no knowledge
+  of telnet.
+- **AYT (Are You There) returns `[SLM-OS]`.** Small nicety — telnet
+  clients use this to ping a hung connection.
+- **Ctrl+C injection into the RX ring is unconditional** on IAC IP
+  even when the ring is near-full; if the ring is truly full the
+  byte is dropped (same as any other byte) but the session-level
+  `interrupt_requested` flag still flips.
+
 ---
 
 ## Phase 3: Startup & Runtime Control
@@ -611,7 +643,9 @@ This aligns with the demo-readiness observability work (#191, #194).
 - ✅ `kernel/src/shell_session.c` — Session pool + lifecycle
   (console singleton + TCP pool of size `MAX_TCP_SHELL_SESSIONS`)
 - ✅ `kernel/src/tcp_shell_server.c` — Listener (accept callback) + `tcpsh` command glue
-- ☐ `kernel/src/telnet.c` (Phase 2) — IAC state machine
+- ✅ `kernel/include/telnet.h` (Phase 2) — IAC state machine API
+- ✅ `kernel/src/telnet.c` (Phase 2) — IAC state machine
+- ✅ `kernel/tests/test_telnet.c` (Phase 2) — 17 parser unit tests
 - ☐ `kernel/src/shell_telnetd.c` (Phase 3) — `telnetd` shell commands
 - ☐ `kernel/src/telnetd_config.c` (Phase 3) — `/etc/telnetd.conf` parser + boot hook
 - ✅ `kernel/tests/test_shell_session.c` — Session + shell_io unit tests (22 tests)

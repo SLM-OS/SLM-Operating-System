@@ -101,6 +101,10 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
         return ERR_MEM;
     }
     sess->io = io;
+    /* Wire the session back into the TCP backend so telnet
+     * subnegotiation can update window_cols / term_type and
+     * IAC IP can flip interrupt_requested on this session. */
+    shell_io_tcp_attach_session(io, sess);
 
     /* Spawn the session task. Pin to CPU 0 so it shares a CPU with
      * the net_pump task — the spinlock-based ring buffers are only

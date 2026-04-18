@@ -29,16 +29,25 @@
 #include "shell_io.h"
 
 struct tcp_pcb;
+struct shell_session;
 
 /* Allocate a TCP shell_io slot and wire tcp_recv / tcp_err / tcp_sent
  * callbacks on `pcb`. Returns NULL if the pool is exhausted (in which
  * case the caller should tcp_close(pcb) and drop the connection).
- * The returned pointer is stable for the session's lifetime; the
- * backend will free the slot when both the peer has disconnected and
- * shell_io_tcp_destroy() has been called.
+ * Emits the server's initial telnet option negotiation before
+ * returning. The returned pointer is stable for the session's
+ * lifetime; the backend will free the slot when both the peer has
+ * disconnected and shell_io_tcp_destroy() has been called.
  *
  * Context: net_pump (accept callback). */
 struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb);
+
+/* Associate a shell_session with an already-created TCP shell_io so
+ * the telnet parser can update the session's window_cols /
+ * window_rows / term_type / interrupt_requested fields as NAWS /
+ * TERMINAL-TYPE / IAC IP arrive. The accept callback calls this
+ * right after shell_session_alloc. */
+void shell_io_tcp_attach_session(struct shell_io *io, struct shell_session *s);
 
 /* Tear down a TCP shell_io: marks the slot eligible for reuse and,
  * if the peer is still connected, schedules a close via the drain

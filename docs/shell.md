@@ -5,9 +5,12 @@ UART console by default and — with networking enabled — also accepts
 connections over TCP so multiple users (or a user + a script) can
 share the same instance.
 
-**Status:** Implemented. Multi-session (TCP) support: Plan §1 complete
-(see `docs/multi-session-shell-plan.md`); telnet protocol handling
-and SSH are deferred (§2 / Phase 4).
+**Status:** Implemented. Multi-session (TCP) support: Plans §1 + §2
+complete (see `docs/multi-session-shell-plan.md`) — both `nc
+localhost 2323` and `telnet localhost 2323` work. Telnet-specific
+features (IAC negotiation, NAWS window size, TERMINAL-TYPE, IAC IP
+for Ctrl+C) are implemented; daemon control (§3) and SSH (§4 /
+#199) are deferred.
 
 ---
 
@@ -582,10 +585,11 @@ hardware validation report.
 
 ## Multi-Session Shell
 
-The same REPL serves the physical UART and TCP clients. Plan §1 of
-`docs/multi-session-shell-plan.md` covers the architecture; Phase 1
-(raw TCP, line-mode, no auth) is landed. Phase 2 (telnet IAC + NAWS)
-and Phase 4 (SSH, #199) are deferred.
+The same REPL serves the physical UART and TCP clients. Plans §1–§2
+of `docs/multi-session-shell-plan.md` cover the architecture.
+Phase 1 landed the TCP backend + REPL plumbing; Phase 2 added the
+telnet IAC state machine so standard `telnet` clients work cleanly.
+Phase 3 (daemon control) and Phase 4 (SSH, #199) are deferred.
 
 ### Bringing up TCP sessions
 
@@ -595,8 +599,12 @@ slmos> tcpsh start         # listen on 0.0.0.0:2323
 [TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
 tcpsh: listening on port 2323
 
-# From the host:
-$ nc 127.0.0.1 2323
+# From the host, either nc or telnet works:
+$ telnet 127.0.0.1 2323
+Trying 127.0.0.1...
+Connected to 127.0.0.1.
+Escape character is '^]'.
+
 SLM-OS Debug Shell (tcp)
 Type 'help' for available commands.
 
@@ -611,6 +619,33 @@ guest's listener is reachable on the host's loopback only. Real
 hardware platforms (Pi 5, Jetson) have no hostfwd — if TCP shell
 starts there, it's reachable on the board's LAN IP with no
 authentication, so gate carefully.
+
+### Telnet protocol (§2)
+
+On connection the server sends a 12-byte option-negotiation burst
+(IAC WILL ECHO, IAC WILL SGA, IAC DO NAWS, IAC DO TERMINAL-TYPE).
+Telnet clients respond with their side of the negotiation and
+transition to character-at-a-time server-echoed mode. Raw `nc`
+clients see the 12 bytes as garbage (0xFF-prefixed) at the top of
+the stream and otherwise behave as before — no regression from
+Phase 1's raw-TCP shell.
+
+Recognised IAC commands:
+- **IAC IAC** — literal 0xFF data byte.
+- **IAC IP** (Interrupt Process) — sets the session's
+  `interrupt_requested` flag and injects a ^C into the RX ring so
+  `shell_read_line` cancels the current input. Long-running
+  commands can poll `shell_interrupt_requested()`.
+- **IAC AYT** (Are You There) — server replies with `[SLM-OS]`.
+- **IAC SB NAWS** (window-size subneg) — updates
+  `session->window_cols` / `session->window_rows`. `top` will use
+  these once #191 lands; default is 80×24.
+- **IAC SB TERMINAL-TYPE** — updates `session->term_type` (e.g.
+  `xterm-256color`). Commands can check this to decide whether to
+  emit ANSI colour.
+
+The parser handles CR/LF normalization: CR LF and CR NUL both
+submit once; bare LF (raw nc) still works.
 
 ### Session model
 
