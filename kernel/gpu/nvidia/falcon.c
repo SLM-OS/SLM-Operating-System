@@ -348,10 +348,22 @@ int falcon_pio_upload_imem(struct falcon *f, const uint8_t *src,
     if (is_secure) ctrl |= FALCON_IMEMC_SECURE;
     flcn_w32(f, FALCON_IMEMC(0), ctrl);
 
-    /* IMEMT — instruction-page tag (PC>>8). Falcon uses this to
-     * map IMEM blocks to virtual instruction addresses; for PIO
-     * upload of a flat ucode at falcon_off, the tag matches. */
-    flcn_w32(f, FALCON_IMEMT(0), falcon_off >> 8);
+    /* IMEMT — instruction-page tag (PC>>8). The IMEMC AINCW bit auto-
+     * increments the write *address* within a 256-byte page, but the
+     * page tag is held in a separate register and must be re-written
+     * for each new page. nvgpu's `gk20a_falcon_copy_to_imem` does the
+     * same dance (writes IMEMT every 64th u32, i.e. every 256 bytes).
+     * Without per-page tag updates, multi-page Booter ucode (~18 KB
+     * non-secure + secure-app split) silently corrupts: the tag stays
+     * pointing at page 0, but the ucode signature was computed against
+     * sequential tags 0,1,2..., so the HS-bootrom rejects the load.
+     *
+     * Tag for the first page comes from `falcon_off >> 8`; subsequent
+     * pages just increment.
+     */
+    uint32_t tag = falcon_off >> 8;
+    flcn_w32(f, FALCON_IMEMT(0), tag);
+    tag++;
     gsp_platform->mb();
 
     /* Stream u32 words. Source is little-endian on disk; assemble
@@ -359,6 +371,14 @@ int falcon_pio_upload_imem(struct falcon *f, const uint8_t *src,
      * blob's IMEM section is u32-aligned in practice but we don't
      * want to assume that on every platform). */
     for (uint32_t i = 0; i < len; i += 4) {
+        /* Cross a 256-byte page boundary? Re-arm IMEMT for the new
+         * page before the next IMEMD store. The first page's tag
+         * was already written above, so this fires at i=256 onward. */
+        if (i != 0 && (i & 0xFFu) == 0) {
+            flcn_w32(f, FALCON_IMEMT(0), tag);
+            tag++;
+        }
+
         uint32_t w = (uint32_t)src[i + 0]
                    | ((uint32_t)src[i + 1] <<  8)
                    | ((uint32_t)src[i + 2] << 16)
