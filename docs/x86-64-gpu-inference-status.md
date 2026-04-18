@@ -135,6 +135,23 @@ remain NULL when no NVIDIA GPU is discovered.
 | `test_gsp_firmware_manifest` | Pre-existing — embedded blob sizes, structural |
 | `test_gsp_init_graceful_without_gpu` | Pre-existing — Phase 0 fails cleanly when no platform installed |
 
+### 1.6 Build-infrastructure test coverage (kexec scaffolding)
+
+Not in-kernel — runs on the dev host, in under a second, no hardware
+required. Invoked via `make kexec-verify PLATFORM=X86_64`.
+Backing script: `scripts/tests/verify-kexec-build.sh`.
+
+Validates all three x86-64 build variants (bare-metal, kexec,
+bzImage) are structurally correct. 29 assertions grouped as:
+
+| Group | Coverage |
+|---|---|
+| `bare-metal` (6 checks) | ELF entry `0x101000`, LOAD paddr `0x100000`, MB1 + MB2 magic in first 8 KiB, MB2 `ENTRY_ADDRESS` tag matches `_start`, UART diag "KEX\\r\\n" present at entry via `mov imm8+OUT` pattern |
+| `kexec` (6 checks) | Same 6 checks but for the 0x20000000 link address |
+| `bzImage ELF` (5 checks) | Entry `0x20000200`, LOAD paddr `0x20000000`, MB1 + MB2 magic, UART diag "BZ\\r\\n" present at entry |
+| `bzImage wrapper file` (8 checks) | Setup header fields kexec-tools' bzImage64 loader validates: `setup_sects` at 0x1F1, `boot_flag` 0xAA55, `HdrS` magic at 0x202, protocol ≥ 0x020C, `loadflags` LOADED_HIGH, `xloadflags` KERNEL_64+CAN_BE_LOADED_ABOVE_4G, `pref_address` 0x20000000, payload[0x200] == 0xfa (stub `cli`) |
+| Helper scripts (4 checks) | `bash -n` parse + `shellcheck -S warning` clean for `scripts/x86-kexec-slmos.sh` and `x86-kexec-deploy.sh` |
+
 ---
 
 ## 2. The blocker (#185) — details

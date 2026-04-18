@@ -124,9 +124,16 @@ make debug           # Build and run with GDB server
 make test            # Build test kernel and run in QEMU
 
 # x86-64 platform:
-make kernel PLATFORM=X86_64    # Build for x86-64
+make kernel PLATFORM=X86_64    # Build for x86-64 (bare-metal, linked at 0x100000)
 make test PLATFORM=X86_64      # Run x86-64 tests (creates GRUB ISO, uses isa-debug-exit)
 make run PLATFORM=X86_64       # Run in QEMU (uses q35 machine, multiboot2 via ISO)
+
+# x86-64 kexec paths (Linux→SLM-OS handoff — for SEC2 unlock inheritance):
+make kernel-kexec PLATFORM=X86_64     # Multiboot2 kexec build (linked at 0x20000000)
+make kernel-bzimage PLATFORM=X86_64   # Linux-bzImage wrapper variant
+make kexec-verify PLATFORM=X86_64     # 29-check structural validator for all 3 x86 builds
+make kexec-deploy PLATFORM=X86_64     # scp ELF to test-pc + fire kexec (mb2 mode)
+# See docs/x86-64-gpu-inference-status.md §4.2.k for kexec investigation trail.
 
 # Other platforms:
 make kernel PLATFORM=RASPI5            # Raspberry Pi 5
