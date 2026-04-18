@@ -95,6 +95,9 @@ int test_suite_net(void);
 /* USB core tests (platform-neutral; Phase 1 of #266) */
 int test_suite_usb_core(void);
 
+/* CDC-ECM class driver tests (ENABLE_NETWORKING; Phase 2 of #266) */
+int test_suite_cdc_ecm(void);
+
 /* Lua scripting tests */
 int test_suite_lua(void);
 

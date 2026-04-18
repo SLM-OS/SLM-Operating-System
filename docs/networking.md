@@ -726,6 +726,28 @@ Phases 2-5 will add the CDC-ECM class driver, the XHCI host driver
 (`kernel/drivers/usb/xhci/`), the `net_driver` glue, and the
 reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
 
+**Phase 2** landed the CDC-ECM class driver on top of the Phase 1 core:
+
+- `kernel/include/cdc_ecm.h` — public API (`cdc_ecm_probe_and_register`,
+  test-visible MAC parser, counters).
+- `kernel/usb/class/cdc_ecm.c` — probe (CDC control + data interface
+  scan, Ethernet functional descriptor walk, `iMACAddress` string
+  decode with locally-administered fallback), static 4-slot RX and
+  4-slot TX pools (2 KB per buffer, BSS today — Phase 3A XHCI
+  decides on NC-memory relocation), and a `struct net_driver` that
+  plugs directly into the existing `lwip_slm` glue.
+- `kernel/tests/test_cdc_ecm.c` — 18 unit tests against a CDC-ECM-
+  shaped mock HCD: MAC-string parser edge cases, full probe + driver
+  registration, net `init` RX submission, `send` (happy path, pool
+  exhaustion, oversized, null), `recv` (happy path, empty, small
+  buffer truncation), fallback MAC synthesis, and rejection of
+  non-CDC devices.
+
+Phase 3A (XHCI host controller) is next — it's the piece that makes
+`cdc_ecm_probe_and_register()` see a real device. Phase 4 wires the
+class driver's net_driver into platform init; Phase 5 is the
+hardware reliability sweep.
+
 ### Build-Time Configuration
 
 Networking is gated behind the `ENABLE_NETWORKING` CMake option, which
@@ -968,6 +990,31 @@ no hardware dependency):
 | `test_enumerate_no_close_on_device_open_failure` | Failed `device_open` does NOT call `device_close` (HCD owns its own partial state) |
 | `test_control_msg_returns_actual_length` | `usb_control_msg` returns bytes transferred on success |
 | `test_control_msg_unknown_request_returns_error` | Unknown request → negative return |
+
+**Tier 5 — CDC-ECM class driver against a mock HCD**
+(`kernel/tests/test_cdc_ecm.c`, runs on every platform the test
+harness builds for with `ENABLE_NETWORKING=ON`):
+
+| Test | Description |
+|------|-------------|
+| `test_parse_mac_string_happy` | 12-hex-char UTF-16LE string descriptor decodes to the expected 6-byte MAC |
+| `test_parse_mac_string_rejects_short_buffer` | 25-byte input rejected (header says 26) |
+| `test_parse_mac_string_rejects_wrong_type` | Non-`USB_DT_STRING` header rejected |
+| `test_parse_mac_string_rejects_non_ascii` | Any non-zero high byte of a UTF-16 unit rejected |
+| `test_parse_mac_string_rejects_non_hex` | Any non-`[0-9a-fA-F]` character rejected |
+| `test_parse_mac_string_null_args` | NULL `desc` or NULL output buffer rejected |
+| `test_probe_binds_and_registers` | Full probe → `net_register_driver` → MAC/MTU/endpoints all visible via public API |
+| `test_probe_skips_when_no_device` | `usb_core_first_device() == NULL` → probe returns 0 and leaves no driver registered |
+| `test_net_init_queues_rx_urbs` | `net_driver->init()` submits exactly one bulk IN URB per RX slot (4) |
+| `test_send_goes_to_bulk_out` | `send(buf, len)` copies the payload into a bulk-OUT URB and completes exactly once |
+| `test_send_busy_when_pool_full` | Submitting `CDC_ECM_TX_SLOTS + 1` without `tx_reap` returns `NET_E_BUSY`; after reap, the next submit succeeds |
+| `test_send_rejects_oversized` | Payload larger than `CDC_ECM_BUF_SIZE` returns `NET_E_TOO_LARGE` |
+| `test_send_rejects_null` | NULL buffer or zero length returns `NET_E_INVAL` |
+| `test_recv_returns_frame_and_resubmits` | Completed bulk-IN URB → `recv()` returns the frame + re-submits its URB so the RX pool stays full |
+| `test_recv_zero_when_nothing_ready` | `recv()` with no completions returns 0 (caller retries on next poll) |
+| `test_recv_handles_small_buffer` | `recv(buf, 32)` on a 128-byte frame copies exactly 32 bytes and does not scribble past |
+| `test_mac_fallback_when_imac_zero` | `iMACAddress == 0` → synthesised locally-administered MAC, unicast bit clear |
+| `test_probe_rejects_non_cdc_device` | Device with no CDC control/data interface pair fails probe with negative return |
 
 Run tests with:
 
