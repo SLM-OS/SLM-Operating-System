@@ -850,17 +850,17 @@ static void test_decode_cert_rejects_header_past_end(void)
 {
     /* fw_size must be STRICTLY less than sizeof(cert_header) to fire
      * the "header runs past end" branch. `sizeof(struct
-     * hailo_fw_cert_header) == 8`, so fw_size=4 forces the
-     * cert_off + sizeof > fw_size check to fail before the zeroed
-     * cert header is even read — otherwise the all-zero header
-     * would land on the zero-key/zero-content rejection and pass
-     * the assertion for the wrong reason. */
-    uint8_t blob[8] = { 0 };
+     * hailo_fw_cert_header) == 8`, so fw_size=4 (= sizeof(blob))
+     * forces the cert_off + sizeof > fw_size check to fail before
+     * the zeroed cert header is even read — otherwise the all-zero
+     * header would land on the zero-key/zero-content rejection and
+     * pass the assertion for the wrong reason. */
+    uint8_t blob[4] = { 0 };
     struct hailo_fw_cert_header cert;
     const uint8_t *key, *content;
     size_t cert_end;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
-        hailo_decode_cert(blob, 4, 0, &cert, &key, &content, &cert_end));
+        hailo_decode_cert(blob, sizeof(blob), 0, &cert, &key, &content, &cert_end));
 }
 
 static void test_decode_cert_rejects_zero_key(void)
@@ -976,8 +976,8 @@ static void test_decode_cert_success_populates_outputs(void)
 
     TEST_ASSERT_EQUAL_UINT32(8u,  cert.key_size);
     TEST_ASSERT_EQUAL_UINT32(12u, cert.content_size);
-    TEST_ASSERT_TRUE(key     == blob + pre_pad + sizeof(cert));
-    TEST_ASSERT_TRUE(content == key + 8);
+    TEST_ASSERT_EQUAL_PTR(blob + pre_pad + sizeof(cert), key);
+    TEST_ASSERT_EQUAL_PTR(key + 8, content);
     TEST_ASSERT_EQUAL_UINT64((uint64_t)(pre_pad + frag_len), (uint64_t)cert_end);
 
     /* Sanity-check the sentinel data shows through the returned
@@ -1137,10 +1137,12 @@ static void test_decode_core_fw_accepts_tight_fit(void)
                                          code_size, code_size);
     /* frag_len is exactly sizeof(firmware_header) + code_size. */
     struct hailo_firmware_header core;
-    const uint8_t *code;
+    const uint8_t *code = NULL;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_decode_core_fw(blob, frag_len, 0, &core, &code));
     TEST_ASSERT_EQUAL_UINT32(code_size, core.code_size);
+    /* Verify out_core_code lands past the header, not at the header. */
+    TEST_ASSERT_EQUAL_PTR(blob + sizeof(core), code);
 }
 
 static void test_decode_core_fw_rejects_one_byte_short(void)
@@ -1170,7 +1172,7 @@ static void test_decode_core_fw_success_populates_outputs(void)
     TEST_ASSERT_EQUAL_UINT32(HAILO_FW_MAGIC_HAILO8, core.magic);
     TEST_ASSERT_EQUAL_UINT32(HAILO_FW_HEADER_VERSION_V0, core.header_version);
     TEST_ASSERT_EQUAL_UINT32(8u, core.code_size);
-    TEST_ASSERT_TRUE(code == blob + pre_pad + sizeof(core));
+    TEST_ASSERT_EQUAL_PTR(blob + pre_pad + sizeof(core), code);
     TEST_ASSERT_EQUAL_HEX8(0xC0, code[0]);
     TEST_ASSERT_EQUAL_HEX8(0xC7, code[7]);
 }
