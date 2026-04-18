@@ -307,7 +307,12 @@ static int cmd_netstat(int argc, char *argv[]) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* TCP Shell Server Command                                                    */
+/* telnetd Command (Phase 3)                                                   */
+/*                                                                            */
+/* The `telnetd` name supersedes `tcpsh` from Phases 1-2. `tcpsh` is still    */
+/* registered as an alias so existing scripts and muscle memory keep working. */
+/* (sys_now() for session age display comes from arch/sys_arch.h included     */
+/*  at the top of this file.)                                                 */
 /* -------------------------------------------------------------------------- */
 
 /* Parse an unsigned decimal in [0, 65535]. Returns -1 on error. */
@@ -324,58 +329,137 @@ static int parse_port(const char *s, uint16_t *out)
     return 0;
 }
 
-static int cmd_tcpsh(int argc, char *argv[])
+/* Parse an unsigned decimal in [0, UINT32_MAX]. Returns -1 on error. */
+static int parse_u32(const char *s, uint32_t *out)
 {
+    if (!s || !*s) return -1;
+    uint64_t v = 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (uint32_t)(*s - '0');
+        if (v > 0xFFFFFFFFULL) return -1;
+    }
+    *out = (uint32_t)v;
+    return 0;
+}
+
+static void print_usage(const char *name)
+{
+    shell_printf("Usage: %s <start [port] | stop | status | sessions | kick <id>>\n",
+                 name);
+}
+
+/* Visitor for `telnetd sessions`. Counts rows printed; also prints
+ * the entry as a formatted row. */
+struct sessions_visitor_ctx {
+    uint32_t now;
+    uint32_t count;
+};
+
+static bool sessions_visitor(const struct tcp_session_info *info, void *c)
+{
+    struct sessions_visitor_ctx *sv = c;
+    char ip[16];
+    net_ip_to_str(info->peer_ip, ip);
+    uint32_t age_ms = sv->now - info->connected_at;
+    shell_printf("  %3u  %-15s  %5u  %u s\n",
+                 (unsigned)info->session_id, ip,
+                 (unsigned)info->peer_port,
+                 (unsigned)(age_ms / 1000));
+    sv->count++;
+    return true;
+}
+
+static int cmd_telnetd(int argc, char *argv[])
+{
+    const char *name = argv[0];   /* "telnetd" or "tcpsh" alias */
+
     if (argc < 2) {
-        shell_printf("Usage: tcpsh <start [port] | stop | status>\n");
+        print_usage(name);
         return -1;
     }
 
     if (strcmp(argv[1], "start") == 0) {
         if (!net_is_up()) {
-            shell_printf("tcpsh: network not initialized (run `net init` first)\n");
+            shell_printf("%s: network not initialized (run `net init` first)\n",
+                         name);
             return -1;
         }
         uint16_t port = 2323;
         if (argc >= 3) {
             if (parse_port(argv[2], &port) != 0) {
-                shell_printf("tcpsh: invalid port\n");
+                shell_printf("%s: invalid port\n", name);
                 return -1;
             }
         }
         int rc = tcp_shell_server_start(port);
         if (rc == 0) {
-            shell_printf("tcpsh: listening on port %u\n", (unsigned)port);
+            shell_printf("%s: listening on port %u\n", name, (unsigned)port);
             return 0;
         }
-        shell_printf("tcpsh: start failed (%d)\n", rc);
+        shell_printf("%s: start failed (%d)\n", name, rc);
         return rc;
     }
 
     if (strcmp(argv[1], "stop") == 0) {
         if (!tcp_shell_server_running()) {
-            shell_printf("tcpsh: not running\n");
+            shell_printf("%s: not running\n", name);
             return 0;
         }
         tcp_shell_server_stop();
-        shell_printf("tcpsh: stopped\n");
+        shell_printf("%s: stopped\n", name);
         return 0;
     }
 
     if (strcmp(argv[1], "status") == 0) {
         if (tcp_shell_server_running()) {
-            shell_printf("tcpsh: running on port %u — accepted=%u active=%u max=%u\n",
+            shell_printf("%s: running on port %u — accepted=%u active=%u max=%u\n",
+                         name,
                          (unsigned)tcp_shell_server_port(),
                          (unsigned)tcp_shell_server_accepted(),
                          (unsigned)shell_io_tcp_active_count(),
                          (unsigned)MAX_TCP_SHELL_SESSIONS);
         } else {
-            shell_printf("tcpsh: stopped\n");
+            shell_printf("%s: stopped\n", name);
         }
         return 0;
     }
 
-    shell_printf("tcpsh: unknown subcommand '%s'\n", argv[1]);
+    if (strcmp(argv[1], "sessions") == 0) {
+        if (!tcp_shell_server_running()) {
+            shell_printf("%s: not running\n", name);
+            return 0;
+        }
+        shell_printf("   ID  Peer IP          Port  Connected\n");
+        shell_printf("  ---  ---------------  ----  ---------\n");
+        struct sessions_visitor_ctx sv = { .now = sys_now(), .count = 0 };
+        shell_io_tcp_foreach(sessions_visitor, &sv);
+        if (sv.count == 0) {
+            shell_printf("  (no active sessions)\n");
+        }
+        return 0;
+    }
+
+    if (strcmp(argv[1], "kick") == 0) {
+        if (argc < 3) {
+            shell_printf("Usage: %s kick <session-id>\n", name);
+            return -1;
+        }
+        uint32_t id = 0;
+        if (parse_u32(argv[2], &id) != 0) {
+            shell_printf("%s: invalid session id\n", name);
+            return -1;
+        }
+        if (shell_io_tcp_kick(id)) {
+            shell_printf("%s: kicked session %u\n", name, (unsigned)id);
+            return 0;
+        }
+        shell_printf("%s: no active session with id %u\n", name, (unsigned)id);
+        return -1;
+    }
+
+    shell_printf("%s: unknown subcommand '%s'\n", name, argv[1]);
+    print_usage(name);
     return -1;
 }
 
@@ -383,13 +467,17 @@ static int cmd_tcpsh(int argc, char *argv[])
 /* Command Registration                                                        */
 /* -------------------------------------------------------------------------- */
 
-/* Command definitions */
+/* Command definitions. `tcpsh` is an alias for the Phase-1/2-era name
+ * and dispatches through the same handler as `telnetd`; the handler
+ * uses argv[0] for its "Usage:" / status prefix so either name
+ * produces self-consistent output. */
 static const shell_cmd_t net_commands[] = {
-    {"net",      cmd_net,      "Network control (init/status)",        true},
-    {"ping",     cmd_ping,     "Send ICMP echo request",               true},
-    {"ifconfig", cmd_ifconfig, "Network interface config",             true},
-    {"netstat",  cmd_netstat,  "Network statistics",                   false},
-    {"tcpsh",    cmd_tcpsh,    "TCP shell server (start|stop|status)", true},
+    {"net",      cmd_net,      "Network control (init/status)",              true},
+    {"ping",     cmd_ping,     "Send ICMP echo request",                     true},
+    {"ifconfig", cmd_ifconfig, "Network interface config",                   true},
+    {"netstat",  cmd_netstat,  "Network statistics",                         false},
+    {"telnetd",  cmd_telnetd,  "Telnet shell daemon (start|stop|status|sessions|kick)", true},
+    {"tcpsh",    cmd_telnetd,  "Alias for telnetd (legacy name)",            true},
 };
 
 /**

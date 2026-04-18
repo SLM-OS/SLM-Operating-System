@@ -186,25 +186,36 @@ Counter semantics:
 - `dropped` — packets that reached lwIP but couldn't be enqueued (pbuf alloc failed, or lwIP netif input rejected the packet)
 - `no_buffers` — the NIC driver couldn't post a fresh RX descriptor after recv (virtqueue descriptor pool exhausted under burst). Nonzero here indicates sustained traffic overrunning the 16-buffer default pool.
 
-### tcpsh
+### telnetd
 
 Multi-session TCP shell — start the listener, then connect with
-`nc localhost 2323` from the host:
+`nc localhost 2323` or `telnet localhost 2323` from the host.
+`tcpsh` is a deprecated alias kept for backward compatibility.
 
 ```
-SLM-OS> tcpsh start
+SLM-OS> telnetd start
 [TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
-tcpsh: listening on port 2323
+telnetd: listening on port 2323
 
-SLM-OS> tcpsh status
-tcpsh: running on port 2323 — accepted=0 active=0 max=2
+SLM-OS> telnetd status
+telnetd: running on port 2323 — accepted=0 active=0 max=2
 
-SLM-OS> tcpsh stop
-tcpsh: stopped
+SLM-OS> telnetd sessions
+   ID  Peer IP          Port  Connected
+  ---  ---------------  ----  ---------
+    1  10.0.2.2         40876  5 s
+
+SLM-OS> telnetd kick 1
+telnetd: kicked session 1
+
+SLM-OS> telnetd stop
+telnetd: stopped
 ```
 
 The TCP shell uses the lwIP raw callback API (required because the
-port builds with `NO_SYS=1` / `LWIP_SOCKET=0`). See
+port builds with `NO_SYS=1` / `LWIP_SOCKET=0`). Build with
+`-DNET_TELNETD_AUTOSTART=ON` and drop `/etc/telnetd.conf` into the
+VFS to bring the daemon up automatically at boot. See
 `docs/shell.md` § Multi-Session Shell and
 `docs/multi-session-shell-plan.md` for the architecture.
 

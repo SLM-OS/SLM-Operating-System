@@ -25,6 +25,7 @@
 #ifndef SHELL_IO_TCP_H
 #define SHELL_IO_TCP_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "shell_io.h"
 
@@ -64,5 +65,39 @@ void shell_io_tcp_poll(void);
 /* Number of currently active TCP sessions (in-use pool slots).
  * Useful for diagnostics. */
 uint32_t shell_io_tcp_active_count(void);
+
+/* Metadata about one active TCP session, snapshotted for safe access
+ * from outside the shell_io_tcp module. */
+struct tcp_session_info {
+    uint32_t session_id;    /* matches shell_session.id */
+    uint32_t peer_ip;       /* network byte order */
+    uint16_t peer_port;
+    uint16_t _pad;
+    uint32_t connected_at;  /* sys_now() timestamp (ms since boot) */
+};
+
+/* Visitor for shell_io_tcp_foreach. Return true to continue iteration,
+ * false to stop early. Called once per active session. */
+typedef bool (*tcp_session_visitor_t)(const struct tcp_session_info *info,
+                                      void *ctx);
+
+/* Iterate every active TCP session and call `visitor` with a snapshot
+ * of its metadata. Safe to call from the shell task.
+ *
+ * Concurrency model:
+ *   - Each slot's metadata is snapshotted under pool_lock.
+ *   - The visitor is called with the snapshot AFTER the lock is
+ *     released for that slot, so the visitor may do arbitrary work
+ *     (print, push into a Lua table, ...) without holding a spinlock.
+ *   - The snapshot is a value copy; the visitor sees a consistent
+ *     set of fields even if the underlying session is freed or
+ *     reused between snapshot and callback. */
+void shell_io_tcp_foreach(tcp_session_visitor_t visitor, void *ctx);
+
+/* Force-disconnect the session with the given id. Marks the shell_io
+ * closed so the session task's REPL exits on its next read; the net
+ * pump path then tcp_closes the pcb and frees the pool slot. Returns
+ * true if a matching session was found, false otherwise. */
+bool shell_io_tcp_kick(uint32_t session_id);
 
 #endif /* SHELL_IO_TCP_H */

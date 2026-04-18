@@ -58,6 +58,12 @@ int test_suite_shell_session(void);
 /* Telnet IAC state machine tests */
 int test_suite_telnet(void);
 
+/* /etc/telnetd.conf parser tests */
+int test_suite_telnetd_config(void);
+
+/* `telnetd` shell command + shell_io_tcp enumeration / kick tests */
+int test_suite_telnetd_cmd(void);
+
 /* VMM/TLB tests */
 int test_suite_vmm(void);
 

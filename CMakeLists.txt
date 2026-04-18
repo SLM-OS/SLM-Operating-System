@@ -197,6 +197,22 @@ if(ENABLE_NETWORKING AND NET_DHCP_AT_BOOT)
     add_compile_definitions(NET_DHCP_AT_BOOT=1)
 endif()
 
+# Telnetd auto-start at boot (plan Phase 3 §3.2).
+#
+# When ON, shell_init calls telnetd_autostart at the end of boot.
+# That function reads /etc/telnetd.conf (if present) or uses the
+# compile-time default (enabled=true when NET_TELNETD_AUTOSTART=ON);
+# if the resolved config says enabled it calls net_init + starts
+# the TCP listener on port 2323.
+#
+# Default is OFF on every platform — operator must opt in explicitly.
+# Real hardware (Pi 5, Jetson) has no host-loopback gate, so the
+# default stays off until Phase 4 SSH (#199) lands.
+option(NET_TELNETD_AUTOSTART "Start telnetd at boot (unauthenticated TCP shell)" OFF)
+if(ENABLE_NETWORKING AND NET_TELNETD_AUTOSTART)
+    add_compile_definitions(NET_TELNETD_AUTOSTART=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
     set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/kernel/kernel-x86_64.ld)
@@ -426,6 +442,8 @@ set(KERNEL_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/shell_io_tcp.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/tcp_shell_server.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnet.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnetd_config.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnetd_autostart.c>
 
     # ==========================================================================
     # Lua Scripting - Lua library includes all FP-using code
@@ -446,6 +464,8 @@ set(TEST_SOURCES
     kernel/tests/test_shell.c
     kernel/tests/test_shell_session.c
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnet.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_config.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
     kernel/tests/test_pmm.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>

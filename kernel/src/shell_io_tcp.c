@@ -36,6 +36,7 @@
 #include "lwip/tcp.h"
 #include "lwip/err.h"
 #include "lwip/pbuf.h"
+#include "arch/sys_arch.h"   /* sys_now() for connected_at timestamp */
 
 /* Per-direction buffer size. Must be a power of two. 4 KB matches
  * Plan §1.7's resource-limit budget. */
@@ -86,6 +87,13 @@ struct tcp_shell_ctx {
 
     /* lwIP pcb — net_pump context only. NULL after close. */
     struct tcp_pcb   *pcb;
+
+    /* Peer + timing info captured in shell_io_tcp_create. Read-only
+     * after that. Used by telnetd sessions / kick for diagnostics. */
+    uint32_t          peer_ip;        /* network byte order */
+    uint16_t          peer_port;
+    uint32_t          connected_at;   /* sys_now() at accept time */
+    uint32_t          session_id;     /* mirror of sess->id for iteration without deref */
 
     /* Associated shell_session — populated after shell_io_tcp_create
      * by the tcp_shell_server accept path. Lets the telnet parser
@@ -442,8 +450,12 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
         return NULL;
     }
 
-    ctx->pcb     = pcb;
-    ctx->session = NULL;   /* Populated later by shell_io_tcp_attach_session. */
+    ctx->pcb          = pcb;
+    ctx->session      = NULL;   /* Populated later by shell_io_tcp_attach_session. */
+    ctx->peer_ip      = pcb->remote_ip.addr;
+    ctx->peer_port    = pcb->remote_port;
+    ctx->connected_at = sys_now();
+    ctx->session_id   = 0;      /* Populated by shell_io_tcp_attach_session. */
 
     ctx->io.read_char     = tcp_read_char;
     ctx->io.try_read_char = tcp_try_read_char;
@@ -478,7 +490,8 @@ void shell_io_tcp_attach_session(struct shell_io *io, struct shell_session *s)
 {
     if (!io) return;
     struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
-    ctx->session = s;
+    ctx->session    = s;
+    ctx->session_id = s ? s->id : 0;
 }
 
 void shell_io_tcp_destroy(struct shell_io *io)
@@ -510,6 +523,60 @@ uint32_t shell_io_tcp_active_count(void)
         if (ctx_pool[i].in_use) n++;
     }
     return n;
+}
+
+void shell_io_tcp_foreach(tcp_session_visitor_t visitor, void *user_ctx)
+{
+    if (!visitor) return;
+    for (uint32_t i = 0; i < MAX_TCP_SHELL_SESSIONS; i++) {
+        struct tcp_shell_ctx *ctx = &ctx_pool[i];
+        /* Snapshot under pool_lock so a concurrent ctx_alloc / ctx_free
+         * can't flip in_use mid-read. The snapshot fields are all
+         * scalars, so a consistent set comes out of the locked region. */
+        irq_flags_t flags = spin_lock_irqsave(&pool_lock);
+        bool active = ctx->in_use && !ctx->closed;
+        struct tcp_session_info info = {0};
+        if (active) {
+            info.session_id   = ctx->session_id;
+            info.peer_ip      = ctx->peer_ip;
+            info.peer_port    = ctx->peer_port;
+            info.connected_at = ctx->connected_at;
+        }
+        spin_unlock_irqrestore(&pool_lock, flags);
+
+        if (active) {
+            if (!visitor(&info, user_ctx)) {
+                return;
+            }
+        }
+    }
+}
+
+bool shell_io_tcp_kick(uint32_t session_id)
+{
+    /* Hold pool_lock across the whole scan AND the `closed` store so
+     * an intervening ctx_free + ctx_alloc can't re-assign the slot to
+     * a different session between our match check and the store —
+     * otherwise we'd disconnect an innocent session that happened to
+     * land in this slot during the kick's context switch. Pool_lock
+     * precedes rx_lock in the lock ordering (no path holds rx_lock
+     * then grabs pool_lock), so setting `closed` directly under
+     * pool_lock is safe. `closed` is volatile, so the unlocked
+     * reader in tcp_read_char will observe the new value on its
+     * next iteration; we don't need rx_lock for the store itself
+     * (it's there to guard head/tail on the recv path, not the flag). */
+    bool kicked = false;
+    irq_flags_t flags = spin_lock_irqsave(&pool_lock);
+    for (uint32_t i = 0; i < MAX_TCP_SHELL_SESSIONS; i++) {
+        struct tcp_shell_ctx *ctx = &ctx_pool[i];
+        if (ctx->in_use && ctx->session_id == session_id) {
+            ctx->closed = true;
+            kicked = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&pool_lock, flags);
+    return kicked;
 }
 
 void shell_io_tcp_poll(void)

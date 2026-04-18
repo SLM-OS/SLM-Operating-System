@@ -491,6 +491,16 @@ void shell_init(void)
     }
 #endif
 
+#if defined(ENABLE_NETWORKING) && !defined(ENABLE_BOOT_TESTS)
+    /* Phase 3: bring telnetd up automatically if /etc/telnetd.conf
+     * says to, or if NET_TELNETD_AUTOSTART was set at build time.
+     * Skipped in the boot-test image — tests spawn their own nets. */
+    {
+        extern void telnetd_autostart(void);
+        telnetd_autostart();
+    }
+#endif
+
     shell_puts("\r\n");
     shell_puts("SLM-OS Debug Shell\r\n");
     shell_puts("Type 'help' for available commands.\r\n");
