@@ -3,14 +3,16 @@
 Bare-metal access to the Tegra T234 PCIe root complex C8 from SLM-OS
 at EL2, needed to drive the RTL8168 NIC on the Super Developer Kit.
 
-**Status (17 April 2026):** Blocked at the CBB-firewall level. The
-restriction is NOT Exception-Level-dependent — an EL1 smoke test
-confirmed that SLM-OS running at EL1 reads the same 0xFFFFFFFF for
-APPL/XHCI as SLM-OS at EL2, while Linux (also EL1) reads the real
-values. The firewall gates by boot trust chain, not by EL. Both
-plan §4.1 (PCIe RTL8168) and §4.2 (USB CDC-ECM) are infeasible
-regardless of boot model. Only a BCT firewall override (custom L4T
-flash) would change this.
+**Status (17 April 2026):** Blocked. Root cause is **clock gating
+during kexec**, not CBB firewall as initially assumed. Linux's
+`pex2_c8_core` clock (via BPMP) reads `0xFFFFFFFF` from APPL when
+disabled, matching exactly what SLM-OS sees post-kexec. User-space
+mitigations (refcount bumps, runtime-PM override, `mrq_rate_locked`)
+don't survive the kexec transition — something at the BPMP or TF-A
+firmware level re-gates the clock regardless of Linux's refcount.
+Both plan §4.1 (PCIe RTL8168) and §4.2 (USB CDC-ECM) remain
+infeasible. BCT firewall override no longer looks like the fix —
+this is a kexec-shutdown-path issue, not a security-policy issue.
 
 ---
 
@@ -180,20 +182,54 @@ Document what was learned, leave the branch's scaffolding + diagnostic
 commands as infrastructure for future work if/when CBB access is
 widened, and stop.
 
+## Clock teardown investigation (follow-up, 17 April 2026)
+
+Rebuttal of the CBB-firewall diagnosis, prompted by research into
+BCT overrides that pointed at non-firewall root causes:
+
+1. **`echo 0 > /sys/kernel/debug/bpmp/debug/clk/pex2_c8_core/state`
+   from Linux at EL1** → APPL[0x04] flips from `0x009490e0` to
+   `0xffffffff`. The same symptom SLM-OS sees post-kexec.
+
+2. **Refcount can be bumped to 100+** via repeated
+   `echo 1 > .../state` writes. Linux respects the user ref and
+   keeps the clock enabled in steady state.
+
+3. **Pre-kexec clock ref bump does NOT survive.** Tested:
+   - Bump refcount to 108
+   - Set PCIe RC `power/control = on` (runtime PM disabled)
+   - Set `mrq_rate_locked = 1` on the clock
+   - `kexec -e`
+   - SLM-OS post-kexec still reads APPL = `0xffffffff`
+
+Something in the kexec shutdown path (BPMP firmware or TF-A SMC
+handler) forcibly gates `pex2_c8_core` regardless of the Linux
+clock framework's refcount. User-space mitigations don't reach it.
+
 ## Immediate next steps
 
-Only one technical option remains: **OEM BCT firewall override**
-(custom L4T flash). See the risk analysis in the team discussion.
-All other approaches (EL refactor, PCIe driver port, USB fallback,
-slmos-kexec hacks) have been empirically ruled out.
+BCT firewall override is no longer the clear option — the problem
+isn't firewall policy. The remaining mitigations are all non-trivial:
+
+- **Kernel module with `clk_force_enable`** — may prevent the
+  teardown by using kernel-level clock-flag semantics beyond
+  refcount. Needs on-board cross-compilation (kernel headers not
+  installed).
+- **Crash-kernel path (`kexec -p` + sysrq-c)** — skips
+  `device_shutdown()` entirely. Needs `crashkernel=` on kernel
+  cmdline (requires editing `/boot/extlinux.conf` + reboot + SLM-OS
+  adaptation for the reserved-memory boot location).
+- **Port the full Tegra PCIe RC bring-up sequence** — complex
+  because BPMP MRQs don't work from SLM-OS (#190). Would need to
+  either fix #190 or replace the MRQ-dependent steps with direct
+  MMIO (if those registers aren't CBB-gated at EL2 — UNTESTED).
 
 Alternative: close #25 and document bare-metal networking on the
-Jetson Orin Nano Super Developer Kit as infeasible without custom
-BCT. The `rtldiag` / `xhcidiag` / `JETSON_EL1_SMOKE` scaffolding
-stays in the tree as diagnostic infrastructure — anyone revisiting
-the problem (or working on it on a board with a different firewall
-posture) can re-run the same tests and skip the investigation
-cost.
+Jetson Orin Nano Super Developer Kit as infeasible without one of
+the above. The `rtldiag` / `xhcidiag` / `JETSON_EL1_SMOKE`
+scaffolding stays in the tree as diagnostic infrastructure — anyone
+revisiting the problem can re-run the clock-gate correlation test
+without re-discovering it.
 
 ---
 
