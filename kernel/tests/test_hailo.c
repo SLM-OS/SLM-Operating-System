@@ -18,6 +18,7 @@
 #include "../ai_accel/hailo/hailo_control.h"
 #include "../ai_accel/hailo/hailo_internal.h"
 #include "../ai_accel/hailo/hailo_tensor.h"
+#include "../ai_accel/hailo/hailo_vdma.h"
 #include "../ai_accel/hailo/hef_parser.h"
 #include "../include/md5.h"
 #include "../include/uart.h"
@@ -107,8 +108,12 @@ static uint8_t  mock_fw_sim_device_memory[MOCK_MEMORY_SIZE];
  * dma_free / cache_* hooks. Kept at file scope (rather than
  * grouped with mock_ops further down) so mock_reset can touch
  * the counters without needing forward declarations. */
-#define MOCK_DMA_POOL_SIZE (256u * 1024u)
-static alignas(HAILO_TENSOR_DMA_ALIGN) uint8_t mock_dma_pool[MOCK_DMA_POOL_SIZE];
+/* Pool is large enough for tensor + VDMA-descriptor-list allocations
+ * and aligned to HAILO_VDMA_DESC_LIST_ALIGN (64 KB) — the strictest
+ * alignment any Hailo DMA structure requires. Smaller-alignment
+ * requests land correctly via the offset math below. */
+#define MOCK_DMA_POOL_SIZE (1024u * 1024u)
+static alignas(HAILO_VDMA_DESC_LIST_ALIGN) uint8_t mock_dma_pool[MOCK_DMA_POOL_SIZE];
 static size_t   mock_dma_next_off;
 static bool     mock_dma_force_null;
 static uint32_t mock_dma_alloc_calls;
@@ -2309,6 +2314,155 @@ static void test_tensor_multi_alloc_distinct_buffers(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 5.4: VDMA descriptor-list allocator                                   */
+/* -------------------------------------------------------------------------- */
+
+/* Descriptor-list allocation shares the tensor-path setup — just
+ * needs the mock platform installed. */
+static void vdma_setup(void)
+{
+    mock_reset();
+    hailo_platform = &mock_ops;
+}
+
+static void test_vdma_alloc_size_rounds_up_to_64k(void)
+{
+    /* 64 descriptors × 16 B = 1024 B → round up to 64 KB. */
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_DESC_LIST_ALIGN,
+        hailo_vdma_desc_list_alloc_size(64));
+    /* 4096 descriptors × 16 B = 65536 B → exactly 64 KB (no bump). */
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_DESC_LIST_ALIGN,
+        hailo_vdma_desc_list_alloc_size(4096));
+    /* 8192 descriptors × 16 B = 128 KB. */
+    TEST_ASSERT_EQUAL_UINT32(2u * HAILO_VDMA_DESC_LIST_ALIGN,
+        hailo_vdma_desc_list_alloc_size(8192));
+}
+
+static void test_vdma_alloc_happy_path(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    int rc = hailo_vdma_desc_list_alloc(256, 4096, true, &list);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, rc);
+    TEST_ASSERT_NOT_NULL(list.descs);
+    TEST_ASSERT_EQUAL_UINT32(256, list.desc_count);
+    TEST_ASSERT_EQUAL_UINT32(255, list.desc_count_mask);
+    TEST_ASSERT_EQUAL_UINT16(4096, list.desc_page_size);
+    TEST_ASSERT_TRUE(list.is_circular);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)list.descs, list.iova);
+    /* 64 KB-aligned address — VDMA engine's HOST_DESC_BASE_ADDR
+     * truncates low 16 bits; any misalignment is a silent firmware
+     * bug. */
+    TEST_ASSERT_EQUAL_UINT64(0,
+        (uintptr_t)list.descs & (HAILO_VDMA_DESC_LIST_ALIGN - 1));
+    /* Buffer zero-initialized — an all-zero descriptor is inert. */
+    for (uint32_t i = 0; i < 256 * sizeof(struct hailo_vdma_descriptor); i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, ((uint8_t *)list.descs)[i]);
+    }
+    hailo_vdma_desc_list_free(&list);
+    TEST_ASSERT_NULL(list.descs);
+    TEST_ASSERT_EQUAL_UINT32(0, list.desc_count);
+}
+
+static void test_vdma_alloc_rejects_non_power_of_two(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(3, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(100, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(1023, 512, false, &list));
+}
+
+static void test_vdma_alloc_rejects_out_of_range(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    /* desc_count = 1 is below MIN_DESC_COUNT. */
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(1, 512, false, &list));
+    /* desc_count = 131072 = 2^17 exceeds MAX (16-bit num_avail/num_proc). */
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(131072, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(0, 512, false, &list));
+}
+
+static void test_vdma_alloc_rejects_zero_page_size(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(64, 0, false, &list));
+}
+
+static void test_vdma_alloc_rejects_null_out(void)
+{
+    vdma_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(64, 512, false, NULL));
+}
+
+static void test_vdma_alloc_nodev_without_platform(void)
+{
+    const struct hailo_platform_ops *saved = hailo_platform;
+    hailo_platform = NULL;
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    hailo_platform = saved;
+}
+
+static void test_vdma_alloc_propagates_nomem(void)
+{
+    vdma_setup();
+    mock_dma_force_null = true;
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    TEST_ASSERT_NULL(list.descs);
+}
+
+static void test_vdma_free_zero_handle_is_noop(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    hailo_vdma_desc_list_free(&list);   /* must not crash */
+    TEST_ASSERT_EQUAL_UINT32(0, mock_dma_free_calls);
+}
+
+static void test_vdma_alloc_accepts_min_count(void)
+{
+    /* Smallest legal list: 2 descriptors. */
+    vdma_setup();
+    struct hailo_vdma_desc_list small;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(HAILO_VDMA_MIN_DESC_COUNT, 64, false, &small));
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_MIN_DESC_COUNT, small.desc_count);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_MIN_DESC_COUNT - 1u,
+                             small.desc_count_mask);
+    hailo_vdma_desc_list_free(&small);
+}
+
+static void test_vdma_alloc_accepts_max_count(void)
+{
+    /* Largest legal list: 65536 descriptors = 1 MB, which matches
+     * the mock pool size exactly. Separate test so mock_reset
+     * gives this alloc a fresh pool — the mock's bump allocator
+     * doesn't reuse memory on free. */
+    vdma_setup();
+    struct hailo_vdma_desc_list large;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(HAILO_VDMA_MAX_DESC_COUNT, 4096, true, &large));
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_MAX_DESC_COUNT, large.desc_count);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_MAX_DESC_COUNT - 1u,
+                             large.desc_count_mask);
+    hailo_vdma_desc_list_free(&large);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Phase 5.3: CCW upload from hef_info                                          */
 /* -------------------------------------------------------------------------- */
 
@@ -2593,6 +2747,19 @@ int test_suite_hailo(void)
     RUN_TEST(test_ccw_upload_multiple_actions_contiguous);
     RUN_TEST(test_ccw_upload_chunks_large_action);
     RUN_TEST(test_ccw_upload_skips_zero_size_action);
+
+    /* Phase 5.4 VDMA descriptor-list allocator */
+    RUN_TEST(test_vdma_alloc_size_rounds_up_to_64k);
+    RUN_TEST(test_vdma_alloc_happy_path);
+    RUN_TEST(test_vdma_alloc_rejects_non_power_of_two);
+    RUN_TEST(test_vdma_alloc_rejects_out_of_range);
+    RUN_TEST(test_vdma_alloc_rejects_zero_page_size);
+    RUN_TEST(test_vdma_alloc_rejects_null_out);
+    RUN_TEST(test_vdma_alloc_nodev_without_platform);
+    RUN_TEST(test_vdma_alloc_propagates_nomem);
+    RUN_TEST(test_vdma_free_zero_handle_is_noop);
+    RUN_TEST(test_vdma_alloc_accepts_min_count);
+    RUN_TEST(test_vdma_alloc_accepts_max_count);
 
     return UnityEnd();
 }
