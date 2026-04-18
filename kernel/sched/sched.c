@@ -454,18 +454,38 @@ static void idle_task_func(void *arg)
     (void)arg;
 
     while (1) {
+        /* Idle-loop heartbeat. The sched_diag_idle_loops array is
+         * NC-backed on PLATFORM_HAS_NC_MEMORY (see scheduler_init)
+         * and plain BSS elsewhere — both paths produce a counter
+         * that CPU 0 can read without cache maintenance. Used by
+         * `ws-diag` (integration tests) and `cpu` (shell) to
+         * distinguish "secondary never reached idle" (counter==0)
+         * from "secondary is idling but SEV is not reaching it"
+         * (counter frozen after initial iterations).
+         *
+         * NULL guard applies only on PLATFORM_HAS_NC_MEMORY where
+         * the symbol is pointer-backed (scheduler_init allocates
+         * via ncmem_alloc, which could in principle return NULL if
+         * the 2 MB NC arena is exhausted; scheduler_init panics
+         * first in practice). On other platforms the symbol is a
+         * BSS array whose address is always non-NULL — GCC's
+         * -Werror=address would flag an unconditional `if (arr)`
+         * there, so the check is gated. */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+        if (sched_diag_idle_loops)
+#endif
+            sched_diag_idle_loops[cpu_id()]++;
 #if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
-        /* Use fixed NC address — sched_diag_idle_loops pointer is in
-         * cacheable BSS and may not be visible to secondary CPUs.
-         * Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
+        /* Belt-and-braces trace slot at a fixed NC address so early-
+         * boot analysis can confirm the counter is wired up even
+         * before scheduler_init finishes. Pi 5: CPU index in Aff1
+         * (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
         {
             uint64_t mpidr;
             __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
             uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
             (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
         }
-#elif !defined(PLATFORM_HAS_NC_MEMORY)
-        sched_diag_idle_loops[cpu_id()]++;
 #endif
 
         /* Unmask IRQ so timer interrupts can fire.
@@ -1311,8 +1331,23 @@ static struct task *sched_try_steal(uint32_t this_cpu)
     /* #105: per-CPU observability counters. `sched_diag_steal_*` are
      * incremented on the THIEF's CPU (this_cpu) so a `cpu` shell
      * dump reports the per-core balance of attempts/hits/stale
-     * discards/empty-victim scans. */
+     * discards/empty-victim scans. Count the isolated-CPU early-
+     * out below as an attempt so the shell diag reads honestly —
+     * an isolated CPU that entered sched_try_steal DID attempt,
+     * we just choose not to probe victims. */
     sched_diag_steal_attempts[this_cpu]++;
+
+    /* Isolated cores must never pull work from other CPUs — that's
+     * the whole point of isolation. The S5 placement override
+     * already refuses to *target* an isolated CPU; this closes the
+     * symmetric hole where an isolated CPU would steal from a
+     * non-isolated neighbour and then run its idle loop while
+     * holding a general-purpose task that was explicitly routed
+     * away from it (test_proactive_load_balance_respects_isolation
+     * would otherwise flake when CPU 2 or 3 acted as a thief). */
+    if (sched.isolated_cores & (1U << this_cpu)) {
+        return NULL;
+    }
 
     for (uint32_t i = 1; i < cpu_count; i++) {
         uint32_t victim = (this_cpu + i) % cpu_count;

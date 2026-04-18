@@ -162,9 +162,39 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
     }
     uart_printf("  SPSR_EL1:  0x%lx\n", tf->spsr);
 
+#if defined(PLATFORM_RASPI5)
+    /* On Pi 5 the fault halt is cleaner via PSCI CPU_OFF than an
+     * in-kernel WFI loop: PSCI hands the core to EL3/TF-A which
+     * gates it from further instructions, so subsequent attempts
+     * to dispatch work to this CPU cleanly fail (the CPU is
+     * power-gated, not idling half-halted in a WFI that SEV
+     * might technically wake). This is part of the #216 recovery
+     * work: a future CPU 0 supervisor will detect the dormant
+     * core and resurrect it via psci_cpu_on; the clean-off state
+     * is the precondition that makes resurrection reliable.
+     *
+     * Not extended to Jetson / QEMU yet — their recovery stories
+     * differ and need their own validation. */
+    if (current_cpu == 0) {
+        uart_puts("\nCPU 0 faulted — system unable to continue "
+                  "(PSCI-offing the boot CPU means no supervisor "
+                  "can resurrect it).\n");
+    } else {
+        /* Cast to unsigned long for %lu — current_cpu is uint32_t
+         * but our uart_printf is variadic; passing a 32-bit value
+         * to %lu reads extra bytes from the arg register on
+         * strict implementations. */
+        uart_printf("\nCPU %lu offlining via PSCI — remaining CPUs "
+                    "continue (see #216 for auto-resurrection plan).\n",
+                    (unsigned long)current_cpu);
+    }
+    psci_cpu_off();
+#endif
+
     uart_puts("\nSystem halted.\n");
 
-    /* Halt */
+    /* Fall-back halt: reached only if the platform doesn't support
+     * PSCI CPU_OFF or PSCI returned unexpectedly. */
     while (1) {
         __asm__ volatile("wfi");
     }

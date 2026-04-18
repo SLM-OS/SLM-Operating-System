@@ -125,6 +125,91 @@ static void reset_test_state(void)
 }
 
 /* ============================================================================
+ * Per-test idle-loop snapshots (#216 dormancy investigation, Pi 5 only)
+ *
+ * Hooks into Unity's setUp / tearDown to capture sched_diag_idle_loops[]
+ * before and after every test in this suite. A secondary CPU whose
+ * delta is zero across a whole test is dormant during that test — and
+ * since tests run sequentially, the FIRST test whose tearDown reports
+ * a zero delta is the test that wedged the CPU. This is what Option A
+ * of the #216 investigation plan needs: pin the culprit test.
+ *
+ * setUp / tearDown are weak in Unity; defining them here overrides the
+ * weak defaults for the whole kernel-test binary. The output is quiet
+ * by default and only prints when a secondary is actually dormant, so
+ * other test suites (ipc, vmm, net, etc. — none of which spawn cross-
+ * CPU work) are unaffected.
+ * ============================================================================ */
+
+#if defined(PLATFORM_RASPI5)
+extern volatile uint32_t *sched_diag_idle_loops;
+
+/* A "dormant" CPU is one whose idle_loops counter hasn't moved
+ * across THIS many consecutive tearDowns. Single tests can finish
+ * in <100us (far below one idle loop period on a WFE'd secondary),
+ * so treating a 1-sample stall as dormancy false-positives on fast
+ * tests. Three consecutive stalled samples (covering ~3x the
+ * average test duration) is the sweet spot — rare enough that an
+ * alive CPU won't trip it, frequent enough to pin the culprit
+ * test within a window of ~3 tests. */
+#define DORMANCY_STALL_THRESHOLD 3
+
+static uint32_t last_idle_abs[MAX_CPUS];
+static uint32_t stall_streak[MAX_CPUS];
+static bool     dormancy_reported[MAX_CPUS];
+#endif
+
+/* Unity's weak default setUp is fine — all sampling happens in
+ * tearDown, so we don't need to override the entry hook. */
+
+void tearDown(void)
+{
+#if defined(PLATFORM_RASPI5)
+    if (!Unity.current_test) return;
+
+    uint32_t n = cpu_count < MAX_CPUS ? cpu_count : MAX_CPUS;
+
+    /* Snapshot every secondary's absolute idle counter once. */
+    uint32_t cur[MAX_CPUS] = {0};
+    for (uint32_t c = 1; c < n; c++) {
+        cur[c] = sched_diag_idle_loops[c];
+    }
+
+    /* Update per-CPU stall streak; emit a [dormancy-enter] line the
+     * moment a CPU first crosses the threshold. This pinpoints the
+     * test that wedged the CPU (or at least the test window inside
+     * which the wedge happened). A follow-up [dormancy-recover]
+     * line is emitted if the CPU later resumes. */
+    for (uint32_t c = 1; c < n; c++) {
+        if (cur[c] == last_idle_abs[c]) {
+            stall_streak[c]++;
+        } else {
+            if (dormancy_reported[c] && stall_streak[c] >= DORMANCY_STALL_THRESHOLD) {
+                uart_printf("  [dormancy-recover] CPU %lu resumed at %s "
+                            "(abs %lu after %lu stalled samples)\n",
+                            (unsigned long)c, Unity.current_test,
+                            (unsigned long)cur[c],
+                            (unsigned long)stall_streak[c]);
+                dormancy_reported[c] = false;
+            }
+            stall_streak[c] = 0;
+        }
+        last_idle_abs[c] = cur[c];
+
+        if (!dormancy_reported[c] &&
+            stall_streak[c] == DORMANCY_STALL_THRESHOLD) {
+            uart_printf("  [dormancy-enter] CPU %lu dormant at %s "
+                        "(idle_abs frozen at %lu for %u consecutive tests)\n",
+                        (unsigned long)c, Unity.current_test,
+                        (unsigned long)cur[c],
+                        DORMANCY_STALL_THRESHOLD);
+            dormancy_reported[c] = true;
+        }
+    }
+#endif
+}
+
+/* ============================================================================
  * Task Functions for Tests
  * ============================================================================ */
 
@@ -928,6 +1013,7 @@ static void test_work_stealing_distributes_load(void)
     extern volatile uint32_t *sched_diag_steal_stale;
     extern volatile uint32_t *sched_diag_schedule;
     extern volatile uint32_t *sched_diag_picked;
+    extern volatile uint32_t *sched_diag_idle_loops;
 #endif
     uint32_t pre_push_full[MAX_CPUS] = {0};
     for (uint32_t c = 0; c < cpu_count; c++)
@@ -958,12 +1044,14 @@ static void test_work_stealing_distributes_load(void)
         uint32_t pre_stale[MAX_CPUS] = {0};
         uint32_t pre_schedule[MAX_CPUS] = {0};
         uint32_t pre_picked[MAX_CPUS] = {0};
+        uint32_t pre_idle[MAX_CPUS] = {0};
         for (uint32_t c = 0; c < cpu_count; c++) {
             pre_attempts[c] = sched_diag_steal_attempts[c];
             pre_successes[c] = sched_diag_steal_successes[c];
             pre_stale[c] = sched_diag_steal_stale[c];
             pre_schedule[c] = sched_diag_schedule[c];
             pre_picked[c] = sched_diag_picked[c];
+            pre_idle[c] = sched_diag_idle_loops[c];
         }
         uint64_t t_queued = timer_get_count();
 #endif
@@ -1054,20 +1142,32 @@ static void test_work_stealing_distributes_load(void)
                         (unsigned long)(recorded[i] - 1),
                         (i + 1 < STEAL_TASK_COUNT) ? "," : "");
         }
-        uart_printf("] per-cpu(att/succ/stale/sched/picked)=");
+        uart_printf("] per-cpu(att/succ/stale/sched/picked/idle)=");
         for (uint32_t c = 0; c < cpu_count; c++) {
             uint32_t da = sched_diag_steal_attempts[c] - pre_attempts[c];
             uint32_t ds = sched_diag_steal_successes[c] - pre_successes[c];
             uint32_t dst = sched_diag_steal_stale[c] - pre_stale[c];
             uint32_t dsc = sched_diag_schedule[c] - pre_schedule[c];
             uint32_t dp = sched_diag_picked[c] - pre_picked[c];
-            uart_printf("%s%lu/%lu/%lu/%lu/%lu",
+            uint32_t di = sched_diag_idle_loops[c] - pre_idle[c];
+            uart_printf("%s%lu/%lu/%lu/%lu/%lu/%lu",
                         (c == 0) ? "" : ",",
                         (unsigned long)da, (unsigned long)ds,
                         (unsigned long)dst,
-                        (unsigned long)dsc, (unsigned long)dp);
+                        (unsigned long)dsc, (unsigned long)dp,
+                        (unsigned long)di);
         }
         uart_printf("\n");
+        /* Absolute idle_loops snapshot separates "CPU never woke
+         * since boot" from "CPU was alive earlier but is dormant
+         * now". Zero here = CPU never executed its idle task. */
+        uart_printf("  ws-diag idle_abs=[");
+        for (uint32_t c = 0; c < cpu_count; c++) {
+            uart_printf("%s%lu",
+                        (c == 0) ? "" : ",",
+                        (unsigned long)sched_diag_idle_loops[c]);
+        }
+        uart_printf("]\n");
 #endif
     }
 
