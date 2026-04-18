@@ -2648,48 +2648,72 @@ static void test_vdma_program_buffer_rejects_zero_size(void)
 
 static void test_vdma_channel_start_programs_regs(void)
 {
-    /* Start channel 3 with a 256-desc list at a known iova; verify
-     * the expected BAR2 writes. desc_depth=8 (2^8=256); data_id=0x05;
-     * iova=0x1_0000_0000 (high=1, low=0 → address_l=0, address_h=1). */
+    /* Start channel 3 with a 256-desc list at a deterministic iova.
+     * desc_depth = ceil_log2(256) = 8. Reference `start_channel`
+     * (hailo-vdma-common.c:859-894) writes, in order:
+     *   1. ALIGNED_ADDR_L (offset 0x08 within channel block), RMW
+     *      to put address_l = high 16 of iova-low-32 in bits [31:16].
+     *   2. ADDR_H (offset 0x0C) = iova >> 32.
+     *   3. BASE_DWORD (offset 0x00) = (depth<<11) | (data_id<<8) —
+     *      also clears CONTROL bits [7:0].
+     *   4. BASE_DWORD RMW to set CONTROL bits [7:0] = START (0x01),
+     *      preserving DEPTH + DATA_ID.
+     *
+     * Pick iova = 0x0001_0000_0000 (low-32 = 0, high-32 = 1); so
+     * address_l = 0 and address_h = 1. */
     vdma_setup();
     struct hailo_vdma_desc_list list = {0};
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_vdma_desc_list_alloc(256, 512, false, &list));
-    /* Override iova to something deterministic — the mock allocator's
-     * return doesn't affect our test's expected values. */
     list.iova = 0x0000000100000000ULL;
 
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_vdma_channel_start(3, &list, 0x05));
 
-    /* Channel 3's base dword lives at BAR2 + 3 * 32 = 0x60. */
+    /* Channel 3 base = 3 * 32 = 0x60. */
+    const uint32_t ch_base = 3u * 32u;
+
+    /* BASE_DWORD: CONTROL=START in low byte, depth=8<<11 (=0x4000),
+     *             data_id=5<<8 (=0x500). Combined low 16 bits:
+     *               (0x4000 | 0x500 | 0x01) & 0xFFFF = 0x4501. */
     uint32_t base_dword;
-    memcpy(&base_dword, &mock_bar2[0x60], sizeof(base_dword));
-    /* Control=START (bit 0) | (depth=8 << 4) | data_id=0x5 = 0x01 | 0x85 low byte.
-     * Actually the final state after read-modify-write START:
-     *   depth_id_dword = (8 << 4) | 0x5 = 0x85
-     *   then CONTROL inserted into bits [7:0]: (0x85 & ~0xFF) | 0x01 = 0x01
-     * Wait — CONTROL lives in bits [7:0] and depth_id ALSO starts at
-     * bit 0 in our packing. The base dword encodes both: bits [3:0]
-     * = data_id, bits [7:4] = depth, and CONTROL overwrites bits [7:0].
-     * After START is issued, bits [7:0] = 0x01 (START), losing depth_id.
-     * That's the reference behavior — DEPTH_ID is latched by the
-     * engine after the first DEPTH_ID write, and subsequent CONTROL
-     * writes overwrite those bits without disturbing the engine's
-     * latched depth. Verify we landed at CONTROL=0x01 in bits[7:0]. */
+    memcpy(&base_dword, &mock_bar2[ch_base], sizeof(base_dword));
     TEST_ASSERT_EQUAL_UINT32(0x01u, base_dword & 0xFFu);
+    TEST_ASSERT_EQUAL_UINT32(0x5u << 8, base_dword & (0x7u << 8));
+    TEST_ASSERT_EQUAL_UINT32(8u << 11, base_dword & (0xFu << 11));
 
-    /* address_l (high 16 of iova low-32) went into channel_base+0x10,
-     * bits [31:16]. iova=0x1_0000_0000 → low-32=0, high-16=0 → addr_l=0.
-     * So the dword should be 0 (or more generally, (addr_l << 16)). */
-    uint32_t addr_l_dword;
-    memcpy(&addr_l_dword, &mock_bar2[0x70], sizeof(addr_l_dword));
-    TEST_ASSERT_EQUAL_UINT32(0u, addr_l_dword);
+    /* ALIGNED_ADDR_L at ch_base + 0x08: bits[31:16] = address_l (0). */
+    uint32_t aligned;
+    memcpy(&aligned, &mock_bar2[ch_base + 0x08], sizeof(aligned));
+    TEST_ASSERT_EQUAL_UINT32(0u, aligned >> 16);
 
-    /* address_h at channel_base+0x14 = 0x74. */
+    /* ADDR_H at ch_base + 0x0C: full u32 = 1. */
     uint32_t addr_h_dword;
-    memcpy(&addr_h_dword, &mock_bar2[0x74], sizeof(addr_h_dword));
+    memcpy(&addr_h_dword, &mock_bar2[ch_base + 0x0C], sizeof(addr_h_dword));
     TEST_ASSERT_EQUAL_UINT32(1u, addr_h_dword);
+
+    hailo_vdma_desc_list_free(&list);
+}
+
+/* Second iova pattern: low-32 nonzero so address_l is nonzero. */
+static void test_vdma_channel_start_encodes_address_l(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    /* iova = 0x0000000ABCD80000 — low 32 bits = 0xABCD0000, so
+     * address_l = 0xABCD (high 16 of low 32) once we mask the
+     * 64 KB-alignment (low 16 bits are zero). */
+    list.iova = 0x0ABCD80000ULL & ~0xFFFFULL;  /* 64 KB-align */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_channel_start(2, &list, 0x00));
+
+    const uint32_t ch_base = 2u * 32u;
+    uint32_t aligned;
+    memcpy(&aligned, &mock_bar2[ch_base + 0x08], sizeof(aligned));
+    uint16_t addr_l = (uint16_t)(aligned >> 16);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)((list.iova >> 16) & 0xFFFFu), addr_l);
 
     hailo_vdma_desc_list_free(&list);
 }
@@ -3328,6 +3352,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_vdma_program_buffer_rejects_null_list);
     RUN_TEST(test_vdma_program_buffer_rejects_zero_size);
     RUN_TEST(test_vdma_channel_start_programs_regs);
+    RUN_TEST(test_vdma_channel_start_encodes_address_l);
     RUN_TEST(test_vdma_channel_start_rejects_misaligned_iova);
     RUN_TEST(test_vdma_channel_start_rejects_bad_channel);
     RUN_TEST(test_vdma_channel_start_rejects_null);

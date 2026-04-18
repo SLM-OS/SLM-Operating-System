@@ -59,6 +59,18 @@ int hailo_tensor_alloc(uint32_t tensor_bytes, struct hailo_tensor *out)
                                           (size_t)HAILO_TENSOR_DMA_ALIGN,
                                           &iova);
     if (!cpu) return HAILO_ERR_NOMEM;
+    /* Defensive: catch a mis-behaving platform allocator that
+     * ignored the alignment hint. VDMA descriptors assume every
+     * tensor page is HAILO_TENSOR_DMA_ALIGN-aligned; a less-
+     * aligned return would corrupt descriptor addresses silently.
+     * Free and fail rather than hand the caller a bad buffer. */
+    if ((uintptr_t)cpu & (HAILO_TENSOR_DMA_ALIGN - 1u)) {
+        WARN("hailo: tensor allocator returned unaligned ptr %p "
+             "(need %u)", cpu, HAILO_TENSOR_DMA_ALIGN);
+        hailo_platform->dma_free(cpu, (size_t)alloc_size,
+                                 (size_t)HAILO_TENSOR_DMA_ALIGN);
+        return HAILO_ERR_NOMEM;
+    }
 
     /* Zero-init. A freshly-allocated output tensor should read as
      * zeros before the first inference. Also avoids leaking prior

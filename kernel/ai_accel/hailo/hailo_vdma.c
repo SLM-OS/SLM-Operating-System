@@ -65,6 +65,16 @@ int hailo_vdma_desc_list_alloc(uint32_t desc_count,
                                           (size_t)HAILO_VDMA_DESC_LIST_ALIGN,
                                           &iova);
     if (!cpu) return HAILO_ERR_NOMEM;
+    /* Defensive: HOST_DESC_BASE_ADDR truncates low 16 bits, so an
+     * unaligned return silently corrupts the device-side pointer.
+     * Reject rather than propagate. */
+    if ((uintptr_t)cpu & (HAILO_VDMA_DESC_LIST_ALIGN - 1u)) {
+        WARN("hailo: desc-list allocator returned unaligned ptr %p "
+             "(need %u)", cpu, HAILO_VDMA_DESC_LIST_ALIGN);
+        hailo_platform->dma_free(cpu, (size_t)alloc_size,
+                                 (size_t)HAILO_VDMA_DESC_LIST_ALIGN);
+        return HAILO_ERR_NOMEM;
+    }
 
     /* Zero-init the whole buffer. A descriptor with all-zero fields
      * is inert (page size 0 → no transfer), which is what we want
@@ -219,35 +229,40 @@ int hailo_vdma_channel_start(uint8_t channel_index,
     uint8_t depth = vdma_ceil_log2(list->desc_count);
     if (depth == 16) depth = 0;
 
-    /* DEPTH_ID dword lives at offset 0 (CHANNEL_BASE_DWORD) as
-     * [depth:4][data_id:4][reserved:24]. Reference shifts:
-     *   desc_depth << VDMA_CHANNEL_DESC_DEPTH_SHIFT  (depth = bits 4..7)
-     *   data_id    << VDMA_CHANNEL_DATA_ID_SHIFT     (data_id = bits 0..3)
-     * Bits [15:8] and [31:16] (CONTROL / NUM_AVAIL) are written
-     * separately by CONTROL writes and NUM_AVAIL writes. */
-    uint32_t depth_id_dword = ((uint32_t)depth << 4) | (uint32_t)(data_id & 0xFu);
-    channel_write_base_dword(channel_index, depth_id_dword);
-
-    /* Descriptor list address: low 16 bits of bits[31:16] + high 32
-     * bits in a separate register slot. Layout in reference:
-     *   VDMA_CHANNEL__ALIGNED_ADDRESS_L_OFFSET = dword containing
-     *       address_l in bits[31:16];
-     *   VDMA_CHANNEL__ADDRESS_H_OFFSET = full 32-bit dword.
-     * Our simpler layout stashes address_l at channel_base+0x10
-     * and address_h at channel_base+0x14 for clarity — matches the
-     * "DEST_REGS" half of the channel's 32-byte block used by
-     * output channels. */
+    /* Write sequence matches hailo_vdma_start_channel
+     * (hailo-vdma-common.c:859-894):
+     *
+     *   1. ALIGNED_ADDR_L dword: bits [31:16] = address_l (the high
+     *      16 bits of the list's 32-bit-low iova). RMW to preserve
+     *      any other fields in that dword.
+     *   2. ADDR_H dword: bits [31:0] = address_h (high 32 bits of
+     *      iova).
+     *   3. BASE_DWORD: write (depth << 11) | (data_id << 8). This
+     *      also clears CONTROL (bits [7:0]), matching what the
+     *      reference does at line 892.
+     *   4. BASE_DWORD RMW: set CONTROL to START while preserving
+     *      the freshly-written DEPTH + DATA_ID bits.
+     */
     uint16_t addr_l = (uint16_t)((list->iova >> 16) & 0xFFFFu);
     uint32_t addr_h = (uint32_t)(list->iova >> 32);
+
+    uint32_t aligned = hailo_platform->read32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L);
+    aligned = (aligned & 0x0000FFFFu) | ((uint32_t)addr_l << 16);
     hailo_platform->write32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + 0x10u,
-        (uint32_t)addr_l << 16);
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L,
+        aligned);
     hailo_platform->write32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + 0x14u,
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_ADDR_H,
         addr_h);
 
+    uint32_t depth_id_dword =
+        ((uint32_t)depth << HAILO_VDMA_CHANNEL_DESC_DEPTH_SHIFT)
+      | ((uint32_t)data_id << HAILO_VDMA_CHANNEL_DATA_ID_SHIFT);
+    channel_write_base_dword(channel_index, depth_id_dword);
+
     /* Issue the START control bit. Read-modify-write the base dword
-     * so we don't clobber DEPTH_ID just written. */
+     * so we don't clobber DEPTH + DATA_ID just written. */
     uint32_t cur = channel_read_base_dword(channel_index);
     cur = (cur & ~0xFFu) | HAILO_VDMA_CTRL_START;
     channel_write_base_dword(channel_index, cur);
@@ -284,7 +299,8 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
     /* Write new_num_avail into bits [31:16] of the base dword.
      * Read-modify-write to preserve CONTROL and DEPTH_ID. */
     uint32_t cur = channel_read_base_dword(channel_index);
-    cur = (cur & 0x0000FFFFu) | ((uint32_t)new_num_avail << 16);
+    cur = (cur & 0x0000FFFFu)
+        | ((uint32_t)new_num_avail << HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT);
     channel_write_base_dword(channel_index, cur);
     hailo_platform->mb();
 

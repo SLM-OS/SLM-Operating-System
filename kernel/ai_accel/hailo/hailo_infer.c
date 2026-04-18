@@ -22,11 +22,14 @@ static uint32_t pick_desc_count(uint32_t tensor_bytes, uint16_t page_size)
 {
     if (tensor_bytes == 0 || page_size == 0) return 0;
     uint32_t needed = (tensor_bytes + page_size - 1u) / page_size;
+    /* Early-reject out-of-range needs BEFORE the shift loop. An
+     * unbounded `while (pow2 < needed) pow2 <<= 1` would wrap
+     * `pow2` to 0 for `needed > 0x80000000` and loop forever. */
+    if (needed > HAILO_VDMA_MAX_DESC_COUNT) return 0;
     /* Round up to power of 2. */
     uint32_t pow2 = 1;
     while (pow2 < needed) pow2 <<= 1;
     if (pow2 < HAILO_VDMA_MIN_DESC_COUNT) pow2 = HAILO_VDMA_MIN_DESC_COUNT;
-    if (pow2 > HAILO_VDMA_MAX_DESC_COUNT) return 0;
     return pow2;
 }
 
@@ -57,6 +60,16 @@ static inline uint64_t cntfrq_read(void)
 #endif
 }
 
+/*
+ * TODO(phase-5.4+): no cross-caller serialization. The current
+ * sole caller is the shell on CPU 0; a future AI-scheduler policy
+ * submitting concurrent inferences would race on the shared VDMA
+ * channel state (channels 0 and 1 are hardcoded via the shell
+ * command and the static per-channel register banks live in BAR2).
+ * When a second caller arrives, wrap the body in a file-scope
+ * spin_lock(&infer_lock) — plain, not irqsave, because the poll
+ * waits can run for milliseconds.
+ */
 int hailo_infer_run(const struct hailo_infer_config *cfg,
                     const void *input,
                     void *output,
@@ -162,6 +175,21 @@ int hailo_infer_run(const struct hailo_infer_config *cfg,
     rc = HAILO_OK;
 
 out:
+    /* Cleanup ordering is load-bearing:
+     *   1. Stop channels FIRST so the VDMA engine stops fetching
+     *      from the descriptor lists and writing to the tensor
+     *      buffers. Freeing these buffers underneath a live engine
+     *      would hand device-visible addresses back to the page
+     *      allocator and allow the DMA to corrupt whatever
+     *      reclaims them.
+     *   2. Free descriptor lists next — they own the addresses the
+     *      channel regs were pointed at; the engine must be idle
+     *      before release is safe.
+     *   3. Free tensors last. Their IOVAs are embedded in the
+     *      descriptors we just freed.
+     * hailo_vdma_channel_stop issues ABORT_PAUSE which the
+     * reference (hailo-vdma-common.c:937) treats as sufficient
+     * for the engine to stop fetching. */
     if (in_started)  hailo_vdma_channel_stop(cfg->input_channel);
     if (out_started) hailo_vdma_channel_stop(cfg->output_channel);
     hailo_vdma_desc_list_free(&in_list);

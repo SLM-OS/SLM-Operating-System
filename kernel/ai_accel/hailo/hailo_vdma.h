@@ -179,15 +179,30 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
  * in hailo-vdma-common.h). */
 #define HAILO_VDMA_MAX_CHANNELS     16u
 
-/* Sub-offsets within a channel's register block. Shared with the
- * reference driver (`hailo-vdma-common.h:21-26`). The channel's
- * base register (at offset 0) packs CONTROL (u8) + DEPTH_ID (u8) +
- * NUM_AVAIL (u16) into a single 32-bit dword; our platform's
- * read32/write32 go through that dword and the VDMA helpers
- * bit-field-insert the specific field. */
-#define HAILO_VDMA_CHANNEL_BASE_DWORD        0x00u  /* ctl+depth+num_avail */
-#define HAILO_VDMA_CHANNEL_NUM_PROC_DWORD    0x04u  /* num_proc (u16 low) */
-#define HAILO_VDMA_CHANNEL_ERROR_DWORD       0x08u
+/* Sub-offsets within a channel's register block (host side).
+ * Mirror the constants in `hailo-vdma-common.c:32-37` and
+ * `hailo-vdma-common.h:21-26`:
+ *
+ *   0x00  BASE_DWORD   [CONTROL:8][data_id:3 at shift 8][depth:4 at shift 11][num_avail:16 at shift 16]
+ *   0x04  NUM_PROC_DWORD  [num_proc:16]
+ *   0x08  ALIGNED_ADDR_L_DWORD  [reserved:16][address_l:16 at shift 16]
+ *   0x0C  ADDR_H_DWORD          [address_h:32]
+ *
+ * CONTROL lives in bits [7:0] of BASE_DWORD. DEPTH and DATA_ID also
+ * live in BASE_DWORD but in different bit ranges — the reference
+ * writes `(depth << 11) | (data_id << 8)` to it (which clears
+ * CONTROL), then follows with a separate CONTROL-start RMW.
+ * NUM_AVAIL lives in bits [31:16] of BASE_DWORD and is written
+ * via RMW to preserve CONTROL + DEPTH + DATA_ID. */
+#define HAILO_VDMA_CHANNEL_BASE_DWORD        0x00u
+#define HAILO_VDMA_CHANNEL_NUM_PROC_DWORD    0x04u
+#define HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L    0x08u
+#define HAILO_VDMA_CHANNEL_ADDR_H            0x0Cu
+
+/* Bit shifts within BASE_DWORD. */
+#define HAILO_VDMA_CHANNEL_DATA_ID_SHIFT     8u     /* data_id bits */
+#define HAILO_VDMA_CHANNEL_DESC_DEPTH_SHIFT  11u    /* depth bits */
+#define HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT   16u    /* num_avail u16 */
 
 /*
  * Start a VDMA channel on a previously-programmed descriptor list.
