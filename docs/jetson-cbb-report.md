@@ -10,7 +10,7 @@ together material previously scattered across `docs/jetson-el2-bringup.md`,
 **Audience:** Future SLM-OS developers and anyone evaluating how much
 Jetson hardware is addressable from a bare-metal kernel at NS EL2.
 
-**Last updated:** 17 April 2026
+**Last updated:** 17 April 2026 (Phase 7 retest retracted the GPU doorbell finding)
 
 ---
 
@@ -32,11 +32,20 @@ remain** are all either:
 
 - **Peripheral apertures the EL2-NS table has never been programmed to
   permit** (UARTA on the 40-pin header; OP-TEE secure carveout at
-  `0xBE000000–0xC2000000`; INA3221 power telemetry; the GPU's
-  channel-creation register apertures — PFIFO, CHRAM, NV_USERMODE), or
+  `0xBE000000–0xC2000000`; INA3221 power telemetry).
+
+  **Previously listed here:** the GPU's PFIFO/CHRAM/NV_USERMODE
+  apertures. An April-17 retest on jetson-nano-2 (peek 0x17BB0000
+  from EL2 returned 0x0000C561, matching Linux `/dev/mem`; poke of
+  the correct token advanced GP_GET) proved those apertures are
+  actually accessible from EL2 — the earlier map was probing the
+  wrong offset (0x17800000) and misreading the GPU's "no register
+  here" `0xbadf1100`-family responses as aborts. What remains
+  kernel-owned is the nvgpu *ioctl surface* (kernel-mode bookkeeping
+  for channel creation), not the MMIO itself.
 - **Privileged-write endpoints that require a bus master the CBB
-  considers "trusted"** — for the GPU doorbell, the only code that
-  can write `NV_USERMODE` is Linux's `nvgpu.ko` kernel driver.
+  considers "trusted"** — handful of SMC-gated registers accessible
+  only via EL3 firmware.
 
 There is no software-only fix for either class from NS EL2. Getting
 "officially" past them requires one of four avenues described in §6:
@@ -112,12 +121,15 @@ Two facts matter for the rest of this report:
 1. **It's per-peripheral, not global.** UARTC and UARTA have
    independent rules — one is reachable from NS EL2, the other is
    not, on the same core at the same privilege.
-2. **It's per-master as well.** The same MMIO aperture that EL2-NS
-   cannot reach (e.g., `NV_USERMODE` at GPU BAR0+0x800000) *can* be
-   reached by Linux's kernel-mode `nvgpu.ko`, because `nvgpu.ko` writes
-   through a different, trusted bus-master path the CBB allows. Reading
-   from the same address from SLM-OS returns `0xbadf1100` (PRI poison),
-   not an abort — confirming the masked-out behavior is per-master.
+2. **It's per-master as well.** Some MMIO apertures that EL2-NS
+   cannot reach from SLM-OS *can* be reached by Linux's kernel-mode
+   drivers because they write through a different, trusted bus-master
+   path the CBB allows. When SLM-OS's read of a masked aperture
+   returns `0xbadf1100` (PRI poison) it indicates a masked-out
+   behavior, not a bus abort. **Caution:** `0xbadf1100` is also the
+   normal response for "no register at this offset" on any GA10x GPU
+   — see §5 below for how misreading that pattern as an abort led to
+   the wrong conclusion about `NV_USERMODE` being blocked.
 
 ---
 
@@ -144,9 +156,9 @@ at the same EL as Linux was running at when kexec handed off.
 | ARM Generic Timer | system regs | ✅ | 100 Hz scheduler tick (cooperative) |
 | Watchdog | `0x02190000` | ✅ | Disabled at boot |
 | DRAM | entire 8 GB | ✅ | ~6.9 GB usable across 3 regions |
-| GPU PMC regs | `0x17000000` (BAR0) | ✅ (read) | ID (GA10B), HWCFG, FECS, runlist status |
+| GPU PMC regs | `0x17000000` (BAR0) | ✅ (read/write) | ID (GA10B), HWCFG, FECS, runlist status |
 | FECS method push | `0x409500`/`0x409504` | ✅ | GPU method submission (verified) |
-| FIFO_USER doorbell | `0x200000+` | ✅ (first 5 channels) | Not yet used |
+| GPU USERMODE doorbell | BAR0 + `0xBB0090` (phys `0x17BB0090`) | ✅ (R/W) | Phase 7 submission kick (verified) |
 | HSP mailboxes (TCU) | `0x03C00000+` | ✅ | Serial input routing |
 | PSCI calls | SMC | ✅ | CPU power, SYSTEM_OFF |
 
@@ -155,10 +167,6 @@ at the same EL as Linux was running at when kexec handed off.
 | Peripheral | Address | Used by | What we lose |
 |---|---|---|---|
 | UARTA | `0x03100000` | 40-pin header UART | Secondary serial console; diagnostic uplink when USB-C is busy |
-| GPU PFIFO | BAR0 + `0x002000` | GPU channel setup | Creating new GPU channels from scratch |
-| GPU CHRAM | channel enable/disable | GPU channel setup | Enabling/scheduling channels directly |
-| GPU NV_USERMODE | BAR0 + `0x800000` | GPU channel doorbell | Notifying PBDMA of GPFIFO submissions |
-| Per-runlist PRI cfg | scattered | GPU runlist control | Full runlist reconfiguration |
 | OP-TEE carveout | `0xBE000000`–`0xC2000000` | OP-TEE secure world | 64 MB of DRAM (unusable; we skip it) |
 | INA3221 telemetry | I²C behind CBB | Power/energy measurement | Energy/power readings have to be captured pre-kexec from Linux |
 | BPMP IVC | `0x0C168000` | Clock, power domain control | Cannot reconfigure any clock post-kexec |
@@ -191,7 +199,7 @@ Cross-walked to the five tracked features (see
 |---|---|---|
 | **SMP / cross-CPU dispatch** | ✅ 6 cores online, `bench smp` passes | No impact — GIC and CPU power are reachable. |
 | **Preemptive multitasking** | 🟡 Cooperative (`COOP_PREEMPT`) | Separate blocker: GIC Group config is locked by TF-A, not CBB. Timer IRQs don't deliver to NS EL2 regardless of CBB. See `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs." |
-| **GPU inference** | 🟠 Detection + FECS gateway working; channel submit blocked | Direct impact. Channels require `PFIFO`/`CHRAM`/`NV_USERMODE` writes — all CBB-blocked at NS EL2 (#258). Workaround: the "channel inherit" approach (Linux creates a channel pre-kexec; SLM-OS writes USERD GP_PUT in DRAM). But the doorbell still has to come from Linux. |
+| **GPU inference** | 🟢 Detection + FECS gateway + Phase 7 NOP dispatch working | No CBB wall in the submit path. Channel *creation* still requires the Linux-side helper (kernel-mode nvgpu ioctl surface), but once the channel exists, SLM-OS writes GP_PUT in DRAM and rings the USERMODE doorbell at BAR0+0xBB0090 directly from EL2. #258 closed 2026-04-17. |
 | **AI scheduler** | ✅ Running | No CBB dependency — pure CPU/NEON path. |
 | **AI page eviction** | ✅ Running | No CBB dependency. |
 | **Networking** | ❌ Not wired yet (#25) | Tentative impact. EQOS MAC is at `0x02310000`; need to verify EL2 reachability (§6.A first experiment). If blocked, Jetson networking is a hard no-go without one of the permanent fixes in §6. |
@@ -225,36 +233,49 @@ The GPU story is instructive because it shows what CBB bypass by
 
 ### What's blocked
 
-- **Create** a new channel — the per-channel ENABLE bit in CHRAM is
-  CBB-locked at NS EL2.
-- **Ring** the submission doorbell — writing GP_PUT to USERD in DRAM
-  lands (we can see the write in memory), but PBDMA never advances
-  GP_GET because the CBB blocks the `NV_USERMODE` doorbell write that
-  wakes PBDMA. Reads of the aperture return the `0xbadf1100` PRI
-  poison value, confirming it's masked, not broken. Tracked as #258.
+- **Create** a new channel *from SLM-OS alone* — the nvgpu ioctl
+  surface (TSG open, ALLOC_AS, SETUP_BIND, nvmap, runlist programming)
+  is a Linux-kernel driver that we haven't ported. This is a software
+  scope limit, not a CBB block; SLM-OS works around it with the
+  Linux-side helper.
 
-### Why the inherit approach mostly closed the gap
+### Historical correction (April 17)
 
-The "channel inherit from Linux" pattern (landed in PR #256) side-steps
-channel *creation*: Linux creates a channel before kexec, keeps it
-alive through the no-suspend transition, and SLM-OS submits work into
-it by writing USERD GP_PUT in DRAM. This works up to the point where
-PBDMA needs to be *told* the GPFIFO has advanced — and that requires a
-doorbell write to `NV_USERMODE`, which is behind CBB.
+Earlier revisions of this report listed channel *creation* and the
+USERMODE *doorbell* as CBB-blocked from EL2. Both conclusions were
+wrong:
 
-Three candidate workarounds are tracked in #258:
+- **The doorbell isn't at `0x800000`.** GA10B inherits the TU104
+  usermode layout; the actual doorbell register is at `BAR0+0xBB0090`
+  (physical `0x17BB0090`), not `BAR0+0x800000`. The old map probed the
+  pre-Turing `FIFO_USER` aperture and declared "blocked."
+- **`0xbadf1100` isn't always a firewall mask.** On GA10x GPUs the
+  value is *also* the PRI poison for "no register at this offset."
+  Since the old probe was hitting unused offsets (0x17800000,
+  0x17002000, etc.), the "blocked" readings were the GPU's normal
+  response for empty space, not CBB refusals.
 
-1. Access NVIDIA L4T's `nvgpu.ko` source (NDA required) to see how its
-   privileged write actually reaches `NV_USERMODE`.
-2. `bpftrace` the live kernel to capture the register-write sequence.
-3. Disassemble L4T's userspace GPU libraries to infer the CUDA path.
+On April 17, `peek 0x17BB0000` from SLM-OS at EL2 returned
+`0x0000C561` — identical to what Linux `/dev/mem` and CUDA's USERMODE
+mmap see. `poke 0x17BB0090 <work_submit_token>` advanced GP_GET on a
+Linux-primed channel from the SLM-OS shell. The updated
+`ga10b_bringup_smoke_test` then completed the full submit path
+end-to-end (GP_PUT → doorbell → PBDMA consume → GP_GET advance),
+reaching `METHOD_ACCEPTED` state. Issue #258 was closed as the result
+of this retest.
 
-All three are *instrumentation*, not *permission*. Even if they reveal
-exactly which BAR offset CUDA's doorbell resolves to, SLM-OS still
-cannot perform the write itself because the CBB blocks the write
-regardless of whether we know the right address. They would at best
-let SLM-OS script Linux to do the write on its behalf — a pattern that
-already works for channel creation and could extend to doorbells.
+### Why the inherit approach is still needed
+
+The inherit path (PR #256) is still the right pattern for Jetson,
+but for a different reason than previously claimed. Channel
+*creation* goes through nvgpu's kernel-mode ioctls — roughly 10 of
+them, plus SMMU programming and runlist management — which is a
+Linux kernel driver SLM-OS hasn't ported. The Linux-side helper
+reuses that code path, then hands off the completed channel's
+addresses + `work_submit_token` to SLM-OS through a handoff block
+in DRAM (wire v2). After kexec, SLM-OS writes GP_PUT in DRAM and
+the doorbell in BAR0 — both directly from EL2 without any CBB
+involvement.
 
 ---
 
@@ -273,11 +294,11 @@ answer for bare-metal peripheral access on Jetson.
 
 **What it unlocks:**
 - UARTA on the 40-pin header.
-- The GPU's channel-creation apertures (PFIFO, CHRAM, NV_USERMODE) —
-  would close #258 directly and unblock full end-to-end GPU compute.
 - INA3221 for bare-metal energy telemetry.
 - Potentially EQOS and Tegra XUSB, depending on what they actually
   need (TBD).
+- *(The GPU's PFIFO/CHRAM/NV_USERMODE apertures are no longer on this
+  list — §5 retest showed they're already reachable from EL2.)*
 
 **What's required:**
 - NVIDIA Jetson Linux Tegra flash host environment installed.
@@ -373,14 +394,15 @@ issues `SMC`, the modified BL31 at EL3 does the write, returns.
 - Flashing the modified BL31.
 
 **Issues:** Still depends on the CBB permissions granted to EL3.
-`NV_USERMODE` and `PFIFO` are owned by the GPU's trust hierarchy;
-EL3 may or may not be able to write them — this is the first
-unknown to test before committing. Also: whatever needs EL3 to do
-it on our behalf becomes two context switches per doorbell, which
-is fine for GPU submission but not for hot MMIO paths.
+Whatever needs EL3 to do it on our behalf becomes two context
+switches per operation, which is fine for cold paths but not for
+hot MMIO. As of April 17, this path is *no longer needed* for the
+GPU doorbell — that write works directly from NS EL2 (§5). Path D
+is now only a fallback for apertures still blocked at EL2 (e.g.,
+UARTA, BPMP IVC).
 
-**Effort:** 2–3 weeks for a proof-of-concept SMC that writes
-`NV_USERMODE`. Then each additional aperture is cheap.
+**Effort:** 2–3 weeks per SMC handler. Cheap for each additional
+aperture once the first is working.
 
 ---
 
@@ -394,12 +416,11 @@ effort, in rough priority order:
    If it's reachable, proceed with the EQOS driver (#25) without
    touching CBB — this is the cheapest thing to verify next.
 
-2. **If GPU compute is the goal (2–3 weeks):** build a minimal custom
-   TF-A (path D) that exposes a single SMC handler for
-   `NV_USERMODE` doorbell writes. Test whether EL3 can even reach that
-   aperture. If yes, this closes #258 and unblocks full GPU pipeline
-   with minimal surface area. If no, path D is a dead-end and the only
-   remaining route is path A (BCT reconfig) or path B (secure boot).
+2. *(Was "build custom TF-A SMC for NV_USERMODE doorbell." Removed
+   April 17: the doorbell write works directly from NS EL2; #258 is
+   closed. What remains blocking full GPU compute is encoding real
+   methods — NOP dispatch is verified; next step is a
+   SEMAPHORE_RELEASE and then compute-class QMD dispatch.)*
 
 3. **If broad bare-metal on Jetson becomes strategic (4 weeks+):**
    invest in path A (BCT reconfig). Start by reverse-engineering
@@ -430,7 +451,7 @@ documented and reproducible," not "NVIDIA blessed us."
 
 | # | Title | Relevance |
 |---|---|---|
-| #258 | Jetson GPU Phase 7: PBDMA doesn't consume GPFIFO entries — doorbell mechanism blocked from EL2 | The CBB blocker on the GPU doorbell aperture |
+| #258 | Jetson GPU Phase 7: PBDMA doesn't consume GPFIFO entries — doorbell mechanism blocked from EL2 | Closed 2026-04-17 as misdiagnosis; actual doorbell is at BAR0+0xBB0090 (TU104 layout) and is reachable from EL2. |
 | #31 | Secure Boot Chain (Jetson fuse-based signature verification) | Path B of §6 |
 | #25 | Jetson Ethernet driver (EQOS controller) | Assumes EQOS is reachable at EL2 — first experiment in §7 |
 | #24 | Jetson USB Serial Console (TinyUSB + Tegra XUSB) | Blocked if XUSB needs clocks SLM-OS can't enable (BPMP unreachable) |

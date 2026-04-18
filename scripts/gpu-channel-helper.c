@@ -3,19 +3,22 @@
  * the handoff metadata for SLM-OS to inherit after kexec.
  *
  * ============================================================
- *   STATUS: WORKING end-to-end (Phase 6) on L4T r36.4.7, 2026-04-17
+ *   STATUS: WORKING end-to-end (Phases 6+7) on L4T r36.4.7, 2026-04-17
  * ============================================================
  *
- * All 10 ioctls succeed; handoff block is written to an nvmap
- * dmabuf; the magic value survives kexec and is found by SLM-OS's
- * Phase 6 DRAM scan. Ioctl parameters were reverse-engineered from
- * CUDA via an LD_PRELOAD ioctl-snoop (see commit history).
+ * All 10 ioctls succeed; handoff block (wire v2, carrying
+ * work_submit_token) is written to an nvmap dmabuf; the magic value
+ * survives kexec and is found by SLM-OS's Phase 6 DRAM scan. Ioctl
+ * parameters were reverse-engineered from CUDA via an LD_PRELOAD
+ * ioctl-snoop (see commit history).
  *
- * Phase 7 (pushbuffer submission) is partial: the helper primes
- * PBDMA by writing GP_PUT + ringing the doorbell via mmap of the
- * CTRL fd, but after kexec the doorbell mmap is gone and PBDMA
- * doesn't auto-poll the detached channel. SLM-OS's GP_PUT write
- * does land in USERD (verified via peek) — just no consumer.
+ * Phase 7 (pushbuffer submission) works end-to-end: SLM-OS reads
+ * the work_submit_token out of the handoff block and writes it to
+ * BAR0+0xBB0090 (physical 0x17BB0090) from EL2. PBDMA consumes
+ * the GPFIFO entry and GP_GET advances. The helper's pre-kexec
+ * doorbell below is kept as a defensive prime — it's a no-op when
+ * PBDMA is already scheduled on this channel but ensures CHRAM
+ * has observed at least one update before kexec.
  *
  * Usage: sudo ./gpu-channel-helper [--timeout-secs N]
  *
