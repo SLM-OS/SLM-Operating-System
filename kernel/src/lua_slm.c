@@ -19,6 +19,12 @@
 #include "ipc.h"
 #include "smp.h"
 #include "string.h"
+#if defined(ENABLE_NETWORKING)
+#include "shell_io_tcp.h"
+#include "tcp_shell_server.h"
+#include "shell_session.h"   /* MAX_TCP_SHELL_SESSIONS */
+#include "net.h"
+#endif
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
 #endif
@@ -1838,6 +1844,134 @@ static int l_shell_exec(lua_State *L) {
     return 1;
 }
 
+#if defined(ENABLE_NETWORKING)
+/* ============================================================================
+ * slm.telnetd_* — Phase 3 Lua bindings for the TCP shell daemon
+ *
+ * Flat namespace (slm.telnetd_start, slm.telnetd_stop, ...) to match
+ * the project's existing slm.component_* / slm.msg_* / slm.sched_*
+ * pattern. The plan (§3.4) shows a nested slm.telnetd.{start,stop,...}
+ * form; flattening is a deliberate deviation to keep Lua convention
+ * consistent across the bindings.
+ * ============================================================================ */
+
+/**
+ * slm.telnetd_start([port]) — bring the listener up.
+ * Returns 0 on success, negative on failure.
+ */
+static int l_telnetd_start(lua_State *L) {
+    if (!L) return 0;
+    int port = luaL_optinteger(L, 1, 2323);
+    if (port < 1 || port > 65535) {
+        return luaL_argerror(L, 1, "port must be 1..65535");
+    }
+    if (!net_is_up()) {
+        if (net_init() != 0) {
+            lua_pushinteger(L, -1);
+            return 1;
+        }
+    }
+    int rc = tcp_shell_server_start((uint16_t)port);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+/**
+ * slm.telnetd_stop() — stop accepting new connections.
+ * Returns true if the listener was running, false if already stopped.
+ */
+static int l_telnetd_stop(lua_State *L) {
+    if (!L) return 0;
+    bool was_running = tcp_shell_server_running();
+    if (was_running) {
+        tcp_shell_server_stop();
+    }
+    lua_pushboolean(L, was_running);
+    return 1;
+}
+
+/**
+ * slm.telnetd_status() — returns a table with daemon state.
+ *   { running, port, accepted, active, max }
+ */
+static int l_telnetd_status(lua_State *L) {
+    if (!L) return 0;
+    lua_newtable(L);
+
+    lua_pushboolean(L, tcp_shell_server_running());
+    lua_setfield(L, -2, "running");
+
+    lua_pushinteger(L, (lua_Integer)tcp_shell_server_port());
+    lua_setfield(L, -2, "port");
+
+    lua_pushinteger(L, (lua_Integer)tcp_shell_server_accepted());
+    lua_setfield(L, -2, "accepted");
+
+    lua_pushinteger(L, (lua_Integer)shell_io_tcp_active_count());
+    lua_setfield(L, -2, "active");
+
+    lua_pushinteger(L, (lua_Integer)MAX_TCP_SHELL_SESSIONS);
+    lua_setfield(L, -2, "max");
+
+    return 1;
+}
+
+/* Closure over the lua_State so the foreach visitor can push into it. */
+struct telnetd_sessions_ctx {
+    lua_State *L;
+    int        idx;   /* next Lua array index */
+};
+
+static bool telnetd_sessions_visitor(const struct tcp_session_info *info, void *c) {
+    struct telnetd_sessions_ctx *sc = c;
+    lua_State *L = sc->L;
+
+    lua_newtable(L);
+
+    lua_pushinteger(L, (lua_Integer)info->session_id);
+    lua_setfield(L, -2, "id");
+
+    lua_pushinteger(L, (lua_Integer)info->peer_ip);
+    lua_setfield(L, -2, "peer_ip");
+
+    lua_pushinteger(L, (lua_Integer)info->peer_port);
+    lua_setfield(L, -2, "peer_port");
+
+    lua_pushinteger(L, (lua_Integer)info->connected_at);
+    lua_setfield(L, -2, "connected_at");
+
+    lua_rawseti(L, -2, sc->idx++);
+    return true;
+}
+
+/**
+ * slm.telnetd_sessions() — returns an array of per-session tables.
+ *   { { id=N, peer_ip=N (nbo), peer_port=N, connected_at=ms }, ... }
+ */
+static int l_telnetd_sessions(lua_State *L) {
+    if (!L) return 0;
+    lua_newtable(L);
+    struct telnetd_sessions_ctx sc = { .L = L, .idx = 1 };
+    shell_io_tcp_foreach(telnetd_sessions_visitor, &sc);
+    return 1;
+}
+
+/**
+ * slm.telnetd_kick(id) — force-disconnect one session.
+ * Returns true if a matching session was found.
+ */
+static int l_telnetd_kick(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer id = luaL_checkinteger(L, 1);
+    if (id < 0 || id > 0xFFFFFFFF) {
+        return luaL_argerror(L, 1, "id out of range");
+    }
+    bool kicked = shell_io_tcp_kick((uint32_t)id);
+    lua_pushboolean(L, kicked);
+    return 1;
+}
+#endif /* ENABLE_NETWORKING */
+
 /* SLM library functions */
 static const luaL_Reg slm_lib[] = {
     {"print", l_print},
@@ -1902,6 +2036,14 @@ static const luaL_Reg slm_lib[] = {
     /* Shell integration */
     {"read_line", l_read_line},
     {"shell_exec", l_shell_exec},
+#if defined(ENABLE_NETWORKING)
+    /* TCP shell daemon (Phase 3) */
+    {"telnetd_start",    l_telnetd_start},
+    {"telnetd_stop",     l_telnetd_stop},
+    {"telnetd_status",   l_telnetd_status},
+    {"telnetd_sessions", l_telnetd_sessions},
+    {"telnetd_kick",     l_telnetd_kick},
+#endif
     {NULL, NULL}
 };
 

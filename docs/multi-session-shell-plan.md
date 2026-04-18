@@ -5,15 +5,16 @@ as the initial protocol layer and a proper daemon control surface
 (`telnetd`) on top. This is foundational work for future SSH support
 (Phase 4, tracked in #199) and for multi-user operation.
 
-**Status:** Phases 1 + 2 complete. `nc localhost 2323` and
+**Status:** Phases 1 + 2 + 3 complete. `nc localhost 2323` and
 `telnet localhost 2323` both get a shell; telnet clients transition
 into character-at-a-time server-echoed mode, raw clients see a
-12-byte negotiation burst at the top of the stream and otherwise
-behave identically to before. UART console coexists; up to
-`MAX_TCP_SHELL_SESSIONS` concurrent remote sessions (currently 2).
-Phase 3 (telnetd daemon control / config file / auto-start) remains
-planned; Phase 4 (SSH, #199) is out-of-scope here.
-**Last updated:** 17 April 2026
+12-byte negotiation burst and otherwise behave identically. UART
+console coexists; up to `MAX_TCP_SHELL_SESSIONS` concurrent remote
+sessions (currently 2). Daemon-style operator controls (`telnetd
+start/stop/status/sessions/kick`, `/etc/telnetd.conf` parser,
+`NET_TELNETD_AUTOSTART` build flag, `slm.telnetd_*` Lua bindings)
+all landed. Phase 4 (SSH, #199) is out-of-scope here.
+**Last updated:** 18 April 2026
 
 ---
 
@@ -617,6 +618,39 @@ This aligns with the demo-readiness observability work (#191, #194).
 
 **Phases 1 + 2 + 3 combined: ~10-13 days.**
 
+### Phase 3 implementation notes
+
+Deviations / design choices that landed:
+
+- **`telnetd` lives in `net_shell.c`**, not a separate
+  `shell_telnetd.c`, because it's tightly coupled with `net_init`
+  and the existing `net`/`ping`/`ifconfig` commands. `tcpsh` is
+  registered as a deprecated alias that dispatches through the
+  same handler (uses `argv[0]` for "Usage:" / error prefix).
+- **Lua bindings are flat (`slm.telnetd_start`, `slm.telnetd_stop`,
+  ...)** rather than the nested `slm.telnetd.start` shape the plan
+  mentioned. This matches the project's existing convention
+  (`slm.component_run`, `slm.msg_publish`, `slm.sched_policy`).
+- **Autostart config precedence:** `/etc/telnetd.conf` always wins
+  when present. Missing file → fall back to the
+  `NET_TELNETD_AUTOSTART` compile-time default. A Lua
+  `/boot/init.lua` hook (plan §3.2 item 2) is not implemented in
+  this phase — the build flag + config file cover the common
+  cases; scripts that want custom init logic can call
+  `slm.telnetd_start(...)` from wherever they like.
+- **Kick semantics:** `telnetd kick <id>` sets the session's
+  `closed` flag. Long-running commands complete first, then
+  `shell_read_line` returns -1 on its next read and the REPL
+  exits. The kicked session disappears from `telnetd sessions`
+  immediately (foreach filters `closed`) even though the underlying
+  TCP connection may still be alive while the active command runs
+  to completion. Aligns with typical daemon `kick` semantics.
+- **Component registry integration (§3.6) is deferred.** The
+  `top`/`ps`/`component list` entries would be valuable but
+  require uptime tracking + bytes_rx/tx counters that aren't
+  wired up today; left for a follow-up that can coordinate with
+  #191/#194.
+
 ---
 
 ## Key Files
@@ -646,10 +680,15 @@ This aligns with the demo-readiness observability work (#191, #194).
 - ✅ `kernel/include/telnet.h` (Phase 2) — IAC state machine API
 - ✅ `kernel/src/telnet.c` (Phase 2) — IAC state machine
 - ✅ `kernel/tests/test_telnet.c` (Phase 2) — 17 parser unit tests
-- ☐ `kernel/src/shell_telnetd.c` (Phase 3) — `telnetd` shell commands
-- ☐ `kernel/src/telnetd_config.c` (Phase 3) — `/etc/telnetd.conf` parser + boot hook
+- ✅ `kernel/src/net_shell.c` (Phase 3) — `telnetd` shell commands
+  (folded into the existing net command file; `tcpsh` kept as a
+  deprecated alias)
+- ✅ `kernel/include/telnetd_config.h` + `kernel/src/telnetd_config.c`
+  (Phase 3) — `/etc/telnetd.conf` parser
+- ✅ `kernel/include/telnetd_autostart.h` +
+  `kernel/src/telnetd_autostart.c` (Phase 3) — boot-time hook
 - ✅ `kernel/tests/test_shell_session.c` — Session + shell_io unit tests (22 tests)
-- ☐ `kernel/tests/test_telnetd_config.c` (Phase 3) — Config parser tests
+- ✅ `kernel/tests/test_telnetd_config.c` (Phase 3) — Config parser tests (15 tests)
 
 ---
 

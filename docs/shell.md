@@ -6,11 +6,12 @@ connections over TCP so multiple users (or a user + a script) can
 share the same instance.
 
 **Status:** Implemented. Multi-session (TCP) support: Plans §1 + §2
-complete (see `docs/multi-session-shell-plan.md`) — both `nc
-localhost 2323` and `telnet localhost 2323` work. Telnet-specific
-features (IAC negotiation, NAWS window size, TERMINAL-TYPE, IAC IP
-for Ctrl+C) are implemented; daemon control (§3) and SSH (§4 /
-#199) are deferred.
++ §3 complete (see `docs/multi-session-shell-plan.md`). Both `nc
+localhost 2323` and `telnet localhost 2323` work with proper telnet
+IAC negotiation, per-session state, boot-time autostart (via
+`/etc/telnetd.conf` or the `NET_TELNETD_AUTOSTART` build flag),
+and Lua scripting hooks (`slm.telnetd_*`). SSH (§4 / #199) is
+deferred.
 
 ---
 
@@ -122,9 +123,12 @@ Available commands:
 | `ifconfig dhcp` | Enable DHCP |
 | `ifconfig <ip> <mask> <gw>` | Set static IP configuration |
 | `netstat` | Show network TX/RX statistics |
-| `tcpsh start [port]` | Start the TCP shell listener (default port 2323) |
-| `tcpsh stop` | Stop the listener (existing sessions keep running) |
-| `tcpsh status` | Show listener state, port, and session counts |
+| `telnetd start [port]` | Start the TCP shell listener (default port 2323) |
+| `telnetd stop` | Stop the listener (existing sessions keep running) |
+| `telnetd status` | Show listener state, port, and session counts |
+| `telnetd sessions` | List active sessions (id, peer ip/port, age) |
+| `telnetd kick <id>` | Force-disconnect a session by id |
+| `tcpsh ...` | Deprecated alias for `telnetd`; same behaviour |
 | `sched` | Show current scheduler policy name |
 | `sched policy` | List all registered scheduling policies |
 | `sched policy <name>` | Switch to a named scheduling policy |
@@ -585,19 +589,20 @@ hardware validation report.
 
 ## Multi-Session Shell
 
-The same REPL serves the physical UART and TCP clients. Plans §1–§2
+The same REPL serves the physical UART and TCP clients. Plans §1–§3
 of `docs/multi-session-shell-plan.md` cover the architecture.
 Phase 1 landed the TCP backend + REPL plumbing; Phase 2 added the
-telnet IAC state machine so standard `telnet` clients work cleanly.
-Phase 3 (daemon control) and Phase 4 (SSH, #199) are deferred.
+telnet IAC state machine; Phase 3 wraps it in a `telnetd`-style
+daemon with config file, autostart, and Lua bindings. Phase 4
+(SSH, #199) is deferred.
 
 ### Bringing up TCP sessions
 
 ```
-slmos> net init           # enable lwIP + DHCP
-slmos> tcpsh start         # listen on 0.0.0.0:2323
+slmos> net init              # enable lwIP + DHCP
+slmos> telnetd start          # listen on 0.0.0.0:2323
 [TCPSH] Listening on 0.0.0.0:2323 (unauthenticated — trusted networks only)
-tcpsh: listening on port 2323
+telnetd: listening on port 2323
 
 # From the host, either nc or telnet works:
 $ telnet 127.0.0.1 2323
@@ -610,8 +615,12 @@ Type 'help' for available commands.
 
 slmos> pwd
 /
-slmos> tcpsh status
-tcpsh: running on port 2323 — accepted=1 active=1 max=2
+slmos> telnetd status
+telnetd: running on port 2323 — accepted=1 active=1 max=2
+slmos> telnetd sessions
+   ID  Peer IP          Port  Connected
+  ---  ---------------  ----  ---------
+    1  10.0.2.2         40876  5 s
 ```
 
 The QEMU Makefile binds `hostfwd=tcp:127.0.0.1:2323-:2323` so the
@@ -665,12 +674,58 @@ submit once; bare LF (raw nc) still works.
   (`ls`, `mem`, `tasks`) skip the lock. See `.mutates` in each
   command-table entry.
 
+### Daemon control (§3)
+
+The `telnetd` command is the operator interface; `tcpsh` is kept
+as a deprecated alias. Subcommands:
+
+| Subcommand | Effect |
+|---|---|
+| `telnetd start [port]` | Start the listener. Default port 2323. |
+| `telnetd stop` | Stop accepting; existing sessions run to EOF. |
+| `telnetd status` | Running? Port, accepted-count, active, max. |
+| `telnetd sessions` | Table of active sessions with peer + age. |
+| `telnetd kick <id>` | Force-disconnect; session exits on next read. |
+
+### Autostart and `/etc/telnetd.conf`
+
+Build with `cmake -DNET_TELNETD_AUTOSTART=ON` to start `telnetd` at
+boot. A `/etc/telnetd.conf` in the VFS can flip that on/off at
+runtime and tune the settings:
+
+```
+# /etc/telnetd.conf — flat key=value
+enabled=true
+port=2323
+bind=0.0.0.0
+max_sessions=2
+```
+
+Unknown keys and malformed lines are logged + counted but do not
+stop parsing. Missing file → use the compile-time default.
+
+### Lua bindings
+
+```lua
+slm.telnetd_start(2323)            -- returns rc (0 on success)
+slm.telnetd_stop()                 -- returns true if was running
+local s = slm.telnetd_status()      -- { running, port, accepted, active, max }
+for _, sess in ipairs(slm.telnetd_sessions()) do
+    print(sess.id, sess.peer_ip, sess.peer_port, sess.connected_at)
+end
+slm.telnetd_kick(1)                 -- returns true if found
+```
+
+Flat namespace (`slm.telnetd_*`) to match the project's existing
+binding convention.
+
 ### Security
 
 Raw TCP has **no authentication** and **no encryption**. The QEMU
-hostfwd binds to `127.0.0.1` only, and `tcpsh` never auto-starts —
-the operator must invoke it explicitly. Do not expose the port on
-untrusted networks until Phase 4 SSH (#199) lands.
+hostfwd binds to `127.0.0.1` only, and telnetd does not auto-start
+unless explicitly enabled via `NET_TELNETD_AUTOSTART=ON` or
+`/etc/telnetd.conf`. Do not expose the port on untrusted networks
+until Phase 4 SSH (#199) lands.
 
 ---
 

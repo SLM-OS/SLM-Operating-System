@@ -36,6 +36,7 @@
 #include "lwip/tcp.h"
 #include "lwip/err.h"
 #include "lwip/pbuf.h"
+#include "arch/sys_arch.h"   /* sys_now() for connected_at timestamp */
 
 /* Per-direction buffer size. Must be a power of two. 4 KB matches
  * Plan §1.7's resource-limit budget. */
@@ -86,6 +87,13 @@ struct tcp_shell_ctx {
 
     /* lwIP pcb — net_pump context only. NULL after close. */
     struct tcp_pcb   *pcb;
+
+    /* Peer + timing info captured in shell_io_tcp_create. Read-only
+     * after that. Used by telnetd sessions / kick for diagnostics. */
+    uint32_t          peer_ip;        /* network byte order */
+    uint16_t          peer_port;
+    uint32_t          connected_at;   /* sys_now() at accept time */
+    uint32_t          session_id;     /* mirror of sess->id for iteration without deref */
 
     /* Associated shell_session — populated after shell_io_tcp_create
      * by the tcp_shell_server accept path. Lets the telnet parser
@@ -442,8 +450,12 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
         return NULL;
     }
 
-    ctx->pcb     = pcb;
-    ctx->session = NULL;   /* Populated later by shell_io_tcp_attach_session. */
+    ctx->pcb          = pcb;
+    ctx->session      = NULL;   /* Populated later by shell_io_tcp_attach_session. */
+    ctx->peer_ip      = pcb->remote_ip.addr;
+    ctx->peer_port    = pcb->remote_port;
+    ctx->connected_at = sys_now();
+    ctx->session_id   = 0;      /* Populated by shell_io_tcp_attach_session. */
 
     ctx->io.read_char     = tcp_read_char;
     ctx->io.try_read_char = tcp_try_read_char;
@@ -478,7 +490,8 @@ void shell_io_tcp_attach_session(struct shell_io *io, struct shell_session *s)
 {
     if (!io) return;
     struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
-    ctx->session = s;
+    ctx->session    = s;
+    ctx->session_id = s ? s->id : 0;
 }
 
 void shell_io_tcp_destroy(struct shell_io *io)
@@ -510,6 +523,52 @@ uint32_t shell_io_tcp_active_count(void)
         if (ctx_pool[i].in_use) n++;
     }
     return n;
+}
+
+void shell_io_tcp_foreach(tcp_session_visitor_t visitor, void *user_ctx)
+{
+    if (!visitor) return;
+    for (uint32_t i = 0; i < MAX_TCP_SHELL_SESSIONS; i++) {
+        struct tcp_shell_ctx *ctx = &ctx_pool[i];
+        /* Snapshot under pool_lock so a concurrent ctx_alloc / ctx_free
+         * can't flip in_use mid-read. The snapshot fields are all
+         * scalars, so a consistent set comes out of the locked region. */
+        irq_flags_t flags = spin_lock_irqsave(&pool_lock);
+        bool active = ctx->in_use && !ctx->closed;
+        struct tcp_session_info info = {0};
+        if (active) {
+            info.session_id   = ctx->session_id;
+            info.peer_ip      = ctx->peer_ip;
+            info.peer_port    = ctx->peer_port;
+            info.connected_at = ctx->connected_at;
+        }
+        spin_unlock_irqrestore(&pool_lock, flags);
+
+        if (active) {
+            if (!visitor(&info, user_ctx)) {
+                return;
+            }
+        }
+    }
+}
+
+bool shell_io_tcp_kick(uint32_t session_id)
+{
+    for (uint32_t i = 0; i < MAX_TCP_SHELL_SESSIONS; i++) {
+        struct tcp_shell_ctx *ctx = &ctx_pool[i];
+        irq_flags_t flags = spin_lock_irqsave(&pool_lock);
+        bool match = ctx->in_use && ctx->session_id == session_id;
+        spin_unlock_irqrestore(&pool_lock, flags);
+        if (!match) continue;
+
+        /* Close the session: shell_read_line will return -1 on its
+         * next read once the RX ring drains, the REPL exits, and the
+         * normal teardown path takes over. We do NOT set shell_done
+         * here — that's the shell task's responsibility. */
+        mark_closed(ctx);
+        return true;
+    }
+    return false;
 }
 
 void shell_io_tcp_poll(void)

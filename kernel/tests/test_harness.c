@@ -111,6 +111,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_shell_session();
 #if defined(ENABLE_NETWORKING)
     total_failures += test_suite_telnet();
+    total_failures += test_suite_telnetd_config();
 #endif
     total_failures += test_suite_pmm();
 #if !defined(PLATFORM_X86_64)
