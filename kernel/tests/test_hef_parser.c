@@ -631,6 +631,104 @@ static void test_decode_tensor_shape_ignores_unknown_field(void)
     TEST_ASSERT_EQUAL_UINT32(42, info.pads[0].index);
 }
 
+/*
+ * Build a ProtoHEFHef blob whose single tensor_shape sub-message has
+ * `shape_bytes` as its body, wrapped in the NG/Op/Pad chain. Shared
+ * harness for the three unknown-wire-type skip tests below.
+ */
+static size_t wrap_tensor_shape_body(uint8_t *out, size_t cap,
+                                     const uint8_t *shape_bytes,
+                                     size_t shape_len)
+{
+    uint8_t pad[64];
+    size_t  pad_len = 0;
+    emit_varint_field(pad, &pad_len, 1, 1);  /* pad index */
+    emit_lenprefix(pad, &pad_len, 6, shape_bytes, shape_len);
+
+    uint8_t op[128];
+    size_t  op_len = 0;
+    emit_lenprefix(op, &op_len, 2, pad, pad_len);  /* input_pads */
+
+    uint8_t ng[256];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 8, op, op_len);    /* ops */
+
+    size_t olen = 0;
+    (void)cap;
+    emit_lenprefix(out, &olen, 2, ng, ng_len);     /* network_groups */
+    return olen;
+}
+
+static void test_decode_tensor_shape_skips_fixed64_unknown_field(void)
+{
+    /* Future tag=7 field with wire_type=1 (fixed64, 8 B payload)
+     * sandwiched between known height and features. Both knowns
+     * must survive the skip. */
+    uint8_t shape[32];
+    size_t  slen = 0;
+    emit_varint_field(shape, &slen, 1, 64);            /* height */
+    emit_tag(shape, &slen, /*field*/ 7, /*wire_type*/ 1);
+    /* 8 bytes of arbitrary payload. */
+    for (int i = 0; i < 8; i++) shape[slen++] = (uint8_t)(0x11 * i);
+    emit_varint_field(shape, &slen, 5, 3);             /* features */
+
+    uint8_t blob[256];
+    size_t  olen = wrap_tensor_shape_body(blob, sizeof(blob), shape, slen);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(64, info.pads[0].height);
+    TEST_ASSERT_EQUAL_UINT32(3,  info.pads[0].features);
+}
+
+static void test_decode_tensor_shape_skips_fixed32_unknown_field(void)
+{
+    /* Future tag=7 field with wire_type=5 (fixed32, 4 B payload)
+     * sandwiched between known width and padded_features. */
+    uint8_t shape[32];
+    size_t  slen = 0;
+    emit_varint_field(shape, &slen, 3, 224);           /* width */
+    emit_tag(shape, &slen, /*field*/ 7, /*wire_type*/ 5);
+    /* 4 bytes of arbitrary payload. */
+    shape[slen++] = 0xDE;
+    shape[slen++] = 0xAD;
+    shape[slen++] = 0xBE;
+    shape[slen++] = 0xEF;
+    emit_varint_field(shape, &slen, 6, 8);             /* padded_features */
+
+    uint8_t blob[256];
+    size_t  olen = wrap_tensor_shape_body(blob, sizeof(blob), shape, slen);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(224, info.pads[0].width);
+    TEST_ASSERT_EQUAL_UINT32(8,   info.pads[0].padded_features);
+}
+
+static void test_decode_tensor_shape_rejects_group_wire_type(void)
+{
+    /* Wire type 3 is the deprecated proto2 "start group" marker. No
+     * modern Hailo HEF should use it; the decoder must reject the
+     * message rather than try to interpret groups. */
+    uint8_t shape[16];
+    size_t  slen = 0;
+    emit_varint_field(shape, &slen, 1, 42);            /* height */
+    emit_tag(shape, &slen, /*field*/ 7, /*wire_type*/ 3);
+    /* No payload needed — the decoder rejects as soon as it sees
+     * the wire type. */
+
+    uint8_t blob[256];
+    size_t  olen = wrap_tensor_shape_body(blob, sizeof(blob), shape, slen);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE,
+                          hef_parse_body(blob, olen, &info));
+}
+
 static void test_decode_tensor_shape_skips_non_varint_unknown_field(void)
 {
     /* Companion to the varint-unknown test: a future non-varint
@@ -736,6 +834,9 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_tensor_shape_rejects_oversize_dim);
     RUN_TEST(test_decode_tensor_shape_ignores_unknown_field);
     RUN_TEST(test_decode_tensor_shape_skips_non_varint_unknown_field);
+    RUN_TEST(test_decode_tensor_shape_skips_fixed64_unknown_field);
+    RUN_TEST(test_decode_tensor_shape_skips_fixed32_unknown_field);
+    RUN_TEST(test_decode_tensor_shape_rejects_group_wire_type);
     RUN_TEST(test_decode_pad_name_truncation);
 
     return UnityEnd();
