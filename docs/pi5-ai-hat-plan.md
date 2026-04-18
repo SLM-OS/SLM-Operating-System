@@ -14,11 +14,11 @@
 | 3 — Hailo driver scaffolding | ✅ done (software) | `kernel/ai_accel/hailo/` + mocked-ops tests; probe/boot/FW-upload need hardware |
 | 4 — nanopb + `.hef` parser | ✅ partial | nanopb vendored (0.4.9.1) + `.hef` outer-header validator + smoke tests; full `ProtoHEFHef` decode deferred until a real `.hef` is available |
 | 5.1 — HEF tensor metadata | ✅ done | I/O pad shapes captured from the first NG |
-| 5.2 — Control-channel RPC transport | ✅ tier-1 (2026-04-18) | IDENTIFY round-trip verified on pi-5-1 (`firmware 4.23.536870912`); remaining opcodes (WRITE/READ_MEMORY, CONFIG_STREAM) use the same transport |
-| 5.3 — hailo_load + weight DMA | ☐🔗 hardware-gated | builds on Phase 5.2 transport; adds WRITE_MEMORY + CONFIG_STREAM opcodes |
+| 5.2 — Control-channel RPC transport | ✅ tier-1 + tier-2 (2026-04-18) | IDENTIFY + WRITE_MEMORY + READ_MEMORY round-tripped on pi-5-1; `hailo peek/poke` wired; only CONFIG_STREAM opcode remains |
+| 5.3 — hailo_load + weight DMA | ☐🔗 hardware-gated | adds CONFIG_STREAM + tensor-buffer allocator |
 | 5.4 — Inference submit + `hailo infer` | ☐🔗 hardware-gated | requires Phase 5.3 |
 | 6 — AI scheduler Hailo policy | ☐🔗 hardware-gated | requires Phase 5.3/5.4 |
-| 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe` / `hailo boot` / `hailo fw` shell commands wired, last now returns real firmware version |
+| 7 — Shell / demo polish | ☐🔗 hardware-gated | `hailo probe/boot/fw/peek/poke` wired; `hailo load <path>` prints HEF metadata |
 
 ---
 
@@ -269,12 +269,16 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - `hailo load <path>` now prints per-pad lines like `in pad[0] "input_layer1" shape=224x224x3 (padded 224x224x4)`.
 - Seven new `test_hef_parser.c` tests cover: pad-with-shape decode, multi-pad ordering, truncation, no-shape pad, NMS-branch skip, second-NG pad isolation, pad-name truncation.
 
-#### Phase 5.2: Control-channel RPC transport ✅ tier-1 (2026-04-18, hardware-verified)
+#### Phase 5.2: Control-channel RPC transport ✅ tier-1 + tier-2 (2026-04-18, hardware-verified)
 
-- `kernel/ai_accel/hailo/hailo_control.{c,h}` implements the HailoRT control-channel wire protocol — MD5-stamped request/response over BAR4 with a BCS_ISTATUS_HOST SW_IRQ completion. First opcode wired is `IDENTIFY` (empty payload, response carries firmware version + board metadata), enough to prove every piece of the transport is correct.
-- Hardware proof: `hailo fw` on pi-5-1 returns `firmware 4.23.536870912` (0x20000000), matching the boot-log fingerprint across three consecutive runs.
-- Four non-obvious wire-format gotchas surfaced during bring-up and are recorded in `docs/reference/hailo-driver-notes.md` and the `hailo_control_wire_gotchas` auto-memory: big-endian header scalars, IMASK-before-ISTATUS unmask, FW_CONTROL-bit-specific polling, and the 4-byte `parameter_count` gap between response header and body (plus `__packed` on the body struct).
-- Seven QEMU-mocked tests in `test_hailo.c` cover the transport (`test_control_identify_*`) — happy path, null arg, wrong state, timeout-no-response, full BE request wire format, IMASK-once arming, ignore-non-FW_CONTROL-IRQ.
+- `kernel/ai_accel/hailo/hailo_control.{c,h}` implements the HailoRT control-channel wire protocol — MD5-stamped request/response over BAR4 with a BCS_ISTATUS_HOST SW_IRQ completion.
+- **Tier-1 (IDENTIFY)**: empty-payload request, response carries firmware version + board metadata. Proved every piece of the transport.
+- **Tier-2 (WRITE_MEMORY + READ_MEMORY)**: parameterized address/length opcodes with 1 KB chunking that matches HailoRT's `CONTROL__MAX_WRITE_MEMORY_CHUNK_SIZE`. Shell bindings `hailo peek <addr> [len]` and `hailo poke <addr> <u32>` exercise both.
+- Hardware proof:
+  - IDENTIFY — `hailo fw` on pi-5-1 returns `firmware 4.23.536870912` (0x20000000), matching the boot-log fingerprint across three consecutive runs.
+  - WRITE/READ_MEMORY — both opcodes round-trip against pi-5-1 firmware with correct BE wire format and response parsing; firmware returns `major_status=0x40000058` for arbitrary-address access without an active stream context (expected HailoRT behavior — these opcodes are only used from within context-switch / CCW-upload flows).
+- Four non-obvious wire-format gotchas surfaced during bring-up and are recorded in `docs/reference/hailo-driver-notes.md` §4.5 and the `hailo_control_wire_gotchas` auto-memory: big-endian header scalars, IMASK-before-ISTATUS unmask, FW_CONTROL-bit-specific polling, and the 4-byte `parameter_count` gap between response header and body (plus `__packed` on the body struct).
+- 15 QEMU-mocked tests in `test_hailo.c` cover the transport — 7 IDENTIFY cases (`test_control_identify_*`) plus 8 WRITE/READ_MEMORY cases (`test_control_{write,read}_memory_*`, `test_control_memory_{round_trip,chunks_large_transfer}`). The mock has a 4 KB smart backing store that simulates firmware memory so WRITE pattern → READ back round-trips can be asserted locally.
 
 #### Phase 5.3: `hailo_load` with weight DMA ☐🔗 hardware
 

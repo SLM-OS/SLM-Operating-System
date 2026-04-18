@@ -87,11 +87,20 @@
  * kernel learns to send them. */
 enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_IDENTIFY       = 0x00,
-    /* HAILO_CONTROL_OPCODE_WRITE_MEMORY = 0x01, (Phase 5.2 — CCW) */
-    /* HAILO_CONTROL_OPCODE_READ_MEMORY  = 0x02, (Phase 5.2)       */
-    /* HAILO_CONTROL_OPCODE_CONFIG_STREAM = 0x03, (Phase 5.2)      */
-    /* Full table in docs/reference/hailort-control-protocol.h.    */
+    HAILO_CONTROL_OPCODE_WRITE_MEMORY   = 0x01,
+    HAILO_CONTROL_OPCODE_READ_MEMORY    = 0x02,
+    /* HAILO_CONTROL_OPCODE_CONFIG_STREAM = 0x03, (Phase 5.3+)     */
+    /* Full table in docs/reference/hailort-control-protocol.h.   */
 };
+
+/*
+ * WRITE_MEMORY and READ_MEMORY are chunked at the HailoRT level;
+ * a single control request can carry at most 1024 bytes of data.
+ * The kernel-level write/read helpers split larger transfers
+ * transparently. Matches CONTROL__MAX_WRITE_MEMORY_CHUNK_SIZE in
+ * hailort-control.hpp:26.
+ */
+#define HAILO_CONTROL_MAX_MEMORY_CHUNK 1024u
 
 /*
  * Common header shared by request and response. Byte-level layout
@@ -213,10 +222,36 @@ int hailo_control_send_recv(const void *req_payload,
                             uint32_t    timeout_us);
 
 /*
- * High-level helpers. Currently just IDENTIFY; more land as
- * needed.
+ * High-level helpers.
  */
 int hailo_control_identify(struct hailo_control_identify_response *out);
+
+/*
+ * Write `data_length` bytes from `data` into firmware memory at
+ * device-side `address`. Transfers larger than
+ * HAILO_CONTROL_MAX_MEMORY_CHUNK are split internally into 1 KB
+ * chunks matching HailoRT's write_memory_chunk loop.
+ *
+ * Returns HAILO_OK on full success, HAILO_ERR_INVAL on null/zero
+ * args, or the first propagated error from the transport if a
+ * chunk fails mid-flight (earlier chunks may have already been
+ * committed on the device — callers who need all-or-nothing
+ * semantics must implement that on top).
+ */
+int hailo_control_write_memory(uint32_t address,
+                               const void *data,
+                               uint32_t data_length);
+
+/*
+ * Read `data_length` bytes from firmware memory at device-side
+ * `address` into `data`. Same chunking rules as write_memory.
+ *
+ * Returns HAILO_OK, HAILO_ERR_INVAL, HAILO_ERR_TIMEOUT (firmware
+ * did not respond), or HAILO_ERR_BAD_FIRMWARE (short response).
+ */
+int hailo_control_read_memory(uint32_t address,
+                              void *data,
+                              uint32_t data_length);
 
 /*
  * Reset internal control-channel state (sequence counter and the

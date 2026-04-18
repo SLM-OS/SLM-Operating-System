@@ -2,12 +2,16 @@
  * hailo_shell.c — `hailo` shell command.
  *
  * Usage:
- *   hailo          — dump driver state, IDs, BAR map.
- *   hailo probe    — re-run hailo_probe and print the result.
- *   hailo boot     — upload embedded firmware and bring the NPU to RUNNING.
- *   hailo load P   — read a `.hef` model at VFS path P and dump metadata.
- *   hailo fw       — report firmware version (post-boot only).
- *   hailo cfgdump  — (Pi 5 only) raw 64-byte bus 1 config dump.
+ *   hailo                  — dump driver state, IDs, BAR map.
+ *   hailo probe            — re-run hailo_probe and print the result.
+ *   hailo boot             — upload embedded firmware and bring NPU to RUNNING.
+ *   hailo load P           — read a `.hef` model at VFS path P, dump metadata.
+ *   hailo fw               — report firmware version (post-boot only).
+ *   hailo peek A [N]       — READ_MEMORY N bytes (default 16, max 64) at
+ *                            device-side address A; hex-dump.
+ *   hailo poke A V         — WRITE_MEMORY a single 32-bit value V at
+ *                            device-side address A (little-endian).
+ *   hailo cfgdump          — (Pi 5 only) raw 64-byte bus 1 config dump.
  *
  * Safe to run on any platform. On non-RASPI5 builds the driver is
  * never installed (stub returns -ENODEV) so `hailo` just reports
@@ -15,6 +19,7 @@
  */
 
 #include "hailo.h"
+#include "hailo_control.h"
 #include "hef_header.h"
 #include "hef_parser.h"
 #include "pmm.h"
@@ -23,6 +28,29 @@
 #include "vfs.h"
 #include <stdint.h>
 #include <string.h>
+
+/* Tiny hex parser for the peek/poke shell commands. Accepts an
+ * optional "0x" / "0X" prefix, returns 0 on success and the parsed
+ * value in *out. Returns -1 if the string is empty, a digit is
+ * invalid, or the accumulated value would overflow 32 bits. */
+static int parse_hex_u32(const char *s, uint32_t *out)
+{
+    if (!s || !*s) return -1;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    if (!*s) return -1;
+    uint32_t v = 0;
+    for (; *s; s++) {
+        uint32_t d;
+        if (*s >= '0' && *s <= '9')      d = (uint32_t)(*s - '0');
+        else if (*s >= 'a' && *s <= 'f') d = (uint32_t)(*s - 'a' + 10);
+        else if (*s >= 'A' && *s <= 'F') d = (uint32_t)(*s - 'A' + 10);
+        else return -1;
+        if (v > 0x0FFFFFFFu) return -1;   /* would shift MSB out */
+        v = (v << 4) | d;
+    }
+    *out = v;
+    return 0;
+}
 
 /*
  * Firmware blob linked in at build time via the CMake HAILO_FW_BLOB
@@ -245,6 +273,69 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    if (argc >= 3 && strcmp(argv[1], "peek") == 0) {
+        /* `hailo peek <addr> [<len>]` — READ_MEMORY on the running
+         * firmware at device-side address `addr` for `len` bytes
+         * (default 16). Output is hex bytes on one line. */
+        uint32_t addr = 0;
+        if (parse_hex_u32(argv[2], &addr) != 0) {
+            shell_printf("hailo: peek: invalid address '%s' "
+                         "(expected 0xNNNN)\n", argv[2]);
+            return 0;
+        }
+        uint32_t len = 16;
+        if (argc >= 4 && parse_hex_u32(argv[3], &len) != 0) {
+            shell_printf("hailo: peek: invalid length '%s'\n", argv[3]);
+            return 0;
+        }
+        if (len == 0 || len > 64) {
+            shell_printf("hailo: peek: length %u out of range (1..64)\n", len);
+            return 0;
+        }
+        uint8_t buf[64];
+        int rc = hailo_control_read_memory(addr, buf, len);
+        if (rc != HAILO_OK) {
+            shell_printf("hailo: peek failed (%d)\n", rc);
+            return 0;
+        }
+        shell_printf("hailo: [0x%08x] =", addr);
+        for (uint32_t i = 0; i < len; i++) {
+            shell_printf(" %02x", buf[i]);
+        }
+        shell_puts("\n");
+        return 0;
+    }
+
+    if (argc >= 4 && strcmp(argv[1], "poke") == 0) {
+        /* `hailo poke <addr> <hex-u32>` — WRITE_MEMORY a single 32-bit
+         * word at device-side `addr`. Minimal path for round-trip
+         * verification from the shell; larger writes are programmatic.
+         * Value is written little-endian (matches how firmware memcpys
+         * raw bytes; HailoRT does the same). */
+        uint32_t addr = 0, value = 0;
+        if (parse_hex_u32(argv[2], &addr) != 0) {
+            shell_printf("hailo: poke: invalid address '%s'\n", argv[2]);
+            return 0;
+        }
+        if (parse_hex_u32(argv[3], &value) != 0) {
+            shell_printf("hailo: poke: invalid value '%s'\n", argv[3]);
+            return 0;
+        }
+        uint8_t bytes[4] = {
+            (uint8_t)(value & 0xFF),
+            (uint8_t)((value >>  8) & 0xFF),
+            (uint8_t)((value >> 16) & 0xFF),
+            (uint8_t)((value >> 24) & 0xFF),
+        };
+        int rc = hailo_control_write_memory(addr, bytes, sizeof(bytes));
+        if (rc != HAILO_OK) {
+            shell_printf("hailo: poke failed (%d)\n", rc);
+            return 0;
+        }
+        shell_printf("hailo: wrote 0x%08x to [0x%08x]\n", value, addr);
+        return 0;
+    }
+
     /* Default: one-line status. */
     shell_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
     return 0;
@@ -253,7 +344,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name    = "hailo",
     .handler = cmd_hailo,
-    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, cfgdump)",
+    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek <addr> [len], poke <addr> <u32>, cfgdump)",
     .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
 };
 
