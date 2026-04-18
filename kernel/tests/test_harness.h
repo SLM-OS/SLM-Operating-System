@@ -92,6 +92,9 @@ int test_suite_littlefs(void);
 /* Networking tests (QEMU only) */
 int test_suite_net(void);
 
+/* USB core tests (platform-neutral; Phase 1 of #266) */
+int test_suite_usb_core(void);
+
 /* Lua scripting tests */
 int test_suite_lua(void);
 

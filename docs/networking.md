@@ -683,6 +683,49 @@ QEMU_NET := -device virtio-net-device,netdev=net0 \
 | Raspberry Pi 5 | Not implemented | — | Requires RP1 gigabit Ethernet driver |
 | Jetson Orin Nano | Not implemented | — | Requires Realtek/Intel NIC driver |
 
+### USB networking (Jetson, work in progress)
+
+A USB-based network path for Jetson is tracked in #266 and scoped in
+[`docs/jetson-usb-networking-plan.md`](jetson-usb-networking-plan.md).
+The plan's Phase 0 CBB probe (commit `5d282b1`) confirmed that the
+Tegra234 XHCI host aperture at `0x03610000` is reachable from NS EL2
+post-kexec — clock-gated rather than firewalled — so Option A (XHCI
+host + CDC-ECM USB-A dongle) is viable.
+
+**Phase 1** landed a platform-neutral USB core:
+
+- `kernel/include/usb.h` — `struct usb_device`, `struct usb_urb`,
+  `struct usb_hcd` ops table, standard descriptor layouts, and
+  standard request constants.
+- `kernel/usb/core/usb_core.c` — HCD registration, URB
+  submit / wait / cancel, descriptor parser (skips alternate
+  settings != 0 and class-specific descriptors), and the 10-step
+  root-port enumeration state machine (port reset → GET_DESCRIPTOR
+  stub → SET_ADDRESS → full descriptor → config tree → parse →
+  SET_CONFIGURATION → endpoint_configure).
+- `kernel/tests/test_usb_core.c` — 37 unit tests against a mock HCD:
+  URB lifecycle, URB cancel on a pending transfer, URB submit-wait
+  timeout (deferred control + cancel-on-expiry), descriptor parse
+  (valid, too-short input, invalid header, bad-bLength config
+  header, orphan endpoint, alt-setting skip, interface-table
+  overflow, endpoint-table overflow), full enumeration plus every
+  error-injection branch (port reset failure, device open failure,
+  SET_CONFIGURATION failure, endpoint_configure failure, generic
+  control-msg failure), device_close symmetry (fires on every
+  post-open error, does NOT fire when port_reset or device_open
+  failed), speed propagation, return-code contract (HCDs returning
+  a positive status-enum value are normalised to -USB_URB_IO_ERROR),
+  and the null-HCD / null-URB guards.
+
+The core compiles on every platform (QEMU, Pi 5, Jetson, x86-64);
+HCD drivers that register against it are gated per-platform. The
+mock HCD has no hardware dependency, so `make test` runs the full
+suite on the host QEMU build.
+
+Phases 2-5 will add the CDC-ECM class driver, the XHCI host driver
+(`kernel/drivers/usb/xhci/`), the `net_driver` glue, and the
+reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
+
 ### Build-Time Configuration
 
 Networking is gated behind the `ENABLE_NETWORKING` CMake option, which
@@ -881,6 +924,50 @@ on both ARM64 MMIO and x86-64 PCI paths):
 | `test_net_msix_handler_drains_tx` | Direct handler invocation bumps `virtio_net_pci_get_irq_count()` and drains the TX used ring (#204 item 3) |
 | `test_net_mmio_watchdog_quiet` / `test_net_pci_watchdog_quiet` | Watchdog stays silent on normal TX burst + drain (#204 item 4) |
 | `test_net_mmio_watchdog_fires_on_stall` / `test_net_pci_watchdog_fires_on_stall` | Synthetic trigger bumps the stall counter exactly once (#204 item 4) |
+
+**Tier 4 — USB core against a mock HCD** (`kernel/tests/test_usb_core.c`,
+runs on every platform the test harness builds for — the mock HCD has
+no hardware dependency):
+
+| Test | Description |
+|------|-------------|
+| `test_urb_status_strings` | `usb_urb_status_str` handles every enum value plus a bad value |
+| `test_hcd_registration` | `usb_core_register_hcd` / `usb_core_get_hcd` round-trip |
+| `test_start_and_enumerate` | Happy-path boot → enumeration → CONFIGURED |
+| `test_enumerate_no_device` | Empty root port leaves `usb_core_first_device()` NULL |
+| `test_enumerate_speed_low_propagates` | Reported port speed is recorded on `dev->speed` |
+| `test_enumerate_port_reset_failure` | `port_reset != 0` bails before SET_ADDRESS |
+| `test_enumerate_device_open_failure` | `device_open != 0` bails before any control transfer |
+| `test_enumerate_set_config_failure` | SET_CONFIGURATION failure leaves the device un-exposed |
+| `test_enumerate_endpoint_configure_failure` | `endpoint_configure != 0` unwinds the enumeration |
+| `test_enumerate_control_failure` | Early GET_DESCRIPTOR failure bails without addressing |
+| `test_enumerate_resets_previous_device` | Failed re-enumerate must clear stale `first_device()` |
+| `test_descriptor_parse` | End-to-end parse populates ifaces + endpoints correctly |
+| `test_find_endpoint_direction_filter` | IN vs OUT selection works on a mixed-direction interface |
+| `test_find_endpoint_mismatch` | Missing ep / unknown iface / NULL dev return NULL |
+| `test_descriptor_parse_invalid_header` | Non-CONFIGURATION top-level descriptor rejected |
+| `test_descriptor_parse_too_short` | Undersized blob rejected without crashing |
+| `test_descriptor_parse_bad_config_blength` | Config header with `bLength != 9` rejected before `p` advances |
+| `test_descriptor_parse_oversized_rejected` | `raw_config_len > sizeof(raw_config)` rejected (prevents OOB walker read) |
+| `test_descriptor_parse_exact_cap_accepted` | `raw_config_len == sizeof(raw_config)` accepted (off-by-one guard on the cap) |
+| `test_hcd_reregister_same_is_silent` | Re-registering the same HCD pointer and clearing via NULL both stay silent — only a genuine two-HCD fight warns |
+| `test_descriptor_parse_interface_overflow` | More than `USB_MAX_INTERFACES_PER_DEV` interfaces: first N accepted, rest dropped without smearing their endpoints onto earlier interfaces |
+| `test_descriptor_parse_endpoint_overflow` | More than `USB_MAX_ENDPOINTS_PER_DEV` endpoints: first N accepted, rest dropped |
+| `test_descriptor_parse_orphan_endpoint` | Endpoint before any interface is skipped |
+| `test_cancel_pending_urb` | Deferred URB → `usb_cancel_urb` → status CANCELLED |
+| `test_cancel_with_no_hcd` | `usb_cancel_urb` returns `-USB_URB_IO_ERROR` for missing HCD / NULL URB |
+| `test_submit_urb_no_hcd` | Graceful failure with negative return when no HCD is registered |
+| `test_submit_urb_null_args` | NULL urb / NULL dev rejected without dereference |
+| `test_submit_urb_hcd_positive_normalized` | HCD returning positive status-enum value is normalised to `-USB_URB_IO_ERROR` (contract shield) |
+| `test_poll_no_hcd_is_safe` | `usb_core_poll` is a no-op with no HCD |
+| `test_poll_calls_hcd` | `usb_core_poll` dispatches to `hcd->poll` every call |
+| `test_control_msg_timeout` | Deferred control URB → `usb_wait_urb` times out, cancels, and returns `-USB_URB_TIMEOUT` |
+| `test_enumerate_closes_device_on_control_failure` | Post-open control failure fires `hcd->device_close` exactly once |
+| `test_enumerate_closes_device_on_set_config_failure` | Deep-pipeline SET_CONFIGURATION failure fires `hcd->device_close` |
+| `test_enumerate_no_close_on_port_reset_failure` | Pre-open port_reset failure does NOT call `device_close` (nothing to release) |
+| `test_enumerate_no_close_on_device_open_failure` | Failed `device_open` does NOT call `device_close` (HCD owns its own partial state) |
+| `test_control_msg_returns_actual_length` | `usb_control_msg` returns bytes transferred on success |
+| `test_control_msg_unknown_request_returns_error` | Unknown request → negative return |
 
 Run tests with:
 

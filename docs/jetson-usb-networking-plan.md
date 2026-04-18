@@ -5,7 +5,19 @@ Nano. **Option A (USB-A host port + CDC-ECM dongle)** is the primary
 target. **Option B (USB-C device mode + CDC-ECM gadget)** is a fallback
 only pursued if the Phase 0 CBB probes rule Option A out.
 
-**Status:** Planning — no code written. Tracked in [#266](https://github.com/SLM-OS/SLM-Operating-System/issues/266).
+**Status:** Phase 0 complete (Option A chosen); Phase 1 scaffolding landed
+on `feature/usb-networking-phase0`. Tracked in
+[#266](https://github.com/SLM-OS/SLM-Operating-System/issues/266). Per-phase
+status lives in §7; outcomes from the Phase 0 decision gate are in §3.
+
+| Phase | Status | Notes |
+|---|---|---|
+| 0 — CBB probe | ✅ done (2026-04-17) | Option A viable; clock-gated, not firewalled. See §3 Phase 0. |
+| 1 — USB core (`kernel/usb/core/`) | ✅ scaffolded | URB / descriptor / enumeration with 25 unit tests against a mock HCD. |
+| 2 — CDC-ECM class driver | ☐ pending | |
+| 3A — XHCI host driver | ☐🔗 pending | Requires Phase 2 + kexec clock-hold extension. |
+| 4 — lwIP netif integration | ☐🔗 pending | Requires Phase 2. |
+| 5 — testing, reliability, docs | ☐🔗 pending | Requires Phases 3A + 4. |
 
 ---
 
@@ -93,7 +105,7 @@ NS EL2. Phase 0 of this plan is the first experiment.
 Phases run in order. Phase 3B is only entered if Phase 0 rules Phase 3A
 out.
 
-### Phase 0 — CBB Probe (1 day)
+### Phase 0 — CBB Probe (1 day) — ✅ done 2026-04-17
 
 **Goal:** decide whether Option A is even viable before doing the
 deep driver work.
@@ -120,10 +132,27 @@ deep driver work.
   remaining Jetson networking path is EQOS (#25) with a BCT-reconfig
   effort (see `docs/jetson-cbb-report.md` §6.A).
 
-No code is written in this phase. Pure empirical probing from the
-existing shell.
+#### Results (jetson-nano-1, post-kexec NS EL2, commit `5d282b1`)
 
-### Phase 1 — USB Core (1-2 weeks)
+| Aperture | Reads | Verdict |
+|---|---|---|
+| XHCI `0x03610000` (32 words) | all `0xffffffff` | not CBB-blocked — clock-gated (no RAS, no `0xbadf1100`) |
+| XUDC `0x03550000` (8 words) | all `0xffffffff` | not CBB-blocked — clock-gated |
+| UPHY padctl `0x03520000` (`0x00..0x38`) | `0x55, 0x113, 0x31, 0xfff, 0x1111, 0xf7bde` | live at NS EL2 |
+
+**Linux-side confirmation:** `tegra-xusb 3610000.usb` is running today
+with HCC params `0x0180ff05` and USB 2.0 + SuperSpeed devices
+enumerated. BPMP debugfs exposes `xusb_core_host`, `xusb_falcon`,
+`xusb_fs`, `xusb_ss`, `xusb_core_dev` clock knobs and `xusba/b/c`
+powergate knobs — same interface shape used by
+`scripts/jetson-kexec-slmos.sh` for GPU clocks today.
+
+**Decision: Option A.** XHCI is reachable; clock-gate state is mitigable
+in Phase 3A by extending the kexec helper to hold
+`xusb_core_host` / `xusb_falcon` / `xusb_fs` + powergates `xusba` / `xusbc`
+on through the handoff. Full discussion in the Phase-0 comment on #266.
+
+### Phase 1 — USB Core (1-2 weeks) — ✅ scaffolded
 
 Applies to both Option A and Option B.
 
@@ -153,6 +182,68 @@ Applies to both Option A and Option B.
   shim is tested).
 - No hot-plug logic beyond "device connected at boot, stays connected"
   — enough for a fixed-dongle demo.
+
+**What landed (feature/usb-networking-phase0):**
+
+| File | Lines | Purpose |
+|---|---|---|
+| `kernel/include/usb.h` | ~260 | Public API: device model, URB, HCD ops, std request/descriptor constants |
+| `kernel/usb/core/usb_core.c` | ~330 | HCD registration, URB submit/wait/cancel, descriptor parser, 10-step root-port enumeration |
+| `kernel/tests/test_usb_core.c` | ~1100 | 37 unit tests against a mock HCD — URB lifecycle, descriptor parse (alt-setting skip, orphan EP, invalid header, undersized input, bad-bLength header, oversized length rejection, interface + endpoint table overflow), full enumeration, every error-injection branch of enumerate, device_close symmetry on every error path, control-msg return semantics + timeout cancel, return-code normalisation, cancel of a pending URB, silent same-HCD re-registration |
+
+Architecture notes:
+- **No dynamic memory in Phase 1 core.** `struct usb_device root_device`
+  is a single static for the Phase-1 scope (one device on one root
+  port). The HCD may allocate its own ring memory via `ncmem_alloc`
+  on Jetson/Pi 5.
+- **Enumeration zeroes state at entry** so a failed retry doesn't
+  leave the previous device visible via `usb_core_first_device()` —
+  regression-guarded by `test_enumerate_resets_previous_device`.
+- **Alt-settings other than 0 are deliberately ignored** by the
+  parser — a CDC-ECM dongle that exposes data-iface alt 1 will see
+  its endpoints skipped until Phase 2 handles the
+  SET_INTERFACE(alt=1) path explicitly.
+- **URB completion is HCD-driven.** `usb_wait_urb` polls `hcd->poll()`
+  between status checks, which lets the mock HCD and the real XHCI
+  driver share the same control-msg path without requiring IRQs.
+- **Return-code contract is uniformly negative.** `usb_submit_urb` /
+  `usb_cancel_urb` / `usb_control_msg` all return 0 on accept and a
+  negative errno-style value on error. If an HCD accidentally returns
+  a positive `usb_urb_status` enum value, the core normalises it to
+  `-USB_URB_IO_ERROR` so callers can rely on `if (rc < 0)`.
+- **Device-close symmetry.** Once `hcd->device_open` has succeeded,
+  every error path in `usb_core_enumerate` routes through the
+  `err_close` label which invokes `hcd->device_close`. This matters
+  for Phase 3A XHCI, which allocates a slot context in `device_open`
+  and must release it on failed enumeration to avoid leaking slots.
+  The core does **not** call `device_close` on pre-open bail-outs
+  (`port_reset` failure or `device_open` itself failing) — the HCD
+  owns its own partial-state cleanup in those cases.
+- **Concurrency model.** `usb_core_register_hcd` is expected to run
+  from the primary CPU before any secondary is brought up; after that
+  `active_hcd` is effectively read-only and the submit / cancel /
+  poll paths read it without locking. Phase 3A adds synchronisation
+  when (and if) any post-boot mutation becomes legal.
+- **Timeouts are a Phase-1 placeholder.** `usb_wait_urb` runs a
+  fixed iteration cap (`timeout_ms × 1000`), not a wall-clock
+  deadline. Good enough for the mock HCD (synchronous) and host
+  QEMU tests; Phase 3A XHCI must switch to `CNTPCT_EL0`-based
+  deadlines (same pattern as `hw_timeout_start` /
+  `hw_timeout_expired` in `component_runtime.c`) before relying on
+  real-time bounds on hardware.
+- **Stack-allocated URB lifetime is a Phase-3A contract.**
+  `usb_control_msg` builds its URB on the caller's stack and blocks
+  in `usb_wait_urb` until completion or timeout. Today this is safe
+  because the mock HCD completes synchronously inside `submit_urb`,
+  and on timeout `usb_wait_urb` calls `usb_cancel_urb` before
+  returning. Phase 3A XHCI will deliver completions from IRQ context
+  — its `cancel_urb` implementation MUST block until no in-flight
+  completion can still write to the URB (either the URB has left
+  the hardware ring, or a pending completion IRQ has already fired)
+  before returning, otherwise the stack-dead URB becomes a
+  use-after-return dereference. A per-CPU static URB pool is an
+  alternative if that invariant is hard to guarantee in the XHCI
+  driver.
 
 **Reference material:**
 - FreeBSD's `usb4bsd` is a cleaner reference than Linux's monolithic
