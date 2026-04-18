@@ -104,20 +104,65 @@
 #define   UBUS_BAR_REMAP_ACCESS_EN     (1u << 0)
 #define PCIE1_AXI_READ_ERROR_DATA      0x4170u
 
+/* BCM2712 "chicken bits" for the AXI/PCIe QoS forwarding search.
+ * Reference: brcm_pcie_set_tc_qos() @ pcie-brcmstb.c:556-604.
+ * Without these, 2712D0 chips have broken QoS forwarding that
+ * interacts badly with bridge config-space completions — observed
+ * symptom: config reads past offset 0x07 return 0xFFFFFFFF because
+ * the CplD never comes back to the requester. */
+#define PCIE1_MISC_CTRL_1                     0x40A0u
+#define   MISC_CTRL_1_EN_VDM_QOS_CONTROL_MASK (1u << 5)
+#define PCIE1_AXI_INTF_CTRL                   0x416Cu
+#define   AXI_EN_RCLK_QOS_ARRAY_FIX           (1u << 13)
+#define   AXI_EN_QOS_UPDATE_TIMING_FIX        (1u << 12)
+#define   AXI_DIS_QOS_GATING_IN_MASTER        (1u << 11)
+#define   AXI_REQFIFO_EN_QOS_PROPAGATION      (1u <<  7)
+#define   AXI_MASTER_MAX_OUTSTANDING_REQS     0x3Fu
+
 /* HARD_DEBUG offset is variant-specific. For 2712 it's 0x4304 (generic
  * 0x4204). See pcie_offsets_bcm2712[] in the reference driver. */
 #define PCIE1_HARD_DEBUG                 0x4304u
 #define   HARD_DEBUG_SERDES_IDDQ_MASK    (1u << 27)
+/* CLKREQ# control bits in HARD_DEBUG. Both must be cleared BEFORE
+ * PERST# deassert — per Linux commit 1bbe2db (Feb 2026). If a
+ * platform has a pull-up on CLKREQ# with no endpoint control
+ * (which is the Pi 5 + AI HAT+ case), leaving these bits set in
+ * their power-on state causes link init failures in the idle time
+ * between PERST# deassertion and the normal post-link-up
+ * brcm_config_clkreq() call. Symptom we saw: link trains (PHY +
+ * DL both set) but config-space reads past offset 0x07 all return
+ * 0xFFFFFFFF. Clearing CLKREQ bits before link-up fixes this. */
+#define   HARD_DEBUG_CLKREQ_DEBUG_EN_MASK  (1u <<  1)
+#define   HARD_DEBUG_CLKREQ_L1SS_EN_MASK   (1u << 21)
+#define   HARD_DEBUG_CLKREQ_MASK \
+    (HARD_DEBUG_CLKREQ_DEBUG_EN_MASK | HARD_DEBUG_CLKREQ_L1SS_EN_MASK)
+/* Internal PERST# override — when set, forces PERST# low regardless
+ * of the PCIE_CTRL.PERSTB bit. Used to extend the PERST# assertion
+ * time for slow-to-lock endpoints (tperst_clk_ms sequence). */
+#define   HARD_DEBUG_PERST_ASSERT_MASK     (1u <<  3)
 
 /* MDIO PLL programming for 54 MHz xosc refclk (brcm_pcie_munge_pll).
  * Values lifted verbatim from the reference driver — these are
  * empirically-determined SerDes PHY settings for the 2712 variant. */
-#define MDIO_PLL_TUNE_COUNT 7
 static const struct { uint8_t regad; uint16_t val; } mdio_pll_tune[] = {
     { 0x16, 0x50b9 }, { 0x17, 0xbda1 }, { 0x18, 0x0094 },
     { 0x19, 0x97b4 }, { 0x1b, 0x5030 }, { 0x1c, 0x5030 },
     { 0x1e, 0x0007 },
 };
+#define MDIO_PLL_TUNE_COUNT \
+    (sizeof(mdio_pll_tune) / sizeof(mdio_pll_tune[0]))
+
+/* Link-up polling budget — same timing as brcm_pcie_start_link in Linux. */
+#define LINK_UP_POLL_INTERVAL_US  5000u
+#define LINK_UP_POLL_ATTEMPTS     20u
+#define LINK_UP_TIMEOUT_MS        (LINK_UP_POLL_INTERVAL_US * LINK_UP_POLL_ATTEMPTS / 1000u)
+
+/* Post-link-up settling delay. 1 ms is plenty on well-behaved hardware;
+ * the pi-5-1 + AI HAT+ config-space truncation blocker (tracked in the
+ * plan doc, Phase 1.5) is not timing-sensitive — 3 seconds vs. 1 ms
+ * showed the same 0xFFFFFFFF reads past offset 0x07. Keep this at 1 ms
+ * until the blocker is understood; boot time matters. */
+#define LINK_UP_SETTLE_US         1000u
 
 /* BCM reset controller — shared across the SoC.
  * ID 7 and ID 43 are the two reset lines for pcie1 (bcm2712.dtsi:1048).
@@ -383,7 +428,7 @@ static void munge_pll_54mhz(void)
 {
     /* Set block-address register so subsequent writes land at 0x1600. */
     pcie1_mdio_write(MDIO_SET_ADDR_REGAD, MDIO_ADDR_BLOCK_PLL);
-    for (int i = 0; i < MDIO_PLL_TUNE_COUNT; i++) {
+    for (size_t i = 0; i < MDIO_PLL_TUNE_COUNT; i++) {
         pcie1_mdio_write(mdio_pll_tune[i].regad, mdio_pll_tune[i].val);
     }
     bcm2712_udelay(200);
@@ -414,24 +459,190 @@ static void set_outbound_win(unsigned win,
 }
 
 /*
- * Wait for link training to complete. 100 ms budget at 5 ms poll
- * intervals — same timing as the Linux brcm_pcie_start_link path.
+ * Wait for link training to complete. Same timing as the Linux
+ * brcm_pcie_start_link path (LINK_UP_TIMEOUT_MS ms total).
  */
 static int wait_link_up(void)
 {
-    for (int i = 0; i < 20; i++) {
+    for (unsigned i = 0; i < LINK_UP_POLL_ATTEMPTS; i++) {
         uint32_t status = pcie1_r32(PCIE1_MISC_STATUS);
         if ((status & (STATUS_PHY_LINKUP | STATUS_DL_ACTIVE))
             == (STATUS_PHY_LINKUP | STATUS_DL_ACTIVE)) {
-            INFO("pcie1: link up (status=0x%x) after %d ms",
-                 status, i * 5);
+            INFO("pcie1: link up (status=0x%x) after %u ms",
+                 status, i * LINK_UP_POLL_INTERVAL_US / 1000u);
             return PCIE_OK;
         }
-        bcm2712_udelay(5000);
+        bcm2712_udelay(LINK_UP_POLL_INTERVAL_US);
     }
     uint32_t status = pcie1_r32(PCIE1_MISC_STATUS);
-    ERROR("pcie1: link training timeout after 100 ms (status=0x%x)", status);
+    ERROR("pcie1: link training timeout after %u ms (status=0x%x)",
+          LINK_UP_TIMEOUT_MS, status);
     return PCIE_ERR_NOLINK;
+}
+
+/*
+ * Steps 1-5 of the train_link sequence: reset the bridge, power up
+ * the PHY, run MDIO PLL tuning, and apply the L1SS PM clock errata.
+ * All MMIO after the bridge deassert goes to pcie1_regs
+ * (PCIE1_BASE); the reset writes go to BCM_RESET_BASE, a different
+ * Device-nGnRnE region. ARM Device-nGnRnE is strongly ordered per
+ * location but only weakly ordered across locations, so a `dsb sy`
+ * bridges the two register windows — the udelay loop alone reads
+ * CNTPCT and provides no MMIO ordering guarantee.
+ */
+static int bcm2712_phy_bringup(void)
+{
+    int rc = rescal_bring_up();
+    if (rc != PCIE_OK) return rc;
+
+    bcm_reset_assert(BCM_RESET_ID_BRIDGE);
+    bcm2712_udelay(200);
+    bcm_reset_deassert(BCM_RESET_ID_BRIDGE);
+
+    /* Bridge (BCM_RESET_BASE) → PHY (PCIE1_BASE) crossover. */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Clear SERDES_IDDQ — power on the PHY. */
+    uint32_t tmp = pcie1_r32(PCIE1_HARD_DEBUG);
+    tmp &= ~HARD_DEBUG_SERDES_IDDQ_MASK;
+    pcie1_w32(PCIE1_HARD_DEBUG, tmp);
+    bcm2712_udelay(200);
+
+    /* MDIO PLL tuning for 54 MHz xosc refclk (2712-specific). */
+    munge_pll_54mhz();
+
+    /* L1SS errata — PM clock period = 18.52 ns (encoded 0x12). */
+    tmp = pcie1_r32(PCIE1_RC_PL_PHY_CTL_15);
+    tmp &= ~PHY_CTL_15_PM_CLK_PERIOD_MASK;
+    tmp |= 0x12;
+    pcie1_w32(PCIE1_RC_PL_PHY_CTL_15, tmp);
+
+    return PCIE_OK;
+}
+
+/*
+ * Steps 6 + 6b of the train_link sequence, extracted so train_link
+ * reads as a sequence of named phases rather than a wall of register
+ * pokes. MISC_CTRL bits + BCM2712-specific AXI QoS chicken bits are
+ * closely related (the AXI path arbitrates the bus transactions that
+ * MISC_CTRL gates), so they live together.
+ *
+ * Observed consequence on 2712D0: without the QoS chicken bits,
+ * config-space reads past offset 0x07 return 0xFFFFFFFF. The
+ * TIMING_FIX bit is Reserved-0 on 2712C1 — detect readback and fall
+ * back to throttling the AXI master's outstanding-request count.
+ */
+static void bcm2712_misc_and_axi_qos(void)
+{
+    uint32_t tmp = pcie1_r32(PCIE1_MISC_CTRL);
+    tmp |= MISC_CTRL_SCB_ACCESS_EN_MASK;
+    tmp &= ~MISC_CTRL_CFG_READ_UR_MODE_MASK;
+    tmp &= ~MISC_CTRL_MAX_BURST_SIZE_MASK;
+    tmp |=  MISC_CTRL_MAX_BURST_SIZE_128;
+    pcie1_w32(PCIE1_MISC_CTRL, tmp);
+
+    uint32_t axi = pcie1_r32(PCIE1_AXI_INTF_CTRL);
+    axi &= ~AXI_REQFIFO_EN_QOS_PROPAGATION;
+    axi |=  AXI_EN_RCLK_QOS_ARRAY_FIX
+         |  AXI_EN_QOS_UPDATE_TIMING_FIX
+         |  AXI_DIS_QOS_GATING_IN_MASTER;
+    pcie1_w32(PCIE1_AXI_INTF_CTRL, axi);
+    axi = pcie1_r32(PCIE1_AXI_INTF_CTRL);
+    if (!(axi & AXI_EN_QOS_UPDATE_TIMING_FIX)) {
+        /* 2712C1 — TIMING_FIX is Reserved-0. Throttle AXI master to
+         * 15 outstanding requests as a best-effort mitigation. */
+        axi &= ~AXI_MASTER_MAX_OUTSTANDING_REQS;
+        axi |= 15u;
+        pcie1_w32(PCIE1_AXI_INTF_CTRL, axi);
+    }
+    tmp = pcie1_r32(PCIE1_MISC_CTRL_1);
+    tmp &= ~MISC_CTRL_1_EN_VDM_QOS_CONTROL_MASK;
+    pcie1_w32(PCIE1_MISC_CTRL_1, tmp);
+}
+
+/*
+ * Steps 13b + 14 + 15: deassert PERST# in the order HATs with
+ * brcm,tperst-clk-ms need. CLKREQ# disabled first so a platform
+ * pull-up on an endpoint without CLKREQ# control (the AI HAT+ case)
+ * can't confuse the link state machine during the idle gap. Then
+ * the two-phase PERST# release with 100 ms of stable refclk in
+ * between, followed by the CEM §6.6.1 100 ms settle.
+ */
+static void bcm2712_perst_tperst_clk_ms(void)
+{
+    uint32_t tmp = pcie1_r32(PCIE1_HARD_DEBUG);
+    tmp &= ~HARD_DEBUG_CLKREQ_MASK;
+    pcie1_w32(PCIE1_HARD_DEBUG, tmp);
+
+    /* Force PERST# low via the internal bit. */
+    tmp = pcie1_r32(PCIE1_HARD_DEBUG);
+    tmp |= HARD_DEBUG_PERST_ASSERT_MASK;
+    pcie1_w32(PCIE1_HARD_DEBUG, tmp);
+
+    /* Deassert main PERST# (bit 2 of PCIE_CTRL). Refclk now stable
+     * while endpoint still sees PERST# asserted externally. */
+    tmp = pcie1_r32(PCIE1_MISC_CTRL_REG);
+    tmp |= PCIE_CTRL_PERSTB_MASK;
+    pcie1_w32(PCIE1_MISC_CTRL_REG, tmp);
+    bcm2712_udelay(100000);
+
+    /* Release internal PERST# — endpoint actually sees deassertion here. */
+    tmp = pcie1_r32(PCIE1_HARD_DEBUG);
+    tmp &= ~HARD_DEBUG_PERST_ASSERT_MASK;
+    pcie1_w32(PCIE1_HARD_DEBUG, tmp);
+
+    /* PCIe CEM §6.6.1 — 100 ms from PERST# deassertion to first
+     * config-space access. */
+    bcm2712_udelay(100000);
+}
+
+/*
+ * Step 17 + 17b: program bus numbers on the RC bridge so downstream
+ * config cycles (bus 1) are forwarded, and enable the standard
+ * BUS_MASTER + MEM_SPACE bits on the bridge's command register.
+ * Without these, the bridge silently limits config-cycle forwarding
+ * to the first two dwords on Pi 5 — reads past offset 0x07 on the
+ * endpoint return 0xFFFFFFFF.
+ *
+ * MEM_BASE / MEM_LIMIT cover the non-prefetchable outbound window.
+ * Encoding is NONSTANDARD on BCM2712's internal RC bridge: the
+ * 16-bit fields at config 0x20 encode bits [39:24] of the 40-bit
+ * CPU address rather than standard PCI's bits [31:20]. With
+ * PCIE1_NONPREF_CPU_BASE = 0x1b_8000_0000 and 2 GB size, this
+ * produces base=0x1b80, limit=0x1bff (packed as 0x1bff_1b80).
+ *
+ * RC config space is directly mapped at pcie1_regs — the Linux
+ * driver confirms this pattern (brcm_pcie_map_bus at
+ * docs/reference/rpi-linux-pcie-brcmstb.c:940-941: RC access goes
+ * through `base + offset` without EXT_CFG_INDEX).
+ */
+#define BCM2712_RC_CFG_COMMAND         0x04u  /* PCI COMMAND/STATUS dword */
+#define BCM2712_RC_CFG_BUS_NUMBERS     0x18u  /* primary/sec/subord */
+#define BCM2712_RC_CFG_MEM_BASE_LIMIT  0x20u  /* nonstandard 40-bit encoding */
+
+#define BCM2712_RC_CMD_BITS            0x0007u   /* IO + MEM + BUS_MASTER */
+#define BCM2712_RC_BUS_LAYOUT          0x00010100u /* primary=0, secondary=1, subordinate=1 */
+
+static void bcm2712_program_rc_bridge(void)
+{
+    volatile uint32_t *rc_cfg = (volatile uint32_t *)pcie1_regs;
+
+    rc_cfg[BCM2712_RC_CFG_BUS_NUMBERS / 4] = BCM2712_RC_BUS_LAYOUT;
+
+    uint32_t rc_cmd = rc_cfg[BCM2712_RC_CFG_COMMAND / 4];
+    /* Preserve STATUS (bits 16..31) and set IO+MEM+BUS_MASTER in the
+     * COMMAND half. STATUS is RW1C, so writing back what was read is
+     * semantically equivalent to not touching it for zero bits. */
+    rc_cmd = (rc_cmd & 0xFFFF0000u) | BCM2712_RC_CMD_BITS;
+    rc_cfg[BCM2712_RC_CFG_COMMAND / 4] = rc_cmd;
+
+    /* MEM_BASE / MEM_LIMIT derived from the outbound window constants.
+     * See comment above this function for the encoding. */
+    uint32_t base_field  = (uint32_t)(PCIE1_NONPREF_CPU_BASE >> 24) & 0xFFFFu;
+    uint32_t limit_field = (uint32_t)(
+        (PCIE1_NONPREF_CPU_BASE + PCIE1_NONPREF_SIZE - 1ULL) >> 24) & 0xFFFFu;
+    rc_cfg[BCM2712_RC_CFG_MEM_BASE_LIMIT / 4] =
+        (limit_field << 16) | base_field;
 }
 
 /*
@@ -456,38 +667,15 @@ static int bcm2712_train_link(void)
 
     INFO("pcie1: training link (status=0x%x before reset)", status);
 
-    /* 1. Run rescal (idempotent). */
-    int rc = rescal_bring_up();
+    /* 1-5. rescal, bridge reset, PHY power, PLL tune, L1SS errata. */
+    int rc = bcm2712_phy_bringup();
     if (rc != PCIE_OK) return rc;
 
-    /* 2. Reset the bridge, deassert, settle. */
-    bcm_reset_assert(BCM_RESET_ID_BRIDGE);
-    bcm2712_udelay(200);
-    bcm_reset_deassert(BCM_RESET_ID_BRIDGE);
-
-    /* 3. Clear SERDES_IDDQ — power on the PHY. */
-    uint32_t tmp = pcie1_r32(PCIE1_HARD_DEBUG);
-    tmp &= ~HARD_DEBUG_SERDES_IDDQ_MASK;
-    pcie1_w32(PCIE1_HARD_DEBUG, tmp);
-    bcm2712_udelay(200);
-
-    /* 4. MDIO PLL tuning for 54 MHz xosc refclk (2712-specific). */
-    munge_pll_54mhz();
-
-    /* 5. L1SS errata — PM clock period = 18.52 ns (encoded 0x12). */
-    tmp = pcie1_r32(PCIE1_RC_PL_PHY_CTL_15);
-    tmp &= ~PHY_CTL_15_PM_CLK_PERIOD_MASK;
-    tmp |= 0x12;
-    pcie1_w32(PCIE1_RC_PL_PHY_CTL_15, tmp);
-
-    /* 6. MISC_CTRL: enable SCB access, UR mode on config reads,
-     *    128B max burst (2712 uses encoded value 1). */
-    tmp = pcie1_r32(PCIE1_MISC_CTRL);
-    tmp |= MISC_CTRL_SCB_ACCESS_EN_MASK
-         | MISC_CTRL_CFG_READ_UR_MODE_MASK;
-    tmp &= ~MISC_CTRL_MAX_BURST_SIZE_MASK;
-    tmp |=  MISC_CTRL_MAX_BURST_SIZE_128;
-    pcie1_w32(PCIE1_MISC_CTRL, tmp);
+    /* 6 + 6b. MISC_CTRL + BCM2712 AXI QoS chicken bits. Deliberately
+     *         leaves CFG_READ_UR_MODE cleared so the RC retries on
+     *         CRS rather than folding it into 0xFFFFFFFF reads. */
+    bcm2712_misc_and_axi_qos();
+    uint32_t tmp;
 
     /*
      * 7. Inbound window (RC_BAR2). DT says
@@ -545,47 +733,22 @@ static int bcm2712_train_link(void)
     tmp &= ~RC_CFG_VENDOR_ENDIAN_MODE_BAR2_MASK;
     pcie1_w32(PCIE1_RC_CFG_VENDOR_SPECIFIC_REG1, tmp);
 
-    /* 14. Deassert PERST# — allow the endpoint to leave reset.
-     *     2712 uses bit 2 of PCIE_CTRL @ 0x4064 (inverted: set = deassert). */
-    tmp = pcie1_r32(PCIE1_MISC_CTRL_REG);
-    tmp |= PCIE_CTRL_PERSTB_MASK;
-    pcie1_w32(PCIE1_MISC_CTRL_REG, tmp);
-
-    /* 15. PCIe CEM §6.6.1 requires ≥100 ms from PERST# deassertion
-     *     to first config-space access. */
-    bcm2712_udelay(100000);
+    /* 13b + 14 + 15. CLKREQ# disable, tperst_clk_ms dance, CEM settle. */
+    bcm2712_perst_tperst_clk_ms();
 
     /* 16. Wait for link-up (PHY + DL bits). */
     rc = wait_link_up();
     if (rc != PCIE_OK) return rc;
 
-    /*
-     * 17. Program the RC bridge's bus numbers so downstream config
-     *     cycles (bus 1) are forwarded. Linux's PCI core does this
-     *     after enumeration; SLM-OS has to do it before scan_bus(1)
-     *     can find anything.
-     *
-     *     Bridge config @ bus 0 devfn 0 offset 0x18:
-     *       byte 0x18 = primary bus    = 0
-     *       byte 0x19 = secondary bus  = 1
-     *       byte 0x1A = subordinate bus= 1
-     *       byte 0x1B = latency timer  = 0
-     */
-    pcie1_w32(PCIE1_EXT_CFG_INDEX, 0);  /* select RC/self */
-    *(volatile uint32_t *)(pcie1_regs + 0x18u) = 0x00010100u;
+    /* 17 + 17b. RC bridge bus numbers, command register, MEM_BASE/LIMIT. */
+    bcm2712_program_rc_bridge();
 
     /*
-     * 18. Give the endpoint time to fully enumerate its config space.
-     *     With DL_ACTIVE high, reads at config[0..7] (vendor+command)
-     *     work immediately, but reads at config[0x8+] (class/rev,
-     *     header type, BARs) return 0xFFFFFFFF for ~500 ms while the
-     *     Hailo boot ROM populates them. Linux's PCI core uses CRS
-     *     retries to hide this; SLM-OS doesn't have a CRS loop yet,
-     *     so just wait. 500 ms is generous; empirical tests on the
-     *     Pi OS dmesg show the endpoint is ready by ~200 ms post-
-     *     link-up.
+     * 18. Post-link-up settling delay (see LINK_UP_SETTLE_US — 1 ms,
+     *     kept short so boot time doesn't suffer while the
+     *     config-space-read blocker is investigated in Phase 1.5).
      */
-    bcm2712_udelay(500000);
+    bcm2712_udelay(LINK_UP_SETTLE_US);
 
     return PCIE_OK;
 }

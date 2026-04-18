@@ -109,6 +109,49 @@ static void cfg_w32(uint8_t bus, uint8_t dev, uint8_t func, uint16_t off,
     host_ops->config_write32(bus, dev, func, off, val);
 }
 
+/*
+ * Place a BAR of `size` bytes inside the [*next, end) window. On
+ * success updates *next to the first byte past the placed BAR and
+ * stores the aligned start address in *out_addr. Returns false if
+ * the BAR doesn't fit (including the case where the next-aligned
+ * address itself wraps past end). Pure function — no globals —
+ * so tests can exercise the bump-allocator math without running
+ * pcie_init().
+ */
+bool pcie_place_bar(uint64_t *next, uint64_t end,
+                    uint64_t size, uint64_t *out_addr)
+{
+    if (!next || !out_addr || size == 0) return false;
+    /* Align upward to the BAR's natural size. size is always a power
+     * of two (the BAR size-probe's invert-plus-one result), so the
+     * (size - 1) mask is well-defined. */
+    uint64_t aligned = (*next + size - 1ULL) & ~(size - 1ULL);
+    if (aligned < *next) return false;             /* alignment wrap */
+    if (aligned + size < aligned) return false;    /* end-of-window wrap */
+    if (aligned + size > end) return false;
+    *out_addr = aligned;
+    *next     = aligned + size;
+    return true;
+}
+
+/* 16-bit config write via dword RMW — used during bus scan before a
+ * device is in the table. Mirrors pcie_config_write16 but takes a
+ * bus/dev/func triple so enumeration-time callers don't need a
+ * descriptor. Keeps COMMAND writes (bits 0-15 at offset 0x04) from
+ * accidentally clobbering STATUS (bits 16-31). STATUS is RW1C so
+ * writing zeros is harmless in practice, but matching the hardware
+ * register width avoids a category of future bug. */
+static void cfg_w16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t off,
+                    uint16_t val)
+{
+    uint16_t aligned   = (uint16_t)(off & ~1u);
+    uint16_t dword_off = (uint16_t)(aligned & ~2u);
+    uint32_t dword     = host_ops->config_read32(bus, dev, func, dword_off);
+    unsigned shift     = (aligned & 2u) * 8u;
+    dword = (dword & ~(0xFFFFu << shift)) | (((uint32_t)val) << shift);
+    host_ops->config_write32(bus, dev, func, dword_off, dword);
+}
+
 uint8_t pcie_config_read8(const struct pcie_device *d, uint16_t off)
 {
     if (!d || !host_ops) return 0xFF;
@@ -193,12 +236,12 @@ static int probe_one_bar(struct pcie_device *dev, int bar_idx)
      * space (some controllers fault on that).
      */
     uint16_t cmd_before = cfg_r16(dev->bus, dev->dev, dev->func, CFG_COMMAND);
-    cfg_w32(dev->bus, dev->dev, dev->func, CFG_COMMAND,
-            cmd_before & ~(CMD_IO_SPACE | CMD_MEMORY_SPACE));
+    cfg_w16(dev->bus, dev->dev, dev->func, CFG_COMMAND,
+            (uint16_t)(cmd_before & ~(CMD_IO_SPACE | CMD_MEMORY_SPACE)));
     cfg_w32(dev->bus, dev->dev, dev->func, off, 0xFFFFFFFFu);
     uint32_t probe_lo_initial = cfg_r32(dev->bus, dev->dev, dev->func, off);
     cfg_w32(dev->bus, dev->dev, dev->func, off, raw_lo);
-    cfg_w32(dev->bus, dev->dev, dev->func, CFG_COMMAND, cmd_before);
+    cfg_w16(dev->bus, dev->dev, dev->func, CFG_COMMAND, cmd_before);
 
     if (probe_lo_initial == 0) {
         return 1;   /* BAR truly doesn't exist — skip */
@@ -233,13 +276,13 @@ static int probe_one_bar(struct pcie_device *dev, int bar_idx)
     uint32_t raw_hi = 0;
     if (is_64) {
         /* Same disable-and-probe pattern as the low half above. */
-        cfg_w32(dev->bus, dev->dev, dev->func, CFG_COMMAND,
-                cmd_before & ~(CMD_IO_SPACE | CMD_MEMORY_SPACE));
+        cfg_w16(dev->bus, dev->dev, dev->func, CFG_COMMAND,
+                (uint16_t)(cmd_before & ~(CMD_IO_SPACE | CMD_MEMORY_SPACE)));
         raw_hi = cfg_r32(dev->bus, dev->dev, dev->func, (uint16_t)(off + 4));
         cfg_w32(dev->bus, dev->dev, dev->func, (uint16_t)(off + 4), 0xFFFFFFFFu);
         probe_hi = cfg_r32(dev->bus, dev->dev, dev->func, (uint16_t)(off + 4));
         cfg_w32(dev->bus, dev->dev, dev->func, (uint16_t)(off + 4), raw_hi);
-        cfg_w32(dev->bus, dev->dev, dev->func, CFG_COMMAND, cmd_before);
+        cfg_w16(dev->bus, dev->dev, dev->func, CFG_COMMAND, cmd_before);
     }
 
     /* Decode size. Mask off the low type bits, then invert + 1.
@@ -425,9 +468,8 @@ int pcie_init(void)
                     uint64_t size = d->bar_size[b];
                     if (size == 0 || size > win_size) continue;
 
-                    /* Align to the BAR's natural size. */
-                    uint64_t addr = (next + size - 1) & ~(size - 1);
-                    if (addr + size > end) {
+                    uint64_t addr;
+                    if (!pcie_place_bar(&next, end, size, &addr)) {
                         WARN("pcie: outbound window exhausted — BAR%d of "
                              "%02x:%02x.%x (size 0x%lx) unassigned",
                              b, d->bus, d->dev, d->func, (unsigned long)size);
@@ -452,7 +494,6 @@ int pcie_init(void)
                     INFO("pcie: %02x:%02x.%x BAR%d assigned 0x%lx (size 0x%lx)",
                          d->bus, d->dev, d->func, b,
                          (unsigned long)addr, (unsigned long)size);
-                    next = addr + size;
                 }
             }
         }

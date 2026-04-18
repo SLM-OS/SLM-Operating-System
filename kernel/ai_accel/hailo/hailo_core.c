@@ -45,6 +45,17 @@ const struct hailo_fw_addrs hailo_fw_addrs_hailo8 = {
     .trigger_address      = 0x000E0980u,
 };
 
+/*
+ * Driver state machine. Transitions are single-threaded by design:
+ * hailo_init and hailo_probe run from the main-kernel boot path on
+ * CPU 0, and hailo_boot (Phase 4) runs from the shell (also CPU 0).
+ * Readers on other CPUs (e.g. `hailo` shell command from a future
+ * per-CPU shell) get a best-effort snapshot — the value is a small
+ * enum so the read is atomic on ARM64. If Phase 5 introduces a
+ * writer off the boot path, extend `atr0_lock` to cover the state
+ * transitions at lines ~194 and ~251 rather than adding a second
+ * lock (keeps lock ordering trivial).
+ */
 static enum hailo_state state = HAILO_STATE_UNINIT;
 
 /*

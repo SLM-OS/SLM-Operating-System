@@ -43,6 +43,13 @@
 #define HEF_VERSION_V3         3
 #define HEF_VERSION_MAX        3
 
+/* Upper bound on proto body size — defense against a non-.hef file
+ * that happens to pass the magic test. Real files are tens of MB;
+ * 256 MB is a generous ceiling that leaves headroom for future
+ * models without letting a corrupted size field trigger a huge
+ * bogus allocation or pointer-arithmetic overflow downstream. */
+#define HEF_PROTO_MAX_SIZE     0x10000000u   /* 256 MB */
+
 /* Outer-header error codes (separate from hailo core so callers
  * can distinguish "bad file" from "device IO"). */
 #define HEF_OK                 0

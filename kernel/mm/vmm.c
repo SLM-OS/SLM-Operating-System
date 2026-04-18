@@ -1087,13 +1087,10 @@ static void vmm_setup_platform(void)
      * (L2 index 10 within L1[64]). Phase 1.5 of the AI HAT+ plan
      * needs this block live so pcie_bcm2712.c can toggle reset
      * ID 43 during link training. */
-    {
-        uint64_t bcm_reset_base = 0x1001400000UL;
-        uint64_t reset_l2_idx = (bcm_reset_base >> BLOCK_SHIFT) & 0x1FF;
-        l2_mmio_pcie[reset_l2_idx] = make_block_desc(bcm_reset_base,
-                                                      VMM_FLAGS_DEVICE);
-        vmm_state.blocks_mapped++;
-    }
+    uint64_t bcm_reset_base = 0x1001400000UL;
+    l2_mmio_pcie[(bcm_reset_base >> BLOCK_SHIFT) & 0x1FF] =
+        make_block_desc(bcm_reset_base, VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
 
     /*
      * Map GIC and GPIO2 region: L1[65] covers 0x1040000000-0x107FFFFFFF

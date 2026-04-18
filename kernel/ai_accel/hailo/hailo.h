@@ -206,9 +206,14 @@ struct hailo_platform_ops {
     /* DMA-capable buffer allocation. Returns the CPU VA and, in
      * *iova_out, the PCIe-side address the Hailo endpoint should
      * target. `align` typically 64 KB for descriptor rings.
-     * Platform is responsible for cache sync on sync_* calls below. */
+     * Platform is responsible for cache sync on sync_* calls below.
+     *
+     * dma_free must be passed the same `size` and `align` the
+     * allocation used — a buddy-allocator backend (Pi 5) rounds
+     * `max(size, align)` up to a power-of-2 block, and needs both
+     * values to reconstruct the block order on free. */
     void *(*dma_alloc)(size_t size, size_t align, uint64_t *iova_out);
-    void  (*dma_free)(void *ptr, size_t size);
+    void  (*dma_free)(void *ptr, size_t size, size_t align);
 
     /* Cache maintenance on DMA buffers. Safe no-op on coherent
      * platforms; real work on Pi 5. */

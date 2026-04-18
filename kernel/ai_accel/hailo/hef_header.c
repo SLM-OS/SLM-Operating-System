@@ -78,7 +78,7 @@ int hef_parse_outer_header(const void *blob, size_t size,
      * proto is meaningless). Upper bound is generous — real files
      * are tens of MB. */
     if (proto_size == 0) return HEF_ERR_BAD_SIZE;
-    if (proto_size > 0x10000000u) return HEF_ERR_BAD_SIZE;  /* 256 MB ceiling */
+    if (proto_size > HEF_PROTO_MAX_SIZE) return HEF_ERR_BAD_SIZE;
 
     size_t proto_end = header_total + proto_size;
     if (proto_end > size) return HEF_ERR_TRUNCATED;
