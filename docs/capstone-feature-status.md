@@ -168,7 +168,7 @@ from a prior driver (bare-metal x86-64 / UEFI-direct Jetson).
 | Platform shim (`gsp_platform_ops`) | N/A | N/A | Complete (11/11 fns, `kernel/arch/arm64/nvidia_gsp_platform.c`) | Complete (11/11 fns) |
 | Engine reset + PIO upload | N/A | N/A | Working on GSP Falcon | Working on GSP + SEC2 |
 | Signed ucode authentication | N/A | N/A | Blocked: GSP priv-lockdown | FWSEC-FRTS 3/3; Booter Load blocked |
-| Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU firmware booted + IDENTIFY / WRITE_MEMORY / READ_MEMORY RPCs verified** (AI HAT+ via pcie1) | CPU (NEON) | CPU (SSE inline-asm) |
+| Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU Phase 5.3 + 5.4 software-complete; firmware boot + control-channel RPCs verified; `hailo infer` pipeline runs (awaits compiled `.hef` + CONFIG_STREAM context for end-to-end)** | CPU (NEON) | CPU (SSE inline-asm) |
 | AI scheduler MLP | CPU | CPU (routed through `inference_device` abstraction) | CPU | CPU |
 
 ### GPU Bringup Stack (Portable)
@@ -219,8 +219,21 @@ trips (firmware acknowledges both with a structured response —
 `major_status = 0x40000058` for arbitrary-address access without
 an active stream context, which is the expected HailoRT behavior
 and confirms the transport is carrying the opcodes correctly).
-Phase 5.3 (CONFIG_STREAM + tensor-buffer allocator for CCW weight
-upload) and 5.4 (inference submit via VDMA rings) remain. See
+Phase 5.3 (HEF CCW action extraction, DMA tensor buffer API, and
+`WRITE_MEMORY`-based CCW upload loop — all software-complete) and
+Phase 5.4 (VDMA descriptor-list allocator, descriptor programming,
+channel start/stop/submit-and-wait, and the `hailo_infer_run`
+orchestrator + `hailo infer` shell — all software-complete) both
+landed 2026-04-18 as well. On pi-5-1, `hailo infer <hex-bytes>`
+now runs the full pipeline (allocates input+output tensors,
+programs descriptor lists, starts both VDMA channels, submits,
+polls for completion) and exits cleanly with
+`HAILO_ERR_TIMEOUT (-4)` at output-submit — exactly the expected
+behavior since firmware has no active stream context. Unlocking
+actual inference needs a compiled `.hef` to drive `CONFIG_STREAM`
+with real per-stream parameters. Once one lands in the lab, the
+same `hailo load <path> upload <base>` → `hailo infer` sequence
+exercises the whole chain without code changes. See
 `docs/pi5-ai-hat-plan.md` for the full phase breakdown and
 `docs/pi5-pcie1-registers.md` for the `pcie1` + MIP1 register
 reference.

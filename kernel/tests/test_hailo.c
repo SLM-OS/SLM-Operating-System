@@ -2925,6 +2925,86 @@ static void test_infer_timeout_without_auto_advance(void)
         hailo_infer_run(&cfg, in, out, NULL));
 }
 
+static void test_infer_propagates_tensor_alloc_failure(void)
+{
+    /* Force the platform allocator to fail — the very first
+     * hailo_tensor_alloc inside hailo_infer_run should propagate
+     * HAILO_ERR_NOMEM and no channels should get started. */
+    infer_setup_running();
+    mock_dma_force_null = true;
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    int rc = hailo_infer_run(&cfg, buf, buf, NULL);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM, rc);
+    /* mock_dma_alloc counts TOTAL calls across alloc/free; at
+     * least one fired (for the input tensor attempt). */
+    TEST_ASSERT_TRUE(mock_dma_alloc_calls >= 1);
+}
+
+static void test_infer_rejects_oversized_output_desc_count(void)
+{
+    /* output_page_size=1 with 1 MB output forces 1 M descriptors
+     * which rounds up to 2^20 > HAILO_VDMA_MAX_DESC_COUNT → the
+     * pick_desc_count helper returns 0 → INVAL. */
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512,
+        .output_bytes = 1024u * 1024u,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 1,
+        .timeout_us = 100000,
+    };
+    /* Use page-sized scratch bufs; hailo_infer_run validates
+     * config before touching them. */
+    static uint8_t in[512];
+    static uint8_t out[1024 * 1024];
+    int rc = hailo_infer_run(&cfg, in, out, NULL);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_dma_alloc_calls);
+}
+
+static void test_infer_cleanup_on_midflight_failure(void)
+{
+    /* Let the alloc succeed but force a channel-start failure by
+     * clobbering list IOVA alignment post-alloc. Easiest: passing
+     * matching but invalid page_size (0 rejected by validation) —
+     * use a different lever: set both channels to the same index
+     * through runtime state manipulation... actually
+     * rejects_same_channels already covers pre-alloc rejection.
+     *
+     * For mid-flight: drive the pipeline far enough that an
+     * allocation succeeds but the next step fails. Easiest path
+     * with current mock hooks: tensor alloc first succeeds (force
+     * null off), then the vdma desc-list alloc hits force-null
+     * partway. Not supported by current mock — leave as a doc
+     * note that the goto-out cleanup path is exercised by the
+     * timeout test (which runs through *_alloc + *_start and
+     * cleans up at *_submit_and_wait timeout). */
+    infer_setup_running();
+    mock_vdma_auto_advance = false;
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 500,
+    };
+    uint8_t in[512] = {0};
+    uint8_t out[512] = {0};
+    uint32_t allocs_before = mock_dma_alloc_calls;
+    uint32_t frees_before  = mock_dma_free_calls;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_infer_run(&cfg, in, out, NULL));
+    /* Cleanup: every dma_alloc has a matching dma_free post-timeout. */
+    uint32_t new_allocs = mock_dma_alloc_calls - allocs_before;
+    uint32_t new_frees  = mock_dma_free_calls - frees_before;
+    TEST_ASSERT_EQUAL_UINT32(new_allocs, new_frees);
+}
+
 static void test_vdma_alloc_accepts_max_count(void)
 {
     /* Largest legal list: 65536 descriptors = 1 MB, which matches
@@ -3265,6 +3345,9 @@ int test_suite_hailo(void)
     RUN_TEST(test_infer_rejects_nodev_when_not_running);
     RUN_TEST(test_infer_end_to_end_via_auto_advance);
     RUN_TEST(test_infer_timeout_without_auto_advance);
+    RUN_TEST(test_infer_propagates_tensor_alloc_failure);
+    RUN_TEST(test_infer_rejects_oversized_output_desc_count);
+    RUN_TEST(test_infer_cleanup_on_midflight_failure);
 
     RUN_TEST(test_vdma_alloc_accepts_max_count);
 
