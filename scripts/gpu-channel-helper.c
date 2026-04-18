@@ -320,6 +320,33 @@ int main(int argc, char **argv)
     int pb_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 65536, 4096);  /* 64 KB */
     int sem_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
 
+    /* Register each dmabuf with the GPU subsystem. CUDA calls this
+     * NVGPU_GPU_IOCTL_REGISTER_BUFFER (op 41) 170 times per channel —
+     * once per buffer it allocates. nvgpu associates caller-provided
+     * metadata with the dmabuf fd; without registration, methods that
+     * reference the buffer's VA may silently no-op. We pass empty
+     * metadata (the content is opaque nvrm_gpu-private data and not
+     * required for correctness — just tracking). */
+    struct nvgpu_gpu_register_buffer_args regbuf;
+    int reg_fds[] = { pb_dmabuf, sem_dmabuf };
+    const char *reg_names[] = { "PB", "SEM" };
+    for (size_t i = 0; i < sizeof(reg_fds)/sizeof(reg_fds[0]); i++) {
+        memset(&regbuf, 0, sizeof(regbuf));
+        regbuf.dmabuf_fd = reg_fds[i];
+        regbuf.comptags_alloc_control = NVGPU_GPU_COMPTAGS_ALLOC_NONE;
+        regbuf.metadata_addr = 0;
+        regbuf.metadata_size = 0;
+        regbuf.flags = 0;
+        if (ioctl(ctrl_fd, NVGPU_GPU_IOCTL_REGISTER_BUFFER, &regbuf) < 0) {
+            fprintf(stderr, "[gpu-helper] REGISTER_BUFFER(%s,fd=%d) failed: "
+                    "%s (errno=%d)\n",
+                    reg_names[i], reg_fds[i], strerror(errno), errno);
+        } else {
+            printf("[gpu-helper] REGISTER_BUFFER %s (fd=%d) OK flags=0x%x\n",
+                   reg_names[i], reg_fds[i], regbuf.flags);
+        }
+    }
+
     /* Map pushbuffer into GPU AS. compr_kind=-1 (invalid), incompr_kind=0
      * means "no compression, use default PTE kind". Per nvgpu docs,
      * at least one of compr_kind/incompr_kind must be != NV_KIND_INVALID. */
