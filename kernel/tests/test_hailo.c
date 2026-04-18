@@ -133,6 +133,13 @@ static uint32_t mock_cache_invalidate_calls;
 static size_t   mock_last_cache_clean_size;
 static size_t   mock_last_cache_invalidate_size;
 
+/* Smart CONFIG_STREAM simulation. When enabled the mock synthesizes
+ * a successful response carrying the supplied dataflow_manager_id,
+ * so tests can assert the driver correctly unpacks the BE-wrapped
+ * response body. */
+static bool    mock_fw_sim_config_stream_enabled;
+static uint8_t mock_fw_sim_config_stream_manager_id;
+
 static void mock_reset(void)
 {
     memset(mock_bar0, 0, sizeof(mock_bar0));
@@ -167,6 +174,8 @@ static void mock_reset(void)
     mock_cache_invalidate_calls = 0;
     mock_last_cache_clean_size = 0;
     mock_last_cache_invalidate_size = 0;
+    mock_fw_sim_config_stream_enabled = false;
+    mock_fw_sim_config_stream_manager_id = 0;
     hailo_control_reset_state_for_tests();
 }
 
@@ -333,9 +342,28 @@ static bool mock_smart_memory_handle(uint32_t opcode_native,
                                      uint8_t *resp_out,
                                      uint32_t *resp_out_len)
 {
-    if (!mock_fw_sim_smart_memory_enabled) return false;
     uint32_t req_opcode_be;
     memcpy(&req_opcode_be, mock_last_control_request + 12, 4);
+
+    /* CONFIG_STREAM is gated by its own flag, independent of the
+     * smart-memory toggle. Response shape is:
+     *   [response_header(24)][parameter_count=0(4)]
+     *   [dataflow_manager_id_length=1(4, BE)]
+     *   [dataflow_manager_id(1)] */
+    if (opcode_native == HAILO_CONTROL_OPCODE_CONFIG_STREAM
+     && mock_fw_sim_config_stream_enabled) {
+        struct {
+            uint32_t dmid_length_be;
+            uint8_t  dataflow_manager_id;
+        } __attribute__((packed)) body;
+        body.dmid_length_be = __builtin_bswap32(1u);
+        body.dataflow_manager_id = mock_fw_sim_config_stream_manager_id;
+        mock_build_echo_response(resp_out, resp_out_len,
+                                 req_opcode_be, 0, &body, sizeof(body));
+        return true;
+    }
+
+    if (!mock_fw_sim_smart_memory_enabled) return false;
 
     if (opcode_native == HAILO_CONTROL_OPCODE_WRITE_MEMORY) {
         /* Request body after the common header:
@@ -3209,6 +3237,210 @@ static void test_ccw_upload_skips_zero_size_action(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* CONFIG_STREAM (Phase 5.3, #281 tier-3)                                      */
+/* -------------------------------------------------------------------------- */
+
+/* Helper — minimal valid cfg with predictable field values. */
+static void make_default_pcie_cfg(struct hailo_stream_pcie_config *cfg, bool is_input)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->stream_index             = 3;
+    cfg->is_input                 = is_input;
+    cfg->skip_nn_stream_config    = false;
+    cfg->nn_stream_config.core_bytes_per_buffer    = 0x1234;
+    cfg->nn_stream_config.core_buffers_per_frame   = 0x0020;
+    cfg->nn_stream_config.periph_bytes_per_buffer  = 0x4000;
+    cfg->nn_stream_config.periph_buffers_per_frame = 0x0002;
+    cfg->nn_stream_config.feature_padding_payload  = 0x0000;
+    cfg->nn_stream_config.buffer_padding_payload   = 0x0000;
+    cfg->nn_stream_config.buffer_padding           = 0x0000;
+    cfg->nn_stream_config.is_core_hw_padding_config_in_dfc = false;
+    cfg->pcie_channel_index       = 5;
+    if (is_input) {
+        cfg->pcie_dataflow_type = (uint8_t)HAILO_PCIE_DATAFLOW_TYPE_CONTINUOUS;
+    } else {
+        cfg->desc_page_size = 512;
+    }
+}
+
+static void test_control_config_stream_rejects_null(void)
+{
+    control_setup_running();
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_config_stream_pcie(NULL, &dmid));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_config_stream_pcie(&cfg, NULL));
+}
+
+static void test_control_config_stream_rejects_bad_channel(void)
+{
+    control_setup_running();
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    cfg.pcie_channel_index = 16;   /* out of range */
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_control_config_stream_rejects_when_not_running(void)
+{
+    boot_setup_probed();   /* state=PROBED, not RUNNING */
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+}
+
+static void test_control_config_stream_input_wire_format(void)
+{
+    control_setup_running();
+    mock_fw_sim_config_stream_enabled    = true;
+    mock_fw_sim_config_stream_manager_id = 0x42;
+
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+    TEST_ASSERT_EQUAL_UINT8(0x42, dmid);
+
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+
+    /* Common header: opcode == CONFIG_STREAM (BE), parameter_count == 7. */
+    struct hailo_control_common_header hdr;
+    memcpy(&hdr, mock_last_control_request, sizeof(hdr));
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(HAILO_CONTROL_OPCODE_CONFIG_STREAM),
+                             hdr.opcode);
+    uint32_t pcount_be;
+    memcpy(&pcount_be, mock_last_control_request + 16, 4);
+    TEST_ASSERT_EQUAL_UINT32(7u, __builtin_bswap32(pcount_be));
+
+    /* Body layout (all scalar lengths BE):
+     *   [16 header]
+     *   [20 pcount=7]
+     *   [24 stream_index_length=1] [28 stream_index=3]
+     *   [29 is_input_length=1]     [33 is_input=1]
+     *   [34 comm_type_length=4]    [38 comm_type=PCIE=2]
+     *   [42 skip_nn_len=1]         [46 skip_nn=0]
+     *   [47 nn_len=?]              [51 nn_stream_config...]
+     * The "nn_stream_config" struct is 19 B packed (see header).
+     */
+    uint8_t stream_index, is_input, skip_nn;
+    uint32_t stream_index_len_be, is_input_len_be, comm_type_len_be, comm_type_be;
+    uint32_t skip_nn_len_be;
+
+    memcpy(&stream_index_len_be, mock_last_control_request + 20, 4);
+    memcpy(&stream_index,        mock_last_control_request + 24, 1);
+    memcpy(&is_input_len_be,     mock_last_control_request + 25, 4);
+    memcpy(&is_input,            mock_last_control_request + 29, 1);
+    memcpy(&comm_type_len_be,    mock_last_control_request + 30, 4);
+    memcpy(&comm_type_be,        mock_last_control_request + 34, 4);
+    memcpy(&skip_nn_len_be,      mock_last_control_request + 38, 4);
+    memcpy(&skip_nn,             mock_last_control_request + 42, 1);
+
+    TEST_ASSERT_EQUAL_UINT32(1u,  __builtin_bswap32(stream_index_len_be));
+    TEST_ASSERT_EQUAL_UINT8(3,    stream_index);
+    TEST_ASSERT_EQUAL_UINT32(1u,  __builtin_bswap32(is_input_len_be));
+    TEST_ASSERT_EQUAL_UINT8(1,    is_input);
+    TEST_ASSERT_EQUAL_UINT32(4u,  __builtin_bswap32(comm_type_len_be));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)HAILO_COMMUNICATION_TYPE_PCIE,
+                             __builtin_bswap32(comm_type_be));
+    TEST_ASSERT_EQUAL_UINT32(1u,  __builtin_bswap32(skip_nn_len_be));
+    TEST_ASSERT_EQUAL_UINT8(0,    skip_nn);
+}
+
+static void test_control_config_stream_output_variant(void)
+{
+    control_setup_running();
+    mock_fw_sim_config_stream_enabled    = true;
+    mock_fw_sim_config_stream_manager_id = 0x77;
+
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, false);
+    cfg.desc_page_size = 0x0200;   /* 512 */
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+    TEST_ASSERT_EQUAL_UINT8(0x77, dmid);
+
+    /* Output variant is pcie_channel_index (u8) + desc_page_size (u16).
+     * desc_page_size is native LE per HailoRT's non-byteswapped
+     * packer — so the low byte comes first on the wire. */
+    uint8_t captured_is_input;
+    memcpy(&captured_is_input, mock_last_control_request + 29, 1);
+    TEST_ASSERT_EQUAL_UINT8(0, captured_is_input);
+
+    /* Wire offsets for CONFIG_STREAM request body (packed):
+     *   0  common_header (16)
+     *   16 parameter_count (4)
+     *   20 stream_index_length (4)  + 24 stream_index (1)
+     *   25 is_input_length (4)      + 29 is_input (1)
+     *   30 comm_type_length (4)     + 34 communication_type (4)
+     *   38 skip_nn_length (4)       + 42 skip_nn (1)
+     *   43 nn_stream_config_length (4) + 47 nn_stream_config (19)
+     *   66 comm_params_length (4)
+     *   70 variant bytes (3 for pcie_output: u8 + u16) */
+    uint32_t comm_params_len_be;
+    memcpy(&comm_params_len_be, mock_last_control_request + 66, 4);
+    TEST_ASSERT_EQUAL_UINT32(3u, __builtin_bswap32(comm_params_len_be));
+
+    uint8_t variant_channel;
+    uint16_t variant_page_size;
+    memcpy(&variant_channel,  mock_last_control_request + 70, 1);
+    memcpy(&variant_page_size, mock_last_control_request + 71, 2);
+    TEST_ASSERT_EQUAL_UINT8(5, variant_channel);
+    TEST_ASSERT_EQUAL_UINT16(0x0200, variant_page_size);   /* native LE */
+}
+
+static void test_control_config_stream_timeout_no_response(void)
+{
+    control_setup_running();
+    /* Neither sim enabled: doorbell fires, nothing responds. */
+    mock_fw_sim_config_stream_enabled = false;
+
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0xFF;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+}
+
+static void test_control_config_stream_propagates_fw_error(void)
+{
+    control_setup_running();
+
+    /* Canned response with non-zero major_status — not smart-mode. */
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t parameter_count;
+        uint32_t dataflow_manager_id_length;
+        uint8_t  dataflow_manager_id;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_CONFIG_STREAM);
+    fake.header.status.major_status = __builtin_bswap32(0x40000058u);
+    fake.header.status.minor_status = __builtin_bswap32(0x40000058u);
+    fake.dataflow_manager_id_length = __builtin_bswap32(1u);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_IO,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -3375,6 +3607,15 @@ int test_suite_hailo(void)
     RUN_TEST(test_infer_cleanup_on_midflight_failure);
 
     RUN_TEST(test_vdma_alloc_accepts_max_count);
+
+    /* CONFIG_STREAM (Phase 5.3, #281 tier-3) */
+    RUN_TEST(test_control_config_stream_rejects_null);
+    RUN_TEST(test_control_config_stream_rejects_bad_channel);
+    RUN_TEST(test_control_config_stream_rejects_when_not_running);
+    RUN_TEST(test_control_config_stream_input_wire_format);
+    RUN_TEST(test_control_config_stream_output_variant);
+    RUN_TEST(test_control_config_stream_timeout_no_response);
+    RUN_TEST(test_control_config_stream_propagates_fw_error);
 
     return UnityEnd();
 }

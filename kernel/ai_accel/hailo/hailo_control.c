@@ -473,13 +473,24 @@ static int control_check_response_header(
     uint32_t opcode = hailo_be32_to_cpu(hdr->common.opcode);
     uint32_t major  = hailo_be32_to_cpu(hdr->status.major_status);
     uint32_t minor  = hailo_be32_to_cpu(hdr->status.minor_status);
-    if (opcode != expected_opcode) {
-        WARN("hailo: %s response wrong opcode (got 0x%x)", op_name, opcode);
-        return HAILO_ERR_BAD_FIRMWARE;
-    }
+    /* Check status BEFORE opcode-echo: firmware's rejection path
+     * leaves the echoed opcode as 0xFFFFFFFF (observed on pi-5-1
+     * with a deliberately minimal CONFIG_STREAM request) rather
+     * than mirroring back the request opcode. Treat that as a
+     * firmware-error rather than a transport-level protocol
+     * violation — the status fields carry the actual reason and
+     * HAILO_ERR_IO is the right signal to the caller. True
+     * protocol violations (opcode is any other value AND status
+     * says success) still fall through as BAD_FIRMWARE. */
     if (major != 0) {
-        WARN("hailo: %s failed (major=%u minor=%u)", op_name, major, minor);
+        WARN("hailo: %s failed (major=0x%x minor=0x%x opcode_echo=0x%x)",
+             op_name, major, minor, opcode);
         return HAILO_ERR_IO;
+    }
+    if (opcode != expected_opcode) {
+        WARN("hailo: %s response wrong opcode "
+             "(got 0x%x resp_len=%u)", op_name, opcode, resp_len);
+        return HAILO_ERR_BAD_FIRMWARE;
     }
     return HAILO_OK;
 }
@@ -767,5 +778,201 @@ int hailo_control_upload_ccw(const struct hef_info *info,
     }
 
     if (out_bytes_uploaded) *out_bytes_uploaded = total;
+    return HAILO_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/* CONFIG_STREAM (opcode 0x03, PCIe variant)                                   */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Wire-format structs matching what HailoRT's
+ * control_protocol__pack_config_stream_base_request +
+ * pack_config_stream_pcie_{input,output}_request produce.
+ *
+ * Every uint32_t `*_length` field is big-endian on the wire. Every
+ * uint16_t / uint32_t scalar inside nn_stream_config is byte-
+ * swapped with htons (including the two u32 fields — matches the
+ * HailoRT quirk; firmware is authoritative). u8 fields and the
+ * packed PCIe variant payloads are raw bytes.
+ */
+struct hailo_ns_nn_stream_config_wire {
+    uint16_t core_bytes_per_buffer;
+    uint16_t core_buffers_per_frame;
+    uint16_t periph_bytes_per_buffer;
+    uint32_t periph_buffers_per_frame;   /* htons on a u32 — see note */
+    uint16_t feature_padding_payload;
+    uint32_t buffer_padding_payload;     /* htons on a u32 — see note */
+    uint16_t buffer_padding;
+    bool     is_core_hw_padding_config_in_dfc;
+} __attribute__((packed));
+
+/* Fixed prefix of the CONFIG_STREAM request payload, common to
+ * every transport variant. The `communication_params` bytes and
+ * their length prefix follow this prefix; they differ by variant. */
+struct hailo_ns_config_stream_prefix_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;            /* BE, = 7 */
+    uint32_t stream_index_length;        /* BE, = 1 */
+    uint8_t  stream_index;
+    uint32_t is_input_length;            /* BE, = 1 */
+    uint8_t  is_input;
+    uint32_t communication_type_length;  /* BE, = 4 */
+    uint32_t communication_type;         /* BE */
+    uint32_t skip_nn_stream_config_length; /* BE, = 1 */
+    uint8_t  skip_nn_stream_config;
+    uint32_t nn_stream_config_length;    /* BE, = sizeof(nn) */
+    struct hailo_ns_nn_stream_config_wire nn_stream_config;
+    uint32_t communication_params_length; /* BE, = sizeof(variant) */
+} __attribute__((packed));
+
+struct hailo_ns_pcie_input_wire {
+    uint8_t pcie_channel_index;
+    uint8_t pcie_dataflow_type;
+} __attribute__((packed));
+
+/* HailoRT does NOT byteswap desc_page_size at pack time — the u16
+ * rides the wire in native LE, matching the memcpy'd-raw
+ * convention used for firmware_version. Keep the field native. */
+struct hailo_ns_pcie_output_wire {
+    uint8_t  pcie_channel_index;
+    uint16_t desc_page_size;
+} __attribute__((packed));
+
+/* Full request = prefix + variant. Size depends on direction;
+ * both variants fit in the same BSS buffer. Input variant is 2 B
+ * so the 3 B output variant is the worst case. */
+struct hailo_ns_config_stream_req_wire {
+    struct hailo_ns_config_stream_prefix_wire prefix;
+    /* Worst-case variant bytes (sizeof(output_wire) = 3). Pad one
+     * byte for safe indexing via offsetof + sizeof. */
+    uint8_t  variant[4];
+} __attribute__((packed));
+
+/*
+ * Response: [response_header(24)] [parameter_count(4)]
+ *           [dataflow_manager_id_length(4)] [dataflow_manager_id(1)]
+ */
+struct hailo_ns_config_stream_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;
+    uint32_t dataflow_manager_id_length;
+    uint8_t  dataflow_manager_id;
+} __attribute__((packed));
+
+static struct hailo_ns_config_stream_req_wire  control_config_stream_req;
+static struct hailo_ns_config_stream_resp_wire control_config_stream_resp;
+
+int hailo_control_config_stream_pcie(
+    const struct hailo_stream_pcie_config *cfg,
+    uint8_t *out_dataflow_manager_id)
+{
+    if (!cfg || !out_dataflow_manager_id) return HAILO_ERR_INVAL;
+    /* Bool-as-int guard: firmware reads these as single bytes.
+     * The C bool type is 0/1 by construction, so no clamping is
+     * needed. We just forbid absurd pcie_channel_index values. */
+    if (cfg->pcie_channel_index >= 16) return HAILO_ERR_INVAL;
+
+    spin_lock(&control_lock);
+
+    uint32_t variant_len;
+    if (cfg->is_input) {
+        variant_len = (uint32_t)sizeof(struct hailo_ns_pcie_input_wire);
+    } else {
+        variant_len = (uint32_t)sizeof(struct hailo_ns_pcie_output_wire);
+    }
+
+    /* Populate the shared prefix. */
+    struct hailo_ns_config_stream_prefix_wire *p = &control_config_stream_req.prefix;
+    p->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    p->common.flags    = 0;
+    p->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    p->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_CONFIG_STREAM);
+    p->parameter_count = hailo_cpu_to_be32(7u);
+
+    p->stream_index_length   = hailo_cpu_to_be32(sizeof(p->stream_index));
+    p->stream_index          = cfg->stream_index;
+
+    p->is_input_length       = hailo_cpu_to_be32(sizeof(p->is_input));
+    p->is_input              = cfg->is_input ? 1u : 0u;
+
+    p->communication_type_length = hailo_cpu_to_be32(sizeof(p->communication_type));
+    p->communication_type    = hailo_cpu_to_be32(HAILO_COMMUNICATION_TYPE_PCIE);
+
+    p->skip_nn_stream_config_length = hailo_cpu_to_be32(sizeof(p->skip_nn_stream_config));
+    p->skip_nn_stream_config = cfg->skip_nn_stream_config ? 1u : 0u;
+
+    p->nn_stream_config_length = hailo_cpu_to_be32(sizeof(p->nn_stream_config));
+    /* htons on every field, including the u32 members that HailoRT
+     * also htons — see struct comment. */
+    p->nn_stream_config.core_bytes_per_buffer    = __builtin_bswap16(cfg->nn_stream_config.core_bytes_per_buffer);
+    p->nn_stream_config.core_buffers_per_frame   = __builtin_bswap16(cfg->nn_stream_config.core_buffers_per_frame);
+    p->nn_stream_config.periph_bytes_per_buffer  = __builtin_bswap16(cfg->nn_stream_config.periph_bytes_per_buffer);
+    p->nn_stream_config.periph_buffers_per_frame = __builtin_bswap16((uint16_t)cfg->nn_stream_config.periph_buffers_per_frame);
+    p->nn_stream_config.feature_padding_payload  = __builtin_bswap16(cfg->nn_stream_config.feature_padding_payload);
+    p->nn_stream_config.buffer_padding_payload   = __builtin_bswap16((uint16_t)cfg->nn_stream_config.buffer_padding_payload);
+    p->nn_stream_config.buffer_padding           = __builtin_bswap16(cfg->nn_stream_config.buffer_padding);
+    p->nn_stream_config.is_core_hw_padding_config_in_dfc
+        = cfg->nn_stream_config.is_core_hw_padding_config_in_dfc ? 1u : 0u;
+
+    p->communication_params_length = hailo_cpu_to_be32(variant_len);
+
+    /* Write the variant bytes into control_config_stream_req.variant,
+     * which begins immediately after the prefix on the wire. */
+    if (cfg->is_input) {
+        struct hailo_ns_pcie_input_wire v = {
+            .pcie_channel_index = cfg->pcie_channel_index,
+            .pcie_dataflow_type = cfg->pcie_dataflow_type,
+        };
+        memcpy(control_config_stream_req.variant, &v, sizeof(v));
+    } else {
+        struct hailo_ns_pcie_output_wire v = {
+            .pcie_channel_index = cfg->pcie_channel_index,
+            .desc_page_size     = cfg->desc_page_size, /* native LE */
+        };
+        memcpy(control_config_stream_req.variant, &v, sizeof(v));
+    }
+
+    uint32_t req_len = (uint32_t)(offsetof(struct hailo_ns_config_stream_req_wire,
+                                           variant)
+                                  + variant_len);
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_config_stream_req, req_len,
+                                             &control_config_stream_resp,
+                                             sizeof(control_config_stream_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(&control_config_stream_req, req_len,
+                                            &control_config_stream_resp,
+                                            sizeof(control_config_stream_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    /* Copy the header out of the packed response struct before
+     * checking, to dodge -Waddress-of-packed-member. */
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_config_stream_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_CONFIG_STREAM,
+                                       "CONFIG_STREAM");
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    if (resp_len < sizeof(control_config_stream_resp)) {
+        WARN("hailo: CONFIG_STREAM response short (%u < %u)",
+             resp_len, (unsigned)sizeof(control_config_stream_resp));
+        spin_unlock(&control_lock);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    *out_dataflow_manager_id = control_config_stream_resp.dataflow_manager_id;
+    spin_unlock(&control_lock);
     return HAILO_OK;
 }

@@ -168,7 +168,7 @@ from a prior driver (bare-metal x86-64 / UEFI-direct Jetson).
 | Platform shim (`gsp_platform_ops`) | N/A | N/A | Complete (11/11 fns, `kernel/arch/arm64/nvidia_gsp_platform.c`) | Complete (11/11 fns) |
 | Engine reset + PIO upload | N/A | N/A | Working on GSP Falcon | Working on GSP + SEC2 |
 | Signed ucode authentication | N/A | N/A | Blocked: GSP priv-lockdown | FWSEC-FRTS 3/3; Booter Load blocked |
-| Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU Phase 5.3 + 5.4 software-complete; firmware boot + control-channel RPCs verified; `hailo infer` pipeline runs (awaits compiled `.hef` + CONFIG_STREAM context for end-to-end)** | CPU (NEON) | CPU (SSE inline-asm) |
+| Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU Phase 5.3 + 5.4 software-complete; firmware boot + IDENTIFY / WRITE_MEMORY / READ_MEMORY / CONFIG_STREAM RPCs verified; `hailo infer` pipeline runs (awaits compiled `.hef` + CONFIG_STREAM context for end-to-end)** (AI HAT+ via pcie1) | CPU (NEON) | CPU (SSE inline-asm) |
 | AI scheduler MLP | CPU | CPU (routed through `inference_device` abstraction) | CPU | CPU |
 
 ### GPU Bringup Stack (Portable)

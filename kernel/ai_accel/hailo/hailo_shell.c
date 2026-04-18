@@ -14,6 +14,9 @@
  *                            device-side address A; hex-dump.
  *   hailo poke A V         — WRITE_MEMORY a single 32-bit value V at
  *                            device-side address A (little-endian).
+ *   hailo cfgstream D C    — CONFIG_STREAM probe (D in {in, out};
+ *                            C = pcie channel hex u4); prints
+ *                            assigned dataflow_manager_id.
  *   hailo infer B          — run an end-to-end VDMA inference smoke test
  *                            with a synthetic B-byte tensor.
  *   hailo cfgdump          — (Pi 5 only) raw 64-byte bus 1 config dump.
@@ -398,14 +401,60 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    if (argc >= 2 && strcmp(argv[1], "cfgstream") == 0) {
+        /* `hailo cfgstream <dir> <channel>` — issue a minimal PCIe
+         * CONFIG_STREAM (opcode 0x03) to pi-5-1 firmware. Most
+         * nn_stream_config fields are left zero because this
+         * command is primarily a transport-liveness probe — a real
+         * caller would pull these values from the .hef. */
+        if (argc < 4) {
+            shell_puts("usage: hailo cfgstream <in|out> <channel-hex>\n");
+            return 0;
+        }
+        bool is_input;
+        if (strcmp(argv[2], "in") == 0)       is_input = true;
+        else if (strcmp(argv[2], "out") == 0) is_input = false;
+        else {
+            shell_printf("hailo: cfgstream: direction '%s' not in "
+                         "{in, out}\n", argv[2]);
+            return 0;
+        }
+        uint32_t ch = 0;
+        if (parse_hex_u32(argv[3], &ch) != 0 || ch >= 16) {
+            shell_printf("hailo: cfgstream: channel '%s' not a hex u4\n",
+                         argv[3]);
+            return 0;
+        }
+
+        struct hailo_stream_pcie_config cfg = {0};
+        cfg.stream_index          = 0;
+        cfg.is_input              = is_input;
+        cfg.skip_nn_stream_config = true;   /* minimal probe */
+        cfg.pcie_channel_index    = (uint8_t)ch;
+        if (is_input) {
+            cfg.pcie_dataflow_type = (uint8_t)HAILO_PCIE_DATAFLOW_TYPE_CONTINUOUS;
+        } else {
+            cfg.desc_page_size = 512;
+        }
+
+        uint8_t dmid = 0;
+        int rc = hailo_control_config_stream_pcie(&cfg, &dmid);
+        if (rc != HAILO_OK) {
+            shell_printf("hailo: cfgstream failed (%d)\n", rc);
+            return 0;
+        }
+        shell_printf("hailo: cfgstream %s ch=%u -> dataflow_manager_id=0x%02x\n",
+                     is_input ? "in" : "out", (unsigned)ch, dmid);
+        return 0;
+    }
+
     if (argc >= 2 && strcmp(argv[1], "infer") == 0) {
         /* `hailo infer <hex-bytes>` — run an end-to-end inference
          * smoke test with a synthetic tensor of the given size.
          * Uses channel 0 (input) / 1 (output) and data_id 0 by
          * default — these would be HEF-derived in a real call.
-         * Fails on Pi 5 today (BAR2 not wired until pcie1 training
-         * lands); exercises the hailo_infer_run pipeline end-to-end
-         * in QEMU tests. */
+         * Fails on Pi 5 today (no active stream context); exercises
+         * the hailo_infer_run pipeline end-to-end in QEMU tests. */
         if (argc < 3) {
             shell_puts("usage: hailo infer <hex-bytes>\n");
             return 0;
@@ -447,7 +496,7 @@ static int cmd_hailo(int argc, char *argv[])
                          bytes, (unsigned long)elapsed);
         } else {
             shell_printf("hailo: infer failed (%d) — expected until "
-                         "BAR2 + CONFIG_STREAM context land\n", rc);
+                         "CONFIG_STREAM context lands\n", rc);
         }
         pmm_free_pages(in,  pages);
         pmm_free_pages(out, pages);
@@ -462,7 +511,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name    = "hailo",
     .handler = cmd_hailo,
-    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek <addr> [len], poke <addr> <u32>, cfgdump)",
+    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump)",
     .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
 };
 
