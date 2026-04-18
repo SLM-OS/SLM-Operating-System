@@ -554,21 +554,29 @@ void shell_io_tcp_foreach(tcp_session_visitor_t visitor, void *user_ctx)
 
 bool shell_io_tcp_kick(uint32_t session_id)
 {
+    /* Hold pool_lock across the whole scan AND the `closed` store so
+     * an intervening ctx_free + ctx_alloc can't re-assign the slot to
+     * a different session between our match check and the store —
+     * otherwise we'd disconnect an innocent session that happened to
+     * land in this slot during the kick's context switch. Pool_lock
+     * precedes rx_lock in the lock ordering (no path holds rx_lock
+     * then grabs pool_lock), so setting `closed` directly under
+     * pool_lock is safe. `closed` is volatile, so the unlocked
+     * reader in tcp_read_char will observe the new value on its
+     * next iteration; we don't need rx_lock for the store itself
+     * (it's there to guard head/tail on the recv path, not the flag). */
+    bool kicked = false;
+    irq_flags_t flags = spin_lock_irqsave(&pool_lock);
     for (uint32_t i = 0; i < MAX_TCP_SHELL_SESSIONS; i++) {
         struct tcp_shell_ctx *ctx = &ctx_pool[i];
-        irq_flags_t flags = spin_lock_irqsave(&pool_lock);
-        bool match = ctx->in_use && ctx->session_id == session_id;
-        spin_unlock_irqrestore(&pool_lock, flags);
-        if (!match) continue;
-
-        /* Close the session: shell_read_line will return -1 on its
-         * next read once the RX ring drains, the REPL exits, and the
-         * normal teardown path takes over. We do NOT set shell_done
-         * here — that's the shell task's responsibility. */
-        mark_closed(ctx);
-        return true;
+        if (ctx->in_use && ctx->session_id == session_id) {
+            ctx->closed = true;
+            kicked = true;
+            break;
+        }
     }
-    return false;
+    spin_unlock_irqrestore(&pool_lock, flags);
+    return kicked;
 }
 
 void shell_io_tcp_poll(void)

@@ -82,8 +82,16 @@ typedef bool (*tcp_session_visitor_t)(const struct tcp_session_info *info,
                                       void *ctx);
 
 /* Iterate every active TCP session and call `visitor` with a snapshot
- * of its metadata. Safe to call from the shell task. Visitor must not
- * re-enter shell_io_tcp functions (could deadlock). */
+ * of its metadata. Safe to call from the shell task.
+ *
+ * Concurrency model:
+ *   - Each slot's metadata is snapshotted under pool_lock.
+ *   - The visitor is called with the snapshot AFTER the lock is
+ *     released for that slot, so the visitor may do arbitrary work
+ *     (print, push into a Lua table, ...) without holding a spinlock.
+ *   - The snapshot is a value copy; the visitor sees a consistent
+ *     set of fields even if the underlying session is freed or
+ *     reused between snapshot and callback. */
 void shell_io_tcp_foreach(tcp_session_visitor_t visitor, void *ctx);
 
 /* Force-disconnect the session with the given id. Marks the shell_io

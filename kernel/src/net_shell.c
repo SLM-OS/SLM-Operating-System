@@ -311,9 +311,9 @@ static int cmd_netstat(int argc, char *argv[]) {
 /*                                                                            */
 /* The `telnetd` name supersedes `tcpsh` from Phases 1-2. `tcpsh` is still    */
 /* registered as an alias so existing scripts and muscle memory keep working. */
+/* (sys_now() for session age display comes from arch/sys_arch.h included     */
+/*  at the top of this file.)                                                 */
 /* -------------------------------------------------------------------------- */
-
-#include "arch/sys_arch.h"   /* sys_now() for session age display */
 
 /* Parse an unsigned decimal in [0, 65535]. Returns -1 on error. */
 static int parse_port(const char *s, uint16_t *out)

@@ -42,14 +42,13 @@ static char *lstrip(char *s)
     return s;
 }
 
-/* Trim trailing whitespace + CR by writing NUL. Returns new length. */
-static size_t rstrip(char *s)
+/* Trim trailing whitespace + CR by writing NUL in place. */
+static void rstrip(char *s)
 {
     size_t n = strlen(s);
     while (n > 0 && (is_ws(s[n-1]) || s[n-1] == '\r')) {
         s[--n] = '\0';
     }
-    return n;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -92,7 +91,16 @@ static bool parse_u8(const char *s, uint8_t *out)
     return true;
 }
 
-/* Parse dotted-quad IPv4 into network-byte-order uint32. */
+/* Parse dotted-quad IPv4 into network-byte-order uint32.
+ *
+ * The shifts below place octet 0 in the low 8 bits and octet 3 in
+ * the high 8 bits of `addr`. On a little-endian host, storing that
+ * uint32 to memory yields the bytes in network byte order (octet 0
+ * first at the lowest address), matching lwIP's ip4_addr_t.addr
+ * layout. A big-endian host would need the opposite shifts, so we
+ * fail the build if anyone retargets to a BE architecture. */
+_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+               "parse_ipv4 assumes a little-endian host to match lwIP's NBO addr layout");
 static bool parse_ipv4(const char *s, uint32_t *out)
 {
     uint32_t addr = 0;
