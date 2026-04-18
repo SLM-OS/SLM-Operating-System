@@ -34,6 +34,15 @@ struct task;
  * this header stays lua-agnostic; lua_shell.c casts when it assigns. */
 struct lua_State;
 
+/* Default terminal size if NAWS hasn't been negotiated. Matches the
+ * venerable 80x24 fallback for a VT100. */
+#define SHELL_DEFAULT_COLS 80
+#define SHELL_DEFAULT_ROWS 24
+
+/* Max terminal-type string (mirrors telnet.h's TELNET_TTYPE_MAX but
+ * this header doesn't pull in telnet.h). */
+#define SHELL_TERM_TYPE_MAX 32
+
 struct shell_session {
     uint32_t         id;                  /* 0 = console; 1..N = TCP */
     struct shell_io *io;                  /* input/output backend */
@@ -49,6 +58,27 @@ struct shell_session {
      * the session closes. Access via void * to avoid pulling <lua.h>
      * into this header. */
     void            *lua;
+
+    /* Terminal metadata.
+     *
+     * For TCP sessions these are populated from telnet NAWS /
+     * TERMINAL-TYPE negotiation. For the console session they stay
+     * at the 80x24 defaults (UART has no way to learn window size).
+     * Commands like `top` use these dimensions to lay out output;
+     * term_type lets commands decide whether to emit ANSI colours.
+     * Updated from net_pump context on subneg, read by the shell
+     * task — volatile so the reader doesn't need a barrier. */
+    volatile uint16_t window_cols;
+    volatile uint16_t window_rows;
+    char              term_type[SHELL_TERM_TYPE_MAX];
+
+    /* Interrupt request (telnet IAC IP / Ctrl+C). Set from the
+     * net_pump tcp_recv callback when a telnet client sends IP;
+     * long-running shell commands can poll shell_interrupt_requested()
+     * and bail out cleanly. shell_read_line also treats this like a
+     * ^C at the prompt. Cleared by shell_clear_interrupt() once the
+     * command has acted on it. */
+    volatile bool     interrupt_requested;
 };
 
 /* Get the singleton console session (UART-backed). Always non-NULL
@@ -84,5 +114,14 @@ void shell_session_unbind(struct task *t);
  * dispatch without first calling shell_init() still get a valid
  * session. Never returns NULL. */
 struct shell_session *shell_session_current(void);
+
+/* True if the current session has a pending interrupt request that
+ * hasn't been cleared yet. Long-running commands should poll this
+ * at convenient yield points and bail out early when set. */
+bool shell_interrupt_requested(void);
+
+/* Clear the current session's interrupt flag. Call after acting on
+ * a detected interrupt so the next one can re-fire. */
+void shell_clear_interrupt(void);
 
 #endif /* SHELL_SESSION_H */

@@ -55,6 +55,9 @@ int test_suite_shell(void);
 /* Shell session pool / per-task binding tests */
 int test_suite_shell_session(void);
 
+/* Telnet IAC state machine tests */
+int test_suite_telnet(void);
+
 /* VMM/TLB tests */
 int test_suite_vmm(void);
 

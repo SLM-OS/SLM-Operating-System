@@ -47,6 +47,17 @@ static bool                  console_session_ready;
 static struct shell_session tcp_session_pool[MAX_TCP_SHELL_SESSIONS];
 static spinlock_t            pool_lock = SPINLOCK_INIT;
 
+static void session_reset_defaults(struct shell_session *s)
+{
+    s->cwd[0]             = '/';
+    s->cwd[1]             = '\0';
+    s->lua                = NULL;
+    s->window_cols        = SHELL_DEFAULT_COLS;
+    s->window_rows        = SHELL_DEFAULT_ROWS;
+    s->term_type[0]       = '\0';
+    s->interrupt_requested = false;
+}
+
 void shell_session_init(void)
 {
     if (console_session_ready) {
@@ -55,11 +66,9 @@ void shell_session_init(void)
 
     console_session.id         = 0;
     console_session.io         = shell_io_uart();
-    console_session.cwd[0]     = '/';
-    console_session.cwd[1]     = '\0';
     console_session.owner_task = NULL;
     console_session.in_use     = true;
-    console_session.lua        = NULL;
+    session_reset_defaults(&console_session);
 
     console_session_ready = true;
 }
@@ -126,9 +135,7 @@ struct shell_session *shell_session_alloc(void)
             s->id         = i + 1;   /* 0 reserved for console */
             s->io         = NULL;
             s->owner_task = NULL;
-            s->lua        = NULL;
-            s->cwd[0]     = '/';
-            s->cwd[1]     = '\0';
+            session_reset_defaults(s);
             spin_unlock_irqrestore(&pool_lock, flags);
             return s;
         }
@@ -148,4 +155,18 @@ void shell_session_free(struct shell_session *s)
     s->owner_task = NULL;
     s->lua        = NULL;
     spin_unlock_irqrestore(&pool_lock, flags);
+}
+
+bool shell_interrupt_requested(void)
+{
+    struct shell_session *s = shell_session_current();
+    return s && s->interrupt_requested;
+}
+
+void shell_clear_interrupt(void)
+{
+    struct shell_session *s = shell_session_current();
+    if (s) {
+        s->interrupt_requested = false;
+    }
 }

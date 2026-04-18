@@ -26,6 +26,7 @@
 #include "spinlock.h"
 #include "string.h"
 #include "task.h"
+#include "telnet.h"
 #include "timer.h"
 
 #include <stddef.h>
@@ -86,6 +87,13 @@ struct tcp_shell_ctx {
     /* lwIP pcb — net_pump context only. NULL after close. */
     struct tcp_pcb   *pcb;
 
+    /* Associated shell_session — populated after shell_io_tcp_create
+     * by the tcp_shell_server accept path. Lets the telnet parser
+     * update window_cols / term_type / interrupt_requested directly
+     * on the session. May be NULL briefly between create and attach
+     * if the caller hasn't set it yet; telnet callbacks tolerate NULL. */
+    struct shell_session *session;
+
     /* RX ring: bytes from peer waiting for the shell task to read. */
     spinlock_t        rx_lock;
     uint8_t           rx_buf[TCP_SHELL_RING_SIZE];
@@ -97,6 +105,12 @@ struct tcp_shell_ctx {
     uint8_t           tx_buf[TCP_SHELL_RING_SIZE];
     uint32_t          tx_head;
     uint32_t          tx_tail;
+
+    /* Telnet parser — state machine between the peer and the RX
+     * ring. Fed byte-by-byte from on_recv; emits data bytes into
+     * the ring via telnet_inject_rx and sends response IACs via
+     * telnet_send_to_peer below. */
+    struct telnet_parser telnet;
 
     /* io vtable embedded so we don't heap-allocate. io.ctx == this. */
     struct shell_io   io;
@@ -118,6 +132,88 @@ static inline uint32_t ring_free(uint32_t head, uint32_t tail)
 {
     return TCP_SHELL_RING_MASK - ring_used(head, tail);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Telnet parser callbacks                                                    */
+/*                                                                            */
+/* These run in net_pump context (invoked from on_recv or from                */
+/* shell_io_tcp_create). Data bytes go into the RX ring (same lock as         */
+/* tcp_recv's direct writes in the raw-TCP Phase 1 path). Response bytes      */
+/* go straight out via tcp_write — it's safe from net_pump context and        */
+/* avoids contending with the shell task's outbound TX ring writes.           */
+/* -------------------------------------------------------------------------- */
+
+static void telnet_inject_rx(void *opaque, uint8_t byte)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)opaque;
+    irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
+    if (ring_free(ctx->rx_head, ctx->rx_tail) > 0) {
+        ctx->rx_buf[ctx->rx_head & TCP_SHELL_RING_MASK] = byte;
+        ctx->rx_head = (ctx->rx_head + 1) & TCP_SHELL_RING_MASK;
+    }
+    /* Ring full — drop. A polite peer stops once the TCP window
+     * stops advancing; see on_recv for the window-slide logic. */
+    spin_unlock_irqrestore(&ctx->rx_lock, flags);
+}
+
+static void telnet_send_to_peer(void *opaque, const uint8_t *data, size_t len)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)opaque;
+    if (!ctx->pcb || len == 0) {
+        return;
+    }
+    if (len > 0xFFFF) len = 0xFFFF;
+    /* TCP_WRITE_FLAG_COPY because `data` may live on the parser's
+     * stack (e.g. a 3-byte IAC response) which goes out of scope
+     * before lwIP actually transmits. */
+    (void)tcp_write(ctx->pcb, data, (uint16_t)len, TCP_WRITE_FLAG_COPY);
+    /* tcp_output is called once at the end of on_recv; individual
+     * response writes don't need to flush. */
+}
+
+static void telnet_on_naws(void *opaque, uint16_t cols, uint16_t rows)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)opaque;
+    if (ctx->session) {
+        ctx->session->window_cols = cols;
+        ctx->session->window_rows = rows;
+    }
+}
+
+static void telnet_on_term_type(void *opaque, const char *term)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)opaque;
+    if (ctx->session && term) {
+        size_t n = strlen(term);
+        if (n >= sizeof(ctx->session->term_type)) {
+            n = sizeof(ctx->session->term_type) - 1;
+        }
+        for (size_t i = 0; i < n; i++) {
+            ctx->session->term_type[i] = term[i];
+        }
+        ctx->session->term_type[n] = '\0';
+    }
+}
+
+static void telnet_on_interrupt(void *opaque)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)opaque;
+    if (ctx->session) {
+        ctx->session->interrupt_requested = true;
+    }
+    /* Also inject 0x03 so a blocking shell_read_line sees ^C and
+     * cancels the current line. */
+    telnet_inject_rx(ctx, 0x03);
+}
+
+static const struct telnet_ops telnet_ops_template = {
+    .inject_rx     = telnet_inject_rx,
+    .send_to_peer  = telnet_send_to_peer,
+    .on_naws       = telnet_on_naws,
+    .on_term_type  = telnet_on_term_type,
+    .on_interrupt  = telnet_on_interrupt,
+    .ctx           = NULL,   /* overwritten per-ctx in shell_io_tcp_create */
+};
 
 /* -------------------------------------------------------------------------- */
 /* shell_io vtable                                                            */
@@ -257,34 +353,28 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
         return ERR_OK;
     }
 
-    /* Copy payload into the ring buffer under rx_lock. */
+    /* Feed every byte through the telnet parser. The parser pushes
+     * decoded data bytes into the RX ring via telnet_inject_rx and
+     * emits option-negotiation replies via telnet_send_to_peer. Ring
+     * overflow is still possible (telnet_inject_rx drops on a full
+     * ring) but is rare in practice because (a) IAC sequences shrink
+     * the byte stream on average, and (b) a polite peer slows down
+     * once tcp_recved stops advancing the window. */
     uint16_t consumed = 0;
     struct pbuf *q = p;
     while (q) {
         const uint8_t *data = (const uint8_t *)q->payload;
-        uint16_t len = q->len;
-
-        irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
-        uint32_t avail = ring_free(ctx->rx_head, ctx->rx_tail);
-        uint16_t to_copy = (len < avail) ? len : (uint16_t)avail;
-        for (uint16_t i = 0; i < to_copy; i++) {
-            ctx->rx_buf[ctx->rx_head & TCP_SHELL_RING_MASK] = data[i];
-            ctx->rx_head = (ctx->rx_head + 1) & TCP_SHELL_RING_MASK;
-        }
-        spin_unlock_irqrestore(&ctx->rx_lock, flags);
-
-        consumed += to_copy;
-        if (to_copy < len) {
-            /* Ring is full — drop the rest. This throttles a
-             * misbehaving peer; a polite peer will slow down once
-             * we stop advancing the TCP window. */
-            break;
-        }
+        telnet_rx(&ctx->telnet, data, q->len);
+        consumed += q->len;
         q = q->next;
     }
 
     if (consumed > 0) {
         tcp_recved(pcb, consumed);
+        /* Flush any telnet responses the parser queued on the pcb. */
+        if (ctx->pcb) {
+            tcp_output(ctx->pcb);
+        }
     }
     pbuf_free(p);
     return ERR_OK;
@@ -352,7 +442,8 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
         return NULL;
     }
 
-    ctx->pcb = pcb;
+    ctx->pcb     = pcb;
+    ctx->session = NULL;   /* Populated later by shell_io_tcp_attach_session. */
 
     ctx->io.read_char     = tcp_read_char;
     ctx->io.try_read_char = tcp_try_read_char;
@@ -362,13 +453,32 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
     ctx->io.is_open       = tcp_is_open;
     ctx->io.ctx           = ctx;
 
+    /* Initialize the telnet parser with our callback set. ctx->ctx
+     * is the opaque pointer the parser hands back to every callback. */
+    struct telnet_ops ops = telnet_ops_template;
+    ops.ctx = ctx;
+    telnet_init(&ctx->telnet, &ops);
+
     /* Wire lwIP callbacks. `arg` is the ctx so callbacks can find it. */
     tcp_arg(pcb, ctx);
     tcp_recv(pcb, on_recv);
     tcp_err(pcb, on_err);
     tcp_sent(pcb, on_sent);
 
+    /* Send the initial option-negotiation burst. Raw-nc clients just
+     * see 12 bytes of 0xFF-prefixed noise; telnet clients transition
+     * into character-at-a-time server-echoed mode. tcp_output flushes. */
+    telnet_send_initial_negotiation(&ctx->telnet);
+    tcp_output(pcb);
+
     return &ctx->io;
+}
+
+void shell_io_tcp_attach_session(struct shell_io *io, struct shell_session *s)
+{
+    if (!io) return;
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
+    ctx->session = s;
 }
 
 void shell_io_tcp_destroy(struct shell_io *io)
