@@ -5,6 +5,7 @@
  *   hailo          — dump driver state, IDs, BAR map.
  *   hailo probe    — re-run hailo_probe and print the result.
  *   hailo boot     — upload embedded firmware and bring the NPU to RUNNING.
+ *   hailo load P   — read a `.hef` model at VFS path P and dump metadata.
  *   hailo fw       — report firmware version (post-boot only).
  *   hailo cfgdump  — (Pi 5 only) raw 64-byte bus 1 config dump.
  *
@@ -14,8 +15,12 @@
  */
 
 #include "hailo.h"
+#include "hef_header.h"
+#include "hef_parser.h"
+#include "pmm.h"
 #include "shell.h"
 #include "uart.h"
+#include "vfs.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -94,6 +99,99 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    if (argc >= 2 && strcmp(argv[1], "load") == 0) {
+        if (argc < 3) {
+            shell_puts("usage: hailo load <vfs-path>\n");
+            return 0;
+        }
+        const char *path = argv[2];
+
+        struct vfs_entry_info info = {0};
+        if (vfs_stat_path(path, &info) != 0) {
+            shell_printf("hailo: stat '%s' failed\n", path);
+            return 0;
+        }
+        if (info.size < 12) {
+            shell_printf("hailo: '%s' too small (%lu bytes)\n",
+                         path, (unsigned long)info.size);
+            return 0;
+        }
+
+        /* Two-pass read: the outer header (up to 32 bytes) tells us
+         * the proto body size, which may be multi-MB. Stage 1 pulls
+         * just the header into a stack buffer; stage 2 PMM-allocates
+         * the body. */
+        uint8_t hdr_buf[64];
+        size_t hdr_read = info.size < sizeof(hdr_buf) ? info.size : sizeof(hdr_buf);
+        int n = vfs_read_path(path, (char *)hdr_buf, hdr_read, 0);
+        if (n < 0) {
+            shell_printf("hailo: read '%s' failed\n", path);
+            return 0;
+        }
+
+        struct hef_outer_header outer = {0};
+        int rc = hef_parse_outer_header(hdr_buf, (size_t)n, &outer);
+        if (rc != HEF_OK) {
+            shell_printf("hailo: outer-header parse failed (%d)\n", rc);
+            return 0;
+        }
+        shell_printf("hailo: hef v%u proto_size=%u (total %lu bytes)\n",
+                     outer.version, outer.proto_size,
+                     (unsigned long)info.size);
+
+        /* Allocate a contiguous page-aligned buffer for the proto
+         * body. PMM rounds up to the next power-of-2 page count. */
+        size_t body_pages = (outer.proto_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        if (body_pages == 0) body_pages = 1;
+        void *body = pmm_alloc_pages(body_pages);
+        if (!body) {
+            shell_printf("hailo: pmm_alloc_pages(%lu) failed for proto body\n",
+                         (unsigned long)body_pages);
+            return 0;
+        }
+
+        n = vfs_read_path(path, (char *)body, outer.proto_size,
+                          outer.proto_offset);
+        if (n < 0 || (uint32_t)n < outer.proto_size) {
+            shell_printf("hailo: read proto body failed (%d of %u)\n",
+                         n, outer.proto_size);
+            pmm_free_pages(body, body_pages);
+            return 0;
+        }
+
+        struct hef_info meta;
+        rc = hef_parse_body(body, outer.proto_size, &meta);
+        pmm_free_pages(body, body_pages);
+
+        if (rc != HEF_PARSER_OK) {
+            shell_printf("hailo: proto decode failed (%d)\n", rc);
+            return 0;
+        }
+
+        shell_printf("  hw_arch = %s (%u)\n",
+                     meta.hw_arch_known ?
+                         (meta.hw_arch == HEF_HW_ARCH_HAILO8   ? "hailo8"  :
+                          meta.hw_arch == HEF_HW_ARCH_HAILO8L  ? "hailo8l" :
+                          meta.hw_arch == HEF_HW_ARCH_HAILO15H ? "hailo15h":
+                          meta.hw_arch == HEF_HW_ARCH_HAILO15M ? "hailo15m":
+                          meta.hw_arch == HEF_HW_ARCH_HAILO10H ? "hailo10h":
+                          "unknown") : "absent",
+                     meta.hw_arch);
+        if (meta.sdk_version[0]) {
+            shell_printf("  sdk_version = %s\n", meta.sdk_version);
+        }
+        shell_printf("  network_groups = %u\n", meta.network_group_count);
+        if (meta.first_network_group[0]) {
+            shell_printf("  first network group = %s\n",
+                         meta.first_network_group);
+        }
+        if (meta.string_truncated) {
+            shell_printf("  (note: at least one string was truncated "
+                         "at %u bytes)\n", (unsigned)HEF_PARSER_MAX_STR);
+        }
+        return 0;
+    }
+
     if (argc >= 2 && strcmp(argv[1], "fw") == 0) {
         uint32_t maj = 0, min = 0, rev = 0;
         int rc = hailo_get_firmware_version(&maj, &min, &rev);
@@ -114,7 +212,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name    = "hailo",
     .handler = cmd_hailo,
-    .help    = "Hailo NPU control (hailo, probe, boot, fw, cfgdump)",
+    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, cfgdump)",
     .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
 };
 

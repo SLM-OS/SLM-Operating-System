@@ -1,0 +1,22 @@
+# nanopb options for hef.proto
+#
+# Pattern syntax: "Name type:FT_X" where Name matches message or
+# field names ("Msg.field" for a single field, "Msg.*" for all
+# fields of a message, "*" for everything).
+#
+# Strategy:
+#   - `*` → all fields default to FT_CALLBACK. This covers the ~69
+#     variable-length fields (repeated / bytes / string / map) in
+#     hef.proto without enumerating each one. Scalar fields also
+#     route through callbacks, which is slower but lets us avoid
+#     having to spell out max_size / max_count bounds we don't know
+#     for an arbitrary Hailo-compiled model.
+#
+# hef_parser.c attaches pb_callback_t handlers on just the fields
+# we consume today (header.hw_arch, header.timestamp, the list of
+# network groups, etc.). nanopb's default no-op callback silently
+# drops the rest while still walking the wire format — necessary
+# because skipping a length-delimited field requires knowing its
+# length, which means the decoder has to read the value to advance.
+
+* type:FT_CALLBACK

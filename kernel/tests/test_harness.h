@@ -83,6 +83,9 @@ int test_suite_hailo(void);
 /* HEF outer-header validator + nanopb freestanding smoke test */
 int test_suite_hef(void);
 
+/* HEF protobuf body parser (nanopb-driven, synthetic wire-format blobs) */
+int test_suite_hef_parser(void);
+
 /* LittleFS integration tests */
 int test_suite_littlefs(void);
 
