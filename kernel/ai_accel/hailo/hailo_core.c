@@ -6,19 +6,22 @@
  * This file only manipulates offsets and state — it never
  * dereferences an MMIO pointer directly.
  *
- * Phase 3 scope:
- *   - hailo_init() validates the ops table.
+ * Current scope:
+ *   - hailo_init() validates the ops table; resets state to UNINIT.
  *   - hailo_probe() reads vendor ID from BAR0 and, as a liveness
  *     check, reads the boot_status register through the ATR[0]
  *     window into device SRAM.
  *   - hailo_validate_firmware() parses the outer firmware header.
- *   - Boot / control-channel / VDMA are stubbed out as
- *     HAILO_ERR_UNSUPPORTED (Phase 4 wires them up).
+ *   - hailo_boot() uploads the app + core firmware sections via
+ *     ATR[0]+BAR4, writes the trigger doorbell, and polls ATR[1]
+ *     for the FW-loaded handshake.
+ *   - Control-channel RPC / VDMA / inference are Phase 5 stubs
+ *     returning HAILO_ERR_UNSUPPORTED.
  *
  * State machine:
  *   UNINIT --init--> UNINIT (ops installed)
  *   UNINIT --probe--> PROBED
- *   PROBED --boot(Phase 4)--> FIRMWARE_ARMED --> BOOTING --> RUNNING
+ *   PROBED --boot--> FIRMWARE_ARMED --> BOOTING --> RUNNING
  *   * --failure--> FAILED
  */
 
@@ -48,7 +51,7 @@ const struct hailo_fw_addrs hailo_fw_addrs_hailo8 = {
 /*
  * Driver state machine. Transitions are single-threaded by design:
  * hailo_init and hailo_probe run from the main-kernel boot path on
- * CPU 0, and hailo_boot (Phase 4) runs from the shell (also CPU 0).
+ * CPU 0, and hailo_boot runs from the shell (also CPU 0).
  * Readers on other CPUs (e.g. `hailo` shell command from a future
  * per-CPU shell) get a best-effort snapshot — the value is a small
  * enum so the read is atomic on ARM64. If Phase 5 introduces a

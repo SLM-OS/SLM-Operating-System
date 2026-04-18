@@ -278,8 +278,8 @@ const char      *hailo_state_str(enum hailo_state s);
  *
  * Returns HAILO_ERR_NODEV if called before hailo_boot() succeeds.
  *
- * Implemented in Phase 4 once the control channel is live;
- * currently returns HAILO_ERR_UNSUPPORTED as a placeholder.
+ * Lands in Phase 5 once the control channel is live; currently
+ * returns HAILO_ERR_UNSUPPORTED as a placeholder.
  */
 int hailo_get_firmware_version(uint32_t *out_major, uint32_t *out_minor,
                                uint32_t *out_revision);
@@ -287,13 +287,12 @@ int hailo_get_firmware_version(uint32_t *out_major, uint32_t *out_minor,
 /*
  * Write the boot firmware image and trigger boot.
  *
- * @fw_bytes, @fw_size: the concatenated app-FW header + code + cert
- *                      headers + cert blobs (the raw `hailo8_fw.bin`
- *                      file as shipped by Hailo).
+ * @fw_bytes, @fw_size: the raw `hailo8_fw.bin` file as shipped by
+ *                      Hailo. Layout: [app_header, app_code,
+ *                      cert_header, cert_key, cert_content,
+ *                      core_header, core_code].
  * Returns HAILO_OK once the FW-loaded ATR[1] flag is observed, or
  * a negative error on timeout / validation failure.
- *
- * Implemented in Phase 4 — currently returns HAILO_ERR_UNSUPPORTED.
  */
 int hailo_boot(const void *fw_bytes, size_t fw_size);
 

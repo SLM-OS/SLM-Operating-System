@@ -570,6 +570,19 @@ static void test_boot_succeeds_and_uploads_sections(void)
     TEST_ASSERT_EQUAL_INT(0, memcmp(
         &mock_sram[hailo_fw_addrs_hailo8.boot_cont_cert - MOCK_SRAM_BASE],
         content_src, 12));
+
+    /* Core section: build_fw_blob appends [core_header, core_code(4)]
+     * after the cert content. Verify both land at their device-side
+     * addresses — core_fw_header (0xA0000) and core_code_ram_base
+     * (0xC0000) for Hailo-8. */
+    uint8_t *core_hdr_src  = content_src + 12;
+    uint8_t *core_code_src = core_hdr_src + sizeof(struct hailo_firmware_header);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(
+        &mock_sram[hailo_fw_addrs_hailo8.core_fw_header - MOCK_SRAM_BASE],
+        core_hdr_src, sizeof(struct hailo_firmware_header)));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(
+        &mock_sram[hailo_fw_addrs_hailo8.core_code_ram_base - MOCK_SRAM_BASE],
+        core_code_src, 4));
 }
 
 static void test_boot_rejects_missing_core_fw(void)
@@ -596,18 +609,65 @@ static void test_boot_rejects_missing_core_fw(void)
     TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_FAILED, (int)hailo_get_state());
 }
 
+/* Helper: return offset of the core firmware header inside a blob
+ * produced by build_fw_blob(code_size, key_size, content_size, ...). */
+static size_t core_hdr_offset(uint32_t code_size, uint32_t key_size,
+                              uint32_t content_size)
+{
+    return sizeof(struct hailo_firmware_header) + code_size
+         + sizeof(struct hailo_fw_cert_header) + key_size + content_size;
+}
+
 static void test_boot_rejects_bad_core_magic(void)
 {
     boot_setup_probed();
     uint8_t blob[128];
     size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
     TEST_ASSERT_TRUE(n != 0);
-    /* Poison core header magic — located at cert_end. */
-    size_t core_off = sizeof(struct hailo_firmware_header) + 4
-                    + sizeof(struct hailo_fw_cert_header) + 4 + 4;
-    struct hailo_firmware_header *core =
-        (struct hailo_firmware_header *)(blob + core_off);
+    struct hailo_firmware_header *core = (struct hailo_firmware_header *)(
+        blob + core_hdr_offset(4, 4, 4));
     core->magic = 0xCAFEBABEu;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE, hailo_boot(blob, n));
+    TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_FAILED, (int)hailo_get_state());
+}
+
+static void test_boot_rejects_core_code_size_zero(void)
+{
+    boot_setup_probed();
+    uint8_t blob[128];
+    size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
+    TEST_ASSERT_TRUE(n != 0);
+    struct hailo_firmware_header *core = (struct hailo_firmware_header *)(
+        blob + core_hdr_offset(4, 4, 4));
+    core->code_size = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE, hailo_boot(blob, n));
+    TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_FAILED, (int)hailo_get_state());
+}
+
+static void test_boot_rejects_core_code_size_oversize(void)
+{
+    boot_setup_probed();
+    uint8_t blob[128];
+    size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
+    TEST_ASSERT_TRUE(n != 0);
+    struct hailo_firmware_header *core = (struct hailo_firmware_header *)(
+        blob + core_hdr_offset(4, 4, 4));
+    core->code_size = HAILO_FW_MAX_CODE_SIZE + 4u;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE, hailo_boot(blob, n));
+    TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_FAILED, (int)hailo_get_state());
+}
+
+static void test_boot_rejects_core_code_truncated(void)
+{
+    boot_setup_probed();
+    uint8_t blob[128];
+    size_t n = build_fw_blob(blob, sizeof(blob), 4, 4, 4, 1, 2, 3);
+    TEST_ASSERT_TRUE(n != 0);
+    /* Declare core_code_size larger than the remaining blob — forces
+     * the core_end > fw_size truncation check. */
+    struct hailo_firmware_header *core = (struct hailo_firmware_header *)(
+        blob + core_hdr_offset(4, 4, 4));
+    core->code_size = 512u;  /* but only 4 bytes actually follow */
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE, hailo_boot(blob, n));
     TEST_ASSERT_EQUAL_INT((int)HAILO_STATE_FAILED, (int)hailo_get_state());
 }
@@ -687,6 +747,9 @@ int test_suite_hailo(void)
     RUN_TEST(test_boot_succeeds_and_uploads_sections);
     RUN_TEST(test_boot_rejects_missing_core_fw);
     RUN_TEST(test_boot_rejects_bad_core_magic);
+    RUN_TEST(test_boot_rejects_core_code_size_zero);
+    RUN_TEST(test_boot_rejects_core_code_size_oversize);
+    RUN_TEST(test_boot_rejects_core_code_truncated);
     RUN_TEST(test_boot_fails_when_fw_never_signals_loaded);
     RUN_TEST(test_boot_chunks_large_code);
 
