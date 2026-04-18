@@ -760,4 +760,229 @@ aligned with the prior A.4/A.5 module approach.
 
 ---
 
+## 10. Handoff — Phase 3A next-phase work
+
+This section is a standalone handoff for a fresh agent (or capstone
+session) picking up Phase 3A. Assume the reader has not followed
+any of the prior sessions — §10 contains everything needed to
+start work on any of the three paths without re-investigation.
+
+### 10.1 What's landed and what it does
+
+On `feature/xhci-ifr-bringup` (this branch), the Tegra234 IFR
+bringup path is correctly ported from Linux. The driver is
+**functionally correct up to the SMMU blocker** — everything that
+SLM-OS can do from NS EL2 without SMMU cooperation is now in place.
+
+Source files to read, in order:
+
+| File | Purpose |
+|---|---|
+| `kernel/drivers/usb/xhci/xhci_tegra.h` | Tegra234 FPCI + BAR2 register map, cited line-by-line from the cached Linux source |
+| `kernel/drivers/usb/xhci/xhci.c` | `tegra_xusb_config`, `bar2_csb_r32/w32`, `tegra_xusb_wait_for_falcon`, `tegra_xusb_read_firmware_header` — all ported from Linux with paragraph-level comments citing the upstream line numbers |
+| `docs/reference/linux-xhci-tegra.c` | Cached Linux tegra-xusb source (2849 lines). Always consult this before writing new Tegra code |
+| `docs/reference/linux-arm-smmu.c` | Cached Linux arm-smmu-v2 source (2395 lines). Primary reference for any SMMU-port or shutdown-caller-hunt work |
+
+### 10.2 Known-good deploy/test workflow
+
+Any path needs hardware iterations on jetson-nano-1. The workflow:
+
+```
+# Build
+make kernel-clean && make kernel PLATFORM=JETSON_ORIN_NANO
+
+# Claim the board via labctl MCP (or CLI) for 30+ minutes
+# Power-cycle to Linux
+# scp build/kernel/slmos.elf to root@192.168.4.20:/root/slmos.elf
+# Kexec: ssh root@192.168.4.20 /usr/local/bin/slmos-kexec /root/slmos.elf
+
+# Capture boot via labctl serial_capture
+# Expected post-kexec output (from baseline task 3A.2.3 state):
+#   xhci: FPCI dev/vendor=0x229810de (expect 0x229810de)
+#   xhci: pre-config CFG_1=0x00b00007 CFG_4=0x0360000c CFG_7=0x0365000c
+#   xhci: post-config ... (idempotent)
+#   xhci: CSB probe FALC_CPUCTL=0xffffffff   (not a bug; see §9.2)
+#   xhci: CSB probe CSBRANGE readback=0x0000080c  (paging control works)
+#   xhci: HCI v1.20, 36 slots, 8 ports, ...
+#   xhci: controller failed to start (USBSTS=0xffffffff)  ← the blocker
+```
+
+After `slmos-kexec` runs successfully, SSH to the board is dead
+(SLM-OS has no network stack) — interact via serial only, or
+power-cycle to return to Linux for the next iteration.
+
+**Two hardware hazards documented by this branch's tests:**
+
+- Writing to `BAR2 + 0x1000` (`XUSB_BAR2_ARU_FW_SCRATCH`, the
+  mailbox IOCTL register) from NS EL2 triggers a TF-A RAS
+  uncorrectable that powers off the CPU core. Currently guarded by
+  `__attribute__((unused))` on `tegra_xusb_read_firmware_header`;
+  do NOT un-guard without a plan to survive the RAS.
+- Writing `XHCI_CMD_HCRST` (the Intel-spec xHCI reset bit) bricks
+  the MMIO aperture on Tegra — it triggers a Falcon-level reset
+  that only BPMP can complete. Guarded in `xhci_reset` with a
+  comment; do NOT lift the guard.
+
+### 10.3 Path 1 — Hunt the arm_smmu_device_shutdown caller
+
+**Hypothesis:** On L4T 36.4.7 / kernel 5.15.148-tegra, `drv->shutdown`
+for `arm-smmu` is NULL, yet the log `arm-smmu 8000000.iommu:
+disabling translation` fires on kexec. Something ELSE calls
+`arm_smmu_device_shutdown`. If identified and suppressed, SMMU
+translations stay live across kexec and SLM-OS inherits working
+xusb-stream DMA.
+
+**Starting-point commands on jetson-nano-1:**
+
+```
+# Candidates — what could call a platform-driver function outside .shutdown
+ssh root@192.168.4.20 'grep -E "(reboot_notifier|syscore|pm_power_off|sdei)" /proc/kallsyms | grep -i smmu'
+
+# Find static registrations via source — L4T 5.15-tegra kernel
+# source is in /usr/src/linux-headers-5.15.148-tegra-ubuntu22.04_aarch64/
+# on the Jetson; run against that tree:
+ssh root@192.168.4.20 'find /usr/src/linux-headers-5.15.148-tegra-ubuntu22.04_aarch64 -type f \( -name "*.c" -o -name "*.h" \) 2>/dev/null | xargs grep -l "arm_smmu_device_shutdown\|\"disabling translation\"" 2>/dev/null'
+
+# Binary scan fallback: find addresses that contain the shutdown function
+# pointer somewhere OTHER than the driver struct
+ssh root@192.168.4.20 'grep arm_smmu_device_shutdown /proc/kallsyms'
+# Use the address to hunt for cross-references in loaded .ko's (unlikely here)
+# or in the vmlinux if available
+```
+
+**Once the caller is found, the fix is a kernel module mirroring
+scripts/arm-smmu-noshutdown/ that NULLs the relevant hook or patches
+the calling code.** The existing module is a template — ~70 lines
+including the license boilerplate.
+
+**Effort estimate:** 4-12 hours depending on whether the caller is
+a common-pattern reboot_notifier (easy) or a proprietary NVIDIA
+Tegra iommu framework call (harder). The caller hunt is the only
+unknown.
+
+**Success criterion:** after the module loads, kexec dmesg no longer
+contains `arm-smmu ... disabling translation`. Then `slmos-kexec
+/root/slmos.elf` and check SLM-OS's xhci init log — `USBCMD.RUN=1`
+should succeed, `NO_OP round-trip OK` should appear, and Phase 3A
+Steps 5-7 (port scan + transfer rings) are then in-scope.
+
+### 10.4 Path 2 — Port arm-smmu-v2 subset to SLM-OS
+
+**Hypothesis:** Rather than preventing Linux from tearing down SMMU
+translations, have SLM-OS re-establish them at NS EL2 after kexec.
+Three SMMU instances at `0x08000000`, `0x10000000`, `0x12000000`
+are NS-accessible on Tegra234 (`ls /sys/bus/platform/drivers/arm-smmu/`
+on the Jetson confirms).
+
+**Minimum subset to port from `docs/reference/linux-arm-smmu.c`:**
+
+- `arm_smmu_write_context_bank` (~40 lines) — programs a context
+  bank's translation registers
+- `arm_smmu_alloc_context_bank` / assignment logic (~60 lines)
+- `arm_smmu_gr0_write` / base-addressing helpers (~30 lines)
+- S1/S2 page-table walk setup for IOVA→PA (~150 lines, can use
+  identity mapping only to start)
+- `arm_smmu_context_fault` handler stub (~30 lines)
+- MMIO access helpers + register-bit macros (already partly ported
+  into SLM-OS's existing MMIO infrastructure)
+
+Estimated ~350-500 lines of actual SLM-OS code, drawing from
+~800 lines of the reference. Then:
+
+- Identify the xusb stream ID by reading the DT fragment on the
+  Jetson: `cat /proc/device-tree/bus@0/usb@3610000/iommus` (binary,
+  decode the `iommus` property — the second cell is the stream ID).
+- In SLM-OS `xhci_init`, after `tegra_xusb_config`, call the new
+  `tegra_smmu_setup(stream_id, pgtable_root)` helper. `pgtable_root`
+  can be `ncmem_alloc`'d and identity-mapped for simplicity (every
+  IOVA == PA, which is what Linux would've given us anyway for a
+  DMA-coherent device).
+- Verify by watching post-kexec `slmos>` log for successful RUN=1
+  and NO_OP completion.
+
+**Effort estimate:** 1-2 weeks of focused work. Most of the risk
+is in hitting the right register sequence; Linux's implementation
+is the gold standard to match.
+
+**Success criterion:** same as Path 1 — RUN=1 succeeds, NO_OP
+round-trips. Additional bonus: this gives SLM-OS a general-purpose
+SMMU capability that unblocks #286 (standalone Falcon firmware load)
+too, and helps any future Tegra DMA-user (PCIe, NVMe via xHCI,
+other platform devices).
+
+### 10.5 Path 3 — Pre-kexec global SMMU bypass
+
+**Hypothesis:** Before kexec, flip every arm-smmu instance into
+CLIENTPD-off passthrough mode via a kernel module, so SMMU
+translations stay live-but-identity for everyone. SLM-OS then sees
+raw physical addresses and doesn't need to touch the SMMU at all.
+
+**Design:**
+
+- Kernel module installed alongside `slmos-kexec`, loaded by the
+  script BEFORE `kexec -e`.
+- For each `arm_smmu_device` registered (via `/sys/bus/platform/drivers/arm-smmu/*`),
+  acquire the platform data pointer, read `sCR0`, write `sCR0 & ~CLIENTPD`
+  (enable all clients bypassing) and set `sACR` to disable faulting.
+- Best-effort. Errors log but don't fail — we'd rather crash on RAS
+  than fail the kexec outright.
+
+**Precedent:** `scripts/arm-smmu-noshutdown/` is the template; this
+is the same shape (one-function kernel module) but writes to the
+SMMU instead of NULL-ing a pointer.
+
+**Risk:** With SMMU globally in passthrough, any residual in-flight
+DMA from other drivers (NVMe, network, audio) can scribble into
+SLM-OS's memory. In practice those drivers' own teardown paths drain
+pipelines first — but this is diagnostic-only.
+
+**Effort estimate:** 2-4 hours to write the module + 2-4 hours of
+on-hardware iteration until it doesn't crash.
+
+**Success criterion:** same — RUN=1 succeeds, NO_OP completes.
+
+**Note:** the `iommu.passthrough=1` cmdline flag we tried earlier
+this investigation breaks tegra-xusb's probe on Linux (Falcon
+firmware load fails), so that's NOT equivalent to this runtime
+approach. A runtime post-probe bypass is the key distinction.
+
+### 10.6 What's been tried and ruled out — don't re-chase these
+
+- **Keep Falcon alive via tegra-xusb `.shutdown`=NULL (A.4)**:
+  `scripts/tegra-xusb-noshutdown/`. Works but was the wrong
+  problem — tegra-xusb has no `.shutdown` callback on any tested
+  L4T kernel.
+- **Keep SMMU alive via arm-smmu `.shutdown`=NULL (A.5)**:
+  `scripts/arm-smmu-noshutdown/`. Module loads but reports
+  "shutdown already NULL" on L4T 36.4.7 — see §10.3 for the
+  actual caller to find.
+- **iommu.passthrough=1 cmdline**: breaks tegra-xusb probe (Falcon
+  firmware load fails); aperture is not readable post-boot. Do not
+  re-add this flag.
+- **Panic-kexec path (`kexec -p`)**: skips device_shutdown() but
+  loads kernel at the crashkernel reserved region (0xEFE00000),
+  which doesn't match SLM-OS's 0x80000000 link address. Would
+  require significant SLM-OS relocation work.
+- **HCRST (xHCI reset)**: bricks the Tegra XHCI aperture
+  permanently. Guarded in `xhci_reset`; do not call.
+- **Wrapper programming** (`tegra_xusb_config`): correctly ported,
+  but confirmed that Linux leaves the wrapper in a good state
+  post-kexec; this is defensive-only, not a fix.
+- **BAR2 FW_SCRATCH IOCTL probe**: triggers RAS uncorrectable →
+  core power-off. Guarded with `__attribute__((unused))`.
+
+### 10.7 Contact points for a blocked investigation
+
+- **GitHub issues**: #266 (Phase 3A umbrella), #285 (original SMMU
+  blocker, wontfix — re-open if a path pans out), #286 (standalone
+  Falcon firmware load, deprioritized by the IFR finding).
+- **Reference code**: `docs/reference/linux-{arm-smmu,xhci-tegra}.c`.
+  When pulling new Linux files, save them here — don't re-fetch.
+- **Lab hardware**: `labctl` MCP. See `kernel/CLAUDE.md` for board
+  claim / serial / power workflows. Jetson-nano-1 has serial
+  access via labctl but SSH only works when it's in Linux (SLM-OS
+  has no network stack).
+
+---
+
 *Last updated: 18 April 2026*
