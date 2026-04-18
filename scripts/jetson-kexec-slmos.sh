@@ -16,9 +16,17 @@
 # from Linux userspace goes through the kernel's BPMP driver, which
 # BPMP firmware DOES accept.
 #
+# USB handoff (#266 Phase 3A):
+#   Same pattern as the GPU. Phase 0 confirmed XHCI at 0x03610000 and
+#   XUDC at 0x03550000 are not CBB-firewalled — they just read
+#   0xFFFFFFFF post-kexec because the runtime-PM sweep tears down the
+#   xusb_* clocks. Holding those clocks + the xusba / xusbc powergates
+#   on before kexec keeps the controller live for SLM-OS's XHCI driver.
+#
 # Usage:
 #   sudo ./jetson-kexec-slmos.sh /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-gpu-suspend /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --no-usb-hold   /path/to/slmos.elf
 #
 # Or install to Jetson and run:
 #   sudo slmos-kexec /root/slmos.elf
@@ -34,13 +42,20 @@
 #                       error. In practice this hasn't fired in testing
 #                       when GPU consumers are stopped before kexec.
 #
+#   --no-usb-hold       Skip the xusb clock + powergate holds. Only
+#                       useful for SLM-OS builds that don't drive the
+#                       XHCI controller; the held clocks are otherwise
+#                       harmless (they just keep the IP block alive).
+#
 set -euo pipefail
 
 NO_GPU_SUSPEND=0
+NO_USB_HOLD=0
 KERNEL=""
 for arg in "$@"; do
     case "$arg" in
         --no-gpu-suspend) NO_GPU_SUSPEND=1 ;;
+        --no-usb-hold)    NO_USB_HOLD=1 ;;
         *) KERNEL="$arg" ;;
     esac
 done
@@ -127,6 +142,41 @@ else
         gpwr="$(cat "$BPMP/clk/gpu_pwr/state" 2>/dev/null || echo '?')"
         echo "       after re-enable: powergate=$pg_final gpusysclk=$gsys gpu_pwr=$gpwr"
     fi
+fi
+
+if [[ "$NO_USB_HOLD" == "0" ]]; then
+    echo "[3.5] Holding xusb clocks + powergates on for SLM-OS XHCI..."
+    # Clocks the tegra-xusb host controller actually runs on. Verified
+    # in the #266 Phase 0 probe (commit fb12937) as the set that
+    # corresponds to a live MMIO aperture at 0x03610000. xusb_core_dev
+    # and xusb_ss are deliberately NOT held — SLM-OS targets USB 2.0
+    # host only for Phase 3A.
+    for clk in xusb_core_host xusb_falcon xusb_fs xusb_hs_hsicp pex_usb_pad_pll0_mgmt utmi_pll; do
+        if [[ -w "$BPMP/clk/$clk/state" ]]; then
+            echo 1 > "$BPMP/clk/$clk/state" 2>/dev/null || \
+                echo "       ${clk}: write failed" >&2
+        fi
+    done
+    # Powergates: xusba is the USB 3 / padctl infrastructure (padctl
+    # is needed even for USB 2.0 to keep the PHY straps valid);
+    # xusbc is the host-controller domain. xusbb (device mode) stays
+    # off — SLM-OS is host-only.
+    for pg in xusba xusbc; do
+        if [[ -w "$BPMP/powergate/$pg/state" ]]; then
+            echo 1 > "$BPMP/powergate/$pg/state" 2>/dev/null || \
+                echo "       ${pg}: write failed" >&2
+        fi
+    done
+
+    # Summarise the state we're handing off so the serial log makes
+    # post-kexec debugging easier.
+    core_host="$(cat "$BPMP/clk/xusb_core_host/state" 2>/dev/null || echo '?')"
+    falcon="$(cat "$BPMP/clk/xusb_falcon/state" 2>/dev/null || echo '?')"
+    pg_a="$(cat "$BPMP/powergate/xusba/state" 2>/dev/null || echo '?')"
+    pg_c="$(cat "$BPMP/powergate/xusbc/state" 2>/dev/null || echo '?')"
+    echo "       after hold: xusb_core_host=$core_host xusb_falcon=$falcon xusba=$pg_a xusbc=$pg_c"
+else
+    echo "[3.5] SKIPPING xusb clock hold (--no-usb-hold)"
 fi
 
 echo "[4/5] Loading kernel: $KERNEL"
