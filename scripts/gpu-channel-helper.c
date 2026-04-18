@@ -247,20 +247,54 @@ int main(int argc, char **argv)
     printf("  usermode_mmio_va  = 0x%llx\n",
            (unsigned long long)sb.usermode_mmio_gpu_va);
 
-    /* Bind a compute object context to the channel. Without this, PBDMA
-     * walks our pushbuffer entries (GP_GET advances) but the host
-     * methods SEM_EXECUTE don't complete — CUDA's strace shows it
-     * calling ALLOC_OBJ_CTX with class_num=AMPERE_COMPUTE_A right
-     * after SETUP_BIND, and the Phase 7 semaphore-release E2E test
-     * starts working once this is added. AMPERE_COMPUTE_A=0xC5C0
-     * matches the channel-GPFIFO class 0xC56F's compute-engine peer. */
+    /* Bind the compute class to the channel. The class number is
+     * chip-specific: CUDA on GA10B (Jetson Orin's iGPU) uses
+     * AMPERE_COMPUTE_B (0xC7C0), NOT AMPERE_COMPUTE_A (0xC5C0 — the
+     * datacenter GA100 class). Captured via LD_PRELOAD ioctl trace of
+     * CUDA's minikick. Using the wrong class causes PBDMA to walk
+     * pushbuffer entries but host methods to silently no-op.
+     *
+     * class_num per GPU family (from NVIDIA open-gpu-kernel-modules):
+     *   Pascal (GP10x)   = 0xC1C0
+     *   Volta  (GV11B)   = 0xC3C0
+     *   Turing (TU10x)   = 0xC5C0  (also GA100 datacenter)
+     *   Ampere GA10x/10B = 0xC7C0  */
     struct nvgpu_alloc_obj_ctx_args octx;
     memset(&octx, 0, sizeof(octx));
-    octx.class_num = 0xC5C0;   /* AMPERE_COMPUTE_A */
+    octx.class_num = 0xC7C0;   /* AMPERE_COMPUTE_B (GA10B) */
     octx.flags = 0;
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_ALLOC_OBJ_CTX, &octx, "ALLOC_OBJ_CTX");
-    printf("[gpu-helper] ALLOC_OBJ_CTX OK (class=0xC5C0, obj_id=0x%llx)\n",
-           (unsigned long long)octx.obj_id);
+    printf("[gpu-helper] ALLOC_OBJ_CTX OK (class=0x%04x, obj_id=0x%llx)\n",
+           octx.class_num, (unsigned long long)octx.obj_id);
+
+    /* Set compute-channel preemption mode. CUDA's trace shows
+     * compute_preempt_mode = CILP (0x04) right after ALLOC_OBJ_CTX.
+     * Without this, the compute context appears to not be fully
+     * activated: PBDMA walks pushbuffer entries (GP_GET advances)
+     * but host-semaphore methods silently no-op. */
+    struct nvgpu_preemption_mode_args pm;
+    memset(&pm, 0, sizeof(pm));
+    pm.graphics_preempt_mode = 0;
+    pm.compute_preempt_mode  = NVGPU_COMPUTE_PREEMPTION_MODE_CILP;
+    xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_SET_PREEMPTION_MODE, &pm,
+           "SET_PREEMPT_MODE");
+    printf("[gpu-helper] SET_PREEMPT_MODE OK (compute=CILP)\n");
+
+    /* Attach an error notifier buffer. CUDA passes a 4KB nvmap dmabuf
+     * here — the kernel writes fault info into it on channel errors.
+     * A channel without a valid notifier may silently drop methods
+     * (rather than faulting) because it has nowhere to report the
+     * error. */
+    int notifier_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
+    struct nvgpu_set_error_notifier en;
+    memset(&en, 0, sizeof(en));
+    en.offset = 0;
+    en.size   = 4096;
+    en.mem    = notifier_dmabuf;
+    xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_SET_ERROR_NOTIFIER, &en,
+           "SET_ERROR_NOTIFIER");
+    printf("[gpu-helper] SET_ERROR_NOTIFIER OK (dmabuf fd=%d, size=4096)\n",
+           notifier_dmabuf);
 
     /* Allocate pushbuffer + semaphore via nvmap. */
     int pb_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 65536, 4096);  /* 64 KB */
