@@ -29,8 +29,9 @@
 #include "gic.h"
 #include "timer.h"
 #include "smp.h"
-#include "shell.h"      /* shell_cmd_t for shell-table tests */
-#include "string.h"     /* strcmp for shell-table scanners */
+#include "shell.h"              /* shell_cmd_t for shell-table tests */
+#include "string.h"             /* strcmp for shell-table scanners */
+#include "x86_lapic_consts.h"   /* LAPIC_TIMER_VECTOR */
 
 /* ============================================================================
  * External Symbols from Boot Code
@@ -1945,24 +1946,13 @@ static inline void test_cpuid(uint32_t leaf,
 }
 
 /*
- * Test: IA32_APIC_BASE reports xAPIC mode after lapic_init.
- *   EN=1 (bit 11)  — LAPIC globally enabled.
- *   EXTD=0 (bit 10) — NOT in x2APIC mode.
- * A regression that drops the two-step x2APIC → xAPIC transition
- * fails here on any kexec from an x2APIC-enabled Linux. Fresh QEMU
- * boot is already xAPIC, but this test still asserts the invariant
- * so any code change that flips EXTD on will be caught.
+ * NOTE: the post-init "APIC_BASE has EN=1, EXTD=0" invariant used
+ * to live in a dedicated test (`test_apic_base_msr_xapic_mode`) but
+ * was a strict subset of `test_lapic_force_xapic_mode_idempotent`'s
+ * precondition checks below — same MSR, same bits, same regression
+ * coverage. Consolidated into the idempotent test so a regression
+ * fires once with a single line number rather than twice.
  */
-static void test_apic_base_msr_xapic_mode(void)
-{
-    uint64_t base = test_rdmsr(0x1B);
-    /* EN must be set. For diagnostic purposes, lapic_init prints
-     * the APIC_BASE MSR value to the boot log on entry — consult
-     * that if this assertion fires. */
-    TEST_ASSERT_TRUE((base & (1ULL << 11)) != 0);
-    /* EXTD must be clear — we're in xAPIC, not x2APIC. */
-    TEST_ASSERT_TRUE((base & (1ULL << 10)) == 0);
-}
 
 /*
  * Test: LAPIC_ID readback is not the "MMIO returns all-ones" pattern.
@@ -2015,8 +2005,10 @@ static void test_lapic_lvt_timer_has_vector(void)
 {
     uint32_t lvt = lapic_read(0x320);  /* LAPIC_LVT_TIMER */
     uint8_t vector = lvt & 0xFF;
-    /* Vector 48 = LAPIC_TIMER_VECTOR in timer_x86.c */
-    TEST_ASSERT_EQUAL_UINT8(48, vector);
+    /* LAPIC_TIMER_VECTOR comes from x86_lapic_consts.h (same header
+     * timer_x86.c uses), so a renumber updates producer + assertion
+     * in one edit. */
+    TEST_ASSERT_EQUAL_UINT8(LAPIC_TIMER_VECTOR, vector);
     /* Mask bit (16) must NOT be set — timer should be running */
     TEST_ASSERT_TRUE((lvt & (1 << 16)) == 0);
 }
@@ -2122,6 +2114,12 @@ static void test_timer_frequency_plausible(void)
  * confirming APIC_BASE is byte-for-byte unchanged after the call,
  * and that MMIO is still live.
  *
+ * Also doubles as the post-init APIC_BASE invariant test: the two
+ * precondition assertions below (EN=1, EXTD=0) catch any regression
+ * that leaves lapic_init in a non-xAPIC state, which used to live
+ * in a separate `test_apic_base_msr_xapic_mode`. Folding them in
+ * means a single failure points at the right line number.
+ *
  * If a regression strips the early-return (e.g. "always run the
  * two-step toggle, it's idempotent on healthy xAPIC"), this test
  * fires — and importantly, it fires BEFORE the bricking would
@@ -2130,6 +2128,10 @@ static void test_timer_frequency_plausible(void)
  */
 static void test_lapic_force_xapic_mode_idempotent(void)
 {
+    /* Precondition: post-init must already be in xAPIC. If this
+     * fails, lapic_init itself is broken — no point exercising the
+     * helper. lapic_init prints the APIC_BASE MSR value to the
+     * boot log on entry; consult that if either assertion fires. */
     uint64_t base = test_rdmsr(0x1B);
     TEST_ASSERT_TRUE((base & (1ULL << 11)) != 0);   /* EN */
     TEST_ASSERT_TRUE((base & (1ULL << 10)) == 0);   /* !EXTD */
@@ -3759,7 +3761,6 @@ int test_suite_x86_boot(void)
     RUN_TEST(test_lapic_eoi_fence_many);
     RUN_TEST(test_lapic_timer_running);
     /* kexec x2APIC / CPUID calibration regression tests (PR #268) */
-    RUN_TEST(test_apic_base_msr_xapic_mode);
     RUN_TEST(test_lapic_id_not_stuck_all_ones);
     RUN_TEST(test_lapic_version_not_stuck_all_ones);
     RUN_TEST(test_lapic_svr_enabled_bit);

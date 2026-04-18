@@ -630,6 +630,13 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src
 )
 
+# Per-platform arch include paths so test code under kernel/tests
+# can pull arch-private headers (e.g. x86_lapic_consts.h) without
+# resorting to relative includes.
+if(PLATFORM STREQUAL "X86_64")
+    list(APPEND KERNEL_INCLUDES ${CMAKE_SOURCE_DIR}/kernel/arch/x86_64)
+endif()
+
 # Build kernel ELF — include lwIP when networking is enabled
 if(ENABLE_NETWORKING)
     add_executable(slmos.elf ${KERNEL_SOURCES} ${TEST_SOURCES} ${LWIP_SOURCES})

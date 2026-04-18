@@ -144,7 +144,6 @@ don't break the fresh-QEMU happy path:
 
 | Test | What it pins down |
 |---|---|
-| `test_apic_base_msr_xapic_mode` | Post-`lapic_init` reads `IA32_APIC_BASE` and asserts `EN=1, EXTD=0` — catches a regression that would toggle the APIC into x2APIC or disabled state on boot |
 | `test_lapic_id_not_stuck_all_ones` | `lapic_get_id()` returns a real APIC ID, not `0xFF` (= "MMIO returns 0xFFFFFFFF" = stuck-in-x2APIC symptom) |
 | `test_lapic_version_not_stuck_all_ones` | `LAPIC_VERSION` is in the Intel-documented 0x10..0x1F range, not `0xFF` |
 | `test_lapic_svr_enabled_bit` | Spurious Vector Register bit 8 (APIC software enable) is set |
@@ -152,7 +151,7 @@ don't break the fresh-QEMU happy path:
 | `test_cpuid_leaf_15_accessible` | CPUID leaf 0x15 doesn't fault under QEMU-max; values are acceptable (zero or non-zero) since lapic_timer_freq_cpuid handles both |
 | `test_cpuid_leaf_16_base_mhz` | CPUID leaf 0x16 base frequency, if reported, is in a plausible 100 MHz–10 GHz range |
 | `test_timer_frequency_plausible` | `timer_get_frequency()` returns a non-zero Hz value after init — either `TIMER_HZ` (PIT fallback) or a TSC frequency (100 MHz–100 GHz). Mere execution of this test also proves timer_init completed without the unbounded PIT hang |
-| `test_lapic_force_xapic_mode_idempotent` | Calls `lapic_force_xapic_mode()` on a healthy xAPIC and asserts APIC_BASE is byte-for-byte unchanged plus MMIO is still live. Catches a regression that strips the load-bearing early-return and would brick the LAPIC on QEMU TCG via an unwanted EN=0→EN=1 toggle |
+| `test_lapic_force_xapic_mode_idempotent` | First asserts `IA32_APIC_BASE` is in xAPIC (EN=1, EXTD=0) post-`lapic_init` (the boot invariant); then calls `lapic_force_xapic_mode()` and asserts APIC_BASE is byte-for-byte unchanged plus MMIO is still live. Catches both an init regression and a regression that strips the load-bearing early-return (which would brick the LAPIC on QEMU TCG via an unwanted EN=0→EN=1 toggle) |
 | `test_lapic_force_xapic_mode_x2apic_recovery` | When CPUID advertises x2APIC: drives the helper through a synthetic x2APIC enter, confirms MMIO at 0xFEE00000 goes dead, calls the helper, and verifies the LAPIC is back in xAPIC with live MMIO afterwards. Restores SVR + LVT timer state so subsequent tests still have a working APIC. Skipped (passes trivially) on hosts without x2APIC |
 
 ### 1.6 Build-infrastructure test coverage (kexec scaffolding)

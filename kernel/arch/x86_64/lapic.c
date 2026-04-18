@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include "uart.h"
 #include "cpuid.h"
+#include "x86_lapic_consts.h"
 
 /* LAPIC register offsets */
 #define LAPIC_ID            0x020
@@ -53,13 +54,9 @@
 /* Default xAPIC MMIO base address on all modern x86 systems. */
 #define LAPIC_DEFAULT_BASE    0xFEE00000ULL
 
-/* Bounded busy-wait budget for PIT calibration paths. ~200 ms at
- * 3 GHz; comfortably longer than the legitimate ~10 ms PIT window
- * but short enough that a kexec-disabled PIT can't hang boot. Both
- * lapic_timer_calibrate (this file) and timer_init's TSC fallback
- * (timer_x86.c) reach for the same number — keep them in sync via
- * this header-style constant. */
-#define TSC_PIT_TIMEOUT_CYCLES   600000000ULL
+/* TSC_PIT_TIMEOUT_CYCLES comes from x86_lapic_consts.h (shared with
+ * timer_x86.c so a future budget tweak only has to land in one
+ * place). */
 
 /* SVR bits */
 #define SVR_APIC_ENABLE     (1 << 8)
