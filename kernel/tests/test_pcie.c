@@ -175,6 +175,64 @@ static void test_bus_master_toggle(void)
     TEST_ASSERT_TRUE((cmd & (1u << 2)) != 0);  /* BUS MASTER */
 }
 
+/*
+ * pcie_core_register_host validates the full vtable. Previously
+ * only config_read32 and config_write32 were checked, so a backend
+ * that forgot init() or map_bar() would crash on first use rather
+ * than fail loudly at registration.
+ *
+ * These tests call pcie_core_register_host with deliberately
+ * incomplete op tables and assert PCIE_ERR_INVAL. The already-
+ * registered GPEX backend is not disturbed because the validation
+ * fails before host_ops is replaced.
+ */
+extern int pcie_core_register_host(const struct pcie_host_ops *ops);
+
+static int      dummy_init(void) { return 0; }
+static bool     dummy_link_up(void) { return true; }
+static uint8_t  dummy_r8 (uint8_t b, uint8_t d, uint8_t f, uint16_t o)
+    { (void)b; (void)d; (void)f; (void)o; return 0; }
+static uint16_t dummy_r16(uint8_t b, uint8_t d, uint8_t f, uint16_t o)
+    { (void)b; (void)d; (void)f; (void)o; return 0; }
+static uint32_t dummy_r32(uint8_t b, uint8_t d, uint8_t f, uint16_t o)
+    { (void)b; (void)d; (void)f; (void)o; return 0; }
+static void     dummy_w32(uint8_t b, uint8_t d, uint8_t f, uint16_t o, uint32_t v)
+    { (void)b; (void)d; (void)f; (void)o; (void)v; }
+static void    *dummy_map(uint64_t a, uint64_t s)
+    { (void)a; (void)s; return NULL; }
+
+static void test_register_host_rejects_null_ops(void)
+{
+    TEST_ASSERT_EQUAL_INT(PCIE_ERR_INVAL, pcie_core_register_host(NULL));
+}
+
+static void test_register_host_rejects_missing_init(void)
+{
+    struct pcie_host_ops partial = {
+        .name = "partial-no-init",
+        .init = NULL,   /* MISSING */
+        .link_up = dummy_link_up,
+        .config_read8 = dummy_r8, .config_read16 = dummy_r16,
+        .config_read32 = dummy_r32, .config_write32 = dummy_w32,
+        .map_bar = dummy_map,
+    };
+    TEST_ASSERT_EQUAL_INT(PCIE_ERR_INVAL,
+                          pcie_core_register_host(&partial));
+}
+
+static void test_register_host_rejects_missing_map_bar(void)
+{
+    struct pcie_host_ops partial = {
+        .name = "partial-no-map-bar",
+        .init = dummy_init, .link_up = dummy_link_up,
+        .config_read8 = dummy_r8, .config_read16 = dummy_r16,
+        .config_read32 = dummy_r32, .config_write32 = dummy_w32,
+        .map_bar = NULL,   /* MISSING */
+    };
+    TEST_ASSERT_EQUAL_INT(PCIE_ERR_INVAL,
+                          pcie_core_register_host(&partial));
+}
+
 #endif /* PLATFORM_QEMU_VIRT */
 
 int test_suite_pcie(void)
@@ -191,6 +249,9 @@ int test_suite_pcie(void)
     RUN_TEST(test_map_bar_returns_va);
     RUN_TEST(test_config_read_consistency);
     RUN_TEST(test_bus_master_toggle);
+    RUN_TEST(test_register_host_rejects_null_ops);
+    RUN_TEST(test_register_host_rejects_missing_init);
+    RUN_TEST(test_register_host_rejects_missing_map_bar);
 #else
     /* Non-QEMU platforms: no known test endpoint is attached. The
      * backend is still exercised by pcie_init() at boot; dedicated

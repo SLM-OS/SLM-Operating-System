@@ -102,7 +102,12 @@ int hef_parse_outer_header(const void *blob, size_t size,
         out->ccws_size = be_u64(t + 4);
         /* CCWS follows the proto body immediately. */
         out->ccws_offset = proto_end;
-        if (out->ccws_offset + out->ccws_size > size) {
+        /* Overflow-safe: ccws_size is attacker-controlled u64 and
+         * the straightforward (offset + size) compare wraps on
+         * near-max values. Rearrange to (size - offset) > ccws_size
+         * after confirming proto_end <= size (already guaranteed
+         * above). */
+        if (out->ccws_size > (uint64_t)(size - proto_end)) {
             return HEF_ERR_TRUNCATED;
         }
         break;
@@ -116,7 +121,7 @@ int hef_parse_outer_header(const void *blob, size_t size,
         out->crc       = be_u32(t + 0);
         out->ccws_size = be_u64(t + 4);
         out->ccws_offset = proto_end;
-        if (out->ccws_offset + out->ccws_size > size) {
+        if (out->ccws_size > (uint64_t)(size - proto_end)) {
             return HEF_ERR_TRUNCATED;
         }
         break;

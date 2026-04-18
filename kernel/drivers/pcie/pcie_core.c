@@ -63,8 +63,25 @@ static uint32_t pcie_device_count;
 
 int pcie_core_register_host(const struct pcie_host_ops *ops)
 {
-    if (!ops || !ops->config_read32 || !ops->config_write32) {
+    /* Validate the full vtable the core is guaranteed to call. A
+     * partially-filled table would NULL-deref on first use — better
+     * to reject at registration. `alloc_msi` and `bind_irq_handler`
+     * are optional (QEMU GPEX stubs them out) so they aren't
+     * required here, but every config / BAR / init op is. */
+    if (!ops
+     || !ops->init
+     || !ops->link_up
+     || !ops->config_read8
+     || !ops->config_read16
+     || !ops->config_read32
+     || !ops->config_write32
+     || !ops->map_bar) {
         return PCIE_ERR_INVAL;
+    }
+    if (host_ops) {
+        WARN("pcie: host_ops already installed ('%s'), replacing with '%s'",
+             host_ops->name ? host_ops->name : "(unnamed)",
+             ops->name      ? ops->name      : "(unnamed)");
     }
     host_ops = ops;
     return PCIE_OK;
@@ -169,6 +186,19 @@ static int probe_one_bar(struct pcie_device *dev, int bar_idx)
     bool is_io = (raw_lo & 1u) != 0;
     bool is_64 = !is_io && (((raw_lo >> 1) & 0x3) == 0x2);
     bool is_prefetch = !is_io && ((raw_lo & (1u << 3)) != 0);
+
+    /*
+     * A spec-compliant device cannot advertise a 64-bit BAR in the
+     * last slot (there's no adjacent high-half register). Refuse
+     * the claim rather than read/clobber config offset 0x28
+     * (Cardbus CIS Pointer) or overflow dev->bar[]/bar_size[]/
+     * bar_flags[] when the code below writes bar_idx + 1.
+     */
+    if (is_64 && bar_idx >= PCIE_NUM_BARS - 1) {
+        WARN("pcie: %02x:%02x.%x BAR%d claims 64-bit in last slot — "
+             "treating as 32-bit", dev->bus, dev->dev, dev->func, bar_idx);
+        is_64 = false;
+    }
 
     /* Size probe. Disable command bits while we flail the BAR. */
     uint16_t cmd = cfg_r16(dev->bus, dev->dev, dev->func, CFG_COMMAND);

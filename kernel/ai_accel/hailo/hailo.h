@@ -85,9 +85,15 @@
 #define HAILO_ATR_OFF_TRSL_ADDR_HI    0x0Cu
 #define HAILO_ATR_OFF_TRSL_PARAM      0x10u
 
-#define HAILO_ATR_PARAM_VALUE         0x17u     /* constant + index<<12 */
+#define HAILO_ATR_PARAM_VALUE         0x17u     /* constant; combine with idx */
 #define HAILO_ATR_TRSL_AXI            0x06u     /* AXI memory translation */
 #define HAILO_ATR_TABLE_SIZE          0x1000u   /* 4 KB per translation */
+
+/* Compose the atr_param register value for ATR entry `idx` (0..3).
+ * Matches the upstream driver's `ATR_PARAM | (index << 12)` formula
+ * — see hailo-pcie-common.c:75. Avoids open-coding the shift at
+ * call sites and guards against future targeting of ATR[1..3]. */
+#define HAILO_ATR_PARAM(idx)          (HAILO_ATR_PARAM_VALUE | ((uint32_t)(idx) << 12))
 
 /*
  * ATR[1]'s trsl_addr_lo is repurposed as a "firmware loaded" flag.
@@ -210,7 +216,9 @@ struct hailo_platform_ops {
     void (*cache_invalidate)(void *addr, size_t size);
 
     /* Memory barrier — ensures prior stores to device memory are
-     * observable before the next MMIO write. */
+     * observable before the next MMIO write. Required (not NULL).
+     * On ARM64 `dsb sy`; on platforms with a weaker default, a
+     * full-system barrier. */
     void (*mb)(void);
 
     /* Microsecond-granularity delay used by boot poll loops. */

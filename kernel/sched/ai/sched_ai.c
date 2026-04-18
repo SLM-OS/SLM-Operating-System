@@ -179,14 +179,28 @@ static void ai_mlp_shutdown(void)
  * The FP context save/restore still happens in the enclosing
  * ai_assign_cpu_common call — this wrapper does not add its own.
  */
+/*
+ * Cached lookup — assign_cpu runs on every new task, so the
+ * string compare through the inference-device registry was a
+ * measurable hot-path cost. Resolved once lazily; the "cpu-mlp"
+ * backend is registered at boot and never removed. An atomic
+ * compare here would be safer against a hypothetical late
+ * registration, but no such path exists.
+ */
+static struct inference_device *cached_cpu_mlp_dev;
+
 static int ai_schedule_mlp_via_device(const float *state,
                                       struct ai_sched_action *action)
 {
-    struct inference_device *dev = inference_device_find("cpu-mlp");
+    struct inference_device *dev = cached_cpu_mlp_dev;
     if (!dev) {
-        /* Backend not registered (AI_SCHED=OFF leaves the registry
-         * empty). Fall back to the direct call — same result. */
-        return ai_schedule_mlp(state, action);
+        dev = inference_device_find("cpu-mlp");
+        if (!dev) {
+            /* Backend not registered (AI_SCHED=OFF leaves the
+             * registry empty). Fall back to the direct call. */
+            return ai_schedule_mlp(state, action);
+        }
+        cached_cpu_mlp_dev = dev;
     }
 
     float logits[AI_SCHED_N_ACTIONS];

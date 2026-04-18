@@ -161,6 +161,18 @@ static void test_init_rejects_incomplete_ops(void)
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
 }
 
+/* Regression: mb() is required (was optional; used by ATR retarget).
+ * A caller that forgets it would silently skip the barrier and
+ * corrupt the access ordering on strongly-ordered hardware. */
+static void test_init_rejects_missing_mb(void)
+{
+    struct hailo_platform_ops bad = mock_ops;
+    bad.mb = NULL;
+    hailo_platform = &bad;
+    int rc = hailo_init();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+}
+
 static void test_init_accepts_complete_ops(void)
 {
     mock_reset();
@@ -356,6 +368,7 @@ int test_suite_hailo(void)
 
     RUN_TEST(test_init_rejects_null_ops);
     RUN_TEST(test_init_rejects_incomplete_ops);
+    RUN_TEST(test_init_rejects_missing_mb);
     RUN_TEST(test_init_accepts_complete_ops);
     RUN_TEST(test_probe_detects_no_device);
     RUN_TEST(test_probe_rejects_wrong_vendor);

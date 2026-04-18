@@ -24,6 +24,7 @@
 
 #include "hailo.h"
 #include "debug.h"
+#include "spinlock.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -45,6 +46,17 @@ const struct hailo_fw_addrs hailo_fw_addrs_hailo8 = {
 };
 
 static enum hailo_state state = HAILO_STATE_UNINIT;
+
+/*
+ * ATR[0] is shared with device firmware post-boot
+ * (docs/reference/hailo-driver-notes.md §9.7). Every dev_read /
+ * dev_write through the ATR[0] window must save → retarget →
+ * access → restore atomically, or concurrent accesses (including
+ * firmware traffic after hailo_boot) corrupt the control channel
+ * silently. Guard the whole save/access/restore sequence under a
+ * single IRQ-disable spinlock.
+ */
+static spinlock_t atr0_lock = SPINLOCK_INIT;
 
 enum hailo_state hailo_get_state(void) { return state; }
 
@@ -78,7 +90,7 @@ static void atr0_set_target(uint64_t dev_addr)
     uint32_t atr0 = HAILO_ATR_BASE;
     hailo_platform->write32(HAILO_BAR_CONFIG,
                             atr0 + HAILO_ATR_OFF_PARAM,
-                            HAILO_ATR_PARAM_VALUE | (0u << 12));
+                            HAILO_ATR_PARAM(0));
     hailo_platform->write32(HAILO_BAR_CONFIG,
                             atr0 + HAILO_ATR_OFF_SRC, 0u);
     hailo_platform->write32(HAILO_BAR_CONFIG,
@@ -90,7 +102,7 @@ static void atr0_set_target(uint64_t dev_addr)
     hailo_platform->write32(HAILO_BAR_CONFIG,
                             atr0 + HAILO_ATR_OFF_TRSL_PARAM,
                             HAILO_ATR_TRSL_AXI);
-    if (hailo_platform->mb) hailo_platform->mb();
+    hailo_platform->mb();
 }
 
 /* Read the ATR[0] entry's trsl_addr_{lo,hi} so the caller can save
@@ -111,7 +123,7 @@ static void atr0_restore(uint32_t lo, uint32_t hi)
                             atr0 + HAILO_ATR_OFF_TRSL_ADDR_LO, lo);
     hailo_platform->write32(HAILO_BAR_CONFIG,
                             atr0 + HAILO_ATR_OFF_TRSL_ADDR_HI, hi);
-    if (hailo_platform->mb) hailo_platform->mb();
+    hailo_platform->mb();
 }
 
 /*
@@ -125,20 +137,27 @@ static int dev_read(uint32_t dev_addr, void *dst, size_t n)
     if (!dst || (n & 3u) != 0) return HAILO_ERR_INVAL;
     if (n > HAILO_ATR_TABLE_SIZE) return HAILO_ERR_INVAL;
 
+    uint32_t page = dev_addr & ~(HAILO_ATR_TABLE_SIZE - 1u);
+    uint32_t off  = dev_addr &  (HAILO_ATR_TABLE_SIZE - 1u);
+    if (off + n > HAILO_ATR_TABLE_SIZE) return HAILO_ERR_INVAL;
+
+    /*
+     * IRQ-disable spinlock across the whole save/retarget/read/
+     * restore sequence. Required because firmware (post-boot) also
+     * uses ATR[0] for its own traffic — a preempt between our
+     * save() and restore() could land firmware writes into the
+     * wrong device-side page, or drop ours on the floor. Even
+     * single-CPU, an IRQ-driven dev_read would corrupt.
+     */
+    irq_flags_t flags = spin_lock_irqsave(&atr0_lock);
+
     uint32_t saved_lo, saved_hi;
     atr0_save(&saved_lo, &saved_hi);
-
-    uint32_t page  = dev_addr & ~(HAILO_ATR_TABLE_SIZE - 1u);
-    uint32_t off   = dev_addr &  (HAILO_ATR_TABLE_SIZE - 1u);
-    if (off + n > HAILO_ATR_TABLE_SIZE) {
-        atr0_restore(saved_lo, saved_hi);
-        return HAILO_ERR_INVAL;
-    }
-
     atr0_set_target(page);
     hailo_platform->bar4_read(off, dst, n);
-
     atr0_restore(saved_lo, saved_hi);
+
+    spin_unlock_irqrestore(&atr0_lock, flags);
     return HAILO_OK;
 }
 
@@ -159,6 +178,7 @@ static bool ops_valid(const struct hailo_platform_ops *ops)
     if (!ops->bar4_write || !ops->bar4_read) return false;
     if (!ops->dma_alloc || !ops->dma_free) return false;
     if (!ops->cache_clean || !ops->cache_invalidate) return false;
+    if (!ops->mb) return false;
     if (!ops->udelay) return false;
     return true;
 }

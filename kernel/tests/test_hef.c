@@ -200,6 +200,46 @@ static void test_hef_accepts_v0_with_md5(void)
     }
 }
 
+/*
+ * Regression for the overflow check on CCWS size: an attacker-
+ * controlled v1 blob that declares a near-UINT64_MAX ccws_size
+ * previously slipped through (offset + size wrapped to a small
+ * value). The fixed check is `ccws_size > size - proto_end`,
+ * which rejects it.
+ */
+static void test_hef_v1_ccws_size_overflow_rejected(void)
+{
+    uint8_t buf[256] = {0};
+    /* Build a v1 header with proto_size=64 and a poisoned
+     * ccws_size = 0xFFFFFFFFFFFFFFFF. */
+    put_be_u32(buf + 0,  HEF_MAGIC);
+    put_be_u32(buf + 4,  HEF_VERSION_V1);
+    put_be_u32(buf + 8,  64);                         /* proto_size */
+    put_be_u32(buf + 12, 0);                          /* crc */
+    put_be_u32(buf + 16, 0xFFFFFFFFu);                /* ccws_size high */
+    put_be_u32(buf + 20, 0xFFFFFFFFu);                /* ccws_size low */
+    put_be_u32(buf + 24, 0);                          /* reserved */
+    /* Proto body fills remaining space — parser needs header (28)
+     * + proto_size (64) = 92 bytes to pass the earlier truncation
+     * check, which our 256-byte buf satisfies. */
+    struct hef_outer_header hdr;
+    int rc = hef_parse_outer_header(buf, sizeof(buf), &hdr);
+    TEST_ASSERT_EQUAL_INT(HEF_ERR_TRUNCATED, rc);
+}
+
+/* Boundary: ccws_size exactly fits the remaining blob. Must accept. */
+static void test_hef_v1_ccws_exact_fit_accepted(void)
+{
+    uint8_t buf[256] = {0};
+    /* header (28) + proto (64) + ccws (164) = 256 bytes exactly. */
+    size_t total = build_v1_blob(buf, 64, 164);
+    TEST_ASSERT_EQUAL_UINT64(256, total);
+    struct hef_outer_header hdr;
+    int rc = hef_parse_outer_header(buf, total, &hdr);
+    TEST_ASSERT_EQUAL_INT(HEF_OK, rc);
+    TEST_ASSERT_EQUAL_UINT64(164, hdr.ccws_size);
+}
+
 /* -------------------------------------------------------------------------- */
 /* nanopb freestanding smoke test                                             */
 /* -------------------------------------------------------------------------- */
@@ -255,6 +295,8 @@ int test_suite_hef(void)
     RUN_TEST(test_hef_rejects_null_blob);
     RUN_TEST(test_hef_rejects_oversize_proto);
     RUN_TEST(test_hef_accepts_v0_with_md5);
+    RUN_TEST(test_hef_v1_ccws_size_overflow_rejected);
+    RUN_TEST(test_hef_v1_ccws_exact_fit_accepted);
 
     RUN_TEST(test_nanopb_varint_roundtrip);
     RUN_TEST(test_nanopb_ostream_overflow);

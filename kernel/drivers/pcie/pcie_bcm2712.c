@@ -105,8 +105,16 @@ static volatile uint8_t *pcie1_regs;   /* PCIe RC MMIO VA */
 static volatile uint8_t *mip1_regs;    /* MIP1 MMIO VA */
 static spinlock_t cfg_lock;            /* guards EXT_CFG_INDEX/DATA pair */
 
-/* MIP1 vector allocation bitmap: bit N set = vector N in use. */
+/*
+ * MIP1 vector allocation bitmap: bit N set = vector N in use.
+ * Guarded by `msi_lock` — alloc/bind can race with other CPUs
+ * touching the bitmap or the per-slot handler table. In practice
+ * allocation is init-time on CPU 0 today, but there's no reason
+ * to require that at the API level; locking keeps the code safe
+ * against a future caller doing runtime MSI alloc.
+ */
 static uint8_t mip1_vec_inuse;
+static spinlock_t msi_lock = SPINLOCK_INIT;
 
 static inline uint32_t pcie1_r32(uint32_t off)
 {
@@ -144,16 +152,17 @@ static inline uint32_t ecam_idx(uint8_t bus, uint8_t dev, uint8_t func)
 /* MMIO region setup                                                           */
 /* -------------------------------------------------------------------------- */
 
-static int map_mmio_regions(void)
+/*
+ * Resolves the pcie1 RC + MIP1 register blocks to VA pointers.
+ * Does NOT install any mapping — vmm_setup_platform() in
+ * kernel/mm/vmm.c already installs a 2 MB block covering
+ * 0x1000000000..0x10001FFFFF as Device memory, which includes
+ * both pcie1 (0x10_00110000) and MIP1 (0x10_00131000). The VA
+ * matches the PA because the mapping is installed via TTBR0's
+ * identity region.
+ */
+static int resolve_mmio_regions(void)
 {
-    /*
-     * vmm_setup_platform() already maps the 2 MB block starting at
-     * 0x1000000000 (same block holds pcie0/1/2 RCs and MIP0/MIP1).
-     * Accessing these registers at their PA is fine thanks to the
-     * identity-style mapping — the VA matches the PA because this
-     * block is mapped via TTBR0's identity region. No additional
-     * vmm_map_region call is needed for the register blocks.
-     */
     pcie1_regs = (volatile uint8_t *)(uintptr_t)PCIE1_BASE;
     mip1_regs  = (volatile uint8_t *)(uintptr_t)MIP1_BASE;
 
@@ -174,7 +183,7 @@ static int bcm2712_init(void)
 {
     spin_init(&cfg_lock);
 
-    int rc = map_mmio_regions();
+    int rc = resolve_mmio_regions();
     if (rc != PCIE_OK) return rc;
 
     /* Per docs/pi5-pcie1-registers.md §4.5: unmask all 8 host
@@ -360,7 +369,8 @@ static const gic_handler_fn mip1_trampolines[MIP1_NUM_VECTORS] = {
  * 1, 2, 4, or 8 (MSI multi-vector rule). Returns the starting vector
  * index or -1 if no aligned block is free.
  */
-static int mip1_alloc_block(int count)
+/* Caller must hold msi_lock. */
+static int mip1_alloc_block_locked(int count)
 {
     /* MSI multi-vector requires the base to be aligned to `count`. */
     int align = count;
@@ -392,7 +402,9 @@ static int bcm2712_alloc_msi(const struct pcie_device *dev, uint8_t cap_ptr,
         return PCIE_ERR_INVAL;
     }
 
-    int base_vec = mip1_alloc_block(count);
+    irq_flags_t msi_flags = spin_lock_irqsave(&msi_lock);
+    int base_vec = mip1_alloc_block_locked(count);
+    spin_unlock_irqrestore(&msi_lock, msi_flags);
     if (base_vec < 0) return PCIE_ERR_NOVEC;
 
     /* Check the endpoint's MSI_CTRL — it advertises how many
@@ -404,8 +416,10 @@ static int bcm2712_alloc_msi(const struct pcie_device *dev, uint8_t cap_ptr,
     uint32_t max_msgs = 1u << mmc;
     if ((uint32_t)count > max_msgs) {
         /* Give back what we reserved. */
+        msi_flags = spin_lock_irqsave(&msi_lock);
         uint8_t mask = (uint8_t)(((1u << count) - 1u) << base_vec);
         mip1_vec_inuse &= ~mask;
+        spin_unlock_irqrestore(&msi_lock, msi_flags);
         return PCIE_ERR_NOVEC;
     }
 
@@ -460,13 +474,21 @@ static int bcm2712_bind_irq_handler(const struct pcie_msi_handle *h,
         return PCIE_ERR_INVAL;
     }
 
+    /* Publish the handler + ctx under msi_lock, and DSB SY after
+     * so the trampoline (which may run on another CPU) sees a
+     * fully-initialised slot before we enable the GIC line. */
+    irq_flags_t msi_flags = spin_lock_irqsave(&msi_lock);
     mip1_slots[vec].handler = handler;
     mip1_slots[vec].ctx = ctx;
+    __asm__ volatile("dsb sy" ::: "memory");
+    spin_unlock_irqrestore(&msi_lock, msi_flags);
 
     int rc = gic_register_handler(irq, mip1_trampolines[vec]);
     if (rc != 0) {
+        msi_flags = spin_lock_irqsave(&msi_lock);
         mip1_slots[vec].handler = NULL;
         mip1_slots[vec].ctx = NULL;
+        spin_unlock_irqrestore(&msi_lock, msi_flags);
         return PCIE_ERR_INVAL;
     }
     gic_enable_irq(irq);
