@@ -94,6 +94,13 @@ struct hef_pad_info {
  * only. Subsequent network groups are counted (network_group_count)
  * but their op/pad structure is not captured — the loader runs one
  * network group at a time.
+ *
+ * Size note: at HEF_PARSER_MAX_PADS=16 and ~64 B per hef_pad_info,
+ * this struct is ~1.2 KB. Callers typically declare it as a kernel
+ * stack local (shell's `hailo load` does). The 16 KB stack has
+ * plenty of room, but future expansion of hef_pad_info or MAX_PADS
+ * scales linearly — keep an eye on stack budget if more fields
+ * land here.
  */
 struct hef_info {
     uint32_t hw_arch;                 /* HEF_HW_ARCH_* */

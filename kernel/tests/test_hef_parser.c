@@ -631,6 +631,48 @@ static void test_decode_tensor_shape_ignores_unknown_field(void)
     TEST_ASSERT_EQUAL_UINT32(42, info.pads[0].index);
 }
 
+static void test_decode_tensor_shape_skips_non_varint_unknown_field(void)
+{
+    /* Companion to the varint-unknown test: a future non-varint
+     * field inside TensorShape (e.g. a length-delimited bytes field
+     * at tag 7) must be skipped per-field, NOT cause the walker to
+     * abandon the rest of the sub-message. The test places the
+     * unknown length-delimited field BETWEEN two known varint dims
+     * (height, then unknown_lenprefix, then features). Before the
+     * fix this test would have captured height but dropped features. */
+    uint8_t shape[32];
+    size_t  slen = 0;
+    emit_varint_field(shape, &slen, 1, 64);                  /* height */
+    /* Emit tag=7, wire_type=2 (length-delimited) with a 3-byte payload. */
+    const uint8_t payload[3] = { 0xAA, 0xBB, 0xCC };
+    emit_lenprefix(shape, &slen, /*field 7*/ 7, payload, sizeof(payload));
+    emit_varint_field(shape, &slen, 5, 3);                   /* features */
+
+    uint8_t pad[32];
+    size_t  pad_len = 0;
+    emit_varint_field(pad, &pad_len, 1, 1);
+    emit_lenprefix(pad, &pad_len, 6, shape, slen);
+
+    uint8_t op[64];
+    size_t  op_len = 0;
+    emit_lenprefix(op, &op_len, 2, pad, pad_len);
+
+    uint8_t ng[128];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 8, op, op_len);
+
+    uint8_t blob[256];
+    size_t  olen = 0;
+    emit_lenprefix(blob, &olen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, olen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(64, info.pads[0].height);
+    TEST_ASSERT_EQUAL_UINT32(3,  info.pads[0].features);
+}
+
 static void test_decode_pad_name_truncation(void)
 {
     /* A pad name longer than HEF_PARSER_MAX_PAD_NAME-1 bytes must
@@ -693,6 +735,7 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_op_without_pads);
     RUN_TEST(test_decode_tensor_shape_rejects_oversize_dim);
     RUN_TEST(test_decode_tensor_shape_ignores_unknown_field);
+    RUN_TEST(test_decode_tensor_shape_skips_non_varint_unknown_field);
     RUN_TEST(test_decode_pad_name_truncation);
 
     return UnityEnd();

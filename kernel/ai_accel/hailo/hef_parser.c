@@ -187,29 +187,57 @@ static bool decode_tensor_shape_cb(pb_istream_t *stream,
      * because the parent ProtoHEFPad already consumed the length-
      * prefix — nanopb hands us `stream` already bounded to this
      * sub-message's body. Walking tags here keeps the call depth
-     * one level shallower than a nested pb_decode. */
+     * one level shallower than a nested pb_decode.
+     *
+     * Forward-compat: if Hailo adds new fields with any wire type,
+     * we skip just that field's bytes and keep parsing. Known
+     * varint fields land in the switch; unknown or future
+     * non-varint fields fall through to the per-wire-type skip so
+     * subsequent known fields are still recovered. */
     while (stream->bytes_left > 0) {
         uint64_t tag = 0;
         if (!pb_decode_varint(stream, &tag)) return false;
         uint32_t field_no  = (uint32_t)(tag >> 3);
         uint32_t wire_type = (uint32_t)(tag & 0x7u);
-        if (wire_type != 0) {
-            /* Unknown / future field type — skip the remainder. */
-            if (!pb_read(stream, NULL, stream->bytes_left)) return false;
+
+        if (wire_type == 0) {   /* varint: known TensorShape fields */
+            uint64_t v = 0;
+            if (!pb_decode_varint(stream, &v)) return false;
+            if (v > UINT32_MAX) return false;
+            uint32_t u = (uint32_t)v;
+            switch (field_no) {
+            case 1: tctx->pad->height          = u; break;
+            case 2: tctx->pad->padded_height   = u; break;
+            case 3: tctx->pad->width           = u; break;
+            case 4: tctx->pad->padded_width    = u; break;
+            case 5: tctx->pad->features        = u; break;
+            case 6: tctx->pad->padded_features = u; break;
+            default: break;   /* future varint field — ignore */
+            }
+            continue;
+        }
+
+        /* Skip one unknown field of any wire type, so known fields
+         * appearing after it still get parsed. Wire type 3 / 4 are
+         * deprecated proto2 groups; treat as malformed. */
+        switch (wire_type) {
+        case 1: {   /* 64-bit fixed */
+            if (!pb_read(stream, NULL, 8)) return false;
             break;
         }
-        uint64_t v = 0;
-        if (!pb_decode_varint(stream, &v)) return false;
-        if (v > UINT32_MAX) return false;
-        uint32_t u = (uint32_t)v;
-        switch (field_no) {
-        case 1: tctx->pad->height          = u; break;
-        case 2: tctx->pad->padded_height   = u; break;
-        case 3: tctx->pad->width           = u; break;
-        case 4: tctx->pad->padded_width    = u; break;
-        case 5: tctx->pad->features        = u; break;
-        case 6: tctx->pad->padded_features = u; break;
-        default: break;   /* ignore unknown fields */
+        case 2: {   /* length-delimited */
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        case 5: {   /* 32-bit fixed */
+            if (!pb_read(stream, NULL, 4)) return false;
+            break;
+        }
+        default:
+            return false;   /* wire type 3/4 (groups) or garbage */
         }
     }
     tctx->pad->has_tensor_shape = true;
@@ -221,10 +249,11 @@ static bool decode_tensor_shape_cb(pb_istream_t *stream,
  * output_pads[] entry inside a ProtoHEFOp. The caller's pad_ctx
  * carries the is_input flag so we don't need two callback bodies.
  *
- * If the pads[] slot array is already full, this still has to run
- * (so nanopb's stream pointer advances past the sub-message), but
- * writes nothing — pads_truncated gets set the first time a pad is
- * dropped.
+ * If the pads[] slot array is already full, the decode still has to
+ * advance the stream past the sub-message but none of the pad
+ * fields need to be recovered — so the overflow branch leaves every
+ * callback NULL and relies on nanopb's default-skip. Avoids a
+ * stack-local scratch pad_info and the wasted callback work.
  */
 struct pad_ctx {
     struct hef_info *info;
@@ -239,44 +268,47 @@ static bool decode_pad_cb(pb_istream_t *stream,
     struct pad_ctx *pctx = (struct pad_ctx *)*arg;
     struct hef_info *info = pctx->info;
 
-    struct hef_pad_info  discard = { 0 };  /* throwaway slot for overflow */
-    struct hef_pad_info *slot;
-    bool capture;
+    ProtoHEFPad pad = ProtoHEFPad_init_default;
 
     if (info->pad_count < HEF_PARSER_MAX_PADS) {
-        slot = &info->pads[info->pad_count];
+        struct hef_pad_info *slot = &info->pads[info->pad_count];
         memset(slot, 0, sizeof(*slot));
         slot->is_input = pctx->is_input;
-        capture = true;
-    } else {
-        slot = &discard;
-        info->pads_truncated = true;
-        capture = false;
+
+        /* read_u32_cb expects a non-NULL `present` pointer even when
+         * the caller doesn't care; provide a named dummy so the
+         * lifetime is obvious (vs. a compound-literal address). */
+        bool index_present = false;
+        struct u32_ctx index_ctx = {
+            .dst = &slot->index, .present = &index_present,
+        };
+        struct string_ctx name_ctx = {
+            .dst = slot->name, .cap = HEF_PARSER_MAX_PAD_NAME,
+            .truncated = &info->string_truncated,
+        };
+        struct tshape_ctx shape_ctx = { .pad = slot };
+
+        pad.index.funcs.decode = read_u32_cb;
+        pad.index.arg          = &index_ctx;
+        pad.name.funcs.decode  = read_string_cb;
+        pad.name.arg           = &name_ctx;
+        /* Oneof access: tensor_shape lives inside the shape_info
+         * union alongside nms_shape. Nanopb shares the callback slot
+         * between oneof members — decode_tensor_shape_cb filters by
+         * field->tag. */
+        pad.shape_info.tensor_shape.funcs.decode = decode_tensor_shape_cb;
+        pad.shape_info.tensor_shape.arg          = &shape_ctx;
+
+        if (!pb_decode(stream, ProtoHEFPad_fields, &pad)) return false;
+        info->pad_count++;
+        return true;
     }
 
-    struct u32_ctx index_ctx = {
-        .dst = &slot->index, .present = &(bool){ false },
-    };
-    struct string_ctx name_ctx = {
-        .dst = slot->name, .cap = HEF_PARSER_MAX_PAD_NAME,
-        .truncated = &info->string_truncated,
-    };
-    struct tshape_ctx shape_ctx = { .pad = slot };
-
-    ProtoHEFPad pad = ProtoHEFPad_init_default;
-    pad.index.funcs.decode = read_u32_cb;
-    pad.index.arg          = &index_ctx;
-    pad.name.funcs.decode  = read_string_cb;
-    pad.name.arg           = &name_ctx;
-    /* Oneof access: tensor_shape lives inside the shape_info union
-     * alongside nms_shape. Nanopb shares the callback slot between
-     * oneof members — decode_tensor_shape_cb filters by field->tag. */
-    pad.shape_info.tensor_shape.funcs.decode = decode_tensor_shape_cb;
-    pad.shape_info.tensor_shape.arg          = &shape_ctx;
-
+    /* Overflow: no callbacks wired, nanopb default-skips every
+     * field and advances the stream. Still report OK so the parent
+     * op decode completes cleanly. */
+    info->pads_truncated = true;
     if (!pb_decode(stream, ProtoHEFPad_fields, &pad)) return false;
-
-    if (capture) info->pad_count++;
     return true;
 }
 

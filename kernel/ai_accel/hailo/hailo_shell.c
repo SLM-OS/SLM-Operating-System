@@ -210,19 +210,19 @@ static int cmd_hailo(int argc, char *argv[])
                          meta.pads_truncated ? " (truncated)" : "");
             for (uint32_t i = 0; i < meta.pad_count; i++) {
                 const struct hef_pad_info *p = &meta.pads[i];
+                const char *name = p->name[0] ? p->name : "<unnamed>";
                 if (p->has_tensor_shape) {
                     shell_printf("    %s pad[%u] \"%s\" shape=%ux%ux%u"
                                  " (padded %ux%ux%u)\n",
                                  p->is_input ? "in" : "out",
-                                 p->index,
-                                 p->name,
+                                 p->index, name,
                                  p->height, p->width, p->features,
                                  p->padded_height, p->padded_width,
                                  p->padded_features);
                 } else {
                     shell_printf("    %s pad[%u] \"%s\" (no tensor_shape)\n",
                                  p->is_input ? "in" : "out",
-                                 p->index, p->name);
+                                 p->index, name);
                 }
             }
         }
