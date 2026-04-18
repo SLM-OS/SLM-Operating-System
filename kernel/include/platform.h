@@ -275,6 +275,15 @@
 #define TEGRA_XHCI_BAR2_BASE     0x03650000UL    /* xHCI BAR2 regs (64 KB) */
 
 /*
+ * Tegra XUDC device controller + XUSB pad controller. Both apertures
+ * live in the 2 MB block at 0x03400000 (shared by UPHY padctl at
+ * 0x03520000 and XUDC at 0x03550000). Mapped for the #266 Phase 0 CBB
+ * reachability probe; see docs/jetson-usb-networking-plan.md §3 Phase 0.
+ */
+#define TEGRA_XUSB_PADCTL_BASE   0x03520000UL    /* UPHY/XUSB pad controller */
+#define TEGRA_XUDC_BASE          0x03550000UL    /* XUDC device controller */
+
+/*
  * Spinlock policy: use the runtime `spinlock_hw_enabled` flag, same as Pi 5.
  *
  * Before MMU enable, memory is non-cacheable and LSE atomics (SWPALB) cause

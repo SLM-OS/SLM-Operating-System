@@ -986,6 +986,19 @@ static void vmm_setup_platform(void)
         DEBUG_PRINT("  XHCI (tegra-xusb) L2[%lu] mapped", (unsigned long)xhci_l2);
     }
 
+    /* Tegra XUDC device controller (0x03550000) + XUSB pad controller
+     * (0x03520000) share the 2 MB block at 0x03400000 (L2 idx 26).
+     * Mapping added for the #266 Phase 0 CBB reachability probe —
+     * reads from these apertures decide whether USB networking goes
+     * Option A (XHCI host + dongle) or Option B (XUDC gadget). */
+    {
+        uint64_t xudc_blk = TEGRA_XUDC_BASE & ~(BLOCK_SIZE - 1);
+        uint64_t xudc_l2 = (xudc_blk >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[xudc_l2] = make_block_desc(xudc_blk, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  XUDC + padctl L2[%lu] mapped", (unsigned long)xudc_l2);
+    }
+
     /* RTL8168 BAR window at 0x35_2800_0000 (L1[212]). One 2 MB block
      * covers BAR2 (0x3528004000, 4 KB) and BAR4 (0x3528000000, 16 KB)
      * both — they land in the same 2 MB-aligned region. */
