@@ -817,13 +817,18 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
 
 /* ---- Phase 6: Inherit channel from Linux ----
  *
- * The CBB firewall blocks PFIFO, CHRAM, and NV_USERMODE registers
- * from EL2 (see commit 70d2a94). Channel creation from scratch is
- * not possible. Instead, a Linux-side helper creates a channel via
- * nvgpu ioctls and writes the channel metadata (USERD address,
- * GPFIFO ring, pushbuffer, semaphore) to a fixed DRAM location
- * (GA10B_CHANNEL_HANDOFF_PHYS). SLM-OS reads the handoff after
- * a --no-gpu-suspend kexec.
+ * Channel creation from scratch at EL2 would require reimplementing
+ * the nvgpu kernel driver (TSG open, channel bind, ALLOC_AS,
+ * SETUP_BIND, nvmap, runlist programming). Rather than port that,
+ * a Linux-side helper creates the channel via nvgpu ioctls and
+ * writes the channel metadata (USERD, GPFIFO, pushbuffer, semaphore,
+ * doorbell token) to a dmabuf in DRAM. SLM-OS scans DRAM for the
+ * handoff magic after a --no-gpu-suspend kexec and uses the values
+ * verbatim. Note: BAR0 itself is accessible at EL2 — the blocker is
+ * the kernel-side ioctl surface, not a hardware firewall. An early
+ * read of the commit 70d2a94 firewall map reported NV_USERMODE
+ * blocked; that was a misinterpretation (wrong offset + misread of
+ * the GPU's "no register here" 0xbadf response).
  *
  * This function validates the handoff block and stores the channel
  * addresses in the bringup struct for Phase 7 (method submission).

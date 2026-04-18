@@ -145,22 +145,29 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
 - **FECS method gateway verified:** `nvgpu test` submits
   DISCOVER_IMAGE_SIZE → FECS returns 513,280 bytes (context size).
   First bare-metal GPU method submission from SLM-OS.
-- **CBB firewall mapped (April 17):** PFIFO, CHRAM, NV_USERMODE
-  are permanently blocked from EL2. Channel setup requires
-  Linux-side pre-creation ("inherit channel" path).
+- **CBB firewall reassessed (April 17, corrects PR #254):** The
+  prior "BAR0 blocked" map was the result of probing the wrong
+  offsets (0x800000 instead of 0xBB0090 for the GA10B doorbell)
+  and misreading the GPU's `0xbadf1100`-family "no register here"
+  responses as bus aborts. BAR0 is fully accessible at EL2 for
+  reads and writes. Channel setup via nvgpu ioctls still needs
+  the Linux-side helper because the ioctl surface is kernel-owned,
+  not because of a hardware firewall.
 - **Phase 6 channel inherit VERIFIED (April 17):** Linux helper
-  creates channel + writes handoff block; SLM-OS scans DRAM,
-  finds magic, parses all addresses. End-to-end E2E verified via
-  `nvgpu inherit` → `nvgpu channel`.
-- **Phase 7 partial (April 17):** `nvgpu submit` writes a NOP
-  pushbuffer GPFIFO entry and GP_PUT in USERD. `peek` confirms
-  the write landed. PBDMA does not consume — the doorbell is
-  CBB-blocked from EL2 and kexec breaks the Linux-side mmap that
-  would ring it. Next step: warm up PBDMA from Linux before kexec.
+  creates channel + writes handoff block (v2 wire format, carries
+  `work_submit_token`); SLM-OS scans DRAM, finds magic, parses
+  all addresses. E2E verified via `nvgpu inherit` → `nvgpu channel`.
+- **Phase 7 HW-verified (April 17):** `nvgpu submit` writes a
+  NOP pushbuffer, advances GP_PUT, and rings the USERMODE
+  doorbell at physical 0x17BB0090 from EL2 with the
+  `work_submit_token` captured from Linux's SETUP_BIND ioctl.
+  PBDMA consumes the entry; GP_GET advances. Bringup reaches
+  METHOD_ACCEPTED. Semaphore stays 0 because a NOP doesn't
+  release it — next step is a real SEMAPHORE_RELEASE method.
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)
-- Phases 1–7 of nvgpu bringup (37 host tests)
+- Phases 1–7 of nvgpu bringup (38 host tests)
 - #190 priv-lockdown root-caused and resolved
 - FECS method gateway — hardware-verified GPU controllability
 - Phase 6 channel inherit — full Linux/SLM-OS handoff working
