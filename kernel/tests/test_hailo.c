@@ -17,6 +17,10 @@
 #include "../ai_accel/hailo/hailo.h"
 #include "../ai_accel/hailo/hailo_control.h"
 #include "../ai_accel/hailo/hailo_internal.h"
+#include "../ai_accel/hailo/hailo_infer.h"
+#include "../ai_accel/hailo/hailo_tensor.h"
+#include "../ai_accel/hailo/hailo_vdma.h"
+#include "../ai_accel/hailo/hef_parser.h"
 #include "../include/md5.h"
 #include "../include/uart.h"
 #include "test_harness.h"
@@ -41,10 +45,19 @@
  * with room to spare. 1 MB of BSS is acceptable for test builds only.
  */
 #define MOCK_BAR0_SIZE  0x4000u
+/* BAR2 holds the VDMA channel registers — 32 B per channel ×
+ * 16 channels = 512 B; round up to 4 KB for headroom. */
+#define MOCK_BAR2_SIZE  0x1000u
 #define MOCK_SRAM_BASE  0x00000000u
 #define MOCK_SRAM_SIZE  0x00100000u   /* 1 MB — covers all Hailo-8 FW targets */
 
 static uint8_t  mock_bar0[MOCK_BAR0_SIZE];
+static uint8_t  mock_bar2[MOCK_BAR2_SIZE];
+/* Per-channel "device responds" simulation hooks. When
+ * mock_vdma_auto_advance is non-zero, every num_avail write also
+ * advances num_proc to match — lets a test drive hailo_vdma_submit_and_wait
+ * past its polling loop without a separate "fire completion" step. */
+static bool     mock_vdma_auto_advance;
 static uint8_t  mock_sram[MOCK_SRAM_SIZE];
 static uint64_t mock_atr0_target;
 static int      mock_init_calls;
@@ -101,9 +114,37 @@ static uint32_t mock_istatus_one_shot_preload;
 static bool     mock_fw_sim_smart_memory_enabled;
 static uint8_t  mock_fw_sim_device_memory[MOCK_MEMORY_SIZE];
 
+/* DMA-mock state used by both mock_reset and the dma_alloc /
+ * dma_free / cache_* hooks. Kept at file scope (rather than
+ * grouped with mock_ops further down) so mock_reset can touch
+ * the counters without needing forward declarations. */
+/* Pool is large enough for tensor + VDMA-descriptor-list allocations
+ * and aligned to HAILO_VDMA_DESC_LIST_ALIGN (64 KB) — the strictest
+ * alignment any Hailo DMA structure requires. Smaller-alignment
+ * requests land correctly via the offset math below. */
+#define MOCK_DMA_POOL_SIZE (1024u * 1024u)
+static alignas(HAILO_VDMA_DESC_LIST_ALIGN) uint8_t mock_dma_pool[MOCK_DMA_POOL_SIZE];
+static size_t   mock_dma_next_off;
+static bool     mock_dma_force_null;
+static uint32_t mock_dma_alloc_calls;
+static uint32_t mock_dma_free_calls;
+static uint32_t mock_cache_clean_calls;
+static uint32_t mock_cache_invalidate_calls;
+static size_t   mock_last_cache_clean_size;
+static size_t   mock_last_cache_invalidate_size;
+
+/* Smart CONFIG_STREAM simulation. When enabled the mock synthesizes
+ * a successful response carrying the supplied dataflow_manager_id,
+ * so tests can assert the driver correctly unpacks the BE-wrapped
+ * response body. */
+static bool    mock_fw_sim_config_stream_enabled;
+static uint8_t mock_fw_sim_config_stream_manager_id;
+
 static void mock_reset(void)
 {
     memset(mock_bar0, 0, sizeof(mock_bar0));
+    memset(mock_bar2, 0, sizeof(mock_bar2));
+    mock_vdma_auto_advance = false;
     memset(mock_sram, 0, sizeof(mock_sram));
     mock_atr0_target = 0;
     mock_init_calls  = 0;
@@ -122,6 +163,19 @@ static void mock_reset(void)
     mock_istatus_one_shot_preload = 0;
     mock_fw_sim_smart_memory_enabled = false;
     memset(mock_fw_sim_device_memory, 0, sizeof(mock_fw_sim_device_memory));
+    /* DMA-allocator + cache-hook observability — reset pool and
+     * counters so per-test assertions start from zero. */
+    memset(mock_dma_pool, 0, sizeof(mock_dma_pool));
+    mock_dma_next_off = 0;
+    mock_dma_force_null = false;
+    mock_dma_alloc_calls = 0;
+    mock_dma_free_calls = 0;
+    mock_cache_clean_calls = 0;
+    mock_cache_invalidate_calls = 0;
+    mock_last_cache_clean_size = 0;
+    mock_last_cache_invalidate_size = 0;
+    mock_fw_sim_config_stream_enabled = false;
+    mock_fw_sim_config_stream_manager_id = 0;
     hailo_control_reset_state_for_tests();
 }
 
@@ -148,6 +202,11 @@ static uint32_t mock_read32(uint8_t bar, uint32_t offset)
     if (bar == HAILO_BAR_CONFIG && offset + 4 <= MOCK_BAR0_SIZE) {
         uint32_t v;
         memcpy(&v, &mock_bar0[offset], sizeof(v));
+        return v;
+    }
+    if (bar == HAILO_BAR_VDMA && offset + 4 <= MOCK_BAR2_SIZE) {
+        uint32_t v;
+        memcpy(&v, &mock_bar2[offset], sizeof(v));
         return v;
     }
     return 0xFFFFFFFFu;
@@ -188,6 +247,27 @@ static void mock_write32(uint8_t bar, uint32_t offset, uint32_t value)
      && offset == HAILO_ATR_BASE + HAILO_ATR_OFF_TRSL_ADDR_HI) {
         mock_atr0_target = (mock_atr0_target & 0xFFFFFFFFULL)
                          | ((uint64_t)value << 32);
+    }
+    /* BAR2 (VDMA channel regs): plain 32-bit store. The VDMA
+     * register block is packed u8/u16 fields, so the driver does
+     * read-modify-write sequences — reflected by reads servicing
+     * from the same mock_bar2 backing. When auto-advance is on,
+     * any write to a channel's NUM_AVAIL (offset 2 within the
+     * 4-byte dword at CHANNEL_CONTROL_OFFSET) also bumps NUM_PROC
+     * (16-bit value at CHANNEL_NUM_PROC_OFFSET=0x04) to match,
+     * simulating the device completing the transfer immediately. */
+    if (bar == HAILO_BAR_VDMA && offset + 4 <= MOCK_BAR2_SIZE) {
+        memcpy(&mock_bar2[offset], &value, sizeof(value));
+        if (mock_vdma_auto_advance
+         && (offset & 0x1Fu) == 0) {
+            /* Write to the channel-base dword. NUM_AVAIL lives in
+             * bits [31:16] of this dword. Mirror it to NUM_PROC
+             * (16-bit at offset+0x04) so a subsequent poll of
+             * num_proc sees completion. */
+            uint16_t num_avail = (uint16_t)(value >> 16);
+            memcpy(&mock_bar2[offset + 0x04],
+                   &num_avail, sizeof(num_avail));
+        }
     }
 }
 
@@ -262,9 +342,28 @@ static bool mock_smart_memory_handle(uint32_t opcode_native,
                                      uint8_t *resp_out,
                                      uint32_t *resp_out_len)
 {
-    if (!mock_fw_sim_smart_memory_enabled) return false;
     uint32_t req_opcode_be;
     memcpy(&req_opcode_be, mock_last_control_request + 12, 4);
+
+    /* CONFIG_STREAM is gated by its own flag, independent of the
+     * smart-memory toggle. Response shape is:
+     *   [response_header(24)][parameter_count=0(4)]
+     *   [dataflow_manager_id_length=1(4, BE)]
+     *   [dataflow_manager_id(1)] */
+    if (opcode_native == HAILO_CONTROL_OPCODE_CONFIG_STREAM
+     && mock_fw_sim_config_stream_enabled) {
+        struct {
+            uint32_t dmid_length_be;
+            uint8_t  dataflow_manager_id;
+        } __attribute__((packed)) body;
+        body.dmid_length_be = __builtin_bswap32(1u);
+        body.dataflow_manager_id = mock_fw_sim_config_stream_manager_id;
+        mock_build_echo_response(resp_out, resp_out_len,
+                                 req_opcode_be, 0, &body, sizeof(body));
+        return true;
+    }
+
+    if (!mock_fw_sim_smart_memory_enabled) return false;
 
     if (opcode_native == HAILO_CONTROL_OPCODE_WRITE_MEMORY) {
         /* Request body after the common header:
@@ -460,16 +559,51 @@ static void mock_bar4_write(uint32_t offset, const void *src, size_t n)
     }
 }
 
+/*
+ * Simple bump allocator backing the mock DMA pool. The pool and
+ * counters are declared up near mock_reset; the allocator body
+ * lives here with the other platform hooks. Reset between tests
+ * via mock_reset.
+ */
 static void *mock_dma_alloc(size_t size, size_t align, uint64_t *iova_out)
 {
-    (void)size; (void)align;
-    if (iova_out) *iova_out = 0;
-    return NULL;        /* not needed for these tests */
+    mock_dma_alloc_calls++;
+    if (mock_dma_force_null) {
+        if (iova_out) *iova_out = 0;
+        return NULL;
+    }
+    /* Round the current offset up to the requested alignment. */
+    size_t aligned_off = (mock_dma_next_off + align - 1u) & ~(align - 1u);
+    if (aligned_off + size > sizeof(mock_dma_pool)) {
+        if (iova_out) *iova_out = 0;
+        return NULL;
+    }
+    void *p = &mock_dma_pool[aligned_off];
+    mock_dma_next_off = aligned_off + size;
+    /* IOVA is the same as the host virtual address in the mock —
+     * identity mapping, matching what the Pi 5 NC allocator does. */
+    if (iova_out) *iova_out = (uint64_t)(uintptr_t)p;
+    return p;
 }
 static void  mock_dma_free(void *ptr, size_t size, size_t align)
-{ (void)ptr; (void)size; (void)align; }
-static void  mock_cache_clean(const void *a, size_t n) { (void)a; (void)n; }
-static void  mock_cache_invalidate(void *a, size_t n)  { (void)a; (void)n; }
+{
+    (void)ptr; (void)size; (void)align;
+    mock_dma_free_calls++;
+    /* Bump allocator never shrinks. Tests that care about resource
+     * accounting assert on the free-count instead. */
+}
+static void  mock_cache_clean(const void *a, size_t n)
+{
+    (void)a;
+    mock_cache_clean_calls++;
+    mock_last_cache_clean_size = n;
+}
+static void  mock_cache_invalidate(void *a, size_t n)
+{
+    (void)a;
+    mock_cache_invalidate_calls++;
+    mock_last_cache_invalidate_size = n;
+}
 static void  mock_mb(void)                             {}
 static void  mock_udelay(uint32_t u)                   { (void)u; }
 
@@ -2090,6 +2224,1223 @@ static void test_control_read_memory_sends_correct_wire(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 5.3: DMA tensor buffers                                               */
+/* -------------------------------------------------------------------------- */
+
+/* All tensor tests assume the mock platform is installed. Pull that
+ * setup into a helper since tensor tests don't need the probed /
+ * running state machine — just a live hailo_platform pointer. */
+static void tensor_setup(void)
+{
+    mock_reset();
+    hailo_platform = &mock_ops;
+}
+
+static void test_tensor_size_from_shape_small(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(224 * 224 * 3,
+        hailo_tensor_size_from_shape(224, 224, 3, 1));
+    TEST_ASSERT_EQUAL_UINT32(56 * 56 * 256 * 2,
+        hailo_tensor_size_from_shape(56, 56, 256, 2));
+}
+
+static void test_tensor_size_from_shape_rejects_zero(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_tensor_size_from_shape(0, 10, 10, 1));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_tensor_size_from_shape(10, 0, 10, 1));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_tensor_size_from_shape(10, 10, 0, 1));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_tensor_size_from_shape(10, 10, 10, 0));
+}
+
+static void test_tensor_size_from_shape_rejects_overflow(void)
+{
+    /* 65536 * 65536 = 4 G > UINT32_MAX → reject at step 1. */
+    TEST_ASSERT_EQUAL_UINT32(0,
+        hailo_tensor_size_from_shape(65536, 65536, 1, 1));
+    /* 1024 * 1024 * 4096 * 1 = 4 G → overflow at step 2. */
+    TEST_ASSERT_EQUAL_UINT32(0,
+        hailo_tensor_size_from_shape(1024, 1024, 4096, 1));
+}
+
+static void test_tensor_alloc_happy_path(void)
+{
+    tensor_setup();
+    struct hailo_tensor t = {0};
+
+    int rc = hailo_tensor_alloc(224 * 224 * 3, &t);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, rc);
+    TEST_ASSERT_NOT_NULL(t.cpu_addr);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)t.cpu_addr, t.iova);
+    TEST_ASSERT_EQUAL_UINT32(224 * 224 * 3, t.tensor_bytes);
+    /* alloc_size rounded up to 4 KB boundary. */
+    TEST_ASSERT_EQUAL_UINT32(
+        (224 * 224 * 3 + 4095) & ~4095u,
+        t.alloc_size);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_TENSOR_DMA_ALIGN, t.align);
+    /* Buffer is page-aligned. */
+    TEST_ASSERT_EQUAL_UINT64(0,
+        (uintptr_t)t.cpu_addr & (HAILO_TENSOR_DMA_ALIGN - 1));
+    /* Buffer is zero-initialized. */
+    for (uint32_t i = 0; i < t.tensor_bytes; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, ((uint8_t *)t.cpu_addr)[i]);
+    }
+    /* dma_alloc fired exactly once. */
+    TEST_ASSERT_EQUAL_UINT32(1, mock_dma_alloc_calls);
+
+    hailo_tensor_free(&t);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_dma_free_calls);
+    /* Handle is zeroed post-free. */
+    TEST_ASSERT_NULL(t.cpu_addr);
+    TEST_ASSERT_EQUAL_UINT32(0, t.tensor_bytes);
+}
+
+static void test_tensor_alloc_rejects_null_out(void)
+{
+    tensor_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, hailo_tensor_alloc(1024, NULL));
+}
+
+static void test_tensor_alloc_rejects_zero_size(void)
+{
+    tensor_setup();
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, hailo_tensor_alloc(0, &t));
+}
+
+static void test_tensor_alloc_nodev_without_platform(void)
+{
+    const struct hailo_platform_ops *saved = hailo_platform;
+    hailo_platform = NULL;
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV, hailo_tensor_alloc(1024, &t));
+    hailo_platform = saved;
+}
+
+static void test_tensor_alloc_propagates_nomem(void)
+{
+    tensor_setup();
+    mock_dma_force_null = true;
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM, hailo_tensor_alloc(4096, &t));
+    /* alloc_calls bumped but handle stays zeroed. */
+    TEST_ASSERT_EQUAL_UINT32(1, mock_dma_alloc_calls);
+    TEST_ASSERT_NULL(t.cpu_addr);
+}
+
+static void test_tensor_prepare_for_device_fires_cache_clean(void)
+{
+    tensor_setup();
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_tensor_alloc(8192, &t));
+
+    hailo_tensor_prepare_for_device(&t);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_cache_clean_calls);
+    /* Clean is scoped to the logical tensor bytes, not the rounded
+     * alloc_size — device only reads what the caller wrote. */
+    TEST_ASSERT_EQUAL_UINT64(8192, mock_last_cache_clean_size);
+
+    hailo_tensor_free(&t);
+}
+
+static void test_tensor_prepare_for_host_fires_cache_invalidate(void)
+{
+    tensor_setup();
+    struct hailo_tensor t;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_tensor_alloc(8192, &t));
+
+    hailo_tensor_prepare_for_host(&t);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_cache_invalidate_calls);
+    TEST_ASSERT_EQUAL_UINT64(8192, mock_last_cache_invalidate_size);
+
+    hailo_tensor_free(&t);
+}
+
+static void test_tensor_free_zero_handle_is_noop(void)
+{
+    tensor_setup();
+    struct hailo_tensor t = {0};
+    hailo_tensor_free(&t);   /* must not crash */
+    TEST_ASSERT_EQUAL_UINT32(0, mock_dma_free_calls);
+}
+
+static void test_tensor_multi_alloc_distinct_buffers(void)
+{
+    tensor_setup();
+    struct hailo_tensor a = {0}, b = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_tensor_alloc(4096, &a));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_tensor_alloc(4096, &b));
+    TEST_ASSERT_NOT_NULL(a.cpu_addr);
+    TEST_ASSERT_NOT_NULL(b.cpu_addr);
+    TEST_ASSERT_NOT_EQUAL(a.cpu_addr, b.cpu_addr);
+    /* Bump-allocator grows monotonically. */
+    TEST_ASSERT_TRUE((uintptr_t)b.cpu_addr > (uintptr_t)a.cpu_addr);
+
+    hailo_tensor_free(&a);
+    hailo_tensor_free(&b);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 5.4: VDMA descriptor-list allocator                                   */
+/* -------------------------------------------------------------------------- */
+
+/* Descriptor-list allocation shares the tensor-path setup — just
+ * needs the mock platform installed. */
+static void vdma_setup(void)
+{
+    mock_reset();
+    hailo_platform = &mock_ops;
+}
+
+static void test_vdma_alloc_size_rounds_up_to_64k(void)
+{
+    /* 64 descriptors × 16 B = 1024 B → round up to 64 KB. */
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_DESC_LIST_ALIGN,
+        hailo_vdma_desc_list_alloc_size(64));
+    /* 4096 descriptors × 16 B = 65536 B → exactly 64 KB (no bump). */
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_DESC_LIST_ALIGN,
+        hailo_vdma_desc_list_alloc_size(4096));
+    /* 8192 descriptors × 16 B = 128 KB. */
+    TEST_ASSERT_EQUAL_UINT32(2u * HAILO_VDMA_DESC_LIST_ALIGN,
+        hailo_vdma_desc_list_alloc_size(8192));
+}
+
+static void test_vdma_alloc_happy_path(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    int rc = hailo_vdma_desc_list_alloc(256, 4096, true, &list);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, rc);
+    TEST_ASSERT_NOT_NULL(list.descs);
+    TEST_ASSERT_EQUAL_UINT32(256, list.desc_count);
+    TEST_ASSERT_EQUAL_UINT32(255, list.desc_count_mask);
+    TEST_ASSERT_EQUAL_UINT16(4096, list.desc_page_size);
+    TEST_ASSERT_TRUE(list.is_circular);
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)list.descs, list.iova);
+    /* 64 KB-aligned address — VDMA engine's HOST_DESC_BASE_ADDR
+     * truncates low 16 bits; any misalignment is a silent firmware
+     * bug. */
+    TEST_ASSERT_EQUAL_UINT64(0,
+        (uintptr_t)list.descs & (HAILO_VDMA_DESC_LIST_ALIGN - 1));
+    /* Buffer zero-initialized — an all-zero descriptor is inert. */
+    for (uint32_t i = 0; i < 256 * sizeof(struct hailo_vdma_descriptor); i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, ((uint8_t *)list.descs)[i]);
+    }
+    hailo_vdma_desc_list_free(&list);
+    TEST_ASSERT_NULL(list.descs);
+    TEST_ASSERT_EQUAL_UINT32(0, list.desc_count);
+}
+
+static void test_vdma_alloc_rejects_non_power_of_two(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(3, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(100, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(1023, 512, false, &list));
+}
+
+static void test_vdma_alloc_rejects_out_of_range(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    /* desc_count = 1 is below MIN_DESC_COUNT. */
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(1, 512, false, &list));
+    /* desc_count = 131072 = 2^17 exceeds MAX (16-bit num_avail/num_proc). */
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(131072, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(0, 512, false, &list));
+}
+
+static void test_vdma_alloc_rejects_zero_page_size(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(64, 0, false, &list));
+}
+
+static void test_vdma_alloc_rejects_null_out(void)
+{
+    vdma_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_desc_list_alloc(64, 512, false, NULL));
+}
+
+static void test_vdma_alloc_nodev_without_platform(void)
+{
+    const struct hailo_platform_ops *saved = hailo_platform;
+    hailo_platform = NULL;
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    hailo_platform = saved;
+}
+
+static void test_vdma_alloc_propagates_nomem(void)
+{
+    vdma_setup();
+    mock_dma_force_null = true;
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    TEST_ASSERT_NULL(list.descs);
+}
+
+static void test_vdma_free_zero_handle_is_noop(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    hailo_vdma_desc_list_free(&list);   /* must not crash */
+    TEST_ASSERT_EQUAL_UINT32(0, mock_dma_free_calls);
+}
+
+static void test_vdma_alloc_accepts_min_count(void)
+{
+    /* Smallest legal list: 2 descriptors. */
+    vdma_setup();
+    struct hailo_vdma_desc_list small;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(HAILO_VDMA_MIN_DESC_COUNT, 64, false, &small));
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_MIN_DESC_COUNT, small.desc_count);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_MIN_DESC_COUNT - 1u,
+                             small.desc_count_mask);
+    hailo_vdma_desc_list_free(&small);
+}
+
+static void test_vdma_program_descriptor_encodes_fields(void)
+{
+    /* Unit-test the bit-layout without any allocation. Reference
+     * layout (hailo-vdma-common.c:139-147):
+     *   PageSize_DescControl     = (page_size << 8) | 0x02
+     *   AddrL_rsvd_DataID        = (addr & 0xFFFFFFC0) | data_id
+     *   AddrH                    = addr >> 32
+     *   RemainingPageSize_Status = 0
+     */
+    struct hailo_vdma_descriptor d = {0};
+    hailo_vdma_program_descriptor(&d,
+        /*dma=*/0x0000000A12345680ULL,
+        /*page=*/512,
+        /*data_id=*/0x3C);
+
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u, d.page_size_desc_control);
+    /* 0x12345680 & 0xFFFFFFC0 = 0x12345680 (already 64-aligned) | 0x3C. */
+    TEST_ASSERT_EQUAL_UINT32(0x12345680u | 0x3Cu, d.addr_l_rsvd_data_id);
+    TEST_ASSERT_EQUAL_UINT32(0x0000000Au, d.addr_h);
+    TEST_ASSERT_EQUAL_UINT32(0u, d.remaining_page_size_status);
+}
+
+static void test_vdma_program_descriptor_masks_low_addr_bits(void)
+{
+    /* Descriptor addresses must be 64-byte aligned; hardware
+     * silently masks the low 6 bits. Verify our packer does the
+     * same mask. */
+    struct hailo_vdma_descriptor d = {0};
+    hailo_vdma_program_descriptor(&d,
+        /*dma=*/0x100000003Fu,   /* misaligned by 0x3F */
+        /*page=*/256, /*data_id=*/0x00);
+    /* Low 6 bits masked → 0x10_00000000 | 0x00 data_id = 0. */
+    TEST_ASSERT_EQUAL_UINT32(0u, d.addr_l_rsvd_data_id);
+    TEST_ASSERT_EQUAL_UINT32(0x10u, d.addr_h);
+}
+
+static void test_vdma_program_buffer_one_descriptor(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+
+    /* Buffer smaller than page_size → one descriptor with the
+     * residue as the last-descriptor page size. */
+    int rc = hailo_vdma_program_buffer(&list, 0,
+        /*iova=*/0x10000, /*size=*/200, /*data_id=*/0x05);
+    TEST_ASSERT_EQUAL_INT(1, rc);
+    TEST_ASSERT_EQUAL_UINT32((200u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32(0x10000u | 0x05u,
+                             list.descs[0].addr_l_rsvd_data_id);
+    /* Descriptors past the programmed one remain zeroed. */
+    TEST_ASSERT_EQUAL_UINT32(0u, list.descs[1].page_size_desc_control);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_exact_multiple(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+
+    /* 1024 B / 512 page = exactly 2 descriptors, no residue.
+     * Each descriptor's page_size field = full page size. */
+    int rc = hailo_vdma_program_buffer(&list, 0,
+        /*iova=*/0x40000, /*size=*/1024, /*data_id=*/0x01);
+    TEST_ASSERT_EQUAL_INT(2, rc);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32(0x40000u | 0x01u,
+                             list.descs[0].addr_l_rsvd_data_id);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[1].page_size_desc_control);
+    /* Second descriptor's address advances by page_size. */
+    TEST_ASSERT_EQUAL_UINT32((0x40000u + 512u) | 0x01u,
+                             list.descs[1].addr_l_rsvd_data_id);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_with_residue(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+
+    /* 1280 B / 512 page = 2 full + 256 residue = 3 descriptors.
+     * Last descriptor's page size == residue size. */
+    int rc = hailo_vdma_program_buffer(&list, 0,
+        /*iova=*/0x80000, /*size=*/1280, /*data_id=*/0x02);
+    TEST_ASSERT_EQUAL_INT(3, rc);
+    /* descs[0] and descs[1] carry full page_size. */
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[1].page_size_desc_control);
+    /* descs[2] carries residue (256). */
+    TEST_ASSERT_EQUAL_UINT32((256u << 8) | 0x02u,
+                             list.descs[2].page_size_desc_control);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_wraps_circular_list(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(4, 512, /*circular=*/true, &list));
+
+    /* 4-descriptor circular list; 3 full-page descriptors starting
+     * at index 2 → programs descs[2], descs[3], descs[0] (wrap). */
+    int rc = hailo_vdma_program_buffer(&list, /*start=*/2,
+        /*iova=*/0x2000, /*size=*/1536, /*data_id=*/0x04);
+    TEST_ASSERT_EQUAL_INT(3, rc);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[2].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[3].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    /* descs[1] untouched. */
+    TEST_ASSERT_EQUAL_UINT32(0u, list.descs[1].page_size_desc_control);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_rejects_overrun(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(4, 512, /*circular=*/false, &list));
+    /* 4-desc non-circular list, start at 2 → only 2 descriptors
+     * available. Ask for 3 → reject. */
+    int rc = hailo_vdma_program_buffer(&list, /*start=*/2,
+        /*iova=*/0x2000, /*size=*/1536, /*data_id=*/0);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_rejects_null_list(void)
+{
+    int rc = hailo_vdma_program_buffer(NULL, 0, 0x1000, 512, 0);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+}
+
+static void test_vdma_program_buffer_rejects_zero_size(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(4, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_program_buffer(&list, 0, 0x1000, 0, 0));
+    hailo_vdma_desc_list_free(&list);
+}
+
+/* -------------------------------------------------------------------------- */
+/* VDMA channel start / stop / submit                                          */
+/* -------------------------------------------------------------------------- */
+
+static void test_vdma_channel_start_programs_regs(void)
+{
+    /* Start channel 3 with a 256-desc list at a deterministic iova.
+     * desc_depth = ceil_log2(256) = 8. Reference `start_channel`
+     * (hailo-vdma-common.c:859-894) writes, in order:
+     *   1. ALIGNED_ADDR_L (offset 0x08 within channel block), RMW
+     *      to put address_l = high 16 of iova-low-32 in bits [31:16].
+     *   2. ADDR_H (offset 0x0C) = iova >> 32.
+     *   3. BASE_DWORD (offset 0x00) = (depth<<11) | (data_id<<8) —
+     *      also clears CONTROL bits [7:0].
+     *   4. BASE_DWORD RMW to set CONTROL bits [7:0] = START (0x01),
+     *      preserving DEPTH + DATA_ID.
+     *
+     * Pick iova = 0x0001_0000_0000 (low-32 = 0, high-32 = 1); so
+     * address_l = 0 and address_h = 1. */
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(256, 512, false, &list));
+    list.iova = 0x0000000100000000ULL;
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_channel_start(3, &list, 0x05));
+
+    /* Channel 3 base = 3 * 32 = 0x60. */
+    const uint32_t ch_base = 3u * 32u;
+
+    /* BASE_DWORD: CONTROL=START in low byte, depth=8<<11 (=0x4000),
+     *             data_id=5<<8 (=0x500). Combined low 16 bits:
+     *               (0x4000 | 0x500 | 0x01) & 0xFFFF = 0x4501. */
+    uint32_t base_dword;
+    memcpy(&base_dword, &mock_bar2[ch_base], sizeof(base_dword));
+    TEST_ASSERT_EQUAL_UINT32(0x01u, base_dword & 0xFFu);
+    TEST_ASSERT_EQUAL_UINT32(0x5u << 8, base_dword & (0x7u << 8));
+    TEST_ASSERT_EQUAL_UINT32(8u << 11, base_dword & (0xFu << 11));
+
+    /* ALIGNED_ADDR_L at ch_base + 0x08: bits[31:16] = address_l (0). */
+    uint32_t aligned;
+    memcpy(&aligned, &mock_bar2[ch_base + 0x08], sizeof(aligned));
+    TEST_ASSERT_EQUAL_UINT32(0u, aligned >> 16);
+
+    /* ADDR_H at ch_base + 0x0C: full u32 = 1. */
+    uint32_t addr_h_dword;
+    memcpy(&addr_h_dword, &mock_bar2[ch_base + 0x0C], sizeof(addr_h_dword));
+    TEST_ASSERT_EQUAL_UINT32(1u, addr_h_dword);
+
+    hailo_vdma_desc_list_free(&list);
+}
+
+/* Second iova pattern: low-32 nonzero so address_l is nonzero. */
+static void test_vdma_channel_start_encodes_address_l(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    /* iova = 0x0000000ABCD80000 — low 32 bits = 0xABCD0000, so
+     * address_l = 0xABCD (high 16 of low 32) once we mask the
+     * 64 KB-alignment (low 16 bits are zero). */
+    list.iova = 0x0ABCD80000ULL & ~0xFFFFULL;  /* 64 KB-align */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_channel_start(2, &list, 0x00));
+
+    const uint32_t ch_base = 2u * 32u;
+    uint32_t aligned;
+    memcpy(&aligned, &mock_bar2[ch_base + 0x08], sizeof(aligned));
+    uint16_t addr_l = (uint16_t)(aligned >> 16);
+    TEST_ASSERT_EQUAL_UINT16((uint16_t)((list.iova >> 16) & 0xFFFFu), addr_l);
+
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_channel_start_rejects_misaligned_iova(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    /* Clobber iova to something NOT 64 KB-aligned. */
+    list.iova = 0x1234;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_channel_start(0, &list, 0));
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_channel_start_rejects_bad_channel(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_channel_start(HAILO_VDMA_MAX_CHANNELS, &list, 0));
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_channel_start_rejects_null(void)
+{
+    vdma_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_channel_start(0, NULL, 0));
+}
+
+static void test_vdma_channel_stop_writes_abort_pause(void)
+{
+    /* Precondition: channel's CONTROL is 0 (idle after mock_reset).
+     * hailo_vdma_channel_stop should NOT short-circuit — idle != abort-pause. */
+    vdma_setup();
+    hailo_vdma_channel_stop(2);
+
+    /* Channel 2 base = 2 * 32 = 0x40. Bits [7:0] should now be
+     * ABORT_PAUSE (0x02). */
+    uint32_t dword;
+    memcpy(&dword, &mock_bar2[0x40], sizeof(dword));
+    TEST_ASSERT_EQUAL_UINT32(0x02u, dword & 0xFFu);
+}
+
+static void test_vdma_channel_stop_skips_if_already_abort_pause(void)
+{
+    vdma_setup();
+    /* Pre-seed channel 5's control byte with ABORT_PAUSE. */
+    uint32_t seed = 0x02u;
+    memcpy(&mock_bar2[5 * 32], &seed, sizeof(seed));
+    hailo_vdma_channel_stop(5);
+    /* Should remain unchanged. */
+    uint32_t dword;
+    memcpy(&dword, &mock_bar2[5 * 32], sizeof(dword));
+    TEST_ASSERT_EQUAL_UINT32(0x02u, dword);
+}
+
+static void test_vdma_submit_and_wait_completes_fast(void)
+{
+    /* Auto-advance on: any num_avail write immediately mirrors to
+     * num_proc. hailo_vdma_submit_and_wait should find completion
+     * on the first poll, well under the timeout. */
+    vdma_setup();
+    mock_vdma_auto_advance = true;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_submit_and_wait(4, /*num_avail=*/0x1234, /*timeout=*/1000));
+
+    /* num_avail landed in the channel's base dword bits [31:16]. */
+    uint32_t dword;
+    memcpy(&dword, &mock_bar2[4 * 32], sizeof(dword));
+    TEST_ASSERT_EQUAL_UINT32(0x1234u, dword >> 16);
+    /* num_proc matches. */
+    uint32_t proc;
+    memcpy(&proc, &mock_bar2[4 * 32 + 4], sizeof(proc));
+    TEST_ASSERT_EQUAL_UINT32(0x1234u, proc & 0xFFFFu);
+}
+
+static void test_vdma_submit_and_wait_times_out(void)
+{
+    /* Without auto-advance, num_proc never catches up → timeout. */
+    vdma_setup();
+    mock_vdma_auto_advance = false;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_vdma_submit_and_wait(0, /*num_avail=*/1, /*timeout=*/200));
+}
+
+static void test_vdma_submit_rejects_bad_channel(void)
+{
+    vdma_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_submit_and_wait(HAILO_VDMA_MAX_CHANNELS, 1, 1000));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 5.4: hailo_infer orchestration                                        */
+/* -------------------------------------------------------------------------- */
+
+/* Helper — bring hailo into RUNNING state so hailo_infer_run's
+ * state-guard passes. Reuses control_setup_running from the control
+ * tests above. */
+static void infer_setup_running(void)
+{
+    control_setup_running();
+    /* Ensure mock's auto-advance is on so the channel submits
+     * inside hailo_infer_run complete immediately. */
+    mock_vdma_auto_advance = true;
+}
+
+static void test_infer_rejects_null_args(void)
+{
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(NULL, buf, buf, NULL));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, NULL, buf, NULL));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, NULL, NULL));
+}
+
+static void test_infer_rejects_same_channels(void)
+{
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 3, .output_channel = 3,   /* same = reject */
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_rejects_bad_channel(void)
+{
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = HAILO_VDMA_MAX_CHANNELS,
+        .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_rejects_zero_sizes(void)
+{
+    infer_setup_running();
+    uint8_t buf[512] = {0};
+    struct hailo_infer_config cfg = {
+        .input_bytes = 0,   .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+    cfg.input_bytes = 512;
+    cfg.output_bytes = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_rejects_nodev_when_not_running(void)
+{
+    boot_setup_probed();   /* state=PROBED, not RUNNING */
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV,
+        hailo_infer_run(&cfg, buf, buf, NULL));
+}
+
+static void test_infer_end_to_end_via_auto_advance(void)
+{
+    /* Full pipeline with the mock's auto-advance flag: input and
+     * output submits complete immediately. Returns HAILO_OK with a
+     * measured elapsed time (though very small under QEMU). */
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 1024, .output_bytes = 2048,
+        .input_channel = 0, .output_channel = 1,
+        .input_data_id = 0x01, .output_data_id = 0x02,
+        .input_page_size = 512, .output_page_size = 1024,
+        .timeout_us = 100000,
+    };
+    uint8_t in[1024];
+    uint8_t out[2048];
+    for (size_t i = 0; i < sizeof(in); i++) in[i] = (uint8_t)i;
+    memset(out, 0, sizeof(out));
+
+    uint64_t elapsed = 0xDEADBEEF;
+    int rc = hailo_infer_run(&cfg, in, out, &elapsed);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, rc);
+    /* elapsed is a non-negative duration; under QEMU/auto-advance
+     * it can be 0 since both reads happen in the same tick. */
+    TEST_ASSERT_NOT_EQUAL(0xDEADBEEF, elapsed);
+}
+
+static void test_infer_timeout_without_auto_advance(void)
+{
+    /* Without auto-advance the first submit-and-wait times out. */
+    control_setup_running();
+    mock_vdma_auto_advance = false;
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 500,   /* very short so the test finishes fast */
+    };
+    uint8_t in[512] = {0};
+    uint8_t out[512] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_infer_run(&cfg, in, out, NULL));
+}
+
+static void test_infer_propagates_tensor_alloc_failure(void)
+{
+    /* Force the platform allocator to fail — the very first
+     * hailo_tensor_alloc inside hailo_infer_run should propagate
+     * HAILO_ERR_NOMEM and no channels should get started. */
+    infer_setup_running();
+    mock_dma_force_null = true;
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 100000,
+    };
+    uint8_t buf[512] = {0};
+    int rc = hailo_infer_run(&cfg, buf, buf, NULL);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM, rc);
+    /* mock_dma_alloc counts TOTAL calls across alloc/free; at
+     * least one fired (for the input tensor attempt). */
+    TEST_ASSERT_TRUE(mock_dma_alloc_calls >= 1);
+}
+
+static void test_infer_rejects_oversized_output_desc_count(void)
+{
+    /* output_page_size=1 with 1 MB output forces 1 M descriptors
+     * which rounds up to 2^20 > HAILO_VDMA_MAX_DESC_COUNT → the
+     * pick_desc_count helper returns 0 → INVAL. */
+    infer_setup_running();
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512,
+        .output_bytes = 1024u * 1024u,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 1,
+        .timeout_us = 100000,
+    };
+    /* Use page-sized scratch bufs; hailo_infer_run validates
+     * config before touching them. */
+    static uint8_t in[512];
+    static uint8_t out[1024 * 1024];
+    int rc = hailo_infer_run(&cfg, in, out, NULL);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_dma_alloc_calls);
+}
+
+static void test_infer_cleanup_on_midflight_failure(void)
+{
+    /* Let the alloc succeed but force a channel-start failure by
+     * clobbering list IOVA alignment post-alloc. Easiest: passing
+     * matching but invalid page_size (0 rejected by validation) —
+     * use a different lever: set both channels to the same index
+     * through runtime state manipulation... actually
+     * rejects_same_channels already covers pre-alloc rejection.
+     *
+     * For mid-flight: drive the pipeline far enough that an
+     * allocation succeeds but the next step fails. Easiest path
+     * with current mock hooks: tensor alloc first succeeds (force
+     * null off), then the vdma desc-list alloc hits force-null
+     * partway. Not supported by current mock — leave as a doc
+     * note that the goto-out cleanup path is exercised by the
+     * timeout test (which runs through *_alloc + *_start and
+     * cleans up at *_submit_and_wait timeout). */
+    infer_setup_running();
+    mock_vdma_auto_advance = false;
+    struct hailo_infer_config cfg = {
+        .input_bytes = 512, .output_bytes = 512,
+        .input_channel = 0, .output_channel = 1,
+        .input_page_size = 512, .output_page_size = 512,
+        .timeout_us = 500,
+    };
+    uint8_t in[512] = {0};
+    uint8_t out[512] = {0};
+    uint32_t allocs_before = mock_dma_alloc_calls;
+    uint32_t frees_before  = mock_dma_free_calls;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_infer_run(&cfg, in, out, NULL));
+    /* Cleanup: every dma_alloc has a matching dma_free post-timeout. */
+    uint32_t new_allocs = mock_dma_alloc_calls - allocs_before;
+    uint32_t new_frees  = mock_dma_free_calls - frees_before;
+    TEST_ASSERT_EQUAL_UINT32(new_allocs, new_frees);
+}
+
+static void test_vdma_alloc_accepts_max_count(void)
+{
+    /* Largest legal list: 65536 descriptors = 1 MB, which matches
+     * the mock pool size exactly. Separate test so mock_reset
+     * gives this alloc a fresh pool — the mock's bump allocator
+     * doesn't reuse memory on free. */
+    vdma_setup();
+    struct hailo_vdma_desc_list large;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(HAILO_VDMA_MAX_DESC_COUNT, 4096, true, &large));
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_MAX_DESC_COUNT, large.desc_count);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_VDMA_MAX_DESC_COUNT - 1u,
+                             large.desc_count_mask);
+    hailo_vdma_desc_list_free(&large);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 5.3: CCW upload from hef_info                                          */
+/* -------------------------------------------------------------------------- */
+
+/* Build a minimal hef_info with N synthetic CCW actions sourced from
+ * a contiguous pattern embedded in a caller-owned blob. The test
+ * fills one deterministic pattern into the blob and records
+ * (offset, size) triples that slice it into N pieces — matching
+ * what the real parser produces from a preliminary_config proto. */
+static void build_ccw_info(struct hef_info *info,
+                           uint8_t *blob, uint32_t blob_size,
+                           const uint32_t *sizes, uint32_t count)
+{
+    memset(info, 0, sizeof(*info));
+    for (uint32_t i = 0; i < blob_size; i++) {
+        blob[i] = (uint8_t)(i ^ 0x5A);
+    }
+    uint32_t off = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        TEST_ASSERT_TRUE(off + sizes[i] <= blob_size);
+        info->ccw_actions[i].data_offset_in_blob = off;
+        info->ccw_actions[i].data_size           = sizes[i];
+        info->ccw_actions[i].cfg_channel_index   = 0;
+        info->ccw_actions[i].cfg_channel_index_known = true;
+        off += sizes[i];
+        info->ccw_total_bytes += sizes[i];
+    }
+    info->ccw_action_count = count;
+    info->ccw_actions_truncated = false;
+}
+
+static void test_ccw_upload_rejects_null(void)
+{
+    control_setup_running();
+    struct hef_info info = {0};
+    uint8_t blob[4] = {0};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(NULL, blob, 0x10000, NULL));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, NULL, 0x10000, NULL));
+}
+
+static void test_ccw_upload_rejects_truncated(void)
+{
+    control_setup_running();
+    struct hef_info info = {0};
+    uint8_t blob[4] = {0};
+    info.ccw_actions_truncated = true;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, blob, 0x10000, NULL));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_rejects_address_wrap(void)
+{
+    control_setup_running();
+    struct hef_info info = {0};
+    uint8_t blob[16];
+    uint32_t sizes[] = { 8 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, blob, 0xFFFFFFFC, NULL));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_empty_info_is_noop(void)
+{
+    control_setup_running();
+    struct hef_info info = {0};
+    uint8_t blob[4] = {0};
+    uint64_t uploaded = 0xDEADBEEF;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x10000, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(0, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_single_action(void)
+{
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t blob[256];
+    struct hef_info info;
+    uint32_t sizes[] = { 32 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x100, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(32, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+
+    /* Round-trip via READ_MEMORY to confirm the bytes landed at
+     * device_base_addr = 0x100. */
+    uint8_t readback[32];
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_read_memory(0x100, readback, sizeof(readback)));
+    TEST_ASSERT_EQUAL_MEMORY(&blob[info.ccw_actions[0].data_offset_in_blob],
+                             readback, sizeof(readback));
+}
+
+static void test_ccw_upload_multiple_actions_contiguous(void)
+{
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t blob[256];
+    struct hef_info info;
+    uint32_t sizes[] = { 16, 20, 12 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 3);
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x200, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(16u + 20u + 12u, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
+
+    /* All three actions appended contiguously, so the 48 bytes at
+     * [0x200, 0x200+48) should match the first 48 bytes of the
+     * blob (because build_ccw_info filled the blob with a single
+     * deterministic pattern and sliced it sequentially). */
+    uint8_t readback[48];
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_read_memory(0x200, readback, sizeof(readback)));
+    TEST_ASSERT_EQUAL_MEMORY(blob, readback, sizeof(readback));
+}
+
+static void test_ccw_upload_chunks_large_action(void)
+{
+    /* 2500 B single action → hailo_control_write_memory's internal
+     * 1 KB chunking fires 3 WRITE_MEMORY doorbells. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    static uint8_t blob[4096];
+    struct hef_info info;
+    uint32_t sizes[] = { 2500 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x400, NULL));
+    TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
+}
+
+static void test_ccw_upload_skips_zero_size_action(void)
+{
+    /* A zero-size action is silently skipped — no doorbell, no
+     * accounting. Defensive handling keeps callers from tripping
+     * WRITE_MEMORY's zero-length INVAL guard. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t blob[64];
+    struct hef_info info;
+    uint32_t sizes[] = { 8, 0, 8 };
+    build_ccw_info(&info, blob, sizeof(blob), sizes, 3);
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, blob, 0x300, NULL));
+    TEST_ASSERT_EQUAL_UINT32(2, mock_control_doorbells);
+}
+
+/* -------------------------------------------------------------------------- */
+/* CONFIG_STREAM (Phase 5.3, #281 tier-3)                                      */
+/* -------------------------------------------------------------------------- */
+
+/* Helper — minimal valid cfg with predictable field values. */
+static void make_default_pcie_cfg(struct hailo_stream_pcie_config *cfg, bool is_input)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->stream_index             = 3;
+    cfg->is_input                 = is_input;
+    cfg->skip_nn_stream_config    = false;
+    cfg->nn_stream_config.core_bytes_per_buffer    = 0x1234;
+    cfg->nn_stream_config.core_buffers_per_frame   = 0x0020;
+    cfg->nn_stream_config.periph_bytes_per_buffer  = 0x4000;
+    cfg->nn_stream_config.periph_buffers_per_frame = 0x0002;
+    cfg->nn_stream_config.feature_padding_payload  = 0x0000;
+    cfg->nn_stream_config.buffer_padding_payload   = 0x0000;
+    cfg->nn_stream_config.buffer_padding           = 0x0000;
+    cfg->nn_stream_config.is_core_hw_padding_config_in_dfc = false;
+    cfg->pcie_channel_index       = 5;
+    if (is_input) {
+        cfg->pcie_dataflow_type = (uint8_t)HAILO_PCIE_DATAFLOW_TYPE_CONTINUOUS;
+    } else {
+        cfg->desc_page_size = 512;
+    }
+}
+
+static void test_control_config_stream_rejects_null(void)
+{
+    control_setup_running();
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_config_stream_pcie(NULL, &dmid));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_config_stream_pcie(&cfg, NULL));
+}
+
+static void test_control_config_stream_rejects_bad_channel(void)
+{
+    control_setup_running();
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    cfg.pcie_channel_index = 16;   /* out of range */
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_control_config_stream_rejects_when_not_running(void)
+{
+    boot_setup_probed();   /* state=PROBED, not RUNNING */
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NODEV,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+}
+
+static void test_control_config_stream_input_wire_format(void)
+{
+    control_setup_running();
+    mock_fw_sim_config_stream_enabled    = true;
+    mock_fw_sim_config_stream_manager_id = 0x42;
+
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+    TEST_ASSERT_EQUAL_UINT8(0x42, dmid);
+
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+
+    /* Common header: opcode == CONFIG_STREAM (BE), parameter_count == 7. */
+    struct hailo_control_common_header hdr;
+    memcpy(&hdr, mock_last_control_request, sizeof(hdr));
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(HAILO_CONTROL_OPCODE_CONFIG_STREAM),
+                             hdr.opcode);
+    uint32_t pcount_be;
+    memcpy(&pcount_be, mock_last_control_request + 16, 4);
+    TEST_ASSERT_EQUAL_UINT32(7u, __builtin_bswap32(pcount_be));
+
+    /* Body layout (all scalar lengths BE):
+     *   [16 header]
+     *   [20 pcount=7]
+     *   [24 stream_index_length=1] [28 stream_index=3]
+     *   [29 is_input_length=1]     [33 is_input=1]
+     *   [34 comm_type_length=4]    [38 comm_type=PCIE=2]
+     *   [42 skip_nn_len=1]         [46 skip_nn=0]
+     *   [47 nn_len=?]              [51 nn_stream_config...]
+     * The "nn_stream_config" struct is 19 B packed (see header).
+     */
+    uint8_t stream_index, is_input, skip_nn;
+    uint32_t stream_index_len_be, is_input_len_be, comm_type_len_be, comm_type_be;
+    uint32_t skip_nn_len_be;
+
+    memcpy(&stream_index_len_be, mock_last_control_request + 20, 4);
+    memcpy(&stream_index,        mock_last_control_request + 24, 1);
+    memcpy(&is_input_len_be,     mock_last_control_request + 25, 4);
+    memcpy(&is_input,            mock_last_control_request + 29, 1);
+    memcpy(&comm_type_len_be,    mock_last_control_request + 30, 4);
+    memcpy(&comm_type_be,        mock_last_control_request + 34, 4);
+    memcpy(&skip_nn_len_be,      mock_last_control_request + 38, 4);
+    memcpy(&skip_nn,             mock_last_control_request + 42, 1);
+
+    TEST_ASSERT_EQUAL_UINT32(1u,  __builtin_bswap32(stream_index_len_be));
+    TEST_ASSERT_EQUAL_UINT8(3,    stream_index);
+    TEST_ASSERT_EQUAL_UINT32(1u,  __builtin_bswap32(is_input_len_be));
+    TEST_ASSERT_EQUAL_UINT8(1,    is_input);
+    TEST_ASSERT_EQUAL_UINT32(4u,  __builtin_bswap32(comm_type_len_be));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)HAILO_COMMUNICATION_TYPE_PCIE,
+                             __builtin_bswap32(comm_type_be));
+    TEST_ASSERT_EQUAL_UINT32(1u,  __builtin_bswap32(skip_nn_len_be));
+    TEST_ASSERT_EQUAL_UINT8(0,    skip_nn);
+}
+
+static void test_control_config_stream_output_variant(void)
+{
+    control_setup_running();
+    mock_fw_sim_config_stream_enabled    = true;
+    mock_fw_sim_config_stream_manager_id = 0x77;
+
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, false);
+    cfg.desc_page_size = 0x0200;   /* 512 */
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+    TEST_ASSERT_EQUAL_UINT8(0x77, dmid);
+
+    /* Output variant is pcie_channel_index (u8) + desc_page_size (u16).
+     * desc_page_size is native LE per HailoRT's non-byteswapped
+     * packer — so the low byte comes first on the wire. */
+    uint8_t captured_is_input;
+    memcpy(&captured_is_input, mock_last_control_request + 29, 1);
+    TEST_ASSERT_EQUAL_UINT8(0, captured_is_input);
+
+    /* Wire offsets for CONFIG_STREAM request body (packed):
+     *   0  common_header (16)
+     *   16 parameter_count (4)
+     *   20 stream_index_length (4)  + 24 stream_index (1)
+     *   25 is_input_length (4)      + 29 is_input (1)
+     *   30 comm_type_length (4)     + 34 communication_type (4)
+     *   38 skip_nn_length (4)       + 42 skip_nn (1)
+     *   43 nn_stream_config_length (4) + 47 nn_stream_config (19)
+     *   66 comm_params_length (4)
+     *   70 variant bytes (3 for pcie_output: u8 + u16) */
+    uint32_t comm_params_len_be;
+    memcpy(&comm_params_len_be, mock_last_control_request + 66, 4);
+    TEST_ASSERT_EQUAL_UINT32(3u, __builtin_bswap32(comm_params_len_be));
+
+    uint8_t variant_channel;
+    uint16_t variant_page_size;
+    memcpy(&variant_channel,  mock_last_control_request + 70, 1);
+    memcpy(&variant_page_size, mock_last_control_request + 71, 2);
+    TEST_ASSERT_EQUAL_UINT8(5, variant_channel);
+    TEST_ASSERT_EQUAL_UINT16(0x0200, variant_page_size);   /* native LE */
+}
+
+static void test_control_config_stream_timeout_no_response(void)
+{
+    control_setup_running();
+    /* Neither sim enabled: doorbell fires, nothing responds. */
+    mock_fw_sim_config_stream_enabled = false;
+
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0xFF;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+}
+
+static void test_control_config_stream_propagates_fw_error(void)
+{
+    control_setup_running();
+
+    /* Canned response with non-zero major_status — not smart-mode. */
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t parameter_count;
+        uint32_t dataflow_manager_id_length;
+        uint8_t  dataflow_manager_id;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_CONFIG_STREAM);
+    fake.header.status.major_status = __builtin_bswap32(0x40000058u);
+    fake.header.status.minor_status = __builtin_bswap32(0x40000058u);
+    fake.dataflow_manager_id_length = __builtin_bswap32(1u);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_stream_pcie_config cfg;
+    make_default_pcie_cfg(&cfg, true);
+    uint8_t dmid = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_IO,
+        hailo_control_config_stream_pcie(&cfg, &dmid));
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -2187,6 +3538,84 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_write_memory_propagates_fw_error);
     RUN_TEST(test_control_read_memory_propagates_fw_error);
     RUN_TEST(test_control_write_memory_rejects_wrong_opcode_echo);
+
+    /* Phase 5.3 tensor-buffer tests */
+    RUN_TEST(test_tensor_size_from_shape_small);
+    RUN_TEST(test_tensor_size_from_shape_rejects_zero);
+    RUN_TEST(test_tensor_size_from_shape_rejects_overflow);
+    RUN_TEST(test_tensor_alloc_happy_path);
+    RUN_TEST(test_tensor_alloc_rejects_null_out);
+    RUN_TEST(test_tensor_alloc_rejects_zero_size);
+    RUN_TEST(test_tensor_alloc_nodev_without_platform);
+    RUN_TEST(test_tensor_alloc_propagates_nomem);
+    RUN_TEST(test_tensor_prepare_for_device_fires_cache_clean);
+    RUN_TEST(test_tensor_prepare_for_host_fires_cache_invalidate);
+    RUN_TEST(test_tensor_free_zero_handle_is_noop);
+    RUN_TEST(test_tensor_multi_alloc_distinct_buffers);
+
+    /* Phase 5.3 CCW upload */
+    RUN_TEST(test_ccw_upload_rejects_null);
+    RUN_TEST(test_ccw_upload_rejects_truncated);
+    RUN_TEST(test_ccw_upload_rejects_address_wrap);
+    RUN_TEST(test_ccw_upload_empty_info_is_noop);
+    RUN_TEST(test_ccw_upload_single_action);
+    RUN_TEST(test_ccw_upload_multiple_actions_contiguous);
+    RUN_TEST(test_ccw_upload_chunks_large_action);
+    RUN_TEST(test_ccw_upload_skips_zero_size_action);
+
+    /* Phase 5.4 VDMA descriptor-list allocator */
+    RUN_TEST(test_vdma_alloc_size_rounds_up_to_64k);
+    RUN_TEST(test_vdma_alloc_happy_path);
+    RUN_TEST(test_vdma_alloc_rejects_non_power_of_two);
+    RUN_TEST(test_vdma_alloc_rejects_out_of_range);
+    RUN_TEST(test_vdma_alloc_rejects_zero_page_size);
+    RUN_TEST(test_vdma_alloc_rejects_null_out);
+    RUN_TEST(test_vdma_alloc_nodev_without_platform);
+    RUN_TEST(test_vdma_alloc_propagates_nomem);
+    RUN_TEST(test_vdma_free_zero_handle_is_noop);
+    RUN_TEST(test_vdma_alloc_accepts_min_count);
+    RUN_TEST(test_vdma_program_descriptor_encodes_fields);
+    RUN_TEST(test_vdma_program_descriptor_masks_low_addr_bits);
+    RUN_TEST(test_vdma_program_buffer_one_descriptor);
+    RUN_TEST(test_vdma_program_buffer_exact_multiple);
+    RUN_TEST(test_vdma_program_buffer_with_residue);
+    RUN_TEST(test_vdma_program_buffer_wraps_circular_list);
+    RUN_TEST(test_vdma_program_buffer_rejects_overrun);
+    RUN_TEST(test_vdma_program_buffer_rejects_null_list);
+    RUN_TEST(test_vdma_program_buffer_rejects_zero_size);
+    RUN_TEST(test_vdma_channel_start_programs_regs);
+    RUN_TEST(test_vdma_channel_start_encodes_address_l);
+    RUN_TEST(test_vdma_channel_start_rejects_misaligned_iova);
+    RUN_TEST(test_vdma_channel_start_rejects_bad_channel);
+    RUN_TEST(test_vdma_channel_start_rejects_null);
+    RUN_TEST(test_vdma_channel_stop_writes_abort_pause);
+    RUN_TEST(test_vdma_channel_stop_skips_if_already_abort_pause);
+    RUN_TEST(test_vdma_submit_and_wait_completes_fast);
+    RUN_TEST(test_vdma_submit_and_wait_times_out);
+    RUN_TEST(test_vdma_submit_rejects_bad_channel);
+
+    /* Phase 5.4 hailo_infer orchestration */
+    RUN_TEST(test_infer_rejects_null_args);
+    RUN_TEST(test_infer_rejects_same_channels);
+    RUN_TEST(test_infer_rejects_bad_channel);
+    RUN_TEST(test_infer_rejects_zero_sizes);
+    RUN_TEST(test_infer_rejects_nodev_when_not_running);
+    RUN_TEST(test_infer_end_to_end_via_auto_advance);
+    RUN_TEST(test_infer_timeout_without_auto_advance);
+    RUN_TEST(test_infer_propagates_tensor_alloc_failure);
+    RUN_TEST(test_infer_rejects_oversized_output_desc_count);
+    RUN_TEST(test_infer_cleanup_on_midflight_failure);
+
+    RUN_TEST(test_vdma_alloc_accepts_max_count);
+
+    /* CONFIG_STREAM (Phase 5.3, #281 tier-3) */
+    RUN_TEST(test_control_config_stream_rejects_null);
+    RUN_TEST(test_control_config_stream_rejects_bad_channel);
+    RUN_TEST(test_control_config_stream_rejects_when_not_running);
+    RUN_TEST(test_control_config_stream_input_wire_format);
+    RUN_TEST(test_control_config_stream_output_variant);
+    RUN_TEST(test_control_config_stream_timeout_no_response);
+    RUN_TEST(test_control_config_stream_propagates_fw_error);
 
     return UnityEnd();
 }
