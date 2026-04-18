@@ -185,9 +185,9 @@ stack than discrete Ampere.
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
 | FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
 | RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (950 lines) | **38** | Phases 1–7 wired; **Phases 5–7 HW-verified** — SLM-OS rings the USERMODE doorbell at BAR0+0xBB0090 from EL2, PBDMA consumes GPFIFO entries |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (1050 lines) | **44** | Phases 1–7 wired; **Phases 5–7 HW-verified** — SLM-OS rings the USERMODE doorbell at BAR0+0xBB0090 from EL2, PBDMA consumes GPFIFO entries. SEMAPHORE_RELEASE encoded correctly for both host-family and COMPUTE_B method variants; GR FE class-subch-mismatch blocker tracked in #273 |
 | **Jetson platform shim** | `nvidia_gsp_platform.c` (350 lines) | **15** | vtable dispatch + DMA align math host-tested |
-| **Total host-side tests** | | **175** | **All passing** |
+| **Total host-side tests** | | **181** | **All passing** |
 
 ### Platform-Specific Blockers
 
@@ -319,9 +319,32 @@ REGISTER_BUFFER for each dmabuf). Tracked in **issue #273** with
 the LD_PRELOAD ioctl interposer (`scripts/nvgpu_ioctl_trace.c`) and
 cached L4T r36.4.7 UAPI headers for continued investigation.
 
+**Phase 7 blocker traced to GR FE (April 18):** Enabled verbose
+nvgpu kernel logging and diffed dmesg between CUDA (silent, works)
+and the helper (every submit triggers
+`gm20b_gr_intr_check_gr_fe_exception`: `esr 0x80000002, info
+0x0108c7c0`). Decoded: `esr` bit 1 = **CLASS_SUBCH_MISMATCH** on
+`NV_PGRAPH_PRI_FE_HWW_ESR`; `info[15:0]` = 0xC7C0 = the class in the
+mismatch. This is the correct AMPERE_COMPUTE_B class per nvgpu's
+own `gr_compute_class_v()`, so GR FE is rejecting the SET_OBJECT
+bind itself (not a downstream method). Also confirmed the
+host-family methods at 0x5C-0x6C and the COMPUTE_B methods at
+0x158-0x168 (clc7c0.h, OPERATION_RELEASE=0, STRUCTURE_SIZE_ONE_WORD)
+both fail with the same exception — the issue is *below* the
+pushbuffer encoding layer, in GR engine context-switch state.
+
+Added `ga10b_build_compute_sema_release_pushbuffer` as a parallel
+pure-function builder (12 dwords: SET_OBJECT + 5 COMPUTE_B method
+pairs) so the next session resolving #273 can call it directly
+instead of re-deriving the encoding. 3 new host regression tests
+guard the COMPUTE_B layout against the same class of bit-position
+and method-family regressions that bit the host-family builder.
+
 **Remaining path to GPU inference:**
-- Resolve #273: find the channel-state gap that prevents GR-engine
-  execution despite PBDMA consuming entries
+- Resolve #273: root-cause the GR FE CLASS_SUBCH_MISMATCH. Most
+  promising leads are RAMFC engine-id state and whether the GR
+  golden context is loaded for channels created via the
+  ioctl-only (no SUBMIT_GPFIFO) path CUDA takes.
 - Compute class binding + QMD dispatch
 - Compute kernel (SASS binary for `sm_87`)
 - Inference loop (GEMM → activation per layer)

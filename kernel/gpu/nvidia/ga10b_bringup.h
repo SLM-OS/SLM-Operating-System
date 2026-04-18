@@ -173,6 +173,43 @@ uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
                                              uint64_t sem_gpu_va,
                                              uint32_t payload);
 
+/* Size of the COMPUTE_B SEMAPHORE_RELEASE pushbuffer in dwords.
+ *
+ * Layout: SET_OBJECT header+data + 5 semaphore method header+data
+ * pairs = 12 dwords. */
+#define GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS  12u
+
+/* Phase 7 pushbuffer builder — compute-class variant (pure logic).
+ *
+ * Writes GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS dwords to `pb`,
+ * encoding:
+ *
+ *   1. SET_OBJECT (method 0) binding AMPERE_COMPUTE_B (class 0xC7C0)
+ *      to subchannel 0. Without this, the GR engine raises
+ *      CLASS_SUBCH_MISMATCH on the first real compute method.
+ *   2. AMPERE_COMPUTE_B's own REPORT_SEMAPHORE_* methods at byte
+ *      offsets 0x158..0x168 (from clc7c0.h). These differ from the
+ *      host-channel semaphore family at 0x5C..0x6C both in byte
+ *      offset and in the EXECUTE encoding — COMPUTE_B uses
+ *      OPERATION_RELEASE=0 (not 1), plus STRUCTURE_SIZE bits [4:3]
+ *      that must be SEMAPHORE_ONE_WORD (1<<3) for a 32-bit payload.
+ *
+ * **State needed at dispatch time for this to succeed:** the
+ * channel's GR context must be loaded and the subchannel must be
+ * able to accept a class bind. As of 2026-04-18 this fails with
+ * GR FE CLASS_SUBCH_MISMATCH on channels set up via the Linux
+ * helper — the bind itself is rejected before the semaphore methods
+ * are processed. Tracked in issue #273. This builder is committed
+ * so whoever resolves #273 can call it directly without re-deriving
+ * the COMPUTE_B encoding.
+ *
+ * **Buffer contract:** `pb` must point to at least
+ * GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS uint32_t slots. Returns the
+ * dword count (always GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS). */
+uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
+                                                     uint64_t sem_gpu_va,
+                                                     uint32_t payload);
+
 /*
  * Top-level runner. Walks phases 1–7 in order and returns 0 iff the
  * smoke test passes. Equivalent to gsp_init() for the nvgpu path.

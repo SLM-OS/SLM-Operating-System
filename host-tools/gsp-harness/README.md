@@ -107,9 +107,11 @@ make test-bringup
 # handoff reader/validator (Phase 6 — magic scan + validation of the
 # handoff block written by scripts/gpu-channel-helper.c, including
 # the v2 work_submit_token field used by the Phase 7 doorbell), and
-# the Phase 7 SEMAPHORE_RELEASE pushbuffer builder (dword-by-dword
-# encoding regression — catches method-family, bit-position, and
-# VA-truncation bugs). 41 test cases.
+# the Phase 7 SEMAPHORE_RELEASE pushbuffer builders — both the
+# host-family variant at byte offsets 0x5C-0x6C and the COMPUTE_B
+# variant at 0x158-0x168 (dword-by-dword encoding regression —
+# catches method-family, bit-position, and VA-truncation bugs).
+# 44 test cases.
 make test-ga10b-bringup
 
 # Jetson GA10B platform shim — portable surfaces of
