@@ -139,6 +139,21 @@ static int cmd_hailo(int argc, char *argv[])
                      outer.version, outer.proto_size,
                      (unsigned long)info.size);
 
+        /* hef_header.c's HEF_PROTO_MAX_SIZE is 256 MB — generous
+         * enough to cover future large models but too generous to
+         * let a corrupted blob commandeer RAM via a fake proto
+         * size. Shell path caps at 16 MB, which covers every
+         * compiled Hailo Model Zoo entry today (yolov5m is the
+         * largest at ~17 MB total file; its proto body is ~2 MB). */
+#define HAILO_LOAD_MAX_PROTO_MB  16u
+        if (outer.proto_size > HAILO_LOAD_MAX_PROTO_MB * 1024u * 1024u) {
+            shell_printf("hailo: refusing to load proto body of %u bytes "
+                         "(> %u MB shell cap; if this is legitimate, raise "
+                         "HAILO_LOAD_MAX_PROTO_MB in hailo_shell.c)\n",
+                         outer.proto_size, HAILO_LOAD_MAX_PROTO_MB);
+            return 0;
+        }
+
         /* Allocate a contiguous page-aligned buffer for the proto
          * body. PMM rounds up to the next power-of-2 page count. */
         size_t body_pages = (outer.proto_size + PAGE_SIZE - 1) / PAGE_SIZE;

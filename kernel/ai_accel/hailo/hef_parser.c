@@ -59,13 +59,18 @@ static bool read_string_cb(pb_istream_t *stream,
         *ctx->truncated = true;
     }
     if (!pb_read(stream, (pb_byte_t *)ctx->dst, copy)) return false;
-    /* Advance past any bytes we didn't copy. */
+    /* Advance past any bytes we didn't copy. Chunked into a small
+     * stack sink rather than one byte per pb_read call — matters
+     * only for pathologically long strings (a well-formed HEF's
+     * sdk_version is < 64 bytes), but a 1 MB truncated string
+     * would be 16 384 iterations of the single-byte loop. */
     if (remain > copy) {
-        pb_byte_t sink;
+        pb_byte_t sink[64];
         size_t skip = remain - copy;
         while (skip > 0) {
-            if (!pb_read(stream, &sink, 1)) return false;
-            skip--;
+            size_t chunk = skip < sizeof(sink) ? skip : sizeof(sink);
+            if (!pb_read(stream, sink, chunk)) return false;
+            skip -= chunk;
         }
     }
     ctx->dst[copy] = '\0';
@@ -90,6 +95,11 @@ static bool read_u32_cb(pb_istream_t *stream,
     struct u32_ctx *ctx = (struct u32_ctx *)*arg;
     uint64_t v = 0;
     if (!pb_decode_varint(stream, &v)) return false;
+    /* Reject out-of-range values rather than silently truncating.
+     * All uint32-bound HEF fields (hw_arch enum, network_group_index,
+     * etc.) fit well under UINT32_MAX; a larger value signals either
+     * a corrupt blob or a schema-drift bug, both worth failing loud. */
+    if (v > UINT32_MAX) return false;
     *ctx->dst = (uint32_t)v;
     *ctx->present = true;
     return true;
@@ -176,6 +186,18 @@ static bool decode_network_group_cb(pb_istream_t *stream,
 /* Public API                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * Trust invariant: the `.hef` blob is assumed to come from a local
+ * filesystem path that the caller controls (via `hailo load`). It is
+ * NOT treated as untrusted input. Nanopb's default-skip recursion
+ * into nested length-delimited sub-messages consumes one kernel-stack
+ * frame per level, so an adversarially-nested proto could overflow
+ * the 16 KB kernel stack. Well-formed Hailo-compiled HEFs have a
+ * fixed structural depth (~5-6 levels), well within safe limits.
+ * Any future path that loads HEF blobs from a network source must
+ * either parse into a bounded-depth staging buffer first or grow the
+ * stack for the decode call.
+ */
 int hef_parse_body(const void *blob, size_t size, struct hef_info *out)
 {
     /* NULL inputs are caller bugs; a zero-length blob is a valid

@@ -2456,11 +2456,23 @@ static void test_shell_cmd_hailo_load_nonexistent(void)
 static void test_shell_cmd_hailo_load_too_small(void)
 {
     ensure_hailo_registered();
-    /* A file that exists but is smaller than the 12-byte HEF header
-     * minimum — shell prints "too small", command returns 0. Use a
-     * preload.conf which always exists in the boot fixture and is
-     * either empty or short. */
-    int ret = shell_execute("hailo load /mnt/files/preload.conf");
+    /* Create a controlled 4-byte file — smaller than the 12-byte HEF
+     * outer-header minimum. Using a known-size fixture rather than
+     * relying on whatever /mnt/files/preload.conf happens to be
+     * guards against a future preload.conf ≥ 12 bytes silently
+     * changing this test's meaning. */
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(
+        "/mnt/files", &subpath);
+    TEST_ASSERT_NOT_NULL(mnt);
+    int f = littlefs_file_open(mnt, "/hailo_too_small.bin",
+                               LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(f >= 0);
+    const uint8_t tiny[4] = { 0, 0, 0, 0 };
+    TEST_ASSERT_TRUE(littlefs_file_write(mnt, f, tiny, sizeof(tiny)) >= 0);
+    littlefs_file_close(mnt, f);
+
+    int ret = shell_execute("hailo load /mnt/files/hailo_too_small.bin");
     TEST_ASSERT_EQUAL_INT(0, ret);
 }
 
