@@ -1071,11 +1071,24 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
                 (unsigned long)new_gp_put,
                 (unsigned long)gp_put_word);
 
-    /* TODO: Ring the doorbell at FIFO_USER (0x200000 + chid * stride).
-     * The doorbell register tells PBDMA to re-read GP_PUT. On some
-     * Ampere configs PBDMA polls USERD automatically; on others the
-     * doorbell is required. We'll try without first and add the
-     * doorbell write if PBDMA doesn't pick up the entry. */
+    /* Ring the USERMODE doorbell so PBDMA re-reads GP_PUT.
+     *
+     * GA10B inherits the TU104 usermode layout: the doorbell lives at
+     *   BAR0 + func_cfg0 + func_doorbell = 0x30000 + 0xB80000 + 0x90 = 0xBB0090
+     * and the token encodes (chid | runlist_id<<16). We assume
+     * runlist_id=0 (the GR/compute runlist on single-GPU GA10B — nvgpu
+     * auto-places compute channels there). Source: OE4T/linux-nvgpu
+     * drivers/gpu/nvgpu/hal/fifo/usermode_tu104.c:58-75. */
+    uint32_t runlist_id = 0;
+    uint32_t doorbell_token = (g_handoff.channel_id & 0xFFFu) |
+                              ((runlist_id & 0x7Fu) << 16);
+    volatile uint32_t *doorbell =
+        (volatile uint32_t *)(uintptr_t)0x17BB0090u;
+    *doorbell = doorbell_token;
+    gsp_platform->mb();
+    uart_printf("[GA10B-P7] doorbell 0x17BB0090 <- 0x%08lx (chid=%lu)\n",
+                (unsigned long)doorbell_token,
+                (unsigned long)g_handoff.channel_id);
 
     /* Poll the semaphore for a non-zero value (indicating the GPU
      * processed our pushbuffer and executed SEMAPHORE_RELEASE).

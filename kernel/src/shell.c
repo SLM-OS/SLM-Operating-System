@@ -49,6 +49,7 @@ const shell_cmd_t builtin_commands[] = {
     {"dtb",    cmd_dtb,    "Show device tree info", false},
     {"gpu",    cmd_gpu,    "Show GPU info (gpu [read <hex-offset>])", false},
     {"peek",   cmd_peek,   "Read physical memory (peek <phys-hex> [count])", false},
+    {"poke",   cmd_poke,   "Write 32-bit word (poke <phys-hex> <val-hex>)", true},
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     {"nvgpu",  cmd_nvgpu,  "Jetson nvgpu bringup (nvgpu <prepare|run|info>)", true},
 #endif
