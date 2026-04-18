@@ -1074,6 +1074,10 @@ coverage per `docs/jetson-usb-networking-plan.md` §8):
 | `test_event_ring_peek_wraps_and_toggles_ecs` | 4 events consumed in a 4-TRB ring: dequeue wraps to 0, ECS toggles 1→0, subsequent peek against stale cycle=1 slots returns false |
 | `test_event_ring_dequeue_phys` | `xhci_event_ring_dequeue_phys` = base + dequeue × 16 (for ERDP programming) |
 | `test_event_ring_peek_null_args` | NULL ring / NULL out-param rejected without dereference |
+| `test_event_ring_peek_then_dequeue_phys_tracks_advance` | After every successful peek, `xhci_event_ring_dequeue_phys` reports the next-to-consume slot; regression cover for `xhci_send_noop` writing ERDP on every consumed event |
+| `test_event_ring_peek_skip_then_match_advances_through_all` | Models `xhci_send_noop`'s skip-and-continue loop: stale completion in slot 0 + real completion in slot 1 — both are consumed, both advance `dequeue_phys` |
+| `test_event_ring_dequeue_phys_after_wrap` | After a full lap (dequeue wraps, ECS toggles), `dequeue_phys` points at the ring base rather than past the end — guard against ERDP arithmetic going off the end |
+| `test_erst_entry_layout` | Event Ring Segment Table entry is 16 bytes, fields at spec-mandated offsets (xHCI 1.2 §6.5) — catches regressions from accidental padding after the driver switched ERST storage to `ncmem_alloc` |
 
 Run tests with:
 

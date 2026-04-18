@@ -18,6 +18,7 @@
 #include "../drivers/usb/xhci/xhci_trb.h"
 
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -328,6 +329,141 @@ static void test_event_ring_peek_null_args(void)
     TEST_ASSERT_FALSE(xhci_event_ring_peek(&r, NULL));
 }
 
+static void test_event_ring_peek_then_dequeue_phys_tracks_advance(void)
+{
+    /*
+     * Regression coverage for the xhci_send_noop ERDP-update invariant:
+     * after every peek that returns true, xhci_event_ring_dequeue_phys
+     * must report the address of the NEXT-to-consume slot. The NO_OP
+     * poll loop writes dequeue_phys to ERDP on every consumed event
+     * (match or skip); if peek ever advanced dequeue without the phys
+     * tracking, the HC would see a stale ERDP and eventually stop
+     * delivering events once the ring filled.
+     */
+    struct xhci_trb trbs[8];
+    struct xhci_event_ring r;
+    uintptr_t base = 0x80000000UL;
+    TEST_ASSERT_EQUAL_INT(0, xhci_event_ring_init(&r, trbs, base, 8));
+
+    /* Seed 4 consecutive events with matching ECS. */
+    for (unsigned i = 0; i < 4; i++) {
+        trbs[i].param_lo = 0xA000u + i;
+        trbs[i].control  = XHCI_TRB_TYPE(XHCI_TRB_EVT_CMD_COMPLETION)
+                           | XHCI_TRB_CYCLE;
+    }
+
+    struct xhci_trb out;
+    for (unsigned i = 0; i < 4; i++) {
+        /* Before peek: dequeue_phys points at slot i. */
+        TEST_ASSERT_EQUAL_UINT64(base + (uint64_t)i * 16,
+                                 xhci_event_ring_dequeue_phys(&r));
+        TEST_ASSERT_TRUE(xhci_event_ring_peek(&r, &out));
+        TEST_ASSERT_EQUAL_UINT32(0xA000u + i, out.param_lo);
+        /* After peek: dequeue_phys points at slot i+1 (HC's next-to-
+         * produce), which is exactly what must go into ERDP. */
+        TEST_ASSERT_EQUAL_UINT64(base + (uint64_t)(i + 1) * 16,
+                                 xhci_event_ring_dequeue_phys(&r));
+    }
+}
+
+static void test_event_ring_peek_skip_then_match_advances_through_all(void)
+{
+    /*
+     * Models xhci_send_noop's inner loop: the first CMD_COMPLETION
+     * event doesn't correlate with our submitted command (stale
+     * Linux-era residue or an unrelated event), so the driver skips
+     * it. The second event matches and ends the poll. Each peek must
+     * consume a distinct slot AND the physical dequeue must advance
+     * in lock-step so the ERDP write covers both slots.
+     */
+    struct xhci_trb trbs[8];
+    struct xhci_event_ring r;
+    uintptr_t base = 0xD000u;
+    TEST_ASSERT_EQUAL_INT(0, xhci_event_ring_init(&r, trbs, base, 8));
+
+    /* Slot 0: unrelated CMD_COMPLETION (simulated stale pointer). */
+    trbs[0].param_lo = 0xCAFECAFEu;
+    trbs[0].param_hi = 0;
+    trbs[0].status   = (uint32_t)(XHCI_CC_SUCCESS << XHCI_CC_SHIFT);
+    trbs[0].control  = XHCI_TRB_TYPE(XHCI_TRB_EVT_CMD_COMPLETION)
+                       | XHCI_TRB_CYCLE;
+    /* Slot 1: the completion we actually want. */
+    trbs[1].param_lo = 0xBEEFu;
+    trbs[1].param_hi = 0;
+    trbs[1].status   = (uint32_t)(XHCI_CC_SUCCESS << XHCI_CC_SHIFT);
+    trbs[1].control  = XHCI_TRB_TYPE(XHCI_TRB_EVT_CMD_COMPLETION)
+                       | XHCI_TRB_CYCLE;
+
+    struct xhci_trb out;
+
+    /* First peek: stale event. Must return true and advance. */
+    TEST_ASSERT_TRUE(xhci_event_ring_peek(&r, &out));
+    TEST_ASSERT_EQUAL_UINT32(0xCAFECAFEu, out.param_lo);
+    TEST_ASSERT_EQUAL_UINT64(base + 16, xhci_event_ring_dequeue_phys(&r));
+
+    /* Second peek: matching event. */
+    TEST_ASSERT_TRUE(xhci_event_ring_peek(&r, &out));
+    TEST_ASSERT_EQUAL_UINT32(0xBEEFu, out.param_lo);
+    TEST_ASSERT_EQUAL_UINT64(base + 32, xhci_event_ring_dequeue_phys(&r));
+
+    /* Third peek: no more events. */
+    TEST_ASSERT_FALSE(xhci_event_ring_peek(&r, &out));
+    /* Dequeue_phys unchanged — failed peek does not advance. */
+    TEST_ASSERT_EQUAL_UINT64(base + 32, xhci_event_ring_dequeue_phys(&r));
+}
+
+static void test_event_ring_dequeue_phys_after_wrap(void)
+{
+    /*
+     * After a full lap, dequeue wraps to 0 and ECS toggles. The ERDP
+     * value we'd write at that point must point at the ring base
+     * (not past the end). Explicit coverage because the wrap path is
+     * exactly where subtle ERDP arithmetic bugs hide.
+     */
+    struct xhci_trb trbs[4];
+    struct xhci_event_ring r;
+    uintptr_t base = 0x40000000UL;
+    TEST_ASSERT_EQUAL_INT(0, xhci_event_ring_init(&r, trbs, base, 4));
+
+    for (unsigned i = 0; i < 4; i++) {
+        trbs[i].control = XHCI_TRB_TYPE(XHCI_TRB_EVT_CMD_COMPLETION)
+                          | XHCI_TRB_CYCLE;
+    }
+
+    struct xhci_trb out;
+    /* Consume 3 — dequeue_phys tracks slot 3. */
+    for (unsigned i = 0; i < 3; i++)
+        TEST_ASSERT_TRUE(xhci_event_ring_peek(&r, &out));
+    TEST_ASSERT_EQUAL_UINT64(base + 3 * 16, xhci_event_ring_dequeue_phys(&r));
+
+    /* 4th consume wraps. dequeue goes back to 0, ECS toggles 1→0. */
+    TEST_ASSERT_TRUE(xhci_event_ring_peek(&r, &out));
+    TEST_ASSERT_EQUAL_UINT8(0, r.cycle_state);
+    TEST_ASSERT_EQUAL_UINT64(base, xhci_event_ring_dequeue_phys(&r));
+}
+
+static void test_erst_entry_layout(void)
+{
+    /*
+     * The driver's xhci_erst_entry isn't exported via the ring header,
+     * but any replacement must satisfy xHCI 1.2 §6.5: 16 bytes total,
+     * base_lo at +0, base_hi at +4, size at +8, reserved at +12. A
+     * regression that adds padding or re-orders fields would surface
+     * here as soon as a matching struct is re-declared.
+     */
+    struct erst_entry_test {
+        uint32_t base_lo;
+        uint32_t base_hi;
+        uint32_t size;
+        uint32_t reserved;
+    };
+    TEST_ASSERT_EQUAL_UINT32(16, sizeof(struct erst_entry_test));
+    TEST_ASSERT_EQUAL_UINT32(0,  offsetof(struct erst_entry_test, base_lo));
+    TEST_ASSERT_EQUAL_UINT32(4,  offsetof(struct erst_entry_test, base_hi));
+    TEST_ASSERT_EQUAL_UINT32(8,  offsetof(struct erst_entry_test, size));
+    TEST_ASSERT_EQUAL_UINT32(12, offsetof(struct erst_entry_test, reserved));
+}
+
 /* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -352,5 +488,9 @@ int test_suite_xhci_ring(void)
     RUN_TEST(test_event_ring_peek_wraps_and_toggles_ecs);
     RUN_TEST(test_event_ring_dequeue_phys);
     RUN_TEST(test_event_ring_peek_null_args);
+    RUN_TEST(test_event_ring_peek_then_dequeue_phys_tracks_advance);
+    RUN_TEST(test_event_ring_peek_skip_then_match_advances_through_all);
+    RUN_TEST(test_event_ring_dequeue_phys_after_wrap);
+    RUN_TEST(test_erst_entry_layout);
     return UnityEnd();
 }
