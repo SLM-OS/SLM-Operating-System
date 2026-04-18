@@ -2470,6 +2470,23 @@ int cmd_poke(int argc, char *argv[])
     return 0;
 }
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+/*
+ * xhci - Show Tegra XHCI host-controller info (#266 Phase 3A). No
+ * arguments. Dumps parsed capabilities + live USBCMD / USBSTS /
+ * PAGESIZE. Reports "not live" if xhci_init bailed (typically because
+ * the xusb clocks weren't held through kexec).
+ */
+int cmd_xhci(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    extern bool xhci_dump_info(void);
+    if (!xhci_dump_info())
+        shell_puts("xhci: not live (clocks gated? check slmos-kexec)\r\n");
+    return 0;
+}
+#endif
+
 /*
  * gpu - Show GPU driver status and optionally read a BAR0 register.
  *

@@ -62,6 +62,7 @@ const shell_cmd_t builtin_commands[] = {
     {"poke",   cmd_poke,   "Write 32-bit word (poke <phys-hex> <val-hex>)", true},
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     {"nvgpu",  cmd_nvgpu,  "Jetson nvgpu bringup (nvgpu <prepare|run|info>)", true},
+    {"xhci",   cmd_xhci,   "Show Tegra XHCI controller info (#266 Phase 3A)", false},
 #endif
     {"elftest", cmd_elftest, "Test ELF loader", true},
     {"run",    cmd_run,    "Run a program (run <name>)", true},

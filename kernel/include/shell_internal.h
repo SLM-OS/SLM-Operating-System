@@ -69,6 +69,7 @@ int cmd_peek(int argc, char **argv);
 int cmd_poke(int argc, char **argv);
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 int cmd_nvgpu(int argc, char **argv);
+int cmd_xhci(int argc, char **argv);
 #endif
 int cmd_bench(int argc, char **argv);
 int cmd_sched(int argc, char **argv);

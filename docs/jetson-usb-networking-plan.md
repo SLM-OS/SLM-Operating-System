@@ -5,18 +5,19 @@ Nano. **Option A (USB-A host port + CDC-ECM dongle)** is the primary
 target. **Option B (USB-C device mode + CDC-ECM gadget)** is a fallback
 only pursued if the Phase 0 CBB probes rule Option A out.
 
-**Status:** Phase 0 complete (Option A chosen); Phase 1 scaffolding landed
-on `feature/usb-networking-phase0`. Tracked in
-[#266](https://github.com/SLM-OS/SLM-Operating-System/issues/266). Per-phase
-status lives in §7; outcomes from the Phase 0 decision gate are in §3.
+**Status:** Phases 0-2 landed on main; Phase 3A partially landed and
+then mothballed after a blocker traced to Linux's kexec-time SMMU
+shutdown (#285, closed wontfix). See §8 for the full investigation
+writeup. Tracked in
+[#266](https://github.com/SLM-OS/SLM-Operating-System/issues/266).
 
 | Phase | Status | Notes |
 |---|---|---|
-| 0 — CBB probe | ✅ done (2026-04-17) | Option A viable; clock-gated, not firewalled. See §3 Phase 0. |
-| 1 — USB core (`kernel/usb/core/`) | ✅ scaffolded | URB / descriptor / enumeration with 37 unit tests against a mock HCD. |
-| 2 — CDC-ECM class driver | ✅ scaffolded | Probe + MAC parse + bulk IN/OUT data path + net_driver glue; 18 unit tests. |
-| 3A — XHCI host driver | ☐🔗 pending | Requires Phase 2 + kexec clock-hold extension. |
-| 4 — lwIP netif integration | ☐🔗 pending | Requires Phase 2. |
+| 0 — CBB probe | ✅ done (2026-04-17) | Option A viable; xHCI clock-gated, not firewalled. See §3 Phase 0. |
+| 1 — USB core (`kernel/usb/core/`) | ✅ merged | PR #272. URB / descriptor / enumeration; 37 unit tests against a mock HCD. |
+| 2 — CDC-ECM class driver | ✅ merged | PR #276. Probe + MAC parse + bulk IN/OUT data path + net_driver glue; 25 unit tests. |
+| 3A — XHCI host driver | ⛔ mothballed (2026-04-18) | Scaffolding + caps parse + rings + NO_OP code landed on `feature/usb-networking-phase2`; ring primitives have 15 unit tests (`test_xhci_ring.c`). Blocked at USBCMD.RUN=1 by the SMMU disable in Linux's kexec path. Root cause + mothball analysis in §8. |
+| 4 — lwIP netif integration | ☐🔗 pending | Requires a working Phase 3A, which is blocked. |
 | 5 — testing, reliability, docs | ☐🔗 pending | Requires Phases 3A + 4. |
 
 ---
@@ -287,7 +288,13 @@ Architecture notes:
 - CDC-ECM spec is public (CDC 1.2 ECM subclass spec).
 - Linux `drivers/net/usb/cdc_ether.c` — ~1000 LoC, well-commented.
 
-### Phase 3A — XHCI Host Driver (3-4 weeks, Option A primary)
+### Phase 3A — XHCI Host Driver (3-4 weeks, Option A primary) — ⛔ mothballed 2026-04-18
+
+Steps 1-3 verified working on real hardware; Step 4 landed as code
+but cannot complete end-to-end. Full investigation in §8. The
+deliverables below are documented as-planned; what actually landed
+and what's blocked is captured in the per-step log at the end of
+this section.
 
 **Deliverables:**
 - `kernel/drivers/usb/xhci/` with:
@@ -329,6 +336,18 @@ Architecture notes:
 - Intel xHCI spec (free from usb.org / Intel).
 - FreeBSD `xhci.c` — ~3500 lines, notably cleaner than Linux's for
   porting.
+
+**Per-step log (what actually happened):**
+
+| Step | Status | Evidence |
+|---|---|---|
+| 1 — kexec xusb clock hold (`scripts/jetson-kexec-slmos.sh`) | ✅ done (`66b7ad9`) | `peek 0x03610000` reads HCIVERSION=0x0120, HCCPARAMS1=0x0180ff05 from SLM-OS post-kexec. |
+| 2 — driver scaffolding (`kernel/drivers/usb/xhci/`) | ✅ done (`47664e4`) | Compiles clean on all four targets. |
+| 3 — capability probe + halt | ✅ done (`47664e4`) | `slmos> xhci` shows 36 slots, 8 ports, 5 interrupters, 64-bit addr, 64-byte ctx. Linux's halt state honoured (USBCMD=0, HCH=1). HCRST on Tegra is lethal (writes brick the aperture) so it's skipped. |
+| 4 — DCBAA + command ring + event ring + NO_OP | ⛔ blocked (`57bdeb8`) | All pre-RUN register writes land cleanly (USBSTS stable at 0x1). USBCMD.RUN=1 wedges the aperture (reads return 0xffffffff). Root cause: SMMU disable — see §8. Ring primitives (cycle-bit handling, Link TRB wrap, event-ring dequeue) have 15 unit tests in `kernel/tests/test_xhci_ring.c` that run on every target. |
+| 5 — port status + ENABLE_SLOT / ADDRESS_DEVICE | not started | Blocked on Step 4. |
+| 6 — control-transfer TRB builder | not started | |
+| 7 — CONFIGURE_ENDPOINT + bulk transfers | not started | |
 
 ### Phase 3B — XUDC Device Driver (2-3 weeks, Option B fallback)
 
@@ -448,4 +467,152 @@ already services virtio-net on QEMU and MACB on Pi 5.
 
 ---
 
-*Last updated: 17 April 2026*
+## 8. Phase 3A Investigation & Mothball (2026-04-18)
+
+Full trace of what stopped Phase 3A mid-Step-4. GitHub issues #282
+and #285 contain the live investigation log; this section is the
+stable narrative summary.
+
+### 8.1 What worked
+
+- **Kexec clock hold (Step 1).** Extending
+  `scripts/jetson-kexec-slmos.sh` to pin `xusb_core_host`,
+  `xusb_falcon`, `xusb_fs` clocks and the `xusba`/`xusbc`
+  powergates via BPMP debugfs keeps the xHCI controller's MMIO
+  aperture addressable from SLM-OS post-kexec. Before the hold
+  was in place the aperture read `0xffffffff` uniformly;
+  afterward it reads live capability values that match Linux's
+  reported state.
+- **Capability probe (Steps 2-3).** From SLM-OS at NS EL2:
+  CAPLENGTH=0x20, HCIVERSION=0x0120, HCCPARAMS1=0x0180ff05 —
+  identical to what Linux reports via `dmesg | grep hcc`. 36
+  device slots, 8 ports, 5 interrupters, 64-bit addressing,
+  64-byte contexts. Halt state is honoured (USBCMD=0, HCH=1).
+- **MMIO writes pre-RUN (Step 4, partial).** All register writes
+  to DCBAAP, CRCR, CONFIG, ERST*, ERDP land cleanly — USBSTS
+  stays at 0x1 throughout. No Falcon-level error triggers from
+  the CPU-side register writes alone.
+
+### 8.2 What broke
+
+Writing `USBCMD.RUN = 1` causes the entire XHCI MMIO aperture to
+return `0xffffffff` on subsequent reads. USBSTS, USBCMD, capability
+registers, everything. The controller has entered an error state
+that bricks its MMIO interface.
+
+Notably, the wedge happens **regardless of what addresses are
+programmed into DCBAAP/CRCR/ERSTBA** — tested with:
+
+- SLM-OS's own NC-memory addresses (0xBDE0xxxx): wedge.
+- Linux's leftover DMA addresses (DCBAAP=0x7ffffff000): wedge.
+- The pre-RUN programming step skipped entirely (use whatever
+  Linux left in the registers): wedge.
+
+### 8.3 Diagnosis: SMMU disable in the kexec path
+
+Linux's kexec handoff logs include these lines immediately before
+the new kernel takes over:
+
+```
+arm-smmu 12000000.iommu: disabling translation
+arm-smmu 10000000.iommu: disabling translation
+arm-smmu 8000000.iommu: disabling translation
+kexec_core: Starting new kernel
+```
+
+The xHCI controller lives in IOMMU group 2 (visible in Linux's
+pre-kexec `dmesg`: `tegra-xusb 3610000.usb: Adding to iommu
+group 2`). When `arm-smmu` shuts down as part of `device_shutdown()`,
+the xusb stream's translations are dropped.
+
+Writing RUN=1 to a running xHCI controller triggers its first DMA
+attempt (fetching the Device Context Base Address Array entry).
+On a Tegra234 system with SMMU translations disabled, that DMA
+faults inside the xusb context bank. The controller enters an
+internal error state that manifests as the MMIO aperture
+returning all-ones.
+
+### 8.4 Options explored
+
+Four variants of Option A (Linux-cooperative pre-kexec
+interventions) were tested on jetson-nano-1:
+
+- **A.1** — `echo on > .../tegra-xusb/power/control`: harmless
+  but ineffective. Runtime PM pin only prevents idle
+  auto-suspend; it doesn't stop `device_shutdown()`.
+- **A.2** — unbind tegra-xusb before kexec: **strictly worse**.
+  The driver's `.remove()` callback zeros the controller's
+  state, so even the first DCBAAP write from SLM-OS wedges the
+  aperture (vs only wedging at RUN=1 without unbind).
+- **A.3** — panic kexec (`kexec -p` + `crashkernel=256M`):
+  skips `device_shutdown()`, BUT loads SLM-OS at the
+  crashkernel-reserved region (0xefe00000) rather than its
+  link address (0x80000000). SLM-OS still advertises RAM at
+  0x80000000+, misidentifies free memory, and hangs early.
+  Making this work would require relocatable-boot support
+  across all of SLM-OS — out of scope for Phase 3A.
+- **A.4** — kernel module that NULLs
+  `tegra-xusb driver->shutdown`: on load, the module reported
+  `shutdown already NULL — no-op`. **The tegra-xusb driver
+  has no `.shutdown` hook on L4T 36.4.7 in the first place.**
+  Every Option-A variant premised on "skip the .shutdown
+  callback" was targeting the wrong mechanism.
+
+After A.4's "already NULL" result, one more diagnostic confirmed
+that the true blocker is SMMU translation disable, not any Falcon
+shutdown path: writing RUN=1 with Linux's own DMA pointers intact
+still wedges the aperture.
+
+### 8.5 Why this isn't fixable in SLM-OS scope
+
+Unblocking the DMA fault needs one of:
+
+- **Prevent `arm-smmu`'s own `.shutdown`** from dropping
+  translations. Risky: leaving SMMU translations live during
+  the kexec transition means any device capable of DMA (not
+  just xHCI) can write stale data into the new kernel's memory
+  before SLM-OS takes over. Would need careful coordination
+  with the kexec path.
+- **Reprogram the xusb stream's SMMU context from SLM-OS**
+  directly. The SMMU control registers are behind the CBB
+  firewall (see `docs/jetson-cbb-report.md` §3) — unreachable
+  from NS EL2.
+- **Load Tegra XUSB Falcon firmware ourselves** (issue #286)
+  and drive the controller cold, without relying on inherited
+  Linux state. Tegra Orin's Falcon may run in HS mode with
+  signed firmware, in which case an unsigned SLM-OS load
+  won't execute. 3-6 weeks of focused work with ~40% success
+  probability.
+
+All three paths go significantly beyond the capstone's scope.
+
+### 8.6 Decision: mothballed
+
+Phase 3A scaffolding (the XHCI driver tree, ring allocation,
+NO_OP command code, `xhci` shell diagnostic) is kept on
+`feature/usb-networking-phase2` as reference for any future
+revival. The Option-A.4 kernel module source is kept in
+`scripts/tegra-xusb-noshutdown/` for the same reason.
+
+Issues **#282** (HCRST brick — symptom of the same SMMU fault)
+and **#285** (Phase 3A blocker) closed as wontfix.
+**#286** (standalone Falcon firmware load) remains open as the
+long-term direction if Jetson USB networking re-enters scope.
+
+### 8.7 Lessons for the next attempt
+
+1. **Read what the driver actually does before designing
+   interventions.** Option A assumed tegra-xusb had a destructive
+   `.shutdown` callback. It didn't.
+2. **Test the kexec-inherit model with a no-op first.** The
+   "leave Linux's DCBAAP in place, just RUN=1" diagnostic that
+   definitively identified SMMU as the blocker should have been
+   the first experiment, not the eighth.
+3. **The CBB is not the only kexec-time barrier.** `docs/jetson-cbb-report.md`
+   §3 covers what the firewall permits; but the SMMU adds a
+   separate, orthogonal DMA-path blocker that kicks in during
+   the Linux→SLM-OS handoff regardless of CBB state.
+
+---
+
+*Last updated: 18 April 2026*

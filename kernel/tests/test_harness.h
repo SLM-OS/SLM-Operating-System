@@ -98,6 +98,9 @@ int test_suite_usb_core(void);
 /* CDC-ECM class driver tests (ENABLE_NETWORKING; Phase 2 of #266) */
 int test_suite_cdc_ecm(void);
 
+/* XHCI ring primitive tests (platform-neutral; Phase 3A of #266) */
+int test_suite_xhci_ring(void);
+
 /* Lua scripting tests */
 int test_suite_lua(void);
 

@@ -162,8 +162,8 @@ at the same EL as Linux was running at when kexec handed off.
 | HSP mailboxes (TCU) | `0x03C00000+` | ✅ | Serial input routing |
 | PSCI calls | SMC | ✅ | CPU power, SYSTEM_OFF |
 | XUSB pad controller | `0x03520000` | ✅ | USB networking UPHY config (#266 Phase 0) |
-| Tegra XHCI host | `0x03610000` | ✅ (clock-dark) | USB networking Option A (#266 Phase 0) |
-| Tegra XUDC device | `0x03550000` | ✅ (clock-dark) | USB networking Option B fallback (#266 Phase 0) |
+| Tegra XHCI host | `0x03610000` | ⚠ MMIO readable, DMA blocked | #266 Phase 3A mothballed. Capability probe works post-kexec once `slmos-kexec` holds the `xusb_*` clocks on. But `USBCMD.RUN=1` wedges the aperture because `arm-smmu` drops the xusb stream's translations during Linux's kexec path (#285, closed). See `docs/jetson-usb-networking-plan.md` §8. |
+| Tegra XUDC device | `0x03550000` | ✅ (clock-dark) | USB networking Option B fallback (#266 Phase 0); expected to hit the same SMMU-at-kexec DMA blocker as XHCI if attempted. |
 
 ### Peripherals blocked even from NS EL2
 
@@ -206,7 +206,7 @@ Cross-walked to the five tracked features (see
 | **AI scheduler** | ✅ Running | No CBB dependency — pure CPU/NEON path. |
 | **AI page eviction** | ✅ Running | No CBB dependency. |
 | **Networking** | ❌ Not wired yet (#25) | Tentative impact. EQOS MAC is at `0x02310000`; need to verify EL2 reachability (§6.A first experiment). If blocked, Jetson networking is a hard no-go without one of the permanent fixes in §6. |
-| **USB** | ❌ Not wired (#24, #266) | Not CBB-blocked — Phase 0 probe on jetson-nano-1 (2026-04-17) showed XHCI at `0x03610000` and XUDC at `0x03550000` both read `0xffffffff` (clock-gated post-kexec, not RAS or `0xbadf1100` poison). UPHY padctl at `0x03520000` is live and returns sensible register state. Blocker is BPMP-owned clock state (the kexec helper kills `xusb_*` clocks the same way it killed the GPU), not the CBB. Matches the GPU pattern — mitigatable via `scripts/jetson-kexec-slmos.sh` debugfs holds. |
+| **USB** | ⛔ Mothballed (#266, #285) | Not CBB-blocked — Phase 0 (2026-04-17) confirmed XHCI + XUDC + UPHY padctl are all NS-EL2-reachable. Clock-gate state fixed by `scripts/jetson-kexec-slmos.sh` holding `xusb_*` clocks + `xusba`/`xusbc` powergates through kexec (commit `66b7ad9`). Phase 3A reached working capability probe but blocked at `USBCMD.RUN=1`: Linux's kexec path disables `arm-smmu` translations for the xusb stream (dmesg `arm-smmu … disabling translation` immediately before `kexec_core: Starting new kernel`), and the controller's first DMA fault on RUN=1 bricks the MMIO aperture. Option A mothballed 2026-04-18 after four variants tested (#285, closed); #286 tracks the long-term standalone-firmware-load alternative. Full investigation in `docs/jetson-usb-networking-plan.md` §8. |
 
 The CBB is the *root blocker* for two features (GPU inference full
 pipeline, and possibly networking) and several smaller items (UARTA,
