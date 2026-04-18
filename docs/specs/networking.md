@@ -15,10 +15,12 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 | ping | ✅ | ✅ | ✅ 2-4 ms RTT | — | ✅ |
 | `ifconfig` | ✅ | ✅ | ✅ | — | ✅ |
 | `netstat` | ✅ | ✅ | ✅ | — | ✅ |
-| TCP shell (raw, port 2323) | ✅ | ✅ | ✅ | — | ✅ |
-| Telnet protocol | ⏸️ (§2 of plan) | ⏸️ | ⏸️ | — | ⏸️ |
+| TCP shell (raw, port 2323) | ✅ | ✅ | ✅ hw-capable, off by default | — | ✅ |
+| Telnet protocol (RFC 854 + ECHO/SGA/NAWS/TERMINAL-TYPE/IP) | ✅ | ✅ | ✅ hw-capable, off by default | — | ✅ |
+| `telnetd` daemon control (`start/stop/status/sessions/kick`) | ✅ | ✅ | ✅ hw-capable, off by default | — | ✅ |
+| `/etc/telnetd.conf` + `NET_TELNETD_AUTOSTART` build flag | ✅ | ✅ | ✅ | — | ✅ |
+| `slm.telnetd_*` Lua bindings | ✅ | ✅ | ✅ | — | ✅ |
 | SSH | ⏸️ (#199) | ⏸️ | ⏸️ | — | ⏸️ |
-| `telnetd` daemon control | ⏸️ (§3 of plan) | ⏸️ | ⏸️ | — | ⏸️ |
 
 ## Skipped / Blocked
 
@@ -26,7 +28,8 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 - **#266 — Jetson USB networking** (fallback for #25). Plan written at `docs/jetson-usb-networking-plan.md`. Option A (USB-A CDC-ECM dongle via XHCI host) is primary; Option B (USB-C device mode CDC-ECM gadget via XUDC) is fallback. Not started; gated on Phase 0 CBB probe of XHCI/XUDC.
 - **#243 — x86-64 Realtek RTL8168/8111 driver for bare-metal.** Works under QEMU x86-64 (virtio-pci); the test-pc dev board has a Realtek NIC that would need a native driver. Not blocking the capstone narrative because QEMU x86-64 demonstrates the full stack.
 - **#247 — Pi 5 RP1 MSIX_CFG engine doesn't fire TLPs.** MACB IRQ handler is registered but never runs. MACB falls back to polling (same pattern as UART RX). Functional at 2-4 ms RTT; not a correctness issue. Affects every RP1 peripheral.
-- **Jetson networking over the internal Ethernet** — requires solving #25 OR #266 OR taking a permanent CBB bypass route (`docs/jetson-cbb-report.md` §6). No viable capstone-timeline path.
+- **Real-hardware default-on for telnet on Pi 5** — code is hardware-capable but `NET_TELNETD_AUTOSTART` is OFF by default because the session is unauthenticated. Rollout gated on SSH (#199) or an explicit operator decision to enable on trusted networks only.
+- **Jetson networking over the internal Ethernet** — requires solving #25 OR #266 OR taking a permanent CBB bypass route (`docs/jetson-cbb-report.md` §6).
 - **IPv6** — lwIP config option; not compiled in. Not a project priority.
 - **TLS** — not in-tree; follows after #199 SSH.
 
@@ -35,7 +38,9 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 - Single `struct net_driver` abstraction plugs any NIC into lwIP — proven with virtio-mmio, virtio-pci, and MACB.
 - Auto-DHCP at boot with static-IP fallback (#197).
 - Live integration tests covering init, TX, RX, DHCP BOUND and FAILED states.
-- Multi-session TCP shell via lwIP raw callbacks, documented plan through telnet + SSH phases (`docs/multi-session-shell-plan.md`).
+- Multi-session TCP shell via lwIP raw callbacks (Phase 1).
+- Full telnet protocol: IAC, ECHO, SGA, NAWS, TERMINAL-TYPE, IAC IP→Ctrl+C. `telnet localhost 2323` gives character-at-a-time server-echoed mode (Phase 2).
+- `telnetd` daemon controls — `start/stop/status/sessions/kick` shell commands, `/etc/telnetd.conf` parser, `NET_TELNETD_AUTOSTART` build flag, `slm.telnetd_*` Lua bindings (Phase 3).
 
 ## See also
 

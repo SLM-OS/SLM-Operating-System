@@ -46,7 +46,7 @@ For delivery narrative, see `docs/capstone-feature-status.md`.
 | IPC (message router) | ✅ | ✅ | ✅ | ✅ | [ipc.md](ipc.md) |
 | Components (hot-swap) | ✅ | ✅ | ✅ | 🟡 no EL0 yet | [components.md](components.md) |
 | Lua scripting | ✅ 5.4.7 | ✅ | ✅ | ✅ | [lua.md](lua.md) |
-| Multi-session shell (TCP) | ✅ | ✅ | ❌ no network | ✅ | [shell.md](shell.md) |
+| Multi-session shell (TCP + telnet + telnetd) | ✅ | ✅ hw-capable, off by default | ❌ no network | ✅ | [shell.md](shell.md) |
 | Testing / CI | ✅ full | 🟡 HW-in-loop | 🟡 HW-in-loop | ✅ QEMU + HW | [testing.md](testing.md) |
 
 ---
