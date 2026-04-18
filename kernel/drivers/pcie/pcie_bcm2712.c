@@ -103,6 +103,13 @@
 
 static volatile uint8_t *pcie1_regs;   /* PCIe RC MMIO VA */
 static volatile uint8_t *mip1_regs;    /* MIP1 MMIO VA */
+
+/*
+ * Lock ordering: msi_lock → cfg_lock. `bcm2712_alloc_msi` holds
+ * msi_lock across `bcm2712_config_read16`, which takes cfg_lock
+ * internally. Never the reverse: nothing under cfg_lock touches
+ * msi_lock. New code that needs both must respect this order.
+ */
 static spinlock_t cfg_lock;            /* guards EXT_CFG_INDEX/DATA pair */
 
 /*
@@ -515,6 +522,10 @@ static int bcm2712_bind_irq_handler(const struct pcie_msi_handle *h,
         msi_flags = spin_lock_irqsave(&msi_lock);
         mip1_slots[vec].handler = NULL;
         mip1_slots[vec].ctx = NULL;
+        /* Symmetric with the publish path: push the cleared slot
+         * out to DRAM so a later rebind sees a real NULL, not a
+         * stale cached handler pointer from this CPU's L2. */
+        __asm__ volatile("dsb sy" ::: "memory");
         spin_unlock_irqrestore(&msi_lock, msi_flags);
         return PCIE_ERR_INVAL;
     }
