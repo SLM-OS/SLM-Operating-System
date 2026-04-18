@@ -32,12 +32,20 @@ forward are realistic.
   set to `os_code_offset` (= 0, the non-secure preamble) instead
   of `apps[0].offset` (= 0x100, the secure entry the HS-bootrom
   jumps to after signature verify)**. After the fix, Falcon
-  executes booter code (CPUCTL=`0x00`); booter then hangs waiting
-  for valid `GspFwWprMeta` (intentionally zeroed today; populating
-  it correctly is the documented E4 boundary, not a bringup bug).
-  The original bare-metal blocker (§2.5: 865/1024 offsets
-  priv-locked from UEFI POST onward) remains for any non-kexec
-  boot path. Tracked as **issue #185**.
+  executes booter code (CPUCTL=`0x00`); booter then hung
+  NULL-derefing `sysmemAddrOfRadix3Elf` because SLM-OS left the
+  whole `GspFwWprMeta` buffer zero. **Stage A** (this PR)
+  populates the bare-minimum WprMeta fields (magic, revision,
+  non-NULL radix3 chain, WPR2 boundaries, fbSize) so the booter
+  can validate the handoff struct and reject the deliberately
+  missing bootloader / signature with a *specific* MAILBOX0
+  status code instead of hanging silently. Hardware iteration
+  to read the new MAILBOX0 value is the immediate post-merge
+  follow-up. Stages B+C (real GSP-RM bootloader + signature
+  population) are the path to actual GSP-RM execution and stay
+  on the E4 boundary. The original bare-metal blocker (§2.5:
+  865/1024 offsets priv-locked from UEFI POST onward) remains
+  for any non-kexec boot path. Tracked as **issue #185**.
 - **The portable half of the GSP bringup code transfers cleanly to
   Jetson and bare-metal SLM-OS.** ~60% of the nouveau GSP-loader
   port is done, all of it platform-agnostic (VBIOS parse, Falcon
@@ -109,7 +117,7 @@ All tests run on the dev machine, not on hardware:
 | `make test-vbios` | 30 | BIT parser, PCIR walker, FWSEC discovery |
 | `make test-falcon` | 37 | Probe/reset/halt-poll/DMA/PIO/HS-boot protocol, plus this session: `falcon_hs_kick` (3), `falcon_is_priv_locked` (3), `falcon_wait_halted` early-bail on `0xbadfXXXX` (1) |
 | `make test-nvfw` | 14 | `nvfw_bin_hdr` / `hs_header_v2` / `hs_load_header_v2` framing |
-| `make test-bringup` | 25 | Sig-index algorithm, DMEMMAPPER patcher (legacy FRTS + generic init_cmd parameterised, +3 this session), `gsp_bringup_free` null-safety and idempotence (+2 this session), state-machine guards |
+| `make test-bringup` | 36 | Sig-index algorithm, DMEMMAPPER patcher (legacy FRTS + generic init_cmd parameterised), `gsp_bringup_free` null-safety, state-machine guards, `gsp_bringup_set_booter_layout` BOOTVEC pinning (5), Stage A WprMeta + radix3 chain helpers (11) |
 | `make test-rpc` | 17 | Ring math, init/dtor, null/oversize/not-alive rejection |
 | **Total** | **123** | |
 
@@ -924,7 +932,7 @@ half of the original write-up is unaffected by the retraction.
 | SEC2 CPUCTL inherited unlock | ✅ confirmed `0x00000020` |
 | `gpu init` reaches NVIDIA dispatcher | ✅ proven (PR #283) |
 | FWSEC-FRTS Phase 1 post-kexec | ✅ WPR2 populated, identical to bare-metal |
-| Booter Load Phase 2 post-kexec | ⚠ Partially unblocked — Falcon now executes booter (CPUCTL=0x00 instead of 0x20), but hangs waiting for valid `GspFwWprMeta` (intentionally zeroed today; populating it is the E4 boundary) |
+| Booter Load Phase 2 post-kexec | ⚠ Stage A in flight — Falcon executes booter (CPUCTL=0x00); WprMeta now populated with magic/revision/radix3-chain/WPR2-bounds/fbSize so the NULL-deref hang is eliminated. Hardware iteration pending to read the new MAILBOX0 status code. Stages B+C (real bootloader + signature) remain. |
 
 **Phase 2 root cause located + fixed (PR #289, 2026-04-18):**
 After three converging-but-wrong investigations (Jetson code reuse,
@@ -975,12 +983,69 @@ none of the reference-source readings spotted — only the runtime
 diagnostic, by exposing the parsed values directly, made it
 obvious.
 
-**E4 next step:** populate `GspFwWprMeta` correctly so the booter
-has valid GSP-RM ELF / radix3 / BCR pointers. Booter currently
-hangs in a wait loop after starting because the WprMeta buffer is
-intentionally zeroed (per `kernel/gpu/nvidia/bringup.c:638-641`).
-This is documented work for the GSP-RM RPC milestone, not a
-bringup bug.
+**Next step (Stage A — this PR):** populate `GspFwWprMeta` with
+the bare-minimum fields the booter validates before doing anything
+else: `magic`, `revision`, a non-NULL 3-level radix3 chain (4 DMA
+pages: L0 → L1 → L2 → dummy ELF page), the WPR2 boundaries from
+FWSEC-FRTS, and `fbSize`. Other fields (real bootloader,
+signature, heap, partition-RPC) stay zero — booter is expected to
+reject the missing bootloader with a discrete MAILBOX0 status
+code, which is the Stage A diagnostic signal. Stages B+C populate
+the real bootloader + signature and are tracked separately as the
+GSP-RM RPC milestone work.
+
+### 4.2.m Option B-kexec — **Stage A: minimum WprMeta + radix3** (NEW 2026-04-18)
+
+**Goal.** Convert the post-PR-#289 hang ("Falcon executes booter
+then hangs forever waiting for valid `GspFwWprMeta`") into a
+discrete MAILBOX0 status code we can interpret. The booter
+NULL-derefs `sysmemAddrOfRadix3Elf` during the radix3 page walk
+when the WprMeta buffer is all-zero; populating just enough fields
+moves the failure to a deeper validation step (missing bootloader,
+missing signature, etc.) which booter reports through MAILBOX0.
+
+**Code shipped.**
+
+| Artefact | What |
+|---|---|
+| `kernel/gpu/nvidia/gsp_wpr_meta.h` | 256-byte `GspFwWprMeta` struct (verbatim layout from `docs/reference/nouveau-r535-nvrm-gsp.h:417-555`); `_Static_assert`s pin sizeof + 11 critical field offsets at compile time so any layout drift breaks the build |
+| `gsp_wpr_meta_populate_minimum` (in `bringup.c`) | Pure helper. Sets magic, revision, sysmemAddrOfRadix3Elf, sizeOfRadix3Elf, gspFwWprStart, gspFwWprEnd, fbSize. Other fields explicitly zeroed. NULL-safe. |
+| `gsp_radix3_fill_dummy_chain` (in `bringup.c`) | Pure helper. Writes single-entry L0/L1/L2 page entries given the per-level IOVAs. NULL in any page argument is a no-op for the entire call. |
+| `struct gsp_bringup` extension (`bringup.h`) | Four new pages tracked: `dma_radix3_l{0,1,2}_va/iova` + `dma_radix3_elf_va/iova/size`. Fail-path frees them; success path leaves them live for SEC2. |
+| `gsp_bringup_booter_load` Phase 4b | Allocates 4× 4 KB DMA pages, zeroes them, calls `gsp_radix3_fill_dummy_chain`, then `gsp_wpr_meta_populate_minimum` against `b->wpr2_addr/size`. Cache-cleans all five buffers (4 radix3 + WprMeta) to PoC before the BAR0 MAILBOX write that kicks SEC2. |
+
+**Test coverage** (`make test-bringup`, +11 tests):
+
+- `test_wpr_meta_struct_size_runtime` — runtime mirror of compile-time struct-size assert.
+- `test_wpr_meta_constants_match_upstream` — magic, revision, verified sentinel literal values.
+- `test_wpr_meta_populate_sets_required_fields` — every populated field assigned to the right argument.
+- `test_wpr_meta_populate_leaves_other_fields_zero` — 21 deliberately-unpopulated fields verified zero (catches a partial-init regression that would silently send garbage to SEC2).
+- `test_wpr_meta_populate_computes_wpr_end` — `gspFwWprEnd = wpr2_addr + wpr2_size` arithmetic.
+- `test_wpr_meta_populate_null_safe` — NULL meta → no crash.
+- `test_radix3_fill_writes_l{0,1,2}_entry_only` — each level writes only entry 0; entries 1..511 stay untouched.
+- `test_radix3_fill_null_pages_no_op` — NULL in any of three page args = no writes anywhere.
+- `test_radix3_fill_accepts_zero_iovas` — zero IOVA pinned as legal-but-bad input (caller's job to reject).
+
+All 36 `test-bringup` tests pass on the dev box. QEMU ARM64
+`make test` and x86-64 kernel build clean.
+
+**Hardware-iteration plan (post-merge).**
+
+1. Claim test-pc, build kexec ELF, run `gpu init` post-kexec.
+2. Read MAILBOX0 from the post-`gsp_bringup_booter_load`
+   diagnostic dump.
+3. Cross-reference the value against nouveau's
+   `gsp_booter_status_codes` — the expected family is
+   "missing/invalid bootloader" or "signature size = 0", both of
+   which are 1-line MAILBOX values.
+4. Decide Stage B's next-narrowest fix from that signal.
+
+If MAILBOX0 instead reports "magic invalid" or "WPR2 mismatch",
+Stage A's struct values are wrong somewhere — the test pinning
+above should catch most such regressions before they reach
+hardware, but the FB size / WPR2 boundaries are GA107-specific
+constants in `bringup.c` that the tests can't validate against
+the real card.
 
 ### 4.3 Option C — **Kernel-shim / patched vfio-pci**
 
