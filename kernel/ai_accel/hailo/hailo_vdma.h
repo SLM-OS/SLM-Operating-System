@@ -118,4 +118,53 @@ void hailo_vdma_desc_list_free(struct hailo_vdma_desc_list *list);
  */
 uint32_t hailo_vdma_desc_list_alloc_size(uint32_t desc_count);
 
+/* -------------------------------------------------------------------------- */
+/* Descriptor programming                                                      */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Program a single descriptor with (dma_address, page_size, data_id).
+ * Bit layout mirrors hailo_vdma_program_descriptor in the reference
+ * driver (hailo-vdma-common.c:139):
+ *
+ *   PageSize_DescControl     = (page_size << 8) | 0x02
+ *   AddrL_rsvd_DataID        = (dma_address & 0xFFFFFFC0) | data_id
+ *   AddrH                    = dma_address >> 32
+ *   RemainingPageSize_Status = 0
+ *
+ * The low 6 bits of AddrL are masked off by hardware — descriptor
+ * addresses must be 64-byte aligned. The `data_id` byte identifies
+ * which on-chip data-source/sink this descriptor belongs to (set
+ * up earlier via CONFIG_STREAM).
+ *
+ * No return value — the function is a pure field assignment; the
+ * caller controls which descriptor slot is targeted.
+ */
+void hailo_vdma_program_descriptor(struct hailo_vdma_descriptor *desc,
+                                   uint64_t dma_address,
+                                   uint16_t page_size,
+                                   uint8_t  data_id);
+
+/*
+ * Program a run of descriptors to cover a single contiguous DMA
+ * buffer. Slices the buffer into chunks of `list->desc_page_size`
+ * bytes; the final descriptor carries any residue (buffer_size %
+ * page_size). Each descriptor's DMA address advances by
+ * page_size from the previous.
+ *
+ * `starting_desc` is the index into list->descs[] at which to begin.
+ * For a circular list, subsequent indices wrap via desc_count_mask.
+ * For a non-circular list, the end of the list is a hard stop —
+ * the function returns HAILO_ERR_INVAL if the buffer would overrun.
+ *
+ * Returns the number of descriptors programmed on success, or a
+ * negative HAILO_ERR_* on failure. Caller decodes by comparing to
+ * zero: anything < 0 is an error, >= 0 is a count.
+ */
+int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
+                              uint32_t starting_desc,
+                              uint64_t buffer_iova,
+                              uint32_t buffer_size,
+                              uint8_t  data_id);
+
 #endif /* AI_ACCEL_HAILO_VDMA_H */

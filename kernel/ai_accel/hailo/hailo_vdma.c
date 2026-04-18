@@ -91,3 +91,75 @@ void hailo_vdma_desc_list_free(struct hailo_vdma_desc_list *list)
     }
     memset(list, 0, sizeof(*list));
 }
+
+/* -------------------------------------------------------------------------- */
+/* Descriptor programming                                                      */
+/* -------------------------------------------------------------------------- */
+
+/* Bit layout constants from the reference
+ * (docs/reference/hailo-vdma-common.c:39-41). Firmware-fixed. */
+#define HAILO_VDMA_DESC_PAGE_SIZE_SHIFT 8u
+#define HAILO_VDMA_DESC_DESC_CONTROL    0x02u
+#define HAILO_VDMA_DESC_ADDR_L_MASK     0xFFFFFFC0u
+
+void hailo_vdma_program_descriptor(struct hailo_vdma_descriptor *desc,
+                                   uint64_t dma_address,
+                                   uint16_t page_size,
+                                   uint8_t  data_id)
+{
+    desc->page_size_desc_control =
+        ((uint32_t)page_size << HAILO_VDMA_DESC_PAGE_SIZE_SHIFT)
+        + HAILO_VDMA_DESC_DESC_CONTROL;
+    desc->addr_l_rsvd_data_id =
+        ((uint32_t)(dma_address & HAILO_VDMA_DESC_ADDR_L_MASK))
+        | (uint32_t)data_id;
+    desc->addr_h                   = (uint32_t)(dma_address >> 32);
+    desc->remaining_page_size_status = 0;
+}
+
+int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
+                              uint32_t starting_desc,
+                              uint64_t buffer_iova,
+                              uint32_t buffer_size,
+                              uint8_t  data_id)
+{
+    if (!list || !list->descs) return HAILO_ERR_INVAL;
+    if (buffer_size == 0) return HAILO_ERR_INVAL;
+    if (starting_desc >= list->desc_count && !list->is_circular) {
+        return HAILO_ERR_INVAL;
+    }
+
+    const uint16_t page_size = list->desc_page_size;
+    if (page_size == 0) return HAILO_ERR_INVAL;
+
+    /* DIV_ROUND_UP(buffer_size, page_size). Number of descriptors
+     * needed to cover the whole buffer, including any residue in
+     * the last descriptor. */
+    const uint32_t descs_needed = (buffer_size + page_size - 1u) / page_size;
+    const uint32_t residue      = buffer_size % page_size;
+
+    /* For a non-circular list, all descriptors must fit in
+     * [starting_desc, desc_count). Circular lists wrap via mask. */
+    if (!list->is_circular
+     && starting_desc + descs_needed > list->desc_count) {
+        return HAILO_ERR_INVAL;
+    }
+
+    uint64_t dma_address = buffer_iova;
+    for (uint32_t i = 0; i < descs_needed - 1u; i++) {
+        uint32_t slot = (starting_desc + i) & list->desc_count_mask;
+        hailo_vdma_program_descriptor(&list->descs[slot],
+                                      dma_address, page_size, data_id);
+        dma_address += page_size;
+    }
+    /* Last descriptor: residue size if the buffer isn't an exact
+     * multiple of page_size, otherwise a full page. Matches the
+     * reference driver's pattern at hailo-vdma-common.c:196-198. */
+    uint32_t last_slot = (starting_desc + descs_needed - 1u)
+                       & list->desc_count_mask;
+    uint16_t last_size = (residue == 0) ? page_size : (uint16_t)residue;
+    hailo_vdma_program_descriptor(&list->descs[last_slot],
+                                  dma_address, last_size, data_id);
+
+    return (int)descs_needed;
+}

@@ -2446,6 +2446,164 @@ static void test_vdma_alloc_accepts_min_count(void)
     hailo_vdma_desc_list_free(&small);
 }
 
+static void test_vdma_program_descriptor_encodes_fields(void)
+{
+    /* Unit-test the bit-layout without any allocation. Reference
+     * layout (hailo-vdma-common.c:139-147):
+     *   PageSize_DescControl     = (page_size << 8) | 0x02
+     *   AddrL_rsvd_DataID        = (addr & 0xFFFFFFC0) | data_id
+     *   AddrH                    = addr >> 32
+     *   RemainingPageSize_Status = 0
+     */
+    struct hailo_vdma_descriptor d = {0};
+    hailo_vdma_program_descriptor(&d,
+        /*dma=*/0x0000000A12345680ULL,
+        /*page=*/512,
+        /*data_id=*/0x3C);
+
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u, d.page_size_desc_control);
+    /* 0x12345680 & 0xFFFFFFC0 = 0x12345680 (already 64-aligned) | 0x3C. */
+    TEST_ASSERT_EQUAL_UINT32(0x12345680u | 0x3Cu, d.addr_l_rsvd_data_id);
+    TEST_ASSERT_EQUAL_UINT32(0x0000000Au, d.addr_h);
+    TEST_ASSERT_EQUAL_UINT32(0u, d.remaining_page_size_status);
+}
+
+static void test_vdma_program_descriptor_masks_low_addr_bits(void)
+{
+    /* Descriptor addresses must be 64-byte aligned; hardware
+     * silently masks the low 6 bits. Verify our packer does the
+     * same mask. */
+    struct hailo_vdma_descriptor d = {0};
+    hailo_vdma_program_descriptor(&d,
+        /*dma=*/0x100000003Fu,   /* misaligned by 0x3F */
+        /*page=*/256, /*data_id=*/0x00);
+    /* Low 6 bits masked → 0x10_00000000 | 0x00 data_id = 0. */
+    TEST_ASSERT_EQUAL_UINT32(0u, d.addr_l_rsvd_data_id);
+    TEST_ASSERT_EQUAL_UINT32(0x10u, d.addr_h);
+}
+
+static void test_vdma_program_buffer_one_descriptor(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+
+    /* Buffer smaller than page_size → one descriptor with the
+     * residue as the last-descriptor page size. */
+    int rc = hailo_vdma_program_buffer(&list, 0,
+        /*iova=*/0x10000, /*size=*/200, /*data_id=*/0x05);
+    TEST_ASSERT_EQUAL_INT(1, rc);
+    TEST_ASSERT_EQUAL_UINT32((200u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32(0x10000u | 0x05u,
+                             list.descs[0].addr_l_rsvd_data_id);
+    /* Descriptors past the programmed one remain zeroed. */
+    TEST_ASSERT_EQUAL_UINT32(0u, list.descs[1].page_size_desc_control);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_exact_multiple(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+
+    /* 1024 B / 512 page = exactly 2 descriptors, no residue.
+     * Each descriptor's page_size field = full page size. */
+    int rc = hailo_vdma_program_buffer(&list, 0,
+        /*iova=*/0x40000, /*size=*/1024, /*data_id=*/0x01);
+    TEST_ASSERT_EQUAL_INT(2, rc);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32(0x40000u | 0x01u,
+                             list.descs[0].addr_l_rsvd_data_id);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[1].page_size_desc_control);
+    /* Second descriptor's address advances by page_size. */
+    TEST_ASSERT_EQUAL_UINT32((0x40000u + 512u) | 0x01u,
+                             list.descs[1].addr_l_rsvd_data_id);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_with_residue(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(64, 512, false, &list));
+
+    /* 1280 B / 512 page = 2 full + 256 residue = 3 descriptors.
+     * Last descriptor's page size == residue size. */
+    int rc = hailo_vdma_program_buffer(&list, 0,
+        /*iova=*/0x80000, /*size=*/1280, /*data_id=*/0x02);
+    TEST_ASSERT_EQUAL_INT(3, rc);
+    /* descs[0] and descs[1] carry full page_size. */
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[1].page_size_desc_control);
+    /* descs[2] carries residue (256). */
+    TEST_ASSERT_EQUAL_UINT32((256u << 8) | 0x02u,
+                             list.descs[2].page_size_desc_control);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_wraps_circular_list(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(4, 512, /*circular=*/true, &list));
+
+    /* 4-descriptor circular list; 3 full-page descriptors starting
+     * at index 2 → programs descs[2], descs[3], descs[0] (wrap). */
+    int rc = hailo_vdma_program_buffer(&list, /*start=*/2,
+        /*iova=*/0x2000, /*size=*/1536, /*data_id=*/0x04);
+    TEST_ASSERT_EQUAL_INT(3, rc);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[2].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[3].page_size_desc_control);
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+                             list.descs[0].page_size_desc_control);
+    /* descs[1] untouched. */
+    TEST_ASSERT_EQUAL_UINT32(0u, list.descs[1].page_size_desc_control);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_rejects_overrun(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(4, 512, /*circular=*/false, &list));
+    /* 4-desc non-circular list, start at 2 → only 2 descriptors
+     * available. Ask for 3 → reject. */
+    int rc = hailo_vdma_program_buffer(&list, /*start=*/2,
+        /*iova=*/0x2000, /*size=*/1536, /*data_id=*/0);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+    hailo_vdma_desc_list_free(&list);
+}
+
+static void test_vdma_program_buffer_rejects_null_list(void)
+{
+    int rc = hailo_vdma_program_buffer(NULL, 0, 0x1000, 512, 0);
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL, rc);
+}
+
+static void test_vdma_program_buffer_rejects_zero_size(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(4, 512, false, &list));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_program_buffer(&list, 0, 0x1000, 0, 0));
+    hailo_vdma_desc_list_free(&list);
+}
+
 static void test_vdma_alloc_accepts_max_count(void)
 {
     /* Largest legal list: 65536 descriptors = 1 MB, which matches
@@ -2759,6 +2917,15 @@ int test_suite_hailo(void)
     RUN_TEST(test_vdma_alloc_propagates_nomem);
     RUN_TEST(test_vdma_free_zero_handle_is_noop);
     RUN_TEST(test_vdma_alloc_accepts_min_count);
+    RUN_TEST(test_vdma_program_descriptor_encodes_fields);
+    RUN_TEST(test_vdma_program_descriptor_masks_low_addr_bits);
+    RUN_TEST(test_vdma_program_buffer_one_descriptor);
+    RUN_TEST(test_vdma_program_buffer_exact_multiple);
+    RUN_TEST(test_vdma_program_buffer_with_residue);
+    RUN_TEST(test_vdma_program_buffer_wraps_circular_list);
+    RUN_TEST(test_vdma_program_buffer_rejects_overrun);
+    RUN_TEST(test_vdma_program_buffer_rejects_null_list);
+    RUN_TEST(test_vdma_program_buffer_rejects_zero_size);
     RUN_TEST(test_vdma_alloc_accepts_max_count);
 
     return UnityEnd();
