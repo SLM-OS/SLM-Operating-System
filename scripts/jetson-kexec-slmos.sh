@@ -179,6 +179,39 @@ else
     echo "[3.5] SKIPPING xusb clock hold (--no-usb-hold)"
 fi
 
+if [[ "$NO_USB_HOLD" == "0" ]]; then
+    echo "[3.6] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
+    XUSB_DEV=/sys/devices/platform/bus@0/3610000.usb
+    if [[ -d "$XUSB_DEV/power" ]]; then
+        # 'on' disables runtime PM; low-cost pin that doesn't itself
+        # prevent Linux's device_shutdown() from running tegra-xusb's
+        # .shutdown() callback at kexec time — see #285.
+        echo on > "$XUSB_DEV/power/control" 2>/dev/null || \
+            echo "       power/control: write failed" >&2
+        status="$(cat "$XUSB_DEV/power/control" 2>/dev/null || echo '?')"
+        runtime="$(cat "$XUSB_DEV/power/runtime_status" 2>/dev/null || echo '?')"
+        echo "       power/control=$status runtime_status=$runtime"
+    else
+        echo "       tegra-xusb device path not found"
+    fi
+
+    # Experimentation notes from #285 (don't re-try these without a plan):
+    #   * Unbinding tegra-xusb pre-kexec calls .remove() which halts
+    #     the Falcon immediately — even DCBAAP writes wedge the
+    #     aperture from SLM-OS afterwards.
+    #   * Panic kexec (`kexec -p` + sysrq-c) skips device_shutdown()
+    #     but loads SLM-OS at the crashkernel reserved region
+    #     (0xefe00000), which doesn't match SLM-OS's 0x80000000 link
+    #     address — SLM-OS mis-identifies free RAM and hangs early
+    #     in boot. Incompatible without significant SLM-OS work.
+    #
+    # Net: Linux's kexec-time shutdown of tegra-xusb is the live
+    # blocker. Until that is worked around (kernel module that
+    # NULLs the .shutdown pointer, or standalone firmware load per
+    # #286), SLM-OS can read the XHCI aperture but cannot run the
+    # controller — USBCMD.RUN=1 wedges the Falcon-stopped MMIO.
+fi
+
 echo "[4/5] Loading kernel: $KERNEL"
 kexec -l "$KERNEL" --reuse-cmdline
 
