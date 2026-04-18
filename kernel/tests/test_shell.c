@@ -2474,6 +2474,12 @@ static void test_shell_cmd_hailo_load_too_small(void)
 
     int ret = shell_execute("hailo load /mnt/files/hailo_too_small.bin");
     TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Clean up so repeated runs of the harness don't accumulate the
+     * fixture (LittleFS is RAM-backed and cleared on boot, so the
+     * leak is bounded to one test-kernel run, but tightening the
+     * cleanup keeps boot-test loops clean). */
+    littlefs_remove(mnt, "/hailo_too_small.bin");
 }
 
 #endif /* !X86_64 */

@@ -34,6 +34,17 @@
 extern const uint8_t hailo_fw_start[] __attribute__((weak));
 extern const uint8_t hailo_fw_end[]   __attribute__((weak));
 
+/*
+ * Upper bound for the proto body the `hailo load` shell path will
+ * decode. hef_header.c's HEF_PROTO_MAX_SIZE stays at 256 MB as the
+ * schema bound, but the shell refuses anything above this cap so a
+ * corrupted-but-magic-matching .hef can't commandeer hundreds of MB
+ * of RAM via a fake proto size. 16 MB covers every compiled Hailo
+ * Model Zoo entry today (yolov5m is the largest at ~17 MB total
+ * file; its proto body is ~2 MB).
+ */
+#define HAILO_LOAD_MAX_PROTO_MB  16u
+
 static int cmd_hailo(int argc, char *argv[])
 {
     if (argc >= 2 && strcmp(argv[1], "probe") == 0) {
@@ -139,13 +150,6 @@ static int cmd_hailo(int argc, char *argv[])
                      outer.version, outer.proto_size,
                      (unsigned long)info.size);
 
-        /* hef_header.c's HEF_PROTO_MAX_SIZE is 256 MB — generous
-         * enough to cover future large models but too generous to
-         * let a corrupted blob commandeer RAM via a fake proto
-         * size. Shell path caps at 16 MB, which covers every
-         * compiled Hailo Model Zoo entry today (yolov5m is the
-         * largest at ~17 MB total file; its proto body is ~2 MB). */
-#define HAILO_LOAD_MAX_PROTO_MB  16u
         if (outer.proto_size > HAILO_LOAD_MAX_PROTO_MB * 1024u * 1024u) {
             shell_printf("hailo: refusing to load proto body of %u bytes "
                          "(> %u MB shell cap; if this is legitimate, raise "
