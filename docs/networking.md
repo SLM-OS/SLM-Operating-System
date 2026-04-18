@@ -1079,6 +1079,28 @@ coverage per `docs/jetson-usb-networking-plan.md` §8):
 | `test_event_ring_dequeue_phys_after_wrap` | After a full lap (dequeue wraps, ECS toggles), `dequeue_phys` points at the ring base rather than past the end — guard against ERDP arithmetic going off the end |
 | `test_erst_entry_layout` | Event Ring Segment Table entry is 16 bytes, fields at spec-mandated offsets (xHCI 1.2 §6.5) — catches regressions from accidental padding after the driver switched ERST storage to `ncmem_alloc` |
 
+**Tier 7 — Tegra234 XHCI wrapper + CSB paging** (`kernel/tests/test_xhci_tegra.c`,
+runs on every platform; Phase 3A.2 of #266 IFR-bringup revival per
+`docs/jetson-usb-networking-plan.md` §9-10):
+
+| Test | Description |
+|------|-------------|
+| `test_csb_page_math_zero` | CSB address 0 decomposes to page=0, offset=0 |
+| `test_csb_page_math_falc_cpuctl` | `XUSB_FALC_CPUCTL` (0x100) → page=0, offset=0x100 |
+| `test_csb_page_math_mp_apmap` | `XUSB_CSB_MP_APMAP` (0x10181c) → page=0x80c, offset=0x01c — the exact value used to prove CSB paging control works on hardware |
+| `test_csb_page_math_mp_iload_base_hi` | `XUSB_CSB_MP_ILOAD_BASE_HI` (0x101a08) → page=0x80d, offset=0x008 — different page from APMAP, rules out accidental fixed-value decoding |
+| `test_csb_page_math_aru_scratch0` | `XUSB_CSB_ARU_SCRATCH0` (0x100100) → page=0x800, offset=0x100 — interesting corner case |
+| `test_csb_page_math_roundtrip_boundaries` | For a sampled set of addresses including 0x1ff / 0x200 / 0xffffffff, `(page_select(x) << 9) \| page_offset(x) == x` |
+| `test_csb_page_math_masks_are_sane` | CSB_PAGE_SELECT_SHIFT=9, SELECT_MASK=0x7fffff (23 bits), OFFSET_MASK=0x1ff (9 bits) — catches silent drift that would route CSB reads to the wrong register |
+| `test_fpci_cfg_offsets_match_linux` | FPCI register offsets CFG_1/4/7/ARU_C11_CSBRANGE/CSB_BASE_ADDR match `linux-xhci-tegra.c` verbatim |
+| `test_fpci_cfg1_bus_master_bit` | IO_SPACE_EN=bit 0, MEM_SPACE_EN=bit 1, BUS_MASTER_EN=bit 2 |
+| `test_fpci_bar_address_masks` | BASE_ADDR_SHIFT=15 / MASK=0x1ffff (BAR0, 32 KB aligned); BASE2_ADDR_SHIFT=16 / MASK=0xffff (BAR2, 64 KB aligned) |
+| `test_bar2_offsets_match_linux` | BAR2 ARU_MBOX_CMD/DATA_IN/DATA_OUT/OWNER, FW_SCRATCH, CSBRANGE, CSB_BASE_ADDR offsets match Linux reference |
+| `test_falcon_csb_offsets_match_linux` | CSB offsets FALC_CPUCTL/BOOTVEC/DMACTL, ARU_SCRATCH0, MP_ILOAD_BASE_LO/HI, MP_APMAP match Linux reference |
+| `test_falcon_cpuctl_bits` | STARTCPU=bit 1, STATE_HALTED=bit 4, STATE_STOPPED=bit 5 — pinned because Path 3 in §10.5 may write STARTCPU via CSB |
+| `test_fw_header_created_time_offset` | `fwimg_created_time` is at byte offset 44 in the firmware header |
+| `test_fw_ioctl_shift` | FW_IOCTL_TYPE_SHIFT=24, FW_IOCTL_CFGTBL_READ=17 — pinned despite the mailbox path being unsafe to call (see §9.2) |
+
 Run tests with:
 
 ```bash

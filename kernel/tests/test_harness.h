@@ -101,6 +101,9 @@ int test_suite_cdc_ecm(void);
 /* XHCI ring primitive tests (platform-neutral; Phase 3A of #266) */
 int test_suite_xhci_ring(void);
 
+/* Tegra234 XHCI wrapper offset + CSB-paging tests (Phase 3A.2 of #266) */
+int test_suite_xhci_tegra(void);
+
 /* Lua scripting tests */
 int test_suite_lua(void);
 
