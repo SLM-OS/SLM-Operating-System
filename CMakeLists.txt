@@ -489,6 +489,11 @@ set(KERNEL_SOURCES
     # CDC-ECM class driver (Phase 2 of #266). Gated on networking so
     # it stays linked out on platforms that don't build lwIP.
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/usb/class/cdc_ecm.c>
+    # Tegra XHCI host-controller driver (Phase 3A of #266). File
+    # itself is always compiled for layout-consistency; the body
+    # is #if'd behind PLATFORM_JETSON_ORIN_NANO so non-Jetson
+    # platforms link a harmless stub.
+    kernel/drivers/usb/xhci/xhci.c
     # Jetson EL1 smoke test (one-shot diagnostic) — JETSON_EL1_SMOKE
     $<$<AND:$<BOOL:${JETSON_EL1_SMOKE}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/tests/jetson_el1_smoke.S>
     # Platform-independent networking stack
@@ -628,6 +633,7 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/lib/littlefs
     ${CMAKE_SOURCE_DIR}/kernel/lib/lwip/src/include
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src
+    ${CMAKE_SOURCE_DIR}/kernel/drivers/usb/xhci
 )
 
 # Per-platform arch include paths so test code under kernel/tests

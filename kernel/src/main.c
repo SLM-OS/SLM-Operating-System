@@ -505,6 +505,21 @@ void kernel_main(void *dtb)
 #endif
 #endif
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /*
+     * Probe the Tegra XHCI host controller (#266 Phase 3A). No-op if
+     * the xusb clocks are gated — the init path bails with a warn
+     * rather than writing to a dead aperture. Later Phase-3A steps
+     * will register this as a usb_hcd and drive URB transfers; today
+     * this is just capability parse + halt/reset so the `xhci` shell
+     * diagnostic works.
+     */
+    {
+        extern int xhci_init(void);
+        (void)xhci_init();
+    }
+#endif
+
     /* Initialize scheduler and IPC AFTER all initial PMM allocations.
      * On Pi 5 without SMPEN, PMM spinlock doesn't provide cross-CPU
      * mutual exclusion. scheduler_init() signals secondary CPUs to proceed
