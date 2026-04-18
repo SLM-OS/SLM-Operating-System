@@ -148,6 +148,31 @@ int ga10b_bringup_channel(struct ga10b_bringup *b);
  * iff the semaphore is observed at its target VA within timeout. */
 int ga10b_bringup_smoke_test(struct ga10b_bringup *b);
 
+/* Size of the Phase 7 SEMAPHORE_RELEASE pushbuffer in dwords. */
+#define GA10B_SEMA_RELEASE_PB_DWORDS  10u
+
+/* Phase 7 pushbuffer builder (pure logic — no MMIO, no globals).
+ *
+ * Writes GA10B_SEMA_RELEASE_PB_DWORDS dwords to `pb`, encoding a host
+ * SEMAPHORE_RELEASE that will cause the GPU to write `payload` (32-bit)
+ * to `sem_gpu_va` after completing all prior work (RELEASE_WFI_EN).
+ *
+ * The encoding uses the Volta+ new-style host-semaphore methods at
+ * byte offsets 0x5C–0x6C (legacy SEMAPHOREA/B/C/D at 0x10–0x1C aren't
+ * routed on AMPERE_CHANNEL_GPFIFO_A on GA10B). Method headers follow
+ * the Fermi-family [12:2] METHOD_ADDRESS layout — common prior bug is
+ * shifting method-index values right by 2, which lands them at the
+ * wrong bit position and PBDMA decodes them as different methods.
+ *
+ * **Buffer contract:** `pb` must point to at least
+ * GA10B_SEMA_RELEASE_PB_DWORDS uint32_t slots. Returns the dword
+ * count written (always GA10B_SEMA_RELEASE_PB_DWORDS). Exposed in the
+ * public header so host tests can verify the encoding without running
+ * on hardware. */
+uint32_t ga10b_build_sema_release_pushbuffer(uint32_t *pb,
+                                             uint64_t sem_gpu_va,
+                                             uint32_t payload);
+
 /*
  * Top-level runner. Walks phases 1–7 in order and returns 0 iff the
  * smoke test passes. Equivalent to gsp_init() for the nvgpu path.

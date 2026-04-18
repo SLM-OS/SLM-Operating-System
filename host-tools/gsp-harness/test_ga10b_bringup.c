@@ -1038,6 +1038,99 @@ static void test_handoff_validate_missing_doorbell_token(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
 }
 
+/* ======================================================================
+ * Phase 7 SEMAPHORE_RELEASE pushbuffer builder
+ *
+ * Verifies ga10b_build_sema_release_pushbuffer() emits the exact dword
+ * stream PBDMA expects. Guards against two specific regressions:
+ *
+ *   1. Method-address bit position. Fermi-family method headers store
+ *      METHOD_ADDRESS at bits [12:2] of the dword (value = byte offset
+ *      with low 2 bits zero). A prior version of this code shifted the
+ *      method index right by 2 before OR-ing into the header, placing
+ *      it at bits [12:0] instead of [12:2] and causing PBDMA to decode
+ *      byte 0x5C as byte 0x14 (an unrouted legacy method slot). The
+ *      expected dword[0] = 0x2001005C (INC, count=1, subch=0, method
+ *      byte 0x5C at bits [12:2]).
+ *
+ *   2. Method family. GA10B's AMPERE_CHANNEL_GPFIFO_A (0xC56F) routes
+ *      the new host-semaphore methods at byte offsets 0x5C-0x6C, NOT
+ *      the legacy SEMAPHOREA/B/C/D at 0x10-0x1C. The test expects the
+ *      new offsets; any revert to legacy would be caught here.
+ * ====================================================================== */
+
+/* Expected method-header builder for test-side clarity. Decomposes
+ * the Fermi+ header into its fields so the test intent ("INC, count=1,
+ * subch=0, byte=X at bits [12:2]") is self-evident and catches both
+ * the bit-position bug AND any future bit-layout refactor. */
+#define EXPECT_INC_HDR(count, subch, byte_off)                         \
+    ((1u << 29) | ((uint32_t)(count) << 16) |                          \
+     ((uint32_t)(subch) << 13) | ((uint32_t)(byte_off) & 0xFFFu))
+
+static void test_sema_release_pb_layout(void)
+{
+    printf("== test_sema_release_pb_layout ==\n");
+    uint32_t pb[GA10B_SEMA_RELEASE_PB_DWORDS];
+    memset(pb, 0xAB, sizeof(pb));   /* poison non-written dwords */
+
+    /* Real GA10B semaphore VA from a bringup on jetson-nano-2 — high
+     * bits = 0x1f, low 32 = 0xfc010000. Tests both halves of the VA
+     * split and the upper-byte mask. */
+    uint64_t sem_va  = 0x1ffc010000ULL;
+    uint32_t payload = 0x0000CAFEu;
+
+    uint32_t dwords = ga10b_build_sema_release_pushbuffer(pb, sem_va, payload);
+    REQUIRE_EQ(dwords, GA10B_SEMA_RELEASE_PB_DWORDS);
+
+    /* Headers use INC (SEC_OP=1), count=1, subch=0, byte offset at
+     * bits [12:2]. Expressing expected values via EXPECT_INC_HDR
+     * ensures this test catches a bit-position regression even if
+     * someone swaps the underlying NVC56F_METHOD_HEADER_INC macro
+     * for an algebraically-different but wrongly-placed version. */
+    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x5Cu));  /* SEM_ADDR_LO */
+    REQUIRE_EQ(pb[1], 0xFC010000u);                  /* VA[31:0] */
+    REQUIRE_EQ(pb[2], EXPECT_INC_HDR(1, 0, 0x60u));  /* SEM_ADDR_HI */
+    REQUIRE_EQ(pb[3], 0x0000001Fu);                  /* VA[39:32] masked to 8 */
+    REQUIRE_EQ(pb[4], EXPECT_INC_HDR(1, 0, 0x64u));  /* SEM_PAYLOAD_LO */
+    REQUIRE_EQ(pb[5], 0x0000CAFEu);
+    REQUIRE_EQ(pb[6], EXPECT_INC_HDR(1, 0, 0x68u));  /* SEM_PAYLOAD_HI */
+    REQUIRE_EQ(pb[7], 0u);                           /* hi word unused */
+    REQUIRE_EQ(pb[8], EXPECT_INC_HDR(1, 0, 0x6Cu));  /* SEM_EXECUTE */
+    /* SEM_EXECUTE = OP_RELEASE(1) | PAYLOAD_32BIT(0) | RELEASE_WFI_EN(0) */
+    REQUIRE_EQ(pb[9], 0x00000001u);
+}
+
+static void test_sema_release_pb_truncates_va_upper(void)
+{
+    printf("== test_sema_release_pb_truncates_va_upper ==\n");
+    uint32_t pb[GA10B_SEMA_RELEASE_PB_DWORDS];
+
+    /* VA with upper bits beyond the 8-bit field: 0x1234567890000000.
+     * SEM_ADDR_HI must store only bits [39:32] = 0x78 (the byte just
+     * above the low 32). */
+    uint64_t sem_va = 0x1234567890000000ULL;
+    ga10b_build_sema_release_pushbuffer(pb, sem_va, 0x11u);
+
+    REQUIRE_EQ(pb[1], 0x90000000u);          /* VA[31:0] */
+    REQUIRE_EQ(pb[3], 0x00000078u);          /* VA[39:32] only */
+}
+
+static void test_sema_release_pb_zero_payload(void)
+{
+    printf("== test_sema_release_pb_zero_payload ==\n");
+    uint32_t pb[GA10B_SEMA_RELEASE_PB_DWORDS];
+    memset(pb, 0xAB, sizeof(pb));
+
+    /* Zero payload still produces valid pushbuffer; only the payload
+     * data word and address words vary per call. */
+    ga10b_build_sema_release_pushbuffer(pb, 0x2000000000ULL, 0u);
+    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 0, 0x5Cu));  /* header unchanged */
+    REQUIRE_EQ(pb[1], 0x00000000u);                  /* VA low 32 */
+    REQUIRE_EQ(pb[3], 0x00000020u);                  /* VA[39:32] = 0x20 */
+    REQUIRE_EQ(pb[5], 0u);
+    REQUIRE_EQ(pb[9], 0x00000001u);                  /* SEM_EXECUTE same */
+}
+
 static void test_handoff_validate_null_addresses(void)
 {
     printf("== test_handoff_validate_null_addresses ==\n");
@@ -1220,6 +1313,10 @@ int main(void)
     test_handoff_validate_null_addresses();
     test_handoff_validate_gpfifo_entries();
     test_handoff_validate_missing_doorbell_token();
+
+    test_sema_release_pb_layout();
+    test_sema_release_pb_truncates_va_upper();
+    test_sema_release_pb_zero_payload();
 
     test_scanner_finds_magic_at_start();
     test_scanner_finds_magic_midrange();

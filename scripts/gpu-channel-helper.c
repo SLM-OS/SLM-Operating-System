@@ -70,6 +70,14 @@
  * with --timeout-secs. */
 #define DEFAULT_TIMEOUT_SECS  300
 
+/* Semaphore payload for the pre-kexec isolation test. MUST stay in
+ * lockstep with GA10B_SMOKETEST_SEM_PAYLOAD in
+ * kernel/gpu/nvidia/ga10b_bringup.c — the SLM-OS-side smoke test uses
+ * the same payload, so a divergence would cause the helper's pre-kexec
+ * check and SLM-OS's post-kexec check to disagree on "did the method
+ * fire?" for no reason. */
+#define HELPER_SMOKETEST_SEM_PAYLOAD  0x0000CAFEu
+
 /* Helper: open a device, die on failure. */
 static int xopen(const char *path, int flags)
 {
@@ -203,20 +211,46 @@ int main(int argc, char **argv)
     struct nvgpu_as_bind_channel_args bind_as = { .channel_fd = ch_fd };
     xioctl(as_fd, NVGPU_AS_IOCTL_BIND_CHANNEL, &bind_as, "AS_BIND");
 
-    /* Bind channel to TSG. */
-    int ch_fd_for_tsg = ch_fd;
-    xioctl(tsg_fd, NVGPU_TSG_IOCTL_BIND_CHANNEL, &ch_fd_for_tsg,
-           "TSG_BIND");
+    /* Create an async subcontext on the TSG and bind the channel to it
+     * via BIND_CHANNEL_EX. CUDA's trace shows this path instead of the
+     * simpler BIND_CHANNEL (op 1). Plain BIND_CHANNEL puts the channel
+     * on the TSG's default SYNC subcontext — compute channels need
+     * ASYNC, otherwise the GR engine accepts pushbuffers but silently
+     * no-ops the methods.
+     *
+     * **Kernel requirement:** `CREATE_SUBCONTEXT` (TSG ioctl op 18)
+     * and `BIND_CHANNEL_EX` (op 11) require L4T r36 or newer. On
+     * older kernels these ops don't exist and xioctl will abort
+     * the helper. The cached UAPI headers under docs/reference/ are
+     * from L4T r36.4.7 (the Jetson Orin Nano dev kit default). */
+    struct nvgpu_tsg_create_subcontext_args subctx;
+    memset(&subctx, 0, sizeof(subctx));
+    subctx.type  = NVGPU_TSG_SUBCONTEXT_TYPE_ASYNC;
+    subctx.as_fd = as_fd;
+    xioctl(tsg_fd, NVGPU_TSG_IOCTL_CREATE_SUBCONTEXT, &subctx,
+           "TSG_CREATE_SUBCONTEXT");
+    printf("[gpu-helper] CREATE_SUBCONTEXT OK (type=ASYNC, veid=%u)\n",
+           subctx.veid);
+
+    struct nvgpu_tsg_bind_channel_ex_args bce;
+    memset(&bce, 0, sizeof(bce));
+    bce.channel_fd    = ch_fd;
+    bce.subcontext_id = subctx.veid;
+    xioctl(tsg_fd, NVGPU_TSG_IOCTL_BIND_CHANNEL_EX, &bce,
+           "TSG_BIND_CHANNEL_EX");
+    printf("[gpu-helper] BIND_CHANNEL_EX OK (veid=%u)\n", bce.subcontext_id);
 
     /* Set nvmap fd on channel. */
     struct nvgpu_set_nvmap_fd_args nvm = { .fd = nvmap_fd };
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_SET_NVMAP_FD, &nvm, "SET_NVMAP");
 
-    /* Disable the watchdog — required when using DETERMINISTIC flag
-     * in SETUP_BIND (nvgpu rejects the combination otherwise). */
+    /* Match CUDA's WDT settings: DISABLE | SET_TIMEOUT with
+     * timeout_ms = UINT_MAX. Required for DETERMINISTIC channels
+     * (nvgpu rejects the combination otherwise). */
     struct nvgpu_channel_wdt_args wdt = {
-        .wdt_status = NVGPU_IOCTL_CHANNEL_DISABLE_WDT,
-        .timeout_ms = 0,
+        .wdt_status = NVGPU_IOCTL_CHANNEL_DISABLE_WDT |
+                      NVGPU_IOCTL_CHANNEL_WDT_FLAG_SET_TIMEOUT,
+        .timeout_ms = 0xFFFFFFFFu,
     };
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_WDT, &wdt, "WDT_DISABLE");
 
@@ -247,9 +281,85 @@ int main(int argc, char **argv)
     printf("  usermode_mmio_va  = 0x%llx\n",
            (unsigned long long)sb.usermode_mmio_gpu_va);
 
+    /* Bind the compute class to the channel. The class number is
+     * chip-specific: CUDA on GA10B (Jetson Orin's iGPU) uses
+     * AMPERE_COMPUTE_B (0xC7C0), NOT AMPERE_COMPUTE_A (0xC5C0 — the
+     * datacenter GA100 class). Captured via LD_PRELOAD ioctl trace of
+     * CUDA's minikick. Using the wrong class causes PBDMA to walk
+     * pushbuffer entries but host methods to silently no-op.
+     *
+     * class_num per GPU family (from NVIDIA open-gpu-kernel-modules):
+     *   Pascal (GP10x)   = 0xC1C0
+     *   Volta  (GV11B)   = 0xC3C0
+     *   Turing (TU10x)   = 0xC5C0  (also GA100 datacenter)
+     *   Ampere GA10x/10B = 0xC7C0  */
+    struct nvgpu_alloc_obj_ctx_args octx;
+    memset(&octx, 0, sizeof(octx));
+    octx.class_num = 0xC7C0;   /* AMPERE_COMPUTE_B (GA10B) */
+    octx.flags = 0;
+    xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_ALLOC_OBJ_CTX, &octx, "ALLOC_OBJ_CTX");
+    printf("[gpu-helper] ALLOC_OBJ_CTX OK (class=0x%04x, obj_id=0x%llx)\n",
+           octx.class_num, (unsigned long long)octx.obj_id);
+
+    /* Set compute-channel preemption mode. CUDA's trace shows
+     * compute_preempt_mode = CILP (0x04) right after ALLOC_OBJ_CTX.
+     * Without this, the compute context appears to not be fully
+     * activated: PBDMA walks pushbuffer entries (GP_GET advances)
+     * but host-semaphore methods silently no-op. */
+    struct nvgpu_preemption_mode_args pm;
+    memset(&pm, 0, sizeof(pm));
+    pm.graphics_preempt_mode = 0;
+    pm.compute_preempt_mode  = NVGPU_COMPUTE_PREEMPTION_MODE_CILP;
+    xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_SET_PREEMPTION_MODE, &pm,
+           "SET_PREEMPT_MODE");
+    printf("[gpu-helper] SET_PREEMPT_MODE OK (compute=CILP)\n");
+
+    /* Attach an error notifier buffer. CUDA passes a 4KB nvmap dmabuf
+     * here — the kernel writes fault info into it on channel errors.
+     * A channel without a valid notifier may silently drop methods
+     * (rather than faulting) because it has nowhere to report the
+     * error. */
+    int notifier_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
+    struct nvgpu_set_error_notifier en;
+    memset(&en, 0, sizeof(en));
+    en.offset = 0;
+    en.size   = 4096;
+    en.mem    = notifier_dmabuf;
+    xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_SET_ERROR_NOTIFIER, &en,
+           "SET_ERROR_NOTIFIER");
+    printf("[gpu-helper] SET_ERROR_NOTIFIER OK (dmabuf fd=%d, size=4096)\n",
+           notifier_dmabuf);
+
     /* Allocate pushbuffer + semaphore via nvmap. */
     int pb_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 65536, 4096);  /* 64 KB */
     int sem_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
+
+    /* Register each dmabuf with the GPU subsystem. CUDA calls this
+     * NVGPU_GPU_IOCTL_REGISTER_BUFFER (op 41) 170 times per channel —
+     * once per buffer it allocates. nvgpu associates caller-provided
+     * metadata with the dmabuf fd; without registration, methods that
+     * reference the buffer's VA may silently no-op. We pass empty
+     * metadata (the content is opaque nvrm_gpu-private data and not
+     * required for correctness — just tracking). */
+    struct nvgpu_gpu_register_buffer_args regbuf;
+    int reg_fds[] = { pb_dmabuf, sem_dmabuf };
+    const char *reg_names[] = { "PB", "SEM" };
+    for (size_t i = 0; i < sizeof(reg_fds)/sizeof(reg_fds[0]); i++) {
+        memset(&regbuf, 0, sizeof(regbuf));
+        regbuf.dmabuf_fd = reg_fds[i];
+        regbuf.comptags_alloc_control = NVGPU_GPU_COMPTAGS_ALLOC_NONE;
+        regbuf.metadata_addr = 0;
+        regbuf.metadata_size = 0;
+        regbuf.flags = 0;
+        if (ioctl(ctrl_fd, NVGPU_GPU_IOCTL_REGISTER_BUFFER, &regbuf) < 0) {
+            fprintf(stderr, "[gpu-helper] REGISTER_BUFFER(%s,fd=%d) failed: "
+                    "%s (errno=%d)\n",
+                    reg_names[i], reg_fds[i], strerror(errno), errno);
+        } else {
+            printf("[gpu-helper] REGISTER_BUFFER %s (fd=%d) OK flags=0x%x\n",
+                   reg_names[i], reg_fds[i], regbuf.flags);
+        }
+    }
 
     /* Map pushbuffer into GPU AS. compr_kind=-1 (invalid), incompr_kind=0
      * means "no compression, use default PTE kind". Per nvgpu docs,
@@ -380,54 +490,94 @@ int main(int argc, char **argv)
      * GP_PUT in USERD and ringing the doorbell on the channel fd's
      * mmap. This "activates" the channel so PBDMA is polling it when
      * SLM-OS later writes GP_PUT after kexec. */
-    printf("[gpu-helper] Priming PBDMA with a NOP pushbuffer...\n");
+    /* Isolation test (issue #273): submit a real SEMAPHORE_RELEASE from
+     * Linux userspace via mmap+doorbell (same path SLM-OS uses post-
+     * kexec). If the semaphore fires Linux-side, the channel is fully
+     * capable and Phase 7's issue is post-kexec state loss. If it
+     * doesn't, the channel setup itself is still incomplete.
+     *
+     * Previous helper versions wrote the doorbell at mmap offset 0 —
+     * that hits the wrong register. The actual USERMODE doorbell is at
+     * BAR0+0xBB0090, which is offset 0x90 *within* the CTRL mmap
+     * (the mmap covers BAR0+0xBB0000..+0xBB0FFF). Fixed below. */
+    printf("[gpu-helper] === ISOLATION TEST: userspace mmap+doorbell ===\n");
 
-    /* Write a NOP method to the pushbuffer at offset 0 */
-    *(uint32_t *)pb_va = 0x00000000u;  /* NOP: subch 0, method 0, count 0 */
+    /* Write SEMAPHORE_RELEASE pushbuffer (10 dwords). Same encoding as
+     * SLM-OS Phase 7 smoke test: new host-semaphore methods 0x5C..0x6C,
+     * OPERATION=RELEASE(1), 32-bit, WFI enabled. */
+    uint32_t *pb32 = (uint32_t *)pb_va;
+    uint64_t sem_gva = sem_map.offset;
+    pb32[0] = 0x2001005Cu;                /* SEM_ADDR_LO header */
+    pb32[1] = (uint32_t)(sem_gva & 0xFFFFFFFFu);
+    pb32[2] = 0x20010060u;                /* SEM_ADDR_HI header */
+    pb32[3] = (uint32_t)((sem_gva >> 32) & 0xFFu);
+    pb32[4] = 0x20010064u;                /* SEM_PAYLOAD_LO header */
+    pb32[5] = HELPER_SMOKETEST_SEM_PAYLOAD;
+    pb32[6] = 0x20010068u;                /* SEM_PAYLOAD_HI header */
+    pb32[7] = 0;
+    pb32[8] = 0x2001006Cu;                /* SEM_EXECUTE header */
+    pb32[9] = 0x00000001u;                /* RELEASE | 32-bit | WFI_EN */
     msync(pb_va, 4096, MS_SYNC);
 
-    /* Build the GPFIFO entry (Ampere format):
-     *   entry0[31:2] = gpu_va & 0xFFFFFFFC
-     *   entry1[7:0]  = gpu_va[39:32]
-     *   entry1[30:10] = length in 4-byte dwords */
-    uint64_t pb_gva = pb_map.offset;  /* pb GPU VA */
+    /* Pre-clear the semaphore so we can detect the GPU write. */
+    *(volatile uint32_t *)sem_va = 0;
+    msync(sem_va, 4096, MS_SYNC);
+
+    /* Build GPFIFO entry in Ampere HW format, length=10 dwords. */
+    uint64_t pb_gva = pb_map.offset;
     uint32_t gp_e0 = (uint32_t)(pb_gva & 0xFFFFFFFCu);
-    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (1u << 10);
+    uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) | (10u << 10);
     ((uint32_t *)gpfifo_va)[0] = gp_e0;
     ((uint32_t *)gpfifo_va)[1] = gp_e1;
     msync(gpfifo_va, 8, MS_SYNC);
-    printf("[gpu-helper] GPFIFO[0] = 0x%08x_%08x (pb_va=0x%llx)\n",
+    printf("[gpu-helper] GPFIFO[0] = 0x%08x_%08x (pb_va=0x%llx, 10 dwords)\n",
            gp_e1, gp_e0, (unsigned long long)pb_gva);
 
-    /* Advance GP_PUT in USERD (word 35) */
+    /* Advance GP_PUT in USERD (word 35). */
     ((uint32_t *)userd_va)[35] = 1;
     msync(userd_va, 4096, MS_SYNC);
 
-    /* Ring the doorbell: mmap the CTRL fd which provides the shared
-     * usermode doorbell region (captured from CUDA's mmap pattern —
-     * CUDA mmaps /dev/nvgpu/igpu0/ctrl, not per-channel fds). Write
-     * the work_submit_token at offset 0. */
-    void *doorbell = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                          MAP_SHARED, ctrl_fd, 0);
-    if (doorbell == MAP_FAILED) {
+    /* mmap the USERMODE doorbell page from the CTRL fd. The mmap covers
+     * the 4KB page starting at BAR0+0xBB0000; the actual doorbell is at
+     * offset 0x90 (BAR0+0xBB0090). Writing at offset 0 hits a control
+     * register that isn't the doorbell. */
+    void *doorbell_page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                               MAP_SHARED, ctrl_fd, 0);
+    if (doorbell_page == MAP_FAILED) {
         perror("mmap doorbell page on ctrl fd");
     } else {
-        printf("[gpu-helper] Doorbell mapped at %p; writing token 0x%x\n",
-               doorbell, sb.work_submit_token);
-        *(volatile uint32_t *)doorbell = sb.work_submit_token;
-        /* Do not msync — it's MMIO, no dirty flush needed */
+        volatile uint32_t *doorbell =
+            (volatile uint32_t *)((char *)doorbell_page + 0x90);
+        printf("[gpu-helper] Doorbell page %p + 0x90; writing token 0x%x\n",
+               doorbell_page, sb.work_submit_token);
+        *doorbell = sb.work_submit_token;
+        __asm__ volatile("dsb sy" ::: "memory");
 
-        /* Wait briefly for PBDMA to consume. */
-        usleep(50000);  /* 50 ms */
+        /* Poll semaphore for up to 1s. */
+        uint32_t sem_val = 0;
+        for (int i = 0; i < 100; i++) {
+            sem_val = *(volatile uint32_t *)sem_va;
+            if (sem_val == HELPER_SMOKETEST_SEM_PAYLOAD) break;
+            usleep(10000);
+        }
         uint32_t gp_get_after = ((volatile uint32_t *)userd_va)[34];
-        printf("[gpu-helper] After doorbell: GP_GET = %u (should be 1 if consumed)\n",
-               gp_get_after);
+        printf("[gpu-helper] After doorbell: GP_GET=%u (want 1), "
+               "sem=0x%08x (want 0x%x)\n",
+               gp_get_after, sem_val, HELPER_SMOKETEST_SEM_PAYLOAD);
+        if (sem_val == HELPER_SMOKETEST_SEM_PAYLOAD) {
+            printf("[gpu-helper] >>> ISOLATION: sema fires Linux-side — "
+                   "channel capable, kexec breaks state\n");
+        } else if (gp_get_after == 1) {
+            printf("[gpu-helper] >>> ISOLATION: PBDMA consumed entry but "
+                   "method didn't fire — channel setup incomplete\n");
+        } else {
+            printf("[gpu-helper] >>> ISOLATION: PBDMA didn't even walk "
+                   "the entry — channel not scheduled\n");
+        }
     }
 
-    /* Re-read + update handoff with the new GP_PUT/GP_GET values.
-     * Rewrite the whole struct to keep all fields coherent; the
-     * initial_gp_* fields live at fixed positions in the struct. */
-    hoff.initial_gp_put = 1;
+    /* Re-read + update handoff with the current GP_PUT/GP_GET values. */
+    hoff.initial_gp_put = ((volatile uint32_t *)userd_va)[35];
     hoff.initial_gp_get = ((volatile uint32_t *)userd_va)[34];
     memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);

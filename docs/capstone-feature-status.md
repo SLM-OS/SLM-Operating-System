@@ -294,9 +294,30 @@ it from `channel_id` alone is wrong on Linux's allocation path,
 which is how PR #254's `nvgpu submit` doorbell kicked the wrong
 channel).
 
+**Phase 7 SEMAPHORE_RELEASE encoding (April 18):** The pushbuffer
+builder for a real host-semaphore release is implemented and host-
+tested (`ga10b_build_sema_release_pushbuffer` in
+`kernel/gpu/nvidia/ga10b_bringup.c`, 3 regression tests in
+`host-tools/gsp-harness/test_ga10b_bringup.c`). Encoding uses the
+Volta+ new-style methods at byte offsets 0x5C–0x6C — GA10B's
+`AMPERE_CHANNEL_GPFIFO_A` doesn't route the legacy SEMAPHOREA/B/C/D
+at 0x10–0x1C. Method headers place METHOD_ADDRESS at bits [12:2],
+not [12:0] (a prior version shifted the index right by 2 and landed
+at the wrong bit position).
+
+On hardware, the encoding is correct (pushbuffer peek matches the
+host-test expectations byte-for-byte) and PBDMA consumes the entry
+(GP_GET advances). The semaphore DRAM slot, however, still reads
+zero — the compute context isn't executing methods despite matching
+CUDA's ioctl setup sequence (channel class 0xC7C0, SET_PREEMPT_MODE
+with CILP, SET_ERROR_NOTIFIER, CREATE_SUBCONTEXT + BIND_CHANNEL_EX,
+REGISTER_BUFFER for each dmabuf). Tracked in **issue #273** with
+the LD_PRELOAD ioctl interposer (`scripts/nvgpu_ioctl_trace.c`) and
+cached L4T r36.4.7 UAPI headers for continued investigation.
+
 **Remaining path to GPU inference:**
-- Encode a real method program (SEMAPHORE_RELEASE) so the
-  semaphore fires — NOPs don't release it
+- Resolve #273: find the channel-state gap that prevents GR-engine
+  execution despite PBDMA consuming entries
 - Compute class binding + QMD dispatch
 - Compute kernel (SASS binary for `sm_87`)
 - Inference loop (GEMM → activation per layer)
