@@ -52,6 +52,7 @@
 #include "debug.h"
 #include "md5.h"
 #include "spinlock.h"
+#include <stddef.h>
 #include <string.h>
 
 /*
@@ -227,19 +228,19 @@ static uint8_t control_req_wire[sizeof(struct hailo_control_wire_hdr)
                               + HAILO_CONTROL_MAX_BUFFER_LENGTH];
 static uint8_t control_resp_wire[HAILO_CONTROL_MAX_BUFFER_LENGTH];
 
-int hailo_control_send_recv(const void *req_payload,
-                            uint32_t    req_len,
-                            void       *resp_payload,
-                            uint32_t    resp_capacity,
-                            uint32_t   *resp_len,
-                            uint32_t    timeout_us)
+/*
+ * Shared arg-validation used by both the public and locked entry
+ * points. Returns HAILO_OK on success, or the appropriate error
+ * code; writes 0 into *resp_len on every error path so callers
+ * don't read stale bytes.
+ */
+static int control_validate_send_recv_args(const void *req_payload,
+                                           uint32_t    req_len,
+                                           void       *resp_payload,
+                                           uint32_t    resp_capacity,
+                                           uint32_t   *resp_len)
 {
-    /* Write zero into *resp_len on every error return so callers
-     * who check rc=HAILO_OK-only get a defined value if they also
-     * look at *resp_len. Done before the NULL check because if
-     * resp_len is NULL there's nothing to zero. */
     if (resp_len) *resp_len = 0;
-
     if (!hailo_platform || hailo_get_state() != HAILO_STATE_RUNNING) {
         return HAILO_ERR_NODEV;
     }
@@ -251,18 +252,24 @@ int hailo_control_send_recv(const void *req_payload,
      || resp_capacity > HAILO_CONTROL_MAX_BUFFER_LENGTH) {
         return HAILO_ERR_INVAL;
     }
+    return HAILO_OK;
+}
 
-    /*
-     * Everything past this point touches the shared static buffers,
-     * the sequence counter, and the firmware's single in-flight
-     * slot — all of which must be serialized. See the file header
-     * for the concurrency model. No IRQ handler takes this lock,
-     * so the non-irqsave form is safe; irqsave is deliberately
-     * avoided so wait_for_response can poll for up to a second
-     * without starving the timer tick.
-     */
-    spin_lock(&control_lock);
-
+/*
+ * Send/receive with control_lock already held. Used by the chunked
+ * WRITE_MEMORY / READ_MEMORY helpers, which need to populate their
+ * static BSS request structs under the same lock they'll run the
+ * I/O under (otherwise the populate-then-call pattern would race).
+ * Plain callers should use hailo_control_send_recv; this is a
+ * private helper.
+ */
+static int hailo_control_send_recv_locked(const void *req_payload,
+                                          uint32_t    req_len,
+                                          void       *resp_payload,
+                                          uint32_t    resp_capacity,
+                                          uint32_t   *resp_len,
+                                          uint32_t    timeout_us)
+{
     /* Unmask interrupts (once) and ensure ATR[0] routes BAR4[0..]
      * and BAR4[0x640..] to the firmware's request / response
      * buffers. */
@@ -341,6 +348,32 @@ int hailo_control_send_recv(const void *req_payload,
     rc = HAILO_OK;
 
 out:
+    return rc;
+}
+
+/*
+ * Public send/receive entry point. Validates, takes control_lock,
+ * dispatches to the locked core, releases. No IRQ handler takes
+ * this lock, so plain spin_lock — not spin_lock_irqsave — is
+ * correct; irqsave is deliberately avoided so wait_for_response
+ * can poll for up to timeout_us without starving the timer tick.
+ */
+int hailo_control_send_recv(const void *req_payload,
+                            uint32_t    req_len,
+                            void       *resp_payload,
+                            uint32_t    resp_capacity,
+                            uint32_t   *resp_len,
+                            uint32_t    timeout_us)
+{
+    int rc = control_validate_send_recv_args(req_payload, req_len,
+                                             resp_payload, resp_capacity,
+                                             resp_len);
+    if (rc != HAILO_OK) return rc;
+
+    spin_lock(&control_lock);
+    rc = hailo_control_send_recv_locked(req_payload, req_len,
+                                        resp_payload, resp_capacity,
+                                        resp_len, timeout_us);
     spin_unlock(&control_lock);
     return rc;
 }
@@ -416,5 +449,274 @@ int hailo_control_identify(struct hailo_control_identify_response *out)
     /* fw_version (major/minor/revision) is memcpy'd raw by HailoRT —
      * firmware writes it in native LE, so leave the body alone. */
     memcpy(out, &resp.body, sizeof(*out));
+    return HAILO_OK;
+}
+
+/*
+ * Common post-send validation for WRITE/READ_MEMORY. Both opcodes
+ * share the response-header layout and the status check; only the
+ * body shape differs. `resp_len` is what send_recv wrote; `opcode`
+ * is the request opcode we expect the firmware to echo back.
+ */
+static int control_check_response_header(
+    const struct hailo_control_response_header *hdr,
+    uint32_t resp_len,
+    uint32_t expected_opcode,
+    const char *op_name)
+{
+    if (resp_len < sizeof(*hdr)) {
+        WARN("hailo: %s response truncated (%u < %u)",
+             op_name, resp_len, (unsigned)sizeof(*hdr));
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    uint32_t opcode = hailo_be32_to_cpu(hdr->common.opcode);
+    uint32_t major  = hailo_be32_to_cpu(hdr->status.major_status);
+    uint32_t minor  = hailo_be32_to_cpu(hdr->status.minor_status);
+    if (opcode != expected_opcode) {
+        WARN("hailo: %s response wrong opcode (got 0x%x)", op_name, opcode);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    if (major != 0) {
+        WARN("hailo: %s failed (major=%u minor=%u)", op_name, major, minor);
+        return HAILO_ERR_IO;
+    }
+    return HAILO_OK;
+}
+
+/*
+ * Shared file-scope scratch for the WRITE/READ_MEMORY chunk wire
+ * structs. Previously built on the stack (~1 KB per call, on top
+ * of send_recv's own frame and the 1.5 KB control_req_wire BSS
+ * copy). Moving to BSS keeps the kernel-stack footprint bounded
+ * so Phase 5.3 can stack additional chunk helpers without compounding
+ * the overhead. Access is serialized by control_lock; the chunk
+ * helpers take the lock before writing here and pass the populated
+ * buffer through hailo_control_send_recv_locked so the lock is
+ * held continuously from populate through I/O.
+ */
+struct control_write_memory_req_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;
+    uint32_t address_length;
+    uint32_t address;
+    uint32_t data_length;
+    uint8_t  data[HAILO_CONTROL_MAX_MEMORY_CHUNK];
+} __attribute__((packed));
+
+struct control_read_memory_req_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;
+    uint32_t address_length;
+    uint32_t address;
+    uint32_t data_count_length;
+    uint32_t data_count;
+} __attribute__((packed));
+
+struct control_read_memory_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;
+    uint32_t data_length;
+    uint8_t  data[HAILO_CONTROL_MAX_MEMORY_CHUNK];
+} __attribute__((packed));
+
+static struct control_write_memory_req_wire control_mem_write_req;
+static struct control_read_memory_req_wire  control_mem_read_req;
+static struct control_read_memory_resp_wire control_mem_read_resp;
+
+/*
+ * One-chunk WRITE_MEMORY round-trip. HailoRT's
+ * CONTROL_PROTOCOL__pack_write_memory_request packs:
+ *   [common_header(16)] [parameter_count=2(4)]
+ *   [address_length=4(4)] [address(4)]
+ *   [data_length(4)] [data(data_length)]
+ * Every scalar is big-endian; `data` is raw bytes. Caller
+ * enforces chunk_size <= HAILO_CONTROL_MAX_MEMORY_CHUNK.
+ */
+static int control_write_memory_chunk(uint32_t address,
+                                      const uint8_t *data,
+                                      uint32_t chunk_size)
+{
+    /* Lock spans populate + I/O so the static scratch isn't raced. */
+    spin_lock(&control_lock);
+
+    control_mem_write_req.common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    control_mem_write_req.common.flags    = 0;
+    control_mem_write_req.common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    control_mem_write_req.common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_WRITE_MEMORY);
+    control_mem_write_req.parameter_count = hailo_cpu_to_be32(2u);
+    control_mem_write_req.address_length  = hailo_cpu_to_be32(sizeof(control_mem_write_req.address));
+    control_mem_write_req.address         = hailo_cpu_to_be32(address);
+    control_mem_write_req.data_length     = hailo_cpu_to_be32(chunk_size);
+    memcpy(control_mem_write_req.data, data, chunk_size);
+
+    /* Only the prefix up through `data[chunk_size]` travels on the
+     * wire. Pack the full struct size minus the unused trailing data. */
+    uint32_t req_len = (uint32_t)(offsetof(struct control_write_memory_req_wire,
+                                            data)
+                                  + chunk_size);
+
+    /* Response is just header + status (no body). */
+    struct hailo_control_response_header resp;
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_mem_write_req, req_len,
+                                             &resp, sizeof(resp), &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(&control_mem_write_req, req_len,
+                                            &resp, sizeof(resp), &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    spin_unlock(&control_lock);
+    if (rc != HAILO_OK) return rc;
+
+    return control_check_response_header(&resp, resp_len,
+                                         HAILO_CONTROL_OPCODE_WRITE_MEMORY,
+                                         "WRITE_MEMORY");
+}
+
+int hailo_control_write_memory(uint32_t address,
+                               const void *data,
+                               uint32_t data_length)
+{
+    if (!data || data_length == 0) return HAILO_ERR_INVAL;
+    /* Sanity cap. Generous relative to any realistic caller
+     * (CCW uploads are model-sized, typically <16 MB); mostly a
+     * guard against accidental UINT32_MAX / overflow patterns
+     * reaching the transport and issuing millions of doorbells. */
+    if (data_length > HAILO_CONTROL_MAX_MEMORY_TRANSFER) return HAILO_ERR_INVAL;
+    /* Reject the address+length wraparound pattern. Without this
+     * check the chunk loop would advance past UINT32_MAX and wrap
+     * to low device addresses. */
+    if (address + data_length < address) return HAILO_ERR_INVAL;
+
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t remaining = data_length;
+    uint32_t cur_addr  = address;
+
+    while (remaining > 0) {
+        uint32_t chunk = remaining < HAILO_CONTROL_MAX_MEMORY_CHUNK
+                        ? remaining
+                        : HAILO_CONTROL_MAX_MEMORY_CHUNK;
+        int rc = control_write_memory_chunk(cur_addr, p, chunk);
+        if (rc != HAILO_OK) return rc;
+        p         += chunk;
+        cur_addr  += chunk;
+        remaining -= chunk;
+    }
+    return HAILO_OK;
+}
+
+/*
+ * One-chunk READ_MEMORY round-trip. HailoRT's
+ * CONTROL_PROTOCOL__pack_read_memory_request packs:
+ *   [common_header(16)] [parameter_count=2(4)]
+ *   [address_length=4(4)] [address(4)]
+ *   [data_count_length=4(4)] [data_count(4)]
+ * Response layout:
+ *   [response_header(24)] [parameter_count(4)]
+ *   [data_length(4)] [data(data_length, raw bytes)]
+ * data_length is BE; data is raw (memcpy'd by HailoRT).
+ */
+static int control_read_memory_chunk(uint32_t address,
+                                     uint8_t *data,
+                                     uint32_t chunk_size)
+{
+    spin_lock(&control_lock);
+
+    control_mem_read_req.common.version    = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    control_mem_read_req.common.flags      = 0;
+    control_mem_read_req.common.sequence   = hailo_cpu_to_be32(control_next_sequence());
+    control_mem_read_req.common.opcode     = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_READ_MEMORY);
+    control_mem_read_req.parameter_count   = hailo_cpu_to_be32(2u);
+    control_mem_read_req.address_length    = hailo_cpu_to_be32(sizeof(control_mem_read_req.address));
+    control_mem_read_req.address           = hailo_cpu_to_be32(address);
+    control_mem_read_req.data_count_length = hailo_cpu_to_be32(sizeof(control_mem_read_req.data_count));
+    control_mem_read_req.data_count        = hailo_cpu_to_be32(chunk_size);
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_mem_read_req,
+                                             sizeof(control_mem_read_req),
+                                             &control_mem_read_resp,
+                                             sizeof(control_mem_read_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(&control_mem_read_req,
+                                            sizeof(control_mem_read_req),
+                                            &control_mem_read_resp,
+                                            sizeof(control_mem_read_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+
+    /* control_mem_read_resp is a file-scope static so the response
+     * data survives releasing the lock, but we must finish reading
+     * out of it before another chunk runs. Snapshot length fields
+     * and copy out under the lock. */
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    /*
+     * control_mem_read_resp.header sits at offset 0 inside the
+     * packed struct and is therefore as-aligned as the aggregate
+     * itself. GCC's -Waddress-of-packed-member doesn't track that,
+     * so copy the header out by value rather than passing a
+     * pointer into the packed aggregate.
+     */
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_mem_read_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_READ_MEMORY,
+                                       "READ_MEMORY");
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    /* Need at least enough response bytes to cover the fixed
+     * prefix plus the `chunk_size` data bytes firmware claims to
+     * have written. */
+    uint32_t fixed = (uint32_t)(offsetof(struct control_read_memory_resp_wire,
+                                         data));
+    if (resp_len < fixed + chunk_size) {
+        WARN("hailo: READ_MEMORY response short (%u < %u)",
+             resp_len, fixed + chunk_size);
+        spin_unlock(&control_lock);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    uint32_t data_length = hailo_be32_to_cpu(control_mem_read_resp.data_length);
+    if (data_length != chunk_size) {
+        WARN("hailo: READ_MEMORY returned %u bytes, expected %u",
+             data_length, chunk_size);
+        spin_unlock(&control_lock);
+        return HAILO_ERR_BAD_FIRMWARE;
+    }
+    memcpy(data, control_mem_read_resp.data, chunk_size);
+    spin_unlock(&control_lock);
+    return HAILO_OK;
+}
+
+int hailo_control_read_memory(uint32_t address,
+                              void *data,
+                              uint32_t data_length)
+{
+    if (!data || data_length == 0) return HAILO_ERR_INVAL;
+    if (data_length > HAILO_CONTROL_MAX_MEMORY_TRANSFER) return HAILO_ERR_INVAL;
+    if (address + data_length < address) return HAILO_ERR_INVAL;
+
+    uint8_t *p = (uint8_t *)data;
+    uint32_t remaining = data_length;
+    uint32_t cur_addr  = address;
+
+    while (remaining > 0) {
+        uint32_t chunk = remaining < HAILO_CONTROL_MAX_MEMORY_CHUNK
+                        ? remaining
+                        : HAILO_CONTROL_MAX_MEMORY_CHUNK;
+        int rc = control_read_memory_chunk(cur_addr, p, chunk);
+        if (rc != HAILO_OK) return rc;
+        p         += chunk;
+        cur_addr  += chunk;
+        remaining -= chunk;
+    }
     return HAILO_OK;
 }

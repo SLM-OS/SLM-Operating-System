@@ -168,7 +168,7 @@ from a prior driver (bare-metal x86-64 / UEFI-direct Jetson).
 | Platform shim (`gsp_platform_ops`) | N/A | N/A | Complete (11/11 fns, `kernel/arch/arm64/nvidia_gsp_platform.c`) | Complete (11/11 fns) |
 | Engine reset + PIO upload | N/A | N/A | Working on GSP Falcon | Working on GSP + SEC2 |
 | Signed ucode authentication | N/A | N/A | Blocked: GSP priv-lockdown | FWSEC-FRTS 3/3; Booter Load blocked |
-| Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU firmware booted + IDENTIFY RPC verified** (AI HAT+ via pcie1) | CPU (NEON) | CPU (SSE inline-asm) |
+| Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU firmware booted + IDENTIFY / WRITE_MEMORY / READ_MEMORY RPCs verified** (AI HAT+ via pcie1) | CPU (NEON) | CPU (SSE inline-asm) |
 | AI scheduler MLP | CPU | CPU (routed through `inference_device` abstraction) | CPU | CPU |
 
 ### GPU Bringup Stack (Portable)
@@ -195,28 +195,32 @@ stack than discrete Ampere.
 documentation. Accessing it would require reverse-engineering the
 VideoCore ISA and firmware. Not feasible within capstone scope.
 
-**Pi 5 Hailo-8 NPU (AI HAT+) — Phase 0–5.2 complete, IDENTIFY RPC
-verified on real hardware (2026-04-18):** A full alternative
-inference path via the Pi 5's external PCIe connector. Phase 0
-research, Phase 1 ARM64 PCIe host controller (`kernel/drivers/pcie/`)
-with BCM2712 link training (`pcie_bcm2712.c`), Phase 2
-`inference_device` abstraction, Phase 3 Hailo driver + full boot
-state machine (`kernel/ai_accel/hailo/`), Phase 4 nanopb-driven
-`.hef` protobuf parser + `hailo load` shell command, Phase 5.1 I/O
-tensor-shape extraction (input/output pad dims from the first
-network group), and Phase 5.2 firmware control-channel RPC
-transport (`hailo_control.{c,h}` — MD5-stamped, MSI-on-BAR0
-completion, BE header scalars; see `docs/reference/hailo-driver-notes.md`
-§4.5 for the wire-format gotchas that surfaced during bring-up) all
-landed. On pi-5-1 with the HAT+ mounted: `hailo probe` succeeds
-(vendor=0x1e60 device=0x2864), `hailo boot` uploads the 164 KB
-Hailo-8 firmware blob (app + cert + core sections) via the
-ATR[0]+BAR4 window and reaches `state=running`, and `hailo fw`
-returns the real firmware version via IDENTIFY
-(`firmware 4.23.536870912`, i.e. 4.23 + revision `0x20000000`,
-matching the boot fingerprint). Phase 5.3 (`hailo_load` with weight
-DMA — WRITE_MEMORY + CONFIG_STREAM opcodes on the Phase 5.2
-transport) and 5.4 (inference submit via VDMA rings) remain. See
+**Pi 5 Hailo-8 NPU (AI HAT+) — Phase 0–5.2 complete (tier-1 + tier-2),
+three control-channel RPCs verified on real hardware (2026-04-18):**
+A full alternative inference path via the Pi 5's external PCIe
+connector. Phase 0 research, Phase 1 ARM64 PCIe host controller
+(`kernel/drivers/pcie/`) with BCM2712 link training
+(`pcie_bcm2712.c`), Phase 2 `inference_device` abstraction, Phase 3
+Hailo driver + full boot state machine (`kernel/ai_accel/hailo/`),
+Phase 4 nanopb-driven `.hef` protobuf parser + `hailo load` shell
+command, Phase 5.1 I/O tensor-shape extraction (input/output pad
+dims from the first network group), and Phase 5.2 firmware
+control-channel RPC transport (`hailo_control.{c,h}` — MD5-stamped,
+MSI-on-BAR0 completion, BE header scalars; see
+`docs/reference/hailo-driver-notes.md` §4.5/4.6 for the wire-format
+gotchas and opcode layouts) all landed. On pi-5-1 with the HAT+
+mounted: `hailo probe` succeeds (vendor=0x1e60 device=0x2864),
+`hailo boot` uploads the 164 KB Hailo-8 firmware blob (app + cert
++ core sections) via the ATR[0]+BAR4 window and reaches
+`state=running`, `hailo fw` returns the real firmware version via
+IDENTIFY (`firmware 4.23.536870912`, matching the boot fingerprint),
+and `hailo peek/poke` exercise WRITE_MEMORY + READ_MEMORY round-
+trips (firmware acknowledges both with a structured response —
+`major_status = 0x40000058` for arbitrary-address access without
+an active stream context, which is the expected HailoRT behavior
+and confirms the transport is carrying the opcodes correctly).
+Phase 5.3 (CONFIG_STREAM + tensor-buffer allocator for CCW weight
+upload) and 5.4 (inference submit via VDMA rings) remain. See
 `docs/pi5-ai-hat-plan.md` for the full phase breakdown and
 `docs/pi5-pcie1-registers.md` for the `pcie1` + MIP1 register
 reference.
