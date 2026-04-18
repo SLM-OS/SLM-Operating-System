@@ -116,20 +116,29 @@ alignas(8) static uint8_t mb2_snapshot[MB2_SNAPSHOT_MAX];
 
 void kernel_main_x86(uint32_t mb_addr)
 {
-    /* Read the size from the live structure FIRST — before anything
-     * else runs that could alter the page it lives on. Then clamp
-     * to the snapshot buffer and memcpy in. */
-    const uint8_t *src = (const uint8_t *)(uintptr_t)mb_addr;
-    uint32_t total_size = *(const uint32_t *)src;
-    if (total_size > MB2_SNAPSHOT_MAX)
-        total_size = MB2_SNAPSHOT_MAX;
-    for (uint32_t i = 0; i < total_size; i++)
-        mb2_snapshot[i] = src[i];
+    /* mb_addr == 0 means the caller had no Multiboot2 info to pass.
+     * The bzImage kexec entry (bzimage_entry.S) is the first such
+     * path; KVM-direct / Xen / UEFI-stub boot could be others in the
+     * future. Leave mb2_snapshot zeroed (BSS default), which reads
+     * back as a zero-size MB2 info struct — detect_ram_end and other
+     * callers that walk the info tags will see an empty structure
+     * and fall back to their defaults instead of NULL-dereffing. */
+    if (mb_addr != 0) {
+        /* Read the size from the live structure FIRST — before
+         * anything else runs that could alter the page it lives on.
+         * Then clamp to the snapshot buffer and memcpy in. */
+        const uint8_t *src = (const uint8_t *)(uintptr_t)mb_addr;
+        uint32_t total_size = *(const uint32_t *)src;
+        if (total_size > MB2_SNAPSHOT_MAX)
+            total_size = MB2_SNAPSHOT_MAX;
+        for (uint32_t i = 0; i < total_size; i++)
+            mb2_snapshot[i] = src[i];
+    }
 
-    /* Point the rest of the kernel at the snapshot. Both the
-     * assembly symbol (multiboot_ptr, read by tests via extern) and
-     * the C variable (multiboot_info_addr, read by detect_ram_end)
-     * now reference kernel-owned memory. */
+    /* Point the rest of the kernel at the snapshot (zero-filled if
+     * mb_addr was 0). Both the assembly symbol (multiboot_ptr, read
+     * by tests via extern) and the C variable (multiboot_info_addr,
+     * read by detect_ram_end) now reference kernel-owned memory. */
     extern uint32_t multiboot_ptr;
     multiboot_ptr = (uint32_t)(uintptr_t)&mb2_snapshot[0];
     multiboot_info_addr = (uint32_t)(uintptr_t)&mb2_snapshot[0];

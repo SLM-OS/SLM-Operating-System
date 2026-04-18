@@ -135,6 +135,23 @@ remain NULL when no NVIDIA GPU is discovered.
 | `test_gsp_firmware_manifest` | Pre-existing — embedded blob sizes, structural |
 | `test_gsp_init_graceful_without_gpu` | Pre-existing — Phase 0 fails cleanly when no platform installed |
 
+### 1.6 Build-infrastructure test coverage (kexec scaffolding)
+
+Not in-kernel — runs on the dev host, in under a second, no hardware
+required. Invoked via `make kexec-verify PLATFORM=X86_64`.
+Backing script: `scripts/tests/verify-kexec-build.sh`.
+
+Validates all three x86-64 build variants (bare-metal, kexec,
+bzImage) are structurally correct. 29 assertions grouped as:
+
+| Group | Coverage |
+|---|---|
+| `bare-metal` (6 checks) | ELF entry `0x101000`, LOAD paddr `0x100000`, MB1 + MB2 magic in first 8 KiB, MB2 `ENTRY_ADDRESS` tag matches `_start`, UART diag "KEX\\r\\n" present at entry via `mov imm8+OUT` pattern |
+| `kexec` (6 checks) | Same 6 checks but for the 0x20000000 link address |
+| `bzImage ELF` (5 checks) | Entry `0x20000200`, LOAD paddr `0x20000000`, MB1 + MB2 magic, UART diag "BZ\\r\\n" present at entry |
+| `bzImage wrapper file` (8 checks) | Setup header fields kexec-tools' bzImage64 loader validates: `setup_sects` at 0x1F1, `boot_flag` 0xAA55, `HdrS` magic at 0x202, protocol ≥ 0x020C, `loadflags` LOADED_HIGH, `xloadflags` KERNEL_64+CAN_BE_LOADED_ABOVE_4G, `pref_address` 0x20000000, payload[0x200] == 0xfa (stub `cli`) |
+| Helper scripts (4 checks) | `bash -n` parse + `shellcheck -S warning` clean for `scripts/x86-kexec-slmos.sh` and `x86-kexec-deploy.sh` |
+
 ---
 
 ## 2. The blocker (#185) — details
@@ -475,6 +492,298 @@ way to actually reach GPU inference.
 
 **Estimated effort:** weeks-to-months. Significantly larger than
 Option A. Not reachable inside a capstone timeline.
+
+### 4.2.k Option B-kexec — **Linux→SLM-OS kexec handoff** (NEW 2026-04-17)
+
+**Approach:** boot Ubuntu normally on test-pc, let nouveau probe the GPU
+(which unlocks SEC2 some ~3 s after modprobe — mechanism not yet
+pinpointed but reproducibly observed, see
+`docs/testing/x86-gpu-sec2-unlock-trace-2026-04-17.md`), then kexec into
+SLM-OS *without power-gating the GPU across the transition*. SEC2 stays
+in its `CPUCTL=0x20` (halted, unlocked) state when SLM-OS starts.
+
+**Consistent with Jetson's `--no-gpu-suspend` fix** — same principle:
+preserve live GPU state across the kernel swap.
+
+**Why this is additive, not a replacement for §4.2:** the bare-metal
+UEFI+SDWire disk-image path (`make x86-disk` → `labctl sdwire flash`)
+remains first-class. kexec is a second route specifically for the
+downstream work (E3.4.d Booter Load) that needs SEC2 already
+unlocked.
+
+**What's in the tree (2026-04-17):**
+
+- `scripts/x86-kexec-slmos.sh` — runs on test-pc; preflights nouveau
+  + SEC2 state + GPU runtime-PM, then `kexec -l --type=multiboot2-x86`
+  and `kexec -e`. kexec-tools ≥ 2.0.28 is on Ubuntu 24.04 and supports
+  `multiboot2-x86` natively, so no kernel boot-code changes are
+  required — the existing Multiboot2 entry in
+  `kernel/arch/x86_64/trampoline32.S` handles the handoff.
+- `scripts/x86-kexec-deploy.sh` — runs on the dev host; scp's
+  `slmos.elf` + helpers to test-pc and optionally triggers the jump.
+- `make kexec-deploy PLATFORM=X86_64` — build + deploy + exec. Set
+  `KEXEC_NO_EXEC=1` to stage only. Set `KEXEC_HOST=user@ip` to
+  override the default test-pc target.
+
+**Prerequisites checked by the helper:**
+- kexec-tools installed with multiboot2-x86 support
+- nouveau loaded (`modprobe nouveau modeset=1`) — the unlock happens
+  during nouveau init
+- GPU `power/control = on` — runtime PM off prevents autosuspend from
+  clobbering SEC2 across the kexec
+- `/dev/mem` read of SEC2 CPUCTL confirms it's not `0xbadf5620` before
+  firing kexec
+
+**Known limits:**
+- test-pc can't also run under VFIO when using this path; the GPU
+  must be nouveau-bound. Switch back to VFIO with `modprobe vfio-pci`
+  after reboot.
+- Booter Load has two GA10x-specific bugs (see 2026-04-17 report
+  §4.4) that will surface once SEC2 is unlocked. Those are separate
+  fixes tracked independently.
+
+**Status (2026-04-17, second iteration):**
+
+1. ✅ **"Invalid memory segment" rejection resolved.** Root cause was
+   kexec-tools' default `kexec_file_load` / auto-detect syscall
+   refusing the image. The older `kexec_load` syscall (`-c` flag)
+   accepts it cleanly: `kexec -c --load --type=multiboot2-x86
+   /root/slmos.elf` returns rc=0 and sets
+   `/sys/kernel/kexec_loaded=1`. Fix committed in
+   `scripts/x86-kexec-slmos.sh`. Also fixed a `set -o pipefail` +
+   `lsmod | grep -q` SIGPIPE bug that was failing the nouveau
+   preflight.
+
+2. ❌ **New blocker — silent handoff.** `kexec -c --exec` fires
+   (Linux dies: SSH drops, ping fails, ping drops), but **SLM-OS
+   never emits serial output**, not even the single `'K'` byte
+   written as the very first action of `_start` (trampoline32.S
+   lines 60-62). Verified the byte IS in the compiled ELF at
+   `0x20001000` after a clean rebuild.
+
+   CPU is reaching some state (Linux is gone, so kexec executed),
+   but not SLM-OS's entry — or UART output is suppressed. The `K`
+   write uses a 3-instruction sequence (`mov $0x3F8,%dx`, `mov
+   $0x4B,%al`, `out %al,%dx`) that is valid in both 32-bit
+   protected mode and 64-bit long mode — so the handoff CPU mode
+   isn't the culprit.
+
+   Most likely causes, in order:
+   - kexec-tools multiboot2-x86 loader is jumping to the wrong
+     address (ELF `e_entry` is 0x20001000 but segments may have
+     been relocated by kexec despite `-c`/non-PIE). Purgatory
+     handoff could be jumping to 0x0 or similar.
+   - UART state reset across handoff (Linux may gate the UART
+     during its shutdown phase; SLM-OS doesn't re-init the UART
+     before the `'K'` write).
+   - Multiboot2 handoff requires a specific header tag (entry
+     address tag, address tag) that our minimal header lacks.
+
+**Experiments tried (2026-04-17, third iteration) — all still silent:**
+
+| Experiment | Result |
+|---|---|
+| Full 16550 UART reinit at `_start` + emit "KEX\r\n" | No output |
+| `MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS` (type=3, entry=_start) | No output |
+| Multiboot v1 header alongside MB2 + `kexec --type=multiboot-x86` | kexec rejects: *"Wrong file type multiboot-x86, file matches type multiboot2-x86"* — it auto-detects MB2 and refuses MB1 on the same file |
+| `kexec -c --load --type=elf-x86_64` (different loader) | Loads successfully (rc=0, kexec_loaded=1), but same silent handoff |
+| Unload KVM + retry multiboot2-x86 | No change — KVM/VMX state isn't the cause |
+
+All experiments leave the machine with network down, no serial
+output, no `'K'`/`'E'`/`'X'` bytes — even though the UART init is
+hardware-level (8250/16550 port writes, no Linux state needed) and
+the ELF entry address is unambiguous.
+
+**2026-04-17 evening update — bzImage wrapper built and tested, same
+silent failure:**
+
+The bzImage wrapper landed (commits above; `make kernel-bzimage
+PLATFORM=X86_64`, `scripts/make-bzimage.py`,
+`kernel/arch/x86_64/bzimage_entry.S`). Setup header passes kexec's
+bzImage64 probe, and `kexec --load --type=bzImage` succeeds via the
+default kexec_file_load syscall in <2 seconds. But `kexec --exec`
+still leaves the machine silent — **no "BZ\r\n" on COM1**, same as
+multiboot2 and elf-x86_64. The 64-bit entry stub's first
+instruction (16550 UART reinit) would emit visible bytes regardless
+of any subsequent state, so CPU is not reaching the stub.
+
+Three kexec loaders, three silent handoffs. The blocker is now
+definitively **upstream of kexec-tools' loader choice** — either in
+kexec purgatory's 64-bit setup on this specific (Ubuntu 24.04 +
+kexec-tools 2.0.28 + H610M UEFI) combination, or in Linux's kexec
+shutdown sequence itself leaving the CPU in a state that can't run
+our code. Not a problem we can fix from userspace without
+debugging kexec-tools/kernel source with instrumentation.
+
+**2026-04-17 late-evening update — SILENCE BROKEN.**
+
+Adding `--console-serial --serial=0x3f8 --serial-baud=115200` to the
+`kexec --load` command was the missing piece. With it, kexec
+purgatory prints `"I'm in purgatory"` over COM1, then **control
+reaches our kernel**:
+
+```
+I'm in purgatory
+KEX
+========================================
+  SLM-OS v0.1.0
+  Small Language Model Operating System
+========================================
+[INFO] Boot successful
+[INFO] Running in Ring 0 on x86-64
+...
+[VMM] Extended identity mapping: 20 GB (20 PD pages)
+[INFO] PMM initialized (buddy allocator)
+[INFO] Initializing GIC...
+[LAPIC] Initialized at 0xfee00000 (ID=255, version=0xff)
+[IOAPIC] Initialized at 0xfec00000 (ID=2, 120 entries)
+[INFO] Initializing timer...
+```
+
+then hangs (no shell prompt, no response to keystroke). That's a
+*separate* post-handoff bug — the LAPIC readback of `ID=255,
+version=0xff` is the telltale sign that the APIC MSR / MMIO state
+inherited from Linux doesn't match what SLM-OS's `lapic.c`
+expects. Timer init hangs on a follow-on poll. Debuggable in a
+future session; independent of the kexec path itself.
+
+**Root cause of the earlier silence:** `--console-serial` is the
+kexec-tools flag that selects a purgatory build with UART setup
+code linked in. Without it, purgatory skips UART initialization,
+and on this host the UART ends up in a state where our
+post-handoff kernel's `out %al, %dx` to the THR never transmits —
+either because the FIFO isn't enabled, the MCR hasn't asserted
+OUT2, or an LPC-level gate is closed. Our kernel's UART reinit
+writes the right values but on an unusable controller.
+
+**Helper script now enables the flag by default.** `kexec -l` is
+invoked as `kexec -c --load --console-serial --serial=0x3f8
+--serial-baud=115200 --type=multiboot2-x86 ...` for mb2, and the
+same without `-c` for bzImage. See `scripts/x86-kexec-slmos.sh`.
+
+**What works today (2026-04-17):**
+
+- mb2 kexec path: `make kexec-deploy PLATFORM=X86_64` boots SLM-OS
+  via kexec → reaches VMM/PMM/LAPIC/IOAPIC/timer init.
+- bzImage path: `make kexec-deploy PLATFORM=X86_64 KEXEC_HOST=...`
+  with `--mode bzimage` also boots, same init depth.
+
+**What's blocking shell/GPU access:**
+
+- SLM-OS's timer / APIC init doesn't complete cleanly when the
+  LAPIC state is whatever kexec's Linux-shutdown path leaves it
+  in. Fix candidates: explicitly reset LAPIC MSR before reading;
+  re-init APIC_BASE MSR; mask LINT0/LINT1 first. This is the
+  next blocker on the kexec path.
+
+**Remaining next-session paths:**
+
+The kexec-tools handoff is not tractable within capstone scope.
+Recommendations:
+
+- **Drop the kexec route for capstone**, keep the code paths we've
+  built as documented dead-ends. Refocus on the Jetson port (§4.1 —
+  Option A) where the same GPU work has an unobstructed path to
+  completion.
+- **Linux-side workaround — userspace nouveau→VFIO state transfer.**
+  Skip kexec entirely. Boot Linux, load nouveau, let it unlock
+  SEC2, then `rmmod vfio-pci` → `rmmod nouveau` without power-gating
+  the GPU (runtime PM off) → run a userspace tool that reopens
+  the GPU via VFIO and continues the GSP bringup from the
+  inherited unlocked state. Higher risk (nouveau cleanup may
+  re-lock SEC2), but sidesteps kexec entirely.
+- **Firmware/BIOS investigation** — try kexec on a different x86-64
+  board (another Gigabyte, an Intel NUC, a Dell OptiPlex) to
+  localise the handoff failure to test-pc's UEFI vs. a general
+  Ubuntu 24.04 issue. Doesn't advance the capstone but would tell
+  us whether the kexec path is a permanent dead-end or a
+  this-hardware issue.
+- **`kexec --console-serial`** to get kexec-tools' purgatory to
+  print progress over COM1 as it runs (may reveal *where* in
+  purgatory the silence starts). We haven't tried this yet; it's
+  genuinely the next low-effort diagnostic.
+- **Build kexec-tools from source with DEBUG=1** (also untried),
+  stepping through `dbgprintf` calls, to confirm whether purgatory
+  entry is reached at all.
+
+Even if kexec never pans out on test-pc, the infrastructure built
+(three parallel x86-64 build variants, structural verifier, deploy
+scripts, bzImage wrapper) is reusable the moment a host with a
+working kexec handoff is available.
+
+**Original "Invalid memory segment" investigation notes:**
+
+Initial `kexec --load --type=multiboot2-x86` (and
+`--type=elf-x86_64`) rejected the image with *"Invalid memory
+segment 0x<addr> - 0x<end>"*. Investigated in this order:
+
+1. First tried the default 1 MiB load (`KERNEL_PHYS = 0x100000`) —
+   rejected because the running Ubuntu kernel is assumed to occupy
+   low memory.
+2. Added a parallel linker script `kernel-x86_64-kexec.ld` that links
+   at `0x20000000` (512 MiB) — rejected too, even with Ubuntu's
+   actual kernel code/rodata/data/bss at `0x48dc00000-0x490ffffff`
+   (above 4 GiB, well clear of 0x20000000).
+3. Debug run confirms `/proc/iomem` reports one contiguous `System
+   RAM` span at `0x100000-0x35fa0fff` (830 MiB) that would easily
+   contain 44 MiB at 0x20000000. `--mem-min`, `elf-x86_64` loader,
+   and auto-detect all give the same rejection.
+
+The rejection is from kexec-tools' internal `valid_memory_segment`
+check, which requires the segment to fit within a single memory
+range reported by the loader's builder. The multiboot2-x86 loader
+(`kexec-tools 2.0.28`) in particular appears to not honour the
+full `System RAM` span — possibly because it expects a relocatable
+(PIE) ELF and ours is linked `-no-pie`, possibly because of a
+loader-specific address limit. Needs further kexec-tools source
+reading to root-cause.
+
+**Infrastructure in tree and working (2026-04-17):**
+
+- `kernel/kernel-x86_64-kexec.ld` — alternate linker script.
+- CMake option `KEXEC_BUILD=1` that swaps in the alt script.
+- `make kernel-kexec PLATFORM=X86_64` — produces
+  `build/kernel-kexec/slmos.elf` linked at 0x20000000. Verified: the
+  ELF is well-formed (`readelf -l` shows entry 0x20001000, LOAD
+  segment at paddr 0x20000000, 44 MiB MemSiz).
+- `make kexec-deploy PLATFORM=X86_64` — scp's the ELF + helper to
+  test-pc and (would) fire kexec. Currently fires but is rejected at
+  `kexec --load`.
+- `scripts/x86-kexec-slmos.sh` — test-pc helper; preflights nouveau
+  + SEC2 state + GPU runpm, then does `kexec -l && kexec -e`.
+- `scripts/x86-kexec-deploy.sh` — dev-host wrapper; scp + invoke.
+- `scripts/tests/verify-kexec-build.sh` + `make kexec-verify
+  PLATFORM=X86_64` — 16-check structural validator. Confirms both the
+  bare-metal ELF (0x100000) and the kexec ELF (0x20000000) link at the
+  expected addresses, both carry MB1 (0x1BADB002) and MB2 (0xE85250D6)
+  magic within the first 8 KiB, both include a `MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS`
+  tag pointing at `_start`, and the trampoline's 16550 UART reinit +
+  "KEX\r\n" diagnostic is in the compiled entry code. Also runs
+  `shellcheck -S warning` against the two Linux-side helper scripts.
+  Runs in under a second; suitable for CI once the X86_64 job calls
+  `make kernel` + `make kernel-kexec`.
+
+**What's left to unblock:**
+
+1. Root-cause the kexec-tools rejection. Build kexec-tools from
+   source locally, add instrumentation around `valid_memory_segment`
+   and `get_memory_ranges`. Expected outcome: a specific constraint
+   (PIE requirement / loader address limit / e820 subdivision logic)
+   that either we can work around via a different loader
+   (`--type=bzImage` with a wrapper) or a linker change.
+2. If the block is "multiboot2 loader wants a relocatable kernel",
+   the cleanest workaround is a **bzImage wrapper**: a tiny stub
+   linked as a Linux-compatible bzImage (well-tested kexec path)
+   that decompresses/copies `slmos.elf` to its final address and
+   jumps to its entry. ~100 lines of Rust or C.
+3. Alternative: use `kexec -p` (panic kernel) with a
+   `crashkernel=64M@0x10000000` reservation on the Ubuntu cmdline.
+   Panic-kernel loads may relax the range check.
+
+**Estimated effort to unblock:** half a day to a day, depending on
+which of the three paths pans out first. All the hard parts (SEC2
+unlock understanding, scripts, build system integration, bare-metal
+preservation) are in tree.
 
 ### 4.3 Option C — **Kernel-shim / patched vfio-pci**
 

@@ -142,7 +142,16 @@ with NEON/SSE acceleration. Actual GPU compute is blocked on both
 Ampere platforms by hardware security boundaries:
 
 - **x86-64 discrete GA107**: Booter Load blocked by SEC2 priv-lockdown
-  raised by VFIO's mandatory PCI FLR (#185)
+  raised by UEFI POST's VBIOS DEVINIT script (#185). Present on both
+  VFIO and bare-metal paths — the "bare-metal bypasses FLR" hypothesis
+  was falsified 2026-04-15 (see `docs/x86-64-gpu-inference-status.md`
+  §2.5). Nouveau clears the lock by mechanism that is firmware-mediated
+  (not CPU MMIO) per the 2026-04-17 mmiotrace investigation
+  (`docs/testing/x86-gpu-sec2-unlock-trace-2026-04-17.md`).
+  **Linux→SLM-OS kexec scaffolding landed** (`make kernel-kexec` +
+  `make kexec-deploy`); load succeeds via the old kexec_load syscall
+  but handoff still silent — bzImage wrapper is the last tractable
+  path, tracked in `docs/x86-64-gpu-inference-status.md` §4.2.k.
 - **Jetson integrated GA10B**: ACR HS ucode load blocked by GSP Falcon
   priv-lockdown (HWCFG2 bit 13) after kexec-from-Linux
 

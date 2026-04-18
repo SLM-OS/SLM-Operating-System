@@ -7,11 +7,20 @@
  * Compile with: gcc -m32 -c trampoline32.S -o trampoline32.o
  */
 
+#include "com1_uart_init.inc"
+
 .set MULTIBOOT2_MAGIC,     0xE85250D6
 .set MULTIBOOT2_ARCH,      0
 .set MULTIBOOT2_HEADER_LENGTH, multiboot_header_end - multiboot_header
 .set MULTIBOOT2_CHECKSUM,  -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH + MULTIBOOT2_HEADER_LENGTH)
 .set MULTIBOOT2_BOOTLOADER_MAGIC, 0x36D76289
+
+/* Multiboot v1 (the older format) — added for kexec-tools which has
+ * had stable multiboot-x86 loader support much longer than
+ * multiboot2-x86. GRUB still prefers multiboot2 (both are present). */
+.set MULTIBOOT1_MAGIC,     0x1BADB002
+.set MULTIBOOT1_FLAGS,     0              /* no address or video requests */
+.set MULTIBOOT1_CHECKSUM,  -(MULTIBOOT1_MAGIC + MULTIBOOT1_FLAGS)
 
 /* Page tables and stack - defined in entry64.S */
 .extern pml4
@@ -27,14 +36,39 @@
  *
  * No framebuffer tag — GRUB EFI cannot always set a video mode.
  * The kernel uses COM1 serial for console output.
+ *
+ * Explicit MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS (type=3) points kexec
+ * at _start. Without it, kexec-tools' multiboot2-x86 loader falls
+ * back to ELF e_entry — which is the same value — but some code
+ * paths (purgatory, older kexec-tools builds) reportedly ignore
+ * e_entry without the tag. Belt-and-suspenders: include both.
  */
 .section .multiboot, "a"
+.align 8
+/* Multiboot v1 header comes first so kexec's multiboot-x86 loader
+ * finds it in the early scan (spec requires magic within first 8
+ * KiB). GRUB and kexec --type=multiboot2-x86 continue to find the
+ * multiboot2 magic immediately after. */
+multiboot1_header:
+    .long MULTIBOOT1_MAGIC
+    .long MULTIBOOT1_FLAGS
+    .long MULTIBOOT1_CHECKSUM
+
 .align 8
 multiboot_header:
     .long MULTIBOOT2_MAGIC
     .long MULTIBOOT2_ARCH
     .long MULTIBOOT2_HEADER_LENGTH
     .long MULTIBOOT2_CHECKSUM
+
+    /* Entry address tag: type=3, flags=0, size=12, entry_addr=_start */
+    .align 8
+entry_tag:
+    .short 3                    /* MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS */
+    .short 0                    /* flags */
+    .long  entry_tag_end - entry_tag
+    .long  _start               /* entry_addr */
+entry_tag_end:
 
     /* End tag */
     .align 8
@@ -55,6 +89,26 @@ multiboot_header_end:
 .global _start
 _start:
     cli
+
+    /* Early-entry diagnostic: reinit COM1 and emit "KEX\r\n" as a
+     * boot-loader handoff breadcrumb. We don't assume the UART was
+     * left in a usable state by the previous bootloader (kexec may
+     * leave it gated; GRUB EFI may have disabled it during
+     * ExitBootServices). The reinit macro is shared with
+     * bzimage_entry.S via com1_uart_init.inc. */
+    COM1_UART_REINIT
+    /* Macro leaves %dx = 0x3F8 (THR). Emit the burst. No busy-wait
+     * on TX-ready — the 16-byte FIFO absorbs short bursts. */
+    mov $0x4B, %al          /* 'K' */
+    out %al, %dx
+    mov $0x45, %al          /* 'E' */
+    out %al, %dx
+    mov $0x58, %al          /* 'X' */
+    out %al, %dx
+    mov $0x0D, %al          /* '\r' */
+    out %al, %dx
+    mov $0x0A, %al          /* '\n' */
+    out %al, %dx
 
     /* Save multiboot info pointer for later */
     mov %ebx, multiboot_ptr

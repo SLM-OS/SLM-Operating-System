@@ -162,6 +162,42 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(JETSON_EL1_SMOKE)),-DJETSON_EL1_SMOKE=ON) \
 		$(MAKE_PROGRAM_ARG)
 
+# kernel-kexec: X86_64-only parallel build of slmos.elf linked at
+# 0x20000000 (for Linux→SLM-OS kexec). Uses a separate build directory
+# so it never clashes with the default 1 MB bare-metal build.
+KERNEL_KEXEC_BUILD_DIR := $(BUILD_DIR)/kernel-kexec
+KERNEL_KEXEC_ELF := $(KERNEL_KEXEC_BUILD_DIR)/slmos.elf
+
+.PHONY: kernel-kexec
+kernel-kexec: runtime $(KERNEL_KEXEC_BUILD_DIR)/Makefile
+ifneq ($(PLATFORM),X86_64)
+	@echo "kernel-kexec requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@echo "Building kernel (kexec variant, link address 0x20000000)..."
+	$(CMAKE) --build $(KERNEL_KEXEC_BUILD_DIR)
+	@echo "kexec ELF: $(KERNEL_KEXEC_ELF)"
+
+$(KERNEL_KEXEC_BUILD_DIR)/Makefile:
+	@echo "Configuring kexec kernel build..."
+	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_KEXEC_BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DPLATFORM=$(PLATFORM) \
+		-DKEXEC_BUILD=1 \
+		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
+		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
+		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
+		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
+		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(MAKE_PROGRAM_ARG)
+
+.PHONY: kernel-kexec-clean
+kernel-kexec-clean:
+	@echo "Cleaning kexec kernel build..."
+	rm -rf $(KERNEL_KEXEC_BUILD_DIR)
+
 .PHONY: kernel-clean
 kernel-clean:
 	@echo "Cleaning kernel build..."
@@ -189,6 +225,109 @@ endif
 .PHONY: x86-disk-verify
 x86-disk-verify: x86-disk
 	@scripts/tests/verify-x86-disk.sh $(KERNEL_BUILD_DIR)/slmos-x86.img
+
+# Verify the kexec-build scaffolding is structurally intact. Checks the
+# kexec ELF is linked at 0x20000000, both MB1 and MB2 headers are
+# present, the MB2 ENTRY_ADDRESS tag points at _start, and the
+# trampoline32.S UART diag ("KEX\r\n") is in the compiled entry. Also
+# validates the bzImage wrapper (setup_header fields kexec-tools'
+# bzImage64 probe reads) and shellchecks the Linux-side helper
+# scripts.
+.PHONY: kexec-verify
+kexec-verify:
+ifneq ($(PLATFORM),X86_64)
+	@echo "kexec-verify requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@scripts/tests/verify-kexec-build.sh
+
+# kernel-bzimage: X86_64-only parallel build of a Linux-bzImage wrapper
+# around the kernel. Used as the third kexec loader path alongside
+# Multiboot2 (unblocked from "Invalid memory segment" but silent after
+# --exec, see x86-64-gpu-inference-status §4.2.k). bzImage is
+# kexec-tools' most thoroughly-tested x86 loader; this target is the
+# next experiment for reaching SLM-OS's _start post-handoff.
+KERNEL_BZIMAGE_BUILD_DIR := $(BUILD_DIR)/kernel-bzimage
+KERNEL_BZIMAGE_ELF       := $(KERNEL_BZIMAGE_BUILD_DIR)/slmos.elf
+KERNEL_BZIMAGE           := $(KERNEL_BZIMAGE_BUILD_DIR)/slmos.bzimage
+
+.PHONY: kernel-bzimage
+kernel-bzimage: runtime $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
+ifneq ($(PLATFORM),X86_64)
+	@echo "kernel-bzimage requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@echo "Building kernel (bzImage variant)..."
+	$(CMAKE) --build $(KERNEL_BZIMAGE_BUILD_DIR)
+	@echo "Wrapping ELF as Linux bzImage..."
+	python3 scripts/make-bzimage.py \
+		$(KERNEL_BZIMAGE_ELF) $(KERNEL_BZIMAGE)
+	@echo "bzImage: $(KERNEL_BZIMAGE)"
+
+$(KERNEL_BZIMAGE_BUILD_DIR)/Makefile:
+	@echo "Configuring bzImage kernel build..."
+	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_BZIMAGE_BUILD_DIR) \
+		-DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DPLATFORM=$(PLATFORM) \
+		-DBZIMAGE_BUILD=1 \
+		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
+		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
+		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
+		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
+		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
+		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(MAKE_PROGRAM_ARG)
+
+.PHONY: kernel-bzimage-clean
+kernel-bzimage-clean:
+	@echo "Cleaning bzImage kernel build..."
+	rm -rf $(KERNEL_BZIMAGE_BUILD_DIR)
+
+# Deploy + kexec SLM-OS onto a running Linux on test-pc. Alternative
+# to the UEFI+SDWire bare-metal path (x86-disk → labctl sdwire flash
+# → power_cycle), used when SEC2 needs to inherit its nouveau-unlocked
+# state (issue #185 / the 2026-04-17 investigation).
+#
+# Flags (override at make invocation):
+#   KEXEC_MODE=mb2|bzimage  — loader flavour (default mb2 = multiboot2).
+#                             bzimage uses make-bzimage.py to wrap the
+#                             kexec-linked ELF into a Linux bzImage so
+#                             kexec-tools' --type=bzImage loader accepts
+#                             it.
+#   KEXEC_HOST=user@ip      — override default test-pc SSH target.
+#   KEXEC_NO_EXEC=1         — scp the artefact but don't fire kexec.
+#
+# kexec-deploy depends on the kernel target matching KEXEC_MODE so the
+# right artefact is always built before the deploy script runs. The
+# per-mode variables are populated lazily via MAKECMDGOALS — bogus
+# KEXEC_MODE in the environment shouldn't break unrelated targets
+# like `make kernel`.
+KEXEC_MODE ?= mb2
+
+ifneq (,$(filter kexec-deploy,$(MAKECMDGOALS)))
+  ifeq ($(KEXEC_MODE),bzimage)
+    KEXEC_DEPLOY_DEP := kernel-bzimage
+    KEXEC_DEPLOY_ARGS := --mode bzimage --bzimage $(KERNEL_BZIMAGE)
+    KEXEC_DEPLOY_BUILD_DIR := $(KERNEL_BZIMAGE_BUILD_DIR)
+  else ifeq ($(KEXEC_MODE),mb2)
+    KEXEC_DEPLOY_DEP := kernel-kexec
+    KEXEC_DEPLOY_ARGS := --mode mb2 --elf $(KERNEL_KEXEC_ELF)
+    KEXEC_DEPLOY_BUILD_DIR := $(KERNEL_KEXEC_BUILD_DIR)
+  else
+    $(error KEXEC_MODE must be 'mb2' or 'bzimage' (got '$(KEXEC_MODE)'))
+  endif
+endif
+
+.PHONY: kexec-deploy
+kexec-deploy: $(KEXEC_DEPLOY_DEP)
+ifneq ($(PLATFORM),X86_64)
+	@echo "kexec-deploy requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
+endif
+	@KERNEL_BUILD_DIR=$(KEXEC_DEPLOY_BUILD_DIR) \
+	 scripts/x86-kexec-deploy.sh \
+	    $(KEXEC_DEPLOY_ARGS) \
+	    $(if $(KEXEC_HOST),--host $(KEXEC_HOST),) \
+	    $(if $(KEXEC_NO_EXEC),--no-exec,)
 
 # P1-2 real-hardware validation: flash slmos-x86.img to test-pc via
 # labctl, run boot_test --count 10, run the 5× sleep-while-echo
