@@ -16,7 +16,7 @@ writeup. Tracked in
 | 0 — CBB probe | ✅ done (2026-04-17) | Option A viable; xHCI clock-gated, not firewalled. See §3 Phase 0. |
 | 1 — USB core (`kernel/usb/core/`) | ✅ merged | PR #272. URB / descriptor / enumeration; 37 unit tests against a mock HCD. |
 | 2 — CDC-ECM class driver | ✅ merged | PR #276. Probe + MAC parse + bulk IN/OUT data path + net_driver glue; 25 unit tests. |
-| 3A — XHCI host driver | ⛔ mothballed (2026-04-18) | Scaffolding + caps parse + rings + NO_OP code landed on `feature/usb-networking-phase2`; ring primitives have 19 unit tests (`test_xhci_ring.c` — includes ERDP-tracking and ERST-layout regression coverage added in the post-merge review round). Blocked at USBCMD.RUN=1 by the SMMU disable in Linux's kexec path. Root cause + mothball analysis in §8. |
+| 3A — XHCI host driver | ⛔ SMMU-blocked (2026-04-18); IFR bringup landed | Phase 3A.1 scaffolding + caps parse + rings + NO_OP on `feature/usb-networking-phase2` (merged #289). Phase 3A.2 IFR bringup (FPCI/BAR2 mapping, `tegra_xusb_config`, CSB paging, mailbox probe) on `feature/xhci-ifr-bringup`. 34 unit tests total across 2 files: 19 in `test_xhci_ring.c` (ring primitives, ERDP, ERST layout) + 15 in `test_xhci_tegra.c` (Tegra234 CSB math + Linux-reference offset pinning). Still blocked at USBCMD.RUN=1 by the SMMU teardown — now definitively identified as the only remaining obstacle. Root cause in §8 and §9; three-path handoff in §10. |
 | 4 — lwIP netif integration | ☐🔗 pending | Requires a working Phase 3A, which is blocked. |
 | 5 — testing, reliability, docs | ☐🔗 pending | Requires Phases 3A + 4. |
 

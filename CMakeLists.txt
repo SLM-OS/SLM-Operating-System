@@ -571,6 +571,11 @@ set(TEST_SOURCES
     # init-with-buffer ring variants don't pull ncmem, so tests drive
     # them with stack-allocated TRB arrays on every target.
     kernel/tests/test_xhci_ring.c
+    # Tegra234 XHCI wrapper + CSB-paging offset tests (Phase 3A.2 of
+    # #266). Pure-logic CSB paging math + Linux-reference register
+    # offset pinning; runs on every target since xhci_tegra.h is
+    # platform-neutral.
+    kernel/tests/test_xhci_tegra.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_lua.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>
