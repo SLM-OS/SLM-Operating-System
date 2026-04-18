@@ -499,26 +499,20 @@ static void test_bringup_free_idempotent_on_fresh_struct(void)
  * jumped to non-secure preamble; now apps[0].offset → secure entry).
  * ============================================================================ */
 
-/* Dummy bytes buffer for the test fixture — if a future change to
- * `gsp_bringup_set_booter_layout` starts reading `img->bytes`, we
- * want it to read from a known allocation instead of NULL-deref'ing.
- * The helper under test today doesn't touch this, so the buffer's
- * contents are irrelevant. */
-static uint8_t test_image_dummy_bytes[0x10000];
-
 /* Construct a minimal nvfw_image with v2-layout values that exercise
  * every field the helper copies. The exact numbers here are chosen so
  * each assertion in the tests below distinguishes the field —
  * apps[0].offset != os_code_offset so a regression that revives the
- * old `booter_boot_addr = os_code_offset` line fires immediately. */
+ * old `booter_boot_addr = os_code_offset` line fires immediately.
+ *
+ * `bytes`/`size` deliberately stay NULL/0: `gsp_bringup_set_booter_layout`
+ * does not dereference the image buffer, only the parsed offset/size
+ * scalars. If a future change starts reading `img->bytes`, it will
+ * fault here in a controlled way and the test author will replace
+ * this with a real backing allocation. */
 static void make_v2_booter_image(struct nvfw_image *img)
 {
     memset(img, 0, sizeof(*img));
-    /* Point bytes/size at a real allocation so a future helper
-     * change that dereferences them fails in a controlled way, not
-     * with a segfault that confuses the test framework. */
-    img->bytes          = test_image_dummy_bytes;
-    img->size           = sizeof(test_image_dummy_bytes);
     img->os_code_offset = 0x100;       /* non-secure preamble */
     img->os_code_size   = 0x100;
     img->os_data_offset = 0x8400;      /* DMEM section */
@@ -607,10 +601,51 @@ static void test_booter_layout_null_args_no_crash(void)
     /* Both NULL. */
     gsp_bringup_set_booter_layout(NULL, NULL);
 
-    /* If we're still running, the helper returned cleanly. Also
-     * verify the b struct is untouched in the NULL-img case. */
-    REQUIRE(b.booter_boot_addr == 0);
-    REQUIRE(b.booter_imem_sec_off == 0);
+    /* If we're still running, the helper returned cleanly. Verify
+     * EVERY field the helper would have written is still its
+     * zero-initialized value — partial copies (helper crashed
+     * mid-assignment) would show up here. */
+    REQUIRE(b.booter_imem_ns_off   == 0);
+    REQUIRE(b.booter_imem_ns_size  == 0);
+    REQUIRE(b.booter_imem_sec_off  == 0);
+    REQUIRE(b.booter_imem_sec_size == 0);
+    REQUIRE(b.booter_dmem_offset   == 0);
+    REQUIRE(b.booter_dmem_size     == 0);
+    REQUIRE(b.booter_dmem_sign     == 0);
+    REQUIRE(b.booter_engine_id     == 0);
+    REQUIRE(b.booter_ucode_id      == 0);
+    REQUIRE(b.booter_boot_addr     == 0);
+}
+
+/* num_apps == 0: helper must refuse — apps[0] would otherwise be
+ * the zero-initialized array entry and silently set BOOTVEC=0,
+ * recreating the Phase 2 STOPPED symptom this PR fixed.
+ *
+ * If a future change relaxes the guard (e.g. defaults BOOTVEC to
+ * os_code_offset for HS-only blobs without an apps entry), this
+ * test must be updated to assert the new contract — don't just
+ * delete it. */
+static void test_booter_layout_rejects_zero_num_apps(void)
+{
+    struct nvfw_image img;
+    struct gsp_bringup b = { 0 };
+    make_v2_booter_image(&img);
+    img.num_apps = 0;
+
+    gsp_bringup_set_booter_layout(&b, &img);
+
+    /* Same untouched-struct check as the NULL test — every field
+     * stays at its zero init. */
+    REQUIRE(b.booter_imem_ns_off   == 0);
+    REQUIRE(b.booter_imem_ns_size  == 0);
+    REQUIRE(b.booter_imem_sec_off  == 0);
+    REQUIRE(b.booter_imem_sec_size == 0);
+    REQUIRE(b.booter_dmem_offset   == 0);
+    REQUIRE(b.booter_dmem_size     == 0);
+    REQUIRE(b.booter_dmem_sign     == 0);
+    REQUIRE(b.booter_engine_id     == 0);
+    REQUIRE(b.booter_ucode_id      == 0);
+    REQUIRE(b.booter_boot_addr     == 0);
 }
 
 /* Zero-size non-secure section (the actual R535 booter_load layout
@@ -668,6 +703,7 @@ int main(void)
     test_booter_layout_bootvec_consistent_when_offsets_match();
     test_booter_layout_null_args_no_crash();
     test_booter_layout_zero_ns_size();
+    test_booter_layout_rejects_zero_num_apps();
 
     /* State-machine guards (E3.4.d / E3.4.e) */
     test_booter_load_refuses_pre_fwsec();

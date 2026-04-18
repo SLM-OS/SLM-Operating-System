@@ -547,10 +547,14 @@ void gsp_bringup_set_booter_layout(struct gsp_bringup *b,
                                    const struct nvfw_image *img)
 {
     /* Defensive — the one in-tree caller
-     * (`gsp_bringup_booter_load`) always passes valid pointers, but
+     * (`gsp_bringup_booter_load`) always passes valid pointers and a
+     * blob with `num_apps >= 1` (it bails on Phase 1 otherwise), but
      * the helper is extern-visible for tests so guard against a
-     * future caller forgetting. */
+     * future caller forgetting. `num_apps == 0` would silently zero
+     * `booter_boot_addr` and recreate the BOOTVEC=0 → STOP-at-IMEM[0]
+     * symptom this PR fixed; refuse the input instead. */
     if (!b || !img) return;
+    if (img->num_apps < 1) return;
     b->booter_imem_ns_off   = img->os_code_offset;
     b->booter_imem_ns_size  = img->os_code_size;
     b->booter_imem_sec_off  = img->apps[0].offset;
