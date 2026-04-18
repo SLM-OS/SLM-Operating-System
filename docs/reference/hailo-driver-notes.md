@@ -329,6 +329,44 @@ All four are implemented in `kernel/ai_accel/hailo/hailo_control.{c,h}`
 and covered by the `test_control_identify_*` suite in
 `kernel/tests/test_hailo.c`.
 
+### 4.6. WRITE_MEMORY / READ_MEMORY opcodes (tier-2, 2026-04-18)
+
+Opcodes `0x01` / `0x02` wired on top of the tier-1 transport. Request /
+response layout:
+
+```
+WRITE_MEMORY request (parameter_count = 2):
+  [common_header(16)] [parameter_count(4)]
+  [address_length=4(4)] [address(4)]
+  [data_length(4)] [data(data_length)]
+
+READ_MEMORY request (parameter_count = 2):
+  [common_header(16)] [parameter_count(4)]
+  [address_length=4(4)] [address(4)]
+  [data_count_length=4(4)] [data_count(4)]
+
+READ_MEMORY response (parameter_count = 0):
+  [response_header(24)] [parameter_count(4)]
+  [data_length(4)] [data(data_length)]      /* data raw, memcpy'd */
+```
+
+Every scalar is big-endian on the wire. `data` bytes in both directions
+are raw — no byteswap. Chunk size is capped at 1024 B
+(`CONTROL__MAX_WRITE_MEMORY_CHUNK_SIZE`); larger transfers are split by
+the driver into back-to-back round-trips with advancing addresses.
+
+**Firmware policy observation (pi-5-1, 2026-04-18).** After `hailo boot`
+but outside of any stream context, both opcodes return
+`major_status = 0x40000058` with `minor_status` set to the same value
+for every address tried (`0x00000000`, `0xA0000`, `0x60000000`,
+`0x60040000`, `0x60100000`). The transport itself is correct — round-
+trips complete with matching response opcode and well-formed status —
+but the firmware rejects arbitrary memory access until an active stream
+context exists. HailoRT's own usage is consistent with this: `write_memory`
+and `read_memory` are only called from within context-switch / CCW-upload
+flows, never standalone. Address-permissive access will land when
+Phase 5.3 adds CONFIG_STREAM and sets up a context.
+
 ---
 
 ## 5. VDMA control channel

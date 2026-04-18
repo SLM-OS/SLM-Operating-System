@@ -1876,6 +1876,173 @@ static void test_control_read_memory_rejects_when_not_running(void)
                           hailo_control_read_memory(0x100, buf, 4));
 }
 
+/*
+ * Firmware-side error propagation: when major_status != 0, the
+ * driver must surface HAILO_ERR_IO rather than silently treating
+ * the response as success. This was the actual failure mode
+ * observed on pi-5-1: major_status=0x40000058 (no active stream
+ * context) for arbitrary-address WRITE/READ; we need to be sure
+ * we don't swallow that.
+ */
+static void test_control_write_memory_propagates_fw_error(void)
+{
+    control_setup_running();
+
+    /* Hand-build a response with non-zero major_status. The mock's
+     * smart-memory mode would always return success, so use the
+     * canned-response path here. */
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_WRITE_MEMORY);
+    fake.header.status.major_status = __builtin_bswap32(0x40000058u);
+    fake.header.status.minor_status = __builtin_bswap32(0x40000058u);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    uint8_t buf[4] = { 0x12, 0x34, 0x56, 0x78 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_IO,
+        hailo_control_write_memory(0x200, buf, sizeof(buf)));
+}
+
+static void test_control_read_memory_propagates_fw_error(void)
+{
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_READ_MEMORY);
+    fake.header.status.major_status = __builtin_bswap32(0x40000058u);
+    fake.header.status.minor_status = __builtin_bswap32(0x40000058u);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    uint8_t buf[4];
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_IO,
+        hailo_control_read_memory(0x200, buf, sizeof(buf)));
+}
+
+/*
+ * If firmware echoes back the wrong opcode in the response — e.g.
+ * because a prior request is getting picked up — the driver must
+ * flag it rather than returning success on a mis-parsed response.
+ */
+static void test_control_write_memory_rejects_wrong_opcode_echo(void)
+{
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    /* Echo IDENTIFY opcode (0x00) instead of WRITE_MEMORY (0x01). */
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    uint8_t buf[4] = { 0 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_BAD_FIRMWARE,
+        hailo_control_write_memory(0x200, buf, sizeof(buf)));
+}
+
+/*
+ * Exact chunk-boundary: 1024 B should fit in exactly one doorbell,
+ * not split into two. Guards against an off-by-one in the
+ * remaining-vs-chunk comparison.
+ */
+static void test_control_write_memory_single_chunk_boundary(void)
+{
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t pattern[HAILO_CONTROL_MAX_MEMORY_CHUNK];
+    for (size_t i = 0; i < sizeof(pattern); i++) pattern[i] = (uint8_t)(i);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_write_memory(0x300, pattern, sizeof(pattern)));
+    /* Exactly one doorbell — not two. */
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+
+    uint8_t readback[HAILO_CONTROL_MAX_MEMORY_CHUNK];
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_read_memory(0x300, readback, sizeof(readback)));
+    TEST_ASSERT_EQUAL_UINT32(2, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_MEMORY(pattern, readback, sizeof(pattern));
+}
+
+/*
+ * Partial last-chunk: 1025 B should split into 1024 + 1, with the
+ * second chunk carrying the trailing byte at the right address
+ * offset. Guards against address arithmetic errors across chunks.
+ */
+static void test_control_write_memory_partial_last_chunk(void)
+{
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t pattern[HAILO_CONTROL_MAX_MEMORY_CHUNK + 1];
+    for (size_t i = 0; i < sizeof(pattern); i++) pattern[i] = (uint8_t)(i ^ 0x5A);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_write_memory(0x500, pattern, sizeof(pattern)));
+    TEST_ASSERT_EQUAL_UINT32(2, mock_control_doorbells);
+
+    /* The LAST captured request is the trailing 1-byte chunk. Its
+     * address must be base + HAILO_CONTROL_MAX_MEMORY_CHUNK, and
+     * its data_length must be 1. */
+    uint32_t addr_be, data_len_be;
+    memcpy(&addr_be,     mock_last_control_request + 24, 4);
+    memcpy(&data_len_be, mock_last_control_request + 28, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x500u + HAILO_CONTROL_MAX_MEMORY_CHUNK,
+                             __builtin_bswap32(addr_be));
+    TEST_ASSERT_EQUAL_UINT32(1u, __builtin_bswap32(data_len_be));
+    TEST_ASSERT_EQUAL_UINT8(pattern[HAILO_CONTROL_MAX_MEMORY_CHUNK],
+                            mock_last_control_request[32]);
+
+    /* Round-trip confirmation. */
+    uint8_t readback[HAILO_CONTROL_MAX_MEMORY_CHUNK + 1];
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_read_memory(0x500, readback, sizeof(readback)));
+    TEST_ASSERT_EQUAL_MEMORY(pattern, readback, sizeof(pattern));
+}
+
+/*
+ * Read response-format assertions the happy-path test didn't quite
+ * cover: verify parameter_count, address_length, data_count_length,
+ * and the BE encoding of data_count.
+ */
+static void test_control_read_memory_sends_correct_wire(void)
+{
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t buf[16];
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_read_memory(0x600, buf, sizeof(buf)));
+
+    uint32_t pcount_be, addr_len_be, addr_be, count_len_be, count_be;
+    memcpy(&pcount_be,    mock_last_control_request + 16, 4);
+    memcpy(&addr_len_be,  mock_last_control_request + 20, 4);
+    memcpy(&addr_be,      mock_last_control_request + 24, 4);
+    memcpy(&count_len_be, mock_last_control_request + 28, 4);
+    memcpy(&count_be,     mock_last_control_request + 32, 4);
+    TEST_ASSERT_EQUAL_UINT32(2u,      __builtin_bswap32(pcount_be));
+    TEST_ASSERT_EQUAL_UINT32(4u,      __builtin_bswap32(addr_len_be));
+    TEST_ASSERT_EQUAL_UINT32(0x600u,  __builtin_bswap32(addr_be));
+    TEST_ASSERT_EQUAL_UINT32(4u,      __builtin_bswap32(count_len_be));
+    TEST_ASSERT_EQUAL_UINT32(16u,     __builtin_bswap32(count_be));
+}
+
 /* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -1961,9 +2128,15 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_write_memory_rejects_when_not_running);
     RUN_TEST(test_control_read_memory_rejects_when_not_running);
     RUN_TEST(test_control_write_memory_sends_correct_wire);
+    RUN_TEST(test_control_read_memory_sends_correct_wire);
     RUN_TEST(test_control_read_memory_returns_device_bytes);
     RUN_TEST(test_control_memory_round_trip);
     RUN_TEST(test_control_memory_chunks_large_transfer);
+    RUN_TEST(test_control_write_memory_single_chunk_boundary);
+    RUN_TEST(test_control_write_memory_partial_last_chunk);
+    RUN_TEST(test_control_write_memory_propagates_fw_error);
+    RUN_TEST(test_control_read_memory_propagates_fw_error);
+    RUN_TEST(test_control_write_memory_rejects_wrong_opcode_echo);
 
     return UnityEnd();
 }
