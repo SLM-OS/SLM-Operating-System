@@ -162,7 +162,14 @@ static const struct net_driver rtl8169_driver = {
 /* Lazy probe — called from the `rtldiag` shell command, NOT from
  * rtl8169_register() at boot. Reading APPL/DBI before knowing whether
  * the RC survived kexec risks an external abort that panics boot;
- * deferring until a user runs rtldiag keeps boot safe. */
+ * deferring until a user runs rtldiag keeps boot safe.
+ *
+ * Race-safe under concurrent `rtldiag` from multi-session shells:
+ * the function only reads MMIO (no side effects) and writes the
+ * same derived values into `g_rtl` regardless of which caller wins.
+ * A concurrent reader via the accessors below could observe a
+ * cosmetically torn view across fields, but no corruption can
+ * result because all writers produce identical values. */
 void rtl8169_refresh_rc_state(void)
 {
     /* APPL controller wrapper — if clocks are gated or resets

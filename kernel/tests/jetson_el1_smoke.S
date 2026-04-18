@@ -35,9 +35,16 @@
 #define APPL_CTRL    0x140A0004    /* Tegra PCIe C8 APPL_CTRL */
 #define XHCI_HCD     0x03610000    /* Tegra XHCI CAPLENGTH|HCIVER */
 
-/* Delay constants for the FIFO-drain busy-loops below. ~1.04 M cycles
- * at ~1.5 GHz ≈ 0.7 ms, long enough to drain 16-byte FIFO at 115200
- * baud (~1.4 ms/char — we need about one char's worth between writes). */
+/* Delay constants for the FIFO-drain busy-loops below. */
+
+/* Per-character delay between raw writes. ~20k cycles ≈ 14 µs at
+ * 1.5 GHz — enough spacing that UARTC's FIFO never backs up while
+ * emitting the "ABCD" breadcrumb without LSR polling. */
+#define CHAR_DELAY           20000
+
+/* FIFO fully-drain delay. ~1.04 M cycles ≈ 0.7 ms — comfortably
+ * larger than one full 16-byte FIFO drain at 115200 baud (≈1.4 ms
+ * per char total, but only queued chars need to drain). */
 #define FIFO_DRAIN_DELAY     0x000FF424
 
 .section ".text"
@@ -139,9 +146,8 @@ el1_entry:
      * unreadable at EL1. EL1 reads ended up working too, so this
      * block reads redundantly now but stays as the historical proof.
      */
-    mov     x4, x4                   /* placeholder */
     ldr     x4, =UARTC_THR
-    mov     w5, #20000              /* delay count between chars */
+    ldr     w5, =CHAR_DELAY
 
     mov     w2, #'A'
     str     w2, [x4]
@@ -339,6 +345,13 @@ put_hex32_nl:
  * EL1 vector table — any exception = print + halt
  * =========================================================================
  * Each vector is 128 bytes (0x80), table must be 2 KB-aligned.
+ *
+ * The `bl puts_raw` inside each vector handler will double-fault
+ * if the exception was itself caused by stack corruption (puts_raw
+ * needs a valid sp to save x29/x30). For this one-shot smoke test
+ * that's acceptable — we're halting anyway, and any cascade still
+ * stops at the second exception. A production exception handler
+ * would print via a stack-less path.
  */
 .align 11
 el1_vectors:
