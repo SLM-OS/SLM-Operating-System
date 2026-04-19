@@ -27,6 +27,7 @@
 
 #include "inference_device.h"
 #include "hailo.h"
+#include "hailo_control.h"
 #include "hailo_infer.h"
 #include "hef_header.h"
 #include "hef_parser.h"
@@ -246,6 +247,104 @@ static int hailo_backend_load_model(struct inference_device *dev,
     slots[idx].output_shape[0] = (uint16_t)pad_dim(out_pad->padded_height,   out_pad->height);
     slots[idx].output_shape[1] = (uint16_t)pad_dim(out_pad->padded_width,    out_pad->width);
     slots[idx].output_shape[2] = (uint16_t)pad_dim(out_pad->padded_features, out_pad->features);
+
+    /* 5. Upload the CCW weight stream. For v2+ HEFs (write_data_ccw_ptr
+     * actions) the payload bytes live in the CCWS block after the
+     * proto body at outer.ccws_offset; pass that as ccws_base. For
+     * v0/v1 HEFs the payload is inline in the proto and ccws_base is
+     * unused. Device base address of 0 lets firmware treat the stream
+     * as append-from-start; the CCW header words in each payload
+     * self-describe their target on-chip destinations, so a single
+     * contiguous upload is sufficient.
+     *
+     * If CCW upload fails, roll back the slot (so a retry doesn't
+     * leak it) and propagate the error to the caller. */
+    if (info.ccw_action_count > 0) {
+        const uint8_t *ccws_base = (const uint8_t *)model + outer.ccws_offset;
+        uint64_t uploaded = 0;
+        int urc = hailo_control_upload_ccw(&info, proto, ccws_base,
+                                           /*device_base=*/0, &uploaded);
+        if (urc != HAILO_OK) {
+            WARN("hailo backend: CCW upload failed (rc=%d after %lu bytes)",
+                 urc, (unsigned long)uploaded);
+            irq_flags_t _f = spin_lock_irqsave(&slots_lock);
+            memset(&slots[idx], 0, sizeof(slots[idx]));
+            spin_unlock_irqrestore(&slots_lock, _f);
+            return hailo_err_to_inf(urc);
+        }
+        INFO("hailo backend: CCW upload OK — %lu bytes across %u actions",
+             (unsigned long)uploaded, info.ccw_action_count);
+    }
+
+    /* 6. CONFIG_STREAM for input + output, but ONLY when both pads
+     * carry real stream-config metadata from the HEF. Synthetic test
+     * HEFs (no has_stream_info on pads) skip this step — they only
+     * exercise the parse + slot-allocation path, not the live
+     * firmware handshake. Real HEFs always populate has_stream_info
+     * via the edge_layer_base decode. */
+    if (!in_pad->has_stream_info || !out_pad->has_stream_info) {
+        *out = (inference_model_handle_t)(idx + 1);
+        return INF_OK;
+    }
+
+    /* Populates firmware-side stream context so subsequent VDMA
+     * submit-and-wait actually completes (instead of timing out
+     * because firmware has no pipe set up). nn_stream_config values
+     * come from the HEF's edge_layer_base; we pass them as-is.
+     *
+     * skip_nn_stream_config=false: firmware must program its DMA
+     * rings from the values we supplied. pcie_channel_index matches
+     * the slot's cfg.input_channel / output_channel (host-chosen 0/1).
+     * Dataflow manager id returned is captured into in_dmid/out_dmid
+     * but not stored in the slot — the slot's cfg already carries
+     * everything hailo_infer_run needs. */
+    uint8_t in_dmid = 0, out_dmid = 0;
+    {
+        struct hailo_stream_pcie_config scfg = {
+            .stream_index          = 0,
+            .is_input              = true,
+            .skip_nn_stream_config = false,
+            .pcie_channel_index    = slots[idx].cfg.input_channel,
+            .pcie_dataflow_type    = 2,     /* PCIE_CONTINUOUS */
+        };
+        scfg.nn_stream_config.core_bytes_per_buffer   = slots[idx].cfg.input_page_size;
+        scfg.nn_stream_config.core_buffers_per_frame  =
+            (uint16_t)(in_pad->has_stream_info ? in_pad->core_buffers_per_frame : 1);
+        scfg.nn_stream_config.periph_bytes_per_buffer = slots[idx].cfg.input_page_size;
+        scfg.nn_stream_config.periph_buffers_per_frame = 1;
+        int src = hailo_control_config_stream_pcie(&scfg, &in_dmid);
+        if (src != HAILO_OK) {
+            WARN("hailo backend: CONFIG_STREAM (input) failed rc=%d", src);
+            irq_flags_t _f = spin_lock_irqsave(&slots_lock);
+            memset(&slots[idx], 0, sizeof(slots[idx]));
+            spin_unlock_irqrestore(&slots_lock, _f);
+            return hailo_err_to_inf(src);
+        }
+    }
+    {
+        struct hailo_stream_pcie_config scfg = {
+            .stream_index          = 0,
+            .is_input              = false,
+            .skip_nn_stream_config = false,
+            .pcie_channel_index    = slots[idx].cfg.output_channel,
+            .desc_page_size        = slots[idx].cfg.output_page_size,
+        };
+        scfg.nn_stream_config.core_bytes_per_buffer   = slots[idx].cfg.output_page_size;
+        scfg.nn_stream_config.core_buffers_per_frame  =
+            (uint16_t)(out_pad->has_stream_info ? out_pad->core_buffers_per_frame : 1);
+        scfg.nn_stream_config.periph_bytes_per_buffer = slots[idx].cfg.output_page_size;
+        scfg.nn_stream_config.periph_buffers_per_frame = 1;
+        int src = hailo_control_config_stream_pcie(&scfg, &out_dmid);
+        if (src != HAILO_OK) {
+            WARN("hailo backend: CONFIG_STREAM (output) failed rc=%d", src);
+            irq_flags_t _f = spin_lock_irqsave(&slots_lock);
+            memset(&slots[idx], 0, sizeof(slots[idx]));
+            spin_unlock_irqrestore(&slots_lock, _f);
+            return hailo_err_to_inf(src);
+        }
+    }
+    INFO("hailo backend: streams configured (in dmid=%u, out dmid=%u)",
+         (unsigned)in_dmid, (unsigned)out_dmid);
 
     /* Handle numbering: 1..HAILO_MAX_MODELS. INF_BUILTIN_HANDLE (=0)
      * stays reserved for backends with compiled-in weights. */

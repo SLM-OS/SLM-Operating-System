@@ -1084,9 +1084,11 @@ static void test_decode_ccw_truncation(void)
 }
 
 /* Action carrying write_data_ccw_ptr (tag 16) instead of write_data_ccw
- * (tag 3): today we don't extract ptr variants; should count zero and
- * parse cleanly. */
-static void test_decode_ccw_ptr_variant_skipped(void)
+ * (tag 3): v2+ HEFs source payload bytes from a separate CCWS block
+ * rather than inline in the proto. The parser now decodes both, flagging
+ * the ptr variant with is_ccw_ptr=true so the uploader knows to resolve
+ * data_offset_in_blob against the CCWS base, not the proto base. */
+static void test_decode_ccw_ptr_variant_decoded(void)
 {
     /* ProtoHEFActionWriteDataCcwPtr body: offset(1)=128, size(2)=64,
      * cfg_channel_index(3)=5. */
@@ -1113,9 +1115,14 @@ static void test_decode_ccw_ptr_variant_skipped(void)
 
     struct hef_info info;
     TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
-    /* write_data_ccw_ptr is not yet extracted — expect zero count. */
-    TEST_ASSERT_EQUAL_UINT32(0, info.ccw_action_count);
-    TEST_ASSERT_EQUAL_UINT64(0, info.ccw_total_bytes);
+    TEST_ASSERT_EQUAL_UINT32(1, info.ccw_action_count);
+    TEST_ASSERT_EQUAL_UINT64(64, info.ccw_total_bytes);
+    const struct hef_ccw_action *a = &info.ccw_actions[0];
+    TEST_ASSERT_TRUE(a->is_ccw_ptr);
+    TEST_ASSERT_EQUAL_UINT32(128, a->data_offset_in_blob);  /* CCWS-relative */
+    TEST_ASSERT_EQUAL_UINT32(64, a->data_size);
+    TEST_ASSERT_TRUE(a->cfg_channel_index_known);
+    TEST_ASSERT_EQUAL_UINT32(5, a->cfg_channel_index);
 }
 
 /* A blob with no preliminary_config leaves ccw_action_count==0. */
@@ -1177,7 +1184,7 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_ccw_missing_cfg_channel);
     RUN_TEST(test_decode_ccw_second_ng_ignored);
     RUN_TEST(test_decode_ccw_truncation);
-    RUN_TEST(test_decode_ccw_ptr_variant_skipped);
+    RUN_TEST(test_decode_ccw_ptr_variant_decoded);
     RUN_TEST(test_decode_ccw_no_preliminary_config);
 
     return UnityEnd();

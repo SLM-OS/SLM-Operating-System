@@ -329,8 +329,19 @@ struct hef_info;
  * (if non-NULL) carries the total byte count — a sanity check
  * against info->ccw_total_bytes.
  */
+/*
+ * `ccws_base` supplies the byte source for v2+ write_data_ccw_ptr
+ * actions (those whose is_ccw_ptr flag is true in hef_ccw_action).
+ * It should point at the start of the HEF's CCWS block — i.e.
+ * (hef_file_base + outer.ccws_offset). Pass NULL if the HEF only
+ * uses v0/v1 write_data_ccw actions (all actions have is_ccw_ptr
+ * false); the upload will still work but v2+ actions referencing
+ * a NULL ccws_base return HAILO_ERR_INVAL early. blob_base remains
+ * the proto-body base for v0/v1 actions.
+ */
 int hailo_control_upload_ccw(const struct hef_info *info,
                              const void *blob_base,
+                             const void *ccws_base,
                              uint32_t device_base_addr,
                              uint64_t *out_bytes_uploaded);
 

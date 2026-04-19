@@ -379,7 +379,22 @@ slmos> bench sched-policy
 
 Parser fix is working: both input + output pads extracted with full HEF-derived stream config and quant info. Policy armed. `AI_SCHED_N_ACTIONS=24` picked up correctly on Pi 5 (previously 42 from the Jetson default in `ai_types.h`).
 
-`bench sched-policy` shows `hailo-8 0/1000 ok` — hailo_infer_run times out because firmware has never received the model context. `hailo load sched` today only parses + registers. For real inference, the already-implemented Phase 5.3 primitives need to be chained in: `hailo_control_upload_ccw(meta, body, base, ...)` to DMA weights, then `hailo_control_config_stream_pcie(cfg, ...)` per input/output stream to establish the dataflow_manager_id. Both functions exist; they're just not called from the sched-install path yet.
+**CCW + CONFIG_STREAM chain wired into `load_model` (2026-04-19):** `inference_device_hailo::load_model` now iterates HEF CCW actions via `hailo_control_upload_ccw`, then fires `hailo_control_config_stream_pcie` for input + output. Works end-to-end against mock firmware (test suite exercises it).
+
+**New parser work — `write_data_ccw_ptr` (v2+):** DFC 3.33.1 emits weight CCWs as `ProtoHEFActionWriteDataCcwPtr` (field 16 of the action oneof) — offset+size pointers into the separate CCWS block that follows the proto body. Added nanopb decoder for this variant; `struct hef_ccw_action.is_ccw_ptr` tells the uploader to resolve `data_offset_in_blob` against `ccws_base = hef_file + outer.ccws_offset` instead of against the proto body. Our scheduler_mlp_pi5.hef yields **46 CCW_PTR actions totalling 208 328 bytes** — matches the CCWS block's physical size.
+
+**Next hardware blocker — CCW target addressing:**
+
+CCW upload on real hardware now fails at action 0 with firmware status `major=0x40030098` (unauthorized WRITE_MEMORY target). Our uploader writes the CCW payload to `device_base_addr` (currently 0) and advances by `action.data_size` per action. That's wrong for v2 CCWs: each CCW payload starts with a 4-byte header encoding the target on-chip register address (or config-channel offset), which firmware parses to route the bytes. Writing to address 0 is rejected because 0 is protected memory.
+
+The fix requires either:
+
+1. **Parse each CCW's internal header** on the host side and WRITE_MEMORY each payload to its encoded target. That mirrors what HailoRT's Linux driver does (`libhailort/src/vdma/vdma_config_manager.cpp` — walks the CCW stream, calls WRITE_MEMORY per payload).
+2. **Use the firmware's config-channel dataflow path** instead of the control-channel WRITE_MEMORY. The firmware has a dedicated config DMA that reads CCWs from a host-side buffer address — CONFIG_STREAM establishes this channel for the `cfg_channel_index` each action references. Then our host WRITE_MEMORY calls land on the config channel's sink, and firmware internally routes.
+
+Option (2) is closer to how Hailo expects it — CONFIG_STREAM for config channels (separate from the per-tensor input/output streams we already configure). Requires another CONFIG_STREAM RPC per `cfg_channel_index`. Tracked as the Phase 6.2 closing item.
+
+Everything else lands cleanly: parser + embed + policy + bench + 170 tests + cross-platform.
 
 **Platform override for AI_SCHED_N_ACTIONS (ai_types.h):** `#if defined(PLATFORM_RASPI5)` → 24, else → 42. The in-tree MLP weights are 42-action; Pi 5 reads only the first 24 rows of w3. Matches the 24-action `scheduler_mlp_pi5.hef` produced by `scripts/hailo/compile_hef.sh --variant pi5`.
 

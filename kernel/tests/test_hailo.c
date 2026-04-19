@@ -3117,9 +3117,9 @@ static void test_ccw_upload_rejects_null(void)
     struct hef_info info = {0};
     uint8_t blob[4] = {0};
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(NULL, blob, 0x10000, NULL));
+        hailo_control_upload_ccw(NULL, blob, NULL, 0x10000, NULL));
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, NULL, 0x10000, NULL));
+        hailo_control_upload_ccw(&info, NULL, NULL, 0x10000, NULL));
 }
 
 static void test_ccw_upload_rejects_truncated(void)
@@ -3129,7 +3129,7 @@ static void test_ccw_upload_rejects_truncated(void)
     uint8_t blob[4] = {0};
     info.ccw_actions_truncated = true;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, blob, 0x10000, NULL));
+        hailo_control_upload_ccw(&info, blob, NULL, 0x10000, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
@@ -3141,7 +3141,7 @@ static void test_ccw_upload_rejects_address_wrap(void)
     uint32_t sizes[] = { 8 };
     build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, blob, 0xFFFFFFFC, NULL));
+        hailo_control_upload_ccw(&info, blob, NULL, 0xFFFFFFFC, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
@@ -3152,7 +3152,7 @@ static void test_ccw_upload_empty_info_is_noop(void)
     uint8_t blob[4] = {0};
     uint64_t uploaded = 0xDEADBEEF;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x10000, &uploaded));
+        hailo_control_upload_ccw(&info, blob, NULL, 0x10000, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(0, uploaded);
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
@@ -3169,7 +3169,7 @@ static void test_ccw_upload_single_action(void)
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x100, &uploaded));
+        hailo_control_upload_ccw(&info, blob, NULL, 0x100, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(32, uploaded);
     TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
 
@@ -3194,7 +3194,7 @@ static void test_ccw_upload_multiple_actions_contiguous(void)
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x200, &uploaded));
+        hailo_control_upload_ccw(&info, blob, NULL, 0x200, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(16u + 20u + 12u, uploaded);
     TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
 
@@ -3221,7 +3221,7 @@ static void test_ccw_upload_chunks_large_action(void)
     build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
 
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x400, NULL));
+        hailo_control_upload_ccw(&info, blob, NULL, 0x400, NULL));
     TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
 }
 
@@ -3239,7 +3239,7 @@ static void test_ccw_upload_skips_zero_size_action(void)
     build_ccw_info(&info, blob, sizeof(blob), sizes, 3);
 
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x300, NULL));
+        hailo_control_upload_ccw(&info, blob, NULL, 0x300, NULL));
     TEST_ASSERT_EQUAL_UINT32(2, mock_control_doorbells);
 }
 
@@ -4344,7 +4344,15 @@ static void test_inf_hailo_load_threads_hef_stream_info(void)
      * when run() later feeds the device, the right stream params
      * are used. We can't read the slot's cfg directly; instead, we
      * assert the load succeeded + the input_bytes field (which is
-     * pad-shape-derived) matches the pad shape. */
+     * pad-shape-derived) matches the pad shape.
+     *
+     * With the Phase 6.2+ chain in place, load_model ALSO fires two
+     * CONFIG_STREAM RPCs (input + output) whenever pads carry real
+     * has_stream_info. Enable the mock firmware's config_stream
+     * simulator so the handshake completes rather than timing out. */
+    mock_fw_sim_config_stream_enabled    = true;
+    mock_fw_sim_config_stream_manager_id = 0x42;
+
     uint8_t blob[2048];
     size_t  n = build_test_hef_with_edge_layers(blob, sizeof(blob),
                                                 7, 256, 0, 0x3C000000u,

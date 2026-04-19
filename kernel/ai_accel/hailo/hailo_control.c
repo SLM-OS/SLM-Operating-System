@@ -739,6 +739,7 @@ int hailo_control_read_memory(uint32_t address,
 
 int hailo_control_upload_ccw(const struct hef_info *info,
                              const void *blob_base,
+                             const void *ccws_base,
                              uint32_t device_base_addr,
                              uint64_t *out_bytes_uploaded)
 {
@@ -758,16 +759,28 @@ int hailo_control_upload_ccw(const struct hef_info *info,
         return HAILO_ERR_INVAL;
     }
 
-    const uint8_t *base = (const uint8_t *)blob_base;
+    const uint8_t *blob = (const uint8_t *)blob_base;
+    const uint8_t *ccws = (const uint8_t *)ccws_base;
     uint32_t cur_addr   = device_base_addr;
     uint64_t total      = 0;
 
     for (uint32_t i = 0; i < info->ccw_action_count; i++) {
         const struct hef_ccw_action *a = &info->ccw_actions[i];
         if (a->data_size == 0) continue;   /* nothing to write */
-        int rc = hailo_control_write_memory(cur_addr,
-                                            base + a->data_offset_in_blob,
-                                            a->data_size);
+
+        const uint8_t *src;
+        if (a->is_ccw_ptr) {
+            if (!ccws) {
+                WARN("hailo: CCW upload skipped action %u: is_ccw_ptr "
+                     "but ccws_base is NULL", i);
+                return HAILO_ERR_INVAL;
+            }
+            src = ccws + a->data_offset_in_blob;
+        } else {
+            src = blob + a->data_offset_in_blob;
+        }
+
+        int rc = hailo_control_write_memory(cur_addr, src, a->data_size);
         if (rc != HAILO_OK) {
             WARN("hailo: CCW upload failed at action %u (rc=%d, "
                  "address=0x%x, size=%u)", i, rc, cur_addr, a->data_size);

@@ -392,14 +392,24 @@ static bool ccw_data_cb(pb_istream_t *stream,
     return pb_read(stream, NULL, data_len);
 }
 
+static bool decode_write_data_ccw_ptr_cb(pb_istream_t *stream,
+                                         const pb_field_t *field,
+                                         void **arg);
+
 static bool decode_write_data_ccw_cb(pb_istream_t *stream,
                                      const pb_field_t *field,
                                      void **arg)
 {
     /* Nanopb shares the callback slot across every branch of
-     * ProtoHEFAction's `action` oneof. Only the write_data_ccw
-     * branch carries the fields we care about; others (write_data,
-     * enable_lcu, debug, …) just get skipped. */
+     * ProtoHEFAction's `action` oneof, so this one function runs
+     * for every action-oneof tag on the wire. We handle two:
+     *   - write_data_ccw      (v0/v1, inline payload bytes)
+     *   - write_data_ccw_ptr  (v2+, payload in the separate CCWS block)
+     * Every other branch (write_data, enable_lcu, debug, …) just
+     * gets skipped past. */
+    if (field->tag == ProtoHEFAction_write_data_ccw_ptr_tag) {
+        return decode_write_data_ccw_ptr_cb(stream, field, arg);
+    }
     if (field->tag != ProtoHEFAction_write_data_ccw_tag) {
         return pb_read(stream, NULL, stream->bytes_left);
     }
@@ -441,6 +451,96 @@ static bool decode_write_data_ccw_cb(pb_istream_t *stream,
     return true;
 }
 
+/*
+ * v2+ variant: write_data_ccw_ptr. Instead of carrying payload bytes
+ * inline (write_data_ccw field 3), the action carries a pointer into
+ * the separate CCWS block that follows the proto body. Three scalars:
+ *   uint64 offset — byte offset into the CCWS block
+ *   uint32 size   — payload length
+ *   uint32 cfg_channel_index
+ *
+ * We store offset into `data_offset_in_blob` (semantic is caller-side;
+ * is_ccw_ptr=true tells the uploader to resolve against ccws_base
+ * rather than blob_base). Offsets are capped at UINT32_MAX; larger
+ * values would overflow our 32-bit storage but CCWS blocks are
+ * bounded well under that in practice (the scheduler_mlp_pi5.hef
+ * CCWS block is ~200 KB).
+ */
+static bool decode_write_data_ccw_ptr_cb(pb_istream_t *stream,
+                                         const pb_field_t *field,
+                                         void **arg)
+{
+    if (field->tag != ProtoHEFAction_write_data_ccw_ptr_tag) {
+        return pb_read(stream, NULL, stream->bytes_left);
+    }
+
+    struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
+
+    /* Parse the inline scalars ourselves — three varint/uint32 fields
+     * which are simpler to walk directly than going through the nanopb
+     * sub-decode + callback wiring dance. */
+    memset(&cctx->pending, 0, sizeof(cctx->pending));
+    cctx->pending.is_ccw_ptr = true;
+    cctx->pending_has_data   = false;
+
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no  = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7u);
+
+        if (wire_type == 0) {   /* varint */
+            uint64_t v = 0;
+            if (!pb_decode_varint(stream, &v)) return false;
+            switch (field_no) {
+            case 1:     /* offset (uint64) — clamp to u32 (see comment) */
+                if (v > UINT32_MAX) return false;
+                cctx->pending.data_offset_in_blob = (uint32_t)v;
+                break;
+            case 2:     /* size (uint32) */
+                if (v > UINT32_MAX) return false;
+                cctx->pending.data_size = (uint32_t)v;
+                cctx->pending_has_data  = true;
+                break;
+            case 3:     /* cfg_channel_index (uint32) */
+                if (v > UINT32_MAX) return false;
+                cctx->pending.cfg_channel_index       = (uint32_t)v;
+                cctx->pending.cfg_channel_index_known = true;
+                break;
+            default:
+                break;
+            }
+            continue;
+        }
+
+        /* Skip unknown wire types by size. */
+        switch (wire_type) {
+        case 1: if (!pb_read(stream, NULL, 8)) return false; break;
+        case 2: {
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        case 5: if (!pb_read(stream, NULL, 4)) return false; break;
+        default: return false;
+        }
+    }
+
+    /* Commit if size was set. Zero-size actions are skipped silently. */
+    if (!cctx->pending_has_data || cctx->pending.data_size == 0) return true;
+
+    if (cctx->info->ccw_action_count < HEF_PARSER_MAX_CCW_ACTIONS) {
+        cctx->info->ccw_actions[cctx->info->ccw_action_count] = cctx->pending;
+    } else {
+        cctx->info->ccw_actions_truncated = true;
+    }
+    cctx->info->ccw_action_count++;
+    cctx->info->ccw_total_bytes += cctx->pending.data_size;
+    return true;
+}
+
 static bool decode_action_cb(pb_istream_t *stream,
                              const pb_field_t *field,
                              void **arg)
@@ -449,8 +549,11 @@ static bool decode_action_cb(pb_istream_t *stream,
     struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
 
     ProtoHEFAction act = ProtoHEFAction_init_default;
-    /* Wire the oneof callback shared across every action branch —
-     * decode_write_data_ccw_cb filters by field->tag. */
+    /* The oneof's branches share a single callback slot (they're
+     * aliased in the generated union). Wire one dispatcher; it
+     * dispatches internally by field->tag. Writing to
+     * write_data_ccw is sufficient to reach every branch because
+     * all oneof entries alias the same pb_callback_t storage. */
     act.action.write_data_ccw.funcs.decode = decode_write_data_ccw_cb;
     act.action.write_data_ccw.arg          = cctx;
     return pb_decode(stream, ProtoHEFAction_fields, &act);
