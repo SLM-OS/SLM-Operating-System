@@ -383,18 +383,30 @@ Parser fix is working: both input + output pads extracted with full HEF-derived 
 
 **New parser work — `write_data_ccw_ptr` (v2+):** DFC 3.33.1 emits weight CCWs as `ProtoHEFActionWriteDataCcwPtr` (field 16 of the action oneof) — offset+size pointers into the separate CCWS block that follows the proto body. Added nanopb decoder for this variant; `struct hef_ccw_action.is_ccw_ptr` tells the uploader to resolve `data_offset_in_blob` against `ccws_base = hef_file + outer.ccws_offset` instead of against the proto body. Our scheduler_mlp_pi5.hef yields **46 CCW_PTR actions totalling 208 328 bytes** — matches the CCWS block's physical size.
 
-**Next hardware blocker — CCW target addressing:**
+**Next real blocker — CONTEXT_SWITCH protocol (not CCW delivery itself):**
 
-CCW upload on real hardware now fails at action 0 with firmware status `major=0x40030098` (unauthorized WRITE_MEMORY target). Our uploader writes the CCW payload to `device_base_addr` (currently 0) and advances by `action.data_size` per action. That's wrong for v2 CCWs: each CCW payload starts with a 4-byte header encoding the target on-chip register address (or config-channel offset), which firmware parses to route the bytes. Writing to address 0 is rejected because 0 is protected memory.
+Hardware verify on pi-5-1 with the full chain — CCW upload + CONFIG_STREAM per stream — reveals that both fail at the firmware layer:
 
-The fix requires either:
+```
+[WARN] hailo: WRITE_MEMORY failed (major=0x40030098 minor=0x40030098 opcode_echo=0x1)
+[WARN] hailo backend: CCW upload failed (rc=-3 after 0 bytes) — v2+ HEFs require context-switch protocol
+[WARN] hailo: CONFIG_STREAM failed (major=0x40030050 minor=0x40030005 opcode_echo=0xffffffff)
+[WARN] hailo backend: CONFIG_STREAM best-effort failed (in rc=-3, out rc=-3) — slot stays live; inference will time out.
+hailo: sched: model loaded (handle=1), ai_policy_hailo armed with HEF quant
+```
 
-1. **Parse each CCW's internal header** on the host side and WRITE_MEMORY each payload to its encoded target. That mirrors what HailoRT's Linux driver does (`libhailort/src/vdma/vdma_config_manager.cpp` — walks the CCW stream, calls WRITE_MEMORY per payload).
-2. **Use the firmware's config-channel dataflow path** instead of the control-channel WRITE_MEMORY. The firmware has a dedicated config DMA that reads CCWs from a host-side buffer address — CONFIG_STREAM establishes this channel for the `cfg_channel_index` each action references. Then our host WRITE_MEMORY calls land on the config channel's sink, and firmware internally routes.
+Our `hailo_control_upload_ccw` uses `WRITE_MEMORY` — a generic "poke bytes at address X" RPC that works for v0/v1 HEFs' inline CCWs but not for v2+ where weights go via the firmware's own context-switch dataflow path. The real HailoRT driver at `libhailort/src/hef/hef_*.cpp` uses two different control opcodes:
 
-Option (2) is closer to how Hailo expects it — CONFIG_STREAM for config channels (separate from the per-tensor input/output streams we already configure). Requires another CONFIG_STREAM RPC per `cfg_channel_index`. Tracked as the Phase 6.2 closing item.
+- `CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER` — declares a network group to firmware
+- `CONTEXT_SWITCH_SET_CONTEXT_INFO` — sends an action list that firmware's context switcher executes, INCLUDING pulling CCW payloads from host-side DMA buffers
 
-Everything else lands cleanly: parser + embed + policy + bench + 170 tests + cross-platform.
+Same reason CONFIG_STREAM fails (`0x40030050` = `STREAM__INVALID_CONFIG_STREAM_INDEX`): firmware doesn't know the streams exist because `SET_CONTEXT_INFO` hasn't been sent yet.
+
+**Scope assessment:** Implementing `CONTEXT_SWITCH_SET_CONTEXT_INFO` is a full new subsystem — action-list packing + CCW DMA buffer management + maybe `CORE_IDENTIFY` + bridge opcodes. Estimate 500-1000 more LoC, needs a clean proto-level understanding of the action stream we're encoding. Not Phase 6.2 scope; tracked as the natural next phase (call it 6.3).
+
+**Best-effort design choice (2026-04-19):** upload + CONFIG_STREAM are now non-fatal — warnings log, slot stays alive, `bench sched-policy` runs through the Hailo path and reports `0/1000 ok` with 10 ms timeouts per decision. That's the CORRECT signal for "pipeline complete, firmware has no context". When Phase 6.3 lands CONTEXT_SWITCH, the WARN lines flip to INFO and `hailo-8` numbers show up.
+
+**Cross-platform:** QEMU, Pi 5, Jetson, x86-64 all build clean under AI_SCHED=ON. All 170 Hailo tests + 23 HEF tests pass in both AI_SCHED=OFF and ON.
 
 **Platform override for AI_SCHED_N_ACTIONS (ai_types.h):** `#if defined(PLATFORM_RASPI5)` → 24, else → 42. The in-tree MLP weights are 42-action; Pi 5 reads only the first 24 rows of w3. Matches the 24-action `scheduler_mlp_pi5.hef` produced by `scripts/hailo/compile_hef.sh --variant pi5`.
 
