@@ -100,10 +100,12 @@ enum hailo_control_cpu {
 /* Subset of HailoRT's HAILO_CONTROL_OPCODE_*. Add more as the
  * kernel learns to send them. */
 enum hailo_control_opcode {
-    HAILO_CONTROL_OPCODE_IDENTIFY       = 0x00,
-    HAILO_CONTROL_OPCODE_WRITE_MEMORY   = 0x01,
-    HAILO_CONTROL_OPCODE_READ_MEMORY    = 0x02,
-    HAILO_CONTROL_OPCODE_CONFIG_STREAM  = 0x03,
+    HAILO_CONTROL_OPCODE_IDENTIFY                             = 0x00,
+    HAILO_CONTROL_OPCODE_WRITE_MEMORY                         = 0x01,
+    HAILO_CONTROL_OPCODE_READ_MEMORY                          = 0x02,
+    HAILO_CONTROL_OPCODE_CONFIG_STREAM                        = 0x03,
+    HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER = 0x20,
+    HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO      = 0x21,
     /* Full table in docs/reference/hailort-control-protocol.h. */
 };
 
@@ -442,6 +444,71 @@ struct hailo_stream_pcie_config {
 int hailo_control_config_stream_pcie(
     const struct hailo_stream_pcie_config *cfg,
     uint8_t *out_dataflow_manager_id);
+
+/*
+ * Constants mirroring hailort's context-switch protocol, kept here
+ * so callers don't have to drag in the whole hailort header set.
+ * See docs/reference/hailort-control-protocol.h lines 40-93 for
+ * upstream definitions.
+ */
+#define HAILO_CS_MAX_CFG_CHANNELS         24u   /* CONTROL_PROTOCOL__MAX_CFG_CHANNELS */
+#define HAILO_CS_MAX_VDMA_ENGINES         3u    /* CONTROL_PROTOCOL__MAX_VDMA_ENGINES_COUNT */
+#define HAILO_CS_MAX_CONTEXT_SIZE         4096u /* CONTROL_PROTOCOL__MAX_CONTEXT_SIZE */
+
+/* Context_type values for SET_CONTEXT_INFO. Mirrors
+ * CONTROL_PROTOCOL__context_switch_context_type_t. */
+enum hailo_cs_context_type {
+    HAILO_CS_CONTEXT_TYPE_PRELIMINARY      = 0,
+    HAILO_CS_CONTEXT_TYPE_DYNAMIC          = 1,
+    HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING  = 2,
+    HAILO_CS_CONTEXT_TYPE_ACTIVATION       = 3,
+};
+
+/*
+ * Host-facing mirror of CONTROL_PROTOCOL__application_header_t.
+ * Field order matches the wire struct exactly so callers can
+ * populate this in natural C style without worrying about the
+ * packed encoding. hailo_control_set_network_group_header copies
+ * into a packed wire buffer before transmission.
+ *
+ * `external_action_list_address` must be 0 for the control-channel
+ * (non-DDR) action-list path — the only path SLM-OS implements in
+ * Phase 6.3. `boundary_channels_bitmap` is a bit-per-VDMA-channel
+ * per engine; callers OR in the channels they plan to drive for
+ * this network group.
+ */
+struct hailo_cs_application_header {
+    uint16_t dynamic_contexts_count;
+    /* INFER_FEATURE_LIST_t — 4 bools, all default-false. */
+    bool     preliminary_run_asap;
+    bool     batch_register_config;
+    bool     can_fast_batch_switch;
+    bool     split_allow_input_action;
+    /* VALIDATION_FEATURE_LIST_t — 1 bool, default false. */
+    bool     is_abbale_supported;
+    uint8_t  networks_count;
+    uint16_t csm_buffer_size;
+    uint16_t batch_size;
+    uint32_t external_action_list_address;              /* 0 = control-channel path */
+    uint32_t boundary_channels_bitmap[HAILO_CS_MAX_VDMA_ENGINES];
+    uint8_t  config_channels_count;
+    uint8_t  config_channel_packed_id[HAILO_CS_MAX_CFG_CHANNELS];
+};
+
+/*
+ * SET_NETWORK_GROUP_HEADER (opcode 0x20, CPU_ID_CORE_CPU). Declares
+ * a network group to the firmware's context switcher before any
+ * per-context action list is sent. The `application_header` is
+ * memcpy'd raw (native LE) onto the wire after a BE
+ * application_header_length prefix.
+ *
+ * Returns HAILO_OK on success, HAILO_ERR_INVAL on null arg or
+ * out-of-range counts, HAILO_ERR_IO if firmware returned non-zero
+ * status (caller checks kernel log for major/minor), or
+ * HAILO_ERR_TIMEOUT / HAILO_ERR_BAD_FIRMWARE from the transport.
+ */
+int hailo_control_set_network_group_header(
+    const struct hailo_cs_application_header *header);
 
 /*
  * Reset internal control-channel state (sequence counter and the

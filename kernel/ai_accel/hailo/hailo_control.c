@@ -1030,3 +1030,115 @@ int hailo_control_config_stream_pcie(
     spin_unlock(&control_lock);
     return HAILO_OK;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Context-switch: SET_NETWORK_GROUP_HEADER (opcode 0x20, CORE CPU).          */
+/* -------------------------------------------------------------------------- */
+
+/* Wire mirror of CONTROL_PROTOCOL__application_header_t. HailoRT's
+ * #pragma pack(1) applies to the entire region covering this struct
+ * (docs/reference/hailort-control-protocol.h:273..1461), so bools
+ * ride as 1-byte and there's no inter-field padding. Total size:
+ *   u16(2) + 4 bools(4) + bool(1) + u8(1) + 2×u16(4) + u32(4)
+ *   + 3×u32(12) + u8(1) + 24×u8(24) = 53 bytes. */
+struct hailo_cs_application_header_wire {
+    uint16_t dynamic_contexts_count;       /* native LE */
+    uint8_t  preliminary_run_asap;
+    uint8_t  batch_register_config;
+    uint8_t  can_fast_batch_switch;
+    uint8_t  split_allow_input_action;
+    uint8_t  is_abbale_supported;
+    uint8_t  networks_count;
+    uint16_t csm_buffer_size;              /* native LE */
+    uint16_t batch_size;                   /* native LE */
+    uint32_t external_action_list_address; /* native LE */
+    uint32_t boundary_channels_bitmap[HAILO_CS_MAX_VDMA_ENGINES]; /* native LE */
+    uint8_t  config_channels_count;
+    uint8_t  config_channel_packed_id[HAILO_CS_MAX_CFG_CHANNELS];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_application_header_wire) == 53,
+               "application_header wire size must be 53 bytes");
+
+struct hailo_cs_set_ngh_req_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;              /* BE, = 1 */
+    uint32_t application_header_length;    /* BE, = 53 */
+    struct hailo_cs_application_header_wire application_header;
+} __attribute__((packed));
+
+struct hailo_cs_set_ngh_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;              /* BE, = 0 */
+} __attribute__((packed));
+
+static struct hailo_cs_set_ngh_req_wire  control_set_ngh_req;
+static struct hailo_cs_set_ngh_resp_wire control_set_ngh_resp;
+
+int hailo_control_set_network_group_header(
+    const struct hailo_cs_application_header *header)
+{
+    if (!header) return HAILO_ERR_INVAL;
+    if (header->config_channels_count > HAILO_CS_MAX_CFG_CHANNELS) return HAILO_ERR_INVAL;
+
+    spin_lock(&control_lock);
+
+    struct hailo_cs_set_ngh_req_wire *r = &control_set_ngh_req;
+    memset(r, 0, sizeof(*r));
+
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER);
+    r->parameter_count = hailo_cpu_to_be32(1u);
+    r->application_header_length =
+        hailo_cpu_to_be32((uint32_t)sizeof(r->application_header));
+
+    /* Field-for-field copy from host struct to packed wire struct.
+     * Scalars stay native LE; only the outer length/parameter_count
+     * prefix is BE (as above). */
+    r->application_header.dynamic_contexts_count  = header->dynamic_contexts_count;
+    r->application_header.preliminary_run_asap    = header->preliminary_run_asap     ? 1u : 0u;
+    r->application_header.batch_register_config   = header->batch_register_config    ? 1u : 0u;
+    r->application_header.can_fast_batch_switch   = header->can_fast_batch_switch    ? 1u : 0u;
+    r->application_header.split_allow_input_action = header->split_allow_input_action ? 1u : 0u;
+    r->application_header.is_abbale_supported     = header->is_abbale_supported      ? 1u : 0u;
+    r->application_header.networks_count          = header->networks_count;
+    r->application_header.csm_buffer_size         = header->csm_buffer_size;
+    r->application_header.batch_size              = header->batch_size;
+    r->application_header.external_action_list_address =
+        header->external_action_list_address;
+    memcpy(r->application_header.boundary_channels_bitmap,
+           header->boundary_channels_bitmap,
+           sizeof(r->application_header.boundary_channels_bitmap));
+    r->application_header.config_channels_count   = header->config_channels_count;
+    memcpy(r->application_header.config_channel_packed_id,
+           header->config_channel_packed_id,
+           sizeof(r->application_header.config_channel_packed_id));
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_set_ngh_req, sizeof(*r),
+                                             &control_set_ngh_resp,
+                                             sizeof(control_set_ngh_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
+                                            &control_set_ngh_req, sizeof(*r),
+                                            &control_set_ngh_resp,
+                                            sizeof(control_set_ngh_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_set_ngh_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER,
+                                       "SET_NETWORK_GROUP_HEADER");
+    spin_unlock(&control_lock);
+    return rc;
+}

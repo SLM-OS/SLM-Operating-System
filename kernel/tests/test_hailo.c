@@ -1801,6 +1801,107 @@ static void test_control_send_recv_cpu_core_rings_core_doorbell(void)
                              mock_control_last_doorbell_val);
 }
 
+static void test_set_network_group_header_rings_core_doorbell_and_wire(void)
+{
+    /* SET_NETWORK_GROUP_HEADER (opcode 0x20) targets CPU_ID_CORE_CPU.
+     * Seed a minimal success response, pack a known header, and
+     * verify:
+     *   - request opcode on the wire is 0x20 (BE)
+     *   - parameter_count is 1 (BE)
+     *   - application_header_length is 53 (BE)
+     *   - CORE doorbell fired, APP did not
+     *   - the application_header bytes match our packed struct
+     *     byte-for-byte (native LE, 53 bytes). */
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t                             parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  =
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER);
+    fake.parameter_count       = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_cs_application_header h;
+    memset(&h, 0, sizeof(h));
+    h.dynamic_contexts_count    = 3;
+    h.preliminary_run_asap      = true;
+    h.networks_count            = 1;
+    h.csm_buffer_size           = 0x1234;
+    h.batch_size                = 2;
+    h.external_action_list_address = 0;
+    h.boundary_channels_bitmap[0] = 0x00000005;   /* engine 0, channels 0+2 */
+    h.config_channels_count     = 1;
+    h.config_channel_packed_id[0] = 0x11;
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_set_network_group_header(&h));
+
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_core_doorbells);
+
+    /* Inspect the captured request wire bytes:
+     * [common header 16][parameter_count 4][application_header_length 4]
+     * [application_header 53]. */
+    TEST_ASSERT_TRUE(mock_last_control_request_len >= 16 + 4 + 4 + 53);
+    const uint8_t *req = mock_last_control_request;
+    uint32_t opcode, param_count, app_len;
+    memcpy(&opcode,      req + 12, 4);  /* offset of `opcode` in common header */
+    memcpy(&param_count, req + 16, 4);
+    memcpy(&app_len,     req + 20, 4);
+    TEST_ASSERT_EQUAL_UINT32(
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER),
+        opcode);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(1u),  param_count);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(53u), app_len);
+
+    /* application_header bytes, native LE. Start at offset 24. */
+    const uint8_t *ah = req + 24;
+    uint16_t dyn_count;
+    memcpy(&dyn_count, ah + 0, 2);
+    TEST_ASSERT_EQUAL_UINT16(3, dyn_count);
+    TEST_ASSERT_EQUAL_UINT8(1, ah[2]);   /* preliminary_run_asap */
+    TEST_ASSERT_EQUAL_UINT8(0, ah[3]);   /* batch_register_config */
+    TEST_ASSERT_EQUAL_UINT8(0, ah[4]);   /* can_fast_batch_switch */
+    TEST_ASSERT_EQUAL_UINT8(0, ah[5]);   /* split_allow_input_action */
+    TEST_ASSERT_EQUAL_UINT8(0, ah[6]);   /* is_abbale_supported */
+    TEST_ASSERT_EQUAL_UINT8(1, ah[7]);   /* networks_count */
+    uint16_t csm;
+    memcpy(&csm, ah + 8, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x1234, csm);
+    uint16_t bs;
+    memcpy(&bs, ah + 10, 2);
+    TEST_ASSERT_EQUAL_UINT16(2, bs);
+    uint32_t ext_addr;
+    memcpy(&ext_addr, ah + 12, 4);
+    TEST_ASSERT_EQUAL_UINT32(0, ext_addr);
+    uint32_t bitmap0;
+    memcpy(&bitmap0, ah + 16, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x00000005, bitmap0);
+    TEST_ASSERT_EQUAL_UINT8(1,    ah[28]);   /* config_channels_count */
+    TEST_ASSERT_EQUAL_UINT8(0x11, ah[29]);   /* config_channel_packed_id[0] */
+}
+
+static void test_set_network_group_header_rejects_null(void)
+{
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+                          hailo_control_set_network_group_header(NULL));
+}
+
+static void test_set_network_group_header_rejects_bad_config_count(void)
+{
+    struct hailo_cs_application_header h;
+    memset(&h, 0, sizeof(h));
+    h.config_channels_count = HAILO_CS_MAX_CFG_CHANNELS + 1;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+                          hailo_control_set_network_group_header(&h));
+}
+
 static void test_control_send_recv_default_rings_app_doorbell(void)
 {
     /* The APP-default path (plain hailo_control_send_recv via
@@ -4725,6 +4826,9 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_identify_happy_path);
     RUN_TEST(test_control_identify_timeout_no_response);
     RUN_TEST(test_control_send_recv_cpu_core_rings_core_doorbell);
+    RUN_TEST(test_set_network_group_header_rings_core_doorbell_and_wire);
+    RUN_TEST(test_set_network_group_header_rejects_null);
+    RUN_TEST(test_set_network_group_header_rejects_bad_config_count);
     RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);
