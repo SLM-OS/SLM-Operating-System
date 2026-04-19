@@ -169,7 +169,7 @@ from a prior driver (bare-metal x86-64 / UEFI-direct Jetson).
 | Engine reset + PIO upload | N/A | N/A | Working on GSP Falcon | Working on GSP + SEC2 |
 | Signed ucode authentication | N/A | N/A | Blocked: GSP priv-lockdown | FWSEC-FRTS 3/3; Booter Load blocked |
 | Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU Phase 5.3 + 5.4 software-complete; firmware boot + IDENTIFY / WRITE_MEMORY / READ_MEMORY / CONFIG_STREAM RPCs verified; `hailo infer` pipeline runs (awaits compiled `.hef` + CONFIG_STREAM context for end-to-end)** (AI HAT+ via pcie1) | CPU (NEON) | CPU (SSE inline-asm) |
-| AI scheduler MLP | CPU | CPU (routed through `inference_device` abstraction); **Phase 6.1 + 6.2 complete — scheduler MLP builds to `.hef` via DFC 3.33.1; `ai_policy_hailo` selectable at runtime via `sched policy ai_hailo`; `hailo load <path> sched` arms the policy with HEF-derived quant + stream config; `bench sched-policy` reports ~25k decisions/sec (40 µs) on Pi 5 cpu-mlp** | CPU | CPU |
+| AI scheduler MLP | CPU | CPU (routed through `inference_device` abstraction); **Phase 6.1 + 6.2 complete — scheduler MLP builds to `.hef` via DFC 3.33.1; parser now handles DFC 3.33.1 v2 HEFs end-to-end (outer header, pad extraction via `sys_index` fallback, `write_data_ccw_ptr` weight-pointer actions); `ai_policy_hailo` selectable at runtime via `sched policy ai_hailo`; `hailo load <path> sched` parses the HEF and arms the policy with HEF-derived quant + stream config; `bench sched-policy` reports ~25k decisions/sec (40 µs) on Pi 5 cpu-mlp. Real NPU inference awaits Phase 6.3 (CONTEXT_SWITCH protocol for firmware context loading).** | CPU | CPU |
 
 ### GPU Bringup Stack (Portable)
 

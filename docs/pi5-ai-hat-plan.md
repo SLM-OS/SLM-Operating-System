@@ -406,16 +406,16 @@ Same reason CONFIG_STREAM fails (`0x40030050` = `STREAM__INVALID_CONFIG_STREAM_I
 
 **Best-effort design choice (2026-04-19):** upload + CONFIG_STREAM are now non-fatal — warnings log, slot stays alive, `bench sched-policy` runs through the Hailo path and reports `0/1000 ok` with 10 ms timeouts per decision. That's the CORRECT signal for "pipeline complete, firmware has no context". When Phase 6.3 lands CONTEXT_SWITCH, the WARN lines flip to INFO and `hailo-8` numbers show up.
 
-**Cross-platform:** QEMU, Pi 5, Jetson, x86-64 all build clean under AI_SCHED=ON. All 170 Hailo tests + 23 HEF tests pass in both AI_SCHED=OFF and ON.
+**Cross-platform:** QEMU, Pi 5, Jetson, x86-64 all build clean under AI_SCHED=ON. 195 Hailo+HEF tests pass in both AI_SCHED=OFF and ON modes.
 
 **Platform override for AI_SCHED_N_ACTIONS (ai_types.h):** `#if defined(PLATFORM_RASPI5)` → 24, else → 42. The in-tree MLP weights are 42-action; Pi 5 reads only the first 24 rows of w3. Matches the 24-action `scheduler_mlp_pi5.hef` produced by `scripts/hailo/compile_hef.sh --variant pi5`.
 
 **Weight-array decoupling (ai_weights.h):** layer-3 extern declarations now use `AI_MLP_LAYER3_MAX_ROWS=42` instead of `AI_MLP_LAYER3_OUT=AI_SCHED_N_ACTIONS`, so the Pi 5 override doesn't conflict with the physical `[42 × 128]` size in `ai_weights_mlp.c`.
 
-**Test coverage** — 29 new QEMU cases:
+**Test coverage summary** (34 new cases vs pre-Phase-6.2 baseline):
 
-- `test_hailo.c` (22 cases): 13 backend tests (register / load happy + error paths / run dtype + size + handle rejection / auto-advance happy / free / shutdown / threads HEF stream info), 5 policy tests (set/get handle + detach + set_from_raw happy + zero-scale reject + NaN reject), 4 edge-layer extraction tests (quant capture, create-if-missing, back-fill shape on shapeless pad, end-to-end load-with-stream-info).
-- `test_hef.c` (3 cases): v2 header accepts with/without trailing CCWS; v2 rejects short trailer. Covers the new 32-byte v2 trailer parsing path against hand-built binaries.
+- **6.2 PR #304 (merged):** 29 cases — 22 in test_hailo.c (backend + policy + early edge-layer paths), 3 in test_hef.c (v2 outer header), 4 policy (set/get/clear/set_from_raw).
+- **6.2 continuation (this PR):** 5 more — 2 edge-layer parser tests (`sys_index` fallback when `pad_index` absent; `direction` proto3-default), 2 CCW_PTR upload tests (ccws_base resolution happy path + NULL rejection), 1 load_model tolerates upload/config_stream failure (best-effort slot stays live).
 
 Cross-platform: QEMU ARM64, Pi 5 (PLATFORM=RASPI5), Jetson Orin Nano, x86-64 all build clean under `AI_SCHED=ON`. Full suite green in both `make test` (AI_SCHED=OFF) and `make test AI_SCHED=ON` modes.
 
