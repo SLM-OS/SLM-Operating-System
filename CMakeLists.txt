@@ -513,7 +513,9 @@ set(KERNEL_SOURCES
     # is #if'd behind PLATFORM_JETSON_ORIN_NANO so non-Jetson
     # platforms link a harmless stub.
     kernel/drivers/usb/xhci/xhci.c
+    kernel/drivers/usb/xhci/xhci_device.c
     kernel/drivers/usb/xhci/xhci_ring.c
+    kernel/drivers/usb/xhci/xhci_xfer.c
     # Jetson EL1 smoke test (one-shot diagnostic) — JETSON_EL1_SMOKE
     $<$<AND:$<BOOL:${JETSON_EL1_SMOKE}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/tests/jetson_el1_smoke.S>
     # Platform-independent networking stack
@@ -586,6 +588,10 @@ set(TEST_SOURCES
     # offset pinning; runs on every target since xhci_tegra.h is
     # platform-neutral.
     kernel/tests/test_xhci_tegra.c
+    # PORTSC decode + context layout (Phase 3A Step 5 of #266).
+    kernel/tests/test_xhci_device.c
+    # TRB builders for control / bulk (Phase 3A Step 6 + 7b of #266).
+    kernel/tests/test_xhci_xfer.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_lua.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>

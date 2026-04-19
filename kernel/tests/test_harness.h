@@ -104,6 +104,12 @@ int test_suite_xhci_ring(void);
 /* Tegra234 XHCI wrapper offset + CSB-paging tests (Phase 3A.2 of #266) */
 int test_suite_xhci_tegra(void);
 
+/* PORTSC decode + context layout (Phase 3A Step 5) */
+int test_suite_xhci_device(void);
+
+/* TRB builder tests (Phase 3A Step 6 + 7b) */
+int test_suite_xhci_xfer(void);
+
 /* Lua scripting tests */
 int test_suite_lua(void);
 
