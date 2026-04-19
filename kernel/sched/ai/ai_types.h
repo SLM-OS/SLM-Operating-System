@@ -54,6 +54,11 @@ _Static_assert(AI_STATE_NUM_CORES * AI_FEATURES_PER_CORE +
  * ============================================================================ */
 
 #ifndef AI_SCHED_N_ACTIONS
+/* PLATFORM_RASPI5 is set on the compiler command line by CMake
+ * (add_compile_definitions(PLATFORM_RASPI5=1) when PLATFORM=RASPI5);
+ * the gate works because that define is live before any source
+ * includes ai_types.h. Other PLATFORM_* macros follow the same
+ * build-system contract. */
 # if defined(PLATFORM_RASPI5)
 #  define AI_SCHED_N_ACTIONS   24  /* Pi 5: 4 cores, no GPU → 4 × 3 × 2 */
 # else

@@ -622,6 +622,7 @@ struct edge_layer_stage {
     uint32_t qp_zp_raw;
 
     bool     seen_stream;
+    bool     seen_sys_index;          /* f8 specifically — used as pad_key fallback */
     uint32_t sys_index;
     uint32_t core_bytes_per_buffer;
     uint32_t core_buffers_per_frame;
@@ -723,7 +724,8 @@ static bool decode_edge_layer_base_cb(pb_istream_t *stream,
             case 5: st->features        = u; st->seen_shape  = true; break;
             case 6: st->padded_features = u; st->seen_shape  = true; break;
             /* Stream config — already captured. */
-            case 8:  st->sys_index              = u; st->seen_stream = true; break;
+            case 8:  st->sys_index              = u;
+                     st->seen_stream = true; st->seen_sys_index = true; break;
             case 9:  st->core_bytes_per_buffer  = u; st->seen_stream = true; break;
             case 10: st->core_buffers_per_frame = u; st->seen_stream = true; break;
             default: break;
@@ -835,12 +837,17 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
      * input layer is proto3-default-stripped; the output layer also
      * omits it). Fall back to the edge_layer's sys_index as the pad
      * key — every boundary edge_layer has one, and matches the data_id
-     * the firmware uses for DMA routing. If neither is present, skip
-     * this edge_layer (non-boundary / intermediate). */
+     * the firmware uses for DMA routing.
+     *
+     * Require seen_sys_index (f8 specifically), not just seen_stream:
+     * f9/f10 can be emitted without f8 in malformed input, leaving
+     * sys_index=0 and collapsing distinct edge_layers onto pad_key=0.
+     * If neither pad_index nor sys_index is present, skip this
+     * edge_layer (non-boundary / intermediate). */
     uint32_t pad_key;
     if (stage.seen_pad_index) {
         pad_key = stage.pad_index;
-    } else if (stage.seen_stream) {
+    } else if (stage.seen_sys_index) {
         pad_key = stage.sys_index;
     } else {
         return true;                                /* non-boundary layer */

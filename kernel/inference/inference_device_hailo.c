@@ -158,15 +158,15 @@ static int pick_largest_pads(const struct hef_info *info,
  * the context-switch protocol lands. */
 static void upload_ccw_best_effort(const struct hef_info *info,
                                    const void *model,
-                                   const uint8_t *proto,
                                    const struct hef_outer_header *outer)
 {
     if (info->ccw_action_count == 0) return;
-    const uint8_t *ccws_base = (const uint8_t *)model + outer->ccws_offset;
+    const uint8_t *proto_base = (const uint8_t *)model + outer->proto_offset;
+    const uint8_t *ccws_base  = (const uint8_t *)model + outer->ccws_offset;
     uint64_t uploaded = 0;
     int urc = hailo_control_upload_ccw(info,
-                                       proto, outer->proto_size,
-                                       ccws_base, outer->ccws_size,
+                                       proto_base, outer->proto_size,
+                                       ccws_base,  outer->ccws_size,
                                        /*device_base=*/0, &uploaded);
     if (urc == HAILO_OK) {
         INFO("hailo backend: CCW upload OK — %lu bytes across %u actions",
@@ -384,7 +384,7 @@ static int hailo_backend_load_model(struct inference_device *dev,
      * CONFIG_STREAM. Failures log a WARN but leave the slot live
      * so inference_run will time out cleanly — the correct signal
      * until Phase 6.3 lands. */
-    upload_ccw_best_effort(&info, model, proto, &outer);
+    upload_ccw_best_effort(&info, model, &outer);
     config_streams_best_effort(idx, in_pad, out_pad);
 
     /* Handle numbering: 1..HAILO_MAX_MODELS. INF_BUILTIN_HANDLE (=0)
