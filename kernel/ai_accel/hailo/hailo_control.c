@@ -1142,3 +1142,146 @@ int hailo_control_set_network_group_header(
     spin_unlock(&control_lock);
     return rc;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Context-switch: SET_CONTEXT_INFO (opcode 0x21, CORE CPU).                  */
+/* -------------------------------------------------------------------------- */
+
+/* Fixed prefix before context_network_data. All length fields are
+ * BE on the wire; the u8 payload bytes they precede are 1-byte and
+ * stored native. Per reference: docs/reference/hailort-control-protocol.h
+ * lines 969-978 and -control_protocol.cpp:1162-1211. */
+struct hailo_cs_set_ctx_info_req_prefix_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;                    /* BE, = 4 */
+    uint32_t is_first_chunk_per_context_length;  /* BE, = 1 */
+    uint8_t  is_first_chunk_per_context;
+    uint32_t is_last_chunk_per_context_length;   /* BE, = 1 */
+    uint8_t  is_last_chunk_per_context;
+    uint32_t context_type_length;                /* BE, = 1 */
+    uint8_t  context_type;
+    uint32_t context_network_data_length;        /* BE, = N */
+    /* context_network_data[N] follows here */
+} __attribute__((packed));
+
+/* 16 (common) + 4 (parameter_count) + 19 (four length+u8 pairs, where
+ * the last length stands alone with data_length following as part of
+ * the variable tail) = 39 bytes. */
+_Static_assert(sizeof(struct hailo_cs_set_ctx_info_req_prefix_wire) == 39,
+               "SET_CONTEXT_INFO prefix must be 39 bytes on the wire");
+
+/* Full request buffer: fixed prefix + up to HAILO_CS_CONTEXT_CHUNK_MAX_BYTES
+ * bytes of action data. Allocated in BSS; single request in flight
+ * at a time (serialized by control_lock). */
+struct hailo_cs_set_ctx_info_req_wire {
+    struct hailo_cs_set_ctx_info_req_prefix_wire prefix;
+    uint8_t  context_network_data[HAILO_CS_CONTEXT_CHUNK_MAX_BYTES];
+} __attribute__((packed));
+
+struct hailo_cs_set_ctx_info_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                    /* BE, = 0 */
+} __attribute__((packed));
+
+static struct hailo_cs_set_ctx_info_req_wire  control_set_ctx_info_req;
+static struct hailo_cs_set_ctx_info_resp_wire control_set_ctx_info_resp;
+
+int hailo_control_set_context_info_chunk(
+    enum hailo_cs_context_type context_type,
+    bool                       is_first_chunk,
+    bool                       is_last_chunk,
+    const void                *network_data,
+    uint32_t                   network_data_len)
+{
+    if (network_data_len > HAILO_CS_CONTEXT_CHUNK_MAX_BYTES) return HAILO_ERR_INVAL;
+    if (network_data_len > 0 && !network_data) return HAILO_ERR_INVAL;
+
+    spin_lock(&control_lock);
+
+    struct hailo_cs_set_ctx_info_req_wire *r = &control_set_ctx_info_req;
+    memset(&r->prefix, 0, sizeof(r->prefix));
+
+    r->prefix.common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->prefix.common.flags    = 0;
+    r->prefix.common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->prefix.common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO);
+    r->prefix.parameter_count = hailo_cpu_to_be32(4u);
+
+    r->prefix.is_first_chunk_per_context_length =
+        hailo_cpu_to_be32(sizeof(r->prefix.is_first_chunk_per_context));
+    r->prefix.is_first_chunk_per_context = is_first_chunk ? 1u : 0u;
+
+    r->prefix.is_last_chunk_per_context_length =
+        hailo_cpu_to_be32(sizeof(r->prefix.is_last_chunk_per_context));
+    r->prefix.is_last_chunk_per_context = is_last_chunk ? 1u : 0u;
+
+    r->prefix.context_type_length = hailo_cpu_to_be32(sizeof(r->prefix.context_type));
+    r->prefix.context_type        = (uint8_t)context_type;
+
+    r->prefix.context_network_data_length = hailo_cpu_to_be32(network_data_len);
+    if (network_data_len > 0) {
+        memcpy(r->context_network_data, network_data, network_data_len);
+    }
+
+    uint32_t req_len = (uint32_t)(sizeof(r->prefix) + network_data_len);
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_set_ctx_info_req, req_len,
+                                             &control_set_ctx_info_resp,
+                                             sizeof(control_set_ctx_info_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
+                                            &control_set_ctx_info_req, req_len,
+                                            &control_set_ctx_info_resp,
+                                            sizeof(control_set_ctx_info_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_set_ctx_info_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO,
+                                       "SET_CONTEXT_INFO");
+    spin_unlock(&control_lock);
+    return rc;
+}
+
+int hailo_control_set_context_info(
+    enum hailo_cs_context_type context_type,
+    const void                *network_data,
+    uint32_t                   network_data_len)
+{
+    if (network_data_len > 0 && !network_data) return HAILO_ERR_INVAL;
+
+    /* Zero-length context: single chunk with is_first=is_last=true
+     * and empty payload. Firmware interprets this as a context with
+     * no actions — legal but rare. */
+    if (network_data_len == 0) {
+        return hailo_control_set_context_info_chunk(
+            context_type, /*is_first=*/true, /*is_last=*/true, NULL, 0);
+    }
+
+    const uint8_t *p = (const uint8_t *)network_data;
+    uint32_t remaining = network_data_len;
+    bool is_first = true;
+
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > HAILO_CS_CONTEXT_CHUNK_MAX_BYTES)
+                             ? HAILO_CS_CONTEXT_CHUNK_MAX_BYTES
+                             : remaining;
+        bool is_last = (chunk == remaining);
+        int rc = hailo_control_set_context_info_chunk(
+            context_type, is_first, is_last, p, chunk);
+        if (rc != HAILO_OK) return rc;
+        p         += chunk;
+        remaining -= chunk;
+        is_first   = false;
+    }
+    return HAILO_OK;
+}

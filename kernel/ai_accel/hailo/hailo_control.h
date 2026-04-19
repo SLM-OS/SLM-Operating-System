@@ -511,6 +511,64 @@ int hailo_control_set_network_group_header(
     const struct hailo_cs_application_header *header);
 
 /*
+ * Maximum context_network_data bytes per SET_CONTEXT_INFO chunk.
+ *
+ * Per hailort's CONTROL_PROTOCOL__CONTEXT_NETWORK_DATA_SINGLE_CONTROL_MAX_SIZE:
+ *   MAX_CONTROL_LENGTH(1500) - offsetof(request_t, parameters)(20)
+ *     - sizeof(context_switch_set_context_info_request_t)(19)
+ *   = 1461 bytes.
+ *
+ * offsetof(parameters) = 16 (common header) + 4 (parameter_count) = 20.
+ * sizeof-request = 4+1+4+1+4+1+4 = 19 (four BE lengths plus three u8
+ * payload slots for is_first / is_last / context_type; the final
+ * context_network_data_length is part of the prefix, the payload
+ * itself is the [0] flex-array tail).
+ */
+#define HAILO_CS_CONTEXT_CHUNK_MAX_BYTES  1461u
+
+/*
+ * SET_CONTEXT_INFO (opcode 0x21, CPU_ID_CORE_CPU). Sends one chunk
+ * of a context's pre-encoded action stream to firmware. The action
+ * bytes come from the HEF's contexts[].metadata — see the
+ * hailort-context_switch_defs.h reference and Phase 6.3d plumbing.
+ *
+ * `context_type` selects preliminary/dynamic/batch-switching/
+ * activation (see enum hailo_cs_context_type). Chunking is driven
+ * by the caller: set is_first_chunk=true on the opening call for a
+ * given context and is_last_chunk=true on the closing call; single-
+ * chunk contexts set both.
+ *
+ * `network_data` points at the chunk bytes; `network_data_len` must
+ * be <= HAILO_CS_CONTEXT_CHUNK_MAX_BYTES. Returns HAILO_OK, or
+ * HAILO_ERR_INVAL on null/oversize, or HAILO_ERR_IO / TIMEOUT /
+ * BAD_FIRMWARE from the transport.
+ */
+int hailo_control_set_context_info_chunk(
+    enum hailo_cs_context_type context_type,
+    bool                       is_first_chunk,
+    bool                       is_last_chunk,
+    const void                *network_data,
+    uint32_t                   network_data_len);
+
+/*
+ * Convenience wrapper that chunks a whole context's action bytes
+ * into HAILO_CS_CONTEXT_CHUNK_MAX_BYTES slices and issues the
+ * sequence of SET_CONTEXT_INFO calls with the is_first/is_last flags
+ * set automatically. Zero-length contexts still fire one
+ * is_first=is_last=true call with an empty payload — firmware treats
+ * that as "context with no actions", which is valid for synthetic
+ * contexts but unusual in practice.
+ *
+ * Returns HAILO_OK on success; the first non-OK rc from any chunk
+ * otherwise. Earlier chunks have already landed — caller must treat
+ * partial failure as a full re-load (Phase 6.3e will add that path).
+ */
+int hailo_control_set_context_info(
+    enum hailo_cs_context_type context_type,
+    const void                *network_data,
+    uint32_t                   network_data_len);
+
+/*
  * Reset internal control-channel state (sequence counter and the
  * "IMASK already armed" flag). Only used by unit tests to isolate
  * each send_recv round from the last. Safe to call at any time.
