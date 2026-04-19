@@ -419,6 +419,48 @@ Same reason CONFIG_STREAM fails (`0x40030050` = `STREAM__INVALID_CONFIG_STREAM_I
 
 Cross-platform: QEMU ARM64, Pi 5 (PLATFORM=RASPI5), Jetson Orin Nano, x86-64 all build clean under `AI_SCHED=ON`. Full suite green in both `make test` (AI_SCHED=OFF) and `make test AI_SCHED=ON` modes.
 
+#### Phase 6.3: Context-switch transport layer ✅ (2026-04-19)
+
+Ships the three CORE-CPU context-switch opcodes to firmware:
+
+- `CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER` (0x20) — declares a network group
+- `CONTEXT_SWITCH_SET_CONTEXT_INFO` (0x21) — per-context action-list bytes, chunked at 1461 B
+- `CHANGE_CONTEXT_SWITCH_STATUS` (0x25) — drives the firmware state machine between RESET and ENABLED
+
+New transport primitive: `hailo_control_send_recv_cpu(cpu_id, ...)` routes the doorbell write to bit 0 (APP CPU) or bit 1 (CORE CPU) of `raise_ready_offset`; context-switch opcodes live on the CORE CPU while every tier-1/2/3 opcode (IDENTIFY, WRITE_MEMORY, CONFIG_STREAM, …) stays on APP CPU.
+
+**Hardware validation (pi-5-1, 2026-04-19):** The `hailo ctxsmoke` shell command exercises the full chain against firmware v4.23:
+
+```
+slmos> hailo ctxsmoke
+hailo: ctxsmoke:
+  [1/3] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...        rc=0
+  [2/3] SET_NETWORK_GROUP_HEADER...                   rc=0
+  [3/3] SET_CONTEXT_INFO (preliminary, 5-byte HALT)
+        major=0x4013006e minor=0x4013006e opcode_echo=0x21
+        rc=-3
+```
+
+Transport works end-to-end on real hardware. Remaining rejection is at the firmware's action-list parser (the HALT placeholder is a 5-byte common_action_header only — not a valid context composition); unblocking it requires the **Phase 6.4 translator** below.
+
+**Firmware v4.23 struct-size lesson:** `application_header_t` is 32 bytes on v4.23 firmware (3 INFER bools + 4 config channels), not the 53 bytes the newer cached reference header shows (4 INFER bools + 24 config channels). First hardware iteration returned `major=0x40030060` = `CONTROL_PROTOCOL_STATUS_INVALID_CONTEXT_SWITCH_APP_HEADER_LENGTH`. Also: `external_action_list_address=0` is interpreted as a valid DDR pointer and rejected — use `HAILO_CS_NO_DDR_ACTION_LIST` (0xFFFFFFFF) for the control-channel path.
+
+**Test coverage — 10 new cases:**
+- 2 CORE CPU doorbell routing (send_recv_cpu goes to bit 1; send_recv default goes to bit 0)
+- 3 SET_NETWORK_GROUP_HEADER (wire format byte-for-byte, null rejection, bad config count rejection)
+- 5 SET_CONTEXT_INFO (single-chunk wire format, multi-chunk 3000-byte payload with is_first/is_last flags, zero-length single-chunk path, oversize rejection, null-with-nonzero-len rejection)
+
+### Phase 6.4: HEF → action-list translator (future)
+
+The natural continuation of 6.3. HEF proto stores structured `ProtoHEFAction` oneof messages (WriteDataCcw, EnableLcu, TriggerSequencer, …). HailoRT translates these into the wire-format action stream defined in `docs/reference/hailort-context_switch_defs.h` (45 action types, repeated-action compression, common 5-byte header + per-type body, `host_buffer_info_t` embedded for CCW DMA pulls). SLM-OS needs to implement the same translator.
+
+**Scope (estimate):** ~500-1000 LoC in a new `kernel/ai_accel/hailo/hailo_context_switch.c`. Depends on: VDMA descriptor-list setup with bus-visible DMA addresses for CCW payloads (existing `hailo_vdma.c` has the primitives), HEF-parser extension to walk `ProtoHEFContext.operations[].actions[]` (the structured actions the compiler emitted), and per-context action-stream serialization.
+
+**Firmware constraints pinned from v4.23:**
+- Zero-length contexts are rejected with `0x40130004`; each `SET_CONTEXT_INFO` must carry ≥1 valid wire action.
+- Firmware expects exactly `dynamic_contexts_count + 3` SET_CONTEXT_INFO calls per load, in fixed order: ACTIVATION, BATCH_SWITCHING, PRELIMINARY, then each DYNAMIC.
+- `csm_buffer_size` must match the VDMA descriptor page size (typically 512 or 4096).
+
 ### Phase 7: Shell Integration & Demo Polish (1 week)
 
 **Deliverables:**
