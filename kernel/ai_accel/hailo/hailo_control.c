@@ -408,12 +408,13 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
     __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
     hailo_platform->mb();
 
-    /* TODO: wait_for_response is a udelay-polled busy wait. For
-     * #281 tier-1 (shell-driven IDENTIFY) this is fine — the lone
-     * caller on CPU 0 just waits. For Phase 5.3+ inference submit,
-     * this should either yield() between polls or route through
-     * the future MSI path so CPU 0 isn't burned for up to a full
-     * timeout_us. */
+    /* TODO(#332): wait_for_response is a udelay-polled busy wait.
+     * For #281 tier-1 (shell-driven IDENTIFY) this is fine — the
+     * lone caller on CPU 0 just waits. For Phase 5.3+ inference
+     * submit, this should either yield() between polls or route
+     * through the future MSI path so CPU 0 isn't burned for up to
+     * a full timeout_us. Picked up during Phase 7 — surface via
+     * `gh issue list --label sub:ai-runtime`. */
     int rc = wait_for_response(timeout_us);
     if (rc != HAILO_OK) goto out;
 
