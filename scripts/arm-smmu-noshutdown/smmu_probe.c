@@ -27,8 +27,15 @@
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/device/driver.h>
+#include <linux/iommu.h>
 #include <linux/platform_device.h>
 #include <linux/kallsyms.h>
+
+/* Must match SLMOS_NC_BASE / SLMOS_NC_SIZE in arm_smmu_noshutdown.c.
+ * Checked at probe time so a drift between the two files surfaces as
+ * a test failure instead of silent wrong behaviour at kexec. */
+#define SLMOS_NC_BASE   0xBDE00000UL
+#define SLMOS_NC_SIZE   (2UL * 1024 * 1024)
 
 static const char *lookup_name(unsigned long addr, char *buf, size_t buflen)
 {
@@ -77,6 +84,62 @@ static int __init smmu_probe_init(void)
                         nbuf, sizeof(nbuf)));
 
     (void)driver_for_each_device(drv, NULL, NULL, print_bound_dev);
+
+    /*
+     * Verify the IOMMU identity mapping that arm_smmu_noshutdown is
+     * expected to have installed. A plain `iommu_map` return of 0 is
+     * not proof that the translation actually works — the io-pgtable
+     * walker is the authoritative check. Ask the xusb domain to
+     * translate 0xBDE00000 and 0xBDE00000 + size/2 (a mid-range
+     * probe to catch partial-install bugs); both should resolve to
+     * themselves when the identity mapping is in place.
+     */
+    {
+        struct device *xusb_dev =
+            bus_find_device_by_name(&platform_bus_type, NULL,
+                                     "3610000.usb");
+        if (!xusb_dev) {
+            pr_info("smmu-probe: xusb 3610000.usb not bound — "
+                    "skipping IOMMU translation check\n");
+        } else {
+            struct iommu_domain *domain =
+                iommu_get_domain_for_dev(xusb_dev);
+            if (!domain) {
+                pr_info("smmu-probe: xusb has no iommu_domain — "
+                        "skipping IOMMU translation check\n");
+            } else {
+                unsigned long iova_low  = SLMOS_NC_BASE;
+                unsigned long iova_mid  = SLMOS_NC_BASE +
+                                           SLMOS_NC_SIZE / 2;
+                unsigned long iova_high = SLMOS_NC_BASE +
+                                           SLMOS_NC_SIZE - 0x1000;
+                phys_addr_t pa_low  = iommu_iova_to_phys(domain, iova_low);
+                phys_addr_t pa_mid  = iommu_iova_to_phys(domain, iova_mid);
+                phys_addr_t pa_high = iommu_iova_to_phys(domain, iova_high);
+                pr_info("smmu-probe:   iommu_iova_to_phys(0x%lx) = 0x%llx "
+                        "(expected 0x%lx if identity-mapped)\n",
+                        iova_low, (unsigned long long)pa_low, iova_low);
+                pr_info("smmu-probe:   iommu_iova_to_phys(0x%lx) = 0x%llx "
+                        "(expected 0x%lx if identity-mapped)\n",
+                        iova_mid, (unsigned long long)pa_mid, iova_mid);
+                pr_info("smmu-probe:   iommu_iova_to_phys(0x%lx) = 0x%llx "
+                        "(expected 0x%lx if identity-mapped)\n",
+                        iova_high, (unsigned long long)pa_high, iova_high);
+                if (pa_low == iova_low && pa_mid == iova_mid &&
+                    pa_high == iova_high)
+                    pr_info("smmu-probe:   IOMMU identity mapping "
+                            "verified across the full 2 MB range\n");
+                else if (!pa_low && !pa_mid && !pa_high)
+                    pr_info("smmu-probe:   IOMMU identity mapping NOT "
+                            "installed (expected before "
+                            "arm_smmu_noshutdown loads)\n");
+                else
+                    pr_warn("smmu-probe:   IOMMU mapping partial / "
+                            "unexpected — investigate\n");
+            }
+            put_device(xusb_dev);
+        }
+    }
 
     pr_info("smmu-probe: done\n");
     return 0;

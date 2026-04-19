@@ -37,11 +37,55 @@ make
 # → arm_smmu_noshutdown.ko  smmu_probe.ko
 ```
 
-## Verification procedure (hardware-only, five kexec-free minutes)
+## Verification
 
-This is the functional test for `arm_smmu_noshutdown`. It runs on a
-live Jetson without needing to kexec into SLM-OS, and covers all
-observable claims the fix makes.
+### Automated (recommended)
+
+`verify.sh` runs the full pre-flight test suite — all 10 assertions
+below, as a single script. It's the functional test for the PR:
+
+```bash
+cd scripts/arm-smmu-noshutdown/
+make && sudo ./verify.sh          # default: stages 1-3, leaves
+                                  #   module loaded for kexec
+sudo /usr/local/bin/slmos-kexec /path/to/slmos.elf  # end-to-end
+```
+
+Optional deeper mode:
+
+```bash
+sudo ./verify.sh --full           # adds stage 4 (rmmod cleanup
+                                  #   test); leaves module UNLOADED,
+                                  #   so re-insmod before kexec
+```
+
+Exit codes: `0` all stages pass, `1` any assertion failed, `2`
+setup error (missing `.ko` or can't `dmesg`).
+
+Each stage tests a specific claim:
+
+| Stage | Claim tested                                                                                                           |
+| ----- | ---------------------------------------------------------------------------------------------------------------------- |
+| 1     | Baseline: `.shutdown` is either `arm_smmu_device_shutdown+...` (L4T 36.4.7) or `(null)` (L4T 36.4.4) — both acceptable |
+| 2     | `arm_smmu_noshutdown` init emits the expected dmesg lines: `.shutdown` handled, xusb iommu_domain found, `iommu_map()` returned 0 |
+| 3     | Post-fix probe: `.shutdown = (null)` AND `iommu_iova_to_phys` translates 0xBDE00000, mid-range, and the last 4 KB all to themselves |
+| 4     | (`--full` only) `rmmod` exit path: `iommu_unmap` returned exactly 2 MB; `.shutdown` stays NULL (load-and-forget); post-unmap translations return 0 |
+
+End-to-end hardware result (default mode → kexec) as of
+2026-04-18 on jetson-nano-1 with L4T 36.4.4:
+
+```
+[INFO] xhci: controller running (USBSTS=0x00000000)
+[INFO] xhci: skipping non-command event type 32
+[INFO] xhci: skipping non-command event type 32
+[INFO] xhci: NO_OP round-trip OK (cc=SUCCESS, cmd_trb @0xbde04180)
+```
+
+### Manual (kexec-free, five minutes)
+
+If you need to step through the individual stages manually — e.g.
+to inspect a new kernel version's `iommu_domain` type — follow the
+procedure below. It's what `verify.sh` automates.
 
 1. **Observe the baseline.** Before loading anything, the platform
    driver's shutdown pointer should be pointing at the real
