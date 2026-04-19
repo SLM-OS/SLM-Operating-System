@@ -305,15 +305,24 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 
 ### Phase 6: AI Scheduler Integration (1–2 weeks)
 
-**Deliverables:**
-- New scheduler policy: `ai_policy_hailo` that uses the inference device abstraction (Phase 2) to run the scheduler MLP on Hailo instead of NEON.
-- Requires retraining/recompiling the scheduler MLP as a `.hef`. Constraint: Hailo's tooling supports a narrower op set than full ONNX; the 108-dim → 24/42-action MLP with ReLU should compile.
-- Benchmark comparison: `bench sched-policy` comparing:
+#### Phase 6.1: Scheduler MLP → `.hef` toolchain ✅ (2026-04-18)
+
+- **ONNX export** (`scripts/hailo/export_scheduler_mlp_onnx.py`) — parses the C99 hex-float arrays in `kernel/sched/ai/ai_weights_mlp.c`, reconstructs the 4-layer MLP (108 → 256 → 256 → 128 → N), and emits two opset-11 ONNX files: `scheduler_mlp_jetson.onnx` (42 actions, full layer-3) and `scheduler_mlp_pi5.onnx` (24 actions, sliced layer-3). Gemm + Relu only — DFC-friendly op set. Verified against a pure-numpy reference forward pass (max |ONNX − numpy| well below float32 ULP at layer-1 intermediate magnitudes).
+- **Calibration dataset** (`scripts/hailo/generate_calibration_data.py`) — synthesizes 256 scheduler state vectors matching `ai_state.c:ai_extract_state`'s normalized feature layout exactly. Mixes 4-core (Pi 5) and 6-core (Jetson) samples. Deterministic under seed so re-runs produce identical calibration data.
+- **DFC compile wrapper** (`scripts/hailo/compile_hef.sh`) — 3-phase DFC 3.33.1 pipeline (parser onnx → optimize with calibration → compiler) with `--arch hailo8|hailo8l` and `--variant pi5|jetson`. Produces `build/hailo/scheduler_mlp_{variant}.hef` (~633/644 KB int8-quantized).
+- **Compiled artifacts** — both `.hef` files build cleanly on DFC 3.33.1 against Hailo-8. Compilation uses 4 of 8 clusters with ~40% control / 21% compute / 13% memory utilization on the tiny network. `.hef` files are not checked in (`build/` is gitignored) — reproduce via the three scripts above.
+- **Test coverage** — 14 Python functional tests in `scripts/hailo/test_hailo_scripts.py` exercise the hex-float parser (round-trip + missing-symbol error), the numpy reference forward, ONNX model validation, full end-to-end exports on the real checked-in weights, calibration-data shape/dtype/range/determinism/zero-fill, and all four `compile_hef.sh` error paths (bad arch, bad variant, missing hailo CLI, missing ONNX input).
+- **Dev-env setup docs** — `docs/setup.md` §Hailo Toolchain documents the Python 3.10 venv, pygraphviz C-header packages, Hailo Developer Zone wheel download, DFC 3.33.1 install, and `scripts/hailo/` invocation. Three troubleshooting entries cover the Python-3.12 pin miss, pygraphviz `Python.h` error, and DFC 5.x vs 3.x wheel-track confusion.
+
+#### Phase 6.2: Kernel integration (next)
+
+- `ai_policy_hailo` scheduler policy that routes the MLP through `inference_device` (Phase 2 abstraction) instead of NEON. Load `scheduler_mlp_pi5.hef` via `hailo load`, feed `ai_extract_state` output, decode `argmax(logits)` back into `ai_sched_action` via the existing `ai_decode_action`.
+- Policy switch at runtime via `sched_set_policy()`.
+- Benchmark comparison — `bench sched-policy`:
   - Round-robin (baseline).
   - CPU MLP (current AI scheduler).
   - Hailo MLP (new).
   - Metrics: decisions/sec, end-to-end task makespan, device power.
-- Policy switch via existing `sched_set_policy()` runtime API — the whole point of the Phase 2 abstraction.
 
 ### Phase 7: Shell Integration & Demo Polish (1 week)
 

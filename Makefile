@@ -386,6 +386,19 @@ gsp-harness:
 gsp-harness-clean:
 	rm -f $(GSP_HARNESS_OUT)
 
+# Hailo toolchain artifacts (Phase 6.1). The three scripts under
+# scripts/hailo/ produce .onnx, .npy, .har, and .hef files plus
+# DFC-generated logs into $(HAILO_BUILD_DIR). No source files live
+# there, so it's safe to wipe. See scripts/hailo/*.py for producers.
+# The Python scripts carry the same default (REPO_ROOT/build/hailo) —
+# keep the two in sync if either changes.
+HAILO_BUILD_DIR := build/hailo
+
+.PHONY: hailo-clean
+hailo-clean:
+	@echo "Cleaning Hailo toolchain artifacts..."
+	rm -rf $(HAILO_BUILD_DIR)
+
 # Jetson UEFI-direct boot layout regression test. Structural checks
 # on the built Jetson kernel ELF that can't be expressed as linker
 # ASSERTs — e.g. "efi_stub_entry contains an `msr vbar_el2`

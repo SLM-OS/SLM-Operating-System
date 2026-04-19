@@ -177,6 +177,88 @@ SLM-OS under QEMU.
 
 ---
 
+## Hailo Toolchain (Optional — Phase 6 / Pi 5 AI HAT+)
+
+Needed only when rebuilding the scheduler MLP as a `.hef` for Hailo-8/8L
+inference, or compiling any other ONNX model for the AI HAT+. Skip this
+section for QEMU-only work.
+
+### 1. System packages (Python 3.10 + native build deps)
+
+The Hailo Dataflow Compiler (DFC) 3.33.1 is pinned to **Python 3.10** —
+3.12 (Ubuntu 24.04 default) and 3.11 are not supported. Install 3.10
+alongside the system Python, plus the C headers `pygraphviz` needs:
+
+```bash
+sudo apt install -y \
+    python3.10 \
+    python3.10-venv \
+    python3.10-dev \
+    libgraphviz-dev \
+    graphviz \
+    pkg-config
+```
+
+Ubuntu 22.04 ships Python 3.10 as its default `python3` — no extra repo
+needed. On Ubuntu 24.04 (default `python3` = 3.12), Python 3.10 comes
+from the `deadsnakes` PPA: `sudo add-apt-repository ppa:deadsnakes/ppa`
+first.
+
+### 2. Get the Hailo wheels
+
+Register at [Hailo Developer Zone](https://hailo.ai/developer-zone/) (free for
+non-commercial use) and download **from the Hailo-8/8L track**:
+
+- `hailo_dataflow_compiler-3.33.1-py3-none-linux_x86_64.whl` (AMD64 / x86-64)
+- `hailo_model_zoo-*.whl` (same track; depends on DFC)
+
+Do **not** use the 5.x DFC track — that's for Hailo-10H and produces
+binaries incompatible with the AI HAT+ silicon.
+
+### 3. Create the venv + install
+
+From the SLM-OS repo root (a `venv/` at the root is gitignored):
+
+```bash
+python3.10 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install /path/to/hailo_dataflow_compiler-3.33.1-py3-none-linux_x86_64.whl
+pip install /path/to/hailo_model_zoo-*.whl
+```
+
+Verify:
+
+```bash
+hailo --version     # expect "Hailo DFC Version: 3.33.1"
+```
+
+The GPU-driver / CUDNN warnings on first run are harmless for MLP-sized
+models — CPU compilation is plenty fast.
+
+### 4. Compile the scheduler MLP
+
+With the venv active:
+
+```bash
+python3 scripts/hailo/export_scheduler_mlp_onnx.py     # ai_weights_mlp.c -> .onnx
+python3 scripts/hailo/generate_calibration_data.py     # synthesize quantization set
+bash   scripts/hailo/compile_hef.sh --arch hailo8 --variant pi5
+# Output: build/hailo/scheduler_mlp_pi5.hef
+```
+
+For Jetson (42-action): `--variant jetson`. For Hailo-8L silicon:
+`--arch hailo8l`.
+
+To wipe all Hailo toolchain artifacts (`.onnx`, `.npy`, `.har`, `.hef`,
+DFC logs) out of `build/hailo/`:
+
+```bash
+make hailo-clean
+```
+
+---
+
 ## Troubleshooting
 
 **`aarch64-none-elf-gcc: command not found`** — the ARM toolchain is
@@ -201,6 +283,19 @@ because the x86-64 ISO uses a BIOS-compatible GRUB stage.
 modern compilers. If Ubuntu's packages are too old, upgrade the
 distribution rather than pinning older SLM-OS commits.
 
+**Hailo `pip install` fails with `Python.h: No such file or directory`** —
+the `pygraphviz` C extension needs Python headers. Install
+`python3.10-dev` (see §Hailo Toolchain step 1). `libgraphviz-dev` is
+needed for the graphviz wrapper itself.
+
+**Hailo `pip install` fails on Python 3.12** — DFC 3.33.1 is pinned to
+Python 3.10. Recreate the venv with `python3.10 -m venv venv`.
+
+**`hailo` CLI errors out with `unrecognized arguments`** — DFC 5.x uses
+different CLI flags than 3.x. Confirm `hailo --version` reports 3.33.1;
+if it reports 5.x, the wrong wheel track was installed (5.x is
+Hailo-10H, not Hailo-8/8L).
+
 ---
 
-*Last updated: April 2026*
+*Last updated: 18 April 2026*
