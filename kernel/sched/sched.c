@@ -1978,9 +1978,12 @@ void scheduler_tick(void)
     uint32_t cpu = cpu_id();
 
     /* Wake any task whose sleep deadline has passed (#319). Cheap walk
-     * of a global list; bounded by MAX_TASKS. Must run before
-     * preempt-disable short-circuit so sleepers still wake while a
-     * context switch is in progress on another CPU. */
+     * of a global list; bounded by MAX_TASKS. task_wake_sleepers only
+     * flips state back to TASK_READY and calls scheduler_add_task — it
+     * does NOT schedule itself, so calling it during the preempt-
+     * disabled window below is safe. Placed here (before the
+     * preempt_disabled short-circuit at the next block) so sleepers
+     * still wake even while this CPU is mid-context-switch. */
     task_wake_sleepers();
 
     /* Always count ticks (used by sleep_ms, uptime, benchmarks) */

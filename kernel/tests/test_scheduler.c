@@ -347,6 +347,90 @@ static void test_task_sleep_ms_clears_wake_state(void)
                      self->state == TASK_READY);
 }
 
+/*
+ * Multi-sleeper: two concurrent sleepers with different deadlines must
+ * both run their post-sleep code, and the shorter sleeper must finish
+ * first. Exercises the sleep queue with > 1 entry (single-entry case
+ * is covered above) and proves task_wake_sleepers walks the whole
+ * list rather than just the head.
+ *
+ * Shared state lives in file-scope statics rather than a per-test
+ * context struct because the sleeper entry functions are plain
+ * task_entry_t callbacks — there's no hook to pass a closure through.
+ * Reset at the top of the test runner so re-entry behaves cleanly.
+ */
+static volatile uint32_t sleep_multi_order[2];
+static volatile uint32_t sleep_multi_finished_count;
+
+static void sleep_short_entry(void *arg)
+{
+    (void)arg;
+    task_sleep_ms(20);
+    uint32_t n = __atomic_fetch_add(&sleep_multi_finished_count, 1,
+                                    __ATOMIC_SEQ_CST);
+    sleep_multi_order[n] = 1;  /* short sleeper identifier */
+    task_exit();
+}
+
+static void sleep_long_entry(void *arg)
+{
+    (void)arg;
+    task_sleep_ms(80);
+    uint32_t n = __atomic_fetch_add(&sleep_multi_finished_count, 1,
+                                    __ATOMIC_SEQ_CST);
+    sleep_multi_order[n] = 2;  /* long sleeper identifier */
+    task_exit();
+}
+
+static void test_task_sleep_ms_multiple_sleepers_wake_in_order(void)
+{
+    sleep_multi_order[0] = 0;
+    sleep_multi_order[1] = 0;
+    sleep_multi_finished_count = 0;
+
+    struct task *s = task_create_with_priority("sleep_short",
+                                               sleep_short_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    struct task *l = task_create_with_priority("sleep_long",
+                                               sleep_long_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_NOT_NULL(l);
+
+    /* task_create_with_priority does not auto-enqueue; tasks only run
+     * once explicitly added to a CPU run queue. Add atomically under
+     * IRQ-save so neither lands before the other. Pin to CPU 0 to
+     * keep wake ordering observable on multi-CPU test hosts. */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(s, 0);
+    scheduler_add_task_to_cpu(l, 0);
+    irq_restore(flags);
+
+    /* Poll for both sleepers to finish, bounded by a generous wall-clock
+     * timeout (500 ms >> 80 ms long sleep + test-harness jitter). */
+    uint64_t freq = timer_get_frequency();
+    uint64_t deadline = timer_get_count() + (freq / 1000) * 500;
+    while (sleep_multi_finished_count < 2) {
+        if (timer_get_count() > deadline) break;
+        yield();
+    }
+
+    /* Reclaim slots before asserting, so a test-result assertion
+     * failure can't leak them into subsequent tests. If the timeout
+     * branch above fired, tasks may still be sleeping — force them
+     * to TERMINATED via scheduler_terminate_task before destroy per
+     * kernel/CLAUDE.md "Leaky tests that block CPU 1" note. */
+    if (s->state != TASK_TERMINATED) scheduler_terminate_task(s);
+    if (l->state != TASK_TERMINATED) scheduler_terminate_task(l);
+    task_destroy(s);
+    task_destroy(l);
+
+    TEST_ASSERT_EQUAL_UINT32(2, sleep_multi_finished_count);
+    /* Short sleeper (id 1) must finish before the long sleeper (id 2). */
+    TEST_ASSERT_EQUAL_UINT32(1, sleep_multi_order[0]);
+    TEST_ASSERT_EQUAL_UINT32(2, sleep_multi_order[1]);
+}
+
 /* ============================================================================
  * Unit Tests: Deadline Boost Logic
  * ============================================================================ */
@@ -3967,6 +4051,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_task_sleep_ms_zero_returns_immediately);
     RUN_TEST(test_task_sleep_ms_sleeps_at_least_ms);
     RUN_TEST(test_task_sleep_ms_clears_wake_state);
+    RUN_TEST(test_task_sleep_ms_multiple_sleepers_wake_in_order);
 
     /* Unit tests: Deadline boost logic */
     RUN_TEST(test_no_deadline_no_boost);

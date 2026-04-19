@@ -284,9 +284,17 @@ struct task *task_slot(uint32_t idx);
  * on CPU 0) runs while it sleeps. The task is woken by the next
  * scheduler_tick whose CNTPCT ≥ the computed deadline.
  *
- * Must be called from task context (NOT from an ISR). The task must
- * not be holding a spinlock — the scheduler yield invalidates that
- * invariant.
+ * Preconditions:
+ *
+ *   - Must be called from task context (NOT from an ISR).
+ *   - IRQs must be enabled. Do NOT invoke from inside an
+ *     interrupt-masked critical section; spin_unlock_irqrestore
+ *     would restore IRQs as disabled and schedule() would then run
+ *     with IRQs off, preventing the coop-preempt tick that drives
+ *     task_wake_sleepers on Pi 5 / Jetson and leading to a silent
+ *     hang on those platforms.
+ *   - The task must not be holding a spinlock — the scheduler yield
+ *     inside this call invalidates that invariant.
  *
  * ms == 0 returns immediately.
  */
