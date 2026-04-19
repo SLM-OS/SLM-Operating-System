@@ -31,11 +31,7 @@
 #include <linux/platform_device.h>
 #include <linux/kallsyms.h>
 
-/* Must match SLMOS_NC_BASE / SLMOS_NC_SIZE in arm_smmu_noshutdown.c.
- * Checked at probe time so a drift between the two files surfaces as
- * a test failure instead of silent wrong behaviour at kexec. */
-#define SLMOS_NC_BASE   0xBDE00000UL
-#define SLMOS_NC_SIZE   (2UL * 1024 * 1024)
+#include "arm_smmu_noshutdown.h"
 
 static const char *lookup_name(unsigned long addr, char *buf, size_t buflen)
 {

@@ -45,15 +45,36 @@
 
 set -uo pipefail
 
+print_help() {
+    cat <<'EOF'
+verify.sh — functional test for arm_smmu_noshutdown + smmu_probe.
+
+Usage:
+  sudo ./verify.sh           run stages 1-3 and leave arm_smmu_noshutdown
+                             loaded, ready for kexec into SLM-OS.
+  sudo ./verify.sh --full    also run stage 4 (rmmod cleanup test).
+                             Leaves the module UNLOADED — re-insmod
+                             before kexec or NO_OP will time out.
+  sudo ./verify.sh -h        show this help.
+
+Stages:
+  1  baseline probe (before any module is loaded)
+  2  load arm_smmu_noshutdown and inspect its dmesg output
+  3  probe again, verifying .shutdown is NULL and the identity
+     mapping translates end-to-end via iommu_iova_to_phys
+  4  (--full only) rmmod arm_smmu_noshutdown and verify the exit
+     path correctly calls iommu_unmap
+
+Exit codes: 0 all-passed, 1 assertion failed, 2 setup error.
+EOF
+}
+
 FULL=0
 for arg in "$@"; do
     case "$arg" in
         --full) FULL=1 ;;
-        -h|--help)
-            sed -n '2,30p' "$0"
-            exit 0
-            ;;
-        *) echo "unknown arg: $arg" >&2; exit 2 ;;
+        -h|--help) print_help; exit 0 ;;
+        *) echo "unknown arg: $arg" >&2; print_help; exit 2 ;;
     esac
 done
 
@@ -65,7 +86,6 @@ RED=$'\e[31m'; GRN=$'\e[32m'; YEL=$'\e[33m'; RST=$'\e[0m'
 pass() { printf '%s[PASS]%s %s\n'  "$GRN" "$RST" "$*"; }
 fail() { printf '%s[FAIL]%s %s\n'  "$RED" "$RST" "$*"; FAILED=1; }
 warn() { printf '%s[WARN]%s %s\n'  "$YEL" "$RST" "$*"; }
-info() { printf '       %s\n' "$*"; }
 
 FAILED=0
 need_root() {
@@ -137,36 +157,37 @@ dmesg -C >/dev/null
 #        already NULL. The field fix is a no-op on this L4T but
 #        still documents the correct field for future kernels.)
 #
-#   The test treats either as a valid baseline but records which
-#   one applied so Stage 3's "post-fix" assertion can adjust its
-#   expectation: if baseline was already NULL, the fix is not
-#   observably changing anything, so Stage 3 asserts NULL-stays-NULL
-#   rather than non-NULL→NULL.
+#   Stage 3's post-fix assertion only checks that `.shutdown` ends
+#   up NULL (true in both cases), so recording the baseline shape
+#   here is informational — it tells the reader whether this run
+#   actually exercised the field-fix code path or not.
 # ------------------------------------------------------------------ #
 printf '\n-- Stage 1: baseline probe --\n'
 insmod "$MOD_PROBE"
-sleep 0.1
 
-# Extract the actual `.shutdown = ...` line once so both paths share it.
+# Extract the actual `.shutdown = ...` line once.
 SHUTDOWN_LINE=$(dmesg | grep -E 'smmu-probe: +\.shutdown =' | tail -1 || true)
 if [[ -z "$SHUTDOWN_LINE" ]]; then
     fail 'smmu_probe did not log a .shutdown line — module failed to load?'
 elif echo "$SHUTDOWN_LINE" | grep -q 'arm_smmu_device_shutdown'; then
-    BASELINE_SHUTDOWN='non-null'
     pass 'baseline: platform_driver.shutdown = arm_smmu_device_shutdown (field-fix relevant)'
 elif echo "$SHUTDOWN_LINE" | grep -q '(null)'; then
-    BASELINE_SHUTDOWN='null'
     pass 'baseline: platform_driver.shutdown = (null) (L4T already ships with NULL — field-fix is a no-op on this kernel)'
 else
     fail "baseline: unexpected .shutdown value: $SHUTDOWN_LINE"
-    BASELINE_SHUTDOWN='unknown'
 fi
 
-# Record whether an identity mapping already exists from a prior load
+# Record whether an identity mapping already exists from a prior load.
+# The arm_smmu_noshutdown exit path removes the mapping on rmmod, so a
+# persistent mapping at baseline means the exit path did NOT run (for
+# example, the previous session crashed or was SIGKILLed mid-test, or
+# force-unload was used). This is not a failure — Stage 2 will
+# fail to add a second mapping if one is still there, which will surface
+# as its own assertion error.
 if dmesg | grep -q 'IOMMU identity mapping verified across the full 2 MB range'; then
     warn 'IOMMU identity mapping already present from a prior load — '\
-'state is preserved across rmmod only if the arm_smmu_noshutdown '\
-'exit path ran; expected if a prior session crashed or was SIGKILLed'
+'the previous session must have skipped the arm_smmu_noshutdown exit '\
+'path (crash / SIGKILL / force-unload). Reboot if Stage 2 asserts fail.'
 fi
 rmmod smmu_probe
 dmesg -C >/dev/null
@@ -180,7 +201,8 @@ dmesg -C >/dev/null
 # ------------------------------------------------------------------ #
 printf '\n-- Stage 2: load arm_smmu_noshutdown --\n'
 insmod "$MOD_NOSHUTDOWN"
-sleep 0.1
+# insmod is synchronous: arm_smmu_noshutdown_init() has already run and
+# all pr_info() lines are in the ring buffer by the time insmod returns.
 # On L4T 36.4.7 the module logs "NULLed arm-smmu platform_driver->shutdown";
 # on L4T 36.4.4 (where the pointer is already NULL at boot) it logs
 # "platform_driver->shutdown already NULL — no-op". Either is fine — the
@@ -205,7 +227,6 @@ dmesg -C >/dev/null
 # ------------------------------------------------------------------ #
 printf '\n-- Stage 3: post-fix probe --\n'
 insmod "$MOD_PROBE"
-sleep 0.1
 dmesg_grep 'smmu-probe: +\.shutdown = \(null\)' \
            'platform_driver.shutdown is NULL after fix'
 dmesg_grep 'IOMMU identity mapping verified across the full 2 MB range' \
@@ -230,12 +251,10 @@ dmesg -C >/dev/null
 if [[ "$FULL" -eq 1 ]]; then
     printf '\n-- Stage 4: unload + verify exit-path cleanup (--full) --\n'
     rmmod arm_smmu_noshutdown
-    sleep 0.1
     dmesg_grep 'iommu_unmap returned 2097152 bytes \(expected 2097152\)' \
                'exit-path iommu_unmap returns full 2 MB'
 
     insmod "$MOD_PROBE"
-    sleep 0.1
     dmesg_grep 'smmu-probe: +\.shutdown = \(null\)' \
                'platform_driver.shutdown stays NULL after rmmod (load-and-forget)'
     dmesg_grep 'IOMMU identity mapping NOT installed' \

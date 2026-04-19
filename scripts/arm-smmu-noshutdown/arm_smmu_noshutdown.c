@@ -1,87 +1,27 @@
 /*
- * arm-smmu-noshutdown — Linux kernel module that neutralises the
- * arm-smmu platform driver's .shutdown callback on L4T so Linux's
- * kexec path leaves the SMMU running across the handoff into SLM-OS.
+ * arm-smmu-noshutdown — Linux kernel module that prepares the L4T
+ * kexec path for a clean handoff into SLM-OS.
  *
- * Purpose: SLM-OS #266 Phase 3A, Path 1 (see
- * docs/jetson-usb-networking-plan.md §10.3). This module fixes a
- * struct-field bug in the previous `.shutdown = NULL` template, so
- * on this L4T kernel arm_smmu_device_shutdown() now actually does
- * stop firing from device_shutdown(). See
- * docs/jetson-usb-networking-plan.md §10.8 for the hardware
- * investigation trail that led to the field fix, the four other
- * variants that were tested but do not solve the end-to-end blocker,
- * and the open follow-on work Phase 3A still needs.
+ * Two things happen on insmod, and both are necessary for SLM-OS's
+ * xHCI driver to reach `NO_OP round-trip OK` after the handoff:
  *
- * What this module fixes
- * ----------------------
+ *   1. Neutralise arm-smmu's platform_driver.shutdown so
+ *      arm_smmu_device_shutdown() stops firing from
+ *      device_shutdown() on kexec. This keeps the SMMU's clocks
+ *      alive and leaves Linux's IOVA-bound context banks in place
+ *      across the handoff.
  *
- *   The previous template stored NULL into `device_driver.shutdown`
- *   (the base struct). The platform bus dispatches shutdown through
- *   `platform_driver.shutdown` via platform_drv_shutdown, which is a
- *   SEPARATE field on the outer platform_driver struct. The base
- *   `device_driver.shutdown` is unused for platform drivers;
- *   NULLing it is a no-op. That explained why the previous template
- *   always reported "already NULL" on L4T even while
- *   `arm-smmu 8000000.iommu: disabling translation` still fired at
- *   kexec. The correct field is reached via to_platform_driver(drv).
+ *   2. Ask Linux's iommu subsystem to add an identity mapping
+ *      (IOVA == PA) for SLM-OS's 2 MB NC region on the xusb
+ *      stream's active iommu_domain, so SLM-OS can program DCBAAP
+ *      / CRCR with raw physical addresses and have them translate
+ *      straight through.
  *
- *   A runtime diagnostic module verified this on hardware:
- *
- *     smmu-probe:   .shutdown = arm_smmu_device_shutdown+0x0/0x40
- *     smmu-probe:   .driver.bus->shutdown = platform_shutdown+0x0/0x60
- *
- *   — i.e. platform_driver.shutdown is what platform_drv_shutdown
- *   reads, and it's non-NULL (pointing at arm_smmu_device_shutdown).
- *   After this module loads:
- *
- *     smmu-probe:   .shutdown = (null)
- *
- *   and on the next kexec the Linux dmesg no longer contains
- *   `arm-smmu ... disabling translation`.
- *
- * What this module does NOT fix
- * -----------------------------
- *
- *   Suppressing arm_smmu_device_shutdown prevents Linux from
- *   tearing down the SMMU clocks or writing sCR0 = CLIENTPD. The
- *   SMMU therefore arrives in SLM-OS still enforcing Linux's
- *   IOVA-to-PA context banks. SLM-OS's xHCI driver programs DCBAAP
- *   / CRCR with raw physical addresses of its own NC-memory
- *   buffers, which the SMMU has no translations for, so the first
- *   HC DMA after `USBCMD.RUN=1` fails silently or — more often —
- *   propagates a fabric-level error response that wedges the xHCI
- *   aperture to 0xFFFFFFFF.
- *
- *   Four alternative fixes were tested in this same module's
- *   history and all either regressed or behaved no better than
- *   this plain-NULL version. See the plan for the full write-up;
- *   briefly:
- *
- *     - Replacement .shutdown that only writes sCR0 = CLIENTPD
- *       (skipping clock teardown) wedges the aperture because
- *       tegra-xusb has no .shutdown and is still actively DMA-ing
- *       when the bypass flips, reinterpreting in-flight IOVAs as
- *       raw PAs.
- *     - Replacement .shutdown that targets only SMMU0 (the xusb
- *       instance) wedges identically.
- *     - SLM-OS-side sCR0 write after xhci_halt() wedges identically,
- *       suggesting the Tegra234 SMMU needs a per-instance bypass
- *       sequence this code doesn't reproduce.
- *     - reboot_notifier firing from kernel_restart_prepare()
- *       produced "tegra-mc: EMEM address decode error" messages
- *       during Linux's remaining shutdown steps, confirming the
- *       bypass raced with in-flight Linux DMA. syscore_shutdown()
- *       is NOT called on the kexec path in 5.15, so there is no
- *       cross-subsystem hook that fires AFTER device_shutdown().
- *
- *   Bringing NO_OP round-trip to success therefore needs either a
- *   minimum-subset port of arm-smmu-v2 into SLM-OS (Path 2 in the
- *   plan, ~350-500 lines) so SLM-OS can program a context bank
- *   that maps its own physical addresses, or a much more careful
- *   pre-kexec sequence that halts every live bus master (not just
- *   xusb) before flipping bypass. Both are out of scope for the
- *   session that produced this module.
+ * See docs/jetson-usb-networking-plan.md §10.3 and §10.8 for the
+ * full investigation, including the struct-field bug the previous
+ * template had (NULLing the wrong field on device_driver) and the
+ * four alternative approaches that were tested and ruled out before
+ * converging on the identity-mapping design.
  *
  * Usage:
  *   insmod arm_smmu_noshutdown.ko
@@ -96,22 +36,7 @@
 #include <linux/iommu.h>
 #include <linux/platform_device.h>
 
-/*
- * SLM-OS's non-cacheable region on Jetson Orin Nano — the 2 MB block
- * at the top of RAM region 1, just below the OP-TEE carveout. Every
- * buffer SLM-OS's xHCI driver hands to the controller (DCBAA,
- * scratchpads, command/event ring TRBs, ERST) comes out of this
- * range via `ncmem_alloc`. See kernel/mm/vmm.c and kernel/CLAUDE.md
- * "Non-Cacheable Shared Memory" for why the region is where it is.
- *
- * Adding an identity mapping covering these 2 MB to the xusb stream's
- * existing Linux-programmed context bank lets SLM-OS program DCBAAP
- * / CRCR with raw physical addresses and have them translate through
- * the SMMU unchanged (IOVA == PA). No bypass, no context-bank
- * reprogramming, no risk of racing in-flight DMA.
- */
-#define SLMOS_NC_BASE   0xBDE00000UL
-#define SLMOS_NC_SIZE   (2UL * 1024 * 1024)   /* 2 MB */
+#include "arm_smmu_noshutdown.h"
 
 static bool iommu_mapping_added;
 
@@ -245,5 +170,6 @@ module_exit(arm_smmu_noshutdown_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("SLM-OS (John Jezl)");
-MODULE_DESCRIPTION("Field-fix for arm-smmu .shutdown suppression "
-                   "across kexec into SLM-OS. See #266, #285.");
+MODULE_DESCRIPTION("Suppress arm-smmu .shutdown and install identity "
+                   "IOMMU mapping for the xusb stream across kexec "
+                   "into SLM-OS. See #266, #285.");
