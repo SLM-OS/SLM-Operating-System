@@ -264,7 +264,8 @@ static int control_validate_send_recv_args(const void *req_payload,
  * Plain callers should use hailo_control_send_recv; this is a
  * private helper.
  */
-static int hailo_control_send_recv_locked(const void *req_payload,
+static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
+                                          const void *req_payload,
                                           uint32_t    req_len,
                                           void       *resp_payload,
                                           uint32_t    resp_capacity,
@@ -286,12 +287,14 @@ static int hailo_control_send_recv_locked(const void *req_payload,
     hailo_platform->bar4_write(0, control_req_wire, aligned_len);
     hailo_platform->mb();
 
-    /* Ring the doorbell: APP CPU control. raise_ready_offset
-     * (0x1684 on Hailo-8) is a direct BAR4 offset — the Linux
-     * driver writes to it via `resources->fw_access` which is
-     * BAR4, and that's how the firmware picks up the "request
-     * ready" event. */
-    uint32_t doorbell_val = HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK;
+    /* Ring the doorbell: APP CPU for ordinary opcodes, CORE CPU
+     * for context-switch opcodes. raise_ready_offset (0x1684 on
+     * Hailo-8) is a direct BAR4 offset — the Linux driver writes
+     * to it via `resources->fw_access` which is BAR4, and that's
+     * how the firmware picks up the "request ready" event. */
+    uint32_t doorbell_val = (cpu_id == HAILO_CTRL_CPU_CORE)
+                                ? HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK
+                                : HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK;
     hailo_platform->bar4_write(hailo_fw_addrs_hailo8.raise_ready_offset,
                                &doorbell_val, sizeof(doorbell_val));
     hailo_platform->mb();
@@ -366,13 +369,28 @@ int hailo_control_send_recv(const void *req_payload,
                             uint32_t   *resp_len,
                             uint32_t    timeout_us)
 {
+    return hailo_control_send_recv_cpu(HAILO_CTRL_CPU_APP,
+                                       req_payload, req_len,
+                                       resp_payload, resp_capacity,
+                                       resp_len, timeout_us);
+}
+
+int hailo_control_send_recv_cpu(enum hailo_control_cpu cpu_id,
+                                const void *req_payload,
+                                uint32_t    req_len,
+                                void       *resp_payload,
+                                uint32_t    resp_capacity,
+                                uint32_t   *resp_len,
+                                uint32_t    timeout_us)
+{
     int rc = control_validate_send_recv_args(req_payload, req_len,
                                              resp_payload, resp_capacity,
                                              resp_len);
     if (rc != HAILO_OK) return rc;
 
     spin_lock(&control_lock);
-    rc = hailo_control_send_recv_locked(req_payload, req_len,
+    rc = hailo_control_send_recv_locked(cpu_id,
+                                        req_payload, req_len,
                                         resp_payload, resp_capacity,
                                         resp_len, timeout_us);
     spin_unlock(&control_lock);
@@ -573,7 +591,8 @@ static int control_write_memory_chunk(uint32_t address,
     int rc = control_validate_send_recv_args(&control_mem_write_req, req_len,
                                              &resp, sizeof(resp), &resp_len);
     if (rc == HAILO_OK) {
-        rc = hailo_control_send_recv_locked(&control_mem_write_req, req_len,
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            &control_mem_write_req, req_len,
                                             &resp, sizeof(resp), &resp_len,
                                             /* 1 s */ 1000000u);
     }
@@ -651,7 +670,8 @@ static int control_read_memory_chunk(uint32_t address,
                                              sizeof(control_mem_read_resp),
                                              &resp_len);
     if (rc == HAILO_OK) {
-        rc = hailo_control_send_recv_locked(&control_mem_read_req,
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            &control_mem_read_req,
                                             sizeof(control_mem_read_req),
                                             &control_mem_read_resp,
                                             sizeof(control_mem_read_resp),
@@ -976,7 +996,8 @@ int hailo_control_config_stream_pcie(
                                              sizeof(control_config_stream_resp),
                                              &resp_len);
     if (rc == HAILO_OK) {
-        rc = hailo_control_send_recv_locked(&control_config_stream_req, req_len,
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            &control_config_stream_req, req_len,
                                             &control_config_stream_resp,
                                             sizeof(control_config_stream_resp),
                                             &resp_len,

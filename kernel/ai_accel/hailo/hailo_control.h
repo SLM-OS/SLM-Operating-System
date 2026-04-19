@@ -54,10 +54,24 @@
 /*
  * Doorbell masks written to raise_ready_offset on BAR4. Bit 0
  * triggers the APP CPU (CPU 0) control handler; bit 1 triggers
- * the CORE CPU (CPU 1) handler. All our requests go to APP CPU.
+ * the CORE CPU (CPU 1) handler. Tier-1/2/3 opcodes (IDENTIFY,
+ * WRITE_MEMORY, CONFIG_STREAM, …) all target APP CPU. Context-
+ * switch opcodes (SET_NETWORK_GROUP_HEADER=0x20,
+ * SET_CONTEXT_INFO=0x21) target CORE CPU.
  */
 #define HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK  (1u << 0)
 #define HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK (1u << 1)
+
+/*
+ * Which firmware CPU the opcode targets. Used by the transport to
+ * pick the doorbell mask. Mirrors hailort's CPU_ID_APP_CPU /
+ * CPU_ID_CORE_CPU enum; kept local to avoid dragging in the full
+ * hailort header stack.
+ */
+enum hailo_control_cpu {
+    HAILO_CTRL_CPU_APP  = 0,
+    HAILO_CTRL_CPU_CORE = 1,
+};
 
 /*
  * BAR0 offsets for the host-side interrupt-status register.
@@ -253,6 +267,21 @@ int hailo_control_send_recv(const void *req_payload,
                             uint32_t    resp_capacity,
                             uint32_t   *resp_len,
                             uint32_t    timeout_us);
+
+/*
+ * Variant that targets the CORE CPU instead of the APP CPU. Needed
+ * for the context-switch opcodes (SET_NETWORK_GROUP_HEADER=0x20,
+ * SET_CONTEXT_INFO=0x21); every other opcode still uses the APP-CPU
+ * default above. Identical semantics otherwise — same control_lock,
+ * same MD5, same response polling — only the doorbell mask differs.
+ */
+int hailo_control_send_recv_cpu(enum hailo_control_cpu cpu_id,
+                                const void *req_payload,
+                                uint32_t    req_len,
+                                void       *resp_payload,
+                                uint32_t    resp_capacity,
+                                uint32_t   *resp_len,
+                                uint32_t    timeout_us);
 
 /*
  * High-level helpers.

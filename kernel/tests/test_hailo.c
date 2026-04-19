@@ -85,6 +85,8 @@ static bool     mock_fw_sim_control_enabled;
 static uint8_t  mock_fw_sim_control_resp[MOCK_CONTROL_RESP_MAX];
 static uint32_t mock_fw_sim_control_resp_len;
 static uint32_t mock_control_doorbells;
+static uint32_t mock_control_core_doorbells;
+static uint32_t mock_control_last_doorbell_val;
 /* Sized to hold a full control-channel payload (HAILO_CONTROL_MAX_BUFFER_LENGTH).
  * A WRITE_MEMORY chunk with a 1024 B data body totals 32 B header + 1024 B
  * data = 1056 B on the wire, which exceeded the old 512 B cap and caused
@@ -162,6 +164,8 @@ static void mock_reset(void)
     memset(mock_fw_sim_control_resp, 0, sizeof(mock_fw_sim_control_resp));
     mock_fw_sim_control_resp_len = 0;
     mock_control_doorbells = 0;
+    mock_control_core_doorbells = 0;
+    mock_control_last_doorbell_val = 0;
     memset(mock_last_control_request, 0, sizeof(mock_last_control_request));
     mock_last_control_request_len = 0;
     mock_imask_writes   = 0;
@@ -559,8 +563,12 @@ static void mock_bar4_write(uint32_t offset, const void *src, size_t n)
      && n >= sizeof(uint32_t)) {
         uint32_t v;
         memcpy(&v, src, sizeof(v));
+        mock_control_last_doorbell_val = v;
         if (v == HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK) {
             mock_control_doorbells++;
+            mock_simulate_fw_control_response();
+        } else if (v == HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK) {
+            mock_control_core_doorbells++;
             mock_simulate_fw_control_response();
         }
     }
@@ -1738,6 +1746,88 @@ static void test_control_identify_timeout_no_response(void)
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
                           hailo_control_identify(&resp));
     TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+}
+
+static void test_control_send_recv_cpu_core_rings_core_doorbell(void)
+{
+    /* Context-switch opcodes target CPU_ID_CORE_CPU, which rings
+     * bit 1 of raise_ready_offset instead of bit 0. The transport
+     * plumbing (hailo_control_send_recv_cpu) must select the right
+     * doorbell mask based on the cpu_id argument. Use the mock's
+     * canned response path (same as IDENTIFY test above) to drive
+     * a round trip via the CORE path and confirm:
+     *   - mock_control_core_doorbells increments
+     *   - mock_control_doorbells does NOT (APP path untouched)
+     *   - last doorbell value equals CORE mask (1<<1) */
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode   = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    fake.parameter_count        = 0;
+
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    /* Build a minimal well-formed request body — common header +
+     * parameter_count (zero params). The transport doesn't care about
+     * opcode value for routing; only length validity and doorbell
+     * routing are under test. */
+    struct {
+        struct hailo_control_common_header header;
+        uint32_t                           parameter_count;
+    } __attribute__((packed)) req;
+    memset(&req, 0, sizeof(req));
+    req.header.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    req.header.opcode   = __builtin_bswap32(0x20);  /* SET_NETWORK_GROUP_HEADER */
+    req.parameter_count = 0;
+
+    uint8_t  resp[64];
+    uint32_t resp_len = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_send_recv_cpu(HAILO_CTRL_CPU_CORE,
+                                    &req, sizeof(req),
+                                    resp, sizeof(resp), &resp_len,
+                                    /*timeout_us=*/1000));
+
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_core_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK,
+                             mock_control_last_doorbell_val);
+}
+
+static void test_control_send_recv_default_rings_app_doorbell(void)
+{
+    /* The APP-default path (plain hailo_control_send_recv via
+     * hailo_control_identify) rings bit 0. Regression-guards the
+     * existing tier-1 opcode callers after the cpu_id plumbing
+     * refactor. */
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode   = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    fake.parameter_count        = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_core_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK,
+                             mock_control_last_doorbell_val);
 }
 
 /*
@@ -4634,6 +4724,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_identify_rejects_null_out);
     RUN_TEST(test_control_identify_happy_path);
     RUN_TEST(test_control_identify_timeout_no_response);
+    RUN_TEST(test_control_send_recv_cpu_core_rings_core_doorbell);
+    RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);
     RUN_TEST(test_control_identify_ignores_non_fw_control_irq);
