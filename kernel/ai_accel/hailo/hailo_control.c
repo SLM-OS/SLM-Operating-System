@@ -1071,7 +1071,7 @@ _Static_assert(sizeof(struct hailo_cs_application_header_wire) == 32,
 struct hailo_cs_set_ngh_req_wire {
     struct hailo_control_common_header common;
     uint32_t parameter_count;              /* BE, = 1 */
-    uint32_t application_header_length;    /* BE, = 53 */
+    uint32_t application_header_length;    /* BE, = 32 (v4.23) */
     struct hailo_cs_application_header_wire application_header;
 } __attribute__((packed));
 

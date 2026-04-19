@@ -641,13 +641,15 @@ static int cmd_hailo(int argc, char *argv[])
     }
 
     if (argc >= 2 && strcmp(argv[1], "ctxsmoke") == 0) {
-        /* Phase 6.3d hardware probe: exercise the two context-switch
-         * opcodes (SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against
-         * live firmware with minimum-viable payloads, and report
+        /* Phase 6.3d/6.4 hardware probe: exercise the three context-
+         * switch opcodes (CHANGE_CONTEXT_SWITCH_STATUS,
+         * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against live
+         * firmware with minimum-viable payloads, and report
          * major/minor status for each. Goal: confirm CPU_ID_CORE_CPU
          * routing works and discover which application_header fields
-         * firmware actually validates before we build the full
-         * HEF→action-list translator. */
+         * and per-context action sequences firmware actually
+         * validates before we build the full HEF→action-list
+         * translator. */
         if (hailo_get_state() != HAILO_STATE_RUNNING) {
             shell_printf("hailo: ctxsmoke needs firmware booted (state=%s)\n",
                          hailo_state_str(hailo_get_state()));
@@ -691,11 +693,10 @@ static int cmd_hailo(int argc, char *argv[])
         struct hailo_tensor ccw_tensor = {0};
         struct hailo_vdma_desc_list ccw_list = {0};
         const uint32_t ccw_bytes = 512u;
-        const uint32_t ccw_descs = 1u;           /* must be >= 2 for alloc, pad to 2 */
         const uint16_t ccw_page_size = 512u;
         int trc = hailo_tensor_alloc(ccw_bytes, &ccw_tensor);
         if (trc != HAILO_OK) {
-            shell_printf("  [3/3] SKIP: CCW tensor alloc failed (%d)\n", trc);
+            shell_printf("  [5/6] SKIP: CCW tensor alloc failed (%d)\n", trc);
             shell_puts("hailo: ctxsmoke done\n");
             return 0;
         }
@@ -707,7 +708,7 @@ static int cmd_hailo(int argc, char *argv[])
                                              /*circular=*/false,
                                              &ccw_list);
         if (drc != HAILO_OK) {
-            shell_printf("  [3/3] SKIP: vdma desc_list alloc failed (%d)\n", drc);
+            shell_printf("  [5/6] SKIP: vdma desc_list alloc failed (%d)\n", drc);
             hailo_tensor_free(&ccw_tensor);
             shell_puts("hailo: ctxsmoke done\n");
             return 0;
@@ -717,13 +718,12 @@ static int cmd_hailo(int argc, char *argv[])
                                                    ccw_bytes,
                                                    /*data_id=*/0);
         if (programmed < 0) {
-            shell_printf("  [3/3] SKIP: vdma program_buffer failed (%d)\n", programmed);
+            shell_printf("  [5/6] SKIP: vdma program_buffer failed (%d)\n", programmed);
             hailo_vdma_desc_list_free(&ccw_list);
             hailo_tensor_free(&ccw_tensor);
             shell_puts("hailo: ctxsmoke done\n");
             return 0;
         }
-        (void)ccw_descs;
 
         /* Firmware enforces strict ACTIVATION → BATCH_SWITCHING →
          * PRELIMINARY → DYNAMIC × N order AND specific per-context
