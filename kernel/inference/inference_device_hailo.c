@@ -27,6 +27,7 @@
 
 #include "inference_device.h"
 #include "hailo.h"
+#include "hailo_control.h"
 #include "hailo_infer.h"
 #include "hef_header.h"
 #include "hef_parser.h"
@@ -105,6 +106,151 @@ static uint32_t pad_bytes(const struct hef_pad_info *p)
     return (uint32_t)bytes;
 }
 
+/* Pick the largest input and output pads across the HEF's pad list.
+ * Multi-head vision models have several pads in each direction; we
+ * size the DMA buffer to the biggest. Returns 0 on success (and
+ * populates the output pointers), -1 if either direction is empty. */
+static int pick_largest_pads(const struct hef_info *info,
+                             const struct hef_pad_info **in_pad_out,
+                             const struct hef_pad_info **out_pad_out,
+                             uint32_t *in_bytes_out,
+                             uint32_t *out_bytes_out)
+{
+    const struct hef_pad_info *in_pad = NULL;
+    const struct hef_pad_info *out_pad = NULL;
+    uint32_t input_bytes = 0, output_bytes = 0;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *p = &info->pads[i];
+        uint32_t b = pad_bytes(p);
+        if (!b) continue;
+        if (p->is_input) {
+            if (b > input_bytes) { input_bytes = b; in_pad = p; }
+        } else {
+            if (b > output_bytes) { output_bytes = b; out_pad = p; }
+        }
+    }
+    if (!input_bytes || !output_bytes || !in_pad || !out_pad) return -1;
+    *in_pad_out    = in_pad;
+    *out_pad_out   = out_pad;
+    *in_bytes_out  = input_bytes;
+    *out_bytes_out = output_bytes;
+    return 0;
+}
+
+/* Upload the HEF's CCW weight stream (best-effort).
+ *
+ * For v0/v1 HEFs whose CCWs are inline `write_data_ccw` actions,
+ * `hailo_control_upload_ccw` writes payloads to sequential firmware
+ * addresses — the original Phase 5.3 path.
+ *
+ * For v2+ HEFs (DFC 3.33.1 scheduler_mlp_pi5.hef), CCWs are
+ * `write_data_ccw_ptr` actions pointing into the separate CCWS
+ * block. Real delivery on v2+ goes through the
+ * CONTEXT_SWITCH_SET_CONTEXT_INFO opcode — firmware's context
+ * switcher pulls CCW payloads from host-side DMA buffers. That's a
+ * separate major subsystem (not yet implemented); our
+ * WRITE_MEMORY-based uploader gets rejected by firmware.
+ *
+ * Treat failure as non-fatal so the policy path stays exercisable
+ * (hailo_infer_run will then time out cleanly when firmware never
+ * produces output). This lets `bench sched-policy` run through the
+ * chain and observe the timeout, which is the correct signal until
+ * the context-switch protocol lands. */
+static void upload_ccw_best_effort(const struct hef_info *info,
+                                   const void *model,
+                                   const struct hef_outer_header *outer)
+{
+    if (info->ccw_action_count == 0) return;
+    const uint8_t *proto_base = (const uint8_t *)model + outer->proto_offset;
+    const uint8_t *ccws_base  = (const uint8_t *)model + outer->ccws_offset;
+    uint64_t uploaded = 0;
+    int urc = hailo_control_upload_ccw(info,
+                                       proto_base, outer->proto_size,
+                                       ccws_base,  outer->ccws_size,
+                                       /*device_base=*/0, &uploaded);
+    if (urc == HAILO_OK) {
+        INFO("hailo backend: CCW upload OK — %lu bytes across %u actions",
+             (unsigned long)uploaded, info->ccw_action_count);
+    } else {
+        WARN("hailo backend: CCW upload failed (rc=%d after %lu bytes); "
+             "proceeding — v2+ HEFs require context-switch protocol which "
+             "is not yet implemented (inference will time out)",
+             urc, (unsigned long)uploaded);
+    }
+}
+
+/* HEF core_buffers_per_frame is a uint32 on the proto side but a
+ * uint16 on the CONFIG_STREAM wire. Default a zero to 1, clamp to
+ * UINT16_MAX with a WARN rather than silent truncation. Realistic
+ * MLP values are 1-4. */
+static uint16_t clamp_cbpf(uint32_t cbpf, const char *tag)
+{
+    if (!cbpf) return 1;
+    if (cbpf > UINT16_MAX) {
+        WARN("hailo backend: %s core_buffers_per_frame=%u exceeds u16; clamping",
+             tag, cbpf);
+        return UINT16_MAX;
+    }
+    return (uint16_t)cbpf;
+}
+
+/* Configure input + output streams via CONFIG_STREAM (best-effort).
+ *
+ * Same rationale as the CCW upload — v2+ HEFs need
+ * CONTEXT_SWITCH_SET_CONTEXT_INFO first so firmware knows about
+ * the streams; without that CONFIG_STREAM returns 0x40030050
+ * (STREAM__INVALID_CONFIG_STREAM_INDEX). Synthetic test HEFs
+ * without has_stream_info skip this step. Real HEFs attempt the
+ * handshake and log a WARN on failure; the slot stays live so
+ * downstream inference_run calls can still be issued (they time
+ * out cleanly when firmware never produces output). */
+static void config_streams_best_effort(int idx,
+                                       const struct hef_pad_info *in_pad,
+                                       const struct hef_pad_info *out_pad)
+{
+    if (!in_pad->has_stream_info || !out_pad->has_stream_info) return;
+
+    uint16_t in_cbpf  = clamp_cbpf(in_pad->core_buffers_per_frame,  "input");
+    uint16_t out_cbpf = clamp_cbpf(out_pad->core_buffers_per_frame, "output");
+
+    uint8_t in_dmid = 0, out_dmid = 0;
+    struct hailo_stream_pcie_config scfg_in = {
+        .stream_index          = 0,
+        .is_input              = true,
+        .skip_nn_stream_config = false,
+        .pcie_channel_index    = slots[idx].cfg.input_channel,
+        .pcie_dataflow_type    = HAILO_PCIE_DATAFLOW_TYPE_BURST,
+    };
+    scfg_in.nn_stream_config.core_bytes_per_buffer    = slots[idx].cfg.input_page_size;
+    scfg_in.nn_stream_config.core_buffers_per_frame   = in_cbpf;
+    scfg_in.nn_stream_config.periph_bytes_per_buffer  = slots[idx].cfg.input_page_size;
+    scfg_in.nn_stream_config.periph_buffers_per_frame = 1;
+    int src_in = hailo_control_config_stream_pcie(&scfg_in, &in_dmid);
+
+    struct hailo_stream_pcie_config scfg_out = {
+        .stream_index          = 0,
+        .is_input              = false,
+        .skip_nn_stream_config = false,
+        .pcie_channel_index    = slots[idx].cfg.output_channel,
+        .desc_page_size        = slots[idx].cfg.output_page_size,
+    };
+    scfg_out.nn_stream_config.core_bytes_per_buffer    = slots[idx].cfg.output_page_size;
+    scfg_out.nn_stream_config.core_buffers_per_frame   = out_cbpf;
+    scfg_out.nn_stream_config.periph_bytes_per_buffer  = slots[idx].cfg.output_page_size;
+    scfg_out.nn_stream_config.periph_buffers_per_frame = 1;
+    int src_out = hailo_control_config_stream_pcie(&scfg_out, &out_dmid);
+
+    if (src_in == HAILO_OK && src_out == HAILO_OK) {
+        INFO("hailo backend: streams configured (in dmid=%u, out dmid=%u)",
+             (unsigned)in_dmid, (unsigned)out_dmid);
+    } else {
+        WARN("hailo backend: CONFIG_STREAM best-effort failed "
+             "(in rc=%d, out rc=%d); v2+ HEFs need CONTEXT_SWITCH "
+             "protocol — not yet implemented. Slot stays live; "
+             "inference will time out.", src_in, src_out);
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /* ops                                                                         */
 /* -------------------------------------------------------------------------- */
@@ -152,26 +298,11 @@ static int hailo_backend_load_model(struct inference_device *dev,
     rc = hef_parse_body(proto, outer.proto_size, &info);
     if (rc != HEF_OK) return INF_ERR_BAD_MODEL;
 
-    /* 3. Pick input and output tensor sizes. In the presence of
-     * multiple input or output pads (rare for scheduler-class MLPs,
-     * common for multi-head vision models), pick the LARGEST in each
-     * direction so the allocated DMA buffer covers all of them. A
-     * future 6.2b refinement can index per-pad slots so multi-head
-     * inference routes each head to its own channel. */
-    const struct hef_pad_info *in_pad = NULL;
-    const struct hef_pad_info *out_pad = NULL;
-    uint32_t input_bytes = 0, output_bytes = 0;
-    for (uint32_t i = 0; i < info.pad_count; i++) {
-        const struct hef_pad_info *p = &info.pads[i];
-        uint32_t b = pad_bytes(p);
-        if (!b) continue;
-        if (p->is_input) {
-            if (b > input_bytes) { input_bytes = b; in_pad = p; }
-        } else {
-            if (b > output_bytes) { output_bytes = b; out_pad = p; }
-        }
-    }
-    if (!input_bytes || !output_bytes || !in_pad || !out_pad) {
+    /* 3. Pick the largest pads in each direction. See pick_largest_pads
+     * for the multi-head rationale. */
+    const struct hef_pad_info *in_pad, *out_pad;
+    uint32_t input_bytes, output_bytes;
+    if (pick_largest_pads(&info, &in_pad, &out_pad, &input_bytes, &output_bytes) != 0) {
         return INF_ERR_BAD_MODEL;
     }
 
@@ -246,6 +377,15 @@ static int hailo_backend_load_model(struct inference_device *dev,
     slots[idx].output_shape[0] = (uint16_t)pad_dim(out_pad->padded_height,   out_pad->height);
     slots[idx].output_shape[1] = (uint16_t)pad_dim(out_pad->padded_width,    out_pad->width);
     slots[idx].output_shape[2] = (uint16_t)pad_dim(out_pad->padded_features, out_pad->features);
+
+    /* 5. Upload CCW weights + 6. configure streams. Both are
+     * best-effort: v2+ HEFs need the CONTEXT_SWITCH protocol (not
+     * yet implemented) before firmware accepts WRITE_MEMORY /
+     * CONFIG_STREAM. Failures log a WARN but leave the slot live
+     * so inference_run will time out cleanly — the correct signal
+     * until Phase 6.3 lands. */
+    upload_ccw_best_effort(&info, model, &outer);
+    config_streams_best_effort(idx, in_pad, out_pad);
 
     /* Handle numbering: 1..HAILO_MAX_MODELS. INF_BUILTIN_HANDLE (=0)
      * stays reserved for backends with compiled-in weights. */

@@ -3117,9 +3117,9 @@ static void test_ccw_upload_rejects_null(void)
     struct hef_info info = {0};
     uint8_t blob[4] = {0};
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(NULL, blob, 0x10000, NULL));
+        hailo_control_upload_ccw(NULL, blob, sizeof(blob), NULL, 0, 0x10000, NULL));
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, NULL, 0x10000, NULL));
+        hailo_control_upload_ccw(&info, NULL, 0, NULL, 0, 0x10000, NULL));
 }
 
 static void test_ccw_upload_rejects_truncated(void)
@@ -3129,7 +3129,7 @@ static void test_ccw_upload_rejects_truncated(void)
     uint8_t blob[4] = {0};
     info.ccw_actions_truncated = true;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, blob, 0x10000, NULL));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x10000, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
@@ -3141,7 +3141,7 @@ static void test_ccw_upload_rejects_address_wrap(void)
     uint32_t sizes[] = { 8 };
     build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, blob, 0xFFFFFFFC, NULL));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0xFFFFFFFC, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
@@ -3152,7 +3152,7 @@ static void test_ccw_upload_empty_info_is_noop(void)
     uint8_t blob[4] = {0};
     uint64_t uploaded = 0xDEADBEEF;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x10000, &uploaded));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x10000, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(0, uploaded);
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
@@ -3169,7 +3169,7 @@ static void test_ccw_upload_single_action(void)
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x100, &uploaded));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x100, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(32, uploaded);
     TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
 
@@ -3194,7 +3194,7 @@ static void test_ccw_upload_multiple_actions_contiguous(void)
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x200, &uploaded));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x200, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(16u + 20u + 12u, uploaded);
     TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
 
@@ -3221,8 +3221,139 @@ static void test_ccw_upload_chunks_large_action(void)
     build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
 
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x400, NULL));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x400, NULL));
     TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
+}
+
+/* Helper: build a CCW action list where every entry is a CCW_PTR
+ * (is_ccw_ptr=true), with offsets into a standalone ccws buffer. */
+static void build_ccw_ptr_info(struct hef_info *info,
+                               uint8_t *ccws, uint32_t ccws_size,
+                               const uint32_t *sizes, uint32_t count)
+{
+    memset(info, 0, sizeof(*info));
+    for (uint32_t i = 0; i < ccws_size; i++) {
+        ccws[i] = (uint8_t)(i ^ 0xA5);
+    }
+    uint32_t off = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        TEST_ASSERT_TRUE(off + sizes[i] <= ccws_size);
+        info->ccw_actions[i].data_offset_in_blob = off;
+        info->ccw_actions[i].data_size           = sizes[i];
+        info->ccw_actions[i].cfg_channel_index   = 0;
+        info->ccw_actions[i].cfg_channel_index_known = true;
+        info->ccw_actions[i].is_ccw_ptr          = true;
+        off += sizes[i];
+        info->ccw_total_bytes += sizes[i];
+    }
+    info->ccw_action_count = count;
+    info->ccw_actions_truncated = false;
+}
+
+static void test_ccw_upload_ptr_variant_resolves_from_ccws_base(void)
+{
+    /* is_ccw_ptr=true actions should source bytes from ccws_base +
+     * data_offset_in_blob, NOT from blob_base. Confirm the correct
+     * bytes land on the device. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t proto[64];    /* dummy — unused for ptr actions */
+    uint8_t ccws[128];
+    struct hef_info info;
+    uint32_t sizes[] = { 16, 24 };
+    build_ccw_ptr_info(&info, ccws, sizeof(ccws), sizes, 2);
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_upload_ccw(&info, proto, sizeof(proto), ccws, sizeof(ccws), 0x200, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(40, uploaded);
+
+    /* Read back and verify source bytes were ccws[] not proto[]. */
+    uint8_t readback[40];
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_read_memory(0x200, readback, sizeof(readback)));
+    TEST_ASSERT_EQUAL_MEMORY(ccws, readback, sizeof(readback));
+}
+
+static void test_ccw_upload_ptr_variant_rejects_null_ccws_base(void)
+{
+    /* A v2+ action with is_ccw_ptr=true and no ccws_base is
+     * unresolvable; upload must return INVAL without touching the
+     * device. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t proto[64];
+    uint8_t ccws[128];
+    struct hef_info info;
+    uint32_t sizes[] = { 16 };
+    build_ccw_ptr_info(&info, ccws, sizeof(ccws), sizes, 1);
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, proto, sizeof(proto),
+                                  /*ccws_base=*/NULL, /*ccws_size=*/0,
+                                  0x300, &uploaded));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+/* Shared builder for single-action out-of-bounds tests. */
+static void build_oob_action(struct hef_info *info, bool is_ptr,
+                             uint32_t offset, uint32_t size)
+{
+    memset(info, 0, sizeof(*info));
+    info->ccw_action_count = 1;
+    info->ccw_actions[0].is_ccw_ptr            = is_ptr;
+    info->ccw_actions[0].data_offset_in_blob   = offset;
+    info->ccw_actions[0].data_size             = size;
+    info->ccw_actions[0].cfg_channel_index_known = true;
+    info->ccw_total_bytes = size;
+}
+
+static void test_ccw_upload_rejects_action_past_ccws_size(void)
+{
+    /* Malformed/adversarial HEF: action claims offset+size past the
+     * CCWS block's actual size. Without the bounds check, upload_ccw
+     * would read past the end of `ccws` and forward arbitrary kernel
+     * memory to firmware. The check must reject cleanly before the
+     * first doorbell fires. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t proto[64];
+    uint8_t ccws[128];
+    struct hef_info info;
+    /* offset=100 + size=64 → end=164 > 128 */
+    build_oob_action(&info, /*is_ptr=*/true, 100, 64);
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, proto, sizeof(proto),
+                                  ccws, sizeof(ccws),
+                                  0x500, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(0, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_rejects_action_past_blob_size(void)
+{
+    /* Mirror for the v0/v1 (inline-blob) path: action's offset+size
+     * exceeds blob_size → INVAL. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t blob[32];
+    struct hef_info info;
+    /* offset=30 + size=16 → end=46 > 32 */
+    build_oob_action(&info, /*is_ptr=*/false, 30, 16);
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0,
+                                  0x600, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(0, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
 static void test_ccw_upload_skips_zero_size_action(void)
@@ -3239,7 +3370,7 @@ static void test_ccw_upload_skips_zero_size_action(void)
     build_ccw_info(&info, blob, sizeof(blob), sizes, 3);
 
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, 0x300, NULL));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x300, NULL));
     TEST_ASSERT_EQUAL_UINT32(2, mock_control_doorbells);
 }
 
@@ -4228,6 +4359,140 @@ static void test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad(void)
     TEST_ASSERT_EQUAL_UINT32(42, info.pads[0].features);
 }
 
+static void test_hef_parser_edge_layer_uses_sys_index_when_pad_index_absent(void)
+{
+    /* DFC 3.33.1 wire format: scheduler_mlp_pi5.hef edge_layers omit
+     * pad_index entirely on their boundary layers. Our parser must
+     * fall back to sys_index (from edge_layer_base) as the pad key,
+     * and treat missing direction as input (proto3 default=0).
+     *
+     * Build a HEF with ONE edge_layer that has shape + sys_index but
+     * NO pad_index and NO direction. Parser should create an input
+     * pad indexed by sys_index. */
+    uint8_t proto[1024];
+    size_t  plen = 0;
+
+    uint8_t elin[256];
+    size_t  elin_len = 0;
+    /* NO direction (field 1) — default to H2D=input */
+    /* NO edge_layer_type (field 2) — default to INFO */
+    uint8_t info_buf[128];
+    size_t  info_len = 0;
+    emit_lenprefix(info_buf, &info_len, 1, (const uint8_t *)"in", 2);
+    {
+        uint8_t base[32];
+        size_t  base_len = 0;
+        emit_varint_field(base, &base_len, 1, 1);    /* height */
+        emit_varint_field(base, &base_len, 3, 1);    /* width */
+        emit_varint_field(base, &base_len, 5, 108);  /* features */
+        emit_varint_field(base, &base_len, 8, 7);    /* sys_index = 7 */
+        emit_varint_field(base, &base_len, 9, 256);  /* core_bytes_per_buffer */
+        emit_lenprefix(info_buf, &info_len, 2, base, base_len);
+    }
+    emit_lenprefix(elin, &elin_len, 3, info_buf, info_len);
+    /* NO pad_index (field 7) */
+
+    uint8_t md_buf[512];
+    size_t  md_len = 0;
+    emit_lenprefix(md_buf, &md_len, 2, elin, elin_len);
+
+    uint8_t ctx_buf[768];
+    size_t  ctx_len = 0;
+    emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
+
+    uint8_t ng_buf[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 3, ctx_buf, ctx_len);
+
+    emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
+                          hef_parse_body(proto, plen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].is_input);        /* default direction 0 */
+    TEST_ASSERT_EQUAL_UINT32(7, info.pads[0].index); /* sys_index = 7 */
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(108, info.pads[0].features);
+    TEST_ASSERT_EQUAL_UINT32(7,   info.pads[0].sys_index);
+    TEST_ASSERT_EQUAL_UINT32(256, info.pads[0].core_bytes_per_buffer);
+}
+
+static void test_hef_parser_edge_layer_direction_1_means_output(void)
+{
+    /* Mirror of the above but with explicit direction=1 (DEVICE_TO_HOST).
+     * Verifies is_input flips to false. */
+    uint8_t proto[1024];
+    size_t  plen = 0;
+
+    uint8_t el[256];
+    size_t  el_len = 0;
+    emit_varint_field(el, &el_len, 1, 1);            /* direction = D2H (output) */
+
+    uint8_t info_buf[128];
+    size_t  info_len = 0;
+    emit_lenprefix(info_buf, &info_len, 1, (const uint8_t *)"out", 3);
+    {
+        uint8_t base[32];
+        size_t  base_len = 0;
+        emit_varint_field(base, &base_len, 5, 24);   /* features = 24 */
+        emit_varint_field(base, &base_len, 8, 3);    /* sys_index = 3 */
+        emit_lenprefix(info_buf, &info_len, 2, base, base_len);
+    }
+    emit_lenprefix(el, &el_len, 3, info_buf, info_len);
+
+    uint8_t md_buf[512];
+    size_t  md_len = 0;
+    emit_lenprefix(md_buf, &md_len, 2, el, el_len);
+
+    uint8_t ctx_buf[768];
+    size_t  ctx_len = 0;
+    emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
+
+    uint8_t ng_buf[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 3, ctx_buf, ctx_len);
+
+    emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
+                          hef_parse_body(proto, plen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_FALSE(info.pads[0].is_input);
+    TEST_ASSERT_EQUAL_UINT32(3, info.pads[0].index);
+    TEST_ASSERT_EQUAL_UINT32(24, info.pads[0].features);
+}
+
+static void test_inf_hailo_load_with_no_ccw_actions_succeeds(void)
+{
+    /* build_test_hef produces a HEF with valid pads but NO
+     * write_data_ccw actions, so `info.ccw_action_count == 0` and
+     * upload_ccw_best_effort short-circuits. load_model returns OK
+     * and the slot is live.
+     *
+     * The survives-failure-path-when-CCW-actions-exist scenario is
+     * exercised at the unit level by the test_ccw_upload_rejects_*
+     * tests above, which hit hailo_control_upload_ccw directly and
+     * confirm the bounds-check rejection without going through
+     * load_model. */
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    mock_fw_sim_config_stream_enabled    = true;
+    mock_fw_sim_config_stream_manager_id = 0x33;
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK,
+        inference_load_model(dev, blob, n, &h));
+    TEST_ASSERT_TRUE(h >= 1);
+    TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
+}
+
 static void test_inf_hailo_load_threads_hef_stream_info(void)
 {
     struct inference_device *dev = hailo_backend_ready();
@@ -4239,7 +4504,15 @@ static void test_inf_hailo_load_threads_hef_stream_info(void)
      * when run() later feeds the device, the right stream params
      * are used. We can't read the slot's cfg directly; instead, we
      * assert the load succeeded + the input_bytes field (which is
-     * pad-shape-derived) matches the pad shape. */
+     * pad-shape-derived) matches the pad shape.
+     *
+     * With the Phase 6.2+ chain in place, load_model ALSO fires two
+     * CONFIG_STREAM RPCs (input + output) whenever pads carry real
+     * has_stream_info. Enable the mock firmware's config_stream
+     * simulator so the handshake completes rather than timing out. */
+    mock_fw_sim_config_stream_enabled    = true;
+    mock_fw_sim_config_stream_manager_id = 0x42;
+
     uint8_t blob[2048];
     size_t  n = build_test_hef_with_edge_layers(blob, sizeof(blob),
                                                 7, 256, 0, 0x3C000000u,
@@ -4408,6 +4681,10 @@ int test_suite_hailo(void)
     RUN_TEST(test_ccw_upload_multiple_actions_contiguous);
     RUN_TEST(test_ccw_upload_chunks_large_action);
     RUN_TEST(test_ccw_upload_skips_zero_size_action);
+    RUN_TEST(test_ccw_upload_ptr_variant_resolves_from_ccws_base);
+    RUN_TEST(test_ccw_upload_ptr_variant_rejects_null_ccws_base);
+    RUN_TEST(test_ccw_upload_rejects_action_past_ccws_size);
+    RUN_TEST(test_ccw_upload_rejects_action_past_blob_size);
 
     /* Phase 5.4 VDMA descriptor-list allocator */
     RUN_TEST(test_vdma_alloc_size_rounds_up_to_64k);
@@ -4489,6 +4766,9 @@ int test_suite_hailo(void)
     RUN_TEST(test_hef_parser_captures_edge_layer_quant);
     RUN_TEST(test_hef_parser_edge_layer_creates_pad_when_ops_empty);
     RUN_TEST(test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad);
+    RUN_TEST(test_hef_parser_edge_layer_uses_sys_index_when_pad_index_absent);
+    RUN_TEST(test_hef_parser_edge_layer_direction_1_means_output);
+    RUN_TEST(test_inf_hailo_load_with_no_ccw_actions_succeeds);
     RUN_TEST(test_inf_hailo_load_threads_hef_stream_info);
 
     return UnityEnd();

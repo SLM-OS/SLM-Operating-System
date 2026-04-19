@@ -349,16 +349,73 @@ New shell subcommand measures decisions/sec for each backend in the inference-de
 
 **Edge-layer extraction is primary source now:** `hef_parser.c::decode_edge_layer_cb` was extended to CREATE pad entries when `ops[]` is empty (not just back-fill existing ones). Direction (input/output), tensor shape (height/width/features), stream info (sys_index, core_bytes), and quantization (scale/zp) all come out of `contexts[].metadata.edge_layers[]` when the ops path is unused. Unit-tested via `test_hef_parser_edge_layer_creates_pad_when_ops_empty`.
 
-**Known gap — DFC 3.33.1 simple MLPs use neither `ops[]` nor `contexts[]`:**
+**Fix (2026-04-19, pi5-hef-preliminary-config branch):** DFC 3.33.1 simple MLPs DO populate `contexts[].metadata.edge_layers[]` — an earlier hex-trace error (miscalculated `preliminary_config` end offset by 32 bytes) made it look like only `preliminary_config` was used. With the arithmetic corrected, the real HEF has a 2509-byte `contexts[]` field following `preliminary_config`, containing two `ProtoHEFEdgeLayer` entries (input + output) with full `edge_layer_base` shapes (1×1×108 input, 1×1×24 output), `sys_index` values, and `numeric_info.qp_scale` quantization.
 
-Hand-decoding the scheduler_mlp_pi5.hef wire format on real hardware (hexdump of the proto body at offset 44) revealed that DFC 3.33.1 for a simple 108→24 MLP packs everything into `preliminary_config` (3063-byte field 2 inside the first network group). No `ops[]`, no `contexts[]`. Both pad-extraction paths our parser supports come up empty, so `hailo load <path> sched` decodes the outer header + top-level proto fields (hw_arch, sdk_version, network_groups=1) but reports pad_count=0, and the backend's `load_model` correctly rejects with `INF_ERR_BAD_MODEL`.
+The actual bug was our parser's requirement that `pad_index` (field 7) be present before creating a pad entry. DFC 3.33.1 doesn't emit `pad_index` on boundary edge_layers, and also doesn't emit `direction` on input layers (proto3 strips zero-valued scalars; direction=HOST_TO_DEVICE=0 is the default). With pad_index and direction both absent, our parser bailed at `!seen_pad_index → return true`.
 
-Extracting pad/stream/quant info from inside `preliminary_config.operation[].actions[]` requires a new callback chain (actions already do decode `write_data_ccw` for weight upload in Phase 5.3 — one of the 18 oneof branches). Which specific action type carries the pad metadata for this HEF revision needs fresh investigation against HailoRT source. That's a standalone follow-up; the Phase 6.2 plumbing + policy path is all in place and validated up to the pad-shape-unavailable point.
+Fix is minimal: in `decode_edge_layer_cb`, fall back to `edge_layer_base.sys_index` as the pad key when `pad_index` is absent, and default `is_input` to true when `direction` is unseen (matching the proto3 default). 2 new QEMU tests pin the behavior (`test_hef_parser_edge_layer_uses_sys_index_when_pad_index_absent`, `test_hef_parser_edge_layer_direction_1_means_output`).
 
-**Test coverage** — 29 new QEMU cases:
+**Hardware verify on pi-5-1 (2026-04-19):**
 
-- `test_hailo.c` (22 cases): 13 backend tests (register / load happy + error paths / run dtype + size + handle rejection / auto-advance happy / free / shutdown / threads HEF stream info), 5 policy tests (set/get handle + detach + set_from_raw happy + zero-scale reject + NaN reject), 4 edge-layer extraction tests (quant capture, create-if-missing, back-fill shape on shapeless pad, end-to-end load-with-stream-info).
-- `test_hef.c` (3 cases): v2 header accepts with/without trailing CCWS; v2 rejects short trailer. Covers the new 32-byte v2 trailer parsing path against hand-built binaries.
+```
+slmos> hailo load /mnt/files/scheduler_mlp.hef sched
+hailo: hef v2 proto_size=425092 (total 633464 bytes)
+  hw_arch = hailo8l (1)
+  sdk_version = 3.33.1
+  network_groups = 1
+  first NG ops = 0, pads captured = 2
+    in pad[1] "<unnamed>" shape=1x1x108 (padded 1x1x108)
+      stream: sys_index=1 core_bytes=864 core_buffers=1
+      quant: scale_raw=0x3b808081 zp_raw=0x00000000
+    out pad[0] "<unnamed>" shape=1x1x24 (padded 1x1x24)
+      stream: sys_index=0 core_bytes=24 core_buffers=1
+      quant: scale_raw=0x3e565ffd zp_raw=0x430c0000
+hailo: sched: model loaded (handle=1), ai_policy_hailo armed with HEF quant
+slmos> bench sched-policy
+  Input dim: 108, Output dim: 24 (AI_SCHED_N_ACTIONS)
+  cpu-mlp     1000/1000 ok   39469 ns/decision   25336 decisions/sec
+  hailo-8     0/1000 ok   0 ns/decision   0 decisions/sec
+```
+
+Parser fix is working: both input + output pads extracted with full HEF-derived stream config and quant info. Policy armed. `AI_SCHED_N_ACTIONS=24` picked up correctly on Pi 5 (previously 42 from the Jetson default in `ai_types.h`).
+
+**CCW + CONFIG_STREAM chain wired into `load_model` (2026-04-19):** `inference_device_hailo::load_model` now iterates HEF CCW actions via `hailo_control_upload_ccw`, then fires `hailo_control_config_stream_pcie` for input + output. Works end-to-end against mock firmware (test suite exercises it).
+
+**New parser work — `write_data_ccw_ptr` (v2+):** DFC 3.33.1 emits weight CCWs as `ProtoHEFActionWriteDataCcwPtr` (field 16 of the action oneof) — offset+size pointers into the separate CCWS block that follows the proto body. Added nanopb decoder for this variant; `struct hef_ccw_action.is_ccw_ptr` tells the uploader to resolve `data_offset_in_blob` against `ccws_base = hef_file + outer.ccws_offset` instead of against the proto body. Our scheduler_mlp_pi5.hef yields **46 CCW_PTR actions totalling 208 328 bytes** — matches the CCWS block's physical size.
+
+**Next real blocker — CONTEXT_SWITCH protocol (not CCW delivery itself):**
+
+Hardware verify on pi-5-1 with the full chain — CCW upload + CONFIG_STREAM per stream — reveals that both fail at the firmware layer:
+
+```
+[WARN] hailo: WRITE_MEMORY failed (major=0x40030098 minor=0x40030098 opcode_echo=0x1)
+[WARN] hailo backend: CCW upload failed (rc=-3 after 0 bytes) — v2+ HEFs require context-switch protocol
+[WARN] hailo: CONFIG_STREAM failed (major=0x40030050 minor=0x40030005 opcode_echo=0xffffffff)
+[WARN] hailo backend: CONFIG_STREAM best-effort failed (in rc=-3, out rc=-3) — slot stays live; inference will time out.
+hailo: sched: model loaded (handle=1), ai_policy_hailo armed with HEF quant
+```
+
+Our `hailo_control_upload_ccw` uses `WRITE_MEMORY` — a generic "poke bytes at address X" RPC that works for v0/v1 HEFs' inline CCWs but not for v2+ where weights go via the firmware's own context-switch dataflow path. The real HailoRT driver at `libhailort/src/hef/hef_*.cpp` uses two different control opcodes:
+
+- `CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER` — declares a network group to firmware
+- `CONTEXT_SWITCH_SET_CONTEXT_INFO` — sends an action list that firmware's context switcher executes, INCLUDING pulling CCW payloads from host-side DMA buffers
+
+Same reason CONFIG_STREAM fails (`0x40030050` = `STREAM__INVALID_CONFIG_STREAM_INDEX`): firmware doesn't know the streams exist because `SET_CONTEXT_INFO` hasn't been sent yet.
+
+**Scope assessment:** Implementing `CONTEXT_SWITCH_SET_CONTEXT_INFO` is a full new subsystem — action-list packing + CCW DMA buffer management + maybe `CORE_IDENTIFY` + bridge opcodes. Estimate 500-1000 more LoC, needs a clean proto-level understanding of the action stream we're encoding. Not Phase 6.2 scope; tracked as the natural next phase (call it 6.3).
+
+**Best-effort design choice (2026-04-19):** upload + CONFIG_STREAM are now non-fatal — warnings log, slot stays alive, `bench sched-policy` runs through the Hailo path and reports `0/1000 ok` with 10 ms timeouts per decision. That's the CORRECT signal for "pipeline complete, firmware has no context". When Phase 6.3 lands CONTEXT_SWITCH, the WARN lines flip to INFO and `hailo-8` numbers show up.
+
+**Cross-platform:** QEMU, Pi 5, Jetson, x86-64 all build clean under AI_SCHED=ON. 195 Hailo+HEF tests pass in both AI_SCHED=OFF and ON modes.
+
+**Platform override for AI_SCHED_N_ACTIONS (ai_types.h):** `#if defined(PLATFORM_RASPI5)` → 24, else → 42. The in-tree MLP weights are 42-action; Pi 5 reads only the first 24 rows of w3. Matches the 24-action `scheduler_mlp_pi5.hef` produced by `scripts/hailo/compile_hef.sh --variant pi5`.
+
+**Weight-array decoupling (ai_weights.h):** layer-3 extern declarations now use `AI_MLP_LAYER3_MAX_ROWS=42` instead of `AI_MLP_LAYER3_OUT=AI_SCHED_N_ACTIONS`, so the Pi 5 override doesn't conflict with the physical `[42 × 128]` size in `ai_weights_mlp.c`.
+
+**Test coverage summary** (34 new cases vs pre-Phase-6.2 baseline):
+
+- **6.2 PR #304 (merged):** 29 cases — 22 in test_hailo.c (backend + policy + early edge-layer paths), 3 in test_hef.c (v2 outer header), 4 policy (set/get/clear/set_from_raw).
+- **6.2 continuation (this PR):** 5 more — 2 edge-layer parser tests (`sys_index` fallback when `pad_index` absent; `direction` proto3-default), 2 CCW_PTR upload tests (ccws_base resolution happy path + NULL rejection), 1 load_model tolerates upload/config_stream failure (best-effort slot stays live).
 
 Cross-platform: QEMU ARM64, Pi 5 (PLATFORM=RASPI5), Jetson Orin Nano, x86-64 all build clean under `AI_SCHED=ON`. Full suite green in both `make test` (AI_SCHED=OFF) and `make test AI_SCHED=ON` modes.
 

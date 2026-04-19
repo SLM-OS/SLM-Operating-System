@@ -392,14 +392,24 @@ static bool ccw_data_cb(pb_istream_t *stream,
     return pb_read(stream, NULL, data_len);
 }
 
+static bool decode_write_data_ccw_ptr_cb(pb_istream_t *stream,
+                                         const pb_field_t *field,
+                                         void **arg);
+
 static bool decode_write_data_ccw_cb(pb_istream_t *stream,
                                      const pb_field_t *field,
                                      void **arg)
 {
     /* Nanopb shares the callback slot across every branch of
-     * ProtoHEFAction's `action` oneof. Only the write_data_ccw
-     * branch carries the fields we care about; others (write_data,
-     * enable_lcu, debug, …) just get skipped. */
+     * ProtoHEFAction's `action` oneof, so this one function runs
+     * for every action-oneof tag on the wire. We handle two:
+     *   - write_data_ccw      (v0/v1, inline payload bytes)
+     *   - write_data_ccw_ptr  (v2+, payload in the separate CCWS block)
+     * Every other branch (write_data, enable_lcu, debug, …) just
+     * gets skipped past. */
+    if (field->tag == ProtoHEFAction_write_data_ccw_ptr_tag) {
+        return decode_write_data_ccw_ptr_cb(stream, field, arg);
+    }
     if (field->tag != ProtoHEFAction_write_data_ccw_tag) {
         return pb_read(stream, NULL, stream->bytes_left);
     }
@@ -441,6 +451,106 @@ static bool decode_write_data_ccw_cb(pb_istream_t *stream,
     return true;
 }
 
+/*
+ * v2+ variant: write_data_ccw_ptr. Instead of carrying payload bytes
+ * inline (write_data_ccw field 3), the action carries a pointer into
+ * the separate CCWS block that follows the proto body. Three scalars:
+ *   uint64 offset — byte offset into the CCWS block
+ *   uint32 size   — payload length
+ *   uint32 cfg_channel_index
+ *
+ * We store offset into `data_offset_in_blob` (semantic is caller-side;
+ * is_ccw_ptr=true tells the uploader to resolve against ccws_base
+ * rather than blob_base). Offsets are capped at UINT32_MAX; larger
+ * values would overflow our 32-bit storage but CCWS blocks are
+ * bounded well under that in practice (the scheduler_mlp_pi5.hef
+ * CCWS block is ~200 KB).
+ */
+static bool decode_write_data_ccw_ptr_cb(pb_istream_t *stream,
+                                         const pb_field_t *field,
+                                         void **arg)
+{
+    if (field->tag != ProtoHEFAction_write_data_ccw_ptr_tag) {
+        return pb_read(stream, NULL, stream->bytes_left);
+    }
+
+    struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
+
+    /* Parse the inline scalars ourselves — three varint/uint32 fields
+     * which are simpler to walk directly than going through the nanopb
+     * sub-decode + callback wiring dance. */
+    memset(&cctx->pending, 0, sizeof(cctx->pending));
+    cctx->pending.is_ccw_ptr = true;
+    cctx->pending_has_data   = false;
+
+    /* Protobuf wire types (spec §3.1). Nanopb exposes these via
+     * PB_WT_* but only when the caller pulls in pb.h's internals;
+     * spell them locally for readability. */
+    enum {
+        WT_VARINT = 0,    /* int32/64, uint32/64, bool, enum */
+        WT_64BIT  = 1,    /* fixed64, sfixed64, double */
+        WT_LEN    = 2,    /* length-delimited (string, bytes, sub-msg) */
+        WT_32BIT  = 5,    /* fixed32, sfixed32, float */
+    };
+
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no  = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7u);
+
+        if (wire_type == WT_VARINT) {
+            uint64_t v = 0;
+            if (!pb_decode_varint(stream, &v)) return false;
+            switch (field_no) {
+            case 1:     /* offset (uint64) — clamp to u32 (see comment) */
+                if (v > UINT32_MAX) return false;
+                cctx->pending.data_offset_in_blob = (uint32_t)v;
+                break;
+            case 2:     /* size (uint32) */
+                if (v > UINT32_MAX) return false;
+                cctx->pending.data_size = (uint32_t)v;
+                cctx->pending_has_data  = true;
+                break;
+            case 3:     /* cfg_channel_index (uint32) */
+                if (v > UINT32_MAX) return false;
+                cctx->pending.cfg_channel_index       = (uint32_t)v;
+                cctx->pending.cfg_channel_index_known = true;
+                break;
+            default:
+                break;
+            }
+            continue;
+        }
+
+        /* Skip unknown wire types by size. */
+        switch (wire_type) {
+        case WT_64BIT: if (!pb_read(stream, NULL, 8)) return false; break;
+        case WT_LEN: {
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        case WT_32BIT: if (!pb_read(stream, NULL, 4)) return false; break;
+        default: return false;
+        }
+    }
+
+    /* Commit if size was set. Zero-size actions are skipped silently. */
+    if (!cctx->pending_has_data || cctx->pending.data_size == 0) return true;
+
+    if (cctx->info->ccw_action_count < HEF_PARSER_MAX_CCW_ACTIONS) {
+        cctx->info->ccw_actions[cctx->info->ccw_action_count] = cctx->pending;
+    } else {
+        cctx->info->ccw_actions_truncated = true;
+    }
+    cctx->info->ccw_action_count++;
+    cctx->info->ccw_total_bytes += cctx->pending.data_size;
+    return true;
+}
+
 static bool decode_action_cb(pb_istream_t *stream,
                              const pb_field_t *field,
                              void **arg)
@@ -449,8 +559,11 @@ static bool decode_action_cb(pb_istream_t *stream,
     struct ccw_ctx *cctx = (struct ccw_ctx *)*arg;
 
     ProtoHEFAction act = ProtoHEFAction_init_default;
-    /* Wire the oneof callback shared across every action branch —
-     * decode_write_data_ccw_cb filters by field->tag. */
+    /* The oneof's branches share a single callback slot (they're
+     * aliased in the generated union). Wire one dispatcher; it
+     * dispatches internally by field->tag. Writing to
+     * write_data_ccw is sufficient to reach every branch because
+     * all oneof entries alias the same pb_callback_t storage. */
     act.action.write_data_ccw.funcs.decode = decode_write_data_ccw_cb;
     act.action.write_data_ccw.arg          = cctx;
     return pb_decode(stream, ProtoHEFAction_fields, &act);
@@ -509,6 +622,7 @@ struct edge_layer_stage {
     uint32_t qp_zp_raw;
 
     bool     seen_stream;
+    bool     seen_sys_index;          /* f8 specifically — used as pad_key fallback */
     uint32_t sys_index;
     uint32_t core_bytes_per_buffer;
     uint32_t core_buffers_per_frame;
@@ -610,7 +724,8 @@ static bool decode_edge_layer_base_cb(pb_istream_t *stream,
             case 5: st->features        = u; st->seen_shape  = true; break;
             case 6: st->padded_features = u; st->seen_shape  = true; break;
             /* Stream config — already captured. */
-            case 8:  st->sys_index              = u; st->seen_stream = true; break;
+            case 8:  st->sys_index              = u;
+                     st->seen_stream = true; st->seen_sys_index = true; break;
             case 9:  st->core_bytes_per_buffer  = u; st->seen_stream = true; break;
             case 10: st->core_buffers_per_frame = u; st->seen_stream = true; break;
             default: break;
@@ -717,15 +832,31 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     el.direction.arg                = &stage;
     if (!pb_decode(stream, ProtoHEFEdgeLayer_fields, &el)) return false;
 
-    if (!stage.seen_pad_index) return true;         /* non-boundary layer */
+    /* Derive a pad identity. DFC 3.33.1 simple-MLP HEFs don't emit
+     * ProtoHEFEdgeLayer.pad_index on their boundary edge_layers (the
+     * input layer is proto3-default-stripped; the output layer also
+     * omits it). Fall back to the edge_layer's sys_index as the pad
+     * key — every boundary edge_layer has one, and matches the data_id
+     * the firmware uses for DMA routing.
+     *
+     * Require seen_sys_index (f8 specifically), not just seen_stream:
+     * f9/f10 can be emitted without f8 in malformed input, leaving
+     * sys_index=0 and collapsing distinct edge_layers onto pad_key=0.
+     * If neither pad_index nor sys_index is present, skip this
+     * edge_layer (non-boundary / intermediate). */
+    uint32_t pad_key;
+    if (stage.seen_pad_index) {
+        pad_key = stage.pad_index;
+    } else if (stage.seen_sys_index) {
+        pad_key = stage.sys_index;
+    } else {
+        return true;                                /* non-boundary layer */
+    }
 
-    /* Find-or-create the pad. DFC 3.33.1 leaves ProtoHEFNetworkGroup.ops[]
-     * empty for simple MLPs, so the edge_layers[] traversal is the only
-     * path that sees pad info. Fall back to appending a new pad if the
-     * ops[] path didn't already register this index. */
+    /* Find-or-create the pad. */
     struct hef_pad_info *p = NULL;
     for (uint32_t i = 0; i < ectx->info->pad_count; i++) {
-        if (ectx->info->pads[i].index == stage.pad_index) {
+        if (ectx->info->pads[i].index == pad_key) {
             p = &ectx->info->pads[i];
             break;
         }
@@ -737,9 +868,11 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
         }
         p = &ectx->info->pads[ectx->info->pad_count++];
         memset(p, 0, sizeof(*p));
-        p->index = stage.pad_index;
-        /* direction: 0 = HOST_TO_DEVICE (input), 1 = DEVICE_TO_HOST. */
-        p->is_input = stage.seen_direction && stage.direction == 0;
+        p->index = pad_key;
+        /* direction defaults to HOST_TO_DEVICE (input = 0) when the
+         * field is absent — proto3 doesn't emit zero-valued enums.
+         * We flip to output only on an explicit direction==1. */
+        p->is_input = !(stage.seen_direction && stage.direction == 1);
         if (stage.seen_shape) {
             p->has_tensor_shape = true;
             p->height           = stage.height;

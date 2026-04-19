@@ -137,10 +137,16 @@ struct hef_pad_info {
  * firmware reserves for CFG uploads.
  */
 struct hef_ccw_action {
-    uint32_t data_offset_in_blob;                  /* offset within hef_parse_body's input */
+    /* For write_data_ccw (v0/v1 HEF): offset into the proto body
+     * (hef_parse_body's `blob` argument), where the payload bytes
+     * were embedded inline. For write_data_ccw_ptr (v2+): offset
+     * into the CCWS block (the file region following the proto
+     * body). `is_ccw_ptr` selects between the two. */
+    uint32_t data_offset_in_blob;
     uint32_t data_size;                            /* bytes */
     uint32_t cfg_channel_index;
     bool     cfg_channel_index_known;              /* false = tag absent, treat as 0 */
+    bool     is_ccw_ptr;                           /* true = v2+ CCWS-block pointer */
 };
 
 /*

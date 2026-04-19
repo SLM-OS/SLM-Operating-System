@@ -12,6 +12,7 @@
  */
 
 #include "ai_types.h"
+#include "ai_weights.h"   /* AI_MLP_LAYER3_MAX_ROWS */
 
 /* ============================================================================
  * MLP stub weights (all zeros)
@@ -32,9 +33,13 @@ const float ai_mlp_w2[AI_MLP_LAYER2_OUT * AI_MLP_LAYER2_IN]
 const float ai_mlp_b2[AI_MLP_LAYER2_OUT]
     __attribute__((aligned(64))) = {0};
 
-const float ai_mlp_w3[AI_MLP_LAYER3_OUT * AI_MLP_LAYER3_IN]
+/* Layer 3 arrays are physically sized for the 42-action Jetson/QEMU
+ * action space; on Pi 5 (AI_SCHED_N_ACTIONS=24) only the first 24
+ * rows are read. This mirrors the real weights in ai_weights_mlp.c
+ * and matches the extern declarations in ai_weights.h. */
+const float ai_mlp_w3[AI_MLP_LAYER3_MAX_ROWS * AI_MLP_LAYER3_IN]
     __attribute__((aligned(64))) = {0};
-const float ai_mlp_b3[AI_MLP_LAYER3_OUT]
+const float ai_mlp_b3[AI_MLP_LAYER3_MAX_ROWS]
     __attribute__((aligned(64))) = {0};
 
 /* ============================================================================
@@ -56,7 +61,7 @@ const float ai_ppo_w2[AI_MLP_LAYER2_OUT * AI_MLP_LAYER2_IN]
 const float ai_ppo_b2[AI_MLP_LAYER2_OUT]
     __attribute__((aligned(64))) = {0};
 
-const float ai_ppo_w3[AI_MLP_LAYER3_OUT * AI_MLP_LAYER3_IN]
+const float ai_ppo_w3[AI_MLP_LAYER3_MAX_ROWS * AI_MLP_LAYER3_IN]
     __attribute__((aligned(64))) = {0};
-const float ai_ppo_b3[AI_MLP_LAYER3_OUT]
+const float ai_ppo_b3[AI_MLP_LAYER3_MAX_ROWS]
     __attribute__((aligned(64))) = {0};
