@@ -943,12 +943,10 @@ Use the `print_test_result()` helper to maintain consistent output format.
 
 ### Phase 4: CI/CD Integration
 
-- **Status**: Complete (December 2025)
-- GitHub Actions workflow (`.github/workflows/ci.yml`)
-- Runs on every push to main/develop and all PRs
-- Uses ARM semihosting for clean QEMU exit
-- Uploads build artifacts (kernel ELF, test output)
-- See `docs/ci-cd.md` for full documentation
+- **Status**: Local CI via `/ci` Claude Code slash command
+- `.claude/commands/ci.md` — clean-build + test sweep across ARM64 and x86-64 QEMU targets
+- Uses ARM semihosting (ARM64) / `isa-debug-exit` (x86-64) for clean QEMU exit
+- The prior GitHub Actions workflow was retired; its config is archived at `docs/archive/ci-cd.md`. The workflow YAMLs under `.github/workflows/` remain in-tree but are not relied on.
 
 ---
 

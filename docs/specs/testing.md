@@ -16,7 +16,7 @@ Test infrastructure: unit tests, integration tests, hardware-in-loop, CI.
 | GSP harness | `./build/host-tools/gsp-harness` (Linux VFIO) | — | — | ✅ against real GA107 |
 | Hardware test target | — | ⏸️ (`make hw-test-pi5` planned, #251) | Ad-hoc `labctl boot_test` | `make x86-hw-validate PLATFORM=X86_64 SLMOS_LABCTL=1` |
 | Reliability target | `bench smp` distribution | `labctl boot_test --count 10` | Same | Same |
-| CI pipeline | GitHub Actions via `docs/ci-cd.md` | CI runs QEMU target only | CI runs QEMU target only | CI runs QEMU target only |
+| CI pipeline | `/ci` slash command (manual, local) | Same | Same | Same |
 | Pre-commit hook | `.pre-commit-config.yaml` if present | Same | Same | Same |
 | Flaky-test tracking | Per-issue (#200 noted during net expansion) | #216 — secondary dormancy | No standing flakes | #171 — closed |
 
@@ -35,7 +35,8 @@ Test infrastructure: unit tests, integration tests, hardware-in-loop, CI.
 ## See also
 
 - `docs/testing.md` (narrative)
-- `docs/ci-cd.md` (GitHub Actions config)
+- `.claude/commands/ci.md` — `/ci` slash command (local CI pipeline)
+- `docs/archive/ci-cd.md` — archived GitHub Actions config (retired)
 - `docs/code-review-standards.md` (post-change checklist)
 - `kernel/tests/` (test source)
 - `docs/testing/` (HW validation logs, live)
