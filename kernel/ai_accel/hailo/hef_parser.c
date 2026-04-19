@@ -941,10 +941,74 @@ struct ctx_actions_accum {
     struct hef_context_actions *current;    /* NULL if current context overflowed */
 };
 
+/* Decode a ProtoHEFActionEnableLcu sub-message and capture its six
+ * scalar fields into hef_info.enable_lcu_actions[]. Called from the
+ * oneof inner callback when the enable_lcu branch (tag 8) fires.
+ *
+ * Returns true on success (parse advanced past the sub-message) and
+ * false on decode error. Sub-message overflow relative to
+ * HEF_PARSER_MAX_ENABLE_LCU_ACTIONS sets enable_lcu_truncated but
+ * still consumes the bytes — parsing continues for the rest of the
+ * context.
+ */
+static bool decode_enable_lcu_body(pb_istream_t *stream,
+                                   struct ctx_actions_accum *acc)
+{
+    /* Stage the six fields + presence flags. All fields are uint32
+     * varints per hef.proto:758-777. */
+    struct hef_enable_lcu_action out;
+    memset(&out, 0, sizeof(out));
+    out.context_index = acc->current ? (uint8_t)acc->current->context_index : 0;
+
+    bool present_discard = false;  /* shared dummy for fields without
+                                      an independent "was this field
+                                      set?" check — EnableLcu scalars
+                                      default-to-zero is fine. */
+
+    struct u32_ctx lcu_idx_ctx   = { .dst = &out.lcu_index,
+                                     .present = &present_discard };
+    struct u32_ctx cluster_ctx   = { .dst = &out.cluster_index,
+                                     .present = &present_discard };
+    struct u32_ctx done_addr_ctx = { .dst = &out.lcu_kernel_done_address,
+                                     .present = &present_discard };
+    struct u32_ctx done_cnt_ctx  = { .dst = &out.lcu_kernel_done_count,
+                                     .present = &present_discard };
+    struct u32_ctx enable_ctx    = { .dst = &out.lcu_enable_address,
+                                     .present = &present_discard };
+    struct u32_ctx net_idx_ctx   = { .dst = &out.network_index,
+                                     .present = &present_discard };
+
+    ProtoHEFActionEnableLcu sub = ProtoHEFActionEnableLcu_init_default;
+    sub.lcu_index.funcs.decode               = read_u32_cb;
+    sub.lcu_index.arg                        = &lcu_idx_ctx;
+    sub.cluster_index.funcs.decode           = read_u32_cb;
+    sub.cluster_index.arg                    = &cluster_ctx;
+    sub.lcu_kernel_done_address.funcs.decode = read_u32_cb;
+    sub.lcu_kernel_done_address.arg          = &done_addr_ctx;
+    sub.lcu_kernel_done_count.funcs.decode   = read_u32_cb;
+    sub.lcu_kernel_done_count.arg            = &done_cnt_ctx;
+    sub.lcu_enable_address.funcs.decode      = read_u32_cb;
+    sub.lcu_enable_address.arg               = &enable_ctx;
+    sub.network_index.funcs.decode           = read_u32_cb;
+    sub.network_index.arg                    = &net_idx_ctx;
+
+    if (!pb_decode(stream, ProtoHEFActionEnableLcu_fields, &sub)) return false;
+
+    if (acc->info->enable_lcu_count < HEF_PARSER_MAX_ENABLE_LCU_ACTIONS) {
+        acc->info->enable_lcu_actions[acc->info->enable_lcu_count] = out;
+    } else {
+        acc->info->enable_lcu_truncated = true;
+    }
+    acc->info->enable_lcu_count++;
+    return true;
+}
+
 /* Oneof inner callback: runs once per ProtoHEFAction.action oneof
  * branch. `field->tag` is the active branch's proto field number
  * (2=write_data, 5=enable_sequencer, 8=enable_lcu, 10=allow_input_
- * dataflow, …). Skip the body; we only record which kinds fire. */
+ * dataflow, …). Every action gets its kind recorded in
+ * context_actions[].action_types[]; the EnableLcu branch also has
+ * its scalar fields pulled into hef_info.enable_lcu_actions[]. */
 static bool decode_compute_action_inner_cb(pb_istream_t *stream,
                                            const pb_field_t *field,
                                            void **arg)
@@ -961,6 +1025,13 @@ static bool decode_compute_action_inner_cb(pb_istream_t *stream,
         }
         acc->current->action_count++;
     }
+
+    /* EnableLcu (tag 8) is the only action kind with extracted
+     * parameters today. All others: consume and skip. */
+    if (field->tag == ProtoHEFAction_enable_lcu_tag) {
+        return decode_enable_lcu_body(stream, acc);
+    }
+
     /* Consume the remaining body bytes so nanopb advances the cursor
      * past this sub-message cleanly. */
     return pb_read(stream, NULL, stream->bytes_left);

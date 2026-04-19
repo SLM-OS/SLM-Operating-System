@@ -1347,6 +1347,179 @@ static void test_decode_context_actions_no_contexts(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 6.4g: per-action parameter extraction (ProtoHEFActionEnableLcu)       */
+/* -------------------------------------------------------------------------- */
+
+/* Emit a full ProtoHEFActionEnableLcu sub-message with all six
+ * scalar fields set. Returns the sub-message bytes (no outer
+ * action-oneof length wrapping — caller wraps). */
+static size_t emit_enable_lcu_body(uint8_t *buf,
+                                   uint32_t lcu_index,
+                                   uint32_t cluster_index,
+                                   uint32_t kernel_done_address,
+                                   uint32_t kernel_done_count,
+                                   uint32_t lcu_enable_address,
+                                   uint32_t network_index)
+{
+    size_t off = 0;
+    emit_varint_field(buf, &off, 1, lcu_index);
+    emit_varint_field(buf, &off, 2, cluster_index);
+    emit_varint_field(buf, &off, 3, kernel_done_address);
+    emit_varint_field(buf, &off, 4, kernel_done_count);
+    emit_varint_field(buf, &off, 5, lcu_enable_address);
+    emit_varint_field(buf, &off, 6, network_index);
+    return off;
+}
+
+/* Build a network group with one context whose operations[0]
+ * contains a single ProtoHEFActionEnableLcu with the given fields. */
+static size_t build_ng_with_one_enable_lcu(uint8_t *out, size_t cap,
+                                           uint32_t lcu_index,
+                                           uint32_t cluster_index,
+                                           uint32_t kernel_done_address,
+                                           uint32_t kernel_done_count,
+                                           uint32_t lcu_enable_address,
+                                           uint32_t network_index)
+{
+    uint8_t body[64];
+    size_t body_len = emit_enable_lcu_body(
+        body, lcu_index, cluster_index, kernel_done_address,
+        kernel_done_count, lcu_enable_address, network_index);
+
+    uint8_t act[96];
+    size_t act_len = 0;
+    emit_lenprefix(act, &act_len, /*8=enable_lcu*/ 8, body, body_len);
+
+    uint8_t op[128];
+    size_t op_len = 0;
+    emit_lenprefix(op, &op_len, /*2=actions*/ 2, act, act_len);
+
+    uint8_t ctx[256];
+    size_t ctx_len = 0;
+    emit_lenprefix(ctx, &ctx_len, /*2=operations*/ 2, op, op_len);
+
+    uint8_t ng[512];
+    size_t ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*3=contexts*/ 3, ctx, ctx_len);
+
+    size_t olen = 0;
+    (void)cap;
+    emit_lenprefix(out, &olen, /*2=network_groups*/ 2, ng, ng_len);
+    return olen;
+}
+
+static void test_decode_enable_lcu_captures_all_fields(void)
+{
+    /* Build a ProtoHEFActionEnableLcu with distinct non-default
+     * values for every scalar — verify each lands in the right slot
+     * in hef_info.enable_lcu_actions[0]. */
+    uint8_t blob[512];
+    size_t blen = build_ng_with_one_enable_lcu(
+        blob, sizeof(blob),
+        /*lcu_index=*/ 3,
+        /*cluster_index=*/ 5,
+        /*kernel_done_address=*/ 0x1234,
+        /*kernel_done_count=*/ 0x12345678,
+        /*lcu_enable_address=*/ 0xABCD,
+        /*network_index=*/ 1);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+
+    TEST_ASSERT_EQUAL_UINT32(1, info.enable_lcu_count);
+    TEST_ASSERT_FALSE(info.enable_lcu_truncated);
+
+    const struct hef_enable_lcu_action *a = &info.enable_lcu_actions[0];
+    TEST_ASSERT_EQUAL_UINT8(0,      a->context_index);
+    TEST_ASSERT_EQUAL_UINT32(3,     a->lcu_index);
+    TEST_ASSERT_EQUAL_UINT32(5,     a->cluster_index);
+    TEST_ASSERT_EQUAL_UINT32(0x1234,     a->lcu_kernel_done_address);
+    TEST_ASSERT_EQUAL_UINT32(0x12345678, a->lcu_kernel_done_count);
+    TEST_ASSERT_EQUAL_UINT32(0xABCD,     a->lcu_enable_address);
+    TEST_ASSERT_EQUAL_UINT32(1,          a->network_index);
+
+    /* The action is also recorded in the context-level summary. */
+    TEST_ASSERT_EQUAL_UINT32(1, info.context_actions_count);
+    TEST_ASSERT_EQUAL_UINT32(1, info.context_actions[0].action_count);
+    TEST_ASSERT_EQUAL_UINT8(8, info.context_actions[0].action_types[0]);
+}
+
+static void test_decode_enable_lcu_defaults_zero_when_absent(void)
+{
+    /* HEF with only lcu_index set — other fields default to 0 per
+     * proto3. Parser stores them as zero, NOT as "unknown" flags,
+     * and the translator's default-vs-non-default selector treats
+     * zero as "use firmware defaults". */
+    uint8_t body[32];
+    size_t body_len = 0;
+    emit_varint_field(body, &body_len, 1, 7);    /* lcu_index only */
+
+    uint8_t act[64]; size_t act_len = 0;
+    emit_lenprefix(act, &act_len, 8, body, body_len);
+
+    uint8_t op[64]; size_t op_len = 0;
+    emit_lenprefix(op, &op_len, 2, act, act_len);
+
+    uint8_t ctx[128]; size_t ctx_len = 0;
+    emit_lenprefix(ctx, &ctx_len, 2, op, op_len);
+
+    uint8_t ng[256]; size_t ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 3, ctx, ctx_len);
+
+    uint8_t blob[512]; size_t blen = 0;
+    emit_lenprefix(blob, &blen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+
+    TEST_ASSERT_EQUAL_UINT32(1, info.enable_lcu_count);
+    const struct hef_enable_lcu_action *a = &info.enable_lcu_actions[0];
+    TEST_ASSERT_EQUAL_UINT32(7, a->lcu_index);
+    TEST_ASSERT_EQUAL_UINT32(0, a->cluster_index);
+    TEST_ASSERT_EQUAL_UINT32(0, a->lcu_kernel_done_address);
+    TEST_ASSERT_EQUAL_UINT32(0, a->lcu_kernel_done_count);
+    TEST_ASSERT_EQUAL_UINT32(0, a->network_index);
+}
+
+static void test_decode_enable_lcu_tracks_context_index(void)
+{
+    /* Two contexts: ctx0 has one EnableLcu(lcu=1), ctx1 has one
+     * EnableLcu(lcu=2). Confirm both get captured and each points
+     * at its source context. */
+    uint8_t b0[32], b1[32];
+    size_t l0 = emit_enable_lcu_body(b0, 1, 0, 0, 0, 0, 0);
+    size_t l1 = emit_enable_lcu_body(b1, 2, 0, 0, 0, 0, 0);
+
+    uint8_t a0[64], a1[64]; size_t al0 = 0, al1 = 0;
+    emit_lenprefix(a0, &al0, 8, b0, l0);
+    emit_lenprefix(a1, &al1, 8, b1, l1);
+
+    uint8_t op0[64], op1[64]; size_t ol0 = 0, ol1 = 0;
+    emit_lenprefix(op0, &ol0, 2, a0, al0);
+    emit_lenprefix(op1, &ol1, 2, a1, al1);
+
+    uint8_t ctx0[128], ctx1[128]; size_t cl0 = 0, cl1 = 0;
+    emit_lenprefix(ctx0, &cl0, 2, op0, ol0);
+    emit_lenprefix(ctx1, &cl1, 2, op1, ol1);
+
+    uint8_t ng[512]; size_t ng_len = 0;
+    emit_lenprefix(ng, &ng_len, 3, ctx0, cl0);
+    emit_lenprefix(ng, &ng_len, 3, ctx1, cl1);
+
+    uint8_t blob[1024]; size_t blen = 0;
+    emit_lenprefix(blob, &blen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+
+    TEST_ASSERT_EQUAL_UINT32(2, info.enable_lcu_count);
+    TEST_ASSERT_EQUAL_UINT8(0, info.enable_lcu_actions[0].context_index);
+    TEST_ASSERT_EQUAL_UINT32(1, info.enable_lcu_actions[0].lcu_index);
+    TEST_ASSERT_EQUAL_UINT8(1, info.enable_lcu_actions[1].context_index);
+    TEST_ASSERT_EQUAL_UINT32(2, info.enable_lcu_actions[1].lcu_index);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -1396,6 +1569,11 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_context_actions_overflow_truncates);
     RUN_TEST(test_decode_context_actions_context_overflow);
     RUN_TEST(test_decode_context_actions_no_contexts);
+
+    /* Phase 6.4g: per-action parameter extraction (EnableLcu) */
+    RUN_TEST(test_decode_enable_lcu_captures_all_fields);
+    RUN_TEST(test_decode_enable_lcu_defaults_zero_when_absent);
+    RUN_TEST(test_decode_enable_lcu_tracks_context_index);
 
     return UnityEnd();
 }

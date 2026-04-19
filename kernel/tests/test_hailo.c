@@ -2448,6 +2448,129 @@ static void test_cs_translate_contexts_rejects_null(void)
         hailo_cs_translate_contexts(&info, &cfg, NULL));
 }
 
+/* Phase 6.4g: translator emits ENABLE_LCU_* wire actions from
+ * parser-captured hef_enable_lcu_action parameters. Default vs
+ * non-default encoding is selected by whether kernel_done_* fields
+ * are non-zero. */
+
+static void test_cs_translate_enable_lcu_default_variant(void)
+{
+    /* Default variant: kernel_done_count = 0 and kernel_done_address
+     * = 0 → emit ENABLE_LCU_DEFAULT (8B header + 2B body = 10B) ahead
+     * of the tail APPLICATION_CHANGE_INTERRUPT (8B). Total DYNAMIC
+     * context: 18 bytes. packed_lcu_id = (cluster<<4)|lcu. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 1;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .context_index = 0,
+        .lcu_index     = 3,
+        .cluster_index = 5,
+        .network_index = 1,
+        .lcu_kernel_done_address = 0,
+        .lcu_kernel_done_count   = 0,
+    };
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)18, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[0]);
+    /* Body starts at offset 8 (after 8-byte common header). */
+    TEST_ASSERT_EQUAL_UINT8((5u << 4) | 3u, out.dynamic[8]);   /* packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[9]);                /* network_index */
+    /* Tail APPLICATION_CHANGE_INTERRUPT at offset 10. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[10]);
+}
+
+static void test_cs_translate_enable_lcu_non_default_variant(void)
+{
+    /* Non-default: kernel_done_count non-zero → emit
+     * ENABLE_LCU_NON_DEFAULT (8B hdr + 8B body = 16B) + tail (8B).
+     * Total DYNAMIC: 24 bytes. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 1;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .context_index           = 0,
+        .lcu_index               = 2,
+        .cluster_index           = 4,
+        .network_index           = 0,
+        .lcu_kernel_done_address = 0x1234,
+        .lcu_kernel_done_count   = 0xABCD1234,
+    };
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)24, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_NON_DEFAULT, out.dynamic[0]);
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 2u, out.dynamic[8]);
+    TEST_ASSERT_EQUAL_UINT8(0, out.dynamic[9]);
+    uint16_t kda;
+    memcpy(&kda, out.dynamic + 10, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x1234, kda);
+    uint32_t kdc;
+    memcpy(&kdc, out.dynamic + 12, 4);
+    TEST_ASSERT_EQUAL_UINT32(0xABCD1234, kdc);
+    /* Tail at offset 16. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[16]);
+}
+
+static void test_cs_translate_multiple_enable_lcu_preserves_order(void)
+{
+    /* Two EnableLcu entries in order; translator emits them in the
+     * same sequence plus the trailing APPLICATION_CHANGE_INTERRUPT. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 2;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .lcu_index = 1, .cluster_index = 2, .network_index = 0,
+    };
+    info.enable_lcu_actions[1] = (struct hef_enable_lcu_action){
+        .lcu_index = 3, .cluster_index = 4, .network_index = 1,
+    };
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Two 10B defaults + 8B tail = 28 bytes. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)28, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[8]);   /* first packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(0, out.dynamic[9]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[10]);
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[18]);  /* second packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[19]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[20]);
+}
+
 static void test_control_send_recv_default_rings_app_doorbell(void)
 {
     /* The APP-default path (plain hailo_control_send_recv via
@@ -5393,6 +5516,9 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_contexts_uses_ccw_count_for_burst_count);
     RUN_TEST(test_cs_translate_contexts_clamps_burst_count_to_u16);
     RUN_TEST(test_cs_translate_contexts_rejects_null);
+    RUN_TEST(test_cs_translate_enable_lcu_default_variant);
+    RUN_TEST(test_cs_translate_enable_lcu_non_default_variant);
+    RUN_TEST(test_cs_translate_multiple_enable_lcu_preserves_order);
     RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);

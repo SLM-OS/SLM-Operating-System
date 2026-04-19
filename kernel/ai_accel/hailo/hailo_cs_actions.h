@@ -185,4 +185,43 @@ struct hailo_cs_act_deactivate_cfg_channel {
 _Static_assert(sizeof(struct hailo_cs_act_deactivate_cfg_channel) == 2,
                "deactivate_cfg_channel body must be 2 bytes");
 
+/* -------------------------------------------------------------------------- */
+/* Compute-context actions (DYNAMIC)                                            */
+/* -------------------------------------------------------------------------- */
+
+/* ENABLE_LCU_DEFAULT: turns on an LCU with firmware-default
+ * kernel_done_address / kernel_done_count. The smaller of the two
+ * ENABLE_LCU variants, used when the HEF didn't override those
+ * fields. packed_lcu_id encoding: (cluster_index << 4) | (lcu_index
+ * & 0xF) per HailoRT convention — single u8 carries both. */
+struct hailo_cs_act_enable_lcu_default {
+    uint8_t packed_lcu_id;
+    uint8_t network_index;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_enable_lcu_default) == 2,
+               "enable_lcu_default body must be 2 bytes");
+
+/* ENABLE_LCU_NON_DEFAULT: same as default plus kernel_done_address
+ * + kernel_done_count — used when the HEF carries non-zero values
+ * for those fields. */
+struct hailo_cs_act_enable_lcu_non_default {
+    uint8_t  packed_lcu_id;
+    uint8_t  network_index;
+    uint16_t kernel_done_address;
+    uint32_t kernel_done_count;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_enable_lcu_non_default) == 8,
+               "enable_lcu_non_default body must be 8 bytes");
+
+/* Encoding helper: pack cluster_index + lcu_index into a single u8
+ * for the wire structs above. High nibble = cluster, low nibble =
+ * lcu. Hailo-8 caps both at 15 so the 4-bit split is lossless. */
+static inline uint8_t hailo_cs_pack_lcu_id(uint32_t cluster_index,
+                                           uint32_t lcu_index)
+{
+    return (uint8_t)(((cluster_index & 0x0Fu) << 4) | (lcu_index & 0x0Fu));
+}
+
 #endif /* AI_ACCEL_HAILO_CS_ACTIONS_H */

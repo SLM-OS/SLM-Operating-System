@@ -168,12 +168,13 @@ struct hef_ccw_action {
  * matching `CONTEXT_SWITCH_DEFS__*` wire actions (EnableLcu,
  * TriggerSequencer, AllowInputDataflow, …).
  *
- * We record just the oneof field number per action (the "kind" —
+ * We record the oneof field number per action (the "kind" —
  * 2=write_data, 5=enable_sequencer, 8=enable_lcu, 10=allow_input_
- * dataflow, …; see ProtoHEFAction in hef.proto:602). A future
- * iteration will also capture per-action parameters; this minimal
- * version is enough to validate the parser reaches every action
- * and to dimension the translator's per-context action count.
+ * dataflow, …; see ProtoHEFAction in hef.proto:602). Per-action
+ * parameter extraction lives in separate arrays on hef_info itself
+ * (see `enable_lcu_actions` below) to keep the per-context struct
+ * small — most actions have no captured parameters in the current
+ * translator scope.
  *
  * `action_type_mask` has bit N set if action kind N was seen in
  * this context — a quick sanity-check that lets a caller detect
@@ -186,6 +187,33 @@ struct hef_context_actions {
     uint32_t action_type_mask;
     uint8_t  action_types[HEF_PARSER_MAX_CONTEXT_ACTIONS];
     bool     truncated;           /* action_count exceeded MAX_CONTEXT_ACTIONS */
+};
+
+/*
+ * One extracted ProtoHEFActionEnableLcu (field 8 of the action
+ * oneof). Captures every scalar the HEF carries — the translator
+ * combines lcu_index + cluster_index into packed_lcu_id and emits
+ * either ENABLE_LCU_DEFAULT (2-byte body: packed_lcu_id +
+ * network_index) or ENABLE_LCU_NON_DEFAULT (8-byte body: same plus
+ * kernel_done_address + kernel_done_count) depending on whether the
+ * kernel-done fields carry non-zero values.
+ *
+ * `context_index` points back into hef_info.context_actions[] so
+ * the translator knows which context this action belongs to. Order
+ * within a context is preserved: enable_lcu_actions[] for a given
+ * context_index appears in the same order as the corresponding
+ * entries in context_actions[context_index].action_types[].
+ */
+#define HEF_PARSER_MAX_ENABLE_LCU_ACTIONS  32u
+
+struct hef_enable_lcu_action {
+    uint8_t  context_index;
+    uint32_t lcu_index;
+    uint32_t cluster_index;
+    uint32_t network_index;
+    uint32_t lcu_kernel_done_address;
+    uint32_t lcu_kernel_done_count;
+    uint32_t lcu_enable_address;
 };
 
 /*
@@ -245,6 +273,17 @@ struct hef_info {
     uint32_t context_actions_count;
     bool     context_actions_truncated;
     struct hef_context_actions context_actions[HEF_PARSER_MAX_CONTEXTS];
+    /*
+     * Phase 6.4g — per-action parameter capture. Currently only
+     * ProtoHEFActionEnableLcu (oneof tag 8) is extracted; other
+     * action types are recorded as "kind-only" in context_actions[]
+     * above. Each captured EnableLcu records its source context via
+     * context_index so the translator can place it correctly when
+     * emitting wire actions.
+     */
+    uint32_t enable_lcu_count;
+    bool     enable_lcu_truncated;
+    struct hef_enable_lcu_action enable_lcu_actions[HEF_PARSER_MAX_ENABLE_LCU_ACTIONS];
 };
 
 /*

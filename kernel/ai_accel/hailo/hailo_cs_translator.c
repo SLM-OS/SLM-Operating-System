@@ -159,23 +159,73 @@ static int translate_preliminary(const struct hef_info *info,
 /* DYNAMIC context                                                              */
 /* -------------------------------------------------------------------------- */
 
-/* Minimum DYNAMIC: APPLICATION_CHANGE_INTERRUPT tail. Per HailoRT's
- * fill_context_recipes_for_multi_context, single-context loads end
- * their dynamic context with this zero-body marker. Real compute
- * actions (EnableLcu, TriggerSequencer, AllowInputDataflow, etc.)
- * would be prepended once per-action parameter extraction is wired
- * in hef_parser.
+/* DYNAMIC context translation. Emits one ENABLE_LCU_* per captured
+ * EnableLcu action in hef_info.enable_lcu_actions[], followed by an
+ * APPLICATION_CHANGE_INTERRUPT tail marker (legal only at tail of
+ * single-dynamic-context loads per HailoRT).
  *
- * info->context_actions[] from Phase 6.4e already records which
- * action kinds are present per context; this stub does NOT yet
- * translate them, so inference won't produce real output. Firmware
- * will still accept the context structurally, letting the full
- * SET_NETWORK_GROUP_HEADER + 4 SET_CONTEXT_INFO chain complete.
+ * HEF 4.23 loads we've seen carry EnableLcu for their compute
+ * clusters; fall through to just the tail marker on loads without
+ * any captured actions (firmware accepts the context structurally
+ * though no compute happens).
+ *
+ * Future action types (TriggerSequencer, AllowInputDataflow,
+ * WaitForSequencer) slot in here as their per-action parameter
+ * extraction lands in hef_parser. The translator's dispatch is
+ * linear — iterate context_actions[].action_types[] and translate
+ * each; the unextracted kinds are skipped silently for now.
  */
+static bool enable_lcu_has_non_default_fields(
+    const struct hef_enable_lcu_action *a)
+{
+    /* Non-default encoding is required when EITHER kernel_done_count
+     * or kernel_done_address is non-zero. HailoRT's selector is the
+     * same. */
+    return a->lcu_kernel_done_count != 0 ||
+           a->lcu_kernel_done_address != 0;
+}
+
+static int translate_enable_lcu(const struct hef_enable_lcu_action *a,
+                                struct hailo_cs_builder *b)
+{
+    uint8_t packed = hailo_cs_pack_lcu_id(a->cluster_index, a->lcu_index);
+    if (enable_lcu_has_non_default_fields(a)) {
+        struct hailo_cs_act_enable_lcu_non_default body = {
+            .packed_lcu_id       = packed,
+            .network_index       = (uint8_t)a->network_index,
+            .kernel_done_address = (uint16_t)a->lcu_kernel_done_address,
+            .kernel_done_count   = a->lcu_kernel_done_count,
+        };
+        return hailo_cs_builder_append(
+            b, HAILO_CS_ACT_ENABLE_LCU_NON_DEFAULT, &body, sizeof(body));
+    }
+    struct hailo_cs_act_enable_lcu_default body = {
+        .packed_lcu_id = packed,
+        .network_index = (uint8_t)a->network_index,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_ENABLE_LCU_DEFAULT, &body, sizeof(body));
+}
+
 static int translate_dynamic(const struct hef_info *info,
                              struct hailo_cs_builder *b)
 {
-    (void)info;
+    /* Emit captured EnableLcu actions in the order they appeared in
+     * the HEF. Context 0 is the (only) dynamic context for the
+     * single-context loads we support today; multi-context loads
+     * will need to dispatch per-context_index. */
+    uint32_t emitted = (info->enable_lcu_count > HEF_PARSER_MAX_ENABLE_LCU_ACTIONS)
+                          ? HEF_PARSER_MAX_ENABLE_LCU_ACTIONS
+                          : info->enable_lcu_count;
+    for (uint32_t i = 0; i < emitted; i++) {
+        int rc = translate_enable_lcu(&info->enable_lcu_actions[i], b);
+        if (rc != HAILO_OK) return rc;
+    }
+
+    /* Tail marker. Firmware requires this as the last action of the
+     * final dynamic context; it signals "this dynamic context is
+     * complete, fire the application-change interrupt when the
+     * action list finishes executing". */
     return hailo_cs_builder_append(b, HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
                                    NULL, 0);
 }
