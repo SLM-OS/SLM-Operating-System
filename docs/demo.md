@@ -11,30 +11,31 @@ exceed a configured threshold. Mid-stream, the monitoring component is
 replaced with a new instance while preserving message subscriptions,
 demonstrating zero-downtime upgrades.
 
-Three scripts are relevant:
+Four scripts are embedded at boot:
 
 | File | Purpose |
 |------|---------|
-| `/mnt/files/demo.lua` | Linear walkthrough. Embedded at boot, source of truth in `scripts/demo.lua`. |
-| `/mnt/files/demo_menu.lua` | Interactive menu covering all five core features (SMP, scheduling, eviction, inference, components). Source of truth in `scripts/demo_menu.lua`. |
-| `scripts/industrial_demo.lua` | Longer scenario-driven version. Not embedded; runs from SD card. |
+| `/mnt/files/demo.lua` | Linear Industrial IoT walkthrough. Source of truth: `scripts/demo.lua`. |
+| `/mnt/files/demo_menu.lua` | Interactive menu covering all five core features (SMP, scheduling, eviction, inference, components). Source of truth: `scripts/demo_menu.lua`. |
+| `/mnt/files/demo_auto.lua` | 5-section scripted auto-demo with Enter-to-advance pauses. Source of truth: `scripts/demo_auto.lua`. |
+| `/mnt/files/multiproc_demo.lua` | Multi-process / concurrent-task reference. Source of truth: `scripts/multiproc_demo.lua`. |
 
-All three use the same Lua API bindings (`slm.*`) and exercise the same
+All four use the same Lua API bindings (`slm.*`) and exercise the same
 kernel subsystems.
 
 ### How scripts get embedded
 
-`scripts/demo.lua` and `scripts/demo_menu.lua` are embedded into the kernel
-ELF at link time via `.incbin` in `kernel/src/demo_scripts.S`. The repo `.lua`
-files are the single source of truth — there is no C-string mirror to keep
-in sync. `demo_init.c` references the `_start`/`_end` symbols produced by
-the assembler and writes each blob to `/mnt/files` at boot.
+Every `scripts/*.lua` file listed above is embedded into the kernel ELF at
+link time via `.incbin` in `kernel/src/demo_scripts.S`. The repo files are
+the single source of truth — there is no C-string mirror to keep in sync.
+`demo_init.c` references the `_start`/`_end` symbols produced by the
+assembler and writes each blob to `/mnt/files` at boot.
 
 Embedding is gated on the `EMBED_DEMO_SCRIPTS` CMake option (default `ON`).
-Pass `EMBED_DEMO_SCRIPTS=OFF` to leave the scripts out of the kernel image
-(saves ~19 KB). The Lua interpreter and all `slm.*` bindings remain fully
-functional in either mode; scripts can still be written to the filesystem
-at runtime (`write /mnt/files/foo.lua ...`).
+Pass `EMBED_DEMO_SCRIPTS=OFF` to leave the scripts out of the kernel image.
+The Lua interpreter and all `slm.*` bindings remain fully functional in
+either mode; scripts can still be written to the filesystem at runtime
+(`write /mnt/files/foo.lua ...`).
 
 ## Prerequisites
 
@@ -85,11 +86,16 @@ shell output) flowing through Lua.
 | s | Drop to shell command |
 | q | Quit |
 
-### Full scenario version (from SD card)
+### Multi-process reference demo
 
 ```
-slm> lua scripts/industrial_demo.lua
+slm> lua /mnt/files/multiproc_demo.lua
 ```
+
+A separate scenario focused on multi-task concurrency — spawns the
+`listener`, `sensor_monitor`, and `counter` built-in components and
+drives IPC across them. Useful for narrating how SLM-OS schedules
+cooperative tasks across the available CPUs.
 
 ## Demo Walkthrough
 
@@ -174,66 +180,34 @@ AI scheduling, and multi-core operation.
 
 ## Expected Output
 
-The following output was captured from a Raspberry Pi 5 running the embedded
-demo script (`/mnt/files/demo.lua`):
+Running `/mnt/files/demo.lua` prints, in order:
 
-```
-============================================================
-  SLM-OS Industrial IoT Demo
-  Small Language Model Operating System
-============================================================
+1. A boxed banner introducing the demo.
+2. **System Overview** — version, CPU count + current CPU, scheduler
+   policy, RAM usage, weight / workspace pool blocks, uptime.
+3. **Sensor Monitoring Pipeline** — `sensor_monitor` start confirmation
+   and active-component count.
+4. **Sensor Data Stream** — five normal readings, each delivered to one
+   subscriber; three anomaly readings, each triggering an `ALERT` line
+   from the monitor and an `[alert-consumer] received: ALERT: value=N`
+   line from the stub subscriber registered at demo start.
+5. **Live Component Hot-Swap** — transition message, index of the new
+   instance, one verification reading (value `88`) delivered to exactly
+   one subscriber.
+6. **On-Device Model Inference** — MNIST load confirmation and a
+   predicted class.
+7. **Final System Status** — task / component counts, memory consumed
+   during the demo, total alerts seen, elapsed demo time.
+8. Closing banner listing demonstrated subsystems.
 
---- System Overview ---
-  Version:   0.6.0
-  CPUs:      8 cores
-  Scheduler: round_robin
-  Memory:    58180 KB free / 61056 KB total
+The demo script completes in roughly 6–10 seconds depending on platform.
+`[sensor_monitor]` lines interleave with script output because the
+component runs as a separate kernel task and writes directly to UART;
+this is expected.
 
---- Starting Sensor Monitor ---
-[sensor_monitor] Started, watching /sensors/data
-  sensor_monitor started (idx=0)
-  Components active: 1
-
---- Sensor Data Stream ---
-  Publishing normal readings (below threshold 50):
-[sensor_monitor] value=23 (normal)
-    Reading: 23  -> 1 subscriber(s)
-[sensor_monitor] value=31 (normal)
-    Reading: 31  -> 1 subscriber(s)
-[sensor_monitor] value=42 (normal)
-    Reading: 42  -> 1 subscriber(s)
-
-  Injecting anomalies (above threshold 50):
-[sensor_monitor] ALERT: value=78
-    ANOMALY: 78  -> 1 subscriber(s)
-[sensor_monitor] ALERT: value=95
-    ANOMALY: 95  -> 1 subscriber(s)
-
---- Live Component Hot-Swap ---
-  Swapping sensor_monitor with new instance...
-[sensor_monitor] Exiting (2 alerts issued)
-[sensor_monitor] Started, watching /sensors/data
-  Hot-swap OK (new idx=1)
-  Verifying new instance:
-[sensor_monitor] ALERT: value=88
-[sensor_monitor] ALERT: value=88
-    Reading: 88  -> 1 subscriber(s)
-
-============================================================
-  Demo Complete
-
-  Demonstrated:
-    - Component lifecycle (start, hot-swap)
-    - Publish/subscribe message routing
-    - Threshold-based anomaly detection
-    - Zero-downtime component replacement
-    - 8-core scheduling
-============================================================
-```
-
-Note: Interleaving of `[sensor_monitor]` log lines with script output is
-expected -- the component runs as a separate kernel task and prints directly
-via UART.
+Values that differ by platform / build config — CPU count, memory sizes,
+inference latency, and exact alert ordering under hot-swap — are not
+reproducible verbatim, so no literal transcript is shown here.
 
 ## Platform Notes
 
@@ -262,30 +236,12 @@ modification since the Jetson platform supports all required subsystems
 
 ## Known Issues
 
-### `/alerts/threshold` topic not found
+### Garbled output during hot-swap
 
-When the sensor monitor publishes an alert to `/alerts/threshold`, no
-subscriber is registered for that topic. The message router logs a "topic not
-found" warning. This is cosmetic -- the demo does not register an alert
-consumer. In a production deployment, a separate alerting component would
-subscribe to `/alerts/threshold`.
-
-### Double alert on value 88 after hot-swap
-
-The verification reading (value 88) may produce two `[sensor_monitor] ALERT`
-lines. This occurs because the old and new component instances briefly
-overlap: the old instance has not yet exited its receive loop when the new
-instance processes the message. Both instances hold a subscription to
-`/sensors/data` during the transition window. This is by design -- the
-hot-swap mechanism prioritizes zero message loss over duplicate suppression.
-
-### CPU count shows 8 instead of 4
-
-On Raspberry Pi 5, `slm.cpu_count()` reports 8 cores instead of the actual 4.
-The Pi 5's BCM2712 SoC uses MPIDR Aff1 values (0x00, 0x01, 0x02, 0x03) that
-the Lua binding interprets as a larger CPU namespace. The kernel's SMP
-subsystem correctly identifies and boots only the 4 physical cores; the
-inflated count is a display issue in the Lua API binding only.
+Output from the old and new `sensor_monitor` instances may interleave
+briefly during the hot-swap transition. The UART has no cross-CPU lock
+on Pi 5 (see `kernel/CLAUDE.md` §"UART Lock on Pi 5 / Jetson"). The
+garbling is cosmetic and does not indicate a functional error.
 
 ---
 
@@ -315,10 +271,12 @@ slmos> bench irq
 
 If the timer frequency shows 0, the ARM generic timer was not initialized.
 
-### Garbled output during hot-swap
+### Component already running
 
-Output from the old and new sensor_monitor instances may interleave briefly during the hot-swap transition. This is expected -- the UART has no cross-CPU lock on Pi 5. The garbling is cosmetic and does not indicate a functional error.
-
-### Component already running error
-
-If the demo is run twice without rebooting, `component_run` may report that the sensor_monitor is already running from the previous execution. Reboot between demo runs for a clean state, or wait for the previous instance's 30-second timeout to expire.
+If the `demo_menu.lua` components option (9) is invoked within 30 seconds
+of a prior run, the prior `sensor_monitor` instance is still alive and
+the kernel logs `Component 'sensor_monitor' is already running`. The
+menu detects this via `slm.component_find` and reuses the prior
+instance for the rest of the scenario; no user action is required.
+For a fully clean run, either wait for the prior instance's 30-second
+inactivity timeout or reboot.

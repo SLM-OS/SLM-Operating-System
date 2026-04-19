@@ -743,8 +743,8 @@ if(EMBED_DEMO_SCRIPTS)
     set_source_files_properties(
         kernel/src/demo_scripts.S
         PROPERTIES
-        COMPILE_DEFINITIONS "DEMO_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo.lua;DEMO_MENU_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo_menu.lua"
-        OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/scripts/demo.lua;${CMAKE_SOURCE_DIR}/scripts/demo_menu.lua"
+        COMPILE_DEFINITIONS "DEMO_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo.lua;DEMO_MENU_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo_menu.lua;DEMO_AUTO_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo_auto.lua;DEMO_MULTIPROC_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/multiproc_demo.lua"
+        OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/scripts/demo.lua;${CMAKE_SOURCE_DIR}/scripts/demo_menu.lua;${CMAKE_SOURCE_DIR}/scripts/demo_auto.lua;${CMAKE_SOURCE_DIR}/scripts/multiproc_demo.lua"
     )
 endif()
 

@@ -5,7 +5,10 @@
 -- can dispatch any shell command directly via slm.shell_exec(). Built
 -- on the slm.read_line() and slm.shell_exec() bindings (issue #151).
 --
--- Usage:  lua /scripts/multiproc_demo.lua
+-- Usage:  lua /mnt/files/multiproc_demo.lua
+--
+-- Embedded into the kernel image via .incbin and written to the
+-- LittleFS ramdisk at boot by demo_init() in kernel/src/demo_init.c.
 
 local P = slm.print
 

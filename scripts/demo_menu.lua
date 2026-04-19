@@ -337,6 +337,23 @@ local function components_demo()
     local idx = slm.component_run("sensor_monitor")
     if idx and idx >= 0 then
         note("sensor_monitor started (index " .. idx .. ")")
+    else
+        -- #318: component_run returns nil/-1 if sensor_monitor is still
+        -- running from a prior invocation of this menu option (its 30s
+        -- inactivity timeout has not yet expired). The prior instance
+        -- still holds its /sensors/data subscription, so the rest of
+        -- the demo (publish + hot-swap) exercises it cleanly — just
+        -- tell the user that is what is happening instead of leaving
+        -- the ugly kernel warning unexplained.
+        local existing = slm.component_find and slm.component_find("sensor_monitor")
+        if existing and existing >= 0 then
+            note(string.format(
+                "sensor_monitor already running from a prior run (index %d) — reusing it",
+                existing))
+            idx = existing
+        else
+            note("sensor_monitor could not be started (registry full?)")
+        end
     end
     slm.yield(); slm.yield()
 
