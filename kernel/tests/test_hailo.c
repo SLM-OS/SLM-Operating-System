@@ -2162,6 +2162,115 @@ static void test_cs_builder_rejects_null_buffer(void)
         hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &body, sizeof(body)));
 }
 
+static void test_cs_builder_accepts_zero_body_action(void)
+{
+    /* Zero-body actions (APPLICATION_CHANGE_INTERRUPT, BURST_CREDITS_
+     * TASK_RESET, etc.) must produce an 8-byte common-header-only
+     * entry on the wire. */
+    uint8_t buf[32];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
+                                NULL, 0));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, hailo_cs_builder_size(&b));
+
+    const uint8_t *d = hailo_cs_builder_data(&b);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET, d[0]);
+    /* Rest of the 8-byte header is zero (pad + time_stamp). */
+    for (int i = 1; i < 8; i++) TEST_ASSERT_EQUAL_UINT8(0, d[i]);
+}
+
+/* -------------------------------------------------------------------------- */
+/* CHANGE_CONTEXT_SWITCH_STATUS (opcode 0x25, CORE CPU)                        */
+/* -------------------------------------------------------------------------- */
+
+static void seed_change_status_success_response(void)
+{
+    /* Opcode-echo check in control_check_response_header is
+     * status-aware: firmware mirrors the opcode in success cases.
+     * Use the CHANGE_CONTEXT_SWITCH_STATUS opcode here so the
+     * echo matches what we expect. */
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t                             parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  =
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS);
+    fake.parameter_count = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+}
+
+static void test_change_context_switch_status_reset_wire_layout(void)
+{
+    /* RESET with IGNORE_APPLICATION_INDEX=255 mirrors hailort's
+     * reset_context_switch_state_machine(). Wire format:
+     *   [common_header 16][parameter_count 4]
+     *   [state_length 4][state 1]
+     *   [app_idx_length 4][app_idx 1]
+     *   [dyn_batch_len 4][dyn_batch 2]
+     *   [batch_cnt_len 4][batch_cnt 2]
+     * Total 42 bytes. CORE CPU doorbell. */
+    control_setup_running();
+    seed_change_status_success_response();
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_RESET,
+            HAILO_CS_IGNORE_APPLICATION_INDEX,
+            /*batch_size=*/0, /*batch_count=*/0));
+
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_core_doorbells);
+
+    TEST_ASSERT_TRUE(mock_last_control_request_len >= 42);
+    const uint8_t *req = mock_last_control_request;
+
+    uint32_t opcode, param_count, state_len;
+    memcpy(&opcode,      req + 12, 4);
+    memcpy(&param_count, req + 16, 4);
+    memcpy(&state_len,   req + 20, 4);
+    TEST_ASSERT_EQUAL_UINT32(
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS),
+        opcode);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(4u), param_count);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(1u), state_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_STATE_RESET, req[24]);
+    /* application_index at offset 29 (after 4-byte BE length). */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_IGNORE_APPLICATION_INDEX, req[29]);
+}
+
+static void test_change_context_switch_status_enabled_carries_batch_params(void)
+{
+    /* ENABLED with application_index=0 and specific batch values.
+     * Mirrors hailort's enable_core_op path. */
+    control_setup_running();
+    seed_change_status_success_response();
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_ENABLED,
+            /*application_index=*/0,
+            /*batch_size=*/8, /*batch_count=*/3));
+
+    const uint8_t *req = mock_last_control_request;
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_STATE_ENABLED, req[24]);
+    TEST_ASSERT_EQUAL_UINT8(0, req[29]);
+    /* dynamic_batch_size at offset 34 (native LE u16). */
+    uint16_t dyn_batch;
+    memcpy(&dyn_batch, req + 34, 2);
+    TEST_ASSERT_EQUAL_UINT16(8, dyn_batch);
+    /* batch_count at offset 40. */
+    uint16_t batch_cnt;
+    memcpy(&batch_cnt, req + 40, 2);
+    TEST_ASSERT_EQUAL_UINT16(3, batch_cnt);
+}
+
 static void test_control_send_recv_default_rings_app_doorbell(void)
 {
     /* The APP-default path (plain hailo_control_send_recv via
@@ -5098,6 +5207,9 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_builder_appends_concatenate);
     RUN_TEST(test_cs_builder_returns_nomem_on_overflow);
     RUN_TEST(test_cs_builder_rejects_null_buffer);
+    RUN_TEST(test_cs_builder_accepts_zero_body_action);
+    RUN_TEST(test_change_context_switch_status_reset_wire_layout);
+    RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);
     RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);

@@ -450,15 +450,86 @@ Transport works end-to-end on real hardware. Remaining rejection is at the firmw
 - 3 SET_NETWORK_GROUP_HEADER (wire format byte-for-byte, null rejection, bad config count rejection)
 - 5 SET_CONTEXT_INFO (single-chunk wire format, multi-chunk 3000-byte payload with is_first/is_last flags, zero-length single-chunk path, oversize rejection, null-with-nonzero-len rejection)
 
-### Phase 6.4: HEF → action-list translator (future)
+### Phase 6.4: HEF → action-list translator (in progress, 2026-04-19)
 
-The natural continuation of 6.3. HEF proto stores structured `ProtoHEFAction` oneof messages (WriteDataCcw, EnableLcu, TriggerSequencer, …). HailoRT translates these into the wire-format action stream defined in `docs/reference/hailort-context_switch_defs.h` (45 action types, repeated-action compression, common 5-byte header + per-type body, `host_buffer_info_t` embedded for CCW DMA pulls). SLM-OS needs to implement the same translator.
+The natural continuation of 6.3. HEF proto stores structured `ProtoHEFAction` oneof messages (WriteDataCcw, EnableLcu, TriggerSequencer, …). HailoRT translates these into the wire-format action stream defined in `docs/reference/hailort-context_switch_defs.h` (45 action types, repeated-action compression, common-header + per-type body, `host_buffer_info_t` embedded for CCW DMA pulls). SLM-OS needs to implement the same translator.
 
-**Scope (estimate):** ~500-1000 LoC in a new `kernel/ai_accel/hailo/hailo_context_switch.c`. Depends on: VDMA descriptor-list setup with bus-visible DMA addresses for CCW payloads (existing `hailo_vdma.c` has the primitives), HEF-parser extension to walk `ProtoHEFContext.operations[].actions[]` (the structured actions the compiler emitted), and per-context action-stream serialization.
+#### What landed in 6.4a–d
+
+**`kernel/ai_accel/hailo/hailo_cs_actions.h`** — host-side mirrors of the wire structs:
+
+- `enum hailo_cs_action_type` — all 45 action-type values (v4.23 order).
+- `struct hailo_cs_common_action_header` — **8 bytes on the wire** (1-byte action_type + 3 pad + 4-byte time_stamp). This is a firmware-discovered fact; see "Key finding" below.
+- `struct hailo_cs_host_buffer_info` (19 B) — embedded in `ACTIVATE_*` actions for firmware to DMA-pull from host buffers.
+- `struct hailo_cs_stream_reg_info` (19 B) — NN-stream buffer geometry.
+- Preliminary-context bodies: `ACTIVATE_CFG_CHANNEL` (21 B), `FETCH_CCW_BURSTS` (3 B), `DEACTIVATE_CFG_CHANNEL` (2 B).
+
+Each struct has a `_Static_assert` on its expected wire size to catch accidental packing drift.
+
+**`kernel/ai_accel/hailo/hailo_cs_builder.{c,h}`** — append-only byte accumulator for building per-context action streams:
+
+```c
+struct hailo_cs_builder b;
+hailo_cs_builder_init(&b, buf, sizeof(buf));
+hailo_cs_builder_append(&b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL, &body, sizeof(body));
+hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS,     &body, sizeof(body));
+hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
+                               hailo_cs_builder_data(&b),
+                               hailo_cs_builder_size(&b));
+```
+
+**`hailo ctxsmoke` shell command** — exercises the full 6-step bring-up chain (RESET → SET_NETWORK_GROUP_HEADER → 4 SET_CONTEXT_INFO calls) against live firmware with per-context minimum action stubs. Used for hardware-level wire-format validation; kept as a permanent diagnostic probe.
+
+#### Key finding — `common_action_header_t` is **8 bytes**, not 5
+
+Firmware v4.23 compiles `CONTEXT_SWITCH_DEFS__common_action_header_t` with natural alignment despite the `#pragma pack(push, 1)` wrapping the reference header. The packed u8 `action_type` is followed by 3 pad bytes, then the u32 `time_stamp` — total 8 bytes on the wire. 5-byte headers produce `major=0x40130016` = `CONTEXT_SWITCH_STATUS_MISALIGNMENT_ERROR_WHILE_READING_ACTIONS`; 8-byte headers are accepted.
+
+Root cause is firmware-internal (likely compiled without the pragma visible, or a wrapper struct re-imposes alignment). Takeaway: **cross-check wire struct sizes against hardware, don't trust the pragma**. Body structs (`host_buffer_info_t`, `activate_cfg_channel_t`, etc.) still appear to be 1-byte packed.
+
+#### Hardware iteration on pi-5-1 fw v4.23 (2026-04-19)
+
+Each iteration consumed one firmware rejection code to decode the next layer:
+
+| Attempt | Context payload | Firmware response | Decode |
+|---|---|---|---|
+| PRELIMINARY-first, no other contexts | 34 B (ACTIVATE_CFG_CHANNEL + FETCH_CCW_BURSTS) | `0x4013006e` | UNEXPECTED_CONTEXT_ORDER |
+| All 4 contexts, stub APPLICATION_CHANGE_INTERRUPT bodies | 5 B each + 34 B preliminary | `0x40130016` on every call | MISALIGNMENT_ERROR_WHILE_READING_ACTIONS (5-byte header wrong) |
+| All 4 contexts with legal per-type actions, 5-byte header | 5–34 B | `0x40130016` ACTIVATION/BATCH, `0x40130018` PRELIMINARY | Header size (5 vs 8) |
+| All 4 contexts, **8-byte common header** | 8–40 B | **ACTIVATION rc=0** ✓ | First legal context accepted by firmware |
+
+Subsequent `SET_CONTEXT_INFO` calls (BATCH_SWITCHING, PRELIMINARY, DYNAMIC) fail with truncated/invalid responses after ACTIVATION succeeds — firmware's internal state machine advances after the first accepted context, and our tight-loop of RPCs lands before firmware's response buffer has finished processing. This is the next frontier and needs investigation into firmware response-buffer timing or an explicit inter-context poll.
+
+#### Per-context minimum actions (confirmed from HailoRT `resource_manager_builder.cpp`)
+
+| Context | Minimum actions | Why |
+|---|---|---|
+| `ACTIVATION` | `BURST_CREDITS_TASK_RESET` (zero-body) | Resets HW credit counters before any stream activates |
+| `BATCH_SWITCHING` | `DDR_BUFFERING_RESET` + `BURST_CREDITS_TASK_START` (both zero-body) | Resets DDR state; starts the credit-task thread |
+| `PRELIMINARY` | `ACTIVATE_CFG_CHANNEL` + `FETCH_CCW_BURSTS` (+ optionally `DEACTIVATE_CFG_CHANNEL`) | Binds config VDMA; pulls CCW payloads into firmware |
+| `DYNAMIC` | `APPLICATION_CHANGE_INTERRUPT` (zero-body, tail only) | Legal tail marker for single-context inference |
+
+`APPLICATION_CHANGE_INTERRUPT` is zero-body and is **only** legal at the tail of the final DYNAMIC context — not in ACTIVATION/BATCH_SWITCHING/PRELIMINARY. Sending it in the wrong context returns MISALIGNMENT because firmware's walker doesn't expect it there.
+
+#### What's still needed for real inference
+
+1. **Response-buffer state between contexts.** Current hardware test shows ACTIVATION succeeds but BATCH_SWITCHING gets a truncated response. Either firmware needs time to finish processing ACTIVATION before the next RPC, or our IRQ-latch handling leaks state between calls.
+2. **HEF parser extension (Phase 6.4e).** Walk `ProtoHEFContext.operations[].actions[]` and capture the compiler-emitted structured actions (EnableLcu, TriggerSequencer, etc.) that go into the DYNAMIC context for compute.
+3. **Full translator (Phase 6.4f).** Map each `ProtoHEFAction` to its `hailort-context_switch_defs.h` wire equivalent, allocate CCW DMA buffers with bus-visible addresses, emit per-context streams, wire into `inference_device_hailo::load_model` replacing the best-effort path.
+
+#### Test coverage — 6 new cases (beyond 6.3's 10)
+
+- `test_cs_builder_append_emits_header_then_body` — single-action byte-for-byte layout including the 3 pad bytes at offsets 1–3.
+- `test_cs_builder_appends_concatenate` — 3-action preliminary-context sequence with `ACTIVATE_CFG_CHANNEL` + `FETCH_CCW_BURSTS` + `DEACTIVATE_CFG_CHANNEL`, asserts action_type bytes + host_buffer_info DMA-address offset.
+- `test_cs_builder_returns_nomem_on_overflow` — buffer capacity enforced.
+- `test_cs_builder_rejects_null_buffer` — null-pointer API check.
+- `test_cs_builder_accepts_zero_body_action` — `BURST_CREDITS_TASK_RESET`-style zero-body actions produce an 8-byte header-only entry.
+- `test_change_context_switch_status_reset_wire_layout` — RESET state transition byte-for-byte.
+- `test_change_context_switch_status_enabled_carries_batch_params` — ENABLED carries the batch-size/batch-count fields.
 
 **Firmware constraints pinned from v4.23:**
 - Zero-length contexts are rejected with `0x40130004`; each `SET_CONTEXT_INFO` must carry ≥1 valid wire action.
 - Firmware expects exactly `dynamic_contexts_count + 3` SET_CONTEXT_INFO calls per load, in fixed order: ACTIVATION, BATCH_SWITCHING, PRELIMINARY, then each DYNAMIC.
+- `common_action_header_t` is 8 bytes (natural alignment, not 5 as the packed reference suggests).
 - `csm_buffer_size` must match the VDMA descriptor page size (typically 512 or 4096).
 
 ### Phase 7: Shell Integration & Demo Polish (1 week)
