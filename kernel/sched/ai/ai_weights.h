@@ -31,9 +31,16 @@ extern const float ai_mlp_b1[AI_MLP_LAYER1_OUT];
 extern const float ai_mlp_w2[AI_MLP_LAYER2_OUT * AI_MLP_LAYER2_IN];
 extern const float ai_mlp_b2[AI_MLP_LAYER2_OUT];
 
-/* Layer 3: 128 -> N_ACTIONS */
-extern const float ai_mlp_w3[AI_MLP_LAYER3_OUT * AI_MLP_LAYER3_IN];
-extern const float ai_mlp_b3[AI_MLP_LAYER3_OUT];
+/* Layer 3: 128 -> N_ACTIONS_MAX. The in-tree arrays are sized for the
+ * 42-action Jetson/QEMU space; Pi 5 (AI_SCHED_N_ACTIONS=24) reads
+ * only the first 24 rows of w3 / first 24 entries of b3. Declaring
+ * the extern with the physical 42-row size is what ai_weights_mlp.c
+ * actually emits — decoupling from AI_SCHED_N_ACTIONS prevents a
+ * conflicting-type error when the platform override reduces the
+ * action count. */
+#define AI_MLP_LAYER3_MAX_ROWS  42
+extern const float ai_mlp_w3[AI_MLP_LAYER3_MAX_ROWS * AI_MLP_LAYER3_IN];
+extern const float ai_mlp_b3[AI_MLP_LAYER3_MAX_ROWS];
 
 /* ============================================================================
  * PPO weights (same architecture as MLP, different learned values)
@@ -48,7 +55,7 @@ extern const float ai_ppo_b1[AI_MLP_LAYER1_OUT];
 extern const float ai_ppo_w2[AI_MLP_LAYER2_OUT * AI_MLP_LAYER2_IN];
 extern const float ai_ppo_b2[AI_MLP_LAYER2_OUT];
 
-extern const float ai_ppo_w3[AI_MLP_LAYER3_OUT * AI_MLP_LAYER3_IN];
-extern const float ai_ppo_b3[AI_MLP_LAYER3_OUT];
+extern const float ai_ppo_w3[AI_MLP_LAYER3_MAX_ROWS * AI_MLP_LAYER3_IN];
+extern const float ai_ppo_b3[AI_MLP_LAYER3_MAX_ROWS];
 
 #endif /* AI_WEIGHTS_H */

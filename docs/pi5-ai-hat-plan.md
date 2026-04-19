@@ -355,7 +355,35 @@ The actual bug was our parser's requirement that `pad_index` (field 7) be presen
 
 Fix is minimal: in `decode_edge_layer_cb`, fall back to `edge_layer_base.sys_index` as the pad key when `pad_index` is absent, and default `is_input` to true when `direction` is unseen (matching the proto3 default). 2 new QEMU tests pin the behavior (`test_hef_parser_edge_layer_uses_sys_index_when_pad_index_absent`, `test_hef_parser_edge_layer_direction_1_means_output`).
 
-Hardware verification of the full `hailo load /mnt/files/scheduler_mlp.hef sched → sched policy ai_hailo → bench sched-policy` chain on pi-5-1 is the next step once the lab is free.
+**Hardware verify on pi-5-1 (2026-04-19):**
+
+```
+slmos> hailo load /mnt/files/scheduler_mlp.hef sched
+hailo: hef v2 proto_size=425092 (total 633464 bytes)
+  hw_arch = hailo8l (1)
+  sdk_version = 3.33.1
+  network_groups = 1
+  first NG ops = 0, pads captured = 2
+    in pad[1] "<unnamed>" shape=1x1x108 (padded 1x1x108)
+      stream: sys_index=1 core_bytes=864 core_buffers=1
+      quant: scale_raw=0x3b808081 zp_raw=0x00000000
+    out pad[0] "<unnamed>" shape=1x1x24 (padded 1x1x24)
+      stream: sys_index=0 core_bytes=24 core_buffers=1
+      quant: scale_raw=0x3e565ffd zp_raw=0x430c0000
+hailo: sched: model loaded (handle=1), ai_policy_hailo armed with HEF quant
+slmos> bench sched-policy
+  Input dim: 108, Output dim: 24 (AI_SCHED_N_ACTIONS)
+  cpu-mlp     1000/1000 ok   39469 ns/decision   25336 decisions/sec
+  hailo-8     0/1000 ok   0 ns/decision   0 decisions/sec
+```
+
+Parser fix is working: both input + output pads extracted with full HEF-derived stream config and quant info. Policy armed. `AI_SCHED_N_ACTIONS=24` picked up correctly on Pi 5 (previously 42 from the Jetson default in `ai_types.h`).
+
+`bench sched-policy` shows `hailo-8 0/1000 ok` — hailo_infer_run times out because firmware has never received the model context. `hailo load sched` today only parses + registers. For real inference, the already-implemented Phase 5.3 primitives need to be chained in: `hailo_control_upload_ccw(meta, body, base, ...)` to DMA weights, then `hailo_control_config_stream_pcie(cfg, ...)` per input/output stream to establish the dataflow_manager_id. Both functions exist; they're just not called from the sched-install path yet.
+
+**Platform override for AI_SCHED_N_ACTIONS (ai_types.h):** `#if defined(PLATFORM_RASPI5)` → 24, else → 42. The in-tree MLP weights are 42-action; Pi 5 reads only the first 24 rows of w3. Matches the 24-action `scheduler_mlp_pi5.hef` produced by `scripts/hailo/compile_hef.sh --variant pi5`.
+
+**Weight-array decoupling (ai_weights.h):** layer-3 extern declarations now use `AI_MLP_LAYER3_MAX_ROWS=42` instead of `AI_MLP_LAYER3_OUT=AI_SCHED_N_ACTIONS`, so the Pi 5 override doesn't conflict with the physical `[42 × 128]` size in `ai_weights_mlp.c`.
 
 **Test coverage** — 29 new QEMU cases:
 

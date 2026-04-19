@@ -54,7 +54,11 @@ _Static_assert(AI_STATE_NUM_CORES * AI_FEATURES_PER_CORE +
  * ============================================================================ */
 
 #ifndef AI_SCHED_N_ACTIONS
-#define AI_SCHED_N_ACTIONS    42  /* Jetson default; overridden by ai_config.h */
+# if defined(PLATFORM_RASPI5)
+#  define AI_SCHED_N_ACTIONS   24  /* Pi 5: 4 cores, no GPU → 4 × 3 × 2 */
+# else
+#  define AI_SCHED_N_ACTIONS   42  /* Jetson / QEMU default: 6 cores + GPU */
+# endif
 #endif
 
 /* Action encoding constants: idx = core * AI_ACTIONS_PER_CORE + priority * 2 + preempt */
