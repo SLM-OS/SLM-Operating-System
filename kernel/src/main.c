@@ -354,6 +354,15 @@ void kernel_main(void *dtb)
                     extern int demo_init(void);
                     demo_init();
                 }
+
+                /* Phase 6.2c: write the embedded scheduler MLP .hef
+                 * (if the kernel was built with SCHEDULER_HEF_BLOB=...)
+                 * so `hailo load /mnt/files/scheduler_mlp.hef sched`
+                 * can reach it. Stub is a no-op when not embedded. */
+                {
+                    extern int sched_hef_init(void);
+                    sched_hef_init();
+                }
             } else {
                 WARN("Failed to mount LittleFS");
             }

@@ -440,6 +440,12 @@ set(KERNEL_SOURCES
     kernel/src/demo_init.c
     # .incbin'ed Lua demo scripts (gated on EMBED_DEMO_SCRIPTS)
     $<$<BOOL:${EMBED_DEMO_SCRIPTS}>:kernel/src/demo_scripts.S>
+
+    # Scheduler MLP .hef embed (gated on SCHEDULER_HEF_BLOB). Stub
+    # sched_hef_init.c always links so main.c doesn't need #ifdef on
+    # the call site; the .S file compiles only when the blob is set.
+    kernel/src/sched_hef_init.c
+    $<$<BOOL:${SCHEDULER_HEF_BLOB}>:kernel/src/sched_hef_embed.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     # General-purpose FDT reader — path + property lookup for any
     # driver. Built on every ARM64 target; x86-64 builds skip it
@@ -733,6 +739,33 @@ if(EMBED_DEMO_SCRIPTS)
         COMPILE_DEFINITIONS "DEMO_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo.lua;DEMO_MENU_LUA_PATH=${CMAKE_SOURCE_DIR}/scripts/demo_menu.lua"
         OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/scripts/demo.lua;${CMAKE_SOURCE_DIR}/scripts/demo_menu.lua"
     )
+endif()
+
+# ============================================================================
+# Scheduler MLP .hef (optional .incbin — Phase 6.2c delivery path)
+# ============================================================================
+#
+# Set -DSCHEDULER_HEF_BLOB=path/to/scheduler_mlp_pi5.hef to embed the
+# compiled scheduler MLP into the kernel image. sched_hef_init.c writes
+# the bytes into /mnt/files/scheduler_mlp.hef at boot so
+# `hailo load /mnt/files/scheduler_mlp.hef sched` can reach them. The
+# .hef is produced by scripts/hailo/compile_hef.sh (see docs/setup.md
+# §Hailo Toolchain).
+set(SCHEDULER_HEF_BLOB "" CACHE FILEPATH
+    "Path to scheduler_mlp_*.hef to embed via .incbin (Phase 6.2c)")
+if(SCHEDULER_HEF_BLOB)
+    if(NOT EXISTS "${SCHEDULER_HEF_BLOB}")
+        message(FATAL_ERROR "SCHEDULER_HEF_BLOB set but file does not exist: "
+                            "${SCHEDULER_HEF_BLOB}")
+    endif()
+    add_compile_definitions(ENABLE_SCHEDULER_HEF_EMBED=1)
+    set_source_files_properties(
+        kernel/src/sched_hef_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "SCHEDULER_HEF_PATH=${SCHEDULER_HEF_BLOB}"
+        OBJECT_DEPENDS "${SCHEDULER_HEF_BLOB}"
+    )
+    message(STATUS "Embedding scheduler MLP .hef: ${SCHEDULER_HEF_BLOB}")
 endif()
 
 # ============================================================================

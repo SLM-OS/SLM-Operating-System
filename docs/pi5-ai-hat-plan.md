@@ -343,9 +343,15 @@ Deployed `AI_SCHED=ON HAILO_FW_BLOB=.../hailo8_fw.bin PLATFORM=RASPI5` kernel. V
 
 New shell subcommand measures decisions/sec for each backend in the inference-device registry. Pi 5 numbers above; QEMU and Jetson numbers await their respective lab passes.
 
-**Known gap — real-inference end-to-end on Hailo hardware:**
+**HEF delivery path landed:** `SCHEDULER_HEF_BLOB=path/to/scheduler_mlp_pi5.hef` at build time `.incbin`s the file into the kernel (`kernel/src/sched_hef_embed.S` + `sched_hef_init.c`). At boot, `sched_hef_init` writes the embedded bytes into `/mnt/files/scheduler_mlp.hef` so `hailo load /mnt/files/scheduler_mlp.hef sched` can reach them. Stub-compiles when the option is unset — zero kernel-image impact for builds that don't embed.
 
-Getting a `.hef` file into the kernel requires embedding it (like `demo_init.c` does for scripts, via `.incbin`) or a VFS mount of the SD boot partition; `/mnt/files` on Pi 5 is a RAM disk populated at boot from in-kernel blobs. The existing Phase 5 CONFIG_STREAM probe rejection (major=0x40030050) remains the firmware-side blocker — even with real quant + stream params from 6.2b, firmware also needs the HEF's preliminary_config CCW actions uploaded before inference fires. The infrastructure is in place; the final real-inference run lands in a follow-up.
+**V2 HEF outer-header support landed (bonus):** DFC 3.33.1 emits HEF v2 binaries whose trailer is 32 bytes (not 20 as our original guess), and whose CCWS size is implicit (file size minus proto_end). `hef_header.c` now parses v2 correctly — confirmed against a real DFC 3.33.1 output: proto body starts at offset 44, top-level proto fields (hw_arch, sdk_version, network_groups) decode cleanly.
+
+**Known gap — v2 HEF proto-body op/pad schema:**
+
+DFC 3.33.1's proto schema diverges from our parser's baseline below the network-group level: `op_count` stays 0 after `hef_parse_body`, which means the nanopb callback chain for `ProtoHEFNetworkGroup.ops[]` doesn't match the wire format DFC 3.33.1 emits (likely a field-number or oneof shift in newer `hef.proto` revisions). Until the v2 proto schema is re-derived and the parser callbacks updated, `hailo load <path> sched` fails with `INF_ERR_BAD_MODEL` at `load_model` time — no pad shapes extracted. The policy path survives this gracefully (falls back to heuristic), but the NPU never runs real inference.
+
+Resolving this is straightforward but substantive follow-up work: grab the matching `hef.proto` from HailoRT's public repo, regen `hef.pb.{c,h}` via `scripts/tools/regen-hef-proto.sh`, audit the field-tag diffs between the v0/v1 proto we currently support and the v2 proto DFC 3.33.1 emits. Out of scope for this PR to keep it shippable.
 
 **Test coverage** — 18 new QEMU cases in `test_hailo.c` (13 backend + 2 policy handle + 3 edge-layer extraction / threading): device registration, happy-path HEF load, error paths (null args / not running / bad header / no pads / size/dtype mismatch / full slot table), slot free + double-free, shutdown clears slots, policy handle set/get and detach, HEF quant + stream capture, non-matching pad_index skip, end-to-end load-with-stream-info.
 

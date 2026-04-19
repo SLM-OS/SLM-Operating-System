@@ -226,7 +226,14 @@ static int cmd_hailo(int argc, char *argv[])
         }
 
         struct hef_outer_header outer = {0};
-        int rc = hef_parse_outer_header(hdr_buf, (size_t)n, &outer);
+        /* hef_parse_outer_header's truncation check verifies the proto
+         * body fits within the supplied `size`. We've only read the
+         * first 64 bytes into hdr_buf, but info.size is the true file
+         * length — pass that so the check passes, while the parser's
+         * actual reads stay within the 32-byte header region (well
+         * inside the 64 bytes we buffered). */
+        int rc = hef_parse_outer_header(hdr_buf, info.size, &outer);
+        (void)n;    /* kept to assert the vfs read succeeded above */
         if (rc != HEF_OK) {
             shell_printf("hailo: outer-header parse failed (%d)\n", rc);
             return 0;
