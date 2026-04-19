@@ -508,8 +508,16 @@ void kernel_main(void *dtb)
     }
 #elif defined(PLATFORM_JETSON_ORIN_NANO)
     {
-        extern void rtl8169_register(void);
-        rtl8169_register();
+        /*
+         * Jetson networking rides on USB CDC-ECM, not native PCIe
+         * Ethernet. The first probe at boot is expected to no-op on
+         * kexec boots (xHCI defers enumeration until the user re-
+         * plugs — see #309) and succeed cleanly on direct-boot cases.
+         * Either way, `net_poll()` retries `cdc_ecm_probe_and_register`
+         * on every tick until the class driver binds.
+         */
+        extern int cdc_ecm_probe_and_register(void);
+        (void)cdc_ecm_probe_and_register();
     }
 #endif
 #endif

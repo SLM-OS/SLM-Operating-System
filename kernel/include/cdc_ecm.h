@@ -22,8 +22,23 @@
  * negative on failure (no CDC-ECM interface found, MAC retrieval
  * failed, etc.). No-op if no device is present (returns 0 — treat
  * as "USB networking disabled").
+ *
+ * Idempotent: safe to call repeatedly. Once a device has been
+ * successfully bound the function returns 0 immediately without
+ * touching any state. Phase 4 drives this from net_poll() so a
+ * post-boot enumeration (e.g. the #309 re-plug on Jetson) is picked
+ * up without a separate callback path. Call cdc_ecm_reset() to
+ * force a re-probe (test-only).
  */
 int cdc_ecm_probe_and_register(void);
+
+/*
+ * Clear the bound-to-device state so the next call to
+ * cdc_ecm_probe_and_register() re-runs the full probe. Test-only
+ * hook — production code relies on the idempotent "bind once per
+ * boot" contract and never needs to reset.
+ */
+void cdc_ecm_reset(void);
 
 /*
  * Drives the USB core's poll path so bulk IN completions can be

@@ -8,6 +8,7 @@
 #include "net.h"
 #include "net_driver.h"
 #include "usb.h"
+#include "cdc_ecm.h"
 #include "debug.h"
 #include "timer.h"
 
@@ -390,10 +391,32 @@ void net_poll(void) {
      * registered, and returns immediately once a device has been
      * enumerated. On Jetson this is what notices a post-kexec
      * re-plug and kicks off the Phase 3A enumeration sequence (#309).
+     *
+     * Once the USB device has enumerated, retry the CDC-ECM probe so
+     * the class driver can bind. Idempotent — subsequent ticks return
+     * 0 immediately once bound. This is the Phase 4 hookup the
+     * cdc_ecm.h header note describes.
+     *
+     * Both calls run unconditionally on every platform (not gated by
+     * #ifdef). On QEMU / Pi 5 / x86-64 there is never a USB device to
+     * enumerate, so each call is an atomic-load early-return — one
+     * function call and one cache-hot load per ~100 Hz tick, well
+     * below anything that would show up on a profile. Keeping the
+     * call site platform-agnostic avoids duplicating the CMake
+     * platform gate in C and mirrors the "USB core compiles on every
+     * platform" design in docs/networking.md.
      */
     (void)usb_core_hotplug_poll();
+    (void)cdc_ecm_probe_and_register();
 
     if (!net_initialized) {
+        return;
+    }
+    /* Defensive: net_init guarantees active_driver was non-NULL at
+     * the time it ran, but nothing prevents later code from clearing
+     * the slot (tests, future hot-unplug paths). Bail rather than
+     * NULL-deref the driver ops below. */
+    if (active_driver == NULL) {
         return;
     }
 
