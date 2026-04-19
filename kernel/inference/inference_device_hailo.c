@@ -30,6 +30,7 @@
 #include "hailo_infer.h"
 #include "hef_header.h"
 #include "hef_parser.h"
+#include "spinlock.h"
 #include "debug.h"
 #include <string.h>
 
@@ -50,6 +51,19 @@ struct hailo_model_slot {
 };
 
 static struct hailo_model_slot slots[HAILO_MAX_MODELS];
+
+/*
+ * Serialises slot-table mutations (in_use flag, cfg/shape init and
+ * zero-out). load_model / free_model / shutdown all take this lock;
+ * run() does NOT — it reads slot->cfg after load_model's IRQ-safe
+ * unlock has stored the full config. Readers see either "slot
+ * in_use=false" (run bails) or a fully-initialised cfg, never a torn
+ * write.
+ *
+ * IRQ-disabling lock flavour is mandatory because run() is reachable
+ * from scheduler-policy paths that can execute with IRQs disabled.
+ */
+static spinlock_t slots_lock = SPINLOCK_INIT;
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
@@ -98,7 +112,9 @@ static uint32_t pad_bytes(const struct hef_pad_info *p)
 static int hailo_backend_init(struct inference_device *dev)
 {
     (void)dev;
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     memset(slots, 0, sizeof(slots));
+    spin_unlock_irqrestore(&slots_lock, flags);
     return INF_OK;
 }
 
@@ -107,7 +123,9 @@ static void hailo_backend_shutdown(struct inference_device *dev)
     (void)dev;
     /* No driver-level release — Hailo state is managed by the
      * device lifecycle (hailo_init / hailo_boot), not this backend. */
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     memset(slots, 0, sizeof(slots));
+    spin_unlock_irqrestore(&slots_lock, flags);
 }
 
 static int hailo_backend_load_model(struct inference_device *dev,
@@ -157,11 +175,28 @@ static int hailo_backend_load_model(struct inference_device *dev,
         return INF_ERR_BAD_MODEL;
     }
 
-    /* 4. Claim a slot. */
+    /* 4. Claim a slot atomically — the check-then-set must be
+     * lock-protected so concurrent loaders don't pick the same index.
+     * Set in_use=true under the lock so later scanners skip us; the
+     * cfg + shape fields fill in while other load/free callers still
+     * see in_use=true (so they won't touch this slot). run() only
+     * dereferences slot->cfg when in_use is true, and we publish
+     * in_use=true BEFORE writing cfg, but that's safe because:
+     *   - a concurrent run() with h pointing at this freshly-claimed
+     *     slot would require the caller to already have the handle
+     *     we haven't returned yet — can't happen;
+     *   - an unrelated run() with a different h never reads this
+     *     slot's cfg. */
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     int idx = -1;
     for (int i = 0; i < HAILO_MAX_MODELS; i++) {
-        if (!slots[i].in_use) { idx = i; break; }
+        if (!slots[i].in_use) {
+            slots[i].in_use = true;
+            idx = i;
+            break;
+        }
     }
+    spin_unlock_irqrestore(&slots_lock, flags);
     if (idx < 0) return INF_ERR_FULL;
 
     /* Stream parameters — prefer HEF-derived values (Phase 6.2b),
@@ -187,7 +222,7 @@ static int hailo_backend_load_model(struct inference_device *dev,
     uint16_t out_page_size = out_pad->has_stream_info && out_pad->core_bytes_per_buffer
                                ? (uint16_t)out_pad->core_bytes_per_buffer : 512;
 
-    slots[idx].in_use = true;
+    /* in_use was set above; now populate the config + shapes. */
     slots[idx].cfg = (struct hailo_infer_config){
         .input_bytes      = input_bytes,
         .output_bytes     = output_bytes,
@@ -197,7 +232,13 @@ static int hailo_backend_load_model(struct inference_device *dev,
         .output_data_id   = out_data_id,
         .input_page_size  = in_page_size,
         .output_page_size = out_page_size,
-        .timeout_us       = 500000,     /* 500 ms */
+        /* Deliberately tight: scheduler-policy path (ai_hailo) invokes
+         * run() from contexts that may have IRQs disabled. A 500 ms
+         * poll would stall the CPU and drop timer ticks. A real
+         * Hailo-8 MLP inference completes in microseconds; 10 ms is
+         * a ~500x safety margin that still caps pathological waits
+         * at a recoverable duration. */
+        .timeout_us       = 10000,      /* 10 ms */
     };
     slots[idx].input_shape[0]  = (uint16_t)pad_dim(in_pad->padded_height,   in_pad->height);
     slots[idx].input_shape[1]  = (uint16_t)pad_dim(in_pad->padded_width,    in_pad->width);
@@ -246,8 +287,15 @@ static int hailo_backend_free_model(struct inference_device *dev,
     (void)dev;
     if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return INF_ERR_INVAL;
     struct hailo_model_slot *slot = &slots[h - 1];
-    if (!slot->in_use) return INF_ERR_INVAL;
+    /* Lock-protected clear so a concurrent load_model scanning for a
+     * free slot doesn't observe in_use=false with stale cfg bytes. */
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
+    if (!slot->in_use) {
+        spin_unlock_irqrestore(&slots_lock, flags);
+        return INF_ERR_INVAL;
+    }
     memset(slot, 0, sizeof(*slot));
+    spin_unlock_irqrestore(&slots_lock, flags);
     return INF_OK;
 }
 
@@ -262,15 +310,19 @@ static int hailo_backend_free_model(struct inference_device *dev,
 
 uint32_t hailo_backend_in_use_slots(void)
 {
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     uint32_t n = 0;
     for (int i = 0; i < HAILO_MAX_MODELS; i++)
         if (slots[i].in_use) n++;
+    spin_unlock_irqrestore(&slots_lock, flags);
     return n;
 }
 
 void hailo_backend_reset_slots_for_tests(void)
 {
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     memset(slots, 0, sizeof(slots));
+    spin_unlock_irqrestore(&slots_lock, flags);
 }
 
 /* -------------------------------------------------------------------------- */

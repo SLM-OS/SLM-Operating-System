@@ -121,24 +121,36 @@ int hef_parse_outer_header(const void *blob, size_t size,
         break;
     }
 
-    case HEF_VERSION_V2:
-    case HEF_VERSION_V3: {
-        /* v2/v3 trailer (confirmed against DFC 3.33.1 output):
+    case HEF_VERSION_V2: {
+        /* V2 trailer (confirmed against DFC 3.33.1 output — hex-traced
+         * a real scheduler_mlp_pi5.hef on pi-5-1):
          *   u32 crc
          *   u8[16] file_hash
+         *   u8[12] reserved/padding (zero in observed output)
          * No CCWS size field in the header — the CCWS block (if any)
          * starts at `proto_end` and runs to end-of-file. Derive the
          * size from the supplied `size` parameter so callers that
          * pass the true file length get a usable ccws_offset +
-         * ccws_size without additional parsing.
-         *
-         * Older Hailo SDKs emitted different v2/v3 layouts (CCWS
-         * size embedded in the header, plus padding). If a future
-         * decode fails with TRUNCATED here, add per-DFC-version
-         * handling keyed on the bit pattern of the hash field.
-         */
+         * ccws_size without additional parsing. */
         out->crc       = be_u32(t + 0);
         memcpy(out->md5, t + 4, 16);            /* file_hash, stored in md5 */
+        out->ccws_offset = proto_end;
+        out->ccws_size   = (size > proto_end) ? (size - proto_end) : 0;
+        break;
+    }
+
+    case HEF_VERSION_V3: {
+        /* V3 trailer is UNTESTED — no real v3 `.hef` has been observed.
+         * The 40-byte size in trailer_size() is a best-guess extrapolation
+         * (V2 + 8 bytes for the proto_xxh3_64bits that HailoRT's public
+         * headers mention). The CRC + file_hash prefix is assumed
+         * stable from V2. When a real v3 file arrives, verify the
+         * trailer layout by hex trace first and refine this case.
+         *
+         * Until then: treat V3 like V2 for the CRC + hash + CCWS
+         * derivation. Known incomplete decode; may need fixing. */
+        out->crc       = be_u32(t + 0);
+        memcpy(out->md5, t + 4, 16);
         out->ccws_offset = proto_end;
         out->ccws_size   = (size > proto_end) ? (size - proto_end) : 0;
         break;

@@ -233,7 +233,7 @@ static int cmd_hailo(int argc, char *argv[])
          * actual reads stay within the 32-byte header region (well
          * inside the 64 bytes we buffered). */
         int rc = hef_parse_outer_header(hdr_buf, info.size, &outer);
-        (void)n;    /* kept to assert the vfs read succeeded above */
+        (void)n;    /* read was validated above; silence unused-var warning */
         if (rc != HEF_OK) {
             shell_printf("hailo: outer-header parse failed (%d)\n", rc);
             return 0;
@@ -369,11 +369,23 @@ static int cmd_hailo(int argc, char *argv[])
              * does not keep a pointer. */
             size_t total = (size_t)outer.proto_offset + outer.proto_size;
             size_t full_pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
-            uint8_t *full = pmm_alloc_pages(full_pages);
-            if (!full) {
+            uint8_t *full = NULL;
+            /* Defensive bound: hdr_buf is 64 B. v0/v1/v2/v3 proto_offset
+             * values (32/28/44/52) all fit. A future HEF version with
+             * a larger trailer would otherwise silently copy past
+             * hdr_buf's tail; reject cleanly before that happens. */
+            if (outer.proto_offset > sizeof(hdr_buf)) {
+                shell_printf("hailo: sched: proto_offset=%u > "
+                             "hdr_buf size %zu (new HEF version?)\n",
+                             outer.proto_offset, sizeof(hdr_buf));
+            } else {
+                full = pmm_alloc_pages(full_pages);
+            }
+            if (!full && outer.proto_offset <= sizeof(hdr_buf)) {
                 shell_printf("hailo: sched: pmm_alloc_pages(%lu) failed\n",
                              (unsigned long)full_pages);
-            } else {
+            }
+            if (full) {
                 memcpy(full, hdr_buf, outer.proto_offset);
                 memcpy(full + outer.proto_offset, body, outer.proto_size);
 

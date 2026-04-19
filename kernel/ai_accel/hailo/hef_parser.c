@@ -865,10 +865,19 @@ static bool decode_network_group_cb(pb_istream_t *stream,
  * NOT treated as untrusted input. Nanopb's default-skip recursion
  * into nested length-delimited sub-messages consumes one kernel-stack
  * frame per level, so an adversarially-nested proto could overflow
- * the 16 KB kernel stack. This parser's own callback chain adds 5
- * levels (Hef → NetworkGroup → Op → Pad → TensorShape); well-formed
- * Hailo-compiled HEFs have fixed structural depth in that range,
- * well within safe limits. Any future path that loads HEF blobs
+ * the 16 KB kernel stack.
+ *
+ * This parser's callback chains are bounded by the proto schema's
+ * structural depth:
+ *   ops path:        Hef → NG → Op → Pad → TensorShape   (5 levels)
+ *   ccw path:        Hef → NG → PrelimConfig → Op → Action
+ *                        → WriteDataCcw                  (6 levels)
+ *   edge-layer path: Hef → NG → Context → CtxMetadata
+ *                        → EdgeLayer → EdgeLayerInfo
+ *                        → EdgeLayerBase / NumericInfo   (7 levels)
+ *
+ * Well-formed Hailo-compiled HEFs have fixed structural depth in that
+ * range, well within safe limits. Any future path that loads HEF blobs
  * from a network source must either parse into a bounded-depth
  * staging buffer first or grow the stack for the decode call.
  */

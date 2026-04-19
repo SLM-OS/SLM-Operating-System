@@ -358,9 +358,15 @@ void ai_policy_hailo_set_model(inference_model_handle_t handle,
                                uint32_t input_n, uint32_t output_n)
 {
     if (handle == INF_INVALID_HANDLE) {
-        ai_hailo_model.loaded = false;
+        /* Release before clearing so a concurrent reader that still
+         * observes loaded=true sees coherent (stale) fields, not a
+         * half-cleared state. Readers ack with acquire before deref. */
+        __atomic_store_n(&ai_hailo_model.loaded, false, __ATOMIC_RELEASE);
         return;
     }
+    /* Non-atomic field writes THEN an atomic release-store of `loaded`:
+     * any reader that acquires loaded==true is guaranteed to observe
+     * the handle/scale/zp/n writes that happened-before. */
     ai_hailo_model.handle       = handle;
     ai_hailo_model.input_scale  = (input_scale  > 0.0f) ? input_scale  : (1.0f / 128.0f);
     ai_hailo_model.input_zp     = input_zp;
@@ -368,12 +374,16 @@ void ai_policy_hailo_set_model(inference_model_handle_t handle,
     ai_hailo_model.output_zp    = output_zp;
     ai_hailo_model.input_n      = input_n  ? input_n  : AI_STATE_DIM;
     ai_hailo_model.output_n     = output_n ? output_n : (uint32_t)AI_SCHED_N_ACTIONS;
-    ai_hailo_model.loaded       = true;
+    __atomic_store_n(&ai_hailo_model.loaded, true, __ATOMIC_RELEASE);
 }
 
 inference_model_handle_t ai_policy_hailo_get_model_handle(void)
 {
-    return ai_hailo_model.loaded ? ai_hailo_model.handle : INF_INVALID_HANDLE;
+    /* Acquire matches the release in ai_policy_hailo_set_model so if
+     * we see loaded==true, we observe the paired handle write. */
+    if (!__atomic_load_n(&ai_hailo_model.loaded, __ATOMIC_ACQUIRE))
+        return INF_INVALID_HANDLE;
+    return ai_hailo_model.handle;
 }
 
 /* Integer-only entry point — see header for rationale. */
@@ -484,7 +494,9 @@ static void quantize_fp32_to_int8(const float *src, int8_t *dst, uint32_t n,
 static int ai_schedule_mlp_via_hailo(const float *state,
                                      struct ai_sched_action *action)
 {
-    if (!ai_hailo_model.loaded || !cached_hailo_dev) {
+    /* Acquire-load loaded: on true, we see all set_model field writes. */
+    if (!__atomic_load_n(&ai_hailo_model.loaded, __ATOMIC_ACQUIRE)
+     || !cached_hailo_dev) {
         /* No model yet — return failure; ai_assign_cpu_common will
          * fall back to heuristic and bump the fallbacks counter. */
         return -1;
