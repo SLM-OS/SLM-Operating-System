@@ -510,11 +510,25 @@ Subsequent `SET_CONTEXT_INFO` calls (BATCH_SWITCHING, PRELIMINARY, DYNAMIC) fail
 
 `APPLICATION_CHANGE_INTERRUPT` is zero-body and is **only** legal at the tail of the final DYNAMIC context — not in ACTIVATION/BATCH_SWITCHING/PRELIMINARY. Sending it in the wrong context returns MISALIGNMENT because firmware's walker doesn't expect it there.
 
+#### Phase 6.4e landed (2026-04-19): HEF parser captures compute-action inventory
+
+`hef_parser` now walks `ProtoHEFContext.operations[].actions[]` and records per-context action summaries into `hef_info.context_actions[]`: `context_index`, `action_count`, `action_type_mask` (bitmap keyed on ProtoHEFAction oneof field numbers), and a capped-size `action_types[]` array preserving decode order. 6 unit tests; caps of `HEF_PARSER_MAX_CONTEXTS=8` and `HEF_PARSER_MAX_CONTEXT_ACTIONS=64`; overflow flags per-context and at the top level.
+
+Per-action parameter extraction (`packed_lcu_id` for `EnableLcu`, `cluster_index` for `TriggerSequencer`, etc.) is deliberately deferred — the current summary is enough to dispatch on action type in the translator.
+
+#### Phase 6.4f landed (2026-04-19): HEF → wire-action translator (skeleton)
+
+`kernel/ai_accel/hailo/hailo_cs_translator.{c,h}` composes over `hailo_cs_builder` and emits the four per-context action byte streams plus the 32-byte `application_header`. Per-context minimums match HailoRT's `fill_*_context_recipes` (v4.23 source).
+
+Hardware-verified on pi-5-1 (2026-04-19) — the translator-driven `ctxsmoke` produces **identical firmware behavior** to the pre-refactor hand-rolled version: `ACTIVATION rc=0`, same downstream truncated-response signal on BATCH_SWITCHING. Byte-level equivalence end-to-end.
+
+What's still a skeleton: the `DYNAMIC` context carries only `APPLICATION_CHANGE_INTERRUPT` as its tail marker — no compute actions translated from the HEF's `operations[].actions[]` yet. Firmware accepts this structurally, but a real inference would need EnableLcu / TriggerSequencer / AllowInputDataflow translated, which requires per-action parameter extraction in `hef_parser` first.
+
 #### What's still needed for real inference
 
-1. **Response-buffer state between contexts.** Current hardware test shows ACTIVATION succeeds but BATCH_SWITCHING gets a truncated response. Either firmware needs time to finish processing ACTIVATION before the next RPC, or our IRQ-latch handling leaks state between calls.
-2. **HEF parser extension (Phase 6.4e).** Walk `ProtoHEFContext.operations[].actions[]` and capture the compiler-emitted structured actions (EnableLcu, TriggerSequencer, etc.) that go into the DYNAMIC context for compute.
-3. **Full translator (Phase 6.4f).** Map each `ProtoHEFAction` to its `hailort-context_switch_defs.h` wire equivalent, allocate CCW DMA buffers with bus-visible addresses, emit per-context streams, wire into `inference_device_hailo::load_model` replacing the best-effort path.
+1. **Response-buffer state between contexts.** Current hardware test shows ACTIVATION succeeds but BATCH_SWITCHING gets a truncated response. Either firmware needs time to finish processing ACTIVATION before the next RPC, or our IRQ-latch handling leaks state between calls. **Next frontier.**
+2. **Per-action parameter extraction (Phase 6.4g).** Extend `hef_parser`'s compute-action walker to capture `ProtoHEFAction` body fields for the common types (EnableLcu, DisableLcu, AllowInputDataflow, EnableSequencer, TriggerSequencer, WaitForSequencer). Enables the translator's DYNAMIC context to emit the actions that actually drive compute.
+3. **Wire translator into `inference_device_hailo::load_model` (Phase 6.4h).** Replace the best-effort WRITE_MEMORY + CONFIG_STREAM path with the SET_NETWORK_GROUP_HEADER + 4 SET_CONTEXT_INFO chain. Gated on (1).
 
 #### Test coverage — 6 new cases (beyond 6.3's 10)
 
