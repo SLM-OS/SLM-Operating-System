@@ -264,7 +264,8 @@ static int control_validate_send_recv_args(const void *req_payload,
  * Plain callers should use hailo_control_send_recv; this is a
  * private helper.
  */
-static int hailo_control_send_recv_locked(const void *req_payload,
+static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
+                                          const void *req_payload,
                                           uint32_t    req_len,
                                           void       *resp_payload,
                                           uint32_t    resp_capacity,
@@ -286,12 +287,14 @@ static int hailo_control_send_recv_locked(const void *req_payload,
     hailo_platform->bar4_write(0, control_req_wire, aligned_len);
     hailo_platform->mb();
 
-    /* Ring the doorbell: APP CPU control. raise_ready_offset
-     * (0x1684 on Hailo-8) is a direct BAR4 offset — the Linux
-     * driver writes to it via `resources->fw_access` which is
-     * BAR4, and that's how the firmware picks up the "request
-     * ready" event. */
-    uint32_t doorbell_val = HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK;
+    /* Ring the doorbell: APP CPU for ordinary opcodes, CORE CPU
+     * for context-switch opcodes. raise_ready_offset (0x1684 on
+     * Hailo-8) is a direct BAR4 offset — the Linux driver writes
+     * to it via `resources->fw_access` which is BAR4, and that's
+     * how the firmware picks up the "request ready" event. */
+    uint32_t doorbell_val = (cpu_id == HAILO_CTRL_CPU_CORE)
+                                ? HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK
+                                : HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK;
     hailo_platform->bar4_write(hailo_fw_addrs_hailo8.raise_ready_offset,
                                &doorbell_val, sizeof(doorbell_val));
     hailo_platform->mb();
@@ -366,13 +369,28 @@ int hailo_control_send_recv(const void *req_payload,
                             uint32_t   *resp_len,
                             uint32_t    timeout_us)
 {
+    return hailo_control_send_recv_cpu(HAILO_CTRL_CPU_APP,
+                                       req_payload, req_len,
+                                       resp_payload, resp_capacity,
+                                       resp_len, timeout_us);
+}
+
+int hailo_control_send_recv_cpu(enum hailo_control_cpu cpu_id,
+                                const void *req_payload,
+                                uint32_t    req_len,
+                                void       *resp_payload,
+                                uint32_t    resp_capacity,
+                                uint32_t   *resp_len,
+                                uint32_t    timeout_us)
+{
     int rc = control_validate_send_recv_args(req_payload, req_len,
                                              resp_payload, resp_capacity,
                                              resp_len);
     if (rc != HAILO_OK) return rc;
 
     spin_lock(&control_lock);
-    rc = hailo_control_send_recv_locked(req_payload, req_len,
+    rc = hailo_control_send_recv_locked(cpu_id,
+                                        req_payload, req_len,
                                         resp_payload, resp_capacity,
                                         resp_len, timeout_us);
     spin_unlock(&control_lock);
@@ -573,7 +591,8 @@ static int control_write_memory_chunk(uint32_t address,
     int rc = control_validate_send_recv_args(&control_mem_write_req, req_len,
                                              &resp, sizeof(resp), &resp_len);
     if (rc == HAILO_OK) {
-        rc = hailo_control_send_recv_locked(&control_mem_write_req, req_len,
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            &control_mem_write_req, req_len,
                                             &resp, sizeof(resp), &resp_len,
                                             /* 1 s */ 1000000u);
     }
@@ -651,7 +670,8 @@ static int control_read_memory_chunk(uint32_t address,
                                              sizeof(control_mem_read_resp),
                                              &resp_len);
     if (rc == HAILO_OK) {
-        rc = hailo_control_send_recv_locked(&control_mem_read_req,
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            &control_mem_read_req,
                                             sizeof(control_mem_read_req),
                                             &control_mem_read_resp,
                                             sizeof(control_mem_read_resp),
@@ -976,7 +996,8 @@ int hailo_control_config_stream_pcie(
                                              sizeof(control_config_stream_resp),
                                              &resp_len);
     if (rc == HAILO_OK) {
-        rc = hailo_control_send_recv_locked(&control_config_stream_req, req_len,
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            &control_config_stream_req, req_len,
                                             &control_config_stream_resp,
                                             sizeof(control_config_stream_resp),
                                             &resp_len,
@@ -1007,5 +1028,351 @@ int hailo_control_config_stream_pcie(
     }
     *out_dataflow_manager_id = control_config_stream_resp.dataflow_manager_id;
     spin_unlock(&control_lock);
+    return HAILO_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Context-switch: SET_NETWORK_GROUP_HEADER (opcode 0x20, CORE CPU).          */
+/* -------------------------------------------------------------------------- */
+
+/* Wire mirror of CONTROL_PROTOCOL__application_header_t for
+ * firmware v4.23 (32 bytes). HailoRT's #pragma pack(1) applies to
+ * the whole struct region, so bools ride as 1-byte and there's no
+ * inter-field padding.
+ *
+ *   u16(2) + 3 bools(3) + bool(1) + u8(1) + 2×u16(4) + u32(4)
+ *   + 3×u32(12) + u8(1) + 4×u8(4) = 32 bytes.
+ *
+ * Firmware rejects any other size with
+ * CONTROL_PROTOCOL_STATUS_INVALID_CONTEXT_SWITCH_APP_HEADER_LENGTH
+ * (major=0x40030060). The newer upstream reference header at
+ * docs/reference/hailort-control-protocol.h:883-894 shows the 53-byte
+ * layout (4 bools + 24 cfg channels) — that's a newer fw release,
+ * not what pi-5-1 ships.
+ */
+struct hailo_cs_application_header_wire {
+    uint16_t dynamic_contexts_count;       /* native LE */
+    uint8_t  preliminary_run_asap;
+    uint8_t  batch_register_config;
+    uint8_t  can_fast_batch_switch;
+    uint8_t  is_abbale_supported;
+    uint8_t  networks_count;
+    uint16_t csm_buffer_size;              /* native LE */
+    uint16_t batch_size;                   /* native LE */
+    uint32_t external_action_list_address; /* native LE */
+    uint32_t boundary_channels_bitmap[HAILO_CS_MAX_VDMA_ENGINES]; /* native LE */
+    uint8_t  config_channels_count;
+    uint8_t  config_channel_packed_id[HAILO_CS_MAX_CFG_CHANNELS];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_application_header_wire) == 32,
+               "v4.23 application_header wire size must be 32 bytes");
+
+struct hailo_cs_set_ngh_req_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;              /* BE, = 1 */
+    uint32_t application_header_length;    /* BE, = 32 (v4.23) */
+    struct hailo_cs_application_header_wire application_header;
+} __attribute__((packed));
+
+struct hailo_cs_set_ngh_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;              /* BE, = 0 */
+} __attribute__((packed));
+
+static struct hailo_cs_set_ngh_req_wire  control_set_ngh_req;
+static struct hailo_cs_set_ngh_resp_wire control_set_ngh_resp;
+
+int hailo_control_set_network_group_header(
+    const struct hailo_cs_application_header *header)
+{
+    if (!header) return HAILO_ERR_INVAL;
+    if (header->config_channels_count > HAILO_CS_MAX_CFG_CHANNELS) return HAILO_ERR_INVAL;
+
+    spin_lock(&control_lock);
+
+    struct hailo_cs_set_ngh_req_wire *r = &control_set_ngh_req;
+    memset(r, 0, sizeof(*r));
+
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER);
+    r->parameter_count = hailo_cpu_to_be32(1u);
+    r->application_header_length =
+        hailo_cpu_to_be32((uint32_t)sizeof(r->application_header));
+
+    /* Field-for-field copy from host struct to packed wire struct.
+     * Scalars stay native LE; only the outer length/parameter_count
+     * prefix is BE (as above). */
+    r->application_header.dynamic_contexts_count  = header->dynamic_contexts_count;
+    r->application_header.preliminary_run_asap    = header->preliminary_run_asap     ? 1u : 0u;
+    r->application_header.batch_register_config   = header->batch_register_config    ? 1u : 0u;
+    r->application_header.can_fast_batch_switch   = header->can_fast_batch_switch    ? 1u : 0u;
+    r->application_header.is_abbale_supported     = header->is_abbale_supported      ? 1u : 0u;
+    r->application_header.networks_count          = header->networks_count;
+    r->application_header.csm_buffer_size         = header->csm_buffer_size;
+    r->application_header.batch_size              = header->batch_size;
+    r->application_header.external_action_list_address =
+        header->external_action_list_address;
+    memcpy(r->application_header.boundary_channels_bitmap,
+           header->boundary_channels_bitmap,
+           sizeof(r->application_header.boundary_channels_bitmap));
+    r->application_header.config_channels_count   = header->config_channels_count;
+    memcpy(r->application_header.config_channel_packed_id,
+           header->config_channel_packed_id,
+           sizeof(r->application_header.config_channel_packed_id));
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_set_ngh_req, sizeof(*r),
+                                             &control_set_ngh_resp,
+                                             sizeof(control_set_ngh_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
+                                            &control_set_ngh_req, sizeof(*r),
+                                            &control_set_ngh_resp,
+                                            sizeof(control_set_ngh_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_set_ngh_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER,
+                                       "SET_NETWORK_GROUP_HEADER");
+    spin_unlock(&control_lock);
+    return rc;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Context-switch: SET_CONTEXT_INFO (opcode 0x21, CORE CPU).                  */
+/* -------------------------------------------------------------------------- */
+
+/* Fixed prefix before context_network_data. All length fields are
+ * BE on the wire; the u8 payload bytes they precede are 1-byte and
+ * stored native. Per reference: docs/reference/hailort-control-protocol.h
+ * lines 969-978 and -control_protocol.cpp:1162-1211. */
+struct hailo_cs_set_ctx_info_req_prefix_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;                    /* BE, = 4 */
+    uint32_t is_first_chunk_per_context_length;  /* BE, = 1 */
+    uint8_t  is_first_chunk_per_context;
+    uint32_t is_last_chunk_per_context_length;   /* BE, = 1 */
+    uint8_t  is_last_chunk_per_context;
+    uint32_t context_type_length;                /* BE, = 1 */
+    uint8_t  context_type;
+    uint32_t context_network_data_length;        /* BE, = N */
+    /* context_network_data[N] follows here */
+} __attribute__((packed));
+
+/* 16 (common) + 4 (parameter_count) + 19 (four length+u8 pairs, where
+ * the last length stands alone with data_length following as part of
+ * the variable tail) = 39 bytes. */
+_Static_assert(sizeof(struct hailo_cs_set_ctx_info_req_prefix_wire) == 39,
+               "SET_CONTEXT_INFO prefix must be 39 bytes on the wire");
+
+/* Full request buffer: fixed prefix + up to HAILO_CS_CONTEXT_CHUNK_MAX_BYTES
+ * bytes of action data. Allocated in BSS; single request in flight
+ * at a time (serialized by control_lock). */
+struct hailo_cs_set_ctx_info_req_wire {
+    struct hailo_cs_set_ctx_info_req_prefix_wire prefix;
+    uint8_t  context_network_data[HAILO_CS_CONTEXT_CHUNK_MAX_BYTES];
+} __attribute__((packed));
+
+struct hailo_cs_set_ctx_info_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                    /* BE, = 0 */
+} __attribute__((packed));
+
+static struct hailo_cs_set_ctx_info_req_wire  control_set_ctx_info_req;
+static struct hailo_cs_set_ctx_info_resp_wire control_set_ctx_info_resp;
+
+int hailo_control_set_context_info_chunk(
+    enum hailo_cs_context_type context_type,
+    bool                       is_first_chunk,
+    bool                       is_last_chunk,
+    const void                *network_data,
+    uint32_t                   network_data_len)
+{
+    if (network_data_len > HAILO_CS_CONTEXT_CHUNK_MAX_BYTES) return HAILO_ERR_INVAL;
+    if (network_data_len > 0 && !network_data) return HAILO_ERR_INVAL;
+
+    spin_lock(&control_lock);
+
+    struct hailo_cs_set_ctx_info_req_wire *r = &control_set_ctx_info_req;
+    memset(&r->prefix, 0, sizeof(r->prefix));
+
+    r->prefix.common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->prefix.common.flags    = 0;
+    r->prefix.common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->prefix.common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO);
+    r->prefix.parameter_count = hailo_cpu_to_be32(4u);
+
+    r->prefix.is_first_chunk_per_context_length =
+        hailo_cpu_to_be32(sizeof(r->prefix.is_first_chunk_per_context));
+    r->prefix.is_first_chunk_per_context = is_first_chunk ? 1u : 0u;
+
+    r->prefix.is_last_chunk_per_context_length =
+        hailo_cpu_to_be32(sizeof(r->prefix.is_last_chunk_per_context));
+    r->prefix.is_last_chunk_per_context = is_last_chunk ? 1u : 0u;
+
+    r->prefix.context_type_length = hailo_cpu_to_be32(sizeof(r->prefix.context_type));
+    r->prefix.context_type        = (uint8_t)context_type;
+
+    r->prefix.context_network_data_length = hailo_cpu_to_be32(network_data_len);
+    if (network_data_len > 0) {
+        memcpy(r->context_network_data, network_data, network_data_len);
+    }
+
+    uint32_t req_len = (uint32_t)(sizeof(r->prefix) + network_data_len);
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_set_ctx_info_req, req_len,
+                                             &control_set_ctx_info_resp,
+                                             sizeof(control_set_ctx_info_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
+                                            &control_set_ctx_info_req, req_len,
+                                            &control_set_ctx_info_resp,
+                                            sizeof(control_set_ctx_info_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_set_ctx_info_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO,
+                                       "SET_CONTEXT_INFO");
+    spin_unlock(&control_lock);
+    return rc;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Context-switch: CHANGE_CONTEXT_SWITCH_STATUS (opcode 0x25, CORE CPU).      */
+/* -------------------------------------------------------------------------- */
+
+/* Wire layout: parameter_count=4 with four length+value pairs.
+ * state_machine_status (u8), application_index (u8),
+ * dynamic_batch_size (u16, native LE), batch_count (u16, native LE). */
+struct hailo_cs_change_status_req_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;                /* BE, = 4 */
+    uint32_t state_machine_status_length;    /* BE, = 1 */
+    uint8_t  state_machine_status;
+    uint32_t application_index_length;       /* BE, = 1 */
+    uint8_t  application_index;
+    uint32_t dynamic_batch_size_length;      /* BE, = 2 */
+    uint16_t dynamic_batch_size;             /* native LE */
+    uint32_t batch_count_length;             /* BE, = 2 */
+    uint16_t batch_count;                    /* native LE */
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_change_status_req_wire) == 42,
+               "CHANGE_CONTEXT_SWITCH_STATUS wire must be 42 bytes");
+
+struct hailo_cs_change_status_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                /* BE, = 0 */
+} __attribute__((packed));
+
+static struct hailo_cs_change_status_req_wire  control_change_status_req;
+static struct hailo_cs_change_status_resp_wire control_change_status_resp;
+
+int hailo_control_change_context_switch_status(
+    enum hailo_cs_state state,
+    uint8_t             application_index,
+    uint16_t            dynamic_batch_size,
+    uint16_t            batch_count)
+{
+    spin_lock(&control_lock);
+
+    struct hailo_cs_change_status_req_wire *r = &control_change_status_req;
+    memset(r, 0, sizeof(*r));
+
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS);
+    r->parameter_count = hailo_cpu_to_be32(4u);
+
+    r->state_machine_status_length = hailo_cpu_to_be32(sizeof(r->state_machine_status));
+    r->state_machine_status        = (uint8_t)state;
+    r->application_index_length    = hailo_cpu_to_be32(sizeof(r->application_index));
+    r->application_index           = application_index;
+    r->dynamic_batch_size_length   = hailo_cpu_to_be32(sizeof(r->dynamic_batch_size));
+    r->dynamic_batch_size          = dynamic_batch_size;
+    r->batch_count_length          = hailo_cpu_to_be32(sizeof(r->batch_count));
+    r->batch_count                 = batch_count;
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_change_status_req, sizeof(*r),
+                                             &control_change_status_resp,
+                                             sizeof(control_change_status_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
+                                            &control_change_status_req, sizeof(*r),
+                                            &control_change_status_resp,
+                                            sizeof(control_change_status_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_change_status_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS,
+                                       "CHANGE_CONTEXT_SWITCH_STATUS");
+    spin_unlock(&control_lock);
+    return rc;
+}
+
+int hailo_control_set_context_info(
+    enum hailo_cs_context_type context_type,
+    const void                *network_data,
+    uint32_t                   network_data_len)
+{
+    if (network_data_len > 0 && !network_data) return HAILO_ERR_INVAL;
+
+    /* Zero-length context: single chunk with is_first=is_last=true
+     * and empty payload. Firmware interprets this as a context with
+     * no actions — legal but rare. */
+    if (network_data_len == 0) {
+        return hailo_control_set_context_info_chunk(
+            context_type, /*is_first=*/true, /*is_last=*/true, NULL, 0);
+    }
+
+    const uint8_t *p = (const uint8_t *)network_data;
+    uint32_t remaining = network_data_len;
+    bool is_first = true;
+
+    while (remaining > 0) {
+        uint32_t chunk = (remaining > HAILO_CS_CONTEXT_CHUNK_MAX_BYTES)
+                             ? HAILO_CS_CONTEXT_CHUNK_MAX_BYTES
+                             : remaining;
+        bool is_last = (chunk == remaining);
+        int rc = hailo_control_set_context_info_chunk(
+            context_type, is_first, is_last, p, chunk);
+        if (rc != HAILO_OK) return rc;
+        p         += chunk;
+        remaining -= chunk;
+        is_first   = false;
+    }
     return HAILO_OK;
 }

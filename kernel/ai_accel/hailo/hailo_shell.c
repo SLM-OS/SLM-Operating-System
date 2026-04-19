@@ -33,7 +33,11 @@
 
 #include "hailo.h"
 #include "hailo_control.h"
+#include "hailo_cs_actions.h"
+#include "hailo_cs_builder.h"
 #include "hailo_infer.h"
+#include "hailo_tensor.h"
+#include "hailo_vdma.h"
 #include "hef_header.h"
 #include "hef_parser.h"
 #include "pmm.h"
@@ -636,6 +640,192 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    if (argc >= 2 && strcmp(argv[1], "ctxsmoke") == 0) {
+        /* Phase 6.3d/6.4 hardware probe: exercise the three context-
+         * switch opcodes (CHANGE_CONTEXT_SWITCH_STATUS,
+         * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against live
+         * firmware with minimum-viable payloads, and report
+         * major/minor status for each. Goal: confirm CPU_ID_CORE_CPU
+         * routing works and discover which application_header fields
+         * and per-context action sequences firmware actually
+         * validates before we build the full HEF→action-list
+         * translator. */
+        if (hailo_get_state() != HAILO_STATE_RUNNING) {
+            shell_printf("hailo: ctxsmoke needs firmware booted (state=%s)\n",
+                         hailo_state_str(hailo_get_state()));
+            return 0;
+        }
+
+        /* Minimum header: 1 network, 1 dynamic context, batch size 1,
+         * declare config channel 1 (packed_id=0x01, engine 0 channel
+         * 1) matching the ACTIVATE_CFG_CHANNEL action below. */
+        struct hailo_cs_application_header hdr;
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.dynamic_contexts_count  = 1;
+        hdr.networks_count          = 1;
+        hdr.batch_size              = 1;
+        hdr.csm_buffer_size         = 512;
+        hdr.external_action_list_address = HAILO_CS_NO_DDR_ACTION_LIST;
+        hdr.config_channels_count       = 1;
+        hdr.config_channel_packed_id[0] = 0x01;
+        hdr.boundary_channels_bitmap[0] = 1u << 1;  /* channel 1 in engine 0 */
+
+        shell_puts("hailo: ctxsmoke:\n");
+        shell_puts("  [1/6] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
+        int rc = hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_RESET,
+            HAILO_CS_IGNORE_APPLICATION_INDEX,
+            /*batch_size=*/0, /*batch_count=*/0);
+        shell_printf("        rc=%d\n", rc);
+
+        shell_puts("  [2/6] SET_NETWORK_GROUP_HEADER...\n");
+        rc = hailo_control_set_network_group_header(&hdr);
+        shell_printf("        rc=%d\n", rc);
+
+        /* Build a minimum-viable preliminary context:
+         *   ACTIVATE_CFG_CHANNEL (binds cfg channel to VDMA + DMA buf)
+         *   FETCH_CCW_BURSTS    (tells FW to pull 1 burst)
+         *
+         * The DMA buffer is a dummy 512-byte patterned payload; we
+         * don't expect real inference to produce output, only to
+         * trace how far firmware parses the context before rejecting.
+         * Channel 0x11 = engine 0, channel 1 (channel 0 reserved). */
+        struct hailo_tensor ccw_tensor = {0};
+        struct hailo_vdma_desc_list ccw_list = {0};
+        const uint32_t ccw_bytes = 512u;
+        const uint16_t ccw_page_size = 512u;
+        int trc = hailo_tensor_alloc(ccw_bytes, &ccw_tensor);
+        if (trc != HAILO_OK) {
+            shell_printf("  [5/6] SKIP: CCW tensor alloc failed (%d)\n", trc);
+            shell_puts("hailo: ctxsmoke done\n");
+            return 0;
+        }
+        memset(ccw_tensor.cpu_addr, 0xA5, ccw_bytes);
+        hailo_tensor_prepare_for_device(&ccw_tensor);
+
+        int drc = hailo_vdma_desc_list_alloc(/*desc_count=*/2,
+                                             ccw_page_size,
+                                             /*circular=*/false,
+                                             &ccw_list);
+        if (drc != HAILO_OK) {
+            shell_printf("  [5/6] SKIP: vdma desc_list alloc failed (%d)\n", drc);
+            hailo_tensor_free(&ccw_tensor);
+            shell_puts("hailo: ctxsmoke done\n");
+            return 0;
+        }
+        int programmed = hailo_vdma_program_buffer(&ccw_list, 0,
+                                                   ccw_tensor.iova,
+                                                   ccw_bytes,
+                                                   /*data_id=*/0);
+        if (programmed < 0) {
+            shell_printf("  [5/6] SKIP: vdma program_buffer failed (%d)\n", programmed);
+            hailo_vdma_desc_list_free(&ccw_list);
+            hailo_tensor_free(&ccw_tensor);
+            shell_puts("hailo: ctxsmoke done\n");
+            return 0;
+        }
+
+        /* Firmware enforces strict ACTIVATION → BATCH_SWITCHING →
+         * PRELIMINARY → DYNAMIC × N order AND specific per-context
+         * action types. APPLICATION_CHANGE_INTERRUPT is zero-body
+         * but only legal at the tail of the final DYNAMIC.
+         * Per-context minimums per HailoRT's fill_* functions:
+         *   ACTIVATION:      ResetBurstCreditsTask (zero body)
+         *   BATCH_SWITCHING: ResetDdrBufferingTask + StartBurstCreditsTask
+         *   PRELIMINARY:     ActivateCfgChannel + FetchCcwBursts
+         *   DYNAMIC:         APPLICATION_CHANGE_INTERRUPT at tail */
+        uint8_t act_buf[16];
+        struct hailo_cs_builder act_b;
+        hailo_cs_builder_init(&act_b, act_buf, sizeof(act_buf));
+        (void)hailo_cs_builder_append(&act_b,
+                                      HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
+                                      NULL, 0);
+
+        shell_printf("  [3/6] SET_CONTEXT_INFO(ACTIVATION, %u bytes: "
+                     "BURST_CREDITS_TASK_RESET)\n",
+                     (unsigned)hailo_cs_builder_size(&act_b));
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_ACTIVATION,
+                                            hailo_cs_builder_data(&act_b),
+                                            (uint32_t)hailo_cs_builder_size(&act_b));
+        shell_printf("        rc=%d\n", rc);
+
+        uint8_t bs_buf[32];
+        struct hailo_cs_builder bs_b;
+        hailo_cs_builder_init(&bs_b, bs_buf, sizeof(bs_buf));
+        (void)hailo_cs_builder_append(&bs_b,
+                                      HAILO_CS_ACT_DDR_BUFFERING_RESET,
+                                      NULL, 0);
+        (void)hailo_cs_builder_append(&bs_b,
+                                      HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                                      NULL, 0);
+
+        shell_printf("  [4/6] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes: "
+                     "DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START)\n",
+                     (unsigned)hailo_cs_builder_size(&bs_b));
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING,
+                                            hailo_cs_builder_data(&bs_b),
+                                            (uint32_t)hailo_cs_builder_size(&bs_b));
+        shell_printf("        rc=%d\n", rc);
+
+        uint8_t ctx_buf[256];
+        struct hailo_cs_builder b;
+        hailo_cs_builder_init(&b, ctx_buf, sizeof(ctx_buf));
+
+        struct hailo_cs_act_activate_cfg_channel acfg = {
+            .packed_vdma_channel_id = 0x01,   /* engine 0 channel 1 (low nibble = channel) */
+            .config_stream_index    = 0,
+            .host_buffer_info = {
+                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                .dma_address      = ccw_list.iova,
+                .desc_page_size   = ccw_page_size,
+                .total_desc_count = ccw_list.desc_count,
+                .bytes_in_pattern = 0,
+            },
+        };
+        struct hailo_cs_act_fetch_ccw_bursts fetch = {
+            .ccw_bursts          = 1,
+            .config_stream_index = 0,
+        };
+        (void)hailo_cs_builder_append(&b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                                      &acfg, sizeof(acfg));
+        (void)hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS,
+                                      &fetch, sizeof(fetch));
+
+        shell_printf("  [5/6] SET_CONTEXT_INFO(PRELIMINARY, %u bytes: "
+                     "ACTIVATE_CFG_CHANNEL + FETCH_CCW_BURSTS)\n",
+                     (unsigned)hailo_cs_builder_size(&b));
+        shell_printf("        CCW buffer iova=0x%lx\n",
+                     (unsigned long)ccw_list.iova);
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
+                                            hailo_cs_builder_data(&b),
+                                            (uint32_t)hailo_cs_builder_size(&b));
+        shell_printf("        rc=%d\n", rc);
+
+        /* DYNAMIC: single APPLICATION_CHANGE_INTERRUPT tail marker.
+         * This is the legal tail-only zero-body action for
+         * single-dynamic-context loads per HailoRT. */
+        uint8_t dyn_buf[16];
+        struct hailo_cs_builder dyn_b;
+        hailo_cs_builder_init(&dyn_b, dyn_buf, sizeof(dyn_buf));
+        (void)hailo_cs_builder_append(&dyn_b,
+                                      HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                                      NULL, 0);
+
+        shell_printf("  [6/6] SET_CONTEXT_INFO(DYNAMIC, %u bytes: "
+                     "APPLICATION_CHANGE_INTERRUPT tail)\n",
+                     (unsigned)hailo_cs_builder_size(&dyn_b));
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_DYNAMIC,
+                                            hailo_cs_builder_data(&dyn_b),
+                                            (uint32_t)hailo_cs_builder_size(&dyn_b));
+        shell_printf("        rc=%d\n", rc);
+
+        hailo_vdma_desc_list_free(&ccw_list);
+        hailo_tensor_free(&ccw_tensor);
+
+        shell_puts("hailo: ctxsmoke done\n");
+        return 0;
+    }
+
     /* Default: one-line status. */
     shell_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
     return 0;
@@ -644,7 +834,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name    = "hailo",
     .handler = cmd_hailo,
-    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump)",
+    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke)",
     .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
 };
 

@@ -16,6 +16,8 @@
 #include "unity.h"
 #include "../ai_accel/hailo/hailo.h"
 #include "../ai_accel/hailo/hailo_control.h"
+#include "../ai_accel/hailo/hailo_cs_actions.h"
+#include "../ai_accel/hailo/hailo_cs_builder.h"
 #include "../ai_accel/hailo/hailo_internal.h"
 #include "../ai_accel/hailo/hailo_infer.h"
 #include "../ai_accel/hailo/hailo_tensor.h"
@@ -85,6 +87,8 @@ static bool     mock_fw_sim_control_enabled;
 static uint8_t  mock_fw_sim_control_resp[MOCK_CONTROL_RESP_MAX];
 static uint32_t mock_fw_sim_control_resp_len;
 static uint32_t mock_control_doorbells;
+static uint32_t mock_control_core_doorbells;
+static uint32_t mock_control_last_doorbell_val;
 /* Sized to hold a full control-channel payload (HAILO_CONTROL_MAX_BUFFER_LENGTH).
  * A WRITE_MEMORY chunk with a 1024 B data body totals 32 B header + 1024 B
  * data = 1056 B on the wire, which exceeded the old 512 B cap and caused
@@ -162,6 +166,8 @@ static void mock_reset(void)
     memset(mock_fw_sim_control_resp, 0, sizeof(mock_fw_sim_control_resp));
     mock_fw_sim_control_resp_len = 0;
     mock_control_doorbells = 0;
+    mock_control_core_doorbells = 0;
+    mock_control_last_doorbell_val = 0;
     memset(mock_last_control_request, 0, sizeof(mock_last_control_request));
     mock_last_control_request_len = 0;
     mock_imask_writes   = 0;
@@ -559,8 +565,12 @@ static void mock_bar4_write(uint32_t offset, const void *src, size_t n)
      && n >= sizeof(uint32_t)) {
         uint32_t v;
         memcpy(&v, src, sizeof(v));
+        mock_control_last_doorbell_val = v;
         if (v == HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK) {
             mock_control_doorbells++;
+            mock_simulate_fw_control_response();
+        } else if (v == HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK) {
+            mock_control_core_doorbells++;
             mock_simulate_fw_control_response();
         }
     }
@@ -1738,6 +1748,556 @@ static void test_control_identify_timeout_no_response(void)
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
                           hailo_control_identify(&resp));
     TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+}
+
+static void test_control_send_recv_cpu_core_rings_core_doorbell(void)
+{
+    /* Context-switch opcodes target CPU_ID_CORE_CPU, which rings
+     * bit 1 of raise_ready_offset instead of bit 0. The transport
+     * plumbing (hailo_control_send_recv_cpu) must select the right
+     * doorbell mask based on the cpu_id argument. Use the mock's
+     * canned response path (same as IDENTIFY test above) to drive
+     * a round trip via the CORE path and confirm:
+     *   - mock_control_core_doorbells increments
+     *   - mock_control_doorbells does NOT (APP path untouched)
+     *   - last doorbell value equals CORE mask (1<<1) */
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode   = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    fake.parameter_count        = 0;
+
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    /* Build a minimal well-formed request body — common header +
+     * parameter_count (zero params). The transport doesn't care about
+     * opcode value for routing; only length validity and doorbell
+     * routing are under test. */
+    struct {
+        struct hailo_control_common_header header;
+        uint32_t                           parameter_count;
+    } __attribute__((packed)) req;
+    memset(&req, 0, sizeof(req));
+    req.header.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    req.header.opcode   = __builtin_bswap32(0x20);  /* SET_NETWORK_GROUP_HEADER */
+    req.parameter_count = 0;
+
+    uint8_t  resp[64];
+    uint32_t resp_len = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_send_recv_cpu(HAILO_CTRL_CPU_CORE,
+                                    &req, sizeof(req),
+                                    resp, sizeof(resp), &resp_len,
+                                    /*timeout_us=*/1000));
+
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_core_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK,
+                             mock_control_last_doorbell_val);
+}
+
+static void test_set_network_group_header_rings_core_doorbell_and_wire(void)
+{
+    /* SET_NETWORK_GROUP_HEADER (opcode 0x20) targets CPU_ID_CORE_CPU.
+     * Seed a minimal success response, pack a known header, and
+     * verify:
+     *   - request opcode on the wire is 0x20 (BE)
+     *   - parameter_count is 1 (BE)
+     *   - application_header_length is 53 (BE)
+     *   - CORE doorbell fired, APP did not
+     *   - the application_header bytes match our packed struct
+     *     byte-for-byte (native LE, 53 bytes). */
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t                             parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  =
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER);
+    fake.parameter_count       = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_cs_application_header h;
+    memset(&h, 0, sizeof(h));
+    h.dynamic_contexts_count    = 3;
+    h.preliminary_run_asap      = true;
+    h.networks_count            = 1;
+    h.csm_buffer_size           = 0x1234;
+    h.batch_size                = 2;
+    h.external_action_list_address = HAILO_CS_NO_DDR_ACTION_LIST;
+    h.boundary_channels_bitmap[0] = 0x00000005;   /* engine 0, channels 0+2 */
+    h.config_channels_count     = 1;
+    h.config_channel_packed_id[0] = 0x11;
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_set_network_group_header(&h));
+
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_core_doorbells);
+
+    /* Inspect the captured request wire bytes:
+     * [common header 16][parameter_count 4][application_header_length 4]
+     * [application_header 32]. */
+    TEST_ASSERT_TRUE(mock_last_control_request_len >= 16 + 4 + 4 + 32);
+    const uint8_t *req = mock_last_control_request;
+    uint32_t opcode, param_count, app_len;
+    memcpy(&opcode,      req + 12, 4);  /* offset of `opcode` in common header */
+    memcpy(&param_count, req + 16, 4);
+    memcpy(&app_len,     req + 20, 4);
+    TEST_ASSERT_EQUAL_UINT32(
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER),
+        opcode);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(1u),  param_count);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(32u), app_len);
+
+    /* application_header bytes, native LE. Start at offset 24. */
+    const uint8_t *ah = req + 24;
+    uint16_t dyn_count;
+    memcpy(&dyn_count, ah + 0, 2);
+    TEST_ASSERT_EQUAL_UINT16(3, dyn_count);
+    TEST_ASSERT_EQUAL_UINT8(1, ah[2]);   /* preliminary_run_asap */
+    TEST_ASSERT_EQUAL_UINT8(0, ah[3]);   /* batch_register_config */
+    TEST_ASSERT_EQUAL_UINT8(0, ah[4]);   /* can_fast_batch_switch */
+    TEST_ASSERT_EQUAL_UINT8(0, ah[5]);   /* is_abbale_supported */
+    TEST_ASSERT_EQUAL_UINT8(1, ah[6]);   /* networks_count */
+    uint16_t csm;
+    memcpy(&csm, ah + 7, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x1234, csm);
+    uint16_t bs;
+    memcpy(&bs, ah + 9, 2);
+    TEST_ASSERT_EQUAL_UINT16(2, bs);
+    uint32_t ext_addr;
+    memcpy(&ext_addr, ah + 11, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_NO_DDR_ACTION_LIST, ext_addr);
+    uint32_t bitmap0;
+    memcpy(&bitmap0, ah + 15, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x00000005, bitmap0);
+    TEST_ASSERT_EQUAL_UINT8(1,    ah[27]);   /* config_channels_count */
+    TEST_ASSERT_EQUAL_UINT8(0x11, ah[28]);   /* config_channel_packed_id[0] */
+}
+
+static void test_set_network_group_header_rejects_null(void)
+{
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+                          hailo_control_set_network_group_header(NULL));
+}
+
+static void test_set_network_group_header_rejects_bad_config_count(void)
+{
+    struct hailo_cs_application_header h;
+    memset(&h, 0, sizeof(h));
+    h.config_channels_count = HAILO_CS_MAX_CFG_CHANNELS + 1;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+                          hailo_control_set_network_group_header(&h));
+}
+
+/* Seed the mock firmware with a minimal SET_CONTEXT_INFO success
+ * response so a chunk call completes. Inlined helper because the
+ * 4 chunking tests below all need it. */
+static void seed_set_context_info_success_response(void)
+{
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t                             parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  =
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO);
+    fake.parameter_count       = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+}
+
+static void test_set_context_info_chunk_single_wire_layout(void)
+{
+    /* Single-chunk context (both is_first and is_last true). Verify:
+     *   - opcode 0x21 (BE) on the wire
+     *   - parameter_count = 4 (BE)
+     *   - each length field = 1 except data_length which carries the
+     *     actual payload size (BE)
+     *   - is_first=1, is_last=1, context_type=PRELIMINARY=0
+     *   - payload bytes land at offset 39 and match input byte-wise
+     *   - CORE doorbell fired */
+    control_setup_running();
+    seed_set_context_info_success_response();
+
+    uint8_t payload[8] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_set_context_info_chunk(
+            HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
+            /*is_first=*/true, /*is_last=*/true,
+            payload, sizeof(payload)));
+
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_core_doorbells);
+
+    TEST_ASSERT_TRUE(mock_last_control_request_len >= 39 + sizeof(payload));
+    const uint8_t *req = mock_last_control_request;
+    uint32_t opcode, param_count;
+    memcpy(&opcode,      req + 12, 4);
+    memcpy(&param_count, req + 16, 4);
+    TEST_ASSERT_EQUAL_UINT32(
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO),
+        opcode);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(4u), param_count);
+
+    /* Per-field length + payload assertions. Offsets from wire layout:
+     * 20: is_first_length (4 BE), 24: is_first (u8)
+     * 25: is_last_length (4 BE), 29: is_last (u8)
+     * 30: ctx_type_length (4 BE), 34: ctx_type (u8)
+     * 35: data_length (4 BE), 39: data... */
+    uint32_t len;
+    memcpy(&len, req + 20, 4); TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(1u), len);
+    TEST_ASSERT_EQUAL_UINT8(1, req[24]);
+    memcpy(&len, req + 25, 4); TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(1u), len);
+    TEST_ASSERT_EQUAL_UINT8(1, req[29]);
+    memcpy(&len, req + 30, 4); TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(1u), len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_CONTEXT_TYPE_PRELIMINARY, req[34]);
+    memcpy(&len, req + 35, 4);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32((uint32_t)sizeof(payload)), len);
+    TEST_ASSERT_EQUAL_MEMORY(payload, req + 39, sizeof(payload));
+}
+
+static void test_set_context_info_chunks_oversize_payload(void)
+{
+    /* A 3000-byte payload must chunk: 1461 + 1461 + 78 = 3 calls.
+     * Each firing the CORE doorbell, with flags is_first=true only
+     * on the first call and is_last=true only on the last.
+     *
+     * Verifying per-call flags requires capturing each request
+     * individually; we approximate by:
+     *   - checking final doorbell count == 3
+     *   - checking the LAST captured request has is_last=1 and size
+     *     equal to the residual 78 bytes */
+    control_setup_running();
+    seed_set_context_info_success_response();
+
+    uint8_t payload[3000];
+    for (size_t i = 0; i < sizeof(payload); i++) payload[i] = (uint8_t)(i * 7u);
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_set_context_info(
+            HAILO_CS_CONTEXT_TYPE_DYNAMIC,
+            payload, (uint32_t)sizeof(payload)));
+
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(3, mock_control_core_doorbells);
+
+    /* Last captured request: is_first must be 0, is_last must be 1,
+     * data_length = 3000 - 1461*2 = 78. */
+    const uint8_t *req = mock_last_control_request;
+    TEST_ASSERT_EQUAL_UINT8(0, req[24]);   /* is_first_chunk */
+    TEST_ASSERT_EQUAL_UINT8(1, req[29]);   /* is_last_chunk */
+    uint32_t data_len;
+    memcpy(&data_len, req + 35, 4);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(78u), data_len);
+    /* The last chunk's payload is payload[1461*2 ..]. */
+    TEST_ASSERT_EQUAL_MEMORY(&payload[1461 * 2], req + 39, 78);
+}
+
+static void test_set_context_info_zero_length_is_single_chunk(void)
+{
+    /* A context with no actions still sends exactly one call with
+     * is_first=is_last=true and data_length=0. */
+    control_setup_running();
+    seed_set_context_info_success_response();
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_set_context_info(
+            HAILO_CS_CONTEXT_TYPE_ACTIVATION, NULL, 0));
+
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_core_doorbells);
+    const uint8_t *req = mock_last_control_request;
+    TEST_ASSERT_EQUAL_UINT8(1, req[24]);
+    TEST_ASSERT_EQUAL_UINT8(1, req[29]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_CONTEXT_TYPE_ACTIVATION, req[34]);
+    uint32_t data_len;
+    memcpy(&data_len, req + 35, 4);
+    TEST_ASSERT_EQUAL_UINT32(0u, data_len);
+}
+
+static void test_set_context_info_chunk_rejects_oversize(void)
+{
+    /* A chunk larger than HAILO_CS_CONTEXT_CHUNK_MAX_BYTES must be
+     * rejected at the API boundary — firmware has a hard cap and
+     * would reject it anyway, but we catch the error before firing
+     * the doorbell. */
+    control_setup_running();
+
+    uint8_t payload[HAILO_CS_CONTEXT_CHUNK_MAX_BYTES + 1];
+    memset(payload, 0, sizeof(payload));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_set_context_info_chunk(
+            HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
+            true, true, payload, (uint32_t)sizeof(payload)));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_core_doorbells);
+}
+
+static void test_set_context_info_chunk_rejects_null_with_nonzero_len(void)
+{
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_set_context_info_chunk(
+            HAILO_CS_CONTEXT_TYPE_DYNAMIC,
+            true, true, NULL, 16));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 6.4a+b: context-switch action-list builder                            */
+/* -------------------------------------------------------------------------- */
+
+static void test_cs_builder_append_emits_header_then_body(void)
+{
+    /* Single FETCH_CCW_BURSTS action: 8-byte common header + 3-byte
+     * body = 11 bytes total. Verify layout byte-for-byte. Header is
+     * 8 bytes (not 5) because natural alignment inserts 3 pad bytes
+     * between the u8 action_type and the u32 time_stamp — see
+     * hailo_cs_common_action_header in hailo_cs_actions.h. */
+    uint8_t buf[32];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    struct hailo_cs_act_fetch_ccw_bursts body = {
+        .ccw_bursts          = 0x1234,
+        .config_stream_index = 0x7,
+    };
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS,
+                                &body, sizeof(body)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)11, hailo_cs_builder_size(&b));
+
+    /* [0]=action_type (u8) = 27 (FETCH_CCW_BURSTS)
+     * [1..3]=pad (3 bytes, zero)
+     * [4..7]=time_stamp (u32 native LE) = 0
+     * [8..9]=ccw_bursts (u16 native LE) = 0x1234
+     * [10]=config_stream_index (u8) = 7 */
+    const uint8_t *d = hailo_cs_builder_data(&b);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS, d[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, d[1]);
+    TEST_ASSERT_EQUAL_UINT8(0, d[2]);
+    TEST_ASSERT_EQUAL_UINT8(0, d[3]);
+    uint32_t ts;
+    memcpy(&ts, d + 4, 4);
+    TEST_ASSERT_EQUAL_UINT32(0, ts);
+    uint16_t bursts;
+    memcpy(&bursts, d + 8, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x1234, bursts);
+    TEST_ASSERT_EQUAL_UINT8(7, d[10]);
+}
+
+static void test_cs_builder_appends_concatenate(void)
+{
+    /* Three actions back-to-back with 8-byte common headers:
+     * ACTIVATE_CFG_CHANNEL (21 B body), FETCH_CCW_BURSTS (3 B body),
+     * DEACTIVATE_CFG_CHANNEL (2 B body). Total: 29 + 11 + 10 = 50. */
+    uint8_t buf[128];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    struct hailo_cs_act_activate_cfg_channel a1 = {
+        .packed_vdma_channel_id = 0x21,
+        .config_stream_index    = 0,
+        .host_buffer_info = {
+            .buffer_type       = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+            .dma_address       = 0x123456789ABCDEF0ull,
+            .desc_page_size    = 512,
+            .total_desc_count  = 16,
+            .bytes_in_pattern  = 0,
+        },
+    };
+    struct hailo_cs_act_fetch_ccw_bursts a2 = { .ccw_bursts = 4, .config_stream_index = 0 };
+    struct hailo_cs_act_deactivate_cfg_channel a3 = { .packed_vdma_channel_id = 0x21, .config_stream_index = 0 };
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL, &a1, sizeof(a1)));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &a2, sizeof(a2)));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, &a3, sizeof(a3)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)29 + 11 + 10, hailo_cs_builder_size(&b));
+
+    const uint8_t *d = hailo_cs_builder_data(&b);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,   d[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,       d[29]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, d[29 + 11]);
+
+    /* host_buffer_info.dma_address starts at offset 8 (common hdr) +
+     * 2 (packed_vdma_channel_id + config_stream_index) + 1 (buffer_type)
+     * = offset 11. It's a u64 native LE. */
+    uint64_t dma_addr;
+    memcpy(&dma_addr, d + 11, 8);
+    TEST_ASSERT_EQUAL_UINT64(0x123456789ABCDEF0ull, dma_addr);
+}
+
+static void test_cs_builder_returns_nomem_on_overflow(void)
+{
+    uint8_t small[10];   /* Too small for one 8+3=11 byte action. */
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, small, sizeof(small));
+    struct hailo_cs_act_fetch_ccw_bursts body = { .ccw_bursts = 1, .config_stream_index = 0 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &body, sizeof(body)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)0, hailo_cs_builder_size(&b));
+}
+
+static void test_cs_builder_rejects_null_buffer(void)
+{
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, NULL, 0);
+    struct hailo_cs_act_fetch_ccw_bursts body = { .ccw_bursts = 1, .config_stream_index = 0 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &body, sizeof(body)));
+}
+
+static void test_cs_builder_accepts_zero_body_action(void)
+{
+    /* Zero-body actions (APPLICATION_CHANGE_INTERRUPT, BURST_CREDITS_
+     * TASK_RESET, etc.) must produce an 8-byte common-header-only
+     * entry on the wire. */
+    uint8_t buf[32];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
+                                NULL, 0));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, hailo_cs_builder_size(&b));
+
+    const uint8_t *d = hailo_cs_builder_data(&b);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET, d[0]);
+    /* Rest of the 8-byte header is zero (pad + time_stamp). */
+    for (int i = 1; i < 8; i++) TEST_ASSERT_EQUAL_UINT8(0, d[i]);
+}
+
+/* -------------------------------------------------------------------------- */
+/* CHANGE_CONTEXT_SWITCH_STATUS (opcode 0x25, CORE CPU)                        */
+/* -------------------------------------------------------------------------- */
+
+static void seed_change_status_success_response(void)
+{
+    /* Opcode-echo check in control_check_response_header is
+     * status-aware: firmware mirrors the opcode in success cases.
+     * Use the CHANGE_CONTEXT_SWITCH_STATUS opcode here so the
+     * echo matches what we expect. */
+    struct {
+        struct hailo_control_response_header header;
+        uint32_t                             parameter_count;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  =
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS);
+    fake.parameter_count = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+}
+
+static void test_change_context_switch_status_reset_wire_layout(void)
+{
+    /* RESET with IGNORE_APPLICATION_INDEX=255 mirrors hailort's
+     * reset_context_switch_state_machine(). Wire format:
+     *   [common_header 16][parameter_count 4]
+     *   [state_length 4][state 1]
+     *   [app_idx_length 4][app_idx 1]
+     *   [dyn_batch_len 4][dyn_batch 2]
+     *   [batch_cnt_len 4][batch_cnt 2]
+     * Total 42 bytes. CORE CPU doorbell. */
+    control_setup_running();
+    seed_change_status_success_response();
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_RESET,
+            HAILO_CS_IGNORE_APPLICATION_INDEX,
+            /*batch_size=*/0, /*batch_count=*/0));
+
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_core_doorbells);
+
+    TEST_ASSERT_TRUE(mock_last_control_request_len >= 42);
+    const uint8_t *req = mock_last_control_request;
+
+    uint32_t opcode, param_count, state_len;
+    memcpy(&opcode,      req + 12, 4);
+    memcpy(&param_count, req + 16, 4);
+    memcpy(&state_len,   req + 20, 4);
+    TEST_ASSERT_EQUAL_UINT32(
+        __builtin_bswap32(HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS),
+        opcode);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(4u), param_count);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(1u), state_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_STATE_RESET, req[24]);
+    /* application_index at offset 29 (after 4-byte BE length). */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_IGNORE_APPLICATION_INDEX, req[29]);
+}
+
+static void test_change_context_switch_status_enabled_carries_batch_params(void)
+{
+    /* ENABLED with application_index=0 and specific batch values.
+     * Mirrors hailort's enable_core_op path. */
+    control_setup_running();
+    seed_change_status_success_response();
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_ENABLED,
+            /*application_index=*/0,
+            /*batch_size=*/8, /*batch_count=*/3));
+
+    const uint8_t *req = mock_last_control_request;
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_STATE_ENABLED, req[24]);
+    TEST_ASSERT_EQUAL_UINT8(0, req[29]);
+    /* dynamic_batch_size at offset 34 (native LE u16). */
+    uint16_t dyn_batch;
+    memcpy(&dyn_batch, req + 34, 2);
+    TEST_ASSERT_EQUAL_UINT16(8, dyn_batch);
+    /* batch_count at offset 40. */
+    uint16_t batch_cnt;
+    memcpy(&batch_cnt, req + 40, 2);
+    TEST_ASSERT_EQUAL_UINT16(3, batch_cnt);
+}
+
+static void test_control_send_recv_default_rings_app_doorbell(void)
+{
+    /* The APP-default path (plain hailo_control_send_recv via
+     * hailo_control_identify) rings bit 0. Regression-guards the
+     * existing tier-1 opcode callers after the cpu_id plumbing
+     * refactor. */
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode   = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    fake.parameter_count        = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_core_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK,
+                             mock_control_last_doorbell_val);
 }
 
 /*
@@ -4634,6 +5194,23 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_identify_rejects_null_out);
     RUN_TEST(test_control_identify_happy_path);
     RUN_TEST(test_control_identify_timeout_no_response);
+    RUN_TEST(test_control_send_recv_cpu_core_rings_core_doorbell);
+    RUN_TEST(test_set_network_group_header_rings_core_doorbell_and_wire);
+    RUN_TEST(test_set_network_group_header_rejects_null);
+    RUN_TEST(test_set_network_group_header_rejects_bad_config_count);
+    RUN_TEST(test_set_context_info_chunk_single_wire_layout);
+    RUN_TEST(test_set_context_info_chunks_oversize_payload);
+    RUN_TEST(test_set_context_info_zero_length_is_single_chunk);
+    RUN_TEST(test_set_context_info_chunk_rejects_oversize);
+    RUN_TEST(test_set_context_info_chunk_rejects_null_with_nonzero_len);
+    RUN_TEST(test_cs_builder_append_emits_header_then_body);
+    RUN_TEST(test_cs_builder_appends_concatenate);
+    RUN_TEST(test_cs_builder_returns_nomem_on_overflow);
+    RUN_TEST(test_cs_builder_rejects_null_buffer);
+    RUN_TEST(test_cs_builder_accepts_zero_body_action);
+    RUN_TEST(test_change_context_switch_status_reset_wire_layout);
+    RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);
+    RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);
     RUN_TEST(test_control_identify_ignores_non_fw_control_irq);
