@@ -349,11 +349,13 @@ New shell subcommand measures decisions/sec for each backend in the inference-de
 
 **Edge-layer extraction is primary source now:** `hef_parser.c::decode_edge_layer_cb` was extended to CREATE pad entries when `ops[]` is empty (not just back-fill existing ones). Direction (input/output), tensor shape (height/width/features), stream info (sys_index, core_bytes), and quantization (scale/zp) all come out of `contexts[].metadata.edge_layers[]` when the ops path is unused. Unit-tested via `test_hef_parser_edge_layer_creates_pad_when_ops_empty`.
 
-**Known gap — DFC 3.33.1 simple MLPs use neither `ops[]` nor `contexts[]`:**
+**Fix (2026-04-19, pi5-hef-preliminary-config branch):** DFC 3.33.1 simple MLPs DO populate `contexts[].metadata.edge_layers[]` — an earlier hex-trace error (miscalculated `preliminary_config` end offset by 32 bytes) made it look like only `preliminary_config` was used. With the arithmetic corrected, the real HEF has a 2509-byte `contexts[]` field following `preliminary_config`, containing two `ProtoHEFEdgeLayer` entries (input + output) with full `edge_layer_base` shapes (1×1×108 input, 1×1×24 output), `sys_index` values, and `numeric_info.qp_scale` quantization.
 
-Hand-decoding the scheduler_mlp_pi5.hef wire format on real hardware (hexdump of the proto body at offset 44) revealed that DFC 3.33.1 for a simple 108→24 MLP packs everything into `preliminary_config` (3063-byte field 2 inside the first network group). No `ops[]`, no `contexts[]`. Both pad-extraction paths our parser supports come up empty, so `hailo load <path> sched` decodes the outer header + top-level proto fields (hw_arch, sdk_version, network_groups=1) but reports pad_count=0, and the backend's `load_model` correctly rejects with `INF_ERR_BAD_MODEL`.
+The actual bug was our parser's requirement that `pad_index` (field 7) be present before creating a pad entry. DFC 3.33.1 doesn't emit `pad_index` on boundary edge_layers, and also doesn't emit `direction` on input layers (proto3 strips zero-valued scalars; direction=HOST_TO_DEVICE=0 is the default). With pad_index and direction both absent, our parser bailed at `!seen_pad_index → return true`.
 
-Extracting pad/stream/quant info from inside `preliminary_config.operation[].actions[]` requires a new callback chain (actions already do decode `write_data_ccw` for weight upload in Phase 5.3 — one of the 18 oneof branches). Which specific action type carries the pad metadata for this HEF revision needs fresh investigation against HailoRT source. That's a standalone follow-up; the Phase 6.2 plumbing + policy path is all in place and validated up to the pad-shape-unavailable point.
+Fix is minimal: in `decode_edge_layer_cb`, fall back to `edge_layer_base.sys_index` as the pad key when `pad_index` is absent, and default `is_input` to true when `direction` is unseen (matching the proto3 default). 2 new QEMU tests pin the behavior (`test_hef_parser_edge_layer_uses_sys_index_when_pad_index_absent`, `test_hef_parser_edge_layer_direction_1_means_output`).
+
+Hardware verification of the full `hailo load /mnt/files/scheduler_mlp.hef sched → sched policy ai_hailo → bench sched-policy` chain on pi-5-1 is the next step once the lab is free.
 
 **Test coverage** — 29 new QEMU cases:
 
