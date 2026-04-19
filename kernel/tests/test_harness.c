@@ -173,6 +173,12 @@ int test_harness_run_all(void)
     /* Tegra234 XHCI wrapper offset + CSB-paging tests (Phase 3A.2). */
     total_failures += test_suite_xhci_tegra();
 
+    /* PORTSC decode + context layout (Phase 3A Step 5). */
+    total_failures += test_suite_xhci_device();
+
+    /* TRB builders for control / bulk (Phase 3A Step 6 + 7b). */
+    total_failures += test_suite_xhci_xfer();
+
 #if !defined(PLATFORM_X86_64)
     /* Phase 5 test suites (ARM64 only — use Rust runtime + ARM assembly) */
 

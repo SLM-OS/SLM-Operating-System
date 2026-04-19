@@ -39,10 +39,12 @@
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
 #include "xhci.h"
+#include "xhci_internal.h"
 #include "xhci_regs.h"
 #include "xhci_ring.h"
 #include "xhci_trb.h"
 #include "xhci_tegra.h"
+#include "usb.h"
 #include "ncmem.h"
 #include "debug.h"
 #include "timer.h"
@@ -64,10 +66,11 @@
  * covering the Tegra FPCI prefix, the standard xHCI block, and the
  * BAR2 wrapper aperture.
  */
-static volatile uint8_t *xhci_cap_base;
-static volatile uint8_t *xhci_op_base;
-static volatile uint8_t *xhci_rt_base;
-static volatile uint8_t *xhci_db_base;
+/* Non-static: shared with xhci_device.c / xhci_xfer.c via xhci_internal.h. */
+volatile uint8_t *xhci_cap_base;
+volatile uint8_t *xhci_op_base;
+volatile uint8_t *xhci_rt_base;
+volatile uint8_t *xhci_db_base;
 
 /*
  * Tegra-specific wrapper aperture base pointers. Populated in
@@ -88,21 +91,23 @@ static volatile uint8_t *xhci_db_base;
 static volatile uint8_t *xhci_fpci_base;
 static volatile uint8_t *xhci_bar2_base;
 
-static struct xhci_caps      xhci_caps_cached;
-static bool                  xhci_live;
+/* Non-static: shared with xhci_device.c / xhci_xfer.c. */
+struct xhci_caps      xhci_caps_cached;
+bool                  xhci_live;
 
 /* Step 4 state */
 #define XHCI_CMD_RING_TRBS           64
 #define XHCI_EVT_RING_TRBS           64
 #define XHCI_PAGESIZE_DEFAULT        4096
 
-static uint64_t             *xhci_dcbaa;          /* aligned(64), MaxSlots+1 entries */
+/* Non-static: DCBAA + ring state shared across TUs. */
+uint64_t             *xhci_dcbaa;          /* aligned(64), MaxSlots+1 entries */
 static uint64_t             *xhci_scratchpad_ptrs;
 static void                 *xhci_scratchpad_bufs; /* N pages × PAGESIZE */
 static uint32_t              xhci_num_scratchpads;
 
-static struct xhci_ring       xhci_cmd_ring;
-static struct xhci_event_ring xhci_evt_ring;
+struct xhci_ring       xhci_cmd_ring;
+struct xhci_event_ring xhci_evt_ring;
 
 /*
  * Event Ring Segment Table entry layout per xHCI 1.2 §6.5. One entry
@@ -742,98 +747,180 @@ static int xhci_start_controller(void)
     return 0;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Cross-TU helpers (exported via xhci_internal.h)                             */
+/* -------------------------------------------------------------------------- */
+
+uint32_t xhci_op_r32(uint32_t off)
+{
+    return r32(xhci_op_base, off);
+}
+
+void xhci_op_w32(uint32_t off, uint32_t val)
+{
+    w32(xhci_op_base, off, val);
+}
+
 /*
- * Issue a NO_OP command and poll the event ring for the matching
- * Command Completion event. Returns 0 on Success, negative otherwise.
- * This is the round-trip test that proves all the ring plumbing is
- * correct — if NO_OP doesn't complete, something is wrong with
- * DCBAAP / CRCR / the doorbell / ERST / ERDP.
+ * Doorbell: four-byte register per device slot, plus slot 0 for the
+ * command ring. `db_index` is 0 for command, 1..MaxSlots for devices.
+ * `target` is 0 on the command doorbell; on device doorbells it is
+ * the DCI of the endpoint being kicked.
+ *
+ * Two barriers frame the doorbell write — the DSB before drains any
+ * NC-memory producer stores (TRB enqueue) to the Point of System
+ * before the HC reads them, and the DSB after makes the MMIO write
+ * visible before we start polling the event ring.
+ */
+void xhci_ring_doorbell(uint8_t db_index, uint8_t target)
+{
+    /* Doorbell register layout: low 8 bits = target (DB Target field),
+     * high 16 bits = stream ID (unused in Phase 3A — no streaming EPs). */
+    uint32_t value = target;
+    dsb(sy);
+    w32(xhci_db_base, 4u * db_index, value);
+    dsb(sy);
+}
+
+/*
+ * Drain every Transfer / Command-Completion event currently visible
+ * on the event ring. Transfer Events route through
+ * xhci_xfer_on_transfer_event; Command Completions update the
+ * per-slot shared state below so xhci_cmd_submit_and_wait can see
+ * them. Returns the number of events consumed.
+ */
+
+/*
+ * Pending-command handshake between this file and the event consumer.
+ * Only one command is ever in flight at a time — usb_core runs the
+ * HCD ops from a single thread during init, and all driver paths
+ * serialise through xhci_cmd_submit_and_wait. That lets the pending
+ * state live as a pair of scalars instead of a per-command queue.
+ */
+static uintptr_t xhci_cmd_pending_phys;
+static bool      xhci_cmd_completed;
+static uint8_t   xhci_cmd_completion_cc;
+static uint8_t   xhci_cmd_completion_slot;
+
+int xhci_event_ring_drain(void)
+{
+    struct xhci_trb evt;
+    int consumed = 0;
+    volatile uint8_t *ir0 = xhci_rt_base + XHCI_IR0_OFFSET;
+
+    while (xhci_event_ring_peek(&xhci_evt_ring, &evt)) {
+        uint32_t type = XHCI_TRB_TYPE_GET(evt.control);
+        switch (type) {
+        case XHCI_TRB_EVT_CMD_COMPLETION: {
+            uintptr_t evt_phys = (uintptr_t)evt.param_lo |
+                                 ((uintptr_t)evt.param_hi << 32);
+            if (xhci_cmd_pending_phys != 0 &&
+                evt_phys == xhci_cmd_pending_phys) {
+                xhci_cmd_completion_cc   = XHCI_CC_GET(evt.status);
+                xhci_cmd_completion_slot = XHCI_TRB_SLOT_GET(evt.control);
+                xhci_cmd_completed       = true;
+            } else {
+                INFO("xhci: stale command completion @0x%lx "
+                     "(expected 0x%lx)",
+                     (unsigned long)evt_phys,
+                     (unsigned long)xhci_cmd_pending_phys);
+            }
+            break;
+        }
+        case XHCI_TRB_EVT_TRANSFER:
+            xhci_xfer_on_transfer_event(&evt);
+            break;
+        case XHCI_TRB_EVT_PORT_STATUS:
+            /* Acknowledged by reading PORTSC in port_status / port_reset;
+             * nothing to do here beyond consuming the event. */
+            break;
+        default:
+            /* Bandwidth-request, doorbell, host-controller events are
+             * informational — log at verbose level for diagnostics. */
+            INFO("xhci: unhandled event type %u (status=0x%08x)",
+                 type, (unsigned)evt.status);
+            break;
+        }
+        consumed++;
+    }
+
+    if (consumed > 0) {
+        /* Bit 3 (EHB) is Event Handler Busy — write-1-to-clear in
+         * polled mode, harmless either way. */
+        uint64_t erdp = xhci_event_ring_dequeue_phys(&xhci_evt_ring) | (1u << 3);
+        w32(ir0, XHCI_IR_ERDP,     (uint32_t)(erdp & 0xFFFFFFFFu));
+        w32(ir0, XHCI_IR_ERDP + 4, (uint32_t)(erdp >> 32));
+    }
+
+    return consumed;
+}
+
+int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
+                             uint8_t *cc_out,
+                             uint8_t *slot_out,
+                             uint32_t timeout_ms)
+{
+    if (cmd == NULL)
+        return -1;
+
+    struct xhci_trb *slot = xhci_ring_enqueue(&xhci_cmd_ring, cmd);
+    if (slot == NULL) {
+        WARN("xhci: command ring enqueue failed");
+        return -1;
+    }
+
+    xhci_cmd_pending_phys    = (uintptr_t)slot;
+    xhci_cmd_completed       = false;
+    xhci_cmd_completion_cc   = 0;
+    xhci_cmd_completion_slot = 0;
+
+    xhci_ring_doorbell(XHCI_DB_COMMAND, 0);
+
+    uint64_t freq  = timer_get_frequency();
+    uint64_t start = timer_get_count();
+    uint64_t ticks = ((uint64_t)timeout_ms * freq) / 1000u;
+
+    while (!xhci_cmd_completed) {
+        (void)xhci_event_ring_drain();
+        if (xhci_cmd_completed)
+            break;
+        if (timer_get_count() - start >= ticks) {
+            WARN("xhci: command timeout (type=%u, USBSTS=0x%08x)",
+                 (unsigned)XHCI_TRB_TYPE_GET(cmd->control),
+                 (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+            xhci_cmd_pending_phys = 0;
+            return -1;
+        }
+    }
+
+    if (cc_out   != NULL) *cc_out   = xhci_cmd_completion_cc;
+    if (slot_out != NULL) *slot_out = xhci_cmd_completion_slot;
+    xhci_cmd_pending_phys = 0;
+    return 0;
+}
+
+/*
+ * Step 4's NO_OP round-trip, re-expressed on top of
+ * xhci_cmd_submit_and_wait. Kept as a diagnostic called from
+ * xhci_init; the round-trip is the definitive check that every
+ * ring / doorbell / ERDP write we programmed is actually reaching
+ * the HC and coming back.
  */
 static int xhci_send_noop(void)
 {
     struct xhci_trb cmd = {0};
     cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_NOOP);
 
-    struct xhci_trb *slot = xhci_ring_enqueue(&xhci_cmd_ring, &cmd);
-    if (slot == NULL) {
-        WARN("xhci: NO_OP enqueue failed");
-        return -1;
+    uint8_t cc = 0;
+    int rc = xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 500);
+    if (rc != 0)
+        return rc;
+    if (cc == XHCI_CC_SUCCESS) {
+        INFO("xhci: NO_OP round-trip OK (cc=SUCCESS)");
+        return 0;
     }
-    uintptr_t cmd_phys = (uintptr_t)slot;
-
-    /*
-     * Two barriers around the doorbell:
-     *  - The DSB before the doorbell guarantees the TRB writes in NC
-     *    memory (xhci_ring_enqueue) have drained to the Point of
-     *    System, so the HC's DMA read after the doorbell sees a
-     *    fully-written TRB rather than partially-written or stale
-     *    zeros.
-     *  - The DSB after the doorbell guarantees the posted MMIO write
-     *    has been issued before the event-ring poll begins reading
-     *    the NC memory the HC writes into.
-     */
-    dsb(sy);
-    w32(xhci_db_base, 4 * XHCI_DB_COMMAND, 0);
-    dsb(sy);
-
-    /* Poll the event ring for up to 500 ms for a matching completion.
-     * Every consumed event advances the ring's dequeue pointer; we
-     * update ERDP each time so the HC's view of "next-to-consume"
-     * stays in sync with ours even when we skip unrelated events. */
-    volatile uint8_t *ir0 = xhci_rt_base + XHCI_IR0_OFFSET;
-    uint64_t start = timer_get_count();
-    uint64_t freq  = timer_get_frequency();
-    uint64_t ticks = freq / 2;   /* 500 ms */
-
-    struct xhci_trb evt;
-    int ret = -1;
-    bool done = false;
-    while (!done && timer_get_count() - start < ticks) {
-        if (!xhci_event_ring_peek(&xhci_evt_ring, &evt))
-            continue;
-
-        uint32_t type = XHCI_TRB_TYPE_GET(evt.control);
-        bool matched = false;
-        if (type != XHCI_TRB_EVT_CMD_COMPLETION) {
-            INFO("xhci: skipping non-command event type %u", type);
-        } else {
-            uint64_t evt_ptr = (uint64_t)evt.param_lo |
-                               ((uint64_t)evt.param_hi << 32);
-            if (evt_ptr != cmd_phys) {
-                INFO("xhci: skipping stale completion @0x%lx (ours 0x%lx)",
-                     (unsigned long)evt_ptr, (unsigned long)cmd_phys);
-            } else {
-                uint32_t cc = XHCI_CC_GET(evt.status);
-                if (cc != XHCI_CC_SUCCESS) {
-                    WARN("xhci: NO_OP completed with cc=%u", cc);
-                    ret = -1;
-                } else {
-                    INFO("xhci: NO_OP round-trip OK (cc=SUCCESS, cmd_trb @0x%lx)",
-                         (unsigned long)cmd_phys);
-                    ret = 0;
-                }
-                matched = true;
-            }
-        }
-
-        /* Update ERDP on every consumed event. Bit 3 (EHB) is the
-         * Event Handler Busy bit — write-1-to-clear in polled mode,
-         * harmless either way. */
-        uint64_t erdp = xhci_event_ring_dequeue_phys(&xhci_evt_ring) | (1u << 3);
-        w32(ir0, XHCI_IR_ERDP,     (uint32_t)(erdp & 0xFFFFFFFFu));
-        w32(ir0, XHCI_IR_ERDP + 4, (uint32_t)(erdp >> 32));
-
-        if (matched)
-            done = true;
-    }
-
-    if (!done) {
-        WARN("xhci: NO_OP timed out — no completion event within 500 ms "
-             "(USBSTS=0x%08x)",
-             (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
-        return -1;
-    }
-    return ret;
+    WARN("xhci: NO_OP completed with cc=%u", cc);
+    return -1;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1036,12 +1123,47 @@ int xhci_init(void)
         /* Don't give up — the driver is partially usable even without
          * NO_OP if the caller only wants capability info. But mark
          * xhci_live so the shell dump works. */
-        WARN("xhci: command/event ring round-trip failed — Step 5 will "
-             "need to debug before port enumeration is attempted");
+        WARN("xhci: command/event ring round-trip failed — HCD "
+             "registration skipped, usb_core will see no device");
+        xhci_live = true;
+        return 0;
     }
 
     xhci_live = true;
-    INFO("xhci: Step 4 complete — ready for port scan (Step 5)");
+
+    /*
+     * Register with usb_core so the single-device enumeration path
+     * runs next. usb_core_start() drives port_status → port_reset →
+     * device_open → the control-transfer descriptor sweep → SET_CONFIGURATION,
+     * then calls endpoint_configure for each non-EP0 endpoint. Errors
+     * are non-fatal here: the xHCI driver keeps running and the shell
+     * diagnostic still works.
+     */
+    usb_core_register_hcd(&xhci_hcd);
+    INFO("xhci: registered with usb_core — running Phase 3A Steps 5-7");
+
+    /*
+     * Call usb_core_start() so the HCD's start() runs, but do NOT
+     * enumerate yet: on kexec, the device Linux already enumerated
+     * is in a state that fails the first EP0 control transfer with
+     * cc=4. We hide that stale device from usb_core in
+     * xhci_hcd_port_status until the user physically re-plugs the
+     * dongle, at which point net_poll → usb_core_hotplug_poll drives
+     * the real enumeration. See issue #309 for the permanent fix
+     * that eliminates the re-plug.
+     */
+    int rc = usb_core_start();
+    if (rc != 0)
+        WARN("xhci: usb_core_start returned %d", rc);
+    /* The state machine in xhci_hcd_port_status defers enumeration
+     * until a fresh CCS rising edge. In the pre-existing-device case
+     * (kexec with a Linux-enumerated dongle, or future direct boot
+     * with an already-plugged device) that means the user must
+     * unplug and re-insert; the "attached at init" log above says so.
+     * On a clean boot with nothing plugged in, this log is the only
+     * hint that a future insertion will enumerate. */
+    INFO("xhci: hot-plug ready — waiting for USB device attach "
+         "(see #309 for the re-plug requirement on kexec boots)");
     return 0;
 }
 
@@ -1097,6 +1219,34 @@ void xhci_get_caps(struct xhci_caps *out)
     else
         memset(out, 0, sizeof(*out));
 }
+
+/* -------------------------------------------------------------------------- */
+/* HCD op table (entries defined across xhci.c / xhci_device.c / xhci_xfer.c)  */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Controller-wide start/stop: xhci_init already halted, allocated,
+ * programmed, and RUN=1'd the controller before registering the HCD,
+ * so the HCD's own `start` is a no-op. Kept non-NULL so usb_core_start
+ * has something to call.
+ */
+int xhci_hcd_start(void)
+{
+    return xhci_live ? 0 : -1;
+}
+
+const struct usb_hcd xhci_hcd = {
+    .name                = "xhci-tegra234",
+    .start               = xhci_hcd_start,
+    .port_status         = xhci_hcd_port_status,
+    .port_reset          = xhci_hcd_port_reset,
+    .device_open         = xhci_hcd_device_open,
+    .device_close        = xhci_hcd_device_close,
+    .endpoint_configure  = xhci_hcd_endpoint_configure,
+    .submit_urb          = xhci_hcd_submit_urb,
+    .cancel_urb          = xhci_hcd_cancel_urb,
+    .poll                = xhci_hcd_poll,
+};
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
 

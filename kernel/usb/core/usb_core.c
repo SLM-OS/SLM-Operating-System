@@ -54,6 +54,27 @@ const struct usb_hcd *usb_core_get_hcd(void)
     return active_hcd;
 }
 
+void usb_core_reset(void)
+{
+    /* If a device is currently enumerated, ask its HCD to release the
+     * per-device resources (xHCI slot, NC contexts, transfer rings)
+     * before we zero the device struct. Without this, a caller who
+     * reached into production code to call usb_core_reset() would
+     * strand HCD-side state; the mock HCD treats device_close as a
+     * no-op counter increment, so tests see the same "device gone"
+     * end-state either way.
+     *
+     * Keeps the registered HCD bound so tests don't have to
+     * re-register on every fixture reset — usb_core_register_hcd(NULL)
+     * is the separate knob for that. */
+    if (root_device_present && active_hcd != NULL &&
+        active_hcd->device_close != NULL) {
+        active_hcd->device_close(&root_device);
+    }
+    memset(&root_device, 0, sizeof(root_device));
+    root_device_present = false;
+}
+
 /* -------------------------------------------------------------------------- */
 /* URB helpers                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -115,6 +136,41 @@ void usb_core_poll(void)
 {
     if (active_hcd && active_hcd->poll)
         active_hcd->poll();
+}
+
+/*
+ * Hot-plug retry path — the caller (net_poll()) invokes this at a slow
+ * cadence so a USB device that wasn't ready at xhci_init time (or was
+ * deliberately hidden as a stale pre-kexec device, see #309) can be
+ * enumerated once a fresh attach is observed.
+ *
+ * Behaviour:
+ *   - If a device has already been enumerated (root_device_present),
+ *     do nothing. One-shot per boot, same contract as Phase 1.
+ *   - Otherwise ask the HCD whether port 0 is reporting a connected
+ *     device. If yes, run the full usb_core_enumerate() sequence.
+ *
+ * Returns 1 if this call successfully enumerated a new device, 0 if
+ * no attach change happened, negative on enumeration failure.
+ */
+int usb_core_hotplug_poll(void)
+{
+    if (active_hcd == NULL || active_hcd->port_status == NULL)
+        return 0;
+    if (root_device_present)
+        return 0;
+
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    if (!active_hcd->port_status(0, &connected, &speed) || !connected)
+        return 0;
+
+    int rc = usb_core_enumerate();
+    if (rc != 0) {
+        WARN("usb_core: hotplug enumerate failed rc=%d", rc);
+        return rc;
+    }
+    return root_device_present ? 1 : 0;
 }
 
 /* -------------------------------------------------------------------------- */
