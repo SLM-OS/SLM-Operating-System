@@ -148,6 +148,49 @@ static void test_wildcard_short_topic_bounds(void)
     msg_router_unsubscribe_all(0);
 }
 
+/*
+ * Regression for #320: msg_router_subscribe must be idempotent by
+ * (component_idx, topic). Previously, repeated subscribe calls
+ * consumed fresh subscriber slots, and a component like sensor_monitor
+ * that re-subscribed during hot-swap would end up in two slots — every
+ * published message was delivered twice to the same component ("double
+ * alert" on value 88 in the demo).
+ *
+ * MAX_SUBSCRIBERS is 4. Subscribing the same (idx, topic) pair 5 times
+ * used to exhaust the topic's slots and fail on the 5th call; with
+ * dedup it succeeds every time.
+ */
+static void test_subscribe_idempotent_exact(void)
+{
+    msg_router_init();
+
+    /* 5 subscribes of the same (idx, topic) — with dedup, all return 0. */
+    for (int i = 0; i < 5; i++) {
+        int rc = msg_router_subscribe("/test/idem", 7);
+        TEST_ASSERT_EQUAL_INT(0, rc);
+    }
+
+    /* Different component_idx on the same topic still takes a new slot. */
+    int rc2 = msg_router_subscribe("/test/idem", 8);
+    TEST_ASSERT_EQUAL_INT(0, rc2);
+
+    msg_router_unsubscribe_all(7);
+    msg_router_unsubscribe_all(8);
+}
+
+static void test_subscribe_idempotent_wildcard(void)
+{
+    msg_router_init();
+
+    /* Same idempotency rule for wildcard subscriptions. */
+    for (int i = 0; i < 5; i++) {
+        int rc = msg_router_subscribe("/wild/*", 7);
+        TEST_ASSERT_EQUAL_INT(0, rc);
+    }
+
+    msg_router_unsubscribe_all(7);
+}
+
 int test_suite_msg_router(void)
 {
     UNITY_BEGIN();
@@ -155,6 +198,8 @@ int test_suite_msg_router(void)
     RUN_TEST(test_subscribe_rejects_long_topic);
     RUN_TEST(test_publish_rejects_long_topic);
     RUN_TEST(test_wildcard_short_topic_bounds);
+    RUN_TEST(test_subscribe_idempotent_exact);
+    RUN_TEST(test_subscribe_idempotent_wildcard);
     RUN_TEST(test_publish_times_out_without_ack);
     return UNITY_END();
 }
