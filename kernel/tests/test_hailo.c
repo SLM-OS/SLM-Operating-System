@@ -2710,8 +2710,13 @@ static void test_cs_translate_activation_emits_input_and_output(void)
                             out.activation[0]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
                             out.activation[8]);
+    /* Input: packed_vdma = config(0x01) + INPUT_OFFSET(1) = 0x02. */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[16]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
                             out.activation[8 + 36]);
+    /* Output: packed_vdma = config(0x01) + OUTPUT_OFFSET(2) = 0x03.
+     * Body begins at offset 8+36+8 = 52; packed_vdma is byte 0. */
+    TEST_ASSERT_EQUAL_UINT8(0x03, out.activation[8 + 36 + 8]);
 }
 
 static void test_cs_translate_activation_skips_internal_pads(void)
@@ -5552,12 +5557,16 @@ static void test_inf_hailo_load_happy_path(void)
 
 /* #179 regression: load_model must drive the context-switch RPC
  * sequence (RESET → SET_NETWORK_GROUP_HEADER → 4 × SET_CONTEXT_INFO
- * → ENABLED). Verify the count of CORE-CPU doorbells rung — the
- * network-group-header + context_info + two status-change RPCs all
- * target the CORE CPU. Empty-DYNAMIC context chunks into a single
- * SET_CONTEXT_INFO_CHUNK call (see hailo_control.c:1481), so the
- * four-context phase contributes 4 doorbells total, producing 7
- * CORE-CPU doorbells on a clean load. */
+ * → ENABLED). Verify the count of CORE-CPU doorbells rung.
+ *
+ * The four SET_CONTEXT_INFO calls fan out to N chunks each when the
+ * context body exceeds HAILO_CS_CONTEXT_CHUNK_MAX_BYTES; build_test_hef
+ * emits sub-chunk contexts so each SET_CONTEXT_INFO is a single
+ * doorbell, producing exactly 7 CORE-CPU doorbells. Using a strict
+ * equality check with an explicit precondition keeps the regression
+ * guard precise: if someone bumps build_test_hef to produce a larger
+ * HEF and the chunking fans out, this assertion fires and gets
+ * updated intentionally rather than masking a behavior change. */
 static void test_inf_hailo_load_rings_context_switch_sequence(void)
 {
     struct inference_device *dev = hailo_backend_ready();
@@ -5578,7 +5587,9 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
 /* #179 failure unwind: if the context-switch sequence fails partway
  * (simulated by disabling the smart-memory mock responder so RPCs
  * hit the "nothing to emit" path and time out), load_model must
- * release the slot rather than leaving it claimed with in_use=true. */
+ * release the slot rather than leaving it claimed with in_use=true.
+ * Additionally verify that exactly one RPC was rung — if unwind ever
+ * retried past the failure, we'd see more doorbells. */
 static void test_inf_hailo_load_releases_slot_on_failure(void)
 {
     struct inference_device *dev = hailo_backend_ready();
@@ -5590,10 +5601,69 @@ static void test_inf_hailo_load_releases_slot_on_failure(void)
 
     uint8_t blob[512];
     size_t  n = build_test_hef(blob, sizeof(blob));
+
+    uint32_t core_before = mock_control_core_doorbells;
     inference_model_handle_t h = INF_INVALID_HANDLE;
     int rc = inference_load_model(dev, blob, n, &h);
     TEST_ASSERT_NOT_EQUAL(INF_OK, rc);
     TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+    /* Exactly one RPC should have fired before abort (the RESET
+     * that timed out). A greater count would mean the unwind logic
+     * kept trying after the first failure. */
+    TEST_ASSERT_EQUAL_UINT32(1u, mock_control_core_doorbells - core_before);
+}
+
+/* Slot reuse after free: load, free, load again with same content
+ * should succeed and produce a valid handle. Catches regressions
+ * where context_switch_unwind leaves the slot in a state that can't
+ * be re-loaded (e.g. stale desc_list descriptors). */
+static void test_inf_hailo_load_reuses_slot_after_free(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+
+    inference_model_handle_t h1 = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h1));
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_free_model(dev, h1));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+
+    inference_model_handle_t h2 = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h2));
+    TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
+    /* Slot index reused is implementation-defined; the only contract
+     * is a valid, non-zero handle. */
+    TEST_ASSERT_TRUE(h2 >= 1);
+}
+
+/* Load fails mid-sequence, then a subsequent load succeeds.
+ * Regression guard for "half-populated slot after unwind" — the
+ * stash + memset + out-of-lock free pattern should leave the slot
+ * cleanly reusable. */
+static void test_inf_hailo_load_recovers_from_prior_failure(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+
+    /* First load: fails because mock is deliberately broken. */
+    mock_fw_sim_smart_memory_enabled = false;
+    mock_fw_sim_control_enabled      = false;
+    inference_model_handle_t h_fail = INF_INVALID_HANDLE;
+    TEST_ASSERT_NOT_EQUAL(INF_OK,
+        inference_load_model(dev, blob, n, &h_fail));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+
+    /* Second load: mock healed, expect success. */
+    mock_fw_sim_smart_memory_enabled = true;
+    inference_model_handle_t h_ok = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK,
+        inference_load_model(dev, blob, n, &h_ok));
+    TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
 }
 
 static void test_inf_hailo_load_fills_slots_until_full(void)
@@ -6427,6 +6497,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_inf_hailo_load_happy_path);
     RUN_TEST(test_inf_hailo_load_rings_context_switch_sequence);
     RUN_TEST(test_inf_hailo_load_releases_slot_on_failure);
+    RUN_TEST(test_inf_hailo_load_reuses_slot_after_free);
+    RUN_TEST(test_inf_hailo_load_recovers_from_prior_failure);
     RUN_TEST(test_inf_hailo_load_fills_slots_until_full);
     RUN_TEST(test_inf_hailo_run_rejects_bad_handle);
     RUN_TEST(test_inf_hailo_run_rejects_wrong_dtype);

@@ -141,7 +141,12 @@ struct hailo_cs_translate_cfg {
  * Total footprint: ~2 KB. Callers typically declare one on the stack
  * of the load_model path (16 KB kernel stack has room).
  */
-#define HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES  512u
+/* Per-context serialized action buffer cap. Sized for worst-case
+ * ACTIVATION with HEF_PARSER_MAX_PADS (16) all as boundary inputs:
+ * 16 × (8 header + 28 body) + 8 BURST_CREDITS = 584 B. 1024 leaves
+ * comfortable headroom for future ACTIVATION additions. Four copies
+ * × 1024 = 4 KB per hailo_cs_context_buffers — still stack-friendly. */
+#define HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES  1024u
 
 struct hailo_cs_context_buffers {
     uint8_t activation      [HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES];
