@@ -324,12 +324,12 @@ def test_calibration_cores_4_pins_every_sample():
 
 
 def test_calibration_cores_6_populates_every_sample():
-    """--cores 6 should produce nonzero per-core features for all 6 cores in most samples."""
+    """--cores 6 should populate per-core features for all 6 cores in every sample."""
     calib = _import("generate_calibration_data")
     data = calib.generate(n_samples=32, seed=3, cores="6")
-    # Cores 4 and 5 each get 6 features. core_type (feature 3) is always 1.0 for
-    # active cores, so column 3*6+3=21 and 5*6+3=33 (for cores 3 and 5) — check
-    # core 5's core_type is 1.0 on every sample, which proves core 5 is active.
+    # core_type (feature index 3) is 1.0 for every active core. Core 5's
+    # core_type is at offset 5*6+3 = 33. If it's 1.0 on every sample, core 5
+    # is active — proving --cores 6 populates all 6 cores (not just 4).
     for i in range(32):
         assert data[i, 5 * 6 + 3] == 1.0, (
             f"sample {i} core 5 core_type=0 under --cores 6; "

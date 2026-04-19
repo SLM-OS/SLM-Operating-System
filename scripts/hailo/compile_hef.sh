@@ -125,8 +125,16 @@ hailo compiler "$HAR_OPT" \
 # filename convention, the failure is clearly visible (missing $HEF after the
 # compiler runs) rather than silently producing the wrong file.
 if [ ! -f "$HEF" ]; then
-    echo "ERROR: expected $HEF but compiler produced something else:" >&2
-    ls -la "$OUTDIR"/*.hef >&2 || true
+    echo "ERROR: expected $HEF but compiler produced something else." >&2
+    # Enumerate any .hef files DFC may have written with an unexpected name,
+    # without the default-bash "glob didn't match" noise.
+    found=$(find "$OUTDIR" -maxdepth 1 -name '*.hef' -print 2>/dev/null)
+    if [ -n "$found" ]; then
+        echo "  Found .hef files:" >&2
+        echo "$found" | sed 's/^/    /' >&2
+    else
+        echo "  (no .hef files in $OUTDIR)" >&2
+    fi
     exit 6
 fi
 
