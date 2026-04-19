@@ -352,8 +352,11 @@ static int cmd_hailo(int argc, char *argv[])
             /* hailo load <path> upload <base> is the manual v0/v1
              * path — no CCWS block needed. Pass NULL for ccws_base;
              * the upload function will reject any v2+ action with a
-             * clear error if one snuck in. */
-            int urc = hailo_control_upload_ccw(&meta, body, NULL,
+             * clear error if one snuck in. blob_size is the proto
+             * body we've already allocated + read into `body`. */
+            int urc = hailo_control_upload_ccw(&meta,
+                                               body, outer.proto_size,
+                                               NULL, 0,
                                                upload_base, &uploaded);
             if (urc == HAILO_OK) {
                 shell_printf("  ccw: uploaded %lu bytes starting at 0x%08x\n",

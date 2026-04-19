@@ -3117,9 +3117,9 @@ static void test_ccw_upload_rejects_null(void)
     struct hef_info info = {0};
     uint8_t blob[4] = {0};
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(NULL, blob, NULL, 0x10000, NULL));
+        hailo_control_upload_ccw(NULL, blob, sizeof(blob), NULL, 0, 0x10000, NULL));
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, NULL, NULL, 0x10000, NULL));
+        hailo_control_upload_ccw(&info, NULL, 0, NULL, 0, 0x10000, NULL));
 }
 
 static void test_ccw_upload_rejects_truncated(void)
@@ -3129,7 +3129,7 @@ static void test_ccw_upload_rejects_truncated(void)
     uint8_t blob[4] = {0};
     info.ccw_actions_truncated = true;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, blob, NULL, 0x10000, NULL));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x10000, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
@@ -3141,7 +3141,7 @@ static void test_ccw_upload_rejects_address_wrap(void)
     uint32_t sizes[] = { 8 };
     build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, blob, NULL, 0xFFFFFFFC, NULL));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0xFFFFFFFC, NULL));
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
@@ -3152,7 +3152,7 @@ static void test_ccw_upload_empty_info_is_noop(void)
     uint8_t blob[4] = {0};
     uint64_t uploaded = 0xDEADBEEF;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, NULL, 0x10000, &uploaded));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x10000, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(0, uploaded);
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
@@ -3169,7 +3169,7 @@ static void test_ccw_upload_single_action(void)
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, NULL, 0x100, &uploaded));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x100, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(32, uploaded);
     TEST_ASSERT_EQUAL_UINT32(1, mock_control_doorbells);
 
@@ -3194,7 +3194,7 @@ static void test_ccw_upload_multiple_actions_contiguous(void)
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, NULL, 0x200, &uploaded));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x200, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(16u + 20u + 12u, uploaded);
     TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
 
@@ -3221,7 +3221,7 @@ static void test_ccw_upload_chunks_large_action(void)
     build_ccw_info(&info, blob, sizeof(blob), sizes, 1);
 
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, NULL, 0x400, NULL));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x400, NULL));
     TEST_ASSERT_EQUAL_UINT32(3, mock_control_doorbells);
 }
 
@@ -3266,7 +3266,7 @@ static void test_ccw_upload_ptr_variant_resolves_from_ccws_base(void)
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, proto, ccws, 0x200, &uploaded));
+        hailo_control_upload_ccw(&info, proto, sizeof(proto), ccws, sizeof(ccws), 0x200, &uploaded));
     TEST_ASSERT_EQUAL_UINT64(40, uploaded);
 
     /* Read back and verify source bytes were ccws[] not proto[]. */
@@ -3292,8 +3292,66 @@ static void test_ccw_upload_ptr_variant_rejects_null_ccws_base(void)
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
-        hailo_control_upload_ccw(&info, proto, /*ccws_base=*/NULL,
+        hailo_control_upload_ccw(&info, proto, sizeof(proto),
+                                  /*ccws_base=*/NULL, /*ccws_size=*/0,
                                   0x300, &uploaded));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_rejects_action_past_ccws_size(void)
+{
+    /* Malformed/adversarial HEF: action claims offset+size past the
+     * CCWS block's actual size. Without the bounds check, upload_ccw
+     * would read past the end of `ccws` and forward arbitrary kernel
+     * memory to firmware. The check must reject cleanly before the
+     * first doorbell fires. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t proto[64];
+    uint8_t ccws[128];
+    struct hef_info info;
+    /* One action with size=64 starting at offset 100 → end=164 > 128. */
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 1;
+    info.ccw_actions[0].is_ccw_ptr            = true;
+    info.ccw_actions[0].data_offset_in_blob   = 100;
+    info.ccw_actions[0].data_size             = 64;
+    info.ccw_actions[0].cfg_channel_index     = 0;
+    info.ccw_actions[0].cfg_channel_index_known = true;
+    info.ccw_total_bytes = 64;
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, proto, sizeof(proto),
+                                  ccws, sizeof(ccws),
+                                  0x500, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(0, uploaded);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
+}
+
+static void test_ccw_upload_rejects_action_past_blob_size(void)
+{
+    /* Mirror for the v0/v1 (inline-blob) path: action's offset+size
+     * exceeds blob_size → INVAL. */
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;
+
+    uint8_t blob[32];
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 1;
+    info.ccw_actions[0].is_ccw_ptr            = false;
+    info.ccw_actions[0].data_offset_in_blob   = 30;
+    info.ccw_actions[0].data_size             = 16;    /* 30+16=46 > 32 */
+    info.ccw_actions[0].cfg_channel_index_known = true;
+    info.ccw_total_bytes = 16;
+
+    uint64_t uploaded = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0,
+                                  0x600, &uploaded));
+    TEST_ASSERT_EQUAL_UINT64(0, uploaded);
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
@@ -3311,7 +3369,7 @@ static void test_ccw_upload_skips_zero_size_action(void)
     build_ccw_info(&info, blob, sizeof(blob), sizes, 3);
 
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_control_upload_ccw(&info, blob, NULL, 0x300, NULL));
+        hailo_control_upload_ccw(&info, blob, sizeof(blob), NULL, 0, 0x300, NULL));
     TEST_ASSERT_EQUAL_UINT32(2, mock_control_doorbells);
 }
 
@@ -4631,6 +4689,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_ccw_upload_skips_zero_size_action);
     RUN_TEST(test_ccw_upload_ptr_variant_resolves_from_ccws_base);
     RUN_TEST(test_ccw_upload_ptr_variant_rejects_null_ccws_base);
+    RUN_TEST(test_ccw_upload_rejects_action_past_ccws_size);
+    RUN_TEST(test_ccw_upload_rejects_action_past_blob_size);
 
     /* Phase 5.4 VDMA descriptor-list allocator */
     RUN_TEST(test_vdma_alloc_size_rounds_up_to_64k);

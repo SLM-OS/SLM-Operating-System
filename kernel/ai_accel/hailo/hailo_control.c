@@ -738,8 +738,8 @@ int hailo_control_read_memory(uint32_t address,
 /* -------------------------------------------------------------------------- */
 
 int hailo_control_upload_ccw(const struct hef_info *info,
-                             const void *blob_base,
-                             const void *ccws_base,
+                             const void *blob_base, size_t blob_size,
+                             const void *ccws_base, size_t ccws_size,
                              uint32_t device_base_addr,
                              uint64_t *out_bytes_uploaded)
 {
@@ -768,6 +768,14 @@ int hailo_control_upload_ccw(const struct hef_info *info,
         const struct hef_ccw_action *a = &info->ccw_actions[i];
         if (a->data_size == 0) continue;   /* nothing to write */
 
+        /* Bounds-check the action's source range against the
+         * appropriate buffer. Without this, a malformed HEF could
+         * walk data_offset_in_blob + data_size off the end of
+         * blob/ccws and leak post-buffer kernel memory to firmware
+         * via WRITE_MEMORY. 64-bit arithmetic avoids overflow in
+         * the `end` computation (data_offset_in_blob + data_size
+         * are both u32, sum fits in u64). */
+        uint64_t end = (uint64_t)a->data_offset_in_blob + a->data_size;
         const uint8_t *src;
         if (a->is_ccw_ptr) {
             if (!ccws) {
@@ -775,8 +783,20 @@ int hailo_control_upload_ccw(const struct hef_info *info,
                      "but ccws_base is NULL", i);
                 return HAILO_ERR_INVAL;
             }
+            if (end > ccws_size) {
+                WARN("hailo: CCW action %u out of CCWS bounds "
+                     "(offset=%u size=%u ccws_size=%zu)",
+                     i, a->data_offset_in_blob, a->data_size, ccws_size);
+                return HAILO_ERR_INVAL;
+            }
             src = ccws + a->data_offset_in_blob;
         } else {
+            if (end > blob_size) {
+                WARN("hailo: CCW action %u out of blob bounds "
+                     "(offset=%u size=%u blob_size=%zu)",
+                     i, a->data_offset_in_blob, a->data_size, blob_size);
+                return HAILO_ERR_INVAL;
+            }
             src = blob + a->data_offset_in_blob;
         }
 

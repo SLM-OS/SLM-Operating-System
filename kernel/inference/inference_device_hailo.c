@@ -274,7 +274,9 @@ static int hailo_backend_load_model(struct inference_device *dev,
     if (info.ccw_action_count > 0) {
         const uint8_t *ccws_base = (const uint8_t *)model + outer.ccws_offset;
         uint64_t uploaded = 0;
-        int urc = hailo_control_upload_ccw(&info, proto, ccws_base,
+        int urc = hailo_control_upload_ccw(&info,
+                                           proto, outer.proto_size,
+                                           ccws_base, outer.ccws_size,
                                            /*device_base=*/0, &uploaded);
         if (urc == HAILO_OK) {
             INFO("hailo backend: CCW upload OK — %lu bytes across %u actions",
@@ -300,6 +302,21 @@ static int hailo_backend_load_model(struct inference_device *dev,
      * so downstream inference_run calls can still be issued (they
      * will time out cleanly when firmware never produces output —
      * the correct signal until the context-switch protocol lands). */
+    /* HEF fields are uint32; the wire format for core_buffers_per_frame
+     * is uint16. Clamp with a WARN rather than silently truncating so
+     * a future HEF that exceeds 16 bits can't produce nonsense stream
+     * configs. Realistic MLP values are 1-4. */
+    uint32_t in_cbpf = in_pad->core_buffers_per_frame
+                         ? in_pad->core_buffers_per_frame : 1;
+    uint32_t out_cbpf = out_pad->core_buffers_per_frame
+                         ? out_pad->core_buffers_per_frame : 1;
+    if (in_cbpf > UINT16_MAX || out_cbpf > UINT16_MAX) {
+        WARN("hailo backend: core_buffers_per_frame exceeds u16 "
+             "(in=%u, out=%u); clamping", in_cbpf, out_cbpf);
+        if (in_cbpf  > UINT16_MAX) in_cbpf  = UINT16_MAX;
+        if (out_cbpf > UINT16_MAX) out_cbpf = UINT16_MAX;
+    }
+
     if (in_pad->has_stream_info && out_pad->has_stream_info) {
         uint8_t in_dmid = 0, out_dmid = 0;
         struct hailo_stream_pcie_config scfg_in = {
@@ -307,11 +324,10 @@ static int hailo_backend_load_model(struct inference_device *dev,
             .is_input              = true,
             .skip_nn_stream_config = false,
             .pcie_channel_index    = slots[idx].cfg.input_channel,
-            .pcie_dataflow_type    = 2,     /* PCIE_CONTINUOUS */
+            .pcie_dataflow_type    = HAILO_PCIE_DATAFLOW_TYPE_BURST,
         };
         scfg_in.nn_stream_config.core_bytes_per_buffer   = slots[idx].cfg.input_page_size;
-        scfg_in.nn_stream_config.core_buffers_per_frame  =
-            (uint16_t)(in_pad->core_buffers_per_frame ? in_pad->core_buffers_per_frame : 1);
+        scfg_in.nn_stream_config.core_buffers_per_frame  = (uint16_t)in_cbpf;
         scfg_in.nn_stream_config.periph_bytes_per_buffer = slots[idx].cfg.input_page_size;
         scfg_in.nn_stream_config.periph_buffers_per_frame = 1;
         int src_in = hailo_control_config_stream_pcie(&scfg_in, &in_dmid);
@@ -324,8 +340,7 @@ static int hailo_backend_load_model(struct inference_device *dev,
             .desc_page_size        = slots[idx].cfg.output_page_size,
         };
         scfg_out.nn_stream_config.core_bytes_per_buffer   = slots[idx].cfg.output_page_size;
-        scfg_out.nn_stream_config.core_buffers_per_frame  =
-            (uint16_t)(out_pad->core_buffers_per_frame ? out_pad->core_buffers_per_frame : 1);
+        scfg_out.nn_stream_config.core_buffers_per_frame  = (uint16_t)out_cbpf;
         scfg_out.nn_stream_config.periph_bytes_per_buffer = slots[idx].cfg.output_page_size;
         scfg_out.nn_stream_config.periph_buffers_per_frame = 1;
         int src_out = hailo_control_config_stream_pcie(&scfg_out, &out_dmid);
