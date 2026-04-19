@@ -131,14 +131,48 @@ static size_t build_request_wire(uint8_t *out,
 }
 
 /*
- * Poll BCS_ISTATUS_HOST for the firmware-control SW IRQ bit
- * (HAILO_PCIE_NNC_FW_CONTROL_IRQ shifted into the SW_IRQ field),
- * yielding (via udelay) between reads. Returns HAILO_OK as soon as
- * that specific bit appears, or HAILO_ERR_TIMEOUT after
- * `timeout_us` elapsed without it. Other sources (notifications,
- * VDMA transfers) get cleared as they arrive so they don't hide
- * the one we're waiting for, but are otherwise ignored — a future
- * MSI path can route them separately.
+ * MSI-driven response signal. Set by the control MSI handler when
+ * firmware writes to the response mailbox and raises its
+ * FW_CONTROL_IRQ bit. wait_for_response acquires + clears this
+ * atomically so one MSI == one response consumed.
+ *
+ * MSI is the path HailoRT uses. Polling still works as a fallback
+ * (platforms that don't implement register_irq, or cases where we
+ * call hailo_control_* before the MSI handler is registered), but
+ * MSI delivers the firmware-ready signal with no scheduling
+ * latency — critical for CORE-CPU context-switch opcodes that
+ * return only after firmware completes async action processing
+ * (see docs/pi5-ai-hat-plan.md §6.4 for the CORE-CPU-async backdrop).
+ */
+static volatile uint32_t control_msi_pending = 0;
+static bool control_msi_registered = false;
+
+static void control_msi_handler(void *ctx)
+{
+    (void)ctx;
+    /* Read + clear whatever ISTATUS bits fired. The SW_IRQ field's
+     * FW_CONTROL_IRQ bit is the one we care about; other sources
+     * (VDMA, notifications) still get W1C'd so they don't accumulate
+     * and confuse later polls. */
+    uint32_t istatus = hailo_platform->read32(
+        HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
+    if (istatus != 0) {
+        hailo_platform->write32(
+            HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST, istatus);
+    }
+    if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
+        __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
+    }
+}
+
+/*
+ * Wait for firmware to signal it's produced a response. Prefers the
+ * MSI-driven flag when available (minimum latency, 0us overhead);
+ * falls back to polling BCS_ISTATUS_HOST for platforms or early-boot
+ * phases where MSI isn't wired up.
+ *
+ * Either path returns HAILO_OK as soon as the firmware-control
+ * signal appears, or HAILO_ERR_TIMEOUT after `timeout_us`.
  */
 static int wait_for_response(uint32_t timeout_us)
 {
@@ -146,16 +180,28 @@ static int wait_for_response(uint32_t timeout_us)
     uint32_t elapsed = 0;
 
     while (elapsed < timeout_us) {
+        /* MSI path: handler consumed the IRQ + set the pending flag.
+         * Caller clears this flag before firing the doorbell, so any
+         * pending=1 observed here reflects firmware's response to
+         * THIS RPC. */
+        if (__atomic_load_n(&control_msi_pending, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
+            return HAILO_OK;
+        }
+        /* Polling fallback: still check ISTATUS in case the MSI
+         * wasn't registered (stub platform / pre-register_irq init).
+         * If MSI handler also fires it will race with this read; the
+         * handler's W1C + our flag-based return is idempotent — both
+         * paths converge on "return HAILO_OK once we've observed the
+         * firmware-control signal at least once". */
         uint32_t istatus = hailo_platform->read32(
             HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
         if (istatus != 0) {
-            /* Write-1-to-clear whichever bits fired. */
             hailo_platform->write32(
                 HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST, istatus);
             if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
                 return HAILO_OK;
             }
-            /* Non-control source fired — keep polling for ours. */
         }
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
@@ -215,15 +261,31 @@ static void control_retarget_atr0(void)
 static bool control_irq_armed = false;
 static void control_arm_interrupts(void)
 {
-    if (control_irq_armed) return;
-    uint32_t mask = hailo_platform->read32(HAILO_BAR_CONFIG,
-                                           HAILO_BSC_IMASK_HOST);
-    mask |= HAILO_BSC_ISTATUS_HOST_MASK;
-    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
-    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
-                            0xFFFFFFFFu);
-    hailo_platform->mb();
-    control_irq_armed = true;
+    if (!control_irq_armed) {
+        uint32_t mask = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                               HAILO_BSC_IMASK_HOST);
+        mask |= HAILO_BSC_ISTATUS_HOST_MASK;
+        hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
+        hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
+                                0xFFFFFFFFu);
+        hailo_platform->mb();
+        control_irq_armed = true;
+    }
+
+    /* Register the MSI handler lazily, on first control send. Platforms
+     * without register_irq (stub / test mock / pre-MSI init) stay on
+     * the polling fallback in wait_for_response. Failure here is
+     * non-fatal — polling still works. Registration is one-shot via
+     * the pi5 side's "reject second call" guard, so we bind the
+     * exactly-once check here with control_msi_registered. */
+    if (!control_msi_registered && hailo_platform->register_irq) {
+        int rc = hailo_platform->register_irq(control_msi_handler, NULL);
+        if (rc == HAILO_OK) {
+            control_msi_registered = true;
+        } else {
+            WARN("hailo: control MSI registration failed (%d); polling fallback", rc);
+        }
+    }
 }
 
 /*
@@ -288,14 +350,18 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
     control_arm_interrupts();
     control_retarget_atr0();
 
-    /* Clear any stale BCS_ISTATUS_HOST bits before firing the new
-     * doorbell. Hygiene only: if a previous RPC's wait_for_response
-     * timed out and firmware set the FW_CONTROL_IRQ bit late, we
-     * don't want the next poll to return immediately on that stale
-     * bit. Tested on pi-5-1 fw v4.23 — does NOT fix the "ACTIVATION
-     * rc=0 then subsequent CORE-CPU RPCs time out" pattern (IDENTIFY
-     * on APP CPU works fine right after; the CORE task is genuinely
-     * busy), but guards against a related race. Idempotent. */
+    /* Clear any stale BCS_ISTATUS_HOST bits AND the MSI-pending flag
+     * before firing the new doorbell. This is a strict pre-doorbell
+     * barrier — any signal observed during wait_for_response after
+     * this point must be firmware's response to THIS RPC.
+     *
+     * The two paths (ISTATUS polling + MSI handler) race for each
+     * firmware completion; whichever sees it first, the other one
+     * may still run after we've returned. If either leaves state
+     * behind for the NEXT RPC to mistakenly consume, we read a
+     * response before firmware has written it — the 0xFFFFFFFF
+     * buffer_len symptom observed on pi-5-1 when chaining multiple
+     * CORE-CPU context-switch opcodes. */
     uint32_t stale = hailo_platform->read32(HAILO_BAR_CONFIG,
                                             HAILO_BCS_ISTATUS_HOST);
     if (stale != 0) {
@@ -303,6 +369,7 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                 HAILO_BCS_ISTATUS_HOST, stale);
         hailo_platform->mb();
     }
+    __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
 
     size_t wire_len = build_request_wire(control_req_wire, req_payload, req_len);
 
@@ -426,8 +493,10 @@ int hailo_control_send_recv_cpu(enum hailo_control_cpu cpu_id,
 void hailo_control_reset_state_for_tests(void)
 {
     __atomic_store_n(&control_sequence, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELAXED);
     control_irq_armed        = false;
     control_atr0_retargeted  = false;
+    control_msi_registered   = false;
 }
 
 int hailo_control_identify(struct hailo_control_identify_response *out)
