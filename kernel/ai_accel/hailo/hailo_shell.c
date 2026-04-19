@@ -299,7 +299,7 @@ static int cmd_hailo(int argc, char *argv[])
             shell_printf("  first network group = %s\n",
                          meta.first_network_group);
         }
-        if (meta.op_count > 0) {
+        if (meta.op_count > 0 || meta.pad_count > 0) {
             shell_printf("  first NG ops = %u, pads captured = %u%s\n",
                          meta.op_count, meta.pad_count,
                          meta.pads_truncated ? " (truncated)" : "");
@@ -318,6 +318,17 @@ static int cmd_hailo(int argc, char *argv[])
                     shell_printf("    %s pad[%u] \"%s\" (no tensor_shape)\n",
                                  p->is_input ? "in" : "out",
                                  p->index, name);
+                }
+                if (p->has_stream_info) {
+                    shell_printf("      stream: sys_index=%u "
+                                 "core_bytes=%u core_buffers=%u\n",
+                                 p->sys_index, p->core_bytes_per_buffer,
+                                 p->core_buffers_per_frame);
+                }
+                if (p->has_quant_info) {
+                    shell_printf("      quant: scale_raw=0x%08x "
+                                 "zp_raw=0x%08x\n",
+                                 p->qp_scale_raw, p->qp_zp_raw);
                 }
             }
         }

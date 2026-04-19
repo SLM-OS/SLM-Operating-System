@@ -4041,50 +4041,61 @@ static void test_hef_parser_captures_edge_layer_quant(void)
     TEST_ASSERT_EQUAL_UINT32(32, info.pads[1].core_bytes_per_buffer);
 }
 
-static void test_hef_parser_skips_nonmatching_edge_layer(void)
+static void test_hef_parser_edge_layer_creates_pad_when_ops_empty(void)
 {
-    /* Build a HEF where the edge layers reference pad_index values
-     * that DON'T exist in the op's pads[]. The parser should decode
-     * without error but leave pads[] quant/stream untouched. */
+    /* DFC 3.33.1 leaves ProtoHEFNetworkGroup.ops[] empty for simple
+     * MLPs. Under that layout, edge_layers[] is the ONLY source of
+     * pad info. Build a HEF with NO ops and just edge layers, and
+     * verify the parser creates pad entries directly. */
     uint8_t proto[1024];
     size_t  plen = 0;
 
-    /* Op with 1-in (pad_index 0) and 1-out (pad_index 100). */
-    uint8_t op_buf[256];
-    size_t  op_len = 0;
-    emit_lenprefix(op_buf, &op_len, 1, (const uint8_t *)"op", 2);
+    /* Edge layer for an input pad: direction=0, pad_index=0,
+     * shape 1x1x108, sys_index=3, core_bytes=128, scale=0x3C000000 (1/128). */
+    uint8_t elin[256];
+    size_t  elin_len = 0;
+    emit_varint_field(elin, &elin_len, 1, 0);      /* direction = H2D */
+    emit_varint_field(elin, &elin_len, 2, 0);      /* edge_layer_type = INFO */
+    /* edge.layer_info with shape + stream + quant */
+    uint8_t info_buf[128];
+    size_t  info_len = 0;
+    emit_lenprefix(info_buf, &info_len, 1, (const uint8_t *)"in", 2);
     {
-        uint8_t pad_buf[64];
-        size_t  pad_len = emit_pad_with_shape(pad_buf, 0, "in",
-                                              1, 1, 8, 1, 1, 8);
-        emit_lenprefix(op_buf, &op_len, 2, pad_buf, pad_len);
+        uint8_t base[32];
+        size_t  base_len = 0;
+        emit_varint_field(base, &base_len, 1, 1);   /* height */
+        emit_varint_field(base, &base_len, 2, 1);   /* padded_height */
+        emit_varint_field(base, &base_len, 3, 1);   /* width */
+        emit_varint_field(base, &base_len, 4, 1);   /* padded_width */
+        emit_varint_field(base, &base_len, 5, 108); /* features */
+        emit_varint_field(base, &base_len, 6, 108); /* padded_features */
+        emit_varint_field(base, &base_len, 8, 3);   /* sys_index */
+        emit_varint_field(base, &base_len, 9, 128); /* core_bytes_per_buffer */
+        emit_lenprefix(info_buf, &info_len, 2, base, base_len);
     }
     {
-        uint8_t pad_buf[64];
-        size_t  pad_len = emit_pad_with_shape(pad_buf, 100, "out",
-                                              1, 1, 4, 1, 1, 4);
-        emit_lenprefix(op_buf, &op_len, 3, pad_buf, pad_len);
+        uint8_t num[16];
+        size_t  num_len = emit_numeric_info(num, 0u, 0x3C000000u);
+        emit_lenprefix(info_buf, &info_len, 3, num, num_len);
     }
+    emit_lenprefix(elin, &elin_len, 3, info_buf, info_len);
+    emit_varint_field(elin, &elin_len, 7, 0);      /* pad_index */
 
-    /* Edge layer referencing a non-existent pad_index (999). */
-    uint8_t el[256];
-    size_t  el_len = emit_edge_layer(el, 0, 999, 7, 64, 1,
-                                      0, 0x3F800000u);  /* scale=1.0 */
-
+    /* ContextMetadata with just this one edge layer (no ops). */
     uint8_t md_buf[512];
     size_t  md_len = 0;
     emit_lenprefix(md_buf, &md_len, 1, (const uint8_t *)"ctx", 3);
-    emit_lenprefix(md_buf, &md_len, 2, el, el_len);
+    emit_lenprefix(md_buf, &md_len, 2, elin, elin_len);
 
     uint8_t ctx_buf[768];
     size_t  ctx_len = 0;
-    emit_varint_field(ctx_buf, &ctx_len, 1, 0);
+    emit_varint_field(ctx_buf, &ctx_len, 1, 0);    /* context_index */
     emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
 
+    /* NetworkGroup with contexts but NO ops. */
     uint8_t ng_buf[1024];
     size_t  ng_len = 0;
     emit_lenprefix(ng_buf, &ng_len, 10, (const uint8_t *)"ng", 2);
-    emit_lenprefix(ng_buf, &ng_len, 8,  op_buf, op_len);
     emit_lenprefix(ng_buf, &ng_len, 3,  ctx_buf, ctx_len);
 
     emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
@@ -4092,11 +4103,16 @@ static void test_hef_parser_skips_nonmatching_edge_layer(void)
     struct hef_info info;
     TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
                           hef_parse_body(proto, plen, &info));
-    TEST_ASSERT_EQUAL_UINT32(2, info.pad_count);
-    TEST_ASSERT_FALSE(info.pads[0].has_quant_info);
-    TEST_ASSERT_FALSE(info.pads[0].has_stream_info);
-    TEST_ASSERT_FALSE(info.pads[1].has_quant_info);
-    TEST_ASSERT_FALSE(info.pads[1].has_stream_info);
+    TEST_ASSERT_EQUAL_UINT32(0, info.op_count);   /* no ops */
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);  /* pad created from edge_layer */
+    TEST_ASSERT_TRUE(info.pads[0].is_input);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(108, info.pads[0].features);
+    TEST_ASSERT_TRUE(info.pads[0].has_quant_info);
+    TEST_ASSERT_EQUAL_UINT32(0x3C000000u, info.pads[0].qp_scale_raw);
+    TEST_ASSERT_TRUE(info.pads[0].has_stream_info);
+    TEST_ASSERT_EQUAL_UINT32(3,   info.pads[0].sys_index);
+    TEST_ASSERT_EQUAL_UINT32(128, info.pads[0].core_bytes_per_buffer);
 }
 
 static void test_inf_hailo_load_threads_hef_stream_info(void)
@@ -4355,7 +4371,7 @@ int test_suite_hailo(void)
 
     /* Phase 6.2b: edge-layer quant + stream extraction */
     RUN_TEST(test_hef_parser_captures_edge_layer_quant);
-    RUN_TEST(test_hef_parser_skips_nonmatching_edge_layer);
+    RUN_TEST(test_hef_parser_edge_layer_creates_pad_when_ops_empty);
     RUN_TEST(test_inf_hailo_load_threads_hef_stream_info);
 
     return UnityEnd();

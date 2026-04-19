@@ -501,6 +501,9 @@ struct edge_layer_stage {
     bool     seen_pad_index;
     uint32_t pad_index;
 
+    bool     seen_direction;
+    uint32_t direction;                /* 0 = HOST_TO_DEVICE (input), 1 = D2H */
+
     bool     seen_quant;
     uint32_t qp_scale_raw;
     uint32_t qp_zp_raw;
@@ -509,6 +512,18 @@ struct edge_layer_stage {
     uint32_t sys_index;
     uint32_t core_bytes_per_buffer;
     uint32_t core_buffers_per_frame;
+
+    /* Tensor shape (also in ProtoHEFEdgeLayerBase). DFC 3.33.1 leaves
+     * ProtoHEFNetworkGroup.ops[] empty for simple MLPs, so pad entries
+     * come out of edge_layers directly rather than being back-filled
+     * from an ops-populated pad slot. */
+    bool     seen_shape;
+    uint32_t height;
+    uint32_t padded_height;
+    uint32_t width;
+    uint32_t padded_width;
+    uint32_t features;
+    uint32_t padded_features;
 };
 
 /*
@@ -587,6 +602,14 @@ static bool decode_edge_layer_base_cb(pb_istream_t *stream,
             if (v > UINT32_MAX) continue;
             uint32_t u = (uint32_t)v;
             switch (field_no) {
+            /* Shape fields (primary source when ops[] is empty). */
+            case 1: st->height          = u; st->seen_shape  = true; break;
+            case 2: st->padded_height   = u; st->seen_shape  = true; break;
+            case 3: st->width           = u; st->seen_shape  = true; break;
+            case 4: st->padded_width    = u; st->seen_shape  = true; break;
+            case 5: st->features        = u; st->seen_shape  = true; break;
+            case 6: st->padded_features = u; st->seen_shape  = true; break;
+            /* Stream config — already captured. */
             case 8:  st->sys_index              = u; st->seen_stream = true; break;
             case 9:  st->core_bytes_per_buffer  = u; st->seen_stream = true; break;
             case 10: st->core_buffers_per_frame = u; st->seen_stream = true; break;
@@ -648,6 +671,20 @@ static bool decode_edge_pad_index_cb(pb_istream_t *stream,
     return true;
 }
 
+/* ProtoHEFEdgeLayer.direction — varint enum (0 = H2D/input, 1 = D2H). */
+static bool decode_edge_direction_cb(pb_istream_t *stream,
+                                     const pb_field_t *field,
+                                     void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+    uint64_t v = 0;
+    if (!pb_decode_varint(stream, &v)) return false;
+    st->direction = (uint32_t)v;
+    st->seen_direction = true;
+    return true;
+}
+
 struct edge_ctx {
     struct hef_info *info;
 };
@@ -676,26 +713,63 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     el.edge.layer_info.arg          = &stage;
     el.pad_index.funcs.decode       = decode_edge_pad_index_cb;
     el.pad_index.arg                = &stage;
+    el.direction.funcs.decode       = decode_edge_direction_cb;
+    el.direction.arg                = &stage;
     if (!pb_decode(stream, ProtoHEFEdgeLayer_fields, &el)) return false;
 
     if (!stage.seen_pad_index) return true;         /* non-boundary layer */
 
-    /* Locate the matching pad by index. */
+    /* Find-or-create the pad. DFC 3.33.1 leaves ProtoHEFNetworkGroup.ops[]
+     * empty for simple MLPs, so the edge_layers[] traversal is the only
+     * path that sees pad info. Fall back to appending a new pad if the
+     * ops[] path didn't already register this index. */
+    struct hef_pad_info *p = NULL;
     for (uint32_t i = 0; i < ectx->info->pad_count; i++) {
-        if (ectx->info->pads[i].index != stage.pad_index) continue;
-        struct hef_pad_info *p = &ectx->info->pads[i];
-        if (stage.seen_quant) {
-            p->has_quant_info = true;
-            p->qp_scale_raw   = stage.qp_scale_raw;
-            p->qp_zp_raw      = stage.qp_zp_raw;
+        if (ectx->info->pads[i].index == stage.pad_index) {
+            p = &ectx->info->pads[i];
+            break;
         }
-        if (stage.seen_stream) {
-            p->has_stream_info       = true;
-            p->sys_index             = stage.sys_index;
-            p->core_bytes_per_buffer = stage.core_bytes_per_buffer;
-            p->core_buffers_per_frame= stage.core_buffers_per_frame;
+    }
+    if (!p) {
+        if (ectx->info->pad_count >= HEF_PARSER_MAX_PADS) {
+            ectx->info->pads_truncated = true;
+            return true;
         }
-        break;
+        p = &ectx->info->pads[ectx->info->pad_count++];
+        memset(p, 0, sizeof(*p));
+        p->index = stage.pad_index;
+        /* direction: 0 = HOST_TO_DEVICE (input), 1 = DEVICE_TO_HOST. */
+        p->is_input = stage.seen_direction && stage.direction == 0;
+        if (stage.seen_shape) {
+            p->has_tensor_shape = true;
+            p->height           = stage.height;
+            p->padded_height    = stage.padded_height;
+            p->width            = stage.width;
+            p->padded_width     = stage.padded_width;
+            p->features         = stage.features;
+            p->padded_features  = stage.padded_features;
+        }
+    } else if (!p->has_tensor_shape && stage.seen_shape) {
+        /* Existing pad (from ops[]) without shape — fill it in. */
+        p->has_tensor_shape = true;
+        p->height           = stage.height;
+        p->padded_height    = stage.padded_height;
+        p->width            = stage.width;
+        p->padded_width     = stage.padded_width;
+        p->features         = stage.features;
+        p->padded_features  = stage.padded_features;
+    }
+
+    if (stage.seen_quant) {
+        p->has_quant_info = true;
+        p->qp_scale_raw   = stage.qp_scale_raw;
+        p->qp_zp_raw      = stage.qp_zp_raw;
+    }
+    if (stage.seen_stream) {
+        p->has_stream_info       = true;
+        p->sys_index             = stage.sys_index;
+        p->core_bytes_per_buffer = stage.core_bytes_per_buffer;
+        p->core_buffers_per_frame= stage.core_buffers_per_frame;
     }
     return true;
 }
