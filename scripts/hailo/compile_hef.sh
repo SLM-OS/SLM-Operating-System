@@ -119,21 +119,21 @@ hailo compiler "$HAR_OPT" \
     --hw-arch "$ARCH" \
     --output-dir "$OUTDIR"
 
-# `hailo compiler` writes <net-name>.hef into --output-dir; rename defensively
-# (net-name was set during parser phase). Common generated names include both
-# scheduler_mlp_<variant>.hef and <variant>_compiled_model.hef across versions.
-for candidate in \
-    "$OUTDIR/scheduler_mlp_${VARIANT}.hef" \
-    "$OUTDIR/scheduler_mlp_${VARIANT}_compiled_model.hef" \
-    "$OUTDIR/$(basename "${HAR_OPT%.har}").hef"; do
-    if [ -f "$candidate" ] && [ "$candidate" != "$HEF" ]; then
-        mv "$candidate" "$HEF"
-        break
-    fi
-done
+# `hailo compiler` writes <net-name>.hef into --output-dir — net-name was set
+# during the parser phase, so DFC 3.33.1 writes directly to $HEF. Verified on
+# DFC 3.33.1: no rename needed. If a future DFC release changes the output
+# filename convention, the failure is clearly visible (missing $HEF after the
+# compiler runs) rather than silently producing the wrong file.
+if [ ! -f "$HEF" ]; then
+    echo "ERROR: expected $HEF but compiler produced something else:" >&2
+    ls -la "$OUTDIR"/*.hef >&2 || true
+    exit 6
+fi
 
+# Compiler also writes <net-name>_compiled.har (the compiled-model HAR)
+# alongside the HEF. That's an intermediate too — remove unless asked to keep.
 if [ $KEEP_INTERMEDIATES -eq 0 ]; then
-    rm -f "$HAR_RAW" "$HAR_OPT"
+    rm -f "$HAR_RAW" "$HAR_OPT" "$OUTDIR/scheduler_mlp_${VARIANT}_compiled.har"
 fi
 
 echo "[compile] done: $HEF"

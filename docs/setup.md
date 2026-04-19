@@ -199,8 +199,10 @@ sudo apt install -y \
     pkg-config
 ```
 
-On Ubuntu 24.04, Python 3.10 comes from the
-`deadsnakes` PPA: `sudo add-apt-repository ppa:deadsnakes/ppa` first.
+Ubuntu 22.04 ships Python 3.10 as its default `python3` — no extra repo
+needed. On Ubuntu 24.04 (default `python3` = 3.12), Python 3.10 comes
+from the `deadsnakes` PPA: `sudo add-apt-repository ppa:deadsnakes/ppa`
+first.
 
 ### 2. Get the Hailo wheels
 
@@ -247,6 +249,13 @@ bash   scripts/hailo/compile_hef.sh --arch hailo8 --variant pi5
 
 For Jetson (42-action): `--variant jetson`. For Hailo-8L silicon:
 `--arch hailo8l`.
+
+To wipe all Hailo toolchain artifacts (`.onnx`, `.npy`, `.har`, `.hef`,
+DFC logs) out of `build/hailo/`:
+
+```bash
+make hailo-clean
+```
 
 ---
 

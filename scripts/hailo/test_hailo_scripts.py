@@ -157,12 +157,14 @@ def test_numpy_forward_matches_hand_computation():
     }
     out = export.numpy_forward(state, weights)
     assert out.shape == (42,), out.shape
-    # state[0]=1 passes through all identities; state[107]=-0.5 is beyond
-    # layer 0's 108-wide input but since w0 is eye(256,108), state[107] reaches
-    # row 107 of layer 0's output, which ReLU zeros. So out[0] should be 1.0.
+    # Propagation trace with identity weights + zero biases:
+    #   layer 0 out[i] = state[i] for i<108 (eye(256,108) pads upper 148 with 0)
+    #   ReLU: state[0]=1.0 kept, state[107]=-0.5 clamped to 0
+    #   layers 1,2 are identities that truncate to 256 then 128 dims
+    #   layer 3 is eye(42,128): keeps rows 0..41, drops 42..127
+    # So out[0] = state[0] = 1.0; all other out[i] are 0 because either the
+    # ReLU zeroed them (state[107]) or layer 3 dropped them (rows 42..127).
     assert abs(out[0] - 1.0) < 1e-6, out[0]
-    # out[107] is beyond the 42 emitted by layer 3 — out is only 42 long.
-    # All other outputs should be 0 (weights zero them).
     for i in range(1, 42):
         assert abs(out[i]) < 1e-6, f"out[{i}]={out[i]}"
 
@@ -199,6 +201,56 @@ def test_onnx_model_validates_and_matches_reference():
         assert max_diff < 1e-5, f"max diff {max_diff:.2e} exceeds 1e-5"
     finally:
         path.unlink()
+
+
+def test_build_onnx_model_rejects_over_sized_n_actions():
+    """Slicing w3[:n_actions] silently truncates; the model builder must catch it."""
+    export = _import("export_scheduler_mlp_onnx")
+
+    weights = {
+        "w0": np.zeros((256, 108), dtype=np.float32),
+        "b0": np.zeros(256, dtype=np.float32),
+        "w1": np.zeros((256, 256), dtype=np.float32),
+        "b1": np.zeros(256, dtype=np.float32),
+        "w2": np.zeros((128, 256), dtype=np.float32),
+        "b2": np.zeros(128, dtype=np.float32),
+        "w3": np.zeros((42, 128), dtype=np.float32),
+        "b3": np.zeros(42, dtype=np.float32),
+    }
+
+    try:
+        export.build_onnx_model(weights, n_actions=50, opset=11)
+    except ValueError as e:
+        assert "n_actions=50" in str(e), e
+        assert "42" in str(e), e
+        return
+    assert False, "expected ValueError for n_actions > layer-3 row count"
+
+
+def test_export_script_runs_on_ai_ppo_symbols():
+    """PPO weights file has the same shape — script should export against it too."""
+    ppo_c = REPO_ROOT / "kernel/sched/ai/ai_weights_ppo.c"
+    if not ppo_c.exists():
+        # Not strictly required; skip rather than fail.
+        print("    (skipping — ai_weights_ppo.c not present)")
+        return
+
+    outdir = Path(tempfile.mkdtemp(prefix="hailo-test-ppo-"))
+    try:
+        result = subprocess.run(
+            [sys.executable, str(HAILO_DIR / "export_scheduler_mlp_onnx.py"),
+             "--source", "ai_ppo", "--outdir", str(outdir)],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, (
+            f"exit {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        for name in ("scheduler_mlp_pi5.onnx", "scheduler_mlp_jetson.onnx"):
+            p = outdir / name
+            assert p.exists(), f"{name} missing"
+    finally:
+        import shutil
+        shutil.rmtree(outdir, ignore_errors=True)
 
 
 def test_end_to_end_export_on_real_weights():
@@ -258,6 +310,30 @@ def test_calibration_zero_fills_inactive_cores():
         # Cores 4 and 5 are offsets 24..30 and 30..36 in the state vector.
         assert np.all(data[i, 24:36] == 0.0), (
             f"sample {i} cores 4-5 not zero: {data[i, 24:36]}"
+        )
+
+
+def test_calibration_cores_4_pins_every_sample():
+    """--cores 4 must zero-fill cores 4-5 on ALL samples, not alternating."""
+    calib = _import("generate_calibration_data")
+    data = calib.generate(n_samples=16, seed=2, cores="4")
+    for i in range(16):
+        assert np.all(data[i, 24:36] == 0.0), (
+            f"sample {i} cores 4-5 not zero under --cores 4: {data[i, 24:36]}"
+        )
+
+
+def test_calibration_cores_6_populates_every_sample():
+    """--cores 6 should produce nonzero per-core features for all 6 cores in most samples."""
+    calib = _import("generate_calibration_data")
+    data = calib.generate(n_samples=32, seed=3, cores="6")
+    # Cores 4 and 5 each get 6 features. core_type (feature 3) is always 1.0 for
+    # active cores, so column 3*6+3=21 and 5*6+3=33 (for cores 3 and 5) — check
+    # core 5's core_type is 1.0 on every sample, which proves core 5 is active.
+    for i in range(32):
+        assert data[i, 5 * 6 + 3] == 1.0, (
+            f"sample {i} core 5 core_type=0 under --cores 6; "
+            f"core block: {data[i, :36].reshape(6, 6)}"
         )
 
 
@@ -359,6 +435,8 @@ def main() -> int:
     runner.run("hex_float_parser_raises_on_missing_symbol", test_hex_float_parser_raises_on_missing_symbol)
     runner.run("numpy_forward_matches_hand_computation", test_numpy_forward_matches_hand_computation)
     runner.run("onnx_model_validates_and_matches_reference", test_onnx_model_validates_and_matches_reference)
+    runner.run("build_onnx_model_rejects_over_sized_n_actions", test_build_onnx_model_rejects_over_sized_n_actions)
+    runner.run("export_script_runs_on_ai_ppo_symbols", test_export_script_runs_on_ai_ppo_symbols)
     runner.run("end_to_end_export_on_real_weights", test_end_to_end_export_on_real_weights)
 
     print("\n== generate_calibration_data.py ==")
@@ -366,6 +444,8 @@ def main() -> int:
     runner.run("calibration_values_in_zero_one", test_calibration_values_in_zero_one)
     runner.run("calibration_deterministic_under_seed", test_calibration_deterministic_under_seed)
     runner.run("calibration_zero_fills_inactive_cores", test_calibration_zero_fills_inactive_cores)
+    runner.run("calibration_cores_4_pins_every_sample", test_calibration_cores_4_pins_every_sample)
+    runner.run("calibration_cores_6_populates_every_sample", test_calibration_cores_6_populates_every_sample)
     runner.run("calibration_script_end_to_end", test_calibration_script_end_to_end)
 
     print("\n== compile_hef.sh ==")

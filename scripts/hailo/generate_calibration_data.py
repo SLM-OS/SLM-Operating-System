@@ -125,13 +125,23 @@ def sample_global_block(rng: np.random.Generator, core_block: np.ndarray,
     return block
 
 
-def generate(n_samples: int, seed: int) -> np.ndarray:
+def _resolve_active_cores(cores: str, i: int) -> int:
+    """Map --cores argument + sample index to the active-core count.
+
+    'mixed' alternates 4/6 on even/odd indices to cover both Pi 5 and Jetson
+    shapes in a single calibration set. '4' or '6' pin every sample.
+    """
+    if cores == "mixed":
+        return 4 if (i % 2 == 0) else 6
+    return int(cores)
+
+
+def generate(n_samples: int, seed: int, cores: str = "mixed") -> np.ndarray:
     rng = np.random.default_rng(seed)
     samples = np.zeros((n_samples, STATE_DIM), dtype=np.float32)
 
     for i in range(n_samples):
-        # Alternate 4-core (Pi 5) and 6-core (Jetson) shapes.
-        active_cores = 4 if (i % 2 == 0) else 6
+        active_cores = _resolve_active_cores(cores, i)
         active_tasks = int(rng.integers(low=0, high=NUM_TASKS + 1))
 
         core_block = sample_core_block(rng, active_cores)
@@ -152,6 +162,9 @@ def main() -> int:
                     help="Number of calibration samples (32-1024 typical)")
     ap.add_argument("--seed", type=int, default=0xC0DEC0DE)
     ap.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR)
+    ap.add_argument("--cores", default="mixed", choices=["4", "6", "mixed"],
+                    help="Active-core count per sample. '4' = Pi 5 only, "
+                         "'6' = Jetson only, 'mixed' alternates 4/6 (default)")
     ap.add_argument("--stats", action="store_true",
                     help="Print per-feature min/mean/max across the dataset")
     args = ap.parse_args()
@@ -160,8 +173,9 @@ def main() -> int:
         print("ERROR: --samples must be >= 1", file=sys.stderr)
         return 1
 
-    print(f"[calib] generating {args.samples} samples (seed=0x{args.seed:08x})")
-    data = generate(args.samples, args.seed)
+    print(f"[calib] generating {args.samples} samples (seed=0x{args.seed:08x}, "
+          f"cores={args.cores})")
+    data = generate(args.samples, args.seed, cores=args.cores)
     assert data.shape == (args.samples, STATE_DIM)
     assert data.dtype == np.float32
 

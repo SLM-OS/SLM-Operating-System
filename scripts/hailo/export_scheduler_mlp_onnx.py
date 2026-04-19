@@ -13,7 +13,10 @@ Built directly against the ONNX Python API — no PyTorch dependency.
 
 Verification: runs the exported graph under onnxruntime against a pure-numpy
 reference that matches kernel/sched/ai/ai_inference.c forward_logits exactly
-and fails if max|onnx - ref| on a fixed test input exceeds 1e-5.
+and fails if max|onnx - ref| on a fixed test input exceeds the --tolerance
+bound (default 1e-3). Layer-1 weights reach ±200, giving float32 ULP
+~6e-3 at intermediate magnitudes; 1e-3 catches real bugs while tolerating
+rounding noise.
 
 Usage:
     python3 scripts/hailo/export_scheduler_mlp_onnx.py
@@ -35,8 +38,15 @@ import onnxruntime as ort
 from onnx import TensorProto, helper, numpy_helper
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_WEIGHTS_C = REPO_ROOT / "kernel/sched/ai/ai_weights_mlp.c"
 DEFAULT_OUTDIR = REPO_ROOT / "build/hailo"
+
+# Per-source default C source. `--source` picks the entry unless `--weights-c`
+# is passed explicitly.
+SOURCE_TO_WEIGHTS_C = {
+    "ai_mlp": REPO_ROOT / "kernel/sched/ai/ai_weights_mlp.c",
+    "ai_ppo": REPO_ROOT / "kernel/sched/ai/ai_weights_ppo.c",
+}
+DEFAULT_WEIGHTS_C = SOURCE_TO_WEIGHTS_C["ai_mlp"]
 
 
 def pretty_path(p: Path) -> str:
@@ -112,6 +122,12 @@ def build_onnx_model(weights: dict[str, np.ndarray], n_actions: int,
     alpha*A*B^T + beta*C, which is exactly y = x @ W.T + b for a (1, in)
     input batch, matching the C reference.
     """
+    max_actions = weights["w3"].shape[0]
+    if n_actions > max_actions:
+        raise ValueError(
+            f"n_actions={n_actions} exceeds layer-3 row count {max_actions} "
+            f"from the weights file; numpy would silently truncate the slice."
+        )
     w3 = weights["w3"][:n_actions]
     b3 = weights["b3"][:n_actions]
 
@@ -181,8 +197,10 @@ def verify(onnx_path: Path, ref_weights: dict[str, np.ndarray],
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--weights-c", type=Path, default=DEFAULT_WEIGHTS_C,
-                    help=f"C source with weight arrays (default: {DEFAULT_WEIGHTS_C})")
+    ap.add_argument("--weights-c", type=Path, default=None,
+                    help="C source with weight arrays. Defaults to "
+                         "ai_weights_mlp.c for --source ai_mlp or "
+                         "ai_weights_ppo.c for --source ai_ppo.")
     ap.add_argument("--source", default="ai_mlp", choices=["ai_mlp", "ai_ppo"],
                     help="Symbol prefix to extract (default: ai_mlp)")
     ap.add_argument("--outdir", type=Path, default=DEFAULT_OUTDIR,
@@ -195,12 +213,13 @@ def main() -> int:
                          "catches real bugs but allows rounding noise.")
     args = ap.parse_args()
 
-    if not args.weights_c.exists():
-        print(f"ERROR: {args.weights_c} not found", file=sys.stderr)
+    weights_c = args.weights_c or SOURCE_TO_WEIGHTS_C[args.source]
+    if not weights_c.exists():
+        print(f"ERROR: {weights_c} not found", file=sys.stderr)
         return 1
 
-    print(f"[export] reading {args.source}_* from {args.weights_c}")
-    weights = parse_c_float_arrays(args.weights_c, args.source)
+    print(f"[export] reading {args.source}_* from {weights_c}")
+    weights = parse_c_float_arrays(weights_c, args.source)
     for name, arr in weights.items():
         print(f"  {args.source}_{name}: shape={tuple(arr.shape)} "
               f"min={arr.min():+.3e} max={arr.max():+.3e}")
