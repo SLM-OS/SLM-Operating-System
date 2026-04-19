@@ -286,9 +286,11 @@ static int read_proc_tasks(char *buf, size_t size, void *ctx)
     size_t remain = size;
     int wrote;
 
-    for (uint32_t id = 0; id < MAX_TASKS; id++) {
-        struct task *t = task_get(id);
-        if (t != NULL) {
+    for (uint32_t i = 0; i < MAX_TASKS; i++) {
+        /* Iterate slots, not task IDs — IDs come from a monotonic
+         * counter and can exceed MAX_TASKS (#321). */
+        struct task *t = task_slot(i);
+        if (t != NULL && t->id != 0 && t->state != TASK_TERMINATED) {
             wrote = uart_snprintf(buf + pos, remain,
                                  "%lu %s %s %u %lu\n",
                                  (unsigned long)t->id,

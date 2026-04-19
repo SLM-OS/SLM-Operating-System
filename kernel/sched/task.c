@@ -540,6 +540,17 @@ struct task *task_get(uint32_t id)
 }
 
 /*
+ * Get task by table slot index.
+ */
+struct task *task_slot(uint32_t idx)
+{
+    if (idx >= MAX_TASKS) {
+        return NULL;
+    }
+    return &task_table[idx];
+}
+
+/*
  * Free a terminated task's resources.
  *
  * This function reclaims the task's stack memory and frees the task slot

@@ -115,8 +115,10 @@ static int l_tasks(lua_State *L) {
 
     int idx = 1;
     for (int i = 0; i < MAX_TASKS; i++) {
-        struct task *t = task_get(i);
-        if (t == NULL || t->state == TASK_TERMINATED) continue;
+        /* Iterate slots, not task IDs — IDs come from a monotonic
+         * counter and can exceed MAX_TASKS (#321). */
+        struct task *t = task_slot((uint32_t)i);
+        if (t == NULL || t->id == 0 || t->state == TASK_TERMINATED) continue;
 
         lua_newtable(L);
 
@@ -196,26 +198,31 @@ static int l_version(lua_State *L) {
 }
 
 /**
- * slm.cpu_count() - Get number of CPUs
+ * slm.cpu_count() - Get number of online CPUs (#312)
+ *
+ * Returns the runtime CPU count from kernel/sched/smp.c, not the
+ * compile-time MAX_CPUS ceiling. MAX_CPUS reported 8 on Pi 5 (4 cores)
+ * because it is an array sizing constant, not a live count.
  */
 static int l_cpu_count(lua_State *L) {
     if (!L) return 0;
-    lua_pushinteger(L, MAX_CPUS);
+    lua_pushinteger(L, (lua_Integer)cpu_count);
     return 1;
 }
 
 /**
- * slm.cpu_id() - Get current CPU ID
+ * slm.cpu_id() - Get current CPU's logical ID (#313)
+ *
+ * Delegates to the canonical cpu_id() from smp.h, which uses
+ * cpu_logical_id(mpidr) to look up the logical index in the
+ * platform-specific MPIDR map. Inline-asm'ing (mpidr & 0xFF)
+ * previously returned Aff0, which is always 0 on Pi 5 (BCM2712
+ * encodes the core ID in Aff1) and wrong on Jetson's dual-cluster
+ * MPIDR layout.
  */
 static int l_cpu_id(lua_State *L) {
     if (!L) return 0;
-#if defined(PLATFORM_X86_64)
-    lua_pushinteger(L, 0);
-#else
-    uint64_t mpidr;
-    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-    lua_pushinteger(L, (lua_Integer)(mpidr & 0xFF));
-#endif
+    lua_pushinteger(L, (lua_Integer)cpu_id());
     return 1;
 }
 
@@ -1326,13 +1333,9 @@ static int l_cpu_info(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)cpu_count);
     lua_setfield(L, -2, "total_count");
 
-#if defined(PLATFORM_X86_64)
-    lua_pushinteger(L, 0);
-#else
-    uint64_t mpidr;
-    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-    lua_pushinteger(L, (lua_Integer)(mpidr & 0xFF));
-#endif
+    /* #313: delegate to the canonical cpu_id(). Inline-asm'ing
+     * (mpidr & 0xFF) returned Aff0, which is always 0 on Pi 5. */
+    lua_pushinteger(L, (lua_Integer)cpu_id());
     lua_setfield(L, -2, "current_cpu");
 
     /* Per-CPU array */

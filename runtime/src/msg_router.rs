@@ -495,6 +495,18 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
         let _g = SpinGuard::new();
         // SAFETY: MSG_ROUTER_LOCK held — exclusive access to WILDCARD_SUBS.
         unsafe {
+            // Idempotent: if this component is already wildcard-subscribed
+            // with the same pattern, return success without taking a second
+            // slot (#320). Without this, repeated subscribe calls deliver
+            // the same message multiple times to the same component.
+            for i in 0..MAX_WILDCARD_SUBS {
+                if WILDCARD_SUBS[i].is_active()
+                    && WILDCARD_SUBS[i].component_idx == component_idx
+                    && str_eq_cstr(&WILDCARD_SUBS[i].pattern, topic_name)
+                {
+                    return 0;
+                }
+            }
             for i in 0..MAX_WILDCARD_SUBS {
                 if !WILDCARD_SUBS[i].is_active() {
                     str_copy(&mut WILDCARD_SUBS[i].pattern, topic_name, TOPIC_NAME_LEN);
@@ -540,6 +552,17 @@ pub extern "C" fn msg_router_subscribe(topic_name: *const u8, component_idx: i32
                 return -1;
             }
         };
+
+        // Idempotent: if this component is already subscribed to this
+        // topic, return success without taking a second slot (#320).
+        // Without this, e.g. component_hot_swap re-subscribes on top of
+        // the new instance's own subscribe call, producing duplicate
+        // message deliveries (the "double alert" in the demo).
+        for j in 0..MAX_SUBSCRIBERS {
+            if TOPICS[idx].subs[j].component_idx == component_idx {
+                return 0;
+            }
+        }
 
         // Add subscriber to first free slot
         for j in 0..MAX_SUBSCRIBERS {

@@ -97,9 +97,11 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
     uint32_t running_tasks = 0;
     uint32_t blocked_tasks = 0;
     uint32_t ready_tasks = 0;
-    for (uint32_t id = 0; id < MAX_TASKS; id++) {
-        struct task *t = task_get(id);
-        if (!t) continue;
+    for (uint32_t i = 0; i < MAX_TASKS; i++) {
+        /* Iterate slots, not task IDs — IDs come from a monotonic
+         * counter and can exceed MAX_TASKS (#321). */
+        struct task *t = task_slot(i);
+        if (!t || t->id == 0 || t->state == TASK_TERMINATED) continue;
         switch (t->state) {
         case TASK_RUNNING:    running_tasks++; break;
         case TASK_BLOCKED:    blocked_tasks++; break;

@@ -15,8 +15,10 @@
  * and #14 (conditional embedding via build flag).
  */
 
-#if !defined(DEMO_LUA_PATH) || !defined(DEMO_MENU_LUA_PATH)
-# error "DEMO_LUA_PATH and DEMO_MENU_LUA_PATH must be supplied by the build system"
+#if !defined(DEMO_LUA_PATH) || !defined(DEMO_MENU_LUA_PATH) || \
+    !defined(DEMO_AUTO_LUA_PATH) || !defined(DEMO_MULTIPROC_LUA_PATH)
+# error "DEMO_LUA_PATH, DEMO_MENU_LUA_PATH, DEMO_AUTO_LUA_PATH, and "\
+        "DEMO_MULTIPROC_LUA_PATH must be supplied by the build system"
 #endif
 
 #define xstr(s) str(s)
@@ -37,6 +39,27 @@ demo_lua_end:
 demo_menu_lua_start:
     .incbin xstr(DEMO_MENU_LUA_PATH)
 demo_menu_lua_end:
+
+    /* #315: demo_auto.lua previously lived as a hand-transcribed
+     * C-string literal in demo_init.c and had already drifted from
+     * scripts/demo_auto.lua ("Demo aborted by user." vs "Demo aborted.").
+     * Now embedded from the on-disk file like the other demo scripts. */
+    .global demo_auto_lua_start
+    .global demo_auto_lua_end
+    .align 4
+demo_auto_lua_start:
+    .incbin xstr(DEMO_AUTO_LUA_PATH)
+demo_auto_lua_end:
+
+    /* #323: multiproc_demo.lua was orphaned — sitting in scripts/ with
+     * no build-side reference and no way to reach /mnt/files at runtime.
+     * Now embedded alongside the other demo scripts. */
+    .global demo_multiproc_lua_start
+    .global demo_multiproc_lua_end
+    .align 4
+demo_multiproc_lua_start:
+    .incbin xstr(DEMO_MULTIPROC_LUA_PATH)
+demo_multiproc_lua_end:
 
 #if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__))
     .section .note.GNU-stack, "", @progbits
