@@ -16,6 +16,8 @@
 #include "unity.h"
 #include "../ai_accel/hailo/hailo.h"
 #include "../ai_accel/hailo/hailo_control.h"
+#include "../ai_accel/hailo/hailo_cs_actions.h"
+#include "../ai_accel/hailo/hailo_cs_builder.h"
 #include "../ai_accel/hailo/hailo_internal.h"
 #include "../ai_accel/hailo/hailo_infer.h"
 #include "../ai_accel/hailo/hailo_tensor.h"
@@ -2051,6 +2053,106 @@ static void test_set_context_info_chunk_rejects_null_with_nonzero_len(void)
         hailo_control_set_context_info_chunk(
             HAILO_CS_CONTEXT_TYPE_DYNAMIC,
             true, true, NULL, 16));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 6.4a+b: context-switch action-list builder                            */
+/* -------------------------------------------------------------------------- */
+
+static void test_cs_builder_append_emits_header_then_body(void)
+{
+    /* Single FETCH_CCW_BURSTS action: 5-byte common header + 3-byte
+     * body = 8 bytes total. Verify layout byte-for-byte. */
+    uint8_t buf[32];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    struct hailo_cs_act_fetch_ccw_bursts body = {
+        .ccw_bursts          = 0x1234,
+        .config_stream_index = 0x7,
+    };
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS,
+                                &body, sizeof(body)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, hailo_cs_builder_size(&b));
+
+    /* [0]=action_type (u8) = 27 (FETCH_CCW_BURSTS)
+     * [1..4]=time_stamp (u32 native LE) = 0
+     * [5..6]=ccw_bursts (u16 native LE) = 0x1234
+     * [7]=config_stream_index (u8) = 7 */
+    const uint8_t *d = hailo_cs_builder_data(&b);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS, d[0]);
+    uint32_t ts;
+    memcpy(&ts, d + 1, 4);
+    TEST_ASSERT_EQUAL_UINT32(0, ts);
+    uint16_t bursts;
+    memcpy(&bursts, d + 5, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x1234, bursts);
+    TEST_ASSERT_EQUAL_UINT8(7, d[7]);
+}
+
+static void test_cs_builder_appends_concatenate(void)
+{
+    /* Three actions back-to-back: ACTIVATE_CFG_CHANNEL (21 B body),
+     * FETCH_CCW_BURSTS (3 B body), DEACTIVATE_CFG_CHANNEL (2 B body).
+     * Total with 5-byte common headers: 26 + 8 + 7 = 41 bytes. */
+    uint8_t buf[128];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    struct hailo_cs_act_activate_cfg_channel a1 = {
+        .packed_vdma_channel_id = 0x21,
+        .config_stream_index    = 0,
+        .host_buffer_info = {
+            .buffer_type       = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+            .dma_address       = 0x123456789ABCDEF0ull,
+            .desc_page_size    = 512,
+            .total_desc_count  = 16,
+            .bytes_in_pattern  = 0,
+        },
+    };
+    struct hailo_cs_act_fetch_ccw_bursts a2 = { .ccw_bursts = 4, .config_stream_index = 0 };
+    struct hailo_cs_act_deactivate_cfg_channel a3 = { .packed_vdma_channel_id = 0x21, .config_stream_index = 0 };
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL, &a1, sizeof(a1)));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &a2, sizeof(a2)));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, &a3, sizeof(a3)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)26 + 8 + 7, hailo_cs_builder_size(&b));
+
+    const uint8_t *d = hailo_cs_builder_data(&b);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,   d[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,       d[26]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, d[26 + 8]);
+
+    /* host_buffer_info.dma_address starts at offset 5 (common hdr) +
+     * 2 (packed_vdma_channel_id + config_stream_index) + 1 (buffer_type)
+     * = offset 8. It's a u64 native LE. */
+    uint64_t dma_addr;
+    memcpy(&dma_addr, d + 8, 8);
+    TEST_ASSERT_EQUAL_UINT64(0x123456789ABCDEF0ull, dma_addr);
+}
+
+static void test_cs_builder_returns_nomem_on_overflow(void)
+{
+    uint8_t small[6];   /* Too small for one 5+3=8 byte action. */
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, small, sizeof(small));
+    struct hailo_cs_act_fetch_ccw_bursts body = { .ccw_bursts = 1, .config_stream_index = 0 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &body, sizeof(body)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)0, hailo_cs_builder_size(&b));
+}
+
+static void test_cs_builder_rejects_null_buffer(void)
+{
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, NULL, 0);
+    struct hailo_cs_act_fetch_ccw_bursts body = { .ccw_bursts = 1, .config_stream_index = 0 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &body, sizeof(body)));
 }
 
 static void test_control_send_recv_default_rings_app_doorbell(void)
@@ -4985,6 +5087,10 @@ int test_suite_hailo(void)
     RUN_TEST(test_set_context_info_zero_length_is_single_chunk);
     RUN_TEST(test_set_context_info_chunk_rejects_oversize);
     RUN_TEST(test_set_context_info_chunk_rejects_null_with_nonzero_len);
+    RUN_TEST(test_cs_builder_append_emits_header_then_body);
+    RUN_TEST(test_cs_builder_appends_concatenate);
+    RUN_TEST(test_cs_builder_returns_nomem_on_overflow);
+    RUN_TEST(test_cs_builder_rejects_null_buffer);
     RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);
