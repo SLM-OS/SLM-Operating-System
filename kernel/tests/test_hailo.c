@@ -3298,6 +3298,19 @@ static void test_ccw_upload_ptr_variant_rejects_null_ccws_base(void)
     TEST_ASSERT_EQUAL_UINT32(0, mock_control_doorbells);
 }
 
+/* Shared builder for single-action out-of-bounds tests. */
+static void build_oob_action(struct hef_info *info, bool is_ptr,
+                             uint32_t offset, uint32_t size)
+{
+    memset(info, 0, sizeof(*info));
+    info->ccw_action_count = 1;
+    info->ccw_actions[0].is_ccw_ptr            = is_ptr;
+    info->ccw_actions[0].data_offset_in_blob   = offset;
+    info->ccw_actions[0].data_size             = size;
+    info->ccw_actions[0].cfg_channel_index_known = true;
+    info->ccw_total_bytes = size;
+}
+
 static void test_ccw_upload_rejects_action_past_ccws_size(void)
 {
     /* Malformed/adversarial HEF: action claims offset+size past the
@@ -3311,15 +3324,8 @@ static void test_ccw_upload_rejects_action_past_ccws_size(void)
     uint8_t proto[64];
     uint8_t ccws[128];
     struct hef_info info;
-    /* One action with size=64 starting at offset 100 → end=164 > 128. */
-    memset(&info, 0, sizeof(info));
-    info.ccw_action_count = 1;
-    info.ccw_actions[0].is_ccw_ptr            = true;
-    info.ccw_actions[0].data_offset_in_blob   = 100;
-    info.ccw_actions[0].data_size             = 64;
-    info.ccw_actions[0].cfg_channel_index     = 0;
-    info.ccw_actions[0].cfg_channel_index_known = true;
-    info.ccw_total_bytes = 64;
+    /* offset=100 + size=64 → end=164 > 128 */
+    build_oob_action(&info, /*is_ptr=*/true, 100, 64);
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
@@ -3339,13 +3345,8 @@ static void test_ccw_upload_rejects_action_past_blob_size(void)
 
     uint8_t blob[32];
     struct hef_info info;
-    memset(&info, 0, sizeof(info));
-    info.ccw_action_count = 1;
-    info.ccw_actions[0].is_ccw_ptr            = false;
-    info.ccw_actions[0].data_offset_in_blob   = 30;
-    info.ccw_actions[0].data_size             = 16;    /* 30+16=46 > 32 */
-    info.ccw_actions[0].cfg_channel_index_known = true;
-    info.ccw_total_bytes = 16;
+    /* offset=30 + size=16 → end=46 > 32 */
+    build_oob_action(&info, /*is_ptr=*/false, 30, 16);
 
     uint64_t uploaded = 0;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
@@ -4463,25 +4464,18 @@ static void test_hef_parser_edge_layer_direction_1_means_output(void)
     TEST_ASSERT_EQUAL_UINT32(24, info.pads[0].features);
 }
 
-static void test_inf_hailo_load_survives_ccw_upload_failure(void)
+static void test_inf_hailo_load_with_no_ccw_actions_succeeds(void)
 {
-    /* Build a HEF with a write_data_ccw action referencing bytes at
-     * a bogus offset inside the proto. When the backend tries to
-     * upload, the firmware mock isn't configured to accept the write,
-     * so the upload returns an error. The backend must treat that
-     * failure as NON-FATAL — the slot stays live, load_model returns
-     * OK, and the caller (ai_policy_hailo) can still use the handle.
-     * This mirrors the real-hardware behavior against v2+ HEFs where
-     * CCW upload via WRITE_MEMORY fails until the CONTEXT_SWITCH
-     * protocol is implemented.
+    /* build_test_hef produces a HEF with valid pads but NO
+     * write_data_ccw actions, so `info.ccw_action_count == 0` and
+     * upload_ccw_best_effort short-circuits. load_model returns OK
+     * and the slot is live.
      *
-     * Approach: reuse build_test_hef_with_edge_layers (which has
-     * valid pads but no CCW actions), then INJECT a write_data_ccw
-     * action pointing at bytes that won't be writable. Easier: just
-     * use build_test_hef (no CCW actions) — upload_ccw short-circuits
-     * on ccw_action_count=0, so there's nothing to fail. The
-     * survives-failure path with CCW actions is exercised more
-     * directly in the ccw_upload tests above. */
+     * The survives-failure-path-when-CCW-actions-exist scenario is
+     * exercised at the unit level by the test_ccw_upload_rejects_*
+     * tests above, which hit hailo_control_upload_ccw directly and
+     * confirm the bounds-check rejection without going through
+     * load_model. */
     struct inference_device *dev = hailo_backend_ready();
     TEST_ASSERT_NOT_NULL(dev);
 
@@ -4774,7 +4768,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad);
     RUN_TEST(test_hef_parser_edge_layer_uses_sys_index_when_pad_index_absent);
     RUN_TEST(test_hef_parser_edge_layer_direction_1_means_output);
-    RUN_TEST(test_inf_hailo_load_survives_ccw_upload_failure);
+    RUN_TEST(test_inf_hailo_load_with_no_ccw_actions_succeeds);
     RUN_TEST(test_inf_hailo_load_threads_hef_stream_info);
 
     return UnityEnd();

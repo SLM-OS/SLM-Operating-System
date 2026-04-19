@@ -483,13 +483,23 @@ static bool decode_write_data_ccw_ptr_cb(pb_istream_t *stream,
     cctx->pending.is_ccw_ptr = true;
     cctx->pending_has_data   = false;
 
+    /* Protobuf wire types (spec §3.1). Nanopb exposes these via
+     * PB_WT_* but only when the caller pulls in pb.h's internals;
+     * spell them locally for readability. */
+    enum {
+        WT_VARINT = 0,    /* int32/64, uint32/64, bool, enum */
+        WT_64BIT  = 1,    /* fixed64, sfixed64, double */
+        WT_LEN    = 2,    /* length-delimited (string, bytes, sub-msg) */
+        WT_32BIT  = 5,    /* fixed32, sfixed32, float */
+    };
+
     while (stream->bytes_left > 0) {
         uint64_t tag = 0;
         if (!pb_decode_varint(stream, &tag)) return false;
         uint32_t field_no  = (uint32_t)(tag >> 3);
         uint32_t wire_type = (uint32_t)(tag & 0x7u);
 
-        if (wire_type == 0) {   /* varint */
+        if (wire_type == WT_VARINT) {
             uint64_t v = 0;
             if (!pb_decode_varint(stream, &v)) return false;
             switch (field_no) {
@@ -515,15 +525,15 @@ static bool decode_write_data_ccw_ptr_cb(pb_istream_t *stream,
 
         /* Skip unknown wire types by size. */
         switch (wire_type) {
-        case 1: if (!pb_read(stream, NULL, 8)) return false; break;
-        case 2: {
+        case WT_64BIT: if (!pb_read(stream, NULL, 8)) return false; break;
+        case WT_LEN: {
             uint64_t len = 0;
             if (!pb_decode_varint(stream, &len)) return false;
             if (len > stream->bytes_left) return false;
             if (!pb_read(stream, NULL, (size_t)len)) return false;
             break;
         }
-        case 5: if (!pb_read(stream, NULL, 4)) return false; break;
+        case WT_32BIT: if (!pb_read(stream, NULL, 4)) return false; break;
         default: return false;
         }
     }
