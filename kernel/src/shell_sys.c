@@ -2584,15 +2584,46 @@ int cmd_poke(int argc, char *argv[])
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 /*
- * xhci - Show Tegra XHCI host-controller info (#266 Phase 3A). No
- * arguments. Dumps parsed capabilities + live USBCMD / USBSTS /
- * PAGESIZE. Reports "not live" if xhci_init bailed (typically because
- * the xusb clocks weren't held through kexec).
+ * xhci - Show Tegra XHCI host-controller info (#266 Phase 3A).
+ *
+ *   xhci                    Dump parsed capabilities + live USBCMD /
+ *                           USBSTS / PAGESIZE.
+ *   xhci port-cycle <n>     Diagnostic: toggle PORTSC[n].PP off → on
+ *                           and log before / during / after values.
+ *                           Used to characterize which ports actually
+ *                           re-evaluate physical state after a power
+ *                           cycle (see #309, #334).
  */
 int cmd_xhci(int argc, char *argv[])
 {
-    (void)argc; (void)argv;
     extern bool xhci_dump_info(void);
+    extern bool xhci_port_cycle(uint8_t port);
+
+    if (argc >= 2 && strcmp(argv[1], "port-cycle") == 0) {
+        if (argc < 3) {
+            shell_puts("usage: xhci port-cycle <port-index>\r\n");
+            return -1;
+        }
+        /* Simple decimal parse — all valid ports are single digit today. */
+        const char *s = argv[2];
+        int port = 0;
+        while (*s >= '0' && *s <= '9') {
+            port = port * 10 + (*s - '0');
+            s++;
+        }
+        if (*s != '\0' || port < 0 || port > 255) {
+            shell_puts("xhci port-cycle: bad port index\r\n");
+            return -1;
+        }
+        if (!xhci_port_cycle((uint8_t)port)) {
+            shell_puts("xhci port-cycle: failed (xhci not live or port "
+                       "out of range)\r\n");
+            return -1;
+        }
+        /* Success: the before/after values are logged via INFO. */
+        return 0;
+    }
+
     if (!xhci_dump_info())
         shell_puts("xhci: not live (clocks gated? check slmos-kexec)\r\n");
     return 0;

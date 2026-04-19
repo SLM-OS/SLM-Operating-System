@@ -1220,6 +1220,64 @@ void xhci_get_caps(struct xhci_caps *out)
         memset(out, 0, sizeof(*out));
 }
 
+/*
+ * xhci_port_cycle - diagnostic: write PP=0 → delay → PP=1 on PORTSC[port].
+ *
+ * Motivation: post-kexec on Tegra234, PORTSC values are frozen because
+ * the XUSB Falcon stops updating them after Linux hands over (see #309
+ * and #334). Manual experimentation showed that writing PORTSC.PP=0
+ * briefly drops the port and writing PP=1 brings it back into Polling,
+ * which is the seed of a proper re-detection. This helper runs that
+ * sequence for a given port so we can interactively test — on all 8
+ * ports, one at a time — whether the Falcon actually re-evaluates
+ * physical state after the toggle.
+ *
+ * Prints before / mid / after PORTSC via INFO() so the serial log pins
+ * the exact sequence. Returns true if the toggle ran, false if xhci is
+ * not live or `port` is out of range.
+ *
+ * Explicitly NOT wired into xhci_init — this is reconnaissance. Once we
+ * know which ports (if any) genuinely respond, the init-time integration
+ * will be a separate change.
+ */
+bool xhci_port_cycle(uint8_t port)
+{
+    if (!xhci_live)
+        return false;
+    if (port >= xhci_caps_cached.max_ports)
+        return false;
+
+    uint32_t before = r32(xhci_op_base, XHCI_OP_PORTSC(port));
+
+    /* Clear RW1CS change bits on every write so they don't get
+     * accidentally cleared by a spurious 1 in those positions. Force
+     * PP=0 while preserving everything else. */
+    uint32_t w_pp_off = (before & ~XHCI_PORTSC_RW1CS_MASK) & ~XHCI_PORTSC_PP;
+    w32(xhci_op_base, XHCI_OP_PORTSC(port), w_pp_off);
+
+    /* 20 ms — xHCI spec requires ≥10 ms between PP transitions for
+     * power-rail settling; 20 ms leaves slack. */
+    uint64_t freq  = timer_get_frequency();
+    uint64_t start = timer_get_count();
+    uint64_t ticks = freq / 50u;
+    while (timer_get_count() - start < ticks) { }
+
+    uint32_t mid = r32(xhci_op_base, XHCI_OP_PORTSC(port));
+
+    /* Now PP=1 — the controller should start port polling + chirp. */
+    uint32_t w_pp_on = (mid & ~XHCI_PORTSC_RW1CS_MASK) | XHCI_PORTSC_PP;
+    w32(xhci_op_base, XHCI_OP_PORTSC(port), w_pp_on);
+
+    start = timer_get_count();
+    while (timer_get_count() - start < ticks) { }
+
+    uint32_t after = r32(xhci_op_base, XHCI_OP_PORTSC(port));
+
+    INFO("xhci: port-cycle[%u]: before=0x%08x pp0=0x%08x after=0x%08x",
+         (unsigned)port, (unsigned)before, (unsigned)mid, (unsigned)after);
+    return true;
+}
+
 /* -------------------------------------------------------------------------- */
 /* HCD op table (entries defined across xhci.c / xhci_device.c / xhci_xfer.c)  */
 /* -------------------------------------------------------------------------- */
