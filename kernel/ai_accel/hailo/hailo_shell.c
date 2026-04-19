@@ -636,6 +636,62 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    if (argc >= 2 && strcmp(argv[1], "ctxsmoke") == 0) {
+        /* Phase 6.3d hardware probe: exercise the two context-switch
+         * opcodes (SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against
+         * live firmware with minimum-viable payloads, and report
+         * major/minor status for each. Goal: confirm CPU_ID_CORE_CPU
+         * routing works and discover which application_header fields
+         * firmware actually validates before we build the full
+         * HEF→action-list translator. */
+        if (hailo_get_state() != HAILO_STATE_RUNNING) {
+            shell_printf("hailo: ctxsmoke needs firmware booted (state=%s)\n",
+                         hailo_state_str(hailo_get_state()));
+            return 0;
+        }
+
+        /* Minimum header: declare 1 network, 1 dynamic context, batch
+         * size 1, no boundary channels, no config channels. Firmware
+         * may reject for missing channels — that's the signal we want.
+         * external_action_list_address must be HAILO_CS_NO_DDR_ACTION_LIST
+         * (0xFFFFFFFF); 0 is treated as a valid DDR pointer → reject. */
+        struct hailo_cs_application_header hdr;
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.dynamic_contexts_count  = 1;
+        hdr.networks_count          = 1;
+        hdr.batch_size              = 1;
+        hdr.csm_buffer_size         = 512;
+        hdr.external_action_list_address = HAILO_CS_NO_DDR_ACTION_LIST;
+        hdr.config_channels_count   = 0;
+
+        shell_puts("hailo: ctxsmoke:\n");
+        shell_puts("  [1/3] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
+        int rc = hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_RESET,
+            HAILO_CS_IGNORE_APPLICATION_INDEX,
+            /*batch_size=*/0, /*batch_count=*/0);
+        shell_printf("        rc=%d\n", rc);
+
+        shell_puts("  [2/3] SET_NETWORK_GROUP_HEADER...\n");
+        rc = hailo_control_set_network_group_header(&hdr);
+        shell_printf("        rc=%d\n", rc);
+
+        /* Minimum non-empty context: 5-byte common_action_header_t
+         * with action_type=HALT (0x2D) + zero timestamp. Firmware
+         * will reject on semantic grounds (HALT not valid in a
+         * preliminary context), but this takes us past the "zero-
+         * length context" gate (0x40130004) to a more specific
+         * error code. */
+        uint8_t halt_action[5] = { 0x2D, 0, 0, 0, 0 };  /* ACTION_TYPE_HALT=41 */
+        shell_puts("  [3/3] SET_CONTEXT_INFO (preliminary, 5-byte HALT placeholder)...\n");
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
+                                            halt_action, sizeof(halt_action));
+        shell_printf("        rc=%d\n", rc);
+
+        shell_puts("hailo: ctxsmoke done\n");
+        return 0;
+    }
+
     /* Default: one-line status. */
     shell_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
     return 0;
@@ -644,7 +700,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name    = "hailo",
     .handler = cmd_hailo,
-    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump)",
+    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke)",
     .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
 };
 

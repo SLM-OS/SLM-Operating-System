@@ -1834,7 +1834,7 @@ static void test_set_network_group_header_rings_core_doorbell_and_wire(void)
     h.networks_count            = 1;
     h.csm_buffer_size           = 0x1234;
     h.batch_size                = 2;
-    h.external_action_list_address = 0;
+    h.external_action_list_address = HAILO_CS_NO_DDR_ACTION_LIST;
     h.boundary_channels_bitmap[0] = 0x00000005;   /* engine 0, channels 0+2 */
     h.config_channels_count     = 1;
     h.config_channel_packed_id[0] = 0x11;
@@ -1847,8 +1847,8 @@ static void test_set_network_group_header_rings_core_doorbell_and_wire(void)
 
     /* Inspect the captured request wire bytes:
      * [common header 16][parameter_count 4][application_header_length 4]
-     * [application_header 53]. */
-    TEST_ASSERT_TRUE(mock_last_control_request_len >= 16 + 4 + 4 + 53);
+     * [application_header 32]. */
+    TEST_ASSERT_TRUE(mock_last_control_request_len >= 16 + 4 + 4 + 32);
     const uint8_t *req = mock_last_control_request;
     uint32_t opcode, param_count, app_len;
     memcpy(&opcode,      req + 12, 4);  /* offset of `opcode` in common header */
@@ -1858,7 +1858,7 @@ static void test_set_network_group_header_rings_core_doorbell_and_wire(void)
         __builtin_bswap32(HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER),
         opcode);
     TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(1u),  param_count);
-    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(53u), app_len);
+    TEST_ASSERT_EQUAL_UINT32(__builtin_bswap32(32u), app_len);
 
     /* application_header bytes, native LE. Start at offset 24. */
     const uint8_t *ah = req + 24;
@@ -1868,23 +1868,22 @@ static void test_set_network_group_header_rings_core_doorbell_and_wire(void)
     TEST_ASSERT_EQUAL_UINT8(1, ah[2]);   /* preliminary_run_asap */
     TEST_ASSERT_EQUAL_UINT8(0, ah[3]);   /* batch_register_config */
     TEST_ASSERT_EQUAL_UINT8(0, ah[4]);   /* can_fast_batch_switch */
-    TEST_ASSERT_EQUAL_UINT8(0, ah[5]);   /* split_allow_input_action */
-    TEST_ASSERT_EQUAL_UINT8(0, ah[6]);   /* is_abbale_supported */
-    TEST_ASSERT_EQUAL_UINT8(1, ah[7]);   /* networks_count */
+    TEST_ASSERT_EQUAL_UINT8(0, ah[5]);   /* is_abbale_supported */
+    TEST_ASSERT_EQUAL_UINT8(1, ah[6]);   /* networks_count */
     uint16_t csm;
-    memcpy(&csm, ah + 8, 2);
+    memcpy(&csm, ah + 7, 2);
     TEST_ASSERT_EQUAL_UINT16(0x1234, csm);
     uint16_t bs;
-    memcpy(&bs, ah + 10, 2);
+    memcpy(&bs, ah + 9, 2);
     TEST_ASSERT_EQUAL_UINT16(2, bs);
     uint32_t ext_addr;
-    memcpy(&ext_addr, ah + 12, 4);
-    TEST_ASSERT_EQUAL_UINT32(0, ext_addr);
+    memcpy(&ext_addr, ah + 11, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_NO_DDR_ACTION_LIST, ext_addr);
     uint32_t bitmap0;
-    memcpy(&bitmap0, ah + 16, 4);
+    memcpy(&bitmap0, ah + 15, 4);
     TEST_ASSERT_EQUAL_UINT32(0x00000005, bitmap0);
-    TEST_ASSERT_EQUAL_UINT8(1,    ah[28]);   /* config_channels_count */
-    TEST_ASSERT_EQUAL_UINT8(0x11, ah[29]);   /* config_channel_packed_id[0] */
+    TEST_ASSERT_EQUAL_UINT8(1,    ah[27]);   /* config_channels_count */
+    TEST_ASSERT_EQUAL_UINT8(0x11, ah[28]);   /* config_channel_packed_id[0] */
 }
 
 static void test_set_network_group_header_rejects_null(void)

@@ -106,6 +106,7 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_CONFIG_STREAM                        = 0x03,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER = 0x20,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO      = 0x21,
+    HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS         = 0x25,
     /* Full table in docs/reference/hailort-control-protocol.h. */
 };
 
@@ -448,12 +449,24 @@ int hailo_control_config_stream_pcie(
 /*
  * Constants mirroring hailort's context-switch protocol, kept here
  * so callers don't have to drag in the whole hailort header set.
- * See docs/reference/hailort-control-protocol.h lines 40-93 for
- * upstream definitions.
+ *
+ * IMPORTANT: MAX_CFG_CHANNELS is 4 in firmware v4.23 (running on the
+ * AI HAT+ in the lab), NOT the 24 the cached reference header
+ * docs/reference/hailort-control-protocol.h shows for newer releases.
+ * The application_header_t wire size is 32 bytes on v4.23; firmware
+ * rejects any other length with
+ * CONTROL_PROTOCOL_STATUS_INVALID_CONTEXT_SWITCH_APP_HEADER_LENGTH
+ * (major=0x40030060). See docs/pi5-ai-hat-plan.md §6.3.
  */
-#define HAILO_CS_MAX_CFG_CHANNELS         24u   /* CONTROL_PROTOCOL__MAX_CFG_CHANNELS */
+#define HAILO_CS_MAX_CFG_CHANNELS         4u    /* v4.23 firmware */
 #define HAILO_CS_MAX_VDMA_ENGINES         3u    /* CONTROL_PROTOCOL__MAX_VDMA_ENGINES_COUNT */
 #define HAILO_CS_MAX_CONTEXT_SIZE         4096u /* CONTROL_PROTOCOL__MAX_CONTEXT_SIZE */
+
+/* `external_action_list_address` sentinel for "no DDR backing — use
+ * control-channel action lists". HailoRT calls this
+ * CONTEXT_SWITCH_DEFS__INVALID_DDR_CONTEXTS_BUFFER_ADDRESS. 0 would
+ * be interpreted as a valid DDR pointer → firmware rejects. */
+#define HAILO_CS_NO_DDR_ACTION_LIST       0xFFFFFFFFu
 
 /* Context_type values for SET_CONTEXT_INFO. Mirrors
  * CONTROL_PROTOCOL__context_switch_context_type_t. */
@@ -479,17 +492,21 @@ enum hailo_cs_context_type {
  */
 struct hailo_cs_application_header {
     uint16_t dynamic_contexts_count;
-    /* INFER_FEATURE_LIST_t — 4 bools, all default-false. */
+    /* INFER_FEATURE_LIST_t — 3 bools on v4.23, all default-false.
+     * split_allow_input_action exists only in newer firmware. */
     bool     preliminary_run_asap;
     bool     batch_register_config;
     bool     can_fast_batch_switch;
-    bool     split_allow_input_action;
     /* VALIDATION_FEATURE_LIST_t — 1 bool, default false. */
     bool     is_abbale_supported;
     uint8_t  networks_count;
     uint16_t csm_buffer_size;
     uint16_t batch_size;
-    uint32_t external_action_list_address;              /* 0 = control-channel path */
+    /* Pass HAILO_CS_NO_DDR_ACTION_LIST (0xFFFFFFFF) for the
+     * control-channel action-list path — Phase 6.3 only supports
+     * this path. Zero is interpreted as a valid DDR pointer by
+     * firmware and will be rejected. */
+    uint32_t external_action_list_address;
     uint32_t boundary_channels_bitmap[HAILO_CS_MAX_VDMA_ENGINES];
     uint8_t  config_channels_count;
     uint8_t  config_channel_packed_id[HAILO_CS_MAX_CFG_CHANNELS];
@@ -567,6 +584,40 @@ int hailo_control_set_context_info(
     enum hailo_cs_context_type context_type,
     const void                *network_data,
     uint32_t                   network_data_len);
+
+/* State-machine targets for CHANGE_CONTEXT_SWITCH_STATUS (opcode 0x25,
+ * CPU_ID_CORE_CPU). Mirrors CONTROL_PROTOCOL__CONTEXT_SWITCH_STATUS_t. */
+enum hailo_cs_state {
+    HAILO_CS_STATE_RESET   = 0,
+    HAILO_CS_STATE_ENABLED = 1,
+};
+
+/* IGNORE_NETWORK_GROUP_INDEX per hailort-control.cpp:2054 — used
+ * with STATE_RESET where the application_index field is meaningless. */
+#define HAILO_CS_IGNORE_APPLICATION_INDEX  255u
+
+/*
+ * CHANGE_CONTEXT_SWITCH_STATUS (opcode 0x25, CPU_ID_CORE_CPU).
+ * Drives the firmware's context-switch state machine between RESET
+ * (idle, ready to accept a new network group) and ENABLED (running).
+ * Must be called with RESET BEFORE SET_NETWORK_GROUP_HEADER; firmware
+ * rejects header/context writes with major=0x40030060 otherwise (this
+ * is what the 2026-04-19 ctxsmoke hardware probe returned on pi-5-1).
+ *
+ * `application_index` is the network-group index (0 for the first
+ * and only loaded NG); pass HAILO_CS_IGNORE_APPLICATION_INDEX on
+ * RESET. `dynamic_batch_size` / `batch_count` are inference-time
+ * params — ignored on RESET, honored on ENABLED (0 / 0 for a simple
+ * "enable with loaded batch size" pattern).
+ *
+ * Returns HAILO_OK, HAILO_ERR_IO on firmware non-zero status, or
+ * transport errors.
+ */
+int hailo_control_change_context_switch_status(
+    enum hailo_cs_state state,
+    uint8_t             application_index,
+    uint16_t            dynamic_batch_size,
+    uint16_t            batch_count);
 
 /*
  * Reset internal control-channel state (sequence counter and the
