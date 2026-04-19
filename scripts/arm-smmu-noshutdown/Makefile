@@ -5,6 +5,7 @@
 # the kexec handoff to preserve the xusb stream's SMMU translations.
 
 obj-m += arm_smmu_noshutdown.o
+obj-m += smmu_probe.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)

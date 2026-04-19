@@ -955,9 +955,12 @@ approach. A runtime post-probe bypass is the key distinction.
   problem — tegra-xusb has no `.shutdown` callback on any tested
   L4T kernel.
 - **Keep SMMU alive via arm-smmu `.shutdown`=NULL (A.5)**:
-  `scripts/arm-smmu-noshutdown/`. Module loads but reports
-  "shutdown already NULL" on L4T 36.4.7 — see §10.3 for the
-  actual caller to find.
+  `scripts/arm-smmu-noshutdown/`. The original template version
+  reported "shutdown already NULL" on L4T 36.4.7 because it was
+  NULLing the wrong struct field — §10.8 has the follow-up
+  investigation. The current version NULLs the correct field and
+  demonstrably prevents arm_smmu_device_shutdown() from firing,
+  but on its own does NOT unblock NO_OP.
 - **iommu.passthrough=1 cmdline**: breaks tegra-xusb probe (Falcon
   firmware load fails); aperture is not readable post-boot. Do not
   re-add this flag.
@@ -972,6 +975,140 @@ approach. A runtime post-probe bypass is the key distinction.
   post-kexec; this is defensive-only, not a fix.
 - **BAR2 FW_SCRATCH IOCTL probe**: triggers RAS uncorrectable →
   core power-off. Guarded with `__attribute__((unused))`.
+
+### 10.8 After-action from the 2026-04-18 Path 1 session
+
+This section updates §10.3 / §10.5 with what was learned on
+jetson-nano-1 hardware during a full Path 1 / Path 3 attempt.
+Everything here is observed behaviour, not hypothesis.
+
+**Caller of `arm_smmu_device_shutdown` identified.** On L4T 5.15.148
+the caller is `platform_drv_shutdown` (the platform bus's own shutdown
+dispatch, installed as `platform_bus_type.shutdown = platform_shutdown`).
+A diagnostic module that reads both halves of the driver struct
+shows:
+
+```
+smmu-probe:   .shutdown = arm_smmu_device_shutdown+0x0/0x40
+smmu-probe:   .driver.bus->shutdown = platform_shutdown+0x0/0x60
+```
+
+The previous template's "shutdown already NULL" result came from a
+struct-field bug: it was NULLing `device_driver.shutdown` (the base
+struct), but the platform bus dispatches shutdown through
+`platform_driver.shutdown`, a SEPARATE field on the outer
+platform_driver struct. NULLing the base field is a no-op for a
+platform driver; the correct field is reached via
+`to_platform_driver(drv)`. That fix is now in
+`scripts/arm-smmu-noshutdown/arm_smmu_noshutdown.c` and verified on
+hardware (post-load, the diagnostic reports `.shutdown = (null)`
+and kexec dmesg no longer contains `arm-smmu ... disabling
+translation`).
+
+**Path 1 alone does NOT unblock NO_OP, and does not reliably even
+unblock `USBCMD.RUN=1`.** Four empirical runs (plus a baseline
+control) on a freshly-booted jetson-nano-1 all ended in the same
+state SLM-OS reported before this session:
+
+```
+[WARN] xhci: controller failed to start (USBSTS=0xffffffff)
+```
+
+A single earlier run on the same hardware (board had been up for
+~112 minutes with miscellaneous module-load / probe operations in
+between) saw `USBCMD.RUN=1` succeed (`USBSTS=0x00000000`) followed
+by NO_OP timeout, but that result was not reproducible. The aperture
+wedge is the more common outcome; the Path 1 field fix alone is
+INSUFFICIENT to meet §10.3's "RUN=1 does not wedge the aperture"
+success criterion by itself.
+
+**Why the bypass variants do not improve matters.** Four variants
+beyond plain NULL were tested and all regressed or behaved no
+better:
+
+1. Replacement `.shutdown` that writes `sCR0 = CLIENTPD` but skips
+   the clock teardown — wedges the aperture. Tegra-xusb has no
+   `.shutdown`, so the xHCI is still actively DMA-ing when the
+   bypass flips; in-flight IOVAs (e.g. DCBAAP = 0x7ffffff000) get
+   reinterpreted as raw PAs in unmapped regions and the HC's next
+   DMA trips a fabric error.
+2. Same replacement but targeting only SMMU0 (the instance that
+   serves xusb per the DT iommus phandle → 0xf0 / stream ID 0x0e)
+   — wedges identically.
+3. Same replacement preserving existing sCR0 bits (`value | CLIENTPD`
+   instead of `value = CLIENTPD`) — wedges identically.
+4. SLM-OS-side `sCR0 = CLIENTPD` write after `xhci_halt()`, with
+   the NULL-field module preserving SMMU clocks across kexec —
+   wedges identically. Reverted; see
+   `git log scripts/arm-smmu-noshutdown/` for the full session
+   history.
+5. reboot_notifier firing from `kernel_restart_prepare()` —
+   produces `tegra-mc: EMEM address decode error` messages during
+   Linux's remaining shutdown steps, because the notifier fires
+   BEFORE `device_shutdown()` drains xhci / other DMA masters.
+   `syscore_shutdown()` is NOT called on the kexec path in 5.15
+   (only on `kernel_restart()`), so there is no cross-subsystem
+   hook that fires AFTER `device_shutdown()`.
+
+**New follow-on blocker to track.** What the Path 1 field fix
+achieves in practice is "Linux no longer writes CLIENTPD into the
+SMMU on kexec, and no longer tears down SMMU clocks". The fabric
+is therefore in a cleaner state on entry to SLM-OS, but the xHCI
+controller's state and the SMMU's active Linux context banks are
+unchanged. The next step — either Path 2 (port arm-smmu-v2 subset
+so SLM-OS can program its own context bank that maps its raw PAs)
+or a more careful pre-kexec quiescing sequence — is now the
+documented follow-on.
+
+**Option 1: Linux-side `iommu_map()` identity mapping (2026-04-18).**
+Instead of porting SMMU code into SLM-OS, the shutdown-suppression
+module was extended to ask Linux's existing arm-smmu driver to add
+an identity mapping (IOVA==PA) on the xusb stream's
+`iommu_domain` before the handoff. Concretely:
+
+```c
+xusb_dev = bus_find_device_by_name(&platform_bus_type, NULL, "3610000.usb");
+domain  = iommu_get_domain_for_dev(xusb_dev);  /* IOMMU_DOMAIN_DMA */
+iommu_map(domain, SLMOS_NC_BASE, SLMOS_NC_BASE, 2MB, READ|WRITE);
+```
+
+This ran cleanly on hardware:
+
+```
+arm-smmu-noshutdown: xusb iommu_domain type=3 (IOMMU_DOMAIN_DMA=3, IDENTITY=4, UNMANAGED=1)
+arm-smmu-noshutdown: added identity IOMMU mapping IOVA 0xbde00000..0xbe000000
+  (PA identical) on xusb domain
+```
+
+IOMMU_DOMAIN_DMA was expected to reject direct `iommu_map()` calls
+(dma-iommu normally manages the IOVA allocator), but 5.15's
+`__iommu_map` in fact allows the call and wires it into the
+underlying io-pgtable. That's the key enabling surprise.
+
+**Hardware result — both success criteria met.** Post-kexec,
+SLM-OS's xhci init prints:
+
+```
+[INFO] xhci: controller running (USBSTS=0x00000000)
+[INFO] xhci: skipping non-command event type 32
+[INFO] xhci: skipping non-command event type 32
+[INFO] xhci: NO_OP round-trip OK (cc=SUCCESS, cmd_trb @0xbde04180)
+```
+
+`USBCMD.RUN=1` no longer wedges the aperture AND the HC successfully
+DMA-reads a command-ring TRB from SLM-OS's NC memory (0xbde04180 is
+inside the identity-mapped 0xbde00000..0xbe000000 range) and writes
+the completion event back to the event ring — a full round-trip
+through the SMMU with translation still enforced. The two
+`skipping non-command event type 32` lines are leftover Port Status
+Change events from Linux's prior xHCI session; the NO_OP handler
+walks past them to find its own completion.
+
+This unblocks #266 Phase 3A Steps 5-7 (port enumeration +
+CONFIGURE_ENDPOINT + bulk transfers). The Option 1 fix is purely
+on the Linux side (no SLM-OS code changes): load
+`scripts/arm-smmu-noshutdown/arm_smmu_noshutdown.ko` before kexec,
+and SLM-OS inherits a usable SMMU + xHCI.
 
 ### 10.7 Contact points for a blocked investigation
 

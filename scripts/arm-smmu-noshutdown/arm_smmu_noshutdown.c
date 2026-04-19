@@ -1,30 +1,27 @@
 /*
- * arm-smmu-noshutdown — Linux kernel module that NULLs the arm-smmu
- * platform driver's .shutdown callback, so Linux's kexec path
- * preserves the SMMU's translation state across the handoff.
+ * arm-smmu-noshutdown — Linux kernel module that prepares the L4T
+ * kexec path for a clean handoff into SLM-OS.
  *
- * Purpose: SLM-OS #266 Phase 3A Option A.5 (successor to A.4).
- * A.4 targeted tegra-xusb but discovered that driver has no
- * .shutdown callback at all. The REAL blocker is arm-smmu's
- * shutdown path, which writes sCR0 |= CLIENTPD (disables all
- * client-port translation) before disabling the SMMU's clocks.
- * After that, any DMA transaction from the xHCI controller faults
- * internally, wedging the MMIO aperture when SLM-OS writes
- * USBCMD.RUN=1.
+ * Two things happen on insmod, and both are necessary for SLM-OS's
+ * xHCI driver to reach `NO_OP round-trip OK` after the handoff:
  *
- * NULLing arm-smmu's .shutdown pointer makes device_shutdown()
- * skip the CLIENTPD write, leaving translations live. The SMMU
- * context banks that Linux programmed for the xusb stream (the
- * IOVA mappings for DCBAAP and friends) remain valid, and SLM-OS's
- * first DMA on RUN=1 goes through cleanly.
+ *   1. Neutralise arm-smmu's platform_driver.shutdown so
+ *      arm_smmu_device_shutdown() stops firing from
+ *      device_shutdown() on kexec. This keeps the SMMU's clocks
+ *      alive and leaves Linux's IOVA-bound context banks in place
+ *      across the handoff.
  *
- * Trade-off: with translations live during the Linux→SLM-OS
- * transition, any residual DMA activity from other devices (NVMe,
- * network, audio) can write to memory they're mapped into. In
- * practice those drivers' own .shutdown callbacks fire first and
- * drain their pipelines — so the window where live translations
- * could cause trouble is small. Confirmed in local testing that
- * SLM-OS boots cleanly through this path.
+ *   2. Ask Linux's iommu subsystem to add an identity mapping
+ *      (IOVA == PA) for SLM-OS's 2 MB NC region on the xusb
+ *      stream's active iommu_domain, so SLM-OS can program DCBAAP
+ *      / CRCR with raw physical addresses and have them translate
+ *      straight through.
+ *
+ * See docs/jetson-usb-networking-plan.md §10.3 and §10.8 for the
+ * full investigation, including the struct-field bug the previous
+ * template had (NULLing the wrong field on device_driver) and the
+ * four alternative approaches that were tested and ruled out before
+ * converging on the identity-mapping design.
  *
  * Usage:
  *   insmod arm_smmu_noshutdown.ko
@@ -36,43 +33,136 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/iommu.h>
 #include <linux/platform_device.h>
+
+#include "arm_smmu_noshutdown.h"
+
+static bool iommu_mapping_added;
+
+/*
+ * Ask Linux's iommu subsystem to add an identity mapping for SLM-OS's
+ * 2 MB NC region on the xusb stream's active domain. After this call,
+ * HC DMAs the SLM-OS xHCI driver issues with IOVA == 0xBDE00000+
+ * translate straight through to the same physical addresses — no
+ * bypass, no context-bank replacement, no race with other live DMA
+ * on this or any other SMMU instance.
+ */
+static int arm_smmu_noshutdown_map_slmos_region(void)
+{
+    struct device *xusb_dev;
+    struct iommu_domain *domain;
+    int rc;
+
+    /* The tegra-xusb platform device the xHCI host controller is
+     * bound to. Name is the DT unit-address form ("@3610000" →
+     * "3610000.usb"). Found at boot time; the device is stable for
+     * the life of the kernel. */
+    xusb_dev = bus_find_device_by_name(&platform_bus_type, NULL,
+                                        "3610000.usb");
+    if (!xusb_dev) {
+        pr_warn("arm-smmu-noshutdown: tegra-xusb 3610000.usb not "
+                "found — cannot add SLM-OS IOMMU mapping\n");
+        return -ENODEV;
+    }
+
+    domain = iommu_get_domain_for_dev(xusb_dev);
+    if (!domain) {
+        pr_warn("arm-smmu-noshutdown: xusb has no attached "
+                "iommu_domain — cannot add SLM-OS IOMMU mapping\n");
+        put_device(xusb_dev);
+        return -ENODEV;
+    }
+
+    pr_info("arm-smmu-noshutdown: xusb iommu_domain type=%d "
+            "(IOMMU_DOMAIN_DMA=%d, IDENTITY=%d, UNMANAGED=%d)\n",
+            domain->type, IOMMU_DOMAIN_DMA, IOMMU_DOMAIN_IDENTITY,
+            IOMMU_DOMAIN_UNMANAGED);
+
+    rc = iommu_map(domain, SLMOS_NC_BASE, SLMOS_NC_BASE, SLMOS_NC_SIZE,
+                   IOMMU_READ | IOMMU_WRITE);
+    if (rc) {
+        pr_warn("arm-smmu-noshutdown: iommu_map(IOVA=0x%lx PA=0x%lx "
+                "size=0x%lx) failed: %d\n",
+                SLMOS_NC_BASE, SLMOS_NC_BASE, SLMOS_NC_SIZE, rc);
+    } else {
+        iommu_mapping_added = true;
+        pr_info("arm-smmu-noshutdown: added identity IOMMU mapping "
+                "IOVA 0x%lx..0x%lx (PA identical) on xusb domain "
+                "(#266 Phase 3A Path 1 option 1)\n",
+                SLMOS_NC_BASE, SLMOS_NC_BASE + SLMOS_NC_SIZE);
+    }
+
+    put_device(xusb_dev);
+    return rc;
+}
 
 static int __init arm_smmu_noshutdown_init(void)
 {
     struct device_driver *drv = driver_find("arm-smmu", &platform_bus_type);
+    struct platform_driver *pdrv;
+
     if (!drv) {
         pr_warn("arm-smmu-noshutdown: arm-smmu driver not found — no-op\n");
         return 0;
     }
 
-    if (drv->shutdown) {
+    pdrv = to_platform_driver(drv);
+
+    if (pdrv->shutdown) {
         /*
-         * No lock / WRITE_ONCE / barrier around this store. It's
-         * safe because `drv->shutdown` is only ever invoked from
-         * `device_shutdown()` on the kernel's reboot / kexec /
-         * poweroff path, which runs single-threaded after all
-         * userspace is torn down. At module-load time no reboot
-         * is in flight, so no concurrent reader exists. The
-         * kexec-path `device_shutdown()` walks drv->shutdown
-         * once, and by the time it does this module has long
-         * since finished loading.
+         * Plain pointer store. Safe because platform_drv_shutdown()
+         * only reads this field under device_shutdown() on the
+         * reboot / kexec / poweroff path, which runs single-threaded
+         * after all userspace is gone. At module-load time no kexec
+         * is in flight, so no concurrent reader exists. By the time
+         * one appears the new value is already in place.
          */
-        drv->shutdown = NULL;
-        pr_info("arm-smmu-noshutdown: NULLed arm-smmu driver->shutdown "
-                "(#266 Phase 3A A.5) — SMMU translations will survive kexec\n");
+        pdrv->shutdown = NULL;
+        pr_info("arm-smmu-noshutdown: NULLed arm-smmu "
+                "platform_driver->shutdown (#266 Phase 3A) — "
+                "arm_smmu_device_shutdown() will no longer fire at "
+                "kexec\n");
     } else {
-        pr_info("arm-smmu-noshutdown: shutdown already NULL — no-op\n");
+        pr_info("arm-smmu-noshutdown: platform_driver->shutdown "
+                "already NULL — no-op\n");
     }
+
+    /* Independent of the shutdown suppression above — if this fails
+     * we still want the shutdown-suppression half of the fix to take
+     * effect, and the failure mode is observable in dmesg. */
+    (void)arm_smmu_noshutdown_map_slmos_region();
+
     return 0;
 }
 
 static void __exit arm_smmu_noshutdown_exit(void)
 {
     /*
-     * Do NOT restore the original pointer. Same rationale as the
-     * tegra-xusb variant — load-and-forget-until-reboot model.
+     * Reverse the IOMMU mapping on rmmod so a subsequent reload of
+     * a rebuilt module doesn't see `iommu_map` fail with -EEXIST.
+     * `platform_driver.shutdown` is deliberately NOT restored —
+     * load-and-forget model; restoring the pointer would reopen the
+     * exact failure we came here to prevent.
      */
+    if (iommu_mapping_added) {
+        struct device *xusb_dev =
+            bus_find_device_by_name(&platform_bus_type, NULL,
+                                     "3610000.usb");
+        if (xusb_dev) {
+            struct iommu_domain *domain =
+                iommu_get_domain_for_dev(xusb_dev);
+            if (domain) {
+                size_t unmapped = iommu_unmap(domain, SLMOS_NC_BASE,
+                                               SLMOS_NC_SIZE);
+                pr_info("arm-smmu-noshutdown: iommu_unmap returned "
+                        "%zu bytes (expected %lu)\n",
+                        unmapped, SLMOS_NC_SIZE);
+            }
+            put_device(xusb_dev);
+        }
+        iommu_mapping_added = false;
+    }
 }
 
 module_init(arm_smmu_noshutdown_init);
@@ -80,5 +170,6 @@ module_exit(arm_smmu_noshutdown_exit);
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("SLM-OS (John Jezl)");
-MODULE_DESCRIPTION("Skip arm-smmu .shutdown so SMMU translations "
-                   "survive kexec into SLM-OS. See #266, #285.");
+MODULE_DESCRIPTION("Suppress arm-smmu .shutdown and install identity "
+                   "IOMMU mapping for the xusb stream across kexec "
+                   "into SLM-OS. See #266, #285.");
