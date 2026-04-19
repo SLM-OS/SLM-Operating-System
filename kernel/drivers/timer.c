@@ -7,6 +7,7 @@
 #include "timer.h"
 #include "gic.h"
 #include "sched.h"
+#include "task.h"       /* task_sleep_ms, task_wake_sleepers (#319) */
 #include "uart.h"
 #include "debug.h"
 #include "platform.h"
@@ -194,22 +195,16 @@ void timer_percpu_init(void)
 
 /*
  * Sleep the current task for the given number of milliseconds.
+ *
+ * Delegates to task_sleep_ms (#319) — the scheduler-blocking primitive
+ * in kernel/sched/task_sleep.c. The old busy-wait implementation (a
+ * yield loop on CNTPCT_EL0) left the caller on the run queue the
+ * entire time, stealing scheduling slots from genuinely-ready work
+ * and preventing the idle task from wfi'ing to save power.
  */
 void sleep_ms(uint32_t ms)
 {
-    if (ms == 0) {
-        return;
-    }
-
-    /* Simple busy-wait implementation for initial bring-up.
-     * Uses the hardware timer counter directly — no task blocking. */
-    uint64_t freq = read_cntfrq();
-    uint64_t target = read_cntpct() + (freq / 1000) * ms;
-
-    while (read_cntpct() < target) {
-        /* Yield to let other tasks run while we wait */
-        yield();
-    }
+    task_sleep_ms(ms);
 }
 
 /*
@@ -230,12 +225,15 @@ void sleep_us(uint64_t us)
 }
 
 /*
- * Wake sleeping tasks (no-op in busy-wait implementation).
+ * Wake sleeping tasks — delegates to the scheduler's sleep queue.
  *
- * The busy-wait sleep uses yield() in a loop, so tasks never enter
- * TASK_BLOCKED state. This stub is kept for API compatibility.
+ * Historically this was a stub because sleep_ms busy-waited. Now
+ * sleep_ms goes through task_sleep_ms (#319) which enqueues on a
+ * real sleep queue; this function is kept for API compatibility
+ * and forwards to task_wake_sleepers so any caller expecting the
+ * old symbol still works.
  */
 void timer_wake_sleepers(void)
 {
-    /* No-op: busy-wait sleep doesn't use a sleep queue */
+    task_wake_sleepers();
 }

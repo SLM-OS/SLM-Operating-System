@@ -632,6 +632,9 @@ void scheduler_init(void)
     extern void task_table_init(void);
     task_table_init();
 
+    /* Initialize sleep queue (#319) */
+    task_sleep_init();
+
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* Allocate diagnostic counters from NC memory for cross-CPU visibility */
     sched_diag_tick = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
@@ -1973,6 +1976,15 @@ void scheduler_start(uint32_t this_cpu)
 void scheduler_tick(void)
 {
     uint32_t cpu = cpu_id();
+
+    /* Wake any task whose sleep deadline has passed (#319). Cheap walk
+     * of a global list; bounded by MAX_TASKS. task_wake_sleepers only
+     * flips state back to TASK_READY and calls scheduler_add_task — it
+     * does NOT schedule itself, so calling it during the preempt-
+     * disabled window below is safe. Placed here (before the
+     * preempt_disabled short-circuit at the next block) so sleepers
+     * still wake even while this CPU is mid-context-switch. */
+    task_wake_sleepers();
 
     /* Always count ticks (used by sleep_ms, uptime, benchmarks) */
     sched.timer_ticks++;

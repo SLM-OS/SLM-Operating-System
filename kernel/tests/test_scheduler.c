@@ -287,6 +287,151 @@ static void test_task_slot_skips_freed_by_id(void)
 }
 
 /* ============================================================================
+ * Unit Tests: task_sleep_ms() scheduler-blocking sleep (#319)
+ * ============================================================================ */
+
+/*
+ * task_sleep_ms(0) is a no-op — returns without enqueueing or yielding.
+ * Measuring wall clock is overkill; just confirm it returns promptly.
+ */
+static void test_task_sleep_ms_zero_returns_immediately(void)
+{
+    uint64_t freq = timer_get_frequency();
+    uint64_t start = timer_get_count();
+    task_sleep_ms(0);
+    uint64_t elapsed = timer_get_count() - start;
+
+    /* Should complete in well under a millisecond — no scheduler round-trip. */
+    TEST_ASSERT_LESS_THAN(freq / 1000, elapsed);
+}
+
+/*
+ * task_sleep_ms(N) must sleep at least N ms. Measure CNTPCT delta
+ * across the call and convert to milliseconds.
+ *
+ * Upper bound: on a single-task test harness, the sleep queue wake
+ * happens via the next scheduler_tick from whichever CPU is running
+ * (coop-preempt or real IRQ). Some slop is expected — use a 4x cap
+ * so the test is robust to host scheduling jitter under QEMU.
+ */
+static void test_task_sleep_ms_sleeps_at_least_ms(void)
+{
+    const uint32_t sleep_ms_request = 50;
+
+    uint64_t freq = timer_get_frequency();
+    uint64_t start = timer_get_count();
+    task_sleep_ms(sleep_ms_request);
+    uint64_t elapsed = timer_get_count() - start;
+
+    uint64_t elapsed_ms = (elapsed * 1000) / freq;
+
+    TEST_ASSERT_GREATER_OR_EQUAL(sleep_ms_request, elapsed_ms);
+    TEST_ASSERT_LESS_THAN(sleep_ms_request * 4, elapsed_ms);
+}
+
+/*
+ * After task_sleep_ms returns, the task must be TASK_READY (not
+ * TASK_BLOCKED — task_wake_sleepers set it back) and wake_time_ns
+ * must be cleared so a subsequent sleep works correctly.
+ */
+static void test_task_sleep_ms_clears_wake_state(void)
+{
+    task_sleep_ms(10);
+
+    struct task *self = task_current();
+    TEST_ASSERT_NOT_NULL(self);
+    TEST_ASSERT_EQUAL_UINT64(0, self->wake_time_ns);
+    TEST_ASSERT_NULL(self->sleep_next);
+    /* State is TASK_RUNNING while the task is executing (us). */
+    TEST_ASSERT_TRUE(self->state == TASK_RUNNING ||
+                     self->state == TASK_READY);
+}
+
+/*
+ * Multi-sleeper: two concurrent sleepers with different deadlines must
+ * both run their post-sleep code, and the shorter sleeper must finish
+ * first. Exercises the sleep queue with > 1 entry (single-entry case
+ * is covered above) and proves task_wake_sleepers walks the whole
+ * list rather than just the head.
+ *
+ * Shared state lives in file-scope statics rather than a per-test
+ * context struct because the sleeper entry functions are plain
+ * task_entry_t callbacks — there's no hook to pass a closure through.
+ * Reset at the top of the test runner so re-entry behaves cleanly.
+ */
+static volatile uint32_t sleep_multi_order[2];
+static volatile uint32_t sleep_multi_finished_count;
+
+static void sleep_short_entry(void *arg)
+{
+    (void)arg;
+    task_sleep_ms(20);
+    uint32_t n = __atomic_fetch_add(&sleep_multi_finished_count, 1,
+                                    __ATOMIC_SEQ_CST);
+    sleep_multi_order[n] = 1;  /* short sleeper identifier */
+    task_exit();
+}
+
+static void sleep_long_entry(void *arg)
+{
+    (void)arg;
+    task_sleep_ms(80);
+    uint32_t n = __atomic_fetch_add(&sleep_multi_finished_count, 1,
+                                    __ATOMIC_SEQ_CST);
+    sleep_multi_order[n] = 2;  /* long sleeper identifier */
+    task_exit();
+}
+
+static void test_task_sleep_ms_multiple_sleepers_wake_in_order(void)
+{
+    sleep_multi_order[0] = 0;
+    sleep_multi_order[1] = 0;
+    sleep_multi_finished_count = 0;
+
+    struct task *s = task_create_with_priority("sleep_short",
+                                               sleep_short_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    struct task *l = task_create_with_priority("sleep_long",
+                                               sleep_long_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_NOT_NULL(l);
+
+    /* task_create_with_priority does not auto-enqueue; tasks only run
+     * once explicitly added to a CPU run queue. Add atomically under
+     * IRQ-save so neither lands before the other. Pin to CPU 0 to
+     * keep wake ordering observable on multi-CPU test hosts. */
+    irq_flags_t flags = irq_save();
+    scheduler_add_task_to_cpu(s, 0);
+    scheduler_add_task_to_cpu(l, 0);
+    irq_restore(flags);
+
+    /* Poll for both sleepers to finish, bounded by a generous wall-clock
+     * timeout (500 ms >> 80 ms long sleep + test-harness jitter). */
+    uint64_t freq = timer_get_frequency();
+    uint64_t deadline = timer_get_count() + (freq / 1000) * 500;
+    while (sleep_multi_finished_count < 2) {
+        if (timer_get_count() > deadline) break;
+        yield();
+    }
+
+    /* Reclaim slots before asserting, so a test-result assertion
+     * failure can't leak them into subsequent tests. If the timeout
+     * branch above fired, tasks may still be sleeping — force them
+     * to TERMINATED via scheduler_terminate_task before destroy per
+     * kernel/CLAUDE.md "Leaky tests that block CPU 1" note. */
+    if (s->state != TASK_TERMINATED) scheduler_terminate_task(s);
+    if (l->state != TASK_TERMINATED) scheduler_terminate_task(l);
+    task_destroy(s);
+    task_destroy(l);
+
+    TEST_ASSERT_EQUAL_UINT32(2, sleep_multi_finished_count);
+    /* Short sleeper (id 1) must finish before the long sleeper (id 2). */
+    TEST_ASSERT_EQUAL_UINT32(1, sleep_multi_order[0]);
+    TEST_ASSERT_EQUAL_UINT32(2, sleep_multi_order[1]);
+}
+
+/* ============================================================================
  * Unit Tests: Deadline Boost Logic
  * ============================================================================ */
 
@@ -3901,6 +4046,12 @@ int test_suite_scheduler(void)
     RUN_TEST(test_task_slot_in_range_returns_slot);
     RUN_TEST(test_task_slot_finds_created_task);
     RUN_TEST(test_task_slot_skips_freed_by_id);
+
+    /* Unit tests: task_sleep_ms() scheduler-blocking sleep (#319) */
+    RUN_TEST(test_task_sleep_ms_zero_returns_immediately);
+    RUN_TEST(test_task_sleep_ms_sleeps_at_least_ms);
+    RUN_TEST(test_task_sleep_ms_clears_wake_state);
+    RUN_TEST(test_task_sleep_ms_multiple_sleepers_wake_in_order);
 
     /* Unit tests: Deadline boost logic */
     RUN_TEST(test_no_deadline_no_boost);

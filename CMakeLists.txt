@@ -353,6 +353,7 @@ set(KERNEL_SOURCES
     # Scheduler
     # ==========================================================================
     kernel/sched/task.c
+    kernel/sched/task_sleep.c
     kernel/sched/sched.c
     kernel/sched/sched_heuristic.c
     kernel/sched/steal_deque.c
