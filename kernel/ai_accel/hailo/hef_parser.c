@@ -717,15 +717,26 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     el.direction.arg                = &stage;
     if (!pb_decode(stream, ProtoHEFEdgeLayer_fields, &el)) return false;
 
-    if (!stage.seen_pad_index) return true;         /* non-boundary layer */
+    /* Derive a pad identity. DFC 3.33.1 simple-MLP HEFs don't emit
+     * ProtoHEFEdgeLayer.pad_index on their boundary edge_layers (the
+     * input layer is proto3-default-stripped; the output layer also
+     * omits it). Fall back to the edge_layer's sys_index as the pad
+     * key — every boundary edge_layer has one, and matches the data_id
+     * the firmware uses for DMA routing. If neither is present, skip
+     * this edge_layer (non-boundary / intermediate). */
+    uint32_t pad_key;
+    if (stage.seen_pad_index) {
+        pad_key = stage.pad_index;
+    } else if (stage.seen_stream) {
+        pad_key = stage.sys_index;
+    } else {
+        return true;                                /* non-boundary layer */
+    }
 
-    /* Find-or-create the pad. DFC 3.33.1 leaves ProtoHEFNetworkGroup.ops[]
-     * empty for simple MLPs, so the edge_layers[] traversal is the only
-     * path that sees pad info. Fall back to appending a new pad if the
-     * ops[] path didn't already register this index. */
+    /* Find-or-create the pad. */
     struct hef_pad_info *p = NULL;
     for (uint32_t i = 0; i < ectx->info->pad_count; i++) {
-        if (ectx->info->pads[i].index == stage.pad_index) {
+        if (ectx->info->pads[i].index == pad_key) {
             p = &ectx->info->pads[i];
             break;
         }
@@ -737,9 +748,11 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
         }
         p = &ectx->info->pads[ectx->info->pad_count++];
         memset(p, 0, sizeof(*p));
-        p->index = stage.pad_index;
-        /* direction: 0 = HOST_TO_DEVICE (input), 1 = DEVICE_TO_HOST. */
-        p->is_input = stage.seen_direction && stage.direction == 0;
+        p->index = pad_key;
+        /* direction defaults to HOST_TO_DEVICE (input = 0) when the
+         * field is absent — proto3 doesn't emit zero-valued enums.
+         * We flip to output only on an explicit direction==1. */
+        p->is_input = !(stage.seen_direction && stage.direction == 1);
         if (stage.seen_shape) {
             p->has_tensor_shape = true;
             p->height           = stage.height;

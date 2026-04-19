@@ -4228,6 +4228,111 @@ static void test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad(void)
     TEST_ASSERT_EQUAL_UINT32(42, info.pads[0].features);
 }
 
+static void test_hef_parser_edge_layer_uses_sys_index_when_pad_index_absent(void)
+{
+    /* DFC 3.33.1 wire format: scheduler_mlp_pi5.hef edge_layers omit
+     * pad_index entirely on their boundary layers. Our parser must
+     * fall back to sys_index (from edge_layer_base) as the pad key,
+     * and treat missing direction as input (proto3 default=0).
+     *
+     * Build a HEF with ONE edge_layer that has shape + sys_index but
+     * NO pad_index and NO direction. Parser should create an input
+     * pad indexed by sys_index. */
+    uint8_t proto[1024];
+    size_t  plen = 0;
+
+    uint8_t elin[256];
+    size_t  elin_len = 0;
+    /* NO direction (field 1) — default to H2D=input */
+    /* NO edge_layer_type (field 2) — default to INFO */
+    uint8_t info_buf[128];
+    size_t  info_len = 0;
+    emit_lenprefix(info_buf, &info_len, 1, (const uint8_t *)"in", 2);
+    {
+        uint8_t base[32];
+        size_t  base_len = 0;
+        emit_varint_field(base, &base_len, 1, 1);    /* height */
+        emit_varint_field(base, &base_len, 3, 1);    /* width */
+        emit_varint_field(base, &base_len, 5, 108);  /* features */
+        emit_varint_field(base, &base_len, 8, 7);    /* sys_index = 7 */
+        emit_varint_field(base, &base_len, 9, 256);  /* core_bytes_per_buffer */
+        emit_lenprefix(info_buf, &info_len, 2, base, base_len);
+    }
+    emit_lenprefix(elin, &elin_len, 3, info_buf, info_len);
+    /* NO pad_index (field 7) */
+
+    uint8_t md_buf[512];
+    size_t  md_len = 0;
+    emit_lenprefix(md_buf, &md_len, 2, elin, elin_len);
+
+    uint8_t ctx_buf[768];
+    size_t  ctx_len = 0;
+    emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
+
+    uint8_t ng_buf[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 3, ctx_buf, ctx_len);
+
+    emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
+                          hef_parse_body(proto, plen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].is_input);        /* default direction 0 */
+    TEST_ASSERT_EQUAL_UINT32(7, info.pads[0].index); /* sys_index = 7 */
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(108, info.pads[0].features);
+    TEST_ASSERT_EQUAL_UINT32(7,   info.pads[0].sys_index);
+    TEST_ASSERT_EQUAL_UINT32(256, info.pads[0].core_bytes_per_buffer);
+}
+
+static void test_hef_parser_edge_layer_direction_1_means_output(void)
+{
+    /* Mirror of the above but with explicit direction=1 (DEVICE_TO_HOST).
+     * Verifies is_input flips to false. */
+    uint8_t proto[1024];
+    size_t  plen = 0;
+
+    uint8_t el[256];
+    size_t  el_len = 0;
+    emit_varint_field(el, &el_len, 1, 1);            /* direction = D2H (output) */
+
+    uint8_t info_buf[128];
+    size_t  info_len = 0;
+    emit_lenprefix(info_buf, &info_len, 1, (const uint8_t *)"out", 3);
+    {
+        uint8_t base[32];
+        size_t  base_len = 0;
+        emit_varint_field(base, &base_len, 5, 24);   /* features = 24 */
+        emit_varint_field(base, &base_len, 8, 3);    /* sys_index = 3 */
+        emit_lenprefix(info_buf, &info_len, 2, base, base_len);
+    }
+    emit_lenprefix(el, &el_len, 3, info_buf, info_len);
+
+    uint8_t md_buf[512];
+    size_t  md_len = 0;
+    emit_lenprefix(md_buf, &md_len, 2, el, el_len);
+
+    uint8_t ctx_buf[768];
+    size_t  ctx_len = 0;
+    emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
+
+    uint8_t ng_buf[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 3, ctx_buf, ctx_len);
+
+    emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
+                          hef_parse_body(proto, plen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_FALSE(info.pads[0].is_input);
+    TEST_ASSERT_EQUAL_UINT32(3, info.pads[0].index);
+    TEST_ASSERT_EQUAL_UINT32(24, info.pads[0].features);
+}
+
 static void test_inf_hailo_load_threads_hef_stream_info(void)
 {
     struct inference_device *dev = hailo_backend_ready();
@@ -4489,6 +4594,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_hef_parser_captures_edge_layer_quant);
     RUN_TEST(test_hef_parser_edge_layer_creates_pad_when_ops_empty);
     RUN_TEST(test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad);
+    RUN_TEST(test_hef_parser_edge_layer_uses_sys_index_when_pad_index_absent);
+    RUN_TEST(test_hef_parser_edge_layer_direction_1_means_output);
     RUN_TEST(test_inf_hailo_load_threads_hef_stream_info);
 
     return UnityEnd();
