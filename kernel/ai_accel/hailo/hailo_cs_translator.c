@@ -8,20 +8,23 @@
  * byte lengths.
  *
  * What this module does NOT do (yet):
- *  - Per-HEF-action translation for the DYNAMIC context (EnableLcu,
- *    TriggerSequencer, etc.). Those require per-action parameter
- *    extraction the parser hasn't yet surfaced. The current DYNAMIC
- *    emits just the APPLICATION_CHANGE_INTERRUPT tail — firmware
- *    accepts this structurally, though a real inference needs the
- *    compute actions too.
+ *  - Per-HEF-action translation for TriggerSequencer, DisableLcu,
+ *    WaitForSequencer, AllowInputDataflow in the DYNAMIC context.
+ *    EnableLcu is translated today (6.4g); the others follow the
+ *    same pattern once their per-action extraction lands in
+ *    hef_parser.
  *  - Boundary-channel ACTIVATION actions (OpenBoundaryInput/Output).
  *    For single-CCW-channel smoke loads the BURST_CREDITS_TASK_RESET
  *    alone is accepted; real I/O streams land alongside parser work
  *    on edge_layer → boundary_channel mapping.
+ *  - Multi-dynamic-context dispatch. translate_dynamic filters
+ *    captured EnableLcu entries to context_index == 0 and will
+ *    need per-context loops when dynamic_contexts_count > 1.
  */
 
 #include <string.h>
 
+#include "debug.h"
 #include "hailo_cs_builder.h"
 #include "hailo_cs_translator.h"
 
@@ -188,7 +191,15 @@ static bool enable_lcu_has_non_default_fields(
 static int translate_enable_lcu(const struct hef_enable_lcu_action *a,
                                 struct hailo_cs_builder *b)
 {
-    uint8_t packed = hailo_cs_pack_lcu_id(a->cluster_index, a->lcu_index);
+    bool clamped = false;
+    uint8_t packed = hailo_cs_pack_lcu_id_checked(a->cluster_index,
+                                                  a->lcu_index,
+                                                  &clamped);
+    if (clamped) {
+        WARN("hailo translator: EnableLcu cluster=%u lcu=%u exceeds 4-bit "
+             "range; packed_lcu_id truncated to 0x%02x",
+             a->cluster_index, a->lcu_index, packed);
+    }
     if (enable_lcu_has_non_default_fields(a)) {
         struct hailo_cs_act_enable_lcu_non_default body = {
             .packed_lcu_id       = packed,
@@ -210,14 +221,18 @@ static int translate_enable_lcu(const struct hef_enable_lcu_action *a,
 static int translate_dynamic(const struct hef_info *info,
                              struct hailo_cs_builder *b)
 {
-    /* Emit captured EnableLcu actions in the order they appeared in
-     * the HEF. Context 0 is the (only) dynamic context for the
-     * single-context loads we support today; multi-context loads
-     * will need to dispatch per-context_index. */
-    uint32_t emitted = (info->enable_lcu_count > HEF_PARSER_MAX_ENABLE_LCU_ACTIONS)
+    /* Emit captured EnableLcu actions that belong to the (only)
+     * dynamic context we currently support — context_index == 0.
+     * Entries tagged with any other context_index are skipped so
+     * a future multi-dynamic-context HEF (dynamic_contexts_count > 1)
+     * doesn't silently splat context-1+ actions into context 0's
+     * byte stream. Those will need per-context-index dispatch when
+     * multi-context translation lands. */
+    uint32_t scanned = (info->enable_lcu_count > HEF_PARSER_MAX_ENABLE_LCU_ACTIONS)
                           ? HEF_PARSER_MAX_ENABLE_LCU_ACTIONS
                           : info->enable_lcu_count;
-    for (uint32_t i = 0; i < emitted; i++) {
+    for (uint32_t i = 0; i < scanned; i++) {
+        if (info->enable_lcu_actions[i].context_index != 0) continue;
         int rc = translate_enable_lcu(&info->enable_lcu_actions[i], b);
         if (rc != HAILO_OK) return rc;
     }

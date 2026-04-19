@@ -153,12 +153,20 @@ static void control_msi_handler(void *ctx)
     /* Read + clear whatever ISTATUS bits fired. The SW_IRQ field's
      * FW_CONTROL_IRQ bit is the one we care about; other sources
      * (VDMA, notifications) still get W1C'd so they don't accumulate
-     * and confuse later polls. */
+     * and confuse later polls.
+     *
+     * mb() after the W1C ensures the MMIO write is globally visible
+     * before control_msi_pending is set. Without it, a polling-path
+     * ISTATUS read on another CPU (in wait_for_response's fallback
+     * loop) could see the bit still set and W1C it again. Harmless
+     * but wasteful — the explicit barrier pairs cleanly with the
+     * atomic_store_release that follows. */
     uint32_t istatus = hailo_platform->read32(
         HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
     if (istatus != 0) {
         hailo_platform->write32(
             HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST, istatus);
+        hailo_platform->mb();
     }
     if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
         __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);

@@ -2644,6 +2644,52 @@ static void test_cs_translate_enable_lcu_non_default_variant(void)
                             out.dynamic[16]);
 }
 
+static void test_cs_translate_skips_enable_lcu_from_other_contexts(void)
+{
+    /* Three EnableLcu entries tagged with context_index 0, 1, 0.
+     * translate_dynamic targets context 0 only; entries tagged with
+     * context_index=1 must NOT appear in the dynamic byte stream.
+     * Result: 2 × 10 B defaults + 8 B tail = 28 bytes, with the
+     * second emitted EnableLcu being the one originally at index 2
+     * (context_index=0), not index 1 (context_index=1). */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 3;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .context_index = 0, .lcu_index = 1, .cluster_index = 2,
+    };
+    info.enable_lcu_actions[1] = (struct hef_enable_lcu_action){
+        /* Different context — must be skipped. */
+        .context_index = 1, .lcu_index = 7, .cluster_index = 7,
+    };
+    info.enable_lcu_actions[2] = (struct hef_enable_lcu_action){
+        .context_index = 0, .lcu_index = 3, .cluster_index = 4,
+    };
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Two context-0 EnableLcu (10B each) + tail (8B) = 28 bytes.
+     * If the filter were broken, we'd see 38 bytes (3 × 10 + 8). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)28, out.dynamic_len);
+    /* First emitted = entry 0: packed (2<<4)|1 = 0x21. */
+    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[8]);
+    /* Second emitted = entry 2 (NOT entry 1): packed (4<<4)|3 = 0x43.
+     * If the filter broke, byte 18 would be 0x77 (from the skipped
+     * context_index=1 entry). */
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[18]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[20]);
+}
+
 static void test_cs_translate_multiple_enable_lcu_preserves_order(void)
 {
     /* Two EnableLcu entries in order; translator emits them in the
@@ -5629,6 +5675,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_contexts_rejects_null);
     RUN_TEST(test_cs_translate_enable_lcu_default_variant);
     RUN_TEST(test_cs_translate_enable_lcu_non_default_variant);
+    RUN_TEST(test_cs_translate_skips_enable_lcu_from_other_contexts);
     RUN_TEST(test_cs_translate_multiple_enable_lcu_preserves_order);
     RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);

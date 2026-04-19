@@ -217,11 +217,30 @@ _Static_assert(sizeof(struct hailo_cs_act_enable_lcu_non_default) == 8,
 
 /* Encoding helper: pack cluster_index + lcu_index into a single u8
  * for the wire structs above. High nibble = cluster, low nibble =
- * lcu. Hailo-8 caps both at 15 so the 4-bit split is lossless. */
+ * lcu. Hailo-8 caps both at 15 so the 4-bit split is lossless for
+ * conforming HEFs. Out-of-range inputs (corrupt HEF, future
+ * architecture, test mistake) would otherwise silently wrap —
+ * hailo_cs_pack_lcu_id_checked surfaces that with a WARN. */
 static inline uint8_t hailo_cs_pack_lcu_id(uint32_t cluster_index,
                                            uint32_t lcu_index)
 {
     return (uint8_t)(((cluster_index & 0x0Fu) << 4) | (lcu_index & 0x0Fu));
+}
+
+/* Wider-contract variant: validates cluster/lcu both fit in 4 bits.
+ * Returns 0 (not a valid packed id on Hailo-8 with cluster=0,lcu=0)
+ * and sets *clamped=true if either field was out of range. Callers
+ * that can't reasonably handle a bad HEF just use the truncating
+ * variant above; translator code paths use this + WARN-log so a
+ * field bug doesn't silently produce a bogus wire action. */
+static inline uint8_t hailo_cs_pack_lcu_id_checked(uint32_t cluster_index,
+                                                   uint32_t lcu_index,
+                                                   bool    *clamped)
+{
+    if (cluster_index > 0x0Fu || lcu_index > 0x0Fu) {
+        *clamped = true;
+    }
+    return hailo_cs_pack_lcu_id(cluster_index, lcu_index);
 }
 
 #endif /* AI_ACCEL_HAILO_CS_ACTIONS_H */
