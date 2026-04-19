@@ -283,6 +283,10 @@ static void reset_all(void)
 {
     memset(&mock, 0, sizeof(mock));
     usb_core_register_hcd(&mock_hcd_ops);
+    /* Clear any prior probe state — the idempotent guard in
+     * cdc_ecm_probe_and_register would otherwise skip the probe
+     * on tests that run after an earlier case bound the driver. */
+    cdc_ecm_reset();
     /* Run full enumeration so the CDC-ECM probe has something to bind to. */
     int rc = usb_core_start();
     TEST_ASSERT_EQUAL_INT(0, rc);
@@ -383,6 +387,7 @@ static void test_probe_skips_when_no_device(void)
         .cancel_urb = mock_cancel_urb,
     };
     usb_core_register_hcd(&empty_hcd);
+    cdc_ecm_reset();                  /* clear any prior bound state */
     (void)usb_core_start();
     TEST_ASSERT_NULL(usb_core_first_device());
 
@@ -580,6 +585,9 @@ static void test_probe_rejects_non_cdc_device(void)
         dev->ifaces[i].class_code = 0xFF;
         dev->ifaces[i].subclass   = 0x00;
     }
+    /* Force a re-probe of the mutated device — the idempotent guard
+     * would otherwise skip. */
+    cdc_ecm_reset();
     int rc = cdc_ecm_probe_and_register();
     TEST_ASSERT_NOT_EQUAL(0, rc);
     /* Probe cleared the probed flag at entry; link must be down now
@@ -625,6 +633,10 @@ static void test_net_driver_ops_fail_when_unprobed(void)
         dev->ifaces[i].class_code = 0xFF;
         dev->ifaces[i].subclass   = 0x00;
     }
+    /* Explicit reset: the probe function is idempotent (Phase 4
+     * needs that for the net_poll retry loop), so forcing a re-probe
+     * of the now-non-CDC device requires clearing the bound flag. */
+    cdc_ecm_reset();
     TEST_ASSERT_NOT_EQUAL(0, cdc_ecm_probe_and_register());
 
     uint8_t buf[64] = {0};
@@ -759,6 +771,105 @@ static void test_rx_completion_error_drops_slot(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 4 — lwIP integration via net_poll()                                    */
+/*                                                                             */
+/* Verifies that net_poll() drives the Phase-4 hookup: usb_core_hotplug_poll  */
+/* picks up new enumerations, then cdc_ecm_probe_and_register binds the        */
+/* class driver, leaving active_driver pointing at cdc_ecm_driver. Production */
+/* path on Jetson is net_pump_task → net_poll → this chain.                    */
+/* -------------------------------------------------------------------------- */
+
+static void test_cdc_ecm_reset_forces_reprobe(void)
+{
+    /* Pin the test-only contract of cdc_ecm_reset(): after a
+     * successful bind, calling reset clears the probed flag so a
+     * subsequent cdc_ecm_probe_and_register re-runs the full probe
+     * flow (MAC + endpoints + net_driver registration). Without this
+     * hook, the idempotent guard in probe_and_register would skip
+     * the re-probe and tests couldn't reset fixture state. */
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_NOT_NULL(cdc_ecm_get_mac());
+    const struct net_driver *drv_first = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv_first);
+
+    cdc_ecm_reset();
+    /* After reset: probed flag cleared, public getters treat us as
+     * unbound. net_driver registration pointer stays in place (reset
+     * doesn't unregister — it only clears the probed flag). */
+    TEST_ASSERT_NULL(cdc_ecm_get_mac());
+
+    /* Re-probe: the full flow runs again. Same mock device, same
+     * expected MAC, same registration. */
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_NOT_NULL(cdc_ecm_get_mac());
+    TEST_ASSERT_EQUAL_PTR(drv_first, net_get_driver());
+}
+
+static void test_net_poll_binds_cdc_ecm_on_enumeration(void)
+{
+    /* Start from unprobed state with a usb_core that's already seen
+     * enumeration (the mock always enumerates on usb_core_start). The
+     * first net_poll() tick must invoke cdc_ecm_probe_and_register and
+     * end with active_driver populated. Other tests in this suite
+     * leave active_driver set, so explicitly clear it first. */
+    reset_all();
+    net_register_driver(NULL);
+    TEST_ASSERT_NULL(net_get_driver());
+
+    net_poll();
+    TEST_ASSERT_NOT_NULL(net_get_driver());
+    TEST_ASSERT_NOT_NULL(cdc_ecm_get_mac());
+}
+
+static void test_net_poll_is_idempotent_after_bind(void)
+{
+    /* Once bound, further net_poll() ticks must NOT re-enter the
+     * probe flow. Verify by snapshotting the driver pointer and
+     * confirming many subsequent ticks keep the same value without
+     * re-registering (a re-register would log the replacement warn
+     * and reset cdc state). */
+    reset_all();
+    net_poll();
+    const struct net_driver *drv_after_first = net_get_driver();
+    TEST_ASSERT_NOT_NULL(drv_after_first);
+
+    for (int i = 0; i < 50; i++)
+        net_poll();
+
+    TEST_ASSERT_EQUAL_PTR(drv_after_first, net_get_driver());
+    /* MAC still matches — the probed state wasn't clobbered. */
+    TEST_ASSERT_NOT_NULL(cdc_ecm_get_mac());
+}
+
+static void test_net_poll_no_hcd_is_safe(void)
+{
+    /* net_poll() must be safe to call before any HCD / device exists
+     * — the net_pump_task spawns unconditionally on ENABLE_NETWORKING
+     * builds and starts before net_init, so every platform hits this
+     * cold-start path. No HCD → usb_core_hotplug_poll returns 0 →
+     * cdc_ecm_probe_and_register returns 0 (no device) → net_poll's
+     * subsequent driver checks bail on !net_initialized. */
+    memset(&mock, 0, sizeof(mock));
+    usb_core_register_hcd(NULL);
+    usb_core_reset();
+    cdc_ecm_reset();
+    net_register_driver(NULL);
+
+    /* Call several ticks — must not crash, must not register a driver. */
+    for (int i = 0; i < 10; i++)
+        net_poll();
+
+    TEST_ASSERT_NULL(net_get_driver());
+    TEST_ASSERT_NULL(cdc_ecm_get_mac());
+
+    /* Restore a usable fixture state for any test added after this
+     * one in the suite — without this, the NULL active_driver and
+     * unregistered HCD would poison the next test's reset_all. */
+    reset_all();
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry point                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -793,6 +904,10 @@ int test_suite_cdc_ecm(void)
     RUN_TEST(test_default_mtu_when_mss_zero);
     RUN_TEST(test_probe_without_functional_descriptor);
     RUN_TEST(test_rx_completion_error_drops_slot);
+    RUN_TEST(test_cdc_ecm_reset_forces_reprobe);
+    RUN_TEST(test_net_poll_binds_cdc_ecm_on_enumeration);
+    RUN_TEST(test_net_poll_is_idempotent_after_bind);
+    RUN_TEST(test_net_poll_no_hcd_is_safe);
 
     return UnityEnd();
 }

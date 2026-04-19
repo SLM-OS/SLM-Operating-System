@@ -129,6 +129,15 @@ static struct {
     uint32_t          tx_completions;
 } cdc;
 
+/*
+ * Log-rate-limit flag for the "no USB device" message emitted by
+ * cdc_ecm_probe_and_register when net_poll retries find no device.
+ * File-scope (rather than function-local static) so cdc_ecm_reset()
+ * can clear it — tests that want to observe the "no device" log
+ * twice rely on that symmetry.
+ */
+static bool cdc_logged_no_device;
+
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -441,6 +450,16 @@ static const struct net_driver cdc_ecm_driver = {
 
 int cdc_ecm_probe_and_register(void)
 {
+    /* Idempotent once a probe has successfully bound. Phase 4 drives
+     * this from net_poll() on every tick so a device that enumerates
+     * after boot (e.g. Jetson post-kexec re-plug, see #309) gets
+     * picked up without a dedicated callback path — but we must not
+     * re-run the full probe on every tick once a device is bound, or
+     * RX URB resubmission + pool counters would drift. ACQUIRE pairs
+     * with the RELEASE at the end of a successful probe below. */
+    if (__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
+        return NET_OK;
+
     /* Every probe starts from a clean slate so a subsequent call that
      * finds no device (or a non-CDC device) can't leave stale state
      * visible via cdc_ecm_get_mac() / cdc_ecm_net_link_status().
@@ -451,7 +470,14 @@ int cdc_ecm_probe_and_register(void)
 
     struct usb_device *dev = usb_core_first_device();
     if (dev == NULL) {
-        INFO("cdc_ecm: no USB device — skipping probe");
+        /* Log once per boot — repeated "no device" messages from the
+         * net_poll retry loop would flood the console. The flag is at
+         * file scope (see cdc_logged_no_device above) so cdc_ecm_reset()
+         * can clear it for test fixtures. */
+        if (!cdc_logged_no_device) {
+            INFO("cdc_ecm: no USB device — will retry on hot-plug");
+            cdc_logged_no_device = true;
+        }
         return NET_OK;   /* "disabled" path is not an error */
     }
 
@@ -564,6 +590,19 @@ void cdc_ecm_poll(void)
 {
     if (__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
         usb_core_poll();
+}
+
+void cdc_ecm_reset(void)
+{
+    /* Test-only: clear the bound-to-device state so the next probe
+     * re-runs from scratch. Production code relies on the idempotent
+     * bind contract and should never call this.
+     *
+     * Also clears the "no device" log-once flag so a test that
+     * re-probes an empty bus after reset sees the log message fire
+     * again — keeps the reset/log-emit symmetry explicit. */
+    __atomic_store_n(&cdc.probed, false, __ATOMIC_RELEASE);
+    cdc_logged_no_device = false;
 }
 
 const uint8_t *cdc_ecm_get_mac(void)

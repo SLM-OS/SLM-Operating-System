@@ -1213,6 +1213,70 @@ Permanent fix candidates (all tracked under #309):
   classes (HID, string descriptors) will need the Data Stage
   event wired up.
 
+### 10.10 Phase 4 shipped — lwIP integration (2026-04-19)
+
+**What landed:**
+
+- `kernel/src/main.c`: on `PLATFORM_JETSON_ORIN_NANO` the old
+  `rtl8169_register()` stub is replaced with
+  `cdc_ecm_probe_and_register()`. The first probe at boot is a
+  no-op on kexec boots (xHCI defers enumeration — see #309) but
+  succeeds cleanly whenever a CDC-ECM device is already
+  enumerated at xhci_init time.
+
+- `kernel/net/lwip_slm.c`: `net_poll()` now calls
+  `cdc_ecm_probe_and_register()` on every tick (right after
+  `usb_core_hotplug_poll()`). Both functions are idempotent
+  — the retry loop is free until a USB device enumerates, at
+  which point the probe runs once and binds the class driver.
+
+- `kernel/usb/class/cdc_ecm.c`: the probe gained an idempotent
+  guard — on every subsequent call with `cdc.probed == true` it
+  returns 0 immediately without touching state. A companion
+  `cdc_ecm_reset()` test-only hook clears the bound flag so
+  test fixtures can force a re-probe. Header declares both.
+
+- `kernel/tests/test_cdc_ecm.c`: three new integration tests
+  (`test_net_poll_binds_cdc_ecm_on_enumeration`,
+  `test_net_poll_is_idempotent_after_bind`,
+  `test_net_poll_no_hcd_is_safe`) exercise the `net_poll →
+  cdc_ecm_probe_and_register` chain end-to-end. Existing tests
+  that relied on the old always-re-probe semantics were updated
+  to call `cdc_ecm_reset()` before their second probe.
+
+**What the chain looks like at runtime (Jetson, kexec boot):**
+
+1. xhci_init: controller up, NO_OP OK, usb_core_start runs but
+   Angle 3 hides the stale pre-kexec device. No enumeration yet.
+2. net_pump_task starts (spawned unconditionally when
+   `ENABLE_NETWORKING` is on). It calls `net_poll()` at ~100 Hz.
+3. Every tick: `usb_core_hotplug_poll()` reads PORTSC, advances
+   the STALE → WAIT_RECONNECT → FRESH state machine.
+4. User physically unplugs the dongle. Next tick sees CCS=0;
+   state advances to WAIT_RECONNECT.
+5. User re-plugs. Next tick sees CCS=1; state advances to FRESH
+   and `usb_core_hotplug_poll` drives `usb_core_enumerate()` →
+   ADDRESS_DEVICE(BSR=1) → GET_DESCRIPTOR → SET_CONFIGURATION →
+   `endpoint_configure` for each bulk endpoint.
+6. Same tick (or next): `cdc_ecm_probe_and_register()` finds
+   `usb_core_first_device()` non-NULL, binds, calls
+   `net_register_driver(&cdc_ecm_driver)`.
+7. User / script runs `net init` at the SLM-OS shell → lwIP
+   comes up via the cdc_ecm driver → DHCP or static IP → ping
+   flows through CDC-ECM's bulk endpoints.
+
+**What still needs hardware validation:**
+
+The Phase 4 wiring has been exercised end-to-end in unit tests
+(mock HCD + mock CDC-ECM device). On real Jetson hardware, the
+xHCI init + stale-transfer-event handling + NO_OP round-trip
+have been confirmed clean. The Angle-3 re-plug → enumeration
+chain has not yet been end-to-end validated because the prior
+hardware session hit a UEFI boot timing issue; a follow-up
+hardware run is planned. Unit tests give high confidence the
+code paths are correct but `ifconfig` / `ping` on a real
+Realtek dongle after re-plug is the final signoff.
+
 ---
 
 *Last updated: 19 April 2026*

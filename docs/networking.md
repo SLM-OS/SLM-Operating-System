@@ -731,14 +731,14 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
 **Phase 2** landed the CDC-ECM class driver on top of the Phase 1 core:
 
 - `kernel/include/cdc_ecm.h` — public API (`cdc_ecm_probe_and_register`,
-  test-visible MAC parser, counters).
+  `cdc_ecm_reset` test hook, test-visible MAC parser, counters).
 - `kernel/usb/class/cdc_ecm.c` — probe (CDC control + data interface
   scan, Ethernet functional descriptor walk, `iMACAddress` string
   decode with locally-administered fallback), static 4-slot RX and
   4-slot TX pools (2 KB per buffer, BSS today — Phase 3A XHCI
   decides on NC-memory relocation), and a `struct net_driver` that
   plugs directly into the existing `lwip_slm` glue.
-- `kernel/tests/test_cdc_ecm.c` — 25 unit tests against a CDC-ECM-
+- `kernel/tests/test_cdc_ecm.c` — 29 unit tests against a CDC-ECM-
   shaped mock HCD. Every public symbol and every error-injection
   branch in `cdc_ecm.c` is covered: MAC-string parser edge cases,
   full probe + driver registration, net `init` RX submission,
@@ -747,7 +747,9 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
   synthesis, probe rejection of non-CDC devices, pre-probe op
   rejection (`NET_E_NOT_INIT`), `cdc_ecm_poll` safety, default MTU
   when `wMaxSegmentSize == 0`, probe success when the functional
-  descriptor is absent, and RX-error drop.
+  descriptor is absent, RX-error drop, and the Phase 4 chain
+  (`cdc_ecm_reset` forces re-probe; `net_poll` binds on
+  enumeration; idempotent after bind; safe with no HCD).
 
 **Phase 3A** (XHCI host controller) — status as of 2026-04-19:
 
@@ -759,7 +761,7 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
 | 6 (control transfers) | ✅ | PR #308 — Setup / Data / Status Stage TRB builders + EP0 dispatch |
 | 7 (CONFIGURE_ENDPOINT + bulk) | ✅ | PR #308 — per-endpoint transfer-ring allocation, Normal TRB for bulk/interrupt |
 | Post-kexec re-plug | ⚠️ | #309 — first EP0 control transfer after ADDRESS_DEVICE returns `cc=4` on a pre-kexec device. Workaround in PR #308: hide the stale device via a three-state attach machine until the user physically re-plugs; `usb_core_hotplug_poll` from `net_poll()` drives fresh enumeration. Permanent fix tracked |
-| Phase 4 (lwIP integration) | ☐ | Out of scope for PR #308 |
+| Phase 4 (lwIP integration) | ✅ | `kernel/src/main.c` registers `cdc_ecm_probe_and_register` in place of the old `rtl8169_register` stub on Jetson. `net_poll()` retries the probe on every tick (idempotent once bound). A post-kexec re-plug now drives xHCI → usb_core → cdc_ecm → lwIP in one chain with no manual intervention beyond the physical re-insert |
 
 Source layout in `kernel/drivers/usb/xhci/`:
 
@@ -1076,6 +1078,10 @@ harness builds for with `ENABLE_NETWORKING=ON`):
 | `test_default_mtu_when_mss_zero` | Functional descriptor with `wMaxSegmentSize == 0` → driver falls back to 1514 |
 | `test_probe_without_functional_descriptor` | Absent Ethernet functional descriptor → probe still succeeds with synthesised MAC + default MTU |
 | `test_rx_completion_error_drops_slot` | Bulk-IN URB completing with `USB_URB_STALL` bumps the RX counter but leaves no payload for `recv()` (driver never forwards errored frames) |
+| `test_cdc_ecm_reset_forces_reprobe` | After a successful bind, `cdc_ecm_reset()` clears the probed flag so the next `cdc_ecm_probe_and_register()` re-runs the full flow; re-registration targets the same driver pointer (Phase 4 public test-hook contract) |
+| `test_net_poll_binds_cdc_ecm_on_enumeration` | First `net_poll()` call with a usb_core that's seen enumeration invokes `cdc_ecm_probe_and_register` and ends with `net_get_driver()` populated — the Phase 4 wiring chain |
+| `test_net_poll_is_idempotent_after_bind` | 50 subsequent `net_poll()` ticks keep the same driver pointer (no re-probe, no re-register) — safe to call on every tick from `net_pump_task` |
+| `test_net_poll_no_hcd_is_safe` | `net_poll()` called before any HCD / device exists doesn't crash and doesn't register a driver (the cold-start path `net_pump_task` hits before `net_init`) |
 
 **Tier 6 — XHCI ring primitives** (`kernel/tests/test_xhci_ring.c`,
 runs on every platform; Phase 3A mothballed code kept for regression
