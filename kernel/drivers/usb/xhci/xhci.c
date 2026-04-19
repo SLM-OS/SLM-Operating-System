@@ -1155,7 +1155,15 @@ int xhci_init(void)
     int rc = usb_core_start();
     if (rc != 0)
         WARN("xhci: usb_core_start returned %d", rc);
-    INFO("xhci: hot-plug ready — re-insert the USB dongle to enumerate");
+    /* The state machine in xhci_hcd_port_status defers enumeration
+     * until a fresh CCS rising edge. In the pre-existing-device case
+     * (kexec with a Linux-enumerated dongle, or future direct boot
+     * with an already-plugged device) that means the user must
+     * unplug and re-insert; the "attached at init" log above says so.
+     * On a clean boot with nothing plugged in, this log is the only
+     * hint that a future insertion will enumerate. */
+    INFO("xhci: hot-plug ready — waiting for USB device attach "
+         "(see #309 for the re-plug requirement on kexec boots)");
     return 0;
 }
 

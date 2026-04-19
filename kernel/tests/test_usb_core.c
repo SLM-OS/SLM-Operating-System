@@ -991,27 +991,34 @@ static void test_control_msg_unknown_request_returns_error(void)
 /* Hot-plug poll (#309 re-plug driver entry point)                             */
 /*                                                                             */
 /* usb_core keeps a `root_device_present` flag that persists across tests —    */
-/* the enumerate path clears it at entry, but hotplug_poll's early-return      */
-/* path does not. Helper below mimics reset_mock_and_core but also forces a    */
-/* usb_core_enumerate with port_connected=false, which is the cheapest way    */
-/* to clear `root_device_present` from prior tests.                            */
+/* clear it via the public usb_core_reset() hook before each case so test      */
+/* ordering can't pollute state.                                               */
 /* -------------------------------------------------------------------------- */
 
 static void reset_mock_and_clear_device_state(bool port_connected,
                                               enum usb_speed speed)
 {
     memset(&mock, 0, sizeof(mock));
-    mock.port_connected = false;
-    mock.port_speed     = USB_SPEED_UNKNOWN;
-    usb_core_register_hcd(&mock_hcd_ops);
-    /* Force root_device_present=false via enumerate's disconnected path. */
-    (void)usb_core_enumerate();
-    TEST_ASSERT_NULL(usb_core_first_device());
-
-    /* Now set the real scenario state for the test. */
-    memset(&mock, 0, sizeof(mock));
     mock.port_connected = port_connected;
     mock.port_speed     = speed;
+    usb_core_register_hcd(&mock_hcd_ops);
+    usb_core_reset();
+    TEST_ASSERT_NULL(usb_core_first_device());
+}
+
+static void test_core_reset_clears_device_without_touching_hcd(void)
+{
+    /* After a successful enumeration, usb_core_reset() must wipe the
+     * device slot but leave the registered HCD in place so subsequent
+     * tests don't need to re-register it. */
+    reset_mock_and_clear_device_state(true, USB_SPEED_HIGH);
+    TEST_ASSERT_EQUAL_INT(0, usb_core_start());
+    TEST_ASSERT_NOT_NULL(usb_core_first_device());
+    TEST_ASSERT_EQUAL_PTR(&mock_hcd_ops, usb_core_get_hcd());
+
+    usb_core_reset();
+    TEST_ASSERT_NULL(usb_core_first_device());
+    TEST_ASSERT_EQUAL_PTR(&mock_hcd_ops, usb_core_get_hcd());
 }
 
 static void test_hotplug_poll_no_hcd_is_safe(void)
@@ -1125,6 +1132,7 @@ int test_suite_usb_core(void)
     RUN_TEST(test_hcd_reregister_same_is_silent);
     RUN_TEST(test_control_msg_returns_actual_length);
     RUN_TEST(test_control_msg_unknown_request_returns_error);
+    RUN_TEST(test_core_reset_clears_device_without_touching_hcd);
     RUN_TEST(test_hotplug_poll_no_hcd_is_safe);
     RUN_TEST(test_hotplug_poll_no_device_connected);
     RUN_TEST(test_hotplug_poll_enumerates_on_attach);

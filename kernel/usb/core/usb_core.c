@@ -54,6 +54,15 @@ const struct usb_hcd *usb_core_get_hcd(void)
     return active_hcd;
 }
 
+void usb_core_reset(void)
+{
+    /* Wipe enumerated-device state. Keeps the registered HCD bound
+     * so tests don't have to re-register on every fixture reset —
+     * usb_core_register_hcd(NULL) is the separate knob for that. */
+    memset(&root_device, 0, sizeof(root_device));
+    root_device_present = false;
+}
+
 /* -------------------------------------------------------------------------- */
 /* URB helpers                                                                 */
 /* -------------------------------------------------------------------------- */

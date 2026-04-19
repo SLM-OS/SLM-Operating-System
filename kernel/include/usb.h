@@ -371,6 +371,18 @@ int usb_core_enumerate(void);
 
 struct usb_device *usb_core_first_device(void);
 
+/*
+ * Clear all enumerated-device state so the next usb_core_start /
+ * usb_core_hotplug_poll behaves as if from a fresh boot. Does NOT
+ * touch the registered HCD (use usb_core_register_hcd(NULL) for that).
+ *
+ * Primarily a test-harness hook: production code should never have a
+ * reason to call this, since usb_core_enumerate() already clears the
+ * device slot on entry. Exposing it lets tests reset between cases
+ * without depending on internal details of the enumerate path.
+ */
+void usb_core_reset(void);
+
 /* -------------------------------------------------------------------------- */
 /* Transfer helpers                                                            */
 /* -------------------------------------------------------------------------- */

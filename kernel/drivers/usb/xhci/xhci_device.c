@@ -192,8 +192,15 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
                  (unsigned)xhci_caps_cached.max_ports);
             return true;
         }
-        INFO("xhci: USB 2.0 device on PORTSC[%u] (stale pre-kexec — "
-             "please unplug and re-insert the dongle to enumerate, see #309)",
+        /* A device already attached at init is either a pre-kexec
+         * leftover Linux enumerated (the common case today — see
+         * #309) or a device that was physically plugged in before
+         * SLM-OS booted directly (the future non-kexec case). The
+         * state machine starts in STALE either way, so the user
+         * either re-plugs (kexec) or experiences a one-time extra
+         * unplug-replug (direct boot). Phrase the log neutrally. */
+        INFO("xhci: USB 2.0 device attached at init on PORTSC[%u] — "
+             "unplug and re-insert to enumerate (see #309)",
              xhci_active_port);
     }
 
