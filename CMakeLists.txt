@@ -407,6 +407,7 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_core.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_control.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_cs_builder.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_cs_translator.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_tensor.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_vdma.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_infer.c>

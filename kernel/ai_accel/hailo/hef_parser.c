@@ -920,16 +920,189 @@ static bool decode_context_metadata_cb(pb_istream_t *stream,
     return pb_decode(stream, ProtoHEFContextMetadata_fields, &md);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Phase 6.4e: per-context compute-action capture                              */
+/*                                                                              */
+/* Walks contexts[].operations[].actions[] and records the oneof-tag of each   */
+/* action into info->context_actions[]. The dispatcher callback runs once per  */
+/* action and — since the oneof branches share a single callback slot —        */
+/* sees field->tag set to the active branch. That tag is exactly the proto    */
+/* field number a translator needs to pick the corresponding                   */
+/* CONTEXT_SWITCH_DEFS__* wire action.                                          */
+/*                                                                              */
+/* This is deliberately narrow: we capture "which action kinds, in what       */
+/* order" per context, not the full per-action parameter body. The             */
+/* translator (6.4f) builds on top of this by adding per-type field extraction */
+/* once the minimum-viable HEF→wire mapping is understood on hardware.         */
+/* -------------------------------------------------------------------------- */
+
+struct ctx_actions_accum {
+    struct hef_info *info;
+    struct hef_context_actions *current;    /* NULL if current context overflowed */
+};
+
+/* Decode a ProtoHEFActionEnableLcu sub-message and capture its six
+ * scalar fields into hef_info.enable_lcu_actions[]. Called from the
+ * oneof inner callback when the enable_lcu branch (tag 8) fires.
+ *
+ * Returns true on success (parse advanced past the sub-message) and
+ * false on decode error. Sub-message overflow relative to
+ * HEF_PARSER_MAX_ENABLE_LCU_ACTIONS sets enable_lcu_truncated but
+ * still consumes the bytes — parsing continues for the rest of the
+ * context.
+ */
+static bool decode_enable_lcu_body(pb_istream_t *stream,
+                                   struct ctx_actions_accum *acc)
+{
+    /* Stage the six fields + presence flags. All fields are uint32
+     * varints per hef.proto:758-777. */
+    struct hef_enable_lcu_action out;
+    memset(&out, 0, sizeof(out));
+    out.context_index = acc->current ? (uint8_t)acc->current->context_index : 0;
+
+    bool present_discard = false;  /* shared dummy for fields without
+                                      an independent "was this field
+                                      set?" check — EnableLcu scalars
+                                      default-to-zero is fine. */
+
+    struct u32_ctx lcu_idx_ctx   = { .dst = &out.lcu_index,
+                                     .present = &present_discard };
+    struct u32_ctx cluster_ctx   = { .dst = &out.cluster_index,
+                                     .present = &present_discard };
+    struct u32_ctx done_addr_ctx = { .dst = &out.lcu_kernel_done_address,
+                                     .present = &present_discard };
+    struct u32_ctx done_cnt_ctx  = { .dst = &out.lcu_kernel_done_count,
+                                     .present = &present_discard };
+    struct u32_ctx enable_ctx    = { .dst = &out.lcu_enable_address,
+                                     .present = &present_discard };
+    struct u32_ctx net_idx_ctx   = { .dst = &out.network_index,
+                                     .present = &present_discard };
+
+    ProtoHEFActionEnableLcu sub = ProtoHEFActionEnableLcu_init_default;
+    sub.lcu_index.funcs.decode               = read_u32_cb;
+    sub.lcu_index.arg                        = &lcu_idx_ctx;
+    sub.cluster_index.funcs.decode           = read_u32_cb;
+    sub.cluster_index.arg                    = &cluster_ctx;
+    sub.lcu_kernel_done_address.funcs.decode = read_u32_cb;
+    sub.lcu_kernel_done_address.arg          = &done_addr_ctx;
+    sub.lcu_kernel_done_count.funcs.decode   = read_u32_cb;
+    sub.lcu_kernel_done_count.arg            = &done_cnt_ctx;
+    sub.lcu_enable_address.funcs.decode      = read_u32_cb;
+    sub.lcu_enable_address.arg               = &enable_ctx;
+    sub.network_index.funcs.decode           = read_u32_cb;
+    sub.network_index.arg                    = &net_idx_ctx;
+
+    if (!pb_decode(stream, ProtoHEFActionEnableLcu_fields, &sub)) return false;
+
+    if (acc->info->enable_lcu_count < HEF_PARSER_MAX_ENABLE_LCU_ACTIONS) {
+        acc->info->enable_lcu_actions[acc->info->enable_lcu_count] = out;
+    } else {
+        acc->info->enable_lcu_truncated = true;
+    }
+    acc->info->enable_lcu_count++;
+    return true;
+}
+
+/* Oneof inner callback: runs once per ProtoHEFAction.action oneof
+ * branch. `field->tag` is the active branch's proto field number
+ * (2=write_data, 5=enable_sequencer, 8=enable_lcu, 10=allow_input_
+ * dataflow, …). Every action gets its kind recorded in
+ * context_actions[].action_types[]; the EnableLcu branch also has
+ * its scalar fields pulled into hef_info.enable_lcu_actions[]. */
+static bool decode_compute_action_inner_cb(pb_istream_t *stream,
+                                           const pb_field_t *field,
+                                           void **arg)
+{
+    struct ctx_actions_accum *acc = (struct ctx_actions_accum *)*arg;
+
+    if (acc->current) {
+        acc->current->action_type_mask |= (1u << field->tag);
+        if (acc->current->action_count < HEF_PARSER_MAX_CONTEXT_ACTIONS) {
+            acc->current->action_types[acc->current->action_count] =
+                (uint8_t)field->tag;
+        } else {
+            acc->current->truncated = true;
+        }
+        acc->current->action_count++;
+    }
+
+    /* EnableLcu (tag 8) is the only action kind with extracted
+     * parameters today. All others: consume and skip. */
+    if (field->tag == ProtoHEFAction_enable_lcu_tag) {
+        return decode_enable_lcu_body(stream, acc);
+    }
+
+    /* Consume the remaining body bytes so nanopb advances the cursor
+     * past this sub-message cleanly. */
+    return pb_read(stream, NULL, stream->bytes_left);
+}
+
+/* Outer callback: fires once per repeated action within an Operation.
+ * Decodes the ProtoHEFAction sub-message with the oneof callback
+ * wired — same two-level pattern as decode_action_cb for the
+ * preliminary_config chain. */
+static bool decode_compute_action_outer_cb(pb_istream_t *stream,
+                                           const pb_field_t *field,
+                                           void **arg)
+{
+    (void)field;
+    struct ctx_actions_accum *acc = (struct ctx_actions_accum *)*arg;
+
+    ProtoHEFAction act = ProtoHEFAction_init_default;
+    /* Any oneof branch wires the shared callback slot — see the
+     * comment on decode_action_cb for why writing to a single
+     * branch reaches every branch. */
+    act.action.write_data_ccw.funcs.decode = decode_compute_action_inner_cb;
+    act.action.write_data_ccw.arg          = acc;
+    return pb_decode(stream, ProtoHEFAction_fields, &act);
+}
+
+static bool decode_compute_operation_cb(pb_istream_t *stream,
+                                        const pb_field_t *field,
+                                        void **arg)
+{
+    (void)field;
+    struct ctx_actions_accum *acc = (struct ctx_actions_accum *)*arg;
+
+    ProtoHEFOperation op = ProtoHEFOperation_init_default;
+    op.actions.funcs.decode          = decode_compute_action_outer_cb;
+    op.actions.arg                   = acc;
+    return pb_decode(stream, ProtoHEFOperation_fields, &op);
+}
+
+struct ctx_walker {
+    struct hef_info *info;
+    struct edge_ctx *edge_ectx;   /* for the existing metadata walker */
+};
+
 static bool decode_context_cb(pb_istream_t *stream,
                               const pb_field_t *field,
                               void **arg)
 {
     (void)field;
-    struct edge_ctx *ectx = (struct edge_ctx *)*arg;
+    struct ctx_walker *walker = (struct ctx_walker *)*arg;
+
+    /* Claim a context_actions slot. Exceeding HEF_PARSER_MAX_CONTEXTS
+     * sets the truncated flag but still decodes the body so the rest
+     * of the sub-message is consumed cleanly. */
+    struct hef_context_actions *slot = NULL;
+    if (walker->info->context_actions_count < HEF_PARSER_MAX_CONTEXTS) {
+        slot = &walker->info->context_actions[
+                   walker->info->context_actions_count];
+        memset(slot, 0, sizeof(*slot));
+        slot->context_index = walker->info->context_actions_count;
+    } else {
+        walker->info->context_actions_truncated = true;
+    }
+    walker->info->context_actions_count++;
+
+    struct ctx_actions_accum acc = { .info = walker->info, .current = slot };
 
     ProtoHEFContext ctx = ProtoHEFContext_init_default;
-    ctx.metadata.funcs.decode = decode_context_metadata_cb;
-    ctx.metadata.arg          = ectx;
+    ctx.metadata.funcs.decode   = decode_context_metadata_cb;
+    ctx.metadata.arg            = walker->edge_ectx;
+    ctx.operations.funcs.decode = decode_compute_operation_cb;
+    ctx.operations.arg          = &acc;
     return pb_decode(stream, ProtoHEFContext_fields, &ctx);
 }
 
@@ -967,6 +1140,14 @@ static bool decode_network_group_cb(pb_istream_t *stream,
         .blob_base = ng->blob_base,
     };
     struct edge_ctx edge_ctx = { .info = ng->info };
+    /* Phase 6.4e: ctx_walker outlives the `if (first_ng)` block
+     * because pb_decode reads contexts.arg after we fall out of
+     * that block — declared at function scope so the pointer
+     * remains valid through the decode. */
+    struct ctx_walker walker_ctx = {
+        .info      = ng->info,
+        .edge_ectx = &edge_ctx,
+    };
     if (first_ng) {
         grp.network_group_name.funcs.decode = read_string_cb;
         grp.network_group_name.arg          = &name_ctx;
@@ -978,9 +1159,14 @@ static bool decode_network_group_cb(pb_istream_t *stream,
          * back-fill per-pad quant + stream info. Wire-format ordering
          * means ops (which builds pads[]) decodes first in Hailo's
          * encoding, so pad_index-keyed lookups in decode_edge_layer_cb
-         * find their targets. */
+         * find their targets.
+         *
+         * Phase 6.4e: the same context walker also captures per-
+         * context compute actions (operations[].actions[]) — the
+         * ctx_walker struct bundles both the edge_ctx for metadata
+         * and the hef_info for actions[] accumulation. */
         grp.contexts.funcs.decode           = decode_context_cb;
-        grp.contexts.arg                    = &edge_ctx;
+        grp.contexts.arg                    = &walker_ctx;
     }
     if (!pb_decode(stream, ProtoHEFNetworkGroup_fields, &grp)) return false;
 

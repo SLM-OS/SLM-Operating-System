@@ -18,6 +18,7 @@
 #include "../ai_accel/hailo/hailo_control.h"
 #include "../ai_accel/hailo/hailo_cs_actions.h"
 #include "../ai_accel/hailo/hailo_cs_builder.h"
+#include "../ai_accel/hailo/hailo_cs_translator.h"
 #include "../ai_accel/hailo/hailo_internal.h"
 #include "../ai_accel/hailo/hailo_infer.h"
 #include "../ai_accel/hailo/hailo_tensor.h"
@@ -89,6 +90,30 @@ static uint32_t mock_fw_sim_control_resp_len;
 static uint32_t mock_control_doorbells;
 static uint32_t mock_control_core_doorbells;
 static uint32_t mock_control_last_doorbell_val;
+
+/* Mock MSI plumbing. mock_register_irq stashes the handler + ctx so
+ * tests can invoke it directly to simulate a firmware-delivered MSI,
+ * without actually routing through GIC. mock_msi_invoke() calls the
+ * recorded handler; used by the Phase 6.4 MSI-path tests. */
+static void (*mock_registered_irq_handler)(void *);
+static void  *mock_registered_irq_ctx;
+static uint32_t mock_register_irq_calls;
+
+static int mock_register_irq(void (*handler)(void *), void *ctx)
+{
+    mock_register_irq_calls++;
+    if (!handler) return HAILO_ERR_INVAL;
+    mock_registered_irq_handler = handler;
+    mock_registered_irq_ctx     = ctx;
+    return HAILO_OK;
+}
+
+static void mock_msi_invoke(void)
+{
+    if (mock_registered_irq_handler) {
+        mock_registered_irq_handler(mock_registered_irq_ctx);
+    }
+}
 /* Sized to hold a full control-channel payload (HAILO_CONTROL_MAX_BUFFER_LENGTH).
  * A WRITE_MEMORY chunk with a 1024 B data body totals 32 B header + 1024 B
  * data = 1056 B on the wire, which exceeded the old 512 B cap and caused
@@ -167,6 +192,9 @@ static void mock_reset(void)
     mock_fw_sim_control_resp_len = 0;
     mock_control_doorbells = 0;
     mock_control_core_doorbells = 0;
+    mock_registered_irq_handler = NULL;
+    mock_registered_irq_ctx     = NULL;
+    mock_register_irq_calls     = 0;
     mock_control_last_doorbell_val = 0;
     memset(mock_last_control_request, 0, sizeof(mock_last_control_request));
     mock_last_control_request_len = 0;
@@ -624,6 +652,10 @@ static void  mock_cache_invalidate(void *a, size_t n)
 static void  mock_mb(void)                             {}
 static void  mock_udelay(uint32_t u)                   { (void)u; }
 
+/* mock_register_irq + helpers defined further up; keep the
+ * platform-ops struct adjacent to its function pointers here. */
+static int  mock_register_irq(void (*handler)(void *), void *ctx);
+
 static const struct hailo_platform_ops mock_ops = {
     .name             = "mock",
     .init             = mock_init,
@@ -638,7 +670,7 @@ static const struct hailo_platform_ops mock_ops = {
     .cache_invalidate = mock_cache_invalidate,
     .mb               = mock_mb,
     .udelay           = mock_udelay,
-    .register_irq     = NULL,
+    .register_irq     = mock_register_irq,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2269,6 +2301,429 @@ static void test_change_context_switch_status_enabled_carries_batch_params(void)
     uint16_t batch_cnt;
     memcpy(&batch_cnt, req + 40, 2);
     TEST_ASSERT_EQUAL_UINT16(3, batch_cnt);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 6.4: MSI-driven response notification                                 */
+/* -------------------------------------------------------------------------- */
+
+static void test_control_registers_msi_on_first_send(void)
+{
+    /* First control-channel send_recv should trigger MSI handler
+     * registration via hailo_platform->register_irq. Subsequent
+     * calls should NOT re-register (one-shot gating in
+     * control_arm_interrupts). */
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode   = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    fake.parameter_count        = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_register_irq_calls);
+    TEST_ASSERT_NOT_NULL(mock_registered_irq_handler);
+
+    /* Second call: register_irq must not fire again. */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_register_irq_calls);
+}
+
+static void test_msi_handler_sets_pending_and_clears_istatus(void)
+{
+    /* Seeded pre-state: FW_CONTROL_IRQ bit set in BCS_ISTATUS_HOST
+     * (simulating firmware completing an RPC). When the MSI handler
+     * fires:
+     *   - reads ISTATUS, sees FW_CONTROL_IRQ
+     *   - W1Cs the bit (mock_write32 echoes this into our istatus store)
+     *   - sets control_msi_pending=1
+     *
+     * Can't directly observe control_msi_pending (static), but the
+     * NEXT wait_for_response will return HAILO_OK immediately if the
+     * pending flag is set, so we use a subsequent IDENTIFY to confirm.
+     * control_setup_running has already registered the MSI handler
+     * during its boot-to-running probe. */
+    control_setup_running();
+
+    /* Ensure a control send happens first so MSI handler is registered. */
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_NOT_NULL(mock_registered_irq_handler);
+
+    /* Seed ISTATUS with FW_CONTROL_IRQ set, then invoke handler. */
+    mock_istatus_one_shot_preload = HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;
+    mock_msi_invoke();
+
+    /* Verify the handler W1C'd the bit — after one read, ISTATUS is 0. */
+    uint32_t after = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                            HAILO_BCS_ISTATUS_HOST);
+    TEST_ASSERT_EQUAL_UINT32(0u, after);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 6.4f: HEF → wire-action translator                                    */
+/* -------------------------------------------------------------------------- */
+
+static void test_cs_translate_application_header_fills_defaults(void)
+{
+    /* The translator derives batch_size=1, dynamic_contexts_count=1,
+     * networks_count=1, csm_buffer_size from cfg, no-DDR sentinel,
+     * config channel populated, and the single boundary bit set. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,   /* channel 1, engine 0 */
+        .config_stream_index   = 0,
+        .ccw_desc_list_iova    = 0x1000u,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 16,
+    };
+
+    struct hailo_cs_application_header hdr;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_application_header(&info, &cfg, &hdr));
+
+    TEST_ASSERT_EQUAL_UINT8(1, hdr.networks_count);
+    TEST_ASSERT_EQUAL_UINT16(1, hdr.dynamic_contexts_count);
+    TEST_ASSERT_EQUAL_UINT16(1, hdr.batch_size);
+    TEST_ASSERT_EQUAL_UINT16(512, hdr.csm_buffer_size);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_NO_DDR_ACTION_LIST,
+                             hdr.external_action_list_address);
+    TEST_ASSERT_EQUAL_UINT8(1, hdr.config_channels_count);
+    TEST_ASSERT_EQUAL_UINT8(0x01, hdr.config_channel_packed_id[0]);
+    /* channel 1 → bit 1 set in engine 0's bitmap. */
+    TEST_ASSERT_EQUAL_UINT32(1u << 1, hdr.boundary_channels_bitmap[0]);
+}
+
+static void test_cs_translate_application_header_rejects_null(void)
+{
+    struct hef_info info; memset(&info, 0, sizeof(info));
+    struct hailo_cs_translate_cfg cfg = {0};
+    struct hailo_cs_application_header hdr;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_application_header(NULL, &cfg, &hdr));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_application_header(&info, NULL, &hdr));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_application_header(&info, &cfg, NULL));
+}
+
+static void test_cs_translate_contexts_produces_all_four(void)
+{
+    /* Minimal hef_info with one CCW action: translator should emit
+     * non-empty bytes in all four context slots and pick the right
+     * action types per context. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 1;
+    info.ccw_total_bytes  = 512;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .config_stream_index   = 0,
+        .ccw_desc_list_iova    = 0xDEADBEEF00000000ull,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Every context must be non-empty (firmware rejects zero-length). */
+    TEST_ASSERT_TRUE(out.activation_len       > 0);
+    TEST_ASSERT_TRUE(out.batch_switching_len  > 0);
+    TEST_ASSERT_TRUE(out.preliminary_len      > 0);
+    TEST_ASSERT_TRUE(out.dynamic_len          > 0);
+
+    /* ACTIVATION: single BURST_CREDITS_TASK_RESET (type 30, zero body).
+     * 8-byte common header alone = 8 bytes. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, out.activation_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
+                            out.activation[0]);
+
+    /* BATCH_SWITCHING: DDR_BUFFERING_RESET (type 31) + BURST_CREDITS_
+     * TASK_START (type 29), both zero-body → 16 bytes total. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)16, out.batch_switching_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
+                            out.batch_switching[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                            out.batch_switching[8]);
+
+    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL (type 22, 21 B body → 29 B)
+     * + FETCH_CCW_BURSTS (type 27, 3 B body → 11 B). Total 40 B. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)40, out.preliminary_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                            out.preliminary[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,
+                            out.preliminary[29]);
+    /* host_buffer_info.dma_address inside the activate body — after
+     * 8-byte header + 2-byte (channel_id + stream_index) + 1-byte
+     * (buffer_type). Offset = 8 + 2 + 1 = 11. */
+    uint64_t iova;
+    memcpy(&iova, out.preliminary + 11, 8);
+    TEST_ASSERT_EQUAL_UINT64(0xDEADBEEF00000000ull, iova);
+    /* FETCH_CCW_BURSTS body at offset 29+8 = 37: u16 ccw_bursts (=1)
+     * then u8 config_stream_index (=0). */
+    uint16_t bursts;
+    memcpy(&bursts, out.preliminary + 37, 2);
+    TEST_ASSERT_EQUAL_UINT16(1, bursts);
+    TEST_ASSERT_EQUAL_UINT8(0, out.preliminary[39]);
+
+    /* DYNAMIC: APPLICATION_CHANGE_INTERRUPT tail marker (zero body). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[0]);
+}
+
+static void test_cs_translate_contexts_uses_ccw_count_for_burst_count(void)
+{
+    /* 7 CCW actions in hef_info → FETCH_CCW_BURSTS encodes ccw_bursts=7. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 7;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x100000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 16,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    uint16_t bursts;
+    memcpy(&bursts, out.preliminary + 37, 2);
+    TEST_ASSERT_EQUAL_UINT16(7, bursts);
+}
+
+static void test_cs_translate_contexts_clamps_burst_count_to_u16(void)
+{
+    /* Pathological ccw_action_count > UINT16_MAX: clamp to 65535. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 100000u;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x100000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 16,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    uint16_t bursts;
+    memcpy(&bursts, out.preliminary + 37, 2);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, bursts);
+}
+
+static void test_cs_translate_contexts_rejects_null(void)
+{
+    struct hef_info info; memset(&info, 0, sizeof(info));
+    struct hailo_cs_translate_cfg cfg = {0};
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(NULL, &cfg, &out));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, NULL, &out));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, &cfg, NULL));
+}
+
+/* Phase 6.4g: translator emits ENABLE_LCU_* wire actions from
+ * parser-captured hef_enable_lcu_action parameters. Default vs
+ * non-default encoding is selected by whether kernel_done_* fields
+ * are non-zero. */
+
+static void test_cs_translate_enable_lcu_default_variant(void)
+{
+    /* Default variant: kernel_done_count = 0 and kernel_done_address
+     * = 0 → emit ENABLE_LCU_DEFAULT (8B header + 2B body = 10B) ahead
+     * of the tail APPLICATION_CHANGE_INTERRUPT (8B). Total DYNAMIC
+     * context: 18 bytes. packed_lcu_id = (cluster<<4)|lcu. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 1;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .context_index = 0,
+        .lcu_index     = 3,
+        .cluster_index = 5,
+        .network_index = 1,
+        .lcu_kernel_done_address = 0,
+        .lcu_kernel_done_count   = 0,
+    };
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)18, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[0]);
+    /* Body starts at offset 8 (after 8-byte common header). */
+    TEST_ASSERT_EQUAL_UINT8((5u << 4) | 3u, out.dynamic[8]);   /* packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[9]);                /* network_index */
+    /* Tail APPLICATION_CHANGE_INTERRUPT at offset 10. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[10]);
+}
+
+static void test_cs_translate_enable_lcu_non_default_variant(void)
+{
+    /* Non-default: kernel_done_count non-zero → emit
+     * ENABLE_LCU_NON_DEFAULT (8B hdr + 8B body = 16B) + tail (8B).
+     * Total DYNAMIC: 24 bytes. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 1;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .context_index           = 0,
+        .lcu_index               = 2,
+        .cluster_index           = 4,
+        .network_index           = 0,
+        .lcu_kernel_done_address = 0x1234,
+        .lcu_kernel_done_count   = 0xABCD1234,
+    };
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)24, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_NON_DEFAULT, out.dynamic[0]);
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 2u, out.dynamic[8]);
+    TEST_ASSERT_EQUAL_UINT8(0, out.dynamic[9]);
+    uint16_t kda;
+    memcpy(&kda, out.dynamic + 10, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x1234, kda);
+    uint32_t kdc;
+    memcpy(&kdc, out.dynamic + 12, 4);
+    TEST_ASSERT_EQUAL_UINT32(0xABCD1234, kdc);
+    /* Tail at offset 16. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[16]);
+}
+
+static void test_cs_translate_skips_enable_lcu_from_other_contexts(void)
+{
+    /* Three EnableLcu entries tagged with context_index 0, 1, 0.
+     * translate_dynamic targets context 0 only; entries tagged with
+     * context_index=1 must NOT appear in the dynamic byte stream.
+     * Result: 2 × 10 B defaults + 8 B tail = 28 bytes, with the
+     * second emitted EnableLcu being the one originally at index 2
+     * (context_index=0), not index 1 (context_index=1). */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 3;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .context_index = 0, .lcu_index = 1, .cluster_index = 2,
+    };
+    info.enable_lcu_actions[1] = (struct hef_enable_lcu_action){
+        /* Different context — must be skipped. */
+        .context_index = 1, .lcu_index = 7, .cluster_index = 7,
+    };
+    info.enable_lcu_actions[2] = (struct hef_enable_lcu_action){
+        .context_index = 0, .lcu_index = 3, .cluster_index = 4,
+    };
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Two context-0 EnableLcu (10B each) + tail (8B) = 28 bytes.
+     * If the filter were broken, we'd see 38 bytes (3 × 10 + 8). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)28, out.dynamic_len);
+    /* First emitted = entry 0: packed (2<<4)|1 = 0x21. */
+    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[8]);
+    /* Second emitted = entry 2 (NOT entry 1): packed (4<<4)|3 = 0x43.
+     * If the filter broke, byte 18 would be 0x77 (from the skipped
+     * context_index=1 entry). */
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[18]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[20]);
+}
+
+static void test_cs_translate_multiple_enable_lcu_preserves_order(void)
+{
+    /* Two EnableLcu entries in order; translator emits them in the
+     * same sequence plus the trailing APPLICATION_CHANGE_INTERRUPT. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.enable_lcu_count = 2;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .lcu_index = 1, .cluster_index = 2, .network_index = 0,
+    };
+    info.enable_lcu_actions[1] = (struct hef_enable_lcu_action){
+        .lcu_index = 3, .cluster_index = 4, .network_index = 1,
+    };
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Two 10B defaults + 8B tail = 28 bytes. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)28, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[8]);   /* first packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(0, out.dynamic[9]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[10]);
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[18]);  /* second packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[19]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[20]);
 }
 
 static void test_control_send_recv_default_rings_app_doorbell(void)
@@ -5210,6 +5665,18 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_builder_accepts_zero_body_action);
     RUN_TEST(test_change_context_switch_status_reset_wire_layout);
     RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);
+    RUN_TEST(test_control_registers_msi_on_first_send);
+    RUN_TEST(test_msi_handler_sets_pending_and_clears_istatus);
+    RUN_TEST(test_cs_translate_application_header_fills_defaults);
+    RUN_TEST(test_cs_translate_application_header_rejects_null);
+    RUN_TEST(test_cs_translate_contexts_produces_all_four);
+    RUN_TEST(test_cs_translate_contexts_uses_ccw_count_for_burst_count);
+    RUN_TEST(test_cs_translate_contexts_clamps_burst_count_to_u16);
+    RUN_TEST(test_cs_translate_contexts_rejects_null);
+    RUN_TEST(test_cs_translate_enable_lcu_default_variant);
+    RUN_TEST(test_cs_translate_enable_lcu_non_default_variant);
+    RUN_TEST(test_cs_translate_skips_enable_lcu_from_other_contexts);
+    RUN_TEST(test_cs_translate_multiple_enable_lcu_preserves_order);
     RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);

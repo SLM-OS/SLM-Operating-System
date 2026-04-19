@@ -510,21 +510,93 @@ Subsequent `SET_CONTEXT_INFO` calls (BATCH_SWITCHING, PRELIMINARY, DYNAMIC) fail
 
 `APPLICATION_CHANGE_INTERRUPT` is zero-body and is **only** legal at the tail of the final DYNAMIC context — not in ACTIVATION/BATCH_SWITCHING/PRELIMINARY. Sending it in the wrong context returns MISALIGNMENT because firmware's walker doesn't expect it there.
 
+#### Phase 6.4e landed (2026-04-19): HEF parser captures compute-action inventory
+
+`hef_parser` now walks `ProtoHEFContext.operations[].actions[]` and records per-context action summaries into `hef_info.context_actions[]`: `context_index`, `action_count`, `action_type_mask` (bitmap keyed on ProtoHEFAction oneof field numbers), and a capped-size `action_types[]` array preserving decode order. 6 unit tests; caps of `HEF_PARSER_MAX_CONTEXTS=8` and `HEF_PARSER_MAX_CONTEXT_ACTIONS=64`; overflow flags per-context and at the top level.
+
+Per-action parameter extraction (`packed_lcu_id` for `EnableLcu`, `cluster_index` for `TriggerSequencer`, etc.) is deliberately deferred — the current summary is enough to dispatch on action type in the translator.
+
+#### Phase 6.4f landed (2026-04-19): HEF → wire-action translator (skeleton)
+
+`kernel/ai_accel/hailo/hailo_cs_translator.{c,h}` composes over `hailo_cs_builder` and emits the four per-context action byte streams plus the 32-byte `application_header`. Per-context minimums match HailoRT's `fill_*_context_recipes` (v4.23 source).
+
+Hardware-verified on pi-5-1 (2026-04-19) — the translator-driven `ctxsmoke` produces **identical firmware behavior** to the pre-refactor hand-rolled version: `ACTIVATION rc=0`, same downstream truncated-response signal on BATCH_SWITCHING. Byte-level equivalence end-to-end.
+
+What's still a skeleton: the `DYNAMIC` context carries only `APPLICATION_CHANGE_INTERRUPT` as its tail marker — no compute actions translated from the HEF's `operations[].actions[]` yet. Firmware accepts this structurally, but a real inference would need EnableLcu / TriggerSequencer / AllowInputDataflow translated, which requires per-action parameter extraction in `hef_parser` first.
+
+#### Phase 6.4: MSI-driven control response notification (2026-04-19)
+
+Replaces the 100µs-polled `BCS_ISTATUS_HOST` loop in `wait_for_response` with an MSI-signaled wait, matching HailoRT's architecture. A new `control_msi_handler` runs in ISR context: reads + write-1-to-clears ISTATUS, sets an atomic `control_msi_pending` flag when `FW_CONTROL_IRQ` fires. `wait_for_response` checks the flag first (zero-overhead acquire on hit), falls back to ISTATUS polling for platforms without `register_irq` (stub, test mock absent this hook).
+
+MSI handler is registered lazily on first `control_arm_interrupts` call via `hailo_platform->register_irq`. Platforms without it stay on the polling fallback — no regression.
+
+Pre-doorbell in `send_recv_locked` now clears **both** a stale `BCS_ISTATUS_HOST` and the `control_msi_pending` flag, so any signal observed during `wait_for_response` belongs to THIS RPC. Closes a race where the MSI handler and polling path both see a given completion, with the second to fire leaving state for the next RPC to mistakenly consume.
+
+Hardware result on pi-5-1 fw v4.23: MSI fires within ~2s of the doorbell for every CORE-CPU RPC (`hailo: MSI vector 287 bound` in boot log; BATCH_SWITCHING exits `wait_for_response` at ~2s instead of timing out at 10s).
+
+#### Phase 6.4g landed (2026-04-19): EnableLcu per-action parameter extraction
+
+Extends `hef_parser`'s compute-action walker to capture `ProtoHEFActionEnableLcu` (oneof tag 8) parameters into `hef_info.enable_lcu_actions[]`. Each entry records all six scalar fields (`lcu_index`, `cluster_index`, `kernel_done_address`, `kernel_done_count`, `lcu_enable_address`, `network_index`) plus the source `context_index`.
+
+Translator emits the matching wire action per captured entry:
+- `ENABLE_LCU_DEFAULT` (2 B body) when `kernel_done_count == 0 && kernel_done_address == 0`
+- `ENABLE_LCU_NON_DEFAULT` (8 B body) otherwise
+
+`packed_lcu_id = (cluster_index << 4) | (lcu_index & 0xF)` via `hailo_cs_pack_lcu_id()` helper — matches HailoRT's convention.
+
+Pattern is the template for future action types (DisableLcu, TriggerSequencer, WaitForSequencer, AllowInputDataflow): add a `hef_<action>_action` struct, a `decode_<action>_body` function, a dispatcher case in `decode_compute_action_inner_cb`, a wire struct + `action_type` in `hailo_cs_actions.h`, and a `translate_<action>` call from `translate_dynamic`.
+
 #### What's still needed for real inference
 
-1. **Response-buffer state between contexts.** Current hardware test shows ACTIVATION succeeds but BATCH_SWITCHING gets a truncated response. Either firmware needs time to finish processing ACTIVATION before the next RPC, or our IRQ-latch handling leaks state between calls.
-2. **HEF parser extension (Phase 6.4e).** Walk `ProtoHEFContext.operations[].actions[]` and capture the compiler-emitted structured actions (EnableLcu, TriggerSequencer, etc.) that go into the DYNAMIC context for compute.
-3. **Full translator (Phase 6.4f).** Map each `ProtoHEFAction` to its `hailort-context_switch_defs.h` wire equivalent, allocate CCW DMA buffers with bus-visible addresses, emit per-context streams, wire into `inference_device_hailo::load_model` replacing the best-effort path.
+1. **Firmware responds with garbage to CORE-CPU RPCs after ACTIVATION.** Even with MSI delivering the response-ready signal within 2s, `BAR4+0x640` reads as `buffer_len=0xFFFFFFFF`. Driver-side fixes (stale-ISTATUS clear, one-shot ATR retarget, pre-doorbell MSI-pending clear, timeout extension, MSI itself) exhausted. Suspect the `BURST_CREDITS_TASK_RESET`-only ACTIVATION is not rich enough content to let firmware's state machine transition cleanly — once 6.4h adds the real boundary-channel actions per-edge-layer that HailoRT's `fill_activation_config_recepies` emits, firmware may settle. See memory note `hailo_core_cpu_response_content.md` for the full matrix of what was tried.
+2. **Additional per-action parameter extraction.** Phase 6.4g shipped EnableLcu; the same pattern needs to extend to DisableLcu, TriggerSequencer, WaitForSequencer, AllowInputDataflow before the DYNAMIC context carries real compute.
+3. **Richer ACTIVATION/BATCH_SWITCHING contexts.** Current stubs (`BURST_CREDITS_TASK_RESET`, `DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START`) pass firmware's parser but are minimum-viable. HailoRT's real emission adds `OpenBoundaryInput`/`OpenBoundaryOutput` per boundary edge layer in ACTIVATION; these need an edge-layer → VDMA-channel mapping we haven't built yet.
+4. **Wire translator into `inference_device_hailo::load_model`.** Replace the best-effort WRITE_MEMORY + CONFIG_STREAM path with the SET_NETWORK_GROUP_HEADER + 4 SET_CONTEXT_INFO chain. Gated on (1), (2), (3).
 
-#### Test coverage — 6 new cases (beyond 6.3's 10)
+#### Test coverage — Phase 6.4 cumulative (beyond 6.3's 10)
 
+Builder (5):
 - `test_cs_builder_append_emits_header_then_body` — single-action byte-for-byte layout including the 3 pad bytes at offsets 1–3.
 - `test_cs_builder_appends_concatenate` — 3-action preliminary-context sequence with `ACTIVATE_CFG_CHANNEL` + `FETCH_CCW_BURSTS` + `DEACTIVATE_CFG_CHANNEL`, asserts action_type bytes + host_buffer_info DMA-address offset.
 - `test_cs_builder_returns_nomem_on_overflow` — buffer capacity enforced.
 - `test_cs_builder_rejects_null_buffer` — null-pointer API check.
 - `test_cs_builder_accepts_zero_body_action` — `BURST_CREDITS_TASK_RESET`-style zero-body actions produce an 8-byte header-only entry.
+
+Change-context-status (2):
 - `test_change_context_switch_status_reset_wire_layout` — RESET state transition byte-for-byte.
 - `test_change_context_switch_status_enabled_carries_batch_params` — ENABLED carries the batch-size/batch-count fields.
+
+MSI response path (2):
+- `test_control_registers_msi_on_first_send` — first control RPC triggers `register_irq`; subsequent RPCs don't re-register (one-shot gating).
+- `test_msi_handler_sets_pending_and_clears_istatus` — directly-invoked MSI handler W1Cs the `FW_CONTROL_IRQ` bit (preseeded via `mock_istatus_one_shot_preload`) so the next polling iteration sees a clean state.
+
+HEF parser context-actions walker, 6.4e (6):
+- `test_decode_context_actions_single_action` — 1-context / 1-action HEF → `action_types[0]==8`, `mask==(1<<8)`.
+- `test_decode_context_actions_mixed_types` — 5 different action kinds in order; order preserved, mask OR'd.
+- `test_decode_context_actions_multiple_contexts` — 2 contexts each get their own slot.
+- `test_decode_context_actions_overflow_truncates` — MAX+1 actions in one context; `truncated` flag set.
+- `test_decode_context_actions_context_overflow` — MAX+1 contexts; top-level `truncated` flag set.
+- `test_decode_context_actions_no_contexts` — NG with no `contexts[]` field.
+
+HEF parser EnableLcu extraction, 6.4g (3):
+- `test_decode_enable_lcu_captures_all_fields` — distinct non-default values for all 6 scalars land in the right slots.
+- `test_decode_enable_lcu_defaults_zero_when_absent` — proto3 default semantics preserved.
+- `test_decode_enable_lcu_tracks_context_index` — multi-context HEF correctly records which context each action belongs to.
+
+Translator application_header + contexts, 6.4f (6):
+- `test_cs_translate_application_header_fills_defaults` — verifies every derived field in the 32-byte header.
+- `test_cs_translate_application_header_rejects_null` — null-arg.
+- `test_cs_translate_contexts_produces_all_four` — byte-for-byte assertion of all four context streams (lengths 8/16/40/8, action_type bytes at expected offsets, `host_buffer_info.dma_address` round-trip).
+- `test_cs_translate_contexts_uses_ccw_count_for_burst_count` — `info.ccw_action_count=7` → `FETCH_CCW_BURSTS.ccw_bursts=7`.
+- `test_cs_translate_contexts_clamps_burst_count_to_u16` — 100000 actions → clamped to UINT16_MAX.
+- `test_cs_translate_contexts_rejects_null` — null-arg.
+
+Translator EnableLcu, 6.4g (3):
+- `test_cs_translate_enable_lcu_default_variant` — `packed_lcu_id` correctly encoded; `ENABLE_LCU_DEFAULT` emitted + tail marker.
+- `test_cs_translate_enable_lcu_non_default_variant` — non-zero `kernel_done_count` switches to `ENABLE_LCU_NON_DEFAULT`; 8-byte body byte-for-byte asserted.
+- `test_cs_translate_multiple_enable_lcu_preserves_order` — two EnableLcu entries emitted in HEF order ahead of the tail.
+
+Total Phase 6.4 unit-test additions: **27 cases** across `test_hailo.c` and `test_hef_parser.c`.
 
 **Firmware constraints pinned from v4.23:**
 - Zero-length contexts are rejected with `0x40130004`; each `SET_CONTEXT_INFO` must carry ≥1 valid wire action.
