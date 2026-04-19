@@ -746,6 +746,20 @@ static int cmd_hailo(int argc, char *argv[])
                                             (uint32_t)bufs.activation_len);
         shell_printf("        rc=%d\n", rc);
 
+        /* Diagnostic: probe an APP-CPU opcode (IDENTIFY) right after
+         * ACTIVATION. Hardware-verified on pi-5-1 fw v4.23 that this
+         * returns rc=0 while the next CORE-CPU RPC (BATCH_SWITCHING)
+         * times out — confirming the control channel as a whole is
+         * healthy; firmware's CORE task specifically is busy
+         * processing ACTIVATION's burst-credits reset asynchronously.
+         * Kept as a permanent diagnostic so future regressions can
+         * distinguish "CORE-busy" from "channel-wedged" at a glance. */
+        struct hailo_control_identify_response idr;
+        int irc = hailo_control_identify(&idr);
+        shell_printf("  [--] DIAG: IDENTIFY(APP) rc=%d fw=%u.%u\n",
+                     irc, (unsigned)idr.fw_version.major,
+                     (unsigned)idr.fw_version.minor);
+
         shell_printf("  [4/6] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
                      (unsigned)bufs.batch_switching_len);
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING,

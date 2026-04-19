@@ -170,11 +170,20 @@ static int wait_for_response(uint32_t timeout_us)
  * hailo_pcie_is_firmware_loaded); our boot path uses the older
  * ATR[1] magic and may leave ATR[0] pointing at the last firmware
  * upload window (core_fw_header at 0xA0000). Force the correct
- * value before every control-channel op. Idempotent — if firmware
- * already set it, this is a no-op.
+ * value on the first control op after boot.
+ *
+ * Gated by `control_atr0_retargeted` so the 5-register reprogram
+ * runs exactly once per driver lifetime. Originally called every
+ * RPC, which is wasteful (the window doesn't move) and creates a
+ * theoretical race where firmware's response-write could land
+ * mid-reprogram. Tested on pi-5-1 fw v4.23 — the one-shot version
+ * behaves identically to per-RPC retargeting (both get rc=0 on
+ * ACTIVATION, both time out on BATCH_SWITCHING), but is cheaper.
  */
+static bool control_atr0_retargeted = false;
 static void control_retarget_atr0(void)
 {
+    if (control_atr0_retargeted) return;
     uint32_t atr0 = HAILO_ATR_BASE;
     hailo_platform->write32(HAILO_BAR_CONFIG,
                             atr0 + HAILO_ATR_OFF_PARAM,
@@ -190,6 +199,7 @@ static void control_retarget_atr0(void)
                             atr0 + HAILO_ATR_OFF_TRSL_PARAM,
                             HAILO_ATR_TRSL_AXI);
     hailo_platform->mb();
+    control_atr0_retargeted = true;
 }
 
 /*
@@ -277,6 +287,22 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
      * buffers. */
     control_arm_interrupts();
     control_retarget_atr0();
+
+    /* Clear any stale BCS_ISTATUS_HOST bits before firing the new
+     * doorbell. Hygiene only: if a previous RPC's wait_for_response
+     * timed out and firmware set the FW_CONTROL_IRQ bit late, we
+     * don't want the next poll to return immediately on that stale
+     * bit. Tested on pi-5-1 fw v4.23 — does NOT fix the "ACTIVATION
+     * rc=0 then subsequent CORE-CPU RPCs time out" pattern (IDENTIFY
+     * on APP CPU works fine right after; the CORE task is genuinely
+     * busy), but guards against a related race. Idempotent. */
+    uint32_t stale = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                            HAILO_BCS_ISTATUS_HOST);
+    if (stale != 0) {
+        hailo_platform->write32(HAILO_BAR_CONFIG,
+                                HAILO_BCS_ISTATUS_HOST, stale);
+        hailo_platform->mb();
+    }
 
     size_t wire_len = build_request_wire(control_req_wire, req_payload, req_len);
 
@@ -400,7 +426,8 @@ int hailo_control_send_recv_cpu(enum hailo_control_cpu cpu_id,
 void hailo_control_reset_state_for_tests(void)
 {
     __atomic_store_n(&control_sequence, 0, __ATOMIC_RELAXED);
-    control_irq_armed = false;
+    control_irq_armed        = false;
+    control_atr0_retargeted  = false;
 }
 
 int hailo_control_identify(struct hailo_control_identify_response *out)
@@ -1238,12 +1265,22 @@ int hailo_control_set_context_info_chunk(
                                              sizeof(control_set_ctx_info_resp),
                                              &resp_len);
     if (rc == HAILO_OK) {
+        /* 10s timeout on SET_CONTEXT_INFO. Longer than other CORE-CPU
+         * opcodes because firmware's CORE task processes each context's
+         * action list asynchronously — the response comes back only
+         * AFTER that work completes. On pi-5-1 fw v4.23 with a tight
+         * 1s timeout, ACTIVATION returned rc=0 but the next
+         * SET_CONTEXT_INFO (BATCH_SWITCHING) timed out because the
+         * CORE task was still finalizing BURST_CREDITS_TASK_RESET
+         * from ACTIVATION. A longer timeout lets the natural sequence
+         * complete. Full MSI-driven response routing is the long-term
+         * fix; this bump unblocks single-MLP loads today. */
         rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
                                             &control_set_ctx_info_req, req_len,
                                             &control_set_ctx_info_resp,
                                             sizeof(control_set_ctx_info_resp),
                                             &resp_len,
-                                            /* 1 s */ 1000000u);
+                                            /* 10 s */ 10000000u);
     }
     if (rc != HAILO_OK) {
         spin_unlock(&control_lock);
