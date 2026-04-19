@@ -25,6 +25,7 @@
 #include "../ai_accel/hailo/hailo_vdma.h"
 #include "../ai_accel/hailo/hef_parser.h"
 #include "../ai_accel/hailo/hef_header.h"
+#include "../ai_accel/hailo/hef.pb.h"   /* ProtoHEFAction_*_tag */
 #include "../include/inference_device.h"
 #include "../include/md5.h"
 #include "../include/uart.h"
@@ -2579,6 +2580,10 @@ static void test_cs_translate_enable_lcu_default_variant(void)
         .lcu_kernel_done_address = 0,
         .lcu_kernel_done_count   = 0,
     };
+    info.context_actions_count = 1;
+    info.context_actions[0].context_index = 0;
+    info.context_actions[0].action_count  = 1;
+    info.context_actions[0].action_types[0] = ProtoHEFAction_enable_lcu_tag;
 
     struct hailo_cs_translate_cfg cfg = {
         .config_vdma_channel   = 0x01,
@@ -2617,6 +2622,10 @@ static void test_cs_translate_enable_lcu_non_default_variant(void)
         .lcu_kernel_done_address = 0x1234,
         .lcu_kernel_done_count   = 0xABCD1234,
     };
+    info.context_actions_count = 1;
+    info.context_actions[0].context_index = 0;
+    info.context_actions[0].action_count  = 1;
+    info.context_actions[0].action_types[0] = ProtoHEFAction_enable_lcu_tag;
 
     struct hailo_cs_translate_cfg cfg = {
         .config_vdma_channel   = 0x01,
@@ -2665,6 +2674,13 @@ static void test_cs_translate_skips_enable_lcu_from_other_contexts(void)
     info.enable_lcu_actions[2] = (struct hef_enable_lcu_action){
         .context_index = 0, .lcu_index = 3, .cluster_index = 4,
     };
+    /* context 0 has two enable_lcu actions; translator should consume
+     * entries 0 and 2, skipping entry 1 (context_index=1). */
+    info.context_actions_count = 1;
+    info.context_actions[0].context_index = 0;
+    info.context_actions[0].action_count  = 2;
+    info.context_actions[0].action_types[0] = ProtoHEFAction_enable_lcu_tag;
+    info.context_actions[0].action_types[1] = ProtoHEFAction_enable_lcu_tag;
 
     struct hailo_cs_translate_cfg cfg = {
         .config_vdma_channel   = 0x01,
@@ -2703,6 +2719,11 @@ static void test_cs_translate_multiple_enable_lcu_preserves_order(void)
     info.enable_lcu_actions[1] = (struct hef_enable_lcu_action){
         .lcu_index = 3, .cluster_index = 4, .network_index = 1,
     };
+    info.context_actions_count = 1;
+    info.context_actions[0].context_index = 0;
+    info.context_actions[0].action_count  = 2;
+    info.context_actions[0].action_types[0] = ProtoHEFAction_enable_lcu_tag;
+    info.context_actions[0].action_types[1] = ProtoHEFAction_enable_lcu_tag;
 
     struct hailo_cs_translate_cfg cfg = {
         .config_vdma_channel   = 0x01,
@@ -2724,6 +2745,319 @@ static void test_cs_translate_multiple_enable_lcu_preserves_order(void)
     TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[19]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
                             out.dynamic[20]);
+}
+
+static void test_cs_translate_disable_lcu_wire_format(void)
+{
+    /* DISABLE_LCU body is 1 byte = packed_lcu_id = (cluster<<4)|lcu.
+     * Emit: 8B header + 1B body + 8B tail = 17 bytes. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.disable_lcu_count = 1;
+    info.disable_lcu_actions[0] = (struct hef_disable_lcu_action){
+        .context_index = 0, .lcu_index = 2, .cluster_index = 3,
+    };
+    info.context_actions_count = 1;
+    info.context_actions[0].action_count  = 1;
+    info.context_actions[0].action_types[0] = ProtoHEFAction_disable_lcu_tag;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel = 0x01, .ccw_desc_list_iova = 0x1000,
+        .ccw_desc_page_size = 512,   .ccw_total_desc_count = 2,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)17, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DISABLE_LCU, out.dynamic[0]);
+    TEST_ASSERT_EQUAL_UINT8((3u << 4) | 2u, out.dynamic[8]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[9]);
+}
+
+static void test_cs_translate_wait_sequencer_wire_format(void)
+{
+    /* SEQUENCER_DONE_INTERRUPT body is 1 byte = sequencer_index
+     * (== cluster_index on Hailo-8). Emit: 8B hdr + 1B + 8B tail. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.wait_sequencer_count = 1;
+    info.wait_sequencer_actions[0] = (struct hef_wait_sequencer_action){
+        .context_index = 0, .cluster_index = 5,
+    };
+    info.context_actions_count = 1;
+    info.context_actions[0].action_count = 1;
+    info.context_actions[0].action_types[0] = ProtoHEFAction_wait_for_seqeuncer_tag;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel = 0x01, .ccw_desc_list_iova = 0x1000,
+        .ccw_desc_page_size = 512,   .ccw_total_desc_count = 2,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)17, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_SEQUENCER_DONE_INTERRUPT,
+                            out.dynamic[0]);
+    TEST_ASSERT_EQUAL_UINT8(5, out.dynamic[8]);   /* sequencer_index */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[9]);
+}
+
+static void test_cs_translate_trigger_sequencer_wire_format(void)
+{
+    /* TRIGGER_SEQUENCER body: 1B cluster_index + 43B sequencer_config
+     * = 44B body. Emit: 8B hdr + 44B + 8B tail = 60 bytes. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.trigger_sequencer_count = 1;
+    info.trigger_sequencer_actions[0] = (struct hef_trigger_sequencer_action){
+        .context_index      = 0,
+        .cluster_index      = 7,
+        .initial_l3_cut     = 2,
+        .initial_l3_offset  = 0x1234,
+        .active_apu_bitmap  = 0xDEADBEEF,
+        .active_ia_bitmap   = 0x12345678,
+        .active_sc_bitmap   = 0xAABBCCDDEEFF0011ull,
+        .active_l2_bitmap   = 0x1122334455667788ull,
+        .l2_offset_0        = 0x0102030405060708ull,
+        .l2_offset_1        = 0x1011121314151617ull,
+    };
+    info.context_actions_count = 1;
+    info.context_actions[0].action_count = 1;
+    info.context_actions[0].action_types[0] =
+        ProtoHEFAction_enable_sequencer_tag;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel = 0x01, .ccw_desc_list_iova = 0x1000,
+        .ccw_desc_page_size = 512,   .ccw_total_desc_count = 2,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)60, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_TRIGGER_SEQUENCER, out.dynamic[0]);
+    /* Body starts at offset 8. */
+    TEST_ASSERT_EQUAL_UINT8(7, out.dynamic[8]);       /* cluster_index */
+    TEST_ASSERT_EQUAL_UINT8(2, out.dynamic[9]);       /* initial_l3_cut */
+    uint16_t l3off; memcpy(&l3off, out.dynamic + 10, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x1234, l3off);
+    uint32_t apu; memcpy(&apu, out.dynamic + 12, 4);
+    TEST_ASSERT_EQUAL_UINT32(0xDEADBEEF, apu);
+    uint32_t ia;  memcpy(&ia,  out.dynamic + 16, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x12345678, ia);
+    uint64_t sc;  memcpy(&sc,  out.dynamic + 20, 8);
+    TEST_ASSERT_EQUAL_UINT64(0xAABBCCDDEEFF0011ull, sc);
+    uint64_t l2;  memcpy(&l2,  out.dynamic + 28, 8);
+    TEST_ASSERT_EQUAL_UINT64(0x1122334455667788ull, l2);
+    uint64_t o0;  memcpy(&o0,  out.dynamic + 36, 8);
+    TEST_ASSERT_EQUAL_UINT64(0x0102030405060708ull, o0);
+    uint64_t o1;  memcpy(&o1,  out.dynamic + 44, 8);
+    TEST_ASSERT_EQUAL_UINT64(0x1011121314151617ull, o1);
+    /* Tail at offset 52. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[52]);
+}
+
+static void test_cs_translate_allow_input_dataflow_wire_format(void)
+{
+    /* FETCH_DATA_FROM_VDMA_CHANNEL body is 9 bytes. Emit: 8B hdr +
+     * 9B body + 8B tail = 25 bytes. The translator looks up the pad
+     * by sys_index to resolve frame_periph_size. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 1;
+    info.pads[0].sys_index            = 42;
+    info.pads[0].core_bytes_per_buffer = 0x01020304;
+
+    info.allow_input_dataflow_count = 1;
+    info.allow_input_dataflow_actions[0] =
+        (struct hef_allow_input_dataflow_action){
+            .context_index = 0, .sys_index = 42, .connection_type = 0,
+        };
+    info.context_actions_count = 1;
+    info.context_actions[0].action_count = 1;
+    info.context_actions[0].action_types[0] =
+        ProtoHEFAction_allow_input_dataflow_tag;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel = 0x03, .ccw_desc_list_iova = 0x1000,
+        .ccw_desc_page_size = 512,   .ccw_total_desc_count = 2,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)25, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_DATA_FROM_VDMA_CHANNEL,
+                            out.dynamic[0]);
+    /* packed_vdma = config_vdma + 1 = 0x04. */
+    TEST_ASSERT_EQUAL_UINT8(0x04, out.dynamic[8]);
+    TEST_ASSERT_EQUAL_UINT8(0,    out.dynamic[9]);   /* stream_index */
+    TEST_ASSERT_EQUAL_UINT8(0,    out.dynamic[10]);  /* network_index */
+    uint32_t fps; memcpy(&fps, out.dynamic + 11, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x01020304, fps);
+    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[15]);  /* credit_type=BYTES */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                            out.dynamic[16]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[17]);
+}
+
+static void test_cs_translate_allow_input_dataflow_missing_pad_fails(void)
+{
+    /* sys_index doesn't match any pad → translator returns INVAL. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 1;
+    info.pads[0].sys_index            = 99;   /* different sys_index */
+    info.pads[0].core_bytes_per_buffer = 0x100;
+    info.allow_input_dataflow_count = 1;
+    info.allow_input_dataflow_actions[0] =
+        (struct hef_allow_input_dataflow_action){
+            .context_index = 0, .sys_index = 42,
+        };
+    info.context_actions_count = 1;
+    info.context_actions[0].action_count = 1;
+    info.context_actions[0].action_types[0] =
+        ProtoHEFAction_allow_input_dataflow_tag;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel = 0x01, .ccw_desc_list_iova = 0x1000,
+        .ccw_desc_page_size = 512,   .ccw_total_desc_count = 2,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+}
+
+static void test_cs_translate_interleaved_kinds_preserves_order(void)
+{
+    /* action_types = [enable_lcu, disable_lcu, enable_lcu, wait_seq,
+     * allow_input_dataflow]. Each kind has its own per-kind array;
+     * the translator's cursor logic must dispatch in action_types[]
+     * order, NOT dump-by-kind. If the cursor used the wrong per-kind
+     * array for the active tag, the emitted stream would shuffle.
+     *
+     * We verify by checking the emitted action_type byte at each
+     * offset of the DYNAMIC context. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+
+    /* Pad for allow_input_dataflow. */
+    info.pad_count = 1;
+    info.pads[0].sys_index            = 17;
+    info.pads[0].core_bytes_per_buffer = 0x1000;
+
+    /* Two enable_lcu entries, one disable, one wait_seq, one allow. */
+    info.enable_lcu_count = 2;
+    info.enable_lcu_actions[0] = (struct hef_enable_lcu_action){
+        .context_index = 0, .lcu_index = 1, .cluster_index = 2,
+    };
+    info.enable_lcu_actions[1] = (struct hef_enable_lcu_action){
+        .context_index = 0, .lcu_index = 3, .cluster_index = 4,
+    };
+    info.disable_lcu_count = 1;
+    info.disable_lcu_actions[0] = (struct hef_disable_lcu_action){
+        .context_index = 0, .lcu_index = 5, .cluster_index = 6,
+    };
+    info.wait_sequencer_count = 1;
+    info.wait_sequencer_actions[0] = (struct hef_wait_sequencer_action){
+        .context_index = 0, .cluster_index = 9,
+    };
+    info.allow_input_dataflow_count = 1;
+    info.allow_input_dataflow_actions[0] =
+        (struct hef_allow_input_dataflow_action){
+            .context_index = 0, .sys_index = 17,
+        };
+
+    info.context_actions_count = 1;
+    info.context_actions[0].action_count = 5;
+    info.context_actions[0].action_types[0] = ProtoHEFAction_enable_lcu_tag;
+    info.context_actions[0].action_types[1] = ProtoHEFAction_disable_lcu_tag;
+    info.context_actions[0].action_types[2] = ProtoHEFAction_enable_lcu_tag;
+    info.context_actions[0].action_types[3] = ProtoHEFAction_wait_for_seqeuncer_tag;
+    info.context_actions[0].action_types[4] = ProtoHEFAction_allow_input_dataflow_tag;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel = 0x01, .ccw_desc_list_iova = 0x1000,
+        .ccw_desc_page_size = 512,   .ccw_total_desc_count = 2,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Walk the emitted stream, verifying the action_type byte of
+     * each 8-byte-header block. Body sizes: enable_lcu_default=2,
+     * disable_lcu=1, sequencer_interrupt=1, fetch_data_from_vdma=9. */
+    size_t off = 0;
+    /* [0] enable_lcu — default variant (kernel_done_count=0) */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[off]);
+    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[off + 8]);   /* first lcu */
+    off += 8 + 2;
+    /* [1] disable_lcu */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DISABLE_LCU, out.dynamic[off]);
+    TEST_ASSERT_EQUAL_UINT8((6u << 4) | 5u, out.dynamic[off + 8]);
+    off += 8 + 1;
+    /* [2] enable_lcu — second of two (entries[1]) */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[off]);
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[off + 8]);
+    off += 8 + 2;
+    /* [3] wait_sequencer */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_SEQUENCER_DONE_INTERRUPT,
+                            out.dynamic[off]);
+    TEST_ASSERT_EQUAL_UINT8(9, out.dynamic[off + 8]);  /* cluster 9 */
+    off += 8 + 1;
+    /* [4] allow_input_dataflow */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_DATA_FROM_VDMA_CHANNEL,
+                            out.dynamic[off]);
+    off += 8 + 9;
+    /* Tail */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[off]);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(off + 8), out.dynamic_len);
+}
+
+static void test_cs_translate_unknown_tag_fails(void)
+{
+    /* action_types[] carries a tag the translator has no handler for.
+     * The stream would be silently incomplete if the translator
+     * skipped it, so we expect HAILO_ERR_INVAL. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.context_actions_count = 1;
+    info.context_actions[0].action_count = 1;
+    info.context_actions[0].action_types[0] = 2;  /* write_data_ccw */
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel = 0x01, .ccw_desc_list_iova = 0x1000,
+        .ccw_desc_page_size = 512,   .ccw_total_desc_count = 2,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+}
+
+static void test_cs_translate_refuses_truncated_context(void)
+{
+    /* ctx->truncated set → translator refuses rather than emit a
+     * partial stream. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.context_actions_count = 1;
+    info.context_actions[0].action_count = 0;
+    info.context_actions[0].truncated    = true;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel = 0x01, .ccw_desc_list_iova = 0x1000,
+        .ccw_desc_page_size = 512,   .ccw_total_desc_count = 2,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
 }
 
 static void test_control_send_recv_default_rings_app_doorbell(void)
@@ -5677,6 +6011,14 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_enable_lcu_non_default_variant);
     RUN_TEST(test_cs_translate_skips_enable_lcu_from_other_contexts);
     RUN_TEST(test_cs_translate_multiple_enable_lcu_preserves_order);
+    RUN_TEST(test_cs_translate_disable_lcu_wire_format);
+    RUN_TEST(test_cs_translate_wait_sequencer_wire_format);
+    RUN_TEST(test_cs_translate_trigger_sequencer_wire_format);
+    RUN_TEST(test_cs_translate_allow_input_dataflow_wire_format);
+    RUN_TEST(test_cs_translate_allow_input_dataflow_missing_pad_fails);
+    RUN_TEST(test_cs_translate_interleaved_kinds_preserves_order);
+    RUN_TEST(test_cs_translate_unknown_tag_fails);
+    RUN_TEST(test_cs_translate_refuses_truncated_context);
     RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);

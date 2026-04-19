@@ -979,7 +979,7 @@ static bool decode_enable_lcu_body(pb_istream_t *stream,
      * varints per hef.proto:758-777. */
     struct hef_enable_lcu_action out;
     memset(&out, 0, sizeof(out));
-    out.context_index = acc->current ? (uint8_t)acc->current->context_index : 0;
+    out.context_index = acc->current ? acc->current->context_index : 0;
 
     bool present_discard = false;  /* shared dummy for fields without
                                       an independent "was this field
@@ -1017,10 +1017,10 @@ static bool decode_enable_lcu_body(pb_istream_t *stream,
 
     if (acc->info->enable_lcu_count < HEF_PARSER_MAX_ENABLE_LCU_ACTIONS) {
         acc->info->enable_lcu_actions[acc->info->enable_lcu_count] = out;
+        acc->info->enable_lcu_count++;
     } else {
         acc->info->enable_lcu_truncated = true;
     }
-    acc->info->enable_lcu_count++;
     return true;
 }
 
@@ -1032,7 +1032,7 @@ static bool decode_disable_lcu_body(pb_istream_t *stream,
 {
     struct hef_disable_lcu_action out;
     memset(&out, 0, sizeof(out));
-    out.context_index = acc->current ? (uint8_t)acc->current->context_index : 0;
+    out.context_index = acc->current ? acc->current->context_index : 0;
 
     bool present_discard = false;
     struct u32_ctx lcu_idx_ctx   = { .dst = &out.lcu_index,          .present = &present_discard };
@@ -1051,10 +1051,10 @@ static bool decode_disable_lcu_body(pb_istream_t *stream,
 
     if (acc->info->disable_lcu_count < HEF_PARSER_MAX_DISABLE_LCU_ACTIONS) {
         acc->info->disable_lcu_actions[acc->info->disable_lcu_count] = out;
+        acc->info->disable_lcu_count++;
     } else {
         acc->info->disable_lcu_truncated = true;
     }
-    acc->info->disable_lcu_count++;
     return true;
 }
 
@@ -1065,7 +1065,7 @@ static bool decode_wait_sequencer_body(pb_istream_t *stream,
 {
     struct hef_wait_sequencer_action out;
     memset(&out, 0, sizeof(out));
-    out.context_index = acc->current ? (uint8_t)acc->current->context_index : 0;
+    out.context_index = acc->current ? acc->current->context_index : 0;
 
     bool present_discard = false;
     struct u32_ctx cluster_ctx = { .dst = &out.cluster_index, .present = &present_discard };
@@ -1078,10 +1078,10 @@ static bool decode_wait_sequencer_body(pb_istream_t *stream,
 
     if (acc->info->wait_sequencer_count < HEF_PARSER_MAX_WAIT_SEQUENCER_ACTIONS) {
         acc->info->wait_sequencer_actions[acc->info->wait_sequencer_count] = out;
+        acc->info->wait_sequencer_count++;
     } else {
         acc->info->wait_sequencer_truncated = true;
     }
-    acc->info->wait_sequencer_count++;
     return true;
 }
 
@@ -1094,7 +1094,7 @@ static bool decode_allow_input_dataflow_body(pb_istream_t *stream,
 {
     struct hef_allow_input_dataflow_action out;
     memset(&out, 0, sizeof(out));
-    out.context_index = acc->current ? (uint8_t)acc->current->context_index : 0;
+    out.context_index = acc->current ? acc->current->context_index : 0;
 
     bool present_discard = false;
     struct u32_ctx sys_idx_ctx   = { .dst = &out.sys_index,       .present = &present_discard };
@@ -1110,10 +1110,10 @@ static bool decode_allow_input_dataflow_body(pb_istream_t *stream,
 
     if (acc->info->allow_input_dataflow_count < HEF_PARSER_MAX_ALLOW_INPUT_DATAFLOW_ACTIONS) {
         acc->info->allow_input_dataflow_actions[acc->info->allow_input_dataflow_count] = out;
+        acc->info->allow_input_dataflow_count++;
     } else {
         acc->info->allow_input_dataflow_truncated = true;
     }
-    acc->info->allow_input_dataflow_count++;
     return true;
 }
 
@@ -1153,7 +1153,7 @@ static bool decode_enable_sequencer_body(pb_istream_t *stream,
 {
     struct hef_trigger_sequencer_action out;
     memset(&out, 0, sizeof(out));
-    out.context_index = acc->current ? (uint8_t)acc->current->context_index : 0;
+    out.context_index = acc->current ? acc->current->context_index : 0;
 
     bool present_discard = false;
     struct u32_ctx cluster_ctx  = { .dst = &out.cluster_index,     .present = &present_discard };
@@ -1190,10 +1190,10 @@ static bool decode_enable_sequencer_body(pb_istream_t *stream,
 
     if (acc->info->trigger_sequencer_count < HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS) {
         acc->info->trigger_sequencer_actions[acc->info->trigger_sequencer_count] = out;
+        acc->info->trigger_sequencer_count++;
     } else {
         acc->info->trigger_sequencer_truncated = true;
     }
-    acc->info->trigger_sequencer_count++;
     return true;
 }
 
@@ -1211,14 +1211,21 @@ static bool decode_compute_action_inner_cb(pb_istream_t *stream,
     struct ctx_actions_accum *acc = (struct ctx_actions_accum *)*arg;
 
     if (acc->current) {
-        acc->current->action_type_mask |= (1u << field->tag);
+        /* Guard the shift: field->tag is bounded by the proto schema at
+         * compile-time today, but a future branch past 31 would invoke
+         * UB on `1u << tag`. Clamp with a mask — tags >= 32 don't get a
+         * bit in the mask but still record in action_types[] so the
+         * translator can see them. */
+        if (field->tag < 32u) {
+            acc->current->action_type_mask |= (1u << field->tag);
+        }
         if (acc->current->action_count < HEF_PARSER_MAX_CONTEXT_ACTIONS) {
             acc->current->action_types[acc->current->action_count] =
                 (uint8_t)field->tag;
+            acc->current->action_count++;
         } else {
             acc->current->truncated = true;
         }
-        acc->current->action_count++;
     }
 
     /* Per-action extraction dispatchers. Every other oneof branch
@@ -1238,8 +1245,17 @@ static bool decode_compute_action_inner_cb(pb_istream_t *stream,
         break;
     }
 
-    /* Consume the remaining body bytes so nanopb advances the cursor
-     * past this sub-message cleanly. */
+    /* Drain the remaining bytes of THIS oneof branch's sub-message
+     * substream. `stream` here is the substream nanopb created for
+     * the active oneof branch (e.g. ProtoHEFActionEnableLcu), NOT
+     * the parent ProtoHEFAction stream — pb_dec_submessage wraps
+     * each sub-message in its own bounded stream before invoking
+     * the callback, so `stream->bytes_left` is this branch's body
+     * length only. Draining the substream does not affect the
+     * parent's cursor. This is the idiomatic nanopb "skip unknown
+     * sub-message content" pattern also used by decode_action_cb,
+     * decode_network_group_metadata_cb, decode_context_metadata_cb,
+     * and the unknown-field handlers throughout this file. */
     return pb_read(stream, NULL, stream->bytes_left);
 }
 

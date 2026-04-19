@@ -353,10 +353,9 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
      * handler registration. Gated so subsequent RPCs skip the setup. */
     control_post_boot_init();
 
-    /* Clear any stale BCS_ISTATUS_HOST bits AND the MSI-pending flag
-     * before firing the new doorbell. This is a strict pre-doorbell
-     * barrier — any signal observed during wait_for_response after
-     * this point must be firmware's response to THIS RPC.
+    /* Clear any stale BCS_ISTATUS_HOST bits before firing the new
+     * doorbell. The MSI-pending flag is cleared AFTER the doorbell
+     * (see below) to close the race described next.
      *
      * The two paths (ISTATUS polling + MSI handler) race for each
      * firmware completion; whichever sees it first, the other one
@@ -372,7 +371,6 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                 HAILO_BCS_ISTATUS_HOST, stale);
         hailo_platform->mb();
     }
-    __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
 
     size_t wire_len = build_request_wire(control_req_wire, req_payload, req_len);
 
@@ -393,6 +391,21 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                 : HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK;
     hailo_platform->bar4_write(hailo_fw_addrs_hailo8.raise_ready_offset,
                                &doorbell_val, sizeof(doorbell_val));
+    hailo_platform->mb();
+
+    /* Clear control_msi_pending AFTER the doorbell + mb() has
+     * published the request. If cleared before the doorbell, a
+     * stale MSI arriving in the window between clear and doorbell
+     * would be handled by the ISR (setting pending=1) and
+     * wait_for_response would exit immediately reading the prior
+     * RPC's buffer (→ 0xFFFFFFFF). Clearing post-doorbell means any
+     * MSI observed from this point must be from firmware's response
+     * to THIS RPC. There is still a narrow window between the
+     * doorbell and the clear where firmware's response-MSI could
+     * set pending=1 and then we clear it; wait_for_response falls
+     * through to ISTATUS polling in that case and still completes
+     * cleanly. */
+    __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
     hailo_platform->mb();
 
     /* TODO: wait_for_response is a udelay-polled busy wait. For

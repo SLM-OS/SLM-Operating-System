@@ -207,7 +207,7 @@ struct hef_context_actions {
 #define HEF_PARSER_MAX_ENABLE_LCU_ACTIONS  32u
 
 struct hef_enable_lcu_action {
-    uint8_t  context_index;
+    uint32_t context_index;
     uint32_t lcu_index;
     uint32_t cluster_index;
     uint32_t network_index;
@@ -225,7 +225,7 @@ struct hef_enable_lcu_action {
 #define HEF_PARSER_MAX_DISABLE_LCU_ACTIONS  32u
 
 struct hef_disable_lcu_action {
-    uint8_t  context_index;
+    uint32_t context_index;
     uint32_t lcu_index;
     uint32_t cluster_index;
     uint32_t lcu_enable_address;
@@ -244,7 +244,7 @@ struct hef_disable_lcu_action {
 #define HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS  16u
 
 struct hef_trigger_sequencer_action {
-    uint8_t  context_index;
+    uint32_t context_index;
     uint32_t cluster_index;
     uint32_t initial_l3_cut;
     uint32_t initial_l3_offset;
@@ -265,7 +265,7 @@ struct hef_trigger_sequencer_action {
 #define HEF_PARSER_MAX_WAIT_SEQUENCER_ACTIONS  16u
 
 struct hef_wait_sequencer_action {
-    uint8_t  context_index;
+    uint32_t context_index;
     uint32_t cluster_index;
 };
 
@@ -281,7 +281,7 @@ struct hef_wait_sequencer_action {
 #define HEF_PARSER_MAX_ALLOW_INPUT_DATAFLOW_ACTIONS  8u
 
 struct hef_allow_input_dataflow_action {
-    uint8_t  context_index;
+    uint32_t context_index;
     uint32_t sys_index;
     uint32_t connection_type;
 };

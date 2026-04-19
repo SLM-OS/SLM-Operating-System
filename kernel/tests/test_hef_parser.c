@@ -1280,8 +1280,9 @@ static void test_decode_context_actions_multiple_contexts(void)
 static void test_decode_context_actions_overflow_truncates(void)
 {
     /* HEF_PARSER_MAX_CONTEXT_ACTIONS + 1 actions in one context.
-     * action_count records the true count; action_types[] stops
-     * at the cap and truncated flag is set. */
+     * action_count saturates at the cap and truncated flag is set,
+     * matching the HEF_PARSER_MAX_PADS convention — callers can
+     * safely index action_types[0..action_count). */
     uint8_t blob[4096];
     uint32_t tags[HEF_PARSER_MAX_CONTEXT_ACTIONS + 1];
     for (uint32_t i = 0; i < HEF_PARSER_MAX_CONTEXT_ACTIONS + 1; i++) {
@@ -1293,10 +1294,10 @@ static void test_decode_context_actions_overflow_truncates(void)
     struct hef_info info;
     TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
     TEST_ASSERT_EQUAL_UINT32(1, info.context_actions_count);
-    TEST_ASSERT_EQUAL_UINT32(HEF_PARSER_MAX_CONTEXT_ACTIONS + 1,
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)HEF_PARSER_MAX_CONTEXT_ACTIONS,
                              info.context_actions[0].action_count);
     TEST_ASSERT_TRUE(info.context_actions[0].truncated);
-    /* action_types[0..MAX-1] all populated as 8; slot MAX not written. */
+    /* All MAX slots populated with tag 8 (enable_lcu). */
     for (uint32_t i = 0; i < HEF_PARSER_MAX_CONTEXT_ACTIONS; i++) {
         TEST_ASSERT_EQUAL_UINT8(8, info.context_actions[0].action_types[i]);
     }
@@ -1430,7 +1431,7 @@ static void test_decode_enable_lcu_captures_all_fields(void)
     TEST_ASSERT_FALSE(info.enable_lcu_truncated);
 
     const struct hef_enable_lcu_action *a = &info.enable_lcu_actions[0];
-    TEST_ASSERT_EQUAL_UINT8(0,      a->context_index);
+    TEST_ASSERT_EQUAL_UINT32(0,      a->context_index);
     TEST_ASSERT_EQUAL_UINT32(3,     a->lcu_index);
     TEST_ASSERT_EQUAL_UINT32(5,     a->cluster_index);
     TEST_ASSERT_EQUAL_UINT32(0x1234,     a->lcu_kernel_done_address);
@@ -1513,9 +1514,9 @@ static void test_decode_enable_lcu_tracks_context_index(void)
     TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
 
     TEST_ASSERT_EQUAL_UINT32(2, info.enable_lcu_count);
-    TEST_ASSERT_EQUAL_UINT8(0, info.enable_lcu_actions[0].context_index);
+    TEST_ASSERT_EQUAL_UINT32(0, info.enable_lcu_actions[0].context_index);
     TEST_ASSERT_EQUAL_UINT32(1, info.enable_lcu_actions[0].lcu_index);
-    TEST_ASSERT_EQUAL_UINT8(1, info.enable_lcu_actions[1].context_index);
+    TEST_ASSERT_EQUAL_UINT32(1, info.enable_lcu_actions[1].context_index);
     TEST_ASSERT_EQUAL_UINT32(2, info.enable_lcu_actions[1].lcu_index);
 }
 
@@ -1571,7 +1572,7 @@ static void test_decode_disable_lcu_captures_fields(void)
     TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
     TEST_ASSERT_EQUAL_UINT32(1, info.disable_lcu_count);
     TEST_ASSERT_FALSE(info.disable_lcu_truncated);
-    TEST_ASSERT_EQUAL_UINT8(0, info.disable_lcu_actions[0].context_index);
+    TEST_ASSERT_EQUAL_UINT32(0, info.disable_lcu_actions[0].context_index);
     TEST_ASSERT_EQUAL_UINT32(7, info.disable_lcu_actions[0].lcu_index);
     TEST_ASSERT_EQUAL_UINT32(3, info.disable_lcu_actions[0].cluster_index);
     TEST_ASSERT_EQUAL_UINT32(0xFFEE, info.disable_lcu_actions[0].lcu_enable_address);
@@ -1660,6 +1661,97 @@ static void test_decode_enable_sequencer_captures_bitmaps_and_l3(void)
     TEST_ASSERT_EQUAL_UINT32(512, a->initial_l3_offset);
 }
 
+/* Malformed-body tests: feed each of the four new action kinds a
+ * body whose trailing varint has the high-bit-set-continuation
+ * marker but no terminating byte — pb_decode_varint fails, the
+ * inner body decoder returns false, hef_parse_body surfaces
+ * HEF_PARSER_ERR_DECODE. Regression guard: the parser must NOT
+ * silently swallow malformed oneof bodies. */
+
+static void test_decode_disable_lcu_truncated_body_rejects(void)
+{
+    uint8_t body[8]; size_t body_len = 0;
+    emit_varint_field(body, &body_len, 1, 7);   /* lcu_index */
+    emit_tag(body, &body_len, 2, /*wt=varint*/ 0);
+    body[body_len++] = 0x80;   /* continuation bit set, no follow-up */
+
+    uint8_t blob[256];
+    size_t blen = build_ng_with_one_action(blob, sizeof(blob),
+                                           /*7=disable_lcu*/ 7, body, body_len);
+    struct hef_info info;
+    TEST_ASSERT_NOT_EQUAL(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+}
+
+static void test_decode_wait_sequencer_truncated_body_rejects(void)
+{
+    uint8_t body[8]; size_t body_len = 0;
+    emit_tag(body, &body_len, 1, /*wt=varint*/ 0);
+    body[body_len++] = 0x80;   /* truncated varint */
+
+    uint8_t blob[256];
+    size_t blen = build_ng_with_one_action(blob, sizeof(blob),
+                                           /*6=wait_for_seqeuncer*/ 6, body, body_len);
+    struct hef_info info;
+    TEST_ASSERT_NOT_EQUAL(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+}
+
+static void test_decode_allow_input_dataflow_truncated_body_rejects(void)
+{
+    uint8_t body[8]; size_t body_len = 0;
+    emit_varint_field(body, &body_len, 1, 3);
+    emit_tag(body, &body_len, 2, /*wt=varint*/ 0);
+    body[body_len++] = 0xFF;   /* truncated varint */
+
+    uint8_t blob[256];
+    size_t blen = build_ng_with_one_action(blob, sizeof(blob),
+                                           /*10=allow_input_dataflow*/ 10, body, body_len);
+    struct hef_info info;
+    TEST_ASSERT_NOT_EQUAL(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+}
+
+static void test_decode_enable_sequencer_truncated_body_rejects(void)
+{
+    uint8_t body[32]; size_t body_len = 0;
+    emit_varint_field(body, &body_len, 1, 2);   /* cluster_index */
+    emit_tag(body, &body_len, 4, /*wt=varint*/ 0);
+    body[body_len++] = 0xFF;   /* truncated active_sc_bitmap */
+
+    uint8_t blob[256];
+    size_t blen = build_ng_with_one_action(blob, sizeof(blob),
+                                           /*5=enable_sequencer*/ 5, body, body_len);
+    struct hef_info info;
+    TEST_ASSERT_NOT_EQUAL(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+}
+
+static void test_decode_enable_sequencer_overflow_truncates(void)
+{
+    /* HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS + 1 enable_sequencer
+     * actions. count saturates at the cap; trigger_sequencer_truncated
+     * is set. Mirrors the truncation semantics already proven for
+     * enable_lcu / pads. */
+    uint8_t blob[8192]; size_t blen = 0;
+    uint8_t ng[6144]; size_t ng_len = 0;
+    for (uint32_t i = 0; i < HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS + 1; i++) {
+        uint8_t body[16]; size_t body_len = 0;
+        emit_varint_field(body, &body_len, 1, i);   /* cluster_index */
+
+        uint8_t act[32]; size_t act_len = wrap_as_hef_action(act, 5, body, body_len);
+        uint8_t op[64];  size_t op_len  = 0;
+        emit_lenprefix(op, &op_len, 2, act, act_len);
+        uint8_t ctx[128]; size_t ctx_len = 0;
+        emit_lenprefix(ctx, &ctx_len, 2, op, op_len);
+        emit_lenprefix(ng, &ng_len, 3, ctx, ctx_len);
+    }
+    emit_lenprefix(blob, &blen, 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(
+        (uint32_t)HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS,
+        info.trigger_sequencer_count);
+    TEST_ASSERT_TRUE(info.trigger_sequencer_truncated);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -1721,6 +1813,11 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_wait_sequencer_captures_cluster_index);
     RUN_TEST(test_decode_allow_input_dataflow_captures_sys_index);
     RUN_TEST(test_decode_enable_sequencer_captures_bitmaps_and_l3);
+    RUN_TEST(test_decode_disable_lcu_truncated_body_rejects);
+    RUN_TEST(test_decode_wait_sequencer_truncated_body_rejects);
+    RUN_TEST(test_decode_allow_input_dataflow_truncated_body_rejects);
+    RUN_TEST(test_decode_enable_sequencer_truncated_body_rejects);
+    RUN_TEST(test_decode_enable_sequencer_overflow_truncates);
 
     return UnityEnd();
 }
