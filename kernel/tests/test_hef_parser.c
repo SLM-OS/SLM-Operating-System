@@ -1520,6 +1520,147 @@ static void test_decode_enable_lcu_tracks_context_index(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 6 close-out: DisableLcu, WaitForSequencer, AllowInputDataflow,        */
+/* EnableSequencer per-action extraction                                       */
+/* -------------------------------------------------------------------------- */
+
+/* Wrap an already-built body sub-message as a ProtoHEFAction. The
+ * oneof tag picks which action kind (7=disable_lcu, 6=wait_seq, etc.). */
+static size_t wrap_as_hef_action(uint8_t *out,
+                                 uint32_t oneof_tag,
+                                 const uint8_t *body,
+                                 size_t body_len)
+{
+    size_t off = 0;
+    emit_lenprefix(out, &off, oneof_tag, body, body_len);
+    return off;
+}
+
+static size_t build_ng_with_one_action(uint8_t *out, size_t cap,
+                                       uint32_t oneof_tag,
+                                       const uint8_t *body,
+                                       size_t body_len)
+{
+    uint8_t act[256]; size_t act_len = wrap_as_hef_action(act, oneof_tag, body, body_len);
+    uint8_t op[512];  size_t op_len  = 0;
+    emit_lenprefix(op, &op_len, /*2=actions*/ 2, act, act_len);
+    uint8_t ctx[1024]; size_t ctx_len = 0;
+    emit_lenprefix(ctx, &ctx_len, /*2=operations*/ 2, op, op_len);
+    uint8_t ng[2048]; size_t ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*3=contexts*/ 3, ctx, ctx_len);
+    size_t olen = 0; (void)cap;
+    emit_lenprefix(out, &olen, /*2=network_groups*/ 2, ng, ng_len);
+    return olen;
+}
+
+static void test_decode_disable_lcu_captures_fields(void)
+{
+    /* ProtoHEFActionDisableLcu = lcu_index(1) + cluster_index(2) +
+     * lcu_enable_address(5). Verify all three land in the parser's
+     * captured struct. */
+    uint8_t body[32]; size_t body_len = 0;
+    emit_varint_field(body, &body_len, 1, 7);       /* lcu_index */
+    emit_varint_field(body, &body_len, 2, 3);       /* cluster_index */
+    emit_varint_field(body, &body_len, 5, 0xFFEE);  /* lcu_enable_address */
+
+    uint8_t blob[512];
+    size_t blen = build_ng_with_one_action(blob, sizeof(blob),
+                                           /*7=disable_lcu*/ 7, body, body_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.disable_lcu_count);
+    TEST_ASSERT_FALSE(info.disable_lcu_truncated);
+    TEST_ASSERT_EQUAL_UINT8(0, info.disable_lcu_actions[0].context_index);
+    TEST_ASSERT_EQUAL_UINT32(7, info.disable_lcu_actions[0].lcu_index);
+    TEST_ASSERT_EQUAL_UINT32(3, info.disable_lcu_actions[0].cluster_index);
+    TEST_ASSERT_EQUAL_UINT32(0xFFEE, info.disable_lcu_actions[0].lcu_enable_address);
+}
+
+static void test_decode_wait_sequencer_captures_cluster_index(void)
+{
+    uint8_t body[16]; size_t body_len = 0;
+    emit_varint_field(body, &body_len, 1, 5);   /* cluster_index */
+
+    uint8_t blob[256];
+    size_t blen = build_ng_with_one_action(blob, sizeof(blob),
+                                           /*6=wait_for_seqeuncer*/ 6, body, body_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.wait_sequencer_count);
+    TEST_ASSERT_EQUAL_UINT32(5, info.wait_sequencer_actions[0].cluster_index);
+}
+
+static void test_decode_allow_input_dataflow_captures_sys_index(void)
+{
+    /* ProtoHEFActionAllowInputDataflow = sys_index + connection_type. */
+    uint8_t body[16]; size_t body_len = 0;
+    emit_varint_field(body, &body_len, 1, 11);  /* sys_index */
+    emit_varint_field(body, &body_len, 2, 2);   /* connection_type */
+
+    uint8_t blob[256];
+    size_t blen = build_ng_with_one_action(blob, sizeof(blob),
+                                           /*10=allow_input_dataflow*/ 10, body, body_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.allow_input_dataflow_count);
+    TEST_ASSERT_EQUAL_UINT32(11, info.allow_input_dataflow_actions[0].sys_index);
+    TEST_ASSERT_EQUAL_UINT32(2,  info.allow_input_dataflow_actions[0].connection_type);
+}
+
+/* Emit a varint value at a given field number, with proto wire type
+ * 0 (varint). Matches emit_varint_field but kept local for clarity. */
+static void emit_u64_varint_field(uint8_t *buf, size_t *off,
+                                  uint32_t field_no, uint64_t value)
+{
+    emit_tag(buf, off, field_no, /*wt=varint*/ 0);
+    while (value >= 0x80u) {
+        buf[(*off)++] = (uint8_t)(value | 0x80u);
+        value >>= 7;
+    }
+    buf[(*off)++] = (uint8_t)value;
+}
+
+static void test_decode_enable_sequencer_captures_bitmaps_and_l3(void)
+{
+    /* ProtoHEFActionEnableSequencer = cluster_index(1) +
+     * active_apu_bitmap(3) + active_sc_bitmap(4) + active_l2_bitmap(5) +
+     * active_ia_bitmap(6) + l2_write_0(7) + l2_write_1(8) +
+     * l2_write_2(9) + l2_write_3(10) + initial_l3_info(11:sub).
+     * We exercise cluster + apu (u32) + sc (u64) + initial_l3_info's
+     * two inner fields. Other fields default to zero. */
+
+    /* initial_l3_info sub-message: initial_l3_index(1) +
+     * initial_l3_offset(2). */
+    uint8_t l3[16]; size_t l3_len = 0;
+    emit_varint_field(l3, &l3_len, 1, 4);       /* initial_l3_index */
+    emit_varint_field(l3, &l3_len, 2, 512);     /* initial_l3_offset */
+
+    uint8_t body[128]; size_t body_len = 0;
+    emit_varint_field(body, &body_len, 1, 2);   /* cluster_index */
+    emit_varint_field(body, &body_len, 3, 0x1234ABCD);  /* active_apu_bitmap */
+    emit_u64_varint_field(body, &body_len, 4, 0xFEEDFACEDEADBEEFull);  /* active_sc_bitmap */
+    emit_lenprefix(body, &body_len, 11, l3, l3_len);    /* initial_l3_info */
+
+    uint8_t blob[512];
+    size_t blen = build_ng_with_one_action(blob, sizeof(blob),
+                                           /*5=enable_sequencer*/ 5, body, body_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.trigger_sequencer_count);
+
+    const struct hef_trigger_sequencer_action *a = &info.trigger_sequencer_actions[0];
+    TEST_ASSERT_EQUAL_UINT32(2,          a->cluster_index);
+    TEST_ASSERT_EQUAL_UINT32(0x1234ABCD, a->active_apu_bitmap);
+    TEST_ASSERT_EQUAL_UINT64(0xFEEDFACEDEADBEEFull, a->active_sc_bitmap);
+    TEST_ASSERT_EQUAL_UINT32(4,   a->initial_l3_cut);
+    TEST_ASSERT_EQUAL_UINT32(512, a->initial_l3_offset);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -1574,6 +1715,12 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_enable_lcu_captures_all_fields);
     RUN_TEST(test_decode_enable_lcu_defaults_zero_when_absent);
     RUN_TEST(test_decode_enable_lcu_tracks_context_index);
+
+    /* Phase 6 close-out: additional action extraction */
+    RUN_TEST(test_decode_disable_lcu_captures_fields);
+    RUN_TEST(test_decode_wait_sequencer_captures_cluster_index);
+    RUN_TEST(test_decode_allow_input_dataflow_captures_sys_index);
+    RUN_TEST(test_decode_enable_sequencer_captures_bitmaps_and_l3);
 
     return UnityEnd();
 }
