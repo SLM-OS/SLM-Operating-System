@@ -86,6 +86,7 @@ struct mock_hcd_state {
     int              cancel_count;
     int              poll_count;
     int              device_close_count;   /* # of times device_close fired */
+    int              device_open_count;    /* # of times device_open fired */
 
     /* Error-injection hooks. Negative value = short-circuit that op. */
     int              port_reset_rc;
@@ -131,6 +132,7 @@ static int mock_port_reset(uint8_t port)
 static int mock_device_open(struct usb_device *dev)
 {
     (void)dev;
+    mock.device_open_count++;
     return mock.device_open_rc;
 }
 
@@ -986,6 +988,97 @@ static void test_control_msg_unknown_request_returns_error(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Hot-plug poll (#309 re-plug driver entry point)                             */
+/*                                                                             */
+/* usb_core keeps a `root_device_present` flag that persists across tests —    */
+/* the enumerate path clears it at entry, but hotplug_poll's early-return      */
+/* path does not. Helper below mimics reset_mock_and_core but also forces a    */
+/* usb_core_enumerate with port_connected=false, which is the cheapest way    */
+/* to clear `root_device_present` from prior tests.                            */
+/* -------------------------------------------------------------------------- */
+
+static void reset_mock_and_clear_device_state(bool port_connected,
+                                              enum usb_speed speed)
+{
+    memset(&mock, 0, sizeof(mock));
+    mock.port_connected = false;
+    mock.port_speed     = USB_SPEED_UNKNOWN;
+    usb_core_register_hcd(&mock_hcd_ops);
+    /* Force root_device_present=false via enumerate's disconnected path. */
+    (void)usb_core_enumerate();
+    TEST_ASSERT_NULL(usb_core_first_device());
+
+    /* Now set the real scenario state for the test. */
+    memset(&mock, 0, sizeof(mock));
+    mock.port_connected = port_connected;
+    mock.port_speed     = speed;
+}
+
+static void test_hotplug_poll_no_hcd_is_safe(void)
+{
+    /* Must be safe before any HCD is registered — net_poll calls it on
+     * every tick and should not crash on platforms without USB. */
+    usb_core_register_hcd(NULL);
+    int rc = usb_core_hotplug_poll();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+}
+
+static void test_hotplug_poll_no_device_connected(void)
+{
+    /* Mock HCD attached but port reports disconnected — hot-plug poll
+     * must not attempt to enumerate. */
+    reset_mock_and_clear_device_state(false, USB_SPEED_UNKNOWN);
+
+    int rc = usb_core_hotplug_poll();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_INT(0, mock.device_open_count);
+    TEST_ASSERT_NULL(usb_core_first_device());
+}
+
+static void test_hotplug_poll_enumerates_on_attach(void)
+{
+    /* Mock HCD reports connected — hot-plug poll must drive the full
+     * enumeration sequence, same as usb_core_start would. */
+    reset_mock_and_clear_device_state(true, USB_SPEED_HIGH);
+
+    int rc = usb_core_hotplug_poll();
+    TEST_ASSERT_EQUAL_INT(1, rc);
+    TEST_ASSERT_NOT_NULL(usb_core_first_device());
+    TEST_ASSERT_EQUAL_UINT8(1, mock.device_configured);
+}
+
+static void test_hotplug_poll_idempotent_after_enumeration(void)
+{
+    /* Once a device is present, subsequent polls are no-ops. This is
+     * what makes calling hotplug_poll from net_poll every tick safe —
+     * no repeated enumeration, no side effects on the mock HCD. */
+    reset_mock_and_clear_device_state(true, USB_SPEED_HIGH);
+
+    TEST_ASSERT_EQUAL_INT(1, usb_core_hotplug_poll());
+    int opens_after_first = mock.device_open_count;
+
+    TEST_ASSERT_EQUAL_INT(0, usb_core_hotplug_poll());
+    TEST_ASSERT_EQUAL_INT(0, usb_core_hotplug_poll());
+    TEST_ASSERT_EQUAL_INT(0, usb_core_hotplug_poll());
+
+    /* No further device_open calls once the first enumeration took. */
+    TEST_ASSERT_EQUAL_INT(opens_after_first, mock.device_open_count);
+}
+
+static void test_hotplug_poll_propagates_enumerate_failure(void)
+{
+    /* If the port goes connected but the HCD fails enumeration (e.g.,
+     * device_open returns error), hotplug_poll must surface the
+     * failure to the caller rather than silently succeeding. */
+    reset_mock_and_clear_device_state(true, USB_SPEED_HIGH);
+    mock.device_open_rc = -1;
+
+    int rc = usb_core_hotplug_poll();
+    TEST_ASSERT_LESS_THAN(0, rc);
+    TEST_ASSERT_NULL(usb_core_first_device());
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry point                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -1032,6 +1125,11 @@ int test_suite_usb_core(void)
     RUN_TEST(test_hcd_reregister_same_is_silent);
     RUN_TEST(test_control_msg_returns_actual_length);
     RUN_TEST(test_control_msg_unknown_request_returns_error);
+    RUN_TEST(test_hotplug_poll_no_hcd_is_safe);
+    RUN_TEST(test_hotplug_poll_no_device_connected);
+    RUN_TEST(test_hotplug_poll_enumerates_on_attach);
+    RUN_TEST(test_hotplug_poll_idempotent_after_enumeration);
+    RUN_TEST(test_hotplug_poll_propagates_enumerate_failure);
 
     return UnityEnd();
 }

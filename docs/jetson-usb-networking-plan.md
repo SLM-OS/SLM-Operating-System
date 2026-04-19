@@ -1122,6 +1122,97 @@ and SLM-OS inherits a usable SMMU + xHCI.
   access via labctl but SSH only works when it's in Linux (SLM-OS
   has no network stack).
 
+### 10.9 Phase 3A Steps 5-7 shipped (2026-04-19)
+
+**What landed in PR #308:**
+
+| File | Content |
+|---|---|
+| `kernel/drivers/usb/xhci/xhci_ctx.h` | Slot / Endpoint / Input context layout helpers keyed by DCI. Byte-offset accessors (not overlaid C structs) so CSZ=1 padding doesn't poison field offsets |
+| `kernel/drivers/usb/xhci/xhci_internal.h` | Cross-TU shared state + HCD op declarations |
+| `kernel/drivers/usb/xhci/xhci_device.c` | `port_status` / `port_reset` / `device_open` (ENABLE_SLOT → ADDRESS_DEVICE BSR=1) / `device_close` / `endpoint_configure` |
+| `kernel/drivers/usb/xhci/xhci_xfer.c` | `submit_urb` (control + bulk), `cancel_urb`, `poll`, transfer-event dispatcher |
+| `kernel/drivers/usb/xhci/xhci_trb_build.h` | Pure-logic Setup/Data/Status/Normal TRB builders (shared with host tests) |
+| `kernel/drivers/usb/xhci/xhci_attach.h` | Hot-plug `STALE → WAIT_RECONNECT → FRESH` state machine for #309 (see below) |
+| `kernel/tests/test_xhci_device.c` | 26 pure-logic tests: PORTSC decode (6 speeds + change-bit isolation + NULL-safety), context layout (stride, offsets, DCI math, CSZ=0+CSZ=1 neighbour non-bleed), hot-plug attach state machine |
+| `kernel/tests/test_xhci_xfer.c` | 14 TRB builder tests pinning every bit |
+| `kernel/tests/test_usb_core.c` | 5 new tests for `usb_core_hotplug_poll` |
+
+Key design choices:
+
+- **ADDRESS_DEVICE BSR=1.** The HC assigns the slot context but does
+  not emit a USB SET_ADDRESS on the wire. `usb_core`'s generic
+  enumeration then sends its own `SET_ADDRESS(1)` through
+  `usb_control_msg`, which `xhci_xfer.c` intercepts and returns
+  synthetic success for — the HC already owns the address. Keeps
+  the xHCI-spec rule ("user code must not submit SET_ADDRESS on
+  EP0") without breaking Phase 1's generic enumeration sequence.
+- **Port scan.** Tegra234 exposes 8 ports mixing USB 3.x and USB 2.
+  `xhci_locate_usb2_port` finds the first port with a connected
+  USB 2 device; `xhci_active_port` is then used for every subsequent
+  PORTSC access. usb_core still addresses it as logical port 0.
+- **Stale-PORTSC compensation.** Post-kexec the PORTSC speed field
+  can read FULL when the device was previously HIGH and the chirp
+  hasn't settled. If the pre-reset scan saw HIGH, prefer that over
+  the stale post-reset value — control transfers at the wrong
+  signalling speed raise `cc=4`.
+
+**Angle 3 — post-kexec re-plug workaround (#309).**
+
+The xHCI driver reaches ADDRESS_DEVICE successfully on the
+post-kexec Realtek dongle, but the first EP0
+`GET_DESCRIPTOR(device, 8)` returns `cc=4` (USB Transaction Error).
+The device's internal state is whatever Linux left behind and our
+bus reset doesn't bring it back to a clean enumerating state.
+
+Workaround: hide the stale device from `usb_core` until the user
+physically unplugs and re-inserts the dongle. Implementation:
+
+1. `xhci_attach.h` — three-state pure logic (`STALE` →
+   `WAIT_RECONNECT` → `FRESH`). Unit-tested in
+   `test_xhci_device.c`.
+2. `xhci_hcd_port_status` — advances the state machine on every
+   call, hides any pre-kexec device until `CCS=1→0→1` is observed.
+3. `usb_core_hotplug_poll` — new public entry point in
+   `kernel/include/usb.h`; called from `net_poll()` on every tick
+   so the re-plug is noticed without a dedicated task.
+
+Serial log after kexec:
+
+```
+xhci: USB 2.0 device on PORTSC[5] (stale pre-kexec — please unplug
+      and re-insert the dongle to enumerate, see #309)
+xhci: hot-plug ready — re-insert the USB dongle to enumerate
+... user unplugs ...
+xhci: pre-kexec device detached — waiting for re-plug
+... user re-plugs ...
+xhci: fresh USB attach on PORTSC[5]
+... enumeration runs normally ...
+```
+
+Permanent fix candidates (all tracked under #309):
+
+1. **Linux-side pre-kexec quiesce.** Add a step to
+   `scripts/arm-smmu-noshutdown/` or a sibling module that
+   explicitly issues SET_CONFIGURATION(0) / device teardown on
+   the xusb bus before kexec, so SLM-OS inherits a defaulted
+   device.
+2. **SLM-OS-side Tegra PHY re-programming.** Re-run the padctl /
+   PHY init sequence during `xhci_init` before issuing the port
+   reset. This mirrors the approach `nvgpu` uses to recover from
+   stale kexec state on the GPU side.
+3. **xHCI RESET_DEVICE command** issued between `ENABLE_SLOT` and
+   `ADDRESS_DEVICE`. Per xHCI §4.6.11 this resets the slot's
+   device state independently of the bus reset — untried so far
+   and the simplest purely-HCD fix.
+
+**Known gaps (tracked separately):**
+
+- `#316` — control-transfer `actual_length` over-reports when
+  the Data Stage short-packets. CDC-ECM is safe but future
+  classes (HID, string descriptors) will need the Data Stage
+  event wired up.
+
 ---
 
-*Last updated: 18 April 2026*
+*Last updated: 19 April 2026*

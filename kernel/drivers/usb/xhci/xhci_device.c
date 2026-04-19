@@ -26,6 +26,7 @@
 #include "xhci_ring.h"
 #include "xhci_trb.h"
 #include "xhci_ctx.h"
+#include "xhci_attach.h"
 #include "usb.h"
 #include "ncmem.h"
 #include "debug.h"
@@ -147,33 +148,11 @@ static uint32_t xhci_active_portsc = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 
 /*
- * Hot-plug state machine for #309 (the post-kexec re-plug workaround).
- *
- *   STALE         Pre-kexec device seen at xhci_init time. CCS=1 but
- *                 the device's internal state is whatever Linux left
- *                 behind, so the first EP0 control transfer returns
- *                 cc=4 (USB Transaction Error). port_status hides this
- *                 device from usb_core until the user unplugs it.
- *   WAIT_RECONNECT The stale device has been unplugged (CCS went 1→0).
- *                 Next CCS rising edge is a fresh attach.
- *   FRESH         A clean attach has been observed; report connected
- *                 and let usb_core enumerate normally.
- *
- * Transitions happen inside xhci_hcd_port_status() on every call and
- * inside xhci_hcd_poll() (indirectly, via xhci_hotplug_poll below).
- * Either path is idempotent and race-free because usb_core runs its
- * HCD ops single-threaded.
- *
- * If no pre-kexec device was present at init, the active port's
- * initial phase is WAIT_RECONNECT so the first CCS=1 transition is
- * treated as fresh (natural hot-plug path for the future non-kexec
- * case).
+ * Hot-plug state: STALE at boot (assume pre-kexec stale device) →
+ * WAIT_RECONNECT once CCS drops → FRESH once CCS rises again.
+ * Transitions live in xhci_attach.h so they can be unit-tested.
+ * Related: issue #309.
  */
-enum xhci_attach_phase {
-    XHCI_ATTACH_STALE = 0,
-    XHCI_ATTACH_WAIT_RECONNECT,
-    XHCI_ATTACH_FRESH,
-};
 static enum xhci_attach_phase xhci_attach_state = XHCI_ATTACH_STALE;
 
 static uint8_t xhci_locate_usb2_port(void)
@@ -224,42 +203,24 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     enum usb_speed s = USB_SPEED_UNKNOWN;
     (void)xhci_decode_portsc(portsc, &c, &s);
 
-    /* Advance the hot-plug state machine in lock-step with the raw
-     * CCS bit. See enum xhci_attach_phase above for the transitions. */
-    switch (xhci_attach_state) {
-    case XHCI_ATTACH_STALE:
-        if (!c) {
-            INFO("xhci: pre-kexec device detached — waiting for re-plug");
-            xhci_attach_state = XHCI_ATTACH_WAIT_RECONNECT;
-        }
-        /* Hide the stale device from usb_core regardless of raw CCS. */
-        if (connected) *connected = false;
-        if (speed)     *speed     = USB_SPEED_UNKNOWN;
-        return true;
+    enum xhci_attach_phase prev = xhci_attach_state;
+    struct xhci_attach_result r = xhci_attach_step(prev, c, s);
+    xhci_attach_state = r.next_state;
 
-    case XHCI_ATTACH_WAIT_RECONNECT:
-        if (c) {
+    if (r.transitioned) {
+        if (prev == XHCI_ATTACH_STALE &&
+            r.next_state == XHCI_ATTACH_WAIT_RECONNECT) {
+            INFO("xhci: pre-kexec device detached — waiting for re-plug");
+        } else if (prev == XHCI_ATTACH_WAIT_RECONNECT &&
+                   r.next_state == XHCI_ATTACH_FRESH) {
             INFO("xhci: fresh USB attach on PORTSC[%u]",
                  (unsigned)xhci_active_port);
-            xhci_attach_state = XHCI_ATTACH_FRESH;
             xhci_prereset_speed = s;
-        } else {
-            if (connected) *connected = false;
-            if (speed)     *speed     = USB_SPEED_UNKNOWN;
-            return true;
         }
-        /* fallthrough: report the fresh device on this same call. */
-        /* FALLTHROUGH */
-
-    case XHCI_ATTACH_FRESH:
-        if (connected) *connected = c;
-        if (speed)     *speed     = s;
-        return true;
     }
 
-    /* Unreachable — enum exhausted. */
-    if (connected) *connected = false;
-    if (speed)     *speed     = USB_SPEED_UNKNOWN;
+    if (connected) *connected = r.report_connected;
+    if (speed)     *speed     = r.report_speed;
     return true;
 }
 
@@ -433,9 +394,19 @@ int xhci_hcd_device_open(struct usb_device *dev)
 
     bool cz = xhci_caps_cached.ctx_64;
 
-    /* Allocate Device Context + Input Context. Both must be
+    /*
+     * Allocate Device Context + Input Context. Both must be
      * 64-byte-aligned per xHCI §6.2.{1,5} table footnotes; we use the
-     * full context stride (32 or 64) as the alignment. */
+     * full context stride (32 or 64) as the alignment.
+     *
+     * ncmem is a bump allocator with no free (see kernel/include/ncmem.h):
+     * if any step of device_open fails, the NC bytes are stranded for
+     * the life of the boot. Phase 3A runs device_open exactly once per
+     * boot (single device, triggered either at init or via the #309
+     * re-plug path), and a failure here is a boot-level problem that
+     * warrants a reboot — so the stranded bytes are acceptable. The
+     * same applies to the ep0 transfer ring allocated a few lines down.
+     */
     d->dev_ctx = ncmem_alloc(xhci_ctx_dev_bytes(cz), 64);
     d->input_ctx = ncmem_alloc(xhci_ctx_in_bytes(cz), 64);
     if (d->dev_ctx == NULL || d->input_ctx == NULL) {
@@ -658,10 +629,10 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
     uint32_t *s0 = xhci_in_slot_dw(d->input_ctx, 0, cz);
     uint32_t *s1 = xhci_in_slot_dw(d->input_ctx, 1, cz);
     uint32_t speed_id = xhci_speed_to_id(dev->speed);
-    uint32_t ctxent = (dci > (*s0 >> XHCI_SLOT_DW0_CTXENT_SHIFT))
-                      ? dci
-                      : ((*s0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT);
-    (void)ctxent;   /* computed fresh below — we always patch Slot DW0. */
+    /* Context Entries in the Slot Context must cover every valid EP
+     * DCI. The Input Context was freshly zeroed above, so no prior
+     * CONFIGURE_ENDPOINT state survives — `dci` is the new high-water
+     * mark for this single-EP add. */
     *s0 = (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
           ((uint32_t)dci << XHCI_SLOT_DW0_CTXENT_SHIFT);
     *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);

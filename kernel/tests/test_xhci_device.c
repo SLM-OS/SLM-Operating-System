@@ -13,6 +13,7 @@
 #include "../drivers/usb/xhci/xhci_internal.h"
 #include "../drivers/usb/xhci/xhci_regs.h"
 #include "../drivers/usb/xhci/xhci_ctx.h"
+#include "../drivers/usb/xhci/xhci_attach.h"
 #include "../include/usb.h"
 
 #include <stdint.h>
@@ -232,6 +233,147 @@ static void test_ctx_dev_neighbours_csz0(void) { do_ctx_dev_neighbours(false); }
 static void test_ctx_dev_neighbours_csz1(void) { do_ctx_dev_neighbours(true);  }
 
 /* -------------------------------------------------------------------------- */
+/* Hot-plug attach state machine (#309 re-plug workaround)                     */
+/* -------------------------------------------------------------------------- */
+
+static void test_attach_stale_hides_connected_device(void)
+{
+    /* STALE + raw CCS=1: hide the pre-kexec device from usb_core. */
+    struct xhci_attach_result r =
+        xhci_attach_step(XHCI_ATTACH_STALE, true, USB_SPEED_HIGH);
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_STALE, r.next_state);
+    TEST_ASSERT_FALSE(r.transitioned);
+    TEST_ASSERT_FALSE(r.report_connected);
+    TEST_ASSERT_EQUAL_INT(USB_SPEED_UNKNOWN, r.report_speed);
+}
+
+static void test_attach_stale_unplug_advances_to_wait(void)
+{
+    /* STALE + raw CCS=0: the stale device has been physically
+     * detached — advance to WAIT_RECONNECT and continue hiding. */
+    struct xhci_attach_result r =
+        xhci_attach_step(XHCI_ATTACH_STALE, false, USB_SPEED_UNKNOWN);
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_WAIT_RECONNECT, r.next_state);
+    TEST_ASSERT_TRUE(r.transitioned);
+    TEST_ASSERT_FALSE(r.report_connected);
+    TEST_ASSERT_EQUAL_INT(USB_SPEED_UNKNOWN, r.report_speed);
+}
+
+static void test_attach_wait_reports_disconnected_while_empty(void)
+{
+    /* WAIT_RECONNECT + raw CCS=0: the expected steady state between
+     * unplug and re-plug. Stay in WAIT_RECONNECT. */
+    struct xhci_attach_result r =
+        xhci_attach_step(XHCI_ATTACH_WAIT_RECONNECT, false, USB_SPEED_UNKNOWN);
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_WAIT_RECONNECT, r.next_state);
+    TEST_ASSERT_FALSE(r.transitioned);
+    TEST_ASSERT_FALSE(r.report_connected);
+    TEST_ASSERT_EQUAL_INT(USB_SPEED_UNKNOWN, r.report_speed);
+}
+
+static void test_attach_wait_reconnect_advances_on_attach(void)
+{
+    /* WAIT_RECONNECT + raw CCS=1: fresh attach — advance to FRESH
+     * and surface the raw speed to usb_core on the same call. */
+    struct xhci_attach_result r =
+        xhci_attach_step(XHCI_ATTACH_WAIT_RECONNECT, true, USB_SPEED_HIGH);
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_FRESH, r.next_state);
+    TEST_ASSERT_TRUE(r.transitioned);
+    TEST_ASSERT_TRUE(r.report_connected);
+    TEST_ASSERT_EQUAL_INT(USB_SPEED_HIGH, r.report_speed);
+}
+
+static void test_attach_fresh_passes_through_connected(void)
+{
+    /* FRESH + raw CCS=1: steady state after enumeration — raw values
+     * flow straight through. */
+    struct xhci_attach_result r =
+        xhci_attach_step(XHCI_ATTACH_FRESH, true, USB_SPEED_FULL);
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_FRESH, r.next_state);
+    TEST_ASSERT_FALSE(r.transitioned);
+    TEST_ASSERT_TRUE(r.report_connected);
+    TEST_ASSERT_EQUAL_INT(USB_SPEED_FULL, r.report_speed);
+}
+
+static void test_attach_fresh_passes_through_disconnect(void)
+{
+    /* FRESH + raw CCS=0: device unplugged after a successful
+     * enumeration. Report disconnected; do NOT revert to STALE —
+     * once FRESH, always trust the raw bit. */
+    struct xhci_attach_result r =
+        xhci_attach_step(XHCI_ATTACH_FRESH, false, USB_SPEED_UNKNOWN);
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_FRESH, r.next_state);
+    TEST_ASSERT_FALSE(r.transitioned);
+    TEST_ASSERT_FALSE(r.report_connected);
+    TEST_ASSERT_EQUAL_INT(USB_SPEED_UNKNOWN, r.report_speed);
+}
+
+static void test_attach_full_replug_sequence(void)
+{
+    /* Walk the complete expected Angle 3 timeline from a kexec boot:
+     * stale device present → user unplugs → steady gap → user
+     * re-plugs → enumeration runs → steady-state connected. Each
+     * step must move usb_core's view exactly once. */
+    enum xhci_attach_phase state = XHCI_ATTACH_STALE;
+    struct xhci_attach_result r;
+
+    /* t0: stale device still attached. usb_core sees disconnected. */
+    r = xhci_attach_step(state, true, USB_SPEED_HIGH);
+    TEST_ASSERT_FALSE(r.report_connected);
+    state = r.next_state;
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_STALE, state);
+
+    /* t1: user unplugs. CCS drops. usb_core still sees disconnected,
+     * but the state machine advances. */
+    r = xhci_attach_step(state, false, USB_SPEED_UNKNOWN);
+    TEST_ASSERT_FALSE(r.report_connected);
+    TEST_ASSERT_TRUE(r.transitioned);
+    state = r.next_state;
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_WAIT_RECONNECT, state);
+
+    /* t2: a few poll cycles later, still no device. */
+    r = xhci_attach_step(state, false, USB_SPEED_UNKNOWN);
+    TEST_ASSERT_FALSE(r.report_connected);
+    TEST_ASSERT_FALSE(r.transitioned);
+    state = r.next_state;
+
+    /* t3: user re-plugs. CCS rises. usb_core sees connected + speed
+     * on this very call, so enumeration kicks off immediately. */
+    r = xhci_attach_step(state, true, USB_SPEED_HIGH);
+    TEST_ASSERT_TRUE(r.report_connected);
+    TEST_ASSERT_EQUAL_INT(USB_SPEED_HIGH, r.report_speed);
+    TEST_ASSERT_TRUE(r.transitioned);
+    state = r.next_state;
+    TEST_ASSERT_EQUAL_INT(XHCI_ATTACH_FRESH, state);
+
+    /* t4: steady state while the dongle is running. */
+    r = xhci_attach_step(state, true, USB_SPEED_HIGH);
+    TEST_ASSERT_TRUE(r.report_connected);
+    TEST_ASSERT_EQUAL_INT(USB_SPEED_HIGH, r.report_speed);
+    TEST_ASSERT_FALSE(r.transitioned);
+}
+
+static void test_attach_is_idempotent(void)
+{
+    /* Calling the step function with the same inputs repeatedly must
+     * not drift — transitioned flips to false after the first call
+     * and the reported state stays consistent. usb_core calls
+     * port_status on every poll tick, so idempotence is load-bearing. */
+    struct xhci_attach_result a =
+        xhci_attach_step(XHCI_ATTACH_FRESH, true, USB_SPEED_HIGH);
+    struct xhci_attach_result b =
+        xhci_attach_step(a.next_state, true, USB_SPEED_HIGH);
+    struct xhci_attach_result c =
+        xhci_attach_step(b.next_state, true, USB_SPEED_HIGH);
+    TEST_ASSERT_EQUAL_INT(a.next_state, b.next_state);
+    TEST_ASSERT_EQUAL_INT(b.next_state, c.next_state);
+    TEST_ASSERT_TRUE(b.report_connected);
+    TEST_ASSERT_TRUE(c.report_connected);
+    TEST_ASSERT_FALSE(b.transitioned);
+    TEST_ASSERT_FALSE(c.transitioned);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -258,5 +400,13 @@ int test_suite_xhci_device(void)
     RUN_TEST(test_ctx_accessor_round_trip_csz1);
     RUN_TEST(test_ctx_dev_neighbours_csz0);
     RUN_TEST(test_ctx_dev_neighbours_csz1);
+    RUN_TEST(test_attach_stale_hides_connected_device);
+    RUN_TEST(test_attach_stale_unplug_advances_to_wait);
+    RUN_TEST(test_attach_wait_reports_disconnected_while_empty);
+    RUN_TEST(test_attach_wait_reconnect_advances_on_attach);
+    RUN_TEST(test_attach_fresh_passes_through_connected);
+    RUN_TEST(test_attach_fresh_passes_through_disconnect);
+    RUN_TEST(test_attach_full_replug_sequence);
+    RUN_TEST(test_attach_is_idempotent);
     return UnityEnd();
 }

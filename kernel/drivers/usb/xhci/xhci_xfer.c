@@ -174,17 +174,6 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     slot->last_trb_phys = (uintptr_t)slot_trb;
     urb->hcd_private    = slot;
 
-    /* Diagnostic while the control-transfer path is new — pin which
-     * TRB physical addresses correspond to which stage so a Transfer
-     * Event cc=X in the serial log is locatable without the ring
-     * base. Remove once the path is stable. */
-    INFO("xhci: control urb submitted setup+data+status last_trb=0x%lx "
-         "bRequest=0x%02x wValue=0x%04x wLength=%u",
-         (unsigned long)slot->last_trb_phys,
-         (unsigned)urb->setup.bRequest,
-         (unsigned)urb->setup.wValue,
-         (unsigned)urb->length);
-
     /* Kick EP0. */
     xhci_ring_doorbell(d->slot_id, XHCI_DCI_EP0);
     return 0;
@@ -315,7 +304,9 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
      * therefore report requested_len — the Data Stage short-packet
      * case raises cc=SHORT_PACKET on the Data TRB, which we currently
      * don't hook (Phase 3A doesn't exercise short control-IN for
-     * CDC-ECM). For bulk, residual is the byte count not transferred;
+     * CDC-ECM). Tracked in #316 for when class drivers beyond
+     * CDC-ECM (HID, string descriptors) need the true byte count.
+     * For bulk, residual is the byte count not transferred;
      * actual = requested - residual. */
     if (urb->transfer_type == USB_XFER_CONTROL) {
         urb->actual_length = (cc == XHCI_CC_SUCCESS) ? slot->requested_len : 0U;

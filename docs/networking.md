@@ -703,7 +703,7 @@ host + CDC-ECM USB-A dongle) is viable.
   root-port enumeration state machine (port reset → GET_DESCRIPTOR
   stub → SET_ADDRESS → full descriptor → config tree → parse →
   SET_CONFIGURATION → endpoint_configure).
-- `kernel/tests/test_usb_core.c` — 37 unit tests against a mock HCD:
+- `kernel/tests/test_usb_core.c` — 42 unit tests against a mock HCD:
   URB lifecycle, URB cancel on a pending transfer, URB submit-wait
   timeout (deferred control + cancel-on-expiry), descriptor parse
   (valid, too-short input, invalid header, bad-bLength config
@@ -715,7 +715,9 @@ host + CDC-ECM USB-A dongle) is viable.
   post-open error, does NOT fire when port_reset or device_open
   failed), speed propagation, return-code contract (HCDs returning
   a positive status-enum value are normalised to -USB_URB_IO_ERROR),
-  and the null-HCD / null-URB guards.
+  null-HCD / null-URB guards, and `usb_core_hotplug_poll`
+  (#309 re-plug entry: no-HCD safety, no-device-connected no-op,
+  attach enumeration, idempotence, enumerate-failure propagation).
 
 The core compiles on every platform (QEMU, Pi 5, Jetson, x86-64);
 HCD drivers that register against it are gated per-platform. The
@@ -747,36 +749,53 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
   when `wMaxSegmentSize == 0`, probe success when the functional
   descriptor is absent, and RX-error drop.
 
-**Phase 3A** (XHCI host controller) reached capability probe and
-ring allocation but is **mothballed as of 2026-04-18** — blocked
-at `USBCMD.RUN = 1` by Linux's kexec path disabling `arm-smmu`
-translations for the xusb stream. The controller's first DMA
-attempt after RUN=1 faults internally and bricks the MMIO
-aperture. Four Linux-cooperative workarounds were tried
-(#285, closed wontfix); none of them address the actual mechanism.
-Full investigation writeup is in
-[`docs/jetson-usb-networking-plan.md`](jetson-usb-networking-plan.md) §8.
+**Phase 3A** (XHCI host controller) — status as of 2026-04-19:
 
-What remains on `feature/usb-networking-phase2` as reference for
-any future revival:
+| Step | Status | Notes |
+|---|---|---|
+| 1-4 (capability probe, halt, ring allocation, NO_OP) | ✅ | Originally mothballed 2026-04-18; unblocked by PR #303 |
+| SMMU blocker | ✅ | PR #303 — `scripts/arm-smmu-noshutdown/` Linux kernel module suppresses arm-smmu's `.shutdown` callback and installs an identity IOMMU mapping for SLM-OS's NC region. Inherited SMMU state now usable across kexec |
+| 5 (port scan, slot addressing) | ✅ | PR #308 — `xhci_hcd_port_status`, `xhci_hcd_port_reset`, `xhci_hcd_device_open` with ENABLE_SLOT + ADDRESS_DEVICE(BSR=1), intercepted SET_ADDRESS |
+| 6 (control transfers) | ✅ | PR #308 — Setup / Data / Status Stage TRB builders + EP0 dispatch |
+| 7 (CONFIGURE_ENDPOINT + bulk) | ✅ | PR #308 — per-endpoint transfer-ring allocation, Normal TRB for bulk/interrupt |
+| Post-kexec re-plug | ⚠️ | #309 — first EP0 control transfer after ADDRESS_DEVICE returns `cc=4` on a pre-kexec device. Workaround in PR #308: hide the stale device via a three-state attach machine until the user physically re-plugs; `usb_core_hotplug_poll` from `net_poll()` drives fresh enumeration. Permanent fix tracked |
+| Phase 4 (lwIP integration) | ☐ | Out of scope for PR #308 |
 
-- `kernel/drivers/usb/xhci/` — scaffolding, capability parse, halt
-  verification, ring allocation, NO_OP command code. The `xhci`
-  shell command on Jetson still works and prints the parsed
-  capability registers (HCI v1.20, 36 slots, 8 ports, 5
-  interrupters) so the code is observably functional up to the
-  blocker.
-- `scripts/jetson-kexec-slmos.sh` — the `xusb_*` clock hold
-  (committed on `main`) is independently useful and is kept.
-- `scripts/tegra-xusb-noshutdown/` — the Option-A.4 kernel module
-  source, kept as reference for anyone re-examining this path.
+Source layout in `kernel/drivers/usb/xhci/`:
 
-Jetson-specific USB networking won't work until either the SMMU
-disable during kexec is worked around (Linux-side change, not
-SLM-OS) or SLM-OS gains the ability to load the Tegra XUSB Falcon
-firmware cold (issue #286, high risk due to HS-mode signing). On
-other platforms networking continues to work via
-virtio-net (QEMU + x86-64) and MACB (Pi 5).
+| File | Content |
+|---|---|
+| `xhci.c` | Controller init, capability/operational register setup, command ring, NO_OP, `xhci_op_r32/w32`, `xhci_ring_doorbell`, `xhci_cmd_submit_and_wait`, `xhci_event_ring_drain`, HCD op table |
+| `xhci_regs.h` | Register offsets and bitfield macros |
+| `xhci_ring.{c,h}` | Transfer-ring allocation + TRB enqueue with PCS flip |
+| `xhci_trb.h` | TRB layout + completion-code macros |
+| `xhci_ctx.h` | Slot / EP / Input context layout helpers keyed by DCI (CSZ-aware byte offsets, no overlaid C structs) |
+| `xhci_internal.h` | Cross-TU shared state (non-static via `extern`) and HCD-op prototypes |
+| `xhci_trb_build.h` | Pure-logic Setup/Data/Status/Normal TRB builders (shared with tests) |
+| `xhci_attach.h` | `STALE → WAIT_RECONNECT → FRESH` hot-plug state machine (pure logic, unit-tested) |
+| `xhci_device.c` | `port_status`, `port_reset`, `device_open` (ENABLE_SLOT, ADDRESS_DEVICE BSR=1), `device_close`, `endpoint_configure` |
+| `xhci_xfer.c` | `submit_urb` (control + bulk), `cancel_urb`, `poll`, transfer-event dispatcher; intercepts USB `SET_ADDRESS` since xHCI handles addressing |
+| `xhci_tegra.{c,h}` | Tegra234-specific FPCI / BAR2 register access + firmware header readout |
+
+Tests covering the Phase 3A path (all run on every platform via
+`make test`):
+
+- `kernel/tests/test_xhci_ring.c` — 9 ring-allocation / enqueue
+  tests.
+- `kernel/tests/test_xhci_tegra.c` — 6 Tegra234 wrapper offset + CSB
+  paging tests.
+- `kernel/tests/test_xhci_device.c` — 26 tests: PORTSC decode (6
+  speeds + change-bit isolation + NULL-safety), context layout
+  (stride, offsets, DCI math, CSZ=0+CSZ=1 accessor round-trip +
+  neighbour non-bleed), hot-plug attach state machine (all 6
+  transitions + full replug walkthrough + idempotence).
+- `kernel/tests/test_xhci_xfer.c` — 14 TRB builder tests pinning
+  every bit (Setup TRT field, Data Stage DIR + ISP + length
+  truncate + 64-bit buffer, Status Stage IOC, Normal TRB IOC+ISP,
+  scratch-zeroing invariant).
+
+On other platforms networking continues to work via virtio-net
+(QEMU + x86-64) and MACB (Pi 5).
 
 ### Build-Time Configuration
 
@@ -1020,6 +1039,11 @@ no hardware dependency):
 | `test_enumerate_no_close_on_device_open_failure` | Failed `device_open` does NOT call `device_close` (HCD owns its own partial state) |
 | `test_control_msg_returns_actual_length` | `usb_control_msg` returns bytes transferred on success |
 | `test_control_msg_unknown_request_returns_error` | Unknown request → negative return |
+| `test_hotplug_poll_no_hcd_is_safe` | `usb_core_hotplug_poll` called before any HCD registration returns 0 without crashing |
+| `test_hotplug_poll_no_device_connected` | Mock HCD reports disconnected → no enumerate, no `device_open` |
+| `test_hotplug_poll_enumerates_on_attach` | Port reports connected → hotplug_poll drives full enumeration, returns 1 |
+| `test_hotplug_poll_idempotent_after_enumeration` | Once a device is present, subsequent polls return 0 and do not re-open the device — safe to call every `net_poll` tick |
+| `test_hotplug_poll_propagates_enumerate_failure` | Port connected but `device_open` fails → hotplug_poll returns the negative error, no stale device |
 
 **Tier 5 — CDC-ECM class driver against a mock HCD**
 (`kernel/tests/test_cdc_ecm.c`, runs on every platform the test
@@ -1100,6 +1124,44 @@ runs on every platform; Phase 3A.2 of #266 IFR-bringup revival per
 | `test_falcon_cpuctl_bits` | STARTCPU=bit 1, STATE_HALTED=bit 4, STATE_STOPPED=bit 5 — pinned because Path 3 in §10.5 may write STARTCPU via CSB |
 | `test_fw_header_created_time_offset` | `fwimg_created_time` is at byte offset 44 in the firmware header |
 | `test_fw_ioctl_shift` | FW_IOCTL_TYPE_SHIFT=24, FW_IOCTL_CFGTBL_READ=17 — pinned despite the mailbox path being unsafe to call (see §9.2) |
+
+**Tier 8 — XHCI port/context/hot-plug** (`kernel/tests/test_xhci_device.c`,
+runs on every platform; covers Phase 3A Step 5 + #309 re-plug state machine):
+
+| Test | Description |
+|------|-------------|
+| `test_portsc_disconnected` | CCS=0 decodes to connected=false, speed=UNKNOWN regardless of speed bits |
+| `test_portsc_high_speed` / `_full_speed` / `_low_speed` / `_super_speed` | Each USB speed ID decodes to the correct `enum usb_speed` |
+| `test_portsc_unknown_speed_id` | Reserved speed ID → connected=true, speed=UNKNOWN, return=false so callers can flag |
+| `test_portsc_ignores_change_bits` | PRC / PEC / CSC do not perturb the (connected, speed) decode |
+| `test_portsc_null_output_safe` | Decode with both output pointers NULL does not crash |
+| `test_ctx_stride_matches_csz` | `xhci_ctx_stride(false)==32`, `(true)==64` — CSZ=0/1 baseline |
+| `test_ctx_dev_bytes` / `_in_bytes` | Device Context = 32 contexts, Input Context = 33 contexts, at either stride |
+| `test_ctx_dev_offset` / `_in_offset` | DCI-indexed byte offsets for both CSZ sizes |
+| `test_dci_ep_addresses` | `bEndpointAddress` → DCI math (ep 1 OUT→2, ep 15 IN→31, etc.) |
+| `test_ctx_accessor_round_trip_csz0` / `_csz1` | Writes at DCI N land at the exact byte offset for that stride |
+| `test_ctx_dev_neighbours_csz0` / `_csz1` | Write at DCI 3/5/7, confirm DCI 2/4/6/8 stay zero — catches CSZ=1 padding-split-across-DCI bugs |
+| `test_attach_stale_hides_connected_device` | STALE + CCS=1 hides the stale device from usb_core |
+| `test_attach_stale_unplug_advances_to_wait` | STALE + CCS=0 transitions to WAIT_RECONNECT |
+| `test_attach_wait_reports_disconnected_while_empty` | WAIT_RECONNECT + CCS=0 stays, reports disconnected |
+| `test_attach_wait_reconnect_advances_on_attach` | WAIT_RECONNECT + CCS=1 advances to FRESH and surfaces the speed |
+| `test_attach_fresh_passes_through_connected` / `_disconnect` | FRESH reports the raw CCS+speed; stays in FRESH regardless |
+| `test_attach_full_replug_sequence` | Walks the full t0→t4 timeline (stale present → unplug → empty → re-plug → steady) |
+| `test_attach_is_idempotent` | Repeated calls with the same inputs keep `transitioned=false` and `report_connected` stable |
+
+**Tier 9 — XHCI TRB builders** (`kernel/tests/test_xhci_xfer.c`,
+runs on every platform; covers Phase 3A Step 6 + 7b TRB construction):
+
+| Test | Description |
+|------|-------------|
+| `test_setup_stage_no_data` / `_data_out` / `_data_in` | Setup Stage TRT field (0/2/3), IDT bit, cycle bit, 8-byte Transfer Length, packed SETUP bytes |
+| `test_data_stage_in` / `_data_stage_out` | Data Stage DIR bit, ISP bit, length, 64-bit buffer address, cycle bit |
+| `test_data_stage_length_truncates` | Bits above 16:0 of `length` do not leak into TD Size / IT fields |
+| `test_status_stage_in` / `_status_stage_out` | Status Stage DIR + IOC; no data or length |
+| `test_normal_sets_ioc_isp` | Normal TRB has both IOC and ISP set |
+| `test_normal_64bit_address` | High 32 bits of a 64-bit buffer land in `param_hi` verbatim |
+| `test_normal_cycle_0` | Cycle bit is respected |
+| `test_builders_zero_scratch` | Every builder zeroes caller stack memory first — stack garbage never leaks into TRB bits the HC reads |
 
 Run tests with:
 
