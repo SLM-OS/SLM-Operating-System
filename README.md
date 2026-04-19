@@ -73,12 +73,13 @@ code quality criteria (no libc, no POSIX, kernel stacks fixed at 16 KB,
 memory-safety review for use-after-free in task/IPC teardown, etc.):
 
 ```
-/review
+/slmos-review
 ```
 
-Runs `.claude/commands/review.md` against the current branch's diff to
-`main`. See the command file for the full critical / high / medium /
-low review taxonomy.
+Runs `.claude/commands/slmos-review.md` against the current branch's diff
+to `main`. Named `slmos-review` rather than the shorter `review` so it
+doesn't mask Claude Code's built-in `/review` command. See the command
+file for the full critical / high / medium / low review taxonomy.
 
 ### Issue Tracking
 
