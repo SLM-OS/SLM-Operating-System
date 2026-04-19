@@ -47,6 +47,7 @@ static const char *lookup_name(unsigned long addr, char *buf, size_t buflen)
 
 static int print_bound_dev(struct device *dev, void *data)
 {
+    (void)data;
     pr_info("smmu-probe:   bound dev=%s\n", dev_name(dev));
     return 0;
 }

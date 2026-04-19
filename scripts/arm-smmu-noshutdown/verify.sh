@@ -185,9 +185,7 @@ fi
 # fail to add a second mapping if one is still there, which will surface
 # as its own assertion error.
 if dmesg | grep -q 'IOMMU identity mapping verified across the full 2 MB range'; then
-    warn 'IOMMU identity mapping already present from a prior load — '\
-'the previous session must have skipped the arm_smmu_noshutdown exit '\
-'path (crash / SIGKILL / force-unload). Reboot if Stage 2 asserts fail.'
+    warn "IOMMU identity mapping already present from a prior load — the previous session must have skipped the arm_smmu_noshutdown exit path (crash / SIGKILL / force-unload). Reboot if Stage 2 asserts fail."
 fi
 rmmod smmu_probe
 dmesg -C >/dev/null
