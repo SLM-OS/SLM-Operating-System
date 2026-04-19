@@ -125,10 +125,11 @@ int cmd_tasks(int argc, char *argv[])
     shell_puts("  ID  Name             State       Pri  CPU  Switches\r\n");
     shell_puts("  --  ---------------  ----------  ---  ---  --------\r\n");
 
-    /* Iterate through possible task IDs */
-    for (uint32_t id = 0; id < MAX_TASKS; id++) {
-        struct task *t = task_get(id);
-        if (t != NULL) {
+    /* Iterate slots, not task IDs — IDs come from a monotonic counter
+     * and can exceed MAX_TASKS (#321). */
+    for (uint32_t i = 0; i < MAX_TASKS; i++) {
+        struct task *t = task_slot(i);
+        if (t != NULL && t->id != 0 && t->state != TASK_TERMINATED) {
             shell_printf("  %2lu  %-15s  %-10s  %3u  %3lu  %lu\r\n",
                         t->id,
                         t->name,

@@ -256,6 +256,22 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
 struct task *task_get(uint32_t id);
 
 /*
+ * Get task by table slot index (0..MAX_TASKS-1).
+ *
+ * Unlike task_get(), which searches by the monotonically-increasing
+ * task ID, task_slot() returns the i-th entry of the task table
+ * directly. Use this when iterating over all live tasks — task IDs
+ * are NOT bounded by MAX_TASKS (they come from next_task_id), so
+ * iterating with task_get(0..MAX_TASKS-1) misses any task whose ID
+ * has grown past MAX_TASKS.
+ *
+ * Returns: Pointer to the slot (caller must check t->id == 0 /
+ * t->state == TASK_TERMINATED to skip empty slots), or NULL if the
+ * index is out of range.
+ */
+struct task *task_slot(uint32_t idx);
+
+/*
  * Set task CPU affinity.
  *
  * @task:     Task to modify
