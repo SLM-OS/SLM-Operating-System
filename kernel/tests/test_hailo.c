@@ -18,6 +18,7 @@
 #include "../ai_accel/hailo/hailo_control.h"
 #include "../ai_accel/hailo/hailo_cs_actions.h"
 #include "../ai_accel/hailo/hailo_cs_builder.h"
+#include "../ai_accel/hailo/hailo_cs_translator.h"
 #include "../ai_accel/hailo/hailo_internal.h"
 #include "../ai_accel/hailo/hailo_infer.h"
 #include "../ai_accel/hailo/hailo_tensor.h"
@@ -2269,6 +2270,182 @@ static void test_change_context_switch_status_enabled_carries_batch_params(void)
     uint16_t batch_cnt;
     memcpy(&batch_cnt, req + 40, 2);
     TEST_ASSERT_EQUAL_UINT16(3, batch_cnt);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 6.4f: HEF → wire-action translator                                    */
+/* -------------------------------------------------------------------------- */
+
+static void test_cs_translate_application_header_fills_defaults(void)
+{
+    /* The translator derives batch_size=1, dynamic_contexts_count=1,
+     * networks_count=1, csm_buffer_size from cfg, no-DDR sentinel,
+     * config channel populated, and the single boundary bit set. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,   /* channel 1, engine 0 */
+        .config_stream_index   = 0,
+        .ccw_desc_list_iova    = 0x1000u,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 16,
+    };
+
+    struct hailo_cs_application_header hdr;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_application_header(&info, &cfg, &hdr));
+
+    TEST_ASSERT_EQUAL_UINT8(1, hdr.networks_count);
+    TEST_ASSERT_EQUAL_UINT16(1, hdr.dynamic_contexts_count);
+    TEST_ASSERT_EQUAL_UINT16(1, hdr.batch_size);
+    TEST_ASSERT_EQUAL_UINT16(512, hdr.csm_buffer_size);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_NO_DDR_ACTION_LIST,
+                             hdr.external_action_list_address);
+    TEST_ASSERT_EQUAL_UINT8(1, hdr.config_channels_count);
+    TEST_ASSERT_EQUAL_UINT8(0x01, hdr.config_channel_packed_id[0]);
+    /* channel 1 → bit 1 set in engine 0's bitmap. */
+    TEST_ASSERT_EQUAL_UINT32(1u << 1, hdr.boundary_channels_bitmap[0]);
+}
+
+static void test_cs_translate_application_header_rejects_null(void)
+{
+    struct hef_info info; memset(&info, 0, sizeof(info));
+    struct hailo_cs_translate_cfg cfg = {0};
+    struct hailo_cs_application_header hdr;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_application_header(NULL, &cfg, &hdr));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_application_header(&info, NULL, &hdr));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_application_header(&info, &cfg, NULL));
+}
+
+static void test_cs_translate_contexts_produces_all_four(void)
+{
+    /* Minimal hef_info with one CCW action: translator should emit
+     * non-empty bytes in all four context slots and pick the right
+     * action types per context. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 1;
+    info.ccw_total_bytes  = 512;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .config_stream_index   = 0,
+        .ccw_desc_list_iova    = 0xDEADBEEF00000000ull,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Every context must be non-empty (firmware rejects zero-length). */
+    TEST_ASSERT_TRUE(out.activation_len       > 0);
+    TEST_ASSERT_TRUE(out.batch_switching_len  > 0);
+    TEST_ASSERT_TRUE(out.preliminary_len      > 0);
+    TEST_ASSERT_TRUE(out.dynamic_len          > 0);
+
+    /* ACTIVATION: single BURST_CREDITS_TASK_RESET (type 30, zero body).
+     * 8-byte common header alone = 8 bytes. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, out.activation_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
+                            out.activation[0]);
+
+    /* BATCH_SWITCHING: DDR_BUFFERING_RESET (type 31) + BURST_CREDITS_
+     * TASK_START (type 29), both zero-body → 16 bytes total. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)16, out.batch_switching_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
+                            out.batch_switching[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                            out.batch_switching[8]);
+
+    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL (type 22, 21 B body → 29 B)
+     * + FETCH_CCW_BURSTS (type 27, 3 B body → 11 B). Total 40 B. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)40, out.preliminary_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                            out.preliminary[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,
+                            out.preliminary[29]);
+    /* host_buffer_info.dma_address inside the activate body — after
+     * 8-byte header + 2-byte (channel_id + stream_index) + 1-byte
+     * (buffer_type). Offset = 8 + 2 + 1 = 11. */
+    uint64_t iova;
+    memcpy(&iova, out.preliminary + 11, 8);
+    TEST_ASSERT_EQUAL_UINT64(0xDEADBEEF00000000ull, iova);
+    /* FETCH_CCW_BURSTS body at offset 29+8 = 37: u16 ccw_bursts (=1)
+     * then u8 config_stream_index (=0). */
+    uint16_t bursts;
+    memcpy(&bursts, out.preliminary + 37, 2);
+    TEST_ASSERT_EQUAL_UINT16(1, bursts);
+    TEST_ASSERT_EQUAL_UINT8(0, out.preliminary[39]);
+
+    /* DYNAMIC: APPLICATION_CHANGE_INTERRUPT tail marker (zero body). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[0]);
+}
+
+static void test_cs_translate_contexts_uses_ccw_count_for_burst_count(void)
+{
+    /* 7 CCW actions in hef_info → FETCH_CCW_BURSTS encodes ccw_bursts=7. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 7;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x100000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 16,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    uint16_t bursts;
+    memcpy(&bursts, out.preliminary + 37, 2);
+    TEST_ASSERT_EQUAL_UINT16(7, bursts);
+}
+
+static void test_cs_translate_contexts_clamps_burst_count_to_u16(void)
+{
+    /* Pathological ccw_action_count > UINT16_MAX: clamp to 65535. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 100000u;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x100000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 16,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    uint16_t bursts;
+    memcpy(&bursts, out.preliminary + 37, 2);
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, bursts);
+}
+
+static void test_cs_translate_contexts_rejects_null(void)
+{
+    struct hef_info info; memset(&info, 0, sizeof(info));
+    struct hailo_cs_translate_cfg cfg = {0};
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(NULL, &cfg, &out));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, NULL, &out));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, &cfg, NULL));
 }
 
 static void test_control_send_recv_default_rings_app_doorbell(void)
@@ -5210,6 +5387,12 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_builder_accepts_zero_body_action);
     RUN_TEST(test_change_context_switch_status_reset_wire_layout);
     RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);
+    RUN_TEST(test_cs_translate_application_header_fills_defaults);
+    RUN_TEST(test_cs_translate_application_header_rejects_null);
+    RUN_TEST(test_cs_translate_contexts_produces_all_four);
+    RUN_TEST(test_cs_translate_contexts_uses_ccw_count_for_burst_count);
+    RUN_TEST(test_cs_translate_contexts_clamps_burst_count_to_u16);
+    RUN_TEST(test_cs_translate_contexts_rejects_null);
     RUN_TEST(test_control_send_recv_default_rings_app_doorbell);
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);
