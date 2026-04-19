@@ -1145,6 +1145,208 @@ static void test_decode_ccw_no_preliminary_config(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 6.4e: contexts[].operations[].actions[] capture                       */
+/* -------------------------------------------------------------------------- */
+
+/* Build a ProtoHEFAction with a specific oneof branch tag and an
+ * empty body. Nanopb reads the length-delimited sub-message via
+ * field->tag → dispatch; the body can be zero bytes for actions
+ * whose parameters we don't need to extract. Returns the serialized
+ * action length in `buf`. */
+static size_t emit_action_with_tag(uint8_t *buf, uint32_t action_tag)
+{
+    /* ProtoHEFAction = { unique_id(1), oneof action { ... } }.
+     * Skip unique_id; emit just the oneof branch as a zero-length
+     * length-prefixed sub-message. The parser dispatches on
+     * field->tag regardless of inner bytes. */
+    size_t off = 0;
+    emit_lenprefix(buf, &off, action_tag, NULL, 0);
+    return off;
+}
+
+/* ProtoHEFContext = { context_index(1), operations(2), metadata(3) }.
+ * This helper emits just the operations field — index and metadata
+ * are optional and the parser handles their absence. */
+static size_t emit_context_with_operations(uint8_t *buf,
+                                           const uint8_t *ops_body,
+                                           size_t ops_len)
+{
+    size_t off = 0;
+    emit_lenprefix(buf, &off, /*2=operations*/ 2, ops_body, ops_len);
+    return off;
+}
+
+/* Build a network group wrapping a single context whose operations[0]
+ * contains `action_count` actions with the given tags. */
+static size_t build_ng_with_context_actions(uint8_t *out, size_t cap,
+                                            const uint32_t *action_tags,
+                                            uint32_t action_count)
+{
+    uint8_t op[1024];
+    size_t  op_len = 0;
+    for (uint32_t i = 0; i < action_count; i++) {
+        uint8_t act[32];
+        size_t  act_len = emit_action_with_tag(act, action_tags[i]);
+        emit_lenprefix(op, &op_len, /*2=actions*/ 2, act, act_len);
+    }
+
+    uint8_t ctx[2048];
+    size_t  ctx_len = emit_context_with_operations(ctx, op, op_len);
+
+    uint8_t ng[2048];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*3=contexts*/ 3, ctx, ctx_len);
+
+    size_t olen = 0;
+    (void)cap;
+    emit_lenprefix(out, &olen, /*2=network_groups*/ 2, ng, ng_len);
+    return olen;
+}
+
+static void test_decode_context_actions_single_action(void)
+{
+    /* One context, one operation, one action (enable_lcu, tag=8).
+     * Parser should record 1 context with action_count=1, type=8
+     * and mask bit 8 set. */
+    uint8_t blob[512];
+    uint32_t tags[] = { /*enable_lcu=*/ 8 };
+    size_t blen = build_ng_with_context_actions(blob, sizeof(blob), tags, 1);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.context_actions_count);
+    TEST_ASSERT_FALSE(info.context_actions_truncated);
+    TEST_ASSERT_EQUAL_UINT32(1, info.context_actions[0].action_count);
+    TEST_ASSERT_EQUAL_UINT8(8, info.context_actions[0].action_types[0]);
+    TEST_ASSERT_EQUAL_UINT32(1u << 8, info.context_actions[0].action_type_mask);
+    TEST_ASSERT_FALSE(info.context_actions[0].truncated);
+}
+
+static void test_decode_context_actions_mixed_types(void)
+{
+    /* One context with several different action types: enable_sequencer(5),
+     * allow_input_dataflow(10), enable_lcu(8), wait_for_sequencer(6),
+     * disable_lcu(7). Verifies order preservation + mask OR. */
+    uint8_t blob[1024];
+    uint32_t tags[] = { 5, 10, 8, 6, 7 };
+    size_t blen = build_ng_with_context_actions(blob, sizeof(blob), tags, 5);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.context_actions_count);
+    TEST_ASSERT_EQUAL_UINT32(5, info.context_actions[0].action_count);
+    TEST_ASSERT_EQUAL_UINT8(5,  info.context_actions[0].action_types[0]);
+    TEST_ASSERT_EQUAL_UINT8(10, info.context_actions[0].action_types[1]);
+    TEST_ASSERT_EQUAL_UINT8(8,  info.context_actions[0].action_types[2]);
+    TEST_ASSERT_EQUAL_UINT8(6,  info.context_actions[0].action_types[3]);
+    TEST_ASSERT_EQUAL_UINT8(7,  info.context_actions[0].action_types[4]);
+    uint32_t expected_mask = (1u<<5) | (1u<<6) | (1u<<7) | (1u<<8) | (1u<<10);
+    TEST_ASSERT_EQUAL_UINT32(expected_mask,
+                             info.context_actions[0].action_type_mask);
+}
+
+static void test_decode_context_actions_multiple_contexts(void)
+{
+    /* Two contexts: ctx0 has [enable_lcu], ctx1 has [allow_input_dataflow].
+     * Each should get its own hef_context_actions entry. */
+    uint8_t op0[32], op1[32], ctx0[64], ctx1[64];
+    size_t op0_len = 0, op1_len = 0;
+    uint8_t a0[16], a1[16];
+    size_t a0_len = emit_action_with_tag(a0, 8);
+    size_t a1_len = emit_action_with_tag(a1, 10);
+    emit_lenprefix(op0, &op0_len, 2, a0, a0_len);
+    emit_lenprefix(op1, &op1_len, 2, a1, a1_len);
+    size_t ctx0_len = emit_context_with_operations(ctx0, op0, op0_len);
+    size_t ctx1_len = emit_context_with_operations(ctx1, op1, op1_len);
+
+    uint8_t ng[512];
+    size_t ng_len = 0;
+    emit_lenprefix(ng, &ng_len, /*3=contexts*/ 3, ctx0, ctx0_len);
+    emit_lenprefix(ng, &ng_len, /*3=contexts*/ 3, ctx1, ctx1_len);
+
+    uint8_t blob[1024];
+    size_t blen = 0;
+    emit_lenprefix(blob, &blen, /*2=network_groups*/ 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(2, info.context_actions_count);
+    TEST_ASSERT_EQUAL_UINT8(8,  info.context_actions[0].action_types[0]);
+    TEST_ASSERT_EQUAL_UINT8(10, info.context_actions[1].action_types[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, info.context_actions[0].context_index);
+    TEST_ASSERT_EQUAL_UINT32(1, info.context_actions[1].context_index);
+}
+
+static void test_decode_context_actions_overflow_truncates(void)
+{
+    /* HEF_PARSER_MAX_CONTEXT_ACTIONS + 1 actions in one context.
+     * action_count records the true count; action_types[] stops
+     * at the cap and truncated flag is set. */
+    uint8_t blob[4096];
+    uint32_t tags[HEF_PARSER_MAX_CONTEXT_ACTIONS + 1];
+    for (uint32_t i = 0; i < HEF_PARSER_MAX_CONTEXT_ACTIONS + 1; i++) {
+        tags[i] = 8;   /* enable_lcu */
+    }
+    size_t blen = build_ng_with_context_actions(
+        blob, sizeof(blob), tags, HEF_PARSER_MAX_CONTEXT_ACTIONS + 1);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(1, info.context_actions_count);
+    TEST_ASSERT_EQUAL_UINT32(HEF_PARSER_MAX_CONTEXT_ACTIONS + 1,
+                             info.context_actions[0].action_count);
+    TEST_ASSERT_TRUE(info.context_actions[0].truncated);
+    /* action_types[0..MAX-1] all populated as 8; slot MAX not written. */
+    for (uint32_t i = 0; i < HEF_PARSER_MAX_CONTEXT_ACTIONS; i++) {
+        TEST_ASSERT_EQUAL_UINT8(8, info.context_actions[0].action_types[i]);
+    }
+}
+
+static void test_decode_context_actions_context_overflow(void)
+{
+    /* HEF_PARSER_MAX_CONTEXTS + 1 contexts, each with 1 action.
+     * context_actions_count reflects the true count; truncated
+     * flag set; only MAX_CONTEXTS slots have valid data. */
+    uint8_t blob[4096];
+    size_t blen = 0;
+    uint8_t ng[2048];
+    size_t ng_len = 0;
+    for (uint32_t i = 0; i < HEF_PARSER_MAX_CONTEXTS + 1; i++) {
+        uint8_t a[16]; size_t a_len = emit_action_with_tag(a, 8);
+        uint8_t op[32]; size_t op_len = 0;
+        emit_lenprefix(op, &op_len, 2, a, a_len);
+        uint8_t ctx[64];
+        size_t ctx_len = emit_context_with_operations(ctx, op, op_len);
+        emit_lenprefix(ng, &ng_len, /*3=contexts*/ 3, ctx, ctx_len);
+    }
+    emit_lenprefix(blob, &blen, /*2=network_groups*/ 2, ng, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_UINT32(HEF_PARSER_MAX_CONTEXTS + 1,
+                             info.context_actions_count);
+    TEST_ASSERT_TRUE(info.context_actions_truncated);
+    /* The first MAX_CONTEXTS slots should have action_count=1. */
+    for (uint32_t i = 0; i < HEF_PARSER_MAX_CONTEXTS; i++) {
+        TEST_ASSERT_EQUAL_UINT32(1, info.context_actions[i].action_count);
+    }
+}
+
+static void test_decode_context_actions_no_contexts(void)
+{
+    /* Network group with no contexts[] field — context_actions_count
+     * must be 0. Uses the existing build_ng_with_pads helper (which
+     * emits an ops-based NG with no contexts). */
+    uint8_t blob[512];
+    size_t n = build_ng_with_pads(blob, sizeof(blob), /*in=*/1, /*out=*/1);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK, hef_parse_body(blob, n, &info));
+    TEST_ASSERT_EQUAL_UINT32(0, info.context_actions_count);
+    TEST_ASSERT_FALSE(info.context_actions_truncated);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -1186,6 +1388,14 @@ int test_suite_hef_parser(void)
     RUN_TEST(test_decode_ccw_truncation);
     RUN_TEST(test_decode_ccw_ptr_variant_decoded);
     RUN_TEST(test_decode_ccw_no_preliminary_config);
+
+    /* Phase 6.4e: context operations[].actions[] capture */
+    RUN_TEST(test_decode_context_actions_single_action);
+    RUN_TEST(test_decode_context_actions_mixed_types);
+    RUN_TEST(test_decode_context_actions_multiple_contexts);
+    RUN_TEST(test_decode_context_actions_overflow_truncates);
+    RUN_TEST(test_decode_context_actions_context_overflow);
+    RUN_TEST(test_decode_context_actions_no_contexts);
 
     return UnityEnd();
 }

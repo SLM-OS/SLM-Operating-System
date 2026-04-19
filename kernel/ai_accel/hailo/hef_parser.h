@@ -65,6 +65,18 @@
  * kernel stack budget.
  */
 #define HEF_PARSER_MAX_CCW_ACTIONS 256
+/* Cap on the number of HEF contexts whose compute-phase action
+ * streams we capture (ProtoHEFContext.operations[].actions[]).
+ * A simple MLP emits ~1-2 dynamic contexts; the fixed ACTIVATION/
+ * BATCH_SWITCHING/PRELIMINARY preambles don't count here — those
+ * are per-context, not per-operation.
+ */
+#define HEF_PARSER_MAX_CONTEXTS     8
+/* Per-context cap on individual actions recorded. A typical MLP
+ * compute context emits a dozen actions (enable_sequencer,
+ * wait_for_sequencer, enable/disable_lcu, allow_input_dataflow,
+ * write_data_by_type, etc.); 64 leaves headroom for larger models. */
+#define HEF_PARSER_MAX_CONTEXT_ACTIONS  64
 
 /*
  * One I/O pad of an op inside the first network group.
@@ -150,6 +162,33 @@ struct hef_ccw_action {
 };
 
 /*
+ * Per-context action summary (Phase 6.4e). Captures what compute-
+ * phase actions each HEF context contains by walking its
+ * `operations[].actions[]`. The translator uses this to emit the
+ * matching `CONTEXT_SWITCH_DEFS__*` wire actions (EnableLcu,
+ * TriggerSequencer, AllowInputDataflow, …).
+ *
+ * We record just the oneof field number per action (the "kind" —
+ * 2=write_data, 5=enable_sequencer, 8=enable_lcu, 10=allow_input_
+ * dataflow, …; see ProtoHEFAction in hef.proto:602). A future
+ * iteration will also capture per-action parameters; this minimal
+ * version is enough to validate the parser reaches every action
+ * and to dimension the translator's per-context action count.
+ *
+ * `action_type_mask` has bit N set if action kind N was seen in
+ * this context — a quick sanity-check that lets a caller detect
+ * "did this context have any EnableLcu actions?" without scanning
+ * the full list.
+ */
+struct hef_context_actions {
+    uint32_t context_index;
+    uint32_t action_count;
+    uint32_t action_type_mask;
+    uint8_t  action_types[HEF_PARSER_MAX_CONTEXT_ACTIONS];
+    bool     truncated;           /* action_count exceeded MAX_CONTEXT_ACTIONS */
+};
+
+/*
  * Distilled metadata from a parsed `.hef` proto body. Owns no
  * dynamic memory; the string fields are inline buffers truncated
  * to HEF_PARSER_MAX_STR-1 bytes with a trailing NUL. If a field
@@ -194,6 +233,18 @@ struct hef_info {
     bool     ccw_actions_truncated;
     uint64_t ccw_total_bytes;
     struct hef_ccw_action ccw_actions[HEF_PARSER_MAX_CCW_ACTIONS];
+    /*
+     * Per-context compute-action summary (Phase 6.4e). Populated
+     * from contexts[].operations[].actions[] during hef_parse_body.
+     * `context_actions_count` is the number of valid entries in
+     * `context_actions[]`. If the HEF has more contexts than
+     * HEF_PARSER_MAX_CONTEXTS, the excess are counted (via
+     * context_actions_truncated) but not recorded. Each per-context
+     * entry has its own `truncated` flag for action-list overflow.
+     */
+    uint32_t context_actions_count;
+    bool     context_actions_truncated;
+    struct hef_context_actions context_actions[HEF_PARSER_MAX_CONTEXTS];
 };
 
 /*
