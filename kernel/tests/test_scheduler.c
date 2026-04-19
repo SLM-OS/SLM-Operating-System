@@ -287,6 +287,67 @@ static void test_task_slot_skips_freed_by_id(void)
 }
 
 /* ============================================================================
+ * Unit Tests: task_sleep_ms() scheduler-blocking sleep (#319)
+ * ============================================================================ */
+
+/*
+ * task_sleep_ms(0) is a no-op — returns without enqueueing or yielding.
+ * Measuring wall clock is overkill; just confirm it returns promptly.
+ */
+static void test_task_sleep_ms_zero_returns_immediately(void)
+{
+    uint64_t freq = timer_get_frequency();
+    uint64_t start = timer_get_count();
+    task_sleep_ms(0);
+    uint64_t elapsed = timer_get_count() - start;
+
+    /* Should complete in well under a millisecond — no scheduler round-trip. */
+    TEST_ASSERT_LESS_THAN(freq / 1000, elapsed);
+}
+
+/*
+ * task_sleep_ms(N) must sleep at least N ms. Measure CNTPCT delta
+ * across the call and convert to milliseconds.
+ *
+ * Upper bound: on a single-task test harness, the sleep queue wake
+ * happens via the next scheduler_tick from whichever CPU is running
+ * (coop-preempt or real IRQ). Some slop is expected — use a 4x cap
+ * so the test is robust to host scheduling jitter under QEMU.
+ */
+static void test_task_sleep_ms_sleeps_at_least_ms(void)
+{
+    const uint32_t sleep_ms_request = 50;
+
+    uint64_t freq = timer_get_frequency();
+    uint64_t start = timer_get_count();
+    task_sleep_ms(sleep_ms_request);
+    uint64_t elapsed = timer_get_count() - start;
+
+    uint64_t elapsed_ms = (elapsed * 1000) / freq;
+
+    TEST_ASSERT_GREATER_OR_EQUAL(sleep_ms_request, elapsed_ms);
+    TEST_ASSERT_LESS_THAN(sleep_ms_request * 4, elapsed_ms);
+}
+
+/*
+ * After task_sleep_ms returns, the task must be TASK_READY (not
+ * TASK_BLOCKED — task_wake_sleepers set it back) and wake_time_ns
+ * must be cleared so a subsequent sleep works correctly.
+ */
+static void test_task_sleep_ms_clears_wake_state(void)
+{
+    task_sleep_ms(10);
+
+    struct task *self = task_current();
+    TEST_ASSERT_NOT_NULL(self);
+    TEST_ASSERT_EQUAL_UINT64(0, self->wake_time_ns);
+    TEST_ASSERT_NULL(self->sleep_next);
+    /* State is TASK_RUNNING while the task is executing (us). */
+    TEST_ASSERT_TRUE(self->state == TASK_RUNNING ||
+                     self->state == TASK_READY);
+}
+
+/* ============================================================================
  * Unit Tests: Deadline Boost Logic
  * ============================================================================ */
 
@@ -3901,6 +3962,11 @@ int test_suite_scheduler(void)
     RUN_TEST(test_task_slot_in_range_returns_slot);
     RUN_TEST(test_task_slot_finds_created_task);
     RUN_TEST(test_task_slot_skips_freed_by_id);
+
+    /* Unit tests: task_sleep_ms() scheduler-blocking sleep (#319) */
+    RUN_TEST(test_task_sleep_ms_zero_returns_immediately);
+    RUN_TEST(test_task_sleep_ms_sleeps_at_least_ms);
+    RUN_TEST(test_task_sleep_ms_clears_wake_state);
 
     /* Unit tests: Deadline boost logic */
     RUN_TEST(test_no_deadline_no_boost);

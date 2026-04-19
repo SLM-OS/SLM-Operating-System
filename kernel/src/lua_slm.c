@@ -156,20 +156,25 @@ static int l_tasks(lua_State *L) {
 static void lua_msg_drain(lua_State *L);
 
 /**
- * slm.sleep(ms) - Sleep for milliseconds (busy wait)
+ * slm.sleep(ms) - Sleep the calling Lua task for milliseconds (#319)
+ *
+ * Delegates to the scheduler-blocking task_sleep_ms primitive. Unlike
+ * the earlier busy-wait, the task leaves the run queue entirely and
+ * another ready task (or the idle task) runs until our deadline.
+ *
+ * msg_subscribe callbacks are drained immediately before and after
+ * the sleep so any pending subscriber fires. A message published
+ * mid-sleep will fire when sleep() returns (worst-case latency:
+ * `ms`). Scripts that need tighter subscriber responsiveness should
+ * yield more often instead of a single long sleep.
  */
 static int l_sleep(lua_State *L) {
     if (!L) return 0;
     lua_Integer ms = luaL_checkinteger(L, 1);
     if (ms > 0) {
-        /* Busy wait - proper sleep would require scheduler support */
-        uint64_t start = timer_get_count();
-        uint64_t freq = timer_get_frequency();
-        uint64_t ticks = (uint64_t)ms * (freq / 1000);
-        while ((timer_get_count() - start) < ticks) {
-            yield();  /* Let other tasks run while waiting */
-            lua_msg_drain(L);  /* Dispatch msg_subscribe callbacks (#207) */
-        }
+        lua_msg_drain(L);
+        task_sleep_ms((uint32_t)ms);
+        lua_msg_drain(L);
     }
     return 0;
 }

@@ -276,6 +276,41 @@ struct task *task_get(uint32_t id);
 struct task *task_slot(uint32_t idx);
 
 /*
+ * Sleep the current task for the given number of milliseconds (#319).
+ *
+ * Unlike the earlier busy-wait sleep_ms, this blocks the calling task
+ * via TASK_BLOCKED + scheduler yield — the task is removed from the
+ * run queue and another ready task (or the idle task, which can wfi
+ * on CPU 0) runs while it sleeps. The task is woken by the next
+ * scheduler_tick whose CNTPCT ≥ the computed deadline.
+ *
+ * Must be called from task context (NOT from an ISR). The task must
+ * not be holding a spinlock — the scheduler yield invalidates that
+ * invariant.
+ *
+ * ms == 0 returns immediately.
+ */
+void task_sleep_ms(uint32_t ms);
+
+/*
+ * Wake any tasks whose sleep deadline has expired.
+ *
+ * Called from scheduler_tick(). Walks the sleep queue, moves every
+ * task whose CNTPCT deadline is past back to TASK_READY and onto its
+ * assigned CPU's run queue. Safe to call at any time; O(n) in the
+ * number of sleeping tasks.
+ *
+ * Renamed from the no-op stub in drivers/timer.c. Backing
+ * implementation lives in kernel/sched/task_sleep.c (#319).
+ */
+void task_wake_sleepers(void);
+
+/*
+ * Initialize sleep-queue state. Called once from scheduler_init.
+ */
+void task_sleep_init(void);
+
+/*
  * Set task CPU affinity.
  *
  * @task:     Task to modify

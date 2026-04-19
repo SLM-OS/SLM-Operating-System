@@ -632,6 +632,9 @@ void scheduler_init(void)
     extern void task_table_init(void);
     task_table_init();
 
+    /* Initialize sleep queue (#319) */
+    task_sleep_init();
+
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* Allocate diagnostic counters from NC memory for cross-CPU visibility */
     sched_diag_tick = ncmem_alloc(MAX_CPUS * sizeof(uint32_t), 64);
@@ -1973,6 +1976,12 @@ void scheduler_start(uint32_t this_cpu)
 void scheduler_tick(void)
 {
     uint32_t cpu = cpu_id();
+
+    /* Wake any task whose sleep deadline has passed (#319). Cheap walk
+     * of a global list; bounded by MAX_TASKS. Must run before
+     * preempt-disable short-circuit so sleepers still wake while a
+     * context switch is in progress on another CPU. */
+    task_wake_sleepers();
 
     /* Always count ticks (used by sleep_ms, uptime, benchmarks) */
     sched.timer_ticks++;
