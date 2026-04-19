@@ -1211,15 +1211,22 @@ static bool decode_compute_action_inner_cb(pb_istream_t *stream,
     struct ctx_actions_accum *acc = (struct ctx_actions_accum *)*arg;
 
     if (acc->current) {
-        /* Guard the shift: field->tag is bounded by the proto schema at
-         * compile-time today, but a future branch past 31 would invoke
-         * UB on `1u << tag`. Clamp with a mask — tags >= 32 don't get a
-         * bit in the mask but still record in action_types[] so the
-         * translator can see them. */
+        /* Guard two narrowings:
+         *   - `1u << field->tag` is UB for tag >= 32. Clamp the mask
+         *     bit-set to tags < 32.
+         *   - action_types[] is uint8_t. Protobuf allows tags up to
+         *     2^29-1, so writing `(uint8_t)field->tag` for tag > 255
+         *     silently aliases distinct action kinds. Tags that large
+         *     aren't in the current proto schema; if we ever see one
+         *     the HEF is either malformed or from an unknown future
+         *     version — either way, the translator can't dispatch it.
+         *     Record as truncated rather than narrow silently. */
         if (field->tag < 32u) {
             acc->current->action_type_mask |= (1u << field->tag);
         }
-        if (acc->current->action_count < HEF_PARSER_MAX_CONTEXT_ACTIONS) {
+        if (field->tag > 0xFFu) {
+            acc->current->truncated = true;
+        } else if (acc->current->action_count < HEF_PARSER_MAX_CONTEXT_ACTIONS) {
             acc->current->action_types[acc->current->action_count] =
                 (uint8_t)field->tag;
             acc->current->action_count++;

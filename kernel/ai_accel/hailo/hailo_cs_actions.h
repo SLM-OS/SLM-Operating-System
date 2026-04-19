@@ -24,6 +24,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Hailo firmware v4.23 expects wire scalars in native little-endian
+ * (confirmed cross-checking hailort's pack/unpack macros — no
+ * byteswap on the data-plane RPC path). These struct layouts rely on
+ * host endianness matching, so reject a BE-host build loudly rather
+ * than producing silent field corruption on the wire. */
+_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+               "Hailo context-switch wire format assumes LE host");
+
 /* Mirrors CONTEXT_SWITCH_DEFS__ACTION_TYPE_t values from v4.23 firmware.
  * Positions in the enum ARE the wire values — do not reorder. */
 enum hailo_cs_action_type {

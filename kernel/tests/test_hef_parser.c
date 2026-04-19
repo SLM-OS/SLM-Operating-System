@@ -1679,7 +1679,7 @@ static void test_decode_disable_lcu_truncated_body_rejects(void)
     size_t blen = build_ng_with_one_action(blob, sizeof(blob),
                                            /*7=disable_lcu*/ 7, body, body_len);
     struct hef_info info;
-    TEST_ASSERT_NOT_EQUAL(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE, hef_parse_body(blob, blen, &info));
 }
 
 static void test_decode_wait_sequencer_truncated_body_rejects(void)
@@ -1692,7 +1692,7 @@ static void test_decode_wait_sequencer_truncated_body_rejects(void)
     size_t blen = build_ng_with_one_action(blob, sizeof(blob),
                                            /*6=wait_for_seqeuncer*/ 6, body, body_len);
     struct hef_info info;
-    TEST_ASSERT_NOT_EQUAL(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE, hef_parse_body(blob, blen, &info));
 }
 
 static void test_decode_allow_input_dataflow_truncated_body_rejects(void)
@@ -1706,7 +1706,7 @@ static void test_decode_allow_input_dataflow_truncated_body_rejects(void)
     size_t blen = build_ng_with_one_action(blob, sizeof(blob),
                                            /*10=allow_input_dataflow*/ 10, body, body_len);
     struct hef_info info;
-    TEST_ASSERT_NOT_EQUAL(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE, hef_parse_body(blob, blen, &info));
 }
 
 static void test_decode_enable_sequencer_truncated_body_rejects(void)
@@ -1720,7 +1720,7 @@ static void test_decode_enable_sequencer_truncated_body_rejects(void)
     size_t blen = build_ng_with_one_action(blob, sizeof(blob),
                                            /*5=enable_sequencer*/ 5, body, body_len);
     struct hef_info info;
-    TEST_ASSERT_NOT_EQUAL(HEF_PARSER_OK, hef_parse_body(blob, blen, &info));
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_ERR_DECODE, hef_parse_body(blob, blen, &info));
 }
 
 static void test_decode_enable_sequencer_overflow_truncates(void)
@@ -1751,6 +1751,17 @@ static void test_decode_enable_sequencer_overflow_truncates(void)
         info.trigger_sequencer_count);
     TEST_ASSERT_TRUE(info.trigger_sequencer_truncated);
 }
+
+/* Note: the parser's `field->tag > 0xFFu` guard in
+ * decode_compute_action_inner_cb protects action_types[] from a
+ * silent u8 narrowing if a future proto schema ever adds an action
+ * branch at tag > 255. Under the current hef.proto + nanopb-generated
+ * ProtoHEFAction_fields table, tags above the defined oneof branches
+ * (max ~30) are treated as unknown fields and skipped before our
+ * callback fires, so the guard is unreachable via a hand-built blob
+ * without regenerating nanopb against an extended schema. Keeping the
+ * guard + this note rather than a runtime test — the cost is one
+ * comparison, the benefit is defense-in-depth against future growth. */
 
 /* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */

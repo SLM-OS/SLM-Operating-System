@@ -353,17 +353,31 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
      * handler registration. Gated so subsequent RPCs skip the setup. */
     control_post_boot_init();
 
-    /* Clear any stale BCS_ISTATUS_HOST bits before firing the new
-     * doorbell. The MSI-pending flag is cleared AFTER the doorbell
-     * (see below) to close the race described next.
+    /* Clear stale BCS_ISTATUS_HOST bits AND control_msi_pending
+     * BEFORE firing the new doorbell. Ordering matters:
      *
-     * The two paths (ISTATUS polling + MSI handler) race for each
-     * firmware completion; whichever sees it first, the other one
-     * may still run after we've returned. If either leaves state
-     * behind for the NEXT RPC to mistakenly consume, we read a
-     * response before firmware has written it — the 0xFFFFFFFF
-     * buffer_len symptom observed on pi-5-1 when chaining multiple
-     * CORE-CPU context-switch opcodes. */
+     *   1. W1C ISTATUS first, so any deferred IRQ in the GIC that
+     *      hasn't reached the handler yet will, when it does fire,
+     *      read ISTATUS=0 and be a no-op — it cannot re-set
+     *      control_msi_pending.
+     *   2. Then clear control_msi_pending. Any prior RPC's handler
+     *      that already ran between step 1 and this clear would have
+     *      seen ISTATUS=0 and done nothing, so pending=1 here is
+     *      strictly from a handler run BEFORE step 1 — the "stale
+     *      pending from the previous RPC" case we need to clear.
+     *   3. mb() pairs the two stores with everything after.
+     *
+     * Clearing pending AFTER the doorbell is tempting (it narrows
+     * the "stale pending" window) but opens a much worse race: on
+     * a fast firmware response, the MSI handler runs between the
+     * doorbell and the clear, sets pending=1, then we clobber it
+     * back to 0. wait_for_response would then see ISTATUS=0 (the
+     * handler W1C'd it) and pending=0, falling through to a full
+     * timeout_us busy-wait. Firmware response latency is ~µs and
+     * our instruction window between doorbell and clear is ~ns, so
+     * the clobber race is unlikely in practice — but the pre-
+     * doorbell ordering above is race-free under the documented
+     * ISTATUS level-hold semantics and is strictly simpler. */
     uint32_t stale = hailo_platform->read32(HAILO_BAR_CONFIG,
                                             HAILO_BCS_ISTATUS_HOST);
     if (stale != 0) {
@@ -371,6 +385,8 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                 HAILO_BCS_ISTATUS_HOST, stale);
         hailo_platform->mb();
     }
+    __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
+    hailo_platform->mb();
 
     size_t wire_len = build_request_wire(control_req_wire, req_payload, req_len);
 
@@ -391,21 +407,6 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                 : HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK;
     hailo_platform->bar4_write(hailo_fw_addrs_hailo8.raise_ready_offset,
                                &doorbell_val, sizeof(doorbell_val));
-    hailo_platform->mb();
-
-    /* Clear control_msi_pending AFTER the doorbell + mb() has
-     * published the request. If cleared before the doorbell, a
-     * stale MSI arriving in the window between clear and doorbell
-     * would be handled by the ISR (setting pending=1) and
-     * wait_for_response would exit immediately reading the prior
-     * RPC's buffer (→ 0xFFFFFFFF). Clearing post-doorbell means any
-     * MSI observed from this point must be from firmware's response
-     * to THIS RPC. There is still a narrow window between the
-     * doorbell and the clear where firmware's response-MSI could
-     * set pending=1 and then we clear it; wait_for_response falls
-     * through to ISTATUS polling in that case and still completes
-     * cleanly. */
-    __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
     hailo_platform->mb();
 
     /* TODO(#332): wait_for_response is a udelay-polled busy wait.

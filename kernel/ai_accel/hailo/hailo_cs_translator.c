@@ -381,6 +381,17 @@ static int translate_dynamic(const struct hef_info *info,
             b, HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT, NULL, 0);
     }
 
+    /* Multi-context HEFs are not yet supported — we'd silently drop
+     * contexts 1..N if we proceeded. Fail loudly instead so the
+     * missing dispatch is visible rather than producing a
+     * structurally-valid-but-semantically-wrong stream. */
+    if (info->context_actions_count > 1) {
+        WARN("hailo translator: dynamic_contexts_count=%u but only "
+             "ctx0 is currently supported — refusing to translate",
+             info->context_actions_count);
+        return HAILO_ERR_INVAL;
+    }
+
     const struct hef_context_actions *ctx = &info->context_actions[target_ctx];
 
     /* Refuse to translate a context whose action list was truncated
