@@ -24,6 +24,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Hailo firmware v4.23 expects wire scalars in native little-endian
+ * (confirmed cross-checking hailort's pack/unpack macros — no
+ * byteswap on the data-plane RPC path). These struct layouts rely on
+ * host endianness matching, so reject a BE-host build loudly rather
+ * than producing silent field corruption on the wire. */
+_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+               "Hailo context-switch wire format assumes LE host");
+
 /* Mirrors CONTEXT_SWITCH_DEFS__ACTION_TYPE_t values from v4.23 firmware.
  * Positions in the enum ARE the wire values — do not reorder. */
 enum hailo_cs_action_type {
@@ -242,5 +250,146 @@ static inline uint8_t hailo_cs_pack_lcu_id_checked(uint32_t cluster_index,
     }
     return hailo_cs_pack_lcu_id(cluster_index, lcu_index);
 }
+
+/* DISABLE_LCU: turns off an LCU previously enabled with
+ * ENABLE_LCU_*. 1-byte body — just the packed_lcu_id. */
+struct hailo_cs_act_disable_lcu {
+    uint8_t packed_lcu_id;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_disable_lcu) == 1,
+               "disable_lcu body must be 1 byte");
+
+/* SEQUENCER_DONE_INTERRUPT: firmware waits on a sequencer's done
+ * interrupt. 1-byte body — sequencer_index (== cluster_index on
+ * Hailo-8). */
+struct hailo_cs_act_sequencer_interrupt {
+    uint8_t sequencer_index;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_sequencer_interrupt) == 1,
+               "sequencer_interrupt body must be 1 byte");
+
+/* CONTEXT_SWITCH_DEFS__sequencer_config_t. Embedded inside
+ * TRIGGER_SEQUENCER's action body. Captures enough register-image
+ * state for firmware to program the sequencer. Packed to 43 bytes
+ * (1+2+4+4+8+8+8+8).
+ *
+ * ⚠ Hardware verification pending (#180 blocker). The common_action_
+ * header case (memory: hailo_cs_common_header_8_bytes) showed fw
+ * v4.23 reads some packed structs with NATURAL alignment even when
+ * the host spec packs them — a 5-byte packed common_header was
+ * rejected with 0x40130016 (MISALIGNMENT_ERROR). If fw v4.23 reads
+ * sequencer_config with natural alignment it would expect 48 bytes
+ * (1 + 1 pad + 2 + 4 + 4 + 8 + 8 + 8 + 8). Cross-check against a
+ * running firmware trace before wiring TRIGGER_SEQUENCER into the
+ * real load path (#179). The boundary-channel structs below carry
+ * the same risk. */
+struct hailo_cs_sequencer_config {
+    uint8_t  initial_l3_cut;
+    uint16_t initial_l3_offset;
+    uint32_t active_apu;
+    uint32_t active_ia;
+    uint64_t active_sc;
+    uint64_t active_l2;
+    uint64_t l2_offset_0;
+    uint64_t l2_offset_1;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_sequencer_config) == 43,
+               "sequencer_config must be 43 bytes "
+               "(1+2+4+4+8+8+8+8)");
+
+/* TRIGGER_SEQUENCER: kicks a cluster's sequencer. Body is
+ * cluster_index + full sequencer_config (44 bytes total). */
+struct hailo_cs_act_trigger_sequencer {
+    uint8_t                          cluster_index;
+    struct hailo_cs_sequencer_config sequencer_config;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_trigger_sequencer) == 44,
+               "trigger_sequencer body must be 44 bytes");
+
+/* FETCH_DATA_FROM_VDMA_CHANNEL: firmware pulls N frames of data
+ * from the host-side VDMA channel into on-chip buffers. Used for
+ * boundary-input flow. Body layout per hailort's
+ * fetch_data_action_data_t. */
+struct hailo_cs_act_fetch_data_from_vdma {
+    uint8_t  packed_vdma_channel_id;
+    uint8_t  stream_index;
+    uint8_t  network_index;
+    uint32_t frame_periph_size;
+    uint8_t  credit_type;     /* CREDIT_IN_BYTES=1, CREDIT_IN_DESCRIPTORS=2 */
+    uint8_t  host_buffer_type; /* HOST_BUFFER_* enum above */
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_fetch_data_from_vdma) == 9,
+               "fetch_data_from_vdma body must be 9 bytes");
+
+/* -------------------------------------------------------------------------- */
+/* Boundary-channel open/activate actions (ACTIVATION context)                  */
+/* -------------------------------------------------------------------------- */
+
+/* Scaffolding only — declared + static_assert-sized here so the wire
+ * layouts are pinned against CONTEXT_SWITCH_DEFS, but NO translator
+ * emits these bodies yet. Wiring lands with #178 (boundary-channel
+ * mapping + OpenBoundary actions). Do not assume dead code: the
+ * structs are load-bearing contracts the #178 implementation will
+ * populate. */
+
+/* OPEN_BOUNDARY_INPUT_CHANNEL: binds a host→device VDMA channel
+ * for boundary input (the stream a host-produced tensor flows
+ * through). Body carries the packed channel id + host_buffer_info
+ * for the descriptor list + stream geometry.
+ */
+struct hailo_cs_act_open_boundary_input_channel {
+    uint8_t                          packed_vdma_channel_id;
+    struct hailo_cs_host_buffer_info host_buffer_info;
+    uint8_t                          stream_index;
+    uint8_t                          network_index;
+    uint16_t                         periph_bytes_per_buffer;
+    uint32_t                         frame_periph_size;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_open_boundary_input_channel) == 28,
+               "open_boundary_input_channel body must be 28 bytes "
+               "(1 + 19 host_buffer_info + 1 + 1 + 2 + 4)");
+
+/* OPEN_BOUNDARY_OUTPUT_CHANNEL: mirror for device→host. Smaller
+ * body — firmware derives output geometry from CONFIG_STREAM state,
+ * so we only supply the channel id + host_buffer_info. */
+struct hailo_cs_act_open_boundary_output_channel {
+    uint8_t                          packed_vdma_channel_id;
+    struct hailo_cs_host_buffer_info host_buffer_info;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_open_boundary_output_channel) == 20,
+               "open_boundary_output_channel body must be 20 bytes");
+
+/* ACTIVATE_BOUNDARY_INPUT / ACTIVATE_BOUNDARY_OUTPUT: firmware
+ * activates the boundary streams for inference. Input carries
+ * stream_reg_info + host_buffer_info + initial_credit_size;
+ * output is similar plus a network_index. */
+struct hailo_cs_act_activate_boundary_input {
+    uint8_t                          packed_vdma_channel_id;
+    uint8_t                          stream_index;
+    struct hailo_cs_stream_reg_info  stream_reg_info;
+    struct hailo_cs_host_buffer_info host_buffer_info;
+    uint32_t                         initial_credit_size;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_input) == 44,
+               "activate_boundary_input body must be 44 bytes");
+
+struct hailo_cs_act_activate_boundary_output {
+    uint8_t                          packed_vdma_channel_id;
+    uint8_t                          stream_index;
+    uint8_t                          network_index;
+    struct hailo_cs_stream_reg_info  stream_reg_info;
+    struct hailo_cs_host_buffer_info host_buffer_info;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_output) == 41,
+               "activate_boundary_output body must be 41 bytes");
 
 #endif /* AI_ACCEL_HAILO_CS_ACTIONS_H */

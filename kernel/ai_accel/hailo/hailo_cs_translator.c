@@ -27,6 +27,7 @@
 #include "debug.h"
 #include "hailo_cs_builder.h"
 #include "hailo_cs_translator.h"
+#include "hef.pb.h"   /* ProtoHEFAction_*_tag constants */
 
 /* -------------------------------------------------------------------------- */
 /* Application header                                                           */
@@ -218,22 +219,299 @@ static int translate_enable_lcu(const struct hef_enable_lcu_action *a,
         b, HAILO_CS_ACT_ENABLE_LCU_DEFAULT, &body, sizeof(body));
 }
 
+/* DisableLcu → DISABLE_LCU (1-byte packed_lcu_id). */
+static int translate_disable_lcu(const struct hef_disable_lcu_action *a,
+                                 struct hailo_cs_builder *b)
+{
+    bool clamped = false;
+    uint8_t packed = hailo_cs_pack_lcu_id_checked(a->cluster_index,
+                                                  a->lcu_index,
+                                                  &clamped);
+    if (clamped) {
+        WARN("hailo translator: DisableLcu cluster=%u lcu=%u exceeds 4-bit "
+             "range; packed_lcu_id truncated to 0x%02x",
+             a->cluster_index, a->lcu_index, packed);
+    }
+    struct hailo_cs_act_disable_lcu body = { .packed_lcu_id = packed };
+    return hailo_cs_builder_append(b, HAILO_CS_ACT_DISABLE_LCU,
+                                   &body, sizeof(body));
+}
+
+/* WaitForSequencer → SEQUENCER_DONE_INTERRUPT (1-byte body).
+ * On Hailo-8, sequencer_index is the cluster_index verbatim. */
+static int translate_wait_sequencer(const struct hef_wait_sequencer_action *a,
+                                    struct hailo_cs_builder *b)
+{
+    if (a->cluster_index > 0xFFu) {
+        WARN("hailo translator: WaitForSequencer cluster=%u exceeds u8; "
+             "truncating to 0x%02x", a->cluster_index,
+             (unsigned)(a->cluster_index & 0xFFu));
+    }
+    struct hailo_cs_act_sequencer_interrupt body = {
+        .sequencer_index = (uint8_t)a->cluster_index,
+    };
+    return hailo_cs_builder_append(b, HAILO_CS_ACT_SEQUENCER_DONE_INTERRUPT,
+                                   &body, sizeof(body));
+}
+
+/* EnableSequencer → TRIGGER_SEQUENCER (cluster + 43-byte
+ * sequencer_config). The HEF's initial_l3_offset is a u32 that fits
+ * in the wire's u16 for all realistic values; initial_l3_cut is a
+ * u32 narrowed to u8. */
+static int translate_trigger_sequencer(const struct hef_trigger_sequencer_action *a,
+                                       struct hailo_cs_builder *b)
+{
+    struct hailo_cs_act_trigger_sequencer body = {
+        .cluster_index = (uint8_t)a->cluster_index,
+        .sequencer_config = {
+            .initial_l3_cut    = (uint8_t)a->initial_l3_cut,
+            .initial_l3_offset = (uint16_t)a->initial_l3_offset,
+            .active_apu        = a->active_apu_bitmap,
+            .active_ia         = a->active_ia_bitmap,
+            .active_sc         = a->active_sc_bitmap,
+            .active_l2         = a->active_l2_bitmap,
+            .l2_offset_0       = a->l2_offset_0,
+            .l2_offset_1       = a->l2_offset_1,
+        },
+    };
+    if (a->cluster_index      > 0xFFu ||
+        a->initial_l3_cut     > 0xFFu ||
+        a->initial_l3_offset  > 0xFFFFu) {
+        WARN("hailo translator: TriggerSequencer narrows — cluster=%u "
+             "l3_cut=%u l3_offset=%u",
+             a->cluster_index, a->initial_l3_cut, a->initial_l3_offset);
+    }
+    return hailo_cs_builder_append(b, HAILO_CS_ACT_TRIGGER_SEQUENCER,
+                                   &body, sizeof(body));
+}
+
+/* AllowInputDataflow → FETCH_DATA_FROM_VDMA_CHANNEL (9-byte body).
+ * The HEF's sys_index identifies the boundary stream; translator
+ * maps it to the host-chosen VDMA channel via the pad table, then
+ * fills geometry from the matching hef_pad_info. */
+static int translate_allow_input_dataflow(
+    const struct hef_allow_input_dataflow_action *a,
+    const struct hef_info *info,
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b)
+{
+    /* Look up the pad by sys_index to recover frame geometry. A
+     * zero-byte fetch is never legitimate — firmware has no clean
+     * error for `frame_periph_size=0`, so fail fast here and let
+     * the caller surface the missing pad. */
+    uint32_t frame_size = 0;
+    bool pad_found = false;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        if (info->pads[i].sys_index == a->sys_index) {
+            frame_size = info->pads[i].core_bytes_per_buffer;
+            pad_found = true;
+            break;
+        }
+    }
+    if (!pad_found || frame_size == 0) {
+        WARN("hailo translator: AllowInputDataflow sys_index=%u not found "
+             "in pads[] (or zero frame_size)", a->sys_index);
+        return HAILO_ERR_INVAL;
+    }
+
+    /* Input stream uses the translator's boundary-input channel
+     * offset (HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET). The same
+     * constant will be consumed by ACTIVATION's OpenBoundaryInput
+     * emitter when #178 lands, so the two ends agree by
+     * construction rather than by separately-written magic numbers. */
+    uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
+                      + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET;
+    if (raw_vdma > 0xFFu) {
+        WARN("hailo translator: AllowInputDataflow packed_vdma overflows u8 "
+             "(config_vdma=%u)", cfg->config_vdma_channel);
+        return HAILO_ERR_INVAL;
+    }
+    uint8_t packed_vdma = (uint8_t)raw_vdma;
+
+    struct hailo_cs_act_fetch_data_from_vdma body = {
+        .packed_vdma_channel_id = packed_vdma,
+        .stream_index           = 0,
+        .network_index          = 0,
+        .frame_periph_size      = frame_size,
+        .credit_type            = 1,   /* CREDIT_IN_BYTES */
+        .host_buffer_type       = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+    };
+    return hailo_cs_builder_append(b, HAILO_CS_ACT_FETCH_DATA_FROM_VDMA_CHANNEL,
+                                   &body, sizeof(body));
+}
+
+/* -------------------------------------------------------------------------- */
+/* DYNAMIC context — order-preserving dispatch                                 */
+/* -------------------------------------------------------------------------- */
+
+/* HEF order matters: the compiler emits enable/disable/trigger/wait
+ * sequences that firmware executes in the given sequence. The
+ * extracted per-kind arrays preserve intra-kind order but a
+ * straight dump-by-kind would shuffle the inter-kind ordering.
+ *
+ * Instead we walk context_actions[0].action_types[] in emit order
+ * and, for each tag, pull the next entry from the matching extract
+ * array via a per-kind read cursor. Cursors are initialized to 0
+ * and advanced past entries that belong to earlier contexts.
+ *
+ * Today only context 0 is supported (context_actions_count > 1 is
+ * rejected upstream) and the parser stamps every captured action
+ * with context_index == 0 in the single-context path. The
+ * "skip non-target-context entries" while-loops below are therefore
+ * dead code against real HEFs today — they fire only in tests that
+ * hand-populate mixed context_index values. Kept in as defense-in-
+ * depth for when multi-context dispatch lands (tracked alongside
+ * #178/#179): the scaffolding stays correct by construction rather
+ * than needing to be reintroduced later.
+ */
+struct dynamic_cursors {
+    uint32_t enable_lcu;
+    uint32_t disable_lcu;
+    uint32_t trigger_sequencer;
+    uint32_t wait_sequencer;
+    uint32_t allow_input_dataflow;
+};
+
 static int translate_dynamic(const struct hef_info *info,
+                             const struct hailo_cs_translate_cfg *cfg,
                              struct hailo_cs_builder *b)
 {
-    /* Emit captured EnableLcu actions that belong to the (only)
-     * dynamic context we currently support — context_index == 0.
-     * Entries tagged with any other context_index are skipped so
-     * a future multi-dynamic-context HEF (dynamic_contexts_count > 1)
-     * doesn't silently splat context-1+ actions into context 0's
-     * byte stream. Those will need per-context-index dispatch when
-     * multi-context translation lands. */
-    uint32_t scanned = (info->enable_lcu_count > HEF_PARSER_MAX_ENABLE_LCU_ACTIONS)
-                          ? HEF_PARSER_MAX_ENABLE_LCU_ACTIONS
-                          : info->enable_lcu_count;
-    for (uint32_t i = 0; i < scanned; i++) {
-        if (info->enable_lcu_actions[i].context_index != 0) continue;
-        int rc = translate_enable_lcu(&info->enable_lcu_actions[i], b);
+    const uint32_t target_ctx = 0;
+    struct dynamic_cursors cur;
+    memset(&cur, 0, sizeof(cur));
+
+    /* If the HEF captured zero contexts, fall through to the tail-
+     * only path. Otherwise walk context_actions[0].action_types[]. */
+    if (info->context_actions_count == 0) {
+        return hailo_cs_builder_append(
+            b, HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT, NULL, 0);
+    }
+
+    /* Multi-context HEFs are not yet supported — we'd silently drop
+     * contexts 1..N if we proceeded. Fail loudly instead so the
+     * missing dispatch is visible rather than producing a
+     * structurally-valid-but-semantically-wrong stream. */
+    if (info->context_actions_count > 1) {
+        WARN("hailo translator: dynamic_contexts_count=%u but only "
+             "ctx0 is currently supported — refusing to translate",
+             info->context_actions_count);
+        return HAILO_ERR_INVAL;
+    }
+
+    const struct hef_context_actions *ctx = &info->context_actions[target_ctx];
+
+    /* Refuse to translate a context whose action list was truncated
+     * at parse time: action_types[] would be missing entries the
+     * firmware expects to execute. The per-kind arrays are checked
+     * inline below because truncation there shifts the cursor-to-
+     * entry correspondence and silently emits the wrong action at
+     * the wrong stream position. */
+    if (ctx->truncated) {
+        WARN("hailo translator: context[%u].action_types truncated "
+             "(%u > %u) — refusing to translate partial stream",
+             target_ctx, ctx->action_count,
+             (unsigned)HEF_PARSER_MAX_CONTEXT_ACTIONS);
+        return HAILO_ERR_INVAL;
+    }
+    if (info->enable_lcu_truncated || info->disable_lcu_truncated ||
+        info->trigger_sequencer_truncated || info->wait_sequencer_truncated ||
+        info->allow_input_dataflow_truncated) {
+        WARN("hailo translator: per-kind action array truncated — "
+             "refusing to translate (cursor positions would drift)");
+        return HAILO_ERR_INVAL;
+    }
+
+    uint32_t count = ctx->action_count;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t tag = ctx->action_types[i];
+        int rc = HAILO_OK;
+
+        switch (tag) {
+        case ProtoHEFAction_enable_lcu_tag: {
+            /* Advance cursor past non-target-context entries. */
+            while (cur.enable_lcu < info->enable_lcu_count &&
+                   info->enable_lcu_actions[cur.enable_lcu].context_index != target_ctx) {
+                cur.enable_lcu++;
+            }
+            if (cur.enable_lcu >= info->enable_lcu_count) {
+                WARN("hailo translator: action_types[%u]=enable_lcu but "
+                     "per-kind array exhausted", i);
+                return HAILO_ERR_INVAL;
+            }
+            rc = translate_enable_lcu(
+                &info->enable_lcu_actions[cur.enable_lcu++], b);
+            break;
+        }
+        case ProtoHEFAction_disable_lcu_tag: {
+            while (cur.disable_lcu < info->disable_lcu_count &&
+                   info->disable_lcu_actions[cur.disable_lcu].context_index != target_ctx) {
+                cur.disable_lcu++;
+            }
+            if (cur.disable_lcu >= info->disable_lcu_count) {
+                WARN("hailo translator: action_types[%u]=disable_lcu but "
+                     "per-kind array exhausted", i);
+                return HAILO_ERR_INVAL;
+            }
+            rc = translate_disable_lcu(
+                &info->disable_lcu_actions[cur.disable_lcu++], b);
+            break;
+        }
+        case ProtoHEFAction_enable_sequencer_tag: {
+            while (cur.trigger_sequencer < info->trigger_sequencer_count &&
+                   info->trigger_sequencer_actions[cur.trigger_sequencer].context_index != target_ctx) {
+                cur.trigger_sequencer++;
+            }
+            if (cur.trigger_sequencer >= info->trigger_sequencer_count) {
+                WARN("hailo translator: action_types[%u]=enable_sequencer but "
+                     "per-kind array exhausted", i);
+                return HAILO_ERR_INVAL;
+            }
+            rc = translate_trigger_sequencer(
+                &info->trigger_sequencer_actions[cur.trigger_sequencer++], b);
+            break;
+        }
+        case ProtoHEFAction_wait_for_seqeuncer_tag: {
+            while (cur.wait_sequencer < info->wait_sequencer_count &&
+                   info->wait_sequencer_actions[cur.wait_sequencer].context_index != target_ctx) {
+                cur.wait_sequencer++;
+            }
+            if (cur.wait_sequencer >= info->wait_sequencer_count) {
+                WARN("hailo translator: action_types[%u]=wait_for_seqeuncer but "
+                     "per-kind array exhausted", i);
+                return HAILO_ERR_INVAL;
+            }
+            rc = translate_wait_sequencer(
+                &info->wait_sequencer_actions[cur.wait_sequencer++], b);
+            break;
+        }
+        case ProtoHEFAction_allow_input_dataflow_tag: {
+            while (cur.allow_input_dataflow < info->allow_input_dataflow_count &&
+                   info->allow_input_dataflow_actions[cur.allow_input_dataflow].context_index != target_ctx) {
+                cur.allow_input_dataflow++;
+            }
+            if (cur.allow_input_dataflow >= info->allow_input_dataflow_count) {
+                WARN("hailo translator: action_types[%u]=allow_input_dataflow "
+                     "but per-kind array exhausted", i);
+                return HAILO_ERR_INVAL;
+            }
+            rc = translate_allow_input_dataflow(
+                &info->allow_input_dataflow_actions[cur.allow_input_dataflow++],
+                info, cfg, b);
+            break;
+        }
+        default:
+            /* The parser recorded this tag but no translator exists for
+             * it yet. Emitting the stream with this action omitted
+             * would produce a wire-valid but semantically wrong
+             * sequence — firmware would execute N-1 actions without
+             * detecting the gap. Fail loudly so the missing translator
+             * is prioritized. */
+            WARN("hailo translator: unsupported action tag %u at "
+                 "action_types[%u] — stream would be incomplete", tag, i);
+            return HAILO_ERR_INVAL;
+        }
+
         if (rc != HAILO_OK) return rc;
     }
 
@@ -280,7 +558,7 @@ int hailo_cs_translate_contexts(
 
     /* DYNAMIC */
     hailo_cs_builder_init(&b, out->dynamic, sizeof(out->dynamic));
-    rc = translate_dynamic(info, &b);
+    rc = translate_dynamic(info, cfg, &b);
     if (rc != HAILO_OK) return rc;
     out->dynamic_len = hailo_cs_builder_size(&b);
 

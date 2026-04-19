@@ -207,13 +207,84 @@ struct hef_context_actions {
 #define HEF_PARSER_MAX_ENABLE_LCU_ACTIONS  32u
 
 struct hef_enable_lcu_action {
-    uint8_t  context_index;
+    uint32_t context_index;
     uint32_t lcu_index;
     uint32_t cluster_index;
     uint32_t network_index;
     uint32_t lcu_kernel_done_address;
     uint32_t lcu_kernel_done_count;
     uint32_t lcu_enable_address;
+};
+
+/*
+ * ProtoHEFActionDisableLcu (oneof tag 7). Smaller sibling of
+ * EnableLcu: proto carries lcu_index + cluster_index (combined into
+ * packed_lcu_id for the wire) and lcu_enable_address. Wire action
+ * body is a single byte — `disable_lcu_action_data_t.packed_lcu_id`.
+ */
+#define HEF_PARSER_MAX_DISABLE_LCU_ACTIONS  32u
+
+struct hef_disable_lcu_action {
+    uint32_t context_index;
+    uint32_t lcu_index;
+    uint32_t cluster_index;
+    uint32_t lcu_enable_address;
+};
+
+/*
+ * ProtoHEFActionEnableSequencer (oneof tag 5) → firmware's
+ * TRIGGER_SEQUENCER wire action. Carries a cluster_index plus a
+ * 43-byte sequencer_config_t: one u8 (initial_l3_cut), one u16
+ * (initial_l3_offset), two u32 bitmaps (apu, ia), four u64 bitmaps
+ * (sc, l2, l2_offset_0, l2_offset_1). The 43-byte size is pinned by
+ * _Static_assert in hailo_cs_actions.h against the packed struct.
+ *
+ * Proto's initial_l3_info message carries initial_l3_cut +
+ * initial_l3_offset as u32s; we narrow them at translation time.
+ */
+#define HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS  16u
+
+struct hef_trigger_sequencer_action {
+    uint32_t context_index;
+    uint32_t cluster_index;
+    uint32_t initial_l3_cut;
+    uint32_t initial_l3_offset;
+    uint32_t active_apu_bitmap;
+    uint32_t active_ia_bitmap;
+    uint64_t active_sc_bitmap;
+    uint64_t active_l2_bitmap;
+    uint64_t l2_offset_0;
+    uint64_t l2_offset_1;
+};
+
+/*
+ * ProtoHEFActionWaitForSequencer (oneof tag 6) → firmware's
+ * SEQUENCER_DONE_INTERRUPT wire action. Proto carries a single
+ * cluster_index; firmware's action body is a single u8
+ * `sequencer_index` (same value as cluster on Hailo-8).
+ */
+#define HEF_PARSER_MAX_WAIT_SEQUENCER_ACTIONS  16u
+
+struct hef_wait_sequencer_action {
+    uint32_t context_index;
+    uint32_t cluster_index;
+};
+
+/*
+ * ProtoHEFActionAllowInputDataflow (oneof tag 10) → firmware's
+ * FETCH_DATA_FROM_VDMA_CHANNEL wire action. HEF identifies the
+ * boundary stream by `sys_index` (the same sys_index we already
+ * capture in hef_pad_info for edge layers); translator maps that
+ * to the host-chosen VDMA channel id + derives stream_index
+ * (== 0 for single-input/-output MLP) + frame_periph_size from the
+ * pad shape.
+ */
+#define HEF_PARSER_MAX_ALLOW_INPUT_DATAFLOW_ACTIONS  8u
+
+struct hef_allow_input_dataflow_action {
+    uint32_t context_index;
+    uint32_t sys_index;
+    uint32_t connection_type;
 };
 
 /*
@@ -284,6 +355,23 @@ struct hef_info {
     uint32_t enable_lcu_count;
     bool     enable_lcu_truncated;
     struct hef_enable_lcu_action enable_lcu_actions[HEF_PARSER_MAX_ENABLE_LCU_ACTIONS];
+
+    uint32_t disable_lcu_count;
+    bool     disable_lcu_truncated;
+    struct hef_disable_lcu_action disable_lcu_actions[HEF_PARSER_MAX_DISABLE_LCU_ACTIONS];
+
+    uint32_t trigger_sequencer_count;
+    bool     trigger_sequencer_truncated;
+    struct hef_trigger_sequencer_action trigger_sequencer_actions[HEF_PARSER_MAX_TRIGGER_SEQUENCER_ACTIONS];
+
+    uint32_t wait_sequencer_count;
+    bool     wait_sequencer_truncated;
+    struct hef_wait_sequencer_action wait_sequencer_actions[HEF_PARSER_MAX_WAIT_SEQUENCER_ACTIONS];
+
+    uint32_t allow_input_dataflow_count;
+    bool     allow_input_dataflow_truncated;
+    struct hef_allow_input_dataflow_action
+            allow_input_dataflow_actions[HEF_PARSER_MAX_ALLOW_INPUT_DATAFLOW_ACTIONS];
 };
 
 /*

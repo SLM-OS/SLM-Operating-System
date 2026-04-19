@@ -353,18 +353,31 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
      * handler registration. Gated so subsequent RPCs skip the setup. */
     control_post_boot_init();
 
-    /* Clear any stale BCS_ISTATUS_HOST bits AND the MSI-pending flag
-     * before firing the new doorbell. This is a strict pre-doorbell
-     * barrier — any signal observed during wait_for_response after
-     * this point must be firmware's response to THIS RPC.
+    /* Clear stale BCS_ISTATUS_HOST bits AND control_msi_pending
+     * BEFORE firing the new doorbell. Ordering matters:
      *
-     * The two paths (ISTATUS polling + MSI handler) race for each
-     * firmware completion; whichever sees it first, the other one
-     * may still run after we've returned. If either leaves state
-     * behind for the NEXT RPC to mistakenly consume, we read a
-     * response before firmware has written it — the 0xFFFFFFFF
-     * buffer_len symptom observed on pi-5-1 when chaining multiple
-     * CORE-CPU context-switch opcodes. */
+     *   1. W1C ISTATUS first, so any deferred IRQ in the GIC that
+     *      hasn't reached the handler yet will, when it does fire,
+     *      read ISTATUS=0 and be a no-op — it cannot re-set
+     *      control_msi_pending.
+     *   2. Then clear control_msi_pending. Any prior RPC's handler
+     *      that already ran between step 1 and this clear would have
+     *      seen ISTATUS=0 and done nothing, so pending=1 here is
+     *      strictly from a handler run BEFORE step 1 — the "stale
+     *      pending from the previous RPC" case we need to clear.
+     *   3. mb() pairs the two stores with everything after.
+     *
+     * Clearing pending AFTER the doorbell is tempting (it narrows
+     * the "stale pending" window) but opens a much worse race: on
+     * a fast firmware response, the MSI handler runs between the
+     * doorbell and the clear, sets pending=1, then we clobber it
+     * back to 0. wait_for_response would then see ISTATUS=0 (the
+     * handler W1C'd it) and pending=0, falling through to a full
+     * timeout_us busy-wait. Firmware response latency is ~µs and
+     * our instruction window between doorbell and clear is ~ns, so
+     * the clobber race is unlikely in practice — but the pre-
+     * doorbell ordering above is race-free under the documented
+     * ISTATUS level-hold semantics and is strictly simpler. */
     uint32_t stale = hailo_platform->read32(HAILO_BAR_CONFIG,
                                             HAILO_BCS_ISTATUS_HOST);
     if (stale != 0) {
@@ -372,6 +385,10 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                 HAILO_BCS_ISTATUS_HOST, stale);
         hailo_platform->mb();
     }
+    /* __ATOMIC_RELEASE already orders this store before the
+     * subsequent request/doorbell writes; no additional mb() needed.
+     * The mb() after the ISTATUS W1C above is separate — it pairs
+     * the MMIO write with the atomic store that follows. */
     __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
 
     size_t wire_len = build_request_wire(control_req_wire, req_payload, req_len);
@@ -395,12 +412,13 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                &doorbell_val, sizeof(doorbell_val));
     hailo_platform->mb();
 
-    /* TODO: wait_for_response is a udelay-polled busy wait. For
-     * #281 tier-1 (shell-driven IDENTIFY) this is fine — the lone
-     * caller on CPU 0 just waits. For Phase 5.3+ inference submit,
-     * this should either yield() between polls or route through
-     * the future MSI path so CPU 0 isn't burned for up to a full
-     * timeout_us. */
+    /* TODO(#332): wait_for_response is a udelay-polled busy wait.
+     * For #281 tier-1 (shell-driven IDENTIFY) this is fine — the
+     * lone caller on CPU 0 just waits. For Phase 5.3+ inference
+     * submit, this should either yield() between polls or route
+     * through the future MSI path so CPU 0 isn't burned for up to
+     * a full timeout_us. Picked up during Phase 7 — surface via
+     * `gh issue list --label sub:ai-runtime`. */
     int rc = wait_for_response(timeout_us);
     if (rc != HAILO_OK) goto out;
 
