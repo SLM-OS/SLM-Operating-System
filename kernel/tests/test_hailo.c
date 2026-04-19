@@ -21,8 +21,15 @@
 #include "../ai_accel/hailo/hailo_tensor.h"
 #include "../ai_accel/hailo/hailo_vdma.h"
 #include "../ai_accel/hailo/hef_parser.h"
+#include "../ai_accel/hailo/hef_header.h"
+#include "../include/inference_device.h"
 #include "../include/md5.h"
 #include "../include/uart.h"
+
+/* Backend registration + test hooks from kernel/inference/inference_device_hailo.c. */
+extern int inference_device_hailo_register(void);
+extern uint32_t hailo_backend_in_use_slots(void);
+extern void hailo_backend_reset_slots_for_tests(void);
 #include "test_harness.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -3441,6 +3448,423 @@ static void test_control_config_stream_propagates_fw_error(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 6.2a: inference_device Hailo backend                                  */
+/* -------------------------------------------------------------------------- */
+
+/* Little-endian varint emitter (proto wire format). Returns bytes written. */
+static size_t emit_varint(uint8_t *buf, uint64_t v)
+{
+    size_t n = 0;
+    while (v >= 0x80) {
+        buf[n++] = (uint8_t)(v | 0x80);
+        v >>= 7;
+    }
+    buf[n++] = (uint8_t)v;
+    return n;
+}
+
+static void emit_tag(uint8_t *buf, size_t *off, uint32_t field, uint32_t wire_type)
+{
+    *off += emit_varint(buf + *off, ((uint64_t)field << 3) | wire_type);
+}
+
+static void emit_varint_field(uint8_t *buf, size_t *off, uint32_t field, uint64_t v)
+{
+    emit_tag(buf, off, field, 0);            /* wire type 0 = varint */
+    *off += emit_varint(buf + *off, v);
+}
+
+static void emit_lenprefix(uint8_t *buf, size_t *off, uint32_t field,
+                           const uint8_t *payload, size_t payload_len)
+{
+    emit_tag(buf, off, field, 2);            /* wire type 2 = length-delimited */
+    *off += emit_varint(buf + *off, payload_len);
+    memcpy(buf + *off, payload, payload_len);
+    *off += payload_len;
+}
+
+/* Build a minimal TensorShape sub-message: h/w/f + padded_h/w/f. */
+static size_t emit_tensor_shape(uint8_t *buf, uint32_t h, uint32_t w, uint32_t f,
+                                uint32_t ph, uint32_t pw, uint32_t pf)
+{
+    size_t off = 0;
+    emit_varint_field(buf, &off, 1, h);
+    emit_varint_field(buf, &off, 2, w);
+    emit_varint_field(buf, &off, 3, f);
+    emit_varint_field(buf, &off, 4, ph);
+    emit_varint_field(buf, &off, 5, pw);
+    emit_varint_field(buf, &off, 6, pf);
+    return off;
+}
+
+/* Pad = {index (f1), name (f2), tensor_shape (f6)}. */
+static size_t emit_pad_with_shape(uint8_t *buf, uint32_t index, const char *name,
+                                  uint32_t h, uint32_t w, uint32_t f,
+                                  uint32_t ph, uint32_t pw, uint32_t pf)
+{
+    size_t off = 0;
+    emit_varint_field(buf, &off, 1, index);
+    emit_lenprefix(buf, &off, 2, (const uint8_t *)name, strlen(name));
+    uint8_t shape_buf[32];
+    size_t  shape_len = emit_tensor_shape(shape_buf, h, w, f, ph, pw, pf);
+    emit_lenprefix(buf, &off, 6, shape_buf, shape_len);
+    return off;
+}
+
+/* Build a full ProtoHEFHef body containing one network group with one
+ * op holding `num_in` input pads + `num_out` output pads. Each pad has
+ * the same tensor shape; change `in_h`/`out_h` to differentiate. */
+static size_t build_minimal_proto(uint8_t *out, size_t cap,
+                                  uint32_t num_in, uint32_t num_out,
+                                  uint32_t in_h, uint32_t in_w, uint32_t in_f,
+                                  uint32_t out_h, uint32_t out_w, uint32_t out_f)
+{
+    (void)cap;
+    /* Op: name + input_pads[] + output_pads[]. */
+    uint8_t op_buf[2048];
+    size_t  op_len = 0;
+    emit_lenprefix(op_buf, &op_len, 1, (const uint8_t *)"op", 2);
+    for (uint32_t i = 0; i < num_in; i++) {
+        uint8_t pad_buf[64];
+        size_t  pad_len = emit_pad_with_shape(pad_buf, i, "in",
+                                              in_h, in_w, in_f,
+                                              in_h, in_w, in_f);
+        emit_lenprefix(op_buf, &op_len, 2, pad_buf, pad_len);
+    }
+    for (uint32_t i = 0; i < num_out; i++) {
+        uint8_t pad_buf[64];
+        size_t  pad_len = emit_pad_with_shape(pad_buf, 100 + i, "out",
+                                              out_h, out_w, out_f,
+                                              out_h, out_w, out_f);
+        emit_lenprefix(op_buf, &op_len, 3, pad_buf, pad_len);
+    }
+
+    /* NG: name + ops[]. */
+    uint8_t ng_buf[4096];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 10, (const uint8_t *)"ng", 2);
+    emit_lenprefix(ng_buf, &ng_len, 8, op_buf, op_len);
+
+    /* Root: one network_groups entry. */
+    size_t olen = 0;
+    emit_lenprefix(out, &olen, 2, ng_buf, ng_len);
+    return olen;
+}
+
+/* Wrap a proto body in a valid v0 HEF header and return total blob size.
+ * Assumes buf is at least 32 + proto_len bytes. */
+static size_t wrap_hef_v0(uint8_t *buf, size_t cap,
+                          const uint8_t *proto, size_t proto_len)
+{
+    if (cap < 32 + proto_len) return 0;
+    /* HEF_MAGIC = 0x01484546, stored big-endian as 01 48 45 46. */
+    buf[0] = 0x01; buf[1] = 0x48; buf[2] = 0x45; buf[3] = 0x46;
+    /* Version V0 = 0. */
+    buf[4] = 0; buf[5] = 0; buf[6] = 0; buf[7] = 0;
+    /* proto_size as big-endian u32. */
+    buf[8]  = (uint8_t)(proto_len >> 24);
+    buf[9]  = (uint8_t)(proto_len >> 16);
+    buf[10] = (uint8_t)(proto_len >>  8);
+    buf[11] = (uint8_t)(proto_len      );
+    /* Reserved (4) + MD5 (16) zero. */
+    memset(buf + 12, 0, 20);
+    memcpy(buf + 32, proto, proto_len);
+    return 32 + proto_len;
+}
+
+/* Helper: build a full valid minimal HEF (header + 1-in/1-out proto).
+ * Returns total size; caller's buf must be >= 256 bytes. */
+static size_t build_test_hef(uint8_t *buf, size_t cap)
+{
+    uint8_t proto[512];
+    size_t  plen = build_minimal_proto(proto, sizeof(proto),
+                                        /*in*/1, /*out*/1,
+                                        /*in_h,w,f*/1, 1, 128,
+                                        /*out_h,w,f*/1, 1, 32);
+    return wrap_hef_v0(buf, cap, proto, plen);
+}
+
+/* Lookup the Hailo backend, (re-)register it, reset slots, and make
+ * sure the firmware is in the RUNNING state. Most tests need all three. */
+static struct inference_device *hailo_backend_ready(void)
+{
+    control_setup_running();
+    (void)inference_device_hailo_register();   /* idempotent for test purposes */
+    hailo_backend_reset_slots_for_tests();
+    return inference_device_find("hailo-8");
+}
+
+static void test_inf_hailo_register_succeeds(void)
+{
+    control_setup_running();
+    int rc = inference_device_hailo_register();
+    /* The first register returns OK; subsequent runs may return
+     * INF_ERR_FULL or similar — both acceptable. Find is the real
+     * check. */
+    (void)rc;
+    struct inference_device *dev = inference_device_find("hailo-8");
+    TEST_ASSERT_NOT_NULL(dev);
+    TEST_ASSERT_EQUAL_STRING("hailo-8", dev->ops->name);
+    TEST_ASSERT_TRUE(dev->ops->caps & INF_CAP_INT8);
+    TEST_ASSERT_TRUE(dev->ops->caps & INF_CAP_LOAD_MODEL);
+}
+
+static void test_inf_hailo_load_rejects_null(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_load_model(dev, NULL, 0, &h));
+    uint8_t blob[16] = {0};
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_load_model(dev, blob, 0, &h));
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_load_model(dev, blob, sizeof(blob), NULL));
+}
+
+static void test_inf_hailo_load_rejects_when_not_running(void)
+{
+    /* Force device back to PROBED (firmware not booted). */
+    boot_setup_probed();
+    (void)inference_device_hailo_register();
+    hailo_backend_reset_slots_for_tests();
+    struct inference_device *dev = inference_device_find("hailo-8");
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[256];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_NODEV,
+        inference_load_model(dev, blob, n, &h));
+}
+
+static void test_inf_hailo_load_rejects_bad_header(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    /* Random 64 bytes with no valid HEF magic. */
+    uint8_t blob[64];
+    memset(blob, 0xAB, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_MODEL,
+        inference_load_model(dev, blob, sizeof(blob), &h));
+}
+
+static void test_inf_hailo_load_rejects_zero_pads(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    /* Build a HEF whose proto body has no network_groups at all →
+     * the backend can't find input/output pads → rejection. */
+    uint8_t blob[128];
+    size_t n = wrap_hef_v0(blob, sizeof(blob), (const uint8_t *)"", 0);
+    TEST_ASSERT_TRUE(n != 0);
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_MODEL,
+        inference_load_model(dev, blob, n, &h));
+}
+
+static void test_inf_hailo_load_happy_path(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK,
+        inference_load_model(dev, blob, n, &h));
+    TEST_ASSERT_TRUE(h >= 1);
+    TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
+}
+
+static void test_inf_hailo_load_fills_slots_until_full(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t handles[4];
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_INT(INF_OK,
+            inference_load_model(dev, blob, n, &handles[i]));
+    }
+    TEST_ASSERT_EQUAL_UINT32(4, hailo_backend_in_use_slots());
+    /* Fifth load must fail — slot table saturated. */
+    inference_model_handle_t overflow;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_FULL,
+        inference_load_model(dev, blob, n, &overflow));
+}
+
+static void test_inf_hailo_run_rejects_bad_handle(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t in_buf[128], out_buf[32];
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 128, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {128, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 32, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {32, 0, 0, 0},
+    };
+    /* h=0 reserved for BUILTIN (not a Hailo handle). */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_run(dev, INF_BUILTIN_HANDLE, &in, &out));
+    /* h > HAILO_MAX_MODELS out of range. */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_run(dev, 99, &in, &out));
+}
+
+static void test_inf_hailo_run_rejects_wrong_dtype(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    uint8_t in_buf[128], out_buf[32];
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 128, .dtype = INF_DTYPE_FP32, /* wrong */
+        .rank = 1, .shape = {128, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 32, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {32, 0, 0, 0},
+    };
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_TENSOR,
+        inference_run(dev, h, &in, &out));
+}
+
+static void test_inf_hailo_run_rejects_size_mismatch(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    uint8_t in_buf[64], out_buf[32];
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 64, /* expected 128 */ .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {64, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 32, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {32, 0, 0, 0},
+    };
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_TENSOR,
+        inference_run(dev, h, &in, &out));
+}
+
+static void test_inf_hailo_run_happy_path_via_auto_advance(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    /* hailo_infer_run polls VDMA num_proc; mock_vdma_auto_advance = true
+     * makes every num_avail write echo into num_proc so the poll
+     * converges on the first iteration. */
+    mock_vdma_auto_advance = true;
+
+    uint8_t in_buf[128], out_buf[32];
+    memset(in_buf, 0x7F, sizeof(in_buf));
+    memset(out_buf, 0x00, sizeof(out_buf));
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 128, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {128, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 32, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {32, 0, 0, 0},
+    };
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_run(dev, h, &in, &out));
+}
+
+static void test_inf_hailo_free_releases_slot(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+    TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
+
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_free_model(dev, h));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+
+    /* Double-free is an error. */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL, inference_free_model(dev, h));
+    /* Reserved handle is always an error. */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_free_model(dev, INF_BUILTIN_HANDLE));
+}
+
+#ifdef CONFIG_AI_SCHEDULER
+#include "../sched/ai/ai_policy_hailo.h"
+#include "../sched/ai/ai_types.h"
+
+static void test_ai_policy_hailo_set_and_get_handle(void)
+{
+    /* set_model_placeholder installs a handle; get_model_handle returns it. */
+    ai_policy_hailo_set_model_placeholder((inference_model_handle_t)3,
+                                           AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(3, (int)ai_policy_hailo_get_model_handle());
+}
+
+static void test_ai_policy_hailo_clear_detaches_model(void)
+{
+    /* Arm, then detach — get_model_handle must report INVALID. */
+    ai_policy_hailo_set_model_placeholder((inference_model_handle_t)2,
+                                           AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(2, (int)ai_policy_hailo_get_model_handle());
+
+    ai_policy_hailo_set_model_placeholder(INF_INVALID_HANDLE, 0, 0);
+    TEST_ASSERT_EQUAL_INT((int)INF_INVALID_HANDLE,
+                          (int)ai_policy_hailo_get_model_handle());
+}
+#endif
+
+static void test_inf_hailo_shutdown_clears_slots(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h1, h2;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h1));
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h2));
+    TEST_ASSERT_EQUAL_UINT32(2, hailo_backend_in_use_slots());
+
+    /* Shutdown is idempotent and clears all slots. */
+    if (dev->ops->shutdown) dev->ops->shutdown(dev);
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -3616,6 +4040,25 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_config_stream_output_variant);
     RUN_TEST(test_control_config_stream_timeout_no_response);
     RUN_TEST(test_control_config_stream_propagates_fw_error);
+
+    /* Phase 6.2a: inference_device Hailo backend */
+#ifdef CONFIG_AI_SCHEDULER
+    RUN_TEST(test_ai_policy_hailo_set_and_get_handle);
+    RUN_TEST(test_ai_policy_hailo_clear_detaches_model);
+#endif
+    RUN_TEST(test_inf_hailo_register_succeeds);
+    RUN_TEST(test_inf_hailo_load_rejects_null);
+    RUN_TEST(test_inf_hailo_load_rejects_when_not_running);
+    RUN_TEST(test_inf_hailo_load_rejects_bad_header);
+    RUN_TEST(test_inf_hailo_load_rejects_zero_pads);
+    RUN_TEST(test_inf_hailo_load_happy_path);
+    RUN_TEST(test_inf_hailo_load_fills_slots_until_full);
+    RUN_TEST(test_inf_hailo_run_rejects_bad_handle);
+    RUN_TEST(test_inf_hailo_run_rejects_wrong_dtype);
+    RUN_TEST(test_inf_hailo_run_rejects_size_mismatch);
+    RUN_TEST(test_inf_hailo_run_happy_path_via_auto_advance);
+    RUN_TEST(test_inf_hailo_free_releases_slot);
+    RUN_TEST(test_inf_hailo_shutdown_clears_slots);
 
     return UnityEnd();
 }

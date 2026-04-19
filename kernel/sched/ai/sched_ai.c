@@ -300,6 +300,210 @@ const struct sched_policy_ops sched_policy_ai_ppo = {
 };
 
 /* ============================================================================
+ * Hailo MLP policy (Phase 6.2)
+ *
+ * Mirrors the CPU MLP policy but routes inference through the
+ * "hailo-8" inference_device backend. Three additional mechanics:
+ *
+ *   1. Model loading is caller-driven. The shell's `hailo load` path
+ *      calls ai_policy_hailo_set_model() with the handle returned by
+ *      inference_load_model() plus the HEF-derived quantization
+ *      parameters (scale + zero-point for both input and output
+ *      tensors). Before a model is set, assign_cpu falls back to the
+ *      heuristic policy — the device is registered but has nothing
+ *      to run.
+ *
+ *   2. State vector (fp32) → INT8 input tensor. Uses per-element
+ *      scale/zero-point quantization, the same math DFC emitted at
+ *      compile time. Quantization formula:
+ *          int8 = clamp(round(fp32 / scale + zero_point), -128, 127)
+ *
+ *   3. INT8 logits → action index. argmax on signed INT8 is invariant
+ *      under monotonic dequantization (y = scale*(x - zp)), so we
+ *      argmax the raw INT8 values and skip the dequant step entirely.
+ *
+ * Phase 6.2a (this commit) registers the policy with placeholder
+ * quantization defaults (scale=1/128, zp=0) applied when the shell
+ * hasn't supplied real params yet. Phase 6.2b extracts real scale/zp
+ * from the HEF's quant tensor fields; once that lands, the defaults
+ * are only used in tests.
+ * ============================================================================ */
+
+static struct ai_policy_stats ai_hailo_stats;
+
+struct ai_hailo_model {
+    bool     loaded;
+    inference_model_handle_t handle;
+    float    input_scale;    /* dequant: fp32 = (int8 - zp) * scale */
+    int8_t   input_zp;
+    float    output_scale;
+    int8_t   output_zp;
+    uint32_t input_n;        /* AI_STATE_DIM bytes (one byte per element post-quant) */
+    uint32_t output_n;       /* AI_SCHED_N_ACTIONS */
+};
+
+static struct ai_hailo_model ai_hailo_model;
+static struct inference_device *cached_hailo_dev;
+
+/*
+ * Public setter called from the shell's `hailo load` path (and from
+ * tests) once a HEF has been parsed + loaded into the device. Passing
+ * handle=INF_INVALID_HANDLE clears the current model; the policy then
+ * falls back to heuristic on subsequent assign_cpu calls.
+ */
+void ai_policy_hailo_set_model(inference_model_handle_t handle,
+                               float input_scale,  int8_t input_zp,
+                               float output_scale, int8_t output_zp,
+                               uint32_t input_n, uint32_t output_n)
+{
+    if (handle == INF_INVALID_HANDLE) {
+        ai_hailo_model.loaded = false;
+        return;
+    }
+    ai_hailo_model.handle       = handle;
+    ai_hailo_model.input_scale  = (input_scale  > 0.0f) ? input_scale  : (1.0f / 128.0f);
+    ai_hailo_model.input_zp     = input_zp;
+    ai_hailo_model.output_scale = (output_scale > 0.0f) ? output_scale : (1.0f / 128.0f);
+    ai_hailo_model.output_zp    = output_zp;
+    ai_hailo_model.input_n      = input_n  ? input_n  : AI_STATE_DIM;
+    ai_hailo_model.output_n     = output_n ? output_n : (uint32_t)AI_SCHED_N_ACTIONS;
+    ai_hailo_model.loaded       = true;
+}
+
+inference_model_handle_t ai_policy_hailo_get_model_handle(void)
+{
+    return ai_hailo_model.loaded ? ai_hailo_model.handle : INF_INVALID_HANDLE;
+}
+
+/* Integer-only entry point — see header for rationale. */
+void ai_policy_hailo_set_model_placeholder(inference_model_handle_t handle,
+                                           uint32_t input_n,
+                                           uint32_t output_n)
+{
+    ai_policy_hailo_set_model(handle, 1.0f/128.0f, 0, 1.0f/128.0f, 0,
+                              input_n, output_n);
+}
+
+static int ai_hailo_init(void)
+{
+    ai_hailo_stats.decisions = 0;
+    ai_hailo_stats.fallbacks = 0;
+    ai_hailo_stats.total_latency_ns = 0;
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+        ai_hailo_stats.action_hist[i] = 0;
+
+    cached_hailo_dev = inference_device_find("hailo-8");
+
+    /* Two degraded paths, both non-fatal so the policy switch still
+     * succeeds and the user can load a model or move to a different
+     * build target without a policy churn: every assign_cpu call
+     * gracefully falls back to the heuristic (round-robin) scheduler
+     * until Hailo is ready. */
+    if (!cached_hailo_dev) {
+        WARN("AI Hailo: 'hailo-8' device not present on this build "
+             "(QEMU / x86 have no NPU). Scheduling decisions will "
+             "fall back to the heuristic policy. Use `sched policy "
+             "ai_mlp` for CPU-based AI inference instead.");
+    } else if (!ai_hailo_model.loaded) {
+        WARN("AI Hailo: policy activated but no model is loaded. "
+             "Scheduling decisions will fall back to the heuristic "
+             "until `hailo load <path> sched` supplies a .hef.");
+    } else {
+        INFO("AI Hailo: policy initialized (model handle=%d already armed)",
+             (int)ai_hailo_model.handle);
+    }
+    return 0;
+}
+
+static void ai_hailo_shutdown(void)
+{
+    if (ai_hailo_stats.decisions > 0) {
+        uint64_t avg_ns = ai_hailo_stats.total_latency_ns / ai_hailo_stats.decisions;
+        INFO("AI Hailo: %u decisions, %u fallbacks, avg latency %lu ns",
+             ai_hailo_stats.decisions, ai_hailo_stats.fallbacks,
+             (unsigned long)avg_ns);
+    }
+    /* Don't free the model here — the shell owns the handle and may
+     * switch back to Hailo later without reloading. */
+}
+
+/* Quantize an fp32 state vector to INT8 using per-tensor scale+zp.
+ * clamp(round(x/scale + zp), -128, 127). */
+static void quantize_fp32_to_int8(const float *src, int8_t *dst, uint32_t n,
+                                   float scale, int8_t zp)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        float q = src[i] / scale + (float)zp;
+        /* Round to nearest, ties away from zero. */
+        int32_t qi = (int32_t)(q + (q >= 0.0f ? 0.5f : -0.5f));
+        if (qi < -128) qi = -128;
+        if (qi >  127) qi =  127;
+        dst[i] = (int8_t)qi;
+    }
+}
+
+static int ai_schedule_mlp_via_hailo(const float *state,
+                                     struct ai_sched_action *action)
+{
+    if (!ai_hailo_model.loaded || !cached_hailo_dev) {
+        /* No model yet — return failure; ai_assign_cpu_common will
+         * fall back to heuristic and bump the fallbacks counter. */
+        return -1;
+    }
+
+    /* Stack buffers: 108 bytes in, 42 bytes out. No heap touch. */
+    int8_t in_int8[AI_STATE_DIM];
+    int8_t out_int8[AI_SCHED_N_ACTIONS];
+
+    quantize_fp32_to_int8(state, in_int8, AI_STATE_DIM,
+                          ai_hailo_model.input_scale,
+                          ai_hailo_model.input_zp);
+
+    inference_tensor_t in = {
+        .data    = in_int8,
+        .n_elems = ai_hailo_model.input_n,
+        .dtype   = INF_DTYPE_INT8,
+        .rank    = 1,
+        .shape   = { (uint16_t)ai_hailo_model.input_n, 0, 0, 0 },
+    };
+    inference_tensor_t out = {
+        .data    = out_int8,
+        .n_elems = ai_hailo_model.output_n,
+        .dtype   = INF_DTYPE_INT8,
+        .rank    = 1,
+        .shape   = { (uint16_t)ai_hailo_model.output_n, 0, 0, 0 },
+    };
+
+    int rc = inference_run(cached_hailo_dev, ai_hailo_model.handle, &in, &out);
+    if (rc != INF_OK) return -1;
+
+    /* argmax INT8 — monotonic under dequant, so no need to float-ify. */
+    uint32_t n = ai_hailo_model.output_n;
+    if (n > (uint32_t)AI_SCHED_N_ACTIONS) n = AI_SCHED_N_ACTIONS;
+    int best = 0;
+    int8_t best_val = out_int8[0];
+    for (uint32_t i = 1; i < n; i++) {
+        if (out_int8[i] > best_val) { best_val = out_int8[i]; best = (int)i; }
+    }
+    ai_decode_action(best, action);
+    return 0;
+}
+
+static uint32_t ai_hailo_assign_cpu(struct task *task)
+{
+    return ai_assign_cpu_common(task, ai_schedule_mlp_via_hailo,
+                                &ai_hailo_stats);
+}
+
+const struct sched_policy_ops sched_policy_ai_hailo = {
+    .name       = "ai_hailo",
+    .init       = ai_hailo_init,
+    .shutdown   = ai_hailo_shutdown,
+    .assign_cpu = ai_hailo_assign_cpu,
+    .tick       = NULL,
+};
+
+/* ============================================================================
  * Statistics Access
  * ============================================================================ */
 
@@ -309,10 +513,13 @@ void sched_ai_get_stats(const char *policy_name,
                         const uint32_t **action_hist, int *n_actions)
 {
     struct ai_policy_stats *stats = NULL;
+    /* policy_name[3] disambiguates among "ai_mlp", "ai_ppo", "ai_hailo" */
     if (policy_name[0] == 'a' && policy_name[3] == 'm')
         stats = &ai_mlp_stats;
     else if (policy_name[0] == 'a' && policy_name[3] == 'p')
         stats = &ai_ppo_stats;
+    else if (policy_name[0] == 'a' && policy_name[3] == 'h')
+        stats = &ai_hailo_stats;
 
     if (!stats) {
         *decisions = 0;
@@ -339,4 +546,7 @@ void sched_ai_init(void)
 {
     sched_register_policy(&sched_policy_ai_mlp);
     sched_register_policy(&sched_policy_ai_ppo);
+#ifndef PLATFORM_X86_64
+    sched_register_policy(&sched_policy_ai_hailo);
+#endif
 }

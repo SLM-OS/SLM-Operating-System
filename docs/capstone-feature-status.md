@@ -169,7 +169,7 @@ from a prior driver (bare-metal x86-64 / UEFI-direct Jetson).
 | Engine reset + PIO upload | N/A | N/A | Working on GSP Falcon | Working on GSP + SEC2 |
 | Signed ucode authentication | N/A | N/A | Blocked: GSP priv-lockdown | FWSEC-FRTS 3/3; Booter Load blocked |
 | Inference backend | CPU (NEON) | CPU (NEON), **Hailo-8 NPU Phase 5.3 + 5.4 software-complete; firmware boot + IDENTIFY / WRITE_MEMORY / READ_MEMORY / CONFIG_STREAM RPCs verified; `hailo infer` pipeline runs (awaits compiled `.hef` + CONFIG_STREAM context for end-to-end)** (AI HAT+ via pcie1) | CPU (NEON) | CPU (SSE inline-asm) |
-| AI scheduler MLP | CPU | CPU (routed through `inference_device` abstraction); **Phase 6.1 compile pipeline complete — scheduler MLP builds to `.hef` for Hailo-8/8L via DFC 3.33.1** | CPU | CPU |
+| AI scheduler MLP | CPU | CPU (routed through `inference_device` abstraction); **Phase 6.1 + 6.2 complete — scheduler MLP builds to `.hef` via DFC 3.33.1; `ai_policy_hailo` selectable at runtime via `sched policy ai_hailo`; `hailo load <path> sched` arms the policy with a loaded model** | CPU | CPU |
 
 ### GPU Bringup Stack (Portable)
 

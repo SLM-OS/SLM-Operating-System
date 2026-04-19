@@ -399,6 +399,7 @@ set(KERNEL_SOURCES
     # Inference-device abstraction (dispatcher always compiled;
     # CPU-MLP backend added under the ai_sched library when AI_SCHED=ON)
     kernel/inference/inference_device.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/inference/inference_device_hailo.c>
 
     # Hailo NPU driver (platform-independent core + shell cmd always
     # compiled on ARM64; Pi 5 platform shim only on RASPI5; stub

@@ -9,6 +9,11 @@
  *                            pad shapes, and CCW summary. If `upload B`
  *                            is given, also issue the CCW upload via
  *                            WRITE_MEMORY against device base addr B.
+ *   hailo load P sched     — load `.hef` into the "hailo-8" inference
+ *                            device and arm ai_policy_hailo with the
+ *                            resulting handle. (Mutually exclusive
+ *                            with `upload B` for now — extend if both
+ *                            are ever needed together.)
  *   hailo fw               — report firmware version (post-boot only).
  *   hailo peek A [N]       — READ_MEMORY N bytes (default 16, max 64) at
  *                            device-side address A; hex-dump.
@@ -35,6 +40,11 @@
 #include "shell.h"
 #include "uart.h"
 #include "vfs.h"
+#ifdef CONFIG_AI_SCHEDULER
+#include "inference_device.h"
+#include "ai_policy_hailo.h"
+#include "ai_types.h"
+#endif
 #include <stdint.h>
 #include <string.h>
 
@@ -170,9 +180,17 @@ static int cmd_hailo(int argc, char *argv[])
          * device-side starting address for the first action. Each
          * subsequent action is appended at base + cumulative bytes.
          * Without a real CONFIG_STREAM response feeding the right
-         * base, callers pick one manually for bring-up. */
+         * base, callers pick one manually for bring-up.
+         *
+         * Optional: `hailo load <path> sched` loads the HEF into the
+         * "hailo-8" inference_device backend and installs the handle
+         * into ai_policy_hailo so scheduler decisions can route
+         * through the NPU. Placeholder quantization parameters
+         * (scale=1/128, zp=0) are used until HEF quant-metadata
+         * extraction lands. */
         bool     do_upload = false;
         uint32_t upload_base = 0;
+        bool     do_sched = false;
         if (argc >= 5 && strcmp(argv[3], "upload") == 0) {
             if (parse_hex_u32(argv[4], &upload_base) != 0) {
                 shell_printf("hailo: load upload: bad hex base '%s'\n",
@@ -180,6 +198,8 @@ static int cmd_hailo(int argc, char *argv[])
                 return 0;
             }
             do_upload = true;
+        } else if (argc >= 4 && strcmp(argv[3], "sched") == 0) {
+            do_sched = true;
         }
 
         struct vfs_entry_info info = {0};
@@ -320,6 +340,57 @@ static int cmd_hailo(int argc, char *argv[])
                 shell_printf("  ccw: upload failed (%d)\n", urc);
             }
         }
+
+#ifdef CONFIG_AI_SCHEDULER
+        if (do_sched) {
+            /* Hand the full HEF blob (header + proto) to the Hailo
+             * inference_device backend for load_model. Allocate a
+             * contiguous buffer sized to the whole file, populate
+             * header + body (body is already resident), and release
+             * it immediately after load_model returns — the backend
+             * does not keep a pointer. */
+            size_t total = (size_t)outer.proto_offset + outer.proto_size;
+            size_t full_pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+            uint8_t *full = pmm_alloc_pages(full_pages);
+            if (!full) {
+                shell_printf("hailo: sched: pmm_alloc_pages(%lu) failed\n",
+                             (unsigned long)full_pages);
+            } else {
+                memcpy(full, hdr_buf, outer.proto_offset);
+                memcpy(full + outer.proto_offset, body, outer.proto_size);
+
+                struct inference_device *dev = inference_device_find("hailo-8");
+                if (!dev) {
+                    shell_puts("hailo: sched: 'hailo-8' device not registered\n");
+                } else {
+                    inference_model_handle_t h = INF_INVALID_HANDLE;
+                    int lrc = inference_load_model(dev, full, total, &h);
+                    if (lrc != INF_OK) {
+                        shell_printf("hailo: sched: load_model failed (%d)\n", lrc);
+                    } else {
+                        /* Placeholder quant (scale=1/128, zp=0) until HEF
+                         * quant-metadata extraction lands (deferred).
+                         * Phase 6.2a scope: plumbing + policy path working
+                         * end-to-end in QEMU under the mock. Real-hardware
+                         * inference with correct dequantization is blocked
+                         * on HEF quant-info parsing — tracked separately.
+                         *
+                         * Use the integer-only wrapper — this file is
+                         * compiled with -mgeneral-regs-only and can't take
+                         * float parameters. */
+                        ai_policy_hailo_set_model_placeholder(
+                            h, AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+                        shell_printf("hailo: sched: model loaded (handle=%d), "
+                                     "ai_policy_hailo armed with placeholder "
+                                     "quant\n", (int)h);
+                    }
+                }
+                pmm_free_pages(full, full_pages);
+            }
+        }
+#else
+        (void)do_sched;
+#endif
 
         pmm_free_pages(body, body_pages);
         return 0;

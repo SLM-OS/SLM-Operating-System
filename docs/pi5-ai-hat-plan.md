@@ -314,15 +314,23 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - **Test coverage** — 14 Python functional tests in `scripts/hailo/test_hailo_scripts.py` exercise the hex-float parser (round-trip + missing-symbol error), the numpy reference forward, ONNX model validation, full end-to-end exports on the real checked-in weights, calibration-data shape/dtype/range/determinism/zero-fill, and all four `compile_hef.sh` error paths (bad arch, bad variant, missing hailo CLI, missing ONNX input).
 - **Dev-env setup docs** — `docs/setup.md` §Hailo Toolchain documents the Python 3.10 venv, pygraphviz C-header packages, Hailo Developer Zone wheel download, DFC 3.33.1 install, and `scripts/hailo/` invocation. Three troubleshooting entries cover the Python-3.12 pin miss, pygraphviz `Python.h` error, and DFC 5.x vs 3.x wheel-track confusion.
 
-#### Phase 6.2: Kernel integration (next)
+#### Phase 6.2: Kernel integration ✅ plumbing + benchmark (2026-04-19)
 
-- `ai_policy_hailo` scheduler policy that routes the MLP through `inference_device` (Phase 2 abstraction) instead of NEON. Load `scheduler_mlp_pi5.hef` via `hailo load`, feed `ai_extract_state` output, decode `argmax(logits)` back into `ai_sched_action` via the existing `ai_decode_action`.
-- Policy switch at runtime via `sched_set_policy()`.
-- Benchmark comparison — `bench sched-policy`:
-  - Round-robin (baseline).
-  - CPU MLP (current AI scheduler).
-  - Hailo MLP (new).
-  - Metrics: decisions/sec, end-to-end task makespan, device power.
+**Landed in this phase:**
+
+- **`inference_device` Hailo backend** (`kernel/inference/inference_device_hailo.c`) — vtable bridge from the Phase 2 `inference_device` abstraction to the Phase 5.4 `hailo_infer_run` orchestrator. `load_model` parses the HEF outer header + proto body, extracts input/output pad shapes, and allocates a fixed-size slot (4 max) with a placeholder `hailo_infer_config`. `run` size-checks the INT8 tensors and forwards. `free_model` releases the slot. Registered as `"hailo-8"` on Pi 5 and Jetson (non-x86 non-QEMU-mock builds); inert on QEMU + x86 where the Hailo platform shim never installs.
+- **`ai_policy_hailo` scheduler policy** (`kernel/sched/ai/sched_ai.c`) — mirrors `ai_mlp` but routes through `"hailo-8"`. Maintains its own handle slot set by the shell via `ai_policy_hailo_set_model` (public in `ai_policy_hailo.h`). Pre-inference quantizes the fp32 state vector to INT8 with a per-tensor scale+zero-point; post-inference argmax on the INT8 output (monotonic under dequant so no need to float-ify logits). Falls back to the heuristic policy on `assign_cpu` when no device is present or no model is loaded — the policy switch still succeeds so the user can load a model after switching, and QEMU/x86 users get a loud warning explaining that CPU fallback is in effect.
+- **Shell wire-up** — `hailo load <path> sched` loads the HEF into the `"hailo-8"` device and installs the handle into `ai_policy_hailo` with placeholder quantization (scale=1/128, zp=0). `sched policy ai_hailo` activates the policy at runtime. `bench sched-policy` measures decisions/sec for each backend in the inference-device registry (`cpu-mlp`, `hailo-8` if armed).
+- **Graceful-fallback warnings** — policy activation with no Hailo device or no loaded model prints a `WARN` line pointing the user at `sched policy ai_mlp` (for QEMU/x86) or `hailo load <path> sched` (for a missing model). Every `assign_cpu` silently falls back to heuristic until Hailo is ready.
+
+**Deferred to a follow-up (outside the current PR scope):**
+
+- HEF quantization-metadata extraction (per-tensor scale + zero-point from `ProtoHEFPad.quant_info`). Without real values, the placeholder 1/128 scale gives arithmetically meaningless but structurally valid INT8 tensors — runs on mock hardware, will produce wrong actions on real silicon.
+- HEF stream-config extraction (`channel_index`, `data_id`, `core_bytes_per_buffer`, `periph_bytes_per_buffer`) from `preliminary_config.operation[].actions[].activate_nn_stream_config`. Without real values, `hailo_infer_run` on hardware times out with `HAILO_ERR_TIMEOUT` because firmware has no stream context — the existing Phase 5.3/5.4 blocker.
+- Deploy `scheduler_mlp_pi5.hef` to pi-5-1 and verify real inference end-to-end (blocked on the two items above).
+- Round-robin baseline in `bench sched-policy` — skipped today because round-robin isn't inference-bound; to compare scheduler throughput end-to-end, run a workload under each policy and use `bench stats`.
+
+**Test coverage** — 15 new QEMU cases in `test_hailo.c` (13 backend + 2 policy): device registration, happy-path HEF load, error paths (null args / not running / bad header / no pads / size/dtype mismatch / full slot table), slot free + double-free, shutdown clears slots, policy handle set/get and detach.
 
 ### Phase 7: Shell Integration & Demo Polish (1 week)
 

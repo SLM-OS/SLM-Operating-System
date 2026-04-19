@@ -763,6 +763,113 @@ static void bench_ipc_latency(void)
     msg_queue_destroy(q);
 }
 
+/* --- Scheduler policy inference-latency micro-benchmark (Phase 6.2d) ---
+ *
+ * Measures how fast each registered inference-device backend can run
+ * a scheduler-shaped forward pass:
+ *   - "cpu-mlp": FP32 state_in / logits_out on NEON (or SSE on x86)
+ *   - "hailo-8" (Pi 5 / Jetson): INT8 state_in / logits_out on the NPU,
+ *     ONLY if a model has been loaded via `hailo load`. Otherwise skips.
+ *
+ * Reports decisions/sec and per-decision ns. Does NOT actually switch
+ * the scheduler policy — the kernel keeps running on its active one
+ * throughout. This isolates model inference latency from full
+ * assign_cpu overhead (which also pays state-extraction + heuristic
+ * fallback); we report a pure forward-pass number.
+ *
+ * Round-robin ("heuristic") isn't inference-bound so it's deliberately
+ * skipped here — a simulated state extraction + per-CPU counter update
+ * is sub-microsecond and doesn't belong on this chart. To compare
+ * scheduler throughput end-to-end, use `bench stats` while running a
+ * workload under each policy in turn.
+ */
+#if defined(CONFIG_AI_SCHEDULER)
+#include "inference_device.h"
+#include "ai_types.h"
+
+static void bench_policy_one(const char *dev_name,
+                             enum inference_dtype dtype,
+                             uint32_t in_n, uint32_t out_n,
+                             inference_model_handle_t h,
+                             uint32_t iters)
+{
+    struct inference_device *dev = inference_device_find(dev_name);
+    if (!dev) {
+        shell_printf("  %-10s  (backend not registered)\r\n", dev_name);
+        return;
+    }
+
+    /* Scratch buffers. Stack budget: 432 B (fp32 108-elem) + 168 B
+     * (fp32 42-elem) = 600 B worst case. INT8 paths are smaller. */
+    uint32_t bpel = (dtype == INF_DTYPE_FP32) ? 4 :
+                    (dtype == INF_DTYPE_FP16) ? 2 : 1;
+    uint32_t in_bytes  = in_n  * bpel;
+    uint32_t out_bytes = out_n * bpel;
+    if (in_bytes > 1024 || out_bytes > 1024) {
+        shell_printf("  %-10s  (in/out too large for stack bench)\r\n", dev_name);
+        return;
+    }
+    alignas(8) uint8_t in_buf[1024];
+    alignas(8) uint8_t out_buf[1024];
+    memset(in_buf, 0, in_bytes);
+
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = in_n, .dtype = (uint8_t)dtype,
+        .rank = 1, .shape = { (uint16_t)in_n, 0, 0, 0 },
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = out_n, .dtype = (uint8_t)dtype,
+        .rank = 1, .shape = { (uint16_t)out_n, 0, 0, 0 },
+    };
+
+    uint64_t t0 = timer_get_count();
+    uint32_t ok = 0;
+    for (uint32_t i = 0; i < iters; i++) {
+        if (inference_run(dev, h, &in, &out) == INF_OK) ok++;
+    }
+    uint64_t t1 = timer_get_count();
+    uint64_t freq = timer_get_frequency();
+    uint64_t total_ns = (t1 - t0) * 1000000000ULL / freq;
+    uint64_t per_ns = ok > 0 ? total_ns / ok : 0;
+    uint64_t per_sec = per_ns > 0 ? 1000000000ULL / per_ns : 0;
+
+    shell_printf("  %-10s  %u/%u ok   %lu ns/decision   %lu decisions/sec\r\n",
+                 dev_name, ok, iters,
+                 (unsigned long)per_ns, (unsigned long)per_sec);
+}
+
+static void bench_sched_policy(void)
+{
+    /* CPU-MLP is built-in; use INF_BUILTIN_HANDLE. Hailo needs a
+     * shell-side loaded model — skip if ai_policy_hailo has no model. */
+    shell_puts("Scheduler Policy Inference Benchmark\r\n");
+    shell_puts("====================================\r\n");
+    shell_printf("  Input dim: %u, Output dim: %u (AI_SCHED_N_ACTIONS)\r\n",
+                 (unsigned)AI_STATE_DIM, (unsigned)AI_SCHED_N_ACTIONS);
+    shell_printf("  %u iterations per backend\r\n", 1000u);
+
+    bench_policy_one("cpu-mlp", INF_DTYPE_FP32,
+                     AI_STATE_DIM, (uint32_t)AI_SCHED_N_ACTIONS,
+                     INF_BUILTIN_HANDLE, 1000);
+
+    /* Hailo-8 runs only if a .hef has been loaded (handle != INVALID).
+     * The policy stashes the handle via ai_policy_hailo_set_model; we
+     * reach into that via an external query below when available. */
+    extern inference_model_handle_t ai_policy_hailo_get_model_handle(void);
+    inference_model_handle_t hailo_h = ai_policy_hailo_get_model_handle();
+    if (hailo_h == INF_INVALID_HANDLE) {
+        shell_puts("  hailo-8     (no model loaded — `hailo load <hef>` first)\r\n");
+    } else {
+        /* hailo backend expects raw INT8 byte counts, not element counts
+         * in the fp32 sense — input/output sizes come from HEF pads. For
+         * the scheduler MLP today those are 108 and 24 bytes. */
+        bench_policy_one("hailo-8", INF_DTYPE_INT8,
+                         AI_STATE_DIM, (uint32_t)AI_SCHED_N_ACTIONS,
+                         hailo_h, 1000);
+    }
+}
+#endif /* CONFIG_AI_SCHEDULER */
+
 /* --- Scheduler stats snapshot --- */
 
 static void bench_sched_stats(void)
@@ -1363,6 +1470,10 @@ int cmd_bench(int argc, char *argv[])
                 shell_printf("    Data integrity: %s\r\n", ok ? "PASS" : "FAIL");
             }
         }
+#if defined(CONFIG_AI_SCHEDULER)
+    } else if (strcmp(argv[1], "sched-policy") == 0) {
+        bench_sched_policy();
+#endif
     } else if (strcmp(argv[1], "all") == 0) {
         shell_puts("SLM-OS Performance Benchmarks\r\n");
         shell_puts("=============================\r\n\r\n");
@@ -1381,7 +1492,7 @@ int cmd_bench(int argc, char *argv[])
         bench_sched_stats();
     } else {
         shell_printf("Unknown benchmark: %s\r\n", argv[1]);
-        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, stats, all\r\n");
+        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, sched-policy, stats, all\r\n");
         return 1;
     }
 

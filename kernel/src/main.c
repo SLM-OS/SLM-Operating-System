@@ -535,11 +535,21 @@ void kernel_main(void *dtb)
      * Ordering matters: the MLP policy's self-test in its init()
      * runs via the direct ai_schedule_mlp path and doesn't depend
      * on the registry, but any live assign_cpu() call afterwards
-     * will look for the "cpu-mlp" device. */
+     * will look for the "cpu-mlp" device.
+     *
+     * The Hailo-8 backend registers alongside the CPU-MLP one on
+     * every non-x86 target (Phase 6.2). `load_model` returns
+     * INF_ERR_NODEV until hailo_boot succeeds, so registering
+     * pre-boot is safe — the device is just inert until the
+     * firmware is running. */
     {
         extern int inference_cpu_register(void);
         extern void sched_ai_init(void);
         inference_cpu_register();
+#ifndef PLATFORM_X86_64
+        extern int inference_device_hailo_register(void);
+        inference_device_hailo_register();
+#endif
         sched_ai_init();
     }
 #endif
