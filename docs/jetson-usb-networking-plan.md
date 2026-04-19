@@ -1060,6 +1060,42 @@ so SLM-OS can program its own context bank that maps its raw PAs)
 or a more careful pre-kexec quiescing sequence — is now the
 documented follow-on.
 
+**Option 1: Linux-side `iommu_map()` identity mapping (2026-04-18).**
+Instead of porting SMMU code into SLM-OS, the shutdown-suppression
+module was extended to ask Linux's existing arm-smmu driver to add
+an identity mapping (IOVA==PA) on the xusb stream's
+`iommu_domain` before the handoff. Concretely:
+
+```c
+xusb_dev = bus_find_device_by_name(&platform_bus_type, NULL, "3610000.usb");
+domain  = iommu_get_domain_for_dev(xusb_dev);  /* IOMMU_DOMAIN_DMA */
+iommu_map(domain, SLMOS_NC_BASE, SLMOS_NC_BASE, 2MB, READ|WRITE);
+```
+
+This ran cleanly on hardware:
+
+```
+arm-smmu-noshutdown: xusb iommu_domain type=3 (IOMMU_DOMAIN_DMA=3, IDENTITY=4, UNMANAGED=1)
+arm-smmu-noshutdown: added identity IOMMU mapping IOVA 0xbde00000..0xbe000000
+  (PA identical) on xusb domain
+```
+
+IOMMU_DOMAIN_DMA was expected to reject direct `iommu_map()` calls
+(dma-iommu normally manages the IOVA allocator), but 5.15's
+`__iommu_map` in fact allows the call and wires it into the
+underlying io-pgtable. That's the key enabling surprise.
+
+**Hardware result.** Post-kexec, SLM-OS's xhci init reaches
+`[INFO] xhci: controller running (USBSTS=0x00000000)` — RUN=1 no
+longer wedges the aperture. This was previously the original blocker
+for #266 Phase 3A. The NO_OP round-trip outcome was not captured
+in the session that implemented Option 1 because the lab controller
+disconnected mid-test; the next session should re-run with the
+Option 1 module loaded and capture whether `NO_OP round-trip OK
+(cc=SUCCESS)` or `NO_OP timed out` shows up. The Option 1 code is
+committed and load-verified; only the full end-to-end capture is
+pending.
+
 ### 10.7 Contact points for a blocked investigation
 
 - **GitHub issues**: #266 (Phase 3A umbrella), #285 (original SMMU

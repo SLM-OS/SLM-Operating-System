@@ -93,7 +93,84 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/iommu.h>
 #include <linux/platform_device.h>
+
+/*
+ * SLM-OS's non-cacheable region on Jetson Orin Nano — the 2 MB block
+ * at the top of RAM region 1, just below the OP-TEE carveout. Every
+ * buffer SLM-OS's xHCI driver hands to the controller (DCBAA,
+ * scratchpads, command/event ring TRBs, ERST) comes out of this
+ * range via `ncmem_alloc`. See kernel/mm/vmm.c and kernel/CLAUDE.md
+ * "Non-Cacheable Shared Memory" for why the region is where it is.
+ *
+ * Adding an identity mapping covering these 2 MB to the xusb stream's
+ * existing Linux-programmed context bank lets SLM-OS program DCBAAP
+ * / CRCR with raw physical addresses and have them translate through
+ * the SMMU unchanged (IOVA == PA). No bypass, no context-bank
+ * reprogramming, no risk of racing in-flight DMA.
+ */
+#define SLMOS_NC_BASE   0xBDE00000UL
+#define SLMOS_NC_SIZE   (2UL * 1024 * 1024)   /* 2 MB */
+
+static bool iommu_mapping_added;
+
+/*
+ * Ask Linux's iommu subsystem to add an identity mapping for SLM-OS's
+ * 2 MB NC region on the xusb stream's active domain. After this call,
+ * HC DMAs the SLM-OS xHCI driver issues with IOVA == 0xBDE00000+
+ * translate straight through to the same physical addresses — no
+ * bypass, no context-bank replacement, no race with other live DMA
+ * on this or any other SMMU instance.
+ */
+static int arm_smmu_noshutdown_map_slmos_region(void)
+{
+    struct device *xusb_dev;
+    struct iommu_domain *domain;
+    int rc;
+
+    /* The tegra-xusb platform device the xHCI host controller is
+     * bound to. Name is the DT unit-address form ("@3610000" →
+     * "3610000.usb"). Found at boot time; the device is stable for
+     * the life of the kernel. */
+    xusb_dev = bus_find_device_by_name(&platform_bus_type, NULL,
+                                        "3610000.usb");
+    if (!xusb_dev) {
+        pr_warn("arm-smmu-noshutdown: tegra-xusb 3610000.usb not "
+                "found — cannot add SLM-OS IOMMU mapping\n");
+        return -ENODEV;
+    }
+
+    domain = iommu_get_domain_for_dev(xusb_dev);
+    if (!domain) {
+        pr_warn("arm-smmu-noshutdown: xusb has no attached "
+                "iommu_domain — cannot add SLM-OS IOMMU mapping\n");
+        put_device(xusb_dev);
+        return -ENODEV;
+    }
+
+    pr_info("arm-smmu-noshutdown: xusb iommu_domain type=%d "
+            "(IOMMU_DOMAIN_DMA=%d, IDENTITY=%d, UNMANAGED=%d)\n",
+            domain->type, IOMMU_DOMAIN_DMA, IOMMU_DOMAIN_IDENTITY,
+            IOMMU_DOMAIN_UNMANAGED);
+
+    rc = iommu_map(domain, SLMOS_NC_BASE, SLMOS_NC_BASE, SLMOS_NC_SIZE,
+                   IOMMU_READ | IOMMU_WRITE);
+    if (rc) {
+        pr_warn("arm-smmu-noshutdown: iommu_map(IOVA=0x%lx PA=0x%lx "
+                "size=0x%lx) failed: %d\n",
+                SLMOS_NC_BASE, SLMOS_NC_BASE, SLMOS_NC_SIZE, rc);
+    } else {
+        iommu_mapping_added = true;
+        pr_info("arm-smmu-noshutdown: added identity IOMMU mapping "
+                "IOVA 0x%lx..0x%lx (PA identical) on xusb domain "
+                "(#266 Phase 3A Path 1 option 1)\n",
+                SLMOS_NC_BASE, SLMOS_NC_BASE + SLMOS_NC_SIZE);
+    }
+
+    put_device(xusb_dev);
+    return rc;
+}
 
 static int __init arm_smmu_noshutdown_init(void)
 {
@@ -125,18 +202,42 @@ static int __init arm_smmu_noshutdown_init(void)
         pr_info("arm-smmu-noshutdown: platform_driver->shutdown "
                 "already NULL — no-op\n");
     }
+
+    /* Independent of the shutdown suppression above — if this fails
+     * we still want the shutdown-suppression half of the fix to take
+     * effect, and the failure mode is observable in dmesg. */
+    (void)arm_smmu_noshutdown_map_slmos_region();
+
     return 0;
 }
 
 static void __exit arm_smmu_noshutdown_exit(void)
 {
     /*
-     * Do NOT restore the original pointer. The module is designed
-     * for a load-and-forget-until-reboot model: once the platform
-     * driver's shutdown pointer has been cleared, the next kexec
-     * will skip SMMU teardown and the Linux half of the system is
-     * about to hand off to SLM-OS anyway.
+     * Reverse the IOMMU mapping on rmmod so a subsequent reload of
+     * a rebuilt module doesn't see `iommu_map` fail with -EEXIST.
+     * `platform_driver.shutdown` is deliberately NOT restored —
+     * load-and-forget model; restoring the pointer would reopen the
+     * exact failure we came here to prevent.
      */
+    if (iommu_mapping_added) {
+        struct device *xusb_dev =
+            bus_find_device_by_name(&platform_bus_type, NULL,
+                                     "3610000.usb");
+        if (xusb_dev) {
+            struct iommu_domain *domain =
+                iommu_get_domain_for_dev(xusb_dev);
+            if (domain) {
+                size_t unmapped = iommu_unmap(domain, SLMOS_NC_BASE,
+                                               SLMOS_NC_SIZE);
+                pr_info("arm-smmu-noshutdown: iommu_unmap returned "
+                        "%zu bytes (expected %lu)\n",
+                        unmapped, SLMOS_NC_SIZE);
+            }
+            put_device(xusb_dev);
+        }
+        iommu_mapping_added = false;
+    }
 }
 
 module_init(arm_smmu_noshutdown_init);

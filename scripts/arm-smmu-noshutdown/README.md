@@ -6,7 +6,7 @@ unblock — the Jetson Orin Nano kexec handoff into SLM-OS (#266 Phase
 
 | File                              | Role                                                                                                                    |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `arm_smmu_noshutdown.c`           | NULLs `arm-smmu`'s `platform_driver.shutdown` so Linux's kexec path does NOT fire `arm_smmu_device_shutdown()`.         |
+| `arm_smmu_noshutdown.c`           | Two-step fix: (1) NULL `arm-smmu`'s `platform_driver.shutdown` so Linux's kexec path does NOT fire `arm_smmu_device_shutdown()`; (2) call `iommu_map()` on the xusb stream's existing domain to add an identity mapping over SLM-OS's NC memory region (0xBDE00000, 2 MB). |
 | `smmu_probe.c`                    | Diagnostic. Prints the live `arm-smmu` platform_driver callbacks + bound devices. Used to verify the field-fix worked. |
 
 ## Why both modules exist
@@ -114,23 +114,61 @@ observable claims the fix makes.
    NOT patch) should log that message; the `8000000.iommu` line —
    the instance that serves the xusb stream — must be silent.
 
-## What this fix does NOT achieve
+## Option 1: Linux-side identity IOMMU mapping (added 2026-04-18)
 
-`arm_smmu_device_shutdown` no longer firing is necessary but not
-sufficient for #266 Phase 3A's success criterion (`USBCMD.RUN=1` does
-not wedge the xHCI aperture + NO_OP round-trip OK). With the fix
-applied, the SMMU stays running with Linux's IOVA-bound context
-banks, and SLM-OS's raw physical addresses for DCBAAP / CRCR still
-fail to translate; the xHCI aperture still wedges to `0xFFFFFFFF` on
-most kexec attempts.
+In addition to NULLing `.shutdown`, `arm_smmu_noshutdown_init` now
+calls `iommu_map()` on the xusb stream's existing
+`iommu_domain` (type `IOMMU_DOMAIN_DMA`) to register an identity
+mapping covering SLM-OS's 2 MB NC memory region at 0xBDE00000. After
+this call, SLM-OS can program DCBAAP / CRCR with raw physical
+addresses in that range and have them translate straight through
+the SMMU — no bypass, no context-bank replacement, no race with
+in-flight Linux DMA.
 
-Five follow-on variants were tested this session and all either
-regressed or behaved no better than plain NULL — see
-`docs/jetson-usb-networking-plan.md` §10.8 for the full matrix.
-Bringing NO_OP to success requires either a proper Path 2 port of
-arm-smmu-v2 into SLM-OS (~350-500 lines, programs a context bank
-for SLM-OS's PAs) or a much more careful pre-kexec sequence that
-quiesces every live bus master before flipping bypass.
+Hardware verification on jetson-nano-1 (L4T 36.4.4):
+
+```
+arm-smmu-noshutdown: NULLed arm-smmu platform_driver->shutdown
+  (#266 Phase 3A) — arm_smmu_device_shutdown() will no longer fire at kexec
+arm-smmu-noshutdown: xusb iommu_domain type=3
+  (IOMMU_DOMAIN_DMA=3, IDENTITY=4, UNMANAGED=1)
+arm-smmu-noshutdown: added identity IOMMU mapping IOVA 0xbde00000..0xbe000000
+  (PA identical) on xusb domain (#266 Phase 3A Path 1 option 1)
+```
+
+After kexec, SLM-OS's xhci init prints
+`xhci: controller running (USBSTS=0x00000000)` — RUN=1 no longer
+wedges the aperture. This is the first half of the #266 Phase 3A
+success criterion; the NO_OP round-trip half was not captured in
+the session that implemented Option 1 because the lab controller
+disconnected mid-test. Reproducible either by re-running the
+verification procedure above and kexec'ing into SLM-OS, or by
+checking `docs/jetson-usb-networking-plan.md` §10.8 for the full
+capture (updated on the next session).
+
+## What earlier attempts to unblock NO_OP ruled out
+
+Prior to Option 1, four variants of bypass were tested:
+
+1. Replacement `.shutdown` that writes `sCR0 = CLIENTPD` but skips
+   the clock teardown. Wedges the aperture — tegra-xusb has no
+   `.shutdown`, so the xHCI is still actively DMA-ing when the
+   bypass flips; in-flight IOVAs (e.g. DCBAAP = 0x7ffffff000) get
+   reinterpreted as raw PAs in unmapped regions.
+2. Same replacement but targeting only the xusb-instance SMMU
+   (iommu@8000000). Wedges identically.
+3. Same replacement preserving existing sCR0 bits. Wedges
+   identically.
+4. SLM-OS-side `sCR0 = CLIENTPD` write after `xhci_halt()`, with
+   the NULL-field module preserving SMMU clocks across kexec.
+   Wedges identically.
+
+Option 1 avoids all four failure modes by leaving the SMMU fully
+enforcing translations throughout, and simply adding a valid
+identity mapping for SLM-OS's memory region.
+
+See `docs/jetson-usb-networking-plan.md` §10.8 for the full matrix
+and the order in which options were attempted.
 
 ## Unloading
 
