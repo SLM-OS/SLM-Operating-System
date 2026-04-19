@@ -2558,6 +2558,218 @@ static void test_cs_translate_contexts_rejects_null(void)
         hailo_cs_translate_contexts(&info, &cfg, NULL));
 }
 
+/* #178: Phase 6.5 ACTIVATION emits OPEN_BOUNDARY_INPUT_CHANNEL +
+ * OPEN_BOUNDARY_OUTPUT_CHANNEL per boundary edge alongside the
+ * BURST_CREDITS_TASK_RESET. Boundary edges are pads with
+ * has_stream_info=true; direction from is_input. */
+
+static void test_cs_translate_activation_emits_open_boundary_input(void)
+{
+    /* One boundary input pad → ACTIVATION = BURST_CREDITS (8) +
+     * OPEN_BOUNDARY_INPUT_CHANNEL (8 hdr + 28 body = 36) = 44 bytes. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 1;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].sys_index             = 7;
+    info.pads[0].core_bytes_per_buffer = 0x0400;   /* 1024 B */
+    info.ccw_action_count = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel            = 0x01,
+        .config_stream_index            = 0,
+        .ccw_desc_list_iova             = 0x1000,
+        .ccw_desc_page_size             = 512,
+        .ccw_total_desc_count           = 2,
+        .boundary_input_desc_list_iova  = 0xAA00000011110000ull,
+        .boundary_input_total_desc_count = 4,
+        .boundary_desc_page_size        = 1024,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 36), out.activation_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
+                            out.activation[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
+                            out.activation[8]);
+    /* Body begins at offset 16. packed_vdma = config+1 = 0x02. */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[16]);
+    /* host_buffer_info at offset 17: buffer_type (1B) + dma_address (8B LE)
+     * + desc_page_size (2B LE) + total_desc_count (4B LE) + bytes_in_pattern (4B). */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                            out.activation[17]);
+    uint64_t dma; memcpy(&dma, out.activation + 18, 8);
+    TEST_ASSERT_EQUAL_UINT64(0xAA00000011110000ull, dma);
+    uint16_t page; memcpy(&page, out.activation + 26, 2);
+    TEST_ASSERT_EQUAL_UINT16(1024, page);
+    uint32_t descs; memcpy(&descs, out.activation + 28, 4);
+    TEST_ASSERT_EQUAL_UINT32(4, descs);
+    /* stream_index @ 36, network_index @ 37, periph @ 38, frame @ 40. */
+    TEST_ASSERT_EQUAL_UINT8(0, out.activation[36]);   /* stream_index */
+    TEST_ASSERT_EQUAL_UINT8(0, out.activation[37]);   /* network_index */
+    uint16_t periph; memcpy(&periph, out.activation + 38, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x0400, periph);
+    uint32_t frame; memcpy(&frame, out.activation + 40, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x0400, frame);
+}
+
+static void test_cs_translate_activation_emits_open_boundary_output(void)
+{
+    /* One boundary output pad → OPEN_BOUNDARY_OUTPUT_CHANNEL body is
+     * 20 B (packed_vdma + host_buffer_info). Total 8 + 8+20 = 36. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 1;
+    info.pads[0].is_input              = false;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].sys_index             = 9;
+    info.pads[0].core_bytes_per_buffer = 0x100;
+    info.ccw_action_count = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel             = 0x01,
+        .config_stream_index             = 0,
+        .ccw_desc_list_iova              = 0x1000,
+        .ccw_desc_page_size              = 512,
+        .ccw_total_desc_count            = 2,
+        .boundary_output_desc_list_iova  = 0xBB00000022220000ull,
+        .boundary_output_total_desc_count = 6,
+        .boundary_desc_page_size         = 1024,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 28), out.activation_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
+                            out.activation[8]);
+    /* packed_vdma = config+2 = 0x03. */
+    TEST_ASSERT_EQUAL_UINT8(0x03, out.activation[16]);
+    uint64_t dma; memcpy(&dma, out.activation + 18, 8);
+    TEST_ASSERT_EQUAL_UINT64(0xBB00000022220000ull, dma);
+    uint32_t descs; memcpy(&descs, out.activation + 28, 4);
+    TEST_ASSERT_EQUAL_UINT32(6, descs);
+}
+
+static void test_cs_translate_activation_emits_input_and_output(void)
+{
+    /* Realistic single-stream MLP: one input, one output. ACTIVATION
+     * total = 8 (BURST) + 36 (OPEN_IN) + 28 (OPEN_OUT) = 72 bytes. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 2;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].sys_index             = 1;
+    info.pads[0].core_bytes_per_buffer = 224 * 224 * 3;
+    info.pads[1].is_input              = false;
+    info.pads[1].has_stream_info       = true;
+    info.pads[1].sys_index             = 2;
+    info.pads[1].core_bytes_per_buffer = 1000;
+    info.ccw_action_count = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel              = 0x01,
+        .ccw_desc_list_iova               = 0x1000,
+        .ccw_desc_page_size               = 512,
+        .ccw_total_desc_count             = 2,
+        .boundary_input_desc_list_iova    = 0x10000,
+        .boundary_input_total_desc_count  = 8,
+        .boundary_output_desc_list_iova   = 0x20000,
+        .boundary_output_total_desc_count = 2,
+        .boundary_desc_page_size          = 4096,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 36 + 28), out.activation_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
+                            out.activation[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
+                            out.activation[8]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
+                            out.activation[8 + 36]);
+}
+
+static void test_cs_translate_activation_skips_internal_pads(void)
+{
+    /* Pads without has_stream_info are internal ops — translator
+     * must not emit OpenBoundary for them. Two internal pads + zero
+     * boundary = BURST_CREDITS only (8 bytes). */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 2;
+    info.pads[0].is_input        = true;
+    info.pads[0].has_stream_info = false;
+    info.pads[1].is_input        = false;
+    info.pads[1].has_stream_info = false;
+    info.ccw_action_count = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, out.activation_len);
+}
+
+static void test_cs_translate_activation_missing_input_iova_fails(void)
+{
+    /* HEF carries a boundary input pad but cfg's input_desc_list_iova
+     * is zero → caller forgot to allocate a descriptor list. Fail
+     * fast rather than emit an action with a NULL DMA address that
+     * firmware would interpret as garbage. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 1;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].core_bytes_per_buffer = 16;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel            = 0x01,
+        .ccw_desc_list_iova             = 0x1000,
+        .ccw_desc_page_size             = 512,
+        .ccw_total_desc_count           = 2,
+        /* boundary_input_desc_list_iova deliberately zero */
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+}
+
+static void test_cs_translate_activation_missing_output_iova_fails(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 1;
+    info.pads[0].is_input        = false;
+    info.pads[0].has_stream_info = true;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+        /* boundary_output_desc_list_iova zero */
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+}
+
 /* Phase 6.4g: translator emits ENABLE_LCU_* wire actions from
  * parser-captured hef_enable_lcu_action parameters. Default vs
  * non-default encoding is selected by whether kernel_done_* fields
@@ -6007,6 +6219,12 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_contexts_uses_ccw_count_for_burst_count);
     RUN_TEST(test_cs_translate_contexts_clamps_burst_count_to_u16);
     RUN_TEST(test_cs_translate_contexts_rejects_null);
+    RUN_TEST(test_cs_translate_activation_emits_open_boundary_input);
+    RUN_TEST(test_cs_translate_activation_emits_open_boundary_output);
+    RUN_TEST(test_cs_translate_activation_emits_input_and_output);
+    RUN_TEST(test_cs_translate_activation_skips_internal_pads);
+    RUN_TEST(test_cs_translate_activation_missing_input_iova_fails);
+    RUN_TEST(test_cs_translate_activation_missing_output_iova_fails);
     RUN_TEST(test_cs_translate_enable_lcu_default_variant);
     RUN_TEST(test_cs_translate_enable_lcu_non_default_variant);
     RUN_TEST(test_cs_translate_skips_enable_lcu_from_other_contexts);

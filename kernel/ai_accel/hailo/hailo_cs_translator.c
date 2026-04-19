@@ -81,14 +81,138 @@ int hailo_cs_translate_application_header(
 /* ACTIVATION context                                                           */
 /* -------------------------------------------------------------------------- */
 
-/* Minimum legal ACTIVATION per HailoRT's fill_activation_config_recepies:
- * BURST_CREDITS_TASK_RESET (zero body). Real MLP ACTIVATION contexts
- * also carry OpenBoundaryInput/Output per boundary edge layer; those
- * land once the parser surfaces edge_layer → VDMA channel mapping. */
-static int translate_activation(struct hailo_cs_builder *b)
+/* ACTIVATION context (Phase 6.5, #178).
+ *
+ * Per HailoRT's fill_activation_config_recepies (v4.23 source trail
+ * documented in docs/pi5-ai-hat-plan.md §6.3):
+ *
+ *   1. BURST_CREDITS_TASK_RESET (zero body) — resets per-channel
+ *      burst credit counters so the new network's config channel
+ *      starts clean.
+ *   2. OPEN_BOUNDARY_INPUT_CHANNEL per boundary input edge — binds
+ *      a host→device VDMA descriptor list to the channel firmware
+ *      will pull tensor data through during inference.
+ *   3. OPEN_BOUNDARY_OUTPUT_CHANNEL per boundary output edge — binds
+ *      device→host channel for the response tensor.
+ *
+ * Boundary edges are signaled in hef_info by pads[].has_stream_info
+ * (the pad was joined to an edge_layer during parse; edge_layers are
+ * the boundary streams exposed to the host). is_input selects the
+ * direction. A single-input / single-output MLP emits exactly one
+ * INPUT_CHANNEL + one OUTPUT_CHANNEL on top of the BURST_CREDITS
+ * reset — three actions total, 28+20+8 = 56 bytes of body plus three
+ * 8-byte common headers = 80 bytes of ACTIVATION. Well under the
+ * HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES cap.
+ *
+ * Multi-stream HEFs (multiple inputs or outputs) require threading
+ * stream_index and a wider boundary-desc-list table through cfg;
+ * single-stream is the MVP.
+ *
+ * firmware expectation (hypothesis, #180): the 0xFFFFFFFF response
+ * pattern on subsequent CORE-CPU RPCs after ACTIVATION suggests fw
+ * v4.23 waits for the full OpenBoundary set before accepting the
+ * next context. Landing this translator function is the concrete
+ * test of that hypothesis. */
+static int translate_open_boundary_for_pad(
+    const struct hef_pad_info *pad,
+    const struct hailo_cs_translate_cfg *cfg,
+    uint8_t stream_index,
+    struct hailo_cs_builder *b)
 {
-    return hailo_cs_builder_append(b, HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
-                                   NULL, 0);
+    if (pad->is_input) {
+        uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
+                          + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET;
+        if (raw_vdma > 0xFFu) {
+            WARN("hailo translator: boundary input packed_vdma overflows "
+                 "u8 (config_vdma=%u)", cfg->config_vdma_channel);
+            return HAILO_ERR_INVAL;
+        }
+        if (cfg->boundary_input_desc_list_iova == 0) {
+            WARN("hailo translator: HEF has boundary input edge (sys_index=%u) "
+                 "but cfg->boundary_input_desc_list_iova is 0",
+                 pad->sys_index);
+            return HAILO_ERR_INVAL;
+        }
+        /* frame_periph_size comes from the pad's core_bytes_per_buffer;
+         * periph_bytes_per_buffer equals frame size for unpadded
+         * single-row tensors (MVP). Multi-row / padded tensors need
+         * a proper periph-vs-core split later. */
+        uint32_t frame = pad->core_bytes_per_buffer;
+        struct hailo_cs_act_open_boundary_input_channel body = {
+            .packed_vdma_channel_id = (uint8_t)raw_vdma,
+            .host_buffer_info = {
+                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                .dma_address      = cfg->boundary_input_desc_list_iova,
+                .desc_page_size   = cfg->boundary_desc_page_size,
+                .total_desc_count = cfg->boundary_input_total_desc_count,
+                .bytes_in_pattern = 0,
+            },
+            .stream_index             = stream_index,
+            .network_index            = 0,
+            .periph_bytes_per_buffer  = (uint16_t)((frame > 0xFFFFu) ? 0xFFFFu : frame),
+            .frame_periph_size        = frame,
+        };
+        return hailo_cs_builder_append(
+            b, HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
+            &body, sizeof(body));
+    } else {
+        uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
+                          + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET;
+        if (raw_vdma > 0xFFu) {
+            WARN("hailo translator: boundary output packed_vdma overflows "
+                 "u8 (config_vdma=%u)", cfg->config_vdma_channel);
+            return HAILO_ERR_INVAL;
+        }
+        if (cfg->boundary_output_desc_list_iova == 0) {
+            WARN("hailo translator: HEF has boundary output edge "
+                 "(sys_index=%u) but cfg->boundary_output_desc_list_iova "
+                 "is 0", pad->sys_index);
+            return HAILO_ERR_INVAL;
+        }
+        struct hailo_cs_act_open_boundary_output_channel body = {
+            .packed_vdma_channel_id = (uint8_t)raw_vdma,
+            .host_buffer_info = {
+                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                .dma_address      = cfg->boundary_output_desc_list_iova,
+                .desc_page_size   = cfg->boundary_desc_page_size,
+                .total_desc_count = cfg->boundary_output_total_desc_count,
+                .bytes_in_pattern = 0,
+            },
+        };
+        (void)stream_index;   /* OUTPUT body omits stream_index today. */
+        return hailo_cs_builder_append(
+            b, HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
+            &body, sizeof(body));
+    }
+}
+
+static int translate_activation(const struct hef_info *info,
+                                const struct hailo_cs_translate_cfg *cfg,
+                                struct hailo_cs_builder *b)
+{
+    /* Step 1: BURST_CREDITS_TASK_RESET. */
+    int rc = hailo_cs_builder_append(b,
+                 HAILO_CS_ACT_BURST_CREDITS_TASK_RESET, NULL, 0);
+    if (rc != HAILO_OK) return rc;
+
+    /* Steps 2 & 3: walk pads, emit OpenBoundary per boundary edge.
+     * stream_index counts boundary pads per direction (0 = first
+     * input boundary, 0 = first output boundary, etc.). */
+    uint8_t input_stream_index  = 0;
+    uint8_t output_stream_index = 0;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *pad = &info->pads[i];
+        if (!pad->has_stream_info) continue;   /* internal pad, skip */
+
+        uint8_t stream_idx = pad->is_input ? input_stream_index
+                                           : output_stream_index;
+        rc = translate_open_boundary_for_pad(pad, cfg, stream_idx, b);
+        if (rc != HAILO_OK) return rc;
+        if (pad->is_input) input_stream_index++;
+        else               output_stream_index++;
+    }
+
+    return HAILO_OK;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -540,7 +664,7 @@ int hailo_cs_translate_contexts(
 
     /* ACTIVATION */
     hailo_cs_builder_init(&b, out->activation, sizeof(out->activation));
-    int rc = translate_activation(&b);
+    int rc = translate_activation(info, cfg, &b);
     if (rc != HAILO_OK) return rc;
     out->activation_len = hailo_cs_builder_size(&b);
 

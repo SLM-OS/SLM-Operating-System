@@ -101,6 +101,35 @@ struct hailo_cs_translate_cfg {
 
     /* Number of descriptors in the CCW list. */
     uint32_t ccw_total_desc_count;
+
+    /* ------------------------------------------------------------ *
+     * Boundary-channel descriptor lists (one for input, one for
+     * output). Populated by the caller (inference_device_hailo::
+     * load_model) with host-allocated VDMA descriptor lists, one
+     * per direction. The translator emits OPEN_BOUNDARY_INPUT_CHANNEL
+     * (for each boundary pad with is_input=true) and
+     * OPEN_BOUNDARY_OUTPUT_CHANNEL (is_input=false) in ACTIVATION,
+     * binding the descriptor lists to the VDMA channels firmware
+     * uses for the dataflow.
+     *
+     * Single-input / single-output MVP: only one of each direction
+     * is supported. Multi-stream HEFs will need this to become a
+     * small array indexed by stream_index.
+     *
+     * Zero-IOVA is treated as "no boundary of this direction in the
+     * HEF" — the translator skips emission. This lets a HEF with
+     * only an input boundary (or synthetic tests that skip the
+     * boundary path) work without requiring fake values.
+     * ------------------------------------------------------------ */
+    uint64_t boundary_input_desc_list_iova;
+    uint32_t boundary_input_total_desc_count;
+
+    uint64_t boundary_output_desc_list_iova;
+    uint32_t boundary_output_total_desc_count;
+
+    /* Boundary descriptor page size (shared by input + output today).
+     * Must match the programmed VDMA descriptor list's page size. */
+    uint16_t boundary_desc_page_size;
 };
 
 /*
