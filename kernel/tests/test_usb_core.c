@@ -1008,17 +1008,35 @@ static void reset_mock_and_clear_device_state(bool port_connected,
 
 static void test_core_reset_clears_device_without_touching_hcd(void)
 {
-    /* After a successful enumeration, usb_core_reset() must wipe the
-     * device slot but leave the registered HCD in place so subsequent
-     * tests don't need to re-register it. */
+    /* After a successful enumeration, usb_core_reset() must:
+     *   - fire hcd->device_close exactly once so HCD-side per-device
+     *     state is released (xHCI slot, NC contexts on the real path)
+     *   - wipe the device slot (first_device returns NULL)
+     *   - leave the registered HCD bound so subsequent tests don't
+     *     have to re-register it */
     reset_mock_and_clear_device_state(true, USB_SPEED_HIGH);
     TEST_ASSERT_EQUAL_INT(0, usb_core_start());
     TEST_ASSERT_NOT_NULL(usb_core_first_device());
     TEST_ASSERT_EQUAL_PTR(&mock_hcd_ops, usb_core_get_hcd());
+    int close_count_before = mock.device_close_count;
 
     usb_core_reset();
     TEST_ASSERT_NULL(usb_core_first_device());
     TEST_ASSERT_EQUAL_PTR(&mock_hcd_ops, usb_core_get_hcd());
+    TEST_ASSERT_EQUAL_INT(close_count_before + 1, mock.device_close_count);
+}
+
+static void test_core_reset_no_device_is_safe(void)
+{
+    /* With no device enumerated, usb_core_reset must NOT call
+     * device_close (there's nothing to close). Regression guard for
+     * the `root_device_present` branch in usb_core_reset. */
+    reset_mock_and_clear_device_state(false, USB_SPEED_UNKNOWN);
+    TEST_ASSERT_EQUAL_INT(0, mock.device_close_count);
+
+    usb_core_reset();
+    TEST_ASSERT_EQUAL_INT(0, mock.device_close_count);
+    TEST_ASSERT_NULL(usb_core_first_device());
 }
 
 static void test_hotplug_poll_no_hcd_is_safe(void)
@@ -1133,6 +1151,7 @@ int test_suite_usb_core(void)
     RUN_TEST(test_control_msg_returns_actual_length);
     RUN_TEST(test_control_msg_unknown_request_returns_error);
     RUN_TEST(test_core_reset_clears_device_without_touching_hcd);
+    RUN_TEST(test_core_reset_no_device_is_safe);
     RUN_TEST(test_hotplug_poll_no_hcd_is_safe);
     RUN_TEST(test_hotplug_poll_no_device_connected);
     RUN_TEST(test_hotplug_poll_enumerates_on_attach);

@@ -56,9 +56,21 @@ const struct usb_hcd *usb_core_get_hcd(void)
 
 void usb_core_reset(void)
 {
-    /* Wipe enumerated-device state. Keeps the registered HCD bound
-     * so tests don't have to re-register on every fixture reset —
-     * usb_core_register_hcd(NULL) is the separate knob for that. */
+    /* If a device is currently enumerated, ask its HCD to release the
+     * per-device resources (xHCI slot, NC contexts, transfer rings)
+     * before we zero the device struct. Without this, a caller who
+     * reached into production code to call usb_core_reset() would
+     * strand HCD-side state; the mock HCD treats device_close as a
+     * no-op counter increment, so tests see the same "device gone"
+     * end-state either way.
+     *
+     * Keeps the registered HCD bound so tests don't have to
+     * re-register on every fixture reset — usb_core_register_hcd(NULL)
+     * is the separate knob for that. */
+    if (root_device_present && active_hcd != NULL &&
+        active_hcd->device_close != NULL) {
+        active_hcd->device_close(&root_device);
+    }
     memset(&root_device, 0, sizeof(root_device));
     root_device_present = false;
 }
