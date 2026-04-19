@@ -145,7 +145,6 @@ static size_t build_request_wire(uint8_t *out,
  * (see docs/pi5-ai-hat-plan.md §6.4 for the CORE-CPU-async backdrop).
  */
 static volatile uint32_t control_msi_pending = 0;
-static bool control_msi_registered = false;
 
 static void control_msi_handler(void *ctx)
 {
@@ -218,26 +217,44 @@ static int wait_for_response(uint32_t timeout_us)
 }
 
 /*
- * Point ATR[0] at the Hailo-8 control-request section (device
- * address 0x60000000). The firmware sets this up post-boot on a
- * "clean" driver path (Linux polls for it in
- * hailo_pcie_is_firmware_loaded); our boot path uses the older
- * ATR[1] magic and may leave ATR[0] pointing at the last firmware
- * upload window (core_fw_header at 0xA0000). Force the correct
- * value on the first control op after boot.
+ * One-shot post-boot init for the control channel. Runs once on the
+ * first hailo_control_send_recv_locked call after firmware is up
+ * and does three things in order:
  *
- * Gated by `control_atr0_retargeted` so the 5-register reprogram
- * runs exactly once per driver lifetime. Originally called every
- * RPC, which is wasteful (the window doesn't move) and creates a
- * theoretical race where firmware's response-write could land
- * mid-reprogram. Tested on pi-5-1 fw v4.23 — the one-shot version
- * behaves identically to per-RPC retargeting (both get rc=0 on
- * ACTIVATION, both time out on BATCH_SWITCHING), but is cheaper.
+ *   1. Point ATR[0] at the Hailo-8 control-request section
+ *      (device address 0x60000000). The firmware sets this up on a
+ *      "clean" driver path (Linux polls for it in
+ *      hailo_pcie_is_firmware_loaded); our boot path uses the older
+ *      ATR[1] magic and may leave ATR[0] pointing at the last
+ *      firmware upload window (core_fw_header at 0xA0000).
+ *
+ *   2. Arm interrupts: OR BSC_ISTATUS_HOST_MASK into BSC_IMASK_HOST
+ *      so firmware's FW_CONTROL_IRQ is latchable, then W1C any stale
+ *      bits so we start from a known-quiet state. Matches
+ *      hailo_pcie_enable_interrupts in the Linux driver.
+ *
+ *   3. Register the MSI handler (hailo_platform->register_irq) so
+ *      wait_for_response's MSI-driven fast path works. Platforms
+ *      without register_irq (stub / test mock) stay on the polling
+ *      fallback; failure here is non-fatal.
+ *
+ * Was originally three independent one-shot flags; consolidated into
+ * a single control_post_boot_init_done gate because the three steps
+ * ALWAYS run together (any caller that needs one needs all three)
+ * and three separate booleans added noise without corresponding
+ * flexibility.
  */
-static bool control_atr0_retargeted = false;
-static void control_retarget_atr0(void)
+static bool control_post_boot_init_done = false;
+
+static void control_post_boot_init(void)
 {
-    if (control_atr0_retargeted) return;
+    if (control_post_boot_init_done) return;
+
+    /* ATR[0] retarget. Originally called every RPC, which is
+     * wasteful (the window doesn't move) and creates a theoretical
+     * race where firmware's response-write could land mid-reprogram.
+     * Hardware-verified identical behavior with one-shot vs per-RPC
+     * on pi-5-1 fw v4.23. */
     uint32_t atr0 = HAILO_ATR_BASE;
     hailo_platform->write32(HAILO_BAR_CONFIG,
                             atr0 + HAILO_ATR_OFF_PARAM,
@@ -253,47 +270,27 @@ static void control_retarget_atr0(void)
                             atr0 + HAILO_ATR_OFF_TRSL_PARAM,
                             HAILO_ATR_TRSL_AXI);
     hailo_platform->mb();
-    control_atr0_retargeted = true;
-}
 
-/*
- * One-shot interrupt setup. The firmware won't latch bits into
- * BCS_ISTATUS_HOST until the matching IMASK bits are enabled —
- * hailo_pcie_enable_interrupts in the Linux driver does exactly
- * this before any fw_control round-trip. Safe to call every
- * request (the mask OR-in is idempotent) but only the first call
- * matters on real hardware. Also clears any stale bits in the
- * ISTATUS / per-channel counter registers so we start each
- * request from a known-quiet state.
- */
-static bool control_irq_armed = false;
-static void control_arm_interrupts(void)
-{
-    if (!control_irq_armed) {
-        uint32_t mask = hailo_platform->read32(HAILO_BAR_CONFIG,
-                                               HAILO_BSC_IMASK_HOST);
-        mask |= HAILO_BSC_ISTATUS_HOST_MASK;
-        hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
-        hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
-                                0xFFFFFFFFu);
-        hailo_platform->mb();
-        control_irq_armed = true;
-    }
+    /* Arm interrupts. */
+    uint32_t mask = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                           HAILO_BSC_IMASK_HOST);
+    mask |= HAILO_BSC_ISTATUS_HOST_MASK;
+    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
+    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
+                            0xFFFFFFFFu);
+    hailo_platform->mb();
 
-    /* Register the MSI handler lazily, on first control send. Platforms
-     * without register_irq (stub / test mock / pre-MSI init) stay on
-     * the polling fallback in wait_for_response. Failure here is
-     * non-fatal — polling still works. Registration is one-shot via
-     * the pi5 side's "reject second call" guard, so we bind the
-     * exactly-once check here with control_msi_registered. */
-    if (!control_msi_registered && hailo_platform->register_irq) {
+    /* Register the MSI handler — non-fatal on failure. */
+    if (hailo_platform->register_irq) {
         int rc = hailo_platform->register_irq(control_msi_handler, NULL);
-        if (rc == HAILO_OK) {
-            control_msi_registered = true;
-        } else {
+        if (rc != HAILO_OK) {
             WARN("hailo: control MSI registration failed (%d); polling fallback", rc);
+            /* Mark done anyway — retry wouldn't help, and the
+             * polling fallback stays available. */
         }
     }
+
+    control_post_boot_init_done = true;
 }
 
 /*
@@ -352,11 +349,9 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                           uint32_t   *resp_len,
                                           uint32_t    timeout_us)
 {
-    /* Unmask interrupts (once) and ensure ATR[0] routes BAR4[0..]
-     * and BAR4[0x640..] to the firmware's request / response
-     * buffers. */
-    control_arm_interrupts();
-    control_retarget_atr0();
+    /* One-shot post-boot init: ATR[0] retarget + IMASK arm + MSI
+     * handler registration. Gated so subsequent RPCs skip the setup. */
+    control_post_boot_init();
 
     /* Clear any stale BCS_ISTATUS_HOST bits AND the MSI-pending flag
      * before firing the new doorbell. This is a strict pre-doorbell
@@ -502,9 +497,7 @@ void hailo_control_reset_state_for_tests(void)
 {
     __atomic_store_n(&control_sequence, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELAXED);
-    control_irq_armed        = false;
-    control_atr0_retargeted  = false;
-    control_msi_registered   = false;
+    control_post_boot_init_done = false;
 }
 
 int hailo_control_identify(struct hailo_control_identify_response *out)
