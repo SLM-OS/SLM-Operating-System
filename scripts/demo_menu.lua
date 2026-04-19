@@ -345,7 +345,7 @@ local function components_demo()
         -- the demo (publish + hot-swap) exercises it cleanly — just
         -- tell the user that is what is happening instead of leaving
         -- the ugly kernel warning unexplained.
-        local existing = slm.component_find and slm.component_find("sensor_monitor")
+        local existing = slm.component_find("sensor_monitor")
         if existing and existing >= 0 then
             note(string.format(
                 "sensor_monitor already running from a prior run (index %d) — reusing it",

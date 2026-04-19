@@ -193,6 +193,102 @@ static void test_idle_task_daif(void)
 #endif /* !PLATFORM_X86_64 */
 
 /* ============================================================================
+ * Unit Tests: task_slot() accessor (#321)
+ * ============================================================================ */
+
+/*
+ * task_slot(idx) returns the i-th entry of the task table directly,
+ * independent of the monotonic task-ID counter. Use case: iterating
+ * all live tasks from diagnostic code (`tasks`, `top`, slm.tasks(),
+ * /proc-like VFS listings) without missing tasks whose IDs have
+ * grown past MAX_TASKS.
+ */
+
+/* Bounds: task_slot returns NULL for out-of-range indices. */
+static void test_task_slot_out_of_range_returns_null(void)
+{
+    TEST_ASSERT_NULL(task_slot(MAX_TASKS));
+    TEST_ASSERT_NULL(task_slot(MAX_TASKS + 1));
+    TEST_ASSERT_NULL(task_slot(UINT32_MAX));
+}
+
+/* In-range: task_slot returns a non-NULL slot pointer for every valid
+ * index, whether or not the slot currently holds a live task. The
+ * empty-slot marker is t->id == 0 (per task_destroy). */
+static void test_task_slot_in_range_returns_slot(void)
+{
+    for (uint32_t i = 0; i < MAX_TASKS; i++) {
+        TEST_ASSERT_NOT_NULL_MESSAGE(task_slot(i),
+            "task_slot returned NULL for an in-range index");
+    }
+}
+
+/* Creating a task populates some slot; iterating via task_slot must
+ * find it by its name (not by id, which we do not control). */
+static void test_task_slot_finds_created_task(void)
+{
+    struct task *t = task_create_with_priority("slot_test",
+                                               nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+    uint32_t created_id = t->id;
+    TEST_ASSERT_NOT_EQUAL(0, created_id);
+
+    bool found = false;
+    for (uint32_t i = 0; i < MAX_TASKS; i++) {
+        struct task *s = task_slot(i);
+        if (s && s->id == created_id) {
+            found = true;
+            break;
+        }
+    }
+    TEST_ASSERT_MESSAGE(found,
+        "task_slot iteration did not find the just-created task");
+
+    /* Clean up */
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/*
+ * After task_destroy, the slot that held the task is marked free via
+ * t->id == 0 (see task.c:586-587). Iterating via task_slot must skip
+ * that slot based on id==0, NOT state, because state stays
+ * TASK_TERMINATED on freed slots (state is not reset by task_destroy).
+ */
+static void test_task_slot_skips_freed_by_id(void)
+{
+    struct task *t = task_create_with_priority("slot_free_test",
+                                               nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    /* Capture the pointer to the exact slot this task occupies so we
+     * can find it again after destroy. */
+    struct task *slot_ptr = t;
+    uint32_t created_id = t->id;
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+
+    /* Same slot pointer is still valid; id has been zeroed. */
+    TEST_ASSERT_EQUAL_UINT32(0, slot_ptr->id);
+
+    /* A fresh iteration via task_slot must not re-discover the now-free
+     * slot under its old id. */
+    for (uint32_t i = 0; i < MAX_TASKS; i++) {
+        struct task *s = task_slot(i);
+        if (s == slot_ptr) {
+            TEST_ASSERT_MESSAGE(s->id == 0,
+                "Freed slot kept non-zero id after task_destroy");
+            /* id==0 means "skip" per the documented contract. */
+            TEST_ASSERT_MESSAGE(s->id != created_id,
+                "Freed slot still reports the original task id");
+        }
+    }
+}
+
+/* ============================================================================
  * Unit Tests: Deadline Boost Logic
  * ============================================================================ */
 
@@ -3801,6 +3897,12 @@ int test_suite_scheduler(void)
     RUN_TEST(test_task_create_multiple_all_irq_masked);
     RUN_TEST(test_idle_task_daif);
 #endif
+
+    /* Unit tests: task_slot() accessor (#321) */
+    RUN_TEST(test_task_slot_out_of_range_returns_null);
+    RUN_TEST(test_task_slot_in_range_returns_slot);
+    RUN_TEST(test_task_slot_finds_created_task);
+    RUN_TEST(test_task_slot_skips_freed_by_id);
 
     /* Unit tests: Deadline boost logic */
     RUN_TEST(test_no_deadline_no_boost);

@@ -47,12 +47,10 @@ local t_start = slm.uptime()
 -- a subscriber, every alert emits a warning that clutters the demo
 -- output. The stub callback just counts alerts for the closing summary.
 local alert_count = 0
-if slm.msg_subscribe then
-    slm.msg_subscribe("/alerts/threshold", function(_topic, data)
-        alert_count = alert_count + 1
-        P(string.format("    [alert-consumer] received: %s", data))
-    end)
-end
+slm.msg_subscribe("/alerts/threshold", function(_topic, data)
+    alert_count = alert_count + 1
+    P(string.format("    [alert-consumer] received: %s", data))
+end)
 
 -- ================================================================
 

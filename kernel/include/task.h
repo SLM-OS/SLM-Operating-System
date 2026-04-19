@@ -265,9 +265,13 @@ struct task *task_get(uint32_t id);
  * iterating with task_get(0..MAX_TASKS-1) misses any task whose ID
  * has grown past MAX_TASKS.
  *
- * Returns: Pointer to the slot (caller must check t->id == 0 /
- * t->state == TASK_TERMINATED to skip empty slots), or NULL if the
- * index is out of range.
+ * Returns the raw slot pointer. Callers MUST check t->id == 0 to skip
+ * empty slots — task_destroy() zeros the id field as its free-slot
+ * marker (task.c "Clear task slot (marks as free: id == 0)"). The
+ * t->state field is NOT reset on destroy (it stays TASK_TERMINATED)
+ * so a state check alone is insufficient; id == 0 is authoritative.
+ *
+ * Returns NULL only if idx is out of range.
  */
 struct task *task_slot(uint32_t idx);
 
