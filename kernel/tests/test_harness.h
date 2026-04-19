@@ -110,6 +110,9 @@ int test_suite_xhci_device(void);
 /* TRB builder tests (Phase 3A Step 6 + 7b) */
 int test_suite_xhci_xfer(void);
 
+/* Tegra padctl register-offset + port-mapping tests (#334 Tier 1) */
+int test_suite_tegra_padctl(void);
+
 /* Lua scripting tests */
 int test_suite_lua(void);
 

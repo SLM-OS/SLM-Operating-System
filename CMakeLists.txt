@@ -519,6 +519,10 @@ set(KERNEL_SOURCES
     kernel/drivers/usb/xhci/xhci_device.c
     kernel/drivers/usb/xhci/xhci_ring.c
     kernel/drivers/usb/xhci/xhci_xfer.c
+    # Tegra234 padctl per-port UTMI PHY power-cycle helper (#334 Tier 1).
+    # Body behind PLATFORM_JETSON_ORIN_NANO; the non-Jetson stub keeps
+    # the test build linking when host tests include the header.
+    kernel/drivers/usb/xhci/tegra_padctl.c
     # Jetson EL1 smoke test (one-shot diagnostic) — JETSON_EL1_SMOKE
     $<$<AND:$<BOOL:${JETSON_EL1_SMOKE}>,$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>>:kernel/tests/jetson_el1_smoke.S>
     # Platform-independent networking stack
@@ -595,6 +599,8 @@ set(TEST_SOURCES
     kernel/tests/test_xhci_device.c
     # TRB builders for control / bulk (Phase 3A Step 6 + 7b of #266).
     kernel/tests/test_xhci_xfer.c
+    # Tegra padctl register-offset + port-mapping pinning (#334 Tier 1).
+    kernel/tests/test_tegra_padctl.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_lua.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>

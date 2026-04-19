@@ -2583,6 +2583,8 @@ int cmd_poke(int argc, char *argv[])
 }
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "../drivers/usb/xhci/tegra_padctl.h"
+
 /*
  * xhci - Show Tegra XHCI host-controller info (#266 Phase 3A).
  *
@@ -2590,18 +2592,26 @@ int cmd_poke(int argc, char *argv[])
  *                           USBSTS / PAGESIZE.
  *   xhci port-cycle <n>     Diagnostic: toggle PORTSC[n].PP off → on
  *                           and log before / during / after values.
- *                           Used to characterize which ports actually
- *                           re-evaluate physical state after a power
- *                           cycle (see #309, #334).
+ *                           Operates at the xHCI controller level —
+ *                           the Falcon may not actually re-poll the
+ *                           PHY after this (see #309, #334).
+ *   xhci phy-cycle <n>      Diagnostic: invoke the padctl UTMI PHY
+ *                           power-cycle helper for the USB 2 pad
+ *                           backing PORTSC[n]. `n` must be a USB 2
+ *                           port index (4..7). Operates one level
+ *                           deeper than port-cycle — actually powers
+ *                           down and back up the analog PHY (#334
+ *                           Tier 1).
  */
 int cmd_xhci(int argc, char *argv[])
 {
     extern bool xhci_dump_info(void);
     extern bool xhci_port_cycle(uint8_t port);
 
-    if (argc >= 2 && strcmp(argv[1], "port-cycle") == 0) {
+    if (argc >= 2 && (strcmp(argv[1], "port-cycle") == 0 ||
+                      strcmp(argv[1], "phy-cycle") == 0)) {
         if (argc < 3) {
-            shell_puts("usage: xhci port-cycle <port-index>\r\n");
+            shell_printf("usage: xhci %s <port-index>\r\n", argv[1]);
             return -1;
         }
         /* Simple decimal parse — all valid ports are single digit today. */
@@ -2612,15 +2622,31 @@ int cmd_xhci(int argc, char *argv[])
             s++;
         }
         if (*s != '\0' || port < 0 || port > 255) {
-            shell_puts("xhci port-cycle: bad port index\r\n");
+            shell_printf("xhci %s: bad port index\r\n", argv[1]);
             return -1;
         }
-        if (!xhci_port_cycle((uint8_t)port)) {
-            shell_puts("xhci port-cycle: failed (xhci not live or port "
-                       "out of range)\r\n");
-            return -1;
+
+        if (strcmp(argv[1], "port-cycle") == 0) {
+            if (!xhci_port_cycle((uint8_t)port)) {
+                shell_puts("xhci port-cycle: failed (xhci not live or "
+                           "port out of range)\r\n");
+                return -1;
+            }
+        } else {
+            /* phy-cycle: port is the xHCI PORTSC index; translate to
+             * padctl pad index and reject non-USB2 ports. */
+            if (!tegra_padctl_portsc_is_usb2((uint8_t)port)) {
+                shell_printf("xhci phy-cycle: PORTSC[%d] is not a USB 2 "
+                             "port (must be 4..7)\r\n", port);
+                return -1;
+            }
+            unsigned pad = tegra_padctl_portsc_to_pad((uint8_t)port);
+            if (!tegra_padctl_usb2_phy_cycle(pad)) {
+                shell_puts("xhci phy-cycle: padctl cycle failed\r\n");
+                return -1;
+            }
         }
-        /* Success: the before/after values are logged via INFO. */
+        /* Success: before/after values are logged via INFO. */
         return 0;
     }
 
