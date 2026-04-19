@@ -29,13 +29,14 @@ int hailo_cs_builder_append(struct hailo_cs_builder *b,
     const size_t need = sizeof(struct hailo_cs_common_action_header) + body_len;
     if (b->used + need > b->capacity) return HAILO_ERR_NOMEM;
 
-    /* Write the 5-byte common header. action_type is u8 on the wire
-     * (hailort's enum is packed); time_stamp is u32 host-chosen and
-     * zero is fine for non-tracing runs. */
-    struct hailo_cs_common_action_header hdr = {
-        .action_type = (uint8_t)type,
-        .time_stamp  = 0,
-    };
+    /* Write the 8-byte common header. action_type is u8 on the wire,
+     * followed by 3 pad bytes (natural alignment before u32
+     * time_stamp — see hailo_cs_common_action_header comment for
+     * why this is 8 not 5). Zero the whole thing first so the pad
+     * bytes are reproducible and the default time_stamp is 0. */
+    struct hailo_cs_common_action_header hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.action_type = (uint8_t)type;
     memcpy(b->buf + b->used, &hdr, sizeof(hdr));
     b->used += sizeof(hdr);
 

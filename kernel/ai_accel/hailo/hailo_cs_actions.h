@@ -91,16 +91,28 @@ enum hailo_cs_edge_direction {
 };
 
 /* Common header that precedes every action body on the wire.
- * action_type is u8 (the enum is packed to u8 in hailort's defs).
- * time_stamp is host-chosen — firmware uses it for tracing only;
- * zero is acceptable. */
+ *
+ * IMPORTANT: 8 bytes, NOT 5. The enum type is packed to u8 via
+ * __attribute__((packed)) on the enum declaration itself, but the
+ * firmware-side struct is NOT __attribute__((packed)) — and
+ * despite the outer #pragma pack(1) region, the firmware compiles
+ * this struct with natural alignment, inserting 3 pad bytes before
+ * `time_stamp`. Confirmed on pi-5-1 fw v4.23: 5-byte headers
+ * produce `0x40130016` (MISALIGNMENT_ERROR_WHILE_READING_ACTIONS).
+ *
+ * Layout on the wire:
+ *   [0]       action_type (u8)
+ *   [1..3]    padding (ignored; emitted as zero)
+ *   [4..7]    time_stamp (u32 native LE; zero is fine for tracing-off)
+ */
 struct hailo_cs_common_action_header {
     uint8_t  action_type;
+    uint8_t  _pad[3];
     uint32_t time_stamp;
-} __attribute__((packed));
+};
 
-_Static_assert(sizeof(struct hailo_cs_common_action_header) == 5,
-               "common_action_header must be 5 bytes");
+_Static_assert(sizeof(struct hailo_cs_common_action_header) == 8,
+               "common_action_header must be 8 bytes on the wire");
 
 /* CONTROL_PROTOCOL__host_buffer_info_t. Embedded inside ACTIVATE_*
  * actions so firmware can DMA-pull data from our host-side

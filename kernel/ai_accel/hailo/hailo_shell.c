@@ -726,30 +726,45 @@ static int cmd_hailo(int argc, char *argv[])
         (void)ccw_descs;
 
         /* Firmware enforces strict ACTIVATION → BATCH_SWITCHING →
-         * PRELIMINARY → DYNAMIC × N order; skipping returns
-         * 0x4013006e (UNEXPECTED_CONTEXT_ORDER). Use minimum 5-byte
-         * APPLICATION_CHANGE_INTERRUPT stub for the two preambles
-         * (no body required) and the DYNAMIC tail — just enough
-         * to satisfy the ordering constraint. The PRELIMINARY
-         * context carries the real ACTIVATE_CFG_CHANNEL +
-         * FETCH_CCW_BURSTS actions. */
-        uint8_t stub_buf[16];
-        struct hailo_cs_builder stub;
-        hailo_cs_builder_init(&stub, stub_buf, sizeof(stub_buf));
-        (void)hailo_cs_builder_append(&stub,
-                                      HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+         * PRELIMINARY → DYNAMIC × N order AND specific per-context
+         * action types. APPLICATION_CHANGE_INTERRUPT is zero-body
+         * but only legal at the tail of the final DYNAMIC.
+         * Per-context minimums per HailoRT's fill_* functions:
+         *   ACTIVATION:      ResetBurstCreditsTask (zero body)
+         *   BATCH_SWITCHING: ResetDdrBufferingTask + StartBurstCreditsTask
+         *   PRELIMINARY:     ActivateCfgChannel + FetchCcwBursts
+         *   DYNAMIC:         APPLICATION_CHANGE_INTERRUPT at tail */
+        uint8_t act_buf[16];
+        struct hailo_cs_builder act_b;
+        hailo_cs_builder_init(&act_b, act_buf, sizeof(act_buf));
+        (void)hailo_cs_builder_append(&act_b,
+                                      HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
                                       NULL, 0);
 
-        shell_puts("  [3/6] SET_CONTEXT_INFO(ACTIVATION, 5-byte stub)...\n");
+        shell_printf("  [3/6] SET_CONTEXT_INFO(ACTIVATION, %u bytes: "
+                     "BURST_CREDITS_TASK_RESET)\n",
+                     (unsigned)hailo_cs_builder_size(&act_b));
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_ACTIVATION,
-                                            hailo_cs_builder_data(&stub),
-                                            (uint32_t)hailo_cs_builder_size(&stub));
+                                            hailo_cs_builder_data(&act_b),
+                                            (uint32_t)hailo_cs_builder_size(&act_b));
         shell_printf("        rc=%d\n", rc);
 
-        shell_puts("  [4/6] SET_CONTEXT_INFO(BATCH_SWITCHING, 5-byte stub)...\n");
+        uint8_t bs_buf[32];
+        struct hailo_cs_builder bs_b;
+        hailo_cs_builder_init(&bs_b, bs_buf, sizeof(bs_buf));
+        (void)hailo_cs_builder_append(&bs_b,
+                                      HAILO_CS_ACT_DDR_BUFFERING_RESET,
+                                      NULL, 0);
+        (void)hailo_cs_builder_append(&bs_b,
+                                      HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                                      NULL, 0);
+
+        shell_printf("  [4/6] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes: "
+                     "DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START)\n",
+                     (unsigned)hailo_cs_builder_size(&bs_b));
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING,
-                                            hailo_cs_builder_data(&stub),
-                                            (uint32_t)hailo_cs_builder_size(&stub));
+                                            hailo_cs_builder_data(&bs_b),
+                                            (uint32_t)hailo_cs_builder_size(&bs_b));
         shell_printf("        rc=%d\n", rc);
 
         uint8_t ctx_buf[256];
@@ -786,10 +801,22 @@ static int cmd_hailo(int argc, char *argv[])
                                             (uint32_t)hailo_cs_builder_size(&b));
         shell_printf("        rc=%d\n", rc);
 
-        shell_puts("  [6/6] SET_CONTEXT_INFO(DYNAMIC, 5-byte stub)...\n");
+        /* DYNAMIC: single APPLICATION_CHANGE_INTERRUPT tail marker.
+         * This is the legal tail-only zero-body action for
+         * single-dynamic-context loads per HailoRT. */
+        uint8_t dyn_buf[16];
+        struct hailo_cs_builder dyn_b;
+        hailo_cs_builder_init(&dyn_b, dyn_buf, sizeof(dyn_buf));
+        (void)hailo_cs_builder_append(&dyn_b,
+                                      HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                                      NULL, 0);
+
+        shell_printf("  [6/6] SET_CONTEXT_INFO(DYNAMIC, %u bytes: "
+                     "APPLICATION_CHANGE_INTERRUPT tail)\n",
+                     (unsigned)hailo_cs_builder_size(&dyn_b));
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_DYNAMIC,
-                                            hailo_cs_builder_data(&stub),
-                                            (uint32_t)hailo_cs_builder_size(&stub));
+                                            hailo_cs_builder_data(&dyn_b),
+                                            (uint32_t)hailo_cs_builder_size(&dyn_b));
         shell_printf("        rc=%d\n", rc);
 
         hailo_vdma_desc_list_free(&ccw_list);

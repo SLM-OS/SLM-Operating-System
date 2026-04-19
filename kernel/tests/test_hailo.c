@@ -2061,8 +2061,11 @@ static void test_set_context_info_chunk_rejects_null_with_nonzero_len(void)
 
 static void test_cs_builder_append_emits_header_then_body(void)
 {
-    /* Single FETCH_CCW_BURSTS action: 5-byte common header + 3-byte
-     * body = 8 bytes total. Verify layout byte-for-byte. */
+    /* Single FETCH_CCW_BURSTS action: 8-byte common header + 3-byte
+     * body = 11 bytes total. Verify layout byte-for-byte. Header is
+     * 8 bytes (not 5) because natural alignment inserts 3 pad bytes
+     * between the u8 action_type and the u32 time_stamp — see
+     * hailo_cs_common_action_header in hailo_cs_actions.h. */
     uint8_t buf[32];
     struct hailo_cs_builder b;
     hailo_cs_builder_init(&b, buf, sizeof(buf));
@@ -2074,28 +2077,32 @@ static void test_cs_builder_append_emits_header_then_body(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS,
                                 &body, sizeof(body)));
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, hailo_cs_builder_size(&b));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)11, hailo_cs_builder_size(&b));
 
     /* [0]=action_type (u8) = 27 (FETCH_CCW_BURSTS)
-     * [1..4]=time_stamp (u32 native LE) = 0
-     * [5..6]=ccw_bursts (u16 native LE) = 0x1234
-     * [7]=config_stream_index (u8) = 7 */
+     * [1..3]=pad (3 bytes, zero)
+     * [4..7]=time_stamp (u32 native LE) = 0
+     * [8..9]=ccw_bursts (u16 native LE) = 0x1234
+     * [10]=config_stream_index (u8) = 7 */
     const uint8_t *d = hailo_cs_builder_data(&b);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS, d[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, d[1]);
+    TEST_ASSERT_EQUAL_UINT8(0, d[2]);
+    TEST_ASSERT_EQUAL_UINT8(0, d[3]);
     uint32_t ts;
-    memcpy(&ts, d + 1, 4);
+    memcpy(&ts, d + 4, 4);
     TEST_ASSERT_EQUAL_UINT32(0, ts);
     uint16_t bursts;
-    memcpy(&bursts, d + 5, 2);
+    memcpy(&bursts, d + 8, 2);
     TEST_ASSERT_EQUAL_UINT16(0x1234, bursts);
-    TEST_ASSERT_EQUAL_UINT8(7, d[7]);
+    TEST_ASSERT_EQUAL_UINT8(7, d[10]);
 }
 
 static void test_cs_builder_appends_concatenate(void)
 {
-    /* Three actions back-to-back: ACTIVATE_CFG_CHANNEL (21 B body),
-     * FETCH_CCW_BURSTS (3 B body), DEACTIVATE_CFG_CHANNEL (2 B body).
-     * Total with 5-byte common headers: 26 + 8 + 7 = 41 bytes. */
+    /* Three actions back-to-back with 8-byte common headers:
+     * ACTIVATE_CFG_CHANNEL (21 B body), FETCH_CCW_BURSTS (3 B body),
+     * DEACTIVATE_CFG_CHANNEL (2 B body). Total: 29 + 11 + 10 = 50. */
     uint8_t buf[128];
     struct hailo_cs_builder b;
     hailo_cs_builder_init(&b, buf, sizeof(buf));
@@ -2120,24 +2127,24 @@ static void test_cs_builder_appends_concatenate(void)
         hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &a2, sizeof(a2)));
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_builder_append(&b, HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, &a3, sizeof(a3)));
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)26 + 8 + 7, hailo_cs_builder_size(&b));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)29 + 11 + 10, hailo_cs_builder_size(&b));
 
     const uint8_t *d = hailo_cs_builder_data(&b);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,   d[0]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,       d[26]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, d[26 + 8]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,       d[29]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, d[29 + 11]);
 
-    /* host_buffer_info.dma_address starts at offset 5 (common hdr) +
+    /* host_buffer_info.dma_address starts at offset 8 (common hdr) +
      * 2 (packed_vdma_channel_id + config_stream_index) + 1 (buffer_type)
-     * = offset 8. It's a u64 native LE. */
+     * = offset 11. It's a u64 native LE. */
     uint64_t dma_addr;
-    memcpy(&dma_addr, d + 8, 8);
+    memcpy(&dma_addr, d + 11, 8);
     TEST_ASSERT_EQUAL_UINT64(0x123456789ABCDEF0ull, dma_addr);
 }
 
 static void test_cs_builder_returns_nomem_on_overflow(void)
 {
-    uint8_t small[6];   /* Too small for one 5+3=8 byte action. */
+    uint8_t small[10];   /* Too small for one 8+3=11 byte action. */
     struct hailo_cs_builder b;
     hailo_cs_builder_init(&b, small, sizeof(small));
     struct hailo_cs_act_fetch_ccw_bursts body = { .ccw_bursts = 1, .config_stream_index = 0 };
