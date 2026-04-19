@@ -24,6 +24,7 @@
 #include "smp.h"
 #include "slm_ffi.h"
 #include "debug.h"
+#include <string.h>
 
 /* Per-policy statistics */
 struct ai_policy_stats {
@@ -382,6 +383,44 @@ void ai_policy_hailo_set_model_placeholder(inference_model_handle_t handle,
 {
     ai_policy_hailo_set_model(handle, 1.0f/128.0f, 0, 1.0f/128.0f, 0,
                               input_n, output_n);
+}
+
+/* Raw-bit-pattern entry point — see header for rationale. */
+int ai_policy_hailo_set_model_from_raw(inference_model_handle_t handle,
+                                       uint32_t input_scale_raw,
+                                       uint32_t input_zp_raw,
+                                       uint32_t output_scale_raw,
+                                       uint32_t output_zp_raw,
+                                       uint32_t input_n, uint32_t output_n)
+{
+    float in_scale, in_zp, out_scale, out_zp;
+    /* Reinterpret the 32-bit IEEE-754 bit patterns as floats without
+     * triggering the undefined-behavior aliasing that pointer-casts
+     * would; memcpy is the standard C way to punt on this. */
+    memcpy(&in_scale,  &input_scale_raw,  4);
+    memcpy(&in_zp,     &input_zp_raw,     4);
+    memcpy(&out_scale, &output_scale_raw, 4);
+    memcpy(&out_zp,    &output_zp_raw,    4);
+
+    /* Reject degenerate values that would crash the quantize loop
+     * (x / 0 → inf) or produce garbage. Caller falls back to the
+     * placeholder setter on -1 without mutating state. */
+    if (!(in_scale > 0.0f) || !(out_scale > 0.0f)) return -1;
+    if (in_scale != in_scale || out_scale != out_scale) return -1;  /* NaN */
+
+    /* Clamp zero-point to the int8 range. Hailo emits integer values
+     * as floats; the scheduler MLP's int8 output has zp in [-128,127]. */
+    int32_t in_zpi  = (int32_t)in_zp;
+    int32_t out_zpi = (int32_t)out_zp;
+    if (in_zpi  < -128) in_zpi  = -128;
+    if (in_zpi  >  127) in_zpi  =  127;
+    if (out_zpi < -128) out_zpi = -128;
+    if (out_zpi >  127) out_zpi =  127;
+
+    ai_policy_hailo_set_model(handle, in_scale, (int8_t)in_zpi,
+                              out_scale, (int8_t)out_zpi,
+                              input_n, output_n);
+    return 0;
 }
 
 static int ai_hailo_init(void)

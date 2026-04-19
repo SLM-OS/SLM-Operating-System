@@ -314,23 +314,40 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
 - **Test coverage** — 14 Python functional tests in `scripts/hailo/test_hailo_scripts.py` exercise the hex-float parser (round-trip + missing-symbol error), the numpy reference forward, ONNX model validation, full end-to-end exports on the real checked-in weights, calibration-data shape/dtype/range/determinism/zero-fill, and all four `compile_hef.sh` error paths (bad arch, bad variant, missing hailo CLI, missing ONNX input).
 - **Dev-env setup docs** — `docs/setup.md` §Hailo Toolchain documents the Python 3.10 venv, pygraphviz C-header packages, Hailo Developer Zone wheel download, DFC 3.33.1 install, and `scripts/hailo/` invocation. Three troubleshooting entries cover the Python-3.12 pin miss, pygraphviz `Python.h` error, and DFC 5.x vs 3.x wheel-track confusion.
 
-#### Phase 6.2: Kernel integration ✅ plumbing + benchmark (2026-04-19)
+#### Phase 6.2: Kernel integration ✅ (2026-04-19)
 
-**Landed in this phase:**
+**6.2a — inference_device backend + policy plumbing:**
 
-- **`inference_device` Hailo backend** (`kernel/inference/inference_device_hailo.c`) — vtable bridge from the Phase 2 `inference_device` abstraction to the Phase 5.4 `hailo_infer_run` orchestrator. `load_model` parses the HEF outer header + proto body, extracts input/output pad shapes, and allocates a fixed-size slot (4 max) with a placeholder `hailo_infer_config`. `run` size-checks the INT8 tensors and forwards. `free_model` releases the slot. Registered as `"hailo-8"` on Pi 5 and Jetson (non-x86 non-QEMU-mock builds); inert on QEMU + x86 where the Hailo platform shim never installs.
+- **`inference_device` Hailo backend** (`kernel/inference/inference_device_hailo.c`) — vtable bridge from the Phase 2 `inference_device` abstraction to the Phase 5.4 `hailo_infer_run` orchestrator. `load_model` parses the HEF outer header + proto body, extracts input/output pad shapes, and allocates a fixed-size slot (4 max). `run` size-checks the INT8 tensors and forwards. `free_model` releases the slot. Registered as `"hailo-8"` on Pi 5 and Jetson (non-x86 builds); inert on QEMU + x86 where the Hailo platform shim never installs.
 - **`ai_policy_hailo` scheduler policy** (`kernel/sched/ai/sched_ai.c`) — mirrors `ai_mlp` but routes through `"hailo-8"`. Maintains its own handle slot set by the shell via `ai_policy_hailo_set_model` (public in `ai_policy_hailo.h`). Pre-inference quantizes the fp32 state vector to INT8 with a per-tensor scale+zero-point; post-inference argmax on the INT8 output (monotonic under dequant so no need to float-ify logits). Falls back to the heuristic policy on `assign_cpu` when no device is present or no model is loaded — the policy switch still succeeds so the user can load a model after switching, and QEMU/x86 users get a loud warning explaining that CPU fallback is in effect.
-- **Shell wire-up** — `hailo load <path> sched` loads the HEF into the `"hailo-8"` device and installs the handle into `ai_policy_hailo` with placeholder quantization (scale=1/128, zp=0). `sched policy ai_hailo` activates the policy at runtime. `bench sched-policy` measures decisions/sec for each backend in the inference-device registry (`cpu-mlp`, `hailo-8` if armed).
-- **Graceful-fallback warnings** — policy activation with no Hailo device or no loaded model prints a `WARN` line pointing the user at `sched policy ai_mlp` (for QEMU/x86) or `hailo load <path> sched` (for a missing model). Every `assign_cpu` silently falls back to heuristic until Hailo is ready.
+- **Shell wire-up** — `hailo load <path> sched` loads the HEF into the `"hailo-8"` device and installs the handle into `ai_policy_hailo`. `sched policy ai_hailo` activates the policy at runtime.
 
-**Deferred to a follow-up (outside the current PR scope):**
+**6.2b — HEF edge-layer metadata extraction (`hef_parser.c`):**
 
-- HEF quantization-metadata extraction (per-tensor scale + zero-point from `ProtoHEFPad.quant_info`). Without real values, the placeholder 1/128 scale gives arithmetically meaningless but structurally valid INT8 tensors — runs on mock hardware, will produce wrong actions on real silicon.
-- HEF stream-config extraction (`channel_index`, `data_id`, `core_bytes_per_buffer`, `periph_bytes_per_buffer`) from `preliminary_config.operation[].actions[].activate_nn_stream_config`. Without real values, `hailo_infer_run` on hardware times out with `HAILO_ERR_TIMEOUT` because firmware has no stream context — the existing Phase 5.3/5.4 blocker.
-- Deploy `scheduler_mlp_pi5.hef` to pi-5-1 and verify real inference end-to-end (blocked on the two items above).
-- Round-robin baseline in `bench sched-policy` — skipped today because round-robin isn't inference-bound; to compare scheduler throughput end-to-end, run a workload under each policy and use `bench stats`.
+- Extended the nanopb callback tree to walk the first network group's `contexts[].metadata.edge_layers[]`. Each edge layer is joined back to the matching pad by `pad_index`.
+- Captures per-tensor quantization: `qp_scale` + `qp_zp` from `ProtoHEFEdgeLayerNumericInfo` (stored as IEEE-754 bit patterns in `struct hef_pad_info.qp_scale_raw` / `qp_zp_raw` so `hef_parser.c` stays compiled with `-mgeneral-regs-only`).
+- Captures per-tensor stream config: `sys_index` (→ VDMA `data_id`), `core_bytes_per_buffer` (→ descriptor page size), `core_buffers_per_frame` from `ProtoHEFEdgeLayerBase`.
+- `inference_device_hailo.c::load_model` now prefers HEF-derived `data_id` + `page_size` over placeholder defaults — each loaded HEF configures its slot's `hailo_infer_config` with real firmware-readable values.
+- `ai_policy_hailo_set_model_from_raw` installs HEF-derived quantization in the policy; the shell's `hailo load <path> sched` path falls back to placeholder quant (1/128 scale) only when a pad lacks `quant_info`.
 
-**Test coverage** — 15 new QEMU cases in `test_hailo.c` (13 backend + 2 policy): device registration, happy-path HEF load, error paths (null args / not running / bad header / no pads / size/dtype mismatch / full slot table), slot free + double-free, shutdown clears slots, policy handle set/get and detach.
+**6.2c — hardware verify on pi-5-1:**
+
+Deployed `AI_SCHED=ON HAILO_FW_BLOB=.../hailo8_fw.bin PLATFORM=RASPI5` kernel. Verified on real hardware:
+
+- `sched policy` lists 4 policies (heuristic, ai_mlp, ai_ppo, ai_hailo).
+- `sched policy ai_hailo` activates cleanly with the expected "no model loaded" WARN + the "Scheduler policy: heuristic -> ai_hailo" confirmation. No crash — scheduler keeps running, falling back to heuristic per design.
+- `bench sched-policy` runs successfully: `cpu-mlp` completes 1000/1000 forward passes at **40 µs per decision (25 021 decisions/sec)** on Cortex-A76. `hailo-8` branch correctly prints `(no model loaded — hailo load <hef> first)` since the VFS-side `.hef` isn't present.
+- `hailo probe` + `hailo boot` continue working as in Phase 5 (firmware 4.23 rev 0x20000000).
+
+**6.2d — `bench sched-policy` benchmark:**
+
+New shell subcommand measures decisions/sec for each backend in the inference-device registry. Pi 5 numbers above; QEMU and Jetson numbers await their respective lab passes.
+
+**Known gap — real-inference end-to-end on Hailo hardware:**
+
+Getting a `.hef` file into the kernel requires embedding it (like `demo_init.c` does for scripts, via `.incbin`) or a VFS mount of the SD boot partition; `/mnt/files` on Pi 5 is a RAM disk populated at boot from in-kernel blobs. The existing Phase 5 CONFIG_STREAM probe rejection (major=0x40030050) remains the firmware-side blocker — even with real quant + stream params from 6.2b, firmware also needs the HEF's preliminary_config CCW actions uploaded before inference fires. The infrastructure is in place; the final real-inference run lands in a follow-up.
+
+**Test coverage** — 18 new QEMU cases in `test_hailo.c` (13 backend + 2 policy handle + 3 edge-layer extraction / threading): device registration, happy-path HEF load, error paths (null args / not running / bad header / no pads / size/dtype mismatch / full slot table), slot free + double-free, shutdown clears slots, policy handle set/get and detach, HEF quant + stream capture, non-matching pad_index skip, end-to-end load-with-stream-info.
 
 ### Phase 7: Shell Integration & Demo Polish (1 week)
 

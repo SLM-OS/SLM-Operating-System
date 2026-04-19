@@ -164,20 +164,39 @@ static int hailo_backend_load_model(struct inference_device *dev,
     }
     if (idx < 0) return INF_ERR_FULL;
 
+    /* Stream parameters — prefer HEF-derived values (Phase 6.2b),
+     * fall back to placeholders that work under the mock but time
+     * out on real hardware. Channel indices are host-chosen; we use
+     * 0 for input and 1 for output (standard convention).
+     *
+     * data_id mirrors the HEF's sys_index — firmware uses it to
+     * route DMA to the correct on-chip buffer. Without the HEF
+     * value the kernel sends 0, which the NPU rejects with a
+     * stream-not-configured status.
+     *
+     * page_size is core_bytes_per_buffer for the input and the
+     * periph side for the output; without HEF values we fall back
+     * to 512 B which only happens to work for models whose real
+     * buffer size is a multiple of it. */
+    uint8_t  in_data_id   = in_pad->has_stream_info  ? (uint8_t) in_pad->sys_index
+                                                     : 0;
+    uint8_t  out_data_id  = out_pad->has_stream_info ? (uint8_t)out_pad->sys_index
+                                                     : 0;
+    uint16_t in_page_size = in_pad->has_stream_info && in_pad->core_bytes_per_buffer
+                              ? (uint16_t)in_pad->core_bytes_per_buffer : 512;
+    uint16_t out_page_size = out_pad->has_stream_info && out_pad->core_bytes_per_buffer
+                               ? (uint16_t)out_pad->core_bytes_per_buffer : 512;
+
     slots[idx].in_use = true;
     slots[idx].cfg = (struct hailo_infer_config){
         .input_bytes      = input_bytes,
         .output_bytes     = output_bytes,
-        /* TODO(Phase 6.2b): replace placeholder channel/data_id/page_size
-         * with values extracted from CONFIG_STREAM responses. These
-         * defaults cause HAILO_ERR_TIMEOUT on real hardware and succeed
-         * only under the mock_vdma_auto_advance test path. */
         .input_channel    = 0,
         .output_channel   = 1,
-        .input_data_id    = 0,
-        .output_data_id   = 0,
-        .input_page_size  = 512,
-        .output_page_size = 512,
+        .input_data_id    = in_data_id,
+        .output_data_id   = out_data_id,
+        .input_page_size  = in_page_size,
+        .output_page_size = out_page_size,
         .timeout_us       = 500000,     /* 500 ms */
     };
     slots[idx].input_shape[0]  = (uint16_t)pad_dim(in_pad->padded_height,   in_pad->height);

@@ -368,21 +368,46 @@ static int cmd_hailo(int argc, char *argv[])
                     if (lrc != INF_OK) {
                         shell_printf("hailo: sched: load_model failed (%d)\n", lrc);
                     } else {
-                        /* Placeholder quant (scale=1/128, zp=0) until HEF
-                         * quant-metadata extraction lands (deferred).
-                         * Phase 6.2a scope: plumbing + policy path working
-                         * end-to-end in QEMU under the mock. Real-hardware
-                         * inference with correct dequantization is blocked
-                         * on HEF quant-info parsing — tracked separately.
-                         *
-                         * Use the integer-only wrapper — this file is
-                         * compiled with -mgeneral-regs-only and can't take
-                         * float parameters. */
-                        ai_policy_hailo_set_model_placeholder(
-                            h, AI_STATE_DIM, AI_SCHED_N_ACTIONS);
-                        shell_printf("hailo: sched: model loaded (handle=%d), "
-                                     "ai_policy_hailo armed with placeholder "
-                                     "quant\n", (int)h);
+                        /* Prefer HEF-derived quant (Phase 6.2b) when
+                         * the parser captured per-pad scale+zp. Walk
+                         * the pads to find the first input + first
+                         * output with has_quant_info. Falls back to
+                         * placeholder scale=1/128 / zp=0 if either
+                         * pad lacks quant_info, or if set_from_raw
+                         * rejects the scale as invalid (zero/NaN). */
+                        const struct hef_pad_info *qin  = NULL;
+                        const struct hef_pad_info *qout = NULL;
+                        for (uint32_t i = 0; i < meta.pad_count; i++) {
+                            if (!meta.pads[i].has_tensor_shape) continue;
+                            if (meta.pads[i].is_input && !qin)  qin  = &meta.pads[i];
+                            if (!meta.pads[i].is_input && !qout) qout = &meta.pads[i];
+                        }
+                        int rc_quant = -1;
+                        if (qin && qout &&
+                            qin->has_quant_info && qout->has_quant_info) {
+                            rc_quant = ai_policy_hailo_set_model_from_raw(
+                                h,
+                                qin->qp_scale_raw,  qin->qp_zp_raw,
+                                qout->qp_scale_raw, qout->qp_zp_raw,
+                                AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+                        }
+                        if (rc_quant == 0) {
+                            shell_printf("hailo: sched: model loaded "
+                                         "(handle=%d), ai_policy_hailo armed "
+                                         "with HEF quant\n", (int)h);
+                        } else {
+                            ai_policy_hailo_set_model_placeholder(
+                                h, AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+                            shell_printf("hailo: sched: model loaded "
+                                         "(handle=%d), ai_policy_hailo armed "
+                                         "with placeholder quant "
+                                         "(HEF quant_info %s)\n",
+                                         (int)h,
+                                         (qin && qin->has_quant_info &&
+                                          qout && qout->has_quant_info)
+                                             ? "rejected (invalid scale)"
+                                             : "absent");
+                        }
                     }
                 }
                 pmm_free_pages(full, full_pages);

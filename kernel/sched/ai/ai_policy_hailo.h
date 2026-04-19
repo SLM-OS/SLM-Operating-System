@@ -52,9 +52,9 @@ void ai_policy_hailo_set_model(inference_model_handle_t handle,
  * compiled with -mgeneral-regs-only such as hailo_shell.c).
  *
  * Installs `handle` with the Phase 6.2a placeholder quantization
- * (scale=1/128, zero_point=0, both directions). Used by
- * `hailo load <path> sched` until real HEF quant metadata is
- * extracted (deferred follow-up).
+ * (scale=1/128, zero_point=0, both directions). Used as a fallback
+ * by `hailo load <path> sched` when the loaded HEF has no
+ * per-pad quant_info.
  *
  * Pass input_n=0 / output_n=0 to defer to the MLP defaults
  * (AI_STATE_DIM / AI_SCHED_N_ACTIONS).
@@ -62,6 +62,25 @@ void ai_policy_hailo_set_model(inference_model_handle_t handle,
 void ai_policy_hailo_set_model_placeholder(inference_model_handle_t handle,
                                            uint32_t input_n,
                                            uint32_t output_n);
+
+/*
+ * FP-capable caller passes HEF-derived quantization parameters as
+ * raw IEEE-754 bit patterns (see `struct hef_pad_info.qp_scale_raw`
+ * / `qp_zp_raw` for why). This file-scope wrapper reinterprets
+ * the bit patterns as floats internally. Callers without access
+ * to HEF pad info should use ai_policy_hailo_set_model_placeholder.
+ *
+ * Returns:
+ *   0   — installed with HEF-derived quant
+ *   -1  — at least one scale was zero / non-finite (caller should
+ *          fall back to the placeholder path; no state mutated)
+ */
+int  ai_policy_hailo_set_model_from_raw(inference_model_handle_t handle,
+                                        uint32_t input_scale_raw,
+                                        uint32_t input_zp_raw,
+                                        uint32_t output_scale_raw,
+                                        uint32_t output_zp_raw,
+                                        uint32_t input_n, uint32_t output_n);
 
 /*
  * Return the currently installed model handle, or INF_INVALID_HANDLE

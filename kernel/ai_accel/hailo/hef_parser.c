@@ -483,6 +483,250 @@ static bool decode_preliminary_config_cb(pb_istream_t *stream,
 }
 
 /* -------------------------------------------------------------------------- */
+/* Edge-layer decode chain (Phase 6.2b)                                        */
+/*                                                                              */
+/* Walks the first network group's contexts[].metadata.edge_layers[] to        */
+/* capture per-pad quantization (qp_scale / qp_zp) and stream info              */
+/* (sys_index, core_bytes_per_buffer, core_buffers_per_frame). Matches each    */
+/* edge layer back to our already-decoded pads[] by pad_index, so the ops[]    */
+/* walk must complete first — the outer network_group decode wires           */
+/* contexts AFTER ops so this natural ordering is honored.                      */
+/*                                                                              */
+/* Protobuf doesn't guarantee field order on the wire, so each                 */
+/* ProtoHEFEdgeLayer decode stages pad_index + quant + stream fields in a     */
+/* local struct and commits to the matching pad_info only at end-of-message.  */
+/* -------------------------------------------------------------------------- */
+
+struct edge_layer_stage {
+    bool     seen_pad_index;
+    uint32_t pad_index;
+
+    bool     seen_quant;
+    uint32_t qp_scale_raw;
+    uint32_t qp_zp_raw;
+
+    bool     seen_stream;
+    uint32_t sys_index;
+    uint32_t core_bytes_per_buffer;
+    uint32_t core_buffers_per_frame;
+};
+
+/*
+ * ProtoHEFEdgeLayerNumericInfo decode. Both qp_zp (tag 1) and
+ * qp_scale (tag 2) are floats on the wire (wire type 5, 32-bit fixed,
+ * little-endian IEEE-754). Store the raw 4 bytes as uint32_t without
+ * any float arithmetic so this file can stay compiled with
+ * -mgeneral-regs-only.
+ */
+static bool decode_numeric_info_cb(pb_istream_t *stream,
+                                   const pb_field_t *field,
+                                   void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no  = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7u);
+
+        if (wire_type == 5) {                       /* 32-bit fixed (float) */
+            uint8_t buf[4];
+            if (!pb_read(stream, buf, 4)) return false;
+            uint32_t v = (uint32_t)buf[0]
+                       | ((uint32_t)buf[1] << 8)
+                       | ((uint32_t)buf[2] << 16)
+                       | ((uint32_t)buf[3] << 24);
+            switch (field_no) {
+            case 1: st->qp_zp_raw    = v; st->seen_quant = true; break;
+            case 2: st->qp_scale_raw = v; st->seen_quant = true; break;
+            default: break;                         /* future float — ignore */
+            }
+            continue;
+        }
+
+        /* Unknown / future fields — skip by wire type. */
+        switch (wire_type) {
+        case 0: { uint64_t _ = 0; if (!pb_decode_varint(stream, &_)) return false; break; }
+        case 1: if (!pb_read(stream, NULL, 8)) return false; break;
+        case 2: {
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        default: return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * ProtoHEFEdgeLayerBase decode — extract the three stream-config
+ * fields we care about (sys_index, core_bytes_per_buffer,
+ * core_buffers_per_frame). All other fields skipped by wire type.
+ */
+static bool decode_edge_layer_base_cb(pb_istream_t *stream,
+                                      const pb_field_t *field,
+                                      void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no  = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7u);
+
+        if (wire_type == 0) {
+            uint64_t v = 0;
+            if (!pb_decode_varint(stream, &v)) return false;
+            if (v > UINT32_MAX) continue;
+            uint32_t u = (uint32_t)v;
+            switch (field_no) {
+            case 8:  st->sys_index              = u; st->seen_stream = true; break;
+            case 9:  st->core_bytes_per_buffer  = u; st->seen_stream = true; break;
+            case 10: st->core_buffers_per_frame = u; st->seen_stream = true; break;
+            default: break;
+            }
+            continue;
+        }
+
+        switch (wire_type) {
+        case 1: if (!pb_read(stream, NULL, 8)) return false; break;
+        case 2: {
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        case 5: if (!pb_read(stream, NULL, 4)) return false; break;
+        default: return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * ProtoHEFEdgeLayerInfo decode — wires the two sub-message callbacks
+ * that actually fill the stage struct.
+ */
+static bool decode_edge_layer_info_cb(pb_istream_t *stream,
+                                      const pb_field_t *field,
+                                      void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+
+    ProtoHEFEdgeLayerInfo info = ProtoHEFEdgeLayerInfo_init_default;
+    info.edge_layer_base.funcs.decode = decode_edge_layer_base_cb;
+    info.edge_layer_base.arg          = st;
+    info.numeric_info.funcs.decode    = decode_numeric_info_cb;
+    info.numeric_info.arg             = st;
+    return pb_decode(stream, ProtoHEFEdgeLayerInfo_fields, &info);
+}
+
+/*
+ * ProtoHEFEdgeLayer.pad_index is `optional uint32`. Capture it into
+ * the stage — order not guaranteed relative to the oneof decode.
+ */
+static bool decode_edge_pad_index_cb(pb_istream_t *stream,
+                                     const pb_field_t *field,
+                                     void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+    uint64_t v = 0;
+    if (!pb_decode_varint(stream, &v)) return false;
+    if (v > UINT32_MAX) return false;
+    st->pad_index = (uint32_t)v;
+    st->seen_pad_index = true;
+    return true;
+}
+
+struct edge_ctx {
+    struct hef_info *info;
+};
+
+/*
+ * ProtoHEFEdgeLayer decode. Stages all fields into a local struct,
+ * then commits to the matching pad in hef_info.pads[] (if any) by
+ * pad_index. Edge layers that don't boundary-map to a known pad are
+ * silently skipped — they describe intermediate/DDR connections we
+ * don't route at the top level.
+ */
+static bool decode_edge_layer_cb(pb_istream_t *stream,
+                                 const pb_field_t *field,
+                                 void **arg)
+{
+    (void)field;
+    struct edge_ctx *ectx = (struct edge_ctx *)*arg;
+    struct edge_layer_stage stage = {0};
+
+    ProtoHEFEdgeLayer el = ProtoHEFEdgeLayer_init_default;
+    /* layer_info lives in the `edge` oneof union; nanopb uses a shared
+     * callback slot for all oneof branches. Attach to layer_info — if
+     * the encoded branch is layer_mux or layer_planes the callback
+     * sees a zero-length stream and exits clean. */
+    el.edge.layer_info.funcs.decode = decode_edge_layer_info_cb;
+    el.edge.layer_info.arg          = &stage;
+    el.pad_index.funcs.decode       = decode_edge_pad_index_cb;
+    el.pad_index.arg                = &stage;
+    if (!pb_decode(stream, ProtoHEFEdgeLayer_fields, &el)) return false;
+
+    if (!stage.seen_pad_index) return true;         /* non-boundary layer */
+
+    /* Locate the matching pad by index. */
+    for (uint32_t i = 0; i < ectx->info->pad_count; i++) {
+        if (ectx->info->pads[i].index != stage.pad_index) continue;
+        struct hef_pad_info *p = &ectx->info->pads[i];
+        if (stage.seen_quant) {
+            p->has_quant_info = true;
+            p->qp_scale_raw   = stage.qp_scale_raw;
+            p->qp_zp_raw      = stage.qp_zp_raw;
+        }
+        if (stage.seen_stream) {
+            p->has_stream_info       = true;
+            p->sys_index             = stage.sys_index;
+            p->core_bytes_per_buffer = stage.core_bytes_per_buffer;
+            p->core_buffers_per_frame= stage.core_buffers_per_frame;
+        }
+        break;
+    }
+    return true;
+}
+
+static bool decode_context_metadata_cb(pb_istream_t *stream,
+                                       const pb_field_t *field,
+                                       void **arg)
+{
+    (void)field;
+    struct edge_ctx *ectx = (struct edge_ctx *)*arg;
+
+    ProtoHEFContextMetadata md = ProtoHEFContextMetadata_init_default;
+    md.edge_layers.funcs.decode = decode_edge_layer_cb;
+    md.edge_layers.arg          = ectx;
+    return pb_decode(stream, ProtoHEFContextMetadata_fields, &md);
+}
+
+static bool decode_context_cb(pb_istream_t *stream,
+                              const pb_field_t *field,
+                              void **arg)
+{
+    (void)field;
+    struct edge_ctx *ectx = (struct edge_ctx *)*arg;
+
+    ProtoHEFContext ctx = ProtoHEFContext_init_default;
+    ctx.metadata.funcs.decode = decode_context_metadata_cb;
+    ctx.metadata.arg          = ectx;
+    return pb_decode(stream, ProtoHEFContext_fields, &ctx);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Repeated network_groups counter + first-name capture                        */
 /* -------------------------------------------------------------------------- */
 
@@ -515,6 +759,7 @@ static bool decode_network_group_cb(pb_istream_t *stream,
         .info = ng->info,
         .blob_base = ng->blob_base,
     };
+    struct edge_ctx edge_ctx = { .info = ng->info };
     if (first_ng) {
         grp.network_group_name.funcs.decode = read_string_cb;
         grp.network_group_name.arg          = &name_ctx;
@@ -522,6 +767,13 @@ static bool decode_network_group_cb(pb_istream_t *stream,
         grp.ops.arg                         = &op_ctx;
         grp.preliminary_config.funcs.decode = decode_preliminary_config_cb;
         grp.preliminary_config.arg          = &ccw_ctx;
+        /* Phase 6.2b: walk contexts[].metadata.edge_layers[] and
+         * back-fill per-pad quant + stream info. Wire-format ordering
+         * means ops (which builds pads[]) decodes first in Hailo's
+         * encoding, so pad_index-keyed lookups in decode_edge_layer_cb
+         * find their targets. */
+        grp.contexts.funcs.decode           = decode_context_cb;
+        grp.contexts.arg                    = &edge_ctx;
     }
     if (!pb_decode(stream, ProtoHEFNetworkGroup_fields, &grp)) return false;
 
