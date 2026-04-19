@@ -314,13 +314,13 @@ static int translate_allow_input_dataflow(
         return HAILO_ERR_INVAL;
     }
 
-    /* Input stream uses the translator cfg's input boundary channel.
-     * Convention: input channels occupy (config_vdma_channel + 1),
-     * output channels occupy (config_vdma_channel + 2). Once
-     * OpenBoundary actions land the cfg will carry explicit
-     * boundary_input/output channel fields; until then this
-     * convention matches what ACTIVATION will emit. */
-    uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel + 1u;
+    /* Input stream uses the translator's boundary-input channel
+     * offset (HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET). The same
+     * constant will be consumed by ACTIVATION's OpenBoundaryInput
+     * emitter when #178 lands, so the two ends agree by
+     * construction rather than by separately-written magic numbers. */
+    uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
+                      + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET;
     if (raw_vdma > 0xFFu) {
         WARN("hailo translator: AllowInputDataflow packed_vdma overflows u8 "
              "(config_vdma=%u)", cfg->config_vdma_channel);
@@ -354,9 +354,15 @@ static int translate_allow_input_dataflow(
  * array via a per-kind read cursor. Cursors are initialized to 0
  * and advanced past entries that belong to earlier contexts.
  *
- * Today only context 0 is supported (single dynamic context); the
- * initialization loop that skips past context-N entries generalizes
- * to multi-context when dynamic_contexts_count grows.
+ * Today only context 0 is supported (context_actions_count > 1 is
+ * rejected upstream) and the parser stamps every captured action
+ * with context_index == 0 in the single-context path. The
+ * "skip non-target-context entries" while-loops below are therefore
+ * dead code against real HEFs today — they fire only in tests that
+ * hand-populate mixed context_index values. Kept in as defense-in-
+ * depth for when multi-context dispatch lands (tracked alongside
+ * #178/#179): the scaffolding stays correct by construction rather
+ * than needing to be reintroduced later.
  */
 struct dynamic_cursors {
     uint32_t enable_lcu;

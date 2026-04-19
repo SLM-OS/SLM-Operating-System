@@ -385,8 +385,11 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                 HAILO_BCS_ISTATUS_HOST, stale);
         hailo_platform->mb();
     }
+    /* __ATOMIC_RELEASE already orders this store before the
+     * subsequent request/doorbell writes; no additional mb() needed.
+     * The mb() after the ISTATUS W1C above is separate — it pairs
+     * the MMIO write with the atomic store that follows. */
     __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELEASE);
-    hailo_platform->mb();
 
     size_t wire_len = build_request_wire(control_req_wire, req_payload, req_len);
 

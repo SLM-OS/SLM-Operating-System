@@ -234,9 +234,10 @@ struct hef_disable_lcu_action {
 /*
  * ProtoHEFActionEnableSequencer (oneof tag 5) → firmware's
  * TRIGGER_SEQUENCER wire action. Carries a cluster_index plus a
- * 36-byte sequencer_config_t: one u8 (initial_l3_cut), one u16
+ * 43-byte sequencer_config_t: one u8 (initial_l3_cut), one u16
  * (initial_l3_offset), two u32 bitmaps (apu, ia), four u64 bitmaps
- * (sc, l2, l2_offset_0, l2_offset_1).
+ * (sc, l2, l2_offset_0, l2_offset_1). The 43-byte size is pinned by
+ * _Static_assert in hailo_cs_actions.h against the packed struct.
  *
  * Proto's initial_l3_info message carries initial_l3_cut +
  * initial_l3_offset as u32s; we narrow them at translation time.

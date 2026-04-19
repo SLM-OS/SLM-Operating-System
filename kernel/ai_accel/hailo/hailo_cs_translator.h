@@ -67,6 +67,18 @@
  * for allocating the CCW DMA buffer via hailo_vdma_desc_list_alloc
  * + hailo_vdma_program_buffer before calling the translator.
  */
+
+/* Boundary VDMA channel offsets relative to config_vdma_channel.
+ * The HEF identifies boundary streams by sys_index; the host picks
+ * which VDMA channel each sys_index maps to. Today the convention
+ * is fixed: input boundary on (config + 1), output boundary on
+ * (config + 2). When #178 lands real edge_layer → channel mapping,
+ * these become defaults with explicit cfg override. ACTIVATION's
+ * OpenBoundaryInput/Output emitter (future) and translate_allow_
+ * input_dataflow (current) both use these so the two ends agree. */
+#define HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET   1u
+#define HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET  2u
+
 struct hailo_cs_translate_cfg {
     /* packed_vdma_channel_id for the config stream (the channel the
      * firmware DMA-pulls CCW payloads through). Typical choice on

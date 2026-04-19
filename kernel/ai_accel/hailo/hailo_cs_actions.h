@@ -272,7 +272,19 @@ _Static_assert(sizeof(struct hailo_cs_act_sequencer_interrupt) == 1,
 
 /* CONTEXT_SWITCH_DEFS__sequencer_config_t. Embedded inside
  * TRIGGER_SEQUENCER's action body. Captures enough register-image
- * state for firmware to program the sequencer. Packed to 35 bytes. */
+ * state for firmware to program the sequencer. Packed to 43 bytes
+ * (1+2+4+4+8+8+8+8).
+ *
+ * ⚠ Hardware verification pending (#180 blocker). The common_action_
+ * header case (memory: hailo_cs_common_header_8_bytes) showed fw
+ * v4.23 reads some packed structs with NATURAL alignment even when
+ * the host spec packs them — a 5-byte packed common_header was
+ * rejected with 0x40130016 (MISALIGNMENT_ERROR). If fw v4.23 reads
+ * sequencer_config with natural alignment it would expect 48 bytes
+ * (1 + 1 pad + 2 + 4 + 4 + 8 + 8 + 8 + 8). Cross-check against a
+ * running firmware trace before wiring TRIGGER_SEQUENCER into the
+ * real load path (#179). The boundary-channel structs below carry
+ * the same risk. */
 struct hailo_cs_sequencer_config {
     uint8_t  initial_l3_cut;
     uint16_t initial_l3_offset;
@@ -317,6 +329,13 @@ _Static_assert(sizeof(struct hailo_cs_act_fetch_data_from_vdma) == 9,
 /* -------------------------------------------------------------------------- */
 /* Boundary-channel open/activate actions (ACTIVATION context)                  */
 /* -------------------------------------------------------------------------- */
+
+/* Scaffolding only — declared + static_assert-sized here so the wire
+ * layouts are pinned against CONTEXT_SWITCH_DEFS, but NO translator
+ * emits these bodies yet. Wiring lands with #178 (boundary-channel
+ * mapping + OpenBoundary actions). Do not assume dead code: the
+ * structs are load-bearing contracts the #178 implementation will
+ * populate. */
 
 /* OPEN_BOUNDARY_INPUT_CHANNEL: binds a host→device VDMA channel
  * for boundary input (the stream a host-produced tensor flows
