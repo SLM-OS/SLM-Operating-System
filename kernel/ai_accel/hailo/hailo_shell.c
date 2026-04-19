@@ -33,7 +33,11 @@
 
 #include "hailo.h"
 #include "hailo_control.h"
+#include "hailo_cs_actions.h"
+#include "hailo_cs_builder.h"
 #include "hailo_infer.h"
+#include "hailo_tensor.h"
+#include "hailo_vdma.h"
 #include "hef_header.h"
 #include "hef_parser.h"
 #include "pmm.h"
@@ -650,11 +654,9 @@ static int cmd_hailo(int argc, char *argv[])
             return 0;
         }
 
-        /* Minimum header: declare 1 network, 1 dynamic context, batch
-         * size 1, no boundary channels, no config channels. Firmware
-         * may reject for missing channels — that's the signal we want.
-         * external_action_list_address must be HAILO_CS_NO_DDR_ACTION_LIST
-         * (0xFFFFFFFF); 0 is treated as a valid DDR pointer → reject. */
+        /* Minimum header: 1 network, 1 dynamic context, batch size 1,
+         * declare config channel 1 (packed_id=0x01, engine 0 channel
+         * 1) matching the ACTIVATE_CFG_CHANNEL action below. */
         struct hailo_cs_application_header hdr;
         memset(&hdr, 0, sizeof(hdr));
         hdr.dynamic_contexts_count  = 1;
@@ -662,31 +664,136 @@ static int cmd_hailo(int argc, char *argv[])
         hdr.batch_size              = 1;
         hdr.csm_buffer_size         = 512;
         hdr.external_action_list_address = HAILO_CS_NO_DDR_ACTION_LIST;
-        hdr.config_channels_count   = 0;
+        hdr.config_channels_count       = 1;
+        hdr.config_channel_packed_id[0] = 0x01;
+        hdr.boundary_channels_bitmap[0] = 1u << 1;  /* channel 1 in engine 0 */
 
         shell_puts("hailo: ctxsmoke:\n");
-        shell_puts("  [1/3] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
+        shell_puts("  [1/6] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
         int rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
             /*batch_size=*/0, /*batch_count=*/0);
         shell_printf("        rc=%d\n", rc);
 
-        shell_puts("  [2/3] SET_NETWORK_GROUP_HEADER...\n");
+        shell_puts("  [2/6] SET_NETWORK_GROUP_HEADER...\n");
         rc = hailo_control_set_network_group_header(&hdr);
         shell_printf("        rc=%d\n", rc);
 
-        /* Minimum non-empty context: 5-byte common_action_header_t
-         * with action_type=HALT (0x2D) + zero timestamp. Firmware
-         * will reject on semantic grounds (HALT not valid in a
-         * preliminary context), but this takes us past the "zero-
-         * length context" gate (0x40130004) to a more specific
-         * error code. */
-        uint8_t halt_action[5] = { 0x2D, 0, 0, 0, 0 };  /* ACTION_TYPE_HALT=41 */
-        shell_puts("  [3/3] SET_CONTEXT_INFO (preliminary, 5-byte HALT placeholder)...\n");
-        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
-                                            halt_action, sizeof(halt_action));
+        /* Build a minimum-viable preliminary context:
+         *   ACTIVATE_CFG_CHANNEL (binds cfg channel to VDMA + DMA buf)
+         *   FETCH_CCW_BURSTS    (tells FW to pull 1 burst)
+         *
+         * The DMA buffer is a dummy 512-byte patterned payload; we
+         * don't expect real inference to produce output, only to
+         * trace how far firmware parses the context before rejecting.
+         * Channel 0x11 = engine 0, channel 1 (channel 0 reserved). */
+        struct hailo_tensor ccw_tensor = {0};
+        struct hailo_vdma_desc_list ccw_list = {0};
+        const uint32_t ccw_bytes = 512u;
+        const uint32_t ccw_descs = 1u;           /* must be >= 2 for alloc, pad to 2 */
+        const uint16_t ccw_page_size = 512u;
+        int trc = hailo_tensor_alloc(ccw_bytes, &ccw_tensor);
+        if (trc != HAILO_OK) {
+            shell_printf("  [3/3] SKIP: CCW tensor alloc failed (%d)\n", trc);
+            shell_puts("hailo: ctxsmoke done\n");
+            return 0;
+        }
+        memset(ccw_tensor.cpu_addr, 0xA5, ccw_bytes);
+        hailo_tensor_prepare_for_device(&ccw_tensor);
+
+        int drc = hailo_vdma_desc_list_alloc(/*desc_count=*/2,
+                                             ccw_page_size,
+                                             /*circular=*/false,
+                                             &ccw_list);
+        if (drc != HAILO_OK) {
+            shell_printf("  [3/3] SKIP: vdma desc_list alloc failed (%d)\n", drc);
+            hailo_tensor_free(&ccw_tensor);
+            shell_puts("hailo: ctxsmoke done\n");
+            return 0;
+        }
+        int programmed = hailo_vdma_program_buffer(&ccw_list, 0,
+                                                   ccw_tensor.iova,
+                                                   ccw_bytes,
+                                                   /*data_id=*/0);
+        if (programmed < 0) {
+            shell_printf("  [3/3] SKIP: vdma program_buffer failed (%d)\n", programmed);
+            hailo_vdma_desc_list_free(&ccw_list);
+            hailo_tensor_free(&ccw_tensor);
+            shell_puts("hailo: ctxsmoke done\n");
+            return 0;
+        }
+        (void)ccw_descs;
+
+        /* Firmware enforces strict ACTIVATION → BATCH_SWITCHING →
+         * PRELIMINARY → DYNAMIC × N order; skipping returns
+         * 0x4013006e (UNEXPECTED_CONTEXT_ORDER). Use minimum 5-byte
+         * APPLICATION_CHANGE_INTERRUPT stub for the two preambles
+         * (no body required) and the DYNAMIC tail — just enough
+         * to satisfy the ordering constraint. The PRELIMINARY
+         * context carries the real ACTIVATE_CFG_CHANNEL +
+         * FETCH_CCW_BURSTS actions. */
+        uint8_t stub_buf[16];
+        struct hailo_cs_builder stub;
+        hailo_cs_builder_init(&stub, stub_buf, sizeof(stub_buf));
+        (void)hailo_cs_builder_append(&stub,
+                                      HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                                      NULL, 0);
+
+        shell_puts("  [3/6] SET_CONTEXT_INFO(ACTIVATION, 5-byte stub)...\n");
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_ACTIVATION,
+                                            hailo_cs_builder_data(&stub),
+                                            (uint32_t)hailo_cs_builder_size(&stub));
         shell_printf("        rc=%d\n", rc);
+
+        shell_puts("  [4/6] SET_CONTEXT_INFO(BATCH_SWITCHING, 5-byte stub)...\n");
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING,
+                                            hailo_cs_builder_data(&stub),
+                                            (uint32_t)hailo_cs_builder_size(&stub));
+        shell_printf("        rc=%d\n", rc);
+
+        uint8_t ctx_buf[256];
+        struct hailo_cs_builder b;
+        hailo_cs_builder_init(&b, ctx_buf, sizeof(ctx_buf));
+
+        struct hailo_cs_act_activate_cfg_channel acfg = {
+            .packed_vdma_channel_id = 0x01,   /* engine 0 channel 1 (low nibble = channel) */
+            .config_stream_index    = 0,
+            .host_buffer_info = {
+                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                .dma_address      = ccw_list.iova,
+                .desc_page_size   = ccw_page_size,
+                .total_desc_count = ccw_list.desc_count,
+                .bytes_in_pattern = 0,
+            },
+        };
+        struct hailo_cs_act_fetch_ccw_bursts fetch = {
+            .ccw_bursts          = 1,
+            .config_stream_index = 0,
+        };
+        (void)hailo_cs_builder_append(&b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                                      &acfg, sizeof(acfg));
+        (void)hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS,
+                                      &fetch, sizeof(fetch));
+
+        shell_printf("  [5/6] SET_CONTEXT_INFO(PRELIMINARY, %u bytes: "
+                     "ACTIVATE_CFG_CHANNEL + FETCH_CCW_BURSTS)\n",
+                     (unsigned)hailo_cs_builder_size(&b));
+        shell_printf("        CCW buffer iova=0x%lx\n",
+                     (unsigned long)ccw_list.iova);
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
+                                            hailo_cs_builder_data(&b),
+                                            (uint32_t)hailo_cs_builder_size(&b));
+        shell_printf("        rc=%d\n", rc);
+
+        shell_puts("  [6/6] SET_CONTEXT_INFO(DYNAMIC, 5-byte stub)...\n");
+        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_DYNAMIC,
+                                            hailo_cs_builder_data(&stub),
+                                            (uint32_t)hailo_cs_builder_size(&stub));
+        shell_printf("        rc=%d\n", rc);
+
+        hailo_vdma_desc_list_free(&ccw_list);
+        hailo_tensor_free(&ccw_tensor);
 
         shell_puts("hailo: ctxsmoke done\n");
         return 0;
