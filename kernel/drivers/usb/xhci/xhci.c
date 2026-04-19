@@ -1141,9 +1141,21 @@ int xhci_init(void)
      */
     usb_core_register_hcd(&xhci_hcd);
     INFO("xhci: registered with usb_core — running Phase 3A Steps 5-7");
+
+    /*
+     * Call usb_core_start() so the HCD's start() runs, but do NOT
+     * enumerate yet: on kexec, the device Linux already enumerated
+     * is in a state that fails the first EP0 control transfer with
+     * cc=4. We hide that stale device from usb_core in
+     * xhci_hcd_port_status until the user physically re-plugs the
+     * dongle, at which point net_poll → usb_core_hotplug_poll drives
+     * the real enumeration. See issue #309 for the permanent fix
+     * that eliminates the re-plug.
+     */
     int rc = usb_core_start();
     if (rc != 0)
         WARN("xhci: usb_core_start returned %d", rc);
+    INFO("xhci: hot-plug ready — re-insert the USB dongle to enumerate");
     return 0;
 }
 

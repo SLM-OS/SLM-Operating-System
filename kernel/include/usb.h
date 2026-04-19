@@ -350,6 +350,19 @@ int usb_core_start(void);
 void usb_core_poll(void);
 
 /*
+ * Hot-plug retry entry point. Call at a slow cadence (every ~100 ms is
+ * fine) to let usb_core notice a late attach and drive enumeration.
+ * Safe to call before any HCD is registered. Idempotent once a device
+ * is enumerated — returns 0 thereafter.
+ *
+ * Return values:
+ *    1 — a new device was just enumerated
+ *    0 — no state change
+ *   <0 — enumeration attempted and failed
+ */
+int usb_core_hotplug_poll(void);
+
+/*
  * Enumerate the root-port device: assign address, pull descriptors,
  * parse interfaces/endpoints, and set the default configuration. Idempotent
  * once state is USB_STATE_CONFIGURED.

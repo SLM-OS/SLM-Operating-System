@@ -7,6 +7,7 @@
 
 #include "net.h"
 #include "net_driver.h"
+#include "usb.h"
 #include "debug.h"
 #include "timer.h"
 
@@ -383,6 +384,15 @@ int net_init(void) {
 }
 
 void net_poll(void) {
+    /*
+     * Drive the USB core's hot-plug retry path even before net_init
+     * has run — usb_core_hotplug_poll() is a no-op when no HCD is
+     * registered, and returns immediately once a device has been
+     * enumerated. On Jetson this is what notices a post-kexec
+     * re-plug and kicks off the Phase 3A enumeration sequence (#309).
+     */
+    (void)usb_core_hotplug_poll();
+
     if (!net_initialized) {
         return;
     }

@@ -146,6 +146,36 @@ static uint8_t xhci_active_port = 0xFF;  /* 0xFF = not yet located */
 static uint32_t xhci_active_portsc = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 
+/*
+ * Hot-plug state machine for #309 (the post-kexec re-plug workaround).
+ *
+ *   STALE         Pre-kexec device seen at xhci_init time. CCS=1 but
+ *                 the device's internal state is whatever Linux left
+ *                 behind, so the first EP0 control transfer returns
+ *                 cc=4 (USB Transaction Error). port_status hides this
+ *                 device from usb_core until the user unplugs it.
+ *   WAIT_RECONNECT The stale device has been unplugged (CCS went 1→0).
+ *                 Next CCS rising edge is a fresh attach.
+ *   FRESH         A clean attach has been observed; report connected
+ *                 and let usb_core enumerate normally.
+ *
+ * Transitions happen inside xhci_hcd_port_status() on every call and
+ * inside xhci_hcd_poll() (indirectly, via xhci_hotplug_poll below).
+ * Either path is idempotent and race-free because usb_core runs its
+ * HCD ops single-threaded.
+ *
+ * If no pre-kexec device was present at init, the active port's
+ * initial phase is WAIT_RECONNECT so the first CCS=1 transition is
+ * treated as fresh (natural hot-plug path for the future non-kexec
+ * case).
+ */
+enum xhci_attach_phase {
+    XHCI_ATTACH_STALE = 0,
+    XHCI_ATTACH_WAIT_RECONNECT,
+    XHCI_ATTACH_FRESH,
+};
+static enum xhci_attach_phase xhci_attach_state = XHCI_ATTACH_STALE;
+
 static uint8_t xhci_locate_usb2_port(void)
 {
     for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
@@ -174,13 +204,18 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     if (xhci_active_port == 0xFF) {
         xhci_active_port = xhci_locate_usb2_port();
         if (xhci_active_port == 0xFF) {
+            /* No device anywhere at init — any future CCS=1 is a
+             * fresh attach. Skip the stale-hide wait. */
+            xhci_attach_state = XHCI_ATTACH_WAIT_RECONNECT;
             if (connected) *connected = false;
             if (speed)     *speed     = USB_SPEED_UNKNOWN;
             INFO("xhci: no USB 2.0 device found across %u ports",
                  (unsigned)xhci_caps_cached.max_ports);
             return true;
         }
-        INFO("xhci: USB 2.0 device on PORTSC[%u]", xhci_active_port);
+        INFO("xhci: USB 2.0 device on PORTSC[%u] (stale pre-kexec — "
+             "please unplug and re-insert the dongle to enumerate, see #309)",
+             xhci_active_port);
     }
 
     uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
@@ -188,8 +223,43 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     bool c = false;
     enum usb_speed s = USB_SPEED_UNKNOWN;
     (void)xhci_decode_portsc(portsc, &c, &s);
-    if (connected) *connected = c;
-    if (speed)     *speed     = s;
+
+    /* Advance the hot-plug state machine in lock-step with the raw
+     * CCS bit. See enum xhci_attach_phase above for the transitions. */
+    switch (xhci_attach_state) {
+    case XHCI_ATTACH_STALE:
+        if (!c) {
+            INFO("xhci: pre-kexec device detached — waiting for re-plug");
+            xhci_attach_state = XHCI_ATTACH_WAIT_RECONNECT;
+        }
+        /* Hide the stale device from usb_core regardless of raw CCS. */
+        if (connected) *connected = false;
+        if (speed)     *speed     = USB_SPEED_UNKNOWN;
+        return true;
+
+    case XHCI_ATTACH_WAIT_RECONNECT:
+        if (c) {
+            INFO("xhci: fresh USB attach on PORTSC[%u]",
+                 (unsigned)xhci_active_port);
+            xhci_attach_state = XHCI_ATTACH_FRESH;
+            xhci_prereset_speed = s;
+        } else {
+            if (connected) *connected = false;
+            if (speed)     *speed     = USB_SPEED_UNKNOWN;
+            return true;
+        }
+        /* fallthrough: report the fresh device on this same call. */
+        /* FALLTHROUGH */
+
+    case XHCI_ATTACH_FRESH:
+        if (connected) *connected = c;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    /* Unreachable — enum exhausted. */
+    if (connected) *connected = false;
+    if (speed)     *speed     = USB_SPEED_UNKNOWN;
     return true;
 }
 

@@ -117,6 +117,41 @@ void usb_core_poll(void)
         active_hcd->poll();
 }
 
+/*
+ * Hot-plug retry path — the caller (net_poll()) invokes this at a slow
+ * cadence so a USB device that wasn't ready at xhci_init time (or was
+ * deliberately hidden as a stale pre-kexec device, see #309) can be
+ * enumerated once a fresh attach is observed.
+ *
+ * Behaviour:
+ *   - If a device has already been enumerated (root_device_present),
+ *     do nothing. One-shot per boot, same contract as Phase 1.
+ *   - Otherwise ask the HCD whether port 0 is reporting a connected
+ *     device. If yes, run the full usb_core_enumerate() sequence.
+ *
+ * Returns 1 if this call successfully enumerated a new device, 0 if
+ * no attach change happened, negative on enumeration failure.
+ */
+int usb_core_hotplug_poll(void)
+{
+    if (active_hcd == NULL || active_hcd->port_status == NULL)
+        return 0;
+    if (root_device_present)
+        return 0;
+
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    if (!active_hcd->port_status(0, &connected, &speed) || !connected)
+        return 0;
+
+    int rc = usb_core_enumerate();
+    if (rc != 0) {
+        WARN("usb_core: hotplug enumerate failed rc=%d", rc);
+        return rc;
+    }
+    return root_device_present ? 1 : 0;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Blocking control transfer                                                   */
 /* -------------------------------------------------------------------------- */
