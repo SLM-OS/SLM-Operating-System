@@ -405,6 +405,22 @@ static bool mock_smart_memory_handle(uint32_t opcode_native,
         return true;
     }
 
+    /* Context-switch opcodes: auto-echo OK for any of the three
+     * load_model RPCs (CHANGE_CONTEXT_SWITCH_STATUS,
+     * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO). load_model issues
+     * these in sequence and the single shared mock_fw_sim_control_resp
+     * buffer can't supply per-opcode responses; auto-echo solves that
+     * without per-test seeding. Gated by mock_fw_sim_smart_memory_enabled
+     * so tests opting out of context-switch responses still work. */
+    if (mock_fw_sim_smart_memory_enabled
+     && (opcode_native == HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS
+      || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER
+      || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO)) {
+        mock_build_echo_response(resp_out, resp_out_len,
+                                 req_opcode_be, 0, NULL, 0);
+        return true;
+    }
+
     if (!mock_fw_sim_smart_memory_enabled) return false;
 
     if (opcode_native == HAILO_CONTROL_OPCODE_WRITE_MEMORY) {
@@ -5431,12 +5447,17 @@ static size_t build_test_hef_with_edge_layers(uint8_t *buf, size_t cap,
 }
 
 /* Lookup the Hailo backend, (re-)register it, reset slots, and make
- * sure the firmware is in the RUNNING state. Most tests need all three. */
+ * sure the firmware is in the RUNNING state. Most tests need all three.
+ * Also enables mock_fw_sim_smart_memory (which now auto-echoes the
+ * context-switch opcodes load_model fires) so load tests don't each
+ * need to seed a fresh mock response. Tests that care about the raw
+ * canned-response path can toggle the flag off locally. */
 static struct inference_device *hailo_backend_ready(void)
 {
     control_setup_running();
     (void)inference_device_hailo_register();   /* idempotent for test purposes */
     hailo_backend_reset_slots_for_tests();
+    mock_fw_sim_smart_memory_enabled = true;
     return inference_device_find("hailo-8");
 }
 
@@ -5527,6 +5548,52 @@ static void test_inf_hailo_load_happy_path(void)
         inference_load_model(dev, blob, n, &h));
     TEST_ASSERT_TRUE(h >= 1);
     TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
+}
+
+/* #179 regression: load_model must drive the context-switch RPC
+ * sequence (RESET → SET_NETWORK_GROUP_HEADER → 4 × SET_CONTEXT_INFO
+ * → ENABLED). Verify the count of CORE-CPU doorbells rung — the
+ * network-group-header + context_info + two status-change RPCs all
+ * target the CORE CPU. Empty-DYNAMIC context chunks into a single
+ * SET_CONTEXT_INFO_CHUNK call (see hailo_control.c:1481), so the
+ * four-context phase contributes 4 doorbells total, producing 7
+ * CORE-CPU doorbells on a clean load. */
+static void test_inf_hailo_load_rings_context_switch_sequence(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    uint32_t core_before = mock_control_core_doorbells;
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    uint32_t core_rpcs = mock_control_core_doorbells - core_before;
+    TEST_ASSERT_EQUAL_UINT32(7u, core_rpcs);
+}
+
+/* #179 failure unwind: if the context-switch sequence fails partway
+ * (simulated by disabling the smart-memory mock responder so RPCs
+ * hit the "nothing to emit" path and time out), load_model must
+ * release the slot rather than leaving it claimed with in_use=true. */
+static void test_inf_hailo_load_releases_slot_on_failure(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    /* Disable smart memory + canned responder → no opcode gets a
+     * valid echo → first context-switch RPC times out → load fails. */
+    mock_fw_sim_smart_memory_enabled = false;
+    mock_fw_sim_control_enabled      = false;
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    int rc = inference_load_model(dev, blob, n, &h);
+    TEST_ASSERT_NOT_EQUAL(INF_OK, rc);
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
 }
 
 static void test_inf_hailo_load_fills_slots_until_full(void)
@@ -6358,6 +6425,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_inf_hailo_load_rejects_bad_header);
     RUN_TEST(test_inf_hailo_load_rejects_zero_pads);
     RUN_TEST(test_inf_hailo_load_happy_path);
+    RUN_TEST(test_inf_hailo_load_rings_context_switch_sequence);
+    RUN_TEST(test_inf_hailo_load_releases_slot_on_failure);
     RUN_TEST(test_inf_hailo_load_fills_slots_until_full);
     RUN_TEST(test_inf_hailo_run_rejects_bad_handle);
     RUN_TEST(test_inf_hailo_run_rejects_wrong_dtype);
