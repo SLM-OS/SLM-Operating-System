@@ -1085,16 +1085,30 @@ IOMMU_DOMAIN_DMA was expected to reject direct `iommu_map()` calls
 `__iommu_map` in fact allows the call and wires it into the
 underlying io-pgtable. That's the key enabling surprise.
 
-**Hardware result.** Post-kexec, SLM-OS's xhci init reaches
-`[INFO] xhci: controller running (USBSTS=0x00000000)` — RUN=1 no
-longer wedges the aperture. This was previously the original blocker
-for #266 Phase 3A. The NO_OP round-trip outcome was not captured
-in the session that implemented Option 1 because the lab controller
-disconnected mid-test; the next session should re-run with the
-Option 1 module loaded and capture whether `NO_OP round-trip OK
-(cc=SUCCESS)` or `NO_OP timed out` shows up. The Option 1 code is
-committed and load-verified; only the full end-to-end capture is
-pending.
+**Hardware result — both success criteria met.** Post-kexec,
+SLM-OS's xhci init prints:
+
+```
+[INFO] xhci: controller running (USBSTS=0x00000000)
+[INFO] xhci: skipping non-command event type 32
+[INFO] xhci: skipping non-command event type 32
+[INFO] xhci: NO_OP round-trip OK (cc=SUCCESS, cmd_trb @0xbde04180)
+```
+
+`USBCMD.RUN=1` no longer wedges the aperture AND the HC successfully
+DMA-reads a command-ring TRB from SLM-OS's NC memory (0xbde04180 is
+inside the identity-mapped 0xbde00000..0xbe000000 range) and writes
+the completion event back to the event ring — a full round-trip
+through the SMMU with translation still enforced. The two
+`skipping non-command event type 32` lines are leftover Port Status
+Change events from Linux's prior xHCI session; the NO_OP handler
+walks past them to find its own completion.
+
+This unblocks #266 Phase 3A Steps 5-7 (port enumeration +
+CONFIGURE_ENDPOINT + bulk transfers). The Option 1 fix is purely
+on the Linux side (no SLM-OS code changes): load
+`scripts/arm-smmu-noshutdown/arm_smmu_noshutdown.ko` before kexec,
+and SLM-OS inherits a usable SMMU + xHCI.
 
 ### 10.7 Contact points for a blocked investigation
 

@@ -136,15 +136,28 @@ arm-smmu-noshutdown: added identity IOMMU mapping IOVA 0xbde00000..0xbe000000
   (PA identical) on xusb domain (#266 Phase 3A Path 1 option 1)
 ```
 
-After kexec, SLM-OS's xhci init prints
-`xhci: controller running (USBSTS=0x00000000)` — RUN=1 no longer
-wedges the aperture. This is the first half of the #266 Phase 3A
-success criterion; the NO_OP round-trip half was not captured in
-the session that implemented Option 1 because the lab controller
-disconnected mid-test. Reproducible either by re-running the
-verification procedure above and kexec'ing into SLM-OS, or by
-checking `docs/jetson-usb-networking-plan.md` §10.8 for the full
-capture (updated on the next session).
+After kexec, SLM-OS's xhci init prints both halves of the
+#266 Phase 3A success criterion:
+
+```
+[INFO] xhci: controller running (USBSTS=0x00000000)
+[INFO] xhci: skipping non-command event type 32
+[INFO] xhci: skipping non-command event type 32
+[INFO] xhci: NO_OP round-trip OK (cc=SUCCESS, cmd_trb @0xbde04180)
+```
+
+- `controller running (USBSTS=0x00000000)` — RUN=1 no longer wedges
+  the aperture.
+- `NO_OP round-trip OK (cc=SUCCESS, cmd_trb @0xbde04180)` — the HC
+  successfully DMA-read the NO_OP TRB from SLM-OS's command ring at
+  0xbde04180 (inside our identity-mapped region), executed it, and
+  DMA-wrote the completion event back to the event ring. Full
+  DMA round-trip through the SMMU with translation still enabled.
+
+The two `skipping non-command event type 32` lines before the
+success are Port Status Change events left in the event ring by
+Linux's prior xHCI session; SLM-OS's NO_OP handler walks past
+them to find its own completion.
 
 ## What earlier attempts to unblock NO_OP ruled out
 
