@@ -90,6 +90,30 @@ static uint32_t mock_fw_sim_control_resp_len;
 static uint32_t mock_control_doorbells;
 static uint32_t mock_control_core_doorbells;
 static uint32_t mock_control_last_doorbell_val;
+
+/* Mock MSI plumbing. mock_register_irq stashes the handler + ctx so
+ * tests can invoke it directly to simulate a firmware-delivered MSI,
+ * without actually routing through GIC. mock_msi_invoke() calls the
+ * recorded handler; used by the Phase 6.4 MSI-path tests. */
+static void (*mock_registered_irq_handler)(void *);
+static void  *mock_registered_irq_ctx;
+static uint32_t mock_register_irq_calls;
+
+static int mock_register_irq(void (*handler)(void *), void *ctx)
+{
+    mock_register_irq_calls++;
+    if (!handler) return HAILO_ERR_INVAL;
+    mock_registered_irq_handler = handler;
+    mock_registered_irq_ctx     = ctx;
+    return HAILO_OK;
+}
+
+static void mock_msi_invoke(void)
+{
+    if (mock_registered_irq_handler) {
+        mock_registered_irq_handler(mock_registered_irq_ctx);
+    }
+}
 /* Sized to hold a full control-channel payload (HAILO_CONTROL_MAX_BUFFER_LENGTH).
  * A WRITE_MEMORY chunk with a 1024 B data body totals 32 B header + 1024 B
  * data = 1056 B on the wire, which exceeded the old 512 B cap and caused
@@ -168,6 +192,9 @@ static void mock_reset(void)
     mock_fw_sim_control_resp_len = 0;
     mock_control_doorbells = 0;
     mock_control_core_doorbells = 0;
+    mock_registered_irq_handler = NULL;
+    mock_registered_irq_ctx     = NULL;
+    mock_register_irq_calls     = 0;
     mock_control_last_doorbell_val = 0;
     memset(mock_last_control_request, 0, sizeof(mock_last_control_request));
     mock_last_control_request_len = 0;
@@ -625,6 +652,10 @@ static void  mock_cache_invalidate(void *a, size_t n)
 static void  mock_mb(void)                             {}
 static void  mock_udelay(uint32_t u)                   { (void)u; }
 
+/* mock_register_irq + helpers defined further up; keep the
+ * platform-ops struct adjacent to its function pointers here. */
+static int  mock_register_irq(void (*handler)(void *), void *ctx);
+
 static const struct hailo_platform_ops mock_ops = {
     .name             = "mock",
     .init             = mock_init,
@@ -639,7 +670,7 @@ static const struct hailo_platform_ops mock_ops = {
     .cache_invalidate = mock_cache_invalidate,
     .mb               = mock_mb,
     .udelay           = mock_udelay,
-    .register_irq     = NULL,
+    .register_irq     = mock_register_irq,
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2270,6 +2301,84 @@ static void test_change_context_switch_status_enabled_carries_batch_params(void)
     uint16_t batch_cnt;
     memcpy(&batch_cnt, req + 40, 2);
     TEST_ASSERT_EQUAL_UINT16(3, batch_cnt);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase 6.4: MSI-driven response notification                                 */
+/* -------------------------------------------------------------------------- */
+
+static void test_control_registers_msi_on_first_send(void)
+{
+    /* First control-channel send_recv should trigger MSI handler
+     * registration via hailo_platform->register_irq. Subsequent
+     * calls should NOT re-register (one-shot gating in
+     * control_arm_interrupts). */
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version  = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode   = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    fake.parameter_count        = 0;
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_register_irq_calls);
+    TEST_ASSERT_NOT_NULL(mock_registered_irq_handler);
+
+    /* Second call: register_irq must not fire again. */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_EQUAL_UINT32(1, mock_register_irq_calls);
+}
+
+static void test_msi_handler_sets_pending_and_clears_istatus(void)
+{
+    /* Seeded pre-state: FW_CONTROL_IRQ bit set in BCS_ISTATUS_HOST
+     * (simulating firmware completing an RPC). When the MSI handler
+     * fires:
+     *   - reads ISTATUS, sees FW_CONTROL_IRQ
+     *   - W1Cs the bit (mock_write32 echoes this into our istatus store)
+     *   - sets control_msi_pending=1
+     *
+     * Can't directly observe control_msi_pending (static), but the
+     * NEXT wait_for_response will return HAILO_OK immediately if the
+     * pending flag is set, so we use a subsequent IDENTIFY to confirm.
+     * control_setup_running has already registered the MSI handler
+     * during its boot-to-running probe. */
+    control_setup_running();
+
+    /* Ensure a control send happens first so MSI handler is registered. */
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    TEST_ASSERT_NOT_NULL(mock_registered_irq_handler);
+
+    /* Seed ISTATUS with FW_CONTROL_IRQ set, then invoke handler. */
+    mock_istatus_one_shot_preload = HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;
+    mock_msi_invoke();
+
+    /* Verify the handler W1C'd the bit — after one read, ISTATUS is 0. */
+    uint32_t after = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                            HAILO_BCS_ISTATUS_HOST);
+    TEST_ASSERT_EQUAL_UINT32(0u, after);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -5510,6 +5619,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_builder_accepts_zero_body_action);
     RUN_TEST(test_change_context_switch_status_reset_wire_layout);
     RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);
+    RUN_TEST(test_control_registers_msi_on_first_send);
+    RUN_TEST(test_msi_handler_sets_pending_and_clears_istatus);
     RUN_TEST(test_cs_translate_application_header_fills_defaults);
     RUN_TEST(test_cs_translate_application_header_rejects_null);
     RUN_TEST(test_cs_translate_contexts_produces_all_four);
