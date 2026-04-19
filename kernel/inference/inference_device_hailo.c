@@ -217,16 +217,24 @@ static int pick_largest_pads(const struct hef_info *info,
  * (hailo_vdma_desc_list_alloc requires a power-of-2 count — the
  * VDMA engine walks the ring via (index & mask) and non-power-of-2
  * counts would corrupt on wraparound). Minimum 2
- * (HAILO_VDMA_MIN_DESC_COUNT). Clamp to a 16-bit ceiling so we stay
- * under num_avail/num_proc's counter width. */
+ * (HAILO_VDMA_MIN_DESC_COUNT). The VDMA engine's num_avail /
+ * num_proc counters are 16-bit, so the maximum count is 65536.
+ * Returns 0 if a legitimate round-up exceeds that ceiling — the
+ * caller must treat 0 as "HEF too large" (HAILO_ERR_INVAL) rather
+ * than silently under-programming the descriptor list. */
 static uint32_t desc_count_for(uint32_t bytes, uint16_t page_size)
 {
     if (page_size == 0) return 2;
     uint32_t n = (bytes + page_size - 1) / page_size;
     if (n < 2) return 2;
-    /* Round up to next power of two. */
+    /* Round up to next power of two, capped at 65536 (the VDMA
+     * ring's counter width). If the rounded-up value would exceed
+     * the cap, signal failure rather than saturate. */
     uint32_t p = 2;
-    while (p < n && p <= 0x8000u) p <<= 1;
+    while (p < n) {
+        if (p >= 0x10000u) return 0;
+        p <<= 1;
+    }
     return p;
 }
 
@@ -251,11 +259,29 @@ static void context_switch_unwind(struct hailo_model_slot *slot)
 static int context_switch_load(struct hailo_model_slot *slot,
                                const struct hef_info *info,
                                const void *model,
+                               size_t     model_size,
                                const struct hef_outer_header *outer,
                                const struct hef_pad_info *in_pad,
                                const struct hef_pad_info *out_pad)
 {
     int rc;
+
+    /* Bound the CCWS region against the caller-provided blob size.
+     * hef_parse_outer_header validates (magic, version, proto range)
+     * but does not bound the CCWS region — a malformed HEF with
+     * ccws_offset+ccws_size overflowing into the caller's buffer
+     * would OOB-read via the memcpy below. Reject such HEFs here. */
+    if (outer->ccws_size > 0) {
+        if (outer->ccws_offset > model_size
+         || outer->ccws_size > model_size - outer->ccws_offset) {
+            WARN("hailo backend: HEF CCWS out of bounds "
+                 "(offset=%lu size=%lu blob=%lu)",
+                 (unsigned long)outer->ccws_offset,
+                 (unsigned long)outer->ccws_size,
+                 (unsigned long)model_size);
+            return HAILO_ERR_INVAL;
+        }
+    }
 
     /* Step 1: CCW buffer + descriptor list.
      * CCWs block lives in the HEF at ccws_offset; size is ccws_size
@@ -281,6 +307,12 @@ static int context_switch_load(struct hailo_model_slot *slot,
 
     uint32_t ccw_desc_count =
         desc_count_for(ccw_bytes, HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE);
+    if (ccw_desc_count == 0) {
+        WARN("hailo backend: CCW region too large for VDMA desc list (%u bytes)",
+             ccw_bytes);
+        rc = HAILO_ERR_INVAL;
+        goto fail;
+    }
     rc = hailo_vdma_desc_list_alloc(ccw_desc_count,
                                     HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
                                     /*circular=*/false, &slot->ccw_list);
@@ -314,6 +346,12 @@ static int context_switch_load(struct hailo_model_slot *slot,
 
         boundary_in_desc_count =
             desc_count_for(in_bytes, HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE);
+        if (boundary_in_desc_count == 0) {
+            WARN("hailo backend: boundary IN region too large for VDMA desc list (%u)",
+                 in_bytes);
+            rc = HAILO_ERR_INVAL;
+            goto fail;
+        }
         rc = hailo_vdma_desc_list_alloc(boundary_in_desc_count,
                                         HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
                                         /*circular=*/false,
@@ -347,6 +385,12 @@ static int context_switch_load(struct hailo_model_slot *slot,
 
         boundary_out_desc_count =
             desc_count_for(out_bytes, HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE);
+        if (boundary_out_desc_count == 0) {
+            WARN("hailo backend: boundary OUT region too large for VDMA desc list (%u)",
+                 out_bytes);
+            rc = HAILO_ERR_INVAL;
+            goto fail;
+        }
         rc = hailo_vdma_desc_list_alloc(boundary_out_desc_count,
                                         HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
                                         /*circular=*/false,
@@ -390,11 +434,16 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: translate_application_header failed (rc=%d)", rc);
         goto fail;
     }
-    /* bufs is ~2 KB — too big for our ~16 KB kernel stack to carry
-     * alongside hef_info, so stage via file-scope BSS. Guarded by
-     * control_lock (implicit: context_switch_load is only called from
-     * load_model, which holds slots_lock over the full sequence). */
-    static struct hailo_cs_context_buffers cs_bufs;
+    /* bufs is ~2 KB — large but still fits on the 16 KB kernel stack
+     * alongside hef_info (~1.2 KB) and the caller's frame. A prior
+     * version used a file-scope static here and claimed slots_lock
+     * protection, but slots_lock is released before context_switch_load
+     * runs (load_model only holds it to claim the slot index) — two
+     * concurrent loads would have raced through a shared static.
+     * Stack-local is the simplest fix and keeps this function re-
+     * entrant. Tensor + desc_list allocations earlier in this call
+     * already consume kernel-stack frame; the extra 2 KB is budgeted. */
+    struct hailo_cs_context_buffers cs_bufs;
     rc = hailo_cs_translate_contexts(info, &tcfg, &cs_bufs);
     if (rc != HAILO_OK) {
         WARN("hailo backend: translate_contexts failed (rc=%d)", rc);
@@ -479,18 +528,26 @@ static int hailo_backend_init(struct inference_device *dev)
 static void hailo_backend_shutdown(struct inference_device *dev)
 {
     (void)dev;
-    /* Release any context-switch DMA allocations held by in-use slots
-     * before zeroing — zeroing alone leaks the tensor/desc_list host
-     * allocations. Hailo device state itself is managed by
-     * hailo_init/hailo_boot lifecycle, not this backend. */
+    /* Two-phase: copy out the DMA resource handles under the lock +
+     * mark slots free, then release them outside the lock. Calling
+     * hailo_*_free under spin_lock_irqsave is unsafe — the platform
+     * dma_free may acquire another lock, trigger an IPI, or walk a
+     * refcount that takes the PMM lock. Holding a kernel-wide IRQ-
+     * disabled critical section across unbounded allocator work is
+     * what to avoid; the out-of-lock path keeps the same ordering
+     * guarantees (in_use=false is visible to other CPUs via the
+     * unlock's release semantics before we free). */
+    struct hailo_model_slot stash[HAILO_MAX_MODELS];
     irq_flags_t flags = spin_lock_irqsave(&slots_lock);
-    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
-        if (slots[i].in_use && slots[i].cs_loaded) {
-            context_switch_unwind(&slots[i]);
-        }
-    }
+    memcpy(stash, slots, sizeof(stash));
     memset(slots, 0, sizeof(slots));
     spin_unlock_irqrestore(&slots_lock, flags);
+
+    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
+        if (stash[i].in_use && stash[i].cs_loaded) {
+            context_switch_unwind(&stash[i]);
+        }
+    }
 }
 
 static int hailo_backend_load_model(struct inference_device *dev,
@@ -602,7 +659,7 @@ static int hailo_backend_load_model(struct inference_device *dev,
      * for CCW + boundary I/O, translates HEF → context-switch wire
      * bytes, and ships the 4-context sequence firmware needs. On
      * failure the slot is released so the caller can retry. */
-    int csrc = context_switch_load(&slots[idx], &info, model, &outer,
+    int csrc = context_switch_load(&slots[idx], &info, model, size, &outer,
                                    in_pad, out_pad);
     if (csrc != HAILO_OK) {
         irq_flags_t f = spin_lock_irqsave(&slots_lock);
@@ -651,21 +708,27 @@ static int hailo_backend_free_model(struct inference_device *dev,
     (void)dev;
     if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return INF_ERR_INVAL;
     struct hailo_model_slot *slot = &slots[h - 1];
-    /* Lock-protected clear so a concurrent load_model scanning for a
-     * free slot doesn't observe in_use=false with stale cfg bytes.
-     * Context-switch resources (CCW + boundary desc lists, DMA
-     * tensors) are released BEFORE we drop the lock so the slot is
-     * seen either fully-loaded or fully-free from another CPU. */
+    /* Two-phase: under the lock, copy out the DMA handles + clear
+     * the slot; outside the lock, free the DMA resources. Holding
+     * spin_lock_irqsave across dma_free would block other CPUs on
+     * any allocator-internal contention and — depending on the
+     * platform's free path — risk nesting locks held at interrupt
+     * priority. The lock ordering is preserved: any concurrent
+     * load_model scanning for a free slot sees in_use=false only
+     * after the slot is fully zeroed. */
+    struct hailo_model_slot stash;
     irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     if (!slot->in_use) {
         spin_unlock_irqrestore(&slots_lock, flags);
         return INF_ERR_INVAL;
     }
-    if (slot->cs_loaded) {
-        context_switch_unwind(slot);
-    }
+    stash = *slot;
     memset(slot, 0, sizeof(*slot));
     spin_unlock_irqrestore(&slots_lock, flags);
+
+    if (stash.cs_loaded) {
+        context_switch_unwind(&stash);
+    }
     return INF_OK;
 }
 
@@ -690,14 +753,19 @@ uint32_t hailo_backend_in_use_slots(void)
 
 void hailo_backend_reset_slots_for_tests(void)
 {
+    /* Same two-phase dance as hailo_backend_shutdown — see that
+     * function for the rationale (dma_free outside spin_lock). */
+    struct hailo_model_slot stash[HAILO_MAX_MODELS];
     irq_flags_t flags = spin_lock_irqsave(&slots_lock);
-    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
-        if (slots[i].in_use && slots[i].cs_loaded) {
-            context_switch_unwind(&slots[i]);
-        }
-    }
+    memcpy(stash, slots, sizeof(stash));
     memset(slots, 0, sizeof(slots));
     spin_unlock_irqrestore(&slots_lock, flags);
+
+    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
+        if (stash[i].in_use && stash[i].cs_loaded) {
+            context_switch_unwind(&stash[i]);
+        }
+    }
 }
 
 /* -------------------------------------------------------------------------- */
