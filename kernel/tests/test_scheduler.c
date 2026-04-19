@@ -275,15 +275,13 @@ static void test_task_slot_skips_freed_by_id(void)
     TEST_ASSERT_EQUAL_UINT32(0, slot_ptr->id);
 
     /* A fresh iteration via task_slot must not re-discover the now-free
-     * slot under its old id. */
+     * slot under its old id — id == 0 is the documented free marker. */
+    (void)created_id;
     for (uint32_t i = 0; i < MAX_TASKS; i++) {
         struct task *s = task_slot(i);
         if (s == slot_ptr) {
             TEST_ASSERT_MESSAGE(s->id == 0,
                 "Freed slot kept non-zero id after task_destroy");
-            /* id==0 means "skip" per the documented contract. */
-            TEST_ASSERT_MESSAGE(s->id != created_id,
-                "Freed slot still reports the original task id");
         }
     }
 }
