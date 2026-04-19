@@ -93,6 +93,28 @@ struct hef_pad_info {
     uint32_t padded_width;
     uint32_t features;
     uint32_t padded_features;
+
+    /*
+     * Phase 6.2b: edge-layer metadata joined in from the first
+     * network group's contexts[].metadata.edge_layers[] by pad_index.
+     *
+     * qp_scale_raw / qp_zp_raw carry the IEEE-754 bit patterns of
+     * `float qp_scale` / `float qp_zp` — the parser file is compiled
+     * with `-mgeneral-regs-only` and cannot touch float values
+     * directly. The FP-capable consumer (kernel/sched/ai/sched_ai.c)
+     * converts via memcpy(&scale, &qp_scale_raw, 4).
+     *
+     * has_quant_info / has_stream_info signal presence independently
+     * so consumers can treat each half as optional.
+     */
+    bool     has_quant_info;
+    uint32_t qp_scale_raw;
+    uint32_t qp_zp_raw;
+
+    bool     has_stream_info;
+    uint32_t sys_index;                /* ProtoHEFEdgeLayerBase.sys_index (f8) */
+    uint32_t core_bytes_per_buffer;    /* f9 */
+    uint32_t core_buffers_per_frame;   /* f10 */
 };
 
 /*

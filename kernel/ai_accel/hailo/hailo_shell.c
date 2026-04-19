@@ -9,6 +9,11 @@
  *                            pad shapes, and CCW summary. If `upload B`
  *                            is given, also issue the CCW upload via
  *                            WRITE_MEMORY against device base addr B.
+ *   hailo load P sched     — load `.hef` into the "hailo-8" inference
+ *                            device and arm ai_policy_hailo with the
+ *                            resulting handle. (Mutually exclusive
+ *                            with `upload B` for now — extend if both
+ *                            are ever needed together.)
  *   hailo fw               — report firmware version (post-boot only).
  *   hailo peek A [N]       — READ_MEMORY N bytes (default 16, max 64) at
  *                            device-side address A; hex-dump.
@@ -35,6 +40,11 @@
 #include "shell.h"
 #include "uart.h"
 #include "vfs.h"
+#ifdef CONFIG_AI_SCHEDULER
+#include "inference_device.h"
+#include "ai_policy_hailo.h"
+#include "ai_types.h"
+#endif
 #include <stdint.h>
 #include <string.h>
 
@@ -170,9 +180,17 @@ static int cmd_hailo(int argc, char *argv[])
          * device-side starting address for the first action. Each
          * subsequent action is appended at base + cumulative bytes.
          * Without a real CONFIG_STREAM response feeding the right
-         * base, callers pick one manually for bring-up. */
+         * base, callers pick one manually for bring-up.
+         *
+         * Optional: `hailo load <path> sched` loads the HEF into the
+         * "hailo-8" inference_device backend and installs the handle
+         * into ai_policy_hailo so scheduler decisions can route
+         * through the NPU. Placeholder quantization parameters
+         * (scale=1/128, zp=0) are used until HEF quant-metadata
+         * extraction lands. */
         bool     do_upload = false;
         uint32_t upload_base = 0;
+        bool     do_sched = false;
         if (argc >= 5 && strcmp(argv[3], "upload") == 0) {
             if (parse_hex_u32(argv[4], &upload_base) != 0) {
                 shell_printf("hailo: load upload: bad hex base '%s'\n",
@@ -180,6 +198,8 @@ static int cmd_hailo(int argc, char *argv[])
                 return 0;
             }
             do_upload = true;
+        } else if (argc >= 4 && strcmp(argv[3], "sched") == 0) {
+            do_sched = true;
         }
 
         struct vfs_entry_info info = {0};
@@ -206,7 +226,14 @@ static int cmd_hailo(int argc, char *argv[])
         }
 
         struct hef_outer_header outer = {0};
-        int rc = hef_parse_outer_header(hdr_buf, (size_t)n, &outer);
+        /* hef_parse_outer_header's truncation check verifies the proto
+         * body fits within the supplied `size`. We've only read the
+         * first 64 bytes into hdr_buf, but info.size is the true file
+         * length — pass that so the check passes, while the parser's
+         * actual reads stay within the 32-byte header region (well
+         * inside the 64 bytes we buffered). */
+        int rc = hef_parse_outer_header(hdr_buf, info.size, &outer);
+        (void)n;    /* read was validated above; silence unused-var warning */
         if (rc != HEF_OK) {
             shell_printf("hailo: outer-header parse failed (%d)\n", rc);
             return 0;
@@ -272,7 +299,7 @@ static int cmd_hailo(int argc, char *argv[])
             shell_printf("  first network group = %s\n",
                          meta.first_network_group);
         }
-        if (meta.op_count > 0) {
+        if (meta.op_count > 0 || meta.pad_count > 0) {
             shell_printf("  first NG ops = %u, pads captured = %u%s\n",
                          meta.op_count, meta.pad_count,
                          meta.pads_truncated ? " (truncated)" : "");
@@ -291,6 +318,17 @@ static int cmd_hailo(int argc, char *argv[])
                     shell_printf("    %s pad[%u] \"%s\" (no tensor_shape)\n",
                                  p->is_input ? "in" : "out",
                                  p->index, name);
+                }
+                if (p->has_stream_info) {
+                    shell_printf("      stream: sys_index=%u "
+                                 "core_bytes=%u core_buffers=%u\n",
+                                 p->sys_index, p->core_bytes_per_buffer,
+                                 p->core_buffers_per_frame);
+                }
+                if (p->has_quant_info) {
+                    shell_printf("      quant: scale_raw=0x%08x "
+                                 "zp_raw=0x%08x\n",
+                                 p->qp_scale_raw, p->qp_zp_raw);
                 }
             }
         }
@@ -320,6 +358,94 @@ static int cmd_hailo(int argc, char *argv[])
                 shell_printf("  ccw: upload failed (%d)\n", urc);
             }
         }
+
+#ifdef CONFIG_AI_SCHEDULER
+        if (do_sched) {
+            /* Hand the full HEF blob (header + proto) to the Hailo
+             * inference_device backend for load_model. Allocate a
+             * contiguous buffer sized to the whole file, populate
+             * header + body (body is already resident), and release
+             * it immediately after load_model returns — the backend
+             * does not keep a pointer. */
+            size_t total = (size_t)outer.proto_offset + outer.proto_size;
+            size_t full_pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
+            uint8_t *full = NULL;
+            /* Defensive bound: hdr_buf is 64 B. v0/v1/v2/v3 proto_offset
+             * values (32/28/44/52) all fit. A future HEF version with
+             * a larger trailer would otherwise silently copy past
+             * hdr_buf's tail; reject cleanly before that happens. */
+            if (outer.proto_offset > sizeof(hdr_buf)) {
+                shell_printf("hailo: sched: proto_offset=%u > "
+                             "hdr_buf size %zu (new HEF version?)\n",
+                             outer.proto_offset, sizeof(hdr_buf));
+            } else {
+                full = pmm_alloc_pages(full_pages);
+            }
+            if (!full && outer.proto_offset <= sizeof(hdr_buf)) {
+                shell_printf("hailo: sched: pmm_alloc_pages(%lu) failed\n",
+                             (unsigned long)full_pages);
+            }
+            if (full) {
+                memcpy(full, hdr_buf, outer.proto_offset);
+                memcpy(full + outer.proto_offset, body, outer.proto_size);
+
+                struct inference_device *dev = inference_device_find("hailo-8");
+                if (!dev) {
+                    shell_puts("hailo: sched: 'hailo-8' device not registered\n");
+                } else {
+                    inference_model_handle_t h = INF_INVALID_HANDLE;
+                    int lrc = inference_load_model(dev, full, total, &h);
+                    if (lrc != INF_OK) {
+                        shell_printf("hailo: sched: load_model failed (%d)\n", lrc);
+                    } else {
+                        /* Prefer HEF-derived quant (Phase 6.2b) when
+                         * the parser captured per-pad scale+zp. Walk
+                         * the pads to find the first input + first
+                         * output with has_quant_info. Falls back to
+                         * placeholder scale=1/128 / zp=0 if either
+                         * pad lacks quant_info, or if set_from_raw
+                         * rejects the scale as invalid (zero/NaN). */
+                        const struct hef_pad_info *qin  = NULL;
+                        const struct hef_pad_info *qout = NULL;
+                        for (uint32_t i = 0; i < meta.pad_count; i++) {
+                            if (!meta.pads[i].has_tensor_shape) continue;
+                            if (meta.pads[i].is_input && !qin)  qin  = &meta.pads[i];
+                            if (!meta.pads[i].is_input && !qout) qout = &meta.pads[i];
+                        }
+                        int rc_quant = -1;
+                        if (qin && qout &&
+                            qin->has_quant_info && qout->has_quant_info) {
+                            rc_quant = ai_policy_hailo_set_model_from_raw(
+                                h,
+                                qin->qp_scale_raw,  qin->qp_zp_raw,
+                                qout->qp_scale_raw, qout->qp_zp_raw,
+                                AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+                        }
+                        if (rc_quant == 0) {
+                            shell_printf("hailo: sched: model loaded "
+                                         "(handle=%d), ai_policy_hailo armed "
+                                         "with HEF quant\n", (int)h);
+                        } else {
+                            ai_policy_hailo_set_model_placeholder(
+                                h, AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+                            shell_printf("hailo: sched: model loaded "
+                                         "(handle=%d), ai_policy_hailo armed "
+                                         "with placeholder quant "
+                                         "(HEF quant_info %s)\n",
+                                         (int)h,
+                                         (qin && qin->has_quant_info &&
+                                          qout && qout->has_quant_info)
+                                             ? "rejected (invalid scale)"
+                                             : "absent");
+                        }
+                    }
+                }
+                pmm_free_pages(full, full_pages);
+            }
+        }
+#else
+        (void)do_sched;
+#endif
 
         pmm_free_pages(body, body_pages);
         return 0;

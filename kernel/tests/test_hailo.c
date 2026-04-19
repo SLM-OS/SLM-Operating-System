@@ -21,8 +21,15 @@
 #include "../ai_accel/hailo/hailo_tensor.h"
 #include "../ai_accel/hailo/hailo_vdma.h"
 #include "../ai_accel/hailo/hef_parser.h"
+#include "../ai_accel/hailo/hef_header.h"
+#include "../include/inference_device.h"
 #include "../include/md5.h"
 #include "../include/uart.h"
+
+/* Backend registration + test hooks from kernel/inference/inference_device_hailo.c. */
+extern int inference_device_hailo_register(void);
+extern uint32_t hailo_backend_in_use_slots(void);
+extern void hailo_backend_reset_slots_for_tests(void);
 #include "test_harness.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -3441,6 +3448,845 @@ static void test_control_config_stream_propagates_fw_error(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Phase 6.2a: inference_device Hailo backend                                  */
+/* -------------------------------------------------------------------------- */
+
+/* Little-endian varint emitter (proto wire format). Returns bytes written. */
+static size_t emit_varint(uint8_t *buf, uint64_t v)
+{
+    size_t n = 0;
+    while (v >= 0x80) {
+        buf[n++] = (uint8_t)(v | 0x80);
+        v >>= 7;
+    }
+    buf[n++] = (uint8_t)v;
+    return n;
+}
+
+static void emit_tag(uint8_t *buf, size_t *off, uint32_t field, uint32_t wire_type)
+{
+    *off += emit_varint(buf + *off, ((uint64_t)field << 3) | wire_type);
+}
+
+static void emit_varint_field(uint8_t *buf, size_t *off, uint32_t field, uint64_t v)
+{
+    emit_tag(buf, off, field, 0);            /* wire type 0 = varint */
+    *off += emit_varint(buf + *off, v);
+}
+
+static void emit_lenprefix(uint8_t *buf, size_t *off, uint32_t field,
+                           const uint8_t *payload, size_t payload_len)
+{
+    emit_tag(buf, off, field, 2);            /* wire type 2 = length-delimited */
+    *off += emit_varint(buf + *off, payload_len);
+    memcpy(buf + *off, payload, payload_len);
+    *off += payload_len;
+}
+
+/* Build a minimal TensorShape sub-message: h/w/f + padded_h/w/f. */
+static size_t emit_tensor_shape(uint8_t *buf, uint32_t h, uint32_t w, uint32_t f,
+                                uint32_t ph, uint32_t pw, uint32_t pf)
+{
+    size_t off = 0;
+    emit_varint_field(buf, &off, 1, h);
+    emit_varint_field(buf, &off, 2, w);
+    emit_varint_field(buf, &off, 3, f);
+    emit_varint_field(buf, &off, 4, ph);
+    emit_varint_field(buf, &off, 5, pw);
+    emit_varint_field(buf, &off, 6, pf);
+    return off;
+}
+
+/* Pad = {index (f1), name (f2), tensor_shape (f6)}. */
+static size_t emit_pad_with_shape(uint8_t *buf, uint32_t index, const char *name,
+                                  uint32_t h, uint32_t w, uint32_t f,
+                                  uint32_t ph, uint32_t pw, uint32_t pf)
+{
+    size_t off = 0;
+    emit_varint_field(buf, &off, 1, index);
+    emit_lenprefix(buf, &off, 2, (const uint8_t *)name, strlen(name));
+    uint8_t shape_buf[32];
+    size_t  shape_len = emit_tensor_shape(shape_buf, h, w, f, ph, pw, pf);
+    emit_lenprefix(buf, &off, 6, shape_buf, shape_len);
+    return off;
+}
+
+/* Build a full ProtoHEFHef body containing one network group with one
+ * op holding `num_in` input pads + `num_out` output pads. Each pad has
+ * the same tensor shape; change `in_h`/`out_h` to differentiate. */
+static size_t build_minimal_proto(uint8_t *out, size_t cap,
+                                  uint32_t num_in, uint32_t num_out,
+                                  uint32_t in_h, uint32_t in_w, uint32_t in_f,
+                                  uint32_t out_h, uint32_t out_w, uint32_t out_f)
+{
+    (void)cap;
+    /* Op: name + input_pads[] + output_pads[]. */
+    uint8_t op_buf[2048];
+    size_t  op_len = 0;
+    emit_lenprefix(op_buf, &op_len, 1, (const uint8_t *)"op", 2);
+    for (uint32_t i = 0; i < num_in; i++) {
+        uint8_t pad_buf[64];
+        size_t  pad_len = emit_pad_with_shape(pad_buf, i, "in",
+                                              in_h, in_w, in_f,
+                                              in_h, in_w, in_f);
+        emit_lenprefix(op_buf, &op_len, 2, pad_buf, pad_len);
+    }
+    for (uint32_t i = 0; i < num_out; i++) {
+        uint8_t pad_buf[64];
+        size_t  pad_len = emit_pad_with_shape(pad_buf, 100 + i, "out",
+                                              out_h, out_w, out_f,
+                                              out_h, out_w, out_f);
+        emit_lenprefix(op_buf, &op_len, 3, pad_buf, pad_len);
+    }
+
+    /* NG: name + ops[]. */
+    uint8_t ng_buf[4096];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 10, (const uint8_t *)"ng", 2);
+    emit_lenprefix(ng_buf, &ng_len, 8, op_buf, op_len);
+
+    /* Root: one network_groups entry. */
+    size_t olen = 0;
+    emit_lenprefix(out, &olen, 2, ng_buf, ng_len);
+    return olen;
+}
+
+/* Wrap a proto body in a valid v0 HEF header and return total blob size.
+ * Assumes buf is at least 32 + proto_len bytes. */
+static size_t wrap_hef_v0(uint8_t *buf, size_t cap,
+                          const uint8_t *proto, size_t proto_len)
+{
+    if (cap < 32 + proto_len) return 0;
+    /* HEF_MAGIC = 0x01484546, stored big-endian as 01 48 45 46. */
+    buf[0] = 0x01; buf[1] = 0x48; buf[2] = 0x45; buf[3] = 0x46;
+    /* Version V0 = 0. */
+    buf[4] = 0; buf[5] = 0; buf[6] = 0; buf[7] = 0;
+    /* proto_size as big-endian u32. */
+    buf[8]  = (uint8_t)(proto_len >> 24);
+    buf[9]  = (uint8_t)(proto_len >> 16);
+    buf[10] = (uint8_t)(proto_len >>  8);
+    buf[11] = (uint8_t)(proto_len      );
+    /* Reserved (4) + MD5 (16) zero. */
+    memset(buf + 12, 0, 20);
+    memcpy(buf + 32, proto, proto_len);
+    return 32 + proto_len;
+}
+
+/* Helper: build a full valid minimal HEF (header + 1-in/1-out proto).
+ * Returns total size; caller's buf must be >= 256 bytes. */
+static size_t build_test_hef(uint8_t *buf, size_t cap)
+{
+    uint8_t proto[512];
+    size_t  plen = build_minimal_proto(proto, sizeof(proto),
+                                        /*in*/1, /*out*/1,
+                                        /*in_h,w,f*/1, 1, 128,
+                                        /*out_h,w,f*/1, 1, 32);
+    return wrap_hef_v0(buf, cap, proto, plen);
+}
+
+/* Phase 6.2b helpers: synthesize an EdgeLayerBase + NumericInfo sub-
+ * message so the new parser callbacks have something to extract. */
+static size_t emit_edge_layer_base(uint8_t *buf,
+                                   uint32_t sys_index,
+                                   uint32_t core_bytes_per_buffer,
+                                   uint32_t core_buffers_per_frame)
+{
+    size_t off = 0;
+    /* Minimal fields: sys_index (f8), core_bytes_per_buffer (f9),
+     * core_buffers_per_frame (f10). Other HWxC fields omitted — the
+     * parser skips unknown varints, so leaving them absent is fine. */
+    emit_varint_field(buf, &off, 8,  sys_index);
+    emit_varint_field(buf, &off, 9,  core_bytes_per_buffer);
+    emit_varint_field(buf, &off, 10, core_buffers_per_frame);
+    return off;
+}
+
+/* Emit a NumericInfo message with qp_zp (f1) + qp_scale (f2) as
+ * 32-bit fixed-width floats (wire type 5, little-endian). */
+static size_t emit_numeric_info(uint8_t *buf,
+                                uint32_t qp_zp_raw, uint32_t qp_scale_raw)
+{
+    size_t off = 0;
+    /* f1 tag + 4-byte LE qp_zp */
+    emit_tag(buf, &off, 1, 5);
+    buf[off + 0] = (uint8_t)(qp_zp_raw      );
+    buf[off + 1] = (uint8_t)(qp_zp_raw >>  8);
+    buf[off + 2] = (uint8_t)(qp_zp_raw >> 16);
+    buf[off + 3] = (uint8_t)(qp_zp_raw >> 24);
+    off += 4;
+    /* f2 tag + 4-byte LE qp_scale */
+    emit_tag(buf, &off, 2, 5);
+    buf[off + 0] = (uint8_t)(qp_scale_raw      );
+    buf[off + 1] = (uint8_t)(qp_scale_raw >>  8);
+    buf[off + 2] = (uint8_t)(qp_scale_raw >> 16);
+    buf[off + 3] = (uint8_t)(qp_scale_raw >> 24);
+    off += 4;
+    return off;
+}
+
+/* ProtoHEFEdgeLayerInfo = {name(f1), edge_layer_base(f2), numeric_info(f3)}. */
+static size_t emit_edge_layer_info(uint8_t *buf,
+                                   uint32_t sys_index,
+                                   uint32_t core_bytes_per_buffer,
+                                   uint32_t core_buffers_per_frame,
+                                   uint32_t qp_zp_raw, uint32_t qp_scale_raw)
+{
+    uint8_t base_buf[32];
+    size_t  base_len = emit_edge_layer_base(base_buf, sys_index,
+                                             core_bytes_per_buffer,
+                                             core_buffers_per_frame);
+    uint8_t num_buf[16];
+    size_t  num_len = emit_numeric_info(num_buf, qp_zp_raw, qp_scale_raw);
+    size_t  off = 0;
+    emit_lenprefix(buf, &off, 1, (const uint8_t *)"ly", 2);
+    emit_lenprefix(buf, &off, 2, base_buf, base_len);
+    emit_lenprefix(buf, &off, 3, num_buf,  num_len);
+    return off;
+}
+
+/* ProtoHEFEdgeLayer = {direction(f1), edge_layer_type(f2),
+ *                      edge.layer_info(f3), pad_index(f7)}. */
+static size_t emit_edge_layer(uint8_t *buf,
+                              uint32_t direction, uint32_t pad_index,
+                              uint32_t sys_index,
+                              uint32_t core_bytes_per_buffer,
+                              uint32_t core_buffers_per_frame,
+                              uint32_t qp_zp_raw, uint32_t qp_scale_raw)
+{
+    uint8_t info_buf[128];
+    size_t  info_len = emit_edge_layer_info(info_buf,
+                                             sys_index,
+                                             core_bytes_per_buffer,
+                                             core_buffers_per_frame,
+                                             qp_zp_raw, qp_scale_raw);
+    size_t off = 0;
+    emit_varint_field(buf, &off, 1, direction);
+    emit_varint_field(buf, &off, 2, 0);    /* edge_layer_type = INFO */
+    emit_lenprefix(buf, &off, 3, info_buf, info_len);
+    emit_varint_field(buf, &off, 7, pad_index);
+    return off;
+}
+
+/* Build a HEF with one network group containing one op (1-in + 1-out)
+ * AND one context whose metadata carries edge_layers matching both
+ * pads (pad_index 0 → input, pad_index 100 → output to match the
+ * build_minimal_proto scheme). */
+static size_t build_test_hef_with_edge_layers(uint8_t *buf, size_t cap,
+                                              uint32_t in_sys_index,
+                                              uint32_t in_core_bpb,
+                                              uint32_t in_qp_zp_raw,
+                                              uint32_t in_qp_scale_raw,
+                                              uint32_t out_sys_index,
+                                              uint32_t out_core_bpb,
+                                              uint32_t out_qp_zp_raw,
+                                              uint32_t out_qp_scale_raw)
+{
+    (void)cap;
+    /* Op with 1-in, 1-out (same as build_minimal_proto defaults). */
+    uint8_t op_buf[512];
+    size_t  op_len = 0;
+    emit_lenprefix(op_buf, &op_len, 1, (const uint8_t *)"op", 2);
+    {
+        uint8_t pad_buf[64];
+        size_t  pad_len = emit_pad_with_shape(pad_buf, 0, "in",
+                                              1, 1, 108, 1, 1, 108);
+        emit_lenprefix(op_buf, &op_len, 2, pad_buf, pad_len);
+    }
+    {
+        uint8_t pad_buf[64];
+        size_t  pad_len = emit_pad_with_shape(pad_buf, 100, "out",
+                                              1, 1, 24, 1, 1, 24);
+        emit_lenprefix(op_buf, &op_len, 3, pad_buf, pad_len);
+    }
+
+    /* Edge layer matching pad_index=0 (input, direction=0). */
+    uint8_t elin_buf[256];
+    size_t  elin_len = emit_edge_layer(elin_buf, 0, 0,
+                                        in_sys_index, in_core_bpb, 1,
+                                        in_qp_zp_raw, in_qp_scale_raw);
+    /* Edge layer matching pad_index=100 (output, direction=1). */
+    uint8_t elout_buf[256];
+    size_t  elout_len = emit_edge_layer(elout_buf, 1, 100,
+                                         out_sys_index, out_core_bpb, 1,
+                                         out_qp_zp_raw, out_qp_scale_raw);
+
+    /* ContextMetadata.edge_layers — two repeated entries. */
+    uint8_t md_buf[1024];
+    size_t  md_len = 0;
+    emit_lenprefix(md_buf, &md_len, 1, (const uint8_t *)"ctx", 3);
+    emit_lenprefix(md_buf, &md_len, 2, elin_buf, elin_len);
+    emit_lenprefix(md_buf, &md_len, 2, elout_buf, elout_len);
+
+    /* Context: context_index (f1) + metadata (f3). */
+    uint8_t ctx_buf[1280];
+    size_t  ctx_len = 0;
+    emit_varint_field(ctx_buf, &ctx_len, 1, 0);   /* context_index */
+    emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
+
+    /* NetworkGroup: name (f10), ops (f8 via op_buf), contexts (f3). */
+    uint8_t ng_buf[2048];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 10, (const uint8_t *)"ng", 2);
+    emit_lenprefix(ng_buf, &ng_len, 8,  op_buf, op_len);
+    emit_lenprefix(ng_buf, &ng_len, 3,  ctx_buf, ctx_len);
+
+    /* ProtoHEFHef: network_groups (f2). */
+    uint8_t proto[4096];
+    size_t  plen = 0;
+    emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
+
+    return wrap_hef_v0(buf, cap, proto, plen);
+}
+
+/* Lookup the Hailo backend, (re-)register it, reset slots, and make
+ * sure the firmware is in the RUNNING state. Most tests need all three. */
+static struct inference_device *hailo_backend_ready(void)
+{
+    control_setup_running();
+    (void)inference_device_hailo_register();   /* idempotent for test purposes */
+    hailo_backend_reset_slots_for_tests();
+    return inference_device_find("hailo-8");
+}
+
+static void test_inf_hailo_register_succeeds(void)
+{
+    control_setup_running();
+    int rc = inference_device_hailo_register();
+    /* The first register returns OK; subsequent runs may return
+     * INF_ERR_FULL or similar — both acceptable. Find is the real
+     * check. */
+    (void)rc;
+    struct inference_device *dev = inference_device_find("hailo-8");
+    TEST_ASSERT_NOT_NULL(dev);
+    TEST_ASSERT_EQUAL_STRING("hailo-8", dev->ops->name);
+    TEST_ASSERT_TRUE(dev->ops->caps & INF_CAP_INT8);
+    TEST_ASSERT_TRUE(dev->ops->caps & INF_CAP_LOAD_MODEL);
+}
+
+static void test_inf_hailo_load_rejects_null(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_load_model(dev, NULL, 0, &h));
+    uint8_t blob[16] = {0};
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_load_model(dev, blob, 0, &h));
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_load_model(dev, blob, sizeof(blob), NULL));
+}
+
+static void test_inf_hailo_load_rejects_when_not_running(void)
+{
+    /* Force device back to PROBED (firmware not booted). */
+    boot_setup_probed();
+    (void)inference_device_hailo_register();
+    hailo_backend_reset_slots_for_tests();
+    struct inference_device *dev = inference_device_find("hailo-8");
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[256];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_NODEV,
+        inference_load_model(dev, blob, n, &h));
+}
+
+static void test_inf_hailo_load_rejects_bad_header(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    /* Random 64 bytes with no valid HEF magic. */
+    uint8_t blob[64];
+    memset(blob, 0xAB, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_MODEL,
+        inference_load_model(dev, blob, sizeof(blob), &h));
+}
+
+static void test_inf_hailo_load_rejects_zero_pads(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    /* Build a HEF whose proto body has no network_groups at all →
+     * the backend can't find input/output pads → rejection. */
+    uint8_t blob[128];
+    size_t n = wrap_hef_v0(blob, sizeof(blob), (const uint8_t *)"", 0);
+    TEST_ASSERT_TRUE(n != 0);
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_MODEL,
+        inference_load_model(dev, blob, n, &h));
+}
+
+static void test_inf_hailo_load_happy_path(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK,
+        inference_load_model(dev, blob, n, &h));
+    TEST_ASSERT_TRUE(h >= 1);
+    TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
+}
+
+static void test_inf_hailo_load_fills_slots_until_full(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t handles[4];
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_INT(INF_OK,
+            inference_load_model(dev, blob, n, &handles[i]));
+    }
+    TEST_ASSERT_EQUAL_UINT32(4, hailo_backend_in_use_slots());
+    /* Fifth load must fail — slot table saturated. */
+    inference_model_handle_t overflow;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_FULL,
+        inference_load_model(dev, blob, n, &overflow));
+}
+
+static void test_inf_hailo_run_rejects_bad_handle(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t in_buf[128], out_buf[32];
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 128, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {128, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 32, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {32, 0, 0, 0},
+    };
+    /* h=0 reserved for BUILTIN (not a Hailo handle). */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_run(dev, INF_BUILTIN_HANDLE, &in, &out));
+    /* h > HAILO_MAX_MODELS out of range. */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_run(dev, 99, &in, &out));
+}
+
+static void test_inf_hailo_run_rejects_wrong_dtype(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    uint8_t in_buf[128], out_buf[32];
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 128, .dtype = INF_DTYPE_FP32, /* wrong */
+        .rank = 1, .shape = {128, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 32, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {32, 0, 0, 0},
+    };
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_TENSOR,
+        inference_run(dev, h, &in, &out));
+}
+
+static void test_inf_hailo_run_rejects_size_mismatch(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    uint8_t in_buf[64], out_buf[32];
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 64, /* expected 128 */ .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {64, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 32, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {32, 0, 0, 0},
+    };
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_TENSOR,
+        inference_run(dev, h, &in, &out));
+}
+
+static void test_inf_hailo_run_happy_path_via_auto_advance(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    /* hailo_infer_run polls VDMA num_proc; mock_vdma_auto_advance = true
+     * makes every num_avail write echo into num_proc so the poll
+     * converges on the first iteration. */
+    mock_vdma_auto_advance = true;
+
+    uint8_t in_buf[128], out_buf[32];
+    memset(in_buf, 0x7F, sizeof(in_buf));
+    memset(out_buf, 0x00, sizeof(out_buf));
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 128, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {128, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 32, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {32, 0, 0, 0},
+    };
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_run(dev, h, &in, &out));
+}
+
+static void test_inf_hailo_free_releases_slot(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+    TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
+
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_free_model(dev, h));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+
+    /* Double-free is an error. */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL, inference_free_model(dev, h));
+    /* Reserved handle is always an error. */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_INVAL,
+        inference_free_model(dev, INF_BUILTIN_HANDLE));
+}
+
+#ifdef CONFIG_AI_SCHEDULER
+#include "../sched/ai/ai_policy_hailo.h"
+#include "../sched/ai/ai_types.h"
+
+static void test_ai_policy_hailo_set_and_get_handle(void)
+{
+    /* set_model_placeholder installs a handle; get_model_handle returns it. */
+    ai_policy_hailo_set_model_placeholder((inference_model_handle_t)3,
+                                           AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(3, (int)ai_policy_hailo_get_model_handle());
+}
+
+static void test_ai_policy_hailo_clear_detaches_model(void)
+{
+    /* Arm, then detach — get_model_handle must report INVALID. */
+    ai_policy_hailo_set_model_placeholder((inference_model_handle_t)2,
+                                           AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(2, (int)ai_policy_hailo_get_model_handle());
+
+    ai_policy_hailo_set_model_placeholder(INF_INVALID_HANDLE, 0, 0);
+    TEST_ASSERT_EQUAL_INT((int)INF_INVALID_HANDLE,
+                          (int)ai_policy_hailo_get_model_handle());
+}
+
+static void test_ai_policy_hailo_set_from_raw_happy_path(void)
+{
+    /* Valid IEEE-754 float bit patterns: scale=0x3C000000 (1/128),
+     * zp=0. Setter installs and get returns the handle. */
+    int rc = ai_policy_hailo_set_model_from_raw((inference_model_handle_t)4,
+                                                0x3C000000u, 0,
+                                                0x3C000000u, 0,
+                                                AI_STATE_DIM,
+                                                AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_INT(4, (int)ai_policy_hailo_get_model_handle());
+    /* Clean up for independence between tests. */
+    ai_policy_hailo_set_model_placeholder(INF_INVALID_HANDLE, 0, 0);
+}
+
+static void test_ai_policy_hailo_set_from_raw_rejects_zero_scale(void)
+{
+    /* scale_raw=0 → float 0.0 → setter returns -1 without mutating state. */
+    ai_policy_hailo_set_model_placeholder(INF_INVALID_HANDLE, 0, 0);
+    int rc = ai_policy_hailo_set_model_from_raw((inference_model_handle_t)7,
+                                                0u, 0,              /* scale=0 */
+                                                0x3C000000u, 0,
+                                                AI_STATE_DIM,
+                                                AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+    /* No model installed despite the failure. */
+    TEST_ASSERT_EQUAL_INT((int)INF_INVALID_HANDLE,
+                          (int)ai_policy_hailo_get_model_handle());
+}
+
+static void test_ai_policy_hailo_set_from_raw_rejects_nan_scale(void)
+{
+    /* scale_raw=0x7FC00000 = quiet NaN → setter rejects. */
+    ai_policy_hailo_set_model_placeholder(INF_INVALID_HANDLE, 0, 0);
+    int rc = ai_policy_hailo_set_model_from_raw((inference_model_handle_t)8,
+                                                0x7FC00000u, 0,
+                                                0x3C000000u, 0,
+                                                AI_STATE_DIM,
+                                                AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+}
+#endif
+
+/* Phase 6.2b: HEF edge-layer quant + stream extraction. */
+
+static void test_hef_parser_captures_edge_layer_quant(void)
+{
+    /* scale=0x3C000000 = IEEE-754 0.0078125 (1/128), zp=0x00000000 = 0.0.
+     * Arbitrary but deterministic so the bit-pattern round-trip can be
+     * asserted without reinterpreting to float inside the test. */
+    uint8_t blob[2048];
+    size_t  n = build_test_hef_with_edge_layers(blob, sizeof(blob),
+                                                /*in*/ 5, 128,
+                                                0x00000000u, 0x3C000000u,
+                                                /*out*/ 9, 32,
+                                                0x00000000u, 0x3C800000u);
+    TEST_ASSERT_TRUE(n != 0);
+
+    struct hef_info info;
+    const uint8_t *proto = blob + 32;   /* 32-byte v0 header */
+    size_t proto_len = n - 32;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
+                          hef_parse_body(proto, proto_len, &info));
+    TEST_ASSERT_EQUAL_UINT32(2, info.pad_count);
+
+    /* Input pad (index 0) should have quant + stream from edge layer 1. */
+    TEST_ASSERT_TRUE(info.pads[0].is_input);
+    TEST_ASSERT_TRUE(info.pads[0].has_quant_info);
+    TEST_ASSERT_EQUAL_UINT32(0x3C000000u, info.pads[0].qp_scale_raw);
+    TEST_ASSERT_EQUAL_UINT32(0x00000000u, info.pads[0].qp_zp_raw);
+    TEST_ASSERT_TRUE(info.pads[0].has_stream_info);
+    TEST_ASSERT_EQUAL_UINT32(5,   info.pads[0].sys_index);
+    TEST_ASSERT_EQUAL_UINT32(128, info.pads[0].core_bytes_per_buffer);
+
+    /* Output pad (index 100) should have quant + stream from edge layer 2. */
+    TEST_ASSERT_FALSE(info.pads[1].is_input);
+    TEST_ASSERT_TRUE(info.pads[1].has_quant_info);
+    TEST_ASSERT_EQUAL_UINT32(0x3C800000u, info.pads[1].qp_scale_raw);
+    TEST_ASSERT_TRUE(info.pads[1].has_stream_info);
+    TEST_ASSERT_EQUAL_UINT32(9,  info.pads[1].sys_index);
+    TEST_ASSERT_EQUAL_UINT32(32, info.pads[1].core_bytes_per_buffer);
+}
+
+static void test_hef_parser_edge_layer_creates_pad_when_ops_empty(void)
+{
+    /* DFC 3.33.1 leaves ProtoHEFNetworkGroup.ops[] empty for simple
+     * MLPs. Under that layout, edge_layers[] is the ONLY source of
+     * pad info. Build a HEF with NO ops and just edge layers, and
+     * verify the parser creates pad entries directly. */
+    uint8_t proto[1024];
+    size_t  plen = 0;
+
+    /* Edge layer for an input pad: direction=0, pad_index=0,
+     * shape 1x1x108, sys_index=3, core_bytes=128, scale=0x3C000000 (1/128). */
+    uint8_t elin[256];
+    size_t  elin_len = 0;
+    emit_varint_field(elin, &elin_len, 1, 0);      /* direction = H2D */
+    emit_varint_field(elin, &elin_len, 2, 0);      /* edge_layer_type = INFO */
+    /* edge.layer_info with shape + stream + quant */
+    uint8_t info_buf[128];
+    size_t  info_len = 0;
+    emit_lenprefix(info_buf, &info_len, 1, (const uint8_t *)"in", 2);
+    {
+        uint8_t base[32];
+        size_t  base_len = 0;
+        emit_varint_field(base, &base_len, 1, 1);   /* height */
+        emit_varint_field(base, &base_len, 2, 1);   /* padded_height */
+        emit_varint_field(base, &base_len, 3, 1);   /* width */
+        emit_varint_field(base, &base_len, 4, 1);   /* padded_width */
+        emit_varint_field(base, &base_len, 5, 108); /* features */
+        emit_varint_field(base, &base_len, 6, 108); /* padded_features */
+        emit_varint_field(base, &base_len, 8, 3);   /* sys_index */
+        emit_varint_field(base, &base_len, 9, 128); /* core_bytes_per_buffer */
+        emit_lenprefix(info_buf, &info_len, 2, base, base_len);
+    }
+    {
+        uint8_t num[16];
+        size_t  num_len = emit_numeric_info(num, 0u, 0x3C000000u);
+        emit_lenprefix(info_buf, &info_len, 3, num, num_len);
+    }
+    emit_lenprefix(elin, &elin_len, 3, info_buf, info_len);
+    emit_varint_field(elin, &elin_len, 7, 0);      /* pad_index */
+
+    /* ContextMetadata with just this one edge layer (no ops). */
+    uint8_t md_buf[512];
+    size_t  md_len = 0;
+    emit_lenprefix(md_buf, &md_len, 1, (const uint8_t *)"ctx", 3);
+    emit_lenprefix(md_buf, &md_len, 2, elin, elin_len);
+
+    uint8_t ctx_buf[768];
+    size_t  ctx_len = 0;
+    emit_varint_field(ctx_buf, &ctx_len, 1, 0);    /* context_index */
+    emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
+
+    /* NetworkGroup with contexts but NO ops. */
+    uint8_t ng_buf[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 10, (const uint8_t *)"ng", 2);
+    emit_lenprefix(ng_buf, &ng_len, 3,  ctx_buf, ctx_len);
+
+    emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
+                          hef_parse_body(proto, plen, &info));
+    TEST_ASSERT_EQUAL_UINT32(0, info.op_count);   /* no ops */
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);  /* pad created from edge_layer */
+    TEST_ASSERT_TRUE(info.pads[0].is_input);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(108, info.pads[0].features);
+    TEST_ASSERT_TRUE(info.pads[0].has_quant_info);
+    TEST_ASSERT_EQUAL_UINT32(0x3C000000u, info.pads[0].qp_scale_raw);
+    TEST_ASSERT_TRUE(info.pads[0].has_stream_info);
+    TEST_ASSERT_EQUAL_UINT32(3,   info.pads[0].sys_index);
+    TEST_ASSERT_EQUAL_UINT32(128, info.pads[0].core_bytes_per_buffer);
+}
+
+static void test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad(void)
+{
+    /* Op with a shape-less pad (no tensor_shape emitted), then an
+     * edge_layer with direction + pad_index + shape. The edge-layer
+     * callback should back-fill the existing pad's shape. Matches the
+     * "found pad, p->has_tensor_shape == false" branch. */
+    uint8_t proto[1024];
+    size_t  plen = 0;
+
+    /* Op with one input pad (index 0), NO tensor_shape set. We
+     * build a pad message with just name + index, no shape_info. */
+    uint8_t op_buf[256];
+    size_t  op_len = 0;
+    emit_lenprefix(op_buf, &op_len, 1, (const uint8_t *)"op", 2);
+    {
+        uint8_t pad_buf[64];
+        size_t  pad_len = 0;
+        emit_varint_field(pad_buf, &pad_len, 1, 0);  /* pad index = 0 */
+        emit_lenprefix(pad_buf, &pad_len, 2,
+                       (const uint8_t *)"in", 2);    /* pad name */
+        /* shape_info intentionally omitted. */
+        emit_lenprefix(op_buf, &op_len, 2, pad_buf, pad_len);
+    }
+
+    /* Edge layer for pad 0 with shape 1x1x42. */
+    uint8_t elin[256];
+    size_t  elin_len = 0;
+    emit_varint_field(elin, &elin_len, 1, 0);     /* direction = H2D */
+    emit_varint_field(elin, &elin_len, 2, 0);     /* edge_layer_type = INFO */
+    uint8_t info_buf[128];
+    size_t  info_len = 0;
+    emit_lenprefix(info_buf, &info_len, 1, (const uint8_t *)"ly", 2);
+    {
+        uint8_t base[32];
+        size_t  base_len = 0;
+        emit_varint_field(base, &base_len, 1, 1);   /* height = 1 */
+        emit_varint_field(base, &base_len, 3, 1);   /* width = 1 */
+        emit_varint_field(base, &base_len, 5, 42);  /* features = 42 */
+        emit_lenprefix(info_buf, &info_len, 2, base, base_len);
+    }
+    emit_lenprefix(elin, &elin_len, 3, info_buf, info_len);
+    emit_varint_field(elin, &elin_len, 7, 0);     /* pad_index */
+
+    uint8_t md_buf[512];
+    size_t  md_len = 0;
+    emit_lenprefix(md_buf, &md_len, 1, (const uint8_t *)"ctx", 3);
+    emit_lenprefix(md_buf, &md_len, 2, elin, elin_len);
+
+    uint8_t ctx_buf[768];
+    size_t  ctx_len = 0;
+    emit_varint_field(ctx_buf, &ctx_len, 1, 0);
+    emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
+
+    uint8_t ng_buf[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 10, (const uint8_t *)"ng", 2);
+    emit_lenprefix(ng_buf, &ng_len, 8,  op_buf, op_len);
+    emit_lenprefix(ng_buf, &ng_len, 3,  ctx_buf, ctx_len);
+
+    emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
+                          hef_parse_body(proto, plen, &info));
+    /* ops path registered the pad, edge_layer path back-filled shape. */
+    TEST_ASSERT_EQUAL_UINT32(1, info.op_count);
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(42, info.pads[0].features);
+}
+
+static void test_inf_hailo_load_threads_hef_stream_info(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    /* Build a HEF where the input pad has sys_index=7 and
+     * core_bytes_per_buffer=256 via an edge layer. The backend must
+     * propagate those values into its slot's hailo_infer_config so
+     * when run() later feeds the device, the right stream params
+     * are used. We can't read the slot's cfg directly; instead, we
+     * assert the load succeeded + the input_bytes field (which is
+     * pad-shape-derived) matches the pad shape. */
+    uint8_t blob[2048];
+    size_t  n = build_test_hef_with_edge_layers(blob, sizeof(blob),
+                                                7, 256, 0, 0x3C000000u,
+                                                9,  32, 0, 0x3C800000u);
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK,
+        inference_load_model(dev, blob, n, &h));
+
+    /* Run a forward pass — confirms the slot's cfg is structurally
+     * valid (nonzero page sizes, valid channels). Actual stream
+     * propagation is a mock-internal detail that hailo_infer_run
+     * covers via its own VDMA reg writes. */
+    mock_vdma_auto_advance = true;
+    uint8_t in_buf[108], out_buf[24];
+    memset(in_buf, 0, sizeof(in_buf));
+    memset(out_buf, 0, sizeof(out_buf));
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 108, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {108, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 24, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {24, 0, 0, 0},
+    };
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_run(dev, h, &in, &out));
+}
+
+static void test_inf_hailo_shutdown_clears_slots(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h1, h2;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h1));
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h2));
+    TEST_ASSERT_EQUAL_UINT32(2, hailo_backend_in_use_slots());
+
+    /* Shutdown is idempotent and clears all slots. */
+    if (dev->ops->shutdown) dev->ops->shutdown(dev);
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -3616,6 +4462,34 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_config_stream_output_variant);
     RUN_TEST(test_control_config_stream_timeout_no_response);
     RUN_TEST(test_control_config_stream_propagates_fw_error);
+
+    /* Phase 6.2a: inference_device Hailo backend */
+#ifdef CONFIG_AI_SCHEDULER
+    RUN_TEST(test_ai_policy_hailo_set_and_get_handle);
+    RUN_TEST(test_ai_policy_hailo_clear_detaches_model);
+    RUN_TEST(test_ai_policy_hailo_set_from_raw_happy_path);
+    RUN_TEST(test_ai_policy_hailo_set_from_raw_rejects_zero_scale);
+    RUN_TEST(test_ai_policy_hailo_set_from_raw_rejects_nan_scale);
+#endif
+    RUN_TEST(test_inf_hailo_register_succeeds);
+    RUN_TEST(test_inf_hailo_load_rejects_null);
+    RUN_TEST(test_inf_hailo_load_rejects_when_not_running);
+    RUN_TEST(test_inf_hailo_load_rejects_bad_header);
+    RUN_TEST(test_inf_hailo_load_rejects_zero_pads);
+    RUN_TEST(test_inf_hailo_load_happy_path);
+    RUN_TEST(test_inf_hailo_load_fills_slots_until_full);
+    RUN_TEST(test_inf_hailo_run_rejects_bad_handle);
+    RUN_TEST(test_inf_hailo_run_rejects_wrong_dtype);
+    RUN_TEST(test_inf_hailo_run_rejects_size_mismatch);
+    RUN_TEST(test_inf_hailo_run_happy_path_via_auto_advance);
+    RUN_TEST(test_inf_hailo_free_releases_slot);
+    RUN_TEST(test_inf_hailo_shutdown_clears_slots);
+
+    /* Phase 6.2b: edge-layer quant + stream extraction */
+    RUN_TEST(test_hef_parser_captures_edge_layer_quant);
+    RUN_TEST(test_hef_parser_edge_layer_creates_pad_when_ops_empty);
+    RUN_TEST(test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad);
+    RUN_TEST(test_inf_hailo_load_threads_hef_stream_info);
 
     return UnityEnd();
 }

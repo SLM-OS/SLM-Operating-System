@@ -28,22 +28,30 @@ static uint64_t be_u64(const uint8_t *p)
 }
 
 /*
- * Per-version trailer sizes.
- * v0: 4 (reserved) + 16 (MD5) = 20 bytes
- * v1: 4 (CRC) + 8 (ccws_size) + 4 (reserved) = 16 bytes
- * v2: 4 (CRC) + 8 (ccws_size) + 4 (reserved) + 4 (padding_bytes) = 20 bytes
- * v3: 4 (CRC) + 8 (ccws_size_with_padding) + 16 (additional metadata) = 28 bytes
+ * Per-version trailer sizes (bytes immediately following the
+ * 12-byte common header).
+ * v0: 4 (reserved) + 16 (MD5)                          = 20 bytes
+ * v1: 4 (CRC) + 8 (ccws_size) + 4 (reserved)           = 16 bytes
+ * v2: 4 (CRC) + 16 (file_hash) + 8 (reserved/padding)
+ *     + 4 (more padding)                               = 32 bytes
+ * v3: 4 (CRC) + 16 (file_hash) + 8 (ccws_size_ext)
+ *     + 16 (additional metadata)                       = 40 bytes
  *
- * (v2/v3 layouts are approximate from the userspace parser — refine
- * when Phase 4 gets a real v2/v3 `.hef` to decode.)
+ * V2 trailer confirmed against a hex dump of a DFC 3.33.1 output:
+ * proto body starts exactly 44 bytes into the file, i.e. 12 common +
+ * 32 trailer. The trailing 12 bytes (after CRC+hash) are zero-padded;
+ * we don't know their semantics today and don't need them — they're
+ * preserved as "reserved" for layout-size accounting only.
+ *
+ * V3 is speculative — adjust when a real v3 `.hef` is available.
  */
 static size_t trailer_size(uint32_t version)
 {
     switch (version) {
     case HEF_VERSION_V0: return 20;
     case HEF_VERSION_V1: return 16;
-    case HEF_VERSION_V2: return 20;
-    case HEF_VERSION_V3: return 28;
+    case HEF_VERSION_V2: return 32;
+    case HEF_VERSION_V3: return 40;
     default:             return 0;
     }
 }
@@ -113,17 +121,38 @@ int hef_parse_outer_header(const void *blob, size_t size,
         break;
     }
 
-    case HEF_VERSION_V2:
-    case HEF_VERSION_V3: {
-        /* v2/v3 carry the same `crc` + `ccws_size` prefix; deeper
-         * fields (padding length, hef hash) are not needed by the
-         * loader today. */
+    case HEF_VERSION_V2: {
+        /* V2 trailer (confirmed against DFC 3.33.1 output — hex-traced
+         * a real scheduler_mlp_pi5.hef on pi-5-1):
+         *   u32 crc
+         *   u8[16] file_hash
+         *   u8[12] reserved/padding (zero in observed output)
+         * No CCWS size field in the header — the CCWS block (if any)
+         * starts at `proto_end` and runs to end-of-file. Derive the
+         * size from the supplied `size` parameter so callers that
+         * pass the true file length get a usable ccws_offset +
+         * ccws_size without additional parsing. */
         out->crc       = be_u32(t + 0);
-        out->ccws_size = be_u64(t + 4);
+        memcpy(out->md5, t + 4, 16);            /* file_hash, stored in md5 */
         out->ccws_offset = proto_end;
-        if (out->ccws_size > (uint64_t)(size - proto_end)) {
-            return HEF_ERR_TRUNCATED;
-        }
+        out->ccws_size   = (size > proto_end) ? (size - proto_end) : 0;
+        break;
+    }
+
+    case HEF_VERSION_V3: {
+        /* V3 trailer is UNTESTED — no real v3 `.hef` has been observed.
+         * The 40-byte size in trailer_size() is a best-guess extrapolation
+         * (V2 + 8 bytes for the proto_xxh3_64bits that HailoRT's public
+         * headers mention). The CRC + file_hash prefix is assumed
+         * stable from V2. When a real v3 file arrives, verify the
+         * trailer layout by hex trace first and refine this case.
+         *
+         * Until then: treat V3 like V2 for the CRC + hash + CCWS
+         * derivation. Known incomplete decode; may need fixing. */
+        out->crc       = be_u32(t + 0);
+        memcpy(out->md5, t + 4, 16);
+        out->ccws_offset = proto_end;
+        out->ccws_size   = (size > proto_end) ? (size - proto_end) : 0;
         break;
     }
     }
