@@ -3999,6 +3999,48 @@ static void test_ai_policy_hailo_clear_detaches_model(void)
     TEST_ASSERT_EQUAL_INT((int)INF_INVALID_HANDLE,
                           (int)ai_policy_hailo_get_model_handle());
 }
+
+static void test_ai_policy_hailo_set_from_raw_happy_path(void)
+{
+    /* Valid IEEE-754 float bit patterns: scale=0x3C000000 (1/128),
+     * zp=0. Setter installs and get returns the handle. */
+    int rc = ai_policy_hailo_set_model_from_raw((inference_model_handle_t)4,
+                                                0x3C000000u, 0,
+                                                0x3C000000u, 0,
+                                                AI_STATE_DIM,
+                                                AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_INT(4, (int)ai_policy_hailo_get_model_handle());
+    /* Clean up for independence between tests. */
+    ai_policy_hailo_set_model_placeholder(INF_INVALID_HANDLE, 0, 0);
+}
+
+static void test_ai_policy_hailo_set_from_raw_rejects_zero_scale(void)
+{
+    /* scale_raw=0 → float 0.0 → setter returns -1 without mutating state. */
+    ai_policy_hailo_set_model_placeholder(INF_INVALID_HANDLE, 0, 0);
+    int rc = ai_policy_hailo_set_model_from_raw((inference_model_handle_t)7,
+                                                0u, 0,              /* scale=0 */
+                                                0x3C000000u, 0,
+                                                AI_STATE_DIM,
+                                                AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+    /* No model installed despite the failure. */
+    TEST_ASSERT_EQUAL_INT((int)INF_INVALID_HANDLE,
+                          (int)ai_policy_hailo_get_model_handle());
+}
+
+static void test_ai_policy_hailo_set_from_raw_rejects_nan_scale(void)
+{
+    /* scale_raw=0x7FC00000 = quiet NaN → setter rejects. */
+    ai_policy_hailo_set_model_placeholder(INF_INVALID_HANDLE, 0, 0);
+    int rc = ai_policy_hailo_set_model_from_raw((inference_model_handle_t)8,
+                                                0x7FC00000u, 0,
+                                                0x3C000000u, 0,
+                                                AI_STATE_DIM,
+                                                AI_SCHED_N_ACTIONS);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+}
 #endif
 
 /* Phase 6.2b: HEF edge-layer quant + stream extraction. */
@@ -4113,6 +4155,77 @@ static void test_hef_parser_edge_layer_creates_pad_when_ops_empty(void)
     TEST_ASSERT_TRUE(info.pads[0].has_stream_info);
     TEST_ASSERT_EQUAL_UINT32(3,   info.pads[0].sys_index);
     TEST_ASSERT_EQUAL_UINT32(128, info.pads[0].core_bytes_per_buffer);
+}
+
+static void test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad(void)
+{
+    /* Op with a shape-less pad (no tensor_shape emitted), then an
+     * edge_layer with direction + pad_index + shape. The edge-layer
+     * callback should back-fill the existing pad's shape. Matches the
+     * "found pad, p->has_tensor_shape == false" branch. */
+    uint8_t proto[1024];
+    size_t  plen = 0;
+
+    /* Op with one input pad (index 0), NO tensor_shape set. We
+     * build a pad message with just name + index, no shape_info. */
+    uint8_t op_buf[256];
+    size_t  op_len = 0;
+    emit_lenprefix(op_buf, &op_len, 1, (const uint8_t *)"op", 2);
+    {
+        uint8_t pad_buf[64];
+        size_t  pad_len = 0;
+        emit_varint_field(pad_buf, &pad_len, 1, 0);  /* pad index = 0 */
+        emit_lenprefix(pad_buf, &pad_len, 2,
+                       (const uint8_t *)"in", 2);    /* pad name */
+        /* shape_info intentionally omitted. */
+        emit_lenprefix(op_buf, &op_len, 2, pad_buf, pad_len);
+    }
+
+    /* Edge layer for pad 0 with shape 1x1x42. */
+    uint8_t elin[256];
+    size_t  elin_len = 0;
+    emit_varint_field(elin, &elin_len, 1, 0);     /* direction = H2D */
+    emit_varint_field(elin, &elin_len, 2, 0);     /* edge_layer_type = INFO */
+    uint8_t info_buf[128];
+    size_t  info_len = 0;
+    emit_lenprefix(info_buf, &info_len, 1, (const uint8_t *)"ly", 2);
+    {
+        uint8_t base[32];
+        size_t  base_len = 0;
+        emit_varint_field(base, &base_len, 1, 1);   /* height = 1 */
+        emit_varint_field(base, &base_len, 3, 1);   /* width = 1 */
+        emit_varint_field(base, &base_len, 5, 42);  /* features = 42 */
+        emit_lenprefix(info_buf, &info_len, 2, base, base_len);
+    }
+    emit_lenprefix(elin, &elin_len, 3, info_buf, info_len);
+    emit_varint_field(elin, &elin_len, 7, 0);     /* pad_index */
+
+    uint8_t md_buf[512];
+    size_t  md_len = 0;
+    emit_lenprefix(md_buf, &md_len, 1, (const uint8_t *)"ctx", 3);
+    emit_lenprefix(md_buf, &md_len, 2, elin, elin_len);
+
+    uint8_t ctx_buf[768];
+    size_t  ctx_len = 0;
+    emit_varint_field(ctx_buf, &ctx_len, 1, 0);
+    emit_lenprefix(ctx_buf, &ctx_len, 3, md_buf, md_len);
+
+    uint8_t ng_buf[1024];
+    size_t  ng_len = 0;
+    emit_lenprefix(ng_buf, &ng_len, 10, (const uint8_t *)"ng", 2);
+    emit_lenprefix(ng_buf, &ng_len, 8,  op_buf, op_len);
+    emit_lenprefix(ng_buf, &ng_len, 3,  ctx_buf, ctx_len);
+
+    emit_lenprefix(proto, &plen, 2, ng_buf, ng_len);
+
+    struct hef_info info;
+    TEST_ASSERT_EQUAL_INT(HEF_PARSER_OK,
+                          hef_parse_body(proto, plen, &info));
+    /* ops path registered the pad, edge_layer path back-filled shape. */
+    TEST_ASSERT_EQUAL_UINT32(1, info.op_count);
+    TEST_ASSERT_EQUAL_UINT32(1, info.pad_count);
+    TEST_ASSERT_TRUE(info.pads[0].has_tensor_shape);
+    TEST_ASSERT_EQUAL_UINT32(42, info.pads[0].features);
 }
 
 static void test_inf_hailo_load_threads_hef_stream_info(void)
@@ -4354,6 +4467,9 @@ int test_suite_hailo(void)
 #ifdef CONFIG_AI_SCHEDULER
     RUN_TEST(test_ai_policy_hailo_set_and_get_handle);
     RUN_TEST(test_ai_policy_hailo_clear_detaches_model);
+    RUN_TEST(test_ai_policy_hailo_set_from_raw_happy_path);
+    RUN_TEST(test_ai_policy_hailo_set_from_raw_rejects_zero_scale);
+    RUN_TEST(test_ai_policy_hailo_set_from_raw_rejects_nan_scale);
 #endif
     RUN_TEST(test_inf_hailo_register_succeeds);
     RUN_TEST(test_inf_hailo_load_rejects_null);
@@ -4372,6 +4488,7 @@ int test_suite_hailo(void)
     /* Phase 6.2b: edge-layer quant + stream extraction */
     RUN_TEST(test_hef_parser_captures_edge_layer_quant);
     RUN_TEST(test_hef_parser_edge_layer_creates_pad_when_ops_empty);
+    RUN_TEST(test_hef_parser_edge_layer_backfills_shape_on_shapeless_pad);
     RUN_TEST(test_inf_hailo_load_threads_hef_stream_info);
 
     return UnityEnd();

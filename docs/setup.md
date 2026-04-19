@@ -257,6 +257,33 @@ DFC logs) out of `build/hailo/`:
 make hailo-clean
 ```
 
+### 5. Embed the `.hef` in the kernel (Phase 6.2)
+
+To make the compiled scheduler MLP reachable by the in-kernel `hailo
+load <path> sched` path, pass both the Hailo firmware blob and the
+compiled `.hef` when building the kernel:
+
+```bash
+make kernel AI_SCHED=ON PLATFORM=RASPI5 \
+    HAILO_FW_BLOB=/path/to/hailo8_fw.bin \
+    SCHEDULER_HEF_BLOB=$(pwd)/build/hailo/scheduler_mlp_pi5.hef
+```
+
+At boot, `kernel/src/sched_hef_init.c` writes the embedded bytes into
+`/mnt/files/scheduler_mlp.hef`. Then from the SLM-OS shell:
+
+```
+slmos> hailo probe
+slmos> hailo boot
+slmos> hailo load /mnt/files/scheduler_mlp.hef sched
+slmos> sched policy ai_hailo
+```
+
+Without `SCHEDULER_HEF_BLOB` set, the stub `sched_hef_init()` is a
+no-op — zero kernel-image impact for builds that don't embed. The
+firmware blob (`hailo8_fw.bin`) is distributed with the Linux HailoRT
+driver and is open-redistribution licensed.
+
 ---
 
 ## Troubleshooting

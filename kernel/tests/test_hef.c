@@ -147,6 +147,76 @@ static void test_hef_accepts_v0(void)
     TEST_ASSERT_EQUAL_UINT64(0, hdr.ccws_size);
 }
 
+/* Phase 6.2c: v2 header builder. Trailer is 32 bytes:
+ *   u64 xxh3_64bits
+ *   u64 ccws_size   (ignored by our parser — derived from file size)
+ *   u64 reserved1
+ *   u64 reserved2
+ * Proto body starts at offset 12 + 32 = 44. */
+static size_t build_v2_blob(uint8_t *buf, size_t buf_size, uint32_t proto_size,
+                            uint64_t ccws_size)
+{
+    size_t total = 44 + proto_size + ccws_size;
+    if (total > buf_size) return 0;
+    put_be_u32(buf + 0,  HEF_MAGIC);
+    put_be_u32(buf + 4,  HEF_VERSION_V2);
+    put_be_u32(buf + 8,  proto_size);
+    /* V2 trailer (32 bytes starting at offset 12): hash + ccws + 16 reserved */
+    put_be_u64(buf + 12, 0xABCDEF0102030405ULL);    /* xxh3_64bits */
+    put_be_u64(buf + 20, ccws_size);                /* ccws_size (in-header) */
+    put_be_u64(buf + 28, 0);                        /* reserved1 */
+    put_be_u64(buf + 36, 0);                        /* reserved2 */
+    memset(buf + 44, 0, proto_size + ccws_size);
+    return total;
+}
+
+static void test_hef_accepts_v2_no_ccws(void)
+{
+    /* v2 with proto-only (CCWS absent): our parser derives ccws_size
+     * from (total_size - proto_end), which must be 0. */
+    uint8_t buf[128] = {0};
+    size_t total = build_v2_blob(buf, sizeof(buf), 32, 0);
+    TEST_ASSERT_TRUE(total != 0);
+    struct hef_outer_header hdr;
+    int rc = hef_parse_outer_header(buf, total, &hdr);
+    TEST_ASSERT_EQUAL_INT(HEF_OK, rc);
+    TEST_ASSERT_EQUAL_UINT32(HEF_VERSION_V2, hdr.version);
+    TEST_ASSERT_EQUAL_UINT32(32, hdr.proto_size);
+    TEST_ASSERT_EQUAL_UINT32(44, hdr.proto_offset);
+    TEST_ASSERT_EQUAL_UINT64(0, hdr.ccws_size);
+    TEST_ASSERT_EQUAL_UINT64(76, hdr.ccws_offset);  /* = proto_end */
+}
+
+static void test_hef_accepts_v2_with_trailing_ccws(void)
+{
+    /* v2 with a 128-byte CCWS block after the proto body. Parser
+     * reports ccws_size = (total - proto_end) regardless of what the
+     * in-header ccws_size says (DFC 3.33.1 observed behavior). */
+    uint8_t buf[512] = {0};
+    size_t total = build_v2_blob(buf, sizeof(buf), /*proto*/ 64, /*ccws*/ 128);
+    TEST_ASSERT_TRUE(total != 0);
+    struct hef_outer_header hdr;
+    int rc = hef_parse_outer_header(buf, total, &hdr);
+    TEST_ASSERT_EQUAL_INT(HEF_OK, rc);
+    TEST_ASSERT_EQUAL_UINT32(HEF_VERSION_V2, hdr.version);
+    TEST_ASSERT_EQUAL_UINT32(64,  hdr.proto_size);
+    TEST_ASSERT_EQUAL_UINT32(44,  hdr.proto_offset);
+    TEST_ASSERT_EQUAL_UINT64(128, hdr.ccws_size);
+    TEST_ASSERT_EQUAL_UINT64(44 + 64, hdr.ccws_offset);
+}
+
+static void test_hef_v2_rejects_short_trailer(void)
+{
+    /* Only 12 + 20 = 32 bytes of header (v0/v1-sized). v2 needs 44. */
+    uint8_t buf[64] = {0};
+    put_be_u32(buf + 0, HEF_MAGIC);
+    put_be_u32(buf + 4, HEF_VERSION_V2);
+    put_be_u32(buf + 8, 16);
+    struct hef_outer_header hdr;
+    int rc = hef_parse_outer_header(buf, 32, &hdr);
+    TEST_ASSERT_EQUAL_INT(HEF_ERR_SHORT, rc);
+}
+
 static void test_hef_accepts_v1_with_ccws(void)
 {
     uint8_t buf[256] = {0};
@@ -307,6 +377,11 @@ int test_suite_hef(void)
     RUN_TEST(test_hef_accepts_v0_with_md5);
     RUN_TEST(test_hef_v1_ccws_size_overflow_rejected);
     RUN_TEST(test_hef_v1_ccws_exact_fit_accepted);
+
+    /* Phase 6.2c v2 header (DFC 3.33.1 format) */
+    RUN_TEST(test_hef_accepts_v2_no_ccws);
+    RUN_TEST(test_hef_accepts_v2_with_trailing_ccws);
+    RUN_TEST(test_hef_v2_rejects_short_trailer);
 
     RUN_TEST(test_nanopb_varint_roundtrip);
     RUN_TEST(test_nanopb_ostream_overflow);

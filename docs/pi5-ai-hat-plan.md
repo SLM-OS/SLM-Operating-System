@@ -355,7 +355,12 @@ Hand-decoding the scheduler_mlp_pi5.hef wire format on real hardware (hexdump of
 
 Extracting pad/stream/quant info from inside `preliminary_config.operation[].actions[]` requires a new callback chain (actions already do decode `write_data_ccw` for weight upload in Phase 5.3 — one of the 18 oneof branches). Which specific action type carries the pad metadata for this HEF revision needs fresh investigation against HailoRT source. That's a standalone follow-up; the Phase 6.2 plumbing + policy path is all in place and validated up to the pad-shape-unavailable point.
 
-**Test coverage** — 18 new QEMU cases in `test_hailo.c` (13 backend + 2 policy handle + 3 edge-layer extraction / threading): device registration, happy-path HEF load, error paths (null args / not running / bad header / no pads / size/dtype mismatch / full slot table), slot free + double-free, shutdown clears slots, policy handle set/get and detach, HEF quant + stream capture, non-matching pad_index skip, end-to-end load-with-stream-info.
+**Test coverage** — 29 new QEMU cases:
+
+- `test_hailo.c` (22 cases): 13 backend tests (register / load happy + error paths / run dtype + size + handle rejection / auto-advance happy / free / shutdown / threads HEF stream info), 5 policy tests (set/get handle + detach + set_from_raw happy + zero-scale reject + NaN reject), 4 edge-layer extraction tests (quant capture, create-if-missing, back-fill shape on shapeless pad, end-to-end load-with-stream-info).
+- `test_hef.c` (3 cases): v2 header accepts with/without trailing CCWS; v2 rejects short trailer. Covers the new 32-byte v2 trailer parsing path against hand-built binaries.
+
+Cross-platform: QEMU ARM64, Pi 5 (PLATFORM=RASPI5), Jetson Orin Nano, x86-64 all build clean under `AI_SCHED=ON`. Full suite green in both `make test` (AI_SCHED=OFF) and `make test AI_SCHED=ON` modes.
 
 ### Phase 7: Shell Integration & Demo Polish (1 week)
 
