@@ -33,6 +33,11 @@
 
 #include "arm_smmu_noshutdown.h"
 
+/*
+ * sprint_symbol() on its own renders "0x<hex>" for addresses that
+ * don't resolve to a kernel symbol, so no "%pS" fallback is needed
+ * here. Only the NULL case is special-cased for readability.
+ */
 static const char *lookup_name(unsigned long addr, char *buf, size_t buflen)
 {
     if (!addr) {
@@ -40,8 +45,6 @@ static const char *lookup_name(unsigned long addr, char *buf, size_t buflen)
         return buf;
     }
     sprint_symbol(buf, addr);
-    if (buf[0] == '\0')
-        snprintf(buf, buflen, "%pS", (void *)addr);
     return buf;
 }
 

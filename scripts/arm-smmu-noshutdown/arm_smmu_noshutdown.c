@@ -155,9 +155,20 @@ static void __exit arm_smmu_noshutdown_exit(void)
             if (domain) {
                 size_t unmapped = iommu_unmap(domain, SLMOS_NC_BASE,
                                                SLMOS_NC_SIZE);
-                pr_info("arm-smmu-noshutdown: iommu_unmap returned "
-                        "%zu bytes (expected %lu)\n",
-                        unmapped, SLMOS_NC_SIZE);
+                if (unmapped == SLMOS_NC_SIZE) {
+                    pr_info("arm-smmu-noshutdown: iommu_unmap "
+                            "returned %zu bytes (expected %lu)\n",
+                            unmapped, SLMOS_NC_SIZE);
+                } else {
+                    /* Partial unmap leaks IOMMU page-table entries
+                     * across a subsequent reload — flag loudly so a
+                     * reboot can be considered before kexec. */
+                    pr_warn("arm-smmu-noshutdown: iommu_unmap "
+                            "returned %zu bytes (expected %lu) — "
+                            "partial unmap, IOMMU state may be "
+                            "inconsistent\n",
+                            unmapped, SLMOS_NC_SIZE);
+                }
             }
             put_device(xusb_dev);
         }

@@ -43,6 +43,11 @@
 #   1  — any assertion failed
 #   2  — setup error (missing modules, can't run dmesg, etc.)
 
+# NOTE: no `-e`. The pass/fail helpers below deliberately aggregate
+# assertion failures via the FAILED flag so that all stages run and
+# the operator sees every [FAIL] line, not just the first. `-u` still
+# catches typos on variable names and `pipefail` still surfaces
+# broken pipelines (e.g., dmesg | grep failing to read from dmesg).
 set -uo pipefail
 
 print_help() {
@@ -83,6 +88,10 @@ MOD_NOSHUTDOWN="$SCRIPT_DIR/arm_smmu_noshutdown.ko"
 MOD_PROBE="$SCRIPT_DIR/smmu_probe.ko"
 
 RED=$'\e[31m'; GRN=$'\e[32m'; YEL=$'\e[33m'; RST=$'\e[0m'
+# Reverse-video red for the --full completion warning — forgetting to
+# re-insmod arm_smmu_noshutdown.ko before kexec silently hangs xHCI,
+# so the banner must be hard to miss on a terminal full of [PASS]s.
+REV=$'\e[7;31m'
 pass() { printf '%s[PASS]%s %s\n'  "$GRN" "$RST" "$*"; }
 fail() { printf '%s[FAIL]%s %s\n'  "$RED" "$RST" "$*"; FAILED=1; }
 warn() { printf '%s[WARN]%s %s\n'  "$YEL" "$RST" "$*"; }
@@ -267,8 +276,13 @@ printf '\n-------------------------------------\n'
 if [[ "$FAILED" -eq 0 ]]; then
     printf '%sALL STAGES PASSED%s\n' "$GRN" "$RST"
     if [[ "$FULL" -eq 1 ]]; then
-        printf 'arm_smmu_noshutdown is NOT loaded (Stage 4 unloaded it).\n'
-        printf 'Re-insmod it before kexec:\n'
+        printf '\n'
+        printf '%s ### WARNING ### %s\n' "$REV" "$RST"
+        printf '%s arm_smmu_noshutdown is NOT LOADED. %s\n' "$REV" "$RST"
+        printf '%s Re-insmod is required before kexec into SLM-OS %s\n' "$REV" "$RST"
+        printf '%s or xHCI NO_OP will time out silently. %s\n' "$REV" "$RST"
+        printf '\n'
+        printf 'Re-insmod:\n'
         printf '    sudo insmod %s\n' "$MOD_NOSHUTDOWN"
     else
         printf 'arm_smmu_noshutdown is loaded; identity mapping is in place.\n'
