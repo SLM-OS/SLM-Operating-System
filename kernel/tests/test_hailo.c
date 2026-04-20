@@ -2741,18 +2741,21 @@ static void test_cs_translate_activation_emits_input_and_output(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 36 + 28), out.activation_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 28 + 36), out.activation_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
                             out.activation[0]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
-                            out.activation[8]);
-    /* Input: packed_vdma = config(0x01) + INPUT_OFFSET(1) = 0x02. */
-    TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[16]);
+    /* HailoRT emits OUTPUT actions before INPUT actions in ACTIVATION
+     * (resource_manager_builder.cpp:1059-1075). OUTPUT body is 28 B
+     * so it occupies [8..35]; INPUT body (36 B) occupies [36..71]. */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
-                            out.activation[8 + 36]);
-    /* Output: packed_vdma = config(0x01) + OUTPUT_OFFSET(15) = 0x10.
-     * D2H range starts at 16. Body begins at offset 8+36+8 = 52. */
-    TEST_ASSERT_EQUAL_UINT8(0x10, out.activation[8 + 36 + 8]);
+                            out.activation[8]);
+    /* Output: packed_vdma = config(0x01) + OUTPUT_OFFSET(15) = 0x10. */
+    TEST_ASSERT_EQUAL_UINT8(0x10, out.activation[16]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
+                            out.activation[8 + 28]);
+    /* Input: packed_vdma = config(0x01) + INPUT_OFFSET(1) = 0x02.
+     * INPUT body begins at offset 8+28+8 = 44; packed_vdma is byte 0. */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[8 + 28 + 8]);
 }
 
 static void test_cs_translate_activation_skips_internal_pads(void)
