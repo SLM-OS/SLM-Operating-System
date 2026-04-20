@@ -190,7 +190,14 @@ static int translate_open_boundary_for_pad(
                 .dma_address      = cfg->boundary_input_desc_list_iova,
                 .desc_page_size   = cfg->boundary_desc_page_size,
                 .total_desc_count = cfg->boundary_input_total_desc_count,
-                .bytes_in_pattern = 0,
+                /* HailoRT sets bytes_in_pattern = transfer_size (periph
+                 * frame size) for boundary channels — see
+                 * vdma_edge_layer.cpp:73 in v4.23.0. For unpadded
+                 * single-row tensors (MVP) this equals core_bytes_per_
+                 * buffer; multi-row / padded tensors need the full
+                 * periph_bytes_per_buffer * periph_buffers_per_frame
+                 * product once the translator consumes that split. */
+                .bytes_in_pattern = frame,
             },
             .stream_index             = stream_index,
             .network_index            = 0,
@@ -211,6 +218,7 @@ static int translate_open_boundary_for_pad(
                  "is 0", pad->sys_index);
             return HAILO_ERR_INVAL;
         }
+        uint32_t out_frame = pad->core_bytes_per_buffer;
         struct hailo_cs_act_open_boundary_output_channel body = {
             .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
@@ -218,7 +226,9 @@ static int translate_open_boundary_for_pad(
                 .dma_address      = cfg->boundary_output_desc_list_iova,
                 .desc_page_size   = cfg->boundary_desc_page_size,
                 .total_desc_count = cfg->boundary_output_total_desc_count,
-                .bytes_in_pattern = 0,
+                /* See note on the input body above — HailoRT derives
+                 * this from the output pad's transfer_size. */
+                .bytes_in_pattern = out_frame,
             },
         };
         (void)stream_index;   /* OUTPUT body omits stream_index today. */
