@@ -50,10 +50,21 @@ bool bpmp_is_available(void)
         return false;
     }
 
-    /* Empty MRQ_PING payload — BPMP replies with an err code of 0
-     * and an empty response body on success. */
-    int32_t err = -1;
-    int rc = mrq_send(MRQ_PING, NULL, 0, NULL, 0, &err);
+    /*
+     * MRQ_PING payload is a 4-byte challenge (see linux-bpmp-abi.h
+     * struct mrq_ping_request). BPMP replies with reply = challenge
+     * left-shifted by 1, carry-bit discarded (per the ABI doc,
+     * not a rotate).
+     */
+    uint32_t challenge = 0xDEADBEEF;
+    uint32_t expected  = challenge << 1;
+    uint32_t reply     = 0;
+    int32_t  err       = -1;
+
+    int rc = mrq_send(MRQ_PING,
+                      &challenge, sizeof(challenge),
+                      &reply, sizeof(reply),
+                      &err);
     if (rc != 0) {
         WARN("BPMP: MRQ_PING transport rc=%d", rc);
         return false;
@@ -62,6 +73,12 @@ bool bpmp_is_available(void)
         WARN("BPMP: MRQ_PING rejected by firmware (err=%ld)", (long)err);
         return false;
     }
+    if (reply != expected) {
+        WARN("BPMP: MRQ_PING reply mismatch (reply=0x%08lx expected=0x%08lx)",
+             (unsigned long)reply, (unsigned long)expected);
+        return false;
+    }
+    INFO("BPMP: MRQ_PING OK (reply=0x%08lx)", (unsigned long)reply);
     return true;
 }
 

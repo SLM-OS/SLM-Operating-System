@@ -79,32 +79,42 @@ bool ivc_rx_has_frame(const struct ivc_channel *rx)
 /*
  * Handshake protocol (condensed from linux-tegra-ivc.c:tegra_ivc_notified):
  *
- *   We ∈ {Established, Sync, Ack}, Them ∈ {same}.
+ *   On each incoming doorbell, the receiver compares (my tx.state, peer's
+ *   tx.state) and takes one transition per call. Both ends follow the same
+ *   state machine — it's symmetric.
  *
- *   Us = Sync:
- *     Them = Sync → Them is resetting their counters; nothing to do.
- *     Them = Established → Them has cleared their counters and still has
- *          previous state; we can advance to Ack, clearing our rx.count.
- *   Us = Ack:
- *     Them = Established → Them has cleared their counters; we zero
- *            our tx.count/rx.count and transition to Established.
- *   Us = Established:
- *     Them = Sync → Them reset; we need to reset our counters and go Ack.
- *     Them = Ack → Them has acked our Sync; we transition to Established.
+ *   (us=Sync, them=Established)   BPMP sees us as Sync while they were
+ *                                 Established. BPMP clears its own
+ *                                 rx.count on the RX channel, writes
+ *                                 its tx.state = Ack, rings us back.
+ *   (us=Sync, them=Ack)           We observe peer's Ack. Zero our tx.count,
+ *                                 write tx.state = Established, ring.
+ *   (us=Sync, them=Sync)          Both reset simultaneously. Zero our
+ *                                 tx.count, write tx.state = Ack, ring.
+ *   (us=Ack, them=Established)    Peer has finished its reset. Write our
+ *                                 tx.state = Established (no doorbell — peer
+ *                                 is ready).
  *
- * For a post-kexec resync, SLM-OS drives both ends to Established from
- * scratch:
- *     write TX.state = Sync     (signal intent to reset)
- *     ring BPMP doorbell
- *     poll until RX.state != Sync  (BPMP has observed and responded)
- *     if RX.state == Ack: clear RX.count, write TX.state = Established,
- *         ring, wait for RX.state == Established.
- *     if RX.state == Established: Them is doing it asymmetrically;
- *         clear counters, go Ack, ring, wait.
+ * For a post-kexec resync from SLM-OS:
  *
- * Since BPMP on a running system always presents Established eventually,
- * the simplified sequence below suffices and matches Linux's
- * tegra_ivc_reset() + tegra_ivc_notified() loop for the common case.
+ *   1. Write our tx.count = 0 and tx.state = Sync. Ring BPMP.
+ *   2. Wait for peer (BPMP) tx.state to become Ack — BPMP has seen our
+ *      Sync, cleared its own rx.count on the RX channel, and signalled
+ *      that it has done so. The "RX channel" we read for the peer's
+ *      state is the BPMP→CPU IVC region, where BPMP's tx.state lives
+ *      at IVC_OFFSET_TX_STATE.
+ *   3. Write our own rx.count = 0 on the RX channel (our ack counter
+ *      for BPMP's outbound frames — we own it). Write tx.state =
+ *      Established on TX. Ring BPMP.
+ *   4. BPMP completes its ack transition to Established. Not strictly
+ *      required to observe — the protocol permits us to start sending
+ *      frames once we're in Established locally.
+ *
+ * Importantly: "peer Established" is the initial starting condition post-
+ * kexec (BPMP kept running and its state is whatever Linux last observed).
+ * We must not treat that as a completed handshake — it means BPMP hasn't
+ * reacted to us at all. The discriminating signal is "peer transitioned
+ * to Ack", which only happens after BPMP processes our Sync.
  */
 int ivc_handshake(struct ivc_channel *tx, struct ivc_channel *rx,
                   int (*ring_doorbell)(void),
@@ -116,7 +126,8 @@ int ivc_handshake(struct ivc_channel *tx, struct ivc_channel *rx,
         return -1;
     }
 
-    /* Step 1 — signal reset intent on our TX. */
+    /* Step 1 — signal reset intent. Only we write tx.count and tx.state
+     * on the TX channel; BPMP owns rx.count there. */
     ivc_write32(tx, IVC_OFFSET_TX_COUNT, 0);
     ivc_write32(tx, IVC_OFFSET_TX_STATE, IVC_STATE_SYNC);
     ivc_dsb();
@@ -127,11 +138,13 @@ int ivc_handshake(struct ivc_channel *tx, struct ivc_channel *rx,
         return rc;
     }
 
-    /* Step 2 — wait for BPMP's TX.state to transition out of Sync.
-     * BPMP will set its side to Ack (sometimes straight to Established).
-     * Poll for up to timeout_us. */
+    /* Step 2 — wait for peer to acknowledge our Sync by going to Ack.
+     * Starting condition is usually peer=Established (from Linux era).
+     * We are looking for the transition Established → Ack, which only
+     * happens after BPMP processes our doorbell. */
     uint32_t remaining = timeout_us;
-    uint32_t peer_state = IVC_STATE_SYNC;
+    uint32_t peer_state;
+    bool rang_second = false;
 
     while (remaining > 0) {
         if (doorbell_pending && doorbell_pending()) {
@@ -139,74 +152,45 @@ int ivc_handshake(struct ivc_channel *tx, struct ivc_channel *rx,
         }
 
         peer_state = ivc_read32(rx, IVC_OFFSET_TX_STATE);
-        if (peer_state != IVC_STATE_SYNC) {
+        if (peer_state == IVC_STATE_ACK) {
             break;
         }
 
-        for (volatile uint32_t i = 0; i < 100; i++) { }  /* ~1 us spin */
-        remaining--;
-    }
-
-    if (peer_state == IVC_STATE_SYNC) {
-        WARN("IVC: peer stuck in Sync after %u us (peer rx raw 0x%08x)",
-             (unsigned)timeout_us,
-             (unsigned)ivc_read32(rx, IVC_OFFSET_TX_STATE));
-        return -2;
-    }
-
-    /* Step 3 — clear our RX.count; BPMP expects this on Ack→Established
-     * transition per linux-tegra-ivc.c:116. */
-    ivc_write32(tx, IVC_OFFSET_RX_COUNT, 0);
-    ivc_dsb();
-
-    /* Step 4 — decide our next state based on peer's observed state. */
-    uint32_t our_next_state;
-    if (peer_state == IVC_STATE_ACK) {
-        our_next_state = IVC_STATE_ESTABLISHED;
-    } else {
-        /* Peer is already Established (common post-Linux state). We
-         * complete the handshake by going Ack then Established. */
-        our_next_state = IVC_STATE_ACK;
-    }
-
-    ivc_write32(tx, IVC_OFFSET_TX_STATE, our_next_state);
-    ivc_dsb();
-
-    rc = ring_doorbell();
-    if (rc != 0) {
-        WARN("IVC: second doorbell ring failed rc=%d", rc);
-        return rc;
-    }
-
-    /* Step 5 — wait for peer to settle into Established.  */
-    remaining = timeout_us;
-    while (remaining > 0) {
-        if (doorbell_pending && doorbell_pending()) {
-            ack_doorbell();
-        }
-
-        peer_state = ivc_read32(rx, IVC_OFFSET_TX_STATE);
-        if (peer_state == IVC_STATE_ESTABLISHED) {
-            break;
+        /* Handle the symmetric-reset edge case: if BPMP also went to Sync
+         * (it shouldn't post-kexec but the protocol allows it), we need
+         * to transition to Ack ourselves. */
+        if (peer_state == IVC_STATE_SYNC && !rang_second) {
+            /* Our response to (us=Sync, them=Sync): go to Ack and ring. */
+            ivc_write32(tx, IVC_OFFSET_TX_STATE, IVC_STATE_ACK);
+            ivc_dsb();
+            (void)ring_doorbell();
+            rang_second = true;
         }
 
         for (volatile uint32_t i = 0; i < 100; i++) { }
         remaining--;
     }
 
-    if (peer_state != IVC_STATE_ESTABLISHED) {
-        WARN("IVC: peer did not reach Established (state=%u)", (unsigned)peer_state);
-        return -3;
+    if (remaining == 0) {
+        WARN("IVC: peer did not transition to Ack within %u us (peer state=%u)",
+             (unsigned)timeout_us, (unsigned)ivc_read32(rx, IVC_OFFSET_TX_STATE));
+        return -2;
     }
 
-    /* If we're still in Ack, one more step to Established. */
-    if (our_next_state == IVC_STATE_ACK) {
-        ivc_write32(tx, IVC_OFFSET_TX_STATE, IVC_STATE_ESTABLISHED);
-        ivc_dsb();
-        /* No doorbell needed — peer already at Established. */
+    /* Step 3 — peer is in Ack. Clear our own ack counter on the RX
+     * channel (we own rx.count there). Then transition us to Established
+     * and ring BPMP one more time so it can complete its own transition. */
+    ivc_write32(rx, IVC_OFFSET_RX_COUNT, 0);
+    ivc_write32(tx, IVC_OFFSET_TX_STATE, IVC_STATE_ESTABLISHED);
+    ivc_dsb();
+
+    rc = ring_doorbell();
+    if (rc != 0) {
+        WARN("IVC: final doorbell ring failed rc=%d", rc);
+        return rc;
     }
 
-    INFO("IVC: handshake complete (our=Established peer=Established)");
+    INFO("IVC: handshake complete (us=Established, peer observed Ack)");
     return 0;
 }
 

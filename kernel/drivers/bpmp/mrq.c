@@ -19,12 +19,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Response header format (docs/reference/linux-bpmp-abi.h:492).
- * `.err` is int32 at offset 0 of the frame payload, followed by a
- * flags word (4 B), then the response-specific payload. */
-#define MRQ_RESP_ERR_OFFSET     0x00
-#define MRQ_RESP_HDR_BYTES      8
-
 /* How long to wait for a response in microseconds. 100 ms is generous
  * for simple MRQs (MRQ_PING round-trips in single-digit microseconds
  * on a live BPMP) but required for MRQs that do hardware work like
@@ -140,42 +134,37 @@ int mrq_send(uint32_t mrq,
         return -4;
     }
 
-    /* Response frame: layout mirrors mrq_response struct.
-     *   offset 0  int32  err
-     *   offset 4  uint32 flags
-     *   offset 8+ payload (MRQ-specific)
+    /*
+     * Wire layout on response. Linux's struct mb_data (one struct for
+     * both directions):
+     *   offset 0x80 (IVC frame MRQ)   int32_t code   — on response, this
+     *                                                  is the BPMP err
+     *                                                  (0 = OK, <0 = errno)
+     *   offset 0x84 (IVC frame FLAGS) uint32_t flags
+     *   offset 0x88 (IVC frame DATA)  MRQ-specific payload
      *
-     * We treat the per-MRQ payload as starting at offset 8 within the
-     * frame data area. Callers pass rx_data buffers sized for the
-     * expected response payload (e.g. 4 bytes for MRQ_CLK responses). */
-    uint8_t frame[128];
+     * ivc_rx_consume writes the code field into *out_mrq and copies the
+     * DATA area into our frame[] buffer. So frame[0..] is the reply
+     * payload directly, with no extra header to skip.
+     */
+    uint8_t frame[IVC_DATA_MAX];
     size_t got = 0;
-    uint32_t resp_mrq = 0;
-    rc = ivc_rx_consume(&g_rx, &resp_mrq, frame, sizeof(frame), &got);
+    uint32_t resp_code = 0;
+    rc = ivc_rx_consume(&g_rx, &resp_code, frame, sizeof(frame), &got);
     if (rc != 0) {
         WARN("BPMP: ivc_rx_consume failed rc=%d", rc);
         return -5;
     }
 
-    int32_t wire_err = 0;
-    if (got >= sizeof(int32_t)) {
-        wire_err = (int32_t)((uint32_t)frame[0] |
-                             ((uint32_t)frame[1] << 8) |
-                             ((uint32_t)frame[2] << 16) |
-                             ((uint32_t)frame[3] << 24));
-    }
     if (err_out) {
-        *err_out = wire_err;
+        *err_out = (int32_t)resp_code;
     }
 
     if (rx_data && rx_len > 0) {
-        /* Skip mrq_response header; copy the payload. */
-        size_t avail = (got > MRQ_RESP_HDR_BYTES) ? (got - MRQ_RESP_HDR_BYTES) : 0;
-        size_t n = (avail < rx_len) ? avail : rx_len;
-        const uint8_t *src = frame + MRQ_RESP_HDR_BYTES;
+        size_t n = (got < rx_len) ? got : rx_len;
         uint8_t *dst = (uint8_t *)rx_data;
         for (size_t i = 0; i < n; i++) {
-            dst[i] = src[i];
+            dst[i] = frame[i];
         }
         /* Zero-fill the rest for callers that don't check got. */
         for (size_t i = n; i < rx_len; i++) {
