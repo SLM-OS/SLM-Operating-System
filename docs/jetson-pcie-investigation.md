@@ -14,6 +14,16 @@ Both plan §4.1 (PCIe RTL8168) and §4.2 (USB CDC-ECM) remain
 infeasible. BCT firewall override no longer looks like the fix —
 this is a kexec-shutdown-path issue, not a security-policy issue.
 
+**Update (20 April 2026):** Gen1 link-speed fallback (Step 1 of the
+#25 revived plan) is **ruled out**. The RTL8168 endpoint is a
+Gen1-only device, so the link already trains at Gen1 natively —
+there is no higher speed to fall back from. An empirical
+confirmation via `setpci CAP_EXP+30.w=0001` on the RC still left
+APPL reading `0xffffffff` post-kexec. Next action is Step 2: port
+the edk2-nvidia BPMP IPC client to SLM-OS so the PCIe RC can be
+re-initialised from bare metal. See §"Gen1 link-speed fallback
+experiment" below.
+
 ---
 
 ## Hardware
@@ -235,6 +245,62 @@ decision.
 The module source, Makefile, and a README with the negative result
 are kept in `scripts/slmos-pcie-keepalive/` as documented
 infrastructure for anyone revisiting this problem.
+
+## Gen1 link-speed fallback experiment (20 April 2026)
+
+**Result: NEGATIVE — and hypothesis was structurally wrong for this
+hardware.**
+
+Issue #25's revived plan proposed a cheap-first "Gen1 fallback"
+experiment, on the theory (borrowed from NVIDIA's kdump-on-Orin-NX
+workaround, forum thread 365485) that forcing PCIe to Gen1
+sidesteps BPMP's retrain step and therefore its clock teardown.
+
+Probing the actual link before running the experiment invalidated
+the premise: **the RTL8168 endpoint is a Gen1-only device.**
+
+```
+# Endpoint (RTL8168, 0008:01:00.0)
+LnkCap:   Port #0, Speed 2.5GT/s, Width x1
+LnkCap2:  Supported Link Speeds: 2.5GT/s          ← Gen1 only
+
+# RC (0008:00:00.0)
+LnkCap:   Port #0, Speed 8GT/s, Width x2          ← Gen3 capable
+LnkCtl2:  Target Link Speed: 8GT/s                ← RC default target
+LnkSta:   Speed 2.5GT/s (downgraded), Width x1    ← trained to EP's cap
+```
+
+The link is already trained at Gen1 naturally because the endpoint
+caps it there. Nothing in the kexec path needs to "retrain to Gen1"
+because there is no higher speed to come down from. The NVIDIA
+workaround targeted Orin-NX boards with Gen2/Gen3 NICs where Gen1
+was a fallback speed; on the Super Dev Kit carrier, Gen1 is the
+only operating speed.
+
+Ran the experiment anyway for rigor:
+
+1. `setpci -s 0008:00:00.0 CAP_EXP+30.w=0001` — forced RC
+   `LnkCtl2.TLS = 2.5GT/s`.
+2. `setpci -s 0008:00:00.0 CAP_EXP+10.w=0460` — triggered
+   `LnkCtl.RL` (Retrain Link).
+3. Confirmed both sides still trained at Gen1; RC `LnkCtl2` now
+   reads `Target Link Speed: 2.5GT/s` (was `8GT/s`).
+4. `busybox devmem 0x140a0004 32` → `0x009490E0` (APPL live).
+5. `slmos-kexec /root/slmos.elf`.
+6. `rtldiag` in SLM-OS shell → `APPL_CTRL: 0xffffffff`,
+   `DBI bus0: vendor=0xffff device=0xffff` — identical
+   post-kexec symptom.
+
+**Interpretation:** forcing the RC's target link speed to Gen1
+pre-kexec does not change anything about the post-kexec MMIO
+symptom. The BPMP teardown path is indifferent to link speed —
+this was always plausible in hindsight (clock gating is per-domain,
+not per-trained-speed), and empirically confirmed here.
+
+**Cost:** ~15 minutes including probing, experiment, and writeup.
+**Value:** Step 1 of the #25 revived plan is foreclosed. Move
+directly to Step 2 (port the edk2-nvidia BPMP IPC client to
+SLM-OS) as the actual unblocking work.
 
 ## Immediate next steps
 
