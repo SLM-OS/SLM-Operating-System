@@ -29,6 +29,28 @@
 #include "hailo_cs_translator.h"
 #include "hef.pb.h"   /* ProtoHEFAction_*_tag constants */
 
+/* Compute `config_vdma_channel + offset` and narrow to u8 for the
+ * wire. Returns HAILO_OK + writes `*out` on success, HAILO_ERR_INVAL
+ * and logs a WARN if the sum exceeds 0xFF (would silently truncate).
+ * `tag` is a short label included in the WARN so the emitter call
+ * site is identifiable in logs ("ActivationInput", "BatchSwitching",
+ * etc). */
+static int pack_boundary_vdma(const struct hailo_cs_translate_cfg *cfg,
+                              uint32_t offset,
+                              const char *tag,
+                              uint8_t *out)
+{
+    uint32_t raw = (uint32_t)cfg->config_vdma_channel + offset;
+    if (raw > 0xFFu) {
+        WARN("hailo translator: %s packed_vdma overflows u8 "
+             "(config_vdma=%u, offset=%u)",
+             tag, cfg->config_vdma_channel, offset);
+        return HAILO_ERR_INVAL;
+    }
+    *out = (uint8_t)raw;
+    return HAILO_OK;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Application header                                                           */
 /* -------------------------------------------------------------------------- */
@@ -146,13 +168,10 @@ static int translate_open_boundary_for_pad(
     struct hailo_cs_builder *b)
 {
     if (pad->is_input) {
-        uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
-                          + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET;
-        if (raw_vdma > 0xFFu) {
-            WARN("hailo translator: boundary input packed_vdma overflows "
-                 "u8 (config_vdma=%u)", cfg->config_vdma_channel);
-            return HAILO_ERR_INVAL;
-        }
+        uint8_t packed_vdma;
+        int rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                                    "ActivationInput", &packed_vdma);
+        if (rc != HAILO_OK) return rc;
         if (cfg->boundary_input_desc_list_iova == 0) {
             WARN("hailo translator: HEF has boundary input edge (sys_index=%u) "
                  "but cfg->boundary_input_desc_list_iova is 0",
@@ -165,7 +184,7 @@ static int translate_open_boundary_for_pad(
          * a proper periph-vs-core split later. */
         uint32_t frame = pad->core_bytes_per_buffer;
         struct hailo_cs_act_open_boundary_input_channel body = {
-            .packed_vdma_channel_id = (uint8_t)raw_vdma,
+            .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
                 .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
                 .dma_address      = cfg->boundary_input_desc_list_iova,
@@ -182,13 +201,10 @@ static int translate_open_boundary_for_pad(
             b, HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
             &body, sizeof(body));
     } else {
-        uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
-                          + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET;
-        if (raw_vdma > 0xFFu) {
-            WARN("hailo translator: boundary output packed_vdma overflows "
-                 "u8 (config_vdma=%u)", cfg->config_vdma_channel);
-            return HAILO_ERR_INVAL;
-        }
+        uint8_t packed_vdma;
+        int rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET,
+                                    "ActivationOutput", &packed_vdma);
+        if (rc != HAILO_OK) return rc;
         if (cfg->boundary_output_desc_list_iova == 0) {
             WARN("hailo translator: HEF has boundary output edge "
                  "(sys_index=%u) but cfg->boundary_output_desc_list_iova "
@@ -196,7 +212,7 @@ static int translate_open_boundary_for_pad(
             return HAILO_ERR_INVAL;
         }
         struct hailo_cs_act_open_boundary_output_channel body = {
-            .packed_vdma_channel_id = (uint8_t)raw_vdma,
+            .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
                 .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
                 .dma_address      = cfg->boundary_output_desc_list_iova,
@@ -279,16 +295,12 @@ static int translate_batch_switching(const struct hef_info *info,
         const struct hef_pad_info *pad = &info->pads[i];
         if (!pad->has_stream_info || !pad->is_input) continue;
 
-        uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
-                          + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET;
-        if (raw_vdma > 0xFFu) {
-            WARN("hailo translator: BATCH_SWITCHING boundary input "
-                 "packed_vdma overflows u8 (config_vdma=%u)",
-                 cfg->config_vdma_channel);
-            return HAILO_ERR_INVAL;
-        }
+        uint8_t packed_vdma;
+        rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                                "BatchSwitching", &packed_vdma);
+        if (rc != HAILO_OK) return rc;
         struct hailo_cs_act_change_boundary_input_batch body = {
-            .packed_vdma_channel_id = (uint8_t)raw_vdma,
+            .packed_vdma_channel_id = packed_vdma,
         };
         rc = hailo_cs_builder_append(b,
                  HAILO_CS_ACT_CHANGE_BOUNDARY_INPUT_BATCH,
@@ -507,17 +519,13 @@ static int translate_allow_input_dataflow(
 
     /* Input stream uses the translator's boundary-input channel
      * offset (HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET). The same
-     * constant will be consumed by ACTIVATION's OpenBoundaryInput
-     * emitter when #178 lands, so the two ends agree by
-     * construction rather than by separately-written magic numbers. */
-    uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
-                      + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET;
-    if (raw_vdma > 0xFFu) {
-        WARN("hailo translator: AllowInputDataflow packed_vdma overflows u8 "
-             "(config_vdma=%u)", cfg->config_vdma_channel);
-        return HAILO_ERR_INVAL;
-    }
-    uint8_t packed_vdma = (uint8_t)raw_vdma;
+     * constant is consumed by ACTIVATION's OpenBoundaryInput
+     * emitter, so the two ends agree by construction rather than
+     * by separately-written magic numbers. */
+    uint8_t packed_vdma;
+    int rc_pack = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                                     "AllowInputDataflow", &packed_vdma);
+    if (rc_pack != HAILO_OK) return rc_pack;
 
     struct hailo_cs_act_fetch_data_from_vdma body = {
         .packed_vdma_channel_id = packed_vdma,
