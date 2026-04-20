@@ -14,6 +14,18 @@ Both plan §4.1 (PCIe RTL8168) and §4.2 (USB CDC-ECM) remain
 infeasible. BCT firewall override no longer looks like the fix —
 this is a kexec-shutdown-path issue, not a security-policy issue.
 
+**Update (20 April 2026, evening):** Step 2 landed on branch
+`jetson-bpmp-ipc`. SLM-OS can now reach BPMP over HSP + IVC + MRQ
+directly, resolving #190 (BPMP MRQ rejection was a set of driver
+bugs, not firmware policy). `bpmp pcie` from the SLM-OS shell
+walks `CLK_ENABLE(PEX2_C8_CORE)` + `RESET_DEASSERT(PEX2_CORE_8)` +
+`RESET_DEASSERT(PEX2_CORE_8_APB)`, all returning rc=0. APPL comes
+alive: `APPL_CTRL` reads `0x00449000` instead of `0xffffffff` —
+the controller wrapper is powered and held in a pre-link-training
+state (LTSSM_EN bit 7 = 0). DBI still returns all-ones because the
+link hasn't trained yet. That's Step 3 scope: toggle LTSSM_EN plus
+whatever UPHY bring-up is required to complete link training.
+
 **Update (20 April 2026):** Gen1 link-speed fallback (Step 1 of the
 #25 revived plan) is **ruled out**. The RTL8168 endpoint is a
 Gen1-only device, so the link already trains at Gen1 natively —
@@ -301,6 +313,100 @@ not per-trained-speed), and empirically confirmed here.
 **Value:** Step 1 of the #25 revived plan is foreclosed. Move
 directly to Step 2 (port the edk2-nvidia BPMP IPC client to
 SLM-OS) as the actual unblocking work.
+
+## BPMP IPC port (Step 2 landed, 20 April 2026)
+
+**Result: POSITIVE.** Port complete on branch `jetson-bpmp-ipc`.
+Four-file driver under `kernel/drivers/bpmp/` (hsp, ivc, mrq, bpmp)
+that correctly implements the Tegra234 BPMP IPC protocol.
+
+### Three bugs in the previous driver
+
+Inherited from #190 (`kernel/drivers/bpmp.c`, 455 LOC, deleted in
+this branch). Each was load-bearing on its own — no single fix
+would have worked.
+
+1. **IVC channel struct layout wrong.** Offset 0x04 is `tx.state`,
+   not `r_count`. `rx.count` is at 0x40. The frame's `mrq` word is
+   at 0x80, data at 0x88. The old driver treated the whole header
+   as packed at offsets 0, 4, 8, 12 — so `bpmp_init`'s counter
+   reset was clobbering `State`, which the handshake state machine
+   reads. BPMP firmware saw garbage and returned silent failures
+   (which on some kexec boots escalated to a TF-A RAS Uncorrectable
+   Error, the symptom that made `bpmp_init` look actively dangerous).
+
+2. **Doorbell offset hardcoded.** Old code used `HSP + 0x10000 +
+   master * 0x100`. Correct formula (from edk2-nvidia's
+   `HspDoorbellInit` and Linux's `tegra_hsp_doorbell_setup`) reads
+   `HSP_DIMENSIONING` at `HSP + 0x380` and computes
+   `HSP + (1 + num_sm/2 + num_ss + num_as) * 0x10000 + master_idx * 0x100`.
+   On Tegra234 the dimensioning register reads `0x0008a228`
+   (num_sm=8, num_ss=2, num_as=2), producing a doorbell region at
+   `HSP + 0x90000`, not `HSP + 0x10000`. The old code was writing
+   `TRIGGER` into a shared-mailbox register — no BPMP notification
+   happened, and every MRQ timed out.
+
+3. **No IVC handshake.** The Sync → Ack → Established protocol from
+   `linux-tegra-ivc.c` was not implemented. A post-kexec BPMP keeps
+   Linux's `tx.count` / `rx.count` values (observed as 70400 on a
+   hot kexec; 11729 on a cold boot) and will silently discard frames
+   whose counter looks ancient compared to its internal state. The
+   new driver drives `Sync → (wait for peer Ack) → Established` via
+   `hsp_ring_bpmp()` and waits for the peer's `tx.state` transition
+   to Ack before declaring success — catching the initial
+   "peer=Established" condition as "BPMP hasn't reacted yet" rather
+   than "handshake done".
+
+### End-to-end validation
+
+SLM-OS boot log on jetson-nano-1 (after slmos-kexec from Linux,
+no PCIe clock pre-hold in the helper):
+
+```
+[INFO] HSP@0x3c00000: DIMENSIONING=0x0008a228 (SM=8 SS=2 AS=2)
+[INFO] HSP doorbells: CCPLEX@0x3c90100 BPMP@0x3c90300
+[INFO] BPMP/IVC: TX@0x40070000 RX@0x40071000 (pre-handshake)
+[INFO] IVC: handshake complete (us=Established, peer observed Ack)
+[INFO] BPMP init: rc=0
+[INFO] BPMP: MRQ_PING OK (reply=0xbd5b7dde)
+```
+
+Then from the shell:
+
+```
+slmos> bpmp pcie
+  CLK_ENABLE(PEX2_C8_CORE):          rc=0
+  RESET_DEASSERT(PEX2_CORE_8):       rc=0
+  RESET_DEASSERT(PEX2_CORE_8_APB):   rc=0
+  PEX2_C8_CORE post-enable state:    1
+
+slmos> rtldiag
+  APPL_CTRL:   0x00449000  (LTSSM_EN=0)
+  APPL_DEBUG:  0x00002000
+  DBI bus0:    vendor=0xffff  device=0xffff
+```
+
+APPL is alive (was `0xffffffff` pre-enable). DBI still reads all-ones
+because `LTSSM_EN` hasn't been set — the controller is powered but
+not yet training the link. That is Step 3's problem.
+
+### What's still pending (Step 3)
+
+1. **Set APPL_CTRL.LTSSM_EN** (bit 7). Requires understanding the
+   Tegra PCIe RC's init sequencing — direct MMIO to APPL and the
+   associated DBI programming (reference: `docs/reference/linux-pcie-tegra194.c`).
+2. **Possibly MRQ_UPHY bring-up.** Linux's Tegra PCIe driver uses
+   MRQ_UPHY to gate the PHY's PLL/calibration. UPHY may already be
+   active from Linux's era — needs empirical test.
+3. **Wait for link training to L0.** LTSSM state in `APPL_DEBUG[8:3]`
+   should reach 0x11 (L0).
+4. **Program iATU** for bus-1 config access, then read the RTL8168
+   endpoint ID.
+5. **r8169 driver.** The scaffolding is in `kernel/drivers/eth_rtl8169.c`
+   — descriptor rings + send/recv.
+
+Steps 1-4 are a few hundred lines drawing on `linux-pcie-tegra194.c`
+(cached). Step 5 is the existing networking-driver-checklist.md work.
 
 ## Immediate next steps
 
