@@ -175,9 +175,18 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
  * 32 contiguous bytes (reference CHANNEL_BASE_OFFSET macro). */
 #define HAILO_VDMA_CHANNEL_STRIDE   32u
 
-/* Max VDMA channels per engine on Hailo-8 (MAX_VDMA_CHANNELS_PER_ENGINE
- * in hailo-vdma-common.h). */
-#define HAILO_VDMA_MAX_CHANNELS     16u
+/* Max VDMA channels per engine on Hailo-8.
+ * MAX_VDMA_CHANNELS_PER_ENGINE = 32 in the reference driver
+ * (hailo-ioctl-common.h:20). Channel index space is a shared 0..31
+ * pool — both H2D and D2H draw from it; direction is conveyed by
+ * the action type (OPEN_BOUNDARY_INPUT_CHANNEL vs OUTPUT_CHANNEL),
+ * not by the index range. `HAILO_PCIE_DMA_SRC_CHANNELS_BITMASK =
+ * 0x0000FFFF` in the reference driver only controls per-channel
+ * register layout within each channel's 32-byte window (host-side
+ * regs first for channels 0..15, device-side first for 16..31 —
+ * see get_channel_regs in hailo-vdma-common.c:576). It is NOT a
+ * per-direction channel reservation. */
+#define HAILO_VDMA_MAX_CHANNELS     32u
 
 /* Sub-offsets within a channel's register block (host side).
  * Mirror the constants in `hailo-vdma-common.c:32-37` and

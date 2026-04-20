@@ -29,6 +29,28 @@
 #include "hailo_cs_translator.h"
 #include "hef.pb.h"   /* ProtoHEFAction_*_tag constants */
 
+/* Compute `config_vdma_channel + offset` and narrow to u8 for the
+ * wire. Returns HAILO_OK + writes `*out` on success, HAILO_ERR_INVAL
+ * and logs a WARN if the sum exceeds 0xFF (would silently truncate).
+ * `tag` is a short label included in the WARN so the emitter call
+ * site is identifiable in logs ("ActivationInput", "BatchSwitching",
+ * etc). */
+static int pack_boundary_vdma(const struct hailo_cs_translate_cfg *cfg,
+                              uint32_t offset,
+                              const char *tag,
+                              uint8_t *out)
+{
+    uint32_t raw = (uint32_t)cfg->config_vdma_channel + offset;
+    if (raw > 0xFFu) {
+        WARN("hailo translator: %s packed_vdma overflows u8 "
+             "(config_vdma=%u, offset=%u)",
+             tag, cfg->config_vdma_channel, offset);
+        return HAILO_ERR_INVAL;
+    }
+    *out = (uint8_t)raw;
+    return HAILO_OK;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Application header                                                           */
 /* -------------------------------------------------------------------------- */
@@ -65,15 +87,41 @@ int hailo_cs_translate_application_header(
     out->config_channels_count       = 1;
     out->config_channel_packed_id[0] = cfg->config_vdma_channel;
 
-    /* boundary_channels_bitmap: bit per VDMA channel used for input
-     * or output dataflow. For single-CCW loads (no boundary I/O
-     * yet) only the config channel counts. Engine 0 is index 0
-     * of the bitmap array; packed_vdma_channel_id's low nibble is
-     * the channel number. */
-    uint8_t chan = cfg->config_vdma_channel & 0x0Fu;
-    out->boundary_channels_bitmap[0] = 1u << chan;
+    /* boundary_channels_bitmap: bit per VDMA channel used for
+     * boundary dataflow (input and output streams bound via
+     * OpenBoundary actions in ACTIVATION). Config channel is NOT
+     * included — that's tracked separately via
+     * config_channel_packed_id[]. If we have a boundary input pad,
+     * bit (config_vdma + INPUT_OFFSET) is set; boundary output pad
+     * → bit (config_vdma + OUTPUT_OFFSET).
+     *
+     * Earlier draft set the config_vdma bit here; that is wrong on
+     * two counts: (a) config channel doesn't belong in the boundary
+     * bitmap by convention, (b) the actual boundary channels
+     * (config+1, config+2) weren't represented at all. Firmware
+     * treats the bitmap as authoritative for which channels it
+     * should walk during BURST_CREDITS_TASK_START — a bitmap that
+     * doesn't include the real boundary channels causes the task
+     * to read uninitialized channel state. */
+    bool has_input_boundary  = false;
+    bool has_output_boundary = false;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *pad = &info->pads[i];
+        if (!pad->has_stream_info) continue;
+        if (pad->is_input)  has_input_boundary  = true;
+        else                has_output_boundary = true;
+    }
+    uint32_t bitmap = 0;
+    if (has_input_boundary) {
+        bitmap |= 1u << ((cfg->config_vdma_channel
+                        + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET) & 0x1Fu);
+    }
+    if (has_output_boundary) {
+        bitmap |= 1u << ((cfg->config_vdma_channel
+                        + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET) & 0x1Fu);
+    }
+    out->boundary_channels_bitmap[0] = bitmap;
 
-    (void)info;   /* Not yet consumed — reserved for future expansion. */
     return HAILO_OK;
 }
 
@@ -81,30 +129,185 @@ int hailo_cs_translate_application_header(
 /* ACTIVATION context                                                           */
 /* -------------------------------------------------------------------------- */
 
-/* Minimum legal ACTIVATION per HailoRT's fill_activation_config_recepies:
- * BURST_CREDITS_TASK_RESET (zero body). Real MLP ACTIVATION contexts
- * also carry OpenBoundaryInput/Output per boundary edge layer; those
- * land once the parser surfaces edge_layer → VDMA channel mapping. */
-static int translate_activation(struct hailo_cs_builder *b)
+/* ACTIVATION context (Phase 6.5, #178).
+ *
+ * Per HailoRT's fill_activation_config_recepies (v4.23 source trail
+ * documented in docs/pi5-ai-hat-plan.md §6.3):
+ *
+ *   1. BURST_CREDITS_TASK_RESET (zero body) — resets per-channel
+ *      burst credit counters so the new network's config channel
+ *      starts clean.
+ *   2. OPEN_BOUNDARY_INPUT_CHANNEL per boundary input edge — binds
+ *      a host→device VDMA descriptor list to the channel firmware
+ *      will pull tensor data through during inference.
+ *   3. OPEN_BOUNDARY_OUTPUT_CHANNEL per boundary output edge — binds
+ *      device→host channel for the response tensor.
+ *
+ * Boundary edges are signaled in hef_info by pads[].has_stream_info
+ * (the pad was joined to an edge_layer during parse; edge_layers are
+ * the boundary streams exposed to the host). is_input selects the
+ * direction. A single-input / single-output MLP emits exactly one
+ * INPUT_CHANNEL + one OUTPUT_CHANNEL on top of the BURST_CREDITS
+ * reset — three actions total, 28+20+8 = 56 bytes of body plus three
+ * 8-byte common headers = 80 bytes of ACTIVATION. Well under the
+ * HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES cap.
+ *
+ * Multi-stream HEFs (multiple inputs or outputs) require threading
+ * stream_index and a wider boundary-desc-list table through cfg;
+ * single-stream is the MVP.
+ *
+ * firmware expectation (hypothesis, #180): the 0xFFFFFFFF response
+ * pattern on subsequent CORE-CPU RPCs after ACTIVATION suggests fw
+ * v4.23 waits for the full OpenBoundary set before accepting the
+ * next context. Landing this translator function is the concrete
+ * test of that hypothesis. */
+static int translate_open_boundary_for_pad(
+    const struct hef_pad_info *pad,
+    const struct hailo_cs_translate_cfg *cfg,
+    uint8_t stream_index,
+    struct hailo_cs_builder *b)
 {
-    return hailo_cs_builder_append(b, HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
-                                   NULL, 0);
+    if (pad->is_input) {
+        uint8_t packed_vdma;
+        int rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                                    "ActivationInput", &packed_vdma);
+        if (rc != HAILO_OK) return rc;
+        if (cfg->boundary_input_desc_list_iova == 0) {
+            WARN("hailo translator: HEF has boundary input edge (sys_index=%u) "
+                 "but cfg->boundary_input_desc_list_iova is 0",
+                 pad->sys_index);
+            return HAILO_ERR_INVAL;
+        }
+        /* frame_periph_size comes from the pad's core_bytes_per_buffer;
+         * periph_bytes_per_buffer equals frame size for unpadded
+         * single-row tensors (MVP). Multi-row / padded tensors need
+         * a proper periph-vs-core split later. */
+        uint32_t frame = pad->core_bytes_per_buffer;
+        struct hailo_cs_act_open_boundary_input_channel body = {
+            .packed_vdma_channel_id = packed_vdma,
+            .host_buffer_info = {
+                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                .dma_address      = cfg->boundary_input_desc_list_iova,
+                .desc_page_size   = cfg->boundary_desc_page_size,
+                .total_desc_count = cfg->boundary_input_total_desc_count,
+                .bytes_in_pattern = 0,
+            },
+            .stream_index             = stream_index,
+            .network_index            = 0,
+            .periph_bytes_per_buffer  = (uint16_t)((frame > 0xFFFFu) ? 0xFFFFu : frame),
+            .frame_periph_size        = frame,
+        };
+        return hailo_cs_builder_append(
+            b, HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
+            &body, sizeof(body));
+    } else {
+        uint8_t packed_vdma;
+        int rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET,
+                                    "ActivationOutput", &packed_vdma);
+        if (rc != HAILO_OK) return rc;
+        if (cfg->boundary_output_desc_list_iova == 0) {
+            WARN("hailo translator: HEF has boundary output edge "
+                 "(sys_index=%u) but cfg->boundary_output_desc_list_iova "
+                 "is 0", pad->sys_index);
+            return HAILO_ERR_INVAL;
+        }
+        struct hailo_cs_act_open_boundary_output_channel body = {
+            .packed_vdma_channel_id = packed_vdma,
+            .host_buffer_info = {
+                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                .dma_address      = cfg->boundary_output_desc_list_iova,
+                .desc_page_size   = cfg->boundary_desc_page_size,
+                .total_desc_count = cfg->boundary_output_total_desc_count,
+                .bytes_in_pattern = 0,
+            },
+        };
+        (void)stream_index;   /* OUTPUT body omits stream_index today. */
+        return hailo_cs_builder_append(
+            b, HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
+            &body, sizeof(body));
+    }
+}
+
+static int translate_activation(const struct hef_info *info,
+                                const struct hailo_cs_translate_cfg *cfg,
+                                struct hailo_cs_builder *b)
+{
+    /* Step 1: BURST_CREDITS_TASK_RESET. */
+    int rc = hailo_cs_builder_append(b,
+                 HAILO_CS_ACT_BURST_CREDITS_TASK_RESET, NULL, 0);
+    if (rc != HAILO_OK) return rc;
+
+    /* Steps 2 & 3: walk pads, emit OpenBoundary per boundary edge.
+     * stream_index counts boundary pads per direction (0 = first
+     * input boundary, 0 = first output boundary, etc.). */
+    uint8_t input_stream_index  = 0;
+    uint8_t output_stream_index = 0;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *pad = &info->pads[i];
+        if (!pad->has_stream_info) continue;   /* internal pad, skip */
+
+        uint8_t stream_idx = pad->is_input ? input_stream_index
+                                           : output_stream_index;
+        rc = translate_open_boundary_for_pad(pad, cfg, stream_idx, b);
+        if (rc != HAILO_OK) return rc;
+        if (pad->is_input) input_stream_index++;
+        else               output_stream_index++;
+    }
+
+    return HAILO_OK;
 }
 
 /* -------------------------------------------------------------------------- */
 /* BATCH_SWITCHING context                                                      */
 /* -------------------------------------------------------------------------- */
 
-/* Minimum BATCH_SWITCHING per HailoRT's fill_batch_switching_context:
- * DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START (both zero body).
- * Real MLP BATCH_SWITCHING contexts with DDR buffers or LCU batch
- * switching add actions here; zero-boundary single-context MLPs
- * don't need them. */
-static int translate_batch_switching(struct hailo_cs_builder *b)
+/* BATCH_SWITCHING context. Per HailoRT's
+ * fill_batch_switching_context_config_recepies_for_multi_context
+ * (resource_manager_builder.cpp L1306-1333, docs/reference/
+ * hailort-context-switch-orchestration.md), the minimal sequence
+ * for a boundary-I/O network is:
+ *
+ *   DDR_BUFFERING_RESET
+ *   CHANGE_BOUNDARY_INPUT_BATCH × N_H2D_boundary
+ *   BURST_CREDITS_TASK_START
+ *
+ * The middle action is load-bearing: BURST_CREDITS_TASK_START spins
+ * up a firmware task that walks boundary H2D channels and expects
+ * each one's batch state to have been set by CHANGE_BOUNDARY_INPUT_
+ * BATCH. Skipping the batch programming is what crashed pi-5-1 fw
+ * v4.23 in #180 — firmware read uninitialised channel state, the
+ * control CPU crashed, and the PCIe link dropped entirely.
+ *
+ * HEFs with zero boundary H2D channels (synthetic tests) fall back
+ * to just DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START, matching
+ * the pre-#180 behavior. */
+static int translate_batch_switching(const struct hef_info *info,
+                                     const struct hailo_cs_translate_cfg *cfg,
+                                     struct hailo_cs_builder *b)
 {
     int rc = hailo_cs_builder_append(b, HAILO_CS_ACT_DDR_BUFFERING_RESET,
                                      NULL, 0);
     if (rc != HAILO_OK) return rc;
+
+    /* Emit CHANGE_BOUNDARY_INPUT_BATCH per boundary H2D pad, matching
+     * the VDMA channel IDs ACTIVATION used in OpenBoundaryInput. */
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *pad = &info->pads[i];
+        if (!pad->has_stream_info || !pad->is_input) continue;
+
+        uint8_t packed_vdma;
+        rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                                "BatchSwitching", &packed_vdma);
+        if (rc != HAILO_OK) return rc;
+        struct hailo_cs_act_change_boundary_input_batch body = {
+            .packed_vdma_channel_id = packed_vdma,
+        };
+        rc = hailo_cs_builder_append(b,
+                 HAILO_CS_ACT_CHANGE_BOUNDARY_INPUT_BATCH,
+                 &body, sizeof(body));
+        if (rc != HAILO_OK) return rc;
+    }
+
     return hailo_cs_builder_append(b, HAILO_CS_ACT_BURST_CREDITS_TASK_START,
                                    NULL, 0);
 }
@@ -316,17 +519,13 @@ static int translate_allow_input_dataflow(
 
     /* Input stream uses the translator's boundary-input channel
      * offset (HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET). The same
-     * constant will be consumed by ACTIVATION's OpenBoundaryInput
-     * emitter when #178 lands, so the two ends agree by
-     * construction rather than by separately-written magic numbers. */
-    uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
-                      + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET;
-    if (raw_vdma > 0xFFu) {
-        WARN("hailo translator: AllowInputDataflow packed_vdma overflows u8 "
-             "(config_vdma=%u)", cfg->config_vdma_channel);
-        return HAILO_ERR_INVAL;
-    }
-    uint8_t packed_vdma = (uint8_t)raw_vdma;
+     * constant is consumed by ACTIVATION's OpenBoundaryInput
+     * emitter, so the two ends agree by construction rather than
+     * by separately-written magic numbers. */
+    uint8_t packed_vdma;
+    int rc_pack = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                                     "AllowInputDataflow", &packed_vdma);
+    if (rc_pack != HAILO_OK) return rc_pack;
 
     struct hailo_cs_act_fetch_data_from_vdma body = {
         .packed_vdma_channel_id = packed_vdma,
@@ -540,13 +739,13 @@ int hailo_cs_translate_contexts(
 
     /* ACTIVATION */
     hailo_cs_builder_init(&b, out->activation, sizeof(out->activation));
-    int rc = translate_activation(&b);
+    int rc = translate_activation(info, cfg, &b);
     if (rc != HAILO_OK) return rc;
     out->activation_len = hailo_cs_builder_size(&b);
 
     /* BATCH_SWITCHING */
     hailo_cs_builder_init(&b, out->batch_switching, sizeof(out->batch_switching));
-    rc = translate_batch_switching(&b);
+    rc = translate_batch_switching(info, cfg, &b);
     if (rc != HAILO_OK) return rc;
     out->batch_switching_len = hailo_cs_builder_size(&b);
 

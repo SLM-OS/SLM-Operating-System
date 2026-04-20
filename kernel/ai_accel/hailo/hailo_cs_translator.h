@@ -70,12 +70,18 @@
 
 /* Boundary VDMA channel offsets relative to config_vdma_channel.
  * The HEF identifies boundary streams by sys_index; the host picks
- * which VDMA channel each sys_index maps to. Today the convention
- * is fixed: input boundary on (config + 1), output boundary on
- * (config + 2). When #178 lands real edge_layer → channel mapping,
- * these become defaults with explicit cfg override. ACTIVATION's
- * OpenBoundaryInput/Output emitter (future) and translate_allow_
- * input_dataflow (current) both use these so the two ends agree. */
+ * which VDMA channel each sys_index maps to. When #178 lands real
+ * edge_layer → channel mapping, these become defaults with explicit
+ * cfg override. ACTIVATION's OpenBoundaryInput/Output emitter and
+ * translate_allow_input_dataflow both use these so the two ends agree.
+ *
+ * On Hailo-8 PCIe, channel_index is a shared 0..31 pool — both H2D
+ * and D2H draw from it. The `HAILO_PCIE_DMA_SRC_CHANNELS_BITMASK =
+ * 0x0000FFFF` in the reference driver only controls register layout
+ * within each channel's 32-byte window (host-side regs first for
+ * channels 0..15, device-side regs first for 16..31 — see
+ * get_channel_regs in hailo-vdma-common.c:576). Action type (32 vs
+ * 33) is what tells firmware the direction. */
 #define HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET   1u
 #define HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET  2u
 
@@ -101,6 +107,35 @@ struct hailo_cs_translate_cfg {
 
     /* Number of descriptors in the CCW list. */
     uint32_t ccw_total_desc_count;
+
+    /* ------------------------------------------------------------ *
+     * Boundary-channel descriptor lists (one for input, one for
+     * output). Populated by the caller (inference_device_hailo::
+     * load_model) with host-allocated VDMA descriptor lists, one
+     * per direction. The translator emits OPEN_BOUNDARY_INPUT_CHANNEL
+     * (for each boundary pad with is_input=true) and
+     * OPEN_BOUNDARY_OUTPUT_CHANNEL (is_input=false) in ACTIVATION,
+     * binding the descriptor lists to the VDMA channels firmware
+     * uses for the dataflow.
+     *
+     * Single-input / single-output MVP: only one of each direction
+     * is supported. Multi-stream HEFs will need this to become a
+     * small array indexed by stream_index.
+     *
+     * Zero-IOVA is treated as "no boundary of this direction in the
+     * HEF" — the translator skips emission. This lets a HEF with
+     * only an input boundary (or synthetic tests that skip the
+     * boundary path) work without requiring fake values.
+     * ------------------------------------------------------------ */
+    uint64_t boundary_input_desc_list_iova;
+    uint32_t boundary_input_total_desc_count;
+
+    uint64_t boundary_output_desc_list_iova;
+    uint32_t boundary_output_total_desc_count;
+
+    /* Boundary descriptor page size (shared by input + output today).
+     * Must match the programmed VDMA descriptor list's page size. */
+    uint16_t boundary_desc_page_size;
 };
 
 /*
@@ -112,7 +147,12 @@ struct hailo_cs_translate_cfg {
  * Total footprint: ~2 KB. Callers typically declare one on the stack
  * of the load_model path (16 KB kernel stack has room).
  */
-#define HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES  512u
+/* Per-context serialized action buffer cap. Sized for worst-case
+ * ACTIVATION with HEF_PARSER_MAX_PADS (16) all as boundary inputs:
+ * 16 × (8 header + 28 body) + 8 BURST_CREDITS = 584 B. 1024 leaves
+ * comfortable headroom for future ACTIVATION additions. Four copies
+ * × 1024 = 4 KB per hailo_cs_context_buffers — still stack-friendly. */
+#define HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES  1024u
 
 struct hailo_cs_context_buffers {
     uint8_t activation      [HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES];

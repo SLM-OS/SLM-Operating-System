@@ -107,6 +107,8 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER = 0x20,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO      = 0x21,
     HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS         = 0x25,
+    HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
+    HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
     /* Full table in docs/reference/hailort-control-protocol.h. */
 };
 
@@ -618,6 +620,35 @@ int hailo_control_change_context_switch_status(
     uint8_t             application_index,
     uint16_t            dynamic_batch_size,
     uint16_t            batch_count);
+
+/*
+ * CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS (opcode 0x47, CPU_ID_CORE_CPU).
+ * Empty-body request. Clears firmware's internal bookkeeping for
+ * previously-configured network groups so the next SET_NETWORK_GROUP_
+ * HEADER / SET_CONTEXT_INFO sequence starts from a clean state.
+ *
+ * Wire capture (#180 diagnostic, 2026-04-19): HailoRT calls this
+ * between CHANGE_CONTEXT_SWITCH_STATUS(RESET) and GET_HW_CONSTS. We
+ * were skipping it entirely, which leaves fw v4.23's context-switch
+ * state machine with stale bookkeeping and causes any non-empty
+ * BATCH_SWITCHING action list to walk into uninitialized memory.
+ */
+int hailo_control_context_switch_clear_configured_apps(void);
+
+/*
+ * GET_HW_CONSTS (opcode 0x48, CPU_ID_CORE_CPU). Empty-body request;
+ * firmware responds with a packed struct of hardware constants.
+ * HailoRT fetches this in fill_activation_config_recepies and
+ * fill_batch_switching_context_edge_layers to size internal
+ * structures.
+ *
+ * For Phase 6.8, the returned constants are not consumed by SLM-OS
+ * (we hardcode reasonable Hailo-8 defaults). The call is made for
+ * the side-effect of completing firmware's pre-configure handshake.
+ * `out_response_len` is set to the number of response body bytes
+ * received so callers can optionally inspect; pass NULL to ignore.
+ */
+int hailo_control_get_hw_consts(uint32_t *out_response_len);
 
 /*
  * Reset internal control-channel state (sequence counter and the

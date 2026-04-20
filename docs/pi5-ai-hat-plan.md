@@ -604,6 +604,63 @@ Total Phase 6.4 unit-test additions: **27 cases** across `test_hailo.c` and `tes
 - `common_action_header_t` is 8 bytes (natural alignment, not 5 as the packed reference suggests).
 - `csm_buffer_size` must match the VDMA descriptor page size (typically 512 or 4096).
 
+#### Phase 6.5 landed (2026-04-19): Boundary channels + OpenBoundary actions
+
+Commit `91e837c` (#178). Extended `hailo_cs_translate_cfg` with `boundary_input_desc_list_iova`, `boundary_output_desc_list_iova`, page size, and descriptor counts. `translate_activation` now walks `info.pads[]` and emits `OPEN_BOUNDARY_INPUT_CHANNEL` (action 32) + `OPEN_BOUNDARY_OUTPUT_CHANNEL` (action 33) per boundary edge alongside `BURST_CREDITS_TASK_RESET`. `boundary_channels_bitmap` in `application_header` now reflects both input and output boundary channels (shifted `& 0x1Fu` to stay within the 32-bit bitmap).
+
+#### Phase 6.6 landed (2026-04-19): Translator wired into `load_model`
+
+Commit `bebe4f2` (#179). `inference_device_hailo::load_model` now allocates boundary DMA tensors + descriptor lists up front and passes their IOVAs into the translator, so ACTIVATION carries real boundary channel info sourced from the caller rather than synthetic shell stubs. Both input and output host buffers are programmed into the VDMA at load time (not on each `run()`).
+
+#### Phase 6.7 landed (2026-04-19): `run()` reuses load-time boundary resources
+
+Commit `4f2b744` (#338). Previously `run()` allocated fresh DMA tensors + descriptor lists on every inference; now it reuses the slot's load-time allocations, eliminating 2 × `hailo_tensor_alloc` + 2 × `hailo_vdma_desc_list_alloc` per call. Boundary IOVAs and descriptor counts are cached in the slot struct.
+
+#### Phase 6.8 landed (2026-04-20): Pre-configure handshake — `CLEAR_CONFIGURED_APPS` + `GET_HW_CONSTS`
+
+Commits on branch `pi5-phase-6-run-rewire`. Added two firmware RPCs that HailoRT issues between `CHANGE_CONTEXT_SWITCH_STATUS(RESET)` and `SET_NETWORK_GROUP_HEADER`:
+
+- **`CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS`** (opcode 0x47, `CPU_ID_CORE_CPU`) — empty-body RPC. Clears firmware's internal bookkeeping for previously-configured network groups so the next load starts from a clean state.
+- **`GET_HW_CONSTS`** (opcode 0x48, `CPU_ID_CORE_CPU`) — empty-body RPC; firmware returns a packed struct of hardware constants (51 bytes on Hailo-8L fw v4.23). Body contents are not consumed by SLM-OS today — the call is made for the side-effect of completing firmware's pre-configure handshake.
+
+**Byte-for-byte verified** against HailoRT v4.23's wire on pi-5-1 via instrumented `hailo_pcie_write_firmware_control` (`print_hex_dump` on the Pi OS card). Both request bodies are 20 bytes identical to HailoRT.
+
+**Also corrected `HAILO_VDMA_MAX_CHANNELS` from 16 → 32** (`kernel/ai_accel/hailo/hailo_vdma.h`). The reference driver's `MAX_VDMA_CHANNELS_PER_ENGINE = 32`; the prior 16 cap would silently reject any future D2H channel index ≥ 16 with `HAILO_ERR_INVAL` on `hailo_vdma_channel_start`.
+
+**Hardware result on pi-5-1 fw v4.23, 2026-04-20:** ctxsmoke now progresses cleanly through 4 RPCs before hitting ACTIVATION:
+```
+[1/8] RESET                        rc=0
+[2/8] CLEAR_CONFIGURED_APPS        rc=0  ← NEW
+[3/8] GET_HW_CONSTS                rc=0 resp_len=51  ← NEW
+[4/8] SET_NETWORK_GROUP_HEADER     rc=0
+[5/8] SET_CONTEXT_INFO(ACTIVATION, 72 B)  rc=-3 (major=0x402d001b)
+```
+
+**BREAKTHROUGH on #180:** Firmware no longer silent-wedges on `BATCH_SWITCHING` (BAR4 returning `0xFFFFFFFF`). It now returns a real diagnostic error code on `ACTIVATION`, which is what lets further root-causing happen.
+
+#### Phase 6.9 remaining (2026-04-20): ACTIVATION rejected with `INVALID_ENGINE_INDEX`
+
+ACTIVATION fails with `major_status = 0x402d001b = VDMA_SERVICE_STATUS_INVALID_ENGINE_INDEX` (module 0x2D = FIRMWARE_MODULE__VDMA_SERVICE, status 0x1B within that module — counted from `VDMA_SERVICE_START`). PRELIMINARY fails with `0x402d0004 = HOST_DESCRIPTOR_BASE_ADDRESS_IS_NOT_64KB_ALIGNED` (cascade — firmware state machine is in error after ACTIVATION).
+
+The error name is misleading: `packed_vdma_channel_id` values emitted (`0x02` for input, `0x03` for output) have `engine_index = (packed >> 5) & 0x3 = 0`, which is the only valid engine on Hailo-8 PCIe (`HAILO_PCIE_DMA_ENGINES_COUNT = 1`). Something else in the ACTIVATION body is tripping the firmware's VDMA-service path.
+
+**Ruled out during this session:**
+
+- **Action-type enum IDs** — verified `OPEN_BOUNDARY_INPUT_CHANNEL = 32`, `OPEN_BOUNDARY_OUTPUT_CHANNEL = 33`, `BURST_CREDITS_TASK_RESET = 30` against `hailort-v4.23.0-context_switch_defs.h`.
+- **Body layouts** — `CONTEXT_SWITCH_DEFS__open_boundary_input_channel_data_t` (28 B) and `..._output_channel_data_t` (20 B) match SLM-OS structs byte-for-byte, including `CONTROL_PROTOCOL__host_buffer_info_t` (19 B, inside a `#pragma pack(push,1)` region per control-protocol.h:273).
+- **H2D/D2H channel-index split hypothesis** — initially suspected output `packed=0x03` was falling in the H2D range [0..15] and firmware was rejecting it as a D2H. `hailo-vdma-common.c:576-587` (`get_channel_regs`) and `hailo-pcie-common.h:30` (`HAILO_PCIE_DMA_ENGINES_COUNT = 1`) + `hailo-ioctl-common.h:20-21` (`MAX_VDMA_CHANNELS_PER_ENGINE = 32`, `VDMA_CHANNELS_PER_ENGINE_PER_DIRECTION = 16`) show `src_channels_bitmask = 0x0000FFFF` only selects which register pair within each channel's 32-byte window comes first (host-side vs device-side) — NOT a per-direction channel reservation. Channel-index space is a shared 0..31 pool; direction is differentiated by the action type. Hypothesis disproven by source-reading; tentative `OUTPUT_CHANNEL_OFFSET = 17` change was reverted.
+
+**Not yet investigated (candidates for next session):**
+
+1. **64 KB-alignment of boundary desc-list IOVAs.** `hailo_vdma_desc_list_alloc` returns page-aligned (4 KB) IOVAs. Firmware's PRELIMINARY cascade returns `HOST_DESCRIPTOR_BASE_ADDRESS_IS_NOT_64KB_ALIGNED`; it's plausible fw lumps all "descriptor-list base address" violations on boundary channels into `INVALID_ENGINE_INDEX` (since the engine-lookup table is keyed off per-channel state). Fix: route boundary desc lists through a 64 KB-aligned allocator (allocate 64 KB, align up), or find an alternate allocator API that already gives 64 KB alignment.
+2. **Pre-load multi-call cadence.** HailoRT's wire capture on 2026-04-20 shows `GET_HW_CONSTS` called **twice** and an interleaved `GET_DEVICE_INFORMATION` (opcode 0x33) between `CLEAR_CONFIGURED_APPS` and the second `GET_HW_CONSTS`. SLM-OS only calls each once. Unlikely to matter semantically, but listed here since the ground-truth HEF load didn't proceed past `GET_HW_CONSTS`.
+3. **Ground-truth ACTIVATION body.** Still unavailable — HailoRT v4.23.0 errors before `SET_CONTEXT_INFO` on every Model Zoo HEF tried (`HAILO_INTERNAL_FAILURE` due to Model Zoo HEFs requiring `max_desc_page_size = 16384` but HailoRT hardcodes 4096 for Hailo-8L). Next-session options: (a) patch HailoRT's `desc_page_size` guard to bypass; (b) find a HEF compiled with `page_size ≤ 4096`; (c) synthesize a minimal `SET_CONTEXT_INFO` test from first principles and bisect by swapping individual action bytes.
+
+**Artifacts left on branch for next session:**
+
+- `kernel/ai_accel/hailo/hailo_shell.c` — `ctxsmoke` retains post-failure BAR4 scope scan + IDENTIFY(APP) diagnostic + 500 ms inter-RPC delay. Kept as a permanent probe; removing once #180 resolves.
+- `/home/pi/Downloads/hailort-drivers/common/pcie_common.c` (on pi-5-1 Pi OS card) — `print_hex_dump` patch in `hailo_pcie_write_firmware_control` captures every HailoRT RPC body on dmesg. Rebuilt driver at `/home/pi/Downloads/hailort-drivers/linux/pcie/hailo_pci.ko`; swap in via `sudo rmmod hailo_pci && sudo insmod ...`.
+
 ### Phase 7: Shell Integration & Demo Polish (1 week)
 
 **Deliverables:**
@@ -657,4 +714,4 @@ Per the project's post-change checklist (run on every phase):
 
 ---
 
-*Last updated: 2026-04-17*
+*Last updated: 2026-04-20*

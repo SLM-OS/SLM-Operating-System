@@ -695,24 +695,83 @@ static int cmd_hailo(int argc, char *argv[])
             return 0;
         }
 
+        /* #180 hypothesis test: allocate boundary input/output DMA
+         * tensors + desc lists, populate synthetic pads with
+         * has_stream_info=true. This forces translate_activation to
+         * emit OPEN_BOUNDARY_INPUT_CHANNEL + OPEN_BOUNDARY_OUTPUT_
+         * CHANNEL alongside BURST_CREDITS_TASK_RESET, producing an
+         * ACTIVATION richer than the 8-byte credits-only stream
+         * firmware rejected the next CORE-CPU RPC after. If this
+         * unblocks BATCH_SWITCHING, #180's "insufficient ACTIVATION
+         * content" hypothesis is confirmed. */
+        const uint32_t bnd_bytes = 256u;
+        const uint16_t bnd_page  = 4096u;
+        struct hailo_tensor bnd_in_tensor  = {0};
+        struct hailo_tensor bnd_out_tensor = {0};
+        struct hailo_vdma_desc_list bnd_in_list  = {0};
+        struct hailo_vdma_desc_list bnd_out_list = {0};
+        int brc = hailo_tensor_alloc(bnd_bytes, &bnd_in_tensor);
+        if (brc == HAILO_OK) brc = hailo_tensor_alloc(bnd_bytes, &bnd_out_tensor);
+        if (brc == HAILO_OK) {
+            memset(bnd_in_tensor.cpu_addr, 0, bnd_bytes);
+            memset(bnd_out_tensor.cpu_addr, 0, bnd_bytes);
+            hailo_tensor_prepare_for_device(&bnd_in_tensor);
+            hailo_tensor_prepare_for_device(&bnd_out_tensor);
+            brc = hailo_vdma_desc_list_alloc(2, bnd_page, false, &bnd_in_list);
+        }
+        if (brc == HAILO_OK) brc = hailo_vdma_desc_list_alloc(2, bnd_page, false, &bnd_out_list);
+        if (brc == HAILO_OK) {
+            (void)hailo_vdma_program_buffer(&bnd_in_list,  0, bnd_in_tensor.iova,  bnd_bytes, 0);
+            (void)hailo_vdma_program_buffer(&bnd_out_list, 0, bnd_out_tensor.iova, bnd_bytes, 0);
+        }
+        if (brc != HAILO_OK) {
+            shell_printf("  [--] SKIP: boundary DMA alloc failed (%d)\n", brc);
+            hailo_vdma_desc_list_free(&bnd_out_list);
+            hailo_vdma_desc_list_free(&bnd_in_list);
+            hailo_tensor_free(&bnd_out_tensor);
+            hailo_tensor_free(&bnd_in_tensor);
+            hailo_vdma_desc_list_free(&ccw_list);
+            hailo_tensor_free(&ccw_tensor);
+            return 0;
+        }
+
         /* Run the translator. Synthetic hef_info with 1 CCW action
-         * gives us a single-FETCH_CCW_BURSTS preliminary. */
+         * + 2 boundary pads (1 input + 1 output) drives the full
+         * ACTIVATION: BURST_CREDITS + OpenBoundaryInput + OpenBoundaryOutput. */
         struct hef_info info;
         memset(&info, 0, sizeof(info));
         info.ccw_action_count = 1;
+        info.pad_count = 2;
+        info.pads[0].is_input              = true;
+        info.pads[0].has_stream_info       = true;
+        info.pads[0].sys_index             = 1;
+        info.pads[0].core_bytes_per_buffer = bnd_bytes;
+        info.pads[1].is_input              = false;
+        info.pads[1].has_stream_info       = true;
+        info.pads[1].sys_index             = 2;
+        info.pads[1].core_bytes_per_buffer = bnd_bytes;
 
         struct hailo_cs_translate_cfg tcfg = {
-            .config_vdma_channel   = 0x01,   /* engine 0 channel 1 */
-            .config_stream_index   = 0,
-            .ccw_desc_list_iova    = ccw_list.iova,
-            .ccw_desc_page_size    = ccw_page_size,
-            .ccw_total_desc_count  = ccw_list.desc_count,
+            .config_vdma_channel              = 0x01,   /* engine 0 channel 1 */
+            .config_stream_index              = 0,
+            .ccw_desc_list_iova               = ccw_list.iova,
+            .ccw_desc_page_size               = ccw_page_size,
+            .ccw_total_desc_count             = ccw_list.desc_count,
+            .boundary_input_desc_list_iova    = bnd_in_list.iova,
+            .boundary_input_total_desc_count  = bnd_in_list.desc_count,
+            .boundary_output_desc_list_iova   = bnd_out_list.iova,
+            .boundary_output_total_desc_count = bnd_out_list.desc_count,
+            .boundary_desc_page_size          = bnd_page,
         };
 
         struct hailo_cs_application_header hdr;
         int terr = hailo_cs_translate_application_header(&info, &tcfg, &hdr);
         if (terr != HAILO_OK) {
             shell_printf("  [--] SKIP: translate_application_header failed (%d)\n", terr);
+            hailo_vdma_desc_list_free(&bnd_out_list);
+            hailo_vdma_desc_list_free(&bnd_in_list);
+            hailo_tensor_free(&bnd_out_tensor);
+            hailo_tensor_free(&bnd_in_tensor);
             hailo_vdma_desc_list_free(&ccw_list);
             hailo_tensor_free(&ccw_tensor);
             return 0;
@@ -722,24 +781,42 @@ static int cmd_hailo(int argc, char *argv[])
         terr = hailo_cs_translate_contexts(&info, &tcfg, &bufs);
         if (terr != HAILO_OK) {
             shell_printf("  [--] SKIP: translate_contexts failed (%d)\n", terr);
+            hailo_vdma_desc_list_free(&bnd_out_list);
+            hailo_vdma_desc_list_free(&bnd_in_list);
+            hailo_tensor_free(&bnd_out_tensor);
+            hailo_tensor_free(&bnd_in_tensor);
             hailo_vdma_desc_list_free(&ccw_list);
             hailo_tensor_free(&ccw_tensor);
             return 0;
         }
 
         shell_puts("hailo: ctxsmoke:\n");
-        shell_puts("  [1/6] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
+        shell_puts("  [1/8] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
         int rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
             /*batch_size=*/0, /*batch_count=*/0);
         shell_printf("        rc=%d\n", rc);
 
-        shell_puts("  [2/6] SET_NETWORK_GROUP_HEADER...\n");
+        /* #180 pre-configure handshake (2026-04-19 wire capture): HailoRT
+         * calls CLEAR_CONFIGURED_APPS then GET_HW_CONSTS between
+         * CHANGE_CONTEXT_SWITCH_STATUS(RESET) and SET_NETWORK_GROUP_HEADER.
+         * Skipping these left firmware's context-switch bookkeeping stale
+         * and BATCH_SWITCHING walked into uninitialized state. */
+        shell_puts("  [2/8] CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS...\n");
+        rc = hailo_control_context_switch_clear_configured_apps();
+        shell_printf("        rc=%d\n", rc);
+
+        shell_puts("  [3/8] GET_HW_CONSTS...\n");
+        uint32_t hw_consts_resp_len = 0;
+        rc = hailo_control_get_hw_consts(&hw_consts_resp_len);
+        shell_printf("        rc=%d resp_len=%u\n", rc, hw_consts_resp_len);
+
+        shell_puts("  [4/8] SET_NETWORK_GROUP_HEADER...\n");
         rc = hailo_control_set_network_group_header(&hdr);
         shell_printf("        rc=%d\n", rc);
 
-        shell_printf("  [3/6] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
+        shell_printf("  [5/8] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
                      (unsigned)bufs.activation_len);
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_ACTIVATION,
                                             bufs.activation,
@@ -760,14 +837,65 @@ static int cmd_hailo(int argc, char *argv[])
                      irc, (unsigned)idr.fw_version.major,
                      (unsigned)idr.fw_version.minor);
 
-        shell_printf("  [4/6] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
+        /* #180 experiment A — async-busy test. Give firmware
+         * up to 500 ms after ACTIVATION completes before sending
+         * the next CORE-CPU RPC. If the CORE task was busy
+         * processing ACTIVATION async, this delay should let it
+         * catch up. */
+        shell_puts("  [--] DIAG: sleeping 500 ms before BATCH_SWITCHING\n");
+        hailo_platform->udelay(500000u);
+
+        shell_printf("  [6/8] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
                      (unsigned)bufs.batch_switching_len);
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING,
                                             bufs.batch_switching,
                                             (uint32_t)bufs.batch_switching_len);
         shell_printf("        rc=%d\n", rc);
 
-        shell_printf("  [5/6] SET_CONTEXT_INFO(PRELIMINARY, %u bytes)\n",
+        /* #180 experiment C — post-failure BAR4 scope scan. Findings
+         * from experiment B: BAR4+0x640 stays 0xFFFFFFFF for >1 s AND
+         * subsequent APP-CPU RPCs also return 0xFFFFFFFF. Is the wedge
+         * confined to the response slot, or is the entire BAR4 window
+         * broken? Read three distinct offsets:
+         *   - 0x000: request slot we just wrote (should echo our request
+         *            bytes if the window is intact).
+         *   - 0x640: response slot (known 0xFFFFFFFF post-failure).
+         *   - 0x100: firmware-owned region that doesn't alias either.
+         *
+         * If all three read 0xFFFFFFFF → ATR window entirely gone.
+         * If 0x000 echoes and 0x640 is 0xFFFFFFFF → firmware stopped
+         * writing responses but the PCIe↔device mapping is intact.
+         * If 0x000 and 0x100 show sensible data but 0x640 is unique →
+         * firmware-side panic/reset of the response slot only. */
+        if (rc != HAILO_OK) {
+            shell_puts("  [--] DIAG: BAR4 window scope scan after failure:\n");
+            uint32_t probes[3] = { 0x000u, 0x100u, 0x640u };
+            for (int i = 0; i < 3; i++) {
+                uint32_t w[4];
+                hailo_platform->bar4_read(probes[i], w, sizeof(w));
+                shell_printf("        [+0x%03x] %08x %08x %08x %08x\n",
+                             probes[i], w[0], w[1], w[2], w[3]);
+            }
+            /* Diag D: BAR0 (PLDA bridge + ATRs) health check. If BAR0
+             * reads also return 0xFFFFFFFF, the PCIe link dropped. If
+             * BAR0 reads reasonable values, the link is alive and the
+             * ATR[0] translation (BAR4 → firmware memory) specifically
+             * is what broke. Read ATR[0].TRSL_ADDR_LO + ISTATUS + IMASK
+             * and compare against the values we programmed at init. */
+            shell_puts("  [--] DIAG: BAR0 bridge health:\n");
+            uint32_t atr_lo = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                  HAILO_ATR_BASE + HAILO_ATR_OFF_TRSL_ADDR_LO);
+            uint32_t istatus = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                                       HAILO_BCS_ISTATUS_HOST);
+            uint32_t imask   = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                                       HAILO_BSC_IMASK_HOST);
+            shell_printf("        ATR[0].TRSL_LO=0x%08x (init=0x%08x)\n",
+                         atr_lo, (unsigned)HAILO_CONTROL_SECTION_ADDR_H8);
+            shell_printf("        BCS_ISTATUS_HOST=0x%08x\n", istatus);
+            shell_printf("        BSC_IMASK_HOST=0x%08x\n", imask);
+        }
+
+        shell_printf("  [7/8] SET_CONTEXT_INFO(PRELIMINARY, %u bytes)\n",
                      (unsigned)bufs.preliminary_len);
         shell_printf("        CCW buffer iova=0x%lx\n",
                      (unsigned long)ccw_list.iova);
@@ -776,13 +904,17 @@ static int cmd_hailo(int argc, char *argv[])
                                             (uint32_t)bufs.preliminary_len);
         shell_printf("        rc=%d\n", rc);
 
-        shell_printf("  [6/6] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
+        shell_printf("  [8/8] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
                      (unsigned)bufs.dynamic_len);
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_DYNAMIC,
                                             bufs.dynamic,
                                             (uint32_t)bufs.dynamic_len);
         shell_printf("        rc=%d\n", rc);
 
+        hailo_vdma_desc_list_free(&bnd_out_list);
+        hailo_vdma_desc_list_free(&bnd_in_list);
+        hailo_tensor_free(&bnd_out_tensor);
+        hailo_tensor_free(&bnd_in_tensor);
         hailo_vdma_desc_list_free(&ccw_list);
         hailo_tensor_free(&ccw_tensor);
 

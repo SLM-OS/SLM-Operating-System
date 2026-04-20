@@ -1,34 +1,47 @@
 /*
  * inference_device_hailo.c — Hailo-8 NPU backend for inference_device.h.
  *
- * Plumbs the Phase 5.3/5.4 Hailo driver (hef_parser / hef_header /
- * hailo_control_upload_ccw / hailo_infer_run) through the common
+ * Plumbs the Hailo driver (hef_parser / hef_header / hailo_control /
+ * hailo_cs_translator / hailo_infer) through the common
  * inference_device vtable so scheduler and Lua bindings can route
  * inference to the NPU the same way they route to the CPU MLP.
  *
- * Scope (Phase 6.2a): plumbing-only. `load_model` parses the HEF
- * outer header and the first network group's pad shapes to derive
- * input/output byte sizes; `run` forwards to `hailo_infer_run` with
- * those sizes. VDMA channel indices, data_ids, and per-descriptor
- * page sizes are placeholders (0/1 channels, data_id=0, page_size=
- * 512) — the values a real HEF-driven inference needs come out of
- * the CONFIG_STREAM response, which Phase 6.2b will extract from
- * the HEF's preliminary_config and thread into the slot.
+ * load_model (Phase 6.6, #179) drives the full context-switch load
+ * sequence:
+ *   1. Parse HEF outer header + proto body (hef_parser).
+ *   2. Pick largest-pad input/output for slot sizing.
+ *   3. Claim a slot.
+ *   4. context_switch_load: allocate CCW + boundary DMA buffers +
+ *      descriptor lists, translate HEF → wire-action contexts, and
+ *      ship the 6-step RPC sequence firmware expects
+ *      (RESET → SET_NETWORK_GROUP_HEADER → 4 × SET_CONTEXT_INFO →
+ *      ENABLED).
+ *   5. Populate slot->cfg + shapes for run().
  *
- * Until 6.2b lands, running this backend on real hardware will
- * time out with HAILO_ERR_TIMEOUT because firmware has no stream
- * context. In QEMU the mock_vdma_auto_advance path completes
- * successfully, so the plumbing is exercised end-to-end under test.
+ * run() currently calls hailo_infer_run, which allocates its own
+ * short-lived tensor + desc list per call. That mismatches the
+ * boundary descriptor lists load_model bound to firmware via
+ * OpenBoundary actions; firmware expects the boundary-channel IOVAs
+ * it was told about in ACTIVATION, not whatever run() just allocated.
+ * Wiring run() to reuse load_model's boundary lists (or switching to
+ * a zero-copy submit path that targets them) is a follow-up — this
+ * backend is today "load works end-to-end on real hardware with
+ * hypothesis validation for #180; inference submit runs in QEMU only
+ * via the mock auto-advance path."
  *
  * Model slots are a fixed-size table (HAILO_MAX_MODELS=4), handed
  * out as handles `idx + 1` so INF_BUILTIN_HANDLE (=0) stays reserved.
- * No dynamic allocation; all state is in BSS.
+ * No dynamic allocation; all state is in BSS + DMA coherent regions
+ * managed by hailo_tensor/hailo_vdma.
  */
 
 #include "inference_device.h"
 #include "hailo.h"
 #include "hailo_control.h"
+#include "hailo_cs_translator.h"
 #include "hailo_infer.h"
+#include "hailo_tensor.h"
+#include "hailo_vdma.h"
 #include "hef_header.h"
 #include "hef_parser.h"
 #include "spinlock.h"
@@ -49,6 +62,20 @@ struct hailo_model_slot {
      * caller's inference_tensor_t.shape can be compared 1:1. */
     uint16_t input_shape[3];
     uint16_t output_shape[3];
+
+    /* Context-switch load-time resources (Phase 6.6, #179). Kept in
+     * the slot so free_model can release them; load allocates, run()
+     * reads nothing from these directly (today). The boundary desc
+     * lists were bound to firmware's VDMA channels via ACTIVATION's
+     * OpenBoundary actions; a future run() refactor that reuses them
+     * instead of allocating fresh lists per-call is a follow-up. */
+    bool                          cs_loaded;
+    struct hailo_tensor           ccw_tensor;
+    struct hailo_vdma_desc_list   ccw_list;
+    struct hailo_tensor           boundary_in_tensor;
+    struct hailo_vdma_desc_list   boundary_in_list;
+    struct hailo_tensor           boundary_out_tensor;
+    struct hailo_vdma_desc_list   boundary_out_list;
 };
 
 static struct hailo_model_slot slots[HAILO_MAX_MODELS];
@@ -156,99 +183,333 @@ static int pick_largest_pads(const struct hef_info *info,
  * produces output). This lets `bench sched-policy` run through the
  * chain and observe the timeout, which is the correct signal until
  * the context-switch protocol lands. */
-static void upload_ccw_best_effort(const struct hef_info *info,
-                                   const void *model,
-                                   const struct hef_outer_header *outer)
+/* -------------------------------------------------------------------------- */
+/* Context-switch load path (Phase 6.6, #179)                                   */
+/*                                                                              */
+/* Replaces the prior "best-effort" WRITE_MEMORY + CONFIG_STREAM flow (which    */
+/* firmware v4.23 rejects for v2+ HEFs) with the full 6-step context-switch    */
+/* sequence HailoRT uses:                                                        */
+/*                                                                              */
+/*   1. Allocate + program the CCW DMA buffer + descriptor list; copy weights  */
+/*      from the HEF's ccws_offset region into the buffer.                      */
+/*   2. Allocate + program boundary input / output DMA buffers + desc lists    */
+/*      sized to the HEF's pad shapes.                                           */
+/*   3. Build hailo_cs_translate_cfg referencing all three descriptor list     */
+/*      IOVAs.                                                                   */
+/*   4. Translate application header + 4 context buffers.                       */
+/*   5. RPCs: CHANGE_CONTEXT_SWITCH_STATUS(RESET) → SET_NETWORK_GROUP_HEADER   */
+/*      → 4 × SET_CONTEXT_INFO → CHANGE_CONTEXT_SWITCH_STATUS(ENABLED).         */
+/*   6. Store tensor + list handles in the slot so free_model can reclaim.      */
+/*                                                                              */
+/* On failure anywhere in the sequence, we unwind whatever allocations already  */
+/* landed and return without marking cs_loaded. free_model treats !cs_loaded   */
+/* slots as having no context-switch resources to release.                      */
+/* -------------------------------------------------------------------------- */
+
+/* Constants shared between allocation and translate_cfg. The MVP
+ * hardcodes these to match ctxsmoke's shell-command sizing on pi-5-1. */
+#define HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL  0x01u
+#define HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE   512u
+#define HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE   4096u
+
+/* Round `bytes` up to `page_size` and return the descriptor count
+ * needed to cover the region, rounded UP to the next power of two
+ * (hailo_vdma_desc_list_alloc requires a power-of-2 count — the
+ * VDMA engine walks the ring via (index & mask) and non-power-of-2
+ * counts would corrupt on wraparound). Minimum 2
+ * (HAILO_VDMA_MIN_DESC_COUNT). The VDMA engine's num_avail /
+ * num_proc counters are 16-bit, so the maximum count is 65536.
+ * Returns 0 if a legitimate round-up exceeds that ceiling — the
+ * caller must treat 0 as "HEF too large" (HAILO_ERR_INVAL) rather
+ * than silently under-programming the descriptor list. */
+static uint32_t desc_count_for(uint32_t bytes, uint16_t page_size)
 {
-    if (info->ccw_action_count == 0) return;
-    const uint8_t *proto_base = (const uint8_t *)model + outer->proto_offset;
-    const uint8_t *ccws_base  = (const uint8_t *)model + outer->ccws_offset;
-    uint64_t uploaded = 0;
-    int urc = hailo_control_upload_ccw(info,
-                                       proto_base, outer->proto_size,
-                                       ccws_base,  outer->ccws_size,
-                                       /*device_base=*/0, &uploaded);
-    if (urc == HAILO_OK) {
-        INFO("hailo backend: CCW upload OK — %lu bytes across %u actions",
-             (unsigned long)uploaded, info->ccw_action_count);
-    } else {
-        WARN("hailo backend: CCW upload failed (rc=%d after %lu bytes); "
-             "proceeding — v2+ HEFs require context-switch protocol which "
-             "is not yet implemented (inference will time out)",
-             urc, (unsigned long)uploaded);
+    if (page_size == 0) return 2;
+    uint32_t n = (bytes + page_size - 1) / page_size;
+    if (n < 2) return 2;
+    /* Round up to next power of two, capped at 65536 (the VDMA
+     * ring's counter width). If the rounded-up value would exceed
+     * the cap, signal failure rather than saturate. */
+    uint32_t p = 2;
+    while (p < n) {
+        if (p >= 0x10000u) return 0;
+        p <<= 1;
     }
+    return p;
 }
 
-/* HEF core_buffers_per_frame is a uint32 on the proto side but a
- * uint16 on the CONFIG_STREAM wire. Default a zero to 1, clamp to
- * UINT16_MAX with a WARN rather than silent truncation. Realistic
- * MLP values are 1-4. */
-static uint16_t clamp_cbpf(uint32_t cbpf, const char *tag)
+/* Release context-switch load resources. Safe to call on a slot with
+ * cs_loaded=false (each tensor/list alloc is zero-initialised until
+ * populated, and hailo_*_free handles zeroed inputs). */
+static void context_switch_unwind(struct hailo_model_slot *slot)
 {
-    if (!cbpf) return 1;
-    if (cbpf > UINT16_MAX) {
-        WARN("hailo backend: %s core_buffers_per_frame=%u exceeds u16; clamping",
-             tag, cbpf);
-        return UINT16_MAX;
-    }
-    return (uint16_t)cbpf;
+    hailo_vdma_desc_list_free(&slot->boundary_out_list);
+    hailo_tensor_free(&slot->boundary_out_tensor);
+    hailo_vdma_desc_list_free(&slot->boundary_in_list);
+    hailo_tensor_free(&slot->boundary_in_tensor);
+    hailo_vdma_desc_list_free(&slot->ccw_list);
+    hailo_tensor_free(&slot->ccw_tensor);
+    slot->cs_loaded = false;
 }
 
-/* Configure input + output streams via CONFIG_STREAM (best-effort).
- *
- * Same rationale as the CCW upload — v2+ HEFs need
- * CONTEXT_SWITCH_SET_CONTEXT_INFO first so firmware knows about
- * the streams; without that CONFIG_STREAM returns 0x40030050
- * (STREAM__INVALID_CONFIG_STREAM_INDEX). Synthetic test HEFs
- * without has_stream_info skip this step. Real HEFs attempt the
- * handshake and log a WARN on failure; the slot stays live so
- * downstream inference_run calls can still be issued (they time
- * out cleanly when firmware never produces output). */
-static void config_streams_best_effort(int idx,
-                                       const struct hef_pad_info *in_pad,
-                                       const struct hef_pad_info *out_pad)
+/* The full 6-step load sequence. Called from load_model after the
+ * slot has been claimed and shapes stored. Returns HAILO_OK on
+ * success (slot->cs_loaded=true, resources owned by the slot) or a
+ * HAILO_ERR_* on any failure (caller must release the slot). */
+static int context_switch_load(struct hailo_model_slot *slot,
+                               const struct hef_info *info,
+                               const void *model,
+                               size_t     model_size,
+                               const struct hef_outer_header *outer,
+                               const struct hef_pad_info *in_pad,
+                               const struct hef_pad_info *out_pad)
 {
-    if (!in_pad->has_stream_info || !out_pad->has_stream_info) return;
+    int rc;
 
-    uint16_t in_cbpf  = clamp_cbpf(in_pad->core_buffers_per_frame,  "input");
-    uint16_t out_cbpf = clamp_cbpf(out_pad->core_buffers_per_frame, "output");
-
-    uint8_t in_dmid = 0, out_dmid = 0;
-    struct hailo_stream_pcie_config scfg_in = {
-        .stream_index          = 0,
-        .is_input              = true,
-        .skip_nn_stream_config = false,
-        .pcie_channel_index    = slots[idx].cfg.input_channel,
-        .pcie_dataflow_type    = HAILO_PCIE_DATAFLOW_TYPE_BURST,
-    };
-    scfg_in.nn_stream_config.core_bytes_per_buffer    = slots[idx].cfg.input_page_size;
-    scfg_in.nn_stream_config.core_buffers_per_frame   = in_cbpf;
-    scfg_in.nn_stream_config.periph_bytes_per_buffer  = slots[idx].cfg.input_page_size;
-    scfg_in.nn_stream_config.periph_buffers_per_frame = 1;
-    int src_in = hailo_control_config_stream_pcie(&scfg_in, &in_dmid);
-
-    struct hailo_stream_pcie_config scfg_out = {
-        .stream_index          = 0,
-        .is_input              = false,
-        .skip_nn_stream_config = false,
-        .pcie_channel_index    = slots[idx].cfg.output_channel,
-        .desc_page_size        = slots[idx].cfg.output_page_size,
-    };
-    scfg_out.nn_stream_config.core_bytes_per_buffer    = slots[idx].cfg.output_page_size;
-    scfg_out.nn_stream_config.core_buffers_per_frame   = out_cbpf;
-    scfg_out.nn_stream_config.periph_bytes_per_buffer  = slots[idx].cfg.output_page_size;
-    scfg_out.nn_stream_config.periph_buffers_per_frame = 1;
-    int src_out = hailo_control_config_stream_pcie(&scfg_out, &out_dmid);
-
-    if (src_in == HAILO_OK && src_out == HAILO_OK) {
-        INFO("hailo backend: streams configured (in dmid=%u, out dmid=%u)",
-             (unsigned)in_dmid, (unsigned)out_dmid);
-    } else {
-        WARN("hailo backend: CONFIG_STREAM best-effort failed "
-             "(in rc=%d, out rc=%d); v2+ HEFs need CONTEXT_SWITCH "
-             "protocol — not yet implemented. Slot stays live; "
-             "inference will time out.", src_in, src_out);
+    /* Bound the CCWS region against the caller-provided blob size.
+     * hef_parse_outer_header validates (magic, version, proto range)
+     * but does not bound the CCWS region — a malformed HEF with
+     * ccws_offset+ccws_size overflowing into the caller's buffer
+     * would OOB-read via the memcpy below. Reject such HEFs here. */
+    if (outer->ccws_size > 0) {
+        if (outer->ccws_offset > model_size
+         || outer->ccws_size > model_size - outer->ccws_offset) {
+            WARN("hailo backend: HEF CCWS out of bounds "
+                 "(offset=%lu size=%lu blob=%lu)",
+                 (unsigned long)outer->ccws_offset,
+                 (unsigned long)outer->ccws_size,
+                 (unsigned long)model_size);
+            return HAILO_ERR_INVAL;
+        }
     }
+
+    /* Step 1: CCW buffer + descriptor list.
+     * CCWs block lives in the HEF at ccws_offset; size is ccws_size
+     * (possibly zero for synthetic test HEFs). A zero-CCW HEF still
+     * needs a valid descriptor list for ACTIVATE_CFG_CHANNEL — we
+     * allocate a minimum 512-byte scratch so firmware's walker has
+     * something to DMA. */
+    uint32_t ccw_bytes = (outer->ccws_size > 0) ? outer->ccws_size
+                                                : HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
+    rc = hailo_tensor_alloc(ccw_bytes, &slot->ccw_tensor);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: CCW tensor alloc failed (rc=%d, bytes=%u)",
+             rc, ccw_bytes);
+        goto fail;
+    }
+    if (outer->ccws_size > 0) {
+        const uint8_t *ccws_base = (const uint8_t *)model + outer->ccws_offset;
+        memcpy(slot->ccw_tensor.cpu_addr, ccws_base, outer->ccws_size);
+    } else {
+        memset(slot->ccw_tensor.cpu_addr, 0, ccw_bytes);
+    }
+    hailo_tensor_prepare_for_device(&slot->ccw_tensor);
+
+    uint32_t ccw_desc_count =
+        desc_count_for(ccw_bytes, HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE);
+    if (ccw_desc_count == 0) {
+        WARN("hailo backend: CCW region too large for VDMA desc list (%u bytes)",
+             ccw_bytes);
+        rc = HAILO_ERR_INVAL;
+        goto fail;
+    }
+    rc = hailo_vdma_desc_list_alloc(ccw_desc_count,
+                                    HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
+                                    /*circular=*/false, &slot->ccw_list);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: CCW desc_list alloc failed (rc=%d)", rc);
+        goto fail;
+    }
+    int programmed = hailo_vdma_program_buffer(&slot->ccw_list, 0,
+                                               slot->ccw_tensor.iova,
+                                               ccw_bytes, /*data_id=*/0);
+    if (programmed < 0) {
+        WARN("hailo backend: CCW program_buffer failed (rc=%d)", programmed);
+        rc = HAILO_ERR_IO;
+        goto fail;
+    }
+
+    /* Step 2: boundary tensors + desc lists — only for pads the HEF
+     * marked as stream-bound. Tests HEFs without edge_layers have
+     * has_stream_info=false and skip the boundary allocation. */
+    uint64_t boundary_in_iova  = 0;
+    uint32_t boundary_in_desc_count = 0;
+    if (in_pad->has_stream_info && in_pad->core_bytes_per_buffer) {
+        uint32_t in_bytes = in_pad->core_bytes_per_buffer;
+        rc = hailo_tensor_alloc(in_bytes, &slot->boundary_in_tensor);
+        if (rc != HAILO_OK) {
+            WARN("hailo backend: boundary IN tensor alloc failed (rc=%d)", rc);
+            goto fail;
+        }
+        memset(slot->boundary_in_tensor.cpu_addr, 0, in_bytes);
+        hailo_tensor_prepare_for_device(&slot->boundary_in_tensor);
+
+        boundary_in_desc_count =
+            desc_count_for(in_bytes, HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE);
+        if (boundary_in_desc_count == 0) {
+            WARN("hailo backend: boundary IN region too large for VDMA desc list (%u)",
+                 in_bytes);
+            rc = HAILO_ERR_INVAL;
+            goto fail;
+        }
+        rc = hailo_vdma_desc_list_alloc(boundary_in_desc_count,
+                                        HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
+                                        /*circular=*/false,
+                                        &slot->boundary_in_list);
+        if (rc != HAILO_OK) {
+            WARN("hailo backend: boundary IN desc_list alloc failed (rc=%d)", rc);
+            goto fail;
+        }
+        int prog = hailo_vdma_program_buffer(&slot->boundary_in_list, 0,
+                                             slot->boundary_in_tensor.iova,
+                                             in_bytes, in_pad->sys_index);
+        if (prog < 0) {
+            WARN("hailo backend: boundary IN program_buffer failed (rc=%d)", prog);
+            rc = HAILO_ERR_IO;
+            goto fail;
+        }
+        boundary_in_iova = slot->boundary_in_list.iova;
+    }
+
+    uint64_t boundary_out_iova  = 0;
+    uint32_t boundary_out_desc_count = 0;
+    if (out_pad->has_stream_info && out_pad->core_bytes_per_buffer) {
+        uint32_t out_bytes = out_pad->core_bytes_per_buffer;
+        rc = hailo_tensor_alloc(out_bytes, &slot->boundary_out_tensor);
+        if (rc != HAILO_OK) {
+            WARN("hailo backend: boundary OUT tensor alloc failed (rc=%d)", rc);
+            goto fail;
+        }
+        memset(slot->boundary_out_tensor.cpu_addr, 0, out_bytes);
+        hailo_tensor_prepare_for_device(&slot->boundary_out_tensor);
+
+        boundary_out_desc_count =
+            desc_count_for(out_bytes, HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE);
+        if (boundary_out_desc_count == 0) {
+            WARN("hailo backend: boundary OUT region too large for VDMA desc list (%u)",
+                 out_bytes);
+            rc = HAILO_ERR_INVAL;
+            goto fail;
+        }
+        rc = hailo_vdma_desc_list_alloc(boundary_out_desc_count,
+                                        HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
+                                        /*circular=*/false,
+                                        &slot->boundary_out_list);
+        if (rc != HAILO_OK) {
+            WARN("hailo backend: boundary OUT desc_list alloc failed (rc=%d)", rc);
+            goto fail;
+        }
+        int prog = hailo_vdma_program_buffer(&slot->boundary_out_list, 0,
+                                             slot->boundary_out_tensor.iova,
+                                             out_bytes, out_pad->sys_index);
+        if (prog < 0) {
+            WARN("hailo backend: boundary OUT program_buffer failed (rc=%d)", prog);
+            rc = HAILO_ERR_IO;
+            goto fail;
+        }
+        boundary_out_iova = slot->boundary_out_list.iova;
+    }
+
+    /* Step 3: translate_cfg. The boundary IOVA fields are zero if the
+     * HEF has no boundary edge of that direction; translate_activation
+     * skips OpenBoundary emission for pads without has_stream_info,
+     * so the two views stay consistent. */
+    struct hailo_cs_translate_cfg tcfg = {
+        .config_vdma_channel              = HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL,
+        .config_stream_index              = 0,
+        .ccw_desc_list_iova               = slot->ccw_list.iova,
+        .ccw_desc_page_size               = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
+        .ccw_total_desc_count             = ccw_desc_count,
+        .boundary_input_desc_list_iova    = boundary_in_iova,
+        .boundary_input_total_desc_count  = boundary_in_desc_count,
+        .boundary_output_desc_list_iova   = boundary_out_iova,
+        .boundary_output_total_desc_count = boundary_out_desc_count,
+        .boundary_desc_page_size          = HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
+    };
+
+    /* Step 4: translate. */
+    struct hailo_cs_application_header hdr;
+    rc = hailo_cs_translate_application_header(info, &tcfg, &hdr);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: translate_application_header failed (rc=%d)", rc);
+        goto fail;
+    }
+    /* bufs is ~2 KB — large but still fits on the 16 KB kernel stack
+     * alongside hef_info (~1.2 KB) and the caller's frame. A prior
+     * version used a file-scope static here and claimed slots_lock
+     * protection, but slots_lock is released before context_switch_load
+     * runs (load_model only holds it to claim the slot index) — two
+     * concurrent loads would have raced through a shared static.
+     * Stack-local is the simplest fix and keeps this function re-
+     * entrant. Tensor + desc_list allocations earlier in this call
+     * already consume kernel-stack frame; the extra 2 KB is budgeted. */
+    struct hailo_cs_context_buffers cs_bufs;
+    rc = hailo_cs_translate_contexts(info, &tcfg, &cs_bufs);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: translate_contexts failed (rc=%d)", rc);
+        goto fail;
+    }
+
+    /* Step 5: six RPCs. Each must succeed; abort on any failure. */
+    rc = hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_RESET,
+            HAILO_CS_IGNORE_APPLICATION_INDEX,
+            /*batch_size=*/0, /*batch_count=*/0);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(RESET) failed (rc=%d)", rc);
+        goto fail;
+    }
+
+    rc = hailo_control_set_network_group_header(&hdr);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: SET_NETWORK_GROUP_HEADER failed (rc=%d)", rc);
+        goto fail;
+    }
+
+    const struct {
+        enum hailo_cs_context_type type;
+        const uint8_t *bytes;
+        uint32_t       len;
+        const char    *name;
+    } ctxs[] = {
+        { HAILO_CS_CONTEXT_TYPE_ACTIVATION,      cs_bufs.activation,
+          (uint32_t)cs_bufs.activation_len,      "ACTIVATION" },
+        { HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING, cs_bufs.batch_switching,
+          (uint32_t)cs_bufs.batch_switching_len, "BATCH_SWITCHING" },
+        { HAILO_CS_CONTEXT_TYPE_PRELIMINARY,     cs_bufs.preliminary,
+          (uint32_t)cs_bufs.preliminary_len,     "PRELIMINARY" },
+        { HAILO_CS_CONTEXT_TYPE_DYNAMIC,         cs_bufs.dynamic,
+          (uint32_t)cs_bufs.dynamic_len,         "DYNAMIC" },
+    };
+    for (uint32_t i = 0; i < sizeof(ctxs) / sizeof(ctxs[0]); i++) {
+        rc = hailo_control_set_context_info(ctxs[i].type,
+                                            ctxs[i].bytes, ctxs[i].len);
+        if (rc != HAILO_OK) {
+            WARN("hailo backend: SET_CONTEXT_INFO(%s) failed (rc=%d)",
+                 ctxs[i].name, rc);
+            goto fail;
+        }
+    }
+
+    rc = hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_ENABLED,
+            /*application_index=*/0,
+            /*batch_size=*/1, /*batch_count=*/1);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) failed (rc=%d)", rc);
+        goto fail;
+    }
+
+    INFO("hailo backend: context-switch load OK (CCW=%u B, IN=%u B, OUT=%u B)",
+         ccw_bytes,
+         in_pad->has_stream_info  ? in_pad->core_bytes_per_buffer  : 0u,
+         out_pad->has_stream_info ? out_pad->core_bytes_per_buffer : 0u);
+    slot->cs_loaded = true;
+    return HAILO_OK;
+
+fail:
+    context_switch_unwind(slot);
+    return rc;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -267,11 +528,26 @@ static int hailo_backend_init(struct inference_device *dev)
 static void hailo_backend_shutdown(struct inference_device *dev)
 {
     (void)dev;
-    /* No driver-level release — Hailo state is managed by the
-     * device lifecycle (hailo_init / hailo_boot), not this backend. */
+    /* Two-phase: copy out the DMA resource handles under the lock +
+     * mark slots free, then release them outside the lock. Calling
+     * hailo_*_free under spin_lock_irqsave is unsafe — the platform
+     * dma_free may acquire another lock, trigger an IPI, or walk a
+     * refcount that takes the PMM lock. Holding a kernel-wide IRQ-
+     * disabled critical section across unbounded allocator work is
+     * what to avoid; the out-of-lock path keeps the same ordering
+     * guarantees (in_use=false is visible to other CPUs via the
+     * unlock's release semantics before we free). */
+    struct hailo_model_slot stash[HAILO_MAX_MODELS];
     irq_flags_t flags = spin_lock_irqsave(&slots_lock);
+    memcpy(stash, slots, sizeof(stash));
     memset(slots, 0, sizeof(slots));
     spin_unlock_irqrestore(&slots_lock, flags);
+
+    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
+        if (stash[i].in_use && stash[i].cs_loaded) {
+            context_switch_unwind(&stash[i]);
+        }
+    }
 }
 
 static int hailo_backend_load_model(struct inference_device *dev,
@@ -378,14 +654,19 @@ static int hailo_backend_load_model(struct inference_device *dev,
     slots[idx].output_shape[1] = (uint16_t)pad_dim(out_pad->padded_width,    out_pad->width);
     slots[idx].output_shape[2] = (uint16_t)pad_dim(out_pad->padded_features, out_pad->features);
 
-    /* 5. Upload CCW weights + 6. configure streams. Both are
-     * best-effort: v2+ HEFs need the CONTEXT_SWITCH protocol (not
-     * yet implemented) before firmware accepts WRITE_MEMORY /
-     * CONFIG_STREAM. Failures log a WARN but leave the slot live
-     * so inference_run will time out cleanly — the correct signal
-     * until Phase 6.3 lands. */
-    upload_ccw_best_effort(&info, model, &outer);
-    config_streams_best_effort(idx, in_pad, out_pad);
+    /* 5. Context-switch load: replaces the prior best-effort
+     * WRITE_MEMORY + CONFIG_STREAM path. Allocates VDMA desc lists
+     * for CCW + boundary I/O, translates HEF → context-switch wire
+     * bytes, and ships the 4-context sequence firmware needs. On
+     * failure the slot is released so the caller can retry. */
+    int csrc = context_switch_load(&slots[idx], &info, model, size, &outer,
+                                   in_pad, out_pad);
+    if (csrc != HAILO_OK) {
+        irq_flags_t f = spin_lock_irqsave(&slots_lock);
+        memset(&slots[idx], 0, sizeof(slots[idx]));
+        spin_unlock_irqrestore(&slots_lock, f);
+        return hailo_err_to_inf(csrc);
+    }
 
     /* Handle numbering: 1..HAILO_MAX_MODELS. INF_BUILTIN_HANDLE (=0)
      * stays reserved for backends with compiled-in weights. */
@@ -417,7 +698,114 @@ static int hailo_backend_run(struct inference_device *dev,
         return INF_ERR_BAD_TENSOR;
     }
 
-    int rc = hailo_infer_run(&slot->cfg, in->data, out->data, NULL);
+    /* #338: submit via the slot's load-bound boundary tensors +
+     * descriptor lists rather than allocating fresh ones. Firmware
+     * was told about these specific IOVAs in ACTIVATION's
+     * OpenBoundaryInput/Output actions; using different buffers at
+     * submit time would either be rejected by firmware or cause the
+     * NN engine to DMA from the zero-initialized load-time buffers.
+     *
+     * If context_switch_load didn't allocate boundary resources
+     * (synthetic HEF without has_stream_info pads), fall back to
+     * the legacy hailo_infer_run path — it allocates its own
+     * buffers and runs self-contained. That path is used by
+     * `hailo infer <size>` shell diagnostics that don't load a HEF. */
+    if (!slot->cs_loaded || slot->boundary_in_tensor.cpu_addr == NULL
+                         || slot->boundary_out_tensor.cpu_addr == NULL) {
+        int rc = hailo_infer_run(&slot->cfg, in->data, out->data, NULL);
+        return hailo_err_to_inf(rc);
+    }
+
+    /* Bounds already checked against slot->cfg.input_bytes/output_bytes
+     * above; the boundary tensors were sized from the same pad values
+     * (core_bytes_per_buffer) at load time so the memcpy target has
+     * matching capacity. Defensive re-check since cfg and tensor
+     * sizing come from different sources and mismatches would be
+     * memory-safety-critical, not just functional bugs. */
+    if (in->n_elems  > slot->boundary_in_tensor.tensor_bytes
+     || out->n_elems > slot->boundary_out_tensor.tensor_bytes) {
+        WARN("hailo backend: tensor size > boundary buffer (in=%u/%u, out=%u/%u)",
+             in->n_elems,  slot->boundary_in_tensor.tensor_bytes,
+             out->n_elems, slot->boundary_out_tensor.tensor_bytes);
+        return INF_ERR_BAD_TENSOR;
+    }
+
+    /* The VDMA channel indices that receive these submits must be
+     * the ones ACTIVATION opened. translate_activation packed them
+     * as config_vdma + BOUNDARY_INPUT_CHANNEL_OFFSET (1) and
+     * BOUNDARY_OUTPUT_CHANNEL_OFFSET (2). The low nibble of
+     * packed_vdma_channel_id is the channel number — same value
+     * both sides need. */
+    uint8_t in_channel  = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
+                                  + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET);
+    uint8_t out_channel = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
+                                  + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET);
+
+    /* Copy caller's input into the pre-allocated DMA buffer +
+     * cache-clean so the device picks up the fresh bytes.
+     * Corresponding invalidate+copy for output happens after submit. */
+    memcpy(slot->boundary_in_tensor.cpu_addr, in->data, in->n_elems);
+    hailo_tensor_prepare_for_device(&slot->boundary_in_tensor);
+
+    /* Start the channels against the load-time desc lists. Safe to
+     * call on each inference — channel_start is idempotent and the
+     * descriptor list bytes were already programmed at load time.
+     * Re-starting ensures CONTROL.start is asserted, which firmware
+     * may have cleared between inferences. */
+    int rc = hailo_vdma_channel_start(in_channel, &slot->boundary_in_list,
+                                      slot->cfg.input_data_id);
+    if (rc != HAILO_OK) return hailo_err_to_inf(rc);
+    rc = hailo_vdma_channel_start(out_channel, &slot->boundary_out_list,
+                                  slot->cfg.output_data_id);
+    if (rc != HAILO_OK) {
+        hailo_vdma_channel_stop(in_channel);
+        return hailo_err_to_inf(rc);
+    }
+
+    /* Re-program the input descriptor list against the fresh tensor
+     * bytes for this inference. The desc list structure is shared
+     * with firmware (bound via OpenBoundary at load time) but the
+     * per-submit num_avail signal tells firmware how many pages to
+     * consume from the current buffer contents. */
+    int programmed = hailo_vdma_program_buffer(&slot->boundary_in_list, 0,
+                                               slot->boundary_in_tensor.iova,
+                                               in->n_elems,
+                                               slot->cfg.input_data_id);
+    if (programmed < 0) {
+        hailo_vdma_channel_stop(in_channel);
+        hailo_vdma_channel_stop(out_channel);
+        return INF_ERR_NOSUPPORT;
+    }
+    uint16_t in_num_avail = (uint16_t)programmed;
+
+    programmed = hailo_vdma_program_buffer(&slot->boundary_out_list, 0,
+                                           slot->boundary_out_tensor.iova,
+                                           out->n_elems,
+                                           slot->cfg.output_data_id);
+    if (programmed < 0) {
+        hailo_vdma_channel_stop(in_channel);
+        hailo_vdma_channel_stop(out_channel);
+        return INF_ERR_NOSUPPORT;
+    }
+    uint16_t out_num_avail = (uint16_t)programmed;
+
+    rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
+                                    slot->cfg.timeout_us);
+    if (rc != HAILO_OK) goto run_out;
+
+    rc = hailo_vdma_submit_and_wait(out_channel, out_num_avail,
+                                    slot->cfg.timeout_us);
+    if (rc != HAILO_OK) goto run_out;
+
+    hailo_tensor_prepare_for_host(&slot->boundary_out_tensor);
+    memcpy(out->data, slot->boundary_out_tensor.cpu_addr, out->n_elems);
+    rc = HAILO_OK;
+
+run_out:
+    /* Stop channels (safe even if start failed). Keep the descriptor
+     * lists + tensors allocated — they're slot-lifetime. */
+    hailo_vdma_channel_stop(in_channel);
+    hailo_vdma_channel_stop(out_channel);
     return hailo_err_to_inf(rc);
 }
 
@@ -427,15 +815,27 @@ static int hailo_backend_free_model(struct inference_device *dev,
     (void)dev;
     if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return INF_ERR_INVAL;
     struct hailo_model_slot *slot = &slots[h - 1];
-    /* Lock-protected clear so a concurrent load_model scanning for a
-     * free slot doesn't observe in_use=false with stale cfg bytes. */
+    /* Two-phase: under the lock, copy out the DMA handles + clear
+     * the slot; outside the lock, free the DMA resources. Holding
+     * spin_lock_irqsave across dma_free would block other CPUs on
+     * any allocator-internal contention and — depending on the
+     * platform's free path — risk nesting locks held at interrupt
+     * priority. The lock ordering is preserved: any concurrent
+     * load_model scanning for a free slot sees in_use=false only
+     * after the slot is fully zeroed. */
+    struct hailo_model_slot stash;
     irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     if (!slot->in_use) {
         spin_unlock_irqrestore(&slots_lock, flags);
         return INF_ERR_INVAL;
     }
+    stash = *slot;
     memset(slot, 0, sizeof(*slot));
     spin_unlock_irqrestore(&slots_lock, flags);
+
+    if (stash.cs_loaded) {
+        context_switch_unwind(&stash);
+    }
     return INF_OK;
 }
 
@@ -458,11 +858,37 @@ uint32_t hailo_backend_in_use_slots(void)
     return n;
 }
 
+/* Test-only: expose load-time boundary IOVAs so run-path tests can
+ * assert that submit happens via the same IOVAs firmware was told
+ * about in ACTIVATION. Out-of-range / unloaded handle returns 0 for
+ * both. */
+void hailo_backend_get_boundary_iovas_for_tests(
+    inference_model_handle_t h, uint64_t *in_iova, uint64_t *out_iova)
+{
+    if (in_iova)  *in_iova  = 0;
+    if (out_iova) *out_iova = 0;
+    if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return;
+    struct hailo_model_slot *slot = &slots[h - 1];
+    if (!slot->in_use || !slot->cs_loaded) return;
+    if (in_iova)  *in_iova  = slot->boundary_in_list.iova;
+    if (out_iova) *out_iova = slot->boundary_out_list.iova;
+}
+
 void hailo_backend_reset_slots_for_tests(void)
 {
+    /* Same two-phase dance as hailo_backend_shutdown — see that
+     * function for the rationale (dma_free outside spin_lock). */
+    struct hailo_model_slot stash[HAILO_MAX_MODELS];
     irq_flags_t flags = spin_lock_irqsave(&slots_lock);
+    memcpy(stash, slots, sizeof(stash));
     memset(slots, 0, sizeof(slots));
     spin_unlock_irqrestore(&slots_lock, flags);
+
+    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
+        if (stash[i].in_use && stash[i].cs_loaded) {
+            context_switch_unwind(&stash[i]);
+        }
+    }
 }
 
 /* -------------------------------------------------------------------------- */
