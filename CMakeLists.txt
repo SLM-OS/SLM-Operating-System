@@ -380,8 +380,14 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/drivers/uart_x86.c>
 
-    # BPMP - Jetson only (required for clock control)
-    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp.c>
+    # BPMP IPC stack — Jetson only.
+    # kernel/drivers/bpmp/bpmp.c provides stubs on non-Jetson platforms,
+    # so it is always compiled. The HSP/IVC/MRQ internals are Jetson-
+    # specific and gated on PLATFORM_JETSON_ORIN_NANO inside each file.
+    kernel/drivers/bpmp/bpmp.c
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp/hsp.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp/ivc.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp/mrq.c>
 
     # Interrupt controller and timer (ARM64 only — x86-64 uses pic.c + timer_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/gic.c>
@@ -672,6 +678,7 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/lib/lwip/src/include
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src
     ${CMAKE_SOURCE_DIR}/kernel/drivers/usb/xhci
+    ${CMAKE_SOURCE_DIR}/kernel/drivers/bpmp
 )
 
 # Per-platform arch include paths so test code under kernel/tests
