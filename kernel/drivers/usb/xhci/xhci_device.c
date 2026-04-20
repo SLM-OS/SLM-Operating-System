@@ -145,6 +145,7 @@ bool xhci_decode_portsc(uint32_t portsc,
  */
 static uint8_t xhci_active_port = 0xFF;  /* 0xFF = not yet located */
 static uint32_t xhci_active_portsc = 0;
+static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 
 /*
@@ -154,6 +155,63 @@ static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
  * Related: issue #309.
  */
 static enum xhci_attach_phase xhci_attach_state = XHCI_ATTACH_STALE;
+
+static const char *xhci_attach_phase_str(enum xhci_attach_phase state)
+{
+    switch (state) {
+    case XHCI_ATTACH_STALE:          return "STALE";
+    case XHCI_ATTACH_WAIT_RECONNECT: return "WAIT_RECONNECT";
+    case XHCI_ATTACH_FRESH:          return "FRESH";
+    }
+    return "UNKNOWN";
+}
+
+static const char *xhci_speed_str(enum usb_speed speed)
+{
+    switch (speed) {
+    case USB_SPEED_LOW:      return "low";
+    case USB_SPEED_FULL:     return "full";
+    case USB_SPEED_HIGH:     return "high";
+    case USB_SPEED_SUPER:    return "super";
+    case USB_SPEED_UNKNOWN:  return "unknown";
+    }
+    return "?";
+}
+
+static bool xhci_stale_signature_changed(uint32_t initial, uint32_t current)
+{
+    /*
+     * Ignore the RW1CS change bits when comparing snapshots; they can
+     * flicker transiently and aren't the structural "this is a different
+     * device/link state now" signal we care about. Everything else is
+     * fair game — on nano-2 the USB-C ethernet dongle changes PORTSC[5]
+     * without ever producing a full CCS 1->0->1 cycle, so the stale-hide
+     * logic needs another promotion path.
+     */
+    uint32_t mask = ~XHCI_PORTSC_RW1CS_MASK;
+    return (initial & mask) != (current & mask);
+}
+
+static bool xhci_stale_port_already_recovered(uint32_t portsc, bool connected)
+{
+    /*
+     * On nano-2, a USB-C ethernet dongle present across kexec can land
+     * in a "connected but deconfigured" state before SLM-OS ever polls
+     * the root port: CCS stays set, PED is clear, and PEC is already
+     * latched. In that case there is no later 1->0->1 transition for
+     * the stale-hide state machine to observe, but the controller has
+     * already told us the port changed. Surface it as a fresh attach so
+     * usb_core can drive the normal port-reset/enumeration sequence.
+     *
+     * Keep this narrow: the original stale inherited device path keeps
+     * PED set, so it still stays hidden until a real re-plug.
+     */
+    if (!connected)
+        return false;
+
+    return !(portsc & XHCI_PORTSC_PED) &&
+           !!(portsc & (XHCI_PORTSC_PEC | XHCI_PORTSC_PRC));
+}
 
 static uint8_t xhci_locate_usb2_port(void)
 {
@@ -168,6 +226,7 @@ static uint8_t xhci_locate_usb2_port(void)
             (s == USB_SPEED_FULL || s == USB_SPEED_LOW ||
              s == USB_SPEED_HIGH)) {
             xhci_active_portsc  = sc;
+            xhci_stale_portsc_initial = sc;
             xhci_prereset_speed = s;
             return p;
         }
@@ -211,6 +270,32 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     (void)xhci_decode_portsc(portsc, &c, &s);
 
     enum xhci_attach_phase prev = xhci_attach_state;
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_already_recovered(portsc, c)) {
+        INFO("xhci: stale port on PORTSC[%u] is connected with PED=0 "
+             "and change latched (0x%08x) — treating as fresh attach",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE && c &&
+        xhci_stale_signature_changed(xhci_stale_portsc_initial, portsc)) {
+        INFO("xhci: stale port signature changed on PORTSC[%u] "
+             "(0x%08x -> 0x%08x) — treating as fresh attach",
+             (unsigned)xhci_active_port,
+             (unsigned)xhci_stale_portsc_initial,
+             (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
     struct xhci_attach_result r = xhci_attach_step(prev, c, s);
     xhci_attach_state = r.next_state;
 
@@ -229,6 +314,47 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     if (connected) *connected = r.report_connected;
     if (speed)     *speed     = r.report_speed;
     return true;
+}
+
+void xhci_dump_port_state(void)
+{
+    if (!xhci_live)
+        return;
+
+    uart_printf("  attach_state=%s active_port=%s",
+                xhci_attach_phase_str(xhci_attach_state),
+                xhci_active_port == 0xFF ? "unset" : "");
+    if (xhci_active_port != 0xFF) {
+        uart_printf("%u stale_portsc=0x%08x last_portsc=0x%08x prereset_speed=%s",
+                    (unsigned)xhci_active_port,
+                    (unsigned)xhci_stale_portsc_initial,
+                    (unsigned)xhci_active_portsc,
+                    xhci_speed_str(xhci_prereset_speed));
+    }
+    uart_puts("\r\n");
+
+    for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
+        uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(p));
+        bool connected = false;
+        enum usb_speed speed = USB_SPEED_UNKNOWN;
+        bool decoded = xhci_decode_portsc(sc, &connected, &speed);
+        uint32_t pls = (sc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+        uint32_t raw_speed = (sc & XHCI_PORTSC_SPEED_MASK) >> XHCI_PORTSC_SPEED_SHIFT;
+
+        uart_printf("  PORTSC[%u]=0x%08x ccs=%u ped=%u pp=%u csc=%u pec=%u prc=%u pls=%u raw_speed=%u decoded=%u speed=%s%s\r\n",
+                    (unsigned)p, (unsigned)sc,
+                    (sc & XHCI_PORTSC_CCS) ? 1u : 0u,
+                    (sc & XHCI_PORTSC_PED) ? 1u : 0u,
+                    (sc & XHCI_PORTSC_PP)  ? 1u : 0u,
+                    (sc & XHCI_PORTSC_CSC) ? 1u : 0u,
+                    (sc & XHCI_PORTSC_PEC) ? 1u : 0u,
+                    (sc & XHCI_PORTSC_PRC) ? 1u : 0u,
+                    (unsigned)pls,
+                    (unsigned)raw_speed,
+                    decoded ? 1u : 0u,
+                    xhci_speed_str(speed),
+                    p == xhci_active_port ? "  <active>" : "");
+    }
 }
 
 int xhci_hcd_port_reset(uint8_t port)

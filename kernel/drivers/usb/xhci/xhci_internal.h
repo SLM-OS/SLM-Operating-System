@@ -117,6 +117,7 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt);
  * true with USB_SPEED_SUPER; higher / reserved IDs return false. */
 bool xhci_decode_portsc(uint32_t portsc, bool *connected,
                         enum usb_speed *speed);
+void xhci_dump_port_state(void);
 
 /* -------------------------------------------------------------------------- */
 /* HCD op table — defined in xhci.c, ops split across .c files                 */

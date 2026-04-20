@@ -23,10 +23,19 @@
 #   xusb_* clocks. Holding those clocks + the xusba / xusbc powergates
 #   on before kexec keeps the controller live for SLM-OS's XHCI driver.
 #
+#   On current L4T kernels the clock hold alone is not enough. Linux's
+#   kexec path also tears down the xusb stream's arm-smmu state, which
+#   makes SLM-OS's first XHCI DMA transaction wedge at USBCMD.RUN=1.
+#   If the arm_smmu_noshutdown module is installed, this helper now
+#   loads it automatically before kexec so the xusb stream keeps a live
+#   translation context plus an identity mapping over SLM-OS's NC memory
+#   region.
+#
 # Usage:
 #   sudo ./jetson-kexec-slmos.sh /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-gpu-suspend /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-usb-hold   /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --no-smmu-fix   /path/to/slmos.elf
 #
 # Or install to Jetson and run:
 #   sudo slmos-kexec /root/slmos.elf
@@ -47,19 +56,64 @@
 #                       XHCI controller; the held clocks are otherwise
 #                       harmless (they just keep the IP block alive).
 #
+#   --no-smmu-fix       Skip loading the optional arm_smmu_noshutdown
+#                       kernel module. Only use this if you are not
+#                       exercising the XHCI host path, or if you are
+#                       deliberately reproducing the pre-fix failure.
+#
 set -euo pipefail
 
 NO_GPU_SUSPEND=0
 NO_USB_HOLD=0
+NO_SMMU_FIX=0
 KERNEL=""
 for arg in "$@"; do
     case "$arg" in
         --no-gpu-suspend) NO_GPU_SUSPEND=1 ;;
         --no-usb-hold)    NO_USB_HOLD=1 ;;
+        --no-smmu-fix)    NO_SMMU_FIX=1 ;;
         *) KERNEL="$arg" ;;
     esac
 done
 KERNEL="${KERNEL:-/root/slmos.elf}"
+
+find_smmu_fix_module() {
+    local candidate
+    for candidate in \
+        "/usr/local/lib/slmos/arm_smmu_noshutdown.ko" \
+        "/opt/slmos/arm_smmu_noshutdown.ko" \
+        "/root/arm-smmu-noshutdown/arm_smmu_noshutdown.ko" \
+        "$(dirname "$0")/arm_smmu_noshutdown.ko"
+    do
+        if [[ -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+verify_smmu_fix_effect() {
+    local identity_line='added identity IOMMU mapping IOVA 0xbde00000..0xbe000000'
+    local domain_line='xusb iommu_domain type='
+    local smmu_lines
+
+    smmu_lines="$(dmesg | grep 'arm-smmu-noshutdown:' 2>/dev/null || true)"
+    if [[ "$smmu_lines" == *"$identity_line"* ]]; then
+        echo "       verified: $identity_line"
+        return 0
+    fi
+
+    echo "Warning: arm_smmu_noshutdown loaded but identity-map confirmation was not seen in dmesg" >&2
+    if [[ "$smmu_lines" == *"$domain_line"* ]]; then
+        echo "         xusb iommu_domain was found, but iommu_map success was not observed" >&2
+    else
+        echo "         xusb iommu_domain probe output was not observed either" >&2
+    fi
+    echo "         recent arm-smmu-noshutdown lines:" >&2
+    printf '%s\n' "$smmu_lines" | tail -n 12 >&2 || true
+    return 1
+}
 
 if [[ ! -f "$KERNEL" ]]; then
     echo "Error: kernel file not found: $KERNEL" >&2
@@ -145,23 +199,36 @@ else
 fi
 
 if [[ "$NO_USB_HOLD" == "0" ]]; then
-    echo "[4/7] Holding xusb clocks + powergates on for SLM-OS XHCI..."
-    # Clocks the tegra-xusb host controller actually runs on. Verified
-    # in the #266 Phase 0 probe (commit fb12937) as the set that
-    # corresponds to a live MMIO aperture at 0x03610000. xusb_core_dev
-    # and xusb_ss are deliberately NOT held — SLM-OS targets USB 2.0
-    # host only for Phase 3A.
-    for clk in xusb_core_host xusb_falcon xusb_fs xusb_hs_hsicp pex_usb_pad_pll0_mgmt utmi_pll; do
+    echo "[4/8] Holding xusb clocks + powergates on for SLM-OS XHCI..."
+    # Keep the full XUSB fabric live across kexec, not just the
+    # minimal USB2 host subset. On jetson-nano-2, RUN=1 still wedged
+    # the aperture with the narrower hold set; forcing the broader
+    # xusb_core_*/xusb_falcon_*/xusb_fs_host/xusb_ss* tree on let the
+    # controller reach "NO_OP round-trip OK".
+    for clk in \
+        xusb_core_dev \
+        xusb_core_host \
+        xusb_core_mux \
+        xusb_core_ss \
+        xusb_falcon \
+        xusb_falcon_host \
+        xusb_falcon_ss \
+        xusb_fs \
+        xusb_fs_host \
+        xusb_hs_hsicp \
+        xusb_ss \
+        xusb_ss_superspeed \
+        pex_usb_pad_pll0_mgmt \
+        utmi_pll; do
         if [[ -w "$BPMP/clk/$clk/state" ]]; then
             echo 1 > "$BPMP/clk/$clk/state" 2>/dev/null || \
                 echo "       ${clk}: write failed" >&2
         fi
     done
-    # Powergates: xusba is the USB 3 / padctl infrastructure (padctl
-    # is needed even for USB 2.0 to keep the PHY straps valid);
-    # xusbc is the host-controller domain. xusbb (device mode) stays
-    # off — SLM-OS is host-only.
-    for pg in xusba xusbc; do
+    # Keep the whole XUSB partition set alive. xusbb is nominally the
+    # device-mode domain, but on nano-2 the successful RUN=1/NO_OP
+    # handoff also had it forced on alongside xusba/xusbc.
+    for pg in xusba xusbb xusbc; do
         if [[ -w "$BPMP/powergate/$pg/state" ]]; then
             echo 1 > "$BPMP/powergate/$pg/state" 2>/dev/null || \
                 echo "       ${pg}: write failed" >&2
@@ -170,17 +237,22 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
 
     # Summarise the state we're handing off so the serial log makes
     # post-kexec debugging easier.
+    core_dev="$(cat "$BPMP/clk/xusb_core_dev/state" 2>/dev/null || echo '?')"
     core_host="$(cat "$BPMP/clk/xusb_core_host/state" 2>/dev/null || echo '?')"
+    core_ss="$(cat "$BPMP/clk/xusb_core_ss/state" 2>/dev/null || echo '?')"
     falcon="$(cat "$BPMP/clk/xusb_falcon/state" 2>/dev/null || echo '?')"
+    fs_host="$(cat "$BPMP/clk/xusb_fs_host/state" 2>/dev/null || echo '?')"
+    ss="$(cat "$BPMP/clk/xusb_ss/state" 2>/dev/null || echo '?')"
     pg_a="$(cat "$BPMP/powergate/xusba/state" 2>/dev/null || echo '?')"
+    pg_b="$(cat "$BPMP/powergate/xusbb/state" 2>/dev/null || echo '?')"
     pg_c="$(cat "$BPMP/powergate/xusbc/state" 2>/dev/null || echo '?')"
-    echo "       after hold: xusb_core_host=$core_host xusb_falcon=$falcon xusba=$pg_a xusbc=$pg_c"
+    echo "       after hold: xusb_core_dev=$core_dev xusb_core_host=$core_host xusb_core_ss=$core_ss xusb_falcon=$falcon xusb_fs_host=$fs_host xusb_ss=$ss xusba=$pg_a xusbb=$pg_b xusbc=$pg_c"
 else
-    echo "[4/7] SKIPPING xusb clock hold (--no-usb-hold)"
+    echo "[4/8] SKIPPING xusb clock hold (--no-usb-hold)"
 fi
 
 if [[ "$NO_USB_HOLD" == "0" ]]; then
-    echo "[5/7] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
+    echo "[5/8] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
     XUSB_DEV=/sys/devices/platform/bus@0/3610000.usb
     if [[ -d "$XUSB_DEV/power" ]]; then
         # 'on' disables runtime PM; low-cost pin that doesn't itself
@@ -205,15 +277,47 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
     #     address — SLM-OS mis-identifies free RAM and hangs early
     #     in boot. Incompatible without significant SLM-OS work.
     #
-    # Net: Linux's kexec-time shutdown of tegra-xusb is the live
-    # blocker. Until that is worked around (kernel module that
-    # NULLs the .shutdown pointer, or standalone firmware load per
-    # #286), SLM-OS can read the XHCI aperture but cannot run the
-    # controller — USBCMD.RUN=1 wedges the Falcon-stopped MMIO.
+    # Net: clock hold alone is insufficient on current L4T. The
+    # xusb stream's SMMU state must also survive into kexec; the
+    # helper handles that in the next step when the optional
+    # arm_smmu_noshutdown module is installed.
 fi
 
-echo "[6/7] Loading kernel: $KERNEL"
+if [[ "$NO_SMMU_FIX" == "0" ]]; then
+    echo "[6/8] Preparing xusb arm-smmu state for post-kexec XHCI..."
+    if [[ -d /sys/module/arm_smmu_noshutdown ]]; then
+        echo "       arm_smmu_noshutdown already loaded"
+        if ! verify_smmu_fix_effect; then
+            echo "Error: arm_smmu_noshutdown is present, but the xusb identity mapping is not confirmed" >&2
+            echo "       refusing to kexec into a known-bad XHCI handoff state" >&2
+            exit 1
+        fi
+    else
+        if smmu_mod="$(find_smmu_fix_module)"; then
+            echo "       loading $smmu_mod"
+            if insmod "$smmu_mod"; then
+                echo "       arm_smmu_noshutdown loaded"
+                if ! verify_smmu_fix_effect; then
+                    echo "Error: arm_smmu_noshutdown did not confirm the xusb identity mapping" >&2
+                    echo "       refusing to kexec into a known-bad XHCI handoff state" >&2
+                    exit 1
+                fi
+            else
+                echo "Warning: failed to load $smmu_mod" >&2
+                echo "         USB-A XHCI may wedge at RUN=1 without the SMMU fix" >&2
+            fi
+        else
+            echo "Warning: arm_smmu_noshutdown.ko not found" >&2
+            echo "         looked in /usr/local/lib/slmos, /opt/slmos, /root/arm-smmu-noshutdown, and $(dirname "$0")" >&2
+            echo "         USB-A XHCI may wedge at RUN=1 without the SMMU fix" >&2
+        fi
+    fi
+else
+    echo "[6/8] SKIPPING arm-smmu fix (--no-smmu-fix)"
+fi
+
+echo "[7/8] Loading kernel: $KERNEL"
 kexec -l "$KERNEL" --reuse-cmdline
 
-echo "[7/7] Executing kexec (serial console will take over)"
+echo "[8/8] Executing kexec (serial console will take over)"
 exec kexec -e

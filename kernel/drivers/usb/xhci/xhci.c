@@ -49,6 +49,7 @@
 #include "debug.h"
 #include "timer.h"
 #include "spinlock.h"   /* dsb()/dmb() cross-platform barrier macros */
+#include "smp.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -738,10 +739,26 @@ static int xhci_start_controller(void)
     /* Set Run/Stop = 1. Poll USBSTS.HCH to drop. */
     uint32_t cmd = r32(xhci_op_base, XHCI_OP_USBCMD);
     w32(xhci_op_base, XHCI_OP_USBCMD, cmd | XHCI_CMD_RUN);
+    dsb(sy);
+    INFO("xhci: post-RUN write USBCMD=0x%08x USBSTS=0x%08x",
+         (unsigned)r32(xhci_op_base, XHCI_OP_USBCMD),
+         (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
     if (poll_reg32(xhci_op_base, XHCI_OP_USBSTS,
                    XHCI_STS_HCH, 0, 500) != 0) {
+        uint32_t dcbaap_lo = r32(xhci_op_base, XHCI_OP_DCBAAP);
+        uint32_t dcbaap_hi = r32(xhci_op_base, XHCI_OP_DCBAAP + 4);
+        uint32_t crcr_lo   = r32(xhci_op_base, XHCI_OP_CRCR);
+        uint32_t crcr_hi   = r32(xhci_op_base, XHCI_OP_CRCR + 4);
         WARN("xhci: controller failed to start (USBSTS=0x%08x)",
              (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+        INFO("xhci: failure snapshot USBCMD=0x%08x CONFIG=0x%08x PAGESIZE=0x%08x",
+             (unsigned)r32(xhci_op_base, XHCI_OP_USBCMD),
+             (unsigned)r32(xhci_op_base, XHCI_OP_CONFIG),
+             (unsigned)r32(xhci_op_base, XHCI_OP_PAGESIZE));
+        INFO("xhci: failure snapshot DCBAAP=%08x%08x CRCR=%08x%08x PORTSC0=0x%08x",
+             (unsigned)dcbaap_hi, (unsigned)dcbaap_lo,
+             (unsigned)crcr_hi, (unsigned)crcr_lo,
+             (unsigned)r32(xhci_op_base, XHCI_OP_PORTSC(0)));
         return -1;
     }
     return 0;
@@ -917,6 +934,13 @@ static int xhci_send_noop(void)
         return rc;
     if (cc == XHCI_CC_SUCCESS) {
         INFO("xhci: NO_OP round-trip OK (cc=SUCCESS)");
+#if defined(JETSON_XHCI_REBOOT_ON_NOOP)
+        INFO("xhci: JETSON_XHCI_REBOOT_ON_NOOP set — rebooting to Linux");
+        timer_busy_wait_us(500000);
+        psci_system_reset();
+        for (;;)
+            __asm__ volatile("wfi");
+#endif
         return 0;
     }
     WARN("xhci: NO_OP completed with cc=%u", cc);
@@ -1207,6 +1231,7 @@ bool xhci_dump_info(void)
                 xhci_bar2_base,
                 (unsigned)bar2_r32(0),
                 (unsigned)bar2_r32(XUSB_BAR2_ARU_SMI_ARU_FW_SCRATCH_DATA0));
+    xhci_dump_port_state();
     return true;
 }
 
