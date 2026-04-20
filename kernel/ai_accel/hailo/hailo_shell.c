@@ -823,12 +823,40 @@ static int cmd_hailo(int argc, char *argv[])
                      irc, (unsigned)idr.fw_version.major,
                      (unsigned)idr.fw_version.minor);
 
+        /* #180 experiment A — async-busy test. Give firmware
+         * up to 500 ms after ACTIVATION completes before sending
+         * the next CORE-CPU RPC. If the CORE task was busy
+         * processing ACTIVATION async, this delay should let it
+         * catch up. */
+        shell_puts("  [--] DIAG: sleeping 500 ms before BATCH_SWITCHING\n");
+        hailo_platform->udelay(500000u);
+
         shell_printf("  [4/6] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
                      (unsigned)bufs.batch_switching_len);
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING,
                                             bufs.batch_switching,
                                             (uint32_t)bufs.batch_switching_len);
         shell_printf("        rc=%d\n", rc);
+
+        /* #180 experiment B — post-failure BAR4 poll. If BATCH_SWITCHING
+         * returned HAILO_ERR_BAD_FIRMWARE (0xFFFFFFFF buffer_len), the
+         * MSI fired before firmware wrote a real response. Poll BAR4
+         * +0x640 every 100 ms for 1 s and print any change — if
+         * buffer_len becomes valid, firmware is slow, not broken. */
+        if (rc != HAILO_OK) {
+            shell_puts("  [--] DIAG: polling BAR4+0x640 for late response...\n");
+            for (int i = 0; i < 10; i++) {
+                hailo_platform->udelay(100000u);
+                uint8_t  hdr_bytes[20];
+                uint32_t bl;
+                hailo_platform->bar4_read(HAILO_CONTROL_REQUEST_RESPONSE_OFFSET,
+                                          hdr_bytes, sizeof(hdr_bytes));
+                memcpy(&bl, &hdr_bytes[16], 4);
+                shell_printf("        t=%d00ms buffer_len=0x%08x\n",
+                             i + 1, bl);
+                if (bl != 0xFFFFFFFFu && bl != 0) break;
+            }
+        }
 
         shell_printf("  [5/6] SET_CONTEXT_INFO(PRELIMINARY, %u bytes)\n",
                      (unsigned)bufs.preliminary_len);
