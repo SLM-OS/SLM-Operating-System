@@ -698,7 +698,114 @@ static int hailo_backend_run(struct inference_device *dev,
         return INF_ERR_BAD_TENSOR;
     }
 
-    int rc = hailo_infer_run(&slot->cfg, in->data, out->data, NULL);
+    /* #338: submit via the slot's load-bound boundary tensors +
+     * descriptor lists rather than allocating fresh ones. Firmware
+     * was told about these specific IOVAs in ACTIVATION's
+     * OpenBoundaryInput/Output actions; using different buffers at
+     * submit time would either be rejected by firmware or cause the
+     * NN engine to DMA from the zero-initialized load-time buffers.
+     *
+     * If context_switch_load didn't allocate boundary resources
+     * (synthetic HEF without has_stream_info pads), fall back to
+     * the legacy hailo_infer_run path — it allocates its own
+     * buffers and runs self-contained. That path is used by
+     * `hailo infer <size>` shell diagnostics that don't load a HEF. */
+    if (!slot->cs_loaded || slot->boundary_in_tensor.cpu_addr == NULL
+                         || slot->boundary_out_tensor.cpu_addr == NULL) {
+        int rc = hailo_infer_run(&slot->cfg, in->data, out->data, NULL);
+        return hailo_err_to_inf(rc);
+    }
+
+    /* Bounds already checked against slot->cfg.input_bytes/output_bytes
+     * above; the boundary tensors were sized from the same pad values
+     * (core_bytes_per_buffer) at load time so the memcpy target has
+     * matching capacity. Defensive re-check since cfg and tensor
+     * sizing come from different sources and mismatches would be
+     * memory-safety-critical, not just functional bugs. */
+    if (in->n_elems  > slot->boundary_in_tensor.tensor_bytes
+     || out->n_elems > slot->boundary_out_tensor.tensor_bytes) {
+        WARN("hailo backend: tensor size > boundary buffer (in=%u/%u, out=%u/%u)",
+             in->n_elems,  slot->boundary_in_tensor.tensor_bytes,
+             out->n_elems, slot->boundary_out_tensor.tensor_bytes);
+        return INF_ERR_BAD_TENSOR;
+    }
+
+    /* The VDMA channel indices that receive these submits must be
+     * the ones ACTIVATION opened. translate_activation packed them
+     * as config_vdma + BOUNDARY_INPUT_CHANNEL_OFFSET (1) and
+     * BOUNDARY_OUTPUT_CHANNEL_OFFSET (2). The low nibble of
+     * packed_vdma_channel_id is the channel number — same value
+     * both sides need. */
+    uint8_t in_channel  = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
+                                  + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET);
+    uint8_t out_channel = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
+                                  + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET);
+
+    /* Copy caller's input into the pre-allocated DMA buffer +
+     * cache-clean so the device picks up the fresh bytes.
+     * Corresponding invalidate+copy for output happens after submit. */
+    memcpy(slot->boundary_in_tensor.cpu_addr, in->data, in->n_elems);
+    hailo_tensor_prepare_for_device(&slot->boundary_in_tensor);
+
+    /* Start the channels against the load-time desc lists. Safe to
+     * call on each inference — channel_start is idempotent and the
+     * descriptor list bytes were already programmed at load time.
+     * Re-starting ensures CONTROL.start is asserted, which firmware
+     * may have cleared between inferences. */
+    int rc = hailo_vdma_channel_start(in_channel, &slot->boundary_in_list,
+                                      slot->cfg.input_data_id);
+    if (rc != HAILO_OK) return hailo_err_to_inf(rc);
+    rc = hailo_vdma_channel_start(out_channel, &slot->boundary_out_list,
+                                  slot->cfg.output_data_id);
+    if (rc != HAILO_OK) {
+        hailo_vdma_channel_stop(in_channel);
+        return hailo_err_to_inf(rc);
+    }
+
+    /* Re-program the input descriptor list against the fresh tensor
+     * bytes for this inference. The desc list structure is shared
+     * with firmware (bound via OpenBoundary at load time) but the
+     * per-submit num_avail signal tells firmware how many pages to
+     * consume from the current buffer contents. */
+    int programmed = hailo_vdma_program_buffer(&slot->boundary_in_list, 0,
+                                               slot->boundary_in_tensor.iova,
+                                               in->n_elems,
+                                               slot->cfg.input_data_id);
+    if (programmed < 0) {
+        hailo_vdma_channel_stop(in_channel);
+        hailo_vdma_channel_stop(out_channel);
+        return INF_ERR_NOSUPPORT;
+    }
+    uint16_t in_num_avail = (uint16_t)programmed;
+
+    programmed = hailo_vdma_program_buffer(&slot->boundary_out_list, 0,
+                                           slot->boundary_out_tensor.iova,
+                                           out->n_elems,
+                                           slot->cfg.output_data_id);
+    if (programmed < 0) {
+        hailo_vdma_channel_stop(in_channel);
+        hailo_vdma_channel_stop(out_channel);
+        return INF_ERR_NOSUPPORT;
+    }
+    uint16_t out_num_avail = (uint16_t)programmed;
+
+    rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
+                                    slot->cfg.timeout_us);
+    if (rc != HAILO_OK) goto run_out;
+
+    rc = hailo_vdma_submit_and_wait(out_channel, out_num_avail,
+                                    slot->cfg.timeout_us);
+    if (rc != HAILO_OK) goto run_out;
+
+    hailo_tensor_prepare_for_host(&slot->boundary_out_tensor);
+    memcpy(out->data, slot->boundary_out_tensor.cpu_addr, out->n_elems);
+    rc = HAILO_OK;
+
+run_out:
+    /* Stop channels (safe even if start failed). Keep the descriptor
+     * lists + tensors allocated — they're slot-lifetime. */
+    hailo_vdma_channel_stop(in_channel);
+    hailo_vdma_channel_stop(out_channel);
     return hailo_err_to_inf(rc);
 }
 
@@ -749,6 +856,22 @@ uint32_t hailo_backend_in_use_slots(void)
         if (slots[i].in_use) n++;
     spin_unlock_irqrestore(&slots_lock, flags);
     return n;
+}
+
+/* Test-only: expose load-time boundary IOVAs so run-path tests can
+ * assert that submit happens via the same IOVAs firmware was told
+ * about in ACTIVATION. Out-of-range / unloaded handle returns 0 for
+ * both. */
+void hailo_backend_get_boundary_iovas_for_tests(
+    inference_model_handle_t h, uint64_t *in_iova, uint64_t *out_iova)
+{
+    if (in_iova)  *in_iova  = 0;
+    if (out_iova) *out_iova = 0;
+    if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return;
+    struct hailo_model_slot *slot = &slots[h - 1];
+    if (!slot->in_use || !slot->cs_loaded) return;
+    if (in_iova)  *in_iova  = slot->boundary_in_list.iova;
+    if (out_iova) *out_iova = slot->boundary_out_list.iova;
 }
 
 void hailo_backend_reset_slots_for_tests(void)

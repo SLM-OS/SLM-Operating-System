@@ -34,6 +34,8 @@
 extern int inference_device_hailo_register(void);
 extern uint32_t hailo_backend_in_use_slots(void);
 extern void hailo_backend_reset_slots_for_tests(void);
+extern void hailo_backend_get_boundary_iovas_for_tests(
+    inference_model_handle_t h, uint64_t *in_iova, uint64_t *out_iova);
 #include "test_harness.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -5784,6 +5786,81 @@ static void test_inf_hailo_run_happy_path_via_auto_advance(void)
     TEST_ASSERT_EQUAL_INT(INF_OK, inference_run(dev, h, &in, &out));
 }
 
+/* #338 regression: when the HEF has boundary pads (has_stream_info=true
+ * on input + output), load_model allocates slot-lifetime boundary
+ * tensors + desc lists and binds their IOVAs to firmware via the
+ * OpenBoundary actions in ACTIVATION. run() MUST submit via those
+ * same IOVAs — not freshly-allocated ones — otherwise firmware DMAs
+ * to/from the zero-initialized load-time buffer while the host
+ * writes elsewhere.
+ *
+ * The prior implementation (pre-#338) called hailo_infer_run which
+ * allocated new tensors + lists per call. This test asserts the
+ * current implementation reuses load-time IOVAs via the mock BAR2
+ * channel register readback: after run(), the CHANNEL_ALIGNED_ADDR_L
+ * at the boundary input channel's base should match the high 16 bits
+ * of slot->boundary_in_list.iova. */
+static void test_inf_hailo_run_reuses_load_boundary_iovas(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    /* HEF with edge_layers produces pads with has_stream_info=true,
+     * triggering the context_switch_load boundary tensor path. */
+    uint8_t blob[2048];
+    size_t  n = build_test_hef_with_edge_layers(blob, sizeof(blob),
+                                                /*in_sys*/ 5, 128,
+                                                0, 0x3C000000u,
+                                                /*out_sys*/ 9, 32,
+                                                0, 0x3C800000u);
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    /* Extract load-time boundary IOVAs for comparison. */
+    uint64_t in_iova = 0, out_iova = 0;
+    hailo_backend_get_boundary_iovas_for_tests(h, &in_iova, &out_iova);
+    TEST_ASSERT_TRUE(in_iova  != 0);
+    TEST_ASSERT_TRUE(out_iova != 0);
+
+    /* Clear BAR2 so the channel register check afterwards is
+     * unambiguous — any non-zero value is from this run(). */
+    memset(mock_bar2, 0, sizeof(mock_bar2));
+    mock_vdma_auto_advance = true;
+
+    /* build_test_hef_with_edge_layers uses shape 1x1x108 input,
+     * 1x1x24 output — byte counts must match slot->cfg expectations. */
+    uint8_t in_buf[108], out_buf[24];
+    memset(in_buf, 0x42, sizeof(in_buf));
+    memset(out_buf, 0, sizeof(out_buf));
+    inference_tensor_t in = {
+        .data = in_buf, .n_elems = 108, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {108, 0, 0, 0},
+    };
+    inference_tensor_t out = {
+        .data = out_buf, .n_elems = 24, .dtype = INF_DTYPE_INT8,
+        .rank = 1, .shape = {24, 0, 0, 0},
+    };
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_run(dev, h, &in, &out));
+
+    /* Boundary input channel = config_vdma(1) + OFFSET(1) = 2.
+     * channel_base(2) = 2 * 32 = 0x40. ALIGNED_ADDR_L is at +0x08.
+     * The reference VDMA writes (iova >> 16) << 16 into that dword's
+     * high 16 bits (RMW to preserve low 16). Extract and compare. */
+    uint32_t addr_l_dword;
+    memcpy(&addr_l_dword, &mock_bar2[2 * 32 + 0x08], 4);
+    uint32_t expected_addr_l = (uint32_t)((in_iova >> 16) & 0xFFFFu) << 16;
+    TEST_ASSERT_EQUAL_UINT32(expected_addr_l,
+                             addr_l_dword & 0xFFFF0000u);
+
+    /* Boundary output channel = config_vdma(1) + OFFSET(2) = 3. */
+    memcpy(&addr_l_dword, &mock_bar2[3 * 32 + 0x08], 4);
+    uint32_t expected_out_addr_l = (uint32_t)((out_iova >> 16) & 0xFFFFu) << 16;
+    TEST_ASSERT_EQUAL_UINT32(expected_out_addr_l,
+                             addr_l_dword & 0xFFFF0000u);
+}
+
 static void test_inf_hailo_free_releases_slot(void)
 {
     struct inference_device *dev = hailo_backend_ready();
@@ -6504,6 +6581,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_inf_hailo_run_rejects_wrong_dtype);
     RUN_TEST(test_inf_hailo_run_rejects_size_mismatch);
     RUN_TEST(test_inf_hailo_run_happy_path_via_auto_advance);
+    RUN_TEST(test_inf_hailo_run_reuses_load_boundary_iovas);
     RUN_TEST(test_inf_hailo_free_releases_slot);
     RUN_TEST(test_inf_hailo_shutdown_clears_slots);
 

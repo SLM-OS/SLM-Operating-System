@@ -695,24 +695,83 @@ static int cmd_hailo(int argc, char *argv[])
             return 0;
         }
 
+        /* #180 hypothesis test: allocate boundary input/output DMA
+         * tensors + desc lists, populate synthetic pads with
+         * has_stream_info=true. This forces translate_activation to
+         * emit OPEN_BOUNDARY_INPUT_CHANNEL + OPEN_BOUNDARY_OUTPUT_
+         * CHANNEL alongside BURST_CREDITS_TASK_RESET, producing an
+         * ACTIVATION richer than the 8-byte credits-only stream
+         * firmware rejected the next CORE-CPU RPC after. If this
+         * unblocks BATCH_SWITCHING, #180's "insufficient ACTIVATION
+         * content" hypothesis is confirmed. */
+        const uint32_t bnd_bytes = 256u;
+        const uint16_t bnd_page  = 4096u;
+        struct hailo_tensor bnd_in_tensor  = {0};
+        struct hailo_tensor bnd_out_tensor = {0};
+        struct hailo_vdma_desc_list bnd_in_list  = {0};
+        struct hailo_vdma_desc_list bnd_out_list = {0};
+        int brc = hailo_tensor_alloc(bnd_bytes, &bnd_in_tensor);
+        if (brc == HAILO_OK) brc = hailo_tensor_alloc(bnd_bytes, &bnd_out_tensor);
+        if (brc == HAILO_OK) {
+            memset(bnd_in_tensor.cpu_addr, 0, bnd_bytes);
+            memset(bnd_out_tensor.cpu_addr, 0, bnd_bytes);
+            hailo_tensor_prepare_for_device(&bnd_in_tensor);
+            hailo_tensor_prepare_for_device(&bnd_out_tensor);
+            brc = hailo_vdma_desc_list_alloc(2, bnd_page, false, &bnd_in_list);
+        }
+        if (brc == HAILO_OK) brc = hailo_vdma_desc_list_alloc(2, bnd_page, false, &bnd_out_list);
+        if (brc == HAILO_OK) {
+            (void)hailo_vdma_program_buffer(&bnd_in_list,  0, bnd_in_tensor.iova,  bnd_bytes, 0);
+            (void)hailo_vdma_program_buffer(&bnd_out_list, 0, bnd_out_tensor.iova, bnd_bytes, 0);
+        }
+        if (brc != HAILO_OK) {
+            shell_printf("  [--] SKIP: boundary DMA alloc failed (%d)\n", brc);
+            hailo_vdma_desc_list_free(&bnd_out_list);
+            hailo_vdma_desc_list_free(&bnd_in_list);
+            hailo_tensor_free(&bnd_out_tensor);
+            hailo_tensor_free(&bnd_in_tensor);
+            hailo_vdma_desc_list_free(&ccw_list);
+            hailo_tensor_free(&ccw_tensor);
+            return 0;
+        }
+
         /* Run the translator. Synthetic hef_info with 1 CCW action
-         * gives us a single-FETCH_CCW_BURSTS preliminary. */
+         * + 2 boundary pads (1 input + 1 output) drives the full
+         * ACTIVATION: BURST_CREDITS + OpenBoundaryInput + OpenBoundaryOutput. */
         struct hef_info info;
         memset(&info, 0, sizeof(info));
         info.ccw_action_count = 1;
+        info.pad_count = 2;
+        info.pads[0].is_input              = true;
+        info.pads[0].has_stream_info       = true;
+        info.pads[0].sys_index             = 1;
+        info.pads[0].core_bytes_per_buffer = bnd_bytes;
+        info.pads[1].is_input              = false;
+        info.pads[1].has_stream_info       = true;
+        info.pads[1].sys_index             = 2;
+        info.pads[1].core_bytes_per_buffer = bnd_bytes;
 
         struct hailo_cs_translate_cfg tcfg = {
-            .config_vdma_channel   = 0x01,   /* engine 0 channel 1 */
-            .config_stream_index   = 0,
-            .ccw_desc_list_iova    = ccw_list.iova,
-            .ccw_desc_page_size    = ccw_page_size,
-            .ccw_total_desc_count  = ccw_list.desc_count,
+            .config_vdma_channel              = 0x01,   /* engine 0 channel 1 */
+            .config_stream_index              = 0,
+            .ccw_desc_list_iova               = ccw_list.iova,
+            .ccw_desc_page_size               = ccw_page_size,
+            .ccw_total_desc_count             = ccw_list.desc_count,
+            .boundary_input_desc_list_iova    = bnd_in_list.iova,
+            .boundary_input_total_desc_count  = bnd_in_list.desc_count,
+            .boundary_output_desc_list_iova   = bnd_out_list.iova,
+            .boundary_output_total_desc_count = bnd_out_list.desc_count,
+            .boundary_desc_page_size          = bnd_page,
         };
 
         struct hailo_cs_application_header hdr;
         int terr = hailo_cs_translate_application_header(&info, &tcfg, &hdr);
         if (terr != HAILO_OK) {
             shell_printf("  [--] SKIP: translate_application_header failed (%d)\n", terr);
+            hailo_vdma_desc_list_free(&bnd_out_list);
+            hailo_vdma_desc_list_free(&bnd_in_list);
+            hailo_tensor_free(&bnd_out_tensor);
+            hailo_tensor_free(&bnd_in_tensor);
             hailo_vdma_desc_list_free(&ccw_list);
             hailo_tensor_free(&ccw_tensor);
             return 0;
@@ -722,6 +781,10 @@ static int cmd_hailo(int argc, char *argv[])
         terr = hailo_cs_translate_contexts(&info, &tcfg, &bufs);
         if (terr != HAILO_OK) {
             shell_printf("  [--] SKIP: translate_contexts failed (%d)\n", terr);
+            hailo_vdma_desc_list_free(&bnd_out_list);
+            hailo_vdma_desc_list_free(&bnd_in_list);
+            hailo_tensor_free(&bnd_out_tensor);
+            hailo_tensor_free(&bnd_in_tensor);
             hailo_vdma_desc_list_free(&ccw_list);
             hailo_tensor_free(&ccw_tensor);
             return 0;
@@ -783,6 +846,10 @@ static int cmd_hailo(int argc, char *argv[])
                                             (uint32_t)bufs.dynamic_len);
         shell_printf("        rc=%d\n", rc);
 
+        hailo_vdma_desc_list_free(&bnd_out_list);
+        hailo_vdma_desc_list_free(&bnd_in_list);
+        hailo_tensor_free(&bnd_out_tensor);
+        hailo_tensor_free(&bnd_in_tensor);
         hailo_vdma_desc_list_free(&ccw_list);
         hailo_tensor_free(&ccw_tensor);
 
