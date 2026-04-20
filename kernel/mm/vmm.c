@@ -84,6 +84,12 @@ static uint64_t l2_ram_c0[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)))
  * the 2 MB block at 0x3528000000. APPL/CFG/DBI regs live in L1[0]
  * (addresses 0x140A0000 and 0x2A000000 region) and reuse l2_mmio. */
 static uint64_t l2_pcie_bar[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+/* L2 table for L1[1] (0x40000000-0x7FFFFFFF) covering Tegra234 SYSRAM.
+ * Only the first 2 MB block is mapped — just the 512 KB SYSRAM region
+ * the BPMP IVC channels sit in at 0x40070000 + 0x40071000. Mapped
+ * Normal Non-Cacheable so CPU writes reach BPMP's R5 without cache
+ * coherence handshakes. */
+static uint64_t l2_sysram[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 #endif
 #if defined(PLATFORM_RASPI5)
 static uint64_t l2_mmio_pcie[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
@@ -1015,6 +1021,28 @@ static void vmm_setup_platform(void)
                     (unsigned long)bar_l1,
                     (unsigned long)bar_l2_idx,
                     (unsigned long)RTL8169_BAR_WINDOW_BASE);
+    }
+
+    /* BPMP shared SRAM at 0x40070000 (CPU→BPMP) and 0x40071000 (BPMP→CPU).
+     * Linux/BPMP IVC protocol writes directly to these buffers without
+     * cache-coherence handshakes, so CCPLEX sees them as Normal Non-
+     * Cacheable. The 512 KB SYSRAM carveout (`sram@40000000`, 0x80000)
+     * fits entirely inside the first 2 MB block of L1[1]; we map that
+     * single block NC and leave the rest of L1[1] unmapped. */
+    {
+        const uint32_t nc_flags = VMM_FLAG_NOCACHE | VMM_FLAG_READ |
+                                  VMM_FLAG_WRITE;
+        for (int i = 0; i < ENTRIES_PER_TABLE; i++) {
+            l2_sysram[i] = 0;
+        }
+        l2_sysram[0] = make_block_desc(SYSRAM_BASE & ~(BLOCK_SIZE - 1),
+                                       nc_flags);
+        l1_table[SYSRAM_BASE >> 30] = make_table_desc((uint64_t)l2_sysram);
+        vmm_state.l2_tables_used++;
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  SYSRAM (BPMP IVC) L1[%u] L2[0] -> 0x%lx (NC)",
+                    (unsigned)(SYSRAM_BASE >> 30),
+                    (unsigned long)(SYSRAM_BASE & ~(BLOCK_SIZE - 1)));
     }
 #endif
 }

@@ -423,18 +423,26 @@ void kernel_main(void *dtb)
     /* Initialize GPU subsystem */
     INFO("Initializing GPU...");
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    /* Jetson: the slmos-kexec helper re-enables the GPU clocks via
-     * BPMP debugfs before kexec, so the MMIO window is already live
-     * when we get here. We do NOT call bpmp_init() in SLM-OS: the
-     * UART driver is in raw mode and never initialized BPMP, and
-     * calling bpmp_init() on top of a Linux-initialized BPMP
-     * triggers a TF-A RAS Uncorrectable Error ("IHI GIC ACE-Lite
-     * Interface Error") — presumably from the IVC channel state
-     * reset at bpmp.c:311-315 touching a coherent memory region
-     * that has a stale owner. Tracked in #190.
+    /* Best-effort BPMP bring-up. #25 Step 2 ported edk2-nvidia's
+     * BPMP IPC client to SLM-OS (kernel/drivers/bpmp/{hsp,ivc,mrq,
+     * bpmp}.c); the handshake re-synchronises Sync → Ack → Established
+     * on a channel Linux may have left mid-transaction. Failure is
+     * non-fatal — the slmos-kexec helper still pre-holds GPU + USB
+     * clocks via /sys/kernel/debug/bpmp, so the rest of boot works
+     * without an SLM-OS-driven BPMP. A working bpmp unblocks PCIe
+     * Step 3 (replay MRQ_UPHY/MRQ_CLK/MRQ_RESET for pex2_c8).
      *
-     * Diagnostic BOOT_0 read still useful to confirm the kexec
-     * helper's force-on worked. */
+     * The diagnostic BOOT_0 read still confirms the kexec helper
+     * ungated the GPU clocks. */
+    {
+        int bpmp_rc = bpmp_init();
+        INFO("BPMP init: rc=%d", bpmp_rc);
+        if (bpmp_rc == 0) {
+            bool responding = bpmp_is_available();
+            INFO("BPMP: %s", responding ? "MRQ_PING round-trip OK"
+                                         : "no PING response (firmware busy?)");
+        }
+    }
     {
         uint32_t boot0_raw = *(volatile uint32_t *)(GPU_BASE + 0x0);
         INFO("GPU raw BOOT_0 read: 0x%08lx (expect 0xB7B000A1 for GA10B)",

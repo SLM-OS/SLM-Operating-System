@@ -4055,3 +4055,106 @@ int cmd_xhcidiag(int argc, char *argv[])
     return 0;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO && ENABLE_NETWORKING */
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "bpmp.h"
+#include "hsp.h"
+
+/*
+ * hspdiag — probe the HSP controller directly (no BPMP IPC required).
+ *
+ * Verifies three things before the BPMP IPC stack can work:
+ *   1. HSP_DIMENSIONING reads cleanly (not 0xffffffff). If it does,
+ *      the MMIO mapping is broken or the HSP block is powered down.
+ *   2. The computed BPMP doorbell address matches expectations for
+ *      Tegra234 (should be near HSP+0x140000, far from the hardcoded
+ *      0x10300 the old driver used).
+ *   3. The BPMP doorbell's ENABLE register has the CCPLEX bit set,
+ *      meaning BPMP has authorised us to ring it.
+ *
+ * Safe to run even if bpmp_init() failed or was never called.
+ */
+int cmd_hspdiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== HSP / BPMP Doorbell Diagnostic ===\r\n");
+
+    /* Idempotent init. If bpmp_init already ran, this returns 0 quickly
+     * because hsp_init caches its own state. If not, we ran the
+     * dimensioning read ourselves. */
+    int rc = hsp_init(HSP_TOP_BASE);
+    uart_printf("  hsp_init(0x%lx): rc=%d\r\n",
+                (unsigned long)HSP_TOP_BASE, rc);
+    if (rc != 0) {
+        uart_puts("=== End Diagnostic ===\r\n");
+        return 0;
+    }
+
+    uint32_t dim = hsp_dimensioning_raw();
+    uint32_t sm = dim & 0xF;
+    uint32_t ss = (dim >> 4) & 0xF;
+    uint32_t as = (dim >> 8) & 0xF;
+    uart_printf("  DIMENSIONING (0x%08x):  SharedMailboxes=%u "
+                "SharedSemaphores=%u ArbitratedSemaphores=%u\r\n",
+                (unsigned)dim, (unsigned)sm, (unsigned)ss, (unsigned)as);
+
+    uintptr_t ccplex_db = hsp_ccplex_doorbell_addr();
+    uintptr_t bpmp_db   = hsp_bpmp_doorbell_addr();
+    uart_printf("  Doorbell CCPLEX:        0x%lx\r\n", (unsigned long)ccplex_db);
+    uart_printf("  Doorbell BPMP:          0x%lx\r\n", (unsigned long)bpmp_db);
+
+    uint32_t bpmp_enable  = *(volatile uint32_t *)(bpmp_db + HSP_DB_REG_ENABLE);
+    uint32_t bpmp_pending = *(volatile uint32_t *)(bpmp_db + HSP_DB_REG_PENDING);
+    uart_printf("  BPMP ENABLE:            0x%08x  (CCPLEX bit 17 = %s)\r\n",
+                (unsigned)bpmp_enable,
+                (bpmp_enable & (1u << HSP_DB_MASTER_CCPLEX)) ? "SET"
+                                                             : "clear (BPMP not listening)");
+    uart_printf("  BPMP PENDING:           0x%08x\r\n", (unsigned)bpmp_pending);
+
+    uint32_t ccplex_enable  = *(volatile uint32_t *)(ccplex_db + HSP_DB_REG_ENABLE);
+    uint32_t ccplex_pending = *(volatile uint32_t *)(ccplex_db + HSP_DB_REG_PENDING);
+    uart_printf("  CCPLEX ENABLE:          0x%08x  (BPMP bit 19 = %s)\r\n",
+                (unsigned)ccplex_enable,
+                (ccplex_enable & (1u << HSP_DB_MASTER_BPMP)) ? "SET"
+                                                              : "clear");
+    uart_printf("  CCPLEX PENDING:         0x%08x  (BPMP notification = %s)\r\n",
+                (unsigned)ccplex_pending,
+                (ccplex_pending & (1u << HSP_DB_MASTER_BPMP)) ? "YES"
+                                                               : "no");
+
+    uart_puts("=== End Diagnostic ===\r\n");
+    return 0;
+}
+
+/*
+ * bpmp — smoke-test the BPMP IPC stack.
+ *
+ * Steps:
+ *   1. bpmp_init() — runs the IVC handshake if not already done.
+ *   2. bpmp_is_available() — sends MRQ_PING and checks the response.
+ *
+ * If MRQ_PING succeeds, #190's mystery is resolved and the PCIe Step 3
+ * (replay UPHY/CLK/RESET MRQs) is unblocked.
+ */
+int cmd_bpmp(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== BPMP IPC Smoke Test ===\r\n");
+
+    int rc = bpmp_init();
+    uart_printf("  bpmp_init:            rc=%d\r\n", rc);
+    if (rc != 0) {
+        uart_puts("=== End Smoke Test ===\r\n");
+        return 0;
+    }
+
+    bool ok = bpmp_is_available();
+    uart_printf("  MRQ_PING round-trip:  %s\r\n", ok ? "OK (BPMP responding)"
+                                                       : "FAIL");
+
+    uart_puts("=== End Smoke Test ===\r\n");
+    return 0;
+}
+#endif /* PLATFORM_JETSON_ORIN_NANO */
