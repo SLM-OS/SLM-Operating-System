@@ -75,6 +75,14 @@ int bpmp_clk_enable(uint32_t clock_id);
 int bpmp_clk_disable(uint32_t clock_id);
 
 /*
+ * Query whether a clock is currently enabled (CMD_CLK_IS_ENABLED).
+ *   clock_id   Tegra234 clock ID.
+ *   state_out  Filled with 0 (disabled) or 1 (enabled) on success.
+ * Returns 0 on success, or the same error convention as bpmp_clk_enable.
+ */
+int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
+
+/*
  * Reset control wrappers. Same error convention as bpmp_clk_*.
  */
 int bpmp_reset_assert(uint32_t reset_id);

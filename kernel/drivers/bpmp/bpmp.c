@@ -119,6 +119,33 @@ int bpmp_clk_disable(uint32_t clock_id)
     return bpmp_clk_command(CMD_CLK_DISABLE, clock_id);
 }
 
+int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out)
+{
+    if (!g_bpmp_initialised || state_out == NULL) {
+        return -1;
+    }
+
+    struct mrq_clk_payload_v1 req = {
+        .cmd_and_id = (CMD_CLK_IS_ENABLED << 24) | (clock_id & 0x00FFFFFF),
+    };
+
+    /* Response is struct cmd_clk_is_enabled_response { int32_t state; } */
+    int32_t reply_state = 0;
+    int32_t err = 0;
+    int rc = mrq_send(MRQ_CLK, &req, sizeof(req),
+                      &reply_state, sizeof(reply_state),
+                      &err);
+    if (rc != 0) {
+        return rc;
+    }
+    if (err != 0) {
+        return (int)err;
+    }
+
+    *state_out = (int)reply_state;
+    return 0;
+}
+
 /* ============================================================================
  * MRQ_RESET wrappers
  * ============================================================================ */
@@ -162,6 +189,7 @@ int  bpmp_init(void)                         { return 0; }
 bool bpmp_is_available(void)                 { return false; }
 int  bpmp_clk_enable(uint32_t id)            { (void)id; return 0; }
 int  bpmp_clk_disable(uint32_t id)           { (void)id; return 0; }
+int  bpmp_clk_is_enabled(uint32_t id, int *out) { (void)id; if (out) *out = 0; return 0; }
 int  bpmp_reset_assert(uint32_t id)          { (void)id; return 0; }
 int  bpmp_reset_deassert(uint32_t id)        { (void)id; return 0; }
 

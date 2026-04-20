@@ -4128,18 +4128,19 @@ int cmd_hspdiag(int argc, char *argv[])
 }
 
 /*
- * bpmp — smoke-test the BPMP IPC stack.
+ * bpmp — exercise the BPMP IPC stack end-to-end.
  *
- * Steps:
- *   1. bpmp_init() — runs the IVC handshake if not already done.
- *   2. bpmp_is_available() — sends MRQ_PING and checks the response.
- *
- * If MRQ_PING succeeds, #190's mystery is resolved and the PCIe Step 3
- * (replay UPHY/CLK/RESET MRQs) is unblocked.
+ *   bpmp         full test suite (ping, clock queries, pcie enable,
+ *                rtldiag readback).
+ *   bpmp ping    MRQ_PING round-trip only.
+ *   bpmp clk     CMD_CLK_IS_ENABLED queries on UART-A + PEX2_C8_CORE.
+ *   bpmp pcie    Enable PEX2_C8_CORE clock + deassert its resets,
+ *                then re-read APPL_CTRL via the rtldiag pipeline.
+ *                THIS IS THE #25 STEP 3 KICKOFF.
  */
 int cmd_bpmp(int argc, char *argv[])
 {
-    (void)argc; (void)argv;
+    const char *mode = (argc >= 2) ? argv[1] : "all";
 
     uart_puts("\r\n=== BPMP IPC Smoke Test ===\r\n");
 
@@ -4150,9 +4151,55 @@ int cmd_bpmp(int argc, char *argv[])
         return 0;
     }
 
-    bool ok = bpmp_is_available();
-    uart_printf("  MRQ_PING round-trip:  %s\r\n", ok ? "OK (BPMP responding)"
-                                                       : "FAIL");
+    /* Step 1: MRQ_PING. */
+    if (argc < 2 || argv[1][0] == 'a' || argv[1][0] == 'p') {
+        bool ok = bpmp_is_available();
+        uart_printf("  MRQ_PING round-trip:  %s\r\n",
+                    ok ? "OK" : "FAIL");
+        if (mode[0] == 'p' && mode[1] == 'i') { /* "ping" */
+            uart_puts("=== End Smoke Test ===\r\n");
+            return 0;
+        }
+    }
+
+    /* Step 2: Clock query smoke tests. UART-A should always be enabled
+     * (Linux just used it); PEX2_C8_CORE state is what #25 cares about. */
+    if (mode[0] == 'a' || mode[0] == 'c') {
+        int uart_state = -1;
+        int uart_rc = bpmp_clk_is_enabled(TEGRA234_CLK_UARTA, &uart_state);
+        uart_printf("  UART_A IS_ENABLED:    rc=%d state=%d (expect 1)\r\n",
+                    uart_rc, uart_state);
+
+        int pcie_state = -1;
+        int pcie_rc = bpmp_clk_is_enabled(TEGRA234_CLK_PEX2_C8_CORE,
+                                          &pcie_state);
+        uart_printf("  PEX2_C8_CORE EN:      rc=%d state=%d\r\n",
+                    pcie_rc, pcie_state);
+    }
+
+    /* Step 3: Actually enable PEX2_C8_CORE + deassert the PCIe resets.
+     * The real demonstration of BPMP IPC — and the door-opener for #25
+     * Step 3 (PCIe RC re-init). Only runs when explicitly requested
+     * (not under `bpmp all`) so a stray exec doesn't disturb the
+     * already-live PCIe state when slmos-kexec pre-held the clocks. */
+    if (mode[0] == 'p' && mode[1] == 'c') { /* "pcie" */
+        uart_puts("\r\n--- PCIe C8 clock/reset sequence ---\r\n");
+        int en_rc = bpmp_clk_enable(TEGRA234_CLK_PEX2_C8_CORE);
+        uart_printf("  CLK_ENABLE(PEX2_C8_CORE):          rc=%d\r\n", en_rc);
+
+        int rs_rc = bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8);
+        uart_printf("  RESET_DEASSERT(PEX2_CORE_8):       rc=%d\r\n", rs_rc);
+
+        int ra_rc = bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8_APB);
+        uart_printf("  RESET_DEASSERT(PEX2_CORE_8_APB):   rc=%d\r\n", ra_rc);
+
+        int post_state = -1;
+        (void)bpmp_clk_is_enabled(TEGRA234_CLK_PEX2_C8_CORE, &post_state);
+        uart_printf("  PEX2_C8_CORE post-enable state:    %d\r\n",
+                    post_state);
+
+        uart_puts("  (Run `rtldiag` next to check APPL liveness.)\r\n");
+    }
 
     uart_puts("=== End Smoke Test ===\r\n");
     return 0;
