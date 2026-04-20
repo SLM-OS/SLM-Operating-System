@@ -724,6 +724,21 @@ static int cmd_hailo(int argc, char *argv[])
             (void)hailo_vdma_program_buffer(&bnd_in_list,  0, bnd_in_tensor.iova,  bnd_bytes, 0);
             (void)hailo_vdma_program_buffer(&bnd_out_list, 0, bnd_out_tensor.iova, bnd_bytes, 0);
         }
+        /* #180 Path A diag: print desc-list IOVAs + low-16-bit residue.
+         * Firmware's HOST_DESCRIPTOR_BASE_ADDRESS_IS_NOT_64KB_ALIGNED
+         * status (0x402d0004) keys off (iova & 0xFFFF). If residue != 0
+         * here, the allocator is silently degrading alignment. */
+        if (brc == HAILO_OK) {
+            shell_printf("  [--] DIAG: ccw_iova=0x%lx (lo16=0x%04x)\n",
+                         (unsigned long)ccw_list.iova,
+                         (unsigned)(ccw_list.iova & 0xFFFFu));
+            shell_printf("  [--] DIAG: bnd_in_iova=0x%lx (lo16=0x%04x)\n",
+                         (unsigned long)bnd_in_list.iova,
+                         (unsigned)(bnd_in_list.iova & 0xFFFFu));
+            shell_printf("  [--] DIAG: bnd_out_iova=0x%lx (lo16=0x%04x)\n",
+                         (unsigned long)bnd_out_list.iova,
+                         (unsigned)(bnd_out_list.iova & 0xFFFFu));
+        }
         if (brc != HAILO_OK) {
             shell_printf("  [--] SKIP: boundary DMA alloc failed (%d)\n", brc);
             hailo_vdma_desc_list_free(&bnd_out_list);
