@@ -838,24 +838,47 @@ static int cmd_hailo(int argc, char *argv[])
                                             (uint32_t)bufs.batch_switching_len);
         shell_printf("        rc=%d\n", rc);
 
-        /* #180 experiment B — post-failure BAR4 poll. If BATCH_SWITCHING
-         * returned HAILO_ERR_BAD_FIRMWARE (0xFFFFFFFF buffer_len), the
-         * MSI fired before firmware wrote a real response. Poll BAR4
-         * +0x640 every 100 ms for 1 s and print any change — if
-         * buffer_len becomes valid, firmware is slow, not broken. */
+        /* #180 experiment C — post-failure BAR4 scope scan. Findings
+         * from experiment B: BAR4+0x640 stays 0xFFFFFFFF for >1 s AND
+         * subsequent APP-CPU RPCs also return 0xFFFFFFFF. Is the wedge
+         * confined to the response slot, or is the entire BAR4 window
+         * broken? Read three distinct offsets:
+         *   - 0x000: request slot we just wrote (should echo our request
+         *            bytes if the window is intact).
+         *   - 0x640: response slot (known 0xFFFFFFFF post-failure).
+         *   - 0x100: firmware-owned region that doesn't alias either.
+         *
+         * If all three read 0xFFFFFFFF → ATR window entirely gone.
+         * If 0x000 echoes and 0x640 is 0xFFFFFFFF → firmware stopped
+         * writing responses but the PCIe↔device mapping is intact.
+         * If 0x000 and 0x100 show sensible data but 0x640 is unique →
+         * firmware-side panic/reset of the response slot only. */
         if (rc != HAILO_OK) {
-            shell_puts("  [--] DIAG: polling BAR4+0x640 for late response...\n");
-            for (int i = 0; i < 10; i++) {
-                hailo_platform->udelay(100000u);
-                uint8_t  hdr_bytes[20];
-                uint32_t bl;
-                hailo_platform->bar4_read(HAILO_CONTROL_REQUEST_RESPONSE_OFFSET,
-                                          hdr_bytes, sizeof(hdr_bytes));
-                memcpy(&bl, &hdr_bytes[16], 4);
-                shell_printf("        t=%d00ms buffer_len=0x%08x\n",
-                             i + 1, bl);
-                if (bl != 0xFFFFFFFFu && bl != 0) break;
+            shell_puts("  [--] DIAG: BAR4 window scope scan after failure:\n");
+            uint32_t probes[3] = { 0x000u, 0x100u, 0x640u };
+            for (int i = 0; i < 3; i++) {
+                uint32_t w[4];
+                hailo_platform->bar4_read(probes[i], w, sizeof(w));
+                shell_printf("        [+0x%03x] %08x %08x %08x %08x\n",
+                             probes[i], w[0], w[1], w[2], w[3]);
             }
+            /* Diag D: BAR0 (PLDA bridge + ATRs) health check. If BAR0
+             * reads also return 0xFFFFFFFF, the PCIe link dropped. If
+             * BAR0 reads reasonable values, the link is alive and the
+             * ATR[0] translation (BAR4 → firmware memory) specifically
+             * is what broke. Read ATR[0].TRSL_ADDR_LO + ISTATUS + IMASK
+             * and compare against the values we programmed at init. */
+            shell_puts("  [--] DIAG: BAR0 bridge health:\n");
+            uint32_t atr_lo = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                  HAILO_ATR_BASE + HAILO_ATR_OFF_TRSL_ADDR_LO);
+            uint32_t istatus = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                                       HAILO_BCS_ISTATUS_HOST);
+            uint32_t imask   = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                                       HAILO_BSC_IMASK_HOST);
+            shell_printf("        ATR[0].TRSL_LO=0x%08x (init=0x%08x)\n",
+                         atr_lo, (unsigned)HAILO_CONTROL_SECTION_ADDR_H8);
+            shell_printf("        BCS_ISTATUS_HOST=0x%08x\n", istatus);
+            shell_printf("        BSC_IMASK_HOST=0x%08x\n", imask);
         }
 
         shell_printf("  [5/6] SET_CONTEXT_INFO(PRELIMINARY, %u bytes)\n",

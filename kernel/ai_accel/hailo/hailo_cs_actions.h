@@ -326,6 +326,22 @@ struct hailo_cs_act_fetch_data_from_vdma {
 _Static_assert(sizeof(struct hailo_cs_act_fetch_data_from_vdma) == 9,
                "fetch_data_from_vdma body must be 9 bytes");
 
+/* CHANGE_BOUNDARY_INPUT_BATCH: BATCH_SWITCHING context action. Tells
+ * firmware "this boundary H2D channel has a new batch size this cycle"
+ * — programmed per boundary input channel between
+ * DDR_BUFFERING_RESET and BURST_CREDITS_TASK_START. HailoRT emits one
+ * per boundary H2D layer; skipping it causes firmware's
+ * BURST_CREDITS_TASK_START to read uninitialized batch state on the
+ * boundary channel and crash the control CPU (observed on pi-5-1 fw
+ * v4.23 as BAR4 going dark + PCIe link drop — issue #180). Body is
+ * just the packed VDMA channel id. */
+struct hailo_cs_act_change_boundary_input_batch {
+    uint8_t packed_vdma_channel_id;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_change_boundary_input_batch) == 1,
+               "change_boundary_input_batch body must be 1 byte");
+
 /* -------------------------------------------------------------------------- */
 /* Boundary-channel open/activate actions (ACTIVATION context)                  */
 /* -------------------------------------------------------------------------- */

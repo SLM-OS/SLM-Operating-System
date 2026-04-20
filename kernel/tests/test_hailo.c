@@ -2408,7 +2408,10 @@ static void test_cs_translate_application_header_fills_defaults(void)
 {
     /* The translator derives batch_size=1, dynamic_contexts_count=1,
      * networks_count=1, csm_buffer_size from cfg, no-DDR sentinel,
-     * config channel populated, and the single boundary bit set. */
+     * config channel populated. boundary_channels_bitmap reflects
+     * ACTUAL boundary channels (config+OFFSETs), not the config
+     * channel itself — a zero-pad HEF has no boundary edges so the
+     * bitmap is zero. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
 
@@ -2432,8 +2435,38 @@ static void test_cs_translate_application_header_fills_defaults(void)
                              hdr.external_action_list_address);
     TEST_ASSERT_EQUAL_UINT8(1, hdr.config_channels_count);
     TEST_ASSERT_EQUAL_UINT8(0x01, hdr.config_channel_packed_id[0]);
-    /* channel 1 → bit 1 set in engine 0's bitmap. */
-    TEST_ASSERT_EQUAL_UINT32(1u << 1, hdr.boundary_channels_bitmap[0]);
+    /* No boundary pads in this info → no boundary channels. */
+    TEST_ASSERT_EQUAL_UINT32(0u, hdr.boundary_channels_bitmap[0]);
+}
+
+static void test_cs_translate_application_header_boundary_bitmap(void)
+{
+    /* With one input + one output boundary pad, the bitmap includes
+     * both boundary channel bits (config+1, config+2) but NOT the
+     * config channel itself. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 2;
+    info.pads[0].is_input        = true;
+    info.pads[0].has_stream_info = true;
+    info.pads[1].is_input        = false;
+    info.pads[1].has_stream_info = true;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_application_header hdr;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_application_header(&info, &cfg, &hdr));
+
+    /* Input boundary at channel 0x02 → bit 2. Output at 0x03 → bit 3.
+     * Config channel (0x01) must NOT be set. */
+    TEST_ASSERT_EQUAL_UINT32((1u << 2) | (1u << 3),
+                             hdr.boundary_channels_bitmap[0]);
 }
 
 static void test_cs_translate_application_header_rejects_null(void)
@@ -2771,6 +2804,81 @@ static void test_cs_translate_activation_missing_input_iova_fails(void)
     struct hailo_cs_context_buffers out;
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
         hailo_cs_translate_contexts(&info, &cfg, &out));
+}
+
+/* #180 regression: BATCH_SWITCHING must emit CHANGE_BOUNDARY_INPUT_BATCH
+ * per boundary H2D pad. Without it, firmware's BURST_CREDITS_TASK_START
+ * reads uninitialized batch state and the control CPU crashes hard
+ * enough to drop the PCIe link (observed on pi-5-1 fw v4.23). */
+static void test_cs_translate_batch_switching_emits_change_boundary_input_batch(void)
+{
+    /* One boundary input + one output. BATCH_SWITCHING layout becomes:
+     *   DDR_BUFFERING_RESET        (8 B header + 0 B body)
+     *   CHANGE_BOUNDARY_INPUT_BATCH (8 B + 1 B)
+     *   BURST_CREDITS_TASK_START   (8 B + 0 B)
+     * Total: 8 + 9 + 8 = 25 bytes. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 2;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].core_bytes_per_buffer = 128;
+    info.pads[1].is_input              = false;
+    info.pads[1].has_stream_info       = true;
+    info.pads[1].core_bytes_per_buffer = 32;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel              = 0x01,
+        .ccw_desc_list_iova               = 0x1000,
+        .ccw_desc_page_size               = 512,
+        .ccw_total_desc_count             = 2,
+        .boundary_input_desc_list_iova    = 0x10000,
+        .boundary_input_total_desc_count  = 2,
+        .boundary_output_desc_list_iova   = 0x20000,
+        .boundary_output_total_desc_count = 2,
+        .boundary_desc_page_size          = 4096,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 9 + 8), out.batch_switching_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
+                            out.batch_switching[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_CHANGE_BOUNDARY_INPUT_BATCH,
+                            out.batch_switching[8]);
+    /* packed_vdma = config(0x01) + INPUT_OFFSET(1) = 0x02. Body at +16. */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.batch_switching[16]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                            out.batch_switching[17]);
+}
+
+/* No boundary H2D → no CHANGE_BOUNDARY_INPUT_BATCH. Preserves the
+ * pre-#180 behavior for synthetic test HEFs. */
+static void test_cs_translate_batch_switching_no_boundary_input(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START, both zero body:
+     * 8 + 8 = 16 bytes. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)16, out.batch_switching_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
+                            out.batch_switching[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                            out.batch_switching[8]);
 }
 
 static void test_cs_translate_activation_missing_output_iova_fails(void)
@@ -6428,6 +6536,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_registers_msi_on_first_send);
     RUN_TEST(test_msi_handler_sets_pending_and_clears_istatus);
     RUN_TEST(test_cs_translate_application_header_fills_defaults);
+    RUN_TEST(test_cs_translate_application_header_boundary_bitmap);
     RUN_TEST(test_cs_translate_application_header_rejects_null);
     RUN_TEST(test_cs_translate_contexts_produces_all_four);
     RUN_TEST(test_cs_translate_contexts_uses_ccw_count_for_burst_count);
@@ -6439,6 +6548,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_activation_skips_internal_pads);
     RUN_TEST(test_cs_translate_activation_missing_input_iova_fails);
     RUN_TEST(test_cs_translate_activation_missing_output_iova_fails);
+    RUN_TEST(test_cs_translate_batch_switching_emits_change_boundary_input_batch);
+    RUN_TEST(test_cs_translate_batch_switching_no_boundary_input);
     RUN_TEST(test_cs_translate_enable_lcu_default_variant);
     RUN_TEST(test_cs_translate_enable_lcu_non_default_variant);
     RUN_TEST(test_cs_translate_skips_enable_lcu_from_other_contexts);

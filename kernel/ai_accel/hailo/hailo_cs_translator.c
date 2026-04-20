@@ -65,15 +65,41 @@ int hailo_cs_translate_application_header(
     out->config_channels_count       = 1;
     out->config_channel_packed_id[0] = cfg->config_vdma_channel;
 
-    /* boundary_channels_bitmap: bit per VDMA channel used for input
-     * or output dataflow. For single-CCW loads (no boundary I/O
-     * yet) only the config channel counts. Engine 0 is index 0
-     * of the bitmap array; packed_vdma_channel_id's low nibble is
-     * the channel number. */
-    uint8_t chan = cfg->config_vdma_channel & 0x0Fu;
-    out->boundary_channels_bitmap[0] = 1u << chan;
+    /* boundary_channels_bitmap: bit per VDMA channel used for
+     * boundary dataflow (input and output streams bound via
+     * OpenBoundary actions in ACTIVATION). Config channel is NOT
+     * included — that's tracked separately via
+     * config_channel_packed_id[]. If we have a boundary input pad,
+     * bit (config_vdma + INPUT_OFFSET) is set; boundary output pad
+     * → bit (config_vdma + OUTPUT_OFFSET).
+     *
+     * Earlier draft set the config_vdma bit here; that is wrong on
+     * two counts: (a) config channel doesn't belong in the boundary
+     * bitmap by convention, (b) the actual boundary channels
+     * (config+1, config+2) weren't represented at all. Firmware
+     * treats the bitmap as authoritative for which channels it
+     * should walk during BURST_CREDITS_TASK_START — a bitmap that
+     * doesn't include the real boundary channels causes the task
+     * to read uninitialized channel state. */
+    bool has_input_boundary  = false;
+    bool has_output_boundary = false;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *pad = &info->pads[i];
+        if (!pad->has_stream_info) continue;
+        if (pad->is_input)  has_input_boundary  = true;
+        else                has_output_boundary = true;
+    }
+    uint32_t bitmap = 0;
+    if (has_input_boundary) {
+        bitmap |= 1u << ((cfg->config_vdma_channel
+                        + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET) & 0x1Fu);
+    }
+    if (has_output_boundary) {
+        bitmap |= 1u << ((cfg->config_vdma_channel
+                        + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET) & 0x1Fu);
+    }
+    out->boundary_channels_bitmap[0] = bitmap;
 
-    (void)info;   /* Not yet consumed — reserved for future expansion. */
     return HAILO_OK;
 }
 
@@ -219,16 +245,57 @@ static int translate_activation(const struct hef_info *info,
 /* BATCH_SWITCHING context                                                      */
 /* -------------------------------------------------------------------------- */
 
-/* Minimum BATCH_SWITCHING per HailoRT's fill_batch_switching_context:
- * DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START (both zero body).
- * Real MLP BATCH_SWITCHING contexts with DDR buffers or LCU batch
- * switching add actions here; zero-boundary single-context MLPs
- * don't need them. */
-static int translate_batch_switching(struct hailo_cs_builder *b)
+/* BATCH_SWITCHING context. Per HailoRT's
+ * fill_batch_switching_context_config_recepies_for_multi_context
+ * (resource_manager_builder.cpp L1306-1333, docs/reference/
+ * hailort-context-switch-orchestration.md), the minimal sequence
+ * for a boundary-I/O network is:
+ *
+ *   DDR_BUFFERING_RESET
+ *   CHANGE_BOUNDARY_INPUT_BATCH × N_H2D_boundary
+ *   BURST_CREDITS_TASK_START
+ *
+ * The middle action is load-bearing: BURST_CREDITS_TASK_START spins
+ * up a firmware task that walks boundary H2D channels and expects
+ * each one's batch state to have been set by CHANGE_BOUNDARY_INPUT_
+ * BATCH. Skipping the batch programming is what crashed pi-5-1 fw
+ * v4.23 in #180 — firmware read uninitialised channel state, the
+ * control CPU crashed, and the PCIe link dropped entirely.
+ *
+ * HEFs with zero boundary H2D channels (synthetic tests) fall back
+ * to just DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START, matching
+ * the pre-#180 behavior. */
+static int translate_batch_switching(const struct hef_info *info,
+                                     const struct hailo_cs_translate_cfg *cfg,
+                                     struct hailo_cs_builder *b)
 {
     int rc = hailo_cs_builder_append(b, HAILO_CS_ACT_DDR_BUFFERING_RESET,
                                      NULL, 0);
     if (rc != HAILO_OK) return rc;
+
+    /* Emit CHANGE_BOUNDARY_INPUT_BATCH per boundary H2D pad, matching
+     * the VDMA channel IDs ACTIVATION used in OpenBoundaryInput. */
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *pad = &info->pads[i];
+        if (!pad->has_stream_info || !pad->is_input) continue;
+
+        uint32_t raw_vdma = (uint32_t)cfg->config_vdma_channel
+                          + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET;
+        if (raw_vdma > 0xFFu) {
+            WARN("hailo translator: BATCH_SWITCHING boundary input "
+                 "packed_vdma overflows u8 (config_vdma=%u)",
+                 cfg->config_vdma_channel);
+            return HAILO_ERR_INVAL;
+        }
+        struct hailo_cs_act_change_boundary_input_batch body = {
+            .packed_vdma_channel_id = (uint8_t)raw_vdma,
+        };
+        rc = hailo_cs_builder_append(b,
+                 HAILO_CS_ACT_CHANGE_BOUNDARY_INPUT_BATCH,
+                 &body, sizeof(body));
+        if (rc != HAILO_OK) return rc;
+    }
+
     return hailo_cs_builder_append(b, HAILO_CS_ACT_BURST_CREDITS_TASK_START,
                                    NULL, 0);
 }
@@ -670,7 +737,7 @@ int hailo_cs_translate_contexts(
 
     /* BATCH_SWITCHING */
     hailo_cs_builder_init(&b, out->batch_switching, sizeof(out->batch_switching));
-    rc = translate_batch_switching(&b);
+    rc = translate_batch_switching(info, cfg, &b);
     if (rc != HAILO_OK) return rc;
     out->batch_switching_len = hailo_cs_builder_size(&b);
 
