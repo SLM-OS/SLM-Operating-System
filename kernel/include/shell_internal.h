@@ -90,6 +90,7 @@ int cmd_xhcidiag(int argc, char **argv);
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 int cmd_hspdiag(int argc, char **argv);
 int cmd_bpmp(int argc, char **argv);
+int cmd_pcietrain(int argc, char **argv);
 #endif
 
 /* Dashboard command (shell_top.c) */

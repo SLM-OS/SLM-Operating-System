@@ -181,6 +181,51 @@ int bpmp_reset_deassert(uint32_t reset_id)
     return bpmp_reset_command(CMD_RESET_DEASSERT, reset_id);
 }
 
+/* ============================================================================
+ * MRQ_UPHY
+ * ============================================================================ */
+
+/*
+ * Wire layout from docs/reference/linux-bpmp-abi.h struct mrq_uphy_request:
+ *
+ *   offset 0   uint16_t lane
+ *   offset 2   uint16_t cmd
+ *   offset 4+  union { sub-command payloads }
+ *
+ * For CMD_UPHY_PCIE_CONTROLLER_STATE the sub-command payload is:
+ *   offset 4   uint8_t pcie_controller
+ *   offset 5   uint8_t enable
+ * Total packed size: 6 bytes (Linux quotes "6" in the ABI doc
+ * "Minimum payload length" table).
+ */
+struct mrq_uphy_ctrl_state_payload {
+    uint16_t lane;                /* 0 — we don't target a specific lane */
+    uint16_t cmd;                 /* CMD_UPHY_PCIE_CONTROLLER_STATE */
+    uint8_t  pcie_controller;
+    uint8_t  enable;
+};
+
+int bpmp_uphy_pcie_controller_state(uint32_t pcie_controller_id, bool enable)
+{
+    if (!g_bpmp_initialised) {
+        return -1;
+    }
+
+    struct mrq_uphy_ctrl_state_payload req = {
+        .lane            = 0,
+        .cmd             = CMD_UPHY_PCIE_CONTROLLER_STATE,
+        .pcie_controller = (uint8_t)(pcie_controller_id & 0xFF),
+        .enable          = enable ? 1u : 0u,
+    };
+
+    int32_t err = 0;
+    int rc = mrq_send(MRQ_UPHY, &req, sizeof(req), NULL, 0, &err);
+    if (rc != 0) {
+        return rc;
+    }
+    return (int)err;
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO */
 
 /* Stubs for QEMU / Pi 5 / x86-64. */
@@ -192,5 +237,6 @@ int  bpmp_clk_disable(uint32_t id)           { (void)id; return 0; }
 int  bpmp_clk_is_enabled(uint32_t id, int *out) { (void)id; if (out) *out = 0; return 0; }
 int  bpmp_reset_assert(uint32_t id)          { (void)id; return 0; }
 int  bpmp_reset_deassert(uint32_t id)        { (void)id; return 0; }
+int  bpmp_uphy_pcie_controller_state(uint32_t id, bool en) { (void)id; (void)en; return 0; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

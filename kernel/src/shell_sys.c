@@ -4233,4 +4233,76 @@ int cmd_bpmp(int argc, char *argv[])
     uart_puts("=== End Smoke Test ===\r\n");
     return 0;
 }
+
+#include "pcie_tegra194.h"
+
+/*
+ * pcietrain — full Tegra PCIe C8 host init + link training + iATU
+ * program + endpoint VID/DID read, using the kernel/drivers/pcie/
+ * pcie_tegra194.c driver layered on top of the BPMP IPC stack.
+ *
+ * The success criterion for #25 Step 3:
+ *   - LTSSM reaches L0 (0x11)
+ *   - DBI bus 0 vendor/device reads 0x10DE:0x229c (NVIDIA RC bridge)
+ *   - CFG bus 1 dev 0 fn 0 reads 0x10EC:0x8168 (Realtek RTL8168)
+ */
+int cmd_pcietrain(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== Tegra PCIe C8 link-up sequence ===\r\n");
+
+    int rc = bpmp_init();
+    uart_printf("  bpmp_init:            rc=%d\r\n", rc);
+    if (rc != 0) {
+        uart_puts("  (cannot proceed without BPMP)\r\n");
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+
+    rc = pcie_tegra_host_init();
+    uart_printf("  pcie host init:       rc=%d\r\n", rc);
+    if (rc != 0) {
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+
+    uint32_t ltssm = 0;
+    int link_rc = pcie_tegra_start_link(500, &ltssm);
+    uart_printf("  pcie start link:      rc=%d  final LTSSM=0x%02x\r\n",
+                link_rc, (unsigned)ltssm);
+
+    struct pcie_tegra_snapshot s;
+    pcie_tegra_read_snapshot(&s);
+    uart_printf("  APPL_CTRL:            0x%08x  (LTSSM_EN=%u)\r\n",
+                (unsigned)s.appl_ctrl, (unsigned)(s.ltssm_en ? 1 : 0));
+    uart_printf("  APPL_DEBUG:           0x%08x  (LTSSM=0x%02x)\r\n",
+                (unsigned)s.appl_debug, (unsigned)s.ltssm_state);
+    uart_printf("  APPL_PINMUX:          0x%08x  (PEX_RST=%u)\r\n",
+                (unsigned)s.appl_pinmux,
+                (unsigned)(s.appl_pinmux & 1));
+    uart_printf("  APPL_LINK_STATUS:     0x%08x  (RDLH_LINK_UP=%u)\r\n",
+                (unsigned)s.appl_link_status,
+                (unsigned)(s.appl_link_status & 1));
+    uart_printf("  DBI bus0 VID:DID:     0x%08x  (expect 0x229c10de)\r\n",
+                (unsigned)s.dbi_bus0_vid_did);
+    uart_printf("  RC alive:             %s\r\n",
+                s.rc_alive ? "YES" : "no (DBI returns all-ones/zeros)");
+
+    if (link_rc == 0) {
+        uint32_t ep = 0;
+        int ep_rc = pcie_tegra_probe_endpoint(&ep);
+        uart_printf("\r\n  EP probe:             rc=%d\r\n", ep_rc);
+        uart_printf("  CFG bus1 VID:DID:     0x%08x  (expect 0x816810ec)\r\n",
+                    (unsigned)ep);
+        if ((ep & 0xFFFF) == 0x10EC && ((ep >> 16) & 0xFFFF) == 0x8168) {
+            uart_puts("  *** RTL8168 endpoint reachable from SLM-OS! ***\r\n");
+        }
+    } else {
+        uart_puts("  (EP probe skipped — link never reached L0)\r\n");
+    }
+
+    uart_puts("=== End ===\r\n");
+    return 0;
+}
 #endif /* PLATFORM_JETSON_ORIN_NANO */

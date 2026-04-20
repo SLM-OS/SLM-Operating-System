@@ -402,6 +402,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/pcie/pcie_qemu_gpex.c>
     $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/pcie/pcie_bcm2712.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/pcie/pcie_stub.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/pcie/pcie_tegra194.c>
 
     # Inference-device abstraction (dispatcher always compiled;
     # CPU-MLP backend added under the ai_sched library when AI_SCHED=ON)
@@ -679,6 +680,7 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src
     ${CMAKE_SOURCE_DIR}/kernel/drivers/usb/xhci
     ${CMAKE_SOURCE_DIR}/kernel/drivers/bpmp
+    ${CMAKE_SOURCE_DIR}/kernel/drivers/pcie
 )
 
 # Per-platform arch include paths so test code under kernel/tests

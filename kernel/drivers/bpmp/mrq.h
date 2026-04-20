@@ -21,6 +21,16 @@
 #define MRQ_QUERY_TAG   1
 #define MRQ_CLK         22
 #define MRQ_RESET       20
+#define MRQ_UPHY        69
+
+/*
+ * MRQ_UPHY sub-commands (linux-bpmp-abi.h enum mrq_uphy_cmd).
+ * Only the two commands we need for PCIe controller bring-up are
+ * defined here.
+ */
+#define CMD_UPHY_PCIE_EP_CONTROLLER_PLL_INIT  3
+#define CMD_UPHY_PCIE_CONTROLLER_STATE        4
+#define CMD_UPHY_PCIE_EP_CONTROLLER_PLL_OFF   5
 
 /*
  * MRQ_CLK sub-commands. The CLK request format packs (cmd << 24) |

@@ -88,4 +88,20 @@ int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
 int bpmp_reset_assert(uint32_t reset_id);
 int bpmp_reset_deassert(uint32_t reset_id);
 
+/*
+ * MRQ_UPHY / CMD_UPHY_PCIE_CONTROLLER_STATE — power up (or down) the
+ * UPHY brick backing a Tegra PCIe controller. Required for PCIe RC
+ * bring-up from bare metal; Linux's tegra_pcie_bpmp_set_ctrl_state
+ * does exactly this before any APPL/DBI programming.
+ *
+ *   pcie_controller_id  Tegra234: 0..10. C8 (the Super Dev Kit's
+ *                       RTL8168 path) is id=8.
+ *   enable              1 to power up, 0 to power down.
+ *
+ * Returns 0 on success. Negative = transport error; positive = BPMP-side
+ * err code from mrq_response.err.
+ */
+int bpmp_uphy_pcie_controller_state(uint32_t pcie_controller_id,
+                                    bool enable);
+
 #endif /* BPMP_H */
