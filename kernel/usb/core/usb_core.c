@@ -7,13 +7,15 @@
  * this core are platform-gated (XHCI on Jetson in Phase 3A).
  *
  * Scope per docs/jetson-usb-networking-plan.md §6:
- *   - single device, no hubs
+ *   - single exposed device
+ *   - one upstream USB 2.0 hub allowed as an internal transport detail
  *   - high/full speed
  *   - enumeration runs once at boot; no hot-plug
  */
 
 #include "usb.h"
 #include "debug.h"
+#include "timer.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -31,6 +33,193 @@
 static const struct usb_hcd *active_hcd;
 static struct usb_device     root_device;
 static bool                  root_device_present;
+static struct usb_device     hub_device;
+static bool                  hub_device_present;
+
+/* -------------------------------------------------------------------------- */
+/* Minimal USB 2.0 hub support                                                */
+/* -------------------------------------------------------------------------- */
+
+#define USB_CLASS_HUB               0x09u
+#define USB_DT_HUB                  0x29u
+
+#define USB_PORT_STAT_CONNECTION    (1u << 0)
+#define USB_PORT_STAT_ENABLE        (1u << 1)
+#define USB_PORT_STAT_POWER         (1u << 8)
+#define USB_PORT_STAT_LOW_SPEED     (1u << 9)
+#define USB_PORT_STAT_HIGH_SPEED    (1u << 10)
+
+#define USB_PORT_STAT_C_CONNECTION  (1u << 0)
+#define USB_PORT_STAT_C_ENABLE      (1u << 1)
+#define USB_PORT_STAT_C_RESET       (1u << 4)
+
+#define USB_PORT_FEAT_POWER         8u
+#define USB_PORT_FEAT_RESET         4u
+#define USB_PORT_FEAT_C_CONNECTION  16u
+#define USB_PORT_FEAT_C_ENABLE      17u
+#define USB_PORT_FEAT_C_RESET       20u
+
+struct usb_hub_descriptor {
+    uint8_t  bLength;
+    uint8_t  bDescriptorType;
+    uint8_t  bNbrPorts;
+    uint16_t wHubCharacteristics;
+    uint8_t  bPwrOn2PwrGood;
+    uint8_t  bHubContrCurrent;
+    uint8_t  device_removable;
+    uint8_t  port_pwr_mask;
+} __attribute__((packed));
+
+struct usb_port_status {
+    uint16_t status;
+    uint16_t change;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct usb_hub_descriptor) == 9, "hub desc size");
+_Static_assert(sizeof(struct usb_port_status) == 4, "port status size");
+
+static bool usb_device_is_hub(const struct usb_device *dev)
+{
+    if (dev == NULL)
+        return false;
+    if (dev->dev_desc.bDeviceClass == USB_CLASS_HUB)
+        return true;
+
+    for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV; i++) {
+        if (dev->ifaces[i].valid &&
+            dev->ifaces[i].class_code == USB_CLASS_HUB)
+            return true;
+    }
+    return false;
+}
+
+static enum usb_speed usb_hub_port_speed(uint16_t status)
+{
+    if (status & USB_PORT_STAT_LOW_SPEED)
+        return USB_SPEED_LOW;
+    if (status & USB_PORT_STAT_HIGH_SPEED)
+        return USB_SPEED_HIGH;
+    return USB_SPEED_FULL;
+}
+
+static int usb_hub_get_descriptor(struct usb_device *hub,
+                                  struct usb_hub_descriptor *desc)
+{
+    if (hub == NULL || desc == NULL)
+        return -1;
+    return usb_control_msg(hub,
+                           USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_DEVICE,
+                           USB_REQ_GET_DESCRIPTOR,
+                           (uint16_t)USB_DT_HUB << 8, 0,
+                           desc, sizeof(*desc), 1000);
+}
+
+static int usb_hub_get_port_status(struct usb_device *hub, uint8_t port,
+                                   struct usb_port_status *st)
+{
+    if (hub == NULL || st == NULL || port == 0)
+        return -1;
+    return usb_control_msg(hub,
+                           USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_OTHER,
+                           USB_REQ_GET_STATUS, 0, port,
+                           st, sizeof(*st), 1000);
+}
+
+static int usb_hub_set_port_feature(struct usb_device *hub, uint8_t port,
+                                    uint16_t feature)
+{
+    if (hub == NULL || port == 0)
+        return -1;
+    return usb_control_msg(hub,
+                           USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_OTHER,
+                           USB_REQ_SET_FEATURE, feature, port,
+                           NULL, 0, 1000);
+}
+
+static int usb_hub_clear_port_feature(struct usb_device *hub, uint8_t port,
+                                      uint16_t feature)
+{
+    if (hub == NULL || port == 0)
+        return -1;
+    return usb_control_msg(hub,
+                           USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_OTHER,
+                           USB_REQ_CLEAR_FEATURE, feature, port,
+                           NULL, 0, 1000);
+}
+
+static int usb_hub_reset_port(struct usb_device *hub, uint8_t port,
+                              enum usb_speed *speed_out)
+{
+    if (usb_hub_set_port_feature(hub, port, USB_PORT_FEAT_RESET) < 0)
+        return -1;
+
+    uint64_t start = timer_get_count();
+    uint64_t freq  = timer_get_frequency();
+    uint64_t ticks = freq / 2;   /* 500 ms */
+    while (timer_get_count() - start < ticks) {
+        struct usb_port_status st = {0};
+        int rc = usb_hub_get_port_status(hub, port, &st);
+        if (rc < (int)sizeof(st))
+            return -1;
+
+        if ((st.change & USB_PORT_STAT_C_RESET) &&
+            (st.status & USB_PORT_STAT_CONNECTION) &&
+            (st.status & USB_PORT_STAT_ENABLE)) {
+            (void)usb_hub_clear_port_feature(hub, port, USB_PORT_FEAT_C_RESET);
+            (void)usb_hub_clear_port_feature(hub, port, USB_PORT_FEAT_C_ENABLE);
+            if (speed_out)
+                *speed_out = usb_hub_port_speed(st.status);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int usb_hub_prepare_ports(struct usb_device *hub,
+                                 struct usb_hub_descriptor *desc)
+{
+    if (hub == NULL || desc == NULL || desc->bNbrPorts == 0)
+        return -1;
+
+    for (uint8_t port = 1; port <= desc->bNbrPorts; port++) {
+        (void)usb_hub_set_port_feature(hub, port, USB_PORT_FEAT_POWER);
+    }
+
+    uint32_t delay_ms = (uint32_t)desc->bPwrOn2PwrGood * 2u;
+    if (delay_ms == 0)
+        delay_ms = 20;
+    uint64_t start = timer_get_count();
+    uint64_t ticks = (timer_get_frequency() / 1000u) * delay_ms;
+    while (timer_get_count() - start < ticks) { }
+    return 0;
+}
+
+static int usb_hub_find_child_port(struct usb_device *hub,
+                                   const struct usb_hub_descriptor *desc,
+                                   uint8_t *port_out,
+                                   enum usb_speed *speed_out)
+{
+    if (hub == NULL || desc == NULL || port_out == NULL || speed_out == NULL)
+        return -1;
+
+    for (uint8_t port = 1; port <= desc->bNbrPorts; port++) {
+        struct usb_port_status st = {0};
+        int rc = usb_hub_get_port_status(hub, port, &st);
+        if (rc < (int)sizeof(st))
+            continue;
+
+        if (!(st.status & USB_PORT_STAT_CONNECTION))
+            continue;
+
+        *port_out = port;
+        *speed_out = usb_hub_port_speed(st.status);
+        return 0;
+    }
+    return -1;
+}
+
+static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset);
+static int usb_try_enumerate_via_hub(struct usb_device *hub);
 
 /* -------------------------------------------------------------------------- */
 /* HCD registration                                                            */
@@ -71,8 +260,14 @@ void usb_core_reset(void)
         active_hcd->device_close != NULL) {
         active_hcd->device_close(&root_device);
     }
+    if (hub_device_present && active_hcd != NULL &&
+        active_hcd->device_close != NULL) {
+        active_hcd->device_close(&hub_device);
+    }
     memset(&root_device, 0, sizeof(root_device));
+    memset(&hub_device, 0, sizeof(hub_device));
     root_device_present = false;
+    hub_device_present = false;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -434,11 +629,186 @@ struct usb_device *usb_core_first_device(void)
  * that allocates a slot context in device_open would leak it on every
  * failed enumeration.
  */
+static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
+{
+    if (dev == NULL || active_hcd == NULL)
+        return -1;
+
+    if (do_root_reset && active_hcd->port_reset &&
+        active_hcd->port_reset(dev->port) != 0) {
+        WARN("usb_core: port_reset failed");
+        return -1;
+    }
+    dev->state = USB_STATE_DEFAULT;
+
+    bool device_opened = false;
+    if (active_hcd->device_open) {
+        if (active_hcd->device_open(dev) != 0) {
+            WARN("usb_core: device_open failed");
+            return -1;
+        }
+        device_opened = true;
+    }
+
+    int n;
+    int rc;
+
+    /*
+     * Step 3: read the first 8 bytes of the device descriptor. Some
+     * devices lie about bMaxPacketSize0 until they've seen the first
+     * IN — Linux does this same two-step for the same reason.
+     */
+    uint8_t dd_stub[8];
+    n = usb_get_descriptor(dev, USB_DT_DEVICE, 0, dd_stub, 8);
+    if (n < 8) {
+        WARN("usb_core: short GET_DESCRIPTOR(device, 8) n=%d", n);
+        goto err_close;
+    }
+    /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
+    dev->dev_desc.bMaxPacketSize0 = dd_stub[7];
+
+    /* Step 4: assign address 1 (single-device policy). */
+    rc = usb_control_msg(dev,
+                         USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                         USB_REQ_SET_ADDRESS,
+                         dev->address, 0, NULL, 0, 500);
+    if (rc < 0) {
+        WARN("usb_core: SET_ADDRESS failed: %s",
+             usb_urb_status_str((enum usb_urb_status)(-rc)));
+        goto err_close;
+    }
+    dev->state = USB_STATE_ADDRESS;
+
+    /* Step 5: full device descriptor. */
+    n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
+                           &dev->dev_desc,
+                           sizeof(dev->dev_desc));
+    if (n < (int)sizeof(dev->dev_desc)) {
+        WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
+        goto err_close;
+    }
+
+    /* Step 6: 9-byte config header to learn wTotalLength. */
+    struct usb_config_descriptor cfg_head;
+    n = usb_get_descriptor(dev, USB_DT_CONFIG, 0,
+                           &cfg_head, sizeof(cfg_head));
+    if (n < (int)sizeof(cfg_head)) {
+        WARN("usb_core: short GET_DESCRIPTOR(config, 9) n=%d", n);
+        goto err_close;
+    }
+    uint16_t total = cfg_head.wTotalLength;
+    if (total > USB_MAX_CONFIG_DESC_BYTES) {
+        WARN("usb_core: config total %u > cap %u — truncating",
+             total, USB_MAX_CONFIG_DESC_BYTES);
+        total = USB_MAX_CONFIG_DESC_BYTES;
+    }
+
+    /* Step 7: full config tree. */
+    n = usb_get_descriptor(dev, USB_DT_CONFIG, 0,
+                           dev->raw_config, total);
+    if (n < (int)total) {
+        WARN("usb_core: short GET_DESCRIPTOR(config, %u) n=%d", total, n);
+        goto err_close;
+    }
+    dev->raw_config_len = total;
+
+    /* Step 8: parse. */
+    if (usb_parse_configuration(dev) != 0) {
+        WARN("usb_core: parse_configuration failed");
+        goto err_close;
+    }
+
+    /* Step 9: activate the default configuration. */
+    uint8_t cfg_val = cfg_head.bConfigurationValue;
+    rc = usb_control_msg(dev,
+                         USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                         USB_REQ_SET_CONFIGURATION,
+                         cfg_val, 0, NULL, 0, 500);
+    if (rc < 0) {
+        WARN("usb_core: SET_CONFIGURATION failed: %s",
+             usb_urb_status_str((enum usb_urb_status)(-rc)));
+        goto err_close;
+    }
+    dev->current_config = cfg_val;
+    dev->state = USB_STATE_CONFIGURED;
+
+    /* Step 10: HCD commits non-EP0 endpoint contexts. */
+    if (active_hcd->endpoint_configure) {
+        for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++) {
+            if (!dev->endpoints[e].valid) continue;
+            int ec = active_hcd->endpoint_configure(dev, &dev->endpoints[e]);
+            if (ec != 0) {
+                WARN("usb_core: endpoint_configure(ep 0x%02x) failed: %d",
+                     dev->endpoints[e].address, ec);
+                goto err_close;
+            }
+        }
+    }
+
+    INFO("usb_core: device configured — vid=0x%04x pid=0x%04x class=0x%02x",
+         dev->dev_desc.idVendor,
+         dev->dev_desc.idProduct,
+         dev->dev_desc.bDeviceClass);
+    return 0;
+
+err_close:
+    if (device_opened && active_hcd->device_close)
+        active_hcd->device_close(dev);
+    return -1;
+}
+
+static int usb_try_enumerate_via_hub(struct usb_device *hub)
+{
+    struct usb_hub_descriptor desc = {0};
+    int rc = usb_hub_get_descriptor(hub, &desc);
+    if (rc < (int)sizeof(desc)) {
+        WARN("usb_core: short GET_DESCRIPTOR(hub) n=%d", rc);
+        return -1;
+    }
+    if (usb_hub_prepare_ports(hub, &desc) != 0) {
+        WARN("usb_core: hub port power-up failed");
+        return -1;
+    }
+
+    uint8_t child_port = 0;
+    enum usb_speed child_speed = USB_SPEED_UNKNOWN;
+    if (usb_hub_find_child_port(hub, &desc, &child_port, &child_speed) != 0) {
+        INFO("usb_core: hub has no connected downstream device");
+        return 0;
+    }
+
+    if (usb_hub_reset_port(hub, child_port, &child_speed) != 0) {
+        WARN("usb_core: hub port %u reset failed", child_port);
+        return -1;
+    }
+
+    memset(&root_device, 0, sizeof(root_device));
+    root_device.hcd = active_hcd;
+    root_device.address = 2;
+    root_device.speed = child_speed;
+    root_device.state = USB_STATE_ATTACHED;
+    root_device.port = child_port;
+    root_device.root_hub_port = hub->root_hub_port;
+    root_device.route_string = child_port;
+
+    rc = usb_enumerate_one(&root_device, false);
+    if (rc != 0)
+        return rc;
+
+    root_device_present = true;
+    return 0;
+}
+
 int usb_core_enumerate(void)
 {
     /* Start from a clean slate — a retry after a previous failure must
      * not leave the stale root_device visible via usb_core_first_device(). */
     root_device_present = false;
+    if (hub_device_present && active_hcd != NULL && active_hcd->device_close) {
+        active_hcd->device_close(&hub_device);
+        memset(&hub_device, 0, sizeof(hub_device));
+        hub_device_present = false;
+    }
 
     if (active_hcd == NULL) {
         WARN("usb_core: no HCD registered");
@@ -457,132 +827,25 @@ int usb_core_enumerate(void)
 
     memset(&root_device, 0, sizeof(root_device));
     root_device.hcd   = active_hcd;
+    root_device.address = 1;
     root_device.speed = speed;
     root_device.state = USB_STATE_ATTACHED;
+    root_device.port  = 0;
 
-    if (active_hcd->port_reset && active_hcd->port_reset(0) != 0) {
-        WARN("usb_core: port_reset failed");
-        return -1;   /* device_open has not run yet — no state to undo. */
-    }
-    root_device.state = USB_STATE_DEFAULT;
+    int rc = usb_enumerate_one(&root_device, true);
+    if (rc != 0)
+        return rc;
 
-    bool device_opened = false;
-    if (active_hcd->device_open) {
-        if (active_hcd->device_open(&root_device) != 0) {
-            WARN("usb_core: device_open failed");
-            return -1;
-        }
-        device_opened = true;
+    if (!usb_device_is_hub(&root_device)) {
+        root_device_present = true;
+        return 0;
     }
 
-    int n;
-    int rc;
-
-    /*
-     * Step 3: read the first 8 bytes of the device descriptor. Some
-     * devices lie about bMaxPacketSize0 until they've seen the first
-     * IN — Linux does this same two-step for the same reason.
-     */
-    uint8_t dd_stub[8];
-    n = usb_get_descriptor(&root_device, USB_DT_DEVICE, 0, dd_stub, 8);
-    if (n < 8) {
-        WARN("usb_core: short GET_DESCRIPTOR(device, 8) n=%d", n);
-        goto err_close;
-    }
-    /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
-    root_device.dev_desc.bMaxPacketSize0 = dd_stub[7];
-
-    /* Step 4: assign address 1 (single-device policy). */
-    rc = usb_control_msg(&root_device,
-                         USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-                         USB_REQ_SET_ADDRESS,
-                         1 /* wValue = address */, 0, NULL, 0, 500);
-    if (rc < 0) {
-        WARN("usb_core: SET_ADDRESS failed: %s",
-             usb_urb_status_str((enum usb_urb_status)(-rc)));
-        goto err_close;
-    }
-    root_device.address = 1;
-    root_device.state   = USB_STATE_ADDRESS;
-
-    /* Step 5: full device descriptor. */
-    n = usb_get_descriptor(&root_device, USB_DT_DEVICE, 0,
-                           &root_device.dev_desc,
-                           sizeof(root_device.dev_desc));
-    if (n < (int)sizeof(root_device.dev_desc)) {
-        WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
-        goto err_close;
-    }
-
-    /* Step 6: 9-byte config header to learn wTotalLength. */
-    struct usb_config_descriptor cfg_head;
-    n = usb_get_descriptor(&root_device, USB_DT_CONFIG, 0,
-                           &cfg_head, sizeof(cfg_head));
-    if (n < (int)sizeof(cfg_head)) {
-        WARN("usb_core: short GET_DESCRIPTOR(config, 9) n=%d", n);
-        goto err_close;
-    }
-    uint16_t total = cfg_head.wTotalLength;
-    if (total > USB_MAX_CONFIG_DESC_BYTES) {
-        WARN("usb_core: config total %u > cap %u — truncating",
-             total, USB_MAX_CONFIG_DESC_BYTES);
-        total = USB_MAX_CONFIG_DESC_BYTES;
-    }
-
-    /* Step 7: full config tree. */
-    n = usb_get_descriptor(&root_device, USB_DT_CONFIG, 0,
-                           root_device.raw_config, total);
-    if (n < (int)total) {
-        WARN("usb_core: short GET_DESCRIPTOR(config, %u) n=%d", total, n);
-        goto err_close;
-    }
-    root_device.raw_config_len = total;
-
-    /* Step 8: parse. */
-    if (usb_parse_configuration(&root_device) != 0) {
-        WARN("usb_core: parse_configuration failed");
-        goto err_close;
-    }
-
-    /* Step 9: activate the default configuration. */
-    uint8_t cfg_val = cfg_head.bConfigurationValue;
-    rc = usb_control_msg(&root_device,
-                         USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-                         USB_REQ_SET_CONFIGURATION,
-                         cfg_val, 0, NULL, 0, 500);
-    if (rc < 0) {
-        WARN("usb_core: SET_CONFIGURATION failed: %s",
-             usb_urb_status_str((enum usb_urb_status)(-rc)));
-        goto err_close;
-    }
-    root_device.current_config = cfg_val;
-    root_device.state = USB_STATE_CONFIGURED;
-
-    /* Step 10: HCD commits non-EP0 endpoint contexts. */
-    if (active_hcd->endpoint_configure) {
-        for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++) {
-            if (!root_device.endpoints[e].valid) continue;
-            int ec = active_hcd->endpoint_configure(&root_device,
-                                                    &root_device.endpoints[e]);
-            if (ec != 0) {
-                WARN("usb_core: endpoint_configure(ep 0x%02x) failed: %d",
-                     root_device.endpoints[e].address, ec);
-                goto err_close;
-            }
-        }
-    }
-
-    root_device_present = true;
-    INFO("usb_core: device configured — vid=0x%04x pid=0x%04x class=0x%02x",
-         root_device.dev_desc.idVendor,
-         root_device.dev_desc.idProduct,
-         root_device.dev_desc.bDeviceClass);
-    return 0;
-
-err_close:
-    if (device_opened && active_hcd->device_close)
-        active_hcd->device_close(&root_device);
-    return -1;
+    memcpy(&hub_device, &root_device, sizeof(hub_device));
+    memset(&root_device, 0, sizeof(root_device));
+    hub_device_present = true;
+    INFO("usb_core: root device is a USB hub — probing one downstream child");
+    return usb_try_enumerate_via_hub(&hub_device);
 }
 
 int usb_core_start(void)

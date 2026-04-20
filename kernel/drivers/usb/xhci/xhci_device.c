@@ -40,10 +40,11 @@
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
 /* -------------------------------------------------------------------------- */
-/* Per-device state pool (single-device Phase 3A)                              */
+/* Per-device state pool. Minimal hub support needs two live devices at once:
+ * the upstream hub and one downstream child. */
 /* -------------------------------------------------------------------------- */
 
-static struct xhci_device xhci_dev_pool[1];
+static struct xhci_device xhci_dev_pool[2];
 
 /* Scratch transfer-ring storage. Each ring occupies one entry here so
  * device_close has a stable teardown path without dynamic allocation.
@@ -472,7 +473,7 @@ static uint16_t xhci_ep0_max_packet(enum usb_speed s)
  *   - EP0 Ctx   DW4: Average TRB Length = 8 (control-transfer rule-of-thumb)
  */
 static void xhci_build_input_ctx_for_address(struct xhci_device *d,
-                                             enum usb_speed speed,
+                                             const struct usb_device *dev,
                                              uintptr_t ep0_ring_phys)
 {
     bool cz = xhci_caps_cached.ctx_64;
@@ -485,10 +486,13 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
     /* Slot Context. */
     uint32_t *s0 = xhci_in_slot_dw(d->input_ctx, 0, cz);
     uint32_t *s1 = xhci_in_slot_dw(d->input_ctx, 1, cz);
-    uint32_t speed_id = xhci_speed_to_id(speed);
+    uint32_t speed_id = xhci_speed_to_id(dev->speed);
     /* Context Entries = 1 (only EP0 is valid until endpoint_configure
-     * adds more). Route string = 0 (root hub port, no hub ancestors). */
-    *s0 = (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
+     * adds more). Route string comes from usb_core; root devices keep
+     * it at 0, one-tier hub children use the downstream port number in
+     * the low nibble. */
+    *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
+          (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
           (1U       << XHCI_SLOT_DW0_CTXENT_SHIFT);
     /* Root Hub Port Number is 1-based per spec. */
     *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
@@ -500,7 +504,7 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
     uint32_t *e3 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 3, cz);
     uint32_t *e4 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 4, cz);
 
-    uint16_t mps = xhci_ep0_max_packet(speed);
+    uint16_t mps = xhci_ep0_max_packet(dev->speed);
     *e0 = 0;                                  /* state=Disabled, interval=0 */
     *e1 = (3U  << XHCI_EP_DW1_CERR_SHIFT) |   /* CErr = 3 retries */
           (XHCI_EP_TYPE_CONTROL << XHCI_EP_DW1_EPTYPE_SHIFT) |
@@ -521,7 +525,7 @@ int xhci_hcd_device_open(struct usb_device *dev)
 
     struct xhci_device *d = xhci_dev_pool_alloc();
     if (d == NULL) {
-        WARN("xhci: device pool exhausted (Phase 3A supports 1 device)");
+        WARN("xhci: device pool exhausted");
         return -1;
     }
 
@@ -571,8 +575,12 @@ int xhci_hcd_device_open(struct usb_device *dev)
         WARN("xhci: device_open before port scan located a USB 2 port");
         goto err;
     }
-    d->root_port = (uint8_t)(xhci_active_port + 1U);
-    (void)dev->port;  /* Phase 3A always uses the scanned port. */
+    if (dev->root_hub_port != 0) {
+        d->root_port = dev->root_hub_port;
+    } else {
+        d->root_port = (uint8_t)(xhci_active_port + 1U);
+        dev->root_hub_port = d->root_port;
+    }
 
     /*
      * Decide which speed to program into the Slot Context.
@@ -591,20 +599,22 @@ int xhci_hcd_device_open(struct usb_device *dev)
      * If the pre-reset scan saw FULL / LOW the downgrade path is
      * trusted — we never observed those speeds renegotiate upward.
      */
-    bool connected_post = false;
-    enum usb_speed speed_post = USB_SPEED_UNKNOWN;
-    (void)xhci_decode_portsc(xhci_active_portsc,
-                              &connected_post, &speed_post);
-    if (xhci_prereset_speed == USB_SPEED_HIGH &&
-        speed_post != USB_SPEED_HIGH) {
-        INFO("xhci: pre-reset HIGH but PORTSC reads %d post-reset; "
-             "using HIGH (stale PORTSC on Tegra)", (int)speed_post);
-        dev->speed = USB_SPEED_HIGH;
-    } else if (speed_post != USB_SPEED_UNKNOWN &&
-               speed_post != dev->speed) {
-        INFO("xhci: post-reset speed %d (was %d on pre-reset scan)",
-             (int)speed_post, (int)dev->speed);
-        dev->speed = speed_post;
+    if (dev->route_string == 0) {
+        bool connected_post = false;
+        enum usb_speed speed_post = USB_SPEED_UNKNOWN;
+        (void)xhci_decode_portsc(xhci_active_portsc,
+                                  &connected_post, &speed_post);
+        if (xhci_prereset_speed == USB_SPEED_HIGH &&
+            speed_post != USB_SPEED_HIGH) {
+            INFO("xhci: pre-reset HIGH but PORTSC reads %d post-reset; "
+                 "using HIGH (stale PORTSC on Tegra)", (int)speed_post);
+            dev->speed = USB_SPEED_HIGH;
+        } else if (speed_post != USB_SPEED_UNKNOWN &&
+                   speed_post != dev->speed) {
+            INFO("xhci: post-reset speed %d (was %d on pre-reset scan)",
+                 (int)speed_post, (int)dev->speed);
+            dev->speed = speed_post;
+        }
     }
 
     /* 1. ENABLE_SLOT. */
@@ -621,7 +631,7 @@ int xhci_hcd_device_open(struct usb_device *dev)
     INFO("xhci: slot %u enabled for port %u", slot, d->root_port);
 
     /* 2. Build Input Context for ADDRESS_DEVICE and write DCBAA[slot]. */
-    xhci_build_input_ctx_for_address(d, dev->speed, ep0->phys);
+    xhci_build_input_ctx_for_address(d, dev, ep0->phys);
     xhci_dcbaa[slot] = (uint64_t)d->dev_ctx_phys;
     dsb(sy);
 
@@ -766,7 +776,8 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
      * DCI. The Input Context was freshly zeroed above, so no prior
      * CONFIGURE_ENDPOINT state survives — `dci` is the new high-water
      * mark for this single-EP add. */
-    *s0 = (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
+    *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
+          (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
           ((uint32_t)dci << XHCI_SLOT_DW0_CTXENT_SHIFT);
     *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
 
