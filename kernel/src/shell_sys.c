@@ -4241,6 +4241,12 @@ int cmd_bpmp(int argc, char *argv[])
  * program + endpoint VID/DID read, using the kernel/drivers/pcie/
  * pcie_tegra194.c driver layered on top of the BPMP IPC stack.
  *
+ *   pcietrain       Default: full init + LTSSM train + EP probe.
+ *   pcietrain warm  Do clock/reset + P2U init but DO NOT toggle
+ *                   PEX_RST or set LTSSM_EN. Checks whether Linux's
+ *                   pre-kexec link survives — if so, the problem
+ *                   is in our re-init sequence, not elsewhere.
+ *
  * The success criterion for #25 Step 3:
  *   - LTSSM reaches L0 (0x11)
  *   - DBI bus 0 vendor/device reads 0x10DE:0x229c (NVIDIA RC bridge)
@@ -4248,7 +4254,7 @@ int cmd_bpmp(int argc, char *argv[])
  */
 int cmd_pcietrain(int argc, char *argv[])
 {
-    (void)argc; (void)argv;
+    const char *mode = (argc >= 2) ? argv[1] : "full";
 
     uart_puts("\r\n=== Tegra PCIe C8 link-up sequence ===\r\n");
 
@@ -4268,7 +4274,18 @@ int cmd_pcietrain(int argc, char *argv[])
     }
 
     uint32_t ltssm = 0;
-    int link_rc = pcie_tegra_start_link(500, &ltssm);
+    int link_rc = 0;
+    if (mode[0] == 'w') {
+        /* warm: read current LTSSM state without toggling anything */
+        struct pcie_tegra_snapshot s0;
+        pcie_tegra_read_snapshot(&s0);
+        ltssm = s0.ltssm_state;
+        uart_printf("  (warm mode) current LTSSM=0x%02x LTSSM_EN=%u\r\n",
+                    (unsigned)ltssm, (unsigned)(s0.ltssm_en ? 1 : 0));
+        link_rc = (ltssm == 0x11) ? 0 : -1;
+    } else {
+        link_rc = pcie_tegra_start_link(2000, &ltssm);
+    }
     uart_printf("  pcie start link:      rc=%d  final LTSSM=0x%02x\r\n",
                 link_rc, (unsigned)ltssm);
 

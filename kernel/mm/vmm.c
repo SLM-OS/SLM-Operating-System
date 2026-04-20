@@ -1023,6 +1023,18 @@ static void vmm_setup_platform(void)
                     (unsigned long)RTL8169_BAR_WINDOW_BASE);
     }
 
+    /* Tegra P2U (PIPE-to-UPHY) control registers for PCIe C8.
+     * P2U instance 0 = 0x03F40000, P2U instance 1 = 0x03F50000 —
+     * both phys used by pcie@140a0000 per DT `phys = <&p2u_...>`.
+     * These fall inside the 2 MB block at 0x03E00000 (L2 idx 31). */
+    {
+        const uint64_t p2u_block = 0x03E00000UL;
+        uint64_t p2u_l2 = (p2u_block >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[p2u_l2] = make_block_desc(p2u_block, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  P2U (PCIe PHY) L2[%lu] mapped", (unsigned long)p2u_l2);
+    }
+
     /* BPMP shared SRAM at 0x40070000 (CPU→BPMP) and 0x40071000 (BPMP→CPU).
      * Linux/BPMP IVC protocol writes directly to these buffers without
      * cache-coherence handshakes, so CCPLEX sees them as Normal Non-

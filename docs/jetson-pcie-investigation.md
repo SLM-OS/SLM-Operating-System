@@ -390,23 +390,82 @@ APPL is alive (was `0xffffffff` pre-enable). DBI still reads all-ones
 because `LTSSM_EN` hasn't been set — the controller is powered but
 not yet training the link. That is Step 3's problem.
 
-### What's still pending (Step 3)
+### Step 3 partial result (20 April 2026, late)
 
-1. **Set APPL_CTRL.LTSSM_EN** (bit 7). Requires understanding the
-   Tegra PCIe RC's init sequencing — direct MMIO to APPL and the
-   associated DBI programming (reference: `docs/reference/linux-pcie-tegra194.c`).
-2. **Possibly MRQ_UPHY bring-up.** Linux's Tegra PCIe driver uses
-   MRQ_UPHY to gate the PHY's PLL/calibration. UPHY may already be
-   active from Linux's era — needs empirical test.
-3. **Wait for link training to L0.** LTSSM state in `APPL_DEBUG[8:3]`
-   should reach 0x11 (L0).
-4. **Program iATU** for bus-1 config access, then read the RTL8168
-   endpoint ID.
-5. **r8169 driver.** The scaffolding is in `kernel/drivers/eth_rtl8169.c`
-   — descriptor rings + send/recv.
+Wrote `kernel/drivers/pcie/pcie_tegra194.c` + `pcie_tegra194.h`
+(~350 LOC). Covers BPMP UPHY/clock/reset, APPL RP programming
+(DM_TYPE, SYS_PRE_DET_STATE, ARCACHE, CFG_BASE_ADDR,
+CFG_IATU_DMA_BASE_ADDR), P2U PHY init on both lanes of PCIe C8,
+CLKREQ override, 100 ms PEX_RST assertion, LTSSM_EN set, and iATU
+region-0 CFG1 programming for bus-1 endpoint access.
 
-Steps 1-4 are a few hundred lines drawing on `linux-pcie-tegra194.c`
-(cached). Step 5 is the existing networking-driver-checklist.md work.
+Added `pcietrain` shell command to drive the full sequence and
+report state.
+
+**Hardware result:** partial. LTSSM stalls at `0x03 (POLLING.COMPLIANCE)` —
+the RC is sending training ordered-sets but the RTL8168 endpoint
+isn't ACKing them. Final state after the sequence on jetson-nano-1:
+
+```
+slmos> pcietrain
+  pcie host init:       rc=0
+  pcie-tegra: P2U lane 0 + lane 1 init OK
+  APPL_CTRL:            0x004490e0  (LTSSM_EN=1)
+  APPL_DEBUG:           0x00002018  (LTSSM=0x03)
+  APPL_PINMUX:          0x00001807  (PEX_RST=1, CLKREQ_OVERRIDE_EN=1)
+  APPL_LINK_STATUS:     0x00000002  (RDLH_LINK_UP=0)
+  DBI bus0 VID:DID:     0x229c10de  (RC bridge alive)
+```
+
+Things verified to work:
+- BPMP IPC (MRQ_UPHY, MRQ_CLK, MRQ_RESET)
+- UPHY controller power-up (CMD 4) accepted
+- Clock and reset deassertion accepted
+- P2U lane 0 + lane 1 MMIO writes complete cleanly
+- APPL writes stick (including LTSSM_EN at APPL_CTRL bit 7)
+- DBI RC bridge identity is read-valid (`0x229c10de`)
+
+Things tried that did NOT fix the `LTSSM=0x03` stall:
+- Longer PEX_RST assertion (200 µs → 100 ms)
+- Longer L0 timeout (500 ms → 2 s)
+- Explicit PEX_RST de-assert in host_init (so `start_link`'s
+  clear-then-set generates a real edge)
+- CLKREQ override: force CCPLEX to supply RefClk regardless of
+  endpoint CLKREQ# (Linux's !supports_clkreq path)
+
+Left for a future Step 3.5 session:
+1. **DBI RC setup from `dw_pcie_setup_rc`.** Linux programs
+   PCIE_PORT_LINK_CONTROL (link-capable width), GEN2_CTRL,
+   LINK_CAPABILITIES, and the PCI Type 1 header before LTSSM_EN.
+   Reference: `docs/reference/linux-pcie-designware-host.c`.
+   Most plausible missing piece — if the RC's advertised link width
+   doesn't match the endpoint's x1, training doesn't complete.
+2. **Force endpoint power cycle.** The RTL8168 is soldered on the
+   carrier board, always-powered from 3.3 V. PEX_RST brings its
+   PCIe side to DETECT but its internal state machine might be
+   wedged from Linux's driver. No software-reachable power control
+   on this board, but worth exploring whether BPMP can gate +3V3
+   via MRQ_POWERGATE.
+3. **Signal-integrity / lane ordering.** Multiple P2U lanes
+   configured but DT uses two (`p2u_nvhs_0` @ 0x3F40000,
+   `p2u_nvhs_1` @ 0x3F50000). The RTL8168 is x1 — might be lane
+   selection or polarity issue on the board.
+4. **Compare APPL_DEBUG bits to Linux trace.** Bit 13 is set
+   (undocumented in tegra194 header). Could indicate PM_LINKST
+   or training-specific status.
+
+The `pcie_tegra_*` driver + `pcietrain` shell command stay in
+tree. Anyone revisiting this has empirical evidence that:
+- The RC starts, reaches POLLING, and sends training sequences.
+- The RTL8168 is NOT responding to those sequences.
+
+That's a narrower scoping than "PCIe is gated off" — Step 2 cleared
+that question entirely.
+
+### r8169 driver (Step 4, not yet started)
+
+Scaffolding is in `kernel/drivers/eth_rtl8169.c`. Stage 2+ work
+blocked on Step 3.5 landing.
 
 ## Immediate next steps
 

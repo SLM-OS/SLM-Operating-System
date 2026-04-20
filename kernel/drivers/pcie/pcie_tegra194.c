@@ -35,6 +35,9 @@
 /* APPL register offsets (docs/reference/linux-pcie-tegra194.c:41..) */
 #define APPL_PINMUX                     0x000
 #define APPL_PINMUX_PEX_RST             (1u << 0)
+#define APPL_PINMUX_CLKREQ_OVERRIDE_EN  (1u << 2)
+#define APPL_PINMUX_CLKREQ_OVERRIDE     (1u << 3)
+#define APPL_PINMUX_CLKREQ_DEFAULT_VALUE (1u << 13)
 #define APPL_CTRL                       0x004
 #define APPL_CTRL_SYS_PRE_DET_STATE     (1u << 6)
 #define APPL_CTRL_LTSSM_EN              (1u << 7)
@@ -54,6 +57,26 @@
 #define APPL_CFG_MISC_ARCACHE_SHIFT     10
 #define APPL_CFG_MISC_ARCACHE_VAL       3u
 #define APPL_CFG_SLCG_OVERRIDE          0x114
+
+/* Tegra P2U (PIPE-to-UPHY) bases for PCIe C8 (two lanes).
+ * From the jetson-nano-1 Linux DT: pcie@140a0000 phys = <p2u_0, p2u_1>
+ * where p2u_0 = phy@3f40000 and p2u_1 = phy@3f50000. */
+#define TEGRA_P2U_C8_LANE0              0x03F40000UL
+#define TEGRA_P2U_C8_LANE1              0x03F50000UL
+
+/* P2U register offsets (docs/reference/linux-phy-tegra194-p2u.c:17-32). */
+#define P2U_CONTROL_CMN                             0x74
+#define P2U_CONTROL_CMN_ENABLE_L2_EXIT_RATE_CHANGE  (1u << 13)
+#define P2U_PERIODIC_EQ_CTRL_GEN3                   0xC0
+#define P2U_PERIODIC_EQ_CTRL_GEN3_PERIODIC_EQ_EN          (1u << 0)
+#define P2U_PERIODIC_EQ_CTRL_GEN3_INIT_PRESET_EQ_TRAIN_EN (1u << 1)
+#define P2U_PERIODIC_EQ_CTRL_GEN4                   0xC4
+#define P2U_PERIODIC_EQ_CTRL_GEN4_INIT_PRESET_EQ_TRAIN_EN (1u << 1)
+#define P2U_RX_DEBOUNCE_TIME                        0xA4
+#define P2U_RX_DEBOUNCE_TIME_MASK                   0x0000FFFFu
+#define P2U_RX_DEBOUNCE_TIME_VAL                    160u
+#define P2U_DIR_SEARCH_CTRL                         0xD4
+#define P2U_DIR_SEARCH_CTRL_GEN4_FINE_GRAIN_SEARCH_TWICE  (1u << 18)
 
 /* iATU outbound region stride (unrolled mapping) and inner offsets. */
 #define ATU_REGION_STRIDE               0x200
@@ -172,11 +195,71 @@ int pcie_tegra_host_init(void)
     appl_write(APPL_CFG_IATU_DMA_BASE_ADDR,
                TEGRA_PCIE_C8_ATU & APPL_CFG_IATU_DMA_BASE_ADDR_MASK);
 
+    /* Step 3.5: P2U PHY init (matches linux-phy-tegra194-p2u.c
+     * tegra_p2u_power_on). Tegra234's "one_dir_search" variant clears
+     * the GEN4 fine-grain search-twice bit; we apply that to both
+     * P2U lanes used by PCIe C8 (DT confirmed: p2u-0 @ 0x3F40000 and
+     * p2u-1 @ 0x3F50000). Without this the UPHY never exits
+     * POLLING.COMPLIANCE and the link stays at LTSSM=0x03. */
+    {
+        const uintptr_t p2u_bases[] = { TEGRA_P2U_C8_LANE0, TEGRA_P2U_C8_LANE1 };
+        for (unsigned i = 0; i < 2; i++) {
+            uintptr_t b = p2u_bases[i];
+            uint32_t val;
+
+            val = mmio_read32(b + P2U_PERIODIC_EQ_CTRL_GEN3);
+            val &= ~P2U_PERIODIC_EQ_CTRL_GEN3_PERIODIC_EQ_EN;
+            val |=  P2U_PERIODIC_EQ_CTRL_GEN3_INIT_PRESET_EQ_TRAIN_EN;
+            mmio_write32(b + P2U_PERIODIC_EQ_CTRL_GEN3, val);
+
+            val = mmio_read32(b + P2U_PERIODIC_EQ_CTRL_GEN4);
+            val |= P2U_PERIODIC_EQ_CTRL_GEN4_INIT_PRESET_EQ_TRAIN_EN;
+            mmio_write32(b + P2U_PERIODIC_EQ_CTRL_GEN4, val);
+
+            val = mmio_read32(b + P2U_RX_DEBOUNCE_TIME);
+            val &= ~P2U_RX_DEBOUNCE_TIME_MASK;
+            val |= P2U_RX_DEBOUNCE_TIME_VAL;
+            mmio_write32(b + P2U_RX_DEBOUNCE_TIME, val);
+
+            /* Tegra234 one_dir_search = true — clear the GEN4 fine-grain
+             * search-twice bit. See linux-phy-tegra194-p2u.c:tegra234_p2u_of_data. */
+            val = mmio_read32(b + P2U_DIR_SEARCH_CTRL);
+            val &= ~P2U_DIR_SEARCH_CTRL_GEN4_FINE_GRAIN_SEARCH_TWICE;
+            mmio_write32(b + P2U_DIR_SEARCH_CTRL, val);
+        }
+        INFO("pcie-tegra: P2U lane 0 + lane 1 init OK");
+    }
+
     /* Step 4: deassert the main core reset. */
     rc = bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8);
     if (rc != 0) {
         WARN("pcie-tegra: RESET_DEASSERT(PEX2_CORE_8) rc=%d", rc);
         return -1;
+    }
+
+    /* Step 5: APPL_PINMUX setup.
+     *
+     *   - PEX_RST bit 0 → drive HIGH (de-asserted = endpoint running).
+     *     After core-reset deassertion APPL_PINMUX bit 0 defaults to 0
+     *     (PERST# asserted = endpoint held in reset); if we leave it
+     *     there, pcie_tegra_start_link's "assert" step is a no-op
+     *     (bit already 0) and no PEX_RST edge is generated.
+     *
+     *   - CLKREQ override → force CCPLEX to supply RefClk unconditionally
+     *     (CLKREQ_OVERRIDE_EN=1, CLKREQ_OVERRIDE=0, CLKREQ_DEFAULT_VALUE=0).
+     *     Without this, the CCPLEX gates the endpoint's reference clock
+     *     whenever the endpoint de-asserts CLKREQ#, and the endpoint
+     *     can't drive CLKREQ# until it has a clock — chicken/egg.
+     *     Linux's tegra_pcie_config_controller applies the same override
+     *     when !supports_clkreq.
+     */
+    {
+        uint32_t pinmux = appl_read(APPL_PINMUX);
+        pinmux |= APPL_PINMUX_PEX_RST;
+        pinmux |= APPL_PINMUX_CLKREQ_OVERRIDE_EN;
+        pinmux &= ~APPL_PINMUX_CLKREQ_OVERRIDE;
+        pinmux &= ~APPL_PINMUX_CLKREQ_DEFAULT_VALUE;
+        appl_write(APPL_PINMUX, pinmux);
     }
 
     g_host_inited = true;
@@ -193,12 +276,17 @@ int pcie_tegra_start_link(uint32_t timeout_ms, uint32_t *ltssm_out)
     }
 
     /* Step 5: PEX_RST assert (logical low — the bit CLEARED means reset
-     * asserted, per the "PEX_RST" signal's active-low semantics). */
+     * asserted, per the "PEX_RST" signal's active-low semantics).
+     * Linux holds this for 100-200 us but that assumes the endpoint was
+     * already observing PERST# from a prior boot. Coming out of a kexec
+     * the endpoint has been running at Linux-era LTSSM state; a 100 ms
+     * hold matches the PCIe CEM spec minimum and reliably forces the
+     * endpoint back to its reset sequence. */
     uint32_t pinmux = appl_read(APPL_PINMUX);
     pinmux &= ~APPL_PINMUX_PEX_RST;
     appl_write(APPL_PINMUX, pinmux);
 
-    pcie_udelay(200);
+    pcie_udelay(100 * 1000);      /* 100 ms */
 
     /* Step 6: enable LTSSM. */
     uint32_t ctrl = appl_read(APPL_CTRL);
@@ -209,6 +297,11 @@ int pcie_tegra_start_link(uint32_t timeout_ms, uint32_t *ltssm_out)
     pinmux = appl_read(APPL_PINMUX);
     pinmux |= APPL_PINMUX_PEX_RST;
     appl_write(APPL_PINMUX, pinmux);
+
+    /* PCIe spec: T_PVPERL = 100 ms power-stable to PERST# de-assertion.
+     * The endpoint then needs additional time to enter DETECT.QUIET
+     * before LTSSM training can begin. Give 20 ms settling time. */
+    pcie_udelay(20 * 1000);
 
     /* Step 8: poll APPL_DEBUG for LTSSM state = L0. */
     uint32_t waited_ms = 0;
