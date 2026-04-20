@@ -833,6 +833,22 @@ static int cmd_hailo(int argc, char *argv[])
 
         shell_printf("  [5/8] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
                      (unsigned)bufs.activation_len);
+        /* #180 diag: dump the first 72 ACTIVATION bytes (the 3 actions
+         * we emit: BURST_CREDITS=8, OPEN_IN=36, OPEN_OUT=28) so the
+         * wire values can be compared against v4.23 reference
+         * byte-for-byte. Prints 4 dwords per line, LE. */
+        {
+            const uint8_t *p = (const uint8_t *)bufs.activation;
+            uint32_t dump_len = (bufs.activation_len > 72u)
+                              ? 72u : (uint32_t)bufs.activation_len;
+            for (uint32_t off = 0; off < dump_len; off += 16) {
+                shell_printf("  [--] ACT[%02u]:", (unsigned)off);
+                for (uint32_t i = 0; i < 16 && off + i < dump_len; i++) {
+                    shell_printf(" %02x", (unsigned)p[off + i]);
+                }
+                shell_puts("\n");
+            }
+        }
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_ACTIVATION,
                                             bufs.activation,
                                             (uint32_t)bufs.activation_len);
