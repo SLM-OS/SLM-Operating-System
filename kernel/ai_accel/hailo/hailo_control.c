@@ -1468,6 +1468,125 @@ int hailo_control_change_context_switch_status(
     return rc;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Context-switch: CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS (0x47, CORE CPU).     */
+/* GET_HW_CONSTS (0x48, CORE CPU).                                            */
+/* -------------------------------------------------------------------------- */
+
+/* Both are empty-body requests. Wire layout matches IDENTIFY:
+ *   [common_header(16)][parameter_count=0(4)] = 20 bytes.
+ * Responses: CLEAR has no body (just header+parameter_count=0),
+ * GET_HW_CONSTS returns a hw_consts struct that SLM-OS doesn't
+ * currently consume — we size the buffer generously so firmware
+ * can never overrun us. */
+struct hailo_cs_empty_req_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;                /* BE, = 0 */
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_empty_req_wire) == 20,
+               "empty-body request wire must be 20 bytes");
+
+struct hailo_cs_clear_apps_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                /* BE, = 0 */
+} __attribute__((packed));
+
+/* HailoRT's CONTROL_PROTOCOL__get_hw_consts_response_t packs a
+ * handful of u32/u16 fields; 128 B body is safely generous. */
+struct hailo_cs_hw_consts_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                /* BE */
+    uint8_t  body[128];
+} __attribute__((packed));
+
+static struct hailo_cs_empty_req_wire        control_clear_apps_req;
+static struct hailo_cs_clear_apps_resp_wire  control_clear_apps_resp;
+static struct hailo_cs_empty_req_wire        control_hw_consts_req;
+static struct hailo_cs_hw_consts_resp_wire   control_hw_consts_resp;
+
+int hailo_control_context_switch_clear_configured_apps(void)
+{
+    spin_lock(&control_lock);
+
+    struct hailo_cs_empty_req_wire *r = &control_clear_apps_req;
+    memset(r, 0, sizeof(*r));
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(
+        HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS);
+    r->parameter_count = 0;
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_clear_apps_req, sizeof(*r),
+                                             &control_clear_apps_resp,
+                                             sizeof(control_clear_apps_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
+                                            &control_clear_apps_req, sizeof(*r),
+                                            &control_clear_apps_resp,
+                                            sizeof(control_clear_apps_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_clear_apps_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS,
+                                       "CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS");
+    spin_unlock(&control_lock);
+    return rc;
+}
+
+int hailo_control_get_hw_consts(uint32_t *out_response_len)
+{
+    spin_lock(&control_lock);
+
+    struct hailo_cs_empty_req_wire *r = &control_hw_consts_req;
+    memset(r, 0, sizeof(*r));
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_GET_HW_CONSTS);
+    r->parameter_count = 0;
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_hw_consts_req, sizeof(*r),
+                                             &control_hw_consts_resp,
+                                             sizeof(control_hw_consts_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
+                                            &control_hw_consts_req, sizeof(*r),
+                                            &control_hw_consts_resp,
+                                            sizeof(control_hw_consts_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_hw_consts_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_GET_HW_CONSTS,
+                                       "GET_HW_CONSTS");
+    if (rc == HAILO_OK && out_response_len) {
+        *out_response_len = resp_len;
+    }
+    spin_unlock(&control_lock);
+    return rc;
+}
+
 int hailo_control_set_context_info(
     enum hailo_cs_context_type context_type,
     const void                *network_data,

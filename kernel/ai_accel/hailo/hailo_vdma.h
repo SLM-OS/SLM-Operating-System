@@ -175,9 +175,12 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
  * 32 contiguous bytes (reference CHANNEL_BASE_OFFSET macro). */
 #define HAILO_VDMA_CHANNEL_STRIDE   32u
 
-/* Max VDMA channels per engine on Hailo-8 (MAX_VDMA_CHANNELS_PER_ENGINE
- * in hailo-vdma-common.h). */
-#define HAILO_VDMA_MAX_CHANNELS     16u
+/* Max VDMA channels per engine on Hailo-8. Channels 0..15 are H2D
+ * (input / config), channels 16..31 are D2H (output) — the reference
+ * driver enforces this split via HAILO_PCIE_DMA_SRC_CHANNELS_BITMASK
+ * = 0x0000FFFF. MAX_VDMA_CHANNELS_PER_ENGINE = 32 in hailo-ioctl-
+ * common.h and VDMA_CHANNELS_PER_ENGINE_PER_DIRECTION = 16. */
+#define HAILO_VDMA_MAX_CHANNELS     32u
 
 /* Sub-offsets within a channel's register block (host side).
  * Mirror the constants in `hailo-vdma-common.c:32-37` and

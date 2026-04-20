@@ -70,12 +70,18 @@
 
 /* Boundary VDMA channel offsets relative to config_vdma_channel.
  * The HEF identifies boundary streams by sys_index; the host picks
- * which VDMA channel each sys_index maps to. Today the convention
- * is fixed: input boundary on (config + 1), output boundary on
- * (config + 2). When #178 lands real edge_layer → channel mapping,
- * these become defaults with explicit cfg override. ACTIVATION's
- * OpenBoundaryInput/Output emitter (future) and translate_allow_
- * input_dataflow (current) both use these so the two ends agree. */
+ * which VDMA channel each sys_index maps to. When #178 lands real
+ * edge_layer → channel mapping, these become defaults with explicit
+ * cfg override. ACTIVATION's OpenBoundaryInput/Output emitter and
+ * translate_allow_input_dataflow both use these so the two ends agree.
+ *
+ * On Hailo-8 PCIe, channel_index is a shared 0..31 pool — both H2D
+ * and D2H draw from it. The `HAILO_PCIE_DMA_SRC_CHANNELS_BITMASK =
+ * 0x0000FFFF` in the reference driver only controls register layout
+ * within each channel's 32-byte window (host-side regs first for
+ * channels 0..15, device-side regs first for 16..31 — see
+ * get_channel_regs in hailo-vdma-common.c:576). Action type (32 vs
+ * 33) is what tells firmware the direction. */
 #define HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET   1u
 #define HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET  2u
 

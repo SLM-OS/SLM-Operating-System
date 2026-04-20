@@ -791,18 +791,32 @@ static int cmd_hailo(int argc, char *argv[])
         }
 
         shell_puts("hailo: ctxsmoke:\n");
-        shell_puts("  [1/6] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
+        shell_puts("  [1/8] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
         int rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
             /*batch_size=*/0, /*batch_count=*/0);
         shell_printf("        rc=%d\n", rc);
 
-        shell_puts("  [2/6] SET_NETWORK_GROUP_HEADER...\n");
+        /* #180 pre-configure handshake (2026-04-19 wire capture): HailoRT
+         * calls CLEAR_CONFIGURED_APPS then GET_HW_CONSTS between
+         * CHANGE_CONTEXT_SWITCH_STATUS(RESET) and SET_NETWORK_GROUP_HEADER.
+         * Skipping these left firmware's context-switch bookkeeping stale
+         * and BATCH_SWITCHING walked into uninitialized state. */
+        shell_puts("  [2/8] CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS...\n");
+        rc = hailo_control_context_switch_clear_configured_apps();
+        shell_printf("        rc=%d\n", rc);
+
+        shell_puts("  [3/8] GET_HW_CONSTS...\n");
+        uint32_t hw_consts_resp_len = 0;
+        rc = hailo_control_get_hw_consts(&hw_consts_resp_len);
+        shell_printf("        rc=%d resp_len=%u\n", rc, hw_consts_resp_len);
+
+        shell_puts("  [4/8] SET_NETWORK_GROUP_HEADER...\n");
         rc = hailo_control_set_network_group_header(&hdr);
         shell_printf("        rc=%d\n", rc);
 
-        shell_printf("  [3/6] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
+        shell_printf("  [5/8] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
                      (unsigned)bufs.activation_len);
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_ACTIVATION,
                                             bufs.activation,
@@ -831,7 +845,7 @@ static int cmd_hailo(int argc, char *argv[])
         shell_puts("  [--] DIAG: sleeping 500 ms before BATCH_SWITCHING\n");
         hailo_platform->udelay(500000u);
 
-        shell_printf("  [4/6] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
+        shell_printf("  [6/8] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
                      (unsigned)bufs.batch_switching_len);
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING,
                                             bufs.batch_switching,
@@ -881,7 +895,7 @@ static int cmd_hailo(int argc, char *argv[])
             shell_printf("        BSC_IMASK_HOST=0x%08x\n", imask);
         }
 
-        shell_printf("  [5/6] SET_CONTEXT_INFO(PRELIMINARY, %u bytes)\n",
+        shell_printf("  [7/8] SET_CONTEXT_INFO(PRELIMINARY, %u bytes)\n",
                      (unsigned)bufs.preliminary_len);
         shell_printf("        CCW buffer iova=0x%lx\n",
                      (unsigned long)ccw_list.iova);
@@ -890,7 +904,7 @@ static int cmd_hailo(int argc, char *argv[])
                                             (uint32_t)bufs.preliminary_len);
         shell_printf("        rc=%d\n", rc);
 
-        shell_printf("  [6/6] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
+        shell_printf("  [8/8] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
                      (unsigned)bufs.dynamic_len);
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_DYNAMIC,
                                             bufs.dynamic,
