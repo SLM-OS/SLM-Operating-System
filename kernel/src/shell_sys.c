@@ -4177,6 +4177,35 @@ int cmd_bpmp(int argc, char *argv[])
                     pcie_rc, pcie_state);
     }
 
+    /* Step 3 kickoff: set APPL_CTRL.LTSSM_EN after the clock/reset
+     * sequence, and sample APPL_DEBUG LTSSM state a few times to see
+     * whether the link trains. This is a minimal stab at Step 3 —
+     * full RC init (DBI programming, Gen3/4 eq, iATU) is not here. */
+    if (mode[0] == 'l' && mode[1] == 't') { /* "ltssm" */
+        uart_puts("\r\n--- LTSSM_EN probe (trivial, no DBI init) ---\r\n");
+        volatile uint32_t *appl_ctrl  = (volatile uint32_t *)(uintptr_t)0x140a0004UL;
+        volatile uint32_t *appl_debug = (volatile uint32_t *)(uintptr_t)0x140a00d0UL;
+
+        uint32_t before_ctrl = *appl_ctrl;
+        uint32_t before_dbg  = *appl_debug;
+        uart_printf("  Before: APPL_CTRL=0x%08x APPL_DEBUG=0x%08x LTSSM=0x%02x\r\n",
+                    (unsigned)before_ctrl, (unsigned)before_dbg,
+                    (unsigned)((before_dbg >> 3) & 0x3F));
+
+        *appl_ctrl = before_ctrl | (1u << 7);   /* APPL_CTRL_LTSSM_EN */
+        __asm__ volatile("dsb sy" ::: "memory");
+
+        for (int i = 0; i < 10; i++) {
+            for (volatile uint32_t k = 0; k < 100000; k++) { }
+            uint32_t ctrl = *appl_ctrl;
+            uint32_t dbg  = *appl_debug;
+            uart_printf("  tick %d: APPL_CTRL=0x%08x LTSSM_EN=%u LTSSM=0x%02x\r\n",
+                        i, (unsigned)ctrl,
+                        (ctrl >> 7) & 1u,
+                        (unsigned)((dbg >> 3) & 0x3F));
+        }
+    }
+
     /* Step 3: Actually enable PEX2_C8_CORE + deassert the PCIe resets.
      * The real demonstration of BPMP IPC — and the door-opener for #25
      * Step 3 (PCIe RC re-init). Only runs when explicitly requested
