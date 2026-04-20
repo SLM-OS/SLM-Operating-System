@@ -2463,9 +2463,10 @@ static void test_cs_translate_application_header_boundary_bitmap(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_application_header(&info, &cfg, &hdr));
 
-    /* Input boundary at channel 0x02 → bit 2. Output at 0x03 → bit 3.
+    /* Input boundary at channel 0x02 → bit 2 (H2D range [0,15]).
+     * Output at 0x10 → bit 16 (D2H range [16,31]).
      * Config channel (0x01) must NOT be set. */
-    TEST_ASSERT_EQUAL_UINT32((1u << 2) | (1u << 3),
+    TEST_ASSERT_EQUAL_UINT32((1u << 2) | (1u << 16),
                              hdr.boundary_channels_bitmap[0]);
 }
 
@@ -2699,8 +2700,8 @@ static void test_cs_translate_activation_emits_open_boundary_output(void)
     TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 28), out.activation_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
                             out.activation[8]);
-    /* packed_vdma = config+2 = 0x03. */
-    TEST_ASSERT_EQUAL_UINT8(0x03, out.activation[16]);
+    /* packed_vdma = config+OUTPUT_OFFSET = 0x01+15 = 0x10 (first D2H). */
+    TEST_ASSERT_EQUAL_UINT8(0x10, out.activation[16]);
     uint64_t dma; memcpy(&dma, out.activation + 18, 8);
     TEST_ASSERT_EQUAL_UINT64(0xBB00000022220000ull, dma);
     uint32_t descs; memcpy(&descs, out.activation + 28, 4);
@@ -2749,9 +2750,9 @@ static void test_cs_translate_activation_emits_input_and_output(void)
     TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[16]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
                             out.activation[8 + 36]);
-    /* Output: packed_vdma = config(0x01) + OUTPUT_OFFSET(2) = 0x03.
-     * Body begins at offset 8+36+8 = 52; packed_vdma is byte 0. */
-    TEST_ASSERT_EQUAL_UINT8(0x03, out.activation[8 + 36 + 8]);
+    /* Output: packed_vdma = config(0x01) + OUTPUT_OFFSET(15) = 0x10.
+     * D2H range starts at 16. Body begins at offset 8+36+8 = 52. */
+    TEST_ASSERT_EQUAL_UINT8(0x10, out.activation[8 + 36 + 8]);
 }
 
 static void test_cs_translate_activation_skips_internal_pads(void)
@@ -5962,8 +5963,9 @@ static void test_inf_hailo_run_reuses_load_boundary_iovas(void)
     TEST_ASSERT_EQUAL_UINT32(expected_addr_l,
                              addr_l_dword & 0xFFFF0000u);
 
-    /* Boundary output channel = config_vdma(1) + OFFSET(2) = 3. */
-    memcpy(&addr_l_dword, &mock_bar2[3 * 32 + 0x08], 4);
+    /* Boundary output channel = config_vdma(1) + OFFSET(15) = 16
+     * (first valid D2H channel). channel_base(16) = 16 * 32 = 0x200. */
+    memcpy(&addr_l_dword, &mock_bar2[16 * 32 + 0x08], 4);
     uint32_t expected_out_addr_l = (uint32_t)((out_iova >> 16) & 0xFFFFu) << 16;
     TEST_ASSERT_EQUAL_UINT32(expected_out_addr_l,
                              addr_l_dword & 0xFFFF0000u);

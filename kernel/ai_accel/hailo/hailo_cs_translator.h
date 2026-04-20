@@ -75,15 +75,22 @@
  * cfg override. ACTIVATION's OpenBoundaryInput/Output emitter and
  * translate_allow_input_dataflow both use these so the two ends agree.
  *
- * On Hailo-8 PCIe, channel_index is a shared 0..31 pool — both H2D
- * and D2H draw from it. The `HAILO_PCIE_DMA_SRC_CHANNELS_BITMASK =
- * 0x0000FFFF` in the reference driver only controls register layout
- * within each channel's 32-byte window (host-side regs first for
- * channels 0..15, device-side regs first for 16..31 — see
- * get_channel_regs in hailo-vdma-common.c:576). Action type (32 vs
- * 33) is what tells firmware the direction. */
+ * On Hailo-8 PCIe, firmware v4.23 enforces distinct H2D and D2H
+ * channel-index ranges: H2D ∈ [0, 15], D2H ∈ [16, 31]. HailoRT's
+ * ChannelAllocator::get_available_channel_id branches on DmaDirection
+ * and picks from the appropriate half (see
+ * hailort-v4.23.0-channel_allocator.cpp and -hailort_driver.hpp:
+ * MIN_H2D_CHANNEL_INDEX=0 / MAX_H2D=15 / MIN_D2H=16 / MAX_D2H=31).
+ * Sending a D2H OpenBoundary with a channel in [0,15] causes firmware
+ * to reject ACTIVATION with VDMA_SERVICE_STATUS_INVALID_ENGINE_INDEX
+ * (observed 2026-04-20 on pi-5-1) — the status code name is
+ * misleading; the actual failure is "channel doesn't match direction".
+ *
+ * INPUT_OFFSET=1  → channel config+1   (H2D slot; with config=1 → 2)
+ * OUTPUT_OFFSET=15 → channel config+15 (D2H slot; with config=1 → 16,
+ *                    the first valid D2H index). */
 #define HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET   1u
-#define HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET  2u
+#define HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET  15u
 
 struct hailo_cs_translate_cfg {
     /* packed_vdma_channel_id for the config stream (the channel the
