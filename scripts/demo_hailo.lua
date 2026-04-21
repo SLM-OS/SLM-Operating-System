@@ -227,13 +227,26 @@ if bench_iters > 0 then
 end
 
 -- ------------------------------------------------------------------
--- Step 5: closing summary
+-- Step 5: release the slot
+-- ------------------------------------------------------------------
+header("5. Unload — slm.hailo.unload(handle)")
+local released = slm.hailo.unload(handle)
+note(string.format("Unload result: %s", tostring(released)))
+local st_after = slm.hailo.status()
+if st_after and st_after.available then
+    note(string.format("  slots in use now: %d / %d",
+        st_after.slots_in_use, st_after.slots_max))
+end
+
+-- ------------------------------------------------------------------
+-- Step 6: closing summary
 -- ------------------------------------------------------------------
 header("Demo Complete")
 note("Hailo NPU path exercised from Lua:")
 note("  - slm.hailo.status()  — device probe")
 note("  - slm.hailo.load()    — HEF staging + firmware context-switch")
 note("  - slm.hailo.infer()   — boundary DMA in, NPU compute, DMA out")
+note("  - slm.hailo.unload()  — release the NPU slot")
 note("")
 note("For narration: this path is end-to-end userspace Lua on a bare-metal")
 note("kernel — no Linux, no HailoRT driver. The firmware protocol (ACTIVATION,")

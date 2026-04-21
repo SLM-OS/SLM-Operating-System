@@ -2159,9 +2159,36 @@ static int l_hailo_status(lua_State *L)
     return 1;
 }
 
+/*
+ * slm.hailo.unload(handle) -> bool
+ *
+ * Releases the NPU slot claimed by a prior slm.hailo.load(). The four-
+ * slot cap means long-running scripts that cycle through models must
+ * unload before loading the next one. Returns true on success, false
+ * on any failure (device absent, out-of-range handle, already-free
+ * slot, underlying free_model error). load()/infer()/unload() form the
+ * minimum lifecycle surface a Lua app needs.
+ */
+static int l_hailo_unload(lua_State *L)
+{
+    if (!L) return 0;
+    lua_Integer handle = luaL_checkinteger(L, 1);
+
+    struct inference_device *dev = lua_hailo_dev();
+    if (!dev || handle < 0 || handle > INT32_MAX) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    int rc = inference_free_model(dev, (int32_t)handle);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
 static const luaL_Reg slm_hailo_lib[] = {
     {"load",   l_hailo_load},
     {"infer",  l_hailo_infer},
+    {"unload", l_hailo_unload},
     {"status", l_hailo_status},
     {NULL, NULL}
 };

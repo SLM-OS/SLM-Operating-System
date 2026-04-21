@@ -1161,7 +1161,7 @@ static void test_slm_eviction_bindings(void)
  * ============================================================================ */
 
 /*
- * Test: slm.hailo namespace is present and exposes the three entry points.
+ * Test: slm.hailo namespace is present and exposes the four entry points.
  */
 static void test_slm_hailo_namespace(void)
 {
@@ -1172,7 +1172,52 @@ static void test_slm_hailo_namespace(void)
         "assert(type(slm.hailo) == 'table', 'slm.hailo should be a table')\n"
         "assert(type(slm.hailo.load) == 'function', 'hailo.load is a function')\n"
         "assert(type(slm.hailo.infer) == 'function', 'hailo.infer is a function')\n"
+        "assert(type(slm.hailo.unload) == 'function', 'hailo.unload is a function')\n"
         "assert(type(slm.hailo.status) == 'function', 'hailo.status is a function')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.unload returns false for invalid handles and
+ * when the device is absent. Never raises.
+ */
+static void test_slm_hailo_unload_bad_handle(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(slm.hailo.unload(-1) == false, 'negative handle -> false')\n"
+        "assert(slm.hailo.unload(9999) == false, 'unknown handle -> false')\n"
+        "assert(slm.hailo.unload(0) == false, 'no-device or unloaded slot -> false')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.unload argument validation — handle must be numeric.
+ */
+static void test_slm_hailo_unload_bad_args(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local ok1 = pcall(slm.hailo.unload)\n"
+        "assert(not ok1, 'unload() with no args should raise')\n"
+        "local ok2 = pcall(slm.hailo.unload, nil)\n"
+        "assert(not ok2, 'unload(nil) should raise')\n"
+        "local ok3 = pcall(slm.hailo.unload, 'foo')\n"
+        "assert(not ok3, 'unload(non-numeric string) should raise')\n"
+        "local ok4 = pcall(slm.hailo.unload, {})\n"
+        "assert(not ok4, 'unload(table) should raise')";
 
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);
@@ -2916,6 +2961,8 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_hailo_load_bad_args);
     RUN_TEST(test_slm_hailo_infer_bad_handle);
     RUN_TEST(test_slm_hailo_infer_bad_args);
+    RUN_TEST(test_slm_hailo_unload_bad_handle);
+    RUN_TEST(test_slm_hailo_unload_bad_args);
 
     RUN_TEST(test_demo_file_exists);
     RUN_TEST(test_demo_menu_file_exists);

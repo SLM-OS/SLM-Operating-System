@@ -128,6 +128,9 @@ Walks through the Hailo-8L AI HAT+ bring-up entirely from Lua:
 5. **Report** — prints an INT8 argmax of the first output chunk plus a
    16-byte hexdump so the reviewer sees actual NPU output, not just a
    length count.
+6. **Unload** — `slm.hailo.unload(handle)` releases the NPU slot.
+   Scripts that cycle through multiple models must unload before the
+   next `load()` since the backend caps at four concurrent slots.
 
 On builds without the Hailo backend (QEMU, Pi 5 without the AI HAT+,
 other platforms) the script prints the `available=false` status and
