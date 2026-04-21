@@ -57,6 +57,7 @@ struct xhci_urb_slot {
     bool             in_use;
     struct usb_urb  *urb;
     uintptr_t        first_trb_phys;
+    uintptr_t        data_trb_phys;
     uintptr_t        last_trb_phys;
     struct xhci_ring *ring;
     unsigned         dci;
@@ -123,19 +124,35 @@ static bool xhci_urb_is_get_descriptor(const struct usb_urb *urb)
 }
 
 static void xhci_log_control_urb(const char *tag, const struct usb_urb *urb,
+                                 const struct xhci_urb_slot *slot,
+                                 uintptr_t event_trb_phys,
                                  uint8_t cc, uint32_t residual)
 {
     if (urb == NULL || urb->transfer_type != USB_XFER_CONTROL)
         return;
 
+    const char *stage = "unknown";
+    if (slot != NULL) {
+        if (event_trb_phys == slot->first_trb_phys) {
+            stage = "setup";
+        } else if (slot->data_trb_phys != 0 &&
+                   event_trb_phys == slot->data_trb_phys) {
+            stage = "data";
+        } else if (event_trb_phys == slot->last_trb_phys) {
+            stage = "status";
+        }
+    }
+
     INFO("xhci: %s ctrl req=0x%02x type=0x%02x wValue=0x%04x wIndex=0x%04x "
-         "wLength=%u cc=%u residual=%u actual=%u status=%d",
+         "wLength=%u stage=%s trb=0x%lx cc=%u residual=%u actual=%u status=%d",
          tag,
          (unsigned)urb->setup.bRequest,
          (unsigned)urb->setup.bmRequestType,
          (unsigned)urb->setup.wValue,
          (unsigned)urb->setup.wIndex,
          (unsigned)urb->setup.wLength,
+         stage,
+         (unsigned long)event_trb_phys,
          (unsigned)cc,
          (unsigned)residual,
          (unsigned)urb->actual_length,
@@ -209,7 +226,9 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     if (has_data) {
         xhci_build_data_stage(&tmpl, (uintptr_t)urb->buffer,
                               urb->length, data_in, 0);
-        if (xhci_ring_put(r, &tmpl) == NULL) goto fail;
+        slot_trb = xhci_ring_put(r, &tmpl);
+        if (slot_trb == NULL) goto fail;
+        slot->data_trb_phys = (uintptr_t)slot_trb;
     }
 
     /* 3. Status Stage — Direction is opposite of the Data Stage. For
@@ -372,7 +391,7 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
     }
 
     if (urb->transfer_type == USB_XFER_CONTROL && cc != XHCI_CC_SUCCESS)
-        xhci_log_control_urb("event", urb, cc, residual);
+        xhci_log_control_urb("event", urb, slot, trb_phys, cc, residual);
 
     usb_urb_complete_fn cb = urb->complete;
     xhci_urb_slot_free(slot);
