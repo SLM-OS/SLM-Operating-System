@@ -430,6 +430,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
     };
 
     /* Step 4: translate. */
+    uart_puts("[cs_load] S4.trans_app\r\n");
     struct hailo_cs_application_header hdr;
     rc = hailo_cs_translate_application_header(info, &tcfg, &hdr);
     if (rc != HAILO_OK) {
@@ -445,14 +446,17 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * Stack-local is the simplest fix and keeps this function re-
      * entrant. Tensor + desc_list allocations earlier in this call
      * already consume kernel-stack frame; the extra 2 KB is budgeted. */
+    uart_puts("[cs_load] S4.trans_ctx\r\n");
     struct hailo_cs_context_buffers cs_bufs;
     rc = hailo_cs_translate_contexts(info, &tcfg, &cs_bufs);
     if (rc != HAILO_OK) {
         WARN("hailo backend: translate_contexts failed (rc=%d)", rc);
         goto fail;
     }
+    uart_puts("[cs_load] S4.trans_done\r\n");
 
     /* Step 5: six RPCs. Each must succeed; abort on any failure. */
+    uart_puts("[cs_load] R1.reset\r\n");
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
@@ -461,12 +465,15 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(RESET) failed (rc=%d)", rc);
         goto fail;
     }
+    uart_puts("[cs_load] R1.ok\r\n");
 
+    uart_puts("[cs_load] R2.ng_hdr\r\n");
     rc = hailo_control_set_network_group_header(&hdr);
     if (rc != HAILO_OK) {
         WARN("hailo backend: SET_NETWORK_GROUP_HEADER failed (rc=%d)", rc);
         goto fail;
     }
+    uart_puts("[cs_load] R2.ok\r\n");
 
     const struct {
         enum hailo_cs_context_type type;
@@ -484,6 +491,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
           (uint32_t)cs_bufs.dynamic_len,         "DYNAMIC" },
     };
     for (uint32_t i = 0; i < sizeof(ctxs) / sizeof(ctxs[0]); i++) {
+        uart_puts("[cs_load] R.ctx.send\r\n");
         rc = hailo_control_set_context_info(ctxs[i].type,
                                             ctxs[i].bytes, ctxs[i].len);
         if (rc != HAILO_OK) {
@@ -491,8 +499,10 @@ static int context_switch_load(struct hailo_model_slot *slot,
                  ctxs[i].name, rc);
             goto fail;
         }
+        uart_puts("[cs_load] R.ctx.ok\r\n");
     }
 
+    uart_puts("[cs_load] R7.enabled\r\n");
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_ENABLED,
             /*application_index=*/0,
@@ -593,13 +603,10 @@ static int hailo_backend_load_model(struct inference_device *dev,
     const struct hef_pad_info *in_pad, *out_pad;
     uint32_t input_bytes, output_bytes;
     if (pick_largest_pads(&info, &in_pad, &out_pad, &input_bytes, &output_bytes) != 0) {
-        uart_printf("[hailo] load_model: pick_largest_pads failed "
-                    "(pad_count=%u)\r\n", (unsigned)info.pad_count);
-        for (uint32_t i = 0; i < info.pad_count && i < 8; i++) {
-            const struct hef_pad_info *p = &info.pads[i];
-            uart_printf("[hailo] pad[%u]: is_input=%d bytes=%u\r\n",
-                        (unsigned)i, (int)p->is_input, (unsigned)pad_bytes(p));
-        }
+        uart_puts("[hailo] load_model: pick_largest_pads failed\r\n");
+        /* Per-pad dump removed — was corrupting UART mid-print under
+         * conditions not yet understood. Simpler puts() is enough to
+         * confirm we reached the fallback. */
 
         /* Phase 8 diagnostic shortcut. If the parser found an input pad
          * but no output pad (the DFC 3.33.1 partial_network_groups +
