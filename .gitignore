@@ -12,6 +12,9 @@ cmake-build-*/
 .claude/worktrees
 .codex
 
+# Codex local state
+.codex
+
 # Temporary output file
 CLAUDE_OUTPUT.md
 
