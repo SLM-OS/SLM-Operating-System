@@ -2060,6 +2060,42 @@ static void test_demo_hailo_file_exists(void)
 }
 
 /*
+ * End-to-end: run the Hailo demo script under QEMU via lua_slm_dofile
+ * (which routes through the VFS, unlike Lua's stubbed dofile). The
+ * script is designed to exit cleanly in every environment — on QEMU
+ * load() returns nil for a non-existent HEF path and the script
+ * prints the error-path message and returns. A non-zero rc from
+ * lua_slm_dofile signals a syntax error, missing binding, or raised
+ * error in the script. Skipped when EMBED_DEMO_SCRIPTS is OFF.
+ *
+ * bench_iters=0 via `arg[2]` so the script skips its inference-loop
+ * even if a future mock-backend upgrade lets load() succeed —
+ * keeping the test fast and deterministic.
+ */
+static void test_demo_hailo_file_dofile_runs_cleanly(void)
+{
+#if !defined(EMBED_DEMO_SCRIPTS)
+    TEST_IGNORE_MESSAGE("EMBED_DEMO_SCRIPTS=OFF — demo scripts not embedded");
+#else
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    /* No-op sleep/yield so the script doesn't stall the harness, and
+     * pin arg[] so the script's second-arg lookup hits bench_iters=0. */
+    int setup = lua_slm_dostring(L,
+        "slm.sleep = function() end\n"
+        "slm.yield = function() end\n"
+        "arg = { '/mnt/files/does_not_exist.hef', '0' }");
+    TEST_ASSERT_EQUAL_INT(0, setup);
+
+    int run = lua_slm_dofile(L, "/mnt/files/demo_hailo.lua");
+    TEST_ASSERT_EQUAL_INT(0, run);
+
+    lua_slm_close(L);
+#endif
+}
+
+/*
  * Test: slm.model_load_mnist loads the embedded MNIST model.
  * Returns a non-negative index on success.
  */
@@ -2967,6 +3003,7 @@ int test_suite_lua(void)
     RUN_TEST(test_demo_file_exists);
     RUN_TEST(test_demo_menu_file_exists);
     RUN_TEST(test_demo_hailo_file_exists);
+    RUN_TEST(test_demo_hailo_file_dofile_runs_cleanly);
 
     /* Dofile (script loading from filesystem) */
     RUN_TEST(test_slm_dofile_nonexistent);

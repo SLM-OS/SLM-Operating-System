@@ -165,6 +165,51 @@ without a compile-time guard.
 | `slm.infer_stats()` | Cumulative inference statistics: `{total, total_ns, min_ns, max_ns, last_ns, errors}`. |
 | `slm.gpu_status()` | GPU subsystem info: `{available, name, device, compute_ready, unified_memory, memory_size}`. `.available` is always set; other fields populated when a driver is present. |
 
+### Hailo NPU (AI HAT+)
+
+The `slm.hailo` sub-table exposes the Hailo-8L NPU backend when the Pi 5
+AI HAT+ is present (the backend registers itself during boot after
+probing the external PCIe link). On platforms without the AI HAT+ —
+QEMU, x86-64, Pi 5 without the HAT, Jetson — every function below
+degrades gracefully: `status()` reports `available=false`,
+`load()`/`infer()` return `nil`, `unload()` returns `false`. Scripts
+that use `slm.hailo.*` therefore remain portable across platforms.
+
+| Function | Description |
+|----------|-------------|
+| `slm.hailo.status()` | Device probe. Returns a table: `{available}` when the backend is absent; `{available, name, slots_in_use, slots_max}` when present. `name` is `"hailo-8"`; `slots_max` is the hard cap (currently 4 concurrent models). |
+| `slm.hailo.load(path)` | Load a compiled HEF from the VFS, staging it through a PMM-allocated buffer. Drives the firmware context-switch sequence (ACTIVATION → PRELIMINARY → DYNAMIC → ENABLED). Returns the model handle (integer ≥ 0) on success or `nil` on any failure (missing file, bad header, backend absent, all slots full). |
+| `slm.hailo.infer(handle, input_bytes)` | Run one inference. `input_bytes` is a Lua string whose byte length must match the model's declared input tensor size (retrieved from the HEF at load time). Returns the raw output tensor as a Lua string, or `nil` on any failure (wrong input size, invalid handle, backend absent, firmware error). |
+| `slm.hailo.unload(handle)` | Release the NPU slot claimed by a prior `load()`. Returns `true` on success, `false` on any failure. Required before `load()`ing a fifth model once the four-slot cap is reached. |
+
+Typical lifecycle:
+
+```lua
+local s = slm.hailo.status()
+if not s.available then
+    print("No Hailo NPU on this platform")
+    return
+end
+
+local h = slm.hailo.load("/mnt/files/mobilenet_v1.hef")
+if h == nil then error("load failed") end
+
+-- Input size is model-specific. For a probe-style demo, see
+-- scripts/demo_hailo.lua which tries common shapes until one is
+-- accepted.
+local input = string.rep("\0", 150528)  -- 224 * 224 * 3
+local output = slm.hailo.infer(h, input)
+if output == nil then error("infer failed") end
+
+-- output is a raw INT8 tensor (1000 classes for MobileNet-V1).
+print("output length:", #output)
+
+assert(slm.hailo.unload(h))
+```
+
+Full walkthrough with a rolling-FPS benchmark: `lua /mnt/files/demo_hailo.lua`
+(see `docs/demo.md` §"Hailo NPU demo").
+
 ### Memory Statistics
 
 ```lua
