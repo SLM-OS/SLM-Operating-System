@@ -38,7 +38,7 @@ static inline void xhci_build_setup_stage(struct xhci_trb *out,
     memcpy(&out->param_lo, setup, sizeof(*setup));
     out->status  = 8U;
     out->control = XHCI_TRB_TYPE(XHCI_TRB_SETUP_STAGE) |
-                   XHCI_TRB_IDT | XHCI_TRB_CH |
+                   XHCI_TRB_IDT |
                    (trt_field << 16) |
                    ((uint32_t)cycle & 0x1U);
 }
@@ -46,9 +46,8 @@ static inline void xhci_build_setup_stage(struct xhci_trb *out,
 /*
  * Data Stage TRB (§6.4.1.2.2). `param` is the data buffer physical
  * address. `status` carries the TRB Transfer Length. DIR bit (bit 16
- * of the control dword) is set for IN, cleared for OUT. The Data
- * Stage chains into the final Status Stage, and ISP is set so a
- * short-packet IN raises an event.
+ * of the control dword) is set for IN, cleared for OUT. ISP is set so
+ * a short-packet IN raises an event.
  */
 static inline void xhci_build_data_stage(struct xhci_trb *out,
                                          uintptr_t buf_phys,
@@ -62,7 +61,7 @@ static inline void xhci_build_data_stage(struct xhci_trb *out,
     out->status   = length & 0x1FFFFU;
     uint32_t dir  = in ? (1u << 16) : 0u;
     out->control  = XHCI_TRB_TYPE(XHCI_TRB_DATA_STAGE) |
-                    dir | XHCI_TRB_ISP | XHCI_TRB_CH |
+                    dir | XHCI_TRB_ISP |
                     ((uint32_t)cycle & 0x1U);
 }
 
