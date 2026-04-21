@@ -366,79 +366,82 @@ int xhci_hcd_port_reset(uint8_t port)
         return -1;
 
     uint8_t pidx = xhci_active_port;
-    uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
-
-    /*
-     * PORTSC write discipline per §5.4.8: read-modify-write, clear the
-     * RW1CS change bits we don't intend to touch (writing 1 would
-     * clear them), then set PR. The controller starts the reset and
-     * signals completion by setting PRC. We clear PRC at the end with
-     * a single RW1CS write.
-     *
-     * Known limitation: on jetson-nano-1 post-kexec with a Realtek
-     * USB hub / CDC-ECM dongle already enumerated by Linux, this
-     * plain PR sequence completes with PRC=1 but the first EP0
-     * control transfer after ADDRESS_DEVICE returns cc=4 (USB
-     * transaction error). A PP=0/PP=1 power-cycle variant was tried
-     * as a harder reset; it got the port stuck in PLS=Polling
-     * instead of U0 and made things worse. Follow-on investigation
-     * (see the PR description) owns fixing that — possible angles
-     * include tegra-xusb padctl/PHY re-programming, or gating the
-     * reset behind an explicit clear of pre-kexec SetPortFeature
-     * state that Linux may have latched in the hub's upstream port.
-     */
-    uint32_t write = portsc & ~XHCI_PORTSC_RW1CS_MASK;
-    write |= XHCI_PORTSC_PR;
-    xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
-
-    uint64_t start = timer_get_count();
     uint64_t freq  = timer_get_frequency();
     uint64_t ticks = freq / 2;   /* 500 ms */
-    while (1) {
-        uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
-        if ((sc & XHCI_PORTSC_PRC) && !(sc & XHCI_PORTSC_PR)) {
-            uint32_t ack = (sc & ~XHCI_PORTSC_RW1CS_MASK) | XHCI_PORTSC_PRC;
-            xhci_op_w32(XHCI_OP_PORTSC(pidx), ack);
-            /* Let the link settle before reading back the final
-             * PORTSC speed field. Tegra234 post-reset speed bits
-             * occasionally lag PRC by a few ms. */
-            uint64_t settle_start = timer_get_count();
-            uint64_t settle_ticks = timer_get_frequency() / 100;  /* 10 ms */
-            while (timer_get_count() - settle_start < settle_ticks) { }
-            uint32_t final_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
-            if (!(final_sc & XHCI_PORTSC_PED)) {
-                /*
-                 * On the inherited-kexec path the first read after
-                 * PRC frequently lands in PED=0 / PLS=7. Give the link
-                 * a little longer to settle before usb_core tries the
-                 * first EP0 transfer against that stale snapshot.
-                 */
-                uint64_t extra_start = timer_get_count();
-                uint64_t extra_ticks = timer_get_frequency() / 5; /* 200 ms */
-                while (timer_get_count() - extra_start < extra_ticks) {
-                    uint32_t retry_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
-                    uint32_t retry_pls =
-                        (retry_sc & XHCI_PORTSC_PLS_MASK) >>
-                        XHCI_PORTSC_PLS_SHIFT;
-                    if ((retry_sc & XHCI_PORTSC_PED) || retry_pls != 7U) {
-                        INFO("xhci: PORTSC[%u] post-reset settle (0x%08x -> 0x%08x)",
-                             pidx, (unsigned)final_sc, (unsigned)retry_sc);
-                        final_sc = retry_sc;
-                        break;
+
+    for (unsigned attempt = 1; attempt <= 3; attempt++) {
+        uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+
+        /*
+         * PORTSC write discipline per §5.4.8: read-modify-write, clear the
+         * RW1CS change bits we don't intend to touch (writing 1 would
+         * clear them), then set PR. The controller starts the reset and
+         * signals completion by setting PRC.
+         */
+        uint32_t write = portsc & ~XHCI_PORTSC_RW1CS_MASK;
+        write |= XHCI_PORTSC_PR;
+        xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
+
+        uint64_t start = timer_get_count();
+        while (1) {
+            uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+            if ((sc & XHCI_PORTSC_PRC) && !(sc & XHCI_PORTSC_PR)) {
+                uint32_t ack = (sc & ~XHCI_PORTSC_RW1CS_MASK) |
+                               XHCI_PORTSC_PRC |
+                               ((sc & XHCI_PORTSC_PEC) ? XHCI_PORTSC_PEC : 0U) |
+                               ((sc & XHCI_PORTSC_CSC) ? XHCI_PORTSC_CSC : 0U);
+                xhci_op_w32(XHCI_OP_PORTSC(pidx), ack);
+
+                /* Let the link settle before reading back the final
+                 * PORTSC speed field. Tegra234 post-reset speed bits
+                 * occasionally lag PRC by a few ms. */
+                uint64_t settle_start = timer_get_count();
+                uint64_t settle_ticks = timer_get_frequency() / 100;  /* 10 ms */
+                while (timer_get_count() - settle_start < settle_ticks) { }
+                uint32_t final_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+                if (!(final_sc & XHCI_PORTSC_PED)) {
+                    /*
+                     * On the inherited-kexec path the first read after
+                     * PRC frequently lands in PED=0 / PLS=7. Give the link
+                     * a little longer to settle before declaring the reset
+                     * incomplete.
+                     */
+                    uint64_t extra_start = timer_get_count();
+                    uint64_t extra_ticks = timer_get_frequency() / 5; /* 200 ms */
+                    while (timer_get_count() - extra_start < extra_ticks) {
+                        uint32_t retry_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+                        uint32_t retry_pls =
+                            (retry_sc & XHCI_PORTSC_PLS_MASK) >>
+                            XHCI_PORTSC_PLS_SHIFT;
+                        if ((retry_sc & XHCI_PORTSC_PED) || retry_pls != 7U) {
+                            INFO("xhci: PORTSC[%u] post-reset settle (0x%08x -> 0x%08x)",
+                                 pidx, (unsigned)final_sc, (unsigned)retry_sc);
+                            final_sc = retry_sc;
+                            break;
+                        }
                     }
                 }
+                INFO("xhci: PORTSC[%u] reset complete (attempt %u, portsc=0x%08x -> 0x%08x)",
+                     pidx, attempt, (unsigned)sc, (unsigned)final_sc);
+                if (final_sc & XHCI_PORTSC_PED) {
+                    xhci_active_portsc = final_sc;
+                    return 0;
+                }
+
+                WARN("xhci: PORTSC[%u] reset left PED=0 (0x%08x)%s",
+                     pidx, (unsigned)final_sc,
+                     attempt < 3 ? " — retrying" : "");
+                break;
             }
-            INFO("xhci: PORTSC[%u] reset complete (portsc=0x%08x → 0x%08x)",
-                 pidx, (unsigned)sc, (unsigned)final_sc);
-            xhci_active_portsc = final_sc;
-            return 0;
-        }
-        if (timer_get_count() - start >= ticks) {
-            WARN("xhci: PORTSC[%u] reset timeout (portsc=0x%08x)",
-                 pidx, (unsigned)xhci_op_r32(XHCI_OP_PORTSC(pidx)));
-            return -1;
+            if (timer_get_count() - start >= ticks) {
+                WARN("xhci: PORTSC[%u] reset timeout (attempt %u, portsc=0x%08x)",
+                     pidx, attempt,
+                     (unsigned)xhci_op_r32(XHCI_OP_PORTSC(pidx)));
+                return -1;
+            }
         }
     }
+    return -1;
 }
 
 /* -------------------------------------------------------------------------- */
