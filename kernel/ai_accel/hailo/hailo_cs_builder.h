@@ -2,13 +2,13 @@
  * hailo_cs_builder.h — accumulator for wire-format action bytes.
  *
  * A SET_CONTEXT_INFO RPC carries `context_network_data`: a flat
- * byte stream of [8-byte common_action_header_t][fixed-size body]
- * tuples, one per action. (The header is 8 bytes — 1-byte action_type
- * + 3 pad bytes + 4-byte time_stamp — per the v4.23 firmware wire
- * format; see hailo_cs_actions.h.) This builder accumulates those
- * bytes into a caller-owned buffer, returning the total length when
- * done. The buffer is then handed to hailo_control_set_context_info
- * (which chunks it at HAILO_CS_CONTEXT_CHUNK_MAX_BYTES internally).
+ * byte stream of [5-byte common_action_header_t][fixed-size body]
+ * tuples, one per action. (The header is 5 bytes — 1-byte action_type
+ * + 4-byte time_stamp — per the v4.23 firmware wire format; see
+ * hailo_cs_actions.h.) This builder accumulates those bytes into
+ * a caller-owned buffer, returning the total length when done. The
+ * buffer is then handed to hailo_control_set_context_info (which
+ * chunks it at HAILO_CS_CONTEXT_CHUNK_MAX_BYTES internally).
  *
  * The builder is a plain in-memory assembler — no locking, no
  * allocation. Callers provide the backing buffer; the builder
