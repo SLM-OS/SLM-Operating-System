@@ -814,6 +814,15 @@ static int cmd_hailo(int argc, char *argv[])
             hailo_tensor_free(&ccw_tensor);
             return 0;
         }
+        /* #180 bisect: argv[3] == "dcc0" overrides dynamic_contexts_count
+         * to 0. Tests whether earlier 2026-04-19 "BURST-only rc=0"
+         * observation was possible because dcc=0 changes firmware's
+         * expectation of ACTIVATION content. */
+        bool dcc0 = (argc >= 4 && strcmp(argv[3], "dcc0") == 0);
+        if (dcc0) {
+            hdr.dynamic_contexts_count = 0;
+            shell_puts("  [--] DIAG: dynamic_contexts_count overridden to 0\n");
+        }
 
         struct hailo_cs_context_buffers bufs;
         terr = hailo_cs_translate_contexts(&info, &tcfg, &bufs);
@@ -958,12 +967,16 @@ static int cmd_hailo(int argc, char *argv[])
                                             (uint32_t)bufs.preliminary_len);
         shell_printf("        rc=%d\n", rc);
 
-        shell_printf("  [8/8] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
-                     (unsigned)bufs.dynamic_len);
-        rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_DYNAMIC,
-                                            bufs.dynamic,
-                                            (uint32_t)bufs.dynamic_len);
-        shell_printf("        rc=%d\n", rc);
+        if (!dcc0) {
+            shell_printf("  [8/8] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
+                         (unsigned)bufs.dynamic_len);
+            rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_DYNAMIC,
+                                                bufs.dynamic,
+                                                (uint32_t)bufs.dynamic_len);
+            shell_printf("        rc=%d\n", rc);
+        } else {
+            shell_puts("  [8/8] SKIP: DYNAMIC (dcc0 mode)\n");
+        }
 
         hailo_vdma_desc_list_free(&bnd_out_list);
         hailo_vdma_desc_list_free(&bnd_in_list);
