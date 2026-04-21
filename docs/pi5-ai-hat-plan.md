@@ -820,13 +820,57 @@ cache-clean → start H2D/D2H channels → reprogram desc lists →
 submit-and-wait on both → cache-invalidate output copy → stop
 channels.
 
-### Phase 7: Shell Integration & Demo Polish (1 week)
+### Phase 7: Shell Integration & Demo Polish ✅ software-complete (2026-04-21)
 
-**Deliverables:**
-- Lua binding: `slm.hailo.load(path)`, `slm.hailo.infer(model, tensor)`, `slm.hailo.status()`.
-- Demo script that runs MobileNetV1 classification on a small embedded image (test data in VFS), shows live FPS in `top`-style UI.
-- `docs/demo.md` updated with an AI HAT+ demo path.
-- Update `docs/capstone-feature-status.md` GPU Inference row: Pi 5 column goes from "—" to "Hailo-8L via AI HAT+".
+**Delivered:**
+- Lua bindings under `slm.hailo.*` — `load(path)`, `infer(handle, input)`,
+  `unload(handle)`, and `status()`. `load` resolves paths through the
+  shell's VFS helper, stages the HEF via PMM-page allocation, and
+  hands bytes to `inference_load_model`. `infer` looks up the
+  model's declared tensor sizes via a new `hailo_backend_model_sizes`
+  helper, wraps input/output in `inference_tensor_t` structs, and
+  returns the raw output bytes as a Lua string. `unload` wraps
+  `inference_free_model` so long-running scripts that cycle through
+  models can release slots before loading the next. `status` reports
+  availability, the registered backend name (`hailo-8`), and slot
+  accounting. All four degrade to `nil` / `available=false` on
+  builds where no Hailo backend is registered (QEMU, Pi 5 without
+  the AI HAT+, other platforms), so the same script runs everywhere.
+- `scripts/demo_hailo.lua` — six-step walkthrough: status probe → HEF
+  load → size-probing single inference → benchmark loop with rolling
+  throughput + latency percentiles (min, p50, p95, p99, max, avg) →
+  slot release → closing summary. Default 100 iterations, overridable
+  via the script's second argument. Embedded in the kernel ELF via
+  `.incbin` alongside the other demo scripts; written to
+  `/mnt/files/demo_hailo.lua` at boot.
+- `demo_menu.lua` key `h` delegates to the Hailo script so the demo
+  menu exposes the NPU path alongside the existing SMP / scheduling /
+  eviction / inference / components sections.
+- `docs/demo.md` — new §"Hailo NPU demo" section with the usage
+  block, per-step explanation, and QEMU vs hardware behavior notes.
+- `docs/capstone-feature-status.md` — Pi 5 Hailo entry bumped to
+  Phase 7 with a reference to the demo doc.
+- 10 new tests in `kernel/tests/test_lua.c` (6 binding, 1 embedded-
+  file existence, 3 namespace / unload argument).
+
+**What's outside Phase 7:**
+- **Embedded test-image bytes** — the original plan called for
+  "MobileNetV1 classification on a small embedded image (test data
+  in VFS)". The current script probes a set of common input sizes
+  and runs the model against zeroed input, so classification output
+  is deterministic-but-meaningless. A reproducible classification
+  demo would require staging a calibrated 224×224 INT8 image (or the
+  HEF's per-model preprocessor output) alongside the HEF. Marginal
+  polish; deferred.
+- **top-style refreshing UI** — the rolling-stats approach (prints a
+  line every ~10 % of iterations) is the scroll-based equivalent for
+  a serial console without ANSI cursor control. A true refreshing
+  UI would need a cursor-save/restore pair and is not worth the
+  scope expansion.
+- **Hardware verification** — software-complete on QEMU. Running
+  `demo_hailo.lua` on pi-5-1 with a real HEF is the natural next
+  step but sits under Phase 8 / demo-readiness since it needs a
+  compiled mobilenet_v1 HEF staged on the SD card.
 
 ---
 
