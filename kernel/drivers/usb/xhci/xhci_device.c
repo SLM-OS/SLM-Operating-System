@@ -406,6 +406,28 @@ int xhci_hcd_port_reset(uint8_t port)
             uint64_t settle_ticks = timer_get_frequency() / 100;  /* 10 ms */
             while (timer_get_count() - settle_start < settle_ticks) { }
             uint32_t final_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+            if (!(final_sc & XHCI_PORTSC_PED)) {
+                /*
+                 * On the inherited-kexec path the first read after
+                 * PRC frequently lands in PED=0 / PLS=7. Give the link
+                 * a little longer to settle before usb_core tries the
+                 * first EP0 transfer against that stale snapshot.
+                 */
+                uint64_t extra_start = timer_get_count();
+                uint64_t extra_ticks = timer_get_frequency() / 5; /* 200 ms */
+                while (timer_get_count() - extra_start < extra_ticks) {
+                    uint32_t retry_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+                    uint32_t retry_pls =
+                        (retry_sc & XHCI_PORTSC_PLS_MASK) >>
+                        XHCI_PORTSC_PLS_SHIFT;
+                    if ((retry_sc & XHCI_PORTSC_PED) || retry_pls != 7U) {
+                        INFO("xhci: PORTSC[%u] post-reset settle (0x%08x -> 0x%08x)",
+                             pidx, (unsigned)final_sc, (unsigned)retry_sc);
+                        final_sc = retry_sc;
+                        break;
+                    }
+                }
+            }
             INFO("xhci: PORTSC[%u] reset complete (portsc=0x%08x → 0x%08x)",
                  pidx, (unsigned)sc, (unsigned)final_sc);
             xhci_active_portsc = final_sc;
