@@ -1148,6 +1148,218 @@ static void test_slm_eviction_bindings(void)
     lua_slm_close(L);
 }
 
+/* ============================================================================
+ * Hailo NPU Bindings (Phase 7)
+ *
+ * slm.hailo.{load, infer, unload, status} are registered on every platform,
+ * but light up only when a hailo-8 inference_device is present. The QEMU
+ * test harness registers a mock hailo-8 backend (so status().available is
+ * true on make test), yet no HEF is staged on the VFS and the mock doesn't
+ * auto-advance infer(), so load()/infer() return nil for every input these
+ * tests provide. Each test covers both branches where applicable — status
+ * checks both available=true and available=false shapes; load/infer bad-
+ * arg and bad-handle cases return nil regardless. These tests pin the
+ * surface area so the contract can't regress silently.
+ * ============================================================================ */
+
+/*
+ * Test: slm.hailo namespace is present and exposes the four entry points.
+ */
+static void test_slm_hailo_namespace(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(type(slm.hailo) == 'table', 'slm.hailo should be a table')\n"
+        "assert(type(slm.hailo.load) == 'function', 'hailo.load is a function')\n"
+        "assert(type(slm.hailo.infer) == 'function', 'hailo.infer is a function')\n"
+        "assert(type(slm.hailo.unload) == 'function', 'hailo.unload is a function')\n"
+        "assert(type(slm.hailo.status) == 'function', 'hailo.status is a function')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.unload returns false for invalid handles and
+ * when the device is absent. Never raises.
+ */
+static void test_slm_hailo_unload_bad_handle(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(slm.hailo.unload(-1) == false, 'negative handle -> false')\n"
+        "assert(slm.hailo.unload(9999) == false, 'unknown handle -> false')\n"
+        "assert(slm.hailo.unload(0) == false, 'no-device or unloaded slot -> false')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.unload argument validation — handle must be numeric.
+ */
+static void test_slm_hailo_unload_bad_args(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local ok1 = pcall(slm.hailo.unload)\n"
+        "assert(not ok1, 'unload() with no args should raise')\n"
+        "local ok2 = pcall(slm.hailo.unload, nil)\n"
+        "assert(not ok2, 'unload(nil) should raise')\n"
+        "local ok3 = pcall(slm.hailo.unload, 'foo')\n"
+        "assert(not ok3, 'unload(non-numeric string) should raise')\n"
+        "local ok4 = pcall(slm.hailo.unload, {})\n"
+        "assert(not ok4, 'unload(table) should raise')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.status() returns a table with the expected shape.
+ * On QEMU: { available = false } with no further fields.
+ * On hardware: { available = true, name = 'hailo-8',
+ *                slots_in_use = int, slots_max = int }.
+ */
+static void test_slm_hailo_status_shape(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local s = slm.hailo.status()\n"
+        "assert(type(s) == 'table', 'status returns a table')\n"
+        "assert(type(s.available) == 'boolean', 'available is boolean')\n"
+        "if s.available then\n"
+        "    assert(s.name == 'hailo-8', 'name should be hailo-8')\n"
+        "    assert(type(s.slots_in_use) == 'number', 'slots_in_use is number')\n"
+        "    assert(type(s.slots_max) == 'number', 'slots_max is number')\n"
+        "    assert(s.slots_in_use >= 0, 'slots_in_use non-negative')\n"
+        "    assert(s.slots_max >= s.slots_in_use, 'max >= in_use')\n"
+        "else\n"
+        "    assert(s.name == nil, 'name absent when unavailable')\n"
+        "    assert(s.slots_in_use == nil, 'slots_in_use absent when unavailable')\n"
+        "    assert(s.slots_max == nil, 'slots_max absent when unavailable')\n"
+        "end";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.load returns nil for a non-existent path.
+ * Exercised the same way on QEMU (device absent -> nil immediately) and
+ * on hardware (device present but VFS stat fails -> nil).
+ */
+static void test_slm_hailo_load_missing_file(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local h = slm.hailo.load('/does/not/exist.hef')\n"
+        "assert(h == nil, 'load of missing file returns nil')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.load argument validation — path must be a string.
+ * luaL_checkstring raises on nil/bool/table/function; numbers are silently
+ * coerced per Lua semantics (so slm.hailo.load(42) is legal and equivalent
+ * to slm.hailo.load("42") — it just fails the VFS stat).
+ */
+static void test_slm_hailo_load_bad_args(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local ok1 = pcall(slm.hailo.load)\n"
+        "assert(not ok1, 'load() with no args should raise')\n"
+        "local ok2 = pcall(slm.hailo.load, nil)\n"
+        "assert(not ok2, 'load(nil) should raise')\n"
+        "local ok3 = pcall(slm.hailo.load, true)\n"
+        "assert(not ok3, 'load(boolean) should raise')\n"
+        "local ok4 = pcall(slm.hailo.load, {})\n"
+        "assert(not ok4, 'load(table) should raise')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.infer with invalid handle returns nil.
+ * On QEMU the device is absent; on hardware the handle validation catches
+ * out-of-range values. Both should produce nil rather than crash.
+ */
+static void test_slm_hailo_infer_bad_handle(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(slm.hailo.infer(-1, 'x') == nil, 'negative handle -> nil')\n"
+        "assert(slm.hailo.infer(9999, 'x') == nil, 'unknown handle -> nil')\n"
+        "assert(slm.hailo.infer(0, '') == nil, 'empty input -> nil')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.hailo.infer argument validation — handle must be an integer,
+ * input must be a string. luaL_checkinteger raises on nil / table / bool
+ * / non-numeric string; luaL_checklstring raises on nil / table / bool
+ * (numbers coerce). This test covers the cases that must raise; coercion
+ * cases are exercised by test_slm_hailo_infer_bad_handle.
+ */
+static void test_slm_hailo_infer_bad_args(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local ok1 = pcall(slm.hailo.infer)\n"
+        "assert(not ok1, 'infer() with no args should raise')\n"
+        "local ok2 = pcall(slm.hailo.infer, 0)\n"
+        "assert(not ok2, 'infer(handle) missing input should raise')\n"
+        "local ok3 = pcall(slm.hailo.infer, 'not_a_number', 'x')\n"
+        "assert(not ok3, 'infer(non-numeric string, ...) should raise')\n"
+        "local ok4 = pcall(slm.hailo.infer, {}, 'x')\n"
+        "assert(not ok4, 'infer(table, ...) should raise')\n"
+        "local ok5 = pcall(slm.hailo.infer, 0, {})\n"
+        "assert(not ok5, 'infer(handle, table) should raise')\n"
+        "local ok6 = pcall(slm.hailo.infer, 0, nil)\n"
+        "assert(not ok6, 'infer(handle, nil) should raise')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
 /*
  * Test: slm.sched_stats counters are non-decreasing between calls.
  * A simple structural test — the counters are monotonic in practice
@@ -1822,6 +2034,66 @@ static void test_demo_menu_file_exists(void)
     /* First line of the script begins with "-- SLM-OS Demo" */
     buf[14] = '\0';
     TEST_ASSERT_EQUAL_STRING("-- SLM-OS Demo", buf);
+#endif
+}
+
+/*
+ * Test: demo_hailo.lua file exists on the filesystem after boot.
+ *
+ * Verified via VFS directly (same rationale as test_demo_menu_file_exists:
+ * Lua's loadfile/dofile are stubbed, and the script probes real hardware
+ * which would be disruptive in the test suite). The script prints its
+ * own banner starting with "-- SLM-OS Hailo NPU Demo".
+ *
+ * Skipped when EMBED_DEMO_SCRIPTS is OFF.
+ */
+static void test_demo_hailo_file_exists(void)
+{
+#if !defined(EMBED_DEMO_SCRIPTS)
+    TEST_IGNORE_MESSAGE("EMBED_DEMO_SCRIPTS=OFF — demo scripts not embedded");
+#else
+    static char buf[64];
+    int n = vfs_read_path("/mnt/files/demo_hailo.lua", buf, sizeof(buf) - 1, 0);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    /* First line: "-- SLM-OS Hailo NPU Demo" */
+    buf[24] = '\0';
+    TEST_ASSERT_EQUAL_STRING("-- SLM-OS Hailo NPU Demo", buf);
+#endif
+}
+
+/*
+ * End-to-end: run the Hailo demo script under QEMU via lua_slm_dofile
+ * (which routes through the VFS, unlike Lua's stubbed dofile). The
+ * script is designed to exit cleanly in every environment — on QEMU
+ * load() returns nil for a non-existent HEF path and the script
+ * prints the error-path message and returns. A non-zero rc from
+ * lua_slm_dofile signals a syntax error, missing binding, or raised
+ * error in the script. Skipped when EMBED_DEMO_SCRIPTS is OFF.
+ *
+ * bench_iters=0 via `arg[2]` so the script skips its inference-loop
+ * even if a future mock-backend upgrade lets load() succeed —
+ * keeping the test fast and deterministic.
+ */
+static void test_demo_hailo_file_dofile_runs_cleanly(void)
+{
+#if !defined(EMBED_DEMO_SCRIPTS)
+    TEST_IGNORE_MESSAGE("EMBED_DEMO_SCRIPTS=OFF — demo scripts not embedded");
+#else
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    /* No-op sleep/yield so the script doesn't stall the harness, and
+     * pin arg[] so the script's second-arg lookup hits bench_iters=0. */
+    int setup = lua_slm_dostring(L,
+        "slm.sleep = function() end\n"
+        "slm.yield = function() end\n"
+        "arg = { '/mnt/files/does_not_exist.hef', '0' }");
+    TEST_ASSERT_EQUAL_INT(0, setup);
+
+    int run = lua_slm_dofile(L, "/mnt/files/demo_hailo.lua");
+    TEST_ASSERT_EQUAL_INT(0, run);
+
+    lua_slm_close(L);
 #endif
 }
 
@@ -2720,8 +2992,20 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_ai_sched_stats);
     RUN_TEST(test_slm_eviction_bindings);
 
+    /* Phase 7: Hailo NPU bindings */
+    RUN_TEST(test_slm_hailo_namespace);
+    RUN_TEST(test_slm_hailo_status_shape);
+    RUN_TEST(test_slm_hailo_load_missing_file);
+    RUN_TEST(test_slm_hailo_load_bad_args);
+    RUN_TEST(test_slm_hailo_infer_bad_handle);
+    RUN_TEST(test_slm_hailo_infer_bad_args);
+    RUN_TEST(test_slm_hailo_unload_bad_handle);
+    RUN_TEST(test_slm_hailo_unload_bad_args);
+
     RUN_TEST(test_demo_file_exists);
     RUN_TEST(test_demo_menu_file_exists);
+    RUN_TEST(test_demo_hailo_file_exists);
+    RUN_TEST(test_demo_hailo_file_dofile_runs_cleanly);
 
     /* Dofile (script loading from filesystem) */
     RUN_TEST(test_slm_dofile_nonexistent);

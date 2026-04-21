@@ -33,6 +33,8 @@ extern const unsigned char demo_auto_lua_start[];
 extern const unsigned char demo_auto_lua_end[];
 extern const unsigned char demo_multiproc_lua_start[];
 extern const unsigned char demo_multiproc_lua_end[];
+extern const unsigned char demo_hailo_lua_start[];
+extern const unsigned char demo_hailo_lua_end[];
 
 int demo_init(void)
 {
@@ -81,6 +83,16 @@ int demo_init(void)
         littlefs_file_write(mnt, fmp, demo_multiproc_lua_start,
                             (size_t)(demo_multiproc_lua_end - demo_multiproc_lua_start));
         littlefs_file_close(mnt, fmp);
+    }
+
+    /* Phase 7: Hailo NPU demo — exercises slm.hailo.status/load/infer.
+     * Degrades to a status-only walk on platforms without an AI HAT+. */
+    int fh = littlefs_file_open(mnt, "/demo_hailo.lua",
+                                LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fh >= 0) {
+        littlefs_file_write(mnt, fh, demo_hailo_lua_start,
+                            (size_t)(demo_hailo_lua_end - demo_hailo_lua_start));
+        littlefs_file_close(mnt, fh);
     }
 
     /* #64: boot-time model preload config. One model name per line.

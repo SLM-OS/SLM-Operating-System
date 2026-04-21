@@ -314,6 +314,33 @@ local function list_models()
 end
 
 -- ---------------------------------------------------------------------------
+-- Hailo NPU demo — delegates to scripts/demo_hailo.lua
+-- ---------------------------------------------------------------------------
+
+local function hailo_demo()
+    header("Hailo NPU (AI HAT+)")
+    local s = slm.hailo.status()
+    if not s or not s.available then
+        note("Hailo backend NOT present on this build/platform.")
+        note("(Expected on QEMU and on Pi 5 builds without the AI HAT+.)")
+        note("Running the full demo anyway — it degrades to a status probe.")
+    else
+        note(string.format("Backend: %s — slots %d / %d",
+            s.name, s.slots_in_use, s.slots_max))
+    end
+    note("")
+    subhead("Delegating to /mnt/files/demo_hailo.lua:")
+    -- Route through shell_exec rather than Lua's built-in dofile: SLM-OS
+    -- stubs fopen to return NULL, so Lua's dofile cannot read VFS paths.
+    -- The `lua` shell command uses lua_slm_dofile internally, which reads
+    -- through the VFS layer and works on every platform.
+    local rc = slm.shell_exec("lua /mnt/files/demo_hailo.lua")
+    if rc ~= 0 then
+        note(string.format("demo_hailo.lua exit code: %d", rc))
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- Components (hot-swap) demo — preserved from earlier demo
 -- ---------------------------------------------------------------------------
 
@@ -435,6 +462,7 @@ local menu = {
     {key = "7", label = "Inference — MNIST load+bench",   action = inference_demo},
     {key = "8", label = "List loaded models",             action = list_models},
     {key = "9", label = "Components & hot-swap",          action = components_demo},
+    {key = "h", label = "Hailo NPU (AI HAT+)",             action = hailo_demo},
     {key = "t", label = "Full system tour",               action = full_tour},
     {key = "p", label = "Active tasks",                   action = show_tasks},
     {key = "s", label = "Run an arbitrary shell command", action = run_shell_command},

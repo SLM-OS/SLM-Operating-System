@@ -195,8 +195,9 @@ stack than discrete Ampere.
 documentation. Accessing it would require reverse-engineering the
 VideoCore ISA and firmware. Not feasible within capstone scope.
 
-**Pi 5 Hailo-8 NPU (AI HAT+) — Phase 0–5.2 complete (tier-1 + tier-2),
-three control-channel RPCs verified on real hardware (2026-04-18):**
+**Pi 5 Hailo-8 NPU (AI HAT+) — Phase 0–7 software-complete, end-to-end
+NPU inference verified on real hardware (2026-04-20), Lua bindings
+landed (2026-04-21):**
 A full alternative inference path via the Pi 5's external PCIe
 connector. Phase 0 research, Phase 1 ARM64 PCIe host controller
 (`kernel/drivers/pcie/`) with BCM2712 link training
@@ -233,10 +234,19 @@ behavior since firmware has no active stream context. Unlocking
 actual inference needs a compiled `.hef` to drive `CONFIG_STREAM`
 with real per-stream parameters. Once one lands in the lab, the
 same `hailo load <path> upload <base>` → `hailo infer` sequence
-exercises the whole chain without code changes. See
-`docs/pi5-ai-hat-plan.md` for the full phase breakdown and
+exercises the whole chain without code changes. Phase 6.9/6.10
+(context-switch wire format: REPEATED_ACTION wrapper,
+FETCH_CFG_CHANNEL_DESCRIPTORS sub-action, boundary channel layout,
+ENABLED transition) landed in PR #344 on 2026-04-21 after a ground-
+truth HailoRT wire capture on pi-5-1 isolated three format gaps in
+the earlier implementation. Phase 7 adds Lua bindings
+(`slm.hailo.load/infer/status`) + an embedded `demo_hailo.lua`
+script so the NPU path can be driven from shell scripts or the
+interactive `demo_menu.lua` menu (key `h`). See
+`docs/pi5-ai-hat-plan.md` for the full phase breakdown,
 `docs/pi5-pcie1-registers.md` for the `pcie1` + MIP1 register
-reference.
+reference, and `docs/demo.md` §"Hailo NPU demo" for the Lua-side
+walkthrough.
 
 **Jetson (GA10B):** MMIO confirmed live at EL2 — `NV_PMC_BOOT_0` reads
 `0xB7B000A1` (GA10B, Ampere Rev 10.1), `NV_PMC_BOOT_42` reads

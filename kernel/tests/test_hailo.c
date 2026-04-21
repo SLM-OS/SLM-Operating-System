@@ -36,6 +36,11 @@ extern uint32_t hailo_backend_in_use_slots(void);
 extern void hailo_backend_reset_slots_for_tests(void);
 extern void hailo_backend_get_boundary_iovas_for_tests(
     inference_model_handle_t h, uint64_t *in_iova, uint64_t *out_iova);
+/* Phase 7: sizes helper used by the Lua slm.hailo.infer binding. */
+extern int hailo_backend_model_sizes(inference_model_handle_t h,
+                                     uint32_t *in_bytes,
+                                     uint32_t *out_bytes);
+extern uint32_t hailo_backend_slots_max(void);
 #include "test_harness.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -5790,6 +5795,103 @@ static void test_inf_hailo_load_happy_path(void)
     TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
 }
 
+/* Phase 7: hailo_backend_model_sizes is the public helper the Lua
+ * slm.hailo.infer binding uses to size tensor buffers before
+ * submitting a job. Contract: returns HAILO_OK + fills both out-
+ * pointers when the handle refers to a loaded slot; returns
+ * HAILO_ERR_INVAL (not OK) when the handle is out of range or the
+ * slot is not in use; tolerates NULL out-pointers (skipped). */
+static void test_inf_hailo_model_sizes_reports_loaded_shape(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    TEST_ASSERT_TRUE(n != 0);
+
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK,
+        inference_load_model(dev, blob, n, &h));
+
+    uint32_t in_bytes = 0, out_bytes = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_backend_model_sizes(h, &in_bytes, &out_bytes));
+    /* build_test_hef declares in=1×1×128, out=1×1×32. pick_largest_pads
+     * multiplies h*w*features so both values must be non-zero and match
+     * the HEF declaration. */
+    TEST_ASSERT_EQUAL_UINT32(128u, in_bytes);
+    TEST_ASSERT_EQUAL_UINT32(32u,  out_bytes);
+}
+
+static void test_inf_hailo_model_sizes_rejects_invalid_handle(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    /* No model loaded — every handle is invalid. */
+    uint32_t in_bytes = 0xDEADBEEF, out_bytes = 0xCAFEBABE;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_backend_model_sizes(0, &in_bytes, &out_bytes));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_backend_model_sizes(-1, &in_bytes, &out_bytes));
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_backend_model_sizes(9999, &in_bytes, &out_bytes));
+    /* Out-params must be untouched on failure so callers can detect
+     * "was there a result?" via a sentinel pre-fill. */
+    TEST_ASSERT_EQUAL_UINT32(0xDEADBEEF, in_bytes);
+    TEST_ASSERT_EQUAL_UINT32(0xCAFEBABE, out_bytes);
+}
+
+static void test_inf_hailo_model_sizes_rejects_freed_slot(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_free_model(dev, h));
+
+    uint32_t in_bytes = 0, out_bytes = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_backend_model_sizes(h, &in_bytes, &out_bytes));
+}
+
+static void test_inf_hailo_model_sizes_tolerates_null_outptrs(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_backend_model_sizes(h, NULL, NULL));
+    uint32_t in_bytes = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_backend_model_sizes(h, &in_bytes, NULL));
+    TEST_ASSERT_EQUAL_UINT32(128u, in_bytes);
+    uint32_t out_bytes = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_backend_model_sizes(h, NULL, &out_bytes));
+    TEST_ASSERT_EQUAL_UINT32(32u, out_bytes);
+}
+
+/* Phase 7: hailo_backend_slots_max reports the compile-time cap.
+ * Exposed so slm.hailo.status can report slots_max without duplicating
+ * HAILO_MAX_MODELS in lua_slm.c. The value is static (currently 4) —
+ * if someone ever bumps the cap they must update both the #define and
+ * any Lua-facing test expectations in lockstep. */
+static void test_inf_hailo_slots_max_matches_define(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    TEST_ASSERT_EQUAL_UINT32(4u, hailo_backend_slots_max());
+}
+
 /* #179 regression: load_model must drive the context-switch RPC
  * sequence (RESET → SET_NETWORK_GROUP_HEADER → 4 × SET_CONTEXT_INFO
  * → ENABLED). Verify the count of CORE-CPU doorbells rung.
@@ -6812,6 +6914,11 @@ int test_suite_hailo(void)
     RUN_TEST(test_inf_hailo_load_rejects_bad_header);
     RUN_TEST(test_inf_hailo_load_rejects_zero_pads);
     RUN_TEST(test_inf_hailo_load_happy_path);
+    RUN_TEST(test_inf_hailo_model_sizes_reports_loaded_shape);
+    RUN_TEST(test_inf_hailo_model_sizes_rejects_invalid_handle);
+    RUN_TEST(test_inf_hailo_model_sizes_rejects_freed_slot);
+    RUN_TEST(test_inf_hailo_model_sizes_tolerates_null_outptrs);
+    RUN_TEST(test_inf_hailo_slots_max_matches_define);
     RUN_TEST(test_inf_hailo_load_rings_context_switch_sequence);
     RUN_TEST(test_inf_hailo_load_releases_slot_on_failure);
     RUN_TEST(test_inf_hailo_load_reuses_slot_after_free);

@@ -14,6 +14,7 @@
 #include "shell.h"
 #include "vfs.h"
 #include "component.h"
+#include "inference_device.h"
 #include "slm_ffi.h"
 #include "sched_policy.h"
 #include "ipc.h"
@@ -1980,6 +1981,246 @@ static int l_telnetd_kick(lua_State *L) {
 }
 #endif /* ENABLE_NETWORKING */
 
+/* =============================================================================
+ * Hailo-8/8L NPU bindings (slm.hailo.*)
+ *
+ * Scripts drive the Hailo backend through the same inference_device
+ * abstraction the scheduler policy uses. The nested `slm.hailo` table
+ * exposes three functions:
+ *
+ *   slm.hailo.load(path)              Load an HEF from VFS, return handle int
+ *                                     (>=0) on success, nil on failure. No
+ *                                     name derivation — the handle is the
+ *                                     only thing callers need.
+ *   slm.hailo.infer(handle, input)    input is a Lua string used as the
+ *                                     INT8 input tensor; length must equal
+ *                                     the model's input_bytes. Returns the
+ *                                     INT8 output as a Lua string, or nil
+ *                                     on any error. No partial outputs.
+ *   slm.hailo.status()                Returns a table:
+ *                                       {available=bool, name=str|nil,
+ *                                        slots_in_use=int, slots_max=int}
+ *                                     `available` is true iff the
+ *                                     "hailo-8" inference_device is
+ *                                     registered AND its backend_init
+ *                                     succeeded (i.e., PCIe probed +
+ *                                     firmware booted on a real Pi 5;
+ *                                     false on QEMU/x86).
+ *
+ * All paths size-check against inference_device_find("hailo-8"). When
+ * the device is absent (no HAT+ / QEMU / wrong platform) every call
+ * returns nil / a status table with available=false — no crashes,
+ * no fallbacks. Fallback to CPU belongs in the caller script, not
+ * here.
+ * ========================================================================== */
+
+/* Backend-specific helpers exposed by kernel/inference/inference_device_hailo.c.
+ * Queries the loaded model's input/output tensor sizes (in bytes) by
+ * handle, the current slot-in-use count, and the static slot cap.
+ * Declared extern-at-use-site matching the existing hailo_backend_*
+ * test helpers pattern (see kernel/tests/test_hailo.c:35). */
+extern int hailo_backend_model_sizes(int32_t h,
+                                     uint32_t *in_bytes,
+                                     uint32_t *out_bytes);
+extern uint32_t hailo_backend_in_use_slots(void);
+extern uint32_t hailo_backend_slots_max(void);
+
+/* Hard upper bound on HEF file size the load path will accept. HEFs
+ * for Hailo-8/8L top out at a few MB (MobileNetV1 ≈ 4 MB, larger
+ * classifiers ≈ 16 MB); 64 MB is well above any realistic HEF and
+ * well below the uint32 + size_t arithmetic danger zone. Guards
+ * against (info.size + 4095) wrapping in uint32 — info.size is
+ * uint32_t per struct vfs_entry_info. */
+#define LUA_HAILO_HEF_MAX_BYTES (64u * 1024u * 1024u)
+
+/* Hard upper bound on a single tensor (input or output). HEFs declare
+ * per-pad shapes, the parser multiplies them into cfg.input_bytes /
+ * cfg.output_bytes, and slm.hailo.infer sizes its output buffer from
+ * that. 16 MB covers every realistic classifier / detector we care
+ * about (MobileNetV1 input = 150 KB, segmentation outputs ≈ 4 MB)
+ * without letting a malformed HEF produce a uint32_t wrap in
+ * (expected_out + 4095) or a giant pmm_alloc_pages request. */
+#define LUA_HAILO_TENSOR_MAX_BYTES (16u * 1024u * 1024u)
+
+/* Hailo-8L inference tensors are INT8; matches the dtype hailo_backend_run
+ * asserts before submission. */
+#ifndef INF_DTYPE_INT8
+#define INF_DTYPE_INT8 3
+#endif
+
+static struct inference_device *lua_hailo_dev(void)
+{
+    return inference_device_find("hailo-8");
+}
+
+/* slm.hailo.load(path) — see the block comment above for contract. */
+static int l_hailo_load(lua_State *L)
+{
+    if (!L) return 0;
+    const char *path = luaL_checkstring(L, 1);
+
+    struct inference_device *dev = lua_hailo_dev();
+    if (!dev) { lua_pushnil(L); return 1; }
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        lua_pushnil(L); return 1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0
+     || info.type != 0 || info.size == 0
+     || info.size > LUA_HAILO_HEF_MAX_BYTES) {
+        lua_pushnil(L); return 1;
+    }
+
+    /* PMM page-aligned allocation matching slm.model_load's pattern.
+     * HEF files on the VFS are a few KB to several MB; this is a
+     * transient staging buffer that the backend copies into its own
+     * slot-owned tensors, so we free it immediately after load.
+     * info.size is already bounded by LUA_HAILO_HEF_MAX_BYTES above
+     * so (info.size + 4095) cannot wrap in uint32_t. */
+    size_t pages_needed = ((size_t)info.size + 4095) / 4096;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) { lua_pushnil(L); return 1; }
+
+    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        pmm_free_pages(buf, pages_needed);
+        lua_pushnil(L); return 1;
+    }
+
+    int32_t handle = -1;
+    int rc = inference_load_model(dev, buf, (size_t)bytes_read, &handle);
+    pmm_free_pages(buf, pages_needed);
+
+    if (rc != 0 || handle < 0) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, handle);
+    return 1;
+}
+
+/* slm.hailo.infer(handle, input_string) — see the block comment above. */
+static int l_hailo_infer(lua_State *L)
+{
+    if (!L) return 0;
+    lua_Integer handle = luaL_checkinteger(L, 1);
+    size_t in_len = 0;
+    const char *in_bytes = luaL_checklstring(L, 2, &in_len);
+
+    struct inference_device *dev = lua_hailo_dev();
+    if (!dev || handle < 0 || handle > INT32_MAX) {
+        lua_pushnil(L); return 1;
+    }
+
+    uint32_t expected_in = 0, expected_out = 0;
+    if (hailo_backend_model_sizes((int32_t)handle,
+                                  &expected_in, &expected_out) != 0) {
+        lua_pushnil(L); return 1;
+    }
+    if (in_len != (size_t)expected_in) { lua_pushnil(L); return 1; }
+    if (expected_in  == 0
+     || expected_out == 0
+     || expected_in  > LUA_HAILO_TENSOR_MAX_BYTES
+     || expected_out > LUA_HAILO_TENSOR_MAX_BYTES) {
+        lua_pushnil(L); return 1;
+    }
+
+    /* Output tensor buffer. Sized to the model's declared output_bytes;
+     * PMM-allocated so we never strain the 16 KB task stack. Freed
+     * before return regardless of outcome. expected_out is bounded by
+     * LUA_HAILO_TENSOR_MAX_BYTES above, so (expected_out + 4095)
+     * cannot wrap in uint32_t. */
+    size_t out_pages = ((size_t)expected_out + 4095) / 4096;
+    uint8_t *out_buf = (uint8_t *)pmm_alloc_pages(out_pages);
+    if (!out_buf) { lua_pushnil(L); return 1; }
+
+    /* shape[0] = 0 when the tensor exceeds uint16 elements. The Hailo
+     * backend's run path consults n_elems for rank-1 INT8 tensors,
+     * not shape[] — and a 150 KB MobileNet input (224*224*3 = 150528)
+     * doesn't fit a uint16_t. Use 0 as an explicit sentinel meaning
+     * "consult n_elems" rather than silently saturating at 0xFFFF
+     * (which would be a plausible-but-wrong shape). */
+    inference_tensor_t in_t = {
+        .data    = (void *)in_bytes,   /* inference_run does not mutate in */
+        .n_elems = (uint32_t)in_len,
+        .dtype   = INF_DTYPE_INT8,
+        .rank    = 1,
+        .shape   = { (uint16_t)(in_len > 0xFFFFu ? 0u : in_len), 0, 0, 0 },
+    };
+    inference_tensor_t out_t = {
+        .data    = out_buf,
+        .n_elems = expected_out,
+        .dtype   = INF_DTYPE_INT8,
+        .rank    = 1,
+        .shape   = { (uint16_t)(expected_out > 0xFFFFu ? 0u : expected_out), 0, 0, 0 },
+    };
+
+    int rc = inference_run(dev, (int32_t)handle, &in_t, &out_t);
+    if (rc != 0) {
+        pmm_free_pages(out_buf, out_pages);
+        lua_pushnil(L); return 1;
+    }
+
+    lua_pushlstring(L, (const char *)out_buf, expected_out);
+    pmm_free_pages(out_buf, out_pages);
+    return 1;
+}
+
+/* slm.hailo.status() — see the block comment above. */
+static int l_hailo_status(lua_State *L)
+{
+    if (!L) return 0;
+    struct inference_device *dev = lua_hailo_dev();
+
+    lua_newtable(L);
+    lua_pushboolean(L, dev != NULL);
+    lua_setfield(L, -2, "available");
+
+    if (dev) {
+        lua_pushstring(L, "hailo-8");
+        lua_setfield(L, -2, "name");
+        lua_pushinteger(L, (lua_Integer)hailo_backend_in_use_slots());
+        lua_setfield(L, -2, "slots_in_use");
+        lua_pushinteger(L, (lua_Integer)hailo_backend_slots_max());
+        lua_setfield(L, -2, "slots_max");
+    }
+    return 1;
+}
+
+/*
+ * slm.hailo.unload(handle) -> bool
+ *
+ * Releases the NPU slot claimed by a prior slm.hailo.load(). The four-
+ * slot cap means long-running scripts that cycle through models must
+ * unload before loading the next one. Returns true on success, false
+ * on any failure (device absent, out-of-range handle, already-free
+ * slot, underlying free_model error). load()/infer()/unload() form the
+ * minimum lifecycle surface a Lua app needs.
+ */
+static int l_hailo_unload(lua_State *L)
+{
+    if (!L) return 0;
+    lua_Integer handle = luaL_checkinteger(L, 1);
+
+    struct inference_device *dev = lua_hailo_dev();
+    if (!dev || handle < 0 || handle > INT32_MAX) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    int rc = inference_free_model(dev, (int32_t)handle);
+    lua_pushboolean(L, rc == 0);
+    return 1;
+}
+
+static const luaL_Reg slm_hailo_lib[] = {
+    {"load",   l_hailo_load},
+    {"infer",  l_hailo_infer},
+    {"unload", l_hailo_unload},
+    {"status", l_hailo_status},
+    {NULL, NULL}
+};
+
 /* SLM library functions */
 static const luaL_Reg slm_lib[] = {
     {"print", l_print},
@@ -2060,6 +2301,10 @@ static const luaL_Reg slm_lib[] = {
  */
 static int luaopen_slm(lua_State *L) {
     luaL_newlib(L, slm_lib);
+    /* Nest the Hailo bindings under slm.hailo so callers can write
+     * slm.hailo.load(path) instead of slm.hailo_load(path). */
+    luaL_newlib(L, slm_hailo_lib);
+    lua_setfield(L, -2, "hailo");
     return 1;
 }
 
