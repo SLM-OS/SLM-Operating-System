@@ -2304,6 +2304,29 @@ static void test_cs_builder_repeated_returns_nomem_on_overflow(void)
     TEST_ASSERT_EQUAL_UINT32((uint32_t)0, hailo_cs_builder_size(&b));
 }
 
+static void test_cs_builder_repeated_rejects_mul_overflow(void)
+{
+    /* count (u8 up to 255) × sub_body_size (size_t) must not overflow.
+     * Using count=255 and sub_body_size = SIZE_MAX/100 forces the
+     * __builtin_mul_overflow branch on both 32-bit and 64-bit hosts
+     * (255 * (SIZE_MAX/100) ≈ 2.55 × SIZE_MAX/100 which exceeds
+     * SIZE_MAX for any reasonable-size SIZE_MAX). Builder rejects
+     * with HAILO_ERR_INVAL before even touching the buffer. */
+    uint8_t buf[32];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    /* sub_bodies pointer may be NULL when we know we'll fail the
+     * overflow check first; pass a valid pointer to rule out the
+     * null-arg early-exit, so the overflow path is exercised. */
+    uint8_t dummy = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_builder_append_repeated(&b,
+            HAILO_CS_ACT_FETCH_CCW_BURSTS,
+            /*count=*/255, &dummy, SIZE_MAX / 100u));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)0, hailo_cs_builder_size(&b));
+}
+
 static void test_cs_builder_repeated_single_count(void)
 {
     /* count=1 is the minimum non-degenerate case and the shape
@@ -6637,6 +6660,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_builder_repeated_wraps_three_fetch_bursts);
     RUN_TEST(test_cs_builder_repeated_rejects_zero_count);
     RUN_TEST(test_cs_builder_repeated_returns_nomem_on_overflow);
+    RUN_TEST(test_cs_builder_repeated_rejects_mul_overflow);
     RUN_TEST(test_cs_builder_repeated_single_count);
     RUN_TEST(test_change_context_switch_status_reset_wire_layout);
     RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);

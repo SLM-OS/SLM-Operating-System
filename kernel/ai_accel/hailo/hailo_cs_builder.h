@@ -62,12 +62,15 @@ int hailo_cs_builder_append(struct hailo_cs_builder *b,
  *
  * Total bytes written: 8 + count * sub_body_size.
  *
- * Used by PRELIMINARY to wrap AddCcwBurst sub-actions on Hailo-8L,
- * where direct FETCH_CCW_BURSTS is rejected with
- * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED but the
- * REPEATED_ACTION-wrapped form is accepted (per HailoRT v4.23 wire
- * capture cached at docs/reference/hailort-v4.23.0-wire-capture-
- * mobilenet.txt).
+ * Used by PRELIMINARY to wrap the CCW-load sub-action: AddCcwBurst
+ * on Hailo-8 (sub_action_type = FETCH_CCW_BURSTS, 0x1b) or
+ * FetchCfgChannelDescriptors on Hailo-8L (sub_action_type = 0x00).
+ * HailoRT picks based on ChannelAllocator::support_pre_fetch — see
+ * hailo_cs_repeated_action_header's docstring in hailo_cs_actions.h
+ * for the full rule. Either sub-type rejected without the wrapper
+ * (CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED). Wire
+ * capture reference: docs/reference/hailort-v4.23.0-wire-capture-
+ * mobilenet.txt.
  *
  * Returns HAILO_OK on success, HAILO_ERR_INVAL on null args or
  * count == 0, HAILO_ERR_NOMEM if the append would exceed capacity.

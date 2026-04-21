@@ -233,11 +233,22 @@ _Static_assert(sizeof(struct hailo_cs_act_deactivate_cfg_channel) == 2,
  *   [8..] N × <sub-action body> (each sized to its action_type's
  *         body struct; no per-body headers)
  *
- * HailoRT uses REPEATED_ACTION in PRELIMINARY on Hailo-8L to wrap
- * AddCcwBurst sub-actions (sub_action_type = FETCH_CCW_BURSTS, body
- * = hailo_cs_act_fetch_ccw_bursts). Direct FETCH_CCW_BURSTS gets
- * rejected there with CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_
- * NOT_SUPPORTED; the REPEATED_ACTION-wrapped form is accepted. */
+ * HailoRT uses REPEATED_ACTION in PRELIMINARY to wrap the CCW-load
+ * sub-action, with the sub_action_type picked by
+ * ChannelAllocator::support_pre_fetch:
+ *
+ *   Hailo-8  (support_pre_fetch = true):
+ *     sub_action_type = FETCH_CCW_BURSTS  (0x1b)
+ *     body            = hailo_cs_act_fetch_ccw_bursts (3 B)
+ *
+ *   Hailo-8L (support_pre_fetch = false):
+ *     sub_action_type = FETCH_CFG_CHANNEL_DESCRIPTORS  (0x00)
+ *     body            = hailo_cs_act_fetch_cfg_channel_descriptors (3 B)
+ *
+ * SLM-OS targets Hailo-8L (AI HAT+) today, so translate_preliminary
+ * emits the FETCH_CFG_CHANNEL_DESCRIPTORS variant. Either sub-type
+ * emitted WITHOUT the REPEATED_ACTION wrapper is rejected with
+ * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED. */
 struct hailo_cs_repeated_action_header {
     uint8_t count;
     uint8_t last_executed;
