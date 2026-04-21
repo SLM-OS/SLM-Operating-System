@@ -761,8 +761,9 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
 | 5 (port scan, slot addressing) | ✅ | PR #308 — `xhci_hcd_port_status`, `xhci_hcd_port_reset`, `xhci_hcd_device_open` with ENABLE_SLOT + ADDRESS_DEVICE(BSR=1), intercepted SET_ADDRESS |
 | 6 (control transfers) | ✅ | PR #308 — Setup / Data / Status Stage TRB builders + EP0 dispatch |
 | 7 (CONFIGURE_ENDPOINT + bulk) | ✅ | PR #308 — per-endpoint transfer-ring allocation, Normal TRB for bulk/interrupt |
-| Post-kexec re-plug | ⚠️ | #309 — first EP0 control transfer after ADDRESS_DEVICE returns `cc=4` on a pre-kexec device. Workaround in PR #308: hide the stale device via a three-state attach machine until the user physically re-plugs; `usb_core_hotplug_poll` from `net_poll()` drives fresh enumeration. Permanent fix tracked |
-| Phase 4 (lwIP integration) | ✅ | `kernel/src/main.c` registers `cdc_ecm_probe_and_register` in place of the old `rtl8169_register` stub on Jetson. `net_poll()` retries the probe on every tick (idempotent once bound). A post-kexec re-plug now drives xHCI → usb_core → cdc_ecm → lwIP in one chain with no manual intervention beyond the physical re-insert |
+| Post-kexec re-plug | ⚠️ | The stale-port state machine and hotplug retry path are in-tree, but on `jetson-nano-2` the inherited Realtek root hub still fails its first EP0 `GET_DESCRIPTOR(device, 8)` setup stage with `cc=4`. Physical re-plug has not yet produced a clean fresh-enumeration path on this hardware. |
+| Minimal hub support | ⚠️ | `usb_core` now has one-tier USB 2.0 hub scaffolding so a root hub can be treated as a transport detail, but the current Jetson Realtek path is still blocked before hub enumeration starts because the root hub never clears the initial EP0 setup failure. |
+| Phase 4 (lwIP integration) | ⚠️ | The `cdc_ecm`/lwIP retry chain remains wired up, but the lab's current Realtek RTL8153 adapters are not exposing a usable CDC-ECM device to SLM-OS yet. Even after the root-hub EP0 issue is fixed, this hardware likely needs hub-aware enumeration and a non-CDC Realtek NIC path rather than the old "re-plug and lwIP binds" expectation. |
 
 Source layout in `kernel/drivers/usb/xhci/`:
 

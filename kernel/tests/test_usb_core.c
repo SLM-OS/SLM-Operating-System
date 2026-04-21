@@ -416,20 +416,39 @@ static void test_enumerate_endpoint_configure_failure(void)
     TEST_ASSERT_EQUAL_UINT8(1, mock.device_configured);
 }
 
-static void test_enumerate_control_failure(void)
+static void test_enumerate_initial_descriptor_retries_once_then_succeeds(void)
 {
     /*
-     * Fail the first 8-byte GET_DESCRIPTOR so enumeration bails early.
-     * Device must NOT be marked present and must NOT have been
-     * addressed.
+     * The initial 8-byte device-descriptor read now has a reopen/retry
+     * loop. One transient control failure should trigger a close +
+     * reopen and then still let enumeration succeed.
      */
     reset_mock_and_core();
     mock.fail_next_control = 1;
 
     int rc = usb_core_start();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_NOT_NULL(usb_core_first_device());
+    TEST_ASSERT_EQUAL_UINT8(1, mock.device_addr);
+    TEST_ASSERT_EQUAL_INT(2, mock.device_open_count);
+    TEST_ASSERT_EQUAL_INT(1, mock.device_close_count);
+}
+
+static void test_enumerate_initial_descriptor_fails_after_retry_budget(void)
+{
+    /*
+     * Three consecutive failures on the first 8-byte GET_DESCRIPTOR
+     * must exhaust the retry budget and leave no device present.
+     */
+    reset_mock_and_core();
+    mock.fail_next_control = 3;
+
+    int rc = usb_core_start();
     TEST_ASSERT_NOT_EQUAL(0, rc);
     TEST_ASSERT_NULL(usb_core_first_device());
     TEST_ASSERT_EQUAL_UINT8(0, mock.device_addr);
+    TEST_ASSERT_EQUAL_INT(3, mock.device_open_count);
+    TEST_ASSERT_EQUAL_INT(3, mock.device_close_count);
 }
 
 static void test_enumerate_resets_previous_device(void)
@@ -443,8 +462,9 @@ static void test_enumerate_resets_previous_device(void)
     TEST_ASSERT_EQUAL_INT(0, usb_core_start());
     TEST_ASSERT_NOT_NULL(usb_core_first_device());
 
-    /* Now fail the second enumeration. */
-    mock.fail_next_control = 1;
+    /* Now exhaust the initial-descriptor retry budget on the second
+     * enumeration so the retry really fails rather than recovering. */
+    mock.fail_next_control = 3;
     int rc = usb_core_enumerate();
     TEST_ASSERT_NOT_EQUAL(0, rc);
     TEST_ASSERT_NULL(usb_core_first_device());
@@ -825,17 +845,17 @@ static void test_control_msg_timeout(void)
 static void test_enumerate_closes_device_on_control_failure(void)
 {
     /*
-     * Once device_open has run, any later failure must fall through to
-     * the cleanup path so the HCD doesn't leak the opened slot.
+     * Initial-descriptor failures now reopen/retry up to three times.
+     * Each failed open must still be closed so the HCD does not leak
+     * default-pipe state across retries.
      */
     reset_mock_and_core();
-    mock.fail_next_control = 1;   /* fail the 8-byte GET_DESCRIPTOR */
+    mock.fail_next_control = 3;   /* fail all 8-byte GET_DESCRIPTOR attempts */
 
     int rc = usb_core_start();
     TEST_ASSERT_NOT_EQUAL(0, rc);
     TEST_ASSERT_NULL(usb_core_first_device());
-    /* device_close must have fired exactly once. */
-    TEST_ASSERT_EQUAL_INT(1, mock.device_close_count);
+    TEST_ASSERT_EQUAL_INT(3, mock.device_close_count);
 }
 
 static void test_enumerate_closes_device_on_set_config_failure(void)
@@ -1122,7 +1142,8 @@ int test_suite_usb_core(void)
     RUN_TEST(test_enumerate_device_open_failure);
     RUN_TEST(test_enumerate_set_config_failure);
     RUN_TEST(test_enumerate_endpoint_configure_failure);
-    RUN_TEST(test_enumerate_control_failure);
+    RUN_TEST(test_enumerate_initial_descriptor_retries_once_then_succeeds);
+    RUN_TEST(test_enumerate_initial_descriptor_fails_after_retry_budget);
     RUN_TEST(test_enumerate_resets_previous_device);
     RUN_TEST(test_descriptor_parse);
     RUN_TEST(test_find_endpoint_direction_filter);

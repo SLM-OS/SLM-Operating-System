@@ -56,6 +56,14 @@ ssh root@<JETSON_IP> 'mkdir -p /usr/local/lib/slmos && \
 If the `.ko` is not present, `slmos-kexec` still runs, but the Jetson
 USB-A host path may wedge at `USBCMD.RUN=1`.
 
+Current status on `jetson-nano-2`: with the helper's wider XUSB hold
+set and the SMMU preservation module installed, SLM-OS now reaches a
+live post-kexec XHCI controller (`USBSTS=0`, `NO_OP round-trip OK`).
+What is still not solved is full device enumeration of the lab's
+Realtek USB Ethernet adapter chain: the inherited root Realtek hub
+still fails on the first EP0 `GET_DESCRIPTOR(device, 8)` setup stage,
+so networking does not come up yet.
+
 The helper script is reasonably well commented. Run it with `--help` on the Jetson for the full flag list, or read the script header for rationale on each step.
 
 ---
