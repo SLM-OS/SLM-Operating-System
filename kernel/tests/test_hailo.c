@@ -2602,8 +2602,14 @@ static void test_cs_translate_activation_emits_open_boundary_input(void)
     TEST_ASSERT_EQUAL_UINT32((uint32_t)(5 + 33), out.activation_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
                             out.activation[0]);
+    /* time_stamp INIT bytes in the BURST_CREDITS header [1..4]. */
+    uint32_t burst_ts; memcpy(&burst_ts, out.activation + 1, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_TIMESTAMP_INIT_VALUE, burst_ts);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
                             out.activation[5]);
+    /* time_stamp INIT bytes in the OPEN_IN header [6..9]. */
+    uint32_t open_in_ts; memcpy(&open_in_ts, out.activation + 6, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_TIMESTAMP_INIT_VALUE, open_in_ts);
     /* Body begins at offset 10. packed_vdma = config+1 = 0x02. */
     TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[10]);
     /* host_buffer_info at offset 11: buffer_type (1B) + dma_address (8B LE)
@@ -2616,6 +2622,12 @@ static void test_cs_translate_activation_emits_open_boundary_input(void)
     TEST_ASSERT_EQUAL_UINT16(1024, page);
     uint32_t descs; memcpy(&descs, out.activation + 22, 4);
     TEST_ASSERT_EQUAL_UINT32(4, descs);
+    /* bytes_in_pattern @ 26: must equal core_bytes_per_buffer (= frame
+     * size, 0x0400) per HailoRT vdma_edge_layer.cpp:73. Hardcoded 0
+     * caused #180 confusion until the wire capture revealed the truth. */
+    uint32_t bytes_in_pattern;
+    memcpy(&bytes_in_pattern, out.activation + 26, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x0400u, bytes_in_pattern);
     /* stream_index @ 30, network_index @ 31, periph @ 32, frame @ 34. */
     TEST_ASSERT_EQUAL_UINT8(0, out.activation[30]);   /* stream_index */
     TEST_ASSERT_EQUAL_UINT8(0, out.activation[31]);   /* network_index */
@@ -2656,12 +2668,20 @@ static void test_cs_translate_activation_emits_open_boundary_output(void)
     TEST_ASSERT_EQUAL_UINT32((uint32_t)(5 + 25), out.activation_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
                             out.activation[5]);
+    /* time_stamp INIT bytes in the OPEN_OUT header [6..9]. */
+    uint32_t open_out_ts; memcpy(&open_out_ts, out.activation + 6, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_TIMESTAMP_INIT_VALUE, open_out_ts);
     /* packed_vdma = config+OUTPUT_OFFSET = 0x01+15 = 0x10 (first D2H). */
     TEST_ASSERT_EQUAL_UINT8(0x10, out.activation[10]);
     uint64_t dma; memcpy(&dma, out.activation + 12, 8);
     TEST_ASSERT_EQUAL_UINT64(0xBB00000022220000ull, dma);
     uint32_t descs; memcpy(&descs, out.activation + 22, 4);
     TEST_ASSERT_EQUAL_UINT32(6, descs);
+    /* bytes_in_pattern @ 26: must equal core_bytes_per_buffer (= 0x100)
+     * for the output pad. Same HailoRT-parity rule as the input body. */
+    uint32_t bytes_in_pattern;
+    memcpy(&bytes_in_pattern, out.activation + 26, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x100u, bytes_in_pattern);
 }
 
 static void test_cs_translate_activation_emits_input_and_output(void)
