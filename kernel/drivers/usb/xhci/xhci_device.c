@@ -215,6 +215,26 @@ static bool xhci_stale_port_already_recovered(uint32_t portsc, bool connected)
            !!(portsc & (XHCI_PORTSC_PEC | XHCI_PORTSC_PRC));
 }
 
+static bool xhci_stale_port_detached_in_linux(uint32_t portsc, bool connected,
+                                              enum usb_speed speed)
+{
+    /*
+     * A Linux-side usb-device "remove" before kexec can leave the
+     * physical device still connected but the root port no longer in the
+     * old Linux-enumerated state: CCS stays set, PED is clear, and no
+     * RW1CS change bits are latched anymore. That is materially different
+     * from the original stale inherited case and is a candidate for a
+     * fresh SLM-OS enumeration attempt without waiting for a manual
+     * unplug/replug.
+     */
+    if (!connected || (portsc & XHCI_PORTSC_PED) ||
+        (portsc & XHCI_PORTSC_RW1CS_MASK))
+        return false;
+
+    return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
+           speed == USB_SPEED_HIGH;
+}
+
 static bool xhci_connected_disabled_port(uint32_t portsc)
 {
     bool connected = false;
@@ -309,6 +329,19 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_stale_port_already_recovered(portsc, c)) {
         INFO("xhci: stale port on PORTSC[%u] is connected with PED=0 "
              "and change latched (0x%08x) — treating as fresh attach",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_detached_in_linux(portsc, c, s)) {
+        INFO("xhci: stale port on PORTSC[%u] is connected-disabled with "
+             "no change bits (0x%08x) — treating as fresh attach",
              (unsigned)xhci_active_port, (unsigned)portsc);
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
