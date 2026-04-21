@@ -38,12 +38,13 @@ void hailo_cs_builder_init(struct hailo_cs_builder *b,
                            uint8_t *buf, size_t capacity);
 
 /*
- * Append a single action: writes an 8-byte common_action_header_t
- * (with action_type=type, pad=0, time_stamp=0) followed by body_len
- * bytes of body data. `body_len` must match the fixed size the
- * firmware expects for that action_type (see struct sizes in
- * hailo_cs_actions.h); the builder does not validate this —
- * misuse produces a malformed action that firmware will reject.
+ * Append a single action: writes a 5-byte common_action_header_t
+ * (with action_type=type, time_stamp=HAILO_CS_TIMESTAMP_INIT_VALUE)
+ * followed by body_len bytes of body data. `body_len` must match
+ * the fixed size the firmware expects for that action_type (see
+ * struct sizes in hailo_cs_actions.h); the builder does not
+ * validate this — misuse produces a malformed action that firmware
+ * will reject.
  *
  * Returns HAILO_OK on success, HAILO_ERR_INVAL on null args, or
  * HAILO_ERR_NOMEM if the append would exceed the buffer capacity.

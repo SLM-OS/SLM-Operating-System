@@ -19,23 +19,33 @@
  *      0x40130016.
  *
  *   3. Per-type minimum actions per context (per HailoRT's
- *      fill_*_context_recipes functions, v4.23 source):
- *        ACTIVATION:      BURST_CREDITS_TASK_RESET (zero body)
+ *      fill_*_context_recipes functions, v4.23 source, plus the
+ *      hardware bisect from #180):
+ *        ACTIVATION:      BURST_CREDITS_TASK_RESET (zero body) +
+ *                         OpenBoundary OUT/IN per boundary edge
  *        BATCH_SWITCHING: DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START
- *        PRELIMINARY:     ACTIVATE_CFG_CHANNEL + FETCH_CCW_BURSTS per
- *                         distinct config channel
+ *        PRELIMINARY:     ACTIVATE_CFG_CHANNEL per distinct config
+ *                         channel. (HailoRT also wraps AddCcwBurst
+ *                         sub-actions inside REPEATED_ACTION here on
+ *                         Hailo-8L; that path is Phase 6.10. Direct
+ *                         FETCH_CCW_BURSTS is rejected with
+ *                         CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_
+ *                         NOT_SUPPORTED — see #180.)
  *        DYNAMIC:         APPLICATION_CHANGE_INTERRUPT tail marker
  *                         (for single-dynamic-context loads)
  *
- *   4. Common action header is **8 bytes** on the wire despite the
- *      reference header's #pragma pack(1). Handled transparently by
- *      hailo_cs_builder.
+ *   4. Common action header is **5 bytes** on the wire (1-byte
+ *      action_type + 4-byte time_stamp, packed). time_stamp must be
+ *      HAILO_CS_TIMESTAMP_INIT_VALUE (0xFFFFFFFF), not 0. Handled
+ *      transparently by hailo_cs_builder.
  *
- * Current scope (Phase 6.4f minimum viable):
- *  - ACTIVATION, BATCH_SWITCHING: fixed stub sequences, no HEF input.
- *  - PRELIMINARY: derived from hef_info.ccw_action_count; one
- *    ACTIVATE_CFG_CHANNEL per config channel, one FETCH_CCW_BURSTS
- *    sized from ccw_action_count.
+ * Current scope (post-#180 minimum viable):
+ *  - ACTIVATION: BURST_CREDITS_TASK_RESET + OpenBoundary OUT before IN
+ *    (HailoRT emission order).
+ *  - BATCH_SWITCHING: fixed stub sequence + ChangeBoundaryInputBatch
+ *    per input pad.
+ *  - PRELIMINARY: ACTIVATE_CFG_CHANNEL only. CCW weight loading via
+ *    REPEATED_ACTION + AddCcwBurst is Phase 6.10.
  *  - DYNAMIC: minimum tail-only marker. The full
  *    operations[].actions[] translation lives behind a follow-up;
  *    the current stub is enough to pass firmware's context-present

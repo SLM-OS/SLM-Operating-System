@@ -715,15 +715,13 @@ static int cmd_hailo(int argc, char *argv[])
             return 0;
         }
 
-        /* #180 hypothesis test: allocate boundary input/output DMA
-         * tensors + desc lists, populate synthetic pads with
-         * has_stream_info=true. This forces translate_activation to
-         * emit OPEN_BOUNDARY_INPUT_CHANNEL + OPEN_BOUNDARY_OUTPUT_
-         * CHANNEL alongside BURST_CREDITS_TASK_RESET, producing an
-         * ACTIVATION richer than the 8-byte credits-only stream
-         * firmware rejected the next CORE-CPU RPC after. If this
-         * unblocks BATCH_SWITCHING, #180's "insufficient ACTIVATION
-         * content" hypothesis is confirmed. */
+        /* #180 (resolved): allocate boundary input/output DMA tensors
+         * + desc lists, populate synthetic pads with has_stream_info=
+         * true so translate_activation emits BURST_CREDITS_TASK_RESET
+         * + OPEN_BOUNDARY_OUTPUT + OPEN_BOUNDARY_INPUT (HailoRT order:
+         * outputs first). With the 5-byte header + INIT timestamp +
+         * D2H channel range fixes, firmware accepts all four contexts
+         * and ctxsmoke completes cleanly. */
         const uint32_t bnd_bytes = 256u;
         const uint16_t bnd_page  = 4096u;
         struct hailo_tensor bnd_in_tensor  = {0};
@@ -865,14 +863,18 @@ static int cmd_hailo(int argc, char *argv[])
 
         shell_printf("  [5/8] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
                      (unsigned)bufs.activation_len);
-        /* #180 diag: dump the first 72 ACTIVATION bytes (the 3 actions
-         * we emit: BURST_CREDITS=8, OPEN_IN=36, OPEN_OUT=28) so the
-         * wire values can be compared against v4.23 reference
-         * byte-for-byte. Prints 4 dwords per line, LE. */
+        /* #180 diag: dump the first 80 ACTIVATION bytes — the three
+         * actions translate_activation emits in HailoRT order
+         * (OUT before IN) total 63 B for a single-stream HEF:
+         *   BURST_CREDITS_TASK_RESET   = 5 (hdr) + 0  (body) = 5
+         *   OPEN_BOUNDARY_OUTPUT       = 5 (hdr) + 20 (body) = 25
+         *   OPEN_BOUNDARY_INPUT        = 5 (hdr) + 28 (body) = 33
+         * 80 covers the "full" variant with margin for tweaks.
+         * Prints 16 bytes per line. */
         {
             const uint8_t *p = (const uint8_t *)bufs.activation;
-            uint32_t dump_len = (bufs.activation_len > 72u)
-                              ? 72u : (uint32_t)bufs.activation_len;
+            uint32_t dump_len = (bufs.activation_len > 80u)
+                              ? 80u : (uint32_t)bufs.activation_len;
             for (uint32_t off = 0; off < dump_len; off += 16) {
                 shell_printf("  [--] ACT[%02u]:", (unsigned)off);
                 for (uint32_t i = 0; i < 16 && off + i < dump_len; i++) {

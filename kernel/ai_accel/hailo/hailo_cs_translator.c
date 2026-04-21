@@ -148,8 +148,8 @@ int hailo_cs_translate_application_header(
  * the boundary streams exposed to the host). is_input selects the
  * direction. A single-input / single-output MLP emits exactly one
  * INPUT_CHANNEL + one OUTPUT_CHANNEL on top of the BURST_CREDITS
- * reset — three actions total, 28+20+8 = 56 bytes of body plus three
- * 8-byte common headers = 80 bytes of ACTIVATION. Well under the
+ * reset — three actions total, 28+20 = 48 bytes of body plus three
+ * 5-byte common headers = 63 bytes of ACTIVATION. Well under the
  * HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES cap.
  *
  * Multi-stream HEFs (multiple inputs or outputs) require threading
@@ -340,14 +340,19 @@ static int translate_batch_switching(const struct hef_info *info,
 /* -------------------------------------------------------------------------- */
 
 /* ACTIVATE_CFG_CHANNEL binds a config stream to the VDMA channel
- * firmware will DMA-pull CCW payloads through. Followed by one
- * FETCH_CCW_BURSTS that tells firmware how many bursts to pull.
+ * firmware will DMA-pull CCW payloads through.
  *
- * For MVP we emit one FETCH_CCW_BURSTS per CCW action captured by
- * the parser; the compiler's chosen burst granularity may differ,
- * but this matches HailoRT's "one burst per write_data_ccw action"
- * convention for simple MLPs. Future multi-burst handling (e.g.
- * repeated-action compression) lives behind a follow-up.
+ * Direct FETCH_CCW_BURSTS used to follow but firmware v4.23 on
+ * Hailo-8L rejects it in PRELIMINARY with 0x402a0001 =
+ * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED — see
+ * #180 wire capture (docs/reference/hailort-v4.23.0-wire-capture-
+ * mobilenet.txt). HailoRT instead wraps AddCcwBurst sub-actions in
+ * REPEATED_ACTION on this device. Real CCW loading via that path
+ * is Phase 6.10; for now PRELIMINARY emits ACTIVATE_CFG_CHANNEL
+ * alone, which is enough to satisfy firmware's "context must contain
+ * ≥1 valid action" check. No weights are actually transferred via
+ * the context-switch path today; legacy v0/v1 HEFs go through the
+ * separate hailo_control_upload_ccw (WRITE_MEMORY) path.
  */
 static int translate_preliminary(const struct hef_info *info,
                                  const struct hailo_cs_translate_cfg *cfg,
