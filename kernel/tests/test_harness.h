@@ -73,6 +73,11 @@ int test_suite_pmm(void);
 /* PCIe host-controller tests (ARM64 only — QEMU virt GPEX for now) */
 int test_suite_pcie(void);
 
+/* BPMP IPC tests (ARM64 only — stub behaviour on non-Jetson, live
+ * hardware exercise via shell commands on Jetson). Related docs:
+ * docs/jetson-pcie-investigation.md. */
+int test_suite_bpmp(void);
+
 /* Inference-device abstraction tests (registry + fake backend;
  * cpu-mlp-specific cases gated on CONFIG_AI_SCHEDULER) */
 int test_suite_inference_device(void);

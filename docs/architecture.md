@@ -214,6 +214,47 @@ This hybrid approach leverages:
 - VFS mount point support unifies virtual and persistent files
 - Shell access via `ls` and `cat` commands
 
+### BPMP IPC (Jetson)
+
+| Component | File(s) | Purpose |
+|-----------|---------|---------|
+| HSP doorbell | `kernel/drivers/bpmp/hsp.c`, `hsp.h` | Dynamic doorbell-address probe via `HSP_DIMENSIONING`; ring/pending/ack |
+| IVC channel protocol | `kernel/drivers/bpmp/ivc.c`, `ivc.h` | Sync→Ack→Established handshake; frame TX/RX on SYSRAM at `0x40070000`/`0x40071000` |
+| MRQ transport | `kernel/drivers/bpmp/mrq.c`, `mrq.h` | Blocking request/response round-trip on top of HSP+IVC |
+| Public API | `kernel/drivers/bpmp/bpmp.c`, `kernel/include/bpmp.h` | `bpmp_init`, `bpmp_is_available`, `bpmp_clk_*`, `bpmp_reset_*`, `bpmp_uphy_pcie_controller_state`, `bpmp_pg_set_state` |
+| Shell tests | `kernel/src/shell_sys.c` | `hspdiag` (dimensioning + doorbell probe), `bpmp` (PING + clock/reset/pcie smoke) |
+
+**Status (April 2026):** BPMP IPC ported from edk2-nvidia's `BpmpIpcDxe` + Linux's
+`tegra-bpmp`. Resolves #190 — bare-metal MRQs from SLM-OS now work (previous driver
+failed at channel-header struct layout + missing IVC handshake + hardcoded doorbell
+offset). MRQ_PING, MRQ_CLK, MRQ_RESET, MRQ_UPHY, and MRQ_PG all functional on
+live Jetson Orin Nano hardware via `bpmp pcie` shell command.
+
+Non-Jetson platforms get stubs — `bpmp.c` is compiled everywhere so callers like
+`uart_tegra.c` (UART_INIT_MODE=1) link cleanly. QEMU tests in
+`kernel/tests/test_bpmp.c` pin the stub behaviour + cross-check clock/reset IDs
+against Linux's `tegra234-clock.h` / `tegra234-reset.h` bindings.
+
+See `docs/jetson-bpmp-ipc-plan.md` for the port design doc and
+`docs/jetson-pcie-investigation.md` for the hardware bring-up trail.
+
+### Tegra PCIe C8 Root Complex (Jetson)
+
+| Component | File(s) | Purpose |
+|-----------|---------|---------|
+| RC bring-up | `kernel/drivers/pcie/pcie_tegra194.c`, `pcie_tegra194.h` | APPL + DBI + P2U PHY init, LTSSM start, iATU program, endpoint probe |
+| Shell test | `kernel/src/shell_sys.c` `cmd_pcietrain` | `pcietrain` — full host init + LTSSM + EP probe, reports APPL/DBI snapshot |
+
+**Status (April 2026):** Driver is a full port of Linux's `tegra_pcie_config_controller`
++ `dw_pcie_setup_rc` + `tegra_pcie_dw_start_link`, cross-checked against
+edk2-nvidia's `PcieControllerDxe` `PrepareHost`. On hardware, APPL_CTRL wakes from
+`0xFFFFFFFF` (clock-gated) to `0x00949060` with `LTSSM_EN=1`, DBI reads the
+NVIDIA RC bridge ID `0x229c10de`. LTSSM stalls at `POLLING.COMPLIANCE (0x03)` —
+endpoint firmware not responding to training sequences. Remaining blockers are
+out of software reach (either TF-A secure filtering or a cold-boot-only
+RTL8168 init path). Tracker: #25. Full trail in
+`docs/jetson-pcie-investigation.md`.
+
 ### Networking Subsystem
 
 | Component | File(s) | Purpose |

@@ -63,7 +63,10 @@ SLM-OS successfully runs on QEMU and Raspberry Pi 5, but is blocked on Jetson Or
 - Any peripheral access from SLM-OS (CBB firewall blocks it)
 - kexec (not validated by NVIDIA, triggers security errors)
 - Direct UEFI boot (same CBB restrictions)
-- BPMP IPC re-initialization after kexec
+- ~~BPMP IPC re-initialization after kexec~~ — **WORKS** as of April 2026
+  via `kernel/drivers/bpmp/` port of edk2-nvidia's BpmpIpc. See
+  `docs/jetson-bpmp-ipc-plan.md` and `docs/jetson-pcie-investigation.md`
+  §"Step 2 landing".
 
 ---
 
@@ -184,40 +187,27 @@ efibootmgr -n 0009  # Set as next boot
 
 ---
 
-## BPMP Communication Issues
+## BPMP Communication
 
 ### Background
 
-The BPMP (Boot and Power Management Processor) controls clocks and power on Tegra SoCs. It runs on a separate ARM Cortex-R5 core and communicates via IVC (Inter-VM Communication) channels.
+The BPMP (Boot and Power Management Processor) controls clocks and power on Tegra SoCs. It runs on a separate ARM Cortex-R5 core and communicates via IVC (Inter-VM Communication) channels on SYSRAM at `0x40070000` / `0x40071000` + HSP doorbells at `0x03C00000`.
 
-### The Problem
+### Status (April 2026): WORKING
 
-After kexec, the IVC channels to BPMP are corrupted/invalid:
+SLM-OS has a full BPMP IPC stack at `kernel/drivers/bpmp/` (hsp.c / ivc.c / mrq.c / bpmp.c), ported from edk2-nvidia's `BpmpIpcDxe` and cross-checked against Linux's `tegra-bpmp`. After kexec, the driver runs a fresh Sync → Ack → Established IVC handshake to reset channel state, then round-trips MRQ_PING, MRQ_CLK, MRQ_RESET, MRQ_UPHY, and MRQ_PG with BPMP firmware.
 
-1. Linux establishes IVC handshake with BPMP during boot
-2. IVC state is stored in shared memory
-3. kexec jumps to SLM-OS without proper IVC teardown
-4. SLM-OS cannot communicate with BPMP
-5. Without BPMP, cannot enable UART clocks
+Verified via `hspdiag` + `bpmp` shell commands — see `docs/jetson-pcie-investigation.md` §"BPMP IPC port" for live output and `docs/jetson-bpmp-ipc-plan.md` for the port design.
 
-### Attempted Solutions
+### Previously attempted (now obsolete)
 
-**IVC Channel Reset:**
-```c
-volatile struct ivc_channel_header *tx_h = tx_header();
-volatile struct ivc_channel_header *rx_h = rx_header();
+The first iteration (#190, landed January 2026) had three root-cause bugs that made it look like BPMP rejected CCPLEX:
 
-/* Sync TX channel: set r_count = w_count */
-mmio_write32(&tx_h->r_count, mmio_read32(&tx_h->w_count));
+1. Wrong `ivc_channel_header` struct layout — offset 0x04 is `tx.state`, not `r_count` as the code assumed. Writes to "r_count=0" clobbered `State` and caused TF-A RAS Uncorrectable Errors.
+2. Hardcoded HSP doorbell offset `HSP+0x10000+master*0x100` instead of computing from `HSP_DIMENSIONING`. Real offset on Tegra234 is `HSP+0x90000+master*0x100`.
+3. No IVC handshake — code trusted Linux's pre-kexec channel state.
 
-/* Sync RX channel: set r_count = w_count */
-mmio_write32(&rx_h->r_count, mmio_read32(&rx_h->w_count));
-
-/* Clear any pending doorbells */
-hsp_ccplex_clear();
-```
-
-**Result:** BPMP still doesn't respond. The full IVC handshake protocol requires capability exchange that we don't have documentation for.
+All three fixed in the April 2026 rewrite. #190 closed.
 
 ### UART Clock Status
 

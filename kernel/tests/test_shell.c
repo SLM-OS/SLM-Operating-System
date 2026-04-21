@@ -2544,6 +2544,38 @@ static void test_shell_gpu_cmd_platform_correctness(void)
 #endif
 }
 
+/*
+ * Jetson BPMP IPC + PCIe shell commands must register on the Jetson
+ * platform only. Guards in kernel/src/shell.c wrap these in
+ * `#if defined(PLATFORM_JETSON_ORIN_NANO)`; removing the guard would
+ * leak unresolved symbols on QEMU/Pi 5/x86-64 since cmd_hspdiag/
+ * cmd_bpmp/cmd_pcietrain are compiled conditionally in shell_sys.c.
+ * Fires on that mis-guard and also catches someone deleting the
+ * commands accidentally.
+ */
+static void test_shell_jetson_bpmp_pcie_cmds_correct_platform(void)
+{
+    bool hspdiag_present   = cmd_table_has(builtin_commands, NUM_BUILTIN_COMMANDS, "hspdiag");
+    bool bpmp_present      = cmd_table_has(builtin_commands, NUM_BUILTIN_COMMANDS, "bpmp");
+    bool pcietrain_present = cmd_table_has(builtin_commands, NUM_BUILTIN_COMMANDS, "pcietrain");
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_MESSAGE(hspdiag_present,
+        "hspdiag must be registered on Jetson (BPMP HSP doorbell probe)");
+    TEST_ASSERT_MESSAGE(bpmp_present,
+        "bpmp must be registered on Jetson (IPC smoke test)");
+    TEST_ASSERT_MESSAGE(pcietrain_present,
+        "pcietrain must be registered on Jetson (PCIe C8 bring-up)");
+#else
+    TEST_ASSERT_MESSAGE(!hspdiag_present,
+        "hspdiag must NOT be registered off-Jetson — its symbol is gated");
+    TEST_ASSERT_MESSAGE(!bpmp_present,
+        "bpmp must NOT be registered off-Jetson — its symbol is gated");
+    TEST_ASSERT_MESSAGE(!pcietrain_present,
+        "pcietrain must NOT be registered off-Jetson — its symbol is gated");
+#endif
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -2555,6 +2587,9 @@ int test_suite_shell(void)
     /* Cross-platform `gpu` builtin shape (x86-64 strips it; everyone
      * else keeps it for Jetson `gpu read`). */
     RUN_TEST(test_shell_gpu_cmd_platform_correctness);
+
+    /* Jetson BPMP + PCIe shell cmds registered iff on Jetson. */
+    RUN_TEST(test_shell_jetson_bpmp_pcie_cmds_correct_platform);
 
     /* Command dispatch tests - essential */
     RUN_TEST(test_shell_empty_command);
