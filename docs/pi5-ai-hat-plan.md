@@ -872,6 +872,62 @@ channels.
   step but sits under Phase 8 / demo-readiness since it needs a
   compiled mobilenet_v1 HEF staged on the SD card.
 
+### Phase 8: First Real Inference on pi-5-1 (in progress, 2026-04-21)
+
+**Goal.** `hailo_backend_run` completes on pi-5-1 with a real
+Hailo-8L-compiled HEF. Correct classification output is a stretch
+goal; the required bar is rc=0 + non-zero latency so capstone
+performance data (throughput, per-inference latency, p99) can be
+captured. A wrong output with a measurable DMA-in → NPU-compute →
+DMA-out round trip is still valid performance data.
+
+**What we know is built.** `inference_load_model` drives the full
+SET_CONTEXT_INFO sequence; all 4 contexts returned rc=0 on fw v4.23
+during ctxsmoke with 0xA5 filler. `hailo_backend_run` is fully
+wired (cache-clean, H2D/D2H start, desc-list reprogram, submit-
+and-wait, cache-invalidate, stop). `slm.hailo.{load, infer,
+unload, status}` reach the backend from Lua. `demo_hailo.lua`
+runs a bench loop that captures per-iteration latency via
+slm.uptime() and reports p50/p95/p99.
+
+**What we expect might fail.** Listed in rough order of likelihood:
+
+1. **Missing PRELIMINARY actions.** `translate_preliminary` emits
+   15 of the 45 defined action types. HailoRT's captured
+   mobilenet_v1 PRELIMINARY contains 46 `WRITE_DATA_BY_TYPE`
+   (sub-type 0x24) actions writing quantization constants. Firmware
+   is expected to accept the CONTEXT_INFO without them (no semantic
+   validation at the RPC boundary) but the NPU compute may produce
+   garbage. *Performance data is still valid in this mode.*
+2. **Multi-config-channel HEF** (#339). Single ACTIVATE +
+   FETCH_CFG_CHANNEL_DESCRIPTORS emitted today. If the target HEF
+   has multiple config streams, load fails before infer.
+3. **CCW weight transfer.** `load_model` allocates a CCW tensor
+   from `hef_info->ccws_size` and uploads real bytes, but this has
+   only been hardware-verified with 0xA5 filler.
+4. **HEF header mismatch.** v4.23 firmware expects a specific HEF
+   format version. Hailo Model Zoo HEFs compiled with a newer
+   Hailo Compiler may declare an incompatible version field and
+   trip the parser's sanity checks.
+
+**Execution plan.**
+
+- Obtain a Hailo-8L-compiled HEF (mobilenet_v1 preferred for
+  comparison against HailoRT reference numbers).
+- Stage via `labctl sdwire_update` onto the SLM-OS SD card
+  alongside the kernel image.
+- Run `lua /mnt/files/demo_hailo.lua /mnt/files/mobilenet_v1.hef
+  200` — 200 iterations for reasonable percentiles, script
+  auto-probes input sizes.
+- Capture serial output via `labctl serial_capture` with a 60 s
+  window to let the bench loop finish.
+- Triage the first failure observed. Do not pre-implement fixes
+  for failures that haven't surfaced on hardware.
+
+**Success criteria (minimum).** `demo_hailo.lua` prints a
+"Benchmark summary" line with a non-zero FPS value. Output
+correctness is a follow-on concern.
+
 ---
 
 ## 4. Risks & Open Questions

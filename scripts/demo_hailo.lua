@@ -185,56 +185,60 @@ if bench_iters > 0 then
     note("Rolling stats printed every ~10 % of iterations.")
     note("")
 
+    -- Microsecond resolution: Hailo-8L native throughput on
+    -- MobileNetV1 is ~1500 FPS (≈0.65 ms/frame). ms timing would
+    -- quantize samples into 0/1/2 ms buckets and produce meaningless
+    -- percentiles. slm.uptime_us() uses CNTPCT (54 MHz on Pi 5).
     local input = string.rep("\0", in_size)
-    local samples = {}
-    local t_start = slm.uptime()
-    local t_last_print = t_start
+    local samples_us = {}
+    local t_start_us = slm.uptime_us()
+    local t_last_print_us = t_start_us
     local last_printed_i = 0
     local errors = 0
     local print_every = math.max(1, math.floor(bench_iters / 10))
 
     for i = 1, bench_iters do
-        local t0 = slm.uptime()
+        local t0 = slm.uptime_us()
         local out = slm.hailo.infer(handle, input)
-        local t1 = slm.uptime()
+        local t1 = slm.uptime_us()
         if out == nil then
             errors = errors + 1
         else
-            samples[#samples + 1] = t1 - t0
+            samples_us[#samples_us + 1] = t1 - t0
         end
         if i % print_every == 0 or i == bench_iters then
-            local window_ms = math.max(1, t1 - t_last_print)
+            local window_us = math.max(1, t1 - t_last_print_us)
             local window_iters = i - last_printed_i
-            local fps = math.floor((window_iters * 1000) / window_ms)
-            P(string.format("    [%4d/%d]  window: %d iters in %d ms  (%d FPS)",
-                i, bench_iters, window_iters, window_ms, fps))
-            t_last_print = t1
+            local fps = math.floor((window_iters * 1000000) / window_us)
+            P(string.format("    [%4d/%d]  window: %d iters in %d us  (%d FPS)",
+                i, bench_iters, window_iters, window_us, fps))
+            t_last_print_us = t1
             last_printed_i = i
         end
     end
 
-    local t_end = slm.uptime()
-    local total_ms = t_end - t_start
+    local t_end_us = slm.uptime_us()
+    local total_us = t_end_us - t_start_us
     note("")
     subhead("Benchmark summary:")
-    note(string.format("  Total:         %d iterations in %d ms",
-        bench_iters, total_ms))
+    note(string.format("  Total:         %d iterations in %d us",
+        bench_iters, total_us))
     note(string.format("  Successful:    %d  (errors: %d)",
-        #samples, errors))
-    if total_ms > 0 then
+        #samples_us, errors))
+    if total_us > 0 then
         note(string.format("  Throughput:    %d FPS",
-            math.floor((#samples * 1000) / total_ms)))
+            math.floor((#samples_us * 1000000) / total_us)))
     end
-    if #samples > 0 then
-        table.sort(samples)
+    if #samples_us > 0 then
+        table.sort(samples_us)
         local sum = 0
-        for _, v in ipairs(samples) do sum = sum + v end
-        local n = #samples
-        local p50 = samples[math.max(1, math.floor(n * 0.50))]
-        local p95 = samples[math.max(1, math.floor(n * 0.95))]
-        local p99 = samples[math.max(1, math.floor(n * 0.99))]
-        note(string.format("  Latency (ms):  min=%d p50=%d p95=%d p99=%d max=%d avg=%d",
-            samples[1], p50, p95, p99, samples[n],
+        for _, v in ipairs(samples_us) do sum = sum + v end
+        local n = #samples_us
+        local p50 = samples_us[math.max(1, math.floor(n * 0.50))]
+        local p95 = samples_us[math.max(1, math.floor(n * 0.95))]
+        local p99 = samples_us[math.max(1, math.floor(n * 0.99))]
+        note(string.format("  Latency (us):  min=%d p50=%d p95=%d p99=%d max=%d avg=%d",
+            samples_us[1], p50, p95, p99, samples_us[n],
             math.floor(sum / n)))
     end
 end
