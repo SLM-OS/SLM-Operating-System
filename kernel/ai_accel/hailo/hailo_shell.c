@@ -484,6 +484,19 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
         shell_puts("  [8/8] SKIP: DYNAMIC (dcc0 mode)\n");
     }
 
+    /* Phase 6.10 step 3: flip firmware out of config mode into RUN.
+     * application_index = 0 (first and only network group in our
+     * synthetic load). dynamic_batch_size = batch_count = 0 uses
+     * the header-supplied batch (we set batch_size=1 in the app
+     * header). If firmware accepts all 4 SET_CONTEXT_INFO calls,
+     * this transition unlocks per-frame VDMA submission. */
+    shell_puts("  [-/8] CHANGE_CONTEXT_SWITCH_STATUS(ENABLED)...\n");
+    rc = hailo_control_change_context_switch_status(
+        HAILO_CS_STATE_ENABLED,
+        /*application_index=*/0,
+        /*batch_size=*/0, /*batch_count=*/0);
+    shell_printf("        rc=%d\n", rc);
+
     hailo_vdma_desc_list_free(&bnd_out_list);
     hailo_vdma_desc_list_free(&bnd_in_list);
     hailo_tensor_free(&bnd_out_tensor);
