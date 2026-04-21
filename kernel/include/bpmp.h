@@ -58,6 +58,12 @@
  * stuck in Sync, etc.).
  *
  * Idempotent: a second call returns 0 without re-running the handshake.
+ *
+ * Concurrency note for all functions below: internally serialised by
+ * a spinlock held for the full MRQ round-trip (commit → ring → poll →
+ * consume). Safe to call from any task context on any CPU. Do NOT
+ * call from an ISR — the round-trip can take up to 100 ms polling
+ * and holds IRQs disabled for that duration.
  */
 int bpmp_init(void);
 

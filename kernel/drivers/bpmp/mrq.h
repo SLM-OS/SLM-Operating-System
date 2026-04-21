@@ -61,6 +61,13 @@
 #define CMD_RESET_MODULE        3
 
 /*
+ * MRQ_CLK pack format: bits [31:24] = sub-command, bits [23:0] = clock ID.
+ * See docs/reference/linux-bpmp-abi.h:1779 (struct mrq_clk_request).
+ */
+#define MRQ_CLK_CMD_AND_ID(cmd, id) \
+    (((uint32_t)(cmd) << 24) | ((uint32_t)(id) & 0x00FFFFFFu))
+
+/*
  * Initialise the MRQ transport layer. Must be called AFTER hsp_init()
  * and after the BPMP SYSRAM regions are mapped Non-Cacheable.
  *

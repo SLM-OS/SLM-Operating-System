@@ -19,6 +19,7 @@
 
 #include "hsp.h"
 #include "debug.h"
+#include "timer.h"      /* timer_busy_wait_us — truthful polling cadence */
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -163,9 +164,10 @@ int hsp_wait_bpmp_doorbell_enabled(uint32_t timeout_us)
         return -1;
     }
 
-    /* Poll in ~1 us steps (no free-running timer usable this early —
-     * spin-count calibrated to a rough 1 MHz loop, good enough for a
-     * one-shot init wait). */
+    /* Poll in 1 us steps using the ARM generic timer (CNTPCT_EL0).
+     * timer_busy_wait_us is callable from any context and gives us a
+     * truthful timeout — the previous "spin 100 iterations for ~1 us"
+     * approximation depended on compiler optimization and cpu freq. */
     uint32_t remaining = timeout_us;
     while (remaining > 0) {
         uint32_t enable = hsp_read32(g_bpmp_doorbell_addr + HSP_DB_REG_ENABLE);
@@ -173,8 +175,7 @@ int hsp_wait_bpmp_doorbell_enabled(uint32_t timeout_us)
             return 0;
         }
 
-        /* Yield 1 us of spin. */
-        for (volatile uint32_t i = 0; i < 100; i++) { }
+        timer_busy_wait_us(1);
         remaining--;
     }
 

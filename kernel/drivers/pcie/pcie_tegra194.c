@@ -155,6 +155,12 @@
 #define ATU_CTRL1_TYPE_CFG1             0x5
 #define ATU_CTRL2_ENABLE                (1u << 31)
 
+/* iATU target-address BDF encoding for CFG transactions (mirrors
+ * Linux's PCIE_ATU_{BUS,DEV,FUNC} in linux-pcie-designware.h:190-192). */
+#define ATU_TARGET_BUS(b)   (((uint32_t)(b) & 0xFFu) << 24)
+#define ATU_TARGET_DEV(d)   (((uint32_t)(d) & 0x1Fu) << 19)
+#define ATU_TARGET_FUNC(f)  (((uint32_t)(f) & 0x07u) << 16)
+
 static bool g_host_inited;
 
 static inline uint32_t mmio_read32(uintptr_t addr)
@@ -188,6 +194,13 @@ static inline uint32_t dbi_read32(uint32_t off)
 static inline void dbi_write32(uint32_t off, uint32_t val)
 {
     mmio_write32(TEGRA_PCIE_C8_DBI + off, val);
+}
+
+static inline uint16_t dbi_read16(uint32_t off)
+{
+    uint16_t v = *(volatile uint16_t *)(TEGRA_PCIE_C8_DBI + off);
+    __asm__ volatile("dsb sy" ::: "memory");
+    return v;
 }
 
 static inline void dbi_write16(uint32_t off, uint16_t val)
@@ -484,11 +497,10 @@ int pcie_tegra_host_init(void)
          * Gen1-only endpoint; the RC trying Gen3 first then failing
          * over to Gen1 is what leaves us stuck in POLLING.COMPLIANCE.
          * LNKCTL2 is 16-bit; TLS bits [3:0]. */
-        uint16_t lnkctl2 = *(volatile uint16_t *)(TEGRA_PCIE_C8_DBI + DBI_PCIE_LNKCTL2);
+        uint16_t lnkctl2 = dbi_read16(DBI_PCIE_LNKCTL2);
         lnkctl2 = (lnkctl2 & ~(uint16_t)PCI_EXP_LNKCTL2_TLS_MASK) |
                   (uint16_t)PCI_EXP_LNKCTL2_TLS_2_5GT;
-        *(volatile uint16_t *)(TEGRA_PCIE_C8_DBI + DBI_PCIE_LNKCTL2) = lnkctl2;
-        __asm__ volatile("dsb sy" ::: "memory");
+        dbi_write16(DBI_PCIE_LNKCTL2, lnkctl2);
 
         /* Disable DLF exchange. Older endpoints (RTL8168 era) don't
          * implement Data Link Feature; the RC attempts DLF negotiation
@@ -598,7 +610,8 @@ int pcie_tegra_probe_endpoint(uint32_t *vid_did_out)
      */
     const uint64_t cfg_base  = TEGRA_PCIE_C8_CFG;
     const uint64_t cfg_limit = cfg_base + 0x1000 - 1;
-    const uint32_t target_bdf = (1u << 24);     /* bus 1, dev 0, func 0 */
+    const uint32_t target_bdf = ATU_TARGET_BUS(1) | ATU_TARGET_DEV(0) |
+                                ATU_TARGET_FUNC(0);
 
     atu_ob_write(0, ATU_LOWER_BASE,   (uint32_t)(cfg_base  & 0xFFFFFFFFu));
     atu_ob_write(0, ATU_UPPER_BASE,   (uint32_t)(cfg_base  >> 32));

@@ -98,7 +98,7 @@ static int bpmp_clk_command(uint32_t cmd, uint32_t clock_id)
     }
 
     struct mrq_clk_payload_v1 req = {
-        .cmd_and_id = (cmd << 24) | (clock_id & 0x00FFFFFF),
+        .cmd_and_id = MRQ_CLK_CMD_AND_ID(cmd, clock_id),
     };
 
     int32_t err = 0;
@@ -126,7 +126,7 @@ int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out)
     }
 
     struct mrq_clk_payload_v1 req = {
-        .cmd_and_id = (CMD_CLK_IS_ENABLED << 24) | (clock_id & 0x00FFFFFF),
+        .cmd_and_id = MRQ_CLK_CMD_AND_ID(CMD_CLK_IS_ENABLED, clock_id),
     };
 
     /* Response is struct cmd_clk_is_enabled_response { int32_t state; } */

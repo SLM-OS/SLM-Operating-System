@@ -20,6 +20,7 @@
 
 #include "ivc.h"
 #include "debug.h"
+#include "timer.h"      /* timer_busy_wait_us — truthful polling cadence */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -167,7 +168,7 @@ int ivc_handshake(struct ivc_channel *tx, struct ivc_channel *rx,
             rang_second = true;
         }
 
-        for (volatile uint32_t i = 0; i < 100; i++) { }
+        timer_busy_wait_us(1);
         remaining--;
     }
 

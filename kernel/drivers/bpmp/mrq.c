@@ -15,6 +15,8 @@
 #include "ivc.h"
 #include "hsp.h"
 #include "debug.h"
+#include "timer.h"      /* timer_busy_wait_us — truthful polling cadence */
+#include "spinlock.h"   /* serialize concurrent MRQ callers */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -32,6 +34,16 @@
 static bool              g_mrq_ready;
 static struct ivc_channel g_tx;
 static struct ivc_channel g_rx;
+
+/*
+ * Serialises concurrent callers of mrq_send. A single MRQ round-trip
+ * is commit → ring → poll-until-response → consume; the shared
+ * g_tx/g_rx channel state can't tolerate a second commit partway
+ * through. This lock is held for the full round-trip, which is OK
+ * because the whole path is bounded by MRQ_POLL_TIMEOUT_US (100 ms)
+ * and no sleep/alloc happens inside it.
+ */
+static spinlock_t g_mrq_lock = SPINLOCK_INIT;
 
 /* Callback thunks so ivc_handshake doesn't need an HSP dependency. */
 static int  ring_bpmp_doorbell(void)  { return hsp_ring_bpmp(); }
@@ -83,10 +95,16 @@ int mrq_send(uint32_t mrq,
         return -1;
     }
 
+    /* Serialise the whole request/response round-trip. Concurrent
+     * callers (e.g. driver-owned clock gates from different CPUs)
+     * would otherwise corrupt the shared g_tx/g_rx state. */
+    irq_flags_t flags_irq = spin_lock_irqsave(&g_mrq_lock);
+
     /* Frame must start from an empty TX side. Normally the previous
      * round-trip cleaned up; if not, something is wedged. */
     if (!ivc_tx_is_empty(&g_tx)) {
         WARN("BPMP: TX busy at start of send (mrq=%u)", (unsigned)mrq);
+        spin_unlock_irqrestore(&g_mrq_lock, flags_irq);
         return -2;
     }
 
@@ -98,6 +116,7 @@ int mrq_send(uint32_t mrq,
     int rc = ivc_tx_commit(&g_tx, mrq, flags, tx_data, tx_len);
     if (rc != 0) {
         WARN("BPMP: ivc_tx_commit failed rc=%d for mrq=%u", rc, (unsigned)mrq);
+        spin_unlock_irqrestore(&g_mrq_lock, flags_irq);
         return -3;
     }
 
@@ -107,6 +126,7 @@ int mrq_send(uint32_t mrq,
         WARN("BPMP: doorbell ring failed rc=%d (enable not set?)", rc);
         /* Not strictly fatal — BPMP may still poll the channel — but
          * treat as an error since the legacy driver silently ignored. */
+        spin_unlock_irqrestore(&g_mrq_lock, flags_irq);
         return -3;
     }
 
@@ -122,7 +142,7 @@ int mrq_send(uint32_t mrq,
             break;
         }
 
-        for (volatile uint32_t i = 0; i < 100; i++) { }
+        timer_busy_wait_us(1);
         remaining--;
     }
 
@@ -131,6 +151,7 @@ int mrq_send(uint32_t mrq,
              (unsigned)mrq,
              (unsigned)ivc_peek_tx_count(&g_tx),
              (unsigned)ivc_peek_tx_count(&g_rx));
+        spin_unlock_irqrestore(&g_mrq_lock, flags_irq);
         return -4;
     }
 
@@ -153,6 +174,7 @@ int mrq_send(uint32_t mrq,
     rc = ivc_rx_consume(&g_rx, &resp_code, frame, sizeof(frame), &got);
     if (rc != 0) {
         WARN("BPMP: ivc_rx_consume failed rc=%d", rc);
+        spin_unlock_irqrestore(&g_mrq_lock, flags_irq);
         return -5;
     }
 
@@ -172,6 +194,7 @@ int mrq_send(uint32_t mrq,
         }
     }
 
+    spin_unlock_irqrestore(&g_mrq_lock, flags_irq);
     return 0;
 }
 

@@ -53,6 +53,10 @@
 
 /* Maximum payload in one frame (matches Linux MSG_DATA_MIN_SZ). */
 #define IVC_DATA_MAX            120
+_Static_assert(IVC_DATA_MAX == 120,
+               "IVC_DATA_MAX must match Linux MSG_DATA_MIN_SZ "
+               "(linux-bpmp-abi.h:536) — BPMP firmware rejects "
+               "frames larger than this");
 
 /* Handshake states (see linux-tegra-ivc.c:enum tegra_ivc_state). */
 #define IVC_STATE_ESTABLISHED   0
@@ -113,7 +117,12 @@ int ivc_tx_commit(struct ivc_channel *tx, uint32_t mrq, uint32_t flags,
  *   out_mrq   filled with the response's mrq field (usually the error code).
  *   out_data  copied from the frame's data area.
  *   max_len   size of the out_data buffer.
- *   *got_len  bytes actually copied (clamped to IVC_DATA_MAX).
+ *   *got_len  set to `min(max_len, IVC_DATA_MAX)`. NOTE: this is the
+ *             number of bytes COPIED into out_data, not the number of
+ *             valid bytes in the frame — IVC has no length metadata on
+ *             the wire (frames are always a fixed 120 bytes). Callers
+ *             should pass rx_len equal to the expected response
+ *             payload size for the MRQ they issued.
  * Returns 0 on success. Also increments rx.count so BPMP knows we
  * processed the frame.
  */
