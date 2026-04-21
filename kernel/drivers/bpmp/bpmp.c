@@ -226,6 +226,43 @@ int bpmp_uphy_pcie_controller_state(uint32_t pcie_controller_id, bool enable)
     return (int)err;
 }
 
+/* ============================================================================
+ * MRQ_PG (Power Gate / Power Domain)
+ * ============================================================================ */
+
+/*
+ * linux-bpmp-abi.h struct mrq_pg_request for CMD_PG_SET_STATE:
+ *   offset 0   uint32  cmd    (1 = CMD_PG_SET_STATE)
+ *   offset 4   uint32  id     (TEGRA234_POWER_DOMAIN_*)
+ *   offset 8   uint32  state  (PG_STATE_ON=1, _OFF=0)
+ * Total 12 bytes (matches ABI doc).
+ */
+struct mrq_pg_set_state_payload {
+    uint32_t cmd;
+    uint32_t id;
+    uint32_t state;
+};
+
+int bpmp_pg_set_state(uint32_t domain_id, bool on)
+{
+    if (!g_bpmp_initialised) {
+        return -1;
+    }
+
+    struct mrq_pg_set_state_payload req = {
+        .cmd   = CMD_PG_SET_STATE,
+        .id    = domain_id,
+        .state = on ? PG_STATE_ON : PG_STATE_OFF,
+    };
+
+    int32_t err = 0;
+    int rc = mrq_send(MRQ_PG, &req, sizeof(req), NULL, 0, &err);
+    if (rc != 0) {
+        return rc;
+    }
+    return (int)err;
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO */
 
 /* Stubs for QEMU / Pi 5 / x86-64. */
@@ -238,5 +275,6 @@ int  bpmp_clk_is_enabled(uint32_t id, int *out) { (void)id; if (out) *out = 0; r
 int  bpmp_reset_assert(uint32_t id)          { (void)id; return 0; }
 int  bpmp_reset_deassert(uint32_t id)        { (void)id; return 0; }
 int  bpmp_uphy_pcie_controller_state(uint32_t id, bool en) { (void)id; (void)en; return 0; }
+int  bpmp_pg_set_state(uint32_t id, bool on) { (void)id; (void)on; return 0; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

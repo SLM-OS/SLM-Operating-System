@@ -104,4 +104,13 @@ int bpmp_reset_deassert(uint32_t reset_id);
 int bpmp_uphy_pcie_controller_state(uint32_t pcie_controller_id,
                                     bool enable);
 
+/*
+ * MRQ_PG / CMD_PG_SET_STATE — turn a BPMP-managed power domain on or off.
+ *   domain_id  TEGRA234_POWER_DOMAIN_* (e.g. PCIEX4CA = 13 for PCIe C8).
+ *   on         true = PG_STATE_ON (1), false = PG_STATE_OFF (0).
+ * Returns 0 on success (including "already in that state"), negative
+ * on transport failure, positive on BPMP-reported err code.
+ */
+int bpmp_pg_set_state(uint32_t domain_id, bool on);
+
 #endif /* BPMP_H */

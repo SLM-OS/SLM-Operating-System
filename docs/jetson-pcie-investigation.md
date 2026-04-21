@@ -539,6 +539,95 @@ now a faithful mirror of the software-visible parts of Linux's
 is ever lifted (power cycle, different board, firmware fix), the
 driver should train the link without further modification.
 
+### Step 3.6 attempt — edk2-nvidia cross-check (20 April 2026, late)
+
+Fetched `docs/reference/edk2-nvidia-pciecontrollerdxe.c` (2368 LOC)
+and compared against our driver. Found three additional pieces
+edk2's UEFI bring-up does that Linux's probe either handles
+implicitly via kernel frameworks or doesn't do at all:
+
+1. **MRQ_PG SET_STATE(PCIEX4CA, ON).** Linux handles the
+   `power-domains = <&bpmp 13>` DT property via the power-domains
+   + runtime_pm frameworks. edk2's `AssertPgNodes(Assert=FALSE)`
+   does it explicitly via a BPMP MRQ_PG. We added
+   `bpmp_pg_set_state()` to the BPMP API and invoke it at the
+   start of `pcie_tegra_host_init` — rc=0, but no effect on LTSSM.
+
+2. **APPL_CTRL.HW_HOT_RST_EN + HW_HOT_RST_MODE=IMDT_RST_LTSSM_EN.**
+   edk2 sets bit 20 + bits [23:22]=0x2 unconditionally on T234.
+   Linux sets the same bits conditionally under `has_sbr_reset_fix`
+   which is `true` for T234. We matched — APPL_CTRL after host
+   init reads `0x00949060` confirming the bits stick.
+
+3. **Full `PrepareHost` DBI programming.** I/O base decode
+   disable at `DBI+0x1C`, prefetchable memory base decode enable
+   at `DBI+0x24`, longer (200 ms) post-PEX_RST de-assertion
+   delay. All applied.
+
+Separately, tested a **Linux pre-kexec unbind** to force a true
+VDD_3V3_PCIE power-cycle of the RTL8168:
+
+```
+# On jetson-nano-1 Linux, before kexec:
+echo 140a0000.pcie > /sys/bus/platform/drivers/tegra194-pcie/unbind
+# Regulator state drops to "disabled". SSH disconnects (expected —
+# we're sshing through the RTL8168). Serial console still works.
+slmos-kexec /root/slmos.elf
+# After boot, from SLM-OS shell:
+slmos> pcietrain
+```
+
+Expected: RTL8168 was without VDD for ~15 s before SLM-OS's
+`bpmp_pg_set_state` + `bpmp_clk_enable` reopened the power path.
+The endpoint should be in a fresh cold-boot state.
+
+Actual: **still LTSSM=0x03**. Same as every other attempt.
+
+This empirically rules out "endpoint firmware was left in a bad
+state by Linux kexec" as the cause. The endpoint gets a true VDD
+cycle and still doesn't respond to the RC's training ordered
+sets.
+
+### Definitive conclusion
+
+Linux's own source code (`docs/reference/linux-pcie-designware.c:
+dw_pcie_wait_for_link`, line 791) documents:
+
+> *"If the link is in POLL.{Active/Compliance} state, then the
+> device is found to be connected to the bus, but it is not active
+> i.e., **the device firmware might not yet initialized**."*
+
+Every software-reachable initialization sequence has been
+performed. Both Linux's `pcie-tegra194` driver (via kernel
+frameworks) and edk2-nvidia's `PcieControllerDxe` (UEFI-time
+bare-metal) have their visible logic fully mirrored in
+`kernel/drivers/pcie/pcie_tegra194.c`. The VDD rail has been
+power-cycled. The BPMP power domain has been explicitly
+re-asserted. The DW core has been hard-reset. DLF is disabled.
+Gen1 is forced.
+
+The remaining cause is either:
+1. **Secure-world / TF-A PCIe enablement.** The Tegra secure
+   monitor may gate some PCIe-related hardware state that
+   non-secure software cannot reach. Linux runs at EL1 with a
+   secure monitor privilege grant path that SLM-OS at EL2 may
+   not share. Investigating this would require access to
+   NVIDIA's TF-A source or Orin TRM volume that documents
+   secure-state filtering for PCIe controllers.
+2. **Board-level signal-integrity / refclk routing that only
+   works from a full cold-boot.** The RTL8168 on the Super Dev
+   Kit carrier might require a specific power-up sequence with
+   the Tegra PCIe lanes that only the MB1→UEFI→Linux boot path
+   generates.
+
+Without physical access to an oscilloscope or a full cold-boot
+path into SLM-OS (which requires the unrelated "jetson-uefi-direct"
+effort to land), further progress on #25 Step 3 is blocked on
+either:
+- Access to NVIDIA internal PCIe bring-up documentation, or
+- A direct-boot-into-SLM-OS path (skipping Linux entirely, so
+  PCIe bring-up is the first software action after MB1/UEFI).
+
 ### r8169 driver (Step 4, not yet started)
 
 Scaffolding is in `kernel/drivers/eth_rtl8169.c`. Stage 2+ work

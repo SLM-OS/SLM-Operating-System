@@ -41,6 +41,9 @@
 #define APPL_CTRL                       0x004
 #define APPL_CTRL_SYS_PRE_DET_STATE     (1u << 6)
 #define APPL_CTRL_LTSSM_EN              (1u << 7)
+#define APPL_CTRL_HW_HOT_RST_EN         (1u << 20)
+#define APPL_CTRL_HW_HOT_RST_MODE_MASK  (0x3u << 22)
+#define APPL_CTRL_HW_HOT_RST_MODE_IMDT_RST_LTSSM_EN (0x2u << 22)
 #define APPL_LINK_STATUS                0x0CC
 #define APPL_LINK_STATUS_RDLH_LINK_UP   (1u << 0)
 #define APPL_DEBUG                      0x0D0
@@ -89,6 +92,12 @@
 #define DBI_PCI_BASE_ADDRESS_0          0x010
 #define DBI_PCI_BASE_ADDRESS_1          0x014
 #define DBI_PCI_PRIMARY_BUS             0x018   /* 32-bit: [7:0] primary, [15:8] sec, [23:16] sub */
+#define DBI_PCI_IO_BASE                 0x01C   /* [7:0] IO base, [15:8] IO limit */
+#define   IO_BASE_IO_DECODE             (1u << 0)
+#define   IO_BASE_IO_DECODE_BIT8        (1u << 8)
+#define DBI_PCI_PREF_MEMORY_BASE        0x024
+#define   CFG_PREF_MEM_LIMIT_BASE_MEM_DECODE        (1u << 0)
+#define   CFG_PREF_MEM_LIMIT_BASE_MEM_LIMIT_DECODE  (1u << 16)
 #define DBI_PCIE_PORT_AFR               0x70C
 #define DBI_PCIE_PORT_LINK_CONTROL      0x710
 #define   PORT_LINK_DLL_LINK_EN         (1u << 5)
@@ -97,10 +106,10 @@
 #define   PORT_LINK_MODE_1_LANES        (0x01u << 16)
 #define   PORT_LINK_MODE_2_LANES        (0x03u << 16)
 #define   PORT_LINK_MODE_4_LANES        (0x07u << 16)
-#define DBI_PCIE_LINK_WIDTH_SPEED_CONTROL 0x80C
+#define DBI_PCIE_LINK_WIDTH_SPEED_CONTROL 0x80C   /* AKA PORT_LOGIC_GEN2_CTRL */
 #define   PORT_LOGIC_LINK_WIDTH_MASK    (0x1Fu << 8)
 #define   PORT_LOGIC_LINK_WIDTH_1_LANES (0x01u << 8)
-#define   PORT_LOGIC_SPEED_CHANGE       (1u << 17)
+#define   PORT_LOGIC_SPEED_CHANGE       (1u << 17)   /* edk2-nvidia DIRECT_SPEED_CHANGE */
 #define DBI_PCIE_MISC_CONTROL_1_OFF     0x8BC
 #define   PCIE_DBI_RO_WR_EN             (1u << 0)
 
@@ -228,8 +237,18 @@ int pcie_tegra_host_init(void)
 {
     INFO("pcie-tegra: configuring PCIe C8 root complex");
 
+    /* Step 0: Ensure the BPMP power-domain PCIEX4CA is ON. Linux
+     * handles this implicitly via the power-domains DT property and
+     * runtime_pm framework; edk2-nvidia's AssertPgNodes(false) does
+     * it explicitly. Without it, the APPL register block might be
+     * readable (other masters keep the partition alive) but the
+     * controller's own power islands may not be fully up. */
+    int rc = bpmp_pg_set_state(TEGRA234_POWER_DOMAIN_PCIEX4CA, true);
+    INFO("pcie-tegra: PG_SET_STATE(PCIEX4CA, on) rc=%d", rc);
+    /* Not fatal if rc != 0 — the domain is often already on. */
+
     /* Step 1: UPHY controller state — BPMP powers up the PHY brick. */
-    int rc = bpmp_uphy_pcie_controller_state(TEGRA_PCIE_C8_CID, true);
+    rc = bpmp_uphy_pcie_controller_state(TEGRA_PCIE_C8_CID, true);
     if (rc != 0) {
         WARN("pcie-tegra: UPHY_PCIE_CONTROLLER_STATE(8, enable) rc=%d", rc);
         /* Not strictly fatal — on a live system BPMP may have already
@@ -273,6 +292,21 @@ int pcie_tegra_host_init(void)
      * tegra_pcie_config_controller lines 1425-1465). Ordering here is
      * important — DM_TYPE and SYS_PRE_DET_STATE must be set before
      * LTSSM is enabled in start_link(). */
+
+    /* Enable HW_HOT_RST in IMDT_RST_LTSSM_EN mode. edk2-nvidia's
+     * InitializeController does this unconditionally on T234 (its
+     * "IsT234" path). Linux does it conditionally on
+     * `has_sbr_reset_fix`, which is true for T234. The IMDT_RST_LTSSM_EN
+     * mode means "on hot reset, LTSSM is re-enabled automatically" —
+     * without this, some RC configurations refuse to complete POLLING
+     * after the endpoint exits its own reset. */
+    {
+        uint32_t c = appl_read(APPL_CTRL);
+        c &= ~APPL_CTRL_HW_HOT_RST_MODE_MASK;
+        c |= APPL_CTRL_HW_HOT_RST_MODE_IMDT_RST_LTSSM_EN;
+        c |= APPL_CTRL_HW_HOT_RST_EN;
+        appl_write(APPL_CTRL, c);
+    }
 
     /* CFG base address. Must be 4 KB-aligned and placed in the masked
      * bits [31:12]. */
@@ -376,6 +410,26 @@ int pcie_tegra_host_init(void)
         /* Enable writes to RO DBI registers for the class code + LNKCAP
          * tweaks further down. */
         dbi_ro_wr_enable(true);
+
+        /* Disable bridge I/O decode — edk2-nvidia PrepareHost, first
+         * step. Without this the bridge may try to forward I/O
+         * transactions through a window that hasn't been programmed,
+         * causing CRS/abort responses that parent timing out. */
+        {
+            uint32_t iob = dbi_read32(DBI_PCI_IO_BASE);
+            iob &= ~(IO_BASE_IO_DECODE | IO_BASE_IO_DECODE_BIT8);
+            dbi_write32(DBI_PCI_IO_BASE, iob);
+        }
+
+        /* Enable prefetchable memory decode — edk2-nvidia PrepareHost
+         * step 2. Sets the decode-enable bits so the bridge's memory
+         * window is consulted during config cycles. */
+        {
+            uint32_t pmb = dbi_read32(DBI_PCI_PREF_MEMORY_BASE);
+            pmb |= CFG_PREF_MEM_LIMIT_BASE_MEM_DECODE;
+            pmb |= CFG_PREF_MEM_LIMIT_BASE_MEM_LIMIT_DECODE;
+            dbi_write32(DBI_PCI_PREF_MEMORY_BASE, pmb);
+        }
 
         /* PORT_LINK_CONTROL: clear FAST_LINK_MODE, set DLL_LINK_EN,
          * advertise max lane capability. num-lanes=4 on Tegra234 C8
@@ -497,8 +551,10 @@ int pcie_tegra_start_link(uint32_t timeout_ms, uint32_t *ltssm_out)
 
     /* PCIe spec: T_PVPERL = 100 ms power-stable to PERST# de-assertion.
      * The endpoint then needs additional time to enter DETECT.QUIET
-     * before LTSSM training can begin. Give 20 ms settling time. */
-    pcie_udelay(20 * 1000);
+     * before LTSSM training can begin. edk2-nvidia's PrepareHost waits
+     * 200 ms after de-assert; Linux waits 100 ms msleep. We err on the
+     * longer side. */
+    pcie_udelay(200 * 1000);
 
     /* Step 8: poll APPL_DEBUG for LTSSM state = L0. */
     uint32_t waited_ms = 0;

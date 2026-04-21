@@ -22,6 +22,7 @@
 #define MRQ_CLK         22
 #define MRQ_RESET       20
 #define MRQ_UPHY        69
+#define MRQ_PG          66
 
 /*
  * MRQ_UPHY sub-commands (linux-bpmp-abi.h enum mrq_uphy_cmd).
@@ -31,6 +32,15 @@
 #define CMD_UPHY_PCIE_EP_CONTROLLER_PLL_INIT  3
 #define CMD_UPHY_PCIE_CONTROLLER_STATE        4
 #define CMD_UPHY_PCIE_EP_CONTROLLER_PLL_OFF   5
+
+/* MRQ_PG sub-commands (linux-bpmp-abi.h enum mrq_pg_cmd). */
+#define CMD_PG_QUERY_ABI    0
+#define CMD_PG_SET_STATE    1
+#define CMD_PG_GET_STATE    2
+
+/* pg_states — legal values for MRQ_PG SET_STATE. */
+#define PG_STATE_OFF        0
+#define PG_STATE_ON         1
 
 /*
  * MRQ_CLK sub-commands. The CLK request format packs (cmd << 24) |

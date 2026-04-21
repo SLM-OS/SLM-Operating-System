@@ -179,6 +179,9 @@
 #define TEGRA234_RESET_PEX2_CORE_8_APB  26 /* PCIe C8 APB reset */
 #define TEGRA234_RESET_GPU           19
 
+/* BPMP power-domain IDs (from tegra234-powergate.h) */
+#define TEGRA234_POWER_DOMAIN_PCIEX4CA  13  /* PCIe C8 domain */
+
 /*
  * Watchdog Timer (WDT)
  *
