@@ -642,6 +642,26 @@ static int cmd_hailo(int argc, char *argv[])
     }
 
     if (argc >= 2 && strcmp(argv[1], "ctxsmoke") == 0) {
+        /* #180 bisection: argv[2] selects which boundary actions to
+         * include in the synthesized ACTIVATION body. Default is
+         * "full" (BURST + OUT + IN), matching the load path. */
+        bool include_out = true;
+        bool include_in  = true;
+        const char *variant = "full";
+        if (argc >= 3) {
+            variant = argv[2];
+            if      (strcmp(argv[2], "min")  == 0) { include_out = false; include_in = false; }
+            else if (strcmp(argv[2], "out")  == 0) { include_out = true;  include_in = false; }
+            else if (strcmp(argv[2], "in")   == 0) { include_out = false; include_in = true;  }
+            else if (strcmp(argv[2], "full") == 0) { include_out = true;  include_in = true;  }
+            else {
+                shell_printf("hailo: ctxsmoke variant '%s' unknown — use min|out|in|full\n",
+                             argv[2]);
+                return 0;
+            }
+        }
+        shell_printf("hailo: ctxsmoke variant=%s (out=%d in=%d)\n",
+                     variant, (int)include_out, (int)include_in);
         /* Phase 6.3d/6.4 hardware probe: exercise the three context-
          * switch opcodes (CHANGE_CONTEXT_SWITCH_STATUS,
          * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against live
@@ -717,9 +737,12 @@ static int cmd_hailo(int argc, char *argv[])
             memset(bnd_out_tensor.cpu_addr, 0, bnd_bytes);
             hailo_tensor_prepare_for_device(&bnd_in_tensor);
             hailo_tensor_prepare_for_device(&bnd_out_tensor);
-            brc = hailo_vdma_desc_list_alloc(2, bnd_page, false, &bnd_in_list);
+            /* #180 bisect: HailoRT typically allocates 64-256 descriptors
+             * per boundary channel; 2 is the hardware minimum but may
+             * not be what firmware expects. Try 64. */
+            brc = hailo_vdma_desc_list_alloc(64, bnd_page, false, &bnd_in_list);
         }
-        if (brc == HAILO_OK) brc = hailo_vdma_desc_list_alloc(2, bnd_page, false, &bnd_out_list);
+        if (brc == HAILO_OK) brc = hailo_vdma_desc_list_alloc(64, bnd_page, false, &bnd_out_list);
         if (brc == HAILO_OK) {
             (void)hailo_vdma_program_buffer(&bnd_in_list,  0, bnd_in_tensor.iova,  bnd_bytes, 0);
             (void)hailo_vdma_program_buffer(&bnd_out_list, 0, bnd_out_tensor.iova, bnd_bytes, 0);
@@ -758,11 +781,11 @@ static int cmd_hailo(int argc, char *argv[])
         info.ccw_action_count = 1;
         info.pad_count = 2;
         info.pads[0].is_input              = true;
-        info.pads[0].has_stream_info       = true;
+        info.pads[0].has_stream_info       = include_in;
         info.pads[0].sys_index             = 1;
         info.pads[0].core_bytes_per_buffer = bnd_bytes;
         info.pads[1].is_input              = false;
-        info.pads[1].has_stream_info       = true;
+        info.pads[1].has_stream_info       = include_out;
         info.pads[1].sys_index             = 2;
         info.pads[1].core_bytes_per_buffer = bnd_bytes;
 
@@ -961,7 +984,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name    = "hailo",
     .handler = cmd_hailo,
-    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke)",
+    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full])",
     .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
 };
 
