@@ -600,8 +600,47 @@ static int hailo_backend_load_model(struct inference_device *dev,
             uart_printf("[hailo] pad[%u]: is_input=%d bytes=%u\r\n",
                         (unsigned)i, (int)p->is_input, (unsigned)pad_bytes(p));
         }
-        return INF_ERR_BAD_MODEL;
-    }
+
+        /* Phase 8 diagnostic shortcut. If the parser found an input pad
+         * but no output pad (the DFC 3.33.1 partial_network_groups +
+         * fused_layers story isn't yet fully decoded), substitute a
+         * plausible ImageNet-classifier output shape so the rest of
+         * the load can proceed and hailo_backend_run can be exercised
+         * for performance measurement. The resulting output bytes are
+         * NOT semantically meaningful — this is a timing-only path. */
+        in_pad = NULL;
+        for (uint32_t i = 0; i < info.pad_count; i++) {
+            if (info.pads[i].is_input && pad_bytes(&info.pads[i]) > 0) {
+                in_pad = &info.pads[i];
+                input_bytes = pad_bytes(&info.pads[i]);
+                break;
+            }
+        }
+        if (!in_pad) return INF_ERR_BAD_MODEL;
+
+        /* Synthesize a 1000-byte output pad (ImageNet 1000-class INT8
+         * softmax). Uses the input pad's sys_index + 100 as a distinct
+         * stream id so the DMA descriptor wiring doesn't collide. */
+        static struct hef_pad_info synthetic_out;
+        memset(&synthetic_out, 0, sizeof(synthetic_out));
+        synthetic_out.index                  = in_pad->index + 1;
+        synthetic_out.is_input               = false;
+        synthetic_out.has_tensor_shape       = true;
+        synthetic_out.height                 = 1;
+        synthetic_out.width                  = 1;
+        synthetic_out.features               = 1000;
+        synthetic_out.padded_height          = 1;
+        synthetic_out.padded_width           = 1;
+        synthetic_out.padded_features        = 1000;
+        synthetic_out.has_stream_info        = true;
+        synthetic_out.sys_index              = in_pad->sys_index + 100;
+        synthetic_out.core_bytes_per_buffer  = 1000;
+        synthetic_out.core_buffers_per_frame = 1;
+        out_pad      = &synthetic_out;
+        output_bytes = 1000;
+
+        uart_printf("[hailo] load_model: SYNTHETIC output pad (1000 bytes)\r\n");
+    } else
     uart_printf("[hailo] load_model: pads in=%u bytes out=%u bytes\r\n",
                 (unsigned)input_bytes, (unsigned)output_bytes);
 
