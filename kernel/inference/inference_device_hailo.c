@@ -876,6 +876,23 @@ void hailo_backend_get_boundary_iovas_for_tests(
     if (out_iova) *out_iova = slot->boundary_out_list.iova;
 }
 
+/* Public helper for callers (e.g. the Lua shell binding) that need
+ * to size a tensor buffer against a loaded model without going
+ * through inference_run. Returns HAILO_OK and fills both out-params
+ * on success, HAILO_ERR_INVAL for an out-of-range / unloaded
+ * handle. Safe to call with either pointer NULL (skips that output). */
+int hailo_backend_model_sizes(inference_model_handle_t h,
+                              uint32_t *in_bytes,
+                              uint32_t *out_bytes)
+{
+    if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return HAILO_ERR_INVAL;
+    struct hailo_model_slot *slot = &slots[h - 1];
+    if (!slot->in_use) return HAILO_ERR_INVAL;
+    if (in_bytes)  *in_bytes  = slot->cfg.input_bytes;
+    if (out_bytes) *out_bytes = slot->cfg.output_bytes;
+    return HAILO_OK;
+}
+
 void hailo_backend_reset_slots_for_tests(void)
 {
     /* Same two-phase dance as hailo_backend_shutdown — see that
