@@ -149,6 +149,7 @@ static uint32_t xhci_active_portsc = 0;
 static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 static bool xhci_skip_next_port_reset = false;
+static bool xhci_force_connected_disabled_reset = false;
 
 /*
  * Hot-plug state: STALE at boot (assume pre-kexec stale device) →
@@ -201,6 +202,52 @@ static const char *xhci_ep_state_str(uint32_t state)
     case 4: return "error";
     default: return "?";
     }
+}
+
+static void xhci_log_devctx_snapshot(struct xhci_device *d, const char *tag)
+{
+    if (d == NULL || d->dev_ctx == NULL)
+        return;
+
+    bool cz = xhci_caps_cached.ctx_64;
+    uint32_t slot0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
+    uint32_t slot1 = *xhci_dev_slot_dw(d->dev_ctx, 1);
+    uint32_t slot2 = *xhci_dev_slot_dw(d->dev_ctx, 2);
+    uint32_t slot3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
+    uint32_t ep00  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+    uint32_t ep01  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
+    uint32_t ep02  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+    uint32_t ep03  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+    uint32_t ep04  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 4, cz);
+    uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
+    uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
+    uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
+    uint32_t root_port = (slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+    uint32_t addr = slot3 & XHCI_SLOT_DW3_ADDR_MASK;
+    uint32_t state = (slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT;
+    uint32_t ep0_state = ep00 & XHCI_EP_DW0_STATE_MASK;
+    uint32_t ep0_type = (ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT;
+    uint32_t ep0_mps = (ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT;
+    uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
+    uint32_t ep0_dcs = ep02 & 0x1U;
+
+    INFO("xhci: %s devctx slot route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+         tag,
+         (unsigned)route, (unsigned)speed, (unsigned)ctxent,
+         (unsigned)root_port, (unsigned)addr,
+         xhci_slot_state_str(state),
+         (unsigned)slot0, (unsigned)slot1,
+         (unsigned)slot2, (unsigned)slot3);
+    INFO("xhci: %s devctx ep0 state=%s type=%u mps=%u tr=0x%lx dcs=%u avg=%u"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x",
+         tag,
+         xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
+         (unsigned)ep0_mps, (unsigned long)ep0_tr,
+         (unsigned)ep0_dcs,
+         (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+         (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+         (unsigned)ep03, (unsigned)ep04);
 }
 
 static bool xhci_stale_signature_changed(uint32_t initial, uint32_t current)
@@ -356,6 +403,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -368,7 +416,8 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
              (unsigned)xhci_active_port, (unsigned)portsc);
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
-        xhci_skip_next_port_reset = true;
+        xhci_skip_next_port_reset = false;
+        xhci_force_connected_disabled_reset = true;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -384,6 +433,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -401,6 +451,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
             INFO("xhci: fresh USB attach on PORTSC[%u]",
                  (unsigned)xhci_active_port);
             xhci_prereset_speed = s;
+            xhci_force_connected_disabled_reset = false;
         }
     }
 
@@ -530,9 +581,16 @@ int xhci_hcd_port_reset(uint8_t port)
         return -1;
 
     uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
-    if (xhci_skip_next_port_reset ||
+    bool connected_disabled =
         (xhci_attach_state == XHCI_ATTACH_FRESH &&
-         xhci_connected_disabled_port(portsc))) {
+         xhci_connected_disabled_port(portsc));
+    bool force_connected_disabled_reset =
+        connected_disabled && xhci_force_connected_disabled_reset;
+
+    xhci_force_connected_disabled_reset = false;
+
+    if (xhci_skip_next_port_reset ||
+        (connected_disabled && !force_connected_disabled_reset)) {
         portsc = xhci_ack_port_changes(xhci_active_port, portsc,
                                        "connected-disabled reuse");
         xhci_skip_next_port_reset = false;
@@ -540,6 +598,11 @@ int xhci_hcd_port_reset(uint8_t port)
         INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x)",
              (unsigned)xhci_active_port, (unsigned)xhci_active_portsc);
         return 0;
+    }
+
+    if (force_connected_disabled_reset) {
+        INFO("xhci: forcing root-port reset on Linux-detached PORTSC[%u] (0x%08x)",
+             (unsigned)xhci_active_port, (unsigned)portsc);
     }
 
     uint8_t pidx = xhci_active_port;
@@ -888,6 +951,7 @@ int xhci_hcd_device_open(struct usb_device *dev)
     }
     INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=1)",
          slot, (unsigned)dev->speed, d->root_port);
+    xhci_log_devctx_snapshot(d, "post-address");
 
     dev->hcd_private = d;
     return 0;
