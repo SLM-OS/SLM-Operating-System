@@ -215,6 +215,19 @@ static bool xhci_stale_port_already_recovered(uint32_t portsc, bool connected)
            !!(portsc & (XHCI_PORTSC_PEC | XHCI_PORTSC_PRC));
 }
 
+static bool xhci_connected_disabled_port(uint32_t portsc)
+{
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    bool decoded = xhci_decode_portsc(portsc, &connected, &speed);
+
+    if (!connected || (portsc & XHCI_PORTSC_PED) || !decoded)
+        return false;
+
+    return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
+           speed == USB_SPEED_HIGH;
+}
+
 static uint8_t xhci_locate_usb2_port(void)
 {
     for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
@@ -368,10 +381,13 @@ int xhci_hcd_port_reset(uint8_t port)
     if (xhci_active_port == 0xFF)
         return -1;
 
-    if (xhci_skip_next_port_reset) {
+    uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
+    if (xhci_skip_next_port_reset ||
+        (xhci_attach_state == XHCI_ATTACH_FRESH &&
+         xhci_connected_disabled_port(portsc))) {
         xhci_skip_next_port_reset = false;
-        xhci_active_portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
-        INFO("xhci: skipping root-port reset on recovered stale PORTSC[%u] (0x%08x)",
+        xhci_active_portsc = portsc;
+        INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x)",
              (unsigned)xhci_active_port, (unsigned)xhci_active_portsc);
         return 0;
     }
@@ -381,7 +397,7 @@ int xhci_hcd_port_reset(uint8_t port)
     uint64_t ticks = freq / 2;   /* 500 ms */
 
     for (unsigned attempt = 1; attempt <= 3; attempt++) {
-        uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
 
         /*
          * PORTSC write discipline per §5.4.8: read-modify-write, clear the
@@ -698,21 +714,19 @@ int xhci_hcd_device_open(struct usb_device *dev)
     cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
     /* control DW, bit 9 = BSR (Block Set Address Request).
      *
-     * Jetson nano-2 experiment: use BSR=0 so the controller performs
-     * its own USB SET_ADDRESS transaction during ADDRESS_DEVICE. The
-     * current BSR=1 path reaches the first software-driven
-     * GET_DESCRIPTOR(device, 8) but dies on the Setup Stage every
-     * time; this tests whether letting xHCI own the address phase
-     * produces a cleaner EP0 baseline for the root hub.
+     * Keep BSR=1 here. The BSR=0 experiment was worse on nano-2: the
+     * HC's internal SET_ADDRESS failed immediately with cc=4, while
+     * BSR=1 gets far enough to exercise software-driven EP0 traffic.
      */
     cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
+                   (1u << 9) |
                    ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
     if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
         cc != XHCI_CC_SUCCESS) {
-        WARN("xhci: ADDRESS_DEVICE(BSR=0) cc=%u", cc);
+        WARN("xhci: ADDRESS_DEVICE(BSR=1) cc=%u", cc);
         goto err_slot;
     }
-    INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=0)",
+    INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=1)",
          slot, (unsigned)dev->speed, d->root_port);
 
     dev->hcd_private = d;
