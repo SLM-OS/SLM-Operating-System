@@ -122,15 +122,21 @@ static uint32_t xhci_td_size_for_single_data_trb(const struct usb_urb *urb)
     if (mps == 0)
         return 0;
 
-    uint32_t packets = (urb->length + mps - 1U) / mps;
-    if (packets == 0)
+    /*
+     * Match Linux's xhci_td_remainder() rule for the common control-TD
+     * shape we use here: one Data Stage TRB carrying the entire payload.
+     * In that case the last data TRB's TD size is zero, even though the
+     * Status Stage TRB still follows in the TD.
+     */
+    if (urb->length <= 31U * mps)
         return 0;
 
     /*
-     * xHCI 1.x TD size = packets remaining after this TRB. For our
-     * single data-stage TRB in a 3-TRB control TD, the hardware still
-     * expects the non-zero remainder count that Linux queues here.
+     * Longer control payloads are out of scope today. Keep the helper
+     * safe if we ever reach them before teaching the driver to split
+     * data across multiple TRBs.
      */
+    uint32_t packets = (urb->length + mps - 1U) / mps;
     return packets > 31U ? 31U : packets;
 }
 
@@ -269,11 +275,11 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
 
     struct xhci_trb tmpl;
     struct xhci_trb *slot_trb;
+    struct xhci_trb *first_trb = NULL;
+    uint32_t first_cycle = 0;
 
     /* 1. Setup Stage. */
     xhci_build_setup_stage(&tmpl, &urb->setup, trt, 0);
-    if (has_data)
-        tmpl.control |= XHCI_TRB_CH;
     if (xhci_urb_is_get_descriptor(urb)) {
         INFO("xhci: setup trb param_lo=0x%08x param_hi=0x%08x status=0x%08x "
              "control=0x%08x",
@@ -283,12 +289,14 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     slot_trb = xhci_ring_put(r, &tmpl);
     if (slot_trb == NULL) goto fail;
     slot->first_trb_phys = (uintptr_t)slot_trb;
+    first_trb = slot_trb;
+    first_cycle = first_trb->control & XHCI_TRB_CYCLE;
+    first_trb->control &= ~XHCI_TRB_CYCLE;
 
     /* 2. Optional Data Stage. */
     if (has_data) {
         xhci_build_data_stage(&tmpl, (uintptr_t)urb->buffer,
                               urb->length, data_in, 0);
-        tmpl.control |= XHCI_TRB_CH;
         tmpl.status |= xhci_td_size_for_single_data_trb(urb)
                        << XHCI_TRB_STATUS_TD_SIZE_SHIFT;
         if (xhci_urb_is_get_descriptor(urb)) {
@@ -323,6 +331,15 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
 
     slot->last_trb_phys = (uintptr_t)slot_trb;
     urb->hcd_private    = slot;
+
+    /*
+     * Match Linux's control-TD publish order: don't expose the first TRB
+     * to hardware until the rest of the TD has been fully written.
+     */
+    if (first_trb != NULL) {
+        dmb(oshst);
+        first_trb->control |= first_cycle;
+    }
 
     /* Kick EP0. */
     xhci_ring_doorbell(d->slot_id, XHCI_DCI_EP0);
