@@ -11,16 +11,17 @@ exceed a configured threshold. Mid-stream, the monitoring component is
 replaced with a new instance while preserving message subscriptions,
 demonstrating zero-downtime upgrades.
 
-Four scripts are embedded at boot:
+Five scripts are embedded at boot:
 
 | File | Purpose |
 |------|---------|
 | `/mnt/files/demo.lua` | Linear Industrial IoT walkthrough. Source of truth: `scripts/demo.lua`. |
-| `/mnt/files/demo_menu.lua` | Interactive menu covering all five core features (SMP, scheduling, eviction, inference, components). Source of truth: `scripts/demo_menu.lua`. |
+| `/mnt/files/demo_menu.lua` | Interactive menu covering all core features (SMP, scheduling, eviction, inference, components, Hailo NPU). Source of truth: `scripts/demo_menu.lua`. |
 | `/mnt/files/demo_auto.lua` | 5-section scripted auto-demo with Enter-to-advance pauses. Source of truth: `scripts/demo_auto.lua`. |
 | `/mnt/files/multiproc_demo.lua` | Multi-process / concurrent-task reference. Source of truth: `scripts/multiproc_demo.lua`. |
+| `/mnt/files/demo_hailo.lua` | Hailo-8L NPU walkthrough — probe, load, infer via `slm.hailo.*`. Source of truth: `scripts/demo_hailo.lua`. |
 
-All four use the same Lua API bindings (`slm.*`) and exercise the same
+All five use the same Lua API bindings (`slm.*`) and exercise the same
 kernel subsystems.
 
 ### How scripts get embedded
@@ -64,7 +65,7 @@ section includes brief pauses (`sleep`) for readability on a serial console.
 slm> lua /mnt/files/demo_menu.lua
 ```
 
-Numbered menu with twelve options — one per core feature plus an all-in-one
+Numbered menu with thirteen options — one per core feature plus an all-in-one
 "full tour" that drives every subsystem in sequence. Each menu item prints a
 short explanation then exercises the relevant `slm.*` bindings against the
 live kernel, so a reviewer can see the actual structured data (not formatted
@@ -81,6 +82,7 @@ shell output) flowing through Lua.
 | 7 | Inference — load MNIST, infer, bench, stats, GPU status |
 | 8 | List loaded models |
 | 9 | Components & hot-swap (sensor_monitor + `/sensors/data`) |
+| h | Hailo NPU (AI HAT+) — delegates to `demo_hailo.lua` |
 | t | Full system tour |
 | p | Active tasks |
 | s | Drop to shell command |
@@ -96,6 +98,40 @@ A separate scenario focused on multi-task concurrency — spawns the
 `listener`, `sensor_monitor`, and `counter` built-in components and
 drives IPC across them. Useful for narrating how SLM-OS schedules
 cooperative tasks across the available CPUs.
+
+### Hailo NPU demo
+
+```
+slm> lua /mnt/files/demo_hailo.lua
+slm> lua /mnt/files/demo_hailo.lua /mnt/files/mobilenet_v1.hef
+```
+
+Walks through the Hailo-8L AI HAT+ bring-up entirely from Lua:
+
+1. **Probe** — `slm.hailo.status()` reports availability, slot usage,
+   and the registered backend name (`hailo-8` when the AI HAT+ is
+   detected at boot).
+2. **Load** — `slm.hailo.load(path)` stages a HEF binary from the VFS
+   and runs the firmware context-switch sequence
+   (ACTIVATION → PRELIMINARY → DYNAMIC → ENABLED). Returns a handle.
+3. **Infer** — `slm.hailo.infer(handle, input_bytes)` pushes the input
+   tensor over a boundary DMA channel, waits for completion, and
+   returns the raw output tensor as a Lua string. The script probes a
+   handful of common input sizes (1×1, 28×28, 224×224, 224×224×3, etc.)
+   until it finds one the loaded model accepts.
+4. **Report** — prints an INT8 argmax of the first output chunk plus a
+   16-byte hexdump so the reviewer sees actual NPU output, not just a
+   length count.
+
+On builds without the Hailo backend (QEMU, Pi 5 without the AI HAT+,
+other platforms) the script prints the `available=false` status and
+exits cleanly — the `slm.hailo.*` bindings always exist, so the same
+script runs everywhere but only exercises hardware when present.
+
+The default HEF path is `/mnt/files/mobilenet_v1.hef`; stage a
+different compiled HEF with the shell's `write` command and pass it
+as the first script argument (e.g.,
+`lua /mnt/files/demo_hailo.lua /mnt/files/my_model.hef`).
 
 ## Demo Walkthrough
 

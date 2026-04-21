@@ -16,9 +16,11 @@
  */
 
 #if !defined(DEMO_LUA_PATH) || !defined(DEMO_MENU_LUA_PATH) || \
-    !defined(DEMO_AUTO_LUA_PATH) || !defined(DEMO_MULTIPROC_LUA_PATH)
-# error "DEMO_LUA_PATH, DEMO_MENU_LUA_PATH, DEMO_AUTO_LUA_PATH, and "\
-        "DEMO_MULTIPROC_LUA_PATH must be supplied by the build system"
+    !defined(DEMO_AUTO_LUA_PATH) || !defined(DEMO_MULTIPROC_LUA_PATH) || \
+    !defined(DEMO_HAILO_LUA_PATH)
+# error "DEMO_LUA_PATH, DEMO_MENU_LUA_PATH, DEMO_AUTO_LUA_PATH, "\
+        "DEMO_MULTIPROC_LUA_PATH, and DEMO_HAILO_LUA_PATH must be "\
+        "supplied by the build system"
 #endif
 
 #define xstr(s) str(s)
@@ -60,6 +62,16 @@ demo_auto_lua_end:
 demo_multiproc_lua_start:
     .incbin xstr(DEMO_MULTIPROC_LUA_PATH)
 demo_multiproc_lua_end:
+
+    /* Phase 7: Hailo NPU demo. Walks through slm.hailo.status/load/infer
+     * and degrades gracefully when the Hailo backend is absent (QEMU,
+     * non-Pi 5 platforms). See docs/demo.md §Hailo NPU Demo. */
+    .global demo_hailo_lua_start
+    .global demo_hailo_lua_end
+    .align 4
+demo_hailo_lua_start:
+    .incbin xstr(DEMO_HAILO_LUA_PATH)
+demo_hailo_lua_end:
 
 #if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__))
     .section .note.GNU-stack, "", @progbits

@@ -1991,6 +1991,30 @@ static void test_demo_menu_file_exists(void)
 }
 
 /*
+ * Test: demo_hailo.lua file exists on the filesystem after boot.
+ *
+ * Verified via VFS directly (same rationale as test_demo_menu_file_exists:
+ * Lua's loadfile/dofile are stubbed, and the script probes real hardware
+ * which would be disruptive in the test suite). The script prints its
+ * own banner starting with "-- SLM-OS Hailo NPU Demo".
+ *
+ * Skipped when EMBED_DEMO_SCRIPTS is OFF.
+ */
+static void test_demo_hailo_file_exists(void)
+{
+#if !defined(EMBED_DEMO_SCRIPTS)
+    TEST_IGNORE_MESSAGE("EMBED_DEMO_SCRIPTS=OFF — demo scripts not embedded");
+#else
+    static char buf[64];
+    int n = vfs_read_path("/mnt/files/demo_hailo.lua", buf, sizeof(buf) - 1, 0);
+    TEST_ASSERT_GREATER_THAN(0, n);
+    /* First line: "-- SLM-OS Hailo NPU Demo" */
+    buf[24] = '\0';
+    TEST_ASSERT_EQUAL_STRING("-- SLM-OS Hailo NPU Demo", buf);
+#endif
+}
+
+/*
  * Test: slm.model_load_mnist loads the embedded MNIST model.
  * Returns a non-negative index on success.
  */
@@ -2895,6 +2919,7 @@ int test_suite_lua(void)
 
     RUN_TEST(test_demo_file_exists);
     RUN_TEST(test_demo_menu_file_exists);
+    RUN_TEST(test_demo_hailo_file_exists);
 
     /* Dofile (script loading from filesystem) */
     RUN_TEST(test_slm_dofile_nonexistent);
