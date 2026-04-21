@@ -462,6 +462,83 @@ tree. Anyone revisiting this has empirical evidence that:
 That's a narrower scoping than "PCIe is gated off" — Step 2 cleared
 that question entirely.
 
+### Step 3.5 attempt (20 April 2026, evening)
+
+Ported `dw_pcie_setup_rc` (DBI RC Type-1 header + link-capable
+configuration), added a full core-reset cycle before APPL
+programming (matching Linux's retry path at
+`linux-pcie-tegra194.c:1020-1021`), disabled DLF exchange (cleared
+bit 31 at `DBI+0x2F8`, matching `linux-pcie-tegra194.c:1023-1026`),
+and forced the RC's target link speed to Gen1 via `LNKCTL2.TLS = 1`
+at `DBI+0xA0`.
+
+```
+slmos> pcietrain
+  bpmp_init: rc=0
+  pcie-tegra: configuring PCIe C8 root complex
+  pcie-tegra: P2U lane 0 + lane 1 init OK
+  pcie-tegra: DLF exchange disabled (DLF_CAP=0x00000001)
+  pcie-tegra: DBI RC setup done (PORT_LINK_CTRL=0x00070120
+              LWSC=0x00030134 PCI_CMD=0x00100107)
+  pcie-tegra: host init OK (APPL_CTRL=0x00449060 CFG_MISC=0x0000cc00)
+  APPL_CTRL:   0x004490e0  (LTSSM_EN=1)
+  APPL_DEBUG:  0x00000018  (LTSSM=0x03 POLLING.COMPLIANCE)
+  DBI bus0:    0x229c10de  (RC bridge alive)
+```
+
+**Still stuck at LTSSM=0x03.** DBI_DLF_CAP reads `0x00000001` — the
+DLF exchange enable bit is confirmed cleared. PORT_LINK_CTRL reads
+`0x00070120` — 4-lane capable, DLL link enable, fast-link off.
+PCI_COMMAND reads `0x00100107` — IO/MEM/MASTER/SERR enabled.
+
+Every software hypothesis now eliminated:
+- ✗ Wrong doorbell offset (Step 2 fixed)
+- ✗ Missing IVC handshake (Step 2 fixed)
+- ✗ Clock/reset gating (Step 2 fixed)
+- ✗ Missing P2U PHY init (this section fixed)
+- ✗ PEX_RST too short (tried 100 ms — no change)
+- ✗ CLKREQ gating refclk (tried override — no change)
+- ✗ Wrong target link speed (forced Gen1 — no change)
+- ✗ DLF incompatibility (disabled — no change)
+- ✗ Missing core reset cycle (added — no change)
+- ✗ Missing DBI RC setup (ported — no change)
+
+The RC is transmitting training ordered sets (POLLING.COMPLIANCE is
+the state the LTSSM enters when it sends TS1/TS2 but gets no valid
+response). The RTL8168 endpoint isn't ACKing.
+
+**Unresolved hypotheses (board-level, not software-addressable
+without more investigation):**
+
+1. **RTL8168 firmware wedge.** The chip runs its own firmware on
+   internal ARM or RISC-like CPU. PERST# may not fully reset its
+   state — Linux's initial training works from a cold power-up.
+   A full VDD_3V3_PCIE cycle would fix this, but we haven't found
+   a software path to power-cycle it. Possible routes:
+     - MRQ_POWERGATE (BPMP may own a powergate domain for the PCIe
+       slot).
+     - Writing `0` to `/sys/class/regulator/VDD_3V3_PCIE/state`
+       pre-kexec, then restoring.
+     - Full Jetson reboot (hard power cycle) — known to train
+       cleanly. This is what we fall back to for fresh-boot Linux.
+
+2. **UPHY-level calibration we haven't invoked.** `CMD_UPHY_PCIE_CONTROLLER_STATE`
+   (sub-cmd 4) succeeded but the doc also lists
+   `CMD_UPHY_PCIE_EP_CONTROLLER_PLL_INIT` (sub-cmd 3) — documented
+   as for EP-mode controllers, but the T234 valid list includes
+   id 10 (and possibly more). Worth testing an empirical probe.
+
+3. **Secure-world (TF-A) gating.** The Jetson's TF-A manages some
+   peripheral access permissions; some PHY-side state may be
+   gated such that non-secure writes don't reach the actual pins.
+
+**Code shape is correct.** `kernel/drivers/pcie/pcie_tegra194.c` is
+now a faithful mirror of the software-visible parts of Linux's
+`tegra_pcie_config_controller` + `dw_pcie_setup_rc` +
+`tegra_pcie_dw_start_link`. If the underlying hardware blocker
+is ever lifted (power cycle, different board, firmware fix), the
+driver should train the link without further modification.
+
 ### r8169 driver (Step 4, not yet started)
 
 Scaffolding is in `kernel/drivers/eth_rtl8169.c`. Stage 2+ work

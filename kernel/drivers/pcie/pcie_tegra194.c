@@ -78,6 +78,61 @@
 #define P2U_DIR_SEARCH_CTRL                         0xD4
 #define P2U_DIR_SEARCH_CTRL_GEN4_FINE_GRAIN_SEARCH_TWICE  (1u << 18)
 
+/* DesignWare DBI register offsets (docs/reference/linux-pcie-designware.h). */
+#define DBI_PCI_COMMAND                 0x004
+#define   DBI_PCI_CMD_IO_EN             (1u << 0)
+#define   DBI_PCI_CMD_MEM_EN            (1u << 1)
+#define   DBI_PCI_CMD_MASTER_EN         (1u << 2)
+#define   DBI_PCI_CMD_SERR_EN           (1u << 8)
+#define DBI_PCI_CLASS_DEVICE            0x00A   /* 16-bit */
+#define   DBI_CLASS_BRIDGE_PCI          0x0604
+#define DBI_PCI_BASE_ADDRESS_0          0x010
+#define DBI_PCI_BASE_ADDRESS_1          0x014
+#define DBI_PCI_PRIMARY_BUS             0x018   /* 32-bit: [7:0] primary, [15:8] sec, [23:16] sub */
+#define DBI_PCIE_PORT_AFR               0x70C
+#define DBI_PCIE_PORT_LINK_CONTROL      0x710
+#define   PORT_LINK_DLL_LINK_EN         (1u << 5)
+#define   PORT_LINK_FAST_LINK_MODE      (1u << 7)
+#define   PORT_LINK_MODE_MASK           (0x3Fu << 16)
+#define   PORT_LINK_MODE_1_LANES        (0x01u << 16)
+#define   PORT_LINK_MODE_2_LANES        (0x03u << 16)
+#define   PORT_LINK_MODE_4_LANES        (0x07u << 16)
+#define DBI_PCIE_LINK_WIDTH_SPEED_CONTROL 0x80C
+#define   PORT_LOGIC_LINK_WIDTH_MASK    (0x1Fu << 8)
+#define   PORT_LOGIC_LINK_WIDTH_1_LANES (0x01u << 8)
+#define   PORT_LOGIC_SPEED_CHANGE       (1u << 17)
+#define DBI_PCIE_MISC_CONTROL_1_OFF     0x8BC
+#define   PCIE_DBI_RO_WR_EN             (1u << 0)
+
+/*
+ * PCIe standard capability base on DW PCIe (Tegra234): 0x70.
+ * LNKCTL2 at cap_base + 0x30 holds the target link speed in bits [3:0].
+ *   1 = 2.5 GT/s (Gen1)
+ *   2 = 5   GT/s (Gen2)
+ *   3 = 8   GT/s (Gen3)
+ * Forcing Gen1 here short-circuits the Gen3-attempt-then-fall-back
+ * path — the RTL8168 is Gen1 only, and our RC otherwise polls at Gen3
+ * then hangs in POLLING.COMPLIANCE instead of training to Gen1.
+ *
+ * Verified on jetson-nano-1: std cap walk 0x34→0x40(id 01)→0x50(05)→
+ * 0x70(10 = PCIe)→0xB0(11), so LNKCTL2 is at 0xA0.
+ */
+#define DBI_PCIE_CAP_BASE               0x70
+#define DBI_PCIE_LNKCTL2                (DBI_PCIE_CAP_BASE + 0x30)
+#define   PCI_EXP_LNKCTL2_TLS_MASK      0xFu
+#define   PCI_EXP_LNKCTL2_TLS_2_5GT     0x1u
+
+/*
+ * Data Link Feature (DLF) extended capability at DBI offset 0x2F4 on
+ * Tegra234 (from ext-cap walk: 0x100→0x148→0x168→0x18C→0x1AC→0x1BC→
+ * 0x2BC→0x2F4 = DLF cap). PCI_DLF_CAP is at DLF_offset + 0x04, so
+ * 0x2F8. Bit 31 = Local DLF Supported / Exchange Enable. Clearing it
+ * tells the RC not to attempt DLF negotiation — the RTL8168 is a
+ * PCIe 2.1-era endpoint that doesn't implement DLF.
+ */
+#define DBI_DLF_CAP                     0x2F8
+#define   DLF_EXCHANGE_ENABLE           (1u << 31)
+
 /* iATU outbound region stride (unrolled mapping) and inner offsets. */
 #define ATU_REGION_STRIDE               0x200
 #define ATU_REGION_DIR_OB_OFFSET        0x0000      /* outbound regions start at ATU base */
@@ -114,6 +169,38 @@ static inline uint32_t appl_read(uint32_t off)
 static inline void appl_write(uint32_t off, uint32_t val)
 {
     mmio_write32(TEGRA_PCIE_C8_APPL + off, val);
+}
+
+static inline uint32_t dbi_read32(uint32_t off)
+{
+    return mmio_read32(TEGRA_PCIE_C8_DBI + off);
+}
+
+static inline void dbi_write32(uint32_t off, uint32_t val)
+{
+    mmio_write32(TEGRA_PCIE_C8_DBI + off, val);
+}
+
+static inline void dbi_write16(uint32_t off, uint16_t val)
+{
+    *(volatile uint16_t *)(TEGRA_PCIE_C8_DBI + off) = val;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+/*
+ * Enable writes to DBI registers that are hardware-readonly in config
+ * space but RW from the DBI port. Needed for class-code, LNKCAP, etc.
+ * Mirrors dw_pcie_dbi_ro_wr_en.
+ */
+static void dbi_ro_wr_enable(bool enable)
+{
+    uint32_t v = dbi_read32(DBI_PCIE_MISC_CONTROL_1_OFF);
+    if (enable) {
+        v |= PCIE_DBI_RO_WR_EN;
+    } else {
+        v &= ~PCIE_DBI_RO_WR_EN;
+    }
+    dbi_write32(DBI_PCIE_MISC_CONTROL_1_OFF, v);
 }
 
 static inline void atu_ob_write(uint32_t region, uint32_t reg, uint32_t val)
@@ -162,6 +249,25 @@ int pcie_tegra_host_init(void)
         WARN("pcie-tegra: RESET_DEASSERT(PEX2_CORE_8_APB) rc=%d", rc);
         return -1;
     }
+
+    /*
+     * Fully reset the core so its internal LTSSM state machine starts
+     * from DETECT.QUIET — matches Linux's retry path in
+     * tegra_pcie_dw_start_link:1020-1021 which assert+deassert
+     * pcie->core_rst when the first training attempt fails. Without
+     * this, the core inherits whatever LTSSM state Linux left behind
+     * pre-kexec, and our PEX_RST pulse + LTSSM_EN set isn't enough
+     * to unstick it from POLLING.COMPLIANCE.
+     */
+    (void)bpmp_reset_assert(TEGRA234_RESET_PEX2_CORE_8);
+    pcie_udelay(1000);
+    rc = bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8);
+    if (rc != 0) {
+        WARN("pcie-tegra: (re-)RESET_DEASSERT(PEX2_CORE_8) rc=%d", rc);
+        return -1;
+    }
+    /* Second APB reset to sync — idempotent, keeps APB alive. */
+    (void)bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8_APB);
 
     /* Step 3: APPL programming (matches linux-pcie-tegra194.c
      * tegra_pcie_config_controller lines 1425-1465). Ordering here is
@@ -230,12 +336,10 @@ int pcie_tegra_host_init(void)
         INFO("pcie-tegra: P2U lane 0 + lane 1 init OK");
     }
 
-    /* Step 4: deassert the main core reset. */
-    rc = bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8);
-    if (rc != 0) {
-        WARN("pcie-tegra: RESET_DEASSERT(PEX2_CORE_8) rc=%d", rc);
-        return -1;
-    }
+    /* Step 4: (the main core reset was already cycled earlier so the
+     * LTSSM state machine starts clean — redundant deassert here is
+     * idempotent and acts as a barrier.) */
+    (void)bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8);
 
     /* Step 5: APPL_PINMUX setup.
      *
@@ -260,6 +364,99 @@ int pcie_tegra_host_init(void)
         pinmux &= ~APPL_PINMUX_CLKREQ_OVERRIDE;
         pinmux &= ~APPL_PINMUX_CLKREQ_DEFAULT_VALUE;
         appl_write(APPL_PINMUX, pinmux);
+    }
+
+    /* Step 6: DBI RC setup (mirrors linux-pcie-designware-host.c
+     * dw_pcie_setup_rc + dw_pcie_setup). Programs the DW PCIe core's
+     * DBI Type-1 header and link-capable configuration so LTSSM can
+     * actually complete training. Without this the RC stalls in
+     * POLLING.COMPLIANCE (LTSSM=0x03) because its internal link
+     * parameters are reset defaults. */
+    {
+        /* Enable writes to RO DBI registers for the class code + LNKCAP
+         * tweaks further down. */
+        dbi_ro_wr_enable(true);
+
+        /* PORT_LINK_CONTROL: clear FAST_LINK_MODE, set DLL_LINK_EN,
+         * advertise max lane capability. num-lanes=4 on Tegra234 C8
+         * (per DT), but the endpoint (RTL8168) is x1 — training auto-
+         * negotiates to x1. */
+        uint32_t plc = dbi_read32(DBI_PCIE_PORT_LINK_CONTROL);
+        plc &= ~PORT_LINK_FAST_LINK_MODE;
+        plc |= PORT_LINK_DLL_LINK_EN;
+        plc &= ~PORT_LINK_MODE_MASK;
+        plc |= PORT_LINK_MODE_4_LANES;
+        dbi_write32(DBI_PCIE_PORT_LINK_CONTROL, plc);
+
+        /* LINK_WIDTH_SPEED_CONTROL: initial training width = 1 lane
+         * (mandatory per DesignWare reference — x1 is the starting
+         * width; auto-negotiation widens after link-up). */
+        uint32_t lwsc = dbi_read32(DBI_PCIE_LINK_WIDTH_SPEED_CONTROL);
+        lwsc &= ~PORT_LOGIC_LINK_WIDTH_MASK;
+        lwsc |= PORT_LOGIC_LINK_WIDTH_1_LANES;
+        dbi_write32(DBI_PCIE_LINK_WIDTH_SPEED_CONTROL, lwsc);
+
+        /* Type-1 header: BAR0=0 (initial — rewritten to 0 again later
+         * per dw_pcie_setup_rc), BAR1=0. */
+        dbi_write32(DBI_PCI_BASE_ADDRESS_0, 0);
+        dbi_write32(DBI_PCI_BASE_ADDRESS_1, 0);
+
+        /* Bus numbers: primary=0, secondary=1, subordinate=0xff.
+         * Keep upper 8 bits (type 1 latency timer etc.) intact. */
+        uint32_t pb = dbi_read32(DBI_PCI_PRIMARY_BUS);
+        pb &= 0xFF000000u;
+        pb |= 0x00FF0100u;
+        dbi_write32(DBI_PCI_PRIMARY_BUS, pb);
+
+        /* Command register: enable IO, Memory, Bus Master, SERR.
+         * Keep upper 16 bits (Status register) intact. */
+        uint32_t cmd = dbi_read32(DBI_PCI_COMMAND);
+        cmd &= 0xFFFF0000u;
+        cmd |= DBI_PCI_CMD_IO_EN | DBI_PCI_CMD_MEM_EN |
+               DBI_PCI_CMD_MASTER_EN | DBI_PCI_CMD_SERR_EN;
+        dbi_write32(DBI_PCI_COMMAND, cmd);
+
+        /* Class code: PCI-to-PCI bridge (0x0604). Required so Linux
+         * and any enumerator recognise this as a Root Port. */
+        dbi_write16(DBI_PCI_CLASS_DEVICE, DBI_CLASS_BRIDGE_PCI);
+
+        /* Initiate speed change after link comes up (harmless if left
+         * set; dw_pcie_setup_rc does this unconditionally). */
+        lwsc = dbi_read32(DBI_PCIE_LINK_WIDTH_SPEED_CONTROL);
+        lwsc |= PORT_LOGIC_SPEED_CHANGE;
+        dbi_write32(DBI_PCIE_LINK_WIDTH_SPEED_CONTROL, lwsc);
+
+        /* Force LNKCTL2 target speed = Gen1 (2.5 GT/s). RTL8168 is a
+         * Gen1-only endpoint; the RC trying Gen3 first then failing
+         * over to Gen1 is what leaves us stuck in POLLING.COMPLIANCE.
+         * LNKCTL2 is 16-bit; TLS bits [3:0]. */
+        uint16_t lnkctl2 = *(volatile uint16_t *)(TEGRA_PCIE_C8_DBI + DBI_PCIE_LNKCTL2);
+        lnkctl2 = (lnkctl2 & ~(uint16_t)PCI_EXP_LNKCTL2_TLS_MASK) |
+                  (uint16_t)PCI_EXP_LNKCTL2_TLS_2_5GT;
+        *(volatile uint16_t *)(TEGRA_PCIE_C8_DBI + DBI_PCIE_LNKCTL2) = lnkctl2;
+        __asm__ volatile("dsb sy" ::: "memory");
+
+        /* Disable DLF exchange. Older endpoints (RTL8168 era) don't
+         * implement Data Link Feature; the RC attempts DLF negotiation
+         * as part of training, the endpoint doesn't respond, and
+         * POLLING.COMPLIANCE is where things park. Clear bit 31 of
+         * DLF_CAP (DBI+0x2F8). Matches Linux's retry path in
+         * tegra_pcie_dw_start_link:1024-1026. */
+        {
+            uint32_t dlf = dbi_read32(DBI_DLF_CAP);
+            dlf &= ~DLF_EXCHANGE_ENABLE;
+            dbi_write32(DBI_DLF_CAP, dlf);
+            INFO("pcie-tegra: DLF exchange disabled (DLF_CAP=0x%08lx)",
+                 (unsigned long)dbi_read32(DBI_DLF_CAP));
+        }
+
+        dbi_ro_wr_enable(false);
+
+        INFO("pcie-tegra: DBI RC setup done (PORT_LINK_CTRL=0x%08lx "
+             "LWSC=0x%08lx PCI_CMD=0x%08lx)",
+             (unsigned long)dbi_read32(DBI_PCIE_PORT_LINK_CONTROL),
+             (unsigned long)dbi_read32(DBI_PCIE_LINK_WIDTH_SPEED_CONTROL),
+             (unsigned long)dbi_read32(DBI_PCI_COMMAND));
     }
 
     g_host_inited = true;
