@@ -151,6 +151,7 @@ static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 static bool xhci_skip_next_port_reset = false;
 static bool xhci_force_connected_disabled_reset = false;
 static bool xhci_force_bsr0_on_open = false;
+static bool xhci_force_inherited_addr2_on_open = false;
 
 /*
  * Hot-plug state: STALE at boot (assume pre-kexec stale device) →
@@ -427,6 +428,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
         xhci_force_bsr0_on_open = false;
+        xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -442,6 +444,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_skip_next_port_reset = false;
         xhci_force_connected_disabled_reset = true;
         xhci_force_bsr0_on_open = false;
+        xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -456,7 +459,8 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
-        xhci_force_bsr0_on_open = true;
+        xhci_force_bsr0_on_open = false;
+        xhci_force_inherited_addr2_on_open = true;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -474,6 +478,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
         xhci_force_bsr0_on_open = false;
+        xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -493,6 +498,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
             xhci_prereset_speed = s;
             xhci_force_connected_disabled_reset = false;
             xhci_force_bsr0_on_open = false;
+            xhci_force_inherited_addr2_on_open = false;
         }
     }
 
@@ -766,6 +772,24 @@ static uint16_t xhci_ep0_max_packet(enum usb_speed s)
     }
 }
 
+static void xhci_patch_inherited_address(struct xhci_device *d, uint8_t addr)
+{
+    if (d == NULL || d->dev_ctx == NULL)
+        return;
+
+    uint32_t *slot3 = xhci_dev_slot_dw(d->dev_ctx, 3);
+    uint32_t old = *slot3;
+    uint32_t patched = old & ~(XHCI_SLOT_DW3_ADDR_MASK |
+                               XHCI_SLOT_DW3_STATE_MASK);
+    patched |= ((uint32_t)addr & XHCI_SLOT_DW3_ADDR_MASK);
+    patched |= (2U << XHCI_SLOT_DW3_STATE_SHIFT); /* addressed */
+    *slot3 = patched;
+    dsb(sy);
+
+    INFO("xhci: patched inherited slot address %u (dw3 0x%08x -> 0x%08x)",
+         (unsigned)addr, (unsigned)old, (unsigned)patched);
+}
+
 /*
  * Populate an Input Context for ADDRESS_DEVICE on a freshly-opened
  * slot. Writes:
@@ -983,7 +1007,9 @@ int xhci_hcd_device_open(struct usb_device *dev)
      * BSR=1 gets far enough to exercise software-driven EP0 traffic.
      */
     bool use_bsr0 = xhci_force_bsr0_on_open;
+    bool use_inherited_addr2 = xhci_force_inherited_addr2_on_open;
     xhci_force_bsr0_on_open = false;
+    xhci_force_inherited_addr2_on_open = false;
     cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
                    ((use_bsr0 ? 0u : 1u) << 9) |
                    ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
@@ -995,6 +1021,8 @@ int xhci_hcd_device_open(struct usb_device *dev)
     }
     INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=%u)",
          slot, (unsigned)dev->speed, d->root_port, use_bsr0 ? 0u : 1u);
+    if (use_inherited_addr2 && !use_bsr0)
+        xhci_patch_inherited_address(d, 2);
     xhci_log_devctx_snapshot(d, "post-address");
 
     dev->hcd_private = d;
