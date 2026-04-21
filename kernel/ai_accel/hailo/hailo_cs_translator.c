@@ -178,11 +178,24 @@ static int translate_open_boundary_for_pad(
                  pad->sys_index);
             return HAILO_ERR_INVAL;
         }
-        /* frame_periph_size comes from the pad's core_bytes_per_buffer;
-         * periph_bytes_per_buffer equals frame size for unpadded
-         * single-row tensors (MVP). Multi-row / padded tensors need
-         * a proper periph-vs-core split later. */
-        uint32_t frame = pad->core_bytes_per_buffer;
+        /* Two distinct quantities:
+         *   bpb   = core_bytes_per_buffer — single periph-buffer size
+         *           (one 224-pixel row of 224×3 INT8 in our test HEF = 672)
+         *   frame = bpb * core_buffers_per_frame — full tensor frame
+         *           (224 rows × 672 = 150528 for a 224×224×3 input)
+         *
+         * Firmware cross-checks:
+         *   - bytes_in_pattern  == frame_periph_size      (transfer size)
+         *   - periph_bytes_per_buffer * frame/bytes ratio  matches desc list
+         *
+         * Earlier build collapsed these to one value (frame = bpb) which
+         * worked for single-row test HEFs but failed the firmware check
+         * on real multi-row tensors with
+         * HAILO_DATAFLOW_STATUS_INVALID_RECEIVE_COMMUNICATION. */
+        uint32_t bpb   = pad->core_bytes_per_buffer;
+        uint32_t bpf   = pad->core_buffers_per_frame
+                           ? pad->core_buffers_per_frame : 1u;
+        uint32_t frame = bpb * bpf;
         struct hailo_cs_act_open_boundary_input_channel body = {
             .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
@@ -190,18 +203,11 @@ static int translate_open_boundary_for_pad(
                 .dma_address      = cfg->boundary_input_desc_list_iova,
                 .desc_page_size   = cfg->boundary_desc_page_size,
                 .total_desc_count = cfg->boundary_input_total_desc_count,
-                /* HailoRT sets bytes_in_pattern = transfer_size (periph
-                 * frame size) for boundary channels — see
-                 * vdma_edge_layer.cpp:73 in v4.23.0. For unpadded
-                 * single-row tensors (MVP) this equals core_bytes_per_
-                 * buffer; multi-row / padded tensors need the full
-                 * periph_bytes_per_buffer * periph_buffers_per_frame
-                 * product once the translator consumes that split. */
                 .bytes_in_pattern = frame,
             },
             .stream_index             = stream_index,
             .network_index            = 0,
-            .periph_bytes_per_buffer  = (uint16_t)((frame > 0xFFFFu) ? 0xFFFFu : frame),
+            .periph_bytes_per_buffer  = (uint16_t)((bpb > 0xFFFFu) ? 0xFFFFu : bpb),
             .frame_periph_size        = frame,
         };
         return hailo_cs_builder_append(
@@ -218,7 +224,9 @@ static int translate_open_boundary_for_pad(
                  "is 0", pad->sys_index);
             return HAILO_ERR_INVAL;
         }
-        uint32_t out_frame = pad->core_bytes_per_buffer;
+        uint32_t obpf = pad->core_buffers_per_frame
+                          ? pad->core_buffers_per_frame : 1u;
+        uint32_t out_frame = pad->core_bytes_per_buffer * obpf;
         struct hailo_cs_act_open_boundary_output_channel body = {
             .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {

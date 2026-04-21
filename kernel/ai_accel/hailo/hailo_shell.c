@@ -1068,17 +1068,36 @@ static int cmd_hailo(int argc, char *argv[])
             uint32_t direction;
             uint32_t pad_index;
             uint32_t sys_index;
+            uint32_t csi_edge_connection_type;
+            uint32_t csi_connected_sys_index;
+            uint32_t csi_connected_ctx_sys_index;
             uint8_t  seen_direction : 1;
             uint8_t  seen_pad_index : 1;
             uint8_t  seen_sys_index : 1;
             uint8_t  seen_shape     : 1;
+            uint8_t  seen_csi       : 1;
+            uint8_t  seen_csi_connected_sys_index : 1;
+            uint8_t  seen_csi_connected_ctx_sys_index : 1;
         };
         extern struct hef_edge_debug hef_edge_debug_slots[];
         extern uint32_t hef_edge_debug_count;
         shell_printf("hailo: edge_debug count=%u\n", hef_edge_debug_count);
         for (uint32_t i = 0; i < hef_edge_debug_count; i++) {
             const struct hef_edge_debug *d = &hef_edge_debug_slots[i];
-            shell_printf("  [%u] dir=%s pad=%s(%u) sys=%s(%u) shape=%s\n",
+            const char *conn = "?";
+            if (d->seen_csi) {
+                switch (d->csi_edge_connection_type) {
+                case 0: conn = "BOUNDARY"; break;
+                case 1: conn = "INTERMED"; break;
+                case 2: conn = "DDR";      break;
+                case 3: conn = "CACHE";    break;
+                default: conn = "??";      break;
+                }
+            } else {
+                conn = "nocsi";
+            }
+            shell_printf("  [%u] dir=%s pad=%s(%u) sys=%s(%u) shape=%s "
+                         "csi=%s conn_sys=%s(%u) cctx_sys=%s(%u)\n",
                          i,
                          d->seen_direction
                             ? (d->direction == 1 ? "D2H" : "H2D")
@@ -1087,7 +1106,12 @@ static int cmd_hailo(int argc, char *argv[])
                          d->pad_index,
                          d->seen_sys_index ? "yes" : "no ",
                          d->sys_index,
-                         d->seen_shape ? "yes" : "no");
+                         d->seen_shape ? "yes" : "no",
+                         conn,
+                         d->seen_csi_connected_sys_index ? "yes" : "no ",
+                         d->csi_connected_sys_index,
+                         d->seen_csi_connected_ctx_sys_index ? "yes" : "no ",
+                         d->csi_connected_ctx_sys_index);
         }
         return 0;
     }

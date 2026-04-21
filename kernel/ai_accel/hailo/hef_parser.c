@@ -659,6 +659,16 @@ struct edge_layer_stage {
     uint32_t padded_width;
     uint32_t features;
     uint32_t padded_features;
+
+    /* Phase 8: context_switch_info parsed from ProtoHEFEdgeLayer
+     * field 5 — holds the real output stream ID for boundary outputs
+     * that don't carry sys_index in edge_layer_base.f8. */
+    bool     seen_csi;
+    uint32_t csi_edge_connection_type;   /* 0=BOUNDARY, 1=INTERMEDIATE, 2=DDR, 3=CACHE */
+    uint32_t csi_connected_sys_index;
+    bool     seen_csi_connected_sys_index;
+    uint32_t csi_connected_ctx_sys_index;  /* from connected_contexts[0].sys_index */
+    bool     seen_csi_connected_ctx_sys_index;
 };
 
 /*
@@ -847,14 +857,118 @@ struct hef_edge_debug {
     uint32_t direction;
     uint32_t pad_index;
     uint32_t sys_index;
+    uint32_t csi_edge_connection_type;
+    uint32_t csi_connected_sys_index;
+    uint32_t csi_connected_ctx_sys_index;
     uint8_t  seen_direction : 1;
     uint8_t  seen_pad_index : 1;
     uint8_t  seen_sys_index : 1;
     uint8_t  seen_shape     : 1;
+    uint8_t  seen_csi       : 1;
+    uint8_t  seen_csi_connected_sys_index : 1;
+    uint8_t  seen_csi_connected_ctx_sys_index : 1;
 };
 #define HEF_EDGE_DEBUG_MAX 8
 struct hef_edge_debug hef_edge_debug_slots[HEF_EDGE_DEBUG_MAX];
 uint32_t hef_edge_debug_count = 0;
+
+/*
+ * Phase 8: ProtoHEFConnectedContextInfo decode. Captures the first
+ * connected_contexts[].sys_index we see. `sys_index` is f3.
+ */
+static bool decode_connected_context_cb(pb_istream_t *stream,
+                                        const pb_field_t *field,
+                                        void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7);
+        if (wire_type == 0) {
+            uint64_t v = 0;
+            if (!pb_decode_varint(stream, &v)) return false;
+            if (field_no == 3 && !st->seen_csi_connected_ctx_sys_index) {
+                st->csi_connected_ctx_sys_index = (uint32_t)v;
+                st->seen_csi_connected_ctx_sys_index = true;
+            }
+            continue;
+        }
+        switch (wire_type) {
+        case 1: if (!pb_read(stream, NULL, 8)) return false; break;
+        case 2: {
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        case 5: if (!pb_read(stream, NULL, 4)) return false; break;
+        default: return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Phase 8: ProtoHEFContextSwitchInformation decode. Captures:
+ *   f3: edge_connection_type    (BOUNDARY=0 / INTERMEDIATE=1 / DDR=2 / CACHE=3)
+ *   f7: connected_sys_index
+ *   f8: connected_contexts[] (repeated ProtoHEFConnectedContextInfo)
+ */
+static bool decode_context_switch_info_cb(pb_istream_t *stream,
+                                          const pb_field_t *field,
+                                          void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+    st->seen_csi = true;
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7);
+        if (wire_type == 0) {
+            uint64_t v = 0;
+            if (!pb_decode_varint(stream, &v)) return false;
+            if (field_no == 3) {
+                st->csi_edge_connection_type = (uint32_t)v;
+            } else if (field_no == 7) {
+                st->csi_connected_sys_index = (uint32_t)v;
+                st->seen_csi_connected_sys_index = true;
+            }
+            continue;
+        }
+        if (wire_type == 2 && field_no == 8) {
+            /* Nested ProtoHEFConnectedContextInfo sub-message. */
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            size_t saved = stream->bytes_left;
+            stream->bytes_left = (size_t)len;
+            bool ok = decode_connected_context_cb(stream, NULL, arg);
+            stream->bytes_left = saved - (size_t)len;
+            if (!ok) return false;
+            continue;
+        }
+        /* Skip other fields (wire-type aware). */
+        switch (wire_type) {
+        case 1: if (!pb_read(stream, NULL, 8)) return false; break;
+        case 2: {
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        case 5: if (!pb_read(stream, NULL, 4)) return false; break;
+        default: return false;
+        }
+    }
+    return true;
+}
 
 static bool decode_edge_layer_cb(pb_istream_t *stream,
                                  const pb_field_t *field,
@@ -876,18 +990,26 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     el.pad_index.arg                = &stage;
     el.direction.funcs.decode       = decode_edge_direction_cb;
     el.direction.arg                = &stage;
+    el.context_switch_info.funcs.decode = decode_context_switch_info_cb;
+    el.context_switch_info.arg          = &stage;
     if (!pb_decode(stream, ProtoHEFEdgeLayer_fields, &el)) return false;
 
     /* Phase 8: stash per-entry flags for post-wedge inspection. */
     if (hef_edge_debug_count < HEF_EDGE_DEBUG_MAX) {
         struct hef_edge_debug *d = &hef_edge_debug_slots[hef_edge_debug_count++];
-        d->direction      = stage.direction;
-        d->pad_index      = stage.pad_index;
-        d->sys_index      = stage.sys_index;
-        d->seen_direction = stage.seen_direction;
-        d->seen_pad_index = stage.seen_pad_index;
-        d->seen_sys_index = stage.seen_sys_index;
-        d->seen_shape     = stage.seen_shape;
+        d->direction                        = stage.direction;
+        d->pad_index                        = stage.pad_index;
+        d->sys_index                        = stage.sys_index;
+        d->csi_edge_connection_type         = stage.csi_edge_connection_type;
+        d->csi_connected_sys_index          = stage.csi_connected_sys_index;
+        d->csi_connected_ctx_sys_index      = stage.csi_connected_ctx_sys_index;
+        d->seen_direction                   = stage.seen_direction;
+        d->seen_pad_index                   = stage.seen_pad_index;
+        d->seen_sys_index                   = stage.seen_sys_index;
+        d->seen_shape                       = stage.seen_shape;
+        d->seen_csi                         = stage.seen_csi;
+        d->seen_csi_connected_sys_index     = stage.seen_csi_connected_sys_index;
+        d->seen_csi_connected_ctx_sys_index = stage.seen_csi_connected_ctx_sys_index;
     }
 
     /* Derive a pad identity. DFC 3.33.1 simple-MLP HEFs don't emit

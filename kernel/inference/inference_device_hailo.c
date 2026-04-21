@@ -386,7 +386,21 @@ static int context_switch_load(struct hailo_model_slot *slot,
     uint64_t boundary_in_iova  = 0;
     uint32_t boundary_in_desc_count = 0;
     if (in_pad->has_stream_info && in_pad->core_bytes_per_buffer) {
-        uint32_t in_bytes = in_pad->core_bytes_per_buffer;
+        /* Phase 8 fix: size to FULL frame bytes, not just a single
+         * periph-buffer. For ResNet-18 at 224×224×3, the HEF declares
+         * core_bytes_per_buffer=672 and core_buffers_per_frame=224 —
+         * a single buffer is one row; a full frame is 150528 bytes.
+         * Sizing the boundary DMA tensor to just 672 bytes caused
+         * firmware to reject ACTIVATION with
+         * HAILO_DATAFLOW_STATUS_INVALID_RECEIVE_COMMUNICATION
+         * (0x40130016) because the programmed descriptor list and
+         * the frame-size-embedded OpenBoundary action disagreed.
+         * Earlier test HEFs were single-buffer (buffers_per_frame=1)
+         * so this path wasn't hit. */
+        uint32_t bpb    = in_pad->core_bytes_per_buffer;
+        uint32_t bpf    = in_pad->core_buffers_per_frame
+                            ? in_pad->core_buffers_per_frame : 1u;
+        uint32_t in_bytes = bpb * bpf;
         rc = hailo_tensor_alloc(in_bytes, &slot->boundary_in_tensor);
         if (rc != HAILO_OK) {
             WARN("hailo backend: boundary IN tensor alloc failed (rc=%d)", rc);
@@ -426,7 +440,11 @@ static int context_switch_load(struct hailo_model_slot *slot,
     uint64_t boundary_out_iova  = 0;
     uint32_t boundary_out_desc_count = 0;
     if (out_pad->has_stream_info && out_pad->core_bytes_per_buffer) {
-        uint32_t out_bytes = out_pad->core_bytes_per_buffer;
+        /* Same full-frame sizing as the input path. */
+        uint32_t obpb    = out_pad->core_bytes_per_buffer;
+        uint32_t obpf    = out_pad->core_buffers_per_frame
+                             ? out_pad->core_buffers_per_frame : 1u;
+        uint32_t out_bytes = obpb * obpf;
         rc = hailo_tensor_alloc(out_bytes, &slot->boundary_out_tensor);
         if (rc != HAILO_OK) {
             WARN("hailo backend: boundary OUT tensor alloc failed (rc=%d)", rc);
