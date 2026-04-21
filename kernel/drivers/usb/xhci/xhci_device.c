@@ -619,6 +619,16 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
     *e2 = (uint32_t)(ep0_ring_phys & 0xFFFFFFFFu) | 0x1U;  /* DCS = 1 */
     *e3 = (uint32_t)(ep0_ring_phys >> 32);
     *e4 = 8U;                                 /* avg TRB length */
+
+    INFO("xhci: address ctx route=0x%x speed_id=%u root_port=%u "
+         "slot_dw0=0x%08x slot_dw1=0x%08x ep0_dw0=0x%08x ep0_dw1=0x%08x "
+         "ep0_dw2=0x%08x ep0_dw3=0x%08x ep0_dw4=0x%08x",
+         (unsigned)dev->route_string,
+         (unsigned)speed_id,
+         (unsigned)d->root_port,
+         (unsigned)*s0, (unsigned)*s1,
+         (unsigned)*e0, (unsigned)*e1, (unsigned)*e2,
+         (unsigned)*e3, (unsigned)*e4);
 }
 
 /* -------------------------------------------------------------------------- */

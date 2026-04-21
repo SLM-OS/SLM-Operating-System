@@ -97,6 +97,43 @@ static struct xhci_urb_slot *xhci_urb_slot_find_by_trb(uintptr_t trb_phys)
     return NULL;
 }
 
+static uint32_t xhci_ep0_mps_for_speed(enum usb_speed speed)
+{
+    switch (speed) {
+    case USB_SPEED_LOW:
+        return 8;
+    case USB_SPEED_FULL:
+        return 64;
+    case USB_SPEED_HIGH:
+        return 64;
+    case USB_SPEED_SUPER:
+        return 512;
+    default:
+        return 8;
+    }
+}
+
+static uint32_t xhci_td_size_for_single_data_trb(const struct usb_urb *urb)
+{
+    if (urb == NULL || urb->length == 0 || urb->buffer == NULL)
+        return 0;
+
+    uint32_t mps = xhci_ep0_mps_for_speed(urb->dev->speed);
+    if (mps == 0)
+        return 0;
+
+    uint32_t packets = (urb->length + mps - 1U) / mps;
+    if (packets == 0)
+        return 0;
+
+    /*
+     * xHCI 1.x TD size = packets remaining after this TRB. For our
+     * single data-stage TRB in a 3-TRB control TD, the hardware still
+     * expects the non-zero remainder count that Linux queues here.
+     */
+    return packets > 31U ? 31U : packets;
+}
+
 /* -------------------------------------------------------------------------- */
 /* URB → TRB builders                                                          */
 /* -------------------------------------------------------------------------- */
@@ -218,6 +255,16 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
              (unsigned)urb->dev->route_string,
              (unsigned)d->root_port,
              (unsigned)urb->dev->speed);
+        INFO("xhci: ctrl setup packet bmRequestType=0x%02x bRequest=0x%02x "
+             "wValue=0x%04x wIndex=0x%04x wLength=%u trt=%u has_data=%u data_in=%u",
+             (unsigned)urb->setup.bmRequestType,
+             (unsigned)urb->setup.bRequest,
+             (unsigned)urb->setup.wValue,
+             (unsigned)urb->setup.wIndex,
+             (unsigned)urb->setup.wLength,
+             (unsigned)trt,
+             (unsigned)has_data,
+             (unsigned)data_in);
     }
 
     struct xhci_trb tmpl;
@@ -225,6 +272,14 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
 
     /* 1. Setup Stage. */
     xhci_build_setup_stage(&tmpl, &urb->setup, trt, 0);
+    if (has_data)
+        tmpl.control |= XHCI_TRB_CH;
+    if (xhci_urb_is_get_descriptor(urb)) {
+        INFO("xhci: setup trb param_lo=0x%08x param_hi=0x%08x status=0x%08x "
+             "control=0x%08x",
+             (unsigned)tmpl.param_lo, (unsigned)tmpl.param_hi,
+             (unsigned)tmpl.status, (unsigned)tmpl.control);
+    }
     slot_trb = xhci_ring_put(r, &tmpl);
     if (slot_trb == NULL) goto fail;
     slot->first_trb_phys = (uintptr_t)slot_trb;
@@ -233,6 +288,16 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     if (has_data) {
         xhci_build_data_stage(&tmpl, (uintptr_t)urb->buffer,
                               urb->length, data_in, 0);
+        tmpl.control |= XHCI_TRB_CH;
+        tmpl.status |= xhci_td_size_for_single_data_trb(urb)
+                       << XHCI_TRB_STATUS_TD_SIZE_SHIFT;
+        if (xhci_urb_is_get_descriptor(urb)) {
+            INFO("xhci: data trb param_lo=0x%08x param_hi=0x%08x status=0x%08x "
+                 "control=0x%08x buf=0x%lx",
+                 (unsigned)tmpl.param_lo, (unsigned)tmpl.param_hi,
+                 (unsigned)tmpl.status, (unsigned)tmpl.control,
+                 (unsigned long)(uintptr_t)urb->buffer);
+        }
         slot_trb = xhci_ring_put(r, &tmpl);
         if (slot_trb == NULL) goto fail;
         slot->data_trb_phys = (uintptr_t)slot_trb;
@@ -248,6 +313,11 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
      */
     bool status_in = has_data ? !data_in : true;
     xhci_build_status_stage(&tmpl, status_in, 0);
+    if (xhci_urb_is_get_descriptor(urb)) {
+        INFO("xhci: status trb status=0x%08x control=0x%08x status_dir_in=%u",
+             (unsigned)tmpl.status, (unsigned)tmpl.control,
+             (unsigned)status_in);
+    }
     slot_trb = xhci_ring_put(r, &tmpl);
     if (slot_trb == NULL) goto fail;
 
