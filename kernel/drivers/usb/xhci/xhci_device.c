@@ -148,6 +148,7 @@ static uint8_t xhci_active_port = 0xFF;  /* 0xFF = not yet located */
 static uint32_t xhci_active_portsc = 0;
 static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
+static bool xhci_skip_next_port_reset = false;
 
 /*
  * Hot-plug state: STALE at boot (assume pre-kexec stale device) →
@@ -278,6 +279,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
              (unsigned)xhci_active_port, (unsigned)portsc);
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -292,6 +294,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
              (unsigned)portsc);
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -364,6 +367,14 @@ int xhci_hcd_port_reset(uint8_t port)
     if (port != 0) return -1;
     if (xhci_active_port == 0xFF)
         return -1;
+
+    if (xhci_skip_next_port_reset) {
+        xhci_skip_next_port_reset = false;
+        xhci_active_portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
+        INFO("xhci: skipping root-port reset on recovered stale PORTSC[%u] (0x%08x)",
+             (unsigned)xhci_active_port, (unsigned)xhci_active_portsc);
+        return 0;
+    }
 
     uint8_t pidx = xhci_active_port;
     uint64_t freq  = timer_get_frequency();
