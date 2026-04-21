@@ -832,6 +832,30 @@ struct edge_ctx {
  * silently skipped — they describe intermediate/DDR connections we
  * don't route at the top level.
  */
+/* Phase 8 diagnostic: per-category tallies of edge_layer outcomes.
+ * `hailo edgeinfo` reads these to understand where pads are being
+ * dropped when a HEF doesn't yield both input and output. */
+uint32_t hef_edge_layer_calls          = 0;
+uint32_t hef_edge_layer_no_key         = 0;    /* neither pad_index nor sys_index */
+uint32_t hef_edge_layer_kept_h2d       = 0;
+uint32_t hef_edge_layer_kept_d2h       = 0;
+uint32_t hef_edge_layer_deduped        = 0;    /* existing pad key matched */
+
+/* Phase 8 per-entry debug: record the first 8 edge_layers seen so we
+ * can dump their (direction, pad_index, sys_index, seen_shape) flags. */
+struct hef_edge_debug {
+    uint32_t direction;
+    uint32_t pad_index;
+    uint32_t sys_index;
+    uint8_t  seen_direction : 1;
+    uint8_t  seen_pad_index : 1;
+    uint8_t  seen_sys_index : 1;
+    uint8_t  seen_shape     : 1;
+};
+#define HEF_EDGE_DEBUG_MAX 8
+struct hef_edge_debug hef_edge_debug_slots[HEF_EDGE_DEBUG_MAX];
+uint32_t hef_edge_debug_count = 0;
+
 static bool decode_edge_layer_cb(pb_istream_t *stream,
                                  const pb_field_t *field,
                                  void **arg)
@@ -839,6 +863,7 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     (void)field;
     struct edge_ctx *ectx = (struct edge_ctx *)*arg;
     struct edge_layer_stage stage = {0};
+    hef_edge_layer_calls++;
 
     ProtoHEFEdgeLayer el = ProtoHEFEdgeLayer_init_default;
     /* layer_info lives in the `edge` oneof union; nanopb uses a shared
@@ -852,6 +877,18 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     el.direction.funcs.decode       = decode_edge_direction_cb;
     el.direction.arg                = &stage;
     if (!pb_decode(stream, ProtoHEFEdgeLayer_fields, &el)) return false;
+
+    /* Phase 8: stash per-entry flags for post-wedge inspection. */
+    if (hef_edge_debug_count < HEF_EDGE_DEBUG_MAX) {
+        struct hef_edge_debug *d = &hef_edge_debug_slots[hef_edge_debug_count++];
+        d->direction      = stage.direction;
+        d->pad_index      = stage.pad_index;
+        d->sys_index      = stage.sys_index;
+        d->seen_direction = stage.seen_direction;
+        d->seen_pad_index = stage.seen_pad_index;
+        d->seen_sys_index = stage.seen_sys_index;
+        d->seen_shape     = stage.seen_shape;
+    }
 
     /* Derive a pad identity. DFC 3.33.1 simple-MLP HEFs don't emit
      * ProtoHEFEdgeLayer.pad_index on their boundary edge_layers (the
@@ -870,7 +907,22 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
         pad_key = stage.pad_index;
     } else if (stage.seen_sys_index) {
         pad_key = stage.sys_index;
+    } else if (stage.seen_direction && stage.direction == 1 && stage.seen_shape) {
+        /* Phase 8: multi-context HEFs encode their boundary output
+         * edge_layer with direction=D2H + shape-only (no pad_index,
+         * no sys_index in edge_layer_base). Both the pad_index and
+         * the per-stream sys_index live elsewhere in the proto
+         * (context_switch_info / partial_network_group layout info)
+         * that our walker doesn't yet reach. Synthesize a distinct
+         * pad_key for the output so pick_largest_pads can succeed;
+         * the shape is what load_model actually needs for output
+         * buffer sizing. sys_index stays zero — firmware may reject
+         * the resulting ACTIVATION if the output stream id isn't
+         * accepted as a default, but that's the next diagnostic,
+         * not a parser limitation. */
+        pad_key = 0xFFFF0001;
     } else {
+        hef_edge_layer_no_key++;
         return true;                                /* non-boundary layer */
     }
 
@@ -879,6 +931,7 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     for (uint32_t i = 0; i < ectx->info->pad_count; i++) {
         if (ectx->info->pads[i].index == pad_key) {
             p = &ectx->info->pads[i];
+            hef_edge_layer_deduped++;
             break;
         }
     }
@@ -894,6 +947,8 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
          * field is absent — proto3 doesn't emit zero-valued enums.
          * We flip to output only on an explicit direction==1. */
         p->is_input = !(stage.seen_direction && stage.direction == 1);
+        if (p->is_input) hef_edge_layer_kept_h2d++;
+        else             hef_edge_layer_kept_d2h++;
         if (stage.seen_shape) {
             p->has_tensor_shape = true;
             p->height           = stage.height;

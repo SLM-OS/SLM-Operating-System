@@ -56,6 +56,14 @@
 #include <stddef.h>
 #include <string.h>
 
+/* Phase 8 diagnostic: last firmware error status captured by
+ * control_check_response_header. Zero until the first RPC that
+ * returned a non-zero major_status. Exposed via hailo shell
+ * `hailo last_err` for post-wedge triage. */
+volatile uint32_t hailo_control_last_err_major  = 0;
+volatile uint32_t hailo_control_last_err_minor  = 0;
+volatile uint32_t hailo_control_last_err_opcode = 0;
+
 /*
  * The Hailo firmware marshals every scalar in the common header, the
  * parameter_count, and the response status/length fields via htonl /
@@ -616,6 +624,13 @@ static int control_check_response_header(
      * protocol violations (opcode is any other value AND status
      * says success) still fall through as BAD_FIRMWARE. */
     if (major != 0) {
+        /* Phase 8: stash last firmware-error status so shell can dump
+         * it post-wedge via `hailo last_err`. uart_printf WARN output
+         * gets corrupted on real HEFs for reasons not yet understood,
+         * so an observable global is the reliable diagnostic channel. */
+        hailo_control_last_err_major = major;
+        hailo_control_last_err_minor = minor;
+        hailo_control_last_err_opcode = opcode;
         WARN("hailo: %s failed (major=0x%x minor=0x%x opcode_echo=0x%x)",
              op_name, major, minor, opcode);
         return HAILO_ERR_IO;

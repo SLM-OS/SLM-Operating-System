@@ -93,6 +93,51 @@ static struct hailo_model_slot slots[HAILO_MAX_MODELS];
  */
 static spinlock_t slots_lock = SPINLOCK_INIT;
 
+/* Phase 8 progress tracker: updated at each cs_load stage, readable by
+ * shell command `hailo stage` after a wedge. uart_puts diagnostics
+ * corrupt mid-print on real HEFs for reasons unknown, so we use a
+ * simple DRAM global instead — the shell recovers post-wedge and can
+ * dump this to pinpoint which stage was last entered. Values:
+ *   0    = idle / pre-cs_load
+ *   10   = entered cs_load, ccw bounds ok
+ *   11   = ccw_tensor allocated
+ *   12   = ccw memcpy + prepare_for_device done
+ *   13   = ccw desc_list allocated + programmed
+ *   20   = boundary IN tensor done
+ *   21   = boundary OUT tensor done
+ *   40   = before translate_application_header
+ *   41   = before translate_contexts
+ *   42   = translate done
+ *   50   = before CHANGE_STATUS(RESET)
+ *   51   = RESET ok
+ *   52   = before SET_NETWORK_GROUP_HEADER
+ *   53   = NG_HEADER ok
+ *   60+ix = before SET_CONTEXT_INFO(ix)  (ix = 0..3)
+ *   61+ix = SET_CONTEXT_INFO(ix) ok
+ *   70   = before CHANGE_STATUS(ENABLED)
+ *   71   = ENABLED ok (load_model success)
+ */
+static volatile int cs_load_stage = 0;
+
+static inline void cs_load_stage_set(int stage)
+{
+    cs_load_stage = stage;
+    __asm__ volatile("dmb ish" ::: "memory");
+}
+
+int hailo_backend_get_cs_load_stage(void)
+{
+    return cs_load_stage;
+}
+
+/* Extern-callable setter for the translator (different compilation
+ * unit) to mark sub-stage progress inside
+ * hailo_cs_translate_contexts. Phase 8 diagnostic only. */
+void cs_load_stage_set_raw(int stage)
+{
+    cs_load_stage_set(stage);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -284,6 +329,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
             return HAILO_ERR_INVAL;
         }
     }
+    cs_load_stage_set(10);
 
     /* Step 1: CCW buffer + descriptor list.
      * CCWs block lives in the HEF at ccws_offset; size is ccws_size
@@ -299,6 +345,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
              rc, ccw_bytes);
         goto fail;
     }
+    cs_load_stage_set(11);
     if (outer->ccws_size > 0) {
         const uint8_t *ccws_base = (const uint8_t *)model + outer->ccws_offset;
         memcpy(slot->ccw_tensor.cpu_addr, ccws_base, outer->ccws_size);
@@ -306,6 +353,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         memset(slot->ccw_tensor.cpu_addr, 0, ccw_bytes);
     }
     hailo_tensor_prepare_for_device(&slot->ccw_tensor);
+    cs_load_stage_set(12);
 
     uint32_t ccw_desc_count =
         desc_count_for(ccw_bytes, HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE);
@@ -330,6 +378,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         rc = HAILO_ERR_IO;
         goto fail;
     }
+    cs_load_stage_set(13);
 
     /* Step 2: boundary tensors + desc lists — only for pads the HEF
      * marked as stream-bound. Tests HEFs without edge_layers have
@@ -372,6 +421,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         }
         boundary_in_iova = slot->boundary_in_list.iova;
     }
+    cs_load_stage_set(20);
 
     uint64_t boundary_out_iova  = 0;
     uint32_t boundary_out_desc_count = 0;
@@ -411,6 +461,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         }
         boundary_out_iova = slot->boundary_out_list.iova;
     }
+    cs_load_stage_set(21);
 
     /* Step 3: translate_cfg. The boundary IOVA fields are zero if the
      * HEF has no boundary edge of that direction; translate_activation
@@ -430,7 +481,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
     };
 
     /* Step 4: translate. */
-    uart_puts("[cs_load] S4.trans_app\r\n");
+    cs_load_stage_set(40);
     struct hailo_cs_application_header hdr;
     rc = hailo_cs_translate_application_header(info, &tcfg, &hdr);
     if (rc != HAILO_OK) {
@@ -446,17 +497,17 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * Stack-local is the simplest fix and keeps this function re-
      * entrant. Tensor + desc_list allocations earlier in this call
      * already consume kernel-stack frame; the extra 2 KB is budgeted. */
-    uart_puts("[cs_load] S4.trans_ctx\r\n");
+    cs_load_stage_set(41);
     struct hailo_cs_context_buffers cs_bufs;
     rc = hailo_cs_translate_contexts(info, &tcfg, &cs_bufs);
     if (rc != HAILO_OK) {
         WARN("hailo backend: translate_contexts failed (rc=%d)", rc);
         goto fail;
     }
-    uart_puts("[cs_load] S4.trans_done\r\n");
+    cs_load_stage_set(42);
 
     /* Step 5: six RPCs. Each must succeed; abort on any failure. */
-    uart_puts("[cs_load] R1.reset\r\n");
+    cs_load_stage_set(50);
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
@@ -465,15 +516,15 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(RESET) failed (rc=%d)", rc);
         goto fail;
     }
-    uart_puts("[cs_load] R1.ok\r\n");
+    cs_load_stage_set(51);
 
-    uart_puts("[cs_load] R2.ng_hdr\r\n");
+    cs_load_stage_set(52);
     rc = hailo_control_set_network_group_header(&hdr);
     if (rc != HAILO_OK) {
         WARN("hailo backend: SET_NETWORK_GROUP_HEADER failed (rc=%d)", rc);
         goto fail;
     }
-    uart_puts("[cs_load] R2.ok\r\n");
+    cs_load_stage_set(53);
 
     const struct {
         enum hailo_cs_context_type type;
@@ -491,18 +542,23 @@ static int context_switch_load(struct hailo_model_slot *slot,
           (uint32_t)cs_bufs.dynamic_len,         "DYNAMIC" },
     };
     for (uint32_t i = 0; i < sizeof(ctxs) / sizeof(ctxs[0]); i++) {
-        uart_puts("[cs_load] R.ctx.send\r\n");
+        cs_load_stage_set(60 + (int)i * 2);     /* 60, 62, 64, 66 per context */
         rc = hailo_control_set_context_info(ctxs[i].type,
                                             ctxs[i].bytes, ctxs[i].len);
         if (rc != HAILO_OK) {
+            /* Encode (rpc_index, rc) so `hailo stage` shows both.
+             * 800_000 + ctx_index*1000 + |rc| — e.g.,
+             * 800004 = SET_CONTEXT_INFO(0) returned rc=-4 (TIMEOUT). */
+            int abs_rc = (rc < 0) ? -rc : rc;
+            cs_load_stage_set(800000 + (int)i * 1000 + abs_rc);
             WARN("hailo backend: SET_CONTEXT_INFO(%s) failed (rc=%d)",
                  ctxs[i].name, rc);
             goto fail;
         }
-        uart_puts("[cs_load] R.ctx.ok\r\n");
+        cs_load_stage_set(61 + (int)i * 2);
     }
 
-    uart_puts("[cs_load] R7.enabled\r\n");
+    cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_ENABLED,
             /*application_index=*/0,
@@ -512,6 +568,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         goto fail;
     }
 
+    cs_load_stage_set(71);
     INFO("hailo backend: context-switch load OK (CCW=%u B, IN=%u B, OUT=%u B)",
          ccw_bytes,
          in_pad->has_stream_info  ? in_pad->core_bytes_per_buffer  : 0u,

@@ -1048,6 +1048,86 @@ static int cmd_hailo(int argc, char *argv[])
         return cmd_hailo_ctxsmoke(argc, argv);
     }
 
+    /* Phase 8: dump the cs_load progress counter. Updated by the
+     * inference backend at each stage of context_switch_load so we
+     * can diagnose wedges without relying on live serial output.
+     * See kernel/inference/inference_device_hailo.c for stage codes. */
+    if (argc >= 2 && strcmp(argv[1], "stage") == 0) {
+        extern int hailo_backend_get_cs_load_stage(void);
+        shell_printf("hailo: cs_load_stage=%d\n",
+                     hailo_backend_get_cs_load_stage());
+        return 0;
+    }
+
+    /* Phase 8: dump per-edge-layer details of first 8 entries. Shows
+     * direction, pad_index, sys_index, and shape flags for each
+     * edge_layer the walker processed. Helps identify which entry
+     * IS the output (and why it wasn't picked up as such). */
+    if (argc >= 2 && strcmp(argv[1], "edges") == 0) {
+        struct hef_edge_debug {
+            uint32_t direction;
+            uint32_t pad_index;
+            uint32_t sys_index;
+            uint8_t  seen_direction : 1;
+            uint8_t  seen_pad_index : 1;
+            uint8_t  seen_sys_index : 1;
+            uint8_t  seen_shape     : 1;
+        };
+        extern struct hef_edge_debug hef_edge_debug_slots[];
+        extern uint32_t hef_edge_debug_count;
+        shell_printf("hailo: edge_debug count=%u\n", hef_edge_debug_count);
+        for (uint32_t i = 0; i < hef_edge_debug_count; i++) {
+            const struct hef_edge_debug *d = &hef_edge_debug_slots[i];
+            shell_printf("  [%u] dir=%s pad=%s(%u) sys=%s(%u) shape=%s\n",
+                         i,
+                         d->seen_direction
+                            ? (d->direction == 1 ? "D2H" : "H2D")
+                            : "unset",
+                         d->seen_pad_index ? "yes" : "no ",
+                         d->pad_index,
+                         d->seen_sys_index ? "yes" : "no ",
+                         d->sys_index,
+                         d->seen_shape ? "yes" : "no");
+        }
+        return 0;
+    }
+
+    /* Phase 8: dump edge_layer walker tallies. Populated by
+     * decode_edge_layer_cb in hef_parser.c — shows how many edge
+     * layers the walker saw, how many had no pad_key (skipped),
+     * and how many landed as input vs output pads. */
+    if (argc >= 2 && strcmp(argv[1], "edgeinfo") == 0) {
+        extern uint32_t hef_edge_layer_calls;
+        extern uint32_t hef_edge_layer_no_key;
+        extern uint32_t hef_edge_layer_kept_h2d;
+        extern uint32_t hef_edge_layer_kept_d2h;
+        extern uint32_t hef_edge_layer_deduped;
+        shell_printf("hailo: edge_layer calls=%u no_key=%u "
+                     "kept_input=%u kept_output=%u deduped=%u\n",
+                     hef_edge_layer_calls,
+                     hef_edge_layer_no_key,
+                     hef_edge_layer_kept_h2d,
+                     hef_edge_layer_kept_d2h,
+                     hef_edge_layer_deduped);
+        return 0;
+    }
+
+    /* Phase 8: dump last firmware-reject reason. Populated by
+     * control_check_response_header whenever a SET_CONTEXT_INFO /
+     * CHANGE_STATUS / similar RPC returns a non-zero major_status.
+     * Cleared on kernel boot. */
+    if (argc >= 2 && strcmp(argv[1], "last_err") == 0) {
+        extern volatile uint32_t hailo_control_last_err_major;
+        extern volatile uint32_t hailo_control_last_err_minor;
+        extern volatile uint32_t hailo_control_last_err_opcode;
+        shell_printf("hailo: last_err major=0x%08x minor=0x%08x "
+                     "opcode_echo=0x%08x\n",
+                     hailo_control_last_err_major,
+                     hailo_control_last_err_minor,
+                     hailo_control_last_err_opcode);
+        return 0;
+    }
+
     /* Default: one-line status. */
     shell_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
     return 0;
