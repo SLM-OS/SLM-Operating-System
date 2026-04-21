@@ -682,16 +682,23 @@ int xhci_hcd_device_open(struct usb_device *dev)
     memset(&cmd, 0, sizeof(cmd));
     cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
     cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
-    /* control DW, bit 9 = BSR (Block Set Address Request). */
+    /* control DW, bit 9 = BSR (Block Set Address Request).
+     *
+     * Jetson nano-2 experiment: use BSR=0 so the controller performs
+     * its own USB SET_ADDRESS transaction during ADDRESS_DEVICE. The
+     * current BSR=1 path reaches the first software-driven
+     * GET_DESCRIPTOR(device, 8) but dies on the Setup Stage every
+     * time; this tests whether letting xHCI own the address phase
+     * produces a cleaner EP0 baseline for the root hub.
+     */
     cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
-                   (1u << 9) |
                    ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
     if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
         cc != XHCI_CC_SUCCESS) {
-        WARN("xhci: ADDRESS_DEVICE(BSR=1) cc=%u", cc);
+        WARN("xhci: ADDRESS_DEVICE(BSR=0) cc=%u", cc);
         goto err_slot;
     }
-    INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=1)",
+    INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=0)",
          slot, (unsigned)dev->speed, d->root_port);
 
     dev->hcd_private = d;
