@@ -42,7 +42,11 @@ local function subhead(s) P("  -- " .. s) end
 -- under dofile / lua scripts; treat it defensively in case the host
 -- shell passes no args at all.
 local hef_path = (arg and arg[1]) or "/mnt/files/mobilenet_v1.hef"
-local bench_iters = tonumber((arg and arg[2]) or 100) or 100
+-- Negative or non-numeric bench_iters collapses to 0 (skip benchmark)
+-- rather than silently producing a loop that never executes but still
+-- prints a "Total: -500 iterations" summary line.
+local bench_iters = math.max(0, math.floor(
+    tonumber((arg and arg[2]) or 100) or 100))
 
 header("SLM-OS Hailo NPU Demo")
 note("Target device: hailo-8L NPU (AI HAT+ on Pi 5)")

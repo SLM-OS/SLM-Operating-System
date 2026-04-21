@@ -2033,6 +2033,15 @@ extern uint32_t hailo_backend_slots_max(void);
  * uint32_t per struct vfs_entry_info. */
 #define LUA_HAILO_HEF_MAX_BYTES (64u * 1024u * 1024u)
 
+/* Hard upper bound on a single tensor (input or output). HEFs declare
+ * per-pad shapes, the parser multiplies them into cfg.input_bytes /
+ * cfg.output_bytes, and slm.hailo.infer sizes its output buffer from
+ * that. 16 MB covers every realistic classifier / detector we care
+ * about (MobileNetV1 input = 150 KB, segmentation outputs ≈ 4 MB)
+ * without letting a malformed HEF produce a uint32_t wrap in
+ * (expected_out + 4095) or a giant pmm_alloc_pages request. */
+#define LUA_HAILO_TENSOR_MAX_BYTES (16u * 1024u * 1024u)
+
 /* Hailo-8L inference tensors are INT8; matches the dtype hailo_backend_run
  * asserts before submission. */
 #ifndef INF_DTYPE_INT8
@@ -2109,12 +2118,18 @@ static int l_hailo_infer(lua_State *L)
         lua_pushnil(L); return 1;
     }
     if (in_len != (size_t)expected_in) { lua_pushnil(L); return 1; }
-    if (expected_out == 0)             { lua_pushnil(L); return 1; }
+    if (expected_out == 0
+     || expected_out > LUA_HAILO_TENSOR_MAX_BYTES
+     || expected_in  > LUA_HAILO_TENSOR_MAX_BYTES) {
+        lua_pushnil(L); return 1;
+    }
 
     /* Output tensor buffer. Sized to the model's declared output_bytes;
      * PMM-allocated so we never strain the 16 KB task stack. Freed
-     * before return regardless of outcome. */
-    size_t out_pages = (expected_out + 4095) / 4096;
+     * before return regardless of outcome. expected_out is bounded by
+     * LUA_HAILO_TENSOR_MAX_BYTES above, so (expected_out + 4095)
+     * cannot wrap in uint32_t. */
+    size_t out_pages = ((size_t)expected_out + 4095) / 4096;
     uint8_t *out_buf = (uint8_t *)pmm_alloc_pages(out_pages);
     if (!out_buf) { lua_pushnil(L); return 1; }
 

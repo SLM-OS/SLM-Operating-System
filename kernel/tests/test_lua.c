@@ -1281,37 +1281,6 @@ static void test_slm_hailo_load_missing_file(void)
 }
 
 /*
- * Test: slm.hailo.load enforces a hard size ceiling. Stage a file
- * larger than the 64 MB LUA_HAILO_HEF_MAX_BYTES cap — load must
- * reject it without computing (info.size + 4095) which would wrap
- * uint32_t and corrupt the pages_needed calculation. We can't easily
- * stage a >64 MB file on LittleFS in a test, so instead verify the
- * check is actually present by observing load returns nil for a path
- * we haven't staged (proves the size guard path is reachable — if
- * load ever skipped the stat check, this would regress).
- *
- * True overflow-boundary coverage lives in the C-side Hailo tests;
- * this test pins the Lua-observable behavior.
- */
-static void test_slm_hailo_load_size_guard_contract(void)
-{
-    lua_State *L = lua_slm_newstate();
-    TEST_ASSERT_NOT_NULL(L);
-
-    const char *code =
-        "-- A path that definitely won't exist on LittleFS. The test\n"
-        "-- suite never stages a 64 MB+ file, so this is the closest\n"
-        "-- we can get without manipulating VFS state from Lua.\n"
-        "local h = slm.hailo.load('/mnt/files/huge.hef')\n"
-        "assert(h == nil, 'non-existent file should return nil')";
-
-    int result = lua_slm_dostring(L, code);
-    TEST_ASSERT_EQUAL_INT(0, result);
-
-    lua_slm_close(L);
-}
-
-/*
  * Test: slm.hailo.load argument validation — path must be a string.
  * luaL_checkstring raises on nil/bool/table/function; numbers are silently
  * coerced per Lua semantics (so slm.hailo.load(42) is legal and equivalent
@@ -3027,7 +2996,6 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_hailo_namespace);
     RUN_TEST(test_slm_hailo_status_shape);
     RUN_TEST(test_slm_hailo_load_missing_file);
-    RUN_TEST(test_slm_hailo_load_size_guard_contract);
     RUN_TEST(test_slm_hailo_load_bad_args);
     RUN_TEST(test_slm_hailo_infer_bad_handle);
     RUN_TEST(test_slm_hailo_infer_bad_args);
