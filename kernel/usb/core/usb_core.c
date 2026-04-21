@@ -654,38 +654,64 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
     if (dev == NULL || active_hcd == NULL)
         return -1;
 
-    if (do_root_reset && active_hcd->port_reset &&
-        active_hcd->port_reset(dev->port) != 0) {
-        WARN("usb_core: port_reset failed");
-        return -1;
-    }
-    dev->state = USB_STATE_DEFAULT;
-
-    bool device_opened = false;
-    if (active_hcd->device_open) {
-        if (active_hcd->device_open(dev) != 0) {
-            WARN("usb_core: device_open failed");
-            return -1;
-        }
-        device_opened = true;
-    }
-
     int n;
     int rc;
+    bool device_opened = false;
 
     /*
-     * Step 3: read the first 8 bytes of the device descriptor. Some
-     * devices lie about bMaxPacketSize0 until they've seen the first
-     * IN — Linux does this same two-step for the same reason.
+     * Some devices, especially hubs inherited across kexec, do not
+     * answer the very first 8-byte device-descriptor read cleanly even
+     * after a successful root-port reset. Mirror Linux's more defensive
+     * initial-descriptor strategy with a small reopen/retry loop before
+     * giving up on enumeration entirely.
      */
-    uint8_t dd_stub[8];
-    n = usb_get_descriptor(dev, USB_DT_DEVICE, 0, dd_stub, 8);
-    if (n < 8) {
-        WARN("usb_core: short GET_DESCRIPTOR(device, 8) n=%d", n);
-        goto err_close;
+    for (unsigned attempt = 0; attempt < 3; attempt++) {
+        if (do_root_reset && active_hcd->port_reset &&
+            active_hcd->port_reset(dev->port) != 0) {
+            WARN("usb_core: port_reset failed");
+            return -1;
+        }
+        dev->state = USB_STATE_DEFAULT;
+
+        if (active_hcd->device_open) {
+            if (active_hcd->device_open(dev) != 0) {
+                WARN("usb_core: device_open failed");
+                return -1;
+            }
+            device_opened = true;
+        }
+
+        /* Give the freshly reset device a moment to settle before the
+         * first EP0 IN transfer. */
+        uint64_t settle_start = timer_get_count();
+        uint64_t settle_ticks = timer_get_frequency() / 10; /* 100 ms */
+        while (timer_get_count() - settle_start < settle_ticks) { }
+
+        /*
+         * Step 3: read the first 8 bytes of the device descriptor. Some
+         * devices lie about bMaxPacketSize0 until they've seen the first
+         * IN — Linux does this same two-step for the same reason.
+         */
+        uint8_t dd_stub[8];
+        n = usb_get_descriptor(dev, USB_DT_DEVICE, 0, dd_stub, 8);
+        if (n >= 8) {
+            /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
+            dev->dev_desc.bMaxPacketSize0 = dd_stub[7];
+            goto got_initial_descriptor;
+        }
+
+        WARN("usb_core: short GET_DESCRIPTOR(device, 8) n=%d (attempt %u/3)",
+             n, attempt + 1);
+
+        if (device_opened && active_hcd->device_close) {
+            active_hcd->device_close(dev);
+            device_opened = false;
+        }
     }
-    /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
-    dev->dev_desc.bMaxPacketSize0 = dd_stub[7];
+
+    goto err_close;
+
+got_initial_descriptor:
 
     /* Step 4: assign address 1 (single-device policy). */
     rc = usb_control_msg(dev,
