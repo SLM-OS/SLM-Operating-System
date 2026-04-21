@@ -1232,6 +1232,7 @@ bool xhci_dump_info(void)
                 (unsigned)bar2_r32(0),
                 (unsigned)bar2_r32(XUSB_BAR2_ARU_SMI_ARU_FW_SCRATCH_DATA0));
     xhci_dump_port_state();
+    xhci_dump_device_state();
     return true;
 }
 

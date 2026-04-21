@@ -180,6 +180,29 @@ static const char *xhci_speed_str(enum usb_speed speed)
     return "?";
 }
 
+static const char *xhci_slot_state_str(uint32_t state)
+{
+    switch (state) {
+    case 0: return "disabled";
+    case 1: return "default";
+    case 2: return "addressed";
+    case 3: return "configured";
+    default: return "?";
+    }
+}
+
+static const char *xhci_ep_state_str(uint32_t state)
+{
+    switch (state & XHCI_EP_DW0_STATE_MASK) {
+    case 0: return "disabled";
+    case 1: return "running";
+    case 2: return "halted";
+    case 3: return "stopped";
+    case 4: return "error";
+    default: return "?";
+    }
+}
+
 static bool xhci_stale_signature_changed(uint32_t initial, uint32_t current)
 {
     /*
@@ -424,6 +447,78 @@ void xhci_dump_port_state(void)
                     decoded ? 1u : 0u,
                     xhci_speed_str(speed),
                     p == xhci_active_port ? "  <active>" : "");
+    }
+}
+
+void xhci_dump_device_state(void)
+{
+    bool cz = xhci_caps_cached.ctx_64;
+
+    for (unsigned i = 0; i < sizeof(xhci_dev_pool) / sizeof(xhci_dev_pool[0]); i++) {
+        struct xhci_device *d = &xhci_dev_pool[i];
+        if (!d->valid)
+            continue;
+
+        uart_printf("  dev[%u]: slot=%u root_port=%u dev_ctx=%p input_ctx=%p\r\n",
+                    i, (unsigned)d->slot_id, (unsigned)d->root_port,
+                    d->dev_ctx, d->input_ctx);
+
+        if (d->dev_ctx != NULL) {
+            uint32_t slot0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
+            uint32_t slot1 = *xhci_dev_slot_dw(d->dev_ctx, 1);
+            uint32_t slot2 = *xhci_dev_slot_dw(d->dev_ctx, 2);
+            uint32_t slot3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
+            uint32_t ep00  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+            uint32_t ep01  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
+            uint32_t ep02  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+            uint32_t ep03  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+            uint32_t ep04  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 4, cz);
+            uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
+            uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
+            uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
+            uint32_t root_port = (slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+            uint32_t addr = slot3 & XHCI_SLOT_DW3_ADDR_MASK;
+            uint32_t state = (slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT;
+            uint32_t ep0_state = ep00 & XHCI_EP_DW0_STATE_MASK;
+            uint32_t ep0_type = (ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT;
+            uint32_t ep0_mps = (ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT;
+            uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
+            uint32_t ep0_dcs = ep02 & 0x1U;
+
+            uart_printf("    slotctx route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+                        " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x\r\n",
+                        (unsigned)route, (unsigned)speed, (unsigned)ctxent,
+                        (unsigned)root_port, (unsigned)addr,
+                        xhci_slot_state_str(state),
+                        (unsigned)slot0, (unsigned)slot1,
+                        (unsigned)slot2, (unsigned)slot3);
+            uart_printf("    ep0ctx state=%s type=%u mps=%u tr=0x%llx dcs=%u avg=%u"
+                        " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x\r\n",
+                        xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
+                        (unsigned)ep0_mps, (unsigned long long)ep0_tr,
+                        (unsigned)ep0_dcs,
+                        (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+                        (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+                        (unsigned)ep03, (unsigned)ep04);
+        }
+
+        if (d->input_ctx != NULL) {
+            uint32_t add = *xhci_in_control_dw(d->input_ctx, 1);
+            uint32_t slot0 = *xhci_in_slot_dw(d->input_ctx, 0, cz);
+            uint32_t slot1 = *xhci_in_slot_dw(d->input_ctx, 1, cz);
+            uint32_t ep00  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 0, cz);
+            uint32_t ep01  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 1, cz);
+            uint32_t ep02  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 2, cz);
+            uint32_t ep03  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 3, cz);
+            uint32_t ep04  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 4, cz);
+
+            uart_printf("    inputctx add=0x%08x slot_dw0=0x%08x slot_dw1=0x%08x"
+                        " ep0_dw0=0x%08x ep0_dw1=0x%08x ep0_dw2=0x%08x"
+                        " ep0_dw3=0x%08x ep0_dw4=0x%08x\r\n",
+                        (unsigned)add, (unsigned)slot0, (unsigned)slot1,
+                        (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+                        (unsigned)ep03, (unsigned)ep04);
+        }
     }
 }
 

@@ -118,6 +118,7 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt);
 bool xhci_decode_portsc(uint32_t portsc, bool *connected,
                         enum usb_speed *speed);
 void xhci_dump_port_state(void);
+void xhci_dump_device_state(void);
 
 /* -------------------------------------------------------------------------- */
 /* HCD op table — defined in xhci.c, ops split across .c files                 */
