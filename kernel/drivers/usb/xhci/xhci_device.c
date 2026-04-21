@@ -305,6 +305,27 @@ static bool xhci_stale_port_detached_in_linux(uint32_t portsc, bool connected,
            speed == USB_SPEED_HIGH;
 }
 
+static bool xhci_stale_port_enabled_inherited(uint32_t portsc, bool connected,
+                                              enum usb_speed speed)
+{
+    /*
+     * Less-destructive Linux-side cleanup (for example authorized=0)
+     * can leave the pre-kexec device still physically present and the
+     * root port fully enabled at USB2 speed, without the poisoned
+     * connected-disabled 0x0c0006e1 state from usb-device remove.
+     *
+     * Treat that as a fresh enumeration candidate for experimentation:
+     * it gives SLM-OS a live high-speed link to work with instead of
+     * forcing the old unplug/replug path up front.
+     */
+    if (!connected || !(portsc & XHCI_PORTSC_PED) ||
+        (portsc & XHCI_PORTSC_RW1CS_MASK))
+        return false;
+
+    return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
+           speed == USB_SPEED_HIGH;
+}
+
 static bool xhci_connected_disabled_port(uint32_t portsc)
 {
     bool connected = false;
@@ -418,6 +439,20 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = false;
         xhci_force_connected_disabled_reset = true;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_enabled_inherited(portsc, c, s)) {
+        INFO("xhci: stale port on PORTSC[%u] is already enabled at USB2 speed "
+             "(0x%08x) — attempting direct enumeration",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
