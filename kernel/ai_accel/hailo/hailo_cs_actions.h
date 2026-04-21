@@ -199,6 +199,37 @@ struct hailo_cs_act_deactivate_cfg_channel {
 _Static_assert(sizeof(struct hailo_cs_act_deactivate_cfg_channel) == 2,
                "deactivate_cfg_channel body must be 2 bytes");
 
+/* REPEATED_ACTION header — the 3-byte block that follows the 5-byte
+ * common_action_header when an action is of type REPEATED_ACTION.
+ * Contents:
+ *   count: how many consecutive sub-action bodies follow (1..255).
+ *   last_executed: firmware-tracked progress counter; set to 0 on
+ *     emission (firmware overwrites as it processes each sub-body).
+ *   sub_action_type: action_type of the sub-bodies, with the bodies
+ *     laid out back-to-back with NO interleaved common_action_headers.
+ *
+ * Layout on the wire (per v4.23 context_switch_defs.h:146-187):
+ *   [0] common_action_header (5 B, action_type = REPEATED_ACTION)
+ *   [5] repeated_action_header {
+ *         count (u8), last_executed (u8), sub_action_type (u8)
+ *       }
+ *   [8..] N × <sub-action body> (each sized to its action_type's
+ *         body struct; no per-body headers)
+ *
+ * HailoRT uses REPEATED_ACTION in PRELIMINARY on Hailo-8L to wrap
+ * AddCcwBurst sub-actions (sub_action_type = FETCH_CCW_BURSTS, body
+ * = hailo_cs_act_fetch_ccw_bursts). Direct FETCH_CCW_BURSTS gets
+ * rejected there with CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_
+ * NOT_SUPPORTED; the REPEATED_ACTION-wrapped form is accepted. */
+struct hailo_cs_repeated_action_header {
+    uint8_t count;
+    uint8_t last_executed;
+    uint8_t sub_action_type;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_repeated_action_header) == 3,
+               "repeated_action_header must be 3 bytes");
+
 /* -------------------------------------------------------------------------- */
 /* Compute-context actions (DYNAMIC)                                            */
 /* -------------------------------------------------------------------------- */
