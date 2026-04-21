@@ -104,6 +104,7 @@ cooperative tasks across the available CPUs.
 ```
 slm> lua /mnt/files/demo_hailo.lua
 slm> lua /mnt/files/demo_hailo.lua /mnt/files/mobilenet_v1.hef
+slm> lua /mnt/files/demo_hailo.lua /mnt/files/mobilenet_v1.hef 500
 ```
 
 Walks through the Hailo-8L AI HAT+ bring-up entirely from Lua:
@@ -119,7 +120,12 @@ Walks through the Hailo-8L AI HAT+ bring-up entirely from Lua:
    returns the raw output tensor as a Lua string. The script probes a
    handful of common input sizes (1×1, 28×28, 224×224, 224×224×3, etc.)
    until it finds one the loaded model accepts.
-4. **Report** — prints an INT8 argmax of the first output chunk plus a
+4. **Benchmark** — runs the inference in a loop and prints rolling
+   throughput every ~10 % of iterations, then a summary with total
+   FPS and latency percentiles (p50 / p95 / p99, plus min / max / avg).
+   Default is 100 iterations; pass an integer as the second argument
+   to override (use `0` to skip the benchmark entirely).
+5. **Report** — prints an INT8 argmax of the first output chunk plus a
    16-byte hexdump so the reviewer sees actual NPU output, not just a
    length count.
 
@@ -130,8 +136,9 @@ script runs everywhere but only exercises hardware when present.
 
 The default HEF path is `/mnt/files/mobilenet_v1.hef`; stage a
 different compiled HEF with the shell's `write` command and pass it
-as the first script argument (e.g.,
-`lua /mnt/files/demo_hailo.lua /mnt/files/my_model.hef`).
+as the first script argument. The optional second argument sets the
+benchmark iteration count (e.g., `lua /mnt/files/demo_hailo.lua
+/mnt/files/my_model.hef 500`).
 
 ## Demo Walkthrough
 

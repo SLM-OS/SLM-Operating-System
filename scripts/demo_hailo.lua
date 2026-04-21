@@ -14,10 +14,13 @@
 -- can live alongside the other demos without platform-specific shell
 -- routing.
 --
--- Usage:  lua /mnt/files/demo_hailo.lua [hef-path]
+-- Usage:  lua /mnt/files/demo_hailo.lua [hef-path [iterations]]
 --
--- hef-path defaults to /mnt/files/mobilenet_v1.hef — supply a different
--- path (or `nil`) to load any other compiled HEF staged on the VFS.
+-- hef-path  defaults to /mnt/files/mobilenet_v1.hef — supply a different
+--           path to load any other compiled HEF staged on the VFS.
+-- iterations  defaults to 100 — number of bench loop passes. 0 skips the
+--             benchmark and only runs a single inference. A real-world
+--             capstone demo uses ≥500 for meaningful percentiles.
 
 local P = slm.print
 local yield = slm.yield
@@ -36,6 +39,7 @@ local function subhead(s) P("  -- " .. s) end
 -- under dofile / lua scripts; treat it defensively in case the host
 -- shell passes no args at all.
 local hef_path = (arg and arg[1]) or "/mnt/files/mobilenet_v1.hef"
+local bench_iters = tonumber((arg and arg[2]) or 100) or 100
 
 header("SLM-OS Hailo NPU Demo")
 note("Target device: hailo-8L NPU (AI HAT+ on Pi 5)")
@@ -160,7 +164,70 @@ if #out_str >= 2 then
 end
 
 -- ------------------------------------------------------------------
--- Step 4: closing summary
+-- Step 4: benchmark loop — live FPS / latency percentiles
+-- ------------------------------------------------------------------
+if bench_iters > 0 then
+    header(string.format("4. Benchmark — %d inferences", bench_iters))
+    note("Running back-to-back inferences with slm.hailo.infer()")
+    note("Rolling stats printed every 10 iterations.")
+    note("")
+
+    local input = string.rep("\0", in_size)
+    local samples = {}
+    local t_start = slm.uptime()
+    local t_last_print = t_start
+    local last_printed_i = 0
+    local errors = 0
+    local print_every = math.max(1, math.floor(bench_iters / 10))
+
+    for i = 1, bench_iters do
+        local t0 = slm.uptime()
+        local out = slm.hailo.infer(handle, input)
+        local t1 = slm.uptime()
+        if out == nil then
+            errors = errors + 1
+        else
+            samples[#samples + 1] = t1 - t0
+        end
+        if i % print_every == 0 or i == bench_iters then
+            local window_ms = math.max(1, t1 - t_last_print)
+            local window_iters = i - last_printed_i
+            local fps = math.floor((window_iters * 1000) / window_ms)
+            P(string.format("    [%4d/%d]  window: %d iters in %d ms  (%d FPS)",
+                i, bench_iters, window_iters, window_ms, fps))
+            t_last_print = t1
+            last_printed_i = i
+        end
+    end
+
+    local t_end = slm.uptime()
+    local total_ms = t_end - t_start
+    note("")
+    subhead("Benchmark summary:")
+    note(string.format("  Total:         %d iterations in %d ms",
+        bench_iters, total_ms))
+    note(string.format("  Successful:    %d  (errors: %d)",
+        #samples, errors))
+    if total_ms > 0 then
+        note(string.format("  Throughput:    %d FPS",
+            math.floor((#samples * 1000) / total_ms)))
+    end
+    if #samples > 0 then
+        table.sort(samples)
+        local sum = 0
+        for _, v in ipairs(samples) do sum = sum + v end
+        local n = #samples
+        local p50 = samples[math.max(1, math.floor(n * 0.50))]
+        local p95 = samples[math.max(1, math.floor(n * 0.95))]
+        local p99 = samples[math.max(1, math.floor(n * 0.99))]
+        note(string.format("  Latency (ms):  min=%d p50=%d p95=%d p99=%d max=%d avg=%d",
+            samples[1], p50, p95, p99, samples[n],
+            math.floor(sum / n)))
+    end
+end
+
+-- ------------------------------------------------------------------
+-- Step 5: closing summary
 -- ------------------------------------------------------------------
 header("Demo Complete")
 note("Hailo NPU path exercised from Lua:")
