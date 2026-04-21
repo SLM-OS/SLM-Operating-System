@@ -2014,21 +2014,24 @@ static int l_telnetd_kick(lua_State *L) {
  * here.
  * ========================================================================== */
 
-/* Backend-specific helper exposed by kernel/inference/inference_device_hailo.c.
+/* Backend-specific helpers exposed by kernel/inference/inference_device_hailo.c.
  * Queries the loaded model's input/output tensor sizes (in bytes) by
- * handle. Returns 0 (HAILO_OK) on success, <0 otherwise. Declared
- * extern-at-use-site matching the existing hailo_backend_* test
- * helpers pattern (see kernel/tests/test_hailo.c:35). */
+ * handle, the current slot-in-use count, and the static slot cap.
+ * Declared extern-at-use-site matching the existing hailo_backend_*
+ * test helpers pattern (see kernel/tests/test_hailo.c:35). */
 extern int hailo_backend_model_sizes(int32_t h,
                                      uint32_t *in_bytes,
                                      uint32_t *out_bytes);
 extern uint32_t hailo_backend_in_use_slots(void);
+extern uint32_t hailo_backend_slots_max(void);
 
-/* Private to the Lua Hailo bindings. Mirrors inference_device_hailo.c's
- * HAILO_MAX_MODELS cap so slm.hailo.status() can report the hard limit
- * without adding a fifth extern. Update both together if the backend
- * ever raises the cap. */
-#define LUA_HAILO_SLOTS_MAX 4u
+/* Hard upper bound on HEF file size the load path will accept. HEFs
+ * for Hailo-8/8L top out at a few MB (MobileNetV1 ≈ 4 MB, larger
+ * classifiers ≈ 16 MB); 64 MB is well above any realistic HEF and
+ * well below the uint32 + size_t arithmetic danger zone. Guards
+ * against (info.size + 4095) wrapping in uint32 — info.size is
+ * uint32_t per struct vfs_entry_info. */
+#define LUA_HAILO_HEF_MAX_BYTES (64u * 1024u * 1024u)
 
 /* Hailo-8L inference tensors are INT8; matches the dtype hailo_backend_run
  * asserts before submission. */
@@ -2057,15 +2060,18 @@ static int l_hailo_load(lua_State *L)
 
     struct vfs_entry_info info;
     if (vfs_stat_path(resolved, &info) != 0
-     || info.type != 0 || info.size == 0) {
+     || info.type != 0 || info.size == 0
+     || info.size > LUA_HAILO_HEF_MAX_BYTES) {
         lua_pushnil(L); return 1;
     }
 
     /* PMM page-aligned allocation matching slm.model_load's pattern.
      * HEF files on the VFS are a few KB to several MB; this is a
      * transient staging buffer that the backend copies into its own
-     * slot-owned tensors, so we free it immediately after load. */
-    size_t pages_needed = (info.size + 4095) / 4096;
+     * slot-owned tensors, so we free it immediately after load.
+     * info.size is already bounded by LUA_HAILO_HEF_MAX_BYTES above
+     * so (info.size + 4095) cannot wrap in uint32_t. */
+    size_t pages_needed = ((size_t)info.size + 4095) / 4096;
     uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
     if (!buf) { lua_pushnil(L); return 1; }
 
@@ -2112,19 +2118,25 @@ static int l_hailo_infer(lua_State *L)
     uint8_t *out_buf = (uint8_t *)pmm_alloc_pages(out_pages);
     if (!out_buf) { lua_pushnil(L); return 1; }
 
+    /* shape[0] = 0 when the tensor exceeds uint16 elements. The Hailo
+     * backend's run path consults n_elems for rank-1 INT8 tensors,
+     * not shape[] — and a 150 KB MobileNet input (224*224*3 = 150528)
+     * doesn't fit a uint16_t. Use 0 as an explicit sentinel meaning
+     * "consult n_elems" rather than silently saturating at 0xFFFF
+     * (which would be a plausible-but-wrong shape). */
     inference_tensor_t in_t = {
         .data    = (void *)in_bytes,   /* inference_run does not mutate in */
         .n_elems = (uint32_t)in_len,
         .dtype   = INF_DTYPE_INT8,
         .rank    = 1,
-        .shape   = { (uint16_t)(in_len > 0xFFFFu ? 0xFFFFu : in_len), 0, 0, 0 },
+        .shape   = { (uint16_t)(in_len > 0xFFFFu ? 0u : in_len), 0, 0, 0 },
     };
     inference_tensor_t out_t = {
         .data    = out_buf,
         .n_elems = expected_out,
         .dtype   = INF_DTYPE_INT8,
         .rank    = 1,
-        .shape   = { (uint16_t)(expected_out > 0xFFFFu ? 0xFFFFu : expected_out), 0, 0, 0 },
+        .shape   = { (uint16_t)(expected_out > 0xFFFFu ? 0u : expected_out), 0, 0, 0 },
     };
 
     int rc = inference_run(dev, (int32_t)handle, &in_t, &out_t);
@@ -2153,7 +2165,7 @@ static int l_hailo_status(lua_State *L)
         lua_setfield(L, -2, "name");
         lua_pushinteger(L, (lua_Integer)hailo_backend_in_use_slots());
         lua_setfield(L, -2, "slots_in_use");
-        lua_pushinteger(L, (lua_Integer)LUA_HAILO_SLOTS_MAX);
+        lua_pushinteger(L, (lua_Integer)hailo_backend_slots_max());
         lua_setfield(L, -2, "slots_max");
     }
     return 1;

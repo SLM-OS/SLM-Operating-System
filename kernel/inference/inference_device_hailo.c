@@ -880,17 +880,39 @@ void hailo_backend_get_boundary_iovas_for_tests(
  * to size a tensor buffer against a loaded model without going
  * through inference_run. Returns HAILO_OK and fills both out-params
  * on success, HAILO_ERR_INVAL for an out-of-range / unloaded
- * handle. Safe to call with either pointer NULL (skips that output). */
+ * handle. Safe to call with either pointer NULL (skips that output).
+ *
+ * Takes slots_lock so a concurrent hailo_backend_free_model can't
+ * zero cfg.input_bytes / cfg.output_bytes between our in_use check
+ * and the reads. Matches hailo_backend_in_use_slots' locking model
+ * (writers mutate slot state under slots_lock, readers that care
+ * about consistency must take it too). */
 int hailo_backend_model_sizes(inference_model_handle_t h,
                               uint32_t *in_bytes,
                               uint32_t *out_bytes)
 {
     if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return HAILO_ERR_INVAL;
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     struct hailo_model_slot *slot = &slots[h - 1];
-    if (!slot->in_use) return HAILO_ERR_INVAL;
-    if (in_bytes)  *in_bytes  = slot->cfg.input_bytes;
-    if (out_bytes) *out_bytes = slot->cfg.output_bytes;
+    if (!slot->in_use) {
+        spin_unlock_irqrestore(&slots_lock, flags);
+        return HAILO_ERR_INVAL;
+    }
+    uint32_t in  = slot->cfg.input_bytes;
+    uint32_t out = slot->cfg.output_bytes;
+    spin_unlock_irqrestore(&slots_lock, flags);
+    if (in_bytes)  *in_bytes  = in;
+    if (out_bytes) *out_bytes = out;
     return HAILO_OK;
+}
+
+/* Public helper: report the maximum number of concurrent models the
+ * backend can hold. Static at compile time today (HAILO_MAX_MODELS),
+ * but exposed as a function so callers (slm.hailo.status) don't need
+ * to duplicate the constant. */
+uint32_t hailo_backend_slots_max(void)
+{
+    return (uint32_t)HAILO_MAX_MODELS;
 }
 
 void hailo_backend_reset_slots_for_tests(void)

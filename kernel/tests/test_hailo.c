@@ -40,6 +40,7 @@ extern void hailo_backend_get_boundary_iovas_for_tests(
 extern int hailo_backend_model_sizes(inference_model_handle_t h,
                                      uint32_t *in_bytes,
                                      uint32_t *out_bytes);
+extern uint32_t hailo_backend_slots_max(void);
 #include "test_harness.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -5879,6 +5880,18 @@ static void test_inf_hailo_model_sizes_tolerates_null_outptrs(void)
     TEST_ASSERT_EQUAL_UINT32(32u, out_bytes);
 }
 
+/* Phase 7: hailo_backend_slots_max reports the compile-time cap.
+ * Exposed so slm.hailo.status can report slots_max without duplicating
+ * HAILO_MAX_MODELS in lua_slm.c. The value is static (currently 4) —
+ * if someone ever bumps the cap they must update both the #define and
+ * any Lua-facing test expectations in lockstep. */
+static void test_inf_hailo_slots_max_matches_define(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+    TEST_ASSERT_EQUAL_UINT32(4u, hailo_backend_slots_max());
+}
+
 /* #179 regression: load_model must drive the context-switch RPC
  * sequence (RESET → SET_NETWORK_GROUP_HEADER → 4 × SET_CONTEXT_INFO
  * → ENABLED). Verify the count of CORE-CPU doorbells rung.
@@ -6905,6 +6918,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_inf_hailo_model_sizes_rejects_invalid_handle);
     RUN_TEST(test_inf_hailo_model_sizes_rejects_freed_slot);
     RUN_TEST(test_inf_hailo_model_sizes_tolerates_null_outptrs);
+    RUN_TEST(test_inf_hailo_slots_max_matches_define);
     RUN_TEST(test_inf_hailo_load_rings_context_switch_sequence);
     RUN_TEST(test_inf_hailo_load_releases_slot_on_failure);
     RUN_TEST(test_inf_hailo_load_reuses_slot_after_free);

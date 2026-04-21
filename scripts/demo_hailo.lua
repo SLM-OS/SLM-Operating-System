@@ -4,8 +4,11 @@
 --
 --   1. Probe the device via slm.hailo.status()
 --   2. Load a HEF binary from the VFS via slm.hailo.load(path)
---   3. Run a single inference via slm.hailo.infer(handle, input)
---   4. Report slot accounting after the model is resident
+--   3. Run a single inference via slm.hailo.infer(handle, input) —
+--      probes common input sizes + prints argmax / hexdump preview
+--   4. Benchmark loop — rolling throughput + p50/p95/p99 latency
+--   5. Release the slot via slm.hailo.unload(handle)
+--   6. Closing summary
 --
 -- Every call degrades safely when the Hailo backend is not registered
 -- (QEMU, Pi 5 without the AI HAT+, other platforms) — status() reports
@@ -169,7 +172,7 @@ end
 if bench_iters > 0 then
     header(string.format("4. Benchmark — %d inferences", bench_iters))
     note("Running back-to-back inferences with slm.hailo.infer()")
-    note("Rolling stats printed every 10 iterations.")
+    note("Rolling stats printed every ~10 % of iterations.")
     note("")
 
     local input = string.rep("\0", in_size)

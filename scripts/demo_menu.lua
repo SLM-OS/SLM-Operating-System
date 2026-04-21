@@ -330,9 +330,13 @@ local function hailo_demo()
     end
     note("")
     subhead("Delegating to /mnt/files/demo_hailo.lua:")
-    local ok, err = pcall(dofile, "/mnt/files/demo_hailo.lua")
-    if not ok then
-        note("demo_hailo.lua raised: " .. tostring(err))
+    -- Route through shell_exec rather than Lua's built-in dofile: SLM-OS
+    -- stubs fopen to return NULL, so Lua's dofile cannot read VFS paths.
+    -- The `lua` shell command uses lua_slm_dofile internally, which reads
+    -- through the VFS layer and works on every platform.
+    local rc = slm.shell_exec("lua /mnt/files/demo_hailo.lua")
+    if rc ~= 0 then
+        note(string.format("demo_hailo.lua exit code: %d", rc))
     end
 end
 
