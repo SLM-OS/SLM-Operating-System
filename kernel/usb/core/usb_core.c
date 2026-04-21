@@ -393,6 +393,15 @@ static int usb_wait_urb(struct usb_urb *urb, uint32_t timeout_ms)
     }
     (void)usb_cancel_urb(urb);
     urb->status = USB_URB_TIMEOUT;
+    if (urb->transfer_type == USB_XFER_CONTROL) {
+        WARN("usb_core: control timeout req=0x%02x type=0x%02x "
+             "wValue=0x%04x wIndex=0x%04x wLength=%u",
+             (unsigned)urb->setup.bRequest,
+             (unsigned)urb->setup.bmRequestType,
+             (unsigned)urb->setup.wValue,
+             (unsigned)urb->setup.wIndex,
+             (unsigned)urb->setup.wLength);
+    }
     return USB_URB_TIMEOUT;
 }
 
@@ -427,6 +436,17 @@ int usb_control_msg(struct usb_device *dev,
     int status = usb_wait_urb(&urb, timeout_ms);
     if (status == USB_URB_OK || status == USB_URB_SHORT)
         return (int)urb.actual_length;
+    if (urb.transfer_type == USB_XFER_CONTROL) {
+        WARN("usb_core: control failed req=0x%02x type=0x%02x "
+             "wValue=0x%04x wIndex=0x%04x wLength=%u status=%s actual=%u",
+             (unsigned)urb.setup.bRequest,
+             (unsigned)urb.setup.bmRequestType,
+             (unsigned)urb.setup.wValue,
+             (unsigned)urb.setup.wIndex,
+             (unsigned)urb.setup.wLength,
+             usb_urb_status_str((enum usb_urb_status)status),
+             (unsigned)urb.actual_length);
+    }
     return -status;
 }
 

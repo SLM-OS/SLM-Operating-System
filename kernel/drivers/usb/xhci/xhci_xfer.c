@@ -56,6 +56,7 @@
 struct xhci_urb_slot {
     bool             in_use;
     struct usb_urb  *urb;
+    uintptr_t        first_trb_phys;
     uintptr_t        last_trb_phys;
     struct xhci_ring *ring;
     unsigned         dci;
@@ -84,8 +85,12 @@ static void xhci_urb_slot_free(struct xhci_urb_slot *s)
 static struct xhci_urb_slot *xhci_urb_slot_find_by_trb(uintptr_t trb_phys)
 {
     for (unsigned i = 0; i < XHCI_MAX_INFLIGHT_URBS; i++) {
-        if (xhci_urbs[i].in_use &&
-            xhci_urbs[i].last_trb_phys == trb_phys)
+        if (!xhci_urbs[i].in_use)
+            continue;
+        if (xhci_urbs[i].first_trb_phys <= trb_phys &&
+            trb_phys <= xhci_urbs[i].last_trb_phys &&
+            ((trb_phys - xhci_urbs[i].first_trb_phys) %
+             sizeof(struct xhci_trb) == 0))
             return &xhci_urbs[i];
     }
     return NULL;
@@ -106,6 +111,35 @@ static enum usb_urb_status xhci_cc_to_urb_status(uint8_t cc)
     case XHCI_CC_USB_TRANSACTION_ERR: return USB_URB_IO_ERROR;
     default:                         return USB_URB_IO_ERROR;
     }
+}
+
+static bool xhci_urb_is_get_descriptor(const struct usb_urb *urb)
+{
+    return urb != NULL &&
+           urb->transfer_type == USB_XFER_CONTROL &&
+           urb->setup.bmRequestType == (USB_DIR_IN | USB_TYPE_STANDARD |
+                                        USB_RECIP_DEVICE) &&
+           urb->setup.bRequest == USB_REQ_GET_DESCRIPTOR;
+}
+
+static void xhci_log_control_urb(const char *tag, const struct usb_urb *urb,
+                                 uint8_t cc, uint32_t residual)
+{
+    if (urb == NULL || urb->transfer_type != USB_XFER_CONTROL)
+        return;
+
+    INFO("xhci: %s ctrl req=0x%02x type=0x%02x wValue=0x%04x wIndex=0x%04x "
+         "wLength=%u cc=%u residual=%u actual=%u status=%d",
+         tag,
+         (unsigned)urb->setup.bRequest,
+         (unsigned)urb->setup.bmRequestType,
+         (unsigned)urb->setup.wValue,
+         (unsigned)urb->setup.wIndex,
+         (unsigned)urb->setup.wLength,
+         (unsigned)cc,
+         (unsigned)residual,
+         (unsigned)urb->actual_length,
+         (int)urb->status);
 }
 
 /* TRB builders live in xhci_trb_build.h (shared with test_xhci_xfer.c). */
@@ -150,12 +184,26 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     slot->dci            = XHCI_DCI_EP0;
     slot->requested_len  = urb->length;
 
+    if (xhci_urb_is_get_descriptor(urb)) {
+        INFO("xhci: submit ctrl GET_DESCRIPTOR type=0x%02x index=%u len=%u "
+             "addr=%u route=0x%x root_port=%u speed=%u",
+             (unsigned)(urb->setup.wValue >> 8),
+             (unsigned)(urb->setup.wValue & 0xFF),
+             (unsigned)urb->setup.wLength,
+             (unsigned)urb->dev->address,
+             (unsigned)urb->dev->route_string,
+             (unsigned)d->root_port,
+             (unsigned)urb->dev->speed);
+    }
+
     struct xhci_trb tmpl;
     struct xhci_trb *slot_trb;
 
     /* 1. Setup Stage. */
     xhci_build_setup_stage(&tmpl, &urb->setup, trt, 0);
-    if (xhci_ring_put(r, &tmpl) == NULL) goto fail;
+    slot_trb = xhci_ring_put(r, &tmpl);
+    if (slot_trb == NULL) goto fail;
+    slot->first_trb_phys = (uintptr_t)slot_trb;
 
     /* 2. Optional Data Stage. */
     if (has_data) {
@@ -165,7 +213,13 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     }
 
     /* 3. Status Stage — Direction is opposite of the Data Stage. For
-     *    a no-data control transfer it must be IN per §4.11.2.2. */
+     *    a no-data control transfer it must be IN per §4.11.2.2.
+     *
+     * Error completions may reference any TRB in the chain, not just
+     * the IOC-bearing Status Stage. Track the whole contiguous span so
+     * a cc=4 on Setup or Data still completes the URB instead of timing
+     * out in usb_wait_urb().
+     */
     bool status_in = has_data ? !data_in : true;
     xhci_build_status_stage(&tmpl, status_in, 0);
     slot_trb = xhci_ring_put(r, &tmpl);
@@ -288,9 +342,9 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
 
     struct xhci_urb_slot *slot = xhci_urb_slot_find_by_trb(trb_phys);
     if (slot == NULL) {
-        /* Could be a stale event from a cancelled URB, or an event for
-         * a TRB mid-chain (we only IOC the last TRB, so this is
-         * unexpected in Phase 3A). Log and move on. */
+        /* Could be a stale event from a cancelled URB. Control-transfer
+         * chains match any TRB in their contiguous Setup/Data/Status
+         * range; anything else is genuinely unexpected in Phase 3A. */
         INFO("xhci: unmatched transfer event trb=0x%lx cc=%u",
              (unsigned long)trb_phys, cc);
         return;
@@ -316,6 +370,9 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
                           : 0U;
         urb->actual_length = actual;
     }
+
+    if (urb->transfer_type == USB_XFER_CONTROL && cc != XHCI_CC_SUCCESS)
+        xhci_log_control_urb("event", urb, cc, residual);
 
     usb_urb_complete_fn cb = urb->complete;
     xhci_urb_slot_free(slot);
