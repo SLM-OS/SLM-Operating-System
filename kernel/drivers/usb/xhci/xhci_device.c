@@ -228,6 +228,26 @@ static bool xhci_connected_disabled_port(uint32_t portsc)
            speed == USB_SPEED_HIGH;
 }
 
+static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
+                                      const char *why)
+{
+    uint32_t change = portsc & XHCI_PORTSC_RW1CS_MASK;
+    if (!change)
+        return portsc;
+
+    uint32_t ack = (portsc & ~XHCI_PORTSC_RW1CS_MASK) | change;
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), ack);
+
+    uint64_t settle_start = timer_get_count();
+    uint64_t settle_ticks = timer_get_frequency() / 100;  /* 10 ms */
+    while (timer_get_count() - settle_start < settle_ticks) { }
+
+    uint32_t after = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+    INFO("xhci: PORTSC[%u] acked change bits for %s (0x%08x -> 0x%08x)",
+         (unsigned)pidx, why, (unsigned)portsc, (unsigned)after);
+    return after;
+}
+
 static uint8_t xhci_locate_usb2_port(void)
 {
     for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
@@ -385,6 +405,8 @@ int xhci_hcd_port_reset(uint8_t port)
     if (xhci_skip_next_port_reset ||
         (xhci_attach_state == XHCI_ATTACH_FRESH &&
          xhci_connected_disabled_port(portsc))) {
+        portsc = xhci_ack_port_changes(xhci_active_port, portsc,
+                                       "connected-disabled reuse");
         xhci_skip_next_port_reset = false;
         xhci_active_portsc = portsc;
         INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x)",
@@ -398,6 +420,7 @@ int xhci_hcd_port_reset(uint8_t port)
 
     for (unsigned attempt = 1; attempt <= 3; attempt++) {
         portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        portsc = xhci_ack_port_changes(pidx, portsc, "pre-reset cleanup");
 
         /*
          * PORTSC write discipline per §5.4.8: read-modify-write, clear the
