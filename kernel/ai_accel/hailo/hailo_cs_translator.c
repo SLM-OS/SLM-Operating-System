@@ -148,8 +148,8 @@ int hailo_cs_translate_application_header(
  * the boundary streams exposed to the host). is_input selects the
  * direction. A single-input / single-output MLP emits exactly one
  * INPUT_CHANNEL + one OUTPUT_CHANNEL on top of the BURST_CREDITS
- * reset — three actions total, 28+20+8 = 56 bytes of body plus three
- * 8-byte common headers = 80 bytes of ACTIVATION. Well under the
+ * reset — three actions total, 28+20 = 48 bytes of body plus three
+ * 5-byte common headers = 63 bytes of ACTIVATION. Well under the
  * HAILO_CS_TRANSLATE_MAX_CONTEXT_BYTES cap.
  *
  * Multi-stream HEFs (multiple inputs or outputs) require threading
@@ -190,7 +190,14 @@ static int translate_open_boundary_for_pad(
                 .dma_address      = cfg->boundary_input_desc_list_iova,
                 .desc_page_size   = cfg->boundary_desc_page_size,
                 .total_desc_count = cfg->boundary_input_total_desc_count,
-                .bytes_in_pattern = 0,
+                /* HailoRT sets bytes_in_pattern = transfer_size (periph
+                 * frame size) for boundary channels — see
+                 * vdma_edge_layer.cpp:73 in v4.23.0. For unpadded
+                 * single-row tensors (MVP) this equals core_bytes_per_
+                 * buffer; multi-row / padded tensors need the full
+                 * periph_bytes_per_buffer * periph_buffers_per_frame
+                 * product once the translator consumes that split. */
+                .bytes_in_pattern = frame,
             },
             .stream_index             = stream_index,
             .network_index            = 0,
@@ -211,6 +218,7 @@ static int translate_open_boundary_for_pad(
                  "is 0", pad->sys_index);
             return HAILO_ERR_INVAL;
         }
+        uint32_t out_frame = pad->core_bytes_per_buffer;
         struct hailo_cs_act_open_boundary_output_channel body = {
             .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
@@ -218,7 +226,9 @@ static int translate_open_boundary_for_pad(
                 .dma_address      = cfg->boundary_output_desc_list_iova,
                 .desc_page_size   = cfg->boundary_desc_page_size,
                 .total_desc_count = cfg->boundary_output_total_desc_count,
-                .bytes_in_pattern = 0,
+                /* See note on the input body above — HailoRT derives
+                 * this from the output pad's transfer_size. */
+                .bytes_in_pattern = out_frame,
             },
         };
         (void)stream_index;   /* OUTPUT body omits stream_index today. */
@@ -226,6 +236,29 @@ static int translate_open_boundary_for_pad(
             b, HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
             &body, sizeof(body));
     }
+}
+
+/* Walk pads once per direction, emitting OpenBoundary actions for
+ * pads matching `emit_inputs`. stream_index counts boundary pads
+ * per direction (0 = first input boundary, etc.). Helper for
+ * translate_activation, which calls this twice (outputs then inputs)
+ * to match HailoRT's emission order. */
+static int emit_open_boundary_pass(const struct hef_info *info,
+                                   const struct hailo_cs_translate_cfg *cfg,
+                                   bool emit_inputs,
+                                   struct hailo_cs_builder *b)
+{
+    uint8_t stream_index = 0;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *pad = &info->pads[i];
+        if (!pad->has_stream_info) continue;
+        if (pad->is_input != emit_inputs) continue;
+        int rc = translate_open_boundary_for_pad(pad, cfg,
+                                                 stream_index, b);
+        if (rc != HAILO_OK) return rc;
+        stream_index++;
+    }
+    return HAILO_OK;
 }
 
 static int translate_activation(const struct hef_info *info,
@@ -237,24 +270,16 @@ static int translate_activation(const struct hef_info *info,
                  HAILO_CS_ACT_BURST_CREDITS_TASK_RESET, NULL, 0);
     if (rc != HAILO_OK) return rc;
 
-    /* Steps 2 & 3: walk pads, emit OpenBoundary per boundary edge.
-     * stream_index counts boundary pads per direction (0 = first
-     * input boundary, 0 = first output boundary, etc.). */
-    uint8_t input_stream_index  = 0;
-    uint8_t output_stream_index = 0;
-    for (uint32_t i = 0; i < info->pad_count; i++) {
-        const struct hef_pad_info *pad = &info->pads[i];
-        if (!pad->has_stream_info) continue;   /* internal pad, skip */
-
-        uint8_t stream_idx = pad->is_input ? input_stream_index
-                                           : output_stream_index;
-        rc = translate_open_boundary_for_pad(pad, cfg, stream_idx, b);
-        if (rc != HAILO_OK) return rc;
-        if (pad->is_input) input_stream_index++;
-        else               output_stream_index++;
-    }
-
-    return HAILO_OK;
+    /* Steps 2 & 3: emit OpenBoundary per boundary edge, OUTPUT before
+     * INPUT to match HailoRT v4.23 byte-for-byte
+     * (resource_manager_builder.cpp:1059-1075 iterates
+     * get_output_layer_infos before get_input_layer_infos). The #180
+     * bisect did not prove firmware *requires* this order, but
+     * matching HailoRT removes one variable from any future
+     * regression triage. */
+    rc = emit_open_boundary_pass(info, cfg, /*emit_inputs=*/false, b);
+    if (rc != HAILO_OK) return rc;
+    return emit_open_boundary_pass(info, cfg, /*emit_inputs=*/true, b);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -317,14 +342,19 @@ static int translate_batch_switching(const struct hef_info *info,
 /* -------------------------------------------------------------------------- */
 
 /* ACTIVATE_CFG_CHANNEL binds a config stream to the VDMA channel
- * firmware will DMA-pull CCW payloads through. Followed by one
- * FETCH_CCW_BURSTS that tells firmware how many bursts to pull.
+ * firmware will DMA-pull CCW payloads through.
  *
- * For MVP we emit one FETCH_CCW_BURSTS per CCW action captured by
- * the parser; the compiler's chosen burst granularity may differ,
- * but this matches HailoRT's "one burst per write_data_ccw action"
- * convention for simple MLPs. Future multi-burst handling (e.g.
- * repeated-action compression) lives behind a follow-up.
+ * Direct FETCH_CCW_BURSTS used to follow but firmware v4.23 on
+ * Hailo-8L rejects it in PRELIMINARY with 0x402a0001 =
+ * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED — see
+ * #180 wire capture (docs/reference/hailort-v4.23.0-wire-capture-
+ * mobilenet.txt). HailoRT instead wraps AddCcwBurst sub-actions in
+ * REPEATED_ACTION on this device. Real CCW loading via that path
+ * is Phase 6.10; for now PRELIMINARY emits ACTIVATE_CFG_CHANNEL
+ * alone, which is enough to satisfy firmware's "context must contain
+ * ≥1 valid action" check. No weights are actually transferred via
+ * the context-switch path today; legacy v0/v1 HEFs go through the
+ * separate hailo_control_upload_ccw (WRITE_MEMORY) path.
  */
 static int translate_preliminary(const struct hef_info *info,
                                  const struct hailo_cs_translate_cfg *cfg,
@@ -345,21 +375,19 @@ static int translate_preliminary(const struct hef_info *info,
                                      &act, sizeof(act));
     if (rc != HAILO_OK) return rc;
 
-    /* If the HEF has CCW actions, emit a FETCH_CCW_BURSTS sized to
-     * the count. For a zero-CCW HEF (unusual; some synthetic tests)
-     * we still emit a single fetch with count=1 — firmware accepts
-     * this, and the subsequent DYNAMIC path tolerates "no weights
-     * were actually transferred". */
-    uint32_t bursts = info->ccw_action_count;
-    if (bursts == 0) bursts = 1;
-    if (bursts > UINT16_MAX) bursts = UINT16_MAX;
-
-    struct hailo_cs_act_fetch_ccw_bursts fetch = {
-        .ccw_bursts          = (uint16_t)bursts,
-        .config_stream_index = cfg->config_stream_index,
-    };
-    return hailo_cs_builder_append(b, HAILO_CS_ACT_FETCH_CCW_BURSTS,
-                                   &fetch, sizeof(fetch));
+    /* #180 bisect (2026-04-20): HailoRT v4.23 does NOT emit
+     * FETCH_CCW_BURSTS (action_type 27) directly in PRELIMINARY
+     * on Hailo-8L — wire capture against mobilenet_v1.hef shows
+     * neither `1b ff ff ff ff` nor `00 ff ff ff ff` (the alternative
+     * FETCH_CFG_CHANNEL_DESCRIPTORS path) as an action header in
+     * the PRELIMINARY context_network_data stream. Firmware rejects
+     * FETCH_CCW_BURSTS with 0x402a0001 = CONFIG_MANAGER_WRAPPER_
+     * STATUS_ACTION_TYPE_NOT_SUPPORTED. Drop the FETCH for now;
+     * adding the right CCW-load path requires HEF action parsing
+     * (REPEATED_ACTION wrappers + per-burst sub-actions per the
+     * captured layout) and is tracked separately. */
+    (void)info;
+    return HAILO_OK;
 }
 
 /* -------------------------------------------------------------------------- */

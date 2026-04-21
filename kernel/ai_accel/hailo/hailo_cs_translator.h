@@ -19,23 +19,33 @@
  *      0x40130016.
  *
  *   3. Per-type minimum actions per context (per HailoRT's
- *      fill_*_context_recipes functions, v4.23 source):
- *        ACTIVATION:      BURST_CREDITS_TASK_RESET (zero body)
+ *      fill_*_context_recipes functions, v4.23 source, plus the
+ *      hardware bisect from #180):
+ *        ACTIVATION:      BURST_CREDITS_TASK_RESET (zero body) +
+ *                         OpenBoundary OUT/IN per boundary edge
  *        BATCH_SWITCHING: DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START
- *        PRELIMINARY:     ACTIVATE_CFG_CHANNEL + FETCH_CCW_BURSTS per
- *                         distinct config channel
+ *        PRELIMINARY:     ACTIVATE_CFG_CHANNEL per distinct config
+ *                         channel. (HailoRT also wraps AddCcwBurst
+ *                         sub-actions inside REPEATED_ACTION here on
+ *                         Hailo-8L; that path is Phase 6.10. Direct
+ *                         FETCH_CCW_BURSTS is rejected with
+ *                         CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_
+ *                         NOT_SUPPORTED — see #180.)
  *        DYNAMIC:         APPLICATION_CHANGE_INTERRUPT tail marker
  *                         (for single-dynamic-context loads)
  *
- *   4. Common action header is **8 bytes** on the wire despite the
- *      reference header's #pragma pack(1). Handled transparently by
- *      hailo_cs_builder.
+ *   4. Common action header is **5 bytes** on the wire (1-byte
+ *      action_type + 4-byte time_stamp, packed). time_stamp must be
+ *      HAILO_CS_TIMESTAMP_INIT_VALUE (0xFFFFFFFF), not 0. Handled
+ *      transparently by hailo_cs_builder.
  *
- * Current scope (Phase 6.4f minimum viable):
- *  - ACTIVATION, BATCH_SWITCHING: fixed stub sequences, no HEF input.
- *  - PRELIMINARY: derived from hef_info.ccw_action_count; one
- *    ACTIVATE_CFG_CHANNEL per config channel, one FETCH_CCW_BURSTS
- *    sized from ccw_action_count.
+ * Current scope (post-#180 minimum viable):
+ *  - ACTIVATION: BURST_CREDITS_TASK_RESET + OpenBoundary OUT before IN
+ *    (HailoRT emission order).
+ *  - BATCH_SWITCHING: fixed stub sequence + ChangeBoundaryInputBatch
+ *    per input pad.
+ *  - PRELIMINARY: ACTIVATE_CFG_CHANNEL only. CCW weight loading via
+ *    REPEATED_ACTION + AddCcwBurst is Phase 6.10.
  *  - DYNAMIC: minimum tail-only marker. The full
  *    operations[].actions[] translation lives behind a follow-up;
  *    the current stub is enough to pass firmware's context-present
@@ -75,15 +85,54 @@
  * cfg override. ACTIVATION's OpenBoundaryInput/Output emitter and
  * translate_allow_input_dataflow both use these so the two ends agree.
  *
- * On Hailo-8 PCIe, channel_index is a shared 0..31 pool — both H2D
- * and D2H draw from it. The `HAILO_PCIE_DMA_SRC_CHANNELS_BITMASK =
- * 0x0000FFFF` in the reference driver only controls register layout
- * within each channel's 32-byte window (host-side regs first for
- * channels 0..15, device-side regs first for 16..31 — see
- * get_channel_regs in hailo-vdma-common.c:576). Action type (32 vs
- * 33) is what tells firmware the direction. */
+ * On Hailo-8 PCIe, firmware v4.23 enforces distinct H2D and D2H
+ * channel-index ranges: H2D ∈ [0, 15], D2H ∈ [16, 31]. HailoRT's
+ * ChannelAllocator::get_available_channel_id branches on DmaDirection
+ * and picks from the appropriate half (see
+ * hailort-v4.23.0-channel_allocator.cpp and -hailort_driver.hpp:
+ * MIN_H2D_CHANNEL_INDEX=0 / MAX_H2D=15 / MIN_D2H=16 / MAX_D2H=31).
+ * Sending a D2H OpenBoundary with a channel in [0,15] causes firmware
+ * to reject ACTIVATION with VDMA_SERVICE_STATUS_INVALID_ENGINE_INDEX
+ * (observed 2026-04-20 on pi-5-1) — the status code name is
+ * misleading; the actual failure is "channel doesn't match direction".
+ *
+ * INPUT_OFFSET=1  → channel config+1   (H2D slot; with config=1 → 2)
+ * OUTPUT_OFFSET=15 → channel config+15 (D2H slot; with config=1 → 16,
+ *                    the first valid D2H index). */
 #define HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET   1u
-#define HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET  2u
+#define HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET  15u
+
+/* Default config-stream VDMA channel. The MVP hardcodes this to 1
+ * (first non-zero H2D slot) so a single load can use channel 1 for
+ * config, channel 2 (= config+INPUT_OFFSET) for boundary input, and
+ * channel 16 (= config+OUTPUT_OFFSET) for boundary output. Lives
+ * here, not in inference_device_hailo.c, so the static_asserts
+ * below reference the same value the inference path uses. */
+#define HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL  0x01u
+
+/* Compile-time guards on the offsets above. Firmware enforces
+ *   H2D channels ∈ [HAILO_CS_PCIE_MIN_H2D, HAILO_CS_PCIE_MAX_H2D] = [0, 15]
+ *   D2H channels ∈ [HAILO_CS_PCIE_MIN_D2H, HAILO_CS_PCIE_MAX_D2H] = [16, 31]
+ * The asserts fire if anyone (a) bumps an offset past its
+ * direction's range or (b) raises the default config channel
+ * without updating both offsets. */
+#define HAILO_CS_PCIE_MIN_H2D       0u
+#define HAILO_CS_PCIE_MAX_H2D       15u
+#define HAILO_CS_PCIE_MIN_D2H       16u
+#define HAILO_CS_PCIE_MAX_D2H       31u
+
+_Static_assert(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
+                   + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET
+               <= HAILO_CS_PCIE_MAX_H2D,
+               "boundary INPUT channel must land in H2D range [0,15]");
+_Static_assert(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
+                   + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET
+               >= HAILO_CS_PCIE_MIN_D2H,
+               "boundary OUTPUT channel must land in D2H range [16,31]");
+_Static_assert(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
+                   + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET
+               <= HAILO_CS_PCIE_MAX_D2H,
+               "boundary OUTPUT channel must not exceed D2H upper bound");
 
 struct hailo_cs_translate_cfg {
     /* packed_vdma_channel_id for the config stream (the channel the

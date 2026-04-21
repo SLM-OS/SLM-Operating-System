@@ -206,9 +206,11 @@ static int pick_largest_pads(const struct hef_info *info,
 /* slots as having no context-switch resources to release.                      */
 /* -------------------------------------------------------------------------- */
 
-/* Constants shared between allocation and translate_cfg. The MVP
- * hardcodes these to match ctxsmoke's shell-command sizing on pi-5-1. */
-#define HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL  0x01u
+/* CCW + boundary page-size defaults shared between allocation and
+ * translate_cfg. The MVP hardcodes both to match ctxsmoke's
+ * shell-command sizing on pi-5-1. The matching config-VDMA-channel
+ * default lives in hailo_cs_translator.h alongside the boundary-
+ * channel offsets and their compile-time range guards. */
 #define HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE   512u
 #define HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE   4096u
 

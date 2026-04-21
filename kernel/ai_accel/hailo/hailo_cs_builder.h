@@ -2,13 +2,13 @@
  * hailo_cs_builder.h — accumulator for wire-format action bytes.
  *
  * A SET_CONTEXT_INFO RPC carries `context_network_data`: a flat
- * byte stream of [8-byte common_action_header_t][fixed-size body]
- * tuples, one per action. (The header is 8 bytes — 1-byte action_type
- * + 3 pad bytes + 4-byte time_stamp — per the v4.23 firmware wire
- * format; see hailo_cs_actions.h.) This builder accumulates those
- * bytes into a caller-owned buffer, returning the total length when
- * done. The buffer is then handed to hailo_control_set_context_info
- * (which chunks it at HAILO_CS_CONTEXT_CHUNK_MAX_BYTES internally).
+ * byte stream of [5-byte common_action_header_t][fixed-size body]
+ * tuples, one per action. (The header is 5 bytes — 1-byte action_type
+ * + 4-byte time_stamp — per the v4.23 firmware wire format; see
+ * hailo_cs_actions.h.) This builder accumulates those bytes into
+ * a caller-owned buffer, returning the total length when done. The
+ * buffer is then handed to hailo_control_set_context_info (which
+ * chunks it at HAILO_CS_CONTEXT_CHUNK_MAX_BYTES internally).
  *
  * The builder is a plain in-memory assembler — no locking, no
  * allocation. Callers provide the backing buffer; the builder
@@ -38,12 +38,13 @@ void hailo_cs_builder_init(struct hailo_cs_builder *b,
                            uint8_t *buf, size_t capacity);
 
 /*
- * Append a single action: writes an 8-byte common_action_header_t
- * (with action_type=type, pad=0, time_stamp=0) followed by body_len
- * bytes of body data. `body_len` must match the fixed size the
- * firmware expects for that action_type (see struct sizes in
- * hailo_cs_actions.h); the builder does not validate this —
- * misuse produces a malformed action that firmware will reject.
+ * Append a single action: writes a 5-byte common_action_header_t
+ * (with action_type=type, time_stamp=HAILO_CS_TIMESTAMP_INIT_VALUE)
+ * followed by body_len bytes of body data. `body_len` must match
+ * the fixed size the firmware expects for that action_type (see
+ * struct sizes in hailo_cs_actions.h); the builder does not
+ * validate this — misuse produces a malformed action that firmware
+ * will reject.
  *
  * Returns HAILO_OK on success, HAILO_ERR_INVAL on null args, or
  * HAILO_ERR_NOMEM if the append would exceed the buffer capacity.

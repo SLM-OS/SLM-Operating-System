@@ -29,14 +29,14 @@ int hailo_cs_builder_append(struct hailo_cs_builder *b,
     const size_t need = sizeof(struct hailo_cs_common_action_header) + body_len;
     if (b->used + need > b->capacity) return HAILO_ERR_NOMEM;
 
-    /* Write the 8-byte common header. action_type is u8 on the wire,
-     * followed by 3 pad bytes (natural alignment before u32
-     * time_stamp — see hailo_cs_common_action_header comment for
-     * why this is 8 not 5). Zero the whole thing first so the pad
-     * bytes are reproducible and the default time_stamp is 0. */
+    /* Write the 5-byte common header: action_type (u8) followed by
+     * 4-byte time_stamp (u32 LE). HailoRT v4.23 sets time_stamp to
+     * CONTEXT_SWITCH_DEFS__TIMESTAMP_INIT_VALUE (0xFFFFFFFF) for
+     * every action, not 0. See the hailo_cs_common_action_header
+     * comment for the wire-capture evidence behind both decisions. */
     struct hailo_cs_common_action_header hdr;
-    memset(&hdr, 0, sizeof(hdr));
     hdr.action_type = (uint8_t)type;
+    hdr.time_stamp  = HAILO_CS_TIMESTAMP_INIT_VALUE;
     memcpy(b->buf + b->used, &hdr, sizeof(hdr));
     b->used += sizeof(hdr);
 

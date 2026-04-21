@@ -459,7 +459,7 @@ The natural continuation of 6.3. HEF proto stores structured `ProtoHEFAction` on
 **`kernel/ai_accel/hailo/hailo_cs_actions.h`** — host-side mirrors of the wire structs:
 
 - `enum hailo_cs_action_type` — all 45 action-type values (v4.23 order).
-- `struct hailo_cs_common_action_header` — **8 bytes on the wire** (1-byte action_type + 3 pad + 4-byte time_stamp). This is a firmware-discovered fact; see "Key finding" below.
+- `struct hailo_cs_common_action_header` — **5 bytes on the wire** (1-byte action_type + 4-byte time_stamp, packed). `time_stamp` is set to `HAILO_CS_TIMESTAMP_INIT_VALUE` (`0xFFFFFFFF`) for every action. *(Earlier this was incorrectly believed to be 8 bytes with natural alignment; see Phase 6.9 wire-capture writeup for how that was overturned.)*
 - `struct hailo_cs_host_buffer_info` (19 B) — embedded in `ACTIVATE_*` actions for firmware to DMA-pull from host buffers.
 - `struct hailo_cs_stream_reg_info` (19 B) — NN-stream buffer geometry.
 - Preliminary-context bodies: `ACTIVATE_CFG_CHANNEL` (21 B), `FETCH_CCW_BURSTS` (3 B), `DEACTIVATE_CFG_CHANNEL` (2 B).
@@ -480,13 +480,29 @@ hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
 
 **`hailo ctxsmoke` shell command** — exercises the full 6-step bring-up chain (RESET → SET_NETWORK_GROUP_HEADER → 4 SET_CONTEXT_INFO calls) against live firmware with per-context minimum action stubs. Used for hardware-level wire-format validation; kept as a permanent diagnostic probe.
 
-#### Key finding — `common_action_header_t` is **8 bytes**, not 5
+#### Key finding (RETRACTED 2026-04-20) — `common_action_header_t` is 5 bytes, not 8
 
-Firmware v4.23 compiles `CONTEXT_SWITCH_DEFS__common_action_header_t` with natural alignment despite the `#pragma pack(push, 1)` wrapping the reference header. The packed u8 `action_type` is followed by 3 pad bytes, then the u32 `time_stamp` — total 8 bytes on the wire. 5-byte headers produce `major=0x40130016` = `CONTEXT_SWITCH_STATUS_MISALIGNMENT_ERROR_WHILE_READING_ACTIONS`; 8-byte headers are accepted.
+The original 6.4d writeup claimed firmware v4.23 reads
+`CONTEXT_SWITCH_DEFS__common_action_header_t` with natural alignment
+(8 bytes) despite the `#pragma pack(1)` in the reference. **That was
+wrong.** A HailoRT v4.23 wire capture against a real Hailo-8L Model
+Zoo HEF on 2026-04-20 (cached at
+`docs/reference/hailort-v4.23.0-wire-capture-mobilenet.txt`) shows
+`BURST_CREDITS_TASK_RESET` — a zero-body action — emitted as exactly
+5 bytes: `1e ff ff ff ff` before the next action header begins.
 
-Root cause is firmware-internal (likely compiled without the pragma visible, or a wrapper struct re-imposes alignment). Takeaway: **cross-check wire struct sizes against hardware, don't trust the pragma**. Body structs (`host_buffer_info_t`, `activate_cfg_channel_t`, etc.) still appear to be 1-byte packed.
+The earlier MISALIGNMENT_ERROR_WHILE_READING_ACTIONS observation that
+seemed to validate the 8-byte theory was actually a *consequence* of
+something else in the action stream (likely the
+`bytes_in_pattern=0` and `OUTPUT_OFFSET=2` bugs we also carried at
+that time). Once the header was packed back to 5 bytes AND the other
+fixes landed, all 4 contexts return rc=0. See Phase 6.9 below for
+the full root-cause writeup. Body structs are also 1-byte packed,
+which the pragma does correctly enforce.
 
 #### Hardware iteration on pi-5-1 fw v4.23 (2026-04-19)
+
+*Note: the bottom row of this table — "8-byte common header → ACTIVATION rc=0" — was a coincidence: the rc=0 came from a different change in the same iteration (likely action-type ordering or body content), not the header size. The actual header is 5 bytes; see Phase 6.9 retraction.*
 
 Each iteration consumed one firmware rejection code to decode the next layer:
 
@@ -586,9 +602,8 @@ HEF parser EnableLcu extraction, 6.4g (3):
 Translator application_header + contexts, 6.4f (6):
 - `test_cs_translate_application_header_fills_defaults` — verifies every derived field in the 32-byte header.
 - `test_cs_translate_application_header_rejects_null` — null-arg.
-- `test_cs_translate_contexts_produces_all_four` — byte-for-byte assertion of all four context streams (lengths 8/16/40/8, action_type bytes at expected offsets, `host_buffer_info.dma_address` round-trip).
-- `test_cs_translate_contexts_uses_ccw_count_for_burst_count` — `info.ccw_action_count=7` → `FETCH_CCW_BURSTS.ccw_bursts=7`.
-- `test_cs_translate_contexts_clamps_burst_count_to_u16` — 100000 actions → clamped to UINT16_MAX.
+- `test_cs_translate_contexts_produces_all_four` — byte-for-byte assertion of all four context streams (lengths 5/10/26/5 with the 5-byte header + dropped FETCH_CCW_BURSTS, action_type bytes at expected offsets, `host_buffer_info.dma_address` round-trip). *(Phase 6.9 update — was 8/16/40/8 before the header retraction and dropped FETCH_CCW_BURSTS.)*
+- *(Removed in Phase 6.9: `test_cs_translate_contexts_uses_ccw_count_for_burst_count` and `test_cs_translate_contexts_clamps_burst_count_to_u16` — both asserted FETCH_CCW_BURSTS in PRELIMINARY, which is no longer emitted.)*
 - `test_cs_translate_contexts_rejects_null` — null-arg.
 
 Translator EnableLcu, 6.4g (3):
@@ -601,7 +616,7 @@ Total Phase 6.4 unit-test additions: **27 cases** across `test_hailo.c` and `tes
 **Firmware constraints pinned from v4.23:**
 - Zero-length contexts are rejected with `0x40130004`; each `SET_CONTEXT_INFO` must carry ≥1 valid wire action.
 - Firmware expects exactly `dynamic_contexts_count + 3` SET_CONTEXT_INFO calls per load, in fixed order: ACTIVATION, BATCH_SWITCHING, PRELIMINARY, then each DYNAMIC.
-- `common_action_header_t` is 8 bytes (natural alignment, not 5 as the packed reference suggests).
+- `common_action_header_t` is 5 bytes packed (1-byte action_type + 4-byte time_stamp); `time_stamp` must be `0xFFFFFFFF` (`HAILO_CS_TIMESTAMP_INIT_VALUE`). *Earlier "8-byte natural alignment" claim retracted in Phase 6.9 wire capture.*
 - `csm_buffer_size` must match the VDMA descriptor page size (typically 512 or 4096).
 
 #### Phase 6.5 landed (2026-04-19): Boundary channels + OpenBoundary actions
@@ -638,28 +653,111 @@ Commits on branch `pi5-phase-6-run-rewire`. Added two firmware RPCs that HailoRT
 
 **BREAKTHROUGH on #180:** Firmware no longer silent-wedges on `BATCH_SWITCHING` (BAR4 returning `0xFFFFFFFF`). It now returns a real diagnostic error code on `ACTIVATION`, which is what lets further root-causing happen.
 
-#### Phase 6.9 remaining (2026-04-20): ACTIVATION rejected with `INVALID_ENGINE_INDEX`
+#### Phase 6.9 RESOLVED (2026-04-20): full 4-context handshake completes
 
-ACTIVATION fails with `major_status = 0x402d001b = VDMA_SERVICE_STATUS_INVALID_ENGINE_INDEX` (module 0x2D = FIRMWARE_MODULE__VDMA_SERVICE, status 0x1B within that module — counted from `VDMA_SERVICE_START`). PRELIMINARY fails with `0x402d0004 = HOST_DESCRIPTOR_BASE_ADDRESS_IS_NOT_64KB_ALIGNED` (cascade — firmware state machine is in error after ACTIVATION).
+After capturing HailoRT v4.23's actual SET_CONTEXT_INFO bytes against
+a real Hailo-8L Model Zoo HEF, two root causes were identified and
+fixed. ctxsmoke now completes cleanly:
 
-The error name is misleading: `packed_vdma_channel_id` values emitted (`0x02` for input, `0x03` for output) have `engine_index = (packed >> 5) & 0x3 = 0`, which is the only valid engine on Hailo-8 PCIe (`HAILO_PCIE_DMA_ENGINES_COUNT = 1`). Something else in the ACTIVATION body is tripping the firmware's VDMA-service path.
+```
+[5/8] SET_CONTEXT_INFO(ACTIVATION, 63 B)       rc=0  ✅
+[6/8] SET_CONTEXT_INFO(BATCH_SWITCHING, 16 B)  rc=0  ✅
+[7/8] SET_CONTEXT_INFO(PRELIMINARY, 26 B)      rc=0  ✅
+[8/8] SET_CONTEXT_INFO(DYNAMIC, 5 B)           rc=0  ✅
+```
 
-**Ruled out during this session:**
+**Root cause #1: `common_action_header` is 5 bytes, not 8.** A
+prior memory note claimed firmware reads the header with natural
+alignment (1-byte action_type + 3 padding bytes + 4-byte time_stamp).
+That was wrong — `#pragma pack(1)` on the reference struct IS
+honored. HailoRT wire bytes for BURST_CREDITS_TASK_RESET (a
+zero-body action) are exactly `1e ff ff ff ff` (5 bytes), then
+the next action header begins. Also `time_stamp` is set to
+`CONTEXT_SWITCH_DEFS__TIMESTAMP_INIT_VALUE` (`0xFFFFFFFF`), not 0.
 
-- **Action-type enum IDs** — verified `OPEN_BOUNDARY_INPUT_CHANNEL = 32`, `OPEN_BOUNDARY_OUTPUT_CHANNEL = 33`, `BURST_CREDITS_TASK_RESET = 30` against `hailort-v4.23.0-context_switch_defs.h`.
-- **Body layouts** — `CONTEXT_SWITCH_DEFS__open_boundary_input_channel_data_t` (28 B) and `..._output_channel_data_t` (20 B) match SLM-OS structs byte-for-byte, including `CONTROL_PROTOCOL__host_buffer_info_t` (19 B, inside a `#pragma pack(push,1)` region per control-protocol.h:273).
-- **H2D/D2H channel-index split hypothesis** — initially suspected output `packed=0x03` was falling in the H2D range [0..15] and firmware was rejecting it as a D2H. `hailo-vdma-common.c:576-587` (`get_channel_regs`) and `hailo-pcie-common.h:30` (`HAILO_PCIE_DMA_ENGINES_COUNT = 1`) + `hailo-ioctl-common.h:20-21` (`MAX_VDMA_CHANNELS_PER_ENGINE = 32`, `VDMA_CHANNELS_PER_ENGINE_PER_DIRECTION = 16`) show `src_channels_bitmask = 0x0000FFFF` only selects which register pair within each channel's 32-byte window comes first (host-side vs device-side) — NOT a per-direction channel reservation. Channel-index space is a shared 0..31 pool; direction is differentiated by the action type. Hypothesis disproven by source-reading; tentative `OUTPUT_CHANNEL_OFFSET = 17` change was reverted.
+**Root cause #2: `FETCH_CCW_BURSTS` is not supported in PRELIMINARY
+on Hailo-8L.** Wire capture confirms HailoRT does not emit
+`FETCH_CCW_BURSTS` (action_type 27, header `1b ff ff ff ff`)
+directly in PRELIMINARY for this device. The firmware rejects it
+with `0x402a0001 = CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_
+SUPPORTED`. HailoRT uses a different REPEATED_ACTION-wrapped
+AddCcwBurst path. SLM-OS now emits ACTIVATE_CFG_CHANNEL alone in
+PRELIMINARY; full CCW loading via the wrapped path is a separate
+workstream (Phase 6.10 below).
 
-**Not yet investigated (candidates for next session):**
+**Smaller correctness fixes landed alongside (each tracked by
+commit on branch `pi5-180-path-a-iova-align`):**
 
-1. **64 KB-alignment of boundary desc-list IOVAs.** `hailo_vdma_desc_list_alloc` returns page-aligned (4 KB) IOVAs. Firmware's PRELIMINARY cascade returns `HOST_DESCRIPTOR_BASE_ADDRESS_IS_NOT_64KB_ALIGNED`; it's plausible fw lumps all "descriptor-list base address" violations on boundary channels into `INVALID_ENGINE_INDEX` (since the engine-lookup table is keyed off per-channel state). Fix: route boundary desc lists through a 64 KB-aligned allocator (allocate 64 KB, align up), or find an alternate allocator API that already gives 64 KB alignment.
-2. **Pre-load multi-call cadence.** HailoRT's wire capture on 2026-04-20 shows `GET_HW_CONSTS` called **twice** and an interleaved `GET_DEVICE_INFORMATION` (opcode 0x33) between `CLEAR_CONFIGURED_APPS` and the second `GET_HW_CONSTS`. SLM-OS only calls each once. Unlikely to matter semantically, but listed here since the ground-truth HEF load didn't proceed past `GET_HW_CONSTS`.
-3. **Ground-truth ACTIVATION body.** Still unavailable — HailoRT v4.23.0 errors before `SET_CONTEXT_INFO` on every Model Zoo HEF tried (`HAILO_INTERNAL_FAILURE` due to Model Zoo HEFs requiring `max_desc_page_size = 16384` but HailoRT hardcodes 4096 for Hailo-8L). Next-session options: (a) patch HailoRT's `desc_page_size` guard to bypass; (b) find a HEF compiled with `page_size ≤ 4096`; (c) synthesize a minimal `SET_CONTEXT_INFO` test from first principles and bisect by swapping individual action bytes.
+- `host_buffer_info.bytes_in_pattern` set to `pad->core_bytes_per_buffer`
+  (matches HailoRT `vdma_edge_layer.cpp:73`); previously hardcoded 0.
+- `HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET` 2 → 15 so the OUTPUT
+  channel lands at index 16 (first valid D2H per HailoRT
+  `channel_allocator.cpp` MIN/MAX_D2H constants 16/31).
+- Translator emits OUTPUT actions before INPUT in ACTIVATION
+  (matches HailoRT `resource_manager_builder.cpp:1059-1075`).
 
-**Artifacts left on branch for next session:**
+**How the wire bytes were captured (replicate this if needed):**
 
-- `kernel/ai_accel/hailo/hailo_shell.c` — `ctxsmoke` retains post-failure BAR4 scope scan + IDENTIFY(APP) diagnostic + 500 ms inter-RPC delay. Kept as a permanent probe; removing once #180 resolves.
-- `/home/pi/Downloads/hailort-drivers/common/pcie_common.c` (on pi-5-1 Pi OS card) — `print_hex_dump` patch in `hailo_pcie_write_firmware_control` captures every HailoRT RPC body on dmesg. Rebuilt driver at `/home/pi/Downloads/hailort-drivers/linux/pcie/hailo_pci.ko`; swap in via `sudo rmmod hailo_pci && sudo insmod ...`.
+1. Swap pi-5-1's Pi OS SD card into the SDWire (the SLM-OS card
+   stays in the Pi 5 directly — see memory note `pi5_lab_setup.md`).
+2. Power-cycle pi-5-1 → boots Pi OS.
+3. SSH into Pi OS, load the patched driver:
+   ```
+   sudo rmmod hailo_pci
+   sudo insmod /home/pi/Downloads/hailort-drivers/linux/pcie/hailo_pci.ko
+   ```
+   (the patched driver's `hailo_pcie_write_firmware_control` calls
+   `print_hex_dump` on every FW-control RPC.)
+4. Patch `libhailort.so.4.23.0` to bypass its hardcoded
+   `max_desc_page_size = 4096` guard (Hailo-8L HEFs need 16384):
+   ```
+   sudo cp /usr/lib/libhailort.so.4.23.0 /usr/lib/libhailort.so.4.23.0.bak
+   for off in 0x24a0cc 0x24a8f4 0x24a998; do
+     printf '\x13' | sudo dd of=/usr/lib/libhailort.so.4.23.0 \
+       bs=1 count=1 seek=$((off+1)) conv=notrunc
+   done
+   ```
+   This changes 3 instances of `cmp wN, #0x1000` (4096) to
+   `cmp wN, #0x4000` (16384) inside
+   `BufferSizesRequirements::get_buffer_requirements_multiple_transfers`.
+5. Download a Hailo-8L Model Zoo HEF and run it:
+   ```
+   curl -sfL -o /tmp/mn.hef \
+     'https://hailo-model-zoo.s3.eu-west-2.amazonaws.com/ModelZoo/Compiled/v2.15.0/hailo8l/mobilenet_v1.hef'
+   sudo dmesg -C
+   hailortcli run /tmp/mn.hef --frames-count 1
+   sudo dmesg > /tmp/dmesg.txt
+   ```
+6. Restore the original libhailort:
+   `sudo cp /usr/lib/libhailort.so.4.23.0.bak /usr/lib/libhailort.so.4.23.0`
+
+The resulting capture is cached at
+`docs/reference/hailort-v4.23.0-wire-capture-mobilenet.txt` so
+future sessions can decode further without re-running the patch.
+
+#### Phase 6.10 (next): full CCW loading via REPEATED_ACTION
+
+The `ACTIVATE_CFG_CHANNEL` action is in place but no weights are
+actually transferred yet. HailoRT's PRELIMINARY for mobilenet_v1
+is 704 bytes of action stream, including:
+
+- A `REPEATED_ACTION` (action_type 24) header wrapping multiple
+  `AddCcwBurst` (FETCH_CCW_BURSTS = 27) sub-actions.
+- Per-cluster `DISABLE_LCU` actions.
+- `MODULE_CONFIG_DONE_INTERRUPT`, `SEQUENCER_DONE_INTERRUPT`,
+  per-channel `INPUT_CHANNEL_TRANSFER_DONE_INTERRUPT` waits.
+- Final `DEACTIVATE_CFG_CHANNEL` calls.
+
+Implementing this requires:
+- HEF action parsing for the PRELIMINARY context's
+  context_actions list (currently we only extract a count).
+- Wire format for `REPEATED_ACTION` and the per-sub-type
+  body layouts (cached in `docs/reference/`).
+- Per-cluster LCU enable/disable from HEF data.
+
+After PRELIMINARY/DYNAMIC complete with real content,
+`CHANGE_CONTEXT_SWITCH_STATUS(ENABLED)` followed by per-frame
+boundary VDMA submission unlocks actual inference.
 
 ### Phase 7: Shell Integration & Demo Polish (1 week)
 
@@ -714,4 +812,4 @@ Per the project's post-change checklist (run on every phase):
 
 ---
 
-*Last updated: 2026-04-20*
+*Last updated: 2026-04-20 (Phase 6.9 RESOLVED — full handshake works)*

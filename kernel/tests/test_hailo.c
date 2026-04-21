@@ -2112,11 +2112,11 @@ static void test_set_context_info_chunk_rejects_null_with_nonzero_len(void)
 
 static void test_cs_builder_append_emits_header_then_body(void)
 {
-    /* Single FETCH_CCW_BURSTS action: 8-byte common header + 3-byte
-     * body = 11 bytes total. Verify layout byte-for-byte. Header is
-     * 8 bytes (not 5) because natural alignment inserts 3 pad bytes
-     * between the u8 action_type and the u32 time_stamp — see
-     * hailo_cs_common_action_header in hailo_cs_actions.h. */
+    /* Single FETCH_CCW_BURSTS action: 5-byte common header + 3-byte
+     * body = 8 bytes total. Header is 5 bytes packed (1-byte
+     * action_type + 4-byte time_stamp; NO padding) per HailoRT v4.23
+     * wire format. time_stamp = HAILO_CS_TIMESTAMP_INIT_VALUE
+     * (0xFFFFFFFF), not 0. */
     uint8_t buf[32];
     struct hailo_cs_builder b;
     hailo_cs_builder_init(&b, buf, sizeof(buf));
@@ -2128,32 +2128,28 @@ static void test_cs_builder_append_emits_header_then_body(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS,
                                 &body, sizeof(body)));
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)11, hailo_cs_builder_size(&b));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, hailo_cs_builder_size(&b));
 
     /* [0]=action_type (u8) = 27 (FETCH_CCW_BURSTS)
-     * [1..3]=pad (3 bytes, zero)
-     * [4..7]=time_stamp (u32 native LE) = 0
-     * [8..9]=ccw_bursts (u16 native LE) = 0x1234
-     * [10]=config_stream_index (u8) = 7 */
+     * [1..4]=time_stamp (u32 native LE) = 0xFFFFFFFF
+     * [5..6]=ccw_bursts (u16 native LE) = 0x1234
+     * [7]=config_stream_index (u8) = 7 */
     const uint8_t *d = hailo_cs_builder_data(&b);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS, d[0]);
-    TEST_ASSERT_EQUAL_UINT8(0, d[1]);
-    TEST_ASSERT_EQUAL_UINT8(0, d[2]);
-    TEST_ASSERT_EQUAL_UINT8(0, d[3]);
     uint32_t ts;
-    memcpy(&ts, d + 4, 4);
-    TEST_ASSERT_EQUAL_UINT32(0, ts);
+    memcpy(&ts, d + 1, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_TIMESTAMP_INIT_VALUE, ts);
     uint16_t bursts;
-    memcpy(&bursts, d + 8, 2);
+    memcpy(&bursts, d + 5, 2);
     TEST_ASSERT_EQUAL_UINT16(0x1234, bursts);
-    TEST_ASSERT_EQUAL_UINT8(7, d[10]);
+    TEST_ASSERT_EQUAL_UINT8(7, d[7]);
 }
 
 static void test_cs_builder_appends_concatenate(void)
 {
-    /* Three actions back-to-back with 8-byte common headers:
+    /* Three actions back-to-back with 5-byte common headers:
      * ACTIVATE_CFG_CHANNEL (21 B body), FETCH_CCW_BURSTS (3 B body),
-     * DEACTIVATE_CFG_CHANNEL (2 B body). Total: 29 + 11 + 10 = 50. */
+     * DEACTIVATE_CFG_CHANNEL (2 B body). Total: 26 + 8 + 7 = 41. */
     uint8_t buf[128];
     struct hailo_cs_builder b;
     hailo_cs_builder_init(&b, buf, sizeof(buf));
@@ -2178,24 +2174,24 @@ static void test_cs_builder_appends_concatenate(void)
         hailo_cs_builder_append(&b, HAILO_CS_ACT_FETCH_CCW_BURSTS, &a2, sizeof(a2)));
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_builder_append(&b, HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, &a3, sizeof(a3)));
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)29 + 11 + 10, hailo_cs_builder_size(&b));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)26 + 8 + 7, hailo_cs_builder_size(&b));
 
     const uint8_t *d = hailo_cs_builder_data(&b);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,   d[0]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,       d[29]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, d[29 + 11]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,       d[26]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, d[26 + 8]);
 
-    /* host_buffer_info.dma_address starts at offset 8 (common hdr) +
+    /* host_buffer_info.dma_address starts at offset 5 (common hdr) +
      * 2 (packed_vdma_channel_id + config_stream_index) + 1 (buffer_type)
-     * = offset 11. It's a u64 native LE. */
+     * = offset 8. It's a u64 native LE. */
     uint64_t dma_addr;
-    memcpy(&dma_addr, d + 11, 8);
+    memcpy(&dma_addr, d + 8, 8);
     TEST_ASSERT_EQUAL_UINT64(0x123456789ABCDEF0ull, dma_addr);
 }
 
 static void test_cs_builder_returns_nomem_on_overflow(void)
 {
-    uint8_t small[10];   /* Too small for one 8+3=11 byte action. */
+    uint8_t small[7];   /* Too small for one 5+3=8 byte action. */
     struct hailo_cs_builder b;
     hailo_cs_builder_init(&b, small, sizeof(small));
     struct hailo_cs_act_fetch_ccw_bursts body = { .ccw_bursts = 1, .config_stream_index = 0 };
@@ -2216,8 +2212,8 @@ static void test_cs_builder_rejects_null_buffer(void)
 static void test_cs_builder_accepts_zero_body_action(void)
 {
     /* Zero-body actions (APPLICATION_CHANGE_INTERRUPT, BURST_CREDITS_
-     * TASK_RESET, etc.) must produce an 8-byte common-header-only
-     * entry on the wire. */
+     * TASK_RESET, etc.) must produce a 5-byte common-header-only
+     * entry on the wire (action_type + time_stamp). */
     uint8_t buf[32];
     struct hailo_cs_builder b;
     hailo_cs_builder_init(&b, buf, sizeof(buf));
@@ -2225,12 +2221,12 @@ static void test_cs_builder_accepts_zero_body_action(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_builder_append(&b, HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
                                 NULL, 0));
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, hailo_cs_builder_size(&b));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)5, hailo_cs_builder_size(&b));
 
     const uint8_t *d = hailo_cs_builder_data(&b);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET, d[0]);
-    /* Rest of the 8-byte header is zero (pad + time_stamp). */
-    for (int i = 1; i < 8; i++) TEST_ASSERT_EQUAL_UINT8(0, d[i]);
+    /* time_stamp is 0xFFFFFFFF (TIMESTAMP_INIT_VALUE), little-endian. */
+    for (int i = 1; i < 5; i++) TEST_ASSERT_EQUAL_UINT8(0xFF, d[i]);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2463,9 +2459,10 @@ static void test_cs_translate_application_header_boundary_bitmap(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_application_header(&info, &cfg, &hdr));
 
-    /* Input boundary at channel 0x02 → bit 2. Output at 0x03 → bit 3.
+    /* Input boundary at channel 0x02 → bit 2 (H2D range [0,15]).
+     * Output at 0x10 → bit 16 (D2H range [16,31]).
      * Config channel (0x01) must NOT be set. */
-    TEST_ASSERT_EQUAL_UINT32((1u << 2) | (1u << 3),
+    TEST_ASSERT_EQUAL_UINT32((1u << 2) | (1u << 16),
                              hdr.boundary_channels_bitmap[0]);
 }
 
@@ -2511,90 +2508,50 @@ static void test_cs_translate_contexts_produces_all_four(void)
     TEST_ASSERT_TRUE(out.dynamic_len          > 0);
 
     /* ACTIVATION: single BURST_CREDITS_TASK_RESET (type 30, zero body).
-     * 8-byte common header alone = 8 bytes. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, out.activation_len);
+     * 5-byte common header alone = 5 bytes. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)5, out.activation_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
                             out.activation[0]);
 
     /* BATCH_SWITCHING: DDR_BUFFERING_RESET (type 31) + BURST_CREDITS_
-     * TASK_START (type 29), both zero-body → 16 bytes total. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)16, out.batch_switching_len);
+     * TASK_START (type 29), both zero-body → 10 bytes total. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)10, out.batch_switching_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
                             out.batch_switching[0]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
-                            out.batch_switching[8]);
+                            out.batch_switching[5]);
 
-    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL (type 22, 21 B body → 29 B)
-     * + FETCH_CCW_BURSTS (type 27, 3 B body → 11 B). Total 40 B. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)40, out.preliminary_len);
+    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL only (type 22, 21 B body
+     * → 26 B). FETCH_CCW_BURSTS was dropped in #180 because firmware
+     * v4.23 on Hailo-8L rejects it with CONFIG_MANAGER_WRAPPER_
+     * STATUS_ACTION_TYPE_NOT_SUPPORTED — HailoRT uses a different
+     * (REPEATED_ACTION-wrapped) CCW load path on Hailo-8L. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)26, out.preliminary_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
                             out.preliminary[0]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,
-                            out.preliminary[29]);
     /* host_buffer_info.dma_address inside the activate body — after
-     * 8-byte header + 2-byte (channel_id + stream_index) + 1-byte
-     * (buffer_type). Offset = 8 + 2 + 1 = 11. */
+     * 5-byte header + 2-byte (channel_id + stream_index) + 1-byte
+     * (buffer_type). Offset = 5 + 2 + 1 = 8. */
     uint64_t iova;
-    memcpy(&iova, out.preliminary + 11, 8);
+    memcpy(&iova, out.preliminary + 8, 8);
     TEST_ASSERT_EQUAL_UINT64(0xDEADBEEF00000000ull, iova);
-    /* FETCH_CCW_BURSTS body at offset 29+8 = 37: u16 ccw_bursts (=1)
-     * then u8 config_stream_index (=0). */
-    uint16_t bursts;
-    memcpy(&bursts, out.preliminary + 37, 2);
-    TEST_ASSERT_EQUAL_UINT16(1, bursts);
-    TEST_ASSERT_EQUAL_UINT8(0, out.preliminary[39]);
 
     /* DYNAMIC: APPLICATION_CHANGE_INTERRUPT tail marker (zero body). */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)5, out.dynamic_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
                             out.dynamic[0]);
 }
 
-static void test_cs_translate_contexts_uses_ccw_count_for_burst_count(void)
-{
-    /* 7 CCW actions in hef_info → FETCH_CCW_BURSTS encodes ccw_bursts=7. */
-    struct hef_info info;
-    memset(&info, 0, sizeof(info));
-    info.ccw_action_count = 7;
-
-    struct hailo_cs_translate_cfg cfg = {
-        .config_vdma_channel   = 0x01,
-        .ccw_desc_list_iova    = 0x100000,
-        .ccw_desc_page_size    = 512,
-        .ccw_total_desc_count  = 16,
-    };
-
-    struct hailo_cs_context_buffers out;
-    TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_cs_translate_contexts(&info, &cfg, &out));
-
-    uint16_t bursts;
-    memcpy(&bursts, out.preliminary + 37, 2);
-    TEST_ASSERT_EQUAL_UINT16(7, bursts);
-}
-
-static void test_cs_translate_contexts_clamps_burst_count_to_u16(void)
-{
-    /* Pathological ccw_action_count > UINT16_MAX: clamp to 65535. */
-    struct hef_info info;
-    memset(&info, 0, sizeof(info));
-    info.ccw_action_count = 100000u;
-
-    struct hailo_cs_translate_cfg cfg = {
-        .config_vdma_channel   = 0x01,
-        .ccw_desc_list_iova    = 0x100000,
-        .ccw_desc_page_size    = 512,
-        .ccw_total_desc_count  = 16,
-    };
-
-    struct hailo_cs_context_buffers out;
-    TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_cs_translate_contexts(&info, &cfg, &out));
-
-    uint16_t bursts;
-    memcpy(&bursts, out.preliminary + 37, 2);
-    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, bursts);
-}
+/* Removed: test_cs_translate_contexts_uses_ccw_count_for_burst_count
+ *          test_cs_translate_contexts_clamps_burst_count_to_u16
+ *
+ * Both tests asserted that FETCH_CCW_BURSTS is emitted in PRELIMINARY
+ * with a ccw_bursts field driven by ccw_action_count. That behaviour
+ * was removed in #180: firmware v4.23 on Hailo-8L rejects
+ * FETCH_CCW_BURSTS in PRELIMINARY with CONFIG_MANAGER_WRAPPER_
+ * STATUS_ACTION_TYPE_NOT_SUPPORTED (0x402a0001). The translator
+ * now emits ACTIVATE_CFG_CHANNEL alone there; full CCW loading via
+ * REPEATED_ACTION-wrapped sub-actions is a separate workstream. */
 
 static void test_cs_translate_contexts_rejects_null(void)
 {
@@ -2616,8 +2573,8 @@ static void test_cs_translate_contexts_rejects_null(void)
 
 static void test_cs_translate_activation_emits_open_boundary_input(void)
 {
-    /* One boundary input pad → ACTIVATION = BURST_CREDITS (8) +
-     * OPEN_BOUNDARY_INPUT_CHANNEL (8 hdr + 28 body = 36) = 44 bytes. */
+    /* One boundary input pad → ACTIVATION = BURST_CREDITS (5) +
+     * OPEN_BOUNDARY_INPUT_CHANNEL (5 hdr + 28 body = 33) = 38 bytes. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.pad_count = 1;
@@ -2642,36 +2599,48 @@ static void test_cs_translate_activation_emits_open_boundary_input(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 36), out.activation_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(5 + 33), out.activation_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
                             out.activation[0]);
+    /* time_stamp INIT bytes in the BURST_CREDITS header [1..4]. */
+    uint32_t burst_ts; memcpy(&burst_ts, out.activation + 1, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_TIMESTAMP_INIT_VALUE, burst_ts);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
-                            out.activation[8]);
-    /* Body begins at offset 16. packed_vdma = config+1 = 0x02. */
-    TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[16]);
-    /* host_buffer_info at offset 17: buffer_type (1B) + dma_address (8B LE)
+                            out.activation[5]);
+    /* time_stamp INIT bytes in the OPEN_IN header [6..9]. */
+    uint32_t open_in_ts; memcpy(&open_in_ts, out.activation + 6, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_TIMESTAMP_INIT_VALUE, open_in_ts);
+    /* Body begins at offset 10. packed_vdma = config+1 = 0x02. */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[10]);
+    /* host_buffer_info at offset 11: buffer_type (1B) + dma_address (8B LE)
      * + desc_page_size (2B LE) + total_desc_count (4B LE) + bytes_in_pattern (4B). */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
-                            out.activation[17]);
-    uint64_t dma; memcpy(&dma, out.activation + 18, 8);
+                            out.activation[11]);
+    uint64_t dma; memcpy(&dma, out.activation + 12, 8);
     TEST_ASSERT_EQUAL_UINT64(0xAA00000011110000ull, dma);
-    uint16_t page; memcpy(&page, out.activation + 26, 2);
+    uint16_t page; memcpy(&page, out.activation + 20, 2);
     TEST_ASSERT_EQUAL_UINT16(1024, page);
-    uint32_t descs; memcpy(&descs, out.activation + 28, 4);
+    uint32_t descs; memcpy(&descs, out.activation + 22, 4);
     TEST_ASSERT_EQUAL_UINT32(4, descs);
-    /* stream_index @ 36, network_index @ 37, periph @ 38, frame @ 40. */
-    TEST_ASSERT_EQUAL_UINT8(0, out.activation[36]);   /* stream_index */
-    TEST_ASSERT_EQUAL_UINT8(0, out.activation[37]);   /* network_index */
-    uint16_t periph; memcpy(&periph, out.activation + 38, 2);
+    /* bytes_in_pattern @ 26: must equal core_bytes_per_buffer (= frame
+     * size, 0x0400) per HailoRT vdma_edge_layer.cpp:73. Hardcoded 0
+     * caused #180 confusion until the wire capture revealed the truth. */
+    uint32_t bytes_in_pattern;
+    memcpy(&bytes_in_pattern, out.activation + 26, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x0400u, bytes_in_pattern);
+    /* stream_index @ 30, network_index @ 31, periph @ 32, frame @ 34. */
+    TEST_ASSERT_EQUAL_UINT8(0, out.activation[30]);   /* stream_index */
+    TEST_ASSERT_EQUAL_UINT8(0, out.activation[31]);   /* network_index */
+    uint16_t periph; memcpy(&periph, out.activation + 32, 2);
     TEST_ASSERT_EQUAL_UINT16(0x0400, periph);
-    uint32_t frame; memcpy(&frame, out.activation + 40, 4);
+    uint32_t frame; memcpy(&frame, out.activation + 34, 4);
     TEST_ASSERT_EQUAL_UINT32(0x0400, frame);
 }
 
 static void test_cs_translate_activation_emits_open_boundary_output(void)
 {
     /* One boundary output pad → OPEN_BOUNDARY_OUTPUT_CHANNEL body is
-     * 20 B (packed_vdma + host_buffer_info). Total 8 + 8+20 = 36. */
+     * 20 B (packed_vdma + host_buffer_info). Total 5 + 5+20 = 30. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.pad_count = 1;
@@ -2696,21 +2665,29 @@ static void test_cs_translate_activation_emits_open_boundary_output(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 28), out.activation_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(5 + 25), out.activation_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
-                            out.activation[8]);
-    /* packed_vdma = config+2 = 0x03. */
-    TEST_ASSERT_EQUAL_UINT8(0x03, out.activation[16]);
-    uint64_t dma; memcpy(&dma, out.activation + 18, 8);
+                            out.activation[5]);
+    /* time_stamp INIT bytes in the OPEN_OUT header [6..9]. */
+    uint32_t open_out_ts; memcpy(&open_out_ts, out.activation + 6, 4);
+    TEST_ASSERT_EQUAL_UINT32(HAILO_CS_TIMESTAMP_INIT_VALUE, open_out_ts);
+    /* packed_vdma = config+OUTPUT_OFFSET = 0x01+15 = 0x10 (first D2H). */
+    TEST_ASSERT_EQUAL_UINT8(0x10, out.activation[10]);
+    uint64_t dma; memcpy(&dma, out.activation + 12, 8);
     TEST_ASSERT_EQUAL_UINT64(0xBB00000022220000ull, dma);
-    uint32_t descs; memcpy(&descs, out.activation + 28, 4);
+    uint32_t descs; memcpy(&descs, out.activation + 22, 4);
     TEST_ASSERT_EQUAL_UINT32(6, descs);
+    /* bytes_in_pattern @ 26: must equal core_bytes_per_buffer (= 0x100)
+     * for the output pad. Same HailoRT-parity rule as the input body. */
+    uint32_t bytes_in_pattern;
+    memcpy(&bytes_in_pattern, out.activation + 26, 4);
+    TEST_ASSERT_EQUAL_UINT32(0x100u, bytes_in_pattern);
 }
 
 static void test_cs_translate_activation_emits_input_and_output(void)
 {
     /* Realistic single-stream MLP: one input, one output. ACTIVATION
-     * total = 8 (BURST) + 36 (OPEN_IN) + 28 (OPEN_OUT) = 72 bytes. */
+     * total = 5 (BURST) + 33 (OPEN_IN) + 25 (OPEN_OUT) = 63 bytes. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.pad_count = 2;
@@ -2740,25 +2717,28 @@ static void test_cs_translate_activation_emits_input_and_output(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 36 + 28), out.activation_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(5 + 25 + 33), out.activation_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_RESET,
                             out.activation[0]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
-                            out.activation[8]);
-    /* Input: packed_vdma = config(0x01) + INPUT_OFFSET(1) = 0x02. */
-    TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[16]);
+    /* HailoRT emits OUTPUT actions before INPUT actions in ACTIVATION
+     * (resource_manager_builder.cpp:1059-1075). OUTPUT body is 25 B
+     * so it occupies [5..29]; INPUT body (33 B) occupies [30..62]. */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_OUTPUT_CHANNEL,
-                            out.activation[8 + 36]);
-    /* Output: packed_vdma = config(0x01) + OUTPUT_OFFSET(2) = 0x03.
-     * Body begins at offset 8+36+8 = 52; packed_vdma is byte 0. */
-    TEST_ASSERT_EQUAL_UINT8(0x03, out.activation[8 + 36 + 8]);
+                            out.activation[5]);
+    /* Output: packed_vdma = config(0x01) + OUTPUT_OFFSET(15) = 0x10. */
+    TEST_ASSERT_EQUAL_UINT8(0x10, out.activation[10]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
+                            out.activation[5 + 25]);
+    /* Input: packed_vdma = config(0x01) + INPUT_OFFSET(1) = 0x02.
+     * INPUT body begins at offset 5+25+5 = 35; packed_vdma is byte 0. */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[5 + 25 + 5]);
 }
 
 static void test_cs_translate_activation_skips_internal_pads(void)
 {
     /* Pads without has_stream_info are internal ops — translator
      * must not emit OpenBoundary for them. Two internal pads + zero
-     * boundary = BURST_CREDITS only (8 bytes). */
+     * boundary = BURST_CREDITS only (5 bytes). */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.pad_count = 2;
@@ -2778,7 +2758,7 @@ static void test_cs_translate_activation_skips_internal_pads(void)
     struct hailo_cs_context_buffers out;
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)8, out.activation_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)5, out.activation_len);
 }
 
 static void test_cs_translate_activation_missing_input_iova_fails(void)
@@ -2813,10 +2793,10 @@ static void test_cs_translate_activation_missing_input_iova_fails(void)
 static void test_cs_translate_batch_switching_emits_change_boundary_input_batch(void)
 {
     /* One boundary input + one output. BATCH_SWITCHING layout becomes:
-     *   DDR_BUFFERING_RESET        (8 B header + 0 B body)
-     *   CHANGE_BOUNDARY_INPUT_BATCH (8 B + 1 B)
-     *   BURST_CREDITS_TASK_START   (8 B + 0 B)
-     * Total: 8 + 9 + 8 = 25 bytes. */
+     *   DDR_BUFFERING_RESET        (5 B header + 0 B body)
+     *   CHANGE_BOUNDARY_INPUT_BATCH (5 B + 1 B)
+     *   BURST_CREDITS_TASK_START   (5 B + 0 B)
+     * Total: 5 + 6 + 5 = 16 bytes. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.pad_count = 2;
@@ -2843,15 +2823,15 @@ static void test_cs_translate_batch_switching_emits_change_boundary_input_batch(
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)(8 + 9 + 8), out.batch_switching_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(5 + 6 + 5), out.batch_switching_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
                             out.batch_switching[0]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_CHANGE_BOUNDARY_INPUT_BATCH,
-                            out.batch_switching[8]);
-    /* packed_vdma = config(0x01) + INPUT_OFFSET(1) = 0x02. Body at +16. */
-    TEST_ASSERT_EQUAL_UINT8(0x02, out.batch_switching[16]);
+                            out.batch_switching[5]);
+    /* packed_vdma = config(0x01) + INPUT_OFFSET(1) = 0x02. Body at +10. */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.batch_switching[10]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
-                            out.batch_switching[17]);
+                            out.batch_switching[11]);
 }
 
 /* No boundary H2D → no CHANGE_BOUNDARY_INPUT_BATCH. Preserves the
@@ -2873,12 +2853,12 @@ static void test_cs_translate_batch_switching_no_boundary_input(void)
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
     /* DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START, both zero body:
-     * 8 + 8 = 16 bytes. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)16, out.batch_switching_len);
+     * 5 + 5 = 10 bytes. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)10, out.batch_switching_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
                             out.batch_switching[0]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
-                            out.batch_switching[8]);
+                            out.batch_switching[5]);
 }
 
 static void test_cs_translate_activation_missing_output_iova_fails(void)
@@ -2909,9 +2889,9 @@ static void test_cs_translate_activation_missing_output_iova_fails(void)
 static void test_cs_translate_enable_lcu_default_variant(void)
 {
     /* Default variant: kernel_done_count = 0 and kernel_done_address
-     * = 0 → emit ENABLE_LCU_DEFAULT (8B header + 2B body = 10B) ahead
-     * of the tail APPLICATION_CHANGE_INTERRUPT (8B). Total DYNAMIC
-     * context: 18 bytes. packed_lcu_id = (cluster<<4)|lcu. */
+     * = 0 → emit ENABLE_LCU_DEFAULT (5B header + 2B body = 7B) ahead
+     * of the tail APPLICATION_CHANGE_INTERRUPT (5B). Total DYNAMIC
+     * context: 12 bytes. packed_lcu_id = (cluster<<4)|lcu. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.enable_lcu_count = 1;
@@ -2939,21 +2919,21 @@ static void test_cs_translate_enable_lcu_default_variant(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)18, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)12, out.dynamic_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[0]);
-    /* Body starts at offset 8 (after 8-byte common header). */
-    TEST_ASSERT_EQUAL_UINT8((5u << 4) | 3u, out.dynamic[8]);   /* packed_lcu_id */
-    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[9]);                /* network_index */
-    /* Tail APPLICATION_CHANGE_INTERRUPT at offset 10. */
+    /* Body starts at offset 5 (after 5-byte common header). */
+    TEST_ASSERT_EQUAL_UINT8((5u << 4) | 3u, out.dynamic[5]);   /* packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[6]);                /* network_index */
+    /* Tail APPLICATION_CHANGE_INTERRUPT at offset 7. */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
-                            out.dynamic[10]);
+                            out.dynamic[7]);
 }
 
 static void test_cs_translate_enable_lcu_non_default_variant(void)
 {
     /* Non-default: kernel_done_count non-zero → emit
-     * ENABLE_LCU_NON_DEFAULT (8B hdr + 8B body = 16B) + tail (8B).
-     * Total DYNAMIC: 24 bytes. */
+     * ENABLE_LCU_NON_DEFAULT (5B hdr + 8B body = 13B) + tail (5B).
+     * Total DYNAMIC: 18 bytes. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.enable_lcu_count = 1;
@@ -2981,19 +2961,19 @@ static void test_cs_translate_enable_lcu_non_default_variant(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)24, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)18, out.dynamic_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_NON_DEFAULT, out.dynamic[0]);
-    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 2u, out.dynamic[8]);
-    TEST_ASSERT_EQUAL_UINT8(0, out.dynamic[9]);
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 2u, out.dynamic[5]);
+    TEST_ASSERT_EQUAL_UINT8(0, out.dynamic[6]);
     uint16_t kda;
-    memcpy(&kda, out.dynamic + 10, 2);
+    memcpy(&kda, out.dynamic + 7, 2);
     TEST_ASSERT_EQUAL_UINT16(0x1234, kda);
     uint32_t kdc;
-    memcpy(&kdc, out.dynamic + 12, 4);
+    memcpy(&kdc, out.dynamic + 9, 4);
     TEST_ASSERT_EQUAL_UINT32(0xABCD1234, kdc);
-    /* Tail at offset 16. */
+    /* Tail at offset 13. */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
-                            out.dynamic[16]);
+                            out.dynamic[13]);
 }
 
 static void test_cs_translate_skips_enable_lcu_from_other_contexts(void)
@@ -3001,7 +2981,7 @@ static void test_cs_translate_skips_enable_lcu_from_other_contexts(void)
     /* Three EnableLcu entries tagged with context_index 0, 1, 0.
      * translate_dynamic targets context 0 only; entries tagged with
      * context_index=1 must NOT appear in the dynamic byte stream.
-     * Result: 2 × 10 B defaults + 8 B tail = 28 bytes, with the
+     * Result: 2 × 7 B defaults + 5 B tail = 19 bytes, with the
      * second emitted EnableLcu being the one originally at index 2
      * (context_index=0), not index 1 (context_index=1). */
     struct hef_info info;
@@ -3036,17 +3016,17 @@ static void test_cs_translate_skips_enable_lcu_from_other_contexts(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    /* Two context-0 EnableLcu (10B each) + tail (8B) = 28 bytes.
-     * If the filter were broken, we'd see 38 bytes (3 × 10 + 8). */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)28, out.dynamic_len);
+    /* Two context-0 EnableLcu (7B each) + tail (5B) = 19 bytes.
+     * If the filter were broken, we'd see 26 bytes (3 × 7 + 5). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)19, out.dynamic_len);
     /* First emitted = entry 0: packed (2<<4)|1 = 0x21. */
-    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[8]);
+    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[5]);
     /* Second emitted = entry 2 (NOT entry 1): packed (4<<4)|3 = 0x43.
-     * If the filter broke, byte 18 would be 0x77 (from the skipped
+     * If the filter broke, byte 12 would be 0x77 (from the skipped
      * context_index=1 entry). */
-    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[18]);
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[12]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
-                            out.dynamic[20]);
+                            out.dynamic[14]);
 }
 
 static void test_cs_translate_multiple_enable_lcu_preserves_order(void)
@@ -3079,21 +3059,21 @@ static void test_cs_translate_multiple_enable_lcu_preserves_order(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    /* Two 10B defaults + 8B tail = 28 bytes. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)28, out.dynamic_len);
-    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[8]);   /* first packed_lcu_id */
-    TEST_ASSERT_EQUAL_UINT8(0, out.dynamic[9]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[10]);
-    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[18]);  /* second packed_lcu_id */
-    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[19]);
+    /* Two 7B defaults + 5B tail = 19 bytes. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)19, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[5]);   /* first packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(0, out.dynamic[6]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[7]);
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[12]);  /* second packed_lcu_id */
+    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[13]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
-                            out.dynamic[20]);
+                            out.dynamic[14]);
 }
 
 static void test_cs_translate_disable_lcu_wire_format(void)
 {
     /* DISABLE_LCU body is 1 byte = packed_lcu_id = (cluster<<4)|lcu.
-     * Emit: 8B header + 1B body + 8B tail = 17 bytes. */
+     * Emit: 5B header + 1B body + 5B tail = 11 bytes. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.disable_lcu_count = 1;
@@ -3112,17 +3092,17 @@ static void test_cs_translate_disable_lcu_wire_format(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)17, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)11, out.dynamic_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DISABLE_LCU, out.dynamic[0]);
-    TEST_ASSERT_EQUAL_UINT8((3u << 4) | 2u, out.dynamic[8]);
+    TEST_ASSERT_EQUAL_UINT8((3u << 4) | 2u, out.dynamic[5]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
-                            out.dynamic[9]);
+                            out.dynamic[6]);
 }
 
 static void test_cs_translate_wait_sequencer_wire_format(void)
 {
     /* SEQUENCER_DONE_INTERRUPT body is 1 byte = sequencer_index
-     * (== cluster_index on Hailo-8). Emit: 8B hdr + 1B + 8B tail. */
+     * (== cluster_index on Hailo-8). Emit: 5B hdr + 1B + 5B tail. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.wait_sequencer_count = 1;
@@ -3141,18 +3121,18 @@ static void test_cs_translate_wait_sequencer_wire_format(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)17, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)11, out.dynamic_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_SEQUENCER_DONE_INTERRUPT,
                             out.dynamic[0]);
-    TEST_ASSERT_EQUAL_UINT8(5, out.dynamic[8]);   /* sequencer_index */
+    TEST_ASSERT_EQUAL_UINT8(5, out.dynamic[5]);   /* sequencer_index */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
-                            out.dynamic[9]);
+                            out.dynamic[6]);
 }
 
 static void test_cs_translate_trigger_sequencer_wire_format(void)
 {
     /* TRIGGER_SEQUENCER body: 1B cluster_index + 43B sequencer_config
-     * = 44B body. Emit: 8B hdr + 44B + 8B tail = 60 bytes. */
+     * = 44B body. Emit: 5B hdr + 44B + 5B tail = 54 bytes. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.trigger_sequencer_count = 1;
@@ -3181,34 +3161,34 @@ static void test_cs_translate_trigger_sequencer_wire_format(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)60, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)54, out.dynamic_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_TRIGGER_SEQUENCER, out.dynamic[0]);
-    /* Body starts at offset 8. */
-    TEST_ASSERT_EQUAL_UINT8(7, out.dynamic[8]);       /* cluster_index */
-    TEST_ASSERT_EQUAL_UINT8(2, out.dynamic[9]);       /* initial_l3_cut */
-    uint16_t l3off; memcpy(&l3off, out.dynamic + 10, 2);
+    /* Body starts at offset 5. */
+    TEST_ASSERT_EQUAL_UINT8(7, out.dynamic[5]);       /* cluster_index */
+    TEST_ASSERT_EQUAL_UINT8(2, out.dynamic[6]);       /* initial_l3_cut */
+    uint16_t l3off; memcpy(&l3off, out.dynamic + 7, 2);
     TEST_ASSERT_EQUAL_UINT16(0x1234, l3off);
-    uint32_t apu; memcpy(&apu, out.dynamic + 12, 4);
+    uint32_t apu; memcpy(&apu, out.dynamic + 9, 4);
     TEST_ASSERT_EQUAL_UINT32(0xDEADBEEF, apu);
-    uint32_t ia;  memcpy(&ia,  out.dynamic + 16, 4);
+    uint32_t ia;  memcpy(&ia,  out.dynamic + 13, 4);
     TEST_ASSERT_EQUAL_UINT32(0x12345678, ia);
-    uint64_t sc;  memcpy(&sc,  out.dynamic + 20, 8);
+    uint64_t sc;  memcpy(&sc,  out.dynamic + 17, 8);
     TEST_ASSERT_EQUAL_UINT64(0xAABBCCDDEEFF0011ull, sc);
-    uint64_t l2;  memcpy(&l2,  out.dynamic + 28, 8);
+    uint64_t l2;  memcpy(&l2,  out.dynamic + 25, 8);
     TEST_ASSERT_EQUAL_UINT64(0x1122334455667788ull, l2);
-    uint64_t o0;  memcpy(&o0,  out.dynamic + 36, 8);
+    uint64_t o0;  memcpy(&o0,  out.dynamic + 33, 8);
     TEST_ASSERT_EQUAL_UINT64(0x0102030405060708ull, o0);
-    uint64_t o1;  memcpy(&o1,  out.dynamic + 44, 8);
+    uint64_t o1;  memcpy(&o1,  out.dynamic + 41, 8);
     TEST_ASSERT_EQUAL_UINT64(0x1011121314151617ull, o1);
-    /* Tail at offset 52. */
+    /* Tail at offset 49. */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
-                            out.dynamic[52]);
+                            out.dynamic[49]);
 }
 
 static void test_cs_translate_allow_input_dataflow_wire_format(void)
 {
-    /* FETCH_DATA_FROM_VDMA_CHANNEL body is 9 bytes. Emit: 8B hdr +
-     * 9B body + 8B tail = 25 bytes. The translator looks up the pad
+    /* FETCH_DATA_FROM_VDMA_CHANNEL body is 9 bytes. Emit: 5B hdr +
+     * 9B body + 5B tail = 19 bytes. The translator looks up the pad
      * by sys_index to resolve frame_periph_size. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
@@ -3234,20 +3214,20 @@ static void test_cs_translate_allow_input_dataflow_wire_format(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)25, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)19, out.dynamic_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_DATA_FROM_VDMA_CHANNEL,
                             out.dynamic[0]);
     /* packed_vdma = config_vdma + 1 = 0x04. */
-    TEST_ASSERT_EQUAL_UINT8(0x04, out.dynamic[8]);
-    TEST_ASSERT_EQUAL_UINT8(0,    out.dynamic[9]);   /* stream_index */
-    TEST_ASSERT_EQUAL_UINT8(0,    out.dynamic[10]);  /* network_index */
-    uint32_t fps; memcpy(&fps, out.dynamic + 11, 4);
+    TEST_ASSERT_EQUAL_UINT8(0x04, out.dynamic[5]);
+    TEST_ASSERT_EQUAL_UINT8(0,    out.dynamic[6]);   /* stream_index */
+    TEST_ASSERT_EQUAL_UINT8(0,    out.dynamic[7]);  /* network_index */
+    uint32_t fps; memcpy(&fps, out.dynamic + 8, 4);
     TEST_ASSERT_EQUAL_UINT32(0x01020304, fps);
-    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[15]);  /* credit_type=BYTES */
+    TEST_ASSERT_EQUAL_UINT8(1, out.dynamic[12]);  /* credit_type=BYTES */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
-                            out.dynamic[16]);
+                            out.dynamic[13]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
-                            out.dynamic[17]);
+                            out.dynamic[14]);
 }
 
 static void test_cs_translate_allow_input_dataflow_missing_pad_fails(void)
@@ -3334,34 +3314,34 @@ static void test_cs_translate_interleaved_kinds_preserves_order(void)
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
     /* Walk the emitted stream, verifying the action_type byte of
-     * each 8-byte-header block. Body sizes: enable_lcu_default=2,
+     * each 5-byte-header block. Body sizes: enable_lcu_default=2,
      * disable_lcu=1, sequencer_interrupt=1, fetch_data_from_vdma=9. */
     size_t off = 0;
     /* [0] enable_lcu — default variant (kernel_done_count=0) */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[off]);
-    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[off + 8]);   /* first lcu */
-    off += 8 + 2;
+    TEST_ASSERT_EQUAL_UINT8((2u << 4) | 1u, out.dynamic[off + 5]);   /* first lcu */
+    off += 5 + 2;
     /* [1] disable_lcu */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DISABLE_LCU, out.dynamic[off]);
-    TEST_ASSERT_EQUAL_UINT8((6u << 4) | 5u, out.dynamic[off + 8]);
-    off += 8 + 1;
+    TEST_ASSERT_EQUAL_UINT8((6u << 4) | 5u, out.dynamic[off + 5]);
+    off += 5 + 1;
     /* [2] enable_lcu — second of two (entries[1]) */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ENABLE_LCU_DEFAULT, out.dynamic[off]);
-    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[off + 8]);
-    off += 8 + 2;
+    TEST_ASSERT_EQUAL_UINT8((4u << 4) | 3u, out.dynamic[off + 5]);
+    off += 5 + 2;
     /* [3] wait_sequencer */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_SEQUENCER_DONE_INTERRUPT,
                             out.dynamic[off]);
-    TEST_ASSERT_EQUAL_UINT8(9, out.dynamic[off + 8]);  /* cluster 9 */
-    off += 8 + 1;
+    TEST_ASSERT_EQUAL_UINT8(9, out.dynamic[off + 5]);  /* cluster 9 */
+    off += 5 + 1;
     /* [4] allow_input_dataflow */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_DATA_FROM_VDMA_CHANNEL,
                             out.dynamic[off]);
-    off += 8 + 9;
+    off += 5 + 9;
     /* Tail */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
                             out.dynamic[off]);
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)(off + 8), out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(off + 5), out.dynamic_len);
 }
 
 static void test_cs_translate_unknown_tag_fails(void)
@@ -5962,8 +5942,9 @@ static void test_inf_hailo_run_reuses_load_boundary_iovas(void)
     TEST_ASSERT_EQUAL_UINT32(expected_addr_l,
                              addr_l_dword & 0xFFFF0000u);
 
-    /* Boundary output channel = config_vdma(1) + OFFSET(2) = 3. */
-    memcpy(&addr_l_dword, &mock_bar2[3 * 32 + 0x08], 4);
+    /* Boundary output channel = config_vdma(1) + OFFSET(15) = 16
+     * (first valid D2H channel). channel_base(16) = 16 * 32 = 0x200. */
+    memcpy(&addr_l_dword, &mock_bar2[16 * 32 + 0x08], 4);
     uint32_t expected_out_addr_l = (uint32_t)((out_iova >> 16) & 0xFFFFu) << 16;
     TEST_ASSERT_EQUAL_UINT32(expected_out_addr_l,
                              addr_l_dword & 0xFFFF0000u);
@@ -6539,8 +6520,6 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_application_header_boundary_bitmap);
     RUN_TEST(test_cs_translate_application_header_rejects_null);
     RUN_TEST(test_cs_translate_contexts_produces_all_four);
-    RUN_TEST(test_cs_translate_contexts_uses_ccw_count_for_burst_count);
-    RUN_TEST(test_cs_translate_contexts_clamps_burst_count_to_u16);
     RUN_TEST(test_cs_translate_contexts_rejects_null);
     RUN_TEST(test_cs_translate_activation_emits_open_boundary_input);
     RUN_TEST(test_cs_translate_activation_emits_open_boundary_output);

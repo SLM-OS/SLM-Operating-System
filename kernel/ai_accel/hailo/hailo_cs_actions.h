@@ -100,27 +100,33 @@ enum hailo_cs_edge_direction {
 
 /* Common header that precedes every action body on the wire.
  *
- * IMPORTANT: 8 bytes, NOT 5. The enum type is packed to u8 via
- * __attribute__((packed)) on the enum declaration itself, but the
- * firmware-side struct is NOT __attribute__((packed)) — and
- * despite the outer #pragma pack(1) region, the firmware compiles
- * this struct with natural alignment, inserting 3 pad bytes before
- * `time_stamp`. Confirmed on pi-5-1 fw v4.23: 5-byte headers
- * produce `0x40130016` (MISALIGNMENT_ERROR_WHILE_READING_ACTIONS).
+ * IMPORTANT: 5 bytes total. action_type (u8) + time_stamp (u32 LE)
+ * with NO padding. The host struct must be __attribute__((packed)).
+ *
+ * A prior session's memory note claimed this was 8 bytes (with 3
+ * pad bytes for natural alignment of time_stamp). That was wrong —
+ * confirmed by capturing HailoRT v4.23 wire bytes on pi-5-1 against
+ * a real Hailo-8L Model Zoo HEF (mobilenet_v1) on 2026-04-20.
+ * HailoRT emits BURST_CREDITS_TASK_RESET as exactly 5 bytes
+ * (1e ff ff ff ff) before the next action.
+ *
+ * time_stamp is set to CONTEXT_SWITCH_DEFS__TIMESTAMP_INIT_VALUE
+ * (0xFFFFFFFF), not 0. Setting 0 may have firmware interpret it as
+ * a real timestamp and reject the action stream as out-of-order.
  *
  * Layout on the wire:
  *   [0]       action_type (u8)
- *   [1..3]    padding (ignored; emitted as zero)
- *   [4..7]    time_stamp (u32 native LE; zero is fine for tracing-off)
+ *   [1..4]    time_stamp (u32 LE; 0xFFFFFFFF = INIT)
  */
 struct hailo_cs_common_action_header {
     uint8_t  action_type;
-    uint8_t  _pad[3];
     uint32_t time_stamp;
-};
+} __attribute__((packed));
 
-_Static_assert(sizeof(struct hailo_cs_common_action_header) == 8,
-               "common_action_header must be 8 bytes on the wire");
+_Static_assert(sizeof(struct hailo_cs_common_action_header) == 5,
+               "common_action_header must be 5 bytes on the wire");
+
+#define HAILO_CS_TIMESTAMP_INIT_VALUE 0xFFFFFFFFu
 
 /* CONTROL_PROTOCOL__host_buffer_info_t. Embedded inside ACTIVATE_*
  * actions so firmware can DMA-pull data from our host-side
