@@ -238,6 +238,29 @@ static int translate_open_boundary_for_pad(
     }
 }
 
+/* Walk pads once per direction, emitting OpenBoundary actions for
+ * pads matching `emit_inputs`. stream_index counts boundary pads
+ * per direction (0 = first input boundary, etc.). Helper for
+ * translate_activation, which calls this twice (outputs then inputs)
+ * to match HailoRT's emission order. */
+static int emit_open_boundary_pass(const struct hef_info *info,
+                                   const struct hailo_cs_translate_cfg *cfg,
+                                   bool emit_inputs,
+                                   struct hailo_cs_builder *b)
+{
+    uint8_t stream_index = 0;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *pad = &info->pads[i];
+        if (!pad->has_stream_info) continue;
+        if (pad->is_input != emit_inputs) continue;
+        int rc = translate_open_boundary_for_pad(pad, cfg,
+                                                 stream_index, b);
+        if (rc != HAILO_OK) return rc;
+        stream_index++;
+    }
+    return HAILO_OK;
+}
+
 static int translate_activation(const struct hef_info *info,
                                 const struct hailo_cs_translate_cfg *cfg,
                                 struct hailo_cs_builder *b)
@@ -247,37 +270,16 @@ static int translate_activation(const struct hef_info *info,
                  HAILO_CS_ACT_BURST_CREDITS_TASK_RESET, NULL, 0);
     if (rc != HAILO_OK) return rc;
 
-    /* Steps 2 & 3: walk pads, emit OpenBoundary per boundary edge.
-     * HailoRT v4.23 emits OUTPUT actions before INPUT actions in
-     * ACTIVATION (resource_manager_builder.cpp:1059-1075 iterates
-     * get_output_layer_infos before get_input_layer_infos). Firmware
-     * may rely on this ordering — the memory note on
-     * INVALID_ENGINE_INDEX lists emission order as a likely cause.
-     * Walk outputs first, then inputs, to match HailoRT byte-for-byte.
-     *
-     * stream_index counts boundary pads per direction. */
-    uint8_t input_stream_index  = 0;
-    uint8_t output_stream_index = 0;
-    for (uint32_t i = 0; i < info->pad_count; i++) {
-        const struct hef_pad_info *pad = &info->pads[i];
-        if (!pad->has_stream_info) continue;
-        if (pad->is_input) continue;  /* outputs first pass */
-        rc = translate_open_boundary_for_pad(pad, cfg,
-                                             output_stream_index, b);
-        if (rc != HAILO_OK) return rc;
-        output_stream_index++;
-    }
-    for (uint32_t i = 0; i < info->pad_count; i++) {
-        const struct hef_pad_info *pad = &info->pads[i];
-        if (!pad->has_stream_info) continue;
-        if (!pad->is_input) continue;  /* inputs second pass */
-        rc = translate_open_boundary_for_pad(pad, cfg,
-                                             input_stream_index, b);
-        if (rc != HAILO_OK) return rc;
-        input_stream_index++;
-    }
-
-    return HAILO_OK;
+    /* Steps 2 & 3: emit OpenBoundary per boundary edge, OUTPUT before
+     * INPUT to match HailoRT v4.23 byte-for-byte
+     * (resource_manager_builder.cpp:1059-1075 iterates
+     * get_output_layer_infos before get_input_layer_infos). The #180
+     * bisect did not prove firmware *requires* this order, but
+     * matching HailoRT removes one variable from any future
+     * regression triage. */
+    rc = emit_open_boundary_pass(info, cfg, /*emit_inputs=*/false, b);
+    if (rc != HAILO_OK) return rc;
+    return emit_open_boundary_pass(info, cfg, /*emit_inputs=*/true, b);
 }
 
 /* -------------------------------------------------------------------------- */

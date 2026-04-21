@@ -102,6 +102,34 @@
 #define HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET   1u
 #define HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET  15u
 
+/* Compile-time guards on the offsets above. Firmware enforces
+ *   H2D channels ∈ [HAILO_CS_PCIE_MIN_H2D, HAILO_CS_PCIE_MAX_H2D] = [0, 15]
+ *   D2H channels ∈ [HAILO_CS_PCIE_MIN_D2H, HAILO_CS_PCIE_MAX_D2H] = [16, 31]
+ * Callers always pin config_vdma_channel = 1 (first non-zero H2D
+ * slot) — HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL in
+ * inference_device_hailo.c. The asserts assume that and would
+ * fire if anyone (a) bumps an offset past its direction's range or
+ * (b) raises the assumed default config channel without updating
+ * both offsets. */
+#define HAILO_CS_PCIE_MIN_H2D       0u
+#define HAILO_CS_PCIE_MAX_H2D       15u
+#define HAILO_CS_PCIE_MIN_D2H       16u
+#define HAILO_CS_PCIE_MAX_D2H       31u
+#define HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL_ASSUMED 1u
+
+_Static_assert(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL_ASSUMED
+                   + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET
+               <= HAILO_CS_PCIE_MAX_H2D,
+               "boundary INPUT channel must land in H2D range [0,15]");
+_Static_assert(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL_ASSUMED
+                   + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET
+               >= HAILO_CS_PCIE_MIN_D2H,
+               "boundary OUTPUT channel must land in D2H range [16,31]");
+_Static_assert(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL_ASSUMED
+                   + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET
+               <= HAILO_CS_PCIE_MAX_D2H,
+               "boundary OUTPUT channel must not exceed D2H upper bound");
+
 struct hailo_cs_translate_cfg {
     /* packed_vdma_channel_id for the config stream (the channel the
      * firmware DMA-pulls CCW payloads through). Typical choice on

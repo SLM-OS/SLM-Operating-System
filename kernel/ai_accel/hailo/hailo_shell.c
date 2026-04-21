@@ -86,6 +86,21 @@ static int parse_hex_u32(const char *s, uint32_t *out)
     return 0;
 }
 
+/* Hex-dump `len` bytes from `p` over the shell with a "[--] <prefix>[NN]:"
+ * line prefix and 16 bytes per line. Used by ctxsmoke for wire-byte
+ * inspection. Bounded by `len`; caller picks the cap. */
+static void shell_hex_dump_bytes(const char *prefix,
+                                 const uint8_t *p, uint32_t len)
+{
+    for (uint32_t off = 0; off < len; off += 16) {
+        shell_printf("  [--] %s[%02u]:", prefix, (unsigned)off);
+        for (uint32_t i = 0; i < 16 && off + i < len; i++) {
+            shell_printf(" %02x", (unsigned)p[off + i]);
+        }
+        shell_puts("\n");
+    }
+}
+
 /*
  * Firmware blob linked in at build time via the CMake HAILO_FW_BLOB
  * option (default: no blob; `hailo boot` reports "firmware not
@@ -869,19 +884,13 @@ static int cmd_hailo(int argc, char *argv[])
          *   BURST_CREDITS_TASK_RESET   = 5 (hdr) + 0  (body) = 5
          *   OPEN_BOUNDARY_OUTPUT       = 5 (hdr) + 20 (body) = 25
          *   OPEN_BOUNDARY_INPUT        = 5 (hdr) + 28 (body) = 33
-         * 80 covers the "full" variant with margin for tweaks.
-         * Prints 16 bytes per line. */
+         * 80 covers the "full" variant with margin for tweaks. */
         {
-            const uint8_t *p = (const uint8_t *)bufs.activation;
             uint32_t dump_len = (bufs.activation_len > 80u)
                               ? 80u : (uint32_t)bufs.activation_len;
-            for (uint32_t off = 0; off < dump_len; off += 16) {
-                shell_printf("  [--] ACT[%02u]:", (unsigned)off);
-                for (uint32_t i = 0; i < 16 && off + i < dump_len; i++) {
-                    shell_printf(" %02x", (unsigned)p[off + i]);
-                }
-                shell_puts("\n");
-            }
+            shell_hex_dump_bytes("ACT",
+                                 (const uint8_t *)bufs.activation,
+                                 dump_len);
         }
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_ACTIVATION,
                                             bufs.activation,
