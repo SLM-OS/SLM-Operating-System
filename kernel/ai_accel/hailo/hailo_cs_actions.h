@@ -180,7 +180,9 @@ _Static_assert(sizeof(struct hailo_cs_act_activate_cfg_channel) == 21,
 
 /* FETCH_CCW_BURSTS: tells firmware to pull `ccw_bursts` bursts from
  * the config stream. Each burst is a fixed-size (compiler-chosen)
- * chunk of CCW payload bytes. */
+ * chunk of CCW payload bytes. Used by HailoRT on Hailo-8 (with
+ * support_pre_fetch). On Hailo-8L support_pre_fetch=false, so
+ * FETCH_CFG_CHANNEL_DESCRIPTORS is used instead — see below. */
 struct hailo_cs_act_fetch_ccw_bursts {
     uint16_t ccw_bursts;
     uint8_t  config_stream_index;
@@ -188,6 +190,21 @@ struct hailo_cs_act_fetch_ccw_bursts {
 
 _Static_assert(sizeof(struct hailo_cs_act_fetch_ccw_bursts) == 3,
                "fetch_ccw_bursts body must be 3 bytes");
+
+/* FETCH_CFG_CHANNEL_DESCRIPTORS (action_type 0): tells firmware to
+ * program `descriptors_count` VDMA descriptors on the config channel
+ * for upcoming CCW DMA-pulls. HailoRT's fallback (non-pre-fetch)
+ * path used on Hailo-8L. Normally wrapped in REPEATED_ACTION so
+ * the firmware's CONFIG_MANAGER_WRAPPER dispatches correctly — the
+ * bare action_type is rejected in PRELIMINARY as
+ * ACTION_TYPE_NOT_SUPPORTED. Per v4.23 context_switch_defs.h:187-191. */
+struct hailo_cs_act_fetch_cfg_channel_descriptors {
+    uint16_t descriptors_count;
+    uint8_t  packed_vdma_channel_id;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_fetch_cfg_channel_descriptors) == 3,
+               "fetch_cfg_channel_descriptors body must be 3 bytes");
 
 /* DEACTIVATE_CFG_CHANNEL: tears down the config stream binding,
  * typically the last action in the preliminary context. */

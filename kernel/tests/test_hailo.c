@@ -2624,12 +2624,15 @@ static void test_cs_translate_contexts_produces_all_four(void)
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
                             out.batch_switching[5]);
 
-    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL only (type 22, 21 B body
-     * → 26 B). FETCH_CCW_BURSTS was dropped in #180 because firmware
-     * v4.23 on Hailo-8L rejects it with CONFIG_MANAGER_WRAPPER_
-     * STATUS_ACTION_TYPE_NOT_SUPPORTED — HailoRT uses a different
-     * (REPEATED_ACTION-wrapped) CCW load path on Hailo-8L. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)26, out.preliminary_len);
+    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL (type 22, 21 B body → 26 B)
+     * + REPEATED_ACTION wrapping 1 × FETCH_CFG_CHANNEL_DESCRIPTORS
+     * (5 common hdr + 3 repeated hdr + 3 sub body = 11 B). Total 37 B.
+     * Phase 6.10 step 2: HailoRT v4.23 uses FETCH_CFG_CHANNEL_DESCRIPTORS
+     * (action_type 0) on Hailo-8L, not FETCH_CCW_BURSTS, because
+     * support_pre_fetch=false on that device. Wrapped in REPEATED_ACTION
+     * so firmware's CONFIG_MANAGER_WRAPPER accepts it (bare form
+     * returns ACTION_TYPE_NOT_SUPPORTED). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)37, out.preliminary_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
                             out.preliminary[0]);
     /* host_buffer_info.dma_address inside the activate body — after
@@ -2638,6 +2641,22 @@ static void test_cs_translate_contexts_produces_all_four(void)
     uint64_t iova;
     memcpy(&iova, out.preliminary + 8, 8);
     TEST_ASSERT_EQUAL_UINT64(0xDEADBEEF00000000ull, iova);
+    /* REPEATED_ACTION starts at offset 26 (after ACTIVATE_CFG_CHANNEL).
+     *   [26]=action_type=REPEATED_ACTION
+     *   [27..30]=time_stamp INIT
+     *   [31]=count=1, [32]=last_executed=0,
+     *   [33]=sub_action_type=FETCH_CFG_CHANNEL_DESCRIPTORS (0)
+     *   [34..35]=descriptors_count u16 LE (= ccw_total_desc_count = 2)
+     *   [36]=packed_vdma_channel_id (= config_vdma_channel = 1) */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_REPEATED_ACTION,
+                            out.preliminary[26]);
+    TEST_ASSERT_EQUAL_UINT8(1, out.preliminary[31]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+                            out.preliminary[33]);
+    uint16_t desc_count_u16;
+    memcpy(&desc_count_u16, out.preliminary + 34, 2);
+    TEST_ASSERT_EQUAL_UINT16(2, desc_count_u16);
+    TEST_ASSERT_EQUAL_UINT8(0x01, out.preliminary[36]);
 
     /* DYNAMIC: APPLICATION_CHANGE_INTERRUPT tail marker (zero body). */
     TEST_ASSERT_EQUAL_UINT32((uint32_t)5, out.dynamic_len);
