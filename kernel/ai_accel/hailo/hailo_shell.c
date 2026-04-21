@@ -691,10 +691,12 @@ static int cmd_hailo(int argc, char *argv[])
         shell_printf("  hw_arch = %s (%u)\n",
                      meta.hw_arch_known ?
                          (meta.hw_arch == HEF_HW_ARCH_HAILO8   ? "hailo8"  :
+                          meta.hw_arch == HEF_HW_ARCH_HAILO8P  ? "hailo8p" :
+                          meta.hw_arch == HEF_HW_ARCH_HAILO8R  ? "hailo8r" :
                           meta.hw_arch == HEF_HW_ARCH_HAILO8L  ? "hailo8l" :
-                          meta.hw_arch == HEF_HW_ARCH_HAILO15H ? "hailo15h":
                           meta.hw_arch == HEF_HW_ARCH_HAILO15M ? "hailo15m":
-                          meta.hw_arch == HEF_HW_ARCH_HAILO10H ? "hailo10h":
+                          meta.hw_arch == HEF_HW_ARCH_HAILO15L ? "hailo15l":
+                          meta.hw_arch == HEF_HW_ARCH_HAILO1XH ? "hailo1xh":
                           "unknown") : "absent",
                      meta.hw_arch);
         if (meta.sdk_version[0]) {

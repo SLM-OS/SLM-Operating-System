@@ -44,11 +44,18 @@
  * ProtoHEFHwArch in hef.proto. Listed here (rather than relying on
  * the generated enum) so callers don't have to include 137 KB of
  * hef.pb.h just to switch on hw_arch. */
+/* Values match ProtoHEFHwArch in hef.proto. Verified 2026-04-21
+ * against hef.proto line 114 after resnet_v1_18_8L.hef parser
+ * misreported hw_arch=3 as "hailo15m" (it's actually HAILO8L).
+ * The prior mapping was a guess; the proto is the source of truth.
+ * See docs/reference/hailo-hef-parser-head.cpp for HailoRT usage. */
 #define HEF_HW_ARCH_HAILO8         0
-#define HEF_HW_ARCH_HAILO8L        1
-#define HEF_HW_ARCH_HAILO15H       2
-#define HEF_HW_ARCH_HAILO15M       3
-#define HEF_HW_ARCH_HAILO10H       4
+#define HEF_HW_ARCH_HAILO8P        1
+#define HEF_HW_ARCH_HAILO8R        2
+#define HEF_HW_ARCH_HAILO8L        3
+#define HEF_HW_ARCH_HAILO15M       4
+#define HEF_HW_ARCH_HAILO15L       6
+#define HEF_HW_ARCH_HAILO1XH       103
 
 #define HEF_PARSER_MAX_STR       64   /* longest string we capture */
 #define HEF_PARSER_MAX_PAD_NAME  32   /* longest pad-name we capture */

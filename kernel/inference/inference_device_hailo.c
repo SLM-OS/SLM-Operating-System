@@ -567,22 +567,43 @@ static int hailo_backend_load_model(struct inference_device *dev,
     /* 1. Outer header — validates magic + version + proto bounds. */
     struct hef_outer_header outer;
     int rc = hef_parse_outer_header(model, size, &outer);
-    if (rc != HEF_OK) return INF_ERR_BAD_MODEL;
+    if (rc != HEF_OK) {
+        uart_printf("[hailo] load_model: outer parse failed rc=%d\r\n", rc);
+        return INF_ERR_BAD_MODEL;
+    }
 
     /* 2. Proto body — extract pad shapes for the first network group.
      * struct hef_info is ~1.2 KB; the 16 KB kernel stack has room. */
     struct hef_info info;
     const uint8_t *proto = (const uint8_t *)model + outer.proto_offset;
     rc = hef_parse_body(proto, outer.proto_size, &info);
-    if (rc != HEF_OK) return INF_ERR_BAD_MODEL;
+    if (rc != HEF_OK) {
+        uart_printf("[hailo] load_model: body parse failed rc=%d\r\n", rc);
+        return INF_ERR_BAD_MODEL;
+    }
+
+    uart_printf("[hailo] load_model: parsed ngs=%u ops=%u pads=%u ccws=%u\r\n",
+                (unsigned)info.network_group_count,
+                (unsigned)info.op_count,
+                (unsigned)info.pad_count,
+                (unsigned)info.ccw_action_count);
 
     /* 3. Pick the largest pads in each direction. See pick_largest_pads
      * for the multi-head rationale. */
     const struct hef_pad_info *in_pad, *out_pad;
     uint32_t input_bytes, output_bytes;
     if (pick_largest_pads(&info, &in_pad, &out_pad, &input_bytes, &output_bytes) != 0) {
+        uart_printf("[hailo] load_model: pick_largest_pads failed "
+                    "(pad_count=%u)\r\n", (unsigned)info.pad_count);
+        for (uint32_t i = 0; i < info.pad_count && i < 8; i++) {
+            const struct hef_pad_info *p = &info.pads[i];
+            uart_printf("[hailo] pad[%u]: is_input=%d bytes=%u\r\n",
+                        (unsigned)i, (int)p->is_input, (unsigned)pad_bytes(p));
+        }
         return INF_ERR_BAD_MODEL;
     }
+    uart_printf("[hailo] load_model: pads in=%u bytes out=%u bytes\r\n",
+                (unsigned)input_bytes, (unsigned)output_bytes);
 
     /* 4. Claim a slot atomically — the check-then-set must be
      * lock-protected so concurrent loaders don't pick the same index.

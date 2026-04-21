@@ -1336,6 +1336,140 @@ static bool decode_context_cb(pb_istream_t *stream,
 }
 
 /* -------------------------------------------------------------------------- */
+/* Partial network group fallback path.                                        */
+/*                                                                             */
+/* DFC 3.33.1 HEFs (confirmed against resnet_v1_18_8L.hef, 2026-04-21) leave   */
+/* the top-level ProtoHEFNetworkGroup.ops / preliminary_config / contexts      */
+/* empty and instead nest the real data inside partial_network_groups[]:       */
+/*                                                                             */
+/*   ProtoHEFNetworkGroup                                                      */
+/*   └── partial_network_groups[] (field 7, repeated)                          */
+/*        └── network_group (ProtoHEFNetworkGroup, field 1) — recurses         */
+/*             ├── ops (field 8)                                               */
+/*             ├── preliminary_config (field 2)                                */
+/*             └── contexts (field 3)                                          */
+/*                                                                             */
+/* Both callbacks reuse the existing decode_op_cb /                            */
+/* decode_preliminary_config_cb / decode_context_cb so pads, CCW actions,      */
+/* and per-context actions land in the same hef_info the top-level path        */
+/* would populate.                                                             */
+/* -------------------------------------------------------------------------- */
+
+struct nested_ng_ctx {
+    struct op_ctx     *op_ctx;
+    struct ccw_ctx    *ccw_ctx;
+    struct ctx_walker *walker_ctx;
+};
+
+/*
+ * ProtoHEFEdgeLayerFused decode: same edge_layer_info as the boundary
+ * walker but always recorded as an OUTPUT pad. DFC 3.33.1 HEFs for
+ * ImageNet classifiers (resnet_v1_18_8L) keep the output softmax as a
+ * fused layer rather than a plain edge_layer, so without this walker
+ * pick_largest_pads sees an input pad but no output.
+ */
+static bool decode_fused_layer_cb(pb_istream_t *stream,
+                                  const pb_field_t *field,
+                                  void **arg)
+{
+    (void)field;
+    struct edge_ctx *ectx = (struct edge_ctx *)*arg;
+    struct edge_layer_stage stage = {0};
+
+    ProtoHEFEdgeLayerFused fused = ProtoHEFEdgeLayerFused_init_default;
+    fused.layer_info.funcs.decode = decode_edge_layer_info_cb;
+    fused.layer_info.arg          = &stage;
+    if (!pb_decode(stream, ProtoHEFEdgeLayerFused_fields, &fused)) return false;
+
+    /* Fused layers don't carry pad_index. Use sys_index as the key —
+     * matches the data_id the firmware uses for DMA routing. Skip if
+     * neither is present (malformed / intermediate layer). */
+    if (!stage.seen_sys_index) return true;
+    uint32_t pad_key = stage.sys_index;
+
+    /* Dedup: if a boundary edge_layer already seeded this pad, don't
+     * clobber it. */
+    for (uint32_t i = 0; i < ectx->info->pad_count; i++) {
+        if (ectx->info->pads[i].index == pad_key) return true;
+    }
+    if (ectx->info->pad_count >= HEF_PARSER_MAX_PADS) {
+        ectx->info->pads_truncated = true;
+        return true;
+    }
+
+    struct hef_pad_info *p = &ectx->info->pads[ectx->info->pad_count++];
+    memset(p, 0, sizeof(*p));
+    p->index    = pad_key;
+    p->is_input = false;       /* fused layers are outputs */
+    if (stage.seen_shape) {
+        p->has_tensor_shape = true;
+        p->height           = stage.height;
+        p->width            = stage.width;
+        p->features         = stage.features;
+        p->padded_height    = stage.padded_height;
+        p->padded_width     = stage.padded_width;
+        p->padded_features  = stage.padded_features;
+    }
+    if (stage.seen_sys_index) {
+        p->has_stream_info         = true;
+        p->sys_index               = stage.sys_index;
+        p->core_bytes_per_buffer   = stage.core_bytes_per_buffer;
+        p->core_buffers_per_frame  = stage.core_buffers_per_frame;
+    }
+    if (stage.seen_quant) {
+        p->has_quant_info = true;
+        p->qp_scale_raw   = stage.qp_scale_raw;
+        p->qp_zp_raw      = stage.qp_zp_raw;
+    }
+    return true;
+}
+
+static bool decode_fused_layers_metadata_cb(pb_istream_t *stream,
+                                            const pb_field_t *field,
+                                            void **arg)
+{
+    (void)field;
+    struct edge_ctx *ectx = (struct edge_ctx *)*arg;
+
+    ProtoHEFFusedLayersMetadata md = ProtoHEFFusedLayersMetadata_init_default;
+    md.fused_layers.funcs.decode = decode_fused_layer_cb;
+    md.fused_layers.arg          = ectx;
+    return pb_decode(stream, ProtoHEFFusedLayersMetadata_fields, &md);
+}
+
+static bool decode_nested_ng_cb(pb_istream_t *stream,
+                                const pb_field_t *field,
+                                void **arg)
+{
+    (void)field;
+    struct nested_ng_ctx *nctx = (struct nested_ng_ctx *)*arg;
+
+    ProtoHEFNetworkGroup grp = ProtoHEFNetworkGroup_init_default;
+    grp.ops.funcs.decode                = decode_op_cb;
+    grp.ops.arg                         = nctx->op_ctx;
+    grp.preliminary_config.funcs.decode = decode_preliminary_config_cb;
+    grp.preliminary_config.arg          = nctx->ccw_ctx;
+    grp.contexts.funcs.decode           = decode_context_cb;
+    grp.contexts.arg                    = nctx->walker_ctx;
+    grp.fused_layers_metadata.funcs.decode = decode_fused_layers_metadata_cb;
+    grp.fused_layers_metadata.arg          = nctx->walker_ctx->edge_ectx;
+    return pb_decode(stream, ProtoHEFNetworkGroup_fields, &grp);
+}
+
+static bool decode_partial_ng_cb(pb_istream_t *stream,
+                                 const pb_field_t *field,
+                                 void **arg)
+{
+    (void)field;
+    struct nested_ng_ctx *nctx = (struct nested_ng_ctx *)*arg;
+
+    ProtoHEFPartialNetworkGroup partial = ProtoHEFPartialNetworkGroup_init_default;
+    partial.network_group.funcs.decode = decode_nested_ng_cb;
+    partial.network_group.arg          = nctx;
+    return pb_decode(stream, ProtoHEFPartialNetworkGroup_fields, &partial);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Repeated network_groups counter + first-name capture                        */
 /* -------------------------------------------------------------------------- */
 
@@ -1377,6 +1511,20 @@ static bool decode_network_group_cb(pb_istream_t *stream,
         .info      = ng->info,
         .edge_ectx = &edge_ctx,
     };
+    /* Phase 8: `nested` threads op/ccw/walker contexts through the
+     * partial_network_groups fallback so DFC 3.33.1 HEFs (which stash
+     * ops / preliminary_config / contexts one level deeper inside
+     * network_group_metadata.partial_network_groups[].network_group)
+     * hit the same slots[] population as the top-level path. Wired
+     * unconditionally: nanopb's callback fires only if the field is
+     * actually present on the wire, so older HEFs with a direct
+     * top-level layout still go through the ops / preliminary_config
+     * / contexts wiring below. */
+    struct nested_ng_ctx nested = {
+        .op_ctx     = &op_ctx,
+        .ccw_ctx    = &ccw_ctx,
+        .walker_ctx = &walker_ctx,
+    };
     if (first_ng) {
         grp.network_group_name.funcs.decode = read_string_cb;
         grp.network_group_name.arg          = &name_ctx;
@@ -1396,6 +1544,20 @@ static bool decode_network_group_cb(pb_istream_t *stream,
          * and the hef_info for actions[] accumulation. */
         grp.contexts.funcs.decode           = decode_context_cb;
         grp.contexts.arg                    = &walker_ctx;
+        /* Phase 8: partial_network_groups fallback (field 7). Newer
+         * DFC outputs nest ops / preliminary_config / contexts one
+         * level deeper under partial_network_groups[].network_group.
+         * nanopb's default callback path silently skips the field
+         * when absent so older HEFs are unaffected. */
+        grp.partial_network_groups.funcs.decode = decode_partial_ng_cb;
+        grp.partial_network_groups.arg          = &nested;
+        /* Phase 8: fused_layers_metadata (field 5) — ImageNet-class
+         * HEFs park the output softmax edge here rather than in
+         * ops.output_pads / contexts[].metadata.edge_layers, so
+         * pick_largest_pads would see only the input pad without
+         * this walker. */
+        grp.fused_layers_metadata.funcs.decode  = decode_fused_layers_metadata_cb;
+        grp.fused_layers_metadata.arg           = &edge_ctx;
     }
     if (!pb_decode(stream, ProtoHEFNetworkGroup_fields, &grp)) return false;
 

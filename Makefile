@@ -162,6 +162,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(JETSON_EL1_SMOKE)),-DJETSON_EL1_SMOKE=ON) \
 		$(if $(HAILO_FW_BLOB),-DHAILO_FW_BLOB=$(HAILO_FW_BLOB)) \
 		$(if $(SCHEDULER_HEF_BLOB),-DSCHEDULER_HEF_BLOB=$(SCHEDULER_HEF_BLOB)) \
+		$(if $(USER_HEF_BLOB),-DUSER_HEF_BLOB=$(USER_HEF_BLOB)) \
 		$(MAKE_PROGRAM_ARG)
 
 # kernel-kexec: X86_64-only parallel build of slmos.elf linked at
